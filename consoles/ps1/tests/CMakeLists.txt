@@ -230,6 +230,37 @@ if(TARGET ps1_run)
                 list(APPEND jcz_more ${name})
             endforeach()
         endforeach()
+        # mdec/frame (XBA-200): the 320x240 picture the MDEC decodes, read by DMA1 and by the CPU, within one 5-bit unit
+        # of the hardware dump (the IDCT's last unit of rounding is not the hardware's yet). The CPU build waits for
+        # the output FIFO to fill again after its very last word, which the hardware does not do either: its last
+        # 16-pixel column is never uploaded (the release's dump is the DMA build's), so it is left out.
+        # frame-24bit-dma: the 24-bit picture (480 halfwords wide) byte by byte, within 4 (compare_vram.py --bytes).
+        # frame-24bit (CPU) copies the 24-bit output as it comes, unswizzled: left out (the hardware's 24-bit block
+        # order on a PIO read is not known).
+        foreach(t frame-15bit-dma frame-15bit frame-24bit-dma)
+            string(REPLACE "-" "_" n ${t})
+            set(region --region 0,0,320,240 --tolerance 1)
+            set(ref vram-15bit.png)
+            if(t STREQUAL frame-15bit)
+                set(region --region 0,0,304,240 --tolerance 1)
+            elseif(t STREQUAL frame-24bit-dma)
+                set(region --region 0,0,480,240 --bytes 4)
+                set(ref vram-24bit.png)
+            endif()
+            foreach(b lle hle)
+                if(b STREQUAL lle)
+                    set(bios ${PS1_BIOS})
+                    set(name ps1_jcz_mdec_${n})
+                else()
+                    set(bios hle)
+                    set(name ps1_hle_jcz_mdec_${n})
+                endif()
+                add_test(NAME ${name} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_jcz_vram.sh $<TARGET_FILE:ps1_run>
+                         ${bios} ${PS1_TESTS_DIR}/mdec/frame/${t}.exe ${PS1_TESTS_DIR}/mdec/frame/${ref}
+                         ${CMAKE_CURRENT_BINARY_DIR}/${name} ${region})
+                list(APPEND jcz_more ${name})
+            endforeach()
+        endforeach()
     endif()
     if(PS1_HAVE_GPU)
         foreach(b lle hle)
@@ -256,8 +287,13 @@ if(TARGET ps1_run)
             # input/pad: Up and Cross held (ps1_run --pad), the program prints the buttons it sees
             add_test(NAME ${p}_input_pad COMMAND sh ${PS1_REPO_ROOT}/tools/consoles/expect_output.sh "PAD_UP|PAD_X"
                      ${R} ${PS1_TESTS_DIR}/input/pad/pad.exe --tty --frames 120 --pad 0x4010 --quiet)
+            # mdec/4bit: the decoded 8x8 block exactly as the hardware's psx.log (read by DMA1 with BA = 0)
+            # ("Done" without the full stop: the text after a fixed number of frames)
+            add_test(NAME ${p}_mdec_4bit COMMAND sh ${PS1_REPO_ROOT}/tools/consoles/expect_output.sh
+                     "0: f0 0f ff 00|4: fd ff ff 0f|8: ed ff ff 0f|c: fb ff ff 0e|10: f0 ff ff 00|14: 00 ff 1f 02|18: 31 f2 30 02|1c: 41 34 33 11"
+                     ${R} ${PS1_TESTS_DIR}/mdec/4bit/4bit.exe --tty --frames 120 --quiet)
             list(APPEND jcz_more ${p}_gpu_gp0_e1 ${p}_gpu_mask_bit ${p}_gpu_version_detect ${p}_dma_chain_looping
-                 ${p}_input_pad)
+                 ${p}_input_pad ${p}_mdec_4bit)
         endforeach()
     endif()
     if(jcz_more)

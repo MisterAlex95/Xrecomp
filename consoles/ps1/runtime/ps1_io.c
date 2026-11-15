@@ -400,6 +400,13 @@ static void dma_run(ps1_machine *m, int ch)
             if (!bs)
                 bs = 0x10000;
             n = bs * ba;
+            if (!ba && ch == 1 && m->mdec) {
+                /* BA = 0 counts as 10000h blocks: DMA1 moves the blocks the MDEC has ready, then its request drops
+                 * (ps1-tests mdec/4bit and 8bit read their block that way, XBA-200). Ended here rather than left
+                 * waiting for a request that never comes. */
+                size_t have = ps1_mdec_out_pending(m->mdec);
+                n = (uint32_t)((have + bs - 1) / bs * bs);
+            }
             c->bcr &= 0xFFFF;
         }
         if (to_dev)

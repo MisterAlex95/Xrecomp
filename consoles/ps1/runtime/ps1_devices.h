@@ -153,6 +153,7 @@ uint32_t ps1_mdec_read(ps1_mdec *d, uint32_t reg); /* 0x1F801820 + 4 * reg, reg 
 void ps1_mdec_write(ps1_mdec *d, uint32_t reg, uint32_t v);
 void ps1_mdec_dma_write(ps1_mdec *d, const uint32_t *words, size_t n); /* DMA0 in */
 size_t ps1_mdec_dma_read(ps1_mdec *d, uint32_t *words, size_t n);      /* DMA1 out */
+size_t ps1_mdec_out_pending(ps1_mdec *d); /* output words not read yet (what DMA1 can move before its request drops) */
 
 /* ---- Save states (XBA-182) -------------------------------------------------------------------------------------- */
 /* Each device's state as opaque bytes of this build (its own struct without host pointers: the IRQ sink, the disc,
