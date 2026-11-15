@@ -135,6 +135,22 @@ static inline int rc_mul_cycles(uint32_t rs, int sign)
     return 4;
 }
 
+/* C after a long multiply with S: bit 31 of the last Booth addend (gba_cpu.c mull_carry). */
+static inline uint32_t rc_mull_carry(uint32_t rm, uint32_t rs, int sign)
+{
+    int n = rc_mul_cycles(rs, sign);
+    uint64_t x = sign ? (uint64_t)(int64_t)(int32_t)rs : rs;
+    uint32_t a;
+    switch ((x >> (8 * n - 2)) & 7) {
+    case 1: case 2: a = rm; break;
+    case 3: a = rm << 1; break;
+    case 4: a = ~(rm << 1); break;
+    case 5: case 6: a = ~rm; break;
+    default: a = 0; break;
+    }
+    return a >> 31;
+}
+
 /* Shift by a register's bottom byte (amt = 0..255); cin = C. */
 static inline uint32_t rc_shift_reg(uint32_t type, uint32_t v, uint32_t amt, uint32_t cin, uint32_t *carry)
 {

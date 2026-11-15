@@ -192,10 +192,10 @@ if(TARGET gba_run)
     # The mGBA test suite (XBA-201): each group's pass count must stay at least what the core reached (raise these
     # when a fix passes more; consoles/gba/tests/mgba_suite.sh). The built-in BIOS (HLE) and Cult-of-GBA (LLE) differ
     # where a test times or checks the BIOS's own code; gba_rc_mgba: the suite recompiled, in lockstep, HLE counts.
-    set(GBA_MGBA_HLE memory=1498 io_read=130 timing=1988 timers=847 timer_irq=90 shifter=140 carry=93
-        multiply_long=52 bios_math=615 dma=1244 sio_read=90 sio_timing=0 misc=6 video=6)
-    set(GBA_MGBA_LLE memory=1488 io_read=130 timing=1868 timers=847 timer_irq=90 shifter=140 carry=93
-        multiply_long=52 bios_math=603 dma=1244 sio_read=90 sio_timing=0 misc=6 video=6)
+    set(GBA_MGBA_HLE memory=1498 io_read=130 timing=2020 timers=847 timer_irq=90 shifter=140 carry=93
+        multiply_long=72 bios_math=615 dma=1244 sio_read=90 sio_timing=4 misc=6 video=6)
+    set(GBA_MGBA_LLE memory=1488 io_read=130 timing=1900 timers=847 timer_irq=90 shifter=140 carry=93
+        multiply_long=72 bios_math=603 dma=1244 sio_read=90 sio_timing=4 misc=6 video=6)
     set(GBA_MGBA ${CMAKE_CURRENT_SOURCE_DIR}/mgba_suite.sh)
     foreach(gm ${GBA_MGBA_HLE})
         string(REGEX REPLACE "=.*" "" g ${gm})

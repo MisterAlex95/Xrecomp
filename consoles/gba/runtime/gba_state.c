@@ -168,7 +168,7 @@ static const struct {
     FIELD(open_bus), FIELD(rc_native), FIELD(fetchmax16), FIELD(fetchmax32), FIELD(pf), FIELD(line_start),
     FIELD(line_phase), FIELD(vcount), FIELD(frames), FIELD(frame_done), FIELD(ie), FIELD(if_), FIELD(ime),
     FIELD(irq_at), FIELD(keys), FIELD(keycnt), FIELD(timer), FIELD(dma), FIELD(dma_latch), FIELD(dma_active),
-    FIELD(dma_due), FIELD(bg_delay), FIELD(win_latch), FIELD(oam_line), FIELD(bg2x), FIELD(bios_latch),
+    FIELD(dma_due), FIELD(sio_at), FIELD(bg_delay), FIELD(win_latch), FIELD(oam_line), FIELD(bg2x), FIELD(bios_latch),
     FIELD(ewram), FIELD(iwram), FIELD(io), FIELD(pal), FIELD(vram), FIELD(oam), FIELD(apu), FIELD(save),
     FIELD(dbg_open), FIELD(dbg_str),
 };

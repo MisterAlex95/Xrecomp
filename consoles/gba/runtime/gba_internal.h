@@ -201,6 +201,7 @@ struct gba_machine {
     uint32_t dma_latch;     /* last value a DMA moved (open bus of DMA reads) */
     bool dma_active;        /* a DMA is moving data (its cartridge accesses stop the prefetch buffer without a wait) */
     uint64_t dma_due;       /* cycle the immediate DMAs started (gba_dma.due) take the bus, UINT64_MAX: none */
+    uint64_t sio_at;        /* cycle a normal-mode serial transfer on the internal clock ends, UINT64_MAX: none */
 
     /* PPU timing (XBA-201, the mGBA suite's video tests): lines before a newly enabled BG shows, the windows'
      * vertical flags (latched at each line start: set on WINxV's top line, cleared on its bottom one), and OAM as

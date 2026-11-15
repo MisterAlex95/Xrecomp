@@ -80,12 +80,28 @@ void gba_update_waitstates(gba_machine *m)
     }
 }
 
+/* A DMA's access to the cartridge bus stops the prefetch buffer too. It waits a cycle when the buffer is empty and
+ * the halfword being read has 2 cycles to go (mGBA suite, DMA timing from / to ROM with the prefetch buffer on). */
+static inline uint32_t dma_pf_stop(gba_machine *m)
+{
+    gba_rc_prefetch *p = &((gba_rc_head *)(void *)m)->pf;
+    uint32_t wait = 0;
+    if (p->run) {
+        rc_pf_advance(p, m->now);
+        uint32_t half = p->thumb ? p->duty : p->duty / 2u;
+        uint32_t r = p->left > half ? p->left - half : p->left; /* cycles left in the current halfword */
+        wait = p->run && !p->count && r == 2;
+    }
+    rc_pf_stop((gba_rc_head *)(void *)m, m->now, false);
+    return wait;
+}
+
 /* A data access to the cartridge bus (ROM, SRAM, EEPROM) stops the prefetch buffer (the cycle's wait when a read
- * was finishing: for the CPU's accesses, not a DMA's, by the mGBA suite's DMA timings). */
+ * was finishing for the CPU's accesses; dma_pf_stop for a DMA's). */
 static inline void cart_data(gba_machine *m, uint32_t addr)
 {
     if ((addr >> 27) & 1) /* 0x08000000-0x0FFFFFFF */
-        m->now += rc_pf_stop((gba_rc_head *)(void *)m, m->now, !m->dma_active && rc_cart(m->cpu.r[15]));
+        m->now += m->dma_active ? dma_pf_stop(m) : rc_pf_stop((gba_rc_head *)(void *)m, m->now, rc_cart(m->cpu.r[15]));
 }
 
 /* ---- mGBA's debug-print port (gba_set_debug_log, XBA-201) ----------------------------------------------- */
