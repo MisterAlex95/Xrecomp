@@ -24,6 +24,23 @@ of time** from the original game code, running against a runtime that stands in 
 And you don't need a PC for it: point the Android app at a game you dumped, press **Prepare**, wait 20–30 minutes
 once, press **Play**. The whole recompiler (Python, capstone, LLVM) runs on the phone.
 
+<table>
+  <tr>
+    <td width="50%" align="center"><img src="docs/images/screens/n64-ocarina-of-time.jpg" alt="The Legend of Zelda: Ocarina of Time, Link in the Kokiri Forest"><br><sub><b>Ocarina of Time</b> · N64 · Vulkan RDP, upscaled</sub></td>
+    <td width="50%" align="center"><img src="docs/images/screens/ps1-crash-bandicoot.jpg" alt="Crash Bandicoot on N. Sanity Beach, upscaled"><br><sub><b>Crash Bandicoot</b> · PS1 · 4× internal resolution</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/images/screens/xbox-kotor.jpg" alt="Star Wars: Knights of the Old Republic, in game on the Endar Spire"><br><sub><b>Star Wars: KotOR</b> · Original Xbox · in game</sub></td>
+    <td width="50%" align="center"><img src="docs/images/screens/gba-pokemon-pinball.png" alt="Pokémon Pinball: Ruby &amp; Sapphire, Ruby table"><br><sub><b>Pokémon Pinball: Ruby &amp; Sapphire</b> · GBA · 60 fps</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/images/screens/android-library.jpg" alt="The XRecomp library on Android: Xbox, PS1 and GBA games side by side"><br><sub><b>The launcher</b> · every console in one library</sub></td>
+    <td width="50%" align="center"><img src="docs/images/screens/android-companion.png" alt="The companion panel on the AYN Thor's second screen: fps, battery, screenshot, quick menu"><br><sub><b>Dual screen</b> · companion panel on the Thor's second screen</sub></td>
+  </tr>
+</table>
+
+<p align="center"><sub>All captured on an AYN Thor (Snapdragon 8 Gen 2) from games dumped from original discs and cartridges.</sub></p>
+
 ## ✨ Why it's interesting
 
 - 🔁 **Static recompilation, four CPUs.** x86 (Xbox), MIPS R4300i (N64), MIPS R3000A (PS1) and ARM7TDMI (GBA) all
