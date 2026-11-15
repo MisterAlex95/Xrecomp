@@ -4288,6 +4288,11 @@ public class LauncherActivity extends Activity {
         PrepareProtocol.Status ps = e.facts.prepare;
         boolean prepares = romPrepares(e) && p != Prep.OFF;   // OFF: no toolchain
         int found = p == Prep.PLAYABLE ? Pack.newlyDiscovered(getFilesDir(), e.tid) : 0;
+        // As an Xbox title's Home (XBA-127): a pack lifted by another toolkit than this APK's still plays, but misses
+        // the lifter's fixes since, so Prepare again is offered.
+        boolean older = prepares && p == Prep.PLAYABLE
+                        && PackFreshness.judge(null, null, Pack.toolkitSha256OfKey(getFilesDir(), e.tid),
+                                               Toolchain.toolkitDigest(this)) == PackFreshness.Verdict.OLDER_TOOLKIT;
         LinearLayout info = hero(e.title(), false, null);
         String line;
         int color;
@@ -4305,8 +4310,9 @@ public class LauncherActivity extends Activity {
             color = Theme.ERROR;
             break;
         case PLAYABLE:
-            line = found > 0 ? getString(R.string.ROM_NEW_CODE, found) : getString(R.string.ROM_PREPARED);
-            color = found > 0 ? Theme.WARN : Theme.OK;
+            line = older ? getString(R.string.HOME_OLDER_TOOLKIT)
+                 : found > 0 ? getString(R.string.ROM_NEW_CODE, found) : getString(R.string.ROM_PREPARED);
+            color = older || found > 0 ? Theme.WARN : Theme.OK;
             break;
         default:
             line = getString(prepares ? R.string.ROM_NOT_PREPARED : R.string.ROM_PS1_LINE);
@@ -4332,7 +4338,7 @@ public class LauncherActivity extends Activity {
             pill(buttons, null, getString(R.string.PREPARE_SEE_WHY), false, () -> go(Screen.PREPARE));
             break;
         case PLAYABLE:
-            if (found > 0)
+            if (older || found > 0)
                 pill(buttons, null, getString(R.string.PREPARE_AGAIN), false, () -> startRomPrepare(e));
             break;
         default:
@@ -4373,7 +4379,8 @@ public class LauncherActivity extends Activity {
         else if (p == Prep.FAILED)
             setNote(getString(R.string.ROM_FAILED_NOTE, ps == null ? "" : ps.code), NOTE_WARN);
         else if (p == Prep.PLAYABLE)
-            setNote(found > 0 ? getString(R.string.ROM_NEW_CODE_NOTE, found) : getString(R.string.ROM_PREPARED_NOTE),
+            setNote(older ? getString(R.string.ROM_OLDER_TOOLKIT_NOTE)
+                    : found > 0 ? getString(R.string.ROM_NEW_CODE_NOTE, found) : getString(R.string.ROM_PREPARED_NOTE),
                     NOTE_INFO);
         else if (p == Prep.NEEDED || p == Prep.CANCELLED || p == Prep.INTERRUPTED)
             setNote(getString(n64 ? R.string.ROM_N64_NOT_PREPARED_NOTE : R.string.ROM_NOT_PREPARED_NOTE), NOTE_INFO);
@@ -5817,6 +5824,12 @@ public class LauncherActivity extends Activity {
         };
         edit.setOnClickListener(v -> openTouchEditor(pick[0], pick[0] == own ? gameKey : null));
         onFocus(edit, detail);
+        // XBA-212: every saved layout away at once (all consoles, every game's own), the usual layout back.
+        listRow(list, getString(R.string.CTL_TOUCH_RESET), getString(R.string.CTL_TOUCH_RESET_DETAIL), () -> {
+            int n = TouchLayout.resetAll(getFilesDir());
+            Log.i(TAG, "launcher: touch layouts reset, " + n + " file(s) removed");
+            describe(getString(R.string.CTL_TOUCH_RESET_DONE, n));
+        });
     }
 
     /** The touch layout editor over the launcher; the focus comes back to the row that opened it. */

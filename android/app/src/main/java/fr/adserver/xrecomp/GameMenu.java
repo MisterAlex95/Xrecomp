@@ -110,6 +110,9 @@ final class GameMenu {
         /** Opens the touch layout editor over the held game (XBA-207); the menu has closed. */
         default void editTouchLayout() {}
 
+        /** The menu opens (XBA-212: a touch layout editor left open over the game is cancelled first). */
+        default void menuOpened() {}
+
         /** The launched GBA, PS1 or N64 game's mapping (ConsoleControls.effective), or null for an Xbox game. */
         default ConsolePadMap consoleMap() {
             return null;
@@ -534,6 +537,7 @@ final class GameMenu {
         openedAt = clock.getAsLong();
         downWhileOpen.clear();
         Log.i(LauncherActivity.TAG, "shell: menu open (" + why + ")");
+        host.menuOpened();
         releaseGameInput();
         host.hold(true);
         launcherPending = false;

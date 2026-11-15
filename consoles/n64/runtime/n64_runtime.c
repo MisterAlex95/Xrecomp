@@ -1050,8 +1050,7 @@ static void pads_read(int port, int players, int range, int dead, pad_in *out)
         uint32_t pressed = 0, swallow = 0;
         out->hk_held |= recomp_hotkeys_pad_update(recomp_hotkeys_get(), &s_hk_pad[p], src, &pressed, &swallow);
         out->hk_pressed |= pressed;
-        if (swallow) /* a held chord's buttons reach the game as nothing */
-            o.buttons &= ~console_pad_targets_using(&s_pad_map, swallow);
+        console_pad_swallow(&s_pad_map, &o, swallow); /* a held chord's buttons: not the on-screen pad's */
         out->buttons |= n64_runtime_buttons_of(o.buttons);
         int8_t x, y;
         n64_runtime_stick(o.stick_x[0], o.stick_y[0], range, dead, &x, &y);
