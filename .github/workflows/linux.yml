@@ -4,7 +4,8 @@
 # Three parallel jobs (the Dockerfile's PART): the root build + ctest + pytest, and the C test projects in two slices.
 # Together they are what PART=all runs on Gitea. gba-corpus is the GBA half of Gitea's homebrew job (XBA-180): the GBA
 # homebrew built (devkitARM image), run with the Cult-of-GBA BIOS too, jsmolka's ROMs run (XBA-193), the homebrew
-# prepared into packs, run headless, screenshots checked and kept as an artefact.
+# prepared into packs, run headless, screenshots checked and kept as an artefact. n64-corpus is its N64 half: the N64
+# homebrew built (libdragon image) and run through consoles/n64/tests (tools/consoles/run_n64_homebrew.sh).
 name: Linux
 
 on:
@@ -65,3 +66,16 @@ jobs:
             out/gba-packs/report.md
             out/gba-packs/SHA256SUMS
           if-no-files-found: ignore
+
+  n64-corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the N64 homebrew corpus
+        run: JOBS=4 bash tools/consoles/build_homebrew.sh n64 out/homebrew
+      - name: N64 corpus through the runtime's ctest (interpreter, recompiled in lockstep, states, rewind)
+        run: JOBS=4 bash tools/consoles/run_n64_homebrew.sh out/homebrew out/n64-homebrew
+      - name: Report
+        if: always()
+        run: tail -n 40 out/n64-homebrew/ctest.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true

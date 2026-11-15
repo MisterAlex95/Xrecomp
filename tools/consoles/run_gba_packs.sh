@@ -83,7 +83,7 @@ rm -rf /out/work /out/packs
 exit $rc'
 
 cid=$(docker create --network none -e JOBS="$jobs" "$image" bash -c "$cmd")
-tar -C "$repo" --exclude=__pycache__ -cf - consoles tools | docker cp - "$cid:/usr/src"
+tar -C "$repo" --exclude=__pycache__ -cf - consoles tools src | docker cp - "$cid:/usr/src"
 docker cp "$corpus/gba" "$cid:/usr/src/hb"
 [ -z "$inputs" ] || docker cp "$inputs/." "$cid:/usr/src/inputs"
 rc=0

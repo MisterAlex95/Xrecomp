@@ -78,9 +78,21 @@ static void bus_clear(void *ctx, int irq)
 static n64_rsp *S;
 static uint8_t *M; /* DMEM then IMEM */
 
+/* The RDRAM write notices (bus.wrote): every byte noticed, and how many notices. */
+static uint8_t *wrote_map;
+static int wrote_calls;
+static void bus_wrote(void *ctx, uint32_t addr, uint32_t len)
+{
+    (void)ctx;
+    wrote_calls++;
+    for (uint32_t i = 0; i < len; i++)
+        if (addr + i < RDRAM_SIZE)
+            wrote_map[addr + i] = 1;
+}
+
 static void new_rsp(void)
 {
-    n64_rcp_bus bus = {rdram, RDRAM_SIZE, bus_raise, bus_clear, NULL, NULL};
+    n64_rcp_bus bus = {rdram, RDRAM_SIZE, bus_raise, bus_clear, NULL, wrote_map ? bus_wrote : NULL};
     if (S)
         n64_rsp_destroy(S);
     S = n64_rsp_create(bus);
@@ -396,6 +408,38 @@ static void test_dma(void)
     CHECK(memcmp(rdram + 0x3100, rdram + 0x3000, 64) == 0, "RSP DMA out");
     CHECK(r32(0x308) == 0x240 && r32(0x30C) == 0x3140 && r32(0x310) == 0xFF8, "RSP DMA readback %X %X %X",
           r32(0x308), r32(0x30C), r32(0x310));
+
+    /* DMEM -> RDRAM notices (XBA-191: a run per row, split where the bank or RDRAM ends): exactly the bytes written,
+     * nothing past RDRAM's end, and far fewer notices than 8-byte steps. */
+    wrote_map = calloc(RDRAM_SIZE, 1);
+    new_rsp();
+    for (int i = 0; i < 0x1000; i++)
+        M[i] = (uint8_t)(i * 13 + 5);
+    memset(rdram + 0x5000, 0, 0x400);
+    wrote_calls = 0;
+    n64_rsp_write_reg(S, 0, 0xF80);                         /* 3 rows of 256 bytes, skip 64: the first wraps the bank */
+    n64_rsp_write_reg(S, 1, 0x5000);
+    n64_rsp_write_reg(S, 3, 0x0FF | 2u << 12 | 0x40u << 20);
+    int ok = 1;
+    for (uint32_t a = 0x4F00; a < 0x5500 && ok; a++) {
+        uint32_t k = a - 0x5000, row = k / 320, col = k % 320;
+        int in = a >= 0x5000 && row < 3 && col < 256;
+        uint8_t want = in ? M[(0xF80 + row * 256 + col) & 0xFFF] : 0;
+        ok = wrote_map[a] == in && (!in || rdram[a] == want);
+    }
+    CHECK(ok, "WR rows: written bytes and notices");
+    CHECK(wrote_calls == 4, "WR notices: one per run (%d)", wrote_calls);
+    CHECK(n64_rsp_read_reg(S, 0) == 0x280 && n64_rsp_read_reg(S, 1) == 0x5000 + 2 * 320 + 256, "WR rows addresses");
+    memset(wrote_map, 0, RDRAM_SIZE);
+    n64_rsp_write_reg(S, 0, 0);
+    n64_rsp_write_reg(S, 1, RDRAM_SIZE - 16);
+    n64_rsp_write_reg(S, 3, 0x03F);
+    CHECK(wrote_map[RDRAM_SIZE - 16] && wrote_map[RDRAM_SIZE - 1] && rdram[RDRAM_SIZE - 1] == M[15],
+          "WR up to RDRAM's end noticed");
+    CHECK(n64_rsp_read_reg(S, 1) == RDRAM_SIZE + 48, "WR past the end: address %06X", n64_rsp_read_reg(S, 1));
+    free(wrote_map);
+    wrote_map = NULL;
+    new_rsp();
 }
 
 /* ---- 1d. DPC registers through COP0 8..15 ---- */

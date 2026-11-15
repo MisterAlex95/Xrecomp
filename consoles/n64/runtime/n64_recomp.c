@@ -602,7 +602,7 @@ void n64_recomp_run(n64_machine *m)
         uint32_t va = (uint32_t)pc, pa;
         if (N64_UNLIKELY(!s->booted)) {
             if (pc != (uint64_t)(int64_t)(int32_t)t->boot_pc) {
-                n64_cpu_step(m);
+                n64_cpu_run_until(m, (uint64_t)(int64_t)(int32_t)t->boot_pc);
                 continue;
             }
             s->booted = true;
@@ -615,16 +615,19 @@ void n64_recomp_run(n64_machine *m)
             /* the instruction lifted code left to the interpreter (after the loop's checks), or a delay slot; then
              * the rest of its block while execution stays in sequence (inside a block nothing is a resume point) */
             bool handed = pc == s->interp_pc;
-            if (handed)
-                s->stats.fallbacks++;
             s->interp_pc = 1;
+            s->expect = 1;
+            if (handed) { /* the handed run, in the interpreter's inlined loop while it stays in sequence */
+                bool chained;
+                uint32_t n = n64_cpu_step_handed(m, &s->interp_left, &chained);
+                s->stats.fallbacks += n;
+                s->stats.interp_ram += n;
+                if (chained)
+                    s->interp_pc = c->pc;
+                continue;
+            }
             s->stats.interp_ram++;
             n64_cpu_step(m);
-            s->expect = 1;
-            if (handed && s->interp_left > 1 && c->pc == pc + 4) {
-                s->interp_pc = pc + 4;
-                s->interp_left--;
-            }
             continue;
         }
         uint32_t base = 0;

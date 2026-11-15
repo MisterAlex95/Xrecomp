@@ -17,6 +17,13 @@
 #define N64_LIKELY(x) (x)
 #define N64_UNLIKELY(x) (x)
 #endif
+/* The interpreter's decode and execute, inlined into its run loops (XBA-191): a call per instruction, with the
+ * callee-saved registers of a big switch, was a fifth of the interpreter's cost. */
+#if defined(__GNUC__) || defined(__clang__)
+#define N64_HOT_INLINE inline __attribute__((always_inline))
+#else
+#define N64_HOT_INLINE inline
+#endif
 
 /* Time: the core counts ticks of half a CPU cycle (187.5 MHz), so the 1.5-cycle average instruction is a whole
  * number: COUNT advances every 4 ticks, the RCP (62.5 MHz) every 3. */
@@ -327,6 +334,14 @@ int n64_cpu_probe(n64_machine *m, uint64_t va, uint32_t *pa);
  * static recompilation's dispatcher (n64_recomp.c) runs the interpreter through these. */
 void n64_cpu_step(n64_machine *m);
 void n64_cpu_take_interrupt(n64_machine *m);
+/* n64_cpu_step in the interpreter's inlined loop until pc == stop_pc, an interrupt is pending or now reaches stop_at
+ * (the dispatcher's steps before the boot PC: IPL3, XBA-191). */
+void n64_cpu_run_until(n64_machine *m, uint64_t stop_pc);
+/* The instructions lifted code handed to the interpreter (n64_recomp.c): steps the one at pc; while *left > 1 and the
+ * next pc follows in sequence, decrements *left and sets *chained, and goes on in the inlined loop as long as the
+ * dispatcher would hand that next instruction straight back (time left, no interrupt pending, kernel mode, a KSEG0 /
+ * KSEG1 RDRAM address); otherwise *chained is false. Returns the number of instructions run (XBA-191). */
+uint32_t n64_cpu_step_handed(n64_machine *m, uint32_t *left, bool *chained);
 
 /* ---- Static recompilation (n64_recomp.c) ------------------------------------------------------------------------ */
 /* n64_cpu_run's loop while a table is attached (m->rc). */
