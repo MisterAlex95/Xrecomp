@@ -706,6 +706,84 @@ public class LibraryScannerTest {
         }
     }
 
+    /**
+     * XBA-192: a .chd an older build left « other file » (no CHD reader yet: same size, same time) is read again by
+     * the first scan of a new identification (an app update), not reused forever; the same build reuses it without
+     * opening it; an index from before the field (0.4.0) counts as another identification.
+     */
+    @Test
+    public void failuresAreReadAgainByANewIdentification() throws Exception {
+        Console.DiscKeyReader was = Console.chdReader;
+        String stamp = LibraryScanner.identifyStamp;
+        try {
+            FakeTree t = new FakeTree("ps1:")
+                    .file("Game.chd", ConsoleTest.chd(ConsoleTest.ps1(true, "BOOT = cdrom:\\SLUS_005.94;1\r\n",
+                                                                      "PLAYSTATION")), 1)
+                    .file("broken.gba", text("not a cartridge"), 2);
+            List<String> asked = new ArrayList<>();
+            LibraryScanner.identifyStamp = "r1/100";
+            Console.chdReader = path -> {
+                asked.add(path);
+                return null;   // the old build: no CHD reader
+            };
+            LibraryScanner.Result old = scan(Arrays.asList(root("t:ps1", t)), null);
+            assertEquals(LibraryIndex.NOT_ROM, old.index.find("ps1:/Game.chd").status);
+            assertEquals("r1/100", old.index.identify);
+
+            Console.chdReader = path -> {
+                asked.add(path);
+                return ConsoleTest.chdKey(t.opened.get(Integer.parseInt(path.substring(3))));
+            };
+            asked.clear();
+            LibraryScanner.Result same = scan(Arrays.asList(root("t:ps1", t)), old.index);
+            assertEquals("the same identification: a stat-only rescan", 0, same.peeks);
+            assertEquals(2, same.reused);
+            assertTrue(asked.isEmpty());
+            assertEquals(LibraryIndex.NOT_ROM, same.index.find("ps1:/Game.chd").status);
+
+            LibraryScanner.identifyStamp = "r2/200";   // the update
+            LibraryScanner.Result updated = scan(Arrays.asList(root("t:ps1", t)), same.index);
+            assertEquals("both failures opened again", 2, updated.peeks);
+            assertEquals(0, updated.reused);
+            assertEquals(1, asked.size());
+            LibraryIndex.Item game = updated.index.find("ps1:/Game.chd");
+            assertTrue(game.ok());
+            assertEquals("ps1-SLUS-00594", game.tid);
+            assertEquals(LibraryIndex.NOT_ROM, updated.index.find("ps1:/broken.gba").status);
+            assertEquals("r2/200", updated.index.identify);
+
+            // ... and the next scan reuses all of it (the game too).
+            LibraryScanner.Result next = scan(Arrays.asList(root("t:ps1", t)), updated.index);
+            assertEquals(0, next.peeks);
+            assertEquals(2, next.reused);
+
+            // An index written before the field (0.4.0: read as "", LibraryStoreTest): its failures are read
+            // again, its games reused.
+            updated.index.identify = "";
+            LibraryScanner.Result fromOlder = scan(Arrays.asList(root("t:ps1", t)), updated.index);
+            assertEquals("broken.gba only", 1, fromOlder.peeks);
+            assertEquals(1, fromOlder.reused);
+            assertTrue(fromOlder.index.find("ps1:/Game.chd").ok());
+        } finally {
+            Console.chdReader = was;
+            LibraryScanner.identifyStamp = stamp;
+        }
+    }
+
+    /** An unreadable item (a document that could not be opened) is tried again by every scan. */
+    @Test
+    public void unreadableItemsAreTriedAgain() {
+        FakeTree t = new FakeTree("gba:").file("Game.gba", ConsoleTest.gba("BXYE"), 1);
+        LibraryScanner.Result first = scan(Arrays.asList(root("t:gba", t)), null);
+        LibraryIndex.Item i = first.index.find("gba:/Game.gba");
+        assertTrue(i.ok());
+        i.status = LibraryIndex.UNREADABLE;   // as when its descriptor could not be opened
+        LibraryScanner.Result again = scan(Arrays.asList(root("t:gba", t)), first.index);
+        assertEquals(1, again.peeks);
+        assertEquals(0, again.reused);
+        assertTrue(again.index.find("gba:/Game.gba").ok());
+    }
+
     /** The walk's limits are per folder: a full folder does not hide the games of the next one. */
     @Test
     public void entryCapPerFolder() {

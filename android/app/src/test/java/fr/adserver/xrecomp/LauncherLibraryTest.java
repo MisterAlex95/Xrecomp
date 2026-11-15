@@ -172,6 +172,7 @@ public class LauncherLibraryTest {
         it.mtime = f.lastModified();
         it.status = LibraryIndex.NOT_XISO;
         x.items.add(it);
+        x.identify = LibraryScanner.identifyStamp(app);   // as this build scanned it: not opened again (XBA-192)
         LibraryIndex.write(Library.indexFile(app.getFilesDir()), x);
     }
 

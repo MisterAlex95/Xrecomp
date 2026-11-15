@@ -12,7 +12,9 @@
  *   fd:N    an open descriptor holding a single-file image (raw .bin, .iso or .chd, recognised by content). The
  *           descriptor is duplicated: the caller keeps its own.
  *
- * Addresses: absolute LBA, MSF 00:02:00 = LBA 0 (the first track's 2-second lead-in pregap is not part of any image).
+ * Addresses: absolute LBA, MSF 00:02:00 = LBA 0 = track 1's INDEX 01. Track 1's pregap is the 2-second lead-in, not
+ * part of the disc: an image that names one (a .cue's PREGAP or INDEX 00 on track 1, a CHD's PREGAP:150 on track 1,
+ * stored or not) is read with track 1 at LBA 0 all the same (drop_lead_in).
  * A track covers [begin, end): begin is its INDEX 00 (or the start of its PREGAP), start its INDEX 01. Sectors of a
  * PREGAP not stored in a file read as zeros (audio silence; data tracks get a header and an empty Mode 2 subheader).
  * A sector that is not raw (2048 / 2336 bytes) is returned in a synthesized raw sector: sync, BCD MSF header, mode
@@ -257,6 +259,31 @@ static int parse_msf(const char *s, uint32_t *frames)
     return 0;
 }
 
+/* Track 1's INDEX 01 is LBA 0 (MSF 00:02:00) on every CD. A pregap before it (a .cue's PREGAP or INDEX 00 on track 1,
+ * a CHD's « PREGAP:150 » on track 1, stored or not) is the lead-in's two seconds, outside the addressable disc: the
+ * whole disc moves down so that track 1 starts at 0, and stored lead-in frames are skipped. Without this the PVD
+ * (LBA 16) of such an image read 150 sectors early: no title key, no boot. */
+static void drop_lead_in(ps1_disc *d)
+{
+    if (!d->ntracks || !d->tracks[0].start)
+        return;
+    disc_track *t0 = &d->tracks[0];
+    uint32_t shift = t0->start;
+    if (t0->data_lba < shift) {
+        uint32_t skip = shift - t0->data_lba;
+        t0->data_off += d->kind == SRC_CHD ? (uint64_t)skip : (uint64_t)skip * (uint64_t)t0->ssize;
+        t0->data_lba = shift;
+    }
+    t0->begin = shift;
+    for (int i = 0; i < d->ntracks; i++) {
+        disc_track *t = &d->tracks[i];
+        t->begin -= shift;
+        t->start -= shift;
+        t->data_lba -= shift;
+        t->end -= shift;
+    }
+}
+
 /* A cue track while parsing: positions relative to its file. */
 typedef struct cue_track {
     int number, file, audio, mode, ssize, swap;
@@ -430,6 +457,7 @@ static int open_cue(ps1_disc *d, const char *path, char *err, size_t errlen)
         }
     }
     d->ntracks = n;
+    drop_lead_in(d);
     d->size = d->tracks[n - 1].end;
     return 0;
 }
@@ -526,6 +554,7 @@ static int open_chd(ps1_disc *d, const char *path, int fd, char *err, size_t err
         set_err(err, errlen, "chd: no CD track metadata");
         return -1;
     }
+    drop_lead_in(d);
     d->size = d->tracks[d->ntracks - 1].end;
     return 0;
 }
