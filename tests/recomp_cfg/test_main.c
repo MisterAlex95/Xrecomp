@@ -104,6 +104,24 @@ int main(void)
     CHECK(recomp_cfg_force("T", "RECOMP_LSFG", "1\n") == -1 && env_is("RECOMP_LSFG", "0"),
           "a refused value leaves the old one");
 
+    /* 5. RECOMP_CFG_SKIP (XBA-188): the named lines are ignored, the others load */
+    unset("RECOMP_CFG_S1"); unset("RECOMP_CFG_S2"); unset("RECOMP_CFG_S3");
+    f = fopen(path, "w");
+    if (f) {
+        fputs("RECOMP_CFG_S1=1\nRECOMP_CFG_S2=2\nRECOMP_CFG_S3=3\n", f);
+        fclose(f);
+        set("RECOMP_CFG_SKIP", "RECOMP_CFG_S1, RECOMP_CFG_S3");
+        n = recomp_cfg_load(path);
+        CHECK(n == 1, "expected 1 option with two skipped, got %d", n);
+        CHECK(getenv("RECOMP_CFG_S1") == NULL && getenv("RECOMP_CFG_S3") == NULL, "skipped lines not set");
+        CHECK(env_is("RECOMP_CFG_S2", "2"), "a line not named still loads");
+        unset("RECOMP_CFG_S2");
+        set("RECOMP_CFG_SKIP", "RECOMP_CFG_S");   /* a prefix is not a name */
+        n = recomp_cfg_load(path);
+        CHECK(n == 3, "a prefix skips nothing, got %d", n);
+        unset("RECOMP_CFG_SKIP");
+    }
+
     remove(path);
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     puts("PASS: recomp.cfg");

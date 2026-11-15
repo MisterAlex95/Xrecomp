@@ -230,16 +230,27 @@ final class RecompConfig {
     }
 
     private final File file;
+    /** The comment line put above the first key the launcher appends (HEADER for recomp.cfg). */
+    private final String header;
     private final List<String> lines = new ArrayList<>();
     private boolean existed;
 
-    private RecompConfig(File file) {
+    private RecompConfig(File file, String header) {
         this.file = file;
+        this.header = header;
     }
 
     /** Reads dir/recomp.cfg; a missing or unreadable file reads as empty (every option at its default). */
     static RecompConfig load(File dir) {
-        RecompConfig c = new RecompConfig(new File(dir, FILE_NAME));
+        return loadFile(new File(dir, FILE_NAME), HEADER);
+    }
+
+    /**
+     * Reads another file of the same syntax (XBA-188: a game's own settings, GameSettings), header the comment put
+     * above the first key appended.
+     */
+    static RecompConfig loadFile(File f, String header) {
+        RecompConfig c = new RecompConfig(f, header);
         if (!c.file.isFile())
             return c;
         try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(c.file),
@@ -322,10 +333,10 @@ final class RecompConfig {
             }
         }
         if (value != null && !placed) {
-            if (!lines.contains(HEADER)) {
+            if (!lines.contains(header)) {
                 if (!lines.isEmpty() && !lines.get(lines.size() - 1).trim().isEmpty())
                     lines.add("");
-                lines.add(HEADER);
+                lines.add(header);
             }
             lines.add(key + "=" + value);
         }
@@ -335,6 +346,22 @@ final class RecompConfig {
     void resetAll() {
         for (Option o : OPTIONS)
             set(o, o.choices[o.defaultIndex()]);
+    }
+
+    /** True when the file sets key, to any value (an empty one too: « KEY= »). */
+    boolean has(String key) {
+        return get(key) != null;
+    }
+
+    /** The keys the file sets, in file order, each once. */
+    List<String> keys() {
+        List<String> out = new ArrayList<>();
+        for (String line : lines) {
+            String k = keyOf(line);
+            if (k != null && !out.contains(k))
+                out.add(k);
+        }
+        return out;
     }
 
     /** True when no option is away from its default. */
@@ -353,7 +380,7 @@ final class RecompConfig {
     void save() throws IOException {
         boolean onlyHeader = true;
         for (String l : lines) {
-            if (!l.trim().isEmpty() && !l.equals(HEADER)) {
+            if (!l.trim().isEmpty() && !l.equals(header)) {
                 onlyHeader = false;
                 break;
             }
@@ -363,7 +390,7 @@ final class RecompConfig {
         File dir = file.getParentFile();
         if (dir != null && !(dir.mkdirs() || dir.isDirectory()))
             throw new IOException("cannot create " + dir);
-        File tmp = new File(dir, FILE_NAME + ".tmp");
+        File tmp = new File(dir, file.getName() + ".tmp");
         try (Writer w = new OutputStreamWriter(new FileOutputStream(tmp), StandardCharsets.UTF_8)) {
             for (String l : lines)
                 w.write(l + "\n");

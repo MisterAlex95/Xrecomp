@@ -702,7 +702,8 @@ purpose.
 #### Settings per console
 
 XBA-181. Which settings reach which console's game (the native side reads them in `src/host` and
-`consoles/*/runtime`):
+`consoles/*/runtime`). Since XBA-188 every row can also be a game's own ([Settings per game](#settings-per-game)); the
+last column says where it could be set per game before, its files now moved into the game's file:
 
 | Setting | Xbox | GBA, PS1, N64 | Per game |
 |---|---|---|---|
@@ -761,6 +762,69 @@ are any. Storage (the library's) lists a console game's save folder too.
 the in-game menu and `ShellActivity` (title video, language, game theme) key their per-game choices on the launched
 game's library key while `rom` is set, the Xbox game's title ID otherwise. Before XBA-181 a console game played
 after an Xbox game showed the Xbox game's Language / Widescreen / 480p rows and got its settings and theme.
+
+#### Settings per game
+
+XBA-188 (`GameSettings.java`). Any option of Settings can follow Settings or have its own value for one game, an Xbox
+title or a GBA / PS1 / N64 game alike: graphics (renderer, frame cap, resolution, aspect ratio, widescreen, 480p,
+texture filtering, vertical sync, the console picture's scale, filter and internal resolution, frame generation),
+audio (buffer, 3D audio), pacing, rumble, drawing threads, fast cores, language; with the game's controls and an N64
+game's controller pak. Only the developer's Self-test stays global.
+
+**Where.** One file per game, `files/settings/game/<KEY>.cfg` (KEY: the Xbox title ID or the library key, upper
+case), in `recomp.cfg`'s syntax:
+
+- a key the file does not set follows Settings;
+- `KEY=VALUE` is the game's own value;
+- `KEY=` (empty) is the runtime's default for this game even when `recomp.cfg` sets another (the « Off » / « Auto »
+  choices that write no line in `recomp.cfg`);
+- an option of several keys (frame generation: `RECOMP_LSFG`, `_MULT`, `_PERF`) is the game's own when the file sets
+  any of them; the keys it does not set keep Settings' values;
+- besides the options: `RECOMP_PAD_MAP` (an Xbox title's own mapping), `RECOMP_<GBA|PS1|N64>_PAD_MAP` (a console
+  game's), `RECOMP_N64_PAK`, and `XRECOMP_THEME` (the launcher's [game theme](#game-theme), never exported).
+
+**Migration.** The per-game files of earlier versions (`language_`, `widescreen_`, `480p_`, `theme_`, `scale_`,
+`filter_`, `upscale_`, `framegen_`, `pad_map_`, `n64_pak_` + KEY in `files/settings`) are moved into the game's file
+the first time any game's settings are read (`GameSettings.migrate`), then deleted; a key the game's file already sets
+wins. Off / native / aspect / frame generation off become `KEY=`, frame generation on becomes Settings' « 2x ».
+`enhancements_<TITLEID>`, `vk_driver_*` and the launcher's own preferences stay where they were.
+
+**Which value a game gets**, first found wins: the game's file, `recomp.cfg`, the runtime's default. One code path for
+every console, `ShellActivity.applyGameSettings` before the runtime starts (`GameSettings.runEnv`):
+
+- a key the game's file sets (and that applies to its console) is exported: the environment wins over `recomp.cfg`
+  (`recomp_cfg.c`);
+- its `KEY=` unsets the variable and names it in `RECOMP_CFG_SKIP` (comma-separated), whose lines
+  `recomp_cfg_load` then ignores;
+- every other key the launcher manages is unset, so `recomp.cfg` decides and nothing a previous game of the same
+  process chose stays;
+- `RECOMP_LANGUAGE`: an Xbox title's own, its « System » (the Android language over `recomp.cfg`'s), else as before
+  ([Game language](#game-language)).
+
+One logcat line at the start: « shell: game settings <KEY> (<console>): RECOMP_GPU_FPS_CAP=60, RECOMP_APU_HRTF=(default)
+… » or « … none (as in Settings) ».
+
+**Game settings screen.** From an Xbox title's Home (**Game settings**, the pill after Settings) and from a console
+game's Home (**Game settings**, after Controls; it was « Options »): every option that applies to the game's console
+(the [table](#settings-per-console): « All consoles » ones for every game, the Xbox's own for Xbox titles, scale and
+filter for the consoles, internal resolution for the PS1 and the N64, frame generation in an APK with it), under
+General / Graphics / Audio / Advanced. Each row: « As in Settings (<Settings' value>) », then each of Settings'
+choices (left / right, A); a **This game** badge when the game's value differs from Settings'. Then « This game »:
+**Controls** (« As in Settings » or « This game only »; A opens its Controls), for an Xbox title its Game theme and
+Enhancements, for an N64 game its Vulkan driver; **Reset to Settings** (also Y: the file goes, its N64 Vulkan driver
+choice too; the value says how many of its own); for a console game, its stored things. Saved at once; a running game
+gets them at its next start.
+
+**In-game menu.** Settings › **Game settings**: the same option rows for the running game, saved for its next start
+(the page says so), and Reset to Settings. The Language, Widescreen, 480p, Scale, Filter, Resolution and Vulkan driver
+rows of Settings stay; they write the same file.
+
+**Xbox per-game controls.** An Xbox title's Controls has « Mapping for: All Xbox games / This game only » at the top,
+as a console game's: this game only copies every game's mapping into its file (`RECOMP_PAD_MAP`) to change on its own,
+all games drops it. The in-game menu › Controls shows the title's own mapping when it has one.
+
+**Limits.** A title built before XBA-188 ignores `RECOMP_CFG_SKIP`: a game's « default » then does not beat a
+`recomp.cfg` line (its own values still do). Players, the on-screen pad and the launcher's preferences stay global.
 
 ### Controls and remapping
 

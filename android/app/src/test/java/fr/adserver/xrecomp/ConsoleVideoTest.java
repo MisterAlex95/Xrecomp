@@ -54,7 +54,7 @@ public class ConsoleVideoTest {
         assertNull(ConsoleVideo.gameChoice(c, GBA, s));
         assertTrue(ConsoleVideo.setGameChoice(c, GBA.toLowerCase(), s, "Integer"));
         assertEquals("integer", ConsoleVideo.gameChoice(c, GBA, s));
-        assertTrue(new File(new File(c.getFilesDir(), "settings"), "scale_" + GBA.toUpperCase()).isFile());
+        assertTrue(GameSettings.file(c.getFilesDir(), GBA).isFile());   // XBA-188: the game's file
         assertNull("the filter untouched", ConsoleVideo.gameChoice(c, GBA, f));
         assertNull("another game", ConsoleVideo.gameChoice(c, "gba-BPEE-00000000", s));
         assertTrue(ConsoleVideo.setGameChoice(c, GBA, f, "linear"));
@@ -189,7 +189,7 @@ public class ConsoleVideoTest {
         assertNull(ConsoleVideo.gameChoice(c, ps1, u));
         assertTrue(ConsoleVideo.setGameChoice(c, ps1, u, "4"));
         assertEquals("4", ConsoleVideo.gameChoice(c, ps1, u));
-        assertTrue(new File(new File(c.getFilesDir(), "settings"), "upscale_" + ps1.toUpperCase()).isFile());
+        assertTrue(GameSettings.file(c.getFilesDir(), ps1).isFile());
         assertTrue(ConsoleVideo.setGameChoice(c, ps1, u, "3"));   // not a value: follows Settings
         assertNull(ConsoleVideo.gameChoice(c, ps1, u));
         assertEquals("1", ConsoleVideo.next(u, null, 1));

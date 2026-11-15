@@ -22,7 +22,8 @@ import java.util.Map;
  * - <TID>.png the title image (as TitleArt caches it), <TID>.hero.png the hero (48 px, luminance-capped);
  * - <TID>.theme, text: v=<GamePalette.VERSION>, xbe=<length>:<lastModified>, source=..., hues=a,b,c, hero=0|1, then
  *   one TOKEN=AARRGGBB line per colour. Stale when v or the default.xbe fingerprint differs: computed again.
- * The player's choice per title (Settings › Launcher › Game theme): files/settings/theme_<TID>, « full » (art and
+ * The player's choice per title (Settings › Launcher › Game theme, or its Game settings): XRECOMP_THEME in the
+ * game's own settings (GameSettings, XBA-188; theme_<TID> before), « full » (art and
  * colours, the default), « colors » or « off ». The game process reads both (ShellActivity, tokens only).
  * Without a title ID there is no theme (stock colours).
  */
@@ -103,13 +104,13 @@ final class GameTheme {
     static Mode mode(Context c, String tid) {
         if (tid == null || tid.isEmpty())
             return Mode.FULL;
-        return Mode.of(GameStore.readSettingFile(c, MODE_FILE_PREFIX + key(tid)));
+        return Mode.of(GameSettings.raw(c, tid, GameSettings.THEME_KEY));   // XBA-188: the game's file
     }
 
     static boolean setMode(Context c, String tid, Mode m) {
         if (tid == null || tid.isEmpty())
             return false;
-        return GameStore.writeSettingFile(c, MODE_FILE_PREFIX + key(tid), m.key);
+        return GameSettings.put(c, tid, GameSettings.THEME_KEY, m == Mode.FULL ? null : m.key);
     }
 
     // ---- Cache -----------------------------------------------------------------------------------------------------

@@ -182,11 +182,11 @@ final class GameMenu {
     static final int ROW_H = Theme.ROW_H;
     static final int VOLUME_STEP = 10;
 
-    enum Page { MAIN, SETTINGS, CONTROLS, DISCS, SAVE_SLOTS, LOAD_SLOTS }
+    enum Page { MAIN, SETTINGS, CONTROLS, DISCS, SAVE_SLOTS, LOAD_SLOTS, GAME_SETTINGS }
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
                 WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, UPSCALE, VK_DRIVER, STATE_SAVE, STATE_LOAD,
-                FAST_FORWARD, AUTO_RESUME }
+                FAST_FORWARD, AUTO_RESUME, GAME_SETTINGS, GS_RESET }
 
     private final Activity activity;
     private final Host host;
@@ -835,6 +835,10 @@ final class GameMenu {
             return;
         feedback.play(UiFeedback.Cue.BACK, drawer);
         if (page != Page.MAIN) {
+            if (page == Page.GAME_SETTINGS) {
+                showPage(Page.SETTINGS, Item.GAME_SETTINGS);
+                return;
+            }
             Item from = page == Page.SETTINGS ? Item.SETTINGS : page == Page.DISCS ? Item.DISC
                         : page == Page.SAVE_SLOTS ? Item.STATE_SAVE : page == Page.LOAD_SLOTS ? Item.STATE_LOAD
                         : Item.CONTROLS;
@@ -960,11 +964,22 @@ final class GameMenu {
                 r.setChoices(video);
                 r.cycler = dir -> stepVideo(GameVideo.Setting.P480, dir);
             }
+            if (titleId() != null)   // XBA-188: every Settings value, this game's own or as in Settings
+                row(Item.GAME_SETTINGS, s(R.string.MENU_GAME_SETTINGS));
             row(Item.SHARE_LOG, s(R.string.MENU_SHARE_LOG));
             row(Item.BACK, s(R.string.MENU_BACK));
             updateValues();
             break;
         }
+        case GAME_SETTINGS:
+            pageV.setText(s(R.string.MENU_GAME_SETTINGS));
+            pageV.setVisibility(View.VISIBLE);
+            kvRow(s(R.string.MENU_GS_NEXT_START), "");
+            for (RecompConfig.Option o : GameSettings.options(Console.ofKey(titleId()), lsfgBuilt()))
+                gameOptionRow(o);
+            row(Item.GS_RESET, s(R.string.GS_RESET));
+            row(Item.BACK, s(R.string.MENU_BACK));
+            break;
         case CONTROLS:
             pageV.setText(s(R.string.MENU_CONTROLS));
             pageV.setVisibility(View.VISIBLE);
@@ -994,7 +1009,9 @@ final class GameMenu {
                 break;
             }
             // XBA-131: the player's remapping (the launcher's Controls), first: each changed control, then the usual list.
-            PadMapping map = PadMapping.load(RecompConfig.load(GameStore.externalFilesDir(activity)));
+            String own = GameSettings.raw(activity, titleId(), PadMapping.KEY);   // XBA-188: the title's own first
+            PadMapping map = own != null ? PadMapping.parse(own)
+                                         : PadMapping.load(RecompConfig.load(GameStore.externalFilesDir(activity)));
             if (!map.isDefault()) {
                 kvRow(s(R.string.MENU_CTL_REMAPPED),
                       activity.getString(R.string.MENU_CTL_REMAPPED_X, map.changedCount()));
@@ -1342,6 +1359,15 @@ final class GameMenu {
         case AUTO_RESUME:
             setAutoResume(!GameStore.autoResume(activity));
             break;
+        case GAME_SETTINGS:
+            showPage(Page.GAME_SETTINGS, null);
+            break;
+        case GS_RESET:
+            GameSettings.reset(activity.getFilesDir(), titleId());
+            Log.i(LauncherActivity.TAG, "shell: menu: game settings of " + titleId() + " reset to Settings (next start)");
+            showPage(Page.GAME_SETTINGS, Item.GS_RESET);
+            flash(s(R.string.GS_RESET_DONE), true);
+            break;
         case BACK:
             back();
             break;
@@ -1434,6 +1460,49 @@ final class GameMenu {
         Log.i(LauncherActivity.TAG, "shell: menu: bottom screen " + next);
         host.bottomScreenChanged();
         updateValues();
+    }
+
+    /** True when this APK has frame generation (R.bool.xba_lsfg; LauncherActivity's test override too). */
+    private boolean lsfgBuilt() {
+        return LauncherActivity.lsfgBuiltOverride != null ? LauncherActivity.lsfgBuiltOverride
+                                                          : activity.getResources().getBoolean(R.bool.xba_lsfg);
+    }
+
+    /**
+     * XBA-188: one option of Game settings (GameSettings): « As in Settings (<value>) », then each choice, saved at
+     * once for the game's next start; the « This game » badge when it differs from Settings'.
+     */
+    private void gameOptionRow(RecompConfig.Option o) {
+        RecompConfig cfg = RecompConfig.load(GameStore.externalFilesDir(activity));
+        int gi = GameSettings.globalIndex(cfg, o);
+        String[] labels = new String[o.choices.length + 1];
+        labels[0] = activity.getString(R.string.ROM_OPT_FOLLOW, s(gi < 0 ? R.string.VAL_CUSTOM : o.choices[gi].label));
+        for (int i = 0; i < o.choices.length; i++)
+            labels[i + 1] = s(o.choices[i].label);
+        Widgets.MenuRow r = new Widgets.MenuRow(activity);
+        r.set(s(o.title), null);
+        r.setChoices(labels);
+        Runnable refresh = () -> {
+            RecompConfig game = GameSettings.load(activity, titleId());
+            int pos = GameSettings.position(cfg, game, o);
+            r.setValue(pos < 0 ? s(R.string.VAL_CUSTOM) : labels[pos]);
+            r.setBadge(GameSettings.differs(cfg, game, o) ? s(R.string.GS_BADGE) : null, Theme.ACCENT);
+            r.invalidate();
+        };
+        refresh.run();
+        r.cycler = dir -> {
+            RecompConfig game = GameSettings.load(activity, titleId());
+            int pos = GameSettings.step(GameSettings.position(cfg, game, o), o, dir);
+            GameSettings.setPosition(game, o, pos);
+            GameSettings.save(game);
+            refresh.run();
+            feedback.play(UiFeedback.Cue.MOVE, r);
+            Log.i(LauncherActivity.TAG, "shell: menu: " + String.join("+", o.keys) + " " + (pos == 0 ? "as in Settings"
+                                        : activity.getResources().getResourceEntryName(o.choices[pos - 1].label))
+                                        + " for " + titleId() + " (next start)");
+        };
+        r.setOnClickListener(v -> r.cycler.step(1));
+        list.addView(r, new LinearLayout.LayoutParams(-1, ROW_H));
     }
 
     /**

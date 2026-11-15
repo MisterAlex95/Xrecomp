@@ -182,4 +182,32 @@ public class LauncherControlsTest {
         assertEquals("R2", row(a, "Blanc").value);
         shot(a, "controls-3-fr");
     }
+
+    /**
+     * XBA-188: an Xbox title's Controls: « Mapping for » all Xbox games (recomp.cfg) or this game only (its
+     * GameSettings file, RECOMP_PAD_MAP); a change there leaves recomp.cfg alone; back to all games drops it.
+     */
+    @Test
+    public void perTitleMapping() throws Exception {
+        LauncherActivity a = controls();
+        String scopeTitle = app.getString(R.string.CC_SCOPE);
+        Widgets.MenuRow scope = row(a, scopeTitle);
+        assertNotNull("a title is set up: the scope row", scope);
+        assertEquals(app.getString(R.string.CC_SCOPE_CONSOLE, "Xbox"), scope.value);
+        scope.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals(app.getString(R.string.CC_SCOPE_GAME), row(a, scopeTitle).value);
+        assertEquals("its own copy of the usual mapping", "", GameSettings.load(app, "4D530004").get(PadMapping.KEY));
+        focusRow(a, app.getString(R.string.XB_A));
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        String own = GameSettings.load(app, "4D530004").get(PadMapping.KEY);
+        assertTrue("the title's own: " + own, own != null && !own.isEmpty());
+        assertNull("recomp.cfg untouched", padMapLine());
+        GameSettings.Env env = GameSettings.runEnv(Console.XBOX, RecompConfig.load(GameStore.externalFilesDir(app)),
+                                                   GameSettings.load(app, "4D530004"), java.util.Locale.US, false);
+        assertEquals(own, env.value(PadMapping.KEY));
+        row(a, scopeTitle).requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertNull("back to all games", GameSettings.load(app, "4D530004").get(PadMapping.KEY));
+    }
 }

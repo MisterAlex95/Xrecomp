@@ -108,13 +108,9 @@ public class ShellActivity extends SDLActivity {
                 Log.w(LauncherActivity.TAG, "shell: cannot set RECOMP_GAME_DIR", e);
             }
         }
-        applyTitleVideo();
-        applyLanguage();
-        applyN64Pak(rom != null);
         applyAutoResume(rom != null);
         applyVkDriver(rom != null);
-        Console console = applyConsolePad(rom != null);
-        applyConsoleVideo(console);
+        Console console = applyGameSettings(rom != null);
         boolean checked = LibraryCheck.applyRunEnv(this);   // a library check's run: status file and pad script (XBA-130)
         applyBuiltinPad();
         super.onCreate(savedInstanceState);
@@ -274,27 +270,6 @@ public class ShellActivity extends SDLActivity {
     }
 
     /**
-     * RECOMP_N64_PAK for the N64 runtime (XBA-174, {@link N64Pak}): the launched N64 game's own choice (« rumble » or
-     * « controller »), else unset (recomp.cfg, then the controller pak, decide), also clearing what a previous game of
-     * this process chose.
-     */
-    private void applyN64Pak(boolean romLaunch) {
-        String tid = romLaunch ? GameStore.launchedTitleId(this) : null;
-        String v = tid != null && Console.ofKey(tid) == Console.N64 ? N64Pak.choice(this, tid) : null;
-        try {
-            if (v != null)
-                Os.setenv(N64Pak.ENV, v, true);
-            else
-                Os.unsetenv(N64Pak.ENV);
-        } catch (ErrnoException e) {
-            Log.w(LauncherActivity.TAG, "shell: cannot set " + N64Pak.ENV, e);
-        }
-        if (tid != null && Console.ofKey(tid) == Console.N64)
-            Log.i(LauncherActivity.TAG, "shell: n64 pak " + (v != null ? v : "default (recomp.cfg, else controller)")
-                                        + ", game " + tid);
-    }
-
-    /**
      * The custom Vulkan driver for the N64 Vulkan RDP ({@link VkDrivers}): for an N64 game whose driver (its own choice
      * in its Options, else Settings' choice, else the system driver: VkDrivers.resolve) is a still installed one,
      * RECOMP_VK_DRIVER_DIR / _LIB / _ID and RECOMP_VK_HOOK_DIR; otherwise all four unset, also
@@ -328,50 +303,23 @@ public class ShellActivity extends SDLActivity {
     }
 
     /**
-     * The player's mapping for a GBA, PS1 or N64 game (XBA-158 / XBA-168 / XBA-174, {@link ConsoleControls}): the
-     * launched game's own as RECOMP_&lt;CONSOLE&gt;_PAD_MAP, where it wins over recomp.cfg's line (the console's
-     * mapping); the other consoles' variables unset, so nothing a previous game of this process set stays. Returns
-     * the launched game's console (XBOX for an Xbox game).
+     * XBA-188: the game's own settings ({@link GameSettings}) over Settings' (recomp.cfg) over the runtime's defaults,
+     * one code path for every console: each key the game's file sets is exported (its « default » unset and named in
+     * RECOMP_CFG_SKIP, so recomp.cfg's line is ignored), every other key unset (recomp.cfg decides, nothing a previous
+     * game of this process chose stays); RECOMP_LANGUAGE is the Android language when neither sets one (GameLanguage).
+     * Covers what were the per-game language, widescreen / 480p, console scale / filter / resolution / frame
+     * generation, controls (RECOMP_PAD_MAP, RECOMP_&lt;C&gt;_PAD_MAP) and N64 pak. One log line names the game's keys.
+     * Returns the launched game's console (XBOX for an Xbox game).
      */
-    private Console applyConsolePad(boolean romLaunch) {
-        String tid = romLaunch ? GameStore.launchedTitleId(this) : null;
-        Console c = tid != null ? Console.ofKey(tid) : Console.XBOX;
-        for (String[] kv : ConsoleControls.runEnv(this, tid)) {
-            try {
-                if (kv[1] != null)
-                    Os.setenv(kv[0], kv[1], true);
-                else
-                    Os.unsetenv(kv[0]);
-            } catch (ErrnoException e) {
-                Log.w(LauncherActivity.TAG, "shell: cannot set " + kv[0], e);
-            }
-        }
-        if (c != Console.XBOX) {
-            String own = ConsoleControls.gameText(this, tid);
-            Log.i(LauncherActivity.TAG, "shell: " + c.id + " controls " + (own == null ? "of the console (recomp.cfg)"
-                                        : "of the game: " + (own.isEmpty() ? "(default)" : own)) + ", game " + tid);
-        }
-        return c;
-    }
-
-    /**
-     * RECOMP_SCALE and RECOMP_FILTER for a GBA, PS1 or N64 game (XBA-181, {@link ConsoleVideo}), RECOMP_UPSCALE too
-     * (XBA-184; the game's own choice for a PS1 or N64 game) and RECOMP_LSFG (XBA-186, frame generation): the game's
-     * own choice, else Settings' (recomp.cfg), else unset (the runtime's default); with the settings every console
-     * shares (vertical sync, audio buffer, rumble, frame generation's multiplier, performance set and shader cache)
-     * from recomp.cfg. An Xbox game: scale, filter, internal resolution and RECOMP_LSFG unset (recomp.cfg's applies).
-     */
-    private void applyConsoleVideo(Console c) {
-        String tid = c != Console.XBOX ? GameStore.launchedTitleId(this) : null;
+    private Console applyGameSettings(boolean romLaunch) {
+        String tid = romLaunch ? GameStore.launchedTitleId(this) : GameLanguage.runningTitleId(this);
+        Console c = romLaunch && tid != null ? Console.ofKey(tid) : Console.XBOX;
         File ext = GameStore.externalFilesDir(this);
         RecompConfig cfg = ext == null ? null : RecompConfig.load(ext);
-        String scale = ConsoleVideo.gameChoice(this, tid, ConsoleVideo.Setting.SCALE);
-        String filter = ConsoleVideo.gameChoice(this, tid, ConsoleVideo.Setting.FILTER);
-        String upscale = ConsoleVideo.gameChoice(this, tid, ConsoleVideo.Setting.UPSCALE);
-        String framegen = ConsoleVideo.gameChoice(this, tid, ConsoleVideo.Setting.FRAMEGEN);   // XBA-186
-        java.util.List<String[]> env = ConsoleVideo.runEnv(c, scale, filter, upscale, framegen, cfg);
-        StringBuilder line = new StringBuilder("shell: console video");
-        for (String[] kv : env) {
+        RecompConfig game = GameSettings.load(this, tid);
+        boolean lsfg = getResources().getBoolean(R.bool.xba_lsfg);
+        GameSettings.Env env = GameSettings.runEnv(c, cfg, game, Locale.getDefault(), lsfg);
+        for (String[] kv : env.vars) {
             try {
                 if (kv[1] != null)
                     Os.setenv(kv[0], kv[1], true);
@@ -380,10 +328,9 @@ public class ShellActivity extends SDLActivity {
             } catch (ErrnoException e) {
                 Log.w(LauncherActivity.TAG, "shell: cannot set " + kv[0], e);
             }
-            line.append(' ').append(kv[0]).append('=').append(kv[1] != null ? kv[1] : "(default)");
         }
-        if (c != Console.XBOX)
-            Log.i(LauncherActivity.TAG, line.append(", game ").append(tid).toString());
+        Log.i(LauncherActivity.TAG, env.logLine((tid != null ? tid : "(no title)") + " (" + c.id + ")"));
+        return c;
     }
 
     /** RECOMP_PS1_PAD=analog in recomp.cfg: the PS1 on-screen pad gets the DualShock's two sticks. */
@@ -391,28 +338,6 @@ public class ShellActivity extends SDLActivity {
         File ext = GameStore.externalFilesDir(this);
         String v = ext == null ? null : RecompConfig.load(ext).get("RECOMP_PS1_PAD");
         return v != null && v.trim().equalsIgnoreCase("analog");
-    }
-
-    /**
-     * RECOMP_LANGUAGE for the runtime (XBA-77, {@link GameLanguage}): the title's own choice, else none when recomp.cfg
-     * has a line (the runtime reads it there), else the Android language when the Xbox has it. Unset otherwise, also
-     * clearing a value a previous game left in this process.
-     */
-    private void applyLanguage() {
-        File ext = GameStore.externalFilesDir(this);
-        String cfg = ext == null ? null : RecompConfig.load(ext).get(GameLanguage.ENV);
-        String tid = GameLanguage.runningTitleId(this);
-        String lang = GameLanguage.resolve(GameLanguage.titleChoice(this, tid), cfg, Locale.getDefault());
-        try {
-            if (lang != null)
-                Os.setenv(GameLanguage.ENV, lang, true);
-            else
-                Os.unsetenv(GameLanguage.ENV);
-        } catch (ErrnoException e) {
-            Log.w(LauncherActivity.TAG, "shell: cannot set " + GameLanguage.ENV, e);
-        }
-        Log.i(LauncherActivity.TAG, "shell: game language " + (lang != null ? lang : cfg != null ? cfg + " (recomp.cfg)"
-                                                              : "en (default)") + ", title " + tid);
     }
 
     /**

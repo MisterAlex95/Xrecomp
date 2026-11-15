@@ -24,7 +24,7 @@
     <string name="OPT_RUMBLE">Vibration de la manette</string>
     <string name="OPT_RUMBLE_DETAIL">Activée : la manette vibre quand le jeu le demande (la DualShock de la PlayStation, le Rumble Pak de la Nintendo 64, la manette Xbox). Désactivée : jamais. Pour toutes les consoles. S\'applique au prochain lancement d\'un jeu. (RECOMP_RUMBLE)</string>
 
-    <string name="ROM_OPTIONS">Options</string>
+    <string name="ROM_OPTIONS">Réglages du jeu</string>
     <string name="ROM_OPT_PICTURE">L\'image de ce jeu</string>
     <string name="ROM_OPT_DATA">Données du jeu</string>
     <string name="ROM_OPT_FOLLOW">Comme les Réglages (%1$s)</string>
@@ -34,4 +34,20 @@
     <string name="ROM_OPT_FILTER_DETAIL">Comment l\'image de ce jeu est agrandie : comme dans Réglages › Graphismes › Filtre de l\'image, ou le sien. Net : des pixels carrés. Lissé : des contours adoucis. S\'applique au prochain lancement du jeu. (RECOMP_FILTER)</string>
     <string name="ROM_OPT_SAVED">Enregistré pour ce jeu</string>
     <string name="ROM_OPT_SAVED_RUNNING">Enregistré pour ce jeu ; s\'applique au prochain lancement du jeu</string>
+    <!-- XBA-188: réglages par jeu -->
+    <string name="GAME_SETTINGS">Réglages du jeu</string>
+    <string name="GS_GROUP_GAME">Ce jeu</string>
+    <string name="GS_BADGE">Ce jeu</string>
+    <string name="GS_OPTION_DETAIL">%1$s\n\nPour ce jeu seulement : comme les Réglages, ou une valeur à lui. S\'applique au prochain lancement du jeu.</string>
+    <string name="GS_CONTROLS_DETAIL">Les boutons avec lesquels ce jeu se joue : la configuration de tous les jeux, ou la sienne (Commandes pour › Ce jeu seulement, dans ses Commandes). A ouvre ses Commandes.</string>
+    <string name="GS_RESET">Revenir aux Réglages</string>
+    <string name="GS_RESET_DETAIL">Toutes les valeurs de %1$s suivent de nouveau les Réglages : ses valeurs, ses commandes et son thème à lui disparaissent. Ses sauvegardes restent.</string>
+    <string name="GS_RESET_DONE">Ce jeu suit de nouveau les Réglages</string>
+    <string name="GS_RESET_FAILED">Les réglages de ce jeu n\'ont pas pu être remis à zéro</string>
+    <string name="GS_SAVE_FAILED">Les réglages de ce jeu n\'ont pas pu être enregistrés</string>
+    <string name="GS_NONE_OWN">Tout comme les Réglages</string>
+    <string name="GS_OWN_COUNT">%1$d à lui</string>
+    <string name="GS_HINT_RESET">Remettre</string>
+    <string name="MENU_GAME_SETTINGS">Réglages du jeu</string>
+    <string name="MENU_GS_NEXT_START">Les valeurs de ce jeu : elles s\'appliquent à son prochain lancement</string>
 </resources>

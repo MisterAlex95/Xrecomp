@@ -22,6 +22,12 @@ extern "C" {
  * malformed line. */
 int recomp_cfg_load(const char *path);
 
+/* Names (comma- or space-separated) whose lines recomp_cfg_load ignores: the
+ * Android launcher's per-game settings (XBA-188) set it when a game chose the
+ * runtime's default for an option recomp.cfg sets, so the line does not apply
+ * to that game. Skipped lines are not counted. */
+#define RECOMP_CFG_SKIP_ENV "RECOMP_CFG_SKIP"
+
 /* A title's forced options (title.json "env_force", docs/runtime/
  * environment-variables.md « Forced by a title »): unlike recomp.cfg they win
  * over everything already set (the environment, recomp.cfg, the launcher's

@@ -1294,4 +1294,45 @@ public class GameMenuTest {
             }
         }
     }
+
+    /**
+     * XBA-188: Settings › Game settings: every Settings value that applies to the running game's console, « As in
+     * Settings (<value>) » then each choice, saved in the game's file for its next start, the « This game » badge when it
+     * differs; Reset to Settings drops the file; B goes back to Settings.
+     */
+    @Test
+    public void gameSettingsPage() throws Exception {
+        java.io.File dir = new java.io.File(activity.getFilesDir(), "gs-game");
+        TestSupport.write(new java.io.File(dir, "default.xbe"), TestSupport.xbe(0x4D5300D1, "Game"));
+        GameStore.remember(activity, dir.getPath(), "Game");
+        menu.release();
+        build();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNotNull(menu.row(GameMenu.Item.GAME_SETTINGS));
+        menu.row(GameMenu.Item.GAME_SETTINGS).performClick();
+        Widgets.MenuRow cap = null, scale = null;
+        for (Widgets.MenuRow r : menu.rowsForTest()) {
+            if (activity.getString(R.string.OPT_GPU_FPS_CAP).equals(r.title))
+                cap = r;
+            if (activity.getString(R.string.OPT_CSCALE).equals(r.title))
+                scale = r;
+        }
+        assertNotNull("an Xbox option", cap);
+        assertNull("no console picture for an Xbox title", scale);
+        assertEquals(activity.getString(R.string.ROM_OPT_FOLLOW, activity.getString(R.string.VAL_AUTO)), cap.value);
+        assertNull(cap.badge);
+        cap.performClick();   // Auto, as Settings: its own, no badge
+        assertEquals("", GameSettings.load(activity, "4D5300D1").get("RECOMP_GPU_FPS_CAP"));
+        assertNull(cap.badge);
+        cap.performClick();   // 30
+        assertEquals("30", GameSettings.load(activity, "4D5300D1").get("RECOMP_GPU_FPS_CAP"));
+        assertEquals(activity.getString(R.string.VAL_FPS_30), cap.value);
+        assertEquals(activity.getString(R.string.GS_BADGE), cap.badge);
+        assertNotNull(menu.row(GameMenu.Item.GS_RESET));
+        menu.row(GameMenu.Item.GS_RESET).performClick();
+        assertFalse(GameSettings.file(activity.getFilesDir(), "4D5300D1").exists());
+        menu.row(GameMenu.Item.BACK).performClick();
+        assertNotNull("back on Settings", menu.row(GameMenu.Item.GAME_SETTINGS));
+    }
 }

@@ -152,8 +152,13 @@ public class LauncherActivity extends Activity {
         ROM_HOME,
         /** A GBA, PS1 or N64 game's Controls (ConsolePadMap): its console's mapping or its own; romEntry. */
         ROM_CONTROLS,
-        /** A GBA, PS1 or N64 game's Options (XBA-181): its own scale and filter, its saves and Prepare files; romEntry. */
+        /**
+         * A GBA, PS1 or N64 game's Game settings (XBA-181 / XBA-188): any Settings value its own or as in Settings, its
+         * saves and Prepare files; romEntry.
+         */
         ROM_OPTIONS,
+        /** An Xbox title's Game settings (XBA-188): any Settings value its own or as in Settings; titleId(). */
+        GAME_SETTINGS,
         /** Settings › Graphics › Vulkan driver: the system driver, the installed ones, the downloadable list. */
         DRIVERS
     }
@@ -1007,6 +1012,9 @@ public class LauncherActivity extends Activity {
         case ROM_OPTIONS:
             buildRomOptions();
             break;
+        case GAME_SETTINGS:
+            buildXboxGameSettings();
+            break;
         case DRIVERS:
             buildDrivers();
             break;
@@ -1728,6 +1736,8 @@ public class LauncherActivity extends Activity {
     /** Home's quiet pills: Settings, Controls, Manage. */
     private void homePills(LinearLayout row) {
         pill(row, Icon.SLIDERS, getString(R.string.SETTINGS), false, () -> go(Screen.SETTINGS));
+        if (state() != State.NONE && titleId() != null)   // XBA-188: this title's own values
+            pill(row, null, getString(R.string.GAME_SETTINGS), false, () -> go(Screen.GAME_SETTINGS));
         pill(row, Icon.PAD, getString(R.string.CONTROLS), false, () -> go(Screen.CONTROLS));
         pill(row, Icon.DISC, getString(R.string.HOME_MANAGE), false, () -> go(Screen.GAME_DATA));
     }
@@ -2240,7 +2250,7 @@ public class LauncherActivity extends Activity {
             GameTheme.setMode(this, tid, modes[i]);
             feedback.play(UiFeedback.Cue.MOVE, r);
             Log.i(TAG, "launcher: game theme " + tid + " " + modes[i].key);
-            show(Screen.SETTINGS, 0);   // syncTheme: the new colours, the focus stays on this row
+            show(screen, 0);   // syncTheme: the new colours, the focus stays on this row
             setNote(getString(R.string.GAME_THEME_SAVED, names[i]), NOTE_OK);
         };
         r.setOnClickListener(v -> r.cycler.step(1));
@@ -5247,6 +5257,12 @@ public class LauncherActivity extends Activity {
 
     /** The mapping the Controls screen edits (RECOMP_PAD_MAP in recomp.cfg, read when the screen is built). */
     private PadMapping padMap = new PadMapping();
+    /**
+     * XBA-188: the title whose Controls these are (null: no game set up, only the mapping of every game), and whether
+     * padMap is its own (RECOMP_PAD_MAP in its GameSettings file) rather than every game's.
+     */
+    private String padMapTid;
+    private boolean padMapGame;
 
     PadMapping padMapForTest() {
         return padMap;
@@ -5262,8 +5278,13 @@ public class LauncherActivity extends Activity {
     private void buildControls() {
         screenTitle.setText(R.string.CONTROLS);
         cfg = RecompConfig.load(GameStore.externalFilesDir(this));
-        padMap = PadMapping.load(cfg);
+        padMapTid = state() != State.NONE ? titleId() : null;
+        String own = padMapTid == null ? null : GameSettings.raw(this, padMapTid, PadMapping.KEY);
+        padMapGame = own != null;
+        padMap = padMapGame ? PadMapping.parse(own) : PadMapping.load(cfg);
         LinearLayout list = listTemplate();
+        if (padMapTid != null)
+            xboxControlsScope(list);
         PadMapping.Source[] sources = PadMapping.Source.values();
         String[] sourceLabels = new String[sources.length];
         for (int i = 0; i < sources.length; i++)
@@ -5283,6 +5304,8 @@ public class LauncherActivity extends Activity {
                 };
                 r.setOnClickListener(v -> r.cycler.step(1));
                 onFocus(r, () -> controlDetail(c));
+                if (defaultFocus == null)
+                    defaultFocus = r;   // the first control, above the scope row
             }
         }
         listLabel(list, getString(R.string.CTL_GROUP_STICKS));
@@ -5316,6 +5339,8 @@ public class LauncherActivity extends Activity {
         onFocus(reset, () -> controlsDescribe(getString(R.string.CTL_RESET_DETAIL)));
         controlsDescribe(getString(R.string.CTL_LEAD));
         changedCount();
+        if (padMapGame)
+            setNote(getString(R.string.CC_GAME_MAP_ON), NOTE_INFO);
         yAction = this::resetControls;
         addHint("A", R.string.HINT_CHANGE, this::clickFocused);
         addHint("Y", R.string.HINT_DEFAULTS, this::resetControls);
@@ -5444,17 +5469,49 @@ public class LauncherActivity extends Activity {
     }
 
     private void saveControls() {
-        padMap.store(cfg);
-        saveSettings();
+        if (padMapGame && padMapTid != null) {   // XBA-188: the title's own (« » = the usual mapping, for it alone)
+            boolean ok = GameSettings.put(this, padMapTid, PadMapping.KEY, padMap.format());
+            setNote(getString(!ok ? R.string.GS_SAVE_FAILED : gameRunning() ? R.string.SETTINGS_SAVED_RUNNING
+                                                                             : R.string.SETTINGS_SAVED),
+                    ok ? NOTE_OK : NOTE_ERROR);
+        } else {
+            padMap.store(cfg);
+            saveSettings();
+        }
         changedCount();
-        Log.i(TAG, "launcher: controls " + (padMap.isDefault() ? "(default)" : padMap.format()));
+        Log.i(TAG, "launcher: controls (" + (padMapGame ? padMapTid : "every game") + ") "
+                   + (padMap.isDefault() ? "(default)" : padMap.format()));
+    }
+
+    /**
+     * XBA-188: « Mapping for: All Xbox games / This game only » at the top of an Xbox title's Controls, as a console
+     * game's (ROM_CONTROLS): this game only takes a copy of every game's mapping to change on its own (its
+     * GameSettings file), all games drops it.
+     */
+    private void xboxControlsScope(LinearLayout list) {
+        String cname = ConsoleControls.consoleName(this, Console.XBOX);
+        MenuRow scope = settingRow(list, getString(R.string.CC_SCOPE), "");
+        String[] scopes = { getString(R.string.CC_SCOPE_CONSOLE, cname), getString(R.string.CC_SCOPE_GAME) };
+        scope.setChoices(scopes);
+        scope.setValue(scopes[padMapGame ? 1 : 0]);
+        if (padMapGame)
+            scope.setBadge(getString(R.string.GS_BADGE), Theme.ACCENT);
+        String tid = padMapTid;
+        scope.cycler = d -> {
+            GameSettings.put(this, tid, PadMapping.KEY, padMapGame ? null : padMap.format());
+            Log.i(TAG, "launcher: " + tid + " controls " + (padMapGame ? "follow every game's" : "of its own"));
+            feedback.play(UiFeedback.Cue.MOVE, scope);
+            show(Screen.CONTROLS, 0);
+        };
+        scope.setOnClickListener(v -> scope.cycler.step(1));
+        String text = getString(R.string.CC_SCOPE_DETAIL, cname);
+        onFocus(scope, () -> controlsDescribe(text));
     }
 
     /** Y, or « Reset controls »: the usual mapping (the line goes from recomp.cfg). */
     private void resetControls() {
         padMap.reset();
-        padMap.store(cfg);
-        saveSettings();
+        saveControls();
         show(Screen.CONTROLS, 0);
         setNote(getString(R.string.CTL_RESET_DONE), NOTE_OK);
     }
@@ -5640,78 +5697,167 @@ public class LauncherActivity extends Activity {
         setNote(getString(R.string.CTL_RESET_DONE), NOTE_OK);
     }
 
-    // ---- ROM_OPTIONS (XBA-181) ----------------------------------------------------------------------------------
+    // ---- GAME_SETTINGS / ROM_OPTIONS (XBA-181, XBA-188) -------------------------------------------------------
 
-    /**
-     * A GBA, PS1 or N64 game's Options: its own scale and filter, for a PS1 or N64 game its internal resolution
-     * (XBA-184), and frame generation on or off in an APK built with it (XBA-186) (ConsoleVideo: « As in Settings »,
-     * then each value;
-     * ShellActivity hands them to the runtime at the game's next start), then its stored things (the saves, the pack,
-     * the Prepare's files: Storage, each deleted on its own, A twice, as in Manage).
-     */
+    /** An Xbox title's Game settings (its Home's « Game settings » pill). */
+    private void buildXboxGameSettings() {
+        String tid = titleId(), dir = gameDir();
+        if (tid == null) {   // nothing to key the values on (the game went away)
+            show(Screen.HOME, 0);
+            return;
+        }
+        buildGameSettings(tid, Console.XBOX, dir != null ? gameTitle(dir) : tid);
+    }
+
+    /** A GBA, PS1 or N64 game's Game settings (its Home's « Game settings » pill), then its stored things. */
     private void buildRomOptions() {
-        screenTitle.setText(R.string.ROM_OPTIONS);
         LibraryScreen.Entry e = romEntry;
         if (e == null) {   // nothing to show (the activity came back without its game)
             show(Screen.LIBRARY, 0);
             return;
         }
-        String key = e.tid;
+        buildGameSettings(e.tid, Console.ofKey(e.tid), e.title());
+    }
+
+    /**
+     * Game settings (XBA-188, GameSettings): every Settings option that applies to the game's console, each « As in
+     * Settings (<Settings' value>) » or one of its values for this game alone (left / right, A), a « This game »
+     * badge on the rows whose value differs from Settings'; the game's controls (a link to its Controls), for an Xbox
+     * title its theme and enhancements, for an N64 game its Vulkan driver; « Reset to Settings » (also Y); for a
+     * console game its stored things (saves, pack, Prepare files, each deleted on its own, A twice). Saved at once,
+     * read by ShellActivity at the game's next start.
+     */
+    private void buildGameSettings(String key, Console con, String gameName) {
+        screenTitle.setText(R.string.GAME_SETTINGS);
+        topRight.setText(gameName);
         cfg = RecompConfig.load(GameStore.externalFilesDir(this));
         LinearLayout list = listTemplate();
-        listLabel(list, getString(R.string.ROM_OPT_PICTURE));
         MenuRow first = null;
-        for (ConsoleVideo.Setting s : ConsoleVideo.Setting.values()) {
-            if (!ConsoleVideo.applies(s, Console.ofKey(key)))
-                continue;
-            if (s == ConsoleVideo.Setting.FRAMEGEN && !lsfgBuilt())
-                continue;   // XBA-186: only an APK built with frame generation offers it
-            int title = s == ConsoleVideo.Setting.SCALE ? R.string.OPT_CSCALE
-                        : s == ConsoleVideo.Setting.FILTER ? R.string.OPT_CFILTER
-                        : s == ConsoleVideo.Setting.FRAMEGEN ? R.string.OPT_LSFG : R.string.OPT_UPSCALE;
-            int detail = s == ConsoleVideo.Setting.SCALE ? R.string.ROM_OPT_SCALE_DETAIL
-                         : s == ConsoleVideo.Setting.FILTER ? R.string.ROM_OPT_FILTER_DETAIL
-                         : s == ConsoleVideo.Setting.FRAMEGEN ? R.string.ROM_OPT_FRAMEGEN_DETAIL
-                                                              : R.string.ROM_OPT_UPSCALE_DETAIL;
-            RecompConfig.Option global = optionTitled(title);
-            String follow = getString(R.string.ROM_OPT_FOLLOW, choiceLabel(cfg, global));
-            String[] labels = new String[s.values.length + 1];
-            labels[0] = follow;
-            for (int i = 0; i < s.values.length; i++)
-                labels[i + 1] = getString(s.labels[i]);
-            MenuRow r = settingRow(list, getString(title), getString(detail));
-            r.setChoices(labels);
-            Runnable refresh = () -> {
-                String v = ConsoleVideo.gameChoice(this, key, s);
-                r.setValue(v == null ? follow : getString(ConsoleVideo.label(s, v)));
-            };
-            refresh.run();
-            r.cycler = d -> {
-                String v = ConsoleVideo.next(s, ConsoleVideo.gameChoice(this, key, s), d);
-                ConsoleVideo.setGameChoice(this, key, s, v);
-                refresh.run();
-                feedback.play(UiFeedback.Cue.MOVE, r);
-                setNote(getString(gameRunning() && key.equals(launchedTid()) ? R.string.ROM_OPT_SAVED_RUNNING
-                                                                             : R.string.ROM_OPT_SAVED), NOTE_OK);
-                Log.i(TAG, "launcher: " + key + " " + s.env + " " + (v == null ? "as in Settings" : v));
-            };
-            r.setOnClickListener(v -> r.cycler.step(1));
+        RecompConfig.Section section = null;
+        for (RecompConfig.Option o : GameSettings.options(con, lsfgBuilt())) {
+            if (o.section != section) {
+                section = o.section;
+                listLabel(list, getString(TAB_LABELS[tabOf(section)]));
+            }
+            MenuRow r = gameOptionRow(list, key, o);
             if (first == null)
                 first = r;
         }
-        if (Console.ofKey(key) == Console.N64 && !vkdInherits())   // only the N64 Vulkan renderer uses one, for now
+        listLabel(list, getString(R.string.GS_GROUP_GAME));
+        gameControlsRow(list, key, con);
+        if (con == Console.N64 && !vkdInherits())   // only the N64 Vulkan renderer uses one, for now
             romVkDriverRow(list, key);
-        // Its stored things (XBA-181: the console's save folder, save/<console>-<KEY>/, Storage.saves).
-        List<Storage.Item> items = Storage.items(storageDirs(), key, games.get(key));
-        if (!items.isEmpty()) {
-            listLabel(list, getString(R.string.ROM_OPT_DATA));
-            for (Storage.Item it : items)
-                storageRow(list, it);
-            storageMeasureLater(items);
+        if (con == Console.XBOX) {
+            gameThemeRow(list, key, gameName);
+            if (Toolchain.available(this) && Pack.titleLayer(getFilesDir(), key) != null)
+                enhancementsRow(list, key, gameName);
+        }
+        String resetText = getString(R.string.GS_RESET_DETAIL, gameName);
+        MenuRow reset = listRow(list, getString(R.string.GS_RESET), resetText, () -> resetGameSettings(key, con));
+        onFocus(reset, () -> describe(resetText));
+        int own = GameSettings.overridden(cfg, GameSettings.load(this, key), con, lsfgBuilt()).size();
+        reset.setValue(own == 0 ? getString(R.string.GS_NONE_OWN) : getString(R.string.GS_OWN_COUNT, own));
+        if (con != Console.XBOX) {
+            // Its stored things (XBA-181: the console's save folder, save/<console>-<KEY>/, Storage.saves).
+            List<Storage.Item> items = Storage.items(storageDirs(), key, games.get(key));
+            if (!items.isEmpty()) {
+                listLabel(list, getString(R.string.ROM_OPT_DATA));
+                for (Storage.Item it : items)
+                    storageRow(list, it);
+                storageMeasureLater(items);
+            }
         }
         defaultFocus = first;
+        yAction = () -> resetGameSettings(key, con);
         addHint("A", R.string.HINT_CHANGE, this::clickFocused);
+        addHint("Y", R.string.GS_HINT_RESET, () -> resetGameSettings(key, con));
         addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    private static int tabOf(RecompConfig.Section s) {
+        switch (s) {
+        case GRAPHICS:
+            return TAB_GRAPHICS;
+        case AUDIO:
+            return TAB_AUDIO;
+        case ADVANCED:
+            return TAB_ADVANCED;
+        default:
+            return TAB_GENERAL;
+        }
+    }
+
+    /** The description of an option's row in Game settings: the console picture's own texts, else Settings'. */
+    private String gameOptionDetail(RecompConfig.Option o) {
+        if (o.title == R.string.OPT_CSCALE)
+            return getString(R.string.ROM_OPT_SCALE_DETAIL);
+        if (o.title == R.string.OPT_CFILTER)
+            return getString(R.string.ROM_OPT_FILTER_DETAIL);
+        if (o.title == R.string.OPT_UPSCALE)
+            return getString(R.string.ROM_OPT_UPSCALE_DETAIL);
+        if (o.title == R.string.OPT_LSFG)
+            return getString(R.string.ROM_OPT_FRAMEGEN_DETAIL);
+        return getString(R.string.GS_OPTION_DETAIL, getString(o.detail));
+    }
+
+    /** One option of Game settings: « As in Settings (<value>) », then each choice; the badge when it differs. */
+    private MenuRow gameOptionRow(LinearLayout list, String key, RecompConfig.Option o) {
+        String follow = getString(R.string.ROM_OPT_FOLLOW, choiceLabel(cfg, o));
+        String[] labels = new String[o.choices.length + 1];
+        labels[0] = follow;
+        for (int i = 0; i < o.choices.length; i++)
+            labels[i + 1] = getString(o.choices[i].label);
+        MenuRow r = settingRow(list, getString(o.title), gameOptionDetail(o));
+        r.setChoices(labels);
+        Runnable refresh = () -> {
+            RecompConfig game = GameSettings.load(this, key);
+            int pos = GameSettings.position(cfg, game, o);
+            r.setValue(pos < 0 ? getString(R.string.VAL_CUSTOM) : labels[pos]);
+            boolean differs = GameSettings.differs(cfg, game, o);
+            r.setBadge(differs ? getString(R.string.GS_BADGE) : null, Theme.ACCENT);
+            r.invalidate();
+        };
+        refresh.run();
+        r.cycler = d -> {
+            RecompConfig game = GameSettings.load(this, key);
+            int pos = GameSettings.step(GameSettings.position(cfg, game, o), o, d);
+            GameSettings.setPosition(game, o, pos);
+            if (!GameSettings.save(game)) {
+                setNote(getString(R.string.SETTINGS_SAVE_FAILED, game.file().getName()), NOTE_ERROR);
+                return;
+            }
+            refresh.run();
+            feedback.play(UiFeedback.Cue.MOVE, r);
+            setNote(getString(gameRunning() && key.equals(launchedTid()) ? R.string.ROM_OPT_SAVED_RUNNING
+                                                                         : R.string.ROM_OPT_SAVED), NOTE_OK);
+            Log.i(TAG, "launcher: " + key + " " + String.join("+", o.keys) + " "
+                       + (pos == 0 ? "as in Settings" : getResources().getResourceEntryName(o.choices[pos - 1].label)));
+        };
+        r.setOnClickListener(v -> r.cycler.step(1));
+        return r;
+    }
+
+    /** « Controls »: whose mapping the game plays with (its own or as in Settings); A opens its Controls. */
+    private void gameControlsRow(LinearLayout list, String key, Console con) {
+        String env = con == Console.XBOX ? PadMapping.KEY : ConsoleControls.env(con);
+        boolean own = GameSettings.raw(this, key, env) != null;
+        String text = getString(R.string.GS_CONTROLS_DETAIL);
+        MenuRow r = listRow(list, getString(R.string.CONTROLS), text,
+                            () -> go(con == Console.XBOX ? Screen.CONTROLS : Screen.ROM_CONTROLS));
+        r.setValue(getString(own ? R.string.CC_SCOPE_GAME : R.string.MENU_VIDEO_FOLLOW));
+        if (own)
+            r.setBadge(getString(R.string.GS_BADGE), Theme.ACCENT);
+        onFocus(r, () -> describe(text));
+    }
+
+    /** Y, or « Reset to Settings »: the game's file goes (its N64 Vulkan driver choice too); the screen again. */
+    private void resetGameSettings(String key, Console con) {
+        boolean ok = GameSettings.reset(getFilesDir(), key);
+        if (con == Console.N64)
+            VkDrivers.of(this).setGameChoice(key, null);
+        Log.i(TAG, "launcher: " + key + " game settings reset to Settings" + (ok ? "" : " (failed)"));
+        show(screen, 0);   // the theme may change back too (syncTheme)
+        setNote(getString(ok ? R.string.GS_RESET_DONE : R.string.GS_RESET_FAILED), ok ? NOTE_OK : NOTE_ERROR);
     }
 
     /**
@@ -5884,7 +6030,8 @@ public class LauncherActivity extends Activity {
                 m.put(storageKey(it), Storage.measure(it));
             runOnUiThread(() -> {
                 storageSizes.putAll(m);
-                if (screen == Screen.STORAGE || screen == Screen.GAME_DATA || screen == Screen.ROM_OPTIONS)
+                if (screen == Screen.STORAGE || screen == Screen.GAME_DATA || screen == Screen.ROM_OPTIONS
+                    || screen == Screen.GAME_SETTINGS)
                     refreshKeepingFocus();
             });
         }, "xba-storage");

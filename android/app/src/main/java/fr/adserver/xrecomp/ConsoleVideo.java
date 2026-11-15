@@ -15,9 +15,9 @@ import java.util.Locale;
  * multiplier, performance set and shader cache stay Settings', {@link #LSFG_ENV}). Which one applies, first found
  * wins:
  * <ol>
- *   <li>the game's own choice (its Home › Options, or the in-game menu), a file per library key: scale_&lt;KEY&gt;,
- *       filter_&lt;KEY&gt;, upscale_&lt;KEY&gt;, framegen_&lt;KEY&gt; (Home › Options only), as {@link ConsoleControls}
- *       keeps pad_map_&lt;KEY&gt;;</li>
+ *   <li>the game's own choice (its Home › Game settings, or the in-game menu), in the game's own settings
+ *       ({@link GameSettings}, XBA-188: the RECOMP_* keys themselves; files scale_, filter_, upscale_, framegen_
+ *       + KEY before), as {@link ConsoleControls} keeps the game's mapping;</li>
  *   <li>Settings › Graphics, a line in recomp.cfg;</li>
  *   <li>the runtime's default (scale: aspect; filter: the console's own, GBA nearest, PS1 and N64 linear).</li>
  * </ol>
@@ -89,15 +89,52 @@ final class ConsoleVideo {
         return s != Setting.UPSCALE || con == Console.PS1 || con == Console.N64;
     }
 
-    private static String file(Setting s, String key) {
-        return s.filePrefix + key.toUpperCase(Locale.ROOT);
+    /** The Settings keys a setting writes in the game's file (XBA-188, GameSettings): frame generation's three. */
+    static String[] gameKeys(Setting s) {
+        return s == Setting.FRAMEGEN ? new String[] { ENV_LSFG, "RECOMP_LSFG_MULT", "RECOMP_LSFG_PERF" }
+                                     : new String[] { s.env };
     }
 
-    /** The game's own choice (one of s.values), or null when it follows Settings. */
+    /**
+     * What the game's file holds for value v of s (XBA-188): Settings' choice of the same meaning, « » for the
+     * runtime's default (scale aspect, native resolution, frame generation off); frame generation on is Settings'
+     * « 2x » (RECOMP_LSFG=1, RECOMP_LSFG_MULT=2).
+     */
+    static List<String[]> gameValues(Setting s, String v) {
+        List<String[]> out = new ArrayList<>();
+        switch (s) {
+        case SCALE:
+            out.add(new String[] { s.env, SCALE_ASPECT.equals(v) ? "" : v });
+            break;
+        case UPSCALE:
+            out.add(new String[] { s.env, UPSCALE_NATIVE.equals(v) ? "" : v });
+            break;
+        case FRAMEGEN: {
+            boolean on = LSFG_ON.equals(v);
+            String[] k = gameKeys(s);
+            out.add(new String[] { k[0], on ? LSFG_ON : "" });
+            out.add(new String[] { k[1], on ? "2" : "" });
+            out.add(new String[] { k[2], "" });
+            break;
+        }
+        default:
+            out.add(new String[] { s.env, v });
+            break;
+        }
+        return out;
+    }
+
+    /** The game's own choice (one of s.values), or null when it follows Settings (GameSettings' file). */
     static String gameChoice(Context c, String key, Setting s) {
         if (key == null || key.isEmpty())
             return null;
-        int i = s.indexOf(GameStore.readSettingFile(c, file(s, key)));
+        String v = GameSettings.raw(c, key, s.env);
+        if (v == null)
+            return null;
+        if (v.isEmpty())
+            return s == Setting.SCALE ? SCALE_ASPECT : s == Setting.UPSCALE ? UPSCALE_NATIVE
+                   : s == Setting.FRAMEGEN ? LSFG_OFF : null;
+        int i = s.indexOf(v);
         return i < 0 ? null : s.values[i];
     }
 
@@ -106,7 +143,15 @@ final class ConsoleVideo {
         if (key == null || key.isEmpty())
             return false;
         int i = s.indexOf(v);
-        return GameStore.writeSettingFile(c, file(s, key), i < 0 ? "" : s.values[i]);
+        RecompConfig g = GameSettings.load(c, key);
+        if (i < 0) {
+            for (String k : gameKeys(s))
+                g.set(k, null);
+        } else {
+            for (String[] kv : gameValues(s, s.values[i]))
+                g.set(kv[0], kv[1]);
+        }
+        return GameSettings.save(g);
     }
 
     /** The per-game cycle: as in Settings, then each value, then as in Settings again. */
