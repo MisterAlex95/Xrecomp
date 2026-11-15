@@ -22,7 +22,7 @@ address space and signal frames itself. A pass is good evidence. A failure is a 
 | Toolkit build | ok | ok, ELF aarch64 |
 | Compiler warnings (toolkit, unique) | 94 | 94, the same list (no new warning) |
 | C test projects | 80, 11 Windows-only | 80, 11 Windows-only |
-| Tests | 99 pass, 1 skip, 0 fail (80 projects, 2026-11-09) | 98 pass, 3 skip, **1 fail** (82 projects, after XBA-21) |
+| Tests | 99 pass, 1 skip, 0 fail (80 projects, 2026-11-09) | 98 pass, 3 skip, **1 fail** (82 projects, after XBA-21); 0 fail since XBA-189 |
 | `pytest tools/` | 981 pass, 8 skip | n/a (host independent) |
 
 The Python side is host independent, with one exception: `tools/recomp/test_reserved_idents` compiles lifted
@@ -36,7 +36,16 @@ How the job checks it: [toolchain.md « CI gating »](toolchain.md#ci-gating).
 
 | Project | What fails | Reading | Next |
 |---|---|---|---|
-| `mmio_decode_a64` (1) | Trapped `ldr s/d/q`: the SIMD register written in the signal frame is not the one the code reads after `sigreturn` (got 0x2F2F2F2F, want 0x3FC00000). Output: 30 traps, 1 unknown, 4 failures, all four on `ldr s`, `ldr d` and `ldr q`. | Probably qemu-user. Its `fpsimd_context` write-back is the suspect. It is exactly what XBA-22 depends on, though. | Confirm on hardware (XBA-45). |
+| (none) | | | |
+
+**Fixed, ours (XBA-189):** `mmio_decode_a64` and `recomp_selftest` (`mmio_simd`) failed on trapped `ldr s/d/q` (got
+0x2F2F2F2F, want 0x3FC00000): the decoder wrote the loaded value to the frame's `fpsimd_context` only. Once a thread has
+run SVE code the frame also carries an `sve_context` with Z0..Z31, and qemu-user (`-cpu max`, its default) always
+writes one and restores the whole of Zn from it, so the write was lost. A real kernel restores bits 127:0 of Zn from
+`fpsimd_context` (Documentation/arch/arm64/sve.rst, « Signal return ») but the bits above from `sve_context`, so on
+an SVE CPU (the Thor) Zn kept stale upper bits. `mmio_decode_a64.h` now writes Zn as well (value in 127:0, zero above,
+following an `extra_context` for a long vector length). Both pass under `-cpu max` (VL 16, 64 and 256 bytes) and
+`-cpu max,sve=off`.
 
 **Fixed, not qemu after all (XBA-21):** `kernel_memory_bridge_posix` (2) and `memory_regressions` (4 of 5) crashed
 because the contiguous window at base + 2 GB was mapped at a fixed address outside the reserved span, and Linux had

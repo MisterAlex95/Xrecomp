@@ -2794,7 +2794,7 @@ of `sigaction` and hundreds of libraries mapped, so a pass in the bundle does no
 | `mirrors` | A write and a read through each of the 28 RAM mirrors (memfd views, XBA-21), seen at the base, and the other way round. |
 | `tiled_alias` | The same between the tiled aperture and the contiguous window (two views of the other memfd). |
 | `mmio_handler` | The toolkit's SIGSEGV handler is still in front, and one host page of guest RAM traps (`PAGE_NOACCESS`, routed by `xbox_PosixMmioSetTestWindow` to a test device). |
-| `mmio_imm`, `mmio_extend`, `mmio_regoff`, `mmio_writeback`, `mmio_unscaled`, `mmio_pair`, `mmio_simd` | One trapped access of each A64 decoder class through that page, by the real chain: libsigchain, the toolkit's handler, `mmio_decode_a64.h`, the register write-back into the signal frame. `mmio_simd` is `ldr q` / `str q` / `ldr d`: the V register written in the frame's `fpsimd_context` (XBA-45). (On x86-64 Linux: `mmio_mov`, `mmio_extend`, `mmio_immstore`, `mmio_xmm_scalar`, `mmio_simd` = `movups`.) |
+| `mmio_imm`, `mmio_extend`, `mmio_regoff`, `mmio_writeback`, `mmio_unscaled`, `mmio_pair`, `mmio_simd` | One trapped access of each A64 decoder class through that page, by the real chain: libsigchain, the toolkit's handler, `mmio_decode_a64.h`, the register write-back into the signal frame. `mmio_simd` is `ldr q` / `str q` / `ldr d`: the V register written in the frame's `fpsimd_context`, and Zn in its `sve_context` when the thread has live SVE state (XBA-45, XBA-189). (On x86-64 Linux: `mmio_mov`, `mmio_extend`, `mmio_immstore`, `mmio_xmm_scalar`, `mmio_simd` = `movups`.) |
 | `exec_alloc` | `NtAllocateVirtualMemory` with `PAGE_EXECUTE_READWRITE` succeeds, read / write, and the mapping is not executable. |
 | `exec_guest` | `MmSetAddressProtect` with `PAGE_EXECUTE_READ` (read-only) and `PAGE_EXECUTE_READWRITE` on guest RAM (a memfd view) takes effect, without `PROT_EXEC`. |
 | `save_dir` | A file created, written, `fsync`ed, read back and removed in the save directory. |
@@ -2806,8 +2806,8 @@ never fault on purpose: whether an address is mapped is asked of the kernel (a p
 A trapped access the decoder cannot service is a crash, as in a title; the fault handler drains logcat first, so the
 last `PASS` line says which check came next. The same code is the CMake test `tests/recomp_selftest` (CI on x86-64,
 arm64 under qemu-user, and the device bundle), so a check that fails only in the app is an Android difference.
-Under qemu-user `mmio_simd` fails (the `mmio_decode_a64` lead, XBA-45): the arm64 job expects `recomp_selftest` to
-fail and gates `recomp_selftest_no_simd` (`RECOMP_SELFTEST_SKIP=mmio_simd`).
+`mmio_simd` used to fail under qemu-user, which always puts an SVE record in the signal frame and restores Z from it:
+the decoder now writes that record too (XBA-189), and the check is gated in the arm64 job like the others.
 
 **No executable guest memory.** The POSIX Win32 shim (`prot_from_page` in `src/platform/win32_compat.c`) no longer maps
 `PAGE_EXECUTE*` to `PROT_EXEC`: read / write are kept, `PAGE_EXECUTE` alone becomes `PROT_READ`. Guest code is

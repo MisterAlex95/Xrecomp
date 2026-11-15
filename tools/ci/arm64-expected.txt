@@ -3,5 +3,3 @@
 # longer fails (remove it). Reasons and history: docs/android/baseline-arm64.md.
 #   <project>/<test>   a test of tests/<project> (root/<test>: the root build's ctest)
 #   <project>          the project fails to configure or build
-mmio_decode_a64/mmio_decode_a64   # trapped ldr s/d/q: qemu-user's fpsimd_context write-back, to confirm on hardware (XBA-45)
-recomp_selftest/recomp_selftest   # its mmio_simd check is the trapped ldr q above (XBA-45); recomp_selftest_no_simd gates the rest

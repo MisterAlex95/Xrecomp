@@ -18,6 +18,9 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/auxv.h>
+#endif
 #include "mmio_decode_a64.h"
 
 static int failures;
@@ -169,7 +172,45 @@ int main(void)
                          : : "r"(model + 0x400), "r"(win + 0x420) : "v0", "memory");
         CHECK_U64("str q lo", *(uint64_t *)(model + 0x420), 0x0011223344556677ull);
         CHECK_U64("str q hi", *(uint64_t *)(model + 0x428), 0x8899AABBCCDDEEFFull);
+        /* V pair of D registers */
+        __asm__ volatile("ldp d0, d1, [%2]\n\tfmov %0, d0\n\tfmov %1, d1"
+                         : "=r"(lo), "=r"(hi) : "r"(win + 0x400) : "v0", "v1", "memory");
+        CHECK_U64("ldp d first", lo, 0x0011223344556677ull);
+        CHECK_U64("ldp d second", hi, 0x8899AABBCCDDEEFFull);
     }
+#if defined(__linux__)
+    /* With SVE state live at the fault (an SVE instruction since the last
+     * syscall), the frame has an sve_context with Z0..Z31, and a load into
+     * Vn must land in Zn too, with Zn zeroed above bit 127 as the
+     * architecture does for a write to Vn (XBA-189). Z0 is all ones before
+     * the trapped ldr q0, and read back whole right after it. */
+    if (getauxval(AT_HWCAP) & (1UL << 22)) {     /* HWCAP_SVE */
+        static uint8_t z[256] __attribute__((aligned(16)));
+        register uint8_t *zp __asm__("x2") = z;  /* the .inst below names x2 */
+        uint64_t vl = 0, i, bad = 0;
+        memset(z, 0x5A, sizeof z);
+        __asm__ volatile(".inst 0x2538dfe0\n\t"   /* mov z0.b, #-1  */
+                         "ldr q0, [%1]\n\t"        /* trapped        */
+                         ".inst 0xe5804040\n\t"    /* str z0, [x2]   */
+                         ".inst 0x04bf5020\n\t"    /* rdvl x0, #1    */
+                         "mov %0, x0"
+                         : "=r"(vl) : "r"(win + 0x400), "r"(zp) : "x0", "v0", "memory");
+        if (vl < 16 || vl > sizeof z) {
+            CHECK_U64("sve vl", vl, 16);
+        } else {
+            uint64_t zlo, zhi;
+            memcpy(&zlo, z, 8);
+            memcpy(&zhi, z + 8, 8);
+            CHECK_U64("ldr q -> z0 lo", zlo, 0x0011223344556677ull);
+            CHECK_U64("ldr q -> z0 hi", zhi, 0x8899AABBCCDDEEFFull);
+            for (i = 16; i < vl; i++) bad += z[i] != 0;
+            CHECK_U64("ldr q zeroes z0 above 127", bad, 0);
+            printf("sve: vl %llu bytes\n", (unsigned long long)vl);
+        }
+    } else {
+        printf("sve: not on this cpu, its check skipped\n");
+    }
+#endif
     /* LDPSW sign-extends both; LDP with writeback advances the base. */
     {
         uint64_t a = 0, b = 0;
