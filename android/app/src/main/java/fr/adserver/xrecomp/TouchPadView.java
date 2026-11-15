@@ -6,6 +6,7 @@ import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
+import android.util.Log;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
@@ -29,6 +30,23 @@ final class TouchPadView extends View {
     interface Listener {
         void state(TouchPad.State s);
     }
+
+    /**
+     * The touch path's debug log (off by default): {@code adb shell setprop log.tag.XRecompTouch DEBUG}, then start
+     * the game. Each finger down / up logs where it landed, the view's size and state, the control hit and the state
+     * sent; ShellActivity logs who took the touch, the overlay sink a failed native call. Read once per view.
+     */
+    static final String DEBUG_TAG = "XRecompTouch";
+
+    static boolean debugOn() {
+        try {
+            return Log.isLoggable(DEBUG_TAG, Log.DEBUG);
+        } catch (RuntimeException e) {   // a JVM test without the property service
+            return false;
+        }
+    }
+
+    private final boolean debug = debugOn();
 
     TouchPad pad = new TouchPad();
     private final Listener listener;
@@ -151,7 +169,20 @@ final class TouchPadView extends View {
             return true;
         }
         send();
+        if (debug && a != MotionEvent.ACTION_MOVE)
+            debugLog(e, a, idx);
         return true;   // a touch on an empty spot does nothing; the game has no use for it either
+    }
+
+    private void debugLog(MotionEvent e, int a, int idx) {
+        float x = e.getX(idx), y = e.getY(idx);
+        TouchPad.Control c = pad.at(x, y, true);
+        Log.d(DEBUG_TAG, "pad: " + MotionEvent.actionToString(a) + " pointer " + e.getPointerId(idx) + " at "
+                         + Math.round(x) + "," + Math.round(y) + " in " + getWidth() + "x" + getHeight() + " (pad "
+                         + Math.round(pad.width()) + "x" + Math.round(pad.height()) + ", " + pad.layout + ", visibility "
+                         + getVisibility() + ", alpha " + getAlpha() + ", shown " + isShown() + ") on "
+                         + (c == null ? "nothing" : c.id + (c.label.isEmpty() ? "" : " " + c.label)
+                            + (c.hidden ? " (hidden)" : "")) + ", fingers " + pad.fingers() + ", sent " + last);
     }
 
     private void editTouch(MotionEvent e, int a, int idx) {
