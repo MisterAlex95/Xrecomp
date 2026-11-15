@@ -38,11 +38,16 @@
  * --run-hash    print one hash (FNV-1a 64) of every frame's displayed picture and audio and the final cycle count,
  *               over the frames after --state-save's frame (all the frames without it): a run from a state loaded
  *               with --state-load gives the same hash over the same number of frames (the save state round trip)
+ * --rewind C:R  the rewind round trip (XBA-194, recomp_rewind_check): --frames frames with pseudo-random pads, a
+ *               capture every C frames as the runtime takes them, R steps back, the picture and every frame after it
+ *               must be the first run's; prints "REWIND OK" and the capture cost, exit 6 on a difference.
+ *               --rewind-mb M: the ring's cap (default 64)
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "ps1_core.h"
 #include "ps1_devices.h"
 #include "ps1_recomp.h"
+#include "recomp_rewind.h"
 
 #include <dlfcn.h>
 
@@ -154,12 +159,76 @@ static double now_s(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+
+/* Rewind round trip (--rewind, XBA-194): pseudo-random pads that change every few frames, the same for a frame. */
+static uint32_t rw_rand(long f)
+{
+    uint32_t x = (uint32_t)(f / 6 + 1) * 2654435761u;
+    x ^= x >> 15;
+    x *= 2246822519u;
+    x ^= x >> 13;
+    return x;
+}
+
+static uint16_t rw_pad_held;
+
+static void rw_input(void *m, long f)
+{
+    uint32_t r = rw_rand(f);
+    ps1_set_pad(m, 0, PS1_PAD_DIGITAL, (uint16_t)(r | rw_pad_held), 0x80, 0x80, 0x80, 0x80);
+}
+
+static void rw_run(void *m)
+{
+    ps1_run_frame(m);
+}
+
+static uint64_t rw_picture(void *m)
+{
+    static uint32_t px[640 * 512];
+    int w = 0, h = 0;
+    uint64_t hv = 0xCBF29CE484222325ull;
+    if (ps1_display(m, px, 640, 512, &w, &h) == 0)
+        hv = fnv64((const uint8_t *)px, (size_t)w * (size_t)h * 4, hv);
+    hv = fnv64((const uint8_t *)&w, sizeof w, hv);
+    return fnv64((const uint8_t *)&h, sizeof h, hv);
+}
+
+static uint64_t rw_audio(void *m)
+{
+    int16_t buf[2048 * 2];
+    size_t n;
+    uint64_t hv = 0xCBF29CE484222325ull;
+    while ((n = ps1_audio_pull(m, buf, 2048)) > 0)
+        hv = fnv64((const uint8_t *)buf, n * 4, hv);
+    return hv;
+}
+
+static size_t rw_size(void *m)
+{
+    return ps1_state_size(m);
+}
+
+static size_t rw_save(uint8_t *out, size_t cap, void *m)
+{
+    return ps1_state_save(m, out, cap);
+}
+
+static int rw_load(const uint8_t *in, size_t n, void *m)
+{
+    if (ps1_state_load(m, in, n) != PS1_STATE_OK)
+        return -1;
+    rw_audio(m); /* what the state had queued was heard already */
+    return 0;
+}
+
 static int usage(void)
 {
     fprintf(stderr, "usage: ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT]\n"
                     "               [--wav OUT] [--tty] [--until-tty TEXT] [--pad MASK] [--hash] [--quiet]\n"
                     "               [--pack LIB.so [--lockstep]] [--missed FILE] [--stats] [--card FILE] [--fast-boot]\n"
-                    "               [--swap FRAME:DISC] [--state-save N:FILE] [--state-load FILE] [--run-hash]\n");
+                    "               [--swap FRAME:DISC] [--state-save N:FILE] [--state-load FILE] [--run-hash]\n"
+                    "               [--rewind C:R [--rewind-mb M]]\n");
     return 3;
 }
 
@@ -175,6 +244,8 @@ int main(int argc, char **argv)
     bool result = false, quiet = false, hash = false, run_hash = false;
     const char *state_save = NULL, *state_load = NULL;
     long state_at = 0;
+    int rewind_every = 0, rewind_back = 0;
+    double rewind_mb = RECOMP_REWIND_MB_DEFAULT;
     tty_state tty = {0};
     uint16_t pad = 0;
 
@@ -235,6 +306,12 @@ int main(int argc, char **argv)
             state_at = strtol(argv[++i], NULL, 10);
             state_save = strchr(argv[i], ':') + 1;
         }
+        else if (!strcmp(a, "--rewind") && more && strchr(argv[i + 1], ':')) {
+            rewind_every = (int)strtol(argv[++i], NULL, 10);
+            rewind_back = (int)strtol(strchr(argv[i], ':') + 1, NULL, 10);
+        }
+        else if (!strcmp(a, "--rewind-mb") && more)
+            rewind_mb = strtod(argv[++i], NULL);
         else if (!strcmp(a, "--quiet"))
             quiet = true;
         else if (a[0] != '-') {
@@ -327,6 +404,16 @@ int main(int argc, char **argv)
         if (!quiet)
             fprintf(stderr, "ps1_run: state %s loaded (%zu bytes, frame %llu)\n", state_load, n,
                     (unsigned long long)ps1_frames(m));
+    }
+    if (rewind_every > 0) {
+        rw_pad_held = pad;
+        recomp_rewind_machine mc = {m, rw_input, rw_run, rw_picture, rw_audio, rw_size, rw_save, rw_load};
+        int r = recomp_rewind_check("ps1", &mc, frames, rewind_every, rewind_back > 0 ? rewind_back : 1,
+                                    (size_t)((rewind_mb > 0 ? rewind_mb : 1) * 1048576.0));
+        ps1_destroy(m);
+        if (twin)
+            ps1_destroy(twin);
+        return r == 0 ? 0 : r == 1 ? 6 : 3;
     }
     uint64_t rh = 0xCBF29CE484222325ull;
     long rh_frames = 0;

@@ -42,6 +42,7 @@
  * Enter = Start, Backspace = Select; any game controller (Xbox layout).
  * Save states (XBA-182): F1-F4 save slots 1-4, Shift+F1-F4 load them (<save dir>/ps1-<KEY>/state<N>.st); Tab held
  * fast-forwards (RECOMP_FF_SPEED: 2..16 times, default 4, or "max"); on a pad, Back + right trigger held does the same.
+ * Rewind (XBA-194): R held goes back in time (Back + left trigger on a pad); RECOMP_REWIND=0 turns it off.
  * Exit 0, 1 when the game cannot run, 2 on a usage error. */
 #include "host_window.h"
 #include "ps1_runtime.h"

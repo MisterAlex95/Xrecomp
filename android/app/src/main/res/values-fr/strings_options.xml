@@ -21,6 +21,15 @@
     <string name="VAL_UPSCALE_2X">2x</string>
     <string name="VAL_UPSCALE_4X">4x</string>
     <string name="VAL_UPSCALE_8X">8x (Vulkan N64)</string>
+    <string name="OPT_REWIND">Retour en arrière</string>
+    <string name="OPT_REWIND_DETAIL">Maintenez le raccourci de retour en arrière (Select + L2 par défaut, R au clavier) pour remonter le temps dans un jeu Game Boy Advance, PlayStation ou Nintendo 64, sans le son ; relâchez et le jeu reprend de là. Activé (sauf N64) : pour la Game Boy Advance et la PlayStation, pas pour la Nintendo 64, où garder l\'historique demande plus à l\'appareil. Un jeu peut avoir le sien (un jeu N64 peut l\'activer). S\'applique au prochain lancement d\'un jeu. (RECOMP_REWIND)</string>
+    <string name="VAL_REWIND_AUTO">Activé (sauf N64)</string>
+    <string name="OPT_REWIND_MB">Mémoire du retour en arrière</string>
+    <string name="OPT_REWIND_MB_DETAIL">La mémoire que l\'historique du retour en arrière peut occuper : plus, c\'est remonter plus loin. Avec 64 Mo, un jeu Game Boy Advance remonte en général une minute ou plus, un jeu PlayStation quelques dizaines de secondes ; les moments les plus anciens partent en premier. Un jeu peut avoir la sienne. S\'applique au prochain lancement d\'un jeu. (RECOMP_REWIND_MB)</string>
+    <string name="VAL_MB_32">32 Mo</string>
+    <string name="VAL_MB_64">64 Mo</string>
+    <string name="VAL_MB_128">128 Mo</string>
+    <string name="VAL_MB_256">256 Mo</string>
     <string name="OPT_RUMBLE">Vibration de la manette</string>
     <string name="OPT_RUMBLE_DETAIL">Activée : la manette vibre quand le jeu le demande (la DualShock de la PlayStation, le Rumble Pak de la Nintendo 64, la manette Xbox). Désactivée : jamais. Pour toutes les consoles. S\'applique au prochain lancement d\'un jeu. (RECOMP_RUMBLE)</string>
 

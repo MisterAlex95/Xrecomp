@@ -111,6 +111,9 @@ int recomp_states_load(int slot);
 /* States loaded so far (successful recomp_states_load calls), from any thread: the console window resets its frame
  * generation history when it changes (XBA-186), so no frame from before the load is blended with one after it. */
 unsigned recomp_states_loads(void);
+/* Counts a load made outside the slots (a rewind step, XBA-194, recomp_rewind.h) in recomp_states_loads, so the frame
+ * generation history starts again too. */
+void recomp_states_note_load(void);
 
 /* What a slot holds: RECOMP_STATE_OK with meta (and the thumbnail when thumb is not NULL), else _EEMPTY /
  * _ECORRUPT / _EVERSION / _ENOGAME. */

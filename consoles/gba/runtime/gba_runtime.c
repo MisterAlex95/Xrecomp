@@ -11,7 +11,11 @@
  * Save states and fast-forward (XBA-182, recomp_states.h): the run attaches itself while it plays, so the in-game
  * menu and the hotkeys (XBA-190, recomp_hotkeys.h: pad chords, desktop keys F1-F4 / Shift+F1-F4 / Tab by default) save
  * and load between frames under s_mu. Fast-forward runs `speed` GBA frames per shown frame with their audio averaged down (or, at
- * "max", as many as fit in a display frame, silent). */
+ * "max", as many as fit in a display frame, silent).
+ *
+ * Rewind (XBA-194, recomp_rewind.h): a capture (the state and the last frame's picture) every RECOMP_REWIND_FRAMES
+ * frames (2 by default) into a ring of RECOMP_REWIND_MB; while the rewind hotkey is held (Select + LT, R) each shown
+ * frame loads the newest capture and drops it, silent; letting go plays on from there. */
 #define _GNU_SOURCE /* pread, nanosleep */
 #include "gba_runtime.h"
 
@@ -24,6 +28,7 @@
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
+#include "recomp_rewind.h"
 #include "recomp_states.h"
 
 #include <SDL.h>
@@ -379,6 +384,23 @@ static int state_save_op(int slot, void *user)
     return rc;
 }
 
+/* A state was loaded into m (a slot, a rewind step), s_mu held: the audio it had queued was heard already, and its
+ * save memory is what the game sees now: the file on disk changes only once the game writes. */
+static void state_loaded_locked(gba_machine *m)
+{
+    int16_t sink[1024 * 2];
+    while (gba_audio_pull(m, sink, 1024) > 0)
+        ;
+    size_t sn = 0;
+    const uint8_t *cur = gba_save_data(m, &sn);
+    uint8_t *copy = cur && sn ? realloc(s_saved, sn) : NULL;
+    if (copy) {
+        memcpy(copy, cur, sn);
+        s_saved = copy;
+        s_saved_n = sn;
+    }
+}
+
 static int state_load_op(int slot, void *user)
 {
     (void)user;
@@ -398,18 +420,7 @@ static int state_load_op(int slot, void *user)
         } else {
             rc = gba_state_load(s_m, blob, n); /* GBA_STATE_* share RECOMP_STATE_*'s values */
             if (rc == GBA_STATE_OK) {
-                int16_t sink[1024 * 2];
-                while (gba_audio_pull(s_m, sink, 1024) > 0) /* what the state had queued was heard already */
-                    ;
-                /* The state's save memory is what the game sees; the file on disk changes only once it writes. */
-                size_t sn = 0;
-                const uint8_t *cur = gba_save_data(s_m, &sn);
-                uint8_t *copy = cur && sn ? realloc(s_saved, sn) : NULL;
-                if (copy) {
-                    memcpy(copy, cur, sn);
-                    s_saved = copy;
-                    s_saved_n = sn;
-                }
+                state_loaded_locked(s_m);
                 s_state_loaded = 1;
             }
         }
@@ -422,6 +433,37 @@ static int state_load_op(int slot, void *user)
         printf("gba: state slot %d not loaded: %s\n", slot, recomp_states_error(rc));
     fflush(stdout);
     return rc;
+}
+
+/* ---- Rewind (XBA-194) ----------------------------------------------------------------------------------------- */
+
+/* A capture: the core's state, then the picture of the frame it ends (the state does not hold it), so a step back
+ * shows that frame at once. Under s_mu, on the frame thread. */
+static size_t rewind_size(void *user)
+{
+    return gba_state_size((gba_machine *)user) + sizeof s_fb;
+}
+
+static size_t rewind_save(uint8_t *out, size_t cap, void *user)
+{
+    gba_machine *m = user;
+    if (cap <= sizeof s_fb)
+        return 0;
+    size_t n = gba_state_save(m, out, cap - sizeof s_fb);
+    if (!n)
+        return 0;
+    memcpy(out + n, s_fb, sizeof s_fb);
+    return n + sizeof s_fb;
+}
+
+static int rewind_load(const uint8_t *in, size_t n, void *user)
+{
+    gba_machine *m = user;
+    if (n <= sizeof s_fb || gba_state_load(m, in, n - sizeof s_fb) != GBA_STATE_OK)
+        return -1;
+    memcpy(s_fb, in + n - sizeof s_fb, sizeof s_fb);
+    state_loaded_locked(m);
+    return 0;
 }
 
 /* ---- The run -------------------------------------------------------------------------------------------------- */
@@ -578,6 +620,8 @@ int gba_runtime_run(const gba_runtime_opts *o)
            recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
     memset(s_hk_pad, 0, sizeof s_hk_pad);
     recomp_hotkeys_get(); /* RECOMP_HOTKEYS / _KEYS, logged once (XBA-190) */
+    recomp_rewinder rw;
+    recomp_rewinder_init(&rw, "gba", NULL); /* RECOMP_REWIND, _MB, _FRAMES (XBA-194) */
     int resume = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume) {
         int r = recomp_states_resume();
@@ -661,6 +705,14 @@ int gba_runtime_run(const gba_runtime_opts *o)
         }
         recomp_hotkeys_run(hk_pressed | key_pressed);
         recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
+        /* Rewind held: one capture back per shown frame, no GBA frame runs, nothing heard (XBA-194). */
+        int rewinding = recomp_rewinder_begin(&rw, !!(hk_held & RECOMP_HK_BIT(RECOMP_HK_REWIND)));
+        if (rewinding) {
+            pthread_mutex_lock(&s_mu);
+            if (recomp_rewinder_step(&rw, rewind_load, m) == 0)
+                recomp_states_note_load(); /* a fresh frame generation history */
+            pthread_mutex_unlock(&s_mu);
+        }
         int ff = recomp_ff_active(), speed = recomp_ff_speed();
         if (ff != was_ff) {
             printf("gba: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",
@@ -671,12 +723,13 @@ int gba_runtime_run(const gba_runtime_opts *o)
             next = now_ns();
         }
         /* Fast-forward: `speed` GBA frames per shown frame (max: as many as fit in one display frame). */
-        int steps = ff ? (speed ? speed : 64) : 1, dirty = 0;
+        int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1, dirty = 0;
         uint64_t burst_end = now_ns() + GBA_FRAME_NS * 9 / 10;
         for (int step = 0; step < steps; step++) {
             pthread_mutex_lock(&s_mu);
             gba_set_keys(m, keys);
             gba_run_frame(m, fb);
+            recomp_rewinder_frame(&rw, rewind_size, rewind_save, m);
             dirty |= gba_save_take_dirty(m);
             if (s_state_loaded) {
                 s_state_loaded = 0;
@@ -751,6 +804,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
     recomp_exit_hook_set(NULL);
     recomp_states_detach(); /* before s_mu: a save / load in progress finishes first */
     recomp_ff_hold(0);
+    recomp_rewinder_free(&rw); /* logs the capture cost */
     if (audio)
         host_audio_close();
     if (window)

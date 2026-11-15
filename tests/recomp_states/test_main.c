@@ -341,6 +341,14 @@ static void test_hotkey_parse(void)
     CHECK(d.pad[RECOMP_HK_QSAVE].button == CPS_RIGHT_SHOULDER && d.pad[RECOMP_HK_QLOAD].button == CPS_LEFT_SHOULDER);
     CHECK(d.pad[RECOMP_HK_MENU].mod == CPS_BACK && d.pad[RECOMP_HK_MENU].button == CPS_START);
     CHECK(d.pad[RECOMP_HK_FF_TOGGLE].button == -1 && d.pad[RECOMP_HK_SLOT_NEXT].button == -1);
+    /* Rewind (XBA-194): Back + left trigger, R on a desktop (not Backspace: the GBA's Select). */
+    CHECK(d.pad[RECOMP_HK_REWIND].mod == CPS_BACK && d.pad[RECOMP_HK_REWIND].button == CPS_LEFT_TRIGGER);
+    CHECK(!strcmp(recomp_hotkeys_key_chord_text(d.key[RECOMP_HK_REWIND], buf, sizeof buf), "r"));
+    CHECK(!strcmp(recomp_hotkeys_action_name(RECOMP_HK_REWIND), "rewind"));
+    hk = d;
+    CHECK(recomp_hotkeys_parse_pad(&hk, "rewind:back+lb,qload:none") == 0 &&
+          hk.pad[RECOMP_HK_REWIND].button == CPS_LEFT_SHOULDER);
+    CHECK(!strcmp(recomp_hotkeys_format_pad(&hk, buf, sizeof buf), "qload:none,rewind:back+left_shoulder"));
     CHECK(!strcmp(recomp_hotkeys_format_pad(&d, buf, sizeof buf), ""));
     CHECK(!strcmp(recomp_hotkeys_format_keys(&d, buf, sizeof buf), ""));
     CHECK(!strcmp(recomp_hotkeys_key_chord_text(d.key[RECOMP_HK_LOAD2], buf, sizeof buf), "shift+f2"));
@@ -417,6 +425,11 @@ static void test_hotkey_pad(void)
     CHECK(recomp_hotkeys_pad_update(&d, &st, RT, &pr, &sw) == 0 && !sw);
     /* The menu chord is the shell's: never held, never swallowed. */
     CHECK(recomp_hotkeys_pad_update(&d, &st, BACK | START, &pr, &sw) == 0 && !pr && !sw);
+    /* Back + left trigger: rewind, held while held (XBA-194); not recomp_hotkeys_run's (a hold). */
+    held = recomp_hotkeys_pad_update(&d, &st, BACK | SRC("lt"), &pr, &sw);
+    CHECK(held == RECOMP_HK_BIT(RECOMP_HK_REWIND) && pr == held && sw == (BACK | SRC("lt")));
+    CHECK(recomp_hotkeys_run(pr) == 0);
+    CHECK(recomp_hotkeys_pad_update(&d, &st, 0, &pr, &sw) == 0);
 
     /* Remapped: quick save on Back + north, fast-forward hold on L3 + R3, slot next on the D-pad right alone. */
     hk = d;

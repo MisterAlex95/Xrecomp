@@ -8,7 +8,7 @@
 #   recomp_storage    a title's data and save directories on a host without a shell (recomp_storage.h), POSIX
 #   xbr_host_core     the log pump (android_log.c), the app lifecycle (recomp_lifecycle.c), the quit path
 #                     (recomp_quit.c), the consoles' save states / fast-forward (recomp_states.c, XBA-182) and
-#                     hotkeys (recomp_hotkeys.c, XBA-190),
+#                     hotkeys (recomp_hotkeys.c, XBA-190), rewind (recomp_rewind.c, XBA-194),
 #                     POSIX; links the first four (xbr_host adds recomp_storage)
 if(NOT TARGET host_time)
     get_filename_component(_xbr_core_src "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
@@ -36,7 +36,8 @@ if(NOT TARGET host_time)
             ${CMAKE_CURRENT_LIST_DIR}/recomp_lifecycle.c
             ${CMAKE_CURRENT_LIST_DIR}/recomp_quit.c
             ${CMAKE_CURRENT_LIST_DIR}/recomp_states.c
-            ${CMAKE_CURRENT_LIST_DIR}/recomp_hotkeys.c)
+            ${CMAKE_CURRENT_LIST_DIR}/recomp_hotkeys.c
+            ${CMAKE_CURRENT_LIST_DIR}/recomp_rewind.c)
         target_include_directories(xbr_host_core PUBLIC ${_xbr_core_src} ${CMAKE_CURRENT_LIST_DIR})
         find_package(Threads REQUIRED)
         target_link_libraries(xbr_host_core PUBLIC Threads::Threads recomp_exit_hook host_time recomp_cfg host_cpus)

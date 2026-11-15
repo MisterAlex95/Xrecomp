@@ -28,11 +28,16 @@
  * --run-hash    print one hash (FNV-1a 64) of every frame's picture and audio and the final cycle count, over the
  *               frames after --state-save's frame (all the frames without it): a run from a state loaded with
  *               --state-load gives the same hash over the same number of frames (the save state round trip)
+ * --rewind C:R  the rewind round trip (XBA-194, recomp_rewind_check): --frames frames with pseudo-random keys, a
+ *               capture every C frames as the runtime takes them (state + picture), R steps back, the picture and
+ *               every frame after it must be the first run's; prints "REWIND OK" and the capture cost, exit 6 on a
+ *               difference. --rewind-mb M: the ring's cap (default 64)
  * Prints the frame rate reached on stderr. Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "gba_core.h"
 #include "gba_pack.h"
 #include "gba_recomp.h"
+#include "recomp_rewind.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -124,6 +129,72 @@ static uint64_t fnv1a(uint64_t h, const void *p, size_t n)
     return h;
 }
 
+
+/* Rewind round trip (--rewind, XBA-194): pseudo-random pads that change every few frames, the same for a frame. */
+static uint32_t rw_rand(long f)
+{
+    uint32_t x = (uint32_t)(f / 6 + 1) * 2654435761u;
+    x ^= x >> 15;
+    x *= 2246822519u;
+    x ^= x >> 13;
+    return x;
+}
+
+static uint16_t rw_fb[GBA_SCREEN_W * GBA_SCREEN_H];
+static unsigned rw_keys_held;
+
+static void rw_input(void *m, long f)
+{
+    gba_set_keys(m, (uint16_t)((rw_rand(f) & 0x3FF) | rw_keys_held));
+}
+
+static void rw_run(void *m)
+{
+    gba_run_frame(m, rw_fb);
+}
+
+static uint64_t rw_picture(void *m)
+{
+    (void)m;
+    return fnv1a(0xCBF29CE484222325ull, rw_fb, sizeof rw_fb);
+}
+
+static uint64_t rw_audio(void *m)
+{
+    int16_t pcm[2 * 1024];
+    size_t n;
+    uint64_t h = 0xCBF29CE484222325ull;
+    while ((n = gba_audio_pull(m, pcm, 1024)) > 0)
+        h = fnv1a(h, pcm, n * 4);
+    return h;
+}
+
+static size_t rw_size(void *m)
+{
+    return gba_state_size(m) + sizeof rw_fb;
+}
+
+/* As gba_runtime.c captures: the state, then the frame's picture. */
+static size_t rw_save(uint8_t *out, size_t cap, void *m)
+{
+    size_t n = cap > sizeof rw_fb ? gba_state_save(m, out, cap - sizeof rw_fb) : 0;
+    if (!n)
+        return 0;
+    memcpy(out + n, rw_fb, sizeof rw_fb);
+    return n + sizeof rw_fb;
+}
+
+static int rw_load(const uint8_t *in, size_t n, void *m)
+{
+    if (n <= sizeof rw_fb || gba_state_load(m, in, n - sizeof rw_fb) != GBA_STATE_OK)
+        return -1;
+    memcpy(rw_fb, in + n - sizeof rw_fb, sizeof rw_fb);
+    int16_t sink[2 * 1024];
+    while (gba_audio_pull(m, sink, 1024) > 0)
+        ;
+    return 0;
+}
+
 static void fourcc(uint32_t v, char out[5])
 {
     for (int i = 0; i < 4; i++) {
@@ -141,6 +212,8 @@ int main(int argc, char **argv)
     const char *state_save = NULL, *state_load = NULL;
     long state_at = 0;
     long frames = 600;
+    int rewind_every = 0, rewind_back = 0;
+    double rewind_mb = RECOMP_REWIND_MB_DEFAULT;
     int result = 0, bios_boot = 0, quiet = 0, reg_result = -1;
     unsigned keys = 0;
 
@@ -177,6 +250,12 @@ int main(int argc, char **argv)
             state_at = strtol(argv[++i], NULL, 10);
             state_save = strchr(argv[i], ':') + 1;
         }
+        else if (!strcmp(argv[i], "--rewind") && i + 1 < argc && strchr(argv[i + 1], ':')) {
+            rewind_every = (int)strtol(argv[++i], NULL, 10);
+            rewind_back = (int)strtol(strchr(argv[i], ':') + 1, NULL, 10);
+        }
+        else if (!strcmp(argv[i], "--rewind-mb") && i + 1 < argc)
+            rewind_mb = strtod(argv[++i], NULL);
         else if (!strcmp(argv[i], "--result"))
             result = 1;
         else if (!strcmp(argv[i], "--bios-boot"))
@@ -188,7 +267,8 @@ int main(int argc, char **argv)
         else {
             fprintf(stderr, "usage: gba_run ROM [--frames N] [--bios PATH] [--bios-boot] [--result] [--ppm OUT] "
                             "[--wav OUT] [--save PATH] [--keys MASK] [--reg-result R] [--pack LIB] [--missed FILE] [--stats] "
-                            "[--lockstep] [--hash] [--state-save N:FILE] [--state-load FILE] [--run-hash] [--quiet]\n");
+                            "[--lockstep] [--hash] [--state-save N:FILE] [--state-load FILE] [--run-hash] "
+                            "[--rewind C:R [--rewind-mb M]] [--quiet]\n");
             return 3;
         }
     }
@@ -259,6 +339,16 @@ int main(int argc, char **argv)
         if (!quiet)
             fprintf(stderr, "gba_run: state %s loaded (%zu bytes, frame %llu)\n", state_load, n,
                     (unsigned long long)gba_frames(m));
+    }
+    if (rewind_every > 0) {
+        rw_keys_held = keys;
+        recomp_rewind_machine mc = {m, rw_input, rw_run, rw_picture, rw_audio, rw_size, rw_save, rw_load};
+        int r = recomp_rewind_check("gba", &mc, frames, rewind_every, rewind_back > 0 ? rewind_back : 1,
+                                    (size_t)((rewind_mb > 0 ? rewind_mb : 1) * 1048576.0));
+        gba_destroy(m);
+        gba_destroy(ref);
+        gba_pack_close(&pk);
+        return r == 0 ? 0 : r == 1 ? 6 : 3;
     }
     uint64_t rh = 0xCBF29CE484222325ull;
     long rh_frames = 0;

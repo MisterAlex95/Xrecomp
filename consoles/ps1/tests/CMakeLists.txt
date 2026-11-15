@@ -26,6 +26,7 @@ endif()
 #   ps1_hle_*          the programs above under the HLE BIOS (no image): PASS, the same result block as under
 #                      OpenBIOS (ps1_hle_same_*), disc boots, mcard, ps1-tests, recompiled in lockstep (ps1_hle_rc_*)
 #   ps1_state_*        save states: the round trip, interpreter and packs (ps1_rc_state_*), refusals (XBA-182)
+#   ps1_rewind_*       rewind round trips (ps1_run --rewind, XBA-194): every homebrew, a disc read, the memory cap
 #   ps1_rc_*           the same programs recompiled (ps1_tools.recomp + cc, discovery loop), in lockstep with the
 #                      interpreter; ps1_rc_fuzz: random MIPS programs under timer IRQs (needs python3, cc)
 # The EXE / BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays green.
@@ -311,6 +312,26 @@ if(TARGET ps1_run)
              ${PS1_TESTS_DIR}/timers/timers.exe ${PS1_RC_WORK}/hle_jcz_timers 12000 --tty --until-tty "Done." --quiet)
     list(APPEND rc ps1_hle_rc_jcz_timers)
     set_tests_properties(${rc} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # Rewind (XBA-194, ps1_run --rewind): 600 frames with pseudo-random pads, a capture every 3 frames as the runtime
+    # takes them, 60 steps back: the picture there and the frames after it must be the first run's, on every homebrew
+    # (HLE BIOS) and through a disc read (overlay); ps1_rewind_cap: a cap just over the newest capture and its coding
+    # buffer (8.45 MB) drops the oldest captures, the rest still come back exact.
+    set(rw)
+    foreach(prog ${hb})
+        add_test(NAME ps1_rewind_hb_${prog} COMMAND ${PS1_RUN_HLE} ${PS1_HOMEBREW_DIR}/${prog}.exe --frames 600
+                 --rewind 3:60 --quiet)
+        list(APPEND rw ps1_rewind_hb_${prog})
+    endforeach()
+    if(PS1_HAVE_CD)
+        add_test(NAME ps1_rewind_hb_overlay COMMAND ${PS1_RUN_HLE} ${PS1_HOMEBREW_DIR}/overlay.exe
+                 --disc ${PS1_HOMEBREW_DIR}/overlay.cue --frames 900 --rewind 3:120 --quiet)
+        list(APPEND rw ps1_rewind_hb_overlay)
+    endif()
+    add_test(NAME ps1_rewind_cap COMMAND ${PS1_RUN_HLE} ${PS1_HOMEBREW_DIR}/timer_irq.exe --frames 900
+             --rewind 1:800 --rewind-mb 8.45 --quiet)
+    list(APPEND rw ps1_rewind_cap)
+    set_tests_properties(${rw} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # Save states (XBA-182, state_exe.sh): the round trip (a state saved after frame 150, the next 150 frames hashed,
     # then the same from the state loaded in a new machine) on every homebrew under OpenBIOS and the HLE BIOS, a disc
