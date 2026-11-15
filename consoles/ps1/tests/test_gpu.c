@@ -13,7 +13,7 @@ static ps1_gpu *G;
 /* FNV-1a of busy scenes (320x240 at (0,0)); regression guards (the busy scene moved with XBA-200: line stepping
  * and dithering, gouraud / UV interpolation as the ps1-tests hardware VRAM dumps show). */
 #ifndef GOLDEN_BUSY
-#define GOLDEN_BUSY 0x4C718F09u
+#define GOLDEN_BUSY 0x3AB62F09u
 #endif
 #ifndef GOLDEN_GFX
 #define GOLDEN_GFX 0x42834BDEu
@@ -677,10 +677,10 @@ static void t_busy(void)
 #define GOLDEN_GFX_4X 0xAEAC961Au
 #endif
 #ifndef GOLDEN_BUSY_2X
-#define GOLDEN_BUSY_2X 0xCFF53DF7u
+#define GOLDEN_BUSY_2X 0xB3A9F650u
 #endif
 #ifndef GOLDEN_BUSY_4X
-#define GOLDEN_BUSY_4X 0xEAA96334u
+#define GOLDEN_BUSY_4X 0x81391805u
 #endif
 
 /* FNV-1a of the shadow's (x, y, w, h) native rectangle, at factor n. */

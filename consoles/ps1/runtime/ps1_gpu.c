@@ -1,7 +1,8 @@
 /* ps1_gpu.c -- the PlayStation GPU (Plane P-7, XBA-165): GP0 / GP1, GPUSTAT / GPUREAD, 1 MB VRAM, a software
  * rasterizer and the display output, behind the GPU part of ps1_devices.h.
  *
- * Behaviour follows psx-spx (nocash); structure is our own. Commands run as soon as their last word arrives, so the
+ * Behaviour follows psx-spx (nocash) and the hardware VRAM dumps of JaCzekanski's ps1-tests (XBA-200: their GPU
+ * programs match pixel for pixel, consoles/ps1/tests ps1_jcz_gpu_*); structure is our own. Commands run as soon as their last word arrives, so the
  * GPU is never busy: GPUSTAT reports ready for commands, DMA blocks and (during a VRAM->CPU transfer) GPUREAD.
  *
  * Rasterization (hardware rules where known):
@@ -9,12 +10,16 @@
  *     |dy| >= 512 is not drawn; a quad is the triangles (v0 v1 v2) and (v1 v2 v3), each culled on its own;
  *   - coverage samples pixel corners with the top-left rule: rows [ytop, ybottom), columns [ceil(xleft),
  *     ceil(xright)), exact integer edge walking (no right column, no bottom row, shared edges drawn once);
- *   - colours and texture coordinates are planes over the triangle (16.16 gradients per triangle), so quads show the
- *     hardware's per-triangle shading seam;
+ *   - colours and texture coordinates are planes over the triangle, so quads show the hardware's per-triangle
+ *     shading seam; the hardware's precision: gradients in 1/4096 truncated, stepped from the leftmost vertex's
+ *     value plus a half;
  *   - textures 4 / 8 bpp through a CLUT and 15 bpp, texture page and window, texel 0000h transparent, bit 15 selects
- *     semi-transparency; modulation (texel * colour) / 128 clamped;
- *   - semi-transparency B/2+F/2, B+F, B-F, B+F/4 on 5-bit channels; dithering (4x4 matrix) only for gouraud-shaded
- *     or texture-modulated polygons and gouraud lines, when GP0(E1h) bit 9 is set; rectangles never dither;
+ *     semi-transparency; modulation (texel * colour) / 128 clamped; the CLUT goes through the GPU's CLUT cache
+ *     (kept while the CLUT position and the entries needed allow, cleared by GP0(01h)); a rectangle flipped in x
+ *     starts at u0 + 1;
+ *   - lines step in 32.32 with steps rounded away from zero, both ends drawn;
+ *   - semi-transparency B/2+F/2, B+F, B-F, B+F/4 on 5-bit channels; dithering (4x4 matrix) for gouraud-shaded or
+ *     texture-modulated polygons and every line, when GP0(E1h) bit 9 is set; rectangles never dither;
  *   - mask bit: GP0(E6h) set (bit 15 forced on written pixels) and check (pixels with bit 15 are kept);
  *   - drawing area clip (inclusive), interlaced 480-line mode skips the displayed field's lines unless GP0(E1h)
  *     bit 10 allows drawing to the displayed area.
@@ -474,15 +479,19 @@ static int raster_tri(ps1_gpu *g, const target *tg, const vtx *a, const vtx *b, 
     span_fn span = raster_setup(g, &rs, p, flat);
     int flattened = 0;
 
-    /* Attribute planes: A(x, y) = base + dAdx * x + dAdy * y, 16.16, rounded to nearest. */
+    /* Attribute planes: A(x, y) = base + dAdx * x + dAdy * y, the hardware's way (ps1-tests gpu/triangle and
+     * gpu/uv-interpolation's VRAM dumps, XBA-200): gradients in 1/4096 truncated toward zero, the value at the
+     * "core" vertex (the leftmost; ties as below) plus a half, stepped from there. Kept as 16.16 (exact: the 1/4096
+     * values shifted). */
+    const vtx *cv = (b->x <= a->x) ? ((c->x <= b->x) ? c : b) : (c->x < a->x) ? c : a;
     int64_t base_r = 0, base_g = 0, base_b = 0, base_u = 0, base_v = 0;
     int32_t dy_r = 0, dy_g = 0, dy_b = 0, dy_u = 0, dy_v = 0;
 #define PLANE(A, DX, DY, BASE)                                                                                     \
     do {                                                                                                          \
         int d1 = b->A - a->A, d2 = c->A - a->A;                                                                   \
-        DX = sat32((((int64_t)d1 * y20 - (int64_t)d2 * y10) * 65536) / area);                                     \
-        DY = sat32((((int64_t)x10 * d2 - (int64_t)x20 * d1) * 65536) / area);                                     \
-        BASE = ((int64_t)a->A << 16) - (int64_t)DX * a->x - (int64_t)DY * a->y + 0x8000;                          \
+        DX = sat32((((int64_t)d1 * y20 - (int64_t)d2 * y10) * 4096) / area * 16);                                 \
+        DY = sat32((((int64_t)x10 * d2 - (int64_t)x20 * d1) * 4096) / area * 16);                                 \
+        BASE = ((int64_t)cv->A << 16) + 0x8000 - (int64_t)DX * cv->x - (int64_t)DY * cv->y;                       \
     } while (0)
     if (p->gouraud && !(p->textured && p->raw)) {
         PLANE(r, rs.drdx, dy_r, base_r);
