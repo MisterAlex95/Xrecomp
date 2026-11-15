@@ -249,7 +249,8 @@ if(TARGET gba_run)
                  --lockstep-ref)
         list(APPEND lockref gba_lockref_mgba_${g})
     endforeach()
-    if(Python3_Interpreter_FOUND)
+    # The fuzzer starts gba_run itself: not under a cross build (no emulator wrapper there, Exec format error).
+    if(Python3_Interpreter_FOUND AND NOT CMAKE_CROSSCOMPILING)
         add_test(NAME gba_lockref_fuzz
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --gba-run $<TARGET_FILE:gba_run>
                     --work ${CMAKE_CURRENT_BINARY_DIR}/lockref_fuzz --seeds 0-7 --frames 30 --ref --lockstep-cycles 61)
