@@ -803,7 +803,12 @@ def desktop(a):
 
     step(4, "lifting the code to C (a few minutes the first time)")
     gen = os.path.join(proj, "src", "recomp", "gen")
-    if same and stamp.get("lift") and os.listdir(gen):
+    # The XDK's XMV player API, found in the XBE and bound to the runtime's
+    # decoder when it is sure (XBA-199, docs/runtime/xmv.md): the lift wraps it.
+    from tools.xmv import find_api
+    xmv_bind = find_api.prepare_bind(xbe, an, log=note)
+    xmv_key = find_api.bind_key(xmv_bind)
+    if same and stamp.get("lift") and os.listdir(gen) and stamp.get("xmv_bind", "") == xmv_key:
         note("up to date", 100)
     else:
         # Lift into a fresh folder, then keep the files that did not change
@@ -819,6 +824,8 @@ def desktop(a):
                "--abi-dir", os.path.join(an, "abi"), "--gen-dir", fresh]
         for fn in (profile or {}).get("exclude_manual", []):
             cmd += ["--exclude-manual", os.path.join(proj, "src", "title", fn)]
+        if xmv_bind:
+            cmd += ["--xmv-bind", xmv_bind]
         progress(2, "lifting")
         log_at = os.path.getsize(log) if os.path.exists(log) else 0
         t = run(cmd, log, tick=(2, 98, "lifting", 100))
@@ -836,6 +843,7 @@ def desktop(a):
              % (len(os.listdir(gen)), t, written, kept, removed), 100)
         # The executable no longer matches the lift until a build succeeds (--check).
         stamp["lift"], stamp["built"] = True, False
+        stamp["xmv_bind"] = xmv_key
         if health is not None:
             stamp["lift_health"] = health
         with open(stamp_path, "w") as f:

@@ -336,6 +336,13 @@ def main():
                              "source of truth so the two cannot drift. Handles "
                              "sub_X_gen wrappers and pins referenced sub_ names. "
                              "Ported from an earlier per-title fork.")
+    parser.add_argument("--xmv-bind", metavar="FILE",
+                        help="Bind the XDK's XMVDecoder_GetNextFrame (and "
+                             "CloseDecoder) named in FILE (tools.xmv.find_api, "
+                             "written by tools.prepare) to the runtime's movie "
+                             "decoder: their bodies become sub_X_gen and "
+                             "recomp_xmv_bind.c defines sub_X (XBA-199). "
+                             "Split mode only")
     parser.add_argument("--trace-functions", metavar="FILE",
                         help="JSON list of addresses to emit an entry trace "
                              "for (RECOMP_TRACE_ENTER). For bring-up: shows "
@@ -599,6 +606,25 @@ def main():
                   + (f"; {len(wrap & known)} wrapped as sub_X_gen" if wrap else ""),
                   file=sys.stderr)
 
+        # --xmv-bind (XBA-199): the XMV API tools.prepare found, wrapped
+        # like a hand-written sub_X_gen wrapper; recomp_xmv_bind.c is the
+        # wrapper.
+        xmv_bound, xmv_plan = {}, None
+        if args.xmv_bind:
+            from . import xmv_bind
+            xmv_plan = xmv_bind.load(args.xmv_bind)
+            hand = set(manual)
+            if args.exclude_manual:
+                hand |= manual_scan_result[0] | manual_scan_result[1]
+            xmv_bound = xmv_bind.select(xmv_plan, set(translator.func_db), hand)
+            if xmv_bound:
+                funcs, manual = _wrap_generated_bodies(
+                    translator, funcs, manual, set(xmv_bound.values()))
+                print("XMV: bound " + ", ".join(
+                    f"{xmv_bind.WHAT[k][1]} 0x{a:08X}" for k, a in sorted(xmv_bound.items()))
+                    + f" to the runtime's decoder (confidence {xmv_plan['confidence']:.2f})",
+                    file=sys.stderr)
+
         stats = translator.translate_batch_split(
             funcs,
             output_dir=gen_dir,
@@ -606,6 +632,9 @@ def main():
             verbose=args.verbose,
             manual=manual,
         )
+        if xmv_bound:
+            stats.setdefault("files", []).append(
+                xmv_bind.write(gen_dir, xmv_bound, xmv_plan))
 
         t_translate = time.time() - t0
         print(f"\n=== Split Translation Complete ({t_translate:.1f}s) ===",

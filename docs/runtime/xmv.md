@@ -1,12 +1,13 @@
 # XMV movies: the runtime's decoder
 
-> Part of the [Documentation Index](../INDEX.md) · Plane XBA-70
+> Part of the [Documentation Index](../INDEX.md) · Plane XBA-70, XBA-199
 
 Xbox titles play their movies (`.xmv`) with the XDK's XMV library, which is linked into the title and lifted like
 the rest of its code. When that lifted decoder runs, nothing else is needed: Fable's plays once vblanks are paced
 (`profiles/titles/4d5300d1/NOTES.md`). For a title whose own decoder cannot run, the runtime carries a portable
-decoder (`src/video/xmv/`) and a hook a title layer binds in place of the library's `XMVDecoder_GetNextFrame`
-(`src/video/xmv_hle.c`). Upstream decodes movies on Windows only, and only `.wmv` files through Media Foundation
+decoder (`src/video/xmv/`) and a hook in place of the library's `XMVDecoder_GetNextFrame` (`src/video/xmv_hle.c`),
+which Prepare binds by itself when it finds the library's API in the XBE ([below](#binding-at-prepare-xba-199)): no
+title layer. Upstream decodes movies on Windows only, and only `.wmv` files through Media Foundation
 (`RECOMP_FMV_HOST`); this works on Linux, macOS, Android and Windows alike.
 
 ## What is where
@@ -20,6 +21,9 @@ decoder (`src/video/xmv/`) and a hook a title layer binds in place of the librar
 | `src/video/xmv/xmv_player.c` | Demuxer + decoders behind a pull API (next frame with its time, decoded audio), BT.601 colour conversion. |
 | `src/video/xmv/xmv_surface.c` | A picture into a D3D surface's pixels: YUY2, UYVY, (LIN_)A8R8G8B8 / X8R8G8B8, (LIN_)R5G6B5, swizzled or linear. |
 | `src/video/xmv_hle.c` | The hook: the movie the title opened, paced on the host clock, written into the title's surface, sound out. |
+| `tools/xmv/find_api.py` | Finds `XMVDecoder_GetNextFrame` / `CloseDecoder` / `CreateDecoderForFile` in an XBE by structure (and recorded signatures), with a confidence. |
+| `tools/recomp/xmv_bind.py` | What the lifter generates from it (`--xmv-bind`): `recomp_xmv_bind.c`, the hook bound in place of the found functions. |
+| `tools/xmv/synth_title.py` | A synthetic movie title of our own with a fake XMV library, for the tests. |
 | `src/kernel/kernel_bridge.c` | `NtCreateFile` of a `*.xmv` file tells the hook its name (`xbox_MovieFileOpened`). |
 | `tools/xmv/xmv_mux.py` | XMV writer, Xbox ADPCM encoder, the test fixtures (`make-test-set`). |
 | `tools/xmv/wmv2_synth.py` | Random valid WMV2 streams for the features FFmpeg's encoder never writes. |
@@ -31,8 +35,9 @@ All of it is plain C99/C11 with no dependency: the decoder builds into `xbox_vid
 
 The XDK's `XMVDecoder_GetNextFrame(decoder, surface, &result, &timestamp)` (stdcall, `ret 0x10`) is the call a
 title polls while a movie plays; it is where a title whose decoder cannot run hangs (Fable, before vblank pacing:
-`XMV_NOFRAME` for ever) and what its old skip override replaced with `XMV_ENDOFFILE`. The runtime's replacement is
-bound the same way, from a title layer's `overrides.c` (`--exclude-manual`, [profiles.md](../technical/profiles.md)):
+`XMV_NOFRAME` for ever) and what its old skip override replaced with `XMV_ENDOFFILE`. Prepare binds the runtime's
+replacement in its place when it finds the function ([below](#binding-at-prepare-xba-199)); by hand, a developer's
+`overrides.c` (`--exclude-manual`, [profiles.md](../technical/profiles.md)) can still do it:
 
 ```c
 void sub_XXXXXXXX(void)                 /* XMVDecoder_GetNextFrame in this XBE */
@@ -42,7 +47,7 @@ void sub_XXXXXXXX(void)                 /* XMVDecoder_GetNextFrame in this XBE *
 }
 ```
 
-and `XMVDecoder_CloseDecoder`, if the title layer finds it, can call `xmv_hle_close(decoder)`. What the hook does:
+and `XMVDecoder_CloseDecoder` can call `xmv_hle_close(decoder)`. What the hook does:
 
 1. **Which movie.** The kernel notes every `.xmv` file the title opens (`NtCreateFile`, host path). A decoder object
    the hook has not seen plays the last one opened. A new open after a movie ended starts a new one on the same
@@ -63,9 +68,81 @@ and `XMVDecoder_CloseDecoder`, if the title layer finds it, can call `xmv_hle_cl
    (`XMV_ENDOFFILE`), the old skip override's behaviour. The log says which (`[XMV] ...`), and at the end of each
    movie how many frames were decoded and how many were not.
 
-Not done: finding `XMVDecoder_GetNextFrame` in an arbitrary XBE. The XMV library varies across XDK builds and
-there is no signature for it yet, so a title layer names the function (from the lifted code: the one the movie loop
-polls, in the XBE's `XMV` section). A signature-based binding is the follow-up (XBA-199).
+## Binding at Prepare (XBA-199)
+
+The XMV library is linked into each title, so its functions move from XBE to XBE and no symbol names them. Prepare
+finds them by structure, the way the D3D service finds D3D's device at run time, and binds the hook through the
+lifter: nothing of any one title is in the toolkit, and no title layer is involved.
+
+**Finding it** (`tools/xmv/find_api.py`, from the XBE alone, a few seconds):
+
+- *The library table*: the XDK build, and an XMV library entry if there is one (a name starting with `XMV`).
+- *The sections*: the XDK's libraries keep their code in sections of their own (D3D, DSOUND, XPP...); the XMV
+  library's is `XMV`. A candidate inside it scores, one outside it (when there is one) counts against.
+- *The movie names*: strings ending in `.xmv` (ANSI or UTF-16) and the functions that use their address: the
+  title's movie player.
+- *The call graph*, from one linear sweep of the code. Every called function whose every `ret` is `ret 0x10`
+  (stdcall, four arguments) is a candidate, scored on its call sites from outside the XMV section (the title calls
+  the public API): the site is in a loop, or its function is called from one (`loop`, `loop_up`); a `cmp` with 1 or
+  2 (`XMV_NEWFRAME`, `XMV_ENDOFFILE`) right after the call (`result`); the address of a stack local passed
+  (`locals`: &result, &timestamp); a `ret 0xC` function called before it (`create`: CreateDecoderForFile, flags,
+  name, &decoder) and a `ret 4` function after (`close`: CloseDecoder), in the XMV section when there is one;
+  the function, or one next to it in the call graph, uses a movie name (`movie`). More than 8 call sites counts
+  against (GetNextFrame is called from one or two places).
+- *Recorded signatures*: `profiles/xdk/<build>/xmv.json` (below). A candidate that matches one of the title's build
+  gets +0.5 (+0.3 for another build).
+
+The confidence is the best candidate's score (capped at 1), lowered by 0.3 when a second candidate is within 0.15 of
+it. **High** is 0.7 or more: an XMV section or a movie name on top of the call shape, or a signature. The shape
+alone (0.6 at best) is reported, never bound. `python -m tools.xmv.find_api default.xbe` prints the evidence for
+each candidate (`--json` for the report as JSON); Prepare writes the same report to `<work>/analysis/xmv_api.json`.
+
+**Binding it.** With a high confidence, Prepare writes `<work>/analysis/xmv_bind.json` (GetNextFrame and, when
+found at the same call site, CloseDecoder; CreateDecoderForFile is reported but never bound: the title's own
+decoder object stays, and its open is what tells the hook the file name) and passes it to `tools.recomp
+--xmv-bind`. The lifter emits those bodies as `sub_X_gen` (the `--exclude-manual` wrap mechanism) and writes
+`recomp_xmv_bind.c` next to the generated code: `sub_X`, which every caller and the dispatch table reach, asks
+`xmv_hle_bound()` and calls the hook (CloseDecoder: `xmv_hle_close`, then the title's own close) or, with
+`RECOMP_XMV=native`, the title's own body. A function the analysis did not find, or one a developer's
+`--exclude-manual` file defines, is not bound. The binding is part of the lift's stamp (desktop `stamp.json`
+`xmv_bind`, Android the lift key): a change re-lifts.
+
+**The switch, `RECOMP_XMV`:**
+
+| Value | At Prepare | At run time, in a bound title |
+|---|---|---|
+| `auto` (default; also unset, `decode`) | bind when found with high confidence | the runtime decodes the movies |
+| `native` | bind nothing | the title's own (lifted) decoder runs, as if nothing were bound |
+| `skip` (or `0`) | bind as `auto` | every movie ends at once (`XMV_ENDOFFILE`) |
+
+Default `auto` binds whenever the API is found, also in a title whose own decoder would run (Fable's does, once
+vblanks are paced): the runtime's decoder is bit-exact with FFmpeg on what it supports, and it does not depend on
+the title's DirectSound streams or decode threads. `native` is the way back for a title where the runtime's decoder
+falls short (X8 intra frames, XBA-198; WMA sound).
+
+**What the logs say.** Prepare: `XMV: XMVDecoder_GetNextFrame at 0x... and XMVDecoder_CloseDecoder at 0x...
+(confidence 0.90): bound to the runtime's decoder`, or `best guess ... too low, not bound`, or `the title has movies
+but no XMVDecoder_GetNextFrame was found`, or nothing for a title with no sign of movies. The lift log:
+`XMV: bound ...`. Run time, at the first call: `[XMV] XMVDecoder_GetNextFrame at 0001xxxx bound by Prepare (found
+with confidence 0.90): the runtime decodes the title's movies` (or `RECOMP_XMV=native, the title's own decoder
+runs`).
+
+**Signatures.** Once a title's functions are confirmed (from the report and the lifted code), `python -m
+tools.xmv.find_api default.xbe --record get_next_frame=0x... [close_decoder=0x...]` writes their masked signatures
+to `profiles/xdk/<build>/xmv.json` (build: the XMV library entry's, else the XDK's; `--build` to choose). The masking
+is `tools/fusion/signatures.py`'s: the first 32 bytes with absolute addresses and branch targets wildcarded, plus
+the function's size; it refuses a function whose returns do not have the API's shape. That is XDK library code
+only, masked, as the signature tooling already stores; no title code. None is recorded yet: they need XBEs dumped
+from real discs.
+
+**What only real titles can confirm.** The detector is tested on synthetic titles of our own
+(`tools/xmv/synth_title.py`: a fake XMV library with the API's shape, in a section of its own or not, with or
+without a movie name, and a title without movies). Unconfirmed on retail XBEs: that the XMV library's code sits in
+a section named `XMV` on every XDK build; whether the library table lists the XMV library at all; that titles call
+`XMVDecoder_GetNextFrame` directly (not through a C++ wrapper of their own, which would then be the candidate, and
+still a correct binding when it keeps the stdcall shape); that `CloseDecoder` follows the poll in the same
+function. A title where it is wrong can be prepared with `RECOMP_XMV=native` (nothing bound) and its
+`find_api` report sent in.
 
 ## The format, as implemented
 
@@ -101,7 +178,7 @@ index byte is clamped to 0..88 the same way.
 | WMV2 I frames coded with the X8 intra coder (`j_type`) | **not done**: the frame is counted and the previous picture stays (follow-up XBA-198) |
 | 5.1 ADPCM (three stereo tracks) | the front pair is played |
 | WMA audio tracks | not played (silence) |
-| Binding `XMVDecoder_GetNextFrame` without a title layer | not done (follow-up XBA-199) |
+| Binding `XMVDecoder_GetNextFrame` without a title layer | done by structure at Prepare (XBA-199); unconfirmed on retail XBEs, no signature recorded yet |
 | Sound on Windows | not done |
 
 "Bit-exact" means: every decoded picture of every fixture is identical, byte for byte, to FFmpeg's decode of the
@@ -128,7 +205,21 @@ same file in its bit-exact mode.
 contiguous window, the movie noted as the kernel notes it, then `xmv_hle_get_next_frame` polled until the end:
 12 `XMV_NEWFRAME` with rising timestamps, `XMV_NOFRAME` in between (paced), each picture in the surface identical to
 the player's own decode, `XMV_ENDOFFILE` after; a new open restarts the decoder object; `RECOMP_XMV=skip`, no movie
-opened, a non-XMV file and an unknown surface format behave as described above.
+opened, a non-XMV file and an unknown surface format behave as described above; `xmv_hle_bound` answers the
+runtime's decoder by default, with `auto` and `skip`, and the title's own with `native`.
+
+The binding (XBA-199):
+
+- `tools/xmv/test_find_api.py`: the synthetic movie title's API found in its `XMV` section (every feature, the
+  title's own `ret 0x10` decoy far behind), found without a section through the movie name, the call shape alone
+  not bound, a title without movies binding nothing, an XMV library entry counted, `RECOMP_XMV=native` at
+  prepare, a signature recorded on one title finding the API in another where only the call shape is left, a
+  wrong-shaped function refused by `--record`, the CLI report, and the generated C.
+- `tools/compat/test_e2e.py`: `tools.prepare --no-build` binds the found functions (their bodies `sub_X_gen`,
+  `recomp_xmv_bind.c`, no title layer) and redoes the lift without them under `RECOMP_XMV=native`; a title with no
+  XMV library gets nothing. With `XBA_E2E=1`, the title is built and run: its own GetNextFrame never gives a frame,
+  bound it plays `basic.xmv` (copied as its `D:\intro.xmv`) into its surface, 12 frames decoded, and goes on to its
+  `DbgPrint`; the same executable with `RECOMP_XMV=native` stays in its loop.
 
 Remaking the fixtures (FFmpeg needed only for this): `python -m tools.xmv.xmv_mux make-test-set
 tests/xmv_decode/fixtures`. `tools/xmv/test_xmv_mux.py` checks the Python side (mux / demux round trip, ADPCM

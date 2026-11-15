@@ -1,10 +1,11 @@
 /* XMV movies decoded by the runtime (XBA-70, docs/runtime/xmv.md).
  *
  * A title plays its movies with the XDK's XMV library, linked into the title
- * and lifted like the rest of it. Where that lifted decoder cannot run, a
- * title layer replaces the library's XMVDecoder_GetNextFrame with
- * xmv_hle_get_next_frame (in its overrides.c, the way Fable's intro movies
- * were once skipped): the runtime then decodes the movie the title opened
+ * and lifted like the rest of it. tools.prepare finds the library's
+ * XMVDecoder_GetNextFrame in the XBE (tools/xmv/find_api.py, XBA-199) and
+ * the lifter binds xmv_hle_get_next_frame in its place (generated
+ * recomp_xmv_bind.c; a developer's overrides.c can do the same by hand, the
+ * way Fable's intro movies were once skipped): the runtime then decodes the movie the title opened
  * (src/video/xmv: XMV demuxer, WMV2 video, Xbox ADPCM audio), paces it on the
  * host clock, writes each picture into the title's surface and plays the
  * sound. RECOMP_XMV=skip turns every movie into "end of file" (the old skip
@@ -49,6 +50,13 @@ uint32_t xmv_hle_get_next_frame(uint32_t decoder_va, uint32_t surface_va,
 
 /* XMVDecoder_CloseDecoder: forget the decoder's movie. */
 void xmv_hle_close(uint32_t decoder_va);
+
+/* The binding tools.prepare generates (XBA-199, tools.recomp --xmv-bind:
+ * recomp_xmv_bind.c) asks this on each call of the bound function: what
+ * 0 = XMVDecoder_GetNextFrame, 1 = XMVDecoder_CloseDecoder, at guest va, found
+ * with confidence_pct / 100. Returns 1 to use the runtime's decoder, 0 for the
+ * title's own lifted body (RECOMP_XMV=native). Logs what was bound once. */
+int xmv_hle_bound(int what, uint32_t va, unsigned confidence_pct);
 
 #ifdef __cplusplus
 }

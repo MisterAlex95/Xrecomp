@@ -71,6 +71,28 @@ static int mode_skip(void)
     return e && (!strcmp(e, "skip") || !strcmp(e, "0"));
 }
 
+static int mode_native(void)
+{
+    const char *e = getenv("RECOMP_XMV");
+    return e && !strcmp(e, "native");
+}
+
+int xmv_hle_bound(int what, uint32_t va, unsigned confidence_pct)
+{
+    static volatile int logged[2];
+    static const char *const names[2] = { "XMVDecoder_GetNextFrame", "XMVDecoder_CloseDecoder" };
+    int native = mode_native();
+    if (what >= 0 && what < 2 && !logged[what]) {
+        logged[what] = 1;
+        fprintf(stderr, "[XMV] %s at %08X bound by Prepare (found with confidence %u.%02u): %s\n", names[what],
+                va, confidence_pct / 100, confidence_pct % 100,
+                native ? "RECOMP_XMV=native, the title's own decoder runs"
+                       : mode_skip() ? "RECOMP_XMV=skip, movies end at once"
+                                     : "the runtime decodes the title's movies");
+    }
+    return !native;
+}
+
 void xbox_MovieFileOpened(const char *host_path)
 {
     if (!host_path)
