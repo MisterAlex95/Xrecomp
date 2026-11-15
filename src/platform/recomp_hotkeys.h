@@ -1,5 +1,5 @@
 /* recomp_hotkeys -- the player's hotkeys: which pad chord or desktop key does fast-forward, quick save / load, the quick
- * slot, the in-game menu (XBA-190).
+ * slot, rewind (XBA-194), the in-game menu (XBA-190).
  *
  * An action takes a pad chord (a modifier held, then a button: « back+right_shoulder »; or a button alone, or none)
  * and a desktop key (« tab », « shift+f1 », or none). The defaults are the fixed chords of XBA-182:
@@ -11,6 +11,7 @@
  *   qload       back+left_shoulder            none          quick load (the quick slot)
  *   slot_next   none                          none          the quick slot + 1 (4 -> 1)
  *   slot_prev   none                          none          the quick slot - 1 (1 -> 4)
+ *   rewind      back+left_trigger             r             rewind while held (XBA-194, recomp_rewind.h)
  *   menu        back+start                    none          the in-game menu (the Android shell's, held ½ s)
  *   save1..4    none                          f1..f4        save slot N
  *   load1..4    none                          shift+f1..f4  load slot N
@@ -45,7 +46,7 @@ extern "C" {
 
 enum {
     RECOMP_HK_FF_HOLD, RECOMP_HK_FF_TOGGLE, RECOMP_HK_QSAVE, RECOMP_HK_QLOAD, RECOMP_HK_SLOT_NEXT, RECOMP_HK_SLOT_PREV,
-    RECOMP_HK_MENU,
+    RECOMP_HK_REWIND, RECOMP_HK_MENU,
     RECOMP_HK_SAVE1, RECOMP_HK_SAVE2, RECOMP_HK_SAVE3, RECOMP_HK_SAVE4,
     RECOMP_HK_LOAD1, RECOMP_HK_LOAD2, RECOMP_HK_LOAD3, RECOMP_HK_LOAD4,
     RECOMP_HK_COUNT
@@ -119,7 +120,8 @@ uint32_t recomp_hotkeys_keys_update(const recomp_hotkeys *hk, recomp_hotkeys_sta
                                     uint32_t *pressed);
 
 /* Runs the actions pressed (recomp_states.h): quick save / load, the quick slot +/- 1, the fast-forward toggle,
- * save / load slot N. The hold (RECOMP_HK_FF_HOLD) is the caller's: recomp_ff_hold(held & RECOMP_HK_BIT(...)).
+ * save / load slot N. The holds are the caller's: recomp_ff_hold(held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)), and
+ * RECOMP_HK_REWIND for its rewinder (recomp_rewind.h).
  * Returns how many ran. */
 int recomp_hotkeys_run(uint32_t pressed);
 

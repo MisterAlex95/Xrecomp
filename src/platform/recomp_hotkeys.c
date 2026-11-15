@@ -11,7 +11,7 @@
 #include "recomp_states.h"
 
 static const char *const k_actions[RECOMP_HK_COUNT] = {
-    "ff_hold", "ff_toggle", "qsave", "qload", "slot_next", "slot_prev", "menu",
+    "ff_hold", "ff_toggle", "qsave", "qload", "slot_next", "slot_prev", "rewind", "menu",
     "save1", "save2", "save3", "save4", "load1", "load2", "load3", "load4",
 };
 
@@ -28,7 +28,7 @@ static const struct { const char *name; int source; } k_short[] = {
     {"select", 10}, {"up", 12}, {"down", 13}, {"left", 14}, {"right", 15},
 };
 
-enum { SRC_LSHOULDER = 4, SRC_RSHOULDER = 5, SRC_RTRIGGER = 7, SRC_BACK = 10, SRC_START = 11 };
+enum { SRC_LSHOULDER = 4, SRC_RSHOULDER = 5, SRC_LTRIGGER = 6, SRC_RTRIGGER = 7, SRC_BACK = 10, SRC_START = 11 };
 
 /* USB HID usages (SDL_Scancode). */
 static const struct { const char *name; int key; } k_keys[] = {
@@ -130,8 +130,10 @@ void recomp_hotkeys_defaults(recomp_hotkeys *hk)
     hk->pad[RECOMP_HK_FF_HOLD] = (recomp_pad_chord){SRC_BACK, SRC_RTRIGGER};
     hk->pad[RECOMP_HK_QSAVE] = (recomp_pad_chord){SRC_BACK, SRC_RSHOULDER};
     hk->pad[RECOMP_HK_QLOAD] = (recomp_pad_chord){SRC_BACK, SRC_LSHOULDER};
+    hk->pad[RECOMP_HK_REWIND] = (recomp_pad_chord){SRC_BACK, SRC_LTRIGGER};
     hk->pad[RECOMP_HK_MENU] = (recomp_pad_chord){SRC_BACK, SRC_START};
     hk->key[RECOMP_HK_FF_HOLD] = (recomp_key_chord){0, 43};
+    hk->key[RECOMP_HK_REWIND] = (recomp_key_chord){0, HID_A + 'r' - 'a'}; /* not Backspace: the GBA's Select key */
     for (int i = 0; i < 4; i++) {
         hk->key[RECOMP_HK_SAVE1 + i] = (recomp_key_chord){0, (uint16_t)(HID_F1 + i)};
         hk->key[RECOMP_HK_LOAD1 + i] = (recomp_key_chord){RECOMP_HK_SHIFT, (uint16_t)(HID_F1 + i)};
@@ -442,7 +444,7 @@ int recomp_hotkeys_run(uint32_t pressed)
             recomp_states_load(a - RECOMP_HK_LOAD1 + 1);
             break;
         default:
-            continue;   /* the hold and the menu are not run here */
+            continue;   /* the holds (fast-forward, rewind) and the menu are not run here */
         }
         n++;
     }

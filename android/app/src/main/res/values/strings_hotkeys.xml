@@ -9,6 +9,7 @@
     <string name="HK_QLOAD">Quick load</string>
     <string name="HK_SLOT_NEXT">Next quick slot</string>
     <string name="HK_SLOT_PREV">Previous quick slot</string>
+    <string name="HK_REWIND">Rewind (hold)</string>
     <string name="HK_MENU">Game menu (held ½ s)</string>
     <string name="HK_NONE">None</string>
     <string name="HK_PRESS">Press the buttons…</string>
@@ -22,7 +23,7 @@
     <string name="HK_SHARED">Same buttons as: %1$s. Both would happen.</string>
     <string name="HK_GAME_NEEDS">The game uses %1$s: with this hotkey set, pressing it does the hotkey instead. Add a modifier (hold Select first).</string>
     <string name="HK_RESET">Reset hotkeys</string>
-    <string name="HK_RESET_DETAIL">Every hotkey back to the usual chords: Select + R2 held fast-forwards, Select + R1 quick saves, Select + L1 quick loads, Select + Start held opens the game menu.</string>
+    <string name="HK_RESET_DETAIL">Every hotkey back to the usual chords: Select + R2 held fast-forwards, Select + L2 held rewinds, Select + R1 quick saves, Select + L1 quick loads, Select + Start held opens the game menu.</string>
     <string name="HK_RESET_DONE">Hotkeys back to the usual ones</string>
     <string name="HK_SLOT_EVENT">Quick slot: %1$d</string>
 </resources>

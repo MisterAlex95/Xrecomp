@@ -225,8 +225,9 @@ final class GameSettings {
             c = Console.XBOX;
         if (o.title == R.string.OPT_SELFTEST)
             return false;
-        if (o.title == R.string.OPT_CSCALE || o.title == R.string.OPT_CFILTER)
-            return c != Console.XBOX;
+        if (o.title == R.string.OPT_CSCALE || o.title == R.string.OPT_CFILTER || o.title == R.string.OPT_REWIND
+            || o.title == R.string.OPT_REWIND_MB)
+            return c != Console.XBOX;   // XBA-194: rewind is the GBA / PS1 / N64 runtimes' (no Xbox save states)
         if (o.title == R.string.OPT_UPSCALE)
             return c == Console.PS1 || c == Console.N64;
         return o.shared || c == Console.XBOX;

@@ -3,7 +3,7 @@
  *   n64_run ROM [--frames N] [--result] [--ppm OUT.ppm] [--wav OUT.wav] [--tty] [--pad MASK] [--pal | --ntsc]
  *           [--save PATH] [--hash] [--info] [--regs] [--quiet]
  *           [--pack LIB.so [--lockstep] [--missed FILE] [--stats]]
- *           [--state-save N:FILE] [--state-load FILE] [--run-hash]
+ *           [--state-save N:FILE] [--state-load FILE] [--run-hash] [--rewind C:R [--rewind-mb M]]
  *
  * ROM           a .z64 / .v64 / .n64 file (any byte order)
  * --frames N    frames (VI interrupts) to run (default 600); with --result, the most frames to wait
@@ -37,11 +37,16 @@
  * --run-hash    print one hash (FNV-1a 64) of every frame's displayed picture and audio and the final cycle count,
  *               over the frames after --state-save's frame (all the frames without it): a run from a state loaded
  *               with --state-load gives the same hash over the same number of frames (the save state round trip)
+ * --rewind C:R  the rewind round trip (XBA-194, recomp_rewind_check): --frames frames with pseudo-random pads, a
+ *               capture every C frames as the runtime takes them, R steps back, the picture and every frame after it
+ *               must be the first run's; prints "REWIND OK" and the capture cost, exit 6 on a difference.
+ *               --rewind-mb M: the ring's cap (default 64)
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "n64_core.h"
 #include "n64_rdp.h"
 #include "n64_recomp.h"
+#include "recomp_rewind.h"
 
 #include <dlfcn.h>
 #include <stdbool.h>
@@ -203,6 +208,64 @@ static uint64_t display_hash(n64_machine *m)
     return hv ^ ((uint64_t)w << 32 | (uint32_t)h);
 }
 
+
+/* Rewind round trip (--rewind, XBA-194): pseudo-random pads that change every few frames, the same for a frame. */
+static uint32_t rw_rand(long f)
+{
+    uint32_t x = (uint32_t)(f / 6 + 1) * 2654435761u;
+    x ^= x >> 15;
+    x *= 2246822519u;
+    x ^= x >> 13;
+    return x;
+}
+
+static uint16_t rw_pad_held;
+
+static void rw_input(void *m, long f)
+{
+    uint32_t r = rw_rand(f);
+    n64_set_controller(m, 0, 1, (uint16_t)(r | rw_pad_held), (int)((r >> 16) & 0x7F) - 64,
+                       (int)((r >> 23) & 0x7F) - 64);
+}
+
+static void rw_run(void *m)
+{
+    n64_run_frame(m);
+}
+
+static uint64_t rw_picture(void *m)
+{
+    return picture_hash(m, 0xCBF29CE484222325ull);
+}
+
+static uint64_t rw_audio(void *m)
+{
+    int16_t buf[2048 * 2];
+    size_t n;
+    uint64_t hv = 0xCBF29CE484222325ull;
+    while ((n = n64_audio_pull(m, buf, 2048)) > 0)
+        hv = fnv64((const uint8_t *)buf, n * 4, hv);
+    return hv;
+}
+
+static size_t rw_size(void *m)
+{
+    return n64_state_size(m);
+}
+
+static size_t rw_save(uint8_t *out, size_t cap, void *m)
+{
+    return n64_state_save(m, out, cap);
+}
+
+static int rw_load(const uint8_t *in, size_t n, void *m)
+{
+    if (n64_state_load(m, in, n) != N64_STATE_OK)
+        return -1;
+    rw_audio(m); /* what the state had queued was heard already */
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *rom_path = NULL, *ppm = NULL, *wav = NULL, *save = NULL, *pack = NULL, *missed = NULL;
@@ -213,6 +276,8 @@ int main(int argc, char **argv)
     long state_at = 0;
     long long lock_cycles = 0, lock_from = 0;
     uint16_t pad = 0;
+    int rewind_every = 0, rewind_back = 0;
+    double rewind_mb = RECOMP_REWIND_MB_DEFAULT;
     n64_options opts = {.force_pal = -1};
 
     for (int i = 1; i < argc; i++) {
@@ -242,6 +307,12 @@ int main(int argc, char **argv)
             info = true;
         else if (!strcmp(a, "--regs"))
             regs = true;
+        else if (!strcmp(a, "--rewind") && more && strchr(argv[i + 1], ':')) {
+            rewind_every = (int)strtol(argv[++i], NULL, 10);
+            rewind_back = (int)strtol(strchr(argv[i], ':') + 1, NULL, 10);
+        }
+        else if (!strcmp(a, "--rewind-mb") && more)
+            rewind_mb = strtod(argv[++i], NULL);
         else if (!strcmp(a, "--quiet"))
             quiet = true;
         else if (!strcmp(a, "--pack") && more)
@@ -346,6 +417,15 @@ int main(int argc, char **argv)
         if (!quiet)
             fprintf(stderr, "n64_run: state %s loaded (%zu bytes, frame %llu)\n", state_load, n,
                     (unsigned long long)n64_frames(m));
+    }
+    if (rewind_every > 0) {
+        rw_pad_held = pad;
+        recomp_rewind_machine mc = {m, rw_input, rw_run, rw_picture, rw_audio, rw_size, rw_save, rw_load};
+        int r = recomp_rewind_check("n64", &mc, frames, rewind_every, rewind_back > 0 ? rewind_back : 1,
+                                    (size_t)((rewind_mb > 0 ? rewind_mb : 1) * 1048576.0));
+        n64_destroy(m);
+        n64_destroy(twin);
+        return r == 0 ? 0 : r == 1 ? 6 : 3;
     }
     uint64_t rh = 0xCBF29CE484222325ull;
     long rh_frames = 0;

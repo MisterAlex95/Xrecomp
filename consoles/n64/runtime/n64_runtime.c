@@ -19,7 +19,11 @@
  * shoulder quick save / load, Back + right trigger held fast-forwards, F1-F4 / Shift+F1-F4 / Tab on a desktop) save
  * and load between frames under s_mu; fast-forward runs `speed` frames per shown frame, their audio averaged down. A state never writes
  * the save files: after a load the cartridge and paks the game sees are the state's, written once the game writes
- * them. */
+ * them.
+ *
+ * Rewind (XBA-194, recomp_rewind.h), the same way too, but off unless RECOMP_REWIND=1 (a capture is a 4 / 8 MB state,
+ * and the Vulkan RDP drains its work for each): a capture every RECOMP_REWIND_FRAMES frames (4 by default), one step
+ * back per shown frame while the hotkey is held (Back + left trigger, R), silent. */
 #define _GNU_SOURCE /* pread, nanosleep */
 #include "n64_runtime.h"
 
@@ -33,6 +37,7 @@
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
+#include "recomp_rewind.h"
 #include "recomp_states.h"
 
 #include <SDL.h>
@@ -635,6 +640,41 @@ static int state_save_op(int slot, void *user)
     return rc;
 }
 
+/* A state was loaded into m (a slot, a rewind step), s_mu held: the audio it had queued was heard already, and its
+ * saves are what the game sees now: the files change only once the game writes them. */
+static void state_loaded_locked(n64_machine *m)
+{
+    int16_t sink[1024 * 2];
+    while (n64_audio_pull(m, sink, 1024) > 0)
+        ;
+    for (int kind = N64_SAVE_EEPROM4K; kind < N_SAVES; kind++) {
+        size_t sn = 0;
+        const uint8_t *cur = n64_save_data(m, (n64_save_kind)kind, &sn);
+        if (cur && sn && (s_saved[kind] || (s_saved[kind] = malloc(sn))))
+            memcpy(s_saved[kind], cur, sn);
+    }
+}
+
+/* Rewind (XBA-194): a capture is the state alone (the picture is in RDRAM, n64_display). Under s_mu. */
+static size_t rewind_size(void *user)
+{
+    return n64_state_size((n64_machine *)user); /* only when a capture is due: it draws the RDP's work out */
+}
+
+static size_t rewind_save(uint8_t *out, size_t cap, void *user)
+{
+    return n64_state_save((n64_machine *)user, out, cap);
+}
+
+static int rewind_load(const uint8_t *in, size_t n, void *user)
+{
+    n64_machine *m = user;
+    if (n64_state_load(m, in, n) != N64_STATE_OK)
+        return -1;
+    state_loaded_locked(m);
+    return 0;
+}
+
 static int state_load_op(int slot, void *user)
 {
     (void)user;
@@ -654,16 +694,7 @@ static int state_load_op(int slot, void *user)
         } else {
             rc = n64_state_load(s_m, blob, n); /* N64_STATE_* share RECOMP_STATE_*'s values */
             if (rc == N64_STATE_OK) {
-                int16_t sink[1024 * 2];
-                while (n64_audio_pull(s_m, sink, 1024) > 0) /* what the state had queued was heard already */
-                    ;
-                /* The state's saves are what the game sees; the files change only once it writes them. */
-                for (int kind = N64_SAVE_EEPROM4K; kind < N_SAVES; kind++) {
-                    size_t sn = 0;
-                    const uint8_t *cur = n64_save_data(s_m, (n64_save_kind)kind, &sn);
-                    if (cur && sn && (s_saved[kind] || (s_saved[kind] = malloc(sn))))
-                        memcpy(s_saved[kind], cur, sn);
-                }
+                state_loaded_locked(s_m);
                 s_state_loaded = 1;
             }
         }
@@ -985,6 +1016,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
            recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
     memset(s_hk_pad, 0, sizeof s_hk_pad);
     recomp_hotkeys_get(); /* RECOMP_HOTKEYS / _KEYS, logged once (XBA-190) */
+    recomp_rewinder rw;
+    recomp_rewinder_init(&rw, "n64", NULL); /* RECOMP_REWIND (off by default), _MB, _FRAMES (XBA-194) */
     int resume = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume) {
         int r = recomp_states_resume();
@@ -1120,6 +1153,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
         }
         recomp_hotkeys_run(hk_pressed);
         recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
+        int rewinding = recomp_rewinder_begin(&rw, !!(hk_held & RECOMP_HK_BIT(RECOMP_HK_REWIND)));
         int ff = recomp_ff_active(), speed = recomp_ff_speed();
         if (ff != was_ff) {
             printf("n64: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",
@@ -1132,8 +1166,15 @@ int n64_runtime_run(const n64_runtime_opts *o)
         }
         /* Fast-forward: `speed` N64 frames per shown frame (max: as many as fit in one display frame), no frame skip
          * (only the last frame's picture is made anyway). */
-        int steps = ff ? (speed ? speed : 64) : 1, dirty = 0, skip = 0, on = display_on > 0;
+        int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1, dirty = 0, skip = 0, on = display_on > 0;
         uint64_t frame_ns = 16683333, burst_end = now_ns() + 15000000;
+        if (rewinding) { /* rewind held: one capture back per shown frame, no N64 frame runs, nothing heard */
+            pthread_mutex_lock(&s_mu);
+            if (recomp_rewinder_step(&rw, rewind_load, m) == 0)
+                recomp_states_note_load(); /* a fresh frame generation history */
+            on = n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
+            pthread_mutex_unlock(&s_mu);
+        }
         for (int step = 0; step < steps; step++) {
             pthread_mutex_lock(&s_mu);
             for (int port = 0; port < players; port++)
@@ -1141,6 +1182,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
             uint64_t c0 = n64_cycles(m);
             n64_run_frame(m);
             frame_ns = n64_runtime_frame_ns(n64_cycles(m) - c0);
+            recomp_rewinder_frame(&rw, rewind_size, rewind_save, m);
             if (s_state_loaded) {
                 s_state_loaded = 0;
                 next = now_ns(); /* a loaded state: the clock starts again from it */
@@ -1286,6 +1328,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     recomp_exit_hook_set(NULL);
     recomp_states_detach(); /* before s_mu: a save / load in progress finishes first */
     recomp_ff_hold(0);
+    recomp_rewinder_free(&rw); /* logs the capture cost */
     if (audio)
         host_audio_close();
     if (window)

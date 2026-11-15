@@ -771,6 +771,40 @@ in-game menu: [app-shell.md « In-game menu »](../docs/android/app-shell.md#in-
 (no frame skip while fast-forwarding), reads the hotkeys from every host pad, and
 the in-game menu shows the rows for an N64 game (`Console.hasSaveStates`).
 
+**Rewind (XBA-194).** Hold the rewind hotkey (pad: **Back + left trigger**; desktop: **R**, not Backspace, the GBA's
+Select; `rewind` in `RECOMP_HOTKEYS` / `_KEYS`) and the game goes back in time, one capture per shown frame, silent;
+let go and it plays on from there. `src/platform/recomp_rewind.h` (in `xbr_host_core`):
+
+- The ring: the runtime captures its machine (the save-state blob above; the GBA adds the frame's picture, which its
+  state does not hold; the PS1 and N64 pictures come back from VRAM / RDRAM) every `RECOMP_REWIND_FRAMES` frames.
+  The newest capture is held whole; each older one is the XOR with the capture after it, coded as runs of zero bytes
+  skipped and literal bytes kept (no dependency, a few dozen lines). Stepping back decodes one delta onto the newest,
+  so a step costs the same at any depth, and the oldest capture goes for free when the memory cap
+  (`RECOMP_REWIND_MB`, default 64; it counts the deltas, the newest capture and the coding buffer) is reached: these
+  backward deltas need no keyframe. Captures of different sizes (the N64 leaves zero RDRAM pages out) code the same
+  way.
+- The runtimes (`recomp_rewinder`): a capture after a console frame when one is due, at most one per shown frame (so
+  fast-forward never captures more than once per display frame); while the hotkey is held, no console frame runs,
+  the newest capture is loaded (the same post-load path as a slot: queued audio dropped, the save chip / cards / paks
+  the state brought back reach storage only once the game writes them) and dropped unless it is the last; the frame
+  generation history starts again on each step (`recomp_states_note_load`). The cost is logged at the end of a run
+  (`<console>: rewind: N captures, x ms each ...`).
+- Defaults: GBA on, a capture every 2 frames; PS1 on, every 3; N64 **off** (every 4 when `RECOMP_REWIND=1`). Capture
+  cost measured on our homebrew (x86-64 host under load, `--rewind`): GBA 0.06 ms (639 KB raw, about 5 KB a capture
+  held); PS1 0.5 ms (4 MB raw, about 40 KB a capture: 64 MB keep minutes of a static scene, tens of seconds of a busy
+  one); N64 1.4 ms on the homebrew, 2.0 ms average with a full 8 MB RDRAM and up to 10 ms peaks, before any Vulkan RDP
+  drain (each capture synchronises the GPU): off by default, a game can turn it on (its settings). The N64 software
+  RDP's hidden-bit packing in `n64_rdp_state_save_sw` went from 6 ms to under 1 ms for this (the format is unchanged).
+
+Headless: `gba_run` / `ps1_run` / `n64_run --rewind C:R [--rewind-mb M]` (`recomp_rewind_check`): `--frames` frames
+with pseudo-random pads, a capture every C frames through the runtimes' `recomp_rewinder`, R steps back; the picture
+must be the one recorded after that capture's frame and every frame after it (picture and audio) the first run's;
+prints `REWIND OK` with the capture cost (exit 6 on a difference). Tests: `tests/recomp_rewind` (the codec with sizes
+that change and corrupt deltas, the ring's round trips, the memory cap and the oldest dropped, the settings, the
+capture schedule under fast-forward, the steps, the check on a fake machine, a load that is not exact caught),
+`gba_rewind_hb_*`, `gba_rewind_cap` (a 2 MB cap), `ps1_rewind_hb_*` (with a disc read, `overlay`), `ps1_rewind_cap`,
+`n64_rewind_hb_*`; the hotkey's default and text form in `tests/recomp_states`.
+
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every
 repository.

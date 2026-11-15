@@ -648,6 +648,8 @@ exist in the runtime and mean something to a player are offered. Graphics and Au
 | General › Enhancements (only for a game whose pack has `title_layer`: the toolkit has optional enhancements for it) | On (default), Off | none: `files/settings/enhancements_<TID>`; off, the game's next Prepare runs with `XBA_NO_TITLE_LAYER=1`, and Home offers Prepare again while the pack differs ([profiles.md](../technical/profiles.md#optional-by-construction), [prepare.md](prepare.md#packjson) `title_layer`) |
 | General › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
 | General › Controller rumble (all consoles) | On (default), Off | `RECOMP_RUMBLE=0` when off: no motor for the Xbox's emulated USB pad, the PS1 DualShock or the N64 Rumble Pak |
+| General › Rewind (all consoles; GBA, PS1, N64 only) | On (not N64) (default), On, Off | XBA-194: `RECOMP_REWIND=1` / `0`; the default writes nothing (on for the GBA and the PS1, off for the N64, whose captures cost more: [consoles/README.md « Rewind »](../../consoles/README.md)). Hold the rewind hotkey (Select + L2) to go back; a game can have its own (an N64 game can turn it on) |
+| General › Rewind memory (all consoles; GBA, PS1, N64 only) | 32 MB, 64 MB (default), 128 MB, 256 MB | `RECOMP_REWIND_MB`: the history's cap, the oldest moments go first |
 | Graphics › Vertical sync (all consoles) | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Scale (all consoles; GBA, PS1, N64 only) | Keep shape (default), Whole pixels, Stretch | `RECOMP_SCALE=integer` / `stretch`; Keep shape writes nothing (the runtimes' `aspect`). A game can have its own ([Settings per console](#settings-per-console)) |
 | Graphics › Picture filter (all consoles; GBA, PS1, N64 only) | Console default (default: GBA sharp, PS1 and N64 smooth), Sharp, Smooth | `RECOMP_FILTER=nearest` / `linear`; Console default writes nothing. A game can have its own |
@@ -709,6 +711,7 @@ last column says where it could be set per game before, its files now moved into
 |---|---|---|---|
 | General › Language | yes | no | Xbox: in-game menu (`language_<TITLEID>`) |
 | General › Controller rumble (`RECOMP_RUMBLE`) | the emulated USB pad | PS1 DualShock, N64 Rumble Pak | no (an N64 game's pak: its Home, `n64_pak_<KEY>`) |
+| General › Rewind, Rewind memory (`RECOMP_REWIND`, `_MB`, XBA-194) | no | yes (N64 off by default) | since XBA-188 only |
 | Graphics › Vertical sync (`RECOMP_PRESENT_VSYNC`) | yes | yes | no |
 | Graphics › Scale (`RECOMP_SCALE`) | no | yes | console game: its Home › Options, or the in-game menu (`scale_<KEY>`) |
 | Graphics › Picture filter (`RECOMP_FILTER`) | no | yes | console game: the same (`filter_<KEY>`) |
@@ -806,8 +809,8 @@ One logcat line at the start: « shell: game settings <KEY> (<console>): RECOMP_
 
 **Game settings screen.** From an Xbox title's Home (**Game settings**, the pill after Settings) and from a console
 game's Home (**Game settings**, after Controls; it was « Options »): every option that applies to the game's console
-(the [table](#settings-per-console): « All consoles » ones for every game, the Xbox's own for Xbox titles, scale and
-filter for the consoles, internal resolution for the PS1 and the N64, frame generation in an APK with it), under
+(the [table](#settings-per-console): « All consoles » ones for every game, the Xbox's own for Xbox titles, scale,
+filter, rewind and its memory for the consoles, internal resolution for the PS1 and the N64, frame generation in an APK with it), under
 General / Graphics / Audio / Advanced. Each row: « As in Settings (<Settings' value>) », then each of Settings'
 choices (left / right, A); a **This game** badge when the game's value differs from Settings'. Then « This game »:
 **Controls** (« As in Settings » or « This game only »; A opens its Controls), for an Xbox title its Game theme and
@@ -1003,7 +1006,7 @@ Tests: `tests/console_pad` (defaults = the old mappings, text, thresholds, the o
 
 ### Hotkeys
 
-XBA-190. The pad chords of fast-forward, quick save / load, the quick slot and the in-game menu are the player's
+XBA-190. The pad chords of fast-forward, quick save / load, the quick slot, rewind (XBA-194) and the in-game menu are the player's
 (`Hotkeys.java`; the runtime's side: [consoles/README.md « Save states and fast-forward »](../../consoles/README.md),
 `src/platform/recomp_hotkeys.h`). The text is `RECOMP_HOTKEYS` (`action:modifier+button`, only what differs from the
 defaults): **every game's** in `recomp.cfg`, a **game's own** in its settings file (`files/settings/game/<KEY>.cfg`,
@@ -1016,6 +1019,7 @@ chord; « » = the defaults for this game, `recomp.cfg`'s line skipped).
 | Fast-forward on / off | none | the menu's toggle |
 | Quick save / Quick load | Select + R1 / Select + L1 | the quick slot |
 | Next / Previous quick slot | none | around 1..4, the menu says « Quick slot: N » |
+| Rewind (hold) | Select + L2 | XBA-194: back in time while held, one capture per frame, silent; let go to play on ([Rewind](#rewind)) |
 | Game menu (held ½ s) | Select + Start | the only one an Xbox title has (no save states there, decision 2026-11-14) |
 
 **Controls › Hotkeys** (the end of a GBA / PS1 / N64 game's Controls and of the Xbox Controls, before « Reset
@@ -1038,6 +1042,23 @@ title but the menu's).
 Tests: `tests/recomp_states` (`test_hotkey_*`: text forms, remapped chords and keys per frame, what they run),
 `HotkeysTest` (model, conflicts, capture, combo, storage and export), `LauncherConsoleControlsTest.gbaHotkeys`
 (screenshot `console-controls-5-hotkeys`), `LauncherControlsTest` (the Xbox's menu row), `GameMenuTest`.
+
+### Rewind
+
+XBA-194. A GBA, PS1 or N64 game goes back in time while the **Rewind (hold)** hotkey is held (Select + L2 by default,
+a [hotkey](#hotkeys) like the others: Controls › Hotkeys changes it, the in-game menu's Controls page lists it): each
+frame shows one capture further back, without sound; letting go plays on from that moment (what came after is
+forgotten). The runtime keeps the history ([consoles/README.md « Rewind »](../../consoles/README.md)): a capture every
+2 frames on the GBA, 3 on the PS1, 4 on the N64, in at most **Settings › General › Rewind memory** (64 MB by default:
+a minute or more of a GBA game, tens of seconds of a busy PS1 game). **Settings › General › Rewind**: « On (not N64) »
+(default: the N64's captures cost more, 2 ms and up every 4 frames), On, Off; both rows are « All consoles » ones and
+a game can have its own in its Game settings (an N64 game can turn rewind on there). Frame generation starts a fresh
+history at each step. The quick save / load and the slots are unaffected: a slot loaded is a point the rewind can go
+back past, to before the load.
+
+Tests: `HotkeysTest.rewindAction` (the action, its default and text form, no clash with the other defaults, shown for
+every console with save states and not for an Xbox title), `GameSettingsTest.rowsPerConsole` (rewind rows for the
+GBA, PS1 and N64, not for an Xbox title); the runtime's in `tests/recomp_rewind` and the consoles' `*_rewind_*`.
 
 ### Device check (hotkeys, XBA-190), for Alex
 

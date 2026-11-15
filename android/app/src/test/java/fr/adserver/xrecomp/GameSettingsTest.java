@@ -174,6 +174,12 @@ public class GameSettingsTest {
                     || gba.contains("OPT_GPU_FPS_CAP") || gba.contains("OPT_HRTF"));
         assertTrue(titles(GameSettings.options(Console.PS1, false)).contains("OPT_UPSCALE"));
         assertTrue(titles(GameSettings.options(Console.N64, false)).contains("OPT_UPSCALE"));
+        // XBA-194: rewind and its memory for a GBA, PS1 or N64 game, never an Xbox title (no save states there).
+        for (Console c : new Console[] { Console.GBA, Console.PS1, Console.N64 }) {
+            List<String> t = titles(GameSettings.options(c, false));
+            assertTrue(c + " rewind", t.contains("OPT_REWIND") && t.contains("OPT_REWIND_MB"));
+        }
+        assertFalse(xbox.contains("OPT_REWIND") || xbox.contains("OPT_REWIND_MB"));
         assertEquals(List.of("RECOMP_PAD_MAP", "RECOMP_HOTKEYS"), GameSettings.extraKeys(Console.XBOX));
         assertEquals(List.of("RECOMP_N64_PAD_MAP", "RECOMP_N64_PAK", "RECOMP_HOTKEYS"), GameSettings.extraKeys(Console.N64));
     }

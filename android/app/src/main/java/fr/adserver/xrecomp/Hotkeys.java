@@ -12,7 +12,7 @@ import java.util.Objects;
 
 /**
  * The player's hotkeys (XBA-190, docs/android/app-shell.md « Hotkeys »): which pad chord does fast-forward, quick save /
- * load, the quick slot and the in-game menu. The text is src/platform/recomp_hotkeys.h's RECOMP_HOTKEYS (« action:mod+
+ * load, the quick slot, rewind (XBA-194, held) and the in-game menu. The text is src/platform/recomp_hotkeys.h's RECOMP_HOTKEYS (« action:mod+
  * button », only what differs from the defaults), kept in recomp.cfg for every game and in a game's own settings
  * (GameSettings, XBA-188) when its Controls are « This game only »; the GBA / PS1 / N64 runtimes read it at the start,
  * the in-game menu ({@link MenuTriggers.Combo}) reads the menu chord, the only one an Xbox title has (decision
@@ -25,7 +25,7 @@ final class Hotkeys {
 
     enum Action {
         FF_HOLD("ff_hold"), FF_TOGGLE("ff_toggle"), QSAVE("qsave"), QLOAD("qload"), SLOT_NEXT("slot_next"),
-        SLOT_PREV("slot_prev"), MENU("menu");
+        SLOT_PREV("slot_prev"), REWIND("rewind"), MENU("menu");
 
         final String key;
 
@@ -145,7 +145,7 @@ final class Hotkeys {
         }
     }
 
-    /** recomp_hotkeys.c's defaults: XBA-182's chords, Select + Start for the menu. */
+    /** recomp_hotkeys.c's defaults: XBA-182's chords, Select + L2 held for rewind (XBA-194), Select + Start for the menu. */
     static Chord def(Action a) {
         switch (a) {
         case FF_HOLD:
@@ -154,6 +154,8 @@ final class Hotkeys {
             return new Chord(PadMapping.Source.BACK, PadMapping.Source.RIGHT_SHOULDER);
         case QLOAD:
             return new Chord(PadMapping.Source.BACK, PadMapping.Source.LEFT_SHOULDER);
+        case REWIND:
+            return new Chord(PadMapping.Source.BACK, PadMapping.Source.LEFT_TRIGGER);
         case MENU:
             return new Chord(PadMapping.Source.BACK, PadMapping.Source.START);
         default:
@@ -454,6 +456,7 @@ final class Hotkeys {
         case QLOAD: return R.string.HK_QLOAD;
         case SLOT_NEXT: return R.string.HK_SLOT_NEXT;
         case SLOT_PREV: return R.string.HK_SLOT_PREV;
+        case REWIND: return R.string.HK_REWIND;
         default: return R.string.HK_MENU;
         }
     }

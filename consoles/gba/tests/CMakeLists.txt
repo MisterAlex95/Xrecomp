@@ -17,6 +17,7 @@ endif()
 #   gba_hb_<prog>      our homebrew under gba_run --result, built-in BIOS (HLE)
 #   gba_hb_lle_<prog>  the same through the Cult-of-GBA BIOS (LLE)
 #   gba_jsmolka_<t>    jsmolka/gba-tests arm / thumb / memory / bios, and save/sram, flash64, flash128, none
+#   gba_rewind_*       rewind round trips on the homebrew (gba_run --rewind, XBA-194)
 #   gba_rc_*           the same ROMs recompiled (gba_tools.recomp + cc, discovery loop), in lockstep with the
 #                      interpreter; gba_rc_fuzz: random ARM / Thumb programs, same comparison (needs python3, cc)
 # The ROM and BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays
@@ -142,6 +143,18 @@ if(TARGET gba_run)
         COMMAND sh ${GBA_STATE_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/gfx.gba
                 ${CMAKE_CURRENT_BINARY_DIR}/state/wrong_game other:${GBA_HOMEBREW_DIR}/sound.gba)
     set_tests_properties(gba_state_hb_lle_sound gba_state_wrong_game PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    # Rewind (XBA-194, gba_run --rewind): 600 frames with pseudo-random keys, a capture every 2 frames as the runtime
+    # takes them, 90 steps back: the picture there and the frames after it must be the first run's
+    # (gba_rewind_hb_*); gba_rewind_cap: a 2 MB cap drops the oldest captures, the rest still come back exact.
+    foreach(prog hello cpu timer_irq iwram_copy gfx pad sound)
+        add_test(NAME gba_rewind_hb_${prog}
+            COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba --frames 600 --rewind 2:90)
+        set_tests_properties(gba_rewind_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
+    endforeach()
+    add_test(NAME gba_rewind_cap
+        COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/sound.gba --frames 2400 --rewind 1:2000
+                --rewind-mb 2)
+    set_tests_properties(gba_rewind_cap PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(NAME gba_rc_fuzz

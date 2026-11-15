@@ -11,6 +11,8 @@
  * Save states and fast-forward (XBA-182, recomp_states.h), the GBA runtime's way: the run attaches itself while it
  * plays; the in-game menu and the hotkeys (XBA-190, recomp_hotkeys.h; desktop F1-F4 / Shift+F1-F4 / Tab by default) save and load
  * between frames under s_mu; fast-forward runs `speed` frames per shown frame, their audio averaged down.
+ * Rewind (XBA-194, recomp_rewind.h), the same way too: a capture every RECOMP_REWIND_FRAMES frames (3 by default),
+ * one step back per shown frame while the hotkey is held (Select + L2, R), silent.
  *
  * Picture: ps1_display gives the display area (256 / 320 / 368 / 512 / 640 x 240 / 480, 15- or 24-bit) as XRGB; it is
  * shown at 4:3 whatever its width (host_window_set_aspect), as a television did. At an internal resolution above 1x
@@ -29,6 +31,7 @@
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
+#include "recomp_rewind.h"
 #include "recomp_states.h"
 
 #include <SDL.h>
@@ -519,6 +522,41 @@ static int state_save_op(int slot, void *user)
     return rc;
 }
 
+/* A state was loaded into m (a slot, a rewind step), s_mu held: the audio it had queued was heard already, and its
+ * cards are what the game sees now: the files change only once the game writes them. */
+static void state_loaded_locked(ps1_machine *m)
+{
+    int16_t sink[1024 * 2];
+    while (ps1_audio_pull(m, sink, 1024) > 0)
+        ;
+    for (int c = 0; c < 2; c++) {
+        size_t cn = 0;
+        const uint8_t *cur = ps1_card_data(m, c, &cn);
+        if (cur && cn == PS1_CARD_SIZE)
+            memcpy(s_saved[c], cur, cn);
+    }
+}
+
+/* Rewind (XBA-194): a capture is the state alone (the picture comes from VRAM, ps1_display). Under s_mu. */
+static size_t rewind_size(void *user)
+{
+    return ps1_state_size((ps1_machine *)user);
+}
+
+static size_t rewind_save(uint8_t *out, size_t cap, void *user)
+{
+    return ps1_state_save((ps1_machine *)user, out, cap);
+}
+
+static int rewind_load(const uint8_t *in, size_t n, void *user)
+{
+    ps1_machine *m = user;
+    if (ps1_state_load(m, in, n) != PS1_STATE_OK)
+        return -1;
+    state_loaded_locked(m);
+    return 0;
+}
+
 static int state_load_op(int slot, void *user)
 {
     (void)user;
@@ -538,16 +576,7 @@ static int state_load_op(int slot, void *user)
         } else {
             rc = ps1_state_load(s_m, blob, n); /* PS1_STATE_* share RECOMP_STATE_*'s values */
             if (rc == PS1_STATE_OK) {
-                int16_t sink[1024 * 2];
-                while (ps1_audio_pull(s_m, sink, 1024) > 0) /* what the state had queued was heard already */
-                    ;
-                /* The state's cards are what the game sees; the files change only once it writes them. */
-                for (int c = 0; c < 2; c++) {
-                    size_t cn = 0;
-                    const uint8_t *cur = ps1_card_data(s_m, c, &cn);
-                    if (cur && cn == PS1_CARD_SIZE)
-                        memcpy(s_saved[c], cur, cn);
-                }
+                state_loaded_locked(s_m);
                 s_state_loaded = 1;
             }
         }
@@ -965,6 +994,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
            recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
     memset(s_hk_pad, 0, sizeof s_hk_pad);
     recomp_hotkeys_get(); /* RECOMP_HOTKEYS / _KEYS, logged once (XBA-190) */
+    recomp_rewinder rw;
+    recomp_rewinder_init(&rw, "ps1", NULL); /* RECOMP_REWIND, _MB, _FRAMES (XBA-194) */
     int resume = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume) {
         int r = recomp_states_resume();
@@ -1087,6 +1118,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         }
         recomp_hotkeys_run(hk_pressed);
         recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
+        int rewinding = recomp_rewinder_begin(&rw, !!(hk_held & RECOMP_HK_BIT(RECOMP_HK_REWIND)));
         int ff = recomp_ff_active(), speed = recomp_ff_speed();
         if (ff != was_ff) {
             printf("ps1: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",
@@ -1097,8 +1129,15 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             next = now_ns();
         }
         /* Fast-forward: `speed` PS1 frames per shown frame (max: as many as fit in one display frame). */
-        int steps = ff ? (speed ? speed : 64) : 1, dirty = 0, on = 0;
+        int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1, dirty = 0, on = 0;
         uint64_t frame_ns = 16683333, burst_end = now_ns() + 15000000;
+        if (rewinding) { /* rewind held: one capture back per shown frame, no PS1 frame runs, nothing heard */
+            pthread_mutex_lock(&s_mu);
+            if (recomp_rewinder_step(&rw, rewind_load, m) == 0)
+                recomp_states_note_load(); /* a fresh frame generation history */
+            on = ps1_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
+            pthread_mutex_unlock(&s_mu);
+        }
         for (int step = 0; step < steps; step++) {
             pthread_mutex_lock(&s_mu);
             disc_swap_step(m, &swap, frames + 1); /* the frame about to run */
@@ -1108,6 +1147,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             uint64_t c0 = ps1_cycles(m);
             ps1_run_frame(m);
             frame_ns = ps1_runtime_frame_ns(ps1_cycles(m) - c0);
+            recomp_rewinder_frame(&rw, rewind_size, rewind_save, m);
             if (s_state_loaded) {
                 s_state_loaded = 0;
                 next = now_ns(); /* a loaded state: the clock starts again from it */
@@ -1224,6 +1264,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     recomp_exit_hook_set(NULL);
     recomp_states_detach(); /* before s_mu: a save / load in progress finishes first */
     recomp_ff_hold(0);
+    recomp_rewinder_free(&rw); /* logs the capture cost */
     if (audio)
         host_audio_close();
     if (window)

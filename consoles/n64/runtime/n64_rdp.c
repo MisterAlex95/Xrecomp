@@ -2751,6 +2751,49 @@ void n64_rdp_attach_dmem(n64_rdp *d, const uint8_t *dmem) { d->dmem = dmem; }
  * command), its primitive count (the noise seed) and the hidden RDRAM bits, four 2-bit values per byte. */
 static size_t hidden_n(const n64_rdp *d) { return d->bus.rdram_size / 2 + 1; }
 
+/* The hidden bits, 2 per entry, packed 4 entries a byte (entry i in bits (i & 3) * 2). Eight entries at a time and
+ * all-zero runs skipped: a state is taken every few frames for rewind (XBA-194), 4 M entries with 8 MB of RDRAM. */
+static void hidden_pack(const uint8_t *hid, size_t n, uint8_t *h)
+{
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t v;
+        memcpy(&v, hid + i, 8);
+        v &= 0x0303030303030303ull;
+        if (!v) {
+            h[i >> 2] = h[(i >> 2) + 1] = 0;
+            continue;
+        }
+        h[i >> 2] = (uint8_t)(hid[i] & 3) | (uint8_t)((hid[i + 1] & 3) << 2) | (uint8_t)((hid[i + 2] & 3) << 4) |
+                    (uint8_t)((hid[i + 3] & 3) << 6);
+        h[(i >> 2) + 1] = (uint8_t)(hid[i + 4] & 3) | (uint8_t)((hid[i + 5] & 3) << 2) |
+                          (uint8_t)((hid[i + 6] & 3) << 4) | (uint8_t)((hid[i + 7] & 3) << 6);
+    }
+    if (i < n) {
+        memset(h + (i >> 2), 0, (n - i + 3) / 4);
+        for (; i < n; i++)
+            h[i >> 2] |= (uint8_t)((hid[i] & 3) << ((i & 3) * 2));
+    }
+}
+
+static void hidden_unpack(const uint8_t *h, size_t n, uint8_t *hid)
+{
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint8_t a = h[i >> 2], b = h[(i >> 2) + 1];
+        if (!(a | b)) {
+            memset(hid + i, 0, 8);
+            continue;
+        }
+        for (int k = 0; k < 4; k++) {
+            hid[i + k] = (uint8_t)((a >> (k * 2)) & 3);
+            hid[i + 4 + k] = (uint8_t)((b >> (k * 2)) & 3);
+        }
+    }
+    for (; i < n; i++)
+        hid[i] = (uint8_t)((h[i >> 2] >> ((i & 3) * 2)) & 3);
+}
+
 size_t n64_rdp_state_extra_size(n64_rdp *d)
 {
     return sizeof(rdp_state) + 4 + (hidden_n(d) + 3) / 4;
@@ -2785,10 +2828,7 @@ void n64_rdp_state_save_sw(n64_rdp *d, n64_rdp_common_state *c, uint8_t *extra)
     memcpy(extra, &d->rd[0]->s, sizeof(rdp_state));
     memcpy(extra + sizeof(rdp_state), &d->rd[0]->prim_count, 4);
     uint8_t *h = extra + sizeof(rdp_state) + 4;
-    const size_t n = hidden_n(d);
-    memset(h, 0, (n + 3) / 4);
-    for (size_t i = 0; i < n; i++)
-        h[i >> 2] |= (uint8_t)((d->hidden[i] & 3) << ((i & 3) * 2));
+    hidden_pack(d->hidden, hidden_n(d), h);
 }
 
 int n64_rdp_state_load_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
@@ -2829,8 +2869,7 @@ int n64_rdp_state_load_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8
         memcpy(&st, extra, sizeof st);
         memcpy(&prims, extra + sizeof st, 4);
         const uint8_t *h = extra + sizeof st + 4;
-        for (size_t i = 0; i < hidden_n(d); i++)
-            d->hidden[i] = (uint8_t)((h[i >> 2] >> ((i & 3) * 2)) & 3);
+        hidden_unpack(h, hidden_n(d), d->hidden);
     } else { /* another back end's state: its drawing state is not ours, it starts as after a reset */
         state_reset(&st);
         memset(d->hidden, 0, hidden_n(d));

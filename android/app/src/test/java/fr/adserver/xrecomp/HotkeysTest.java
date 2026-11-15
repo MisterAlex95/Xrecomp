@@ -47,8 +47,27 @@ public class HotkeysTest {
         assertEquals("back+right_shoulder", h.get(Hotkeys.Action.QSAVE).text());
         assertEquals("back+left_shoulder", h.get(Hotkeys.Action.QLOAD).text());
         assertEquals("back+start", h.get(Hotkeys.Action.MENU).text());
+        assertEquals("back+left_trigger", h.get(Hotkeys.Action.REWIND).text());   // XBA-194, held
         assertTrue(h.get(Hotkeys.Action.FF_TOGGLE).isNone());
         assertTrue(h.get(Hotkeys.Action.SLOT_NEXT).isNone());
+    }
+
+    @Test
+    public void rewindAction() {
+        // XBA-194: recomp_hotkeys.c's « rewind », in recomp_hotkeys.h's order (after slot_prev, before menu).
+        assertSame(Hotkeys.Action.REWIND, Hotkeys.Action.of("rewind"));
+        Hotkeys h = Hotkeys.parse("rewind:select+lb,qload:none");
+        assertEquals(new Hotkeys.Chord(PadMapping.Source.BACK, PadMapping.Source.LEFT_SHOULDER),
+                     h.get(Hotkeys.Action.REWIND));
+        assertEquals("qload:none,rewind:back+left_shoulder", h.format());
+        // Its chord does not clash with the others by default; it shows for every console with save states.
+        Hotkeys d = new Hotkeys();
+        for (Console c : new Console[] { Console.GBA, Console.PS1, Console.N64 }) {
+            assertTrue(Hotkeys.actions(c).contains(Hotkeys.Action.REWIND));
+            assertTrue(d.sharing(Hotkeys.Action.REWIND, c).isEmpty());
+        }
+        assertFalse(Hotkeys.actions(Console.XBOX).contains(Hotkeys.Action.REWIND));
+        assertEquals(R.string.HK_REWIND, Hotkeys.label(Hotkeys.Action.REWIND));
     }
 
     @Test

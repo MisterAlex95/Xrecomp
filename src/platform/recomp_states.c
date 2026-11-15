@@ -305,6 +305,7 @@ static int run_op(int slot, int load)
 }
 
 unsigned recomp_states_loads(void) { return (unsigned)atomic_load(&s_loads); }
+void recomp_states_note_load(void) { atomic_fetch_add(&s_loads, 1); }
 
 int recomp_states_save(int slot) { return run_op(slot, 0); }
 int recomp_states_load(int slot) { return run_op(slot, 1); }

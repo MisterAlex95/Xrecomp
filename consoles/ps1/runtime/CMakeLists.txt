@@ -154,5 +154,8 @@ if(NOT ANDROID AND NOT TARGET ps1_run)
     add_executable(ps1_run tools/ps1_run.c)
     ps1_core_exported(ps1_run) # first, so the whole archive comes before the plain one
     target_link_libraries(ps1_run PRIVATE ps1_core)
+    # --rewind (XBA-194): the ring alone (libc), not the whole host layer.
+    target_sources(ps1_run PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/recomp_rewind.c)
+    target_include_directories(ps1_run PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform)
     target_compile_options(ps1_run PRIVATE -Wall -Wextra)
 endif()

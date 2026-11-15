@@ -24,6 +24,7 @@ endif()
 #                     interpreter; n64_rc_systemtest the suite under --pack; n64_rc_fuzz random MIPS III code
 #   n64_state_*       save states (XBA-183, state_rom.sh): round trips on the homebrew ROMs (interpreter, packs as
 #                     n64_rc_state_*, the Vulkan RDP), another ROM's state refused
+#   n64_rewind_*      rewind round trips on the homebrew ROMs (n64_run --rewind, XBA-194)
 #   n64_systemtest    lemmy-64/n64-systemtest (MIT) built from source: every CPU / COP0 / TLB / COP1 / memory test
 #                     must pass but the known gaps listed in systemtest_known.txt (RSP / RDP tests only count with
 #                     the real modules)
@@ -163,6 +164,13 @@ if(TARGET n64_run)
                  ${N64_HOMEBREW_DIR}/gfx.z64 ${CMAKE_CURRENT_BINARY_DIR}/upscale)
         set_tests_properties(n64_hb_gfx_upscale PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)
     endif()
+    # Rewind (XBA-194, n64_run --rewind): 600 frames with pseudo-random pads, a capture every 4 frames as the runtime
+    # takes them, 45 steps back: the picture there and the frames after it must be the first run's.
+    foreach(prog ${hb})
+        add_test(NAME n64_rewind_hb_${prog} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_rom.sh $<TARGET_FILE:n64_run>
+                 ${N64_HOMEBREW_DIR}/${prog}.z64 --frames 600 --rewind 4:45 --quiet)
+        set_tests_properties(n64_rewind_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    endforeach()
     # Save states (XBA-183, state_rom.sh): the round trip (a state saved after frame 150, the next 150 frames' picture
     # and audio hashed, then the same from the state loaded in a new machine) on every homebrew ROM, gfx's also
     # loaded with 2 and 4 RDP threads; with each ROM's pack below (n64_rc_state_*: states cross between lifted and

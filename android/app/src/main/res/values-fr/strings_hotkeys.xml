@@ -8,6 +8,7 @@
     <string name="HK_QLOAD">Chargement rapide</string>
     <string name="HK_SLOT_NEXT">Emplacement rapide suivant</string>
     <string name="HK_SLOT_PREV">Emplacement rapide précédent</string>
+    <string name="HK_REWIND">Retour en arrière (maintenir)</string>
     <string name="HK_MENU">Menu du jeu (maintenus ½ s)</string>
     <string name="HK_NONE">Aucun</string>
     <string name="HK_PRESS">Appuyez sur les boutons…</string>
@@ -21,7 +22,7 @@
     <string name="HK_SHARED">Mêmes boutons que : %1$s. Les deux se produiraient.</string>
     <string name="HK_GAME_NEEDS">Le jeu utilise %1$s : avec ce raccourci, appuyer dessus fait le raccourci à la place. Ajoutez un modificateur (maintenez Select d\'abord).</string>
     <string name="HK_RESET">Raccourcis par défaut</string>
-    <string name="HK_RESET_DETAIL">Tous les raccourcis reviennent aux accords d\'origine : Select + R2 maintenus pour l\'avance rapide, Select + R1 sauvegarde vite, Select + L1 charge vite, Select + Start maintenus ouvrent le menu du jeu.</string>
+    <string name="HK_RESET_DETAIL">Tous les raccourcis reviennent aux accords d\'origine : Select + R2 maintenus pour l\'avance rapide, Select + L2 maintenus pour revenir en arrière, Select + R1 sauvegarde vite, Select + L1 charge vite, Select + Start maintenus ouvrent le menu du jeu.</string>
     <string name="HK_RESET_DONE">Raccourcis d\'origine remis</string>
     <string name="HK_SLOT_EVENT">Emplacement rapide : %1$d</string>
 </resources>
