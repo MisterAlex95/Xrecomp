@@ -10,6 +10,8 @@
  *                                                     update changes the UUID: a new file, the old one stays unused.
  *   mesa/                                             MESA_SHADER_CACHE_DIR, Mesa's own disk cache (Turnip), set
  *                                                     before the driver opens unless the environment already has it.
+ *   ssbo-emulation/                                   the same two when Turnip's tu_enable_ssbo_emulation is on (8x,
+ *                                                     n64_vk_cache_turnip_env): its shaders differ, its cache apart.
  * The directory is created when missing. The file is written to a temporary name next to it, then renamed: a start
  * killed while writing leaves the previous file whole. A file that is truncated, of another format, of another device
  * or driver (UUID), or whose checksum fails is ignored (logged): the cache starts empty and the file is replaced at the
@@ -31,13 +33,22 @@ extern "C" {
 #define N64_VK_CACHE_HEADER 40                 /* magic, UUID, size, checksum */
 #define N64_VK_CACHE_MAX ((size_t)256 << 20)   /* a larger payload is not read */
 
-/* $RECOMP_VK_CACHE_DIR with a trailing '/', created when missing (parents too). 0: unset, empty, too long, or it
+/* $RECOMP_VK_CACHE_DIR with a trailing '/' (and "ssbo-emulation/" after n64_vk_cache_turnip_env returned 1), created
+ * when missing (parents too). 0: unset, empty, too long, or it
  * cannot be created (logged). */
 int n64_vk_cache_dir(char *out, size_t n);
 
-/* MESA_SHADER_CACHE_DIR=<dir>mesa (created) unless MESA_SHADER_CACHE_DIR is already set; nothing without a cache
- * directory. Before the driver is opened (Mesa reads it when the device is created). */
+/* MESA_SHADER_CACHE_DIR=<dir>mesa (created) unless MESA_SHADER_CACHE_DIR is already set to something else than what
+ * an earlier call set; nothing without a cache directory. Before the driver is opened (Mesa reads it when the device is created). */
 void n64_vk_cache_mesa_env(void);
+
+/* Turnip's tu_enable_ssbo_emulation (Mesa driconf, read from the environment when the driver opens; Mesa 26.2+:
+ * maxStorageBufferRange 2 GiB - 1 instead of 128 MiB on a7xx, buffers of 128 MiB or more through bounds-checked global
+ * memory). Before the driver opens: for a wanted factor of 8 (a 512 MB upscaled RDRAM binding) it is set to "true"
+ * unless already set or RECOMP_N64_TURNIP_SSBO_EMULATION=0; for 1x-4x a value this function set earlier in the
+ * process is removed (a player's own value stays). Returns 1 when the variable is now on ("true", "1", "yes", "on"),
+ * and then n64_vk_cache_dir is <RECOMP_VK_CACHE_DIR>/ssbo-emulation/ (pipelines and Mesa's cache apart). Logged. */
+int n64_vk_cache_turnip_env(int wanted_factor);
 
 /* <dir>pipelines-<uuid hex>.bin. 0: no cache directory. */
 int n64_vk_cache_file(char *out, size_t n, const uint8_t uuid[N64_VK_CACHE_UUID_SIZE]);

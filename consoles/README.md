@@ -714,10 +714,26 @@ bit for bit against angrylion.
   CPU: 640 VI pixels x the scale wide, 240 / 288 lines (480 / 576 interlaced, upscaled bob instead of our VI's weave)
   x the scale high, 1280 x 480 at 2x. The runtime shows it at 4:3 and crops the guard band as at 1x
   (`RECOMP_N64_CROP_EDGES`); `--screenshot` and `n64_run --ppm` write it at that size. Costs and limits:
-  - the upscaled RDRAM (8 MB x the factor squared) is bound as one storage buffer, so it must fit the device's
-    `maxStorageBufferRange` (128 MB on lavapipe and many mobile drivers: 4x at most), and the buffers and the VI's
-    images must fit in half the largest device-local heap. The factor is lowered with a log line otherwise
-    (`upscale 8x needs a 512 MB storage buffer, ... allows 128 MB`, `upscale lowered from 8x to 4x`);
+  - the upscaled RDRAM (8 MB x the factor squared: 512 MB at 8x), the upscaled hidden RDRAM (half that), the per-tile
+    colour / depth and the tile work list are each bound as one storage buffer, so each must fit the device's
+    `maxStorageBufferRange` (128 MB on many mobile drivers: 4x at most), and all the buffers and the VI's images must
+    fit in half the largest device-local heap and 3 GB (`fit_upscale`). The factor is lowered with a log line naming
+    the buffer otherwise (`upscale 8x needs a 512 MB storage buffer (upscaled RDRAM), ... allows 128 MB`,
+    `upscale lowered from 8x to 4x`); the factor kept is logged with its size (`upscale 8x: about 2045 MB of
+    buffers (upscaled RDRAM 512 MB, tile work list 512 MB, 524288 tile instances)`). The start line ends with the
+    device's limits (`storage range 128 MB, buffers <= ... MB, allocations <= ... MB, heap ... MB`);
+  - paraLLEl-RDP's per-tile buffers are capped (our patch, `third_party/parallel-rdp/README.md`): upstream sizes them
+    for factor^2 x 32768 tile instances (8x: a 2 GiB tile work list, 512 MB each of per-tile colour and depth, about
+    4.1 GB in all); we use min(factor^2, 16) x 32768, lowered until the tile work list fits the storage range (128 MB:
+    131072). A batch is flushed before a primitive that would overflow it, and a primitive larger than the whole
+    budget upscaled is drawn at 1x (logged once: `drawn at 1x`). At 8x that is about 2 GB of buffers (upscaled RDRAM
+    512, hidden 256, tile work list 512, per-tile 320, VI images ~380 MB). Test hooks: `RECOMP_N64_VK_RANGE_MB=<n>`
+    (the storage range seen by the factor check and the budget) and `RECOMP_N64_VK_TILE_INSTANCES=<n>` (a smaller
+    budget, upscaled only);
+  - the command processor is made twice at start (the check, then a fresh one for the game): the first one's buffers
+    are freed (`Device::wait_idle`) before the second is made, and large zero-filled buffers are cleared by the GPU,
+    not by a CPU memset of mapped memory (Turnip's memory is all host-visible). This runs on the emulation thread
+    (SDL's main thread), never on Android's UI thread;
   - the scanout is halved (filtered, super-sampled) until it is at most 2560 pixels wide, so 8x is read back at 4x;
     `RECOMP_N64_UPSCALE_DOWNSCALE=0..3` sets the halvings;
   - texture rectangles are drawn at 1x by default (2D and HUD art made for 1:1 texels shows seams otherwise):
@@ -725,7 +741,7 @@ bit for bit against angrylion.
     1x; `RECOMP_N64_UPSCALE_SSREADBACK=1` makes the RDRAM copy the upscaled picture averaged down (not bit-exact);
   - the start-up check runs upscaled: its frame buffer is 256 pixels wide, so the upscaled passes run, and its VI
     scanout must come out at the expected size and colour. A shader try that fails upscaled is made again at 1x
-    (`default shaders fail upscaled (2x) on <GPU>, trying 1x`). The start line ends `upscale 2x, scanout 2x`;
+    (`default shaders fail upscaled (2x) on <GPU>, trying 1x`). The start line has `upscale 2x, scanout 2x`;
   - the software RDP always draws at 1x: `n64: upscale 2x needs the Vulkan RDP, the software RDP draws at 1x`, also
     when the Vulkan RDP cannot start (Qualcomm's own driver on the Thor) or fails during the game.
 - **Custom Vulkan driver (Android).** The player can supply a driver, Mesa Turnip for the Adreno, which compiles
@@ -750,6 +766,16 @@ bit for bit against angrylion.
   cache goes to `<dir>/mesa` (`MESA_SHADER_CACHE_DIR`, unless set). Without it every start compiled the same
   pipelines again: ~1.35 s of a 4x start of Ocarina of Time on the Thor's Turnip. `n64_vk_cache.h`;
   [environment variables](../docs/runtime/environment-variables.md#custom-vulkan-driver-n64-rdp).
+- **8x on Turnip (Adreno 7xx).** Turnip's a7xx `maxStorageBufferRange` is 128 MB, so 8x (a 512 MB upscaled RDRAM
+  binding) needs Mesa's driconf `tu_enable_ssbo_emulation` (Mesa 26.2+, e.g. PurpleVK: the range becomes 2 GiB - 1,
+  buffers of 128 MB or more go through bounds-checked global memory). Before any driver opens, when the wanted factor
+  is 8, the runtime sets `tu_enable_ssbo_emulation=true` in the environment unless it is already set
+  (`n64_vk_cache_turnip_env`, logged `tu_enable_ssbo_emulation=true for 8x`); `RECOMP_N64_TURNIP_SSBO_EMULATION=0`
+  keeps it off, and it is never set for 1x-4x (a value set for an earlier 8x start in the process is removed). With
+  it on, the pipeline cache and Mesa's cache live in `<dir>/ssbo-emulation/` (the shaders differ) and the start line
+  ends `, tu_enable_ssbo_emulation`. A driver without the option keeps the 128 MB range: `upscale lowered from 8x to
+  4x`; an upscaled check that fails: 1x. Super-sampled readback is never used at 8x. After a whole 10-s window (not
+  the first) below 97 % speed at 8x the runtime logs once `n64: NN % speed at 8x over the last 10 s: try 4x`.
 
 Tests (`consoles/n64/tests`, built with `-DXBR_N64_RDP_VULKAN=ON`; without a GPU, Mesa's lavapipe with
 `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`):

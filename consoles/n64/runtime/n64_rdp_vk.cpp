@@ -45,8 +45,9 @@
  * each frame-buffer pass twice, at 1x into RDRAM as above (what the game reads back) and upscaled into GPU buffers of
  * RDRAM's size times the factor squared, which its own VI scans out (vk_scanout_rgba: into one of two kept host
  * buffers, read where the GPU copied them by n64_display / n64_display_rgba). The
- * factor is lowered first when those buffers exceed the device's storage buffer range or half its largest
- * device-local heap (fit_upscale, logged). The check at create then draws into a 256-pixel-wide frame buffer (the
+ * factor is lowered first when one of those buffers exceeds the device's storage buffer range, or all of them half
+ * its largest device-local heap or 3 GB (fit_upscale, logged; paraLLEl-RDP's per-tile buffers are capped by our
+ * tile-instance budget, third_party/parallel-rdp/README.md). The check at create then draws into a 256-pixel-wide frame buffer (the
  * width paraLLEl-RDP upscales from) and scans it out, so the upscaled and VI pipelines are compiled and checked too;
  * a try that fails upscaled is made again at 1x.
  *
@@ -297,58 +298,147 @@ int env_int(const char *name, int def)
     return e && *e ? atoi(e) : def;
 }
 
+bool g_ss8_logged; /* upscale_flags: the 8x refusal, logged once */
+bool g_ssbo_emulation; /* n64_vk_cache_turnip_env said on: for the start line */
+
 RDP::CommandProcessorFlags upscale_flags(int f)
 {
     RDP::CommandProcessorFlags fl = f >= 8   ? RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_8X_BIT
                                     : f >= 4 ? RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_4X_BIT
                                     : f >= 2 ? RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_2X_BIT
                                              : 0;
-    if (fl && env_int("RECOMP_N64_UPSCALE_SSREADBACK", 0) != 0)
-        fl |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT;
+    /* Not at 8x: its write mask would sit past the 512 MB upscaled RDRAM (atomicOr there, memory_interfacing.h), and
+     * it keeps paraLLEl-RDP's full tile-instance sizes (a 2 GiB tile work list). */
+    if (fl && env_int("RECOMP_N64_UPSCALE_SSREADBACK", 0) != 0) {
+        if (f < 8)
+            fl |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT;
+        else if (!g_ss8_logged) {
+            fprintf(stderr, "n64: Vulkan RDP: no super-sampled readback at 8x (RECOMP_N64_UPSCALE_SSREADBACK ignored)\n");
+            g_ss8_logged = true;
+        }
+    }
     return fl;
 }
 
-/* The largest factor up to f whose buffers the device can hold: paraLLEl-RDP binds the upscaled RDRAM (RDRAM's size
- * x f^2) as one storage buffer, so it must fit maxStorageBufferRange (128 MB on many mobile drivers: 4x at most with
- * 8 MB of RDRAM, 2x with the super-sampled readback's write mask), and the upscaled RDRAM, hidden RDRAM and the VI's images must fit in half the largest device-local
- * heap (the rest is the game's and the system's; on a phone that heap is the shared RAM). */
-int fit_upscale(VkRdp *d, int f)
+/* The storage buffer range the bindings must fit: $RECOMP_N64_VK_RANGE_MB (a test hook, also handed to paraLLEl-RDP's
+ * tile-instance budget), else the device's maxStorageBufferRange. */
+uint64_t storage_range(VkRdp *d)
 {
-    if (f <= 1)
-        return 1;
-    const VkPhysicalDeviceLimits &lim = d->dev->get_gpu_properties().limits;
+    const int mb = env_int("RECOMP_N64_VK_RANGE_MB", 0);
+    if (mb > 0)
+        return (uint64_t)mb << 20;
+    return d->dev->get_gpu_properties().limits.maxStorageBufferRange;
+}
+
+uint64_t largest_device_heap(VkRdp *d)
+{
     const VkPhysicalDeviceMemoryProperties &mem = d->dev->get_memory_properties();
     uint64_t heap = 0;
     for (uint32_t i = 0; i < mem.memoryHeapCount; i++)
         if (mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
             heap = std::max<uint64_t>(heap, mem.memoryHeaps[i].size);
+    return heap;
+}
+
+/* The test hooks, handed to paraLLEl-RDP before each command processor (process-wide, our patch): the range above when
+ * overridden, and $RECOMP_N64_VK_TILE_INSTANCES (a forced tile-instance budget, upscaled only). */
+void set_rdp_limits()
+{
+    const int mb = env_int("RECOMP_N64_VK_RANGE_MB", 0);
+    RDP::set_storage_range_override(mb > 0 ? (uint64_t)mb << 20 : 0);
+    const int n = env_int("RECOMP_N64_VK_TILE_INSTANCES", 0);
+    RDP::set_forced_tile_instances(n > 0 ? (unsigned)n : 0u);
+}
+
+constexpr uint64_t UPSCALE_CEILING = 3ull << 30; /* never more than 3 GB of upscaled buffers */
+
+/* The largest factor up to f whose buffers the device can hold. paraLLEl-RDP (with our tile-instance budget,
+ * RDP::renderer_buffer_sizes) binds as single storage buffers the upscaled RDRAM (RDRAM's size x f^2: 512 MB at 8x),
+ * the upscaled hidden RDRAM (half that), the per-tile colour / depth and the tile work list: each must fit
+ * maxStorageBufferRange (128 MB on many mobile drivers, Turnip's a7xx unless tu_enable_ssbo_emulation: 4x at most
+ * with 8 MB of RDRAM). All of them and the VI's images must fit half the largest device-local heap (the rest is the
+ * game's and the system's; on a phone that heap is the shared RAM) and 3 GB. Logged: which buffer failed. */
+int fit_upscale(VkRdp *d, int f)
+{
+    if (f <= 1)
+        return 1;
+    const char *gpu = d->dev->get_gpu_properties().deviceName;
+    const uint64_t range = storage_range(d);
+    const uint64_t heap = largest_device_heap(d);
     const uint64_t rdram = d->bus.rdram_size;
+    const int forced = env_int("RECOMP_N64_VK_TILE_INSTANCES", 0);
     const int asked = f;
     for (; f > 1; f /= 2) {
-        const uint64_t ff = (uint64_t)f * (uint64_t)f;
-        const uint64_t ss = (upscale_flags(f) & RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT)
-                                ? 2ull * RDP::Limits::MaxWidth * RDP::Limits::MaxHeight / 8 /* its write mask */
-                                : 0;
-        const uint64_t range = rdram * ff + ss;
+        const bool ss = (upscale_flags(f) & RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT) != 0;
+        const RDP::RendererBufferSizes b = RDP::renderer_buffer_sizes((unsigned)f, ss, rdram, rdram / 2, range,
+                                                                      forced > 0 ? (unsigned)forced : 0u);
+        const struct { const char *name; uint64_t size; } binds[] = {
+            { "upscaled RDRAM", b.rdram_slices },          { "upscaled hidden RDRAM", b.hidden_slices },
+            { "per-tile colour / depth", b.per_tile_color }, { "tile work list", b.tile_work_list },
+            { "tile binning", b.tile_binning },
+        };
+        const char *bad = nullptr;
+        uint64_t bad_size = 0;
+        for (const auto &bd : binds)
+            if (bd.size > range) {
+                bad = bd.name;
+                bad_size = bd.size;
+                break;
+            }
+        if (bad) {
+            fprintf(stderr, "n64: Vulkan RDP: upscale %dx needs a %llu MB storage buffer (%s), %s allows %llu MB\n", f,
+                    (unsigned long long)(bad_size >> 20), bad, gpu, (unsigned long long)(range >> 20));
+            continue;
+        }
         const uint64_t images = 4ull * (640ull * (uint64_t)f) * (576ull * (uint64_t)f) * 4ull; /* VI stages, RGBA8 */
-        const uint64_t need = range + rdram / 2 * ff + rdram + images;
-        if (range > lim.maxStorageBufferRange) {
-            fprintf(stderr, "n64: Vulkan RDP: upscale %dx needs a %llu MB storage buffer, %s allows %llu MB\n", f,
-                    (unsigned long long)(range >> 20), d->dev->get_gpu_properties().deviceName,
-                    (unsigned long long)(lim.maxStorageBufferRange >> 20));
+        const uint64_t need = b.total + rdram + images;
+        if (need > UPSCALE_CEILING || (heap && need > heap / 2)) {
+            fprintf(stderr, "n64: Vulkan RDP: upscale %dx needs about %llu MB of video memory, %s has %llu MB (at most "
+                            "half of it, and %llu MB, for the upscaled buffers)\n", f,
+                    (unsigned long long)(need >> 20), gpu, (unsigned long long)(heap >> 20),
+                    (unsigned long long)(UPSCALE_CEILING >> 20));
             continue;
         }
-        if (heap && need > heap / 2) {
-            fprintf(stderr, "n64: Vulkan RDP: upscale %dx needs about %llu MB of video memory, %s has %llu MB\n", f,
-                    (unsigned long long)(need >> 20), d->dev->get_gpu_properties().deviceName,
-                    (unsigned long long)(heap >> 20));
-            continue;
-        }
+        fprintf(stderr, "n64: Vulkan RDP: upscale %dx: about %llu MB of buffers (upscaled RDRAM %llu MB, tile work "
+                        "list %llu MB, %u tile instances)\n", f, (unsigned long long)(need >> 20),
+                (unsigned long long)(b.rdram_slices >> 20), (unsigned long long)(b.tile_work_list >> 20),
+                b.tile_instances);
         break;
     }
     if (f != asked)
         fprintf(stderr, "n64: Vulkan RDP: upscale lowered from %dx to %dx\n", asked, f);
     return f;
+}
+
+/* ", storage range 128 MB, buffers <= 1024 MB, allocations <= 1024 MB, heap 7543 MB" for the start line. */
+void limits_label(VkRdp *d, char *out, size_t n)
+{
+    const Vulkan::DeviceFeatures &ft = d->dev->get_device_features();
+    const uint64_t range = d->dev->get_gpu_properties().limits.maxStorageBufferRange;
+    snprintf(out, n, ", storage range %llu MB, buffers <= %llu MB, allocations <= %llu MB, heap %llu MB",
+             (unsigned long long)(range >> 20), (unsigned long long)(ft.vk13_props.maxBufferSize >> 20),
+             (unsigned long long)(ft.vk11_props.maxMemoryAllocationSize >> 20),
+             (unsigned long long)(largest_device_heap(d) >> 20));
+    if (g_ssbo_emulation) {
+        const size_t l = strlen(out);
+        snprintf(out + l, n - l, ", tu_enable_ssbo_emulation");
+    }
+    if (env_int("RECOMP_N64_VK_RANGE_MB", 0) > 0) {
+        const size_t l = strlen(out);
+        snprintf(out + l, n - l, " (RECOMP_N64_VK_RANGE_MB=%d)", env_int("RECOMP_N64_VK_RANGE_MB", 0));
+    }
+}
+
+/* Drops the command processor and frees its buffers now: Granite only queues a destroyed buffer for the frame context's
+ * next turn, so a new command processor made right after would hold a second set of upscaled buffers (8x before the
+ * tile-instance budget: 2 x 4.1 GB, the Thor's processes killed for memory). */
+void drop_cp(VkRdp *d)
+{
+    if (!d->cp)
+        return;
+    d->cp->idle();
+    d->cp.reset();
+    d->dev->wait_idle();
 }
 
 /* Halvings of the scanout: $RECOMP_N64_UPSCALE_DOWNSCALE (0..3, at most down to 1x), else as many as keep the picture
@@ -810,7 +900,8 @@ bool try_driver(VkRdp *d, bool *custom)
                             "games (Ocarina of Time), not used (RECOMP_N64_RDP_UBERSHADER=1 to try it)\n", gpu);
             break;
         }
-        d->cp.reset(); /* one set of (upscaled) buffers at a time */
+        drop_cp(d); /* one set of (upscaled) buffers at a time */
+        set_rdp_limits();
         d->cp.reset(new RDP::CommandProcessor(*d->dev, bus.rdram, 0, bus.rdram_size, bus.rdram_size / 2,
                                               tries[i].flags | upscale_flags(d->upscale)));
         if (!d->cp->device_is_supported() && d->upscale > 1) {
@@ -829,8 +920,8 @@ bool try_driver(VkRdp *d, bool *custom)
         if (check(d)) {
             d->cp_flags = tries[i].flags | upscale_flags(d->upscale);
             /* A fresh command processor for the game: none of the check's RDP state. */
-            d->cp->idle();
-            d->cp.reset();
+            drop_cp(d);
+            set_rdp_limits();
             d->cp.reset(new RDP::CommandProcessor(*d->dev, bus.rdram, 0, bus.rdram_size, bus.rdram_size / 2,
                                                   d->cp_flags));
             set_quirks(d);
@@ -839,7 +930,9 @@ bool try_driver(VkRdp *d, bool *custom)
                 snprintf(up, sizeof up, ", upscale %dx, scanout %dx%s", d->upscale, d->upscale >> d->down_steps,
                          (d->cp_flags & RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT)
                              ? ", super-sampled readback" : "");
-            printf("n64: Vulkan RDP on %s (paraLLEl-RDP, %s; %s%s)\n", gpu, tries[i].name, drv, up);
+            char lim[256];
+            limits_label(d, lim, sizeof lim);
+            printf("n64: Vulkan RDP on %s (paraLLEl-RDP, %s; %s%s%s)\n", gpu, tries[i].name, drv, up, lim);
             fflush(stdout);
             std::lock_guard<std::mutex> lk(g_pc_mu);
             pc_save_locked(d, "startup check");
@@ -880,7 +973,9 @@ void *vk_create(n64_rcp_bus bus)
         return nullptr;
     d->bus = bus;
     Vulkan::get_stalled_compiles(d->stalls0, d->stall_ns0); /* the check's compiles count as this RDP's */
-    n64_vk_cache_mesa_env(); /* before any driver opens */
+    /* before any driver opens: Turnip's SSBO emulation for 8x (its own cache directory), then Mesa's disk cache */
+    g_ssbo_emulation = n64_vk_cache_turnip_env(n64_rdp_upscale_wanted()) != 0;
+    n64_vk_cache_mesa_env();
     hook_threads();          /* before any command processor starts its threads */
 
     if (void *gipa = n64_vk_driver_open()) {

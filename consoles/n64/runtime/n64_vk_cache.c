@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -56,6 +57,12 @@ static int make_dirs(char *path)
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode) ? 0 : -1;
 }
 
+static int s_ssbo_emulation;  /* n64_vk_cache_turnip_env: the cache variant */
+static int s_ssbo_ours;       /* tu_enable_ssbo_emulation was set by n64_vk_cache_turnip_env */
+static char s_mesa_ours[1024]; /* the MESA_SHADER_CACHE_DIR n64_vk_cache_mesa_env set, "" none */
+
+#define SSBO_SUBDIR "ssbo-emulation"
+
 int n64_vk_cache_dir(char *out, size_t n)
 {
     const char *e = getenv("RECOMP_VK_CACHE_DIR");
@@ -63,7 +70,8 @@ int n64_vk_cache_dir(char *out, size_t n)
         return 0;
     const size_t len = strlen(e);
     const int slash = e[len - 1] == '/';
-    if (len + (slash ? 0 : 1) + 1 > n) {
+    const size_t sub = s_ssbo_emulation ? sizeof SSBO_SUBDIR : 0; /* "/ssbo-emulation" */
+    if (len + (slash ? 0 : 1) + sub + 1 > n) {
         fprintf(stderr, "n64: Vulkan RDP: RECOMP_VK_CACHE_DIR is too long, no pipeline cache\n");
         return 0;
     }
@@ -72,6 +80,10 @@ int n64_vk_cache_dir(char *out, size_t n)
     size_t l = len;
     while (l > 1 && out[l - 1] == '/')
         out[--l] = 0;
+    if (s_ssbo_emulation) {
+        memcpy(out + l, "/" SSBO_SUBDIR, sizeof SSBO_SUBDIR + 1);
+        l += sizeof SSBO_SUBDIR;
+    }
     if (make_dirs(out) != 0) {
         fprintf(stderr, "n64: Vulkan RDP: cannot create %s (%s), no pipeline cache\n", out, strerror(errno));
         return 0;
@@ -81,11 +93,39 @@ int n64_vk_cache_dir(char *out, size_t n)
     return 1;
 }
 
+static int truthy(const char *v)
+{
+    return v && (!strcmp(v, "1") || !strcasecmp(v, "true") || !strcasecmp(v, "yes") || !strcasecmp(v, "on"));
+}
+
+int n64_vk_cache_turnip_env(int wanted_factor)
+{
+    const char *off = getenv("RECOMP_N64_TURNIP_SSBO_EMULATION");
+    const int allowed = !(off && !strcmp(off, "0"));
+    const char *have = getenv("tu_enable_ssbo_emulation");
+    if (wanted_factor >= 8 && allowed) {
+        if (!have || !*have) {
+            setenv("tu_enable_ssbo_emulation", "true", 0);
+            s_ssbo_ours = 1;
+            fprintf(stderr, "n64: Vulkan RDP: tu_enable_ssbo_emulation=true for %dx (Turnip: storage buffers over 128 "
+                            "MB; RECOMP_N64_TURNIP_SSBO_EMULATION=0 turns it off)\n", wanted_factor);
+        }
+    } else if (s_ssbo_ours) {
+        unsetenv("tu_enable_ssbo_emulation"); /* ours, from an earlier start at 8x: never for 1x-4x */
+        s_ssbo_ours = 0;
+    }
+    have = getenv("tu_enable_ssbo_emulation");
+    s_ssbo_emulation = truthy(have);
+    if (s_ssbo_emulation && !s_ssbo_ours)
+        fprintf(stderr, "n64: Vulkan RDP: tu_enable_ssbo_emulation=%s from the environment\n", have);
+    return s_ssbo_emulation;
+}
+
 void n64_vk_cache_mesa_env(void)
 {
     const char *have = getenv("MESA_SHADER_CACHE_DIR");
-    if (have && *have)
-        return;
+    if (have && *have && strcmp(have, s_mesa_ours) != 0)
+        return; /* the player's (or the environment's) own */
     char dir[1024];
     if (!n64_vk_cache_dir(dir, sizeof dir - 8))
         return;
@@ -94,7 +134,8 @@ void n64_vk_cache_mesa_env(void)
         fprintf(stderr, "n64: Vulkan RDP: cannot create %s (%s)\n", dir, strerror(errno));
         return;
     }
-    setenv("MESA_SHADER_CACHE_DIR", dir, 0);
+    setenv("MESA_SHADER_CACHE_DIR", dir, 1);
+    snprintf(s_mesa_ours, sizeof s_mesa_ours, "%s", dir);
 }
 
 int n64_vk_cache_file(char *out, size_t n, const uint8_t uuid[N64_VK_CACHE_UUID_SIZE])

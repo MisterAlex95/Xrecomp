@@ -196,6 +196,43 @@ static void cache_tests(const char *base)
     n64_vk_cache_mesa_env();
     CHECK(!strcmp(getenv("MESA_SHADER_CACHE_DIR"), "/elsewhere"));
     unsetenv("MESA_SHADER_CACHE_DIR");
+
+    /* Turnip's SSBO emulation: set for 8x only, its cache apart; ours removed again for 4x; a player's value stays;
+     * RECOMP_N64_TURNIP_SSBO_EMULATION=0 keeps it off */
+    unsetenv("tu_enable_ssbo_emulation");
+    unsetenv("RECOMP_N64_TURNIP_SSBO_EMULATION");
+    CHECK(n64_vk_cache_turnip_env(4) == 0 && getenv("tu_enable_ssbo_emulation") == NULL);
+    CHECK(n64_vk_cache_turnip_env(8) == 1);
+    CHECK(getenv("tu_enable_ssbo_emulation") && !strcmp(getenv("tu_enable_ssbo_emulation"), "true"));
+    char emu[760];
+    snprintf(emu, sizeof emu, "%s/ssbo-emulation", set);
+    CHECK(n64_vk_cache_dir(dir, sizeof dir));
+    snprintf(want, sizeof want, "%s/", emu);
+    CHECK(!strcmp(dir, want));
+    CHECK(stat(emu, &st) == 0 && S_ISDIR(st.st_mode));
+    char emu_path[900];
+    CHECK(n64_vk_cache_file(emu_path, sizeof emu_path, uuid));
+    snprintf(want, sizeof want, "%s/pipelines-a0a1a2a3a4a5a6a7a8a9aaabacadaeaf.bin", emu);
+    CHECK(!strcmp(emu_path, want));
+    n64_vk_cache_mesa_env();
+    snprintf(want, sizeof want, "%s/mesa", emu);
+    CHECK(getenv("MESA_SHADER_CACHE_DIR") && !strcmp(getenv("MESA_SHADER_CACHE_DIR"), want));
+    rmdir(want);
+    CHECK(n64_vk_cache_turnip_env(2) == 0 && getenv("tu_enable_ssbo_emulation") == NULL);
+    n64_vk_cache_mesa_env(); /* ours from the 8x start: back to the plain directory */
+    snprintf(want, sizeof want, "%s/mesa", set);
+    CHECK(getenv("MESA_SHADER_CACHE_DIR") && !strcmp(getenv("MESA_SHADER_CACHE_DIR"), want));
+    rmdir(emu);
+    setenv("tu_enable_ssbo_emulation", "false", 1);
+    CHECK(n64_vk_cache_turnip_env(8) == 0 && !strcmp(getenv("tu_enable_ssbo_emulation"), "false"));
+    setenv("tu_enable_ssbo_emulation", "1", 1);
+    CHECK(n64_vk_cache_turnip_env(1) == 1 && !strcmp(getenv("tu_enable_ssbo_emulation"), "1"));
+    unsetenv("tu_enable_ssbo_emulation");
+    setenv("RECOMP_N64_TURNIP_SSBO_EMULATION", "0", 1);
+    CHECK(n64_vk_cache_turnip_env(8) == 0 && getenv("tu_enable_ssbo_emulation") == NULL);
+    unsetenv("RECOMP_N64_TURNIP_SSBO_EMULATION");
+    rmdir(emu);
+    unsetenv("MESA_SHADER_CACHE_DIR");
     unsetenv("RECOMP_VK_CACHE_DIR");
 
     remove(path);

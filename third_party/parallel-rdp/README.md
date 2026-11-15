@@ -95,6 +95,24 @@ The command ring (the N64 runtime's deferred DP interrupt, `consoles/n64/runtime
 - `parallel-rdp/rdp_device.cpp`: `ring.init(..., 1u << 18)`, 1 MB of commands instead of 16 KB (about 100
   triangles), so the emulation thread does not wait for the GPU while a frame's display list is queued.
 
+The upscaled renderer's memory (XBA-185 at 8x; upstream: about 4.1 GB at 8x, the tile work list alone 2 GiB):
+
+- `parallel-rdp/rdp_renderer.*`: `renderer_buffer_sizes` gives the tile-instance budget and the size of every buffer
+  an upscaled renderer allocates (the N64 runtime checks them against the device, `fit_upscale`). Upscaled without
+  super-sampled readback the budget (`caps.max_num_tile_instances`, the `TILE_INSTANCE_STRIDE` spec constant) is
+  min(factor^2, 16) x `MaxTileInstances` instead of factor^2 x, lowered (in steps of `MaxTileInstances`, not below
+  one) until the tile work list, bound whole by the tile binning, fits `maxStorageBufferRange`
+  (`set_storage_range_override` replaces that, `set_forced_tile_instances` forces a smaller budget: test hooks).
+  `caps.tile_budget` then replaces `need_flush`'s reservation of a whole screen of tiles (a million at 8x, more than
+  the budget: a flush per primitive) with a test in `draw_shaded_primitive`: flush first when the primitive's
+  conservative tile count would overflow the budget. A primitive whose count alone exceeds it is drawn in a batch of
+  its own at 1x only (`stream.native_only`, `render_pass_is_upscaled` false; the next upscaled pass's pre-pass copies
+  the changed RDRAM into the upscaled domain, as for any pass not drawn upscaled), logged once.
+  `compute_conservative_max_num_tiles` takes the scaling. 1x and super-sampled readback keep upstream's sizes and
+  flushes.
+- `vulkan/device.cpp`: `create_buffer` clears a zero-initialized device buffer of 16 MB or more with a GPU fill even
+  when its memory is host-visible (every memory type on Turnip), instead of a CPU memset of write-combined memory.
+
 The pipeline cache is unchanged Granite: `Device::init_pipeline_cache(data, size)`, `get_pipeline_cache_size` and
 `get_pipeline_cache_data`, called by the N64 runtime (`n64_vk_cache.h`), as this tree has no filesystem for Granite's
 own `cache://pipeline_cache.bin`.

@@ -75,6 +75,33 @@ struct RendererOptions
 	bool force_ubershader = false;
 };
 
+// xboxrecomp-android patch (third_party/parallel-rdp/README.md): the tile-instance budget of an upscaled renderer.
+// Upstream sizes its per-tile buffers for factor^2 * Limits::MaxTileInstances tile instances (8x: 2 GiB of tile work
+// list, 512 MiB each of per-tile colour and depth). Upscaled (2x and up, without super-sampled readback) the budget
+// is min(factor^2, 16) * MaxTileInstances, lowered so that the tile work list (bound whole by the tile binning) fits
+// the storage buffer range; a primitive that would overflow it flushes first, one that alone exceeds it is drawn at
+// 1x only (the next upscaled pass copies it into the upscaled domain). 1x and super-sampled readback: upstream.
+struct RendererBufferSizes
+{
+	unsigned tile_instances = 0;
+	uint64_t rdram_slices = 0;    // multisampled RDRAM (+ the super-sampled readback's write mask), one binding
+	uint64_t hidden_slices = 0;   // multisampled hidden RDRAM, one binding
+	uint64_t per_tile_color = 0;  // per-tile shaded colour, and as much for depth
+	uint64_t per_tile_small = 0;  // per-tile coverage, and as much for shaded alpha
+	uint64_t tile_work_list = 0;  // bound whole in tile binning
+	uint64_t tile_binning = 0;    // tile binning bitmask, and as much for the per-tile offsets
+	uint64_t total = 0;           // every buffer above and the smaller ones (not the VI's images)
+};
+// max_storage_range: the range the bindings must fit (0: none); forced_tile_instances: 0, or a budget to use instead
+// (upscaled only, at least 64, a multiple of 64). Ignores set_storage_range_override / set_forced_tile_instances.
+RendererBufferSizes renderer_buffer_sizes(unsigned upscaling_factor, bool super_sampled_readback, uint64_t rdram_size,
+                                          uint64_t hidden_rdram_size, uint64_t max_storage_range,
+                                          unsigned forced_tile_instances);
+// Process-wide, read by the next renderers: a storage buffer range to use instead of the device's
+// maxStorageBufferRange (0: the device's), and a forced tile-instance budget (0: none). For tests.
+void set_storage_range_override(uint64_t bytes);
+void set_forced_tile_instances(unsigned count);
+
 enum class ValidationError
 {
 	Fill4bpp,
@@ -233,6 +260,9 @@ private:
 
 		std::vector<UploadInfo> tmem_upload_infos;
 		unsigned max_shaded_tiles = 0;
+		// xboxrecomp-android patch: this batch holds a primitive too large for the tile-instance budget upscaled,
+		// it is rendered at 1x only (render_pass_is_upscaled).
+		bool native_only = false;
 		Vulkan::CommandBufferHandle cmd;
 	} stream;
 
@@ -377,7 +407,8 @@ private:
 
 	std::unordered_set<Util::Hash> pending_async_pipelines;
 
-	unsigned compute_conservative_max_num_tiles(const TriangleSetup &setup) const;
+	// xboxrecomp-android patch: the scaling as a parameter (1 for a primitive drawn at 1x only).
+	unsigned compute_conservative_max_num_tiles(const TriangleSetup &setup, int scaling) const;
 
 	void deduce_static_texture_state(unsigned tile, unsigned max_lod_level);
 	void deduce_noise_state();
@@ -396,6 +427,10 @@ private:
 		bool super_sample_readback_dither = false;
 		unsigned upscaling = 1;
 		unsigned max_num_tile_instances = Limits::MaxTileInstances;
+		// xboxrecomp-android patch: max_num_tile_instances is the capped budget (RendererBufferSizes): flush before a
+		// primitive that would overflow it instead of reserving a whole screen of tiles in need_flush.
+		bool tile_budget = false;
+		bool native_only_logged = false;
 		unsigned max_tiles_x = ImplementationConstants::MaxTilesX;
 		unsigned max_tiles_y = ImplementationConstants::MaxTilesY;
 		unsigned max_width = Limits::MaxWidth;
