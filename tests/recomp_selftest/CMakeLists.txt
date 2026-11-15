@@ -15,7 +15,3 @@ set(_xbe ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/conformance/test.xbe)
 # Every check, the SIMD load included.
 add_test(NAME recomp_selftest COMMAND recomp_selftest_test ${_xbe} ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(recomp_selftest PROPERTIES ENVIRONMENT "RECOMP_GUEST_WINDOW=1")
-# Without mmio_simd: under qemu-user a trapped ldr q fails (its fpsimd_context write-back, XBA-45), and the arm64 job
-# lists recomp_selftest as an expected failure (tools/ci/arm64-expected.txt); this one keeps the rest gated there.
-add_test(NAME recomp_selftest_no_simd COMMAND recomp_selftest_test ${_xbe} ${CMAKE_CURRENT_BINARY_DIR})
-set_tests_properties(recomp_selftest_no_simd PROPERTIES ENVIRONMENT "RECOMP_GUEST_WINDOW=1;RECOMP_SELFTEST_SKIP=mmio_simd")

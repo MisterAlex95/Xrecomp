@@ -34,7 +34,8 @@
  *                by the real chain (libsigchain, the toolkit's handler, the
  *                A64 or x86-64 decoder, the register write-back into the
  *                signal frame); mmio_simd is the SIMD load / store (ldr q /
- *                movups), whose write-back is XBA-45
+ *                movups): on arm64 the V register in the fpsimd_context
+ *                and, when live, Zn in the sve_context (XBA-45, XBA-189)
  *   exec_alloc   xbox_NtAllocateVirtualMemory with PAGE_EXECUTE_READWRITE
  *                succeeds, read / write, and the mapping is not executable
  *   exec_guest   xbox_MmSetAddressProtect with PAGE_EXECUTE_READ and
@@ -54,8 +55,7 @@
  * would be in a title: the PASS lines before it (the fault handler drains
  * logcat first) say which check it was.
  *
- * RECOMP_SELFTEST_SKIP: names to skip, separated by commas or spaces (the
- * arm64 CI job skips mmio_simd under qemu-user, XBA-45).
+ * RECOMP_SELFTEST_SKIP: names to skip, separated by commas or spaces.
  *
  * POSIX hosts. Leaves the memory layout shut down. */
 #ifndef XBOXRECOMP_RECOMP_SELFTEST_H

@@ -42,7 +42,6 @@
 #define A64_CTX_LR(uc)   ((uc)->uc_mcontext->__ss.__lr)
 #define A64_CTX_SP(uc)   ((uc)->uc_mcontext->__ss.__sp)
 #define A64_CTX_HAS_V 1
-#define A64_CTX_V(uc, n) ((uc)->uc_mcontext->__ns.__v[(n)])
 #elif defined(__linux__)
 #include <ucontext.h>
 #include <asm/sigcontext.h>      /* struct _aarch64_ctx, fpsimd_context */
@@ -51,34 +50,116 @@
 #define A64_CTX_FP(uc)   ((uc)->uc_mcontext.regs[29])
 #define A64_CTX_LR(uc)   ((uc)->uc_mcontext.regs[30])
 #define A64_CTX_SP(uc)   ((uc)->uc_mcontext.sp)
-/* The FP/SIMD file is a record in uc_mcontext.__reserved: a chain of
- * _aarch64_ctx headers (magic, size), the fpsimd_context among them and a
- * zero magic at the end. rt_sigreturn restores the V registers from it, so
- * writing there is how a load lands. Streaming-SVE state, which an SVE
- * record would supersede, does not arise in lifted code: clang's volatile
- * MEM32() accesses are plain LDR/STR. */
-static inline __uint128_t *mmio_a64_linux_vregs(ucontext_t *uc)
+#define A64_CTX_HAS_V 1
+/* The FP/SIMD file is in uc_mcontext.__reserved: a chain of _aarch64_ctx
+ * headers (magic, size) ended by a zero magic. An extra_context record there
+ * points at more records past the 4 KB area (a large SVE vector length), with
+ * their own zero terminator. ESR, ZA, ZT, TPIDR2, FPMR... records are
+ * skipped by size. The two that matter here:
+ *  - fpsimd_context, always present: V0..V31, FPSR, FPCR;
+ *  - sve_context, once the thread has run SVE code since its last syscall
+ *    (qemu-user with -cpu max: always). Bare (16 bytes: vl, flags) when no
+ *    register data is live; otherwise Z0..Z31 of vl bytes each from +16,
+ *    then P0..P15 and FFR. SVE_SIG_FLAG_SM: the thread is in streaming mode
+ *    and the data is the streaming Z file, same layout at the streaming vl,
+ *    so it is handled the same way.
+ * On delivery V0..V31 are the same in both (Documentation/arch/arm64/sve.rst,
+ * « Signal handling »: "the content of V0..V31 is duplicated"), so a store
+ * reads the FPSIMD copy. On sigreturn, the kernel restores bits 127:0 of Zn
+ * from fpsimd_context and the rest from sve_context; qemu-user restores the
+ * whole of Zn from sve_context, so a write to vregs[] alone is lost there.
+ * A load therefore writes both: vregs[n], and Zn as an architectural write
+ * to Vn leaves it -- the value in 127:0, zeroes above (which a real kernel
+ * would otherwise restore from the stale record). Header-independent: the
+ * magic and the layout are spelled out here, as bionic, glibc and musl ship
+ * different <asm/sigcontext.h> vintages. */
+#define MMIO_A64_SVE_MAGIC   0x53564501u
+#define MMIO_A64_EXTRA_MAGIC 0x45585401u
+#define MMIO_A64_CTX_HDR     16u   /* struct sve_context without register data */
+#define MMIO_A64_SVE_VL      8u    /* struct sve_context: u16 vl at +8 */
+
+/* The record with this magic, extra_context followed, or NULL. */
+static inline struct _aarch64_ctx *mmio_a64_linux_record(ucontext_t *uc, uint32_t magic)
 {
     unsigned char *p = (unsigned char *)uc->uc_mcontext.__reserved;
     unsigned char *end = p + sizeof(uc->uc_mcontext.__reserved);
+    unsigned char *extra = 0;
+    uint32_t extra_size = 0;
+    int in_extra = 0;
+
     while (p + sizeof(struct _aarch64_ctx) <= end) {
         struct _aarch64_ctx *h = (struct _aarch64_ctx *)p;
-        if (h->magic == 0 || h->size < sizeof(*h))
+        if (h->magic == 0) {
+            if (!extra || in_extra)
+                break;
+            p = extra; end = extra + extra_size; in_extra = 1;
+            continue;
+        }
+        if (h->size < sizeof(*h) || h->size > (uintptr_t)(end - p))
             break;
-        if (h->magic == FPSIMD_MAGIC) {
-            if (p + sizeof(struct fpsimd_context) > end) return 0;
-            return ((struct fpsimd_context *)p)->vregs;
+        if (h->magic == magic)
+            return h;
+        if (h->magic == MMIO_A64_EXTRA_MAGIC && !in_extra && h->size >= 24) {
+            uint64_t datap;          /* struct extra_context: u64 datap, u32 size */
+            __builtin_memcpy(&datap, p + 8, 8);
+            __builtin_memcpy(&extra_size, p + 16, 4);
+            extra = (unsigned char *)(uintptr_t)datap;
         }
         p += h->size;
     }
     return 0;
 }
-#define A64_CTX_HAS_V 1
-#define A64_CTX_V_OK(uc) (mmio_a64_linux_vregs(uc) != 0)
-#define A64_CTX_V(uc, n) (mmio_a64_linux_vregs(uc)[(n)])
 #endif
-#ifndef A64_CTX_V_OK
-#define A64_CTX_V_OK(uc) 1
+
+#if A64_CTX_HAS_V
+/* The V registers of a frame: where a store reads them and where a load
+ * writes them (plus the live SVE Z registers on Linux, see above). */
+typedef struct {
+    __uint128_t *v;
+    unsigned char *z;     /* Z0 in the sve_context, or NULL */
+    uint32_t vl;          /* bytes per Z register */
+} mmio_a64_vfile;
+
+static inline int mmio_a64_vfile_get(ucontext_t *uc, mmio_a64_vfile *f)
+{
+    f->z = 0;
+    f->vl = 0;
+#if defined(__APPLE__)
+    /* Darwin's mcontext has the 128-bit NEON file only: no SVE, and SME
+     * state, where the CPU has it, is not part of the signal context. */
+    f->v = (__uint128_t *)uc->uc_mcontext->__ns.__v;
+    return 1;
+#else
+    struct _aarch64_ctx *h = mmio_a64_linux_record(uc, FPSIMD_MAGIC);
+    if (!h || h->size < sizeof(struct fpsimd_context))
+        return 0;                                /* no FP/SIMD record to edit */
+    f->v = ((struct fpsimd_context *)h)->vregs;
+    h = mmio_a64_linux_record(uc, MMIO_A64_SVE_MAGIC);
+    if (h && h->size > MMIO_A64_CTX_HDR) {
+        uint16_t vl;
+        __builtin_memcpy(&vl, (unsigned char *)h + MMIO_A64_SVE_VL, 2);
+        if (vl && vl % 16 == 0 && MMIO_A64_CTX_HDR + 32u * vl <= h->size) {
+            f->z = (unsigned char *)h + MMIO_A64_CTX_HDR;
+            f->vl = vl;
+        }
+    }
+    return 1;
+#endif
+}
+
+/* Vn = val, as a load does it: Zn (when live) zeroed above bit 127. */
+static inline void mmio_a64_vset(mmio_a64_vfile *f, int n, __uint128_t val)
+{
+    f->v[n] = val;
+    if (f->z) {             /* byte i of Zn at offset i, whatever the endianness */
+        unsigned char *z = f->z + (uint32_t)n * f->vl;
+        uint32_t i;
+        for (i = 0; i < 16; i++)
+            z[i] = (unsigned char)(val >> (8 * i));
+        for (; i < f->vl; i++)
+            z[i] = 0;
+    }
+}
 #endif
 
 typedef uint64_t (*mmio_a64_read_fn)(void *dev, uint32_t off, int size);
@@ -101,11 +182,16 @@ static inline int mmio_emulate_a64(ucontext_t *uc, uint32_t off, void *dev,
     uint32_t insn = *(const uint32_t *)(uintptr_t)A64_CTX_PC(uc);
     uint32_t op29_27 = (insn >> 27) & 7;
     int V = (insn >> 26) & 1;
+#if A64_CTX_HAS_V
+    mmio_a64_vfile vf = { 0, 0, 0 };
+#endif
 
     if (!rd || !wr)
         return 0;
-    if (V && !A64_CTX_V_OK(uc))                  /* no FP/SIMD record to edit */
+#if A64_CTX_HAS_V
+    if (V && !mmio_a64_vfile_get(uc, &vf))       /* no FP/SIMD record to edit */
         return 0;
+#endif
 
     if (op29_27 == 7) {                          /* load/store register */
         int size = (insn >> 30) & 3;
@@ -140,12 +226,12 @@ static inline int mmio_emulate_a64(ucontext_t *uc, uint32_t off, void *dev,
             if (is_load) {
                 if (bytes == 16) {
                     __uint128_t lo = rd(dev, off, 8), hi = rd(dev, off + 8, 8);
-                    A64_CTX_V(uc, rt) = lo | (hi << 64);
+                    mmio_a64_vset(&vf, rt, lo | (hi << 64));
                 } else {
-                    A64_CTX_V(uc, rt) = rd(dev, off, bytes);
+                    mmio_a64_vset(&vf, rt, rd(dev, off, bytes));
                 }
             } else {
-                __uint128_t q = A64_CTX_V(uc, rt);
+                __uint128_t q = vf.v[rt];
                 if (bytes == 16) {
                     wr(dev, off, (uint64_t)q, 8);
                     wr(dev, off + 8, (uint64_t)(q >> 64), 8);
@@ -221,7 +307,7 @@ static inline int mmio_emulate_a64(ucontext_t *uc, uint32_t off, void *dev,
                 b = (uint64_t)(int64_t)(int32_t)b;
             }
 #if A64_CTX_HAS_V
-            if (V) { A64_CTX_V(uc, rt) = a; A64_CTX_V(uc, rt2) = b; } else
+            if (V) { mmio_a64_vset(&vf, rt, a); mmio_a64_vset(&vf, rt2, b); } else
 #endif
             {
                 if (rt != 31) *mmio_a64_xreg(uc, rt) = a;
@@ -230,7 +316,7 @@ static inline int mmio_emulate_a64(ucontext_t *uc, uint32_t off, void *dev,
         } else {
             uint64_t a, b;
 #if A64_CTX_HAS_V
-            if (V) { a = (uint64_t)A64_CTX_V(uc, rt); b = (uint64_t)A64_CTX_V(uc, rt2); } else
+            if (V) { a = (uint64_t)vf.v[rt]; b = (uint64_t)vf.v[rt2]; } else
 #endif
             {
                 a = rt == 31 ? 0 : *mmio_a64_xreg(uc, rt);
