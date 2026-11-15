@@ -154,8 +154,10 @@ public class ToolchainTest {
 
     @Test
     public void jobsFormula() {
-        // docs/android/prepare.md: (MemAvailable - 3 GB) / 1 GB, between 1 and min(5, cores)
-        assertEquals(4, Toolchain.jobsFor(7L << 30, 8));
+        // docs/android/prepare.md: (MemAvailable - 3 GB) / 512 MB, between 1 and min(5, cores)
+        assertEquals(4, Toolchain.jobsFor(5L << 30, 8));
+        assertEquals(2, Toolchain.jobsFor(4L << 30, 8));
+        assertEquals(5, Toolchain.jobsFor(7L << 30, 8));
         assertEquals(5, Toolchain.jobsFor(12L << 30, 8));
         assertEquals(1, Toolchain.jobsFor(2L << 30, 8));
         assertEquals(1, Toolchain.jobsFor(0, 8));

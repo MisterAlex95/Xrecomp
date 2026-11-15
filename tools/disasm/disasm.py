@@ -43,8 +43,10 @@ class Disassembler:
                  observed_seeds: Optional[set] = None,
                  skip_library_immediates: bool = False,
                  static_discovery: Optional[int] = None,
-                 discovery_cap: Optional[float] = None):
+                 discovery_cap: Optional[float] = None,
+                 lean: bool = False):
         self.xbe_path = xbe_path
+        self.lean = lean
         self.analysis_json = analysis_json
         self.output_dir = output_dir or config.DEFAULT_OUTPUT_DIR
         self.text_only = text_only
@@ -322,7 +324,8 @@ class Disassembler:
                 print(f"\nPhase 7: Writing output to {self.output_dir}/...")
             writer = OutputWriter(
                 self.output_dir, self.engine, self.func_detector,
-                self.xrefs, self.labels, self.image, self.strings)
+                self.xrefs, self.labels, self.image, self.strings,
+                lean=self.lean)
             writer.write_all(sections_to_disasm=sections, verbose=self.verbose)
 
             # Save cache

@@ -81,11 +81,12 @@ def test_reporter_dedupes(capsys):
 @pytest.mark.parametrize("avail_gb,cpus,want", [
     (None, 8, 1),        # unknown memory
     (2, 8, 1),           # below the reserve: still one job
-    (4.9, 8, 1),
-    (5.0, 8, 2),
-    (6.0, 8, 3),
-    (7.5, 8, 4),
-    (12, 8, 5),          # (12 - 3) / 1 = 9 -> capped at 5
+    (3.9, 8, 1),
+    (4.0, 8, 2),         # (4 - 3) / 0.5
+    (4.5, 8, 3),
+    (5.0, 8, 4),
+    (5.5, 8, 5),
+    (12, 8, 5),          # (12 - 3) / 0.5 = 18 -> capped at 5
     (64, 8, 5),
     (12, 2, 2),          # no more jobs than cores
 ])
@@ -127,6 +128,27 @@ def test_header_digest(tmp_path):
     assert cc.header_digest([str(tmp_path / "a")]) == d0
     (tmp_path / "a" / "x.h").write_text("#define A 2\n")
     assert cc.header_digest([str(tmp_path / "a")]) != d0
+
+
+def test_header_digest_of_the_lifted_c(tmp_path):
+    """XBA-209: for the lifted C, recomp_funcs.h counts without its `void name(void);` lines, so a re-lift that
+    found one more function keeps the other chunks' objects; anything else in it still counts, and the project's
+    own C keeps the whole header."""
+    gen = tmp_path / "src" / "recomp" / "gen"
+    gen.mkdir(parents=True)
+    h = gen / "recomp_funcs.h"
+    h.write_text('/**\n * T - Recompiled Function Declarations\n * 2 functions, auto-generated\n */\n'
+                 '#include "recomp_types.h"\nvoid sub_00011000(void);\nvoid memcpy_hook(void);  /* 0x00012000 */\n')
+    d, g = cc.header_digest([str(gen)]), cc.header_digest([str(gen)], generated=True)
+    h.write_text('/**\n * T - Recompiled Function Declarations\n * 3 functions, auto-generated\n */\n'
+                 '#include "recomp_types.h"\nvoid sub_00011000(void);\nvoid sub_00011040(void);\n')
+    assert cc.header_digest([str(gen)], generated=True) == g
+    assert cc.header_digest([str(gen)]) != d
+    h.write_text('#include "recomp_types.h"\n#define X 1\nvoid sub_00011000(void);\n')
+    assert cc.header_digest([str(gen)], generated=True) != g
+    assert cc.is_generated(str(gen / "recomp_0003.c"))
+    assert not cc.is_generated(str(tmp_path / "src" / "main.c"))
+    assert not cc.is_generated(str(tmp_path / "src" / "title" / "fix.c"))
 
 
 def test_compile_flags():

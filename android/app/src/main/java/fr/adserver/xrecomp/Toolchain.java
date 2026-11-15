@@ -192,8 +192,8 @@ final class Toolchain {
     }
 
     /**
-     * Parallel compile jobs, the formula of docs/android/prepare.md (« Measurements »): 1 GB per job after a 3 GB
-     * reserve, (MemAvailable - 3 GB) / 1 GB, between 1 and min(5, cores). Passed explicitly (--jobs), so that the
+     * Parallel compile jobs, the formula of docs/android/prepare.md (« Measurements »): 512 MB per job after a 3 GB
+     * reserve, (MemAvailable - 3 GB) / 512 MB, between 1 and min(5, cores). Passed explicitly (--jobs), so that the
      * retry after a kill can halve it.
      */
     static int jobs(Context c) {
@@ -201,7 +201,7 @@ final class Toolchain {
     }
 
     static int jobsFor(long memAvailable, int cores) {
-        long byRam = (memAvailable - (3L << 30)) / (1L << 30);
+        long byRam = (memAvailable - (3L << 30)) / (512L << 20);
         return (int)Math.max(1, Math.min(Math.min(5, Math.max(1, cores)), byRam));
     }
 

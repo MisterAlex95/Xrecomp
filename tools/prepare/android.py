@@ -152,7 +152,7 @@ class Run:
         an = os.path.join(self.work, "analysis")
         mb = max(1.0, os.path.getsize(self.xbe) / 1e6)
         d, fid = os.path.join(an, "disasm"), os.path.join(an, "func_id")
-        disasm = ["tools.disasm", self.xbe, "-o", d, "--force"]
+        disasm = ["tools.disasm", self.xbe, "-o", d, "--force", "--lean"]
         # Function starts the analysis cannot find (the layers' "seed_functions").
         for fn in (self.profile or {}).get("seed_functions", []):
             disasm += ["--seed-functions", fn]
@@ -232,7 +232,7 @@ class Run:
             for fn in os.listdir(gen):
                 os.remove(os.path.join(gen, fn))
             an = self.an
-            args = ["tools.recomp", self.xbe, "--all", "--split", "250",
+            args = ["tools.recomp", self.xbe, "--all", "--split-bytes", str(cc.LIFT_CHUNK_BYTES),
                     "--game-name", self.info.get("title", self.tid),
                     "--disasm-dir", os.path.join(an, "disasm"), "--func-id-dir", os.path.join(an, "func_id"),
                     "--abi-dir", os.path.join(an, "abi"), "--gen-dir", gen]

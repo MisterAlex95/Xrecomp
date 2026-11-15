@@ -112,7 +112,9 @@ def corpus_text(copies):
     """corpus.s, plus `copies` renamed copies of its code (data once)."""
     src = open(os.path.join(HERE, "corpus.s")).read()
     head, data = src.split("# @data", 1)
-    labels = sorted(set(re.findall(r"^(\w+):", head, re.M)) - {"_start"}, key=len, reverse=True)
+    # Numeric local labels (1:, 2b, 3f) stay as they are: they are local already.
+    labels = sorted({l for l in re.findall(r"^(\w+):", head, re.M) if not l.isdigit()} - {"_start"},
+                    key=len, reverse=True)
     extra, calls = [], []
     for k in range(1, copies + 1):
         body = head.split(".text", 1)[1]
@@ -162,7 +164,7 @@ def lift(out, copies=0, python=sys.executable, recomp_args=()):
          "--strings", os.path.join(d, "strings.json"), "--xrefs", os.path.join(d, "xrefs.json"), "-o", fid],
         ["tools.abi_analysis", xbe, "--disasm-dir", d, "--func-id-dir", fid, "--output-dir", os.path.join(an, "abi")],
         # tools/prepare/android.py Run.lift's arguments.
-        ["tools.recomp", xbe, "--all", "--split", "250", "--game-name", "Bench",
+        ["tools.recomp", xbe, "--all", "--split-bytes", str(pcc.LIFT_CHUNK_BYTES), "--game-name", "Bench",
          "--disasm-dir", d, "--func-id-dir", fid, "--abi-dir", os.path.join(an, "abi"),
          "--gen-dir", gen, "-o", os.path.join(an, "recomp")] + list(recomp_args),
     )

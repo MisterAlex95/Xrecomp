@@ -23,9 +23,17 @@ API = 30
 TARGET = "aarch64-linux-android%d" % API
 GB = 1 << 30
 # Each clang job on the generated C: see "Measurements" in docs/android/prepare.md.
-JOB_RSS = 1 * GB
+# 512 MB since the lift's chunks are at most ~1.5 MB of C (XBA-209): one peaks
+# at ~170 MB, where a 5 MB chunk of the old 250-function split reached 0.6 GB.
+JOB_RSS = GB // 2
 RESERVED = 3 * GB
 MAX_JOBS = 5
+
+# The lift's chunks (tools.recomp --split-bytes, XBA-209): about 1 MB of C
+# each, at boundaries a re-lift with a few more functions keeps. ~1-2 s of
+# clang -O2 per chunk on a desktop core; a 250 MB title gives ~250 of them,
+# enough to keep every job busy to the end.
+LIFT_CHUNK_BYTES = 1000000
 
 # The toolkit's header directories (what the CMake targets of src/ export).
 TOOLKIT_INCLUDES = ("include", "src", "src/kernel", "src/platform", "src/audio", "src/apu",
@@ -174,7 +182,7 @@ def mem_available(meminfo="/proc/meminfo"):
 
 
 def default_jobs(avail=None, cpus=None, job_rss=JOB_RSS, reserved=RESERVED):
-    """min(5, (MemAvailable - 3 GB) / 1 GB), at least 1, at most the CPU
+    """min(5, (MemAvailable - 3 GB) / 512 MB), at least 1, at most the CPU
     count (job_rss / reserved: another console's figures, tools/prepare/gba.py).
     `avail` None = unknown memory: 1."""
     if avail is None:
@@ -296,9 +304,26 @@ def compile_flags(opt, toolkit, proj, sysroot, profile=False, include_dirs=()):
     return flags
 
 
-def header_digest(dirs):
+FUNCS_H = "recomp_funcs.h"
+# A line of recomp_funcs.h that only declares a lifted function (all of them
+# are void(void)), with the comment a hand-written override's line carries;
+# and its comments (the banner counts the functions).
+_FUNC_DECL = re.compile(rb"^void [A-Za-z_]\w*\(void\);[^\n]*\n?", re.M)
+_COMMENT = re.compile(rb"/\*.*?\*/", re.S)
+
+
+def header_digest(dirs, generated=False):
     """sha256 over every .h under `dirs` (paths and contents): an object
-    depends on its headers too, and a lift rewrites recomp_funcs.h."""
+    depends on its headers too, and a lift rewrites recomp_funcs.h.
+
+    generated: the digest for the lifted C (src/recomp/gen/*.c). There
+    recomp_funcs.h counts without its `void name(void);` lines and its
+    comments (XBA-209): a
+    generated file that compiled names only functions declared, all with that
+    one signature, so a declaration added or dropped elsewhere cannot change
+    its object, and a re-lift that found a few more functions recompiles the
+    chunks that changed, not all of them. The project's own C (main.c,
+    src/title, src/extra) keeps the whole header in its key."""
     h = hashlib.sha256()
     seen = set()
     for top in dirs:
@@ -313,8 +338,11 @@ def header_digest(dirs):
                 seen.add(p)
                 h.update(p.encode() + b"\0")
                 with open(p, "rb") as f:
-                    for chunk in iter(lambda: f.read(1 << 20), b""):
-                        h.update(chunk)
+                    if generated and fn == FUNCS_H:
+                        h.update(_FUNC_DECL.sub(b"", _COMMENT.sub(b"", f.read())))
+                    else:
+                        for chunk in iter(lambda: f.read(1 << 20), b""):
+                            h.update(chunk)
                 h.update(b"\0")
     return h.hexdigest()
 
@@ -326,6 +354,12 @@ def cache_key(path, source, flags, compiler_id, headers):
                  compiler_id.encode(), b"\0", headers.encode()):
         h.update(part)
     return h.hexdigest()
+
+
+def is_generated(path):
+    """A lifted C file: <project>/src/recomp/gen/*.c."""
+    d = os.path.dirname(os.path.abspath(path))
+    return os.path.basename(d) == "gen" and os.path.basename(os.path.dirname(d)) == "recomp"
 
 
 def include_dirs_of(flags):
@@ -355,12 +389,15 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     Raises StepError (COMPILE_FAILED / NO_SPACE) or Cancelled."""
     os.makedirs(obj_dir, exist_ok=True)
     cid = tc.compiler_id()
-    headers = header_digest(include_dirs_of(flags))
+    dirs = include_dirs_of(flags)
+    headers = header_digest(dirs)
+    gen_headers = header_digest(dirs, generated=True)
     plan = []
     for s in sources:
         with open(s, "rb") as f:
             data = f.read()
-        plan.append((s, len(data), os.path.join(obj_dir, cache_key(s, data, flags, cid, headers) + ".o")))
+        hd = gen_headers if is_generated(s) else headers
+        plan.append((s, len(data), os.path.join(obj_dir, cache_key(s, data, flags, cid, hd) + ".o")))
     total = len(plan)
     todo = [p for p in plan if not os.path.isfile(p[2])]
     todo.sort(key=lambda p: -p[1])

@@ -210,11 +210,11 @@ class Disassembler:
             ops = []
         try:
             _, written = cs_insn.regs_access()
-            insn.regs_written = [
-                _reg_names.get(reg, self._cs.reg_name(reg))
-                for reg in written
-                if _reg_names.get(reg, self._cs.reg_name(reg))
-            ]
+            # The table first: Capstone's reg_name is a ctypes call, and
+            # .get(reg, reg_name(reg)) made it twice per register (XBA-209).
+            names = (_reg_names[reg] if reg in _reg_names
+                     else self._cs.reg_name(reg) for reg in written)
+            insn.regs_written = [name for name in names if name]
         except Exception:
             insn.regs_written = []
         for cs_op in ops:

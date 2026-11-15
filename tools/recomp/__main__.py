@@ -296,6 +296,11 @@ def main():
                         help="Generate C header file")
     parser.add_argument("--split", type=int, metavar="N",
                         help="Split output into files of N functions each")
+    parser.add_argument("--split-bytes", type=int, metavar="BYTES",
+                        help="Split output into self-contained files of about "
+                             "BYTES of C each, with boundaries that a few "
+                             "added or removed functions leave in place "
+                             "(tools.prepare; XBA-209)")
     parser.add_argument("--gen-dir",
                         help="Output dir for split generated files "
                              "(default: src/game/recomp/gen)")
@@ -525,7 +530,7 @@ def main():
 
     print(f"\nTranslating {len(funcs)} functions...", file=sys.stderr)
 
-    if args.split:
+    if args.split or args.split_bytes:
         # Split output mode: multiple .c files + header + dispatch table
         gen_dir = args.gen_dir or os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
@@ -628,7 +633,8 @@ def main():
         stats = translator.translate_batch_split(
             funcs,
             output_dir=gen_dir,
-            chunk_size=args.split,
+            chunk_size=args.split or 250,
+            chunk_bytes=args.split_bytes,
             verbose=args.verbose,
             manual=manual,
         )
