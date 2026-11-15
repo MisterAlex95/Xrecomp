@@ -351,10 +351,12 @@ public class ShellActivity extends SDLActivity {
 
     /**
      * RECOMP_STATE_RESUME for a GBA / PS1 / N64 runtime (recomp_states.h): « 1 » when « Resume where I left off » is
-     * on, so the automatic slot the menu saved when the player left is loaded before the first frame; unset otherwise.
+     * on, so the automatic slot the menu saved when the player left is loaded before the first frame; unset otherwise,
+     * and for a launch from the Home's « Start » (GameStore.takeFreshStart, one launch only).
      */
     private void applyAutoResume(boolean consoleGame) {
-        boolean on = consoleGame && GameStore.autoResume(this);
+        boolean fresh = GameStore.takeFreshStart(this);
+        boolean on = consoleGame && GameStore.autoResume(this) && !fresh;
         try {
             if (on)
                 Os.setenv("RECOMP_STATE_RESUME", "1", true);
@@ -363,7 +365,7 @@ public class ShellActivity extends SDLActivity {
         } catch (ErrnoException e) {
             Log.w(LauncherActivity.TAG, "shell: cannot set RECOMP_STATE_RESUME", e);
         }
-        Log.i(LauncherActivity.TAG, "shell: resume where I left off " + (on ? "on" : "off"));
+        Log.i(LauncherActivity.TAG, "shell: resume where I left off " + (on ? "on" : fresh ? "off (Start)" : "off"));
     }
 
     /**

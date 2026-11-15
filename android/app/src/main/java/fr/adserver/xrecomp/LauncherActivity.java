@@ -4326,7 +4326,12 @@ public class LauncherActivity extends Activity {
             heroLine(info, homeMeta(e.record.lastPlayed, e.record.playMs), 0);
 
         LinearLayout buttons = heroButtons(info);
-        Widgets.PillButton play = pill(buttons, Icon.PLAY, getString(R.string.PLAY), true, () -> launchRom(e));
+        // Where the player left off saved: Resume (that point) first, Start (the console's boot) beside it.
+        boolean resumable = GameStore.canResume(this, e.tid);
+        Widgets.PillButton play = pill(buttons, Icon.PLAY, getString(resumable ? R.string.ROM_RESUME : R.string.PLAY),
+                                       true, () -> launchRom(e));
+        if (resumable)
+            pill(buttons, null, getString(R.string.ROM_START), false, () -> launchRom(e, true));
         switch (prepares ? p : Prep.PLAYABLE) {   // PLAYABLE without new code: no second button
         case RUNNING:
             pill(buttons, null, getString(R.string.PREPARING), false, () -> go(Screen.PREPARE));
@@ -4645,6 +4650,11 @@ public class LauncherActivity extends Activity {
      * same ROM running is brought back, another game running is ended first (one game process at a time).
      */
     private void launchRom(LibraryScreen.Entry e) {
+        launchRom(e, false);
+    }
+
+    /** The same; fresh: from the console's boot, not where the player left off (the Home's Start). */
+    private void launchRom(LibraryScreen.Entry e, boolean fresh) {
         if (e.chip == GameState.Chip.NO_FILE_ACCESS) {
             onChooseLibraryFolder();
             return;
@@ -4655,7 +4665,7 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.LIB_SOURCE_GONE_NOTE, e.title()), NOTE_WARN);
             return;
         }
-        if (rom.equals(GameStore.launchedRom(this)) && gameRunning()) {
+        if (!fresh && rom.equals(GameStore.launchedRom(this)) && gameRunning()) {
             Log.i(TAG, "launcher: library: " + e.tid + " runs, bringing it back");
             resumeShell();
             return;
@@ -4673,7 +4683,9 @@ public class LauncherActivity extends Activity {
         GameStore.sessionStart(this, now, e.tid);
         Library.sessionStart(games, e.tid, now);
         writeGames();
-        Log.i(TAG, "launcher: library: play " + e.tid + " (" + e.title() + ") from " + rom);
+        if (fresh)
+            GameStore.requestFreshStart(this);
+        Log.i(TAG, "launcher: library: " + (fresh ? "start " : "play ") + e.tid + " (" + e.title() + ") from " + rom);
         startActivity(new Intent(this, ShellActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
         finish();
