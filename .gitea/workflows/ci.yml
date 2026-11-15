@@ -160,7 +160,8 @@ jobs:
   # XBA-193: it also gets the Cult-of-GBA BIOS (MIT, built from source) and jsmolka/gba-tests (MIT), kept in the
   # host's Docker as the data image xba-gba-inputs:<hash of the pins> (tools/consoles/gba_test_inputs.sh: about a
   # second cached, a few seconds cold), and runs ctest gba_hb_lle_* / gba_jsmolka_* and their gba_rc_* too (30 tests,
-  # about 11 s). They are inputs only: never uploaded with the artefact.
+  # about 11 s). They are inputs only: never uploaded with the artefact. XBA-201: the image also holds the mGBA test
+  # suite (MIT, built from source by tools/consoles/build_gba_suite.sh) for ctest gba_mgba* / gba_rc_mgba (pass counts).
   # The N64 programs go through consoles/n64/tests the same way (tools/consoles/run_n64_homebrew.sh, same deps image,
   # about 100 s cached): ctest n64_runtime / n64_pack / n64_hb_* / n64_rc_hb_* / n64_(rc_)state_* / n64_rewind_hb_*
   # / n64_cheats_hb_* (29 tests, skipped in the linux job). That part also runs when a PR touches consoles/n64/.
@@ -194,7 +195,7 @@ jobs:
           base=${MERGE_BASE:-$BASE_SHA}
           if [ -n "$base" ] && git fetch -q --depth 1 "$url" "$base" 2>/dev/null \
              && files=$(git diff --name-only "$base" HEAD); then
-            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|consoles/n64/|tools/prepare/|tools/docker/((gba|ps1|n64)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh|run_n64_homebrew\.sh)$|\.gitea/workflows/ci\.yml$)'; then
+            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|consoles/n64/|tools/prepare/|tools/docker/((gba|ps1|n64)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh|build_gba_suite\.sh|run_n64_homebrew\.sh)$|\.gitea/workflows/ci\.yml$)'; then
               echo "build=true" >> "$GITHUB_OUTPUT"
             else
               echo "Nothing the homebrew corpus is built from: skipped."

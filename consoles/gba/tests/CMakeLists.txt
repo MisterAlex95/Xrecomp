@@ -19,6 +19,8 @@ endif()
 #   gba_jsmolka_<t>    jsmolka/gba-tests arm / thumb / memory / bios, and save/sram, flash64, flash128, none
 #   gba_rewind_*       rewind round trips on the homebrew (gba_run --rewind, XBA-194)
 #   gba_cheats_*       cheat codes on the homebrew (gba_run --cheats, XBA-197), interpreted and recompiled
+#   gba_mgba_<group>   the mGBA test suite's groups (mgba_suite.sh, XBA-201): pass counts at least the ones reached
+#                      (a regression fails), built-in BIOS; gba_mgba_lle_<group> through the Cult-of-GBA BIOS
 #   gba_rc_*           the same ROMs recompiled (gba_tools.recomp + cc, discovery loop), in lockstep with the
 #                      interpreter; gba_rc_fuzz: random ARM / Thumb programs, same comparison (needs python3, cc)
 # The ROM and BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays
@@ -26,6 +28,7 @@ endif()
 #   tools/consoles/build_homebrew.sh gba build/homebrew     -> GBA_HOMEBREW_DIR (default build/homebrew/gba)
 #   tools/consoles/fetch_gba_tests.sh build/gba-tests       -> GBA_TESTS_DIR (default build/gba-tests)
 #   tools/consoles/build_gba_bios.sh build/gba-bios         -> GBA_BIOS (default build/gba-bios/cult-of-gba-bios.bin)
+#   tools/consoles/build_gba_suite.sh build/gba-suite       -> GBA_SUITE (default build/gba-suite/suite.gba)
 if(WIN32)
     message(FATAL_ERROR "The console runtimes are POSIX-only (xbr_host)")
 endif()
@@ -83,6 +86,7 @@ get_filename_component(GBA_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../.. ABSOLU
 set(GBA_HOMEBREW_DIR ${GBA_REPO_ROOT}/build/homebrew/gba CACHE PATH "Built GBA homebrew (build_homebrew.sh gba)")
 set(GBA_TESTS_DIR ${GBA_REPO_ROOT}/build/gba-tests CACHE PATH "jsmolka/gba-tests ROMs (fetch_gba_tests.sh)")
 set(GBA_BIOS ${GBA_REPO_ROOT}/build/gba-bios/cult-of-gba-bios.bin CACHE FILEPATH "Cult-of-GBA BIOS (build_gba_bios.sh)")
+set(GBA_SUITE ${GBA_REPO_ROOT}/build/gba-suite/suite.gba CACHE FILEPATH "mGBA test suite ROM (build_gba_suite.sh)")
 set(GBA_RUN_ROM ${CMAKE_CURRENT_SOURCE_DIR}/run_rom.sh)
 set(GBA_EXPECT sh ${GBA_REPO_ROOT}/tools/consoles/expect_output.sh)   # XBA-197: output checks
 set(GBA_CHEATS ${CMAKE_CURRENT_SOURCE_DIR}/cheats)
@@ -183,6 +187,28 @@ if(TARGET gba_run)
                 sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/hello.gba --result --frames 900
                 --cheats ${GBA_CHEATS}/hello.cheats ${GBA_CHEAT_PEEKS})
     set_tests_properties(gba_cheats_hb_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
+    # The mGBA test suite (XBA-201): each group's pass count must stay at least what the core reached (raise these
+    # when a fix passes more; consoles/gba/tests/mgba_suite.sh). The built-in BIOS (HLE) and Cult-of-GBA (LLE) differ
+    # where a test times or checks the BIOS's own code; gba_rc_mgba: the suite recompiled, in lockstep, HLE counts.
+    set(GBA_MGBA_HLE memory=1498 io_read=130 timing=1190 timers=740 timer_irq=90 shifter=140 carry=93
+        multiply_long=52 bios_math=615 dma=1244 sio_read=90 sio_timing=0 misc=4 video=6)
+    set(GBA_MGBA_LLE memory=1488 io_read=130 timing=1204 timers=847 timer_irq=90 shifter=140 carry=93
+        multiply_long=52 bios_math=603 dma=1244 sio_read=90 sio_timing=0 misc=6 video=6)
+    set(GBA_MGBA ${CMAKE_CURRENT_SOURCE_DIR}/mgba_suite.sh)
+    foreach(gm ${GBA_MGBA_HLE})
+        string(REGEX REPLACE "=.*" "" g ${gm})
+        add_test(NAME gba_mgba_${g} COMMAND sh ${GBA_MGBA} $<TARGET_FILE:gba_run> ${GBA_SUITE} ${gm})
+        set_tests_properties(gba_mgba_${g} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    endforeach()
+    foreach(gm ${GBA_MGBA_LLE})
+        string(REGEX REPLACE "=.*" "" g ${gm})
+        add_test(NAME gba_mgba_lle_${g}
+            COMMAND sh ${GBA_MGBA} $<TARGET_FILE:gba_run> ${GBA_SUITE} ${gm} -- --bios ${GBA_BIOS})
+        set_tests_properties(gba_mgba_lle_${g} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    endforeach()
+    add_test(NAME gba_rc_mgba
+        COMMAND sh ${GBA_MGBA} $<TARGET_FILE:gba_run> ${GBA_SUITE} --recomp ${GBA_RC_WORK}/mgba ${GBA_MGBA_HLE})
+    set_tests_properties(gba_rc_mgba PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(NAME gba_rc_fuzz
