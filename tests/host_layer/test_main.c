@@ -23,6 +23,7 @@
 
 #include <SDL.h>
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -439,6 +440,15 @@ static double bench(const uint32_t *px, int preset, int n)
     return (double)(xbox_HostNowNs() - t0) / 1e6 / n;
 }
 
+/* run_shaders' live change, from a thread of its own as the Android UI thread's would be. */
+static void *live_request(void *arg)
+{
+    HostShader s = { HOST_SHADER_SCANLINES, 80, 0, 0 };
+    (void)arg;
+    host_window_request_picture(HOST_SCALE_STRETCH, HOST_FILTER_NEAREST, &s);
+    return NULL;
+}
+
 static int run_shaders(void)
 {
     static uint32_t flat[SW * SH];
@@ -660,6 +670,24 @@ static int run_shaders(void)
         memcpy(&bh, hdr + 22, 4);
         CHECK(bw == SW && bh == SH && pix[0] == 128 && pix[1] == 128 && pix[2] == 128);
         unlink(bmp);
+    }
+
+    /* A live change (the in-game menu, host_window_request_picture): from another thread, taken by the next
+     * present only; -1 / NULL keep what is there. */
+    {
+        pthread_t th;
+        host_window_set_scaling(HOST_SCALE_ASPECT, HOST_FILTER_LINEAR);
+        host_window_set_shader(NULL);
+        CHECK(host_window_present_rgba(flat, SW, SH, SW * 4));
+        CHECK(pthread_create(&th, NULL, live_request, NULL) == 0);
+        pthread_join(th, NULL);
+        CHECK(host_window_shader_active() == HOST_SHADER_NONE);   /* not before the next present */
+        CHECK(host_window_present_rgba(flat, SW, SH, SW * 4));
+        CHECK(host_window_shader_active() == HOST_SHADER_SCANLINES);
+        host_window_request_picture(-1, -1, NULL);
+        CHECK(host_window_present_rgba(flat, SW, SH, SW * 4));
+        CHECK(host_window_shader_active() == HOST_SHADER_SCANLINES);
+        host_window_set_shader(NULL);
     }
 
     /* A shader that does not build: none, logged once, presents still work. */

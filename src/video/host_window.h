@@ -161,6 +161,12 @@ const char *host_window_shader_name(int preset);
 void host_window_env_shader(const char *console_var, int def, HostShader *out);
 void host_window_shader_env(const char *console_var);
 
+/* A live change of the picture (the in-game menu, docs/android/app-shell.md « In-game menu »), from any thread:
+ * scale (HOST_SCALE_*), filter (HOST_FILTER_*) and, when s is not NULL, the shader, taken by the presenting thread
+ * at its next present (host_window_present_rgba / _texture / _again), never in the middle of a frame. scale or
+ * filter -1 keeps the current one. A later request replaces one not yet taken. */
+void host_window_request_picture(int scale, int filter, const HostShader *s);
+
 /* The rate the window presents at, from any thread (the Android companion
  * panel and FPS overlay when no Xbox presenter runs): *fps_centi frames per
  * second x 100 over the last second (0 when nothing was presented for two

@@ -79,5 +79,5 @@
     <string name="GS_OWN_COUNT">%1$d of its own</string>
     <string name="GS_HINT_RESET">Reset</string>
     <string name="MENU_GAME_SETTINGS">Game settings</string>
-    <string name="MENU_GS_NEXT_START">This game\'s own values: they apply the next time it starts</string>
+    <string name="MENU_GS_NEXT_START">This game\'s own values: the picture changes at once, the rest when the game restarts</string>
 </resources>

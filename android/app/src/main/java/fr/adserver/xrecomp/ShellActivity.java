@@ -42,7 +42,7 @@ public class ShellActivity extends SDLActivity {
     private CompanionPanel panel;
     private GameMenu menu;
     /** The overlay pad both the companion panel and the on-screen pad drive (XBA-42). */
-    private final OverlayMixer mixer = new OverlayMixer(new NativeOverlay());
+    private final OverlayMixer mixer = new OverlayMixer(new NativeOverlay(this));
     private TouchControls touch;
     /** « shell: fps N » every 10 s while started, panel or not (Device check: fps with the panel on and off). */
     private final android.os.Handler fpsLog = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -436,6 +436,8 @@ public class ShellActivity extends SDLActivity {
     protected void onResume() {
         super.onResume();
         SystemBars.hide(this);
+        if (touch != null)
+            touch.closeEditor("resumed");   // never left over the game (XBA-212)
         if (menu != null)
             menu.onResume();
     }
@@ -526,13 +528,13 @@ public class ShellActivity extends SDLActivity {
     @Override
     public boolean dispatchTouchEvent(MotionEvent e) {
         boolean down = e.getActionMasked() == MotionEvent.ACTION_DOWN;
-        if (touch != null && touch.editor != null) {   // the touch layout editor: no menu swipe, nothing to the game
+        // The touch layout editor (no menu swipe, nothing to the game), or a tap revealing a hidden pad (XBA-212).
+        if (touch != null && touch.takeTouch(e, menu != null && menu.isOpen())) {
             if (down && touchDebug)
-                Log.d(TouchPadView.DEBUG_TAG, "shell: down to the touch layout editor");
-            return touch.editor.dispatchTouchEvent(e);
+                Log.d(TouchPadView.DEBUG_TAG, "shell: down taken by the " + (touch.editor != null
+                                              ? "touch layout editor" : "on-screen pad's reveal"));
+            return true;
         }
-        if (touch != null && down)
-            touch.onTouch();
         if (menu != null && menu.dispatchTouch(e)) {
             if (down && touchDebug)
                 Log.d(TouchPadView.DEBUG_TAG, "shell: down taken by the menu's swipe");
@@ -650,6 +652,12 @@ public class ShellActivity extends SDLActivity {
         public void setTouchShown(boolean on) {
             if (touch != null)
                 touch.force(on);
+        }
+
+        @Override
+        public void menuOpened() {
+            if (touch != null)
+                touch.closeEditor("menu opened");
         }
 
         @Override
@@ -788,6 +796,20 @@ public class ShellActivity extends SDLActivity {
                 finish();
             }
         }
+
+        @Override
+        public void setPicture(ConsoleVideo.Picture p) {
+            try {
+                MenuNative.nativeSetPicture(p.xbox, p.scale, p.filter, p.shader, p.strength, p.curvature, p.ghosting);
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: the picture cannot be changed live", e);
+            }
+        }
+
+        @Override
+        public void restartGame() {
+            ShellActivity.this.restartGame(null);   // as the title's quick reboot: a new process, the same game
+        }
     }
 
     /**
@@ -847,7 +869,12 @@ public class ShellActivity extends SDLActivity {
     /** The overlay pad (input_overlay.h) through CompanionNative. */
     private static final class NativeOverlay implements OverlayMixer.Sink {
         private final boolean debug = TouchPadView.debugOn();
+        private final android.content.Context context;
         private boolean failed;
+
+        NativeOverlay(android.content.Context context) {
+            this.context = context;
+        }
 
         @Override
         public void pad(int buttons, int analogMask, int lt, int rt, int lx, int ly, int rx, int ry) {
@@ -875,9 +902,16 @@ public class ShellActivity extends SDLActivity {
 
         /** Once per process: the on-screen pad and the panel cannot reach the game (said, not swallowed). */
         private void failed(UnsatisfiedLinkError e) {
-            if (!failed)
-                Log.e(LauncherActivity.TAG, "shell: overlay pad: no native call, touch input cannot reach the game", e);
+            if (failed)
+                return;
             failed = true;
+            Log.e(LauncherActivity.TAG, "shell: overlay pad: no native call, touch input cannot reach the game", e);
+            try {   // said on screen too, once (XBA-212): the player would only see a pad that does nothing
+                android.widget.Toast.makeText(context, R.string.TOUCH_NATIVE_FAILED, android.widget.Toast.LENGTH_LONG)
+                    .show();
+            } catch (RuntimeException t) {
+                Log.w(LauncherActivity.TAG, "shell: overlay pad: no toast", t);
+            }
         }
     }
 

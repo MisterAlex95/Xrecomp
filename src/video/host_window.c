@@ -275,6 +275,47 @@ static void shader_free(void)
         present_shader_release(&s_sprog[i], 0);
 }
 
+/* ── Live picture changes (the in-game menu) ─────────────────────────────
+ * host_window_request_picture may come from any thread (Android's UI thread); the presenting thread takes the
+ * request at its next present (live_take), so scale, filter and shader only ever change between two frames. */
+static pthread_mutex_t s_live_mu = PTHREAD_MUTEX_INITIALIZER;
+static int s_live_pending;               /* atomic: a request waits */
+static int s_live_scale = -1, s_live_filter = -1, s_live_has_shader;
+static HostShader s_live_shader;
+
+void host_window_request_picture(int scale, int filter, const HostShader *s)
+{
+    pthread_mutex_lock(&s_live_mu);
+    s_live_scale = scale;
+    s_live_filter = filter;
+    s_live_has_shader = s != NULL;
+    if (s)
+        s_live_shader = *s;
+    pthread_mutex_unlock(&s_live_mu);
+    __atomic_store_n(&s_live_pending, 1, __ATOMIC_RELEASE);
+}
+
+static void live_take(void)
+{
+    int scale, filter, has;
+    HostShader sh;
+
+    if (!__atomic_load_n(&s_live_pending, __ATOMIC_ACQUIRE))
+        return;
+    pthread_mutex_lock(&s_live_mu);
+    __atomic_store_n(&s_live_pending, 0, __ATOMIC_RELAXED);
+    scale = s_live_scale;
+    filter = s_live_filter;
+    has = s_live_has_shader;
+    sh = s_live_shader;
+    pthread_mutex_unlock(&s_live_mu);
+    host_window_set_scaling(scale < 0 ? s_scale : scale, filter < 0 ? s_filter : filter);
+    if (has)
+        host_window_set_shader(&sh);
+    fprintf(stderr, "  [HOST] window: picture changed live: scale %d, filter %d, shader %s\n", s_scale, s_filter,
+            host_window_shader_name(s_shader.preset));
+}
+
 /* LCD ghosting wants the previous picture: present_rgba then alternates between two textures. */
 static int shader_wants_prev(void)
 {
@@ -578,6 +619,7 @@ static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
 
 int host_window_present_texture(unsigned tex, int w, int h, int top_down)
 {
+    live_take();
     return draw(tex, 0, w, h, top_down);
 }
 
@@ -762,6 +804,7 @@ int host_window_present_rgba(const void *px, int w, int h, int pitch)
     if (!s_win || !px || w <= 0 || h <= 0 || pitch < w * 4)
         return 0;
     keep_last(px, w, h, pitch);   /* the real picture, for host_window_screenshot_bmp */
+    live_take();
 #if defined(XBOXRECOMP_LSFG)
     if (fg_present(px, w, h, pitch))
         return 1;
@@ -812,6 +855,7 @@ int host_window_present_again(void)
 {
     if (!s_win || !s_again_tex)
         return 0;
+    live_take();
 #if defined(XBOXRECOMP_LSFG)
     if (s_fg && framegen_pacer_active() && !recomp_ff_active())
         return 1; /* the pacer draws its FIFO at its due times (host_window_sleep_until): nothing new to give it */
