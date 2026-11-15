@@ -29,10 +29,15 @@ on an AYN Thor. Every change gives exactly the same results as before: the same 
   - the renderer in use, the internal resolution, rewind on or off, and the CPU core and its clock.
 
   Please attach these lines to N64 speed reports (`adb logcat | grep n64:`).
+- **On-screen controls debug log**: `adb shell setprop log.tag.XRecompTouch DEBUG` logs where each finger goes,
+  which view takes it, and what reaches the game. A failure to reach the game's native code is now logged instead of
+  silently ignored.
 
 ## Known problems
 
 - Nothing in this release has been measured on a phone yet; the gains above are desktop measurements.
+- On-screen controls not responding on the AYN Thor (reported with 0.5.1): not found yet; logs with the debug switch
+  above help.
 - The Vulkan N64 renderer's own threads are not yet moved back to the fast cores after a resume.
 - From 0.5.0: N64 rewind costs up to a few ms per capture, hence off by default; no save states, rewind or
   fast-forward for Xbox titles.
