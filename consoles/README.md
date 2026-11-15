@@ -193,6 +193,16 @@ cmake -S consoles/ps1/tests -B build/ps1 -DPS1_CORE_ONLY=ON && cmake --build bui
 build/ps1/ps1_runtime/ps1_run --exe build/homebrew/ps1/gfx.exe --result --ppm gfx.ppm
 ```
 
+The linux CI job has neither the BIOS, the corpus nor ps1-tests, so those tests skip (77) there. The **homebrew job**
+runs them (XBA-200): `tools/consoles/ps1_test_inputs.sh` keeps OpenBIOS and the ps1-tests release in the host's
+Docker as the data image `xba-ps1-inputs:<hash of the pins>` (about a second cached; cold, the BIOS build pulls
+PCSX-Redux's build image unless `xba-ps1-oracle` is there, and removes it again), then `tools/consoles/run_ps1_tests.sh`
+builds `consoles/ps1/tests` in the linux job's deps image and runs its whole ctest (177 tests: `ps1_hb_*`, `ps1_rc_*`,
+`ps1_jcz_*` with the GPU VRAM dumps, `ps1_hle_*`, states, rewind, cheats, `ps1_lockref_*` and the unit tests; about
+80 s). One that skips fails the job; `PS1_CI_EXCLUDE` (a ctest `-E` regex) can leave slow tests to local runs. The job
+also runs on a PR that touches `consoles/ps1/`; GitHub's `ps1-corpus` job does the same. The same locally:
+`tools/consoles/build_homebrew.sh ps1 build/homebrew && tools/consoles/ps1_test_inputs.sh && tools/consoles/run_ps1_tests.sh`.
+
 **PS1 static recompilation (P-2 XBA-160, P-3 XBA-161, P-4 XBA-162).** The GBA's model on RAM-loaded code: a PS1
 program's MIPS code is lifted to C, compiled for the host into a title pack (`libtitle.so`), and runs natively on the
 same core; the BIOS, the devices, DMA, timers and interrupts are the interpreter's code either way. Universal, no
