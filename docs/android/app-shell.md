@@ -145,7 +145,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 
 | Screen | What it shows | Reached from |
 |---|---|---|
-| Library | The [game library](#game-library): a full-width grid of the games (five columns), the focused game's state and play time as one context line at the bottom left; Rescan, Storage, Library folders, Settings and About in the **Options** sheet (Y). | Every start when the library is on, B from a game's Home. |
+| Library | The [game library](#game-library): a full-width grid of the games (five columns), the focused game's state and play time as one context line at the bottom left; Rescan, Storage, Library folders, Settings and About in the **Options** sheet (Y). Over the grid the **Search** and **Sort** pills, « Recently played » and the favourites first, the console tabs in the top bar ([Library view](#library-view-xba-206)). | Every start when the library is on, B from a game's Home. |
 | Storage | What the app stores per game, each deleted on its own ([Storage](#storage)). | Options (Y) on the library. |
 | Welcome | What the app is (a recompiled game, the game not included: bring your own copy), three plain steps, a « Get started » button. | First start, when no game is set up at all. |
 | Choose your game (source) | A list: **Game folder** (read in place with All files access, otherwise copied; the value says which), **Disc image (ISO)** (extracted once; the free space in the top bar), **Game library folder**; the focused choice explained on the right. | Welcome, Manage › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
@@ -457,9 +457,10 @@ way; Home's copy line is what the long-press « Launcher » shows.
 | A (`BUTTON_A`), D-pad centre, Enter | Select the focused item; on a setting, the next value. |
 | B (`BUTTON_B`), Back, Escape | Back one screen; on Home or Welcome, leave the app (on a library game's Home: the library); during an import or a Prepare, Cancel (a Prepare: twice); with the Options sheet open, close it. |
 | Left / right on a setting | Previous / next value. |
-| L1 / R1 | Settings: previous / next tab (wrapping). |
+| L1 / R1 | Settings: previous / next tab (wrapping). Library: previous / next console of the filter (All, Xbox, GBA, PS1, N64; with games of several consoles). |
+| X | Library: the focused game in or out of the favourites. A game's Home: Add to / Remove from favourites. Drivers: delete. About: Licences. |
 | Y | Library: the **Options** sheet (Rescan, Storage, Library folders, Settings, About; B or Y closes it, the focus comes back). Settings: the defaults. Preparing: hide it (the Prepare carries on). A failed Prepare: Share log. |
-| Start | Home: Play (not shown as a hint). Library: the focused game's primary action. |
+| Start | Home: Play (not shown as a hint). Library: the focused game's primary action (not shown as a hint either since XBA-206, except in an empty library). |
 | Touch | Tap an item to select it, the arrows of a setting to step it, a button hint to do what it says. After a touch, the first D-pad or A press brings the focus back. |
 
 A and B are taken on release, once, so a held button does not repeat. Dimmed rows and buttons (Play without a usable
@@ -617,10 +618,20 @@ its theme to `build/screenshots/preview-*.png` (git-ignored); without the proper
 
 ### Play time
 
-« Last played » and « Play time » are kept simple: a session starts when the launcher starts `ShellActivity` (not when
-it only brings a running game back) and ends when the launcher shows again with the game no longer running; a session
-the launcher never saw end counts for at most 6 hours (`game` SharedPreferences, `last_played`, `play_ms`,
-`session_start`).
+« Last played » and « Play time » (Home, the library's context line, the « Recently played » row and the Last played /
+Most played sorts): a session starts when the launcher starts `ShellActivity` (not when it only brings a running game
+back), for an Xbox game and, since XBA-206, for a GBA, PS1 or N64 game too (its library record holds its times; it is
+never the selected game: `Library.Games.selected` skips the other consoles). It ends when the launcher shows again
+with the game no longer running, or when another game is started while it waits in the background.
+
+Its length is the time the game was **on screen** (XBA-206): `ShellActivity` counts from `onStart` to `onStop` (and
+Quit) in `files/play_clock.properties` (`PlayClock`: the session it belongs to, the closed on-screen time, when the
+current stretch began, the last write), written at each change and once a minute while the game shows, so a game left
+in the background does not count and a crash loses a minute at most. A game process the system restarts within the
+same session goes on with its count. A session the game never counted (an older game process) falls back to the wall
+clock since launch; any session counts for at most 6 hours. The totals: the record's `last_played` / `play_ms` in
+`games.json`, and the one-game `game` SharedPreferences (`last_played`, `play_ms`, `session_start`, `session_tid`).
+logcat: `launcher: play session of <TID>: N s on screen`.
 
 `LauncherScreensTest` renders every screen and Home state in English and French at 1280 x 720 and 1920 x 1080, each
 with its focused row, to `build/screenshots/ui-<state>-<en|fr>-<720|1080>.png` (`--target app-unit-tests-out`);
@@ -1580,6 +1591,49 @@ not read (a `.chd` before the native CHD reader) becomes a game without being to
 `files/library/index.json` (rebuildable). Rescans: each
 time the library opens (when some folder is read by path), Y, a new folder; with every folder through SAF only at a
 cold start and on Y. logcat: `launcher: library: scan of F folders: N items, M games, T ms (…)`.
+
+### Library view (XBA-206)
+
+What the library shows and in which order, `LibraryView` (pure; the launcher hands it the entries):
+
+| | |
+|---|---|
+| **Sort** pill | Name → Last played → Console (Xbox, GBA, PS1, N64, by name in each) → Most played, A for the next; the focus stays on the pill. Names compare without accents (« Écran » with the E's). Never played: last, by name. |
+| Console tabs | In the top bar with games of several consoles: **All**, then the consoles present; L1 / R1 (or a tap). An Xbox-only library has none. A console saved while its games were there and gone now shows All. |
+| **Search** pill | A on it: a text field in its place with the on-screen keyboard (not full screen: `IME_FLAG_NO_EXTRACT_UI`), the grid follows each letter; every word typed must be in the title, any case, accents not needed (« pokemon » finds « Pokémon »). The keyboard's Search key goes to the first game found. B clears the search (before leaving the library); the pill shows « *query* » while one is typed. The library's poll does not rebuild the screen while the field has the focus. |
+| Favourites | X on a card (or on a game's Home: **Add to favourites** / **Remove from favourites**): first in the grid in every sort, a star in the art's top right corner; note « *Game* is a favourite: first in the library ». The focus follows the card. |
+| **Recently played** | A row of the last five games played, any console, above **All games**; not while a console or a search narrows the grid, nor in a library of one row (five games or fewer). A on a card there opens the game as in the grid. |
+
+The sort, the console and the favourites are this device's: `files/library_view.properties` (`sort`, `console`,
+`favourites`); the search is not kept. The hints are A Open, X Favourite, Y Options (Start still does the primary
+action). logcat: `launcher: library: sorted by …`, `console …`, `<key> is a favourite`, `search opened`, `search
+cleared`. Tests: `LibraryViewTest` (the sorts, the filter, the search, favourites first, the file), `PlayClockTest`,
+`LauncherLibraryViewTest` (X on a card and on Home, the Sort pill, L1 / R1, the search, « Recently played », the
+session closed with the game's count; `library-view-*.png`).
+
+### Device check (library view, XBA-206), for Alex
+
+A library with Xbox and GBA (or PS1 / N64) games, more than five in all, a few of them played before.
+
+1. Open the library: the **Search** and **Sort: Name** pills over the grid, « Recently played » with the games last
+   played (any console, most recent first), then « All games »; the hints A Open, X Favourite, Y Options.
+2. Focus a game, press **X**: it moves first with a star in its top right corner, the focus with it, a note says so.
+   X again: back in its place, no star. Close and reopen the app: the favourites are still first.
+3. Open a game's Home (an Xbox one, then a GBA one): the hint X « Add to favourites »; press it, the hint becomes
+   « Remove from favourites »; B: the game is first in the library with its star.
+4. Press A on **Sort** several times: Last played, Console, Most played, Name; the grid reorders, the focus stays on the
+   pill. Close and reopen the app: the same sort.
+5. **L1 / R1**: the tabs All, Xbox, GBA, … in the top bar filter the grid (the « Recently played » row goes while a
+   console is chosen). Close and reopen the app: the same console.
+6. A on **Search**: a field with the keyboard, the grid still visible; type a few letters: the grid narrows at each
+   letter (try a name without its accent). The keyboard's Search key: the focus goes to the first game. A word that
+   matches nothing: « No game matches … ». **B**: the search is cleared, the whole library is back (the app stays).
+7. Play a GBA game 2-3 minutes, Back to launcher (the game waits) for a few minutes, then go back and Quit: its Home
+   says « Just now · 3 min played » (the minutes in the background are not counted); it is first in « Recently
+   played ». The same with an Xbox game.
+8. In a game, open the menu › **Settings**: the row « Picture shader (next start) »; choose CRT, quit and start the
+   game again: the CRT shader is on (logcat `RECOMP_SHADER`); « As in Settings » puts Settings' shader back.
+9. French: every new label (Rechercher, Tri : Nom, Joués récemment, Tous les jeux, Favori, Tous) is in French.
 
 ### Other consoles (XBA-178)
 
@@ -2741,7 +2795,7 @@ less the display cutout, so 720p and 1080p look the same.
 | Cheats | A GBA, PS1 or N64 game (XBA-197): the game's cheat codes, each On / Off, Add a code (a keyboard dialog), Delete a code (A twice); a change takes effect at once ([Cheats](#cheats)). |
 | Quick save / load (pad chords) | Same condition, without opening the menu: by default **Back + RB** saves and **Back + LB** loads the quick slot, the last slot saved or loaded (at the start, the most recently saved, else slot 1); the player's [hotkeys](#hotkeys) may move them and add next / previous quick slot. The runtime reads the chords itself; the menu polls `MenuNative.nativeStateEvent` every 250 ms while the game shows and says « Saved to slot N », « Slot N loaded », « Quick slot: N » or the error at the top of the screen. Controls lists the hotkeys. |
 | Resume where I left off | Same condition: Settings › « Resume where I left off », On by default (`files/settings/auto_resume`). On, the menu saves the **automatic slot** (`auto.st`, slot 0) when the player leaves the game: Quit (its confirmation then says « Your place is kept for next time »), Back to launcher, Home or the screen off (`GameMenu.onStop`). At the next start `ShellActivity` sets `RECOMP_STATE_RESUME=1` and the runtime loads it before the first frame; the menu says « Resumed where you left off » (or that it could not, and the game starts from the beginning). Load state lists it first as « Where you left off » when there is one; Save state never offers it. |
-| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only for an Xbox game whose XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». A GBA, PS1 or N64 game (XBA-181) has none of these three: **Scale (next start)** and **Filter (next start)** instead, As in Settings then each value, this game's own ([Settings per console](#settings-per-console)); Perf overlay, Volume and Screenshot are the same rows (the native side backs them for the consoles through the same JNI calls). An Xbox game's screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
+| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only for an Xbox game whose XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». A GBA, PS1 or N64 game (XBA-181) has none of these three: **Scale (next start)** and **Filter (next start)** instead, As in Settings then each value, this game's own ([Settings per console](#settings-per-console)). Every game with a title ID (Xbox too, XBA-203) has **Picture shader (next start)** (XBA-206): As in Settings (its value), None, Sharp, Scanlines, CRT, LCD, this game's own `RECOMP_SHADER` in its [Settings per game](#settings-per-game) file, the same value as the Game settings page's row (the runtime reads it once at start: `present_shader_env`). Perf overlay, Volume and Screenshot are the same rows (the native side backs them for the consoles through the same JNI calls). An Xbox game's screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
 | Controls | The usual mapping, compact (plus Back and the menu chord, Select + Start unless the [hotkeys](#hotkeys) say otherwise, and for a GBA / PS1 / N64 game each hotkey set); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). A GBA / PS1 / N64 game: each of its buttons and the controls it comes from ([Controls for the other consoles](#controls-for-the-other-consoles)). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
 | Change disc | Only for a PlayStation game with two discs or more found beside it (XBA-166, [PlayStation games](#playstation-games-xba-168)): a page of its discs, « In the drive » under the one playing; choosing another closes the menu and the lid opens, a second later the new disc is in. |

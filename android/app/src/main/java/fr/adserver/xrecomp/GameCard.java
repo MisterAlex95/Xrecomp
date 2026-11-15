@@ -17,7 +17,7 @@ import android.view.View;
  * One game of the library grid (docs/android/app-shell.md « Game library »): its title image (TitleArt's cached PNG)
  * or a monogram on the title ID's hue, its title on one line, and under it its state (GameState) as a dot and a label
  * — only when it is not « Ready »; when the library holds games of several consoles, the console's short name as a
- * badge in the art's top left corner (XBA-178). Focusable: it grows a little when focused, and the launcher's Glide draws a ring
+ * badge in the art's top left corner (XBA-178); a favourite's star in its top right one (XBA-206). Focusable: it grows a little when focused, and the launcher's Glide draws a ring
  * around its art. Colours are read from Theme when drawn (the library is always in the stock colours).
  */
 final class GameCard extends View {
@@ -29,7 +29,7 @@ final class GameCard extends View {
     private int monoColor = Theme.ACCENT_DEEP;
     private String title = "", chip = "", badge = "";
     private int chipColor = Theme.TEXT_DIM;
-    private boolean chipShown = true, dim;
+    private boolean chipShown = true, dim, favourite;
     private float focusT;
     private ValueAnimator anim;
 
@@ -59,6 +59,16 @@ final class GameCard extends View {
     void setBadge(String b) {
         badge = b == null ? "" : b;
         invalidate();
+    }
+
+    /** XBA-206: a favourite, a star in the art's top right corner. */
+    void setFavourite(boolean f) {
+        favourite = f;
+        invalidate();
+    }
+
+    boolean favouriteForTest() {
+        return favourite;
     }
 
     String badgeForTest() {
@@ -190,6 +200,15 @@ final class GameCard extends View {
             c.drawRoundRect(b, bh / 2, bh / 2, fillP);
             badgeP.setColor(Theme.alpha(Theme.TEXT_BRIGHT, dim ? 0.6f : 0.94f));
             c.drawText(badge, b.left + Theme.S2, b.centerY() - (bm.ascent + bm.descent) / 2, badgeP);
+        }
+        if (favourite) {
+            // A star on a dark disc, in the art's top right corner (XBA-206).
+            float r = 22, cx = artR.right - Theme.S2 - r, cy = artR.top + Theme.S2 + r;
+            fillP.setShader(null);
+            fillP.setColor(0xB0000000);
+            c.drawCircle(cx, cy, r, fillP);
+            fillP.setColor(Theme.alpha(Theme.ACCENT, dim ? 0.6f : 1f));
+            c.drawPath(Widgets.star(cx, cy + 1, r * 0.68f), fillP);
         }
         c.restore();
         lineP.setColor(Theme.alpha(Theme.TEXT, 0.10f));

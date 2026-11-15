@@ -110,4 +110,23 @@
     <string name="ROM_N64_NOTE">Play starts the game from its cartridge file, no BIOS needed. Saves and the controller pak are kept for each game. The second button puts a rumble pak in the controller instead (no controller pak saves then).</string>
     <string name="ROM_N64_NOT_PREPARED_NOTE">Play starts the game at once from its cartridge file, in the interpreter. Prepare translates it for this device (a few minutes) so that it runs natively; you can play meanwhile. The last button picks the controller pak (saves) or a rumble pak.</string>
     <string name="ROM_N64_NOTE_RUMBLE">Play starts the game from its cartridge file, no BIOS needed. A rumble pak is in the controller: your pad vibrates when the game says so. The second button puts the controller pak back (its saves).</string>
+    <!-- XBA-206: the library's view (sort, console filter, search, favourites, recently played) -->
+    <string name="LIB_HINT_FAV">Favourite</string>
+    <string name="LIB_FAV_ADD">Add to favourites</string>
+    <string name="LIB_FAV_REMOVE">Remove from favourites</string>
+    <string name="LIB_FAV_ADDED">%1$s is a favourite: first in the library</string>
+    <string name="LIB_FAV_REMOVED">%1$s is no longer a favourite</string>
+    <string name="LIB_ALL">All</string>
+    <string name="LIB_RECENT">Recently played</string>
+    <string name="LIB_ALL_GAMES">All games</string>
+    <string name="LIB_SEARCH">Search</string>
+    <string name="LIB_SEARCH_Q">« %1$s »</string>
+    <string name="LIB_SEARCH_HINT">Game name</string>
+    <string name="LIB_NO_MATCH">No game matches « %1$s ». B clears the search.</string>
+    <string name="LIB_NO_GAME_CONSOLE">No game of this console. L1 / R1 change the console.</string>
+    <string name="LIB_SORT">Sort: %1$s</string>
+    <string name="LIB_SORT_NAME">Name</string>
+    <string name="LIB_SORT_LAST_PLAYED">Last played</string>
+    <string name="LIB_SORT_CONSOLE">Console</string>
+    <string name="LIB_SORT_MOST_PLAYED">Most played</string>
 </resources>

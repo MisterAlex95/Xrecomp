@@ -49,7 +49,7 @@ import java.util.function.LongSupplier;
  *   <li>Items: Resume, for a GBA, PS1 or N64 game Save state, Load state (four slots each) and Fast-forward
  *       (XBA-182, XBA-183) and Cheats (XBA-197: each code On / Off, Add a code, Delete a code; written at once),
  *       Settings (performance overlay, game volume, bottom screen: all live; this game's language,
- *       widescreen and 480p: next start; Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
+ *       widescreen and 480p, its picture shader (XBA-206): next start; Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
  *       background; « Back to the home screen » in a game's own app, which has no launcher to show), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
  *       title and « Paused · 0:42 played ».</li>
  * </ul>
@@ -196,7 +196,7 @@ final class GameMenu {
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
                 WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, UPSCALE, VK_DRIVER, STATE_SAVE, STATE_LOAD,
-                FAST_FORWARD, AUTO_RESUME, GAME_SETTINGS, GS_RESET, CHEATS, CHEAT_ADD, CHEAT_DELETE }
+                FAST_FORWARD, AUTO_RESUME, GAME_SETTINGS, GS_RESET, CHEATS, CHEAT_ADD, CHEAT_DELETE, SHADER }
 
     private final Activity activity;
     private final Host host;
@@ -986,6 +986,13 @@ final class GameMenu {
                 r.setChoices(video);
                 r.cycler = dir -> stepVideo(GameVideo.Setting.P480, dir);
             }
+            if (titleId() != null) {
+                // XBA-206: the picture shader (XBA-195 / XBA-203: every console's window and the Xbox presenter), this
+                // game's own in its GameSettings file, from its next start (the runtime reads RECOMP_SHADER once).
+                RecompConfig.Option sh = shaderOption();
+                if (sh != null)
+                    rows.put(Item.SHADER, gameOptionRow(sh, s(R.string.MENU_SHADER)));
+            }
             if (titleId() != null)   // XBA-188: every Settings value, this game's own or as in Settings
                 row(Item.GAME_SETTINGS, s(R.string.MENU_GAME_SETTINGS));
             row(Item.SHARE_LOG, s(R.string.MENU_SHARE_LOG));
@@ -998,7 +1005,7 @@ final class GameMenu {
             pageV.setVisibility(View.VISIBLE);
             kvRow(s(R.string.MENU_GS_NEXT_START), "");
             for (RecompConfig.Option o : GameSettings.options(Console.ofKey(titleId()), lsfgBuilt()))
-                gameOptionRow(o);
+                gameOptionRow(o, s(o.title));
             row(Item.GS_RESET, s(R.string.GS_RESET));
             row(Item.BACK, s(R.string.MENU_BACK));
             break;
@@ -1609,7 +1616,7 @@ final class GameMenu {
      * XBA-188: one option of Game settings (GameSettings): « As in Settings (<value>) », then each choice, saved at
      * once for the game's next start; the « This game » badge when it differs from Settings'.
      */
-    private void gameOptionRow(RecompConfig.Option o) {
+    private Widgets.MenuRow gameOptionRow(RecompConfig.Option o, String title) {
         RecompConfig cfg = RecompConfig.load(GameStore.externalFilesDir(activity));
         int gi = GameSettings.globalIndex(cfg, o);
         String[] labels = new String[o.choices.length + 1];
@@ -1617,7 +1624,7 @@ final class GameMenu {
         for (int i = 0; i < o.choices.length; i++)
             labels[i + 1] = s(o.choices[i].label);
         Widgets.MenuRow r = new Widgets.MenuRow(activity);
-        r.set(s(o.title), null);
+        r.set(title, null);
         r.setChoices(labels);
         Runnable refresh = () -> {
             RecompConfig game = GameSettings.load(activity, titleId());
@@ -1640,6 +1647,15 @@ final class GameMenu {
         };
         r.setOnClickListener(v -> r.cycler.step(1));
         list.addView(r, new LinearLayout.LayoutParams(-1, ROW_H));
+        return r;
+    }
+
+    /** Settings' « Picture shader » option (RECOMP_SHADER), or null. */
+    static RecompConfig.Option shaderOption() {
+        for (RecompConfig.Option o : RecompConfig.OPTIONS)
+            if (o.title == R.string.OPT_CSHADER)
+                return o;
+        return null;
     }
 
     /**

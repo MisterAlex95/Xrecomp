@@ -103,4 +103,23 @@
     <string name="ROM_N64_NOTE">Jouer lance le jeu depuis son fichier de cartouche, sans BIOS. Les sauvegardes et le Controller Pak sont conservés pour chaque jeu. Le second bouton met un Rumble Pak dans la manette à la place (sans les sauvegardes du Controller Pak).</string>
     <string name="ROM_N64_NOT_PREPARED_NOTE">Jouer lance le jeu tout de suite depuis son fichier de cartouche, dans l\'interpréteur. Préparer le traduit pour cet appareil (quelques minutes) pour qu\'il tourne en natif ; vous pouvez jouer pendant ce temps. Le dernier bouton choisit le Controller Pak (sauvegardes) ou un Rumble Pak.</string>
     <string name="ROM_N64_NOTE_RUMBLE">Jouer lance le jeu depuis son fichier de cartouche, sans BIOS. Un Rumble Pak est dans la manette : elle vibre quand le jeu le demande. Le second bouton remet le Controller Pak (ses sauvegardes).</string>
+    <!-- XBA-206 : l'affichage de la bibliothèque (tri, filtre par console, recherche, favoris, joués récemment) -->
+    <string name="LIB_HINT_FAV">Favori</string>
+    <string name="LIB_FAV_ADD">Ajouter aux favoris</string>
+    <string name="LIB_FAV_REMOVE">Retirer des favoris</string>
+    <string name="LIB_FAV_ADDED">%1$s est un favori : en tête de la bibliothèque</string>
+    <string name="LIB_FAV_REMOVED">%1$s n\'est plus un favori</string>
+    <string name="LIB_ALL">Tous</string>
+    <string name="LIB_RECENT">Joués récemment</string>
+    <string name="LIB_ALL_GAMES">Tous les jeux</string>
+    <string name="LIB_SEARCH">Rechercher</string>
+    <string name="LIB_SEARCH_Q">« %1$s »</string>
+    <string name="LIB_SEARCH_HINT">Nom du jeu</string>
+    <string name="LIB_NO_MATCH">Aucun jeu ne correspond à « %1$s ». B efface la recherche.</string>
+    <string name="LIB_NO_GAME_CONSOLE">Aucun jeu de cette console. L1 / R1 changent de console.</string>
+    <string name="LIB_SORT">Tri : %1$s</string>
+    <string name="LIB_SORT_NAME">Nom</string>
+    <string name="LIB_SORT_LAST_PLAYED">Joué récemment</string>
+    <string name="LIB_SORT_CONSOLE">Console</string>
+    <string name="LIB_SORT_MOST_PLAYED">Le plus joué</string>
 </resources>

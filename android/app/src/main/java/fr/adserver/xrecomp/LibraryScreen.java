@@ -371,6 +371,20 @@ final class LibraryScreen {
      * registers them as focusables.
      */
     static ScrollView grid(Context c, List<? extends View> cards, View footer) {
+        ScrollView scroll = scroll(c);
+        LinearLayout col = (LinearLayout)scroll.getChildAt(0);
+        addRows(c, col, cards);
+        if (footer != null) {
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                                                                        LinearLayout.LayoutParams.WRAP_CONTENT);
+            p.topMargin = Theme.S2;
+            col.addView(footer, p);
+        }
+        return scroll;
+    }
+
+    /** The library's vertical scroll and its column (its only child), empty. */
+    static ScrollView scroll(Context c) {
         ScrollView scroll = new ScrollView(c);
         scroll.setVerticalScrollBarEnabled(false);
         scroll.setClipToPadding(false);
@@ -379,6 +393,13 @@ final class LibraryScreen {
         LinearLayout col = new LinearLayout(c);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setClipChildren(false);
+        scroll.addView(col, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+                                                         FrameLayout.LayoutParams.WRAP_CONTENT));
+        return scroll;
+    }
+
+    /** The rows of COLUMNS cards for cards, added to col (the « Recently played » row is one of them, XBA-206). */
+    static void addRows(Context c, LinearLayout col, List<? extends View> cards) {
         LinearLayout row = null;
         int n = cards.size(), rows = (n + COLUMNS - 1) / COLUMNS;
         for (int i = 0; i < rows * COLUMNS; i++) {
@@ -395,14 +416,5 @@ final class LibraryScreen {
             View v = i < n ? cards.get(i) : new View(c);
             row.addView(v, new LinearLayout.LayoutParams(w, GameCard.H));
         }
-        if (footer != null) {
-            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
-                                                                        LinearLayout.LayoutParams.WRAP_CONTENT);
-            p.topMargin = Theme.S2;
-            col.addView(footer, p);
-        }
-        scroll.addView(col, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
-                                                         FrameLayout.LayoutParams.WRAP_CONTENT));
-        return scroll;
     }
 }

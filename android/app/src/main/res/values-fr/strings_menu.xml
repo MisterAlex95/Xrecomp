@@ -58,4 +58,5 @@
     <string name="MENU_STATE_RESUME_FAILED">Reprise impossible : le jeu repart du début</string>
     <string name="MENU_RESUME_AUTO">Reprendre là où je m\'étais arrêté</string>
     <string name="MENU_QUIT_CONFIRM_KEPT">Votre progression est gardée pour la prochaine fois</string>
+    <string name="MENU_SHADER">Shader d\'image (au prochain lancement)</string>
 </resources>
