@@ -52,6 +52,7 @@ int    recomp_dispatch_init(void);
 size_t recomp_dispatch_flat_bytes(void);
 
 void f_a(void) {} void f_b(void) {} void f_c(void) {} void f_d(void) {}
+recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
 
 static const uint32_t known[] = {0x00011000,0x00011004,0x00012000,0x000203FC};
 static const uint32_t absent[] = {
@@ -127,6 +128,81 @@ def test_generated_dispatch_flat_matches_binary_search():
         assert r.returncode == 0, r.stdout + r.stderr
         assert r.stdout.startswith("OK"), r.stdout
         print("     " + r.stdout.strip())
+
+
+# The inline lookup of the indirect-call macros (XBA-38): g_recomp_flat, with
+# manual overrides folded in, while recomp_lookup keeps the generated answer.
+HARNESS_INLINE = r"""
+#include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+
+typedef void (*recomp_func_t)(void);
+recomp_func_t recomp_lookup(uint32_t);
+int    recomp_dispatch_init(void);
+typedef struct recomp_flat_dispatch {
+    void (**table)(void); uint32_t base; uint32_t span; uint32_t trace;
+} recomp_flat_dispatch_t;
+#define RECOMP_FLAT_DISPATCH_DEFINED
+extern recomp_flat_dispatch_t g_recomp_flat;
+#define RECOMP_FLAT_LOOKUP(_va) \
+    (((uint32_t)(_va) - g_recomp_flat.base) < g_recomp_flat.span \
+        ? g_recomp_flat.table[(uint32_t)(_va) - g_recomp_flat.base] : (void (*)(void))0)
+
+void f_a(void) {} void f_b(void) {} void f_c(void) {} void f_d(void) {} void f_m(void) {}
+static int manual_calls;
+recomp_func_t recomp_lookup_manual(uint32_t va) {
+    manual_calls++;
+    if (va == 0x00011004u || va == 0x00011008u) return f_m;   /* translated, and not */
+    return NULL;
+}
+
+int main(void) {
+    static const uint32_t absent[] = { 0x00000000, 0x00010FFF, 0x00011001, 0x00011008,
+        0x000203FD, 0x00020400, 0xFFFFFFFF, 0xFE000000, 0x80000000 };
+    size_t i;
+    if (RECOMP_FLAT_LOOKUP(0x00011000u)) { printf("FAIL: hit before init\n"); return 1; }
+    setenv("RECOMP_ICALL_TRACE", "1", 1);
+    if (!recomp_dispatch_init()) { printf("FAIL: init\n"); return 1; }
+    if (!g_recomp_flat.trace) { printf("FAIL: trace not on\n"); return 1; }
+    if (manual_calls != 4) { printf("FAIL: manual asked %d times\n", manual_calls); return 1; }
+    if (RECOMP_FLAT_LOOKUP(0x00011000u) != f_a || RECOMP_FLAT_LOOKUP(0x00012000u) != f_c ||
+        RECOMP_FLAT_LOOKUP(0x000203FCu) != f_d) { printf("FAIL: inline lookup\n"); return 1; }
+    if (RECOMP_FLAT_LOOKUP(0x00011004u) != f_m) { printf("FAIL: override not folded\n"); return 1; }
+    for (i = 0; i < sizeof absent / sizeof absent[0]; i++)
+        if (RECOMP_FLAT_LOOKUP(absent[i])) { printf("FAIL: inline hit at %08X\n", absent[i]); return 1; }
+    /* recomp_lookup still answers with the generated function */
+    if (recomp_lookup(0x00011004u) != f_b || recomp_lookup(0x00011000u) != f_a ||
+        recomp_lookup(0x00011008u) != NULL) { printf("FAIL: recomp_lookup changed\n"); return 1; }
+    printf("OK\n");
+    return 0;
+}
+"""
+
+
+def test_inline_flat_lookup_folds_manual_overrides():
+    cc = _find_cc()
+    if not cc:
+        import pytest
+        pytest.skip('no C compiler on PATH')
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "recomp_funcs.h"), "w") as f:
+            f.write("#include <stdint.h>\n#include <stddef.h>\n"
+                    "void f_a(void); void f_b(void); void f_c(void); void f_d(void);\n")
+        disp = os.path.join(tmp, "recomp_dispatch.c")
+        BatchTranslator._write_dispatch_table(
+            object.__new__(BatchTranslator), TRANSLATIONS, disp, "recomp_funcs.h")
+        hp = os.path.join(tmp, "harness.c")
+        with open(hp, "w") as f:
+            f.write(HARNESS_INLINE)
+        exe = os.path.join(tmp, "t.exe")
+        from tools.recomp.c_fixture import command
+        r = subprocess.run(command(cc, [hp, disp], exe, include_dirs=[tmp]),
+                           cwd=tmp, capture_output=True, text=True)
+        assert r.returncode == 0, (r.stdout + r.stderr)[-2000:]
+        r = subprocess.run([exe], capture_output=True, text=True)
+        assert r.returncode == 0 and r.stdout.startswith("OK"), r.stdout + r.stderr
 
 
 def test_empty_translation_set_does_not_divide_by_zero():

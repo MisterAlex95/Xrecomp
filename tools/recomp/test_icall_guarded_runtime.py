@@ -82,6 +82,7 @@ uint32_t g_esp, eax, g_ebp, g_seh_ebp;
 #define RECOMP_ICALL_OBSERVE(va, flags) ((void)0)
 #define RECOMP_ICALL_OBSERVE_SITE(site, va) ((void)0)
 #define RECOMP_ABI_CALL(va, fn) (fn)()
+FLAT_DISPATCH
 static int hits, misses, lookups, fails, called_a, called_b, called_c;
 #define RECOMP_ICALL_GUARD_HIT()  ((void)hits++)
 #define RECOMP_ICALL_GUARD_MISS() ((void)misses++)
@@ -118,15 +119,43 @@ static int check(const char *what, uint32_t target, int a, int b, int c,
 }
 int main(void) {
     int bad = 0;
+#ifdef FLAT_ON
+    /* The inline flat lookup (XBA-38): a hit calls without asking
+     * recomp_lookup_manual (its overrides are in the table already). */
+    static void (*table[0x300])(void);
+    table[0x000] = sub_A; table[0x100] = sub_B; table[0x200] = sub_C;
+    g_recomp_flat.table = table; g_recomp_flat.base = 0x00011000u; g_recomp_flat.span = 0x300;
+    g_recomp_flat.trace = 1;
+    bad |= check("unseen C, flat", 0x00011200u, 0, 0, 1, 0, 1, 0, 0);
+    if (g_icall_count != 1) { printf("FAIL trace count %u\n", (unsigned)g_icall_count); bad = 1; }
+#endif
     bad |= check("recorded A", 0x00011000u, 1, 0, 0, 1, 0, 0, 0);
     bad |= check("recorded B", 0x00011100u, 0, 1, 0, 1, 0, 0, 0);
+#ifndef FLAT_ON
     bad |= check("unseen C",   0x00011200u, 0, 0, 1, 0, 1, 1, 0);
+#endif
     bad |= check("unresolved", 0x00011300u, 0, 0, 0, 0, 1, 1, 1);
     bad |= check("not code",   0x00F00000u, 0, 0, 0, 0, 1, 0, 1);
     if (!bad) printf("OK\n");
     return bad;
 }
 """
+
+
+def _flat_dispatch():
+    """recomp_types.h's inline flat lookup and trace switch (XBA-38), with an
+    empty table (span 0): every call takes the slow path, as before."""
+    return "\n".join([
+        "typedef struct recomp_flat_dispatch { void (**table)(void);"
+        " uint32_t base, span, trace; } recomp_flat_dispatch_t;",
+        "recomp_flat_dispatch_t g_recomp_flat;",
+        "#define RECOMP_UNLIKELY(x) (x)",
+        _macro("RECOMP_FLAT_LOOKUP"),
+        _macro("RECOMP_ICALL_TRACE_NOTE"),
+    ])
+
+
+HARNESS = HARNESS.replace("FLAT_DISPATCH", _flat_dispatch())
 
 
 def _run(tmp, srcs, *, defines=(), include_dirs=()):
@@ -150,6 +179,9 @@ def test_guarded_site_matches_generic_dispatch_for_every_target():
         with open(p, "w") as f:
             f.write(src)
         r = _run(tmp, [p])
+        assert r.returncode == 0 and r.stdout.startswith("OK"), \
+            r.stdout + r.stderr + "\n" + src
+        r = _run(tmp, [p], defines=("FLAT_ON",))
         assert r.returncode == 0 and r.stdout.startswith("OK"), \
             r.stdout + r.stderr + "\n" + src
 

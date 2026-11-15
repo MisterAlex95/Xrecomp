@@ -61,6 +61,8 @@ Every indirect call in generated code goes through the RECOMP_ICALL macro. It im
 } while(0)
 ```
 
+(The macro above is the original shape. Since XBA-38 the macros first index the flat dispatch table inline, `RECOMP_FLAT_LOOKUP` over `g_recomp_flat`, exported by the generated `recomp_dispatch.c`: `recomp_dispatch_init` folds each translated VA's manual override into it, so a hit is what the tiers below would return, and a miss takes them as before.)
+
 ### Tier 1: Manual Overrides
 
 Some functions need hand-written replacements because the generated code does not work correctly (e.g., functions that rely on GPU hardware, or functions with bugs in the recompiler output). The manual lookup checks a small table (~30 entries) first:
@@ -248,6 +250,8 @@ volatile uint64_t g_icall_count;
 ```
 
 When the game crashes, inspect `g_icall_trace` in the debugger to see the most recent indirect call targets. The crashing ICALL is typically the last entry.
+
+The ring and the counter are written only when `RECOMP_ICALL_TRACE=1` is in the environment at startup (read by `recomp_dispatch_init`, XBA-38): written on every call they were a cache line shared by every guest thread. Set it before reproducing a crash or a hang.
 
 ### Failure Logging
 

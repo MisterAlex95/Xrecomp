@@ -893,13 +893,14 @@ static inline int32_t recomp_cvt_si32(double value, uint32_t mxcsr, int truncate
 /** Size of the ring buffer (must be power of 2). */
 #define ICALL_TRACE_SIZE 16
 
-/** Ring buffer of recent indirect call target VAs. */
+/** Ring buffer of recent indirect call target VAs: written only with
+ *  RECOMP_ICALL_TRACE=1 (g_recomp_flat.trace, below). */
 extern volatile uint32_t g_icall_trace[ICALL_TRACE_SIZE];
 
 /** Current write index into the ring buffer. */
 extern volatile uint32_t g_icall_trace_idx;
 
-/** Total count of indirect calls executed. */
+/** Total count of indirect calls executed (RECOMP_ICALL_TRACE=1 only). */
 extern volatile uint64_t g_icall_count;
 
 /**
@@ -1018,6 +1019,95 @@ typedef double   RECOMP_MAY_ALIAS recomp_f64_alias;
 /** Float/double memory access. */
 #define MEMF(addr)   (*(volatile recomp_f32_alias *)XBOX_PTR(addr))
 #define MEMD(addr)   (*(volatile recomp_f64_alias *)XBOX_PTR(addr))
+
+/* Guest memory that does not alias g_cpu, in the generated code (XBA-38).
+ *
+ * With the types above, a guest store may alias the uint32_t registers in
+ * g_cpu by the C aliasing rules, so after every MEM32 store the compiler
+ * reloads each register it had in a host register, and keeps every register
+ * write in memory order around it. Guest memory never holds g_cpu, so in the
+ * generated code the accesses go through one-member structs instead, a type
+ * nothing in g_cpu can alias (tools/bench, x86-64 clang 19: -30 % on the SSE
+ * workload, -7 % on x87, the integer ones unchanged).
+ *
+ * What XBA-138's may_alias types gave is kept: a host fault on a guest access
+ * becomes a guest exception built from g_cpu, so every register written
+ * before an access must be in g_cpu when it faults (tests/seh_fault_regs).
+ * recomp_guest_base's asm reads g_cpu ("m" input) and hands back the guest
+ * memory base the access adds to its address: every g_cpu store before it in
+ * program order has happened before the access, and since the asm only reads
+ * memory, nothing has to be reloaded after it. It emits no instruction and,
+ * being the base rather than the whole address, leaves the address modes
+ * alone (passing the address through it cost +5..10 % on loops).
+ *
+ * Generated code only: hand-written runtime C may reach the same guest bytes
+ * through plain uint32_t pointers, which a struct type would not alias.
+ * RECOMP_GUEST_MEM_NOALIAS=0 restores the types above (tools/bench variant
+ * memalias0). MSVC does no type-based alias analysis: nothing to change. */
+#ifndef RECOMP_GUEST_MEM_NOALIAS
+#  if defined(RECOMP_GENERATED_CODE) && (defined(__GNUC__) || defined(__clang__))
+#    define RECOMP_GUEST_MEM_NOALIAS 1
+#  else
+#    define RECOMP_GUEST_MEM_NOALIAS 0
+#  endif
+#endif
+#if RECOMP_GUEST_MEM_NOALIAS
+typedef struct { uint8_t  v; } recomp_gm_u8;
+typedef struct { uint16_t v; } recomp_gm_u16;
+typedef struct { uint32_t v; } recomp_gm_u32;
+typedef struct { int8_t   v; } recomp_gm_s8;
+typedef struct { int16_t  v; } recomp_gm_s16;
+typedef struct { int32_t  v; } recomp_gm_s32;
+typedef struct { int64_t  v; } recomp_gm_s64;
+typedef struct { float    v; } recomp_gm_f32;
+typedef struct { double   v; } recomp_gm_f64;
+static inline uintptr_t recomp_guest_base(void)
+{
+    uintptr_t b = (uintptr_t)g_xbox_mem_offset;
+    __asm__("" : "+r"(b) : "m"(g_cpu));
+    return b;
+}
+#define RECOMP_GM(T, addr) \
+    (((volatile T *)((uintptr_t)(uint32_t)(addr) + recomp_guest_base()))->v)
+#undef MEM8
+#undef MEM16
+#undef MEM32
+#undef SMEM8
+#undef SMEM16
+#undef SMEM32
+#undef SMEM64
+#undef MEMF
+#undef MEMD
+#define MEM8(addr)   RECOMP_GM(recomp_gm_u8,  addr)
+#define MEM16(addr)  RECOMP_GM(recomp_gm_u16, addr)
+#define MEM32(addr)  RECOMP_GM(recomp_gm_u32, addr)
+#define SMEM8(addr)  RECOMP_GM(recomp_gm_s8,  addr)
+#define SMEM16(addr) RECOMP_GM(recomp_gm_s16, addr)
+#define SMEM32(addr) RECOMP_GM(recomp_gm_s32, addr)
+#define SMEM64(addr) RECOMP_GM(recomp_gm_s64, addr)
+#define MEMF(addr)   RECOMP_GM(recomp_gm_f32, addr)
+#define MEMD(addr)   RECOMP_GM(recomp_gm_f64, addr)
+#endif
+
+/* rep stos's fast path (tools/recomp/lifter.py _lift_rep_stos, XBA-38):
+ * `count` elements of `size` bytes (1, 2 or 4) of `value` at the host
+ * address of a forward fill the lifter has checked stays below the MMIO
+ * range. One memset when every byte of the element is the same (zeroing, the
+ * usual case), else a plain loop the compiler turns into wide stores. */
+static inline void recomp_rep_fill(void *dst, uint32_t value, size_t count, unsigned size)
+{
+    uint8_t *d = (uint8_t *)dst;
+    size_t i;
+    if (size == 1 || (size == 2 && (uint8_t)value == (uint8_t)(value >> 8)) ||
+        (size == 4 && value == (value & 0xFFu) * 0x01010101u)) {
+        memset(d, (int)(value & 0xFFu), count * size);
+    } else if (size == 2) {
+        uint16_t v = (uint16_t)value;
+        for (i = 0; i < count; i++) memcpy(d + 2 * i, &v, 2);
+    } else {
+        for (i = 0; i < count; i++) memcpy(d + 4 * i, &value, 4);
+    }
+}
 
 /* FSAVE's protected-mode image. Only state represented by the double-stack
  * model is restored: CW, TOP, condition codes and eight registers.
@@ -1809,6 +1899,48 @@ recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 #endif
 
+/* The flat dispatch table, as the generated recomp_dispatch.c exports it
+ * (XBA-38): the indirect-call macros below index it inline, so a call to a
+ * translated function costs a bounds check and a load instead of two
+ * out-of-line lookups (recomp_lookup_manual, then recomp_lookup).
+ *
+ * span stays 0 until recomp_dispatch_init() built the table, so every lookup
+ * misses and takes the slow path (manual, generated, kernel) as before. The
+ * table holds recomp_lookup_manual's override for every translated VA it
+ * covers (recomp_dispatch_init asks it once per entry), so a hit is what the
+ * slow path would have returned: an override at a VA that is not a
+ * translated function is still found by the slow path, since that slot is
+ * empty. recomp_lookup_manual must therefore answer the same for a VA for the
+ * whole run, which every override table does (a fixed list of addresses).
+ *
+ * trace: the indirect-call ring buffer and counter below (g_icall_trace,
+ * g_icall_count) are crash and hang forensics. Written on every call they
+ * were a shared cache line bounced between guest threads, so they are kept
+ * only when RECOMP_ICALL_TRACE=1 is in the environment when
+ * recomp_dispatch_init runs; otherwise one predictable branch. */
+#ifndef RECOMP_FLAT_DISPATCH_DEFINED   /* the generated recomp_dispatch.c has it too */
+#define RECOMP_FLAT_DISPATCH_DEFINED
+typedef struct recomp_flat_dispatch {
+    void (**table)(void);
+    uint32_t base;
+    uint32_t span;
+    uint32_t trace;
+} recomp_flat_dispatch_t;
+#endif
+extern recomp_flat_dispatch_t g_recomp_flat;
+
+#define RECOMP_FLAT_LOOKUP(_va) \
+    (((uint32_t)(_va) - g_recomp_flat.base) < g_recomp_flat.span \
+        ? g_recomp_flat.table[(uint32_t)(_va) - g_recomp_flat.base] : (void (*)(void))0)
+
+#define RECOMP_ICALL_TRACE_NOTE(_va) do { \
+    if (RECOMP_UNLIKELY(g_recomp_flat.trace)) { \
+        g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = (_va); \
+        g_icall_trace_idx++; \
+        g_icall_count++; \
+    } \
+} while (0)
+
 /**
  * RECOMP_ABI_CALL - call a resolved target, optionally checking the ABI.
  *
@@ -1929,15 +2061,14 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
  */
 #define RECOMP_ICALL(xbox_va) do { \
     uint32_t _va = (uint32_t)(xbox_va); \
-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
-    g_icall_trace_idx++; \
-    g_icall_count++; \
+    RECOMP_ICALL_TRACE_NOTE(_va); \
     /* Skip garbage VAs outside code section + kernel thunk range */ \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
         recomp_icall_not_code_log(_va); \
         g_esp += 4; eax = 0; break; \
     } \
-    recomp_func_t _fn = recomp_lookup_manual(_va); \
+    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
+    if (!_fn) _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_kernel(_va); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
@@ -1956,14 +2087,13 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
  */
 #define RECOMP_ICALL_SAFE(xbox_va, saved_esp) do { \
     uint32_t _va = (uint32_t)(xbox_va); \
-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
-    g_icall_trace_idx++; \
-    g_icall_count++; \
+    RECOMP_ICALL_TRACE_NOTE(_va); \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
         recomp_icall_not_code_log(_va); \
         g_esp = (saved_esp); eax = 0; break; \
     } \
-    recomp_func_t _fn = recomp_lookup_manual(_va); \
+    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
+    if (!_fn) _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_kernel(_va); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
@@ -1976,14 +2106,13 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
 #define RECOMP_ICALL_SAFE_CC(xbox_va, saved_esp) do { \
     (void)(saved_esp); \
     uint32_t _va = (uint32_t)(xbox_va); \
-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
-    g_icall_trace_idx++; \
-    g_icall_count++; \
+    RECOMP_ICALL_TRACE_NOTE(_va); \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
         recomp_icall_not_code_log(_va); \
         g_esp += 4; eax = 0; break; \
     } \
-    recomp_func_t _fn = recomp_lookup_manual(_va); \
+    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
+    if (!_fn) _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_kernel(_va); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
@@ -2002,15 +2131,14 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
  */
 #define RECOMP_ICALL_SAFE_AT(xbox_va, saved_esp, site) do { \
     uint32_t _va = (uint32_t)(xbox_va); \
-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
-    g_icall_trace_idx++; \
-    g_icall_count++; \
+    RECOMP_ICALL_TRACE_NOTE(_va); \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
         recomp_icall_not_code_log(_va); \
         g_esp = (saved_esp); eax = 0; break; \
     } \
     RECOMP_ICALL_OBSERVE_SITE((site), _va); \
-    recomp_func_t _fn = recomp_lookup_manual(_va); \
+    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
+    if (!_fn) _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_kernel(_va); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
@@ -2023,15 +2151,14 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
 #define RECOMP_ICALL_SAFE_AT_CC(xbox_va, saved_esp, site) do { \
     (void)(saved_esp); \
     uint32_t _va = (uint32_t)(xbox_va); \
-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
-    g_icall_trace_idx++; \
-    g_icall_count++; \
+    RECOMP_ICALL_TRACE_NOTE(_va); \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
         recomp_icall_not_code_log(_va); \
         g_esp += 4; eax = 0; break; \
     } \
     RECOMP_ICALL_OBSERVE_SITE((site), _va); \
-    recomp_func_t _fn = recomp_lookup_manual(_va); \
+    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
+    if (!_fn) _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_kernel(_va); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
@@ -2065,7 +2192,8 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
         recomp_icall_not_code_log(_va); \
         g_esp += 4u + (uint32_t)(ret_imm); g_eax = 0; break; \
     } \
-    recomp_func_t _fn = recomp_lookup_manual(_va); \
+    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
+    if (!_fn) _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_kernel(_va); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \

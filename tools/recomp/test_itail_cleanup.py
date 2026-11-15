@@ -115,6 +115,9 @@ uint32_t g_esp, g_eax, g_seh_ebp, slot;
 #define MEM32(a) ((void)(a), slot)
 #define RECOMP_ICALL_OBSERVE(va, flags) ((void)0)
 #define RECOMP_ABI_CALL(va, fn) (fn)()
+typedef struct recomp_flat_dispatch { void (**table)(void); uint32_t base, span, trace; } recomp_flat_dispatch_t;
+recomp_flat_dispatch_t g_recomp_flat;   /* span 0: the slow path */
+FLAT_LOOKUP
 static int called, fails, not_code;
 /* The target the slot names when resolved: a guest `ret 0x18`. */
 void sub_T(void) { called++; g_esp += 28; }
@@ -160,7 +163,8 @@ def test_failed_tail_target_pops_what_the_jumpers_ret_pops():
     if not cc:
         pytest.skip("no C compiler on PATH")
     lifted = _tail_line(_translate(THUNK, BASE, len(THUNK)))
-    src = (HARNESS.replace("IS_CODE", _macro("RECOMP_ICALL_IS_CODE"))
+    src = (HARNESS.replace("FLAT_LOOKUP", _macro("RECOMP_FLAT_LOOKUP"))
+                  .replace("IS_CODE", _macro("RECOMP_ICALL_IS_CODE"))
                   .replace("ITAIL_RET", _macro("RECOMP_ITAIL_RET"))
                   .replace("LIFTED", lifted))
     with tempfile.TemporaryDirectory() as tmp:

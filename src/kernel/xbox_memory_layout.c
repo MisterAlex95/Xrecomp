@@ -3190,8 +3190,12 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
         /* The running indirect-call total separates a hang from mere
          * slowness. Kernel calls cannot: a pure CPU loop makes none, so
          * "same count at 20s and 60s" proves nothing about it. */
-        fprintf(stderr, "  icalls so far: %llu\n",
-                (unsigned long long)g_icall_count);
+        if (!getenv("RECOMP_ICALL_TRACE"))  /* XBA-38: kept only on demand */
+            fprintf(stderr, "  icall trace off (RECOMP_ICALL_TRACE=1 keeps the count"
+                            " and the recent targets)\n");
+        else
+            fprintf(stderr, "  icalls so far: %llu\n",
+                    (unsigned long long)g_icall_count);
         fprintf(stderr, "  recent ICALL targets:");
         for (k = 0; k < 16; k++)
             fprintf(stderr, " %08X",
