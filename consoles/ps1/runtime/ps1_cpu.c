@@ -701,6 +701,13 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
 }
 
 void ps1_cpu_step(ps1_machine *m) { step(m); }
+
+void ps1_cpu_step_unliftable(ps1_machine *m)
+{
+    do {
+        step(m);
+    } while (m->cycles < m->next_event && !m->irq_pending && m->pc != m->hook_at && !ps1_rc_liftable_pc(m->pc));
+}
 void ps1_cpu_take_interrupt(ps1_machine *m) { take_interrupt(m); }
 
 void ps1_cpu_hook_check(ps1_machine *m)

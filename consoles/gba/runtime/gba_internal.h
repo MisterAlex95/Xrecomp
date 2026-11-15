@@ -307,6 +307,10 @@ void gba_cpu_reset(gba_machine *m, uint32_t pc, uint32_t cpsr);
 void gba_cpu_run(gba_machine *m);
 /* Executes exactly one instruction (or takes a pending IRQ). For tests. */
 void gba_cpu_step(gba_machine *m);
+/* The recompiler's loop for code it does not cover (gba_recomp_run): steps while the next instruction is outside the
+ * cartridge ROM or an IRQ is due to be taken, and the frame's time is not up and the CPU not halted, as that loop
+ * would call gba_cpu_step for each, without a call per instruction. */
+void gba_cpu_step_outside_rom(gba_machine *m);
 uint32_t gba_get_cpsr(const gba_machine *m);
 void gba_set_cpsr(gba_machine *m, uint32_t v);
 void gba_set_mode(gba_machine *m, uint32_t mode);

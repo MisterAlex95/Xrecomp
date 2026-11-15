@@ -288,6 +288,18 @@ int ps1_bus_fault(ps1_machine *m, uint32_t addr, int store);
 
 /* ps1_cpu.c: one interpreter step (the instruction at pc; no IRQ / hook check), the interpreter-only run loop. */
 void ps1_cpu_step(ps1_machine *m);
+/* Code a title pack can hold (ps1_recomp.c): main RAM above the BIOS's kernel area (the first 64 KB), from KUSEG, KSEG0
+ * or KSEG1, word aligned. */
+#define PS1_RC_LOW_RAM 0x10000u
+static inline bool ps1_rc_liftable_pc(uint32_t pc)
+{
+    uint32_t seg = pc >> 29, p = pc & 0x1FFFFFFFu;
+    return !(pc & 3) && (seg == 0 || seg == 4 || seg == 5) && p < 0x00800000u && (p & 0x1FFFFFu) >= PS1_RC_LOW_RAM;
+}
+/* The recompiler's loop for code no pack can hold (ps1_recomp_run): steps while the next instruction is not liftable,
+ * no interrupt is pending, no hook is due and the time slice is not up, as that loop would call ps1_cpu_step for each
+ * (the BIOS, its exception handler), without a call per instruction. */
+void ps1_cpu_step_unliftable(ps1_machine *m);
 void ps1_cpu_hook_check(ps1_machine *m);   /* the run loop's BIOS / fast-boot hook test before an instruction */
 void ps1_cpu_take_interrupt(ps1_machine *m);
 
