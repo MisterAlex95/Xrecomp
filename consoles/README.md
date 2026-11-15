@@ -405,6 +405,10 @@ an EXE gets `EXE-<CRC32>`. Every option is listed at the top of `runtime/tools/p
 (`consoles/ps1/tests/test_main.c`: the helpers and `.m3u` parsing, then gfx.exe fast-booted, through `fd:N`, a memory
 card read back and left alone, gfx.cue booted by the BIOS to its 320 x 240 picture, the errors, a save written and
 reloaded, a playlist's disc swap, fast boot on and off); `ps1_hb_fastboot_*` boot every homebrew disc fast.
+Diagnostic in the log (stdout, logcat on Android; no effect on the game): `ps1: the game has not left pc 0x… for 5 s
+with interrupts off (I_STAT …, I_MASK …)` once when, for 300 frame ends in a row, SR.IEc is 0 and the PC stays in one
+64-byte window (a hang in a device the loop polls: no IRQ handler can get it out), and `ps1: running again` when it
+leaves (`ps1_runtime.c`, `stall_check`).
 
 **N64 core (N-1 XBA-169, N-3 XBA-171, N-4 XBA-172).** Interpreter first, the PS1's shape. `consoles/n64/runtime/n64_core.h`:
 a VR4300 interpreter (`n64_cpu.c`: every MIPS III integer instruction, 64-bit ops, LL / SC / LLD / SCD, LWL..SDR,
