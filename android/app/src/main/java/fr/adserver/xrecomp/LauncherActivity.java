@@ -1178,6 +1178,8 @@ public class LauncherActivity extends Activity {
         boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
         boolean once = e.getAction() == KeyEvent.ACTION_UP && !e.isCanceled();
         lastInputAt = clock.getAsLong();
+        if (hkCapture != null && hotkeyCaptureKey(e))   // XBA-190: « press the buttons » takes every key
+            return true;
         // The dimmed Preparing screen: the first key only wakes it (its release is swallowed too).
         if (dimmed) {
             if (down) {
@@ -5334,6 +5336,8 @@ public class LauncherActivity extends Activity {
         }
         controlsPorts(list);   // XBA-123
         controlsTouch(list);   // XBA-42
+        controlsHotkeys(list, Console.XBOX, padMapTid,   // XBA-190: the menu chord, an Xbox title's only hotkey
+                        padMapGame || Hotkeys.gameText(this, padMapTid) != null, () -> Hotkeys.sourcesOf(padMap));
         MenuRow reset = listRow(list, getString(R.string.CTL_RESET), getString(R.string.CTL_RESET_DETAIL),
                                 this::resetControls);
         onFocus(reset, () -> controlsDescribe(getString(R.string.CTL_RESET_DETAIL)));
@@ -5499,6 +5503,7 @@ public class LauncherActivity extends Activity {
         String tid = padMapTid;
         scope.cycler = d -> {
             GameSettings.put(this, tid, PadMapping.KEY, padMapGame ? null : padMap.format());
+            Hotkeys.storeGame(this, tid, padMapGame ? null : hotkeys);   // XBA-190: the hotkeys follow the scope
             Log.i(TAG, "launcher: " + tid + " controls " + (padMapGame ? "follow every game's" : "of its own"));
             feedback.play(UiFeedback.Cue.MOVE, scope);
             show(Screen.CONTROLS, 0);
@@ -5514,6 +5519,192 @@ public class LauncherActivity extends Activity {
         saveControls();
         show(Screen.CONTROLS, 0);
         setNote(getString(R.string.CTL_RESET_DONE), NOTE_OK);
+    }
+
+    // ---- Hotkeys (XBA-190) ----------------------------------------------------------------------------------------
+
+    /** The hotkeys the Controls screen edits: every game's (recomp.cfg) or, hotkeysGame, the game's own. */
+    private Hotkeys hotkeys = new Hotkeys();
+    private boolean hotkeysGame;
+    private String hotkeysKey;
+    /** « Press the buttons »: the capture in progress (null: none), its action and row. */
+    private Hotkeys.Capture hkCapture;
+    private Hotkeys.Action hkCaptureAction;
+    private MenuRow hkCaptureRow;
+    /** Each hotkey row's value, refreshed together (a change can make or end a conflict elsewhere). */
+    private final List<Runnable> hkRefresh = new ArrayList<>();
+    /** Each hotkey row's description, said again once a capture changes its chord. */
+    private final EnumMap<Hotkeys.Action, Runnable> hkDetails = new EnumMap<>(Hotkeys.Action.class);
+    static final long HK_CAPTURE_MS = 5000;
+    private final Runnable hkCaptureTimeout = () -> endHotkeyCapture(true);
+
+    Hotkeys hotkeysForTest() {
+        return hotkeys;
+    }
+
+    boolean hotkeyCapturingForTest() {
+        return hkCapture != null;
+    }
+
+    /**
+     * A Controls screen's « Hotkeys » (Hotkeys, src/platform/recomp_hotkeys.h): one row per action a game of console
+     * con has (the menu's alone for an Xbox title), its value the chord; A captures a new one (« press the buttons »),
+     * left / right turn it off or put the usual one back; « · conflict » after the chord when two actions share it or a
+     * chord without a modifier takes a button the game uses (gameSources: the CPS bits its mapping reads); « Reset
+     * hotkeys ». Saved at once: the game's own (key, its GameSettings file) when game, else recomp.cfg's line.
+     */
+    private void controlsHotkeys(LinearLayout list, Console con, String key, boolean game,
+                                 java.util.function.IntSupplier gameSources) {
+        hotkeysKey = key;
+        hotkeysGame = game && key != null;
+        hotkeys = hotkeysGame ? Hotkeys.parse(Hotkeys.gameText(this, key)) : Hotkeys.loadGlobal(cfg);
+        hkRefresh.clear();
+        hkDetails.clear();
+        listLabel(list, getString(R.string.HK_GROUP));
+        for (Hotkeys.Action a : Hotkeys.actions(con)) {
+            MenuRow r = settingRow(list, getString(Hotkeys.label(a)), "");
+            Runnable value = () -> {
+                if (r == hkCaptureRow && hkCapture != null && hkCapture.result() == null)
+                    return;
+                String label = Hotkeys.chordLabel(this, hotkeys.get(a));   // a badge would hide the value
+                r.setValue(hotkeys.hasConflict(a, con, gameSources.getAsInt())
+                           ? getString(R.string.HK_VALUE_CONFLICT, label) : label);
+            };
+            hkRefresh.add(value);
+            value.run();
+            Runnable detail = () -> hotkeyDetail(a, con, gameSources.getAsInt());
+            hkDetails.put(a, detail);
+            r.cycler = d -> {
+                Hotkeys.Chord cur = hotkeys.get(a);
+                hotkeys.set(a, !cur.isNone() ? Hotkeys.Chord.NONE : Hotkeys.def(a));
+                saveHotkeys();
+                feedback.play(UiFeedback.Cue.MOVE, r);
+                detail.run();
+            };
+            r.setOnClickListener(v -> startHotkeyCapture(a, r));
+            onFocus(r, detail);
+        }
+        String resetText = getString(R.string.HK_RESET_DETAIL);
+        MenuRow reset = listRow(list, getString(R.string.HK_RESET), resetText, () -> {
+            hotkeys.reset();
+            saveHotkeys();
+            setNote(getString(R.string.HK_RESET_DONE), NOTE_OK);
+        });
+        onFocus(reset, () -> describe(resetText + "\n\n" + getString(R.string.HK_DETAIL_SCOPE)));
+    }
+
+    /** The focused hotkey's text: what it is, its chord, its conflicts, where it is kept. */
+    private void hotkeyDetail(Hotkeys.Action a, Console con, int gameSources) {
+        String name = getString(Hotkeys.label(a)), chord = Hotkeys.chordLabel(this, hotkeys.get(a));
+        StringBuilder b = new StringBuilder(getString(a == Hotkeys.Action.MENU ? R.string.HK_DETAIL_MENU
+                                                                               : R.string.HK_DETAIL, name, chord));
+        List<Hotkeys.Action> shared = hotkeys.sharing(a, con);
+        if (!shared.isEmpty()) {
+            StringBuilder o = new StringBuilder();
+            for (Hotkeys.Action x : shared)
+                o.append(o.length() == 0 ? "" : ", ").append(getString(Hotkeys.label(x)));
+            b.append("\n\n").append(getString(R.string.HK_SHARED, o));
+        }
+        PadMapping.Source need = hotkeys.gameNeeds(a, gameSources);
+        if (need != null)
+            b.append("\n\n").append(getString(R.string.HK_GAME_NEEDS, getString(ControlsLabels.source(need))));
+        b.append("\n\n").append(getString(R.string.HK_DETAIL_SCOPE));
+        describe(b.toString());
+    }
+
+    /** Written at once: the game's own (its GameSettings file), or recomp.cfg's line (none for the defaults). */
+    private void saveHotkeys() {
+        if (hotkeysGame) {
+            boolean ok = Hotkeys.storeGame(this, hotkeysKey, hotkeys);
+            setNote(getString(!ok ? R.string.GS_SAVE_FAILED : gameRunning() ? R.string.SETTINGS_SAVED_RUNNING
+                                                                             : R.string.SETTINGS_SAVED),
+                    ok ? NOTE_OK : NOTE_ERROR);
+        } else {
+            Hotkeys.storeGlobal(cfg, hotkeys);
+            saveSettings();
+        }
+        for (Runnable r : hkRefresh)
+            r.run();
+        Log.i(TAG, "launcher: hotkeys (" + (hotkeysGame ? hotkeysKey : "every game") + ") "
+                   + (hotkeys.isDefault() ? "(default)" : hotkeys.format()));
+    }
+
+    /** A, on a hotkey row: the next buttons pressed make its chord (or nothing within HK_CAPTURE_MS). */
+    private void startHotkeyCapture(Hotkeys.Action a, MenuRow r) {
+        endHotkeyCapture(false);
+        hkCapture = new Hotkeys.Capture();
+        hkCaptureAction = a;
+        hkCaptureRow = r;
+        r.setValue(getString(R.string.HK_PRESS));
+        setNote(getString(R.string.HK_CAPTURE_NOTE, getString(Hotkeys.label(a))), NOTE_INFO);
+        feedback.play(UiFeedback.Cue.MOVE, r);
+        poller.postDelayed(hkCaptureTimeout, HK_CAPTURE_MS);
+    }
+
+    /** A key while capturing: true when the capture took it (every key until the chord's buttons are up again). */
+    private boolean hotkeyCaptureKey(KeyEvent e) {
+        Hotkeys.Capture c = hkCapture;
+        if (hkCaptureRow == null || !hkCaptureRow.isAttachedToWindow()) {   // the screen went away
+            endHotkeyCapture(false);
+            return false;
+        }
+        int k = e.getKeyCode();
+        boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
+        if (c.result() == null && (k == KeyEvent.KEYCODE_ESCAPE
+                                   || (k == KeyEvent.KEYCODE_BACK && !Hotkeys.fromGamepad(e.getSource())))) {
+            if (!down)
+                endHotkeyCapture(true);   // a touch screen's or a keyboard's Back: nothing changes
+            return true;
+        }
+        if (e.getRepeatCount() > 0)
+            return true;
+        hotkeyCaptured(c.key(k, down));
+        if (!c.active())
+            hkCapture = null;
+        return true;
+    }
+
+    /** The trigger axes while capturing (a pad whose L2 / R2 come only as axes). */
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent e) {
+        if (hkCapture != null && (e.getSource() & android.view.InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
+            Hotkeys.Capture c = hkCapture;
+            float l = Math.max(e.getAxisValue(MotionEvent.AXIS_LTRIGGER), e.getAxisValue(MotionEvent.AXIS_BRAKE));
+            float r = Math.max(e.getAxisValue(MotionEvent.AXIS_RTRIGGER), e.getAxisValue(MotionEvent.AXIS_GAS));
+            hotkeyCaptured(c.triggers(l, r));
+            if (!c.active())
+                hkCapture = null;
+            return true;
+        }
+        return super.dispatchGenericMotionEvent(e);
+    }
+
+    private void hotkeyCaptured(Hotkeys.Chord chord) {
+        if (chord == null || hkCaptureAction == null)
+            return;
+        poller.removeCallbacks(hkCaptureTimeout);
+        Hotkeys.Action a = hkCaptureAction;
+        hkCaptureAction = null;
+        hotkeys.set(a, chord);
+        saveHotkeys();
+        setNote(getString(R.string.HK_CAPTURED, getString(Hotkeys.label(a)), Hotkeys.chordLabel(this, chord)), NOTE_OK);
+        Runnable detail = hkDetails.get(a);
+        if (detail != null)
+            detail.run();
+        if (hkCaptureRow != null)
+            feedback.play(UiFeedback.Cue.MOVE, hkCaptureRow);
+    }
+
+    /** Ends a capture (the timeout, Back on a touch screen, another capture); note: say nothing changed. */
+    private void endHotkeyCapture(boolean note) {
+        poller.removeCallbacks(hkCaptureTimeout);
+        boolean was = hkCapture != null && hkCapture.result() == null;
+        hkCapture = null;
+        hkCaptureAction = null;
+        for (Runnable r : hkRefresh)
+            r.run();
+        if (was && note)
+            setNote(getString(R.string.HK_CAPTURE_CANCELLED), NOTE_INFO);
     }
 
     // ---- ROM_CONTROLS (XBA-158 / XBA-168 / XBA-174) ---------------------------------------------------------------
@@ -5555,6 +5746,7 @@ public class LauncherActivity extends Activity {
         scope.cycler = d -> {
             // This game only: a copy of the console's mapping to change on its own; all games: the copy goes.
             ConsoleControls.storeGame(this, key, romMapGame ? null : romMap);
+            Hotkeys.storeGame(this, key, romMapGame ? null : hotkeys);   // XBA-190: the hotkeys follow the scope
             Log.i(TAG, "launcher: " + key + " controls " + (romMapGame ? "follow the console's" : "of its own"));
             feedback.play(UiFeedback.Cue.MOVE, scope);
             show(Screen.ROM_CONTROLS, 0);
@@ -5637,6 +5829,8 @@ public class LauncherActivity extends Activity {
             }
         }
         controlsTouch(list, getString(R.string.CC_TOUCH_DETAIL, cname));
+        controlsHotkeys(list, con, key, romMapGame || Hotkeys.gameText(this, key) != null,   // XBA-190
+                        () -> Hotkeys.sourcesOf(romMap));
         String resetText = getString(R.string.CC_RESET_DETAIL, cname,
                                      romMapGame ? e.title() : getString(R.string.CC_SCOPE_CONSOLE, cname));
         MenuRow reset = listRow(list, getString(R.string.CTL_RESET), resetText, this::resetRomControls);

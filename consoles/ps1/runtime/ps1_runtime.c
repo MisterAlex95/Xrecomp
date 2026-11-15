@@ -9,7 +9,7 @@
  * frame runs, the memory cards are written and the window keeps pumping.
  *
  * Save states and fast-forward (XBA-182, recomp_states.h), the GBA runtime's way: the run attaches itself while it
- * plays; the in-game menu and the desktop keys (F1-F4 save, Shift+F1-F4 load, Tab held fast-forwards) save and load
+ * plays; the in-game menu and the hotkeys (XBA-190, recomp_hotkeys.h; desktop F1-F4 / Shift+F1-F4 / Tab by default) save and load
  * between frames under s_mu; fast-forward runs `speed` frames per shown frame, their audio averaged down.
  *
  * Picture: ps1_display gives the display area (256 / 320 / 368 / 512 / 640 x 240 / 480, 15- or 24-bit) as XRGB; it is
@@ -27,6 +27,7 @@
 #include "ps1_devices.h"
 #include "ps1_pack.h"
 #include "recomp_exit_hook.h"
+#include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
 #include "recomp_states.h"
 
@@ -561,25 +562,6 @@ static int state_load_op(int slot, void *user)
     return rc;
 }
 
-/* Desktop keys of the save states: F1-F4 save slots 1-4, Shift+F1-F4 load them, on the key's press. */
-static void state_keys(int held[4])
-{
-    const Uint8 *ks = SDL_GetKeyboardState(NULL);
-    if (!ks)
-        return;
-    int shift = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
-    for (int i = 0; i < 4; i++) {
-        int down = ks[SDL_SCANCODE_F1 + i];
-        if (down && !held[i]) {
-            if (shift)
-                recomp_states_load(i + 1);
-            else
-                recomp_states_save(i + 1);
-        }
-        held[i] = down;
-    }
-}
-
 /* ---- Multi-disc games (XBA-166) ------------------------------------------------------------------------------- */
 
 #define SWAP_LID_FRAMES 60 /* the lid stays open about a second: games poll Getstat, they see it */
@@ -731,8 +713,7 @@ typedef struct pad_in {
     uint16_t buttons;
     uint8_t lx, ly, rx, ry;
     int toggle; /* Back + L3 + R3 held */
-    int ff;     /* Back + right trigger held: fast-forward (XBA-182) */
-    int quick;  /* Back + right / left shoulder pressed this frame: quick save / load (RECOMP_CHORD_*) */
+    uint32_t hk_held, hk_pressed; /* the hotkeys a pad holds / pressed this frame (recomp_hotkeys.h, XBA-190) */
 } pad_in;
 
 static int deflection(uint8_t v)
@@ -743,7 +724,7 @@ static int deflection(uint8_t v)
 /* The host pads for PS1 port `port`, through the player's mapping (the on-screen pad joins host pad 1,
  * console_pad_read): with one player every pad drives port 0 (buttons merged, the most deflected stick wins); with
  * two, host pad N drives port N. */
-static int s_quick_held[HOST_PAD_PORTS]; /* recomp_states_chord's state per host pad */
+static recomp_hotkeys_state s_hk_pad[HOST_PAD_PORTS]; /* recomp_hotkeys_pad_update's state per host pad */
 static void pads_read(int port, int players, int analog, pad_in *out)
 {
     memset(out, 0, sizeof *out);
@@ -756,22 +737,16 @@ static void pads_read(int port, int players, int analog, pad_in *out)
         ConsolePadOut o;
         if (!console_pad_read(&s_pad_map, p, &o))
             continue;
-        int swallow = 0, act = recomp_states_chord(!!(o.host_buttons & HOST_PAD_BACK),
-                                                   !!(o.host_buttons & HOST_PAD_LSHOULDER),
-                                                   !!(o.host_buttons & HOST_PAD_RSHOULDER), &s_quick_held[p], &swallow);
-        if (act && !out->quick)
-            out->quick = act;
-        if (swallow) /* the chord's Back and shoulders reach the game as nothing */
-            o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_LEFT_SHOULDER) |
-                                                                CPS_BIT(CPS_RIGHT_SHOULDER));
+        HostPadState st;
+        uint32_t src = host_pad_read(p, &st) ? console_pad_sources(&st, s_pad_map.stick_threshold, RECOMP_HK_TRIGGER) : 0;
+        uint32_t pressed = 0, swallow = 0;
+        out->hk_held |= recomp_hotkeys_pad_update(recomp_hotkeys_get(), &s_hk_pad[p], src, &pressed, &swallow);
+        out->hk_pressed |= pressed;
+        if (swallow) /* a held chord's buttons reach the game as nothing */
+            o.buttons &= ~console_pad_targets_using(&s_pad_map, swallow);
         const uint32_t chord = HOST_PAD_BACK | HOST_PAD_LSTICK | HOST_PAD_RSTICK;
         if ((o.host_buttons & chord) == chord)
             out->toggle = 1;
-        HostPadState st;
-        if (host_pad_read(p, &st) && (st.buttons & HOST_PAD_BACK) && st.axis[HOST_PAD_AXIS_RT] > 16384) {
-            out->ff = 1; /* the chord's Back and right trigger reach the game as nothing */
-            o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_RIGHT_TRIGGER));
-        }
         out->buttons |= ps1_runtime_pad_of(&o, s_pad_map.stick_threshold, analog);
         uint8_t lx = ps1_runtime_axis(o.stick_x[0]), ly = ps1_runtime_axis(o.stick_y[0]);
         uint8_t rx = ps1_runtime_axis(o.stick_x[1]), ry = ps1_runtime_axis(o.stick_y[1]);
@@ -988,7 +963,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     recomp_states_attach(&ops, s_state_dir);
     printf("ps1: save states %s%s, fast-forward x%d%s\n", s_state_dir[0] ? "in " : "off (no save dir)", s_state_dir,
            recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
-    memset(s_quick_held, 0, sizeof s_quick_held);
+    memset(s_hk_pad, 0, sizeof s_hk_pad);
+    recomp_hotkeys_get(); /* RECOMP_HOTKEYS / _KEYS, logged once (XBA-190) */
     int resume = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume) {
         int r = recomp_states_resume();
@@ -1024,7 +1000,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     static int16_t pcm[PS1_AUDIO_RATE / 10 * 2];
     int dw = 320, dh = 240, last_w = 0, last_h = 0, last_pal = -1, last_int = -1, display_on = -1;
     uint64_t frames = 0, next = now_ns(), t0 = next, late_resets = 0, dirty_at = 0, dirty_first = 0;
-    int was_paused = 0, heard = 0, rc = 0, toggle_held = 0, f6_held = 0, fkeys[4] = {0}, was_ff = 0;
+    int was_paused = 0, heard = 0, rc = 0, toggle_held = 0, f6_held = 0, was_ff = 0;
+    recomp_hotkeys_state hk_keys = {0};
     recomp_ff_carry carry = {{0, 0}, 0};
     disc_swap swap = {"", 0};
     ps1_gpu *gpu = ps1_get_gpu(m);
@@ -1072,7 +1049,6 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         pad_in p1, p2;
         pads_read(0, players, analog, &p1);
         pads_read(1, players, analog2, &p2);
-        recomp_states_chord_run(p1.quick ? p1.quick : p2.quick);
         if (p1.toggle && !toggle_held) {
             pthread_mutex_lock(&s_mu);
             int was = analog;
@@ -1101,10 +1077,16 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             }
             f6_held = f6;
         }
-        if (window)
-            state_keys(fkeys);
-        const Uint8 *ks = window ? SDL_GetKeyboardState(NULL) : NULL;
-        recomp_ff_hold(p1.ff || p2.ff || (ks && ks[SDL_SCANCODE_TAB]));
+        uint32_t hk_held = p1.hk_held | p2.hk_held, hk_pressed = p1.hk_pressed | p2.hk_pressed;
+        if (window) { /* the desktop keys (RECOMP_HOTKEYS_KEYS: Tab, F1-F4, Shift+F1-F4 by default) */
+            int nks = 0;
+            uint32_t key_pressed = 0;
+            const Uint8 *ks = SDL_GetKeyboardState(&nks);
+            hk_held |= recomp_hotkeys_keys_update(recomp_hotkeys_get(), &hk_keys, ks, nks, &key_pressed);
+            hk_pressed |= key_pressed;
+        }
+        recomp_hotkeys_run(hk_pressed);
+        recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
         int ff = recomp_ff_active(), speed = recomp_ff_speed();
         if (ff != was_ff) {
             printf("ps1: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",

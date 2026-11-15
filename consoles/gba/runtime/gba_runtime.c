@@ -9,8 +9,8 @@
  * is written and the window keeps pumping.
  *
  * Save states and fast-forward (XBA-182, recomp_states.h): the run attaches itself while it plays, so the in-game
- * menu and the desktop keys (F1-F4 save a slot, Shift+F1-F4 load it, Tab held fast-forwards) save and load between
- * frames under s_mu. Fast-forward runs `speed` GBA frames per shown frame with their audio averaged down (or, at
+ * menu and the hotkeys (XBA-190, recomp_hotkeys.h: pad chords, desktop keys F1-F4 / Shift+F1-F4 / Tab by default) save
+ * and load between frames under s_mu. Fast-forward runs `speed` GBA frames per shown frame with their audio averaged down (or, at
  * "max", as many as fit in a display frame, silent). */
 #define _GNU_SOURCE /* pread, nanosleep */
 #include "gba_runtime.h"
@@ -22,6 +22,7 @@
 #include "host_pad.h"
 #include "host_window.h"
 #include "recomp_exit_hook.h"
+#include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
 #include "recomp_states.h"
 
@@ -459,63 +460,33 @@ static uint16_t keyboard_keys(void)
     return k;
 }
 
-/* The fast-forward chord (XBA-182): Back + right trigger past half, held on a physical pad. */
-static int ff_chord(int port)
-{
-    HostPadState st;
-    return host_pad_read(port, &st) && (st.buttons & HOST_PAD_BACK) && st.axis[HOST_PAD_AXIS_RT] > 16384;
-}
-
 /* Every connected pad drives the one GBA (a handheld's own controls and an external pad both work), through the
- * player's mapping; the on-screen pad joins pad 1 (console_pad_read). *chord: a pad holds the fast-forward chord (its
- * Back and right trigger then reach the game as nothing). *quick: a pad pressed a quick save / load chord this frame
- * (Back + right / left shoulder, recomp_states_chord; Back and the shoulders then reach the game as nothing). */
-static int s_quick_held[HOST_PAD_PORTS];
-static uint16_t pads_keys(int *chord, int *quick)
+ * player's mapping; the on-screen pad joins pad 1 (console_pad_read). The player's hotkeys (XBA-190,
+ * recomp_hotkeys.h) are read on each physical pad: *hk_held gets the actions whose chord a pad holds, *hk_pressed
+ * those whose chord went down this frame; a held chord's buttons reach the game as nothing. */
+static recomp_hotkeys_state s_hk_pad[HOST_PAD_PORTS];
+static uint16_t pads_keys(uint32_t *hk_held, uint32_t *hk_pressed)
 {
     uint16_t k = 0;
+    const recomp_hotkeys *hk = recomp_hotkeys_get();
     if (!s_pad_map.console)
         console_pad_defaults(&s_pad_map, CONSOLE_PAD_GBA);
-    *chord = 0;
-    *quick = RECOMP_CHORD_NONE;
+    *hk_held = *hk_pressed = 0;
     for (int p = 0; p < HOST_PAD_PORTS; p++) {
         ConsolePadOut o;
         if (console_pad_read(&s_pad_map, p, &o)) {
-            int swallow = 0, act = recomp_states_chord(!!(o.host_buttons & HOST_PAD_BACK),
-                                                       !!(o.host_buttons & HOST_PAD_LSHOULDER),
-                                                       !!(o.host_buttons & HOST_PAD_RSHOULDER), &s_quick_held[p], &swallow);
-            if (act && !*quick)
-                *quick = act;
+            HostPadState st;
+            uint32_t src = host_pad_read(p, &st) ? console_pad_sources(&st, s_pad_map.stick_threshold, RECOMP_HK_TRIGGER)
+                                                 : 0;
+            uint32_t pressed = 0, swallow = 0;
+            *hk_held |= recomp_hotkeys_pad_update(hk, &s_hk_pad[p], src, &pressed, &swallow);
+            *hk_pressed |= pressed;
             if (swallow)
-                o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_LEFT_SHOULDER) |
-                                                                    CPS_BIT(CPS_RIGHT_SHOULDER));
-            if (ff_chord(p)) {
-                *chord = 1;
-                o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_RIGHT_TRIGGER));
-            }
+                o.buttons &= ~console_pad_targets_using(&s_pad_map, swallow);
             k |= gba_runtime_keys_of(o.buttons);
         }
     }
     return k;
-}
-
-/* Desktop keys of the save states (XBA-182): F1-F4 save slots 1-4, Shift+F1-F4 load them, on the key's press. */
-static void state_keys(int held[4])
-{
-    const Uint8 *ks = SDL_GetKeyboardState(NULL);
-    if (!ks)
-        return;
-    int shift = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
-    for (int i = 0; i < 4; i++) {
-        int down = ks[SDL_SCANCODE_F1 + i];
-        if (down && !held[i]) {
-            if (shift)
-                recomp_states_load(i + 1);
-            else
-                recomp_states_save(i + 1);
-        }
-        held[i] = down;
-    }
 }
 
 void gba_runtime_opts_init(gba_runtime_opts *o)
@@ -605,7 +576,8 @@ int gba_runtime_run(const gba_runtime_opts *o)
     recomp_states_attach(&ops, s_state_dir);
     printf("gba: save states %s%s, fast-forward x%d%s\n", s_state_dir[0] ? "in " : "off (no save dir)", s_state_dir,
            recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
-    memset(s_quick_held, 0, sizeof s_quick_held);
+    memset(s_hk_pad, 0, sizeof s_hk_pad);
+    recomp_hotkeys_get(); /* RECOMP_HOTKEYS / _KEYS, logged once (XBA-190) */
     int resume = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume) {
         int r = recomp_states_resume();
@@ -642,7 +614,8 @@ int gba_runtime_run(const gba_runtime_opts *o)
     static uint8_t rgba[GBA_SCREEN_W * GBA_SCREEN_H * 4];
     static int16_t pcm[GBA_AUDIO_RATE / 10 * 2];
     uint64_t frames = 0, next = now_ns(), dirty_at = 0, t0 = next, late_resets = 0;
-    int was_paused = 0, heard = 0, rc = 0, fkeys[4] = {0}, was_ff = 0;
+    int was_paused = 0, heard = 0, rc = 0, was_ff = 0;
+    recomp_hotkeys_state hk_keys = {0};
     recomp_ff_carry carry = {{0, 0}, 0};
 
     for (;;) {
@@ -679,13 +652,15 @@ int gba_runtime_run(const gba_runtime_opts *o)
             next = now_ns();   /* the time away is not caught up */
         }
 
-        int chord = 0, quick = 0;
-        uint16_t keys = (uint16_t)(o->keys | pads_keys(&chord, &quick) | (window ? keyboard_keys() : 0));
-        recomp_states_chord_run(quick);
-        if (window)
-            state_keys(fkeys);
-        const Uint8 *ks = window ? SDL_GetKeyboardState(NULL) : NULL;
-        recomp_ff_hold(chord || (ks && ks[SDL_SCANCODE_TAB]));
+        uint32_t hk_held = 0, hk_pressed = 0, key_pressed = 0;
+        uint16_t keys = (uint16_t)(o->keys | pads_keys(&hk_held, &hk_pressed) | (window ? keyboard_keys() : 0));
+        if (window) { /* the desktop keys (RECOMP_HOTKEYS_KEYS: Tab, F1-F4, Shift+F1-F4 by default) */
+            int nks = 0;
+            const Uint8 *ks = SDL_GetKeyboardState(&nks);
+            hk_held |= recomp_hotkeys_keys_update(recomp_hotkeys_get(), &hk_keys, ks, nks, &key_pressed);
+        }
+        recomp_hotkeys_run(hk_pressed | key_pressed);
+        recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
         int ff = recomp_ff_active(), speed = recomp_ff_speed();
         if (ff != was_ff) {
             printf("gba: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",

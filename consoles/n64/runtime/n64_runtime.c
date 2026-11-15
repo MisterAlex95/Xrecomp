@@ -15,9 +15,9 @@
  * wide, in buffers allocated for that size.
  *
  * Save states and fast-forward (XBA-183, recomp_states.h), the PS1 runtime's way: the run attaches itself while it
- * plays; the in-game menu, the pad chords (Back + right / left shoulder: quick save / load; Back + right trigger held:
- * fast-forward) and the desktop keys (F1-F4 save, Shift+F1-F4 load, Tab held fast-forwards) save and load between
- * frames under s_mu; fast-forward runs `speed` frames per shown frame, their audio averaged down. A state never writes
+ * plays; the in-game menu and the player's hotkeys (XBA-190, recomp_hotkeys.h: by default Back + right / left
+ * shoulder quick save / load, Back + right trigger held fast-forwards, F1-F4 / Shift+F1-F4 / Tab on a desktop) save
+ * and load between frames under s_mu; fast-forward runs `speed` frames per shown frame, their audio averaged down. A state never writes
  * the save files: after a load the cartridge and paks the game sees are the state's, written once the game writes
  * them. */
 #define _GNU_SOURCE /* pread, nanosleep */
@@ -31,6 +31,7 @@
 #include "n64_pack.h"
 #include "n64_rdp.h"
 #include "recomp_exit_hook.h"
+#include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
 #include "recomp_states.h"
 
@@ -677,25 +678,6 @@ static int state_load_op(int slot, void *user)
     return rc;
 }
 
-/* Desktop keys of the save states: F1-F4 save slots 1-4, Shift+F1-F4 load them, on the key's press. */
-static void state_keys(int held[4])
-{
-    const Uint8 *ks = SDL_GetKeyboardState(NULL);
-    if (!ks)
-        return;
-    int shift = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
-    for (int i = 0; i < 4; i++) {
-        int down = ks[SDL_SCANCODE_F1 + i];
-        if (down && !held[i]) {
-            if (shift)
-                recomp_states_load(i + 1);
-            else
-                recomp_states_save(i + 1);
-        }
-        held[i] = down;
-    }
-}
-
 /* ---- The run -------------------------------------------------------------------------------------------------- */
 
 static uint64_t now_ns(void)
@@ -761,11 +743,10 @@ typedef struct pad_in {
     int any; /* a host pad drives this controller */
     uint16_t buttons;
     int8_t x, y;
-    int quick; /* RECOMP_CHORD_SAVE / _LOAD: Back + a shoulder went down (recomp_states_chord) */
-    int ff;    /* Back + right trigger held: fast-forward */
+    uint32_t hk_held, hk_pressed; /* the hotkeys a pad holds / pressed this frame (recomp_hotkeys.h, XBA-190) */
 } pad_in;
 
-static int s_quick_held[HOST_PAD_PORTS]; /* recomp_states_chord's state per host pad */
+static recomp_hotkeys_state s_hk_pad[HOST_PAD_PORTS]; /* recomp_hotkeys_pad_update's state per host pad */
 
 /* The host pads for N64 controller `port`, through the player's mapping (the on-screen pad joins host pad 1,
  * console_pad_read; the mapping's range / deadzone, when set, over the runtime's): with one player every pad drives
@@ -786,19 +767,13 @@ static void pads_read(int port, int players, int range, int dead, pad_in *out)
         if (!console_pad_read(&s_pad_map, p, &o))
             continue;
         out->any = 1;
-        int swallow = 0, act = recomp_states_chord(!!(o.host_buttons & HOST_PAD_BACK),
-                                                   !!(o.host_buttons & HOST_PAD_LSHOULDER),
-                                                   !!(o.host_buttons & HOST_PAD_RSHOULDER), &s_quick_held[p], &swallow);
-        if (act && !out->quick)
-            out->quick = act;
-        if (swallow) /* the chord's Back and shoulders reach the game as nothing */
-            o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_LEFT_SHOULDER) |
-                                                                CPS_BIT(CPS_RIGHT_SHOULDER));
         HostPadState st;
-        if (host_pad_read(p, &st) && (st.buttons & HOST_PAD_BACK) && st.axis[HOST_PAD_AXIS_RT] > 16384) {
-            out->ff = 1; /* the chord's Back and right trigger reach the game as nothing */
-            o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_RIGHT_TRIGGER));
-        }
+        uint32_t src = host_pad_read(p, &st) ? console_pad_sources(&st, s_pad_map.stick_threshold, RECOMP_HK_TRIGGER) : 0;
+        uint32_t pressed = 0, swallow = 0;
+        out->hk_held |= recomp_hotkeys_pad_update(recomp_hotkeys_get(), &s_hk_pad[p], src, &pressed, &swallow);
+        out->hk_pressed |= pressed;
+        if (swallow) /* a held chord's buttons reach the game as nothing */
+            o.buttons &= ~console_pad_targets_using(&s_pad_map, swallow);
         out->buttons |= n64_runtime_buttons_of(o.buttons);
         int8_t x, y;
         n64_runtime_stick(o.stick_x[0], o.stick_y[0], range, dead, &x, &y);
@@ -1008,7 +983,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
     recomp_states_attach(&sops, s_state_dir);
     printf("n64: save states %s%s, fast-forward x%d%s\n", s_state_dir[0] ? "in " : "off (no save dir)", s_state_dir,
            recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
-    memset(s_quick_held, 0, sizeof s_quick_held);
+    memset(s_hk_pad, 0, sizeof s_hk_pad);
+    recomp_hotkeys_get(); /* RECOMP_HOTKEYS / _KEYS, logged once (XBA-190) */
     int resume = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume) {
         int r = recomp_states_resume();
@@ -1076,7 +1052,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
     n64_runtime_stuck stuck;
     n64_runtime_stuck_init(&stuck);
     uint64_t fault_logged = 0;
-    int fkeys[4] = {0, 0, 0, 0}, was_ff = 0;
+    int was_ff = 0;
+    recomp_hotkeys_state hk_keys = {0};
     recomp_ff_carry carry = {{0, 0}, 0};
 
     for (;;) {
@@ -1119,14 +1096,12 @@ int n64_runtime_run(const n64_runtime_opts *o)
         }
 
         pad_in pads[4];
-        int quick = 0, ffhold = 0;
+        uint32_t hk_held = 0, hk_pressed = 0;
         for (int port = 0; port < players; port++) {
             pads_read(port, players, range, dead, &pads[port]);
-            if (pads[port].quick && !quick)
-                quick = pads[port].quick;
-            ffhold |= pads[port].ff;
+            hk_held |= pads[port].hk_held;
+            hk_pressed |= pads[port].hk_pressed;
         }
-        recomp_states_chord_run(quick);
         pads[0].buttons |= o->buttons;
 #ifndef __ANDROID__ /* a device's own controls may also come as keys (arrows for its D-pad): not the stick there */
         if (window) {
@@ -1136,10 +1111,15 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 n64_runtime_stick(kx, ky, range, 0, &pads[0].x, &pads[0].y);
         }
 #endif
-        if (window)
-            state_keys(fkeys);
-        const Uint8 *ks = window ? SDL_GetKeyboardState(NULL) : NULL;
-        recomp_ff_hold(ffhold || (ks && ks[SDL_SCANCODE_TAB]));
+        if (window) { /* the desktop keys (RECOMP_HOTKEYS_KEYS: Tab, F1-F4, Shift+F1-F4 by default) */
+            int nks = 0;
+            uint32_t key_pressed = 0;
+            const Uint8 *ks = SDL_GetKeyboardState(&nks);
+            hk_held |= recomp_hotkeys_keys_update(recomp_hotkeys_get(), &hk_keys, ks, nks, &key_pressed);
+            hk_pressed |= key_pressed;
+        }
+        recomp_hotkeys_run(hk_pressed);
+        recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
         int ff = recomp_ff_active(), speed = recomp_ff_speed();
         if (ff != was_ff) {
             printf("n64: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",

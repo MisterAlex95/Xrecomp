@@ -699,20 +699,34 @@ guest memory and GPU). Three layers:
   variable and the in-game menu saves the slot when the player leaves (Quit, Back to launcher, the background).
 - Quick save / load: on a pad, **Back + right shoulder** saves and **Back + left shoulder** loads the quick slot
   (the last numbered slot saved or loaded this run; at the start, the most recently saved one, else slot 1). Back and
-  the shoulders then reach the game as nothing. `recomp_states_chord` is the per-pad edge detector the runtimes call
-  each frame; `recomp_states_last_event` tells the UI what the last quick save / load / resume did (the Android menu
-  shows « Saved to slot N »).
-- Fast-forward (`recomp_ff_*`): a toggle (the menu's « Fast-forward ») and a hold (Tab on a desktop; on a pad, Back +
-  right trigger held, whose two controls then reach the game as nothing); the speed is `RECOMP_FF_SPEED` (2..16
+  the shoulders then reach the game as nothing. `recomp_states_last_event` tells the UI what the last quick save /
+  load / resume / quick slot change did (the Android menu shows « Saved to slot N », « Quick slot: N »).
+- Fast-forward (`recomp_ff_*`): a toggle (the menu's « Fast-forward », or a hotkey) and a hold (Tab on a desktop; on a
+  pad, Back + right trigger held, whose two controls then reach the game as nothing); the speed is `RECOMP_FF_SPEED` (2..16
   times the console's rate, default 4) or `max` (as many frames as fit in one display frame, silent). The runtime
   runs `speed` frames per shown frame and averages their audio down by the same factor (higher pitched, never a gap:
   the audio queue keeps its length, so pacing stays audio-driven).
 
-Desktop: `gba_play` / `ps1_play` / `n64_play` F1-F4 save slots 1-4, Shift+F1-F4 load them, Tab held fast-forwards, the
-pad chords as above. Headless, `gba_run` / `ps1_run` / `n64_run --state-save N:FILE` writes a state after frame N,
+- Hotkeys (XBA-190, `src/platform/recomp_hotkeys.h`, in `xbr_host_core`): the chords above are the defaults of a
+  map the player can change. Actions: `ff_hold`, `ff_toggle`, `qsave`, `qload`, `slot_next` / `slot_prev` (the quick
+  slot + / - 1, around), `menu` (the Android shell's, `MenuTriggers`), `save1..4` / `load1..4`; each takes a pad chord
+  (`RECOMP_HOTKEYS`: a modifier then a button, a button alone, or none) and a desktop key (`RECOMP_HOTKEYS_KEYS`:
+  `[ctrl+][alt+][shift+]key`), parsed once in `recomp_hotkeys_get`
+  ([environment-variables.md](../docs/runtime/environment-variables.md)). Each frame a runtime hands every physical
+  pad's sources (`console_pad_sources`, triggers past half) to `recomp_hotkeys_pad_update` (what is held, what went
+  down, the sources to hide from the game) and the SDL keyboard to `recomp_hotkeys_keys_update`, runs what went down
+  with `recomp_hotkeys_run` and holds fast-forward while `ff_hold` is held. A two-button chord fires once when both
+  are down (either order); a button-alone chord waits while a two-button chord holds its button; the menu chord is
+  never fired or swallowed by a runtime (the Android shell opens the menu and the game keeps the buttons). The
+  Android app edits them per console and per game ([app-shell.md « Hotkeys »](../docs/android/app-shell.md#hotkeys)).
+  No screenshot hotkey: the menu's Screenshot is the shell's (the desktop players have `--screenshot`).
+
+Desktop: `gba_play` / `ps1_play` / `n64_play` by default F1-F4 save slots 1-4, Shift+F1-F4 load them, Tab held
+fast-forwards (`RECOMP_HOTKEYS_KEYS` remaps them), the pad chords as above (`RECOMP_HOTKEYS`). Headless, `gba_run` / `ps1_run` / `n64_run --state-save N:FILE` writes a state after frame N,
 `--state-load FILE` starts from one (exit 5 when the core refuses it), `--run-hash` prints one hash of every frame's
 picture and audio after the save point. Tests: `tests/recomp_states` (slot files, refusals, thumbnails, the attach /
-save / load path, the automatic and quick slots, the chords, the events, fast-forward speed and audio); the round trip
+save / load path, the automatic and quick slots, the chords, the events, fast-forward speed and audio; the hotkeys:
+both text forms and their round trip, remapped pad chords and keys frame by frame, what they run); the round trip
 on every homebrew (`gba_state_hb_*`, `ps1_state_hb_*`, `ps1_state_hle_hb_*`: save after 120 / 150 frames, hash the
 next 180 / 150, then the same from the state in a new machine; a run from power-on must differ;
 `consoles/{gba,ps1}/tests/state_*.sh`), the same with each program's pack (`gba_rc_state_hb_*`, `ps1_rc_state_hb_*`:
@@ -728,7 +742,7 @@ the quick slot and fast-forward while gfx.z64 runs, the automatic slot resumed, 
 in-game menu: [app-shell.md « In-game menu »](../docs/android/app-shell.md#in-game-menu).
 
 `n64_runtime.c` attaches as `"n64"` with `<save dir>/n64-<KEY>`, runs its frames through the same fast-forward loop
-(no frame skip while fast-forwarding), reads the quick save / load and fast-forward chords from every host pad, and
+(no frame skip while fast-forwarding), reads the hotkeys from every host pad, and
 the in-game menu shows the rows for an N64 game (`Console.hasSaveStates`).
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we

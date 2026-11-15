@@ -37,8 +37,6 @@
     <string name="MENU_ON">On</string>
     <string name="MENU_OFF">Off</string>
     <string name="MENU_SCREEN_OFF">Off</string>
-    <string name="CTL_COMBO">Select + Start</string>
-    <string name="CTL_COMBO_X">Game menu (held ½ s)</string>
     <!-- XBA-166: a multi-disc PlayStation game. -->
     <string name="MENU_DISC">Change disc</string>
     <string name="MENU_DISC_PLAYING">In the drive</string>
@@ -61,13 +59,7 @@
     <string name="MENU_STATE_ERR_NO_GAME">Save states are not available for this game</string>
     <string name="MENU_STATE_SAVE_FAILED">Slot %1$d: the state was not saved</string>
     <string name="MENU_STATE_LOAD_FAILED">Slot %1$d: the state was not loaded</string>
-    <string name="CTL_FF">Back + RT</string>
-    <string name="CTL_FF_X">Fast-forward (hold)</string>
-    <!-- Quick save / load chords, the automatic slot and resuming. -->
-    <string name="CTL_QUICK_SAVE">Back + RB</string>
-    <string name="CTL_QUICK_SAVE_X">Quick save (last slot)</string>
-    <string name="CTL_QUICK_LOAD">Back + LB</string>
-    <string name="CTL_QUICK_LOAD_X">Quick load (last slot)</string>
+    <!-- The automatic slot and resuming (the hotkeys: strings_hotkeys.xml, XBA-190). -->
     <string name="MENU_STATE_AUTO">Where you left off</string>
     <string name="MENU_STATE_RESUMED">Resumed where you left off</string>
     <string name="MENU_STATE_RESUME_FAILED">Could not resume: the game starts from the beginning</string>

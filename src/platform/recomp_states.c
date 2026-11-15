@@ -368,6 +368,17 @@ int recomp_states_quick_slot(void)
     return best;
 }
 
+int recomp_states_quick_step(int dir)
+{
+    int q = recomp_states_quick_slot();
+    q = ((q - 1 + (dir < 0 ? -1 : 1)) % RECOMP_STATE_SLOTS + RECOMP_STATE_SLOTS) % RECOMP_STATE_SLOTS + 1;
+    pthread_mutex_lock(&s_mu);
+    s_quick = q;
+    pthread_mutex_unlock(&s_mu);
+    note(RECOMP_STATE_EV_SLOT, q, RECOMP_STATE_OK);
+    return q;
+}
+
 int recomp_states_quick_save(void)
 {
     int slot = recomp_states_quick_slot();
