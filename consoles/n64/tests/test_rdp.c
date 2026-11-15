@@ -956,6 +956,33 @@ static uint32_t busy_hash(int threads)
     return h;
 }
 
+/* The Vulkan RDP: paraLLEl-RDP's own threads (command ring, fence executor, pipeline compiles; RDP::set_thread_hook)
+ * call the same hook, each start heard again as an end once the RDP is gone. */
+static void t_vk_thread_hook(void)
+{
+    if (!vk)
+        return;
+    static int one = 1;
+    if (G.dp)
+        rig_close(&G); /* threads that kept an earlier test's hook end before the count */
+    G.dp = NULL;
+    atomic_store(&hook_up, 0);
+    atomic_store(&hook_down, 0);
+    n64_rdp_set_thread_hook(count_hook, &one);
+    fresh("vulkan thread hook");
+    if (!vk) { /* it fell back to the software RDP this time */
+        n64_rdp_set_thread_hook(NULL, NULL);
+        return;
+    }
+    rig_close(&G);
+    G.dp = NULL;
+    n64_rdp_set_thread_hook(NULL, NULL);
+    const int up = atomic_load(&hook_up), down = atomic_load(&hook_down);
+    check(up >= 3, "thread hook: paraLLEl-RDP's threads start through it");
+    expect("thread hook: as many ends as starts", (uint32_t)down, (uint32_t)up);
+    fresh("after the thread hook");
+}
+
 static void t_scenes(void)
 {
     uint32_t h1 = busy_hash(1);
@@ -1636,6 +1663,7 @@ int main(int argc, char **argv)
     t_persp();
     t_lod();
     t_scenes();
+    t_vk_thread_hook();
     t_matrix();
     t_wrote();
     t_gfx();

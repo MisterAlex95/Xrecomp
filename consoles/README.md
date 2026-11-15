@@ -49,7 +49,9 @@ off Android) together with those workers: its target is the frame period, and ea
 working, not the sleep to the next deadline, so the governor raises the clocks only as far as the frames need. The
 frame loop and the workers also run at a display thread's priority (nice -8). The log says
 `perf hint: ADPF session open for N thread(s), target 16.68 ms per frame`. paraLLEl-RDP's own threads (the Vulkan
-RDP's command and timeline threads) are not in the session nor tracked.
+RDP's command ring worker, fence executor and pipeline compile worker) call the same hook (`RDP::set_thread_hook`, our
+patch in `third_party/parallel-rdp`, given the hook of `n64_rdp_set_thread_hook` when the Vulkan RDP is created), so
+they are in the session, at nice -8 and put back on the fast cores after a resume like the software RDP's bands.
 
 CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1` and `XBR_CONSOLE_N64` are ON by default on Linux and macOS and OFF
 on Android and Windows. A console is turned on for Android once it is ready: the GBA (XBA-157), the PS1 (XBA-168) and
@@ -700,6 +702,14 @@ bit for bit against angrylion.
   fails (no `libxba_vkdriver.so`), the same path as a driver that cannot be opened. In the app the player picks
   the driver in Settings › Graphics › Vulkan driver (downloaded from GitHub releases or imported as a zip; none
   ships with the app): [app-shell.md « Vulkan drivers »](../docs/android/app-shell.md#vulkan-drivers).
+- **Pipeline cache.** With `RECOMP_VK_CACHE_DIR` (the app: `<cache>/vk_cache/<driver id or system>/`), the device's
+  VkPipelineCache starts from `pipelines-<pipelineCacheUUID>.bin` there before the check (`pipeline cache loaded (N
+  KB)` / `no pipeline cache yet` / `pipeline cache ... ignored (truncated)`), and is written back, to a temporary
+  file then renamed, when it grew: after the check, every 10 s (a thread of its own), when the app pauses (sessions
+  on Android end killed after a pause) and at destroy (`pipeline cache saved (N KB, <why>, T ms)`). Mesa's own disk
+  cache goes to `<dir>/mesa` (`MESA_SHADER_CACHE_DIR`, unless set). Without it every start compiled the same
+  pipelines again: ~1.35 s of a 4x start of Ocarina of Time on the Thor's Turnip. `n64_vk_cache.h`;
+  [environment variables](../docs/runtime/environment-variables.md#custom-vulkan-driver-n64-rdp).
 
 Tests (`consoles/n64/tests`, built with `-DXBR_N64_RDP_VULKAN=ON`; without a GPU, Mesa's lavapipe with
 `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`):

@@ -68,6 +68,7 @@ int n64_rdp_upscale_wanted(void);
 extern const n64_rdp_ops n64_rdp_sw_ops; /* n64_rdp_select.c, over n64_rdp_sw_* */
 #ifdef N64_RDP_HAVE_VULKAN
 extern const n64_rdp_ops n64_rdp_vk_ops; /* n64_rdp_vk.cpp */
+void n64_rdp_vk_save_caches(const char *why); /* n64_rdp.h n64_rdp_save_caches, for the live Vulkan RDP */
 #endif
 
 #ifdef __cplusplus

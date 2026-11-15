@@ -559,6 +559,7 @@ static void on_exit_hook(const char *why)
 {
     (void)why;
     saves_flush("exit");
+    n64_rdp_save_caches(); /* the Vulkan RDP's pipeline cache, when new pipelines were compiled */
     /* The in-game menu's Quit ends the process here: the discovery loop's code too (XBA-174). */
     pthread_mutex_lock(&s_mu);
     if (s_m && s_discovered[0])
@@ -572,8 +573,10 @@ static void on_exit_hook(const char *why)
 static void on_lifecycle(int paused, void *user)
 {
     (void)user;
-    if (paused)
+    if (paused) {
         saves_flush("pause");
+        n64_rdp_save_caches(); /* the Vulkan RDP's pipeline cache (n64_vk_cache.h): sessions end killed after a pause */
+    }
 }
 
 static void snapshot(n64_machine *m, int kind)
