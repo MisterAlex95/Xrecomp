@@ -43,6 +43,24 @@ static int valid_key(const char *k)
     return 1;
 }
 
+/* 1 when key is one of RECOMP_CFG_SKIP's names (comma- or space-separated). */
+static int skipped(const char *key)
+{
+    const char *list = getenv(RECOMP_CFG_SKIP_ENV), *p;
+    size_t n = strlen(key);
+    if (!list)
+        return 0;
+    for (p = list; *p;) {
+        size_t len;
+        while (*p == ',' || isspace((unsigned char)*p)) p++;
+        len = strcspn(p, ", \t");
+        if (len == n && len > 0 && strncmp(p, key, n) == 0)
+            return 1;
+        p += len;
+    }
+    return 0;
+}
+
 int recomp_cfg_load(const char *path)
 {
     FILE *f;
@@ -74,6 +92,11 @@ int recomp_cfg_load(const char *path)
         val = trim(eq + 1);
         if (!valid_key(key)) {
             fprintf(stderr, "recomp.cfg:%d: \"%s\" is not a variable name, line skipped\n", lineno, key);
+            continue;
+        }
+        if (skipped(key)) {
+            /* The launcher's per-game settings chose the runtime's default for it (XBA-188). */
+            append(summary, sizeof summary, &used, "%s%s (skipped: the game's own setting)", count ? ", " : "", key);
             continue;
         }
         if (getenv(key)) {

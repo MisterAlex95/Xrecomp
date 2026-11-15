@@ -253,7 +253,7 @@ public class LauncherScreensTest {
         assertTrue(a.focusForTest() == play);
         List<String> pills = new ArrayList<>();
         View v = play;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             v = v.focusSearch(View.FOCUS_RIGHT);
             assertTrue(v instanceof Widgets.PillButton);
             assertFalse(((Widgets.PillButton)v).primaryForTest());
@@ -261,8 +261,9 @@ public class LauncherScreensTest {
             v.requestFocus();
             idle(200);
         }
-        assertEquals(java.util.Arrays.asList(app.getString(R.string.SETTINGS), app.getString(R.string.CONTROLS),
-                                             app.getString(R.string.HOME_MANAGE)), pills);
+        assertEquals(java.util.Arrays.asList(app.getString(R.string.SETTINGS), app.getString(R.string.GAME_SETTINGS),
+                                             app.getString(R.string.CONTROLS), app.getString(R.string.HOME_MANAGE)),
+                     pills);
         List<String> hints = new ArrayList<>();
         for (Widgets.Hint h : a.hintsForTest())
             hints.add(h.glyphForTest());
@@ -913,5 +914,47 @@ public class LauncherScreensTest {
         assertTrue(a.descriptionForTest().contains(app.getString(R.string.LSFG_TITLE_UNAVAILABLE_DETAIL)));
         key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
         assertEquals(app.getString(R.string.VAL_LSFG_2X), r.value);
+    }
+
+    /**
+     * XBA-188: an Xbox title's Game settings (its Home's « Game settings » pill): the Xbox's options and the shared
+     * ones, no console picture; a step saves the title's own value in its file (recomp.cfg untouched) with the « This
+     * game » badge when it differs from Settings'; its theme row; Y resets everything to Settings.
+     */
+    @Test
+    public void xboxGameSettings() throws Exception {
+        RecompConfig cfg = RecompConfig.load(GameStore.externalFilesDir(app));
+        cfg.set("RECOMP_WIDESCREEN", "1");
+        cfg.save();
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.GAME_SETTINGS);
+        idle(300);
+        assertEquals(LauncherActivity.Screen.GAME_SETTINGS, a.screenForTest());
+        String ws = app.getString(R.string.OPT_WIDESCREEN);
+        Widgets.MenuRow r = row(a, ws);
+        assertNotNull(r);
+        assertEquals(app.getString(R.string.ROM_OPT_FOLLOW, app.getString(R.string.VAL_ON)), r.value);
+        assertNull(row(a, app.getString(R.string.OPT_CSCALE)));
+        assertNotNull(row(a, app.getString(R.string.OPT_VSYNC)));
+        assertNotNull(row(a, app.getString(R.string.OPT_LANGUAGE)));
+        assertNotNull(row(a, app.getString(R.string.GAME_THEME)));
+        assertNotNull(row(a, app.getString(R.string.GS_RESET)));
+        assertEquals(app.getString(R.string.GS_NONE_OWN), row(a, app.getString(R.string.GS_RESET)).value);
+        r.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);   // Off for this title: over Settings' On
+        r = row(a, ws);
+        assertEquals(app.getString(R.string.VAL_OFF), r.value);
+        assertEquals(app.getString(R.string.GS_BADGE), r.badge);
+        assertEquals("", GameSettings.load(app, TID).get("RECOMP_WIDESCREEN"));
+        assertEquals(Boolean.FALSE, GameVideo.titleChoice(app, TID, GameVideo.Setting.WIDESCREEN));
+        assertEquals("recomp.cfg untouched", "1",
+                     RecompConfig.load(GameStore.externalFilesDir(app)).get("RECOMP_WIDESCREEN"));
+        assertEquals(app.getString(R.string.ROM_OPT_SAVED), a.noteForTest());
+        shot(a, "game-settings-xbox", true);
+        key(a, KeyEvent.KEYCODE_BUTTON_Y);
+        assertFalse(GameSettings.file(app.getFilesDir(), TID).exists());
+        assertEquals(app.getString(R.string.GS_RESET_DONE), a.noteForTest());
+        assertEquals(app.getString(R.string.ROM_OPT_FOLLOW, app.getString(R.string.VAL_ON)), row(a, ws).value);
+        assertNull(row(a, ws).badge);
     }
 }

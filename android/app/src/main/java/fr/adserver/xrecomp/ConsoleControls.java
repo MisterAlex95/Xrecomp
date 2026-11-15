@@ -13,15 +13,13 @@ import java.util.Locale;
  *   <li>The console's mapping, for all its games: recomp.cfg's RECOMP_GBA_PAD_MAP / RECOMP_PS1_PAD_MAP /
  *       RECOMP_N64_PAD_MAP (no line: the usual one), which the runtime reads at the game's start
  *       (src/input/console_pad.h).</li>
- *   <li>A game's own mapping, over the console's: files/settings/pad_map_&lt;library key&gt;, « map: » and the text
- *       (« map: » alone: the console's usual mapping for this game). {@link ShellActivity} puts it in the environment
+ *   <li>A game's own mapping, over the console's: the RECOMP_&lt;C&gt;_PAD_MAP key of its own settings
+ *       (GameSettings, XBA-188), the text (empty: the console's usual mapping for this game). {@link ShellActivity} puts it in the environment
  *       under the same name before the runtime starts, where it wins over recomp.cfg's line; without one the variable
  *       is unset, so recomp.cfg decides.</li>
  * </ul>
  */
 final class ConsoleControls {
-    private static final String FILE_PREFIX = "pad_map_";
-    private static final String OWN = "map:";
 
     private ConsoleControls() {}
 
@@ -49,16 +47,12 @@ final class ConsoleControls {
         cfg.set(env(m.console), t.isEmpty() ? null : t);
     }
 
-    private static String file(String key) {
-        return FILE_PREFIX + key.toUpperCase(Locale.ROOT);
-    }
-
     /** The game's own mapping text ("" for the usual mapping), or null when it follows the console's. */
     static String gameText(Context c, String key) {
         if (key == null || key.isEmpty())
             return null;
-        String v = GameStore.readSettingFile(c, file(key));
-        return v != null && v.startsWith(OWN) ? v.substring(OWN.length()).trim() : null;
+        String env = env(Console.ofKey(key));
+        return env == null ? null : GameSettings.raw(c, key, env);   // XBA-188: the game's file
     }
 
     static boolean hasGameMap(Context c, String key) {
@@ -75,7 +69,8 @@ final class ConsoleControls {
     static boolean storeGame(Context c, String key, ConsolePadMap m) {
         if (key == null || key.isEmpty())
             return false;
-        return GameStore.writeSettingFile(c, file(key), m == null ? "" : OWN + m.format());
+        String env = env(Console.ofKey(key));
+        return env != null && GameSettings.put(c, key, env, m == null ? null : m.format());
     }
 
     /** What the game plays with: its own mapping, else the console's (recomp.cfg in ext, may be null). */
@@ -165,6 +160,8 @@ final class ConsoleControls {
 
     static String consoleName(Context c, Console k) {
         switch (k) {
+        case XBOX:
+            return "Xbox";   // XBA-188: an Xbox title's Controls scope (« All Xbox games »)
         case GBA:
             return c.getString(R.string.CC_CONSOLE_GBA);
         case PS1:

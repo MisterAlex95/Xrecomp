@@ -427,8 +427,7 @@ public class LauncherConsoleControlsTest {
         assertEquals(app.getString(R.string.ROM_OPT_FOLLOW, app.getString(R.string.VAL_LSFG_2X)), r.value);
         focusRow(a, title);
         assertEquals(app.getString(R.string.ROM_OPT_FRAMEGEN_DETAIL), a.descriptionForTest());
-        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
-        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);   // XBA-188: Settings' choices, Off first
         assertEquals("0", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN));
         assertEquals(app.getString(R.string.VAL_OFF), row(a, title).value);
         assertEquals("recomp.cfg untouched", "1", cfgLine("RECOMP_LSFG"));
@@ -444,7 +443,7 @@ public class LauncherConsoleControlsTest {
         }
         assertEquals("0", lsfg);
         assertEquals("2", mult);
-        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        key(a, KeyEvent.KEYCODE_DPAD_LEFT);
         assertNull("back to Settings' choice", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN));
     }
 

@@ -12,7 +12,8 @@ import java.util.Locale;
  *
  * Which one applies, first found wins:
  * <ol>
- *   <li>the title's own choice (in-game menu › Settings › Widescreen / 480p: On or Off), a file per title ID;</li>
+ *   <li>the title's own choice (in-game menu › Settings › Widescreen / 480p: On or Off, or its Game settings), kept
+ *       in the game's own settings ({@link GameSettings}, XBA-188);</li>
  *   <li>Settings › Graphics, a line in recomp.cfg (or one written there by hand);</li>
  *   <li>off (the runtime's default).</li>
  * </ol>
@@ -40,16 +41,15 @@ final class GameVideo {
     static Boolean titleChoice(Context c, String titleId, Setting s) {
         if (titleId == null || titleId.isEmpty())
             return null;
-        String v = GameStore.readSettingFile(c, s.filePrefix + titleId.toUpperCase(Locale.ROOT));
-        return "1".equals(v) ? Boolean.TRUE : "0".equals(v) ? Boolean.FALSE : null;
+        String v = GameSettings.raw(c, titleId, s.env);   // XBA-188: the game's file, « » = off
+        return v == null ? null : "1".equals(v) ? Boolean.TRUE : Boolean.FALSE;
     }
 
     /** Sets the title's own choice; null goes back to following Settings. */
     static boolean setTitleChoice(Context c, String titleId, Setting s, Boolean on) {
         if (titleId == null || titleId.isEmpty())
             return false;
-        return GameStore.writeSettingFile(c, s.filePrefix + titleId.toUpperCase(Locale.ROOT),
-                                          on == null ? "" : on ? "1" : "0");
+        return GameSettings.put(c, titleId, s.env, on == null ? null : on ? "1" : "");
     }
 
     /** What to put in the variable before the runtime starts, or null to leave it unset (recomp.cfg decides). */

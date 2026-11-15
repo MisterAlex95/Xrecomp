@@ -24,7 +24,7 @@
     <string name="OPT_RUMBLE">Controller rumble</string>
     <string name="OPT_RUMBLE_DETAIL">On: the controller vibrates when the game asks for it (the PlayStation DualShock, the Nintendo 64 Rumble Pak, the Xbox pad). Off: never. For every console. Applies the next time a game starts. (RECOMP_RUMBLE)</string>
 
-    <string name="ROM_OPTIONS">Options</string>
+    <string name="ROM_OPTIONS">Game settings</string>
     <string name="ROM_OPT_PICTURE">This game\'s picture</string>
     <string name="ROM_OPT_DATA">Game data</string>
     <string name="ROM_OPT_FOLLOW">As in Settings (%1$s)</string>
@@ -34,4 +34,20 @@
     <string name="ROM_OPT_FILTER_DETAIL">How this game\'s picture is enlarged: as in Settings › Graphics › Picture filter, or its own. Sharp: square pixels. Smooth: softened edges. Applies the next time the game starts. (RECOMP_FILTER)</string>
     <string name="ROM_OPT_SAVED">Saved for this game</string>
     <string name="ROM_OPT_SAVED_RUNNING">Saved for this game; it applies the next time the game starts</string>
+    <!-- XBA-188: Settings per game -->
+    <string name="GAME_SETTINGS">Game settings</string>
+    <string name="GS_GROUP_GAME">This game</string>
+    <string name="GS_BADGE">This game</string>
+    <string name="GS_OPTION_DETAIL">%1$s\n\nFor this game alone: as in Settings, or a value of its own. Applies the next time the game starts.</string>
+    <string name="GS_CONTROLS_DETAIL">The buttons this game plays with: the mapping of all games, or one of its own (Mapping for › This game only, in its Controls). A opens its Controls.</string>
+    <string name="GS_RESET">Reset to Settings</string>
+    <string name="GS_RESET_DETAIL">Every value of %1$s follows Settings again: its own values, its own controls and its theme go. Its saves stay.</string>
+    <string name="GS_RESET_DONE">This game follows Settings again</string>
+    <string name="GS_RESET_FAILED">This game\'s settings could not be reset</string>
+    <string name="GS_SAVE_FAILED">This game\'s settings could not be saved</string>
+    <string name="GS_NONE_OWN">All as in Settings</string>
+    <string name="GS_OWN_COUNT">%1$d of its own</string>
+    <string name="GS_HINT_RESET">Reset</string>
+    <string name="MENU_GAME_SETTINGS">Game settings</string>
+    <string name="MENU_GS_NEXT_START">This game\'s own values: they apply the next time it starts</string>
 </resources>

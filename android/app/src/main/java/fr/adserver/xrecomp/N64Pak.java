@@ -2,12 +2,10 @@ package fr.adserver.xrecomp;
 
 import android.content.Context;
 
-import java.util.Locale;
-
 /**
  * The accessory in an N64 game's controller (XBA-174): a controller pak (the default: its saves, pak1.mpk) or a rumble
- * pak (the pad vibrates when the game says so). One choice per game, from the N64 Home's second button, a file per
- * library key as {@link GameVideo} keeps its per-title choices. The runtime reads RECOMP_N64_PAK
+ * pak (the pad vibrates when the game says so). One choice per game, from the N64 Home's second button, kept in the
+ * game's own settings ({@link GameSettings}, RECOMP_N64_PAK). The runtime reads RECOMP_N64_PAK
  * (consoles/n64/runtime/n64_runtime.c): {@link ShellActivity} sets it to « rumble » or « controller » for a game with a
  * choice and unsets it otherwise, so a RECOMP_N64_PAK line of recomp.cfg, then the controller pak, decide.
  */
@@ -15,7 +13,6 @@ final class N64Pak {
     static final String ENV = "RECOMP_N64_PAK";
     static final String CONTROLLER = "controller";
     static final String RUMBLE = "rumble";
-    private static final String FILE_PREFIX = "n64_pak_";
 
     private N64Pak() {}
 
@@ -23,7 +20,7 @@ final class N64Pak {
     static String choice(Context c, String key) {
         if (key == null || key.isEmpty())
             return null;
-        String v = GameStore.readSettingFile(c, FILE_PREFIX + key.toUpperCase(Locale.ROOT));
+        String v = GameSettings.raw(c, key, ENV);   // XBA-188: the game's file
         return RUMBLE.equals(v) ? RUMBLE : CONTROLLER.equals(v) ? CONTROLLER : null;
     }
 
@@ -31,8 +28,7 @@ final class N64Pak {
     static boolean setChoice(Context c, String key, String v) {
         if (key == null || key.isEmpty())
             return false;
-        return GameStore.writeSettingFile(c, FILE_PREFIX + key.toUpperCase(Locale.ROOT),
-                                          RUMBLE.equals(v) || CONTROLLER.equals(v) ? v : "");
+        return GameSettings.put(c, key, ENV, RUMBLE.equals(v) || CONTROLLER.equals(v) ? v : null);
     }
 
     /** Whether the game plays with the rumble pak: its choice, else recomp.cfg's line (cfg, may be null). */

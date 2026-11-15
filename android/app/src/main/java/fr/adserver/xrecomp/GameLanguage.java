@@ -12,7 +12,8 @@ import java.util.Locale;
  *
  * Which one applies, first found wins:
  * <ol>
- *   <li>the title's own choice (in-game menu › Settings › Language), a small file per title ID;</li>
+ *   <li>the title's own choice (in-game menu › Settings › Language, or its Game settings), kept in the game's own
+ *       settings ({@link GameSettings}, XBA-188);</li>
  *   <li>Settings › Game › Language, a RECOMP_LANGUAGE line in recomp.cfg (or one written there by hand);</li>
  *   <li>the Android system language when it is one the Xbox has;</li>
  *   <li>English (the runtime's default when nothing is set).</li>
@@ -32,8 +33,6 @@ final class GameLanguage {
 
     /** The order the screens offer them: the European languages of PAL discs first, then the Asian ones. */
     static final int[] MENU_ORDER = { 0, 3, 2, 4, 5, 8, 1, 6, 7 };
-
-    private static final String TITLE_FILE_PREFIX = "language_";
 
     private GameLanguage() {}
 
@@ -83,7 +82,7 @@ final class GameLanguage {
     static String titleChoice(Context c, String titleId) {
         if (titleId == null || titleId.isEmpty())
             return null;
-        String v = GameStore.readSettingFile(c, TITLE_FILE_PREFIX + titleId.toUpperCase(Locale.ROOT));
+        String v = GameSettings.raw(c, titleId, ENV);   // XBA-188: the game's file
         return indexOf(v) < 0 ? null : CODES[indexOf(v)];
     }
 
@@ -91,8 +90,8 @@ final class GameLanguage {
     static boolean setTitleChoice(Context c, String titleId, String code) {
         if (titleId == null || titleId.isEmpty())
             return false;
-        return GameStore.writeSettingFile(c, TITLE_FILE_PREFIX + titleId.toUpperCase(Locale.ROOT),
-                                          code == null ? "" : code);
+        int i = indexOf(code);
+        return GameSettings.put(c, titleId, ENV, i < 0 ? null : CODES[i]);
     }
 
     /**

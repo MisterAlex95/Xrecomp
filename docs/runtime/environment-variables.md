@@ -487,3 +487,9 @@ See [Network: a console with no cable](../technical/network.md).
 |---|---|---|---|
 | `RECOMP_NIC` | on | The MCPX Ethernet controller model (XBA-117): registers at 0xFEF00000 trapped and answered as a controller with no cable (PHY link down, autonegotiation never completes, transmit refused with carrier lost, no interrupt), `PhyGetLinkState` returns 0. `0` is the behaviour before: the registers are plain memory and `PhyGetLinkState` says link up. | `xbox_nic.c` |
 | `RECOMP_NIC_TRACE=1` | off | Prints the first 400 NIC register accesses (offset, size, value): what a title's network stack does at boot. | `xbox_nic.c` |
+
+## RECOMP_CFG_SKIP (XBA-188)
+
+Comma- or space-separated variable names whose `recomp.cfg` lines `recomp_cfg_load` ignores
+(`src/platform/recomp_cfg.c`). The Android launcher sets it when a game's own settings chose the runtime's default for
+an option `recomp.cfg` sets (docs/android/app-shell.md « Settings per game »). Unset: every line loads.
