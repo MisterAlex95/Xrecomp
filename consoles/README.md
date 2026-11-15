@@ -669,6 +669,28 @@ compiles them -O3 -mtune=cortex-a715. What is left on the PS1 is the interpreter
 instruction: the per-step delay-slot and load-delay bookkeeping through memory), which a register-cached loop or a
 predecoded block cache would address.
 
+**N64 core speed (XBA-191).** Same method: callgrind on the homebrew corpus, n64-systemtest and their packs
+(`n64_run --run-hash --hash`: picture, audio, cycles and RDRAM must not move), `n64_rsp_bench` / `n64_rdp_bench` for
+the RCP. The homebrew sit in libdragon's idle loops after their checks, so they measure the interpreter (about 1.04 M
+guest instructions per frame) and the per-frame device work. What changed, all byte-identical (run hashes on x86-64
+and aarch64, lockstep, save-state and rewind round trips, `--stats`):
+- The interpreter's decode / execute and its load / store paths are always_inline in its loops (`N64_HOT_INLINE`):
+  ~85 -> ~61 host instructions per guest instruction.
+- Packs: the dispatcher's interpreter runs (before the boot PC, and the instructions lifted code hands back while
+  they follow in sequence) go through that inlined loop instead of a call per instruction.
+- AI resampler: the 32 taps computed in their own loop, the history ring read as two runs (same sums, same order).
+- SP DMA: one memcpy and one RDRAM write notice per contiguous run instead of per 8 bytes.
+
+x86-64 Ryzen AI Max+ 395, gcc -O3, before -> after, host instructions per frame: homebrew (hello / cpu / timer_irq /
+gfx) 88 M -> 62 M, rsp.z64 80 M -> 57 M, n64-systemtest 99 M -> 73 M, gfx.z64 with its pack 4.0 M -> 3.6 M,
+n64-systemtest with its pack 24.7 M -> 21.3 M. Wall clock per 600 frames: interpreter 3.8 s -> 3.5 s (1.08-1.09x),
+packs within noise to 1.03x: this core hides most of what was removed (the interpreter's remaining cost is a chain
+of stores and loads of pc / npc / now through memory per instruction); the Thor's cores should see more. The RSP
+(`n64_rsp.c`, low level: there is no HLE) and the software RDP are unchanged and are what a real game spends its
+frame on: on that host `n64_rsp_bench` runs the vector-heavy loop at ~1.8x the RSP's clock with the portable vector
+code (the NEON path runs on arm64), and the busy 320x240 RDP scene at ~85 frames/s on one thread (spans and the
+bilinear sampler are 80 % of it). VI scanout, the scheduler and the bus are under 1 % of any profile here.
+
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
 presents each one twice at 60 Hz), the generated frames take the repeats' slots, and the runtimes' frame sleep goes
