@@ -216,6 +216,13 @@ struct gba_machine {
     int16_t sine[256];      /* BIOS sine table (HLE BgAffineSet / ObjAffineSet), 1.14 fixed point */
 
     uint64_t rom_hash;      /* FNV-1a 64 of the ROM | 1, 0 until a save state needs it (gba_state.c) */
+
+    /* mGBA's debug-print port (gba_set_debug_log): the host's callback (not state), whether the game opened the port
+     * and the string it is writing. */
+    gba_debug_log_fn dbg_cb;
+    void *dbg_ctx;
+    bool dbg_open;
+    char dbg_str[257];
 };
 
 /* gba_machine starts with gba_rc_head's members. */

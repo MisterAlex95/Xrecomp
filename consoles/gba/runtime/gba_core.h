@@ -126,6 +126,13 @@ size_t gba_state_save(gba_machine *m, uint8_t *out, size_t cap);
 int gba_state_check(gba_machine *m, const uint8_t *data, size_t size);
 int gba_state_load(gba_machine *m, const uint8_t *data, size_t size);
 
+/* mGBA's debug-print port (XBA-201), for test ROMs that log through it (the mGBA test suite): off unless a callback
+ * is set. Then a write of 0xC0DE to 0x04FFF780 turns the port on (reads there give 0x1DEA), the game puts a string at
+ * 0x04FFF600-0x04FFF6FF and writes its level | 0x100 to 0x04FFF700, and cb(ctx, level, string) runs. Without a
+ * callback those addresses are unmapped as on hardware. Not part of a save state (a host hook). */
+typedef void (*gba_debug_log_fn)(void *ctx, int level, const char *msg);
+void gba_set_debug_log(gba_machine *m, gba_debug_log_fn cb, void *ctx);
+
 void gba_destroy(gba_machine *m);
 
 #ifdef __cplusplus
