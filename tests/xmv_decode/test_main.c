@@ -222,6 +222,44 @@ static void check_truncated(void)
     free(buf);
 }
 
+/* The decoder alone, configured from a WMV file's 4-byte extradata (FFmpeg's
+ * encoder wrote f0 c3 b4 80 for "basic") instead of the XMV header word: the
+ * same pictures. */
+static void check_wmv_extradata(void)
+{
+    static const uint8_t ext[4] = { 0xf0, 0xc3, 0xb4, 0x80 };
+    size_t size;
+    uint8_t *buf = load("basic", &size);
+    XmvDemux *x;
+    XmvPacket pkt;
+    Wmv2Dec *d;
+    int n = 0, ok = 1, i;
+    if (!buf)
+        return;
+    x = xmv_demux_open_memory(buf, size);
+    d = wmv2_dec_create(96, 64);
+    wmv2_dec_set_wmv_extradata(d, ext);
+    while (x && d && xmv_demux_next(x, &pkt) == 1) {
+        for (i = 0; i < pkt.nframes; i++, n++) {
+            uint32_t crc = 0;
+            int pl, y, stride;
+            ok &= wmv2_dec_decode(d, pkt.frame[i].data, pkt.frame[i].size, WMV2_LE_WORDS) == WMV2_OK;
+            ok &= wmv2_dec_last_was_key(d) == pkt.frame[i].key;
+            for (pl = 0; pl < 3; pl++) {
+                const uint8_t *p = wmv2_dec_plane(d, pl, &stride);
+                for (y = 0; y < (pl ? 32 : 64); y++)
+                    crc = crc_update(crc, p + (size_t)y * stride, pl ? 48 : 96);
+            }
+            ok &= crc == xmv_fixtures[0].crc[n];
+        }
+    }
+    CHECK(ok && n == 12 && wmv2_dec_width(d) == 96 && wmv2_dec_height(d) == 64,
+          "WMV extradata configures the decoder as the XMV header does (%d frames)", n);
+    wmv2_dec_destroy(d);
+    xmv_demux_close(x);
+    free(buf);
+}
+
 static void check_damaged(void)
 {
     /* Random bytes as a frame: an error or a picture, never a crash. */
@@ -321,6 +359,7 @@ int main(void)
     check_demux_errors();
     check_truncated();
     check_damaged();
+    check_wmv_extradata();
     check_colour();
     check_surface();
     if (failures) {
