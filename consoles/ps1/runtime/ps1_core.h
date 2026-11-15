@@ -124,6 +124,10 @@ uint64_t ps1_cycles(ps1_machine *m);
 uint64_t ps1_frames(ps1_machine *m);
 uint8_t *ps1_ram(ps1_machine *m); /* the 2 MB of main RAM, writable */
 
+/* Test hook (XBA-204): on, the machine runs the reference interpreter loop (one full step per instruction) instead of
+ * the register-cached one; ps1_run --lockstep-ref runs both and compares them. A host setting, not in save states. */
+void ps1_cpu_set_reference(ps1_machine *m, int on);
+
 /* Console text (BIOS putchar / puts, A(3Ch) A(3Eh) B(3Dh) B(3Fh)): each character goes to fn. NULL: dropped. */
 void ps1_set_tty(ps1_machine *m, void (*fn)(void *ctx, char c), void *ctx);
 

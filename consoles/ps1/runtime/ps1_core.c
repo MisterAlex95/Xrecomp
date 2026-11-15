@@ -157,6 +157,7 @@ void ps1_destroy(ps1_machine *m)
     if (m->disc)
         ps1_disc_close(m->disc);
     ps1_recomp_free(m);
+    ps1_cpu_free(m);
     ps1_hle_destroy(m);
     free(m->ram);
     free(m->ram_gen);
@@ -256,7 +257,11 @@ uint32_t ps1_pc(ps1_machine *m) { return m->pc; }
 uint32_t ps1_cop0(ps1_machine *m, int r) { return (r >= 0 && r < 32) ? m->cop0[r] : 0; }
 uint64_t ps1_cycles(ps1_machine *m) { return m->cycles; }
 uint64_t ps1_frames(ps1_machine *m) { return m->frames; }
-uint8_t *ps1_ram(ps1_machine *m) { return m->ram; }
+uint8_t *ps1_ram(ps1_machine *m)
+{
+    ps1_cpu_flush_blocks(m); /* the caller may write code there */
+    return m->ram;
+}
 int ps1_exe_started(ps1_machine *m) { return m->exe_started; }
 int ps1_bios_hle(ps1_machine *m) { return m->hle != NULL; }
 struct ps1_gpu *ps1_get_gpu(ps1_machine *m) { return m->gpu; }

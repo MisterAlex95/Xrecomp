@@ -25,6 +25,9 @@
  * --lockstep    with --pack: an interpreter-only twin runs alongside, the whole state (CPU, cycles, scheduler, RAM,
  *               scratchpad, GTE, VRAM) compared after every frame; prints "LOCKSTEP OK" or the first difference
  *               (exit 4)
+ * --lockstep-ref  without a pack (XBA-204): the twin runs the reference interpreter loop (one full step per
+ *               instruction, ps1_cpu_set_reference), this machine the register-cached loop and its predecoded blocks;
+ *               compared as --lockstep does
  * --lockstep-cycles N  (debugging) compare every N cycles instead of every frame (1: about every instruction),
  *               and print both PCs at the first difference
  * --missed FILE append the code the interpreter had to run (address, hash, bytes: the discovered file of
@@ -255,12 +258,29 @@ static void cheat_poke32(void *m, uint32_t addr, uint32_t v)
     ps1_poke32(m, addr, v);
 }
 
+/* --lockstep-ref --lockstep-cycles: the CPU registers, pc and the clock of both machines (cheap, after every stop). */
+static bool ps1_cpu_differs(ps1_machine *a, ps1_machine *b, char *why, size_t n)
+{
+    for (int i = 0; i < 32; i++)
+        if (ps1_reg(a, i) != ps1_reg(b, i)) {
+            snprintf(why, n, "r%d", i);
+            return true;
+        }
+    if (ps1_pc(a) != ps1_pc(b) || ps1_cycles(a) != ps1_cycles(b) || ps1_cop0(a, 12) != ps1_cop0(b, 12) ||
+        ps1_cop0(a, 13) != ps1_cop0(b, 13) || ps1_cop0(a, 14) != ps1_cop0(b, 14)) {
+        snprintf(why, n, "pc / cycles / COP0");
+        return true;
+    }
+    return false;
+}
+
 static int usage(void)
 {
     fprintf(stderr, "usage: ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT]\n"
                     "               [--vram OUT]\n"
                     "               [--wav OUT] [--tty] [--until-tty TEXT] [--pad MASK] [--hash] [--quiet]\n"
-                    "               [--pack LIB.so [--lockstep]] [--missed FILE] [--stats] [--card FILE] [--fast-boot]\n"
+                    "               [--pack LIB.so [--lockstep]] [--lockstep-ref] [--missed FILE] [--stats] [--card FILE]\n"
+                    "               [--fast-boot]\n"
                     "               [--swap FRAME:DISC] [--state-save N:FILE] [--state-load FILE] [--run-hash]\n"
                     "               [--rewind C:R [--rewind-mb M]] [--cheats FILE] [--peek ADDR]\n");
     return 3;
@@ -271,13 +291,13 @@ int main(int argc, char **argv)
     const char *bios_path = getenv("RECOMP_PS1_BIOS"), *exe_path = NULL, *disc_path = NULL;
     const char *vram_out = NULL;
     const char *ppm = NULL, *wav = NULL, *until = NULL, *pack = NULL, *missed = NULL, *card = NULL;
-    bool lockstep = false, stats = false, fast_boot = false;
+    bool lockstep = false, lock_ref = false, stats = false, fast_boot = false;
     const char *cheats_path = NULL;
     uint32_t peeks[8];
     int npeek = 0;
     long swap_frame = -1;
     const char *swap_disc = NULL;
-    long lock_cycles = 0;
+    long lock_cycles = 0, lock_stops = 0;
     long frames = 600;
     bool result = false, quiet = false, hash = false, run_hash = false;
     const char *state_save = NULL, *state_load = NULL;
@@ -321,6 +341,8 @@ int main(int argc, char **argv)
             pack = argv[++i];
         else if (!strcmp(a, "--lockstep"))
             lockstep = true;
+        else if (!strcmp(a, "--lockstep-ref"))
+            lockstep = lock_ref = true;
         else if (!strcmp(a, "--lockstep-cycles") && more)
             lockstep = true, lock_cycles = strtol(argv[++i], NULL, 0);
         else if (!strcmp(a, "--missed") && more)
@@ -390,11 +412,13 @@ int main(int argc, char **argv)
     char err[256] = "";
     ps1_machine *m = ps1_create(bios, bios_size, disc_path, exe, exe_size, err, sizeof err);
     ps1_machine *twin = NULL;
-    if (m && pack && lockstep)
+    if (m && (pack || lock_ref) && lockstep)
         twin = ps1_create(bios, bios_size, disc_path, exe, exe_size, err, sizeof err);
+    if (twin && lock_ref)
+        ps1_cpu_set_reference(twin, 1);
     free(bios);
     free(exe);
-    if (!m || (pack && lockstep && !twin)) {
+    if (!m || ((pack || lock_ref) && lockstep && !twin)) {
         fprintf(stderr, "ps1_run: %s\n", err);
         return 3;
     }
@@ -505,7 +529,11 @@ int main(int argc, char **argv)
                 ps1_run_cycles(m, (uint64_t)lock_cycles);
                 while (ps1_cycles(twin) < ps1_cycles(m))
                     ps1_run_cycles(twin, ps1_cycles(m) - ps1_cycles(twin));
-                if (ps1_recomp_compare(twin, m, why, sizeof why) != 0) {
+                /* with --lockstep-ref the CPU state at each stop, the whole machine every 1024 stops and at the end
+                 * of the frame (the memory compare would dominate) */
+                bool full = !lock_ref || ++lock_stops % 1024 == 0 || ps1_cycles(m) >= end;
+                if ((lock_ref && ps1_cpu_differs(twin, m, why, sizeof why)) ||
+                    (full && ps1_recomp_compare(twin, m, why, sizeof why) != 0)) {
                     printf("LOCKSTEP DIFF at cycle %llu: %s; before: interpreter pc 0x%08X, recompiled pc 0x%08X; "
                            "after: 0x%08X, 0x%08X\n", (unsigned long long)ps1_cycles(m), why, pa, pb, ps1_pc(twin),
                            ps1_pc(m));
@@ -601,10 +629,11 @@ int main(int argc, char **argv)
     double dt = now_s() - t0;
     if (twin) {
         if (diverged >= 0) {
-            printf("LOCKSTEP DIFF at frame %ld: %s (interpreter vs recompiled)\n", diverged, why);
+            printf("LOCKSTEP DIFF at frame %ld: %s (%s)\n", diverged, why,
+                   lock_ref ? "reference interpreter vs blocks" : "interpreter vs recompiled");
             rc = 4;
         } else {
-            printf("LOCKSTEP OK: %ld frames identical to the interpreter\n", f);
+            printf("LOCKSTEP OK: %ld frames identical to the %sinterpreter\n", f, lock_ref ? "reference " : "");
         }
     }
     if (run_hash) {
