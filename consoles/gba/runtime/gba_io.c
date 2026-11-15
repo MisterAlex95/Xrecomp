@@ -350,6 +350,17 @@ void gba_run_frame(gba_machine *m, uint16_t *framebuffer)
 
 /* ---- register access ------------------------------------------------------------------------------------ */
 
+/* Registers that do not drive the data bus when read (write-only or unmapped halfwords): the CPU sees the open bus
+ * (the last prefetched opcode, gba_prefetch_latch). The other unreadable halfwords (the upper half of a 32-bit
+ * register, a few holes) read as 0. GBATEK « GBA I/O Map », checked by the mGBA suite's I/O read tests (XBA-201). */
+bool gba_io_open_bus(uint32_t addr)
+{
+    uint32_t a = addr & 0x3FE;
+    return (a >= 0x10 && a < 0x48) || a == 0x4C || a == 0x4E || (a >= 0x54 && a < 0x60) || a == 0x8C || a == 0x8E ||
+           (a >= 0xA0 && a < 0xB8) || (a >= 0xBC && a < 0xC4) || (a >= 0xC8 && a < 0xD0) || (a >= 0xD4 && a < 0xDC) ||
+           (a >= 0xE0 && a < 0x100);
+}
+
 uint16_t gba_io_read16(gba_machine *m, uint32_t addr)
 {
     uint32_t a = addr & 0x3FE;
@@ -358,8 +369,20 @@ uint16_t gba_io_read16(gba_machine *m, uint32_t addr)
         return timer_value(m, (int)(a - 0x100) >> 2);
     case 0x102: case 0x106: case 0x10A: case 0x10E:
         return m->timer[(a - 0x102) >> 2].ctl;
-    case 0xBA: case 0xC6: case 0xD2: case 0xDE:
-        return m->dma[(a - 0xBA) / 12].cnt_h;
+    case 0xBA: case 0xC6: case 0xD2:
+        return m->dma[(a - 0xBA) / 12].cnt_h & 0xF7E0;
+    case 0xDE:
+        return m->dma[3].cnt_h & 0xFFE0;
+    case 0x008: case 0x00A: /* BG0CNT, BG1CNT: no wrap-around bit */
+        return rd16(&m->io[a]) & 0xDFFF;
+    case 0x048: case 0x04A: /* WININ, WINOUT */
+        return rd16(&m->io[a]) & 0x3F3F;
+    case 0x050: /* BLDCNT */
+        return rd16(&m->io[a]) & 0x3FFF;
+    case 0x052: /* BLDALPHA */
+        return rd16(&m->io[a]) & 0x1F1F;
+    case 0x136: case 0x142: case 0x15A: case 0x206: case 0x20A: case 0x302:
+        return 0;
     default:
         break;
     }
@@ -368,7 +391,7 @@ uint16_t gba_io_read16(gba_machine *m, uint32_t addr)
     if ((a >= 0x10 && a < 0x48) || a == 0x4C || (a >= 0x54 && a < 0x60) || (a >= 0xA0 && a < 0xBA) ||
         (a >= 0xBC && a < 0xC6) || (a >= 0xC8 && a < 0xD2) || (a >= 0xD4 && a < 0xDE) || (a >= 0xE0 && a < 0x100) ||
         (a >= 0x110 && a < 0x120) || (a >= 0x20C && a < 0x300) || a >= 0x304)
-        return 0; /* write-only or unused */
+        return 0; /* write-only or unused (the CPU's reads of the open-bus ones never get here: gba_io_open_bus) */
     return rd16(&m->io[a]);
 }
 

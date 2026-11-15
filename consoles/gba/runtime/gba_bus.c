@@ -131,6 +131,13 @@ static uint16_t rom_read16(const gba_machine *m, uint32_t addr)
     return (uint16_t)(a >> 1);
 }
 
+static uint16_t io_half(gba_machine *m, uint32_t addr)
+{
+    if (gba_io_open_bus(addr))
+        return (uint16_t)(m->open_bus >> ((addr & 2) * 8));
+    return gba_io_read16(m, addr);
+}
+
 static uint32_t read32_raw(gba_machine *m, uint32_t addr)
 {
     switch (addr >> 24) {
@@ -144,7 +151,7 @@ static uint32_t read32_raw(gba_machine *m, uint32_t addr)
         return rd32(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)]);
     case 0x4:
         if ((addr & 0xFFFFFF) < GBA_IO_SIZE)
-            return gba_io_read16(m, addr) | (uint32_t)gba_io_read16(m, addr + 2) << 16;
+            return io_half(m, addr) | (uint32_t)io_half(m, addr + 2) << 16;
         if ((addr & 0xFFFC) == 0x800)
             return 0x0D000020;
         if (dbg_port(m, addr))
@@ -179,7 +186,7 @@ static uint16_t read16_raw(gba_machine *m, uint32_t addr)
         return rd16(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)]);
     case 0x4:
         if ((addr & 0xFFFFFF) < GBA_IO_SIZE)
-            return gba_io_read16(m, addr);
+            return io_half(m, addr);
         if ((addr & 0xFFFC) == 0x800)
             return (addr & 2) ? 0x0D00 : 0x0020;
         if (dbg_port(m, addr))
@@ -249,6 +256,44 @@ uint8_t gba_read8(gba_machine *m, uint32_t addr, bool seq)
     return read8_raw(m, addr);
 }
 
+/* A halfword of code memory, without side effects (the regions code can run from). */
+static uint16_t code_half(gba_machine *m, uint32_t addr)
+{
+    switch (addr >> 24) {
+    case 0x0:
+        return addr < GBA_BIOS_SIZE ? rd16(&m->bios[addr & ~1u]) : 0;
+    case 0x2:
+        return rd16(&m->ewram[addr & (GBA_EWRAM_SIZE - 2)]);
+    case 0x3:
+        return rd16(&m->iwram[addr & (GBA_IWRAM_SIZE - 2)]);
+    case 0x5:
+        return rd16(&m->pal[addr & (GBA_PAL_SIZE - 2)]);
+    case 0x6:
+        return rd16(&m->vram[vram_offset(addr) & ~1u]);
+    case 0x7:
+        return rd16(&m->oam[addr & (GBA_OAM_SIZE - 2)]);
+    case 0x8: case 0x9: case 0xA: case 0xB: case 0xC: case 0xD:
+        return gba_rom_half(m, addr);
+    default:
+        return 0;
+    }
+}
+
+uint32_t gba_prefetch_latch(gba_machine *m, uint32_t pc, bool thumb)
+{
+    if (!thumb)
+        return code_half(m, pc + 8) | (uint32_t)code_half(m, pc + 10) << 16;
+    uint32_t r = pc >> 24;
+    bool aligned = !(pc & 2);
+    if (r == 0x0 || r == 0x7) /* BIOS, OAM: the word holding [pc+4] when aligned, [pc+2] and [pc+4] when not */
+        return aligned ? code_half(m, pc + 4) | (uint32_t)code_half(m, pc + 6) << 16
+                       : code_half(m, pc + 2) | (uint32_t)code_half(m, pc + 4) << 16;
+    if (r == 0x3) /* IWRAM: [pc+4] in the half it lands in, [pc+2] left in the other */
+        return aligned ? code_half(m, pc + 4) | (uint32_t)code_half(m, pc + 2) << 16
+                       : code_half(m, pc + 2) | (uint32_t)code_half(m, pc + 4) << 16;
+    return code_half(m, pc + 4) * 0x00010001u; /* EWRAM, palette, VRAM, cartridge: [pc+4] twice */
+}
+
 /* Opcode fetches: like reads, plus the open-bus / BIOS latches and the prefetch approximation. */
 uint32_t gba_fetch32(gba_machine *m, uint32_t addr, bool seq)
 {
@@ -269,7 +314,7 @@ uint32_t gba_fetch32(gba_machine *m, uint32_t addr, bool seq)
             v = read32_raw(m, addr);
         }
     }
-    m->open_bus = v;
+    m->open_bus = gba_prefetch_latch(m, addr, false);
     return v;
 }
 
@@ -293,7 +338,7 @@ uint16_t gba_fetch16(gba_machine *m, uint32_t addr, bool seq)
             v = read16_raw(m, addr);
         }
     }
-    m->open_bus = v * 0x00010001u;
+    m->open_bus = gba_prefetch_latch(m, addr, true);
     return v;
 }
 

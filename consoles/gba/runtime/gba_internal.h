@@ -276,9 +276,18 @@ void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq);
 uint16_t gba_fetch16(gba_machine *m, uint32_t addr, bool seq);
 uint32_t gba_fetch32(gba_machine *m, uint32_t addr, bool seq);
 void gba_update_waitstates(gba_machine *m);
+/* The opcode the CPU prefetched while running the one at pc (ARM [pc+8]; Thumb by region, GBATEK « Reading from
+ * Unused Memory »): what the opcode fetch leaves in m->open_bus, so what unmapped and write-only reads return. */
+uint32_t gba_prefetch_latch(gba_machine *m, uint32_t pc, bool thumb);
+static inline uint16_t gba_rom_half(const gba_machine *m, uint32_t addr)
+{
+    uint32_t a = addr & 0x1FFFFFE;
+    return a < m->rom_size ? rd16(&m->rom[a]) : (uint16_t)(a >> 1); /* past the end: the latched address */
+}
 
 /* gba_io.c */
 uint16_t gba_io_read16(gba_machine *m, uint32_t addr);
+bool gba_io_open_bus(uint32_t addr); /* a CPU / DMA read there sees the open bus */
 void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v);
 void gba_io_write8(gba_machine *m, uint32_t addr, uint8_t v);
 void gba_raise_irq(gba_machine *m, uint16_t bits);

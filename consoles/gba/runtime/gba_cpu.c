@@ -966,17 +966,19 @@ static inline __attribute__((always_inline)) uint32_t fetch16_seq(gba_machine *m
     if (r - 8u <= 5u && a < m->rom_size) {
         m->now += m->fetch16[r];
         v = rd16(&m->rom[a]);
+        m->open_bus = gba_rom_half(m, pc + 4) * 0x00010001u; /* the prefetched opcode (gba_prefetch_latch) */
     } else if (r == 3) {
         m->now += 1;
         v = rd16(&m->iwram[pc & (GBA_IWRAM_SIZE - 1)]);
+        m->open_bus = gba_prefetch_latch(m, pc, true);
     } else if (pc < GBA_BIOS_SIZE) {
         m->now += m->fetch16[0];
         v = rd16(&m->bios[pc]);
         m->bios_latch = rd32(&m->bios[(pc + 4) & (GBA_BIOS_SIZE - 4)]); /* as gba_fetch16 */
+        m->open_bus = m->bios_latch;
     } else {
         return gba_fetch16(m, pc, true);
     }
-    m->open_bus = v * 0x00010001u;
     return v;
 }
 
@@ -986,17 +988,19 @@ static inline __attribute__((always_inline)) uint32_t fetch32_seq(gba_machine *m
     if (r - 8u <= 5u && a < m->rom_size) {
         m->now += m->fetch32[r];
         v = rd32(&m->rom[a]);
+        m->open_bus = gba_rom_half(m, pc + 8) | (uint32_t)gba_rom_half(m, pc + 10) << 16;
     } else if (r == 3) {
         m->now += 1;
         v = rd32(&m->iwram[pc & (GBA_IWRAM_SIZE - 1)]);
+        m->open_bus = rd32(&m->iwram[(pc + 8) & (GBA_IWRAM_SIZE - 4)]);
     } else if (pc < GBA_BIOS_SIZE) {
         m->now += m->fetch32[0];
         v = rd32(&m->bios[pc]);
         m->bios_latch = rd32(&m->bios[(pc + 8) & (GBA_BIOS_SIZE - 4)]); /* the prefetched opcode, as gba_fetch32 */
+        m->open_bus = m->bios_latch;
     } else {
         return gba_fetch32(m, pc, true);
     }
-    m->open_bus = v;
     return v;
 }
 
