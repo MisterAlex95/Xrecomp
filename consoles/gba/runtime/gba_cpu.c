@@ -568,7 +568,7 @@ static void arm_block_transfer(gba_machine *m, uint32_t op)
             if (!(list & (1u << i)))
                 continue;
             uint32_t v = gba_read32(m, addr & ~3u, seq);
-            seq = true;
+            seq = ((addr + 4) >> 24) == (addr >> 24); /* into another region: non-sequential */
             addr += 4;
             if (i == 15) {
                 if (s) /* LDM ..., {.., PC}^ : CPSR = SPSR */
@@ -590,7 +590,7 @@ static void arm_block_transfer(gba_machine *m, uint32_t op)
             else if ((uint32_t)i == rn && w && (uint32_t)i != first)
                 v = new_base; /* the base was already written back after the first transfer */
             gba_write32(m, addr & ~3u, v, seq);
-            seq = true;
+            seq = ((addr + 4) >> 24) == (addr >> 24); /* into another region: non-sequential */
             addr += 4;
         }
         if (w)
@@ -752,7 +752,7 @@ static void thumb_push_pop(gba_machine *m, uint32_t op)
         for (int i = 0; i < 8; i++) {
             if (list & (1u << i)) {
                 R[i] = gba_read32(m, addr & ~3u, seq);
-                seq = true;
+                seq = ((addr + 4) >> 24) == (addr >> 24); /* into another region: non-sequential */
                 addr += 4;
             }
         }
@@ -775,7 +775,7 @@ static void thumb_push_pop(gba_machine *m, uint32_t op)
         for (int i = 0; i < 8; i++) {
             if (list & (1u << i)) {
                 gba_write32(m, addr & ~3u, R[i], seq);
-                seq = true;
+                seq = ((addr + 4) >> 24) == (addr >> 24); /* into another region: non-sequential */
                 addr += 4;
             }
         }
@@ -806,7 +806,7 @@ static void thumb_ldm_stm(gba_machine *m, uint32_t op)
         for (int i = 0; i < 8; i++) {
             if (list & (1u << i)) {
                 R[i] = gba_read32(m, addr & ~3u, seq);
-                seq = true;
+                seq = ((addr + 4) >> 24) == (addr >> 24); /* into another region: non-sequential */
                 addr += 4;
             }
         }
@@ -817,7 +817,7 @@ static void thumb_ldm_stm(gba_machine *m, uint32_t op)
             if (list & (1u << i)) {
                 uint32_t v = ((uint32_t)i == rb && (uint32_t)i != first) ? new_base : R[i];
                 gba_write32(m, addr & ~3u, v, seq);
-                seq = true;
+                seq = ((addr + 4) >> 24) == (addr >> 24); /* into another region: non-sequential */
                 addr += 4;
             }
         }
@@ -1007,6 +1007,18 @@ static inline __attribute__((always_inline)) uint32_t fetch32_seq(gba_machine *m
     return v;
 }
 
+/* After an instruction that took cycles beyond its opcode fetch (data accesses, internal cycles) and did not branch,
+ * the next opcode fetch is non-sequential: its cycles beyond the sequential fetch, charged at the end of the
+ * instruction (lifted code: RC_NEXTRA). With the cartridge's prefetch buffer on, the buffer had the bus meanwhile: no
+ * penalty (approximation). Fitted to the mGBA suite's timing tests (XBA-201). */
+static inline uint32_t nfetch_extra(const gba_machine *m, uint32_t pc, bool thumb)
+{
+    uint32_t r = (pc >> 24) & 15;
+    if (r - 8u <= 5u && m->prefetch)
+        return 0;
+    return thumb ? (uint32_t)m->wait16[r][0] - m->fetch16[r] : (uint32_t)m->wait32[r][0] - m->fetch32[r];
+}
+
 /* Inlined into the run loop with both decoders: a call per instruction (and the callee-saved registers each one
  * saves) was a large share of the interpreter's time. gba_cpu_step keeps an out-of-line copy. */
 static inline __attribute__((always_inline)) void step(gba_machine *m)
@@ -1019,19 +1031,27 @@ static inline __attribute__((always_inline)) void step(gba_machine *m)
     if (m->cpu.cpsr_ctl & CPSR_T) {
         uint32_t pc = R[15] - 4;
         uint32_t op = fetch16_seq(m, pc);
+        uint64_t t0 = m->now;
         thumb_execute(m, op, pc);
-        if (!m->cpu.branched)
+        if (!m->cpu.branched) {
             R[15] += 2;
-        else
+            if (m->now != t0)
+                m->now += nfetch_extra(m, pc, true);
+        } else {
             refill(m, R[15]);
+        }
     } else {
         uint32_t pc = R[15] - 8;
         uint32_t op = fetch32_seq(m, pc);
+        uint64_t t0 = m->now;
         arm_execute(m, op, pc);
-        if (!m->cpu.branched)
+        if (!m->cpu.branched) {
             R[15] += 4;
-        else
+            if (m->now != t0)
+                m->now += nfetch_extra(m, pc, false);
+        } else {
             refill(m, R[15]);
+        }
     }
 }
 

@@ -136,6 +136,7 @@ class FnLifter:
         body = fn(op, a) if fn else None
         if body is None:
             return None
+        body = self.after_access(body)
         if cond == 0xE:
             return body
         return ["if (%s) {" % COND[cond]] + ["    " + s for s in body] + ["}"]
@@ -296,12 +297,14 @@ class FnLifter:
         for k, (kind, x) in enumerate(ops):
             dst = x[len("uint32_t "):] if x.startswith("uint32_t ") else x
             ad = "a0_ + %d" % (4 * k) if k else "a0_"
+            # sequential after the first, unless the run crosses into another region (gba_cpu.c block transfers)
+            sq = "((a0_ + %d) >> 24) == ((a0_ + %d) >> 24)" % (4 * k, 4 * k - 4) if k else "0"
             if kind == "r":
                 fast.append("%s = RC_FRD32(%s);" % (dst, ad))
-                slow.append("%s = RC_BRD32(%s, %d, %s);" % (dst, ad, 1 if k else 0, ob))
+                slow.append("%s = RC_BRD32(%s, %s, %s);" % (dst, ad, sq, ob))
             else:
                 fast.append("RC_FWR32(%s, %s);" % (ad, x))
-                slow.append("RC_BWR32(%s, %s, %d, %s);" % (ad, x, 1 if k else 0, ob))
+                slow.append("RC_BWR32(%s, %s, %s, %s);" % (ad, x, sq, ob))
         out.append("if (RC_RUN_RAM(a0_, %d)) {" % n)
         out.append("    RC_RUN_WAITS(a0_, %d);" % n)
         out.append("    RC_RUN_BASE(a0_);")
@@ -428,7 +431,17 @@ class FnLifter:
 
     def thumb_ins(self, op: int, a: int) -> list:
         cls = thumb_class(op)
-        return getattr(self, "t_" + cls)(op, a) if hasattr(self, "t_" + cls) else None
+        body = getattr(self, "t_" + cls)(op, a) if hasattr(self, "t_" + cls) else None
+        return None if body is None else self.after_access(body)
+
+    @staticmethod
+    def after_access(body):
+        # After cycles beyond the opcode fetch (a data access, internal cycles) the next opcode fetch is
+        # non-sequential (gba_cpu.c step, gba_recomp_rt.h RC_NEXTRA): its extra cycles, unless the instruction jumps
+        # (the refill is non-sequential anyway).
+        if (is_memory(body) or any(NOW_RE.search(x) for x in body)) and not any("RC_JUMP" in x for x in body):
+            return body + ["now += RC_NEXTRA();"]
+        return body
 
     def tob(self, a):
         # Thumb in the cartridge ROM: the open-bus latch holds the prefetched opcode [$+4] in both halves.
@@ -726,7 +739,7 @@ class FnLifter:
 MEM_RE = re.compile(r"\b(?:RD|WR)(?:8|16|32)\(|\bRC_RUN_RAM\(")
 NOW_RE = re.compile(r"now \+= ([^;]*);")
 MUL_RE = re.compile(r"^\(uint32_t\)rc_mul_cycles\(\w+, \d\)( \+ 1)?$")
-WAIT_RE = re.compile(r"^h->wait(?:16|32)\[\d+\]\[0\]$")
+WAIT_RE = re.compile(r"h->wait(?:16|32)\[\d+\]\[0\]")
 EXITS = ("RC_JUMP_DYN", "RC_BX", "RC_EXIT")  # what follows may be a return point
 MAX_BLOCK = 12  # instructions per block at most (an event in a block makes the interpreter run the rest of it)
 
@@ -746,7 +759,7 @@ def static_cost(body):
                 const += int(e)
             elif MUL_RE.match(e):
                 const += 5 if e.endswith("+ 1") else 4
-            elif WAIT_RE.match(e):
+            elif WAIT_RE.fullmatch(e) or e == "RC_NEXTRA()":
                 terms.append(e)
             else:
                 raise ValueError("lift: unknown cycle term %r" % e)
