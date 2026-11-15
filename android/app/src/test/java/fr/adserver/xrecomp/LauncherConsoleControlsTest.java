@@ -67,8 +67,15 @@ public class LauncherConsoleControlsTest {
         Toolchain.nativeDirOverride = TestSupport.fakeNativeDir(tmp.getRoot()).getAbsolutePath();
     }
 
+    private String savedSourceDir;
+
     @After
     public void tearDown() {
+        if (savedSourceDir != null)
+            app.getApplicationInfo().sourceDir = savedSourceDir;
+        app.getApplicationInfo().metaData = null;
+        TitleApp.resetMeta();
+        TitleApp.testKey = null;
         Toolchain.assetsOverride = null;
         Toolchain.nativeDirOverride = null;
         LauncherActivity.lsfgBuiltOverride = null;
@@ -593,5 +600,97 @@ public class LauncherConsoleControlsTest {
         key(a, KeyEvent.KEYCODE_DPAD_LEFT);
         assertNull(Hotkeys.gameText(app, key));
         assertEquals("Select + Y", row(a, qsave).value);
+    }
+
+    /** XRecomp's APK for « Create an app »: a copy of this build's resource APK (TitleApkTest.resourceApk). */
+    private File useTemplate(File apk) throws Exception {
+        savedSourceDir = app.getApplicationInfo().sourceDir;
+        app.getApplicationInfo().sourceDir = apk.getPath();
+        return apk;
+    }
+
+    /**
+     * XBA-215: a GBA game's Options › Create an app (not prepared: the description says so), built with the ROM in it
+     * and handed to the installer under fr.adserver.xrecomp.tgba_&lt;key&gt;.
+     */
+    @Test
+    public void gbaOptionsCreateAnApp() throws Exception {
+        File t = tmp.newFile("base.apk");
+        java.nio.file.Files.copy(TitleApkTest.resourceApk().toPath(), t.toPath(),
+                                 java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        useTemplate(t);
+        shadowOf(app.getPackageManager()).setCanRequestPackageInstalls(true);
+        TitleApp.testKey = TitleApkTest.makeKey("xba-console-row");   // Robolectric has no AndroidKeyStore
+        File rom = rom("gba", "Pocket Quest.gba", ConsoleTest.gba("AXVE"));
+        LauncherActivity a = launch();
+        String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(rom)).tid;
+        openControls(a, "Pocket Quest", R.string.ROM_OPTIONS, LauncherActivity.Screen.ROM_OPTIONS);
+        Widgets.MenuRow r = row(a, app.getString(R.string.TITLE_APP_ADD));
+        assertNotNull("Create an app", r);
+        assertTrue(r.description, r.description.startsWith(
+            app.getString(R.string.TITLE_APP_ADD_CONSOLE_DETAIL_UNPREPARED, "").substring(0, 40)));
+        shot(a, "console-options-3-create-app");
+        r.performClick();
+        Thread w = a.workerForTest();
+        assertNotNull(w);
+        w.join(60_000);
+        idle(300);
+        assertEquals(app.getString(R.string.TITLE_APP_CONFIRM, "Pocket Quest"), a.noteForTest());
+        assertEquals(LauncherActivity.Screen.ROM_OPTIONS, a.screenForTest());
+        List<android.content.pm.PackageInstaller.SessionInfo> sessions =
+            app.getPackageManager().getPackageInstaller().getAllSessions();
+        assertEquals(1, sessions.size());
+        assertEquals(TitleApk.packageName(key), sessions.get(0).getAppPackageName());
+    }
+
+    /**
+     * XBA-215: a GBA game's own app (its key in the meta-data, its ROM in its APK): its icon takes the game out once,
+     * then starts it (ShellActivity with the ROM taken out); the next start goes straight into the game.
+     */
+    @Test
+    public void aConsoleGameAppTakesItsGameOutAndPlays() throws Exception {
+        String key = "gba-AXVE01";
+        byte[] rom = ConsoleTest.gba("AXVE");
+        File template = TitleApkTest.resourceApk();
+        TitleApk.Spec s = TitleApkTest.spec(template);
+        s.titleId = key;
+        s.xbeSha256 = "";
+        s.extra = ConsoleApp.entries(key, "Pocket Quest", java.util.Collections.singletonList(
+            new ConsoleApp.GameFile("Pocket Quest.gba", rom.length, () -> new java.io.ByteArrayInputStream(rom))),
+            null);
+        File apk = tmp.newFile("game.apk");
+        TitleApk.rewrite(template, apk, s, null, null);
+        useTemplate(apk);
+        android.os.Bundle meta = new android.os.Bundle();
+        meta.putString(TitleApk.META_TITLE_ID, key);
+        meta.putString(TitleApk.META_PARENT, "fr.adserver.xrecomp.shell");
+        shadowOf(app.getPackageManager()).getInternalMutablePackageInfo(app.getPackageName())
+            .applicationInfo.metaData = meta;
+        TitleApp.resetMeta();
+        assertEquals(key, ConsoleApp.ownKey(app));
+
+        LauncherActivity a = Robolectric.buildActivity(LauncherActivity.class).setup().get();
+        Thread w = a.consoleWorkerForTest();   // null when it was quick enough to be over during setup()
+        if (w != null) {
+            assertEquals("taking the game out", LauncherActivity.Screen.DIRECT, a.screenForTest());
+            w.join(30_000);
+        }
+        idle(300);
+        File out = new File(ConsoleApp.gameDir(app.getFilesDir()), "Pocket Quest.gba");
+        assertTrue(out.isFile());
+        assertEquals(out.getAbsolutePath(), GameStore.launchedRom(app));
+        assertEquals(key, GameStore.launchedTitleId(app));
+        android.content.Intent started = shadowOf(app).getNextStartedActivity();
+        assertNotNull(started);
+        assertEquals(ShellActivity.class.getName(), started.getComponent().getClassName());
+        assertTrue(a.isFinishing());
+
+        // The next start: straight into the game, nothing taken out again.
+        LauncherActivity b = Robolectric.buildActivity(LauncherActivity.class).setup().get();
+        assertNull(b.consoleWorkerForTest());
+        assertTrue(b.isFinishing());
+        started = shadowOf(app).getNextStartedActivity();
+        assertNotNull(started);
+        assertEquals(ShellActivity.class.getName(), started.getComponent().getClassName());
     }
 }

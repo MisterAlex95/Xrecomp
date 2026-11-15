@@ -71,14 +71,70 @@ final class TitleApk {
         String iconEntry;
         /** R.mipmap.xba_title_icon: the same id in the template, which is this very APK. */
         int iconRes;
+        /** Entries added to the copy (a console game's: its game files and pack, ConsoleApp), or none. */
+        List<ApkZip.Added> extra;
 
         String packageName() {
             return TitleApk.packageName(titleId);
         }
     }
 
+    /**
+     * The generated app's package for a game key: an Xbox title ID in lower case (fr.adserver.xrecomp.t4d5300d1); a
+     * GBA / PS1 / N64 library key (« gba-AXVE », XBA-215) as « tgba_AXVE », its « _ » written « _u » and its « - »
+     * « _d » so that keyOfPackage gives the key back (a package segment holds letters, digits and « _ » only).
+     */
     static String packageName(String titleId) {
-        return PACKAGE_PREFIX + titleId.toLowerCase(Locale.ROOT);
+        Console c = Console.ofKey(titleId);
+        if (c == Console.XBOX)
+            return PACKAGE_PREFIX + titleId.toLowerCase(Locale.ROOT);
+        String key = titleId.substring(c.id.length() + 1);
+        return PACKAGE_PREFIX + c.id + "_" + key.replace("_", "_u").replace("-", "_d");
+    }
+
+    /** The game key of a generated app's package (packageName's inverse), or null when pkg is not one. */
+    static String keyOfPackage(String pkg) {
+        if (pkg == null || !pkg.startsWith(PACKAGE_PREFIX))
+            return null;
+        String rest = pkg.substring(PACKAGE_PREFIX.length());
+        for (Console c : Console.values()) {
+            if (c == Console.XBOX || !rest.startsWith(c.id + "_"))
+                continue;
+            StringBuilder key = new StringBuilder();
+            String enc = rest.substring(c.id.length() + 1);
+            for (int i = 0; i < enc.length(); i++) {
+                char ch = enc.charAt(i);
+                if (ch != '_') {
+                    key.append(ch);
+                    continue;
+                }
+                char next = ++i < enc.length() ? enc.charAt(i) : 0;
+                if (next == 'u')
+                    key.append('_');
+                else if (next == 'd')
+                    key.append('-');
+                else
+                    return null;
+            }
+            String k = normKey(c.id + "-" + key);
+            return k != null && packageName(k).equals(pkg) ? k : null;
+        }
+        String id = Pack.normTitleId(rest);
+        return id != null && packageName(id).equals(pkg) ? id : null;
+    }
+
+    /**
+     * A game key as the game apps use it: an Xbox title ID normalised (8 upper-case hex digits), a library key of
+     * another console as it is when it can name a pack folder (Console.packDirName); null otherwise.
+     */
+    static String normKey(String key) {
+        if (key == null)
+            return null;
+        String k = key.trim();
+        Console c = Console.ofKey(k);
+        if (c == Console.XBOX)
+            return Pack.normTitleId(k);
+        return Console.packDirName(c, k.substring(c.id.length() + 1));
     }
 
     static String label(String title) {
@@ -185,7 +241,10 @@ final class TitleApk {
             if (META_TITLE_ID.equals(name) || META_XBE_SHA256.equals(name) || META_PARENT.equals(name))
                 x.remove(md);
         }
-        addMeta(x, root, META_TITLE_ID, s.titleId.toUpperCase(Locale.ROOT));
+        String key = normKey(s.titleId);
+        if (key == null)
+            throw new IOException("not a game key: " + s.titleId);
+        addMeta(x, root, META_TITLE_ID, key);
         addMeta(x, root, META_XBE_SHA256, s.xbeSha256 == null ? "" : s.xbeSha256);
         addMeta(x, root, META_PARENT, parent);
         return x.toBytes();
@@ -253,7 +312,7 @@ final class TitleApk {
         Map<String, byte[]> replace = new HashMap<>();
         replace.put("AndroidManifest.xml", patchManifest(readManifest(template), s));
         replace.put(s.iconEntry, s.iconPng);
-        ApkZip.rewrite(template, unsigned, replace, TitleApk::oldSignature, progress, cancelled);
+        ApkZip.rewrite(template, unsigned, replace, TitleApk::oldSignature, s.extra, progress, cancelled);
     }
 
     /** Signs unsigned into out: APK Signature Scheme v2 only, stored entries aligned (4, 16 KB for a .so). */

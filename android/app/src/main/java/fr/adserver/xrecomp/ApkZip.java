@@ -5,6 +5,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
@@ -47,6 +48,27 @@ final class ApkZip {
 
         /** The offset of the entry's data in the file it was read from (after its local header). */
         long dataOffset;
+    }
+
+    /** Where an added entry's bytes come from: opened twice (its CRC first, then the copy). */
+    interface Opener {
+        InputStream open() throws IOException;
+    }
+
+    /**
+     * An entry added to the copy (a console game's own app: its game files, XBA-215): stored, aligned like any stored
+     * entry, its CRC and size read in a first pass. sizeHint: its size as far as known, for the progress only.
+     */
+    static final class Added {
+        final String name;
+        final Opener opener;
+        final long sizeHint;
+
+        Added(String name, long sizeHint, Opener opener) {
+            this.name = name;
+            this.sizeHint = Math.max(0, sizeHint);
+            this.opener = opener;
+        }
     }
 
     /** Progress of a copy: bytes written so far out of the input's size. */
@@ -135,17 +157,34 @@ final class ApkZip {
      */
     static void rewrite(File in, File out, Map<String, byte[]> replace, Predicate<String> drop, Progress progress,
                         java.util.function.BooleanSupplier cancelled) throws IOException {
+        rewrite(in, out, replace, drop, null, progress, cancelled);
+    }
+
+    /**
+     * The same, with the entries of added appended after the copied ones, stored (an entry of in with one of their
+     * names is left out).
+     */
+    static void rewrite(File in, File out, Map<String, byte[]> replace, Predicate<String> drop, List<Added> added,
+                        Progress progress, java.util.function.BooleanSupplier cancelled) throws IOException {
+        java.util.Set<String> addedNames = new java.util.HashSet<>();
+        if (added != null)
+            for (Added a : added)
+                if (!addedNames.add(a.name))
+                    throw new IOException("added twice: " + a.name);
         try (RandomAccessFile f = new RandomAccessFile(in, "r");
              OutputStream os = new BufferedOutputStream(new FileOutputStream(out), 1 << 16)) {
             List<Entry> entries = entries(f);
             long total = f.length();
+            if (added != null)
+                for (Added a : added)
+                    total += a.sizeHint;
             CountingOut o = new CountingOut(os);
             List<Entry> written = new ArrayList<>();
             byte[] buf = new byte[1 << 16];
             for (Entry e : entries) {
                 if (cancelled != null && cancelled.getAsBoolean())
                     throw new InterruptedIOException("cancelled");
-                if (drop != null && drop.test(e.name))
+                if ((drop != null && drop.test(e.name)) || addedNames.contains(e.name))
                     continue;
                 Entry w = copyHeader(e);
                 byte[] data = null;
@@ -197,6 +236,13 @@ final class ApkZip {
                 if (progress != null)
                     progress.update(Math.min(o.count, total), total);
             }
+            if (added != null) {
+                for (Added a : added) {
+                    if (cancelled != null && cancelled.getAsBoolean())
+                        throw new InterruptedIOException("cancelled");
+                    written.add(writeAdded(o, a, buf, progress, total, cancelled));
+                }
+            }
             long cdStart = o.count;
             for (Entry w : written) {
                 byte[] name = w.name.getBytes(StandardCharsets.UTF_8);
@@ -219,6 +265,64 @@ final class ApkZip {
                .putShort((short)written.size()).putInt((int)cdSize).putInt((int)cdStart).putShort((short)0);
             o.write(end.array());
         }
+    }
+
+    /** One added entry: its CRC and size (a first read), then its local header and its bytes (a second read). */
+    private static Entry writeAdded(CountingOut o, Added a, byte[] buf, Progress progress, long total,
+                                    java.util.function.BooleanSupplier cancelled) throws IOException {
+        CRC32 crc = new CRC32();
+        long size = 0;
+        try (InputStream in = a.opener.open()) {
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                crc.update(buf, 0, n);
+                size += n;
+            }
+        }
+        if (size > 0xfffffffeL)
+            throw new IOException(a.name + ": too large for a zip without zip64");
+        Entry w = new Entry();
+        w.name = a.name;
+        w.versionMadeBy = 20;
+        w.versionNeeded = 10;
+        w.method = STORED;
+        w.date = (1 << 5) | 1;   // 1980-01-01, as the build tools write
+        w.crc = crc.getValue();
+        w.size = w.compressedSize = size;
+        w.localOffset = o.count;
+        byte[] name = w.name.getBytes(StandardCharsets.UTF_8);
+        if (name.length > 0xffff)
+            throw new IOException("entry name too long");
+        int align = alignment(w.name, STORED);
+        long dataAt = o.count + 30 + name.length;
+        int pad = (int)((align - (dataAt + 6) % align) % align);
+        byte[] extra = new byte[6 + pad];
+        ByteBuffer x = ByteBuffer.wrap(extra).order(ByteOrder.LITTLE_ENDIAN);
+        x.putShort((short)ALIGNMENT_EXTRA_ID).putShort((short)(2 + pad)).putShort((short)align);
+        ByteBuffer h = ByteBuffer.allocate(30).order(ByteOrder.LITTLE_ENDIAN);
+        h.putInt(LOCAL_SIG).putShort((short)w.versionNeeded).putShort((short)0).putShort((short)STORED)
+         .putShort((short)w.time).putShort((short)w.date).putInt((int)w.crc).putInt((int)size).putInt((int)size)
+         .putShort((short)name.length).putShort((short)extra.length);
+        o.write(h.array());
+        o.write(name);
+        o.write(extra);
+        long left = size;
+        CRC32 again = new CRC32();
+        try (InputStream in = a.opener.open()) {
+            int n;
+            while (left > 0 && (n = in.read(buf, 0, (int)Math.min(buf.length, left))) > 0) {
+                if (cancelled != null && cancelled.getAsBoolean())
+                    throw new InterruptedIOException("cancelled");
+                again.update(buf, 0, n);
+                o.write(buf, 0, n);
+                left -= n;
+                if (progress != null)
+                    progress.update(Math.min(o.count, total), total);
+            }
+        }
+        if (left != 0 || again.getValue() != w.crc)
+            throw new IOException(a.name + ": changed while it was copied");
+        return w;
     }
 
     private static Entry copyHeader(Entry e) {

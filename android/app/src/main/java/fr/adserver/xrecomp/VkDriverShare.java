@@ -43,7 +43,7 @@ final class VkDriverShare {
     static String callerTitleId(String caller) {
         if (caller == null || !caller.startsWith(TitleApk.PACKAGE_PREFIX))
             return null;
-        return Pack.normTitleId(caller.substring(TitleApk.PACKAGE_PREFIX.length()));
+        return TitleApk.keyOfPackage(caller);
     }
 
     // ---- XRecomp's answer -----------------------------------------------------------------------------------------
@@ -130,7 +130,7 @@ final class VkDriverShare {
      * few MB): off the UI thread where possible. Nothing in XRecomp itself.
      */
     static Outcome sync(Context c) {
-        String parent = TitleApp.ownParent(c), tid = Pack.normTitleId(TitleApp.ownTitleId(c));
+        String parent = TitleApp.ownParent(c), tid = TitleApk.normKey(TitleApp.ownTitleId(c));
         if (parent == null || tid == null)
             return Outcome.NO_ANSWER;
         Bundle b;

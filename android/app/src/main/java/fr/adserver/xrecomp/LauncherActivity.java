@@ -415,6 +415,11 @@ public class LauncherActivity extends Activity {
                                && !selectShortcutTitle(in.getStringExtra(EXTRA_TITLE_ID));
         if (badPack != null && savedInstanceState == null)
             dropBadPack(badPack);
+        // A console game's own app (XBA-215): its game is in its APK, taken out once, then straight into it.
+        if (ConsoleApp.ownKey(this) != null && !change && !showLauncher) {
+            startConsoleDirect(savedInstanceState, noData, exited);
+            return;
+        }
         // A game's own app: its icon goes into the game (the DIRECT screen while something is needed first).
         direct = ownTid() != null && !change && !showLauncher;
         if (direct) {
@@ -2962,28 +2967,7 @@ public class LauncherActivity extends Activity {
                 if (spec.xbeSha256.isEmpty())
                     Log.w(TAG, "launcher: game app " + spec.packageName() + ": no default.xbe hash, not locked");
                 spec.iconPng = TitleApp.iconPng(icon, tid, label);
-                spec.iconEntry = TitleApp.iconEntry(this);
-                spec.iconRes = R.mipmap.xba_title_icon;
-                TitleApp.Key key = TitleApp.key();
-                File apk = TitleApp.build(this, spec, key, new TitleApp.Progress() {
-                    @Override
-                    public void update(long done, long total) {
-                        progress(done, total, label);
-                    }
-
-                    @Override
-                    public void signing() {
-                        progressIndeterminate(R.string.TITLE_APP_SIGNING);
-                    }
-                }, () -> cancelRequested);
-                Log.i(TAG, "launcher: game app " + spec.packageName() + ": " + apk.length() + " bytes, signed");
-                progressIndeterminate(R.string.TITLE_APP_HANDING);
-                TitleApp.install(this, apk, spec.packageName(), label, (done, total) -> progress(done, total, label),
-                                 () -> cancelRequested);
-                //noinspection ResultOfMethodCallIgnored
-                apk.delete();   // the session has its own copy
-                workerNoteKind = NOTE_INFO;
-                workerNote = getString(R.string.TITLE_APP_CONFIRM, label);
+                buildTitleApp(spec);
             } catch (java.io.InterruptedIOException e) {
                 TitleApp.clean(this);
                 cancelled();
@@ -2991,6 +2975,155 @@ public class LauncherActivity extends Activity {
                 Log.w(TAG, "launcher: game app " + TitleApk.packageName(tid) + " failed", e);
                 TitleApp.clean(this);
                 fail(getString(R.string.TITLE_APP_BUILD_FAILED, String.valueOf(e.getMessage())));
+            }
+        });
+    }
+
+    /**
+     * Worker: spec (its key, label, parent, lock, icon PNG and extra entries set) made into the game's app, signed and
+     * handed to Android's installer; the note says to confirm.
+     */
+    private void buildTitleApp(TitleApk.Spec spec) throws IOException {
+        String label = spec.label;
+        spec.iconEntry = TitleApp.iconEntry(this);
+        spec.iconRes = R.mipmap.xba_title_icon;
+        TitleApp.Key key = TitleApp.key();
+        File apk = TitleApp.build(this, spec, key, new TitleApp.Progress() {
+            @Override
+            public void update(long done, long total) {
+                progress(done, total, label);
+            }
+
+            @Override
+            public void signing() {
+                progressIndeterminate(R.string.TITLE_APP_SIGNING);
+            }
+        }, () -> cancelRequested);
+        Log.i(TAG, "launcher: game app " + spec.packageName() + ": " + apk.length() + " bytes, signed");
+        progressIndeterminate(R.string.TITLE_APP_HANDING);
+        TitleApp.install(this, apk, spec.packageName(), label, (done, total) -> progress(done, total, label),
+                         () -> cancelRequested);
+        //noinspection ResultOfMethodCallIgnored
+        apk.delete();   // the session has its own copy
+        workerNoteKind = NOTE_INFO;
+        workerNote = getString(R.string.TITLE_APP_CONFIRM, label);
+    }
+
+    /**
+     * ROM_OPTIONS › Create an app (XBA-215, docs/android/app-shell.md « A console game's own app »): for a GBA, PS1 or
+     * N64 game whose files can be read; not in a game's own app, nor from a split install. Its size: XRecomp's APK,
+     * the game's files and its pack.
+     */
+    private void consoleAppRow(LinearLayout list, LibraryScreen.Entry e) {
+        File template = TitleApp.ownTitleId(this) == null ? TitleApp.template(this) : null;
+        if (template == null || e == null || e.active == null || TitleApk.normKey(e.tid) == null
+            || e.chip == GameState.Chip.NO_FILE_ACCESS)
+            return;
+        Console con = e.console();
+        File packDir = Pack.check(getFilesDir(), e.tid) == Pack.Check.VALID
+                       ? Pack.packDir(getFilesDir(), con, e.tid.substring(con.id.length() + 1)) : null;
+        long size = template.length() + Math.max(0, e.active.size) + (packDir == null ? 0 : GameStore.treeSize(packDir));
+        String detail = getString(packDir != null ? R.string.TITLE_APP_ADD_CONSOLE_DETAIL
+                                                  : R.string.TITLE_APP_ADD_CONSOLE_DETAIL_UNPREPARED, size(size));
+        MenuRow r = listRow(list, getString(R.string.TITLE_APP_ADD), detail, () -> onCreateConsoleApp(e));
+        onFocus(r, () -> describe(detail));
+    }
+
+    /** A document's file name: its display name, else its id's last part. */
+    private String fileNameOf(Uri uri) {
+        String n = displayName(uri);
+        int cut = Math.max(n.lastIndexOf('/'), n.lastIndexOf(':'));
+        return cut >= 0 ? n.substring(cut + 1) : n;
+    }
+
+    /** A document's size, or -1 when its provider does not say. */
+    private long documentSize(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[] { OpenableColumns.SIZE }, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0))
+                return c.getLong(0);
+        } catch (RuntimeException ignored) {
+        }
+        return -1;
+    }
+
+    /** The game files of a console game's entry: the file it starts from first, then a .cue's tracks. */
+    private List<ConsoleApp.GameFile> consoleGameFiles(LibraryScreen.Entry e) throws IOException {
+        Library.Folder folder = Library.folderOf(Library.folders(this), e.active);
+        String tree = folder == null ? null : folder.tree;
+        List<String> locs = new ArrayList<>();
+        locs.add(e.active.loc);
+        locs.addAll(e.active.parts);
+        List<ConsoleApp.GameFile> out = new ArrayList<>();
+        ContentResolver cr = getContentResolver();
+        for (String loc : locs) {
+            File f = LibraryIndex.locFile(loc);
+            if (f != null) {
+                if (!f.isFile())
+                    throw new IOException(f + " is not there");
+                out.add(new ConsoleApp.GameFile(f.getName(), f.length(), () -> new java.io.FileInputStream(f)));
+            } else if (loc.startsWith("doc:") && tree != null && !tree.isEmpty()) {
+                Uri u = DocumentsContract.buildDocumentUriUsingTree(Uri.parse(tree), loc.substring(4));
+                out.add(new ConsoleApp.GameFile(fileNameOf(u), documentSize(u), () -> {
+                    java.io.InputStream in = cr.openInputStream(u);
+                    if (in == null)
+                        throw new java.io.FileNotFoundException(u.toString());
+                    return in;
+                }));
+            } else {
+                throw new IOException("cannot read " + loc);
+            }
+        }
+        return out;
+    }
+
+    /** Create an app of a console game: its files and pack put into the APK (ConsoleApp), then as an Xbox game's. */
+    private void onCreateConsoleApp(LibraryScreen.Entry e) {
+        if (!TitleApp.canInstall(this)) {
+            Log.i(TAG, "launcher: game app: Install unknown apps is off, opening its settings");
+            setNote(getString(R.string.TITLE_APP_ALLOW), NOTE_WARN);
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                         Uri.parse("package:" + getPackageName())));
+            } catch (ActivityNotFoundException ex) {
+                Log.w(TAG, "launcher: no Install unknown apps screen", ex);
+            }
+            return;
+        }
+        File template = TitleApp.template(this);
+        String key = TitleApk.normKey(e.tid);
+        if (template == null || key == null)
+            return;
+        Console con = e.console();
+        File packDir = Pack.check(getFilesDir(), key) == Pack.Check.VALID
+                       ? Pack.packDir(getFilesDir(), con, key.substring(con.id.length() + 1)) : null;
+        long game = Math.max(0, e.active.size) + (packDir == null ? 0 : GameStore.treeSize(packDir));
+        long need = 2 * (template.length() + game) + TitleApp.SPACE_MARGIN, free = getFilesDir().getUsableSpace();
+        if (free < need) {
+            setNote(getString(R.string.NOT_ENOUGH_SPACE, size(need), size(free)), NOTE_ERROR);
+            return;
+        }
+        String title = e.title();
+        String label = TitleApk.label(title == null || title.trim().isEmpty() ? key : title);
+        Bitmap icon = CoverArt.load(getFilesDir(), e.tid);
+        Log.i(TAG, "launcher: game app " + TitleApk.packageName(key) + " « " + label + " »: building from " + template
+                   + " (" + template.length() + " bytes) with " + e.active.loc
+                   + (packDir != null ? " and its pack" : ", no pack"));
+        runWorker(R.string.TITLE_APP_BUILDING, () -> {
+            try {
+                TitleApk.Spec spec = new TitleApk.Spec();
+                spec.titleId = key;
+                spec.label = label;
+                spec.parent = getPackageName();
+                spec.extra = ConsoleApp.entries(key, label, consoleGameFiles(e), packDir);
+                spec.iconPng = TitleApp.iconPng(icon, key, label);
+                buildTitleApp(spec);
+            } catch (java.io.InterruptedIOException ex) {
+                TitleApp.clean(this);
+                cancelled();
+            } catch (IOException | RuntimeException ex) {
+                Log.w(TAG, "launcher: game app " + TitleApk.packageName(key) + " failed", ex);
+                TitleApp.clean(this);
+                fail(getString(R.string.TITLE_APP_BUILD_FAILED, String.valueOf(ex.getMessage())));
             }
         });
     }
@@ -3513,6 +3646,138 @@ public class LauncherActivity extends Activity {
             askParentForPack();
             directStep(true);
         }
+    }
+
+    /** A console game's own app: the game's files being taken out of its APK (consoleWorker runs). */
+    private Thread consoleWorker;
+
+    /** Tests: the thread taking a console game's app's game out. */
+    Thread consoleWorkerForTest() {
+        return consoleWorker;
+    }
+
+    /** This APK's stamp: a regenerated app (installed over this one) takes its game out again. */
+    private String consoleStamp() {
+        try {
+            return String.valueOf(getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime);
+        } catch (PackageManager.NameNotFoundException e) {
+            return "0";
+        }
+    }
+
+    /**
+     * onCreate of a console game's own app (XBA-215): the game running is brought back, a game taken out already
+     * starts with nothing shown; otherwise DIRECT, while the game comes out of the APK (or why it cannot), then the
+     * game. The game ended by itself (or its files missing): DIRECT with Play.
+     */
+    private void startConsoleDirect(Bundle saved, String noData, String exited) {
+        String key = ConsoleApp.ownKey(this);
+        boolean report = noData != null || exited != null;
+        if (saved == null && !report) {
+            if (gameRunning()) {
+                Log.i(TAG, "launcher: game app: the game is running, bringing it back");
+                resumeShell();
+                return;
+            }
+            ConsoleApp.Installed inst = ConsoleApp.installed(getFilesDir(), key, consoleStamp());
+            if (inst != null) {
+                launchConsoleApp(inst);
+                return;
+            }
+        }
+        Log.i(TAG, "launcher: game app " + key + ": shown (" + (noData != null ? "NO_GAME_DATA in " + noData
+                                                               : exited != null ? "game exited: " + exited
+                                                               : "taking the game out of the app") + ")");
+        setUpWindow();
+        feedback = new UiFeedback(this);
+        syncTheme(Screen.DIRECT);
+        buildStage();
+        if (exited != null)
+            directShow(Direct.ERROR, getString(R.string.DIRECT_ENDED), Theme.WARN, titleExitedNote(this, exited),
+                       R.string.PLAY, this::consoleDirectStep, false);
+        else if (noData != null)
+            directFail(getString(R.string.STATE_MISSING), getString(R.string.NO_GAME_DATA, noData), R.string.PLAY,
+                       this::consoleDirectStep, false);
+        else
+            consoleDirectStep();
+    }
+
+    /** The game when it is out of the APK; otherwise it is taken out, DIRECT saying how far. */
+    private void consoleDirectStep() {
+        if (isFinishing() || (consoleWorker != null && consoleWorker.isAlive()))
+            return;
+        String key = ConsoleApp.ownKey(this), stamp = consoleStamp();
+        ConsoleApp.Installed inst = ConsoleApp.installed(getFilesDir(), key, stamp);
+        if (inst != null) {
+            launchConsoleApp(inst);
+            return;
+        }
+        directShow(Direct.COPYING, getString(R.string.CONSOLE_APP_UNPACKING, 0), Theme.ACCENT, null, 0, null, false);
+        File apk = new File(getApplicationInfo().sourceDir), files = getFilesDir();
+        int[] shown = { 0 };
+        Log.i(TAG, "launcher: game app " + key + ": taking the game out of " + apk);
+        consoleWorker = new Thread(() -> {
+            ConsoleApp.Installed got = null;
+            IOException err = null;
+            try {
+                got = ConsoleApp.install(apk, files, key, stamp, (done, total) -> {
+                    int pct = total <= 0 ? 0 : (int)(done * 100 / total);
+                    if (pct != shown[0]) {
+                        shown[0] = pct;
+                        runOnUiThread(() -> {
+                            if (screen == Screen.DIRECT && directStatus != null && directState == Direct.COPYING)
+                                directStatus.set(getString(R.string.CONSOLE_APP_UNPACKING, pct), Theme.ACCENT);
+                        });
+                    }
+                }, this::isDestroyed);
+            } catch (IOException e) {
+                err = e;
+            }
+            ConsoleApp.Installed ok = got;
+            IOException why = err;
+            runOnUiThread(() -> consoleUnpacked(ok, why));
+        }, "xba-console-app");
+        consoleWorker.start();
+    }
+
+    private void consoleUnpacked(ConsoleApp.Installed inst, IOException err) {
+        consoleWorker = null;
+        if (isFinishing() || isDestroyed())
+            return;
+        if (inst != null) {
+            Log.i(TAG, "launcher: game app " + inst.key + ": the game is out (" + inst.rom + ")");
+            launchConsoleApp(inst);
+            return;
+        }
+        Log.w(TAG, "launcher: game app: taking the game out failed", err);
+        String detail = err instanceof ConsoleApp.NoSpace
+                        ? getString(R.string.CONSOLE_APP_NO_SPACE, size(((ConsoleApp.NoSpace)err).need))
+                        : String.valueOf(err == null ? "" : err.getMessage());
+        directFail(getString(R.string.CONSOLE_APP_FAILED), detail, R.string.PLAY, this::consoleDirectStep, false);
+    }
+
+    /** The game of a console game's own app started, as the library would start it (its play session too). */
+    private void launchConsoleApp(ConsoleApp.Installed inst) {
+        if (mainProcessPid() != 0)
+            endRunningGame();
+        String title = inst.title.isEmpty() ? appLabel() : inst.title;
+        GameStore.rememberRomLaunch(this, inst.rom, title, inst.key, null);
+        long now = System.currentTimeMillis();
+        closeOpenSession(now);
+        if (games.get(inst.key) == null) {
+            Library.Record r = new Library.Record();
+            r.titleId = inst.key;
+            r.title = title;
+            r.addedAt = now;
+            games.put(r);
+        }
+        GameStore.sessionStart(this, now, inst.key);
+        Library.sessionStart(games, inst.key, now);
+        writeGames();
+        Log.i(TAG, "launcher: game app: play " + inst.key + " (" + title + ") from " + inst.rom);
+        startActivity(new Intent(this, ShellActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
+        finish();
     }
 
     /** The game can start now: its files, no copy running, a pack from this default.xbe (or no Prepare here). */
@@ -6392,6 +6657,8 @@ public class LauncherActivity extends Activity {
         onFocus(reset, () -> describe(resetText));
         int own = GameSettings.overridden(cfg, GameSettings.load(this, key), con, lsfgBuilt()).size();
         reset.setValue(own == 0 ? getString(R.string.GS_NONE_OWN) : getString(R.string.GS_OWN_COUNT, own));
+        if (con != Console.XBOX && romEntry != null && key.equals(romEntry.tid))
+            consoleAppRow(list, romEntry);   // XBA-215: an app of its own, the game in it
         if (con != Console.XBOX) {
             // Its stored things (XBA-181: the console's save folder, save/<console>-<KEY>/, Storage.saves).
             List<Storage.Item> items = Storage.items(storageDirs(), key, games.get(key));

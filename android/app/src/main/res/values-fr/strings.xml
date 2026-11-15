@@ -213,6 +213,11 @@
     <string name="TITLE_APP_ADD">Créer une app</string>
     <string name="TITLE_APP_ADD_DETAIL">Fait de ce jeu une app à part sur cet appareil : son nom et son logo parmi vos apps, verrouillée sur ce disque, elle s\'ouvre directement dessus. C\'est une copie de XRecomp : elle occupe environ %1$s. Android vous demande de confirmer l\'installation. Pour votre usage personnel uniquement.</string>
     <string name="TITLE_APP_ADD_UNPREPARED">Préparez d\'abord ce jeu (Accueil › Préparer) : son app est faite à partir du jeu préparé, pour démarrer directement dessus.</string>
+    <string name="TITLE_APP_ADD_CONSOLE_DETAIL">Fait de ce jeu une app à part sur cet appareil, avec le jeu et son code préparé dedans : son nom parmi vos apps, elle s\'ouvre directement dessus et se joue sans XRecomp. Elle occupe environ %1$s. Android vous demande de confirmer l\'installation. Pour votre usage personnel uniquement.</string>
+    <string name="TITLE_APP_ADD_CONSOLE_DETAIL_UNPREPARED">Fait de ce jeu une app à part sur cet appareil, avec le jeu dedans : son nom parmi vos apps, elle s\'ouvre directement dessus et se joue sans XRecomp. Préparez-le d\'abord pour y mettre aussi son code préparé, plus rapide. Elle occupe environ %1$s. Android vous demande de confirmer l\'installation. Pour votre usage personnel uniquement.</string>
+    <string name="CONSOLE_APP_UNPACKING">Préparation du jeu… %1$d %%</string>
+    <string name="CONSOLE_APP_FAILED">Le jeu n\'a pas pu être installé</string>
+    <string name="CONSOLE_APP_NO_SPACE">Pas assez d\'espace libre : il faut environ %1$s.</string>
     <string name="TITLE_APP_PREPARE_FIRST">Préparez d\'abord %1$s, puis Créer une app.</string>
     <string name="TITLE_APP_ALLOW">Autorisez XRecomp à installer des apps dans l\'écran qui s\'est ouvert, puis revenez et appuyez de nouveau sur Créer une app.</string>
     <string name="TITLE_APP_BUILDING">Création de l\'app</string>

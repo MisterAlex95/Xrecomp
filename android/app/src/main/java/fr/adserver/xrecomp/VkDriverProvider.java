@@ -51,7 +51,7 @@ public class VkDriverProvider extends ContentProvider {
             Log.w(LauncherActivity.TAG, "launcher: vulkan driver choice refused (" + arg + "): " + r);
             return VkDriverShare.refusal(r);
         }
-        return VkDriverShare.answer(VkDrivers.of(getContext()), Pack.normTitleId(arg));
+        return VkDriverShare.answer(VkDrivers.of(getContext()), TitleApk.normKey(arg));
     }
 
     @Override

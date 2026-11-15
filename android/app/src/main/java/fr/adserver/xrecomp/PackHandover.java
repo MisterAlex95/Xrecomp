@@ -78,7 +78,7 @@ final class PackHandover {
             return Refusal.NOT_A_PARENT;   // a game's own app never hands its pack on
         if (caller == null || caller.isEmpty())
             return Refusal.NO_CALLER;      // not started for a result (adb shell am start, a plain startActivity)
-        String id = Pack.normTitleId(tid);
+        String id = TitleApk.normKey(tid);   // an Xbox title ID, or a console game's key (its app, XBA-215)
         if (id == null)
             return Refusal.BAD_TITLE;
         if (!TitleApk.packageName(id).equals(caller))

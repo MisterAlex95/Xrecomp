@@ -239,7 +239,8 @@ played.
 Manage › **Create an app** makes, on the phone itself, a real app for the game shown: its own package, the game's
 name under the icon, the game's title image as the icon, locked to that disc. Android's installer installs it (its
 own dialog). The [home-screen shortcut](#a-game-on-the-home-screen) stays; [A title's own APK](#a-titles-own-apk) is
-the same idea built on a host. The row is there for a game with a title ID, not in a game's own app, and not when
+the same idea built on a host; a GBA, PS1 or N64 game has it too ([A console game's own app](#a-console-games-own-app)).
+The row is there for a game with a title ID, not in a game's own app, and not when
 XRecomp itself is installed as split APKs; its description gives the size the app will take (it is a copy of the
 whole of XRecomp, toolchain included).
 
@@ -304,6 +305,50 @@ copy is left in `app/build/title-app/title-app.apk`, for `aapt2 dump badging` (p
 
 The app carries the game's icon and, once prepared, code made from the player's own disc: it is for the player's own
 use and is never distributed.
+
+### A console game's own app
+
+XBA-215. A GBA, PS1 or N64 game has the same row: its Home › **Options** › **Create an app** (in the « This game »
+group, under « Reset to Settings »). The row is there when the game's files can be read (not « No file access »), not
+in a game's own app, and not when XRecomp is installed as split APKs. Its description gives the size: XRecomp's APK,
+the game's files and its pack; without a pack it says that preparing the game first puts its faster prepared code in
+too. The rest is as for an Xbox game: Install unknown apps first, the progress screen, the same key, the installer's
+dialog and its outcome as a note.
+
+What differs: **the game is in the app.** `ConsoleApp` adds stored entries to the copy (`ApkZip.Added`: a CRC pass,
+then the copy; aligned like any stored entry):
+
+| Entry | What |
+|---|---|
+| `assets/xba-game.json` | `format` 1, `key` (the library key, `gba-AXVE01`), `title`, `rom` (the file the game starts from), `files` (each game file's name and size), `pack` (the pack's file names, `pack.json` first; empty when the game is not prepared) |
+| `assets/xba-game/<name>` | the game's files: the ROM, a disc image, or a `.cue` and every track the library index lists for it (a path, or a document of the library folder's tree read through its grant) |
+| `assets/xba-pack/<name>` | the valid pack's files (`PackHandover.servableNames`: `pack.json`, its lib, its images) |
+
+| What | Value |
+|---|---|
+| Package | `fr.adserver.xrecomp.t<console>_<key>`, the key's `_` written `_u` and its `-` `_d` (`TitleApk.packageName`; `keyOfPackage` gives the key back): `gba-AXVE01` → `fr.adserver.xrecomp.tgba_AXVE01` |
+| Meta-data | `…TITLE_ID` = the library key as it is (`TitleApk.normKey`), `…XBE_SHA256` empty, `…PARENT` XRecomp's package |
+| Icon | the game's cover art (`CoverArt.load`), else the monogram |
+| Free space to make it | twice (XRecomp's APK + the game's files + the pack) plus 64 MB |
+
+**The game's app** (`ConsoleApp.ownKey` not null) starts straight into the game. At its first start, and after it was
+made again (its `lastUpdateTime` is not the one `files/game/installed.json` names), it takes the game out of its own
+APK on the DIRECT screen (« Getting the game ready… 42 % »): the game files into `files/game/` (through
+`game.partial/`, each checked against its CRC; a `.cue`'s FILE lines pointed at the tracks there, whatever their
+case), the pack into `packs/<console>-<key>` (through `.partial`, published as the Prepare does), `installed.json` last.
+Then it plays as the library would play the game (`GameStore.rememberRomLaunch`, a play session); a later start goes
+straight to `ShellActivity`. It needs no file access, no XRecomp and no Prepare: its saves, settings and controls are
+its own. An N64 game's app follows XRecomp's Vulkan driver like an Xbox game's (`VkDriverShare`, by its key). Not
+enough space, or a damaged entry: DIRECT says why, with Play to try again. The game ended by itself: DIRECT with Play.
+
+The APK is as large as XRecomp plus the game (a PS1 disc: up to about 700 MB more). The files are a copy of the
+player's own game, made on their own device for their own use; nothing is sent anywhere.
+
+logcat: `launcher: game app fr.adserver.xrecomp.tgba_… « <label> »: building from <apk> (<n> bytes) with <loc> and its
+pack`, then in the game's app `launcher: game app gba-…: taking the game out of <apk>`, `…: the game is out (<path>)`,
+`launcher: game app: play gba-… (<title>) from <path>`. Tests: `ConsoleAppTest` (the package name both ways, unsafe
+file names refused, a disc and a pack into a signed APK verified by apksig, taken out again: the tracks, the `.cue`
+rewritten, the pack published, `installed.json` naming the APK; another game's key and an APK without a game refused).
 
 ### Straight into the game
 
@@ -410,6 +455,22 @@ from a folder**, prepared and played once. Uninstall any earlier Fable app first
 4. Open Fable (the new app): it goes into the game ([Straight into the game](#straight-into-the-game) and its
    device check). Long-press › Launcher › Settings › About shows the game check with Fable's hash and the app id
    `fr.adserver.xrecomp.t4d5300d1`.
+
+### Device check (console game's own app), for Alex
+
+XBA-215, label « Device ». One GBA game, one PS1 disc as a `.cue` with tracks, one N64 game.
+
+1. GBA game › Options: the row **Create an app** under « Reset to Settings », its size in the description. Press A
+   (Install unknown apps allowed): the progress screen, then Android's dialog; install.
+2. The new icon (the game's cover, or its monogram) opens « Getting the game ready… » with a percentage, then the game.
+   Quit, open it again: straight into the game, no screen first.
+3. Play a little, save in game, quit, reopen: the save is there. The game's app never asks for file access.
+4. PS1 disc (.cue + tracks) › Options › Create an app: the game's app plays the disc, music tracks included.
+5. N64 game prepared in XRecomp: its app plays at the prepared speed (logcat: the pack is loaded, not the
+   interpreter); an N64 game not prepared: the row's description says to prepare first, the app still plays.
+6. Create the app again for the same game: it installs over the first one (no « signed by another key »), and its
+   next start shows « Getting the game ready… » once more.
+7. In French: « Créer une app », « Préparation du jeu… ».
 
 ### Device check (pack handover, XBA-176), for Alex
 

@@ -237,6 +237,11 @@
     <string name="TITLE_APP_ADD">Create an app</string>
     <string name="TITLE_APP_ADD_DETAIL">Makes this game an app of its own on this device: its name and logo in your apps, locked to this disc, opening straight into it. It is a copy of XRecomp, so it takes about %1$s. Android asks you to confirm the install. For your own use only.</string>
     <string name="TITLE_APP_ADD_UNPREPARED">Prepare this game first (Home › Prepare): its own app is made from the prepared game, so that it starts straight into it.</string>
+    <string name="TITLE_APP_ADD_CONSOLE_DETAIL">Makes this game an app of its own on this device, the game and its prepared code in it: its name in your apps, opening straight into it, playable without XRecomp. It takes about %1$s. Android asks you to confirm the install. For your own use only.</string>
+    <string name="TITLE_APP_ADD_CONSOLE_DETAIL_UNPREPARED">Makes this game an app of its own on this device, the game in it: its name in your apps, opening straight into it, playable without XRecomp. Prepare it first to put its faster prepared code in too. It takes about %1$s. Android asks you to confirm the install. For your own use only.</string>
+    <string name="CONSOLE_APP_UNPACKING">Getting the game ready… %1$d %%</string>
+    <string name="CONSOLE_APP_FAILED">The game could not be set up</string>
+    <string name="CONSOLE_APP_NO_SPACE">Not enough free space: about %1$s are needed.</string>
     <string name="TITLE_APP_PREPARE_FIRST">Prepare %1$s first, then Create an app.</string>
     <string name="TITLE_APP_ALLOW">Allow XRecomp to install apps on the screen that opened, then come back and press Create an app again.</string>
     <string name="TITLE_APP_BUILDING">Creating the app</string>
