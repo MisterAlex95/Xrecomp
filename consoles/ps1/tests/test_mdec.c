@@ -164,18 +164,18 @@ static void test_colour(void)
     const uint16_t *px = (const uint16_t *)out;
     int pts[4][2] = {{0, 0}, {15, 0}, {0, 15}, {15, 15}};
     for (int q = 0; q < 4; q++) {
-        int v = ((ys[q] + 128) & 0xFF) >> 3;
+        int v = (((ys[q] + 128) & 0xFF) + 4) >> 3; /* 5 bits rounded (XBA-200) */
         uint16_t want = (uint16_t)(v | v << 5 | v << 10 | 0x8000);
         uint16_t got = px[pts[q][0] + pts[q][1] * 16];
         CHECK(got == want, "quadrant %d: %04X, expected %04X", q, got, want);
     }
-    /* 24-bit, signed, with colour: Cr 40 -> R = Y + 56, G = Y - 28 (fixed point of 1.402 / 0.7143) */
+    /* 24-bit, signed, with colour: R = Y + 1.402 Cr, G = Y - 0.714 Cr in the hardware's fixed point (XBA-200) */
     const int yz[4] = {0, 0, 0, 0};
     colour_mb(16 * 8 / 2 * 2 / 2, 0, yz, (2u << 27) | (1u << 26));
     CHECK(ps1_mdec_dma_read(md, out, 192) == 192, "24-bit macroblock: 192 words");
     const int8_t *b = (const int8_t *)out;
     /* Cr DC: rl value 32 -> 64 after quant -> 8 after the IDCT */
-    int cr = 8, r = (cr * 1436) >> 10, g = (-cr * 731) >> 10;
+    int cr = 8, r = (359 * cr + 0x80) >> 8, g = ((-183 * cr & ~7) + 0x80) >> 8;
     CHECK(b[0] == r && b[1] == g && b[2] == 0, "24-bit pixel 0: %d %d %d, expected %d %d 0", b[0], b[1], b[2], r, g);
     CHECK(b[255 * 3] == r && b[255 * 3 + 2] == 0, "24-bit last pixel");
     /* two macroblocks in one command, one DMA read each */
