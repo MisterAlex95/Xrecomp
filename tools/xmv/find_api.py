@@ -550,11 +550,13 @@ def prepare_bind(xbe, out_dir, log=print):
 
 
 def bind_key(path):
-    """What the lift depends on: the bind file's content, or "" with none."""
+    """What the lift depends on: the bind file's content and the generated binding's version, or "" with
+    none."""
     if not path or not os.path.exists(path):
         return ""
+    from tools.recomp.xmv_bind import VERSION
     with open(path, encoding="utf-8") as f:
-        return json.dumps(json.load(f), sort_keys=True)
+        return json.dumps(dict(json.load(f), binding=VERSION), sort_keys=True)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────

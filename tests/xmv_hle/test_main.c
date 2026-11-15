@@ -22,6 +22,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
 
 static int failures;
+static const char *movie_basic;
 #define CHECK(c, ...) do { if (!(c)) { failures++; printf("FAIL: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
 static unsigned char *load_file(const char *path, size_t *len)
@@ -50,6 +51,136 @@ static void nap_ms(int ms)
     nanosleep(&ts, NULL);
 }
 
+/* XBA-199: the binding's routing. A movie the runtime decodes exactly is
+ * its own; one it would not (or cannot open) goes to the title's own decoder,
+ * whose results the watchdog then watches. */
+static char fixture_dir[512];
+static const char *fixture(const char *name)
+{
+    static char path[640];
+    snprintf(path, sizeof path, "%s/%s.xmv", fixture_dir, name);
+    return path;
+}
+
+static int route(const char *movie, uint32_t decoder)
+{
+    xbox_MovieFileOpened(movie);
+    return xmv_hle_route(0x00012050u, 90, decoder);
+}
+
+/* The title's own GetNextFrame wrote `result`; the binding reports it. */
+static void native(uint32_t decoder, uint32_t res, uint32_t result)
+{
+    wr32(res, result);
+    xmv_hle_native_result(decoder, res);
+}
+
+static void test_routing(const char *xbe_path, uint32_t surf, uint32_t res, uint32_t tim)
+{
+    static const char *const delegated[] = { "x8", "wma", "surround", "damaged" };
+    XmvPlayer *p;
+    XmvProbe pr;
+    uint32_t r, polls;
+    int i;
+
+    /* The probe, on the player: X8 frames are seen from their picture header. */
+    p = xmv_player_open_file(fixture("x8"));
+    CHECK(p && xmv_player_probe(p, 1800, 30, &pr) == 0, "probe x8.xmv");
+    if (p) {
+        uint32_t pts;
+        CHECK(pr.x8 == 1 && pr.x8_allowed && pr.frames == 12 && pr.complete && !pr.broken,
+              "x8.xmv: one X8 frame of 12 (%u of %u)", pr.x8, pr.frames);
+        CHECK(xmv_player_next_frame(p, &pts) == 1 && pts == 0, "the probe rewinds the player");
+        xmv_player_close(p);
+    }
+    p = xmv_player_open_file(fixture("damaged"));
+    CHECK(p && xmv_player_probe(p, 1800, 30, &pr) == 0 && pr.damaged == 4 && pr.decoded == 12,
+          "damaged.xmv: 4 damaged frames (%u)", p ? pr.damaged : 0);
+    xmv_player_close(p);
+    p = xmv_player_open_file(fixture("x8_unused"));
+    CHECK(p && xmv_player_probe(p, 5, 2, &pr) == 0 && pr.frames == 5 && pr.decoded == 2 && !pr.complete &&
+          pr.x8_allowed && !pr.x8, "the probe stops at its limits");
+    xmv_player_close(p);
+
+    /* Fully supported: the runtime's. */
+    CHECK(route(fixture("x8_unused"), 0x00B00000u) == 1, "X8 allowed but not used: the runtime decodes it");
+    xmv_hle_get_next_frame(0x00B00000u, surf, res, tim);
+    CHECK(rd32(res) == XMV_NEWFRAME, "and plays it (%u)", rd32(res));
+    xmv_hle_close(0x00B00000u);
+    CHECK(route(movie_basic, 0x00B00000u) == 1, "basic.xmv: the runtime decodes it");
+    xmv_hle_close(0x00B00000u);
+
+    /* Handed to the title's own decoder, for the whole movie. */
+    for (i = 0; i < 4; i++) {
+        CHECK(route(fixture(delegated[i]), 0x00B10000u) == 0, "%s.xmv: the title's own decoder", delegated[i]);
+        CHECK(xmv_hle_route(0x00012050u, 90, 0x00B10000u) == 0, "%s.xmv: still the title's own", delegated[i]);
+        native(0x00B10000u, res, XMV_NEWFRAME);
+        CHECK(xmv_hle_route(0x00012050u, 90, 0x00B10000u) == 0, "%s.xmv: whole", delegated[i]);
+        xmv_hle_close(0x00B10000u);
+    }
+    CHECK(route(xbe_path, 0x00B20000u) == 0, "a file the runtime cannot open: the title's own decoder");
+    xmv_hle_close(0x00B20000u);
+
+    /* RECOMP_XMV: runtime keeps every movie, skip ends it through the hook,
+     * native never asks. */
+    setenv("RECOMP_XMV", "runtime", 1);
+    CHECK(route(fixture("x8"), 0x00B30000u) == 1, "RECOMP_XMV=runtime: the runtime decodes an X8 movie too");
+    xmv_hle_get_next_frame(0x00B30000u, surf, res, tim);
+    CHECK(rd32(res) == XMV_NEWFRAME, "RECOMP_XMV=runtime plays it (%u)", rd32(res));
+    xmv_hle_close(0x00B30000u);
+    setenv("RECOMP_XMV", "skip", 1);
+    CHECK(route(fixture("x8"), 0x00B30000u) == 1, "RECOMP_XMV=skip: the hook");
+    xmv_hle_get_next_frame(0x00B30000u, surf, res, tim);
+    CHECK(rd32(res) == XMV_ENDOFFILE, "RECOMP_XMV=skip ends it (%u)", rd32(res));
+    xmv_hle_close(0x00B30000u);
+    setenv("RECOMP_XMV", "native", 1);
+    CHECK(route(movie_basic, 0x00B30000u) == 0, "RECOMP_XMV=native: the title's own, also for a supported movie");
+    unsetenv("RECOMP_XMV");
+
+    /* The watchdog: the title's own decoder gives nothing while the title
+     * polls; the runtime plays the movie instead. */
+    setenv("RECOMP_XMV_WATCHDOG", "0.2", 1);
+    CHECK(route(fixture("x8"), 0x00B40000u) == 0, "watchdog: handed over");
+    for (polls = 0; polls < 400 && xmv_hle_route(0x00012050u, 90, 0x00B40000u) == 0; polls++) {
+        native(0x00B40000u, res, XMV_NOFRAME);
+        nap_ms(2);
+    }
+    CHECK(polls >= 40 && polls < 400, "the watchdog trips after 0.2 s of polls (%u polls)", polls);
+    for (r = 0, polls = 0; polls < 200 && r != XMV_NEWFRAME; polls++) {
+        xmv_hle_get_next_frame(0x00B40000u, surf, res, tim);
+        r = rd32(res);
+        nap_ms(2);
+    }
+    CHECK(r == XMV_NEWFRAME, "then the runtime plays it (%u)", r);
+    xmv_hle_close(0x00B40000u);
+
+    /* A hang after frames were shown: the movie ends. */
+    CHECK(route(fixture("wma"), 0x00B50000u) == 0, "watchdog after frames: handed over");
+    native(0x00B50000u, res, XMV_NEWFRAME);
+    for (polls = 0; polls < 400 && xmv_hle_route(0x00012050u, 90, 0x00B50000u) == 0; polls++) {
+        native(0x00B50000u, res, XMV_NOFRAME);
+        nap_ms(2);
+    }
+    xmv_hle_get_next_frame(0x00B50000u, surf, res, tim);
+    CHECK(polls < 400 && rd32(res) == XMV_ENDOFFILE, "a hang after frames ends the movie (%u)", rd32(res));
+    xmv_hle_close(0x00B50000u);
+
+    /* Polls a second apart do not count (a paused movie). */
+    CHECK(route(fixture("x8"), 0x00B60000u) == 0, "pause: handed over");
+    native(0x00B60000u, res, XMV_NOFRAME);
+    nap_ms(1100);
+    native(0x00B60000u, res, XMV_NOFRAME);
+    CHECK(xmv_hle_route(0x00012050u, 90, 0x00B60000u) == 0, "a pause is not a hang");
+    setenv("RECOMP_XMV_WATCHDOG", "0", 1);
+    for (polls = 0; polls < 150; polls++) {
+        native(0x00B60000u, res, XMV_NOFRAME);
+        nap_ms(2);
+    }
+    CHECK(xmv_hle_route(0x00012050u, 90, 0x00B60000u) == 0, "RECOMP_XMV_WATCHDOG=0: no watchdog");
+    xmv_hle_close(0x00B60000u);
+    unsetenv("RECOMP_XMV_WATCHDOG");
+}
+
 #define W 96
 #define H 64
 #define PITCH 512                        /* a 128-pixel LIN_X8R8G8B8 surface */
@@ -65,6 +196,8 @@ int main(int argc, char **argv)
     uint8_t *expect;
 
     setvbuf(stdout, NULL, _IONBF, 0);
+    snprintf(fixture_dir, sizeof fixture_dir, "%s", argc > 3 ? argv[3] : "tests/xmv_hle/fixtures");
+    movie_basic = movie;
     xbe = load_file(xbe_path, &xbe_len);
     if (!xbe || !xbox_MemoryLayoutInit(xbe, xbe_len)) {
         printf("cannot set up guest memory from %s\n", xbe_path);
@@ -163,6 +296,9 @@ int main(int argc, char **argv)
     setenv("RECOMP_XMV", "native", 1);
     CHECK(xmv_hle_bound(0, 0x00012050u, 90) == 0, "RECOMP_XMV=native: the title's own decoder");
     unsetenv("RECOMP_XMV");
+
+    wr32(surf + 0x0C, 0x1Eu << 8);                         /* LIN_X8R8G8B8 again */
+    test_routing(xbe_path, surf, res, tim);
 
     xmv_player_close(ref);
     free(expect);
