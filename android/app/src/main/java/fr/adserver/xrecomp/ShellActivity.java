@@ -788,6 +788,20 @@ public class ShellActivity extends SDLActivity {
                 finish();
             }
         }
+
+        @Override
+        public void setPicture(ConsoleVideo.Picture p) {
+            try {
+                MenuNative.nativeSetPicture(p.xbox, p.scale, p.filter, p.shader, p.strength, p.curvature, p.ghosting);
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: the picture cannot be changed live", e);
+            }
+        }
+
+        @Override
+        public void restartGame() {
+            ShellActivity.this.restartGame(null);   // as the title's quick reboot: a new process, the same game
+        }
     }
 
     /**
