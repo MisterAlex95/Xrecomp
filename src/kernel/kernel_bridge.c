@@ -5109,6 +5109,27 @@ static void bridge_NtCreateFile(void)
                 && !xbox_VideoIsPlaying())
             xbox_VideoPlayFile(host);
     }
+
+    /* An XMV movie: the runtime's decoder (src/video/xmv_hle.c) plays the
+     * file the title opened last when a title layer hands it the XDK's
+     * XMVDecoder_GetNextFrame (XBA-70). Only the name is kept here. */
+    if (g_eax == 0) {
+        extern void xbox_MovieFileOpened(const char *host_path);
+        const wchar_t *w = xbox_LastHostPath();
+        size_t n = 0;
+
+        while (w[n])
+            n++;
+        if (n > 4 && w[n - 4] == L'.' && (w[n - 3] | 0x20) == L'x' && (w[n - 2] | 0x20) == L'm'
+                && (w[n - 1] | 0x20) == L'v') {
+            char host[MAX_PATH * 2];
+            size_t k;
+            for (k = 0; k < n && k < sizeof(host) - 1; k++)
+                host[k] = (char)w[k];
+            host[k] = 0;
+            xbox_MovieFileOpened(host);
+        }
+    }
 }
 
 /* ── NtOpenFile (ordinal 202, 6 args = 24 bytes) ──────── */

@@ -59,6 +59,28 @@ LGPL-2.1-or-later — extracted from xemu
   satisfies that.
 
 
+LGPL-2.1-or-later — WMV2 code tables extracted from FFmpeg
+----------------------------------------------------------
+
+  https://ffmpeg.org/
+
+    src/video/xmv/wmv2_tables.c
+                          The WMV2 / MS-MPEG4 variable-length codes,
+                          run/level, motion vector, scan and quantiser
+                          tables, from libavcodec msmpeg4data.c,
+                          msmpeg4_vc1_data.c, mpeg4data.h, h263data.c,
+                          h263dsp.c and wmv2data.c (FFmpeg 7.0.2)
+                          (c) 2000, 2001 Fabrice Bellard;
+                          2002-2004 Michael Niedermayer
+
+  Only the arrays were taken (renamed). The decoder that uses them
+  (src/video/xmv/wmv2_dec.c, the XMV demuxer, the Xbox ADPCM decoder and the
+  rest of src/video/xmv) is this project's own code under the MIT licence;
+  FFmpeg's decoder served as the reference its output is compared against
+  (tests/xmv_decode, docs/runtime/xmv.md). Same licence terms as the xemu
+  files above: LGPL-2.1-or-later, full text in LICENSES/LGPL-2.1.txt.
+
+
 Frame generation (LSFG) — built from pinned sources, not vendored
 -----------------------------------------------------------------
 
