@@ -6,6 +6,8 @@
 # homebrew built (devkitARM image), run with the Cult-of-GBA BIOS too, jsmolka's ROMs run (XBA-193), the homebrew
 # prepared into packs, run headless, screenshots checked and kept as an artefact. n64-corpus is its N64 half: the N64
 # homebrew built (libdragon image) and run through consoles/n64/tests (tools/consoles/run_n64_homebrew.sh).
+# ps1-corpus is its PS1 half (XBA-200): the PS1 homebrew built (PSn00bSDK image), OpenBIOS built and ps1-tests fetched
+# (tools/consoles/ps1_test_inputs.sh), the whole consoles/ps1/tests ctest run (tools/consoles/run_ps1_tests.sh).
 name: Linux
 
 on:
@@ -79,3 +81,18 @@ jobs:
       - name: Report
         if: always()
         run: tail -n 40 out/n64-homebrew/ctest.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+  ps1-corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the PS1 homebrew corpus
+        run: JOBS=4 bash tools/consoles/build_homebrew.sh ps1 out/homebrew
+      - name: PS1 test inputs (OpenBIOS, JaCzekanski/ps1-tests)
+        run: bash tools/consoles/ps1_test_inputs.sh out/ps1-inputs
+      - name: PS1 tests (homebrew, ps1-tests, OpenBIOS + HLE, recompiled in lockstep, states, lockref)
+        run: JOBS=4 bash tools/consoles/run_ps1_tests.sh out/homebrew out/ps1-tests out/ps1-inputs
+      - name: Report
+        if: always()
+        run: tail -n 40 out/ps1-tests/ctest.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
