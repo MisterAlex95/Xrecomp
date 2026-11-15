@@ -109,6 +109,8 @@ void gba_schedule(gba_machine *m)
         next = m->irq_at;
     if (m->dma_due < next)
         next = m->dma_due;
+    if (m->sio_at < next)
+        next = m->sio_at;
     m->next_event = next;
 }
 
@@ -440,6 +442,13 @@ static void run_events(gba_machine *m)
             gba_dma_run_due(m);
             any = true;
         }
+        if (m->sio_at <= m->now) { /* the serial transfer is over: start bit clear, its IRQ */
+            m->sio_at = UINT64_MAX;
+            wr16(&m->io[0x128], (uint16_t)(rd16(&m->io[0x128]) & ~0x80));
+            if (m->io[0x129] & 0x40)
+                gba_raise_irq(m, IRQ_SERIAL);
+            any = true;
+        }
         if (m->irq_at <= m->now) { /* the request reaches the CPU (and ends a halt) */
             m->irq_line = true;
             m->irq_at = UINT64_MAX;
@@ -553,6 +562,28 @@ uint16_t gba_io_read16(gba_machine *m, uint32_t addr)
     return rd16(&m->io[a]);
 }
 
+/* ---- serial port ---------------------------------------------------------------------------------------- */
+
+/* SIOCNT written. Normal mode (RCNT bit 15 clear, SIOCNT bit 13 clear) on the internal clock (bit 0) shifts its 8 or
+ * 32 bits (bit 12) at 256 KHz or 2 MHz (bit 1) whether or not a cable is there; then the start bit (7) clears and the
+ * serial IRQ (bit 14) fires, SIO_LATENCY cycles after the last bit's period (mGBA suite, SIO timing: the same on
+ * both clocks and lengths). On the external clock with nothing connected it never ends; the other modes are not
+ * timed. */
+#define SIO_LATENCY 5
+static void sio_write_ctl(gba_machine *m, uint16_t v)
+{
+    if (!(v & 0x80) || (v & 0x2001) != 0x0001 || (m->io[0x135] & 0x80)) {
+        m->sio_at = UINT64_MAX;
+        return;
+    }
+    if (m->sio_at != UINT64_MAX)
+        return; /* already shifting */
+    uint32_t bits = (v & 0x1000) ? 32 : 8;
+    m->sio_at = m->now + bits * ((v & 2) ? 8u : 64u) + SIO_LATENCY;
+    if (m->sio_at < m->next_event)
+        m->next_event = m->sio_at;
+}
+
 void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v)
 {
     m->blk_attn++; /* a running block stops after this access (gba_cpu.c) */
@@ -599,6 +630,10 @@ void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v)
     case 0x102: case 0x106: case 0x10A: case 0x10E:
         wr16(&m->io[a], v);
         timer_write_ctl(m, (int)(a - 0x102) >> 2, v);
+        return;
+    case 0x128: /* SIOCNT */
+        wr16(&m->io[a], v);
+        sio_write_ctl(m, v);
         return;
     case 0x132:
         m->keycnt = v;
@@ -678,6 +713,7 @@ void gba_io_reset(gba_machine *m)
     m->irq_line = false;
     m->irq_at = UINT64_MAX;
     m->dma_due = UINT64_MAX;
+    m->sio_at = UINT64_MAX;
     m->keycnt = 0;
     gba_apu_reset(m);
     gba_set_keys(m, 0);
