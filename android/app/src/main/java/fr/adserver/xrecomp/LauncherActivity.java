@@ -737,7 +737,9 @@ public class LauncherActivity extends Activity {
         topTabs = rowLayout();
         topTabs.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams tl = lp(0, MATCH, 1);
-        tl.leftMargin = Theme.S6 + Theme.S5;
+        // A narrow stage (4:3, square) brings the tabs closer to the title, so French ones fit too.
+        tl.leftMargin = Widgets.Stage.designWidth(this) < Widgets.HeroRow.STACK_BELOW + 2 * Theme.MARGIN_X
+                        ? Theme.S5 : Theme.S6 + Theme.S5;
         topBar.addView(topTabs, tl);
         topRight = Theme.oneLine(Theme.text(this, Theme.T_BODY, Theme.REGULAR, Theme.TEXT_DIM));
         topBar.addView(topRight, lp(WRAP, WRAP));
@@ -1424,6 +1426,8 @@ public class LauncherActivity extends Activity {
     static final int LIST_W = 1072;
     /** Between the list's focus plates and the description column. */
     static final int DESC_GAP = 80;
+    /** The description column's least width: on a narrow stage the list gets narrower to keep it (Widgets.ListSplit). */
+    static final int DESC_MIN_W = 400;
 
     /** The description column of a list screen: the focused row's explanation, as plain text. */
     private LinearLayout desc;
@@ -1433,7 +1437,7 @@ public class LauncherActivity extends Activity {
      * margin), and a quiet column on the right with the focused row's description only. Returns the list.
      */
     private LinearLayout listTemplate() {
-        LinearLayout h = rowLayout();
+        LinearLayout h = new Widgets.ListSplit(this, LIST_W, DESC_MIN_W);
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
         scroll.setClipToPadding(false);
@@ -1679,7 +1683,7 @@ public class LauncherActivity extends Activity {
     }
 
     private LinearLayout hero(String title, boolean empty, Bitmap art) {
-        LinearLayout hero = rowLayout();
+        LinearLayout hero = new Widgets.HeroRow(this);
         hero.setGravity(Gravity.CENTER_VERTICAL);
         Widgets.ArtTile tile = new Widgets.ArtTile(this);
         if (empty)
@@ -5048,6 +5052,9 @@ public class LauncherActivity extends Activity {
      * sheet on Y. An empty library shows why and a « Library folder » button. Stock colours; the backdrop's glow
      * follows the focused card (its cached theme).
      */
+    /** The library grid's columns: five on 16:9, fewer on a narrower stage (LibraryScreen.columns). */
+    private int libColumns = LibraryScreen.COLUMNS;
+
     private void buildLibrary() {
         screenTitle.setText(R.string.LIB_TITLE);
         libEntries = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
@@ -5208,7 +5215,7 @@ public class LauncherActivity extends Activity {
             libFocus(e);
             // The first row of cards: back to the top, the Search and Sort pills in sight (not under the title).
             boolean top = libRecentCards.contains(c) || libRecentCards.isEmpty() && libCards.indexOf(c) >= 0
-                          && libCards.indexOf(c) < LibraryScreen.COLUMNS;
+                          && libCards.indexOf(c) < libColumns;
             if (top && libScroll != null)
                 libScroll.post(() -> libScroll.scrollTo(0, 0));
         });
@@ -5233,9 +5240,10 @@ public class LauncherActivity extends Activity {
         libContent.removeAllViews();
         LibraryView.State view = libView();
         libShown = LibraryView.apply(libEntries, view);
-        List<LibraryScreen.Entry> recent = view.narrowed() || libEntries.size() <= LibraryScreen.COLUMNS
+        libColumns = LibraryScreen.columns(Widgets.Stage.designWidth(this) - 2 * Theme.MARGIN_X);
+        List<LibraryScreen.Entry> recent = view.narrowed() || libEntries.size() <= libColumns
                                            ? Collections.emptyList()
-                                           : LibraryView.recent(libEntries, LibraryView.RECENT_MAX);
+                                           : LibraryView.recent(libEntries, libColumns);
         GameCard focusCard = null, recentWant = null;
         if (!recent.isEmpty()) {
             libContent.addView(Theme.label(this, getString(R.string.LIB_RECENT)), lp(MATCH, WRAP));
@@ -5245,7 +5253,7 @@ public class LauncherActivity extends Activity {
                 if (e.tid.equals(want) && recentWant == null)
                     recentWant = c;
             }
-            LibraryScreen.addRows(this, libContent, libRecentCards);
+            LibraryScreen.addRows(this, libContent, libRecentCards, libColumns);
             LinearLayout.LayoutParams p = lp(MATCH, WRAP);
             p.topMargin = Theme.S3;
             libContent.addView(Theme.label(this, getString(R.string.LIB_ALL_GAMES)), p);
@@ -5264,7 +5272,7 @@ public class LauncherActivity extends Activity {
             p.topMargin = Theme.S3;
             libContent.addView(none, p);
         } else {
-            LibraryScreen.addRows(this, libContent, libCards);
+            LibraryScreen.addRows(this, libContent, libCards, libColumns);
         }
         if (focusCard == null)
             focusCard = recentWant;

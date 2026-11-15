@@ -15,8 +15,13 @@ import android.widget.TextView;
 final class Theme {
     private Theme() {}
 
-    /** The design grid: the stage is at least this big, and scaled to fit the screen. */
+    /** The design grid: scaled to fit the screen, wider or taller to match its shape (narrower down to DESIGN_MIN_W). */
     static final int DESIGN_W = 1920, DESIGN_H = 1080;
+    /**
+     * The stage is never narrower than this: on a 4:3 or square screen (a single-screen handheld) the content keeps
+     * the screen's height scale and reflows into a narrower stage, instead of shrinking to fit 1920 across.
+     */
+    static final int DESIGN_MIN_W = 1280;
 
     // ---- Colours ------------------------------------------------------------------------------------------------
     // Stock: a deep green-black, one vivid green, warm off-white text. A game's theme (GameTheme, from its title
@@ -157,6 +162,8 @@ final class Theme {
     static final int ROW_INSET = 32;
     /** Home: the art tile; a button (Play and the pills next to it). */
     static final int ART = 400, BUTTON_H = 96;
+    /** The art tile on a narrow stage, above the title (Widgets.HeroRow). */
+    static final int ART_COMPACT = 240;
     /** The quiet right column of a list screen (the focused row's description). */
     static final int DESC_W = 600;
     /** An overlay's corner (the in-game menu's flash and overlay pills keep their own). */

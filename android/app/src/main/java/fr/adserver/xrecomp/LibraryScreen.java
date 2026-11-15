@@ -27,7 +27,16 @@ import java.util.Map;
 final class LibraryScreen {
     private LibraryScreen() {}
 
+    /** The grid's columns on a 16:9 stage (and the most it has). */
     static final int COLUMNS = 5;
+    /** The fewest (a square screen), and the least room between two arts. */
+    static final int MIN_COLUMNS = 3, MIN_GAP = Theme.S3;
+
+    /** The columns for a grid avail design pixels wide: as many arts as fit with MIN_GAP, MIN_COLUMNS to COLUMNS. */
+    static int columns(int avail) {
+        int n = (avail + MIN_GAP) / (GameCard.ART + MIN_GAP);
+        return Math.max(MIN_COLUMNS, Math.min(COLUMNS, n));
+    }
     /** A « running » status this fresh counts as a live Prepare (LauncherActivity.PREPARE_FRESH_MS). */
     static final long PREPARE_FRESH_MS = 15000;
 
@@ -413,14 +422,14 @@ final class LibraryScreen {
     // ---- The grid ---------------------------------------------------------------------------------------------------
 
     /**
-     * The grid: rows of COLUMNS cards in a vertical scroll (the D-pad's focus search moves between them by geometry),
+     * The grid: rows of cols cards in a vertical scroll (the D-pad's focus search moves between them by geometry),
      * the first column on the left margin, the last art on the right one. cards are added in order; the caller
      * registers them as focusables.
      */
-    static ScrollView grid(Context c, List<? extends View> cards, View footer) {
+    static ScrollView grid(Context c, List<? extends View> cards, View footer, int cols) {
         ScrollView scroll = scroll(c);
         LinearLayout col = (LinearLayout)scroll.getChildAt(0);
-        addRows(c, col, cards);
+        addRows(c, col, cards, cols);
         if (footer != null) {
             LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
                                                                         LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -445,23 +454,49 @@ final class LibraryScreen {
         return scroll;
     }
 
-    /** The rows of COLUMNS cards for cards, added to col (the « Recently played » row is one of them, XBA-206). */
-    static void addRows(Context c, LinearLayout col, List<? extends View> cards) {
+    /**
+     * The rows of cols cards for cards, added to col (the « Recently played » row is one of them, XBA-206). A card's
+     * slot is GameCard.W (room for its title past the art) when the row has room for it, else the art's width.
+     */
+    static void addRows(Context c, LinearLayout col, List<? extends View> cards, int cols) {
         LinearLayout row = null;
-        int n = cards.size(), rows = (n + COLUMNS - 1) / COLUMNS;
-        for (int i = 0; i < rows * COLUMNS; i++) {
-            if (i % COLUMNS == 0) {
-                row = new LinearLayout(c);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setClipChildren(false);
+        int n = cards.size(), rows = (n + cols - 1) / cols;
+        for (int i = 0; i < rows * cols; i++) {
+            if (i % cols == 0) {
+                row = new GridRow(c, cols);
                 col.addView(row, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, GameCard.H));
             } else {
                 row.addView(new View(c), new LinearLayout.LayoutParams(0, 1, 1));   // the gaps share the rest
             }
-            boolean last = i % COLUMNS == COLUMNS - 1;
+            boolean last = i % cols == cols - 1;
             int w = last ? GameCard.ART : GameCard.W;   // the last art ends on the margin
             View v = i < n ? cards.get(i) : new View(c);
             row.addView(v, new LinearLayout.LayoutParams(w, GameCard.H));
+        }
+    }
+
+    /** A row of the grid: its cards' slots narrow to the art's width when GameCard.W each does not fit. */
+    private static final class GridRow extends LinearLayout {
+        private final int cols;
+
+        GridRow(Context c, int cols) {
+            super(c);
+            this.cols = cols;
+            setOrientation(HORIZONTAL);
+            setClipChildren(false);
+        }
+
+        @Override
+        protected void onMeasure(int wSpec, int hSpec) {
+            if (MeasureSpec.getMode(wSpec) != MeasureSpec.UNSPECIFIED) {
+                boolean wide = (cols - 1) * GameCard.W + GameCard.ART <= MeasureSpec.getSize(wSpec);
+                for (int i = 0; i < getChildCount() - 1; i++) {   // the last slot stays the art's width
+                    LayoutParams p = (LayoutParams)getChildAt(i).getLayoutParams();
+                    if (p.weight == 0)   // a card's slot, not a gap
+                        p.width = wide ? GameCard.W : GameCard.ART;
+                }
+            }
+            super.onMeasure(wSpec, hSpec);
         }
     }
 }

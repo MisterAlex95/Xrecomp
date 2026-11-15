@@ -1460,7 +1460,8 @@ public class GameMenuTest {
     @Test
     public void screenshots() throws Exception {
         GameStore.remember(activity, "/sdcard/games/test", "Test Title: The Long Name Edition");
-        String[][] sizes = { { "1080", "w1920dp-h1080dp-land-mdpi" }, { "720", "w1280dp-h720dp-land-mdpi" } };
+        String[][] sizes = { { "1080", "w1920dp-h1080dp-land-mdpi" }, { "720", "w1280dp-h720dp-land-mdpi" },
+                             { "4x3", "w1440dp-h1080dp-land-mdpi" }, { "1x1", "w1080dp-h1080dp-land-mdpi" } };
         for (String loc : new String[] { "en", "fr" }) {
             for (String[] size : sizes) {
                 RuntimeEnvironment.setQualifiers(loc + "-" + size[1]);

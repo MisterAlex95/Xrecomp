@@ -21,6 +21,7 @@ import android.text.TextPaint;
 import android.text.TextUtils;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.Gravity;
 import android.view.View;
 import android.widget.LinearLayout;
 import android.view.ViewGroup;
@@ -82,8 +83,9 @@ final class Widgets {
     // ---- Stage: the 1920 x 1080 design grid, scaled to the screen ----------------------------------------------
 
     /**
-     * Holds the launcher's content at design size (at least 1920 x 1080, wider or taller to match the screen's
-     * shape) and scales it to fill the window less the display cutout. Touch and focus go through the transform.
+     * Holds the launcher's content at design size (1080 high and 1920 wide on 16:9; wider or taller to match the
+     * screen's shape, and narrower down to Theme.DESIGN_MIN_W on a 4:3 or square one, so the text keeps its size) and
+     * scales it to fill the window less the display cutout. Touch and focus go through the transform.
      */
     static final class Stage extends ViewGroup {
         private final View content;
@@ -105,11 +107,28 @@ final class Widgets {
             });
         }
 
+        /**
+         * The stage's design width for a window of w x h pixels (cutout left out): 1920 on 16:9, wider on a wider
+         * screen, down to Theme.DESIGN_MIN_W on a narrower one.
+         */
+        static int designWidth(int w, int h) {
+            float sc = Math.min(Math.max(1, w) / (float)Theme.DESIGN_MIN_W, Math.max(1, h) / (float)Theme.DESIGN_H);
+            return Math.round(Math.max(1, w) / sc);
+        }
+
+        /** The design width for the activity's window now, before the stage is measured (the library's columns). */
+        static int designWidth(android.app.Activity a) {
+            android.view.WindowMetrics m = a.getWindowManager().getCurrentWindowMetrics();
+            Rect b = m.getBounds();
+            Insets i = m.getWindowInsets().getInsets(WindowInsets.Type.displayCutout());
+            return designWidth(b.width() - i.left - i.right, b.height() - i.top - i.bottom);
+        }
+
         @Override
         protected void onMeasure(int wSpec, int hSpec) {
             int w = MeasureSpec.getSize(wSpec), h = MeasureSpec.getSize(hSpec);
             int aw = Math.max(1, w - cut.left - cut.right), ah = Math.max(1, h - cut.top - cut.bottom);
-            scale = Math.min(aw / (float)Theme.DESIGN_W, ah / (float)Theme.DESIGN_H);
+            scale = Math.min(aw / (float)Theme.DESIGN_MIN_W, ah / (float)Theme.DESIGN_H);
             dw = Math.round(aw / scale);
             dh = Math.round(ah / scale);
             content.measure(MeasureSpec.makeMeasureSpec(dw, MeasureSpec.EXACTLY),
@@ -970,6 +989,72 @@ final class Widgets {
                 drawIcon(c, icon, x + iw / 2, h / 2, iw, iconP);
             Paint.FontMetrics fm = labelP.getFontMetrics();
             c.drawText(label, x + iw + ig, h / 2 - (fm.ascent + fm.descent) / 2, labelP);
+        }
+    }
+
+    /**
+     * Home's layout (the art tile, then the title column): side by side on a wide stage (16:9 and wider), stacked
+     * on a narrow one (4:3, square: a single-screen handheld), where the art shrinks to {@link Theme#ART_COMPACT} and
+     * the column gets the full width, so the buttons keep their labels. The first child is the art, the second the
+     * column; the switch happens in onMeasure, from the width the row is given.
+     */
+    static final class HeroRow extends LinearLayout {
+        /** Narrower than this (design pixels), the row stacks. */
+        static final int STACK_BELOW = 1500;
+
+        HeroRow(Context c) {
+            super(c);
+            setOrientation(HORIZONTAL);
+        }
+
+        /** True once measured stacked (tests). */
+        boolean stacked() {
+            return getOrientation() == VERTICAL;
+        }
+
+        @Override
+        protected void onMeasure(int wSpec, int hSpec) {
+            if (getChildCount() == 2 && MeasureSpec.getMode(wSpec) != MeasureSpec.UNSPECIFIED) {
+                boolean stack = MeasureSpec.getSize(wSpec) < STACK_BELOW;
+                LayoutParams art = (LayoutParams)getChildAt(0).getLayoutParams();
+                LayoutParams info = (LayoutParams)getChildAt(1).getLayoutParams();
+                setOrientation(stack ? VERTICAL : HORIZONTAL);
+                setGravity(stack ? Gravity.CENTER_VERTICAL | Gravity.START : Gravity.CENTER_VERTICAL);
+                art.width = art.height = stack ? Theme.ART_COMPACT : Theme.ART;
+                info.width = stack ? LayoutParams.MATCH_PARENT : 0;
+                info.weight = stack ? 0 : 1;
+                info.leftMargin = stack ? 0 : Theme.S5;
+                info.topMargin = stack ? Theme.S4 : 0;
+            }
+            super.onMeasure(wSpec, hSpec);
+        }
+    }
+
+    /**
+     * A list screen's two columns (the list, then the focused row's description): the list is listW wide while the
+     * description keeps descMin beside it; on a narrower stage (4:3, square) the list gives way, never below half.
+     * The first child is the list (its width set here, its negative left margin kept), the second the description.
+     */
+    static final class ListSplit extends LinearLayout {
+        private final int listW, descMin;
+
+        ListSplit(Context c, int listW, int descMin) {
+            super(c);
+            this.listW = listW;
+            this.descMin = descMin;
+            setOrientation(HORIZONTAL);
+        }
+
+        @Override
+        protected void onMeasure(int wSpec, int hSpec) {
+            if (getChildCount() == 2 && MeasureSpec.getMode(wSpec) != MeasureSpec.UNSPECIFIED) {
+                int w = MeasureSpec.getSize(wSpec);
+                LayoutParams list = (LayoutParams)getChildAt(0).getLayoutParams();
+                LayoutParams desc = (LayoutParams)getChildAt(1).getLayoutParams();
+                int room = w - desc.leftMargin - descMin - list.leftMargin;   // the margin is negative: the plates
+                list.width = Math.max(Math.min(listW, room), w / 2);
+            }
+            super.onMeasure(wSpec, hSpec);
         }
     }
 
