@@ -302,7 +302,7 @@ the MDEC has ready (mdec/4bit and 8bit's release binaries), the HLE printf's `%2
 checked by ctest (both BIOSes, skipped without the fetched release): gpu/clipping, clut-cache, lines, quad,
 rectangles, texture-flip, texture-overflow, transparency, triangle, uv-interpolation, vram-to-vram-overlap against
 their dumps (`ps1_jcz_gpu_*`, `ps1_hle_jcz_gpu_*`), mdec/frame-15bit-dma and frame-15bit within one 5-bit unit
-(`ps1_jcz_mdec_*`, `compare_vram.py --tolerance 1`; the CPU build waits for output after its very last word, as the
+and frame-24bit-dma within 4 per byte (`ps1_jcz_mdec_*`, `compare_vram.py --tolerance 1` / `--bytes 4`; the CPU build waits for output after its very last word, as the
 hardware would, so its last column is never uploaded and is left out), gpu/gp0-e1, mask-bit, version-detect,
 dma/chain-looping, input/pad and mdec/4bit by their text, on top of the earlier cpu / gte / dma / timers / spu /
 cdrom ones. Not matched, by design or

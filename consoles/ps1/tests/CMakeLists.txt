@@ -234,11 +234,18 @@ if(TARGET ps1_run)
         # of the hardware dump (the IDCT's last unit of rounding is not the hardware's yet). The CPU build waits for
         # the output FIFO to fill again after its very last word, which the hardware does not do either: its last
         # 16-pixel column is never uploaded (the release's dump is the DMA build's), so it is left out.
-        foreach(t frame-15bit-dma frame-15bit)
+        # frame-24bit-dma: the 24-bit picture (480 halfwords wide) byte by byte, within 4 (compare_vram.py --bytes).
+        # frame-24bit (CPU) copies the 24-bit output as it comes, unswizzled: left out (the hardware's 24-bit block
+        # order on a PIO read is not known).
+        foreach(t frame-15bit-dma frame-15bit frame-24bit-dma)
             string(REPLACE "-" "_" n ${t})
-            set(region --region 0,0,320,240)
+            set(region --region 0,0,320,240 --tolerance 1)
+            set(ref vram-15bit.png)
             if(t STREQUAL frame-15bit)
-                set(region --region 0,0,304,240)
+                set(region --region 0,0,304,240 --tolerance 1)
+            elseif(t STREQUAL frame-24bit-dma)
+                set(region --region 0,0,480,240 --bytes 4)
+                set(ref vram-24bit.png)
             endif()
             foreach(b lle hle)
                 if(b STREQUAL lle)
@@ -249,8 +256,8 @@ if(TARGET ps1_run)
                     set(name ps1_hle_jcz_mdec_${n})
                 endif()
                 add_test(NAME ${name} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_jcz_vram.sh $<TARGET_FILE:ps1_run>
-                         ${bios} ${PS1_TESTS_DIR}/mdec/frame/${t}.exe ${PS1_TESTS_DIR}/mdec/frame/vram-15bit.png
-                         ${CMAKE_CURRENT_BINARY_DIR}/${name} ${region} --tolerance 1)
+                         ${bios} ${PS1_TESTS_DIR}/mdec/frame/${t}.exe ${PS1_TESTS_DIR}/mdec/frame/${ref}
+                         ${CMAKE_CURRENT_BINARY_DIR}/${name} ${region})
                 list(APPEND jcz_more ${name})
             endforeach()
         endforeach()
