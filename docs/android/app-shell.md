@@ -983,6 +983,46 @@ changes, their file, which one a game gets; pure Java), `TouchEdit` (the editor'
   hidden controls not hit, drag on the grid, pinch, − / +, reset), `TouchEditorTest` (drag and save, This game only,
   B cancels; screenshots `ui-touch-editor-<layout>-<en|fr>`, `ui-touch-editor-hint-<en|fr>`).
 
+### Touch robustness (XBA-212)
+
+« The touch controls don't work » (AYN Thor, 0.5.1) with no regression in the touch → native path: every way the pad
+can look broken is closed.
+
+- **The in-game editor never passes for the game**: an opaque banner centred at the top (« Editing touch layout »,
+  Cancel, Save) and a dark tint (`TouchEditor.GAME_TINT`) over the held game. It is cancelled (the old layout kept)
+  when the game goes to the background (`onStop`), at each start (never restored), on `onResume`, when the in-game
+  menu opens (the panel's Menu button) and on Back / B. A layout with no D-pad / stick or no face button left to press
+  is not saved (the editor says so).
+- **Saved layouts are repaired at load** (`TouchLayout.repair`): entries of controls the layout has not are dropped; a
+  size that is NaN / zero / negative goes back to 100 %; a place off the screen, on an edge, NaN or with its centre in
+  the menu's swipe strip goes back to the default place. A layout that still leaves no reachable direction control or
+  face button (hidden, or stacked under another control: `TouchPad.playable`) is set aside for the console's defaults
+  (`shell: touch layout <LAYOUT> set aside for the defaults: ...`). Settings › Controls › **Reset touch layouts**
+  removes every saved layout (all consoles, every game's own).
+- **Hotkey chords never mask the touch buttons**: the GBA / PS1 / N64 runtimes hide a held chord's buttons with
+  `console_pad_swallow`, from the physical pad's part only; the overlay's targets (`ConsolePadOut.overlay_buttons`)
+  always reach the game.
+- **Auto on the Thor**: its built-in controls count as a controller, so Auto hides the pad (and the companion panel
+  hides it on the top screen). A tap on the game's screen (outside the menu's swipe strip, menu closed) reveals it;
+  that first tap sends nothing; it hides again after 10 s without a touch (`TouchControls.REVEAL_MS`) or when a
+  physical button is pressed (or a stick / trigger pushed half way). Hidden that way, a hint once per game process
+  (logcat and toast: « Touch pad hidden: ... »).
+- A failed native overlay call is logged (PR #159) and said once in a toast.
+- Tests: `TouchRobustTest` (editor auto-close and banner, repair / fallback, the editor refusing an unplayable layout,
+  reset, a physical chord with a touch button held, reveal on tap, the panel), `tests/console_pad` (`test_swallow`).
+
+### Device check (touch robustness, XBA-212), for Alex
+
+1. Thor, Show *Without a controller*, Bottom screen Panel: start a game; a toast says the touch pad is hidden. Tap the
+   middle of the top screen: the pad appears and the game got no button. Play with it; leave it 10 s untouched: it
+   goes. Tap again, then press a physical button: it goes.
+2. In-game menu › Settings › Edit touch layout: the banner « Editing touch layout » is at the top and the game is dark
+   behind it. Press Home, come back: the editor is gone, the pad plays. Open it again, press B: gone.
+3. Edit touch layout, hide the D-pad and both sticks, Save: refused with a message.
+4. Settings › Controls › Reset touch layouts: « Touch layouts reset (N removed) »; games show the usual layout.
+5. A PS1 / GBA game, Show *Always*: hold the touch Select while holding Select + right trigger (fast-forward) on
+   the Thor's pad: the game still sees Select pressed (before: it was hidden while the chord was held).
+
 ### Device check (touch layout editor, XBA-207), for Alex
 
 On the Thor: Bottom screen **Off** and Controls › On-screen pad › Show **Always** (as for XBA-42).
