@@ -159,7 +159,7 @@ def test_desktop_pack_end_to_end(tmp_path):
     assert gba.check(str(final), key, sha, gba.host_abi()) is None
     assert (work / "rom.gba").read_bytes() == rom_bytes
     t = load_table(str(final / "libtitle.so"))
-    assert t.abi == 2 and t.count == 0 and t.rom_sha256.decode() == sha
+    assert t.abi == 3 and t.count == 0 and t.rom_sha256.decode() == sha
 
     # Again: nothing to do.
     rc, lines = prepare(args, env_fake())

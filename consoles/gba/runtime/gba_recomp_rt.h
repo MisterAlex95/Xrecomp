@@ -53,15 +53,36 @@ typedef struct gba_cpu {
     bool stopped;
 } gba_cpu;
 
+/* The cartridge's prefetch buffer (GBATEK « GBA System Control », WAITCNT bit 14): while the CPU does not use the
+ * cartridge bus (internal cycles, other memories, opcodes served by the buffer), the unit reads the opcodes that follow
+ * the last one fetched from the cartridge, up to 8 halfwords (8 Thumb / 4 ARM opcodes), each in one sequential access.
+ * An opcode fetch at the buffer's head costs 1 cycle; at the opcode being read, the rest of that read; elsewhere it is
+ * an ordinary (non-sequential) access, after which the unit restarts behind it. A data access to the cartridge (ROM,
+ * SRAM, EEPROM) stops and empties it, one cycle later when a read was finishing in that cycle. The state is computed
+ * lazily: `time` is the cycle it holds for, the cycles since then were cycles without a cartridge access by the CPU
+ * (every one goes through rc_pf_fetch / rc_pf_stop). The interpreter and lifted code share these functions. */
+typedef struct gba_rc_prefetch {
+    uint64_t time;          /* cycle the state below is for */
+    uint32_t head;          /* address of the next opcode the buffer serves */
+    uint32_t left;          /* while `run`: cycles until the opcode being read is in the buffer */
+    uint8_t count;          /* opcodes in the buffer */
+    uint8_t cap;            /* its capacity in opcodes: 8 Thumb, 4 ARM */
+    uint8_t duty;           /* cycles of one prefetch (a sequential halfword, two for ARM) */
+    bool valid;             /* `head` is meaningful (false: stopped and emptied, or the buffer is off) */
+    bool run;               /* reading the next opcode */
+    bool thumb;             /* the opcode size it reads */
+    uint8_t pad_[2];
+} gba_rc_prefetch;
+
 typedef struct gba_rc_head {
     gba_cpu cpu;
     uint64_t now;           /* cycles since creation */
     uint64_t next_event;    /* the CPU runs until now reaches it */
     uint8_t wait16[16][2];  /* cycles of one 8/16-bit access [region][seq] */
     uint8_t wait32[16][2];  /* cycles of one 32-bit access [region][seq] */
-    uint8_t fetch16[16];    /* cycles of a sequential Thumb opcode fetch per region (cartridge prefetch included) */
+    uint8_t fetch16[16];    /* cycles of a sequential Thumb opcode fetch per region (without the prefetch buffer) */
     uint8_t fetch32[16];    /* the same for ARM opcodes */
-    bool prefetch;
+    bool prefetch;          /* WAITCNT bit 14: the cartridge's prefetch buffer is on (rc_pf_fetch) */
     bool irq_line;          /* IME && (IE & IF) */
     uint8_t rc_exit;        /* GBA_RC_EXIT_*: why lifted code returned */
     uint8_t rc_hint;        /* with GBA_RC_EXIT_INTERP: see below (0 before each call; older cores ignore it) */
@@ -69,6 +90,9 @@ typedef struct gba_rc_head {
     uint64_t rc_native;     /* instructions run natively (counted when the pack is built with -DGBA_RC_COUNT) */
     uint8_t *rc_ewram;      /* the machine's EWRAM (256 KB) and IWRAM (32 KB): lifted code reads and writes them */
     uint8_t *rc_iwram;      /* directly, with the bus's wait states (no side effect there) */
+    uint8_t fetchmax16[16]; /* the most one Thumb opcode fetch can cost per region (the event checks' bound) */
+    uint8_t fetchmax32[16]; /* the same for ARM opcodes */
+    gba_rc_prefetch pf;     /* the cartridge's prefetch buffer (rc_pf_*) */
 } gba_rc_head;
 
 enum {
@@ -151,6 +175,111 @@ static inline uint32_t rc_shift_reg(uint32_t type, uint32_t v, uint32_t amt, uin
     }
 }
 
+/* ---- the cartridge's prefetch buffer (gba_rc_prefetch), shared by the interpreter and lifted code ---- */
+
+static inline bool rc_cart(uint32_t addr)
+{
+    return ((addr >> 24) & 15) - 8u <= 5u;
+}
+
+/* Brings the buffer's state up to `now`: the reads that completed meanwhile. */
+static inline void rc_pf_advance(gba_rc_prefetch *p, uint64_t now)
+{
+    if (now <= p->time)
+        return;
+    if (p->run) {
+        uint64_t e = now - p->time;
+        while (e >= p->left) {
+            e -= p->left;
+            if (++p->count >= p->cap) {
+                p->run = false;
+                break;
+            }
+            p->left = p->duty;
+        }
+        if (p->run)
+            p->left -= (uint32_t)e;
+    }
+    p->time = now;
+}
+
+/* A data access to the cartridge bus at `now` (from_cart: by code running from the cartridge): stops and empties the
+ * buffer. Returns the cycle the access waits when the unit was finishing a halfword in this cycle. */
+static inline uint32_t rc_pf_stop(gba_rc_head *h, uint64_t now, bool from_cart)
+{
+    gba_rc_prefetch *p = &h->pf;
+    uint32_t wait = 0;
+    if (p->run) {
+        rc_pf_advance(p, now);
+        if (p->run && from_cart && (p->left == 1 || (!p->thumb && p->left == p->duty / 2u + 1u)))
+            wait = 1;
+    }
+    p->valid = p->run = false;
+    p->count = 0;
+    return wait;
+}
+
+/* An opcode fetch from the cartridge at `now` with the buffer on: the opcode at addr (thumb: a halfword), ncost the
+ * cycles of the access when the buffer does not have it. Returns the fetch's cycles. */
+static inline uint32_t rc_pf_fetch(gba_rc_head *h, uint64_t now, uint32_t addr, bool thumb, uint32_t ncost)
+{
+    gba_rc_prefetch *p = &h->pf;
+    uint32_t w = thumb ? 2u : 4u, c;
+    rc_pf_advance(p, now);
+    if (p->valid && addr == p->head && p->thumb == thumb) {
+        if (p->count) { /* in the buffer */
+            p->count--;
+            p->head += w;
+            if (!p->run) { /* it was full: room again */
+                p->run = true;
+                p->left = p->duty;
+            }
+            return 1;
+        }
+        if (p->run) { /* being read: the rest of that read, then the next one starts */
+            c = p->left;
+            p->head += w;
+            p->left = p->duty;
+            p->time = now + c;
+            return c;
+        }
+    }
+    c = rc_pf_stop(h, now, true) + ncost;
+    uint32_t s16 = h->wait16[(addr >> 24) & 15][1];
+    p->valid = p->run = true;
+    p->thumb = thumb;
+    p->count = 0;
+    p->cap = thumb ? 8 : 4;
+    p->duty = (uint8_t)(thumb ? s16 : 2 * s16);
+    p->head = addr + w;
+    p->left = p->duty;
+    p->time = now + c;
+    return c;
+}
+
+/* The opcode fetch at the start of the instruction at pc (the pipeline reads the opcode at pc + 8 / + 4 meanwhile):
+ * sequential, from the prefetch buffer in the cartridge when it is on. */
+static inline uint32_t rc_fetch_cost(gba_rc_head *h, uint64_t now, uint32_t pc, bool thumb)
+{
+    uint32_t r = (pc >> 24) & 15;
+    if (rc_cart(pc) && h->prefetch)
+        return rc_pf_fetch(h, now, pc + (thumb ? 4u : 8u), thumb, thumb ? h->wait16[r][0] : h->wait32[r][0]);
+    return thumb ? h->fetch16[r] : h->fetch32[r];
+}
+
+/* Pipeline refill after a jump whose new r15 (target + 8 / + 4) is r15: the target's opcode (non-sequential), then
+ * the next one (sequential). */
+static inline uint32_t rc_refill_cost(gba_rc_head *h, uint64_t now, uint32_t r15, bool thumb)
+{
+    uint32_t r = (r15 >> 24) & 15;
+    if (rc_cart(r15) && h->prefetch) {
+        uint32_t w = thumb ? 2u : 4u, t = r15 - 2 * w;
+        uint32_t c = rc_pf_fetch(h, now, t, thumb, thumb ? h->wait16[r][0] : h->wait32[r][0]);
+        return c + rc_pf_fetch(h, now + c, t + w, thumb, thumb ? h->wait16[r][1] : h->wait32[r][1]);
+    }
+    return thumb ? (uint32_t)h->wait16[r][0] + h->wait16[r][1] : (uint32_t)h->wait32[r][0] + h->wait32[r][1];
+}
+
 /* ---- the shape of a lifted function (generated by gba_tools.recomp) ----
  *
  *   void f(gba_machine *m_) {
@@ -177,10 +306,13 @@ static inline uint32_t rc_shift_reg(uint32_t type, uint32_t v, uint32_t amt, uin
     uint32_t r10 = h->cpu.r[10], r11 = h->cpu.r[11], r12 = h->cpu.r[12], r13 = h->cpu.r[13], r14 = h->cpu.r[14];    \
     uint32_t fN = h->cpu.n, fZ = h->cpu.z, fC = h->cpu.c, fV = h->cpu.v;                                             \
     uint64_t now = h->now, ne = h->next_event;                                                                       \
-    uint32_t fc = RC_FETCH_COST();                                                                                   \
+    uint32_t fc = RC_FETCH_COST(), fb = RC_FETCH_MAX();                                                              \
+    bool pf_ = RC_PF_ON();                                                                                           \
     uint32_t epc = 0
 
 #define RC_FETCH_COST() ((uint32_t)(RC_T ? h->fetch16[RC_REGION] : h->fetch32[RC_REGION]))
+#define RC_FETCH_MAX() ((uint32_t)(RC_T ? h->fetchmax16[RC_REGION] : h->fetchmax32[RC_REGION]))
+#define RC_PF_ON() ((RC_REGION) - 8u <= 5u && h->prefetch)
 #define RC_PC() (h->cpu.r[15] - RC_PIPE)
 #define RC_M ((gba_machine *)(void *)h)
 
@@ -190,10 +322,13 @@ static inline uint32_t rc_shift_reg(uint32_t type, uint32_t v, uint32_t amt, uin
 #define RC_COUNT() ((void)0)
 #endif
 
-/* Start of an instruction: its opcode fetch. */
-#define RC_I()                                                                                                       \
+/* Start of the instruction at A: its opcode fetch (from the prefetch buffer in the cartridge when it is on). */
+#define RC_I(A)                                                                                                      \
     do {                                                                                                             \
-        now += fc;                                                                                                   \
+        now += __builtin_expect(pf_, 0)                                                                              \
+                   ? rc_pf_fetch(h, now, (uint32_t)(A) + RC_PIPE, RC_T,                                              \
+                                 RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0])                           \
+                   : fc;                                                                                             \
         RC_COUNT();                                                                                                  \
     } while (0)
 
@@ -202,7 +337,7 @@ static inline uint32_t rc_shift_reg(uint32_t type, uint32_t v, uint32_t amt, uin
  * the segment, the interpreter runs from A. */
 #define RC_STOP(A, NFC, EXTRA, N)                                                                                    \
     do {                                                                                                             \
-        if (__builtin_expect(now + (uint32_t)(NFC) * fc + (uint32_t)(EXTRA) >= ne, 0)) {                             \
+        if (__builtin_expect(now + (uint32_t)(NFC) * fb + (uint32_t)(EXTRA) >= ne, 0)) {                             \
             epc = (A);                                                                                               \
             if (now >= ne)                                                                                           \
                 goto x_exit;                                                                                         \
@@ -215,7 +350,7 @@ static inline uint32_t rc_shift_reg(uint32_t type, uint32_t v, uint32_t amt, uin
  * segment's static cycles end before the next event. */
 #define RC_CHECK(A, NFC, EXTRA, N)                                                                                   \
     do {                                                                                                             \
-        if (__builtin_expect(now + (uint32_t)(NFC) * fc + (uint32_t)(EXTRA) >= ne, 0)) {                             \
+        if (__builtin_expect(now + (uint32_t)(NFC) * fb + (uint32_t)(EXTRA) >= ne, 0)) {                             \
             epc = (A);                                                                                               \
             h->rc_hint = (N);                                                                                        \
             goto x_interp;                                                                                           \
@@ -348,6 +483,8 @@ static inline uint8_t *rc_ram(gba_rc_head *h, uint32_t a, uint32_t align)
 #define RC_AFTER_BUS_WRITE()                                                                                         \
     do {                                                                                                             \
         fc = RC_FETCH_COST();                                                                                        \
+        fb = RC_FETCH_MAX();                                                                                         \
+        pf_ = RC_PF_ON();                                                                                            \
         ne = ((h->irq_line & !(h->cpu.cpsr_ctl & 0x80u)) | h->cpu.halted | h->cpu.stopped) ? 0 : ne;                 \
     } while (0)
 
@@ -359,11 +496,10 @@ static inline uint8_t *rc_ram(gba_rc_head *h, uint32_t a, uint32_t align)
                     : (uint32_t)(RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0]) - fc))
 
 /* Pipeline refill after a write to PC whose new r15 (address + 8 / + 4) is R15, in the current state. */
-#define RC_REFILL(R15)                                                                                               \
-    do {                                                                                                             \
-        uint32_t rg__ = ((R15) >> 24) & 15;                                                                           \
-        now += RC_T ? (uint32_t)h->wait16[rg__][0] + h->wait16[rg__][1] : (uint32_t)h->wait32[rg__][0] + h->wait32[rg__][1]; \
-    } while (0)
+#define RC_REFILL(R15) (now += rc_refill_cost(h, now, (R15), RC_T))
+
+/* A literal folded from the cartridge (W: the load's wait states): the access still stops the prefetch buffer. */
+#define RC_LIT(W) (rc_pf_stop(h, now, (RC_REGION) - 8u <= 5u) + (uint32_t)(W))
 
 /* Write to PC without a state change (B, BL, data ops, LDR / LDM / POP to PC): refill, then go on at the target. */
 #define RC_JUMP_DYN(T_)                                                                                              \
@@ -385,14 +521,11 @@ static inline uint8_t *rc_ram(gba_rc_head *h, uint32_t a, uint32_t align)
         if (t__ & 1) {                                                                                                \
             h->cpu.cpsr_ctl |= 0x20u;                                                                                \
             h->cpu.r[15] = (t__ & ~1u) + 4;                                                                           \
-            uint32_t rg__ = (h->cpu.r[15] >> 24) & 15;                                                                \
-            now += (uint32_t)h->wait16[rg__][0] + h->wait16[rg__][1];                                                  \
         } else {                                                                                                     \
             h->cpu.cpsr_ctl &= ~0x20u;                                                                               \
             h->cpu.r[15] = (t__ & ~3u) + 8;                                                                           \
-            uint32_t rg__ = (h->cpu.r[15] >> 24) & 15;                                                                \
-            now += (uint32_t)h->wait32[rg__][0] + h->wait32[rg__][1];                                                  \
         }                                                                                                            \
+        now += rc_refill_cost(h, now, h->cpu.r[15], (t__ & 1) != 0);                                                 \
         goto x_flush;                                                                                                \
     } while (0)
 

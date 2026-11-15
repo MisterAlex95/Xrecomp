@@ -161,7 +161,7 @@ struct gba_machine {
     uint64_t now;           /* cycles since creation */
     uint64_t next_event;    /* the CPU loop runs until now reaches it */
     /* Wait states, rebuilt on WAITCNT writes: cycles of one access, [region 0..15][seq]; fetch16 / fetch32: a
-     * sequential opcode fetch, the cartridge prefetch included. */
+     * sequential opcode fetch without the cartridge's prefetch buffer (with it on: rc_pf_fetch). */
     uint8_t wait16[16][2];
     uint8_t wait32[16][2];
     uint8_t fetch16[16];
@@ -174,6 +174,9 @@ struct gba_machine {
     uint64_t rc_native;     /* instructions lifted code ran (packs built with -DGBA_RC_COUNT) */
     uint8_t *rc_ewram;      /* = ewram, iwram below (lifted code's inline accesses) */
     uint8_t *rc_iwram;
+    uint8_t fetchmax16[16]; /* the most one opcode fetch can cost per region (lifted code's event checks) */
+    uint8_t fetchmax32[16];
+    gba_rc_prefetch pf;     /* the cartridge's prefetch buffer (gba_recomp_rt.h rc_pf_*) */
 
     struct gba_rc_state *rc; /* the attached recompiled code (gba_recomp.c), NULL: interpreter only */
 
@@ -252,6 +255,10 @@ GBA_RC_SAME(open_bus);
 GBA_RC_SAME(rc_native);
 GBA_RC_SAME(rc_ewram);
 GBA_RC_SAME(rc_iwram);
+GBA_RC_SAME(fetchmax16);
+GBA_RC_SAME(fetchmax32);
+GBA_RC_SAME(pf);
+_Static_assert(sizeof(gba_rc_prefetch) == 24, "gba_rc_prefetch layout");
 _Static_assert(BANK_COUNT == 6, "gba_cpu banks");
 
 /* Little-endian helpers. */

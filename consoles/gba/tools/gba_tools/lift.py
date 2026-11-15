@@ -335,7 +335,7 @@ class FnLifter:
                     if not b:
                         v = ror(v, (addr & 3) * 8)
                     region = (addr >> 24) & 15
-                    out = ["now += h->%s[%d][0];" % ("wait16" if b else "wait32", region), "now += 1;"]
+                    out = ["now += RC_LIT(h->%s[%d][0]);" % ("wait16" if b else "wait32", region), "now += 1;"]
                     out.append(self.jump(v) if rd == 15 else "r%d = %s;" % (rd, hx(v)))
                     return out
             off = hx(off)
@@ -538,7 +538,7 @@ class FnLifter:
         addr = ((a + 4) & ~2) + (op & 0xFF) * 4
         v = self.fold_literal(addr, 4)
         if v is not None:
-            return ["now += h->wait32[%d][0];" % ((addr >> 24) & 15), "r%d = %s;" % (rd, hx(v)), "now += 1;"]
+            return ["now += RC_LIT(h->wait32[%d][0]);" % ((addr >> 24) & 15), "r%d = %s;" % (rd, hx(v)), "now += 1;"]
         return ["r%d = RD32(%s, 0, %s);" % (rd, hx(addr), self.tob(a)), "now += 1;"]
 
     def t_regoff(self, op, a):
@@ -707,7 +707,7 @@ class FnLifter:
                 continue
             if x in leaders:
                 out.append("    RC_STOP(%s, %s, %d);" % (hx(x), segment_cost(addrs, i, size, leaders, bodies), left[x]))
-            out.append("    RC_I();")
+            out.append("    RC_I(%s);" % hx(x))
             if body:
                 out.append("    {")
                 out += ["        " + s for s in body]
@@ -740,6 +740,7 @@ MEM_RE = re.compile(r"\b(?:RD|WR)(?:8|16|32)\(|\bRC_RUN_RAM\(")
 NOW_RE = re.compile(r"now \+= ([^;]*);")
 MUL_RE = re.compile(r"^\(uint32_t\)rc_mul_cycles\(\w+, \d\)( \+ 1)?$")
 WAIT_RE = re.compile(r"h->wait(?:16|32)\[\d+\]\[0\]")
+LIT_RE = re.compile(r"RC_LIT\((h->wait(?:16|32)\[\d+\]\[0\])\)")
 EXITS = ("RC_JUMP_DYN", "RC_BX", "RC_EXIT")  # what follows may be a return point
 MAX_BLOCK = 12  # instructions per block at most (an event in a block makes the interpreter run the rest of it)
 
@@ -761,6 +762,9 @@ def static_cost(body):
                 const += 5 if e.endswith("+ 1") else 4
             elif WAIT_RE.fullmatch(e) or e == "RC_NEXTRA()":
                 terms.append(e)
+            elif LIT_RE.fullmatch(e):  # a folded literal: the load's wait states, plus the prefetch buffer's stop
+                terms.append(LIT_RE.fullmatch(e).group(1))
+                const += 1
             else:
                 raise ValueError("lift: unknown cycle term %r" % e)
     return const, terms

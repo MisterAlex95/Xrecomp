@@ -3,9 +3,9 @@
  *
  * Accesses may get an unaligned address: the bus aligns it, except for the save chip (8-bit bus, gba_save.c); the
  * CPU rotates misaligned loads. The EEPROM answers in the 0x0D000000 area (gba_save.c). Each access adds its cycles to m->now from the
- * wait-state tables, which follow WAITCNT. Not modelled: the PPU's VRAM / palette / OAM contention, the exact
- * cartridge prefetch buffer (approximated: with prefetch on, sequential ROM opcode fetches cost 1 cycle per
- * halfword). */
+ * wait-state tables, which follow WAITCNT, and the cartridge's prefetch buffer (gba_recomp_rt.h rc_pf_*: opcode
+ * fetches from the cartridge go through it, data accesses there stop it). Not modelled: the PPU's VRAM / palette /
+ * OAM contention. */
 #include "gba_internal.h"
 
 #include <string.h>
@@ -61,18 +61,29 @@ void gba_update_waitstates(gba_machine *m)
         m->wait32[r][1] = (uint8_t)s32;
     }
     m->prefetch = (w & 0x4000) != 0;
-    /* Sequential opcode fetches as gba_fetch16 / gba_fetch32 charge them (lifted code adds these). */
+    if (!m->prefetch)
+        rc_pf_stop((gba_rc_head *)(void *)m, m->now, false);
+    /* Sequential opcode fetches without the prefetch buffer (rc_fetch_cost; lifted code adds these), and the most a
+     * fetch can cost with it (case by case in rc_pf_fetch: 1 from the buffer, at most a sequential read while one is
+     * under way, else a non-sequential access after a cycle's wait). */
     for (int r = 0; r < 16; r++) {
-        if (r == 3) {
-            m->fetch16[r] = m->fetch32[r] = 1;
-        } else if (r >= 8 && r <= 0xD) {
-            m->fetch16[r] = m->prefetch ? 1 : m->wait16[r][1];
-            m->fetch32[r] = m->prefetch ? 2 : m->wait32[r][1];
-        } else {
-            m->fetch16[r] = m->wait16[r][1];
-            m->fetch32[r] = m->wait32[r][1];
+        m->fetch16[r] = r == 3 ? 1 : m->wait16[r][1];
+        m->fetch32[r] = r == 3 ? 1 : m->wait32[r][1];
+        m->fetchmax16[r] = m->fetch16[r];
+        m->fetchmax32[r] = m->fetch32[r];
+        if (r >= 8 && r <= 0xD && m->prefetch) {
+            int n16 = m->wait16[r][0] + 1, n32 = m->wait32[r][0] + 1;
+            m->fetchmax16[r] = (uint8_t)(n16 > m->wait16[r][1] ? n16 : m->wait16[r][1]);
+            m->fetchmax32[r] = (uint8_t)(n32 > 2 * m->wait16[r][1] ? n32 : 2 * m->wait16[r][1]);
         }
     }
+}
+
+/* A data access to the cartridge bus (ROM, SRAM, EEPROM) stops the prefetch buffer. */
+static inline void cart_data(gba_machine *m, uint32_t addr)
+{
+    if ((addr >> 27) & 1) /* 0x08000000-0x0FFFFFFF */
+        m->now += rc_pf_stop((gba_rc_head *)(void *)m, m->now, rc_cart(m->cpu.r[15]));
 }
 
 /* ---- mGBA's debug-print port (gba_set_debug_log, XBA-201) ----------------------------------------------- */
@@ -236,6 +247,7 @@ static inline bool save_region(uint32_t addr)
 
 uint32_t gba_read32(gba_machine *m, uint32_t addr, bool seq)
 {
+    cart_data(m, addr);
     m->now += m->wait32[(addr >> 24) & 15][seq];
     if (!save_region(addr))
         addr &= ~3u;
@@ -244,6 +256,7 @@ uint32_t gba_read32(gba_machine *m, uint32_t addr, bool seq)
 
 uint16_t gba_read16(gba_machine *m, uint32_t addr, bool seq)
 {
+    cart_data(m, addr);
     m->now += m->wait16[(addr >> 24) & 15][seq];
     if (!save_region(addr))
         addr &= ~1u;
@@ -252,6 +265,7 @@ uint16_t gba_read16(gba_machine *m, uint32_t addr, bool seq)
 
 uint8_t gba_read8(gba_machine *m, uint32_t addr, bool seq)
 {
+    cart_data(m, addr);
     m->now += m->wait16[(addr >> 24) & 15][seq];
     return read8_raw(m, addr);
 }
@@ -294,7 +308,7 @@ uint32_t gba_prefetch_latch(gba_machine *m, uint32_t pc, bool thumb)
     return code_half(m, pc + 4) * 0x00010001u; /* EWRAM, palette, VRAM, cartridge: [pc+4] twice */
 }
 
-/* Opcode fetches: like reads, plus the open-bus / BIOS latches and the prefetch approximation. */
+/* Opcode fetches: like reads, plus the open-bus / BIOS latches and, sequential in the cartridge, the prefetch buffer. */
 uint32_t gba_fetch32(gba_machine *m, uint32_t addr, bool seq)
 {
     uint32_t r = (addr >> 24) & 15;
@@ -303,7 +317,7 @@ uint32_t gba_fetch32(gba_machine *m, uint32_t addr, bool seq)
         m->now += 1;
         v = rd32(&m->iwram[addr & (GBA_IWRAM_SIZE - 1)]);
     } else if (r >= 8 && r <= 0xD) {
-        m->now += (seq && m->prefetch) ? 2 : m->wait32[r][seq];
+        m->now += seq ? rc_fetch_cost((gba_rc_head *)(void *)m, m->now, addr, false) : m->wait32[r][0];
         v = rom_read32(m, addr);
     } else {
         m->now += m->wait32[r][seq];
@@ -323,7 +337,7 @@ uint16_t gba_fetch16(gba_machine *m, uint32_t addr, bool seq)
     uint32_t r = (addr >> 24) & 15;
     uint16_t v;
     if (r >= 8 && r <= 0xD) {
-        m->now += (seq && m->prefetch) ? 1 : m->wait16[r][seq];
+        m->now += seq ? rc_fetch_cost((gba_rc_head *)(void *)m, m->now, addr, true) : m->wait16[r][0];
         v = rom_read16(m, addr);
     } else if (r == 3) {
         m->now += 1;
@@ -351,6 +365,7 @@ static bool bitmap_mode(const gba_machine *m)
 
 void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq)
 {
+    cart_data(m, addr);
     m->now += m->wait32[(addr >> 24) & 15][seq];
     if (save_region(addr)) { /* 8-bit bus: the byte of the value the address selects */
         gba_save_write8(m, addr, (uint8_t)(v >> ((addr & 3) * 8)));
@@ -389,6 +404,7 @@ void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq)
 
 void gba_write16(gba_machine *m, uint32_t addr, uint16_t v, bool seq)
 {
+    cart_data(m, addr);
     m->now += m->wait16[(addr >> 24) & 15][seq];
     if (save_region(addr)) {
         gba_save_write8(m, addr, (uint8_t)(v >> ((addr & 1) * 8)));
@@ -428,6 +444,7 @@ void gba_write16(gba_machine *m, uint32_t addr, uint16_t v, bool seq)
 
 void gba_write8(gba_machine *m, uint32_t addr, uint8_t v, bool seq)
 {
+    cart_data(m, addr);
     m->now += m->wait16[(addr >> 24) & 15][seq];
     switch (addr >> 24) {
     case 0x2:
