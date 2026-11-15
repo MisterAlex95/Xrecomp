@@ -74,6 +74,8 @@ final class TouchPad {
         int face, glyph;          // the mark's colour (0: the Duke's, by id) and its drawn shape (GLYPH_*)
         int pushX, pushY;         // a button that pushes the right stick fully (-1, 0, 1; Y up): the C buttons
         float cx, cy, r, hw, hh;
+        float size = 1f;          // the player's size for it (TouchLayout, XBA-207): r, hw and hh already include it
+        boolean hidden;           // hidden by the player (TouchLayout): neither drawn nor hit
 
         Control(int id, Kind kind, String label, int bits, int analog) {
             this.id = id;
@@ -148,6 +150,9 @@ final class TouchPad {
 
     final List<Control> controls = new ArrayList<>();
     final Layout layout;
+    /** The player's layout (XBA-207): moves, sizes and hides on top of the default placement; empty: the defaults. */
+    private TouchLayout custom = new TouchLayout();
+    private float scale = 1f;
     private final Map<Integer, float[]> pointers = new HashMap<>();   // id -> { x, y }
     private final Map<Integer, Control> captured = new HashMap<>();   // id -> the stick or D-pad it landed on
     private float width, height;
@@ -239,6 +244,7 @@ final class TouchPad {
     void layout(float w, float h, float scale) {
         width = w;
         height = h;
+        this.scale = scale;
         // Where things are: o (a thousandth of the height). How big they are, and the spacing inside a group: u (o
         // times the size setting), so a larger pad grows in place rather than running into its neighbours.
         float o = h / 1000f, u = o * scale;
@@ -246,6 +252,7 @@ final class TouchPad {
         float minLeft = w * EDGE_FRAC;
         if (layout != Layout.XBOX) {
             layoutConsole(w, h, o, u, minLeft);
+            applyCustom();
             cancel();
             return;
         }
@@ -265,7 +272,87 @@ final class TouchPad {
         pill(RT, w - 165 * o, 95 * o, 110 * u, 55 * u);
         pill(BACK, w / 2 - 110 * u, h - 60 * o, 70 * u, 32 * u);
         pill(START, w / 2 + 110 * u, h - 60 * o, 70 * u, 32 * u);
+        applyCustom();
         cancel();
+    }
+
+    // ---- The player's layout (XBA-207) ------------------------------------------------------------------------
+
+    /** The player's layout (null: the defaults), placed at once when the pad has a size. */
+    void setCustom(TouchLayout t) {
+        custom = t == null ? new TouchLayout() : t.copy();
+        if (width > 0)
+            layout(width, height, scale);
+    }
+
+    TouchLayout custom() {
+        return custom;
+    }
+
+    float scale() {
+        return scale;
+    }
+
+    /** Each entry of the player's layout over the default placement: its place (normalised), its size, hidden. */
+    private void applyCustom() {
+        for (Control c : controls) {
+            c.size = 1f;
+            c.hidden = false;
+        }
+        for (Map.Entry<Integer, TouchLayout.Entry> e : custom.entries.entrySet()) {
+            if (!has(e.getKey()))
+                continue;   // another layout's control (a PS1 analog file read for the digital pad)
+            Control c = control(e.getKey());
+            TouchLayout.Entry t = e.getValue();
+            resize(c, t.size);
+            if (!Float.isNaN(t.x))
+                c.cx = t.x * width;
+            if (!Float.isNaN(t.y))
+                c.cy = t.y * height;
+            c.hidden = t.hidden;
+            clamp(c);
+        }
+    }
+
+    /** Resizes one control to size times its default (clamped to TouchLayout's range), kept on screen. */
+    void resize(Control c, float size) {
+        size = Math.max(TouchLayout.MIN_SIZE, Math.min(TouchLayout.MAX_SIZE, size));
+        float k = size / c.size;
+        c.r *= k;
+        c.hw *= k;
+        c.hh *= k;
+        c.size = size;
+        clamp(c);
+    }
+
+    /** Moves one control's centre to (x, y), kept on screen and clear of the menu's edge swipe. */
+    void moveTo(Control c, float x, float y) {
+        c.cx = x;
+        c.cy = y;
+        clamp(c);
+    }
+
+    private void clamp(Control c) {
+        float rx = c.pill() ? c.hw : c.r, ry = c.pill() ? c.hh : c.r;
+        float minX = width * EDGE_FRAC + rx, maxX = Math.max(minX, width - rx);
+        c.cx = Math.max(minX, Math.min(maxX, c.cx));
+        c.cy = Math.max(ry, Math.min(Math.max(ry, height - ry), c.cy));
+    }
+
+    /** The control under (x, y) for the editor: hidden ones too, the nearest centre first. */
+    Control pick(float x, float y) {
+        Control best = null;
+        float bestD = Float.MAX_VALUE;
+        for (Control c : controls) {
+            if (!c.hit(x, y, BUTTON_SLOP))
+                continue;
+            float dx = x - c.cx, dy = y - c.cy, d = (dx * dx + dy * dy) / (c.r * c.r);
+            if (d < bestD) {
+                bestD = d;
+                best = c;
+            }
+        }
+        return best;
     }
 
     /**
@@ -392,7 +479,7 @@ final class TouchPad {
         Control best = null;
         float bestD = Float.MAX_VALUE;
         for (Control c : controls) {
-            if (!landing && c.kind != Kind.BUTTON)
+            if (c.hidden || (!landing && c.kind != Kind.BUTTON))
                 continue;
             float slop = c.kind == Kind.STICK ? STICK_SLOP : c.kind == Kind.DPAD ? 1.1f : BUTTON_SLOP;
             if (!c.hit(x, y, slop))

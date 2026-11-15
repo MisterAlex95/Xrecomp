@@ -32,6 +32,11 @@ final class TouchControls implements InputManager.InputDeviceListener {
     private boolean used, panel, shown, checked;
     /** The in-game menu's toggle for this session: shown or hidden whatever the mode, null: the mode decides. */
     private Boolean forced;
+    /** The running game's key (GameSettings), for its own touch layout (XBA-207); null: the console's. */
+    private String gameKey;
+    private TouchPad.Layout padLayout = TouchPad.Layout.XBOX;
+    /** The touch layout editor while it is open over the game, else null. */
+    TouchEditor editor;
 
     TouchControls(Activity a, OverlayMixer mixer, Devices devices) {
         this.activity = a;
@@ -43,7 +48,45 @@ final class TouchControls implements InputManager.InputDeviceListener {
 
     /** The console's layout (XBA-158 / XBA-168 / XBA-174): its own buttons, set before start. */
     void layout(TouchPad.Layout l) {
+        padLayout = l;
         view.setLayout(l);
+    }
+
+    /** The running game's key: its own touch layout wins over the console's (TouchLayout.resolve). */
+    void game(String key) {
+        gameKey = key;
+    }
+
+    /** The player's layout for this console and game (XBA-207), on the pad. */
+    private void loadLayout() {
+        TouchLayout.Resolved r = TouchLayout.resolve(activity.getFilesDir(), gameKey, padLayout);
+        view.setCustom(r.layout);
+        if (!r.layout.isEmpty())
+            Log.i(LauncherActivity.TAG, "shell: touch layout " + padLayout + (r.perGame ? " (this game's)" : "")
+                                        + ", " + r.layout.entries.size() + " control(s) changed");
+    }
+
+    /**
+     * Opens the touch layout editor over the game (the in-game menu's « Edit touch layout »): the live pad hidden
+     * under it, the saved layout on the pad at once. done runs when it closes (the activity lets the game go).
+     */
+    void edit(Runnable done) {
+        if (editor != null)
+            return;
+        editor = new TouchEditor(activity, padLayout, gameKey, settings, true, saved -> {
+            if (saved != null)
+                view.setCustom(saved);
+            ViewGroup parent = (ViewGroup)editor.getParent();
+            if (parent != null)
+                parent.removeView(editor);
+            editor = null;
+            view.setAlpha(1f);
+            done.run();
+        });
+        view.setAlpha(0f);   // the editor draws its own copy
+        view.releaseAll();
+        activity.addContentView(editor, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                                                                   ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
     /** Adds the view (before the in-game menu's, so the menu draws above it). */
@@ -56,6 +99,7 @@ final class TouchControls implements InputManager.InputDeviceListener {
     void start() {
         settings = TouchSettings.load(activity);
         view.apply(settings);
+        loadLayout();
         InputManager im = (InputManager)activity.getSystemService(Context.INPUT_SERVICE);
         if (im != null)
             im.registerInputDeviceListener(this, new Handler(Looper.getMainLooper()));

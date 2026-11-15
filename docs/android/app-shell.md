@@ -939,14 +939,69 @@ buttons into the one overlay pad, `CompanionNative.nativeOverlayPad`, port 0).
   controller, hidden as soon as a controller sends a key or a motion, back when the controllers are gone or the
   screen is touched with none connected), *Always*, *Never*. **Never while the companion panel is up** on a second
   screen (the Thor). Opacity 30 / 50 (default) / 70 / 100 %, size Small / Normal / Large. One line in
-  `files/settings/touch_controls` (`AUTO 50 100`), read at each game start. Layout editing: later (the positions are
-  in `TouchPad.layout`).
+  `files/settings/touch_controls` (`AUTO 50 100`), read at each game start. Where each control sits: the defaults in
+  `TouchPad.layout`, the player's changes on top ([Touch layout editor](#touch-layout-editor-xba-207)).
 - logcat: `shell: touch controls shown|hidden (<why>, <mode>)`.
 - Tests: `TouchPadTest` (two sticks and buttons at once, the D-pad's eight ways, sliding, a stick kept off the
   circle, triggers, cancel, the layout on screen and clear of the edge at every size, visibility, the mixer),
   `TouchControlsTest` (real multi-pointer MotionEvents, Auto / Always / Never, a controller used, the panel; screenshots
   `touch-1-default`, `touch-2-four-fingers`, `touch-3-large-opaque`, `touch-4-small-faint`), `LauncherPlayersTest`
   (`controls-4-players`, `controls-5-touch`).
+
+### Touch layout editor (XBA-207)
+
+Move, resize and hide the on-screen pad's controls, per console layout and optionally per game. `TouchLayout` (the
+changes, their file, which one a game gets; pure Java), `TouchEdit` (the editor's gestures; pure Java), `TouchEditor`
+(the full-screen layer: the pad in edit mode, `TouchPadView.startEditing`, and a small panel).
+
+- **Opened from** Controls › On-screen pad › **Edit touch layout** (the Xbox Controls screen and a GBA / PS1 / N64
+  game's Controls): left / right pick the layout (Xbox, Game Boy Advance, PlayStation, PlayStation (analog),
+  Nintendo 64; the page's console first), A opens the editor over the launcher. And from the in-game menu ›
+  Settings › **Edit touch layout** (shown with the On-screen pad row): the menu closes, the game stays held under the
+  editor (the live pad hidden), and Save puts the new layout on the running game at once.
+- **Editing**: drag a control to move it (its centre snaps to a grid of 1/40 of the screen's height while Grid is
+  on); with a control selected, a second finger pinches its size, or − / + step it by 10 % (50 to 250 % of its
+  default, on top of the global Size setting); Hide / Show; Reset puts every control back; Cancel or Back / B leaves
+  without saving. Hidden controls stay in the editor as dashed ghosts (select one to show it again); in the game they
+  are neither drawn nor hit-tested. Controls stay on screen and clear of the menu's left-edge swipe. Drag the panel's
+  title to move the panel out of the way. Every pad control can be edited (sticks, D-pad, face buttons, shoulders and
+  triggers, Start / Select / Back, stick presses, the C buttons); the in-game menu has no on-screen button (it opens
+  with the edge swipe).
+- **Scope**: *For all games* writes `files/settings/touch_layout/<LAYOUT>.txt` (`XBOX`, `GBA`, `PS1`, `PS1_ANALOG`,
+  `N64`); *This game only* (offered when the editor knows the game: in game, or from a game's Controls) writes
+  `files/settings/touch_layout/game/<KEY>.<LAYOUT>.txt` (KEY as in [Settings per game](#settings-per-game)), a sibling
+  of the game's settings file. A game's file wins over its console's (`TouchLayout.resolve`); saving for all games
+  removes the game's file. Nothing is written until the player saves, and a reset saved for all games removes the
+  console's file: the defaults are unchanged until edited.
+- **Format**: one line per changed control, `A x=0.8750 y=0.4630 size=1.20 hidden`: the centre normalised (x over
+  the width, y over the height), so a layout survives a resolution change; a control with no line (or no x / y) keeps
+  its default place, anchored to the edges. The app is landscape only (`sensorLandscape`): one layout per console, not
+  per orientation. The companion panel on a second screen is not affected (the on-screen pad never shows with it).
+- logcat: `touch layout: <LAYOUT> [for <KEY>] saved, N control(s) changed`, `shell: touch layout <LAYOUT> (this
+  game's), N control(s) changed` at the game's start, `shell: menu: edit touch layout`.
+- Tests: `TouchLayoutTest` (the format both ways, normalisation across sizes, the game's file over the console's,
+  hidden controls not hit, drag on the grid, pinch, − / +, reset), `TouchEditorTest` (drag and save, This game only,
+  B cancels; screenshots `ui-touch-editor-<layout>-<en|fr>`, `ui-touch-editor-hint-<en|fr>`).
+
+### Device check (touch layout editor, XBA-207), for Alex
+
+On the Thor: Bottom screen **Off** and Controls › On-screen pad › Show **Always** (as for XBA-42).
+
+1. Controls › On-screen pad › Edit touch layout: left / right cycle Xbox, Game Boy Advance, PlayStation, PlayStation
+   (analog), Nintendo 64; A opens the editor with that layout over a dark backdrop with a grid.
+2. Drag A to the middle of the screen: it follows the finger and snaps to the grid; Grid: off, drag again: it moves
+   freely. Drag a control towards the left edge: it stops short of it.
+3. Select the left stick, then pinch with a second finger: it grows / shrinks; − / + step it by 10 %; the panel shows
+   its name and size.
+4. Hide Select (or Back): it turns into a dashed ghost. Save. Start a game of that console: A where you put it, Select
+   gone, and a touch where Select was presses nothing.
+5. In-game menu › Settings › Edit touch layout: the game stays frozen under the editor; move Start, Save: the game
+   resumes with Start in its new place at once. Back / B in the editor leaves without changes.
+6. In game, editor › *This game only* › move a button › Save. Another game of the same console keeps the console's
+   layout; this game keeps its own after a restart.
+7. Editor › Reset › Save (For all games): the usual layout is back.
+8. Bottom screen back to Panel: the companion panel is unchanged and no on-screen pad shows on the top screen.
+9. Drag the editor panel by its title to uncover a control under it.
 
 ### Device check (players and on-screen pad, XBA-123 / XBA-42), for Alex
 

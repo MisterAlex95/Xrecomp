@@ -24,4 +24,25 @@
     <string name="CTL_SIZE_NORMAL">Normal</string>
     <string name="CTL_SIZE_LARGE">Large</string>
     <string name="PERCENT">%1$d %%</string>
+    <!-- The touch layout editor (XBA-207, TouchEditor). -->
+    <string name="CTL_TOUCH_EDIT">Edit touch layout</string>
+    <string name="CTL_TOUCH_EDIT_DETAIL">Move, resize or hide the on-screen pad\'s controls for %1$s games: left and right choose the console, A opens the editor. Your layout keeps its place at any screen resolution; until you save one, the usual layout stays.</string>
+    <string name="MENU_TOUCH_EDIT">Edit touch layout</string>
+    <string name="TE_TITLE">Edit touch layout · %1$s</string>
+    <string name="TE_LAYOUT_XBOX">Xbox</string>
+    <string name="TE_LAYOUT_PS1_ANALOG">PlayStation (analog)</string>
+    <string name="TE_HINT">Drag a control to move it. Select one, then pinch with a second finger or use − and + to resize it.</string>
+    <string name="TE_SELECTED">%1$s · %2$d %%</string>
+    <string name="TE_HIDDEN">hidden</string>
+    <string name="TE_SMALLER">−</string>
+    <string name="TE_BIGGER">+</string>
+    <string name="TE_HIDE">Hide</string>
+    <string name="TE_SHOW">Show</string>
+    <string name="TE_GRID_ON">Grid: on</string>
+    <string name="TE_GRID_OFF">Grid: off</string>
+    <string name="TE_SCOPE_CONSOLE">For all games</string>
+    <string name="TE_SCOPE_GAME">This game only</string>
+    <string name="TE_RESET">Reset</string>
+    <string name="TE_CANCEL">Cancel</string>
+    <string name="TE_SAVE">Save</string>
 </resources>

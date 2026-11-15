@@ -2,6 +2,7 @@ package fr.adserver.xrecomp;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
@@ -19,6 +20,10 @@ import android.view.View;
  *
  * Every pointer of every MotionEvent goes to {@link TouchPad}; the state is sent only when it changed. Released on
  * ACTION_CANCEL, when hidden, and when detached.
+ *
+ * <p>The touch layout editor (XBA-207, {@link TouchEditor}) uses one in edit mode ({@link #startEditing}): the fingers
+ * go to a {@link TouchEdit} instead (move, pinch), nothing is sent to the game, hidden controls show as dashed ghosts,
+ * the selected one is outlined and the snap grid drawn.
  */
 final class TouchPadView extends View {
     interface Listener {
@@ -34,6 +39,9 @@ final class TouchPadView extends View {
                         text = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
     private final Path path = new Path();
+    /** The editor's gestures, or null: the live pad. */
+    TouchEdit edit;
+    private final Paint ghost = new Paint(Paint.ANTI_ALIAS_FLAG), grid = new Paint();
 
     TouchPadView(Context c, Listener listener) {
         super(c);
@@ -42,6 +50,24 @@ final class TouchPadView extends View {
         text.setTextAlign(Paint.Align.CENTER);
         text.setTypeface(Theme.MEDIUM);
         setHapticFeedbackEnabled(true);
+        ghost.setStyle(Paint.Style.STROKE);
+        grid.setStrokeWidth(1f);
+    }
+
+    /** Edit mode (the touch layout editor): touches move and resize controls, the game gets nothing. */
+    TouchEdit startEditing() {
+        pad.cancel();
+        send();
+        edit = new TouchEdit(pad);
+        invalidate();
+        return edit;
+    }
+
+    /** The player's layout (TouchLayout, XBA-207) on this pad: nothing held. */
+    void setCustom(TouchLayout t) {
+        pad.setCustom(t);
+        send();
+        invalidate();
     }
 
     /** The console's layout (TouchPad.Layout): a new pad, nothing held. */
@@ -67,6 +93,10 @@ final class TouchPadView extends View {
     @Override
     protected void onSizeChanged(int w, int h, int ow, int oh) {
         super.onSizeChanged(w, h, ow, oh);
+        if (edit != null && pad.width() > 0) {
+            edit.cancel();
+            pad.setCustom(TouchLayout.capture(pad));   // the edits so far, normalised, on the new size
+        }
         pad.layout(w, h, scale);
         send();
     }
@@ -97,6 +127,10 @@ final class TouchPadView extends View {
     @Override
     public boolean onTouchEvent(MotionEvent e) {
         int a = e.getActionMasked(), idx = e.getActionIndex();
+        if (edit != null) {
+            editTouch(e, a, idx);
+            return true;
+        }
         switch (a) {
         case MotionEvent.ACTION_DOWN:
         case MotionEvent.ACTION_POINTER_DOWN:
@@ -119,6 +153,37 @@ final class TouchPadView extends View {
         send();
         return true;   // a touch on an empty spot does nothing; the game has no use for it either
     }
+
+    private void editTouch(MotionEvent e, int a, int idx) {
+        TouchPad.Control before = edit.selected;
+        switch (a) {
+        case MotionEvent.ACTION_DOWN:
+        case MotionEvent.ACTION_POINTER_DOWN:
+            edit.down(e.getPointerId(idx), e.getX(idx), e.getY(idx));
+            break;
+        case MotionEvent.ACTION_MOVE:
+            for (int i = 0; i < e.getPointerCount(); i++)
+                edit.move(e.getPointerId(i), e.getX(i), e.getY(i));
+            break;
+        case MotionEvent.ACTION_UP:
+        case MotionEvent.ACTION_POINTER_UP:
+            edit.up(e.getPointerId(idx));
+            break;
+        case MotionEvent.ACTION_CANCEL:
+            edit.cancel();
+            break;
+        default:
+            return;
+        }
+        if (edit.selected != before && edit.selected != null)
+            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+        if (editListener != null)
+            editListener.run();
+        invalidate();
+    }
+
+    /** Called after each edit gesture (the editor's panel follows the selection). */
+    Runnable editListener;
 
     /** The state to the listener when it changed; a click of feedback when a button goes down. */
     private void send() {
@@ -145,19 +210,66 @@ final class TouchPadView extends View {
     @Override
     protected void onDraw(Canvas c) {
         TouchPad.State s = last;
+        int live = opacity;
+        if (edit != null) {
+            drawGrid(c);
+            opacity = Math.max(opacity, 70);   // the editor shows the controls clearly, whatever the setting
+        }
         for (TouchPad.Control k : pad.controls) {
-            boolean held = s.held(k);
-            switch (k.kind) {
-            case STICK:
-                drawStick(c, k, s);
-                break;
-            case DPAD:
-                drawDpad(c, k, s.buttons);
-                break;
-            default:
-                drawButton(c, k, held);
-                break;
-            }
+            if (k.hidden && edit == null)
+                continue;
+            int shown = opacity;
+            if (k.hidden)
+                opacity = Math.round(opacity * 0.35f);
+            drawControl(c, k, s);
+            opacity = shown;
+            if (edit != null)
+                drawEditMarks(c, k);
+        }
+        opacity = live;
+    }
+
+    private void drawGrid(Canvas c) {
+        if (!edit.grid)
+            return;
+        float step = edit.gridStep() * 4;   // a line every fourth cell: the snap is finer than what is drawn
+        if (step < 4)
+            return;
+        grid.setColor(0x26FFFFFF);
+        for (float x = 0; x <= getWidth(); x += step)
+            c.drawLine(x, 0, x, getHeight(), grid);
+        for (float y = 0; y <= getHeight(); y += step)
+            c.drawLine(0, y, getWidth(), y, grid);
+    }
+
+    /** A hidden control's dashed ring, the selected one's outline in the accent colour. */
+    private void drawEditMarks(Canvas c, TouchPad.Control k) {
+        boolean sel = edit.selected == k;
+        if (!sel && !k.hidden)
+            return;
+        float grow = Math.max(6f, k.r * 0.12f);
+        ghost.setStrokeWidth(Math.max(3f, k.r * (sel ? 0.07f : 0.04f)));
+        ghost.setColor(sel ? Theme.ACCENT | 0xFF000000 : 0xC0FFFFFF);
+        ghost.setPathEffect(k.hidden ? new DashPathEffect(new float[] { grow * 1.5f, grow }, 0) : null);
+        if (k.pill()) {
+            rect.set(k.cx - k.hw - grow, k.cy - k.hh - grow, k.cx + k.hw + grow, k.cy + k.hh + grow);
+            c.drawRoundRect(rect, k.hh + grow, k.hh + grow, ghost);
+        } else {
+            c.drawCircle(k.cx, k.cy, k.r + grow, ghost);
+        }
+    }
+
+    private void drawControl(Canvas c, TouchPad.Control k, TouchPad.State s) {
+        switch (k.kind) {
+        case STICK:
+            drawStick(c, k, s);
+            break;
+        case DPAD:
+            drawDpad(c, k, s.buttons);
+            break;
+        default:
+            drawButton(c, k, s.held(k));
+            break;
         }
     }
 
