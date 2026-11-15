@@ -268,6 +268,9 @@ struct n64_machine {
     uint8_t *isv;                /* 64 KB buffer at 0x13FF0000 (allocated at the first write) */
     void (*tty)(void *ctx, char c);
     void *tty_ctx;
+    /* Save states (n64_state.c): the ROM's hash, computed at the first save or load (host side, not state). */
+    uint64_t rom_hash;
+    bool rom_hashed;
 };
 
 /* Instruction / access costs in ticks (n64_cpu.c; lifted code charges the same: n64_recomp_rt.h). */
@@ -332,6 +335,11 @@ bool n64_recomp_active(const n64_machine *m);
 void n64_recomp_free(n64_machine *m);
 /* RDRAM was reset (memset): every cached content check is stale. */
 void n64_recomp_reset(n64_machine *m);
+/* Save states (n64_state.c): whether IPL3 is done as far as the attached table knows (-1: no table), and a state was
+ * loaded (RDRAM pages bumped by the caller): the dispatch cache and hand-offs are forgotten, the boot flag is the
+ * state's (-1: unknown, then from the frames the state had run). */
+int n64_recomp_booted(n64_machine *m);
+void n64_recomp_state_loaded(n64_machine *m, int booted);
 
 /* ---- COP1 (n64_fpu.c) ------------------------------------------------------------------------------------------ */
 /* Executes a COP1 instruction (opcode 0x11), CU1 already checked. */

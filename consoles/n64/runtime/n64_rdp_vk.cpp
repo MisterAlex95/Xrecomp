@@ -89,6 +89,14 @@ struct VkRdp {
     uint32_t fe_ci_addr = 0, fe_zi_addr = 0;
     uint32_t wr_lo[2]{}, wr_hi[2]{};
 
+    /* Save states (XBA-183): the last of each state command paraLLEl-RDP was given (single-word commands by id, the
+     * tiles' Set Tile and their size, which the loads set too), replayed into it when a state loads. TMEM is not
+     * kept: games load their textures again before they draw with them. */
+    uint64_t shadow[0x40]{};
+    uint64_t shadow_tile[8]{}, shadow_size[8]{};
+    uint64_t shadow_valid = 0; /* bit id: shadow[id]; bit 0..7 of shadow_tiles / shadow_sizes: per tile */
+    uint32_t shadow_tiles = 0, shadow_sizes = 0;
+
     std::unique_ptr<Vulkan::Context> ctx;
     std::unique_ptr<Vulkan::Device> dev;
     std::unique_ptr<RDP::CommandProcessor> cp;
@@ -398,6 +406,23 @@ uint32_t cmd_cost(VkRdp *d, const uint32_t *w, int id)
     return 1;
 }
 
+/* Save states: a state command into the shadow (see VkRdp). */
+void shadow_record(VkRdp *d, uint64_t w0)
+{
+    const int id = (int)(w0 >> 56) & 0x3F;
+    const int tile = (int)(w0 >> 24) & 7;
+    if ((id >= 0x2A && id <= 0x2F) || (id >= 0x37 && id <= 0x3F) || id == 0x3C) {
+        d->shadow[id] = w0;
+        d->shadow_valid |= 1ull << id;
+    } else if (id == 0x35) {
+        d->shadow_tile[tile] = w0;
+        d->shadow_tiles |= 1u << tile;
+    } else if (id == 0x30 || id == 0x32 || id == 0x33 || id == 0x34) { /* the loads set the tile's size fields too */
+        d->shadow_size[tile] = (w0 & ~(0x3Full << 56)) | (0x32ull << 56);
+        d->shadow_sizes |= 1u << tile;
+    }
+}
+
 void dispatch(VkRdp *d, const uint32_t *w, int len)
 {
     const uint64_t w0 = (uint64_t)w[0] << 32 | w[1];
@@ -432,6 +457,7 @@ void dispatch(VkRdp *d, const uint32_t *w, int len)
             wrote_add(d, (int)(w0 & 0xFFF) >> 2, ((int)(w0 >> 32) & 0xFFF) / 4 + 1);
     }
 
+    shadow_record(d, w0);
     d->cp->enqueue_command((unsigned)len * 2, w);
     d->unsynced = true;
     if (id == 0x29) { /* SYNC_FULL: drawn and in RDRAM, then the DP interrupt */
@@ -668,6 +694,8 @@ void vk_reset(void *p)
     d->fe_sc_y1 = 0xFFF;
     d->fe_zon = 0;
     d->wr_lo[0] = d->wr_hi[0] = d->wr_lo[1] = d->wr_hi[1] = 0;
+    d->shadow_valid = 0;
+    d->shadow_tiles = d->shadow_sizes = 0;
 }
 
 void vk_attach_dmem(void *p, const uint8_t *dmem) { static_cast<VkRdp *>(p)->dmem = dmem; }
@@ -793,8 +821,124 @@ int vk_scanout(void *p, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int 
     return 0;
 }
 
+/* ---- Save states (XBA-183, n64_rdp_backend.h) ---------------------------------------------------------------------- */
+/* Drawn out and synchronised before a save (RDRAM holds every pixel); the extra bytes are the shadow of state commands.
+ * On load: synchronised, the front end's registers set, the shadow replayed into paraLLEl-RDP (its modes, combiner,
+ * colours, images, scissor and tiles are the state's; TMEM is whatever it held). The upscaled copy of RDRAM
+ * (XBA-185) is derived: paraLLEl-RDP compares RDRAM with its reference copy before each pass and takes the 1x pixels
+ * where they changed, so the upscaled frame buffers follow the loaded RDRAM from the next frame drawn. */
+struct VkShadow {
+    uint64_t cmd[0x40], tile[8], size[8], valid;
+    uint32_t tiles, sizes;
+};
+
+size_t vk_state_extra_size(void *p)
+{
+    (void)p;
+    return sizeof(VkShadow);
+}
+
+void vk_state_save(void *p, n64_rdp_common_state *c, uint8_t *extra)
+{
+    VkRdp *d = static_cast<VkRdp *>(p);
+    on_thread();
+    sync(d);
+    memset(c, 0, sizeof *c);
+    c->start = d->start;
+    c->end = d->end;
+    c->current = d->current;
+    c->status = d->status;
+    c->clock = d->clock;
+    c->bufbusy = d->bufbusy;
+    c->pipebusy = d->pipebusy;
+    c->tmemc = d->tmemc;
+    c->start_pending = (uint32_t)d->start_pending;
+    c->npend = (uint32_t)d->npend;
+    for (int i = 0; i < d->npend && i < 22; i++)
+        c->pend[i] = (uint64_t)d->pend[2 * i] << 32 | d->pend[2 * i + 1];
+    c->fe_cycle = d->fe_cycle;
+    c->fe_ci_size = d->fe_ci_size;
+    c->fe_ci_width = d->fe_ci_width;
+    c->fe_zon = d->fe_zon;
+    c->fe_sc_y0 = d->fe_sc_y0;
+    c->fe_sc_y1 = d->fe_sc_y1;
+    c->fe_ci_addr = d->fe_ci_addr;
+    c->fe_zi_addr = d->fe_zi_addr;
+    c->fe_ti_size = 0;
+    c->fe_ti_width = 1;
+    VkShadow sh{};
+    memcpy(sh.cmd, d->shadow, sizeof sh.cmd);
+    memcpy(sh.tile, d->shadow_tile, sizeof sh.tile);
+    memcpy(sh.size, d->shadow_size, sizeof sh.size);
+    sh.valid = d->shadow_valid;
+    sh.tiles = d->shadow_tiles;
+    sh.sizes = d->shadow_sizes;
+    memcpy(extra, &sh, sizeof sh);
+}
+
+int vk_state_load(void *p, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
+{
+    VkRdp *d = static_cast<VkRdp *>(p);
+    if ((extra && n != sizeof(VkShadow)) || c->npend > 22)
+        return -1;
+    on_thread();
+    sync(d);
+    d->start = c->start;
+    d->end = c->end;
+    d->current = c->current;
+    d->status = c->status;
+    d->clock = c->clock;
+    d->bufbusy = c->bufbusy;
+    d->pipebusy = c->pipebusy;
+    d->tmemc = c->tmemc;
+    d->start_pending = (int)c->start_pending;
+    d->npend = (int)c->npend;
+    for (int i = 0; i < d->npend; i++) {
+        d->pend[2 * i] = (uint32_t)(c->pend[i] >> 32);
+        d->pend[2 * i + 1] = (uint32_t)c->pend[i];
+    }
+    d->fe_cycle = c->fe_cycle;
+    d->fe_ci_size = c->fe_ci_size;
+    d->fe_ci_width = c->fe_ci_width;
+    d->fe_zon = c->fe_zon;
+    d->fe_sc_y0 = c->fe_sc_y0;
+    d->fe_sc_y1 = c->fe_sc_y1;
+    d->fe_ci_addr = c->fe_ci_addr;
+    d->fe_zi_addr = c->fe_zi_addr;
+    d->wr_lo[0] = d->wr_hi[0] = d->wr_lo[1] = d->wr_hi[1] = 0;
+    if (!extra)
+        return 0;
+    VkShadow sh;
+    memcpy(&sh, extra, sizeof sh);
+    memcpy(d->shadow, sh.cmd, sizeof d->shadow);
+    memcpy(d->shadow_tile, sh.tile, sizeof d->shadow_tile);
+    memcpy(d->shadow_size, sh.size, sizeof d->shadow_size);
+    d->shadow_valid = sh.valid;
+    d->shadow_tiles = sh.tiles;
+    d->shadow_sizes = sh.sizes;
+    if (d->failed)
+        return 0;
+    auto put1 = [d](uint64_t w) {
+        const uint32_t words[2] = { (uint32_t)(w >> 32), (uint32_t)w };
+        d->cp->enqueue_command(2, words);
+        d->unsynced = true;
+    };
+    for (int id = 0; id < 0x40; id++)
+        if (sh.valid >> id & 1)
+            put1(sh.cmd[id]);
+    for (int t = 0; t < 8; t++) {
+        if (sh.tiles >> t & 1)
+            put1(sh.tile[t]);
+        if (sh.sizes >> t & 1)
+            put1(sh.size[t]);
+    }
+    sync(d);
+    return 0;
+}
+
 } // namespace
 
 extern "C" const n64_rdp_ops n64_rdp_vk_ops = { "vulkan", vk_create, vk_destroy, vk_reset, vk_attach_dmem,
                                                 vk_read_reg, vk_write_reg, vk_run, vk_set_threads, vk_flush,
-                                                vk_failed, vk_upscale, vk_scanout_scale, vk_scanout };
+                                                vk_failed, vk_upscale, vk_scanout_scale, vk_scanout,
+                                                vk_state_extra_size, vk_state_save, vk_state_load };

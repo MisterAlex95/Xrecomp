@@ -44,6 +44,7 @@
  * for the same reason. */
 #include "n64_devices.h"
 #include "n64_rdp.h"
+#include "n64_rdp_backend.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -2744,6 +2745,105 @@ void n64_rdp_reset(n64_rdp *d)
 }
 
 void n64_rdp_attach_dmem(n64_rdp *d, const uint8_t *dmem) { d->dmem = dmem; }
+
+/* ---- Save states (XBA-183, n64_rdp_backend.h) ---------------------------------------------------------------------- */
+/* The back end's own bytes: renderer 0's drawing state (every renderer holds the same once flushed: they all run every
+ * command), its primitive count (the noise seed) and the hidden RDRAM bits, four 2-bit values per byte. */
+static size_t hidden_n(const n64_rdp *d) { return d->bus.rdram_size / 2 + 1; }
+
+size_t n64_rdp_state_extra_size(n64_rdp *d)
+{
+    return sizeof(rdp_state) + 4 + (hidden_n(d) + 3) / 4;
+}
+
+void n64_rdp_state_save_sw(n64_rdp *d, n64_rdp_common_state *c, uint8_t *extra)
+{
+    n64_rdp_flush(d);
+    memset(c, 0, sizeof *c);
+    c->start = d->start;
+    c->end = d->end;
+    c->current = d->current;
+    c->status = d->status;
+    c->clock = d->clock;
+    c->bufbusy = d->bufbusy;
+    c->pipebusy = d->pipebusy;
+    c->tmemc = d->tmemc;
+    c->start_pending = (uint32_t)d->start_pending;
+    c->npend = (uint32_t)d->npend;
+    memcpy(c->pend, d->pend, sizeof c->pend);
+    c->fe_cycle = d->fe_cycle;
+    c->fe_ci_size = d->fe_ci_size;
+    c->fe_ci_width = d->fe_ci_width;
+    c->fe_zon = d->fe_zon;
+    c->fe_sc_y0 = d->fe_sc_y0;
+    c->fe_sc_y1 = d->fe_sc_y1;
+    c->fe_ci_addr = d->fe_ci_addr;
+    c->fe_zi_addr = d->fe_zi_addr;
+    c->fe_ti_addr = d->fe_ti_addr;
+    c->fe_ti_size = d->fe_ti_size;
+    c->fe_ti_width = d->fe_ti_width;
+    memcpy(extra, &d->rd[0]->s, sizeof(rdp_state));
+    memcpy(extra + sizeof(rdp_state), &d->rd[0]->prim_count, 4);
+    uint8_t *h = extra + sizeof(rdp_state) + 4;
+    const size_t n = hidden_n(d);
+    memset(h, 0, (n + 3) / 4);
+    for (size_t i = 0; i < n; i++)
+        h[i >> 2] |= (uint8_t)((d->hidden[i] & 3) << ((i & 3) * 2));
+}
+
+int n64_rdp_state_load_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
+{
+    if (extra && n != n64_rdp_state_extra_size(d))
+        return -1;
+    if (c->npend > 24)
+        return -1;
+    n64_rdp_flush(d);
+    d->start = c->start;
+    d->end = c->end;
+    d->current = c->current;
+    d->status = c->status;
+    d->clock = c->clock;
+    d->bufbusy = c->bufbusy;
+    d->pipebusy = c->pipebusy;
+    d->tmemc = c->tmemc;
+    d->start_pending = (int)c->start_pending;
+    d->npend = (int)c->npend;
+    memcpy(d->pend, c->pend, sizeof d->pend);
+    d->fe_cycle = c->fe_cycle;
+    d->fe_ci_size = c->fe_ci_size;
+    d->fe_ci_width = c->fe_ci_width;
+    d->fe_zon = c->fe_zon;
+    d->fe_sc_y0 = c->fe_sc_y0;
+    d->fe_sc_y1 = c->fe_sc_y1;
+    d->fe_ci_addr = c->fe_ci_addr;
+    d->fe_zi_addr = c->fe_zi_addr;
+    d->fe_ti_addr = c->fe_ti_addr;
+    d->fe_ti_size = c->fe_ti_size;
+    d->fe_ti_width = c->fe_ti_width;
+    d->wr_lo[0] = d->wr_hi[0] = d->wr_lo[1] = d->wr_hi[1] = 0;
+    d->haz_lo = UINT32_MAX;
+    d->haz_hi = 0;
+    rdp_state st;
+    uint32_t prims = 0;
+    if (extra) {
+        memcpy(&st, extra, sizeof st);
+        memcpy(&prims, extra + sizeof st, 4);
+        const uint8_t *h = extra + sizeof st + 4;
+        for (size_t i = 0; i < hidden_n(d); i++)
+            d->hidden[i] = (uint8_t)((h[i >> 2] >> ((i & 3) * 2)) & 3);
+    } else { /* another back end's state: its drawing state is not ours, it starts as after a reset */
+        state_reset(&st);
+        memset(d->hidden, 0, hidden_n(d));
+    }
+    for (int i = 0; i < d->nthreads; i++) {
+        d->rd[i]->s = st;
+        d->rd[i]->prim_count = prims;
+        d->rd[i]->dirty = 1;
+        d->rd[i]->tdirty = 1;
+        tmem_dirty(d->rd[i], 0, 4096);
+    }
+    return 0;
+}
 
 uint32_t n64_rdp_read_reg(n64_rdp *d, uint32_t reg)
 {

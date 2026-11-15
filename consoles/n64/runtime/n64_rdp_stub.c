@@ -2,6 +2,7 @@
  * draws nothing. Commands from CURRENT to END (RDRAM or, with XBUS, DMEM) are skipped by their length; SYNC_FULL raises
  * the DP interrupt, so code that waits for the RDP to finish carries on. */
 #include "n64_rdp.h"
+#include "n64_rdp_backend.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,34 @@ void n64_rdp_reset(n64_rdp *d)
 }
 
 void n64_rdp_attach_dmem(n64_rdp *d, const uint8_t *dmem) { d->dmem = dmem; }
+
+/* Save states (XBA-183): the registers only. */
+size_t n64_rdp_state_extra_size(n64_rdp *d)
+{
+    (void)d;
+    return 0;
+}
+
+void n64_rdp_state_save_sw(n64_rdp *d, n64_rdp_common_state *c, uint8_t *extra)
+{
+    (void)extra;
+    memset(c, 0, sizeof *c);
+    c->start = d->start;
+    c->end = d->end;
+    c->current = d->current;
+    c->status = d->status;
+}
+
+int n64_rdp_state_load_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
+{
+    if (extra && n != 0)
+        return -1;
+    d->start = c->start;
+    d->end = c->end;
+    d->current = c->current;
+    d->status = c->status;
+    return 0;
+}
 
 uint32_t n64_rdp_read_reg(n64_rdp *d, uint32_t reg)
 {

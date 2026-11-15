@@ -12,7 +12,14 @@
  * as XRGB; it is shown at 4:3 whatever its size (host_window_set_aspect), as a television did, less the VI's black
  * guard band (8 VI pixels each side, RECOMP_N64_CROP_EDGES), which a television hid in its overscan. With the Vulkan
  * RDP upscaling (RECOMP_N64_UPSCALE / RECOMP_UPSCALE, XBA-185) the picture is its scanout, 640 VI pixels x the scale
- * wide, in buffers allocated for that size. */
+ * wide, in buffers allocated for that size.
+ *
+ * Save states and fast-forward (XBA-183, recomp_states.h), the PS1 runtime's way: the run attaches itself while it
+ * plays; the in-game menu, the pad chords (Back + right / left shoulder: quick save / load; Back + right trigger held:
+ * fast-forward) and the desktop keys (F1-F4 save, Shift+F1-F4 load, Tab held fast-forwards) save and load between
+ * frames under s_mu; fast-forward runs `speed` frames per shown frame, their audio averaged down. A state never writes
+ * the save files: after a load the cartridge and paks the game sees are the state's, written once the game writes
+ * them. */
 #define _GNU_SOURCE /* pread, nanosleep */
 #include "n64_runtime.h"
 
@@ -25,6 +32,7 @@
 #include "n64_rdp.h"
 #include "recomp_exit_hook.h"
 #include "recomp_lifecycle.h"
+#include "recomp_states.h"
 
 #include <SDL.h>
 
@@ -577,6 +585,117 @@ static void saves_clear(void)
     }
 }
 
+/* ---- Save states (XBA-183) ------------------------------------------------------------------------------------ */
+
+static char s_state_dir[1100]; /* <save dir>/n64-<KEY> */
+static int s_state_loaded;     /* a state was loaded: the loop resets its clock (under s_mu) */
+static int s_state_crop;       /* the run crops the VI's guard band: the thumbnail too */
+
+/* recomp_states_save's callback, any thread: the state and a thumbnail of the picture the VI shows (at 1x), taken
+ * under s_mu (between frames), then written to <dir>/state<slot>.st. */
+static int state_save_op(int slot, void *user)
+{
+    (void)user;
+    char path[1200];
+    if (recomp_states_slot_path(s_state_dir, slot, path, sizeof path) != 0)
+        return RECOMP_STATE_ESLOT;
+    static uint32_t xrgb[N64_SCREEN_MAX_W * N64_SCREEN_MAX_H];
+    static uint8_t rgba[N64_SCREEN_MAX_W * N64_SCREEN_MAX_H * 4];
+    static uint16_t thumb[RECOMP_STATE_THUMB_W * RECOMP_STATE_THUMB_H];
+    recomp_state_meta meta;
+    memset(&meta, 0, sizeof meta);
+    snprintf(meta.console, sizeof meta.console, "n64");
+    snprintf(meta.key, sizeof meta.key, "%.47s", s_key);
+    int w = 0, h = 0;
+    pthread_mutex_lock(&s_mu);
+    if (!s_m) {
+        pthread_mutex_unlock(&s_mu);
+        return RECOMP_STATE_ENOGAME;
+    }
+    size_t cap = n64_state_size(s_m), n = 0;
+    uint8_t *blob = malloc(cap);
+    if (blob)
+        n = n64_state_save(s_m, blob, cap);
+    meta.frames = n64_frames(s_m);
+    if (n64_display(s_m, xrgb, N64_SCREEN_MAX_W, N64_SCREEN_MAX_H, &w, &h) != 0 || w <= 0 || h <= 0) {
+        w = 320;
+        h = 240;
+        memset(xrgb, 0, sizeof(uint32_t) * 320 * 240);
+    }
+    pthread_mutex_unlock(&s_mu);
+    n64_runtime_xrgb_to_rgba(xrgb, rgba, (size_t)w * (size_t)h);
+    int cc = s_state_crop ? n64_runtime_crop_columns(w) : 0;
+    recomp_states_thumb(rgba + 4 * cc, w - 2 * cc, h, w * 4, 4, 3, thumb, &meta.thumb_w, &meta.thumb_h);
+    int rc = n ? recomp_states_write(path, &meta, thumb, blob, n) : RECOMP_STATE_EIO;
+    free(blob);
+    printf("n64: state slot %d %s (%zu bytes, frame %llu) %s\n", slot, rc == 0 ? "saved" : "not saved", n,
+           (unsigned long long)meta.frames, rc == 0 ? path : recomp_states_error(rc));
+    fflush(stdout);
+    return rc;
+}
+
+static int state_load_op(int slot, void *user)
+{
+    (void)user;
+    char path[1200];
+    if (recomp_states_slot_path(s_state_dir, slot, path, sizeof path) != 0)
+        return RECOMP_STATE_ESLOT;
+    recomp_state_meta meta;
+    uint8_t *blob = NULL;
+    size_t n = 0;
+    int rc = recomp_states_read(path, &meta, NULL, &blob, &n);
+    if (rc == RECOMP_STATE_OK && strcmp(meta.console, "n64") != 0)
+        rc = RECOMP_STATE_EGAME;
+    if (rc == RECOMP_STATE_OK) {
+        pthread_mutex_lock(&s_mu);
+        if (!s_m) {
+            rc = RECOMP_STATE_ENOGAME;
+        } else {
+            rc = n64_state_load(s_m, blob, n); /* N64_STATE_* share RECOMP_STATE_*'s values */
+            if (rc == N64_STATE_OK) {
+                int16_t sink[1024 * 2];
+                while (n64_audio_pull(s_m, sink, 1024) > 0) /* what the state had queued was heard already */
+                    ;
+                /* The state's saves are what the game sees; the files change only once it writes them. */
+                for (int kind = N64_SAVE_EEPROM4K; kind < N_SAVES; kind++) {
+                    size_t sn = 0;
+                    const uint8_t *cur = n64_save_data(s_m, (n64_save_kind)kind, &sn);
+                    if (cur && sn && (s_saved[kind] || (s_saved[kind] = malloc(sn))))
+                        memcpy(s_saved[kind], cur, sn);
+                }
+                s_state_loaded = 1;
+            }
+        }
+        pthread_mutex_unlock(&s_mu);
+    }
+    free(blob);
+    if (rc == 0)
+        printf("n64: state slot %d loaded (%s)\n", slot, path);
+    else
+        printf("n64: state slot %d not loaded: %s\n", slot, recomp_states_error(rc));
+    fflush(stdout);
+    return rc;
+}
+
+/* Desktop keys of the save states: F1-F4 save slots 1-4, Shift+F1-F4 load them, on the key's press. */
+static void state_keys(int held[4])
+{
+    const Uint8 *ks = SDL_GetKeyboardState(NULL);
+    if (!ks)
+        return;
+    int shift = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
+    for (int i = 0; i < 4; i++) {
+        int down = ks[SDL_SCANCODE_F1 + i];
+        if (down && !held[i]) {
+            if (shift)
+                recomp_states_load(i + 1);
+            else
+                recomp_states_save(i + 1);
+        }
+        held[i] = down;
+    }
+}
+
 /* ---- The run -------------------------------------------------------------------------------------------------- */
 
 static uint64_t now_ns(void)
@@ -642,7 +761,11 @@ typedef struct pad_in {
     int any; /* a host pad drives this controller */
     uint16_t buttons;
     int8_t x, y;
+    int quick; /* RECOMP_CHORD_SAVE / _LOAD: Back + a shoulder went down (recomp_states_chord) */
+    int ff;    /* Back + right trigger held: fast-forward */
 } pad_in;
+
+static int s_quick_held[HOST_PAD_PORTS]; /* recomp_states_chord's state per host pad */
 
 /* The host pads for N64 controller `port`, through the player's mapping (the on-screen pad joins host pad 1,
  * console_pad_read; the mapping's range / deadzone, when set, over the runtime's): with one player every pad drives
@@ -663,6 +786,19 @@ static void pads_read(int port, int players, int range, int dead, pad_in *out)
         if (!console_pad_read(&s_pad_map, p, &o))
             continue;
         out->any = 1;
+        int swallow = 0, act = recomp_states_chord(!!(o.host_buttons & HOST_PAD_BACK),
+                                                   !!(o.host_buttons & HOST_PAD_LSHOULDER),
+                                                   !!(o.host_buttons & HOST_PAD_RSHOULDER), &s_quick_held[p], &swallow);
+        if (act && !out->quick)
+            out->quick = act;
+        if (swallow) /* the chord's Back and shoulders reach the game as nothing */
+            o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_LEFT_SHOULDER) |
+                                                                CPS_BIT(CPS_RIGHT_SHOULDER));
+        HostPadState st;
+        if (host_pad_read(p, &st) && (st.buttons & HOST_PAD_BACK) && st.axis[HOST_PAD_AXIS_RT] > 16384) {
+            out->ff = 1; /* the chord's Back and right trigger reach the game as nothing */
+            o.buttons &= ~console_pad_targets_using(&s_pad_map, CPS_BIT(CPS_BACK) | CPS_BIT(CPS_RIGHT_TRIGGER));
+        }
         out->buttons |= n64_runtime_buttons_of(o.buttons);
         int8_t x, y;
         n64_runtime_stick(o.stick_x[0], o.stick_y[0], range, dead, &x, &y);
@@ -863,6 +999,22 @@ int n64_runtime_run(const n64_runtime_opts *o)
     static int listening;
     if (!listening && recomp_lifecycle_listen(on_lifecycle, NULL) == 0)
         listening = 1;
+    /* Save states: <save dir>/n64-<KEY>/state<N>.st, beside the saves (none without a save dir). */
+    if (!o->save_dir || !*o->save_dir ||
+        snprintf(s_state_dir, sizeof s_state_dir, "%s/n64-%s", o->save_dir, key) >= (int)sizeof s_state_dir)
+        s_state_dir[0] = 0;
+    s_state_crop = n64_runtime_crop_edges(o);
+    recomp_state_ops sops = {"n64", state_save_op, state_load_op, NULL};
+    recomp_states_attach(&sops, s_state_dir);
+    printf("n64: save states %s%s, fast-forward x%d%s\n", s_state_dir[0] ? "in " : "off (no save dir)", s_state_dir,
+           recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
+    memset(s_quick_held, 0, sizeof s_quick_held);
+    int resume = recomp_states_resume_enabled() && s_state_dir[0];
+    if (resume) {
+        int r = recomp_states_resume();
+        printf("n64: resume from the automatic slot: %s\n", r == RECOMP_STATE_EEMPTY ? "nothing saved yet"
+                                                                                     : recomp_states_error(r));
+    }
 
     int window = !o->headless && !host_window_headless();
     if (SDL_WasInit(SDL_INIT_EVENTS) == 0)
@@ -924,6 +1076,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
     n64_runtime_stuck stuck;
     n64_runtime_stuck_init(&stuck);
     uint64_t fault_logged = 0;
+    int fkeys[4] = {0, 0, 0, 0}, was_ff = 0;
+    recomp_ff_carry carry = {{0, 0}, 0};
 
     for (;;) {
         int running = 1;
@@ -937,6 +1091,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
         }
         if (!running) {
             printf("n64: quit asked after %llu frames\n", (unsigned long long)frames);
+            if (resume && frames > 0) /* the player closed the window: the next start resumes here */
+                printf("n64: automatic slot %s\n", recomp_states_error(recomp_states_save(RECOMP_STATE_AUTO)));
             break;
         }
         if (recomp_lifecycle_paused()) {
@@ -963,8 +1119,14 @@ int n64_runtime_run(const n64_runtime_opts *o)
         }
 
         pad_in pads[4];
-        for (int port = 0; port < players; port++)
+        int quick = 0, ffhold = 0;
+        for (int port = 0; port < players; port++) {
             pads_read(port, players, range, dead, &pads[port]);
+            if (pads[port].quick && !quick)
+                quick = pads[port].quick;
+            ffhold |= pads[port].ff;
+        }
+        recomp_states_chord_run(quick);
         pads[0].buttons |= o->buttons;
 #ifndef __ANDROID__ /* a device's own controls may also come as keys (arrows for its D-pad): not the stick there */
         if (window) {
@@ -974,42 +1136,85 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 n64_runtime_stick(kx, ky, range, 0, &pads[0].x, &pads[0].y);
         }
 #endif
-        pthread_mutex_lock(&s_mu);
-        for (int port = 0; port < players; port++)
-            n64_set_controller(m, port, 1, pads[port].buttons, pads[port].x, pads[port].y);
-        uint64_t c0 = n64_cycles(m);
-        n64_run_frame(m);
-        uint64_t frame_ns = n64_runtime_frame_ns(n64_cycles(m) - c0);
-        guest_health(m, &stuck, &fault_logged, frame_ns);
-        int kind = n64_save_kind_detected(m);
-        int cart_dirty = kind != N64_SAVE_NONE && n64_save_take_dirty(m, (n64_save_kind)kind);
-        if (kind != last_kind && kind != N64_SAVE_NONE && !cart_dirty && !s_saved[kind])
-            snapshot(m, kind); /* detected at its first access: written once the game changes it */
-        int dirty = cart_dirty;
-        for (int p = 0; p < 4; p++)
-            dirty |= n64_save_take_dirty(m, (n64_save_kind)(N64_SAVE_PAK0 + p));
-        /* Frame skip: the picture of a frame the host is late for is not made nor shown (the frame itself ran). */
-        int audio_low = audio && heard && !o->unpaced && host_audio_queued() < AUDIO_TARGET_FRAMES / 4;
-        int skip = n64_runtime_frameskip(o->unpaced && fskip < 0 ? 0 : fskip, o->unpaced ? 0 : behind,
-                                         frame_ns, audio_low, &skip_run);
-        if ((o->frames && frames + 1 >= o->frames) || (o->capture_path && o->capture_frame == frames + 1))
-            skip = 0; /* the last frame of a bounded run is the screenshot; a capture is a capture */
-        int on = skip ? display_on > 0 : n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
-        skipped += (uint64_t)skip;
-        if (rumble_on)
-            rumble_drive(m, players, rumble_sent); /* RECOMP_RUMBLE=0: never */
-        pthread_mutex_unlock(&s_mu);
-        frames++;
-        fps_frames++;
+        if (window)
+            state_keys(fkeys);
+        const Uint8 *ks = window ? SDL_GetKeyboardState(NULL) : NULL;
+        recomp_ff_hold(ffhold || (ks && ks[SDL_SCANCODE_TAB]));
+        int ff = recomp_ff_active(), speed = recomp_ff_speed();
+        if (ff != was_ff) {
+            printf("n64: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",
+                   (unsigned long long)frames);
+            fflush(stdout);
+            carry = (recomp_ff_carry){{0, 0}, 0};
+            was_ff = ff;
+            next = now_ns();
+            behind = 0;
+        }
+        /* Fast-forward: `speed` N64 frames per shown frame (max: as many as fit in one display frame), no frame skip
+         * (only the last frame's picture is made anyway). */
+        int steps = ff ? (speed ? speed : 64) : 1, dirty = 0, skip = 0, on = display_on > 0;
+        uint64_t frame_ns = 16683333, burst_end = now_ns() + 15000000;
+        for (int step = 0; step < steps; step++) {
+            pthread_mutex_lock(&s_mu);
+            for (int port = 0; port < players; port++)
+                n64_set_controller(m, port, 1, pads[port].buttons, pads[port].x, pads[port].y);
+            uint64_t c0 = n64_cycles(m);
+            n64_run_frame(m);
+            frame_ns = n64_runtime_frame_ns(n64_cycles(m) - c0);
+            if (s_state_loaded) {
+                s_state_loaded = 0;
+                next = now_ns(); /* a loaded state: the clock starts again from it */
+                behind = 0;
+            }
+            guest_health(m, &stuck, &fault_logged, frame_ns);
+            int kind = n64_save_kind_detected(m);
+            int cart_dirty = kind != N64_SAVE_NONE && n64_save_take_dirty(m, (n64_save_kind)kind);
+            if (kind != last_kind && kind != N64_SAVE_NONE && !cart_dirty && !s_saved[kind])
+                snapshot(m, kind); /* detected at its first access: written once the game changes it */
+            dirty |= cart_dirty;
+            for (int p = 0; p < 4; p++)
+                dirty |= n64_save_take_dirty(m, (n64_save_kind)(N64_SAVE_PAK0 + p));
+            int last = step == steps - 1 || !ff || (o->frames && frames + 1 >= o->frames) ||
+                       (!speed && now_ns() >= burst_end);
+            if (last) {
+                /* Frame skip: the picture of a frame the host is late for is not made nor shown (the frame itself
+                 * ran). */
+                int audio_low = audio && heard && !o->unpaced && host_audio_queued() < AUDIO_TARGET_FRAMES / 4;
+                skip = ff ? 0 : n64_runtime_frameskip(o->unpaced && fskip < 0 ? 0 : fskip, o->unpaced ? 0 : behind,
+                                                      frame_ns, audio_low, &skip_run);
+                if ((o->frames && frames + 1 >= o->frames) || (o->capture_path && o->capture_frame == frames + 1))
+                    skip = 0; /* the last frame of a bounded run is the screenshot; a capture is a capture */
+                on = skip ? display_on > 0 : n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
+                skipped += (uint64_t)skip;
+            }
+            if (rumble_on)
+                rumble_drive(m, players, rumble_sent); /* RECOMP_RUMBLE=0: never */
+            pthread_mutex_unlock(&s_mu);
+            frames++;
+            fps_frames++;
+            if (kind != last_kind) {
+                printf("n64: cartridge save type %s at frame %llu\n", save_kind_name(kind), (unsigned long long)frames);
+                last_kind = kind;
+            }
+            if (frames == 2 ||
+                (frames > 2 && (frame_ns > last_frame_ns + 500000 || last_frame_ns > frame_ns + 500000))) {
+                printf("n64: VI rate %.2f Hz at frame %llu\n", 1e9 / (double)frame_ns, (unsigned long long)frames);
+                last_frame_ns = frame_ns;
+            }
+            /* Sound: everything the frame made (about 800 sample frames at 60 Hz); averaged down while
+             * fast-forwarding. */
+            size_t got;
+            while ((got = n64_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2)) > 0) {
+                heard = 1;
+                if (ff)
+                    got = speed ? recomp_ff_audio(pcm, got, speed, &carry) : 0;
+                if (audio && got)
+                    host_audio_queue(pcm, (uint32_t)got);
+            }
+            if (last)
+                break;
+        }
 
-        if (kind != last_kind) {
-            printf("n64: cartridge save type %s at frame %llu\n", save_kind_name(kind), (unsigned long long)frames);
-            last_kind = kind;
-        }
-        if (frames == 2 || (frames > 2 && (frame_ns > last_frame_ns + 500000 || last_frame_ns > frame_ns + 500000))) {
-            printf("n64: VI rate %.2f Hz at frame %llu\n", 1e9 / (double)frame_ns, (unsigned long long)frames);
-            last_frame_ns = frame_ns;
-        }
         if (skip) {
             /* keep the last picture and its size */
         } else if (!on || dw <= 0 || dh <= 0 || dw > max_w || dh > max_h) {
@@ -1025,14 +1230,6 @@ int n64_runtime_run(const n64_runtime_opts *o)
             if (display_on >= 0 || !on)
                 printf("n64: display %s at frame %llu\n", on ? "on" : "off", (unsigned long long)frames);
             display_on = on;
-        }
-
-        /* Sound: everything the frame made (about 800 sample frames at 60 Hz). */
-        size_t got;
-        while ((got = n64_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2)) > 0) {
-            heard = 1;
-            if (audio)
-                host_audio_queue(pcm, (uint32_t)got);
         }
 
         uint64_t t = now_ns();
@@ -1069,7 +1266,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
         if (o->frames && frames >= o->frames)
             break;
 
-        if (!o->unpaced) {
+        if (!o->unpaced && !(ff && !speed)) {
             next += frame_ns;
             /* Audio-driven: a queue above its target slows the clock a little, below it speeds it up (±2%). */
             if (audio && heard) {
@@ -1107,6 +1304,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
         for (int p = 0; p < HOST_PAD_PORTS; p++)
             host_pad_rumble(p, 0, 0, 0);
     recomp_exit_hook_set(NULL);
+    recomp_states_detach(); /* before s_mu: a save / load in progress finishes first */
+    recomp_ff_hold(0);
     if (audio)
         host_audio_close();
     if (window)

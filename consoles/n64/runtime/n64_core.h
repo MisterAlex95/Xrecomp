@@ -163,6 +163,33 @@ const uint8_t *n64_save_data(n64_machine *m, n64_save_kind kind, size_t *size);
 int n64_save_take_dirty(n64_machine *m, n64_save_kind kind);
 int n64_save_load(n64_machine *m, n64_save_kind kind, const uint8_t *data, size_t size);
 
+/* Save states (XBA-183): the whole machine as a versioned blob: a header (magic, console "n64", N64_STATE_VERSION, the
+ * ROM's hash, RDRAM's size), then sections each checked against this build: the machine (the VR4300 with its GPRs,
+ * HI / LO, PC and delay slot state, COP0 with COUNT / COMPARE and the TLB, COP1 with FCSR and the FR mode; time and
+ * the event scheduler; MI, VI, AI with its DMA queue and resampler, PI, SI / PIF RAM with the controllers and paks, RI;
+ * EEPROM, SRAM and controller pak contents, the RTC), RDRAM (4 or 8 MB, all-zero 4 KB pages left out), the RSP
+ * (n64_devices.h: IMEM / DMEM, scalar and vector units), the RDP (its DPC registers and the back end's drawing state;
+ * drawn out first), FlashRAM, the IS-Viewer buffer, the recompiled code's boot flag. Take and load them between
+ * frames. A state is the machine only, so it loads the same interpreted or recompiled (lifted code is checked against
+ * RDRAM again after a load: every page counts as written). A state never writes the save files: the cartridge and
+ * paks in the machine become the state's, the runtime writes them once the game does (n64_save_take_dirty is clear
+ * after a load).
+ * n64_state_size: the bytes n64_state_save needs now (RDRAM's zero pages depend on its contents: call it right
+ * before). n64_state_save: the size written, 0 when cap is too small. n64_state_check / n64_state_load:
+ * N64_STATE_OK, or why the state is refused (another ROM, another version / build or RDRAM size, not a state); the
+ * machine is left as it was. The values match recomp_states.h's RECOMP_STATE_*. */
+#define N64_STATE_VERSION 1
+enum {
+    N64_STATE_OK = 0,
+    N64_STATE_EGAME = -3,
+    N64_STATE_EVERSION = -4,
+    N64_STATE_ECORRUPT = -7,
+};
+size_t n64_state_size(n64_machine *m);
+size_t n64_state_save(n64_machine *m, uint8_t *out, size_t cap);
+int n64_state_check(n64_machine *m, const uint8_t *data, size_t size);
+int n64_state_load(n64_machine *m, const uint8_t *data, size_t size);
+
 /* Debug / test accessors: memory without side effects (virtual KSEG0 / KSEG1 or physical addresses below
  * 0x20000000: RDRAM, RSP DMEM / IMEM, ROM, PIF RAM; others read 0), CPU registers, PC, HI / LO, COP0 / COP1. */
 uint32_t n64_peek32(n64_machine *m, uint32_t addr);

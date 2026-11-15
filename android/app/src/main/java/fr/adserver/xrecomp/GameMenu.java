@@ -46,7 +46,8 @@ import java.util.function.LongSupplier;
  *       in the game every key it saw go down and centres every stick it saw move, and the companion's buttons;
  *       closing releases the companion's again. A key whose down came while open acts on its release, so nothing of
  *       it reaches the game.</li>
- *   <li>Items: Resume, for a GBA or PS1 game Save state, Load state (four slots each) and Fast-forward (XBA-182),
+ *   <li>Items: Resume, for a GBA, PS1 or N64 game Save state, Load state (four slots each) and Fast-forward
+ *       (XBA-182, XBA-183),
  *       Settings (performance overlay, game volume, bottom screen: all live; this game's language,
  *       widescreen and 480p: next start; Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
  *       background; « Back to the home screen » in a game's own app, which has no launcher to show), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
@@ -122,7 +123,10 @@ final class GameMenu {
             return false;
         }
 
-        /** XBA-182: a GBA or PS1 game with save states runs (MenuNative.nativeStatesAvailable): the state rows show. */
+        /**
+         * XBA-182 / XBA-183: a GBA, PS1 or N64 game with save states runs (MenuNative.nativeStatesAvailable): the state
+         * rows show.
+         */
         default boolean statesSupported() {
             return false;
         }
@@ -880,7 +884,7 @@ final class GameMenu {
         case MAIN:
             pageV.setVisibility(View.GONE);
             row(Item.RESUME, s(R.string.MENU_RESUME));
-            if (statesSupported()) {   // XBA-182: a GBA or PS1 game
+            if (statesSupported()) {   // XBA-182 / XBA-183: a GBA, PS1 or N64 game
                 row(Item.STATE_SAVE, s(R.string.MENU_STATE_SAVE));
                 row(Item.STATE_LOAD, s(R.string.MENU_STATE_LOAD));
                 Widgets.MenuRow ff = row(Item.FAST_FORWARD, s(R.string.MENU_FAST_FORWARD));
@@ -908,7 +912,7 @@ final class GameMenu {
             r = row(Item.VOLUME, s(R.string.MENU_VOLUME));
             r.setChoices(new String[] { volumeLabel(100), s(R.string.MENU_MUTED) });
             r.cycler = dir -> setVolume(volume + dir * VOLUME_STEP);
-            if (statesSupported()) {   // a GBA or PS1 game: the automatic slot
+            if (statesSupported()) {   // a GBA, PS1 or N64 game: the automatic slot
                 r = row(Item.AUTO_RESUME, s(R.string.MENU_RESUME_AUTO));
                 r.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
                 r.cycler = dir -> setAutoResume(!GameStore.autoResume(activity));
@@ -993,7 +997,7 @@ final class GameMenu {
             if (cm != null) {   // a GBA, PS1 or N64 game: its buttons and where they come from (XBA-158 / 168 / 174)
                 kvRow(s(R.string.CTL_MENU), s(R.string.CTL_MENU_X));
                 kvRow(s(R.string.CTL_COMBO), s(R.string.CTL_COMBO_X));
-                if (cm.console == Console.GBA || cm.console == Console.PS1) {   // XBA-182: the fixed pad chords
+                if (cm.console.hasSaveStates()) {   // XBA-182 / XBA-183: the fixed pad chords
                     kvRow(s(R.string.CTL_FF), s(R.string.CTL_FF_X));
                     kvRow(s(R.string.CTL_QUICK_SAVE), s(R.string.CTL_QUICK_SAVE_X));
                     kvRow(s(R.string.CTL_QUICK_LOAD), s(R.string.CTL_QUICK_LOAD_X));
@@ -1174,7 +1178,7 @@ final class GameMenu {
 
     // ---- Quick save / load and resuming ------------------------------------------------------------------------
 
-    /** « Resume where I left off » applies: a GBA or PS1 game with states, and the setting on. */
+    /** « Resume where I left off » applies: a GBA, PS1 or N64 game with states, and the setting on. */
     private boolean autoResumes() {
         return GameStore.autoResume(activity) && statesSupported();
     }

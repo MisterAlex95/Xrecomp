@@ -1,8 +1,10 @@
 /* N64 core unit tests (XBA-169, XBA-172): ROM byte orders and header, the HLE PIF boot state, joybus (controllers,
  * controller pak with its CRC, rumble pak, EEPROM), SRAM and FlashRAM through the PI, PI DMA, the AI (queue,
- * interrupt, 48 kHz output) and the VI picture. Register sequences and data are made here; no ROM files. */
+ * interrupt, 48 kHz output), the VI picture and save states (XBA-183). Register sequences and data are made here; no
+ * ROM files. */
 #include "n64_internal.h"
 #include "n64_rdp.h"
+#include "n64_recomp.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -939,6 +941,103 @@ static void test_vi(void)
     n64_destroy(m);
 }
 
+/* ---- Save states (XBA-183) -------------------------------------------------------------------------------------- */
+
+static void test_states(void)
+{
+    n64_machine *m = mk(NULL);
+    /* A machine with something everywhere: CPU and FPU registers, a TLB entry, RDRAM, the RSP, saves and paks, VI and
+     * AI registers, a FlashRAM cartridge, an IS-Viewer buffer. */
+    for (int r = 1; r < 32; r++)
+        m->cpu.gpr[r] = 0x0123456789ABCDEFull * (uint64_t)r;
+    m->cpu.hi = 0x1111;
+    m->cpu.lo = 0x2222;
+    for (int r = 0; r < 32; r++)
+        m->cpu.fpr[r] = 0x4000000000000000ull + (uint64_t)r;
+    m->cpu.fcsr = 0x01000003u;
+    m->cpu.tlb[3].hi = 0x80000000ull;
+    m->cpu.tlb[3].lo[0] = 0x1234;
+    for (uint32_t i = 0; i < 0x1000; i += 4)
+        n64_poke32(m, 0x80100000u + i, 0xC0DE0000u + i);
+    n64_poke32(m, 0x80700000u, 0xFEEDFACEu);  /* the expansion pak's half */
+    n64_poke32(m, 0xA4000100u, 0x55AA55AAu);  /* DMEM */
+    n64_rsp_set_gpr(m->rsp, 7, 0xBEEF);
+    for (int i = 0; i < 64; i++) {
+        m->eeprom[i] = (uint8_t)(i * 3);
+        m->sram[i] = (uint8_t)(i * 5);
+        m->pak[1][i] = (uint8_t)(i * 7);
+    }
+    n64_save_set_kind(m, N64_SAVE_FLASH);
+    m->flash[100] = 0x42;
+    w32(m, 0x13FF0020, 0x41424344); /* IS-Viewer buffer */
+    w32(m, 0x0440000C, 0x200);      /* V_INTR */
+    w32(m, 0x04500014, 15);         /* AI_BITRATE */
+    for (int i = 0; i < 3; i++)
+        n64_run_frame(m);
+    n64_save_take_dirty(m, N64_SAVE_FLASH);
+
+    size_t cap = n64_state_size(m);
+    uint8_t *st = malloc(cap + 16);
+    size_t n = n64_state_save(m, st, cap);
+    CHECK(n == cap && n > 0, "state size %zu, saved %zu", cap, n);
+    CHECK(n64_state_save(m, st, cap - 1) == 0, "a too small buffer is refused");
+    n = n64_state_save(m, st, cap);
+    CHECK(n < 2u * 1024 * 1024, "zero pages left out: %zu bytes", n);
+    CHECK(n64_state_check(m, st, n) == N64_STATE_OK, "own state checks");
+
+    n64_machine *b = mk(NULL);
+    CHECK(n64_state_load(b, st, n) == N64_STATE_OK, "loads into a fresh machine");
+    char why[160] = "";
+    CHECK(n64_recomp_compare(m, b, why, sizeof why) == 0, "same machine after the load: %s", why);
+    CHECK_EQ(n64_peek32(b, 0x80700000u), 0xFEEDFACEu, "RDRAM above 4 MB");
+    CHECK_EQ(n64_rsp_get_gpr(b->rsp, 7), 0xBEEF, "RSP register");
+    CHECK(!memcmp(m->eeprom, b->eeprom, sizeof m->eeprom) && !memcmp(m->sram, b->sram, sizeof m->sram) &&
+              !memcmp(m->pak, b->pak, sizeof m->pak), "EEPROM, SRAM and paks");
+    CHECK(b->flash && b->flash[100] == 0x42 && b->save_kind == N64_SAVE_FLASH, "FlashRAM");
+    CHECK(b->isv && n64_be32(b->isv + 0x20) == 0x41424344u, "IS-Viewer buffer");
+    CHECK(!memcmp(m->vi, b->vi, sizeof m->vi) && m->ai_bitrate == b->ai_bitrate, "VI / AI registers");
+    CHECK(b->rom != m->rom && b->rsp != m->rsp && b->rsp && b->rdp && b->spmem == n64_rsp_mem(b->rsp), "host side kept");
+    int dirty = 0;
+    for (int k = N64_SAVE_EEPROM4K; k <= N64_SAVE_PAK3; k++)
+        dirty |= n64_save_take_dirty(b, (n64_save_kind)k);
+    CHECK(!dirty, "a load leaves the saves clean (the files change once the game writes)");
+    for (int i = 0; i < 3; i++) {
+        n64_run_frame(m);
+        n64_run_frame(b);
+    }
+    CHECK(n64_recomp_compare(m, b, why, sizeof why) == 0, "same run after the load: %s", why);
+
+    /* Refusals leave the machine as it was. */
+    n64_machine *c = mk(NULL);
+    uint32_t before = n64_peek32(c, 0x80100000u);
+    uint8_t *bad = malloc(n);
+    memcpy(bad, st, n);
+    bad[12] ^= 0xFF; /* the format version */
+    CHECK(n64_state_load(c, bad, n) == N64_STATE_EVERSION, "another version refused");
+    memcpy(bad, st, n);
+    bad[0] = 'Y';
+    CHECK(n64_state_load(c, bad, n) == N64_STATE_ECORRUPT, "not a state");
+    CHECK(n64_state_load(c, st, n - 100) == N64_STATE_ECORRUPT, "truncated");
+    CHECK(n64_state_load(c, st, 20) == N64_STATE_ECORRUPT, "header only");
+    CHECK_EQ(n64_peek32(c, 0x80100000u), before, "refused states change nothing");
+    n64_destroy(c);
+    n64_options small = {.force_pal = -1, .rdram_size = 0x400000u};
+    c = mk(&small);
+    CHECK(n64_state_load(c, st, n) == N64_STATE_EVERSION, "a 4 MB machine refuses an 8 MB state");
+    n64_destroy(c);
+    static uint8_t rom2[ROM_SIZE];
+    make_rom(rom2);
+    rom2[0x2000] ^= 1;
+    char err[128];
+    c = n64_create(rom2, ROM_SIZE, NULL, err, sizeof err);
+    CHECK(c && n64_state_load(c, st, n) == N64_STATE_EGAME, "another ROM refused");
+    n64_destroy(c);
+    free(bad);
+    free(st);
+    n64_destroy(b);
+    n64_destroy(m);
+}
+
 int main(void)
 {
     test_rom();
@@ -950,6 +1049,7 @@ int main(void)
     test_ai();
     test_ai_resampler();
     test_vi();
+    test_states();
     printf("n64_io: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

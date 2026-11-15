@@ -23,6 +23,7 @@
 #include "n64_devices.h"
 
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 
 /* arm64: the vector unit's hot ops and the quad loads / stores as NEON intrinsics (XBA-173), the portable C
@@ -185,6 +186,25 @@ void n64_rsp_reset(n64_rsp *s)
     s->mem_addr = s->dram_addr = 0;
     s->dma_len = 0;
     s->semaphore = 0;
+}
+
+/* Save states (XBA-183): everything up to the host side (the bus, the RDP; the ROMs after them are constants). */
+#define RSP_STATE_SIZE offsetof(n64_rsp, bus)
+
+size_t n64_rsp_state_size(n64_rsp *s)
+{
+    (void)s;
+    return RSP_STATE_SIZE;
+}
+
+void n64_rsp_state_save(n64_rsp *s, uint8_t *out) { memcpy(out, s, RSP_STATE_SIZE); }
+
+int n64_rsp_state_load(n64_rsp *s, const uint8_t *in, size_t n)
+{
+    if (n != RSP_STATE_SIZE)
+        return -1;
+    memcpy(s, in, RSP_STATE_SIZE);
+    return 0;
 }
 
 void n64_rsp_attach_rdp(n64_rsp *s, n64_rdp *dp)

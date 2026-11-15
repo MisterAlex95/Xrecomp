@@ -6,6 +6,7 @@
  * libdragon to reach main without graphics or audio microcode. */
 #include "n64_devices.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -48,6 +49,23 @@ void n64_rsp_reset(n64_rsp *s)
 }
 
 void n64_rsp_attach_rdp(n64_rsp *s, n64_rdp *dp) { s->dp = dp; }
+
+/* Save states (XBA-183): everything after the host side (the bus, the RDP). */
+#define RSP_STATE_OFF offsetof(n64_rsp, mem)
+#define RSP_STATE_SIZE (sizeof(n64_rsp) - RSP_STATE_OFF)
+size_t n64_rsp_state_size(n64_rsp *s)
+{
+    (void)s;
+    return RSP_STATE_SIZE;
+}
+void n64_rsp_state_save(n64_rsp *s, uint8_t *out) { memcpy(out, (uint8_t *)s + RSP_STATE_OFF, RSP_STATE_SIZE); }
+int n64_rsp_state_load(n64_rsp *s, const uint8_t *in, size_t n)
+{
+    if (n != RSP_STATE_SIZE)
+        return -1;
+    memcpy((uint8_t *)s + RSP_STATE_OFF, in, RSP_STATE_SIZE);
+    return 0;
+}
 uint8_t *n64_rsp_mem(n64_rsp *s) { return s->mem; }
 int n64_rsp_halted(n64_rsp *s) { return (s->status & ST_HALT) != 0; }
 uint32_t n64_rsp_get_gpr(n64_rsp *s, int r)

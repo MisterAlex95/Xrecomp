@@ -882,7 +882,10 @@ public class GameMenuTest {
         TestSupport.screenshot(menu.root, "menu-controls-gba");
     }
 
-    /** XBA-182: a GBA game's Controls page has the fast-forward chord; an N64 game's and the Xbox list do not. */
+    /**
+     * XBA-182 / XBA-183: a GBA game's and an N64 game's Controls page have the fast-forward and quick save / load
+     * chords; the Xbox list does not.
+     */
     @Test
     public void consoleControlsListFastForward() throws Exception {
         host.console = ConsolePadMap.parse(Console.GBA, "");
@@ -892,6 +895,14 @@ public class GameMenuTest {
         collect(menu.drawer, texts);
         assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_FF)));
         assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_FF_X)));
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        host.console = ConsolePadMap.parse(Console.N64, "");
+        menu.row(GameMenu.Item.CONTROLS).performClick();
+        texts.clear();
+        collect(menu.drawer, texts);
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_FF)));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_QUICK_SAVE)));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_QUICK_LOAD)));
         press(KeyEvent.KEYCODE_BUTTON_B);
         host.console = null;
         menu.row(GameMenu.Item.CONTROLS).performClick();
@@ -938,6 +949,30 @@ public class GameMenuTest {
         assertEquals(activity.getString(R.string.MENU_STATE_SAVE), rows.get(1).title);
         assertEquals(activity.getString(R.string.MENU_STATE_LOAD), rows.get(2).title);
         assertEquals(activity.getString(R.string.MENU_FAST_FORWARD), rows.get(3).title);
+    }
+
+    /**
+     * XBA-183: an N64 game with save states has the same rows as a GBA or PS1 game: Save state, Load state and
+     * Fast-forward on the main page, « Resume where I left off » in Settings beside its N64 rows.
+     */
+    @Test
+    public void n64GameStateRows() {
+        GameStore.rememberRomLaunch(activity, "/sdcard/roms/zelda.z64", "Zelda", "n64-NZLP-B2055FBD");
+        menu.release();
+        build();
+        statesGame();
+        menu.open("Back");
+        List<Widgets.MenuRow> rows = menu.rowsForTest();
+        assertSame(menu.row(GameMenu.Item.STATE_SAVE), rows.get(1));
+        assertSame(menu.row(GameMenu.Item.STATE_LOAD), rows.get(2));
+        assertSame(menu.row(GameMenu.Item.FAST_FORWARD), rows.get(3));
+        menu.row(GameMenu.Item.STATE_SAVE).performClick();
+        assertEquals(GameMenu.Page.SAVE_SLOTS, menu.page());
+        assertEquals(5, menu.rowsForTest().size());   // four slots, Back
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNotNull(menu.row(GameMenu.Item.AUTO_RESUME));
+        assertNotNull(menu.row(GameMenu.Item.UPSCALE));
     }
 
     @Test

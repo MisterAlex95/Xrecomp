@@ -31,6 +31,15 @@ public class ConsoleTest {
     @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
 
+    /** XBA-182 / XBA-183: the consoles whose runtimes save states (the in-game menu's state rows). */
+    @Test
+    public void saveStatesPerConsole() {
+        assertTrue(Console.GBA.hasSaveStates());
+        assertTrue(Console.PS1.hasSaveStates());
+        assertTrue(Console.N64.hasSaveStates());
+        assertFalse(Console.XBOX.hasSaveStates());
+    }
+
     private final Console.DiscKeyReader nativeChd = Console.chdReader;
 
     @After

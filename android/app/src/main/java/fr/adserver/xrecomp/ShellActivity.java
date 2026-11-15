@@ -341,8 +341,8 @@ public class ShellActivity extends SDLActivity {
     }
 
     /**
-     * RECOMP_STATE_RESUME for a GBA / PS1 runtime (recomp_states.h): « 1 » when « Resume where I left off » is on, so
-     * the automatic slot the menu saved when the player left is loaded before the first frame; unset otherwise.
+     * RECOMP_STATE_RESUME for a GBA / PS1 / N64 runtime (recomp_states.h): « 1 » when « Resume where I left off » is
+     * on, so the automatic slot the menu saved when the player left is loaded before the first frame; unset otherwise.
      */
     private void applyAutoResume(boolean consoleGame) {
         boolean on = consoleGame && GameStore.autoResume(this);
@@ -586,13 +586,13 @@ public class ShellActivity extends SDLActivity {
             }
         }
 
-        /** XBA-182: a GBA or PS1 game runs, and its runtime can save states. */
+        /** XBA-182 / XBA-183: a GBA, PS1 or N64 game runs, and its runtime can save states. */
         @Override
         public boolean statesSupported() {
             String tid = GameStore.launchedRom(ShellActivity.this) != null
                          ? GameStore.launchedTitleId(ShellActivity.this) : null;
             Console c = tid == null ? null : Console.ofKey(tid);
-            if (c != Console.GBA && c != Console.PS1)
+            if (c == null || !c.hasSaveStates())
                 return false;
             try {
                 return MenuNative.nativeStatesAvailable();

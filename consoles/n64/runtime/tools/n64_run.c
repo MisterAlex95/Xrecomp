@@ -3,6 +3,7 @@
  *   n64_run ROM [--frames N] [--result] [--ppm OUT.ppm] [--wav OUT.wav] [--tty] [--pad MASK] [--pal | --ntsc]
  *           [--save PATH] [--hash] [--info] [--regs] [--quiet]
  *           [--pack LIB.so [--lockstep] [--missed FILE] [--stats]]
+ *           [--state-save N:FILE] [--state-load FILE] [--run-hash]
  *
  * ROM           a .z64 / .v64 / .n64 file (any byte order)
  * --frames N    frames (VI interrupts) to run (default 600); with --result, the most frames to wait
@@ -30,6 +31,12 @@
  * --missed FILE with --pack: append the code the interpreter had to run to FILE (the discovery loop's input)
  * --stats       with --pack: calls, fallbacks, lookups, re-hashes, and the native share of the instructions (packs
  *               built with -DN64_RC_COUNT)
+ * --state-save N:FILE  after frame N, write a save state (n64_state_save, XBA-183) to FILE
+ * --state-load FILE    load a save state before the first frame (exit 5 when the core refuses it: another ROM,
+ *               another version or RDRAM size, not a state)
+ * --run-hash    print one hash (FNV-1a 64) of every frame's displayed picture and audio and the final cycle count,
+ *               over the frames after --state-save's frame (all the frames without it): a run from a state loaded
+ *               with --state-load gives the same hash over the same number of frames (the save state round trip)
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "n64_core.h"
@@ -131,7 +138,8 @@ static int usage(void)
 {
     fprintf(stderr, "usage: n64_run ROM [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty] [--pad MASK]\n"
                     "               [--pal | --ntsc] [--save PATH] [--hash] [--info] [--regs] [--quiet]\n"
-                    "               [--pack LIB.so [--lockstep] [--missed FILE] [--stats]]\n");
+                    "               [--pack LIB.so [--lockstep] [--missed FILE] [--stats]]\n"
+                    "               [--state-save N:FILE] [--state-load FILE] [--run-hash]\n");
     return 3;
 }
 
@@ -144,6 +152,41 @@ static n64_save_kind kind_of_size(size_t n)
     case 0x20000: return N64_SAVE_FLASH;
     default: return N64_SAVE_NONE;
     }
+}
+
+static uint64_t fnv64(const uint8_t *p, size_t n, uint64_t h)
+{
+    for (size_t i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 0x100000001B3ull;
+    }
+    return h;
+}
+
+/* The picture n64_display shows (at the upscaled size with the Vulkan RDP's scanout), into h. */
+static uint64_t picture_hash(n64_machine *m, uint64_t h)
+{
+    static uint32_t *px;
+    static size_t cap;
+    struct n64_rdp *rdp = n64_get_rdp(m);
+    int sc = rdp ? n64_rdp_scanout_scale(rdp) : 0;
+    if (sc < 1)
+        sc = 1;
+    int mw = N64_SCREEN_MAX_W * sc, mh = N64_SCREEN_MAX_H * sc;
+    if (cap < (size_t)mw * (size_t)mh) {
+        free(px);
+        cap = (size_t)mw * (size_t)mh;
+        px = malloc(cap * sizeof *px);
+        if (!px) {
+            cap = 0;
+            return h;
+        }
+    }
+    int w = 0, h2 = 0;
+    if (n64_display(m, px, mw, mh, &w, &h2) == 0)
+        h = fnv64((const uint8_t *)px, (size_t)w * (size_t)h2 * 4, h);
+    h = fnv64((const uint8_t *)&w, sizeof w, h);
+    return fnv64((const uint8_t *)&h2, sizeof h2, h);
 }
 
 static uint64_t display_hash(n64_machine *m)
@@ -165,7 +208,9 @@ int main(int argc, char **argv)
     const char *rom_path = NULL, *ppm = NULL, *wav = NULL, *save = NULL, *pack = NULL, *missed = NULL;
     long frames = 600;
     bool result = false, quiet = false, hash = false, tty = false, info = false, regs = false;
-    bool lockstep = false, stats = false;
+    bool lockstep = false, stats = false, run_hash = false;
+    const char *state_save = NULL, *state_load = NULL;
+    long state_at = 0;
     long long lock_cycles = 0, lock_from = 0;
     uint16_t pad = 0;
     n64_options opts = {.force_pal = -1};
@@ -211,6 +256,14 @@ int main(int argc, char **argv)
             lock_from = strtoll(argv[++i], NULL, 0);
         else if (!strcmp(a, "--stats"))
             stats = true;
+        else if (!strcmp(a, "--run-hash"))
+            run_hash = true;
+        else if (!strcmp(a, "--state-load") && more)
+            state_load = argv[++i];
+        else if (!strcmp(a, "--state-save") && more && strchr(argv[i + 1], ':')) {
+            state_at = strtol(argv[++i], NULL, 10);
+            state_save = strchr(argv[i], ':') + 1;
+        }
         else if (a[0] != '-' && !rom_path)
             rom_path = a;
         else
@@ -275,6 +328,28 @@ int main(int argc, char **argv)
         n64_set_controller(twin, 0, 1, pad, 0, 0);
     bool lock_bad = false;
 
+    if (state_load) {
+        size_t n = 0;
+        uint8_t *st = load_file(state_load, &n);
+        int src = st ? n64_state_load(m, st, n) : N64_STATE_ECORRUPT;
+        if (src == N64_STATE_OK && twin)
+            src = n64_state_load(twin, st, n);
+        free(st);
+        if (src != N64_STATE_OK) {
+            printf("STATE REFUSED %s: %s\n", state_load,
+                   src == N64_STATE_EGAME ? "another ROM" : src == N64_STATE_EVERSION ? "another version"
+                                                                                       : "not a state");
+            n64_destroy(m);
+            n64_destroy(twin);
+            return 5;
+        }
+        if (!quiet)
+            fprintf(stderr, "n64_run: state %s loaded (%zu bytes, frame %llu)\n", state_load, n,
+                    (unsigned long long)n64_frames(m));
+    }
+    uint64_t rh = 0xCBF29CE484222325ull;
+    long rh_frames = 0;
+
     FILE *wf = NULL;
     uint32_t wav_frames = 0;
     if (wav) {
@@ -329,14 +404,35 @@ int main(int argc, char **argv)
                 break;
             }
         }
-        if (wf) {
+        int counted = run_hash && (!state_save || f + 1 > state_at);
+        if (counted) {
+            rh = picture_hash(m, rh);
+            rh_frames++;
+        }
+        if (wf || run_hash) {
             int16_t buf[2048 * 2];
             size_t n;
             while ((n = n64_audio_pull(m, buf, 2048)) > 0) {
+                if (counted)
+                    rh = fnv64((const uint8_t *)buf, n * 4, rh);
+                if (!wf)
+                    continue;
                 for (size_t i = 0; i < n * 2; i++)
                     put16(wf, (uint16_t)buf[i]);
                 wav_frames += (uint32_t)n;
             }
+        }
+        if (state_save && f + 1 == state_at) {
+            size_t cap = n64_state_size(m), n = 0;
+            uint8_t *st = malloc(cap);
+            FILE *sf = st ? fopen(state_save, "wb") : NULL;
+            if (!st || !(n = n64_state_save(m, st, cap)) || !sf || fwrite(st, 1, n, sf) != n || fclose(sf) != 0) {
+                fprintf(stderr, "n64_run: cannot write the state %s\n", state_save);
+                return 3;
+            }
+            free(st);
+            if (!quiet)
+                fprintf(stderr, "n64_run: state written to %s after frame %ld (%zu bytes)\n", state_save, f + 1, n);
         }
         if (result && n64_peek32(m, RESULT_ADDR) == RESULT_MAGIC) {
             uint32_t st = n64_peek32(m, RESULT_ADDR + 4);
@@ -348,6 +444,11 @@ int main(int argc, char **argv)
         }
     }
     double dt = now_s() - t0;
+    if (run_hash) {
+        uint64_t cyc = n64_cycles(m);
+        rh = fnv64((const uint8_t *)&cyc, sizeof cyc, rh);
+        printf("run-hash %016llx frames %ld\n", (unsigned long long)rh, rh_frames);
+    }
     if (twin && !lock_bad)
         printf("LOCKSTEP OK (%ld frames, the whole state identical after each)\n", f);
     if (pack && missed) {

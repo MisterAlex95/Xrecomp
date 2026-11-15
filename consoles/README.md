@@ -645,8 +645,8 @@ as it comes; fast-forward bypasses it, a state load and a pause start a fresh hi
 generated at a reduced size. Latency: half the game's frame period plus the generation cost (16.7 ms + c at 30 fps).
 Details: [Frame generation › Console window](../docs/technical/framegen.md#console-window).
 
-**Save states and fast-forward (XBA-182).** GBA and PS1 (the N64 plugs in the same way, below; the Xbox has none: its
-state is the whole guest memory and GPU). Three layers:
+**Save states and fast-forward (XBA-182, XBA-183).** GBA, PS1 and N64 (the Xbox has none: its state is the whole
+guest memory and GPU). Three layers:
 
 - The cores: `gba_state_save` / `gba_state_load` (`gba_core.h`, `gba_state.c`) and `ps1_state_save` / `ps1_state_load`
   (`ps1_core.h`, `ps1_state.c`) put the whole machine in a blob: a header (magic `XRSTATE`, the console, its format
@@ -666,12 +666,33 @@ state is the whole guest memory and GPU). Three layers:
   the PS1 bumps every RAM page's write counter and flushes its dispatch cache, so each lifted function is hashed
   against RAM again before it runs. Take and load states between frames. Loading clears the save chip's / cards'
   dirty flags: what the state brought back reaches `game.sav` / `card1.mcr` only once the game writes its save again.
+  N64 (XBA-183): `n64_state_save` / `n64_state_load` (`n64_core.h`, `n64_state.c`), `N64_STATE_VERSION`, the ROM's
+  hash and RDRAM's size (4 or 8 MB) in the header. Sections: the `n64_machine` (the VR4300's GPRs, HI / LO, PC and
+  delay slot state, LL bit, COP0 with COUNT / COMPARE and the 32 TLB entries, COP1's registers, FCSR and the FR mode;
+  the tick clock and the event scheduler; MI, VI, AI with its two-buffer DMA queue and the resampler's phase and
+  history, PI with its latch, SI and PIF RAM, the controllers with their paks, RI; EEPROM, SRAM and the four
+  controller paks, the RTC and the FlashRAM's command state), RDRAM (all-zero 4 KB pages left out: 1.5 MB for our
+  homebrew, up to 8 MB for a game), the RSP (`n64_rsp_state_*`, `n64_devices.h`: IMEM / DMEM, the scalar registers,
+  the vector unit's registers, accumulator, flags and divider, PC, the SP registers and semaphore: the RSP is LLE, so
+  there is no HLE state), the RDP (`n64_rdp_state_*`: the DPC registers and the command being collected, then the back
+  end's own: the software RDP's modes, combiner, colours, tiles, TMEM, noise seed and hidden RDRAM bits, drawn out
+  first whatever its thread count; the Vulkan RDP is synchronised first, so RDRAM holds every pixel, and keeps the
+  last of each state command it was given, replayed into paraLLEl-RDP on load, TMEM not kept: games load textures
+  again before they use them), FlashRAM's 128 KB when the cartridge has it, the IS-Viewer buffer, the recompiled
+  code's boot flag. A state of one RDP back end loads on the other with its DPC registers only (the drawing state
+  starts as after a reset: the game sets it again in its next display list). The upscaled copy of RDRAM (XBA-185) is
+  derived and never saved: paraLLEl-RDP takes the 1x pixels where RDRAM changed, so what the game draws again is
+  upscaled again, a picture it never redraws shows at 1x until then. On load every RDRAM page's write counter is
+  bumped and the dispatch cache flushed, as on the PS1; the VI's picture path (`n64_vi.c`) starts afresh (an
+  interlaced game's first field after a load is shown alone). The save files are never written by a state: the
+  runtime writes the cartridge and paks once the game does.
 - The shared interface, `src/platform/recomp_states.h` (in `xbr_host_core`): a runtime attaches itself while it
   plays (console, state folder, a save and a load callback that run under its frame lock), the in-game menu and the
   desktop keys call `recomp_states_save / _load / _info (slot)`. Slots: `<save dir>/<console>-<KEY>/state1.st` ..
   `state4.st`, beside the saves: a header (magic `XRSLOT`, version, console, key, the time saved, the frames run), a
   thumbnail of the last frame (RGB565, at most 160 x 120, at the console's display aspect), then the core's blob;
-  written through `.tmp` + rename. About 0.6 MB for the GBA, 4.1 MB for the PS1. No save dir, no states.
+  written through `.tmp` + rename. About 0.6 MB for the GBA, 4.1 MB for the PS1, 1 to 10 MB for the N64. No save
+  dir, no states.
 - The automatic slot, `auto.st` (slot `RECOMP_STATE_AUTO` = 0), for « resume where I left off »: with
   `RECOMP_STATE_RESUME=1` the runtime loads it before its first frame (`recomp_states_resume`; an empty slot starts
   the game as usual, a refused one too) and saves it when the player closes the window. On Android the app sets the
@@ -687,26 +708,28 @@ state is the whole guest memory and GPU). Three layers:
   runs `speed` frames per shown frame and averages their audio down by the same factor (higher pitched, never a gap:
   the audio queue keeps its length, so pacing stays audio-driven).
 
-Desktop: `gba_play` / `ps1_play` F1-F4 save slots 1-4, Shift+F1-F4 load them, Tab held fast-forwards, the pad chords
-as above. Headless,
-`gba_run` / `ps1_run --state-save N:FILE` writes a state after frame N, `--state-load FILE` starts from one (exit 5
-when the core refuses it), `--run-hash` prints one hash of every frame's picture and audio after the save point.
-Tests: `tests/recomp_states` (slot files, refusals, thumbnails, the attach / save / load path, the automatic and quick
-slots, the chords, the events, fast-forward speed and audio); the round trip on every homebrew (`gba_state_hb_*`, `ps1_state_hb_*`, `ps1_state_hle_hb_*`: save after 120 /
-150 frames, hash the next 180 / 150, then the same from the state in a new machine; a run from power-on must differ;
+Desktop: `gba_play` / `ps1_play` / `n64_play` F1-F4 save slots 1-4, Shift+F1-F4 load them, Tab held fast-forwards, the
+pad chords as above. Headless, `gba_run` / `ps1_run` / `n64_run --state-save N:FILE` writes a state after frame N,
+`--state-load FILE` starts from one (exit 5 when the core refuses it), `--run-hash` prints one hash of every frame's
+picture and audio after the save point. Tests: `tests/recomp_states` (slot files, refusals, thumbnails, the attach /
+save / load path, the automatic and quick slots, the chords, the events, fast-forward speed and audio); the round trip
+on every homebrew (`gba_state_hb_*`, `ps1_state_hb_*`, `ps1_state_hle_hb_*`: save after 120 / 150 frames, hash the
+next 180 / 150, then the same from the state in a new machine; a run from power-on must differ;
 `consoles/{gba,ps1}/tests/state_*.sh`), the same with each program's pack (`gba_rc_state_hb_*`, `ps1_rc_state_hb_*`:
-the state of a recompiled run loads in the interpreter and the other way round, same hash, and a recompiled run from
-a state stays in lockstep), a disc read in progress (`ps1_state_hb_disc_overlay`), refusals (`gba_state_wrong_game`,
-`ps1_state_wrong_game`, `ps1_state_wrong_bios`); the runtimes' tests save and load through `recomp_states.h` while
-the game runs on its own thread (`gba_runtime`, `ps1_runtime`). The Android in-game menu: [app-shell.md « In-game
-menu »](../docs/android/app-shell.md#in-game-menu).
+the state of a recompiled run loads in the interpreter and the other way round, same hash, and a recompiled run from a
+state stays in lockstep), a disc read in progress (`ps1_state_hb_disc_overlay`), refusals (`gba_state_wrong_game`,
+`ps1_state_wrong_game`, `ps1_state_wrong_bios`); the runtimes' tests save and load through `recomp_states.h` while the
+game runs on its own thread (`gba_runtime`, `ps1_runtime`). N64: `n64_io` (a machine with something in every part
+saved, loaded into a fresh one and compared, the same run after; refusals: version, magic, truncated, another ROM, a 4
+MB machine), `n64_state_hb_*` (every homebrew ROM, `consoles/n64/tests/state_rom.sh`; also loaded with 2 and 4 RDP
+threads), `n64_rc_state_hb_*` (with each ROM's pack), `n64_state_vulkan_gfx` (the Vulkan RDP's round trip, states
+crossing back ends, upscaled 2x: the same machine after the load), `n64_state_wrong_game`, and `n64_runtime` (slots,
+the quick slot and fast-forward while gfx.z64 runs, the automatic slot resumed, another game's refused). The Android
+in-game menu: [app-shell.md « In-game menu »](../docs/android/app-shell.md#in-game-menu).
 
-**The N64 next.** The same three steps: `n64_state_save / _load` in the core (the VR4300 and COP0 / COP1 / TLB, RDRAM,
-the RSP's DMEM / IMEM and registers, the RDP's state, VI / AI / PI / SI / MI, the PIF and the cartridge save; the
-lifted code's RAM checks invalidated on load as the PS1 does), then `n64_runtime.c` attaches with
-`recomp_states_attach(&(recomp_state_ops){"n64", save, load, NULL}, "<save dir>/n64-<KEY>")` and runs its frames
-through the fast-forward loop like the other two; the menu shows the rows for `n64` once `ShellActivity`'s
-`statesSupported` lists it.
+`n64_runtime.c` attaches as `"n64"` with `<save dir>/n64-<KEY>`, runs its frames through the same fast-forward loop
+(no frame skip while fast-forwarding), reads the quick save / load and fast-forward chords from every host pad, and
+the in-game menu shows the rows for an N64 game (`Console.hasSaveStates`).
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every

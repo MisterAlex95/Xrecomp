@@ -44,7 +44,7 @@
     <string name="MENU_DISC_PLAYING">In the drive</string>
     <string name="MENU_DISC_DONE">Disc %1$d: the lid opens, the disc goes in</string>
     <string name="MENU_DISC_FAILED">The disc cannot be opened</string>
-    <!-- XBA-182: a GBA or PS1 game's save states (four slots) and fast-forward. -->
+    <!-- XBA-182 / XBA-183: a GBA, PS1 or N64 game's save states (four slots) and fast-forward. -->
     <string name="MENU_STATE_SAVE">Save state</string>
     <string name="MENU_STATE_LOAD">Load state</string>
     <string name="MENU_FAST_FORWARD">Fast-forward</string>
