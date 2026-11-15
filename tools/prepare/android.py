@@ -152,7 +152,7 @@ class Run:
         an = os.path.join(self.work, "analysis")
         mb = max(1.0, os.path.getsize(self.xbe) / 1e6)
         d, fid = os.path.join(an, "disasm"), os.path.join(an, "func_id")
-        disasm = ["tools.disasm", self.xbe, "-o", d, "--force"]
+        disasm = ["tools.disasm", self.xbe, "-o", d, "--force", "--lean"]
         # Function starts the analysis cannot find (the layers' "seed_functions").
         for fn in (self.profile or {}).get("seed_functions", []):
             disasm += ["--seed-functions", fn]

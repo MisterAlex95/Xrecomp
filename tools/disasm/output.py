@@ -26,8 +26,13 @@ class OutputWriter:
     def __init__(self, output_dir: str, engine: DisasmEngine,
                  functions: FunctionDetector, xrefs: XRefTracker,
                  labels: LabelManager, image: BinaryImage,
-                 strings: List[dict]):
+                 strings: List[dict], lean: bool = False):
         self.output_dir = Path(output_dir)
+        # lean (--lean, XBA-209): the files only tools read. Compact JSON
+        # (json.dumps without indent runs in C; json.dump with an indent is
+        # the pure-Python encoder) and no ASM listings, which are tens of MB
+        # of text for a person to read.
+        self.lean = lean
         self.engine = engine
         self.functions = functions
         self.xrefs = xrefs
@@ -49,7 +54,7 @@ class OutputWriter:
         self._write_strings_json()
         self._write_labels_json()
 
-        if sections_to_disasm:
+        if sections_to_disasm and not self.lean:
             asm_dir = self.output_dir / "asm"
             asm_dir.mkdir(parents=True, exist_ok=True)
 
@@ -58,6 +63,12 @@ class OutputWriter:
 
             for sec in sections_to_disasm:
                 self._write_section_asm(sec, asm_dir, verbose)
+
+    def _dump(self, data, f) -> None:
+        if self.lean:
+            f.write(json.dumps(data, separators=(",", ":")))
+        else:
+            json.dump(data, f, indent=2)
 
     def _write_summary(self) -> None:
         """Write summary.json with statistics."""
@@ -99,13 +110,13 @@ class OutputWriter:
         funcs = sorted(self.functions.functions.values(), key=lambda f: f.start)
         data = [f.to_dict() for f in funcs]
         with open(self.output_dir / "functions.json", 'w') as f:
-            json.dump(data, f, indent=2)
+            self._dump(data, f)
 
     def _write_xrefs_json(self) -> None:
         """Write xrefs.json with all cross-references."""
         data = self.xrefs.to_list()
         with open(self.output_dir / "xrefs.json", 'w') as f:
-            json.dump(data, f, indent=2)
+            self._dump(data, f)
 
     def _write_strings_json(self) -> None:
         """Write strings.json with string references."""
@@ -125,13 +136,13 @@ class OutputWriter:
             data.append(entry)
 
         with open(self.output_dir / "strings.json", 'w') as f:
-            json.dump(data, f, indent=2)
+            self._dump(data, f)
 
     def _write_labels_json(self) -> None:
         """Write labels.json with all named symbols."""
         data = self.labels.to_list()
         with open(self.output_dir / "labels.json", 'w') as f:
-            json.dump(data, f, indent=2)
+            self._dump(data, f)
 
     def _write_section_asm(self, section: SectionInfo, asm_dir: Path,
                            verbose: bool = False) -> None:

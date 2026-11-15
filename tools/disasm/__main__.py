@@ -114,6 +114,14 @@ def main():
              "Default: $RECOMP_STATIC_DISCOVERY_CAP, else no cap.",
     )
 
+    parser.add_argument(
+        "--lean",
+        action="store_true",
+        help="Write only what the pipeline reads: compact JSON, no ASM "
+             "listings (tools.prepare --android: faster, and tens of MB less "
+             "on a phone; XBA-209)",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -144,6 +152,7 @@ def main():
             skip_library_immediates=args.skip_library_immediates,
             static_discovery=args.static_discovery,
             discovery_cap=args.discovery_cap,
+            lean=args.lean,
         )
         success = disassembler.run()
         sys.exit(0 if success else 1)
