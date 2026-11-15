@@ -734,6 +734,7 @@ public class LauncherActivity extends Activity {
         });
         root.setPadding(Theme.MARGIN_X, Theme.MARGIN_TOP, Theme.MARGIN_X, Theme.MARGIN_BOTTOM);
         root.setClipChildren(false);
+        root.setClipToPadding(false);   // a focused row grows (FOCUS_SCALE) into the margin: its first letter stays whole
 
         topBar = rowLayout();
         topBar.setGravity(Gravity.CENTER_VERTICAL);
