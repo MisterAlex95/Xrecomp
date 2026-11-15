@@ -75,7 +75,7 @@ static uint64_t bios_hash(ps1_machine *m)
 static size_t sec_size(ps1_machine *m, int id)
 {
     switch (id) {
-    case SEC_MACHINE: return sizeof(ps1_machine);
+    case SEC_MACHINE: return PS1_MACHINE_SAVED;
     case SEC_RAM: return PS1_RAM_SIZE;
     case SEC_GPU: return m->gpu ? ps1_gpu_state_size(m->gpu) : 0;
     case SEC_CDROM: return m->cdrom ? ps1_cdrom_state_size(m->cdrom) : 0;
@@ -97,7 +97,7 @@ size_t ps1_state_size(ps1_machine *m)
 
 static void save_machine(ps1_machine *m, uint8_t *out)
 {
-    memcpy(out, m, sizeof *m);
+    memcpy(out, m, PS1_MACHINE_SAVED);
     /* Host pointers and host-side flags: not the machine's (the blob may not be aligned: by offset). */
 #define CLEAR(f) do { size_t n_ = sizeof m->f; memset(out + offsetof(ps1_machine, f), 0, n_); } while (0)
     CLEAR(ram);
@@ -220,7 +220,7 @@ int ps1_state_load(ps1_machine *m, const uint8_t *data, size_t size)
     void (*tty)(void *, char) = m->tty;
     void *tty_ctx = m->tty_ctx;
     struct ps1_hle *hle = m->hle;
-    memcpy(m, at[SEC_MACHINE], sizeof *m);
+    memcpy(m, at[SEC_MACHINE], PS1_MACHINE_SAVED); /* the host-only tail (blocks, interp_ref) stays */
     m->ram = ram;
     m->rc_scratch = rc_scratch;
     m->ram_gen = ram_gen;

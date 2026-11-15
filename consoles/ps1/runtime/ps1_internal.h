@@ -173,7 +173,7 @@ struct ps1_machine {
     bool branch_taken;      /* the branch before the running instruction was taken (CAUSE.BT) */
     bool next_taken;
     bool irq_pending;       /* SR.IEc && (SR.IM & CAUSE.IP) */
-    uint32_t hook_at;       /* a jump went to a hooked address (BIOS tables 0xA0 / 0xB0, shell 0x80030000) */
+    uint32_t hook_at;      /* a jump went to a hooked address (BIOS tables 0xA0 / 0xB0, shell 0x80030000) */
     uint32_t cop0[32];
     uint64_t cycles;
     uint64_t next_event;
@@ -247,12 +247,19 @@ struct ps1_machine {
 
     /* The HLE BIOS (ps1_hle.c, XBA-163): NULL when a BIOS image runs (LLE). */
     struct ps1_hle *hle;
+
+    /* Host side only, after everything a save state holds (ps1_state.c saves the machine up to PS1_MACHINE_SAVED). */
+    struct ps1_blocks *blocks; /* the interpreter's predecoded blocks (ps1_cpu.c, XBA-204), made on first use */
+    bool interp_ref;           /* the reference interpreter loop (ps1_cpu_set_reference) */
 };
+#define PS1_MACHINE_SAVED offsetof(ps1_machine, blocks)
 
 /* ps1_cpu.c */
 void ps1_cpu_reset(ps1_machine *m);
 void ps1_cpu_run(ps1_machine *m);   /* runs instructions until cycles >= next_event */
 void ps1_cpu_update_irq(ps1_machine *m);
+void ps1_cpu_free(ps1_machine *m);          /* the predecoded blocks (ps1_destroy) */
+void ps1_cpu_flush_blocks(ps1_machine *m);  /* RAM written behind the core's back (ps1_ram): decode again */
 void ps1_cpu_exception(ps1_machine *m, uint32_t code, uint32_t badvaddr_or_cop);
 
 /* ps1_bus.c: memory accesses. They return 0 or a pending exception code (EXC_*), the CPU raises it. */

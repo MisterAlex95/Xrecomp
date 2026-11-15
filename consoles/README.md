@@ -705,6 +705,34 @@ compiles them -O3 -mtune=cortex-a715. What is left on the PS1 is the interpreter
 instruction: the per-step delay-slot and load-delay bookkeeping through memory), which a register-cached loop or a
 predecoded block cache would address.
 
+**PS1 interpreter: predecoded blocks (XBA-204).** `ps1_cpu_run` (and the recompiler's loop for code no pack holds)
+now runs predecoded blocks (`ps1_cpu.c` « Predecoded blocks »): straight runs of main RAM or BIOS code decoded once
+into ops (operands extracted, branch targets computed), executed by a computed-goto loop with the CPU state in
+locals. A load whose next instruction cannot tell lands at once (put back in flight with the register's old value if
+that instruction falls back), so the per-instruction delay-slot bookkeeping is gone; a block ends after a branch and
+its delay slot, a GTE command, a load the next instruction would see in flight, an instruction the ops don't hold, the
+1 KB page end. A block is entered only where the run loop's per-instruction checks are known to pass (no interrupt
+pending, the hook address not inside, the clock below the next event: a per-op bound of fetch and load cycles; near
+the event only the ops sure to start before it run), so interrupts and events land at the same instruction as
+before. Ops that would raise an exception fall back to `step()` from the state in front of them; IO and BIOS-ROM data
+accesses go through the bus with the clock where `step()` has it, and stop the block. Blocks are checked against the
+RAM page write counters (`ram_gen`, the packs' mechanism) and their words compared again when a page moved; a store
+into a running block's own code stops it. Between the run loop's stops every field of the machine is what the old
+loop leaves (the interpreter scratch fields too), so save states and frames are byte-identical. `step()`'s own loop
+stays as the reference: `ps1_cpu_set_reference`, `ps1_run --lockstep-ref` (twin compared after every frame, with
+`--lockstep-cycles N` the CPU every N cycles and the whole machine every 1024 stops), `recomp_fuzz.py --ref`, the
+`ps1_lockref_*` ctests. Checked: the whole PS1 suite (x86-64 and aarch64 under qemu), 548 lockstep runs (every
+homebrew and every ps1-tests program, OpenBIOS and HLE, per frame and every 1 / 7 / 61 / 997 cycles, the overlay
+disc), 450 random-program seeds under timer IRQs, the run hashes below unchanged.
+
+x86-64 Ryzen AI Max+ 395, gcc -O3, before -> after: host instructions per frame (callgrind, 120 frames) bench 33.0 M
+-> 17.7 M, gfx.exe 39.0 M -> 19.3 M, cpu.exe 43.5 M -> 20.4 M, gfx.exe HLE 45.0 M -> 21.7 M, bench with its pack
+23.3 M -> 15.6 M, gfx.exe with its pack 4.68 M -> 4.41 M. Wall clock per 600 frames (best of 3): hello 2120 -> 1030 ms,
+gfx 2099 -> 987, gfx HLE 2206 -> 1005, cpu 2156 -> 988, ps1-tests gpu/benchmark 2792 -> 1265, gpu/triangle 2296 ->
+1268, spu/stereo 1974 -> 1164, bench 2428 -> 1466, bench with its pack 1614 -> 1202, gfx with its pack 505 -> 510
+(1.7-2.2x interpreted, 1.34x for the bench pack's BIOS share). What remains on the interpreted bench is block entry
+and exit (that code branches every few instructions) and the SPU.
+
 **N64 core speed (XBA-191).** Same method: callgrind on the homebrew corpus, n64-systemtest and their packs
 (`n64_run --run-hash --hash`: picture, audio, cycles and RDRAM must not move), `n64_rsp_bench` / `n64_rdp_bench` for
 the RCP. The homebrew sit in libdragon's idle loops after their checks, so they measure the interpreter (about 1.04 M
