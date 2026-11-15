@@ -150,6 +150,17 @@ void n64_run_cycles(n64_machine *m, uint64_t cycles);
  * max_w x max_h. Returns 0 and the size, or -1 when the VI is blank (w / h then a default size). With the Vulkan RDP
  * upscaling (n64_rdp.h n64_rdp_scanout_scale > 0) and a buffer that holds it, its VI's picture at the upscaled size. */
 int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h);
+/* 0 when n64_display would now give the same picture as at its last call, 1 when it may differ (or there was none).
+ * Conservative: 1 unless all of these are as they were then: the VI registers that shape the picture (V_CURRENT
+ * aside), the back end and its scanout scale (the caller's buffer the same as then); the field order is not tracked, so an
+ * interlaced mode is always 1; the RDRAM the VI reads (its lines and the filters' neighbours) was not written: by
+ * the CPU, lifted code or a PI / SI DMA (per 4 KB page: n64_core's write counters, which a state load, a reset and
+ * n64_rdram move too), nor by the RDP or SP DMA (their exact bus.wrote ranges), and no row the RDP has drawn but
+ * not yet reported (n64_rdp.h n64_rdp_unreported; the software RDP is flushed) overlaps it. With an upscaled scanout
+ * a non-RCP write keeps it 1 until the VI has shown the RDP's next SYNC_FULL (paraLLEl-RDP takes such writes into its
+ * upscaled copy at its next pass). The gamma dither noise of the 1x VI (a function of the frame) is not a change.
+ * Host-only (no effect on the machine). The runtime makes, converts and uploads a picture only when this says so. */
+int n64_display_changed(n64_machine *m);
 /* The framebuffer the VI scans (ORIGIN, WIDTH and the pixel type of its registers), raw: 0x00RRGGBB from its top-left
  * pixel, WIDTH (at most max_w) wide and max_h lines (fewer at the end of RDRAM), no VI filter or scaling (XBA-202:
  * test ROMs whose references are framebuffer dumps). Returns 0 and the size, or -1 when the VI is blank. */

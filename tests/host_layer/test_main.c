@@ -269,6 +269,9 @@ static int run_window(void)
             break;
         }
     }
+    /* The same picture drawn again (a console frame without a new picture): one more present, no upload. */
+    CHECK(host_window_present_again() == 1);
+    frames++;
     host_window_info(&info);
     printf("host_layer window: %llu frames, GL%s %d.%d, %dx%d, vsync %d, pads 0x%x, buttons seen 0x%x\n",
            (unsigned long long)info.frames, info.gles ? " ES" : "", info.gl_major, info.gl_minor, info.drawable_w,

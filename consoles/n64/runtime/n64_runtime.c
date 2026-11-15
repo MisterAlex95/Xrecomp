@@ -2,7 +2,8 @@
  *
  * The PS1 runtime's shape (consoles/ps1/runtime/ps1_runtime.c): one thread does everything, frame by frame: pump the
  * window's events (quit, background, pads), read the pads, run one N64 frame (to the next VI interrupt), queue its
- * audio, present the VI's picture, then sleep to the next frame's deadline. The frame's length comes from the CPU
+ * audio, present the VI's picture (made, converted and uploaded only when it changed: n64_display_changed; the same
+ * texture drawn again otherwise, RECOMP_N64_PRESENT_ALWAYS=1 makes one every VI), then sleep to the next frame's deadline. The frame's length comes from the CPU
  * cycles the core ran (its VI follows the game's timing: NTSC 60 Hz, PAL 50 Hz, one field per interrupt when
  * interlaced), so pacing is the N64's own VI rate; absolute deadlines (no drift), nudged by the audio queue once the
  * AI makes sound, a stall of more than three frames resets the clock. While the app is paused (background, the
@@ -329,6 +330,15 @@ int n64_runtime_frameskip(int mode, int64_t behind_ns, uint64_t frame_ns, int au
         skip = *run < mode;
     else
         skip = *run < 3 && (behind_ns > (int64_t)(frame_ns / 2) || audio_low);
+    *run = skip ? *run + 1 : 0;
+    return skip;
+}
+
+int n64_runtime_frameskip_picture(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run)
+{
+    if (mode >= 0)
+        return n64_runtime_frameskip(mode, behind_ns, frame_ns, audio_low, run);
+    int skip = *run < 1 && (behind_ns > (int64_t)(frame_ns / 2) || audio_low);
     *run = skip ? *run + 1 : 0;
     return skip;
 }
@@ -1202,10 +1212,16 @@ int n64_runtime_run(const n64_runtime_opts *o)
         fskip = N64_RT_FRAMESKIP_MAX;
     if (fskip < N64_RT_FRAMESKIP_AUTO)
         fskip = N64_RT_FRAMESKIP_AUTO;
+    /* A picture is made, converted and uploaded only when it changed (n64_display_changed); RECOMP_N64_PRESENT_ALWAYS=1:
+     * on every VI, as before. */
+    int present_always = env_choice("RECOMP_N64_PRESENT_ALWAYS", "1", 0);
     if (fskip == N64_RT_FRAMESKIP_AUTO)
-        printf("n64: frame skip auto (when late or the audio runs low, at most 3 in a row)\n");
+        printf("n64: frame skip auto (when late or the audio runs low, at most %s in a row)\n",
+               present_always ? "3" : "1 new picture");
     else
         printf("n64: frame skip %d\n", fskip);
+    printf("n64: present %s\n", present_always ? "every VI (RECOMP_N64_PRESENT_ALWAYS=1)"
+                                                : "new pictures only (unchanged VIs show the last one again)");
     int tty = o->tty >= 0 ? o->tty : env_choice("RECOMP_N64_TTY", "1", 0);
     if (tty)
         n64_set_tty(m, on_tty, NULL);
@@ -1441,6 +1457,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
         /* Fast-forward: `speed` N64 frames per shown frame (max: as many as fit in one display frame), no frame skip
          * (only the last frame's picture is made anyway). */
         int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1, dirty = 0, skip = 0, on = display_on > 0;
+        int fresh = 1; /* a new picture made this host frame (0: the VI's picture had not changed, nothing made) */
         uint64_t frame_ns = 16683333, burst_end = now_ns() + 15000000;
         if (rewinding) { /* rewind held: one capture back per shown frame, no N64 frame runs, nothing heard */
             pthread_mutex_lock(&s_mu);
@@ -1484,17 +1501,26 @@ int n64_runtime_run(const n64_runtime_opts *o)
             if (last) {
                 /* Frame skip: the picture of a frame the host is late for is not made nor shown (the frame itself
                  * ran). */
+                /* An unchanged picture is neither made nor skipped: frame skip decides on new pictures only (and
+                 * a picture skipped is still new at the next VI). */
                 int audio_low = audio && heard && !o->unpaced && host_audio_queued() < AUDIO_TARGET_FRAMES / 4;
-                skip = ff ? 0 : n64_runtime_frameskip(o->unpaced && fskip < 0 ? 0 : fskip, o->unpaced ? 0 : behind,
-                                                      frame_ns, audio_low, &skip_run);
-                if ((o->frames && frames + 1 >= o->frames) || (o->capture_path && o->capture_frame == frames + 1))
+                int forced = (o->frames && frames + 1 >= o->frames) ||
+                             (o->capture_path && o->capture_frame == frames + 1);
+                fresh = present_always || forced || n64_display_changed(m);
+                int fmode = o->unpaced && fskip < 0 ? 0 : fskip;
+                int64_t fbehind = o->unpaced ? 0 : behind;
+                skip = ff || !fresh ? 0
+                       : present_always ? n64_runtime_frameskip(fmode, fbehind, frame_ns, audio_low, &skip_run)
+                                        : n64_runtime_frameskip_picture(fmode, fbehind, frame_ns, audio_low, &skip_run);
+                if (forced)
                     skip = 0; /* the last frame of a bounded run is the screenshot; a capture is a capture */
                 uint64_t tv = now_ns();
-                on = skip ? display_on > 0 : n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
+                on = skip || !fresh ? display_on > 0 : n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
                 pacc.vi += now_ns() - tv;
                 skipped += (uint64_t)skip;
                 pacc.skipped += (uint64_t)skip;
-                pacc.pictures += (uint64_t)!skip;
+                pacc.pictures += (uint64_t)(fresh && !skip);
+                pacc.unchanged += (uint64_t)!fresh;
             }
             if (rumble_on)
                 rumble_drive(m, players, rumble_sent); /* RECOMP_RUMBLE=0: never */
@@ -1526,7 +1552,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 break;
         }
 
-        if (skip) {
+        if (skip || !fresh) {
             /* keep the last picture and its size */
         } else if (!on || dw <= 0 || dh <= 0 || dw > max_w || dh > max_h) {
             dw = last_w ? last_w : 320;
@@ -1579,7 +1605,12 @@ int n64_runtime_run(const n64_runtime_opts *o)
             fps_frames = 0;
         }
 
-        if (window && !skip) {
+        if (window && !skip && !fresh) {
+            /* The same picture: the window's texture drawn again (frame generation: nothing, it paces itself). */
+            uint64_t tp = now_ns();
+            host_window_present_again();
+            pacc.present += now_ns() - tp;
+        } else if (window && !skip) {
             uint64_t tp = now_ns();
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);

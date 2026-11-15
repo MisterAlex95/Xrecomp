@@ -265,6 +265,21 @@ static void test_helpers(void)
         CHECK(n == 6); /* fixed 2: two of every three */
         run = 0;
         CHECK(n64_runtime_frameskip(0, (int64_t)f * 10, f, 1, &run) == 0);
+        /* Over new pictures only: auto never skips two in a row; fixed N and 0 as above. */
+        run = 0;
+        n = 0;
+        for (int i = 0; i < 8; i++)
+            n += n64_runtime_frameskip_picture(N64_RT_FRAMESKIP_AUTO, (int64_t)f, f, 0, &run);
+        CHECK(n == 4); /* skip 1, show 1 */
+        run = 0;
+        CHECK(n64_runtime_frameskip_picture(N64_RT_FRAMESKIP_AUTO, 0, f, 0, &run) == 0 && run == 0);
+        CHECK(n64_runtime_frameskip_picture(N64_RT_FRAMESKIP_AUTO, 0, f, 1, &run) == 1 && run == 1);
+        CHECK(n64_runtime_frameskip_picture(N64_RT_FRAMESKIP_AUTO, (int64_t)f, f, 1, &run) == 0 && run == 0);
+        n = 0;
+        for (int i = 0; i < 9; i++)
+            n += n64_runtime_frameskip_picture(2, 0, f, 0, &run);
+        CHECK(n == 6);
+        CHECK(n64_runtime_frameskip_picture(0, (int64_t)f * 10, f, 1, &run) == 0);
     }
 }
 

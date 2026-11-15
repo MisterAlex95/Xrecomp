@@ -565,6 +565,10 @@ int host_window_present_texture(unsigned tex, int w, int h, int top_down)
     return draw(tex, 0, w, h, top_down);
 }
 
+/* The last upload_draw's texture pair and size, for host_window_present_again. */
+static unsigned s_again_tex, s_again_prev;
+static int s_again_w, s_again_h;
+
 /* Uploads RGBA pixels into the window's texture and draws it. */
 static int upload_draw(const void *px, int w, int h, int pitch)
 {
@@ -611,7 +615,11 @@ static int upload_draw(const void *px, int w, int h, int pitch)
         s_gl.TexSubImage2D(XGL_TEXTURE_2D, 0, 0, 0, w, h, XGL_RGBA, XGL_UNSIGNED_BYTE, px);
     }
     s_gl.PixelStorei(XGL_UNPACK_ROW_LENGTH, 0);
-    return draw(s_tex, ghost && s_tex_prev_w == w && s_tex_prev_h == h ? s_tex_prev : 0, w, h, 1);
+    s_again_tex = s_tex;
+    s_again_prev = ghost && s_tex_prev_w == w && s_tex_prev_h == h ? s_tex_prev : 0;
+    s_again_w = w;
+    s_again_h = h;
+    return draw(s_again_tex, s_again_prev, w, h, 1);
 }
 
 #if defined(XBOXRECOMP_LSFG)
@@ -743,6 +751,17 @@ int host_window_present_rgba(const void *px, int w, int h, int pitch)
         return 1;
 #endif
     return upload_draw(px, w, h, pitch);
+}
+
+int host_window_present_again(void)
+{
+    if (!s_win || !s_again_tex)
+        return 0;
+#if defined(XBOXRECOMP_LSFG)
+    if (s_fg && framegen_pacer_active() && !recomp_ff_active())
+        return 1; /* the pacer draws its FIFO at its due times (host_window_sleep_until): nothing new to give it */
+#endif
+    return draw(s_again_tex, s_again_prev, s_again_w, s_again_h, 1);
 }
 
 void host_window_sleep_until(uint64_t deadline_ns)
@@ -1033,6 +1052,7 @@ void host_window_close(void)
     s_tex_filter = -1;
     s_tex_prev = 0;
     s_tex_prev_w = s_tex_prev_h = 0;
+    s_again_tex = s_again_prev = 0;
     s_tex_prev_filter = -1;
     memset(s_sprog, 0, sizeof s_sprog);   /* a context that could not be made current: built again next time */
     memset(&s_gl, 0, sizeof s_gl);

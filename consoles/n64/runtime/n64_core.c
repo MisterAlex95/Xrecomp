@@ -13,7 +13,20 @@
 
 static void rcp_raise(void *ctx, int irq) { n64_mi_raise(ctx, irq); }
 static void rcp_clear(void *ctx, int irq) { n64_mi_clear(ctx, irq); }
-static void rcp_wrote(void *ctx, uint32_t addr, uint32_t len) { n64_rdram_wrote(ctx, addr, len); }
+static void rcp_wrote(void *ctx, uint32_t addr, uint32_t len)
+{
+    n64_machine *m = ctx;
+    n64_rdram_wrote(m, addr, len);
+    if (!len || addr >= m->rdram_size)
+        return;
+    uint32_t last = addr + len - 1;
+    if (last >= m->rdram_size)
+        last = m->rdram_size - 1;
+    for (uint32_t p = addr >> N64_PAGE_SHIFT; p <= last >> N64_PAGE_SHIFT; p++)
+        m->rcp_gen[p]++; /* the same pages n64_rdram_wrote bumped: n64_display_changed tells them apart */
+    if (addr < m->disp.hi && last >= m->disp.lo)
+        m->disp_rcp_hits++;
+}
 
 static void seterr(char *err, size_t n, const char *msg)
 {
@@ -84,7 +97,8 @@ n64_machine *n64_create(const uint8_t *rom, size_t size, const n64_options *opts
     m->rdram_size = m->opts.rdram_size == 0x400000u ? 0x400000u : N64_RDRAM_SIZE;
     m->rdram = calloc(1, m->rdram_size);
     m->rdram_gen = calloc(m->rdram_size >> N64_PAGE_SHIFT, sizeof *m->rdram_gen);
-    if (!m->rom || !m->rdram || !m->rdram_gen) {
+    m->rcp_gen = calloc(m->rdram_size >> N64_PAGE_SHIFT, sizeof *m->rcp_gen);
+    if (!m->rom || !m->rdram || !m->rdram_gen || !m->rcp_gen) {
         seterr(err, errlen, "out of memory");
         n64_destroy(m);
         return NULL;
@@ -138,6 +152,7 @@ void n64_destroy(n64_machine *m)
     free(m->rom);
     free(m->rdram);
     free(m->rdram_gen);
+    free(m->rcp_gen);
     free(m->flash);
     free(m->isv);
     n64_vi_free(m);

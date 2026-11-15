@@ -62,6 +62,12 @@ void host_window_set_event_hook(host_window_event_fn fn, void *user);
  * window's own texture and presents it. Returns 1, or 0 on a GL error. */
 int host_window_present_rgba(const void *px, int w, int h, int pitch);
 
+/* Draws the picture the last host_window_present_rgba uploaded again (no upload, no copy kept for the screenshot):
+ * for a frame whose picture did not change (the N64 runtime: a VI without a new picture). With frame generation
+ * running it draws nothing (the pacer shows its FIFO at its own due times and wants distinct pictures only). Returns
+ * 1, or 0 when nothing was presented yet or on a GL error. */
+int host_window_present_again(void);
+
 /* Frame generation (XBA-186, docs/technical/framegen.md « Console window »): in a build with XBOXRECOMP_LSFG,
  * under RECOMP_LSFG=1, host_window_open starts the pacer (the LSFG bridge when built in, the fake generator under
  * RECOMP_LSFG_FAKE=1; "[LSFG] off: ..." and the usual present when it cannot). host_window_present_rgba then hands

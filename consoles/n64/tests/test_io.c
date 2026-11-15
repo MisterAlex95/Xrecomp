@@ -941,6 +941,94 @@ static void test_vi(void)
     n64_destroy(m);
 }
 
+/* ---- The VI's change test (n64_display_changed) ------------------------------------------------------------------ */
+
+/* RDP commands into RDRAM at 0x700000 and run through the DPC registers (the software RDP): a fill of rows y0..y1 of
+ * a 320-pixel 16-bit colour image at addr, then SYNC_FULL. */
+static void rdp_fill(n64_machine *m, uint32_t addr, int y0, int y1)
+{
+    const uint64_t op[] = {
+        (uint64_t)0x3F << 56 | (uint64_t)2 << 51 | (uint64_t)(320 - 1) << 32 | addr, /* colour image RGBA16 */
+        (uint64_t)0x2D << 56 | (uint64_t)(320 << 2) << 12 | (uint64_t)(240 << 2),    /* scissor 0,0 .. 320,240 */
+        (uint64_t)0x2F << 56 | (uint64_t)3 << 52,                                    /* fill mode */
+        (uint64_t)0x37 << 56 | 0xF801F801u,                                          /* red */
+        (uint64_t)0x36 << 56 | (uint64_t)(319 << 2) << 44 | (uint64_t)(y1 << 2) << 32 | (uint64_t)(y0 << 2),
+        (uint64_t)0x29 << 56,                                                        /* SYNC_FULL */
+    };
+    const uint32_t base = 0x700000;
+    for (unsigned i = 0; i < sizeof op / sizeof op[0]; i++) {
+        n64_wbe32(m->rdram + base + 8 * i, (uint32_t)(op[i] >> 32));
+        n64_wbe32(m->rdram + base + 8 * i + 4, (uint32_t)op[i]);
+    }
+    w32(m, 0x04100000, base);
+    w32(m, 0x04100004, base + 8 * (uint32_t)(sizeof op / sizeof op[0]));
+}
+
+/* 1 until the picture was made, then 0 until something it is made from changes: the VI's registers, a CPU store or
+ * the RDP's rows inside the RDRAM it reads (not the next buffer, even on a shared 4 KB page), a state load; always 1
+ * interlaced; the gamma dither's noise is not a change. */
+static void test_display_changed(void)
+{
+    n64_options ntsc = {.force_pal = 0};
+    n64_machine *m = mk(&ntsc);
+    static uint32_t px[640 * 576];
+    int w, h;
+    const uint32_t fb = 0x100000, fb2 = fb + 320 * 240 * 2; /* fb2 starts inside fb's last 4 KB page */
+    vi_mode(m, 0x3302, fb, 320, 0x006C02EC, 0x002501FF, 0x200, 0x400);
+    CHECK(n64_display_changed(m) == 1, "no picture yet");
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(n64_display_changed(m) == 0, "the same picture");
+    n64_run_frame(m);
+    n64_run_frame(m);
+    CHECK(n64_display_changed(m) == 0, "frames run, nothing written");
+
+    w32(m, fb + 100 * 640 + 8, 0x12345678); /* a CPU store into the framebuffer */
+    CHECK(n64_display_changed(m) == 1, "CPU store into the framebuffer");
+    CHECK(n64_display_changed(m) == 1, "still changed until shown");
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(n64_display_changed(m) == 0, "shown");
+    w32(m, 0x300000, 1);
+    CHECK(n64_display_changed(m) == 0, "a store elsewhere");
+
+    rdp_fill(m, fb2, 0, 9);
+    CHECK(n64_display_changed(m) == 0, "the RDP drawing the next buffer (same page as the last line)");
+    CHECK(m->rdram[fb2] != 0, "the RDP drew there");
+    rdp_fill(m, fb, 10, 19);
+    CHECK(n64_display_changed(m) == 1, "the RDP drawing the framebuffer");
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK_EQ(px[320 * 12 + 100], 0xFF0000, "its rows shown");
+    CHECK(n64_display_changed(m) == 0, "shown");
+
+    w32(m, 0x04400030, 0x201); /* X_SCALE */
+    CHECK(n64_display_changed(m) == 1, "a VI register");
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(n64_display_changed(m) == 0, "shown");
+    w32(m, 0x04400004, fb2); /* the buffer swap */
+    CHECK(n64_display_changed(m) == 1, "VI_ORIGIN");
+    n64_display(m, px, 640, 576, &w, &h);
+
+    w32(m, 0x04400000, 0x3306); /* gamma dither: noise that follows the frame count */
+    n64_display(m, px, 640, 576, &w, &h);
+    n64_run_frame(m);
+    CHECK(n64_display_changed(m) == 0, "gamma dither alone is no change");
+
+    static uint8_t st[N64_RDRAM_SIZE + (1u << 20)];
+    size_t n = n64_state_save(m, st, sizeof st);
+    CHECK(n > 0, "state saved");
+    CHECK(n64_display_changed(m) == 0, "a state save changes nothing");
+    CHECK(n64_state_load(m, st, n) == N64_STATE_OK, "state loaded");
+    CHECK(n64_display_changed(m) == 1, "a state load");
+    n64_display(m, px, 640, 576, &w, &h);
+
+    vi_mode(m, 0x3342, fb, 640, 0x006C02EC, 0x002501FF, 0x400, 0x400); /* interlaced */
+    for (int i = 0; i < 3; i++) {
+        n64_run_frame(m);
+        CHECK(n64_display_changed(m) == 1, "interlaced: every VI (%d)", i);
+        n64_display(m, px, 640, 576, &w, &h);
+    }
+    n64_destroy(m);
+}
+
 /* ---- Save states (XBA-183) -------------------------------------------------------------------------------------- */
 
 static void test_states(void)
@@ -1049,6 +1137,7 @@ int main(void)
     test_ai();
     test_ai_resampler();
     test_vi();
+    test_display_changed();
     test_states();
     printf("n64_io: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;

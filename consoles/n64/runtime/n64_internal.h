@@ -296,6 +296,23 @@ struct n64_machine {
     uint32_t perf_every;         /* one frame in this many is timed (0: none) */
     uint32_t perf_count;         /* frames since the last timed one */
     n64_perf perf;
+    /* The VI's change test (n64_display_changed, n64_vi.c): rcp_gen counts, per page, the rdram_gen bumps that came
+     * from the RCP's bus.wrote (the RDP's drawn rows, SP DMA), whose exact ranges are tested against the picture's
+     * instead (disp_rcp_hits); the rest of rdram_gen (CPU and lifted stores, PI / SI DMA, n64_rdram, state loads,
+     * reset) counts by page. disp: the state at the last n64_display. */
+    uint32_t *rcp_gen;
+    uint64_t disp_rcp_hits;      /* bus.wrote ranges that overlapped [disp.lo, disp.hi) */
+    struct {
+        bool valid;
+        bool cpu_pending;        /* a non-RCP write changed the picture; the upscaled copy follows at the next pass */
+        uint32_t vi[14];
+        uint32_t lo, hi;         /* the RDRAM the VI reads */
+        uint64_t gen;            /* the non-RCP writes into those pages */
+        uint64_t hits;           /* disp_rcp_hits */
+        uint64_t syncs;          /* the RDP's SYNC_FULL count when cpu_pending was set */
+        const char *rdp;         /* the back end's name (a replacement changes the picture's source) */
+        int sscale;
+    } disp;
 };
 #define N64_MACHINE_STATE_BYTES offsetof(n64_machine, blocks)
 

@@ -164,6 +164,11 @@ int n64_runtime_frameskip_parse(const char *v);
  * is more than half a frame late or the audio is about to run dry, at most 3 in a row (15 fps shown at worst at
  * 60 Hz); a fixed N skips N, shows one. */
 int n64_runtime_frameskip(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run);
+/* The same over new pictures only (the frame loop asks it only for a VI whose picture changed, n64_display_changed;
+ * an unchanged VI is neither shown nor skipped and leaves *run alone): auto skips at most one new picture in a row
+ * (a skipped picture is still new at the next VI, so it is shown one VI late); a fixed N as above.
+ * RECOMP_N64_PRESENT_ALWAYS=1 brings back n64_runtime_frameskip on every VI. */
+int n64_runtime_frameskip_picture(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run);
 
 /* The performance line (n64: perf ...), logged every 10 s after the frame-rate line and once at exit over the whole
  * run (pauses left out): which configuration ran and where the host's time went. Times are ms per N64 frame: the

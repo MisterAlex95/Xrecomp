@@ -531,10 +531,17 @@ frames) against the pictures made and shown (`n64_display`), the VIs whose pictu
 pictures frame skip dropped; the game's buffer swaps (VI_ORIGIN changes), the Vulkan RDP's upscaled scanouts and the
 times its command ring was full; paraLLEl-RDP's "Stalled compile" pipelines (5 ms or more) and their time; then the
 worst host frame's own breakdown: `n64_run_frame`, `n64_display`, present, audio, the rest, and the RDP's waits inside
-that frame. Frame skip (`RECOMP_N64_FRAMESKIP`, `n64_play
---frameskip`): `auto` (default) skips the picture of a frame
-that starts more than half a frame late or while the audio queue is about to run dry, at most 3 in a row; `N` shows
-one frame in N + 1; `0` never. A skipped frame still runs whole (CPU, RSP, the RDP drawing into RDRAM, which games
+that frame. Pictures: the frame loop makes, converts and
+uploads a picture only for a VI whose picture changed since the last one shown (`n64_display_changed`: the VI
+registers, the RDRAM it reads written by the CPU, a DMA or the RDP, rows the Vulkan RDP has queued there, a state load;
+interlaced modes always): a game that draws one picture per 2 or 3 VIs (Ocarina of Time PAL) scans out, converts and
+uploads once per picture, and the other VIs draw the window's texture again (`host_window_present_again`; nothing
+with frame generation, which paces itself). `RECOMP_N64_PRESENT_ALWAYS=1` makes a picture on every VI as before.
+Frame skip (`RECOMP_N64_FRAMESKIP`, `n64_play --frameskip`) decides on new pictures only (an unchanged VI is neither
+shown nor skipped): `auto` (default) skips a new picture when its frame starts more than half a frame late or while
+the audio queue is about to run dry, never two in a row (a skipped picture is still new at the next VI and shown
+then); `N` shows one new picture in N + 1; `0` never. With `RECOMP_N64_PRESENT_ALWAYS=1` it decides on every VI,
+`auto` at most 3 in a row. A skipped frame still runs whole (CPU, RSP, the RDP drawing into RDRAM, which games
 read back) and makes its audio: only `n64_display` and the present are skipped (the software RDP commits its pixels
 at the end of every emulated frame, `n64_rdp_frame_end`, shown or not). The software RDP's renderer threads
 (`n64_rdp_set_threads`): `RECOMP_N64_RDP_THREADS`, else 2 on Android, else the core's (`XBR_N64_RDP_THREADS`, else

@@ -281,7 +281,7 @@ static inline uint32_t noise(uint32_t x, uint32_t y, uint32_t f)
     return h;
 }
 
-int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
+static int display_picture(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
 {
     uint32_t ctrl = m->vi[0], type = ctrl & 3;
     uint32_t origin = m->vi[1] & 0xFFFFFF, width = m->vi[2] & 0xFFF;
@@ -455,6 +455,117 @@ int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, in
     *w = ow;
     *h = oh;
     return 0;
+}
+
+/* ---- The change test (n64_core.h n64_display_changed) ------------------------------------------------------------- */
+/* The RDRAM bytes the VI reads for the registers as they are, [*lo, *hi) (empty when it shows nothing): the
+ * framebuffer lines its visible rows sample, one line more for the vertical interpolation, one more each side for the
+ * AA / dither filters' neighbours (n64_display above), and one more line for paraLLEl-RDP's own VI (whose filters
+ * are not ours). Lines are whole (WIDTH pixels). */
+static void vi_read_range(const n64_machine *m, uint32_t *lo, uint32_t *hi)
+{
+    uint32_t ctrl = m->vi[0], type = ctrl & 3;
+    uint32_t origin = m->vi[1] & 0xFFFFFF, width = m->vi[2] & 0xFFF;
+    int vs = (int)((m->vi[10] >> 16) & 0x3FF), ve = (int)(m->vi[10] & 0x3FF);
+    uint32_t ys = m->vi[13] & 0xFFF, yoff = (m->vi[13] >> 16) & 0xFFF;
+    *lo = *hi = 0;
+    if (type < 2 || width == 0 || ve <= vs || ys == 0)
+        return;
+    int field_h = m->pal ? 288 : 240, vref = m->pal ? 44 : 34;
+    int lines = (ve - vs) >> 1, row0 = (vs - vref) >> 1;
+    int j0 = row0 < 0 ? -row0 : 0, j1 = field_h - row0 < lines ? field_h - row0 : lines;
+    if (j1 <= j0)
+        return;
+    uint64_t stride = (uint64_t)width * (type == 3 ? 4 : 2);
+    int64_t y0 = (int64_t)((yoff + (uint64_t)j0 * ys) >> 10) - 1;
+    int64_t y1 = (int64_t)((yoff + (uint64_t)(j1 - 1) * ys) >> 10) + 3; /* last line read + interpolation, filter,
+                                                                            paraLLEl-RDP's VI */
+    if (y0 < 0)
+        y0 = 0;
+    uint64_t a = origin + (uint64_t)y0 * stride, b = origin + (uint64_t)(y1 + 1) * stride;
+    if (a >= m->rdram_size)
+        return;
+    if (b > m->rdram_size)
+        b = m->rdram_size;
+    *lo = (uint32_t)a;
+    *hi = (uint32_t)b;
+}
+
+/* The writes into the pages of [lo, hi) that did not come through bus.wrote (CPU, lifted code, PI / SI DMA...). */
+static uint64_t non_rcp_gen(const n64_machine *m, uint32_t lo, uint32_t hi)
+{
+    uint64_t sum = 0;
+    if (hi <= lo)
+        return 0;
+    for (uint32_t p = lo >> N64_PAGE_SHIFT; p <= (hi - 1) >> N64_PAGE_SHIFT; p++)
+        sum += (uint32_t)(m->rdram_gen[p] - m->rcp_gen[p]);
+    return sum;
+}
+
+static uint64_t rdp_full_syncs(n64_machine *m)
+{
+    n64_rdp_stats st;
+    n64_rdp_get_stats(m->rdp, &st);
+    return st.full_syncs;
+}
+
+int n64_display_changed(n64_machine *m)
+{
+    if (!m->disp.valid || (m->vi[0] & 0x40)) /* none yet; interlaced: the field order is n64_display's state */
+        return 1;
+    for (int r = 0; r < 14; r++)
+        if (r != 4 && m->vi[r] != m->disp.vi[r]) /* V_CURRENT (4) is the beam, not the picture */
+            return 1;
+    if (n64_rdp_backend_name(m->rdp) != m->disp.rdp || n64_rdp_scanout_scale(m->rdp) != m->disp.sscale)
+        return 1;
+    uint32_t lo = m->disp.lo, hi = m->disp.hi; /* the same registers: the same range */
+    if (hi > lo) {
+        if (n64_rdp_unreported(m->rdp, lo, hi)) /* drawn there, not in RDRAM yet (the software RDP: flushed) */
+            return 1;
+        if (m->disp_rcp_hits != m->disp.hits || non_rcp_gen(m, lo, hi) != m->disp.gen)
+            return 1;
+    }
+    if (m->disp.cpu_pending && rdp_full_syncs(m) != m->disp.syncs)
+        return 1;
+    return 0;
+}
+
+/* After a picture: what it was made from, for n64_display_changed. */
+static void display_snapshot(n64_machine *m)
+{
+    uint32_t lo, hi;
+    vi_read_range(m, &lo, &hi);
+    const int same_range = m->disp.valid && lo == m->disp.lo && hi == m->disp.hi;
+    const uint64_t gen = non_rcp_gen(m, lo, hi);
+    const int sscale = n64_rdp_scanout_scale(m->rdp);
+    if (sscale > 0) {
+        uint64_t syncs = rdp_full_syncs(m);
+        if (m->disp.cpu_pending && syncs != m->disp.syncs)
+            m->disp.cpu_pending = false; /* this picture was scanned out after the RDP's next pass */
+        /* (A write before a buffer swap, the range then another, is not caught: the CPU drawing into a buffer the
+         * RDP does not draw, rare in an upscaled game.) */
+        if (same_range && gen != m->disp.gen) {
+            m->disp.cpu_pending = true; /* the upscaled copy may not have it yet: again after the next SYNC_FULL */
+            m->disp.syncs = syncs;
+        }
+    } else {
+        m->disp.cpu_pending = false;
+    }
+    memcpy(m->disp.vi, m->vi, sizeof m->disp.vi);
+    m->disp.lo = lo;
+    m->disp.hi = hi;
+    m->disp.gen = gen;
+    m->disp.hits = m->disp_rcp_hits;
+    m->disp.rdp = n64_rdp_backend_name(m->rdp);
+    m->disp.sscale = sscale;
+    m->disp.valid = true;
+}
+
+int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
+{
+    int r = display_picture(m, xrgb, max_w, max_h, w, h);
+    display_snapshot(m);
+    return r;
 }
 
 int n64_framebuffer(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
