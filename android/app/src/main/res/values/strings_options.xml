@@ -11,7 +11,7 @@
     <string name="VAL_CSCALE_INTEGER">Whole pixels</string>
     <string name="VAL_CSCALE_STRETCH">Stretch</string>
     <string name="OPT_CFILTER">Picture filter</string>
-    <string name="OPT_CFILTER_DETAIL">How the picture of a Game Boy Advance, PlayStation or Nintendo 64 game is enlarged. Sharp: square pixels, as on the console\'s screen. Smooth: softened edges. Console default: sharp for the Game Boy Advance, smooth for the PlayStation and the Nintendo 64. A game can have its own (its Options). Applies the next time a game starts. (RECOMP_FILTER)</string>
+    <string name="OPT_CFILTER_DETAIL">How the picture of a Game Boy Advance, PlayStation or Nintendo 64 game is enlarged. Sharp: square pixels, as on the console\'s screen. Smooth: softened edges. Console default: sharp for the Game Boy Advance, smooth for the PlayStation and the Nintendo 64. A picture larger than the screen (4x and up) is reduced smoothly either way: sharp would drop whole columns of pixels. A game can have its own (its Options). Applies the next time a game starts. (RECOMP_FILTER)</string>
     <string name="VAL_CFILTER_CONSOLE">Console default</string>
     <string name="VAL_CFILTER_NEAREST">Sharp</string>
     <string name="VAL_CFILTER_LINEAR">Smooth</string>
@@ -32,14 +32,16 @@
     <string name="VAL_MB_256">256 MB</string>
     <!-- XBA-195: picture shaders (src/video/host_window.c). -->
     <string name="OPT_CSHADER">Picture shader</string>
-    <string name="OPT_CSHADER_DETAIL">A look for a game\'s picture (Xbox, Game Boy Advance, PlayStation, Nintendo 64), drawn at the screen\'s resolution. None: the picture as it is. Sharp bilinear: square pixels without uneven widths when the scale is not whole. Scanlines: the dark lines of a TV. CRT: scanlines and the red, green and blue stripes of a TV tube. LCD grid: the pixel grid of a handheld\'s screen (none on an Xbox game). A game can have its own (its Options). Applies the next time a game starts. (RECOMP_SHADER)</string>
+    <string name="OPT_CSHADER_DETAIL">A look for a game\'s picture (Xbox, Game Boy Advance, PlayStation, Nintendo 64), drawn at the screen\'s resolution. None: the picture as it is. Sharp bilinear: square pixels without uneven widths when the scale is not whole. Scanlines: the dark lines of a TV. CRT: scanlines and the red, green and blue stripes of a TV tube. LCD grid: the pixel grid of a handheld\'s screen (none on an Xbox game). Edge smoothing (FXAA): softens jagged edges. Sharpen (CAS): crisper detail and text, without halos (Shader strength: how much). Whatever the choice, a picture larger than the screen (a Nintendo 64 or PlayStation game at 4x) is reduced smoothly, every pixel it covers counted, for steadier fine lines and text (RECOMP_PRESENT_DOWNSCALE=0 in recomp.cfg: off). A game can have its own (its Options). Applies the next time a game starts. (RECOMP_SHADER)</string>
     <string name="VAL_CSHADER_NONE">None</string>
     <string name="VAL_CSHADER_SHARP">Sharp bilinear</string>
     <string name="VAL_CSHADER_SCANLINES">Scanlines</string>
     <string name="VAL_CSHADER_CRT">CRT</string>
     <string name="VAL_CSHADER_LCD">LCD grid</string>
+    <string name="VAL_CSHADER_FXAA">Edge smoothing (FXAA)</string>
+    <string name="VAL_CSHADER_CAS">Sharpen (CAS)</string>
     <string name="OPT_CSHADER_STRENGTH">Shader strength</string>
-    <string name="OPT_CSHADER_STRENGTH_DETAIL">How marked the picture shader\'s lines or grid are. Shader default: scanlines and LCD grid 50 %, CRT 60 %. No effect with None or Sharp bilinear. Applies the next time a game starts. (RECOMP_SHADER_STRENGTH)</string>
+    <string name="OPT_CSHADER_STRENGTH_DETAIL">How marked the picture shader\'s lines or grid are, or how much Sharpen sharpens. Shader default: scanlines, LCD grid and Sharpen 50 %, CRT 60 %. No effect with None, Sharp bilinear or Edge smoothing. Applies the next time a game starts. (RECOMP_SHADER_STRENGTH)</string>
     <string name="VAL_CSHADER_STRENGTH_DEFAULT">Shader default</string>
     <string name="VAL_PERCENT_25">25 %</string>
     <string name="VAL_PERCENT_50">50 %</string>

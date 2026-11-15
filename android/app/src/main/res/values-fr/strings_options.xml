@@ -11,7 +11,7 @@
     <string name="VAL_CSCALE_INTEGER">Pixels entiers</string>
     <string name="VAL_CSCALE_STRETCH">Étirer</string>
     <string name="OPT_CFILTER">Filtre de l\'image</string>
-    <string name="OPT_CFILTER_DETAIL">Comment l\'image d\'un jeu Game Boy Advance, PlayStation ou Nintendo 64 est agrandie. Net : des pixels carrés, comme sur l\'écran de la console. Lissé : des contours adoucis. Selon la console : net pour la Game Boy Advance, lissé pour la PlayStation et la Nintendo 64. Un jeu peut avoir le sien (ses Options). S\'applique au prochain lancement d\'un jeu. (RECOMP_FILTER)</string>
+    <string name="OPT_CFILTER_DETAIL">Comment l\'image d\'un jeu Game Boy Advance, PlayStation ou Nintendo 64 est agrandie. Net : des pixels carrés, comme sur l\'écran de la console. Lissé : des contours adoucis. Selon la console : net pour la Game Boy Advance, lissé pour la PlayStation et la Nintendo 64. Une image plus grande que l\'écran (4x et plus) est réduite en douceur dans les deux cas : net y perdrait des colonnes entières de pixels. Un jeu peut avoir le sien (ses Options). S\'applique au prochain lancement d\'un jeu. (RECOMP_FILTER)</string>
     <string name="VAL_CFILTER_CONSOLE">Selon la console</string>
     <string name="VAL_CFILTER_NEAREST">Net</string>
     <string name="VAL_CFILTER_LINEAR">Lissé</string>
@@ -31,14 +31,16 @@
     <string name="VAL_MB_128">128 Mo</string>
     <string name="VAL_MB_256">256 Mo</string>
     <string name="OPT_CSHADER">Shader d\'image</string>
-    <string name="OPT_CSHADER_DETAIL">Un rendu pour l\'image d\'un jeu (Xbox, Game Boy Advance, PlayStation, Nintendo 64), dessiné à la résolution de l\'écran. Aucun : l\'image telle quelle. Bilinéaire net : des pixels carrés sans largeurs inégales quand l\'échelle n\'est pas entière. Lignes de balayage : les lignes sombres d\'une télé. CRT : les lignes et les bandes rouges, vertes et bleues d\'un tube de télé. Grille LCD : la grille de pixels de l\'écran d\'une console portable (aucun sur un jeu Xbox). Un jeu peut avoir le sien (ses Options). S\'applique au prochain lancement d\'un jeu. (RECOMP_SHADER)</string>
+    <string name="OPT_CSHADER_DETAIL">Un rendu pour l\'image d\'un jeu (Xbox, Game Boy Advance, PlayStation, Nintendo 64), dessiné à la résolution de l\'écran. Aucun : l\'image telle quelle. Bilinéaire net : des pixels carrés sans largeurs inégales quand l\'échelle n\'est pas entière. Lignes de balayage : les lignes sombres d\'une télé. CRT : les lignes et les bandes rouges, vertes et bleues d\'un tube de télé. Grille LCD : la grille de pixels de l\'écran d\'une console portable (aucun sur un jeu Xbox). Lissage des contours (FXAA) : adoucit les bords en escalier. Netteté (CAS) : détails et texte plus nets, sans halo (Intensité du shader : de combien). Quel que soit le choix, une image plus grande que l\'écran (un jeu Nintendo 64 ou PlayStation en 4x) est réduite en douceur, chaque pixel couvert compté, pour des lignes fines et un texte plus stables (RECOMP_PRESENT_DOWNSCALE=0 dans recomp.cfg : désactivé). Un jeu peut avoir le sien (ses Options). S\'applique au prochain lancement d\'un jeu. (RECOMP_SHADER)</string>
     <string name="VAL_CSHADER_NONE">Aucun</string>
     <string name="VAL_CSHADER_SHARP">Bilinéaire net</string>
     <string name="VAL_CSHADER_SCANLINES">Lignes de balayage</string>
     <string name="VAL_CSHADER_CRT">CRT</string>
     <string name="VAL_CSHADER_LCD">Grille LCD</string>
+    <string name="VAL_CSHADER_FXAA">Lissage des contours (FXAA)</string>
+    <string name="VAL_CSHADER_CAS">Netteté (CAS)</string>
     <string name="OPT_CSHADER_STRENGTH">Intensité du shader</string>
-    <string name="OPT_CSHADER_STRENGTH_DETAIL">La netteté des lignes ou de la grille du shader d\'image. Selon le shader : lignes de balayage et grille LCD 50 %, CRT 60 %. Sans effet avec Aucun ou Bilinéaire net. S\'applique au prochain lancement d\'un jeu. (RECOMP_SHADER_STRENGTH)</string>
+    <string name="OPT_CSHADER_STRENGTH_DETAIL">La netteté des lignes ou de la grille du shader d\'image, ou la force de Netteté. Selon le shader : lignes de balayage, grille LCD et Netteté 50 %, CRT 60 %. Sans effet avec Aucun, Bilinéaire net ou Lissage des contours. S\'applique au prochain lancement d\'un jeu. (RECOMP_SHADER_STRENGTH)</string>
     <string name="VAL_CSHADER_STRENGTH_DEFAULT">Selon le shader</string>
     <string name="VAL_PERCENT_25">25 %</string>
     <string name="VAL_PERCENT_50">50 %</string>

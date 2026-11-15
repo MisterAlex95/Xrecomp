@@ -42,7 +42,8 @@ final class ConsoleVideo {
     static final String ENV_SHADER_STRENGTH = "RECOMP_SHADER_STRENGTH";
     static final String ENV_SHADER_CURVATURE = "RECOMP_SHADER_CURVATURE";
     static final String ENV_SHADER_GHOSTING = "RECOMP_SHADER_GHOSTING";
-    static final String SHADER_SHARP = "sharp", SHADER_SCANLINES = "scanlines", SHADER_CRT = "crt", SHADER_LCD = "lcd";
+    static final String SHADER_SHARP = "sharp", SHADER_SCANLINES = "scanlines", SHADER_CRT = "crt", SHADER_LCD = "lcd",
+                        SHADER_FXAA = "fxaa", SHADER_CAS = "cas";
     /** XBA-186: frame generation for a console game (src/video/host_window.c, docs/technical/framegen.md). */
     static final String ENV_LSFG = "RECOMP_LSFG";
     static final String LSFG_ON = "1", LSFG_OFF = "0";
@@ -310,7 +311,7 @@ final class ConsoleVideo {
         String sh = GameSettings.effective(global, game, ENV_SHADER);
         sh = sh == null ? "none" : sh.trim().toLowerCase(Locale.ROOT);
         if (!sh.equals(SHADER_SHARP) && !sh.equals(SHADER_SCANLINES) && !sh.equals(SHADER_CRT)
-            && !sh.equals(SHADER_LCD))
+            && !sh.equals(SHADER_LCD) && !sh.equals(SHADER_FXAA) && !sh.equals(SHADER_CAS))
             sh = "none";
         return new Picture(xbox, scale, filter, sh,
                            percent(GameSettings.effective(global, game, ENV_SHADER_STRENGTH), -1),
