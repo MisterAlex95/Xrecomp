@@ -111,6 +111,18 @@ public class GameMenuTest {
         /** The native side's last quick save / load / resume event, null = none. */
         int[] event;
         @Override public int[] stateEvent() { return event; }
+        /** XBA-197: Add a code asked (the game's key), and the name the fake dialog then adds. */
+        final List<String> cheatAdds = new ArrayList<>();
+        String cheatToAdd;
+        @Override public void addCheat(Console con, String key, java.util.function.Consumer<String> added) {
+            cheatAdds.add(key);
+            if (cheatToAdd != null) {
+                Cheats c = Cheats.load(RuntimeEnvironment.getApplication().getFilesDir(), key);
+                c.add(cheatToAdd, Cheats.normalize("8003A2C4 0063"), "x");
+                c.save();
+                added.accept(cheatToAdd);
+            }
+        }
     }
 
     /** A stand-in for the game's frame (ours: gradients and shapes), so the dimming shows in the screenshots. */
@@ -1375,5 +1387,60 @@ public class GameMenuTest {
         assertFalse(GameSettings.file(activity.getFilesDir(), "4D5300D1").exists());
         menu.row(GameMenu.Item.BACK).performClick();
         assertNotNull("back on Settings", menu.row(GameMenu.Item.GAME_SETTINGS));
+    }
+
+    /**
+     * XBA-197: a GBA / PS1 / N64 game's Cheats page: each cheat On / Off (written to its .cheats file at once, which the
+     * runtime reads again by itself), Add a code (the host's dialog), Delete a code (A twice), B back; none for an Xbox
+     * title.
+     */
+    @Test
+    public void cheatsPage() throws Exception {
+        assertNull("no game: no Cheats row", menu.row(GameMenu.Item.CHEATS));
+        String key = "gba-AXVE-1A2B3C4D";
+        Cheats c = Cheats.load(activity.getFilesDir(), key);
+        c.add("Infinite lives", Cheats.normalize("02000010:63"), "x");
+        c.add("Max money", Cheats.normalize("82000020 270F"), "x");
+        c.list.get(1).enabled = false;
+        assertTrue(c.save());
+        GameStore.rememberRomLaunch(activity, "/sdcard/roms/quest.gba", "Pocket Quest", key);
+        menu.release();
+        build();
+        menu.open("Back");
+        assertNotNull(menu.row(GameMenu.Item.CHEATS));
+        menu.row(GameMenu.Item.CHEATS).performClick();
+        assertEquals(GameMenu.Page.CHEATS, menu.page());
+        List<Widgets.MenuRow> rows = menu.rowsForTest();
+        assertEquals("Infinite lives", rows.get(0).title);
+        assertEquals(activity.getString(R.string.MENU_ON), rows.get(0).value);
+        assertEquals("Max money", rows.get(1).title);
+        assertEquals(activity.getString(R.string.MENU_OFF), rows.get(1).value);
+        rows.get(1).performClick();
+        assertTrue(Cheats.load(activity.getFilesDir(), key).list.get(1).enabled);
+        assertEquals(activity.getString(R.string.MENU_ON), rows.get(1).value);
+        rows.get(0).cycler.step(1);
+        assertFalse(Cheats.load(activity.getFilesDir(), key).list.get(0).enabled);
+
+        host.cheatToAdd = "Walk through walls";
+        menu.row(GameMenu.Item.CHEAT_ADD).performClick();
+        assertEquals(List.of(key), host.cheatAdds);
+        assertEquals(3, Cheats.load(activity.getFilesDir(), key).list.size());
+        assertEquals("Walk through walls", menu.rowsForTest().get(2).title);
+
+        menu.row(GameMenu.Item.CHEAT_DELETE).performClick();
+        assertEquals(GameMenu.Page.CHEATS_DELETE, menu.page());
+        Widgets.MenuRow first = menu.rowsForTest().get(0);
+        first.performClick();   // armed
+        assertEquals(activity.getString(R.string.CHEATS_DELETE_ARM), first.value);
+        assertEquals(3, Cheats.load(activity.getFilesDir(), key).list.size());
+        first.performClick();   // gone
+        List<Cheats.Cheat> left = Cheats.load(activity.getFilesDir(), key).list;
+        assertEquals(2, left.size());
+        assertEquals("Max money", left.get(0).name);
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        assertEquals(GameMenu.Page.CHEATS, menu.page());
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        assertEquals(GameMenu.Page.MAIN, menu.page());
+        assertSame(menu.row(GameMenu.Item.CHEATS), menu.focusedRow());
     }
 }

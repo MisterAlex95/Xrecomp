@@ -47,7 +47,7 @@ import java.util.function.LongSupplier;
  *       closing releases the companion's again. A key whose down came while open acts on its release, so nothing of
  *       it reaches the game.</li>
  *   <li>Items: Resume, for a GBA, PS1 or N64 game Save state, Load state (four slots each) and Fast-forward
- *       (XBA-182, XBA-183),
+ *       (XBA-182, XBA-183) and Cheats (XBA-197: each code On / Off, Add a code, Delete a code; written at once),
  *       Settings (performance overlay, game volume, bottom screen: all live; this game's language,
  *       widescreen and 480p: next start; Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
  *       background; « Back to the home screen » in a game's own app, which has no launcher to show), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
@@ -162,6 +162,12 @@ final class GameMenu {
         default int[] stateEvent() {
             return null;
         }
+
+        /**
+         * XBA-197: « Add a code » of the Cheats page: the dialog ({@link CheatsUi#add}); added(name) once the code is
+         * saved.
+         */
+        default void addCheat(Console console, String key, java.util.function.Consumer<String> added) {}
     }
 
     /** The automatic slot (« Where you left off ») and the kinds of nativeStateEvent. */
@@ -186,11 +192,11 @@ final class GameMenu {
     static final int ROW_H = Theme.ROW_H;
     static final int VOLUME_STEP = 10;
 
-    enum Page { MAIN, SETTINGS, CONTROLS, DISCS, SAVE_SLOTS, LOAD_SLOTS, GAME_SETTINGS }
+    enum Page { MAIN, SETTINGS, CONTROLS, DISCS, SAVE_SLOTS, LOAD_SLOTS, GAME_SETTINGS, CHEATS, CHEATS_DELETE }
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
                 WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, UPSCALE, VK_DRIVER, STATE_SAVE, STATE_LOAD,
-                FAST_FORWARD, AUTO_RESUME, GAME_SETTINGS, GS_RESET }
+                FAST_FORWARD, AUTO_RESUME, GAME_SETTINGS, GS_RESET, CHEATS, CHEAT_ADD, CHEAT_DELETE }
 
     private final Activity activity;
     private final Host host;
@@ -216,6 +222,9 @@ final class GameMenu {
     private List<Ps1Discs.Disc> discList;
     private String openedBy = "";
     private long openedAt, quitArmedAt = -1;
+    /** XBA-197: the Delete a code row armed (its index, -1: none) and when. */
+    private int cheatArmed = -1;
+    private long cheatArmedAt;
     private boolean perfOn;
     /** The game's title ID for the per-title language (titleId()). */
     private boolean titleIdRead;
@@ -846,9 +855,13 @@ final class GameMenu {
                 showPage(Page.SETTINGS, Item.GAME_SETTINGS);
                 return;
             }
+            if (page == Page.CHEATS_DELETE) {
+                showPage(Page.CHEATS, Item.CHEAT_DELETE);
+                return;
+            }
             Item from = page == Page.SETTINGS ? Item.SETTINGS : page == Page.DISCS ? Item.DISC
                         : page == Page.SAVE_SLOTS ? Item.STATE_SAVE : page == Page.LOAD_SLOTS ? Item.STATE_LOAD
-                        : Item.CONTROLS;
+                        : page == Page.CHEATS ? Item.CHEATS : Item.CONTROLS;
             showPage(Page.MAIN, from);
             return;
         }
@@ -895,6 +908,8 @@ final class GameMenu {
                 ff.cycler = dir -> toggleFastForward();
                 updateValues();
             }
+            if (cheatsSupported())   // XBA-197: a GBA, PS1 or N64 game's cheat codes
+                row(Item.CHEATS, s(R.string.CHEATS));
             row(Item.SETTINGS, s(R.string.MENU_SETTINGS));
             row(Item.CONTROLS, s(R.string.MENU_CONTROLS));
             row(Item.SCREENSHOT, s(R.string.MENU_SCREENSHOT));
@@ -1025,6 +1040,24 @@ final class GameMenu {
                 kvRow(s(r[0]), s(r[1]));
             row(Item.BACK, s(R.string.MENU_BACK));
             break;
+        case CHEATS:
+        case CHEATS_DELETE: {
+            boolean del = p == Page.CHEATS_DELETE;
+            pageV.setText(s(del ? R.string.CHEATS_DELETE : R.string.CHEATS));
+            pageV.setVisibility(View.VISIBLE);
+            cheatArmed = -1;
+            Cheats cheats = Cheats.load(activity.getFilesDir(), titleId());
+            kvRow(s(cheats.list.isEmpty() ? R.string.CHEATS_NONE : R.string.CHEATS_LIVE), "");
+            for (int i = 0; i < cheats.list.size(); i++)
+                cheatRow(cheats.list.get(i), i, del);
+            if (!del) {
+                row(Item.CHEAT_ADD, s(R.string.CHEATS_ADD));
+                if (!cheats.list.isEmpty())
+                    row(Item.CHEAT_DELETE, s(R.string.CHEATS_DELETE));
+            }
+            row(Item.BACK, s(R.string.MENU_BACK));
+            break;
+        }
         case DISCS:
             pageV.setText(s(R.string.MENU_DISC));
             pageV.setVisibility(View.VISIBLE);
@@ -1110,6 +1143,64 @@ final class GameMenu {
         discList = now;
         close();
         flash(activity.getString(R.string.MENU_DISC_DONE, d.number), true);
+    }
+
+    // ---- Cheats (XBA-197) ----------------------------------------------------------------------------------------
+
+    /** A GBA, PS1 or N64 game runs (not an Xbox title): its cheat codes can be changed while it plays. */
+    private boolean cheatsSupported() {
+        String key = titleId();
+        return key != null && Console.ofKey(key) != Console.XBOX;
+    }
+
+    /**
+     * One cheat of the Cheats page (On / Off: A or left / right, written at once, the runtime reads the file again by
+     * itself), or of Delete a code (A arms, A again within {@link #QUIT_ARM_MS} deletes).
+     */
+    private void cheatRow(Cheats.Cheat c, int index, boolean delete) {
+        Widgets.MenuRow r = new Widgets.MenuRow(activity);
+        r.set(c.name, null);
+        r.setSubtitle(c.lines.isEmpty() ? null : c.lines.get(0) + (c.lines.size() > 1 ? " …" : ""));
+        r.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, r);
+        if (delete) {
+            r.setOnClickListener(v -> {
+                if (cheatArmed != index || clock.getAsLong() - cheatArmedAt > QUIT_ARM_MS) {
+                    cheatArmed = index;
+                    cheatArmedAt = clock.getAsLong();
+                    r.setValue(s(R.string.CHEATS_DELETE_ARM));
+                    r.invalidate();
+                    return;
+                }
+                Cheats cheats = Cheats.load(activity.getFilesDir(), titleId());
+                cheats.remove(index);
+                boolean ok = cheats.save();
+                Log.i(LauncherActivity.TAG, "shell: menu: cheat \"" + c.name + "\" deleted for " + titleId()
+                                            + (ok ? "" : " (not saved)"));
+                showPage(cheats.list.isEmpty() ? Page.CHEATS : Page.CHEATS_DELETE, null);
+                flash(ok ? activity.getString(R.string.CHEATS_DELETED, c.name) : s(R.string.CHEATS_SAVE_FAILED), ok);
+            });
+        } else {
+            r.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
+            r.setValue(s(c.enabled ? R.string.MENU_ON : R.string.MENU_OFF));
+            Runnable toggle = () -> {
+                Cheats cheats = Cheats.load(activity.getFilesDir(), titleId());
+                cheats.toggle(index);
+                boolean ok = cheats.save();
+                boolean on = index < cheats.list.size() && cheats.list.get(index).enabled;
+                r.setValue(s(on ? R.string.MENU_ON : R.string.MENU_OFF));
+                r.invalidate();
+                Log.i(LauncherActivity.TAG, "shell: menu: cheat \"" + c.name + "\" " + (on ? "on" : "off") + " for "
+                                            + titleId() + (ok ? "" : " (not saved)"));
+                if (!ok)
+                    flash(s(R.string.CHEATS_SAVE_FAILED), false);
+            };
+            r.cycler = dir -> {
+                toggle.run();
+                feedback.play(UiFeedback.Cue.MOVE, r);
+            };
+            r.setOnClickListener(v -> toggle.run());
+        }
+        list.addView(r, new LinearLayout.LayoutParams(-1, ROW_H));
     }
 
     // ---- Save states and fast-forward (XBA-182) ----------------------------------------------------------------
@@ -1391,6 +1482,22 @@ final class GameMenu {
             break;
         case GAME_SETTINGS:
             showPage(Page.GAME_SETTINGS, null);
+            break;
+        case CHEATS:
+            showPage(Page.CHEATS, null);
+            break;
+        case CHEAT_ADD: {
+            String key = titleId();
+            Console con = Console.ofKey(key);
+            Log.i(LauncherActivity.TAG, "shell: menu: add a cheat code for " + key);
+            host.addCheat(con, key, name -> {
+                showPage(Page.CHEATS, Item.CHEAT_ADD);
+                flash(activity.getString(R.string.CHEATS_ADDED, name), true);
+            });
+            break;
+        }
+        case CHEAT_DELETE:
+            showPage(Page.CHEATS_DELETE, null);
             break;
         case GS_RESET:
             GameSettings.reset(activity.getFilesDir(), titleId());

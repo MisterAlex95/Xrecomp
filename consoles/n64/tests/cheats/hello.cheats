@@ -1,0 +1,27 @@
+# Cheats on our homebrew (XBA-197, n64_cheats_hb_*): GameShark codes writing into the unused top of the xba_result
+# block (consoles/n64/tests/homebrew/common/xba_result.h, physical 0x00300000, big-endian, table[100..] from
+# 0x803001B0), read back with n64_run --peek after the verdict.
+
+[80 / 81: 8 and 16-bit constant writes]
+enabled=1
+813001B0 1234
+803001B2 0056
+
+[off: never applied]
+enabled=0
+813001B6 BAD0
+
+[D1: 16-bit write when the status word's low half is 0x5353 (PASS)]
+enabled=1
+D1300006 5353
+813001B4 BEEF
+
+[50: serial repeater, three 16-bit writes]
+enabled=1
+50000302 0001
+813001B8 0010
+
+[F1: a boot-time write (once, at 0x80380000: RDRAM the program leaves alone), with an enabler code (ignored)]
+enabled=1
+EE000000 0000
+F1380000 7777

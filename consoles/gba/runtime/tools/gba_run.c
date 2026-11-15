@@ -32,8 +32,12 @@
  *               capture every C frames as the runtime takes them (state + picture), R steps back, the picture and
  *               every frame after it must be the first run's; prints "REWIND OK" and the capture cost, exit 6 on a
  *               difference. --rewind-mb M: the ring's cap (default 64)
+ * --cheats FILE the cheat list FILE (XBA-197, recomp_cheats.h): its enabled codes run after every frame (on both
+ *               machines with --lockstep)
+ * --peek ADDR   after the run, print the 32-bit word at ADDR ("peek 0x0203FE10 = 0x..."); up to 8 times
  * Prints the frame rate reached on stderr. Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
+#include "gba_cheats.h"
 #include "gba_core.h"
 #include "gba_pack.h"
 #include "gba_recomp.h"
@@ -216,6 +220,9 @@ int main(int argc, char **argv)
     double rewind_mb = RECOMP_REWIND_MB_DEFAULT;
     int result = 0, bios_boot = 0, quiet = 0, reg_result = -1;
     unsigned keys = 0;
+    const char *cheats_path = NULL;
+    uint32_t peeks[8];
+    int npeek = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
@@ -256,6 +263,10 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--rewind-mb") && i + 1 < argc)
             rewind_mb = strtod(argv[++i], NULL);
+        else if (!strcmp(argv[i], "--cheats") && i + 1 < argc)
+            cheats_path = argv[++i];
+        else if (!strcmp(argv[i], "--peek") && i + 1 < argc && npeek < 8)
+            peeks[npeek++] = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--result"))
             result = 1;
         else if (!strcmp(argv[i], "--bios-boot"))
@@ -268,7 +279,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "usage: gba_run ROM [--frames N] [--bios PATH] [--bios-boot] [--result] [--ppm OUT] "
                             "[--wav OUT] [--save PATH] [--keys MASK] [--reg-result R] [--pack LIB] [--missed FILE] [--stats] "
                             "[--lockstep] [--hash] [--state-save N:FILE] [--state-load FILE] [--run-hash] "
-                            "[--rewind C:R [--rewind-mb M]] [--quiet]\n");
+                            "[--rewind C:R [--rewind-mb M]] [--cheats FILE] [--peek ADDR] [--quiet]\n");
             return 3;
         }
     }
@@ -350,6 +361,13 @@ int main(int argc, char **argv)
         gba_pack_close(&pk);
         return r == 0 ? 0 : r == 1 ? 6 : 3;
     }
+    gba_cheats cheats, cheats_ref;
+    gba_cheats_open(&cheats, m, pack ? pk.table : NULL, cheats_path ? cheats_path : "");
+    gba_cheats_open(&cheats_ref, ref, NULL, "");
+    if (ref && cheats_path) {
+        printf("(the interpreter twin runs the same cheats)\n");
+        recomp_cheats_load(&cheats_ref.list, cheats_path);
+    }
     uint64_t rh = 0xCBF29CE484222325ull;
     long rh_frames = 0;
 
@@ -372,10 +390,12 @@ int main(int argc, char **argv)
     int diverged = 0;
     for (f = 0; f < frames; f++) {
         gba_run_frame(m, fb);
+        gba_cheats_frame(&cheats, (uint16_t)keys);
         if (ref) {
             char why[160] = "";
             static int16_t sink[2 * 4096];
             gba_run_frame(ref, ref_fb);
+            gba_cheats_frame(&cheats_ref, (uint16_t)keys);
             while (gba_audio_pull(ref, sink, 4096) > 0) /* keeps both audio rings alike */
                 ;
             int d = gba_recomp_compare(ref, m, why, sizeof why);
@@ -523,6 +543,10 @@ int main(int argc, char **argv)
                !idle ? "TIMEOUT: not in an idle loop" : v ? "FAIL: first failed test" : "PASS", pc);
         rc = !idle ? 2 : v ? 1 : rc;
     }
+    for (int i = 0; i < npeek; i++)
+        printf("peek 0x%08X = 0x%08X\n", peeks[i], gba_peek32(m, peeks[i]));
+    gba_cheats_close(&cheats);
+    gba_cheats_close(&cheats_ref);
     gba_destroy(m);
     gba_destroy(ref);
     gba_pack_close(&pk);

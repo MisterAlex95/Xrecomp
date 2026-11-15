@@ -1,0 +1,34 @@
+# Cheats on our homebrew (XBA-197, gba_cheats_hb_*): each one writes into the unused top of the xba_result block
+# (consoles/gba/tests/homebrew/common/xba_result.h, table[100..119] at 0x0203FFB0..0x0203FFFF), which the test
+# reads back with gba_run --peek after the verdict.
+
+[raw 32-bit constant write]
+enabled=1
+0203FFB0:C0DE0001
+
+[off: never applied]
+enabled=0
+0203FFB4:BAD00000
+
+[GameShark v1/v2, encrypted: 16-bit write when the status word is PASS (its low half 0x5353)]
+enabled=1
+format=gsa
+# decrypted: D203FE04 00005353 (if 16-bit at status == 0x5353) / 1203FFB8 0000BEEF
+719DA152 D603989E
+58BD4019 91E341B7
+
+[Action Replay v3, encrypted, detected: 8-bit fill of 4 bytes]
+enabled=1
+# decrypted: 0023FFBC 00000377 (bytes 0x77 at 0x0203FFBC..0x0203FFBF)
+FE211898 37D36728
+
+[CodeBreaker: 16-bit write and an add]
+enabled=1
+8203FFC0 1234
+8203FFC2 0010
+E203FFC2 0001
+
+[ROM patch (GameShark v1/v2, decrypted): the cartridge word at 0x08000004]
+enabled=1
+format=gsa-raw
+60000002 0000ABCD

@@ -18,6 +18,7 @@ endif()
 #   gba_hb_lle_<prog>  the same through the Cult-of-GBA BIOS (LLE)
 #   gba_jsmolka_<t>    jsmolka/gba-tests arm / thumb / memory / bios, and save/sram, flash64, flash128, none
 #   gba_rewind_*       rewind round trips on the homebrew (gba_run --rewind, XBA-194)
+#   gba_cheats_*       cheat codes on the homebrew (gba_run --cheats, XBA-197), interpreted and recompiled
 #   gba_rc_*           the same ROMs recompiled (gba_tools.recomp + cc, discovery loop), in lockstep with the
 #                      interpreter; gba_rc_fuzz: random ARM / Thumb programs, same comparison (needs python3, cc)
 # The ROM and BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays
@@ -83,6 +84,8 @@ set(GBA_HOMEBREW_DIR ${GBA_REPO_ROOT}/build/homebrew/gba CACHE PATH "Built GBA h
 set(GBA_TESTS_DIR ${GBA_REPO_ROOT}/build/gba-tests CACHE PATH "jsmolka/gba-tests ROMs (fetch_gba_tests.sh)")
 set(GBA_BIOS ${GBA_REPO_ROOT}/build/gba-bios/cult-of-gba-bios.bin CACHE FILEPATH "Cult-of-GBA BIOS (build_gba_bios.sh)")
 set(GBA_RUN_ROM ${CMAKE_CURRENT_SOURCE_DIR}/run_rom.sh)
+set(GBA_EXPECT sh ${GBA_REPO_ROOT}/tools/consoles/expect_output.sh)   # XBA-197: output checks
+set(GBA_CHEATS ${CMAKE_CURRENT_SOURCE_DIR}/cheats)
 
 if(TARGET gba_run)
     foreach(prog hello cpu timer_irq iwram_copy gfx pad sound)
@@ -106,6 +109,17 @@ if(TARGET gba_run)
     # gba_rc_fuzz: random ARM / Thumb programs with timer IRQs, lifted and compared the same way (recomp_fuzz.py).
     set(GBA_RC_ROM ${CMAKE_CURRENT_SOURCE_DIR}/recomp_rom.sh)
     set(GBA_RC_WORK ${CMAKE_CURRENT_BINARY_DIR}/recomp)
+    add_test(NAME gba_rc_cheats_hb_hello
+        COMMAND ${GBA_EXPECT} "LOCKSTEP OK|peek 0x0203FFB0 = 0xC0DE0001|peek 0x0203FFC0 = 0x00111234"
+                sh ${GBA_RC_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/hello.gba ${GBA_RC_WORK}/cheats_hello
+                --result --frames 900 --cheats ${GBA_CHEATS}/ram.cheats --peek 0x0203FFB0 --peek 0x0203FFC0)
+    add_test(NAME gba_rc_cheats_hb_hello_rompatch
+        COMMAND ${GBA_EXPECT} "LOCKSTEP OK|recompiled code set aside|peek 0x08000004 = 0x51AEABCD"
+                sh ${GBA_RC_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/hello.gba
+                ${GBA_RC_WORK}/cheats_hello_rompatch --result --frames 900 --cheats ${GBA_CHEATS}/hello.cheats
+                --peek 0x08000004)
+    set_tests_properties(gba_rc_cheats_hb_hello gba_rc_cheats_hb_hello_rompatch PROPERTIES SKIP_RETURN_CODE 77
+                         TIMEOUT 600)
     foreach(prog hello cpu timer_irq iwram_copy gfx pad sound)
         add_test(NAME gba_rc_hb_${prog}
             COMMAND sh ${GBA_RC_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba ${GBA_RC_WORK}/hb_${prog}
@@ -155,6 +169,20 @@ if(TARGET gba_run)
         COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/sound.gba --frames 2400 --rewind 1:2000
                 --rewind-mb 2)
     set_tests_properties(gba_rewind_cap PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
+    # Cheats (XBA-197, gba_run --cheats cheats/hello.cheats): a raw write, GameShark v1/v2 and Action Replay v3
+    # encrypted codes (a conditional on the result block's status, a fill), CodeBreaker writes and an add, a cartridge
+    # patch, and a cheat that is off; the values read back after the verdict (--peek). gba_rc_cheats_*: the same on
+    # the recompiled pack in lockstep with the interpreter: RAM codes only (the pack stays), and with the cartridge
+    # patch (the pack's lifted code is set aside while it is in place).
+    set(GBA_CHEAT_PEEKS --peek 0x0203FFB0 --peek 0x0203FFB4 --peek 0x0203FFB8 --peek 0x0203FFBC --peek 0x0203FFC0
+        --peek 0x08000004)
+    string(CONCAT GBA_CHEAT_WANT "HELO PASS|peek 0x0203FFB0 = 0xC0DE0001|peek 0x0203FFB4 = 0x00000000"
+           "|peek 0x0203FFB8 = 0x0000BEEF|peek 0x0203FFBC = 0x77777777|peek 0x0203FFC0 = 0x00111234")
+    add_test(NAME gba_cheats_hb_hello
+        COMMAND ${GBA_EXPECT} "${GBA_CHEAT_WANT}|peek 0x08000004 = 0x51AEABCD"
+                sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/hello.gba --result --frames 900
+                --cheats ${GBA_CHEATS}/hello.cheats ${GBA_CHEAT_PEEKS})
+    set_tests_properties(gba_cheats_hb_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(NAME gba_rc_fuzz

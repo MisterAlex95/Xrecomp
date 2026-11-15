@@ -415,3 +415,39 @@ uint32_t gba_peek32(gba_machine *m, uint32_t addr)
     const uint8_t *p = peek_ptr(m, addr);
     return p ? rd32(p) : 0;
 }
+
+/* ---- cheats (XBA-197) ------------------------------------------------------------------------------------- */
+
+void gba_cheat_poke(gba_machine *m, uint32_t addr, uint32_t v, int size)
+{
+    uint32_t region = addr >> 24;
+    if (region == 0x4) {
+        if (size == 1)
+            gba_io_write8(m, addr, (uint8_t)v);
+        else if (size == 2)
+            gba_io_write16(m, addr & ~1u, (uint16_t)v);
+        else {
+            gba_io_write16(m, addr & ~3u, (uint16_t)v);
+            gba_io_write16(m, (addr & ~3u) + 2, (uint16_t)(v >> 16));
+        }
+        return;
+    }
+    if (region < 0x2 || region > 0x7)
+        return;
+    for (int i = 0; i < size; i++) {
+        uint8_t *p = (uint8_t *)peek_ptr(m, addr + (uint32_t)i);
+        if (p)
+            *p = (uint8_t)(v >> (8 * i));
+    }
+}
+
+int gba_rom_patch16(gba_machine *m, uint32_t addr, uint16_t v)
+{
+    uint32_t off = (addr & 0x1FFFFFFu) & ~1u;
+    if ((addr >> 24) < 0x8 || (addr >> 24) > 0x9 || off + 2 > m->rom_size)
+        return -1;
+    gba_state_pin_rom_hash(m);
+    m->rom[off] = (uint8_t)v;
+    m->rom[off + 1] = (uint8_t)(v >> 8);
+    return 0;
+}

@@ -13,6 +13,9 @@
  * between frames under s_mu; fast-forward runs `speed` frames per shown frame, their audio averaged down.
  * Rewind (XBA-194, recomp_rewind.h), the same way too: a capture every RECOMP_REWIND_FRAMES frames (3 by default),
  * one step back per shown frame while the hotkey is held (Select + L2, R), silent.
+ * Cheats (XBA-197, recomp_cheats.h): RECOMP_CHEATS_FILE's enabled codes run after every PS1 frame under s_mu through
+ * ps1_peek32 / ps1_poke32 (a write that changes code a pack runs from RAM moves that page's write counter: the
+ * interpreter takes over that function); the file is read again when the app changes it (every 30 shown frames).
  *
  * Picture: ps1_display gives the display area (256 / 320 / 368 / 512 / 640 x 240 / 480, 15- or 24-bit) as XRGB; it is
  * shown at 4:3 whatever its width (host_window_set_aspect), as a television did. At an internal resolution above 1x
@@ -28,6 +31,7 @@
 #include "ps1_core.h"
 #include "ps1_devices.h"
 #include "ps1_pack.h"
+#include "recomp_cheats.h"
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
@@ -690,6 +694,18 @@ static void disc_swap_step(ps1_machine *m, disc_swap *sw, uint64_t frame)
     }
 }
 
+/* ---- Cheats (XBA-197): the bus, RAM words through the core's side-effect-free accessors ----------------------- */
+
+static uint32_t cheat_peek32(void *m, uint32_t addr)
+{
+    return ps1_peek32(m, addr);
+}
+
+static void cheat_poke32(void *m, uint32_t addr, uint32_t v)
+{
+    ps1_poke32(m, addr, v);
+}
+
 /* ---- The run -------------------------------------------------------------------------------------------------- */
 
 static uint64_t now_ns(void)
@@ -996,6 +1012,11 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     recomp_hotkeys_get(); /* RECOMP_HOTKEYS / _KEYS, logged once (XBA-190) */
     recomp_rewinder rw;
     recomp_rewinder_init(&rw, "ps1", NULL); /* RECOMP_REWIND, _MB, _FRAMES (XBA-194) */
+    recomp_cheats cheats;
+    recomp_cheats_init(&cheats, RECOMP_CHEAT_PS1);
+    recomp_cheats_load_env(&cheats, "ps1"); /* RECOMP_CHEATS_FILE (XBA-197) */
+    recomp_cheat_bus cheat_bus = {m, NULL, NULL, cheat_peek32, cheat_poke32, 0, NULL, 0};
+    unsigned cheat_polls = 0;
     int resume = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume) {
         int r = recomp_states_resume();
@@ -1139,6 +1160,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             on = ps1_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
             pthread_mutex_unlock(&s_mu);
         }
+        if (++cheat_polls % 30 == 0)
+            recomp_cheats_poll(&cheats); /* the app changed the list: read it again */
         for (int step = 0; step < steps; step++) {
             pthread_mutex_lock(&s_mu);
             disc_swap_step(m, &swap, frames + 1); /* the frame about to run */
@@ -1148,6 +1171,8 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             uint64_t c0 = ps1_cycles(m);
             ps1_run_frame(m);
             frame_ns = ps1_runtime_frame_ns(ps1_cycles(m) - c0);
+            if (cheats.n)
+                recomp_cheats_apply(&cheats, &cheat_bus);
             recomp_rewinder_frame(&rw, rewind_size, rewind_save, m);
             if (s_state_loaded) {
                 s_state_loaded = 0;
@@ -1266,6 +1291,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     recomp_states_detach(); /* before s_mu: a save / load in progress finishes first */
     recomp_ff_hold(0);
     recomp_rewinder_free(&rw); /* logs the capture cost */
+    recomp_cheats_free(&cheats);
     if (audio)
         host_audio_close();
     if (window)

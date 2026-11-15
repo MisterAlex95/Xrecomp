@@ -52,6 +52,12 @@ static uint64_t rom_hash(gba_machine *m)
     return m->rom_hash;
 }
 
+/* Cheats patch the cartridge (gba_rom_patch16): the game's hash is the unpatched ROM's. */
+void gba_state_pin_rom_hash(gba_machine *m)
+{
+    (void)rom_hash(m);
+}
+
 /* The BIOS: 0 for the built-in one (its code is ours, rebuilt at creation), else the image's hash. */
 static uint64_t bios_hash(gba_machine *m)
 {

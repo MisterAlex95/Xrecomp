@@ -23,7 +23,11 @@
  *
  * Rewind (XBA-194, recomp_rewind.h), the same way too, but off unless RECOMP_REWIND=1 (a capture is a 4 / 8 MB state,
  * and the Vulkan RDP drains its work for each): a capture every RECOMP_REWIND_FRAMES frames (4 by default), one step
- * back per shown frame while the hotkey is held (Back + left trigger, R), silent. */
+ * back per shown frame while the hotkey is held (Back + left trigger, R), silent.
+ *
+ * Cheats (XBA-197, recomp_cheats.h): RECOMP_CHEATS_FILE's enabled GameShark codes run after every N64 frame under
+ * s_mu through n64_peek32 / n64_poke32 (a write that changes code a pack runs from RDRAM moves that page's write
+ * counter: the interpreter takes over that function); the file is read again when the app changes it. */
 #define _GNU_SOURCE /* pread, nanosleep */
 #include "n64_runtime.h"
 
@@ -34,6 +38,7 @@
 #include "n64_core.h"
 #include "n64_pack.h"
 #include "n64_rdp.h"
+#include "recomp_cheats.h"
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
@@ -709,6 +714,18 @@ static int state_load_op(int slot, void *user)
     return rc;
 }
 
+/* ---- Cheats (XBA-197): the bus, RDRAM words through the core's side-effect-free accessors --------------------- */
+
+static uint32_t cheat_peek32(void *m, uint32_t addr)
+{
+    return n64_peek32(m, addr);
+}
+
+static void cheat_poke32(void *m, uint32_t addr, uint32_t v)
+{
+    n64_poke32(m, addr, v);
+}
+
 /* ---- The run -------------------------------------------------------------------------------------------------- */
 
 static uint64_t now_ns(void)
@@ -1018,6 +1035,11 @@ int n64_runtime_run(const n64_runtime_opts *o)
     recomp_hotkeys_get(); /* RECOMP_HOTKEYS / _KEYS, logged once (XBA-190) */
     recomp_rewinder rw;
     recomp_rewinder_init(&rw, "n64", NULL); /* RECOMP_REWIND (off by default), _MB, _FRAMES (XBA-194) */
+    recomp_cheats cheats;
+    recomp_cheats_init(&cheats, RECOMP_CHEAT_N64);
+    recomp_cheats_load_env(&cheats, "n64"); /* RECOMP_CHEATS_FILE (XBA-197) */
+    recomp_cheat_bus cheat_bus = {m, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0};
+    unsigned cheat_polls = 0;
     int resume = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume) {
         int r = recomp_states_resume();
@@ -1176,6 +1198,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
             on = n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
             pthread_mutex_unlock(&s_mu);
         }
+        if (++cheat_polls % 30 == 0)
+            recomp_cheats_poll(&cheats); /* the app changed the list: read it again */
         for (int step = 0; step < steps; step++) {
             pthread_mutex_lock(&s_mu);
             for (int port = 0; port < players; port++)
@@ -1183,6 +1207,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
             uint64_t c0 = n64_cycles(m);
             n64_run_frame(m);
             frame_ns = n64_runtime_frame_ns(n64_cycles(m) - c0);
+            if (cheats.n)
+                recomp_cheats_apply(&cheats, &cheat_bus);
             recomp_rewinder_frame(&rw, rewind_size, rewind_save, m);
             if (s_state_loaded) {
                 s_state_loaded = 0;
@@ -1330,6 +1356,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     recomp_states_detach(); /* before s_mu: a save / load in progress finishes first */
     recomp_ff_hold(0);
     recomp_rewinder_free(&rw); /* logs the capture cost */
+    recomp_cheats_free(&cheats);
     if (audio)
         host_audio_close();
     if (window)

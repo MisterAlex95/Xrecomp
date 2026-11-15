@@ -4,6 +4,7 @@
  *           [--save PATH] [--hash] [--info] [--regs] [--quiet]
  *           [--pack LIB.so [--lockstep] [--missed FILE] [--stats]]
  *           [--state-save N:FILE] [--state-load FILE] [--run-hash] [--rewind C:R [--rewind-mb M]]
+ *           [--cheats FILE] [--peek ADDR]
  *
  * ROM           a .z64 / .v64 / .n64 file (any byte order)
  * --frames N    frames (VI interrupts) to run (default 600); with --result, the most frames to wait
@@ -41,11 +42,15 @@
  *               capture every C frames as the runtime takes them, R steps back, the picture and every frame after it
  *               must be the first run's; prints "REWIND OK" and the capture cost, exit 6 on a difference.
  *               --rewind-mb M: the ring's cap (default 64)
+ * --cheats FILE the cheat list FILE (XBA-197, recomp_cheats.h): its enabled GameShark codes run after every frame
+ *               (on both machines with --lockstep)
+ * --peek ADDR   after the run, print the 32-bit word at ADDR ("peek 0x80300010 = 0x..."); up to 8 times
  * Prints the frame rate reached on stderr (unless --quiet). Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "n64_core.h"
 #include "n64_rdp.h"
 #include "n64_recomp.h"
+#include "recomp_cheats.h"
 #include "recomp_rewind.h"
 
 #include <dlfcn.h>
@@ -139,12 +144,23 @@ static double now_s(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+static uint32_t cheat_peek32(void *m, uint32_t addr)
+{
+    return n64_peek32(m, addr);
+}
+
+static void cheat_poke32(void *m, uint32_t addr, uint32_t v)
+{
+    n64_poke32(m, addr, v);
+}
+
 static int usage(void)
 {
     fprintf(stderr, "usage: n64_run ROM [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty] [--pad MASK]\n"
                     "               [--pal | --ntsc] [--save PATH] [--hash] [--info] [--regs] [--quiet]\n"
                     "               [--pack LIB.so [--lockstep] [--missed FILE] [--stats]]\n"
-                    "               [--state-save N:FILE] [--state-load FILE] [--run-hash]\n");
+                    "               [--state-save N:FILE] [--state-load FILE] [--run-hash] [--cheats FILE]\n"
+                    "               [--peek ADDR]\n");
     return 3;
 }
 
@@ -272,6 +288,9 @@ int main(int argc, char **argv)
     long frames = 600;
     bool result = false, quiet = false, hash = false, tty = false, info = false, regs = false;
     bool lockstep = false, stats = false, run_hash = false;
+    const char *cheats_path = NULL;
+    uint32_t peeks[8];
+    int npeek = 0;
     const char *state_save = NULL, *state_load = NULL;
     long state_at = 0;
     long long lock_cycles = 0, lock_from = 0;
@@ -313,6 +332,10 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(a, "--rewind-mb") && more)
             rewind_mb = strtod(argv[++i], NULL);
+        else if (!strcmp(a, "--cheats") && more)
+            cheats_path = argv[++i];
+        else if (!strcmp(a, "--peek") && more && npeek < 8)
+            peeks[npeek++] = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(a, "--quiet"))
             quiet = true;
         else if (!strcmp(a, "--pack") && more)
@@ -457,16 +480,30 @@ int main(int argc, char **argv)
         n64_run_cycles(m, (uint64_t)lock_from);
         n64_run_cycles(twin, (uint64_t)lock_from);
     }
+    recomp_cheats cheats, cheats_twin;
+    recomp_cheats_init(&cheats, RECOMP_CHEAT_N64);
+    recomp_cheats_init(&cheats_twin, RECOMP_CHEAT_N64);
+    if (cheats_path) {
+        recomp_cheats_load(&cheats, cheats_path);
+        if (twin)
+            recomp_cheats_load(&cheats_twin, cheats_path);
+    }
+    recomp_cheat_bus cbus = {m, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0};
+    recomp_cheat_bus cbus_twin = {twin, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0};
     for (f = 0; f < frames; f++) {
         if (twin && lock_cycles > 0)
             n64_run_cycles(m, (uint64_t)lock_cycles);
         else
             n64_run_frame(m);
+        if (cheats.n)
+            recomp_cheats_apply(&cheats, &cbus);
         if (twin) {
             if (lock_cycles > 0)
                 n64_run_cycles(twin, (uint64_t)lock_cycles);
             else
                 n64_run_frame(twin);
+            if (cheats_twin.n)
+                recomp_cheats_apply(&cheats_twin, &cbus_twin);
             char why[160] = "";
             int d = n64_recomp_compare(m, twin, why, sizeof why);
             if (!d && display_hash(m) != display_hash(twin)) {
@@ -614,6 +651,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "n64_run: %ld frames in %.2f s (%.1f fps, %.1f MIPS, %.1f MHz emulated)\n", f, dt,
                 dt > 0 ? f / dt : 0.0, dt > 0 ? (double)n64_instructions(m) / dt / 1e6 : 0.0,
                 dt > 0 ? (double)n64_cycles(m) / dt / 1e6 : 0.0);
+    for (int i = 0; i < npeek; i++)
+        printf("peek 0x%08X = 0x%08X\n", peeks[i], n64_peek32(m, peeks[i]));
+    recomp_cheats_free(&cheats);
+    recomp_cheats_free(&cheats_twin);
     n64_destroy(m);
     n64_destroy(twin);
     /* lib stays loaded until exit (no dlclose: nothing may call into it after the machines are gone anyway) */

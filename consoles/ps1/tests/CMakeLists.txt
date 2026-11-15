@@ -27,6 +27,7 @@ endif()
 #                      OpenBIOS (ps1_hle_same_*), disc boots, mcard, ps1-tests, recompiled in lockstep (ps1_hle_rc_*)
 #   ps1_state_*        save states: the round trip, interpreter and packs (ps1_rc_state_*), refusals (XBA-182)
 #   ps1_rewind_*       rewind round trips (ps1_run --rewind, XBA-194): every homebrew, a disc read, the memory cap
+#   ps1_cheats_*       GameShark codes on the homebrew (ps1_run --cheats, XBA-197), interpreted and recompiled
 #   ps1_rc_*           the same programs recompiled (ps1_tools.recomp + cc, discovery loop), in lockstep with the
 #                      interpreter; ps1_rc_fuzz: random MIPS programs under timer IRQs (needs python3, cc)
 # The EXE / BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays green.
@@ -302,6 +303,13 @@ if(TARGET ps1_run)
                  hle ${PS1_HOMEBREW_DIR}/${prog}.exe ${PS1_RC_WORK}/hle_hb_${prog} 900 --result --quiet)
         list(APPEND rc ps1_hle_rc_hb_${prog})
     endforeach()
+    # Cheats (XBA-197) on the recompiled hello in lockstep with the interpreter, the codes running on both.
+    add_test(NAME ps1_hle_rc_cheats_hb_hello COMMAND sh ${PS1_REPO_ROOT}/tools/consoles/expect_output.sh
+             "LOCKSTEP OK|peek 0x801F01B0 = 0x00561234|peek 0x801F01C0 = 0x00001234"
+             sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_exe.sh $<TARGET_FILE:ps1_run> hle ${PS1_HOMEBREW_DIR}/hello.exe
+             ${PS1_RC_WORK}/hle_cheats_hello 900 --result --quiet
+             --cheats ${CMAKE_CURRENT_SOURCE_DIR}/cheats/hello.cheats --peek 0x801F01B0 --peek 0x801F01C0)
+    list(APPEND rc ps1_hle_rc_cheats_hb_hello)
     if(PS1_HAVE_CD)
         add_test(NAME ps1_hle_rc_hb_disc_overlay COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_exe.sh
                  $<TARGET_FILE:ps1_run> hle ${PS1_HOMEBREW_DIR}/overlay.cue ${PS1_RC_WORK}/hle_hb_disc_overlay 3000
@@ -332,6 +340,16 @@ if(TARGET ps1_run)
              --rewind 1:800 --rewind-mb 8.45 --quiet)
     list(APPEND rw ps1_rewind_cap)
     set_tests_properties(${rw} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # Cheats (XBA-197, ps1_run --cheats cheats/hello.cheats): GameShark 30 / 80 writes, a D0 conditional on the result
+    # block's status, a 50 serial repeater, a C2 copy and a cheat that is off, read back after the verdict (--peek).
+    string(CONCAT want "PASS|peek 0x801F01B0 = 0x00561234|peek 0x801F01B4 = 0x0000BEEF|peek 0x801F01B8 = 0x00110010"
+           "|peek 0x801F01BC = 0x00000012|peek 0x801F01C0 = 0x00001234")
+    add_test(NAME ps1_cheats_hb_hello COMMAND sh ${PS1_REPO_ROOT}/tools/consoles/expect_output.sh "${want}"
+             ${PS1_RUN_HLE} ${PS1_HOMEBREW_DIR}/hello.exe --result --frames 900 --quiet
+             --cheats ${CMAKE_CURRENT_SOURCE_DIR}/cheats/hello.cheats
+             --peek 0x801F01B0 --peek 0x801F01B4 --peek 0x801F01B8 --peek 0x801F01BC --peek 0x801F01C0)
+    set_tests_properties(ps1_cheats_hb_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # Save states (XBA-182, state_exe.sh): the round trip (a state saved after frame 150, the next 150 frames hashed,
     # then the same from the state loaded in a new machine) on every homebrew under OpenBIOS and the HLE BIOS, a disc
