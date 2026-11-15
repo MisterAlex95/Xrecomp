@@ -1442,6 +1442,9 @@ recomp_func_t recomp_lookup(uint32_t va)
 recomp_func_t seh_fixture_lookup_harness(uint32_t va);
 recomp_func_t recomp_lookup_manual(uint32_t va) { return seh_fixture_lookup_harness(va); }
 
+/* No flat table (span 0): every indirect call takes the lookups above. */
+recomp_flat_dispatch_t g_recomp_flat;
+
 const uint32_t seh_fixture_text_va = 0x00010000u;
 const uint32_t seh_fixture_text_size = 1222u;
 const unsigned char seh_fixture_text[] = {
