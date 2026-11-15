@@ -391,9 +391,9 @@ build/n64/n64_runtime/n64_run build/n64-systemtest/n64-systemtest.z64 --tty --fr
 
 The linux CI job has no corpus, so its N64 ROM tests skip (77). The **homebrew job** runs them after the corpus build
 (`tools/consoles/run_n64_homebrew.sh`, the linux job's deps image, about 100 s cached; GitHub's `n64-corpus` the
-same): ctest `n64_runtime`, `n64_pack`, `n64_hb_*`, `n64_rc_hb_*`, `n64_(rc_)state_*` and `n64_rewind_hb_*` (28
-tests; one that skips fails the job). The job also runs on a PR that touches `consoles/n64/`. Locally:
-`tools/consoles/build_homebrew.sh n64 build/homebrew && tools/consoles/run_n64_homebrew.sh build/homebrew`.
+same): ctest `n64_runtime`, `n64_pack`, `n64_hb_*`, `n64_rc_hb_*`, `n64_(rc_)state_*`, `n64_rewind_hb_*` and
+`n64_cheats_hb_*` (29 tests; one that skips fails the job). The job also runs on a PR that touches `consoles/n64/`.
+Locally: `tools/consoles/build_homebrew.sh n64 build/homebrew && tools/consoles/run_n64_homebrew.sh build/homebrew`.
 
 **The VI's picture (`n64_vi.c`, `n64_display`).** What a television showed, not a crop of the framebuffer: a fixed
 canvas of 640 VI pixels from H = 108 (NTSC) / 128 (PAL) and 240 / 288 lines from half-line 34 / 44 (480 / 576

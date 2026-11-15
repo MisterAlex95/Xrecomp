@@ -7,11 +7,11 @@
 # linux job has no corpus, so there every N64 ROM test skips (77); this runs them for real. In a throwaway container
 # of the linux job's dependency stage (tools/docker/linux.Dockerfile --target deps, tag xba-linux-deps, shared with
 # run_gba_packs.sh), without network: consoles/n64/tests built with N64_HOMEBREW_DIR pointing at the corpus, then
-#   ctest -R '^n64_(runtime|pack|(rc_)?hb_|(rc_)?state_|rewind_hb_)'
+#   ctest -R '^n64_(runtime|pack|(rc_)?hb_|(rc_)?state_|rewind_hb_|cheats_hb_)'
 # the runtime's headless runs of gfx.z64, the pack identity, each program under n64_run --result (interpreter) and
-# recompiled by the discovery loop in lockstep with the interpreter, the save-state and rewind round trips. A test
-# that skips although the corpus is here fails the run. n64-systemtest (n64_systemtest / n64_rc_systemtest) is not
-# built here: it is not part of the corpus.
+# recompiled by the discovery loop in lockstep with the interpreter, the save-state and rewind round trips, the
+# GameShark codes. A test that skips although the corpus is here fails the run. n64-systemtest (n64_systemtest /
+# n64_rc_systemtest) is not built here: it is not part of the corpus.
 # Sources go in and results come out with `docker cp` (no bind mounts: CI drives the host's Docker from a container).
 # OUT_DIR gets build.log and ctest.log. Exits 1 when a test fails or skips.
 #
@@ -55,7 +55,7 @@ cmake -S consoles/n64/tests -B /tmp/build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDeb
 rc=0
 t0=$(date +%s)
 echo "== ctest n64 runtime / hb / rc_hb / state / rewind (interpreter, discovery-loop recompilation in lockstep)"
-ctest --test-dir /tmp/build -R "^n64_(runtime|pack|(rc_)?hb_|(rc_)?state_|rewind_hb_)" -j"$JOBS" --output-on-failure \
+ctest --test-dir /tmp/build -R "^n64_(runtime|pack|(rc_)?hb_|(rc_)?state_|rewind_hb_|cheats_hb_)" -j"$JOBS" --output-on-failure \
     --timeout 900 >/out/ctest.log 2>&1 || rc=1
 grep -E "^ *[0-9]+/[0-9]+ Test|tests passed|tests failed" /out/ctest.log
 grep -q "Skipped" /out/ctest.log && { echo "a test skipped although the corpus is here"; rc=1; }

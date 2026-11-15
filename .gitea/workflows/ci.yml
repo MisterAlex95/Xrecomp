@@ -163,7 +163,7 @@ jobs:
   # about 11 s). They are inputs only: never uploaded with the artefact.
   # The N64 programs go through consoles/n64/tests the same way (tools/consoles/run_n64_homebrew.sh, same deps image,
   # about 100 s cached): ctest n64_runtime / n64_pack / n64_hb_* / n64_rc_hb_* / n64_(rc_)state_* / n64_rewind_hb_*
-  # (28 tests, skipped in the linux job). That part also runs when a PR touches consoles/n64/.
+  # / n64_cheats_hb_* (29 tests, skipped in the linux job). That part also runs when a PR touches consoles/n64/.
   homebrew:
     needs: linux
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
