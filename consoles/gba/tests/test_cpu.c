@@ -296,6 +296,9 @@ static void test_dma_timer(void)
     gba_write32(m, 0x040000D4, DATA, false);
     gba_write32(m, 0x040000D8, DATA + 0x100, false);
     gba_write32(m, 0x040000DC, 4 | (0x8400u << 16), false); /* 4 words, 32-bit, now */
+    CHECK(gba_peek32(m, DATA + 0x10C) == 0 && m->dma_due == m->now + 2, "dma3 waits for its start delay");
+    m->now += 2;
+    (void)gba_read32(m, DATA, false); /* a CPU access after the delay: the transfer runs first */
     CHECK(gba_peek32(m, DATA + 0x10C) == 0x1003 && !(gba_io_read16(m, 0x040000DE) & 0x8000), "dma3 copy");
 
     /* Timer 0 at 1 cycle per tick from 0xFFF0 overflows after 16 cycles into the cascaded timer 1. */
