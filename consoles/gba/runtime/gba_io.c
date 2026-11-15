@@ -289,7 +289,10 @@ static void timer_write_ctl(gba_machine *m, int i, uint16_t v)
     if (!(old & 0x80) && (v & 0x80))
         t->counter = t->reload;
     int shift = timer_shift[v & 3];
-    t->base_time = (was && shift == t->shift) ? m->now - frac : m->now + TIMER_START_DELAY;
+    if (was && shift == t->shift)
+        t->base_time = m->now - frac;
+    else /* the prescaler is a free-running divider: a prescaled timer ticks on multiples of its period */
+        t->base_time = (m->now + TIMER_START_DELAY) & ~(((uint64_t)1 << shift) - 1);
     t->shift = shift;
     timer_set_due(m, i);
     gba_schedule(m);
