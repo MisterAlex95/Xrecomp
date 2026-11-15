@@ -8,7 +8,8 @@
 #                            publishing (the files stay on the run's page)
 #
 # Gitea ignores .github/workflows while .gitea/workflows exists. No game, no game data, no generated C: each download
-# is this repository's tree at the commit (tools/ci/package_toolkit.sh), plus XRecomp.app for the Mac.
+# is this repository's tree at the commit (tools/ci/package_toolkit.sh) with the pinned frame generation source tarballs
+# (lsfg-vk framegen, volk, DXVK, SPIRV-Headers: built by default, XBA-187), plus XRecomp.app for the Mac.
 #
 # Order with Gitea: tools/ci/github_release.sh deletes and recreates a release (the APK side), which would drop files
 # attached before it. So the publish job waits for the release of this very commit (target_commitish), then attaches.
@@ -119,8 +120,12 @@ jobs:
           mkdir -p "$t/game" && cp tools/conformance/test.xbe "$t/game/default.xbe"
           "$t/venv/bin/python" -m tools.prepare "$t/game/default.xbe" --work "$t/work" --no-build
           ls "$t/work/project/src/recomp/gen/recomp_dispatch.c"
-          cmake -S . -B "$t/build" -DCMAKE_BUILD_TYPE=Release
+          # Frame generation is in the default build (XBA-187), from the tarballs the archive carries: no fetch.
+          cmake -S . -B "$t/build" -DCMAKE_BUILD_TYPE=Release | tee "$t/configure.log"
+          grep -q 'LSFG: bridge built' "$t/configure.log"
+          if grep -q 'LSFG: fetching' "$t/configure.log"; then echo "the archive's tarballs were not used"; exit 1; fi
           cmake --build "$t/build" -j"$(nproc)"
+          nm "$t/build/src/framegen/libxbox_framegen.a" | grep -q ' T lsfg_bridge_open$'
       - uses: actions/upload-artifact@v4
         with:
           name: linux

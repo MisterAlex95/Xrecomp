@@ -3,9 +3,8 @@
 #
 # volk comes the way the fork pins it: its thirdparty/volk submodule (zeux/volk be3dbd49), populated with
 # `git -C $LSFG_VK_SRC submodule update --init thirdparty/volk` (only that one: pe-parse, dxbc and toml11 are not
-# used). Vulkan headers: the NDK sysroot on Android; elsewhere XBOXRECOMP_VULKAN_HEADERS (a directory holding
-# vulkan/vulkan_core.h, e.g. Vulkan-Headers/include or the NDK's sysroot/usr/include: only its vulkan/ and
-# vk_video/ subdirectories are staged into the build tree), else a system Vulkan SDK (find_package(Vulkan)).
+# used). Vulkan headers: lsfg_vulkan_headers.cmake (the NDK sysroot on Android; elsewhere XBOXRECOMP_VULKAN_HEADERS,
+# else the Khronos headers this repository carries for paraLLEl-RDP).
 if(TARGET lsfg-vk-framegen)
     return()
 endif()
@@ -21,19 +20,9 @@ if(NOT EXISTS "${XBOXRECOMP_VOLK_SRC}/volk.c")
                         "`git -C ${_lsfg_src} submodule update --init thirdparty/volk`")
 endif()
 
-set(XBOXRECOMP_VULKAN_HEADERS "$ENV{VULKAN_HEADERS}" CACHE PATH
-    "Directory holding vulkan/vulkan_core.h (not needed on Android or with a Vulkan SDK)")
-if(XBOXRECOMP_VULKAN_HEADERS AND NOT ANDROID)
-    if(NOT EXISTS "${XBOXRECOMP_VULKAN_HEADERS}/vulkan/vulkan_core.h")
-        message(FATAL_ERROR "XBOXRECOMP_VULKAN_HEADERS=${XBOXRECOMP_VULKAN_HEADERS}: no vulkan/vulkan_core.h")
-    endif()
-    # Staged so that a sysroot's libc headers never shadow the host's.
-    set(_vkh "${CMAKE_BINARY_DIR}/lsfg-vulkan-headers")
-    file(COPY "${XBOXRECOMP_VULKAN_HEADERS}/vulkan" DESTINATION "${_vkh}/include")
-    if(EXISTS "${XBOXRECOMP_VULKAN_HEADERS}/vk_video")
-        file(COPY "${XBOXRECOMP_VULKAN_HEADERS}/vk_video" DESTINATION "${_vkh}/include")
-    endif()
-    set(VULKAN_HEADERS_INSTALL_DIR "${_vkh}" CACHE PATH "" FORCE)   # volk adds /include
+include(${CMAKE_CURRENT_LIST_DIR}/lsfg_vulkan_headers.cmake)
+if(NOT ANDROID)
+    set(VULKAN_HEADERS_INSTALL_DIR "${XBR_LSFG_VULKAN_HEADERS_STAGE}" CACHE PATH "" FORCE)   # volk adds /include
 endif()
 if(ANDROID)
     set(VOLK_PULL_IN_VULKAN OFF CACHE BOOL "" FORCE)   # the NDK sysroot has the headers; libvulkan is dlopened

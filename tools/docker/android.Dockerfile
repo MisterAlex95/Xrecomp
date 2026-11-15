@@ -61,9 +61,24 @@ RUN { echo "NDK      $(grep Pkg.Revision $ANDROID_NDK_HOME/source.properties | c
 # The release keystore never goes in the image: it comes in as a build secret when an APK is signed.
 WORKDIR /src
 
+# The pinned frame generation sources (XBA-187, src/framegen/lsfg_sources.txt: keep these lines in step with it,
+# tools/lsfg/test_fetch_sources.py checks): the tarballs src/framegen/lsfg_sources.cmake takes from
+# XBOXRECOMP_DEPS_DIR, so the native builds below fetch nothing. Checksummed, cached by BuildKit until a pin moves.
+FROM scratch AS lsfg-sources
+ADD --checksum=sha256:435d413a27e1e3bdc226ed867acecec6af0e202dd6750a9517ae566f562b267a \
+    https://codeload.github.com/GameNative/lsfg-vk-android/tar.gz/d33caceb5e26cc6773834c00b4eb570ad4906272 /lsfg-vk-android-435d413a27e1e3bd.tar.gz
+ADD --checksum=sha256:295d6de2bccb4e46f77d4173ba42c9513a66623071e80ceb597e9d95de73cc32 \
+    https://codeload.github.com/zeux/volk/tar.gz/be3dbd49bf77052665e96b6c7484af855e7e5f67 /volk-295d6de2bccb4e46.tar.gz
+ADD --checksum=sha256:a6eb05696a6e5369ac55767ddb8d4c1f6e682478afe6768db714e8ad4e7a4463 \
+    https://codeload.github.com/doitsujin/dxvk/tar.gz/9d6f54a1ade20d1d27dd421024717a636f3d8c68 /dxvk-a6eb05696a6e5369.tar.gz
+ADD --checksum=sha256:cfeed5f9a97d12a9761a26e7f5bd10fedb1a8ce92033075151ae3bc7206fc229 \
+    https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/8b246ff75c6615ba4532fe4fde20f1be090c3764 /spirv-headers-cfeed5f9a97d12a9.tar.gz
+
 # The toolkit's static libraries for arm64-v8a, API 30 (XBA-17). Checks that no desktop dependency is linked.
 FROM android AS toolkit
 ARG JOBS=4
+COPY --from=lsfg-sources / /opt/xba-lsfg-sources/
+ENV XBOXRECOMP_DEPS_DIR=/opt/xba-lsfg-sources
 COPY . /src
 RUN mkdir -p /reports \
     && cmake -S /src -B /work/android -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DXBOXRECOMP_BUILD_TESTS=OFF \
@@ -108,6 +123,8 @@ FROM ps1-bios-out AS xba-ps1-bios
 FROM android AS apk
 ARG XBA_VERSION=dev
 COPY --from=xba-ps1-bios /openbios.bin /opt/xba-ps1-bios/openbios.bin
+COPY --from=lsfg-sources / /opt/xba-lsfg-sources/
+ENV XBOXRECOMP_DEPS_DIR=/opt/xba-lsfg-sources
 COPY . /src
 WORKDIR /src/android
 RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
@@ -176,6 +193,8 @@ COPY --from=app-unit-tests /out/ /
 FROM android AS stub-apk
 ARG XBA_VERSION=dev
 RUN apt-get update && apt-get install -y --no-install-recommends python3-capstone && rm -rf /var/lib/apt/lists/*
+COPY --from=lsfg-sources / /opt/xba-lsfg-sources/
+ENV XBOXRECOMP_DEPS_DIR=/opt/xba-lsfg-sources
 COPY . /src
 WORKDIR /src/android
 RUN /src/tools/android/stub_title.sh /work/stub \
@@ -307,6 +326,8 @@ ARG XBA_DEBUGGABLE=1
 ARG JOBS=4
 COPY --from=xba-toolchain / /opt/xba-toolchain/
 COPY --from=xba-ps1-bios /openbios.bin /opt/xba-ps1-bios/openbios.bin
+COPY --from=lsfg-sources / /opt/xba-lsfg-sources/
+ENV XBOXRECOMP_DEPS_DIR=/opt/xba-lsfg-sources
 COPY . /src
 WORKDIR /src/android
 RUN --mount=type=secret,id=xba_keystore --mount=type=secret,id=xba_keystore_password \
@@ -338,8 +359,18 @@ RUN set -e; bt=$(ls -d "$ANDROID_HOME"/build-tools/* | tail -1); apk=/out/xrecom
              assets/licences/LICENSE.txt assets/licences/NOTICE.txt \
              assets/licences/Apache-2.0-WITH-LLVM-exception.txt assets/licences/PSF-2.0.txt \
              assets/licences/BSD-3-Clause-capstone.txt assets/licences/Apache-2.0-apksig.txt \
-             assets/licences/MIT-OpenBIOS.txt assets/ps1-bios/openbios.bin; do \
+             assets/licences/MIT-OpenBIOS.txt assets/ps1-bios/openbios.bin \
+             lib/arm64-v8a/libxba_import.so assets/licences/MIT-lsfg-vk.txt assets/licences/Zlib-DXVK.txt \
+             assets/licences/MIT-Khronos-SPIRV-Headers.txt; do \
         grep -q " $f\$" /out/xrecomp-contents.txt || { echo "xrecomp.apk: missing $f"; exit 1; }; done; \
+    nm="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"; \
+    unzip -p "$apk" lib/arm64-v8a/libmain.so > /tmp/libmain.so; unzip -p "$apk" lib/arm64-v8a/libxba_import.so > /tmp/libimp.so; \
+    "$nm" -D --defined-only /tmp/libmain.so | grep -q ' T lsfg_bridge_open$' \
+        || { echo "xrecomp.apk: no frame generation bridge in libmain.so (XBA-187)"; exit 1; }; \
+    "$nm" -D --defined-only /tmp/libimp.so | grep -q 'DxbcModule' \
+        || { echo "xrecomp.apk: no DXBC translator in libxba_import.so (XBA-187)"; exit 1; }; \
+    echo "frame generation: bridge in libmain.so, translator in libxba_import.so" | tee /out/xrecomp-lsfg.txt; \
+    rm -f /tmp/libmain.so /tmp/libimp.so; \
     ! unzip -Z1 "$apk" | grep -iE '\.(xbe|iso|xiso)$' | grep -vx 'assets/selftest.xbe' \
         || { echo "xrecomp.apk: an XBE or disc image other than the self-test"; exit 1; }; \
     "$bt/aapt2" dump badging "$apk" | grep -E "^package:|application-debuggable" | tee /out/xrecomp-badging.txt; \

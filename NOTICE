@@ -59,16 +59,24 @@ LGPL-2.1-or-later — extracted from xemu
   satisfies that.
 
 
-Frame generation (LSFG) — built from pinned checkouts, not vendored
--------------------------------------------------------------------
+Frame generation (LSFG) — built from pinned sources, not vendored
+-----------------------------------------------------------------
 
-  docs/technical/framegen.md. These are compiled into binaries built with
-  -DXBOXRECOMP_LSFG=ON and the checkouts below (or the Android app with
-  -PxbaLsfg=1); the default build contains none of them.
+  docs/technical/framegen.md. Frame generation is in the default build
+  (XBA-187): the build fetches the sources below at pinned commits, each
+  archive checked against its SHA-256 (src/framegen/lsfg_sources.txt), unless
+  checkouts are given; -DXBOXRECOMP_LSFG=OFF (Android: -PxbaLsfg=0) leaves
+  them out. They are compiled into the Android APK (framegen and volk in
+  libmain.so, the DXVK subset and SPIRV-Headers in libxba_import.so) and into
+  desktop builds (framegen and volk); the desktop downloads carry the source
+  archives in third_party/lsfg-sources. Full licence texts:
+  LICENSES/MIT-lsfg-vk.txt, LICENSES/Zlib-DXVK.txt,
+  LICENSES/MIT-Khronos-SPIRV-Headers.txt.
 
   framegen (lsfg-vk 1.0), MIT
-    https://github.com/GameNative/lsfg-vk-android, commit d33caceb, the
-    framegen/ directory only, unmodified (XBOXRECOMP_LSFG_VK_SRC).
+    https://github.com/GameNative/lsfg-vk-android, commit
+    d33caceb5e26cc6773834c00b4eb570ad4906272, the framegen/ directory only,
+    unmodified (XBOXRECOMP_LSFG_VK_SRC overrides it).
 
       MIT License
 
@@ -96,14 +104,16 @@ Frame generation (LSFG) — built from pinned checkouts, not vendored
     lsfg-vk 2.x is CC BY-NC-ND 4.0 and is not used.
 
   volk, MIT
-    https://github.com/zeux/volk, commit be3dbd49 (the fork's
-    thirdparty/volk submodule). Copyright (c) 2018-2025 Arseny Kapoulkine.
-    Same MIT terms as above.
+    https://github.com/zeux/volk, commit
+    be3dbd49bf77052665e96b6c7484af855e7e5f67 (the fork's thirdparty/volk
+    submodule). Copyright (c) 2018-2025 Arseny Kapoulkine. Same MIT terms as
+    above.
 
   DXVK, zlib/libpng licence
-    https://github.com/doitsujin/dxvk, tag v2.6.2: src/dxbc, src/spirv and
-    src/util compiled from a checkout (XBOXRECOMP_LSFG_DXVK_SRC) into the
-    DXBC translator. src/framegen/dxvk_shim/ in this repository is a DXVK
+    https://github.com/doitsujin/dxvk, tag v2.6.2 (commit
+    9d6f54a1ade20d1d27dd421024717a636f3d8c68): src/dxbc, src/spirv and
+    src/util compiled, unmodified, into the DXBC translator
+    (XBOXRECOMP_LSFG_DXVK_SRC overrides it). src/framegen/dxvk_shim/ in this repository is a DXVK
     derivative, altered (reduced to the declarations the DXBC compiler
     needs) and released under the same licence.
 
@@ -129,8 +139,15 @@ Frame generation (LSFG) — built from pinned checkouts, not vendored
       - This notice may not be removed or altered from any source
         distribution.
 
-  SPIRV-Headers (DXVK's include/spirv submodule), headers only:
+  SPIRV-Headers (DXVK's include/spirv submodule, commit
+    8b246ff75c6615ba4532fe4fde20f1be090c3764), headers only:
+    https://github.com/KhronosGroup/SPIRV-Headers
     Copyright (c) 2015-2024 The Khronos Group Inc., MIT-style Khronos terms.
+
+  Desktop builds compile framegen, volk and the translator against the
+  Khronos Vulkan headers already listed for paraLLEl-RDP
+  (third_party/parallel-rdp/vulkan-headers, Apache-2.0) unless another
+  directory is given; Android uses the NDK's.
 
   Lossless.dll and its shaders belong to the user and are never part of this
   repository, an APK or a CI artefact.
@@ -315,6 +332,14 @@ The Android app (XRecomp) — what the APK ships
     tools/consoles/build_ps1_bios.sh does, sha256 checked; no Sony BIOS)
     https://github.com/pcsx-redux/nugget
     Copyright (c) 2019 PCSX-Redux authors. Full text: LICENSES/MIT-OpenBIOS.txt
+
+  Frame generation (libmain.so, libxba_import.so): framegen (lsfg-vk 1.0)
+    and volk, MIT; DXVK v2.6.2's DXBC compiler, zlib/libpng licence;
+    SPIRV-Headers, MIT-style Khronos terms. Versions, commits and notices
+    under « Frame generation (LSFG) » above. Full texts:
+    LICENSES/MIT-lsfg-vk.txt, LICENSES/Zlib-DXVK.txt,
+    LICENSES/MIT-Khronos-SPIRV-Headers.txt. Lossless.dll is never shipped:
+    the player picks their own copy (Choose Lossless.dll).
 
   The packs the app builds on the device (libtitle.so) are made from the
   player's own disc and never leave the device; no game code or data is in

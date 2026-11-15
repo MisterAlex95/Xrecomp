@@ -53,20 +53,12 @@ target_include_directories(lsfg_dxbc
     PRIVATE ${_stage} ${_dxvk}/include/spirv/include ${_dxvk}/include/native/windows)
 target_compile_definitions(lsfg_dxbc PRIVATE NOMINMAX LSFG_DXVK_VERSION="${_dxvk_version}")
 set_target_properties(lsfg_dxbc PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
-target_compile_options(lsfg_dxbc PRIVATE -w)   # DXVK's code, built as is
-if(ANDROID)
-    # The NDK sysroot has the Vulkan headers.
-elseif(XBOXRECOMP_VULKAN_HEADERS)
-    if(NOT EXISTS "${CMAKE_BINARY_DIR}/lsfg-vulkan-headers/include/vulkan")
-        file(COPY "${XBOXRECOMP_VULKAN_HEADERS}/vulkan" DESTINATION "${CMAKE_BINARY_DIR}/lsfg-vulkan-headers/include")
-        if(EXISTS "${XBOXRECOMP_VULKAN_HEADERS}/vk_video")
-            file(COPY "${XBOXRECOMP_VULKAN_HEADERS}/vk_video" DESTINATION "${CMAKE_BINARY_DIR}/lsfg-vulkan-headers/include")
-        endif()
-    endif()
-    target_include_directories(lsfg_dxbc PRIVATE "${CMAKE_BINARY_DIR}/lsfg-vulkan-headers/include")
-else()
-    find_package(Vulkan REQUIRED)
-    target_include_directories(lsfg_dxbc PRIVATE ${Vulkan_INCLUDE_DIRS})
+# DXVK's code, built as is. Its dxbc_module.h uses std::optional without including <optional> (libc++ brings it in
+# through other headers, libstdc++ does not): forced in for GCC hosts.
+target_compile_options(lsfg_dxbc PRIVATE -w -include optional)
+if(NOT ANDROID)   # the NDK sysroot has the Vulkan headers
+    include(${CMAKE_CURRENT_LIST_DIR}/lsfg_vulkan_headers.cmake)
+    target_include_directories(lsfg_dxbc PRIVATE "${XBR_LSFG_VULKAN_HEADERS_STAGE}/include")
 endif()
 find_package(Threads REQUIRED)
 target_link_libraries(lsfg_dxbc PRIVATE Threads::Threads ${CMAKE_DL_LIBS})

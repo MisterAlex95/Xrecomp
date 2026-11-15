@@ -72,4 +72,4 @@ The Xbox audio out is `src/apu/apu_sdl2.c` (APU-bound, X).
 | File | Class | Note |
 |---|---|---|
 | `framegen_pacer.[ch]`, `framegen_fake.c`, `framegen_policy.h`, `framegen_console.[ch]` | G | `host_framegen` |
-| `lsfg_*` (bridge, generator, cache, dll, spv, dxbc) | G, optional | Vulkan LSFG; stays in `xbox_framegen` / `lsfg_shaders` (heavy, opt-in). A console can link them as they are |
+| `lsfg_*` (bridge, generator, cache, dll, spv, dxbc) | G, optional | Vulkan LSFG; stays in `xbox_framegen` / `lsfg_shaders` (heavy; in the default build since XBA-187, `-DXBOXRECOMP_LSFG=OFF` leaves it out). A console can link them as they are |

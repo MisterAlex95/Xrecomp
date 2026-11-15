@@ -9,12 +9,10 @@ set(XBA_TITLE_DIR "" CACHE PATH
 
 # The toolkit, from the root of this repository (SDL2 comes in as its subproject on Android).
 get_filename_component(XBOXRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
-# Frame generation (gradle -PxbaLsfg=1, docs/technical/framegen.md): the toolkit's XBOXRECOMP_LSFG, with the Vulkan
-# bridge (C++20, libc++ static: ANDROID_STL c++_static, gradle's default) when XBOXRECOMP_LSFG_VK_SRC is given.
-# libvulkan.so is dlopened by volk, never linked: the APK still starts on a device without Vulkan.
-if(XBOXRECOMP_LSFG)
-    enable_language(CXX)
-endif()
+# Frame generation (on by default, gradle -PxbaLsfg=0 leaves it out; docs/technical/framegen.md): the toolkit's
+# XBOXRECOMP_LSFG with the Vulkan bridge (C++20, libc++ static: ANDROID_STL c++_static, gradle's default) over the
+# pinned framegen, fetched unless XBOXRECOMP_LSFG_VK_SRC names a checkout. libvulkan.so is dlopened by volk, never
+# linked: the APK still starts on a device without Vulkan. CXX is enabled below in any case.
 # The N64 Vulkan RDP (XBR_N64_RDP_VULKAN, ON on Android: paraLLEl-RDP, C++17, libc++ static) goes into libmain.so:
 # libmain links C++, so CXX is enabled here, at the top (consoles/n64/runtime/CMakeLists.txt). Its libvulkan is
 # dlopened too (its own volk, renamed prdp_*: no clash with the LSFG bridge's).
@@ -98,8 +96,9 @@ if(NOT TARGET xiso)
     add_subdirectory("${XBOXRECOMP_ROOT}/src/xiso" xiso)
 endif()
 # It also imports Lossless.dll for frame generation (lsfg_jni.c, LsfgNative.java): the shader-cache helpers are C,
-# libc only, and always built. With -PxbaLsfg=1 and a DXVK checkout (XBOXRECOMP_LSFG_DXVK_SRC) the DXBC translator
-# is linked in too (C++17, libc++ static), so the phone translates the shaders itself.
+# libc only, and always built. With frame generation on (the default) the DXBC translator over the pinned DXVK
+# (fetched unless XBOXRECOMP_LSFG_DXVK_SRC names a checkout) is linked in too (C++17, libc++ static), so the phone
+# translates the shaders itself.
 include("${XBOXRECOMP_ROOT}/src/framegen/lsfg_shaders.cmake")
 # ps1_jni.c (Ps1Native.java, XBA-159): the title key of a .chd PlayStation disc for the library scan
 # (Console.identify): recomp_pack_rom_identify with the PS1 disc reader (ps1_disc.c + the vendored libchdr) as its

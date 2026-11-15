@@ -45,3 +45,6 @@ tools/VERSION
 # macOS launcher (macos/)
 macos/.build/
 macos/build/
+
+# Frame generation tarballs fetched by src/framegen/lsfg_sources.cmake (XBA-187)
+third_party/lsfg-sources/

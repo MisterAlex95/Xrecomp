@@ -23,6 +23,11 @@ Downloads: the [GitHub releases](https://github.com/MisterAlex95/Xrecomp/release
   otherwise macOS blocks it or runs it from a translocated copy that cannot see its toolkit (Setup then asks for it).
 - `xrecomp-v<version>-linux.tar.gz`: the toolkit for Linux (README « Linux »).
 - A `.sha256` next to each.
+- **Frame generation** (LSFG, XBA-187) in every one of them: the APK has the Vulkan bridge in `libmain.so` and the
+  shader translator in `libxba_import.so` (Settings › Graphics › Frame generation, « Choose Lossless.dll »); the
+  desktop folders carry its pinned sources (`third_party/lsfg-sources`), which a game build compiles in by default.
+  Lossless.dll itself is never shipped: the player picks their own copy, from their Lossless Scaling install.
+  Licences: NOTICE « Frame generation (LSFG) », `LICENSES/MIT-lsfg-vk.txt`, `LICENSES/Zlib-DXVK.txt`.
 - No game, no game data, no generated C: you prepare your own games on your device or computer.
 
 `xrecomp-latest` carries the same files, named `xrecomp-<commit>…`. The desktop files are built on GitHub's runners

@@ -43,8 +43,9 @@ public struct ConfigOption: Identifiable, Sendable {
 }
 
 /// The options the Mac launcher offers: the Android table (RecompConfig.java) without the Android-only keys
-/// (RECOMP_BIG_CORES, the shell self-test) and frame generation (it needs an LSFG build, MoltenVK and the player's
-/// Lossless.dll; desktop prepare does not build it), plus the window options of the SDL presenter.
+/// (RECOMP_BIG_CORES, the shell self-test) and frame generation (desktop builds have it since XBA-187, but it needs
+/// MoltenVK and a shader cache from the player's Lossless.dll, which this launcher cannot import yet:
+/// tools/lsfg/lsfg_translate, then RECOMP_LSFG=1), plus the window options of the SDL presenter.
 public enum OptionTable {
     typealias C = ConfigOption.Choice
 
