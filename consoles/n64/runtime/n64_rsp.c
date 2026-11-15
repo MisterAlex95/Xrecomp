@@ -267,23 +267,33 @@ static void sp_dma(n64_rsp *s, int to_rdram, uint32_t lenreg)
     uint8_t *rd = s->bus.rdram;
     uint32_t size = s->bus.rdram_size;
     for (uint32_t row = 0; row < count; row++) {
-        for (uint32_t b = 0; b < len; b += 8) {
-            uint8_t *sp = s->mem + (bank | off);
+        /* In runs that stay inside the SP bank, inside the 24-bit RDRAM address space and on one side of RDRAM's
+         * end: the bytes of the 8-byte steps the hardware takes, one memcpy and one write notice per run (XBA-191). */
+        for (uint32_t b = 0; b < len;) {
+            uint32_t n = len - b;
+            if (n > 0x1000 - off)
+                n = 0x1000 - off;
+            if (n > 0x1000000 - da)
+                n = 0x1000000 - da;
             int in = rd && da + 8 <= size;
+            if (in && n > size - da)
+                n = size - da;
+            uint8_t *sp = s->mem + (bank | off);
             if (to_rdram) {
                 if (in) {
-                    memcpy(rd + da, sp, 8);
+                    memcpy(rd + da, sp, n);
                     if (s->bus.wrote)
-                        s->bus.wrote(s->bus.ctx, da, 8);
+                        s->bus.wrote(s->bus.ctx, da, n);
                 }
             } else {
                 if (in)
-                    memcpy(sp, rd + da, 8);
+                    memcpy(sp, rd + da, n);
                 else
-                    memset(sp, 0, 8);
+                    memset(sp, 0, n);
             }
-            off = (off + 8) & 0xFF8;
-            da = (da + 8) & 0xFFFFF8;
+            b += n;
+            off = (off + n) & 0xFF8;
+            da = (da + n) & 0xFFFFF8;
         }
         if (row + 1 < count)
             da = (da + skip) & 0xFFFFF8;
