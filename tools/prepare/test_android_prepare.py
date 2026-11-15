@@ -137,9 +137,11 @@ def test_header_digest_of_the_lifted_c(tmp_path):
     gen = tmp_path / "src" / "recomp" / "gen"
     gen.mkdir(parents=True)
     h = gen / "recomp_funcs.h"
-    h.write_text('#include "recomp_types.h"\nvoid sub_00011000(void);\nvoid memcpy_hook(void);  /* 0x00012000 */\n')
+    h.write_text('/**\n * T - Recompiled Function Declarations\n * 2 functions, auto-generated\n */\n'
+                 '#include "recomp_types.h"\nvoid sub_00011000(void);\nvoid memcpy_hook(void);  /* 0x00012000 */\n')
     d, g = cc.header_digest([str(gen)]), cc.header_digest([str(gen)], generated=True)
-    h.write_text('#include "recomp_types.h"\nvoid sub_00011000(void);\nvoid sub_00011040(void);\n')
+    h.write_text('/**\n * T - Recompiled Function Declarations\n * 3 functions, auto-generated\n */\n'
+                 '#include "recomp_types.h"\nvoid sub_00011000(void);\nvoid sub_00011040(void);\n')
     assert cc.header_digest([str(gen)], generated=True) == g
     assert cc.header_digest([str(gen)]) != d
     h.write_text('#include "recomp_types.h"\n#define X 1\nvoid sub_00011000(void);\n')

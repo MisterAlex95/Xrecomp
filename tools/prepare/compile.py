@@ -306,8 +306,10 @@ def compile_flags(opt, toolkit, proj, sysroot, profile=False, include_dirs=()):
 
 FUNCS_H = "recomp_funcs.h"
 # A line of recomp_funcs.h that only declares a lifted function (all of them
-# are void(void)), with the comment a hand-written override's line carries.
+# are void(void)), with the comment a hand-written override's line carries;
+# and its comments (the banner counts the functions).
 _FUNC_DECL = re.compile(rb"^void [A-Za-z_]\w*\(void\);[^\n]*\n?", re.M)
+_COMMENT = re.compile(rb"/\*.*?\*/", re.S)
 
 
 def header_digest(dirs, generated=False):
@@ -315,7 +317,8 @@ def header_digest(dirs, generated=False):
     depends on its headers too, and a lift rewrites recomp_funcs.h.
 
     generated: the digest for the lifted C (src/recomp/gen/*.c). There
-    recomp_funcs.h counts without its `void name(void);` lines (XBA-209): a
+    recomp_funcs.h counts without its `void name(void);` lines and its
+    comments (XBA-209): a
     generated file that compiled names only functions declared, all with that
     one signature, so a declaration added or dropped elsewhere cannot change
     its object, and a re-lift that found a few more functions recompiles the
@@ -336,7 +339,7 @@ def header_digest(dirs, generated=False):
                 h.update(p.encode() + b"\0")
                 with open(p, "rb") as f:
                     if generated and fn == FUNCS_H:
-                        h.update(_FUNC_DECL.sub(b"", f.read()))
+                        h.update(_FUNC_DECL.sub(b"", _COMMENT.sub(b"", f.read())))
                     else:
                         for chunk in iter(lambda: f.read(1 << 20), b""):
                             h.update(chunk)
