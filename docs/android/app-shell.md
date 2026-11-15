@@ -2272,6 +2272,11 @@ game's files present **Prepare failed**, **Pack invalid** (the pack was built fr
 **Not imported**, **Needs copying**, **No file access** (per folder: a path without All files access, a tree whose
 permission is gone), else **Source gone** (an in-place folder that vanished) or
 **Game data missing**. A game with neither files nor source leaves the grid (its pack and saves stay in Storage).
+With the on-device toolchain a **Ready** card says how prepared the game is (`GameState.prepared`): **Prepared** (green
+dot), **Prepared · out of date** (amber: its pack.json `toolkit_sha256` is not this APK's toolkit digest —
+`PackFreshness` OLDER_TOOLKIT, as Home's « Prepared by an older version of the app »; it still plays), or, for a
+GBA / PS1 / N64 game without a valid pack, **Not prepared** (neutral grey: it plays in the interpreter). « New code
+found » stays on Home only (most played games have some). Without the toolchain a Ready card shows no chip.
 Variants: images with the same title ID are one game; the active one is the record's source, else the most recently
 modified.
 

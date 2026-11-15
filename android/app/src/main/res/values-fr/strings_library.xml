@@ -21,6 +21,10 @@
     <string name="LIB_FOLDER_REMOVE_SUB">Rien n\'y est supprimé</string>
     <string name="LIB_FOLDER_REMOVED">%1$s ne fait plus partie de la bibliothèque. Rien n\'y a été supprimé.</string>
     <string name="LIB_CHIP_NOT_PLAYABLE_YET">Pas encore jouable</string>
+    <!-- A Ready game's card when the app can prepare it (GameState.prepared) -->
+    <string name="LIB_CHIP_PREPARED">Préparé</string>
+    <string name="LIB_CHIP_OUTDATED">Préparé · pas à jour</string>
+    <string name="LIB_CHIP_NOT_PREPARED">Pas préparé</string>
     <string name="LIB_NOT_PLAYABLE_NOTE">Les jeux %1$s sont listés mais pas encore jouables : leur console arrive dans une prochaine version.</string>
     <string name="LIB_TRUNCATED">Trop de fichiers : l\'analyse d\'un dossier s\'est arrêtée à 5 000 entrées</string>
     <string name="LIB_SCANNING">Analyse des dossiers de la bibliothèque… %1$d trouvés</string>
