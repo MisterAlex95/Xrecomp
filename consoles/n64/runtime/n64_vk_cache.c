@@ -235,3 +235,102 @@ int n64_vk_cache_save(const char *path, const uint8_t uuid[N64_VK_CACHE_UUID_SIZ
     }
     return 0;
 }
+
+/* ---- Start-up count (startup-<factor>x.count) ------------------------------------------------------------------- */
+static int count_file(char *out, size_t n, int factor)
+{
+    char dir[1024];
+    if (factor < 1 || factor > 64 || !n64_vk_cache_dir(dir, sizeof dir))
+        return 0;
+    const int w = snprintf(out, n, "%sstartup-%dx.count", dir, factor);
+    return w > 0 && (size_t)w < n;
+}
+
+static void uuid_hex(char out[2 * N64_VK_CACHE_UUID_SIZE + 1], const uint8_t uuid[N64_VK_CACHE_UUID_SIZE])
+{
+    for (int i = 0; i < N64_VK_CACHE_UUID_SIZE; i++)
+        snprintf(out + 2 * i, 3, "%02x", uuid[i]);
+}
+
+int n64_vk_cache_count_load(int factor, const uint8_t uuid[N64_VK_CACHE_UUID_SIZE])
+{
+    char path[1100], line[128], hex[2 * N64_VK_CACHE_UUID_SIZE + 1], have[2 * N64_VK_CACHE_UUID_SIZE + 1];
+    if (!count_file(path, sizeof path, factor))
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    const int got = fgets(line, sizeof line, f) != NULL;
+    fclose(f);
+    int count = 0;
+    if (!got || sscanf(line, "%32s %d", have, &count) != 2)
+        return 0;
+    uuid_hex(hex, uuid);
+    return !strcmp(have, hex) && count > 0 && count < 100000 ? count : 0;
+}
+
+int n64_vk_cache_count_save(int factor, const uint8_t uuid[N64_VK_CACHE_UUID_SIZE], int count)
+{
+    char path[1100], tmp[1200], hex[2 * N64_VK_CACHE_UUID_SIZE + 1];
+    if (count <= 0 || !count_file(path, sizeof path, factor))
+        return -1;
+    snprintf(tmp, sizeof tmp, "%s.tmp%ld", path, (long)getpid());
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return -1;
+    uuid_hex(hex, uuid);
+    int ok = fprintf(f, "%s %d\n", hex, count) > 0;
+    ok = fclose(f) == 0 && ok;
+    if (!ok || rename(tmp, path) != 0) {
+        remove(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+/* ---- Start-up progress ------------------------------------------------------------------------------------------ */
+static int s_pg_active, s_pg_done, s_pg_expected; /* __atomic builtins */
+
+#define PG_LOAD(x) __atomic_load_n(&(x), __ATOMIC_ACQUIRE)
+#define PG_STORE(x, v) __atomic_store_n(&(x), (v), __ATOMIC_RELEASE)
+
+int n64_vk_progress_total(int built, int expected)
+{
+    return expected > 0 && built <= expected ? expected : 0;
+}
+
+void n64_vk_progress_begin(void)
+{
+    PG_STORE(s_pg_done, 0);
+    PG_STORE(s_pg_expected, 0);
+    PG_STORE(s_pg_active, 1);
+}
+
+void n64_vk_progress_expect(int expected)
+{
+    PG_STORE(s_pg_expected, expected > 0 ? expected : 0);
+}
+
+void n64_vk_progress_step(void)
+{
+    if (PG_LOAD(s_pg_active))
+        __atomic_add_fetch(&s_pg_done, 1, __ATOMIC_ACQ_REL);
+}
+
+int n64_vk_progress_end(void)
+{
+    PG_STORE(s_pg_active, 0);
+    PG_STORE(s_pg_expected, 0);
+    return PG_LOAD(s_pg_done);
+}
+
+int n64_vk_progress_get(int *done, int *total)
+{
+    const int active = PG_LOAD(s_pg_active);
+    const int d = PG_LOAD(s_pg_done), e = PG_LOAD(s_pg_expected);
+    if (done)
+        *done = d;
+    if (total)
+        *total = active ? n64_vk_progress_total(d, e) : 0;
+    return active;
+}

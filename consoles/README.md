@@ -766,6 +766,22 @@ bit for bit against angrylion.
   cache goes to `<dir>/mesa` (`MESA_SHADER_CACHE_DIR`, unless set). Without it every start compiled the same
   pipelines again: ~1.35 s of a 4x start of Ocarina of Time on the Thor's Turnip. `n64_vk_cache.h`;
   [environment variables](../docs/runtime/environment-variables.md#custom-vulkan-driver-n64-rdp).
+  A driver that fails every try writes what it did compile too (`pipeline cache saved (..., failed check, ...)`).
+- **Start-up progress and warm-up.** Every pipeline the start waits for (the check's, the game's command processor's;
+  from the cache or not: Granite's build hook) is counted from `vk_create`'s start to its end; the count the last start
+  at that factor reached is kept as `startup-<f>x.count` beside the pipelines and is the next start's total
+  (`n64_rdp_shader_progress`: the app shows « Compiling shaders… 7/13 », a spinner without a count). One line sums a
+  start up: `start-up pipelines: 16 built (16 expected), 0 compiled 5 ms or more (0 ms), start 210 ms`.
+  `n64_rdp_vk_warmup(factor)` runs that same start with no game (an 8 MB RDRAM of its own: RDRAM's size and the
+  factor are specialisation constants, a smaller allocation would build other pipelines), then 32 VI scanouts of
+  other formats when upscaled (16 / 32-bit, the AA modes, filters, 320 / 640 wide: what games' first frames
+  compile), then destroys it, so the cache and the count are written (`warm-up done at 4x: 16 start-up pipelines and
+  13 of 32 VI formats, ...`). It leaves the driver's trial marker and `last_start` alone and does not fall back to
+  the system driver. The app runs it in a process of its own, never next to a game
+  ([app-shell.md « Shader warm-up »](../docs/android/app-shell.md#shader-warm-up)). Test: ctest
+  `n64_rdp_vulkan_warmup` (two warm-ups into a fresh cache; the second's progress counts against the first's
+  count). On lavapipe the driver gives no pipeline cache data: the second run reads Mesa's disk cache only (~10x
+  faster, still JIT compiles over 5 ms); on Turnip the VkPipelineCache serves them.
 - **8x on Turnip (Adreno 7xx).** Turnip's a7xx `maxStorageBufferRange` is 128 MB, so 8x (a 512 MB upscaled RDRAM
   binding) needs Mesa's driconf `tu_enable_ssbo_emulation` (Mesa 26.2+, e.g. PurpleVK: the range becomes 2 GiB - 1,
   buffers of 128 MB or more go through bounds-checked global memory). Before any driver opens, when the wanted factor

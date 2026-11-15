@@ -424,6 +424,11 @@
     <string name="VKD_DELETE_FAILED">%1$s n\'a pas pu être supprimé.</string>
     <string name="VKD_SELECTED">Pilote Vulkan : %1$s.</string>
     <string name="VKD_SELECTED_RUNNING">Pilote Vulkan : %1$s. Le jeu en cours garde son pilote jusqu\'à son prochain démarrage.</string>
+    <!-- N64 shader compiles: the game's start-up line (ShaderOverlay) and the warm-up's end (ShaderWarmupService) -->
+    <string name="SHADERS_COMPILING">Compilation des shaders…</string>
+    <string name="SHADERS_COMPILING_N">Compilation des shaders… %1$d</string>
+    <string name="SHADERS_COMPILING_COUNT">Compilation des shaders… %1$d/%2$d</string>
+    <string name="SHADERS_READY">Shaders prêts</string>
     <string name="VKD_SELECT_FAILED">Le choix n\'a pas pu être enregistré.</string>
     <string name="VKD_GAME_RUNNING">Un jeu est en cours : un nouveau choix s\'applique à son prochain démarrage.</string>
     <string name="VKD_DOWNLOADING">Téléchargement du pilote…</string>

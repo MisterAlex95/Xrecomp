@@ -80,6 +80,8 @@ Counters for the N64 runtime's performance line (`n64: perf`, `consoles/README.m
 - `parallel-rdp/command_ring.*`: `enqueue_command` times its waits for room in a full ring (`blocked_waits`,
   `blocked_ns`; no clock read when there is room); `parallel-rdp/rdp_device.*`: `CommandProcessor::get_ring_blocked`.
 - `vulkan/command_buffer.*`: `get_stalled_compiles`, the count and total time of the "Stalled compile" pipelines.
+- `vulkan/command_buffer.*`: `get_pipeline_builds` and `set_pipeline_build_hook`, every pipeline built that its caller
+  waited for (from the pipeline cache or not), for the N64 runtime's start-up progress ("Compiling shaders… 7/13").
 
 Threads in the host's performance session (the N64 runtime's `n64_rdp_set_thread_hook`, which also covers the
 software RDP's band threads):

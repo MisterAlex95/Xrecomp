@@ -12,6 +12,7 @@
 #include "apu_volume.h"
 #include "host_audio.h"
 #include "host_window.h"
+#include "n64_rdp.h"
 #include "ps1_runtime.h"
 #include "platform/recomp_lifecycle.h"
 #include "platform/recomp_quit.h"
@@ -203,4 +204,19 @@ JNIEXPORT void JNICALL JNI_FN(nativeSetPicture)(JNIEnv *env, jclass cls, jboolea
     }
     printf("xboxrecomp: picture from the in-game menu: %s%s%s%s shader %s\n", xbox ? "(xbox)" : "scale ",
            xbox ? "" : scale, xbox ? "" : ", filter ", xbox ? "" : filter, host_window_shader_name(preset));
+}
+
+/* ---- N64 shader compiles at the start ---------------------------------------------------------------------------- */
+/* The Vulkan RDP's start-up progress (n64_rdp.h n64_rdp_shader_progress): { active, done, total }, total 0 when
+ * unknown. The game's overlay polls it ("Compiling shaders... 7/13", ShaderOverlay): two atomic loads, never a lock. */
+JNIEXPORT jintArray JNICALL JNI_FN(nativeShaderProgress)(JNIEnv *env, jclass cls)
+{
+    (void)cls;
+    int done = 0, total = 0;
+    const int active = n64_rdp_shader_progress(&done, &total);
+    const jint v[3] = { active, done, total };
+    jintArray out = (*env)->NewIntArray(env, 3);
+    if (out)
+        (*env)->SetIntArrayRegion(env, out, 0, 3, v);
+    return out;
 }

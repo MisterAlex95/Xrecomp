@@ -6,6 +6,9 @@
  * ($RECOMP_N64_UPSCALE, $RECOMP_UPSCALE) and asked of the back end; only the Vulkan one honours it. */
 #include "n64_rdp.h"
 #include "n64_rdp_backend.h"
+#ifdef N64_RDP_HAVE_VULKAN
+#include "n64_vk_cache.h" /* n64_vk_progress_get */
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -415,6 +418,30 @@ void n64_rdp_save_caches(void)
     n64_rdp_vk_save_caches("pause");
 #endif
 }
+
+int n64_rdp_shader_progress(int *done, int *total)
+{
+#ifdef N64_RDP_HAVE_VULKAN
+    return n64_vk_progress_get(done, total);
+#else
+    if (done)
+        *done = 0;
+    if (total)
+        *total = 0;
+    return 0;
+#endif
+}
+
+#ifndef N64_RDP_HAVE_VULKAN
+int n64_rdp_vk_warmup(int factor, n64_rdp_warmup_result *out)
+{
+    (void)factor;
+    if (out)
+        memset(out, 0, sizeof *out);
+    fprintf(stderr, "n64: shader warm-up: this build has no Vulkan RDP\n");
+    return 3;
+}
+#endif
 
 void n64_rdp_frame_end(n64_rdp *d)
 {

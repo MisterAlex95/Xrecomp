@@ -19,8 +19,9 @@ get_filename_component(XBOXRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../
 enable_language(CXX)
 add_subdirectory("${XBOXRECOMP_ROOT}" xboxrecomp)
 
-add_library(main SHARED shell_main.c pack_loader.c companion_jni.c menu_jni.c)
-# companion_jni.c: the second-screen panel; menu_jni.c: the in-game menu (hold, volume, quit)
+add_library(main SHARED shell_main.c pack_loader.c companion_jni.c menu_jni.c warmup_jni.c)
+# companion_jni.c: the second-screen panel; menu_jni.c: the in-game menu (hold, volume, quit); warmup_jni.c: the N64
+# shader warm-up (ShaderWarmupService, its own process)
 target_compile_definitions(main PRIVATE XBA_VERSION="${XBA_VERSION}")
 # The whole toolkit, not only what shell_main.c calls: System.loadLibrary("main") then checks on the device that
 # bionic resolves every symbol the runtime needs (pack_loader.c has weak forwarders for the four a title provides:

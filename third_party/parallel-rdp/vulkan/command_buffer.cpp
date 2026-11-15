@@ -1025,11 +1025,24 @@ void CommandBuffer::end_render_pass()
 
 // xboxrecomp-android patch (third_party/parallel-rdp/README.md): the stalls, counted for the N64 runtime's perf line.
 static std::atomic<uint64_t> stalled_compiles{0}, stalled_compile_ns{0};
+// ... and every pipeline built on the calling thread (any duration; the N64 runtime's start-up progress).
+static std::atomic<uint64_t> pipeline_builds{0};
+static std::atomic<PipelineBuildHook> pipeline_build_hook{nullptr};
 
 void get_stalled_compiles(uint64_t &count, uint64_t &ns)
 {
 	count = stalled_compiles.load(std::memory_order_relaxed);
 	ns = stalled_compile_ns.load(std::memory_order_relaxed);
+}
+
+uint64_t get_pipeline_builds()
+{
+	return pipeline_builds.load(std::memory_order_relaxed);
+}
+
+void set_pipeline_build_hook(PipelineBuildHook hook)
+{
+	pipeline_build_hook.store(hook, std::memory_order_release);
 }
 
 static void log_compile_time(const char *tag, Hash hash,
@@ -1041,6 +1054,13 @@ static void log_compile_time(const char *tag, Hash hash,
 	{
 		stalled_compiles.fetch_add(1, std::memory_order_relaxed);
 		stalled_compile_ns.fetch_add(uint64_t(time_ns), std::memory_order_relaxed);
+	}
+	// A build the caller waited for (not the async thread's, not a "compile required" answer): from the cache or not.
+	if (mode != CommandBuffer::CompileMode::AsyncThread && result != VK_PIPELINE_COMPILE_REQUIRED)
+	{
+		uint64_t n = pipeline_builds.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (auto hook = pipeline_build_hook.load(std::memory_order_acquire))
+			hook(n, uint64_t(time_ns));
 	}
 #ifndef VULKAN_DEBUG
 	// If a compile takes more than 5 ms and it's not happening on an async thread,

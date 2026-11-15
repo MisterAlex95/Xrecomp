@@ -100,6 +100,15 @@
                 android:value="Compiles the user's own game files into native code on the device (a one-time, user-started build of 20 to 60 minutes, with progress and Cancel in the notification)" />
         </service>
 
+        <!-- The N64 shader warm-up (ShaderWarmup): the Vulkan RDP's pipelines built ahead of a game's first start, in a
+             process of its own (it loads libmain.so and a custom Vulkan driver, and at 8x the game's 2 GB of
+             buffers), ended when it is done and whenever a game starts; never next to a game. A few seconds: no
+             foreground service. -->
+        <service
+            android:name=".ShaderWarmupService"
+            android:exported="false"
+            android:process=":warmup" />
+
         <!-- « Check my library » (XBA-130): its screen and the service that drives it, in the launcher's process; the
              service keeps that process alive while a checked game runs in front of it. -->
         <activity

@@ -42,6 +42,30 @@ void n64_rdp_get_thread_hook(n64_rdp_thread_hook *fn, void **user);
  * RECOMP_VK_CACHE_DIR, n64_vk_cache.h): the app is pausing and may be killed there. Any thread; the RDP, if any, that
  * is alive. Nothing for the software RDP. */
 void n64_rdp_save_caches(void);
+/* The Vulkan RDP's start-up progress (n64_vk_cache.h n64_vk_progress_get): 1 while it starts (opens the driver,
+ * builds the check's and the game's pipelines), *done the pipelines built, *total those expected (0: unknown). 0
+ * otherwise, and always without the Vulkan RDP. Any thread (the app's UI polls it: "Compiling shaders... 7/13"). */
+int n64_rdp_shader_progress(int *done, int *total);
+
+/* The shader warm-up (the app runs it in a process of its own while no game runs): the Vulkan RDP started as a game
+ * would start it, with the environment's driver (RECOMP_VK_DRIVER_*, n64_vk_driver.h) and cache directory
+ * (RECOMP_VK_CACHE_DIR, required), at factor (1, 2, 4 or 8) on an 8 MB RDRAM of its own (paraLLEl-RDP's pipelines
+ * take RDRAM's size and the factor as specialisation constants: a smaller one would build other pipelines), then a
+ * few VI scanouts of other formats when upscaled (what games' first frames compile), then destroyed: the pipeline
+ * cache and startup-<f>x.count are written. The driver's trial marker and last_start are left alone
+ * (n64_vk_driver_set_trial); a custom driver that cannot open is not replaced by the system's. Takes the buffers a
+ * game's RDP takes (about 2 GB at 8x): never next to a game. */
+typedef struct {
+    int factor;          /* the factor drawn at (lowered by the device's limits), 0 when the RDP did not start */
+    int startup;         /* pipelines the start built (what a game's start builds) */
+    int extra;           /* pipelines the extra scanouts built */
+    int compiled;        /* of all those, the ones that took 5 ms or more (not from the cache, as a rule) */
+    unsigned cache_kb;   /* the pipeline cache read at the start (KB, 0: none) */
+    double seconds;      /* the whole warm-up */
+} n64_rdp_warmup_result;
+/* 0: done (the cache is written); 1: the Vulkan RDP cannot run on this driver (a game gets the software RDP or the
+ * system driver); 2: no RECOMP_VK_CACHE_DIR, or out of memory; 3: a build without the Vulkan RDP. out may be NULL. */
+int n64_rdp_vk_warmup(int factor, n64_rdp_warmup_result *out);
 /* A commit: every command queued is drawn and in RDRAM (the VI reads it next, a save state takes it...). */
 void n64_rdp_flush(n64_rdp *d);
 /* The end of an emulated frame (n64_run_frame): the software RDP commits there, whether or not the host shows the

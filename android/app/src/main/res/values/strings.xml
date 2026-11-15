@@ -450,6 +450,11 @@
     <string name="VKD_DELETE_FAILED">%1$s could not be deleted.</string>
     <string name="VKD_SELECTED">Vulkan driver: %1$s.</string>
     <string name="VKD_SELECTED_RUNNING">Vulkan driver: %1$s. The game running now keeps its driver until it is started again.</string>
+    <!-- N64 shader compiles: the game's start-up line (ShaderOverlay) and the warm-up's end (ShaderWarmupService) -->
+    <string name="SHADERS_COMPILING">Compiling shaders…</string>
+    <string name="SHADERS_COMPILING_N">Compiling shaders… %1$d</string>
+    <string name="SHADERS_COMPILING_COUNT">Compiling shaders… %1$d/%2$d</string>
+    <string name="SHADERS_READY">Shaders ready</string>
     <string name="VKD_SELECT_FAILED">The choice could not be saved.</string>
     <string name="VKD_GAME_RUNNING">A game is running: a new choice applies at its next start.</string>
     <string name="VKD_DOWNLOADING">Downloading the driver…</string>

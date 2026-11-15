@@ -300,6 +300,19 @@ public class LauncherActivity extends Activity {
     // ---- Prepare ----
     private String titleIdDir, titleIdValue;
     private final android.os.Handler poller = new android.os.Handler(android.os.Looper.getMainLooper());
+    /**
+     * The N64 shader warm-up after a change of Vulkan driver or internal resolution (ShaderWarmup.Reason.SETTING):
+     * {@link #WARMUP_DELAY_MS} after the last step of a cycling row, for warmupTid (null: Settings'); kept for later
+     * (warmup.pending) when the launcher pauses first, dropped when a game starts (its start compiles them).
+     */
+    static final long WARMUP_DELAY_MS = 3000;
+    private String warmupTid;
+    private boolean warmupArmed;
+    private final Runnable warmupTick = () -> {
+        warmupArmed = false;
+        String tid = warmupTid;
+        new Thread(() -> ShaderWarmup.request(this, tid, ShaderWarmup.Reason.SETTING), "ShaderWarmupRequest").start();
+    };
     private boolean resumed;
     private Prep homePrep;
     /**
@@ -553,6 +566,12 @@ public class LauncherActivity extends Activity {
         showTitleAppOutcome();
         poller.removeCallbacks(pollTick);
         poller.postDelayed(pollTick, PREPARE_POLL_MS);
+        // N64 shader warm-up: after an app update, and what was asked while a game ran (never next to a Prepare)
+        if (!prepareProcessAlive())
+            new Thread(() -> {
+                ShaderWarmup.afterUpdate(this);
+                ShaderWarmup.runPending(this);
+            }, "ShaderWarmupResume").start();
     }
 
     @Override
@@ -560,7 +579,30 @@ public class LauncherActivity extends Activity {
         resumed = false;
         TitleAppReceiver.listener = null;
         poller.removeCallbacks(pollTick);
+        if (warmupArmed) {   // a warm-up was about to start: at the next resume without a game
+            poller.removeCallbacks(warmupTick);
+            warmupArmed = false;
+            ShaderWarmup.keepPending(this, warmupTid);
+        }
         super.onPause();
+    }
+
+    /** A change of the N64 Vulkan driver or internal resolution (of tid, or Settings' when null): a warm-up soon. */
+    private void warmupSoon(String tid) {
+        warmupTid = tid;
+        warmupArmed = true;
+        poller.removeCallbacks(warmupTick);
+        poller.postDelayed(warmupTick, WARMUP_DELAY_MS);
+    }
+
+    /** The N64 game whose settings a Settings-wide change matters to: the last one launched, else null (Settings'). */
+    private String lastN64Tid() {
+        String tid = GameStore.launchedTitleId(this);
+        return tid != null && Console.ofKey(tid) == Console.N64 ? tid : null;
+    }
+
+    private static boolean setsUpscale(RecompConfig.Option o) {
+        return java.util.Arrays.asList(o.keys).contains(ConsoleVideo.ENV_UPSCALE);
     }
 
     @Override
@@ -2346,6 +2388,8 @@ public class LauncherActivity extends Activity {
         cfg.set(o, o.choices[next]);
         saveSettings();
         refreshOptionRow(r, o);
+        if (setsUpscale(o))
+            warmupSoon(lastN64Tid());
         if (o.title == R.string.OPT_GPU)
             refreshRendererDims();
         feedback.play(UiFeedback.Cue.MOVE, r);
@@ -2694,6 +2738,8 @@ public class LauncherActivity extends Activity {
         boolean ok = d == null ? drivers.clearActive() : drivers.setActive(d.id);
         Log.i(TAG, "launcher: vulkan driver " + (d == null ? "system" : d.name + " (" + d.id + ")")
                    + (ok ? "" : ": not saved"));
+        if (ok)
+            warmupSoon(lastN64Tid());
         refreshKeepingFocus();
         if (!ok)
             setNote(getString(R.string.VKD_SELECT_FAILED), NOTE_ERROR);
@@ -6746,6 +6792,8 @@ public class LauncherActivity extends Activity {
                                                                          : R.string.ROM_OPT_SAVED), NOTE_OK);
             Log.i(TAG, "launcher: " + key + " " + String.join("+", o.keys) + " "
                        + (pos == 0 ? "as in Settings" : getResources().getResourceEntryName(o.choices[pos - 1].label)));
+            if (setsUpscale(o) && Console.ofKey(key) == Console.N64)
+                warmupSoon(key);
         };
         r.setOnClickListener(v -> r.cycler.step(1));
         return r;
@@ -6823,6 +6871,7 @@ public class LauncherActivity extends Activity {
             setNote(getString(gameRunning() && key.equals(launchedTid()) ? R.string.ROM_OPT_SAVED_RUNNING
                                                                          : R.string.ROM_OPT_SAVED), NOTE_OK);
             Log.i(TAG, "launcher: " + key + " vulkan driver " + (v == null ? "as in Settings" : v));
+            warmupSoon(key);
         };
         r.setOnClickListener(v -> r.cycler.step(1));
     }
@@ -7755,6 +7804,10 @@ public class LauncherActivity extends Activity {
             }
         }
         Log.i(TAG, "launcher: play");
+        if (warmupArmed) {   // the game's own start compiles them (with its progress line) and keeps them
+            poller.removeCallbacks(warmupTick);
+            warmupArmed = false;
+        }
         Intent i = new Intent(this, ShellActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         if (restart)
             i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);

@@ -56,6 +56,14 @@
  * and the cache is written back when it grew: after the check passed, every 10 s from a thread of its own (the
  * compiles during the game), when the app pauses (n64_rdp_save_caches: sessions on Android end killed after a pause)
  * and at destroy. MESA_SHADER_CACHE_DIR points Mesa's own disk cache (Turnip) at <dir>mesa before the driver opens.
+ * A driver that fails every try still writes what it compiled (the passing pipelines are not compiled again at the
+ * next start that tries it).
+ *
+ * Start-up progress (n64_vk_cache.h n64_vk_progress_*): from the start of vk_create to its end every pipeline built
+ * (Granite's build hook, from the cache or not) counts; the count the last start at this factor reached
+ * (startup-<f>x.count) is the total, so the app shows "Compiling shaders... 7/13" instead of a black screen. One line
+ * sums the start up ("start-up pipelines: 13 built, 0 compiled"). The shader warm-up (n64_rdp_vk_warmup) runs the same
+ * start without a game, then a few VI formats, so the game's first start finds everything in the cache.
  *
  * Threads (n64_rdp.h n64_rdp_set_thread_hook): paraLLEl-RDP's command ring worker, fence executor and pipeline
  * compile worker call the same hook as the software RDP's band threads when they start and end (RDP::set_thread_hook,
@@ -153,6 +161,8 @@ struct VkRdp {
      * thread that saves it when it grew (pc_cv, pc_quit under g_pc_mu). */
     std::string pc_path;
     size_t pc_size = 0;
+    size_t pc_loaded = 0; /* what pc_load read (0: nothing) */
+    int pg_expected = 0;  /* the start-up count expected (startup-<f>x.count), 0: none */
     bool pc_no_data_logged = false;
     std::thread pc_thread;
     std::condition_variable pc_cv;
@@ -745,6 +755,7 @@ void pc_load(VkRdp *d)
     uint8_t *data = static_cast<uint8_t *>(n64_vk_cache_load(path, uuid, &n, &why));
     if (data && d->dev->init_pipeline_cache(data, n)) {
         d->pc_size = n;
+        d->pc_loaded = n;
         printf("n64: Vulkan RDP: pipeline cache loaded (%zu KB) from %s\n", n >> 10, path);
     } else {
         if (!data && !strcmp(why, "none"))
@@ -883,6 +894,10 @@ bool try_driver(VkRdp *d, bool *custom)
     driver_label(d->dev.get(), *custom, drv, sizeof drv);
     d->upscale = fit_upscale(d, n64_rdp_upscale_wanted());
     d->down_steps = scanout_steps(d->upscale);
+    /* the start-up progress' total: what the last start at this factor on this device and driver built */
+    d->pg_expected = d->pc_path.empty()
+                         ? 0 : n64_vk_cache_count_load(d->upscale, d->dev->get_gpu_properties().pipelineCacheUUID);
+    n64_vk_progress_expect(d->pg_expected);
 
     /* The default shaders, then without subgroup operations, then the ubershader: the first set that compiles and
      * draws the check right. The device keeps its programs and their failed pipelines from one try to the next. */
@@ -953,6 +968,11 @@ bool try_driver(VkRdp *d, bool *custom)
     }
     if (d->cp && d->cp->device_is_supported())
         fprintf(stderr, "n64: Vulkan RDP: the driver of %s (%s) cannot run paraLLEl-RDP's shaders\n", gpu, drv);
+    {
+        /* what did compile (the pipelines that passed, the other tries') is not compiled again at its next try */
+        std::lock_guard<std::mutex> lk(g_pc_mu);
+        pc_save_locked(d, "failed check");
+    }
     d->cp.reset(); /* the command processor, then the device, then the instance */
     d->dev.reset();
     d->ctx.reset();
@@ -960,10 +980,43 @@ bool try_driver(VkRdp *d, bool *custom)
     return false;
 }
 
+bool g_warmup; /* n64_rdp_vk_warmup is running vk_create: a custom driver that fails is not replaced by the system's */
+
+/* Granite's build hook (any thread): one more pipeline for the start-up progress (ignored outside a start). */
+void on_pipeline_build(uint64_t, uint64_t) { n64_vk_progress_step(); }
+
+/* The start-up progress from vk_create's start to its end, whatever path it leaves by. */
+struct StartupProgress {
+    StartupProgress()
+    {
+        Vulkan::set_pipeline_build_hook(on_pipeline_build);
+        n64_vk_progress_begin();
+    }
+    ~StartupProgress() { n64_vk_progress_end(); }
+};
+
+/* The start succeeded: its pipelines summed up, and their count kept as the next start's total. */
+void startup_done(VkRdp *d, uint64_t t0)
+{
+    int built = 0;
+    n64_vk_progress_get(&built, nullptr);
+    uint64_t stalls = 0, stall_ns = 0;
+    Vulkan::get_stalled_compiles(stalls, stall_ns);
+    printf("n64: Vulkan RDP: start-up pipelines: %d built (%s%d expected), %llu compiled 5 ms or more (%.0f ms), "
+           "start %.0f ms\n", built, d->pg_expected ? "" : "none ", d->pg_expected,
+           (unsigned long long)(stalls - d->stalls0), (double)(stall_ns - d->stall_ns0) / 1e6,
+           (double)(host_ns() - t0) / 1e6);
+    fflush(stdout);
+    if (!d->pc_path.empty() && built > 0 && built != d->pg_expected)
+        n64_vk_cache_count_save(d->upscale, d->dev->get_gpu_properties().pipelineCacheUUID, built);
+}
+
 /* The loaders, in order: the player's driver (n64_vk_driver.h) when one is selected and opens, then the system's.
  * Custom driver -> system driver -> NULL, and n64_rdp_select.c starts the software RDP; each step is logged. */
 void *vk_create(n64_rcp_bus bus)
 {
+    StartupProgress progress;
+    const uint64_t t0 = host_ns();
     /* paraLLEl-RDP's incoherent path pages RDRAM by a power of two. */
     if (!bus.rdram || bus.rdram_size < (1u << 20) || (bus.rdram_size & (bus.rdram_size - 1)))
         return nullptr;
@@ -987,11 +1040,17 @@ void *vk_create(n64_rcp_bus bus)
                 n64_vk_driver_done(ok ? "ok" : "unsupported");
             if (ok) {
                 vk_reset(d.get());
+                startup_done(d.get(), t0);
                 pc_start(d.get());
                 return d.release();
             }
         } else {
             n64_vk_driver_done("open_failed");
+        }
+        if (g_warmup) {
+            fprintf(stderr, "n64: Vulkan RDP: warm-up: custom driver %s cannot run paraLLEl-RDP, nothing to warm\n",
+                    n64_vk_driver_id());
+            return nullptr; /* the game would fall back to the system driver: its own directory, not this one */
         }
         if (!custom) {
             fprintf(stderr, "n64: Vulkan RDP: the device's own driver was already tried\n");
@@ -1004,6 +1063,10 @@ void *vk_create(n64_rcp_bus bus)
             fprintf(stderr, "n64: Vulkan RDP: no Vulkan loader\n");
             return nullptr;
         }
+    } else if (g_warmup && n64_vk_driver_selected()) {
+        fprintf(stderr, "n64: Vulkan RDP: warm-up: custom driver %s does not open, nothing to warm\n",
+                n64_vk_driver_id());
+        return nullptr;
     } else if (!Vulkan::Context::init_loader(nullptr)) {
         fprintf(stderr, "n64: Vulkan RDP: no Vulkan loader\n");
         return nullptr;
@@ -1012,6 +1075,7 @@ void *vk_create(n64_rcp_bus bus)
     if (!try_driver(d.get(), &custom))
         return nullptr;
     vk_reset(d.get());
+    startup_done(d.get(), t0);
     pc_start(d.get());
     return d.release();
 }
@@ -1426,7 +1490,95 @@ int vk_unreported(void *p, uint32_t lo, uint32_t hi)
 /* n64_rdp.h n64_rdp_dp_complete. */
 void vk_dp_complete(void *p) { dp_finish(static_cast<VkRdp *>(p)); }
 
+/* ---- Shader warm-up (n64_rdp.h n64_rdp_vk_warmup) ------------------------------------------------------------------- */
+/* The VI formats games scan out, each a pipeline set of its own (paraLLEl-RDP's VI takes the control register's type,
+ * anti-aliasing, dither filter, gamma and divot bits, and the X scale, as specialisation constants): 16 and 32-bit,
+ * the four anti-aliasing modes, the filters off and on, 320 and 640 wide. Upscaled only (at 1x the VI is ours,
+ * n64_vi.c). Returns how many scanouts were made. */
+int warm_vi(VkRdp *d)
+{
+    if (d->upscale <= 1)
+        return 0;
+    int n = 0;
+    static const uint32_t types[] = { 2, 3 };
+    static const uint32_t filters[] = { 0, 0x4 | 0x8 | 0x10 | 0x10000 }; /* gamma dither, gamma, divot, dither filter */
+    static const uint32_t xscales[] = { 0x200, 0x400 };
+    for (uint32_t type : types)
+        for (uint32_t aa = 0; aa < 4; aa++)
+            for (uint32_t filter : filters)
+                for (uint32_t xs : xscales) {
+                    const uint32_t width = xs == 0x400 ? 640 : 320;
+                    const uint32_t vi[14] = { type | aa << 8 | filter, 0x1000, width, 0x200, 0, 0x03E52239, 0x20D,
+                                              0xC15, 0x0C150C15, 108u << 16 | 748u, 37u << 16 | 511u, 0x000E0204, xs,
+                                              0x400 };
+                    unsigned sw = 0, sh = 0;
+                    scanout_rgb(d, vi, 0, &sw, &sh);
+                    d->cp->begin_frame_context();
+                    n++;
+                    if (d->cp->has_pipeline_failure())
+                        return n; /* logged by Granite; the game would see the same */
+                }
+    return n;
+}
+
 } // namespace
+
+extern "C" int n64_rdp_vk_warmup(int factor, n64_rdp_warmup_result *out)
+{
+    n64_rdp_warmup_result r{};
+    if (out)
+        *out = r;
+    const uint64_t t0 = host_ns();
+    const char *cache = getenv("RECOMP_VK_CACHE_DIR");
+    if (!cache || !*cache) {
+        fprintf(stderr, "n64: Vulkan RDP: warm-up: no RECOMP_VK_CACHE_DIR, nothing would be kept\n");
+        return 2;
+    }
+    const uint32_t size = 8u << 20; /* N64_RDRAM_SIZE: what every game's RDP is made with */
+    std::unique_ptr<uint8_t[]> rdram(new (std::nothrow) uint8_t[size]());
+    if (!rdram) {
+        fprintf(stderr, "n64: Vulkan RDP: warm-up: out of memory\n");
+        return 2;
+    }
+    n64_rcp_bus bus{};
+    bus.rdram = rdram.get();
+    bus.rdram_size = size;
+    printf("n64: Vulkan RDP: shader warm-up at %dx, cache %s\n", factor, cache);
+    fflush(stdout);
+    n64_rdp_set_upscale(factor);
+    n64_vk_driver_set_trial(0);
+    g_warmup = true;
+    VkRdp *d = static_cast<VkRdp *>(vk_create(bus));
+    g_warmup = false;
+    int rc = 1;
+    if (d) {
+        r.factor = d->upscale;
+        r.cache_kb = (unsigned)(d->pc_loaded >> 10);
+        n64_vk_progress_get(&r.startup, nullptr);
+        const uint64_t builds0 = Vulkan::get_pipeline_builds();
+        on_thread();
+        const int scans = warm_vi(d);
+        r.extra = (int)(Vulkan::get_pipeline_builds() - builds0);
+        uint64_t stalls = 0, ns = 0;
+        Vulkan::get_stalled_compiles(stalls, ns);
+        r.compiled = (int)(stalls - d->stalls0);
+        vk_destroy(d); /* the last save (pc_stop) */
+        rc = 0;
+        r.seconds = (double)(host_ns() - t0) / 1e9;
+        printf("n64: Vulkan RDP: warm-up done at %dx: %d start-up pipelines and %d of %d VI formats, %d compiled 5 ms "
+               "or more (pipeline cache read: %u KB), %.2f s\n", r.factor, r.startup, r.extra, scans, r.compiled,
+               r.cache_kb, r.seconds);
+    } else {
+        r.seconds = (double)(host_ns() - t0) / 1e9;
+        fprintf(stderr, "n64: Vulkan RDP: warm-up: the Vulkan RDP did not start (%.2f s)\n", r.seconds);
+    }
+    fflush(stdout);
+    n64_vk_driver_set_trial(1);
+    n64_rdp_set_upscale(0);
+    if (out)
+        *out = r;
+    return rc;
+}
 
 extern "C" void n64_rdp_vk_save_caches(const char *why)
 {
