@@ -32,8 +32,6 @@
     <string name="MENU_ON">Oui</string>
     <string name="MENU_OFF">Non</string>
     <string name="MENU_SCREEN_OFF">Aucun</string>
-    <string name="CTL_COMBO">Select + Start</string>
-    <string name="CTL_COMBO_X">Menu du jeu (maintenus ½ s)</string>
     <string name="MENU_DISC">Changer de disque</string>
     <string name="MENU_DISC_PLAYING">Dans le lecteur</string>
     <string name="MENU_DISC_DONE">Disque %1$d : le capot s\'ouvre, le disque entre</string>
@@ -54,13 +52,7 @@
     <string name="MENU_STATE_ERR_NO_GAME">Pas de sauvegarde d\'état pour ce jeu</string>
     <string name="MENU_STATE_SAVE_FAILED">Emplacement %1$d : l\'état n\'a pas été sauvegardé</string>
     <string name="MENU_STATE_LOAD_FAILED">Emplacement %1$d : l\'état n\'a pas été chargé</string>
-    <string name="CTL_FF">Retour + RT</string>
-    <string name="CTL_FF_X">Avance rapide (maintenus)</string>
-    <!-- Sauvegarde / chargement rapides, l'emplacement automatique et la reprise. -->
-    <string name="CTL_QUICK_SAVE">Retour + RB</string>
-    <string name="CTL_QUICK_SAVE_X">Sauvegarde rapide (dernier emplacement)</string>
-    <string name="CTL_QUICK_LOAD">Retour + LB</string>
-    <string name="CTL_QUICK_LOAD_X">Chargement rapide (dernier emplacement)</string>
+    <!-- L'emplacement automatique et la reprise (les raccourcis : strings_hotkeys.xml). -->
     <string name="MENU_STATE_AUTO">Là où vous vous étiez arrêté</string>
     <string name="MENU_STATE_RESUMED">Reprise là où vous vous étiez arrêté</string>
     <string name="MENU_STATE_RESUME_FAILED">Reprise impossible : le jeu repart du début</string>

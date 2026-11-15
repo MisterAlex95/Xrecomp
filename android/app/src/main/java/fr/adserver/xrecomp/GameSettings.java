@@ -15,7 +15,7 @@ import java.util.Locale;
  * A game's own settings (XBA-188, docs/android/app-shell.md « Settings per game »): any option of Settings
  * ({@link RecompConfig#OPTIONS}) can follow Settings (« As in Settings ») or have its own value for one game, Xbox
  * title or GBA / PS1 / N64 game alike, with the game's controls (RECOMP_PAD_MAP for an Xbox title, the console's
- * RECOMP_&lt;C&gt;_PAD_MAP), the N64 controller pak and the launcher's game theme.
+ * RECOMP_&lt;C&gt;_PAD_MAP) and hotkeys (RECOMP_HOTKEYS, XBA-190), the N64 controller pak and the launcher's game theme.
  *
  * <p>One file per game, files/settings/game/&lt;KEY&gt;.cfg (KEY: the Xbox title ID or the library key, upper case), in
  * recomp.cfg's syntax: a key the file does not set follows Settings; « KEY=VALUE » is the game's value; « KEY= » (an
@@ -317,11 +317,12 @@ final class GameSettings {
 
     /** The per-console keys the game's file may set besides the options: its controls (and the N64's pak). */
     static List<String> extraKeys(Console c) {
+        // XBA-190: the hotkeys (RECOMP_HOTKEYS) for every console: an Xbox title reads its menu chord.
         if (c == null || c == Console.XBOX)
-            return Arrays.asList(PadMapping.KEY);
+            return Arrays.asList(PadMapping.KEY, Hotkeys.KEY);
         if (c == Console.N64)
-            return Arrays.asList(ConsoleControls.env(c), N64Pak.ENV);
-        return Arrays.asList(ConsoleControls.env(c));
+            return Arrays.asList(ConsoleControls.env(c), N64Pak.ENV, Hotkeys.KEY);
+        return Arrays.asList(ConsoleControls.env(c), Hotkeys.KEY);
     }
 
     /** Every key a game of any console may export: the options' and the controls'. */

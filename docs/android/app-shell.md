@@ -1001,6 +1001,67 @@ Tests: `tests/console_pad` (defaults = the old mappings, text, thresholds, the o
 `console-controls-*`), `TouchPadTest` (layouts on screen at every size, nothing overlapping, what each button presses),
 `TouchControlsTest` (`touch-5-gba` … `touch-8-n64`), `GameMenuTest` (`touchToggle`, `consoleControlsPage`).
 
+### Hotkeys
+
+XBA-190. The pad chords of fast-forward, quick save / load, the quick slot and the in-game menu are the player's
+(`Hotkeys.java`; the runtime's side: [consoles/README.md « Save states and fast-forward »](../../consoles/README.md),
+`src/platform/recomp_hotkeys.h`). The text is `RECOMP_HOTKEYS` (`action:modifier+button`, only what differs from the
+defaults): **every game's** in `recomp.cfg`, a **game's own** in its settings file (`files/settings/game/<KEY>.cfg`,
+[Settings per game](#settings-per-game)), which `GameSettings.runEnv` exports (an Xbox title's too, for its menu
+chord; « » = the defaults for this game, `recomp.cfg`'s line skipped).
+
+| Action | Default | |
+|---|---|---|
+| Fast-forward (hold) | Select + R2 | while held |
+| Fast-forward on / off | none | the menu's toggle |
+| Quick save / Quick load | Select + R1 / Select + L1 | the quick slot |
+| Next / Previous quick slot | none | around 1..4, the menu says « Quick slot: N » |
+| Game menu (held ½ s) | Select + Start | the only one an Xbox title has (no save states there, decision 2026-11-14) |
+
+**Controls › Hotkeys** (the end of a GBA / PS1 / N64 game's Controls and of the Xbox Controls, before « Reset
+controls »): one row per action (the menu's alone for an Xbox title), its value the chord (« Select + R1 », « None »).
+**A** starts the capture: the row says « Press the buttons… »; the first button pressed is the modifier, the second
+makes the chord, one pressed and released alone is a chord of that button (triggers as keys or as axes past half);
+the releases that follow are eaten (the chord's A or B does not click or go back); nothing within 5 s, or Back on a
+touch screen: « Nothing changed ». **Left / right** turn the hotkey off, or put the usual one back. **Conflicts**: the
+value reads « Select + Y · conflict » when two actions have the same buttons (either order: both would happen) or a
+chord of one button takes a button the game's mapping uses (it would no longer reach the game); the description says
+which. « **Reset hotkeys** » puts every one back. Saved at once, in the scope shown: *Mapping for* · this game only
+keeps them in the game's file (switching to it copies them, back to all games drops the copy), otherwise in
+`recomp.cfg` for every game of every console. Logcat `launcher: hotkeys (every game) qsave:back+north`.
+
+**In-game menu.** `MenuTriggers.Combo` listens to the game's menu chord (Select + Start by default; a chord of one
+button: that button held; none: only Guide, Back and the swipe open the menu; a chord with a stick direction keeps
+Select + Start). The Controls page lists Back, the menu chord, then each hotkey set for the game (none for an Xbox
+title but the menu's).
+
+Tests: `tests/recomp_states` (`test_hotkey_*`: text forms, remapped chords and keys per frame, what they run),
+`HotkeysTest` (model, conflicts, capture, combo, storage and export), `LauncherConsoleControlsTest.gbaHotkeys`
+(screenshot `console-controls-5-hotkeys`), `LauncherControlsTest` (the Xbox's menu row), `GameMenuTest`.
+
+### Device check (hotkeys, XBA-190), for Alex
+
+On the AYN Thor, a GBA game and an Xbox title of yours in the library.
+
+1. GBA game › Controls: the Hotkeys section shows Fast-forward (hold) « Select + R2 », Quick save « Select + R1 »,
+   Quick load « Select + L1 », Game menu « Select + Start », the others « None ». Screenshot.
+2. Quick save › A, then hold Select and press Y: the row reads « Select + Y », the note « Quick save: Select + Y »; the
+   screen did not go back or click anything. `recomp.cfg` has `RECOMP_HOTKEYS=qsave:back+north`.
+3. Play: Select + Y says « Saved to slot N »; Select + R1 no longer saves (R1 reaches the game). Logcat
+   `[INPUT] hotkeys: pad qsave:back+north`.
+4. Fast-forward on / off › A, then Select + Y: both rows read « · conflict »; left on it: « None », the conflict goes.
+5. Next quick slot › A, press L3 alone: in the game L3 says « Quick slot: 2 », then a quick save goes to slot 2.
+   Next quick slot › A, press A alone: « A · conflict », the description says the game uses A; right puts « None ».
+6. Fast-forward (hold) › A, hold L2 then press R2 (the Thor's analog triggers): « L2 + R2 ». In the game L2 + R2 held
+   fast-forwards, neither trigger reaches the game while both are held.
+7. Mapping for → « This game only »: the hotkeys come along; Reset hotkeys there: this game is back to the usual chords,
+   another GBA game keeps Select + Y.
+8. Game menu › A, press L1 then R1: in the game L1 + R1 held ½ s opens the menu; Select + Start no longer does.
+   The menu's Controls page lists « L1 + R1 · Game menu (held ½ s) » and the hotkeys set.
+9. Xbox title › Controls: Hotkeys has only Game menu. Change it (L1 + R1) and check it opens the menu in the game.
+10. French: the section reads « Raccourcis », « Appuyez sur les boutons… », « · conflit ».
+11. Reset hotkeys everywhere you changed them; `recomp.cfg` loses the line.
+
 ### Device check (controls for the other consoles, XBA-158 / XBA-168 / XBA-174), for Alex
 
 On the AYN Thor, a GBA game, a PS1 disc and an N64 cartridge of yours in the library.
@@ -2567,7 +2628,7 @@ less the display cutout, so 720p and 1080p look the same.
 |---|---|
 | Android Back (the navigation bar, the back gesture, a keyboard) | Opens; Back again (or B) closes. A Back key **from a gamepad** SDL reads (`SDLControllerManager.isDeviceSDLJoystick`) is that pad's Select for the game, as it always was (SDL maps `KEYCODE_BACK` from a pad to its Back button), so it does not open the menu. |
 | Guide / Mode (`KEYCODE_BUTTON_MODE`) | The Xbox pad has no such button, so no game uses it: the menu takes it whole. Many handhelds keep it for the system; then it never reaches the app. |
-| Select + Start held 0.5 s | Both still reach the game while held (each alone is a game button: Back and Start); when the menu opens, the game gets their release. Xbox games read Back and Start each on its own, so holding both half a second is free. |
+| Select + Start held 0.5 s (the « Game menu » [hotkey](#hotkeys): another chord, one button, or none) | Both still reach the game while held (each alone is a game button: Back and Start); when the menu opens, the game gets their release. Xbox games read Back and Start each on its own, so holding both half a second is free. |
 | A swipe in from the left edge (top screen) | Down within 3 % of the width from the left edge, then 6 % of the width to the right, mostly sideways. The game sees the touch begin and gets an `ACTION_CANCEL` when the swipe is recognised. With Android's gesture navigation the same swipe may also be the system's back gesture: a Back within 0.6 s of a swipe-open is ignored, so the menu stays open. |
 | « Menu » on the companion panel (second screen) | Opens or closes it. |
 
@@ -2595,11 +2656,11 @@ less the display cutout, so 720p and 1080p look the same.
 |---|---|
 | Resume | Closes the menu. |
 | Save state, Load state | Only for a GBA, PS1 or N64 game whose runtime can save states (XBA-182, XBA-183: `Host.statesSupported`: `Console.hasSaveStates`, then `MenuNative.nativeStatesAvailable`); an Xbox game does not show them. Each opens a page of four slots, « Slot 1 » to « Slot 4 », then Back. Under each slot: « Empty », or when it was saved (the time alone for today, « 14:32 »; the date and the time for another day, in the device's format), and its thumbnail at the right of the row. The slots are read each time the page shows, so a fresh save is there the next time. **Save state**: choosing a slot saves to it (over what it held), closes the menu and says « Saved to slot N » at the top of the screen. **Load state**: an empty slot is dimmed; choosing it says « Slot N is empty » and the menu stays; a saved one loads, closes the menu and says « Slot N loaded ». A failure closes the menu with a warning that names it: the slot holds another game's state, it was saved by another version of the app, it is damaged, it cannot be written or read. B (or Back) returns to the main page on the row that opened the page. |
-| Fast-forward | Same condition: On / Off, a setting row (A or left / right toggles it, the menu stays open). On, the game runs faster until it is turned off. The pad chord **Back + RT, held** does the same while held (Controls lists it for a GBA, PS1 or N64 game). |
-| Quick save / load (pad chords) | Same condition, without opening the menu: **Back + RB** saves and **Back + LB** loads the quick slot, the last slot saved or loaded (at the start, the most recently saved, else slot 1). The runtime reads the chords itself; the menu polls `MenuNative.nativeStateEvent` every 250 ms while the game shows and says « Saved to slot N », « Slot N loaded » or the error at the top of the screen. Controls lists both chords. |
+| Fast-forward | Same condition: On / Off, a setting row (A or left / right toggles it, the menu stays open). On, the game runs faster until it is turned off. The pad chord **Back + RT, held** does the same while held by default ([Hotkeys](#hotkeys); Controls lists it for a GBA, PS1 or N64 game). |
+| Quick save / load (pad chords) | Same condition, without opening the menu: by default **Back + RB** saves and **Back + LB** loads the quick slot, the last slot saved or loaded (at the start, the most recently saved, else slot 1); the player's [hotkeys](#hotkeys) may move them and add next / previous quick slot. The runtime reads the chords itself; the menu polls `MenuNative.nativeStateEvent` every 250 ms while the game shows and says « Saved to slot N », « Slot N loaded », « Quick slot: N » or the error at the top of the screen. Controls lists the hotkeys. |
 | Resume where I left off | Same condition: Settings › « Resume where I left off », On by default (`files/settings/auto_resume`). On, the menu saves the **automatic slot** (`auto.st`, slot 0) when the player leaves the game: Quit (its confirmation then says « Your place is kept for next time »), Back to launcher, Home or the screen off (`GameMenu.onStop`). At the next start `ShellActivity` sets `RECOMP_STATE_RESUME=1` and the runtime loads it before the first frame; the menu says « Resumed where you left off » (or that it could not, and the game starts from the beginning). Load state lists it first as « Where you left off » when there is one; Save state never offers it. |
 | Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only for an Xbox game whose XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». A GBA, PS1 or N64 game (XBA-181) has none of these three: **Scale (next start)** and **Filter (next start)** instead, As in Settings then each value, this game's own ([Settings per console](#settings-per-console)); Perf overlay, Volume and Screenshot are the same rows (the native side backs them for the consoles through the same JNI calls). An Xbox game's screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
-| Controls | The usual mapping, compact (plus Back and Select + Start: the menu); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). A GBA / PS1 / N64 game: each of its buttons and the controls it comes from ([Controls for the other consoles](#controls-for-the-other-consoles)). |
+| Controls | The usual mapping, compact (plus Back and the menu chord, Select + Start unless the [hotkeys](#hotkeys) say otherwise, and for a GBA / PS1 / N64 game each hotkey set); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). A GBA / PS1 / N64 game: each of its buttons and the controls it comes from ([Controls for the other consoles](#controls-for-the-other-consoles)). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
 | Change disc | Only for a PlayStation game with two discs or more found beside it (XBA-166, [PlayStation games](#playstation-games-xba-168)): a page of its discs, « In the drive » under the one playing; choosing another closes the menu and the lid opens, a second later the new disc is in. |
 | Settings › Share log | This process's logcat to `files/logs/game.log`, then the share sheet (the companion panel's `LogProvider` path). The menu stays open. |

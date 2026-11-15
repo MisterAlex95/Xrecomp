@@ -165,7 +165,7 @@ final class GameMenu {
     }
 
     /** The automatic slot (« Where you left off ») and the kinds of nativeStateEvent. */
-    static final int AUTO_SLOT = 0, EV_SAVED = 1, EV_LOADED = 2, EV_RESUMED = 3;
+    static final int AUTO_SLOT = 0, EV_SAVED = 1, EV_LOADED = 2, EV_RESUMED = 3, EV_SLOT = 4;
 
     /** XBA-182: the save state slots, and the native side's codes (menu_jni.c). */
     static final int SLOTS = 4;
@@ -220,6 +220,8 @@ final class GameMenu {
     /** The game's title ID for the per-title language (titleId()). */
     private boolean titleIdRead;
     private String titleIdValue;
+    /** XBA-190: the game's hotkeys (its own, else every game's), read once; the combo listens to its menu chord. */
+    private Hotkeys hotkeys;
     private int volume, volumeBeforeMute = 100;
     private ValueAnimator anim;
 
@@ -644,6 +646,7 @@ final class GameMenu {
             }
             // A gamepad's Back is its Select for SDL (and so for the combo).
             int ck = k == KeyEvent.KEYCODE_BACK ? KeyEvent.KEYCODE_BUTTON_SELECT : k;
+            hotkeys();   // the combo's chord (XBA-190), set on the first key
             if (e.getRepeatCount() == 0 && combo.key(ck, down, clock.getAsLong())) {
                 handler.removeCallbacks(comboFire);
                 if (combo.held())
@@ -987,21 +990,14 @@ final class GameMenu {
         case CONTROLS:
             pageV.setText(s(R.string.MENU_CONTROLS));
             pageV.setVisibility(View.VISIBLE);
-            int[][] kv = { { R.string.CTL_MENU, R.string.CTL_MENU_X }, { R.string.CTL_COMBO, R.string.CTL_COMBO_X },
-                           { R.string.CTL_FACE, R.string.CTL_FACE_X },
+            int[][] kv = { { R.string.CTL_FACE, R.string.CTL_FACE_X },
                            { R.string.CTL_L1, R.string.CTL_L1_X }, { R.string.CTL_R1, R.string.CTL_R1_X },
                            { R.string.CTL_TRIGGERS, R.string.CTL_TRIGGERS_X },
                            { R.string.CTL_START, R.string.CTL_START_X }, { R.string.CTL_SELECT, R.string.CTL_SELECT_X },
                            { R.string.CTL_DPAD, R.string.CTL_DPAD_X }, { R.string.CTL_STICKS, R.string.CTL_STICKS_X } };
             ConsolePadMap cm = host.consoleMap();
             if (cm != null) {   // a GBA, PS1 or N64 game: its buttons and where they come from (XBA-158 / 168 / 174)
-                kvRow(s(R.string.CTL_MENU), s(R.string.CTL_MENU_X));
-                kvRow(s(R.string.CTL_COMBO), s(R.string.CTL_COMBO_X));
-                if (cm.console.hasSaveStates()) {   // XBA-182 / XBA-183: the fixed pad chords
-                    kvRow(s(R.string.CTL_FF), s(R.string.CTL_FF_X));
-                    kvRow(s(R.string.CTL_QUICK_SAVE), s(R.string.CTL_QUICK_SAVE_X));
-                    kvRow(s(R.string.CTL_QUICK_LOAD), s(R.string.CTL_QUICK_LOAD_X));
-                }
+                hotkeyRows(cm.console);   // XBA-190: the menu chord and, with save states, the other hotkeys
                 if (!cm.isDefault())
                     kvRow(s(R.string.MENU_CTL_REMAPPED),
                           activity.getString(R.string.MENU_CTL_REMAPPED_X, cm.changedCount()));
@@ -1024,6 +1020,7 @@ final class GameMenu {
                         kvRow(s(ControlsLabels.source(map.get(c))), s(ControlsLabels.control(c)));
                 }
             }
+            hotkeyRows(Console.XBOX);   // XBA-190: the menu chord only (no save states for an Xbox title)
             for (int[] r : kv)
                 kvRow(s(r[0]), s(r[1]));
             row(Item.BACK, s(R.string.MENU_BACK));
@@ -1210,7 +1207,9 @@ final class GameMenu {
         stateSeq = ev[0];
         int kind = ev[1], slot = ev[2], code = ev[3];
         Log.i(LauncherActivity.TAG, "shell: state event " + kind + " slot " + slot + ": " + code);
-        if (kind == EV_RESUMED)
+        if (kind == EV_SLOT)   // XBA-190: the slot_next / slot_prev hotkeys
+            flash(activity.getString(R.string.HK_SLOT_EVENT, slot), true);
+        else if (kind == EV_RESUMED)
             flash(s(code == STATE_OK ? R.string.MENU_STATE_RESUMED : R.string.MENU_STATE_RESUME_FAILED),
                   code == STATE_OK);
         else if (code == STATE_OK)
@@ -1271,6 +1270,33 @@ final class GameMenu {
     }
 
     /** A line of the Controls table: the device's control, what the game gets. */
+    /**
+     * XBA-190: the game's hotkeys (Hotkeys: its own, else every game's), read once. The combo listens to their menu
+     * chord from then on.
+     */
+    Hotkeys hotkeys() {
+        if (hotkeys == null) {
+            try {
+                hotkeys = Hotkeys.effective(activity, GameStore.externalFilesDir(activity), titleId());
+            } catch (RuntimeException e) {
+                hotkeys = new Hotkeys();
+            }
+            combo.setChord(hotkeys.get(Hotkeys.Action.MENU));
+        }
+        return hotkeys;
+    }
+
+    /** The Controls page's hotkey lines: Back, the menu chord, then each hotkey a game of console c has and uses. */
+    private void hotkeyRows(Console c) {
+        kvRow(s(R.string.CTL_MENU), s(R.string.CTL_MENU_X));
+        Hotkeys h = hotkeys();
+        for (Hotkeys.Action a : Hotkeys.actions(c)) {
+            Hotkeys.Chord ch = h.get(a);
+            if (!ch.isNone())
+                kvRow(Hotkeys.chordLabel(activity, ch), s(Hotkeys.label(a)));
+        }
+    }
+
     private void kvRow(String key, String value) {
         LinearLayout l = new LinearLayout(activity);
         l.setOrientation(LinearLayout.HORIZONTAL);

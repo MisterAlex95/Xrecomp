@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Les raccourcis du joueur (XBA-190, Hotkeys). -->
+<resources>
+    <string name="HK_GROUP">Raccourcis</string>
+    <string name="HK_FF_HOLD">Avance rapide (maintenir)</string>
+    <string name="HK_FF_TOGGLE">Avance rapide oui / non</string>
+    <string name="HK_QSAVE">Sauvegarde rapide</string>
+    <string name="HK_QLOAD">Chargement rapide</string>
+    <string name="HK_SLOT_NEXT">Emplacement rapide suivant</string>
+    <string name="HK_SLOT_PREV">Emplacement rapide précédent</string>
+    <string name="HK_MENU">Menu du jeu (maintenus ½ s)</string>
+    <string name="HK_NONE">Aucun</string>
+    <string name="HK_PRESS">Appuyez sur les boutons…</string>
+    <string name="HK_CAPTURE_NOTE">%1$s : maintenez un bouton et appuyez sur un second, ou appuyez sur un seul (5 s)</string>
+    <string name="HK_CAPTURED">%1$s : %2$s</string>
+    <string name="HK_CAPTURE_CANCELLED">Rien n\'a changé</string>
+    <string name="HK_DETAIL">%1$s : %2$s. Appuyez sur A, puis sur les boutons : maintenez-en un (le modificateur, comme Select) et appuyez sur un second, ou appuyez sur un seul. Gauche et droite le désactivent ou remettent celui d\'origine. Ses boutons n\'arrivent pas au jeu tant que l\'accord est maintenu ; chacun seul arrive toujours au jeu.</string>
+    <string name="HK_DETAIL_MENU">%1$s : %2$s, maintenus une demi-seconde ; le jeu reçoit quand même les boutons. Guide, Retour et un glissement depuis le bord gauche ouvrent aussi le menu.</string>
+    <string name="HK_DETAIL_SCOPE">Les raccourcis valent pour tous les jeux de toutes les consoles, ou pour ce jeu seul quand ses commandes sont « Ce jeu seulement ».</string>
+    <string name="HK_VALUE_CONFLICT">%1$s · conflit</string>
+    <string name="HK_SHARED">Mêmes boutons que : %1$s. Les deux se produiraient.</string>
+    <string name="HK_GAME_NEEDS">Le jeu utilise %1$s : avec ce raccourci, appuyer dessus fait le raccourci à la place. Ajoutez un modificateur (maintenez Select d\'abord).</string>
+    <string name="HK_RESET">Raccourcis par défaut</string>
+    <string name="HK_RESET_DETAIL">Tous les raccourcis reviennent aux accords d\'origine : Select + R2 maintenus pour l\'avance rapide, Select + R1 sauvegarde vite, Select + L1 charge vite, Select + Start maintenus ouvrent le menu du jeu.</string>
+    <string name="HK_RESET_DONE">Raccourcis d\'origine remis</string>
+    <string name="HK_SLOT_EVENT">Emplacement rapide : %1$d</string>
+</resources>

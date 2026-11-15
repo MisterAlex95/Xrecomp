@@ -126,6 +126,9 @@ public class LauncherControlsTest {
         assertNotNull(row(a, app.getString(R.string.XB_LSTICK)));
         assertNotNull(row(a, app.getString(R.string.XB_RSTICK)));
         assertNotNull(row(a, app.getString(R.string.CTL_RESET)));
+        // XBA-190: an Xbox title's only hotkey is the menu chord (no save states there).
+        assertEquals("Select + Start", row(a, app.getString(R.string.HK_MENU)).value);
+        assertNull(row(a, app.getString(R.string.HK_QSAVE)));
         assertEquals(app.getString(R.string.SRC_L1), row(a, app.getString(R.string.XB_BLACK)).value);
         assertEquals(app.getString(R.string.SRC_L2), row(a, app.getString(R.string.XB_LT)).value);
         assertEquals("the first row has the focus", app.getString(R.string.XB_A),

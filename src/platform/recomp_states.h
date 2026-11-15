@@ -18,9 +18,10 @@
  * console's rate) or "max" (as fast as the host runs, audio muted); default 4. Runtimes run `speed` console frames
  * per shown frame and pass the audio through recomp_ff_audio (averaged down: higher pitched, never gapped).
  *
- * Quick save / load: the pad chords Back + right shoulder (save) and Back + left shoulder (load) act on the quick
- * slot, the last slot 1..N saved or loaded this run (at the start: the most recently saved one, else slot 1). The UI
- * learns what they did through recomp_states_last_event (the in-game menu shows « Saved to slot N »).
+ * Quick save / load: the pad chords (by default Back + right shoulder: save, Back + left shoulder: load; the player's
+ * hotkeys, recomp_hotkeys.h, XBA-190) act on the quick slot, the last slot 1..N saved or loaded this run (at the
+ * start: the most recently saved one, else slot 1). The UI learns what they did through recomp_states_last_event
+ * (the in-game menu shows « Saved to slot N »).
  *
  * Resume: with RECOMP_STATE_RESUME=1 (the app's « Resume where I left off »), the runtime loads the automatic slot
  * before its first frame, and saves it when the player closes the game (desktop: the window; Android: the menu's
@@ -119,11 +120,14 @@ int recomp_states_info(int slot, recomp_state_meta *meta, uint16_t *thumb);
 
 /* The slot quick save / load act on (1..RECOMP_STATE_SLOTS; see above). */
 int recomp_states_quick_slot(void);
+/* The next (dir > 0) or previous (dir < 0) slot becomes the quick slot, around 1..RECOMP_STATE_SLOTS (the hotkeys
+ * slot_next / slot_prev, XBA-190); records an RECOMP_STATE_EV_SLOT event. Returns the new quick slot. */
+int recomp_states_quick_step(int dir);
 /* Saves / loads the quick slot and records an event. RECOMP_STATE_*. */
 int recomp_states_quick_save(void);
 int recomp_states_quick_load(void);
 
-/* The pad chords, one call per pad per frame: back, the left and right shoulders held now; *held the pad's state
+/* The default pad chords alone (XBA-182; the runtimes go through recomp_hotkeys.h since XBA-190), one call per pad per frame: back, the left and right shoulders held now; *held the pad's state
  * (zero it at the start). Returns RECOMP_CHORD_SAVE / _LOAD on the frame a shoulder goes down with Back held (once
  * per press), else RECOMP_CHORD_NONE. *swallow: Back + a shoulder are held, so neither should reach the game. */
 enum { RECOMP_CHORD_NONE = 0, RECOMP_CHORD_SAVE = 1, RECOMP_CHORD_LOAD = 2 };
@@ -138,7 +142,7 @@ int recomp_states_resume_enabled(void);
 int recomp_states_resume(void);
 
 /* What the last quick save / load / resume did, for the UI: seq grows with each event (0: none yet). */
-enum { RECOMP_STATE_EV_SAVED = 1, RECOMP_STATE_EV_LOADED = 2, RECOMP_STATE_EV_RESUMED = 3 };
+enum { RECOMP_STATE_EV_SAVED = 1, RECOMP_STATE_EV_LOADED = 2, RECOMP_STATE_EV_RESUMED = 3, RECOMP_STATE_EV_SLOT = 4 };
 typedef struct recomp_state_event {
     uint32_t seq;
     int kind;   /* RECOMP_STATE_EV_* */

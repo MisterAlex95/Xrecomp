@@ -883,32 +883,38 @@ public class GameMenuTest {
     }
 
     /**
-     * XBA-182 / XBA-183: a GBA game's and an N64 game's Controls page have the fast-forward and quick save / load
-     * chords; the Xbox list does not.
+     * XBA-182 / XBA-183 / XBA-190: a GBA game's and an N64 game's Controls page list the hotkeys (fast-forward, quick
+     * save / load, the menu chord: the usual chords); the Xbox list has only the menu's.
      */
     @Test
     public void consoleControlsListFastForward() throws Exception {
+        String ff = Hotkeys.chordLabel(activity, Hotkeys.def(Hotkeys.Action.FF_HOLD));
+        String qsave = Hotkeys.chordLabel(activity, Hotkeys.def(Hotkeys.Action.QSAVE));
+        String menuChord = Hotkeys.chordLabel(activity, Hotkeys.def(Hotkeys.Action.MENU));
         host.console = ConsolePadMap.parse(Console.GBA, "");
         menu.open("Back");
         menu.row(GameMenu.Item.CONTROLS).performClick();
         java.util.List<String> texts = new java.util.ArrayList<>();
         collect(menu.drawer, texts);
-        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_FF)));
-        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_FF_X)));
+        assertTrue(texts.toString(), texts.contains(ff));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.HK_FF_HOLD)));
+        assertTrue(texts.toString(), texts.contains(menuChord));
         press(KeyEvent.KEYCODE_BUTTON_B);
         host.console = ConsolePadMap.parse(Console.N64, "");
         menu.row(GameMenu.Item.CONTROLS).performClick();
         texts.clear();
         collect(menu.drawer, texts);
-        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_FF)));
-        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_QUICK_SAVE)));
-        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.CTL_QUICK_LOAD)));
+        assertTrue(texts.toString(), texts.contains(qsave));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.HK_QSAVE)));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.HK_QLOAD)));
+        assertFalse("an unset hotkey is not listed", texts.contains(activity.getString(R.string.HK_FF_TOGGLE)));
         press(KeyEvent.KEYCODE_BUTTON_B);
         host.console = null;
         menu.row(GameMenu.Item.CONTROLS).performClick();
         texts.clear();
         collect(menu.drawer, texts);
-        assertFalse(texts.toString(), texts.contains(activity.getString(R.string.CTL_FF)));
+        assertFalse(texts.toString(), texts.contains(activity.getString(R.string.HK_FF_HOLD)));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.HK_MENU)));
     }
 
     // ---- Save states and fast-forward (XBA-182) --------------------------------------------------------------------

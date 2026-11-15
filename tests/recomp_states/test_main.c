@@ -1,6 +1,9 @@
-/* recomp_states (XBA-182): slot files, thumbnails, the runtime's attach / save / load path, fast-forward. */
+/* recomp_states (XBA-182): slot files, thumbnails, the runtime's attach / save / load path, fast-forward; and the
+ * hotkeys over them (XBA-190, recomp_hotkeys.h): the text forms, the pad chords and keys per frame, what they run. */
 #define _POSIX_C_SOURCE 200809L
 #include "recomp_states.h"
+#include "recomp_hotkeys.h"
+#include "console_pad.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -300,6 +303,212 @@ static void test_ff(void)
     CHECK(recomp_ff_audio(same, 2, 1, &c) == 2 && same[3] == 8);
 }
 
+/* ---- Hotkeys (XBA-190, recomp_hotkeys.h) ----------------------------------------------------------------------- */
+
+#define SRC(name) (1u << recomp_hotkeys_source(name))
+
+/* The names agree with console_pad.h's (the runtimes hand recomp_hotkeys_pad_update console_pad_sources' bits). */
+static void test_hotkey_names(void)
+{
+    for (int i = 0; i < CPS_SOURCES; i++)
+        CHECK(console_pad_source_name(i) && recomp_hotkeys_source_name(i) &&
+              !strcmp(console_pad_source_name(i), recomp_hotkeys_source_name(i)));
+    CHECK(RECOMP_HK_SOURCES == CPS_SOURCES);
+    CHECK(recomp_hotkeys_source("rt") == CPS_RIGHT_TRIGGER && recomp_hotkeys_source("SELECT") == CPS_BACK &&
+          recomp_hotkeys_source("lb") == CPS_LEFT_SHOULDER && recomp_hotkeys_source("nope") == -1);
+    for (int a = 0; a < RECOMP_HK_COUNT; a++)
+        CHECK(recomp_hotkeys_action(recomp_hotkeys_action_name(a)) == a);
+    CHECK(recomp_hotkeys_action("bogus") == -1 && !recomp_hotkeys_action_name(RECOMP_HK_COUNT));
+    /* Keys: HID usages, SDL's scancodes (SDL_SCANCODE_TAB 43, _F1 58, _A 4, _1 30, _0 39). */
+    CHECK(recomp_hotkeys_key("tab") == 43 && recomp_hotkeys_key("F1") == 58 && recomp_hotkeys_key("f12") == 69);
+    CHECK(recomp_hotkeys_key("a") == 4 && recomp_hotkeys_key("Z") == 29 && recomp_hotkeys_key("1") == 30 &&
+          recomp_hotkeys_key("0") == 39);
+    CHECK(recomp_hotkeys_key("f13") == 0 && recomp_hotkeys_key("") == 0 && recomp_hotkeys_key("xx") == 0);
+    for (int k = 1; k < 256; k++) {
+        const char *n = recomp_hotkeys_key_name(k);
+        if (n)
+            CHECK(recomp_hotkeys_key(n) == k);
+    }
+}
+
+static void test_hotkey_parse(void)
+{
+    recomp_hotkeys hk, d;
+    char buf[512];
+    recomp_hotkeys_defaults(&d);
+    /* The defaults: XBA-182's chords and keys. */
+    CHECK(d.pad[RECOMP_HK_FF_HOLD].mod == CPS_BACK && d.pad[RECOMP_HK_FF_HOLD].button == CPS_RIGHT_TRIGGER);
+    CHECK(d.pad[RECOMP_HK_QSAVE].button == CPS_RIGHT_SHOULDER && d.pad[RECOMP_HK_QLOAD].button == CPS_LEFT_SHOULDER);
+    CHECK(d.pad[RECOMP_HK_MENU].mod == CPS_BACK && d.pad[RECOMP_HK_MENU].button == CPS_START);
+    CHECK(d.pad[RECOMP_HK_FF_TOGGLE].button == -1 && d.pad[RECOMP_HK_SLOT_NEXT].button == -1);
+    CHECK(!strcmp(recomp_hotkeys_format_pad(&d, buf, sizeof buf), ""));
+    CHECK(!strcmp(recomp_hotkeys_format_keys(&d, buf, sizeof buf), ""));
+    CHECK(!strcmp(recomp_hotkeys_key_chord_text(d.key[RECOMP_HK_LOAD2], buf, sizeof buf), "shift+f2"));
+    CHECK(!strcmp(recomp_hotkeys_pad_chord_text(d.pad[RECOMP_HK_QSAVE], buf, sizeof buf), "back+right_shoulder"));
+
+    /* A remap: short names, '=' or ':', none, spaces / semicolons; the text lists only what differs. */
+    hk = d;
+    CHECK(recomp_hotkeys_parse_pad(&hk, "qsave:select+y; ff_toggle=l3+r3 qload:none,slot_next:dpad_right") == 0);
+    CHECK(hk.pad[RECOMP_HK_QSAVE].mod == CPS_BACK && hk.pad[RECOMP_HK_QSAVE].button == CPS_NORTH);
+    CHECK(hk.pad[RECOMP_HK_QLOAD].button == -1);
+    CHECK(hk.pad[RECOMP_HK_SLOT_NEXT].mod == -1 && hk.pad[RECOMP_HK_SLOT_NEXT].button == CPS_DPAD_RIGHT);
+    CHECK(!strcmp(recomp_hotkeys_format_pad(&hk, buf, sizeof buf),
+                  "ff_toggle:left_stick_click+right_stick_click,qsave:back+north,qload:none,slot_next:dpad_right"));
+    recomp_hotkeys back = d;
+    CHECK(recomp_hotkeys_parse_pad(&back, buf) == 0 && !memcmp(back.pad, hk.pad, sizeof hk.pad));
+    /* Rejected entries count; the good ones still apply. */
+    hk = d;
+    CHECK(recomp_hotkeys_parse_pad(&hk, "warp:back+a,qsave:back+back,qload:back+nothing,menu,ff_hold:start+a") == 4);
+    CHECK(hk.pad[RECOMP_HK_FF_HOLD].mod == CPS_START && hk.pad[RECOMP_HK_FF_HOLD].button == CPS_SOUTH);
+    CHECK(hk.pad[RECOMP_HK_QSAVE].button == CPS_RIGHT_SHOULDER);
+    CHECK(recomp_hotkeys_parse_pad(&hk, NULL) == 0 && recomp_hotkeys_parse_pad(&hk, "") == 0);
+    CHECK(recomp_hotkeys_parse_pad(NULL, "x") == -1);
+
+    /* Keys. */
+    hk = d;
+    CHECK(recomp_hotkeys_parse_keys(&hk, "qsave:f5,qload:shift+f5,ff_toggle:ctrl+alt+q,ff_hold:none,save1:bad+f1") == 1);
+    CHECK(hk.key[RECOMP_HK_QSAVE].key == 62 && hk.key[RECOMP_HK_QSAVE].mods == 0);
+    CHECK(hk.key[RECOMP_HK_QLOAD].mods == RECOMP_HK_SHIFT);
+    CHECK(hk.key[RECOMP_HK_FF_TOGGLE].mods == (RECOMP_HK_CTRL | RECOMP_HK_ALT) && hk.key[RECOMP_HK_FF_HOLD].key == 0);
+    CHECK(!strcmp(recomp_hotkeys_format_keys(&hk, buf, sizeof buf),
+                  "ff_hold:none,ff_toggle:ctrl+alt+q,qsave:f5,qload:shift+f5"));
+    back = d;
+    CHECK(recomp_hotkeys_parse_keys(&back, buf) == 0 && !memcmp(back.key, hk.key, sizeof hk.key));
+    /* A buffer too small keeps whole entries. */
+    char small[24];
+    recomp_hotkeys_format_keys(&hk, small, sizeof small);
+    CHECK(!strcmp(small, "ff_hold:none"));
+
+    /* This run's: the environment, read once until reset. */
+    setenv("RECOMP_HOTKEYS", "qsave:back+north", 1);
+    setenv("RECOMP_HOTKEYS_KEYS", "qsave:f5", 1);
+    recomp_hotkeys_reset();
+    const recomp_hotkeys *g = recomp_hotkeys_get();
+    CHECK(g->pad[RECOMP_HK_QSAVE].button == CPS_NORTH && g->key[RECOMP_HK_QSAVE].key == 62);
+    setenv("RECOMP_HOTKEYS", "qsave:back+east", 1);
+    CHECK(recomp_hotkeys_get()->pad[RECOMP_HK_QSAVE].button == CPS_NORTH);
+    unsetenv("RECOMP_HOTKEYS");
+    unsetenv("RECOMP_HOTKEYS_KEYS");
+    recomp_hotkeys_reset();
+    CHECK(!memcmp(recomp_hotkeys_get(), &d, sizeof d));
+}
+
+static void test_hotkey_pad(void)
+{
+    recomp_hotkeys d, hk;
+    recomp_hotkeys_state st = {0};
+    uint32_t pr = 0, sw = 0, held;
+    recomp_hotkeys_defaults(&d);
+    const uint32_t BACK = SRC("back"), RB = SRC("rb"), LB = SRC("lb"), RT = SRC("rt"), START = SRC("start");
+
+    /* The default chords, as recomp_states_chord's test: once per press, in either order, swallowed while held. */
+    CHECK(recomp_hotkeys_pad_update(&d, &st, RB, &pr, &sw) == 0 && !pr && !sw);
+    CHECK(recomp_hotkeys_pad_update(&d, &st, BACK, &pr, &sw) == 0 && !pr && !sw);
+    held = recomp_hotkeys_pad_update(&d, &st, BACK | RB, &pr, &sw);
+    CHECK(held == RECOMP_HK_BIT(RECOMP_HK_QSAVE) && pr == held && sw == (BACK | RB));
+    held = recomp_hotkeys_pad_update(&d, &st, BACK | RB, &pr, &sw);
+    CHECK(held == RECOMP_HK_BIT(RECOMP_HK_QSAVE) && !pr && sw == (BACK | RB));
+    held = recomp_hotkeys_pad_update(&d, &st, BACK | RB | LB, &pr, &sw);
+    CHECK(pr == RECOMP_HK_BIT(RECOMP_HK_QLOAD) && sw == (BACK | RB | LB));
+    CHECK(recomp_hotkeys_pad_update(&d, &st, BACK, &pr, &sw) == 0 && !pr && !sw);
+    /* Back + right trigger: held while held, its buttons swallowed. */
+    held = recomp_hotkeys_pad_update(&d, &st, RT | BACK, &pr, &sw);
+    CHECK(held == RECOMP_HK_BIT(RECOMP_HK_FF_HOLD) && sw == (BACK | RT));
+    CHECK(recomp_hotkeys_pad_update(&d, &st, RT, &pr, &sw) == 0 && !sw);
+    /* The menu chord is the shell's: never held, never swallowed. */
+    CHECK(recomp_hotkeys_pad_update(&d, &st, BACK | START, &pr, &sw) == 0 && !pr && !sw);
+
+    /* Remapped: quick save on Back + north, fast-forward hold on L3 + R3, slot next on the D-pad right alone. */
+    hk = d;
+    CHECK(recomp_hotkeys_parse_pad(&hk, "qsave:back+north,ff_hold:l3+r3,slot_next:right,slot_prev:back+right") == 0);
+    st.held = 0;
+    CHECK(recomp_hotkeys_pad_update(&hk, &st, BACK | RB, &pr, &sw) == 0 && !sw);   /* the old chord: nothing */
+    held = recomp_hotkeys_pad_update(&hk, &st, BACK | SRC("y"), &pr, &sw);
+    CHECK(pr == RECOMP_HK_BIT(RECOMP_HK_QSAVE) && sw == (BACK | SRC("y")));
+    held = recomp_hotkeys_pad_update(&hk, &st, SRC("l3") | SRC("r3"), &pr, &sw);
+    CHECK(held == RECOMP_HK_BIT(RECOMP_HK_FF_HOLD) && sw == (SRC("l3") | SRC("r3")));
+    CHECK(recomp_hotkeys_pad_update(&hk, &st, RT | BACK, &pr, &sw) == 0);   /* the old hold: nothing */
+    /* A button alone fires on its own, not while a two-button chord holds it. */
+    held = recomp_hotkeys_pad_update(&hk, &st, SRC("right"), &pr, &sw);
+    CHECK(pr == RECOMP_HK_BIT(RECOMP_HK_SLOT_NEXT) && sw == SRC("right"));
+    recomp_hotkeys_pad_update(&hk, &st, 0, &pr, &sw);
+    held = recomp_hotkeys_pad_update(&hk, &st, BACK | SRC("right"), &pr, &sw);
+    CHECK(held == RECOMP_HK_BIT(RECOMP_HK_SLOT_PREV) && pr == held);
+    /* NULL out-parameters and state are fine. */
+    CHECK(recomp_hotkeys_pad_update(&hk, NULL, BACK | SRC("y"), NULL, NULL) == RECOMP_HK_BIT(RECOMP_HK_QSAVE));
+    CHECK(recomp_hotkeys_pad_update(NULL, &st, BACK | SRC("y"), &pr, &sw) == 0 && !sw);
+}
+
+static void test_hotkey_keys(void)
+{
+    recomp_hotkeys d, hk;
+    recomp_hotkeys_state st = {0};
+    uint8_t ks[256];
+    uint32_t pr = 0, held;
+    recomp_hotkeys_defaults(&d);
+    memset(ks, 0, sizeof ks);
+    ks[58] = 1;   /* F1: save slot 1, once */
+    CHECK(recomp_hotkeys_keys_update(&d, &st, ks, 256, &pr) == RECOMP_HK_BIT(RECOMP_HK_SAVE1) && pr);
+    recomp_hotkeys_keys_update(&d, &st, ks, 256, &pr);
+    CHECK(!pr);
+    ks[58] = 0;
+    recomp_hotkeys_keys_update(&d, &st, ks, 256, &pr);
+    ks[229] = ks[59] = 1;   /* right Shift + F2: load slot 2, not save 2 */
+    held = recomp_hotkeys_keys_update(&d, &st, ks, 256, &pr);
+    CHECK(held == RECOMP_HK_BIT(RECOMP_HK_LOAD2) && pr == held);
+    memset(ks, 0, sizeof ks);
+    ks[43] = 1;   /* Tab: the hold */
+    CHECK(recomp_hotkeys_keys_update(&d, &st, ks, 256, &pr) == RECOMP_HK_BIT(RECOMP_HK_FF_HOLD));
+    /* A short array: keys past it are up. */
+    CHECK(recomp_hotkeys_keys_update(&d, &st, ks, 40, &pr) == 0);
+    /* Remapped keys. */
+    hk = d;
+    CHECK(recomp_hotkeys_parse_keys(&hk, "ff_hold:space,qsave:f5,save1:none") == 0);
+    memset(ks, 0, sizeof ks);
+    ks[43] = ks[58] = 1;
+    CHECK(recomp_hotkeys_keys_update(&hk, &st, ks, 256, &pr) == 0);
+    ks[44] = ks[62] = 1;
+    held = recomp_hotkeys_keys_update(&hk, &st, ks, 256, &pr);
+    CHECK(held == (RECOMP_HK_BIT(RECOMP_HK_FF_HOLD) | RECOMP_HK_BIT(RECOMP_HK_QSAVE)));
+}
+
+static void test_hotkey_run(void)
+{
+    recomp_state_ops ops = {"gba", fake_save, fake_load, &s_machine};
+    recomp_state_event ev;
+    recomp_states_attach(&ops, s_dir);
+    recomp_ff_reset();
+    s_machine = 41;
+    CHECK(recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_SAVE2)) == 1);
+    CHECK(recomp_states_quick_slot() == 2);
+    /* Slot next / previous go around and record an event. */
+    CHECK(recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_SLOT_NEXT)) == 1 && recomp_states_quick_slot() == 3);
+    recomp_states_last_event(&ev);
+    CHECK(ev.kind == RECOMP_STATE_EV_SLOT && ev.slot == 3 && ev.rc == RECOMP_STATE_OK);
+    recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_SLOT_NEXT));
+    recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_SLOT_NEXT));
+    CHECK(recomp_states_quick_slot() == 1);
+    recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_SLOT_PREV));
+    CHECK(recomp_states_quick_slot() == 4);
+    /* Quick save / load act on the quick slot. */
+    s_machine = 77;
+    CHECK(recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_QSAVE)) == 1);
+    recomp_states_last_event(&ev);
+    CHECK(ev.kind == RECOMP_STATE_EV_SAVED && ev.slot == 4 && ev.rc == RECOMP_STATE_OK);
+    s_machine = 0;
+    recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_QLOAD));
+    CHECK(s_machine == 77);
+    recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_LOAD2));
+    CHECK(s_machine == 41);
+    /* The toggle flips; the hold and the menu do not run here. */
+    CHECK(recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_FF_TOGGLE)) == 1 && recomp_ff_toggled());
+    recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_FF_TOGGLE));
+    CHECK(!recomp_ff_toggled());
+    CHECK(recomp_hotkeys_run(RECOMP_HK_BIT(RECOMP_HK_FF_HOLD) | RECOMP_HK_BIT(RECOMP_HK_MENU)) == 0);
+    CHECK(!recomp_ff_active());
+    recomp_states_detach();
+}
+
 int main(void)
 {
     snprintf(s_dir, sizeof s_dir, "/tmp/recomp_states_test.XXXXXX");
@@ -312,6 +521,11 @@ int main(void)
     test_attach();
     test_quick();
     test_ff();
+    test_hotkey_names();
+    test_hotkey_parse();
+    test_hotkey_pad();
+    test_hotkey_keys();
+    test_hotkey_run();
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", s_dir);
     if (system(cmd) != 0)

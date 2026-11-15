@@ -503,4 +503,95 @@ public class LauncherConsoleControlsTest {
         assertFalse(a.romMapForTest().isDefault());
         shot(a, "console-controls-5-ps1");
     }
+
+    private static void pad(LauncherActivity a, int code, boolean down) {
+        a.dispatchKeyEvent(new KeyEvent(down ? KeyEvent.ACTION_DOWN : KeyEvent.ACTION_UP, code));
+        idle(50);
+    }
+
+    /** A, then the buttons pressed in order and released in reverse: the capture of a hotkey row's chord. */
+    private static void capture(LauncherActivity a, String row, int... codes) {
+        focusRow(a, row);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertTrue("capturing", a.hotkeyCapturingForTest());
+        for (int c : codes)
+            pad(a, c, true);
+        for (int i = codes.length - 1; i >= 0; i--)
+            pad(a, codes[i], false);
+        assertFalse("the capture ended with the buttons up", a.hotkeyCapturingForTest());
+        idle(300);
+    }
+
+    /**
+     * XBA-190: a GBA game's Controls › Hotkeys: the usual chords; A then Select + Y makes quick save's chord (recomp.cfg,
+     * every game), its buttons' releases do nothing else; the same chord on « Fast-forward on / off » marks both rows
+     * « · conflict », left turns it off; a button alone the game uses (A) is a conflict too; a capture with no button
+     * changes nothing; « This game only » copies the hotkeys into the game's file, « Reset hotkeys » resets that copy.
+     */
+    @Test
+    public void gbaHotkeys() throws Exception {
+        File rom = rom("gba", "Pocket Quest.gba", ConsoleTest.gba("AXVE"));
+        LauncherActivity a = launch();
+        String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(rom)).tid;
+        openControls(a, "Pocket Quest");
+        String qsave = app.getString(R.string.HK_QSAVE), toggle = app.getString(R.string.HK_FF_TOGGLE);
+        for (Hotkeys.Action h : Hotkeys.Action.values())
+            assertNotNull(h.name(), row(a, app.getString(Hotkeys.label(h))));
+        assertEquals("Select + R1", row(a, qsave).value);
+        assertEquals("Select + R2", row(a, app.getString(R.string.HK_FF_HOLD)).value);
+        assertEquals("Select + Start", row(a, app.getString(R.string.HK_MENU)).value);
+        assertEquals(app.getString(R.string.HK_NONE), row(a, toggle).value);
+
+        capture(a, qsave, KeyEvent.KEYCODE_BUTTON_SELECT, KeyEvent.KEYCODE_BUTTON_Y);
+        assertEquals(LauncherActivity.Screen.ROM_CONTROLS, a.screenForTest());
+        assertEquals("qsave:back+north", cfgLine(Hotkeys.KEY));
+        assertEquals("Select + Y", row(a, qsave).value);
+        assertEquals(app.getString(R.string.HK_CAPTURED, qsave, "Select + Y"), a.noteForTest());
+
+        // The same chord, the other way round, on the toggle: a conflict on both rows; left turns the toggle off.
+        capture(a, toggle, KeyEvent.KEYCODE_BUTTON_Y, KeyEvent.KEYCODE_BUTTON_SELECT);
+        assertEquals(app.getString(R.string.HK_VALUE_CONFLICT, "Y + Select"), row(a, toggle).value);
+        assertEquals(app.getString(R.string.HK_VALUE_CONFLICT, "Select + Y"), row(a, qsave).value);
+        assertTrue(a.descriptionForTest(), a.descriptionForTest().contains(qsave));
+        key(a, KeyEvent.KEYCODE_DPAD_LEFT);
+        assertEquals(app.getString(R.string.HK_NONE), row(a, toggle).value);
+        assertEquals("Select + Y", row(a, qsave).value);
+        assertEquals("qsave:back+north", cfgLine(Hotkeys.KEY));
+
+        // A button alone the GBA's A uses: a conflict, said in the description.
+        String next = app.getString(R.string.HK_SLOT_NEXT);
+        capture(a, next, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals("qsave:back+north,slot_next:south", cfgLine(Hotkeys.KEY));
+        assertEquals(app.getString(R.string.HK_VALUE_CONFLICT, app.getString(R.string.SRC_SOUTH)), row(a, next).value);
+        assertTrue(a.descriptionForTest(), a.descriptionForTest().contains(
+            app.getString(R.string.HK_GAME_NEEDS, app.getString(R.string.SRC_SOUTH))));
+        shot(a, "console-controls-5-hotkeys");
+
+        // A capture with nothing pressed: after HK_CAPTURE_MS, nothing changed.
+        String qload = app.getString(R.string.HK_QLOAD);
+        focusRow(a, qload);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(app.getString(R.string.HK_PRESS), row(a, qload).value);
+        idle(LauncherActivity.HK_CAPTURE_MS + 100);
+        assertFalse(a.hotkeyCapturingForTest());
+        assertEquals("Select + L1", row(a, qload).value);
+        assertEquals(app.getString(R.string.HK_CAPTURE_CANCELLED), a.noteForTest());
+
+        // This game only: the hotkeys come along into the game's file; a reset there leaves recomp.cfg alone.
+        focusRow(a, app.getString(R.string.CC_SCOPE));
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals("qsave:back+north,slot_next:south", Hotkeys.gameText(app, key));
+        a.forceFocusForTest();
+        idle(300);
+        focusRow(a, app.getString(R.string.HK_RESET));
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals("", Hotkeys.gameText(app, key));
+        assertEquals("qsave:back+north,slot_next:south", cfgLine(Hotkeys.KEY));
+        assertEquals("Select + R1", row(a, qsave).value);
+        // Back to all games: the copy goes.
+        focusRow(a, app.getString(R.string.CC_SCOPE));
+        key(a, KeyEvent.KEYCODE_DPAD_LEFT);
+        assertNull(Hotkeys.gameText(app, key));
+        assertEquals("Select + Y", row(a, qsave).value);
+    }
 }

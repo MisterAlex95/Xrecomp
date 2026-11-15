@@ -6,7 +6,7 @@ import android.view.MotionEvent;
 /**
  * The in-game menu's triggers as plain state machines (docs/android/app-shell.md « In-game menu »), so the JVM tests
  * drive them with made-up events and times: the swipe in from the left edge of the screen, and the gamepad combo
- * Select + Start held {@link #COMBO_MS}.
+ * (Select + Start, or the player's « Game menu » hotkey) held {@link #COMBO_MS}.
  */
 final class MenuTriggers {
     private MenuTriggers() {}
@@ -87,11 +87,15 @@ final class MenuTriggers {
     }
 
     /**
-     * Select + Start: both held at once, from the moment the second one goes down. The keys still reach the game
-     * (each alone is a game button); the menu, once open, releases them in the game.
+     * The menu's pad chord held {@link #COMBO_MS}: Select + Start by default, the player's « Game menu » hotkey
+     * (Hotkeys, XBA-190) when set ({@link #setChord}): both held at once, from the moment the second one goes down; a
+     * chord of one button: that button held alone; none: the combo never fires (Guide, Back and the swipe still
+     * open the menu). The keys still reach the game (each alone is a game button); the menu, once open, releases them
+     * in the game.
      */
     static final class Combo {
-        private boolean select, start;
+        private int keyA = KeyEvent.KEYCODE_BUTTON_SELECT, keyB = KeyEvent.KEYCODE_BUTTON_START;
+        private boolean a, b;
         private long since = -1;
 
         static boolean isSelect(int keyCode) {
@@ -102,15 +106,39 @@ final class MenuTriggers {
             return keyCode == KeyEvent.KEYCODE_BUTTON_START;
         }
 
-        /** A key event; true when it was Select or Start. */
+        /** The chord to listen for; a chord with a stick direction (no key) keeps Select + Start. */
+        void setChord(Hotkeys.Chord c) {
+            reset();
+            if (c == null || c.isNone()) {
+                keyA = keyB = -1;
+                return;
+            }
+            int kb = Hotkeys.keyOf(c.button), ka = c.mod == null ? -1 : Hotkeys.keyOf(c.mod);
+            if (kb < 0 || (c.mod != null && ka < 0)) {
+                keyA = KeyEvent.KEYCODE_BUTTON_SELECT;
+                keyB = KeyEvent.KEYCODE_BUTTON_START;
+                return;
+            }
+            keyA = c.mod == null ? kb : ka;
+            keyB = c.mod == null ? -1 : kb;
+        }
+
+        /** False when the menu has no pad chord. */
+        boolean enabled() {
+            return keyA >= 0;
+        }
+
+        /** A key event; true when it was one of the chord's keys. */
         boolean key(int keyCode, boolean down, long now) {
-            if (isSelect(keyCode))
-                select = down;
-            else if (isStart(keyCode))
-                start = down;
+            if (keyCode < 0)
+                return false;
+            if (keyCode == keyA)
+                a = down;
+            else if (keyCode == keyB)
+                b = down;
             else
                 return false;
-            if (select && start) {
+            if (a && (b || keyB < 0)) {
                 if (since < 0)
                     since = now;
             } else {
@@ -133,7 +161,7 @@ final class MenuTriggers {
         }
 
         void reset() {
-            select = start = false;
+            a = b = false;
             since = -1;
         }
     }
