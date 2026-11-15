@@ -565,8 +565,23 @@ the compiler vectorises, identical results everywhere. One cycle per instruction
 (`consoles/n64/tests`): `test_rsp.c` (hand-checked vectors, and 93 differential groups of random microcode over every
 vector funct, load, store, DMA, status and scalar op whose checksums must equal those the ares oracle computed from the
 homebrew ROM `homebrew/rsp`), `test_rsp_rdp.c` (microcode driving the real RDP over XBUS and from RDRAM);
-`n64_rsp_bench` (by hand; `-n COUNT` runs a fixed instruction count and prints a DMEM hash): ~115 M RSP
-instructions/s on a vector-dense loop on the x86 dev host (was ~97).
+`n64_rsp_bench` (by hand; `-n COUNT` runs a fixed instruction count and prints a DMEM hash): ~139 M RSP
+instructions/s on a vector-dense loop on the x86 dev host (was ~97, then ~115 before the predecoded table).
+
+*Predecoded table.* `n64_rsp_run` runs each IMEM word from a predecoded entry (one per word, 16 bytes: the handler
+kind, register indices or the vector registers' offsets, the immediate already extended, the branch target and link,
+the element selector). An entry keeps the word it was decoded from and the loop compares it with the word it fetches,
+decoding again when they differ: no IMEM writer (CPU stores, SP DMA, the HLE boot, save state loads) has to
+invalidate anything, and a stale entry cannot run. The table is host only, outside the save state. Vector
+computational ops are 128 functions (64 opcodes x selector 0 / 1 or a shuffle), each the NEON or portable body inlined
+at a constant opcode, so no opcode switch is left at run time; the aligned LDV / SDV / LQV / SQV run inline in the
+loop. Inlining the vector bodies into the loop itself was measured slower (register pressure on both paths). Same
+results, cycles (one per instruction) and stop conditions as before: the 93 ares groups, the RSP + RDP tests and
+the bench's DMEM hash are identical on x86, arm64 NEON and arm64 portable (qemu-user), as are the run hashes of
+every homebrew ROM, both n64-systemtest ROMs, libdragon's test ROM and rsp_inval_instrs (900 frames); `test_rsp.c`
+rewrites IMEM after it ran (CPU writes, the microcode's own DMA, a state load, a selector change at one slot).
+Callgrind on `n64_rsp_bench -n`: arm64 NEON 68.4 -> 48.8 instructions per RSP instruction, arm64 portable 92.8 ->
+75.4, x86-64 123.5 -> 93.5.
 
 *NEON (arm64, XBA-173).* On arm64 the hot vector ops are NEON intrinsics (`vu_op_neon`: the multiply-accumulate family
 VMULF..VMADH, VADD / VSUB / VADDC / VSUBC, VLT / VEQ / VNE / VGE, VCL / VCH, VMRG, the logic ops, the divide moves),
