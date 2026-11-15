@@ -105,3 +105,29 @@ def test_profile_name(tmp_path, monkeypatch):
     monkeypatch.setattr(identify, "PROFILES", str(tmp_path))
     r = identify.identify(TEST_XBE)
     assert (r["name"], r["profile_name"]) == ("SYNTH", "Synthetic Title")
+
+
+@pytest.mark.parametrize("name", ["DEFAULT.XBE", "Default.xbe"])
+def test_folder_default_xbe_any_case(tmp_path, name):
+    # Discs are case-blind and the app's companion folder keeps the name as on the disc (SpikeOut: Battle Street).
+    d = _folder(tmp_path)
+    os.rename(d / "default.xbe", d / name)
+    assert identify.folder_xbe(str(d)) == str(d / name)
+    kind, xbe, data = identify.read_source(str(d))
+    assert kind == "folder" and os.path.basename(xbe) == name and data == open(TEST_XBE, "rb").read()
+
+
+def test_find_xbe_folder_any_case(tmp_path):
+    from tools.prepare import __main__ as prep
+    d = _folder(tmp_path)
+    os.rename(d / "default.xbe", d / "DEFAULT.XBE")
+    xbe, data_dir, image = prep.find_xbe(str(d), str(tmp_path / "work"))
+    assert xbe == str(d / "DEFAULT.XBE") and data_dir == str(d) and image is None
+
+
+def test_folder_without_xbe(tmp_path):
+    d = _folder(tmp_path)
+    os.remove(d / "default.xbe")
+    assert identify.folder_xbe(str(d)) is None
+    with pytest.raises(identify.IdentifyError):
+        identify.read_source(str(d))

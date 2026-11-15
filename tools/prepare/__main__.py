@@ -306,8 +306,9 @@ def find_xbe(source, work):
     """(path to default.xbe, game data folder or None, image or None)."""
     src = os.path.abspath(source)
     if os.path.isdir(src):
-        xbe = os.path.join(src, "default.xbe")
-        if not os.path.isfile(xbe):
+        from tools.prepare.identify import folder_xbe
+        xbe = folder_xbe(src)
+        if xbe is None:
             raise SystemExit("%s: no default.xbe in this folder" % src)
         return xbe, src, None
     low = src.lower()
