@@ -134,7 +134,12 @@ How it is built: framework `Activity` and `View`s only (no AndroidX, no Material
 code (`Theme.java` for colours, type, spacing and sizes; `Widgets.java` for the custom views: list rows, pill
 buttons, tabs, the Options sheet, the focus highlight, the import ring, status dots, button hints). Everything is laid out on a 1920 x 1080 design grid that `Widgets.Stage` scales to the
 window (wider or taller screens get a wider or taller grid, never a stretched one), so it looks the same from 1280 x 720
-to 1920 x 1080. The window is fullscreen and immersive (system bars hidden, back with a swipe), drawn under the display
+to 1920 x 1080. Narrower screens (single-screen handhelds in 4:3 or square, such as 1240 x 1080 or 720 x 720) keep
+the height's scale and get a narrower grid, down to 1280 wide (`Theme.DESIGN_MIN_W`), so the text does not shrink:
+Home stacks its art (smaller, `Theme.ART_COMPACT`) above the title and buttons (`Widgets.HeroRow`), the library has
+four columns on 4:3 and three on a square (`LibraryScreen.columns`), a list screen narrows its list to keep the
+description column (`Widgets.ListSplit`), and the Settings tabs move closer to the title. The screenshot tests render
+every launcher screen at 4:3 and square too (`-4x3`, `-1x1`). The window is fullscreen and immersive (system bars hidden, back with a swipe), drawn under the display
 cutout, and the stage keeps its content out of the cutout's insets. System fonts only (`sans-serif`,
 `sans-serif-medium`); the look is our own (deep green-black, one vivid green accent, warm off-white text), with no
 console or game maker's logo or name in the art.
