@@ -23,6 +23,7 @@ Pinned as `ARG`s at the top of the Dockerfile. Change both places together.
 | Gradle | 8.10.2, in `/opt/gradle` | Pre-installed so that builds do not download a wrapper distribution. |
 | JDK | Temurin 17 (17.0.21) | trixie has no OpenJDK 17 package. |
 | SDL2 | `release-2.32.10`, sources in `$SDL2_SRC` | `android-project/` is the SDLActivity template. |
+| Frame generation sources | lsfg-vk-android d33caceb + volk be3dbd49, DXVK v2.6.2 + SPIRV-Headers 8b246ff7 | The `lsfg-sources` stage (`ADD --checksum` of the archives pinned in `src/framegen/lsfg_sources.txt`), copied to `/opt/xba-lsfg-sources` (`$XBOXRECOMP_DEPS_DIR`) by the stages that build native code: the APKs build frame generation in by default (XBA-187) without fetching. |
 
 The spec said SDL2 2.30.x. We took 2.32.10, the latest SDL2 release: the same API, more Android fixes.
 

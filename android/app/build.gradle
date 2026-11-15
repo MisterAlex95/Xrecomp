@@ -8,17 +8,14 @@ plugins {
 def sdl2Src = System.getenv('SDL2_SRC') ?: findProperty('sdl2Src')
 if (!sdl2Src) throw new GradleException('Set SDL2_SRC (or -Psdl2Src=...) to the SDL2 sources (release-2.32.10)')
 def xbaVersion = findProperty('xbaVersion') ?: 'dev'
-// Frame generation (docs/technical/framegen.md): -PxbaLsfg=1 builds the toolkit's XBOXRECOMP_LSFG (pacer, shader
-// cache) into libmain.so; with LSFG_VK_SRC (or -PlsfgVkSrc=..., GameNative/lsfg-vk-android at d33caceb with its
-// thirdparty/volk submodule) also the Vulkan bridge, and with DXVK_SRC (or -PdxvkSrc=..., DXVK v2.6.2 with
-// include/spirv) the DXBC translator in libxba_import.so. Off by default.
-def xbaLsfg = ((findProperty('xbaLsfg') ?: '0') as String) == '1'
+// Frame generation (docs/technical/framegen.md, XBA-187): on by default. The toolkit's XBOXRECOMP_LSFG (pacer, shader
+// cache, Vulkan bridge) goes into libmain.so and the DXBC translator into libxba_import.so, over pinned sources that
+// CMake fetches (src/framegen/lsfg_sources.cmake: GameNative/lsfg-vk-android d33caceb with volk, DXVK v2.6.2 with
+// SPIRV-Headers; kept in third_party/lsfg-sources or $XBOXRECOMP_DEPS_DIR) unless LSFG_VK_SRC / -PlsfgVkSrc=... and
+// DXVK_SRC / -PdxvkSrc=... name checkouts. -PxbaLsfg=0 leaves it out (offline builds).
+def xbaLsfg = ((findProperty('xbaLsfg') ?: '1') as String) != '0'
 def lsfgVkSrc = xbaLsfg ? ((findProperty('lsfgVkSrc') ?: System.getenv('LSFG_VK_SRC') ?: '') as String) : ''
 def dxvkSrc = xbaLsfg ? ((findProperty('dxvkSrc') ?: System.getenv('DXVK_SRC') ?: '') as String) : ''
-if (xbaLsfg && !lsfgVkSrc)
-    logger.warn('-PxbaLsfg=1 without -PlsfgVkSrc / LSFG_VK_SRC: no Vulkan bridge, the launcher hides frame generation')
-if (xbaLsfg && !dxvkSrc)
-    logger.warn('-PxbaLsfg=1 without -PdxvkSrc / DXVK_SRC: no DXBC translator, the phone needs a desktop-translated cache')
 // A title linked into libmain.so (XBA-52): its project directory, a copy of templates/new-game with its generated C.
 def xbaTitleDir = findProperty('xbaTitleDir') ?: ''
 // The SHA-256 of the default.xbe a title's APK is built for (XBA-54, XBA-40): the game picker refuses another disc
@@ -242,8 +239,9 @@ android {
         // Shown on the launcher's About screen (XBA-41).
         resValue 'string', 'xba_version', xbaVersion
         resValue 'string', 'xba_version_code', (findProperty('xbaVersionCode') ?: '1') as String
-        // The launcher offers Frame generation and « Choose Lossless.dll » only when the bridge is in libmain.so.
-        resValue 'bool', 'xba_lsfg', (xbaLsfg && lsfgVkSrc) ? 'true' : 'false'
+        // The launcher offers Frame generation and « Choose Lossless.dll » only when the bridge is in libmain.so: with
+        // frame generation on, CMake builds it or fails (no silent build without it).
+        resValue 'bool', 'xba_lsfg', xbaLsfg ? 'true' : 'false'
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {

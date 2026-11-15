@@ -13,6 +13,26 @@ project(xboxrecomp VERSION 0.14.0 LANGUAGES C)
 #   xbox_apu       - MCPX APU audio emulation (extracted from xemu)
 #   xbox_nv2a      - NV2A GPU emulation (extracted from xemu)
 
+# Frame generation (LSFG, docs/technical/framegen.md): the pacer (C) and the Vulkan bridge (C++20, over the pinned
+# MIT framegen that src/framegen fetches when no checkout is given). On by default on POSIX hosts (XBA-187) when
+# this is the top-level project or the project adding the toolkit enabled CXX (templates/new-game, the Android app):
+# a C project cannot link the bridge, so the test projects under tests/ (C only, add_subdirectory of the toolkit)
+# keep building without it. -DXBOXRECOMP_LSFG=OFF leaves it out (offline builds). ON also defines XBOXRECOMP_LSFG on
+# the executor and the GL back end, which then apply the cap and present-mode rules under RECOMP_LSFG=1
+# (src/framegen/framegen_policy.h).
+get_property(_xbr_languages GLOBAL PROPERTY ENABLED_LANGUAGES)
+if(NOT WIN32 AND (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR "CXX" IN_LIST _xbr_languages))
+    set(_xbr_lsfg_default ON)
+else()
+    set(_xbr_lsfg_default OFF)
+endif()
+option(XBOXRECOMP_LSFG "Build frame generation (LSFG pacer and bridge)" ${_xbr_lsfg_default})
+if(XBOXRECOMP_LSFG AND NOT WIN32)
+    # The bridge is C++20: CXX is enabled here, before any subdirectory, so that every directory below (the console
+    # runtimes' executables link xbr_host, hence the bridge) links with the C++ driver.
+    enable_language(CXX)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -136,16 +156,8 @@ if(NOT WIN32 AND NOT TARGET xiso)
     add_subdirectory(src/xiso)
 endif()
 
-# Frame generation (LSFG): the pacer (C) here; the Vulkan bridge adds its C++
-# parts to src/framegen. Off by default: the default build and the upstream
-# tests do not see it. ON also defines XBOXRECOMP_LSFG on the executor and the
-# GL back end, which then apply the cap and present-mode rules under
-# RECOMP_LSFG=1 (src/framegen/framegen_policy.h).
-option(XBOXRECOMP_LSFG "Build frame generation (LSFG pacer and bridge)" OFF)
+# Frame generation (LSFG): option and CXX at the top (XBOXRECOMP_LSFG above); the libraries below.
 if(XBOXRECOMP_LSFG AND NOT WIN32)
-    # The bridge is C++20 (src/framegen/lsfg_vulkan.cmake: XBOXRECOMP_LSFG_VK_SRC, the pinned MIT framegen). A
-    # project that adds the toolkit with add_subdirectory enables CXX itself (templates/new-game does).
-    enable_language(CXX)
     add_subdirectory(src/framegen)
     target_compile_definitions(xbox_kernel PRIVATE XBOXRECOMP_LSFG=1)
     if(TARGET xbox_gpu)

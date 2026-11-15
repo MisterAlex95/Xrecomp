@@ -59,7 +59,7 @@ case "$family" in
         sudo pacman -S --needed "${PKGS[@]}"
         ;;
     fedora)
-        PKGS=(cmake gcc make pkgconf-pkg-config SDL2-devel mesa-libGL-devel
+        PKGS=(cmake gcc gcc-c++ make pkgconf-pkg-config SDL2-devel mesa-libGL-devel
               libepoxy-devel openssl-devel ffmpeg-devel)
         echo "Detected Fedora/RHEL. Installing ${#PKGS[@]} packages..."
         echo "(ffmpeg-devel needs RPM Fusion enabled.)"

@@ -11,8 +11,11 @@
 >
 > Part of the [Documentation Index](../INDEX.md)
 
-Built only with `-DXBOXRECOMP_LSFG=ON` (POSIX hosts); the default build and the
-upstream tests do not see it. Run-time switches: see
+Built by default on POSIX hosts (XBA-187: Android, Linux, macOS), from pinned
+sources the build fetches itself; `-DXBOXRECOMP_LSFG=OFF` (Android
+`-PxbaLsfg=0`) leaves it out. The test projects under `tests/` (C only) build
+without it. Off at run time until the player turns it on (and picks their own
+Lossless.dll). Run-time switches: see
 [Environment Variables](../runtime/environment-variables.md#frame-generation).
 
 ## Design
@@ -53,8 +56,8 @@ The LSFG compute chain (mipmaps -> alpha x7 -> beta -> gamma x7 -> delta x3 ->
 generate, ~100 dispatches per generated frame, storage images in R8_UNORM,
 R8G8B8A8_UNORM and R16G16B16A16_SFLOAT) is the `framegen/` library of
 lsfg-vk 1.0 as carried by the Android fork **GameNative/lsfg-vk-android at
-commit d33caceb** (MIT, see Licences). We build it unmodified from a checkout
-(`XBOXRECOMP_LSFG_VK_SRC`, like `SDL2_SRC`) and call only its public API
+commit d33caceb** (MIT, see Licences). We build it unmodified from the pinned
+archive (or a checkout, `XBOXRECOMP_LSFG_VK_SRC`; Build below) and call only its public API
 (`framegen/public/lsfg_3_1.hpp`, `lsfg_3_1p.hpp`): the fork's
 `initializeExternal` (framegen on *our* device and queue) and
 `createContextFromImages` (plain VkImages in GENERAL layout), then
@@ -141,9 +144,9 @@ as lsfg-vk 1.0 did with its DXVK subset: `lsfg_dxbc.cpp` reads the container,
 compiles it with default options and returns the SPIR-V
 (`lsfg_translate_fn`, the contract is in `lsfg_cache.h`). Pinned at **DXVK
 v2.6.2**: 2.7 moved samplers to a global descriptor heap, which framegen's
-fixed per-pass layouts cannot express. DXVK is used from a checkout
-(`XBOXRECOMP_LSFG_DXVK_SRC` / `$DXVK_SRC`, with its `include/spirv` submodule),
-never vendored. DXVK's `src/dxbc` includes `../dxvk/dxvk_shader.h` (the whole
+fixed per-pass layouts cannot express. DXVK is used from the pinned archive
+with SPIRV-Headers in its `include/spirv` (or a checkout,
+`XBOXRECOMP_LSFG_DXVK_SRC` / `$DXVK_SRC`), never vendored. DXVK's `src/dxbc` includes `../dxvk/dxvk_shader.h` (the whole
 Vulkan back end), so `lsfg_dxbc.cmake` stages `src/dxbc`, `src/spirv` and
 `src/util` into the build tree beside our reduced stand-ins
 (`src/framegen/dxvk_shim/dxvk/`: the few DXVK types the compiler uses, a
@@ -156,28 +159,49 @@ every output SPIR-V 1.6 with the right resource counts for its pass, 4.7 MB in
 all, 0.4 s.
 
 ```
-cmake -S tools/lsfg -B build/lsfg -DXBOXRECOMP_LSFG_DXVK_SRC=$DXVK_SRC \
-      -DXBOXRECOMP_VULKAN_HEADERS=<dir with vulkan/vulkan_core.h>
+cmake -S tools/lsfg -B build/lsfg        # fetches DXVK (pinned) unless -DXBOXRECOMP_LSFG_DXVK_SRC=<checkout>
+cmake --build build/lsfg
 build/lsfg/lsfg_translate /path/to/your/Lossless.dll       # -> the desktop cache, made current
 build/lsfg/lsfg_translate --dir <cache dir pulled from a phone>
 ```
 
 On Android the translator links into `libxba_import.so` (about 1.3 MB stripped,
-arm64) when the APK is built with `-PxbaLsfg=1` and `DXVK_SRC`, so the phone
-translates at import (`LsfgNative.hasTranslator()`); without it the app only
+arm64) in every APK built with frame generation (the default), so the phone
+translates at import (`LsfgNative.hasTranslator()`); an APK without it only
 extracts, and a cache translated on a desktop can be pushed.
 
 ## Build
 
+On by default (XBA-187); the sources are fetched at pinned commits, never vendored.
+
 | Build | What |
 |---|---|
-| default | nothing of this (`XBOXRECOMP_LSFG` OFF): default build and upstream tests unchanged |
-| `-DXBOXRECOMP_LSFG=ON` | `xbox_framegen`: pacer, fake generator, shader-cache helpers (C only) |
-| + `-DXBOXRECOMP_LSFG_VK_SRC=<checkout>` (or `$LSFG_VK_SRC`) | + the bridge (C++20), volk, framegen; `XBOXRECOMP_LSFG_BRIDGE=1` on `xbox_framegen`; call `lsfg_bridge_register()` before `framegen_pacer_start()` |
-| + `-DXBOXRECOMP_LSFG_DXVK_SRC=<checkout>` (or `$DXVK_SRC`) | + `lsfg_dxbc` (the translator) |
-| Android `-PxbaLsfg=1` (+ `-PlsfgVkSrc`, `-PdxvkSrc` or the env vars) | the same in `libmain.so` / `libxba_import.so`; the launcher shows Frame generation only with the bridge (`R.bool.xba_lsfg`) |
+| default (POSIX host, top-level build or a project with CXX enabled) | `xbox_framegen` with the bridge (C++20), volk and framegen, from the pinned archives; `XBOXRECOMP_LSFG_BRIDGE=1` on `xbox_framegen`; call `lsfg_bridge_register()` before `framegen_pacer_start()` |
+| Android (gradle, no flag) | the same in `libmain.so`, plus `lsfg_dxbc` (the translator, over the pinned DXVK) in `libxba_import.so`; `R.bool.xba_lsfg` true, so the launcher shows Frame generation |
+| `-DXBOXRECOMP_LSFG_VK_SRC=<checkout>` (or `$LSFG_VK_SRC`; Android `-PlsfgVkSrc`) | that framegen checkout instead of the archive |
+| `-DXBOXRECOMP_LSFG_DXVK_SRC=<checkout>` (or `$DXVK_SRC`; Android `-PdxvkSrc`) | that DXVK checkout; on a desktop it also builds `lsfg_dxbc` into the toolkit (`tools/lsfg` fetches DXVK itself) |
+| `-DXBOXRECOMP_LSFG_FETCH=OFF` | no fetch: without checkouts, the pacer and fake generator only |
+| `-DXBOXRECOMP_LSFG=OFF`, Android `-PxbaLsfg=0` | nothing of this (offline builds); the launcher hides Frame generation |
+| a C-only project adding the toolkit (`tests/*`) | OFF by default: a C project cannot link the bridge; upstream tests unchanged |
 
-Sources:
+**Pinned sources** (`src/framegen/lsfg_sources.txt`: name, SHA-256 of GitHub's
+commit archive, URL): GameNative/lsfg-vk-android d33caceb, volk be3dbd49 (the
+fork's `thirdparty/volk` pin), DXVK v2.6.2 (9d6f54a1), SPIRV-Headers 8b246ff7
+(DXVK's `include/spirv` pin). `src/framegen/lsfg_sources.cmake` takes each
+`<name>-<sha256:16>.tar.gz` from `XBOXRECOMP_DEPS_DIR` (default
+`$XBOXRECOMP_DEPS_DIR`, else `third_party/lsfg-sources/`, git-ignored),
+downloading it once when it is missing (`file(DOWNLOAD)`, hash checked), and
+extracts it into the build tree (`lsfg-src/`), volk and SPIRV-Headers nested
+where the submodules go. About 1.9 MB of archives in all. Caches:
+`tools/lsfg/fetch_sources.sh [DIR]` fills a directory ahead of time (offline
+builds); the desktop downloads carry the archives in
+`third_party/lsfg-sources/` (`tools/ci/package_toolkit.sh`), so a game builds
+without network; the Android image has them in its `lsfg-sources` stage
+(`ADD --checksum`, cached by BuildKit; `tools/lsfg/test_fetch_sources.py` checks
+it matches the pins). Configure fails, saying how to go offline, when an archive
+can be neither found nor fetched: no silent build without frame generation.
+
+Checkouts instead of archives (the old way, still supported):
 
 ```
 git clone https://github.com/GameNative/lsfg-vk-android && git -C lsfg-vk-android checkout d33caceb
@@ -187,19 +211,25 @@ git clone --branch v2.6.2 --depth 1 https://github.com/doitsujin/dxvk && \
 ```
 
 Only `framegen/` and `thirdparty/volk` of the fork are compiled; its
-pe-parse, dxbc, toml11 submodules and its layer are not used. Vulkan headers:
-the NDK sysroot on Android; elsewhere `XBOXRECOMP_VULKAN_HEADERS` (a directory
-holding `vulkan/vulkan_core.h`: Vulkan-Headers' `include`, or the NDK's
-`sysroot/usr/include`, whose `vulkan/` and `vk_video/` alone are staged into
-the build tree) or a Vulkan SDK. Android: `VK_USE_PLATFORM_ANDROID_KHR` (volk's
+pe-parse, dxbc, toml11 submodules and its layer are not used. Vulkan headers
+(`lsfg_vulkan_headers.cmake`): the NDK sysroot on Android; elsewhere
+`XBOXRECOMP_VULKAN_HEADERS` (a directory holding `vulkan/vulkan_core.h`:
+Vulkan-Headers' `include`, a Vulkan SDK's, or the NDK's `sysroot/usr/include`,
+whose `vulkan/` and `vk_video/` alone are staged into the build tree), else the
+Khronos headers the repository carries for paraLLEl-RDP
+(`third_party/parallel-rdp/vulkan-headers`, 1.3.278): no Vulkan SDK needed. GCC
+builds DXVK's compiler with `-include optional` (its `dxbc_module.h` relies on
+libc++'s transitive includes). Android: `VK_USE_PLATFORM_ANDROID_KHR` (volk's
 public define) for framegen's AHardwareBuffer paths; libc++ static
 (`c++_static`) in `libmain.so` and `libxba_import.so`; SDL2's hidapi brings its
 own static libc++ into `libSDL2.so`, which is fine as no C++ object crosses
 the library boundary. Measured arm64 Release sizes, stripped: bridge +
 framegen + volk 1.6 MB, translator 1.3 MB; neither needs `libvulkan.so`.
 
-A project that adds the toolkit with `add_subdirectory` enables CXX itself
-when `XBOXRECOMP_LSFG` is on (`templates/new-game` does).
+A project that adds the toolkit with `add_subdirectory` enables CXX itself, before
+adding it, to get frame generation (`templates/new-game` and the Android app
+do); the root build enables CXX at its top, before any subdirectory, so that
+every executable linking `xbr_host` links with the C++ driver.
 
 ## Pacing
 
@@ -487,12 +517,11 @@ and the window's wait loop. Clean under ThreadSanitizer, UBSan and ASan.
 
 ## Android
 
-- **Build**: `-PxbaLsfg=1 -PlsfgVkSrc=<lsfg-vk-android checkout> -PdxvkSrc=<dxvk
-  v2.6.2>` (or `LSFG_VK_SRC` / `DXVK_SRC`) is a supported configuration; see
-  [App shell](../android/app-shell.md#frame-generation) for the full command.
-  Without `lsfgVkSrc` gradle warns and the launcher hides the rows; without
-  `dxvkSrc` the phone only extracts (a desktop-translated cache can be pushed
-  into the directory).
+- **Build**: every APK has it by default (XBA-187: xrecomp-latest, releases,
+  title APKs), bridge and translator from the pinned sources; `-PxbaLsfg=0`
+  builds one without (the launcher then hides the rows); `-PlsfgVkSrc` /
+  `-PdxvkSrc` (or `LSFG_VK_SRC` / `DXVK_SRC`) use checkouts. See
+  [App shell](../android/app-shell.md#frame-generation).
 - **Launcher**: Settings › Graphics › All consoles › **Frame generation** (XBA-186: every console reads it; it
   was under Xbox only before): Off (default) /
   2× / 2× performance writes `RECOMP_LSFG`, `RECOMP_LSFG_MULT`,
@@ -537,11 +566,11 @@ benchmark is Device checklist step 3.
 
 | Component | Licence | How it is used |
 |---|---|---|
-| framegen (lsfg-vk 1.0, GameNative/lsfg-vk-android d33caceb, `framegen/`) | MIT, (c) 2025 lsfg-vk | compiled from a checkout, unmodified; in binaries (NOTICE) |
+| framegen (lsfg-vk 1.0, GameNative/lsfg-vk-android d33caceb, `framegen/`) | MIT, (c) 2025 lsfg-vk | compiled from the pinned archive, unmodified; in every APK and desktop build (NOTICE, `LICENSES/MIT-lsfg-vk.txt`) |
 | volk (zeux/volk be3dbd49, the fork's submodule) | MIT, (c) 2018-2025 Arseny Kapoulkine | same |
-| DXVK v2.6.2 (`src/dxbc`, `src/spirv`, `src/util`) | zlib, (c) 2017 Philip Rebohle and others | compiled from a checkout; `src/framegen/dxvk_shim/` is a DXVK derivative in this repo (zlib, altered) |
-| SPIRV-Headers (DXVK's `include/spirv`) | MIT-style (Khronos) | headers only |
-| Vulkan headers (NDK / Vulkan-Headers) | Apache-2.0 / MIT | headers only |
+| DXVK v2.6.2 (`src/dxbc`, `src/spirv`, `src/util`) | zlib, (c) 2017 Philip Rebohle and others | compiled from the pinned archive into `libxba_import.so` and `lsfg_translate` (`LICENSES/Zlib-DXVK.txt`); `src/framegen/dxvk_shim/` is a DXVK derivative in this repo (zlib, altered) |
+| SPIRV-Headers (DXVK's `include/spirv`) | MIT-style (Khronos) | headers only (`LICENSES/MIT-Khronos-SPIRV-Headers.txt`) |
+| Vulkan headers (NDK / `third_party/parallel-rdp/vulkan-headers`) | Apache-2.0 / MIT | headers only |
 | MoltenVK (macOS) | Apache-2.0 | user-installed or already present, never bundled |
 
 **Not used:** lsfg-vk 2.x (CC BY-NC-ND 4.0: no derivatives), the fork's code
@@ -571,7 +600,7 @@ with extra terms: read for nothing, copy nothing).
 | `tests/lsfg_dll` | PE walker on synthetic PE32/PE32+ (all truncations, 15 malformations), SHA-256 vectors, cache import / reuse / translate with a fake translator, unsupported DLL, damaged cache file | nothing (C, POSIX) |
 | `tests/lsfg_spv` | renumbering order, sets, idempotence, layout mismatch, unsupported resources, corrupt modules, capabilities, every table layout | nothing |
 | `tools/lsfg/test_inspect_dll.py` | inspect_dll on synthetic PE | pytest |
-| `tests/lsfg_bridge` | argument checks; moving square (generated square between the inputs), history-only and reset, pipeline cache reuse; `--bench [frames]` | `LSFG_VK_SRC` at build time; a Vulkan driver and `RECOMP_LSFG_DIR` (or `RECOMP_LSFG_DLL` + the translator built in) at run time, else exit 77 |
+| `tests/lsfg_bridge` | argument checks; moving square (generated square between the inputs), history-only and reset, pipeline cache reuse; `--bench [frames]` | `LSFG_VK_SRC` at build time (a checkout, or a build tree's `lsfg-src/lsfg-vk-android`); a Vulkan driver and `RECOMP_LSFG_DIR` (or `RECOMP_LSFG_DLL` + the translator built in) at run time, else exit 77 |
 | `tests/framegen_pacer` | pacing (below) | nothing |
 | `tests/framegen_console` | the console window's distinct frames, FIFO, bypass, reset, size cap ([Console window](#console-window)) | nothing |
 

@@ -1,0 +1,8 @@
+# The pinned third-party sources of frame generation (docs/technical/framegen.md « Build », NOTICE), fetched by
+# src/framegen/lsfg_sources.cmake when no checkout is given, by tools/lsfg/fetch_sources.sh for CI and the desktop
+# downloads, and by tools/docker/android.Dockerfile (lsfg-sources stage: keep its ADD lines in step with this file).
+# GitHub's archive of a commit; the SHA-256 is of that .tar.gz. One line each: name sha256 url.
+lsfg-vk-android 435d413a27e1e3bdc226ed867acecec6af0e202dd6750a9517ae566f562b267a https://codeload.github.com/GameNative/lsfg-vk-android/tar.gz/d33caceb5e26cc6773834c00b4eb570ad4906272
+volk 295d6de2bccb4e46f77d4173ba42c9513a66623071e80ceb597e9d95de73cc32 https://codeload.github.com/zeux/volk/tar.gz/be3dbd49bf77052665e96b6c7484af855e7e5f67
+dxvk a6eb05696a6e5369ac55767ddb8d4c1f6e682478afe6768db714e8ad4e7a4463 https://codeload.github.com/doitsujin/dxvk/tar.gz/9d6f54a1ade20d1d27dd421024717a636f3d8c68
+spirv-headers cfeed5f9a97d12a9761a26e7f5bd10fedb1a8ce92033075151ae3bc7206fc229 https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/8b246ff75c6615ba4532fe4fde20f1be090c3764

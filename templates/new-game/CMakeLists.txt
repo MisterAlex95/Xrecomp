@@ -42,8 +42,9 @@ set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../xboxrecomp" CACHE PATH
 # and provides the 'xboxrecomp' umbrella target to link against.
 # (The Android app shell has added it already, and set XBOXRECOMP_DIR.)
 if(NOT XBOXRECOMP_SHELL_TITLE)
-    # Frame generation (-DXBOXRECOMP_LSFG=ON) links a C++20 library: CXX must be enabled at this level.
-    if(XBOXRECOMP_LSFG)
+    # Frame generation (on by default on POSIX hosts, -DXBOXRECOMP_LSFG=OFF to leave it out) links a C++20 library:
+    # CXX must be enabled at this level, which also turns the toolkit's default on.
+    if(NOT WIN32 AND (NOT DEFINED XBOXRECOMP_LSFG OR XBOXRECOMP_LSFG))
         enable_language(CXX)
     endif()
     add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)

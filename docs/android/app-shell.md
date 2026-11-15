@@ -24,13 +24,13 @@ with the plain shell, use `fr.adserver.xrecomp.dev` in their `adb` paths and `ru
 |---|---|
 | `LauncherActivity` | The launcher entry ([The launcher](#the-launcher)): welcome, game choice and import, home (the game's art and title, one line, a solid Play / Prepare and three quiet pills: Settings, Controls, Manage), in its own process `:launcher`. `Theme.java` and `Widgets.java` draw it, `TitleArt.java` decodes the game's title image, `GameArt`, `GamePalette` and `GameTheme` make the [game theme](#game-theme) from it, `UiFeedback.java` plays its sounds and haptics; `RecompConfig.java` writes its settings to `recomp.cfg`. With a valid game and « Open the game directly next time » on, it starts `ShellActivity` at once and shows nothing. |
 | `ShellActivity` | Subclass of SDL's `SDLActivity`, which loads `libSDL2.so` and then `libmain.so`. SDL's Java side is compiled from the pinned sources (`$SDL2_SRC/android-project`), not copied here. Not exported: started by the launcher, after it sets `RECOMP_GAME_DIR`. Holds the [in-game menu](#in-game-menu) (`GameMenu`), a View layer over SDL's surface. |
-| `libxba_import.so` | The launcher's ISO import: `xiso_jni.c` around the static `xiso` target (`src/xiso`); and « Choose Lossless.dll » ([Frame generation](#frame-generation)): `lsfg_jni.c` around the shader cache (and the DXBC translator in a `-PxbaLsfg=1` build with DXVK). Loaded only in `:launcher`. |
+| `libxba_import.so` | The launcher's ISO import: `xiso_jni.c` around the static `xiso` target (`src/xiso`); and « Choose Lossless.dll » ([Frame generation](#frame-generation)): `lsfg_jni.c` around the shader cache (and the DXBC translator, in every build with frame generation: the default). Loaded only in `:launcher`. |
 | `libmain.so` | `shell_main.c` + the **whole** toolkit (`--whole-archive`) + the title, when one is linked (see [A title in the shell](#a-title-in-the-shell)). Loading it on a device proves that bionic resolves every symbol the runtime uses. Four symbols that a title provides are weak stubs in `shell_main.c`, and so is the title's hook `recomp_title_main`. |
 | logcat | `src/platform/android_log.c`: stdout (INFO) and stderr (WARN) go to the tag `xboxrecomp`, one entry per line. `xbox_android_log_init()` is the first call of `SDL_main`. |
 | Window | Black, fullscreen, landscape (`sensorLandscape` + `SDL_HINT_ORIENTATIONS`). |
 | Back | Opens and closes the [in-game menu](#in-game-menu) (ShellActivity takes it before SDL); quitting is in the menu (see [Quit](#quit)). A gamepad's own Back key stays that pad's Select for the game, as before. SDL still traps Back (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`); its old Back-twice path (`QUIT_PROMPT` toast, twice within 2 s quits) is only reached where nothing above SDL takes Back. |
 | Manifest | minSdk 30, target 35, arm64-v8a only, GLES 3.0 required, `allowNativeHeapPointerTagging="false"`, `isGame`. |
-| Frame generation | `-PxbaLsfg=1 -PlsfgVkSrc=… -PdxvkSrc=…` ([Frame generation](#frame-generation)); off by default. |
+| Frame generation | On by default, sources fetched at pinned commits ([Frame generation](#frame-generation)); `-PxbaLsfg=0` leaves it out. |
 | Per title | `-PxbaTitleDir=…` (the title's project), `-PxbaApplicationId=…`, `-PxbaLabel=…`, `-PxbaVersionCode=…`, `-PxbaXbeSha256=…` (the expected `default.xbe`, [WRONG_GAME](#wrong_game)). The title is linked next to `shell_main.c`, which stays the entry (XBA-52). |
 | Assets | `selftest.xbe`: the synthetic XBE of `tools/conformance` (ours, no game content), copied in at build time for the [self-test](#self-test-in-the-app-process). |
 | Signing | Debug key generated once per toolchain image, so updates install in place while the image is cached. The release key will be a build secret, never in the repo. |
@@ -968,20 +968,16 @@ On the AYN Thor, a GBA game, a PS1 disc and an N64 cartridge of yours in the lib
 
 ### Frame generation
 
-Lossless Scaling frame generation (LSFG 3.1, [Frame Generation](../technical/framegen.md)) in an APK built with:
-
-```bash
-cd android && JAVA_HOME=… SDL2_SRC=… gradle -PxbaLsfg=1 \
-    -PlsfgVkSrc=/path/to/lsfg-vk-android \
-    -PdxvkSrc=/path/to/dxvk \
-    assembleDebug assembleRelease            # + -PxbaTitleDir=… etc. for a title's APK
-```
+Lossless Scaling frame generation (LSFG 3.1, [Frame Generation](../technical/framegen.md)) is in every APK by default
+(XBA-187): a plain `gradle assembleDebug` / `assembleRelease` builds the Vulkan bridge into `libmain.so` and the DXBC
+translator into `libxba_import.so`, over sources CMake fetches at pinned commits (framegen.md « Build »; kept in
+`third_party/lsfg-sources` or `$XBOXRECOMP_DEPS_DIR`, the Android image has them already).
 
 | Gradle property | Environment | What |
 |---|---|---|
-| `-PxbaLsfg=1` | | Builds `XBOXRECOMP_LSFG` (pacer, presenter path, shader cache) into `libmain.so`. Off by default. |
-| `-PlsfgVkSrc=<dir>` | `LSFG_VK_SRC` | GameNative/lsfg-vk-android at d33caceb with its `thirdparty/volk` submodule: the Vulkan bridge. Without it gradle warns and the launcher hides the rows (`R.bool.xba_lsfg`). |
-| `-PdxvkSrc=<dir>` | `DXVK_SRC` | DXVK v2.6.2 with `include/spirv`: the DXBC translator in `libxba_import.so`, so the phone translates at import. Without it gradle warns; the phone only extracts, and a cache translated on a desktop (`tools/lsfg/lsfg_translate --dir`) can be pushed into `<files>/lsfg/<key>`. |
+| `-PxbaLsfg=0` | | Leaves frame generation out (offline builds): no bridge, no translator, the launcher hides the rows (`R.bool.xba_lsfg` false). Default `1`. |
+| `-PlsfgVkSrc=<dir>` | `LSFG_VK_SRC` | A GameNative/lsfg-vk-android checkout (d33caceb, with its `thirdparty/volk` submodule) instead of the pinned archive. |
+| `-PdxvkSrc=<dir>` | `DXVK_SRC` | A DXVK v2.6.2 checkout (with `include/spirv`) instead of the pinned archive. A build without the translator (none today) only extracts at import; a cache translated on a desktop (`tools/lsfg/lsfg_translate --dir`) can be pushed into `<files>/lsfg/<key>`. |
 
 In the launcher, Settings › Graphics:
 

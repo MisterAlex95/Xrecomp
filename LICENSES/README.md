@@ -27,3 +27,6 @@ in NOTICE. Their binary distribution requires the licence text to travel with th
 | `MIT-paraLLEl-RDP.txt` | paraLLEl-RDP, Granite and volk (`libmain.so`: the N64 Vulkan RDP, `third_party/parallel-rdp`), their three MIT licences verbatim |
 | `Apache-2.0-Vulkan-Headers.txt` | the Khronos Vulkan headers paraLLEl-RDP is built with (`third_party/parallel-rdp/vulkan-headers`), verbatim Apache License 2.0 |
 | `BSD-2-Clause-libadrenotools.txt` | libadrenotools and linkernsbypass (`libxba_vkdriver.so` and the four hook libraries: loading a user-supplied Vulkan driver for the N64 RDP, `third_party/adrenotools`), verbatim `LICENSE` of libadrenotools (linkernsbypass carries the same text) |
+| `MIT-lsfg-vk.txt` | framegen (lsfg-vk 1.0, GameNative/lsfg-vk-android d33caceb) and its volk (`libmain.so`: frame generation's Vulkan compute chain, fetched at pinned commits by `src/framegen/lsfg_sources.cmake`), their two MIT licences verbatim |
+| `Zlib-DXVK.txt` | DXVK v2.6.2's DXBC compiler (`libxba_import.so`: translates the player's Lossless.dll shaders), and `src/framegen/dxvk_shim/` (a DXVK derivative), verbatim `LICENSE` of DXVK |
+| `MIT-Khronos-SPIRV-Headers.txt` | SPIRV-Headers (DXVK's `include/spirv`, in the DXBC translator of `libxba_import.so`), verbatim `LICENSE` |
