@@ -596,6 +596,8 @@ final class Widgets {
         String subtitle;
         String badge, value;
         int badgeColor = Theme.TEXT_DIM;
+        /** The value's colour when not focused (0: TEXT_DIM); Game settings draws a game's own value in ACCENT. */
+        int valueColor;
         Cycler cycler;
         /**
          * XBA-182: a picture at the right side (a save state's), as tall as the focus plate, its aspect kept; with one
@@ -677,6 +679,15 @@ final class Widgets {
             return tickAnim;
         }
 
+        void setValueColor(int color) {
+            valueColor = color;
+            invalidate();
+        }
+
+        private int valueBase() {
+            return valueColor != 0 ? valueColor : Theme.TEXT_DIM;
+        }
+
         void setBadge(String badge, int color) {
             this.badge = badge;
             this.badgeColor = color;
@@ -754,7 +765,7 @@ final class Widgets {
                 // The value sits at the right edge, and moves left to make room for its arrows when focused.
                 float vRight = right - arrows * t, vx = vRight - vw, cy = h / 2;
                 valueP.setColor(dim ? Theme.TEXT_FAINT
-                                    : blend(blend(Theme.TEXT_DIM, Theme.ACCENT, t), Theme.ACCENT, tickT));
+                                    : blend(blend(valueBase(), Theme.ACCENT, t), Theme.ACCENT, tickT));
                 Paint.FontMetrics fm = valueP.getFontMetrics();
                 c.save();
                 float s = 1 + 0.14f * tickT;
@@ -833,7 +844,7 @@ final class Widgets {
             c.drawText(fit(title, titleP, avail), x, top + titleH, titleP);
             String v = fit(value, valueP, avail);
             float vw = valueP.measureText(v), vy = top + titleH + gap + valueH;
-            valueP.setColor(dim ? Theme.TEXT_FAINT : blend(blend(Theme.TEXT_DIM, Theme.ACCENT, t), Theme.ACCENT, tickT));
+            valueP.setColor(dim ? Theme.TEXT_FAINT : blend(blend(valueBase(), Theme.ACCENT, t), Theme.ACCENT, tickT));
             c.save();
             float s = 1 + 0.14f * tickT;
             c.scale(s, s, x + vw / 2, vy + (vf.ascent + vf.descent) / 2);
@@ -883,7 +894,11 @@ final class Widgets {
         private boolean compact;
         private final Paint fillP = fill(0), iconP = stroke(Theme.TEXT, 3.5f);
         private final TextPaint labelP = textPaint(Theme.T_ROW, Theme.MEDIUM, Theme.TEXT);
-        private final RectF r = new RectF();
+        private final TextPaint markP = textPaint(Theme.T_SMALL, Theme.MEDIUM, Theme.GLYPH_INK);
+        private final RectF r = new RectF(), markR = new RectF();
+        /** A short count after the label, in an ACCENT bubble (Game settings: how many values are the game's own). */
+        String mark;
+        private static final float MARK_PAD = 12, MARK_H = 36;
 
         PillButton(Context c) {
             super(c);
@@ -896,6 +911,17 @@ final class Widgets {
             requestLayout();
             invalidate();
             return this;
+        }
+
+        /** The count bubble after the label, or none (null, empty). */
+        void setMark(String m) {
+            mark = m == null || m.isEmpty() ? null : m;
+            requestLayout();
+            invalidate();
+        }
+
+        private float markWidth() {
+            return mark == null ? 0 : Math.max(MARK_H, markP.measureText(mark) + 2 * MARK_PAD);
         }
 
         boolean primaryForTest() {
@@ -926,6 +952,8 @@ final class Widgets {
             if (compact)
                 return Theme.BUTTON_H;
             float w = labelP.measureText(title) + 2 * Theme.S5;
+            if (mark != null)
+                w += Theme.S2 + markWidth();
             if (icon != null)
                 w += 28 + Theme.S2;
             return Math.round(w);
@@ -981,14 +1009,32 @@ final class Widgets {
             float iw = icon != null ? 28 : 0, ig = icon != null ? Theme.S2 : 0;
             if (compact) {
                 drawIcon(c, icon, w / 2, h / 2, iw, iconP);
+                if (mark != null)   // a dot at the top right says there is a count
+                    drawMarkDot(c, w, h);
                 return;
             }
-            String label = fit(title, labelP, Math.max(10, w - 2 * Theme.S4 - iw - ig));
-            float lw = labelP.measureText(label), total = iw + ig + lw, x = (w - total) / 2;
+            float mw = markWidth(), mg = mark != null ? Theme.S2 : 0;
+            String label = fit(title, labelP, Math.max(10, w - 2 * Theme.S4 - iw - ig - mw - mg));
+            float lw = labelP.measureText(label), total = iw + ig + lw + mg + mw, x = (w - total) / 2;
             if (icon != null)
                 drawIcon(c, icon, x + iw / 2, h / 2, iw, iconP);
             Paint.FontMetrics fm = labelP.getFontMetrics();
             c.drawText(label, x + iw + ig, h / 2 - (fm.ascent + fm.descent) / 2, labelP);
+            if (mark != null) {
+                float mx = x + iw + ig + lw + mg;
+                markR.set(mx, (h - MARK_H) / 2, mx + mw, (h + MARK_H) / 2);
+                fillP.setColor(dim ? Theme.TEXT_FAINT : Theme.ACCENT);
+                c.drawRoundRect(markR, MARK_H / 2, MARK_H / 2, fillP);
+                markP.setColor(Theme.GLYPH_INK);
+                Paint.FontMetrics mf = markP.getFontMetrics();
+                c.drawText(mark, markR.centerX() - markP.measureText(mark) / 2,
+                           h / 2 - (mf.ascent + mf.descent) / 2, markP);
+            }
+        }
+
+        private void drawMarkDot(Canvas c, float w, float h) {
+            fillP.setColor(dim ? Theme.TEXT_FAINT : Theme.ACCENT);
+            c.drawCircle(w * 0.78f, h * 0.22f, 8, fillP);
         }
     }
 
@@ -1152,10 +1198,21 @@ final class Widgets {
             return n == 0 ? 2 * GLYPH_W : left[n - 1] + width[n - 1] + GAP - Theme.S2 + GLYPH_W;
         }
 
+        /** Below 1 when the labels are wider than the room given (Game settings' five tabs on a square stage). */
+        private float fit = 1;
+
         @Override
         protected void onMeasure(int w, int h) {
-            setMeasuredDimension(Math.round(total()) + 2, MeasureSpec.getMode(h) == MeasureSpec.EXACTLY
-                                                          ? MeasureSpec.getSize(h) : Theme.TOP_BAR_H);
+            int natural = Math.round(total()) + 2, width = natural;
+            if (MeasureSpec.getMode(w) != MeasureSpec.UNSPECIFIED && MeasureSpec.getSize(w) < natural)
+                width = MeasureSpec.getSize(w);
+            fit = width / (float)natural;
+            setMeasuredDimension(width, MeasureSpec.getMode(h) == MeasureSpec.EXACTLY ? MeasureSpec.getSize(h)
+                                                                                      : Theme.TOP_BAR_H);
+        }
+
+        float fitForTest() {
+            return fit;
         }
 
         private void glyph(Canvas c, float x, float cy, String g) {
@@ -1168,6 +1225,8 @@ final class Widgets {
         @Override
         protected void onDraw(Canvas c) {
             float cy = getHeight() / 2f;
+            c.save();
+            c.scale(fit, fit, 0, cy);
             glyph(c, 0, cy, "L1");
             Paint.FontMetrics fm = tp.getFontMetrics();
             float base = cy - (fm.ascent + fm.descent) / 2;
@@ -1179,6 +1238,7 @@ final class Widgets {
                                     UNDERLINE / 2, UNDERLINE / 2, lineP);
             }
             glyph(c, total() - GLYPH_W, cy, "R1");
+            c.restore();
         }
 
         @Override
@@ -1187,7 +1247,7 @@ final class Widgets {
                 return true;
             if (e.getAction() != MotionEvent.ACTION_UP || listener == null)
                 return super.onTouchEvent(e);
-            float x = e.getX();
+            float x = e.getX() / fit;
             int n = labels.length;
             if (x < GLYPH_W) {
                 listener.onTab((active - 1 + n) % n);

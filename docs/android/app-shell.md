@@ -891,15 +891,25 @@ One logcat line at the start: « shell: game settings <KEY> (<console>): RECOMP_
 … » or « … none (as in Settings) ».
 
 **Game settings screen.** From an Xbox title's Home (**Game settings**, the pill after Settings) and from a console
-game's Home (**Game settings**, after Controls; it was « Options »): every option that applies to the game's console
-(the [table](#settings-per-console): « All consoles » ones for every game, the Xbox's own for Xbox titles, scale,
-filter, rewind and its memory for the consoles, internal resolution for the PS1 and the N64, frame generation in an APK with it), under
-General / Graphics / Audio / Advanced. Each row: « As in Settings (<Settings' value>) », then each of Settings'
-choices (left / right, A); a **This game** badge when the game's value differs from Settings'. Then « This game »:
-**Controls** (« As in Settings » or « This game only »; A opens its Controls), for an Xbox title its Game theme and
-Enhancements, for an N64 game its Vulkan driver; **Reset to Settings** (also Y: the file goes, its N64 Vulkan driver
-choice too; the value says how many of its own); for a console game, its stored things. Saved at once; a running game
-gets them at its next start.
+game's Home (**Game settings**, after Controls; it was « Options »). Laid out as Settings is (XBA-216, after
+[GameNative](https://github.com/utkarshdalal/GameNative)'s per-game page): the **game's name** is the title, then
+Settings' tabs, General / Graphics / Audio / Advanced (only those with rows for the game's console), and a last
+**This game** tab; L1 / R1 (or a tap) change tab, each keeps its focus, and the page opens on the first. A tab's label
+counts how many of its values are the game's own (« Graphics · 2 »), the footer says how many in all (« Game settings
+· 3 of its own », « … · all as in Settings »), and a game's Home shows that count in an accent bubble on its **Game
+settings** pill (`GameSettings.ownTotal`: options whose value differs from Settings', plus its own controls, hotkeys,
+N64 pak and theme). When five labels do not fit the bar (French on a square stage), the tabs are drawn smaller
+(`Widgets.Tabs`).
+
+The option tabs hold every option that applies to the game's console (the [table](#settings-per-console): « All
+consoles » ones for every game, the Xbox's own for Xbox titles under « Xbox only », scale, filter, rewind and its memory
+for the consoles, internal resolution for the PS1 and the N64, frame generation in an APK with it; an N64 game's Vulkan
+driver ends Graphics). Each row: « As in Settings (<Settings' value>) », then each of Settings' choices (left / right,
+A); a value of the game's own is drawn in the accent with a **This game** badge. The « This game » tab: **Controls**
+(« As in Settings » or « This game only »; A opens its Controls), for a console game its Cheats, for an Xbox title its
+Game theme and Enhancements; **Reset to Settings** (also Y, on any tab: the file goes, its N64 Vulkan driver choice
+too; the value says how many of its own); for a console game its app and its stored things. Saved at once (the counts
+follow); a running game gets them at its next start.
 
 **In-game menu.** Settings › **Game settings**: the same option rows for the running game, saved at once; the picture
 options are shown at once, the others wait for « Restart to apply » (the page says so), and Reset to Settings. The Language, Widescreen, 480p, Scale, Filter, Resolution and Vulkan driver

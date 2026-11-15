@@ -87,6 +87,21 @@ public class GameSettingsTest {
         assertTrue(env.logLine(XBOX).contains("RECOMP_APU_HRTF=(default)"));
     }
 
+    /** What Game settings' tabs and Home's pill count: options that differ from Settings, then the other keys. */
+    @Test
+    public void ownCountsWhatDiffersAndTheOtherKeys() throws Exception {
+        File files = tmp.newFolder();
+        RecompConfig global = cfg("RECOMP_GPU_FPS_CAP", "60");
+        // Frame cap as Settings' (not counted), vsync off and widescreen default (counted), its own mapping and theme.
+        RecompConfig g = game(files, XBOX, "RECOMP_GPU_FPS_CAP", "60", "RECOMP_PRESENT_VSYNC", "0",
+                              "RECOMP_WIDESCREEN", "1", "RECOMP_PAD_MAP", "a=b", GameSettings.THEME_KEY, "off");
+        List<RecompConfig.Option> opts = GameSettings.options(Console.XBOX, false);
+        assertEquals(2, GameSettings.ownCount(global, g, opts));
+        assertEquals(2, GameSettings.ownExtras(g, Console.XBOX));
+        assertEquals(4, GameSettings.ownTotal(global, g, Console.XBOX, false));
+        assertEquals(0, GameSettings.ownTotal(global, GameSettings.load(files, GBA), Console.GBA, false));
+    }
+
     @Test
     public void everyKeyIsSetOrUnsetSoNoPreviousGameStays() throws Exception {
         GameSettings.Env env = GameSettings.runEnv(Console.GBA, cfg(), GameSettings.load(tmp.newFolder(), GBA),
