@@ -203,6 +203,22 @@ static void test_multiply_swap(void)
     arm(m, (uint32_t[]){0xE0F10392}, 1); /* smlals r0, r1, r2, r3: -2 + 1 */
     CHECK(m->cpu.r[0] == 0xFFFFFFFFu && m->cpu.r[1] == 0xFFFFFFFFu && m->cpu.n == 1, "smlals: %x:%x",
           m->cpu.r[1], m->cpu.r[0]);
+    /* C after a long multiply: bit 31 of the last Booth addend (the mGBA suite's hardware results) */
+    m->cpu.r[2] = 0xFFFFFFFFu;
+    m->cpu.r[3] = 0xFFFFFFFFu;
+    m->cpu.c = 0;
+    arm(m, (uint32_t[]){0xE0910392}, 1); /* umulls: digit +2, (2 * rm) bit 31 */
+    CHECK(m->cpu.c == 1 && m->cpu.n == 1, "umulls C: %u", m->cpu.c);
+    m->cpu.r[2] = 0x80000000u;
+    m->cpu.r[3] = 0xFFFFFFFFu;
+    arm(m, (uint32_t[]){0xE0910392}, 1); /* umulls: rm bit 30 clear */
+    CHECK(m->cpu.c == 0, "umulls C: %u", m->cpu.c);
+    m->cpu.r[2] = 0;
+    m->cpu.r[3] = 0x80000000u;
+    arm(m, (uint32_t[]){0xE0D10392}, 1); /* smulls: digit -1, ~rm bit 31 */
+    CHECK(m->cpu.c == 1 && m->cpu.z == 1, "smulls C: %u", m->cpu.c);
+    arm(m, (uint32_t[]){0xE0910392}, 1); /* umulls: digit +1, rm bit 31 */
+    CHECK(m->cpu.c == 0, "umulls C: %u", m->cpu.c);
     m->cpu.r[1] = 7;
     m->cpu.r[2] = 6;
     m->cpu.r[3] = 100;

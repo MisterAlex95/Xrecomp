@@ -29,8 +29,10 @@ extern "C" {
  * (Prepare builds them again).
  * 3 (XBA-205): lifted code models the cartridge's prefetch buffer (gba_rc_head fetchmax / pf, rc_pf_fetch for each
  * opcode fetch in the cartridge: RC_I takes the address; RC_LIT for folded literals), and its event checks count the
- * last instruction's fetch (immediate DMAs start after a delay): packs built for 2 are refused. */
-#define GBA_RECOMP_ABI 3
+ * last instruction's fetch (immediate DMAs start after a delay): packs built for 2 are refused.
+ * 4 (XBA-205): lifted UMULL / SMULL / UMLAL / SMLAL with S set C as the ARM7TDMI does (rc_mull_carry): packs built
+ * for 3 are refused. */
+#define GBA_RECOMP_ABI 4
 
 /* Entered with the CPU state at the entry's address (ARM or Thumb as flagged); returns when control leaves the
  * recompiled code, with the CPU's PC (and mode) set to where execution continues. The core may also enter it at a

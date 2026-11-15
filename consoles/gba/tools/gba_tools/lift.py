@@ -258,18 +258,17 @@ class FnLifter:
         if hi == 15 or lo == 15:
             return None
         s, acc, sign = (op >> 20) & 1, (op >> 21) & 1, (op >> 22) & 1
-        RM = self.reg(rm, a + 8)
-        out = ["uint32_t vs_ = %s;" % self.reg(rs, a + 8)]
+        out = ["uint32_t vs_ = %s;" % self.reg(rs, a + 8), "uint32_t vm_ = %s;" % self.reg(rm, a + 8)]
         if sign:
-            out.append("uint64_t res_ = (uint64_t)((int64_t)(int32_t)%s * (int32_t)vs_);" % RM)
+            out.append("uint64_t res_ = (uint64_t)((int64_t)(int32_t)vm_ * (int32_t)vs_);")
         else:
-            out.append("uint64_t res_ = (uint64_t)%s * vs_;" % RM)
+            out.append("uint64_t res_ = (uint64_t)vm_ * vs_;")
         out.append("now += (uint32_t)rc_mul_cycles(vs_, %d) + 1;" % sign)
         if acc:
             out += ["res_ += (uint64_t)r%d << 32 | r%d;" % (hi, lo), "now += 1;"]
         out += ["r%d = (uint32_t)res_;" % lo, "r%d = (uint32_t)(res_ >> 32);" % hi]
         if s:
-            out.append("fN = (uint32_t)(res_ >> 63); fZ = res_ == 0;")
+            out.append("fN = (uint32_t)(res_ >> 63); fZ = res_ == 0; fC = rc_mull_carry(vm_, vs_, %d);" % sign)
         return out
 
     def arm_bx(self, op, a):

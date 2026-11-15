@@ -283,6 +283,27 @@ static inline int mul_cycles(uint32_t rs, bool sign)
     return 4;
 }
 
+/* C after UMULL / SMULL / UMLAL / SMLAL with S (unpredictable on ARMv4, but the ARM7TDMI's is deterministic). The
+ * multiplier recodes rs as radix-4 Booth digits, 4 per internal cycle of mul_cycles; the multiplicand rm goes through
+ * a carry-save adder array as rm, 2 * rm, ~rm or ~(2 * rm) (a negation is an inversion plus a carry in). The flag is
+ * bit 31 of the last cycle's last addend: the digit of rs bits 8n, 8n - 1, 8n - 2 (bit 32 = the sign, or 0 for
+ * unsigned). Checked against the hardware results of the mGBA suite (4 cycles); with early termination it is the
+ * same rule, not measured. MUL / MLA keep C (the 32-bit case is not modelled). gba_recomp_rt.h: rc_mull_carry. */
+static inline bool mull_carry(uint32_t rm, uint32_t rs, bool sign)
+{
+    int n = mul_cycles(rs, sign);
+    uint64_t x = sign ? (uint64_t)(int64_t)(int32_t)rs : rs;
+    uint32_t a;
+    switch ((x >> (8 * n - 2)) & 7) {
+    case 1: case 2: a = rm; break;
+    case 3: a = rm << 1; break;
+    case 4: a = ~(rm << 1); break;
+    case 5: case 6: a = ~rm; break;
+    default: a = 0; break;
+    }
+    return a >> 31;
+}
+
 static inline bool cond_ok(const gba_machine *m, uint32_t cond)
 {
     const gba_cpu *c = &m->cpu;
@@ -428,12 +449,12 @@ static void arm_multiply_long(gba_machine *m, uint32_t op)
 {
     uint32_t hi = (op >> 16) & 15, lo = (op >> 12) & 15, rs = (op >> 8) & 15, rm = op & 15;
     bool s = (op >> 20) & 1, acc = (op >> 21) & 1, sign = (op >> 22) & 1;
-    uint32_t vs = R[rs];
+    uint32_t vs = R[rs], vm = R[rm];
     uint64_t res;
     if (sign)
-        res = (uint64_t)((int64_t)(int32_t)R[rm] * (int32_t)vs);
+        res = (uint64_t)((int64_t)(int32_t)vm * (int32_t)vs);
     else
-        res = (uint64_t)R[rm] * vs;
+        res = (uint64_t)vm * vs;
     m->now += mul_cycles(vs, sign) + 1;
     if (acc) {
         res += (uint64_t)R[hi] << 32 | R[lo];
@@ -444,6 +465,7 @@ static void arm_multiply_long(gba_machine *m, uint32_t op)
     if (s) {
         m->cpu.n = (uint32_t)(res >> 63);
         m->cpu.z = res == 0;
+        m->cpu.c = mull_carry(vm, vs, sign);
     }
 }
 
