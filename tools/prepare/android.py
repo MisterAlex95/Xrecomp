@@ -212,6 +212,13 @@ class Run:
                 shutil.copy(s, os.path.join(extra, os.path.basename(s)))
         gen = os.path.join(proj, "src", "recomp", "gen")
         key = self.m.profile_digest(self.profile)
+        # The XDK's XMV player API bound to the runtime's decoder (XBA-199):
+        # what is bound is part of the lift's key.
+        from tools.xmv import find_api
+        xmv_bind = find_api.prepare_bind(self.xbe, self.an, log=lambda m: self.rep.progress(3, 0, m))
+        xmv_key = find_api.bind_key(xmv_bind)
+        if xmv_key:
+            key = "%s|xmv:%s" % (key, xmv_key)
         if self.stamp.get("lift") == key and os.listdir(gen):
             self.rep.progress(3, 100, "lift up to date (%d C files)" % len(os.listdir(gen)))
         else:
@@ -231,6 +238,8 @@ class Run:
                     "--abi-dir", os.path.join(an, "abi"), "--gen-dir", gen]
             for fn in (self.profile or {}).get("exclude_manual", []):
                 args += ["--exclude-manual", os.path.join(proj, "src", "title", fn)]
+            if xmv_bind:
+                args += ["--xmv-bind", xmv_bind]
             mb = max(1.0, os.path.getsize(self.xbe) / 1e6)
             log_at = os.path.getsize(self.log) if os.path.exists(self.log) else 0
             self.py_step(args, 3, 2, 100, "lifting to C", 30 * mb, "LIFT_FAILED")

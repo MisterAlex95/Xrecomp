@@ -40,6 +40,7 @@ on the desktop and on the device alike (the tree ships in the app's `toolkit.zip
 |---|---|---|
 | Toolkit | none: `src/` (runtime) and `tools/` (lifter); in the title project `recomp_xdk_defaults()` and the D3D service (`recomp_d3d_configure` / `recomp_d3d_start`) | always |
 | XDK library | `profiles/xdk/<name>/layer.json`: none ships | a title's `"layers"` names it (a developer's A/B, never shipped) |
+| (XDK signatures) | `profiles/xdk/<build>/xmv.json`: masked signatures of the XMV library's API, data for `tools.xmv.find_api`, not a layer; none recorded yet | read by every prepare ([xmv.md](../runtime/xmv.md#binding-at-prepare-xba-199)) |
 | Engine | `profiles/engines/<name>/layer.json`: none ships | `tools.xbe_ident` finds the engine whose `layer` (in `tools/xbe_ident/engines.json`) is `<name>` |
 | Title | `profiles/titles/<title id>/title.json`: optional enhancements | the title ID matches, unless `--no-title-layer` / `XBA_NO_TITLE_LAYER=1` |
 
@@ -192,6 +193,18 @@ structure, nothing to fall back on but the ring offsets). What only real titles 
 ring, put and semaphore offsets (+0x24/+0x28/+0/+0x30) hold on every build (they are what finds the device: a build
 where they moved is not found at all, and needs `RECOMP_D3D_DEVICE_PTR`); the fence-event pair shape; RunPushBuffer's
 offsets beyond 5849; and that the walk suits every D3D8 title (KOTOR is the one tested).
+
+## The XMV movie API (XBA-199)
+
+The XDK's XMV library is linked into each title like D3D. Prepare finds its `XMVDecoder_GetNextFrame` (and
+`CloseDecoder`) from the XBE alone (`tools/xmv/find_api.py`: the `XMV` section, the movie names in the strings, the
+movie loop's call shape, recorded signatures) and, when it is sure, the lifter generates the binding to the runtime's
+decoder (`tools.recomp --xmv-bind`, `recomp_xmv_bind.c` in the generated code). What a title layer's `overrides.c`
+had to name by address before is therefore found for every title; `RECOMP_XMV=native` keeps the title's own decoder
+(at prepare: nothing bound; at run time: the lifted body). Signatures confirmed on one title go to
+`profiles/xdk/<build>/xmv.json` (`python -m tools.xmv.find_api default.xbe --record get_next_frame=0x...`): masked
+XDK library bytes, as `tools/fusion/signatures.py` stores them, never title code. Details:
+[xmv.md](../runtime/xmv.md#binding-at-prepare-xba-199).
 
 ## Adding a title
 

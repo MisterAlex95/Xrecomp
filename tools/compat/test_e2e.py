@@ -687,3 +687,88 @@ def test_static_discovery_needs_no_round(tmp_path):
     assert E2E_DECOYS
     summary = json.loads((work / "analysis" / "disasm" / "summary.json").read_text())
     assert summary["discovery"]["added"]["gap_body"] >= 1, summary["discovery"]
+
+
+def _movie_disc(tmp_path, **kw):
+    """tools/xmv/synth_title.py's movie title, with one of our own XMV fixtures as its D:\\intro.xmv."""
+    from tools.xmv.synth_title import movie_title
+    d = tmp_path / "movie"
+    d.mkdir()
+    p, labels = movie_title(d / "default.xbe", **kw)
+    shutil.copy(os.path.join(ROOT, "tests", "xmv_decode", "fixtures", "basic.xmv"), d / "intro.xmv")
+    return d, p, labels
+
+
+def test_prepare_binds_the_xmv_api_it_finds(tmp_path):
+    """XBA-199: prepare finds the fake XMV library's GetNextFrame and CloseDecoder by structure, and the lift
+    wraps them: their bodies are sub_X_gen, recomp_xmv_bind.c defines sub_X. No title layer."""
+    d, xbe, l = _movie_disc(tmp_path)
+    work = tmp_path / "work"
+    r = _prepare(xbe, work, "--no-build")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    gnf, close = "%08X" % l["get_next_frame"], "%08X" % l["close"]
+    assert "XMV: XMVDecoder_GetNextFrame at 0x%s and XMVDecoder_CloseDecoder at 0x%s" % (gnf, close) in r.stdout
+    gen = work / "project" / "src" / "recomp" / "gen"
+    bind = (gen / "recomp_xmv_bind.c").read_text()
+    assert "void sub_%s(void)" % gnf in bind and "void sub_%s(void)" % close in bind
+    text = "".join(p.read_text(errors="replace") for p in gen.glob("recomp_0*.c"))
+    assert "void sub_%s_gen(void)" % gnf in text and "void sub_%s_gen(void)" % close in text
+    assert "XMV: bound XMVDecoder_CloseDecoder" in (work / "prepare.log").read_text()
+    assert json.loads((work / "analysis" / "xmv_api.json").read_text())["high"]
+    title = work / "project" / "src" / "title"
+    assert not title.is_dir()                                   # no title layer
+
+    # RECOMP_XMV=native at prepare: nothing bound, the lift is redone without it.
+    r = subprocess.run([sys.executable, "-m", "tools.prepare", xbe, "--work", str(work), "--no-build"],
+                       cwd=ROOT, capture_output=True, text=True, timeout=900, env=dict(os.environ, RECOMP_XMV="native"))
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "RECOMP_XMV=native, the title's own movie decoder is kept" in r.stdout
+    assert not (gen / "recomp_xmv_bind.c").exists()
+
+
+def test_prepare_binds_nothing_without_an_xmv_library(tmp_path):
+    d, xbe, _ = _movie_disc(tmp_path, movie=False)
+    work = tmp_path / "work"
+    r = _prepare(xbe, work, "--no-build")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "XMV:" not in r.stdout
+    assert not (work / "project" / "src" / "recomp" / "gen" / "recomp_xmv_bind.c").exists()
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_a_bound_title_plays_its_movie(tmp_path):
+    """XBA-199 in the real runtime: the title's own GetNextFrame never gives a frame (a decoder that cannot
+    run), so lifted as is it polls for ever. Bound by Prepare, the runtime plays the .xmv the title opened
+    into its D3DSurface (12 frames, paced), the movie ends, and the title goes on (its DbgPrint). Then the same
+    executable with RECOMP_XMV=native runs the title's own decoder: no movie, the title stays in its loop."""
+    if not shutil.which("cmake"):
+        pytest.skip("no cmake")
+    from tools.xmv.synth_title import DONE
+    d, xbe, l = _movie_disc(tmp_path)
+    out = tmp_path / "results.jsonl"
+    r = subprocess.run([sys.executable, "-m", "tools.compat", "run", str(d), "--work-root", str(tmp_path / "cw"),
+                        "--seconds", "6", "--sustain", "3", "--out", str(out)],
+                       cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    work = tmp_path / "cw" / "movie"
+    log = (work / "run-0.log").read_text(errors="replace")
+    assert "[XMV] XMVDecoder_GetNextFrame at %08X bound by Prepare" % l["get_next_frame"] in log, log[-3000:]
+    assert "the runtime decodes the title's movies" in log
+    assert "intro.xmv: 96x64" in log, log[-3000:]
+    assert "[XMV] movie ended: 12 frames (12 decoded, 0 X8 intra not supported, 0 damaged)" in log, log[-3000:]
+    assert DONE in log.split("[XMV] movie ended", 1)[1], log[-3000:]
+    assert "[XMV] XMVDecoder_CloseDecoder at %08X bound by Prepare" % l["close"] in log
+
+    from tools.compat.__main__ import project_exe
+    exe = project_exe(str(work))
+    proc = subprocess.Popen([exe], cwd=os.path.dirname(exe), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=dict(os.environ, RECOMP_XMV="native", SDL_VIDEODRIVER="dummy",
+                                     SDL_AUDIODRIVER="dummy"))
+    try:
+        native, _ = proc.communicate(timeout=6)
+    except subprocess.TimeoutExpired:
+        proc.kill()                     # by PID: the title polls for ever, as expected
+        native, _ = proc.communicate()
+    native = native.decode(errors="replace")
+    assert "RECOMP_XMV=native, the title's own decoder runs" in native, native[-3000:]
+    assert "movie ended" not in native and DONE not in native, native[-3000:]

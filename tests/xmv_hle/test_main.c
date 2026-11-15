@@ -153,6 +153,17 @@ int main(int argc, char **argv)
     CHECK(rd32(res) == XMV_NEWFRAME, "an unknown surface format still advances the movie (%u)", rd32(res));
     xmv_hle_close(0x00A40000u);
 
+    /* The binding tools.prepare generates (XBA-199) asks which decoder runs:
+     * the runtime's by default and with skip, the title's own with native. */
+    CHECK(xmv_hle_bound(0, 0x00012050u, 90) == 1, "bound: the runtime's decoder by default");
+    setenv("RECOMP_XMV", "auto", 1);
+    CHECK(xmv_hle_bound(1, 0x00012080u, 90) == 1, "RECOMP_XMV=auto: the runtime's decoder");
+    setenv("RECOMP_XMV", "skip", 1);
+    CHECK(xmv_hle_bound(0, 0x00012050u, 90) == 1, "RECOMP_XMV=skip: the runtime's hook (which ends movies)");
+    setenv("RECOMP_XMV", "native", 1);
+    CHECK(xmv_hle_bound(0, 0x00012050u, 90) == 0, "RECOMP_XMV=native: the title's own decoder");
+    unsetenv("RECOMP_XMV");
+
     xmv_player_close(ref);
     free(expect);
     if (failures) {
