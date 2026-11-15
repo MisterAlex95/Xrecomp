@@ -1031,6 +1031,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     int scale, filter;
     n64_runtime_display(o, &scale, &filter);
     host_window_set_scaling(scale, filter);
+    host_window_shader_env("RECOMP_N64_SHADER"); /* XBA-195: picture shader */
     host_window_set_aspect(4, 3);
     int crop = n64_runtime_crop_edges(o);
     if (window) {

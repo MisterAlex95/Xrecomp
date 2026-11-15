@@ -304,6 +304,357 @@ static int run_window(void)
     return s_fail;
 }
 
+/* ── Picture shaders (XBA-195) ──────────────────────────────────────────
+ * Each preset is drawn through the real present path and read back with host_window_capture (the drawable as drawn).
+ * A 160x120 picture in a 640x480 window at whole-pixel scale: every console pixel is 4x4 output pixels, the
+ * picture fills the window. */
+enum { SW = 160, SH = 120, WW = 640, WH = 480 };
+
+typedef struct {
+    int w, h;
+    unsigned char *rgb;
+} Ppm;
+
+static int ppm_read(const char *path, Ppm *out)
+{
+    FILE *f = fopen(path, "rb");
+    int w = 0, h = 0, max = 0;
+
+    out->rgb = NULL;
+    if (!f)
+        return 0;
+    if (fscanf(f, "P6 %d %d %d", &w, &h, &max) != 3 || w <= 0 || h <= 0 || max != 255 || fgetc(f) == EOF) {
+        fclose(f);
+        return 0;
+    }
+    out->rgb = malloc((size_t)w * h * 3);
+    if (!out->rgb || fread(out->rgb, 3, (size_t)w * h, f) != (size_t)w * h) {
+        free(out->rgb);
+        out->rgb = NULL;
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    unlink(path);
+    out->w = w;
+    out->h = h;
+    return 1;
+}
+
+static int ppm_at(const Ppm *p, int x, int y, int c)
+{
+    return p->rgb[((size_t)y * p->w + x) * 3 + c];
+}
+
+/* The mean of channel c over row y (or column x when y < 0). */
+static double ppm_mean_row(const Ppm *p, int y, int c)
+{
+    double s = 0;
+    for (int x = 0; x < p->w; x++)
+        s += ppm_at(p, x, y, c);
+    return s / p->w;
+}
+
+static double ppm_mean_col(const Ppm *p, int x, int c)
+{
+    double s = 0;
+    for (int y = 0; y < p->h; y++)
+        s += ppm_at(p, x, y, c);
+    return s / p->h;
+}
+
+/* Presents px with preset (strength -1: its default) and captures the window. */
+static int shot(const uint32_t *px, int preset, int strength, Ppm *out)
+{
+    char path[512];
+    const char *tmp = getenv("TMPDIR");
+    HostShader s = { preset, strength, 0, 0 };
+
+    snprintf(path, sizeof path, "%s/xbr_host_shader_%d.ppm", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+    host_window_set_shader(&s);
+    host_window_pump();
+    host_window_capture(path);
+    if (!host_window_present_rgba(px, SW, SH, SW * 4))
+        return 0;
+    return ppm_read(path, out) && out->w == WW && out->h == WH;
+}
+
+/* Milliseconds per present of preset at the window's size, vsync off (llvmpipe here: relative cost only). */
+static double bench(const uint32_t *px, int preset, int n)
+{
+    HostShader s = { preset, -1, preset == HOST_SHADER_CRT ? 30 : 0, preset == HOST_SHADER_LCD ? 50 : 0 };
+
+    host_window_set_shader(&s);
+    host_window_present_rgba(px, SW, SH, SW * 4);   /* builds the program */
+    uint64_t t0 = xbox_HostNowNs();
+    for (int i = 0; i < n; i++)
+        host_window_present_rgba(px, SW, SH, SW * 4);
+    return (double)(xbox_HostNowNs() - t0) / 1e6 / n;
+}
+
+static int run_shaders(void)
+{
+    static uint32_t flat[SW * SH];
+    Ppm none = { 0 }, p = { 0 };
+    char bmp[512];
+    const char *tmp = getenv("TMPDIR");
+
+    /* Parsing and the environment, before any window. */
+    CHECK(host_window_shader_parse("none") == HOST_SHADER_NONE);
+    CHECK(host_window_shader_parse("Sharp") == HOST_SHADER_SHARP);
+    CHECK(host_window_shader_parse("SCANLINES") == HOST_SHADER_SCANLINES);
+    CHECK(host_window_shader_parse("crt") == HOST_SHADER_CRT);
+    CHECK(host_window_shader_parse("lcd") == HOST_SHADER_LCD);
+    CHECK(host_window_shader_parse("xbr") == -1 && host_window_shader_parse("") == -1);
+    CHECK(host_window_shader_parse(NULL) == -1);
+    CHECK(!strcmp(host_window_shader_name(HOST_SHADER_CRT), "crt") && !strcmp(host_window_shader_name(99), "none"));
+    {
+        HostShader s;
+        unsetenv("RECOMP_SHADER");
+        unsetenv("RECOMP_TEST_SHADER");
+        unsetenv("RECOMP_SHADER_STRENGTH");
+        unsetenv("RECOMP_SHADER_CURVATURE");
+        unsetenv("RECOMP_SHADER_GHOSTING");
+        host_window_env_shader("RECOMP_TEST_SHADER", HOST_SHADER_NONE, &s);
+        CHECK(s.preset == HOST_SHADER_NONE && s.strength == -1 && s.curvature == 0 && s.ghosting == 0);
+        setenv("RECOMP_SHADER", "scanlines", 1);
+        setenv("RECOMP_SHADER_STRENGTH", "250", 1);
+        setenv("RECOMP_SHADER_CURVATURE", "30", 1);
+        setenv("RECOMP_SHADER_GHOSTING", "x", 1);
+        host_window_env_shader("RECOMP_TEST_SHADER", HOST_SHADER_NONE, &s);
+        CHECK(s.preset == HOST_SHADER_SCANLINES && s.strength == 100 && s.curvature == 30 && s.ghosting == 0);
+        setenv("RECOMP_TEST_SHADER", "lcd", 1);
+        host_window_env_shader("RECOMP_TEST_SHADER", HOST_SHADER_NONE, &s);
+        CHECK(s.preset == HOST_SHADER_LCD);
+        host_window_env_shader(NULL, HOST_SHADER_NONE, &s);
+        CHECK(s.preset == HOST_SHADER_SCANLINES);
+        setenv("RECOMP_SHADER", "bogus", 1);
+        host_window_env_shader(NULL, HOST_SHADER_SHARP, &s);
+        CHECK(s.preset == HOST_SHADER_SHARP);
+        unsetenv("RECOMP_SHADER");
+        unsetenv("RECOMP_TEST_SHADER");
+        unsetenv("RECOMP_SHADER_STRENGTH");
+        unsetenv("RECOMP_SHADER_CURVATURE");
+        unsetenv("RECOMP_SHADER_GHOSTING");
+    }
+
+    if (host_window_headless()) {
+        printf("host_layer shaders: headless (XBR_BUILD_ONLY or no display), skipped\n");
+        return s_fail ? 1 : 77;
+    }
+    host_window_set_scaling(HOST_SCALE_INTEGER, HOST_FILTER_NEAREST);
+    if (!host_window_open("xbr_host shaders", WW, WH, 0)) {
+        fprintf(stderr, "host_layer shaders: cannot open a window with a GL context\n");
+        return 1;
+    }
+    HostWindowInfo info;
+    host_window_info(&info);
+    if (info.drawable_w != WW || info.drawable_h != WH) {
+        printf("host_layer shaders: drawable %dx%d, not %dx%d; skipped\n", info.drawable_w, info.drawable_h, WW, WH);
+        host_window_close();
+        SDL_Quit();
+        return s_fail ? 1 : 77;
+    }
+    for (int i = 0; i < SW * SH; i++)
+        flat[i] = 0xFF808080u;   /* mid grey */
+
+    /* none: the picture as it is. */
+    CHECK(shot(flat, HOST_SHADER_NONE, -1, &none));
+    if (none.rgb) {
+        CHECK(ppm_at(&none, 0, 0, 0) == 128 && ppm_at(&none, WW - 1, WH - 1, 1) == 128);
+        CHECK(ppm_mean_row(&none, 2, 0) == ppm_mean_row(&none, 3, 0));
+    }
+
+    /* scanlines: each console line is 4 rows; rows 2-3 darker than none, rows 0-1 no darker. */
+    CHECK(shot(flat, HOST_SHADER_SCANLINES, -1, &p));
+    CHECK(host_window_shader_active() == HOST_SHADER_SCANLINES);
+    if (p.rgb && none.rgb) {
+        for (int line = 0; line < SH; line += 37) {
+            double r0 = ppm_mean_row(&p, line * 4, 1), r3 = ppm_mean_row(&p, line * 4 + 3, 1);
+            CHECK(r0 >= ppm_mean_row(&none, line * 4, 1));
+            CHECK(r3 < 0.8 * ppm_mean_row(&none, line * 4 + 3, 1));
+            CHECK(r0 > r3 + 30);
+        }
+        printf("host_layer shaders: scanlines rows 0..3 %.0f %.0f %.0f %.0f (none 128)\n", ppm_mean_row(&p, 0, 1),
+               ppm_mean_row(&p, 1, 1), ppm_mean_row(&p, 2, 1), ppm_mean_row(&p, 3, 1));
+        /* Columns all alike: no horizontal effect. */
+        CHECK(ppm_mean_col(&p, 0, 1) == ppm_mean_col(&p, 1, 1));
+    }
+    free(p.rgb);
+    p.rgb = NULL;
+
+    /* Strength 0: the picture as none draws it. */
+    CHECK(shot(flat, HOST_SHADER_SCANLINES, 0, &p));
+    if (p.rgb && none.rgb)
+        CHECK(!memcmp(p.rgb, none.rgb, (size_t)WW * WH * 3));
+    free(p.rgb);
+    p.rgb = NULL;
+
+    /* CRT: scanlines plus the aperture grille, red / green / blue stripes one pixel wide. */
+    CHECK(shot(flat, HOST_SHADER_CRT, -1, &p));
+    if (p.rgb) {
+        CHECK(ppm_mean_row(&p, 0, 1) > ppm_mean_row(&p, 3, 1) + 20);
+        CHECK(ppm_mean_col(&p, 0, 0) > ppm_mean_col(&p, 0, 1) + 10);   /* column 0: red */
+        CHECK(ppm_mean_col(&p, 1, 1) > ppm_mean_col(&p, 1, 2) + 10);   /* column 1: green */
+        CHECK(ppm_mean_col(&p, 2, 2) > ppm_mean_col(&p, 2, 0) + 10);   /* column 2: blue */
+    }
+    free(p.rgb);
+    p.rgb = NULL;
+    {
+        /* Curvature: the corners go black, the centre stays lit. */
+        HostShader s = { HOST_SHADER_CRT, -1, 100, 0 };
+        char path[512];
+        snprintf(path, sizeof path, "%s/xbr_host_shader_c_%d.ppm", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+        host_window_set_shader(&s);
+        host_window_capture(path);
+        CHECK(host_window_present_rgba(flat, SW, SH, SW * 4));
+        CHECK(ppm_read(path, &p));
+        if (p.rgb) {
+            CHECK(ppm_at(&p, 1, 1, 0) == 0 && ppm_at(&p, WW - 2, WH - 2, 1) == 0);
+            CHECK(ppm_at(&p, WW / 2, WH / 2, 0) > 64);
+        }
+        free(p.rgb);
+        p.rgb = NULL;
+    }
+
+    /* LCD: the last column and row of every 4x4 cell darker, the inside as none. */
+    CHECK(shot(flat, HOST_SHADER_LCD, -1, &p));
+    if (p.rgb && none.rgb) {
+        CHECK(ppm_at(&p, 1, 1, 0) == ppm_at(&none, 1, 1, 0));
+        CHECK(ppm_at(&p, 3, 1, 0) < ppm_at(&none, 3, 1, 0) - 30);     /* the cell's right edge */
+        CHECK(ppm_at(&p, 1, 3, 0) < ppm_at(&none, 1, 3, 0) - 30);     /* its bottom edge */
+        CHECK(ppm_at(&p, 401, 205, 1) == ppm_at(&none, 401, 205, 1));
+        CHECK(ppm_at(&p, 403, 205, 1) < ppm_at(&none, 403, 205, 1) - 30);
+    }
+    free(p.rgb);
+    p.rgb = NULL;
+    {
+        /* Ghosting: after a white picture, a black one shows part of the white one. */
+        static uint32_t white[SW * SH], black[SW * SH];
+        HostShader s = { HOST_SHADER_LCD, 0, 0, 100 };
+        char path[512];
+        for (int i = 0; i < SW * SH; i++) {
+            white[i] = 0xFFFFFFFFu;
+            black[i] = 0xFF000000u;
+        }
+        snprintf(path, sizeof path, "%s/xbr_host_shader_g_%d.ppm", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+        host_window_set_shader(&s);
+        CHECK(host_window_present_rgba(white, SW, SH, SW * 4));
+        host_window_capture(path);
+        CHECK(host_window_present_rgba(black, SW, SH, SW * 4));
+        CHECK(ppm_read(path, &p));
+        if (p.rgb)
+            CHECK(ppm_at(&p, WW / 2, WH / 2, 0) > 100 && ppm_at(&p, WW / 2, WH / 2, 0) < 155);
+        free(p.rgb);
+        p.rgb = NULL;
+        host_window_capture(path);
+        CHECK(host_window_present_rgba(black, SW, SH, SW * 4));   /* black after black: black */
+        CHECK(ppm_read(path, &p));
+        if (p.rgb)
+            CHECK(ppm_at(&p, WW / 2, WH / 2, 0) == 0);
+        free(p.rgb);
+        p.rgb = NULL;
+    }
+
+    /* Sharp bilinear at a non-integer scale (stretch, linear: a 150-wide picture in 640 columns is 4.27x): the
+     * black / white edge blends over fewer columns than plain linear. */
+    {
+        static uint32_t e2[150 * SH];
+        int n_none = 0, n_sharp = 0;
+        char path[512];
+        for (int y = 0; y < SH; y++)
+            for (int x = 0; x < 150; x++)
+                e2[y * 150 + x] = x < 75 ? 0xFF000000u : 0xFFFFFFFFu;
+        snprintf(path, sizeof path, "%s/xbr_host_shader_s_%d.ppm", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+        host_window_set_scaling(HOST_SCALE_STRETCH, HOST_FILTER_LINEAR);
+        for (int pass = 0; pass < 2; pass++) {
+            HostShader s = { pass ? HOST_SHADER_SHARP : HOST_SHADER_NONE, -1, 0, 0 };
+            host_window_set_shader(&s);
+            host_window_capture(path);
+            CHECK(host_window_present_rgba(e2, 150, SH, 150 * 4));
+            CHECK(ppm_read(path, &p));
+            if (p.rgb) {
+                int n = 0;
+                for (int x = 0; x < p.w; x++) {
+                    int v = ppm_at(&p, x, WH / 2, 1);
+                    n += v > 8 && v < 247;
+                }
+                if (pass)
+                    n_sharp = n;
+                else
+                    n_none = n;
+                CHECK(ppm_at(&p, 10, WH / 2, 1) < 8 && ppm_at(&p, WW - 10, WH / 2, 1) > 247);
+            }
+            free(p.rgb);
+            p.rgb = NULL;
+        }
+        printf("host_layer shaders: edge blend columns: linear %d, sharp bilinear %d\n", n_none, n_sharp);
+        CHECK(n_sharp <= 2 && n_sharp < n_none);   /* at most the one output pixel straddling the edge */
+        /* The other scale modes and an upscaled-sized picture draw too. */
+        host_window_set_scaling(HOST_SCALE_ASPECT, HOST_FILTER_LINEAR);
+        CHECK(host_window_present_rgba(e2, 150, SH, 150 * 4));
+    }
+
+    /* The screenshot stays the raw picture, whatever the shader. */
+    {
+        HostShader s = { HOST_SHADER_CRT, 100, 100, 0 };
+        unsigned char hdr[54], pix[3];
+        host_window_set_scaling(HOST_SCALE_INTEGER, HOST_FILTER_NEAREST);
+        host_window_set_shader(&s);
+        CHECK(host_window_present_rgba(flat, SW, SH, SW * 4));
+        snprintf(bmp, sizeof bmp, "%s/xbr_host_shader_%d.bmp", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+        CHECK(host_window_screenshot_bmp(bmp) == 0);
+        FILE *f = fopen(bmp, "rb");
+        CHECK(f && fread(hdr, 1, sizeof hdr, f) == sizeof hdr && fread(pix, 1, 3, f) == 3);
+        if (f)
+            fclose(f);
+        int32_t bw, bh;
+        memcpy(&bw, hdr + 18, 4);
+        memcpy(&bh, hdr + 22, 4);
+        CHECK(bw == SW && bh == SH && pix[0] == 128 && pix[1] == 128 && pix[2] == 128);
+        unlink(bmp);
+    }
+
+    /* A shader that does not build: none, logged once, presents still work. */
+    setenv("RECOMP_SHADER_TEST_FAIL", "lcd", 1);
+    host_window_close();
+    CHECK(host_window_open("xbr_host shaders", WW, WH, 0));
+    CHECK(shot(flat, HOST_SHADER_LCD, -1, &p));
+    CHECK(host_window_shader_active() == HOST_SHADER_NONE);
+    if (p.rgb && none.rgb)
+        CHECK(!memcmp(p.rgb, none.rgb, (size_t)WW * WH * 3));
+    free(p.rgb);
+    p.rgb = NULL;
+    unsetenv("RECOMP_SHADER_TEST_FAIL");
+
+    /* Cost: milliseconds per present, vsync off, in a fresh window of HOST_LAYER_BENCH_SIZE (WxH, default 640x480)
+     * for HOST_LAYER_BENCH presents (default 30); on Mesa's llvmpipe a relative cost only. */
+    {
+        int bw = WW, bh = WH;
+        const char *sz = getenv("HOST_LAYER_BENCH_SIZE");
+        int bench_n = getenv("HOST_LAYER_BENCH") ? atoi(getenv("HOST_LAYER_BENCH")) : 30;
+        if (sz && sscanf(sz, "%dx%d", &bw, &bh) != 2) {
+            bw = WW;
+            bh = WH;
+        }
+        host_window_close();
+        host_window_set_scaling(HOST_SCALE_ASPECT, HOST_FILTER_LINEAR);
+        CHECK(host_window_open("xbr_host shaders", bw, bh, 0));
+        host_window_info(&info);
+        printf("host_layer shaders: cost at %dx%d (GL%s %d.%d), ms per present of a %dx%d picture:",
+               info.drawable_w, info.drawable_h, info.gles ? " ES" : "", info.gl_major, info.gl_minor, SW, SH);
+        for (int i = 0; i < HOST_SHADER_COUNT; i++)
+            printf(" %s %.3f", host_window_shader_name(i), bench(flat, i, bench_n));
+        printf("\n");
+    }
+    host_window_set_shader(NULL);
+    host_window_close();
+    free(none.rgb);
+    SDL_Quit();
+    printf("%s\n", s_fail ? "host_layer shaders: FAIL" : "host_layer shaders: ok");
+    return s_fail;
+}
+
 int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "core";
@@ -313,6 +664,8 @@ int main(int argc, char **argv)
         return run_core();
     if (!strcmp(mode, "window"))
         return run_window();
-    fprintf(stderr, "usage: %s core|window\n", argv[0]);
+    if (!strcmp(mode, "shaders"))
+        return run_shaders();
+    fprintf(stderr, "usage: %s core|window|shaders\n", argv[0]);
     return 2;
 }

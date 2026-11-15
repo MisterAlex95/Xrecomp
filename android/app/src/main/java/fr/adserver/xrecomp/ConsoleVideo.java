@@ -32,6 +32,16 @@ final class ConsoleVideo {
     static final String SCALE_ASPECT = "aspect", SCALE_INTEGER = "integer", SCALE_STRETCH = "stretch";
     static final String FILTER_NEAREST = "nearest", FILTER_LINEAR = "linear";
     static final String UPSCALE_NATIVE = "1", UPSCALE_2X = "2", UPSCALE_4X = "4", UPSCALE_8X = "8";
+    /**
+     * XBA-195: the picture shader (src/video/host_window.c host_window_env_shader; none when unset), its strength,
+     * the CRT's curvature and the LCD grid's ghosting (0..100). Settings' « All consoles » rows and a GBA / PS1 / N64
+     * game's own (GameSettings), exported by ShellActivity like every option; an Xbox game never gets them.
+     */
+    static final String ENV_SHADER = "RECOMP_SHADER";
+    static final String ENV_SHADER_STRENGTH = "RECOMP_SHADER_STRENGTH";
+    static final String ENV_SHADER_CURVATURE = "RECOMP_SHADER_CURVATURE";
+    static final String ENV_SHADER_GHOSTING = "RECOMP_SHADER_GHOSTING";
+    static final String SHADER_SHARP = "sharp", SHADER_SCANLINES = "scanlines", SHADER_CRT = "crt", SHADER_LCD = "lcd";
     /** XBA-186: frame generation for a console game (src/video/host_window.c, docs/technical/framegen.md). */
     static final String ENV_LSFG = "RECOMP_LSFG";
     static final String LSFG_ON = "1", LSFG_OFF = "0";

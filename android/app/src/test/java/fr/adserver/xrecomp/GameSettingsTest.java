@@ -120,6 +120,27 @@ public class GameSettingsTest {
     }
 
     @Test
+    public void pictureShaderPerGame() throws Exception {
+        // XBA-195: a console game's own shader over Settings', its « None » over Settings' line; never an Xbox game's.
+        File files = tmp.newFolder();
+        RecompConfig g = game(files, GBA, "RECOMP_SHADER", "lcd", "RECOMP_SHADER_GHOSTING", "30");
+        GameSettings.Env env = GameSettings.runEnv(Console.GBA, cfg("RECOMP_SHADER", "crt", "RECOMP_SHADER_STRENGTH",
+                                                                    "75"), g, Locale.US, false);
+        assertEquals("lcd", env.value("RECOMP_SHADER"));
+        assertEquals("30", env.value("RECOMP_SHADER_GHOSTING"));
+        assertNull("Settings' strength: recomp.cfg decides", env.value("RECOMP_SHADER_STRENGTH"));
+        RecompConfig none = game(files, PS1, "RECOMP_SHADER", "");
+        env = GameSettings.runEnv(Console.PS1, cfg("RECOMP_SHADER", "crt"), none, Locale.US, false);
+        assertNull(env.value("RECOMP_SHADER"));
+        assertEquals("RECOMP_SHADER", env.value(GameSettings.SKIP_ENV));
+        RecompConfig x = game(files, XBOX, "RECOMP_SHADER", "crt");
+        assertNull(GameSettings.runEnv(Console.XBOX, cfg(), x, Locale.US, false).value("RECOMP_SHADER"));
+        assertTrue(GameSettings.allExportedKeys().containsAll(List.of("RECOMP_SHADER", "RECOMP_SHADER_STRENGTH",
+                                                                      "RECOMP_SHADER_CURVATURE",
+                                                                      "RECOMP_SHADER_GHOSTING")));
+    }
+
+    @Test
     public void language() throws Exception {
         File files = tmp.newFolder();
         RecompConfig none = GameSettings.load(files, XBOX);
@@ -180,6 +201,13 @@ public class GameSettingsTest {
             assertTrue(c + " rewind", t.contains("OPT_REWIND") && t.contains("OPT_REWIND_MB"));
         }
         assertFalse(xbox.contains("OPT_REWIND") || xbox.contains("OPT_REWIND_MB"));
+        // XBA-195: the picture shader's rows, for the console window's games only.
+        for (String t : new String[] { "OPT_CSHADER", "OPT_CSHADER_STRENGTH", "OPT_CSHADER_CURVE", "OPT_CSHADER_GHOST" }) {
+            assertFalse(t, xbox.contains(t));
+            assertTrue(t, gba.contains(t));
+            assertTrue(t, titles(GameSettings.options(Console.PS1, false)).contains(t));
+            assertTrue(t, titles(GameSettings.options(Console.N64, false)).contains(t));
+        }
         assertEquals(List.of("RECOMP_PAD_MAP", "RECOMP_HOTKEYS"), GameSettings.extraKeys(Console.XBOX));
         assertEquals(List.of("RECOMP_N64_PAD_MAP", "RECOMP_N64_PAK", "RECOMP_HOTKEYS"), GameSettings.extraKeys(Console.N64));
     }

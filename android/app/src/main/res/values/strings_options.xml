@@ -30,6 +30,27 @@
     <string name="VAL_MB_64">64 MB</string>
     <string name="VAL_MB_128">128 MB</string>
     <string name="VAL_MB_256">256 MB</string>
+    <!-- XBA-195: picture shaders (src/video/host_window.c). -->
+    <string name="OPT_CSHADER">Picture shader</string>
+    <string name="OPT_CSHADER_DETAIL">A look for the picture of a Game Boy Advance, PlayStation or Nintendo 64 game, drawn at the screen\'s resolution. None: the picture as it is. Sharp bilinear: square pixels without uneven widths when the scale is not whole. Scanlines: the dark lines of a TV. CRT: scanlines and the red, green and blue stripes of a TV tube. LCD grid: the pixel grid of a handheld\'s screen. A game can have its own (its Options). Applies the next time a game starts. (RECOMP_SHADER)</string>
+    <string name="VAL_CSHADER_NONE">None</string>
+    <string name="VAL_CSHADER_SHARP">Sharp bilinear</string>
+    <string name="VAL_CSHADER_SCANLINES">Scanlines</string>
+    <string name="VAL_CSHADER_CRT">CRT</string>
+    <string name="VAL_CSHADER_LCD">LCD grid</string>
+    <string name="OPT_CSHADER_STRENGTH">Shader strength</string>
+    <string name="OPT_CSHADER_STRENGTH_DETAIL">How marked the picture shader\'s lines or grid are. Shader default: scanlines and LCD grid 50 %, CRT 60 %. No effect with None or Sharp bilinear. Applies the next time a game starts. (RECOMP_SHADER_STRENGTH)</string>
+    <string name="VAL_CSHADER_STRENGTH_DEFAULT">Shader default</string>
+    <string name="VAL_PERCENT_25">25 %</string>
+    <string name="VAL_PERCENT_50">50 %</string>
+    <string name="VAL_PERCENT_75">75 %</string>
+    <string name="VAL_PERCENT_100">100 %</string>
+    <string name="OPT_CSHADER_CURVE">CRT curvature</string>
+    <string name="OPT_CSHADER_CURVE_DETAIL">The CRT shader\'s screen bulges like a TV tube, with darker corners. Only with the CRT shader. Applies the next time a game starts. (RECOMP_SHADER_CURVATURE)</string>
+    <string name="OPT_CSHADER_GHOST">LCD ghosting</string>
+    <string name="OPT_CSHADER_GHOST_DETAIL">The LCD grid shader keeps a trace of the previous picture, as a handheld\'s slow screen did (some games count on it for transparency). Only with the LCD grid shader. Applies the next time a game starts. (RECOMP_SHADER_GHOSTING)</string>
+    <string name="VAL_LEVEL_SLIGHT">Slight</string>
+    <string name="VAL_LEVEL_STRONG">Strong</string>
     <string name="OPT_RUMBLE">Controller rumble</string>
     <string name="OPT_RUMBLE_DETAIL">On: the controller vibrates when the game asks for it (the PlayStation DualShock, the Nintendo 64 Rumble Pak, the Xbox pad). Off: never. For every console. Applies the next time a game starts. (RECOMP_RUMBLE)</string>
 

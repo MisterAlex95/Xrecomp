@@ -111,6 +111,52 @@ int host_window_env_scale(const char *console_var, int def);
 int host_window_env_filter(const char *console_var, int def);
 int host_window_env_vsync(void);
 
+/* Picture shaders (XBA-195, docs/runtime/environment-variables.md « Console picture »): one fragment shader of our
+ * own (GLSL ES 3.0 / GLSL 1.50) between the picture and the window, drawn at the output resolution in the same pass
+ * as the scaling, so after an upscaled (XBA-184) or generated (XBA-186) frame and with every scale mode:
+ *   HOST_SHADER_NONE       the picture as it is (the default; the plain present, no cost)
+ *   HOST_SHADER_SHARP      sharp bilinear: whole-pixel prescale then linear, crisp at any non-integer scale
+ *                          (samples the window's texture linearly whatever the filter)
+ *   HOST_SHADER_SCANLINES  the lower half of each console line darkened (strength: how much), faded out below two
+ *                          output pixels per line
+ *   HOST_SHADER_CRT        scanlines + an RGB aperture-grille mask; curvature (barrel + vignette) when set
+ *   HOST_SHADER_LCD        a pixel grid (GBA-like, one output pixel per cell edge); ghosting (a blend with the
+ *                          previous picture) when set, present_rgba only
+ * "Console lines": the picture's height divided by round(height / 240) (an upscaled 960-line PS1 picture has 240
+ * lines, a GBA 160). strength / curvature / ghosting 0..100; strength -1: the preset's default (scanlines 50,
+ * CRT 60, LCD 50; unused by sharp). A preset whose shader does not compile or link falls back to none (logged
+ * once). host_window_screenshot_bmp stays the raw picture; host_window_capture reads the drawable as drawn
+ * (shader included). Set before or after open, from the presenting thread; kept across open / close. */
+enum {
+    HOST_SHADER_NONE = 0,
+    HOST_SHADER_SHARP = 1,
+    HOST_SHADER_SCANLINES = 2,
+    HOST_SHADER_CRT = 3,
+    HOST_SHADER_LCD = 4,
+    HOST_SHADER_COUNT = 5
+};
+typedef struct HostShader {
+    int preset;      /* HOST_SHADER_* */
+    int strength;    /* 0..100, -1: the preset's default */
+    int curvature;   /* CRT: 0 (flat, the default)..100 */
+    int ghosting;    /* LCD: 0 (none, the default)..100 */
+} HostShader;
+void host_window_set_shader(const HostShader *s);   /* NULL: none */
+/* The preset drawn by the next present: the one set, or none after its shader failed to build. */
+int host_window_shader_active(void);
+/*   host_window_shader_parse  "none" / "sharp" / "scanlines" / "crt" / "lcd" -> HOST_SHADER_* (case ignored; -1
+ *                             for NULL, "" or anything else); host_window_shader_name the other way ("none" for
+ *                             an unknown preset)
+ *   host_window_env_shader    preset: $console_var (e.g. "RECOMP_GBA_SHADER") when it parses, else $RECOMP_SHADER,
+ *                             else def; strength $RECOMP_SHADER_STRENGTH, curvature $RECOMP_SHADER_CURVATURE,
+ *                             ghosting $RECOMP_SHADER_GHOSTING (0..100, clamped; unset or not a number: -1 / 0 / 0)
+ *   host_window_shader_env    host_window_env_shader + host_window_set_shader, what a console runtime calls with
+ *                             host_window_set_scaling */
+int host_window_shader_parse(const char *v);
+const char *host_window_shader_name(int preset);
+void host_window_env_shader(const char *console_var, int def, HostShader *out);
+void host_window_shader_env(const char *console_var);
+
 /* The rate the window presents at, from any thread (the Android companion
  * panel and FPS overlay when no Xbox presenter runs): *fps_centi frames per
  * second x 100 over the last second (0 when nothing was presented for two
