@@ -1,7 +1,8 @@
 /* The Nintendo 64 runtime (XBA-146, XBA-174): its pure helpers (pad mapping, stick, colour conversion, save paths,
  * fallback key, frame length, pak names) and headless runs (SDL's dummy drivers) of our homebrew: gfx.z64's picture,
  * the same ROM through "fd:N" (the app shell's documents) and byte-swapped (.v64), saves on disk read back and left
- * alone while unchanged, the app shell's entry, and the errors.
+ * alone while unchanged, the app shell's entry, and the errors; save states (XBA-183) saved and loaded through
+ * recomp_states.h while the game runs on its own thread, the automatic slot resumed, another game's state refused.
  *
  *   n64_runtime_test [HOMEBREW_DIR]     (the runs skip, the helpers still run, when gfx.z64 is absent) */
 #include "host_pad.h"
@@ -9,6 +10,10 @@
 #include "host_time.h"
 #include "n64_core.h"
 #include "n64_runtime.h"
+#include "recomp_lifecycle.h"
+#include "recomp_states.h"
+
+#include <pthread.h>
 
 #include <SDL.h>
 
@@ -292,6 +297,114 @@ static int ppm_pixel(const char *path, int x, int y, uint8_t rgb[3])
     return ok ? 0 : -1;
 }
 
+static void *run_thread(void *arg)
+{
+    static int rc;
+    rc = n64_runtime_run((const n64_runtime_opts *)arg);
+    return &rc;
+}
+
+static void wait_attached(void)
+{
+    for (int i = 0; i < 500 && !recomp_states_available(); i++)
+        usleep(10 * 1000);
+}
+
+static void quit_run(pthread_t th)
+{
+    SDL_Event quit;
+    void *ret = NULL;
+    memset(&quit, 0, sizeof quit);
+    quit.type = SDL_QUIT;
+    CHECK(SDL_PushEvent(&quit) == 1);
+    CHECK(pthread_join(th, &ret) == 0 && ret && *(int *)ret == 0);
+    CHECK(!recomp_states_available());
+}
+
+/* Save states (XBA-183): gfx.z64 plays paced on its own thread; slot 1 saved (with a 4:3 thumbnail of its picture)
+ * and loaded as the in-game menu does, slot 2 while the game is held, the quick slot; fast-forward toggled; the
+ * automatic slot saved when the window closes and resumed at the next start (RECOMP_STATE_RESUME=1); the slot copied
+ * into another game's folder (hello.z64) refused there. */
+static void test_states(const char *dir, const char *hb)
+{
+    char rom[600], rom2[600], slot[800], other[800], cmd[1700];
+    snprintf(rom, sizeof rom, "%s/gfx.z64", hb);
+    snprintf(rom2, sizeof rom2, "%s/hello.z64", hb);
+    recomp_states_detach();
+    CHECK(recomp_states_save(1) == RECOMP_STATE_ENOGAME);
+    n64_runtime_opts o;
+    n64_runtime_opts_init(&o);
+    o.rom = rom;
+    o.save_dir = dir;
+    o.title_key = "STAT-00000001";
+    o.headless = 1;
+    pthread_t th;
+    CHECK(pthread_create(&th, NULL, run_thread, &o) == 0);
+    wait_attached();
+    CHECK(recomp_states_available() && !strcmp(recomp_states_console(), "n64"));
+    usleep(600 * 1000);
+    recomp_state_meta meta;
+    static uint16_t thumb[RECOMP_STATE_THUMB_W * RECOMP_STATE_THUMB_H];
+    CHECK(recomp_states_info(1, &meta, NULL) == RECOMP_STATE_EEMPTY);
+    CHECK(recomp_states_save(1) == RECOMP_STATE_OK);
+    CHECK(recomp_states_info(1, &meta, thumb) == RECOMP_STATE_OK);
+    CHECK(!strcmp(meta.console, "n64") && !strcmp(meta.key, "STAT-00000001") && meta.frames > 0);
+    CHECK(meta.thumb_w == 160 && meta.thumb_h == 120);
+    int lit = 0;
+    for (int i = 0; i < meta.thumb_w * meta.thumb_h; i++)
+        lit += thumb[i] != 0;
+    CHECK(lit > 100); /* gfx.z64's picture, not black */
+    snprintf(slot, sizeof slot, "%s/n64-STAT-00000001/state1.st", dir);
+    CHECK(file_size(slot) > 100000);
+    recomp_ff_set(1);
+    usleep(150 * 1000);
+    recomp_ff_set(0);
+    CHECK(recomp_states_load(1) == RECOMP_STATE_OK);
+    recomp_lifecycle_pause_for(RECOMP_HOLD_MENU);
+    CHECK(recomp_states_save(2) == RECOMP_STATE_OK && recomp_states_load(2) == RECOMP_STATE_OK);
+    recomp_lifecycle_resume_for(RECOMP_HOLD_MENU);
+    CHECK(recomp_states_quick_slot() == 2 && recomp_states_quick_load() == RECOMP_STATE_OK);
+    usleep(50 * 1000);
+    quit_run(th);
+
+    /* The automatic slot: saved when the window closes, loaded before the first frame of the next run. */
+    char autost[800];
+    snprintf(autost, sizeof autost, "%s/n64-STAT-00000001/auto.st", dir);
+    setenv("RECOMP_STATE_RESUME", "1", 1);
+    CHECK(pthread_create(&th, NULL, run_thread, &o) == 0);
+    wait_attached();
+    usleep(300 * 1000);
+    quit_run(th);
+    CHECK(file_size(autost) > 100000);
+    recomp_state_event ev0, ev;
+    recomp_states_last_event(&ev0);
+    CHECK(pthread_create(&th, NULL, run_thread, &o) == 0);
+    wait_attached();
+    usleep(100 * 1000);
+    recomp_states_last_event(&ev);
+    CHECK(ev.seq != ev0.seq && ev.kind == RECOMP_STATE_EV_RESUMED && ev.rc == RECOMP_STATE_OK);
+    quit_run(th);
+    unsetenv("RECOMP_STATE_RESUME");
+
+    if (access(rom2, R_OK) != 0)
+        return;
+    snprintf(other, sizeof other, "%s/n64-OTHR-00000002", dir);
+    mkdir(other, 0755);
+    snprintf(other, sizeof other, "%s/n64-OTHR-00000002/state3.st", dir);
+    snprintf(cmd, sizeof cmd, "cp '%s' '%s'", slot, other);
+    CHECK(system(cmd) == 0);
+    n64_runtime_opts_init(&o);
+    o.rom = rom2;
+    o.save_dir = dir;
+    o.title_key = "OTHR-00000002";
+    o.headless = 1;
+    CHECK(pthread_create(&th, NULL, run_thread, &o) == 0);
+    wait_attached();
+    CHECK(recomp_states_info(3, &meta, NULL) == RECOMP_STATE_OK);
+    CHECK(recomp_states_load(3) == RECOMP_STATE_EGAME);
+    quit_run(th);
+}
+
 static void test_runs(const char *hb)
 {
     char dir[] = "/tmp/n64_runtime_test.XXXXXX", rom[600], v64[400], shot[300], eep[400], pak[400], spec[32],
@@ -387,6 +500,9 @@ static void test_runs(const char *hb)
     n64_runtime_set_save_dir(NULL);
     snprintf(cmd, sizeof cmd, "cmp -s '%s' '%s.ref' && cmp -s '%s' '%s.ref'", eep, eep, pak, pak);
     CHECK(system(cmd) == 0);
+
+    /* 6: save states (XBA-183). */
+    test_states(dir, hb);
     SDL_Quit();
 
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);

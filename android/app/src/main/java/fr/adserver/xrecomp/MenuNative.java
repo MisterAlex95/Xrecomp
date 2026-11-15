@@ -29,7 +29,7 @@ final class MenuNative {
      */
     static native boolean nativePs1ChangeDisc(String path);
 
-    /** XBA-182: true while a GBA or PS1 game that supports save states runs (with a save folder). */
+    /** XBA-182 / XBA-183: true while a GBA, PS1 or N64 game that supports save states runs (with a save folder). */
     static native boolean nativeStatesAvailable();
 
     /**

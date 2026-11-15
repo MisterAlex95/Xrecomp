@@ -16,6 +16,18 @@
 extern "C" {
 #endif
 
+/* Save states (XBA-183): what every back end has, the DPC front end (n64_rdp_select.c writes it, then the back end's own
+ * bytes). pend: the command being collected, 64-bit words high word first (npend of them). */
+typedef struct n64_rdp_common_state {
+    uint32_t start, end, current, status;
+    uint32_t clock, bufbusy, pipebusy, tmemc;
+    uint32_t start_pending, npend;
+    uint64_t pend[24];
+    int32_t fe_cycle, fe_ci_size, fe_ci_width, fe_zon, fe_sc_y0, fe_sc_y1;
+    uint32_t fe_ci_addr, fe_zi_addr, fe_ti_addr;
+    int32_t fe_ti_size, fe_ti_width;
+} n64_rdp_common_state;
+
 typedef struct n64_rdp_ops {
     const char *name; /* "software", "vulkan" */
     void *(*create)(n64_rcp_bus bus); /* NULL: this back end cannot run here */
@@ -35,6 +47,13 @@ typedef struct n64_rdp_ops {
     int (*upscale)(void *d);
     int (*scanout_scale)(void *d);
     int (*scanout)(void *d, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w, int *h);
+    /* Save states (XBA-183), between frames: the back end's own bytes after the common part (state_extra_size; NULL:
+     * none), state_save draws out what is queued and fills both, state_load puts them back: extra NULL for a state of
+     * another back end (the common part only; the back end's drawing state starts from its reset values). 0, or -1
+     * (the extra bytes are not this build's). */
+    size_t (*state_extra_size)(void *d);
+    void (*state_save)(void *d, n64_rdp_common_state *c, uint8_t *extra);
+    int (*state_load)(void *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n);
 } n64_rdp_ops;
 
 /* The factor the next back end is asked to draw at (n64_rdp_select.c: n64_rdp_set_upscale, else the environment). */

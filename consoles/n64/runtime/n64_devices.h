@@ -82,6 +82,21 @@ int n64_rsp_semaphore_held(n64_rsp *s);
 /* Runs up to cycles RSP cycles (stops early on BREAK / halt). Returns the cycles used. */
 uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles);
 
+/* ---- Save states (XBA-183) ------------------------------------------------------------------------------------------ */
+/* Each device's state as opaque bytes of this build (n64_core.h « Save states » puts them together). The RSP: IMEM /
+ * DMEM, the scalar and vector registers, the accumulator and flags, the divider, PC, the SP registers and semaphore
+ * (the placeholder: what it has). The RDP: the DPC registers and the command being collected, then the back end's own
+ * state (the software RDP: modes, combiner, tiles, TMEM, the hidden RDRAM bits; the Vulkan RDP: nothing, it is drawn
+ * out and synchronised first); a state from the other back end loads its registers only. _size first, then _save
+ * into that many bytes (the RDP flushes what is batched first: take states between frames). _load returns 0, or -1
+ * when the bytes are not this build's (wrong size or kind), the device then left as it was. */
+size_t n64_rsp_state_size(n64_rsp *s);
+void n64_rsp_state_save(n64_rsp *s, uint8_t *out);
+int n64_rsp_state_load(n64_rsp *s, const uint8_t *in, size_t n);
+size_t n64_rdp_state_size(n64_rdp *d);
+void n64_rdp_state_save(n64_rdp *d, uint8_t *out);
+int n64_rdp_state_load(n64_rdp *d, const uint8_t *in, size_t n);
+
 /* ---- RDP ------------------------------------------------------------------------------------------------------------ */
 n64_rdp *n64_rdp_create(n64_rcp_bus bus);
 void n64_rdp_destroy(n64_rdp *d);

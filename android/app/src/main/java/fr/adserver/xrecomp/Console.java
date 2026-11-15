@@ -43,6 +43,14 @@ enum Console {
         return null;
     }
 
+    /**
+     * XBA-182 / XBA-183: the console's runtime saves states and fast-forwards (recomp_states.h): GBA, PS1 and N64. An
+     * Xbox game never does (its state is the whole guest memory and GPU).
+     */
+    boolean hasSaveStates() {
+        return this == GBA || this == PS1 || this == N64;
+    }
+
     /** The console's short name on a library card's badge (a product name: not translated). */
     String badge() {
         switch (this) {

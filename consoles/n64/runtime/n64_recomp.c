@@ -267,6 +267,26 @@ void n64_recomp_reset(n64_machine *m)
             s->vstate[i] = V_UNKNOWN;
 }
 
+int n64_recomp_booted(n64_machine *m)
+{
+    return m->rc && m->rc->table ? (int)m->rc->booted : -1;
+}
+
+void n64_recomp_state_loaded(n64_machine *m, int booted)
+{
+    m->rc_lo = m->rc_len = 0;
+    m->rc_hit = 0;
+    struct n64_rc_state *s = m->rc;
+    if (!s)
+        return;
+    flush_cache(s);
+    /* A state from an interpreter-only run does not say: IPL3 takes a fraction of a second, a state is saved later. */
+    s->booted = booted >= 0 ? booted != 0 : m->frames >= 30;
+    for (uint32_t i = 0; i < s->n; i++)
+        if (s->vstate[i] == V_OK)
+            s->vstate[i] = V_UNKNOWN;
+}
+
 void n64_recomp_free(n64_machine *m)
 {
     struct n64_rc_state *s = m->rc;

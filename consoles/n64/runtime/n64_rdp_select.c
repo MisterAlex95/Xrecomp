@@ -22,6 +22,9 @@ void n64_rdp_sw_write_reg(n64_rdp_sw *d, uint32_t reg, uint32_t v);
 void n64_rdp_sw_run(n64_rdp_sw *d);
 int n64_rdp_sw_set_threads(n64_rdp_sw *d, int n);
 void n64_rdp_sw_flush(n64_rdp_sw *d);
+size_t n64_rdp_sw_state_extra_size(n64_rdp_sw *d);
+void n64_rdp_sw_state_save(n64_rdp_sw *d, n64_rdp_common_state *c, uint8_t *extra);
+int n64_rdp_sw_state_load(n64_rdp_sw *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n);
 
 static void *sw_create(n64_rcp_bus bus) { return n64_rdp_sw_create(bus); }
 static void sw_destroy(void *d) { n64_rdp_sw_destroy(d); }
@@ -32,10 +35,16 @@ static void sw_write_reg(void *d, uint32_t reg, uint32_t v) { n64_rdp_sw_write_r
 static void sw_run(void *d) { n64_rdp_sw_run(d); }
 static int sw_set_threads(void *d, int n) { return n64_rdp_sw_set_threads(d, n); }
 static void sw_flush(void *d) { n64_rdp_sw_flush(d); }
+static size_t sw_state_extra_size(void *d) { return n64_rdp_sw_state_extra_size(d); }
+static void sw_state_save(void *d, n64_rdp_common_state *c, uint8_t *extra) { n64_rdp_sw_state_save(d, c, extra); }
+static int sw_state_load(void *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
+{
+    return n64_rdp_sw_state_load(d, c, extra, n);
+}
 
 const n64_rdp_ops n64_rdp_sw_ops = { "software", sw_create, sw_destroy, sw_reset, sw_attach_dmem,
                                      sw_read_reg, sw_write_reg, sw_run, sw_set_threads, sw_flush, NULL,
-                                     NULL, NULL, NULL };
+                                     NULL, NULL, NULL, sw_state_extra_size, sw_state_save, sw_state_load };
 
 struct n64_rdp {
     const n64_rdp_ops *ops;
@@ -228,4 +237,64 @@ const uint8_t *n64_rdp_sw_hidden_bits(n64_rdp_sw *d);
 const uint8_t *n64_rdp_hidden_bits(n64_rdp *d)
 {
     return d->ops == &n64_rdp_sw_ops ? n64_rdp_sw_hidden_bits(d->impl) : NULL;
+}
+
+/* ---- Save states (XBA-183) ------------------------------------------------------------------------------------------ */
+/* The bytes: a small header (magic, the back end's name, the common part's and the extra part's sizes), the common
+ * part (n64_rdp_common_state), the back end's own. A state of the other back end loads its common part only (the
+ * player switched renderers between saving and loading: the game sets its drawing state again in its next display
+ * list, as after replace_failed). */
+#define RDP_STATE_MAGIC 0x52445053u /* "RDPS" */
+#define RDP_STATE_HEAD 24u
+
+static size_t extra_size(n64_rdp *d) { return d->ops->state_extra_size ? d->ops->state_extra_size(d->impl) : 0; }
+
+size_t n64_rdp_state_size(n64_rdp *d)
+{
+    return RDP_STATE_HEAD + sizeof(n64_rdp_common_state) + extra_size(d);
+}
+
+static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+static uint32_t get32(const uint8_t *p)
+{
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+
+void n64_rdp_state_save(n64_rdp *d, uint8_t *out)
+{
+    size_t xn = extra_size(d);
+    memset(out, 0, RDP_STATE_HEAD);
+    put32(out, RDP_STATE_MAGIC);
+    snprintf((char *)out + 4, 12, "%s", d->ops->name);
+    put32(out + 16, (uint32_t)sizeof(n64_rdp_common_state));
+    put32(out + 20, (uint32_t)xn);
+    n64_rdp_common_state c;
+    memset(&c, 0, sizeof c);
+    if (d->ops->state_save)
+        d->ops->state_save(d->impl, &c, out + RDP_STATE_HEAD + sizeof c);
+    memcpy(out + RDP_STATE_HEAD, &c, sizeof c);
+}
+
+int n64_rdp_state_load(n64_rdp *d, const uint8_t *in, size_t n)
+{
+    if (n < RDP_STATE_HEAD + sizeof(n64_rdp_common_state) || get32(in) != RDP_STATE_MAGIC ||
+        get32(in + 16) != sizeof(n64_rdp_common_state) || !d->ops->state_load)
+        return -1;
+    size_t xn = get32(in + 20);
+    if (xn != n - RDP_STATE_HEAD - sizeof(n64_rdp_common_state))
+        return -1;
+    char name[12];
+    memcpy(name, in + 4, sizeof name);
+    name[sizeof name - 1] = 0;
+    const int same = strcmp(name, d->ops->name) == 0;
+    if (same && xn != extra_size(d))
+        return -1;
+    n64_rdp_common_state c;
+    memcpy(&c, in + RDP_STATE_HEAD, sizeof c);
+    if (!same)
+        fprintf(stderr, "n64: state saved with the %s RDP, loaded on the %s RDP: its drawing state starts afresh\n",
+                name, d->ops->name);
+    return d->ops->state_load(d->impl, &c, same ? in + RDP_STATE_HEAD + sizeof c : NULL, xn);
 }

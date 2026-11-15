@@ -1,7 +1,7 @@
 /* The in-game menu's JNI (fr.adserver.xrecomp.MenuNative, docs/android/app-shell.md « In-game menu »): hold the
  * game while the drawer is open (the lifecycle's MENU reason: the flip parks and the audio device pauses, as in the
- * background), the output volume, quit, a PlayStation game's disc change (XBA-166), and a GBA / PS1 game's save
- * states and fast-forward (XBA-182, recomp_states.h). Called on the UI thread. */
+ * background), the output volume, quit, a PlayStation game's disc change (XBA-166), and a GBA / PS1 / N64 game's
+ * save states and fast-forward (XBA-182, XBA-183, recomp_states.h). Called on the UI thread. */
 #include <jni.h>
 #include <stdint.h>
 #include <stdio.h>

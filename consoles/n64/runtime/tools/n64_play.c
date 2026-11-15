@@ -34,6 +34,10 @@
  *                   discovery loop: the Prepare's <work>/discovered.txt, or n64_tools.recomp --discovered FILE)
  * Keyboard: arrows = stick, X = A, C = B, Z = Z, Enter = Start, Q / E = L / R, I / K / J / L = C buttons,
  * T / G / F / H = D-pad; any game controller (Xbox layout).
+ * Save states (XBA-183): F1-F4 save slots 1-4, Shift+F1-F4 load them (<save dir>/n64-<KEY>/state<N>.st); Tab held
+ * fast-forwards (RECOMP_FF_SPEED: 2..16 times, default 4, or "max"); on a pad, Back + right trigger held does the same,
+ * Back + right / left shoulder quick saves / loads; RECOMP_STATE_RESUME=1 resumes from the automatic slot, saved when
+ * the window closes.
  * Exit 0, 1 when the game cannot run, 2 on a usage error. */
 #include "host_window.h"
 #include "n64_runtime.h"

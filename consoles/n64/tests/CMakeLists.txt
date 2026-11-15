@@ -22,6 +22,8 @@ endif()
 #                     rsp needs the real RSP (n64_rsp.c), gfx the real RSP and RDP (n64_rsp.c, n64_rdp.c)
 #   n64_rc_*          the same ROMs recompiled (n64_tools.recomp + cc, discovery loop) in lockstep with the
 #                     interpreter; n64_rc_systemtest the suite under --pack; n64_rc_fuzz random MIPS III code
+#   n64_state_*       save states (XBA-183, state_rom.sh): round trips on the homebrew ROMs (interpreter, packs as
+#                     n64_rc_state_*, the Vulkan RDP), another ROM's state refused
 #   n64_systemtest    lemmy-64/n64-systemtest (MIT) built from source: every CPU / COP0 / TLB / COP1 / memory test
 #                     must pass but the known gaps listed in systemtest_known.txt (RSP / RDP tests only count with
 #                     the real modules)
@@ -161,6 +163,26 @@ if(TARGET n64_run)
                  ${N64_HOMEBREW_DIR}/gfx.z64 ${CMAKE_CURRENT_BINARY_DIR}/upscale)
         set_tests_properties(n64_hb_gfx_upscale PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)
     endif()
+    # Save states (XBA-183, state_rom.sh): the round trip (a state saved after frame 150, the next 150 frames' picture
+    # and audio hashed, then the same from the state loaded in a new machine) on every homebrew ROM, gfx's also
+    # loaded with 2 and 4 RDP threads; with each ROM's pack below (n64_rc_state_*: states cross between lifted and
+    # interpreted runs); gfx on the Vulkan RDP (its round trip, states crossing back ends, upscaled 2x); refusals:
+    # another ROM's state, a truncated one.
+    set(N64_STATE sh ${CMAKE_CURRENT_SOURCE_DIR}/state_rom.sh $<TARGET_FILE:n64_run>)
+    set(N64_STATE_WORK ${CMAKE_CURRENT_BINARY_DIR}/state)
+    foreach(prog ${hb})
+        add_test(NAME n64_state_hb_${prog} COMMAND ${N64_STATE} ${N64_HOMEBREW_DIR}/${prog}.z64
+                 ${N64_STATE_WORK}/hb_${prog} interp)
+        set_tests_properties(n64_state_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    endforeach()
+    add_test(NAME n64_state_wrong_game COMMAND ${N64_STATE} ${N64_HOMEBREW_DIR}/timer_irq.z64 ${N64_STATE_WORK}/other
+             other:${N64_HOMEBREW_DIR}/hello.z64)
+    set_tests_properties(n64_state_wrong_game PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    if(N64_HAVE_RCP AND TARGET n64_rdp_vk)
+        add_test(NAME n64_state_vulkan_gfx COMMAND ${N64_STATE} ${N64_HOMEBREW_DIR}/gfx.z64 ${N64_STATE_WORK}/vulkan
+                 vulkan)
+        set_tests_properties(n64_state_vulkan_gfx PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+    endif()
     add_test(NAME n64_systemtest COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_systemtest.sh $<TARGET_FILE:n64_run>
              ${N64_SYSTEMTEST} ${CMAKE_CURRENT_SOURCE_DIR}/systemtest_known.txt ${N64_HAVE_RCP})
     set_tests_properties(n64_systemtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
@@ -177,6 +199,12 @@ if(TARGET n64_run)
             add_test(NAME n64_rc_hb_${prog} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_rom.sh $<TARGET_FILE:n64_run>
                      ${N64_HOMEBREW_DIR}/${prog}.z64 ${N64_RC_WORK}/hb_${prog} 900 --result)
             set_tests_properties(n64_rc_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800
+                                 ENVIRONMENT "PYTHON=${Python3_EXECUTABLE}")
+        endforeach()
+        foreach(prog ${hb})
+            add_test(NAME n64_rc_state_hb_${prog} COMMAND ${N64_STATE} ${N64_HOMEBREW_DIR}/${prog}.z64
+                     ${N64_STATE_WORK}/rc_${prog} pack)
+            set_tests_properties(n64_rc_state_hb_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 2400
                                  ENVIRONMENT "PYTHON=${Python3_EXECUTABLE}")
         endforeach()
         add_test(NAME n64_rc_systemtest COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_systemtest.sh
