@@ -1240,6 +1240,35 @@ static N64_HOT_INLINE void step(n64_machine *m)
 }
 
 void n64_cpu_step(n64_machine *m) { step(m); }
+
+void n64_cpu_run_until(n64_machine *m, uint64_t stop_pc)
+{
+    while (m->now < m->stop_at && !m->cpu.irq && m->cpu.pc != stop_pc)
+        step(m);
+}
+
+uint32_t n64_cpu_step_handed(n64_machine *m, uint32_t *left, bool *chained)
+{
+    n64_cpu *c = &m->cpu;
+    uint32_t n = 0;
+    for (;;) {
+        uint64_t pc = c->pc;
+        step(m);
+        n++;
+        if (*left <= 1 || c->pc != pc + 4) {
+            *chained = false;
+            return n;
+        }
+        (*left)--;
+        *chained = true;
+        /* The dispatcher's checks before it hands the next instruction over (n64_recomp_run), the simple case. */
+        uint64_t nx = c->pc;
+        uint32_t va = (uint32_t)nx;
+        if (m->now >= m->stop_at || c->irq || c->ksu != 0 || nx != (uint64_t)(int64_t)(int32_t)va ||
+            va - 0x80000000u >= 0x40000000u || (va & 0x1FFFFFFFu) >= m->rdram_size)
+            return n;
+    }
+}
 void n64_cpu_take_interrupt(n64_machine *m) { take_interrupt(m); }
 
 void n64_cpu_run(n64_machine *m)
