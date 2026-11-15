@@ -447,6 +447,30 @@ uint16_t gba_io_read16(gba_machine *m, uint32_t addr)
         return rd16(&m->io[a]) & 0x1F1F;
     case 0x136: case 0x142: case 0x15A: case 0x206: case 0x20A: case 0x302:
         return 0;
+    /* Serial port with no link cable (GBATEK « GBA Communication Ports », the mGBA suite's SIO register tests):
+     * what reads back depends on the mode (SIOCNT bits 12-13, RCNT bits 14-15). */
+    case 0x120: case 0x122: /* SIODATA32 in 32-bit normal mode; SIOMULTI0-1 (nothing received) otherwise */
+        return (rd16(&m->io[0x128]) & 0x3000) == 0x1000 && !(m->io[0x135] & 0x80) ? rd16(&m->io[a]) : 0;
+    case 0x124: case 0x126:
+        return 0;
+    case 0x128: { /* SIOCNT: bit 15 and the error / ID bits read as 0 (UART: bit 5 is CTS) */
+        uint16_t v = rd16(&m->io[a]);
+        return (uint16_t)(v & ((v & 0x3000) == 0x3000 ? ~0x8050u : ~0x8070u));
+    }
+    case 0x12A: /* SIODATA8 / SIOMLT_SEND (UART: the empty receive FIFO) */
+        return (rd16(&m->io[0x128]) & 0x3000) == 0x3000 ? 0 : rd16(&m->io[a]);
+    case 0x134: { /* RCNT: bits 9-13 unused; SC / SD (normal mode) and SC / SD (JOY mode) read low */
+        uint16_t v = rd16(&m->io[a]) & 0xC1FF;
+        if (!(v & 0x8000) && !(rd16(&m->io[0x128]) & 0x2000))
+            v &= (uint16_t)~0x000A;
+        else if ((v & 0xC000) == 0xC000)
+            v &= (uint16_t)~0x0003;
+        return v;
+    }
+    case 0x140: /* JOYCNT: the IRQ enable bit (the flags are write-1-to-clear) */
+        return rd16(&m->io[a]) & 0x0040;
+    case 0x150: case 0x152: case 0x154: case 0x156: /* JOY_RECV / JOY_TRANS */
+        return 0;
     default:
         break;
     }
