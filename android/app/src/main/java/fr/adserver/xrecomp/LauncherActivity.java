@@ -647,6 +647,11 @@ public class LauncherActivity extends Activity {
         return noteText;
     }
 
+    /** The footer's resting line (the library's context, Game settings' count). */
+    String contextForTest() {
+        return contextText;
+    }
+
     /** The library's cards as built (the « Library folder » tile last). */
     List<GameCard> libraryCardsForTest() {
         return libCards;
@@ -875,6 +880,11 @@ public class LauncherActivity extends Activity {
             java.util.Arrays.fill(tabFocus, -1);
             focusMemory.remove(Screen.SETTINGS);
         }
+        if ((s == Screen.GAME_SETTINGS || s == Screen.ROM_OPTIONS) && screen != s) {   // opens on its first tab
+            gameTab = 0;
+            java.util.Arrays.fill(gameTabFocus, -1);
+            focusMemory.remove(s);
+        }
         if (screen != null && screen != Screen.IMPORT)
             history.push(screen);
         show(s);
@@ -951,6 +961,8 @@ public class LauncherActivity extends Activity {
         licencesScroll = null;
         xAction = yAction = startAction = l1Action = r1Action = null;
         topRight.setText("");
+        screenTitle.setMaxWidth(Integer.MAX_VALUE);
+        gameCounts = null;
         topTabs.removeAllViews();
         setTopBar(s != Screen.HOME && s != Screen.PREPARE && s != Screen.DIRECT && s != Screen.ROM_HOME);
         contextText = "";
@@ -1762,7 +1774,8 @@ public class LauncherActivity extends Activity {
     private void homePills(LinearLayout row) {
         pill(row, Icon.SLIDERS, getString(R.string.SETTINGS), false, () -> go(Screen.SETTINGS));
         if (state() != State.NONE && titleId() != null)   // XBA-188: this title's own values
-            pill(row, null, getString(R.string.GAME_SETTINGS), false, () -> go(Screen.GAME_SETTINGS));
+            pill(row, null, getString(R.string.GAME_SETTINGS), false, () -> go(Screen.GAME_SETTINGS))
+                .setMark(gameSettingsMark(titleId(), Console.XBOX));
         pill(row, Icon.PAD, getString(R.string.CONTROLS), false, () -> go(Screen.CONTROLS));
         pill(row, Icon.DISC, getString(R.string.HOME_MANAGE), false, () -> go(Screen.GAME_DATA));
     }
@@ -4636,7 +4649,8 @@ public class LauncherActivity extends Activity {
         // XBA-158 / XBA-168 / XBA-174: the console's buttons remapped, for all its games or this one (ROM_CONTROLS).
         pill(buttons, Icon.PAD, getString(R.string.CONTROLS), false, () -> go(Screen.ROM_CONTROLS));
         // XBA-181: this game's picture (scale, filter) and its stored files (saves, Prepare files): ROM_OPTIONS.
-        pill(buttons, null, getString(R.string.ROM_OPTIONS), false, () -> go(Screen.ROM_OPTIONS));
+        pill(buttons, null, getString(R.string.ROM_OPTIONS), false, () -> go(Screen.ROM_OPTIONS))
+            .setMark(gameSettingsMark(e.tid, e.console()));
         homePrimary = play;
         defaultFocus = play;
         startAction = () -> launchRom(e);
@@ -6629,63 +6643,185 @@ public class LauncherActivity extends Activity {
         buildGameSettings(e.tid, Console.ofKey(e.tid), e.title());
     }
 
+    /** Game settings' last tab: the game's controls, cheats, theme, driver, reset, app and stored things. */
+    static final int TAB_GAME = 4;
+    /** The tabs Game settings shows (TAB_GENERAL… TAB_GAME, those with rows for the game's console). */
+    private int[] gameTabs = { TAB_GAME };
+    /** The tab shown, an index in gameTabs; each tab's focus when it was left (-1: its first row). */
+    private int gameTab;
+    private final int[] gameTabFocus = { -1, -1, -1, -1, -1 };
+    private String[] gameTabNames = {};
+    /** Recounts Game settings' tabs and footer after a change (null on other screens). */
+    private Runnable gameCounts;
+
+    int gameTabForTest() {
+        return gameTabs[gameTab];
+    }
+
+    /** Game settings' tab labels, as shown (« Graphics · 1 »). */
+    String[] gameTabNamesForTest() {
+        return gameTabNames.clone();
+    }
+
+    /** Shows Game settings' tab tabId (TAB_GENERAL… TAB_GAME); false when the game's console has no such tab. */
+    boolean showGameTabForTest(int tabId) {
+        for (int i = 0; i < gameTabs.length; i++) {
+            if (gameTabs[i] == tabId) {
+                gameTab = i;
+                switchingTab = true;
+                show(screen, 0);
+                switchingTab = false;
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
-     * Game settings (XBA-188, GameSettings): every Settings option that applies to the game's console, each « As in
-     * Settings (<Settings' value>) » or one of its values for this game alone (left / right, A), a « This game »
-     * badge on the rows whose value differs from Settings'; the game's controls (a link to its Controls), for an Xbox
-     * title its theme and enhancements, for an N64 game its Vulkan driver; « Reset to Settings » (also Y); for a
-     * console game its stored things (saves, pack, Prepare files, each deleted on its own, A twice). Saved at once,
-     * read by ShellActivity at the game's next start.
+     * Game settings (XBA-188, GameSettings), laid out as Settings is (XBA-216, after GameNative's per-game page):
+     * the game's name as the title and Settings' tabs (L1 / R1), each tab's label with how many of its values are the
+     * game's own (« Graphics · 2 »), then a last « This game » tab. Each option is « As in Settings (<Settings'
+     * value>) » or one of its values for this game alone (left / right, A); a value of its own is drawn in the accent
+     * with a « This game » badge. « This game »: the game's controls (a link to its Controls), for a console game its
+     * cheats, for an Xbox title its theme and enhancements; « Reset to Settings » (also Y, on any tab); for a console
+     * game its app and stored things (saves, pack, Prepare files, each deleted on its own, A twice). An N64 game's
+     * Vulkan driver ends Graphics. The footer says how much is the game's own. Saved at once, read by ShellActivity at
+     * the game's next start.
      */
     private void buildGameSettings(String key, Console con, String gameName) {
-        screenTitle.setText(R.string.GAME_SETTINGS);
-        topRight.setText(gameName);
+        screenTitle.setText(gameName);
+        screenTitle.setMaxWidth(Widgets.Stage.designWidth(this) / 4);
         cfg = RecompConfig.load(GameStore.externalFilesDir(this));
+        List<RecompConfig.Option> all = GameSettings.options(con, lsfgBuilt());
+        // The option tabs that have rows for this console, then « This game ».
+        int[] ids = new int[TABS + 1];
+        int n = 0;
+        for (int t = 0; t < TABS; t++) {
+            for (RecompConfig.Option o : all) {
+                if (tabOf(o.section) == t) {
+                    ids[n++] = t;
+                    break;
+                }
+            }
+        }
+        ids[n++] = TAB_GAME;
+        gameTabs = java.util.Arrays.copyOf(ids, n);
+        if (gameTab >= n)
+            gameTab = 0;
+        int tabId = gameTabs[gameTab];
+        gameCounts = () -> gameTabsBar(key, con, all);
+        gameCounts.run();
+
         LinearLayout list = listTemplate();
         MenuRow first = null;
-        RecompConfig.Section section = null;
-        for (RecompConfig.Option o : GameSettings.options(con, lsfgBuilt())) {
-            if (o.section != section) {
-                section = o.section;
-                listLabel(list, getString(TAB_LABELS[tabOf(section)]));
+        if (tabId != TAB_GAME) {
+            RecompConfig.Section section = tabSection(tabId);
+            List<RecompConfig.Option> tab = new ArrayList<>();
+            for (RecompConfig.Option o : all) {
+                if (tabOf(o.section) == tabId)
+                    tab.add(o);
             }
-            MenuRow r = gameOptionRow(list, key, o);
-            if (first == null)
-                first = r;
-        }
-        listLabel(list, getString(R.string.GS_GROUP_GAME));
-        gameControlsRow(list, key, con);
-        if (con != Console.XBOX)
-            cheatsRow(list, key, con);
-        if (con == Console.N64 && !vkdInherits())   // only the N64 Vulkan renderer uses one, for now
-            romVkDriverRow(list, key);
-        if (con == Console.XBOX) {
-            gameThemeRow(list, key, gameName);
-            if (Toolchain.available(this) && Pack.titleLayer(getFilesDir(), key) != null)
-                enhancementsRow(list, key, gameName);
-        }
-        String resetText = getString(R.string.GS_RESET_DETAIL, gameName);
-        MenuRow reset = listRow(list, getString(R.string.GS_RESET), resetText, () -> resetGameSettings(key, con));
-        onFocus(reset, () -> describe(resetText));
-        int own = GameSettings.overridden(cfg, GameSettings.load(this, key), con, lsfgBuilt()).size();
-        reset.setValue(own == 0 ? getString(R.string.GS_NONE_OWN) : getString(R.string.GS_OWN_COUNT, own));
-        if (con != Console.XBOX && romEntry != null && key.equals(romEntry.tid))
-            consoleAppRow(list, romEntry);   // XBA-215: an app of its own, the game in it
-        if (con != Console.XBOX) {
-            // Its stored things (XBA-181: the console's save folder, save/<console>-<KEY>/, Storage.saves).
-            List<Storage.Item> items = Storage.items(storageDirs(), key, games.get(key));
-            if (!items.isEmpty()) {
-                listLabel(list, getString(R.string.ROM_OPT_DATA));
-                for (Storage.Item it : items)
-                    storageRow(list, it);
-                storageMeasureLater(items);
+            // XBA-181: an Xbox title's tab splits as Settings' does (« All consoles », « Xbox only »).
+            boolean grouped = con == Console.XBOX && RecompConfig.grouped(tab, section);
+            for (int oi = 0; oi < tab.size(); oi++) {
+                RecompConfig.Option o = tab.get(oi);
+                if (grouped && (oi == 0 || tab.get(oi - 1).shared != o.shared))
+                    listLabel(list, getString(o.shared ? R.string.SET_GROUP_ALL : R.string.SET_GROUP_XBOX));
+                MenuRow r = gameOptionRow(list, key, o);
+                if (first == null)
+                    first = r;
+            }
+            if (tabId == TAB_GRAPHICS && con == Console.N64 && !vkdInherits())   // only the N64 Vulkan renderer
+                romVkDriverRow(list, key);
+        } else {
+            gameControlsRow(list, key, con);
+            if (con != Console.XBOX)
+                cheatsRow(list, key, con);
+            if (con == Console.XBOX) {
+                gameThemeRow(list, key, gameName);
+                if (Toolchain.available(this) && Pack.titleLayer(getFilesDir(), key) != null)
+                    enhancementsRow(list, key, gameName);
+            }
+            String resetText = getString(R.string.GS_RESET_DETAIL, gameName);
+            MenuRow reset = listRow(list, getString(R.string.GS_RESET), resetText, () -> resetGameSettings(key, con));
+            onFocus(reset, () -> describe(resetText));
+            int own = GameSettings.overridden(cfg, GameSettings.load(this, key), con, lsfgBuilt()).size();
+            reset.setValue(own == 0 ? getString(R.string.GS_NONE_OWN) : getString(R.string.GS_OWN_COUNT, own));
+            if (con != Console.XBOX && romEntry != null && key.equals(romEntry.tid))
+                consoleAppRow(list, romEntry);   // XBA-215: an app of its own, the game in it
+            if (con != Console.XBOX) {
+                // Its stored things (XBA-181: the console's save folder, save/<console>-<KEY>/, Storage.saves).
+                List<Storage.Item> items = Storage.items(storageDirs(), key, games.get(key));
+                if (!items.isEmpty()) {
+                    listLabel(list, getString(R.string.ROM_OPT_DATA));
+                    for (Storage.Item it : items)
+                        storageRow(list, it);
+                    storageMeasureLater(items);
+                }
             }
         }
         defaultFocus = first;
+        l1Action = () -> switchGameTab(-1);
+        r1Action = () -> switchGameTab(1);
         yAction = () -> resetGameSettings(key, con);
         addHint("A", R.string.HINT_CHANGE, this::clickFocused);
         addHint("Y", R.string.GS_HINT_RESET, () -> resetGameSettings(key, con));
         addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /** Game settings' tabs, each with how many of its values are the game's own, and the footer's total. */
+    private void gameTabsBar(String key, Console con, List<RecompConfig.Option> all) {
+        RecompConfig game = GameSettings.load(this, key);
+        int n = gameTabs.length;
+        String[] names = new String[n];
+        for (int i = 0; i < n; i++) {
+            int t = gameTabs[i], own;
+            if (t == TAB_GAME) {
+                own = GameSettings.ownExtras(game, con);
+            } else {
+                List<RecompConfig.Option> in = new ArrayList<>();
+                for (RecompConfig.Option o : all) {
+                    if (tabOf(o.section) == t)
+                        in.add(o);
+                }
+                own = GameSettings.ownCount(cfg, game, in);
+            }
+            String label = getString(t == TAB_GAME ? R.string.GS_GROUP_GAME : TAB_LABELS[t]);
+            names[i] = own == 0 ? label : getString(R.string.GS_TAB_COUNT, label, own);
+        }
+        gameTabNames = names;
+        topTabs.removeAllViews();
+        topTabs.addView(new Widgets.Tabs(this, names, gameTab, i -> switchGameTab(i - gameTab)), lp(WRAP, MATCH));
+        int total = GameSettings.ownTotal(cfg, game, con, lsfgBuilt());
+        setContext(total == 0 ? getString(R.string.GS_FOOTER_NONE) : getString(R.string.GS_FOOTER_OWN, total),
+                   total == 0 ? 0 : Theme.ACCENT);
+    }
+
+    /** L1 / R1 (and a tap on a tab) in Game settings: the previous or next tab, wrapping; each keeps its focus. */
+    private void switchGameTab(int dir) {
+        if ((screen != Screen.GAME_SETTINGS && screen != Screen.ROM_OPTIONS) || dir == 0)
+            return;
+        int n = gameTabs.length;
+        gameTabFocus[gameTabs[gameTab]] = focusables.indexOf(focused());
+        gameTab = ((gameTab + dir) % n + n) % n;
+        int f = gameTabFocus[gameTabs[gameTab]];
+        if (f >= 0)
+            focusMemory.put(screen, f);
+        else
+            focusMemory.remove(screen);
+        feedback.play(UiFeedback.Cue.MOVE, host);
+        switchingTab = true;
+        show(screen, dir > 0 ? 1 : -1);
+        switchingTab = false;
+    }
+
+    /** What Home's « Game settings » pill counts: the game's own values (none: no count). */
+    private String gameSettingsMark(String key, Console con) {
+        if (key == null)
+            return null;
+        int n = GameSettings.ownTotal(RecompConfig.load(GameStore.externalFilesDir(this)), GameSettings.load(this, key),
+                                      con, lsfgBuilt());
+        return n == 0 ? null : String.valueOf(n);
     }
 
     private static int tabOf(RecompConfig.Section s) {
@@ -6729,6 +6865,7 @@ public class LauncherActivity extends Activity {
             r.setValue(pos < 0 ? getString(R.string.VAL_CUSTOM) : labels[pos]);
             boolean differs = GameSettings.differs(cfg, game, o);
             r.setBadge(differs ? getString(R.string.GS_BADGE) : null, Theme.ACCENT);
+            r.setValueColor(differs ? Theme.ACCENT : 0);
             r.invalidate();
         };
         refresh.run();
@@ -6741,6 +6878,8 @@ public class LauncherActivity extends Activity {
                 return;
             }
             refresh.run();
+            if (gameCounts != null)
+                gameCounts.run();
             feedback.play(UiFeedback.Cue.MOVE, r);
             setNote(getString(gameRunning() && key.equals(launchedTid()) ? R.string.ROM_OPT_SAVED_RUNNING
                                                                          : R.string.ROM_OPT_SAVED), NOTE_OK);

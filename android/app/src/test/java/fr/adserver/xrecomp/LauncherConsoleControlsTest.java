@@ -139,6 +139,21 @@ public class LauncherConsoleControlsTest {
     }
 
     private static Widgets.MenuRow row(LauncherActivity a, String title) {
+        Widgets.MenuRow found = rowShown(a, title);
+        // Game settings spreads its rows over tabs: look in each, the one it is in stays shown.
+        LauncherActivity.Screen s = a.screenForTest();
+        if (found != null || (s != LauncherActivity.Screen.GAME_SETTINGS && s != LauncherActivity.Screen.ROM_OPTIONS))
+            return found;
+        int was = a.gameTabForTest();
+        for (int t = 0; t <= LauncherActivity.TAB_GAME; t++) {
+            if (t != was && a.showGameTabForTest(t) && (found = rowShown(a, title)) != null)
+                return found;
+        }
+        a.showGameTabForTest(was);
+        return null;
+    }
+
+    private static Widgets.MenuRow rowShown(LauncherActivity a, String title) {
         for (Widgets.MenuRow r : views(a.getWindow().getDecorView(), Widgets.MenuRow.class, new ArrayList<>()))
             if (title.equals(r.title))
                 return r;
@@ -151,6 +166,7 @@ public class LauncherConsoleControlsTest {
 
     /** Down with the D-pad until the row titled title has the focus, else up. */
     private static void focusRow(LauncherActivity a, String title) {
+        row(a, title);   // Game settings: its tab first
         for (int i = 0; i < 40 && !focusedOn(a, title); i++)
             key(a, KeyEvent.KEYCODE_DPAD_DOWN);
         for (int i = 0; i < 40 && !focusedOn(a, title); i++)

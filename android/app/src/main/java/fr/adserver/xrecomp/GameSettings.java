@@ -338,6 +338,31 @@ final class GameSettings {
         return Arrays.asList(ConsoleControls.env(c), Hotkeys.KEY);
     }
 
+    /** How many of these options the game gives a value other than Settings' (the rows with a « This game » badge). */
+    static int ownCount(RecompConfig global, RecompConfig game, List<RecompConfig.Option> opts) {
+        int n = 0;
+        for (RecompConfig.Option o : opts) {
+            if (differs(global, game, o))
+                n++;
+        }
+        return n;
+    }
+
+    /** How many of its console's other keys the game sets: its controls, hotkeys, N64 pak, and its theme. */
+    static int ownExtras(RecompConfig game, Console c) {
+        int n = game.has(THEME_KEY) ? 1 : 0;
+        for (String k : extraKeys(c)) {
+            if (game.has(k))
+                n++;
+        }
+        return n;
+    }
+
+    /** Everything that is the game's own (its Home's « Game settings » count): options and other keys. */
+    static int ownTotal(RecompConfig global, RecompConfig game, Console c, boolean lsfg) {
+        return ownCount(global, game, options(c, lsfg)) + ownExtras(game, c);
+    }
+
     /** Every key a game of any console may export: the options' and the controls'. */
     static List<String> allExportedKeys() {
         List<String> out = new ArrayList<>();

@@ -80,6 +80,9 @@
     <string name="GS_SAVE_FAILED">Les réglages de ce jeu n\'ont pas pu être enregistrés</string>
     <string name="GS_NONE_OWN">Tout comme les Réglages</string>
     <string name="GS_OWN_COUNT">%1$d à lui</string>
+    <string name="GS_TAB_COUNT">%1$s · %2$d</string>
+    <string name="GS_FOOTER_NONE">Réglages du jeu · tout comme les Réglages</string>
+    <string name="GS_FOOTER_OWN">Réglages du jeu · %1$d à lui</string>
     <string name="GS_HINT_RESET">Remettre</string>
     <string name="MENU_GAME_SETTINGS">Réglages du jeu</string>
     <string name="MENU_GS_NEXT_START">Les valeurs de ce jeu : l\'image change tout de suite, le reste au redémarrage du jeu</string>

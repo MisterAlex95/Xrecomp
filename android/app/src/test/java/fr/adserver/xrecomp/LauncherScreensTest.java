@@ -5,6 +5,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.robolectric.Shadows.shadowOf;
 
 import android.app.ActivityManager;
@@ -156,6 +157,21 @@ public class LauncherScreensTest {
     }
 
     private static Widgets.MenuRow row(LauncherActivity a, String title) {
+        Widgets.MenuRow found = rowShown(a, title);
+        // Game settings spreads its rows over tabs: look in each, the one it is in stays shown.
+        LauncherActivity.Screen s = a.screenForTest();
+        if (found != null || (s != LauncherActivity.Screen.GAME_SETTINGS && s != LauncherActivity.Screen.ROM_OPTIONS))
+            return found;
+        int was = a.gameTabForTest();
+        for (int t = 0; t <= LauncherActivity.TAB_GAME; t++) {
+            if (t != was && a.showGameTabForTest(t) && (found = rowShown(a, title)) != null)
+                return found;
+        }
+        a.showGameTabForTest(was);
+        return null;
+    }
+
+    private static Widgets.MenuRow rowShown(LauncherActivity a, String title) {
         for (Widgets.MenuRow r : rows(a.getWindow().getDecorView(), new ArrayList<>()))
             if (title.equals(r.title))
                 return r;
@@ -942,6 +958,11 @@ public class LauncherScreensTest {
         assertNotNull(row(a, app.getString(R.string.GAME_THEME)));
         assertNotNull(row(a, app.getString(R.string.GS_RESET)));
         assertEquals(app.getString(R.string.GS_NONE_OWN), row(a, app.getString(R.string.GS_RESET)).value);
+        assertEquals(LauncherActivity.TAB_GAME, a.gameTabForTest());
+        r = row(a, ws);   // back on its tab (Graphics)
+        assertEquals(LauncherActivity.TAB_GRAPHICS, a.gameTabForTest());
+        idle(300);
+        r = row(a, ws);
         r.requestFocusFromTouch();
         key(a, KeyEvent.KEYCODE_DPAD_RIGHT);   // Off for this title: over Settings' On
         r = row(a, ws);
@@ -952,11 +973,61 @@ public class LauncherScreensTest {
         assertEquals("recomp.cfg untouched", "1",
                      RecompConfig.load(GameStore.externalFilesDir(app)).get("RECOMP_WIDESCREEN"));
         assertEquals(app.getString(R.string.ROM_OPT_SAVED), a.noteForTest());
+        // GameNative-style visibility: the tab and the footer count the game's own values, the value is the accent.
+        assertEquals(Theme.ACCENT, r.valueColor);
+        assertTrue(java.util.Arrays.asList(a.gameTabNamesForTest()).contains(
+            app.getString(R.string.GS_TAB_COUNT, app.getString(R.string.SECTION_GRAPHICS), 1)));
+        assertEquals(app.getString(R.string.GS_FOOTER_OWN, 1), a.contextForTest());
         shot(a, "game-settings-xbox", true);
         key(a, KeyEvent.KEYCODE_BUTTON_Y);
         assertFalse(GameSettings.file(app.getFilesDir(), TID).exists());
         assertEquals(app.getString(R.string.GS_RESET_DONE), a.noteForTest());
         assertEquals(app.getString(R.string.ROM_OPT_FOLLOW, app.getString(R.string.VAL_ON)), row(a, ws).value);
         assertNull(row(a, ws).badge);
+        assertEquals(app.getString(R.string.GS_FOOTER_NONE), a.contextForTest());
+    }
+
+    /** Home's « Game settings » pill counts the game's own values (none: no count). */
+    @Test
+    public void homeGameSettingsCount() throws Exception {
+        LauncherActivity a = launch();
+        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
+        assertNull(gameSettingsPill(a).mark);
+        GameSettings.put(app, TID, "RECOMP_WIDESCREEN", "1");
+        GameSettings.put(app, TID, "RECOMP_PRESENT_VSYNC", "0");
+        a.goForTest(LauncherActivity.Screen.GAME_SETTINGS);
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_B);
+        idle(300);
+        assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
+        assertEquals("2", gameSettingsPill(a).mark);
+        shot(a, "home-game-settings-count", true);
+    }
+
+    /** Game settings' tabs with a count, and Home's pill with its count, at every size and in French too. */
+    @Test
+    public void gameSettingsTabsEverySize() throws Exception {
+        GameSettings.put(app, TID, "RECOMP_PRESENT_VSYNC", "0");
+        GameSettings.put(app, TID, "RECOMP_WIDESCREEN", "1");
+        GameSettings.put(app, TID, "RECOMP_APU_HRTF", "0");   // a count on Audio too: the widest bar
+        render("home-game-settings-count", true, null);
+        render("game-settings-tabs", true, a -> {
+            a.goForTest(LauncherActivity.Screen.GAME_SETTINGS);
+            idle(300);
+            assertTrue(a.showGameTabForTest(LauncherActivity.TAB_GRAPHICS));
+            idle(300);
+        });
+    }
+
+    private Widgets.PillButton gameSettingsPill(LauncherActivity a) {
+        android.view.ViewGroup row = (android.view.ViewGroup)a.homePrimaryForTest().getParent();
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View v = row.getChildAt(i);
+            if (v instanceof Widgets.PillButton
+                    && app.getString(R.string.GAME_SETTINGS).equals(((Widgets.PillButton)v).title))
+                return (Widgets.PillButton)v;
+        }
+        fail("no Game settings pill");
+        return null;
     }
 }
