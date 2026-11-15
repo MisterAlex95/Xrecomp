@@ -54,6 +54,22 @@ void xmv_player_stats(const XmvPlayer *p, XmvPlayerStats *s);
 /* Back to the start. */
 int xmv_player_rewind(XmvPlayer *p);
 
+/* A look at the start of a movie before it plays (XBA-199: the runtime hands
+ * a movie it would not decode exactly to the title's own decoder). On a
+ * player just opened: the first max_frames frames are walked, the first
+ * decode_frames of them decoded, the others only their picture header read
+ * (cheap); then the player is rewound. Returns 0, -1 if it could not rewind. */
+typedef struct {
+    uint32_t frames;          /* frames looked at */
+    uint32_t decoded;         /* of them, decoded (the first ones) */
+    uint32_t x8;              /* X8 intra frames (any of them: read from the picture header) */
+    uint32_t damaged;         /* decoded frames the decoder found damaged */
+    int x8_allowed;           /* a sequence header allows X8 intra frames */
+    int broken;               /* the packet chain broke before the end of the scan */
+    int complete;             /* the whole movie was looked at */
+} XmvProbe;
+int xmv_player_probe(XmvPlayer *p, uint32_t max_frames, uint32_t decode_frames, XmvProbe *out);
+
 /* Colour conversion of a YUV 4:2:0 picture (BT.601, studio range, as the
  * Xbox's XMV player converts): to 32-bit pixels B, G, R, A=255 in memory
  * order (D3DFMT_A8R8G8B8 / X8R8G8B8 little-endian), or to YUY2 (Y0 U Y1 V). */

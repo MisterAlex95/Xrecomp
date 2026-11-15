@@ -36,6 +36,11 @@ typedef struct {
     uint32_t rs_frac;
     int16_t rs_prev[2], rs_cur[2];
     int rs_primed;
+    /* XBA-199: the title's own decoder plays this movie (the runtime would
+     * not decode it exactly, or cannot open it), and its watchdog. */
+    int delegated;
+    uint64_t last_poll_ns, stall_ns;
+    uint32_t native_frames;
 } XmvSession;
 
 static XmvSession s_sess[MAX_SESSIONS];
@@ -77,6 +82,23 @@ static int mode_native(void)
     return e && !strcmp(e, "native");
 }
 
+/* RECOMP_XMV=runtime: the runtime's decoder for every movie, also those it
+ * does not fully support (no hand-over to the title's own decoder). */
+static int mode_runtime(void)
+{
+    const char *e = getenv("RECOMP_XMV");
+    return e && !strcmp(e, "runtime");
+}
+
+/* The watchdog of a movie handed to the title's own decoder: seconds without
+ * a frame while the title polls (RECOMP_XMV_WATCHDOG, default 10, 0 = off). */
+static uint64_t watchdog_ns(void)
+{
+    const char *e = getenv("RECOMP_XMV_WATCHDOG");
+    double sec = e && *e ? atof(e) : 10.0;
+    return sec > 0 ? (uint64_t)(sec * 1e9) : 0;
+}
+
 int xmv_hle_bound(int what, uint32_t va, unsigned confidence_pct)
 {
     static volatile int logged[2];
@@ -87,8 +109,10 @@ int xmv_hle_bound(int what, uint32_t va, unsigned confidence_pct)
         fprintf(stderr, "[XMV] %s at %08X bound by Prepare (found with confidence %u.%02u): %s\n", names[what],
                 va, confidence_pct / 100, confidence_pct % 100,
                 native ? "RECOMP_XMV=native, the title's own decoder runs"
-                       : mode_skip() ? "RECOMP_XMV=skip, movies end at once"
-                                     : "the runtime decodes the title's movies");
+                : mode_skip() ? "RECOMP_XMV=skip, movies end at once"
+                : mode_runtime() ? "the runtime decodes the title's movies (RECOMP_XMV=runtime: all of them)"
+                                 : "the runtime decodes the title's movies it fully supports, the title's own "
+                                   "decoder the others");
     }
     return !native;
 }
@@ -106,7 +130,14 @@ void xbox_MovieFileOpened(const char *host_path)
 
 static void session_end(XmvSession *s)
 {
-    if (s->player) {
+    if (s->delegated) {
+        if (s->player)
+            xmv_player_close(s->player);
+        s->player = NULL;
+        fprintf(stderr, "[XMV] decoder %08X done: the title's own decoder gave %u frames\n", s->decoder,
+                s->native_frames);
+        s->delegated = 0;
+    } else if (s->player) {
         XmvPlayerStats st;
         xmv_player_stats(s->player, &st);
         fprintf(stderr, "[XMV] movie ended: %u frames (%u decoded, %u X8 intra not supported, %u damaged)\n",
@@ -117,9 +148,75 @@ static void session_end(XmvSession *s)
     s->ended = 1;
 }
 
-static XmvSession *session_get(uint32_t decoder)
+/* The runtime starts playing the session's (open) movie now. */
+static void session_start(XmvSession *s)
+{
+    const XmvInfo *in = xmv_player_info(s->player);
+    fprintf(stderr, "[XMV] decoder %08X plays %s: %ux%u, %u ms, %d audio track(s)\n", s->decoder, s_path,
+            in->width, in->height, in->duration_ms, in->ntracks);
+    s->start_ns = now_ns();
+#if !defined(_WIN32)
+    if (xmv_player_audio_track(s->player) >= 0)
+        host_audio_open(xmv_player_audio_rate(s->player), xmv_player_audio_channels(s->player) >= 2 ? 2 : 1);
+#endif
+}
+
+/* The first frames the hand-over probe looks at (their picture header) and,
+ * of them, decodes: X8 intra frames further in are not seen (a minute at 30
+ * frames per second). */
+#define PROBE_FRAMES 1800
+#define PROBE_DECODE 30
+
+/* Why the runtime's decoder would not play this movie exactly (written into
+ * why), or 0 if it would. Leaves the player at the start. */
+static int unsupported(XmvPlayer *pl, char *why, size_t n)
+{
+    const XmvInfo *in = xmv_player_info(pl);
+    XmvProbe pr;
+    int i;
+    for (i = 0; i < in->ntracks; i++) {
+        const XmvTrack *t = &in->track[i];
+        if (t->compression == XMV_CODEC_WMAV2) {
+            snprintf(why, n, "audio track %d is WMA (the runtime plays Xbox ADPCM and PCM)", i);
+            return 1;
+        }
+        if (!((t->compression == XMV_CODEC_XBOX_ADPCM && t->bits_per_sample == 4) ||
+              (t->compression == XMV_CODEC_PCM && t->bits_per_sample == 16))) {
+            snprintf(why, n, "audio track %d is format 0x%04X, %u bits", i, t->compression, t->bits_per_sample);
+            return 1;
+        }
+        if ((t->flags & (XMV_AUDIO_51_FRONT | XMV_AUDIO_51_CENTER | XMV_AUDIO_51_REAR)) || t->channels > 2) {
+            snprintf(why, n, "%s sound (the runtime plays two channels)", t->channels > 2 ? "multichannel" : "5.1");
+            return 1;
+        }
+    }
+    if (xmv_player_probe(pl, PROBE_FRAMES, PROBE_DECODE, &pr) < 0) {
+        snprintf(why, n, "the movie could not be rewound after its probe");
+        return 1;
+    }
+    if (pr.x8) {
+        snprintf(why, n, "X8 intra frames (%u in the first %u frames; XBA-198)", pr.x8, pr.frames);
+        return 1;
+    }
+    if (pr.broken) {
+        snprintf(why, n, "damaged packets after frame %u", pr.frames);
+        return 1;
+    }
+    if (pr.damaged >= 2 && pr.damaged * 16 >= pr.decoded) {
+        snprintf(why, n, "%u damaged frames in the first %u", pr.damaged, pr.decoded);
+        return 1;
+    }
+    return 0;
+}
+
+/* The decoder object's session. A new one opens the movie the title opened
+ * last. With can_delegate (the binding, which can call the title's own
+ * decoder) and RECOMP_XMV=auto, a movie the runtime would not decode exactly,
+ * or cannot open, is handed to the title's own decoder (delegated). */
+static XmvSession *session_get(uint32_t decoder, int can_delegate)
 {
     XmvSession *s = NULL, *free_slot = NULL;
+    char why[sizeof s_path + 64];
     int i;
     for (i = 0; i < MAX_SESSIONS; i++) {
         if (s_sess[i].decoder == decoder)
@@ -129,7 +226,8 @@ static XmvSession *session_get(uint32_t decoder)
     }
     /* An ended movie, and the title has opened another since: a new one on
      * the same decoder object. */
-    if (s && s->ended && s->gen != s_gen) {
+    if (s && (s->ended || s->delegated) && s->gen != s_gen) {
+        session_end(s);
         memset(s, 0, sizeof *s);
         free_slot = s;
         s = NULL;
@@ -146,27 +244,30 @@ static XmvSession *session_get(uint32_t decoder)
     s->decoder = decoder;
     s->gen = s_gen;
     s->start_ns = now_ns();
+    if (can_delegate && !mode_skip() && !mode_runtime() &&
+        (!s_path[0] || !(s->player = xmv_player_open_file(s_path)) || unsupported(s->player, why, sizeof why))) {
+        if (!s_path[0])
+            snprintf(why, sizeof why, "no .xmv file opened");
+        else if (!s->player)
+            snprintf(why, sizeof why, "%s is not an XMV file the runtime can play", s_path);
+        fprintf(stderr, "[XMV] decoder %08X: %s: the title's own decoder plays this movie\n", decoder, why);
+        s->delegated = 1;
+        return s;
+    }
     if (mode_skip() || !s_path[0]) {
         fprintf(stderr, "[XMV] decoder %08X: %s, the movie is skipped\n", decoder,
                 s_path[0] ? "RECOMP_XMV=skip" : "no .xmv file opened");
         s->ended = 1;
         return s;
     }
-    s->player = xmv_player_open_file(s_path);
+    if (!s->player)
+        s->player = xmv_player_open_file(s_path);
     if (!s->player) {
         fprintf(stderr, "[XMV] %s: not an XMV file the runtime can play, skipped\n", s_path);
         s->ended = 1;
         return s;
     }
-    {
-        const XmvInfo *in = xmv_player_info(s->player);
-        fprintf(stderr, "[XMV] decoder %08X plays %s: %ux%u, %u ms, %d audio track(s)\n", decoder, s_path,
-                in->width, in->height, in->duration_ms, in->ntracks);
-    }
-#if !defined(_WIN32)
-    if (xmv_player_audio_track(s->player) >= 0)
-        host_audio_open(xmv_player_audio_rate(s->player), xmv_player_audio_channels(s->player) >= 2 ? 2 : 1);
-#endif
+    session_start(s);
     return s;
 }
 
@@ -279,7 +380,16 @@ uint32_t xmv_hle_get_next_frame(uint32_t decoder, uint32_t surface, uint32_t res
     XmvSession *s;
     uint32_t result = XMV_NOFRAME, t_ms = 0;
     lock();
-    s = session_get(decoder);
+    s = session_get(decoder, 0);
+    if (s->delegated) {
+        /* Handed to the title's own decoder, yet the hook is called: a
+         * hand-written override with no own decoder to call. */
+        s->delegated = 0;
+        if (s->player)
+            session_start(s);
+        else
+            s->ended = 1;
+    }
     if (!s->ended && !s->have_pending) {
         if (xmv_player_next_frame(s->player, &s->pending_pts) == 1)
             s->have_pending = 1;
@@ -318,5 +428,69 @@ void xmv_hle_close(uint32_t decoder)
             session_end(&s_sess[i]);
             memset(&s_sess[i], 0, sizeof s_sess[i]);
         }
+    unlock();
+}
+
+/* ── The binding's routing (XBA-199) ───────────────────────────────────── */
+
+int xmv_hle_route(uint32_t va, unsigned confidence_pct, uint32_t decoder)
+{
+    XmvSession *s;
+    int ours;
+    if (!xmv_hle_bound(0, va, confidence_pct))
+        return 0;                       /* RECOMP_XMV=native */
+    lock();
+    s = session_get(decoder, 1);
+    ours = !s->delegated;
+    unlock();
+    return ours;
+}
+
+void xmv_hle_native_result(uint32_t decoder, uint32_t result_va)
+{
+    XmvSession *s = NULL;
+    uint64_t now, wd;
+    uint32_t r;
+    int i;
+    if (!result_va || mode_native())
+        return;
+    memcpy(&r, (const uint8_t *)((uintptr_t)result_va + (uintptr_t)xbox_GetMemoryOffset()), 4);
+    now = now_ns();
+    lock();
+    for (i = 0; i < MAX_SESSIONS; i++)
+        if (s_sess[i].decoder == decoder && s_sess[i].delegated)
+            s = &s_sess[i];
+    if (!s) {
+        unlock();
+        return;
+    }
+    if (r == XMV_NEWFRAME || r == XMV_ENDOFFILE) {
+        s->native_frames += r == XMV_NEWFRAME;
+        s->stall_ns = 0;
+    } else if (s->last_poll_ns && now - s->last_poll_ns < 1000000000ull) {
+        /* A second or more between two polls is not counted: the title paused
+         * the movie, or was busy elsewhere. */
+        s->stall_ns += now - s->last_poll_ns;
+    }
+    s->last_poll_ns = now;
+    wd = watchdog_ns();
+    if (wd && s->stall_ns >= wd) {
+        /* Hung: nothing of the movie shown yet, the runtime plays it if it
+         * can open it (not exactly, but better than a hang); else, or once
+         * the title's own decoder has shown frames, the movie ends. */
+        int play = s->player && !s->native_frames;
+        fprintf(stderr, "[XMV] decoder %08X: the title's own decoder gave no frame for %.1f s while the title "
+                "polled: %s\n", decoder, (double)s->stall_ns / 1e9,
+                play ? "the runtime plays the movie instead" : "the movie ends");
+        s->delegated = 0;
+        if (play) {
+            session_start(s);
+        } else {
+            if (s->player)
+                xmv_player_close(s->player);
+            s->player = NULL;
+            s->ended = 1;
+        }
+    }
     unlock();
 }

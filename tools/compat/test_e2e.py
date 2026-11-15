@@ -772,3 +772,21 @@ def test_a_bound_title_plays_its_movie(tmp_path):
     native = native.decode(errors="replace")
     assert "RECOMP_XMV=native, the title's own decoder runs" in native, native[-3000:]
     assert "movie ended" not in native and DONE not in native, native[-3000:]
+
+    # The hand-over: a movie with an X8 intra frame goes to the title's own decoder (RECOMP_XMV=auto), which
+    # never gives a frame here, so the watchdog gives it back to the runtime, which plays it, and the title goes on.
+    shutil.copy(os.path.join(ROOT, "tests", "xmv_hle", "fixtures", "x8.xmv"), d / "intro.xmv")
+    proc = subprocess.Popen([exe], cwd=os.path.dirname(exe), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=dict(os.environ, RECOMP_XMV_WATCHDOG="1", SDL_VIDEODRIVER="dummy",
+                                     SDL_AUDIODRIVER="dummy"))
+    try:
+        handed, _ = proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()                     # by PID
+        handed, _ = proc.communicate()
+    handed = handed.decode(errors="replace")
+    assert "X8 intra frames (1 in the first 12 frames; XBA-198): the title's own decoder plays this movie" in handed, \
+        handed[-3000:]
+    assert "while the title polled: the runtime plays the movie instead" in handed, handed[-3000:]
+    assert "[XMV] movie ended: 12 frames" in handed, handed[-3000:]
+    assert DONE in handed.split("[XMV] movie ended", 1)[1], handed[-3000:]

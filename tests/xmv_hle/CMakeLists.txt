@@ -14,4 +14,5 @@ target_link_libraries(xmv_hle_test PRIVATE xboxrecomp)
 enable_testing()
 add_test(NAME xmv_hle
          COMMAND xmv_hle_test ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/conformance/test.xbe
-                 ${CMAKE_CURRENT_SOURCE_DIR}/../xmv_decode/fixtures/basic.xmv)
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../xmv_decode/fixtures/basic.xmv
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)

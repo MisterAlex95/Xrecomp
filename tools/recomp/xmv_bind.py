@@ -7,7 +7,9 @@ tools.recomp --xmv-bind FILE. The lifter then emits those bodies as
 sub_X_gen (the --exclude-manual wrap mechanism) and writes
 recomp_xmv_bind.c into the generated sources: sub_X, reached by every caller
 and by the dispatch table, calls the runtime's decoder (xmv_hle_get_next_frame,
-xmv_hle_close) or, with RECOMP_XMV=native, the title's own lifted body. Not a
+xmv_hle_close) or the title's own lifted body: with RECOMP_XMV=native, and for
+a movie the runtime would not decode exactly (xmv_hle_route decides per movie;
+xmv_hle_native_result watches the title's decoder for a hang). Not a
 title layer: every title whose XMV library is found gets it, and nothing of
 any one title is in the toolkit.
 
@@ -20,6 +22,9 @@ import os
 import sys
 
 FILE_NAME = "recomp_xmv_bind.c"
+# The shape of the generated binding, part of the lift's stamp (find_api.bind_key): a change re-lifts.
+# 2: GetNextFrame routed per movie (xmv_hle_route, xmv_hle_native_result: the hand-over, XBA-199).
+VERSION = 2
 WHAT = {"get_next_frame": (0, "XMVDecoder_GetNextFrame"), "close_decoder": (1, "XMVDecoder_CloseDecoder")}
 
 
@@ -73,6 +78,8 @@ def source(bound, plan):
         "extern uint32_t xmv_hle_get_next_frame(uint32_t decoder_va, uint32_t surface_va,",
         "                                       uint32_t result_va, uint32_t time_va);",
         "extern void xmv_hle_close(uint32_t decoder_va);",
+        "extern int xmv_hle_route(uint32_t va, unsigned confidence_pct, uint32_t decoder_va);",
+        "extern void xmv_hle_native_result(uint32_t decoder_va, uint32_t result_va);",
         "",
     ]
     for k, addr in sorted(bound.items(), key=lambda kv: WHAT[kv[0]][0]):
@@ -82,8 +89,11 @@ def source(bound, plan):
             lines += [
                 "void %s(void)    /* %s(decoder, surface, &result, &timestamp) */" % (name, api),
                 "{",
-                "    if (!xmv_hle_bound(%d, 0x%08Xu, %du)) {" % (what, addr, pct),
+                "    uint32_t decoder = MEM32(esp + 4), result = MEM32(esp + 12);",
+                "    if (!xmv_hle_route(0x%08Xu, %du, decoder)) {" % (addr, pct),
+                "        /* RECOMP_XMV=native, or a movie the runtime hands to the title's own decoder */",
                 "        %s_gen();" % name,
+                "        xmv_hle_native_result(decoder, result);",
                 "        return;",
                 "    }",
                 "    eax = xmv_hle_get_next_frame(MEM32(esp + 4), MEM32(esp + 8), MEM32(esp + 12), MEM32(esp + 16));",

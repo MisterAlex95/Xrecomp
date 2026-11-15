@@ -65,7 +65,7 @@ def _mid(a, b, c):
 
 class Synth:
     def __init__(self, width, height, seed, mspel_bit=1, abt_flag=1, tlmv=0, per_mb_rl_bit=1,
-                 slices=1, loop_filter=0):
+                 slices=1, loop_filter=0, x8_allowed=0):
         self.t = tables()
         self.rng = random.Random(seed)
         self.w, self.h = width, height
@@ -73,6 +73,7 @@ class Synth:
         self.cw, self.ch = self.mbw * 16, self.mbh * 16
         self.mspel_bit, self.abt_flag, self.tlmv = mspel_bit, abt_flag, tlmv
         self.per_mb_rl_bit, self.slices, self.loop_filter = per_mb_rl_bit, slices, loop_filter
+        self.x8_allowed = x8_allowed
         self.slice_height = self.mbh // slices if slices else self.mbh
         self.w8 = 2 * self.mbw + 1
         self.mv = {}            # b8 index -> (x, y); the extra column and the top border read as 0
@@ -83,7 +84,7 @@ class Synth:
 
     def header_word(self):
         """The sequence header in XMV's packing."""
-        return (self.mspel_bit | (self.loop_filter << 1) | (self.abt_flag << 2) | (0 << 3) |
+        return (self.mspel_bit | (self.loop_filter << 1) | (self.abt_flag << 2) | (self.x8_allowed << 3) |
                 (self.tlmv << 4) | (self.per_mb_rl_bit << 5) | ((self.slices & 7) << 6))
 
     # ── code tables ──
@@ -159,6 +160,8 @@ class Synth:
         bw.put(0, 1)                     # I
         bw.put(0, 7)
         bw.put(q, 5)
+        if self.x8_allowed:
+            bw.put(0, 1)                 # j_type: the usual intra coding
         per_mb_rl = r.randint(0, 1) if self.per_mb_rl_bit else 0
         if self.per_mb_rl_bit:
             bw.put(per_mb_rl, 1)
@@ -191,6 +194,20 @@ class Synth:
                 for n in range(6):
                     self._intra_block(bw, n, dc_table, rl_luma, rl_chroma, (cbp >> (5 - n)) & 1)
                 self._set_mv(mbx, mby, (0, 0))
+        return bw.bytes()
+
+    def x8_i_frame(self, q, nbytes=96):
+        """An I frame coded with the X8 intra coder (j_type 1): the picture header, then random bytes
+        standing for the X8 data. Not a decodable picture: it is what tests the runtime's detection of X8
+        frames (its fallback to the title's own decoder, XBA-199), never a reference for decoding."""
+        assert self.x8_allowed
+        bw = BitWriter()
+        bw.put(0, 1)                     # I
+        bw.put(0, 7)
+        bw.put(q, 5)
+        bw.put(1, 1)                     # j_type: X8
+        for _ in range(nbytes):
+            bw.put(self.rng.randrange(256), 8)
         return bw.bytes()
 
     def p_frame(self, q, intra_share=0.15):
@@ -355,12 +372,18 @@ class Synth:
         return bw.bytes()
 
 
-def synth_movie(width, height, nframes, gop, seed, **kw):
-    """(header word, [big-endian frames]): an I frame every gop frames."""
+def synth_movie(width, height, nframes, gop, seed, x8_at=(), **kw):
+    """(header word, [big-endian frames]): an I frame every gop frames. The I frames whose index is in x8_at
+    are X8 ones (x8_i_frame; x8_allowed is then set)."""
+    if x8_at:
+        kw["x8_allowed"] = 1
     s = Synth(width, height, seed, **kw)
     r = random.Random(seed ^ 0x5A5A)
     frames = []
     for k in range(nframes):
         q = r.randint(1, 31)
-        frames.append(s.i_frame(q) if k % gop == 0 else s.p_frame(q))
+        if k % gop == 0:
+            frames.append(s.x8_i_frame(q) if k in x8_at else s.i_frame(q))
+        else:
+            frames.append(s.p_frame(q))
     return s.header_word(), frames

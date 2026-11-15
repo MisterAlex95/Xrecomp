@@ -13,6 +13,7 @@ struct XmvPlayer {
     int pkt_valid, pkt_frame;
     int track;                 /* audio track played, -1 none */
     int channels, rate;
+    int x8_allowed;            /* the last sequence header allows X8 intra frames */
     int16_t *pcm;              /* FIFO of decoded frames */
     size_t pcm_cap, pcm_head, pcm_len;   /* in frames */
     XmvPlayerStats st;
@@ -145,23 +146,36 @@ size_t xmv_player_read_audio(XmvPlayer *p, int16_t *out, size_t max_frames)
     return n;
 }
 
-int xmv_player_next_frame(XmvPlayer *p, uint32_t *pts_ms)
+/* The next frame of the packet chain: 1, 0 at the end, -1 if the chain
+ * broke. audio: decode the packets' audio on the way. */
+static int next_coded_frame(XmvPlayer *p, const XmvFrame **out, int audio)
 {
-    const XmvFrame *f;
     int r;
     while (!p->pkt_valid || p->pkt_frame >= p->pkt.nframes) {
         r = xmv_demux_next(p->dmx, &p->pkt);
         if (r <= 0) {
             p->pkt_valid = 0;
-            return 0;
+            return r;
         }
         p->pkt_valid = 1;
         p->pkt_frame = 0;
-        if (p->pkt.has_header)
+        if (p->pkt.has_header) {
             wmv2_dec_set_xmv_header(p->dec, p->pkt.header);
-        queue_audio(p);
+            p->x8_allowed = (p->pkt.header >> 3) & 1;
+        }
+        if (audio)
+            queue_audio(p);
     }
-    f = &p->pkt.frame[p->pkt_frame++];
+    *out = &p->pkt.frame[p->pkt_frame++];
+    return 1;
+}
+
+int xmv_player_next_frame(XmvPlayer *p, uint32_t *pts_ms)
+{
+    const XmvFrame *f;
+    int r;
+    if (next_coded_frame(p, &f, 1) <= 0)
+        return 0;
     r = wmv2_dec_decode(p->dec, f->data, f->size, WMV2_LE_WORDS);
     p->st.frames++;
     if (r == WMV2_OK) p->st.decoded++;
@@ -187,9 +201,46 @@ int xmv_player_rewind(XmvPlayer *p)
     wmv2_dec_destroy(p->dec);
     p->dec = nd;
     p->pkt_valid = 0;
+    p->x8_allowed = 0;
     p->pcm_head = p->pcm_len = 0;
     memset(&p->st, 0, sizeof p->st);
     return xmv_demux_rewind(p->dmx);
+}
+
+/* An X8 intra frame, from its picture header alone: an I frame (first bit
+ * 0), 7 bits, the quantiser (5), then j_type when the sequence header allows
+ * X8. The frame is little-endian 32-bit words of the MSB-first bitstream:
+ * those 14 bits are the top of its first word. */
+static int frame_is_x8(const XmvFrame *f, int x8_allowed)
+{
+    uint32_t w;
+    if (!x8_allowed || f->size < 4)
+        return 0;
+    w = (uint32_t)f->data[0] | ((uint32_t)f->data[1] << 8) | ((uint32_t)f->data[2] << 16) |
+        ((uint32_t)f->data[3] << 24);
+    return !(w >> 31) && ((w >> 19) & 31) != 0 && ((w >> 18) & 1);
+}
+
+int xmv_player_probe(XmvPlayer *p, uint32_t max_frames, uint32_t decode_frames, XmvProbe *out)
+{
+    const XmvFrame *f;
+    int r = 1;
+    memset(out, 0, sizeof *out);
+    while (out->frames < max_frames && (r = next_coded_frame(p, &f, 0)) == 1) {
+        int x8 = frame_is_x8(f, p->x8_allowed);
+        out->x8_allowed |= p->x8_allowed;
+        out->x8 += (uint32_t)x8;
+        if (out->frames < decode_frames) {
+            int d = wmv2_dec_decode(p->dec, f->data, f->size, WMV2_LE_WORDS);
+            out->decoded++;
+            if (d == WMV2_ERROR)
+                out->damaged++;
+        }
+        out->frames++;
+    }
+    out->broken = r < 0;
+    out->complete = r == 0;
+    return xmv_player_rewind(p);
 }
 
 /* ── Colour conversion ─────────────────────────────────────────────────── */

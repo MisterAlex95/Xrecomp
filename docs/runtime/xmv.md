@@ -1,6 +1,6 @@
 # XMV movies: the runtime's decoder
 
-> Part of the [Documentation Index](../INDEX.md) · Plane XBA-70, XBA-199
+> Part of the [Documentation Index](../INDEX.md) · Plane XBA-70, XBA-199, XBA-198
 
 Xbox titles play their movies (`.xmv`) with the XDK's XMV library, which is linked into the title and lifted like
 the rest of its code. When that lifted decoder runs, nothing else is needed: Fable's plays once vblanks are paced
@@ -64,9 +64,11 @@ and `XMVDecoder_CloseDecoder` can call `xmv_hle_close(decoder)`. What the hook d
    layer's audio device (`host_audio`, POSIX hosts), down-mixed to its channels and linearly resampled when the
    device runs at another rate (it keeps the format of its first open). Not through the APU: the title's own
    DirectSound streams for the movie are never fed. Windows: no sound yet.
-5. **Fallback.** `RECOMP_XMV=skip`, no `.xmv` opened, a file that is not XMV: the movie ends at once
-   (`XMV_ENDOFFILE`), the old skip override's behaviour. The log says which (`[XMV] ...`), and at the end of each
-   movie how many frames were decoded and how many were not.
+5. **Fallback.** Bound by Prepare, a movie the runtime would not decode exactly goes to the title's own
+   decoder ([the hand-over](#the-hand-over-to-the-titles-own-decoder)). Called directly (a hand-written override,
+   which has no own decoder to call), or with `RECOMP_XMV=skip`, no `.xmv` opened or a file that is not XMV: the
+   movie ends at once (`XMV_ENDOFFILE`), the old skip override's behaviour. The log says which (`[XMV] ...`), and
+   at the end of each movie how many frames were decoded and how many were not.
 
 ## Binding at Prepare (XBA-199)
 
@@ -102,30 +104,70 @@ found at the same call site, CloseDecoder; CreateDecoderForFile is reported but 
 decoder object stays, and its open is what tells the hook the file name) and passes it to `tools.recomp
 --xmv-bind`. The lifter emits those bodies as `sub_X_gen` (the `--exclude-manual` wrap mechanism) and writes
 `recomp_xmv_bind.c` next to the generated code: `sub_X`, which every caller and the dispatch table reach, asks
-`xmv_hle_bound()` and calls the hook (CloseDecoder: `xmv_hle_close`, then the title's own close) or, with
-`RECOMP_XMV=native`, the title's own body. A function the analysis did not find, or one a developer's
+`xmv_hle_route()` with the decoder object and calls the hook or the title's own body (`sub_X_gen`, then
+`xmv_hle_native_result()` with what it answered: [the hand-over](#the-hand-over-to-the-titles-own-decoder));
+CloseDecoder calls `xmv_hle_close`, then the title's own close. A function the analysis did not find, or one a developer's
 `--exclude-manual` file defines, is not bound. The binding is part of the lift's stamp (desktop `stamp.json`
-`xmv_bind`, Android the lift key): a change re-lifts.
+`xmv_bind`, Android the lift key, with the generated binding's version `xmv_bind.VERSION`): a change re-lifts.
 
 **The switch, `RECOMP_XMV`:**
 
 | Value | At Prepare | At run time, in a bound title |
 |---|---|---|
-| `auto` (default; also unset, `decode`) | bind when found with high confidence | the runtime decodes the movies |
+| `auto` (default; also unset, `decode`) | bind when found with high confidence | per movie: the runtime's decoder when it supports everything the movie uses, else the title's own (below) |
+| `runtime` | bind as `auto` | the runtime decodes every movie, also those it does not fully support |
 | `native` | bind nothing | the title's own (lifted) decoder runs, as if nothing were bound |
 | `skip` (or `0`) | bind as `auto` | every movie ends at once (`XMV_ENDOFFILE`) |
 
 Default `auto` binds whenever the API is found, also in a title whose own decoder would run (Fable's does, once
-vblanks are paced): the runtime's decoder is bit-exact with FFmpeg on what it supports, and it does not depend on
-the title's DirectSound streams or decode threads. `native` is the way back for a title where the runtime's decoder
-falls short (X8 intra frames, XBA-198; WMA sound).
+vblanks are paced): on what it supports the runtime's decoder is bit-exact with FFmpeg, and it does not depend on
+the title's DirectSound streams or decode threads; a movie it does not support goes to the title's own decoder,
+which is what played before the binding. `native` keeps the title's own decoder for every movie (and binds
+nothing: the way back if the binding itself is wrong).
+
+## The hand-over to the title's own decoder
+
+Binding the runtime's decoder must not make a working movie worse: X8 intra frames (XBA-198), WMA sound and 5.1
+are not decoded exactly, and the title's own decoder may well handle them. So with `RECOMP_XMV=auto`, at the first
+`GetNextFrame` of a decoder object, `xmv_hle_route()` opens the movie the title opened and looks at it:
+
+- *the audio tracks*: any WMA track (the runtime would play it silent), any format other than 4-bit Xbox ADPCM or
+  16-bit PCM, a 5.1 movie (tracks flagged as its pairs) or a track of more than two channels (the runtime plays
+  two);
+- *the first frames* (`xmv_player_probe`): the picture header of the first 1,800 (a minute at 30 frames per
+  second) for X8 intra frames (an I frame whose `j_type` bit is set, when the sequence header allows X8: FFmpeg's
+  encoder and others set that flag on every stream, so the flag alone says nothing), and the first 30 decoded for
+  damage: two or more damaged frames, and at least one in sixteen, or a broken packet chain;
+- *the file*: none opened, or not one the runtime can open.
+
+Any of these, and the whole movie goes to the title's own decoder: every `GetNextFrame` of that decoder object
+calls the title's lifted body, until it is closed or the title opens another movie. The log says why, once:
+`[XMV] decoder 00A10000: X8 intra frames (3 in the first 1800 frames; XBA-198): the title's own decoder plays this
+movie`, and at its close how many frames the title's decoder gave. The decision is taken before anything of the
+movie is shown, so the two decoders never share one: the title's own `CreateDecoderForFile` is never bound, its
+decoder object is complete.
+
+What the probe does not see: an X8 frame after the first minute (the runtime then shows the previous picture for
+it, counted in `movie ended`), damage further in. Checking a disc's movies beforehand: `xmv_dump` (below) says
+how many frames of a movie the runtime decodes.
+
+**The watchdog.** A movie handed over can hang in the title's own decoder (Fable's did, before vblank pacing:
+`XMV_NOFRAME` for ever). After each call of the title's body, `xmv_hle_native_result()` reads the result it wrote:
+with no `XMV_NEWFRAME` for 10 seconds while the title keeps polling (`RECOMP_XMV_WATCHDOG=seconds`, `0` turns it
+off; a second or more between two polls is not counted, a paused movie), the runtime takes the movie back: if the
+title's decoder never gave a frame and the runtime can open the file, the runtime plays it from the start (not
+exactly, but better than a hang); otherwise the movie ends (`XMV_ENDOFFILE`). Logged: `[XMV] decoder 00A10000: the
+title's own decoder gave no frame for 10.0 s while the title polled: the runtime plays the movie instead` (or
+`the movie ends`). The XBA-93 wait-spin detection is not used for this: it watches spin loops on guest memory, not
+a polled API, and a movie poll loop that calls `GetNextFrame` is exactly what the watchdog sees.
 
 **What the logs say.** Prepare: `XMV: XMVDecoder_GetNextFrame at 0x... and XMVDecoder_CloseDecoder at 0x...
 (confidence 0.90): bound to the runtime's decoder`, or `best guess ... too low, not bound`, or `the title has movies
 but no XMVDecoder_GetNextFrame was found`, or nothing for a title with no sign of movies. The lift log:
 `XMV: bound ...`. Run time, at the first call: `[XMV] XMVDecoder_GetNextFrame at 0001xxxx bound by Prepare (found
-with confidence 0.90): the runtime decodes the title's movies` (or `RECOMP_XMV=native, the title's own decoder
-runs`).
+with confidence 0.90): the runtime decodes the title's movies it fully supports, the title's own decoder the
+others` (or `RECOMP_XMV=native, the title's own decoder runs`); then, per movie, `[XMV] decoder ... plays ...` or
+the hand-over's reason.
 
 **Signatures.** Once a title's functions are confirmed (from the report and the lifted code), `python -m
 tools.xmv.find_api default.xbe --record get_next_frame=0x... [close_decoder=0x...]` writes their masked signatures
@@ -175,9 +217,9 @@ index byte is clamped to 0..88 the same way.
 | WMV2 I frames (MS-MPEG4 intra: DC/AC prediction, three RL tables per class, escapes 1-3) | done, bit-exact |
 | WMV2 P frames: skip maps (none / MPEG / row / column), inter MB tables, MV prediction with the top-left flag, half-pel and mspel motion compensation, the 8x4 / 4x8 adaptive block transform, intra MBs | done, bit-exact |
 | Loop filter, several slices, pictures that are not whole macroblocks | done, bit-exact |
-| WMV2 I frames coded with the X8 intra coder (`j_type`) | **not done**: the frame is counted and the previous picture stays (follow-up XBA-198) |
-| 5.1 ADPCM (three stereo tracks) | the front pair is played |
-| WMA audio tracks | not played (silence) |
+| WMV2 I frames coded with the X8 intra coder (`j_type`) | **not done** (XBA-198): bound, such a movie goes to the title's own decoder; called directly or with `RECOMP_XMV=runtime`, the frame is counted and the previous picture stays |
+| 5.1 ADPCM (three stereo tracks) | bound: the title's own decoder; else the front pair is played |
+| WMA audio tracks | bound: the title's own decoder; else not played (silence) |
 | Binding `XMVDecoder_GetNextFrame` without a title layer | done by structure at Prepare (XBA-199); unconfirmed on retail XBEs, no signature recorded yet |
 | Sound on Windows | not done |
 
@@ -208,6 +250,16 @@ the player's own decode, `XMV_ENDOFFILE` after; a new open restarts the decoder 
 opened, a non-XMV file and an unknown surface format behave as described above; `xmv_hle_bound` answers the
 runtime's decoder by default, with `auto` and `skip`, and the title's own with `native`.
 
+The hand-over, on `tests/xmv_hle/fixtures` (`python -m tools.xmv.xmv_mux make-fallback-set tests/xmv_hle/fixtures`:
+`wmv2_synth.py` streams, no FFmpeg): the probe finds the X8 frame of `x8.xmv` from its picture header, the four
+damaged frames of `damaged.xmv`, stops at its limits and rewinds the player; `x8_unused.xmv` (X8 allowed by the
+sequence header, never used: its pictures are bit-exact with FFmpeg's) and `basic.xmv` stay the runtime's;
+`x8.xmv`, `wma.xmv` (a WMA track), `surround.xmv` (three 5.1 pairs), `damaged.xmv` and a file that is not XMV go to
+the title's own decoder, for the whole movie; `RECOMP_XMV=runtime` keeps an X8 movie, `skip` ends it, `native`
+never asks; the watchdog takes a hung movie back after `RECOMP_XMV_WATCHDOG` seconds of polls and the runtime plays
+it, ends it when the title's decoder had given frames, ignores polls a second apart, and is off with `0`.
+`tools/xmv/test_xmv_mux.py` checks that the fixtures are what `make-fallback-set` writes.
+
 The binding (XBA-199):
 
 - `tools/xmv/test_find_api.py`: the synthetic movie title's API found in its `XMV` section (every feature, the
@@ -219,7 +271,9 @@ The binding (XBA-199):
   `recomp_xmv_bind.c`, no title layer) and redoes the lift without them under `RECOMP_XMV=native`; a title with no
   XMV library gets nothing. With `XBA_E2E=1`, the title is built and run: its own GetNextFrame never gives a frame,
   bound it plays `basic.xmv` (copied as its `D:\intro.xmv`) into its surface, 12 frames decoded, and goes on to its
-  `DbgPrint`; the same executable with `RECOMP_XMV=native` stays in its loop.
+  `DbgPrint`; the same executable with `RECOMP_XMV=native` stays in its loop; with `x8.xmv` as the movie, it goes
+to the title's own decoder, which gives nothing, the watchdog (`RECOMP_XMV_WATCHDOG=1`) gives it back to the
+runtime, which plays it, and the title goes on.
 
 Remaking the fixtures (FFmpeg needed only for this): `python -m tools.xmv.xmv_mux make-test-set
 tests/xmv_decode/fixtures`. `tools/xmv/test_xmv_mux.py` checks the Python side (mux / demux round trip, ADPCM

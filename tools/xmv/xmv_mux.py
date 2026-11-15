@@ -19,6 +19,7 @@ Builds XMV files from our own material, for the runtime's XMV decoder tests
 
 Usage:
     python -m tools.xmv.xmv_mux make-test-set tests/xmv_decode/fixtures
+    python -m tools.xmv.xmv_mux make-fallback-set tests/xmv_hle/fixtures
     python -m tools.xmv.xmv_mux make-fixture OUT.xmv --size 96x64 --frames 12 \
         [--gop 6] [--q 4] [--channels 2] [--rate 22050] [--loop-filter] [--slices N]
 """
@@ -322,6 +323,51 @@ def make_test_set(directory, ffmpeg="ffmpeg"):
         f.write("\n".join(lines) + "\n")
 
 
+# The fixtures of tests/xmv_hle's fallback (XBA-199): movies using what the runtime's decoder does not decode
+# exactly, which it hands to the title's own decoder, and one that only allows X8 without using it. Made from
+# wmv2_synth.py streams; no FFmpeg (nothing here is a decoding reference). (name, frames, gop, seed, X8 frames,
+# audio kind, damaged frames, X8 allowed by the sequence header).
+FALLBACK_SET = [
+    ("x8", 12, 4, 11, (4,), "adpcm", (), 1),
+    ("x8_unused", 12, 4, 12, (), "adpcm", (), 1),
+    ("wma", 12, 6, 13, (), "wma", (), 0),
+    ("surround", 12, 6, 14, (), "5.1", (), 0),
+    ("damaged", 12, 6, 15, (), "adpcm", (2, 3, 4, 5), 0),
+]
+FALLBACK_SIZE = (96, 64)
+
+
+def make_fallback_fixture(out, nframes, gop, seed, x8_at, audio_kind, damaged, x8_allowed):
+    from .wmv2_synth import synth_movie
+    import random
+    w, h = FALLBACK_SIZE
+    word, frames = synth_movie(w, h, nframes, gop, seed, x8_at=x8_at, mspel_bit=1, abt_flag=1, tlmv=0,
+                               per_mb_rl_bit=1, slices=1, x8_allowed=x8_allowed)
+    for k in damaged:
+        frames[k] = b"\0\0\0\0"            # an I frame header with quantiser 0: never valid
+    rate = 22050
+    nsamp = int(nframes * rate / 30)
+    audio = []
+    if audio_kind == "adpcm":
+        audio.append((0x0069, 2, rate, 4, 0, encode_xbox_adpcm(tone(rate, 2, nsamp), 2)[0]))
+    elif audio_kind == "5.1":
+        for flags in (1, 2, 4):              # front, centre + LFE, rear: three stereo tracks
+            audio.append((0x0069, 2, rate, 4, flags, encode_xbox_adpcm(tone(rate, 2, nsamp), 2)[0]))
+    elif audio_kind == "wma":
+        r = random.Random(seed)
+        audio.append((0x0161, 2, 44100, 16, 0, bytes(r.randrange(256) for _ in range(4 * 1024))))
+    blob = mux_xmv(w, h, frames, word, 30, audio)
+    with open(out, "wb") as f:
+        f.write(blob)
+    return blob
+
+
+def make_fallback_set(directory):
+    os.makedirs(directory, exist_ok=True)
+    for name, *spec in FALLBACK_SET:
+        make_fallback_fixture(os.path.join(directory, name + ".xmv"), *spec)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="tools.xmv.xmv_mux", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -340,7 +386,12 @@ def main(argv=None):
     ts = sub.add_parser("make-test-set", help="write tests/xmv_decode's fixtures and expected.h")
     ts.add_argument("dir")
     ts.add_argument("--ffmpeg", default="ffmpeg")
+    fs = sub.add_parser("make-fallback-set", help="write tests/xmv_hle's fallback fixtures (no FFmpeg)")
+    fs.add_argument("dir")
     a = ap.parse_args(argv)
+    if a.cmd == "make-fallback-set":
+        make_fallback_set(a.dir)
+        return None
     if a.cmd == "make-test-set":
         make_test_set(a.dir, a.ffmpeg)
         return None

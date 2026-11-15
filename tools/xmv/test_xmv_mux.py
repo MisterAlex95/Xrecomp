@@ -116,3 +116,17 @@ def test_fixtures_are_there_and_listed():
         x = XMVFile(os.path.join(FIXTURES, name + ".xmv"))
         assert sum(len(p.frames) for p in x.packets) > 0
         assert '"%s"' % name in expected
+
+
+def test_fallback_fixtures_are_what_make_fallback_set_writes(tmp_path):
+    """tests/xmv_hle's hand-over fixtures (XBA-199): deterministic, and the X8 frame where it is said to be."""
+    from tools.xmv.xmv_mux import FALLBACK_SET, make_fallback_set
+    make_fallback_set(str(tmp_path))
+    here = os.path.join(HERE, "..", "..", "tests", "xmv_hle", "fixtures")
+    for name, *_ in FALLBACK_SET:
+        made = (tmp_path / (name + ".xmv")).read_bytes()
+        assert made == open(os.path.join(here, name + ".xmv"), "rb").read(), name
+    _, frames = synth_movie(96, 64, 12, 4, 11, x8_at=(4,))
+    w = struct.unpack(">I", frames[4][:4])[0]
+    assert (w >> 31) == 0 and (w >> 18) & 1 and (w >> 19) & 31     # I, j_type 1, a quantiser
+    assert all(not ((struct.unpack(">I", frames[k][:4])[0] >> 18) & 1) for k in (0, 8))

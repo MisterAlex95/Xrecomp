@@ -137,7 +137,7 @@ def test_the_generated_binding(tmp_path):
     assert "xmv_hle_get_next_frame(MEM32(esp + 4), MEM32(esp + 8), MEM32(esp + 12), MEM32(esp + 16));" in c
     assert "esp += 4 + 16;" in c
     assert "xmv_hle_close(MEM32(esp + 4));" in c and "sub_00012080_gen();" in c
-    assert "xmv_hle_bound(0, 0x00012050u, 90u)" in c
+    assert "xmv_hle_route(0x00012050u, 90u, decoder)" in c and "xmv_hle_native_result(decoder, result);" in c
     # Not a function the analysis found, or written by hand: nothing bound.
     assert xmv_bind.select(plan, {0x12080}, set(), log=lambda m: None) == {}
     assert xmv_bind.select(plan, {0x12050, 0x12080}, {0x12050}, log=lambda m: None) == {}
