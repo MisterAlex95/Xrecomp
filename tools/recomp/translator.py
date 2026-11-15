@@ -675,6 +675,32 @@ class FunctionTranslator:
                 start, end, set(), set(), coalescing=True)
         return self._reach_memo[start, end]
 
+    _NUMBER = re.compile(r"(-?)\b(0x[0-9a-fA-F]+|[0-9]+)\b")
+
+    def _may_name_code(self, raw_bytes, start, end):
+        """Whether the static-indirect pass can learn anything from this
+        body's linear decode (XBA-209): it has an indirect call (a callback
+        table needs one), or a push or mov carries a number that is a code
+        address not yet a function (a stored callback). Decided on the lite
+        decode (mnemonics and operand text, the same instruction stream),
+        conservatively: every number in the operand text counts, so a body
+        this refuses is one the full decode finds nothing in either, and the
+        pass skips the detailed decode of most functions."""
+        func_db = self.func_db
+        for insn in self.disasm.scan_function(raw_bytes, start, end):
+            m = insn.mnemonic
+            if m == "call":
+                if insn.call_target is None:
+                    return True
+            elif m == "push" or m == "mov":
+                for neg, num in self._NUMBER.findall(insn.op_str):
+                    v = int(num, 16) if num[:2] in ("0x", "0X") else int(num)
+                    for imm in ((v & 0xFFFFFFFF, (-v) & 0xFFFFFFFF) if neg
+                                else (v & 0xFFFFFFFF,)):
+                        if imm not in func_db and is_code_address(imm):
+                            return True
+        return False
+
     @staticmethod
     def _stored_immediate(insn):
         """Return the immediate a push or memory store passes, if any."""
@@ -767,6 +793,9 @@ class FunctionTranslator:
                 raw_bytes = self._read_func_bytes(caller, end)
                 if not raw_bytes:
                     continue
+                if (caller not in self.recovered_function_starts
+                        and not self._may_name_code(raw_bytes, caller, end)):
+                    continue        # no table, no stored code address
                 instructions = self.disasm.disassemble_function(
                     raw_bytes, caller, end)
             # Linear decoding runs on through inline data and past exits;
@@ -1540,9 +1569,14 @@ class FunctionTranslator:
             else:
                 end = info.get("end", start)
                 raw_bytes = self._read_func_bytes(start, end)
+                # Only an indirect jmp through memory is a site: a function
+                # without one (the lite decode says) needs no operand detail.
                 instructions = (
                     self.disasm.disassemble_function(raw_bytes, start, end)
-                    if raw_bytes else [])
+                    if raw_bytes and any(
+                        insn.mnemonic == "jmp" and "[" in insn.op_str
+                        for insn in self.disasm.scan_function(raw_bytes, start, end))
+                    else [])
                 known = {}
             for insn in instructions:
                 if (insn.mnemonic != "jmp" or insn.jump_target
