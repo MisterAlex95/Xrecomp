@@ -23,7 +23,7 @@ volatile uint32_t g_icall_trace_idx;
 volatile uint64_t g_icall_count;
 ```
 
-Every `RECOMP_ICALL` macro writes to this buffer before dispatching. When the game crashes, inspect the ring buffer in the debugger:
+With `RECOMP_ICALL_TRACE=1` in the environment (off by default since XBA-38), every `RECOMP_ICALL` macro writes to this buffer before dispatching. When the game crashes, inspect the ring buffer in the debugger:
 
 ```
 g_icall_trace[0]  = 0x00145670   ; RwTextureRead (valid)
