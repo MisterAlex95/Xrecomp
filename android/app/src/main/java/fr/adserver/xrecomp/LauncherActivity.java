@@ -5824,6 +5824,12 @@ public class LauncherActivity extends Activity {
         };
         edit.setOnClickListener(v -> openTouchEditor(pick[0], pick[0] == own ? gameKey : null));
         onFocus(edit, detail);
+        // XBA-212: every saved layout away at once (all consoles, every game's own), the usual layout back.
+        listRow(list, getString(R.string.CTL_TOUCH_RESET), getString(R.string.CTL_TOUCH_RESET_DETAIL), () -> {
+            int n = TouchLayout.resetAll(getFilesDir());
+            Log.i(TAG, "launcher: touch layouts reset, " + n + " file(s) removed");
+            describe(getString(R.string.CTL_TOUCH_RESET_DONE, n));
+        });
     }
 
     /** The touch layout editor over the launcher; the focus comes back to the row that opened it. */

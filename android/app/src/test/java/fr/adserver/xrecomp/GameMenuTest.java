@@ -81,6 +81,8 @@ public class GameMenuTest {
         @Override public void shareLog() { shareLogs++; }
         @Override public void backToLauncher() { launchers++; }
         @Override public void quit() { quits++; }
+        Runnable onMenuOpened;    // XBA-212: what the activity does when the menu opens (closes the touch editor)
+        @Override public void menuOpened() { if (onMenuOpened != null) onMenuOpened.run(); }
 
         Boolean touch;            // the on-screen pad: null = none
         ConsolePadMap console;    // a GBA / PS1 / N64 game's mapping, null = an Xbox game
