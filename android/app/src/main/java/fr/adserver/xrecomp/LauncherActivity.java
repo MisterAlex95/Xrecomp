@@ -4506,6 +4506,7 @@ public class LauncherActivity extends Activity {
         e.importingTid = worker != null && worker.isAlive() ? importTid : null;
         e.queue = PrepareProtocol.readQueue(PrepareProtocol.queueFile(getFilesDir()));
         e.packDropped = droppedPacks;
+        e.toolkit = Toolchain.toolkitDigest(this);
         return e;
     }
 
@@ -5180,8 +5181,8 @@ public class LauncherActivity extends Activity {
     private GameCard libCard(LibraryScreen.Entry e) {
         GameCard c = new GameCard(this);
         c.setGame(LibraryScreen.art(getFilesDir(), libArt, e), e.tid, e.title(), LibraryScreen.chipText(this, e),
-                  LibraryScreen.chipColor(e.chip));
-        c.setChipShown(e.chip != GameState.Chip.READY);
+                  LibraryScreen.chipColor(e));
+        c.setChipShown(LibraryScreen.chipShown(e));
         if (libBadges)
             c.setBadge(e.console().badge());
         c.setFavourite(libView().favourite(e.tid));
@@ -5503,9 +5504,9 @@ public class LauncherActivity extends Activity {
         int[] g = LibraryScreen.glows(this, e);
         if (backdrop != null)
             backdrop.setGlows(g[0], g[1]);
-        setContext(libContext(e), LibraryScreen.chipColor(e.chip));
+        setContext(libContext(e), LibraryScreen.chipColor(e));
         if (companion != null)
-            companion.library(e.title(), LibraryScreen.chipText(this, e), LibraryScreen.chipColor(e.chip),
+            companion.library(e.title(), LibraryScreen.chipText(this, e), LibraryScreen.chipColor(e),
                               LibraryScreen.art(getFilesDir(), libArt, e), primaryLabel(e));
     }
 
@@ -5559,7 +5560,7 @@ public class LauncherActivity extends Activity {
         homeChip = e.chip;
         String title = e.title();
         String chipText = LibraryScreen.chipText(this, e);
-        int chipColor = LibraryScreen.chipColor(e.chip);
+        int chipColor = LibraryScreen.chipColor(e);
 
         LinearLayout info = hero(title, false);
         heroLine(info, chipText, chipColor);
@@ -5620,7 +5621,7 @@ public class LauncherActivity extends Activity {
             return true;
         for (int i = 0; i < now.size(); i++) {
             LibraryScreen.Entry a = now.get(i), b = libEntries.get(i);
-            if (!a.tid.equals(b.tid) || a.chip != b.chip || a.queuePos != b.queuePos)
+            if (!a.tid.equals(b.tid) || a.chip != b.chip || a.prepared != b.prepared || a.queuePos != b.queuePos)
                 return true;
         }
         return false;
