@@ -412,9 +412,12 @@ static void build_windows(line_ctx *c)
             if (c->objwin[x])
                 c->winmask[x] = v;
     }
-    if ((d & 0x4000) && win_in_v(rd16(io, REG_WIN1V), c->line))
+    unsigned wv = c->in->win_v;
+    int in1 = (wv & 0x80) ? (wv & 2) != 0 : win_in_v(rd16(io, REG_WIN1V), c->line);
+    int in0 = (wv & 0x80) ? (wv & 1) != 0 : win_in_v(rd16(io, REG_WIN0V), c->line);
+    if ((d & 0x4000) && in1)
         win_fill_h(c->winmask, rd16(io, REG_WIN1H), (uint8_t)((winin >> 8) & 0x3F));
-    if ((d & 0x2000) && win_in_v(rd16(io, REG_WIN0V), c->line))
+    if ((d & 0x2000) && in0)
         win_fill_h(c->winmask, rd16(io, REG_WIN0H), (uint8_t)(winin & 0x3F));
 }
 
@@ -578,7 +581,7 @@ void gba_ppu_render_line(const gba_ppu_inputs *in, int line, uint16_t out[240])
     c.mosaic = rd16(in->io, REG_MOSAIC);
 
     unsigned mode = dispcnt & 7;
-    unsigned bgmask = (dispcnt >> 8) & 15;
+    unsigned bgmask = (dispcnt >> 8) & 15 & ~(unsigned)in->bg_hide;
     static const uint8_t present[8] = {0xF, 0x7, 0xC, 0x4, 0x4, 0x4, 0, 0};
     bgmask &= present[mode];
 

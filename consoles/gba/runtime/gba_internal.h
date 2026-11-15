@@ -196,6 +196,13 @@ struct gba_machine {
     gba_dma dma[4];
     uint32_t dma_latch;     /* last value a DMA moved (open bus of DMA reads) */
 
+    /* PPU timing (XBA-201, the mGBA suite's video tests): lines before a newly enabled BG shows, the windows'
+     * vertical flags (latched at each line start: set on WINxV's top line, cleared on its bottom one), and OAM as
+     * the previous line's render point saw it (sprites are fetched a line ahead: a later write shows a line later). */
+    uint8_t bg_delay[4];
+    uint8_t win_latch;
+    uint8_t oam_line[GBA_OAM_SIZE];
+
     /* Affine reference points, 20.8 fixed point sign-extended from 28 bits. */
     int32_t bg2x, bg2y, bg3x, bg3y;
 

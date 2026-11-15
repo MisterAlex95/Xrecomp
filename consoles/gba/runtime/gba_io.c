@@ -8,6 +8,8 @@
  * width (gba_save.c). */
 #include "gba_internal.h"
 
+#include <string.h>
+
 static const int timer_shift[4] = {0, 6, 8, 10};
 /* Timer and interrupt timing, fitted to the mGBA suite's hardware results (timer count-up, timer IRQ; XBA-201): a
  * timer counts from the cycle after the write that starts it; a CPU read sees the counter as it was when the access
@@ -332,9 +334,14 @@ static void ppu_event(gba_machine *m)
     switch (m->line_phase) {
     case 0: /* end of HDraw: draw the line */
         if (m->vcount < GBA_SCREEN_H && m->fb) {
-            gba_ppu_inputs in = {m->io, m->pal, m->vram, m->oam, m->bg2x, m->bg2y, m->bg3x, m->bg3y};
+            uint8_t hide = 0;
+            for (int b = 0; b < 4; b++)
+                hide |= (uint8_t)((m->bg_delay[b] != 0) << b);
+            gba_ppu_inputs in = {m->io, m->pal, m->vram, m->oam_line, m->bg2x, m->bg2y, m->bg3x, m->bg3y,
+                                 hide, (uint8_t)(0x80 | m->win_latch)};
             gba_ppu_render_line(&in, (int)m->vcount, m->fb + m->vcount * GBA_SCREEN_W);
         }
+        memcpy(m->oam_line, m->oam, GBA_OAM_SIZE); /* what the next line's sprites are fetched from */
         m->line_phase = 1;
         break;
     case 1: /* HBlank */
@@ -357,6 +364,17 @@ static void ppu_event(gba_machine *m)
         if (++m->vcount == GBA_LINES)
             m->vcount = 0;
         wr16(&m->io[6], (uint16_t)m->vcount);
+        for (int b = 0; b < 4; b++)
+            if (m->bg_delay[b])
+                m->bg_delay[b]--;
+        for (int w = 0; w < 2; w++) {
+            uint16_t wv = rd16(&m->io[0x44 + 2 * w]);
+            uint32_t top = wv >> 8, bottom = wv & 0xFF;
+            if (m->vcount == bottom)
+                m->win_latch &= (uint8_t)~(1u << w);
+            else if (m->vcount == top)
+                m->win_latch |= (uint8_t)(1u << w);
+        }
         if (m->vcount == GBA_SCREEN_H) {
             set_dispstat_flags(m, 1, 0);
             if (m->io[4] & 0x08)
@@ -492,6 +510,18 @@ void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v)
         return;
     }
     switch (a) {
+    case 0x000: { /* DISPCNT: a BG switched on shows 3 lines later, one switched off disappears at once */
+        uint16_t old = rd16(&m->io[0]);
+        for (int b = 0; b < 4; b++) {
+            uint16_t bit = (uint16_t)(0x100u << b);
+            if ((v & bit) && !(old & bit))
+                m->bg_delay[b] = 3;
+            else if (!(v & bit))
+                m->bg_delay[b] = 0;
+        }
+        wr16(&m->io[0], v);
+        return;
+    }
     case 0x004: /* DISPSTAT: flags are read-only */
         wr16(&m->io[4], (uint16_t)((rd16(&m->io[4]) & 7) | (v & 0xFF38)));
         vcount_check(m);
