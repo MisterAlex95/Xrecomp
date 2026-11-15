@@ -23,7 +23,9 @@ API = 30
 TARGET = "aarch64-linux-android%d" % API
 GB = 1 << 30
 # Each clang job on the generated C: see "Measurements" in docs/android/prepare.md.
-JOB_RSS = 1 * GB
+# 512 MB since the lift's chunks are at most ~1.5 MB of C (XBA-209): one peaks
+# at ~170 MB, where a 5 MB chunk of the old 250-function split reached 0.6 GB.
+JOB_RSS = GB // 2
 RESERVED = 3 * GB
 MAX_JOBS = 5
 
@@ -180,7 +182,7 @@ def mem_available(meminfo="/proc/meminfo"):
 
 
 def default_jobs(avail=None, cpus=None, job_rss=JOB_RSS, reserved=RESERVED):
-    """min(5, (MemAvailable - 3 GB) / 1 GB), at least 1, at most the CPU
+    """min(5, (MemAvailable - 3 GB) / 512 MB), at least 1, at most the CPU
     count (job_rss / reserved: another console's figures, tools/prepare/gba.py).
     `avail` None = unknown memory: 1."""
     if avail is None:
