@@ -52,6 +52,7 @@
 
 #ifndef _WIN32
 #include <pthread.h>
+#include <time.h>
 #define RDP_THREADS 1
 #endif
 
@@ -209,6 +210,7 @@ struct n64_rdp {
     uint64_t *batch;
     uint32_t nbatch;
     uint32_t haz_lo, haz_hi;
+    n64_rdp_stats stats; /* host counters (n64_rdp_get_stats), not in save states */
 #ifdef RDP_THREADS
     pthread_t th[N64_RDP_MAX_THREADS];
     pthread_mutex_t mu;
@@ -2477,6 +2479,11 @@ const uint8_t *n64_rdp_hidden_bits(n64_rdp *d)
     return d->hidden;
 }
 
+void n64_rdp_get_stats(n64_rdp *d, n64_rdp_stats *out)
+{
+    *out = d->stats;
+}
+
 void n64_rdp_flush(n64_rdp *d)
 {
     if (!d->nbatch) {
@@ -2485,6 +2492,8 @@ void n64_rdp_flush(n64_rdp *d)
     }
 #ifdef RDP_THREADS
     if (d->threads_up) {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
         pthread_mutex_lock(&d->mu);
         d->running = d->nthreads - 1;
         d->gen++;
@@ -2495,6 +2504,9 @@ void n64_rdp_flush(n64_rdp *d)
         while (d->running)
             pthread_cond_wait(&d->cv_done, &d->mu);
         pthread_mutex_unlock(&d->mu);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        d->stats.waits++;
+        d->stats.wait_ns += (uint64_t)((int64_t)(t1.tv_sec - t0.tv_sec) * 1000000000 + (t1.tv_nsec - t0.tv_nsec));
     } else
 #endif
     {
@@ -2616,6 +2628,8 @@ static void dispatch(n64_rdp *d, const uint64_t *w, int len)
         d->pipebusy = (d->pipebusy + cost) & 0xFFFFFF;
     if (id != 0x29) /* commands after a SYNC_FULL in the same buffer start the pipe again */
         d->status |= ST_PIPE_BUSY | ST_GCLK;
+    d->stats.commands++;
+    d->stats.full_syncs += id == 0x29;
 
     if (id == 0x30 || id == 0x33 || id == 0x34) {
         uint32_t sh = (uint32_t)(w0 >> 12) & 0xFFF, sl = (uint32_t)(w0 >> 44) & 0xFFF;

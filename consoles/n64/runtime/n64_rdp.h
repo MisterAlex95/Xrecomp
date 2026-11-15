@@ -70,6 +70,16 @@ int n64_rdp_scanout_scale(const n64_rdp *d);
 int n64_rdp_scanout(n64_rdp *d, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w,
                     int *h);
 
+/* Host performance counters (n64_core.h n64_perf), totals since n64_rdp_create (kept across a back end replacement):
+ * commands run, SYNC_FULL among them, flushes that drew or waited (the threaded software RDP drawing its batch and
+ * waiting for its threads; the Vulkan RDP waiting for the GPU, for the write-back into RDRAM and for the upscaled
+ * scanout) and their time in ns.
+ * Not in save states. */
+typedef struct n64_rdp_stats {
+    uint64_t commands, full_syncs, waits, wait_ns;
+} n64_rdp_stats;
+void n64_rdp_get_stats(n64_rdp *d, n64_rdp_stats *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -52,6 +52,7 @@
 #include "thread_id.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -83,6 +84,7 @@ struct VkRdp {
     uint32_t pend[44]{}; /* one command, 32-bit words (high word first), up to 22 64-bit words */
     int npend = 0;       /* 64-bit words collected */
     bool unsynced = false; /* commands queued since the last wait */
+    n64_rdp_stats stats{}; /* host counters (n64_rdp_get_stats), not in save states */
 
     /* Front-end view of the state, for the costs and the written ranges (as in n64_rdp.c). */
     int fe_cycle = 0, fe_ci_size = 2, fe_ci_width = 320, fe_zon = 0, fe_sc_y0 = 0, fe_sc_y1 = 0xFFF;
@@ -166,11 +168,21 @@ void wrote_report(VkRdp *d)
 }
 
 /* Everything queued is drawn and written back into the core's RDRAM. */
+uint64_t host_ns()
+{
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 void sync(VkRdp *d)
 {
     if (d->unsynced) {
         on_thread();
+        const uint64_t t0 = host_ns();
         d->cp->wait_for_timeline(d->cp->signal_timeline());
+        d->stats.waits++;
+        d->stats.wait_ns += host_ns() - t0;
         d->unsynced = false;
         if (!d->failed && d->cp->has_pipeline_failure()) {
             d->failed = true;
@@ -277,7 +289,10 @@ void scanout_rgb(VkRdp *d, const uint32_t *vi, uint32_t field, unsigned *sw, uns
         d->cp->set_vi_register(RDP::VIRegister(r), r == unsigned(RDP::VIRegister::VCurrentLine) ? field : vi[r]);
     RDP::ScanoutOptions so;
     so.downscale_steps = d->down_steps;
+    const uint64_t t0 = host_ns();
     d->cp->scanout_sync(d->scan, *sw, *sh, so);
+    d->stats.waits++;
+    d->stats.wait_ns += host_ns() - t0;
 }
 
 /* ---- The check at create -------------------------------------------------------------------------------------------- */
@@ -435,6 +450,8 @@ void dispatch(VkRdp *d, const uint32_t *w, int len)
         d->pipebusy = (d->pipebusy + cost) & 0xFFFFFF;
     if (id != 0x29)
         d->status |= ST_PIPE_BUSY | ST_GCLK;
+    d->stats.commands++;
+    d->stats.full_syncs += id == 0x29;
     if (id == 0x30 || id == 0x33 || id == 0x34) {
         uint32_t sh = (uint32_t)(w0 >> 12) & 0xFFF, sl = (uint32_t)(w0 >> 44) & 0xFFF;
         d->tmemc = (d->tmemc + ((sh - sl) >> 2) + 4) & 0xFFFFFF;
@@ -936,9 +953,15 @@ int vk_state_load(void *p, const n64_rdp_common_state *c, const uint8_t *extra, 
     return 0;
 }
 
+void vk_stats(void *p, n64_rdp_stats *out)
+{
+    *out = static_cast<VkRdp *>(p)->stats;
+}
+
 } // namespace
 
 extern "C" const n64_rdp_ops n64_rdp_vk_ops = { "vulkan", vk_create, vk_destroy, vk_reset, vk_attach_dmem,
                                                 vk_read_reg, vk_write_reg, vk_run, vk_set_threads, vk_flush,
                                                 vk_failed, vk_upscale, vk_scanout_scale, vk_scanout,
-                                                vk_state_extra_size, vk_state_save, vk_state_load };
+                                                vk_state_extra_size, vk_state_save, vk_state_load,
+                                                vk_stats };

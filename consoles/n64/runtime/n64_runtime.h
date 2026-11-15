@@ -165,6 +165,48 @@ int n64_runtime_frameskip_parse(const char *v);
  * 60 Hz); a fixed N skips N, shows one. */
 int n64_runtime_frameskip(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run);
 
+/* The performance line (n64: perf ...), logged every 10 s after the frame-rate line and once at exit over the whole
+ * run (pauses left out): which configuration ran and where the host's time went. Times are ms per N64 frame: the
+ * core's n64_run_frame split into cpu / rsp / rdp / sched (the scheduler and the VI / AI / PI / SI events) by the
+ * core's timed frames (n64_perf, one in 8), the RDP's flush waits (inside rdp, or inside vi when the VI asks for
+ * them), then the runtime's own stages (idle: the sleep, the frame-generation draws during it included); other is
+ * what is left of the wall time (pads, cheats, rewind captures, save files). Host frames are the loop's iterations
+ * (one shown or skipped picture; several N64 frames each while fast-forwarding), their length without the sleep. */
+typedef struct n64_runtime_perf {
+    double seconds;           /* wall time covered */
+    uint64_t frames;          /* N64 frames run */
+    uint64_t host_frames;     /* host frames */
+    double vi_hz;             /* the game's VI rate (the full speed) */
+    double cpu_ms, rsp_ms, rdp_ms, sched_ms, rdp_wait_ms;
+    double vi_ms;             /* n64_display (the VI's picture, the upscaled scanout) */
+    double present_ms;        /* RGBA conversion and host_window_present_rgba */
+    double audio_ms;          /* n64_audio_pull and host_audio_queue */
+    double idle_ms;           /* sleeping to the next frame's deadline */
+    double other_ms;
+    double worst_ms;          /* the longest host frame */
+    double over_ms;           /* one VI frame (16.7 ms NTSC, 20 ms PAL) */
+    uint64_t over_1, over_2;  /* host frames longer than one VI frame, than two */
+    double rsp_instr, rdp_cmds, rdp_syncs; /* per N64 frame: RSP instructions, RDP commands, SYNC_FULL */
+    int pack;                 /* a title pack is attached */
+    double native_pct;        /* with a pack: the share of the CPU's instructions lifted code ran */
+    double interp_instr;      /* with a pack: RDRAM instructions the interpreter ran, per N64 frame */
+    uint64_t rehashes, slow_lookups; /* with a pack: entries re-hashed (a page they cover written), cache misses */
+    const char *rdp;          /* the RDP back end ("software", "vulkan") */
+    int rdp_threads;          /* the software RDP's scanline-band threads */
+    int upscale;              /* the RDP's internal resolution factor */
+    int rewind;               /* rewind captures on */
+    int cpu;                  /* the host core the loop ran on at the end (-1: unknown) */
+    long cpu_khz;             /* that core's scaling_cur_freq (0: unreadable) */
+} n64_runtime_perf;
+/* The line's text after "n64: perf ": "speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (wait 3.0) sched 0.3
+ * vi 1.8 present 0.9 audio 0.1 idle 0.0 other 0.2 ms/frame; worst 41 ms, 212 > 16.7 ms, 30 > 33.4 ms of 150 frames;
+ * rsp 1.20 M instr, rdp 3400 cmds, 2.0 full syncs /frame; pack 83 % native, 3.1 k interp instr/frame, 12 rehashes,
+ * 40 slow lookups; rdp vulkan, upscale 2x, rewind off; core 6 @ 1.90 GHz" ("no pack", "rdp software, 2 threads",
+ * "core ?" / "core 6" when unknown). Returns what snprintf returns. */
+int n64_runtime_perf_format(const n64_runtime_perf *p, char *out, size_t n);
+/* The whole-run figures of the last n64_runtime_run (zeroed before the first; tests). */
+void n64_runtime_last_perf(n64_runtime_perf *out);
+
 /* The « guest stuck » detector of the frame loop (diagnostics only: it logs, it changes nothing). Fed once per frame
  * with the guest's progress counters (n64_guest_activity) and its fault count (n64_guest_fault_info). Returns
  * N64_RT_STUCK_NONE, or once per episode the reason the guest looks dead: no VI origin change, SI / PI DMA or audio

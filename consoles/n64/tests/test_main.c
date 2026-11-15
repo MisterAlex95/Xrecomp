@@ -325,6 +325,61 @@ static void quit_run(pthread_t th)
  * and loaded as the in-game menu does, slot 2 while the game is held, the quick slot; fast-forward toggled; the
  * automatic slot saved when the window closes and resumed at the next start (RECOMP_STATE_RESUME=1); the slot copied
  * into another game's folder (hello.z64) refused there. */
+/* The performance line's text (n64_runtime_perf_format): the fields in their order, the pack and the core variants. */
+static void test_perf_format(void)
+{
+    n64_runtime_perf p;
+    char line[1024];
+    memset(&p, 0, sizeof p);
+    p.seconds = 10.0;
+    p.frames = 150;
+    p.host_frames = 150;
+    p.vi_hz = 60.0;
+    p.cpu_ms = 7.9;
+    p.rsp_ms = 4.1;
+    p.rdp_ms = 5.2;
+    p.rdp_wait_ms = 3.0;
+    p.sched_ms = 0.3;
+    p.vi_ms = 1.8;
+    p.present_ms = 0.9;
+    p.worst_ms = 41.2;
+    p.over_ms = 16.7;
+    p.over_1 = 120;
+    p.over_2 = 30;
+    p.rsp_instr = 1.2e6;
+    p.rdp_cmds = 3400;
+    p.rdp_syncs = 2;
+    p.pack = 1;
+    p.native_pct = 83.4;
+    p.interp_instr = 3100;
+    p.rehashes = 12;
+    p.slow_lookups = 40;
+    p.rdp = "vulkan";
+    p.upscale = 2;
+    p.cpu = 6;
+    p.cpu_khz = 1900800;
+    n64_runtime_perf_format(&p, line, sizeof line);
+    CHECK(strcmp(line, "speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (wait 3.0) sched 0.3 vi 1.8 present "
+                       "0.9 audio 0.0 idle 0.0 other 0.0 ms/frame; worst 41 ms, 120 > 16.7 ms, 30 > 33.4 ms of 150 "
+                       "frames; rsp 1.20 M instr, rdp 3400 cmds, 2.0 full syncs /frame; pack 83 % native, 3.1 k "
+                       "interp instr/frame, 12 rehashes, 40 slow lookups; rdp vulkan, upscale 2x, rewind off; core 6 @ "
+                       "1.90 GHz") == 0);
+    if (failures)
+        printf("perf line: %s\n", line);
+    p.pack = 0;
+    p.rdp = "software";
+    p.rdp_threads = 2;
+    p.upscale = 1;
+    p.rewind = 1;
+    p.cpu_khz = 0;
+    n64_runtime_perf_format(&p, line, sizeof line);
+    CHECK(strstr(line, "; no pack; rdp software, 2 threads, upscale 1x, rewind on; core 6") != NULL);
+    CHECK(strstr(line, "GHz") == NULL);
+    p.cpu = -1;
+    n64_runtime_perf_format(&p, line, sizeof line);
+    CHECK(strstr(line, "; core ?") != NULL);
+}
+
 static void test_states(const char *dir, const char *hb)
 {
     char rom[600], rom2[600], slot[800], other[800], cmd[1700];
@@ -438,6 +493,20 @@ static void test_runs(const char *hb)
     CHECK(n64_runtime_run(&o) == 0);
     CHECK(ppm_size(shot, &w, &h) == 0 && w == 320 && h >= 224 && h <= 240);
     CHECK(ppm_pixel(shot, 40, 30, rgb) == 0 && rgb[0] > 200 && rgb[1] < 40 && rgb[2] < 40);
+    /* The whole run's performance figures: every frame counted, the core timed, the stages add up to the wall time
+     * (other: what no stage covers, a small part). */
+    n64_runtime_perf pf;
+    n64_runtime_last_perf(&pf);
+    double wall_ms = pf.frames ? pf.seconds * 1e3 / (double)pf.frames : 0.0;
+    double staged = pf.cpu_ms + pf.rsp_ms + pf.rdp_ms + pf.sched_ms + pf.vi_ms + pf.present_ms + pf.audio_ms +
+                    pf.idle_ms;
+    printf("perf of run 1: %.4f ms/frame, staged %.4f (cpu %.4f rsp %.4f rdp %.4f sched %.4f vi %.4f audio %.4f "
+           "other %.4f), %llu host frames, rdp %s\n",
+           wall_ms, staged, pf.cpu_ms, pf.rsp_ms, pf.rdp_ms, pf.sched_ms, pf.vi_ms, pf.audio_ms, pf.other_ms,
+           (unsigned long long)pf.host_frames, pf.rdp ? pf.rdp : "?");
+    CHECK(pf.frames == 120 && pf.host_frames >= 118 && pf.host_frames <= 120);
+    CHECK(pf.cpu_ms > 0 && pf.vi_ms > 0 && pf.rdp && pf.vi_hz > 49 && pf.vi_hz < 61);
+    CHECK(staged <= wall_ms * 1.001 && staged >= wall_ms * 0.9);
     CHECK(n64_runtime_save_path(dir, "TEST-00000001", N64_SAVE_PAK0, pak, sizeof pak) == 0);
     CHECK(file_size(pak) == -1);
     CHECK(n64_runtime_save_path(dir, "TEST-00000001", N64_SAVE_EEPROM4K, eep, sizeof eep) == 0);
@@ -524,6 +593,7 @@ int main(int argc, char **argv)
     }
     test_helpers();
     test_display();
+    test_perf_format();
     if (argc >= 2)
         test_runs(argv[1]);
     else

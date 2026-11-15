@@ -18,6 +18,7 @@ struct n64_rdp {
     n64_rcp_bus bus;
     const uint8_t *dmem;
     uint32_t start, end, current, status;
+    uint64_t commands, full_syncs; /* n64_rdp_get_stats */
 };
 
 n64_rdp *n64_rdp_create(n64_rcp_bus bus)
@@ -132,8 +133,11 @@ void n64_rdp_run(n64_rdp *d)
         if (d->current + n > d->end)
             break; /* the rest of this command is not there yet */
         d->current += n;
-        if (op == 0x29)
+        d->commands++;
+        if (op == 0x29) {
+            d->full_syncs++;
             d->bus.raise(d->bus.ctx, N64_MI_DP);
+        }
     }
 }
 
@@ -146,6 +150,12 @@ int n64_rdp_set_threads(n64_rdp *d, int n)
 }
 
 void n64_rdp_flush(n64_rdp *d) { (void)d; }
+void n64_rdp_get_stats(n64_rdp *d, n64_rdp_stats *out)
+{
+    memset(out, 0, sizeof *out);
+    out->commands = d->commands;
+    out->full_syncs = d->full_syncs;
+}
 const uint8_t *n64_rdp_hidden_bits(n64_rdp *d)
 {
     (void)d;

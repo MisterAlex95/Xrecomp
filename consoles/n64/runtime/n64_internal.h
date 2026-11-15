@@ -288,9 +288,14 @@ struct n64_machine {
     uint64_t rom_hash;
     bool rom_hashed;
     /* ---- Host-only tail, not in save states (n64_state.c saves the machine up to blocks): the interpreter's
-     * predecoded blocks (n64_cpu.c, XBA-210) and the reference switch (n64_set_interp_reference). ---- */
+     * predecoded blocks (n64_cpu.c, XBA-210), the reference switch (n64_set_interp_reference) and the host
+     * performance counters (n64_perf_enable / n64_perf_get, n64_core.c). ---- */
     struct n64_blocks *blocks;
     bool interp_ref;
+    bool perf_timing;            /* this frame's stages are timed */
+    uint32_t perf_every;         /* one frame in this many is timed (0: none) */
+    uint32_t perf_count;         /* frames since the last timed one */
+    n64_perf perf;
 };
 #define N64_MACHINE_STATE_BYTES offsetof(n64_machine, blocks)
 

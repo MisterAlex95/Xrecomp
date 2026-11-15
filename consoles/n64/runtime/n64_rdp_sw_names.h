@@ -15,6 +15,7 @@
 #define n64_rdp_set_threads n64_rdp_sw_set_threads
 #define n64_rdp_flush n64_rdp_sw_flush
 #define n64_rdp_hidden_bits n64_rdp_sw_hidden_bits
+#define n64_rdp_get_stats n64_rdp_sw_get_stats
 #define n64_rdp_state_extra_size n64_rdp_sw_state_extra_size
 #define n64_rdp_state_save_sw n64_rdp_sw_state_save
 #define n64_rdp_state_load_sw n64_rdp_sw_state_load
