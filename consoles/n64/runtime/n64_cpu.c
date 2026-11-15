@@ -49,6 +49,10 @@ void n64_cpu_status_changed(n64_machine *m)
         c->ops64 = c->addr64;
         break;
     }
+    /* Status.RE (reverse endian) in user mode: the aligned accesses reach their address XOR 8 - size (bytes 7,
+     * halfwords 6, words and instructions 4), the partial ones (LWL ... SDR) theirs XOR 7; BadVAddr keeps the
+     * address as given (n64-systemtest "RE user mode ..."). */
+    c->re = c->ksu == 2 && (sr & SR_RE);
     n64_cpu_update_irq(m);
 }
 
@@ -87,13 +91,21 @@ void n64_cpu_set_count(n64_machine *m, uint32_t v)
     n64_cpu_schedule_compare(m);
 }
 
-/* RANDOM counts down from 31 and wraps to 31 after reaching WIRED (6-bit counter: with WIRED > 31 it runs through
- * 0 and 63 down to WIRED). Derived from the instruction count rather than kept per instruction. */
+/* RANDOM counts down from 31 by one per instruction and wraps to 31 after reaching WIRED (6-bit counter: with
+ * WIRED > 31 it runs through 0 and 63 down to WIRED). Derived from the instruction count rather than kept per
+ * instruction. A WIRED write sets it to 31 two instructions later; an MFC0 right after the MTC0 still sees the old
+ * sequence (n64-systemtest "Random (decrement)", timing group, and "Random (read early)", cop0hazard group). */
 static uint32_t random_reg(n64_machine *m)
 {
-    uint32_t wired = (uint32_t)m->cpu.cop0[C0_WIRED] & 63;
+    const n64_cpu *c = &m->cpu;
+    uint32_t wired = (uint32_t)c->cop0[C0_WIRED] & 63;
+    uint64_t base = c->random_base;
+    if (m->instructions < base) {
+        wired = c->wired_prev;
+        base = c->random_base_prev;
+    }
     uint32_t span = wired <= 31 ? 32 - wired : 32 + 64 - wired;
-    uint32_t i = (uint32_t)(m->instructions % span);
+    uint32_t i = (uint32_t)((m->instructions - base) % span);
     return i <= 31 ? 31 - i : 63 - (i - 32);
 }
 
@@ -162,6 +174,19 @@ static void exception_vec(n64_machine *m, int code, int ce, uint32_t offset)
 void n64_cpu_exception(n64_machine *m, int code, int ce)
 {
     exception_vec(m, code, ce, 0x180);
+}
+
+int n64_cpu_next_cop(n64_machine *m)
+{
+    const n64_cpu *c = &m->cpu;
+    if (c->ds)
+        return 0;
+    uint64_t pc = c->cur + 4;
+    uint64_t off = (pc - 0xFFFFFFFF80000000ull) & ~0x20000000ull; /* KSEG0 or KSEG1 */
+    if (pc < 0xFFFFFFFF80000000ull || pc >= 0xFFFFFFFFC0000000ull || off >= (uint64_t)m->rdram_size)
+        return 0;
+    uint32_t op = n64_be32(m->rdram + off) >> 26;
+    return op == 0x11 ? 1 : op == 0x12 ? 2 : 0;
 }
 
 /* BadVAddr, Context / XContext BadVPN2 and EntryHi VPN2 / R: set by TLB and address error exceptions alike. */
@@ -348,6 +373,8 @@ static N64_HOT_INLINE bool rd_x(n64_machine *m, uint64_t va, int size, uint64_t 
     uint32_t pa;
     if (!vtop(m, va, ACC_LOAD, &pa, raise))
         return false;
+    if (N64_UNLIKELY(m->cpu.re))
+        pa ^= (uint32_t)(8 - size) & 7;
     if (N64_LIKELY(pa < m->rdram_size)) {
         const uint8_t *p = m->rdram + pa;
         switch (size) {
@@ -412,6 +439,8 @@ static N64_HOT_INLINE bool wr_x(n64_machine *m, uint64_t va, int size, uint64_t 
     uint32_t pa;
     if (!vtop(m, va, ACC_STORE, &pa, raise))
         return false;
+    if (N64_UNLIKELY(m->cpu.re))
+        pa ^= (uint32_t)(8 - size) & 7;
     if (N64_LIKELY(pa < m->rdram_size)) {
         if (N64_UNLIKELY(m->mi_mode & 0x80)) {
             mi_repeat_write(m, pa, size, v);
@@ -501,6 +530,8 @@ static bool fetch_slow(n64_machine *m, uint64_t pc, uint32_t *ins)
     uint32_t pa;
     if (!vtop_slow(m, pc, ACC_FETCH, &pa, true))
         return false;
+    if (m->cpu.re)
+        pa ^= 4;
     if (pa < m->rdram_size) {
         *ins = n64_be32(m->rdram + pa);
         m->now += kseg1(pc) ? COST_UNCACHED_RAM : COST_CACHED;
@@ -514,6 +545,66 @@ static bool fetch_slow(n64_machine *m, uint64_t pc, uint32_t *ins)
     *ins = n64_bus_read32(m, pa);
     m->now += pa >= 0x10000000u ? COST_ROM : COST_UNCACHED_RAM;
     return true;
+}
+
+/* CACHE (op: the rt field, cache in bits 1:0, operation in 4:2). Only the tags are modelled (n64_cpu itag / dtag):
+ * every access still reads and writes memory, so the operations on data (fills, write backs) leave memory as it is,
+ * while index / hit invalidates, store / load tag, fill and create dirty exclusive keep the tags the way the hardware
+ * does (n64-systemtest "CACHE icache index invalidate ...", "CACHE dcache create dirty exclusive ..."). The hit
+ * operations translate the address and can raise TLB exceptions; the index ones use its low bits only. False when
+ * the translation raised (raise: false for lifted code, n64_rc_cache: then nothing is done). */
+static bool cache_op(n64_machine *m, int op, uint64_t va, bool raise)
+{
+    n64_cpu *c = &m->cpu;
+    bool dcache = (op & 3) == 1;
+    if ((op & 3) > 1)
+        return true; /* no secondary cache */
+    uint32_t *tag = dcache ? &c->dtag[(va >> 4) & 511] : &c->itag[(va >> 5) & 511];
+    uint32_t valid = dcache ? 3u << 6 : 2u << 6; /* D: valid dirty (PState 3), I: valid (2) */
+    int kind = op >> 2;
+    uint32_t pa = 0;
+    if (kind >= 3) { /* create dirty exclusive, the hit operations, fill */
+        if (!vtop(m, va, ACC_LOAD, &pa, raise))
+            return false;
+    }
+    uint32_t pfn = (pa >> 12) << 8;
+    bool hit = (*tag & 0xC0u) && (*tag & 0x0FFFFF00u) == pfn;
+    switch (kind) {
+    case 0: /* index invalidate (I) / index write back invalidate (D) */
+        *tag &= ~0xC0u;
+        break;
+    case 1: /* index load tag */
+        c->cop0[C0_TAGLO] = *tag;
+        c->cop0[C0_TAGHI] = 0;
+        break;
+    case 2: /* index store tag */
+        *tag = (uint32_t)c->cop0[C0_TAGLO] & 0x0FFFFFC0u;
+        break;
+    case 3: /* create dirty exclusive (D) */
+        if (dcache)
+            *tag = pfn | valid;
+        break;
+    case 4: /* hit invalidate */
+        if (hit)
+            *tag &= ~0xC0u;
+        break;
+    case 5: /* hit write back invalidate (D) / fill (I) */
+        if (dcache) {
+            if (hit)
+                *tag &= ~0xC0u;
+        } else {
+            *tag = pfn | valid;
+        }
+        break;
+    default: /* hit write back: memory is always current */
+        break;
+    }
+    return true;
+}
+
+int n64_rc_cache(n64_machine *m, int op, uint64_t va)
+{
+    return cache_op(m, op, va, false) ? 0 : 1;
 }
 
 /* ---- Arithmetic helpers ---------------------------------------------------------------------------------------- */
@@ -574,7 +665,12 @@ static void cop0_write(n64_machine *m, int r, uint64_t v)
         c->cop0[r] = v & 0x01FFE000u;
         break;
     case C0_WIRED:
+        if (m->instructions >= c->random_base) { /* else the previous write has not taken effect yet */
+            c->wired_prev = (uint32_t)c->cop0[r] & 63;
+            c->random_base_prev = c->random_base;
+        }
         c->cop0[r] = v & 0x3F;
+        c->random_base = m->instructions + 2;
         break;
     case C0_COUNT:
         n64_cpu_set_count(m, (uint32_t)v);
@@ -726,18 +822,20 @@ static void cop0_op(n64_machine *m, uint32_t ins)
 #define NEED64() do { if (N64_UNLIKELY(!c->ops64)) RI(); } while (0)
 #define SET(r, v) do { if (r) c->gpr[r] = (v); } while (0)
 
+/* A branch adds its offset to the PC of the instruction after it: cur + 4, but in the delay slot of a jump or another
+ * branch, that one's target (n64-systemtest "BEQ: Within delay slot of J", cycle group). */
 static inline void branch(n64_cpu *c, bool taken, int64_t off)
 {
     c->next_ds = true;
     if (taken)
-        c->npc = c->cur + 4 + (uint64_t)(off << 2);
+        c->npc = c->pc + (uint64_t)(off << 2);
 }
 
 static inline void branch_likely(n64_cpu *c, bool taken, int64_t off)
 {
     if (taken) {
         c->next_ds = true;
-        c->npc = c->cur + 4 + (uint64_t)(off << 2);
+        c->npc = c->pc + (uint64_t)(off << 2);
     } else { /* the delay slot is nullified */
         c->pc = c->npc;
         c->npc += 4;
@@ -1045,6 +1143,8 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
     case 0x1A: case 0x1B: { /* LDL LDR */
         NEED64();
         uint64_t a = g[rs] + (uint64_t)imm;
+        if (N64_UNLIKELY(c->re))
+            a ^= 7;
         if (!rd_partial(m, a, 8, &v))
             return;
         uint64_t r = g[rt];
@@ -1066,6 +1166,8 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
     case 0x21: if (rd(m, g[rs] + (uint64_t)imm, 2, &v)) SET(rt, (uint64_t)(int64_t)(int16_t)v); break;  /* LH */
     case 0x22: case 0x26: { /* LWL LWR */
         uint64_t a = g[rs] + (uint64_t)imm;
+        if (N64_UNLIKELY(c->re))
+            a ^= 7;
         if (!rd_partial(m, a, 4, &v))
             return;
         uint32_t r = (uint32_t)g[rt], w = (uint32_t)v;
@@ -1090,6 +1192,8 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
     case 0x29: wr(m, g[rs] + (uint64_t)imm, 2, g[rt]); break;
     case 0x2A: case 0x2E: { /* SWL SWR: the bytes of the aligned word they cover */
         uint64_t a = g[rs] + (uint64_t)imm;
+        if (N64_UNLIKELY(c->re))
+            a ^= 7;
         uint32_t r = (uint32_t)g[rt], mask, data;
         if ((ins >> 26) == 0x2A) {
             unsigned sh = 8 * (unsigned)(a & 3);
@@ -1107,6 +1211,8 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
     case 0x2C: case 0x2D: { /* SDL SDR */
         NEED64();
         uint64_t a = g[rs] + (uint64_t)imm;
+        if (N64_UNLIKELY(c->re))
+            a ^= 7;
         uint64_t r = g[rt], mask, data;
         if ((ins >> 26) == 0x2C) {
             unsigned sh = 8 * (unsigned)(a & 7);
@@ -1120,11 +1226,12 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
         store_masked(m, a, data, mask, 8);
         break;
     }
-    case 0x2F: /* CACHE: no cache model */
+    case 0x2F: /* CACHE */
         if (c->ksu != 0 && !(c->cop0[C0_STATUS] & SR_CU0)) {
             n64_cpu_exception(m, EXC_CPU, 0);
             return;
         }
+        cache_op(m, rt, g[rs] + (uint64_t)imm, true);
         break;
     case 0x30: { /* LL */
         uint64_t a = g[rs] + (uint64_t)imm;
@@ -1199,7 +1306,21 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
             n64_cpu_exception(m, EXC_CPU, 2);
             return;
         }
-        RI();
+        /* With CU2 set they raise nothing and go through the COP2 latch like the moves (n64-systemtest
+         * "LWC2/LDC2/SWC2/SDC2", a poorly understood quirk): both loads fill the latch with the aligned doubleword,
+         * SDC2 stores the latch, SWC2 its low word. */
+        {
+            uint64_t a = g[rs] + (uint64_t)imm;
+            if ((ins >> 26) == 0x32 || (ins >> 26) == 0x36) {
+                if (rd(m, a & ~(uint64_t)7, 8, &v))
+                    c->cop2_latch = v;
+            } else if ((ins >> 26) == 0x3E) {
+                wr(m, a & ~(uint64_t)7, 8, c->cop2_latch);
+            } else {
+                wr(m, a & ~(uint64_t)3, 4, (uint32_t)c->cop2_latch);
+            }
+        }
+        break;
     default: /* 0x1C-0x1E, 0x33, 0x3B: reserved (COP3 loads / stores) */
         RI();
     }
