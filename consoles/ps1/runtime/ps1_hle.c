@@ -779,8 +779,13 @@ static void hle_printf(ps1_machine *m, uint32_t fmt, int first_arg)
             width = (int)arg(m, ai++);
             c = (char)rd8(m, ++p);
         } else {
-            while (c >= '0' && c <= '9') {
-                width = width * 10 + (c - '0');
+            /* the BIOS's printf takes a flag after the width too ("%2-d": ps1-tests cpu/access-time, whose
+             * hardware log shows it left-justified) */
+            while ((c >= '0' && c <= '9') || (width && c == '-')) {
+                if (c == '-')
+                    left = true;
+                else
+                    width = width * 10 + (c - '0');
                 c = (char)rd8(m, ++p);
             }
         }
