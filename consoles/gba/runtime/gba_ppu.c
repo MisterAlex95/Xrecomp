@@ -114,13 +114,23 @@ static void render_text_bg(line_ctx *c, int bg)
         unsigned hf = (e & 0x400) ? 7 : 0;
         if (!bpp8) {
             unsigned addr = charbase + (e & 0x3FF) * 32 + ty * 4;
-            if (addr >= 0x10000) {   /* BG tiles cannot reach OBJ VRAM */
+            uint32_t row = addr >= 0x10000 ? 0 : rd32(vram, addr); /* BG tiles cannot reach OBJ VRAM */
+            if (row == 0) {   /* colour 0 everywhere: transparent */
                 memset(dst + x, 0, n * sizeof *dst);
             } else {
-                uint32_t row = rd32(vram, addr);
+                if (hf) {   /* mirrored: reverse the eight nibbles once instead of per pixel */
+                    row = __builtin_bswap32(row);
+                    row = ((row >> 4) & 0x0F0F0F0Fu) | ((row & 0x0F0F0F0Fu) << 4);
+                }
                 const uint16_t *lut = c->lut4 + (e >> 12) * 16;
-                for (unsigned k = 0; k < n; k++)
-                    dst[x + k] = lut[(row >> (((px + k) ^ hf) * 4)) & 15];
+                row >>= px * 4;
+                if (n == 8) {
+                    for (unsigned k = 0; k < 8; k++)
+                        dst[x + k] = lut[(row >> (k * 4)) & 15];
+                } else {
+                    for (unsigned k = 0; k < n; k++)
+                        dst[x + k] = lut[(row >> (k * 4)) & 15];
+                }
             }
         } else {
             unsigned addr = charbase + (e & 0x3FF) * 64 + ty * 8;
@@ -208,6 +218,20 @@ static void render_bitmap_bg(line_ctx *c, int mode)
     unsigned frame = (mode != 3 && (c->dispcnt & 0x10)) ? 0xA000 : 0;
 
     affine_setup(c, 2, &x, &y, &pa, &pc);
+    if (pa == 0x100 && pc == 0) {   /* unscaled, unrotated (the usual case): one row, x + i */
+        int32_t ix0 = x >> 8, iy = y >> 8;
+        for (int i = 0; i < W; i++) {
+            int32_t ix = ix0 + i;
+            if ((uint32_t)ix >= (uint32_t)bw || (uint32_t)iy >= (uint32_t)bh)
+                dst[i] = 0;
+            else if (mode == 4)
+                dst[i] = c->lut8[vram[frame + (unsigned)(iy * bw + ix)]];
+            else
+                dst[i] = (uint16_t)(rd16(vram, frame + (unsigned)(iy * bw + ix) * 2) | OPAQUE);
+        }
+        finish_affine(c, 2);
+        return;
+    }
     for (int i = 0; i < W; i++, x += pa, y += pc) {
         int32_t ix = x >> 8, iy = y >> 8;
         if ((uint32_t)ix >= (uint32_t)bw || (uint32_t)iy >= (uint32_t)bh) {
@@ -459,70 +483,80 @@ static void compose(line_ctx *c, unsigned bgmask, uint16_t *out)
             any_semi = c->objsemi[x] && c->objp[x] != OBJ_NONE;
     int need_second = any_semi || effect == 1;
 
+    /* The two front-most visible layers of each pixel (c1 / l1 in front, c2 / l2 behind it; the backdrop when there
+     * are fewer), painted back to front: for each priority from 3 to 0, the backgrounds of that priority from the
+     * highest number down, then the sprites of that priority (a sprite is in front of a background of its own
+     * priority). A visible pixel pushes the front layer back to second place. That is the front-to-back search of
+     * each pixel (lower priority first, then lower BG number, a sprite before the backgrounds of its priority) done
+     * a layer at a time. The second layer only matters for blending: without it only the front one is tracked. */
+    uint16_t c1[W], c2[W];
+    uint8_t l1[W], l2[W];
+    unsigned objprios = 0;   /* bit p: a sprite pixel of priority p is visible through the OBJ window bit */
+    if (obj_on)
+        for (int x = 0; x < W; x++)
+            if (c->objp[x] != OBJ_NONE && (c->winmask[x] & 0x10))
+                objprios |= 1u << c->objp[x];
+    for (int x = 0; x < W; x++) {
+        c1[x] = c2[x] = (uint16_t)backdrop;
+        l1[x] = l2[x] = LAYER_BD;
+    }
+    for (int p = 3; p >= 0; p--) {
+        for (int j = nbg - 1; j >= 0; j--) {
+            if (prio[j] != p)
+                continue;
+            int b = order[j];
+            const uint16_t *px = c->bg[b];
+            if (need_second) {
+                for (int x = 0; x < W; x++)
+                    if ((px[x] & OPAQUE) && ((c->winmask[x] >> b) & 1)) {
+                        c2[x] = c1[x];
+                        l2[x] = l1[x];
+                        c1[x] = px[x];
+                        l1[x] = (uint8_t)b;
+                    }
+            } else {
+                for (int x = 0; x < W; x++)
+                    if ((px[x] & OPAQUE) && ((c->winmask[x] >> b) & 1)) {
+                        c1[x] = px[x];
+                        l1[x] = (uint8_t)b;
+                    }
+            }
+        }
+        if (!(objprios & (1u << p)))
+            continue;
+        for (int x = 0; x < W; x++)
+            if (c->objp[x] == p && (c->winmask[x] & 0x10)) {
+                c2[x] = c1[x];
+                l2[x] = l1[x];
+                c1[x] = c->objc[x];
+                l1[x] = LAYER_OBJ;
+            }
+    }
+
+    if (effect == 0 && !any_semi) {   /* no colour effect anywhere: the front layer as is */
+        for (int x = 0; x < W; x++)
+            out[x] = (uint16_t)(c1[x] & 0x7FFFu);
+        return;
+    }
     for (int x = 0; x < W; x++) {
         unsigned m = c->winmask[x];
-        int obj_ok = obj_on && c->objp[x] != OBJ_NONE && (m & 0x10);
-        unsigned c1 = backdrop, c2 = backdrop, l1 = LAYER_BD, l2 = LAYER_BD;
-        int want = need_second && (m & 0x20) ? 2 : 1;
-
-        if (want == 1) {
-            /* Front-most layer only. */
-            int j = 0;
-            for (; j < nbg; j++) {
-                if (obj_ok && c->objp[x] <= prio[j])
-                    break;
-                int b = order[j];
-                uint16_t px = c->bg[b][x];
-                if ((m >> b) & 1 && (px & OPAQUE)) {
-                    c1 = px;
-                    l1 = (unsigned)b;
-                    break;
-                }
-            }
-            if (l1 == LAYER_BD && obj_ok) {
-                c1 = c->objc[x];
-                l1 = LAYER_OBJ;
-            }
-        } else {
-            int found = 0;
-            for (int j = 0; j < nbg && found < 2; j++) {
-                if (obj_ok && c->objp[x] <= prio[j]) {
-                    obj_ok = 0;
-                    if (found++ == 0) { c1 = c->objc[x]; l1 = LAYER_OBJ; }
-                    else { c2 = c->objc[x]; l2 = LAYER_OBJ; }
-                    if (found >= 2)
-                        break;
-                }
-                int b = order[j];
-                uint16_t px = c->bg[b][x];
-                if ((m >> b) & 1 && (px & OPAQUE)) {
-                    if (found++ == 0) { c1 = px; l1 = (unsigned)b; }
-                    else { c2 = px; l2 = (unsigned)b; }
-                }
-            }
-            if (found < 2 && obj_ok) {
-                if (found == 0) { c1 = c->objc[x]; l1 = LAYER_OBJ; }
-                else { c2 = c->objc[x]; l2 = LAYER_OBJ; }
-            }
-        }
-        c1 &= 0x7FFF;
-        c2 &= 0x7FFF;
-
+        unsigned a = c1[x] & 0x7FFFu, l = l1[x];
         if (m & 0x20) {
-            if (l1 == LAYER_OBJ && c->objsemi[x] && ((t2 >> l2) & 1))
-                c1 = blend_alpha(c1, c2, eva, evb);
-            else if ((t1 >> l1) & 1) {
+            unsigned b = c2[x] & 0x7FFFu, lb = l2[x];
+            if (l == LAYER_OBJ && c->objsemi[x] && ((t2 >> lb) & 1))
+                a = blend_alpha(a, b, eva, evb);
+            else if ((t1 >> l) & 1) {
                 if (effect == 1) {
-                    if ((t2 >> l2) & 1)
-                        c1 = blend_alpha(c1, c2, eva, evb);
+                    if ((t2 >> lb) & 1)
+                        a = blend_alpha(a, b, eva, evb);
                 } else if (effect == 2) {
-                    c1 = brighten(c1, evy);
+                    a = brighten(a, evy);
                 } else if (effect == 3) {
-                    c1 = darken(c1, evy);
+                    a = darken(a, evy);
                 }
             }
         }
-        out[x] = (uint16_t)c1;
+        out[x] = (uint16_t)a;
     }
 }
 
@@ -549,11 +583,12 @@ void gba_ppu_render_line(const gba_ppu_inputs *in, int line, uint16_t out[240])
     bgmask &= present[mode];
 
     if (bgmask && mode != 3 && mode != 5) {
-        for (unsigned i = 0; i < 256; i++) {
-            uint16_t col = (uint16_t)(rd16(in->palette, i * 2) | OPAQUE);
-            c.lut8[i] = i ? col : 0;
-            c.lut4[i] = (i & 15) ? col : 0;
-        }
+        for (unsigned i = 0; i < 256; i++)
+            c.lut8[i] = (uint16_t)(rd16(in->palette, i * 2) | OPAQUE);
+        memcpy(c.lut4, c.lut8, sizeof c.lut4);
+        for (unsigned i = 0; i < 256; i += 16)
+            c.lut4[i] = 0;
+        c.lut8[0] = 0;
     }
     for (int b = 0; b < 4; b++) {
         if (!(bgmask & (1u << b)))

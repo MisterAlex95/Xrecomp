@@ -234,7 +234,7 @@ void gba_recomp_run(gba_machine *m)
         uint32_t thumb = (m->cpu.cpsr_ctl & CPSR_T) ? 1 : 0;
         uint32_t pc = m->cpu.r[15] - (thumb ? 4 : 8);
         if (!in_rom(pc) || (m->irq_line && !(m->cpu.cpsr_ctl & CPSR_I))) {
-            gba_cpu_step(m); /* BIOS, RAM, or the IRQ to take */
+            gba_cpu_step_outside_rom(m); /* BIOS, RAM, or the IRQ to take: as long as that lasts */
             continue;
         }
         uint32_t key = pc | thumb;

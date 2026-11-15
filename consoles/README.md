@@ -637,6 +637,32 @@ alone is within noise of what it was before the page write tracking. Lifted C co
 instructions with gcc -O1 -fno-tree-slp-vectorize on that host (homebrew: 28-38 k instructions in ~4-5 s with 6 jobs;
 n64-systemtest: 407 k instructions in ~77 s with 6 jobs, 1.1 s / 1k).
 
+**GBA / PS1 interpreter speed (XBA-191).** Profiled with callgrind (instruction counts, portable enough to steer arm64
+work; qemu timings mean nothing) on the homebrew corpus, the jsmolka / JaCzekanski suites and the synthetic game-sized
+programs of `gba/tests/bench` and `ps1/tests/bench` (`build_rom.sh` / `build_exe.sh`, CPU-bound), each run with
+`--run-hash` so a change that alters a picture, a sample or a cycle shows. What changed, all byte-identical (run
+hashes, lockstep, save-state round trips, a differential fuzz of the PPU against its previous version):
+- Both interpreters' step functions, and on the GBA both decoders and the data-processing class, are inlined into
+  the run loop (a call per instruction and its callee-saved registers were a fifth of the PS1 interpreter's cost);
+  the opcode fetch from the regions code runs from (GBA ROM / IWRAM / BIOS with the `fetch16` / `fetch32` cost tables
+  lifted code already uses; PS1 main RAM) is inline, the rest goes through the bus as before.
+- PS1 byte / halfword loads and every store to main RAM skip the bus call (same decode, page write counter bumped).
+- With a pack, code no pack holds (the BIOS and its interrupt handlers, GBA RAM code) runs in the inlined
+  interpreter loop (`gba_cpu_step_outside_rom`, `ps1_cpu_step_unliftable`) instead of a call per instruction from
+  the recompiler's loop; on the PS1 bench that code is still most of the frame.
+- GBA PPU: layers composed back to front a layer at a time instead of a front-to-back search per pixel; 4bpp text rows
+  mirrored once, empty rows skipped; unscaled bitmap rows walked directly. PS1 SPU: no interpolation for an off,
+  silent voice.
+
+x86-64 Ryzen AI Max+ 395, gcc -O3, before -> after, instructions per frame: GBA bench 20.3 M -> 13.5 M, gfx.gba 7.7 M
+-> 4.9 M, jsmolka arm 5.7 M -> 2.6 M, bench with its pack 9.6 M -> 6.3 M; PS1 bench 45.4 M -> 36.5 M, gfx.exe 53.5 M
+-> 42.6 M, bench with its pack 33.9 M -> 26.9 M. Wall clock per 600 frames: GBA 1.3-1.6x faster, PS1 1.06-1.16x
+(that wide core hides most of the PS1 interpreter's removed loads and stores; the Cortex-A715 / A710 cores of the
+Thor should see more of it). LTO of the cores gains 0-4 % there and is not enabled; the Android build already
+compiles them -O3 -mtune=cortex-a715. What is left on the PS1 is the interpreter itself (~80 instructions per guest
+instruction: the per-step delay-slot and load-delay bookkeeping through memory), which a register-cached loop or a
+predecoded block cache would address.
+
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
 presents each one twice at 60 Hz), the generated frames take the repeats' slots, and the runtimes' frame sleep goes

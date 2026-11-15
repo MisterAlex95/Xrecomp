@@ -321,7 +321,11 @@ static int16_t voice_sample(ps1_spu *s, int i, int16_t prev_out)
         v->out = 0;
         return 0;
     }
-    if (s->non & (1u << i)) {
+    if (v->phase == PH_OFF && v->env == 0) {
+        /* Off and silent: nothing below can raise the envelope (an end flag only mutes and releases, a release from 0
+         * stays at 0), so the output is 0 whatever the sample; skip the interpolation, keep the rest running. */
+        sample = 0;
+    } else if (s->non & (1u << i)) {
         sample = (int16_t)s->noise;
     } else {
         uint32_t idx = v->counter >> 12, g = (v->counter >> 4) & 0xFF;

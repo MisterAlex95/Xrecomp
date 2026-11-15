@@ -522,9 +522,9 @@ void ps1_recomp_get_stats(ps1_machine *m, ps1_recomp_stats *out)
 /* Main RAM above the kernel area, through KUSEG / KSEG0 / KSEG1: where lifted code may run. */
 static inline bool liftable_pc(uint32_t pc)
 {
-    uint32_t seg = pc >> 29, p = pc & 0x1FFFFFFFu;
-    return !(pc & 3) && (seg == 0 || seg == 4 || seg == 5) && p < 0x00800000u && (p & 0x1FFFFFu) >= LOW_RAM;
+    return ps1_rc_liftable_pc(pc);
 }
+_Static_assert(LOW_RAM == PS1_RC_LOW_RAM, "ps1_recomp LOW_RAM");
 
 /* Does instruction ins read register r as an operand, or load into it (other than LWL / LWR, which merge with the
  * load in flight)? Then the load in flight to r must stay in flight across it. */
@@ -573,7 +573,10 @@ void ps1_recomp_run(ps1_machine *m)
         ps1_cpu_hook_check(m);
         uint32_t pc = m->pc;
         if (!s->table || !liftable_pc(pc) || (!s->booted && !(s->booted = pc == s->table->boot_pc))) {
-            ps1_cpu_step(m);
+            if (s->table && !liftable_pc(pc))
+                ps1_cpu_step_unliftable(m); /* the BIOS, its handlers: as long as that lasts */
+            else
+                ps1_cpu_step(m);
             continue;
         }
         if (pc == s->interp_pc || m->next_delay || (m->cop0[C0_SR] & (SR_KUC | SR_ISC))) {

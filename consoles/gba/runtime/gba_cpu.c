@@ -308,7 +308,7 @@ static inline uint32_t load32_rot(gba_machine *m, uint32_t addr, bool seq)
 
 /* ---- ARM ------------------------------------------------------------------------------------------------ */
 
-static void arm_data_processing(gba_machine *m, uint32_t op)
+static inline __attribute__((always_inline)) void arm_data_processing(gba_machine *m, uint32_t op)
 {
     uint32_t opc = (op >> 21) & 15;
     bool s = (op >> 20) & 1;
@@ -597,7 +597,7 @@ static void arm_block_transfer(gba_machine *m, uint32_t op)
         gba_set_mode(m, mode);
 }
 
-static void arm_execute(gba_machine *m, uint32_t op, uint32_t pc)
+static inline __attribute__((always_inline)) void arm_execute(gba_machine *m, uint32_t op, uint32_t pc)
 {
     if (op >> 28 != 0xE && !cond_ok(m, op >> 28))
         return;
@@ -822,7 +822,7 @@ static void thumb_ldm_stm(gba_machine *m, uint32_t op)
     }
 }
 
-static void thumb_execute(gba_machine *m, uint32_t op, uint32_t pc)
+static inline __attribute__((always_inline)) void thumb_execute(gba_machine *m, uint32_t op, uint32_t pc)
 {
     uint32_t carry;
     switch (op >> 11) {
@@ -957,7 +957,52 @@ static void thumb_execute(gba_machine *m, uint32_t op, uint32_t pc)
 
 /* ---- run loop ------------------------------------------------------------------------------------------- */
 
-static inline void step(gba_machine *m)
+/* Sequential opcode fetches from the cartridge ROM, IWRAM and the BIOS, the regions code runs from, inline: what gba_fetch16 /
+ * gba_fetch32 (gba_bus.c) do there with seq = true, whose cost is the fetch16 / fetch32 table that lifted code also
+ * charges (gba_update_waitstates: prefetch included). Everything else goes through the bus functions. */
+static inline __attribute__((always_inline)) uint32_t fetch16_seq(gba_machine *m, uint32_t pc)
+{
+    uint32_t r = (pc >> 24) & 15, a = pc & 0x1FFFFFEu, v;
+    if (r - 8u <= 5u && a < m->rom_size) {
+        m->now += m->fetch16[r];
+        v = rd16(&m->rom[a]);
+    } else if (r == 3) {
+        m->now += 1;
+        v = rd16(&m->iwram[pc & (GBA_IWRAM_SIZE - 1)]);
+    } else if (pc < GBA_BIOS_SIZE) {
+        m->now += m->fetch16[0];
+        v = rd16(&m->bios[pc]);
+        m->bios_latch = rd32(&m->bios[(pc + 4) & (GBA_BIOS_SIZE - 4)]); /* as gba_fetch16 */
+    } else {
+        return gba_fetch16(m, pc, true);
+    }
+    m->open_bus = v * 0x00010001u;
+    return v;
+}
+
+static inline __attribute__((always_inline)) uint32_t fetch32_seq(gba_machine *m, uint32_t pc)
+{
+    uint32_t r = (pc >> 24) & 15, a = pc & 0x1FFFFFCu, v;
+    if (r - 8u <= 5u && a < m->rom_size) {
+        m->now += m->fetch32[r];
+        v = rd32(&m->rom[a]);
+    } else if (r == 3) {
+        m->now += 1;
+        v = rd32(&m->iwram[pc & (GBA_IWRAM_SIZE - 1)]);
+    } else if (pc < GBA_BIOS_SIZE) {
+        m->now += m->fetch32[0];
+        v = rd32(&m->bios[pc]);
+        m->bios_latch = rd32(&m->bios[(pc + 8) & (GBA_BIOS_SIZE - 4)]); /* the prefetched opcode, as gba_fetch32 */
+    } else {
+        return gba_fetch32(m, pc, true);
+    }
+    m->open_bus = v;
+    return v;
+}
+
+/* Inlined into the run loop with both decoders: a call per instruction (and the callee-saved registers each one
+ * saves) was a large share of the interpreter's time. gba_cpu_step keeps an out-of-line copy. */
+static inline __attribute__((always_inline)) void step(gba_machine *m)
 {
     if (m->irq_line && !(m->cpu.cpsr_ctl & CPSR_I)) {
         take_irq(m);
@@ -966,7 +1011,7 @@ static inline void step(gba_machine *m)
     m->cpu.branched = false;
     if (m->cpu.cpsr_ctl & CPSR_T) {
         uint32_t pc = R[15] - 4;
-        uint32_t op = gba_fetch16(m, pc, true);
+        uint32_t op = fetch16_seq(m, pc);
         thumb_execute(m, op, pc);
         if (!m->cpu.branched)
             R[15] += 2;
@@ -974,7 +1019,7 @@ static inline void step(gba_machine *m)
             refill(m, R[15]);
     } else {
         uint32_t pc = R[15] - 8;
-        uint32_t op = gba_fetch32(m, pc, true);
+        uint32_t op = fetch32_seq(m, pc);
         arm_execute(m, op, pc);
         if (!m->cpu.branched)
             R[15] += 4;
@@ -986,6 +1031,15 @@ static inline void step(gba_machine *m)
 void gba_cpu_step(gba_machine *m)
 {
     step(m);
+}
+
+void gba_cpu_step_outside_rom(gba_machine *m)
+{
+    do {
+        step(m);
+    } while (m->now < m->next_event && !m->cpu.halted && !m->cpu.stopped &&
+             ((R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u)) - 0x08000000u >= 0x06000000u ||
+              (m->irq_line && !(m->cpu.cpsr_ctl & CPSR_I))));
 }
 
 void gba_cpu_run(gba_machine *m)
