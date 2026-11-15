@@ -274,6 +274,11 @@ static void test_irq(void)
     m->ie = IRQ_VBLANK;
     m->ime = 1;
     gba_update_irq(m);
+    /* The request reaches the CPU 4 cycles later (XBA-201, the mGBA suite's timer IRQ tests). */
+    CHECK(!m->irq_line && m->irq_at == m->now + 4, "irq latency: line %d at %llu (now %llu)", m->irq_line,
+          (unsigned long long)m->irq_at, (unsigned long long)m->now);
+    m->now += 4;
+    gba_update_irq(m);
     gba_cpu_step(m);
     CHECK((gba_get_cpsr(m) & 0x1F) == MODE_IRQ && gba_cpu_pc(m) == 0x18 && m->cpu.r[14] == CODE + 2 + 4 &&
               (m->cpu.spsr[BANK_IRQ] & CPSR_T) && (gba_get_cpsr(m) & CPSR_I),

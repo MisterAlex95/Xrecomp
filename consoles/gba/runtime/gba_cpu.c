@@ -143,6 +143,9 @@ static void exception(gba_machine *m, uint32_t mode, uint32_t vector, uint32_t l
 
 static void take_irq(gba_machine *m)
 {
+    /* The entry costs like a branch (2S + 1N): the opcode fetch of the instruction it replaces, then the refill. */
+    uint32_t r = (gba_cpu_pc(m) >> 24) & 15;
+    m->now += is_thumb(m) ? m->fetch16[r] : m->fetch32[r];
     /* LR = next instruction + 4 in both states, so the handler returns with SUBS PC, LR, #4. */
     exception(m, MODE_IRQ, 0x18, gba_cpu_pc(m) + 4);
     refill(m, 0x18);

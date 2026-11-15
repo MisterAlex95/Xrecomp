@@ -184,8 +184,10 @@ struct gba_machine {
     bool frame_done;
     uint16_t *fb;           /* framebuffer of the running frame, or NULL */
 
-    /* Interrupts. */
+    /* Interrupts. irq_line (what the CPU sees) follows IME && (IE & IF) GBA_IRQ_LATENCY cycles late: irq_at is the
+     * cycle a pending request reaches the CPU, UINT64_MAX when none is on its way. */
     uint16_t ie, if_, ime;
+    uint64_t irq_at;
 
     uint16_t keys;          /* KEYINPUT as read (0 = pressed) */
     uint16_t keycnt;
@@ -291,6 +293,8 @@ bool gba_io_open_bus(uint32_t addr); /* a CPU / DMA read there sees the open bus
 void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v);
 void gba_io_write8(gba_machine *m, uint32_t addr, uint8_t v);
 void gba_raise_irq(gba_machine *m, uint16_t bits);
+/* An interrupt request raised by an event due at `when` (<= now): it reaches the CPU GBA_IRQ_LATENCY cycles after. */
+void gba_raise_irq_at(gba_machine *m, uint16_t bits, uint64_t when);
 void gba_update_irq(gba_machine *m);
 void gba_schedule(gba_machine *m);
 void gba_io_reset(gba_machine *m);
