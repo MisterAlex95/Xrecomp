@@ -456,3 +456,35 @@ int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, in
     *h = oh;
     return 0;
 }
+
+int n64_framebuffer(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
+{
+    uint32_t type = m->vi[0] & 3, origin = m->vi[1] & 0xFFFFFF, width = m->vi[2] & 0xFFF;
+    *w = *h = 0;
+    if (type < 2 || width == 0)
+        return -1;
+    n64_rdp_flush(m->rdp);
+    uint32_t bpp = type == 3 ? 4 : 2;
+    int ow = (int)width < max_w ? (int)width : max_w;
+    int oh = 0;
+    for (int y = 0; y < max_h; y++) {
+        uint32_t line = origin + (uint32_t)y * width * bpp;
+        if ((uint64_t)line + (uint64_t)ow * bpp > m->rdram_size)
+            break;
+        const uint8_t *p = m->rdram + line;
+        uint32_t *out = xrgb + (size_t)y * (size_t)ow;
+        for (int x = 0; x < ow; x++) {
+            if (bpp == 4) {
+                out[x] = (uint32_t)p[4 * x] << 16 | (uint32_t)p[4 * x + 1] << 8 | p[4 * x + 2];
+            } else {
+                uint32_t v = n64_be16(p + 2 * x);
+                uint32_t r = (v >> 11) & 31, g = (v >> 6) & 31, b = (v >> 1) & 31;
+                out[x] = (r << 3 | r >> 2) << 16 | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2);
+            }
+        }
+        oh = y + 1;
+    }
+    *w = ow;
+    *h = oh;
+    return oh > 0 ? 0 : -1;
+}

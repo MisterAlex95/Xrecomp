@@ -37,6 +37,9 @@ endif()
 #                     hardware ("Test passed")
 #   n64_lockref_*     the interpreter's predecoded blocks against its reference loop (n64_run --lockstep-ref, XBA-210):
 #                     every ROM above and random MIPS III code (recomp_fuzz.py --ref)
+#   n64_krom_tests    krom's PeterLemon/N64 test ROMs (Unlicense, XBA-202), built from source with libdragon's open IPL3:
+#                     each one's framebuffer after 90 frames against the repository's reference screenshot
+#                     (krom_tests.py), at least N64_KROM_PASS of them
 # The ROM tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays green.
 # They come from (repo root):
 #   tools/consoles/build_homebrew.sh n64 build/homebrew     -> N64_HOMEBREW_DIR (default build/homebrew/n64)
@@ -46,6 +49,7 @@ endif()
 #   tools/consoles/build_n64_libdragon_tests.sh build/n64-libdragon-tests -> N64_LIBDRAGON_TESTROM (default
 #                                                              build/n64-libdragon-tests/testrom_emu.z64), and
 #                                                              rsp_inval_instrs.z64 next to it
+#   tools/consoles/build_n64_krom_tests.sh build/n64-krom-tests -> N64_KROM_DIR (default build/n64-krom-tests)
 if(WIN32)
     message(FATAL_ERROR "The console runtimes are POSIX-only (xbr_host)")
 endif()
@@ -156,11 +160,13 @@ set(N64_SYSTEMTEST_FULL ${N64_REPO_ROOT}/build/n64-systemtest/n64-systemtest-ful
     "n64-systemtest ROM with every test group (build_n64_systemtest.sh)")
 set(N64_LIBDRAGON_TESTROM ${N64_REPO_ROOT}/build/n64-libdragon-tests/testrom_emu.z64 CACHE FILEPATH
     "libdragon's test ROM (build_n64_libdragon_tests.sh)")
+set(N64_KROM_DIR ${N64_REPO_ROOT}/build/n64-krom-tests CACHE PATH "krom's test ROMs (build_n64_krom_tests.sh)")
 # Pass-count thresholds of the open test ROMs (XBA-202), with the real RSP / RDP: a regression fails even in a test the
 # known-gap lists cover. Raise them with the core; lower only for a test proven wrong.
 set(N64_SYSTEMTEST_PASS 3716)       # of 3721 test values (base group): 5 need cached data
 set(N64_SYSTEMTEST_FULL_PASS 3726)  # of 3731 (base, timing, cycle, cop0hazard, poorly understood quirks)
 set(N64_LIBDRAGON_PASS 102)         # of 107 (4 skipped under emulation): test_cache_invalidate needs cached data
+set(N64_KROM_PASS 204)              # of 323 krom test ROMs (krom_tests.py)
 set(N64_RT ${CMAKE_CURRENT_SOURCE_DIR}/../runtime)
 set(N64_HAVE_RCP OFF)
 if(EXISTS ${N64_RT}/n64_rsp.c AND EXISTS ${N64_RT}/n64_rdp.c)
@@ -246,6 +252,14 @@ if(TARGET n64_run)
             add_test(NAME n64_libdragon_tests_vulkan COMMAND ${N64_LDT})
             set_tests_properties(n64_libdragon_tests_vulkan PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200
                                  ENVIRONMENT "N64_LIBDRAGON_MIN_PASS=${N64_LIBDRAGON_PASS};RECOMP_N64_RDP=vulkan")
+        endif()
+        # krom's (PeterLemon/N64) test ROMs against their reference screenshots (krom_tests.py; built with an open
+        # IPL3 by build_n64_krom_tests.sh): at least N64_KROM_PASS must match.
+        find_package(Python3 COMPONENTS Interpreter)
+        if(Python3_FOUND)
+            add_test(NAME n64_krom_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/krom_tests.py
+                     $<TARGET_FILE:n64_run> ${N64_KROM_DIR} --min-pass ${N64_KROM_PASS} --jobs 4 --table)
+            set_tests_properties(n64_krom_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
         endif()
     endif()
 
