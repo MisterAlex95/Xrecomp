@@ -13,6 +13,8 @@
  *               2 on timeout
  * --ppm OUT     write the last frame the VI shows as a binary PPM (black when blank); at the upscaled size when the
  *               Vulkan RDP upscales (RECOMP_N64_RDP=vulkan RECOMP_UPSCALE=2, n64_rdp.h)
+ * --fb OUT      write the framebuffer the VI scans, raw (n64_framebuffer: its WIDTH x 480 lines from ORIGIN, no VI
+ *               filter), as a binary PPM
  * --wav OUT     write the audio of the run (n64_audio_pull after each frame) as a 48 kHz stereo 16-bit WAV
  * --tty         copy the IS-Viewer debug text (libdragon debugf, osSyncPrintf) to stdout
  * --pad MASK    buttons held on controller 1 for the whole run (N64_BTN_* bits)
@@ -104,7 +106,7 @@ static uint8_t *load_file(const char *path, size_t *size)
     return buf;
 }
 
-static int write_ppm(const char *path, n64_machine *m)
+static int write_ppm(const char *path, n64_machine *m, bool raw_fb)
 {
     struct n64_rdp *rdp = n64_get_rdp(m);
     int sc = rdp ? n64_rdp_scanout_scale(rdp) : 0; /* the Vulkan RDP's upscaled scanout (XBA-185) */
@@ -115,7 +117,7 @@ static int write_ppm(const char *path, n64_machine *m)
     if (!px)
         return -1;
     int w = 320, h = 240;
-    if (n64_display(m, px, mw, mh, &w, &h) != 0)
+    if (raw_fb ? n64_framebuffer(m, px, N64_SCREEN_MAX_W, 480, &w, &h) != 0 : n64_display(m, px, mw, mh, &w, &h) != 0)
         memset(px, 0, (size_t)mw * (size_t)mh * sizeof *px);
     FILE *f = fopen(path, "wb");
     if (!f) {
@@ -162,7 +164,7 @@ static void cheat_poke32(void *m, uint32_t addr, uint32_t v)
 
 static int usage(void)
 {
-    fprintf(stderr, "usage: n64_run ROM [--frames N] [--result] [--ppm OUT] [--wav OUT] [--tty] [--pad MASK]\n"
+    fprintf(stderr, "usage: n64_run ROM [--frames N] [--result] [--ppm OUT] [--fb OUT] [--wav OUT] [--tty] [--pad MASK]\n"
                     "               [--pal | --ntsc] [--save PATH] [--hash] [--info] [--regs] [--quiet]\n"
                     "               [--pack LIB.so [--lockstep] [--missed FILE] [--stats]] [--lockstep-ref]\n"
                     "               [--state-save N:FILE] [--state-load FILE] [--run-hash] [--cheats FILE]\n"
@@ -315,7 +317,7 @@ static int state_compare(n64_machine *a, n64_machine *b, char *why, size_t n)
 
 int main(int argc, char **argv)
 {
-    const char *rom_path = NULL, *ppm = NULL, *wav = NULL, *save = NULL, *pack = NULL, *missed = NULL;
+    const char *rom_path = NULL, *ppm = NULL, *fb_ppm = NULL, *wav = NULL, *save = NULL, *pack = NULL, *missed = NULL;
     long frames = 600;
     bool result = false, quiet = false, hash = false, tty = false, info = false, regs = false;
     bool lockstep = false, lockref = false, stats = false, run_hash = false;
@@ -339,6 +341,8 @@ int main(int argc, char **argv)
             result = true;
         else if (!strcmp(a, "--ppm") && more)
             ppm = argv[++i];
+        else if (!strcmp(a, "--fb") && more)
+            fb_ppm = argv[++i];
         else if (!strcmp(a, "--wav") && more)
             wav = argv[++i];
         else if (!strcmp(a, "--tty"))
@@ -676,8 +680,10 @@ int main(int argc, char **argv)
             printf("  pc 0x%016llX, %llu instructions\n", (unsigned long long)n64_pc(m),
                    (unsigned long long)n64_instructions(m));
     }
-    if (ppm && write_ppm(ppm, m) != 0)
+    if (ppm && write_ppm(ppm, m, false) != 0)
         fprintf(stderr, "n64_run: cannot write %s\n", ppm);
+    if (fb_ppm && write_ppm(fb_ppm, m, true) != 0)
+        fprintf(stderr, "n64_run: cannot write %s\n", fb_ppm);
     if (wf) {
         fseek(wf, 4, SEEK_SET);
         put32(wf, 36 + wav_frames * 4);

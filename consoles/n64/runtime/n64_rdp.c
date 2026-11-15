@@ -638,7 +638,10 @@ ALWAYS_INLINE void tex_stage(rdp_render *r, const rdp_prim *p, int32_t as, int32
         int lt = 0, frac;
         int magnify = lod < 32;
         if (magnify) {
-            frac = (om->detail || om->sharpen) ? (lod << 3) & 0xFF : 0;
+            /* Without detail / sharpen the fraction is that of a distant pixel when there is a single level (the
+             * primitive's level count 0, as a texture rectangle after no triangle has): 0xFF, else 0 (angrylion's
+             * lodfrac_lodtile_signals; krom's RDP texture-rectangle tests read it as alpha). */
+            frac = (om->detail || om->sharpen) ? (lod << 3) & 0xFF : (p->level == 0 ? 0xFF : 0);
             if (om->sharpen)
                 frac -= 0x100; /* negative: extrapolates away from TEX1 */
         } else {

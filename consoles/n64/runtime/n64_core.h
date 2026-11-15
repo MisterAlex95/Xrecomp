@@ -150,6 +150,10 @@ void n64_run_cycles(n64_machine *m, uint64_t cycles);
  * max_w x max_h. Returns 0 and the size, or -1 when the VI is blank (w / h then a default size). With the Vulkan RDP
  * upscaling (n64_rdp.h n64_rdp_scanout_scale > 0) and a buffer that holds it, its VI's picture at the upscaled size. */
 int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h);
+/* The framebuffer the VI scans (ORIGIN, WIDTH and the pixel type of its registers), raw: 0x00RRGGBB from its top-left
+ * pixel, WIDTH (at most max_w) wide and max_h lines (fewer at the end of RDRAM), no VI filter or scaling (XBA-202:
+ * test ROMs whose references are framebuffer dumps). Returns 0 and the size, or -1 when the VI is blank. */
+int n64_framebuffer(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h);
 
 /* Audio: stereo int16, interleaved L/R, N64_AUDIO_RATE, made while n64_run_frame runs (silence while the AI is
  * idle). Copies at most frames sample frames and returns how many. Same thread as n64_run_frame. */
