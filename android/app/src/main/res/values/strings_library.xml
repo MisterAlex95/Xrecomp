@@ -97,6 +97,7 @@
     <string name="ROM_NEW_CODE">Prepared · %1$d new addresses found · prepare again</string>
     <string name="ROM_NOT_PREPARED_NOTE">Play starts the game at once, in the interpreter. Prepare translates it for this device (a few minutes) so that it runs natively; you can play meanwhile.</string>
     <string name="ROM_PREPARED_NOTE">The game runs from its preparation. Code it does not cover still runs in the interpreter and is noted for the next Prepare.</string>
+    <string name="ROM_OLDER_TOOLKIT_NOTE">This update translates games better. Prepare again to get its fixes; until then the game plays as before. Your saves are kept.</string>
     <string name="ROM_NEW_CODE_NOTE">Your last games ran code the preparation had missed (%1$d addresses). Prepare again to translate it too; Play works meanwhile.</string>
     <string name="ROM_FAILED_NOTE">The preparation failed (%1$s); the game still plays in the interpreter. See what failed for the log.</string>
     <string name="ROM_PREPARED_DONE">%1$s is prepared: it now runs natively.</string>
