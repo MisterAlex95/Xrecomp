@@ -8,7 +8,8 @@
  *
  * Cycles: each instruction costs its opcode fetch (sequential), its data accesses (first one non-sequential,
  * the rest of an LDM / STM sequential), its internal cycles (multiplies by operand size, register shifts,
- * loads) and, after a branch, the pipeline refill (one non-sequential + one sequential fetch). */
+ * loads) and, after a branch, the pipeline refill (one non-sequential + one sequential fetch). In the cartridge with
+ * WAITCNT bit 14 set, opcode fetches go through the prefetch buffer (gba_recomp_rt.h rc_pf_fetch). */
 #include "gba_internal.h"
 
 #define R (m->cpu.r)
@@ -85,13 +86,11 @@ static inline uint32_t get_spsr(const gba_machine *m)
 
 /* ---- branches and exceptions ---------------------------------------------------------------------------- */
 
+#define HEAD(m) ((gba_rc_head *)(void *)(m))
+
 static inline void refill(gba_machine *m, uint32_t addr)
 {
-    int r = (addr >> 24) & 15;
-    if (is_thumb(m))
-        m->now += m->wait16[r][0] + m->wait16[r][1];
-    else
-        m->now += m->wait32[r][0] + m->wait32[r][1];
+    m->now += rc_refill_cost(HEAD(m), m->now, addr, is_thumb(m));
 }
 
 /* PC write in the current state (no interworking). */
@@ -144,8 +143,7 @@ static void exception(gba_machine *m, uint32_t mode, uint32_t vector, uint32_t l
 static void take_irq(gba_machine *m)
 {
     /* The entry costs like a branch (2S + 1N): the opcode fetch of the instruction it replaces, then the refill. */
-    uint32_t r = (gba_cpu_pc(m) >> 24) & 15;
-    m->now += is_thumb(m) ? m->fetch16[r] : m->fetch32[r];
+    m->now += rc_fetch_cost(HEAD(m), m->now, gba_cpu_pc(m), is_thumb(m));
     /* LR = next instruction + 4 in both states, so the handler returns with SUBS PC, LR, #4. */
     exception(m, MODE_IRQ, 0x18, gba_cpu_pc(m) + 4);
     refill(m, 0x18);
@@ -155,9 +153,8 @@ static void take_irq(gba_machine *m)
 static void do_swi(gba_machine *m, uint32_t pc, uint32_t num)
 {
     uint32_t next = pc + (is_thumb(m) ? 2 : 4);
-    if (m->builtin_bios && num != 0x04 && num != 0x05) {
-        /* Built-in BIOS: everything but the interrupt waits runs in C, without entering the handler. */
-        m->now += 3 * 4; /* entry + return, roughly */
+    if (m->builtin_bios && num == 0x00) {
+        /* Built-in BIOS: SoftReset in C at once (the other SWIs go through its dispatcher to their HLE stubs). */
         gba_bios_hle_swi(m, num);
         m->bios_latch = 0xE3A02004; /* what a SWI through the BIOS leaves in the latch ([0x188+8]) */
         return;
@@ -643,7 +640,7 @@ static inline __attribute__((always_inline)) void arm_execute(gba_machine *m, ui
     case 3:
         if (op & 0x10) {
             if (op == GBA_HLE_TRAP && m->builtin_bios && pc < GBA_BIOS_SIZE)
-                gba_bios_hle_swi(m, R[12]);
+                gba_bios_hle_swi(m, pc - GBA_HLE_STUBS < 0x800u ? (pc - GBA_HLE_STUBS) >> 3 : R[12]);
             else
                 undefined(m, pc);
         } else {
@@ -967,7 +964,7 @@ static inline __attribute__((always_inline)) uint32_t fetch16_seq(gba_machine *m
 {
     uint32_t r = (pc >> 24) & 15, a = pc & 0x1FFFFFEu, v;
     if (r - 8u <= 5u && a < m->rom_size) {
-        m->now += m->fetch16[r];
+        m->now += m->prefetch ? rc_pf_fetch(HEAD(m), m->now, pc + 4, true, m->wait16[r][0]) : m->fetch16[r];
         v = rd16(&m->rom[a]);
         m->open_bus = gba_rom_half(m, pc + 4) * 0x00010001u; /* the prefetched opcode (gba_prefetch_latch) */
     } else if (r == 3) {
@@ -989,7 +986,7 @@ static inline __attribute__((always_inline)) uint32_t fetch32_seq(gba_machine *m
 {
     uint32_t r = (pc >> 24) & 15, a = pc & 0x1FFFFFCu, v;
     if (r - 8u <= 5u && a < m->rom_size) {
-        m->now += m->fetch32[r];
+        m->now += m->prefetch ? rc_pf_fetch(HEAD(m), m->now, pc + 8, false, m->wait32[r][0]) : m->fetch32[r];
         v = rd32(&m->rom[a]);
         m->open_bus = gba_rom_half(m, pc + 8) | (uint32_t)gba_rom_half(m, pc + 10) << 16;
     } else if (r == 3) {
@@ -1009,8 +1006,8 @@ static inline __attribute__((always_inline)) uint32_t fetch32_seq(gba_machine *m
 
 /* After an instruction that took cycles beyond its opcode fetch (data accesses, internal cycles) and did not branch,
  * the next opcode fetch is non-sequential: its cycles beyond the sequential fetch, charged at the end of the
- * instruction (lifted code: RC_NEXTRA). With the cartridge's prefetch buffer on, the buffer had the bus meanwhile: no
- * penalty (approximation). Fitted to the mGBA suite's timing tests (XBA-201). */
+ * instruction (lifted code: RC_NEXTRA). With the cartridge's prefetch buffer on, the next fetch goes through it
+ * (rc_pf_fetch, which costs a non-sequential access when it misses). Fitted to the mGBA suite's timing tests (XBA-201). */
 static inline uint32_t nfetch_extra(const gba_machine *m, uint32_t pc, bool thumb)
 {
     uint32_t r = (pc >> 24) & 15;

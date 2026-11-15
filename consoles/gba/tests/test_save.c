@@ -201,6 +201,7 @@ static void dma3(gba_machine *m, uint32_t src, uint32_t dst, uint16_t count)
     gba_io_write16(m, 0x040000DA, (uint16_t)(dst >> 16));
     gba_io_write16(m, 0x040000DC, count);
     gba_io_write16(m, 0x040000DE, 0x8000); /* enable, now, 16-bit, increment */
+    gba_dma_run_due(m);                    /* without waiting for its start delay */
 }
 
 #define BITS 0x02001000u

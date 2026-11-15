@@ -62,11 +62,12 @@ image; the ROM is never committed. `consoles/gba/tests/mgba_suite.sh` runs each 
 `END: passed/total` line from mGBA's debug-print port (`gba_run --debug-log`, `gba_set_debug_log`); the video group
 compares each scene's frame with its reference frame. ctest `gba_mgba_<group>` (built-in BIOS), `gba_mgba_lle_<group>`
 (Cult-of-GBA) and `gba_rc_mgba` (recompiled, in lockstep) fail when a count drops below the one reached (the
-thresholds in the CMakeLists: raise them with each fix). Counts after XBA-201 (HLE / LLE): memory 1498 / 1488 of 1552,
-I/O read 130 of 130, timing 1190 / 1204 of 2020, timer count-up 740 / 847 of 936, timer IRQ 90 of 90, shifter, carry,
-DMA and SIO register R/W all, multiply long 52 of 72, BIOS math 615 / 603 of 615, SIO timing 0 of 4, misc 4 / 6 of 12,
-video 6 of 7. What is left is mostly the cartridge prefetch buffer (the timing tests' `P` columns; the core charges a
-flat 1 cycle per prefetched halfword), the BIOS's own timing in HLE, DMA start latency and the multiply carry flag.
+thresholds in the CMakeLists: raise them with each fix). Counts after XBA-205 (HLE / LLE): memory 1498 / 1488 of 1552,
+I/O read 130 of 130, timing 1988 / 1868 of 2020, timer count-up 847 of 936, timer IRQ 90 of 90, shifter, carry,
+DMA and SIO register R/W all, multiply long 52 of 72, BIOS math 615 / 603 of 615, SIO timing 0 of 4, misc 6 of 12,
+video 6 of 7. XBA-205 brought the cartridge prefetch buffer (`gba_recomp_rt.h` `rc_pf_*`, shared with lifted code),
+the BIOS's SWI dispatcher and routine cycle counts in HLE, the immediate DMA's start delay. What is left: the
+multiply-long carry flag, a cycle in a few DMA-from / to-ROM prefetch columns, SIO timing, the misc edge cases.
 
 **Playing a GBA game (XBA-157).** `gba_runtime_run` (`gba_runtime.h`) plays a ROM on the host layer: `host_window`
 (RGB555 → RGBA texture, letterboxed, aspect, integer or stretch scaling, nearest by default or linear: the display

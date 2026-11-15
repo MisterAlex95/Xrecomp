@@ -1,8 +1,10 @@
 /* GBA BIOS support (XBA-153): direct boot, and the built-in BIOS used when no BIOS image is given.
  *
- * The built-in BIOS is our own: a few dozen ARM words (vectors, the IRQ dispatcher every game relies on, and
- * IntrWait / VBlankIntrWait, which must run as code so interrupts can be taken while waiting) plus the other
- * SWIs implemented in C (HLE), from their behaviour as documented in GBATEK « BIOS Functions ». The IRQ
+ * The built-in BIOS is our own: a few dozen ARM words (vectors, the IRQ dispatcher every game relies on, the SWI
+ * dispatcher, Halt / Stop and IntrWait / VBlankIntrWait, which must run as code so interrupts can be taken while
+ * waiting) plus the other SWIs implemented in C (HLE, reached through one stub each), from their behaviour as
+ * documented in GBATEK « BIOS Functions ». SWIs take the Nintendo BIOS's path and cycles: its dispatcher as code, the
+ * HLE routines charging what the BIOS's loops cost (XBA-205, fitted to the mGBA suite's hardware timings). The IRQ
  * dispatcher follows the documented BIOS contract: push r0-r3, r12, lr; call the handler at [0x03007FFC];
  * pop; return. Games acknowledge their interrupts in BIOS_IF at 0x03007FF8, which IntrWait polls.
  *
@@ -36,53 +38,92 @@ static const uint32_t builtin_code[][2] = {
     {0x134, 0xE510F004}, /* ldr   pc, [r0, #-4]         handler at 0x03007FFC */
     {0x138, 0xE8BD500F}, /* ldmfd sp!, {r0-r3, r12, lr} */
     {0x13C, 0xE25EF004}, /* subs  pc, lr, #4 */
-    /* swi: only SWI 0x04 / 0x05 come here (the others are HLE'd at the SWI instruction) */
+    /* swi: the Nintendo BIOS's dispatcher, instruction for instruction (so SWIs cost what they cost there): save
+     * r11, r12, lr and SPSR on the supervisor stack, fetch the function from the table by the comment byte, run it in
+     * system mode with the caller's IRQ mask (r2 and lr saved on that stack), return with MOVS at 0x188. */
     {0x140, 0xE92D5800}, /* stmfd sp!, {r11, r12, lr} */
     {0x144, 0xE55EC002}, /* ldrb  r12, [lr, #-2]        comment byte, ARM or Thumb */
-    {0x148, 0xE35C0005}, /* cmp   r12, #5 */
-    {0x14C, 0x0A00002B}, /* beq   vblankintrwait (0x200) */
-    {0x150, 0xE35C0004}, /* cmp   r12, #4 */
-    {0x154, 0x0A00002B}, /* beq   intrwait (0x208) */
-    {0x158, GBA_HLE_TRAP}, /* hle   r12 */
-    {0x15C, 0xEA000008}, /* b     swi_ret (0x184) */
-    {0x184, 0xE8BD5800}, /* swi_ret: ldmfd sp!, {r11, r12, lr} */
+    {0x148, 0xE28FBFAC}, /* add   r11, pc, #0x2B0       r11 = the table (0x400) */
+    {0x14C, 0xE79BC10C}, /* ldr   r12, [r11, r12, lsl #2] */
+    {0x150, 0xE14FB000}, /* mrs   r11, spsr */
+    {0x154, 0xE92D0800}, /* stmfd sp!, {r11} */
+    {0x158, 0xE20BB080}, /* and   r11, r11, #0x80 */
+    {0x15C, 0xE38BB01F}, /* orr   r11, r11, #0x1F */
+    {0x160, 0xE129F00B}, /* msr   cpsr_fc, r11          system mode, the caller's I */
+    {0x164, 0xE92D4004}, /* stmfd sp!, {r2, lr} */
+    {0x168, 0xE28FE000}, /* add   lr, pc, #0            lr = 0x170 */
+    {0x16C, 0xE12FFF1C}, /* bx    r12 */
+    {0x170, 0xE8BD4004}, /* ldmfd sp!, {r2, lr} */
+    {0x174, 0xE3A0C0D3}, /* mov   r12, #0xD3 */
+    {0x178, 0xE129F00C}, /* msr   cpsr_fc, r12          back to supervisor mode, IRQs off */
+    {0x17C, 0xE8BD0800}, /* ldmfd sp!, {r11} */
+    {0x180, 0xE169F00B}, /* msr   spsr_fc, r11 */
+    {0x184, 0xE8BD5800}, /* ldmfd sp!, {r11, r12, lr} */
     {0x188, 0xE1B0F00E}, /* movs  pc, lr */
     {0x190, 0xE3A02004}, /* (value read back after a SWI) */
+    /* VBlankIntrWait / IntrWait (r0: discard old flags, r1: the flags): halt until the IRQ handler has set one of
+     * them in BIOS_IF (0x03FFFFF8 = 0x03007FF8), acknowledging it there with IME off; run in system mode with the
+     * caller's IRQ mask, as the dispatcher calls them (the BIOS's loop: halt, check, again while none came). */
     {0x200, 0xE3A00001}, /* vblankintrwait: mov r0, #1 */
     {0x204, 0xE3A01001}, /* mov   r1, #1 */
-    {0x208, 0xE92D000C}, /* intrwait: stmfd sp!, {r2, r3} */
-    {0x20C, 0xE3A03301}, /* mov   r3, #0x04000000 */
-    {0x210, 0xE3A02001}, /* mov   r2, #1 */
-    {0x214, 0xE5832208}, /* str   r2, [r3, #0x208]      IME = 1 */
+    {0x208, 0xE92D4010}, /* intrwait: stmfd sp!, {r4, lr} */
+    {0x20C, 0xE3A02000}, /* mov   r2, #0 */
+    {0x210, 0xE3A03001}, /* mov   r3, #1 */
+    {0x214, 0xE3A0C301}, /* mov   r12, #0x04000000 */
     {0x218, 0xE3500000}, /* cmp   r0, #0 */
-    {0x21C, 0x115320B8}, /* ldrneh r2, [r3, #-8]        BIOS_IF (0x03FFFFF8 = 0x03007FF8) */
-    {0x220, 0x11C22001}, /* bicne r2, r2, r1            discard old flags */
-    {0x224, 0x114320B8}, /* strneh r2, [r3, #-8] */
-    {0x228, 0xE10F2000}, /* mrs   r2, cpsr */
-    {0x22C, 0xE3C22080}, /* bic   r2, r2, #0x80 */
-    {0x230, 0xE121F002}, /* msr   cpsr_c, r2            IRQs on while waiting */
-    {0x234, 0xE3A02000}, /* wait: mov r2, #0 */
-    {0x238, 0xE5C32301}, /* strb  r2, [r3, #0x301]      HALTCNT: halt */
-    {0x23C, 0xE15320B8}, /* ldrh  r2, [r3, #-8] */
-    {0x240, 0xE1120001}, /* tst   r2, r1 */
-    {0x244, 0x0AFFFFFA}, /* beq   wait */
-    {0x248, 0xE1C22001}, /* bic   r2, r2, r1 */
-    {0x24C, 0xE14320B8}, /* strh  r2, [r3, #-8] */
-    {0x250, 0xE10F2000}, /* mrs   r2, cpsr */
-    {0x254, 0xE3822080}, /* orr   r2, r2, #0x80 */
-    {0x258, 0xE121F002}, /* msr   cpsr_c, r2 */
-    {0x25C, 0xE8BD000C}, /* ldmfd sp!, {r2, r3} */
-    {0x260, 0xEAFFFFC7}, /* b     swi_ret (0x184) */
+    {0x21C, 0x1B000001}, /* blne  check (0x228)         discard what already came */
+    {0x220, 0xE28FE01C}, /* add   lr, pc, #0x1C         lr = again (0x244) */
+    {0x224, 0xE5CC2301}, /* halt: strb r2, [r12, #0x301]  HALTCNT */
+    {0x228, 0xE5CC2208}, /* check: strb r2, [r12, #0x208] IME = 0 */
+    {0x22C, 0xE15C40B8}, /* ldrh  r4, [r12, #-8]        BIOS_IF */
+    {0x230, 0xE0110004}, /* ands  r0, r1, r4 */
+    {0x234, 0x10244000}, /* eorne r4, r4, r0 */
+    {0x238, 0x114C40B8}, /* strneh r4, [r12, #-8] */
+    {0x23C, 0xE5CC3208}, /* strb  r3, [r12, #0x208]     IME = 1 */
+    {0x240, 0xE12FFF1E}, /* bx    lr */
+    {0x244, 0x0AFFFFF6}, /* again: beq halt (0x224) */
+    {0x248, 0xE8BD4010}, /* ldmfd sp!, {r4, lr} */
+    {0x24C, 0xE12FFF1E}, /* bx    lr */
+    /* Halt, Stop, CustomHalt (r2 = HALTCNT value; the dispatcher keeps r2) */
+    {0x2C0, 0xE3A02000}, /* halt: mov r2, #0 */
+    {0x2C4, 0xE3A0C301}, /* mov   r12, #0x04000000 */
+    {0x2C8, 0xE5CC2301}, /* strb  r2, [r12, #0x301]     HALTCNT */
+    {0x2CC, 0xE12FFF1E}, /* bx    lr */
+    {0x2D0, 0xE3A02080}, /* stop: mov r2, #0x80 */
+    {0x2D4, 0xE3A0C301}, /* mov   r12, #0x04000000 */
+    {0x2D8, 0xE5CC2301}, /* strb  r2, [r12, #0x301] */
+    {0x2DC, 0xE12FFF1E}, /* bx    lr */
+    {0x2E0, 0xE3A0C301}, /* customhalt: mov r12, #0x04000000 */
+    {0x2E4, 0xE5CC2301}, /* strb  r2, [r12, #0x301] */
+    {0x2E8, 0xE12FFF1E}, /* bx    lr */
     /* reset: SoftReset in C */
     {0x300, 0xE3A0C000}, /* mov   r12, #0 */
     {0x304, GBA_HLE_TRAP}, /* hle   r12 */
 };
+
+/* The function table (256 entries, by comment byte) and the HLE stubs: SWI n runs `hle; bx lr` at GBA_HLE_STUBS + 8n,
+ * the trap runs it in C (gba_bios_hle_swi). Halt, Stop, CustomHalt and the interrupt waits are code above. */
+#define GBA_HLE_TABLE 0x400u
 
 void gba_bios_install_builtin(gba_machine *m)
 {
     memset(m->bios, 0, sizeof m->bios);
     for (size_t i = 0; i < sizeof builtin_code / sizeof builtin_code[0]; i++)
         wr32(&m->bios[builtin_code[i][0]], builtin_code[i][1]);
+    for (uint32_t n = 0; n < 256; n++) {
+        uint32_t fn = GBA_HLE_STUBS + 8 * n;
+        wr32(&m->bios[fn], GBA_HLE_TRAP);
+        wr32(&m->bios[fn + 4], 0xE12FFF1E); /* bx lr */
+        switch (n) {
+        case 0x02: fn = 0x2C0; break;
+        case 0x03: fn = 0x2D0; break;
+        case 0x04: fn = 0x208; break;
+        case 0x05: fn = 0x200; break;
+        case 0x27: fn = 0x2E0; break;
+        default: break;
+        }
+        wr32(&m->bios[GBA_HLE_TABLE + 4 * n], fn);
+    }
     m->builtin_bios = true;
 }
 
@@ -168,6 +209,76 @@ static void bios_div(gba_machine *m, int32_t num, int32_t den)
     R[3] = (uint32_t)(q < 0 ? -q : q);
 }
 
+/* ---- the BIOS's cycles: what its routines cost beyond the HLE stub (trap; bx lr), so a SWI costs what it costs on
+ * hardware. The dispatcher runs as code (builtin_code); the math routines follow the Nintendo BIOS's loops (the shift
+ * loop and the subtract loop of its division: 5 and 8 cycles an iteration; Sqrt: Newton steps on that division),
+ * whose iteration counts and the constants were checked against the mGBA suite's hardware timings (XBA-205: BIOS
+ * Division / Sqrt / ArcTan, CpuFastSet, every wait-state column). */
+
+/* The division loops on |num| / |den| (unsigned): the shifts align den under num, then one subtract a bit. */
+static uint32_t div_loop_cycles(uint32_t num, uint32_t den)
+{
+    uint32_t c = 0, r2 = den;
+    for (int k = 0; k < 32; k++) { /* cmp r2, r0, lsr #1; movls r2, r2, lsl #1; bcc */
+        bool cs = r2 >= (num >> 1), ls = r2 <= (num >> 1);
+        if (ls)
+            r2 <<= 1;
+        if (cs) {
+            c += 3;
+            break;
+        }
+        c += 5;
+    }
+    for (int k = 0; k < 33; k++) { /* cmp; adc; subcs; teq r2, r1; movne r2, r2, lsr #1; bne */
+        if (num >= r2)
+            num -= r2;
+        if (r2 == den) {
+            c += 6;
+            break;
+        }
+        r2 >>= 1;
+        c += 8;
+    }
+    return c;
+}
+
+static uint32_t div_cycles(int32_t num, int32_t den)
+{
+    uint32_t n = num < 0 ? 0u - (uint32_t)num : (uint32_t)num, d = den < 0 ? 0u - (uint32_t)den : (uint32_t)den;
+    return 9 + div_loop_cycles(n, d);
+}
+
+/* Sqrt: r1 = the power of two above sqrt(x) (halve x, double r1), then r1 = (r1 + x / r1) / 2 until it stops
+ * falling. */
+static uint32_t sqrt_cycles(uint32_t x)
+{
+    uint32_t c = 7, v = x, r1 = 1;
+    while (v > r1) { /* cmp; movhi; movhi; bhi */
+        v >>= 1;
+        r1 <<= 1;
+        c += 6;
+    }
+    c += 4;
+    for (int k = 0; k < 64; k++) {
+        uint32_t prev = r1, q = r1 ? x / r1 : 0;
+        c += 4 + div_loop_cycles(x, r1) + 3; /* mov x4; the division; add; movs lsr #1; cmp */
+        r1 = (r1 + q) >> 1;
+        if (r1 >= prev) {
+            c += 1;
+            break;
+        }
+        c += 3;
+    }
+    return c;
+}
+
+/* ArcTan: straight-line code, nine MULs whose cycles depend on their Rs (t, then the polynomial's terms). */
+static uint32_t mul_m(int32_t rs)
+{
+    uint32_t v = rs < 0 ? ~(uint32_t)rs : (uint32_t)rs;
+    return v < 0x100 ? 1 : v < 0x10000 ? 2 : v < 0x1000000 ? 3 : 4;
+}
+
 static uint32_t isqrt(uint32_t v)
 {
     uint32_t r = 0, bit = 1u << 30;
@@ -194,16 +305,17 @@ static inline int32_t asr32(int32_t v, int n) { return v < 0 ? ~(~v >> n) : v >>
  * test suite checks all three, XBA-201). */
 static int32_t arctan(gba_machine *m, int32_t t)
 {
+    static const int32_t k[7] = {0x390, 0x91C, 0xFB6, 0x16AA, 0x2081, 0x3651, 0xA2F9};
+    uint32_t cyc = 32 + 2 * mul_m(t) + mul_m(0xA9); /* t * t and the last MUL by t, the first term */
     int32_t a = -asr32(mul32(t, t), 14);
-    int32_t b = asr32(mul32(0xA9, a), 14) + 0x390;
-    b = asr32(mul32(b, a), 14) + 0x91C;
-    b = asr32(mul32(b, a), 14) + 0xFB6;
-    b = asr32(mul32(b, a), 14) + 0x16AA;
-    b = asr32(mul32(b, a), 14) + 0x2081;
-    b = asr32(mul32(b, a), 14) + 0x3651;
-    b = asr32(mul32(b, a), 14) + 0xA2F9;
+    int32_t b = asr32(mul32(0xA9, a), 14) + k[0];
+    for (int i = 1; i < 7; i++) {
+        cyc += mul_m(b);
+        b = asr32(mul32(b, a), 14) + k[i];
+    }
     R[1] = (uint32_t)a;
     R[3] = (uint32_t)b;
+    m->now += cyc;
     return asr32(mul32(t, b), 16);
 }
 
@@ -230,6 +342,7 @@ static void arctan2(gba_machine *m, int32_t x, int32_t y)
     int32_t num = d >= 0 ? y : x, den = d >= 0 ? x : y;
     if ((e ^ d) < 0)
         idx += 1;
+    m->now += 30 + div_cycles(mul32(num, 1 << 14), den); /* the octant logic and the division (ArcTan adds its own) */
     bios_div(m, mul32(num, 1 << 14), den);
     int32_t r = arctan(m, (int32_t)R[0]);
     if (d < 0)
@@ -255,6 +368,7 @@ static void cpu_set(gba_machine *m, uint32_t src, uint32_t dst, uint32_t ctl)
 {
     uint32_t count = ctl & 0x1FFFFF;
     bool fill = ctl & (1u << 24);
+    m->now += 40 + 7 * count; /* the setup, and a load / store / subs / bgt loop an item (beyond the accesses) */
     if (ctl & (1u << 26)) {
         uint32_t v = fill ? ldr_rot(m, src) : 0;
         for (uint32_t i = 0; i < count; i++, dst += 4) {
@@ -279,11 +393,15 @@ static void cpu_fast_set(gba_machine *m, uint32_t src, uint32_t dst, uint32_t ct
     uint32_t count = ((ctl & 0x1FFFFF) + 7) & ~7u; /* whole blocks of 8 words */
     if (!(ctl & 0x1FFFFF))
         return;
-    uint32_t v = (ctl & (1u << 24)) ? ldr_rot(m, src) : 0;
+    bool fill = (ctl & (1u << 24)) != 0;
+    /* The setup, then per block of 8 words an LDMIA (fetch + internal cycle) / STMIA (fetch) / SUBS / BGT. */
+    m->now += 44 + (fill ? 5 : 7) * (count / 8) - 2;
+    uint32_t v = fill ? ldr_rot(m, src) : 0;
     for (uint32_t i = 0; i < count; i++) {
-        if (!(ctl & (1u << 24)))
-            v = gba_read32(m, (src + 4 * i) & ~3u, true);
-        gba_write32(m, (dst + 4 * i) & ~3u, v, true);
+        bool seq = (i & 7) != 0;
+        if (!fill)
+            v = gba_read32(m, (src + 4 * i) & ~3u, seq);
+        gba_write32(m, (dst + 4 * i) & ~3u, v, seq);
     }
 }
 
@@ -474,9 +592,18 @@ void gba_bios_hle_swi(gba_machine *m, uint32_t num)
             m->cpu.halted = true;
         break;
     case 0x03: m->cpu.stopped = true; break;
-    case 0x06: bios_div(m, (int32_t)R[0], (int32_t)R[1]); break;
-    case 0x07: bios_div(m, (int32_t)R[1], (int32_t)R[0]); break;
-    case 0x08: R[0] = isqrt(R[0]); break;
+    case 0x06:
+        m->now += div_cycles((int32_t)R[0], (int32_t)R[1]);
+        bios_div(m, (int32_t)R[0], (int32_t)R[1]);
+        break;
+    case 0x07: /* DivArm: three MOVs to swap, then Div */
+        m->now += 3 + div_cycles((int32_t)R[1], (int32_t)R[0]);
+        bios_div(m, (int32_t)R[1], (int32_t)R[0]);
+        break;
+    case 0x08:
+        m->now += sqrt_cycles(R[0]);
+        R[0] = isqrt(R[0]);
+        break;
     case 0x09: R[0] = (uint32_t)arctan(m, (int32_t)R[0]); break;
     case 0x0A: arctan2(m, (int32_t)R[0], (int32_t)R[1]); break;
     case 0x0B: cpu_set(m, R[0], R[1], R[2]); break;

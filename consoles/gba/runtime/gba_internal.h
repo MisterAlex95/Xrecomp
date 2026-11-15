@@ -151,6 +151,7 @@ typedef struct gba_dma {
     uint32_t src, dst;      /* internal (latched) */
     uint32_t count;
     bool active_special;
+    bool due;               /* immediate timing: started, waiting for its start delay (dma_due) */
 } gba_dma;
 
 struct gba_rc_state; /* gba_recomp.c */
@@ -161,7 +162,7 @@ struct gba_machine {
     uint64_t now;           /* cycles since creation */
     uint64_t next_event;    /* the CPU loop runs until now reaches it */
     /* Wait states, rebuilt on WAITCNT writes: cycles of one access, [region 0..15][seq]; fetch16 / fetch32: a
-     * sequential opcode fetch, the cartridge prefetch included. */
+     * sequential opcode fetch without the cartridge's prefetch buffer (with it on: rc_pf_fetch). */
     uint8_t wait16[16][2];
     uint8_t wait32[16][2];
     uint8_t fetch16[16];
@@ -174,6 +175,9 @@ struct gba_machine {
     uint64_t rc_native;     /* instructions lifted code ran (packs built with -DGBA_RC_COUNT) */
     uint8_t *rc_ewram;      /* = ewram, iwram below (lifted code's inline accesses) */
     uint8_t *rc_iwram;
+    uint8_t fetchmax16[16]; /* the most one opcode fetch can cost per region (lifted code's event checks) */
+    uint8_t fetchmax32[16];
+    gba_rc_prefetch pf;     /* the cartridge's prefetch buffer (gba_recomp_rt.h rc_pf_*) */
 
     struct gba_rc_state *rc; /* the attached recompiled code (gba_recomp.c), NULL: interpreter only */
 
@@ -195,6 +199,8 @@ struct gba_machine {
     gba_timer timer[4];
     gba_dma dma[4];
     uint32_t dma_latch;     /* last value a DMA moved (open bus of DMA reads) */
+    bool dma_active;        /* a DMA is moving data (its cartridge accesses stop the prefetch buffer without a wait) */
+    uint64_t dma_due;       /* cycle the immediate DMAs started (gba_dma.due) take the bus, UINT64_MAX: none */
 
     /* PPU timing (XBA-201, the mGBA suite's video tests): lines before a newly enabled BG shows, the windows'
      * vertical flags (latched at each line start: set on WINxV's top line, cleared on its bottom one), and OAM as
@@ -252,6 +258,10 @@ GBA_RC_SAME(open_bus);
 GBA_RC_SAME(rc_native);
 GBA_RC_SAME(rc_ewram);
 GBA_RC_SAME(rc_iwram);
+GBA_RC_SAME(fetchmax16);
+GBA_RC_SAME(fetchmax32);
+GBA_RC_SAME(pf);
+_Static_assert(sizeof(gba_rc_prefetch) == 24, "gba_rc_prefetch layout");
 _Static_assert(BANK_COUNT == 6, "gba_cpu banks");
 
 /* Little-endian helpers. */
@@ -305,6 +315,14 @@ void gba_raise_irq_at(gba_machine *m, uint16_t bits, uint64_t when);
 void gba_update_irq(gba_machine *m);
 void gba_schedule(gba_machine *m);
 void gba_io_reset(gba_machine *m);
+/* Runs the immediate DMAs whose start delay is over (m->now >= m->dma_due): the scheduler, and the bus before a
+ * CPU access that would contend with them (gba_dma_due_check). */
+void gba_dma_run_due(gba_machine *m);
+static inline void gba_dma_due_check(gba_machine *m)
+{
+    if (__builtin_expect(m->now >= m->dma_due, 0))
+        gba_dma_run_due(m);
+}
 
 /* gba_audio.c: sound registers 0x60-0xA7 (byte granularity), FIFO timer ticks, catching up. */
 void gba_apu_reset(gba_machine *m);
@@ -360,5 +378,6 @@ void gba_bios_direct_boot(gba_machine *m);
 /* The built-in BIOS's SWI handler hit its HLE trap: run SWI `num` in C. */
 void gba_bios_hle_swi(gba_machine *m, uint32_t num);
 #define GBA_HLE_TRAP 0xE7F0DEF0u   /* an ARM undefined encoding, only honoured inside the built-in BIOS */
+#define GBA_HLE_STUBS 0x800u       /* the built-in BIOS's HLE stub of SWI n: GBA_HLE_STUBS + 8n (trap; bx lr) */
 
 #endif

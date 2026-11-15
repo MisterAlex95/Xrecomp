@@ -335,7 +335,7 @@ class FnLifter:
                     if not b:
                         v = ror(v, (addr & 3) * 8)
                     region = (addr >> 24) & 15
-                    out = ["now += h->%s[%d][0];" % ("wait16" if b else "wait32", region), "now += 1;"]
+                    out = ["now += RC_LIT(h->%s[%d][0]);" % ("wait16" if b else "wait32", region), "now += 1;"]
                     out.append(self.jump(v) if rd == 15 else "r%d = %s;" % (rd, hx(v)))
                     return out
             off = hx(off)
@@ -538,7 +538,7 @@ class FnLifter:
         addr = ((a + 4) & ~2) + (op & 0xFF) * 4
         v = self.fold_literal(addr, 4)
         if v is not None:
-            return ["now += h->wait32[%d][0];" % ((addr >> 24) & 15), "r%d = %s;" % (rd, hx(v)), "now += 1;"]
+            return ["now += RC_LIT(h->wait32[%d][0]);" % ((addr >> 24) & 15), "r%d = %s;" % (rd, hx(v)), "now += 1;"]
         return ["r%d = RD32(%s, 0, %s);" % (rd, hx(addr), self.tob(a)), "now += 1;"]
 
     def t_regoff(self, op, a):
@@ -707,7 +707,7 @@ class FnLifter:
                 continue
             if x in leaders:
                 out.append("    RC_STOP(%s, %s, %d);" % (hx(x), segment_cost(addrs, i, size, leaders, bodies), left[x]))
-            out.append("    RC_I();")
+            out.append("    RC_I(%s);" % hx(x))
             if body:
                 out.append("    {")
                 out += ["        " + s for s in body]
@@ -734,12 +734,15 @@ class FnLifter:
 # its first instruction: due now, leave for the dispatcher; due inside the segment, the interpreter runs the rest of
 # the block (GBA_RC_EXIT_INTERP, rc_hint = how many instructions), as RC_CHECK after a memory access. Entered inside a
 # block, the function answers the same from its mid_ table. A bus write that raises an IRQ or halts the CPU sets the
-# local next event to 0, so the next check stops there.
+# local next event to 0, so the next check stops there. The bound also counts the last instruction's fetch: its first
+# data access then starts before the next event too, as it must (the interpreter's bus runs an immediate DMA whose start
+# delay is over before such an access, gba_dma_due_check; lifted code's inline RAM accesses do not look).
 
 MEM_RE = re.compile(r"\b(?:RD|WR)(?:8|16|32)\(|\bRC_RUN_RAM\(")
 NOW_RE = re.compile(r"now \+= ([^;]*);")
 MUL_RE = re.compile(r"^\(uint32_t\)rc_mul_cycles\(\w+, \d\)( \+ 1)?$")
 WAIT_RE = re.compile(r"h->wait(?:16|32)\[\d+\]\[0\]")
+LIT_RE = re.compile(r"RC_LIT\((h->wait(?:16|32)\[\d+\]\[0\])\)")
 EXITS = ("RC_JUMP_DYN", "RC_BX", "RC_EXIT")  # what follows may be a return point
 MAX_BLOCK = 12  # instructions per block at most (an event in a block makes the interpreter run the rest of it)
 
@@ -761,13 +764,17 @@ def static_cost(body):
                 const += 5 if e.endswith("+ 1") else 4
             elif WAIT_RE.fullmatch(e) or e == "RC_NEXTRA()":
                 terms.append(e)
+            elif LIT_RE.fullmatch(e):  # a folded literal: the load's wait states, plus the prefetch buffer's stop
+                terms.append(LIT_RE.fullmatch(e).group(1))
+                const += 1
             else:
                 raise ValueError("lift: unknown cycle term %r" % e)
     return const, terms
 
 
 def segment_cost(addrs, i, size, leaders, bodies):
-    """The cycle bound of the segment starting at addrs[i]: the instructions before its last one."""
+    """The cycle bound of the segment starting at addrs[i]: the instructions before its last one, and the last one's
+    fetch."""
     nfc, const, terms = 0, 0, []
     j = i
     while True:
@@ -780,7 +787,7 @@ def segment_cost(addrs, i, size, leaders, bodies):
         const += c
         terms += t
         j += 1
-    return "%d, %s" % (nfc, " + ".join([str(const)] + terms))
+    return "%d, %s" % (nfc + 1, " + ".join([str(const)] + terms))
 
 
 def block_left(addrs, size, leaders):

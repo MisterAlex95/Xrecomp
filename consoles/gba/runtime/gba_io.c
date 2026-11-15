@@ -107,10 +107,16 @@ void gba_schedule(gba_machine *m)
             next = m->timer[i].overflow_at;
     if (m->irq_at < next)
         next = m->irq_at;
+    if (m->dma_due < next)
+        next = m->dma_due;
     m->next_event = next;
 }
 
 /* ---- DMA ------------------------------------------------------------------------------------------------ */
+
+/* An immediate DMA starts this many cycles after the write that enables it; until then the CPU goes on, and a CPU
+ * access (the first of an instruction) at or after that point waits for the transfer (mGBA suite, DMA timing). */
+#define DMA_START_DELAY 2
 
 static void dma_run(gba_machine *m, int i)
 {
@@ -131,12 +137,14 @@ static void dma_run(gba_machine *m, int i)
     if (i == 3 && gba_eeprom_area(m, dst))
         gba_eeprom_dma_hint(m, count);
 
-    bool seq = false;
+    /* From the cartridge to the cartridge, the first write follows the first read on the cartridge bus: sequential. */
+    m->dma_active = true;
+    bool seq = false, cart2 = (src >> 25) - 4u < 3u && (dst >> 25) - 4u < 3u;
     for (uint32_t n = 0; n < count; n++) {
         if (w32) {
             uint32_t v = src >= 0x02000000 ? gba_read32(m, src & ~3u, seq) : m->dma_latch;
             m->dma_latch = v;
-            gba_write32(m, dst & ~3u, v, seq);
+            gba_write32(m, dst & ~3u, v, seq || cart2);
         } else {
             uint16_t v;
             if (src >= 0x02000000) {
@@ -145,13 +153,14 @@ static void dma_run(gba_machine *m, int i)
             } else {
                 v = (uint16_t)(m->dma_latch >> ((dst & 2) * 8));
             }
-            gba_write16(m, dst & ~1u, v, seq);
+            gba_write16(m, dst & ~1u, v, seq || cart2);
         }
         seq = true;
         src += (uint32_t)src_inc;
         dst += (uint32_t)dst_inc;
     }
     m->now += 2;
+    m->dma_active = false;
     d->src = src;
     if (!fifo)
         d->dst = dst;
@@ -179,8 +188,27 @@ static void dma_write_ctl(gba_machine *m, int i, uint16_t v)
         d->dst = rd32(&m->io[0xB4 + 12 * i]) & (i == 3 ? 0x0FFFFFFF : 0x07FFFFFF);
         uint32_t c = rd16(&m->io[0xB8 + 12 * i]) & (i == 3 ? 0xFFFF : 0x3FFF);
         d->count = c ? c : (i == 3 ? 0x10000 : 0x4000);
-        if (((v >> 12) & 3) == DMA_NOW)
-            dma_run(m, i);
+        if (((v >> 12) & 3) == DMA_NOW) { /* it takes the bus DMA_START_DELAY cycles later, the CPU runs meanwhile */
+            d->due = true;
+            if (m->now + DMA_START_DELAY < m->dma_due)
+                m->dma_due = m->now + DMA_START_DELAY;
+            if (m->dma_due < m->next_event)
+                m->next_event = m->dma_due;
+        }
+    } else if (!(v & 0x8000)) {
+        d->due = false;
+    }
+}
+
+void gba_dma_run_due(gba_machine *m)
+{
+    m->dma_due = UINT64_MAX;
+    for (int i = 0; i < 4; i++) {
+        if (m->dma[i].due) {
+            m->dma[i].due = false;
+            if (m->dma[i].cnt_h & 0x8000)
+                dma_run(m, i);
+        }
     }
 }
 
@@ -407,6 +435,10 @@ static void run_events(gba_machine *m)
                 any = true;
             }
         }
+        if (m->dma_due <= m->now) {
+            gba_dma_run_due(m);
+            any = true;
+        }
         if (m->irq_at <= m->now) { /* the request reaches the CPU (and ends a halt) */
             m->irq_line = true;
             m->irq_at = UINT64_MAX;
@@ -623,6 +655,7 @@ void gba_io_reset(gba_machine *m)
     m->ie = m->if_ = m->ime = 0;
     m->irq_line = false;
     m->irq_at = UINT64_MAX;
+    m->dma_due = UINT64_MAX;
     m->keycnt = 0;
     gba_apu_reset(m);
     gba_set_keys(m, 0);
