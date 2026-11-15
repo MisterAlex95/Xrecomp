@@ -6,12 +6,16 @@
  *                            for HOST_LAYER_SECONDS), the pads read each frame;
  *                            exits 77 (skipped) when host_window_headless()
  *                            says so (XBR_BUILD_ONLY, no display)
+ *   host_layer_test shaders  the console window's picture shaders (XBA-195), skipped the same way
+ *   host_layer_test present_shaders  the shared shader module (XBA-203): keys and sources on every host, each
+ *                            preset built in every GL context the display offers
  */
 #include "host_audio.h"
 #include "host_cpus.h"
 #include "host_pad.h"
 #include "host_time.h"
 #include "host_window.h"
+#include "present_shaders.h"
 #include "framegen_pacer.h"
 #include "recomp_cfg.h"
 #include "recomp_lifecycle.h"
@@ -655,6 +659,158 @@ static int run_shaders(void)
     return s_fail;
 }
 
+/* ── The shared shader module (present_shaders.c, XBA-203) ──────────────
+ * Its pure half on every host: names, keys, strengths, console / Xbox lines, the sources of each dialect. With a
+ * display, every preset built in each GL context the host can make: GLES 3.0 (GLSL ES 3.00 and 1.00, the console
+ * window and SDL's opengles2 renderer), a 3.2 core context (GLSL 1.50) and a compatibility one (GLSL 1.20, SDL's
+ * opengl renderer). */
+static int src_has(PresentGlsl d, int preset, const char *needle)
+{
+    const char *src[4];
+    int n = 0;
+
+    present_shader_fs_src(d, preset, NULL, src, &n);
+    for (int i = 0; i < n; i++)
+        if (strstr(src[i], needle))
+            return 1;
+    return 0;
+}
+
+/* Builds every preset in a fresh context of that kind; -1 when the context cannot be made here. */
+static int build_all(const char *what, int es, int major, int minor, int profile, PresentGlsl d1, int d2)
+{
+    SDL_Window *w;
+    SDL_GLContext ctx;
+    int built = 0;
+
+    SDL_GL_ResetAttributes();
+    if (profile)
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, profile);
+    if (es)
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    if (major) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor);
+    }
+    w = SDL_CreateWindow(what, 0, 0, 64, 64, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+    ctx = w ? SDL_GL_CreateContext(w) : NULL;
+    if (!ctx) {
+        printf("host_layer present_shaders: no %s context here (%s), skipped\n", what, SDL_GetError());
+        if (w)
+            SDL_DestroyWindow(w);
+        return -1;
+    }
+    SDL_GL_MakeCurrent(w, ctx);
+    for (int k = 0; k < 2; k++) {
+        int d = k ? d2 : (int)d1;
+        if (d < 0)
+            continue;
+        for (int p = HOST_SHADER_SHARP; p < HOST_SHADER_COUNT; p++) {
+            PresentShaderProg sp = { 0 };
+            int ok = present_shader_build(&sp, (PresentGlsl)d, p, "[TEST]");
+            if (!ok)
+                fprintf(stderr, "FAIL: %s dialect %d preset %s does not build\n", what, d, present_shader_name(p));
+            CHECK(ok && sp.prog && sp.u_tex >= 0);   /* unused uniforms are optimised out (-1) */
+            /* The legacy vertex shader carries the crop and the legacy fragment header the swap. */
+            CHECK((d == PRESENT_GLSL_ES100 || d == PRESENT_GLSL_120) == (sp.u_rect >= 0));
+            built += ok;
+            present_shader_release(&sp, 0);
+        }
+    }
+    SDL_GL_DeleteContext(ctx);
+    SDL_DestroyWindow(w);
+    printf("host_layer present_shaders: %s: %d programs built\n", what, built);
+    return built;
+}
+
+static int run_present_shaders(void)
+{
+    HostShader s = { HOST_SHADER_CRT, -1, 0, 0 }, c;
+    const char *src[4];
+    int n = -1;
+
+    CHECK(present_shader_parse("CRT") == HOST_SHADER_CRT && present_shader_parse("lcd") == HOST_SHADER_LCD);
+    CHECK(present_shader_parse("") == -1 && present_shader_parse(NULL) == -1 && present_shader_parse("xbr") == -1);
+    CHECK(!strcmp(present_shader_name(HOST_SHADER_SHARP), "sharp") && !strcmp(present_shader_name(-1), "none"));
+    CHECK(present_shader_strength(&s) == 60);
+    s.preset = HOST_SHADER_SCANLINES;
+    CHECK(present_shader_strength(&s) == 50);
+    s.strength = 150;
+    CHECK(present_shader_strength(&s) == 100);
+    s.preset = HOST_SHADER_NONE;
+    CHECK(present_shader_strength(&s) == 0);
+    s = (HostShader){ 9, 30, 30, 30 };
+    c = present_shader_clamp(&s);
+    CHECK(c.preset == HOST_SHADER_NONE);
+    s = (HostShader){ HOST_SHADER_CRT, -7, 300, -2 };
+    c = present_shader_clamp(&s);
+    CHECK(c.preset == HOST_SHADER_CRT && c.strength == -1 && c.curvature == 100 && c.ghosting == 0);
+    c = present_shader_clamp(NULL);
+    CHECK(c.preset == HOST_SHADER_NONE && c.strength == -1);
+
+    /* Keys: the console's variable, then RECOMP_SHADER. */
+    setenv("RECOMP_SHADER", "scanlines", 1);
+    setenv("RECOMP_XBOX_SHADER", "sharp", 1);
+    setenv("RECOMP_SHADER_STRENGTH", "35", 1);
+    setenv("RECOMP_SHADER_CURVATURE", "x", 1);
+    present_shader_env("RECOMP_XBOX_SHADER", HOST_SHADER_NONE, &c);
+    CHECK(c.preset == HOST_SHADER_SHARP && c.strength == 35 && c.curvature == 0 && c.ghosting == 0);
+    setenv("RECOMP_XBOX_SHADER", "bogus", 1);
+    present_shader_env("RECOMP_XBOX_SHADER", HOST_SHADER_NONE, &c);
+    CHECK(c.preset == HOST_SHADER_SCANLINES);
+    unsetenv("RECOMP_SHADER");
+    present_shader_env(NULL, HOST_SHADER_CRT, &c);
+    CHECK(c.preset == HOST_SHADER_CRT);
+    unsetenv("RECOMP_XBOX_SHADER");
+    unsetenv("RECOMP_SHADER_STRENGTH");
+    unsetenv("RECOMP_SHADER_CURVATURE");
+
+    /* Lines: a console picture's, upscaled or not; an Xbox frame's, line pairs below 720. */
+    CHECK(present_shader_console_cells(160) == 160 && present_shader_console_cells(240) == 240);
+    CHECK(present_shader_console_cells(960) == 240 && present_shader_console_cells(480) == 240);
+    CHECK(present_shader_console_cells(0) == 1);
+    CHECK(present_shader_xbox_cells(480) == 240 && present_shader_xbox_cells(1440) == 240);
+    CHECK(present_shader_xbox_cells(576) == 288 && present_shader_xbox_cells(720) == 720);
+    CHECK(present_shader_xbox_cells(1920) == 240 && present_shader_xbox_cells(2160) == 720);   /* 4 x 480, 3 x 720 */
+    CHECK(present_shader_xbox_cells(1080) == 1080);   /* none of the three: each line */
+    CHECK(present_shader_xbox_cells(0) == 1);
+
+    /* Sources: none has no fragment shader; each dialect its header; the bodies shared. */
+    present_shader_fs_src(PRESENT_GLSL_ES300, HOST_SHADER_NONE, NULL, src, &n);
+    CHECK(n == 0);
+    present_shader_fs_src(PRESENT_GLSL_ES100, HOST_SHADER_CRT, NULL, src, &n);
+    CHECK(n == 4 && !strncmp(src[0], "#version 100\n", 13));
+    present_shader_vs_src(PRESENT_GLSL_120, src, &n);
+    CHECK(n == 2 && !strcmp(src[0], "#version 120\n") && strstr(src[1], "a_pos") && strstr(src[1], "u_rect"));
+    present_shader_vs_src(PRESENT_GLSL_ES300, src, &n);
+    CHECK(n == 2 && strstr(src[1], "gl_VertexID") && !strstr(src[1], "a_pos"));
+    CHECK(src_has(PRESENT_GLSL_150, HOST_SHADER_LCD, "#version 150") && src_has(PRESENT_GLSL_150, HOST_SHADER_LCD, "u_ghost"));
+    CHECK(src_has(PRESENT_GLSL_ES100, HOST_SHADER_SCANLINES, "texture2D") && src_has(PRESENT_GLSL_120, HOST_SHADER_SHARP, "u_swap"));
+    CHECK(!src_has(PRESENT_GLSL_ES300, HOST_SHADER_SCANLINES, "texture2D"));
+    present_shader_fs_src(PRESENT_GLSL_ES300, HOST_SHADER_CRT, "not glsl;\n", src, &n);
+    CHECK(n == 3 && !strcmp(src[2], "not glsl;\n"));
+
+    if (host_window_headless()) {
+        printf("host_layer present_shaders: no display, GL builds skipped; %s\n", s_fail ? "FAIL" : "ok");
+        return s_fail;
+    }
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        printf("host_layer present_shaders: SDL video unavailable (%s), GL builds skipped\n", SDL_GetError());
+        return s_fail;
+    }
+    {
+        int es3 = build_all("GLES 3.0", 1, 3, 0, 0, PRESENT_GLSL_ES300, PRESENT_GLSL_ES100);
+        int es2 = build_all("GLES 2.0", 1, 2, 0, 0, PRESENT_GLSL_ES100, -1);
+        int core = build_all("GL 3.2 core", 0, 3, 2, SDL_GL_CONTEXT_PROFILE_CORE, PRESENT_GLSL_150, -1);
+        int compat = build_all("GL compatibility", 0, 0, 0, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY, PRESENT_GLSL_120, -1);
+        CHECK(es3 != 0 && es2 != 0 && core != 0 && compat != 0);   /* -1 (not here) is fine, 0 built is not */
+        CHECK(es3 > 0 || es2 > 0 || core > 0 || compat > 0);
+    }
+    SDL_Quit();
+    printf("%s\n", s_fail ? "host_layer present_shaders: FAIL" : "host_layer present_shaders: ok");
+    return s_fail;
+}
+
 int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "core";
@@ -666,6 +822,8 @@ int main(int argc, char **argv)
         return run_window();
     if (!strcmp(mode, "shaders"))
         return run_shaders();
-    fprintf(stderr, "usage: %s core|window|shaders\n", argv[0]);
+    if (!strcmp(mode, "present_shaders"))
+        return run_present_shaders();
+    fprintf(stderr, "usage: %s core|window|shaders|present_shaders\n", argv[0]);
     return 2;
 }

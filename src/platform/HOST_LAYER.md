@@ -42,6 +42,7 @@ interface target when there is no Vulkan bridge). The `*.cmake` files have inclu
 | File | Class | Note |
 |---|---|---|
 | `host_window.[ch]` | G (new) | SDL window, GL ES 3.0 / 3.2 core context, RGBA or GL-texture present, letterboxed (aspect, integer or stretch scaling, linear or nearest: `host_window_set_scaling`; a fixed display shape such as the PS1's 4:3: `host_window_set_aspect`), a capture of the drawable as presented (`host_window_capture`), events → lifecycle and pads; from any thread, the present rate (`host_window_stats`) and the last picture as a BMP (`host_window_screenshot_bmp`); the shared display keys `RECOMP_SCALE` (aspect, integer or stretch) / `RECOMP_FILTER` / `RECOMP_PRESENT_VSYNC` (`host_window_env_*`, XBA-181); picture shaders none / sharp / scanlines / crt / lcd (`host_window_set_shader`, `RECOMP_SHADER*`, XBA-195, [below](#picture-shaders-xba-195)) |
+| `present_shaders.[ch]` | G (new) | the picture shaders (XBA-203): presets, `RECOMP_SHADER*` keys, GLSL in two dialects, GL program and uniforms, shared by `host_window` and the Xbox presenter ([below](#picture-shaders-xba-195)) |
 | `perf_overlay.[ch]` | G | SDL_Renderer overlay; moved from `xbox_video` to `xbr_host` |
 | `display_vsync_android.[ch]` | M → split | AChoreographer grid; now hands samples to a sink passed to `display_vsync_android_start`, and the Xbox presenter passes `nv2a_pb_exec_display_clock`. Moved to `xbr_host` |
 | `display_clock.h`, `frame_times.h` | G | header-only |
@@ -102,8 +103,31 @@ PS1 and N64 runtimes call next to `host_window_set_scaling` (`RECOMP_GBA_SHADER`
 `RECOMP_N64_SHADER` win over `RECOMP_SHADER`). A program is built on its first draw; one that does not compile or
 link is logged once (« picture shader X does not build here; drawing without one ») and none is drawn instead
 (`RECOMP_SHADER_TEST_FAIL=<preset>` forces that, for the test). `host_window_screenshot_bmp` stays the raw picture,
-without the shader; `host_window_capture` reads the drawable as drawn, shader included. The Xbox presenter
-(`fb_present_sdl.c`) has none of this: moving it onto `host_window` (or giving it the same pass) is follow-up work.
+without the shader; `host_window_capture` reads the drawable as drawn, shader included.
+
+The presets, their keys, the GLSL and the uniforms live in `present_shaders.[ch]` (XBA-203), shared by the console
+window and the Xbox presenter: the same fragment bodies in two dialects, GLSL ES 3.00 / 1.50 for a context of our
+own (`host_window`: no vertex buffer, `gl_VertexID`) and GLSL ES 1.00 / 1.20 for SDL_Renderer's context (a vertex
+attribute; `texture()` mapped onto `texture2D`, with a B/R swap for the textures SDL's opengles2 renderer keeps as
+swapped RGBA). `present_shader_env`, `_parse`, `_name`, `_strength`, `_clamp`, `_console_cells` / `_xbox_cells`,
+`_build` (with the `RECOMP_SHADER_TEST_FAIL` fallback and its log line), `_use` (the uniforms) and
+`_draw_legacy` (a draw inside SDL's renderer that puts back every GL state SDL caches).
+
+### The Xbox presenter (XBA-203)
+
+`fb_present_sdl.c` draws its frame through the same presets: `RECOMP_XBOX_SHADER` wins over `RECOMP_SHADER`, with
+the same strength and curvature keys. `lcd` is a handheld's grid: an Xbox frame is drawn without one (logged). The
+pass replaces the plain `SDL_RenderCopy` of whatever is shown (a flip, a GPU back end's frame at its
+`RECOMP_GPU_SCALE` size, a frame generation entry, a ZOOM crop) and draws into the letterboxed rectangle of the
+logical size (640x480 or 16:9) at the output resolution, inside SDL's renderer: its GL context (the `opengles2`
+renderer on Android, GLSL ES 1.00; `opengl` on Linux, GLSL 1.20; on macOS a shader asks SDL for its OpenGL renderer
+instead of Metal), its texture (`SDL_GL_BindTexture`), and every GL state SDL caches put back after the draw. The
+perf overlay is drawn over it by SDL. Scanlines follow the guest's lines: the frame's height is 480, 576 or 720
+lines (or a GPU multiple), and a standard-definition frame draws one scanline per pair of lines, as a TV shows one
+field (240 / 288); a 720-line frame one per line. Sharp bilinear samples linearly. Another renderer, a texture SDL
+pads, or a shader that does not build: the plain copy, logged once. `xbox_FramebufferDumpBmp` stays the raw frame;
+`xbox_FramebufferWindowCapture` writes the drawable as drawn (PPM), `xbox_FramebufferWindowShaderActive` the preset
+drawn.
 
 Tests: `tests/host_layer`, `host_layer_test shaders` (`host_layer_shaders`, skipped without a display): each preset
 drawn into a 640x480 window and read back with `host_window_capture`: scanlines darken rows 2-3 of every 4-row line
@@ -111,7 +135,13 @@ and leave the columns alike, strength 0 equals none, the CRT's columns are red /
 blacks the corners, the LCD grid darkens each cell's last column and row and keeps its inside, ghosting shows half
 of a white picture under the next black one, sharp bilinear blends a black / white edge over fewer columns than
 linear at 4.27x, the BMP screenshot is the raw grey, a forced build failure draws exactly what none draws. Run it
-under Xvfb + Mesa (`DISPLAY=:N`).
+under Xvfb + Mesa (`DISPLAY=:N`). `host_layer_test present_shaders` (`host_layer_present_shaders`): the shared
+module's keys, lines and sources on every host, and with a display every preset built in each context Mesa offers
+(GLES 3.0 with GLSL ES 3.00 and 1.00, GLES 2.0, 3.2 core, compatibility). `tests/fb_present_sdl`
+(`fb_present_sdl_shaders`, skipped without a display): the Xbox presenter's window with SDL's opengl and opengles2
+renderers, each case a child process presenting a frame and capturing the window: none, scanlines (240 over 960
+rows, also through an RGBX frame; the BMP screenshot raw), CRT columns, curvature corners, sharp against linear at
+4.27x, `lcd` drawn as none, `RECOMP_XBOX_SHADER` over `RECOMP_SHADER`, the forced build failure.
 
 Cost (`HOST_LAYER_BENCH_SIZE=1920x1080 HOST_LAYER_BENCH=100 host_layer_test shaders`, ms per present of a 160x120
 picture in a 1920x1080 window, Mesa llvmpipe on one CPU thread, `LP_NUM_THREADS=1`; a software rasteriser, so the

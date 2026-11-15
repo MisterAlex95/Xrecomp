@@ -83,6 +83,7 @@
 #include "video_player.h"
 #include "perf_overlay.h"
 #include "aspect_policy.h"
+#include "present_shaders.h"  /* picture shaders, shared with host_window (XBA-203) */
 #include "pvideo_posix.h"     /* the PVIDEO overlay's scan-out */
 #include "keyboard_sdl.h"     /* src/input: keys into the pad stand-in */
 #include "xinput_xbox.h"
@@ -1198,6 +1199,214 @@ static int env_on(const char *name)
     return e && *e && *e != '0';
 }
 
+/* ── Picture shaders (XBA-203, present_shaders.h) ─────────────────────────
+ * The console window's presets (none, sharp, scanlines, crt; lcd is a handheld's grid and draws none here), from
+ * RECOMP_XBOX_SHADER, else RECOMP_SHADER, with the same strength / curvature keys. The pass draws the shown frame
+ * (a flip, a GPU back end's frame or a frame generation entry) into the letterboxed rectangle at the output
+ * resolution, inside SDL's renderer: its GL context (the opengles2 or opengl renderer; GLSL ES 1.00 / 1.20), its
+ * texture (SDL_GL_BindTexture), every cached state put back; the perf overlay is drawn over it by SDL. Any other
+ * renderer, a texture SDL pads, or a shader that does not build: the plain copy, logged once. Main thread only,
+ * except s_xshader_active (read by xbox_FramebufferWindowShaderActive). */
+static HostShader s_xshader = { HOST_SHADER_NONE, -1, 0, 0 };
+static PresentShaderProg s_xsprog[HOST_SHADER_COUNT];
+static int s_xshader_glsl = -1;          /* PRESENT_GLSL_ES100 / _120, -1: no GL renderer */
+static int s_xshader_off;                /* the pass cannot run in this renderer (logged) */
+static volatile int s_xshader_active;
+static SDL_RendererInfo s_xren_info;
+static pthread_mutex_t s_capture_mu = PTHREAD_MUTEX_INITIALIZER;
+static char s_capture[1024];             /* xbox_FramebufferWindowCapture, under s_capture_mu */
+
+int xbox_FramebufferWindowShaderActive(void)
+{
+    return __atomic_load_n(&s_xshader_active, __ATOMIC_ACQUIRE);
+}
+
+void xbox_FramebufferWindowCapture(const char *path)
+{
+    pthread_mutex_lock(&s_capture_mu);
+    snprintf(s_capture, sizeof s_capture, "%s", path ? path : "");
+    pthread_mutex_unlock(&s_capture_mu);
+}
+
+/* Before the renderer: the preset from the environment; on macOS (Metal by default) a shader asks SDL for its
+ * OpenGL renderer, unless SDL_RENDER_DRIVER says otherwise. */
+static void xshader_env(void)
+{
+    HostShader s;
+
+    present_shader_env("RECOMP_XBOX_SHADER", HOST_SHADER_NONE, &s);
+    if (s.preset == HOST_SHADER_LCD) {
+        fprintf(stderr, "  [FBWIN] picture shader lcd is a handheld's pixel grid; an Xbox frame is drawn "
+                        "without one\n");
+        s.preset = HOST_SHADER_NONE;
+    }
+    s_xshader = present_shader_clamp(&s);
+    if (s_xshader.preset == HOST_SHADER_NONE)
+        return;
+    fprintf(stderr, "  [FBWIN] picture shader %s requested (strength %d, curvature %d)\n",
+            present_shader_name(s_xshader.preset), present_shader_strength(&s_xshader), s_xshader.curvature);
+#if defined(__APPLE__)
+    SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+#endif
+}
+
+/* After the renderer: the dialect its GL context takes, or none. */
+static void xshader_renderer(SDL_Renderer *ren)
+{
+    s_xshader_glsl = -1;
+    if (SDL_GetRendererInfo(ren, &s_xren_info) != 0)
+        memset(&s_xren_info, 0, sizeof s_xren_info);
+    if (s_xren_info.name && !strcmp(s_xren_info.name, "opengles2"))
+        s_xshader_glsl = PRESENT_GLSL_ES100;
+    else if (s_xren_info.name && !strcmp(s_xren_info.name, "opengl"))
+        s_xshader_glsl = PRESENT_GLSL_120;
+    if (s_xshader.preset != HOST_SHADER_NONE && s_xshader_glsl < 0) {
+        fprintf(stderr, "  [FBWIN] picture shader %s needs SDL's OpenGL renderer (this one is %s); drawing "
+                        "without one\n", present_shader_name(s_xshader.preset),
+                s_xren_info.name ? s_xren_info.name : "?");
+        s_xshader_off = 1;
+    }
+    __atomic_store_n(&s_xshader_active, s_xshader.preset != HOST_SHADER_NONE && !s_xshader_off
+                                        ? s_xshader.preset : HOST_SHADER_NONE, __ATOMIC_RELEASE);
+}
+
+/* The preset to draw with, or none (unset, no GL renderer, or its shader failed). */
+static int xshader_preset(void)
+{
+    int p = s_xshader.preset;
+
+    return p > HOST_SHADER_NONE && p < HOST_SHADER_COUNT && !s_xshader_off && !s_xsprog[p].failed
+           ? p : HOST_SHADER_NONE;
+}
+
+static void xshader_fail(const char *why)
+{
+    fprintf(stderr, "  [FBWIN] picture shader %s: %s; drawing without one\n",
+            present_shader_name(s_xshader.preset), why);
+    s_xshader_off = 1;
+    __atomic_store_n(&s_xshader_active, HOST_SHADER_NONE, __ATOMIC_RELEASE);
+}
+
+/* The format SDL keeps a texture of `format` in (SDL_CreateTexture's choice: the format itself when the renderer
+ * has it, else its first one with the same alpha). SDL's opengles2 renderer stores ARGB8888 / RGB888 as RGBA bytes
+ * and swaps B and R in its shaders: so must ours. */
+static int xshader_swap(uint32_t format)
+{
+    uint32_t native = 0;
+
+    if (s_xshader_glsl != PRESENT_GLSL_ES100)
+        return 0;
+    for (Uint32 i = 0; i < s_xren_info.num_texture_formats; i++) {
+        if (s_xren_info.texture_formats[i] == format)
+            native = format;
+    }
+    for (Uint32 i = 0; !native && i < s_xren_info.num_texture_formats; i++) {
+        uint32_t f = s_xren_info.texture_formats[i];
+        if (!SDL_ISPIXELFORMAT_FOURCC(f) && SDL_ISPIXELFORMAT_ALPHA(f) == SDL_ISPIXELFORMAT_ALPHA(format))
+            native = f;
+    }
+    return native == SDL_PIXELFORMAT_ARGB8888 || native == SDL_PIXELFORMAT_RGB888;
+}
+
+/* Draws tex (tw x th, `format`, aspect_pack class) through the preset into the rectangle rw x rh centred in the
+ * ow x oh drawable, after the clear SDL has queued. Returns 0 when the caller is to copy it as usual. */
+static int xshader_draw(SDL_Renderer *ren, SDL_Texture *tex, uint32_t tw, uint32_t th, uint32_t format,
+                        uint64_t aspect, int ow, int oh, uint32_t rw, uint32_t rh)
+{
+    int p = xshader_preset();
+    float sx = 0, sy = 0;
+    uint32_t y0 = 0, rows = th;
+    int cells;
+    unsigned err;
+
+    if (p == HOST_SHADER_NONE || !tex || !tw || !th || !rw || !rh)
+        return 0;
+    if (aspect_cls(aspect) == ASPECT_ZOOM && aspect_y0(aspect) + aspect_rows(aspect) <= th && aspect_rows(aspect)) {
+        y0 = aspect_y0(aspect);
+        rows = aspect_rows(aspect);
+    }
+    SDL_RenderFlush(ren);   /* the clear first; SDL's context is current from here */
+    if (SDL_GL_BindTexture(tex, &sx, &sy) != 0) {
+        xshader_fail("SDL cannot bind its texture");
+        return 0;
+    }
+    if (sx != 1.0f || sy != 1.0f) {
+        SDL_GL_UnbindTexture(tex);
+        xshader_fail("SDL pads the texture (no NPOT textures)");
+        return 0;
+    }
+    if (!present_shader_build(&s_xsprog[p], (PresentGlsl)s_xshader_glsl, p, "[FBWIN]")) {
+        SDL_GL_UnbindTexture(tex);
+        __atomic_store_n(&s_xshader_active, HOST_SHADER_NONE, __ATOMIC_RELEASE);
+        return 0;
+    }
+    cells = present_shader_xbox_cells((int)th);
+    {
+        PresentShaderParams pp = {
+            .src_w = (float)tw, .src_h = (float)th,
+            /* The viewport as if the whole texture filled it: a ZOOM crop shows rows of it over rh. */
+            .out_w = (float)rw, .out_h = (float)rh * (float)th / (float)rows,
+            .cells_w = (float)tw * (float)cells / (float)th, .cells_h = (float)cells,
+            .rect = { 0.0f, (float)y0 / (float)th, 1.0f, (float)rows / (float)th },
+            .flip = 1, .swap = xshader_swap(format),
+            .strength = present_shader_strength(&s_xshader), .curvature = s_xshader.curvature,
+        };
+        err = present_shader_draw_legacy(&s_xsprog[p], &pp, (ow - (int)rw) / 2, (oh - (int)rh) / 2,
+                                         (int)rw, (int)rh);
+    }
+    SDL_GL_UnbindTexture(tex);
+    if (err) {
+        static int logged;
+        if (!logged) {
+            logged = 1;
+            fprintf(stderr, "  [FBWIN] picture shader %s: GL error 0x%04x at its draw\n", present_shader_name(p),
+                    err);
+        }
+    }
+    return 1;
+}
+
+/* xbox_FramebufferWindowCapture: the drawable as drawn, before the present. */
+static void capture_drawable(SDL_Renderer *ren)
+{
+    char path[sizeof s_capture];
+    int ow = 0, oh = 0;
+    unsigned char *rgb;
+    FILE *f;
+
+    pthread_mutex_lock(&s_capture_mu);
+    memcpy(path, s_capture, sizeof path);
+    s_capture[0] = 0;
+    pthread_mutex_unlock(&s_capture_mu);
+    if (!path[0])
+        return;
+    if (s_xshader_glsl < 0 || SDL_GetRendererOutputSize(ren, &ow, &oh) != 0 || ow <= 0 || oh <= 0) {
+        fprintf(stderr, "  [FBWIN] capture: needs SDL's OpenGL renderer\n");
+        return;
+    }
+    SDL_RenderFlush(ren);
+    rgb = malloc((size_t)ow * oh * 3);
+    if (!rgb || !present_shader_read_rgb(ow, oh, rgb)) {
+        free(rgb);
+        return;
+    }
+    {
+        /* Written aside, then renamed: a reader never sees half a file. */
+        char tmp[sizeof path + 8];
+        snprintf(tmp, sizeof tmp, "%s.part", path);
+        f = fopen(tmp, "wb");
+        if (f) {
+            fprintf(f, "P6\n%d %d\n255\n", ow, oh);
+            fwrite(rgb, 3, (size_t)ow * oh, f);
+            fclose(f);
+            if (rename(tmp, path) != 0)
+                remove(tmp);
+        } else
+            fprintf(stderr, "  [FBWIN] capture: cannot write %s\n", path);
+    }
+    free(rgb);
+}
+
 int xbox_HostWindowMain(int (*guest_main)(void))
 {
     SDL_Window *win;
@@ -1249,6 +1458,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     win_w = (int)(xbox_AspectSetting() == ASPECT_SETTING_16_9 ? 854u : FB_W) * scale;
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+    xshader_env();
 #ifdef __ANDROID__
     /* Back is trapped. In the app ShellActivity takes it first (it opens the
      * in-game menu, docs/android/app-shell.md « In-game menu »), so the
@@ -1287,6 +1497,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     " vsync %s); guest runs on a pthread\n",
                     FB_W, FB_H, ri.name, vsync ? "on" : "off");
     }
+    xshader_renderer(ren);
 #if defined(XBOXRECOMP_HAVE_GPU)
     {
         /* The drawable's real size (HiDPI pixels), for the GL back end's
@@ -1412,6 +1623,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                         SDL_DestroyTexture(tex);
                     tex = NULL;
                     perf_overlay_reset();
+                    for (int i = 0; i < HOST_SHADER_COUNT; i++)
+                        present_shader_release(&s_xsprog[i], 1);   /* went with the context */
                     reupload = 1;
                     dirty = 1;
                 } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat
@@ -1553,16 +1766,36 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                 }
                 linear = tex_w != rw || sh != rh;
             }
+            /* Sharp bilinear blends texels itself: it samples linearly whatever the scale. */
+            if (xshader_preset() == HOST_SHADER_SHARP)
+                linear = 1;
             if (linear != tex_linear) {
                 SDL_SetTextureScaleMode(tex, linear ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
                 tex_linear = linear;
             }
         }
         if (dirty) {
+            int shaded = 0;
             dirty = 0;
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
             SDL_RenderClear(ren);
-            if (tex && aspect_cls(tex_aspect) == ASPECT_ZOOM
+            if (tex && xshader_preset() != HOST_SHADER_NONE) {
+                /* The letterboxed rectangle SDL's logical size gives: 640x480, or 16:9. */
+                int ow = 0, oh = 0, cls = aspect_cls(tex_aspect);
+                uint32_t rw, rh, lw = cls == ASPECT_NORMAL ? FB_W : 16u, lh = cls == ASPECT_NORMAL ? FB_H : 9u;
+                SDL_GetRendererOutputSize(ren, &ow, &oh);
+                if ((uint64_t)ow * lh <= (uint64_t)oh * lw) {
+                    rw = (uint32_t)ow;
+                    rh = (uint32_t)((uint64_t)ow * lh / lw);
+                } else {
+                    rh = (uint32_t)oh;
+                    rw = (uint32_t)((uint64_t)oh * lw / lh);
+                }
+                shaded = xshader_draw(ren, tex, tex_w, tex_h, tex_format, tex_aspect, ow, oh, rw, rh);
+            }
+            if (shaded) {
+                /* Drawn through the picture shader. */
+            } else if (tex && aspect_cls(tex_aspect) == ASPECT_ZOOM
                     && aspect_y0(tex_aspect) + aspect_rows(tex_aspect) <= tex_h) {
                 SDL_Rect src = { 0, (int)aspect_y0(tex_aspect), (int)tex_w,
                                  (int)aspect_rows(tex_aspect) };
@@ -1570,6 +1803,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             } else if (tex)
                 SDL_RenderCopy(ren, tex, NULL, NULL);
             perf_overlay_draw(ren);
+            if (tex)
+                capture_drawable(ren);   /* a frame, not the clear of a window event before the first */
             {
                 uint64_t t_call = now_ns();
                 SDL_RenderPresent(ren);
@@ -1660,6 +1895,9 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     if (tex)
         SDL_DestroyTexture(tex);
     perf_overlay_reset();
+    for (int i = 0; i < HOST_SHADER_COUNT; i++)
+        present_shader_release(&s_xsprog[i], 1);   /* go with the renderer's context */
+    __atomic_store_n(&s_xshader_active, HOST_SHADER_NONE, __ATOMIC_RELEASE);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     if (!xbox_InputAnyOpen())

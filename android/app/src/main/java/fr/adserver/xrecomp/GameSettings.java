@@ -216,10 +216,11 @@ final class GameSettings {
     // ---- Options --------------------------------------------------------------------------------------------------
 
     /**
-     * Whether option o means anything to a game of console c: the GBA / PS1 / N64 picture options (scale, filter,
-     * the picture shader's four, XBA-195) to those consoles, the internal resolution to the PS1 and the N64, the
-     * others every console reads (« All consoles ») to every game, the Xbox's own to Xbox titles; the shell's
-     * self-test (a developer switch) to none.
+     * Whether option o means anything to a game of console c: the GBA / PS1 / N64 picture options (scale, filter)
+     * to those consoles, the internal resolution to the PS1 and the N64, the picture shader (XBA-195) to every game
+     * but its LCD ghosting to the console games (the Xbox presenter draws no LCD grid, XBA-203), the others every
+     * console reads (« All consoles ») to every game, the Xbox's own to Xbox titles; the shell's self-test (a
+     * developer switch) to none.
      */
     static boolean appliesTo(RecompConfig.Option o, Console c) {
         if (c == null)
@@ -229,14 +230,16 @@ final class GameSettings {
         if (o.title == R.string.OPT_CSCALE || o.title == R.string.OPT_CFILTER || o.title == R.string.OPT_REWIND
             || o.title == R.string.OPT_REWIND_MB)
             return c != Console.XBOX;   // XBA-194: rewind is the GBA / PS1 / N64 runtimes' (no Xbox save states)
+        if (o.title == R.string.OPT_CSHADER_GHOST)
+            return c != Console.XBOX;   // XBA-203: the LCD grid's ghosting; an Xbox game draws no LCD grid
         if (isShader(o))
-            return c != Console.XBOX;   // XBA-195: the console window's picture shader (the Xbox presenter has none)
+            return true;                // XBA-195 / XBA-203: the console window's and the Xbox presenter's
         if (o.title == R.string.OPT_UPSCALE)
             return c == Console.PS1 || c == Console.N64;
         return o.shared || c == Console.XBOX;
     }
 
-    /** XBA-195: the picture shader's options (the console window's; the Xbox presenter has none). */
+    /** XBA-195: the picture shader's options (the console window's and, XBA-203, the Xbox presenter's). */
     static boolean isShader(RecompConfig.Option o) {
         return o.title == R.string.OPT_CSHADER || o.title == R.string.OPT_CSHADER_STRENGTH
                || o.title == R.string.OPT_CSHADER_CURVE || o.title == R.string.OPT_CSHADER_GHOST;
