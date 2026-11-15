@@ -1089,6 +1089,26 @@ static inline uintptr_t recomp_guest_base(void)
 #define MEMD(addr)   RECOMP_GM(recomp_gm_f64, addr)
 #endif
 
+/* rep stos's fast path (tools/recomp/lifter.py _lift_rep_stos, XBA-38):
+ * `count` elements of `size` bytes (1, 2 or 4) of `value` at the host
+ * address of a forward fill the lifter has checked stays below the MMIO
+ * range. One memset when every byte of the element is the same (zeroing, the
+ * usual case), else a plain loop the compiler turns into wide stores. */
+static inline void recomp_rep_fill(void *dst, uint32_t value, size_t count, unsigned size)
+{
+    uint8_t *d = (uint8_t *)dst;
+    size_t i;
+    if (size == 1 || (size == 2 && (uint8_t)value == (uint8_t)(value >> 8)) ||
+        (size == 4 && value == (value & 0xFFu) * 0x01010101u)) {
+        memset(d, (int)(value & 0xFFu), count * size);
+    } else if (size == 2) {
+        uint16_t v = (uint16_t)value;
+        for (i = 0; i < count; i++) memcpy(d + 2 * i, &v, 2);
+    } else {
+        for (i = 0; i < count; i++) memcpy(d + 4 * i, &value, 4);
+    }
+}
+
 /* FSAVE's protected-mode image. Only state represented by the double-stack
  * model is restored: CW, TOP, condition codes and eight registers.
  * Tags, exception bits and the instruction/data pointers are not modeled; the

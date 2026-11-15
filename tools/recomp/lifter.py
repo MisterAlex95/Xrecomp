@@ -3621,6 +3621,23 @@ class Lifter:
             f"ecx = 0; }} /* {m} */",
         ]
 
+    def _lift_rep_stos(self, size, value, m):
+        """rep stos: forwards over plain guest memory, one memset (or a host
+        fill loop the compiler vectorises) through recomp_rep_fill (XBA-38);
+        backwards (DF), into the MMIO range or wrapping the 32-bit address,
+        volatile elements as before. The range is checked in 64 bits like
+        rep movs's. rep stosb used to memset unchecked, MMIO included."""
+        mem = f"MEM{size*8}"
+        return [
+            "{ uint64_t _n = (uint64_t)ecx * %du;" % size,
+            "if (!g_df && edi < 0xFD000000u && (uint64_t)edi + _n <= 0xFD000000u) {",
+            f"  recomp_rep_fill((void*)XBOX_PTR(edi), {value}, ecx, {size}u); edi += ecx * {size}u; }}",
+            f"else {{ uint32_t _i; int32_t _st = RECOMP_DF_STEP({size});",
+            f"  for (_i = 0; _i < ecx; _i++) {mem}(edi + _i*_st) = {value};",
+            "  edi += ecx * _st; }",
+            f"ecx = 0; }} /* {m} */",
+        ]
+
     def _lift_rep_string(self, insn, m):
         # Every one of these steps by RECOMP_DF_STEP(size) rather than a
         # literal, because EFLAGS.DF decides the direction and the block
@@ -3650,24 +3667,11 @@ class Lifter:
         if "movsw" in m:
             return self._lift_rep_movs(2, m)
         if "stosb" in m:
-            return ["if (!g_df) { memset((void*)XBOX_PTR(edi), (uint8_t)eax, ecx); edi += ecx; }",
-                    "else { uint32_t _i; for (_i = 0; _i < ecx; _i++)"
-                    " MEM8(edi - _i) = LO8(eax); edi -= ecx; }",
-                    "ecx = 0; /* rep stosb */"]
+            return self._lift_rep_stos(1, "LO8(eax)", m)
         if "stosd" in m:
-            return [
-                "{ uint32_t _i; int32_t _st = RECOMP_DF_STEP(4);"
-                " for (_i = 0; _i < ecx; _i++) MEM32(edi + _i*_st) = eax;"
-                " edi += ecx * _st; }",
-                "ecx = 0; /* rep stosd */"
-            ]
+            return self._lift_rep_stos(4, "eax", m)
         if "stosw" in m:
-            return [
-                "{ uint32_t _i; int32_t _st = RECOMP_DF_STEP(2);"
-                " for (_i = 0; _i < ecx; _i++) MEM16(edi + _i*_st) = LO16(eax);"
-                " edi += ecx * _st; }",
-                "ecx = 0; /* rep stosw */"
-            ]
+            return self._lift_rep_stos(2, "LO16(eax)", m)
         if "cmpsb" in m:
             return self._rep_compare(m, "MEM8(esi)", "MEM8(edi)", 1, True)
         if "scasb" in m:
