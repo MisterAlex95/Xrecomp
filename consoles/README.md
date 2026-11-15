@@ -566,7 +566,13 @@ bit for bit against angrylion.
   what came before). So what the CPU and the RSP read never depends on host timing or thread count; a game sees the
   pixels at SYNC_FULL rather than as each command runs (libultra and libdragon wait for it anyway). Costs: 8 MB of
   mirror plus 4 MB of hidden bits for 8 MB of RDRAM, a dirty bit per byte per renderer (1 MB each). Without threads
-  (Windows, or when none can start) the emulation thread runs the renderers at the commits.
+  (Windows, or when none can start) the emulation thread runs the renderers at the commits. Tests: every
+  `n64_run --run-hash --hash` of the homebrew, n64-systemtest, libdragon's test ROM and rsp_inval_instrs identical
+  to the synchronous RDP's for 1, 2 and 4 threads; `n64_rdp_stress` (`test_rdp.c` with renderers stalling at random,
+  `N64_RDP_STRESS`, checking after every commit that no renderer wrote outside the tracked bytes); clean under
+  ThreadSanitizer. `n64_rdp_bench`'s streamed case (the busy scene fed in 64-word pieces under 15 ms of emulation
+  work, x86-64 Ryzen AI Max+ 395): 27.0 ms per frame -> 15.5 ms on 1 thread, 22.1 -> 15.6 on 2; the busy scene
+  drawn at once costs about 3 % more on 1 thread (mirror copies, dirty bits), the same on 2 and 4.
 - **Coherence.** paraLLEl-RDP gets the core's RDRAM without imported host memory (its "incoherent" path). It uploads
   the pages a render pass reads and writes back, byte-masked, the bytes the GPU wrote, swapping each word between the
   N64 byte order and the GPU's host words (our patch). On SYNC_FULL the CPU waits for the GPU and the write-back,
