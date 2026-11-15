@@ -800,6 +800,46 @@ frame on: on that host `n64_rsp_bench` runs the vector-heavy loop at ~1.8x the R
 code (the NEON path runs on arm64), and the busy 320x240 RDP scene at ~85 frames/s on one thread (spans and the
 bilinear sampler are 80 % of it). VI scanout, the scheduler and the bus are under 1 % of any profile here.
 
+**N64 interpreter: predecoded blocks (XBA-210).** The PS1's model (XBA-204) on the VR4300: `n64_cpu_run` runs RDRAM
+code (through KSEG0, KSEG1 or a TLB-mapped 32-bit segment) as blocks decoded once into directly threaded ops
+(`n64_cpu.c` « Predecoded blocks »): operands, immediates, branch targets and link values computed, 64-bit registers
+in place, delay slots resolved at decode (a likely branch not taken skips its slot with neither fetch cost nor count,
+as `step()` does). A block ends after a branch and its delay slot, before an instruction the ops don't hold (TLB
+instructions, ERET, LL / SC, traps, SYSCALL / BREAK, COP2 / COP3), at the 4 KB page end or at 64 ops. It is entered
+only where `step()`'s loop would run its instructions back to back (kernel mode, no delay slot, no interrupt pending,
+MI repeat mode off): per-op tick bounds (fetch by region, MULT / DIV latencies, the uncached data cost, the FPU's
+latency) let a block near `stop_at` run only the ops sure to start before it, so VI lines, COUNT = COMPARE, DMA ends
+and RSP slices land at the same instruction. Exceptions are found before an op changes anything and `step()` runs that
+instruction from the state in front of it (EPC / BD / BadVAddr / the TLB refill vector are its own); COP1 goes
+through `n64_fpu_cop1`, MFC0 / MTC0 / CACHE through `cop0_read` / `cop0_write` / `cache_op`, with the clock and the
+instruction count `step()` would have (COUNT, RANDOM); a block stops after MTC0, and after a bus access that raised
+the interrupt line, moved `stop_at`, switched MI repeat mode on or wrote into its page. Blocks are checked against the
+RDRAM page counters (CPU stores, PI / SI / SP DMA, the RSP: the packs' mechanism), mapped blocks also against the TLB
+generation (TLB writes, EntryHi / ASID) and Status.ERL; a store into the running block's words stops it; the CACHE
+instruction only keeps tags, so it never changes what a block runs. Blocks link to the blocks that ran after them; a
+branch to itself over a NOP (an idle loop) fast-forwards to `stop_at`, counting every op that would have started.
+Between the run loop's stops every field of the machine is `step()`'s, so run hashes, save states (same format: the
+block cache is a host-only tail of `n64_machine`) and packs are unchanged. `step()`'s loop stays as the oracle:
+`n64_set_interp_reference`, `n64_run --lockstep-ref` (the twin compared after every frame, its whole save state byte
+for byte; with `--lockstep-cycles N`, `n64_cpu_compare` every N cycles and the whole machine every 1024 stops),
+`recomp_fuzz.py --ref` (random MIPS III code under fast timer interrupts that also calls subroutines through KSEG1 and
+through a TLB page whose two ASIDs map different code, flips its own instructions, swaps code under itself by PI DMA and
+toggles Status.IE), the `n64_lockref_*` ctests. Checked: the whole N64 suite (x86-64, and aarch64 under qemu), 153
+lockstep runs (every homebrew, both n64-systemtest ROMs, libdragon's test ROM, rsp_inval_instrs: 900 frames, and every
+1 / 7 / 61 / 997 cycles from four points of each run) and 500 random-program seeds (every frame, and every 1 / 7 / 61
+cycles), no difference; the open test ROMs' pass counts unchanged (3716 / 3726 / 102).
+
+x86-64 Ryzen AI Max+ 395, gcc -O3, before -> blocks without the idle fast-forward -> final: host instructions per frame
+(callgrind, 120 frames, no audio pulled) hello 61.2 M -> 25.1 M -> 0.93 M, timer_irq 63.8 M -> 23.9 M -> 12.0 M, gfx
+62.7 M -> 24.7 M -> 7.1 M, rsp 57.2 M -> 26.7 M -> 26.7 M, n64-systemtest 73.7 M -> 31.5 M -> 31.5 M, libdragon's test
+ROM 57.1 M -> 28.4 M -> 28.4 M (about 1.04 M guest instructions per frame: ~59 host instructions per guest instruction
+before, ~24-34 with the blocks, devices included). Wall clock per 600 frames with `--run-hash` (best of 3, on a loaded
+host): hello 3.42 -> 1.50 -> 0.51 s, timer_irq 3.76 -> 1.58 -> 0.57, gfx 3.44 -> 1.47 -> 0.61, rsp 2.94 -> 1.17 -> 0.88,
+n64-systemtest 4.87 -> 2.40 -> 2.03, libdragon's test ROM 4.54 -> 3.58 -> 3.24 (2.0-2.5x from the blocks where the code
+is interpreter-bound, 1.3-1.4x on the test ROM, which spends much of its time in device accesses and short blocks;
+the homebrew sit in idle loops, which now cost almost nothing). Packs are unchanged (the dispatcher's interpreter runs
+still use `step()`).
+
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
 presents each one twice at 60 Hz), the generated frames take the repeats' slots, and the runtimes' frame sleep goes

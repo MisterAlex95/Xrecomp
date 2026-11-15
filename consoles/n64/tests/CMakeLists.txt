@@ -35,6 +35,8 @@ endif()
 #                     N64_LIBDRAGON_PASS of them; on the Vulkan RDP too (_vulkan), and recompiled in lockstep (n64_rc_)
 #   n64_rsp_inval_instrs sauraen/rsp_inval_instrs (Unlicense, XBA-202): the RSP's invalid SPECIAL opcodes as measured on
 #                     hardware ("Test passed")
+#   n64_lockref_*     the interpreter's predecoded blocks against its reference loop (n64_run --lockstep-ref, XBA-210):
+#                     every ROM above and random MIPS III code (recomp_fuzz.py --ref)
 # The ROM tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays green.
 # They come from (repo root):
 #   tools/consoles/build_homebrew.sh n64 build/homebrew     -> N64_HOMEBREW_DIR (default build/homebrew/n64)
@@ -245,6 +247,42 @@ if(TARGET n64_run)
             set_tests_properties(n64_libdragon_tests_vulkan PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200
                                  ENVIRONMENT "N64_LIBDRAGON_MIN_PASS=${N64_LIBDRAGON_PASS};RECOMP_N64_RDP=vulkan")
         endif()
+    endif()
+
+    # The interpreter's predecoded blocks (XBA-210) against its reference loop, one full step per instruction
+    # (n64_run --lockstep-ref): the whole save state compared after every frame, and with --lockstep-cycles the CPU
+    # every 61 cycles from frame 30 on (the whole machine every 1024 stops), which also cuts blocks short at every
+    # point; n64-systemtest (both ROMs), libdragon's test ROM, rsp_inval_instrs; random MIPS III code under fast timer
+    # interrupts with TLB-mapped / uncached / self-modifying / DMA-replaced code (recomp_fuzz.py --ref).
+    set(N64_LOCKREF sh ${CMAKE_CURRENT_SOURCE_DIR}/run_rom.sh $<TARGET_FILE:n64_run>)
+    set(lockref)
+    foreach(prog ${hb})
+        add_test(NAME n64_lockref_hb_${prog} COMMAND ${N64_LOCKREF} ${N64_HOMEBREW_DIR}/${prog}.z64 --frames 300
+                 --lockstep-ref --quiet)
+        add_test(NAME n64_lockref_cyc_hb_${prog} COMMAND ${N64_LOCKREF} ${N64_HOMEBREW_DIR}/${prog}.z64 --frames 2
+                 --lockstep-ref --lockstep-cycles 61 --lockstep-from 46875000 --quiet)
+        list(APPEND lockref n64_lockref_hb_${prog} n64_lockref_cyc_hb_${prog})
+    endforeach()
+    add_test(NAME n64_lockref_systemtest COMMAND ${N64_LOCKREF} ${N64_SYSTEMTEST} --frames 1200 --lockstep-ref --quiet)
+    add_test(NAME n64_lockref_systemtest_full COMMAND ${N64_LOCKREF} ${N64_SYSTEMTEST_FULL} --frames 1200 --lockstep-ref
+             --quiet)
+    add_test(NAME n64_lockref_libdragon_tests COMMAND ${N64_LOCKREF} ${N64_LIBDRAGON_TESTROM} --frames 1500
+             --lockstep-ref --quiet)
+    get_filename_component(N64_LDT_DIR ${N64_LIBDRAGON_TESTROM} DIRECTORY)
+    add_test(NAME n64_lockref_rsp_inval_instrs COMMAND ${N64_LOCKREF} ${N64_LDT_DIR}/rsp_inval_instrs.z64 --frames 900
+             --lockstep-ref --quiet)
+    list(APPEND lockref n64_lockref_systemtest n64_lockref_systemtest_full n64_lockref_libdragon_tests
+         n64_lockref_rsp_inval_instrs)
+    set_tests_properties(${lockref} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 ENVIRONMENT "N64_RUN_TIMEOUT=840")
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        add_test(NAME n64_lockref_fuzz COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --ref
+                 --n64-run $<TARGET_FILE:n64_run> --work ${CMAKE_CURRENT_BINARY_DIR}/lockref_fuzz --seeds 0-15
+                 --frames 20 --insns 1500)
+        add_test(NAME n64_lockref_fuzz_cycles COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py
+                 --ref --n64-run $<TARGET_FILE:n64_run> --work ${CMAKE_CURRENT_BINARY_DIR}/lockref_fuzz_cyc
+                 --seeds 16-19 --frames 1 --insns 1500 --lockstep-cycles 7)
+        set_tests_properties(n64_lockref_fuzz n64_lockref_fuzz_cycles PROPERTIES TIMEOUT 1200)
     endif()
 
     # Static recompilation (N-1 XBA-169, N-2 XBA-170, N-3 XBA-171): each homebrew ROM lifted to C from the ROM alone
