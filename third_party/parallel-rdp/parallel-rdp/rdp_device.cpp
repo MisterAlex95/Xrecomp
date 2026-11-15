@@ -250,6 +250,12 @@ bool CommandProcessor::uses_ubershader() const
 	return renderer.uses_ubershader();
 }
 
+void CommandProcessor::get_ring_blocked(uint64_t &waits, uint64_t &ns) const
+{
+	waits = ring.blocked_waits;
+	ns = ring.blocked_ns;
+}
+
 void CommandProcessor::set_validation_interface(ValidationInterface *iface)
 {
 	renderer.set_validation_interface(iface);

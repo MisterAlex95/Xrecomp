@@ -232,9 +232,11 @@ uint64_t n64_instructions(n64_machine *m);
 typedef struct n64_perf {
     uint64_t frames;           /* n64_run_frame calls */
     uint64_t timed;            /* of those, the frames whose stages were timed */
-    uint64_t cpu_ns;           /* in the timed frames: the CPU (interpreter or pack: n64_cpu_run) */
-    uint64_t rsp_ns;           /* the RSP (n64_rsp_run) */
-    uint64_t rdp_ns;           /* the RDP (n64_rdp_run: the software RDP draws there, the Vulkan RDP queues) */
+    uint64_t cpu_ns;           /* in the timed frames: the CPU (interpreter or pack: n64_cpu_run), its RDP runs out */
+    uint64_t rsp_ns;           /* the RSP (n64_rsp_run), without the RDP runs its DPC_END writes start */
+    uint64_t rdp_ns;           /* the RDP: every n64_rdp_run (after an RSP slice, and those the RSP's or the CPU's
+                                * DPC_END writes start); the software RDP draws there, the Vulkan RDP queues (and
+                                * blocks on a full command ring, rdp_queue_ns) and waits at SYNC_FULL */
     uint64_t frame_ns;         /* the whole n64_run_frame (the scheduler, VI / AI / PI / SI events included) */
     uint64_t rsp_instructions; /* every frame: RSP instructions run */
     uint64_t rdp_commands;     /* RDP commands run (n64_rdp_get_stats) */
@@ -243,6 +245,12 @@ typedef struct n64_perf {
      * their time, wherever they happen: in n64_rdp_run, and those the VI asks for (n64_display, save states). */
     uint64_t rdp_waits;
     uint64_t rdp_wait_ns;
+    /* The Vulkan RDP (n64_rdp.h n64_rdp_stats, every frame): waits for room in its full command ring (inside
+     * rdp_ns, not in rdp_wait_ns), its upscaled scanouts (their wait is part of rdp_wait_ns), stalled pipeline
+     * compiles. */
+    uint64_t rdp_queue_waits, rdp_queue_ns;
+    uint64_t rdp_scanouts, rdp_scanout_ns;
+    uint64_t rdp_stalled_compiles, rdp_stalled_compile_ns;
 } n64_perf;
 void n64_perf_enable(n64_machine *m, int every);
 void n64_perf_get(n64_machine *m, n64_perf *out);

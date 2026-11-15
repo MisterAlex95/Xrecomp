@@ -229,16 +229,26 @@ void n64_perf_get(n64_machine *m, n64_perf *out)
     out->rdp_full_syncs = r.full_syncs;
     out->rdp_waits = r.waits;
     out->rdp_wait_ns = r.wait_ns;
+    out->rdp_queue_waits = r.queue_waits;
+    out->rdp_queue_ns = r.queue_ns;
+    out->rdp_scanouts = r.scanouts;
+    out->rdp_scanout_ns = r.scanout_ns;
+    out->rdp_stalled_compiles = r.stalled_compiles;
+    out->rdp_stalled_compile_ns = r.stalled_compile_ns;
 }
 
-/* One slice timed stage by stage (one frame in perf_every): the same work as below. */
+/* One slice timed stage by stage (one frame in perf_every): the same work as below. The RDP runs the CPU's and the
+ * RSP's DPC_END writes start inside n64_cpu_run / n64_rsp_run (n64_rdp_time_runs, on for the timed frame) are taken
+ * out of their stage and counted as the RDP's. */
 static void slice_timed(n64_machine *m, bool rsp_on)
 {
+    uint64_t r0 = n64_rdp_run_ns(m->rdp);
     uint64_t t0 = perf_ns();
     if (m->now < m->stop_at)
         n64_cpu_run(m);
     uint64_t t1 = perf_ns();
-    m->perf.cpu_ns += t1 - t0;
+    uint64_t r1 = n64_rdp_run_ns(m->rdp);
+    m->perf.cpu_ns += (t1 - t0) - (r1 - r0);
     if (rsp_on) {
         uint64_t d = (m->now - m->rsp_tick) / 3;
         while (d > 0 && !n64_rsp_halted(m->rsp)) {
@@ -248,12 +258,14 @@ static void slice_timed(n64_machine *m, bool rsp_on)
         }
         m->rsp_tick = m->now;
         uint64_t t2 = perf_ns();
+        uint64_t r2 = n64_rdp_run_ns(m->rdp);
         n64_rdp_run(m->rdp);
-        uint64_t t3 = perf_ns();
-        m->perf.rsp_ns += t2 - t1;
-        m->perf.rdp_ns += t3 - t2;
+        uint64_t r3 = n64_rdp_run_ns(m->rdp);
+        m->perf.rsp_ns += (t2 - t1) - (r2 - r1);
+        m->perf.rdp_ns += r3 - r0;
     } else {
         m->rsp_tick = m->now;
+        m->perf.rdp_ns += r1 - r0;
     }
 }
 
@@ -297,6 +309,7 @@ void n64_run_frame(n64_machine *m)
     if (m->perf_every && ++m->perf_count >= m->perf_every) {
         m->perf_count = 0;
         m->perf_timing = true;
+        n64_rdp_time_runs(m->rdp, 1);
         t0 = perf_ns();
     }
     m->frame_done = false;
@@ -307,6 +320,7 @@ void n64_run_frame(n64_machine *m)
     n64_ai_advance(m);
     if (N64_UNLIKELY(m->perf_timing)) {
         m->perf_timing = false;
+        n64_rdp_time_runs(m->rdp, 0);
         m->perf.timed++;
         m->perf.frame_ns += perf_ns() - t0;
     }

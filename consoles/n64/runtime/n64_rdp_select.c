@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* The software RDP, as n64_rdp_sw_names.h renames it. */
 typedef struct n64_rdp_sw n64_rdp_sw;
@@ -47,7 +48,7 @@ static void sw_stats(void *d, n64_rdp_stats *out) { n64_rdp_sw_get_stats(d, out)
 const n64_rdp_ops n64_rdp_sw_ops = { "software", sw_create, sw_destroy, sw_reset, sw_attach_dmem,
                                      sw_read_reg, sw_write_reg, sw_run, sw_set_threads, sw_flush, NULL,
                                      NULL, NULL, NULL, sw_state_extra_size, sw_state_save, sw_state_load,
-                                     sw_stats };
+                                     sw_stats, NULL };
 
 struct n64_rdp {
     const n64_rdp_ops *ops;
@@ -56,7 +57,28 @@ struct n64_rdp {
     const uint8_t *dmem;
     int threads;         /* the last n64_rdp_set_threads, 0: never called */
     n64_rdp_stats past;  /* the counters of the back ends replaced (n64_rdp_get_stats) */
+    int timing;          /* n64_rdp_time_runs */
+    uint64_t run_ns;
 };
+
+static uint64_t run_clock_ns(void)
+{
+    struct timespec ts;
+#ifdef _WIN32
+    timespec_get(&ts, TIME_UTC);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+void n64_rdp_time_runs(n64_rdp *d, int on)
+{
+    if (d)
+        d->timing = on != 0;
+}
+
+uint64_t n64_rdp_run_ns(const n64_rdp *d) { return d ? d->run_ns : 0; }
 
 static void backend_stats(const n64_rdp *d, n64_rdp_stats *out)
 {
@@ -76,6 +98,12 @@ void n64_rdp_get_stats(n64_rdp *d, n64_rdp_stats *out)
     out->full_syncs += d->past.full_syncs;
     out->waits += d->past.waits;
     out->wait_ns += d->past.wait_ns;
+    out->queue_waits += d->past.queue_waits;
+    out->queue_ns += d->past.queue_ns;
+    out->scanouts += d->past.scanouts;
+    out->scanout_ns += d->past.scanout_ns;
+    out->stalled_compiles += d->past.stalled_compiles;
+    out->stalled_compile_ns += d->past.stalled_compile_ns;
 }
 
 #ifndef N64_RDP_DEFAULT_BACKEND
@@ -244,9 +272,22 @@ static void replace_failed(n64_rdp *d)
 /* After the commands ran, the RDP is idle (CURRENT is END): the moment to replace a failed back end. */
 void n64_rdp_run(n64_rdp *d)
 {
+    uint64_t t0 = d->timing ? run_clock_ns() : 0;
     d->ops->run(d->impl);
     if (d->ops->failed && d->ops->failed(d->impl))
         replace_failed(d);
+    if (t0)
+        d->run_ns += run_clock_ns() - t0;
+}
+
+int n64_rdp_unreported(n64_rdp *d, uint32_t lo, uint32_t hi)
+{
+    if (!d)
+        return 0;
+    if (d->ops->unreported)
+        return d->ops->unreported(d->impl, lo, hi);
+    n64_rdp_flush(d); /* the software RDP: its pixels land and are reported at a commit (already done at frame end) */
+    return 0;
 }
 
 void n64_rdp_flush(n64_rdp *d)

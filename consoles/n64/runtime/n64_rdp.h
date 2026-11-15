@@ -89,8 +89,26 @@ int n64_rdp_scanout(n64_rdp *d, const uint32_t *vi, uint32_t field, uint32_t *xr
  * Not in save states. */
 typedef struct n64_rdp_stats {
     uint64_t commands, full_syncs, waits, wait_ns;
+    /* The Vulkan RDP only (0 elsewhere): the emulation thread waiting for room in paraLLEl-RDP's full command ring
+     * (back-pressure: the GPU or its ring worker behind; not in wait_ns), the upscaled scanouts and their wait (part
+     * of wait_ns), the "Stalled compile" pipelines (5 ms or more, any thread) and their compile time. */
+    uint64_t queue_waits, queue_ns;
+    uint64_t scanouts, scanout_ns;
+    uint64_t stalled_compiles, stalled_compile_ns;
 } n64_rdp_stats;
 void n64_rdp_get_stats(n64_rdp *d, n64_rdp_stats *out);
+
+/* Host time spent in n64_rdp_run (n64_core.c's timed frames, the « n64: perf » line): while on, each call is timed
+ * and the total (ns, since n64_rdp_create) moves; off (the default), n64_rdp_run reads no clock. Wherever the call
+ * comes from: the core's slice, the RSP's DPC_END write (n64_rsp.c), the CPU's (n64_io.c). */
+void n64_rdp_time_runs(n64_rdp *d, int on);
+uint64_t n64_rdp_run_ns(const n64_rdp *d);
+
+/* Rows drawn but not yet reported through bus.wrote (queued on the GPU, not waited for) that overlap RDRAM
+ * [lo, hi): 1 when some may, 0 when none do. The VI's change test (n64_core.h n64_display_changed): a picture whose
+ * pixels are still being drawn has changed. Back ends that cannot tell (the software RDP, whose pixels land at its
+ * commits) are flushed instead, which reports them. */
+int n64_rdp_unreported(n64_rdp *d, uint32_t lo, uint32_t hi);
 
 #ifdef __cplusplus
 }

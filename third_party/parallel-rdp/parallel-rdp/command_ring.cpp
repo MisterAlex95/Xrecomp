@@ -71,9 +71,17 @@ void CommandRing::drain()
 void CommandRing::enqueue_command(unsigned num_words, const uint32_t *words)
 {
 	std::unique_lock<std::mutex> holder{lock};
-	cond.wait(holder, [this, num_words]() {
-		return write_count + num_words + 1 <= read_count + ring.size();
-	});
+	// xboxrecomp-android patch: a wait for room is timed (only then: no clock read on the common path).
+	if (write_count + num_words + 1 > read_count + ring.size())
+	{
+		auto t0 = std::chrono::steady_clock::now();
+		cond.wait(holder, [this, num_words]() {
+			return write_count + num_words + 1 <= read_count + ring.size();
+		});
+		blocked_waits++;
+		blocked_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now() - t0).count());
+	}
 
 	size_t mask = ring.size() - 1;
 	ring[write_count++ & mask] = num_words;

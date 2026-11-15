@@ -46,6 +46,7 @@
 #include "n64_rdp.h"
 #include "n64_vk_driver.h"
 
+#include "command_buffer.hpp"
 #include "context.hpp"
 #include "device.hpp"
 #include "rdp_device.hpp"
@@ -85,6 +86,7 @@ struct VkRdp {
     int npend = 0;       /* 64-bit words collected */
     bool unsynced = false; /* commands queued since the last wait */
     n64_rdp_stats stats{}; /* host counters (n64_rdp_get_stats), not in save states */
+    uint64_t stalls0 = 0, stall_ns0 = 0; /* get_stalled_compiles at create (vk_stats reports the difference) */
 
     /* Front-end view of the state, for the costs and the written ranges (as in n64_rdp.c). */
     int fe_cycle = 0, fe_ci_size = 2, fe_ci_width = 320, fe_zon = 0, fe_sc_y0 = 0, fe_sc_y1 = 0xFFF;
@@ -291,8 +293,11 @@ void scanout_rgb(VkRdp *d, const uint32_t *vi, uint32_t field, unsigned *sw, uns
     so.downscale_steps = d->down_steps;
     const uint64_t t0 = host_ns();
     d->cp->scanout_sync(d->scan, *sw, *sh, so);
+    const uint64_t dt = host_ns() - t0;
     d->stats.waits++;
-    d->stats.wait_ns += host_ns() - t0;
+    d->stats.wait_ns += dt;
+    d->stats.scanouts++;
+    d->stats.scanout_ns += dt;
 }
 
 /* ---- The check at create -------------------------------------------------------------------------------------------- */
@@ -643,6 +648,7 @@ void *vk_create(n64_rcp_bus bus)
     if (!d)
         return nullptr;
     d->bus = bus;
+    Vulkan::get_stalled_compiles(d->stalls0, d->stall_ns0); /* the check's compiles count as this RDP's */
 
     if (void *gipa = n64_vk_driver_open()) {
         bool custom = true;
@@ -955,7 +961,25 @@ int vk_state_load(void *p, const n64_rdp_common_state *c, const uint8_t *extra, 
 
 void vk_stats(void *p, n64_rdp_stats *out)
 {
-    *out = static_cast<VkRdp *>(p)->stats;
+    const VkRdp *d = static_cast<VkRdp *>(p);
+    *out = d->stats;
+    if (d->cp)
+        d->cp->get_ring_blocked(out->queue_waits, out->queue_ns);
+    uint64_t n = 0, ns = 0;
+    Vulkan::get_stalled_compiles(n, ns);
+    out->stalled_compiles = n - d->stalls0;
+    out->stalled_compile_ns = ns - d->stall_ns0;
+}
+
+/* n64_rdp_unreported: the rows queued since the last wait (wrote_add's ranges, reported at the next sync) against
+ * RDRAM [lo, hi). */
+int vk_unreported(void *p, uint32_t lo, uint32_t hi)
+{
+    const VkRdp *d = static_cast<VkRdp *>(p);
+    for (int i = 0; i < 2; i++)
+        if (d->wr_hi[i] > d->wr_lo[i] && d->wr_lo[i] < hi && lo < d->wr_hi[i])
+            return 1;
+    return 0;
 }
 
 } // namespace
@@ -964,4 +988,4 @@ extern "C" const n64_rdp_ops n64_rdp_vk_ops = { "vulkan", vk_create, vk_destroy,
                                                 vk_read_reg, vk_write_reg, vk_run, vk_set_threads, vk_flush,
                                                 vk_failed, vk_upscale, vk_scanout_scale, vk_scanout,
                                                 vk_state_extra_size, vk_state_save, vk_state_load,
-                                                vk_stats };
+                                                vk_stats, vk_unreported };

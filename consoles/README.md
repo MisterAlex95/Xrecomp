@@ -502,25 +502,36 @@ skipped), followed by a performance line (`n64_runtime_perf`; also once at exit 
 the run:`), for device reports:
 
 ```
-n64: perf speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (wait 3.0) sched 0.3 vi 1.8 present 0.9 audio 0.1
-idle 0.0 other 0.2 ms/frame; worst 41 ms, 212 > 16.7 ms, 30 > 33.4 ms of 150 frames; rsp 1.20 M instr, rdp 3400 cmds,
-2.0 full syncs /frame; pack 83 % native, 3.1 k interp instr/frame, 12 rehashes, 40 slow lookups; rdp vulkan, upscale
-2x, rewind off; core 6 @ 1.90 GHz
+n64: perf speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (queue 1.0, sync 2.5, scanout 0.5) sched 0.3 vi 1.8
+present 0.9 audio 0.1 idle 0.0 other 0.2 ms/frame; worst 41 ms, 212 > 16.7 ms, 30 > 33.4 ms of 150 frames; rsp 1.20 M
+instr, rdp 3400 cmds, 2.0 full syncs /frame; pack 83 % native, 3.1 k interp instr/frame, 12 rehashes, 40 slow lookups;
+rdp vulkan, upscale 2x, rewind off; core 6 @ 1.90 GHz
+n64: perf detail 500 VIs, 167 pictures (16.7/s), 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts, 40
+full rings; 0 stalled compiles (0 ms); worst 40 ms: core 30.1 vi 7.2 present 1.8 audio 0.1 other 0.8 (rdp queue 9.0,
+sync 8.0, scanout 3.0)
 ```
 
 Speed is N64 frames per second against the VI's rate. Times are ms per N64 frame: `n64_run_frame` split into the CPU
-(interpreter or pack), the RSP, the RDP (the software RDP draws there, the Vulkan RDP queues) and `sched` (the
-scheduler, VI / AI / PI / SI events) as the core's timed frames split it (`n64_perf`: one frame in 8 is timed stage by
-stage, two clock reads per CPU slice; the counts run on every frame); `wait` the RDP's flushes (the threaded software
-RDP drawing its batch, the Vulkan RDP waiting for the GPU, its write-back and its upscaled scanout), inside `rdp` or
-`vi`; then `n64_display`, the RGBA conversion and present, the audio pull and queue, the sleep to the next deadline
+(interpreter or pack), the RSP, the RDP and `sched` (the scheduler, VI / AI / PI / SI events) as the core's timed
+frames split it (`n64_perf`: one frame in 8 is timed stage by stage, two clock reads per CPU slice; the counts run on
+every frame). `rdp` is every `n64_rdp_run`, also those the RSP's DPC_END writes start inside its time slice (which `rsp`
+then leaves out, so `rsp` is the RSP's own work): the software RDP draws there, the Vulkan RDP queues its commands to
+paraLLEl-RDP, blocks while paraLLEl-RDP's command ring is full (`queue`) and waits at SYNC_FULL. In brackets the RDP's
+waits: `queue` that back-pressure (inside `rdp`), `sync` its flushes (the threaded software RDP drawing its batch, the
+Vulkan RDP waiting for the GPU and its write-back: at SYNC_FULL inside `rdp`, the VI's inside `vi`), `scanout` the
+upscaled scanout's GPU wait and read-back (inside `vi`); then `n64_display`, the RGBA conversion and present, the audio pull and queue, the sleep to the next deadline
 (`idle`, frame generation's draws during it included), and `other` what is left (pads, cheats, rewind captures, save
 files). The host frames (one shown or skipped picture) are measured without their sleep: the worst one and how many took
 longer than one and two VI frames. With a pack: the share of the CPU's instructions lifted code ran, the RDRAM
 instructions the interpreter ran, re-hashes (a page holding lifted code written) and dispatch cache misses. Then the RDP
 back end (and the software RDP's threads), the internal resolution, rewind, and the host core the loop is on with its
 `scaling_cur_freq` (Linux / Android; `core ?` elsewhere). The counters are host-only: not in save states, no effect on
-the run (`n64_run --perf N` prints the core's part, run hashes unchanged). Frame skip (`RECOMP_N64_FRAMESKIP`, `n64_play
+the run (`n64_run --perf N` prints the core's part, run hashes unchanged). The detail line that follows: the VIs (N64
+frames) against the pictures made and shown (`n64_display`), the VIs whose picture had not changed and the new
+pictures frame skip dropped; the game's buffer swaps (VI_ORIGIN changes), the Vulkan RDP's upscaled scanouts and the
+times its command ring was full; paraLLEl-RDP's "Stalled compile" pipelines (5 ms or more) and their time; then the
+worst host frame's own breakdown: `n64_run_frame`, `n64_display`, present, audio, the rest, and the RDP's waits inside
+that frame. Frame skip (`RECOMP_N64_FRAMESKIP`, `n64_play
 --frameskip`): `auto` (default) skips the picture of a frame
 that starts more than half a frame late or while the audio queue is about to run dry, at most 3 in a row; `N` shows
 one frame in N + 1; `0` never. A skipped frame still runs whole (CPU, RSP, the RDP drawing into RDRAM, which games

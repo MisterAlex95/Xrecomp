@@ -75,6 +75,12 @@ which must say whether a custom driver such as Turnip is in use):
 The N64 runtime uses them (`consoles/n64/runtime/n64_rdp_vk.cpp`): a check at start, then default shaders, no
 subgroups, ubershader, else the software RDP (`consoles/README.md`).
 
+Counters for the N64 runtime's performance line (`n64: perf`, `consoles/README.md`), host-only, no effect on drawing:
+
+- `parallel-rdp/command_ring.*`: `enqueue_command` times its waits for room in a full ring (`blocked_waits`,
+  `blocked_ns`; no clock read when there is room); `parallel-rdp/rdp_device.*`: `CommandProcessor::get_ring_blocked`.
+- `vulkan/command_buffer.*`: `get_stalled_compiles`, the count and total time of the "Stalled compile" pipelines.
+
 The shaders are unchanged, so the precompiled SPIR-V is upstream's.
 
 ## Symbols

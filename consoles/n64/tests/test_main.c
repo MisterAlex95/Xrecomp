@@ -359,7 +359,12 @@ static void test_perf_format(void)
     p.cpu = 6;
     p.cpu_khz = 1900800;
     n64_runtime_perf_format(&p, line, sizeof line);
-    CHECK(strcmp(line, "speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (wait 3.0) sched 0.3 vi 1.8 present "
+    p.rdp_queue_ms = 1.0;
+    p.rdp_sync_ms = 2.5;
+    p.rdp_scanout_ms = 0.5;
+    n64_runtime_perf_format(&p, line, sizeof line);
+    CHECK(strcmp(line, "speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (queue 1.0, sync 2.5, scanout 0.5) "
+                       "sched 0.3 vi 1.8 present "
                        "0.9 audio 0.0 idle 0.0 other 0.0 ms/frame; worst 41 ms, 120 > 16.7 ms, 30 > 33.4 ms of 150 "
                        "frames; rsp 1.20 M instr, rdp 3400 cmds, 2.0 full syncs /frame; pack 83 % native, 3.1 k "
                        "interp instr/frame, 12 rehashes, 40 slow lookups; rdp vulkan, upscale 2x, rewind off; core 6 @ "
@@ -378,6 +383,33 @@ static void test_perf_format(void)
     p.cpu = -1;
     n64_runtime_perf_format(&p, line, sizeof line);
     CHECK(strstr(line, "; core ?") != NULL);
+
+    /* The detail line: the pictures against the VIs, the worst frame's own breakdown. */
+    memset(&p, 0, sizeof p);
+    p.seconds = 10.0;
+    p.frames = 500;
+    p.pictures = 167;
+    p.unchanged = 333;
+    p.vi_origin_changes = 167;
+    p.scanouts = 167;
+    p.queue_waits = 40;
+    p.stalled_compiles = 2;
+    p.stalled_compile_ms = 70.4;
+    p.worst_ms = 40.2;
+    p.worst_core_ms = 30.1;
+    p.worst_vi_ms = 7.2;
+    p.worst_present_ms = 1.8;
+    p.worst_audio_ms = 0.1;
+    p.worst_other_ms = 1.0;
+    p.worst_queue_ms = 9.0;
+    p.worst_sync_ms = 8.0;
+    p.worst_scanout_ms = 3.0;
+    n64_runtime_perf_detail_format(&p, line, sizeof line);
+    CHECK(strcmp(line, "500 VIs, 167 pictures (16.7/s), 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts, "
+                       "40 full rings; 2 stalled compiles (70 ms); worst 40 ms: core 30.1 vi 7.2 present 1.8 audio "
+                       "0.1 other 1.0 (rdp queue 9.0, sync 8.0, scanout 3.0)") == 0);
+    if (failures)
+        printf("detail line: %s\n", line);
 }
 
 static void test_states(const char *dir, const char *hb)

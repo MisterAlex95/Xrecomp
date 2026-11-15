@@ -57,6 +57,9 @@ typedef struct n64_rdp_ops {
     int (*state_load)(void *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n);
     /* Host performance counters (n64_rdp.h n64_rdp_get_stats) since this back end's create. NULL: none. */
     void (*stats)(void *d, n64_rdp_stats *out);
+    /* n64_rdp.h n64_rdp_unreported: 1 when rows drawn but not yet reported through bus.wrote may overlap RDRAM
+     * [lo, hi). NULL: the back end is flushed instead (its pixels in RDRAM and reported). */
+    int (*unreported)(void *d, uint32_t lo, uint32_t hi);
 } n64_rdp_ops;
 
 /* The factor the next back end is asked to draw at (n64_rdp_select.c: n64_rdp_set_upscale, else the environment). */
