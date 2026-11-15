@@ -16,6 +16,11 @@ typedef struct gba_ppu_inputs {
     const uint8_t *oam;     /* 1 KB */
     /* internal affine reference points for BG2/BG3, latched at VBlank and advanced by PB/PD each line by the core */
     int32_t bg2x, bg2y, bg3x, bg3y;
+    /* From the core's line timing (0 in a synthetic scene: none of it): BGs enabled in DISPCNT that do not show yet
+     * (bit per BG: an enabled layer appears 3 lines after the write); the windows' vertical flags, latched at each
+     * line start (bit 7 set: bit 0 = inside WIN0's lines, bit 1 = WIN1's; clear: from WINxV as y1 <= line < y2). */
+    uint8_t bg_hide;
+    uint8_t win_v;
 } gba_ppu_inputs;
 
 void gba_ppu_render_line(const gba_ppu_inputs *in, int line, uint16_t out[240]); /* RGB555 */

@@ -351,6 +351,13 @@ static inline uint8_t *rc_ram(gba_rc_head *h, uint32_t a, uint32_t align)
         ne = ((h->irq_line & !(h->cpu.cpsr_ctl & 0x80u)) | h->cpu.halted | h->cpu.stopped) ? 0 : ne;                 \
     } while (0)
 
+/* After an instruction's data access (and no jump), the next opcode fetch is non-sequential: its cycles beyond the
+ * sequential fetch `fc` (gba_cpu.c nfetch_extra), but for the cartridge with its prefetch buffer on. */
+#define RC_NEXTRA()                                                                                                  \
+    ((uint32_t)(((RC_REGION) - 8u <= 5u && h->prefetch)                                                             \
+                    ? 0u                                                                                             \
+                    : (uint32_t)(RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0]) - fc))
+
 /* Pipeline refill after a write to PC whose new r15 (address + 8 / + 4) is R15, in the current state. */
 #define RC_REFILL(R15)                                                                                               \
     do {                                                                                                             \

@@ -97,6 +97,8 @@ size_t gba_state_save(gba_machine *m, uint8_t *out, size_t cap)
     CLEAR(fb);
     CLEAR(rom_hash);
     CLEAR(save.dirty);
+    CLEAR(dbg_cb);
+    CLEAR(dbg_ctx);
 #undef CLEAR
     return need;
 }
@@ -130,6 +132,8 @@ int gba_state_load(gba_machine *m, const uint8_t *data, size_t size)
     uint32_t rom_size = m->rom_size;
     uint64_t rh = m->rom_hash;
     bool builtin = m->builtin_bios;
+    gba_debug_log_fn dbg_cb = m->dbg_cb;
+    void *dbg_ctx = m->dbg_ctx;
     memcpy(m, data + HEADER_BYTES + 8, sizeof *m);
     m->rom = rom;
     m->rc_ewram = ewram_p;
@@ -139,6 +143,8 @@ int gba_state_load(gba_machine *m, const uint8_t *data, size_t size)
     m->rom_size = rom_size;
     m->rom_hash = rh;
     m->builtin_bios = builtin;
+    m->dbg_cb = dbg_cb;
+    m->dbg_ctx = dbg_ctx;
     m->save.dirty = false; /* the state's save memory reaches storage only once the game writes it again */
     gba_recomp_state_loaded(m);
     return GBA_STATE_OK;

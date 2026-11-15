@@ -8,7 +8,15 @@
  * width (gba_save.c). */
 #include "gba_internal.h"
 
+#include <string.h>
+
 static const int timer_shift[4] = {0, 6, 8, 10};
+/* Timer and interrupt timing, fitted to the mGBA suite's hardware results (timer count-up, timer IRQ; XBA-201): a
+ * timer counts from the cycle after the write that starts it; a CPU read sees the counter as it was when the access
+ * began (one cycle before the access ends, where m->now stands); an interrupt request reaches the CPU
+ * GBA_IRQ_LATENCY cycles after its flag rises (gba_update_irq, irq_at). */
+#define TIMER_START_DELAY 1
+#define TIMER_READ_EARLY 1
 
 static inline int32_t sext28(uint32_t v)
 {
@@ -17,20 +25,49 @@ static inline int32_t sext28(uint32_t v)
 
 /* ---- interrupts ----------------------------------------------------------------------------------------- */
 
-void gba_update_irq(gba_machine *m)
+#define GBA_IRQ_LATENCY 4
+
+static void update_irq_at(gba_machine *m, uint64_t when)
 {
-    m->irq_line = (m->ime & 1) && (m->ie & m->if_ & 0x3FFF);
+    bool pending = (m->ime & 1) && (m->ie & m->if_ & 0x3FFF);
+    if (!pending) {
+        m->irq_line = false;
+        m->irq_at = UINT64_MAX;
+    } else if (!m->irq_line) {
+        if (m->irq_at == UINT64_MAX)
+            m->irq_at = when + GBA_IRQ_LATENCY;
+        if (m->irq_at <= m->now) {
+            m->irq_line = true;
+            m->irq_at = UINT64_MAX;
+            m->cpu.halted = false;
+        } else if (m->irq_at < m->next_event) {
+            m->next_event = m->irq_at;
+        }
+    }
     wr16(&m->io[0x200], m->ie);
     wr16(&m->io[0x202], m->if_);
     wr16(&m->io[0x208], m->ime);
-    if (m->ie & m->if_ & 0x3FFF)
-        m->cpu.halted = false; /* halt ends on IE & IF, whatever IME and CPSR.I say */
+    /* Halt ends on IE & IF, whatever IME and CPSR.I say; with IME set, when the request reaches the CPU (irq_at, so the
+     * IRQ is taken first thing after the halt, as on hardware). */
+    if ((m->ie & m->if_ & 0x3FFF) && (!(m->ime & 1) || m->irq_line))
+        m->cpu.halted = false;
+}
+
+void gba_update_irq(gba_machine *m)
+{
+    update_irq_at(m, m->now);
 }
 
 void gba_raise_irq(gba_machine *m, uint16_t bits)
 {
     m->if_ |= bits;
-    gba_update_irq(m);
+    update_irq_at(m, m->now);
+}
+
+void gba_raise_irq_at(gba_machine *m, uint16_t bits, uint64_t when)
+{
+    m->if_ |= bits;
+    update_irq_at(m, when);
 }
 
 static void check_keypad_irq(gba_machine *m)
@@ -68,6 +105,8 @@ void gba_schedule(gba_machine *m)
     for (int i = 0; i < 4; i++)
         if (m->timer[i].overflow_at < next)
             next = m->timer[i].overflow_at;
+    if (m->irq_at < next)
+        next = m->irq_at;
     m->next_event = next;
 }
 
@@ -178,12 +217,13 @@ static inline bool timer_counting(const gba_machine *m, int i)
     return (ctl & 0x80) && !(i > 0 && (ctl & 0x04));
 }
 
-static uint16_t timer_value(const gba_machine *m, int i)
+/* The counter at cycle `now` (>= the last processed overflow). */
+static uint16_t timer_value(const gba_machine *m, int i, uint64_t now)
 {
     const gba_timer *t = &m->timer[i];
-    if (!timer_counting(m, i))
+    if (!timer_counting(m, i) || now < t->base_time)
         return t->counter;
-    uint64_t v = t->counter + ((m->now - t->base_time) >> t->shift);
+    uint64_t v = t->counter + ((now - t->base_time) >> t->shift);
     if (v >= 0x10000) { /* overflow due but not processed yet (mid-instruction read) */
         uint32_t period = 0x10000u - t->reload;
         v = t->reload + (v - 0x10000) % period;
@@ -204,7 +244,7 @@ static void timer_overflow(gba_machine *m, int i, uint64_t when)
     t->base_time = when;
     timer_set_due(m, i);
     if (t->ctl & 0x40)
-        gba_raise_irq(m, (uint16_t)(IRQ_TIMER0 << i));
+        gba_raise_irq_at(m, (uint16_t)(IRQ_TIMER0 << i), when);
     if (i < 2) {
         uint16_t sh = rd16(&m->io[0x82]); /* SOUNDCNT_H: FIFO A / B timer select */
         if (((sh >> 10) & 1) == i)
@@ -221,21 +261,40 @@ static void timer_overflow(gba_machine *m, int i, uint64_t when)
     }
 }
 
+/* Overflows due by now happen before a timer register write that lands at the same cycle (the write sees the
+ * timers as they are at its end). */
+static void timers_catch_up(gba_machine *m)
+{
+    bool any;
+    do {
+        any = false;
+        for (int i = 0; i < 4; i++)
+            if (m->timer[i].overflow_at <= m->now) {
+                timer_overflow(m, i, m->timer[i].overflow_at);
+                any = true;
+            }
+    } while (any);
+}
+
 static void timer_write_ctl(gba_machine *m, int i, uint16_t v)
 {
+    timers_catch_up(m);
     gba_timer *t = &m->timer[i];
     bool was = timer_counting(m, i);
     uint16_t old = t->ctl;
     uint64_t frac = 0;
     if (was) {
         frac = (m->now - t->base_time) & ((1u << t->shift) - 1);
-        t->counter = timer_value(m, i);
+        t->counter = timer_value(m, i, m->now);
     }
     t->ctl = v & 0xC7;
     if (!(old & 0x80) && (v & 0x80))
         t->counter = t->reload;
     int shift = timer_shift[v & 3];
-    t->base_time = (was && shift == t->shift) ? m->now - frac : m->now;
+    if (was && shift == t->shift)
+        t->base_time = m->now - frac;
+    else /* the prescaler is a free-running divider: a prescaled timer ticks on multiples of its period */
+        t->base_time = (m->now + TIMER_START_DELAY) & ~(((uint64_t)1 << shift) - 1);
     t->shift = shift;
     timer_set_due(m, i);
     gba_schedule(m);
@@ -275,9 +334,14 @@ static void ppu_event(gba_machine *m)
     switch (m->line_phase) {
     case 0: /* end of HDraw: draw the line */
         if (m->vcount < GBA_SCREEN_H && m->fb) {
-            gba_ppu_inputs in = {m->io, m->pal, m->vram, m->oam, m->bg2x, m->bg2y, m->bg3x, m->bg3y};
+            uint8_t hide = 0;
+            for (int b = 0; b < 4; b++)
+                hide |= (uint8_t)((m->bg_delay[b] != 0) << b);
+            gba_ppu_inputs in = {m->io, m->pal, m->vram, m->oam_line, m->bg2x, m->bg2y, m->bg3x, m->bg3y,
+                                 hide, (uint8_t)(0x80 | m->win_latch)};
             gba_ppu_render_line(&in, (int)m->vcount, m->fb + m->vcount * GBA_SCREEN_W);
         }
+        memcpy(m->oam_line, m->oam, GBA_OAM_SIZE); /* what the next line's sprites are fetched from */
         m->line_phase = 1;
         break;
     case 1: /* HBlank */
@@ -300,6 +364,17 @@ static void ppu_event(gba_machine *m)
         if (++m->vcount == GBA_LINES)
             m->vcount = 0;
         wr16(&m->io[6], (uint16_t)m->vcount);
+        for (int b = 0; b < 4; b++)
+            if (m->bg_delay[b])
+                m->bg_delay[b]--;
+        for (int w = 0; w < 2; w++) {
+            uint16_t wv = rd16(&m->io[0x44 + 2 * w]);
+            uint32_t top = wv >> 8, bottom = wv & 0xFF;
+            if (m->vcount == bottom)
+                m->win_latch &= (uint8_t)~(1u << w);
+            else if (m->vcount == top)
+                m->win_latch |= (uint8_t)(1u << w);
+        }
         if (m->vcount == GBA_SCREEN_H) {
             set_dispstat_flags(m, 1, 0);
             if (m->io[4] & 0x08)
@@ -332,6 +407,11 @@ static void run_events(gba_machine *m)
                 any = true;
             }
         }
+        if (m->irq_at <= m->now) { /* the request reaches the CPU (and ends a halt) */
+            m->irq_line = true;
+            m->irq_at = UINT64_MAX;
+            m->cpu.halted = false;
+        }
     } while (any);
     gba_schedule(m);
 }
@@ -350,16 +430,65 @@ void gba_run_frame(gba_machine *m, uint16_t *framebuffer)
 
 /* ---- register access ------------------------------------------------------------------------------------ */
 
+/* Registers that do not drive the data bus when read (write-only or unmapped halfwords): the CPU sees the open bus
+ * (the last prefetched opcode, gba_prefetch_latch). The other unreadable halfwords (the upper half of a 32-bit
+ * register, a few holes) read as 0. GBATEK « GBA I/O Map », checked by the mGBA suite's I/O read tests (XBA-201). */
+bool gba_io_open_bus(uint32_t addr)
+{
+    uint32_t a = addr & 0x3FE;
+    return (a >= 0x10 && a < 0x48) || a == 0x4C || a == 0x4E || (a >= 0x54 && a < 0x60) || a == 0x8C || a == 0x8E ||
+           (a >= 0xA0 && a < 0xB8) || (a >= 0xBC && a < 0xC4) || (a >= 0xC8 && a < 0xD0) || (a >= 0xD4 && a < 0xDC) ||
+           (a >= 0xE0 && a < 0x100);
+}
+
 uint16_t gba_io_read16(gba_machine *m, uint32_t addr)
 {
     uint32_t a = addr & 0x3FE;
     switch (a) {
-    case 0x100: case 0x104: case 0x108: case 0x10C:
-        return timer_value(m, (int)(a - 0x100) >> 2);
+    case 0x100: case 0x104: case 0x108: case 0x10C: {
+        /* Before an overflow processed this cycle, timer_value gives the reloaded value (base_time > now). */
+        return timer_value(m, (int)(a - 0x100) >> 2, m->now - TIMER_READ_EARLY);
+    }
     case 0x102: case 0x106: case 0x10A: case 0x10E:
         return m->timer[(a - 0x102) >> 2].ctl;
-    case 0xBA: case 0xC6: case 0xD2: case 0xDE:
-        return m->dma[(a - 0xBA) / 12].cnt_h;
+    case 0xBA: case 0xC6: case 0xD2:
+        return m->dma[(a - 0xBA) / 12].cnt_h & 0xF7E0;
+    case 0xDE:
+        return m->dma[3].cnt_h & 0xFFE0;
+    case 0x008: case 0x00A: /* BG0CNT, BG1CNT: no wrap-around bit */
+        return rd16(&m->io[a]) & 0xDFFF;
+    case 0x048: case 0x04A: /* WININ, WINOUT */
+        return rd16(&m->io[a]) & 0x3F3F;
+    case 0x050: /* BLDCNT */
+        return rd16(&m->io[a]) & 0x3FFF;
+    case 0x052: /* BLDALPHA */
+        return rd16(&m->io[a]) & 0x1F1F;
+    case 0x136: case 0x142: case 0x15A: case 0x206: case 0x20A: case 0x302:
+        return 0;
+    /* Serial port with no link cable (GBATEK « GBA Communication Ports », the mGBA suite's SIO register tests):
+     * what reads back depends on the mode (SIOCNT bits 12-13, RCNT bits 14-15). */
+    case 0x120: case 0x122: /* SIODATA32 in 32-bit normal mode; SIOMULTI0-1 (nothing received) otherwise */
+        return (rd16(&m->io[0x128]) & 0x3000) == 0x1000 && !(m->io[0x135] & 0x80) ? rd16(&m->io[a]) : 0;
+    case 0x124: case 0x126:
+        return 0;
+    case 0x128: { /* SIOCNT: bit 15 and the error / ID bits read as 0 (UART: bit 5 is CTS) */
+        uint16_t v = rd16(&m->io[a]);
+        return (uint16_t)(v & ((v & 0x3000) == 0x3000 ? ~0x8050u : ~0x8070u));
+    }
+    case 0x12A: /* SIODATA8 / SIOMLT_SEND (UART: the empty receive FIFO) */
+        return (rd16(&m->io[0x128]) & 0x3000) == 0x3000 ? 0 : rd16(&m->io[a]);
+    case 0x134: { /* RCNT: bits 9-13 unused; SC / SD (normal mode) and SC / SD (JOY mode) read low */
+        uint16_t v = rd16(&m->io[a]) & 0xC1FF;
+        if (!(v & 0x8000) && !(rd16(&m->io[0x128]) & 0x2000))
+            v &= (uint16_t)~0x000A;
+        else if ((v & 0xC000) == 0xC000)
+            v &= (uint16_t)~0x0003;
+        return v;
+    }
+    case 0x140: /* JOYCNT: the IRQ enable bit (the flags are write-1-to-clear) */
+        return rd16(&m->io[a]) & 0x0040;
+    case 0x150: case 0x152: case 0x154: case 0x156: /* JOY_RECV / JOY_TRANS */
+        return 0;
     default:
         break;
     }
@@ -368,7 +497,7 @@ uint16_t gba_io_read16(gba_machine *m, uint32_t addr)
     if ((a >= 0x10 && a < 0x48) || a == 0x4C || (a >= 0x54 && a < 0x60) || (a >= 0xA0 && a < 0xBA) ||
         (a >= 0xBC && a < 0xC6) || (a >= 0xC8 && a < 0xD2) || (a >= 0xD4 && a < 0xDE) || (a >= 0xE0 && a < 0x100) ||
         (a >= 0x110 && a < 0x120) || (a >= 0x20C && a < 0x300) || a >= 0x304)
-        return 0; /* write-only or unused */
+        return 0; /* write-only or unused (the CPU's reads of the open-bus ones never get here: gba_io_open_bus) */
     return rd16(&m->io[a]);
 }
 
@@ -381,6 +510,18 @@ void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v)
         return;
     }
     switch (a) {
+    case 0x000: { /* DISPCNT: a BG switched on shows 3 lines later, one switched off disappears at once */
+        uint16_t old = rd16(&m->io[0]);
+        for (int b = 0; b < 4; b++) {
+            uint16_t bit = (uint16_t)(0x100u << b);
+            if ((v & bit) && !(old & bit))
+                m->bg_delay[b] = 3;
+            else if (!(v & bit))
+                m->bg_delay[b] = 0;
+        }
+        wr16(&m->io[0], v);
+        return;
+    }
     case 0x004: /* DISPSTAT: flags are read-only */
         wr16(&m->io[4], (uint16_t)((rd16(&m->io[4]) & 7) | (v & 0xFF38)));
         vcount_check(m);
@@ -398,6 +539,7 @@ void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v)
         dma_write_ctl(m, (int)(a - 0xBA) / 12, v);
         return;
     case 0x100: case 0x104: case 0x108: case 0x10C:
+        timers_catch_up(m);
         m->timer[(a - 0x100) >> 2].reload = v;
         wr16(&m->io[a], v);
         return;
@@ -480,6 +622,7 @@ void gba_io_reset(gba_machine *m)
     }
     m->ie = m->if_ = m->ime = 0;
     m->irq_line = false;
+    m->irq_at = UINT64_MAX;
     m->keycnt = 0;
     gba_apu_reset(m);
     gba_set_keys(m, 0);

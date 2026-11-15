@@ -10,8 +10,9 @@
 #   1. consoles/gba/tests built with GBA_CORE_ONLY=ON and GBA_HOMEBREW_DIR pointing at the corpus, then
 #      ctest -R '^gba_(rc_)?hb_' -E _lle_: each program under gba_run --result (interpreter), and recompiled by the
 #      discovery loop in lockstep with the interpreter
-#   1b. with INPUTS_DIR (XBA-193): ctest -R '^gba_(rc_)?(hb_lle_|jsmolka_)', the same programs through the Cult-of-GBA
-#      BIOS (LLE) and jsmolka's ROMs, interpreted and recompiled; without it those skip and are not run
+#   1b. with INPUTS_DIR (XBA-193): ctest -R '^gba_(rc_)?(hb_lle_|jsmolka_|mgba)', the same programs through the
+#      Cult-of-GBA BIOS (LLE), jsmolka's ROMs and the mGBA test suite's pass counts (XBA-201), interpreted and
+#      recompiled; without it those skip and are not run
 #   2. tools/consoles/gba_corpus_packs.py: each program prepared into a desktop pack (python3 -m tools.prepare),
 #      run with the pack in lockstep until its result block's verdict, a screenshot 30 frames later, its sha256
 #      checked against consoles/gba/tests/corpus_screens.sha256
@@ -59,7 +60,7 @@ trap cleanup EXIT
 cmd='mkdir -p /out && cd /usr/src
 cmake -S consoles/gba/tests -B /tmp/build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGBA_CORE_ONLY=ON \
     -DGBA_HOMEBREW_DIR=/usr/src/hb -DGBA_BIOS=/usr/src/inputs/gba-bios/cult-of-gba-bios.bin \
-    -DGBA_TESTS_DIR=/usr/src/inputs/gba-tests >/out/build.log 2>&1 && cmake --build /tmp/build -j"$JOBS" >>/out/build.log 2>&1 \
+    -DGBA_TESTS_DIR=/usr/src/inputs/gba-tests -DGBA_SUITE=/usr/src/inputs/gba-suite/suite.gba >/out/build.log 2>&1 && cmake --build /tmp/build -j"$JOBS" >>/out/build.log 2>&1 \
   || { tail -n 30 /out/build.log; exit 1; }
 rc=0
 echo "== ctest gba_hb_* / gba_rc_hb_* (interpreter, discovery-loop recompilation in lockstep)"
@@ -68,14 +69,14 @@ ctest --test-dir /tmp/build -R "^gba_(rc_)?hb_" -E _lle_ -j"$JOBS" --output-on-f
 grep -E "^ *[0-9]+/[0-9]+ Test|tests passed|tests failed" /out/ctest.log
 [ "$rc" = 0 ] || grep -A30 "The following tests FAILED" /out/ctest.log || true
 if [ -d /usr/src/inputs ]; then
-  echo "== ctest gba_hb_lle_* / gba_jsmolka_* and their gba_rc_* (Cult-of-GBA BIOS, jsmolka/gba-tests)"
+  echo "== ctest gba_hb_lle_* / gba_jsmolka_* / gba_mgba* and their gba_rc_* (Cult-of-GBA BIOS, jsmolka, mGBA suite)"
   t0=$(date +%s)
-  ctest --test-dir /tmp/build -R "^gba_(rc_)?(hb_lle_|jsmolka_)" -j"$JOBS" --output-on-failure --timeout 600 \
+  ctest --test-dir /tmp/build -R "^gba_(rc_)?(hb_lle_|jsmolka_|mgba)" -j"$JOBS" --output-on-failure --timeout 1200 \
     >/out/ctest-inputs.log 2>&1 || rc=1
   grep -E "^ *[0-9]+/[0-9]+ Test|tests passed|tests failed" /out/ctest-inputs.log
   grep -q "Skipped" /out/ctest-inputs.log && { echo "a test skipped although its inputs are here"; rc=1; }
   grep -A30 "The following tests FAILED" /out/ctest-inputs.log || true
-  echo "== LLE + jsmolka ctest in $(($(date +%s) - t0)) s"
+  echo "== LLE + jsmolka + mGBA suite ctest in $(($(date +%s) - t0)) s"
 fi
 echo "== Prepare packs (python3 -m tools.prepare), run headless, screenshots"
 python3 tools/consoles/gba_corpus_packs.py /usr/src/hb /out --gba-run /tmp/build/gba_runtime/gba_run || rc=1

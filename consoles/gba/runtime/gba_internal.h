@@ -184,8 +184,10 @@ struct gba_machine {
     bool frame_done;
     uint16_t *fb;           /* framebuffer of the running frame, or NULL */
 
-    /* Interrupts. */
+    /* Interrupts. irq_line (what the CPU sees) follows IME && (IE & IF) GBA_IRQ_LATENCY cycles late: irq_at is the
+     * cycle a pending request reaches the CPU, UINT64_MAX when none is on its way. */
     uint16_t ie, if_, ime;
+    uint64_t irq_at;
 
     uint16_t keys;          /* KEYINPUT as read (0 = pressed) */
     uint16_t keycnt;
@@ -193,6 +195,13 @@ struct gba_machine {
     gba_timer timer[4];
     gba_dma dma[4];
     uint32_t dma_latch;     /* last value a DMA moved (open bus of DMA reads) */
+
+    /* PPU timing (XBA-201, the mGBA suite's video tests): lines before a newly enabled BG shows, the windows'
+     * vertical flags (latched at each line start: set on WINxV's top line, cleared on its bottom one), and OAM as
+     * the previous line's render point saw it (sprites are fetched a line ahead: a later write shows a line later). */
+    uint8_t bg_delay[4];
+    uint8_t win_latch;
+    uint8_t oam_line[GBA_OAM_SIZE];
 
     /* Affine reference points, 20.8 fixed point sign-extended from 28 bits. */
     int32_t bg2x, bg2y, bg3x, bg3y;
@@ -216,6 +225,13 @@ struct gba_machine {
     int16_t sine[256];      /* BIOS sine table (HLE BgAffineSet / ObjAffineSet), 1.14 fixed point */
 
     uint64_t rom_hash;      /* FNV-1a 64 of the ROM | 1, 0 until a save state needs it (gba_state.c) */
+
+    /* mGBA's debug-print port (gba_set_debug_log): the host's callback (not state), whether the game opened the port
+     * and the string it is writing. */
+    gba_debug_log_fn dbg_cb;
+    void *dbg_ctx;
+    bool dbg_open;
+    char dbg_str[257];
 };
 
 /* gba_machine starts with gba_rc_head's members. */
@@ -269,12 +285,23 @@ void gba_write32(gba_machine *m, uint32_t addr, uint32_t v, bool seq);
 uint16_t gba_fetch16(gba_machine *m, uint32_t addr, bool seq);
 uint32_t gba_fetch32(gba_machine *m, uint32_t addr, bool seq);
 void gba_update_waitstates(gba_machine *m);
+/* The opcode the CPU prefetched while running the one at pc (ARM [pc+8]; Thumb by region, GBATEK « Reading from
+ * Unused Memory »): what the opcode fetch leaves in m->open_bus, so what unmapped and write-only reads return. */
+uint32_t gba_prefetch_latch(gba_machine *m, uint32_t pc, bool thumb);
+static inline uint16_t gba_rom_half(const gba_machine *m, uint32_t addr)
+{
+    uint32_t a = addr & 0x1FFFFFE;
+    return a < m->rom_size ? rd16(&m->rom[a]) : (uint16_t)(a >> 1); /* past the end: the latched address */
+}
 
 /* gba_io.c */
 uint16_t gba_io_read16(gba_machine *m, uint32_t addr);
+bool gba_io_open_bus(uint32_t addr); /* a CPU / DMA read there sees the open bus */
 void gba_io_write16(gba_machine *m, uint32_t addr, uint16_t v);
 void gba_io_write8(gba_machine *m, uint32_t addr, uint8_t v);
 void gba_raise_irq(gba_machine *m, uint16_t bits);
+/* An interrupt request raised by an event due at `when` (<= now): it reaches the CPU GBA_IRQ_LATENCY cycles after. */
+void gba_raise_irq_at(gba_machine *m, uint16_t bits, uint64_t when);
 void gba_update_irq(gba_machine *m);
 void gba_schedule(gba_machine *m);
 void gba_io_reset(gba_machine *m);

@@ -185,69 +185,106 @@ static uint32_t isqrt(uint32_t v)
     return r;
 }
 
-/* ArcTan of a 1.14 tangent in [-1, 1]: the BIOS's polynomial (GBATEK), result in 0x4000 = pi/2 units. */
-static int32_t arctan(int32_t t)
+/* 32-bit ARM arithmetic: MUL wraps, ASR keeps the sign. */
+static inline int32_t mul32(int32_t a, int32_t b) { return (int32_t)((uint32_t)a * (uint32_t)b); }
+static inline int32_t asr32(int32_t v, int n) { return v < 0 ? ~(~v >> n) : v >> n; }
+
+/* ArcTan (SWI 0x09): the BIOS's polynomial (GBATEK) on the whole 32-bit r0, in 32-bit arithmetic as the BIOS runs it,
+ * result in 0x4000 = pi/2 units. Like the BIOS it leaves -(t * t) >> 14 in r1 and the polynomial in r3 (the mGBA
+ * test suite checks all three, XBA-201). */
+static int32_t arctan(gba_machine *m, int32_t t)
 {
-    int32_t a = -((t * t) >> 14);
-    int32_t b = ((0xA9 * a) >> 14) + 0x390;
-    b = ((b * a) >> 14) + 0x91C;
-    b = ((b * a) >> 14) + 0xFB6;
-    b = ((b * a) >> 14) + 0x16AA;
-    b = ((b * a) >> 14) + 0x2081;
-    b = ((b * a) >> 14) + 0x3651;
-    b = ((b * a) >> 14) + 0xA2F9;
-    return (b * t) >> 16;
+    int32_t a = -asr32(mul32(t, t), 14);
+    int32_t b = asr32(mul32(0xA9, a), 14) + 0x390;
+    b = asr32(mul32(b, a), 14) + 0x91C;
+    b = asr32(mul32(b, a), 14) + 0xFB6;
+    b = asr32(mul32(b, a), 14) + 0x16AA;
+    b = asr32(mul32(b, a), 14) + 0x2081;
+    b = asr32(mul32(b, a), 14) + 0x3651;
+    b = asr32(mul32(b, a), 14) + 0xA2F9;
+    R[1] = (uint32_t)a;
+    R[3] = (uint32_t)b;
+    return asr32(mul32(t, b), 16);
 }
 
-static uint32_t arctan2(int32_t x, int32_t y)
+/* ArcTan2 (SWI 0x0A), r0 = x, r1 = y: the octant method of the Cult-of-GBA BIOS (MIT, bios_calls/math/arctan.s), which
+ * gives the Nintendo BIOS's results: the angle of the octant plus ArcTan of y / x (or -x / y), computed with Div and
+ * ArcTan, so r1 is what ArcTan leaves; r3 is always 0x170 on return. With x = 0 the BIOS returns before its Div:
+ * r1 keeps y. Result in [0, 0x10000) for [0, 2 pi). */
+static void arctan2(gba_machine *m, int32_t x, int32_t y)
 {
-    int32_t r;
-    if (y == 0)
-        return x >= 0 ? 0 : 0x8000;
-    if (x == 0)
-        return y >= 0 ? 0x4000 : 0xC000;
-    int64_t ax = x < 0 ? -(int64_t)x : x, ay = y < 0 ? -(int64_t)y : y;
-    if (ax >= ay) {
-        r = arctan((int32_t)(((int64_t)y << 14) / x));
-        if (x < 0)
-            r += 0x8000;
-        else if (y < 0)
-            r += 0x10000;
-    } else {
-        r = (y > 0 ? 0x4000 : 0xC000) - arctan((int32_t)(((int64_t)x << 14) / y));
+    static const uint16_t octant[8] = {0x0000, 0x0040, 0x0040, 0x0080, 0x0080, 0x00C0, 0x00C0, 0x0100};
+    int idx = 0;
+    int32_t ay = y, ax = x;
+    if (y < 0) {
+        idx += 4;
+        ay = -y;
     }
-    return (uint32_t)r & 0xFFFF;
+    int32_t sx = x < 0 ? -1 : 0;
+    int32_t e = y ^ sx;
+    if (e < 0)
+        idx += 2;
+    if (x < 0)
+        ax = -x;
+    int32_t d = ax - ay; /* >= 0: |x| >= |y|, y / x; else x / y, negated after */
+    int32_t num = d >= 0 ? y : x, den = d >= 0 ? x : y;
+    if ((e ^ d) < 0)
+        idx += 1;
+    bios_div(m, mul32(num, 1 << 14), den);
+    int32_t r = arctan(m, (int32_t)R[0]);
+    if (d < 0)
+        r = -r;
+    R[0] = (uint32_t)(r + (octant[idx] << 8));
+    R[3] = 0x170;
+    if (x == 0)
+        R[1] = (uint32_t)y;
 }
+
+/* CpuSet / CpuFastSet as the BIOS runs them (its loops: LDRH / STRH, LDM / STM, LDR / STR; Cult-of-GBA's
+ * bios_calls/cpu_set.s, MIT): unaligned addresses behave as those instructions do (a rotated LDRH / LDR, LDM / STM
+ * aligned, the save chip's 8-bit bus seeing the whole address). */
+static inline uint32_t ror32b(uint32_t v, unsigned n)
+{
+    n &= 31;
+    return n ? (v >> n) | (v << (32 - n)) : v;
+}
+static uint32_t ldrh_rot(gba_machine *m, uint32_t a) { return ror32b(gba_read16(m, a, true), (a & 1) * 8); }
+static uint32_t ldr_rot(gba_machine *m, uint32_t a) { return ror32b(gba_read32(m, a, true), (a & 3) * 8); }
 
 static void cpu_set(gba_machine *m, uint32_t src, uint32_t dst, uint32_t ctl)
 {
     uint32_t count = ctl & 0x1FFFFF;
     bool fill = ctl & (1u << 24);
     if (ctl & (1u << 26)) {
-        src &= ~3u;
-        dst &= ~3u;
-        uint32_t v = fill ? rd32m(m, src) : 0;
-        for (uint32_t i = 0; i < count; i++) {
-            if (!fill)
-                v = rd32m(m, src + 4 * i);
-            gba_write32(m, dst + 4 * i, v, true);
+        uint32_t v = fill ? ldr_rot(m, src) : 0;
+        for (uint32_t i = 0; i < count; i++, dst += 4) {
+            if (fill) {
+                gba_write32(m, dst, v, true); /* STR */
+            } else {
+                gba_write32(m, dst & ~3u, gba_read32(m, (src + 4 * i) & ~3u, true), true); /* LDMIA / STMIA */
+            }
         }
     } else {
-        src &= ~1u;
-        dst &= ~1u;
-        uint16_t v = fill ? (uint16_t)rd16m(m, src) : 0;
-        for (uint32_t i = 0; i < count; i++) {
+        uint16_t v = fill ? (uint16_t)ldrh_rot(m, src) : 0;
+        for (uint32_t i = 0; i < count; i++, dst += 2) {
             if (!fill)
-                v = (uint16_t)rd16m(m, src + 2 * i);
-            gba_write16(m, dst + 2 * i, v, true);
+                v = (uint16_t)ldrh_rot(m, src + 2 * i);
+            gba_write16(m, dst, v, true);
         }
     }
 }
 
 static void cpu_fast_set(gba_machine *m, uint32_t src, uint32_t dst, uint32_t ctl)
 {
-    uint32_t count = ((ctl & 0x1FFFFF) + 7) & ~7u;
-    cpu_set(m, src, dst, (ctl & (1u << 24)) | (1u << 26) | count);
+    uint32_t count = ((ctl & 0x1FFFFF) + 7) & ~7u; /* whole blocks of 8 words */
+    if (!(ctl & 0x1FFFFF))
+        return;
+    uint32_t v = (ctl & (1u << 24)) ? ldr_rot(m, src) : 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!(ctl & (1u << 24)))
+            v = gba_read32(m, (src + 4 * i) & ~3u, true);
+        gba_write32(m, (dst + 4 * i) & ~3u, v, true);
+    }
 }
 
 static void bg_affine_set(gba_machine *m, uint32_t src, uint32_t dst, uint32_t n)
@@ -440,8 +477,8 @@ void gba_bios_hle_swi(gba_machine *m, uint32_t num)
     case 0x06: bios_div(m, (int32_t)R[0], (int32_t)R[1]); break;
     case 0x07: bios_div(m, (int32_t)R[1], (int32_t)R[0]); break;
     case 0x08: R[0] = isqrt(R[0]); break;
-    case 0x09: R[0] = (uint32_t)arctan((int16_t)R[0]) & 0xFFFF; break;
-    case 0x0A: R[0] = arctan2((int16_t)R[0], (int16_t)R[1]); break;
+    case 0x09: R[0] = (uint32_t)arctan(m, (int32_t)R[0]); break;
+    case 0x0A: arctan2(m, (int32_t)R[0], (int32_t)R[1]); break;
     case 0x0B: cpu_set(m, R[0], R[1], R[2]); break;
     case 0x0C: cpu_fast_set(m, R[0], R[1], R[2]); break;
     case 0x0D: R[0] = 0xBAAE187F; break; /* GetBiosChecksum: the value games expect */

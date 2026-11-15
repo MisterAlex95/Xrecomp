@@ -136,6 +136,7 @@ class FnLifter:
         body = fn(op, a) if fn else None
         if body is None:
             return None
+        body = self.after_access(body)
         if cond == 0xE:
             return body
         return ["if (%s) {" % COND[cond]] + ["    " + s for s in body] + ["}"]
@@ -296,12 +297,14 @@ class FnLifter:
         for k, (kind, x) in enumerate(ops):
             dst = x[len("uint32_t "):] if x.startswith("uint32_t ") else x
             ad = "a0_ + %d" % (4 * k) if k else "a0_"
+            # sequential after the first, unless the run crosses into another region (gba_cpu.c block transfers)
+            sq = "((a0_ + %d) >> 24) == ((a0_ + %d) >> 24)" % (4 * k, 4 * k - 4) if k else "0"
             if kind == "r":
                 fast.append("%s = RC_FRD32(%s);" % (dst, ad))
-                slow.append("%s = RC_BRD32(%s, %d, %s);" % (dst, ad, 1 if k else 0, ob))
+                slow.append("%s = RC_BRD32(%s, %s, %s);" % (dst, ad, sq, ob))
             else:
                 fast.append("RC_FWR32(%s, %s);" % (ad, x))
-                slow.append("RC_BWR32(%s, %s, %d, %s);" % (ad, x, 1 if k else 0, ob))
+                slow.append("RC_BWR32(%s, %s, %s, %s);" % (ad, x, sq, ob))
         out.append("if (RC_RUN_RAM(a0_, %d)) {" % n)
         out.append("    RC_RUN_WAITS(a0_, %d);" % n)
         out.append("    RC_RUN_BASE(a0_);")
@@ -320,7 +323,7 @@ class FnLifter:
         writeback = (not p) or w
         if rn == 15 and writeback:
             return None
-        ob = hx(op)
+        ob = self.aob(a)
         if op & (1 << 25):
             off, _ = self.shift_imm((op >> 5) & 3, self.reg(op & 15, a + 8), (op >> 7) & 31, False)
         else:
@@ -361,7 +364,7 @@ class FnLifter:
         writeback = (not p) or w
         if rn == 15 and writeback:
             return None
-        ob = hx(op)
+        ob = self.aob(a)
         off = hx(((op >> 4) & 0xF0) | (op & 0xF)) if op & (1 << 22) else self.reg(op & 15, a + 8)
         out = ["uint32_t b_ = %s;" % self.reg(rn, a + 8),
                "uint32_t mv_ = b_ %s %s;" % ("+" if u else "-", off),
@@ -392,7 +395,7 @@ class FnLifter:
             return None
         regs = [i for i in range(16) if lst >> i & 1]
         size = 4 * len(regs)
-        ob = hx(op)
+        ob = self.aob(a)
         out = ["uint32_t b_ = r%d;" % rn]
         if u:
             out.append("uint32_t ad_ = b_ + %d;" % (4 if p else 0))
@@ -428,10 +431,32 @@ class FnLifter:
 
     def thumb_ins(self, op: int, a: int) -> list:
         cls = thumb_class(op)
-        return getattr(self, "t_" + cls)(op, a) if hasattr(self, "t_" + cls) else None
+        body = getattr(self, "t_" + cls)(op, a) if hasattr(self, "t_" + cls) else None
+        return None if body is None else self.after_access(body)
 
-    def tob(self, op):
-        return hx(op * 0x00010001)
+    @staticmethod
+    def after_access(body):
+        # After cycles beyond the opcode fetch (a data access, internal cycles) the next opcode fetch is
+        # non-sequential (gba_cpu.c step, gba_recomp_rt.h RC_NEXTRA): its extra cycles, unless the instruction jumps
+        # (the refill is non-sequential anyway).
+        if (is_memory(body) or any(NOW_RE.search(x) for x in body)) and not any("RC_JUMP" in x for x in body):
+            return body + ["now += RC_NEXTRA();"]
+        return body
+
+    def tob(self, a):
+        # Thumb in the cartridge ROM: the open-bus latch holds the prefetched opcode [$+4] in both halves.
+        return hx(self.rom_half(a + 4) * 0x00010001)
+
+    def rom_half(self, addr):
+        # gba_bus.c rom_read16: past the end of the ROM, the cartridge bus answers the halfword address.
+        off = addr & 0x1FFFFFE
+        if off < self.rom.size:  # the image is padded with zeros to a word
+            return int.from_bytes(bytes(self.rom.data[off:off + 2]).ljust(2, b"\0"), "little")
+        return (off >> 1) & 0xFFFF
+
+    def aob(self, a):
+        # ARM in the cartridge ROM: the open-bus latch holds the prefetched opcode [$+8].
+        return hx(self.rom_half(a + 8) | self.rom_half(a + 10) << 16)
 
     def t_shift(self, op, a):
         rd, rs, amt, typ = op & 7, (op >> 3) & 7, (op >> 6) & 31, op >> 11
@@ -514,11 +539,11 @@ class FnLifter:
         v = self.fold_literal(addr, 4)
         if v is not None:
             return ["now += h->wait32[%d][0];" % ((addr >> 24) & 15), "r%d = %s;" % (rd, hx(v)), "now += 1;"]
-        return ["r%d = RD32(%s, 0, %s);" % (rd, hx(addr), self.tob(op)), "now += 1;"]
+        return ["r%d = RD32(%s, 0, %s);" % (rd, hx(addr), self.tob(a)), "now += 1;"]
 
     def t_regoff(self, op, a):
         rd, k = op & 7, (op >> 9) & 7
-        ob = self.tob(op)
+        ob = self.tob(a)
         out = ["uint32_t ad_ = r%d + r%d;" % ((op >> 3) & 7, (op >> 6) & 7)]
         D = "r%d" % rd
         if k == 0:
@@ -543,7 +568,7 @@ class FnLifter:
     def t_immoff(self, op, a):
         rd, off, rb = op & 7, (op >> 6) & 31, (op >> 3) & 7
         byte = op & 0x1000
-        ob = self.tob(op)
+        ob = self.tob(a)
         out = ["uint32_t ad_ = r%d + %d;" % (rb, off if byte else off * 4)]
         if op & 0x800:
             if byte:
@@ -557,7 +582,7 @@ class FnLifter:
 
     def t_half(self, op, a):
         rd = op & 7
-        ob = self.tob(op)
+        ob = self.tob(a)
         out = ["uint32_t ad_ = r%d + %d;" % ((op >> 3) & 7, ((op >> 6) & 31) * 2)]
         if op & 0x800:
             out += ["r%d = rc_ror(RD16(ad_, 0, %s), (ad_ & 1) * 8);" % (rd, ob), "now += 1;"]
@@ -567,7 +592,7 @@ class FnLifter:
 
     def t_sprel(self, op, a):
         rd = (op >> 8) & 7
-        ob = self.tob(op)
+        ob = self.tob(a)
         out = ["uint32_t ad_ = r13 + %d;" % ((op & 0xFF) * 4)]
         if op & 0x800:
             out += ["r%d = rc_ror(RD32(ad_, 0, %s), (ad_ & 3) * 8);" % (rd, ob), "now += 1;"]
@@ -589,7 +614,7 @@ class FnLifter:
         lst, extra = op & 0xFF, (op >> 8) & 1
         if not lst and not extra:
             return None
-        ob = self.tob(op)
+        ob = self.tob(a)
         regs = [i for i in range(8) if lst >> i & 1]
         if op & 0x800:  # POP
             ops = [("r", "r%d" % i) for i in regs] + ([("r", "uint32_t pc_")] if extra else [])
@@ -607,7 +632,7 @@ class FnLifter:
         rb, lst = (op >> 8) & 7, op & 0xFF
         if not lst:
             return None
-        ob = self.tob(op)
+        ob = self.tob(a)
         regs = [i for i in range(8) if lst >> i & 1]
         out = ["uint32_t ad_ = r%d;" % rb, "uint32_t nb_ = ad_ + %d;" % (4 * len(regs))]
         if op & 0x800:
@@ -714,7 +739,7 @@ class FnLifter:
 MEM_RE = re.compile(r"\b(?:RD|WR)(?:8|16|32)\(|\bRC_RUN_RAM\(")
 NOW_RE = re.compile(r"now \+= ([^;]*);")
 MUL_RE = re.compile(r"^\(uint32_t\)rc_mul_cycles\(\w+, \d\)( \+ 1)?$")
-WAIT_RE = re.compile(r"^h->wait(?:16|32)\[\d+\]\[0\]$")
+WAIT_RE = re.compile(r"h->wait(?:16|32)\[\d+\]\[0\]")
 EXITS = ("RC_JUMP_DYN", "RC_BX", "RC_EXIT")  # what follows may be a return point
 MAX_BLOCK = 12  # instructions per block at most (an event in a block makes the interpreter run the rest of it)
 
@@ -734,7 +759,7 @@ def static_cost(body):
                 const += int(e)
             elif MUL_RE.match(e):
                 const += 5 if e.endswith("+ 1") else 4
-            elif WAIT_RE.match(e):
+            elif WAIT_RE.fullmatch(e) or e == "RC_NEXTRA()":
                 terms.append(e)
             else:
                 raise ValueError("lift: unknown cycle term %r" % e)

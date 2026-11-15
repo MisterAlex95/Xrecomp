@@ -35,6 +35,15 @@
  * --cheats FILE the cheat list FILE (XBA-197, recomp_cheats.h): its enabled codes run after every frame (on both
  *               machines with --lockstep)
  * --peek ADDR   after the run, print the 32-bit word at ADDR ("peek 0x0203FE10 = 0x..."); up to 8 times
+ * --debug-log   print what the game logs through mGBA's debug-print port ("mgba: <level> <text>"; gba_set_debug_log:
+ *               the port answers only with this option or --pad-script)
+ * --pad-script FILE  drive the pad from FILE (XBA-201) instead of --keys, one command per line (# comments):
+ *                 press KEYS N     hold KEYS (A, B, SELECT, START, RIGHT, LEFT, UP, DOWN, R, L joined by +) N frames
+ *                 wait N           N frames with no key
+ *                 until-log TEXT N frames with no key until the game logs a line containing TEXT through the debug
+ *                                  port (at most N frames, else "PAD TIMEOUT" and exit 2 at the end)
+ *                 hash LABEL       print "hash LABEL <FNV-1a 64 of the last frame>"
+ *               The run ends with the script (--frames is then only a cap, default 10 million)
  * Prints the frame rate reached on stderr. Exit 3 on a usage or file error. */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "gba_cheats.h"
@@ -199,6 +208,131 @@ static int rw_load(const uint8_t *in, size_t n, void *m)
     return 0;
 }
 
+/* ---- --pad-script / --debug-log (XBA-201) ---- */
+
+typedef struct pad_cmd {
+    char op;             /* 'p' press / wait, 'u' until-log, 'h' hash */
+    unsigned keys;
+    long n;
+    char text[160];
+} pad_cmd;
+
+typedef struct pad_script {
+    pad_cmd *cmd;
+    size_t n, at;
+    long left;           /* frames left in the current command (-1: not started) */
+    int print_log;
+    int seen;            /* the current until-log's text was logged */
+    int timeouts;
+} pad_script;
+
+static pad_script pad;
+
+static void debug_log(void *ctx, int level, const char *msg)
+{
+    pad_script *ps = ctx;
+    if (ps->print_log)
+        printf("mgba: %d %s\n", level, msg);
+    if (ps->at < ps->n && ps->cmd[ps->at].op == 'u' && strstr(msg, ps->cmd[ps->at].text))
+        ps->seen = 1;
+}
+
+static void debug_log_twin(void *ctx, int level, const char *msg)
+{
+    (void)ctx;
+    (void)level;
+    (void)msg;
+}
+
+static int parse_keys(const char *s, unsigned *out)
+{
+    static const char *names[] = {"A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L"};
+    unsigned k = 0;
+    char buf[128];
+    snprintf(buf, sizeof buf, "%s", s);
+    for (char *t = strtok(buf, "+"); t; t = strtok(NULL, "+")) {
+        int i;
+        for (i = 0; i < 10 && strcmp(t, names[i]); i++)
+            ;
+        if (i == 10)
+            return -1;
+        k |= 1u << i;
+    }
+    *out = k;
+    return 0;
+}
+
+static int pad_load(pad_script *ps, const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    char line[256];
+    int ln = 0;
+    while (fgets(line, sizeof line, f)) {
+        ln++;
+        char *h = strchr(line, '#');
+        if (h)
+            *h = 0;
+        char op[32] = "", a[160] = "";
+        long n = 0;
+        int got = sscanf(line, "%31s %159s %ld", op, a, &n);
+        if (got <= 0)
+            continue;
+        pad_cmd c = {0};
+        if (!strcmp(op, "press") && got == 3 && parse_keys(a, &c.keys) == 0 && n > 0) {
+            c.op = 'p';
+            c.n = n;
+        } else if (!strcmp(op, "wait") && got >= 2 && (n = strtol(a, NULL, 0)) > 0) {
+            c.op = 'p';
+            c.n = n;
+        } else if (!strcmp(op, "until-log") && got == 3 && n > 0) {
+            c.op = 'u';
+            c.n = n;
+            snprintf(c.text, sizeof c.text, "%s", a);
+        } else if (!strcmp(op, "hash") && got >= 2) {
+            c.op = 'h';
+            snprintf(c.text, sizeof c.text, "%s", a);
+        } else {
+            fprintf(stderr, "gba_run: %s:%d: bad pad command\n", path, ln);
+            fclose(f);
+            return -1;
+        }
+        pad_cmd *nc = realloc(ps->cmd, (ps->n + 1) * sizeof *nc);
+        if (!nc) {
+            fclose(f);
+            return -1;
+        }
+        ps->cmd = nc;
+        ps->cmd[ps->n++] = c;
+    }
+    fclose(f);
+    ps->left = -1;
+    return 0;
+}
+
+/* Before a frame: runs the instant commands (hash of the last frame), returns the keys of the frame or -1 at the
+ * end of the script. */
+static int pad_before(pad_script *ps, const uint16_t *fb, size_t fb_bytes);
+/* After a frame. */
+static void pad_after(pad_script *ps)
+{
+    pad_cmd *c = &ps->cmd[ps->at];
+    if (c->op == 'u' && ps->seen) {
+        ps->at++;
+        ps->left = -1;
+        return;
+    }
+    if (--ps->left == 0) {
+        if (c->op == 'u') {
+            printf("PAD TIMEOUT: no \"%s\" logged in %ld frames\n", c->text, c->n);
+            ps->timeouts++;
+        }
+        ps->at++;
+        ps->left = -1;
+    }
+}
+
 static void fourcc(uint32_t v, char out[5])
 {
     for (int i = 0; i < 4; i++) {
@@ -206,6 +340,23 @@ static void fourcc(uint32_t v, char out[5])
         out[i] = (c >= 32 && c < 127) ? c : '?';
     }
     out[4] = 0;
+}
+
+static int pad_before(pad_script *ps, const uint16_t *fb, size_t fb_bytes)
+{
+    while (ps->at < ps->n && ps->cmd[ps->at].op == 'h') {
+        printf("hash %s %016llx\n", ps->cmd[ps->at].text,
+               (unsigned long long)fnv1a(0xCBF29CE484222325ull, fb, fb_bytes));
+        ps->at++;
+    }
+    if (ps->at >= ps->n)
+        return -1;
+    pad_cmd *c = &ps->cmd[ps->at];
+    if (ps->left < 0) {
+        ps->left = c->n;
+        ps->seen = 0;
+    }
+    return c->op == 'p' ? (int)c->keys : 0;
 }
 
 int main(int argc, char **argv)
@@ -220,13 +371,20 @@ int main(int argc, char **argv)
     double rewind_mb = RECOMP_REWIND_MB_DEFAULT;
     int result = 0, bios_boot = 0, quiet = 0, reg_result = -1;
     unsigned keys = 0;
-    const char *cheats_path = NULL;
+    const char *cheats_path = NULL, *pad_path = NULL;
+    int debug_log_on = 0, frames_given = 0;
     uint32_t peeks[8];
     int npeek = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--frames") && i + 1 < argc)
+        if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
             frames = strtol(argv[++i], NULL, 0);
+            frames_given = 1;
+        }
+        else if (!strcmp(argv[i], "--pad-script") && i + 1 < argc)
+            pad_path = argv[++i];
+        else if (!strcmp(argv[i], "--debug-log"))
+            debug_log_on = 1;
         else if (!strcmp(argv[i], "--bios") && i + 1 < argc)
             bios_path = argv[++i];
         else if (!strcmp(argv[i], "--ppm") && i + 1 < argc)
@@ -279,7 +437,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "usage: gba_run ROM [--frames N] [--bios PATH] [--bios-boot] [--result] [--ppm OUT] "
                             "[--wav OUT] [--save PATH] [--keys MASK] [--reg-result R] [--pack LIB] [--missed FILE] [--stats] "
                             "[--lockstep] [--hash] [--state-save N:FILE] [--state-load FILE] [--run-hash] "
-                            "[--rewind C:R [--rewind-mb M]] [--cheats FILE] [--peek ADDR] [--quiet]\n");
+                            "[--rewind C:R [--rewind-mb M]] [--cheats FILE] [--peek ADDR] [--debug-log] [--pad-script FILE] [--quiet]\n");
             return 3;
         }
     }
@@ -317,6 +475,20 @@ int main(int argc, char **argv)
             fprintf(stderr, "gba_run: pack %s: %s\n", pack, why);
             return 3;
         }
+    }
+    if (pad_path) {
+        if (pad_load(&pad, pad_path) != 0) {
+            fprintf(stderr, "gba_run: cannot read the pad script %s\n", pad_path);
+            return 3;
+        }
+        if (!frames_given)
+            frames = 10000000;
+    }
+    if (pad_path || debug_log_on) {
+        pad.print_log = debug_log_on;
+        gba_set_debug_log(m, debug_log, &pad);
+        if (ref)
+            gba_set_debug_log(ref, debug_log_twin, NULL);
     }
     if (bios_boot)
         gba_boot_bios(m);
@@ -389,7 +561,18 @@ int main(int argc, char **argv)
     static uint16_t ref_fb[GBA_SCREEN_W * GBA_SCREEN_H];
     int diverged = 0;
     for (f = 0; f < frames; f++) {
+        if (pad_path) {
+            int k = pad_before(&pad, fb, sizeof fb);
+            if (k < 0)
+                break;
+            keys = (unsigned)k;
+            gba_set_keys(m, (uint16_t)keys);
+            if (ref)
+                gba_set_keys(ref, (uint16_t)keys);
+        }
         gba_run_frame(m, fb);
+        if (pad_path)
+            pad_after(&pad);
         gba_cheats_frame(&cheats, (uint16_t)keys);
         if (ref) {
             char why[160] = "";
@@ -550,5 +733,11 @@ int main(int argc, char **argv)
     gba_destroy(m);
     gba_destroy(ref);
     gba_pack_close(&pk);
+    if (pad_path && rc == 0 && (pad.timeouts || pad.at < pad.n)) {
+        if (pad.at < pad.n)
+            printf("PAD TIMEOUT: --frames %ld ran out before the script's end\n", frames);
+        rc = 2;
+    }
+    free(pad.cmd);
     return diverged ? 4 : rc;
 }

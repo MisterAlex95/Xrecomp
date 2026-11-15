@@ -70,3 +70,11 @@ uint32_t gba_reg(gba_machine *m, int r)
 uint32_t gba_cpsr(gba_machine *m) { return gba_get_cpsr(m); }
 uint64_t gba_cycles(gba_machine *m) { return m->now; }
 uint64_t gba_frames(gba_machine *m) { return m->frames; }
+
+void gba_set_debug_log(gba_machine *m, gba_debug_log_fn cb, void *ctx)
+{
+    m->dbg_cb = cb;
+    m->dbg_ctx = ctx;
+    if (!cb)
+        m->dbg_open = false;
+}
