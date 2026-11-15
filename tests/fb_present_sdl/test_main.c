@@ -16,6 +16,8 @@
  *   sharp       a black / white edge in a 300x225 frame (4.27x) blends over fewer columns than the linear plain copy
  *   linear      that plain copy
  *   lcd         no LCD grid for an Xbox: drawn as none, none active
+ *   fxaa, cas   the edge smoothing and sharpening presets: active, the flat grey as it is, the red block red (the
+ *               swap of SDL's opengles2 textures through their neighbour taps)
  *   override    RECOMP_XBOX_SHADER=scanlines wins over RECOMP_SHADER=crt
  *   fail        RECOMP_SHADER_TEST_FAIL=crt: the shader does not build, none is drawn, none active
  *   live        none at the start, scanlines set live (xbox_FramebufferWindowSetShader, the in-game menu) drawn
@@ -290,6 +292,15 @@ static int guest_main(void)
             CHECK(c[0] == 128 && c[1] == 128 && c[2] == 128);
             unlink(bmp);
         }
+    } else if (!strcmp(s_case, "fxaa") || !strcmp(s_case, "cas")) {
+        int bad = 0;
+        CHECK(xbox_FramebufferWindowShaderActive() == (s_case[0] == 'f' ? HOST_SHADER_FXAA : HOST_SHADER_CAS));
+        for (int y = 200; y < WH; y += 3)   /* away from the red block's edges, which both may touch */
+            for (int x = 200; x < WW; x += 3)
+                for (int c = 0; c < 3; c++)
+                    bad += abs(at(&p, x, y, c) - 128) > 2;
+        CHECK(bad == 0);
+        CHECK(mean(&p, 16, 16, 112, 112, 0) > 240 && mean(&p, 16, 16, 112, 112, 2) < 15);
     } else if (!strcmp(s_case, "crt")) {
         CHECK(xbox_FramebufferWindowShaderActive() == HOST_SHADER_CRT);
         /* gl_FragCoord.x 0, 1, 2 of every 3: red, green, blue. */
@@ -317,6 +328,8 @@ static const Case k_cases[] = {
     { "sharp", "sharp", NULL, NULL, NULL },
     { "linear", NULL, NULL, NULL, NULL },
     { "lcd", "lcd", NULL, NULL, NULL },
+    { "fxaa", "fxaa", NULL, NULL, NULL },
+    { "cas", "cas", NULL, NULL, NULL },
     { "override", "crt", "scanlines", NULL, NULL },
     { "fail", "crt", NULL, "RECOMP_SHADER_TEST_FAIL", "crt" },
     { "live", NULL, NULL, NULL, NULL },

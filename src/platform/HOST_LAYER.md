@@ -41,7 +41,7 @@ interface target when there is no Vulkan bridge). The `*.cmake` files have inclu
 ### src/video
 | File | Class | Note |
 |---|---|---|
-| `host_window.[ch]` | G (new) | SDL window, GL ES 3.0 / 3.2 core context, RGBA or GL-texture present, letterboxed (aspect, integer or stretch scaling, linear or nearest: `host_window_set_scaling`; a fixed display shape such as the PS1's 4:3: `host_window_set_aspect`), a capture of the drawable as presented (`host_window_capture`), events → lifecycle and pads; from any thread, the present rate (`host_window_stats`) and the last picture as a BMP (`host_window_screenshot_bmp`; a picture presented with `host_window_present_rgba_shared` is not copied, the caller gives it on demand); the shared display keys `RECOMP_SCALE` (aspect, integer or stretch) / `RECOMP_FILTER` / `RECOMP_PRESENT_VSYNC` (`host_window_env_*`, XBA-181); picture shaders none / sharp / scanlines / crt / lcd (`host_window_set_shader`, `RECOMP_SHADER*`, XBA-195, [below](#picture-shaders-xba-195)) |
+| `host_window.[ch]` | G (new) | SDL window, GL ES 3.0 / 3.2 core context, RGBA or GL-texture present, letterboxed (aspect, integer or stretch scaling, linear or nearest: `host_window_set_scaling`; a fixed display shape such as the PS1's 4:3: `host_window_set_aspect`), a capture of the drawable as presented (`host_window_capture`), events → lifecycle and pads; from any thread, the present rate (`host_window_stats`) and the last picture as a BMP (`host_window_screenshot_bmp`; a picture presented with `host_window_present_rgba_shared` is not copied, the caller gives it on demand); the shared display keys `RECOMP_SCALE` (aspect, integer or stretch) / `RECOMP_FILTER` / `RECOMP_PRESENT_VSYNC` (`host_window_env_*`, XBA-181); picture shaders none / sharp / scanlines / crt / lcd / fxaa / cas (`host_window_set_shader`, `RECOMP_SHADER*`, XBA-195, [below](#picture-shaders-xba-195)); a minified picture's texels averaged (`RECOMP_PRESENT_DOWNSCALE`, [below](#minified-pictures)) |
 | `present_shaders.[ch]` | G (new) | the picture shaders (XBA-203): presets, `RECOMP_SHADER*` keys, GLSL in two dialects, GL program and uniforms, shared by `host_window` and the Xbox presenter ([below](#picture-shaders-xba-195)) |
 | `perf_overlay.[ch]` | G | SDL_Renderer overlay; moved from `xbox_video` to `xbr_host` |
 | `display_vsync_android.[ch]` | M → split | AChoreographer grid; now hands samples to a sink passed to `display_vsync_android_start`, and the Xbox presenter passes `nv2a_pb_exec_display_clock`. Moved to `xbr_host` |
@@ -77,7 +77,7 @@ The Xbox audio out is `src/apu/apu_sdl2.c` (APU-bound, X).
 
 ## Picture shaders (XBA-195)
 
-The console window (`host_window.c`) can draw the picture through one of five presets, our own small fragment shaders
+The console window (`host_window.c`) can draw the picture through one of seven presets, our own small fragment shaders
 (GLSL ES 3.0 on Android / Mesa, GLSL 1.50 on a 3.2 core context; no third-party shader pack). Each is a single pass
 at the output resolution: the same full-viewport triangle and letterbox as the plain present, the shader replacing
 the plain sampling. It therefore applies after the picture is made, whatever made it: an upscaled PS1 / N64 frame
@@ -91,10 +91,12 @@ other), and every scale mode (aspect, integer, stretch, `host_window_set_aspect`
 | Scanlines | `scanlines` | the lower half of each console line darkened (strength), the upper half slightly brightened; antialiased over one output pixel; faded out below two output pixels per line |
 | CRT | `crt` | scanlines + an aperture grille (red / green / blue columns one output pixel wide); `RECOMP_SHADER_CURVATURE` adds a barrel curvature (black outside) and a vignette |
 | LCD grid | `lcd` | each console pixel sharp, its right and bottom output pixel darkened (strength), faded out below 2.5 output pixels per cell; `RECOMP_SHADER_GHOSTING` blends the previous picture in (present_rgba alternates two textures for it) |
+| Edge smoothing | `fxaa` | FXAA-class (our own): luma at the four diagonal half-steps gives an edge's direction, two and four taps along it are blended, the four-tap blend kept unless it leaves the neighbourhood's luma range; low-contrast areas untouched. The step is one output pixel, or one texel when the picture is enlarged. Samples linearly |
+| Sharpen | `cas` | contrast-adaptive sharpening (our own, after the published CAS idea): centre and four neighbours (same step as FXAA), the negative lobe up to -0.2 per neighbour at strength 100 (default 50), shrunk where the neighbourhood nears black or white (no halo or clipping); strength 0 draws as none. Samples linearly |
 
 « Console lines »: the picture's height divided by `round(height / 240)`, so an upscaled 960-line PS1 picture still
 gets 240 scanlines and a GBA 160. Strength, curvature and ghosting are 0..100 (strength unset: the preset's default,
-scanlines 50, CRT 60, LCD 50).
+scanlines 50, CRT 60, LCD 50, CAS 50).
 
 API: `host_window_set_shader(&HostShader)` (preset, strength, curvature, ghosting; before or after open, kept across
 open / close), `host_window_shader_active()` (the preset drawn: none after a failure), `host_window_shader_parse` /
@@ -112,6 +114,36 @@ attribute; `texture()` mapped onto `texture2D`, with a B/R swap for the textures
 swapped RGBA). `present_shader_env`, `_parse`, `_name`, `_strength`, `_clamp`, `_console_cells` / `_xbox_cells`,
 `_build` (with the `RECOMP_SHADER_TEST_FAIL` fallback and its log line), `_use` (the uniforms) and
 `_draw_legacy` (a draw inside SDL's renderer that puts back every GL state SDL caches).
+
+### Minified pictures
+
+An upscaled scanout is often larger than the rectangle it is shown in: the N64 at 4x hands the window 2560x1152
+(the VI's 640 columns with the guard band, `scanout_steps` in `n64_rdp_vk.cpp`) for a 1440x1080 4:3 viewport on a
+1080p panel, 1.8x horizontally, 1.07x vertically; a PS1 640-wide mode at 4x is 2560x1920. One bilinear tap per output
+pixel then skips texels past ~1.5x (thin lines and text break up, edges crawl); nearest keeps one column in 1.8 and
+drops the rest. So in an axis minified by more than 1.25x (`PRESENT_DOWNSCALE_MIN`) the picture is drawn with the
+texels under each output pixel averaged: a box filter over texel centres (`xr_area` in the shared GLSL), exact while
+the pixel spans up to 7 texels, `ceil(ratio) + 1` taps in that axis (3 for the N64's 1.8x, 3 x 3 at 2x), at most 8,
+spread bilinear taps beyond 7x; an axis that is not minified keeps the single tap of the texture's filter.
+`present_shader_taps` decides the taps (also the uniform `u_taps`, with the footprint); every preset samples through
+it (`xr_sample`: scanlines, CRT, LCD, FXAA and CAS average too, sharp bilinear draws the area filter when
+minified, there being no whole factor to keep), and with no preset `host_window` draws a small area program
+(`PRESENT_SHADER_AREA`, not a preset: `present_shader_parse("area")` is -1) instead of the plain one. A picture that
+is not minified draws exactly as before (the plain program, no cost).
+
+Nearest: the filter means square pixels for an enlarged picture. Minified by a non-integer factor it only drops
+texels, so the averaging applies whatever `RECOMP_FILTER` says (the texel-centre taps read the same with either
+filter); an axis that is not minified stays nearest. `RECOMP_PRESENT_DOWNSCALE=0` turns it off (one tap at any scale,
+as before); `host_window_set_downscale(1 / 0 / -1 the variable)`, `host_window_downscale_drawn()`. The change is
+logged once (« picture 2560x1152 in 1440x1080: minified, texels averaged »). The Xbox presenter averages inside its
+presets only (its plain copy stays SDL's).
+
+Cost: the N64 case is three texture fetches and a short uniform loop per output pixel (~1.5 M pixels), against one;
+FXAA ~19 and CAS ~15 fetches when minified (each neighbour averaged too). `host_layer_test shaders` prints both
+(`HOST_LAYER_BENCH_SIZE=1440x1080`), on llvmpipe with one thread (a software rasteriser: the shader's own
+arithmetic, not a GPU's): the 2560x1152 picture at 4:3, one tap 41.5 ms, averaged 101.7, FXAA 402, CAS 362. On an
+Adreno 740 the averaged pass should cost well under 0.1 ms over the plain one (4.7 M fetches); FXAA / CAS about
+0.2-0.3 ms: to be confirmed on the device (`perf` present column).
 
 ### The Xbox presenter (XBA-203)
 
@@ -135,8 +167,13 @@ and leave the columns alike, strength 0 equals none, the CRT's columns are red /
 blacks the corners, the LCD grid darkens each cell's last column and row and keeps its inside, ghosting shows half
 of a white picture under the next black one, sharp bilinear blends a black / white edge over fewer columns than
 linear at 4.27x, the BMP screenshot is the raw grey, a forced build failure draws exactly what none draws. Run it
-under Xvfb + Mesa (`DISPLAY=:N`). `host_layer_test present_shaders` (`host_layer_present_shaders`): the shared
-module's keys, lines and sources on every host, and with a display every preset built in each context Mesa offers
+under Xvfb + Mesa (`DISPLAY=:N`). Minified pictures: 1-texel black / white
+columns 1152 wide (and 2.25x vertically) in 640 output columns: one tap a moire (mean absolute deviation along a row
+67 linear, 128 nearest), averaged near the mean grey (14), with linear and nearest; every preset averages; a picture
+that is not minified (4x) draws the same on and off, 1.07x stays one tap. FXAA blends a hard 1:1 diagonal (0
+blended pixels with none, ~900 with it) and leaves a flat picture as none; CAS steepens a soft 64 / 192 edge, leaves
+flat parts as they are, strength 0 as none. `host_layer_test present_shaders` (`host_layer_present_shaders`): the shared
+module's keys, lines, taps and sources on every host, and with a display every preset built in each context Mesa offers
 (GLES 3.0 with GLSL ES 3.00 and 1.00, GLES 2.0, 3.2 core, compatibility). `tests/fb_present_sdl`
 (`fb_present_sdl_shaders`, skipped without a display): the Xbox presenter's window with SDL's opengl and opengles2
 renderers, each case a child process presenting a frame and capturing the window: none, scanlines (240 over 960

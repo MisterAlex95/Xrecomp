@@ -177,7 +177,9 @@ transfers complete after their length), the three root counters with every clock
 scanline / VBlank scheduler driven by `ps1_gpu_get_timing` (`ps1_io.c`), SIO0 with the digital pad, the DualShock
 (digital or analog mode; config mode: 0x43 enter / exit, 0x44 mode + lock, 0x45 status, 0x46 / 0x47 / 0x4C tables,
 0x4D rumble mapping, whose motors `ps1_pad_rumble` reports; `ps1_pad_analog_button`) and two 128 KB memory cards (`ps1_sio.c`; `ps1_card_data` / `ps1_card_take_dirty` / `ps1_card_load` like
-the GBA saves). The other chips are reached through `ps1_devices.h` only: target `ps1_core` links `ps1_gpu`, `ps1_cd`,
+the GBA saves; JOY_STAT bit 7 is the /ACK level, a pulse of `PS1_SIO_ACK_PULSE` = 100 cycles from the IRQ as on
+hardware, not a latch: Duke Nukem - Time to Kill's card handler waits for it to drop with interrupts off; bit 9, the
+IRQ, stays until JOY_CTRL bit 4). The other chips are reached through `ps1_devices.h` only: target `ps1_core` links `ps1_gpu`, `ps1_cd`,
 `ps1_spu` and `ps1_mdec`, each the real module or its placeholder `ps1_<dev>_stub.c` when the source is absent.
 
 BIOS: **OpenBIOS** (MIT, PCSX-Redux's nugget tree), built from source by `tools/consoles/build_ps1_bios.sh` at the
@@ -403,6 +405,10 @@ an EXE gets `EXE-<CRC32>`. Every option is listed at the top of `runtime/tools/p
 (`consoles/ps1/tests/test_main.c`: the helpers and `.m3u` parsing, then gfx.exe fast-booted, through `fd:N`, a memory
 card read back and left alone, gfx.cue booted by the BIOS to its 320 x 240 picture, the errors, a save written and
 reloaded, a playlist's disc swap, fast boot on and off); `ps1_hb_fastboot_*` boot every homebrew disc fast.
+Diagnostic in the log (stdout, logcat on Android; no effect on the game): `ps1: the game has not left pc 0x… for 5 s
+with interrupts off (I_STAT …, I_MASK …)` once when, for 300 frame ends in a row, SR.IEc is 0 and the PC stays in one
+64-byte window (a hang in a device the loop polls: no IRQ handler can get it out), and `ps1: running again` when it
+leaves (`ps1_runtime.c`, `stall_check`).
 
 **N64 core (N-1 XBA-169, N-3 XBA-171, N-4 XBA-172).** Interpreter first, the PS1's shape. `consoles/n64/runtime/n64_core.h`:
 a VR4300 interpreter (`n64_cpu.c`: every MIPS III integer instruction, 64-bit ops, LL / SC / LLD / SCD, LWL..SDR,
