@@ -11,6 +11,9 @@
  * and a DEADFACE parameter; with the default parameter they are the constants below (cross-checked by deriving them
  * from those tables while writing this; the tables are not needed here since DEADFACE is not supported). */
 #define _POSIX_C_SOURCE 200809L
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE          /* st_mtimespec, hidden by _POSIX_C_SOURCE */
+#endif
 #include "recomp_cheats.h"
 
 #include <ctype.h>
