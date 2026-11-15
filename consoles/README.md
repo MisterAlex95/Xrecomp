@@ -744,6 +744,38 @@ gfx 2099 -> 987, gfx HLE 2206 -> 1005, cpu 2156 -> 988, ps1-tests gpu/benchmark 
 (1.7-2.2x interpreted, 1.34x for the bench pack's BIOS share). What remains on the interpreted bench is block entry
 and exit (that code branches every few instructions) and the SPU.
 
+**GBA interpreter: predecoded blocks (XBA-208).** Same approach for the ARM7TDMI (`gba_cpu.c` « predecoded blocks »):
+`gba_cpu_run` and the recompiler's loop for code no pack holds (the BIOS, routines copied to IWRAM, EWRAM code) run
+straight runs of cartridge, IWRAM, EWRAM or BIOS code decoded once into ARM and Thumb ops (operands and condition
+extracted, PC-relative values and branch targets computed; LDM / STM / PUSH / POP, halfword transfers and MRS
+included, the rare rest are generic ops through the old decoders), executed by computed-goto loops with the flags in
+locals; a run goes on across taken branches in the same state and region. Each instruction costs what `step()`
+charges, in the same order: the opcode fetch (through the cartridge's prefetch buffer when it is on), wait states,
+the non-sequential fetch after data accesses or internal cycles, refills, the IRQ line's 4-cycle delay and the DMA
+start delay as the scheduler has them. EWRAM / IWRAM accesses skip the bus call while no DMA is due; the others go
+through the bus with r15, the open-bus / BIOS latches and the clock where `step()` has them. An IO register write, a
+DMA, a wait-state change or a write to code bumps `blk_attn` and stops the run after that instruction, so IRQs,
+halts and events land at the same instruction as before. RAM blocks are invalidated per 256-byte page through a code
+map (a bit per halfword some block was decoded from, checked by every bus write and cheat poke): routines copied to
+IWRAM and self-modifying code decode again; save state loads, the BIOS's RAM resets and cartridge patches flush
+everything. `step()`'s loop stays as the reference: `gba_cpu_set_reference`, `gba_run --lockstep-ref` (twin compared
+after every frame on its whole save state, `gba_state_compare`; with `--lockstep-cycles N` both run in slices of N
+cycles, `gba_run_cycles`, the CPU compared at every stop and the whole state every 1024), `recomp_fuzz.py --ref`
+(`--iwram`: the random program copied to IWRAM before every pass with an immediate patched), the `gba_lockref_*`
+ctests. Checked: the whole GBA suite with every input (x86-64, and aarch64 under qemu with the same run hashes), the
+mGBA suite counts unchanged group by group (HLE and LLE), 335 lockstep runs (every homebrew HLE / LLE / BIOS boot,
+jsmolka's 8 ROMs, the bench, every mGBA suite group; per frame and every 1 / 7 / 61 / 997 cycles), 702 random-program
+seeds (cartridge and IWRAM, built-in and Cult-of-GBA BIOS, per frame and every 1 / 7 / 13 / 997 cycles), the corpus
+screenshots, the run hashes below unchanged.
+
+x86-64 Ryzen AI Max+ 395, gcc -O3, before -> after: host instructions per frame (callgrind, 120 frames) bench 14.28 M
+-> 9.92 M, gfx.gba 4.87 M -> 3.66 M, cpu.gba 2.48 M -> 1.69 M, iwram_copy 2.47 M -> 1.68 M, jsmolka arm 2.56 M ->
+1.98 M, thumb 2.55 M -> 1.98 M. CPU time per 3000 frames (best of 5, interpreter only): bench 3.29 -> 2.61 s (1.26x),
+jsmolka arm 0.53 -> 0.36 s (1.47x), thumb 0.53 -> 0.37 s (1.43x), gfx 0.75 -> 0.51 s (1.47x), cpu 0.58 -> 0.31 s
+(1.87x); mGBA suite groups 1.2-1.6x (memory 77 -> 56 ms, timing 102 -> 75, timers 98 -> 63, dma 118 -> 85). The
+bench's cartridge code is bound by the prefetch buffer's model (every opcode fetch goes through it); the blocks
+(host memory: up to ~18 MB for a game-sized code footprint, committed as used) are not in save states.
+
 **N64 core speed (XBA-191).** Same method: callgrind on the homebrew corpus, n64-systemtest and their packs
 (`n64_run --run-hash --hash`: picture, audio, cycles and RDRAM must not move), `n64_rsp_bench` / `n64_rdp_bench` for
 the RCP. The homebrew sit in libdragon's idle loops after their checks, so they measure the interpreter (about 1.04 M

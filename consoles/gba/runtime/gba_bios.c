@@ -159,6 +159,7 @@ static void soft_reset(gba_machine *m)
 {
     bool ewram = gba_peek8(m, 0x03007FFA) != 0;
     memset(&m->iwram[0x7E00], 0, 0x200);
+    gba_cpu_flush_blocks(m);
     gba_cpu_reset(m, 0, MODE_SVC | CPSR_I | CPSR_F);
     boot_state(m, ewram ? 0x02000000 : 0x08000000);
     m->cpu.branched = true; /* the SWI must not advance PC past the new entry */
@@ -171,6 +172,8 @@ static void register_ram_reset(gba_machine *m, uint32_t flags)
         memset(m->ewram, 0, sizeof m->ewram);
     if (flags & 0x02)
         memset(m->iwram, 0, 0x7E00);
+    if (flags & 0x03)
+        gba_cpu_flush_blocks(m);
     if (flags & 0x04)
         memset(m->pal, 0, sizeof m->pal);
     if (flags & 0x08)

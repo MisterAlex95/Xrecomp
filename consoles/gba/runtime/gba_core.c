@@ -25,6 +25,7 @@ gba_machine *gba_create(const uint8_t *rom, size_t rom_size, const uint8_t *bios
     m->rc_ewram = m->ewram;
     m->rc_iwram = m->iwram;
     m->rom_size = (uint32_t)rom_size;
+    m->cpu_cap = UINT64_MAX;
     gba_save_init(m); /* save kind from the ROM, erased chip (0xFF) */
 
     if (bios) {
@@ -56,6 +57,7 @@ void gba_destroy(gba_machine *m)
     if (!m)
         return;
     gba_recomp_free(m);
+    gba_cpu_free(m);
     free(m->rom);
     free(m);
 }

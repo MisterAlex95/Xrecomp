@@ -23,6 +23,8 @@ endif()
 #                      (a regression fails), built-in BIOS; gba_mgba_lle_<group> through the Cult-of-GBA BIOS
 #   gba_rc_*           the same ROMs recompiled (gba_tools.recomp + cc, discovery loop), in lockstep with the
 #                      interpreter; gba_rc_fuzz: random ARM / Thumb programs, same comparison (needs python3, cc)
+#   gba_lockref_*      the interpreter's predecoded blocks against its reference loop (gba_run --lockstep-ref,
+#                      XBA-208)
 # The ROM and BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays
 # green. They come from (repo root):
 #   tools/consoles/build_homebrew.sh gba build/homebrew     -> GBA_HOMEBREW_DIR (default build/homebrew/gba)
@@ -216,4 +218,46 @@ if(TARGET gba_run)
                     --work ${GBA_RC_WORK}/fuzz --seeds 0-5 --frames 20)
         set_tests_properties(gba_rc_fuzz PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
     endif()
+
+    # The interpreter's predecoded blocks (XBA-208) against its reference loop, one full step per instruction
+    # (gba_run --lockstep-ref): the whole save state and the frame compared after every frame, and with
+    # --lockstep-cycles the CPU every 61 cycles (the whole state every 1024 stops), which also cuts blocks short at
+    # every point; the built-in and the Cult-of-GBA BIOS, jsmolka's ROMs, mGBA suite groups (their counts as above),
+    # random ARM / Thumb programs under timer IRQs from the cartridge and copied to IWRAM each pass with an immediate
+    # patched (recomp_fuzz.py --ref [--iwram]).
+    set(lockref)
+    foreach(prog hello cpu timer_irq iwram_copy gfx pad sound)
+        add_test(NAME gba_lockref_hb_${prog}
+            COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba --frames 900
+                    --lockstep-ref)
+        add_test(NAME gba_lockref_lle_hb_${prog}
+            COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba --frames 900 --lockstep-ref
+                    --bios ${GBA_BIOS})
+        add_test(NAME gba_lockref_cyc_hb_${prog}
+            COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_HOMEBREW_DIR}/${prog}.gba --frames 60
+                    --lockstep-cycles 61)
+        list(APPEND lockref gba_lockref_hb_${prog} gba_lockref_lle_hb_${prog} gba_lockref_cyc_hb_${prog})
+    endforeach()
+    foreach(t arm thumb memory bios sram flash64 flash128 none)
+        add_test(NAME gba_lockref_jsmolka_${t}
+            COMMAND sh ${GBA_RUN_ROM} $<TARGET_FILE:gba_run> ${GBA_TESTS_DIR}/${t}.gba --frames 300 --lockstep-ref)
+        list(APPEND lockref gba_lockref_jsmolka_${t})
+    endforeach()
+    foreach(gm ${GBA_MGBA_HLE})
+        string(REGEX REPLACE "=.*" "" g ${gm})
+        add_test(NAME gba_lockref_mgba_${g} COMMAND sh ${GBA_MGBA} $<TARGET_FILE:gba_run> ${GBA_SUITE} ${gm} --
+                 --lockstep-ref)
+        list(APPEND lockref gba_lockref_mgba_${g})
+    endforeach()
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME gba_lockref_fuzz
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --gba-run $<TARGET_FILE:gba_run>
+                    --work ${CMAKE_CURRENT_BINARY_DIR}/lockref_fuzz --seeds 0-7 --frames 30 --ref --lockstep-cycles 61)
+        add_test(NAME gba_lockref_fuzz_iwram
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --gba-run $<TARGET_FILE:gba_run>
+                    --work ${CMAKE_CURRENT_BINARY_DIR}/lockref_fuzz_iwram --seeds 0-7 --frames 30 --insns 30 --ref
+                    --iwram --lockstep-cycles 61)
+        list(APPEND lockref gba_lockref_fuzz gba_lockref_fuzz_iwram)
+    endif()
+    set_tests_properties(${lockref} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
 endif()
