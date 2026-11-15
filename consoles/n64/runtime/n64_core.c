@@ -1,6 +1,7 @@
 /* N64 machine (XBA-169 / 171 / 172): creation, reset, the event scheduler (VI lines, COUNT = COMPARE, PI / SI / AI
  * DMA completions) around the CPU loop, the RSP's time slices, and the debug accessors. */
 #include "n64_internal.h"
+#include "n64_rdp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -233,6 +234,7 @@ void n64_run_frame(n64_machine *m)
     uint64_t cap = m->now + m->vi_line_ticks * (uint64_t)(m->vi_lines + 2) * 2;
     while (!m->frame_done && m->now < cap)
         slice(m, cap);
+    n64_rdp_frame_end(m->rdp); /* the software RDP's pixels in RDRAM at an emulated moment, shown or not */
     n64_ai_advance(m);
 }
 

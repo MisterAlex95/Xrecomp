@@ -293,7 +293,7 @@ int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, in
     int field_h = m->pal ? 288 : 240;
     *w = 320;
     *h = field_h;
-    n64_rdp_flush(m->rdp); /* with scanline-band threads the RDP may still hold batched primitives */
+    n64_rdp_flush(m->rdp); /* the software RDP commits what its renderer threads drew */
     /* Internal resolution (XBA-185, n64_rdp.h): the Vulkan RDP's own VI scans out its upscaled picture when the
      * caller's buffer holds it (640 VI pixels wide times the scale); else, or when it shows nothing, the picture
      * below, from RDRAM at 1x. */

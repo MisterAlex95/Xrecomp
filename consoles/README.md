@@ -487,9 +487,10 @@ by the audio queue; a line every 10 s gives the frame rate reached (`n64: N fps 
 skipped). Frame skip (`RECOMP_N64_FRAMESKIP`, `n64_play --frameskip`): `auto` (default) skips the picture of a frame
 that starts more than half a frame late or while the audio queue is about to run dry, at most 3 in a row; `N` shows
 one frame in N + 1; `0` never. A skipped frame still runs whole (CPU, RSP, the RDP drawing into RDRAM, which games
-read back) and makes its audio: only `n64_display` and the present are skipped. The RDP's
-scanline-band threads (`n64_rdp_set_threads`): `RECOMP_N64_RDP_THREADS`, else 2 on Android, else the core's
-(`XBR_N64_RDP_THREADS`, else 1). Saves: `<save dir>/n64-<KEY>/game.eep` (EEPROM 4K 512 B / 16K 2 KB), `game.sra` (SRAM
+read back) and makes its audio: only `n64_display` and the present are skipped (the software RDP commits its pixels
+at the end of every emulated frame, `n64_rdp_frame_end`, shown or not). The software RDP's renderer threads
+(`n64_rdp_set_threads`): `RECOMP_N64_RDP_THREADS`, else 2 on Android, else the core's (`XBR_N64_RDP_THREADS`, else
+1). Saves: `<save dir>/n64-<KEY>/game.eep` (EEPROM 4K 512 B / 16K 2 KB), `game.sra` (SRAM
 32 KB), `game.fla` (FlashRAM 128 KB), `pak1.mpk`..`pak4.mpk` (controller paks, 32 KB): raw images, the files
 mupen64plus and ares use (rename to copy one in). A cartridge save on disk is read before the first frame and also
 fixes the save type (an `.eep`'s size picks 4K or 16K unless the header says; a 2 KB `.eep` for a 4K game gives its
@@ -553,6 +554,19 @@ bit for bit against angrylion.
   means Vulkan on Android when a device with Vulkan 1.1 and 8/16-bit storage is there, software elsewhere. Anything
   that stops the Vulkan RDP from starting falls back to software (logged). The start line names the back end
   (`n64: ... RDP vulkan, threads 1`), and the Vulkan one also logs `n64: Vulkan RDP on <GPU> (paraLLEl-RDP)`.
+- **Software RDP threads.** The emulation thread only queues the commands; `n64_rdp_set_threads` renderers on their
+  own threads (1 by default, 2 on Android) draw them as they come, each on its rows ((y / 4) % n), so drawing overlaps
+  the CPU and RSP work of the same display list and the picture does not depend on the count. Deterministic by
+  construction: TMEM loads are done by the front end from RDRAM when the command is dispatched (the TMEM bytes travel
+  in the queue); the renderers draw into a mirror of RDRAM and of the hidden bits (the 1 KB blocks a primitive may
+  touch copied in by the front end the first time an epoch needs them); the bytes they wrote reach RDRAM only at
+  commits, fixed emulated moments: SYNC_FULL (before the DP interrupt), a texture load from pixels drawn since the last
+  commit, `n64_rdp_flush` (the VI's `n64_display`, the end of each emulated frame, save states, reset), a full table
+  of image layouts. Two images with different row layouts over the same bytes get a barrier (the renderers finish
+  what came before). So what the CPU and the RSP read never depends on host timing or thread count; a game sees the
+  pixels at SYNC_FULL rather than as each command runs (libultra and libdragon wait for it anyway). Costs: 8 MB of
+  mirror plus 4 MB of hidden bits for 8 MB of RDRAM, a dirty bit per byte per renderer (1 MB each). Without threads
+  (Windows, or when none can start) the emulation thread runs the renderers at the commits.
 - **Coherence.** paraLLEl-RDP gets the core's RDRAM without imported host memory (its "incoherent" path). It uploads
   the pages a render pass reads and writes back, byte-masked, the bytes the GPU wrote, swapping each word between the
   N64 byte order and the GPU's host words (our patch). On SYNC_FULL the CPU waits for the GPU and the write-back,

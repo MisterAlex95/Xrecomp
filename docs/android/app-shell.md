@@ -2084,7 +2084,7 @@ while its Prepare runs or waits, **Running** while it runs, **No file access** w
   consoles/README.md « N64 RDP »): logcat `n64: Vulkan RDP on Adreno (TM) 740 (paraLLEl-RDP, default shaders)`. If
   the device has no usable Vulkan, or its driver cannot compile paraLLEl-RDP's shaders (checked at start, then without
   subgroups, then with the ubershader), it falls back to the software RDP (logged). `RECOMP_N64_RDP=software` (or
-  `vulkan`) in recomp.cfg forces one. The software RDP draws with 2 scanline-band threads (`RECOMP_N64_RDP_THREADS=N`, 1..8, changes it).
+  `vulkan`) in recomp.cfg forces one. The software RDP draws on 2 renderer threads (while the emulation thread runs on) (`RECOMP_N64_RDP_THREADS=N`, 1..8, changes it).
   logcat says the rate reached every 10 s (`n64: 58.3 fps over
   the last 10 s (VI 60.0 Hz), 0 late resets so far`) and at quit (`n64: N frames in S s (… fps), N late resets`).
 - **Saves.** `<internal files>/save/n64-<KEY>/`: `game.eep` (EEPROM 4K, 512 bytes, or 16K, 2 KB), `game.sra` (SRAM,

@@ -38,10 +38,24 @@
  * two hidden bits (kept here in a side array: RDRAM's 9th bits are not in n64_rcp_bus) or in the top bits of a 32-bit
  * pixel's alpha. Things approximated are listed at their code.
  *
- * Threads: optional scanline bands (n64_rdp.h). Every renderer executes every command (so each keeps its own TMEM and
- * state), draws only the rows (y / 4) % n == band, and the pixels in a row are drawn in command order: the output does
- * not depend on the thread count. The per-pixel noise is a hash of (x, y, primitive count), not a running generator,
- * for the same reason. */
+ * Threads (n64_rdp.h): the renderers run on their own threads, the emulation thread only queues commands, so drawing
+ * overlaps the CPU and RSP work of the same display list. Every renderer executes every command (so each keeps its own
+ * TMEM and state), draws only the rows (y / 4) % n == band, and the pixels in a row are drawn in command order: the
+ * output does not depend on the thread count. The per-pixel noise is a hash of (x, y, primitive count), not a running
+ * generator, for the same reason. What the CPU and the RSP see never depends on host timing:
+ *   - the queue (stream_*) is a ring of commands the renderers read up to a write index. TMEM loads are done by the
+ *     front end's own renderer (fe: state commands and loads only) from RDRAM when the command is dispatched, and the
+ *     TMEM bytes they changed travel in the queue (Q_LOAD);
+ *   - the renderers draw into a mirror of RDRAM (and of the hidden bits), never into RDRAM. The 1 KB blocks a
+ *     primitive may touch (its rows inside the scissor: footprint) are copied RDRAM -> mirror by the front end the
+ *     first time an epoch needs them, before the primitive is queued (no renderer touches a block before that);
+ *   - at a commit the front end waits for the renderers and copies the bytes they wrote (one dirty bit per RDRAM byte
+ *     and renderer) mirror -> RDRAM, then reports them (bus.wrote). Commits happen at fixed emulated moments only:
+ *     SYNC_FULL (before the DP interrupt), a load whose source overlaps the epoch's footprints, n64_rdp_flush (the VI,
+ *     the end of an emulated frame, save states), a full epoch table. A full queue only waits for room;
+ *   - two images with a different row layout (address, bytes per row) whose footprints overlap would let two bands
+ *     write the same byte in either order: the front end waits for the renderers (a barrier, no copy) in between.
+ * DPC registers, counters and the DP interrupt stay in the front end. */
 #include "n64_devices.h"
 #include "n64_rdp.h"
 #include "n64_rdp_backend.h"
@@ -52,7 +66,16 @@
 
 #ifndef _WIN32
 #include <pthread.h>
+#include <sched.h>
 #define RDP_THREADS 1
+/* The queue's indices and handshake flags, shared between the front end and the renderers. */
+#define LD_ACQ(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
+#define LD_SC(p) __atomic_load_n((p), __ATOMIC_SEQ_CST)
+#define ST_SC(p, v) __atomic_store_n((p), (v), __ATOMIC_SEQ_CST)
+#else /* no threads: the front end runs the renderers itself when it waits for them */
+#define LD_ACQ(p) (*(p))
+#define LD_SC(p) (*(p))
+#define ST_SC(p, v) (*(p) = (v))
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -181,9 +204,26 @@ struct rdp_render {
     uint32_t dlo, dhi;   /* TMEM bytes [dlo, dhi) loaded since dec16 was last brought up to date */
     uint64_t dec16[2048]; /* every 16-bit TMEM word as RGBA 5551 decoded and packed (pk4), for RGBA16 / TLUT texels */
     uint32_t prim_count; /* noise seed: primitives drawn so far */
+    uint64_t *wbits;     /* a renderer: the mirror bytes it wrote since the last commit, a bit per byte */
+    uint32_t qpos;       /* a renderer: the queue position it has executed up to (atomic) */
 };
 
-#define BATCH_MAX (1u << 16)
+/* The queue: a ring of 64-bit words, commands as the RDP takes them plus two of our own (ids the front end never
+ * queues: it drops no-ops and syncs). A command never wraps: Q_PAD fills the end of the ring instead. */
+#define Q_WORDS (1u << 17)
+#define Q_MASK (Q_WORDS - 1)
+#define Q_PAD 0x01  /* word 0: id, length in words (low 24 bits) */
+#define Q_LOAD 0x02 /* word 0: id, length; word 1: the load command; word 2: TMEM bytes [lo, hi) (lo | hi << 32), then
+                       those bytes (TMEM after the load) */
+#define BLK_SHIFT 10 /* mirror blocks copied from RDRAM: 1 KB */
+#define MAX_ENT 32   /* row layouts in an epoch */
+
+/* The bytes an epoch's primitives may touch through one row layout (image address, bytes per row): all of it, and
+ * since the last barrier. */
+typedef struct {
+    uint32_t addr, stride;
+    uint32_t lo, hi, blo, bhi;
+} rdp_ent;
 
 struct n64_rdp {
     n64_rcp_bus bus;
@@ -197,7 +237,7 @@ struct n64_rdp {
     rdp_render *rd[N64_RDP_MAX_THREADS];
     int nthreads;
 
-    /* Front-end view of the state, for the costs and the batch hazards. */
+    /* Front-end view of the state, for the costs and the bus.wrote ranges (saved: n64_rdp_common_state). */
     int fe_cycle, fe_ci_size, fe_ci_width, fe_zon;
     uint32_t fe_ci_addr, fe_zi_addr, fe_ti_addr;
     int fe_ti_size, fe_ti_width, fe_sc_y0, fe_sc_y1;
@@ -205,16 +245,22 @@ struct n64_rdp {
      * through bus.wrote once drawn (wrote_report): the core's write tracking for its recompiled code (n64_recomp.h). */
     uint32_t wr_lo[2], wr_hi[2];
 
-    /* Batch (threads > 1). */
-    uint64_t *batch;
-    uint32_t nbatch;
-    uint32_t haz_lo, haz_hi;
+    /* The stream (see the top of the file). */
+    rdp_render *fe;          /* the front end's renderer: state commands and TMEM loads, from RDRAM */
+    uint8_t *mirror, *mhidden; /* the renderers' RDRAM and hidden bits */
+    uint8_t *valid;          /* mirror blocks copied from RDRAM this epoch, a bit per block */
+    uint64_t *q;
+    uint32_t qw;             /* the front end's write position (published to qpub) */
+    uint32_t qpub;           /* commands up to here may run (atomic) */
+    rdp_ent ent[MAX_ENT];
+    int nent;
+    int threads_up;          /* the renderers run on their threads (else on this one, when it waits) */
 #ifdef RDP_THREADS
     pthread_t th[N64_RDP_MAX_THREADS];
     pthread_mutex_t mu;
     pthread_cond_t cv_go, cv_done;
-    unsigned gen;
-    int running, quit, threads_up;
+    int quit, sleepers, fe_waiting; /* atomic */
+    uint32_t fe_target;             /* atomic: the position the front end waits for (fe_waiting) */
 #endif
 };
 
@@ -282,6 +328,55 @@ static const uint8_t magic_matrix[16] = { 0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7,
 static const uint8_t bayer_matrix[16] = { 0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7, 3, 6, 2 };
 
 static inline int row_mine(const rdp_render *r, int y) { return r->nbands == 1 || ((y >> 2) % r->nbands) == r->band; }
+
+/* Bits [lo, hi) of a bitmap. */
+static void bits_set(uint64_t *b, uint32_t lo, uint32_t hi)
+{
+    if (lo >= hi)
+        return;
+    const uint32_t wl = lo >> 6, wh = (hi - 1) >> 6;
+    const uint64_t ml = ~0ull << (lo & 63), mh = ~0ull >> (63 - ((hi - 1) & 63));
+    if (wl == wh) {
+        b[wl] |= ml & mh;
+        return;
+    }
+    b[wl] |= ml;
+    for (uint32_t w = wl + 1; w < wh; w++)
+        b[w] = ~0ull;
+    b[wh] |= mh;
+}
+
+/* The renderer wrote (or may have written) the n bytes from RDRAM address a (not yet masked to 24 bits, as the
+ * pixel routines compute it): its dirty bits, which a commit copies to RDRAM. */
+static void mark(rdp_render *r, uint32_t a, uint32_t n)
+{
+    a &= 0xFFFFFF;
+    if (a + n > 0x1000000u) { /* the pixel addresses wrap at 16 MB */
+        const uint32_t m = 0x1000000u - a;
+        mark(r, 0, n - m);
+        n = m;
+    }
+    if (!r->wbits || a >= r->ram_size)
+        return;
+    if (n > r->ram_size - a)
+        n = r->ram_size - a;
+    bits_set(r->wbits, a, a + n);
+}
+
+/* log2 of the bytes per pixel of the colour image: in fill / copy mode (fill_span, copy_rect: 8-bit below 16) and in
+ * 1 / 2-cycle mode (the span routines: 4-bit as 16). */
+static inline int px_shift_fill(int ci_size) { return ci_size == 3 ? 2 : ci_size == 2 ? 1 : 0; }
+static inline int px_shift_std(int ci_size) { return ci_size == 3 ? 2 : ci_size == 1 ? 0 : 1; }
+
+/* Pixels x0..x1 of row y: colour (sh: px_shift_*) and, when z, Z. */
+static void mark_row(rdp_render *r, int y, int x0, int x1, int sh, int z)
+{
+    const rdp_state *s = &r->s;
+    const uint32_t row = (uint32_t)y * (uint32_t)s->ci_width, n = (uint32_t)(x1 - x0 + 1);
+    mark(r, s->ci_addr + ((row + (uint32_t)x0) << sh), n << sh);
+    if (z)
+        mark(r, s->zi_addr + ((row + (uint32_t)x0) << 1), n << 1);
+}
 
 /* ---- Textures ------------------------------------------------------------------------------------------------------ */
 /* Raw texel for copy mode, as a 16-bit pixel (and the 32-bit / 8-bit forms for those colour images). */
@@ -1726,6 +1821,10 @@ static void raster(rdp_render *r, const rdp_prim *p)
     const unsigned amask = (r->use_shade ? 0x0Fu : 0u) | (r->use_tex ? 0x70u : 0u) | (r->use_z ? 0x80u : 0u);
     /* the rows of this renderer's band: blocks of 4 rows, one block in nb */
     const int nb = r->nbands, ylast = (ybot - 1) >> 2;
+    /* what the span routine writes, for the dirty bits (copy-mode triangles draw nothing) */
+    const int draws = s->om.cycle != CYC_COPY;
+    const int csh = s->om.cycle == CYC_FILL ? px_shift_fill(s->ci_size) : px_shift_std(s->ci_size);
+    const int zw = s->om.cycle < CYC_COPY && r->use_z && s->om.z_update;
     int y = ytop >> 2;
     if (nb > 1) {
         const int blk = y >> 2, m = blk % nb;
@@ -1783,6 +1882,8 @@ static void raster(rdp_render *r, const rdp_prim *p)
                        (int32_t)((uint32_t)p->a0[i] + (uint32_t)p->dade[i] * (uint32_t)(y - y0) +
                                  (uint32_t)(((int64_t)p->dadx[i] * dx) >> 16));
         r->span(r, p, &row);
+        if (draws)
+            mark_row(r, y, row.x0, row.x1, csh, zw);
     }
 }
 
@@ -1854,6 +1955,7 @@ static void fill_rect(rdp_render *r, int xh, int yh, int xl, int yl)
         if (!row_mine(r, y) || (r->s.sc_field && (y & 1) != r->s.sc_odd))
             continue;
         fill_span(r, y, x0, x1);
+        mark_row(r, y, x0, x1, px_shift_fill(r->s.ci_size), 0);
     }
 }
 
@@ -1884,6 +1986,7 @@ static void copy_rect(rdp_render *r, int xh, int yh, int xl, int yl, int tn, int
     for (int y = y0; y <= y1; y++) {
         if (!row_mine(r, y) || (s->sc_field && (y & 1) != s->sc_odd))
             continue;
+        mark_row(r, y, x0, x1, px_shift_fill(osz), 0);
         const uint32_t row = (uint32_t)y * (uint32_t)s->ci_width;
         /* s10.10 coordinates: copy mode steps dsdx / 4 per pixel (4.0 = one texel per pixel). */
         const int32_t fy = (flip ? dsdx : dtdy) * (y - by);
@@ -2368,27 +2471,132 @@ static void state_reset(rdp_state *s)
     }
 }
 
-static rdp_render *render_new(n64_rdp *d)
+/* A renderer (worker: one of the bands, drawing into the mirror) or the front end's (state and loads, from RDRAM). */
+static rdp_render *render_new(n64_rdp *d, int worker)
 {
     rdp_render *r = calloc(1, sizeof *r);
     if (!r)
         return NULL;
     r->dp = d;
-    r->ram = d->bus.rdram;
+    r->ram = worker ? d->mirror : d->bus.rdram;
     r->ram_size = d->bus.rdram_size;
-    r->hidden = d->hidden;
+    r->hidden = worker ? d->mhidden : d->hidden;
     r->nbands = 1;
+    if (worker) {
+        r->wbits = calloc(((size_t)d->bus.rdram_size + 63) / 64, sizeof *r->wbits);
+        if (!r->wbits) {
+            free(r);
+            return NULL;
+        }
+    }
     state_reset(&r->s);
     r->dirty = 1;
     return r;
 }
 
-static void run_batch(rdp_render *r, const uint64_t *w, uint32_t n)
+static void render_free(rdp_render *r)
 {
-    for (uint32_t i = 0; i < n;) {
-        int len = cmd_len((int)(w[i] >> 56) & 0x3F);
-        exec_cmd(r, w + i);
-        i += (uint32_t)len;
+    if (r)
+        free(r->wbits);
+    free(r);
+}
+
+/* ---- The stream: queue, renderer threads, mirror, commits ---------------------------------------------------------- */
+static inline void cpu_relax(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || (defined(__arm__) && defined(__ARM_ARCH) && __ARM_ARCH >= 7)
+    __asm__ __volatile__("yield");
+#endif
+}
+#define SPIN 4000 /* polls before a wait sleeps (a few microseconds) */
+
+static inline int ctz64(uint64_t v)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_ctzll(v);
+#else
+    int n = 0;
+    while (!(v & 1)) {
+        v >>= 1;
+        n++;
+    }
+    return n;
+#endif
+}
+
+#ifdef N64_RDP_STRESS
+/* Test builds (consoles/n64/tests: n64_rdp_stress_test): renderers that stall at random between commands, so any
+ * dependence on their timing shows in the results. */
+#include <stdio.h>
+#include <time.h>
+static void stress_pause(void)
+{
+    static __thread uint32_t x;
+    if (!x)
+        x = (uint32_t)(uintptr_t)&x | 1u;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    if (x % 7 == 0)
+        sched_yield();
+    if (x % 211 == 0) {
+        struct timespec ts = { 0, (long)(x % 300) * 1000 };
+        nanosleep(&ts, NULL);
+    }
+}
+#endif
+
+/* A TMEM load the front end did (Q_LOAD): the tile registers the load command sets, then the TMEM bytes. */
+static void apply_load(rdp_render *r, const uint64_t *w)
+{
+    const uint64_t lw = w[1];
+    rdp_tile *t = &r->s.tile[(lw >> 24) & 7];
+    if (((lw >> 56) & 0x3F) == 0x33) { /* load_block's */
+        t->sl = (uint16_t)((lw >> 44) & 0xFFF);
+        t->tl = (uint16_t)((lw >> 32) & 0xFFF);
+        t->sh = (uint16_t)((lw >> 12) & 0xFFF);
+        t->th = (uint16_t)(lw & 0xFFF);
+    } else {
+        set_tile_size(t, lw);
+    }
+    const uint32_t lo = (uint32_t)w[2], hi = (uint32_t)(w[2] >> 32);
+    if (hi > lo) {
+        memcpy(r->s.tmem + lo, w + 3, hi - lo);
+        tmem_dirty(r, lo, hi);
+    }
+    r->tdirty = 1;
+}
+
+/* Renderer r executes the queue from its position up to end (a command boundary). */
+static void run_queue(n64_rdp *d, rdp_render *r, uint32_t end)
+{
+    uint32_t p = r->qpos;
+    while (p != end) {
+        const uint64_t *w = d->q + (p & Q_MASK);
+        const int id = (int)(w[0] >> 56) & 0x3F;
+        uint32_t len;
+        if (id == Q_PAD || id == Q_LOAD) {
+            len = (uint32_t)w[0] & 0xFFFFFF;
+            if (id == Q_LOAD)
+                apply_load(r, w);
+        } else {
+            len = (uint32_t)cmd_len(id);
+            exec_cmd(r, w);
+        }
+        p += len;
+#ifdef N64_RDP_STRESS
+        stress_pause();
+#endif
+        ST_SC(&r->qpos, p);
+#ifdef RDP_THREADS
+        if (LD_SC(&d->fe_waiting) && (int32_t)(p - LD_SC(&d->fe_target)) >= 0) {
+            pthread_mutex_lock(&d->mu);
+            pthread_cond_broadcast(&d->cv_done);
+            pthread_mutex_unlock(&d->mu);
+        }
+#endif
     }
 }
 
@@ -2398,26 +2606,30 @@ typedef struct {
     int id;
 } worker_arg;
 
+/* A renderer's thread: every renderer thread starts here. */
 static void *worker(void *arg)
 {
     n64_rdp *d = ((worker_arg *)arg)->d;
-    int id = ((worker_arg *)arg)->id;
+    rdp_render *r = d->rd[((worker_arg *)arg)->id];
     free(arg);
-    unsigned seen = 0;
-    pthread_mutex_lock(&d->mu);
     for (;;) {
-        while (!d->quit && d->gen == seen)
-            pthread_cond_wait(&d->cv_go, &d->mu);
-        if (d->quit)
+        uint32_t end = LD_ACQ(&d->qpub);
+        for (int spin = 0; end == r->qpos && spin < SPIN && !LD_ACQ(&d->quit); spin++) {
+            cpu_relax();
+            end = LD_ACQ(&d->qpub);
+        }
+        if (end == r->qpos) {
+            pthread_mutex_lock(&d->mu);
+            __atomic_add_fetch(&d->sleepers, 1, __ATOMIC_SEQ_CST);
+            while ((end = LD_SC(&d->qpub)) == r->qpos && !LD_ACQ(&d->quit))
+                pthread_cond_wait(&d->cv_go, &d->mu);
+            __atomic_sub_fetch(&d->sleepers, 1, __ATOMIC_SEQ_CST);
+            pthread_mutex_unlock(&d->mu);
+        }
+        if (LD_ACQ(&d->quit))
             break;
-        seen = d->gen;
-        pthread_mutex_unlock(&d->mu);
-        run_batch(d->rd[id], d->batch, d->nbatch);
-        pthread_mutex_lock(&d->mu);
-        if (--d->running == 0)
-            pthread_cond_signal(&d->cv_done);
+        run_queue(d, r, end);
     }
-    pthread_mutex_unlock(&d->mu);
     return NULL;
 }
 
@@ -2425,14 +2637,331 @@ static void threads_stop(n64_rdp *d)
 {
     if (!d->threads_up)
         return;
+    ST_SC(&d->quit, 1);
     pthread_mutex_lock(&d->mu);
-    d->quit = 1;
     pthread_cond_broadcast(&d->cv_go);
     pthread_mutex_unlock(&d->mu);
-    for (int i = 1; i < d->nthreads; i++)
+    for (int i = 0; i < d->threads_up; i++)
         pthread_join(d->th[i], NULL);
-    d->quit = 0;
+    ST_SC(&d->quit, 0);
     d->threads_up = 0;
+}
+#else
+static void threads_stop(n64_rdp *d) { (void)d; }
+#endif
+
+/* One thread per renderer; when one cannot start, none: the front end then runs the renderers itself (stream_wait). */
+static void threads_start(n64_rdp *d)
+{
+#ifdef RDP_THREADS
+    for (int i = 0; i < d->nthreads; i++) {
+        worker_arg *a = malloc(sizeof *a);
+        if (a) {
+            a->d = d;
+            a->id = i;
+        }
+        if (!a || pthread_create(&d->th[i], NULL, worker, a) != 0) {
+            free(a);
+            threads_stop(d);
+            return;
+        }
+        d->threads_up = i + 1;
+    }
+#else
+    (void)d;
+#endif
+}
+
+static inline int reached(rdp_render *r, uint32_t target) { return (int32_t)(LD_ACQ(&r->qpos) - target) >= 0; }
+
+/* Every renderer has executed the queue up to target (at most the published position). */
+static void stream_wait(n64_rdp *d, uint32_t target)
+{
+    if (!d->threads_up) { /* everything published: past target */
+        (void)target;
+        for (int i = 0; i < d->nthreads; i++)
+            run_queue(d, d->rd[i], d->qpub);
+        return;
+    }
+#ifdef RDP_THREADS
+    for (int i = 0; i < d->nthreads; i++) {
+        rdp_render *r = d->rd[i];
+        for (int spin = 0; !reached(r, target) && spin < SPIN; spin++)
+            cpu_relax();
+        if (reached(r, target))
+            continue;
+        pthread_mutex_lock(&d->mu);
+        ST_SC(&d->fe_target, target);
+        ST_SC(&d->fe_waiting, 1);
+        while ((int32_t)(LD_SC(&r->qpos) - target) < 0)
+            pthread_cond_wait(&d->cv_done, &d->mu);
+        ST_SC(&d->fe_waiting, 0);
+        pthread_mutex_unlock(&d->mu);
+    }
+#endif
+}
+
+/* The renderers may run the commands written so far. */
+static void stream_publish(n64_rdp *d)
+{
+    ST_SC(&d->qpub, d->qw);
+#ifdef RDP_THREADS
+    if (d->threads_up && LD_SC(&d->sleepers)) {
+        pthread_mutex_lock(&d->mu);
+        pthread_cond_broadcast(&d->cv_go);
+        pthread_mutex_unlock(&d->mu);
+    }
+#endif
+}
+
+/* Room for len words at the write position (the renderers are far enough). */
+static void stream_room(n64_rdp *d, uint32_t len)
+{
+    const uint32_t target = d->qw + len - Q_WORDS;
+    for (int i = 0; i < d->nthreads; i++)
+        if (!reached(d->rd[i], target)) {
+            stream_wait(d, target);
+            return;
+        }
+}
+
+/* len contiguous words to write a command into (then stream_put). */
+static uint64_t *stream_reserve(n64_rdp *d, uint32_t len)
+{
+    uint32_t off = d->qw & Q_MASK;
+    if (off + len > Q_WORDS) { /* the end of the ring: a pad, the command at the start */
+        const uint32_t pad = Q_WORDS - off;
+        stream_room(d, pad);
+        d->q[off] = (uint64_t)Q_PAD << 56 | pad;
+        d->qw += pad;
+        stream_publish(d);
+        off = 0;
+    }
+    stream_room(d, len);
+    return d->q + off;
+}
+
+static void stream_put(n64_rdp *d, uint32_t len)
+{
+    d->qw += len;
+    stream_publish(d);
+}
+
+static void stream_cmd(n64_rdp *d, const uint64_t *w, int len)
+{
+    uint64_t *o = stream_reserve(d, (uint32_t)len);
+    memcpy(o, w, (size_t)len * sizeof *w);
+    stream_put(d, (uint32_t)len);
+}
+
+/* A TMEM load: done now by the front end's renderer from RDRAM (the bytes as they are at this emulated moment), the
+ * TMEM bytes it changed queued for the renderers. */
+static void stream_load(n64_rdp *d, const uint64_t *w)
+{
+    rdp_render *fe = d->fe;
+    fe->dlo = fe->dhi = 0;
+    exec_cmd(fe, w);
+    const uint32_t lo = fe->dhi ? fe->dlo : 0, hi = fe->dhi;
+    const uint32_t len = 3 + (hi - lo + 7) / 8;
+    uint64_t *o = stream_reserve(d, len);
+    o[0] = (uint64_t)Q_LOAD << 56 | len;
+    o[1] = w[0];
+    o[2] = lo | (uint64_t)hi << 32;
+    if (hi > lo) {
+        o[len - 1] = 0;
+        memcpy(o + 3, fe->s.tmem + lo, hi - lo);
+    }
+    stream_put(d, len);
+}
+
+/* Copies the RDRAM blocks of [lo, hi) the mirror does not hold this epoch (no queued primitive touches them). */
+static void snapshot(n64_rdp *d, uint32_t lo, uint32_t hi)
+{
+    const uint32_t size = d->bus.rdram_size;
+    for (uint32_t b = lo >> BLK_SHIFT; b <= (hi - 1) >> BLK_SHIFT; b++) {
+        if (d->valid[b >> 3] & (1u << (b & 7)))
+            continue;
+        d->valid[b >> 3] |= (uint8_t)(1u << (b & 7));
+        const uint32_t a = b << BLK_SHIFT, n = size - a < (1u << BLK_SHIFT) ? size - a : (1u << BLK_SHIFT);
+        memcpy(d->mirror + a, d->bus.rdram + a, n);
+        memcpy(d->mhidden + (a >> 1), d->hidden + (a >> 1), (n + 1) >> 1);
+    }
+}
+
+/* Bytes [a, a + n) (a pixel address, not yet masked) of a row layout, split at the 16 MB wrap and clipped to RDRAM. */
+typedef struct {
+    uint32_t addr, stride, lo, hi;
+} rdp_fp;
+static int fp_add(const n64_rdp *d, rdp_fp *fp, int k, uint32_t addr, uint32_t stride, uint32_t a, uint32_t n)
+{
+    a &= 0xFFFFFF;
+    if (a + n > 0x1000000u) {
+        k = fp_add(d, fp, k, addr, stride, 0, a + n - 0x1000000u);
+        n = 0x1000000u - a;
+    }
+    const uint32_t size = d->bus.rdram_size;
+    if (n && a < size) {
+        fp[k].addr = addr;
+        fp[k].stride = stride;
+        fp[k].lo = a;
+        fp[k].hi = a + (n < size - a ? n : size - a);
+        k++;
+    }
+    return k;
+}
+
+static int ent_find(const n64_rdp *d, uint32_t addr, uint32_t stride)
+{
+    for (int i = 0; i < d->nent; i++)
+        if (d->ent[i].addr == addr && d->ent[i].stride == stride)
+            return i;
+    return -1;
+}
+
+/* A primitive's footprint joins the epoch: a commit first when the table is full, a barrier when another row layout
+ * covered the same bytes since the last one, the blocks copied into the mirror. */
+static void epoch_add(n64_rdp *d, const rdp_fp *fp, int k)
+{
+    int fresh = 0;
+    for (int i = 0; i < k; i++)
+        fresh += ent_find(d, fp[i].addr, fp[i].stride) < 0;
+    if (d->nent + fresh > MAX_ENT)
+        n64_rdp_flush(d);
+    int bar = 0;
+    for (int i = 0; i < k && !bar; i++)
+        for (int j = 0; j < d->nent; j++) {
+            const rdp_ent *e = &d->ent[j];
+            if ((e->addr != fp[i].addr || e->stride != fp[i].stride) && fp[i].lo < e->bhi && fp[i].hi > e->blo) {
+                bar = 1;
+                break;
+            }
+        }
+    if (bar) {
+        stream_wait(d, d->qw);
+        for (int j = 0; j < d->nent; j++)
+            d->ent[j].blo = d->ent[j].bhi = 0;
+    }
+    for (int i = 0; i < k; i++) {
+        int j = ent_find(d, fp[i].addr, fp[i].stride);
+        if (j < 0) {
+            j = d->nent++;
+            d->ent[j] = (rdp_ent){ fp[i].addr, fp[i].stride, fp[i].lo, fp[i].hi, fp[i].lo, fp[i].hi };
+        } else {
+            rdp_ent *e = &d->ent[j];
+            e->lo = fp[i].lo < e->lo ? fp[i].lo : e->lo;
+            e->hi = fp[i].hi > e->hi ? fp[i].hi : e->hi;
+            if (e->bhi <= e->blo) {
+                e->blo = fp[i].lo;
+                e->bhi = fp[i].hi;
+            } else {
+                e->blo = fp[i].lo < e->blo ? fp[i].lo : e->blo;
+                e->bhi = fp[i].hi > e->bhi ? fp[i].hi : e->bhi;
+            }
+        }
+        snapshot(d, fp[i].lo, fp[i].hi);
+    }
+}
+
+/* The bytes a drawing command may read or write, from the front end's state: its rows inside the scissor, pixels 0
+ * to the scissor's right edge (a row past the image width runs into the next row, as the pixel routines address it),
+ * in the colour image and, when Z is on, the Z image. */
+static void draw_footprint(n64_rdp *d, const uint64_t *w, int id)
+{
+    const rdp_state *s = &d->fe->s;
+    const uint64_t w0 = w[0];
+    int y0, y1;
+    if (id <= 0x0F) { /* a triangle: YH, YL (s11.2) */
+        y0 = sext((uint32_t)w0 & 0x3FFF, 14) >> 2;
+        y1 = sext((uint32_t)(w0 >> 32) & 0x3FFF, 14) >> 2;
+    } else { /* a rectangle: YH, YL (10.2) */
+        y0 = (int)(w0 & 0xFFF) >> 2;
+        y1 = (int)((w0 >> 32) & 0xFFF) >> 2;
+    }
+    y0 = imax(imax(y0, s->sc_y0 >> 2), 0);
+    y1 = imin(y1, s->sc_y1 >> 2);
+    if (y1 < y0)
+        return;
+    const uint32_t width = (uint32_t)s->ci_width, first = (uint32_t)y0 * width;
+    const uint32_t n = (uint32_t)(y1 - y0) * width + (uint32_t)(s->sc_x1 >> 2) + 1;
+    const int cyc = s->om.cycle, sh = cyc >= CYC_COPY ? px_shift_fill(s->ci_size) : px_shift_std(s->ci_size);
+    rdp_fp fp[4];
+    int k = fp_add(d, fp, 0, s->ci_addr, width << sh, s->ci_addr + (first << sh), n << sh);
+    if (cyc < CYC_COPY && (s->om.z_compare || s->om.z_update))
+        k = fp_add(d, fp, k, s->zi_addr, width << 1, s->zi_addr + (first << 1), n << 1);
+    epoch_add(d, fp, k);
+}
+
+/* Whether the RDRAM a TMEM load reads (bounded generously) overlaps the epoch's footprints. */
+static int load_hazard(const n64_rdp *d, uint64_t w)
+{
+    const rdp_state *s = &d->fe->s;
+    const int id = (int)(w >> 56) & 0x3F;
+    const uint32_t sl = (w >> 44) & 0xFFF, tl = (w >> 32) & 0xFFF, sh = (w >> 12) & 0xFFF, th = w & 0xFFF;
+    const uint32_t width = (uint32_t)s->ti_width, size = (uint32_t)s->ti_size;
+    uint32_t a, n;
+    if (id == 0x30) { /* TLUT: 16-bit entries */
+        if ((sh >> 2) < (sl >> 2))
+            return 0;
+        a = s->ti_addr + (((tl >> 2) * width + (sl >> 2)) << 1);
+        n = ((sh >> 2) - (sl >> 2) + 1) * 2;
+    } else if (id == 0x33) { /* block */
+        if (sh < sl)
+            return 0;
+        a = s->ti_addr + (((tl * width + sl) << size) >> 1);
+        n = (sh - sl + 1) * 4 + 8;
+    } else { /* tile */
+        const uint32_t s0 = sl >> 2, t0 = tl >> 2, s1 = sh >> 2, t1 = th >> 2;
+        if (s1 < s0 || t1 < t0)
+            return 0;
+        a = s->ti_addr + (((t0 * width + s0) << size) >> 1);
+        n = ((((t1 - t0) * width) << size) >> 1) + (s1 - s0 + 1) * 4 + 8;
+    }
+    a &= 0xFFFFFF;
+    uint32_t r[2][2] = { { a, a + n }, { 0, 0 } };
+    if (a + n > 0x1000000u) {
+        r[0][1] = 0x1000000u;
+        r[1][1] = a + n - 0x1000000u;
+    }
+    for (int i = 0; i < d->nent; i++)
+        for (int k = 0; k < 2; k++)
+            if (r[k][0] < d->ent[i].hi && r[k][1] > d->ent[i].lo)
+                return 1;
+    return 0;
+}
+
+/* Mirror -> RDRAM: the bytes of [lo, hi) a renderer wrote (and their hidden bits); the dirty bits cleared. */
+static void commit_range(n64_rdp *d, uint32_t lo, uint32_t hi)
+{
+    uint8_t *ram = d->bus.rdram;
+    for (uint32_t wi = lo >> 6; wi < (hi + 63) >> 6; wi++) {
+        uint64_t v = 0;
+        for (int i = 0; i < d->nthreads; i++) {
+            v |= d->rd[i]->wbits[wi];
+            d->rd[i]->wbits[wi] = 0;
+        }
+        while (v) {
+            const int s = ctz64(v);
+            const uint64_t t = v >> s;
+            const int n = t == ~0ull ? 64 : ctz64(~t); /* the run of set bits from s */
+            const uint32_t a = (wi << 6) + (uint32_t)s, e = a + (uint32_t)n;
+            memcpy(ram + a, d->mirror + a, (size_t)n);
+            memcpy(d->hidden + (a >> 1), d->mhidden + (a >> 1), ((e - 1) >> 1) - (a >> 1) + 1);
+            v = s + n >= 64 ? 0 : v & (~0ull << (s + n));
+        }
+    }
+}
+
+#ifdef N64_RDP_STRESS
+static void stress_check_clean(n64_rdp *d)
+{
+    for (int i = 0; i < N64_RDP_MAX_THREADS; i++)
+        if (d->rd[i])
+            for (size_t k = 0; k < ((size_t)d->bus.rdram_size + 63) / 64; k++)
+                if (d->rd[i]->wbits[k]) {
+                    fprintf(stderr, "n64_rdp: renderer %d wrote 0x%06X outside the epoch's footprints\n", i,
+                            (unsigned)(k * 64 + (size_t)ctz64(d->rd[i]->wbits[k])));
+                    abort();
+                }
 }
 #endif
 
@@ -2460,9 +2989,9 @@ static void wrote_add(n64_rdp *d, int y0, int y1)
     }
 }
 
-/* Everything drawn so far is in RDRAM: the core hears which ranges were written (bus.wrote; n64_rdram_wrote bumps
- * its page counters, so recompiled code drawn over is checked again). Called on the CPU's thread only, after the
- * pixels are written (a batch: once flushed), so the counters are never bumped before the bytes changed. */
+/* What was drawn is in RDRAM: the core hears which ranges were written (bus.wrote; n64_rdram_wrote bumps its page
+ * counters, so recompiled code drawn over is checked again). Called on the CPU's thread only, at a commit, after the
+ * bytes changed. */
 static void wrote_report(n64_rdp *d)
 {
     for (int i = 0; i < 2; i++) {
@@ -2477,33 +3006,19 @@ const uint8_t *n64_rdp_hidden_bits(n64_rdp *d)
     return d->hidden;
 }
 
+/* A commit: every queued command executed, what the renderers drew copied to RDRAM and reported. */
 void n64_rdp_flush(n64_rdp *d)
 {
-    if (!d->nbatch) {
-        wrote_report(d); /* one renderer: drawn already */
-        return;
-    }
-#ifdef RDP_THREADS
-    if (d->threads_up) {
-        pthread_mutex_lock(&d->mu);
-        d->running = d->nthreads - 1;
-        d->gen++;
-        pthread_cond_broadcast(&d->cv_go);
-        pthread_mutex_unlock(&d->mu);
-        run_batch(d->rd[0], d->batch, d->nbatch);
-        pthread_mutex_lock(&d->mu);
-        while (d->running)
-            pthread_cond_wait(&d->cv_done, &d->mu);
-        pthread_mutex_unlock(&d->mu);
-    } else
+    stream_wait(d, d->qw);
+    if (d->nent) {
+        for (int i = 0; i < d->nent; i++)
+            commit_range(d, d->ent[i].lo, d->ent[i].hi);
+        memset(d->valid, 0, ((d->bus.rdram_size >> BLK_SHIFT) + 8) / 8);
+        d->nent = 0;
+#ifdef N64_RDP_STRESS
+        stress_check_clean(d);
 #endif
-    {
-        for (int i = 0; i < d->nthreads; i++)
-            run_batch(d->rd[i], d->batch, d->nbatch);
     }
-    d->nbatch = 0;
-    d->haz_lo = UINT32_MAX;
-    d->haz_hi = 0;
     wrote_report(d);
 }
 
@@ -2514,71 +3029,32 @@ int n64_rdp_set_threads(n64_rdp *d, int n)
     if (n > N64_RDP_MAX_THREADS)
         n = N64_RDP_MAX_THREADS;
     n64_rdp_flush(d);
-#ifdef RDP_THREADS
     threads_stop(d);
-#else
-    n = 1;
-#endif
-    for (int i = 1; i < N64_RDP_MAX_THREADS; i++) {
-        if (i < n && !d->rd[i])
-            d->rd[i] = render_new(d);
-        if (i < n && !d->rd[i])
+    for (int i = 1; i < n; i++) {
+        if (!d->rd[i])
+            d->rd[i] = render_new(d, 1);
+        if (!d->rd[i]) {
             n = i;
+            break;
+        }
     }
     for (int i = 0; i < n; i++) {
-        if (i)
+        if (i) {
             d->rd[i]->s = d->rd[0]->s;
+            d->rd[i]->prim_count = d->rd[0]->prim_count;
+            tmem_dirty(d->rd[i], 0, 4096); /* TMEM copied from renderer 0 */
+        }
         d->rd[i]->band = i;
         d->rd[i]->nbands = n;
-        d->rd[i]->prim_count = d->rd[0]->prim_count;
         d->rd[i]->dirty = 1;
-        if (i)
-            tmem_dirty(d->rd[i], 0, 4096); /* TMEM copied from renderer 0 */
+        d->rd[i]->qpos = d->qw;
     }
     d->nthreads = n;
-    if (n > 1 && !d->batch) {
-        d->batch = malloc(BATCH_MAX * sizeof *d->batch);
-        if (!d->batch) {
-            for (int i = 0; i < n; i++) {
-                d->rd[i]->band = 0;
-                d->rd[i]->nbands = 1;
-            }
-            d->nthreads = 1;
-            return 1;
-        }
-    }
-#ifdef RDP_THREADS
-    if (n > 1) {
-        d->threads_up = 1;
-        for (int i = 1; i < n; i++) {
-            worker_arg *a = malloc(sizeof *a);
-            if (a) {
-                a->d = d;
-                a->id = i;
-            }
-            if (!a || pthread_create(&d->th[i], NULL, worker, a) != 0) {
-                free(a);
-                /* fall back to running the bands one after the other on this thread */
-                d->nthreads = i;
-                threads_stop(d);
-                d->nthreads = n;
-                break;
-            }
-        }
-    }
-#endif
-    return d->nthreads;
+    threads_start(d);
+    return n;
 }
 
 /* ---- Front end ----------------------------------------------------------------------------------------------------- */
-static void haz_add(n64_rdp *d, uint32_t lo, uint32_t hi)
-{
-    if (lo < d->haz_lo)
-        d->haz_lo = lo;
-    if (hi > d->haz_hi)
-        d->haz_hi = hi;
-}
-
 /* Approximate RDP cycles of a command, and front-end bookkeeping. */
 static uint32_t cmd_cost(n64_rdp *d, const uint64_t *w, int id)
 {
@@ -2604,6 +3080,9 @@ static uint32_t cmd_cost(n64_rdp *d, const uint64_t *w, int id)
     return 1;
 }
 
+/* Commands that change the renderers' state (exec_cmd): queued; the others (no-ops, syncs) are not. */
+static inline int is_state_cmd(int id) { return (id >= 0x2A && id <= 0x2F) || id == 0x32 || id == 0x35 || id >= 0x37; }
+
 static void dispatch(n64_rdp *d, const uint64_t *w, int len)
 {
     const uint64_t w0 = w[0];
@@ -2622,7 +3101,6 @@ static void dispatch(n64_rdp *d, const uint64_t *w, int len)
         d->tmemc = (d->tmemc + ((sh - sl) >> 2) + 4) & 0xFFFFFF;
     }
 
-    const int threaded = d->nthreads > 1;
     switch (id) {
     case 0x2F: d->fe_cycle = (int)(w0 >> 52) & 3; d->fe_zon = (w0 >> 4 & 3) != 0; break;
     case 0x2D: d->fe_sc_y0 = (int)(w0 >> 32) & 0xFFF; d->fe_sc_y1 = (int)w0 & 0xFFF; break;
@@ -2631,53 +3109,31 @@ static void dispatch(n64_rdp *d, const uint64_t *w, int len)
         d->fe_ti_width = (int)((w0 >> 32) & 0x3FF) + 1;
         d->fe_ti_addr = (uint32_t)w0 & 0xFFFFFF;
         break;
-    case 0x3E:
-        if (threaded && ((uint32_t)w0 & 0xFFFFFF) != d->fe_zi_addr)
-            n64_rdp_flush(d);
-        d->fe_zi_addr = (uint32_t)w0 & 0xFFFFFF;
-        break;
-    case 0x3F: {
-        uint32_t a = (uint32_t)w0 & 0xFFFFFF;
-        int sz = (int)(w0 >> 51) & 3, wd = (int)((w0 >> 32) & 0x3FF) + 1;
-        if (threaded && (a != d->fe_ci_addr || sz != d->fe_ci_size || wd != d->fe_ci_width))
-            n64_rdp_flush(d);
-        d->fe_ci_addr = a;
-        d->fe_ci_size = sz;
-        d->fe_ci_width = wd;
-        break;
-    }
-    case 0x30: case 0x33: case 0x34:
-        if (threaded && d->nbatch) { /* a load from pixels drawn earlier in the batch waits for them */
-            uint32_t lo = d->fe_ti_addr, hi = lo + (uint32_t)d->fe_ti_width * 4u * 1024u;
-            if (lo < d->haz_hi && hi > d->haz_lo)
-                n64_rdp_flush(d);
-        }
+    case 0x3E: d->fe_zi_addr = (uint32_t)w0 & 0xFFFFFF; break;
+    case 0x3F:
+        d->fe_ci_addr = (uint32_t)w0 & 0xFFFFFF;
+        d->fe_ci_size = (int)(w0 >> 51) & 3;
+        d->fe_ci_width = (int)((w0 >> 32) & 0x3FF) + 1;
         break;
     default: break;
     }
+
     if (draw) {
         if (id <= 0x0F) /* a triangle: YH (top) and YL (bottom), s11.2 */
             wrote_add(d, sext((uint32_t)w0 & 0x3FFF, 14) >> 2, sext((uint32_t)(w0 >> 32) & 0x3FFF, 14) >> 2);
         else /* a rectangle: YH (top) and YL (bottom), 10.2; one row more for the fill / copy modes' inclusive edge */
             wrote_add(d, (int)(w0 & 0xFFF) >> 2, ((int)(w0 >> 32) & 0xFFF) / 4 + 1);
-    }
-    if (threaded && draw) {
-        uint32_t stride = ((uint32_t)d->fe_ci_width << d->fe_ci_size) >> 1;
-        uint32_t rows = (uint32_t)(d->fe_sc_y1 >> 2) + 1;
-        haz_add(d, d->fe_ci_addr, d->fe_ci_addr + stride * rows);
-        if (d->fe_zon)
-            haz_add(d, d->fe_zi_addr, d->fe_zi_addr + (uint32_t)d->fe_ci_width * 2u * rows);
-    }
-
-    if (!threaded) {
-        exec_cmd(d->rd[0], w);
-    } else {
-        if (d->nbatch + (uint32_t)len > BATCH_MAX)
+        draw_footprint(d, w, id);
+        stream_cmd(d, w, len);
+    } else if (id == 0x30 || id == 0x33 || id == 0x34) {
+        if (d->nent && load_hazard(d, w0)) /* a load from pixels drawn in this epoch: drawn into RDRAM first */
             n64_rdp_flush(d);
-        memcpy(d->batch + d->nbatch, w, (size_t)len * sizeof *w);
-        d->nbatch += (uint32_t)len;
+        stream_load(d, w);
+    } else if (is_state_cmd(id)) {
+        exec_cmd(d->fe, w);
+        stream_cmd(d, w, len);
     }
-    if (id == 0x29) { /* SYNC_FULL: everything drawn, DP interrupt */
+    if (id == 0x29) { /* SYNC_FULL: everything drawn and in RDRAM, DP interrupt */
         n64_rdp_flush(d);
         d->status &= ~(ST_PIPE_BUSY | ST_GCLK);
         if (d->bus.raise)
@@ -2702,18 +3158,38 @@ static uint64_t fetch64(const n64_rdp *d, uint32_t a)
     return (uint64_t)n64_be32(b) << 32 | n64_be32(b + 4);
 }
 
+static void rdp_free(n64_rdp *d)
+{
+    for (int i = 0; i < N64_RDP_MAX_THREADS; i++)
+        render_free(d->rd[i]);
+    render_free(d->fe);
+    free(d->q);
+    free(d->valid);
+    free(d->mirror);
+    free(d->mhidden);
+    free(d->hidden);
+    free(d);
+}
+
 n64_rdp *n64_rdp_create(n64_rcp_bus bus)
 {
     n64_rdp *d = calloc(1, sizeof *d);
     if (!d)
         return NULL;
     d->bus = bus;
-    d->hidden = calloc(bus.rdram_size / 2 + 1, 1);
+    const size_t size = bus.rdram_size;
+    d->hidden = calloc(size / 2 + 1, 1);
+    d->mhidden = calloc(size / 2 + 1, 1);
+    d->mirror = calloc(size ? size : 1, 1);
+    d->valid = calloc(((size >> BLK_SHIFT) + 8) / 8, 1);
+    d->q = malloc(Q_WORDS * sizeof *d->q);
     d->nthreads = 1;
-    d->rd[0] = d->hidden ? render_new(d) : NULL;
-    if (!d->rd[0]) {
-        free(d->hidden);
-        free(d);
+    if (d->hidden && d->mhidden && d->mirror && d->valid && d->q) {
+        d->fe = render_new(d, 0);
+        d->rd[0] = render_new(d, 1);
+    }
+    if (!d->fe || !d->rd[0]) {
+        rdp_free(d);
         return NULL;
     }
 #ifdef RDP_THREADS
@@ -2723,9 +3199,7 @@ n64_rdp *n64_rdp_create(n64_rcp_bus bus)
 #endif
     n64_rdp_reset(d);
     const char *env = getenv("XBR_N64_RDP_THREADS");
-    const int nt = env ? atoi(env) : N64_RDP_DEFAULT_THREADS;
-    if (nt > 1)
-        n64_rdp_set_threads(d, nt);
+    n64_rdp_set_threads(d, env ? atoi(env) : N64_RDP_DEFAULT_THREADS);
     return d;
 }
 
@@ -2733,22 +3207,18 @@ void n64_rdp_destroy(n64_rdp *d)
 {
     if (!d)
         return;
-#ifdef RDP_THREADS
     threads_stop(d);
+#ifdef RDP_THREADS
     pthread_mutex_destroy(&d->mu);
     pthread_cond_destroy(&d->cv_go);
     pthread_cond_destroy(&d->cv_done);
 #endif
-    for (int i = 0; i < N64_RDP_MAX_THREADS; i++)
-        free(d->rd[i]);
-    free(d->batch);
-    free(d->hidden);
-    free(d);
+    rdp_free(d);
 }
 
 void n64_rdp_reset(n64_rdp *d)
 {
-    d->nbatch = 0;
+    n64_rdp_flush(d); /* what was queued lands in RDRAM first, as if drawn at once */
     d->start = d->end = d->current = 0;
     d->status = 0;
     d->clock = d->bufbusy = d->pipebusy = d->tmemc = 0;
@@ -2764,16 +3234,16 @@ void n64_rdp_reset(n64_rdp *d)
     d->fe_sc_y1 = 0xFFF;
     d->fe_zon = 0;
     d->wr_lo[0] = d->wr_hi[0] = d->wr_lo[1] = d->wr_hi[1] = 0;
-    d->haz_lo = UINT32_MAX;
-    d->haz_hi = 0;
     memset(d->hidden, 0, d->bus.rdram_size / 2 + 1);
-    for (int i = 0; i < N64_RDP_MAX_THREADS; i++)
-        if (d->rd[i]) {
-            state_reset(&d->rd[i]->s);
-            d->rd[i]->prim_count = 0;
-            d->rd[i]->dirty = 1;
-            tmem_dirty(d->rd[i], 0, 4096);
+    for (int i = 0; i <= N64_RDP_MAX_THREADS; i++) { /* the renderers (idle: flushed) and the front end's */
+        rdp_render *r = i < N64_RDP_MAX_THREADS ? d->rd[i] : d->fe;
+        if (r) {
+            state_reset(&r->s);
+            r->prim_count = 0;
+            r->dirty = 1;
+            tmem_dirty(r, 0, 4096);
         }
+    }
 }
 
 void n64_rdp_attach_dmem(n64_rdp *d, const uint8_t *dmem) { d->dmem = dmem; }
@@ -2893,8 +3363,6 @@ int n64_rdp_state_load_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8
     d->fe_ti_size = c->fe_ti_size;
     d->fe_ti_width = c->fe_ti_width;
     d->wr_lo[0] = d->wr_hi[0] = d->wr_lo[1] = d->wr_hi[1] = 0;
-    d->haz_lo = UINT32_MAX;
-    d->haz_hi = 0;
     rdp_state st;
     uint32_t prims = 0;
     if (extra) {
@@ -2906,12 +3374,13 @@ int n64_rdp_state_load_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8
         state_reset(&st);
         memset(d->hidden, 0, hidden_n(d));
     }
-    for (int i = 0; i < d->nthreads; i++) {
-        d->rd[i]->s = st;
-        d->rd[i]->prim_count = prims;
-        d->rd[i]->dirty = 1;
-        d->rd[i]->tdirty = 1;
-        tmem_dirty(d->rd[i], 0, 4096);
+    for (int i = 0; i <= d->nthreads; i++) { /* the renderers (idle: flushed) and the front end's */
+        rdp_render *r = i < d->nthreads ? d->rd[i] : d->fe;
+        r->s = st;
+        r->prim_count = prims;
+        r->dirty = 1;
+        r->tdirty = 1;
+        tmem_dirty(r, 0, 4096);
     }
     return 0;
 }
@@ -2985,6 +3454,4 @@ void n64_rdp_run(n64_rdp *d)
             d->npend = 0;
         }
     }
-    if (!d->nbatch)
-        wrote_report(d); /* drawn (one renderer, or the batch flushed): the core hears it before the CPU runs on */
 }

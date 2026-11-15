@@ -231,6 +231,12 @@ void n64_rdp_flush(n64_rdp *d)
         replace_failed(d);
 }
 
+void n64_rdp_frame_end(n64_rdp *d)
+{
+    if (d->ops == &n64_rdp_sw_ops)
+        n64_rdp_flush(d);
+}
+
 /* The 16-bit pixels' hidden coverage bits (n64_rdp.h, for the VI's anti-aliasing filter; NULL: none, the VI then uses
  * the pixel's low bit). The software RDP keeps them in a side array; the Vulkan RDP keeps them on the GPU: NULL. */
 const uint8_t *n64_rdp_sw_hidden_bits(n64_rdp_sw *d);

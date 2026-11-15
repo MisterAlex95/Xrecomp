@@ -486,7 +486,7 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_N64_UPSCALE_NATIVE_TEXRECT=0` | on | Upscales texture rectangles too (by default they are drawn at 1x: 2D and HUD art made for 1:1 texels). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_UPSCALE_NATIVE_LOD=1` | off | Computes texture LOD as at 1x when upscaled (games that pick textures through LOD). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_UPSCALE_SSREADBACK=1` | off | The RDRAM copy the game reads is the upscaled picture averaged down, not the 1x one (not bit-exact). | `n64_rdp_vk.cpp` |
-| `RECOMP_N64_RDP_THREADS=N` | 2 on Android, else `XBR_N64_RDP_THREADS`, else 1 | The software RDP's scanline-band threads (`--rdp-threads`). | `n64_runtime.c`, `n64_rdp.c` |
+| `RECOMP_N64_RDP_THREADS=N` | 2 on Android, else `XBR_N64_RDP_THREADS`, else 1 | The software RDP's renderer threads (`--rdp-threads`): they draw while the emulation thread runs on, the result is the same for any count. | `n64_runtime.c`, `n64_rdp.c` |
 | `RECOMP_N64_RDP_CHECK=0` | on | Skips the Vulkan RDP's start-up draw check (only a pipeline failure then falls back). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_RDP_UBERSHADER=1` | off on Qualcomm's driver | Uses the Vulkan RDP's ubershader on Qualcomm's proprietary driver anyway (games come out black there, so it goes software). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_TTY=1` | off | Prints the IS-Viewer text a game writes (`--tty`). | `n64_runtime.c` |
