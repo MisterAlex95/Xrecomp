@@ -1431,7 +1431,11 @@ gives its `default.xbe` only (`XisoNative.extractFileParts` over its parts, at m
 source before an import); an unchanged one (location, size, modification time) is not opened again. The title image
 and the game theme are cached there and then (`files/art/<TID>.png`, `<TID>.theme`). Files that are not games (not
 an Xbox image, no or a bad `default.xbe`, a game file of another console without a title key, unreadable) make the
-dimmed « Other files (n) » line under the grid. The index is `files/library/index.json` (rebuildable). Rescans: each
+dimmed « Other files (n) » line under the grid. They are not reused forever (XBA-192): an unreadable one is opened
+again by every scan, the others by the first scan of a new identification (the index's `"identify"`:
+`LibraryScanner.IDENTIFY_REV` and the APK's install / update time), so after an update a file an older build could
+not read (a `.chd` before the native CHD reader) becomes a game without being touched. The index is
+`files/library/index.json` (rebuildable). Rescans: each
 time the library opens (when some folder is read by path), Y, a new folder; with every folder through SAF only at a
 cold start and on Y. logcat: `launcher: library: scan of F folders: N items, M games, T ms (…)`.
 

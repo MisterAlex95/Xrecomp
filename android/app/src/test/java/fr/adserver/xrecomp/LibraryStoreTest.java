@@ -324,6 +324,7 @@ public class LibraryStoreTest {
                      + "\"mtime\":4,\"status\":\"ok\",\"tid\":\"4D5300D1\",\"title\":\"Fable\",\"region\":1,"
                      + "\"disc\":0,\"version\":0,\"xbe_sha256\":\"00\",\"xbe\":\"xbe/4D5300D1-00000000/default.xbe\"}]}";
         LibraryIndex x = LibraryIndex.fromJson(new org.json.JSONObject(old));
+        assertEquals("no identification: another one than this build's (XBA-192)", "", x.identify);
         LibraryIndex.Item i = x.find("file:/sdcard/xbox/Fable.iso");
         assertTrue(i.ok());
         assertEquals(Console.XBOX, i.console);
@@ -366,9 +367,11 @@ public class LibraryStoreTest {
         bios.status = LibraryIndex.IGNORED;
         bios.folder = "content://tree/ps1";
         x.items.add(bios);
+        x.identify = "r2/1234";
         File f = Library.indexFile(files);
         LibraryIndex.write(f, x);
         LibraryIndex back = LibraryIndex.read(f);
+        assertEquals("the identification that scanned it (XBA-192)", "r2/1234", back.identify);
         LibraryIndex.Item d = back.find("doc:primary:ps1/Disc.cue");
         assertTrue(d.ok());
         assertEquals(Console.PS1, d.console);

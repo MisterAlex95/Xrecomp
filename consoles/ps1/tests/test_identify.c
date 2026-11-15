@@ -314,11 +314,240 @@ static void test_keys(void)
     CHECK(key_of("magic.chd", key, sizeof key) == -1, "magic.chd: %s", key);
 }
 
-int main(void)
+/* ---- Real chdman output (XBA-192) ------------------------------------------------------------------------------
+ * The CHDs above come from this test's own writer. chdman (MAME's tool, the one players use) also writes multi-track
+ * discs with CD-DA, stored and unstored pregaps, a lead-in pregap on track 1, 2048-byte tracks, and the cdzs / cdfl
+ * codecs. CHDMAN_DISCS lists them, made from this test's volume (never game data) and a tone of our own:
+ * `ps1_identify_test --make DIR` writes their sources and runs chdman (on the PATH, or $CHDMAN) into DIR. The fixtures
+ * in consoles/ps1/tests/chdman/ were made that way (its README) and are checked on every run; when chdman is installed
+ * the test makes and checks a fresh set too. */
+
+enum { TONE_FRAMES = 30, GAP = 150 };
+
+typedef struct {
+    const char *name, *cue, *args;
+    int tracks;
+    uint32_t size, t2_start;   /* disc size; track 2's INDEX 01 (one track: 0) */
+} chdman_disc;
+
+static const chdman_disc CHDMAN_DISCS[] = {
+    { "single", "single.cue", "", 1, NFR, 0 },   /* the default codecs: cdlz, cdzl, cdfl */
+    { "single_cdzs", "single.cue", "-c cdzs", 1, NFR, 0 },
+    { "single_cdlz", "single.cue", "-c cdlz", 1, NFR, 0 },
+    { "single_cdzl", "single.cue", "-c cdzl", 1, NFR, 0 },
+    { "iso2048", "iso.cue", "", 1, NFR, 0 },   /* MODE1/2048 */
+    /* data + CD-DA, redump's shape: the audio track's INDEX 00 / 01, its pregap stored */
+    { "audio", "audio.cue", "", 2, NFR + GAP + TONE_FRAMES, NFR + GAP },
+    { "audio_cdzs", "audio.cue", "-c cdzs,cdfl", 2, NFR + GAP + TONE_FRAMES, NFR + GAP },
+    { "pregap", "pregap.cue", "", 2, NFR + GAP + TONE_FRAMES, NFR + GAP },       /* PREGAP: not stored */
+    { "t1pregap", "t1pregap.cue", "", 2, NFR + GAP + TONE_FRAMES, NFR + GAP },   /* track 1 PREGAP 00:02:00 */
+    { "t1index0", "t1index0.cue", "", 2, NFR + GAP + TONE_FRAMES, NFR + GAP },   /* track 1 INDEX 00, stored */
+};
+#define N_CHDMAN (sizeof CHDMAN_DISCS / sizeof *CHDMAN_DISCS)
+
+/* Tone frame i: a CD-DA sector of our own, little-endian as in a .bin. */
+static void tone_sector(uint8_t *s, uint32_t i)
 {
+    make_audio_sector(s, 1000 + i);
+}
+
+static FILE *open_in(const char *dir, const char *name, const char *mode)
+{
+    char p[1024];
+    snprintf(p, sizeof p, "%s/%s", dir, name);
+    FILE *f = fopen(p, mode);
+    if (!f) {
+        printf("cannot write %s\n", p);
+        exit(1);
+    }
+    return f;
+}
+
+static void write_text(const char *dir, const char *name, const char *text)
+{
+    FILE *f = open_in(dir, name, "w");
+    fputs(text, f);
+    fclose(f);
+}
+
+/* data.bin (the volume, raw), data.iso (its 2048-byte user data), lead.bin (150 empty frames, then the volume),
+ * tone.bin (150 frames of silence, then the tone), tone_np.bin (the tone alone), and the cue sheets. */
+static void write_sources(const char *dir)
+{
+    uint8_t sec[2352];
+    make_disc("PLAYSTATION", "BOOT = cdrom:\\SLUS_005.94;1\r\nTCB = 4\r\n");
+    FILE *bin = open_in(dir, "data.bin", "wb"), *iso = open_in(dir, "data.iso", "wb");
+    FILE *lead = open_in(dir, "lead.bin", "wb"), *tone = open_in(dir, "tone.bin", "wb");
+    FILE *tnp = open_in(dir, "tone_np.bin", "wb");
+    memset(sec, 0, sizeof sec);
+    for (int i = 0; i < GAP; i++)
+        fwrite(sec, 1, 2352, lead), fwrite(sec, 1, 2352, tone);
+    for (uint32_t l = 0; l < NFR; l++) {
+        fwrite(frames + l * FRAME, 1, 2352, bin);
+        fwrite(frames + l * FRAME, 1, 2352, lead);
+        fwrite(frames + l * FRAME + 24, 1, 2048, iso);
+    }
+    for (uint32_t i = 0; i < TONE_FRAMES; i++) {
+        tone_sector(sec, i);
+        fwrite(sec, 1, 2352, tone);
+        fwrite(sec, 1, 2352, tnp);
+    }
+    fclose(bin), fclose(iso), fclose(lead), fclose(tone), fclose(tnp);
+    write_text(dir, "single.cue", "FILE \"data.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+    write_text(dir, "iso.cue", "FILE \"data.iso\" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n");
+    write_text(dir, "audio.cue",
+               "FILE \"data.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n"
+               "FILE \"tone.bin\" BINARY\n  TRACK 02 AUDIO\n    INDEX 00 00:00:00\n    INDEX 01 00:02:00\n");
+    write_text(dir, "pregap.cue",
+               "FILE \"data.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n"
+               "FILE \"tone_np.bin\" BINARY\n  TRACK 02 AUDIO\n    PREGAP 00:02:00\n    INDEX 01 00:00:00\n");
+    write_text(dir, "t1pregap.cue",
+               "FILE \"data.bin\" BINARY\n  TRACK 01 MODE2/2352\n    PREGAP 00:02:00\n    INDEX 01 00:00:00\n"
+               "FILE \"tone.bin\" BINARY\n  TRACK 02 AUDIO\n    INDEX 00 00:00:00\n    INDEX 01 00:02:00\n");
+    write_text(dir, "t1index0.cue",
+               "FILE \"lead.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 00 00:00:00\n    INDEX 01 00:02:00\n"
+               "FILE \"tone.bin\" BINARY\n  TRACK 02 AUDIO\n    INDEX 00 00:00:00\n    INDEX 01 00:02:00\n");
+}
+
+/* Writes the sources into dir and runs chdman on each of CHDMAN_DISCS, then `chdman verify` on what it wrote: a CHD
+ * chdman itself cannot read back (chdman 0.276 now and then leaves a stray last byte in a tiny cdlz CHD's map) is
+ * removed. Returns how many were removed, or -1 when chdman did not run. */
+static int make_chdman(const char *dir)
+{
+    const char *chdman = getenv("CHDMAN");
+    char cmd[4096], p[1024];
+    int bad = 0;
+    if (!chdman || !*chdman)
+        chdman = "chdman";
+    write_sources(dir);
+    for (size_t i = 0; i < N_CHDMAN; i++) {
+        const chdman_disc *c = &CHDMAN_DISCS[i];
+        snprintf(p, sizeof p, "%s/%s.chd", dir, c->name);
+        snprintf(cmd, sizeof cmd, "%s createcd -f %s -i '%s/%s' -o '%s' >'%s/chdman.log' 2>&1", chdman, c->args, dir,
+                 c->cue, p, dir);
+        if (system(cmd) != 0) {
+            printf("note: %s failed (see %s/chdman.log)\n", cmd, dir);
+            return -1;
+        }
+        snprintf(cmd, sizeof cmd, "%s verify -i '%s' >'%s/chdman.log' 2>&1", chdman, p, dir);
+        if (system(cmd) != 0) {
+            printf("note: chdman cannot read back its own %s.chd: left out\n", c->name);
+            remove(p);
+            bad++;
+        }
+    }
+    return bad;
+}
+
+/* Every disc of CHDMAN_DISCS in dir: the title key (path and fd:N, as the app asks), the track layout, the volume's
+ * sectors, the tone's first sector and the silence before it. fresh: chdman's output of this run, where a disc
+ * make_chdman left out is skipped. */
+static void check_chdman(const char *dir, int fresh)
+{
+    char p[1024], key[64], fdp[32], err[256];
+    uint8_t got[2352], want[2352];
+    make_disc("PLAYSTATION", "BOOT = cdrom:\\SLUS_005.94;1\r\nTCB = 4\r\n");
+    ps1_identify_install();
+    for (size_t i = 0; i < N_CHDMAN; i++) {
+        const chdman_disc *c = &CHDMAN_DISCS[i];
+        int console = -1;
+        snprintf(p, sizeof p, "%s/%s.chd", dir, c->name);
+        if (fresh && access(p, F_OK) != 0)
+            continue;
+        key[0] = 0;
+        CHECK(recomp_pack_rom_identify(p, &console, key, sizeof key) == 0 && console == RECOMP_CONSOLE_PS1
+                  && !strcmp(key, "SLUS-00594"), "%s: key '%s'", p, key);
+        int fd = open(p, O_RDONLY);
+        CHECK(fd >= 0, "cannot open %s", p);
+        snprintf(fdp, sizeof fdp, "fd:%d", fd);
+        console = -1, key[0] = 0;
+        CHECK(recomp_pack_rom_identify(fdp, &console, key, sizeof key) == 0 && console == RECOMP_CONSOLE_PS1
+                  && !strcmp(key, "SLUS-00594"), "%s as %s: key '%s'", c->name, fdp, key);
+        ps1_disc *d = ps1_disc_open(fdp, err, sizeof err);
+        CHECK(d, "%s as %s: %s", c->name, fdp, err);
+        ps1_disc_close(d);
+        CHECK(fd < 0 || fcntl(fd, F_GETFD) != -1, "%s: the caller's descriptor stays open", c->name);
+        if (fd >= 0)
+            close(fd);
+        d = ps1_disc_open(p, err, sizeof err);
+        CHECK(d, "%s: %s", p, err);
+        if (!d)
+            continue;
+        uint32_t start = 99;
+        int audio = -1;
+        CHECK(ps1_disc_track_count(d) == c->tracks, "%s: %d tracks", c->name, ps1_disc_track_count(d));
+        CHECK(ps1_disc_size(d) == c->size, "%s: size %u, want %u", c->name, ps1_disc_size(d), c->size);
+        CHECK(ps1_disc_track(d, 1, &start, &audio) == 0 && start == 0 && !audio, "%s: track 1 at %u", c->name, start);
+        for (uint32_t l = 16; l < 20; l++)
+            CHECK(ps1_disc_read_sector(d, l, got) == 0 && !memcmp(got + 24, frames + l * FRAME + 24, 2048),
+                  "%s: lba %u", c->name, l);
+        if (c->tracks > 1) {
+            CHECK(ps1_disc_track(d, 2, &start, &audio) == 0 && start == c->t2_start && audio, "%s: track 2 at %u",
+                  c->name, start);
+            tone_sector(want, 0);
+            CHECK(ps1_disc_read_sector(d, c->t2_start, got) == 0 && !memcmp(got, want, 2352), "%s: tone at %u",
+                  c->name, c->t2_start);
+            memset(want, 0, sizeof want);
+            CHECK(ps1_disc_read_sector(d, c->t2_start - 1, got) == 0 && !memcmp(got, want, 2352), "%s: pregap",
+                  c->name);
+        }
+        ps1_disc_close(d);
+    }
+}
+
+/* The sources' cue sheets through ps1_disc's own sheet reader: the layout of their CHDs. */
+static void check_sources(const char *dir)
+{
+    char p[1024], err[256];
+    uint8_t got[2352];
+    for (size_t i = 0; i < N_CHDMAN; i++) {
+        const chdman_disc *c = &CHDMAN_DISCS[i];
+        uint32_t start = 99;
+        snprintf(p, sizeof p, "%s/%s", dir, c->cue);
+        ps1_disc *d = ps1_disc_open(p, err, sizeof err);
+        CHECK(d, "%s: %s", p, err);
+        if (!d)
+            continue;
+        CHECK(ps1_disc_size(d) == c->size, "%s: size %u", c->cue, ps1_disc_size(d));
+        CHECK(ps1_disc_track(d, 1, &start, NULL) == 0 && start == 0, "%s: track 1 at %u", c->cue, start);
+        CHECK(ps1_disc_read_sector(d, 16, got) == 0 && !memcmp(got + 24, frames + 16 * FRAME + 24, 2048),
+              "%s: the PVD", c->cue);
+        if (c->tracks > 1)
+            CHECK(ps1_disc_track(d, 2, &start, NULL) == 0 && start == c->t2_start, "%s: track 2 at %u", c->cue,
+                  start);
+        ps1_disc_close(d);
+    }
+}
+
+static void test_chdman(const char *fixtures)
+{
+    char dir[700];
+    if (fixtures)
+        check_chdman(fixtures, 0);
+    else
+        printf("note: no chdman fixture directory given\n");
+    path_in(dir, sizeof dir, "chdman");
+    mkdir(dir, 0755);
+    write_sources(dir);
+    check_sources(dir);
+    if (system("command -v \"${CHDMAN:-chdman}\" >/dev/null 2>&1") != 0) {
+        printf("note: chdman not installed, only the committed chdman CHDs were checked\n");
+        return;
+    }
+    if (make_chdman(dir) >= 0)
+        check_chdman(dir, 1);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 3 && !strcmp(argv[1], "--make")) {   /* the fixtures: ps1_identify_test --make DIR */
+        mkdir(argv[2], 0755);
+        return make_chdman(argv[2]) ? 1 : 0;
+    }
     scratch();
 #ifdef XBR_PS1_CHD
     test_keys();
+    test_chdman(argc > 1 ? argv[1] : NULL);
 #else
     printf("note: built without XBR_PS1_CHD: no CHD title keys\n");
     scratch_cleanup();

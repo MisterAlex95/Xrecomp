@@ -16,7 +16,7 @@ import java.util.Map;
  * or corrupt file is an empty index and the next scan opens every image again. Plain Java and org.json.
  *
  * <pre>
- * {"v":1, "root":"file:/storage/emulated/0/xbox", "scanned_at":0, "truncated":false, "items":[
+ * {"v":1, "root":"file:/storage/emulated/0/xbox", "scanned_at":0, "truncated":false, "identify":"r2/…", "items":[
  *  {"loc":"file:/…/Halo.iso", "kind":"iso|folder", "name":"Halo.iso", "size":0, "mtime":0, "status":"ok",
  *   "tid":"4D530004", "title":"Halo", "region":4, "disc":0, "version":0, "xbe_sha256":"…",
  *   "xbe":"xbe/4D530004-0123abcd/default.xbe", "folder":"content://…/tree/primary%3Axbox"},
@@ -47,6 +47,11 @@ final class LibraryIndex {
     long scannedAt;
     /** The scan stopped at its entry cap: the folder holds more than the index lists. */
     boolean truncated;
+    /**
+     * The identification that scanned it (LibraryScanner.identifyStamp: its revision and the app's install time; ""
+     * in an older index). A rescan by another one opens the items that are not games again (XBA-192).
+     */
+    String identify = "";
     final List<Item> items = new ArrayList<>();
 
     static final class Item {
@@ -223,6 +228,7 @@ final class LibraryIndex {
         o.put("root", root);
         o.put("scanned_at", scannedAt);
         o.put("truncated", truncated);
+        o.put("identify", identify);
         JSONArray a = new JSONArray();
         for (Item i : items)
             a.put(i.toJson());
@@ -235,6 +241,7 @@ final class LibraryIndex {
         x.root = o.optString("root", "");
         x.scannedAt = o.optLong("scanned_at", 0);
         x.truncated = o.optBoolean("truncated", false);
+        x.identify = o.optString("identify", "");
         JSONArray a = o.optJSONArray("items");
         if (a != null) {
             for (int k = 0; k < a.length(); k++) {

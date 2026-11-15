@@ -36,7 +36,10 @@ import java.util.Locale;
  * Android directory are skipped; a game folder is not descended. A rescan reuses every item whose location, size and
  * modification time are unchanged without opening it (a stat-only rescan; a .cue's fingerprint covers its tracks).
  * Failures stay in the index with their status (LibraryIndex.NOT_XISO, NO_XBE, BAD_XBE, UNREADABLE, NOT_ROM): the
- * « Other files » line.
+ * « Other files » line. A failure is not reused forever (XBA-192): an UNREADABLE item is opened again by every scan
+ * (the folder's permission or a card may be back), any other by the first scan of a new identification
+ * ({@link #identifyStamp}: an app update or reinstall, or {@link #IDENTIFY_REV}), so a file an older build could not
+ * read (a .chd before the native CHD reader) becomes a game without being touched.
  *
  * The walk is plain Java over Tree and ImagePeek, so the JVM tests drive it with fakes. Production trees: PathTree
  * (java.io.File, with All files access) and DocTree (the Storage Access Framework). Runs on a background thread.
@@ -46,6 +49,17 @@ final class LibraryScanner {
 
     static final String TAG = "xboxrecomp";
     static final int MAX_DEPTH = 4, MAX_ENTRIES = 5000;
+    /**
+     * The revision of the identification (Console.identify, the image peek, the native readers). Bump it when they
+     * learn to read a file they gave up on: the next scan opens every failed item again.
+     */
+    static final int IDENTIFY_REV = 2;
+    /**
+     * The identification of this build, stored in the index (LibraryIndex.identify): « r&lt;IDENTIFY_REV&gt; », plus
+     * the app's install time in the app (scanLibrary), so an update re-reads the failures even when no one bumped
+     * IDENTIFY_REV.
+     */
+    static volatile String identifyStamp = "r" + IDENTIFY_REV;
     /** The largest default.xbe taken (real ones: a few MB). */
     static final long MAX_XBE = 32L << 20;
 
@@ -153,6 +167,7 @@ final class LibraryScanner {
         Result r = new Result();
         r.index = new LibraryIndex();
         LibraryIndex prev = previous == null ? new LibraryIndex() : previous;
+        r.index.identify = identifyStamp;
         java.util.Set<String> seen = new java.util.HashSet<>();
         boolean unreadable = false;
         for (int k = 0; k < roots.size() && !r.cancelled; k++) {
@@ -297,6 +312,8 @@ final class LibraryScanner {
             LibraryIndex.Item p = prev.find(loc);
             if (p == null || !p.sameFingerprint(loc, size, mtime))
                 return null;
+            if (!p.ok() && (LibraryIndex.UNREADABLE.equals(p.status) || !r.index.identify.equals(prev.identify)))
+                return null;   // a failure: read again (UNREADABLE always, the others by a new identification)
             if (p.ok() && !p.otherConsole()) {
                 File x = xbeOf(p);
                 if (x == null || !x.isFile())
@@ -336,7 +353,7 @@ final class LibraryScanner {
                 }
                 r.peeks++;
                 rc = peek.extractFile(fds, "default.xbe", tmp, MAX_XBE);
-            } catch (IOException | RuntimeException e) {
+            } catch (IOException | RuntimeException | LinkageError e) {   // LinkageError: no libxba_import.so
                 warn("launcher: library: cannot open " + n.loc + ": " + e);
                 rc = 1;
             } finally {
@@ -803,6 +820,16 @@ final class LibraryScanner {
         return folderRoots(c, Environment.isExternalStorageManager());
     }
 
+    /** {@link #identifyStamp} of the app: the revision and the install / update time of this APK. */
+    static String identifyStamp(Context c) {
+        long t = 0;
+        try {
+            t = c.getPackageManager().getPackageInfo(c.getPackageName(), 0).lastUpdateTime;
+        } catch (android.content.pm.PackageManager.NameNotFoundException | RuntimeException ignored) {
+        }
+        return "r" + IDENTIFY_REV + "/" + t;
+    }
+
     /** The production ImagePeek: libxba_import.so. */
     static final ImagePeek NATIVE_PEEK = (fds, path, out, max) ->
             XisoNative.extractFileParts(fds, path, out.getAbsolutePath(), max);
@@ -850,6 +877,7 @@ final class LibraryScanner {
         File files = c.getFilesDir();
         File indexFile = Library.indexFile(files);
         LibraryIndex prev = LibraryIndex.read(indexFile);
+        identifyStamp = identifyStamp(c);
         long start = SystemClock.elapsedRealtime();
         Result r = scan(roots, prev, NATIVE_PEEK, Library.xbeCacheDir(files), titleArtAndTheme(c), listener, cancel);
         if (!r.cancelled) {
