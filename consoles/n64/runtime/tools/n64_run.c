@@ -670,10 +670,10 @@ int main(int argc, char **argv)
         n64_recomp_stats st;
         n64_recomp_get_stats(m, &st);
         uint64_t total = n64_instructions(m);
-        printf("recomp: %llu calls, %llu interpreted RDRAM instructions (%llu fallbacks), %llu slow lookups, "
-               "%llu re-hashes (%llu stale), %llu interrupts\n",
+        printf("recomp: %llu calls, %llu interpreted RDRAM instructions (%llu fallbacks, %llu blocks), %llu slow "
+               "lookups, %llu re-hashes (%llu stale), %llu interrupts\n",
                (unsigned long long)st.calls, (unsigned long long)st.interp_ram, (unsigned long long)st.fallbacks,
-               (unsigned long long)st.slow_lookups, (unsigned long long)st.rehashes, (unsigned long long)st.stale,
+               (unsigned long long)st.blocks, (unsigned long long)st.slow_lookups, (unsigned long long)st.rehashes, (unsigned long long)st.stale,
                (unsigned long long)st.interrupts);
         if (st.native)
             printf("recomp: %.2f%% native (%llu of %llu instructions)\n", total ? 100.0 * st.native / total : 0.0,

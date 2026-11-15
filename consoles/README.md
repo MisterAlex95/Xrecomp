@@ -897,8 +897,30 @@ before, ~24-34 with the blocks, devices included). Wall clock per 600 frames wit
 host): hello 3.42 -> 1.50 -> 0.51 s, timer_irq 3.76 -> 1.58 -> 0.57, gfx 3.44 -> 1.47 -> 0.61, rsp 2.94 -> 1.17 -> 0.88,
 n64-systemtest 4.87 -> 2.40 -> 2.03, libdragon's test ROM 4.54 -> 3.58 -> 3.24 (2.0-2.5x from the blocks where the code
 is interpreter-bound, 1.3-1.4x on the test ROM, which spends much of its time in device accesses and short blocks;
-the homebrew sit in idle loops, which now cost almost nothing). Packs are unchanged (the dispatcher's interpreter runs
-still use `step()`).
+the homebrew sit in idle loops, which now cost almost nothing). Packs were unchanged then (the dispatcher's interpreter
+runs used `step()`): see the next paragraph.
+
+**N64 packs: the interpreter's blocks for code no entry covers.** Under a pack, RDRAM code no entry matches (code the
+last Prepare did not see: overlays relocated to other heap addresses, other contents at an entry's address) used to
+run through `step()` one instruction at a time with a dispatch lookup each, 2-3x slower than without a pack since
+XBA-210. `n64_recomp_run` now records the miss as before, then runs one predecoded block from that PC
+(`n64_cpu_run_block`, XBA-210's runner without its chaining) and comes back to the dispatcher. The block stops in front
+of the next entry's start in that page (cached in the dispatch line with the miss), and of a hand-off still pending,
+so lifted code is entered at the same instructions as before (the same call counts); a branch that is its last
+instruction keeps its delay slot, which `step()` also ran without a lookup. Inside a block execution stays in
+sequence, so the discovery record is the same (`--missed` files byte-identical); after it the dispatcher's
+« next expected PC » is the one the last step would have left. Recording a miss (a hash of its 2 KB window) is skipped
+when it is sure to change nothing: the last call at that PC changed nothing, and neither the record count nor the
+window's RDRAM page counters moved since (kept in the dispatch line); before, every taken branch into such code paid
+it, an idle loop there at every turn. The handed run (`interp_pc`), delay slots and the
+reference loop (`--lockstep-ref`) keep `step()`. Both paths are tick-exact: run hashes, lockstep, save states
+unchanged; `--stats` adds the block count (and the slow lookups drop). Tests: `recomp_fuzz.py` now also runs every
+seed in lockstep with part of its table (`N64_RC_ENTRIES` 0-0 and 1-1000000: blocks between lifted functions under the
+fast timer interrupt). Measured (x86-64 dev host, loaded, n64-systemtest 1200 frames under its pack, before -> after,
+same run hash, `--missed` identical; blocks alone, then with the record skip): whole table (97.2 % native) 3.17 ->
+3.16 -> 3.15 s; `N64_RC_ENTRIES=0-6000` (8 % of the instructions interpreted, 5519 records) 5.89 -> 5.36 -> 3.55 s;
+`N64_RC_ENTRIES=0-2500` (94 % interpreted, the case of a game far from its last Prepare) 15.67 -> 5.14 -> 3.58 s (no
+pack: 3.17 s).
 
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game

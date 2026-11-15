@@ -1702,7 +1702,7 @@ static uint32_t blk_decode(uint32_t ins, uint64_t ipc, bop *o, uint32_t *extra)
 }
 
 static __attribute__((noinline)) blk *blk_build(n64_machine *m, struct n64_blocks *bc, const void *const *h,
-                                                uint64_t pc, uint32_t pa, uint32_t fc, bool mapped)
+                                                uint64_t pc, uint32_t pa, uint32_t fc, bool mapped, uint32_t maxops)
 {
     uint32_t limit = (0x1000u - (pa & 0xFFFu)) / 4;
     if (limit > BLK_MAX)
@@ -1713,7 +1713,7 @@ static __attribute__((noinline)) blk *blk_build(n64_machine *m, struct n64_block
     blk *b = (blk *)(void *)(bc->arena + bc->used);
     const uint8_t *src = m->rdram + pa;
     uint32_t n = 0, branch = 0, seen = 1, ex[BLK_MAX], kind[BLK_MAX];
-    for (uint32_t i = 0; i < limit; i++) {
+    for (uint32_t i = 0; i < limit && i < maxops; i++) {
         uint64_t ipc = pc + 4 * i;
         uint32_t k = blk_decode(n64_be32(src + 4 * i), ipc, &b->ops[i], &ex[i]);
         kind[i] = k;
@@ -1779,9 +1779,16 @@ static __attribute__((noinline)) blk *blk_build(n64_machine *m, struct n64_block
     return b;
 }
 
+/* Whether b holds at most maxops ops, not counting the delay slot of a branch that is op maxops - 1 (BLK_MAX: any). */
+static inline bool blk_fits(const blk *b, uint32_t maxops)
+{
+    return maxops >= BLK_MAX || b->n <= maxops || (b->branch && b->n == maxops + 1u);
+}
+
 /* The block at pc (kernel mode), decoded when missing, checked against its page counter and its translation. NULL or
- * n = 0: none (step() runs the instruction). h: run_blocks' handlers. */
-static __attribute__((noinline)) blk *blk_get_slow(n64_machine *m, uint64_t pc, const void *const *h)
+ * n = 0: none (step() runs the instruction). h: run_blocks' handlers. maxops: blk_fits (a block that does not is
+ * decoded again, shorter). */
+static __attribute__((noinline)) blk *blk_get_slow(n64_machine *m, uint64_t pc, const void *const *h, uint32_t maxops)
 {
     struct n64_blocks *bc = m->blocks;
     if (!bc) {
@@ -1810,31 +1817,33 @@ static __attribute__((noinline)) blk *blk_get_slow(n64_machine *m, uint64_t pc, 
     if (pa >= m->rdram_size)
         return NULL;
     blk *b = bc->tab[blk_index(pc)];
-    if (b && b->vpc == pc && b->pa == pa && b->fc == fc && !memcmp(m->rdram + pa, b->words, b->cmp4)) {
+    if (b && b->vpc == pc && b->pa == pa && b->fc == fc && blk_fits(b, maxops) &&
+        !memcmp(m->rdram + pa, b->words, b->cmp4)) {
         b->gen = m->rdram_gen[b->page]; /* the page was written, not this code; or the TLB, not this mapping */
         b->tlb_gen = m->cpu.tlb_gen;
         b->erl = (m->cpu.cop0[C0_STATUS] & SR_ERL) != 0;
         return b;
     }
-    b = blk_build(m, bc, h, pc, pa, fc, mapped);
+    b = blk_build(m, bc, h, pc, pa, fc, mapped, maxops);
     if (!b) {
         blocks_flush(bc);
-        b = blk_build(m, bc, h, pc, pa, fc, mapped);
+        b = blk_build(m, bc, h, pc, pa, fc, mapped, maxops);
     }
     return b;
 }
 
-static N64_HOT_INLINE blk *blk_get(n64_machine *m, uint64_t pc, const void *const *h)
+static N64_HOT_INLINE blk *blk_get(n64_machine *m, uint64_t pc, const void *const *h, uint32_t maxops)
 {
     struct n64_blocks *bc = m->blocks;
     if (N64_LIKELY(bc != NULL)) {
         blk *b = bc->tab[blk_index(pc)];
         if (N64_LIKELY(b && b->vpc == pc && m->rdram_gen[b->page] == b->gen &&
                        (!b->mapped || (b->tlb_gen == m->cpu.tlb_gen &&
-                                       b->erl == ((m->cpu.cop0[C0_STATUS] & SR_ERL) != 0)))))
+                                       b->erl == ((m->cpu.cop0[C0_STATUS] & SR_ERL) != 0))) &&
+                       blk_fits(b, maxops)))
             return b;
     }
-    return blk_get_slow(m, pc, h);
+    return blk_get_slow(m, pc, h, maxops);
 }
 
 /* A block's data access outside the inline KSEG0 / KSEG1 RDRAM paths (mapped addresses, the bus): the interpreter's
@@ -1919,8 +1928,9 @@ static inline void be_store(uint8_t *p, int size, uint64_t v)
  * now < stop_at). Returns BLK_STOPPED where the run loop must check again (every field of the machine as step()'s loop
  * leaves it), BLK_INTERPRET when the instruction at pc must be stepped (no block there), BLK_SLOW when step() must run
  * it (an op that falls back: the machine holds the state in front of it), BLK_NEAR when stop_at is close: the run loop
- * steps to it. */
-static __attribute__((noinline)) int run_blocks(n64_machine *m)
+ * steps to it. one (n64_cpu_run_block): only the block at pc, of at most maxops ops (blk_fits), and back to the caller
+ * after it (an idle loop still fast-forwards). */
+static __attribute__((noinline)) int run_blocks(n64_machine *m, bool one, uint32_t maxops)
 {
     n64_cpu *const c = &m->cpu;
     uint64_t *const r = c->gpr;
@@ -2068,7 +2078,7 @@ static __attribute__((noinline)) int run_blocks(n64_machine *m)
             goto likely_skip;                                                                                          \
     } while (0)
 
-    b = blk_get(m, pc, op_label);
+    b = blk_get(m, pc, op_label, maxops);
 have_block:
     if (!b || !b->n) {
         ret = BLK_INTERPRET;
@@ -2444,7 +2454,15 @@ l_end:
             ret = BLK_STOPPED;
             goto out;
         }
+        if (N64_UNLIKELY(one)) {
+            ret = BLK_STOPPED;
+            goto out;
+        }
         goto again; /* a loop on itself: its words and translation unchanged (no store into them, no TLB write) */
+    }
+    if (N64_UNLIKELY(one)) {
+        ret = BLK_STOPPED;
+        goto out;
     }
     goto link;
 l_cut:
@@ -2486,7 +2504,7 @@ likely_skip:
     c->cur = b->vpc + 4 * IDX();
     c->ds = false;
     pc = b->fall;
-    if (now >= stop) {
+    if (now >= stop || N64_UNLIKELY(one)) {
         ret = BLK_STOPPED;
         goto out;
     }
@@ -2501,7 +2519,7 @@ link: {
         goto have_block;
     }
     uint32_t ep = m->blocks->epoch;
-    nb = blk_get(m, pc, op_label);
+    nb = blk_get(m, pc, op_label, BLK_MAX);
     if (nb && m->blocks->epoch == ep) /* no flush meanwhile: b is still where it was */
         ((blk *)b)->succ[w] = nb;
     b = nb;
@@ -2550,6 +2568,12 @@ out_npc:
 #undef BRANCH
 }
 
+bool n64_cpu_run_block(n64_machine *m, uint32_t maxops)
+{
+    int r = run_blocks(m, true, maxops ? maxops : 1u);
+    return r == BLK_INTERPRET || r == BLK_SLOW;
+}
+
 void n64_cpu_run(n64_machine *m)
 {
     if (N64_UNLIKELY(m->rc != NULL) && n64_recomp_active(m)) {
@@ -2573,7 +2597,7 @@ void n64_cpu_run(n64_machine *m)
             continue;
         }
         if (N64_LIKELY(!c->next_ds && c->ksu == 0 && !(m->mi_mode & 0x80) && c->npc == c->pc + 4)) {
-            int r = run_blocks(m);
+            int r = run_blocks(m, false, BLK_MAX);
             if (r == BLK_STOPPED)
                 continue;
             if (r == BLK_NEAR) { /* close to stop_at: step()'s loop to it */

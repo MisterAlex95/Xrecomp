@@ -365,6 +365,12 @@ void n64_cpu_run_until(n64_machine *m, uint64_t stop_pc);
  * dispatcher would hand that next instruction straight back (time left, no interrupt pending, kernel mode, a KSEG0 /
  * KSEG1 RDRAM address); otherwise *chained is false. Returns the number of instructions run (XBA-191). */
 uint32_t n64_cpu_step_handed(n64_machine *m, uint32_t *left, bool *chained);
+/* One predecoded block (XBA-210) from pc, of at most maxops instructions (a branch that is the last of them keeps its
+ * delay slot), as step() would run them: the dispatcher's RDRAM code no table covers (n64_recomp.c). The caller's
+ * checks hold: now < stop_at, no interrupt pending, kernel mode, not in a delay slot, npc == pc + 4, MI repeat mode
+ * off. True when the instruction at pc must be stepped instead (no block there, or an op that falls back: the machine
+ * holds the state in front of it); false when the machine is where step()'s loop would be after the block. */
+bool n64_cpu_run_block(n64_machine *m, uint32_t maxops);
 
 /* ---- Static recompilation (n64_recomp.c) ------------------------------------------------------------------------ */
 /* n64_cpu_run's loop while a table is attached (m->rc). */
