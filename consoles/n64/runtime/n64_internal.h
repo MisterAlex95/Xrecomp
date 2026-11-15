@@ -287,7 +287,12 @@ struct n64_machine {
     /* Save states (n64_state.c): the ROM's hash, computed at the first save or load (host side, not state). */
     uint64_t rom_hash;
     bool rom_hashed;
+    /* ---- Host-only tail, not in save states (n64_state.c saves the machine up to blocks): the interpreter's
+     * predecoded blocks (n64_cpu.c, XBA-210) and the reference switch (n64_set_interp_reference). ---- */
+    struct n64_blocks *blocks;
+    bool interp_ref;
 };
+#define N64_MACHINE_STATE_BYTES offsetof(n64_machine, blocks)
 
 /* Instruction / access costs in ticks (n64_cpu.c; lifted code charges the same: n64_recomp_rt.h). */
 enum {
@@ -327,6 +332,7 @@ static inline void n64_rdram_wrote_aligned(n64_machine *m, uint32_t pa, uint32_t
 
 /* ---- CPU (n64_cpu.c) ------------------------------------------------------------------------------------------- */
 void n64_cpu_reset(n64_machine *m);
+void n64_cpu_free(n64_machine *m); /* the predecoded blocks */
 /* Runs instructions while now < stop_at. */
 void n64_cpu_run(n64_machine *m);
 /* STATUS or CAUSE changed: recompute the mode and the interrupt line. */

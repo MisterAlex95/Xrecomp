@@ -132,6 +132,7 @@ void n64_destroy(n64_machine *m)
     if (m->rdp)
         n64_rdp_destroy(m->rdp);
     n64_recomp_free(m);
+    n64_cpu_free(m);
     free(m->rom);
     free(m->rdram);
     free(m->rdram_gen);
@@ -305,7 +306,12 @@ uint64_t n64_fpr(n64_machine *m, int r) { return r >= 0 && r < 32 ? m->cpu.fpr[r
 uint32_t n64_fcsr(n64_machine *m) { return m->cpu.fcsr; }
 uint64_t n64_cycles(n64_machine *m) { return m->now / N64_TICKS_PER_CYCLE; }
 uint64_t n64_frames(n64_machine *m) { return m->frames; }
-uint8_t *n64_rdram(n64_machine *m) { return m->rdram; }
+uint8_t *n64_rdram(n64_machine *m)
+{
+    for (uint32_t p = 0; p < (m->rdram_size >> N64_PAGE_SHIFT); p++)
+        m->rdram_gen[p]++; /* the caller may write code there: predecoded blocks and lifted code check it again */
+    return m->rdram;
+}
 uint32_t n64_rdram_size(n64_machine *m) { return m->rdram_size; }
 uint64_t n64_instructions(n64_machine *m) { return m->instructions; }
 

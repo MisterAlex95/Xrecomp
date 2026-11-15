@@ -17,6 +17,14 @@ included. It is lifted and built (tools/consoles/n64_recomp_build.py, discovery 
 --lockstep: the interpreter and the recompiled machine must agree on the whole state (GPRs, FPRs, COP0, time,
 instruction count, scheduler, RDRAM) after every frame. Exit 0 when every seed agrees, 1 at the first difference,
 77 when Python or a C compiler is missing (skipped).
+
+With --ref (XBA-210) nothing is lifted: the same programs run under n64_run --lockstep-ref, the interpreter's
+predecoded blocks against its reference loop (the whole save state compared after every frame, or every
+--lockstep-cycles N cycles), and the programs also exercise what blocks must notice: subroutines called through KSEG1
+(uncached fetch) and through a TLB-mapped page whose two entries (ASID 1 and 2) map different physical code at the same
+address (the body switches EntryHi's ASID), self-modifying code (an instruction a few words ahead flipped through
+KSEG0 or KSEG1, every pass), PI DMAs that replace the subroutines' code under the program (polling PI_STATUS), and
+Status.IE toggles that hold the timer interrupt back.
 """
 
 import argparse
@@ -59,7 +67,9 @@ def cop1(fmt, ft, fs, fd, funct):
 
 
 ERET = 0x42000018
+TLBWI = 0x42000002
 NOP = 0
+MAPPED = 0x00400000  # --ref: the TLB-mapped address of the subroutines (kuseg, 8 KB pair)
 
 ALU3 = [0x21, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2A, 0x2B, 0x2D, 0x2F, 0x04, 0x06, 0x07, 0x14, 0x16, 0x17]
 SHIFT = [0x00, 0x02, 0x03, 0x38, 0x3A, 0x3B, 0x3C, 0x3E, 0x3F]
@@ -77,9 +87,10 @@ FOPS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # arithmetic and 
 
 
 class Gen:
-    def __init__(self, seed, insns):
+    def __init__(self, seed, insns, ref=False):
         self.r = random.Random(seed)
         self.n = insns
+        self.ref = ref
         self.code = []
         self.fr = self.r.random() < 0.5
         self.period = self.r.choice([40, 90, 150, 300, 600])
@@ -216,11 +227,15 @@ class Gen:
         self.emit(cop0(0, 8, 9))
         self.emit(i_type(0x09, 8, 8, self.period))
         self.emit(cop0(4, 8, 11))
+        if self.ref:
+            fix_tlb = len(self.code)
+            self.code.extend([NOP] * (2 * 13 + 3))  # the TLB entries, written once the layout is known
         # the body, in an endless loop; subroutines after it
         nsubs = 4
         top = self.pc()
         body, i = [], 0
         jal_sites = []
+        dma_sites = []
         while i < self.n:
             k = r.random()
             left = self.n - i
@@ -241,37 +256,114 @@ class Gen:
             elif k < 0.29:  # set the rounding mode (and sometimes an enable: FPE exceptions, also after the result)
                 words = [i_type(0x0D, 0, 1, r.randrange(4) | (r.choice([0, 0, 0, 0x800, 0x400, 0x200, 0x100, 0x80]))),
                          (0x11 << 26) | (6 << 21) | (1 << 16) | (31 << 11)]
+            elif self.ref and k < 0.33:
+                words = self.ref_site(top + 4 * len(body), dma_sites, len(body))
             else:
                 words = [self.simple()]
             body.extend(words)
             i += len(words)
         end = top + 4 * len(body)
-        subs_at = end + 8
+        lens, sub_words = [], []
+        for _ in range(nsubs):  # (the random draws in the order the lifter fuzz has always made them)
+            lens.append(r.randint(1, 8))
+            sub_words += [self.simple() for _ in range(lens[-1])] + [r_type(0x08, RA), self.simple()]
+
+        def subs():
+            words = []
+            for n in lens:
+                words += [self.simple() for _ in range(n)] + [r_type(0x08, RA), self.simple()]
+            return words
+
+        if self.ref:  # after the handler, on a 4 KB page (P), a second version on the page pair after (P + 0x2000)
+            handler_at = end + 8
+            subs_at = (handler_at + 4 * len(handler) + 0xFFF) & ~0xFFF
+            sub2_words = subs()
+        else:
+            subs_at = end + 8
         sub_addrs = []
-        sub_words = []
-        for _ in range(nsubs):
-            sub_addrs.append(subs_at + 4 * len(sub_words))
-            for _ in range(r.randint(1, 8)):
-                sub_words.append(self.simple())
-            sub_words += [r_type(0x08, RA), self.simple()]
+        at = subs_at
+        for n in lens:
+            sub_addrs.append(at)
+            at += 4 * (n + 2)
         for site in jal_sites:
             t = r.choice(sub_addrs)
             if site >= 0:
                 body[site] = j_type(0x03, t)
             else:
+                if self.ref:  # through KSEG1, through the TLB-mapped page, or KSEG0
+                    t = r.choice([t | 0x20000000, MAPPED + (t - subs_at), t])
                 s = -site - 1
                 body[s] = i_type(0x0F, 0, 25, t >> 16)
                 body[s + 1] = i_type(0x0D, 25, 25, t & 0xFFFF)
+        if self.ref:
+            nbytes = 4 * len(sub_words)
+            for s, words in dma_sites:  # PI DMA of one version or the other over the subroutines at P
+                src = r.choice([subs_at, subs_at + 0x2000])
+                cart = 0x10000000 + 0x1000 + (src - BASE)
+                body[s:s + len(words)] = self.dma_words(words, subs_at & 0x1FFFFFFF, cart, nbytes)
+            tlb = []
+            for idx, (asid, pa) in enumerate([(1, subs_at & 0x1FFFFFFF), (2, (subs_at + 0x2000) & 0x1FFFFFFF)]):
+                lo0 = ((pa >> 12) << 6) | (3 << 3) | 6  # C = 3, D, V (not global)
+                lo1 = (((pa + 0x1000) >> 12) << 6) | (3 << 3) | 6
+                tlb += [i_type(0x0F, 0, 8, MAPPED >> 16), i_type(0x0D, 8, 8, asid), cop0(4, 8, 10)]  # EntryHi
+                tlb += [i_type(0x0F, 0, 8, lo0 >> 16), i_type(0x0D, 8, 8, lo0 & 0xFFFF), cop0(4, 8, 2)]
+                tlb += [i_type(0x0F, 0, 8, lo1 >> 16), i_type(0x0D, 8, 8, lo1 & 0xFFFF), cop0(4, 8, 3)]
+                tlb += [cop0(4, 0, 5), i_type(0x0D, 0, 8, idx), cop0(4, 8, 0), TLBWI]  # PageMask 0, Index, TLBWI
+            tlb += [i_type(0x0D, 0, 8, 1), cop0(4, 8, 10), NOP]  # EntryHi: ASID 1
+            assert len(tlb) == 2 * 13 + 3
+            self.code[fix_tlb:fix_tlb + len(tlb)] = tlb
         self.code.extend(body)
         self.emit(j_type(0x02, top))
         self.emit(NOP)
-        self.code.extend(sub_words)
+        if not self.ref:
+            self.code.extend(sub_words)
         hsrc = self.pc()
         self.code.extend(handler)
+        if self.ref:
+            while self.pc() < subs_at:
+                self.emit(NOP)
+            self.code.extend(sub_words)
+            while self.pc() < subs_at + 0x2000:
+                self.emit(NOP)
+            self.code.extend(sub2_words)
         # patch the handler source address
         self.code[fix_handler] = i_type(0x0F, 0, 8, hsrc >> 16)
         self.code[fix_handler + 1] = i_type(0x0D, 8, 8, hsrc & 0xFFFF)
         return self.code
+
+    def ref_site(self, at, dma_sites, idx):
+        """--ref: a site of what predecoded blocks must notice (at: its address; idx: its index in the body)."""
+        r = self.r
+        t, u = r.sample(REGS, 2)
+        k = r.random()
+        if k < 0.35:  # flip an instruction a few words ahead (ADDIU imm1 <-> imm2), through KSEG0 or KSEG1
+            gap = [self.simple() for _ in range(r.randint(0, 2))]
+            target = at + 4 * (5 + len(gap))
+            if r.random() < 0.3:
+                target |= 0x20000000
+            imm1, imm2 = r.randrange(0x10000), r.randrange(0x10000)
+            return [i_type(0x0F, 0, t, target >> 16), i_type(0x0D, t, t, target & 0xFFFF), i_type(0x23, t, u, 0),
+                    i_type(0x0E, u, u, imm1 ^ imm2), i_type(0x2B, t, u, 0)] + gap + \
+                [i_type(0x09, self.reg(), self.reg(), imm1)]
+        if k < 0.6:  # switch the TLB-mapped page's ASID (1 or 2: the other version of the subroutines)
+            return [i_type(0x0D, 0, t, r.choice([1, 2])), cop0(4, t, 10)]
+        if k < 0.8:  # Status.IE off or on (CU1, FR, IM7 kept)
+            return [cop0(0, t, 12), i_type(0x0E, t, t, 1), cop0(4, t, 12)]
+        words = [NOP] * 17  # a PI DMA over the subroutines, filled in once the layout is known
+        dma_sites.append((idx, words))
+        return words
+
+    def dma_words(self, words, dram, cart, nbytes):
+        t, u = 8, 9  # scratch: random values anyway
+        out = [i_type(0x0F, 0, t, 0xA460)]                                     # t = PI base (KSEG1)
+        out += [i_type(0x23, t, u, 0x10), i_type(0x0C, u, u, 3), i_type(0x05, u, 0, -3), NOP]  # wait while busy
+        out += [i_type(0x0F, 0, u, dram >> 16), i_type(0x0D, u, u, dram & 0xFFFF), i_type(0x2B, t, u, 0x00)]
+        out += [i_type(0x0F, 0, u, cart >> 16), i_type(0x0D, u, u, cart & 0xFFFF), i_type(0x2B, t, u, 0x04)]
+        out += [i_type(0x0F, 0, u, (nbytes - 1) >> 16), i_type(0x0D, u, u, (nbytes - 1) & 0xFFFF),
+                i_type(0x2B, t, u, 0x0C)]                                       # PI_WR_LEN: cartridge -> RDRAM
+        out += [NOP] * (len(words) - len(out))
+        assert len(out) == len(words)
+        return out
 
     def handler(self):
         """At 0x80000180: the timer interrupt moves COMPARE on and counts; any other exception skips the instruction
@@ -309,8 +401,8 @@ def boot_code(nbytes):
     return w
 
 
-def make_rom(seed, insns):
-    g = Gen(seed, insns)
+def make_rom(seed, insns, ref=False):
+    g = Gen(seed, insns, ref)
     code = g.program()
     prog = struct.pack(">%dI" % len(code), *code)
     prog += b"\0" * (-len(prog) % 16)
@@ -333,7 +425,11 @@ def main(argv=None):
     ap.add_argument("--frames", type=int, default=10)
     ap.add_argument("--insns", type=int, default=600)
     ap.add_argument("--jobs", type=int, default=int(os.environ.get("JOBS", "4")))
+    ap.add_argument("--ref", action="store_true", help="interpreter blocks vs reference loop, nothing lifted")
+    ap.add_argument("--lockstep-cycles", type=int, default=0, help="with --ref: compare every N CPU cycles")
     args = ap.parse_args(argv)
+    if args.ref:
+        return main_ref(args)
     if not shutil.which(os.environ.get("CC", "cc")):
         print("skipped: no C compiler")
         return 77
@@ -367,6 +463,30 @@ def main(argv=None):
             print("FAIL: seed %d differs from the interpreter" % seed)
             return 1
     print("recomp_fuzz: %d seeds, all in lockstep with the interpreter" % len(seeds))
+    return 0
+
+
+def main_ref(args):
+    lo, _, hi = args.seeds.partition("-")
+    seeds = range(int(lo), int(hi or lo) + 1)
+    os.makedirs(args.work, exist_ok=True)
+    for seed in seeds:
+        rom, g = make_rom(seed, args.insns, ref=True)
+        path = os.path.join(args.work, "ref%d.z64" % seed)
+        with open(path, "wb") as f:
+            f.write(rom)
+        cmd = [args.n64_run, path, "--quiet", "--lockstep-ref", "--frames", str(args.frames)]
+        if args.lockstep_cycles:
+            cmd += ["--lockstep-cycles", str(args.lockstep_cycles)]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
+        out = r.stdout.strip()
+        print("seed %d (FR=%d, timer every %d COUNT ticks): %s" % (seed, g.fr, g.period, out))
+        if "LOCKSTEP OK" not in out:
+            print(r.stderr)
+            print("FAIL: seed %d: the blocks differ from the reference loop" % seed)
+            return 1
+        os.remove(path)
+    print("recomp_fuzz --ref: %d seeds, all in lockstep with the reference loop" % len(seeds))
     return 0
 
 
