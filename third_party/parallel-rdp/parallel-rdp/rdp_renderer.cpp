@@ -28,6 +28,7 @@
 #include "luts.hpp"
 #include "timer.hpp"
 #include <limits>
+#include <atomic>
 #include <stdlib.h>
 #ifdef PARALLEL_RDP_SHADER_DIR
 #include "global_managers.hpp"
@@ -38,6 +39,65 @@
 
 namespace RDP
 {
+// xboxrecomp-android patch (third_party/parallel-rdp/README.md): the tile-instance budget (RendererBufferSizes).
+static std::atomic<uint64_t> storage_range_override;
+static std::atomic<unsigned> forced_tile_instances;
+
+void set_storage_range_override(uint64_t bytes)
+{
+	storage_range_override.store(bytes);
+}
+
+void set_forced_tile_instances(unsigned count)
+{
+	forced_tile_instances.store(count);
+}
+
+RendererBufferSizes renderer_buffer_sizes(unsigned factor, bool super_sampled_readback, uint64_t rdram_size,
+                                          uint64_t hidden_rdram_size, uint64_t max_storage_range,
+                                          unsigned forced)
+{
+	RendererBufferSizes s;
+	if (factor == 0)
+		factor = 1;
+	const uint64_t ff = uint64_t(factor) * factor;
+	uint64_t n = ff * Limits::MaxTileInstances;
+	const uint64_t work_per_instance = sizeof(TileRasterWork) * Limits::MaxStaticRasterizationStates;
+	if (factor > 1 && !super_sampled_readback)
+	{
+		n = std::min<uint64_t>(ff, 16) * Limits::MaxTileInstances;
+		// The tile work list is bound whole: its range bounds the budget, never below the 1x budget (a whole 1x
+		// screen of tiles must fit).
+		if (max_storage_range)
+			n = std::min(n, std::max<uint64_t>(max_storage_range / work_per_instance / Limits::MaxTileInstances *
+			                                   Limits::MaxTileInstances, Limits::MaxTileInstances));
+		if (forced)
+			n = std::min<uint64_t>(n, std::max<uint64_t>(64, forced & ~63u));
+	}
+	s.tile_instances = unsigned(n);
+
+	const uint64_t tiles = uint64_t(factor * Limits::MaxWidth / ImplementationConstants::TileWidth) *
+	                       (factor * Limits::MaxHeight / ImplementationConstants::TileHeight);
+	const uint64_t tile_pixels = ImplementationConstants::TileWidth * ImplementationConstants::TileHeight;
+	s.tile_binning = sizeof(uint32_t) * (Limits::MaxPrimitives / 32) * tiles;
+	s.tile_work_list = work_per_instance * n;
+	s.per_tile_color = sizeof(uint32_t) * n * tile_pixels;
+	s.per_tile_small = sizeof(uint8_t) * n * tile_pixels;
+	if (factor > 1)
+	{
+		s.rdram_slices = rdram_size * ff;
+		if (super_sampled_readback)
+			s.rdram_slices += 2 * Limits::MaxWidth * Limits::MaxHeight / 8;
+		s.hidden_slices = hidden_rdram_size * ff;
+	}
+	s.total = s.rdram_slices + s.hidden_slices + (factor > 1 ? rdram_size : 0) /* reference RDRAM */ +
+	          2 * s.per_tile_color + 2 * s.per_tile_small + s.tile_work_list + 2 * s.tile_binning +
+	          sizeof(uint32_t) * tiles /* coarse binning */ +
+	          uint64_t(factor) * Limits::MaxSpanSetups * sizeof(SpanSetup) +
+	          uint64_t(Limits::MaxTMEMInstances) * 0x1000;
+	return s;
+}
+
 Renderer::Renderer(CommandProcessor &processor_)
 	: processor(processor_)
 {
@@ -123,7 +183,21 @@ bool Renderer::init_renderer(const RendererOptions &options)
 	caps.max_height = options.upscaling_factor * Limits::MaxHeight;
 	caps.max_tiles_x = options.upscaling_factor * ImplementationConstants::MaxTilesX;
 	caps.max_tiles_y = options.upscaling_factor * ImplementationConstants::MaxTilesY;
-	caps.max_num_tile_instances = options.upscaling_factor * options.upscaling_factor * Limits::MaxTileInstances;
+	// xboxrecomp-android patch (README): the capped tile-instance budget when upscaled (RendererBufferSizes).
+	{
+		uint64_t range = storage_range_override.load();
+		if (!range)
+			range = device->get_gpu_properties().limits.maxStorageBufferRange;
+		const unsigned forced = options.upscaling_factor > 1 ? forced_tile_instances.load() : 0u;
+		caps.max_num_tile_instances = renderer_buffer_sizes(options.upscaling_factor, options.super_sampled_readback,
+		                                                    0, 0, range, forced).tile_instances;
+		caps.tile_budget = options.upscaling_factor > 1 && !options.super_sampled_readback;
+		if (caps.tile_budget)
+			LOGI("paraLLEl-RDP tile instances: %u (upstream %u, storage range %llu MB)\n",
+			     caps.max_num_tile_instances,
+			     options.upscaling_factor * options.upscaling_factor * Limits::MaxTileInstances,
+			     (unsigned long long)(range >> 20));
+	}
 
 #ifdef PARALLEL_RDP_SHADER_DIR
 	pipeline_worker.reset(new WorkerThread<Vulkan::DeferredPipelineCompile, PipelineExecutor>(
@@ -1064,12 +1138,11 @@ static std::pair<int32_t, int32_t> interpolate_x(const TriangleSetup &setup, int
 	return { clamp_int32(xleft), clamp_int32(xright) };
 }
 
-unsigned Renderer::compute_conservative_max_num_tiles(const TriangleSetup &setup) const
+unsigned Renderer::compute_conservative_max_num_tiles(const TriangleSetup &setup, int scaling) const
 {
 	if (setup.yl <= setup.yh)
 		return 0;
 
-	int scaling = int(caps.upscaling);
 	int start_y = setup.yh & ~(SUBPIXELS_Y - 1);
 	int end_y = (setup.yl - 1) | (SUBPIXELS_Y - 1);
 
@@ -1541,13 +1614,43 @@ void Renderer::draw_shaded_primitive(TriangleSetup &setup, const AttributeSetup 
 
 	fixup_triangle_setup(setup);
 
-	unsigned num_tiles = compute_conservative_max_num_tiles(setup);
+	unsigned num_tiles = compute_conservative_max_num_tiles(setup, int(caps.upscaling));
 
 #if 0
 	// Don't exit early, throws off seeding of noise channels.
 	if (!num_tiles)
 		return;
 #endif
+
+	// xboxrecomp-android patch (README): with the capped budget, flush before the primitive that would overflow it;
+	// one that alone exceeds it is drawn in a batch of its own at 1x only.
+	bool native_only = false;
+	if (!caps.ubershader && caps.tile_budget)
+	{
+		if (num_tiles > caps.max_num_tile_instances)
+		{
+			unsigned native_tiles = compute_conservative_max_num_tiles(setup, 1);
+			if (native_tiles > caps.max_num_tile_instances)
+			{
+				// Only with a forced tiny budget: the 1x budget holds a whole 1x screen of tiles.
+				LOGE("Primitive of %u tiles exceeds %u tile instances even at 1x, dropped.\n", native_tiles,
+				     caps.max_num_tile_instances);
+				return;
+			}
+			if (!caps.native_only_logged)
+			{
+				LOGW("Primitive of %u upscaled tiles exceeds %u tile instances, drawn at 1x (logged once).\n",
+				     num_tiles, caps.max_num_tile_instances);
+				caps.native_only_logged = true;
+			}
+			flush_queues();
+			stream.native_only = true;
+			native_only = true;
+			num_tiles = native_tiles;
+		}
+		else if (stream.max_shaded_tiles + num_tiles > caps.max_num_tile_instances)
+			flush_queues();
+	}
 
 	if (!caps.ubershader)
 		stream.max_shaded_tiles += num_tiles;
@@ -1589,7 +1692,7 @@ void Renderer::draw_shaded_primitive(TriangleSetup &setup, const AttributeSetup 
 		fb.depth_write_pending = true;
 	pending_primitives++;
 
-	if (need_flush())
+	if (native_only || need_flush())
 		flush_queues();
 }
 
@@ -1645,7 +1748,8 @@ bool Renderer::need_flush() const
 			stream.triangle_setup.full();
 	bool span_info_full =
 			(stream.span_info_jobs.size() * ImplementationConstants::DefaultWorkgroupSize + Limits::MaxHeight > Limits::MaxSpanSetups);
-	bool max_shaded_tiles =
+	// xboxrecomp-android patch (README): with the capped budget draw_shaded_primitive flushes before an overflow.
+	bool max_shaded_tiles = !caps.tile_budget &&
 			(stream.max_shaded_tiles + caps.max_tiles_x * caps.max_tiles_y > caps.max_num_tile_instances);
 
 #ifdef VULKAN_DEBUG
@@ -2551,6 +2655,7 @@ void Renderer::reset_context()
 	stream.span_info_offsets.reset();
 	stream.span_info_jobs.reset();
 	stream.max_shaded_tiles = 0;
+	stream.native_only = false; // xboxrecomp-android patch (README)
 
 	fb.deduced_height = 0;
 	fb.color_write_pending = false;
@@ -3062,6 +3167,10 @@ bool Renderer::render_pass_is_upscaled() const
 {
 	if (caps.super_sample_readback)
 		return true;
+
+	// xboxrecomp-android patch (README): a primitive too large for the tile-instance budget, drawn at 1x only.
+	if (stream.native_only)
+		return false;
 
 	bool need_render_pass = fb.width != 0 && fb.deduced_height != 0 && !stream.span_info_jobs.empty();
 	return need_render_pass && should_render_upscaled();

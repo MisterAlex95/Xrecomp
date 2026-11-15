@@ -4578,7 +4578,12 @@ BufferHandle Device::create_buffer(const BufferCreateInfo &create_info, const vo
 
 	bool need_init = initial || zero_initialize;
 	void *ptr = nullptr;
-	if (need_init && memory_type_is_host_visible(memory_type))
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): a large zero-initialized buffer in host-visible
+	// device memory (every memory type of Turnip, a unified-memory GPU) is cleared by a GPU fill, not a CPU memset of
+	// write-combined memory on the creating thread (paraLLEl-RDP's upscaled buffers: hundreds of MB).
+	const bool gpu_clear = zero_initialize && create_info.domain == BufferDomain::Device &&
+	                       create_info.size >= (VkDeviceSize(16) << 20);
+	if (need_init && memory_type_is_host_visible(memory_type) && !gpu_clear)
 		ptr = managers.memory.map_memory(allocation, MEMORY_ACCESS_WRITE_BIT, 0, allocation.get_size());
 
 	if (need_init && !ptr)
