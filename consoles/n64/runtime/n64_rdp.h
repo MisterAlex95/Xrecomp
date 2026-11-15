@@ -26,6 +26,12 @@ extern "C" {
  * libdragon look at the result. n is clamped to 1..N64_RDP_MAX_THREADS; returns the count in use. The environment
  * variable XBR_N64_RDP_THREADS sets it at n64_rdp_create (default N64_RDP_DEFAULT_THREADS). */
 int n64_rdp_set_threads(n64_rdp *d, int n);
+/* Called by each scanline-band thread as it starts (starting = 1) and just before it ends (0), on that thread: the
+ * runtime notes the thread there (n64_runtime: its fast cores put back after a resume, the performance hint session;
+ * recomp_host_worker_hook) so the RDP itself needs nothing of the host. Process-wide, for the threads started after
+ * the call; NULL (the default): none. */
+typedef void (*n64_rdp_thread_hook)(int starting, void *user);
+void n64_rdp_set_thread_hook(n64_rdp_thread_hook fn, void *user);
 /* Draws whatever is batched (no-op with one thread). */
 void n64_rdp_flush(n64_rdp *d);
 /* The two hidden RDRAM bits of each 16-bit word (the low bits of a 16-bit pixel's coverage), one byte per word:

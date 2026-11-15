@@ -37,6 +37,20 @@ exit for the next Prepare (`gba_runtime_opts.discovered_path`). Import filter (`
 content decides (Xbox volume magic `MICROSOFT*XBOX*MEDIA` first, then an ISO 9660 volume with system ID
 `PLAYSTATION`). CHD is accepted by name but not read yet (no title key).
 
+**Cores and clocks on Android.** The app shell puts the runtime on the fast cores before it starts
+(`recomp_host_cpus_init`, `RECOMP_BIG_CORES`), and every runtime thread inherits them. The threads a frame waits on
+(the N64 software RDP's scanline bands, the PS1 GPU's shadow-pass workers) call a thread hook as they start and end
+(`n64_rdp_set_thread_hook`, `ps1_gpu_set_thread_hook`; the devices stay free of host code): the runtime's hook,
+`recomp_host_worker_hook` (`src/platform/host_perf_hint.h`), has `host_cpus` note them, so after the app comes back
+from the background (Home, a notification), when the 5.15 kernel of the AYN Thor has left them on the little cores,
+`recomp_lifecycle_resume` puts them back (XBA-50). The frame loop of each runtime (GBA, PS1, N64) is an ADPF
+performance hint session (`APerformanceHint`, Android 13+, looked up in libandroid.so at run time; a no-op before and
+off Android) together with those workers: its target is the frame period, and each frame reports the time it spent
+working, not the sleep to the next deadline, so the governor raises the clocks only as far as the frames need. The
+frame loop and the workers also run at a display thread's priority (nice -8). The log says
+`perf hint: ADPF session open for N thread(s), target 16.68 ms per frame`. paraLLEl-RDP's own threads (the Vulkan
+RDP's command and timeline threads) are not in the session nor tracked.
+
 CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1` and `XBR_CONSOLE_N64` are ON by default on Linux and macOS and OFF
 on Android and Windows. A console is turned on for Android once it is ready: the GBA (XBA-157), the PS1 (XBA-168) and
 the N64 (XBA-174) are.
@@ -512,7 +526,8 @@ that starts more than half a frame late or while the audio queue is about to run
 one frame in N + 1; `0` never. A skipped frame still runs whole (CPU, RSP, the RDP drawing into RDRAM, which games
 read back) and makes its audio: only `n64_display` and the present are skipped. The RDP's
 scanline-band threads (`n64_rdp_set_threads`): `RECOMP_N64_RDP_THREADS`, else 2 on Android, else the core's
-(`XBR_N64_RDP_THREADS`, else 1). Saves: `<save dir>/n64-<KEY>/game.eep` (EEPROM 4K 512 B / 16K 2 KB), `game.sra` (SRAM
+(`XBR_N64_RDP_THREADS`, else 1); they are put back on the fast cores after a resume and share the frame loop's
+performance hint session (« Cores and clocks on Android » above). Saves: `<save dir>/n64-<KEY>/game.eep` (EEPROM 4K 512 B / 16K 2 KB), `game.sra` (SRAM
 32 KB), `game.fla` (FlashRAM 128 KB), `pak1.mpk`..`pak4.mpk` (controller paks, 32 KB): raw images, the files
 mupen64plus and ares use (rename to copy one in). A cartridge save on disk is read before the first frame and also
 fixes the save type (an `.eep`'s size picks 4K or 16K unless the header says; a 2 KB `.eep` for a 4K game gives its

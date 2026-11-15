@@ -37,6 +37,7 @@
 #include "host_window.h"
 #include "n64_core.h"
 #include "n64_pack.h"
+#include "host_perf_hint.h"
 #include "n64_rdp.h"
 #include "recomp_cheats.h"
 #include "recomp_exit_hook.h"
@@ -1102,6 +1103,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
         sha_ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
     }
     char err[256] = "";
+    /* The RDP's band threads, as they start: their fast cores put back after a resume, the performance hint. */
+    n64_rdp_set_thread_hook(recomp_host_worker_hook, NULL);
     n64_machine *m = n64_create(rom, rom_n, &mo, err, sizeof err);
     free(rom);
     if (!m) {
@@ -1268,6 +1271,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     pthread_mutex_unlock(&s_mu);
     pm_line = pm_run;
     uint64_t p_worst = 0, p_worst_run = 0, p_iter = 0, p_iter_idle = 0, p_paused_at = 0, p_frame_ns = 16683333;
+    recomp_perf_hint_begin(16683333); /* the frame period; each frame's own below */
 
     for (;;) {
         int running = 1;
@@ -1329,6 +1333,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
             p_iter = it;
             p_iter_idle = 0;
         }
+        uint64_t work_t0 = now_ns(); /* the frame's work, for the performance hint (the sleep after it is not) */
 
         pad_in pads[4];
         uint32_t hk_held = 0, hk_pressed = 0;
@@ -1515,6 +1520,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
         }
         if (o->frames && frames >= o->frames)
             break;
+        recomp_perf_hint_frame((int64_t)(now_ns() - work_t0), (int64_t)frame_ns);
 
         if (!o->unpaced && !(ff && !speed)) {
             next += frame_ns;
@@ -1540,6 +1546,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
         }
     }
 
+    recomp_perf_hint_end();
     uint64_t t_end = now_ns();
     double secs = (double)(t_end - t0) / 1e9;
     printf("n64: %llu frames in %.1f s (%.2f fps), %llu skipped, %llu late resets\n", (unsigned long long)frames, secs,

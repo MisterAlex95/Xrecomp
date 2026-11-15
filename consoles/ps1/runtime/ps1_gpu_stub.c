@@ -134,6 +134,12 @@ int ps1_gpu_upscale(ps1_gpu *g)
     return 1;
 }
 
+void ps1_gpu_set_thread_hook(ps1_gpu_thread_hook fn, void *user)
+{
+    (void)fn;
+    (void)user;
+}
+
 int ps1_gpu_set_threads(ps1_gpu *g, int n)
 {
     (void)g;
