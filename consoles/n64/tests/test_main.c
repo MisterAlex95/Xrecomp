@@ -419,10 +419,18 @@ static void test_perf_format(void)
     p.worst_queue_ms = 9.0;
     p.worst_sync_ms = 8.0;
     p.worst_scanout_ms = 3.0;
+    p.worst_deadline_ms = 0.2;
+    p.scanouts_early = 160;
+    p.dp_deferred = 160;
+    p.dp_now = 7;
+    p.dp_early = 1;
+    p.dp_waits = 12;
+    p.dp_wait_ms = 3.5;
     n64_runtime_perf_detail_format(&p, line, sizeof line);
-    CHECK(strcmp(line, "500 VIs, 167 pictures (16.7/s), 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts, "
-                       "40 full rings; 2 stalled compiles (70 ms); worst 40 ms: core 30.1 vi 7.2 present 1.8 audio "
-                       "0.1 other 1.0 (rdp queue 9.0, sync 8.0, scanout 3.0)") == 0);
+    CHECK(strcmp(line, "500 VIs, 167 pictures (16.7/s), 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts "
+                       "(160 early), 40 full rings; DP 160 deferred (1 early, 0 backoffs), 7 at once, 12 waited 3.5 "
+                       "ms (0.02 ms each); 2 stalled compiles (70 ms); worst 40 ms: core 30.1 vi 7.2 present 1.8 "
+                       "audio 0.1 other 1.0 (rdp queue 9.0, sync 8.0, deadline 0.2, scanout 3.0)") == 0);
     if (failures)
         printf("detail line: %s\n", line);
 }

@@ -129,6 +129,8 @@ static pthread_mutex_t s_last_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t *s_last;
 static size_t s_last_cap;
 static int s_last_w, s_last_h, s_last_anum, s_last_aden;
+static host_window_last_fn s_last_fn; /* host_window_present_rgba_shared: the caller has the picture */
+static void *s_last_user;
 
 static int env_set(const char *name)
 {
@@ -516,6 +518,20 @@ static void keep_last(const uint8_t *px, int w, int h, int pitch)
     s_last_h = h;
     s_last_anum = s_aspect_num;
     s_last_aden = s_aspect_den;
+    s_last_fn = NULL;
+    pthread_mutex_unlock(&s_last_mu);
+}
+
+/* host_window_present_rgba_shared: no copy, the caller's `last` gives the picture on demand. */
+static void keep_shared(host_window_last_fn fn, void *user, int w, int h)
+{
+    pthread_mutex_lock(&s_last_mu);
+    s_last_fn = fn;
+    s_last_user = user;
+    s_last_w = w;
+    s_last_h = h;
+    s_last_anum = s_aspect_num;
+    s_last_aden = s_aspect_den;
     pthread_mutex_unlock(&s_last_mu);
 }
 
@@ -796,6 +812,45 @@ int host_window_present_rgba(const void *px, int w, int h, int pitch)
     return upload_draw(px, w, h, pitch);
 }
 
+int host_window_present_rgba_shared(const void *px, int w, int h, int pitch, host_window_last_fn last, void *user)
+{
+    if (!s_win || !px || w <= 0 || h <= 0 || pitch < w * 4)
+        return 0;
+    if (last)
+        keep_shared(last, user, w, h);
+    else
+        keep_last(px, w, h, pitch);
+#if defined(XBOXRECOMP_LSFG)
+    if (fg_present(px, w, h, pitch))
+        return 1;
+#endif
+    return upload_draw(px, w, h, pitch);
+}
+
+/* The shared picture as a kept copy (the caller's pixels are about to go). */
+void host_window_keep_shared(void)
+{
+    pthread_mutex_lock(&s_last_mu);
+    host_window_last_fn fn = s_last_fn;
+    void *user = s_last_user;
+    int anum = s_last_anum, aden = s_last_aden;
+    s_last_fn = NULL;
+    pthread_mutex_unlock(&s_last_mu);
+    uint8_t *px = NULL;
+    int w = 0, h = 0;
+    if (!fn || fn(user, &px, &w, &h) != 0 || !px) {
+        free(px);
+        return;
+    }
+    int keep_num = s_aspect_num, keep_den = s_aspect_den;
+    s_aspect_num = anum; /* the shape it was shown at */
+    s_aspect_den = aden;
+    keep_last(px, w, h, w * 4);
+    s_aspect_num = keep_num;
+    s_aspect_den = keep_den;
+    free(px);
+}
+
 int host_window_present_again(void)
 {
     if (!s_win || !s_again_tex)
@@ -970,15 +1025,23 @@ int host_window_screenshot_bmp(const char *path)
     if (!path || !path[0])
         return -1;
     pthread_mutex_lock(&s_last_mu);
+    host_window_last_fn fn = s_last_fn;
+    void *user = s_last_user;
     w = s_last_w;
     h = s_last_h;
     anum = s_last_anum;
     aden = s_last_aden;
-    if (s_last && w > 0 && h > 0 && (px = malloc((size_t)w * h * 4)))
+    if (!fn && s_last && w > 0 && h > 0 && (px = malloc((size_t)w * h * 4)))
         memcpy(px, s_last, (size_t)w * h * 4);
     pthread_mutex_unlock(&s_last_mu);
-    if (!px)
+    if (fn && fn(user, &px, &w, &h) != 0) { /* the caller's picture (host_window_present_rgba_shared) */
+        free(px);
+        px = NULL;
+    }
+    if (!px || w <= 0 || h <= 0) {
+        free(px);
         return -1;
+    }
 
     /* The shape it was shown at: the height kept and the width following, or the width kept when that would
      * make it narrower than it is. */
@@ -1073,6 +1136,7 @@ void host_window_close(void)
     s_last = NULL;
     s_last_cap = 0;
     s_last_w = s_last_h = 0;
+    s_last_fn = NULL;
     pthread_mutex_unlock(&s_last_mu);
     SDL_DelEventWatch(lifecycle_watch, NULL);
     host_pad_shutdown();

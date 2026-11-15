@@ -667,6 +667,12 @@ int main(int argc, char **argv)
                (double)p.rdp_scanout_ns / 1e6 / nf, (double)p.rsp_instructions / nf, (double)p.rdp_commands / nf,
                (double)p.rdp_full_syncs / nf, (unsigned long long)p.rdp_stalled_compiles,
                (double)p.rdp_stalled_compile_ns / 1e6);
+        printf("perf: DP %llu deferred, %llu at once, %llu early, %llu backoffs; %llu deadline waits %.1f ms; %llu "
+               "early scanouts of %llu scanouts (%llu started)\n",
+               (unsigned long long)p.dp_deferred, (unsigned long long)p.dp_now, (unsigned long long)p.dp_early,
+               (unsigned long long)p.dp_backoffs, (unsigned long long)p.rdp_dp_waits, (double)p.rdp_dp_wait_ns / 1e6,
+               (unsigned long long)p.rdp_prefetch_hits, (unsigned long long)p.rdp_scanouts,
+               (unsigned long long)p.rdp_prefetches);
     }
     if (pack && stats) {
         n64_recomp_stats st;

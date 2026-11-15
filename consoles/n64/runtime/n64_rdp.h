@@ -102,6 +102,11 @@ typedef struct n64_rdp_stats {
     uint64_t queue_waits, queue_ns;
     uint64_t scanouts, scanout_ns;
     uint64_t stalled_compiles, stalled_compile_ns;
+    /* Deferred DP interrupts (n64_rdp_dp_complete): those completed, and the emulation thread's wait for the GPU at
+     * their completion (not in wait_ns; the Vulkan RDP only). */
+    uint64_t dp_completed, dp_waits, dp_wait_ns;
+    /* Early scanouts (n64_rdp_scanout_prefetch) started, and those n64_rdp_scanout took (among scanouts). */
+    uint64_t prefetches, prefetch_hits;
 } n64_rdp_stats;
 void n64_rdp_get_stats(n64_rdp *d, n64_rdp_stats *out);
 
@@ -116,6 +121,31 @@ uint64_t n64_rdp_run_ns(const n64_rdp *d);
  * pixels are still being drawn has changed. Back ends that cannot tell (the software RDP, whose pixels land at its
  * commits) are flushed instead, which reports them. */
 int n64_rdp_unreported(n64_rdp *d, uint32_t lo, uint32_t hi);
+
+/* A SYNC_FULL whose DP interrupt the core deferred (n64_devices.h bus.defer_dp; n64_core.c « Deferred DP interrupt »)
+ * completes: the GPU's work is waited for, the rows it drew are reported through bus.wrote, the busy bits clear and
+ * the DP interrupt is raised. Nothing when none is pending. A back end that cannot defer (the software RDP; a failed
+ * Vulkan RDP replaced since) raises the interrupt. n64_rdp_flush waits for the GPU too but leaves the interrupt to
+ * its deadline: what the game sees never depends on when the host flushes. */
+void n64_rdp_dp_complete(n64_rdp *d);
+/* Tests and n64_run (RECOMP_N64_RDP_DEFER_SOFTWARE=1): the software RDPs created from now on ask bus.defer_dp at each
+ * SYNC_FULL too (their pixels are drawn at once, only the interrupt is held), so the policy runs without a GPU. */
+void n64_rdp_set_defer_software(int on);
+
+/* Early scanout (the Vulkan RDP, upscaled): when the game changes VI_ORIGIN the GPU has usually nothing queued, while
+ * by the end of that VI frame it holds the next picture's work (a scanout queues behind it). n64_rdp_scanout_prefetch
+ * starts the scanout of the picture the registers show (vi, field; RDRAM [lo, hi) is what it reads) at once, without
+ * waiting, when the RDP has nothing queued since its last wait; n64_rdp_scanout then takes it when the registers and
+ * field are the same and the RDP drew nothing into [lo, hi) since (else a fresh scanout). n64_rdp_scanout_forget drops
+ * it (the CPU wrote there). Nothing elsewhere. */
+void n64_rdp_scanout_prefetch(n64_rdp *d, const uint32_t *vi, uint32_t field, uint32_t lo, uint32_t hi);
+/* n64_rdp_scanout without its copy: *rgba points at the back end's own picture, RGBA8 bytes (r, g, b, a; the alpha
+ * is the VI's, not always 255: show it opaque), *w x *h pixels, rows *pitch bytes apart, read where the GPU wrote it.
+ * Valid until the second scanout after this one (two buffers in turn; an early scanout counts) and while the RDP
+ * lives. 0, or -1 (no scanout, the VI shows nothing). */
+int n64_rdp_scanout_rgba(n64_rdp *d, const uint32_t *vi, uint32_t field, const uint8_t **rgba, int *w, int *h,
+                         int *pitch);
+void n64_rdp_scanout_forget(n64_rdp *d);
 
 #ifdef __cplusplus
 }
