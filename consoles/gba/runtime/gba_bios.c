@@ -240,35 +240,51 @@ static void arctan2(gba_machine *m, int32_t x, int32_t y)
         R[1] = (uint32_t)y;
 }
 
+/* CpuSet / CpuFastSet as the BIOS runs them (its loops: LDRH / STRH, LDM / STM, LDR / STR; Cult-of-GBA's
+ * bios_calls/cpu_set.s, MIT): unaligned addresses behave as those instructions do (a rotated LDRH / LDR, LDM / STM
+ * aligned, the save chip's 8-bit bus seeing the whole address). */
+static inline uint32_t ror32b(uint32_t v, unsigned n)
+{
+    n &= 31;
+    return n ? (v >> n) | (v << (32 - n)) : v;
+}
+static uint32_t ldrh_rot(gba_machine *m, uint32_t a) { return ror32b(gba_read16(m, a, true), (a & 1) * 8); }
+static uint32_t ldr_rot(gba_machine *m, uint32_t a) { return ror32b(gba_read32(m, a, true), (a & 3) * 8); }
+
 static void cpu_set(gba_machine *m, uint32_t src, uint32_t dst, uint32_t ctl)
 {
     uint32_t count = ctl & 0x1FFFFF;
     bool fill = ctl & (1u << 24);
     if (ctl & (1u << 26)) {
-        src &= ~3u;
-        dst &= ~3u;
-        uint32_t v = fill ? rd32m(m, src) : 0;
-        for (uint32_t i = 0; i < count; i++) {
-            if (!fill)
-                v = rd32m(m, src + 4 * i);
-            gba_write32(m, dst + 4 * i, v, true);
+        uint32_t v = fill ? ldr_rot(m, src) : 0;
+        for (uint32_t i = 0; i < count; i++, dst += 4) {
+            if (fill) {
+                gba_write32(m, dst, v, true); /* STR */
+            } else {
+                gba_write32(m, dst & ~3u, gba_read32(m, (src + 4 * i) & ~3u, true), true); /* LDMIA / STMIA */
+            }
         }
     } else {
-        src &= ~1u;
-        dst &= ~1u;
-        uint16_t v = fill ? (uint16_t)rd16m(m, src) : 0;
-        for (uint32_t i = 0; i < count; i++) {
+        uint16_t v = fill ? (uint16_t)ldrh_rot(m, src) : 0;
+        for (uint32_t i = 0; i < count; i++, dst += 2) {
             if (!fill)
-                v = (uint16_t)rd16m(m, src + 2 * i);
-            gba_write16(m, dst + 2 * i, v, true);
+                v = (uint16_t)ldrh_rot(m, src + 2 * i);
+            gba_write16(m, dst, v, true);
         }
     }
 }
 
 static void cpu_fast_set(gba_machine *m, uint32_t src, uint32_t dst, uint32_t ctl)
 {
-    uint32_t count = ((ctl & 0x1FFFFF) + 7) & ~7u;
-    cpu_set(m, src, dst, (ctl & (1u << 24)) | (1u << 26) | count);
+    uint32_t count = ((ctl & 0x1FFFFF) + 7) & ~7u; /* whole blocks of 8 words */
+    if (!(ctl & 0x1FFFFF))
+        return;
+    uint32_t v = (ctl & (1u << 24)) ? ldr_rot(m, src) : 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!(ctl & (1u << 24)))
+            v = gba_read32(m, (src + 4 * i) & ~3u, true);
+        gba_write32(m, (dst + 4 * i) & ~3u, v, true);
+    }
 }
 
 static void bg_affine_set(gba_machine *m, uint32_t src, uint32_t dst, uint32_t n)
