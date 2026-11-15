@@ -5,14 +5,16 @@
  * colour; signed or unsigned; bit 15 for 15-bit), 2 set the luminance (and colour) quant tables, 3 set the IDCT scale
  * table, 0 and 4..7 no function. The input is parsed one halfword at a time (run-length codes with the FE00h end /
  * padding code, quant scale, zigzag order, the q_scale = 0 mode without quantisation or zigzag), so a command may
- * arrive in any number of DMA blocks. Each block goes through the IDCT with the scale table of command 3 (two passes
- * of the 8x8 matrix product, 13 fractional bits of the table, rounding as psx-spx « real_idct_core »), then
- * YUV -> RGB (R = Y + 1.402 Cr, G = Y - 0.3437 Cb - 0.7143 Cr, B = Y + 1.772 Cb, 10-bit fixed point, saturated to
- * signed 8 bits) or the 9-bit clip and saturation of monochrome output.
+ * arrive in any number of DMA blocks; a block ends at its end code or its 64th coefficient. Each block goes through
+ * the IDCT with the scale table of command 3 (two passes of the 8x8 matrix product, 13 fractional bits of the table,
+ * coefficients with 4 fractional bits, 15 bits rounded off per pass), then YUV -> RGB (R = Y + 1.402 Cr,
+ * G = Y - 0.344 Cb - 0.714 Cr, B = Y + 1.772 Cb in 8-bit fixed point, the 9-bit clip, saturated to signed 8 bits; 15-bit
+ * output rounded) or the 9-bit clip and saturation of monochrome output (4-bit rounded). That precision reproduces
+ * the hardware's output of ps1-tests mdec/4bit exactly and mdec/8bit / frame to within one unit (XBA-200).
  *
- * Output (read from 1F801820h or DMA1): a colour macroblock comes out as the 16x16 picture in raster order, the
- * order DMA1 leaves in RAM (the hardware hands out four 8x8 blocks and DMA1 reorders them; reading the data register
- * by hand gets the raster order here too); 24-bit pixels are 3 bytes R, G, B packed into words, 15-bit pixels are
+ * Output (read from 1F801820h or DMA1): a colour macroblock comes out as its four 8x8 blocks, each row by row (what
+ * reading the data register gets), and DMA1 writes it to RAM as the 16x16 picture in raster order (XBA-200, ps1-tests
+ * mdec/frame's PIO and DMA builds); 24-bit pixels are 3 bytes R, G, B packed into words, 15-bit pixels are
  * halfwords; a monochrome block is 8x8 bytes (8-bit) or nibbles (4-bit, low nibble first). Status: output empty (31),
  * input full (30, never: the input is consumed at once), busy (29, parameters remaining), data-in / data-out requests
  * (28 / 27, when enabled by the control register), the command's depth / signed / bit-15 bits (26..23), the current
@@ -58,15 +60,23 @@ struct ps1_mdec {
 
 /* ---- output ------------------------------------------------------------------------------------------------- */
 
+/* Words in a colour macroblock (15-bit 128, 24-bit 192; 1 for monochrome output, which is never reordered). The
+ * output keeps colour macroblocks at multiples of it, so a read's place in its macroblock is out_pos % mb_words. */
+static size_t mb_words(const ps1_mdec *d)
+{
+    return d->depth == 3 ? 128 : d->depth == 2 ? 192 : 1;
+}
+
 static void out_word(ps1_mdec *d, uint32_t w)
 {
     if (d->out_pos == d->out_len)
         d->out_pos = d->out_len = 0;
     if (d->out_len == d->out_cap) {
-        if (d->out_pos > 0) {
-            memmove(d->out, d->out + d->out_pos, (d->out_len - d->out_pos) * sizeof *d->out);
-            d->out_len -= d->out_pos;
-            d->out_pos = 0;
+        size_t drop = d->out_pos - d->out_pos % mb_words(d);
+        if (drop > 0) {
+            memmove(d->out, d->out + drop, (d->out_len - drop) * sizeof *d->out);
+            d->out_len -= drop;
+            d->out_pos -= drop;
         }
         if (d->out_len == d->out_cap) {
             size_t cap = d->out_cap ? d->out_cap * 2 : 1024;
@@ -84,6 +94,16 @@ static int sat8(int v) { return v < -128 ? -128 : v > 127 ? 127 : v; }
 
 /* ---- IDCT --------------------------------------------------------------------------------------------------- */
 
+/* The 9-bit result of the second pass, saturated to signed 8 bits. */
+static int mask9(int32_t v)
+{
+    v &= 0x1FF;
+    return sat8(v & 0x100 ? v - 0x200 : v);
+}
+
+/* Coefficients carry 4 fractional bits (see rle_halfword), the table 13 (its entries >> 3); each pass rounds off 15
+ * bits, the first into 16 bits, the second into the 9-bit clip: the precision the hardware's output shows (ps1-tests
+ * mdec/4bit, 8bit and frame VRAM dumps match, XBA-200). The result (signed 8 bits) is back in blk. */
 static void idct(const ps1_mdec *d, int32_t blk[64])
 {
     int32_t tmp[64];
@@ -91,11 +111,11 @@ static void idct(const ps1_mdec *d, int32_t blk[64])
     for (int pass = 0; pass < 2; pass++) {
         for (int x = 0; x < 8; x++) {
             for (int y = 0; y < 8; y++) {
-                int64_t sum = 0;
+                int32_t sum = 0;
                 for (int z = 0; z < 8; z++)
-                    sum += (int64_t)src[y + z * 8] * (d->scale[x + z * 8] >> 3);
-                /* strip the 13 fractional bits, rounding half up */
-                dst[x + y * 8] = (int32_t)((sum + 0xFFF) >> 13);
+                    sum += src[y + z * 8] * (d->scale[x + z * 8] >> 3);
+                sum = (sum + 0x4000) >> 15;
+                dst[x + y * 8] = pass ? mask9(sum) : (int16_t)sum;
             }
         }
         int32_t *t = src;
@@ -109,28 +129,38 @@ static void idct(const ps1_mdec *d, int32_t blk[64])
 
 static void emit_mono(ps1_mdec *d, const int32_t *blk)
 {
-    uint8_t px[64];
-    for (int i = 0; i < 64; i++) {
-        int v = blk[i] & 0x1FF;
-        if (v & 0x100)
-            v -= 0x200; /* signed 9-bit */
-        v = sat8(v);
-        if (!d->sign)
-            v ^= 0x80;
-        px[i] = (uint8_t)v;
-    }
     if (d->depth == 1) {
+        uint8_t x = d->sign ? 0 : 0x80;
         for (int i = 0; i < 64; i += 4)
-            out_word(d, (uint32_t)px[i] | (uint32_t)px[i + 1] << 8 | (uint32_t)px[i + 2] << 16 |
-                            (uint32_t)px[i + 3] << 24);
+            out_word(d, (uint32_t)(uint8_t)(blk[i] ^ x) | (uint32_t)(uint8_t)(blk[i + 1] ^ x) << 8 |
+                            (uint32_t)(uint8_t)(blk[i + 2] ^ x) << 16 | (uint32_t)(uint8_t)(blk[i + 3] ^ x) << 24);
     } else {
+        /* 4 bits: the 8-bit value rounded (+8, capped at 127), its top nibble */
+        uint32_t x = d->sign ? 0 : 8;
         for (int i = 0; i < 64; i += 8) {
             uint32_t w = 0;
-            for (int j = 0; j < 8; j++)
-                w |= (uint32_t)(px[i + j] >> 4) << (4 * j);
+            for (int j = 0; j < 8; j++) {
+                int v = blk[i + j] + 8;
+                w |= (((uint32_t)(uint8_t)(v > 127 ? 127 : v) >> 4) ^ x) << (4 * j);
+            }
             out_word(d, w);
         }
     }
+}
+
+/* The raster word (16 x 16 picture, row by row) at block-order position i of an n-word macroblock (n = 128 or 192:
+ * 4 or 6 words per block row). */
+static size_t raster_word(size_t n, size_t i)
+{
+    size_t per = n / 32, blk = i / (n / 4), row = (i % (n / 4)) / per, w = i % per;
+    return ((blk >> 1) * 8 + row) * (per * 2) + (blk & 1) * per + w;
+}
+
+/* The inverse: the block-order position of raster word r. */
+static size_t block_word(size_t n, size_t r)
+{
+    size_t per = n / 32, row = r / (per * 2), c = r % (per * 2);
+    return ((row >> 3) * 2 + c / per) * (n / 4) + (row & 7) * per + c % per;
 }
 
 static void emit_colour(ps1_mdec *d)
@@ -140,33 +170,45 @@ static void emit_colour(ps1_mdec *d)
         for (int px = 0; px < 16; px++) {
             int c = (px >> 1) + (py >> 1) * 8;
             int cr = d->cr[c], cb = d->cb[c];
-            int r = (cr * 1436) >> 10;               /* 1.402 */
-            int g = (-cb * 352 - cr * 731) >> 10;    /* -0.3437, -0.7143 */
-            int b = (cb * 1815) >> 10;               /* 1.772 */
+            int r = (359 * cr + 0x80) >> 8;                                   /* 1.402 */
+            int g = ((-88 * cb & ~0x1F) + (-183 * cr & ~0x07) + 0x80) >> 8;  /* -0.344, -0.714 */
+            int b = (454 * cb + 0x80) >> 8;                                   /* 1.772 */
             int yv = d->y[(px >> 3) + (py >> 3) * 2][(px & 7) + (py & 7) * 8];
-            int R = sat8(yv + r), G = sat8(yv + g), B = sat8(yv + b);
-            if (!d->sign) {
-                R ^= 0x80;
-                G ^= 0x80;
-                B ^= 0x80;
-            }
-            rgb[px + py * 16][0] = (uint8_t)R;
-            rgb[px + py * 16][1] = (uint8_t)G;
-            rgb[px + py * 16][2] = (uint8_t)B;
+            /* unsigned values here (signed output: flipped again below) */
+            rgb[px + py * 16][0] = (uint8_t)(mask9(yv + r) ^ 0x80);
+            rgb[px + py * 16][1] = (uint8_t)(mask9(yv + g) ^ 0x80);
+            rgb[px + py * 16][2] = (uint8_t)(mask9(yv + b) ^ 0x80);
         }
     }
+    uint32_t words[192];
     if (d->depth == 2) {
         const uint8_t *p = &rgb[0][0];
+        uint32_t x = d->sign ? 0x80808080u : 0;
         for (int i = 0; i < 768; i += 4)
-            out_word(d, (uint32_t)p[i] | (uint32_t)p[i + 1] << 8 | (uint32_t)p[i + 2] << 16 | (uint32_t)p[i + 3] << 24);
+            words[i / 4] = ((uint32_t)p[i] | (uint32_t)p[i + 1] << 8 | (uint32_t)p[i + 2] << 16 |
+                            (uint32_t)p[i + 3] << 24) ^ x;
     } else {
-        uint16_t b15 = d->bit15 ? 0x8000 : 0;
+        /* 5 bits rounded ((c + 4) >> 3, capped); signed output flips each channel's top bit */
+        uint16_t x = (uint16_t)((d->bit15 ? 0x8000 : 0) | (d->sign ? 0x4210 : 0));
+        uint16_t px[2];
         for (int i = 0; i < 256; i += 2) {
-            uint16_t a = (uint16_t)((rgb[i][0] >> 3) | (rgb[i][1] >> 3) << 5 | (rgb[i][2] >> 3) << 10 | b15);
-            uint16_t b = (uint16_t)((rgb[i + 1][0] >> 3) | (rgb[i + 1][1] >> 3) << 5 | (rgb[i + 1][2] >> 3) << 10 | b15);
-            out_word(d, a | (uint32_t)b << 16);
+            for (int k = 0; k < 2; k++) {
+                int c5[3];
+                for (int ch = 0; ch < 3; ch++) {
+                    int v = (rgb[i + k][ch] + 4) >> 3;
+                    c5[ch] = v > 31 ? 31 : v;
+                }
+                px[k] = (uint16_t)((c5[0] | c5[1] << 5 | c5[2] << 10) ^ x);
+            }
+            words[i / 2] = px[0] | (uint32_t)px[1] << 16;
         }
     }
+    /* the hardware hands the macroblock out as its four 8x8 blocks (top left, top right, bottom left, bottom
+     * right), each row by row: what a read of the data register gets (ps1-tests mdec/frame's PIO build swizzles
+     * that); DMA1 puts them back in raster order (ps1_mdec_dma_read) */
+    size_t n = mb_words(d);
+    for (size_t i = 0; i < n; i++)
+        out_word(d, words[raster_word(n, i)]);
 }
 
 static int colour(const ps1_mdec *d) { return d->depth >= 2; }
@@ -180,7 +222,7 @@ static void block_done(ps1_mdec *d)
     }
     int16_t *dst = d->blk_index == 0 ? d->cr : d->blk_index == 1 ? d->cb : d->y[d->blk_index - 2];
     for (int i = 0; i < 64; i++)
-        dst[i] = (int16_t)(d->blk[i] < -32768 ? -32768 : d->blk[i] > 32767 ? 32767 : d->blk[i]);
+        dst[i] = (int16_t)d->blk[i]; /* signed 8 bits */
     if (++d->blk_index == 6) {
         d->blk_index = 0;
         emit_colour(d);
@@ -189,9 +231,19 @@ static void block_done(ps1_mdec *d)
 
 static int32_t s10(uint16_t n) { return (int32_t)((n & 0x3FF) ^ 0x200) - 0x200; }
 
+/* A coefficient with 4 fractional bits: c * q (AC: (c * q) >> 3), rounded half a unit toward zero, saturated to
+ * 15 bits; q = 0 (q_scale 0 mode, or a 0 table entry): c * 2. */
+static int32_t coef(int32_t c, int32_t q, int ac)
+{
+    if (!q)
+        return c * 32;
+    int32_t v = (ac ? (c * q) >> 3 : c * q) * 16;
+    return v + (c > 0 ? -8 : c < 0 ? 8 : 0);
+}
+
 static void store(ps1_mdec *d, int32_t val)
 {
-    val = val < -0x400 ? -0x400 : val > 0x3FF ? 0x3FF : val;
+    val = val < -0x4000 ? -0x4000 : val > 0x3FFF ? 0x3FFF : val;
     if (d->qscale)
         d->blk[d->zagzig[d->k]] = val;
     else
@@ -208,14 +260,16 @@ static void rle_halfword(ps1_mdec *d, uint16_t n)
         d->k = 0;
         d->qscale = (n >> 10) & 0x3F;
         d->in_block = 1;
-        store(d, d->qscale ? s10(n) * qt[0] : s10(n) * 2);
+        store(d, coef(s10(n), d->qscale ? qt[0] : 0, 0));
         return;
     }
     d->k += ((n >> 10) & 0x3F) + 1;
     if (d->k <= 63) {
-        int32_t val = d->qscale ? (s10(n) * qt[d->k] * d->qscale + 4) / 8 : s10(n) * 2;
-        store(d, val);
-        return;
+        store(d, coef(s10(n), qt[d->k] * d->qscale, 1));
+        if (d->k < 63)
+            return;
+        /* the 64th coefficient ends the block without an end code (an FE00h after it is padding): ps1-tests
+         * mdec/4bit and 8bit's sanitized streams, decoded on the hardware (XBA-200) */
     }
     d->in_block = 0;
     block_done(d);
@@ -363,7 +417,15 @@ void ps1_mdec_dma_write(ps1_mdec *d, const uint32_t *words, size_t n)
 
 size_t ps1_mdec_dma_read(ps1_mdec *d, uint32_t *words, size_t n)
 {
-    size_t got = 0;
+    size_t got = 0, mb = mb_words(d);
+    if (mb > 1) {
+        /* DMA1 writes a colour macroblock's blocks back in raster order */
+        while (got < n && d->out_pos < d->out_len) {
+            size_t base = d->out_pos - d->out_pos % mb, k = base + block_word(mb, d->out_pos % mb);
+            words[got++] = k < d->out_len ? d->out[k] : 0;
+            d->out_pos++;
+        }
+    }
     while (got < n && d->out_pos < d->out_len)
         words[got++] = d->out[d->out_pos++];
     for (size_t i = got; i < n; i++)
@@ -376,19 +438,21 @@ size_t ps1_mdec_dma_read(ps1_mdec *d, uint32_t *words, size_t n)
 /* The decoder (tables, command, block in progress), then the output words not read yet. */
 size_t ps1_mdec_state_size(ps1_mdec *d)
 {
-    return sizeof(ps1_mdec) + (d->out_len - d->out_pos) * sizeof(uint32_t);
+    size_t base = d->out_pos - d->out_pos % mb_words(d); /* from the macroblock being read */
+    return sizeof(ps1_mdec) + (d->out_len - base) * sizeof(uint32_t);
 }
 
 void ps1_mdec_state_save(ps1_mdec *d, uint8_t *out)
 {
     ps1_mdec c = *d;
+    size_t base = d->out_pos - d->out_pos % mb_words(d);
     c.out = NULL;
-    c.out_len -= c.out_pos;
-    c.out_pos = 0;
+    c.out_len -= base;
+    c.out_pos -= base;
     c.out_cap = 0;
     memcpy(out, &c, sizeof c);
     if (c.out_len)
-        memcpy(out + sizeof c, d->out + d->out_pos, c.out_len * sizeof(uint32_t));
+        memcpy(out + sizeof c, d->out + base, c.out_len * sizeof(uint32_t));
 }
 
 int ps1_mdec_state_load(ps1_mdec *d, const uint8_t *in, size_t n)
@@ -397,7 +461,7 @@ int ps1_mdec_state_load(ps1_mdec *d, const uint8_t *in, size_t n)
     if (n < sizeof c)
         return -1;
     memcpy(&c, in, sizeof c);
-    if (c.out_pos != 0 || n != sizeof c + c.out_len * sizeof(uint32_t))
+    if (c.out_pos > c.out_len || n != sizeof c + c.out_len * sizeof(uint32_t))
         return -1;
     uint32_t *buf = d->out;
     size_t cap = d->out_cap;

@@ -1,7 +1,8 @@
 /* ps1_gpu.c -- the PlayStation GPU (Plane P-7, XBA-165): GP0 / GP1, GPUSTAT / GPUREAD, 1 MB VRAM, a software
  * rasterizer and the display output, behind the GPU part of ps1_devices.h.
  *
- * Behaviour follows psx-spx (nocash); structure is our own. Commands run as soon as their last word arrives, so the
+ * Behaviour follows psx-spx (nocash) and the hardware VRAM dumps of JaCzekanski's ps1-tests (XBA-200: their GPU
+ * programs match pixel for pixel, consoles/ps1/tests ps1_jcz_gpu_*); structure is our own. Commands run as soon as their last word arrives, so the
  * GPU is never busy: GPUSTAT reports ready for commands, DMA blocks and (during a VRAM->CPU transfer) GPUREAD.
  *
  * Rasterization (hardware rules where known):
@@ -9,12 +10,16 @@
  *     |dy| >= 512 is not drawn; a quad is the triangles (v0 v1 v2) and (v1 v2 v3), each culled on its own;
  *   - coverage samples pixel corners with the top-left rule: rows [ytop, ybottom), columns [ceil(xleft),
  *     ceil(xright)), exact integer edge walking (no right column, no bottom row, shared edges drawn once);
- *   - colours and texture coordinates are planes over the triangle (16.16 gradients per triangle), so quads show the
- *     hardware's per-triangle shading seam;
+ *   - colours and texture coordinates are planes over the triangle, so quads show the hardware's per-triangle
+ *     shading seam; the hardware's precision: gradients in 1/4096 truncated, stepped from the leftmost vertex's
+ *     value plus a half;
  *   - textures 4 / 8 bpp through a CLUT and 15 bpp, texture page and window, texel 0000h transparent, bit 15 selects
- *     semi-transparency; modulation (texel * colour) / 128 clamped;
- *   - semi-transparency B/2+F/2, B+F, B-F, B+F/4 on 5-bit channels; dithering (4x4 matrix) only for gouraud-shaded
- *     or texture-modulated polygons and gouraud lines, when GP0(E1h) bit 9 is set; rectangles never dither;
+ *     semi-transparency; modulation (texel * colour) / 128 clamped; the CLUT goes through the GPU's CLUT cache
+ *     (kept while the CLUT position and the entries needed allow, cleared by GP0(01h)); a rectangle flipped in x
+ *     starts at u0 + 1;
+ *   - lines step in 32.32 with steps rounded away from zero, both ends drawn;
+ *   - semi-transparency B/2+F/2, B+F, B-F, B+F/4 on 5-bit channels; dithering (4x4 matrix) for gouraud-shaded or
+ *     texture-modulated polygons and every line, when GP0(E1h) bit 9 is set; rectangles never dither;
  *   - mask bit: GP0(E6h) set (bit 15 forced on written pixels) and check (pixels with bit 15 are kept);
  *   - drawing area clip (inclusive), interlaced 480-line mode skips the displayed field's lines unless GP0(E1h)
  *     bit 10 allows drawing to the displayed area.
@@ -113,6 +118,14 @@ struct ps1_gpu {
     int up;        /* log2 of the factor: 0, 1 or 2 */
     int threads;   /* workers wanted for the shadow pass (-1: by the host's cores) */
     struct gpu_pool *pool; /* those workers, while upscaled */
+
+    /* The CLUT cache (XBA-200): the palette a 4 / 8 bpp primitive loaded, kept until a primitive needs another CLUT
+     * position or more entries (4 bpp loads 16, 8 bpp 256) or GP0(01h) clears it; VRAM writes do not reach it
+     * (ps1-tests gpu/clut-cache's hardware dump). Outside the state (states keep their size): a state loaded starts
+     * with it empty, the next primitive loads it from VRAM. */
+    uint16_t clut_cache[256];
+    uint32_t clut_tag; /* the CLUT attribute loaded */
+    int clut_n;        /* entries loaded: 0 (empty), 16 or 256 */
 };
 
 /* A state is the GPU up to the shadow: the size it had before XBA-184 (vram ends where the struct's alignment puts
@@ -393,11 +406,16 @@ static span_fn raster_setup(ps1_gpu *g, raster *rs, const prim *p, uint32_t flat
     rs->tw_and_v = ~(my * 8) & 0xFF;
     rs->tw_or_v = (oy & my) * 8;
     if (depth < 2) {
-        unsigned cx = (p->clut & 0x3F) * 16, cy = (p->clut >> 6) & 0x1FF;
         int n = depth == 0 ? 16 : 256;
-        const uint16_t *src = g->vram + cy * VRAM_W;
-        for (int i = 0; i < n; i++)
-            rs->clut[i] = src[(cx + i) & (VRAM_W - 1)];
+        if (g->clut_n < n || g->clut_tag != (p->clut & 0x7FFF)) {
+            unsigned cx = (p->clut & 0x3F) * 16, cy = (p->clut >> 6) & 0x1FF;
+            const uint16_t *src = g->vram + cy * VRAM_W;
+            for (int i = 0; i < n; i++)
+                g->clut_cache[i] = src[(cx + i) & (VRAM_W - 1)];
+            g->clut_tag = p->clut & 0x7FFF;
+            g->clut_n = n;
+        }
+        memcpy(rs->clut, g->clut_cache, (size_t)n * sizeof rs->clut[0]);
     }
     int shade = p->raw ? 0 : p->gouraud ? 2 : 1;
     /* Flat modulation by 808080h without dithering is the texel itself. */
@@ -461,15 +479,19 @@ static int raster_tri(ps1_gpu *g, const target *tg, const vtx *a, const vtx *b, 
     span_fn span = raster_setup(g, &rs, p, flat);
     int flattened = 0;
 
-    /* Attribute planes: A(x, y) = base + dAdx * x + dAdy * y, 16.16, rounded to nearest. */
+    /* Attribute planes: A(x, y) = base + dAdx * x + dAdy * y, the hardware's way (ps1-tests gpu/triangle and
+     * gpu/uv-interpolation's VRAM dumps, XBA-200): gradients in 1/4096 truncated toward zero, the value at the
+     * "core" vertex (the leftmost; ties as below) plus a half, stepped from there. Kept as 16.16 (exact: the 1/4096
+     * values shifted). */
+    const vtx *cv = (b->x <= a->x) ? ((c->x <= b->x) ? c : b) : (c->x < a->x) ? c : a;
     int64_t base_r = 0, base_g = 0, base_b = 0, base_u = 0, base_v = 0;
     int32_t dy_r = 0, dy_g = 0, dy_b = 0, dy_u = 0, dy_v = 0;
 #define PLANE(A, DX, DY, BASE)                                                                                     \
     do {                                                                                                          \
         int d1 = b->A - a->A, d2 = c->A - a->A;                                                                   \
-        DX = sat32((((int64_t)d1 * y20 - (int64_t)d2 * y10) * 65536) / area);                                     \
-        DY = sat32((((int64_t)x10 * d2 - (int64_t)x20 * d1) * 65536) / area);                                     \
-        BASE = ((int64_t)a->A << 16) - (int64_t)DX * a->x - (int64_t)DY * a->y + 0x8000;                          \
+        DX = sat32((((int64_t)d1 * y20 - (int64_t)d2 * y10) * 4096) / area * 16);                                 \
+        DY = sat32((((int64_t)x10 * d2 - (int64_t)x20 * d1) * 4096) / area * 16);                                 \
+        BASE = ((int64_t)cv->A << 16) + 0x8000 - (int64_t)DX * cv->x - (int64_t)DY * cv->y;                       \
     } while (0)
     if (p->gouraud && !(p->textured && p->raw)) {
         PLANE(r, rs.drdx, dy_r, base_r);
@@ -636,7 +658,10 @@ static void raster_rect(ps1_gpu *g, const target *tg, raster *rs, span_fn span, 
         return;
     int skip_field = skip_field_line(g);
     uint32_t k = (uint32_t)(x0 - rx);
-    uint32_t u = ((uint32_t)u0 << 16) + (flipx ? (uint32_t)bias - k * (uint32_t)step : k * (uint32_t)step);
+    /* x-flipped, the hardware starts one texel right of u0 (u0 + 1, u0, u0 - 1, ...; y-flipped: v0, v0 - 1, ...):
+     * ps1-tests gpu/texture-flip's hardware VRAM dump (XBA-200) */
+    uint32_t u = ((uint32_t)(u0 + flipx) << 16) +
+                 (flipx ? (uint32_t)bias - k * (uint32_t)step : k * (uint32_t)step);
     for (int yy = y0; yy < y1; yy++) {
         if (skip_field && ((yy >> s) & 1) == g->field)
             continue;
@@ -942,7 +967,7 @@ static void line_hi(ps1_gpu *g, int x0, int y0, uint32_t c0, int x1, int y1, uin
             bstep = ((int)((c1 >> 16) & 0xFF) - (int)((c0 >> 16) & 0xFF)) * 65536 / n;
         }
     }
-    const int8_t (*dm)[4] = (gour && (g->e1 & 0x200)) ? dither_matrix : dither_none;
+    const int8_t (*dm)[4] = (g->e1 & 0x200) ? dither_matrix : dither_none; /* flat lines too */
     int mode = (g->e1 >> 5) & 3;
     uint16_t chk = g->check_mask ? 0x8000 : 0, setm = g->set_mask ? 0x8000 : 0;
     int skip_field = skip_field_line(g);
@@ -968,31 +993,46 @@ static void line_hi(ps1_gpu *g, int x0, int y0, uint32_t c0, int x1, int y1, uin
     }
 }
 
-/* Lines: max(|dx|, |dy|) + 1 pixels, both ends included, positions and colours stepped in fixed point. */
+/* A line's position step: delta / k in 32.32, rounded away from zero (the hardware's: a line from y to y + 1 over
+ * 80 pixels steps down at its exact middle; ps1-tests gpu/lines, XBA-200). */
+static inline int64_t line_step(int delta, int k)
+{
+    int64_t d = (int64_t)delta * 4294967296LL;
+    if (d < 0)
+        d -= k - 1;
+    else if (d > 0)
+        d += k - 1;
+    return d / k;
+}
+
+/* Lines: max(|dx|, |dy|) + 1 pixels, both ends included. Positions in 32.32 from the pixel centre (less 1024 in x,
+ * and in y when it decreases), colours in 20.12 from the half; steps rounded as the hardware does (gpu/lines' VRAM
+ * dump matches pixel for pixel). */
 static void draw_line(ps1_gpu *g, int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, int gour, int semi)
 {
     int dx = x1 - x0, dy = y1 - y0;
     if (iabs(dx) >= 1024 || iabs(dy) >= 512)
         return;
     int n = iabs(dx) > iabs(dy) ? iabs(dx) : iabs(dy);
-    const int64_t one = 4294967296LL; /* 32.32 */
-    int64_t xs = x0 * one + one / 2, ys = y0 * one + one / 2;
+    const int64_t half = 2147483648LL;
+    int64_t xs = x0 * 4294967296LL + half, ys = y0 * 4294967296LL + half;
     int64_t xstep = 0, ystep = 0;
-    int32_t r = (int32_t)((c0 & 0xFF) << 16) + 0x8000, gg = (int32_t)(((c0 >> 8) & 0xFF) << 16) + 0x8000;
-    int32_t b = (int32_t)(((c0 >> 16) & 0xFF) << 16) + 0x8000;
+    int32_t r = (int32_t)((c0 & 0xFF) << 12) | 0x800, gg = (int32_t)(((c0 >> 8) & 0xFF) << 12) | 0x800;
+    int32_t b = (int32_t)(((c0 >> 16) & 0xFF) << 12) | 0x800;
     int32_t rstep = 0, gstep = 0, bstep = 0;
     if (n) {
-        xstep = dx * one / n;
-        ystep = dy * one / n;
-        if (xstep < 0) xs--;
-        if (ystep < 0) ys--;
+        xstep = line_step(dx, n);
+        ystep = line_step(dy, n);
         if (gour) {
-            rstep = ((int)(c1 & 0xFF) - (int)(c0 & 0xFF)) * 65536 / n;
-            gstep = ((int)((c1 >> 8) & 0xFF) - (int)((c0 >> 8) & 0xFF)) * 65536 / n;
-            bstep = ((int)((c1 >> 16) & 0xFF) - (int)((c0 >> 16) & 0xFF)) * 65536 / n;
+            rstep = ((int)(c1 & 0xFF) - (int)(c0 & 0xFF)) * 4096 / n;
+            gstep = ((int)((c1 >> 8) & 0xFF) - (int)((c0 >> 8) & 0xFF)) * 4096 / n;
+            bstep = ((int)((c1 >> 16) & 0xFF) - (int)((c0 >> 16) & 0xFF)) * 4096 / n;
         }
     }
-    const int8_t (*dm)[4] = (gour && (g->e1 & 0x200)) ? dither_matrix : dither_none;
+    xs -= 1024;
+    if (ystep < 0)
+        ys -= 1024;
+    const int8_t (*dm)[4] = (g->e1 & 0x200) ? dither_matrix : dither_none; /* flat lines too */
     int mode = (g->e1 >> 5) & 3;
     uint16_t chk = g->check_mask ? 0x8000 : 0, setm = g->set_mask ? 0x8000 : 0;
     int skip_field = skip_field_line(g);
@@ -1006,7 +1046,7 @@ static void draw_line(ps1_gpu *g, int x0, int y0, uint32_t c0, int x1, int y1, u
         if (*d & chk)
             continue;
         int dv = dm[y & 3][x & 3];
-        int cr = clamp255((r >> 16) + dv), cg = clamp255((gg >> 16) + dv), cb = clamp255((b >> 16) + dv);
+        int cr = clamp255((r >> 12) + dv), cg = clamp255((gg >> 12) + dv), cb = clamp255((b >> 12) + dv);
         uint16_t px = (uint16_t)((cr >> 3) | (cg >> 3) << 5 | (cb >> 3) << 10);
         if (semi)
             px = blend(*d, px, mode) & 0x7FFF;
@@ -1227,7 +1267,9 @@ static void execute(ps1_gpu *g)
     uint32_t w = g->cmd[0], op = w >> 24;
     switch (op >> 5) {
     case 0:
-        if (op == 0x02)
+        if (op == 0x01)
+            g->clut_n = 0; /* clear cache */
+        else if (op == 0x02)
             cmd_fill(g);
         else if (op == 0x1F && !g->irq_flag) {
             g->irq_flag = 1;
@@ -1345,6 +1387,7 @@ static void reset_fifo(ps1_gpu *g)
 void ps1_gpu_reset(ps1_gpu *g)
 {
     reset_fifo(g);
+    g->clut_n = 0;
     g->irq_flag = 0;
     g->display_off = 1;
     g->dma_dir = 0;
@@ -1643,6 +1686,7 @@ int ps1_gpu_state_load(ps1_gpu *g, const uint8_t *in, size_t n)
     ps1_irq_sink irq = g->irq;
     memcpy(g, in, GPU_STATE_SIZE);
     g->irq = irq;
+    g->clut_n = 0;
     if (g->hi) /* the upscale's shadow is derived: made again from the VRAM loaded */
         hi_rebuild(g);
     return 0;

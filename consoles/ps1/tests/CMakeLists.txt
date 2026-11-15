@@ -202,6 +202,67 @@ if(TARGET ps1_run)
     endif()
     set_tests_properties(${jcz} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
+    # The whole ps1-tests release run (XBA-200): GPU programs checked against the VRAM dumps made on the hardware that
+    # the release ships (run_jcz_vram.sh + compare_vram.py, 5 bits per channel), GPU / DMA programs by their console
+    # text, under OpenBIOS (ps1_jcz_*) and the HLE BIOS (ps1_hle_jcz_*). lines: the last segment of the two gouraud
+    # polylines ends on a colour the program never sets (stack garbage), left out; transparency: the dump's VRAM
+    # outside the 320x240 the program draws is white (not cleared on that console), only the picture is compared.
+    set(jcz_more)
+    if(PS1_HAVE_GPU AND Python3_Interpreter_FOUND)
+        set(PS1_JCZ_VRAM_lines --ignore 150,141,182,173 --ignore 150,140,151,141 --ignore 210,141,242,173
+            --ignore 210,140,211,141)
+        set(PS1_JCZ_VRAM_transparency --region 0,0,320,240)
+        foreach(t clipping clut-cache lines quad rectangles texture-flip texture-overflow transparency triangle
+                  uv-interpolation vram-to-vram-overlap)
+            string(REPLACE "-" "_" n ${t})
+            foreach(b lle hle)
+                if(b STREQUAL lle)
+                    set(bios ${PS1_BIOS})
+                    set(name ps1_jcz_gpu_${n})
+                else()
+                    set(bios hle)
+                    set(name ps1_hle_jcz_gpu_${n})
+                endif()
+                add_test(NAME ${name} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_jcz_vram.sh $<TARGET_FILE:ps1_run>
+                         ${bios} ${PS1_TESTS_DIR}/gpu/${t}/${t}.exe ${PS1_TESTS_DIR}/gpu/${t}/vram.png
+                         ${CMAKE_CURRENT_BINARY_DIR}/${name} ${PS1_JCZ_VRAM_${t}})
+                list(APPEND jcz_more ${name})
+            endforeach()
+        endforeach()
+    endif()
+    if(PS1_HAVE_GPU)
+        foreach(b lle hle)
+            if(b STREQUAL lle)
+                set(bios ${PS1_BIOS})
+                set(p ps1_jcz)
+            else()
+                set(bios hle)
+                set(p ps1_hle_jcz)
+            endif()
+            set(J sh ${CMAKE_CURRENT_SOURCE_DIR}/run_jcz.sh $<TARGET_FILE:ps1_run> ${bios})
+            add_test(NAME ${p}_gpu_gp0_e1 COMMAND ${J} ${PS1_TESTS_DIR}/gpu/gp0-e1/gp0-e1.exe
+                     "pass - testUnsetAllowTextureDisableClearsBitAfterWrite")
+            add_test(NAME ${p}_gpu_mask_bit COMMAND ${J} ${PS1_TESTS_DIR}/gpu/mask-bit/mask-bit.exe
+                     "pass - testCheckIsMaskBitStickySetBit")
+            # no "Done." in these two: the text after a fixed number of frames
+            set(R sh ${CMAKE_CURRENT_SOURCE_DIR}/run_exe.sh $<TARGET_FILE:ps1_run> ${bios})
+            add_test(NAME ${p}_gpu_version_detect COMMAND sh ${PS1_REPO_ROOT}/tools/consoles/expect_output.sh
+                     "GPUREAD = 0x00000002|GPU version 2" ${R} ${PS1_TESTS_DIR}/gpu/version-detect/version-detect.exe
+                     --tty --frames 120 --quiet)
+            add_test(NAME ${p}_dma_chain_looping COMMAND sh ${PS1_REPO_ROOT}/tools/consoles/expect_output.sh
+                     "empty but complete chain...|finished = true, irq = true|single self-referencing chain...|double self-referencing chain...|finished = false, irq = false"
+                     ${R} ${PS1_TESTS_DIR}/dma/chain-looping/chain-looping.exe --tty --frames 600 --quiet)
+            # input/pad: Up and Cross held (ps1_run --pad), the program prints the buttons it sees
+            add_test(NAME ${p}_input_pad COMMAND sh ${PS1_REPO_ROOT}/tools/consoles/expect_output.sh "PAD_UP|PAD_X"
+                     ${R} ${PS1_TESTS_DIR}/input/pad/pad.exe --tty --frames 120 --pad 0x4010 --quiet)
+            list(APPEND jcz_more ${p}_gpu_gp0_e1 ${p}_gpu_mask_bit ${p}_gpu_version_detect ${p}_dma_chain_looping
+                 ${p}_input_pad)
+        endforeach()
+    endif()
+    if(jcz_more)
+        set_tests_properties(${jcz_more} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    endif()
+
     # The HLE BIOS (P-5 HLE, XBA-163): the same programs with no BIOS image (ps1_run --bios hle). ps1_hle_hb_<prog>:
     # PASS; ps1_hle_same_<prog>: the same result block as under OpenBIOS (checksums, every table entry);
     # ps1_hle_hb_disc_<prog>: booted from the disc by the HLE BIOS (SYSTEM.CNF read from ISO 9660); ps1_hle_mcard: the

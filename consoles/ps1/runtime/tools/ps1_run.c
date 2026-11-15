@@ -14,6 +14,8 @@
  * --result      read the 512-byte xba_result block of our homebrew (consoles/ps1/tests/homebrew/common/xba_result.h,
  *               physical 0x001F0000) at each VBlank, stop at the verdict; exit 0 on PASS, 1 on FAIL, 2 on timeout
  * --ppm OUT     write the last displayed frame as a binary PPM (black when the display is off)
+ * --vram OUT    write the whole 1024x512 VRAM as a binary PPM, each 15-bit pixel's 5-bit channels scaled to 8 bits
+ *               (c << 3 | c >> 2), the mask bit dropped: what ps1-tests' reference vram.png images show (XBA-200)
  * --wav OUT     write the audio of the run (ps1_audio_pull after each frame) as a 44.1 kHz stereo 16-bit WAV
  * --tty         copy the console text (BIOS putchar / puts, the debug UART) to stdout
  * --until-tty T stop once the console text contains T (exit 0), exit 2 if it never does
@@ -135,6 +137,23 @@ static int write_ppm(const char *path, ps1_machine *m)
     return fclose(f);
 }
 
+static int write_vram(const char *path, ps1_machine *m)
+{
+    const uint16_t *vram = ps1_gpu_vram(ps1_get_gpu(m));
+    FILE *f = vram ? fopen(path, "wb") : NULL;
+    if (!f)
+        return -1;
+    fprintf(f, "P6\n1024 512\n255\n");
+    for (int i = 0; i < 1024 * 512; i++) {
+        uint16_t p = vram[i];
+        uint8_t c[3] = {(uint8_t)(p & 31), (uint8_t)((p >> 5) & 31), (uint8_t)((p >> 10) & 31)};
+        for (int k = 0; k < 3; k++)
+            c[k] = (uint8_t)(c[k] << 3 | c[k] >> 2);
+        fwrite(c, 1, 3, f);
+    }
+    return fclose(f);
+}
+
 static void put32(FILE *f, uint32_t v)
 {
     uint8_t b[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
@@ -239,6 +258,7 @@ static void cheat_poke32(void *m, uint32_t addr, uint32_t v)
 static int usage(void)
 {
     fprintf(stderr, "usage: ps1_run [--bios PATH] [--exe X.exe | --disc X.cue] [--frames N] [--result] [--ppm OUT]\n"
+                    "               [--vram OUT]\n"
                     "               [--wav OUT] [--tty] [--until-tty TEXT] [--pad MASK] [--hash] [--quiet]\n"
                     "               [--pack LIB.so [--lockstep]] [--missed FILE] [--stats] [--card FILE] [--fast-boot]\n"
                     "               [--swap FRAME:DISC] [--state-save N:FILE] [--state-load FILE] [--run-hash]\n"
@@ -249,6 +269,7 @@ static int usage(void)
 int main(int argc, char **argv)
 {
     const char *bios_path = getenv("RECOMP_PS1_BIOS"), *exe_path = NULL, *disc_path = NULL;
+    const char *vram_out = NULL;
     const char *ppm = NULL, *wav = NULL, *until = NULL, *pack = NULL, *missed = NULL, *card = NULL;
     bool lockstep = false, stats = false, fast_boot = false;
     const char *cheats_path = NULL;
@@ -284,6 +305,8 @@ int main(int argc, char **argv)
             result = true;
         else if (!strcmp(a, "--ppm") && more)
             ppm = argv[++i];
+        else if (!strcmp(a, "--vram") && more)
+            vram_out = argv[++i];
         else if (!strcmp(a, "--wav") && more)
             wav = argv[++i];
         else if (!strcmp(a, "--tty"))
@@ -640,6 +663,8 @@ int main(int argc, char **argv)
         printf("until-tty: \"%s\" not seen in %ld frames\n", until, f);
     if (ppm && write_ppm(ppm, m) != 0)
         fprintf(stderr, "ps1_run: cannot write %s\n", ppm);
+    if (vram_out && write_vram(vram_out, m) != 0)
+        fprintf(stderr, "ps1_run: cannot write %s\n", vram_out);
     if (wf) {
         fseek(wf, 4, SEEK_SET);
         put32(wf, 36 + wav_frames * 4);

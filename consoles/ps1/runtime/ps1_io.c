@@ -473,6 +473,13 @@ static void dma_write(ps1_machine *m, uint32_t off, uint32_t v)
     case 0: c->madr = v & 0xFFFFFFu; break;
     case 4: c->bcr = v; break;
     case 8:
+        if ((v & 0x01000000u) && m->dma_done_at[ch] != UINT64_MAX) {
+            /* Started again while the last transfer's completion is pending: its words moved already, so it
+             * completes now (flag, IRQ) rather than clearing the new start when it ends (gpu/texture-overflow:
+             * PSn00bSDK's LoadImage starts the next image as soon as GPUSTAT says ready, XBA-200). */
+            dma_finish(m, ch);
+            ps1_sched_recompute(m);
+        }
         if (ch == 6)
             c->chcr = (v & 0x51000000u) | 2u;
         else
