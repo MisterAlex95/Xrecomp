@@ -4279,7 +4279,8 @@ public class LauncherActivity extends Activity {
      */
     private void buildPrepare() {
         String title = prepTitle();
-        LinearLayout info = romEntry != null ? hero(title, false, null) : hero(title, false);
+        LinearLayout info = romEntry != null ? hero(title, false, LibraryScreen.art(getFilesDir(), libArt, romEntry))
+                                              : hero(title, false);
         if (companion != null)
             companion.preparing(prepTid(), title);
         prepStatus = (Widgets.Chip)heroLine(info, getString(R.string.PREPARE_STARTING), Theme.OK);
@@ -4563,7 +4564,9 @@ public class LauncherActivity extends Activity {
         boolean older = prepares && p == Prep.PLAYABLE
                         && PackFreshness.judge(null, null, Pack.toolkitSha256OfKey(getFilesDir(), e.tid),
                                                Toolchain.toolkitDigest(this)) == PackFreshness.Verdict.OLDER_TOOLKIT;
-        LinearLayout info = hero(e.title(), false, null);
+        // Its cover (CoverArt) or the frame the shell kept, as on its library card; the monogram without either.
+        Bitmap cover = LibraryScreen.art(getFilesDir(), libArt, e);
+        LinearLayout info = hero(e.title(), false, cover);
         String line;
         int color;
         switch (prepares ? p : Prep.OFF) {
@@ -4641,7 +4644,7 @@ public class LauncherActivity extends Activity {
         addHint("B", R.string.LIB_TITLE, this::back);
         favouriteHint(e);   // XBA-206
         if (companion != null) {
-            companion.art(null);
+            companion.art(cover);
             companion.home(e.title(), line, color, true, play.title);
         }
 
