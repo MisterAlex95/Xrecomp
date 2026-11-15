@@ -37,6 +37,20 @@ exit for the next Prepare (`gba_runtime_opts.discovered_path`). Import filter (`
 content decides (Xbox volume magic `MICROSOFT*XBOX*MEDIA` first, then an ISO 9660 volume with system ID
 `PLAYSTATION`). CHD is accepted by name but not read yet (no title key).
 
+**Cores and clocks on Android.** The app shell puts the runtime on the fast cores before it starts
+(`recomp_host_cpus_init`, `RECOMP_BIG_CORES`), and every runtime thread inherits them. The threads a frame waits on
+(the N64 software RDP's scanline bands, the PS1 GPU's shadow-pass workers) call a thread hook as they start and end
+(`n64_rdp_set_thread_hook`, `ps1_gpu_set_thread_hook`; the devices stay free of host code): the runtime's hook,
+`recomp_host_worker_hook` (`src/platform/host_perf_hint.h`), has `host_cpus` note them, so after the app comes back
+from the background (Home, a notification), when the 5.15 kernel of the AYN Thor has left them on the little cores,
+`recomp_lifecycle_resume` puts them back (XBA-50). The frame loop of each runtime (GBA, PS1, N64) is an ADPF
+performance hint session (`APerformanceHint`, Android 13+, looked up in libandroid.so at run time; a no-op before and
+off Android) together with those workers: its target is the frame period, and each frame reports the time it spent
+working, not the sleep to the next deadline, so the governor raises the clocks only as far as the frames need. The
+frame loop and the workers also run at a display thread's priority (nice -8). The log says
+`perf hint: ADPF session open for N thread(s), target 16.68 ms per frame`. paraLLEl-RDP's own threads (the Vulkan
+RDP's command and timeline threads) are not in the session nor tracked.
+
 CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1` and `XBR_CONSOLE_N64` are ON by default on Linux and macOS and OFF
 on Android and Windows. A console is turned on for Android once it is ready: the GBA (XBA-157), the PS1 (XBA-168) and
 the N64 (XBA-174) are.
@@ -484,13 +498,37 @@ Every host pad drives controller 1, or with `RECOMP_N64_PLAYERS=2..4` host pad N
 Sound: `n64_audio_pull` (48 kHz) into `host_audio`. Pacing: the frame's length is the CPU cycles the core ran to the
 next VI interrupt (NTSC about 60 Hz, PAL 50 Hz, one field per interrupt when interlaced), absolute deadlines nudged ±2 %
 by the audio queue; a line every 10 s gives the frame rate reached (`n64: N fps over the last 10 s`, with the frames
-skipped). Frame skip (`RECOMP_N64_FRAMESKIP`, `n64_play --frameskip`): `auto` (default) skips the picture of a frame
+skipped), followed by a performance line (`n64_runtime_perf`; also once at exit over the whole run, `n64: perf over
+the run:`), for device reports:
+
+```
+n64: perf speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (wait 3.0) sched 0.3 vi 1.8 present 0.9 audio 0.1
+idle 0.0 other 0.2 ms/frame; worst 41 ms, 212 > 16.7 ms, 30 > 33.4 ms of 150 frames; rsp 1.20 M instr, rdp 3400 cmds,
+2.0 full syncs /frame; pack 83 % native, 3.1 k interp instr/frame, 12 rehashes, 40 slow lookups; rdp vulkan, upscale
+2x, rewind off; core 6 @ 1.90 GHz
+```
+
+Speed is N64 frames per second against the VI's rate. Times are ms per N64 frame: `n64_run_frame` split into the CPU
+(interpreter or pack), the RSP, the RDP (the software RDP draws there, the Vulkan RDP queues) and `sched` (the
+scheduler, VI / AI / PI / SI events) as the core's timed frames split it (`n64_perf`: one frame in 8 is timed stage by
+stage, two clock reads per CPU slice; the counts run on every frame); `wait` the RDP's flushes (the threaded software
+RDP drawing its batch, the Vulkan RDP waiting for the GPU, its write-back and its upscaled scanout), inside `rdp` or
+`vi`; then `n64_display`, the RGBA conversion and present, the audio pull and queue, the sleep to the next deadline
+(`idle`, frame generation's draws during it included), and `other` what is left (pads, cheats, rewind captures, save
+files). The host frames (one shown or skipped picture) are measured without their sleep: the worst one and how many took
+longer than one and two VI frames. With a pack: the share of the CPU's instructions lifted code ran, the RDRAM
+instructions the interpreter ran, re-hashes (a page holding lifted code written) and dispatch cache misses. Then the RDP
+back end (and the software RDP's threads), the internal resolution, rewind, and the host core the loop is on with its
+`scaling_cur_freq` (Linux / Android; `core ?` elsewhere). The counters are host-only: not in save states, no effect on
+the run (`n64_run --perf N` prints the core's part, run hashes unchanged). Frame skip (`RECOMP_N64_FRAMESKIP`, `n64_play
+--frameskip`): `auto` (default) skips the picture of a frame
 that starts more than half a frame late or while the audio queue is about to run dry, at most 3 in a row; `N` shows
 one frame in N + 1; `0` never. A skipped frame still runs whole (CPU, RSP, the RDP drawing into RDRAM, which games
 read back) and makes its audio: only `n64_display` and the present are skipped (the software RDP commits its pixels
 at the end of every emulated frame, `n64_rdp_frame_end`, shown or not). The software RDP's renderer threads
 (`n64_rdp_set_threads`): `RECOMP_N64_RDP_THREADS`, else 2 on Android, else the core's (`XBR_N64_RDP_THREADS`, else
-1). Saves: `<save dir>/n64-<KEY>/game.eep` (EEPROM 4K 512 B / 16K 2 KB), `game.sra` (SRAM
+1); they are put back on the fast cores after a resume and share the frame loop's performance hint session (« Cores
+and clocks on Android » above). Saves: `<save dir>/n64-<KEY>/game.eep` (EEPROM 4K 512 B / 16K 2 KB), `game.sra` (SRAM
 32 KB), `game.fla` (FlashRAM 128 KB), `pak1.mpk`..`pak4.mpk` (controller paks, 32 KB): raw images, the files
 mupen64plus and ares use (rename to copy one in). A cartridge save on disk is read before the first frame and also
 fixes the save type (an `.eep`'s size picks 4K or 16K unless the header says; a 2 KB `.eep` for a 4K game gives its
@@ -528,8 +566,23 @@ the compiler vectorises, identical results everywhere. One cycle per instruction
 (`consoles/n64/tests`): `test_rsp.c` (hand-checked vectors, and 93 differential groups of random microcode over every
 vector funct, load, store, DMA, status and scalar op whose checksums must equal those the ares oracle computed from the
 homebrew ROM `homebrew/rsp`), `test_rsp_rdp.c` (microcode driving the real RDP over XBUS and from RDRAM);
-`n64_rsp_bench` (by hand; `-n COUNT` runs a fixed instruction count and prints a DMEM hash): ~115 M RSP
-instructions/s on a vector-dense loop on the x86 dev host (was ~97).
+`n64_rsp_bench` (by hand; `-n COUNT` runs a fixed instruction count and prints a DMEM hash): ~139 M RSP
+instructions/s on a vector-dense loop on the x86 dev host (was ~97, then ~115 before the predecoded table).
+
+*Predecoded table.* `n64_rsp_run` runs each IMEM word from a predecoded entry (one per word, 16 bytes: the handler
+kind, register indices or the vector registers' offsets, the immediate already extended, the branch target and link,
+the element selector). An entry keeps the word it was decoded from and the loop compares it with the word it fetches,
+decoding again when they differ: no IMEM writer (CPU stores, SP DMA, the HLE boot, save state loads) has to
+invalidate anything, and a stale entry cannot run. The table is host only, outside the save state. Vector
+computational ops are 128 functions (64 opcodes x selector 0 / 1 or a shuffle), each the NEON or portable body inlined
+at a constant opcode, so no opcode switch is left at run time; the aligned LDV / SDV / LQV / SQV run inline in the
+loop. Inlining the vector bodies into the loop itself was measured slower (register pressure on both paths). Same
+results, cycles (one per instruction) and stop conditions as before: the 93 ares groups, the RSP + RDP tests and
+the bench's DMEM hash are identical on x86, arm64 NEON and arm64 portable (qemu-user), as are the run hashes of
+every homebrew ROM, both n64-systemtest ROMs, libdragon's test ROM and rsp_inval_instrs (900 frames); `test_rsp.c`
+rewrites IMEM after it ran (CPU writes, the microcode's own DMA, a state load, a selector change at one slot).
+Callgrind on `n64_rsp_bench -n`: arm64 NEON 68.4 -> 48.8 instructions per RSP instruction, arm64 portable 92.8 ->
+75.4, x86-64 123.5 -> 93.5.
 
 *NEON (arm64, XBA-173).* On arm64 the hot vector ops are NEON intrinsics (`vu_op_neon`: the multiply-accumulate family
 VMULF..VMADH, VADD / VSUB / VADDC / VSUBC, VLT / VEQ / VNE / VGE, VCL / VCH, VMRG, the logic ops, the divide moves),
@@ -864,8 +917,30 @@ before, ~24-34 with the blocks, devices included). Wall clock per 600 frames wit
 host): hello 3.42 -> 1.50 -> 0.51 s, timer_irq 3.76 -> 1.58 -> 0.57, gfx 3.44 -> 1.47 -> 0.61, rsp 2.94 -> 1.17 -> 0.88,
 n64-systemtest 4.87 -> 2.40 -> 2.03, libdragon's test ROM 4.54 -> 3.58 -> 3.24 (2.0-2.5x from the blocks where the code
 is interpreter-bound, 1.3-1.4x on the test ROM, which spends much of its time in device accesses and short blocks;
-the homebrew sit in idle loops, which now cost almost nothing). Packs are unchanged (the dispatcher's interpreter runs
-still use `step()`).
+the homebrew sit in idle loops, which now cost almost nothing). Packs were unchanged then (the dispatcher's interpreter
+runs used `step()`): see the next paragraph.
+
+**N64 packs: the interpreter's blocks for code no entry covers.** Under a pack, RDRAM code no entry matches (code the
+last Prepare did not see: overlays relocated to other heap addresses, other contents at an entry's address) used to
+run through `step()` one instruction at a time with a dispatch lookup each, 2-3x slower than without a pack since
+XBA-210. `n64_recomp_run` now records the miss as before, then runs one predecoded block from that PC
+(`n64_cpu_run_block`, XBA-210's runner without its chaining) and comes back to the dispatcher. The block stops in front
+of the next entry's start in that page (cached in the dispatch line with the miss), and of a hand-off still pending,
+so lifted code is entered at the same instructions as before (the same call counts); a branch that is its last
+instruction keeps its delay slot, which `step()` also ran without a lookup. Inside a block execution stays in
+sequence, so the discovery record is the same (`--missed` files byte-identical); after it the dispatcher's
+« next expected PC » is the one the last step would have left. Recording a miss (a hash of its 2 KB window) is skipped
+when it is sure to change nothing: the last call at that PC changed nothing, and neither the record count nor the
+window's RDRAM page counters moved since (kept in the dispatch line); before, every taken branch into such code paid
+it, an idle loop there at every turn. The handed run (`interp_pc`), delay slots and the
+reference loop (`--lockstep-ref`) keep `step()`. Both paths are tick-exact: run hashes, lockstep, save states
+unchanged; `--stats` adds the block count (and the slow lookups drop). Tests: `recomp_fuzz.py` now also runs every
+seed in lockstep with part of its table (`N64_RC_ENTRIES` 0-0 and 1-1000000: blocks between lifted functions under the
+fast timer interrupt). Measured (x86-64 dev host, loaded, n64-systemtest 1200 frames under its pack, before -> after,
+same run hash, `--missed` identical; blocks alone, then with the record skip): whole table (97.2 % native) 3.17 ->
+3.16 -> 3.15 s; `N64_RC_ENTRIES=0-6000` (8 % of the instructions interpreted, 5519 records) 5.89 -> 5.36 -> 3.55 s;
+`N64_RC_ENTRIES=0-2500` (94 % interpreted, the case of a game far from its last Prepare) 15.67 -> 5.14 -> 3.58 s (no
+pack: 3.17 s).
 
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game

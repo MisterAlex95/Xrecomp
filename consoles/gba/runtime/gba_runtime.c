@@ -28,6 +28,7 @@
 #include "host_audio.h"
 #include "console_pad.h"
 #include "host_pad.h"
+#include "host_perf_hint.h"
 #include "host_window.h"
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
@@ -668,6 +669,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
     int was_paused = 0, heard = 0, rc = 0, was_ff = 0;
     recomp_hotkeys_state hk_keys = {0};
     recomp_ff_carry carry = {{0, 0}, 0};
+    recomp_perf_hint_begin(GBA_FRAME_NS); /* the frame loop, one session (no worker threads) */
 
     for (;;) {
         int running = 1;
@@ -702,6 +704,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
             was_paused = 0;
             next = now_ns();   /* the time away is not caught up */
         }
+        uint64_t work_t0 = now_ns(); /* the frame's work, for the performance hint (the sleep after it is not) */
 
         uint32_t hk_held = 0, hk_pressed = 0, key_pressed = 0;
         uint16_t keys = (uint16_t)(o->keys | pads_keys(&hk_held, &hk_pressed) | (window ? keyboard_keys() : 0));
@@ -778,6 +781,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
         }
         if (o->frames && frames >= o->frames)
             break;
+        recomp_perf_hint_frame((int64_t)(now_ns() - work_t0), (int64_t)GBA_FRAME_NS);
 
         if (!o->unpaced && !(ff && !speed)) {
             next += GBA_FRAME_NS;
@@ -799,6 +803,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
         }
     }
 
+    recomp_perf_hint_end();
     double secs = (double)(now_ns() - t0) / 1e9;
     printf("gba: %llu frames in %.1f s (%.2f fps), %llu late resets\n", (unsigned long long)frames, secs,
            secs > 0 ? (double)frames / secs : 0.0, (unsigned long long)late_resets);

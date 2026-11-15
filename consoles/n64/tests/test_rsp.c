@@ -861,6 +861,65 @@ static void test_oracle(int print)
     failures += bad;
 }
 
+/* IMEM rewritten after its code ran (n64_rsp.c keeps a predecoded entry per IMEM word): by the CPU between runs, by
+ * an SP DMA the microcode starts itself and then jumps into, by a save state load, and by a vector op whose selector
+ * class changes (whole vector vs a shuffle) at the same slot. The new words must run, never the old decode. */
+static void test_imem_rewrite(void)
+{
+    new_rsp();
+    LOAD(R_ORI(1, 0, 0x11), R_LQV(1, 0, 0, 0), R_BREAK);
+    go();
+    CHECK(n64_rsp_get_gpr(S, 1) == 0x11, "first program");
+    LOAD(R_ORI(1, 0, 0x22), R_ORI(2, 0, 0x33), R_BREAK); /* the CPU's writes (n64_rsp_mem) */
+    go();
+    CHECK(n64_rsp_get_gpr(S, 1) == 0x22 && n64_rsp_get_gpr(S, 2) == 0x33, "rewritten by the CPU: %X %X",
+          n64_rsp_get_gpr(S, 1), n64_rsp_get_gpr(S, 2));
+
+    /* IMEM 0x100 runs once, then the microcode DMAs other code over it from RDRAM and jumps there. */
+    new_rsp();
+    n64_wbe32(M + 0x1100, R_ORI(3, 0, 0x44));
+    n64_wbe32(M + 0x1104, R_BREAK);
+    n64_rsp_write_reg(S, 8, 0x100);
+    n64_rsp_write_reg(S, 4, 0x5);
+    n64_rsp_run(S, 100);
+    CHECK(n64_rsp_halted(S) && n64_rsp_get_gpr(S, 3) == 0x44, "IMEM 0x100 before the DMA");
+    n64_wbe32(rdram + 0x3000, R_ORI(3, 0, 0x55));
+    n64_wbe32(rdram + 0x3004, R_BREAK);
+    LOAD(R_ORI(1, 0, 0x1100), R_MTC0(1, 0), R_ORI(1, 0, 0x3000), R_MTC0(1, 1), R_MTC0(0, 2), /* 8 bytes */
+         R_J(0x100), R_NOP);
+    go();
+    CHECK(n64_rsp_get_gpr(S, 3) == 0x55, "rewritten by the RSP's own DMA: %X", n64_rsp_get_gpr(S, 3));
+
+    /* A save state's IMEM replaces what ran since it was taken. */
+    size_t sz = n64_rsp_state_size(S);
+    uint8_t *st = malloc(sz);
+    CHECK(st != NULL, "state buffer");
+    if (st) {
+        LOAD(R_ORI(4, 0, 0x66), R_BREAK);
+        n64_rsp_state_save(S, st);
+        LOAD(R_ORI(4, 0, 0x77), R_BREAK);
+        go();
+        CHECK(n64_rsp_get_gpr(S, 4) == 0x77, "before the load");
+        CHECK(n64_rsp_state_load(S, st, sz) == 0, "state load");
+        go();
+        CHECK(n64_rsp_get_gpr(S, 4) == 0x66, "IMEM from the state: %X", n64_rsp_get_gpr(S, 4));
+        free(st);
+    }
+
+    /* The same slot as VADD with selector 0 (the whole vector) then 8 (element 0 everywhere). */
+    new_rsp();
+    static const uint16_t v1[8] = {1, 2, 3, 4, 5, 6, 7, 8}, v2[8] = {10, 20, 30, 40, 50, 60, 70, 80};
+    static const uint16_t whole[8] = {11, 22, 33, 44, 55, 66, 77, 88}, elem0[8] = {11, 12, 13, 14, 15, 16, 17, 18};
+    wvec(0x000, v1);
+    wvec(0x010, v2);
+    LOAD(R_LQV(1, 0, 0, 0), R_LQV(2, 0, 1, 0), R_VOP(RV_VADD, 3, 1, 2, 0), R_SQV(3, 0, 2, 0), R_BREAK);
+    go();
+    CHECK(vec_eq(0x020, whole), "VADD whole vector");
+    n64_wbe32(M + 0x1008, R_VOP(RV_VADD, 3, 1, 2, 8));
+    go();
+    CHECK(vec_eq(0x020, elem0), "VADD element 0 after the rewrite");
+}
+
 int main(int argc, char **argv)
 {
     int print = argc > 1 && strcmp(argv[1], "--print") == 0;
@@ -876,6 +935,7 @@ int main(int argc, char **argv)
         test_vu_divide();
         test_cop2_moves();
         test_loads_stores();
+        test_imem_rewrite();
     }
     test_oracle(print);
     n64_rsp_destroy(S);

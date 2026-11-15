@@ -67,6 +67,7 @@
 #ifndef _WIN32
 #include <pthread.h>
 #include <sched.h>
+#include <time.h>
 #define RDP_THREADS 1
 /* The queue's indices and handshake flags, shared between the front end and the renderers. */
 #define LD_ACQ(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
@@ -255,6 +256,7 @@ struct n64_rdp {
     rdp_ent ent[MAX_ENT];
     int nent;
     int threads_up;          /* the renderers run on their threads (else on this one, when it waits) */
+    n64_rdp_stats stats;     /* host counters (n64_rdp_get_stats), not in save states */
 #ifdef RDP_THREADS
     pthread_t th[N64_RDP_MAX_THREADS];
     pthread_mutex_t mu;
@@ -2600,10 +2602,21 @@ static void run_queue(n64_rdp *d, rdp_render *r, uint32_t end)
     }
 }
 
+static n64_rdp_thread_hook s_thread_hook; /* n64_rdp_set_thread_hook */
+static void *s_thread_hook_user;
+
+void n64_rdp_set_thread_hook(n64_rdp_thread_hook fn, void *user)
+{
+    s_thread_hook = fn;
+    s_thread_hook_user = user;
+}
+
 #ifdef RDP_THREADS
 typedef struct {
     n64_rdp *d;
     int id;
+    n64_rdp_thread_hook hook; /* as set when the thread was made: the same one hears it end */
+    void *hook_user;
 } worker_arg;
 
 /* A renderer's thread: every renderer thread starts here. */
@@ -2611,7 +2624,11 @@ static void *worker(void *arg)
 {
     n64_rdp *d = ((worker_arg *)arg)->d;
     rdp_render *r = d->rd[((worker_arg *)arg)->id];
+    n64_rdp_thread_hook hook = ((worker_arg *)arg)->hook;
+    void *hook_user = ((worker_arg *)arg)->hook_user;
     free(arg);
+    if (hook)
+        hook(1, hook_user);
     for (;;) {
         uint32_t end = LD_ACQ(&d->qpub);
         for (int spin = 0; end == r->qpos && spin < SPIN && !LD_ACQ(&d->quit); spin++) {
@@ -2630,6 +2647,8 @@ static void *worker(void *arg)
             break;
         run_queue(d, r, end);
     }
+    if (hook)
+        hook(0, hook_user);
     return NULL;
 }
 
@@ -2659,6 +2678,8 @@ static void threads_start(n64_rdp *d)
         if (a) {
             a->d = d;
             a->id = i;
+            a->hook = s_thread_hook;
+            a->hook_user = s_thread_hook_user;
         }
         if (!a || pthread_create(&d->th[i], NULL, worker, a) != 0) {
             free(a);
@@ -2674,8 +2695,34 @@ static void threads_start(n64_rdp *d)
 
 static inline int reached(rdp_render *r, uint32_t target) { return (int32_t)(LD_ACQ(&r->qpos) - target) >= 0; }
 
-/* Every renderer has executed the queue up to target (at most the published position). */
+static uint64_t now_ns(void)
+{
+#ifdef RDP_THREADS
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+#else
+    return 0;
+#endif
+}
+
+static void stream_wait_(n64_rdp *d, uint32_t target);
+/* Every renderer has executed the queue up to target (at most the published position). The time the front end spends
+ * waiting (or drawing, without threads) is counted in the stats. */
 static void stream_wait(n64_rdp *d, uint32_t target)
+{
+    int behind = 0;
+    for (int i = 0; i < d->nthreads && !behind; i++)
+        behind = d->threads_up ? !reached(d->rd[i], target) : d->rd[i]->qpos != d->qpub;
+    if (!behind)
+        return;
+    const uint64_t t0 = now_ns();
+    stream_wait_(d, target);
+    d->stats.waits++;
+    d->stats.wait_ns += now_ns() - t0;
+}
+
+static void stream_wait_(n64_rdp *d, uint32_t target)
 {
     if (!d->threads_up) { /* everything published: past target */
         (void)target;
@@ -3006,6 +3053,11 @@ const uint8_t *n64_rdp_hidden_bits(n64_rdp *d)
     return d->hidden;
 }
 
+void n64_rdp_get_stats(n64_rdp *d, n64_rdp_stats *out)
+{
+    *out = d->stats;
+}
+
 /* A commit: every queued command executed, what the renderers drew copied to RDRAM and reported. */
 void n64_rdp_flush(n64_rdp *d)
 {
@@ -3095,6 +3147,8 @@ static void dispatch(n64_rdp *d, const uint64_t *w, int len)
         d->pipebusy = (d->pipebusy + cost) & 0xFFFFFF;
     if (id != 0x29) /* commands after a SYNC_FULL in the same buffer start the pipe again */
         d->status |= ST_PIPE_BUSY | ST_GCLK;
+    d->stats.commands++;
+    d->stats.full_syncs += id == 0x29;
 
     if (id == 0x30 || id == 0x33 || id == 0x34) {
         uint32_t sh = (uint32_t)(w0 >> 12) & 0xFFF, sl = (uint32_t)(w0 >> 44) & 0xFFF;

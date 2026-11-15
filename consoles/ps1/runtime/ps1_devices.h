@@ -90,6 +90,12 @@ int ps1_gpu_upscale(ps1_gpu *g);
  * count). Default -1: by the host's cores (3 from 8 cores, 2 from 4, 1 from 2). Returns the workers running (none at
  * 1x). */
 int ps1_gpu_set_threads(ps1_gpu *g, int n);
+/* Called by each of those workers as it starts (starting = 1) and just before it ends (0), on that thread: the
+ * runtime notes the thread there (ps1_runtime: its fast cores put back after a resume, the performance hint session;
+ * recomp_host_worker_hook) so the GPU itself needs nothing of the host. Process-wide, for the workers started after
+ * the call; NULL (the default): none. */
+typedef void (*ps1_gpu_thread_hook)(int starting, void *user);
+void ps1_gpu_set_thread_hook(ps1_gpu_thread_hook fn, void *user);
 /* The shadow VRAM, (1024 x 512) x factor, row stride 1024 x factor; the native VRAM at 1x. Tests. */
 const uint16_t *ps1_gpu_vram_hi(ps1_gpu *g);
 
