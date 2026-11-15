@@ -371,6 +371,20 @@ uint32_t n64_cpu_step_handed(n64_machine *m, uint32_t *left, bool *chained);
  * off. True when the instruction at pc must be stepped instead (no block there, or an op that falls back: the machine
  * holds the state in front of it); false when the machine is where step()'s loop would be after the block. */
 bool n64_cpu_run_block(n64_machine *m, uint32_t maxops);
+/* The pages of RDRAM code no valid entry covers, KSEG0 then KSEG1 (n64_recomp.c keeps it): free[i] for i < npages is
+ * the page at 0x80000000 + i * 4 KB, free[npages + i] the one at 0xA0000000 + i * 4 KB; 1: the dispatcher has nothing
+ * to run there but the interpreter. */
+typedef struct n64_blk_region {
+    const uint8_t *free;
+    uint32_t npages;
+} n64_blk_region;
+/* Blocks one after the other from pc as n64_cpu_run's loop runs them (same checks as n64_cpu_run_block), while they
+ * stay in pages rg->free marks: back to the caller at a page it does not mark, and in front of a block reached by a
+ * branch or jump taken that is not marked as recorded (the dispatcher records missed code there, then calls again
+ * with mark: the block at pc is then marked). Returns 0: the machine is where step()'s loop would be (stop_at reached,
+ * an interrupt, a store into the block); 1: the instruction at pc must be stepped (no block, an op that falls back);
+ * 2: stop_at is close, step to it; 3: pc left the marked pages or is a branch target not recorded yet. */
+int n64_cpu_run_region(n64_machine *m, const n64_blk_region *rg, bool mark);
 
 /* ---- Static recompilation (n64_recomp.c) ------------------------------------------------------------------------ */
 /* n64_cpu_run's loop while a table is attached (m->rc). */

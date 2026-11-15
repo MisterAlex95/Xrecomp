@@ -734,7 +734,12 @@ Contract (`n64_recomp.h`, frozen between `n64_tools`, Prepare, the loader and th
 - `n64_attach_recomp` / `n64_recomp_missed` / `n64_recomp_write_missed` (`n64_recomp.c`, called from `n64_cpu_run`):
   RDRAM code in kernel mode, once the CPU reached the boot PC, runs lifted code when an entry matches, the interpreter
   otherwise; the discovered file gets `ADDR HASH HEXBYTES` per miss (a 2 KB window, never past a mapped page). An
-  address seen with 8 contents is code generated at run time: left to the interpreter.
+  address seen with 8 contents is code generated at run time: left to the interpreter; records of an address that
+  agree over their common length are one code (recorded once, merged by the lifter). An entry whose code is not in
+  memory does not cut the interpreter's blocks, and pages no entry's code is in run as the interpreter's chained
+  blocks (`n64_cpu_run_region`), back to the dispatcher only when execution leaves them, at a branch target not
+  recorded yet, or at an event (2026-11-15: the pack's dispatching costs about what the interpreter does). The runtime saves the
+  record at pause, every three minutes and at exit.
 
 Lifted code is tick-exact with the interpreter, in the GBA / PS1 recompilers' shape (compile time on the phone):
 functions cut into blocks (entry, jump targets, return points, every 12 instructions), only block starts resumable

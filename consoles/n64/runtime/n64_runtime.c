@@ -529,15 +529,34 @@ static void saves_flush(const char *why)
     pthread_mutex_unlock(&s_mu);
 }
 
-static void on_exit_hook(const char *why)
+/* The discovery loop's record to disk (XBA-174): at exit, when the app pauses (a session usually ends killed in the
+ * background, after the pause) and every few minutes of play. Appends only what the file lacks. */
+#define MISSED_EVERY_NS (180ull * 1000000000ull)
+static void missed_flush(void)
 {
-    (void)why;
-    saves_flush("exit");
-    /* The in-game menu's Quit ends the process here: the discovery loop's code too (XBA-174). */
     pthread_mutex_lock(&s_mu);
     if (s_m && s_discovered[0])
         n64_pack_save_missed(s_m, s_discovered);
     pthread_mutex_unlock(&s_mu);
+}
+
+/* missed_flush every MISSED_EVERY_NS of the run loop's time (the emulation thread, between frames). */
+static void missed_flush_every(uint64_t now)
+{
+    static uint64_t last;
+    if (!last)
+        last = now;
+    if (now - last >= MISSED_EVERY_NS) {
+        last = now;
+        missed_flush();
+    }
+}
+
+static void on_exit_hook(const char *why)
+{
+    (void)why;
+    saves_flush("exit");
+    missed_flush(); /* the in-game menu's Quit ends the process here */
 }
 
 /* The app paused (background, the in-game menu): the saves go to disk at once, from the thread that paused it (on
@@ -546,8 +565,10 @@ static void on_exit_hook(const char *why)
 static void on_lifecycle(int paused, void *user)
 {
     (void)user;
-    if (paused)
+    if (paused) {
         saves_flush("pause");
+        missed_flush();
+    }
 }
 
 static void snapshot(n64_machine *m, int kind)
@@ -1289,11 +1310,13 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 printf("n64: automatic slot %s\n", recomp_states_error(recomp_states_save(RECOMP_STATE_AUTO)));
             break;
         }
+        missed_flush_every(now_ns());
         if (recomp_lifecycle_paused()) {
             if (!was_paused) {
                 printf("n64: paused at frame %llu\n", (unsigned long long)frames);
                 fflush(stdout);
                 saves_flush("pause");
+                missed_flush();
                 rumble_sent[0] = rumble_sent[1] = rumble_sent[2] = rumble_sent[3] = 1; /* stopped below on resume */
                 for (int p = 0; p < HOST_PAD_PORTS; p++)
                     host_pad_rumble(p, 0, 0, 0);
