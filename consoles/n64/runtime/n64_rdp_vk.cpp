@@ -41,23 +41,40 @@
  * factor is lowered first when those buffers exceed the device's storage buffer range or half its largest
  * device-local heap (fit_upscale, logged). The check at create then draws into a 256-pixel-wide frame buffer (the
  * width paraLLEl-RDP upscales from) and scans it out, so the upscaled and VI pipelines are compiled and checked too;
- * a try that fails upscaled is made again at 1x. */
+ * a try that fails upscaled is made again at 1x.
+ *
+ * Pipeline cache (n64_vk_cache.h): with RECOMP_VK_CACHE_DIR, the device's VkPipelineCache starts from
+ * pipelines-<pipelineCacheUUID>.bin there (before the first command processor, so the check's pipelines come from it)
+ * and the cache is written back when it grew: after the check passed, every 10 s from a thread of its own (the
+ * compiles during the game), when the app pauses (n64_rdp_save_caches: sessions on Android end killed after a pause)
+ * and at destroy. MESA_SHADER_CACHE_DIR points Mesa's own disk cache (Turnip) at <dir>mesa before the driver opens.
+ *
+ * Threads (n64_rdp.h n64_rdp_set_thread_hook): paraLLEl-RDP's command ring worker, fence executor and pipeline
+ * compile worker call the same hook as the software RDP's band threads when they start and end (RDP::set_thread_hook,
+ * our patch in third_party/parallel-rdp): on Android they join the performance session, nice -8 and the fast cores
+ * after a resume. */
 #include "n64_rdp_backend.h"
 #include "n64_rdp.h"
+#include "n64_vk_cache.h"
 #include "n64_vk_driver.h"
 
 #include "context.hpp"
 #include "device.hpp"
 #include "rdp_device.hpp"
+#include "thread_hook.hpp"
 #include "thread_id.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <new>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -109,6 +126,15 @@ struct VkRdp {
     int upscale = 1;
     unsigned down_steps = 0;
     std::vector<RDP::RGBA> scan;
+
+    /* Pipeline cache file (n64_vk_cache.h): its path ("": none), the size of the data it holds (Granite's blob), the
+     * thread that saves it when it grew (pc_cv, pc_quit under g_pc_mu). */
+    std::string pc_path;
+    size_t pc_size = 0;
+    bool pc_no_data_logged = false;
+    std::thread pc_thread;
+    std::condition_variable pc_cv;
+    bool pc_quit = false;
 };
 
 /* Granite records command buffers per registered thread index: whichever thread drives the RDP is index 0, like
@@ -517,6 +543,120 @@ bool ubershader_draws_wrong(Vulkan::Device *dev)
     return dev->get_device_features().driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY_KHR;
 }
 
+/* ---- Pipeline cache (n64_vk_cache.h) -------------------------------------------------------------------------------- */
+std::mutex g_pc_mu;         /* every save; g_pc_live; the pc_cv waits */
+VkRdp *g_pc_live = nullptr; /* the RDP n64_rdp_vk_save_caches saves: from vk_create's success to vk_destroy */
+constexpr size_t PC_EMPTY = 16 + 8 + 32; /* Granite's UUID and hash, a Vulkan cache header: nothing compiled in it */
+
+/* The device's VkPipelineCache, from the file when there is a whole one of this device and driver, else empty. Without
+ * RECOMP_VK_CACHE_DIR, none (as before). Right after set_context: before any pipeline is made. */
+void pc_load(VkRdp *d)
+{
+    d->pc_path.clear();
+    d->pc_size = 0;
+    const uint8_t *uuid = d->dev->get_gpu_properties().pipelineCacheUUID;
+    char path[1200];
+    if (!n64_vk_cache_file(path, sizeof path, uuid))
+        return;
+    size_t n = 0;
+    const char *why = "";
+    uint8_t *data = static_cast<uint8_t *>(n64_vk_cache_load(path, uuid, &n, &why));
+    if (data && d->dev->init_pipeline_cache(data, n)) {
+        d->pc_size = n;
+        printf("n64: Vulkan RDP: pipeline cache loaded (%zu KB) from %s\n", n >> 10, path);
+    } else {
+        if (!data && !strcmp(why, "none"))
+            printf("n64: Vulkan RDP: no pipeline cache yet (%s)\n", path);
+        else
+            fprintf(stderr, "n64: Vulkan RDP: pipeline cache %s ignored (%s), starting empty\n", path,
+                    data ? "the driver refused it" : why);
+        if (!d->dev->init_pipeline_cache(nullptr, 0)) {
+            fprintf(stderr, "n64: Vulkan RDP: the driver cannot make a pipeline cache\n");
+            path[0] = 0;
+        }
+    }
+    free(data);
+    fflush(stdout);
+    d->pc_path = path;
+}
+
+/* Writes the cache when it differs in size from what the file holds (new pipelines). g_pc_mu held. */
+void pc_save_locked(VkRdp *d, const char *why)
+{
+    if (d->pc_path.empty() || !d->dev)
+        return;
+    const size_t n = d->dev->get_pipeline_cache_size();
+    if (n == d->pc_size || n == 0)
+        return;
+    if (n <= PC_EMPTY) {
+        if (!d->pc_no_data_logged)
+            fprintf(stderr, "n64: Vulkan RDP: the driver gives no pipeline cache data (%zu bytes); only its own "
+                            "shader cache (MESA_SHADER_CACHE_DIR) is kept\n", n);
+        d->pc_no_data_logged = true;
+        return;
+    }
+    std::vector<uint8_t> buf(n);
+    if (!d->dev->get_pipeline_cache_data(buf.data(), n))
+        return; /* it grew between the two calls (VK_INCOMPLETE): the next save */
+    const uint64_t t0 = host_ns();
+    const int rc = n64_vk_cache_save(d->pc_path.c_str(), d->dev->get_gpu_properties().pipelineCacheUUID, buf.data(), n);
+    d->pc_size = n; /* a write that failed (logged) is not tried again until the cache grows again */
+    if (rc == 0) {
+        printf("n64: Vulkan RDP: pipeline cache saved (%zu KB, %s, %.1f ms) to %s\n", n >> 10, why,
+               (double)(host_ns() - t0) / 1e6, d->pc_path.c_str());
+        fflush(stdout);
+    }
+}
+
+/* The saver thread: the compiles of the game (a new 4x effect, a new combiner) are on disk within 10 s. */
+void pc_saver(VkRdp *d)
+{
+    std::unique_lock<std::mutex> lk(g_pc_mu);
+    while (!d->pc_cv.wait_for(lk, std::chrono::seconds(10), [d]() { return d->pc_quit; }))
+        pc_save_locked(d, "new pipelines");
+}
+
+void pc_start(VkRdp *d)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_pc_mu);
+        g_pc_live = d;
+        d->pc_quit = false;
+    }
+    if (d->pc_path.empty())
+        return;
+    try {
+        d->pc_thread = std::thread(pc_saver, d);
+    } catch (...) {
+        fprintf(stderr, "n64: Vulkan RDP: no pipeline cache thread; saved at pause and at exit only\n");
+    }
+}
+
+/* Before the device goes: no more saves from elsewhere, the last one here. */
+void pc_stop(VkRdp *d)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_pc_mu);
+        if (g_pc_live == d)
+            g_pc_live = nullptr;
+        d->pc_quit = true;
+    }
+    d->pc_cv.notify_all();
+    if (d->pc_thread.joinable())
+        d->pc_thread.join();
+    std::lock_guard<std::mutex> lk(g_pc_mu);
+    pc_save_locked(d, "exit");
+}
+
+/* paraLLEl-RDP's threads (RDP::set_thread_hook) call the hook the runtime gave n64_rdp_set_thread_hook. */
+void hook_threads()
+{
+    n64_rdp_thread_hook fn = nullptr;
+    void *user = nullptr;
+    n64_rdp_get_thread_hook(&fn, &user);
+    RDP::set_thread_hook(fn, user);
+}
+
 /* ---- n64_rdp_ops ---------------------------------------------------------------------------------------------------- */
 void vk_reset(void *p);
 
@@ -548,6 +688,7 @@ bool try_driver(VkRdp *d, bool *custom)
     }
     d->dev.reset(new Vulkan::Device);
     d->dev->set_context(*d->ctx);
+    pc_load(d); /* before the first command processor: the check's pipelines come from the file too */
     const char *gpu = d->dev->get_gpu_properties().deviceName;
     char drv[2 * VK_MAX_DRIVER_NAME_SIZE + 64];
     if (*custom && d->dev->get_device_features().driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY_KHR) {
@@ -608,6 +749,8 @@ bool try_driver(VkRdp *d, bool *custom)
                              ? ", super-sampled readback" : "");
             printf("n64: Vulkan RDP on %s (paraLLEl-RDP, %s; %s%s)\n", gpu, tries[i].name, drv, up);
             fflush(stdout);
+            std::lock_guard<std::mutex> lk(g_pc_mu);
+            pc_save_locked(d, "startup check");
             return true;
         }
         if (d->upscale > 1) {
@@ -628,6 +771,7 @@ bool try_driver(VkRdp *d, bool *custom)
     d->cp.reset(); /* the command processor, then the device, then the instance */
     d->dev.reset();
     d->ctx.reset();
+    d->pc_path.clear();
     return false;
 }
 
@@ -643,6 +787,8 @@ void *vk_create(n64_rcp_bus bus)
     if (!d)
         return nullptr;
     d->bus = bus;
+    n64_vk_cache_mesa_env(); /* before any driver opens */
+    hook_threads();          /* before any command processor starts its threads */
 
     if (void *gipa = n64_vk_driver_open()) {
         bool custom = true;
@@ -653,6 +799,7 @@ void *vk_create(n64_rcp_bus bus)
                 n64_vk_driver_done(ok ? "ok" : "unsupported");
             if (ok) {
                 vk_reset(d.get());
+                pc_start(d.get());
                 return d.release();
             }
         } else {
@@ -677,6 +824,7 @@ void *vk_create(n64_rcp_bus bus)
     if (!try_driver(d.get(), &custom))
         return nullptr;
     vk_reset(d.get());
+    pc_start(d.get());
     return d.release();
 }
 
@@ -688,6 +836,7 @@ void vk_destroy(void *p)
     on_thread();
     if (d->cp)
         d->cp->idle();
+    pc_stop(d); /* the compiles are over: the last save */
     d->cp.reset(); /* the command processor, then the device, then the instance */
     d->dev.reset();
     d->ctx.reset();
@@ -959,6 +1108,13 @@ void vk_stats(void *p, n64_rdp_stats *out)
 }
 
 } // namespace
+
+extern "C" void n64_rdp_vk_save_caches(const char *why)
+{
+    std::lock_guard<std::mutex> lk(g_pc_mu);
+    if (g_pc_live)
+        pc_save_locked(g_pc_live, why);
+}
 
 extern "C" const n64_rdp_ops n64_rdp_vk_ops = { "vulkan", vk_create, vk_destroy, vk_reset, vk_attach_dmem,
                                                 vk_read_reg, vk_write_reg, vk_run, vk_set_threads, vk_flush,

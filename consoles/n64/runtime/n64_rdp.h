@@ -35,6 +35,13 @@ int n64_rdp_set_threads(n64_rdp *d, int n);
  * the call; NULL (the default): none. */
 typedef void (*n64_rdp_thread_hook)(int starting, void *user);
 void n64_rdp_set_thread_hook(n64_rdp_thread_hook fn, void *user);
+/* The hook as set (both NULL when none): the Vulkan RDP gives it to paraLLEl-RDP's own threads (command ring, fence
+ * executor, pipeline compiles) at n64_rdp_create. */
+void n64_rdp_get_thread_hook(n64_rdp_thread_hook *fn, void **user);
+/* Writes the back end's caches to disk now when they changed (the Vulkan RDP's pipeline cache under
+ * RECOMP_VK_CACHE_DIR, n64_vk_cache.h): the app is pausing and may be killed there. Any thread; the RDP, if any, that
+ * is alive. Nothing for the software RDP. */
+void n64_rdp_save_caches(void);
 /* A commit: every command queued is drawn and in RDRAM (the VI reads it next, a save state takes it...). */
 void n64_rdp_flush(n64_rdp *d);
 /* The end of an emulated frame (n64_run_frame): the software RDP commits there, whether or not the host shows the

@@ -367,6 +367,7 @@ See [consoles/README.md](../../consoles/README.md) (N64 RDP) and `consoles/n64/r
 | `RECOMP_VK_DRIVER_ID=<id>` | the directory's last component | The driver's id, for the log, the trial marker and `last_start`. | `n64_vk_driver.c` |
 | `RECOMP_VK_HOOK_DIR=<dir>` | the directory `libmain.so` was loaded from | The app's native library directory (`ApplicationInfo.nativeLibraryDir`), where adrenotools' hook libraries are. | `n64_vk_driver.c` |
 | `RECOMP_VK_DRIVER=system` | unset | Forces the system driver whatever the others say. | `n64_vk_driver.c` |
+| `RECOMP_VK_CACHE_DIR=<dir>` | unset (nothing kept) | Where the Vulkan RDP keeps compiled shaders between starts (created when missing): `pipelines-<pipelineCacheUUID>.bin`, the VkPipelineCache (read before the start-up check; written when it grew, after the check, every 10 s, at pause and at exit; a truncated or foreign file is ignored and replaced), and `mesa/`, Mesa's disk cache (`MESA_SHADER_CACHE_DIR` is set to it unless already set). The app sets `<cache>/vk_cache/<driver id or system>/` for every N64 game. | `consoles/n64/runtime/n64_vk_cache.c` |
 
 Files next to the drivers (written only when the driver directory's parent is named `vk_drivers`):
 `vk_drivers/trying` holds the id while the driver is being opened and checked; found at the next start with the same

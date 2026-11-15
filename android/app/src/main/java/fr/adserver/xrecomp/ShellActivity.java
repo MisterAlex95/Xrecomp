@@ -19,7 +19,9 @@ import org.libsdl.app.SDLControllerManager;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -277,6 +279,8 @@ public class ShellActivity extends SDLActivity {
      * in its Options, else Settings' choice, else the system driver: VkDrivers.resolve) is a still installed one,
      * RECOMP_VK_DRIVER_DIR / _LIB / _ID and RECOMP_VK_HOOK_DIR; otherwise all four unset, also
      * clearing what a previous game of this process had. RECOMP_VK_DRIVER=system in recomp.cfg still wins natively.
+     * For every N64 game RECOMP_VK_CACHE_DIR too (VkDrivers.cacheEnv, under getCacheDir()): the compiled shaders of
+     * the last start, so the next one does not compile them again.
      * A game's own app uses its own files/vk_drivers (the driver it took from XRecomp).
      */
     private void applyVkDriver(boolean romLaunch) {
@@ -287,7 +291,9 @@ public class ShellActivity extends SDLActivity {
         VkDrivers drivers = VkDrivers.of(this);
         VkDrivers.Driver d = n64 ? drivers.resolve(tid) : null;
         String own = n64 ? drivers.gameChoice(tid) : null;
-        for (String[] kv : VkDrivers.runEnv(d, getApplicationInfo().nativeLibraryDir)) {
+        List<String[]> env = new ArrayList<>(VkDrivers.runEnv(d, getApplicationInfo().nativeLibraryDir));
+        env.add(VkDrivers.cacheEnv(d, n64 ? getCacheDir() : null));
+        for (String[] kv : env) {
             try {
                 if (kv[1] != null)
                     Os.setenv(kv[0], kv[1], true);

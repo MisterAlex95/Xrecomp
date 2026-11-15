@@ -256,6 +256,13 @@ void n64_rdp_flush(n64_rdp *d)
         replace_failed(d);
 }
 
+void n64_rdp_save_caches(void)
+{
+#ifdef N64_RDP_HAVE_VULKAN
+    n64_rdp_vk_save_caches("pause");
+#endif
+}
+
 void n64_rdp_frame_end(n64_rdp *d)
 {
     if (d->ops == &n64_rdp_sw_ops)
