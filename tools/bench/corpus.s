@@ -181,7 +181,7 @@ w_bytes:
     pop ebx
     ret
 
-# ── x87: 4x4 matrix times 256 vec4, fld/fmul/faddp/fstp, fistp result ──
+# ── x87: 4x4 matrix times 256 vec4, fld/fmul/faddp/fstp, sum of sqrt|v| (fabs/fsqrt), fistp ──
     .globl w_x87
 w_x87:
     push ebx
@@ -222,7 +222,10 @@ w_x87:
     mov esi, offset vec_out
     mov ecx, 1024
 4:
-    fadd dword ptr [esi]
+    fld dword ptr [esi]
+    fabs
+    fsqrt
+    faddp st(1), st
     add esi, 4
     dec ecx
     jnz 4b

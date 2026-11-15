@@ -81,6 +81,7 @@ VARIANTS = {
     "ie": ["-ftls-model=initial-exec"],
     "ld": ["-ftls-model=local-dynamic"],
     "thinlto": ["-flto=thin"],
+    "a715": ["-mcpu=cortex-a715"],          # the reference device's big cores (arm64 builds only)
     "cpuslot": ["-DRECOMP_CPU_SLOT=1"],
     "cpuslot0": ["-DRECOMP_CPU_SLOT=0"],
     "memalias": ["-DRECOMP_GUEST_MEM_NOALIAS=1"],
@@ -242,7 +243,7 @@ def build(out, variant, cc="clang", target=None, sysroot=None, jobs=2):
     obj_bytes = sum(os.path.getsize(o) for o in objs)
     rt_flags = tflags + base_flags() + ["-I" + os.path.join(out, "gen"), "-I" + out]
     ldx = []
-    if target and "android" in target:
+    if (target and "android" in target) or lto:     # ThinLTO needs lld (its --thinlto-jobs)
         ldx = ["-fuse-ld=lld"]
     lto_link = (["-flto=thin", "-Wl,--thinlto-jobs=%d" % jobs] if lto else []) + \
         [f for f in extra if f.startswith("-O")]
@@ -257,7 +258,10 @@ def build(out, variant, cc="clang", target=None, sysroot=None, jobs=2):
     link_s = time.time() - t1
     sh([cc] + tflags + ldx + ["-O2", "-DBENCH_SHARED", "-o", os.path.join(so, "bench"), main, "-ldl"])
     sh([cc] + rt_flags + ldx + lto_link + ["-o", os.path.join(bdir, "exe", "bench"), main, rt] + objs + ["-lm"])
-    size = sh(["size", "-A", os.path.join(so, "libtitle.so")], check=False).stdout
+    try:
+        size = sh(["size", "-A", os.path.join(so, "libtitle.so")], check=False).stdout
+    except OSError:                 # no binutils `size` (the arm64 cross image)
+        size = ""
     m = re.search(r"^\.text\s+(\d+)", size, re.M)
     info = {"variant": variant, "flags": " ".join(extra), "compile_s": round(compile_s, 2),
             "link_s": round(link_s, 2), "peak_rss_mb": round(peak / 1024.0, 1), "objects_bytes": obj_bytes,
