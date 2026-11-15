@@ -55,6 +55,19 @@ timer overflows, SOUNDBIAS) mixes at 131 kHz and hands out 48 kHz stereo through
 a ROM headless. Tests: `consoles/gba/tests/CMakeLists.txt` (unit tests, our homebrew HLE and LLE, jsmolka/gba-tests
 CPU / memory / BIOS / save suites fetched by `tools/consoles/fetch_gba_tests.sh`).
 
+**Compatibility: the mGBA test suite (XBA-201).** `tools/consoles/build_gba_suite.sh` builds
+[mgba-emu/suite](https://github.com/mgba-emu/suite) (MIT, published as source only) at a pinned commit in the devkitARM
+image; the ROM is never committed. `consoles/gba/tests/mgba_suite.sh` runs each of its groups from a fresh boot under
+`gba_run --pad-script` (press / wait / until-log / hash commands walk its menus) and reads the suite's own
+`END: passed/total` line from mGBA's debug-print port (`gba_run --debug-log`, `gba_set_debug_log`); the video group
+compares each scene's frame with its reference frame. ctest `gba_mgba_<group>` (built-in BIOS), `gba_mgba_lle_<group>`
+(Cult-of-GBA) and `gba_rc_mgba` (recompiled, in lockstep) fail when a count drops below the one reached (the
+thresholds in the CMakeLists: raise them with each fix). Counts after XBA-201 (HLE / LLE): memory 1498 / 1488 of 1552,
+I/O read 130 of 130, timing 1190 / 1204 of 2020, timer count-up 740 / 847 of 936, timer IRQ 90 of 90, shifter, carry,
+DMA and SIO register R/W all, multiply long 52 of 72, BIOS math 615 / 603 of 615, SIO timing 0 of 4, misc 4 / 6 of 12,
+video 6 of 7. What is left is mostly the cartridge prefetch buffer (the timing tests' `P` columns; the core charges a
+flat 1 cycle per prefetched halfword), the BIOS's own timing in HLE, DMA start latency and the multiply carry flag.
+
 **Playing a GBA game (XBA-157).** `gba_runtime_run` (`gba_runtime.h`) plays a ROM on the host layer: `host_window`
 (RGB555 → RGBA texture, letterboxed, aspect, integer or stretch scaling, nearest by default or linear: the display
 options shared by every console, [environment-variables.md](../docs/runtime/environment-variables.md#consoles-gba-ps1-n64)), every `host_pad` controller in
@@ -113,7 +126,8 @@ it, so no corpus). The homebrew corpus runs in the **homebrew job** instead (XBA
 `tools/consoles/run_gba_packs.sh` in the linux job's deps image: ctest `gba_hb_*` and `gba_rc_hb_*`, then, with the
 inputs from `tools/consoles/gba_test_inputs.sh` (XBA-193: the Cult-of-GBA BIOS built from source and jsmolka/gba-tests,
 both MIT, never committed or uploaded, cached in the host's Docker as the data image `xba-gba-inputs:<hash of the
-pins>`), `gba_hb_lle_*`, `gba_jsmolka_*` and their `gba_rc_*` (30 tests, about 11 s; one that skips fails the job), then `tools/consoles/gba_corpus_packs.py`, the user's chain on each program:
+pins>`), `gba_hb_lle_*`, `gba_jsmolka_*` and their `gba_rc_*`, and since XBA-201 the mGBA suite's `gba_mgba*` /
+`gba_rc_mgba` (the image holds its ROM too; 59 tests, about 100 s; one that skips fails the job), then `tools/consoles/gba_corpus_packs.py`, the user's chain on each program:
 `python3 -m tools.prepare <prog>.gba` (a desktop pack), `gba_run --pack libtitle.so --lockstep --result` until the
 verdict, and a screenshot 30 frames later (`--ppm`, kept as PNG in the run's artefact `gba-corpus-screens`). A program
 fails on a failing result block, a lockstep difference, or a screenshot whose sha256 is not the one in
