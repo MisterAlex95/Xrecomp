@@ -26,6 +26,7 @@
 #include "kernel_missing.h"
 #include "nv2a_flip_hold.h"
 #include "guest_clock.h"     /* fast-forward (XBA-240) */
+#include "xbox_dev_state.h"  /* save states (XBA-248) */
 #include "platform/host_time.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -2119,10 +2120,89 @@ static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
 #endif
 }
 
+/* Save states (XBA-248, xbox_dev_state.h): the poll thread held between two
+ * passes. A hold request is taken at the top of the loop, after the previous
+ * pass finished its walk: the thread runs the executor's prepare on its own
+ * thread (the GPU back end's context is current there: render targets are
+ * read back into guest memory), says it is held and waits. On release after
+ * a load it drops the back end's caches, again on its own thread, and the
+ * next pass re-takes PUT and GET from the restored registers. */
+static volatile LONG s_poll_hold_req, s_poll_held, s_poll_loaded, s_poll_reload;
+
+static void nv2a_poll_hold_point(void)
+{
+    extern void nv2a_pb_exec_state_prepare(void);
+    extern void nv2a_pb_exec_state_after_load(void);
+
+    if (!InterlockedCompareExchange(&s_poll_hold_req, 0, 0))
+        return;
+    nv2a_pb_exec_state_prepare();
+    InterlockedExchange(&s_poll_held, 1);
+    while (InterlockedCompareExchange(&s_poll_hold_req, 0, 0)
+           && !InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0))
+        Sleep(1);
+    if (InterlockedExchange(&s_poll_loaded, 0)) {
+        nv2a_pb_exec_state_after_load();
+        InterlockedExchange(&s_poll_reload, 1);
+    }
+    InterlockedExchange(&s_poll_held, 0);
+}
+
+int xbox_Nv2aPollHold(int hold, int loaded)
+{
+    DWORD t0 = GetTickCount();
+
+    if (!g_nv2a_ack_thread)
+        return -1;
+    if (hold) {
+        InterlockedExchange(&s_poll_hold_req, 1);
+        while (!InterlockedCompareExchange(&s_poll_held, 0, 0)) {
+            if (GetTickCount() - t0 > 2000) {
+                InterlockedExchange(&s_poll_hold_req, 0);
+                return 0;
+            }
+            Sleep(1);
+        }
+        return 1;
+    }
+    if (!InterlockedCompareExchange(&s_poll_held, 0, 0))
+        return 0;
+    InterlockedExchange(&s_poll_loaded, loaded ? 1 : 0);
+    InterlockedExchange(&s_poll_hold_req, 0);
+    while (InterlockedCompareExchange(&s_poll_held, 0, 0)) {
+        if (GetTickCount() - t0 > 2000)
+            return 0;
+        Sleep(1);
+    }
+    return 1;
+}
+
+/* The register aperture, whole: 16 MB of host memory, nearly all zero, so
+ * run-length coded (xbox_dev_state.h); a restore writes only the words that
+ * differ, which leaves untouched pages uncommitted. */
+void xbox_Nv2aApertureSave(XdsWriter *w)
+{
+    xds_put_u32(w, g_nv2a_memory ? 1u : 0u);
+    if (g_nv2a_memory)
+        xds_put_words_rle(w, (const volatile uint32_t *)g_nv2a_memory, XBOX_NV2A_SIZE / 4);
+}
+
+int xbox_Nv2aApertureLoad(XdsReader *r)
+{
+    if (!xds_get_u32(r))
+        return !r->err;
+    if (!g_nv2a_memory) {
+        xds_fail(r);
+        return 0;
+    }
+    return xds_get_words_rle(r, (volatile uint32_t *)g_nv2a_memory, XBOX_NV2A_SIZE / 4);
+}
+
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
+        nv2a_poll_hold_point();
         /* A flip held for its vblank (nv2a_flip_hold.h): this pass walks
          * nothing, leaves DMA_GET where it is and acknowledges no PFB flush,
          * which is how the title feels the console's FLIP_STALL. Nothing is
@@ -2186,6 +2266,15 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             DWORD now_ms = GetTickCount();
             uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
             int walked = 0;
+            if (InterlockedExchange(&s_poll_reload, 0)) {
+                /* A state was loaded: the walk carries on from the restored
+                 * GET (a segment held behind a flip at the capture is walked
+                 * next), as if this thread had left it there. */
+                uint32_t get_now = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
+                last_put = get_now;
+                get_written = get_now;
+                last_put_ms = now_ms;
+            }
             if (!flip_held
                     && (put != last_put || (now_ms - last_put_ms) > 2000)) {
                 walked = 1;

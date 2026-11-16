@@ -36,3 +36,7 @@ set_tests_properties(usb_ohci_posix_catchup_off PROPERTIES SKIP_RETURN_CODE 77
 add_test(NAME usb_ohci_posix_no_tib COMMAND usb_ohci_posix_test ${TEST_XBE})
 set_tests_properties(usb_ohci_posix_no_tib PROPERTIES SKIP_RETURN_CODE 77
                      ENVIRONMENT RECOMP_TIB_PER_THREAD=0)
+# Save states (XBA-248): the USB section captured, the model reset, restored, the same pad report.
+add_test(NAME usb_ohci_posix_state COMMAND usb_ohci_posix_test ${TEST_XBE} state)
+set_tests_properties(usb_ohci_posix_state PROPERTIES SKIP_RETURN_CODE 77
+                     ENVIRONMENT RECOMP_USB_PADS=1)

@@ -383,7 +383,19 @@ typedef struct {
      * 300 us across idle calls), never with RECOMP_GPU_ZPASS=lazy. NULL:
      * the executor waits for that report after 2 ms instead. */
     void (*zpass_flush)(void);
+    /* Optional, save states (XBA-248, xbox_dev_state.h), on the executor
+     * thread with the title frozen. NV2A_BACKEND_STATE_FLUSH, before a
+     * capture: everything only the GPU holds goes to guest memory (every
+     * render target read back, a present read-back in flight completed), so
+     * the state's RAM has the picture. NV2A_BACKEND_STATE_DROP, after a load:
+     * forget every cache (targets, depth, textures, programs, vertex
+     * buffers); they rebuild from the restored guest memory. Depth held only
+     * by the GPU is not read back: a frame's depth starts cleared after a
+     * load. NULL: the back end keeps nothing guest memory does not have. */
+    void (*state)(int op);
 } Nv2aBackend;
+
+enum { NV2A_BACKEND_STATE_FLUSH = 1, NV2A_BACKEND_STATE_DROP = 2 };
 
 /* The NV2A poll loop calls this when a tick found nothing new to walk
  * (the walker has caught up with PUT): pending visibility reports the GPU

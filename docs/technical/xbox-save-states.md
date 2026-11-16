@@ -183,6 +183,46 @@ frames are part of the chain signatures. A rebuilt title (a new prepare) cannot 
 Sizes: RAM dominates (up to 64 MB raw, zero pages skipped); everything else is tens of KB. Capture cost on a phone:
 a 64 MB copy takes about 5-10 ms; for rewind, pages are compared with the previous capture and only changed pages kept.
 
+## Device sections (XBA-248)
+
+The NV2A, APU and USB models serialise themselves into byte buffers; the state container (XBA-245) only frames
+and stores them. Interface: `src/kernel/xbox_dev_state.h` (header-only buffer, run-length coding of 32-bit words,
+section framing `u32 tag, u32 version, u64 length, payload`, the section table `xbox_DevStateSections`).
+
+With every guest thread frozen (`xbox_ParkFreeze`):
+
+1. `xbox_DevStateFreeze()` holds the device threads between two passes. The NV2A poll thread finishes its walk,
+   resolves pending visibility reports, has the GPU back end read every render target back into guest memory
+   (back-end hook `state(NV2A_BACKEND_STATE_FLUSH)`, run on that thread, where the GL context is current), then
+   waits. The APU frame thread idles (`state_hold`, whatever plays). The OHCI controller thread stands still.
+2. Capture (RAM first, then each section's `capture`) or restore (RAM first, then each `restore`).
+3. `xbox_DevStateThaw(loaded)`. After a load the NV2A poll thread drops every back-end cache
+   (`NV2A_BACKEND_STATE_DROP`: targets, depth, textures, programs, vertex buffers rebuild from guest memory) and
+   takes PUT / GET from the restored registers; the flip hold, the frame cap's schedule and the pacing alignment
+   start again; `recomp_states_note_load` resets frame generation's history.
+
+| Section | Saved | Rebuilt or cleared |
+|---|---|---|
+| NV2A | The 16 MB register aperture (PGRAPH, PFIFO, PCRTC, PVIDEO, RAMIN with the DMA objects), run-length coded; the DMA walker's GET, CALL return and cut-off method; the executor's decoded state (surface, vertex attributes, texture stages, combiners, the Kelvin register file, the semaphore target); the vertex program memory, constants and load cursors; the CPU rasteriser's host depth buffers | GPU objects (dropped, re-created from guest memory; programs reload from the disk cache); visibility queries (resolved before the capture); depth held only by the GPU (a frame after a load starts with it cleared) |
+| APU | The APU, GP and EP register files; the sequencer's sample count; per voice the resampler's samples and position, the filters, the HRTF history and coefficient ramps, each bin's last gain; SSLs, HRTF table, submix headrooms, title-held voice locks; the GP / EP DSP memories (MCPX aperture 0x30000-0x7FFFF); the doorbell ack's state; the software mixer's play positions | The device queue (`xa2_clear`), the monitor buffer (a fresh EP period), the pacing clock, the reverb's delay lines |
+| USB | Both OHCI register files with the read counts the frame number derives from; each pad's control pipe, address, configuration and rumble; plugged pads, hotplug bookkeeping, addresses of pads pulled out, a list kick not walked yet | The pads re-attach to the host's current pads at the controller's next hotplug decision; the rumble is re-applied to whatever pad is there |
+
+Sizes on the synthetic XBE: NV2A, APU (absent) and USB together 6.6 KB, captured in 3 ms (most of it the scan of
+the 16 MB aperture); the APU model with one voice playing 50 KB (the per-voice block, run-length coded).
+
+Tests: `tests/nv2a_ffp_backend` (`nv2a-state`: the executor's state captured, overwritten, restored, and a clear
+and two batches reach the back end exactly as without the round trip), `tests/nv2a_gl_backend` (case 9: a target
+drawn only on the GPU, flushed, captured, restored and dropped, presents the same pixels; without the flush it
+does not), `tests/apu_state` (a pitched, fading voice mixed from a restored model equals the uninterrupted run
+sample for sample; RAM alone does not), `tests/apu_lifecycle` (the section of a live instance with the frame
+thread held), `tests/usb_ohci_posix` (`usb_ohci_posix_state`: an enumerated pad's report and registers after a
+reset and a restore; every section through `xbox_DevStateFreeze` / `CaptureAll` / `RestoreAll` / `Thaw` with
+the real poll thread).
+
+Not covered: the AC'97 page and the NIC (a state taken during a network session resumes with the link down), the
+HLE DirectSound layer's host buffers (`src/audio`: restored only within the run that owns them), the legacy
+xemu-derived `src/nv2a` model (Windows MMIO path, not run by recompiled titles).
+
 ## Limits
 
 - **Titles outside the class** (above) never offer states. The status file and the app name the reason: fibers or

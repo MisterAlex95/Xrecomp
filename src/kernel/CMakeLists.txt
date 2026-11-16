@@ -52,6 +52,7 @@ set(KERNEL_SOURCES
     nv2a_vsh_interp.c
     nv2a_combiner.c
     guest_clock.c
+    xbox_dev_state.c
 )
 
 add_library(xbox_kernel STATIC ${KERNEL_SOURCES})

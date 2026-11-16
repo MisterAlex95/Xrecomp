@@ -16,6 +16,7 @@
 #include "usb_hotplug.h"
 #include "../platform/host_time.h"
 #include "../input/xinput_xbox.h"   /* xbox_InputSetState: rumble */
+#include "../kernel/xbox_dev_state.h"  /* save states (XBA-248) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -503,6 +504,10 @@ static volatile unsigned s_present;
  * for one gets no answer, as on the wire. */
 static volatile uint32_t s_gone_addr[4];
 
+/* Each pad's motors as the title last set them (save states: re-applied to
+ * the host pad after a load). */
+static uint16_t s_rumble[USB_GAMEPAD_MAX][2];
+
 /* Which pad an endpoint descriptor talks to: by its function address, and
  * address 0 -- the default address a device answers before SET_ADDRESS --
  * is the plugged pad that has not been given one yet. Pads are plugged one
@@ -758,6 +763,8 @@ static uint32_t ohci_do_td(OhciController *hc, uint32_t ed0, uint32_t td)
                     fprintf(stderr, "  [OHCI%d] rumble pad %d left %u right %u (ep %u)\n",
                             hc->index, pad, v.wLeftMotorSpeed, v.wRightMotorSpeed, endpoint);
                 xbox_InputSetState((DWORD)pad, &v);
+                s_rumble[pad][0] = v.wLeftMotorSpeed;
+                s_rumble[pad][1] = v.wRightMotorSpeed;
             }
         }
         if (endpoint == 0) {
@@ -1953,4 +1960,143 @@ void xbox_OhciReport(void)
                 s_hc[i].reg[HcInterruptStatus / 4],
                 s_hc[i].reg[HcRhPortStatus1 / 4]);
     fflush(stderr);
+}
+
+/* ---- save states (XBA-248, kernel/xbox_dev_state.h) --------------------
+ *
+ * Both register files (with the read counts the frame number is derived
+ * from), the control pipes' state per pad, the pads' addresses and
+ * configurations, which pads are plugged and the hotplug's bookkeeping, the
+ * addresses of pads pulled out, a list kick not walked yet, and each pad's
+ * rumble. Taken with the controller thread held between passes and no list
+ * walk in progress. After a load the pads re-attach to the host's current
+ * pads by themselves: the controller thread's next hotplug decision plugs
+ * or pulls the difference, as when a controller comes or goes. */
+#define OHCI_STATE_MAGIC 0x3149484Fu          /* "OHI1" */
+
+int xbox_OhciStateHold(int hold)
+{
+    if (!s_enabled)
+        return 0;
+    return xbox_OhciHoldControllerForTest(hold);
+}
+
+int xbox_OhciStateCapture(XdsWriter *w)
+{
+    uint8_t addr[USB_GAMEPAD_MAX], conf[USB_GAMEPAD_MAX];
+    int i, spins = 0;
+
+    xds_put_u32(w, OHCI_STATE_MAGIC);
+    xds_put_u32(w, (uint32_t)s_enabled);
+    if (!s_enabled)
+        return !w->err;
+    while (!list_try()) {
+        if (++spins > 2000)
+            return 0;                  /* a walk that never ends: refuse */
+        Sleep(1);
+    }
+    xds_put_u32(w, (uint32_t)s_device_hc);
+    xds_put_u32(w, s_ndp);
+    for (i = 0; i < 2; i++) {
+        xds_put_blob(w, s_hc[i].reg, sizeof s_hc[i].reg);
+        xds_put_u32(w, s_hc[i].reads);
+        xds_put_u32(w, (uint32_t)s_hc[i].periodic_seen);
+        xds_put_u32(w, (uint32_t)s_hc[i].ple_seen);
+    }
+    xds_put_blob(w, g_setup_pending_, sizeof g_setup_pending_);
+    xds_put_blob(w, g_setup_, sizeof g_setup_);
+    xds_put_blob(w, g_ctrl_buf_, sizeof g_ctrl_buf_);
+    xds_put_blob(w, g_ctrl_len_, sizeof g_ctrl_len_);
+    xds_put_blob(w, g_ctrl_sent_, sizeof g_ctrl_sent_);
+    usb_gamepad_state_get(addr, conf);
+    xds_put_blob(w, addr, sizeof addr);
+    xds_put_blob(w, conf, sizeof conf);
+    xds_put_u32(w, __atomic_load_n(&s_present, __ATOMIC_ACQUIRE));
+    for (i = 0; i < 4; i++)
+        xds_put_u32(w, __atomic_load_n(&s_gone_addr[i], __ATOMIC_RELAXED));
+    xds_put_blob(w, &s_hotplug, sizeof s_hotplug);
+    xds_put_u32(w, (uint32_t)__atomic_load_n(&s_list_kick, __ATOMIC_ACQUIRE));
+    xds_put_blob(w, s_rumble, sizeof s_rumble);
+    list_leave();
+    return !w->err;
+}
+
+int xbox_OhciStateRestore(XdsReader *r, uint32_t version)
+{
+    uint32_t reg[2][OHCI_REG_MAX / 4], reads[2], pseen[2], plseen[2];
+    uint32_t setup_pending[USB_GAMEPAD_MAX], present, gone[4], kick;
+    UsbSetup setup[USB_GAMEPAD_MAX];
+    uint8_t ctrl_buf[USB_GAMEPAD_MAX][64], addr[USB_GAMEPAD_MAX], conf[USB_GAMEPAD_MAX];
+    int ctrl_len[USB_GAMEPAD_MAX], ctrl_sent[USB_GAMEPAD_MAX];
+    UsbHotplug hp;
+    uint16_t rumble[USB_GAMEPAD_MAX][2];
+    int i, spins = 0;
+
+    if (version != XDS_USB_VERSION || xds_get_u32(r) != OHCI_STATE_MAGIC) {
+        xds_fail(r);
+        return 0;
+    }
+    if (!xds_get_u32(r))
+        return !r->err;                /* captured with USB off: nothing to restore */
+    /* Read whole before anything changes: a refused state leaves the model as it was. */
+    if (!s_enabled || xds_get_u32(r) != (uint32_t)s_device_hc || xds_get_u32(r) != s_ndp) {
+        xds_fail(r);
+        return 0;
+    }
+    for (i = 0; i < 2; i++) {
+        xds_get_blob(r, reg[i], sizeof reg[i]);
+        reads[i] = xds_get_u32(r);
+        pseen[i] = xds_get_u32(r);
+        plseen[i] = xds_get_u32(r);
+    }
+    xds_get_blob(r, setup_pending, sizeof setup_pending);
+    xds_get_blob(r, setup, sizeof setup);
+    xds_get_blob(r, ctrl_buf, sizeof ctrl_buf);
+    xds_get_blob(r, ctrl_len, sizeof ctrl_len);
+    xds_get_blob(r, ctrl_sent, sizeof ctrl_sent);
+    xds_get_blob(r, addr, sizeof addr);
+    xds_get_blob(r, conf, sizeof conf);
+    present = xds_get_u32(r);
+    for (i = 0; i < 4; i++)
+        gone[i] = xds_get_u32(r);
+    xds_get_blob(r, &hp, sizeof hp);
+    kick = xds_get_u32(r);
+    xds_get_blob(r, rumble, sizeof rumble);
+    if (r->err)
+        return 0;
+
+    while (!list_try()) {
+        if (++spins > 2000)
+            return 0;
+        Sleep(1);
+    }
+    for (i = 0; i < 2; i++) {
+        memcpy(s_hc[i].reg, reg[i], sizeof reg[i]);
+        s_hc[i].reads = reads[i];
+        s_hc[i].periodic_seen = (int)pseen[i];
+        s_hc[i].ple_seen = (int)plseen[i];
+    }
+    memcpy(g_setup_pending_, setup_pending, sizeof setup_pending);
+    memcpy(g_setup_, setup, sizeof setup);
+    memcpy(g_ctrl_buf_, ctrl_buf, sizeof ctrl_buf);
+    memcpy(g_ctrl_len_, ctrl_len, sizeof ctrl_len);
+    memcpy(g_ctrl_sent_, ctrl_sent, sizeof ctrl_sent);
+    usb_gamepad_state_set(addr, conf);
+    __atomic_store_n(&s_present, present, __ATOMIC_RELEASE);
+    for (i = 0; i < 4; i++)
+        __atomic_store_n(&s_gone_addr[i], gone[i], __ATOMIC_RELAXED);
+    s_hotplug = hp;
+    __atomic_store_n(&s_list_kick, (int)kick, __ATOMIC_RELEASE);
+    memcpy(s_rumble, rumble, sizeof rumble);
+    list_leave();
+
+    /* The motors as the state had them, on whatever pad is there now (0 stops one running). */
+    for (i = 0; i < USB_GAMEPAD_MAX; i++)
+        if (present & (1u << i)) {
+            XBOX_VIBRATION v;
+            v.wLeftMotorSpeed = rumble[i][0];
+            v.wRightMotorSpeed = rumble[i][1];
+            xbox_InputSetState((DWORD)i, &v);
+        }
+    return 1;
 }

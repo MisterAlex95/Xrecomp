@@ -56,6 +56,7 @@
 #include "nv2a_combiner.h"
 #include "nv2a_backend.h"
 #include "nv2a_coverage.h"     /* what is not drawn, by name (XBA-120) */
+#include "xbox_dev_state.h"   /* save states (XBA-248) */
 #if defined(_WIN32)
 #include <windows.h>
 #define NV_TLS __declspec(thread)
@@ -7941,4 +7942,132 @@ void nv2a_pb_exec_report(void)
         }
     }
     fflush(stderr);
+}
+
+/* ---- Save states (XBA-248, xbox_dev_state.h) ---------------------------
+ *
+ * The executor's decoded state is plain data in this file's statics: the
+ * surface and draw state (s_gpu, no pointers), the Kelvin register file,
+ * the texture-stage registers, the semaphore hand-over, and the CPU
+ * rasteriser's depth buffers, which live on the host (s_zbufs). It is
+ * saved between two pushbuffer segments, with the poll thread held, so no
+ * batch is half gathered: s_bcount and the program-triangle queue are empty
+ * there (prepare flushes the queue all the same). What is derived from it
+ * (fixed-function constants, the swizzle masks of the bound surface, the
+ * batch scratch) is recomputed at the next batch. Statistics stay as they
+ * are: they describe the run, not the guest. */
+
+void nv2a_pb_exec_state_prepare(void)
+{
+    xf_queue_flush();
+    /* Every visibility report the title has asked for is written to guest
+     * memory now; a state carries no GPU query. */
+    if (s_zp_count)
+        zpass_resolve_queue(1, 0);
+    if (s_backend && s_backend->state)
+        s_backend->state(NV2A_BACKEND_STATE_FLUSH);
+}
+
+void nv2a_pb_exec_state_after_load(void)
+{
+    uint32_t i;
+
+    /* Queued reports belonged to the timeline the load left. */
+    s_zp_head = s_zp_count = s_zp_answered = 0;
+    s_zp_acc = 0;
+    if (s_backend && s_backend->state)
+        s_backend->state(NV2A_BACKEND_STATE_DROP);
+    /* The back end re-uploads every constant at its next batch. */
+    for (i = 0; i < NV2A_VSH_CONSTANTS; i++)
+        s_ffpc_stamp[i] = ++s_ffpc_serial;
+    /* A flip held for its vblank, the cap's schedule and the vblank clock's
+     * watch start again from now. */
+    xbox_FlipHoldCancel(&s_flip_hold, xbox_HostNowNs());
+    s_cap_next_ns = s_cap_due_ns = 0;
+    s_cap_until_ns = 0;
+    s_align_restart = 1;
+    s_vbl_moved_ns = 0;
+    s_pace_slept_ns = 0;
+    s_render_ns = 0;
+}
+
+#define NV_STATE_MAGIC 0x45584543u          /* "CEXE" */
+
+void nv2a_pb_exec_state_save(XdsWriter *w)
+{
+    int i;
+
+    xds_put_u32(w, NV_STATE_MAGIC);
+    xds_put_u32(w, (uint32_t)s_exec_inited);
+    /* s_gpu is mostly its index and inline buffers (512 KB), zero past
+     * what the last batch used: run-length coded as words. */
+    xds_put_words_rle(w, (const uint32_t *)(const void *)&s_gpu, sizeof s_gpu / 4);
+    xds_put_words_rle(w, s_reg, sizeof s_reg / 4);
+    xds_put_blob(w, s_tex_reg, sizeof s_tex_reg);
+    xds_put_blob(w, s_tex_set, sizeof s_tex_set);
+    xds_put_u32(w, s_sem_va);
+    xds_put_u32(w, s_sem_last);
+    xds_put_u32(w, (uint32_t)s_sem_seen);
+    xds_put_u32(w, s_bprim);
+    /* Depth buffers (CPU rasteriser), each with its zeta offset. */
+    xds_put_u32(w, (uint32_t)s_zbuf_next);
+    for (i = 0; i < 4; i++) {
+        xds_put_u32(w, s_zbufs[i].z ? 1u : 0u);
+        if (s_zbufs[i].z) {
+            xds_put_u32(w, s_zbufs[i].offset);
+            xds_put_words_rle(w, (const uint32_t *)s_zbufs[i].z,
+                              (size_t)NV_ZBUF_W * NV_ZBUF_H);
+        }
+    }
+    nv2a_vsh_state_save(w);
+}
+
+int nv2a_pb_exec_state_load(XdsReader *r)
+{
+    static uint32_t gpu[sizeof s_gpu / 4], reg[sizeof s_reg / 4];
+    static uint32_t tex_reg[sizeof s_tex_reg / 4];
+    static uint8_t tex_set[sizeof s_tex_set];
+    int i, inited;
+
+    if (xds_get_u32(r) != NV_STATE_MAGIC) {
+        xds_fail(r);
+        return 0;
+    }
+    /* Into copies first: a state refused here leaves the executor whole. */
+    inited = (int)xds_get_u32(r);
+    if (!xds_get_words_rle(r, gpu, sizeof gpu / 4) || !xds_get_words_rle(r, reg, sizeof reg / 4)
+            || !xds_get_blob(r, tex_reg, sizeof tex_reg) || !xds_get_blob(r, tex_set, sizeof tex_set))
+        return 0;
+    memcpy(&s_gpu, gpu, sizeof s_gpu);
+    memcpy(s_reg, reg, sizeof s_reg);
+    memcpy(s_tex_reg, tex_reg, sizeof s_tex_reg);
+    memcpy(s_tex_set, tex_set, sizeof s_tex_set);
+    if (inited)
+        s_exec_inited = 1;
+    s_sem_va = xds_get_u32(r);
+    s_sem_last = xds_get_u32(r);
+    s_sem_seen = (int)xds_get_u32(r);
+    s_bprim = xds_get_u32(r);
+    s_bcount = 0;
+    s_xfq_n = 0;
+    s_zbuf_next = (int)xds_get_u32(r);
+    for (i = 0; i < 4 && !r->err; i++) {
+        if (!xds_get_u32(r)) {
+            s_zbufs[i].offset = 0;
+            free(s_zbufs[i].z);
+            s_zbufs[i].z = NULL;
+            continue;
+        }
+        s_zbufs[i].offset = xds_get_u32(r);
+        if (!s_zbufs[i].z)
+            s_zbufs[i].z = (float *)malloc(sizeof(float) * NV_ZBUF_W * NV_ZBUF_H);
+        if (!s_zbufs[i].z) {
+            xds_fail(r);
+            break;
+        }
+        xds_get_words_rle(r, (uint32_t *)s_zbufs[i].z, (size_t)NV_ZBUF_W * NV_ZBUF_H);
+    }
+    if (!r->err)
+        nv2a_vsh_state_load(r);
+    return !r->err;
 }

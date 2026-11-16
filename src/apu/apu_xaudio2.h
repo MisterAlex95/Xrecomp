@@ -40,6 +40,11 @@ int xa2_queued_samples(void);
  * the dry spell that follows is not an underrun. */
 void xa2_expect_drain(void);
 
+/* Drop every sample queued and not yet played (a save state was loaded:
+ * what was queued belongs to the timeline the load left). The drain that
+ * follows is not an underrun. */
+void xa2_clear(void);
+
 /* Pacing marks in samples for count buffers of buf_samples, fed one period
  * (period samples) at a time. A period is submitted only while queued <
  * high, so high is capped where that period could fill a buffer the voice

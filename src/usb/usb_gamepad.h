@@ -55,4 +55,9 @@ unsigned usb_gamepad_scripted(void);
  * prefixed "p<n+1>-". */
 #define USB_GAMEPAD_MAX 4
 
+/* Save states (XBA-248, ohci.c): each pad's bus address and configuration. */
+void usb_gamepad_state_get(uint8_t address[USB_GAMEPAD_MAX], uint8_t configuration[USB_GAMEPAD_MAX]);
+void usb_gamepad_state_set(const uint8_t address[USB_GAMEPAD_MAX],
+                           const uint8_t configuration[USB_GAMEPAD_MAX]);
+
 #endif /* XBOX_USB_GAMEPAD_H */

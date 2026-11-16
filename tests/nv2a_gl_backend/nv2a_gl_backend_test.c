@@ -31,6 +31,12 @@
  * presented as is (the window cannot read it through guest memory) comes
  * out as a 640x480 host frame, each pixel the mean of its four samples:
  *   8. one green sample column over red reads half green, half red.
+ * Save states (XBA-248), the back end's state hook:
+ *   9. a target drawn by the GPU only (never read back), FLUSH, guest memory
+ *      captured; more drawn and presented: the reference. The memory
+ *      restored, DROP (every GL object forgotten), the same drawn again:
+ *      the same pixels. Without the FLUSH the capture misses the GPU's
+ *      pixels and the picture differs (the control).
  * Also: RECOMP_GPU unset selects the platform's default (gpu_selected).
  * RECOMP_GPU_CPU_WRITES=0 (another ctest entry) checks that the same cases
  * fail without the merge, so the test tells the two apart. */
@@ -43,6 +49,7 @@
 #define FBHOST 0x00500000u          /* 64x32 A8R8G8B8, host present */
 #define FBAA   0x00600000u          /* 1280x960 A8R8G8B8, AA 2x2 */
 #define FBBIG  0x00B00000u          /* 800x600 A8R8G8B8 */
+#define FBST   0x00E00000u          /* 64x32 A8R8G8B8, save states */
 
 static uint8_t *s_mem;
 static int s_fail, s_cpu_on = 1;
@@ -385,6 +392,60 @@ int main(void)
               && ((c0 >> 8) & 0xFF) <= 0x81 && (c0 & 0xFF) == 0);
         CHECK(c1 == 0xFF0000u);
         s_scale_cfg.scale = keep;
+    }
+
+    /* 9. Save states: FLUSH before the capture, DROP after the restore. */
+    {
+        Nv2aSurface st = surf(FBST, 64, 32, 256, 4, 0x0108);
+        static uint8_t snap[MEM_BYTES];
+        uint8_t ref[64 * 32 * 4], got[64 * 32 * 4];
+        uint32_t drops = s_state_drops, flushes = s_state_flushes, diff, i;
+        int pass;
+
+        for (pass = 0; pass < 2; pass++) {       /* 0: with the FLUSH, 1: without */
+            memset(s_mem + FBST, 0, sizeof ref);
+            clear(&st, 0xFFFF0000u);
+            present(&st, 1, NULL);               /* red in guest memory: clean */
+            flip();
+            {
+                Nv2aSurface g = clip(st, 8, 0, 6, 32);
+                clear(&g, 0xFF00FF00u);          /* green on the GPU only */
+            }
+            if (pass == 0)
+                s_backend.state(NV2A_BACKEND_STATE_FLUSH);
+            memcpy(snap, s_mem, MEM_BYTES);      /* the RAM section */
+            {
+                Nv2aSurface g = clip(st, 30, 10, 20, 12);
+                clear(&g, 0xFF0000FFu);
+            }
+            present(&st, 1, NULL);
+            flip();
+            memcpy(ref, s_mem + FBST, sizeof ref);   /* uninterrupted */
+
+            memset(s_mem, 0x77, MEM_BYTES);
+            memcpy(s_mem, snap, MEM_BYTES);
+            s_backend.state(NV2A_BACKEND_STATE_DROP);
+            {
+                Nv2aSurface g = clip(st, 30, 10, 20, 12);
+                clear(&g, 0xFF0000FFu);
+            }
+            present(&st, 1, NULL);
+            flip();
+            memcpy(got, s_mem + FBST, sizeof got);
+            for (diff = 0, i = 0; i < 64 * 32; i++)
+                diff += memcmp(ref + i * 4, got + i * 4, 4) != 0;
+            printf("9. save state %s the flush: %u of 2048 pixels differ after the restore"
+                   " (green at x=10 reads 0x%08X)\n", pass ? "without" : "with", diff,
+                   px32(FBST, 256, 10, 5));
+            if (pass == 0) {
+                CHECK(diff == 0);
+                CHECK(px32(FBST, 256, 10, 5) == 0xFF00FF00u);
+                CHECK(px32(FBST, 256, 35, 15) == 0xFF0000FFu);
+            } else {
+                CHECK(diff == 6 * 32);           /* the green column is lost */
+            }
+        }
+        CHECK(s_state_flushes == flushes + 1 && s_state_drops == drops + 2);
     }
 
     CHECK(glGetError() == GL_NO_ERROR);

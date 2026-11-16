@@ -25,6 +25,7 @@
 #include <stddef.h>   /* ptrdiff_t */
 #include <stdlib.h>
 #include <string.h>
+#include "xbox_dev_state.h"   /* save states (XBA-248) */
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -639,4 +640,51 @@ void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
 uint32_t nv2a_pb_scan_runaways(void)
 {
     return s_runaways;
+}
+
+/* ---- save states (XBA-248, xbox_dev_state.h) ---------------------------
+ * The walker's own position: the DMA walk's GET, its CALL return and the
+ * method whose parameters PUT cut off. Saved between two passes of the poll
+ * thread, so the segment scan (which walks from one PUT to the next) holds
+ * nothing of its own here: its PUT is the register's, re-taken after a load
+ * (xbox_Nv2aPollHold). */
+#define SCAN_STATE_MAGIC 0x31424350u          /* "PCB1" */
+
+void nv2a_pb_scan_state_save(XdsWriter *w)
+{
+    xds_put_u32(w, SCAN_STATE_MAGIC);
+    xds_put_u32(w, s_get);
+    xds_put_u32(w, s_ret);
+    xds_put_u32(w, (uint32_t)s_in_call);
+    xds_put_u32(w, s_pend_left);
+    xds_put_u32(w, s_pend_i);
+    xds_put_u32(w, s_pend_method);
+    xds_put_u32(w, s_pend_subch);
+    xds_put_u32(w, (uint32_t)s_pend_noninc);
+    xds_put_u32(w, s_pub);
+}
+
+int nv2a_pb_scan_state_load(XdsReader *r)
+{
+    uint32_t v[9];
+    int i;
+
+    if (xds_get_u32(r) != SCAN_STATE_MAGIC) {
+        xds_fail(r);
+        return 0;
+    }
+    for (i = 0; i < 9; i++)
+        v[i] = xds_get_u32(r);
+    if (r->err)
+        return 0;
+    s_get = v[0];
+    s_ret = v[1];
+    s_in_call = (int)v[2];
+    s_pend_left = v[3];
+    s_pend_i = v[4];
+    s_pend_method = v[5];
+    s_pend_subch = v[6];
+    s_pend_noninc = (int)v[7];
+    s_pub = v[8];
+    return 1;
 }

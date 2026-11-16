@@ -10,7 +10,12 @@
  * no image and no contiguous allocation above page 0, mcpx_apu_phys resolves
  * a low physical address to the buffer + address. The frame thread idles
  * after init (pause_requested) until something resumes it, so the test polls
- * the doorbell itself. */
+ * the doorbell itself.
+ *
+ * Save states (XBA-248): an instance's section captured with the frame
+ * thread held, its model, DSP memory and sequencer count overwritten,
+ * restored: all back, the host side started afresh (monitor buffer, a new
+ * EP period, the device queue cleared). */
 #include "apu_state.h"
 #include "apu.h"
 #include "apu_xaudio2.h"
@@ -41,6 +46,8 @@ unsigned xa2_underruns(void)   { return 0; }
 int  xa2_queued_samples(void)  { return 0; }
 uint64_t xa2_samples_played(void) { return 0; }
 void xa2_expect_drain(void)    {}
+static int dev_clears;
+void xa2_clear(void)           { dev_clears++; }
 int  xa2_submit_samples(const int16_t *s, int n) { (void)s; (void)n; return 1; }
 
 #define FAKE_RAM   (256u << 10)
@@ -183,6 +190,64 @@ static void cycle_case(uint8_t *ram)
     check(now - base < (long long)sizeof(DSPState), what);
 }
 
+static void state_case(uint8_t *ram)
+{
+    static uint8_t aperture[0x80000];
+    MCPXAPUState *d = bring_up(ram);
+    XdsWriter w = { 0 };
+    XdsReader r;
+    int clears = dev_clears;
+    char what[96];
+
+    if (!d) { failures++; return; }
+    mcpx_apu_dsp_set_aperture(aperture);
+    memset(aperture, 0, sizeof aperture);
+    *(uint32_t *)(aperture + 0x30100) = 0xC0FFEE01u;     /* GP memory */
+    *(uint32_t *)(aperture + 0x5FFF0) = 0x0EEDBEEFu;     /* EP memory */
+    d->regs[NV_PAPU_SSL] = 0x800;
+    d->gp.regs[7] = 0x1234;
+    d->vp.filters[5].rs_pos = 0.25f;
+    d->vp.filters[5].rs_have = 1;
+    d->vp.filters[5].gain_prev[2] = 0.5f;
+    d->vp.filters[9].svf[1].op = &d->vp.filters[9].svf[1].b;
+    d->sample_count = 1234;
+
+    check(mcpx_apu_state_hold(1) && d->is_idle, "state: the frame thread is held idle");
+    check(mcpx_apu_state_capture(&w) && !w.err, "state: the APU section is captured");
+    snprintf(what, sizeof what, "state: section %zu bytes", w.len);
+    check(w.len < 128u * 1024u, what);
+
+    d->regs[NV_PAPU_SSL] = 0;
+    d->gp.regs[7] = 0;
+    memset(&d->vp.filters[5], 0, sizeof d->vp.filters[5]);
+    d->vp.filters[9].svf[1].op = NULL;
+    d->sample_count = 99;
+    *(uint32_t *)(aperture + 0x30100) = 0;
+    *(uint32_t *)(aperture + 0x5FFF0) = 7;
+    d->monitor.frame_buf[3][0] = 77;
+    d->ep_frame_div = 13;
+
+    r = xds_reader(w.p, w.len);
+    check(mcpx_apu_state_restore(&r, XDS_APU_VERSION) && !r.err && r.pos == r.len,
+          "state: the section is restored");
+    check(d->regs[NV_PAPU_SSL] == 0x800 && d->gp.regs[7] == 0x1234 && d->sample_count == 1234,
+          "state: registers and the sequencer count are back");
+    check(d->vp.filters[5].rs_pos == 0.25f && d->vp.filters[5].rs_have == 1
+          && d->vp.filters[5].gain_prev[2] == 0.5f
+          && d->vp.filters[9].svf[1].op == &d->vp.filters[9].svf[1].b,
+          "state: the voice processor's host state is back");
+    check(*(uint32_t *)(aperture + 0x30100) == 0xC0FFEE01u
+          && *(uint32_t *)(aperture + 0x5FFF0) == 0x0EEDBEEFu, "state: GP and EP memories are back");
+    check(d->monitor.frame_buf[3][0] == 0 && d->ep_frame_div % 8 == 0 && dev_clears == clears + 1,
+          "state: monitor buffer, EP period and device queue start afresh");
+    r = xds_reader(w.p, w.len);
+    check(!mcpx_apu_state_restore(&r, XDS_APU_VERSION + 1), "state: another version is refused");
+    mcpx_apu_state_hold(0);
+    xds_writer_free(&w);
+    mcpx_apu_dsp_set_aperture(NULL);
+    mcpx_apu_shutdown(d);
+}
+
 int main(void)
 {
     uint8_t *ram = (uint8_t *)calloc(1, FAKE_RAM);
@@ -192,6 +257,7 @@ int main(void)
     gate_case(ram);
     config_case(ram);
     cycle_case(ram);
+    state_case(ram);
     printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
     free(ram);
     return failures ? 1 : 0;

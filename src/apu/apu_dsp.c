@@ -26,6 +26,7 @@
 #include "apu_dsp_watch.h"
 #include "apu_mix.h"
 #include "fpconv.h"
+#include "apu_savestate.h"   /* save states (XBA-248) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -462,4 +463,52 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
 
     g_dbg.gp.cycles = 0;
     g_dbg.ep.cycles = 0;
+}
+
+/* ---- save states (XBA-248, apu_savestate.h) ----------------------------
+ * The GP and EP windows of the MCPX aperture are the DSPs' X/Y/P memories,
+ * plain memory DirectSound fills (effects images, mixbin routing); run-length
+ * coded, they are mostly zero. The doorbell ack's page and the GP's reset
+ * state go with them. The reverb's delay lines are host-side and start
+ * silent after a load. */
+#define DSP_WIN_START 0x30000u
+#define DSP_WIN_END   0x80000u
+#define DSP_STATE_MAGIC 0x31505344u          /* "DSP1" */
+
+void mcpx_apu_dsp_state_save(XdsWriter *w)
+{
+    const uint8_t *ap = dsp_aperture();
+
+    xds_put_u32(w, DSP_STATE_MAGIC);
+    xds_put_u32(w, (uint32_t)s_gp_in_reset);
+    xds_put_u32(w, s_gprst_seen);
+    xds_put_u32(w, s_dsp_ack_auto_page);
+    xds_put_u32(w, ap ? 1u : 0u);
+    if (ap)
+        xds_put_words_rle(w, (const volatile uint32_t *)(ap + DSP_WIN_START),
+                          (DSP_WIN_END - DSP_WIN_START) / 4);
+}
+
+int mcpx_apu_dsp_state_load(XdsReader *r)
+{
+    uint8_t *ap = (uint8_t *)dsp_aperture();
+
+    if (xds_get_u32(r) != DSP_STATE_MAGIC) {
+        xds_fail(r);
+        return 0;
+    }
+    s_gp_in_reset = (int)xds_get_u32(r);
+    s_gprst_seen = xds_get_u32(r);
+    s_dsp_ack_auto_page = xds_get_u32(r);
+    if (xds_get_u32(r)) {
+        if (!ap) {
+            xds_fail(r);
+            return 0;
+        }
+        xds_get_words_rle(r, (volatile uint32_t *)(ap + DSP_WIN_START),
+                          (DSP_WIN_END - DSP_WIN_START) / 4);
+    }
+    if (s_reverb)
+        apu_reverb_clear(s_reverb);
+    return !r->err;
 }

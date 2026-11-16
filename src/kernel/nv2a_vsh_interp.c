@@ -28,6 +28,7 @@
  * the runtime's screen-space epilogue (RCC of R12.w, then a MAD into oPos).
  */
 #include "nv2a_vsh_interp.h"
+#include "xbox_dev_state.h"   /* save states (XBA-248) */
 
 #include <math.h>
 #include <stdio.h>
@@ -833,4 +834,52 @@ const uint64_t *nv2a_vsh_constant_stamps(uint64_t *serial)
     if (serial)
         *serial = s_const_serial;
     return s_const_stamp;
+}
+
+/* ---- save states (XBA-248, xbox_dev_state.h) ---------------------------
+ * Program memory, constants and the load cursors, as the pushbuffer left
+ * them. The decoded copy and the back end's program info are derived: a
+ * load moves the revision on, so both are rebuilt at the next batch, and
+ * stamps every constant, so a back end re-uploads them all. */
+#define VSH_STATE_MAGIC 0x31485356u          /* "VSH1" */
+
+void nv2a_vsh_state_save(XdsWriter *w)
+{
+    xds_put_u32(w, VSH_STATE_MAGIC);
+    xds_put_blob(w, s_program, sizeof s_program);
+    xds_put_blob(w, s_const, sizeof s_const);
+    xds_put_u32(w, s_load_slot);
+    xds_put_u32(w, s_load_word);
+    xds_put_u32(w, s_start_slot);
+    xds_put_u32(w, s_const_load);
+    xds_put_u32(w, s_const_word);
+    xds_put_u32(w, s_cxt_write);
+}
+
+int nv2a_vsh_state_load(XdsReader *r)
+{
+    static uint32_t program[NV2A_VSH_SLOTS][4];
+    static float constants[NV2A_VSH_CONSTANTS][4];
+    uint32_t i;
+
+    if (xds_get_u32(r) != VSH_STATE_MAGIC) {
+        xds_fail(r);
+        return 0;
+    }
+    if (!xds_get_blob(r, program, sizeof program) || !xds_get_blob(r, constants, sizeof constants))
+        return 0;
+    memcpy(s_program, program, sizeof s_program);
+    memcpy(s_const, constants, sizeof s_const);
+    s_load_slot = xds_get_u32(r);
+    s_load_word = xds_get_u32(r);
+    s_start_slot = xds_get_u32(r);
+    s_const_load = xds_get_u32(r);
+    s_const_word = xds_get_u32(r);
+    s_cxt_write = xds_get_u32(r);
+    s_program_revision++;
+    s_dec_valid = 0;
+    s_info.valid = 0;
+    for (i = 0; i < NV2A_VSH_CONSTANTS; i++)
+        CONST_TOUCH(i);
+    return !r->err;
 }
