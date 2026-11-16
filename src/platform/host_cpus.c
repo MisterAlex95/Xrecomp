@@ -67,6 +67,45 @@ uint64_t recomp_big_core_mask(const char *root, uint64_t allowed,
     return big ? big : allowed;
 }
 
+static const char *s_sysfs_root;   /* NULL: the real tree */
+
+void recomp_host_cpus_set_sysfs_root(const char *root)
+{
+    s_sysfs_root = root;
+}
+
+int recomp_fastest_core(const char *root, uint64_t allowed,
+                        unsigned long *value, int *by_capacity)
+{
+    int cpu, pass, best = -1, lowest = -1;
+    unsigned long best_v = 0;
+
+    if (value) *value = 0;
+    if (by_capacity) *by_capacity = 0;
+    if (!root)
+        root = s_sysfs_root ? s_sysfs_root : "/sys/devices/system/cpu";
+    for (cpu = 0; cpu < 64; cpu++)
+        if (allowed >> cpu & 1) { lowest = cpu; break; }
+    if (lowest < 0)
+        return -1;
+    /* pass 0: cpufreq maxima; pass 1: cpu_capacity, if no core had a maximum */
+    for (pass = 0; pass < 2 && best < 0; pass++)
+        for (cpu = lowest; cpu < 64; cpu++) {
+            unsigned long v;
+            if (!(allowed >> cpu & 1)) continue;
+            v = read_cpu_value(root, cpu, pass == 0 ? "cpufreq/cpuinfo_max_freq" : "cpu_capacity");
+            if (v > best_v) {          /* strictly: the lowest index keeps a tie */
+                best_v = v;
+                best = cpu;
+                if (by_capacity) *by_capacity = pass;
+            }
+        }
+    if (best < 0)
+        return lowest;                 /* nothing readable */
+    if (value) *value = best_v;
+    return best;
+}
+
 static void mask_text(uint64_t m, char *buf, size_t size)
 {
     int cpu = 0;
