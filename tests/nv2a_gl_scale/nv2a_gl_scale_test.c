@@ -1,6 +1,7 @@
 /* Internal resolution policy (nv2a_gl_scale.c): which surfaces scale, the
  * scale that sticks to a scaled target's memory, the rectangle rounding,
- * visibility counts and RECOMP_GPU_SCALE_TARGETS parsing. */
+ * visibility counts, RECOMP_GPU_SCALE_TARGETS parsing, and which variable
+ * sets the scale (RECOMP_GPU_SCALE over the shared RECOMP_UPSCALE, XBA-237). */
 #include "nv2a_gl_scale.h"
 
 #include <math.h>
@@ -321,8 +322,47 @@ static void test_aa_present(void)
     CHECK(fx == 2 && fy == 1);
 }
 
+/* XBA-237: Settings > Graphics > Internal resolution (RECOMP_UPSCALE, every
+ * console) reaches the Xbox; the Xbox's own RECOMP_GPU_SCALE wins. */
+static void test_choose(void)
+{
+    static const struct { const char *gpu, *up; int how; float sc; const char *key; } c[] = {
+        { NULL, NULL, NV2A_GL_SCALE_UNSET, 1.0f, NULL },
+        { "", "", NV2A_GL_SCALE_UNSET, 1.0f, NULL },
+        { NULL, "1", NV2A_GL_SCALE_FIXED, 1.0f, "RECOMP_UPSCALE" },
+        { NULL, "2", NV2A_GL_SCALE_FIXED, 2.0f, "RECOMP_UPSCALE" },
+        { NULL, "4", NV2A_GL_SCALE_FIXED, 4.0f, "RECOMP_UPSCALE" },
+        { NULL, "8", NV2A_GL_SCALE_FIXED, 4.0f, "RECOMP_UPSCALE" },      /* the N64's 8x: 4 */
+        { NULL, "2 ", NV2A_GL_SCALE_FIXED, 2.0f, "RECOMP_UPSCALE" },
+        { NULL, "0", NV2A_GL_SCALE_BAD, 1.0f, "RECOMP_UPSCALE" },
+        { NULL, "big", NV2A_GL_SCALE_BAD, 1.0f, "RECOMP_UPSCALE" },
+        { NULL, "auto", NV2A_GL_SCALE_BAD, 1.0f, "RECOMP_UPSCALE" },     /* auto is the Xbox's own */
+        { "3", "4", NV2A_GL_SCALE_FIXED, 3.0f, "RECOMP_GPU_SCALE" },     /* the Xbox's own wins */
+        { "1", "4", NV2A_GL_SCALE_FIXED, 1.0f, "RECOMP_GPU_SCALE" },
+        { "2.25", NULL, NV2A_GL_SCALE_FIXED, 2.25f, "RECOMP_GPU_SCALE" },
+        { "auto", "2", NV2A_GL_SCALE_AUTO, 1.0f, "RECOMP_GPU_SCALE" },
+        { "5", "2", NV2A_GL_SCALE_BAD, 1.0f, "RECOMP_GPU_SCALE" },        /* 1-4 only, as before */
+        { "", "2", NV2A_GL_SCALE_FIXED, 2.0f, "RECOMP_UPSCALE" },
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof c / sizeof c[0]; i++) {
+        float sc = -1.0f;
+        const char *key = "x";
+        int how = nv2a_gl_scale_choose(c[i].gpu, c[i].up, &sc, &key);
+        if (how != c[i].how || !FEQ(sc, c[i].sc) || !((key == NULL && c[i].key == NULL)
+                                                      || (key && c[i].key && strcmp(key, c[i].key) == 0))) {
+            fprintf(stderr, "FAIL choose #%u (%s, %s): %d %.2f %s\n", (unsigned)i,
+                    c[i].gpu ? c[i].gpu : "unset", c[i].up ? c[i].up : "unset", how, (double)sc,
+                    key ? key : "NULL");
+            s_fail++;
+        }
+    }
+}
+
 int main(void)
 {
+    test_choose();
     test_aa_present();
     test_policy();
     test_sticky();

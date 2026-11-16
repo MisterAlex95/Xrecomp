@@ -153,7 +153,7 @@ static int s_present_host_env, s_readback_present;
  * headless. Set on the main thread before the guest (and so the executor)
  * starts. */
 static uint32_t s_display_w, s_display_h;
-/* Internal resolution, RECOMP_GPU_SCALE (scale_from_env, at ensure_init):
+/* Internal resolution, RECOMP_GPU_SCALE else RECOMP_UPSCALE (scale_from_env, at ensure_init):
  * 1 to 4, what the frame-buffer class of targets is drawn at (WP-S1). */
 static float s_scale = 1.0f;
 
@@ -490,19 +490,22 @@ static void sig_init(void);
 
 /* RECOMP_GPU_SCALE: 1 (default), 2, 3, a decimal 1-4, or "auto" -- the
  * window's drawable height / 480 (1080 -> 2.25, 1440x1080 shown 1:1),
- * at most 3; 1 headless. Never more than GL_MAX_TEXTURE_SIZE / 640. Needs
- * the context (called from ensure_init). */
+ * at most 3; 1 headless. Unset, the setting every console shares,
+ * RECOMP_UPSCALE (Settings > Graphics > Internal resolution: 1, 2, 4; 8 draws
+ * at 4; XBA-237, nv2a_gl_scale_choose). Never more than
+ * GL_MAX_TEXTURE_SIZE / 640. Needs the context (called from ensure_init). */
 static float scale_from_env(void)
 {
-    const char *e = getenv("RECOMP_GPU_SCALE");
+    const char *key;
     GLint max_tex = 0;
     float sc = 1.0f;
     char why[96];
+    int how = nv2a_gl_scale_choose(getenv("RECOMP_GPU_SCALE"), getenv("RECOMP_UPSCALE"), &sc, &key);
 
-    if (!e || !*e)
+    if (how == NV2A_GL_SCALE_UNSET)
         return 1.0f;
-    snprintf(why, sizeof why, "RECOMP_GPU_SCALE=%s", e);
-    if (strcmp(e, "auto") == 0) {
+    snprintf(why, sizeof why, "%s=%s", key, getenv(key));
+    if (how == NV2A_GL_SCALE_AUTO) {
         if (s_display_h) {
             sc = (float)s_display_h / 480.0f;
             if (sc > 3.0f)
@@ -512,13 +515,9 @@ static float scale_from_env(void)
         } else {
             snprintf(why, sizeof why, "RECOMP_GPU_SCALE=auto, no window");
         }
-    } else {
-        char *end;
-        double v = strtod(e, &end);
-        if (end != e && *end == 0 && v >= 1.0 && v <= 4.0)
-            sc = (float)v;
-        else
-            fprintf(stderr, "  [GPUGL] RECOMP_GPU_SCALE=%s: expected 1-4 or auto; using 1\n", e);
+    } else if (how == NV2A_GL_SCALE_BAD) {
+        fprintf(stderr, "  [GPUGL] %s: expected %s; using 1\n", why,
+                strcmp(key, "RECOMP_UPSCALE") == 0 ? "1, 2, 4 or 8" : "1-4 or auto");
     }
     if (sc < 1.0f)
         sc = 1.0f;

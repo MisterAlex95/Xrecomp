@@ -3,6 +3,39 @@
 #include "nv2a_gl_scale.h"
 
 #include <stdlib.h>
+#include <string.h>
+
+int nv2a_gl_scale_choose(const char *gpu_scale, const char *upscale, float *scale,
+                         const char **key)
+{
+    const char *e = gpu_scale;
+    char *end;
+    double v;
+
+    *scale = 1.0f;
+    *key = NULL;
+    if (e && *e) {
+        *key = "RECOMP_GPU_SCALE";
+        if (strcmp(e, "auto") == 0)
+            return NV2A_GL_SCALE_AUTO;
+        v = strtod(e, &end);
+        if (end == e || *end || !(v >= 1.0 && v <= 4.0))
+            return NV2A_GL_SCALE_BAD;
+        *scale = (float)v;
+        return NV2A_GL_SCALE_FIXED;
+    }
+    e = upscale;
+    if (!e || !*e)
+        return NV2A_GL_SCALE_UNSET;
+    *key = "RECOMP_UPSCALE";
+    v = strtod(e, &end);
+    while (end != e && (*end == ' ' || *end == '\t'))
+        end++;
+    if (end == e || *end || !(v >= 1.0))
+        return NV2A_GL_SCALE_BAD;
+    *scale = v > 4.0 ? 4.0f : (float)v;
+    return NV2A_GL_SCALE_FIXED;
+}
 
 uint32_t nv2a_gl_scale_parse_targets(const char *s, Nv2aGlScaleConfig *cfg)
 {
