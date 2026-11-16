@@ -3,6 +3,7 @@
 #include "input_map.h"
 
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 
 static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -22,6 +23,19 @@ void xbox_InputOverlaySet(int port, const XBOX_GAMEPAD *pad)
     s_active[port] = pad != NULL;
     s_seq[port]++;
     pthread_mutex_unlock(&s_lock);
+    /* Once per run: the first press that reached the runtime (with the USB
+     * report's own first-held line, usb_gamepad.c, it says where a press that
+     * does nothing in the title stops). */
+    if (pad && (pad->wButtons || pad->bAnalogButtons[0] || pad->bAnalogButtons[1] || pad->bAnalogButtons[2]
+                || pad->bAnalogButtons[3] || pad->bAnalogButtons[6] || pad->bAnalogButtons[7])) {
+        static int s_logged;
+        if (!__atomic_exchange_n(&s_logged, 1, __ATOMIC_RELAXED)) {
+            fprintf(stderr, "  [INPUT] touch overlay: first press on port %d (buttons %04X, A %u B %u X %u Y %u)\n",
+                    port + 1, pad->wButtons, pad->bAnalogButtons[0], pad->bAnalogButtons[1],
+                    pad->bAnalogButtons[2], pad->bAnalogButtons[3]);
+            fflush(stderr);
+        }
+    }
 }
 
 int xbox_InputOverlayGet(int port, XBOX_GAMEPAD *out, DWORD *seq)

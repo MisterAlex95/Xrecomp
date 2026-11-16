@@ -16,6 +16,7 @@
 #ifndef _WIN32
 #include "../kernel/guest_clock.h"     /* xbox_FastForwardPoll (XBA-240) */
 #include "input/xbox_pad_hotkeys.h"
+#include "input/input_overlay.h"     /* report_diag: whether the touch overlay is on */
 #include "platform/recomp_hotkeys.h"
 #include "platform/recomp_states.h"   /* recomp_ff_hold */
 #endif
@@ -646,6 +647,38 @@ static void pad_hotkeys(int pad, XBOX_GAMEPAD *g)
 }
 #endif
 
+/* One line the first time each pad's report reaches the title, and one the
+ * first time a report carries a button or trigger held: whether a title polls
+ * its pad at all, and whether what the player presses gets there (the touch
+ * overlay on a phone included), readable from any log without an option set
+ * (on a phone the player cannot write recomp.cfg). Two lines per pad per run. */
+static void report_diag(int pad, const uint8_t *out, int connected)
+{
+    static unsigned s_first, s_held;
+    unsigned bit = 1u << (pad & 3);
+    int i, held = out[2] || out[3];
+
+    for (i = 4; i < 12 && !held; i++)
+        held = out[i] >= 32;
+    if (!(s_first & bit)) {
+        s_first |= bit;
+        fprintf(stderr, "  [USB] pad %d: first report to the title (%s)\n", pad + 1,
+                connected ? "host input connected" : "no host input yet: nothing held");
+        fflush(stderr);
+    }
+    if (held && !(s_held & bit)) {
+        const char *overlay = "n/a";
+#ifndef _WIN32
+        overlay = xbox_InputOverlayGet(pad, NULL, NULL) ? "on" : "off";
+#endif
+        s_held |= bit;
+        fprintf(stderr, "  [USB] pad %d: first report with input held: buttons %02X%02X analog %02X %02X %02X %02X"
+                " %02X %02X %02X %02X (touch overlay %s)\n", pad + 1, out[3], out[2], out[4], out[5], out[6],
+                out[7], out[8], out[9], out[10], out[11], overlay);
+        fflush(stderr);
+    }
+}
+
 int usb_gamepad_report(int pad, uint8_t *out, int max)
 {
     XBOX_INPUT_STATE state;
@@ -704,6 +737,7 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
 #endif
         out[2] = synth;
         pad_script_apply(pad, out);
+        report_diag(pad, out, 0);
         return 20;
     }
 
@@ -724,5 +758,6 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
     out[18] = (uint8_t)(g->sThumbRY & 0xFF);
     out[19] = (uint8_t)((g->sThumbRY >> 8) & 0xFF);
     pad_script_apply(pad, out);
+    report_diag(pad, out, 1);
     return 20;
 }
