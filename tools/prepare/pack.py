@@ -105,6 +105,26 @@ def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHEL
     return meta
 
 
+# The lifter's call-site table (tools/recomp/translator.py, recomp_dispatch.c): resume entries when it is not empty.
+_CALL_SITE_COUNT = re.compile(r"g_recomp_call_site_count\s*=\s*(\d+)u?\s*;")
+
+
+def resume_entries(sources):
+    """XBA-258: whether the generated code has resume entries (XBA-250), so a state saved in one run resumes in
+    another (« Resume where I left off »): recomp_dispatch.c's call-site table holds at least one site. sources: the
+    project's C files (cc.collect_sources). False when the file is not among them or says nothing."""
+    for src in sources:
+        if os.path.basename(src) != "recomp_dispatch.c":
+            continue
+        try:
+            with open(src, errors="replace") as f:
+                m = _CALL_SITE_COUNT.search(f.read())
+        except OSError:
+            return False
+        return bool(m and int(m.group(1)) > 0)
+    return False
+
+
 def _fsync_dir(d):
     try:
         fd = os.open(d, os.O_RDONLY)

@@ -21,7 +21,8 @@ import java.util.regex.Pattern;
  * pack.json: {"format":1, "title_id", "title", "xbe_sha256", "abi":"arm64-v8a", "shell_abi":1, "toolkit",
  * "toolkit_sha256", "lib":"libtitle.so", "lib_sha256", "lib_size", "entry":"recomp_title_main", "cc", "built_at"}, and
  * "env_force":{"RECOMP_LSFG":"0", ...} when the title profile forces options (the native loader sets them over
- * recomp.cfg; the launcher only shows them).
+ * recomp.cfg; the launcher only shows them), and "resume" (XBA-258: the generated code has resume entries,
+ * {@link #resume}).
  *
  * Other consoles (XBA-147, {@link Console}): "console" ("xbox" when absent, so every pack made before stays valid, same
  * format 1) and, for gba / ps1 / n64, "title_key" in place of title_id. Such a pack is packs/&lt;console&gt;-&lt;key&gt;
@@ -217,6 +218,36 @@ final class Pack {
             return h.isEmpty() ? null : h.toLowerCase(Locale.ROOT);
         } catch (IOException | JSONException e) {
             return null;
+        }
+    }
+
+    /**
+     * XBA-258: what the launcher can say, before a launch, about « Resume where I left off » (the automatic slot,
+     * XBA-249 / XBA-250). YES: the game's states survive the run (a GBA / PS1 / N64 game always; an Xbox title whose
+     * pack.json says "resume": true, its generated code has resume entries). PREPARE_AGAIN: an Xbox pack made before
+     * pack.json said (a Prepare again gives it the entries). NO: no Xbox pack, or one whose code has none.
+     */
+    enum Resume { YES, PREPARE_AGAIN, NO }
+
+    static Resume resume(File filesDir, String libraryKey) {
+        if (libraryKey == null || libraryKey.isEmpty())
+            return Resume.NO;
+        Console c = Console.ofKey(libraryKey);
+        if (c != Console.XBOX)
+            return c != null && c.hasSaveStates() ? Resume.YES : Resume.NO;
+        String id = normTitleId(libraryKey);
+        if (id == null)
+            return Resume.NO;
+        File json = new File(packDir(filesDir, id), JSON);
+        if (!json.isFile())
+            return Resume.NO;
+        try {
+            JSONObject o = new JSONObject(PrepareProtocol.readText(json, 1 << 20));
+            if (!o.has("resume"))
+                return Resume.PREPARE_AGAIN;
+            return o.optBoolean("resume", false) ? Resume.YES : Resume.NO;
+        } catch (IOException | JSONException e) {
+            return Resume.NO;
         }
     }
 

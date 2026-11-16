@@ -735,6 +735,18 @@ public class ShellActivity extends SDLActivity {
          * XBA-249 / XBA-250: an Xbox title's states survive the run (the automatic slot, « Resume where I left off »)
          * when its runtime can resume them in a fresh process (generated code with resume entries).
          */
+        /** XBA-258: an Xbox title whose states work but whose generated code has no resume entries. */
+        @Override
+        public boolean resumeNeedsPrepare() {
+            if (GameStore.launchedRom(ShellActivity.this) != null || !statesSupported())
+                return false;
+            try {
+                return !MenuNative.nativeStatesResumable();
+            } catch (UnsatisfiedLinkError e) {
+                return false;
+            }
+        }
+
         @Override
         public boolean resumeSupported() {
             if (GameStore.launchedRom(ShellActivity.this) != null)

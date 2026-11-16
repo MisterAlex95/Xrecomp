@@ -400,6 +400,9 @@ class Run:
                                   toolkit_sha256=self.toolkit_sha, title_layer=self.title_layer)
             if images:
                 meta["images"] = images
+            # XBA-258: resume entries in the generated code, so the app can say before a launch that the title
+            # resumes where the player left off (its card's « Resume » tag) or that it needs preparing again.
+            meta["resume"] = pack.resume_entries(self.sources)
             # The analysis' function count and static discovery's share per
             # pass (XBA-137), for the owner's library report.
             from tools.prepare import discovered

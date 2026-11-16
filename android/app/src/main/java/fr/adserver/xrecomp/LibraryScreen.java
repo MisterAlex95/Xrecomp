@@ -74,6 +74,8 @@ final class LibraryScreen {
         GameState.Prepared prepared = GameState.Prepared.NONE;
         /** 1 for the next Prepare to run, 0 when not queued. */
         int queuePos;
+        /** XBA-258: whether the game resumes where the player left off (Pack.resume), read for a Ready game only. */
+        Pack.Resume resume = Pack.Resume.NO;
 
         Entry(String tid) {
             this.tid = tid;
@@ -237,6 +239,7 @@ final class LibraryScreen {
         en.chip = GameState.chip(f);
         en.prepared = GameState.prepared(f, en.chip);
         en.queuePos = env.queue.position(en.tid);
+        en.resume = en.chip == GameState.Chip.READY ? Pack.resume(filesDir, en.tid) : Pack.Resume.NO;
     }
 
     /**
@@ -332,6 +335,14 @@ final class LibraryScreen {
         default:
             return chipColor(e.chip);
         }
+    }
+
+    /**
+     * XBA-258: the card's « Resume » tag: a Ready game that resumes where the player left off (a GBA / PS1 / N64
+     * game; an Xbox title prepared with resume entries), so the player knows it before launching.
+     */
+    static boolean resumeTag(Entry e) {
+        return e.chip == GameState.Chip.READY && e.resume == Pack.Resume.YES;
     }
 
     /** The card shows a state line: not for a plain « Ready » (no toolchain: nothing worth saying). */

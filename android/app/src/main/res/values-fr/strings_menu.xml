@@ -59,6 +59,8 @@
     <string name="MENU_STATE_RESUMED">Reprise là où vous vous étiez arrêté</string>
     <string name="MENU_STATE_RESUME_FAILED">Reprise impossible : le jeu repart du début</string>
     <string name="MENU_RESUME_AUTO">Reprendre là où je m\'étais arrêté</string>
+    <string name="MENU_RESUME_WHY_PREPARE">Préparez à nouveau ce jeu pour l\'activer</string>
+    <string name="MENU_RESUME_WHY_GAME">Impossible pour ce jeu</string>
     <string name="MENU_QUIT_CONFIRM_KEPT">Votre progression est gardée pour la prochaine fois</string>
     <string name="MENU_RESTART_APPLY">Redémarrer pour appliquer</string>
     <string name="MENU_RESTART_APPLY_SUB">Des changements l\'attendent</string>

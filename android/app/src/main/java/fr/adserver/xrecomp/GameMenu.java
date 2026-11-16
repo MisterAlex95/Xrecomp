@@ -150,6 +150,14 @@ final class GameMenu {
         }
 
         /**
+         * XBA-258: the game's states would survive the run but its generated code has no resume entries (an Xbox
+         * title prepared before XBA-250): a Prepare again turns « Resume where I left off » on.
+         */
+        default boolean resumeNeedsPrepare() {
+            return false;
+        }
+
+        /**
          * XBA-240: a game that fast-forwards without save states runs (an Xbox title: its guest clock runs faster):
          * the Fast-forward row shows.
          */
@@ -997,10 +1005,14 @@ final class GameMenu {
             r = row(Item.VOLUME, s(R.string.MENU_VOLUME));
             r.setChoices(new String[] { volumeLabel(100), s(R.string.MENU_MUTED) });
             r.cycler = dir -> setVolume(volume + dir * VOLUME_STEP);
-            if (resumeSupported()) {   // the automatic slot: a console game, an Xbox title with resume entries (XBA-250)
-                r = row(Item.AUTO_RESUME, s(R.string.MENU_RESUME_AUTO));
+            // The automatic slot: a console game, an Xbox title with resume entries (XBA-250). XBA-258: the row is
+            // always there, so the player knows the setting exists; a game that cannot resume says why.
+            r = row(Item.AUTO_RESUME, s(R.string.MENU_RESUME_AUTO));
+            if (resumeSupported()) {
                 r.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
                 r.cycler = dir -> setAutoResume(!GameStore.autoResume(activity));
+            } else {
+                r.setSubtitle(resumeWhyNot());   // no value: the label and the reason keep the row's width
             }
             if (host.hasSecondScreen()) {
                 r = row(Item.BOTTOM, s(R.string.MENU_BOTTOM));
@@ -1367,6 +1379,20 @@ final class GameMenu {
         }
     }
 
+    /**
+     * XBA-258: why this game does not resume where the player left off: an Xbox title prepared before its code had
+     * resume entries (a Prepare again gives them), else a game whose states cannot be kept.
+     */
+    String resumeWhyNot() {
+        boolean prepare;
+        try {
+            prepare = host.resumeNeedsPrepare();
+        } catch (RuntimeException e) {
+            prepare = false;
+        }
+        return s(prepare ? R.string.MENU_RESUME_WHY_PREPARE : R.string.MENU_RESUME_WHY_GAME);
+    }
+
     /** Saves the automatic slot when resuming applies (leaving the game: quit, background, back to launcher). */
     void autoSave(String why) {
         if (!autoResumes())
@@ -1590,7 +1616,10 @@ final class GameMenu {
             toggleFastForward();
             break;
         case AUTO_RESUME:
-            setAutoResume(!GameStore.autoResume(activity));
+            if (resumeSupported())
+                setAutoResume(!GameStore.autoResume(activity));
+            else
+                flash(resumeWhyNot(), false);   // XBA-258
             break;
         case GAME_SETTINGS:
             showPage(Page.GAME_SETTINGS, null);
@@ -2026,7 +2055,8 @@ final class GameMenu {
             r.setValue(s(host.fastForward() ? R.string.MENU_ON : R.string.MENU_OFF));
         r = rows.get(Item.AUTO_RESUME);
         if (r != null)
-            r.setValue(s(GameStore.autoResume(activity) ? R.string.MENU_ON : R.string.MENU_OFF));
+            r.setValue(!resumeSupported() ? null
+                       : s(GameStore.autoResume(activity) ? R.string.MENU_ON : R.string.MENU_OFF));
         r = rows.get(Item.TOUCH);
         Boolean touch = host.touchShown();
         if (r != null && touch != null)

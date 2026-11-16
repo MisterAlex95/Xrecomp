@@ -341,6 +341,7 @@ public class LibraryScreenTest {
             assertEquals(Theme.TEXT_DIM, LibraryScreen.chipColor(e));
             assertTrue(LibraryScreen.chipShown(e));
             assertEquals(R.string.LIB_CHIP_NOT_PREPARED, LibraryScreen.preparedLabel(e.prepared));
+            assertTrue(key, LibraryScreen.resumeTag(e));   // XBA-258: a console game resumes where it was left
 
             consolePack(c, k[1], TK_APP);
             e = LibraryScreen.entry(files, key, g, x, env);
@@ -384,6 +385,16 @@ public class LibraryScreenTest {
         f = LibraryScreen.entry(files, FABLE, g, x, env);
         assertEquals(GameState.Prepared.PREPARED, f.prepared);
         assertTrue(LibraryScreen.chipShown(f));
+        // XBA-258: the « Resume » tag only for a pack whose generated code has resume entries.
+        assertEquals(Pack.Resume.PREPARE_AGAIN, f.resume);
+        assertFalse(LibraryScreen.resumeTag(f));
+        TestSupport.write(pj, new org.json.JSONObject(PrepareProtocol.readText(pj, 1 << 16))
+                                  .put("resume", true).toString());
+        f = LibraryScreen.entry(files, FABLE, g, x, env);
+        assertTrue(LibraryScreen.resumeTag(f));
+        TestSupport.write(pj, new org.json.JSONObject(PrepareProtocol.readText(pj, 1 << 16))
+                                  .put("resume", false).toString());
+        assertFalse(LibraryScreen.resumeTag(LibraryScreen.entry(files, FABLE, g, x, env)));
     }
 
     /** A library folder the app cannot read: only its games show « No file access ». */
