@@ -3295,6 +3295,8 @@ volatile uint64_t g_icall_count = 0;
 
 static void xbox_heap_reset_base(void);
 
+static void xbe_note_header_sha1(const uint8_t *xbe, size_t n);   /* save states, at the end */
+
 BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
 {
     g_force_return = getenv("RECOMP_FORCE_RETURN") != NULL;
@@ -3619,6 +3621,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
             extern void xbox_path_set_title_id(uint32_t);
             xbox_path_set_title_id(*(const DWORD *)(xbe + cert_off + 8));
         }
+        /* The image's identity for save states (XBA-245): its headers'
+         * SHA-1 (SizeOfHeaders at +0x108; they carry each section's digest). */
+        xbe_note_header_sha1(xbe, xbe_size);
         /* The allowed game regions (+0xA0): the console's region (XBA-121). */
         if (cert_off + 0xA4 <= xbe_size)
             xbox_ConsoleSetTitleRegions(*(const DWORD *)(xbe + cert_off + 0xA0));
@@ -5938,4 +5943,239 @@ void xbox_HeapFree(uint32_t xbox_va)
 HANDLE xbox_GetMappingHandle(void)
 {
     return g_mapping_handle;
+}
+
+/* ── Save states (XBA-245): guest ranges, the memory manager's state ──────
+ *
+ * See xbox_memory_layout.h. The MEM payload, little-endian u32 throughout:
+ *   heap      heap_next, alloc_count, block_count, then per block addr, size,
+ *             flags (bit 0 free, bit 1 named); thread stacks used, high
+ *   contig    pages (CONTIG_PAGES), in_use, high, first_free, allocs,
+ *             released, free_calls, peak; the page map (one byte per page);
+ *             the block lengths as a count of non-zero entries then (index,
+ *             length) pairs; the RAM-name map (one byte per page)
+ *   lazy      count, floor, top, next, reserve_next, then per reservation
+ *             base, size, released
+ *   vmem      byte length, then guest_vmem_state_save's payload */
+
+static uint8_t g_xbe_header_sha1[20];
+
+static void xbe_note_header_sha1(const uint8_t *xbe, size_t n)
+{
+    XBOX_SHA_CONTEXT ctx;
+    size_t hdr = n >= 0x10C ? *(const uint32_t *)(xbe + 0x108) : 0;
+
+    memset(g_xbe_header_sha1, 0, sizeof g_xbe_header_sha1);
+    if (!hdr || hdr > n)
+        hdr = n;
+    xbox_XcSHAInit(&ctx);
+    xbox_XcSHAUpdate(&ctx, xbe, (ULONG)hdr);
+    xbox_XcSHAFinal(&ctx, g_xbe_header_sha1);
+}
+
+const uint8_t *xbox_XbeHeaderSha1(void)
+{
+    return g_xbe_header_sha1;
+}
+
+struct range_fill { XboxGuestRange *out; int max, n; };
+
+static void range_add(struct range_fill *f, uint32_t kind, uint32_t va, uint32_t size, uint8_t *host)
+{
+    if (!size || !host)
+        return;
+    if (f->n < f->max) {
+        f->out[f->n].kind = kind;
+        f->out[f->n].va = va;
+        f->out[f->n].size = size;
+        f->out[f->n].host = host;
+    }
+    f->n++;
+}
+
+static void range_add_vmem(uint32_t va, uint32_t size, uint8_t *host, void *user)
+{
+    range_add((struct range_fill *)user, XBOX_RANGE_VMEM, va, size, host);
+}
+
+int xbox_StateGuestRanges(XboxGuestRange *out, int max)
+{
+    struct range_fill f = { out, max, 0 };
+
+    if (!g_memory_base || !g_memory_size)
+        return 0;
+    range_add(&f, XBOX_RANGE_RAM, 0, (uint32_t)(g_memory_size & ~(size_t)0xFFFu),
+              (uint8_t *)(uintptr_t)g_memory_offset);
+    if (g_contig_memory) {
+        uint32_t high = (g_contig_high + CONTIG_PAGE - 1) & ~(CONTIG_PAGE - 1);
+        if (high > XBOX_CONTIG_SIZE)
+            high = XBOX_CONTIG_SIZE;
+        range_add(&f, XBOX_RANGE_CONTIG, XBOX_CONTIG_BASE, high, (uint8_t *)g_contig_memory);
+    }
+    AcquireSRWLockShared(&g_lazy_lock);
+    if (g_span_base && g_lazy_next < g_lazy_top)
+        range_add(&f, XBOX_RANGE_LAZY, g_lazy_next, g_lazy_top - g_lazy_next,
+                  (uint8_t *)((uintptr_t)g_lazy_next + (uintptr_t)g_memory_offset));
+    ReleaseSRWLockShared(&g_lazy_lock);
+    guest_vmem_committed_runs(range_add_vmem, &f);
+    return f.n;
+}
+
+static void ms_put32(uint8_t *out, size_t cap, size_t *at, uint32_t v)
+{
+    if (out && *at + 4 <= cap)
+        memcpy(out + *at, &v, 4);   /* every host we build for is little-endian */
+    *at += 4;
+}
+
+static void ms_bytes(uint8_t *out, size_t cap, size_t *at, const volatile uint8_t *p, size_t n)
+{
+    if (out && *at + n <= cap)
+        memcpy(out + *at, (const void *)p, n);
+    *at += n;
+}
+
+size_t xbox_MemStateSave(uint8_t *out, size_t cap)
+{
+    size_t at = 0, len_at, vm;
+    uint32_t i, nz = 0;
+
+    AcquireSRWLockShared(&g_heap_lock);
+    ms_put32(out, cap, &at, g_heap_next);
+    ms_put32(out, cap, &at, (uint32_t)g_heap_alloc_count);
+    ms_put32(out, cap, &at, (uint32_t)g_heap_block_count);
+    for (i = 0; i < (uint32_t)g_heap_block_count; i++) {
+        ms_put32(out, cap, &at, g_heap_blocks[i].addr);
+        ms_put32(out, cap, &at, g_heap_blocks[i].size);
+        ms_put32(out, cap, &at, (uint32_t)(g_heap_blocks[i].free ? 1 : 0) | (g_heap_blocks[i].named ? 2u : 0u));
+    }
+    ReleaseSRWLockShared(&g_heap_lock);
+    AcquireSRWLockShared(&g_thread_stacks_lock);
+    ms_put32(out, cap, &at, (uint32_t)g_thread_stacks_used);
+    ms_put32(out, cap, &at, (uint32_t)g_thread_stacks_high);
+    ReleaseSRWLockShared(&g_thread_stacks_lock);
+
+    contig_lock();
+    ms_put32(out, cap, &at, (uint32_t)CONTIG_PAGES);
+    ms_put32(out, cap, &at, g_contig_pages_in_use);
+    ms_put32(out, cap, &at, g_contig_high);
+    ms_put32(out, cap, &at, g_contig_first_free);
+    ms_put32(out, cap, &at, g_contig_allocs);
+    ms_put32(out, cap, &at, g_contig_released);
+    ms_put32(out, cap, &at, g_contig_free_calls);
+    ms_put32(out, cap, &at, g_contig_peak_pages);
+    ms_bytes(out, cap, &at, g_contig_used, CONTIG_PAGES);
+    for (i = 0; i < CONTIG_PAGES; i++)
+        nz += g_contig_len[i] != 0;
+    ms_put32(out, cap, &at, nz);
+    for (i = 0; i < CONTIG_PAGES; i++)
+        if (g_contig_len[i]) {
+            ms_put32(out, cap, &at, i);
+            ms_put32(out, cap, &at, g_contig_len[i]);
+        }
+    ms_bytes(out, cap, &at, g_phys_ram_named, CONTIG_PAGES);
+    contig_unlock();
+
+    AcquireSRWLockShared(&g_lazy_lock);
+    ms_put32(out, cap, &at, (uint32_t)g_lazy_count);
+    ms_put32(out, cap, &at, g_lazy_floor);
+    ms_put32(out, cap, &at, g_lazy_top);
+    ms_put32(out, cap, &at, g_lazy_next);
+    ms_put32(out, cap, &at, g_reserve_next);
+    for (i = 0; i < (uint32_t)g_lazy_count; i++) {
+        ms_put32(out, cap, &at, g_lazy[i].base);
+        ms_put32(out, cap, &at, g_lazy[i].size);
+        ms_put32(out, cap, &at, (uint32_t)g_lazy[i].released);
+    }
+    ReleaseSRWLockShared(&g_lazy_lock);
+
+    len_at = at;
+    ms_put32(out, cap, &at, 0);
+    vm = guest_vmem_state_save(out && at <= cap ? out + at : NULL, out && at <= cap ? cap - at : 0);
+    at += vm;
+    ms_put32(out, cap, &len_at, (uint32_t)vm);
+    return at;
+}
+
+int xbox_MemStateCheck(const uint8_t *in, size_t n, XboxMemStateInfo *info)
+{
+    XboxMemStateInfo d;
+    size_t at = 0;
+    uint32_t i, count, prev_end = 0, len, vm_runs = 0;
+
+#define MS_NEED(k) do { if ((size_t)(k) > n - at || at > n) return -1; } while (0)
+#define MS_GET(v) do { MS_NEED(4); memcpy(&(v), in + at, 4); at += 4; } while (0)
+    memset(&d, 0, sizeof d);
+    MS_GET(d.heap_next);
+    MS_GET(i);                                  /* alloc_count */
+    MS_GET(d.heap_blocks);
+    if (d.heap_blocks > XBOX_HEAP_MAX_BLOCKS)
+        return -1;
+    MS_NEED((size_t)d.heap_blocks * 12);
+    for (i = 0; i < d.heap_blocks; i++) {
+        uint32_t addr, size, flags;
+        memcpy(&addr, in + at, 4);
+        memcpy(&size, in + at + 4, 4);
+        memcpy(&flags, in + at + 8, 4);
+        at += 12;
+        if (flags & ~3u)
+            return -1;
+        if (size) {
+            if (addr < prev_end)                /* address order, no overlap */
+                return -1;
+            prev_end = addr + size;
+            if (!(flags & 1))
+                d.heap_live++;
+        }
+    }
+    MS_GET(i);                                  /* thread stacks used, high */
+    MS_GET(i);
+    MS_GET(d.contig_pages);
+    if (d.contig_pages != CONTIG_PAGES)
+        return -1;
+    MS_GET(d.contig_in_use);
+    MS_GET(d.contig_high);
+    if (d.contig_in_use > d.contig_pages || d.contig_high > XBOX_CONTIG_SIZE)
+        return -1;
+    at += 5 * 4;                                /* first_free .. peak */
+    MS_NEED(d.contig_pages);
+    at += d.contig_pages;                       /* the page map */
+    MS_GET(count);
+    if (count > d.contig_pages)
+        return -1;
+    MS_NEED((size_t)count * 8);
+    for (i = 0; i < count; i++) {
+        uint32_t idx;
+        memcpy(&idx, in + at + (size_t)i * 8, 4);
+        if (idx >= d.contig_pages)
+            return -1;
+    }
+    at += (size_t)count * 8;
+    MS_NEED(d.contig_pages);
+    at += d.contig_pages;                       /* the RAM-name map */
+    MS_GET(d.lazy_count);
+    if (d.lazy_count > LAZY_RESERVE_MAX)
+        return -1;
+    MS_GET(i);                                  /* floor */
+    MS_GET(d.lazy_top);
+    MS_GET(d.lazy_next);
+    MS_GET(i);                                  /* reserve_next */
+    if (d.lazy_next > d.lazy_top)
+        return -1;
+    MS_NEED((size_t)d.lazy_count * 12);
+    at += (size_t)d.lazy_count * 12;
+    MS_GET(len);
+    MS_NEED(len);
+    if (guest_vmem_state_check(in + at, len, &vm_runs) != 0)
+        return -1;
+    d.vmem_active = len > 4;
+    d.vmem_runs = vm_runs;
+    at += len;
+    if (at != n)
+        return -1;
+#undef MS_GET
+#undef MS_NEED
+    if (info)
+        *info = d;
+    return 0;
 }

@@ -32,6 +32,7 @@
 #define ADD64(p, v)    ((void)_InterlockedExchangeAdd64((volatile __int64 *)(p), (__int64)(v)))
 #define LOAD64(p)      ((uint64_t)_InterlockedOr64((volatile __int64 *)(p), 0))
 #define STORE64(p, v)  ((void)_InterlockedExchange64((volatile __int64 *)(p), (__int64)(v)))
+#define FENCE()        MemoryBarrier()
 #else
 #define ADD32(p, v)    __atomic_add_fetch((p), (int32_t)(v), __ATOMIC_SEQ_CST)
 #define LOAD32(p)      __atomic_load_n((p), __ATOMIC_SEQ_CST)
@@ -41,7 +42,10 @@
 #define ADD64(p, v)    ((void)__atomic_fetch_add((p), (uint64_t)(v), __ATOMIC_RELAXED))
 #define LOAD64(p)      __atomic_load_n((p), __ATOMIC_RELAXED)
 #define STORE64(p, v)  __atomic_store_n((p), (uint64_t)(v), __ATOMIC_RELAXED)
+#define FENCE()        __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #endif
+
+typedef char park_cpu_fits[sizeof(RecompCpu) <= XBOX_PARK_CPU_BYTES ? 1 : -1];
 
 typedef struct {
     volatile int32_t state;          /* XBOX_PARK_*; written by the owner, read by anyone */
@@ -49,6 +53,11 @@ typedef struct {
     volatile int32_t dispatch;
     volatile unsigned long tid;
     volatile uint64_t kernel_calls;
+    /* The park record (kernel_park.h): written by the owner between two seq increments. */
+    volatile uint32_t seq;
+    volatile int32_t returned;
+    volatile uint32_t status;
+    RecompCpu cpu;
 } Slot;
 
 static Slot s_slots[XBOX_PARK_MAX_THREADS];
@@ -107,6 +116,21 @@ int xbox_ParkOrdinalBlocks(uint32_t ordinal)
 static int parked_now(void)
 {
     return t_depth == t_base_depth + 1 && t_cb == t_base_cb;
+}
+
+/* The owner rewrites its record: seq odd meanwhile (readers wait, xbox_ParkRecords). Enter: the call and
+ * the registers as the guest made it; Leave (returned): the registers as the call left them. */
+static void record_write(Slot *s, int returned, uint32_t ordinal, uint32_t ret_va)
+{
+    STORE32((volatile int32_t *)&s->seq, (int32_t)(s->seq + 1));
+    if (!returned) {
+        s->ordinal = ordinal;
+        s->ret_va = ret_va;
+    }
+    s->returned = returned;
+    s->status = returned ? g_eax : 0;
+    memcpy(&s->cpu, (const void *)&g_cpu, sizeof s->cpu);
+    STORE32((volatile int32_t *)&s->seq, (int32_t)(s->seq + 1));
 }
 
 /* s_busy reached 0 / left 0: the all-parked window opens / closes. Racy by one transition at worst. */
@@ -178,6 +202,11 @@ void xbox_ParkThreadStart(void)
             s->dispatch = 0;
             s->tid = (unsigned long)GetCurrentThreadId();
             s->kernel_calls = 0;
+            s->returned = 0;
+            s->status = 0;
+            memset(&s->cpu, 0, sizeof s->cpu);
+            /* A new generation of the slot: a capture that read the previous thread's record sees it change. */
+            STORE32((volatile int32_t *)&s->seq, (int32_t)((s->seq + 2) & ~1u));
             t_slot = i;
             t_nest = 0;
             t_base_depth = t_depth;
@@ -228,8 +257,7 @@ void xbox_ParkKernelEnter(uint32_t ordinal, uint32_t ret_va)
         return;
     {
         Slot *s = &s_slots[t_slot];
-        s->ordinal = ordinal;
-        s->ret_va = ret_va;
+        record_write(s, 0, ordinal, ret_va);
         s->kernel_calls++;
         STORE32(&s->state, xbox_ParkOrdinalBlocks(ordinal) ? XBOX_PARK_WAITING : XBOX_PARK_KERNEL);
     }
@@ -245,6 +273,8 @@ void xbox_ParkKernelLeave(void)
 {
     int was = t_slot >= 0 && parked_now();
 
+    if (was)
+        record_write(&s_slots[t_slot], 1, 0, 0);   /* the registers as the call left them */
     t_depth--;
     if (was && !parked_now())
         go_busy(XBOX_PARK_RUNNING);
@@ -448,6 +478,77 @@ uint32_t xbox_ParkGuestPages(uint32_t *resident, uint32_t *nonzero)
     if (resident) *resident = res;
     if (nonzero) *nonzero = nz;
     return pages;
+}
+
+int xbox_ParkRecords(XboxParkRecord *out, int max)
+{
+    int i, n = 0;
+
+    for (i = 0; i < XBOX_PARK_MAX_THREADS && n < max; i++) {
+        Slot *s = &s_slots[i];
+        XboxParkRecord *r = &out[n];
+        uint32_t s1, s2;
+        int tries = 0;
+
+        if (LOAD32(&s->state) == XBOX_PARK_FREE)
+            continue;
+        for (;;) {
+            s1 = (uint32_t)LOAD32((volatile int32_t *)&s->seq);
+            if (s1 & 1u) {          /* being rewritten: the owner is inside its Leave hook */
+                if (++tries > 1000)
+                    SwitchToThread();
+                continue;
+            }
+            memset(r, 0, sizeof *r);
+            r->slot = i;
+            r->state = LOAD32(&s->state);
+            r->ordinal = s->ordinal;
+            r->ret_va = s->ret_va;
+            r->returned = s->returned;
+            r->status = s->status;
+            r->dispatch = s->dispatch;
+            r->tid = s->tid;
+            r->kernel_calls = s->kernel_calls;
+            r->cpu_bytes = (uint32_t)sizeof(RecompCpu);
+            memcpy(r->cpu, (const void *)&s->cpu, sizeof(RecompCpu));
+            FENCE();
+            s2 = (uint32_t)LOAD32((volatile int32_t *)&s->seq);
+            if (s1 == s2)
+                break;
+        }
+        r->seq = s1;
+        if (r->state == XBOX_PARK_FREE)     /* it ended while being read */
+            continue;
+        n++;
+    }
+    return n;
+}
+
+int xbox_ParkRecordsChanged(const XboxParkRecord *r, int n)
+{
+    int i, live = 0;
+
+    for (i = 0; i < XBOX_PARK_MAX_THREADS; i++)
+        if (LOAD32(&s_slots[i].state) != XBOX_PARK_FREE)
+            live++;
+    if (live != n)
+        return 1;
+    for (i = 0; i < n; i++) {
+        Slot *s = &s_slots[r[i].slot];
+        if (LOAD32(&s->state) == XBOX_PARK_FREE || (uint32_t)LOAD32((volatile int32_t *)&s->seq) != r[i].seq)
+            return 1;
+    }
+    return 0;
+}
+
+int xbox_ParkDropped(void)
+{
+    return LOAD32(&s_dropped);
+}
+
+int xbox_ParkThisThreadIsGuest(void)
+{
+    return t_slot >= 0;
 }
 
 void xbox_ParkReset(void)

@@ -391,3 +391,117 @@ int guest_vmem_query(uint32_t address, uint32_t info[7])
     info[6] = first.state ? MEM_PRIVATE_TYPE : 0;           /* Type */
     return 1;
 }
+
+/* ---- Save states (XBA-245) ---------------------------------------------- */
+
+static void vm_put32(uint8_t *out, size_t cap, size_t *at, uint32_t v)
+{
+    if (out && *at + 4 <= cap) {
+        out[*at] = (uint8_t)v;
+        out[*at + 1] = (uint8_t)(v >> 8);
+        out[*at + 2] = (uint8_t)(v >> 16);
+        out[*at + 3] = (uint8_t)(v >> 24);
+    }
+    *at += 4;
+}
+
+static uint32_t vm_get32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static int same_entry(const guest_page_t *a, const guest_page_t *b)
+{
+    return a->owner == b->owner && a->state == b->state && a->protect == b->protect
+        && a->reserve_protect == b->reserve_protect;
+}
+
+size_t guest_vmem_state_save(uint8_t *out, size_t cap)
+{
+    size_t at = 0, count_at;
+    uint32_t pages, i, runs = 0;
+
+    if (!s_pages) {
+        vm_put32(out, cap, &at, 0);
+        return at;
+    }
+    AcquireSRWLockShared(&s_lock);
+    pages = (s_top - s_lo) / VMEM_PAGE;
+    vm_put32(out, cap, &at, 1);
+    vm_put32(out, cap, &at, s_mirror_lo);
+    vm_put32(out, cap, &at, s_lo);
+    vm_put32(out, cap, &at, s_top);
+    count_at = at;
+    vm_put32(out, cap, &at, 0);
+    for (i = 0; i < pages;) {
+        uint32_t j = i + 1;
+        while (j < pages && same_entry(&s_pages[j], &s_pages[i]))
+            j++;
+        vm_put32(out, cap, &at, j - i);
+        vm_put32(out, cap, &at, s_pages[i].owner);
+        vm_put32(out, cap, &at, (uint32_t)s_pages[i].state | (uint32_t)s_pages[i].protect << 16);
+        vm_put32(out, cap, &at, s_pages[i].reserve_protect);
+        runs++;
+        i = j;
+    }
+    ReleaseSRWLockShared(&s_lock);
+    vm_put32(out, cap, &count_at, runs);
+    return at;
+}
+
+int guest_vmem_state_check(const uint8_t *in, size_t n, uint32_t *runs)
+{
+    uint32_t lo, top, count, i;
+    uint64_t covered = 0;
+
+    if (runs)
+        *runs = 0;
+    if (n < 4)
+        return -1;
+    if (vm_get32(in) == 0)
+        return n == 4 ? 0 : -1;
+    if (n < 20)
+        return -1;
+    lo = vm_get32(in + 8);
+    top = vm_get32(in + 12);
+    count = vm_get32(in + 16);
+    if (top < lo || (top - lo) % VMEM_PAGE || n != 20 + (size_t)count * 16)
+        return -1;
+    for (i = 0; i < count; i++) {
+        uint32_t len = vm_get32(in + 20 + (size_t)i * 16);
+        if (!len)
+            return -1;
+        covered += len;
+    }
+    if (covered != (top - lo) / VMEM_PAGE)
+        return -1;
+    if (runs)
+        *runs = count;
+    return 0;
+}
+
+int guest_vmem_committed_runs(void (*fn)(uint32_t va, uint32_t size, uint8_t *host, void *user), void *user)
+{
+    uint32_t pages, i, runs = 0;
+
+    if (!s_pages)
+        return 0;
+    AcquireSRWLockShared(&s_lock);
+    pages = (s_top - s_lo) / VMEM_PAGE;
+    for (i = 0; i < pages;) {
+        uint32_t j;
+        if (s_pages[i].state != MEM_COMMIT_FLAG) {
+            i++;
+            continue;
+        }
+        for (j = i + 1; j < pages && s_pages[j].state == MEM_COMMIT_FLAG; j++)
+            ;
+        if (fn)
+            fn(s_lo + i * VMEM_PAGE, (j - i) * VMEM_PAGE,
+               (uint8_t *)((uintptr_t)(s_lo + i * VMEM_PAGE) + (uintptr_t)s_offset), user);
+        runs++;
+        i = j;
+    }
+    ReleaseSRWLockShared(&s_lock);
+    return runs;
+}

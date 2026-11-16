@@ -119,6 +119,48 @@ int  xbox_ParkReport(FILE *out);
  * in the window. Reads guest memory: freeze first for a consistent count. */
 uint32_t xbox_ParkGuestPages(uint32_t *resident, uint32_t *nonzero);
 
+/* ---- Park records: what a save state stores per thread (XBA-245, xbox_state.h) ----------------------------
+ *
+ * Each registered thread keeps a record of its current top-level kernel call: the ordinal, the guest return
+ * address, and a copy of its register set (RecompCpu, the calling thread's g_cpu). Enter writes the
+ * registers as the guest made the call (esp at the return address, the arguments above it); Leave rewrites
+ * them as the call left them (eax the status, esp past the return address and the stdcall arguments) and
+ * sets `returned`. So a frozen thread's record says either « in call N from R, registers at the call » (the
+ * call is re-issued on restore, its partial effects on its outputs overwritten) or « returned from N with
+ * these registers » (held at the call's end: it resumes at R). Two copies of about 330 bytes per top-level
+ * kernel call.
+ *
+ * Each record has a sequence number, odd while its owner rewrites it. xbox_ParkRecords reads them while a
+ * freeze holds the threads; a frozen thread can still change its record once (its call returns, then the
+ * freeze holds it), so a capture reads the records, captures, and calls xbox_ParkRecordsChanged: a change
+ * means a call returned meanwhile and the capture must be taken again (that thread is held now). */
+#define XBOX_PARK_CPU_BYTES 512      /* room for a RecompCpu (sizeof checked in kernel_park.c) */
+
+typedef struct {
+    int slot;                /* 0..XBOX_PARK_MAX_THREADS-1, stable for the thread's life */
+    int state;               /* XBOX_PARK_* */
+    uint32_t ordinal;        /* the top-level kernel call */
+    uint32_t ret_va;         /* its guest return address */
+    int returned;            /* the call has returned (the thread is held at its end) */
+    uint32_t status;         /* eax as the call left it, when returned */
+    int dispatch;            /* held at DISPATCH_LEVEL */
+    unsigned long tid;       /* host thread id */
+    uint64_t kernel_calls;
+    uint32_t seq;            /* even: the record is complete */
+    uint32_t cpu_bytes;      /* sizeof(RecompCpu) */
+    uint64_t cpu[XBOX_PARK_CPU_BYTES / 8];   /* the RecompCpu, cpu_bytes of it */
+} XboxParkRecord;
+
+/* The registered threads' records (at most max), each read consistently: a record being rewritten is waited
+ * for (its owner finishes within the Leave hook). Meant for a frozen set of threads. Returns the count. */
+int  xbox_ParkRecords(XboxParkRecord *out, int max);
+/* 1 when a record of r[0..n) changed since it was read, or a thread registered or ended. */
+int  xbox_ParkRecordsChanged(const XboxParkRecord *r, int n);
+/* Threads that started while every slot was taken (untracked: a state cannot cover them). */
+int  xbox_ParkDropped(void);
+/* 1 when the calling thread is a registered guest thread. */
+int  xbox_ParkThisThreadIsGuest(void);
+
 /* Tests: forget every thread and statistic. Not thread safe. */
 void xbox_ParkReset(void);
 

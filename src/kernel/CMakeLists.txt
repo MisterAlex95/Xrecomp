@@ -54,7 +54,24 @@ set(KERNEL_SOURCES
     guest_clock.c
 )
 
+# Save states (XBA-245): the XBXS container writes recomp_states slot files,
+# which only POSIX hosts build (xbr_host_core).
+if(NOT WIN32)
+    list(APPEND KERNEL_SOURCES xbox_state.c xbox_state_guest.c)
+endif()
+
 add_library(xbox_kernel STATIC ${KERNEL_SOURCES})
+
+# The toolkit version a save state records (a state from another toolkit is refused).
+if(NOT WIN32)
+    if(xboxrecomp_VERSION)
+        set(_xbr_state_version "${xboxrecomp_VERSION}")
+    else()
+        set(_xbr_state_version "unknown")
+    endif()
+    set_source_files_properties(xbox_state.c PROPERTIES
+        COMPILE_DEFINITIONS "XBOXRECOMP_TOOLKIT_VERSION=\"${_xbr_state_version}\"")
+endif()
 
 # See src/platform/CMakeLists.txt: resolve src/ relative to this file, not via
 # CMAKE_SOURCE_DIR, which is the consuming project's root under add_subdirectory().
