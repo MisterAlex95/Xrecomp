@@ -1279,13 +1279,14 @@ final class Widgets {
         static final int W = 600;
         static final float SCRIM = 0.55f;
         final android.widget.LinearLayout rows, hints;
+        private final android.widget.LinearLayout panel;
 
         Sheet(Context c, String title, Runnable onClose) {
             super(c);
             setBackgroundColor(Theme.alpha(0xFF000000, SCRIM));
             setClickable(true);
             setOnClickListener(v -> onClose.run());
-            android.widget.LinearLayout panel = new android.widget.LinearLayout(c);
+            panel = new android.widget.LinearLayout(c);
             panel.setOrientation(android.widget.LinearLayout.VERTICAL);
             panel.setBackground(new Panel(0));
             panel.setClickable(true);   // a tap on the sheet is not one on the scrim
@@ -1313,6 +1314,18 @@ final class Widgets {
 
         void addRow(MenuRow r) {
             rows.addView(r, new android.widget.LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, Theme.ROW_H));
+        }
+
+        /** A paragraph between the title and the rows (the update's offer), at most maxLines lines. */
+        android.widget.TextView addText(String text, int maxLines) {
+            android.widget.TextView t = Theme.body(getContext(), text);
+            t.setMaxLines(maxLines);
+            t.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            android.widget.LinearLayout.LayoutParams p = new android.widget.LinearLayout.LayoutParams(
+                    LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+            p.bottomMargin = Theme.S4;
+            panel.addView(t, panel.indexOfChild(rows), p);
+            return t;
         }
 
         void addHint(Hint h) {

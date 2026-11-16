@@ -159,6 +159,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Home | No top bar: the game's title image (or a monogram) in the [game theme](#game-theme)'s colours, its title (the XBE certificate's name, else the folder's name), **one line** — when it was played (« Yesterday · 12 h 40 min played », « Not played yet »), or its state when it is not ready (« Needs preparing · once, about 20–30 min », « Prepare failed · CODE », the Prepare's progress, « Queued (n) », « Game data missing » with the folder, …) — and **one row of buttons**: a solid **Play** (or **Prepare**, **Preparing…**, **See what failed**, **Choose a game**) and three quiet pills, **Settings**, **Controls**, **Manage**. Before the first play the note says where the in-game menu is. | A finished import (Play focused), every start when « Start in the game » is off, the « Launcher » shortcut, B from the screens above. |
 | Settings | Four tabs (General, Graphics, Audio, Advanced; L1 / R1) of [options](#settings) as « label  value » rows, left / right (or A) to change, the focused option's description on the right. About ends Advanced. | Home, Options. |
 | Vulkan drivers | « System driver », the installed drivers, « Import a zip », « Refresh the list », the drivers one can download ([Vulkan drivers](#vulkan-drivers)). A chooses, X twice deletes, Y refreshes. Not in a game's own app. | Settings › Graphics › Vulkan driver. |
+| Updates | **Install XRecomp <version>** (when one is out), **Check now**, **Check at launch**, **Channel** ([Updates](#updates)). Y checks. Not in a game's own app. | Settings › General › Updates; « Update available » modal at the launch. |
 | Controls | The player's **remapping** ([Controls and remapping](#controls-and-remapping)): one row per Xbox control (A B X Y, Black, White, the triggers; Back, Start, the stick presses; the D-pad; the two sticks), its value the player's button, changed like a setting; « Reset controls » (also Y). The description column says what the focused row does and draws the handheld with, next to each control, what the game gets from it. | Home. |
 | Controls (GBA, PS1, N64) | The console's buttons remapped, for all its games or this game only ([Controls for the other consoles](#controls-for-the-other-consoles)): Mapping for, one row per console button, the sticks, the N64 stick's range and dead zone, the on-screen pad, « Reset controls » (also Y). | A GBA / PS1 / N64 game's Home (its « Controls » pill). |
 | Manage | **Change game** (another folder or image, or the same one again to re-import; **Library** when the [game library](#game-library) is on); **Delete the imported copy** (only when the game is the app's own copy, `files/games/<TID>/` or the older `files/game/`; its size as the value; press A twice within 5 s; saves are kept); **Add to home screen** (a [shortcut for this game](#a-game-on-the-home-screen), only when the home screen takes pin requests); **Create an app** (the game's [own app](#a-games-own-app), made and installed on the device; its size as the description; **only for a prepared game** (a valid pack built from this disc): before that the row says « Prepare this game first » and pressing it only repeats that in the note, so the app it makes always takes the pack over and starts straight into the game; not in a game's own app); the game's pack, Prepare files, caches and saves with their sizes, each deleted on its own ([Storage](#storage)). The technical facts (title ID, prepared date, pack size, folder, source, size, free space) are the first row's description. | Home. |
@@ -166,7 +167,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Licences | XBA-100. Every licence text the APK carries, monospaced, one after the other: `LICENSE`, `NOTICE`, then `LICENSES/*.txt` (copied into the assets `licences/` at build time by `xbaLicencesAsset`). D-pad up / down scroll, L1 / R1 page, a finger scrolls too. | X on About. |
 
 Messages and errors (`NOT_A_GAME_FOLDER`, `WRONG_GAME`, `NOT_ENOUGH_SPACE`, « Import canceled », « Saved », ...) go to
-the left of the footer line (the hints are on its right), with a dot coloured by kind; there are no toasts and no dialogs. logcat (tag `xboxrecomp`):
+the left of the footer line (the hints are on its right), with a dot coloured by kind; there are no toasts and no dialogs (the one modal is the « Update available » sheet, [Updates](#updates)). logcat (tag `xboxrecomp`):
 `launcher: shown (...)` naming why, then one `launcher:` line per step (folder, hash, copy, import, game set, play,
 settings saved, errors).
 
@@ -721,6 +722,7 @@ exist in the runtime and mean something to a player are offered. Graphics and Au
 | General › Sounds | On (default), Off | none: `ui_sound` |
 | General › Vibration | On (default), Off | none: `ui_haptics` |
 | General › Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
+| General › Updates (not in a game's own app) | the last check as the value; A opens the Updates screen | none: [Updates](#updates), `app_update` SharedPreferences |
 | General › Game theme (only with a game that has a title ID) | Art and colours (default), Colours only, Off | none: [Game theme](#game-theme), `files/settings/theme_<TID>` |
 | General › Enhancements (only for a game whose pack has `title_layer`: the toolkit has optional enhancements for it) | On (default), Off | none: `files/settings/enhancements_<TID>`; off, the game's next Prepare runs with `XBA_NO_TITLE_LAYER=1`, and Home offers Prepare again while the pack differs ([profiles.md](../technical/profiles.md#optional-by-construction), [prepare.md](prepare.md#packjson) `title_layer`) |
 | General › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
@@ -1433,7 +1435,7 @@ X Delete, B Back; Y refreshes):
 | On this device › **System driver** | « Active » when no driver is chosen | back to the system driver | the device's own driver; the footer below |
 | one row per installed driver (by name) | `driverVersion` (else `packageVersion`); « Active » (Settings' default), or « Not compatible » / « Active · not compatible » (`unsupported`), or « Failed last time » / « Active · failed last time » (any other failure) | makes it the default one (and clears the trial marker) | its description, version, source (« GitHub · owner/repo · tag », « Imported zip », « From XRecomp »), size on disk; the last start's warning in amber |
 | **Import a zip** | | the system document picker (`ACTION_OPEN_DOCUMENT`, `REQ_VK_DRIVER`), then the package is checked and installed on the worker | what a package is |
-| To download › **Refresh the list** | the list's state: « List from <date> », « <date> (old) », « Updating… », « No connection · List from <date> », « GitHub limit reached, retry after <time> · … », « GitHub did not answer (HTTP n) », « Not fetched yet » | asks GitHub now (every source; on a thread, the screen is rebuilt when it answers, the note repeats the state) | which repositories, and that this is the only network use |
+| To download › **Refresh the list** | the list's state: « List from <date> », « <date> (old) », « Updating… », « No connection · List from <date> », « GitHub limit reached, retry after <time> · … », « GitHub did not answer (HTTP n) », « Not fetched yet » | asks GitHub now (every source; on a thread, the screen is rebuilt when it answers, the note repeats the state) | which repositories |
 | one row per listed driver not installed (same sha256, or the id that sha256 gives), by file name without `.zip` then `.adpkg` (« turnip_mrpurple_T29-toasted »; `VkDriverStore.rowNames`, with « · <release tag> » when two listed files give the same name) | its size; « Pre-release » | downloads it behind the progress screen (percent, bytes; B cancels), then installs it | release title, source, tag, file, date, size, pre-release; the footer |
 | (no row) | | | « No list yet. Refresh … » or « Every listed driver is installed. » as a line of text |
 
@@ -1486,9 +1488,9 @@ game app at its next start, not while it runs; the game app keeps one choice (it
 `settings/vk_driver`) and has no per-game row; a game's own app exists only for Xbox titles today, so the inherited
 driver has no effect until an N64 game can have one.
 
-**Network use.** This is the only place XRecomp uses the network, hence `android.permission.INTERNET` in the manifest
-(no `ACCESS_NETWORK_STATE`; cleartext stays off). Requests are made only when the Drivers screen asks: nothing at
-start, nothing in the background. A game's own app does not get the permission (`TitleApk.PARENT_ONLY_PERMISSIONS`
+**Network use.** `android.permission.INTERNET` in the manifest serves this list, the cover art and XRecomp's own
+updates ([Updates](#updates)), nothing else (no `ACCESS_NETWORK_STATE`; cleartext stays off). The driver list is asked
+only when the Drivers screen asks: nothing at start, nothing in the background. A game's own app does not get the permission (`TitleApk.PARENT_ONLY_PERMISSIONS`
 drops its `<uses-permission>` from the copy), and `VkDriverIndex.networkAllowed` is false there: no request, state
 `NO_NETWORK`.
 
@@ -1567,6 +1569,70 @@ screenshot `console-options-2-n64-vkdriver.png`), `GameMenuTest.n64GameVulkanDri
 9. In-game menu › Settings of an N64 game: « Vulkan driver » cycles the same choices.
 10. Delete R8 (X, X): the first game's Options row is « As in Settings » again.
 11. Download names in the list have no `.zip` / `.adpkg` (« turnip_mrpurple_T29-toasted »).
+
+### Updates
+
+XRecomp updates itself from its public GitHub releases (`AppUpdate`, `AppUpdateReceiver`; `LauncherActivity` draws
+the modal and the screen). Never in a game's own app (it is made again from XRecomp: Manage › Create an app).
+
+**At the launch.** When **Check at launch** is on (the default), each time the launcher comes to the front and the
+last check is older than an hour, it asks GitHub on a thread. When a newer XRecomp is out, a **modal** (the sheet,
+« Update available ») says « XRecomp 0.13.0 is out (you have 0.12.1) · 47 MB », the start of the release notes,
+and offers **Install now**, **Later** and **Skip this version**. It shows only on the screens one lands on (library,
+Home, welcome), with nothing else open and no game running, once per run and version; a skipped version is never
+offered again by the modal (Settings still has it). With « Open the game directly » on, the launcher is not shown at
+the start, so the modal waits for the next time it is.
+
+**Settings › General › Updates** (`Screen.UPDATE`; its value is the last check: « Up to date », « 0.13.0 available »,
+« No connection », « Not available »…): **Install XRecomp <version>** (when an update is known; its size, « Test
+build » as the badge, the notes as the description), **Check now** (Y too; the note says the outcome, the description
+when it last checked), **Check at launch** (On / Off) and **Channel**: **Releases** (the `xrecomp-v<version>` releases)
+or **Test builds** (also `xrecomp-latest`, built from every change of `main`). The default follows the build: a
+release (version name `<version>+<commit>`) follows releases, a test build test builds.
+
+**Which version is newer.** Every APK we publish has the version code « commit time / 60 » (release.yml, ci.yml), so
+a release's version code is its commit's committer time: `GET /repos/MisterAlex95/Xrecomp/git/commits/<target_commitish>`
+(a small answer, cached in `files/update/commits.json`: a commit never changes). An update is a release whose
+version code is above this app's; on Test builds, the newer of the latest release and `xrecomp-latest` (the release
+when equal). The releases page (`/releases?per_page=20`) is asked with `If-None-Match` (a 304 keeps
+`files/update/releases.json` and does not count against GitHub's 60 requests an hour). User-Agent « XRecomp », nothing
+about the player or the device.
+
+**Install now.** A Prepare running or a game running: a note asks to wait or to close it (the update ends every
+process of the app). Without « Install unknown apps » for XRecomp, its settings screen opens first (the modal comes
+back after). Then the download behind the progress screen (B cancels): only
+`https://github.com/MisterAlex95/Xrecomp/releases/download/<tag>/<asset>`, redirects to `*.githubusercontent.com`,
+size and the release's sha256 digest checked (`VkDriverIndex.fetch`), into `files/update/`; then the APK itself
+(`AppUpdate.checkApk`): the same package, a higher version code, signed by this app's certificate. Then a
+`PackageInstaller` session: Android asks the player to confirm, except from Android 12 when XRecomp installed the
+running version itself (`UPDATE_PACKAGES_WITHOUT_USER_ACTION`, dropped from a game's own app): from the second update
+on, it goes in without asking. Android ends the app to replace it; at the next start the launcher says « XRecomp is
+up to date: <version> » and deletes the download. A cancel or a failure from the installer is a note.
+
+**Only the published key.** An APK signed by another key than the one of every XRecomp we publish
+(docs/releases/README.md « BC:F2:04:… ») could not install ours over itself: a local or debug build checks nothing
+and Settings › General › Updates says « Not available » and why.
+
+### Device check (updates), for Alex
+
+Needs a published release newer than the APK installed: install the previous release's APK (`xrecomp-v<n-1>.apk`)
+from GitHub first.
+
+1. Start XRecomp with Wi-Fi on: within a few seconds the « Update available » modal names the newer version, yours,
+   its size and the notes; logcat `launcher: update check (RELEASES): AVAILABLE xrecomp-v… code …` then
+   `launcher: offering update …`.
+2. Later (B): the modal closes. Leave the app (Home button) and come back: no modal again in this run.
+3. Settings › General › Updates: the value « <version> available »; the screen shows Install XRecomp <version> with
+   its size, Check now, Check at launch On, Channel Releases.
+4. Install XRecomp <version>: if « Install unknown apps » is off for XRecomp, its settings open; allow it, come
+   back: the modal is offered again. Install now: the progress screen, then Android asks to confirm the update;
+   confirm: XRecomp closes. Open it: the note « XRecomp is up to date: <version> »; About shows the new version;
+   your games, settings and packs are still there.
+5. Channel › Test builds: a check runs at once; when `xrecomp-latest` is newer than the release, « <commit>
+   available » with the « Test build » badge. Install it: on Android 12 and later it installs **without** asking
+   this time (XRecomp installed the running version), and XRecomp closes.
+6. Airplane mode, Check now: the note « No connection ».
+7. A game's own app: no Updates row in its Settings.
 
 ### Shader warm-up
 

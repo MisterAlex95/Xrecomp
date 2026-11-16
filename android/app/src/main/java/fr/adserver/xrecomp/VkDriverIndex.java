@@ -691,7 +691,7 @@ final class VkDriverIndex {
             throw new IOException("no network permission");
         File part = partFile(e);
         try {
-            String sha = fetch(e, part, progress, cancelled);
+            String sha = fetch(http, e.url, e.size, e.sha256, part, progress, cancelled);
             if (cancelled != null && cancelled.getAsBoolean())
                 throw new DownloadException(DownloadException.Reason.CANCELLED, "cancelled");
             store.install(part, sha, e);
@@ -709,8 +709,18 @@ final class VkDriverIndex {
         return null;
     }
 
-    private String fetch(Entry e, File part, Progress progress, BooleanSupplier cancelled) throws IOException {
-        String url = e.url;
+    /**
+     * GET url (https, redirects to {@link #downloadHost} only) into part, checking the size (when size > 0; else at
+     * most {@link #MAX_DOWNLOAD_BYTES}) and the sha256 (when sha256 is not null). Returns the file's sha256. Shared
+     * with AppUpdate (the app's own APK).
+     */
+    static String fetch(Http http, String url, long size, String sha256, File part, Progress progress,
+                        BooleanSupplier cancelled) throws IOException {
+        return fetch(http, url, size, sha256, MAX_DOWNLOAD_BYTES, part, progress, cancelled);
+    }
+
+    static String fetch(Http http, String url, long size, String sha256, long maxBytes, File part, Progress progress,
+                        BooleanSupplier cancelled) throws IOException {
         Map<String, String> h = new LinkedHashMap<>();
         h.put("User-Agent", USER_AGENT);
         h.put("Accept", "application/octet-stream");
@@ -734,20 +744,20 @@ final class VkDriverIndex {
                 }
                 if (code != 200)
                     throw new DownloadException(DownloadException.Reason.HTTP, "HTTP " + code);
-                return copy(e, r, part, progress, cancelled);
+                return copy(size, sha256, maxBytes, r, part, progress, cancelled);
             }
         }
         throw new DownloadException(DownloadException.Reason.BAD_URL, "too many redirects");
     }
 
-    private static String copy(Entry e, Response r, File part, Progress progress, BooleanSupplier cancelled)
-            throws IOException {
+    private static String copy(long size, String sha256, long maxBytes, Response r, File part, Progress progress,
+                               BooleanSupplier cancelled) throws IOException {
         long length = r.length();
-        if (e.size > 0 && length >= 0 && length != e.size)
+        if (size > 0 && length >= 0 && length != size)
             throw new DownloadException(DownloadException.Reason.SIZE,
-                                        "size " + length + " instead of " + e.size);
-        long limit = e.size > 0 ? e.size : MAX_DOWNLOAD_BYTES;
-        long total = e.size > 0 ? e.size : length;
+                                        "size " + length + " instead of " + size);
+        long limit = size > 0 ? size : maxBytes;
+        long total = size > 0 ? size : length;
         File dir = part.getParentFile();
         if (dir != null && !dir.isDirectory() && !dir.mkdirs())
             throw new IOException("cannot create " + dir);
@@ -769,12 +779,12 @@ final class VkDriverIndex {
                     progress.onProgress(done, total);
             }
         }
-        if (e.size > 0 && done != e.size)
-            throw new DownloadException(DownloadException.Reason.SIZE, "size " + done + " instead of " + e.size);
+        if (size > 0 && done != size)
+            throw new DownloadException(DownloadException.Reason.SIZE, "size " + done + " instead of " + size);
         String sha = hex(md.digest());
-        if (e.sha256 != null && !e.sha256.equals(sha))
+        if (sha256 != null && !sha256.equals(sha))
             throw new DownloadException(DownloadException.Reason.SHA256,
-                                        "sha256 " + sha + " instead of " + e.sha256);
+                                        "sha256 " + sha + " instead of " + sha256);
         return sha;
     }
 

@@ -160,7 +160,9 @@ public class LauncherActivity extends Activity {
         /** An Xbox title's Game settings (XBA-188): any Settings value its own or as in Settings; titleId(). */
         GAME_SETTINGS,
         /** Settings › Graphics › Vulkan driver: the system driver, the installed ones, the downloadable list. */
-        DRIVERS
+        DRIVERS,
+        /** Settings › General › Updates: XRecomp's own updates (AppUpdate). */
+        UPDATE
     }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
@@ -556,6 +558,9 @@ public class LauncherActivity extends Activity {
         // Library folders all through the Storage Access Framework: scanned at a cold start (and on Y) only.
         if (savedInstanceState == null && lib && !Library.folders(this).isEmpty() && !Library.anyFolderPath(this))
             startScan();
+        // XRecomp's own update went in since the last start: said once (AppUpdate).
+        if (savedInstanceState == null && TitleApp.ownTitleId(this) == null && AppUpdate.justUpdated(this))
+            setNote(getString(R.string.UPD_UPDATED, version()), NOTE_OK);
     }
 
     @Override
@@ -564,6 +569,9 @@ public class LauncherActivity extends Activity {
         resumed = true;
         TitleAppReceiver.listener = () -> runOnUiThread(this::showTitleAppOutcome);
         showTitleAppOutcome();
+        AppUpdateReceiver.listener = () -> runOnUiThread(this::showAppUpdateOutcome);
+        showAppUpdateOutcome();
+        updateAtLaunch();
         poller.removeCallbacks(pollTick);
         poller.postDelayed(pollTick, PREPARE_POLL_MS);
         // N64 shader warm-up: after an app update, and what was asked while a game ran (never next to a Prepare)
@@ -578,6 +586,7 @@ public class LauncherActivity extends Activity {
     protected void onPause() {
         resumed = false;
         TitleAppReceiver.listener = null;
+        AppUpdateReceiver.listener = null;
         poller.removeCallbacks(pollTick);
         if (warmupArmed) {   // a warm-up was about to start: at the next resume without a game
             poller.removeCallbacks(warmupTick);
@@ -1090,6 +1099,9 @@ public class LauncherActivity extends Activity {
             break;
         case DRIVERS:
             buildDrivers();
+            break;
+        case UPDATE:
+            buildUpdate();
             break;
         }
         restoreFocus(false);
@@ -2192,6 +2204,8 @@ public class LauncherActivity extends Activity {
                                R.string.SELF_HEAL_ON, R.string.SELF_HEAL_OFF);
             if (DualScreen.available(this, CompanionScreen.ownDisplayId(this)))
                 bottomScreenRow(list);
+            if (TitleApp.ownTitleId(this) == null)   // a game's own app is made again from XRecomp, never updated
+                updatesRow(list);
             String dir = gameDir();
             if (dir != null && state() != State.NONE && GameStore.findXbe(new File(dir)) != null && titleId() != null) {
                 gameThemeRow(list, titleId(), gameTitle(dir));
@@ -2897,6 +2911,276 @@ public class LauncherActivity extends Activity {
                         refreshKeepingFocus();
                 });
         }, "xba-vkd-sync").start();
+    }
+
+    // ---- XRecomp's own updates (Settings › General › Updates; AppUpdate; docs/android/app-shell.md « Updates ») ---
+
+    /** The check running (at the launch or Check now), or null. */
+    private Thread updateChecker;
+    /** A known update's modal comes this long after the launcher is in front. */
+    static final long UPDATE_OFFER_DELAY_MS = 600;
+    /** The update the launch's modal offered in this process (its version code): offered once per run. */
+    private static long updateOffered;
+    /** Tests: stands in for the real network (VkDriverIndex.UrlHttp). */
+    static java.util.function.Function<android.content.Context, VkDriverIndex.Http> updateHttpFactory;
+
+    private VkDriverIndex.Http updateHttp() {
+        return updateHttpFactory != null ? updateHttpFactory.apply(this) : new VkDriverIndex.UrlHttp();
+    }
+
+    private boolean updateChecking() {
+        return updateChecker != null && updateChecker.isAlive();
+    }
+
+    /**
+     * At each resume: an update already known is offered (the modal, once per run); otherwise, when « Check at
+     * launch » is on and the last check is older than an hour, a check on a thread, whose update is offered.
+     */
+    private void updateAtLaunch() {
+        if (AppUpdate.unsupported(this) != null)
+            return;
+        AppUpdate.Check last = AppUpdate.lastCheck(this);
+        if (last.state == AppUpdate.State.AVAILABLE)   // once the screen is in (its first show closes any sheet)
+            poller.postDelayed(() -> offerUpdate(last), UPDATE_OFFER_DELAY_MS);
+        if (AppUpdate.autoDue(this, System.currentTimeMillis()))
+            checkUpdate(false);
+    }
+
+    /** A check on a thread (manual: Check now, whose outcome is a note); its update is offered, the screen rebuilt. */
+    private void checkUpdate(boolean manual) {
+        if (updateChecking() || AppUpdate.unsupported(this) != null)
+            return;
+        VkDriverIndex.Http http = updateHttp();
+        updateChecker = new Thread(() -> {
+            AppUpdate.Check k = AppUpdate.check(this, http, System.currentTimeMillis());
+            runOnUiThread(() -> {
+                if (isFinishing())
+                    return;
+                if (screen == Screen.UPDATE || (screen == Screen.SETTINGS && settingsTab == TAB_GENERAL))
+                    refreshKeepingFocus();
+                if (manual)
+                    setNote(updateState(k, false), k.state == AppUpdate.State.AVAILABLE ? NOTE_OK
+                                                   : k.state == AppUpdate.State.UP_TO_DATE ? NOTE_INFO : NOTE_WARN);
+                if (k.state == AppUpdate.State.AVAILABLE && !manual)
+                    offerUpdate(k);
+            });
+        }, "xba-update-check");
+        updateChecker.start();
+        if (screen == Screen.UPDATE && !building)
+            refreshKeepingFocus();   // « Checking… »
+    }
+
+    /**
+     * The launch's modal: « XRecomp X is available », its notes, Install now / Later / Skip this version. Only on the
+     * screens one lands on (library, Home, welcome), nothing else open, no game running, once per run and version.
+     */
+    private void offerUpdate(AppUpdate.Check k) {
+        AppUpdate.Release r = k.release;
+        if (r == null || !resumed || sheet != null || workerBusy || r.versionCode == updateOffered
+            || r.versionCode == AppUpdate.skipped(this) || r.versionCode <= AppUpdate.ownVersionCode(this))
+            return;
+        if (screen != Screen.LIBRARY && screen != Screen.HOME && screen != Screen.ROM_HOME && screen != Screen.WELCOME)
+            return;
+        if (gameRunning())
+            return;
+        updateOffered = r.versionCode;
+        Log.i(TAG, "launcher: offering update " + r.tag + " " + r.version());
+        openSheet(R.string.UPD_SHEET_TITLE);
+        String head = getString(r.testBuild() ? R.string.UPD_OFFER_TEST : R.string.UPD_OFFER, r.version(), version())
+                      + (r.size > 0 ? " · " + size(r.size) : "");
+        String notes = notesExcerpt(r.notes, 600);
+        sheet.addText(notes.isEmpty() ? head : head + "\n\n" + notes, 12);
+        sheetRow(getString(R.string.UPD_INSTALL_NOW), () -> installUpdate(r));
+        sheetRow(getString(R.string.UPD_LATER), () -> setNote(getString(R.string.UPD_LATER_NOTE), NOTE_INFO));
+        sheetRow(getString(R.string.UPD_SKIP), () -> {
+            AppUpdate.skip(this, r.versionCode);
+            setNote(getString(R.string.UPD_SKIPPED, r.version()), NOTE_INFO);
+        });
+        sheetReady();
+    }
+
+    /** Release notes as plain text for the modal: Markdown marks dropped, at most max characters. */
+    static String notesExcerpt(String md, int max) {
+        StringBuilder b = new StringBuilder();
+        for (String line : (md == null ? "" : md).replace("\r", "").split("\n")) {
+            String t = line.trim().replaceAll("^#+\\s*", "").replaceAll("^[*-]\\s+", "• ")
+                           .replaceAll("[`*_]", "").replaceAll("\\[([^]]*)]\\([^)]*\\)", "$1");
+            if (t.isEmpty())
+                continue;
+            b.append(t).append('\n');
+        }
+        String s = b.toString().trim();
+        return s.length() <= max ? s : s.substring(0, max).trim() + "…";
+    }
+
+    /** Install now: the download behind the progress screen (B cancels), then Android's installer. */
+    private void installUpdate(AppUpdate.Release r) {
+        if (prepareProcessAlive()) {
+            setNote(getString(R.string.UPD_WAIT_PREPARE), NOTE_WARN);
+            return;
+        }
+        if (gameRunning()) {
+            setNote(getString(R.string.UPD_CLOSE_GAME), NOTE_WARN);
+            return;
+        }
+        if (!TitleApp.canInstall(this)) {
+            Log.i(TAG, "launcher: update: Install unknown apps is off, opening its settings");
+            setNote(getString(R.string.UPD_ALLOW), NOTE_WARN);
+            updateOffered = 0;   // offered again when the player comes back from the setting
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                         Uri.parse("package:" + getPackageName())));
+            } catch (ActivityNotFoundException e) {
+                Log.w(TAG, "launcher: no Install unknown apps screen", e);
+            }
+            return;
+        }
+        VkDriverIndex.Http http = updateHttp();
+        Log.i(TAG, "launcher: update " + r.tag + " " + r.version() + ": downloading " + r.assetName);
+        runWorker(R.string.UPD_DOWNLOADING, () -> {
+            try {
+                File apk = AppUpdate.download(this, http, r, (done, total) -> progress(done, total, r.assetName),
+                                              () -> cancelRequested);
+                AppUpdate.installer.install(this, apk, r.version());
+                workerNoteKind = NOTE_INFO;
+                workerNote = getString(R.string.UPD_HANDED, r.version());
+            } catch (IOException ex) {
+                Log.w(TAG, "launcher: update: " + ex);
+                AppUpdate.clean(this);
+                boolean cancel = ex instanceof VkDriverIndex.DownloadException
+                                 && ((VkDriverIndex.DownloadException)ex).reason
+                                    == VkDriverIndex.DownloadException.Reason.CANCELLED;
+                workerNoteKind = cancel ? NOTE_INFO : NOTE_ERROR;
+                workerNote = cancel ? getString(R.string.UPD_CANCELLED)
+                                    : ex instanceof AppUpdate.BadApk
+                                    ? getString(R.string.UPD_BAD_APK, String.valueOf(ex.getMessage()))
+                                    : getString(R.string.UPD_FAILED, String.valueOf(ex.getMessage()));
+            }
+        });
+    }
+
+    /** The installer's outcome for the update (AppUpdateReceiver), as a note; nothing when none is new. */
+    private void showAppUpdateOutcome() {
+        String[] o = AppUpdate.takeOutcome(this);
+        if (o == null)
+            return;
+        int status = Integer.parseInt(o[0]);
+        if (status == android.content.pm.PackageInstaller.STATUS_SUCCESS)
+            setNote(getString(R.string.UPD_UPDATED, o[2]), NOTE_OK);
+        else if (status == android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED)
+            setNote(getString(R.string.UPD_CANCELLED), NOTE_INFO);
+        else
+            setNote(getString(R.string.UPD_FAILED, o[1].isEmpty() ? String.valueOf(status) : o[1]), NOTE_ERROR);
+    }
+
+    /** A check's outcome in a few words (the rows' value, Check now's note). */
+    private String updateState(AppUpdate.Check k, boolean checking) {
+        if (checking)
+            return getString(R.string.UPD_CHECKING);
+        switch (k.state) {
+        case UP_TO_DATE:
+            return getString(R.string.UPD_UP_TO_DATE);
+        case AVAILABLE:
+            return getString(R.string.UPD_AVAILABLE, k.release.version());
+        case OFFLINE:
+            return getString(R.string.UPD_OFFLINE);
+        case RATE_LIMITED:
+            return getString(R.string.UPD_RATE_LIMITED);
+        case FAILED:
+            return getString(R.string.UPD_CHECK_FAILED);
+        default:
+            return getString(R.string.UPD_NEVER);
+        }
+    }
+
+    /** « Last checked 5 minutes ago », or "" before the first check. */
+    private String updateWhen(AppUpdate.Check k) {
+        if (k.at <= 0)
+            return "";
+        return getString(R.string.UPD_LAST_CHECKED,
+                         DateUtils.getRelativeTimeSpanString(k.at, System.currentTimeMillis(),
+                                                             DateUtils.MINUTE_IN_MILLIS).toString());
+    }
+
+    /** Settings › General › « Updates »: the last check's outcome as the value; A opens UPDATE. */
+    private void updatesRow(LinearLayout list) {
+        AppUpdate.Unsupported why = AppUpdate.unsupported(this);
+        MenuRow r = listRow(list, getString(R.string.UPD_TITLE), getString(R.string.UPD_ROW_DETAIL),
+                            () -> go(Screen.UPDATE));
+        r.setValue(why != null ? getString(R.string.UPD_UNAVAILABLE)
+                               : updateState(AppUpdate.lastCheck(this), updateChecking()));
+    }
+
+    /**
+     * UPDATE: « Install XRecomp X » when an update is known (its notes as the description), « Check now » (the last
+     * check as the value; Y too), « Check at launch » and the channel. A build that cannot update itself says why.
+     */
+    private void buildUpdate() {
+        screenTitle.setText(R.string.UPD_TITLE);
+        LinearLayout list = listTemplate();
+        String current = getString(R.string.UPD_CURRENT, version());
+        AppUpdate.Unsupported why = AppUpdate.unsupported(this);
+        if (why != null) {
+            MenuRow r = listRow(list, getString(R.string.UPD_UNAVAILABLE), null,
+                                () -> setNote(getString(R.string.UPD_UNAVAILABLE), NOTE_INFO));
+            String text = getString(why == AppUpdate.Unsupported.GAME_APP ? R.string.UPD_UNSUPPORTED_GAME_APP
+                                                                          : R.string.UPD_UNSUPPORTED_SIGNER);
+            r.setDescription(text);
+            onFocus(r, () -> describe(text, current, Theme.TEXT_DIM));
+            addHint("B", R.string.HINT_BACK, this::back);
+            return;
+        }
+        AppUpdate.Check k = AppUpdate.lastCheck(this);
+        boolean checking = updateChecking();
+        if (k.state == AppUpdate.State.AVAILABLE && k.release != null) {
+            AppUpdate.Release rel = k.release;
+            MenuRow in = listRow(list, getString(R.string.UPD_INSTALL, rel.version()), null,
+                                 () -> installUpdate(rel));
+            in.setValue(rel.size > 0 ? size(rel.size) : "");
+            if (rel.testBuild())
+                in.setBadge(getString(R.string.UPD_TEST_BUILD), Theme.WARN);
+            String notes = notesExcerpt(rel.notes, 1500);
+            String text = getString(rel.testBuild() ? R.string.UPD_OFFER_TEST : R.string.UPD_OFFER, rel.version(),
+                                    version()) + (notes.isEmpty() ? "" : "\n\n" + notes);
+            in.setDescription(text);
+            onFocus(in, () -> describe(text, current, Theme.TEXT_DIM));
+        }
+        MenuRow now = listRow(list, getString(R.string.UPD_CHECK_NOW), getString(R.string.UPD_CHECK_NOW_DETAIL),
+                              () -> checkUpdate(true));
+        now.setValue(updateState(k, checking));
+        String when = updateWhen(k);
+        onFocus(now, () -> describe(now.description, when.isEmpty() ? current : when + "\n" + current,
+                                    Theme.TEXT_DIM));
+        launcherToggle(list, R.string.UPD_AUTO, R.string.UPD_AUTO_DETAIL, AppUpdate::autoOn, AppUpdate::setAutoOn,
+                       R.string.UPD_AUTO_ON, R.string.UPD_AUTO_OFF);
+        AppUpdate.Channel[] chans = AppUpdate.Channel.values();
+        String[] names = { getString(R.string.UPD_CHANNEL_RELEASES), getString(R.string.UPD_CHANNEL_LATEST) };
+        MenuRow ch = settingRow(list, getString(R.string.UPD_CHANNEL), getString(R.string.UPD_CHANNEL_DETAIL));
+        ch.setChoices(names);
+        ch.setValue(names[AppUpdate.channel(this).ordinal()]);
+        ch.cycler = d -> {
+            int n = chans.length, i = ((AppUpdate.channel(this).ordinal() + d) % n + n) % n;
+            AppUpdate.setChannel(this, chans[i]);
+            ch.setValue(names[i]);
+            feedback.play(UiFeedback.Cue.MOVE, ch);
+            Log.i(TAG, "launcher: update channel " + chans[i]);
+            checkUpdate(true);   // the channel's newest, at once
+        };
+        ch.setOnClickListener(v -> ch.cycler.step(1));
+        yAction = () -> checkUpdate(true);
+        addHint("A", R.string.HINT_CHOOSE, this::clickFocused);
+        addHint("Y", R.string.UPD_CHECK_NOW, () -> checkUpdate(true));
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /** Tests: the check's thread. */
+    Thread updateCheckerForTest() {
+        return updateChecker;
+    }
+
+    /** Tests: the modal is offered again in this process. */
+    static void resetUpdateOfferForTest() {
+        updateOffered = 0;
     }
 
     // ---- GAME_DATA ---------------------------------------------------------------------------------------------
