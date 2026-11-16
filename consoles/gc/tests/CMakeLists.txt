@@ -11,6 +11,10 @@ endif()
 #                 after 120 fields must equal hello_xfb.png
 #   gc_rc_hello   the same DOL recompiled (gc_tools.recomp + cc, discovery loop), mostly native: same picture
 #   gc_fnma       fnmadd / fnmsub and their s / ps_ forms keep an exact zero's -0 and a NaN's sign (no homebrew)
+#   gc_gx_<prog>  our libogc GX programs (homebrew gx*) under gc_run --gx: the GLES renderer on a headless EGL
+#                 context (llvmpipe), the XFB compared with gx_ref/<prog>.png within a tolerance (run_gx.sh,
+#                 gx_compare.py); each program also checks pixels itself by EFB peeks (green square = all passed).
+#                 Skipped (77) without the corpus or without a GLES 3 context (XBA-262)
 # Both skip (exit 77) when the homebrew is not built (the linux CI job has no corpus; the homebrew job builds it):
 #   tools/consoles/build_homebrew.sh gc build/homebrew    -> GC_HOMEBREW_DIR (default build/homebrew/gc)
 # The frontend's own tests (synthetic code, no toolchain; one runs a program both interpreted and recompiled) run
@@ -46,6 +50,14 @@ if(TARGET gc_run)
                 ${CMAKE_CURRENT_BINARY_DIR}/hello_rc rc ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png)
     set_tests_properties(gc_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     set_tests_properties(gc_rc_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+    # GX (XBA-262): one test per program, gx_ref/<prog>.png the expected XFB
+    set(GC_GX_PROGS gxtri gxtex)
+    foreach(prog ${GC_GX_PROGS})
+        add_test(NAME gc_gx_${prog}
+            COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_gx.sh $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/${prog}.dol
+                    ${CMAKE_CURRENT_BINARY_DIR}/gx_${prog} ${CMAKE_CURRENT_SOURCE_DIR}/gx_ref/${prog}.png)
+        set_tests_properties(gc_gx_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)
+    endforeach()
 endif()
 
 # gc_padtest (XBA-259): our libogc pad test (homebrew/padtest) with controller input injected on the serial

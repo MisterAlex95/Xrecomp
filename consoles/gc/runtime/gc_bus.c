@@ -2,7 +2,7 @@
  *
  * Physical addresses (gc_mmu.c translates effective ones; EA & 0x3FFFFFFF with the default BATs):
  *   0x00000000  MEM1, 24 MB (inline in gc_recomp_rt.h; here only when an access crosses its end)
- *   0x0C000000  CP, PE (16-bit): stored, no GX
+ *   0x0C000000  CP, PE (16-bit): the GPU's command processor and pixel engine (gx/gx_fifo.c, XBA-262)
  *   0x0C002000  VI (16-bit): timing registers stored, beam position computed, display interrupts DI0..DI3 raised on
  *               their line, framebuffer address and picture configuration read by gc_xfb_rgb
  *   0x0C003000  PI (32-bit): interrupt cause / mask, the reset switch (never pressed), the Flipper revision
@@ -12,7 +12,8 @@
  *   0x0C006000  DI (32-bit): the DVD drive, gc_di.c (XBA-261)
  *   0x0C006400  SI: standard controllers (gc_si.c, XBA-259); EXI, AI (32-bit): transfers complete at once with
  *               nothing on the other end (no memory cards; EXI reads give zeros: blank SRAM / RTC)
- *   0x0C008000  GX FIFO: writes dropped
+ *   0x0C008000  the write-gather pipe: into the GX FIFO (gx_fifo_write, XBA-262)
+ *   0x08000000  the EFB as the CPU peeks and pokes it (gx_efb_peek / gx_efb_poke)
  *   0x20000000  the locked cache (16 KB; gc_mmu.c maps EA 0xE0000000 onto it while HID2[LCE] is set)
  * Anything else reads 0 and drops writes (logged with -v). */
 #include <stdio.h>
@@ -169,6 +170,8 @@ static uint32_t pi_read32(gc_machine *m, unsigned idx)
         return m->pi_intmr;
     case 11:
         return 0x246500B1u; /* Flipper revision C */
+    case 3: case 4: case 5: /* the CPU's GX FIFO: base, end, write pointer */
+        return gx_pi_read(m->gx, idx);
     default:
         return m->pi_reg[idx];
     }
@@ -182,6 +185,9 @@ static void pi_write32(gc_machine *m, unsigned idx, uint32_t v)
         break;
     case 1:
         m->pi_intmr = v;
+        break;
+    case 3: case 4: case 5:
+        gx_pi_write(m->gx, idx, v);
         break;
     default:
         m->pi_reg[idx] = v;
@@ -235,6 +241,10 @@ static uint16_t hw_read16(gc_machine *m, uint32_t pa)
         return dsp_read16(m, (off & 0x7F) >> 1);
     if (off >= 0x4000 && off < 0x4080)
         return (uint16_t)m->mi_reg[(off & 0x7F) >> 1];
+    if (off < 0x1000)
+        return gx_cp_read16(m->gx, off);
+    if (off < 0x2000)
+        return gx_pe_read16(m->gx, off);
     if (off < 0x3000 || (off >= 0x4000 && off < 0x6000) || off >= 0x7000)
         return 0; /* CP, PE, holes */
     /* a 32-bit block read 16 bits at a time */
@@ -255,6 +265,14 @@ static void hw_write16(gc_machine *m, uint32_t pa, uint16_t v)
     }
     if (off >= 0x4000 && off < 0x4080) {
         m->mi_reg[(off & 0x7F) >> 1] = v;
+        return;
+    }
+    if (off < 0x1000) {
+        gx_cp_write16(m->gx, off, v);
+        return;
+    }
+    if (off < 0x2000) {
+        gx_pe_write16(m->gx, off, v);
         return;
     }
     if (off < 0x3000 || (off >= 0x4000 && off < 0x6000) || off >= 0x7000)
@@ -295,8 +313,10 @@ uint32_t gc_hw_read(gc_machine *m, uint32_t pa, unsigned size)
 void gc_hw_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size)
 {
     uint32_t off = pa & 0xFFFF;
-    if (off >= 0x8000)
-        return; /* GX FIFO */
+    if (off >= 0x8000) { /* the write-gather pipe */
+        gx_fifo_write(m->gx, v, size);
+        return;
+    }
     if (size == 1) {
         uint16_t h = hw_read16(m, pa & ~1u);
         h = (pa & 1) ? (uint16_t)((h & 0xFF00) | (v & 0xFF)) : (uint16_t)((h & 0xFF) | (v & 0xFF) << 8);
@@ -342,6 +362,10 @@ uint32_t gc_phys_read(gc_machine *m, uint32_t pa, unsigned size)
     }
     if ((pa & 0xFFFF0000u) == 0x0C000000u)
         return gc_hw_read(m, pa, size);
+    if ((pa & 0xFF000000u) == 0x08000000u) {
+        uint32_t v = gx_efb_peek(m->gx, pa & ~3u);
+        return size == 4 ? v : size == 2 ? (v >> (16 - 8 * (pa & 2))) & 0xFFFF : (v >> (24 - 8 * (pa & 3))) & 0xFF;
+    }
     if (pa >= 0x20000000u && pa + size <= 0x20000000u + GC_LC_SIZE) {
         uint32_t v = 0;
         for (unsigned i = 0; i < size; i++)
@@ -363,6 +387,10 @@ void gc_phys_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size)
     }
     if ((pa & 0xFFFF0000u) == 0x0C000000u) {
         gc_hw_write(m, pa, v, size);
+        return;
+    }
+    if ((pa & 0xFF000000u) == 0x08000000u) {
+        gx_efb_poke(m->gx, pa & ~3u, v, size);
         return;
     }
     if (pa >= 0x20000000u && pa + size <= 0x20000000u + GC_LC_SIZE) {

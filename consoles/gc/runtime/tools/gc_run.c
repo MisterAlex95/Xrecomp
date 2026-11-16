@@ -2,6 +2,7 @@
  *
  *   gc_run PROG.dol [--frames N] [--png OUT] [--pack LIB.so] [--missed FILE] [--stats] [--peek ADDR[:N]] [--pal]
  *          [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]]... [-v]
+ *          [--gx] [--gx-hw] [--gx-scale N] [--gx-shaders async|sync|uber|special] [--gx-list FILE] [--gx-copy-ram]
  *
  * --frames counts video fields (60 per second, 50 in PAL). --pal: the IPL's PAL state (gc_set_tv_mode). --pad: a
  * standard controller on port PORT (0..3) for the whole run, BUTTONS in hex (GC_PAD_*), then sticks and triggers in
@@ -13,7 +14,13 @@
  *
  * Discs (XBA-261): PROG may be a disc image instead (ISO / GCM, CISO, GCZ, RVZ, WIA: decided by content; --disc
  * forces it): it boots through its apploader with no IPL (gc_boot.h). --disc2 IMAGE --swap-at FIELD swaps discs at
- * that field (the cover opens, then closes on the second disc), for multi-disc sets. */
+ * that field (the cover opens, then closes on the second disc), for multi-disc sets.
+ *
+ * GX (XBA-262): --gx draws with the GLES renderer on a headless EGL context (Mesa's llvmpipe unless --gx-hw); exits
+ * 77 when there is no GLES 3 context to be had. --gx-scale: internal resolution; --gx-shaders: async (ubershader
+ * until the specialised shader is ready), sync, uber (ubershader only), special (specialised only, compiled on first
+ * use); --gx-list: the per-title shader list (read, then written back); --gx-copy-ram: EFB copies to textures are
+ * also encoded into RAM. */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +28,7 @@
 
 #include "gc_boot.h"
 #include "gc_core.h"
+#include "gx/gx.h"
 #include "gc_png.h"
 
 static uint8_t *read_file(const char *path, size_t *size)
@@ -44,7 +52,8 @@ static uint8_t *read_file(const char *path, size_t *size)
 int main(int argc, char **argv)
 {
     const char *dol_path = NULL, *png = NULL, *pack = NULL, *missed = NULL, *disc2 = NULL;
-    int frames = 60, stats = 0, verbose = 0, npeek = 0, force_disc = 0, swap_at = -1;
+    int frames = 60, stats = 0, verbose = 0, npeek = 0, force_disc = 0, swap_at = -1, use_gx = 0, gx_hw = 0;
+    gx_gl_options gxo = {0, 1, 0, NULL};
     const char *peek[16];
     int pal = 0;
     gc_pad_state pads[4];
@@ -73,6 +82,20 @@ int main(int argc, char **argv)
                                         (uint8_t)v[4], (uint8_t)v[5]};
         } else if (!strcmp(argv[i], "--stats"))
             stats = 1;
+        else if (!strcmp(argv[i], "--gx"))
+            use_gx = 1;
+        else if (!strcmp(argv[i], "--gx-hw"))
+            use_gx = 1, gx_hw = 1;
+        else if (!strcmp(argv[i], "--gx-scale") && i + 1 < argc)
+            gxo.scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--gx-list") && i + 1 < argc)
+            gxo.shader_list = argv[++i];
+        else if (!strcmp(argv[i], "--gx-copy-ram"))
+            gxo.efb_copy_ram = 1;
+        else if (!strcmp(argv[i], "--gx-shaders") && i + 1 < argc) {
+            const char *v = argv[++i];
+            gxo.async_shaders = !strcmp(v, "sync") ? 0 : !strcmp(v, "uber") ? -1 : !strcmp(v, "special") ? 2 : 1;
+        }
         else if (!strcmp(argv[i], "--disc") && i + 1 < argc && !dol_path)
             force_disc = 1, dol_path = argv[++i];
         else if (!strcmp(argv[i], "--disc2") && i + 1 < argc)
@@ -86,7 +109,8 @@ int main(int argc, char **argv)
         else {
             fprintf(stderr, "usage: gc_run PROG.dol|DISC [--disc IMAGE] [--disc2 IMAGE --swap-at FIELD] [--frames N]"
                             " [--png OUT] [--pack LIB] [--missed FILE] [--stats] [--peek ADDR[:N]] [--pal]"
-                            " [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]] [-v]\n");
+                            " [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]] [-v] [--gx] [--gx-hw] [--gx-scale N]"
+                            " [--gx-shaders MODE] [--gx-list FILE] [--gx-copy-ram]\n");
             return 2;
         }
     }
@@ -119,6 +143,14 @@ int main(int argc, char **argv)
         return 2;
     }
     gc_set_verbose(m, verbose);
+    if (use_gx) {
+        char gwhy[160] = "";
+        if (gx_egl_headless_create(!gx_hw, gwhy, sizeof gwhy) || gx_gl_attach(gc_gx(m), &gxo)) {
+            fprintf(stderr, "gc_run: no GLES 3 renderer (%s): skipped\n", gwhy[0] ? gwhy : "see above");
+            gc_destroy(m);
+            return 77;
+        }
+    }
     if (pal)
         gc_set_tv_mode(m, GC_TV_PAL);
     for (int p = 0; p < 4; p++)
@@ -159,6 +191,17 @@ int main(int argc, char **argv)
         gc_recomp_get_stats(m, &s);
         printf("stats: native %llu interpreted %llu calls %llu span_checks %llu\n", (unsigned long long)s.native,
                (unsigned long long)s.interp, (unsigned long long)s.calls, (unsigned long long)s.span_checks);
+        gx_stats g;
+        gx_get_stats(gc_gx(m), &g);
+        printf("gx: fifo %llu bytes, draws %llu, vertices %llu, batches %llu (uber %llu, specialised %llu), "
+               "efb copies %llu, xfb copies %llu, textures decoded %llu (hits %llu), shaders ready %llu pending %llu, "
+               "peeks %llu pokes %llu, unknown commands %llu\n",
+               (unsigned long long)g.fifo_bytes, (unsigned long long)g.draws, (unsigned long long)g.vertices,
+               (unsigned long long)g.batches, (unsigned long long)g.uber_draws, (unsigned long long)g.special_draws,
+               (unsigned long long)g.efb_copies, (unsigned long long)g.xfb_copies, (unsigned long long)g.tex_decodes,
+               (unsigned long long)g.tex_hits, (unsigned long long)g.shaders_ready,
+               (unsigned long long)g.shaders_pending, (unsigned long long)g.peeks, (unsigned long long)g.pokes,
+               (unsigned long long)g.unknown_cmds);
     }
     for (int i = 0; i < npeek; i++) { /* --peek ADDR[:WORDS]: memory words at the end (debugging) */
         unsigned long a = strtoul(peek[i], NULL, 16), n = 1;
@@ -198,6 +241,8 @@ int main(int argc, char **argv)
         }
     }
     gc_destroy(m);
+    if (use_gx)
+        gx_egl_headless_destroy();
     if (lib)
         dlclose(lib);
     return rc;

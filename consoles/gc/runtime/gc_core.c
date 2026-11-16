@@ -38,6 +38,19 @@ static uint32_t field_lines(const gc_machine *m, uint64_t f)
     return (f & 1) ? m->frame_lines / 2 : m->frame_lines - m->frame_lines / 2;
 }
 
+/* GX asks for PI interrupt causes (PE token / finish, CP). */
+static void gx_irq(void *user, uint32_t set, uint32_t clear)
+{
+    gc_machine *m = user;
+    m->pi_intsr = (m->pi_intsr | set) & ~clear;
+    gc_check_interrupts(m);
+}
+
+gx_state *gc_gx(gc_machine *m)
+{
+    return m->gx;
+}
+
 /* The video standard of the fields to come, from the VI's DCR format (XBA-259): PAL (1) has 625 lines at 25 frames
  * per second, everything else (NTSC, MPAL, debug) 525 at 30. Taken at a field start, so a field keeps its length. */
 static void video_timing(gc_machine *m)
@@ -91,7 +104,8 @@ gc_machine *gc_alloc_machine(char *why, size_t why_len)
     }
     m->h.ram = calloc(1, GC_RAM_SIZE);
     m->aram = calloc(1, GC_ARAM_SIZE);
-    if (!m->h.ram || !m->aram) {
+    m->gx = m->h.ram ? gx_create(m->h.ram, GC_RAM_SIZE, gx_irq, m) : NULL;
+    if (!m->h.ram || !m->aram || !m->gx) {
         snprintf(why, why_len, "out of memory");
         gc_destroy(m);
         return NULL;
@@ -180,6 +194,7 @@ void gc_destroy(gc_machine *m)
 {
     if (!m)
         return;
+    gx_destroy(m->gx);
     free(m->h.ram);
     free(m->aram);
     free(m->span_state);
@@ -193,6 +208,7 @@ void gc_destroy(gc_machine *m)
 void gc_set_verbose(gc_machine *m, int level)
 {
     m->verbose = level;
+    gx_set_verbose(m->gx, level);
 }
 
 const char *gc_error(const gc_machine *m)
@@ -268,6 +284,7 @@ int gc_run_frame(gc_machine *m)
     if (m->error[0])
         return -1;
     m->frames++;
+    gx_field(m->gx);
     video_timing(m);
     m->field_end += (uint64_t)field_lines(m, m->frames) * m->line_cycles;
     m->field_line = 0;

@@ -8,7 +8,8 @@
 # job's dependency stage (tools/docker/linux.Dockerfile --target deps, tag xba-linux-deps, shared with
 # run_gba_packs.sh, run_n64_homebrew.sh and run_nds_homebrew.sh), without network: consoles/gc/tests built with
 # GC_HOMEBREW_DIR pointing at the corpus, then ctest -R '^gc_' (gc_hello: the interpreter; gc_rc_hello: recompiled by
-# the discovery loop; both compare the XFB with consoles/gc/tests/hello_xfb.png). A test that skips although the
+# the discovery loop; both compare the XFB with consoles/gc/tests/hello_xfb.png; gc_gx_*: the GX programs drawn by the
+# GLES renderer on llvmpipe, XBA-262, against consoles/gc/tests/gx_ref/). A test that skips although the
 # corpus is here fails the run. Sources go in and results come out with `docker cp` (no bind mounts: CI drives the
 # host's Docker from a container). OUT_DIR gets build.log, ctest.log and the frames. Exits 1 when a test fails or
 # skips.
@@ -57,6 +58,7 @@ grep -q "Skipped" /out/ctest.log && { echo "a test skipped although the corpus i
 [ "$rc" = 0 ] || grep -A30 "The following tests FAILED" /out/ctest.log || true
 cp /tmp/build/hello_interp/xfb.png /out/hello_interp.png 2>/dev/null || true
 cp /tmp/build/hello_rc/xfb.png /out/hello_rc.png 2>/dev/null || true
+for d in /tmp/build/gx_*; do [ -f "$d/xfb.png" ] && cp "$d/xfb.png" "/out/${d##*/}.png"; done
 echo "== GameCube ctest in $(($(date +%s) - t0)) s"
 exit $rc'
 

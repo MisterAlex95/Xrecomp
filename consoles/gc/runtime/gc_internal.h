@@ -10,6 +10,7 @@
 
 #include "gc_core.h"
 #include "gc_recomp_rt.h"
+#include "gx/gx.h"
 
 /* Clocks: the Gekko at 486 MHz, the time base and decrementer at a twelfth of it (bus clock / 4). The core counts
  * an estimate of each instruction's cycles (gc_cycles: 1 for most, more for multiplies, divides, FP divides,
@@ -80,6 +81,8 @@ struct gc_machine {
     gc_pad_state pad[4];  /* what each SI port has plugged in (gc_set_pad) */
     uint32_t exi[15];
     uint32_t mi_reg[0x40];
+    /* the GPU (gx/: FIFO, CP, PE, renderer; XBA-262) */
+    gx_state *gx;
 
     /* interpreter and recompiled code */
     bool branched;        /* the last instruction the interpreter ran was a taken branch */

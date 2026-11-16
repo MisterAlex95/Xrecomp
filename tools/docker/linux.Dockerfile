@@ -4,11 +4,14 @@
 # From the repo root:
 #   docker build -f tools/docker/linux.Dockerfile --target test .
 # Same packages as tools/linux/install_deps.sh (Debian branch), plus the Python side of CONTRIBUTING.md.
+# libegl-mesa0 / libgles2 / libgl1-mesa-dri: a headless GLES 3 context on Mesa's llvmpipe for the GameCube GX tests
+# (XBA-262, consoles/gc/tests/run_gx.sh; loaded at run time, nothing links them).
 # The test stage runs ctest and pytest at build time: a red test fails the build.
 FROM debian:trixie-slim AS deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake build-essential clang pkg-config ninja-build \
         libsdl2-dev libgl1-mesa-dev libepoxy-dev libssl-dev \
+        libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri \
         libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
         python3 python3-venv ccache \
     && rm -rf /var/lib/apt/lists/*

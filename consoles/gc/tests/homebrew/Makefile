@@ -4,7 +4,10 @@
 # Each program directory gives <prog>.dol (elf2dol: what the runtime loads) and <prog>.elf (symbols, for debugging
 # only).
 
-PROGS := hello padtest
+PROGS := hello padtest gxtri gxtex
+# Programs with data made at build time: <prog>/mktex.py OUTDIR writes OUTDIR/textures.c / .h (gxtex: our pictures
+# through gxtexconv, XBA-262).
+GEN_PROGS := gxtex
 OUT ?= out
 BUILD ?= build
 
@@ -24,6 +27,15 @@ all: $(addprefix $(OUT)/,$(addsuffix .dol,$(PROGS)))
 
 define prog_rules
 $(1)_OBJS := $$(patsubst %.c,$(BUILD)/%.o,$$(wildcard $(1)/*.c))
+ifneq ($$(filter $(1),$(GEN_PROGS)),)
+$(1)_OBJS += $(BUILD)/$(1)/gen/textures.o
+$(BUILD)/$(1)/gen/textures.c: $(1)/mktex.py
+	python3 $(1)/mktex.py $(BUILD)/$(1)/gen
+$(BUILD)/$(1)/gen/textures.o: $(BUILD)/$(1)/gen/textures.c
+	$$(CC) $$(CFLAGS) -c -o $$@ $$<
+$$(patsubst %.c,$(BUILD)/%.o,$$(wildcard $(1)/*.c)): $(BUILD)/$(1)/gen/textures.c
+$$(patsubst %.c,$(BUILD)/%.o,$$(wildcard $(1)/*.c)): CFLAGS += -I$(BUILD)/$(1)/gen
+endif
 
 $(OUT)/$(1).elf: $$($(1)_OBJS) | $(OUT)
 	$$(CC) $$(LDFLAGS) -Wl,-Map,$(BUILD)/$(1).map -o $$@ $$^ $$(LIBS)

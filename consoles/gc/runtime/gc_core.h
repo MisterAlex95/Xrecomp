@@ -70,6 +70,11 @@ int gc_xfb_yuv(gc_machine *m, uint8_t *yuv, int *w, int *h);
 
 uint32_t gc_peek32(gc_machine *m, uint32_t ea);
 
+/* The machine's GPU (consoles/gc/runtime/gx/gx.h): attach a renderer with gx_gl_attach(gc_gx(m), ...) on the thread
+ * that runs gc_run_frame, with a GLES 3 context current (XBA-262). */
+typedef struct gx_state gx_state;
+gx_state *gc_gx(gc_machine *m);
+
 #ifdef __cplusplus
 }
 #endif

@@ -21,13 +21,18 @@ if(NOT TARGET ps1_chdr)
 endif()
 
 if(NOT TARGET gc_core)
+    # gx/: the GPU (XBA-262): FIFO, command processor, vertex loader and transform, TEV shaders, textures, EFB
+    # copies, on OpenGL ES 3.0 loaded at run time (no GL headers or libraries at build time; dlopen + pthreads).
+    set(GC_GX_SRCS gx/gx_fifo.c gx/gx_vtx.c gx/gx_tex.c gx/gx_shader.c gx/gx_gl.c gx/gx_egl.c)
     add_library(gc_core STATIC gc_core.c gc_cpu.c gc_bus.c gc_si.c gc_mmu.c gc_recomp.c
-                gc_disc.c gc_disc_wia.c gc_bzip2.c gc_di.c gc_boot.c)
+                gc_disc.c gc_disc_wia.c gc_bzip2.c gc_di.c gc_boot.c ${GC_GX_SRCS})
     target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_include_directories(gc_core PRIVATE ${GC_LIBCHDR}/deps/miniz-3.1.2 ${GC_LIBCHDR}/deps/zstd-1.5.7
                                                ${GC_LIBCHDR}/deps/lzma-26.02/include)
     target_compile_definitions(gc_core PRIVATE MINIZ_NO_ARCHIVE_APIS MINIZ_NO_DEFLATE_APIS MINIZ_NO_STDIO MINIZ_NO_TIME)
     target_link_libraries(gc_core PUBLIC ps1_chdr)
+    find_package(Threads REQUIRED)
+    target_link_libraries(gc_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
     # -ffp-contract=off: fmul then fadd round twice on the 750, so the interpreter and lifted code (built the same
     # way, run_hello.sh) must not fuse them (GCC does by default on arm64); fmadd and friends call fma() (XBA-255).
     # -frounding-math: the core runs guest code under the host rounding mode FPSCR[RN] asks for (XBA-260).
