@@ -10,6 +10,7 @@ dlopened runtime library that owns the thread-local guest registers).
     python -m tools.bench run OUT VARIANT [--reps R] [--scale X] [--layout exe|so]
     python -m tools.bench sweep OUT VARIANT... [--cc CC] [--reps R]  -> Markdown table
     python -m tools.bench insns OUT VARIANT [--cc CC --target aarch64-linux-android30 --sysroot S]
+    python -m tools.bench icount OUT VARIANT --target T --runner 'qemu-aarch64 -L ...' [--scale X]
 
 `lift` needs capstone and binutils that assemble i386 (`as --32`, `ld -m
 elf_i386`): xba-deps:latest has both. `--copies N` adds N renamed copies of
@@ -23,6 +24,15 @@ the baseline's is reported as such: it changed what the code computes.
 `insns` disassembles the hot functions of a build (objdump of libtitle.so)
 and counts instructions, loads, stores and calls (TLS descriptor calls
 apart): the arm64 numbers, since qemu timings say nothing about a phone.
+
+`icount` counts the instructions each workload executes (XBA-238), under
+the qemu of --runner with one instruction per translation block, less a
+run of the same binary at scale 0 (start-up, image load). Dynamic counts
+are what static counts and qemu timings are not: comparable across
+builds of the hot loops. Slow (qemu logs every instruction): use
+--scale 0.1. An arm64 build qemu-user can run is a glibc one, e.g. NDK
+clang with --target aarch64-linux-gnu --sysroot <aarch64 glibc root>
+(the build links with lld, as the Android one does).
 
 Nothing here comes from a game: the corpus is hand-written.
 """
@@ -346,6 +356,29 @@ def classify(insns, arch):
     return c
 
 
+def icount(out, variant, runner, layout="exe", scale=0.1, target=None, only=None):
+    """{workload: instructions executed} (see the module docstring)."""
+    out = os.path.abspath(out)
+    bdir = os.path.join(out, "build", variant + ("" if not target else "-" + target))
+    exe = os.path.join(bdir, layout, "bench")
+    trace = ["-one-insn-per-tb", "-d", "nochain,exec", "-D", "/dev/stdout"]
+
+    def count(w, sc):
+        args = list(runner[:1]) + trace + list(runner[1:]) + \
+            [exe, os.path.join(out, "image.bin"), "1", str(sc), w]
+        p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        n = sum(1 for line in p.stdout if line.startswith(b"Trace"))
+        if p.wait() != 0:
+            raise SystemExit("%s failed (%d)" % (" ".join(args), p.returncode))
+        return n
+    res = {}
+    for w, _ in WORKLOADS:
+        if only and w != only:
+            continue
+        res[w] = count(w, scale) - count(w, 0)
+    return res
+
+
 def insns(out, variant, target=None, objdump="llvm-objdump"):
     out = os.path.abspath(out)
     bdir = os.path.join(out, "build", variant + ("" if not target else "-" + target))
@@ -378,7 +411,7 @@ def main(argv=None):
     p.add_argument("out")
     p.add_argument("--copies", type=int, default=0)
     p.add_argument("--recomp-arg", action="append", default=[])
-    for name in ("build", "run", "sweep", "insns"):
+    for name in ("build", "run", "sweep", "insns", "icount"):
         p = sub.add_parser(name)
         p.add_argument("out")
         p.add_argument("variants", nargs="+")
@@ -408,6 +441,11 @@ def main(argv=None):
                 row[layout] = r
         if a.cmd == "insns":
             row["insns"] = insns(a.out, v, a.target, a.objdump)
+        if a.cmd == "icount":
+            if not a.runner:
+                raise SystemExit("icount needs --runner (a qemu-user)")
+            row["icount"] = icount(a.out, v, a.runner.split(), a.layout,
+                                   a.scale if a.scale != 1.0 else 0.1, a.target, a.only)
         results.append(row)
         print(json.dumps(row), flush=True)
     if a.json:
