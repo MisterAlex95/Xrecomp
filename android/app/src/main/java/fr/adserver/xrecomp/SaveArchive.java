@@ -33,7 +33,7 @@ import java.util.zip.ZipOutputStream;
  * date, and per title its key, name and content hash). Only save folders: never the caches, packs or game data.
  *
  * Import restores per title: every entry is checked (no absolute path, no « .. », only a save folder of a valid key,
- * bounded sizes), the archive is unpacked under save/.import first, then for each title in it the current save
+ * bounded sizes), the archive is unpacked under save/.import-<n> first, then for each title in it the current save
  * folders move to save/.backup/<key>/ (one generation, replaced by the next import of that title) and the archive's
  * take their place, by rename. A title the archive has not is untouched. Plain Java (org.json).
  */
@@ -294,14 +294,33 @@ final class SaveArchive {
     }
 
     /**
-     * Unpacks a save archive under save/.import (emptied first), checking every entry. Throws when the stream is not
-     * a zip with at least one save folder, or breaks a bound; the caller then calls {@link #discard}.
+     * Unpacks a save archive under a folder of its own, save/.import-<n>, checking every entry. Throws (and leaves
+     * nothing) when the stream is not a zip with at least one save folder, or breaks a bound.
      */
     static Unpacked unpack(Storage.Dirs d, InputStream in) throws IOException {
-        File dir = new File(d.saveDir(), IMPORT_DIR);
-        GameStore.deleteTree(dir);
-        if (!dir.mkdirs() && !dir.isDirectory())
+        sweep(d);
+        File dir = new File(d.saveDir(), IMPORT_DIR + "-" + Long.toHexString(System.nanoTime()));
+        if (!dir.mkdirs())
             throw new IOException("cannot create " + dir);
+        try {
+            return unpackInto(dir, in);
+        } catch (IOException | RuntimeException e) {
+            GameStore.deleteTree(dir);
+            throw e;
+        }
+    }
+
+    /** Import folders left by a process killed in the middle (older than a day; never one in use). */
+    private static void sweep(Storage.Dirs d) {
+        File[] l = d.saveDir().listFiles();
+        long old = System.currentTimeMillis() - 24 * 3600_000L;
+        for (int i = 0; l != null && i < l.length; i++) {
+            if (l[i].getName().startsWith(IMPORT_DIR) && l[i].lastModified() < old)
+                GameStore.deleteTree(l[i]);
+        }
+    }
+
+    private static Unpacked unpackInto(File dir, InputStream in) throws IOException {
         Unpacked u = new Unpacked(dir);
         Map<String, String> manifestNames = new java.util.HashMap<>();
         TreeSet<String> keys = new TreeSet<>();

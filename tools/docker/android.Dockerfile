@@ -332,6 +332,7 @@ COPY . /src
 WORKDIR /src/android
 RUN --mount=type=secret,id=xba_keystore --mount=type=secret,id=xba_keystore_password \
     --mount=type=secret,id=xba_key_alias \
+    --mount=type=secret,id=xba_google_client_id --mount=type=secret,id=xba_google_client_secret \
     set -e; \
     case "$XBA_SIGNING" in auto|release|debug) ;; *) echo "XBA_SIGNING=$XBA_SIGNING: auto, release or debug"; exit 1;; esac; \
     if [ -s /run/secrets/xba_keystore ] && [ "$XBA_SIGNING" != debug ]; then \
@@ -339,6 +340,11 @@ RUN --mount=type=secret,id=xba_keystore --mount=type=secret,id=xba_keystore_pass
         XBA_KEYSTORE_PASSWORD=$(cat /run/secrets/xba_keystore_password 2>/dev/null || true); export XBA_KEYSTORE_PASSWORD; \
         if [ -s /run/secrets/xba_key_alias ]; then XBA_KEY_ALIAS=$(cat /run/secrets/xba_key_alias); export XBA_KEY_ALIAS; fi; \
     fi; \
+    # Cloud saves' Google client (docs/android/app-shell.md « Cloud saves »): without it the APK has none.
+    if [ -s /run/secrets/xba_google_client_id ]; then \
+        XBA_GOOGLE_CLIENT_ID=$(cat /run/secrets/xba_google_client_id); export XBA_GOOGLE_CLIENT_ID; \
+        XBA_GOOGLE_CLIENT_SECRET=$(cat /run/secrets/xba_google_client_secret 2>/dev/null || true); export XBA_GOOGLE_CLIENT_SECRET; \
+    else echo "no Google client secret: this APK has no cloud saves"; fi; \
     require=0; [ "$XBA_SIGNING" != release ] || require=1; \
     printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties; \
     gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaVersionCode="$XBA_VERSION_CODE" \

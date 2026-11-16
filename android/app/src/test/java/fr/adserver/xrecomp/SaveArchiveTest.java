@@ -114,8 +114,9 @@ public class SaveArchiveTest {
         assertEquals(Arrays.asList(TID, GBA), peek.keys());
         assertEquals("Sample Game", peek.names.get(TID));
         assertEquals(4, peek.summary.files);
+        assertTrue(peek.dir.getName().startsWith(SaveArchive.IMPORT_DIR + "-"));
         SaveArchive.discard(peek);
-        assertFalse(new File(d.saveDir(), SaveArchive.IMPORT_DIR).exists());
+        assertFalse(peek.dir.exists());
 
         Storage.Dirs other = new Storage.Dirs(tmp.newFolder("files2"), tmp.newFolder("ext2"));
         Storage.Dirs mine = d;
@@ -129,7 +130,7 @@ public class SaveArchiveTest {
         assertFalse("never the caches", new File(other.saveDir(), "Cache").exists());
         assertFalse(new File(other.saveDir(), "Partition3.img").exists());
         assertEquals("the same content, the same hash", hash, SaveArchive.hash(other, TID));
-        assertFalse(new File(other.saveDir(), SaveArchive.IMPORT_DIR).exists());
+        assertEquals("no import folder left", Collections.emptyList(), importLeftovers(other));
         d = mine;
     }
 
@@ -157,6 +158,15 @@ public class SaveArchiveTest {
                      new java.util.TreeSet<>(Arrays.asList(TID, OTHER)), Storage.titles(d, new Library.Games()));
     }
 
+    private static java.util.List<String> importLeftovers(Storage.Dirs d) {
+        java.util.List<String> l = new java.util.ArrayList<>();
+        for (String n : d.saveDir().list()) {
+            if (n.startsWith(SaveArchive.IMPORT_DIR))
+                l.add(n);
+        }
+        return l;
+    }
+
     @Test
     public void hostileArchives() throws Exception {
         save("UDATA/4d530004/save.dat", "mine");
@@ -173,6 +183,7 @@ public class SaveArchiveTest {
             fail("an archive without saves");
         } catch (IOException expected) {
         }
+        assertEquals("a refused archive leaves nothing", Collections.emptyList(), importLeftovers(d));
         try {
             SaveArchive.unpack(d, new ByteArrayInputStream("not a zip at all".getBytes("UTF-8")));
             fail("not a zip");

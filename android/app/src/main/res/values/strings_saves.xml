@@ -23,4 +23,59 @@
         <item quantity="other">Saves of %d games restored.</item>
     </plurals>
     <string name="SAVES_NOT_AN_ARCHIVE">%s is not a save file made by XRecomp.</string>
+    <!-- Cloud saves -->
+    <string name="CLOUD_TITLE">Cloud saves</string>
+    <string name="CLOUD_ROW_DETAIL">Keeps your saves in your Google Drive and in step between your devices: XRecomp, a game\'s own app, another handheld.</string>
+    <string name="CLOUD_UNAVAILABLE">Not in this build</string>
+    <string name="CLOUD_UNAVAILABLE_DETAIL">This build of XRecomp was made without the Google sign-in that cloud saves need. The releases have it. Export saves still works: pick Google Drive as the place to write the file.</string>
+    <plurals name="CLOUD_CONFLICTS_N">
+        <item quantity="one">%d game to check</item>
+        <item quantity="other">%d games to check</item>
+    </plurals>
+    <string name="CLOUD_CONFLICT_BADGE">Both changed</string>
+    <string name="CLOUD_CODE">Code: %s</string>
+    <string name="CLOUD_CODE_DETAIL">On a phone or a computer, open %1$s and type %2$s, then pick your Google account and allow XRecomp. This screen goes on by itself. A copies the code.</string>
+    <string name="CLOUD_WAITING">Waiting…</string>
+    <string name="CLOUD_OPEN_HERE">Open %s on this device</string>
+    <string name="CLOUD_OPEN_HERE_DETAIL">Opens the page in a browser here, with the code copied: paste it there, then come back.</string>
+    <string name="CLOUD_CONNECT">Connect Google Drive</string>
+    <string name="CLOUD_CONNECT_DETAIL">Signs in with a code you type on google.com/device. XRecomp only gets a hidden folder of its own in your Drive: it cannot see your files, and its folder does not show among them.</string>
+    <string name="CLOUD_CONNECTING">Asking Google…</string>
+    <string name="CLOUD_ACCOUNT">Google account</string>
+    <string name="CLOUD_ACCOUNT_DETAIL">Press A twice to disconnect. Your saves stay on this device and in your Drive.</string>
+    <string name="CLOUD_SYNC_NOW">Sync now</string>
+    <string name="CLOUD_SYNC_NOW_DETAIL">Sends the saves that changed here and brings back those that changed on another device. A game whose saves changed on both sides waits for you to choose.</string>
+    <string name="CLOUD_SYNCING">Syncing…</string>
+    <string name="CLOUD_NEVER">Never</string>
+    <string name="CLOUD_LAST_ERROR">Last problem: %s</string>
+    <string name="CLOUD_AUTO">Sync automatically</string>
+    <string name="CLOUD_AUTO_DETAIL">On: each time you come back to XRecomp, and before a game starts (its newer saves from the cloud first). Offline, games start all the same.</string>
+    <string name="CLOUD_AUTO_ON">Saves sync automatically</string>
+    <string name="CLOUD_AUTO_OFF">Saves sync only with Sync now</string>
+    <string name="CLOUD_CONFLICTS">Changed on both sides</string>
+    <string name="CLOUD_CONFLICT_DETAIL">Its saves changed on this device and on another one since the last sync. Choose which to keep: the other ones are kept aside on this device.</string>
+    <string name="CLOUD_KEEP_DEVICE">Keep this device\'s saves</string>
+    <string name="CLOUD_KEEP_CLOUD">Use the cloud\'s saves</string>
+    <string name="CLOUD_DISCONNECT_CONFIRM">Press A again within 5 seconds to disconnect your Google account.</string>
+    <string name="CLOUD_DISCONNECTED">Disconnected. Your saves are still here and in your Drive.</string>
+    <string name="CLOUD_OFFLINE">Cannot reach Google. Check the connection and try again.</string>
+    <string name="CLOUD_CONNECTED">Connected as %s. Syncing your saves…</string>
+    <string name="CLOUD_DENIED">Google sign-in refused: nothing connected.</string>
+    <string name="CLOUD_EXPIRED">The code expired. Connect again for a new one.</string>
+    <string name="CLOUD_SIGNIN_FAILED">Google sign-in failed: %s</string>
+    <string name="CLOUD_CODE_COPIED">Code %s copied.</string>
+    <string name="CLOUD_NO_BROWSER">No browser here: open the page on a phone or a computer.</string>
+    <string name="CLOUD_SIGNED_OUT">Cloud saves: Google signed you out. Connect again in Storage › Cloud saves.</string>
+    <plurals name="CLOUD_CONFLICT_NOTE">
+        <item quantity="one">Cloud saves: %d game changed here and on another device. Choose in Cloud saves.</item>
+        <item quantity="other">Cloud saves: %d games changed here and on another device. Choose in Cloud saves.</item>
+    </plurals>
+    <string name="CLOUD_FAILED">Sync failed: %s</string>
+    <string name="CLOUD_UP_TO_DATE">Saves up to date.</string>
+    <string name="CLOUD_SYNCED">Saves synced: %1$d sent, %2$d brought back.</string>
+    <plurals name="CLOUD_DOWNLOADED">
+        <item quantity="one">Newer saves of %d game brought back from the cloud.</item>
+        <item quantity="other">Newer saves of %d games brought back from the cloud.</item>
+    </plurals>
+    <string name="CLOUD_CHECKING">Checking cloud saves…</string>
 </resources>

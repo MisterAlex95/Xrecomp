@@ -64,6 +64,8 @@ jobs:
           KS_B64: ${{ secrets.XBA_RELEASE_KEYSTORE_B64 }}
           XBA_KEYSTORE_PASSWORD: ${{ secrets.XBA_RELEASE_KEYSTORE_PASSWORD }}
           XBA_KEY_ALIAS: ${{ secrets.XBA_RELEASE_KEY_ALIAS }}
+          XBA_GOOGLE_CLIENT_ID: ${{ secrets.XBA_GOOGLE_CLIENT_ID }}
+          XBA_GOOGLE_CLIENT_SECRET: ${{ secrets.XBA_GOOGLE_CLIENT_SECRET }}
         run: |
           tag=${GITHUB_REF#refs/tags/}
           sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
@@ -71,6 +73,12 @@ jobs:
           (umask 077 && mkdir -p sec && printf '%s' "$KS_B64" | base64 -d > sec/release.p12)
           set -- --secret id=xba_keystore,src=sec/release.p12 --secret id=xba_keystore_password,env=XBA_KEYSTORE_PASSWORD
           [ -z "$XBA_KEY_ALIAS" ] || set -- "$@" --secret id=xba_key_alias,env=XBA_KEY_ALIAS
+          # Cloud saves' Google client (docs/android/app-shell.md « Cloud saves »): optional, the APK has none without it.
+          if [ -n "$XBA_GOOGLE_CLIENT_ID" ]; then
+            set -- "$@" --secret id=xba_google_client_id,env=XBA_GOOGLE_CLIENT_ID --secret id=xba_google_client_secret,env=XBA_GOOGLE_CLIENT_SECRET
+          else
+            echo "::warning::No cloud saves in this APK: the secrets XBA_GOOGLE_CLIENT_ID / XBA_GOOGLE_CLIENT_SECRET are not set."
+          fi
           docker build -f tools/docker/android.Dockerfile --target xrecomp-apk-out --progress=plain \
             --build-context xba-toolchain=out/toolchain "$@" --build-arg JOBS=4 --build-arg XBA_SIGNING=release \
             --build-arg XBA_DEBUGGABLE=0 --build-arg XBA_VERSION="${tag#xrecomp-v}+$sha8" \

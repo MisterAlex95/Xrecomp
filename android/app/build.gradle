@@ -242,6 +242,15 @@ android {
         // The launcher offers Frame generation and « Choose Lossless.dll » only when the bridge is in libmain.so: with
         // frame generation on, CMake builds it or fails (no silent build without it).
         resValue 'bool', 'xba_lsfg', xbaLsfg ? 'true' : 'false'
+        // Cloud saves (docs/android/app-shell.md « Cloud saves »): the project's Google OAuth client, of type « TVs and
+        // Limited Input devices » (GoogleDrive.java). -PxbaGoogleClientId / -PxbaGoogleClientSecret, or the env
+        // XBA_GOOGLE_CLIENT_ID / XBA_GOOGLE_CLIENT_SECRET (CI: BuildKit secrets, never in the repository). An installed
+        // app's client secret is not confidential (it ships in the APK), but it stays out of the public repo. Empty:
+        // the build has no cloud saves (the row says so).
+        resValue 'string', 'xba_google_client_id',
+                 ((findProperty('xbaGoogleClientId') ?: System.getenv('XBA_GOOGLE_CLIENT_ID') ?: '') as String).trim()
+        resValue 'string', 'xba_google_client_secret',
+                 ((findProperty('xbaGoogleClientSecret') ?: System.getenv('XBA_GOOGLE_CLIENT_SECRET') ?: '') as String).trim()
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {
