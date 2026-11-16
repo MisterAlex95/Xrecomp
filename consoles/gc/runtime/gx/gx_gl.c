@@ -71,7 +71,7 @@ typedef struct ubo_t {
 struct gx_gl {
     gx_glfn f;
     gx_eglfn egl;
-    int scale, async, efb_copy_ram, trace;
+    int scale, async, efb_copy_ram, trace, xfb_ram;
     char *list_path;
     GLint max_tex;
 
@@ -1247,10 +1247,12 @@ void gx_gl_copy(gx_state *gx, uint32_t exec)
         if (lines > 1024)
             lines = 1024;
         int ow = (w + 1) / 2;
-        GLuint t = scratch_tex(g, ow, lines);
-        copy_pass(gx, t, ow, lines, src, 1, 0, 0, 0, false, (int)BITS(exec, 7, 2));
+        if (g->xfb_ram) {
+            GLuint t = scratch_tex(g, ow, lines);
+            copy_pass(gx, t, ow, lines, src, 1, 0, 0, 0, false, (int)BITS(exec, 7, 2));
+        }
         size_t row = (size_t)ow * 4;
-        uint8_t *buf = malloc(row * (size_t)lines);
+        uint8_t *buf = g->xfb_ram ? malloc(row * (size_t)lines) : NULL; /* GC_GX_XFB_RAM=0: texture only */
         if (buf) {
             F.glPixelStorei(GL_PACK_ALIGNMENT, 1);
             F.glReadPixels(0, 0, ow, lines, GL_RGBA, GL_UNSIGNED_BYTE, buf);
@@ -1503,6 +1505,7 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
         g->async = env_int("GC_GX_ASYNC", 1);
     g->efb_copy_ram = opt && opt->efb_copy_ram ? 1 : env_int("GC_GX_EFB_COPY_RAM", 0);
     g->trace = env_int("GC_GX_TRACE", 0);
+    g->xfb_ram = env_int("GC_GX_XFB_RAM", 1);
     const char *list = opt && opt->shader_list ? opt->shader_list : getenv("GC_GX_SHADER_LIST");
     if (list && *list)
         g->list_path = strdup(list);

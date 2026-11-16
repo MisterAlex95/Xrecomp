@@ -514,6 +514,7 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_GC_UPSCALE=N` | `RECOMP_UPSCALE`, else 1 | GameCube GX internal resolution, 1..8 times the 640 x 528 EFB (EFB copies to textures too); the window shows the XFB copy at that size. | `consoles/gc/runtime/gx/gx_gl.c` |
 | `GC_GX_ASYNC=1\|0\|-1\|2` | 1 | GameCube GX shaders: 1 specialised shaders compiled on a worker thread, the ubershader meanwhile; 0 compiled on first use (blocking); -1 ubershader only; 2 specialised only. | `gx_gl.c` |
 | `GC_GX_EFB_COPY_RAM=1` | off | GameCube GX: EFB copies to textures are also encoded into RAM (CPU readers, a copy read back in another format), at the cost of a GPU readback per copy. | `gx_gl.c` |
+| `GC_GX_XFB_RAM=0` | on | GameCube GX: copies to the XFB stay on the GPU (the window shows them) instead of also being converted to YUV and read back into RAM each field; a screenshot or anything reading the XFB from RAM then sees an old picture. | `gx_gl.c` |
 | `GC_GX_SHADER_LIST=FILE` | the title's `gx_shaders.txt` (app) | GameCube GX: the per-title list of TEV / vertex states met, read and compiled ahead at start, written back at exit. | `gx_gl.c`, `gc_runtime.c` |
 | `GC_GX_TRACE=1` | off | GameCube GX: log texture decodes, TLUT loads, new TEV states, fog registers and EFB peeks. | `gx_gl.c`, `gx_fifo.c` |
 | `RECOMP_GC_FRAMES=N` | unbounded | The Android entry (`gc_runtime_start`): stop after N fields (checks). | `gc_runtime.c` |

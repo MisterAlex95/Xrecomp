@@ -1540,7 +1540,7 @@ each field); `gx.h` is the API.
   CPU write over them is noticed); `GC_GX_EFB_COPY_RAM=1` / `--gx-copy-ram` also encodes them into RAM. To the XFB:
   filtered, gamma corrected, converted to YUV 4:2:2 on the GPU, read back into RAM for the VI (Y scaling for
   `GX_SetDispCopyYScale`); the copy's GL picture at the internal resolution is kept (`gx_xfb_texture`) and
-  `gc_runtime` shows it in the window. EFB peeks (colour, Z, alpha read mode) from a 1x copy of the EFB cached until
+  `gc_runtime` shows it in the window (`GC_GX_XFB_RAM=0` skips the readback into RAM: a GPU sync less per field). EFB peeks (colour, Z, alpha read mode) from a 1x copy of the EFB cached until
   the next draw; pokes write one pixel.
 - `gc_run --gx`: the renderer on a headless EGL context (surfaceless Mesa; llvmpipe unless `--gx-hw`), `--gx-scale`,
   `--gx-shaders async|sync|uber|special`, `--gx-list`, `--gx-copy-ram`; 77 without a GLES 3 context. `GC_GX_TRACE=1`
