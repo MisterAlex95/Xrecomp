@@ -2,7 +2,7 @@
 # Builds the homebrew test corpus of the other consoles (XBA-149): our own test programs, never a
 # commercial ROM, disc or BIOS.
 #
-#   tools/consoles/build_homebrew.sh [gba|ps1|n64|nds|psp|gc|dc|all] [OUTDIR]  (default: all build/homebrew)
+#   tools/consoles/build_homebrew.sh [gba|ps1|n64|nds|psp|gc|dc|ps2|all] [OUTDIR]  (default: all build/homebrew)
 #
 # For each console: builds the toolchain image tools/docker/<console>-homebrew.Dockerfile (tag
 # xba-<console>-homebrew; Docker's layer cache makes a rebuild instant), then builds
@@ -15,6 +15,7 @@
 #   psp: <prog>.prx + <prog>.pbp (EBOOT) + <prog>.elf      (hello; spike XBA-224)
 #   gc:  <prog>.dol + <prog>.elf                           (hello; spike XBA-225)
 #   dc:  <prog>.elf + <prog>.bin (raw, unscrambled)        (hello; spike XBA-227)
+#   ps2: <prog>.elf (the EE executable)                    (hello; spike XBA-226)
 # plus SHA256SUMS. Outputs are never committed (build/ is ignored).
 #
 # Sources go in and outputs come out with `docker cp`, not bind mounts, so the script also works
@@ -31,10 +32,10 @@ tmo=${XBA_HOMEBREW_TIMEOUT:-1800}
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 case "$what" in
-gba | ps1 | n64 | nds | psp | gc | dc) consoles=("$what") ;;
-all) consoles=(gba ps1 n64 nds psp gc dc) ;;
+gba | ps1 | n64 | nds | psp | gc | dc | ps2) consoles=("$what") ;;
+all) consoles=(gba ps1 n64 nds psp gc dc ps2) ;;
 *)
-    echo "usage: $0 [gba|ps1|n64|nds|psp|gc|dc|all] [OUTDIR]" >&2
+    echo "usage: $0 [gba|ps1|n64|nds|psp|gc|dc|ps2|all] [OUTDIR]" >&2
     exit 2
     ;;
 esac
@@ -58,6 +59,7 @@ build_cmd_psp='make -j"$JOBS" OUT=/tmp/out BUILD=/tmp/build && cp /tmp/out/*.prx
 build_cmd_gc='make -j"$JOBS" OUT=/tmp/out BUILD=/tmp/build && cp /tmp/out/*.dol /tmp/out/*.elf /out/'
 build_cmd_dc='. /opt/toolchains/dc/kos/environ.sh.master && make -j"$JOBS" OUT=/tmp/out BUILD=/tmp/build \
   && cp /tmp/out/*.elf /tmp/out/*.bin /out/'
+build_cmd_ps2='make -j"$JOBS" OUT=/tmp/out BUILD=/tmp/build && cp /tmp/out/*.elf /out/'
 
 cid=
 cleanup() { [ -z "$cid" ] || docker rm -f "$cid" >/dev/null 2>&1 || true; }
