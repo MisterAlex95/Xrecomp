@@ -243,6 +243,15 @@ def _parse_xbe_sections(xbe_data):
     """
     import struct
 
+    if xbe_data[:2] == b'MZ':      # a Windows PE (XBA-233): its own front end
+        try:
+            from tools.pe_parser.pe_parser import parse_pe
+            return [{"name": s.name, "va": s.virtual_addr, "size": s.virtual_size, "raw": s.raw_addr,
+                     "raw_size": s.raw_size, "executable": s.executable}
+                    for s in parse_pe(xbe_data).sections] or None
+        except (ValueError, RuntimeError):
+            return None
+
     if len(xbe_data) < 0x180:
         return None
 

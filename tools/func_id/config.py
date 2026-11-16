@@ -176,9 +176,9 @@ def configure_from_xbe(xbe_path: str) -> None:
     the one title it was captured from -- every function past that table's end
     lands outside the .text/.rdata/.data ranges and is misclassified.
     """
-    from tools.xbe_parser.xbe_parser import XBEParser
+    from tools.xbe_parser.xbe_parser import open_image
 
-    xbe = XBEParser(xbe_path).parse()
+    xbe = open_image(xbe_path)
     has_size = [s for s in xbe.sections if s.raw_size > 0]
     if not has_size:
         raise ValueError(f"XBE has no non-empty sections: {xbe_path}")

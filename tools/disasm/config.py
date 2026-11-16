@@ -96,9 +96,9 @@ def configure_from_xbe(xbe_path):
     Using this makes anything consulting this module's layout per-title rather
     than pinned to the reference title's addresses.
     """
-    from tools.xbe_parser.xbe_parser import XBEParser
+    from tools.xbe_parser.xbe_parser import open_image
 
-    xbe = XBEParser(xbe_path).parse()
+    xbe = open_image(xbe_path)
     sections = [
         (s.name, s.virtual_addr, s.virtual_size)
         for s in xbe.sections if s.raw_size > 0

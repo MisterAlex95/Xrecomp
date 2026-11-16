@@ -158,6 +158,12 @@ if(NOT WIN32 AND NOT TARGET xiso)
     add_subdirectory(src/xiso)
 endif()
 
+# The Win32 runtime (XBA-233, epic XBA-231: Windows PC games): a spike for recompiled 32-bit Windows console
+# programs (tools.win32). POSIX hosts, not in the Android app.
+if(NOT WIN32 AND NOT ANDROID)
+    add_subdirectory(src/win32)
+endif()
+
 # Frame generation (LSFG): option and CXX at the top (XBOXRECOMP_LSFG above); the libraries below.
 if(XBOXRECOMP_LSFG AND NOT WIN32)
     add_subdirectory(src/framegen)

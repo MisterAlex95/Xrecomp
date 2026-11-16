@@ -239,8 +239,8 @@ def load_image(xbe_path: str, analysis_json: Optional[str] = None) -> BinaryImag
     # Read raw binary
     raw_data = xbe_file.read_bytes()
 
-    # Validate XBE magic
-    if raw_data[:4] != b'XBEH':
+    # Validate the magic: an XBE, or a Windows PE (XBA-233, analysis JSON from tools.pe_parser)
+    if raw_data[:4] != b'XBEH' and raw_data[:2] != b'MZ':
         raise ValueError(f"Invalid XBE magic: {raw_data[:4]!r}")
 
     # Find and load analysis JSON

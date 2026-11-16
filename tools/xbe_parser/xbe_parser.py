@@ -1241,6 +1241,20 @@ def print_xbe_info(xbe: XBEFile):
     print("\n" + "=" * 70)
 
 
+def open_image(path: str):
+    """The parsed image the pipeline reads, XBE or PE (XBA-233).
+
+    An XBE parses here; a Windows PE (MZ magic) goes to the PE front end
+    (tools/pe_parser), whose as_xbe() view has the same header, sections and
+    kernel_imports attributes. Everything else is refused as before."""
+    with open(path, "rb") as f:
+        magic = f.read(2)
+    if magic == b"MZ":
+        from tools.pe_parser.pe_parser import parse_pe
+        return parse_pe(path).as_xbe()
+    return XBEParser(path).parse()
+
+
 # ============================================================
 # JSON Export
 # ============================================================
@@ -1326,6 +1340,11 @@ def main():
     if not os.path.exists(args.xbe_path):
         print(f"Error: File not found: {args.xbe_path}", file=sys.stderr)
         sys.exit(1)
+
+    with open(args.xbe_path, "rb") as f:
+        if f.read(2) == b"MZ":         # a Windows PE: its own front end (XBA-233)
+            from tools.pe_parser.pe_parser import main as pe_main
+            sys.exit(pe_main(sys.argv[1:]))
 
     xbe_parser = XBEParser(args.xbe_path)
     xbe = xbe_parser.parse()
