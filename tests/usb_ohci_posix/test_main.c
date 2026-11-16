@@ -20,6 +20,14 @@
  * Run a second time with RECOMP_OHCI_CATCHUP=0 (a second CTest entry), the
  * same calls must leave the list and the line alone.
  *
+ * Then a timed wait (WP-2, kernel_hal.c xbox_IrqServiceTimedWait): with the
+ * controller thread still held, a control transfer queued (no new
+ * ControlListFilled: the queued descriptor alone is what is owed) and a guest
+ * thread waiting 50 ms on the event the transfer's DPC sets, the wait's
+ * service pass walks the list, runs the USB interrupt and the DPC on the
+ * waiting thread, and the wait succeeds. Nothing queued, it times out as
+ * before. With RECOMP_OHCI_CATCHUP=0 the transfer one times out too.
+ *
  * With the argument "state" (RECOMP_USB_PADS=1, another CTest entry), the
  * save state of the USB section (XBA-248): a pad enumerated through the
  * control list (SET_ADDRESS, SET_CONFIGURATION), the model captured, its
@@ -44,9 +52,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Supplied by recompiled game code in a real build; nothing here calls one. */
+/* Supplied by recompiled game code in a real build; the timed wait's DPC
+ * routine (timed_wait) is the one "generated" function here. */
 typedef void (*recomp_func_t)(void);
-recomp_func_t recomp_lookup(unsigned int va) { (void)va; return 0; }
+#define TW_DPC_ROUTINE_VA 0x00001000u
+#define TW_ISR_ROUTINE_VA 0x00001010u
+static void tw_dpc_routine(void);
+static void tw_isr_routine(void);
+recomp_func_t recomp_lookup(unsigned int va)
+{
+    return va == TW_DPC_ROUTINE_VA ? tw_dpc_routine
+         : va == TW_ISR_ROUTINE_VA ? tw_isr_routine : 0;
+}
 recomp_func_t recomp_lookup_manual(unsigned int va) { (void)va; return 0; }
 
 static int failures;
@@ -196,6 +213,150 @@ static void catch_up(volatile uint32_t *hc0)
               detail);
         check(runs == 0, "RECOMP_OHCI_CATCHUP=0: no line raised", detail);
     }
+}
+
+/* ── A timed wait served before it times out (WP-2) ───────────────── */
+
+#define TW_ED      0x00404000u
+#define TW_TD0     0x00404100u
+#define TW_TD1     0x00404110u
+#define TW_KDPC    0x00404800u
+#define TW_KINT    0x00404900u
+
+static volatile uint32_t *s_tw_hc0;
+static HANDLE s_tw_event;
+static volatile long s_tw_isr_runs, s_tw_dpc_runs;
+static volatile uint32_t s_tw_done;
+static unsigned long s_tw_dpc_tid;
+
+/* The driver's ISR, connected on the USB vector (the model calls it with
+ * the KINTERRUPT and its context): takes the done queue, acknowledges WDH,
+ * queues its DPC, claims the interrupt. */
+static void tw_isr_routine(void)
+{
+    uint32_t status = s_tw_hc0[0x0C / 4];
+
+    __atomic_add_fetch(&s_tw_isr_runs, 1, __ATOMIC_RELAXED);
+    g_eax = 0;
+    if (status & 0x02u) {
+        s_tw_done = ((uint32_t *)s_base)[(CU_HCCA + 0x84) / 4];
+        s_tw_hc0[0x0C / 4] = 0x02u;
+        xbox_DpcQueue(TW_KDPC, 0, 0);
+        g_eax = 1;
+    }
+    g_esp += 12;                        /* ret 8, and the return address */
+}
+
+/* Its DPC: the transfer is complete, the waiter's event is set. */
+static void tw_dpc_routine(void)
+{
+    __atomic_add_fetch(&s_tw_dpc_runs, 1, __ATOMIC_RELAXED);
+    s_tw_dpc_tid = (unsigned long)GetCurrentThreadId();
+    SetEvent(s_tw_event);
+    g_esp += 20;                        /* ret 16, and the dummy return */
+}
+
+typedef struct {
+    NTSTATUS st;
+    double ms;
+    unsigned long tid;
+} TwWait;
+
+/* A guest thread's KeWaitForSingleObject, 50 ms. */
+static void *tw_wait_thread(void *p)
+{
+    TwWait *w = (TwWait *)p;
+    LARGE_INTEGER t;
+    uint64_t t0;
+    int slot;
+
+    g_fs_base = 0;                      /* no KPCR: keep IRQL off guest memory */
+    xbox_DpcMarkGuestThread();
+    slot = xbox_worker_stack_alloc();
+    g_esp = XBOX_WORKER_STACK_TOP(slot);
+    w->tid = (unsigned long)GetCurrentThreadId();
+    t.QuadPart = -500000;               /* 50 ms relative, as XAPI's */
+    t0 = xbox_HostNowNs();
+    w->st = xbox_KeWaitServiced(s_tw_event, FALSE, &t);
+    w->ms = (double)(xbox_HostNowNs() - t0) / 1e6;
+    xbox_worker_stack_free(slot);
+    return NULL;
+}
+
+static void tw_wait(TwWait *w)
+{
+    pthread_t t;
+
+    memset(w, 0, sizeof *w);
+    if (pthread_create(&t, NULL, tw_wait_thread, w) == 0)
+        pthread_join(t, NULL);
+}
+
+static void timed_wait(volatile uint32_t *hc0)
+{
+    uint32_t *mem = (uint32_t *)s_base;
+    const char *v = getenv("RECOMP_OHCI_CATCHUP");
+    const char *tib = getenv("RECOMP_TIB_PER_THREAD");
+    int on = !(v && *v == '0');
+    uint32_t head;
+    TwWait w;
+    char detail[160];
+
+    printf("\n  timed wait served before its timeout (catch-up %s)\n",
+           on ? "on" : "off");
+    if (tib && *tib == '0') {
+        printf("  no controller thread (RECOMP_TIB_PER_THREAD=0): no wait hook, skipped\n");
+        return;
+    }
+    s_tw_hc0 = hc0;
+    s_tw_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+
+    /* What catch_up left: its done queue acknowledged, nothing pending. */
+    hc0[0x0C / 4] = 0x02u;
+    mem[(CU_HCCA + 0x84) / 4] = 0;
+    run_release_point();
+    memset(mem + TW_ED / 4, 0, 0x1000);
+    mem[TW_KINT / 4 + 0] = TW_ISR_ROUTINE_VA;
+    xbox_ConnectInterruptForTest(1, TW_KINT);   /* OHCI's vector */
+
+    /* Nothing queued: the wait times out as it always did. */
+    tw_wait(&w);
+    snprintf(detail, sizeof detail, "status 0x%08X after %.1f ms, ISR %ld",
+             (unsigned)w.st, w.ms, s_tw_isr_runs);
+    check(w.st == STATUS_TIMEOUT && w.ms >= 45.0 && w.ms < 250.0
+          && s_tw_isr_runs == 0,
+          "nothing queued: a 50 ms wait times out", detail);
+
+    /* A control transfer queued, the controller thread still held. */
+    mem[TW_ED / 4 + 0] = 0x7Fu;                 /* FA 127, endpoint 0     */
+    mem[TW_ED / 4 + 1] = TW_TD1;                /* TailP                  */
+    mem[TW_ED / 4 + 2] = TW_TD0;                /* HeadP                  */
+    mem[TW_TD0 / 4 + 0] = (2u << 19) | (0xFu << 28);
+    mem[TW_TD0 / 4 + 2] = TW_TD1;
+    ((uint16_t *)(s_base + TW_KDPC))[0] = 0x13; /* a KDPC                 */
+    mem[(TW_KDPC + 12) / 4] = TW_DPC_ROUTINE_VA;
+    hc0[0x20 / 4] = TW_ED;                      /* HcControlHeadED        */
+
+    tw_wait(&w);
+    head = mem[TW_ED / 4 + 2] & ~0xFu;
+    snprintf(detail, sizeof detail,
+             "status 0x%08X after %.1f ms, HeadP 0x%08X done 0x%08X ISR %ld DPC %ld",
+             (unsigned)w.st, w.ms, head, s_tw_done, s_tw_isr_runs, s_tw_dpc_runs);
+    if (on) {
+        check(w.st == 0, "transfer queued, controller held: the 50 ms wait succeeds",
+              detail);
+        check(head == TW_TD1 && s_tw_done == TW_TD0,
+              "the transfer was walked from the waiting thread", detail);
+        check(s_tw_isr_runs == 1 && s_tw_dpc_runs == 1 && s_tw_dpc_tid == w.tid,
+              "its ISR and DPC ran once, the DPC on the waiting thread", detail);
+        check(w.ms >= 45.0 && w.ms < 250.0,
+              "the pass came at the timeout, not before", detail);
+    } else {
+        check(w.st == STATUS_TIMEOUT && head == TW_TD0 && s_tw_dpc_runs == 0,
+              "RECOMP_OHCI_CATCHUP=0: the wait times out, the list is left alone",
+              detail);
+    }
+    CloseHandle(s_tw_event);
 }
 
 /* ── Save state (XBA-248) ──────────────────────────────────────────── */
@@ -473,8 +634,10 @@ int main(int argc, char **argv)
             state_round_trip(hc0);
             dev_state_all(hc0);
         }
-        else
+        else {
             catch_up(hc0);
+            timed_wait(hc0);
+        }
     }
     check(!s_unhandled, "no access fell through to the crash path", NULL);
     xbox_OhciReport();

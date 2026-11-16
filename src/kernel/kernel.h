@@ -978,6 +978,32 @@ void    xbox_IrqSafePoint(void);
  * read, and raises its own line there with xbox_IrqRaiseHere. */
 void    xbox_IrqSetCatchUpHook(void (*hook)(void));
 void    xbox_IrqRaiseHere(int line);
+/* The same model's side of a timed guest wait about to report STATUS_TIMEOUT
+ * (xbox_IrqServiceTimedWait). hook(0) asks: -1 switched off, 0 the device
+ * owes the guest nothing, 1 it owes work (a transfer queued and the model's
+ * thread overdue or held), 2 it owes work and a save state holds the model
+ * (its capture holds the gate too: the pass waits for it, up to 5 s).
+ * hook(1) does that work and raises its line with xbox_IrqRaiseHere; it
+ * returns 1 when it did. */
+void    xbox_IrqSetWaitCatchUpHook(int (*hook)(int run));
+/* A guest thread's timed wait timed out (a non-zero timeout, PASSIVE_LEVEL,
+ * outside any ISR or DPC, not holding the gate): give the device models one
+ * service pass before the timeout is reported, as on the console, where the
+ * hardware completes a transfer whatever the host scheduler did. Takes the
+ * gate (waiting for it at most RECOMP_IRQ_SAFE_MS while a model owes work or
+ * something is queued, up to 5 s while a save state's capture holds it), runs the wait catch-up hook, the posted interrupts and
+ * the queued DPCs, as a release point does. Returns 1 when it ran: the caller
+ * then tests its object again with a zero timeout. 0 at once when there is
+ * nothing to do or no wait hook is registered (RECOMP_OHCI_CATCHUP=0). */
+int     xbox_IrqServiceTimedWait(void);
+/* KeWaitForSingleObject on a host handle with that pass: a timed wait that
+ * times out is served (xbox_IrqServiceTimedWait) and retested with a zero
+ * timeout. The bridges' KeWaitForSingleObject and KeWaitForMultipleObjects
+ * do the same around their own object resolution. */
+NTSTATUS xbox_KeWaitServiced(PVOID Object, BOOLEAN Alertable, PLARGE_INTEGER Timeout);
+/* Tests only: connect a KINTERRUPT (routine at +0, context at +4) on a vector,
+ * as KeConnectInterrupt does, for a device model to find. */
+void    xbox_ConnectInterruptForTest(uint32_t vector, uint32_t kinterrupt_va);
 /* The [IRQ] summary line, once per 600 vblanks when anything was posted. */
 void    xbox_IrqReport(void);
 /* The thread holding the gate (0 when free), for the ungated-delivery logs. */

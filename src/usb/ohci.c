@@ -1443,42 +1443,49 @@ static int ohci_service_lists(OhciController *hc, uint32_t control)
 
 static void ohci_isr_on_holder(void);
 
-/* The guest's side of the lists (see s_list_kick). Called by kernel_hal.c on
- * a guest thread at its release point, with safe points on. Nothing happens
- * unless the driver has filled a list and the controller thread is four
- * ticks overdue, so a host that schedules the controller thread on time
- * never comes past the second test. The frame clock stays the controller
- * thread's. */
-void xbox_OhciCatchUp(void)
+/* RECOMP_OHCI_CATCHUP=0: the controller thread alone, as before (an A/B
+ * switch for one release). Turns off both guest-side entries below. */
+static int catchup_on(void)
 {
     static int on = -1;
-    OhciController *hc;
-    uint32_t control, enable;
-
-    if (!__atomic_load_n(&s_list_kick, __ATOMIC_RELAXED))
-        return;
-    /* RECOMP_OHCI_CATCHUP=0: the controller thread alone, as before (an A/B
-     * switch for one release). */
     if (on < 0) {
         const char *v = getenv("RECOMP_OHCI_CATCHUP");
         on = !(v && *v == '0');
     }
-    if (!on)
-        return;
-    if (!__atomic_load_n(&s_test_held, __ATOMIC_ACQUIRE)
-        && xbox_HostNowNs() - __atomic_load_n(&s_tick_ns, __ATOMIC_RELAXED)
-           < OHCI_OVERDUE_NS)
-        return;
-    hc = &s_hc[s_device_hc];
+    return on;
+}
+
+/* Held between passes (a test, or a save state's hold), or four ticks late. */
+static int controller_overdue(void)
+{
+    return __atomic_load_n(&s_test_held, __ATOMIC_ACQUIRE)
+        || xbox_HostNowNs() - __atomic_load_n(&s_tick_ns, __ATOMIC_RELAXED)
+           >= OHCI_OVERDUE_NS;
+}
+
+/* A save state holds the controller (xbox_OhciStateHold): its capture reads
+ * guest memory and the register file, and no walk may change them meanwhile. */
+static volatile int s_state_hold;
+
+/* The walk from the guest's side, and the interrupt it owes. The caller has
+ * checked that the controller is overdue. Returns 1 when the lists were
+ * walked. */
+static int ohci_catch_up_walk(void)
+{
+    OhciController *hc = &s_hc[s_device_hc];
+    uint32_t control, enable;
+
+    if (__atomic_load_n(&s_state_hold, __ATOMIC_ACQUIRE))
+        return 0;
     control = hc->reg[HcControl / 4];
     enable  = hc->reg[HcInterruptEnable / 4];
     /* Not operational, or the driver's ISR has masked the controller and its
      * DPC has not run yet: that DPC is drained at this same release point,
      * and the next one comes back here. */
     if ((control & 0xC0u) != 0x80u || !(enable & INTR_MIE))
-        return;
+        return 0;
     if (!list_try())
-        return;
+        return 0;
     ohci_service_lists(hc, control);
     list_leave();
     if (hc->reg[HcInterruptStatus / 4] & enable & 0x7Fu) {
@@ -1496,6 +1503,68 @@ void xbox_OhciCatchUp(void)
         xbox_IrqSetHandler(XBOX_IRQ_OHCI, ohci_isr_on_holder);
         xbox_IrqRaiseHere(XBOX_IRQ_OHCI);
     }
+    return 1;
+}
+
+/* The guest's side of the lists (see s_list_kick). Called by kernel_hal.c on
+ * a guest thread at its release point, with safe points on. Nothing happens
+ * unless the driver has filled a list and the controller thread is four
+ * ticks overdue, so a host that schedules the controller thread on time
+ * never comes past the second test. The frame clock stays the controller
+ * thread's. */
+void xbox_OhciCatchUp(void)
+{
+    if (!__atomic_load_n(&s_list_kick, __ATOMIC_RELAXED))
+        return;
+    if (!catchup_on() || !controller_overdue())
+        return;
+    ohci_catch_up_walk();
+}
+
+/* A control or bulk list with a transfer descriptor queued on an endpoint
+ * the controller would service (not skipped, not halted, HeadP != TailP). */
+static int ohci_list_queued(uint32_t ed)
+{
+    int guard = 0;
+
+    while (guest_ok(bus_resolve(ed), 16) && ++guard < 64) {
+        uint32_t head = rd32(ed + 8);
+        if (!(rd32(ed) & ED_SKIP) && !(head & ED_HEAD_HALT)
+            && (head & ED_PTR_MASK)
+            && (head & ED_PTR_MASK) != (rd32(ed + 4) & ED_PTR_MASK))
+            return 1;
+        ed = rd32(ed + 12) & ED_PTR_MASK;
+    }
+    return 0;
+}
+
+/* The entry for a timed guest wait about to time out (kernel_hal.c,
+ * xbox_IrqServiceTimedWait; kernel.h xbox_IrqSetWaitCatchUpHook). Owed is
+ * a list kick not walked yet, or a control or bulk descriptor still queued:
+ * a waiter blocked since it wrote ControlListFilled made no release point,
+ * and by the time it times out the kick may have been consumed by a pass
+ * that the driver's queue raced. Either with the controller thread overdue
+ * or held. run=0 only asks (2: a save state holds the controller, its
+ * capture the gate); run=1 walks (under the gate, never during a save
+ * state's capture: that holds the gate too). */
+static int ohci_wait_catch_up(int run)
+{
+    OhciController *hc = &s_hc[s_device_hc];
+    uint32_t control = hc->reg[HcControl / 4];
+
+    if (!catchup_on())
+        return -1;
+    if ((control & 0xC0u) != 0x80u || !controller_overdue())
+        return 0;
+    if (!__atomic_load_n(&s_list_kick, __ATOMIC_RELAXED)
+        && !((control & 0x10u)
+             && ohci_list_queued(hc->reg[HcControlHeadED / 4] & ED_PTR_MASK))
+        && !((control & 0x20u)
+             && ohci_list_queued(hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK)))
+        return 0;
+    if (!run)
+        return __atomic_load_n(&s_state_hold, __ATOMIC_ACQUIRE) ? 2 : 1;
+    return ohci_catch_up_walk();
 }
 
 int xbox_OhciHoldControllerForTest(int hold)
@@ -1547,6 +1616,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
     }
     __atomic_store_n(&s_tick_ns, xbox_HostNowNs(), __ATOMIC_RELAXED);
     xbox_IrqSetCatchUpHook(xbox_OhciCatchUp);
+    xbox_IrqSetWaitCatchUpHook(ohci_wait_catch_up);
     __atomic_store_n(&s_thread_running, 1, __ATOMIC_RELEASE);
 
     for (;;) {
@@ -2013,9 +2083,16 @@ void xbox_OhciReport(void)
 int xbox_OhciStateHold(int hold)
 {
     /* No controller thread (USB off, it gave up waiting for the driver, a test): nothing to hold, at once. */
+    int r;
+
     if (!s_enabled || (hold && !__atomic_load_n(&s_thread_running, __ATOMIC_ACQUIRE)))
         return 0;
-    return xbox_OhciHoldControllerForTest(hold);
+    if (hold)
+        __atomic_store_n(&s_state_hold, 1, __ATOMIC_RELEASE);
+    r = xbox_OhciHoldControllerForTest(hold);
+    if (!hold)
+        __atomic_store_n(&s_state_hold, 0, __ATOMIC_RELEASE);
+    return r;
 }
 
 int xbox_OhciStateCapture(XdsWriter *w)
