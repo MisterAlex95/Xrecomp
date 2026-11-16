@@ -155,33 +155,131 @@ Not covered by the prototype: the timer thread's DPCs and the device models' ISR
 the capture, XBA-245), the native-call thunk-table path (`kernel_thunks.c`), and host waits made from inside lifted
 code (`xbox_GuestPollWait`, NV2A kick waits): a thread blocked there counts as busy (XBA-251).
 
-## Data format
+## Data format (XBA-245: `src/kernel/xbox_state.h`)
 
-A state is a slot file of `recomp_states` (`XRSLOT` header, console `xbox`, game key = title ID, thumbnail), whose
-blob is:
+A state is a slot file of `recomp_states` (`XRSLOT` header, console `xbox`, game key = the title ID as `%08X`,
+thumbnail), whose blob is an **XBXS container of tagged sections**. Little-endian throughout (every host we build
+for is). POSIX hosts (Linux, macOS, Android): `recomp_states` is not built for Windows.
 
 ```
-"XBXS" u32 version
-identity: title ID, XBE SHA-1, build ID of the generated code (hash of the lifted sources), RAM size
-sections, each: u32 tag, u32 version, u64 length, payload
-  RAM    page bitmap (non-zero pages), then the pages (compressed; rewind codes XOR deltas, recomp_rewind.h)
-  CPU    per guest thread: guest thread id, KTHREAD VA, TIB VA, guest stack bounds, RecompCpu, ebp shadow stack,
-         park record (ordinal, guest return address, status when the call already returned), chain signature
-         (return VA and esp per frame, start routine)
-  MEM    heap allocator, contiguous page map, guest_vmem
-  KOBJ   kernel objects and the handle table, guest clock, timer and DPC queues, APC queues
-  FILE   open files and directories (title path, host path, offset, access)
-  NV2A   register file, pushbuffer GET / PUT, DMA objects, executor state (render targets already read back to RAM)
-  APU    MCPX aperture, VP state
-  USB    OHCI registers, device models
+header (128 bytes)
+  0    "XBXS"
+  4    u32 format version (XBOX_STATE_VERSION, 1)
+  8    u32 header size (128)
+  12   u32 section count
+  16   u32 title ID (certificate)
+  20   u8[20] SHA-1 of the XBE's headers (base to SizeOfHeaders: they carry every section's own SHA-1)
+  40   u8 build ID length, 44 u8[32] build ID of the binary (ELF NT_GNU_BUILD_ID of the module the runtime is
+       linked into, the executable or the app's libmain.so; Mach-O LC_UUID; xbox_StateSetBuildId overrides)
+  76   char[16] toolkit version ("0.14.0", from CMake)
+  92   u32 RAM size, 96 u32 mapped size, 100 u32 contiguous window size, 104 u32 sizeof(RecompCpu)
+  108  u64 Unix time of the capture (ms)
+  120  u64 hash of bytes 0..119
+sections, in registration order, each:
+  u32 tag, u32 version, u64 length, u64 hash of the payload (xbox_StateHash, 64-bit, four lanes), payload
 ```
+
+The sections this ticket writes (built in, always first):
+
+| Tag | Version | Payload |
+|---|---|---|
+| `CPU ` | 1 | u32 thread count, u32 sizeof(RecompCpu); per guest thread a 64-byte head (park slot, park state, ordinal, guest return address, returned, status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base and limit from the KTHREAD, esp, guest thread id) then the raw RecompCpu |
+| `MEM ` | 1 | `xbox_MemStateSave`: heap cursor, alloc count and block table, worker stack count; the contiguous window's counters, page map, block lengths (sparse) and RAM-name map; the lazy reservations; guest_vmem's page table as runs |
+| `RAM ` | 1 | u32 range count; per range u32 kind, u32 guest base, u32 pages, a bitmap of the pages stored, then those pages (4 KB each) |
+
+Not in the design's first draft: the ebp shadow stack and the chain signature in `CPU ` (XBA-247 adds them and bumps
+the section's version), compression.
+
+**Ranges** (`xbox_StateGuestRanges`): the RAM view `[0, mapped size)`, the contiguous window up to its high-water
+mark (its own storage, not RAM: the KTHREADs of spawned threads live there), the lazy reservations (POSIX,
+`[cursor, top)` above the RAM view) and the pages `RECOMP_EXT_VMA` has committed. The mirrors and the tiled alias are
+views of these and are left out. All-zero pages are not stored (the bitmap says so).
+
+**No compressor**: there is none in the tree (the console runtimes skip zero pages the same way, `n64_state.c`), and
+a real title's state is dominated by non-zero RAM. Rewind (XBA-249) codes XOR deltas on top (`recomp_rewind.h`); the
+capture already hashes every page and counts the pages changed since the previous capture (the `[STATE]` line).
+
+### Adding a section (XBA-246, XBA-248)
+
+```c
+static int kobj_save(XboxStateWriter *w, const XboxStateContext *ctx, void *user);   /* every guest thread frozen */
+static int kobj_check(const uint8_t *p, size_t n, uint32_t version, void *user);     /* validate, restore nothing */
+static const XboxStateSection kobj = { XBOX_STATE_TAG_KOBJ, 1, "kobj", kobj_save, kobj_check, NULL };
+xbox_StateRegister(&kobj);   /* once, from the component's init, before the first capture */
+```
+
+- The tags are reserved in `xbox_state.h`: `KOBJ`, `FILE` (XBA-246), `NV2A`, `APU `, `USB ` (XBA-248). A section is
+  written after the ones registered before it; `xbox_StateRegister` with the same tag replaces it.
+- `save` writes with `xbox_StatePut32 / 64 / Put` or `xbox_StateReserve` (keep offsets, not pointers: the buffer
+  grows). It runs with every guest thread frozen and the dispatch gate held when it is on; it may run more than once
+  per capture (below), so it must not change state. `ctx` gives the frozen threads (`xbox_StateContextThread`: park
+  record, registers, KTHREAD, guest stack).
+- `check` parses its payload with `XboxStateReader` / `xbox_StateGet32 ...` and returns `XBOX_STATE_OK`,
+  `_ECORRUPT` or `_EVERSION`. The container has already checked the section's length and hash.
+- Bump the section's version when its payload changes. XBA-249 adds the load callbacks.
+
+### Reading
+
+`xbox_StateCheck` (and `xbox_StateReadSlot`, which reads the slot file first) checks, in order: magic and format
+version; the header hash; the identity against the running title (another title or XBE: `EGAME`; another build ID,
+toolkit, memory size or RecompCpu size: `EVERSION`); every section's bounds and hash (`ECORRUPT`), that this build
+registers it with the same version (`EVERSION`: a state from a build with other sections), its check callback; that
+every registered section is present; no trailing bytes. Nothing is restored (XBA-249). `xbox_StateParseHeader` reads
+the header alone, for a menu listing slots of any title.
 
 A state loads only into the binary that saved it (the build ID): call-site addresses and the lifted functions'
 frames are part of the chain signatures. A rebuilt title (a new prepare) cannot load older states; the menu says so
 (`RECOMP_STATE_EVERSION`).
 
-Sizes: RAM dominates (up to 64 MB raw, zero pages skipped); everything else is tens of KB. Capture cost on a phone:
-a 64 MB copy takes about 5-10 ms; for rewind, pages are compared with the previous capture and only changed pages kept.
+## The capture (XBA-245)
+
+`xbox_StateCapture(timeout, &blob, &n, &stats)` from any host thread that is not a guest thread:
+
+1. **Freeze** (`xbox_ParkFreeze`): every guest thread at its next kernel boundary.
+2. **Settle**: a thread frozen inside a non-blocking call is still running that call's bridge; wait (50 ms at most)
+   until it has returned and is held at the call's end.
+3. **Refuse** what a state cannot hold: a thread held at DISPATCH_LEVEL, threads the park detector could not track
+   (more than 64), the dispatch gate held by someone else (50 ms). Then take the dispatch gate (when
+   `RECOMP_DISPATCH_GATE` is on), so no ISR or DPC runs guest code meanwhile.
+4. **Capture**, then check the park records again. Each guest thread keeps a record of its current top-level kernel
+   call (`kernel_park.h`): Enter writes the registers as the guest made the call (esp at the return address), Leave
+   rewrites them as the call left them (eax the status, esp past the arguments) and marks it returned. A wait that
+   completes during the capture rewrites its record (and maybe guest memory), so the capture is taken again; that
+   thread is held now, so at most one attempt per thread: threads + 3 attempts at most.
+5. Thaw.
+
+A frozen thread is therefore recorded either « in call N from R, registers at the call » (a restore re-issues the
+call, overwriting its partial effects on its outputs) or « returned from N with status S, registers as the call left
+them » (it resumes at R). In the measurements below most threads are « returned »: their sleeps end during the freeze.
+
+Not quiesced: with the dispatch gate off (the default), the timer thread still updates the guest clock words in the
+kernel data page during a capture, and device models' host threads may write guest memory. The clock is XBA-246's
+(`KOBJ`), the devices XBA-248's; the dirty-page test counts one such page between two captures in one freeze.
+
+`RECOMP_STATE_PROBE=<seconds>` (diagnostics) captures every that many seconds on a host thread and logs the line
+below; with `RECOMP_STATE_PROBE_DIR=<dir>` it also writes `<dir>/probe.st` and reads it back:
+
+```
+[STATE] capture: 3 guest threads, RAM 15 of 16386 pages stored (0.1 MB, 3 changed since the last capture) in 2 ranges, blob 0.09 MB; 5.19 ms (freeze 0.30, settle 0.00, sections 4.89, 1 attempt)
+[STATE] probe: /tmp/x/probe.st written in 2.5 ms (ok), read back and checked in 0.1 ms: ok
+```
+
+### Measurements
+
+`tests/xbox_state` on Linux x86-64 (Docker `xba-deps`), the synthetic XBE and the three game-shaped threads of
+`tests/kernel_park`:
+
+| Measure | Lock and gate off | Guest CPU lock and dispatch gate on |
+|---|---|---|
+| Capture, 10 at odd moments (freeze included) | 7.2 ms mean, 9.6 ms worst | 5.7 ms mean, 11.6 ms worst |
+| First capture of the run (page-hash tables allocated) | 30-43 ms, 2 attempts | 30 ms, 2 attempts |
+| Blob | 0.09 MB: CPU 1.2 KB, MEM 33 KB, RAM 62 KB (15 of 16,386 pages) | same |
+| Slot file write / read and check | 2.5 ms / 0.1 ms | |
+
+The time is the scan of the 64 MB window (16,384 pages read to find the non-zero ones), whatever the title holds;
+copying and hashing the stored pages adds to it with a real title. **A real title on Linux: not measured yet** (the
+agents have no title; `RECOMP_STATE_PROBE=5 RECOMP_STATE_PROBE_DIR=/tmp` on one gives the figures, to be added here).
+Expected from the sizes: most of 64 MB non-zero, so a blob of 40-64 MB and a capture of a few tens of ms.
 
 ## Limits
 
@@ -201,7 +299,7 @@ a 64 MB copy takes about 5-10 ms; for rewind, pages are compared with the previo
 | Ticket | What | Needs |
 |---|---|---|
 | XBA-244 | This design, the park detector and its measurements | |
-| XBA-245 | Guest state capture (RAM, registers, memory manager) and the state format | |
+| XBA-245 | Guest state capture (RAM, registers, memory manager) and the state format: done (`xbox_state.h`, `tests/xbox_state`) | |
 | XBA-246 | Kernel objects with readable, restorable state | |
 | XBA-247 | Lifter: ebp shadow stack across calls, call-site unwind table, chain signatures | |
 | XBA-248 | NV2A, APU and USB capture and restore | |

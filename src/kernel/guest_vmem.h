@@ -51,3 +51,17 @@ int guest_vmem_free(uint32_t *base, uint32_t *size, uint32_t free_type,
  *             State, Protect, Type } -- the 28-byte guest
  *             MEMORY_BASIC_INFORMATION layout. */
 int guest_vmem_query(uint32_t address, uint32_t info[7]);
+
+/* Save states (XBA-245, xbox_state.h).
+ *
+ * state_save: the tracker's page table as runs of identical entries (u32
+ * active; when active: u32 mirror_lo, lo, top, run count, then per run u32
+ * pages, owner, u16 state, u16 protect, u32 reserve_protect), written to out
+ * when out is not NULL and cap is large enough; returns its size either way.
+ * state_check: 0 when a payload of that shape covers [lo, top) exactly, else
+ * -1; *runs the run count (may be NULL).
+ * committed_runs: fn for each run of committed pages (the only tracked pages
+ * the host backs and that can be read), in address order; returns the runs. */
+size_t guest_vmem_state_save(uint8_t *out, size_t cap);
+int guest_vmem_state_check(const uint8_t *in, size_t n, uint32_t *runs);
+int guest_vmem_committed_runs(void (*fn)(uint32_t va, uint32_t size, uint8_t *host, void *user), void *user);

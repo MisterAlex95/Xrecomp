@@ -691,6 +691,53 @@ uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
  */
 void xbox_HeapFree(uint32_t xbox_va);
 
+/* ---- Save states (XBA-245, xbox_state.h) -----------------------------------
+ *
+ * The guest memory a state carries, as ranges of separate storage: the RAM
+ * view [0, mapped size), the contiguous window up to its high-water mark (its
+ * own backing, not RAM: kernel.h XBOX_CONTIG_BASE), the lazy reservations
+ * (POSIX, [cursor, top) above the RAM view) and the pages RECOMP_EXT_VMA has
+ * committed (guest_vmem). Mirrors and the tiled alias are views of these and
+ * are left out. `host` is where the range's first byte is on the host. */
+enum {
+    XBOX_RANGE_RAM = 0,
+    XBOX_RANGE_CONTIG = 1,
+    XBOX_RANGE_LAZY = 2,
+    XBOX_RANGE_VMEM = 3,
+};
+typedef struct XboxGuestRange {
+    uint32_t kind;          /* XBOX_RANGE_* */
+    uint32_t va;            /* guest address, 4 KB aligned */
+    uint32_t size;          /* bytes, a multiple of 4 KB */
+    uint8_t *host;
+} XboxGuestRange;
+/* Fills out[0..max) and returns how many ranges there are (may exceed max). */
+int xbox_StateGuestRanges(XboxGuestRange *out, int max);
+
+/* The memory manager's host-side state (section MEM): the heap's cursor and
+ * block table, the worker stack count, the contiguous window's page map,
+ * block lengths, counters and the RAM-name map, the lazy reservations, and
+ * guest_vmem's page table. Writes it to out when out is not NULL and cap is
+ * large enough; returns its size either way. Takes the allocators' locks. */
+#define XBOX_MEM_STATE_VERSION 1
+size_t xbox_MemStateSave(uint8_t *out, size_t cap);
+typedef struct XboxMemStateInfo {
+    uint32_t heap_next, heap_blocks, heap_live;
+    uint32_t contig_pages, contig_in_use, contig_high;
+    uint32_t lazy_count, lazy_next, lazy_top;
+    uint32_t vmem_active, vmem_runs;
+} XboxMemStateInfo;
+/* Parses a MEM payload (version XBOX_MEM_STATE_VERSION) without restoring
+ * it: 0 when it is well formed and matches this build's window sizes, -1
+ * otherwise. info may be NULL. */
+int xbox_MemStateCheck(const uint8_t *in, size_t n, XboxMemStateInfo *info);
+
+/* SHA-1 of the loaded XBE's headers (base to SizeOfHeaders: the image and
+ * section headers with each section's own SHA-1 digest, the certificate), so
+ * it names the whole image without hashing every section again. All zero
+ * before an XBE is loaded. */
+const uint8_t *xbox_XbeHeaderSha1(void);
+
 /**
  * Bytes remaining in the heap block containing this guest address, or 0 if the
  * heap never handed it out. Backs MmQueryAllocationSize and

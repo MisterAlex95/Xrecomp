@@ -13760,6 +13760,12 @@ void xbox_kernel_bridge_init(void)
      * other thread. */
     xbox_DpcMarkGuestThread();
     guest_cpu_join();
+#ifndef _WIN32
+    {   /* RECOMP_STATE_PROBE: periodic save-state captures, measured (XBA-245) */
+        extern void xbox_StateProbeStart(void);
+        xbox_StateProbeStart();
+    }
+#endif
     if (!g_thunk_table_base) {
         fprintf(stderr, "  Kernel thunk bridge: no thunk table address (the XBE "
                         "header's was not read): nothing patched\n");
