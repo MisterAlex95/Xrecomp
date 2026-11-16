@@ -1,5 +1,6 @@
 /*
- * xbox_state.h - Xbox save states, part 1: capture the guest state and the state format (XBA-245)
+ * xbox_state.h - Xbox save states: capture the guest state, the state format (XBA-245) and the same-run
+ * restore (XBA-249)
  *
  * Design: docs/technical/xbox-save-states.md. With every guest thread frozen at a kernel boundary
  * (kernel_park.h), a capture writes one blob, "XBXS", of tagged sections:
@@ -15,26 +16,38 @@
  * format does.
  *
  * Built-in sections (this file's ticket):
- *   CPU   per guest thread its park record (kernel_park.h): the call it is in (ordinal, guest return
- *         address) or the host wait inside lifted code (site kind and guest VA, XBA-251), whether it
- *         returned and its status, the RecompCpu, the TIB, the KTHREAD, the guest stack bounds and the
- *         guest thread id read from the KTHREAD
+ *   CPU   the run it was taken in (XBA-249), then per guest thread its park record (kernel_park.h): the
+ *         call it is in (ordinal, guest return address, esp at the call) or the host wait inside lifted code
+ *         (site kind and guest VA, XBA-251), whether it returned and its status, the RecompCpu, the TIB, the
+ *         KTHREAD, the guest stack bounds and the guest thread id read from the KTHREAD
  *   MEM   the memory manager's host-side state (xbox_MemStateSave: heap, contiguous window, lazy
  *         reservations, guest_vmem)
  *   RAM   guest memory, range by range (xbox_StateGuestRanges): a bitmap of the pages stored (not all
  *         zero), then those pages. No compressor in the tree (the console runtimes skip zero pages the
  *         same way, n64_state.c); rewind codes XOR deltas on top (recomp_rewind.h)
  *
- * Other components add their own sections (XBA-246 kernel objects and files, XBA-248 NV2A, APU, USB):
- * a section is a tag, a version, a save callback (runs during the capture, every guest thread frozen)
- * and a check callback (validates a payload without restoring anything). xbox_StateRegister, once,
- * before the first capture (an init function of the component). XBA-249 adds the load callbacks.
+ * Also built in since XBA-249: KOBJ (kernel_kobj_state.h, saved for this run: XBOX_KOBJ_IN_SESSION), NV2A,
+ * APU, USB (xbox_dev_state.h; the capture and the load hold the device threads around every section,
+ * xbox_DevStateFreeze / Thaw). Other components add their own sections: a section is a tag, a version, a
+ * save callback (runs during the capture, every guest thread frozen), a check callback (validates a payload
+ * without restoring anything) and a load callback (puts a checked payload back). xbox_StateRegister, once,
+ * before the first capture (an init function of the component).
  *
  * Reading a state checks, in order: the magic and format version, the header hash, the identity
  * against the running title (another title or XBE: EGAME; another build, toolkit or memory size:
  * EVERSION), then every section: its bounds and hash (ECORRUPT), that it is registered here with the
- * same version (EVERSION), its check callback; and that every registered section is present. Nothing is
- * restored yet (XBA-249).
+ * same version (EVERSION), its check callback; and that every registered section is present.
+ *
+ * Loading (same run, XBA-249: xbox_StateLoad). Every guest thread is frozen, then each must be held at the end
+ * of a kernel call (a wait in progress is given until the timeout to end). The state is accepted only when it
+ * was taken in this run and its threads are the threads running now, each parked at the same call as in the
+ * state (same ordinal, guest return address and esp at the call: the host stack below it is then the one the
+ * state's thread had). XBA-247 replaces this check with the chain signature (every frame's return address and
+ * esp, the ebp shadow stack): chain_matches in xbox_state.c is the hook. Otherwise ECHAIN with the reason,
+ * and nothing changes. Then, with the devices held: MEM, RAM, KOBJ, NV2A, APU, USB and any other section in
+ * registration order, and each thread's registers (the ones it sees when its call returns, or the call made
+ * again when the state has the thread inside it). A section that fails part way puts back a capture taken
+ * just before (never a partial load).
  *
  * The slot file is recomp_states' (XRSLOT header, console "xbox", game key the title ID in hex,
  * thumbnail), with the XBXS blob as the core blob. POSIX hosts (recomp_states is not built on Windows).
@@ -69,8 +82,9 @@ extern "C" {
 #define XBOX_STATE_TAG_APU  XBOX_STATE_TAG('A', 'P', 'U', ' ')   /* XBA-248 */
 #define XBOX_STATE_TAG_USB  XBOX_STATE_TAG('U', 'S', 'B', ' ')   /* XBA-248 */
 
-/* CPU v2 (XBA-251): the park site kind (XboxParkRecord.site) in each thread's head; v1 is refused. */
-#define XBOX_STATE_CPU_VERSION 2
+/* CPU v2 (XBA-251): the park site kind (XboxParkRecord.site) in each thread's head. v3 (XBA-249): the run id
+ * and the esp at the call. Older versions are refused. */
+#define XBOX_STATE_CPU_VERSION 3
 #define XBOX_STATE_RAM_VERSION 1
 /* MEM: XBOX_MEM_STATE_VERSION (xbox_memory_layout.h) */
 
@@ -82,6 +96,8 @@ enum {
     XBOX_STATE_EIO = -5,
     XBOX_STATE_EEMPTY = -2,     /* no slot file */
     XBOX_STATE_ECORRUPT = -7,   /* not a state, truncated, or a hash does not match */
+    XBOX_STATE_ECHAIN = -8,     /* RECOMP_STATE_EREFUSED: the game is not at a point this state can be loaded at
+                                 * (a thread parked elsewhere, created or ended since, another run) */
     XBOX_STATE_EFREEZE = -20,   /* a guest thread did not reach a kernel call in time */
     XBOX_STATE_EBUSY = -21,     /* not now: a thread at DISPATCH_LEVEL, untracked threads, the dispatch
                                  * gate held, a capture already running, or called from a guest thread */
@@ -139,7 +155,14 @@ typedef struct XboxStateSection {
      * any payload is accepted. */
     int (*check)(const uint8_t *p, size_t n, uint32_t version, void *user);
     void *user;
+    /* Puts a payload xbox_StateCheck accepted back (XBA-249), every guest thread frozen and the device
+     * threads held: XBOX_STATE_OK, or an error (the load puts back the state it replaced; a reason through
+     * xbox_StateSectionReason). NULL: the section has nothing to restore. */
+    int (*load)(const uint8_t *p, size_t n, uint32_t version, void *user);
 } XboxStateSection;
+
+/* From a save or load callback: why it failed, for the capture's or the load's reason. */
+void xbox_StateSectionReason(const char *fmt, ...);
 
 /* Adds a section (or replaces the one with the same tag), written after the ones registered before it
  * (CPU, MEM, RAM come first). 0, or -1 (tag 0, no save callback, table full). Any thread; not during a
@@ -190,6 +213,7 @@ int xbox_StateCaptureFrozen(uint8_t **blob, size_t *blob_n, XboxStateStats *st);
 typedef struct XboxStateThread {
     int slot, state;
     uint32_t ordinal, ret_va;
+    uint32_t call_esp;       /* esp when the call was made (its return address's slot) */
     int returned;
     uint32_t status;
     int dispatch;
@@ -227,6 +251,10 @@ int xbox_StateSection(const uint8_t *blob, size_t n, uint32_t tag, const uint8_t
 
 /* The built-in sections' payloads, parsed (tests, XBA-249). */
 int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int max);   /* count or -1 */
+/* The run a CPU payload was taken in (xbox_StateRunId), 0 when malformed. */
+uint64_t xbox_StateCpuRun(const uint8_t *p, size_t n);
+/* This run's id: random, fixed for the process. */
+uint64_t xbox_StateRunId(void);
 typedef struct XboxStateRamInfo {
     uint32_t ranges, pages, stored;
 } XboxStateRamInfo;
@@ -234,6 +262,54 @@ int xbox_StateRamInfo(const uint8_t *p, size_t n, XboxStateRamInfo *info);   /* 
 /* The stored copy of guest page `va` (4 KB aligned) in a RAM payload: 1 with *page (NULL: the page was all
  * zero), 0 when no range covers it, -1 when the payload is malformed. */
 int xbox_StateRamPage(const uint8_t *p, size_t n, uint32_t va, const uint8_t **page);
+
+/* ---- Loading (same run, XBA-249) ------------------------------------------------------------------------ */
+
+typedef struct XboxStateLoadStats {
+    double freeze_ms;        /* until every guest thread was parked */
+    double settle_ms;        /* until each was held at the end of its call */
+    double backup_ms;        /* the capture taken first, put back if a section fails */
+    double load_ms;          /* the sections and the registers */
+    int threads;
+    int reissued;            /* threads whose call is made again (the state had them inside it) */
+    char reason[256];        /* why it was refused or failed, or "" */
+} XboxStateLoadStats;
+
+/* Freezes every guest thread (timeout_ms for the freeze, and again for the waits in progress to end), loads the
+ * state (see the top of this file), thaws. Logs one line ("[STATE] load: ..." or "[STATE] load refused: ...").
+ * Not from a guest thread. XBOX_STATE_OK, _ECHAIN (with the reason), any code xbox_StateCheck returns,
+ * _EFREEZE, _EBUSY, _ENOMEM, _ESECTION. */
+int xbox_StateLoad(const uint8_t *blob, size_t n, uint32_t timeout_ms, XboxStateLoadStats *st);
+/* The same with the freeze already held by the caller (it stays held: the threads run on at the caller's
+ * xbox_ParkThaw). */
+int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, XboxStateLoadStats *st);
+/* Reads a slot file (xbox_StateReadSlot) and loads it. */
+int xbox_StateLoadSlot(const char *path, uint32_t timeout_ms, XboxStateLoadStats *st);
+
+/* ---- The runtime service (xbox_state_service.c) --------------------------------------------------------- */
+
+/* Attaches the running title to recomp_states (console "xbox", slots in <save dir>/xbox-<TITLE ID>), so the
+ * in-game menu's Save state / Load state, the quick save / load chords and the slot hotkeys reach
+ * xbox_StateSaveSlot / xbox_StateLoadSlot; starts the rewind thread (RECOMP_REWIND, recomp_rewind.h).
+ * Called by xbox_kernel_bridge_init (after xbox_path_init in a title; a host that sets the paths later calls it
+ * again: the attach only). */
+void xbox_StateServiceStart(void);
+/* 1 when save states can be offered for the running title, else 0 with the reason in why (no guest
+ * thread yet, a title that switches stacks, untracked threads, no save folder). */
+int  xbox_StateAvailable(char *why, size_t why_n);
+/* From the pad's hotkeys (usb_gamepad.c, the controller thread, which a capture holds): the actions pressed
+ * (recomp_hotkeys.h bits) run on the service's thread; held: the rewind chord is held now. */
+void xbox_StateServiceHotkeys(uint32_t pressed, int rewind_held);
+/* Rewind arms on the first pad report (a title playing) or this call (tests): captures start then. */
+void xbox_StateRewindArm(void);
+typedef struct XboxRewindStats {
+    int on;                  /* rewind is on (settings, and not turned off by a failure) */
+    uint64_t captures, steps, failed;
+    double capture_ms_avg, capture_ms_max, step_ms_avg;
+    size_t ring_bytes, ring_count, blob_bytes;
+    char off_reason[160];    /* why it turned itself off, or "" */
+} XboxRewindStats;
+void xbox_StateRewindStats(XboxRewindStats *out);
 
 /* ---- Slot files ----------------------------------------------------------------------------------------- */
 

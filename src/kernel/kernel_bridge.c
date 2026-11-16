@@ -13466,19 +13466,28 @@ static void kernel_thunk_dispatch(void)
     int slot = g_kernel_dispatch_slot;
     uint32_t ordinal = slot >= 0 && slot < XBOX_KERNEL_THUNK_TABLE_SIZE
                      ? g_slot_ordinals[slot] : 0;
-    int held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL, ordinal);
-    /* A kernel boundary: the thread is parked for a snapshot (XBA-244) until
-     * it runs guest code again, so also while it queues for the guest CPU;
-     * a freeze holds it at the end. */
-    xbox_ParkKernelEnter(ordinal, g_esp ? BRIDGE_MEM32(g_esp) : 0);
-    ks_thread_kernel_enter();   /* a queue's thread is not running in here (XBA-133) */
-    xbox_SehRuntimeEnter();      /* a host fault in the bridge stays the runtime's (XBA-132) */
-    kernel_thunk_dispatch_body();
-    xbox_SehRuntimeLeave();
-    ks_thread_kernel_leave();
-    if (held)
-        xbox_GuestCpuAcquire();
-    xbox_ParkKernelLeave();
+    for (;;) {
+        int held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL, ordinal);
+        /* A kernel boundary: the thread is parked for a snapshot (XBA-244) until
+         * it runs guest code again, so also while it queues for the guest CPU;
+         * a freeze holds it at the end. */
+        xbox_ParkKernelEnter(ordinal, g_esp ? BRIDGE_MEM32(g_esp) : 0);
+        ks_thread_kernel_enter();   /* a queue's thread is not running in here (XBA-133) */
+        xbox_SehRuntimeEnter();      /* a host fault in the bridge stays the runtime's (XBA-132) */
+        kernel_thunk_dispatch_body();
+        xbox_SehRuntimeLeave();
+        ks_thread_kernel_leave();
+        xbox_ParkKernelReturned();   /* back from the bridge, maybe queued for the guest CPU next */
+        if (held)
+            xbox_GuestCpuAcquire();
+        xbox_ParkKernelLeave();
+        /* A same-run state load (XBA-249) put this thread back « in this call »:
+         * its registers are the ones the guest made the call with (the restored
+         * guest stack holds the arguments), so it is made again. */
+        if (!xbox_ParkTakeReissue())
+            break;
+        g_kernel_dispatch_slot = slot;
+    }
 }
 
 static void kernel_thunk_dispatch_body(void)
@@ -13764,7 +13773,9 @@ void xbox_kernel_bridge_init(void)
 #ifndef _WIN32
     {   /* RECOMP_STATE_PROBE: periodic save-state captures, measured (XBA-245) */
         extern void xbox_StateProbeStart(void);
+        extern void xbox_StateServiceStart(void);
         xbox_StateProbeStart();
+        xbox_StateServiceStart();   /* the menu's save states, the chords, rewind (XBA-249) */
     }
 #endif
     if (!g_thunk_table_base) {

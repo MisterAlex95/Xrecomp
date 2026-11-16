@@ -1,27 +1,55 @@
 /*
- * xbox_state_guest.c - the built-in sections of an Xbox save state: CPU, MEM, RAM (XBA-245, xbox_state.h)
+ * xbox_state_guest.c - the built-in sections of an Xbox save state: CPU, MEM, RAM (XBA-245), and the wrappers
+ * that make the kernel objects (XBA-246) and the devices (XBA-248) sections of the container (XBA-249).
+ * xbox_state.h has the API.
  *
- * CPU v2   u32 thread count, u32 sizeof(RecompCpu), then per thread a 68-byte head and the RecompCpu:
- *            slot, park state, ordinal, guest return address, returned (0 / 1), status, dispatch, host tid,
- *            u64 kernel calls, TIB, KTHREAD, guest stack base, guest stack limit, esp, guest thread id,
+ * CPU v3   u32 thread count, u32 sizeof(RecompCpu), u64 run id (xbox_StateRunId, XBA-249), then per thread a
+ *            68-byte head and the RecompCpu: slot, park state, ordinal, guest return address, returned (0 / 1),
+ *            status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base, guest stack limit,
+ *            esp at the park point (the call's return address slot, XBA-249; v2: esp now), guest thread id,
  *            park site (XBOX_PARK_SITE_*: 0 a kernel call; else a host wait inside lifted code, XBA-251,
- *            whose ordinal is 0 and guest return address the site's VA). v1 (64-byte head, no site) is
- *            refused: a state only loads into the build that wrote it anyway.
- * MEM v1   xbox_MemStateSave (xbox_memory_layout.c)
+ *            whose ordinal is 0 and guest return address the site's VA). Older versions are refused: a state
+ *            only loads into the build that wrote it anyway. Its load is xbox_state.c's (threads matched).
+ * MEM v1   xbox_MemStateSave / xbox_MemStateLoad (xbox_memory_layout.c)
  * RAM v1   u32 range count, then per range u32 kind (XBOX_RANGE_*), u32 guest base, u32 pages, a bitmap of
  *          the pages stored (bit set: not all zero; (pages + 7) / 8 bytes), then those pages, 4 KB each
+ * KOBJ v1  xbox_KobjSave's blob ("XKOB"), taken for this run (XBOX_KOBJ_IN_SESSION)
+ * NV2A, APU, USB v1   the device's own payload (xbox_DevStateSections)
  *
  * Dirty pages: each capture keeps a 64-bit hash per page and counts the pages that changed since the
- * previous capture (logged; rewind, XBA-249, will store only those).
+ * previous capture (logged).
  */
 #include "xbox_state.h"
 #include "kernel_park.h"
+#include "kernel_kobj_state.h"
+#include "xbox_dev_state.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #define PAGE 4096u
 #define CPU_HEAD 68u
+#define CPU_TOP 16u          /* count, sizeof(RecompCpu), run id */
+
+uint64_t xbox_StateRunId(void)
+{
+    static uint64_t id;
+    if (!id) {             /* the same answer every time after the first: a benign race at most */
+        struct timespec ts;
+        uint64_t v;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        v = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+        v ^= (uint64_t)getpid() << 40;
+        v ^= (uint64_t)(uintptr_t)&id;
+        v *= 0x9E3779B97F4A7C15ull;
+        v ^= v >> 31;
+        id = v ? v : 1;
+    }
+    return id;
+}
 
 /* ---- CPU ------------------------------------------------------------------------------------------------- */
 
@@ -32,6 +60,7 @@ int xbox_state_cpu_save(XboxStateWriter *w, const XboxStateContext *ctx, void *u
 
     xbox_StatePut32(w, (uint32_t)ctx->threads);
     xbox_StatePut32(w, (uint32_t)sizeof(RecompCpu));
+    xbox_StatePut64(w, xbox_StateRunId());
     for (i = 0; i < ctx->threads; i++) {
         XboxStateThread t;
         if (xbox_StateContextThread(ctx, i, &t) != 0)
@@ -49,7 +78,7 @@ int xbox_state_cpu_save(XboxStateWriter *w, const XboxStateContext *ctx, void *u
         xbox_StatePut32(w, t.kthread);
         xbox_StatePut32(w, t.stack_base);
         xbox_StatePut32(w, t.stack_limit);
-        xbox_StatePut32(w, t.cpu.r_esp);
+        xbox_StatePut32(w, t.call_esp);
         xbox_StatePut32(w, t.guest_tid);
         xbox_StatePut32(w, t.site);
         xbox_StatePut(w, &t.cpu, sizeof t.cpu);
@@ -63,8 +92,9 @@ int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int m
     uint32_t count = xbox_StateGet32(&r), cpu_bytes = xbox_StateGet32(&r), i;
     uint64_t used = 0;
 
+    (void)xbox_StateGet64(&r);       /* the run id */
     if (r.bad || count > XBOX_PARK_MAX_THREADS || cpu_bytes != sizeof(RecompCpu)
-        || n != 8 + (size_t)count * (CPU_HEAD + cpu_bytes))
+        || n != CPU_TOP + (size_t)count * (CPU_HEAD + cpu_bytes))
         return -1;
     for (i = 0; i < count; i++) {
         XboxStateThread t;
@@ -83,7 +113,7 @@ int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int m
         t.kthread = xbox_StateGet32(&r);
         t.stack_base = xbox_StateGet32(&r);
         t.stack_limit = xbox_StateGet32(&r);
-        (void)xbox_StateGet32(&r);   /* esp, also in the RecompCpu */
+        t.call_esp = xbox_StateGet32(&r);
         t.guest_tid = xbox_StateGet32(&r);
         t.site = xbox_StateGet32(&r);
         cpu = xbox_StateGet(&r, cpu_bytes);
@@ -98,6 +128,13 @@ int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int m
             out[i] = t;
     }
     return (int)count;
+}
+
+uint64_t xbox_StateCpuRun(const uint8_t *p, size_t n)
+{
+    XboxStateReader r = { p, n, 8, 0 };
+    uint64_t v = xbox_StateGet64(&r);
+    return r.bad ? 0 : v;
 }
 
 int xbox_state_cpu_check(const uint8_t *p, size_t n, uint32_t version, void *user)
@@ -139,6 +176,17 @@ int xbox_state_mem_check(const uint8_t *p, size_t n, uint32_t version, void *use
     if (version != XBOX_MEM_STATE_VERSION)
         return XBOX_STATE_EVERSION;
     return xbox_MemStateCheck(p, n, NULL) == 0 ? XBOX_STATE_OK : XBOX_STATE_ECORRUPT;
+}
+
+int xbox_state_mem_load(const uint8_t *p, size_t n, uint32_t version, void *user)
+{
+    char why[160];
+    (void)version; (void)user;
+    if (xbox_MemStateLoad(p, n, why, sizeof why) != 0) {
+        xbox_StateSectionReason("memory manager: %s", why);
+        return XBOX_STATE_ECHAIN;
+    }
+    return XBOX_STATE_OK;
 }
 
 /* ---- RAM ------------------------------------------------------------------------------------------------- */
@@ -404,4 +452,195 @@ int xbox_state_ram_check(const uint8_t *p, size_t n, uint32_t version, void *use
     if (version != XBOX_STATE_RAM_VERSION)
         return XBOX_STATE_EVERSION;
     return ram_walk(p, n, NULL, NULL, NULL) == 0 ? XBOX_STATE_OK : XBOX_STATE_ECORRUPT;
+}
+
+/* ---- RAM back into guest memory (XBA-249) ------------------------------------------------------------------ */
+
+/* Every page of every saved range, the stored ones copied and the others zeroed, into wherever that guest page
+ * lives now (xbox_StateGuestRanges: the ranges may have grown since; a saved page no range holds now refuses
+ * the state). check_only: only that check. */
+struct ram_put {
+    XboxGuestRange *cur;
+    int ncur;
+    int check_only;
+    uint32_t missing_va;
+    uint32_t written;
+};
+
+static uint8_t *cur_host(const struct ram_put *rp, uint32_t va)
+{
+    int i;
+    for (i = 0; i < rp->ncur; i++) {
+        const XboxGuestRange *g = &rp->cur[i];
+        if (va >= g->va && (uint64_t)va + PAGE <= (uint64_t)g->va + g->size)
+            return g->host + (va - g->va);
+    }
+    return NULL;
+}
+
+static int put_cb(uint32_t kind, uint32_t va, uint32_t pages, const uint8_t *bits, const uint8_t *data, void *user)
+{
+    struct ram_put *rp = (struct ram_put *)user;
+    uint32_t pg;
+    (void)kind;
+
+    for (pg = 0; pg < pages; pg++) {
+        uint32_t at = va + pg * PAGE;
+        uint8_t *dst = cur_host(rp, at);
+        int stored = (bits[pg >> 3] >> (pg & 7)) & 1u;
+        if (!dst) {
+            rp->missing_va = at;
+            return 1;
+        }
+        if (rp->check_only)
+            continue;
+        if (stored) {
+            if (memcmp(dst, data, PAGE) != 0) {
+                memcpy(dst, data, PAGE);
+                rp->written++;
+            }
+            data += PAGE;
+        } else if (page_nonzero(dst)) {
+            memset(dst, 0, PAGE);
+            rp->written++;
+        }
+    }
+    return 0;
+}
+
+static int ram_put(const uint8_t *p, size_t n, int check_only, uint32_t *missing, uint32_t *written)
+{
+    XboxGuestRange stack_ranges[16], *ranges = stack_ranges;
+    struct ram_put rp;
+    int nr, rc;
+
+    nr = xbox_StateGuestRanges(ranges, 16);
+    if (nr > 16) {
+        ranges = (XboxGuestRange *)malloc((size_t)nr * sizeof *ranges);
+        if (!ranges)
+            return XBOX_STATE_ENOMEM;
+        nr = xbox_StateGuestRanges(ranges, nr);
+    }
+    memset(&rp, 0, sizeof rp);
+    rp.cur = ranges;
+    rp.ncur = nr;
+    rp.check_only = check_only;
+    rc = ram_walk(p, n, put_cb, &rp, NULL);
+    if (ranges != stack_ranges)
+        free(ranges);
+    if (missing)
+        *missing = rp.missing_va;
+    if (written)
+        *written = rp.written;
+    if (rc < 0)
+        return XBOX_STATE_ECORRUPT;
+    return rc ? XBOX_STATE_ECHAIN : XBOX_STATE_OK;
+}
+
+int xbox_state_ram_precheck(const uint8_t *p, size_t n, char *why, size_t why_n)
+{
+    uint32_t missing = 0;
+    int rc = ram_put(p, n, 1, &missing, NULL);
+    if (rc == XBOX_STATE_ECHAIN && why && why_n)
+        snprintf(why, why_n, "guest page 0x%08X of the state is not mapped now", missing);
+    return rc;
+}
+
+static uint32_t s_ram_written;
+
+int xbox_state_ram_load(const uint8_t *p, size_t n, uint32_t version, void *user)
+{
+    uint32_t missing = 0;
+    int rc;
+    (void)version; (void)user;
+
+    rc = ram_put(p, n, 0, &missing, &s_ram_written);
+    if (rc == XBOX_STATE_ECHAIN)
+        xbox_StateSectionReason("guest page 0x%08X of the state is not mapped now", missing);
+    /* The page hashes describe the memory before the load: the next capture compares against nothing. */
+    xbox_state_ram_reset();
+    return rc;
+}
+
+uint32_t xbox_state_ram_written(void)
+{
+    return s_ram_written;
+}
+
+/* ---- KOBJ: the kernel objects (XBA-246) --------------------------------------------------------------------- */
+
+int xbox_state_kobj_save(XboxStateWriter *w, const XboxStateContext *ctx, void *user)
+{
+    XboxKobjRefusals why;
+    void *blob = NULL;
+    size_t len = 0;
+    (void)ctx; (void)user;
+
+    memset(&why, 0, sizeof why);
+    if (!xbox_KobjSave(&blob, &len, XBOX_KOBJ_IN_SESSION, &why)) {
+        if (why.count > 0)
+            xbox_StateSectionReason("%d kernel object(s) cannot be saved now; first: %s 0x%08X: %s", why.count,
+                                    why.r[0].what, why.r[0].token ? why.r[0].token : why.r[0].guest_va,
+                                    why.r[0].reason);
+        else
+            xbox_StateSectionReason("kernel objects: out of memory");
+        return XBOX_STATE_EBUSY;
+    }
+    xbox_StatePut(w, blob, len);
+    free(blob);
+    return XBOX_STATE_OK;
+}
+
+int xbox_state_kobj_check(const uint8_t *p, size_t n, uint32_t version, void *user)
+{
+    (void)user;
+    if (version != XBOX_KOBJ_VERSION)
+        return XBOX_STATE_EVERSION;
+    if (n < 8 || memcmp(p, "XKOB", 4) != 0)
+        return XBOX_STATE_ECORRUPT;
+    if ((p[4] | p[5] << 8 | p[6] << 16 | (uint32_t)p[7] << 24) != XBOX_KOBJ_VERSION)
+        return XBOX_STATE_EVERSION;
+    return XBOX_STATE_OK;
+}
+
+int xbox_state_kobj_load(const uint8_t *p, size_t n, uint32_t version, void *user)
+{
+    char err[200];
+    (void)version; (void)user;
+    if (!xbox_KobjLoad(p, n, XBOX_KOBJ_IN_SESSION, err, sizeof err)) {
+        xbox_StateSectionReason("kernel objects: %s", err[0] ? err : "refused");
+        return XBOX_STATE_ESECTION;
+    }
+    return XBOX_STATE_OK;
+}
+
+/* ---- NV2A, APU, USB (XBA-248): user is the device's XdsSection ---------------------------------------------- */
+
+int xbox_state_dev_save(XboxStateWriter *w, const XboxStateContext *ctx, void *user)
+{
+    const XdsSection *sec = (const XdsSection *)user;
+    XdsWriter dw;
+    int ok;
+    (void)ctx;
+
+    memset(&dw, 0, sizeof dw);
+    ok = sec->capture(&dw) && !dw.err;
+    if (ok)
+        xbox_StatePut(w, dw.p, dw.len);
+    else
+        xbox_StateSectionReason("%s: the device could not be captured", sec->name);
+    xds_writer_free(&dw);
+    return ok ? XBOX_STATE_OK : XBOX_STATE_ESECTION;
+}
+
+int xbox_state_dev_load(const uint8_t *p, size_t n, uint32_t version, void *user)
+{
+    const XdsSection *sec = (const XdsSection *)user;
+    XdsReader r = xds_reader(p, n);
+
+    if (!sec->restore(&r, version) || r.err) {
+        xbox_StateSectionReason("%s: the device refused its state (version %u, %zu bytes)", sec->name, version, n);
+        return XBOX_STATE_ESECTION;
+    }
+    return XBOX_STATE_OK;
 }

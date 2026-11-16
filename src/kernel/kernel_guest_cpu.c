@@ -419,10 +419,11 @@ void xbox_GuestCpuPreempt(uint32_t va)
         return;
     }
     InterlockedIncrement(&s_preempts);
-    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_PREEMPT, va);
-    guest_cpu_handoff(XBOX_GUEST_CPU_PREEMPT, va);
-    guest_cpu_acquire(0);
-    xbox_ParkHostWaitLeave();
+    do {   /* again when a same-run state load put the thread back in here (XBA-249) */
+        xbox_ParkHostWaitEnter(XBOX_PARK_SITE_PREEMPT, va);
+        guest_cpu_handoff(XBOX_GUEST_CPU_PREEMPT, va);
+        guest_cpu_acquire(0);
+    } while (xbox_ParkHostWaitLeave());
 }
 
 /* Guest code a bridge runs on a guest thread (an unwind handler, a

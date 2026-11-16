@@ -1016,6 +1016,13 @@ const char *xbox_path_save_dir_utf8(void)
     return s_save_dir;
 }
 
+/* Whether xbox_path_init ran (the save states attach only then, XBA-249: a test without paths keeps its
+ * home directory untouched). */
+int xbox_path_is_initialized(void)
+{
+    return s_initialized ? 1 : 0;
+}
+
 const char *xbox_path_utility_dir_utf8(void)
 {
     static char out[MAX_PATH];

@@ -5,7 +5,8 @@ project(xbox_state_test C)
 # (xbox_MemoryLayoutInit on the synthetic XBE), capture guest RAM, the threads'
 # registers and the memory manager into an XBXS blob, write it as a slot file
 # and read it back section by section; corrupt, foreign and other-build blobs
-# are refused. Prints the capture time and the blob size.
+# are refused. XBA-249: the same-run load (and its refusals), rewind's ring and
+# the recomp_states front end. Prints the capture and load times and the blob size.
 if(WIN32)
     message(FATAL_ERROR "This regression covers the POSIX host")
 endif()

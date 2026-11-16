@@ -110,6 +110,8 @@ public class GameMenuTest {
         boolean ff, ffOnly;   // ffOnly: XBA-240, an Xbox title (fast-forward without states)
         @Override public boolean statesSupported() { return states; }
         @Override public boolean fastForwardSupported() { return ffOnly; }
+        Boolean resume;       // XBA-249: null = as statesSupported; false = an Xbox title's states (this run only)
+        @Override public boolean resumeSupported() { return resume != null ? resume : states; }
         @Override public long stateTime(int slot) { return times[slot]; }
         @Override public int[] stateThumb(int slot) { return thumbs[slot]; }
         @Override public int saveState(int slot) { saved.add(slot); return saveCode; }
@@ -1089,6 +1091,66 @@ public class GameMenuTest {
         menu.open("Back");
         menu.row(GameMenu.Item.STATE_SAVE).performClick();
         assertFalse(activity.getString(R.string.MENU_STATE_EMPTY).equals(menu.rowsForTest().get(2).subtitle));
+    }
+
+    /**
+     * XBA-249: an Xbox title whose runtime offers states: Save state and Load state under Resume, then Fast-forward;
+     * no « Resume where I left off » (its states load only within the run); the Controls page lists the quick save /
+     * load chords; a refused load and a save not possible now say so.
+     */
+    @Test
+    public void xboxStateRows() throws Exception {
+        host.ffOnly = true;
+        host.states = true;
+        host.resume = false;
+        menu.open("Back");
+        List<Widgets.MenuRow> rows = menu.rowsForTest();
+        assertSame(menu.row(GameMenu.Item.RESUME), rows.get(0));
+        assertSame(menu.row(GameMenu.Item.STATE_SAVE), rows.get(1));
+        assertSame(menu.row(GameMenu.Item.STATE_LOAD), rows.get(2));
+        assertSame(menu.row(GameMenu.Item.FAST_FORWARD), rows.get(3));
+        idle(100);
+        TestSupport.screenshot(menu.root, "menu-xbox-states");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNull(menu.row(GameMenu.Item.AUTO_RESUME));
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        menu.row(GameMenu.Item.CONTROLS).performClick();
+        java.util.List<String> texts = new java.util.ArrayList<>();
+        collect(menu.drawer, texts);
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.HK_QSAVE)));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.HK_QLOAD)));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.HK_FF_HOLD)));
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        menu.close();
+
+        host.times[1] = System.currentTimeMillis();
+        host.loadCode = GameMenu.STATE_REFUSED;
+        menu.open("Back");
+        menu.row(GameMenu.Item.STATE_LOAD).performClick();
+        assertEquals(GameMenu.Page.LOAD_SLOTS, menu.page());
+        assertEquals(5, menu.rowsForTest().size());   // four slots, Back: no « Where you left off »
+        menu.rowsForTest().get(0).performClick();
+        assertEquals(List.of(1), host.loaded);
+        assertEquals(activity.getString(R.string.MENU_STATE_ERR_REFUSED), menu.flashText());
+        host.saveCode = GameMenu.STATE_REFUSED;
+        menu.open("Back");
+        menu.row(GameMenu.Item.STATE_SAVE).performClick();
+        menu.rowsForTest().get(0).performClick();
+        assertEquals(activity.getString(R.string.MENU_STATE_ERR_NOT_NOW), menu.flashText());
+        // Leaving the game saves no automatic slot for it.
+        GameStore.setAutoResume(activity, true);
+        menu.autoSave("test");
+        assertEquals(List.of(1), host.saved);
+    }
+
+    /** XBA-249: an Xbox title whose runtime says states are not available keeps the XBA-240 rows. */
+    @Test
+    public void xboxWithoutStatesKeepsFastForwardOnly() {
+        host.ffOnly = true;
+        host.states = false;
+        menu.open("Back");
+        assertNull(menu.row(GameMenu.Item.STATE_SAVE));
+        assertSame(menu.row(GameMenu.Item.FAST_FORWARD), menu.rowsForTest().get(1));
     }
 
     @Test

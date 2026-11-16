@@ -599,23 +599,29 @@ unsigned usb_gamepad_scripted(void)
 #ifndef _WIN32
 /* XBA-240: the fast-forward hotkeys on an Xbox pad, as the consoles read
  * them (recomp_hotkeys.h: by default Back + right trigger held; a toggle when
- * the player set one). Only the two fast-forward actions mean anything to an
- * Xbox title (no states, no rewind; the menu chord is the Android shell's).
- * A held chord's buttons are taken out of what the title sees. Each report
- * (the OHCI thread's polls) also picks up the speed (xbox_FastForwardPoll). */
+ * the player set one). XBA-249: with the title's save states attached
+ * (xbox_state_service.c), the quick save / load chords, the slot hotkeys and
+ * the rewind hold too; those run on the state service's thread (a capture
+ * holds this controller thread, which calls here). The menu chord is the
+ * Android shell's. A held chord's buttons are taken out of what the title
+ * sees. Each report (the OHCI thread's polls) also picks up the speed
+ * (xbox_FastForwardPoll). */
+extern void xbox_StateServiceHotkeys(uint32_t pressed, int rewind_held);
+
 static void pad_hotkeys(int pad, XBOX_GAMEPAD *g)
 {
     static recomp_hotkeys hk;
     static int hk_ready;
     static recomp_hotkeys_state st[USB_GAMEPAD_MAX];
-    static uint32_t holding;           /* bit n: pad n holds fast-forward */
+    static uint32_t holding, rewinding;   /* bit n: pad n holds fast-forward / rewind */
+    const uint32_t ff = RECOMP_HK_BIT(RECOMP_HK_FF_HOLD) | RECOMP_HK_BIT(RECOMP_HK_FF_TOGGLE);
     uint32_t pressed = 0, swallow = 0, held;
 
     if (!hk_ready) {
-        int a;
+        int a, states = recomp_states_available() && !strcmp(recomp_states_console(), "xbox");
         hk = *recomp_hotkeys_get();
         for (a = 0; a < RECOMP_HK_COUNT; a++)
-            if (a != RECOMP_HK_FF_HOLD && a != RECOMP_HK_FF_TOGGLE)
+            if (!(ff & RECOMP_HK_BIT(a)) && (!states || a == RECOMP_HK_MENU))
                 hk.pad[a].mod = hk.pad[a].button = -1;
         hk_ready = 1;
     }
@@ -626,9 +632,14 @@ static void pad_hotkeys(int pad, XBOX_GAMEPAD *g)
         holding |= 1u << pad;
     else
         holding &= ~(1u << pad);
+    if (held & RECOMP_HK_BIT(RECOMP_HK_REWIND))
+        rewinding |= 1u << pad;
+    else
+        rewinding &= ~(1u << pad);
     recomp_ff_hold(holding != 0);
-    if (pressed)
-        recomp_hotkeys_run(pressed);   /* the toggle */
+    if (pressed & ff)
+        recomp_hotkeys_run(pressed & ff);   /* the toggle */
+    xbox_StateServiceHotkeys(pressed & ~ff, rewinding != 0);   /* also arms rewind: a title is playing */
     if (g)
         xbox_pad_hotkey_swallow(g, swallow);
     xbox_FastForwardPoll();

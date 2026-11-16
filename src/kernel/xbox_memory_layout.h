@@ -731,6 +731,13 @@ typedef struct XboxMemStateInfo {
  * it: 0 when it is well formed and matches this build's window sizes, -1
  * otherwise. info may be NULL. */
 int xbox_MemStateCheck(const uint8_t *in, size_t n, XboxMemStateInfo *info);
+/* Puts a MEM payload back (same-run restore, XBA-249): the heap's block table and cursor, the thread stack
+ * counts, the contiguous window's page map and counters, the lazy reservations. guest_vmem's page table must be
+ * what it is now (RECOMP_EXT_VMA commits are not redone): otherwise -1 and nothing changes. 0, or -1 with a
+ * reason in why. Every guest thread frozen. */
+int xbox_MemStateLoad(const uint8_t *in, size_t n, char *why, size_t why_n);
+/* What xbox_MemStateLoad would refuse, changing nothing: 0 when it would load. */
+int xbox_MemStateLoadCheck(const uint8_t *in, size_t n, char *why, size_t why_n);
 
 /* SHA-1 of the loaded XBE's headers (base to SizeOfHeaders: the image and
  * section headers with each section's own SHA-1 digest, the certificate), so

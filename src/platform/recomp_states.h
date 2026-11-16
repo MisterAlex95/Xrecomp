@@ -4,8 +4,10 @@
  * (gba_play, ps1_play: F1-F4 / Shift+F1-F4 / Tab) call, whatever console runs. A console runtime (gba_runtime,
  * ps1_runtime; n64_runtime can plug in the same way) attaches itself while a game plays: its console name, its
  * state folder (<save dir>/<console>-<KEY>) and two callbacks that save / load a slot between frames (the runtime
- * holds its frame mutex in them, so a state is never taken mid-frame). Xbox games do not attach yet: their threads
- * run on host stacks, so a state needs a safe-point freeze and more (docs/technical/xbox-save-states.md, XBA-249).
+ * holds its frame mutex in them, so a state is never taken mid-frame). Xbox titles attach too (console "xbox",
+ * xbox_state_service.c, XBA-249): their states freeze every guest thread at a kernel call and load only within the
+ * run that saved them, when every thread is back at the same call (else RECOMP_STATE_EREFUSED;
+ * docs/technical/xbox-save-states.md).
  *
  * Slot files: <dir>/state<N>.st, N = 1..RECOMP_STATE_SLOTS, and the automatic slot <dir>/auto.st (slot
  * RECOMP_STATE_AUTO = 0: saved when the player leaves the game, loaded at the next start to resume). A small header (magic "XRSLOT", version, console, game
@@ -54,6 +56,9 @@ enum {
     RECOMP_STATE_EIO = -5,       /* cannot write or read the file */
     RECOMP_STATE_ESLOT = -6,     /* slot out of range */
     RECOMP_STATE_ECORRUPT = -7,  /* not a state file, or truncated */
+    RECOMP_STATE_EREFUSED = -8,  /* the game is not at a point this state can be loaded at (Xbox: a thread parked
+                                  * elsewhere, created or ended since, a state from an earlier run), or a state
+                                  * cannot be taken right now (a thread that never reaches a kernel call) */
 };
 
 /* "ok", "no console game", "empty slot", ... (logs). */

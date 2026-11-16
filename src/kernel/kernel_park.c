@@ -60,7 +60,12 @@ typedef struct {
     volatile int32_t returned;
     volatile uint32_t status;
     volatile uint32_t site;          /* XBOX_PARK_SITE_* of the current park point */
+    volatile uint32_t call_esp;      /* esp at the call's Enter (the return address's slot), kept by Leave */
     RecompCpu cpu;
+    /* Same-run restore (XBA-249): the owner's own g_cpu (thread-local, valid while it is registered), and a
+     * call to issue again once the freeze lets it go (xbox_ParkRestoreThread / xbox_ParkTakeReissue). */
+    RecompCpu *live;
+    volatile int32_t reissue;
 } Slot;
 
 static Slot s_slots[XBOX_PARK_MAX_THREADS];
@@ -151,6 +156,7 @@ static void record_write(Slot *s, int returned, uint32_t site, uint32_t ordinal,
         s->site = site;
         s->ordinal = ordinal;
         s->ret_va = ret_va;
+        s->call_esp = g_esp;
     }
     s->returned = returned;
     s->status = returned ? g_eax : 0;
@@ -230,6 +236,9 @@ void xbox_ParkThreadStart(void)
             s->returned = 0;
             s->status = 0;
             s->site = XBOX_PARK_SITE_KERNEL;
+            s->call_esp = 0;
+            s->live = (RecompCpu *)&g_cpu;
+            s->reissue = 0;
             memset(&s->cpu, 0, sizeof s->cpu);
             /* A new generation of the slot: a capture that read the previous thread's record sees it change. */
             STORE32((volatile int32_t *)&s->seq, (int32_t)((s->seq + 2) & ~1u));
@@ -318,6 +327,12 @@ void xbox_ParkKernelLeave(void)
     park_leave();
 }
 
+void xbox_ParkKernelReturned(void)
+{
+    if (t_slot >= 0 && parked_now())
+        record_write(&s_slots[t_slot], 1, 0, 0, 0);
+}
+
 /* Only a guest thread's host wait outside a kernel call is a park point of its own (counted as one
  * kernel-call level); one inside a kernel call (a bridge's helper) leaves that call the park point. */
 void xbox_ParkHostWaitEnter(uint32_t site, uint32_t va)
@@ -332,13 +347,18 @@ void xbox_ParkHostWaitEnter(uint32_t site, uint32_t va)
     park_enter(site, 0, va);
 }
 
-void xbox_ParkHostWaitLeave(void)
+int xbox_ParkHostWaitLeave(void)
 {
+    int again = 0;
+
     if (t_hw <= 0 || --t_hw > 0)
-        return;
-    if (t_hw_counted)
+        return 0;
+    if (t_hw_counted) {
         park_leave();
+        again = xbox_ParkTakeReissue();   /* a same-run load put the thread back inside this wait (XBA-249) */
+    }
     t_hw_counted = 0;
+    return again;
 }
 
 void xbox_ParkCallbackEnter(void)
@@ -576,10 +596,12 @@ int xbox_ParkRecords(XboxParkRecord *out, int max)
             r->ret_va = s->ret_va;
             r->returned = s->returned;
             r->status = s->status;
+            r->call_esp = s->call_esp;
             r->dispatch = s->dispatch;
             r->tid = s->tid;
             r->kernel_calls = s->kernel_calls;
             r->site = s->site;
+            r->reissue = LOAD32(&s->reissue);
             r->cpu_bytes = (uint32_t)sizeof(RecompCpu);
             memcpy(r->cpu, (const void *)&s->cpu, sizeof(RecompCpu));
             FENCE();
@@ -610,6 +632,50 @@ int xbox_ParkRecordsChanged(const XboxParkRecord *r, int n)
             return 1;
     }
     return 0;
+}
+
+int xbox_ParkRestoreThread(int slot, const void *cpu_bytes, int reissue)
+{
+    const RecompCpu *cpu = (const RecompCpu *)cpu_bytes;
+    Slot *s;
+
+    if (slot < 0 || slot >= XBOX_PARK_MAX_THREADS || !cpu || !LOAD32(&s_freeze))
+        return -1;
+    s = &s_slots[slot];
+    if (!s->live)
+        return -1;
+    /* A host wait inside lifted code still waiting (XBA-251): the helper does not touch g_cpu while it waits,
+     * and the freeze holds the thread at its Leave once the wait ends, so its registers can be set now; the
+     * record is rewritten by that Leave. Reissue: the helper waits once more after that. */
+    if (s->site != XBOX_PARK_SITE_KERNEL && !s->returned
+        && (LOAD32(&s->state) == XBOX_PARK_WAITING || LOAD32(&s->state) == XBOX_PARK_KERNEL)) {
+        memcpy(s->live, cpu, sizeof *cpu);
+        STORE32(&s->reissue, reissue ? 1 : 0);
+        return 0;
+    }
+    /* Held at the end of its call: the owner sits in go_busy (Leave) until the thaw, and reads its g_cpu only
+     * after it, through the gate lock the thaw takes. Or still queued for the guest CPU after its bridge
+     * returned (xbox_ParkKernelReturned): it reads g_cpu only once it has the CPU and is past the freeze. Or
+     * held still from a previous load that set it to make its call again. */
+    if (LOAD32(&s->state) == XBOX_PARK_RUNNING || LOAD32(&s->state) == XBOX_PARK_FREE
+        || !(s->returned || (LOAD32(&s->reissue))))
+        return -1;
+    memcpy(s->live, cpu, sizeof *cpu);
+    STORE32((volatile int32_t *)&s->seq, (int32_t)(s->seq + 1));
+    memcpy(&s->cpu, cpu, sizeof s->cpu);
+    s->returned = !reissue;
+    s->status = reissue ? 0 : cpu->r_eax;
+    s->call_esp = reissue ? cpu->r_esp : s->call_esp;
+    STORE32((volatile int32_t *)&s->seq, (int32_t)(s->seq + 1));
+    STORE32(&s->reissue, reissue ? 1 : 0);
+    return 0;
+}
+
+int xbox_ParkTakeReissue(void)
+{
+    if (t_slot < 0)
+        return 0;
+    return InterlockedExchange((volatile LONG *)&s_slots[t_slot].reissue, 0) != 0;
 }
 
 int xbox_ParkDropped(void)

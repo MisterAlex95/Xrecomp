@@ -110,13 +110,18 @@ void xbox_ParkThreadStart(void);
 void xbox_ParkThreadEnd(void);
 void xbox_ParkKernelEnter(uint32_t ordinal, uint32_t ret_va);
 void xbox_ParkKernelLeave(void);
+/* Between the bridge's return and the guest CPU taken back (XBA-249): the record says « returned » already, so a
+ * thread queued for the guest CPU behind a frozen one counts as back from its call for a same-run load. */
+void xbox_ParkKernelReturned(void);
 void xbox_ParkCallbackEnter(void);
 void xbox_ParkCallbackLeave(void);
 /* A host wait inside lifted code (XBOX_PARK_SITE_POLL .. PREEMPT, va the guest VA of the call site; 0 when
  * the caller has none, a title override's call). Nested ones (xbox_GuestPollWait's kick wait) only count
  * once: the outermost site is recorded. Leave blocks while a freeze holds the thread. */
 void xbox_ParkHostWaitEnter(uint32_t site, uint32_t va);
-void xbox_ParkHostWaitLeave(void);
+/* Returns 1 when a same-run state load (XBA-249) put the thread back « inside » this wait: its registers are
+ * the ones it entered with, and the helper waits again (call Enter / wait / Leave once more). */
+int  xbox_ParkHostWaitLeave(void);
 /* "kernel call", "poll loop", "NV2A kick wait", "hlt", "guest CPU preempt"; "?" otherwise. */
 const char *xbox_ParkSiteName(uint32_t site);
 
@@ -185,6 +190,7 @@ typedef struct {
     uint32_t ret_va;         /* its guest return address */
     int returned;            /* the call has returned (the thread is held at its end) */
     uint32_t status;         /* eax as the call left it, when returned */
+    uint32_t call_esp;       /* esp when the call was made (the return address's slot), returned or not */
     int dispatch;            /* held at DISPATCH_LEVEL */
     unsigned long tid;       /* host thread id */
     uint64_t kernel_calls;
@@ -192,6 +198,7 @@ typedef struct {
     uint32_t cpu_bytes;      /* sizeof(RecompCpu) */
     uint64_t cpu[XBOX_PARK_CPU_BYTES / 8];   /* the RecompCpu, cpu_bytes of it */
     uint32_t site;           /* XBOX_PARK_SITE_*: a kernel call, or a host wait inside lifted code */
+    int reissue;             /* a same-run load set its registers to make its call again at the thaw (XBA-249) */
 } XboxParkRecord;
 
 /* The registered threads' records (at most max), each read consistently: a record being rewritten is waited
@@ -199,6 +206,18 @@ typedef struct {
 int  xbox_ParkRecords(XboxParkRecord *out, int max);
 /* 1 when a record of r[0..n) changed since it was read, or a thread registered or ended. */
 int  xbox_ParkRecordsChanged(const XboxParkRecord *r, int n);
+/* Same-run restore (XBA-249, xbox_state.h xbox_StateLoad). With a freeze in force and the thread in `slot` held
+ * at the end of its call (state HELD, returned): its register set becomes cpu, which it sees when the call
+ * returns at the thaw (reissue 0: the record was « returned », cpu is as the call left it), or the call is
+ * made again from cpu (reissue 1: the record was « in the call », cpu as the guest made it, esp at the return
+ * address): kernel_thunk_dispatch asks xbox_ParkTakeReissue after its Leave hook and dispatches the same
+ * slot again. Its park record is rewritten to match. A thread at a host wait inside lifted code (XBA-251) may
+ * also be still waiting: its registers are set at once, and with reissue the helper waits once more when its
+ * xbox_ParkHostWaitLeave returns 1. 0, or -1 (not frozen, not held at a call's end nor at a host wait). */
+int  xbox_ParkRestoreThread(int slot, const void *cpu, int reissue);   /* cpu: a RecompCpu */
+/* On the calling guest thread, after xbox_ParkKernelLeave: 1 (once) when its call must be issued again. */
+int  xbox_ParkTakeReissue(void);
+
 /* Threads that started while every slot was taken (untracked: a state cannot cover them). */
 int  xbox_ParkDropped(void);
 /* 1 when the calling thread is a registered guest thread. */

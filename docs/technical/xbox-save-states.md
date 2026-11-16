@@ -224,7 +224,7 @@ section. What refuses a save: a set on its way to a blocked thread (retry), a ho
 host object kind we do not carry (file mappings), and, for another run, a running thread, an owned mutant or a held
 host critical section. A held host critical section in session is recorded and must be held by the same thread, as
 deep, when the state loads. A load refuses, changing nothing, while a thread is blocked on an event it would tear
-down: bringing parked threads out of their waits and back is XBA-249's. POSIX hosts only: on Windows the objects are
+down: the same-run load (XBA-249) waits until every thread is back from its kernel call first. POSIX hosts only: on Windows the objects are
 real Win32 objects and the save is refused. Test: `tests/kernel_kobj_state`.
 
 ## Data format (XBA-245: `src/kernel/xbox_state.h`)
@@ -264,18 +264,20 @@ sections, each: u32 tag, u32 version, u64 length, payload
   USB    OHCI registers, device models
 ```
 
-The sections this ticket writes (built in, always first):
+The sections this ticket writes (built in, always first; since XBA-249 `KOBJ`, `NV2A`, `APU ` and `USB ` follow them,
+built in too, so a state has seven sections):
 
 | Tag | Version | Payload |
 |---|---|---|
-| `CPU ` | 2 | u32 thread count, u32 sizeof(RecompCpu); per guest thread a 68-byte head (park slot, park state, ordinal, guest return address, returned, status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base and limit from the KTHREAD, esp, guest thread id, park site) then the raw RecompCpu |
+| `CPU ` | 3 | u32 thread count, u32 sizeof(RecompCpu), u64 run id (XBA-249); per guest thread a 68-byte head (park slot, park state, ordinal, guest return address, returned, status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base and limit from the KTHREAD, esp at the park point (the call's return address slot, XBA-249), guest thread id, park site) then the raw RecompCpu |
 | `MEM ` | 1 | `xbox_MemStateSave`: heap cursor, alloc count and block table, worker stack count; the contiguous window's counters, page map, block lengths (sparse) and RAM-name map; the lazy reservations; guest_vmem's page table as runs |
 | `RAM ` | 1 | u32 range count; per range u32 kind, u32 guest base, u32 pages, a bitmap of the pages stored, then those pages (4 KB each) |
 
 Not in the design's first draft: the ebp shadow stack and the chain signature in `CPU ` (XBA-247 adds them and bumps
 the section's version), compression.
 
-**Park records, two kinds** (`CPU ` v2, XBA-251; v1 had no site and is refused, `EVERSION`). The head's last word,
+**Park records, two kinds** (`CPU ` v2, XBA-251; v3 since XBA-249 adds the run id and the esp at the park point;
+older versions are refused, `EVERSION`). The head's last word,
 the park site (`XboxParkRecord.site`, `XboxStateThread.site`, `XBOX_PARK_SITE_*` in `kernel_park.h`), says which:
 
 | Site | Kind | ordinal | guest return address | Resume |
@@ -302,7 +304,8 @@ capture already hashes every page and counts the pages changed since the previou
 ```c
 static int kobj_save(XboxStateWriter *w, const XboxStateContext *ctx, void *user);   /* every guest thread frozen */
 static int kobj_check(const uint8_t *p, size_t n, uint32_t version, void *user);     /* validate, restore nothing */
-static const XboxStateSection kobj = { XBOX_STATE_TAG_KOBJ, 1, "kobj", kobj_save, kobj_check, NULL };
+static int kobj_load(const uint8_t *p, size_t n, uint32_t version, void *user);      /* XBA-249: put it back */
+static const XboxStateSection kobj = { XBOX_STATE_TAG_KOBJ, 1, "kobj", kobj_save, kobj_check, NULL, kobj_load };
 xbox_StateRegister(&kobj);   /* once, from the component's init, before the first capture */
 ```
 
@@ -314,7 +317,9 @@ xbox_StateRegister(&kobj);   /* once, from the component's init, before the firs
   record, registers, KTHREAD, guest stack).
 - `check` parses its payload with `XboxStateReader` / `xbox_StateGet32 ...` and returns `XBOX_STATE_OK`,
   `_ECORRUPT` or `_EVERSION`. The container has already checked the section's length and hash.
-- Bump the section's version when its payload changes. XBA-249 adds the load callbacks.
+- `load` (XBA-249) puts a checked payload back, every guest thread frozen and the device threads held; on failure it
+  returns an error with a reason (`xbox_StateSectionReason`) and the load puts the state of before back.
+- Bump the section's version when its payload changes.
 
 ### Reading
 
@@ -322,7 +327,8 @@ xbox_StateRegister(&kobj);   /* once, from the component's init, before the firs
 version; the header hash; the identity against the running title (another title or XBE: `EGAME`; another build ID,
 toolkit, memory size or RecompCpu size: `EVERSION`); every section's bounds and hash (`ECORRUPT`), that this build
 registers it with the same version (`EVERSION`: a state from a build with other sections), its check callback; that
-every registered section is present; no trailing bytes. Nothing is restored (XBA-249). `xbox_StateParseHeader` reads
+every registered section is present; no trailing bytes. Nothing is restored (`xbox_StateLoad` does, below).
+`xbox_StateParseHeader` reads
 the header alone, for a menu listing slots of any title.
 
 A state loads only into the binary that saved it (the build ID): call-site addresses and the lifted functions'
@@ -419,6 +425,99 @@ Not covered: the AC'97 page and the NIC (a state taken during a network session 
 HLE DirectSound layer's host buffers (`src/audio`: restored only within the run that owns them), the legacy
 xemu-derived `src/nv2a` model (Windows MMIO path, not run by recompiled titles).
 
+## Same-run load (XBA-249)
+
+`xbox_StateLoad(blob, n, timeout, &stats)` (and `xbox_StateLoadSlot`), from any host thread that is not a guest
+thread, one capture or load at a time:
+
+1. **Check** the blob (`xbox_StateCheck`: title, build, sections) and that it was taken **in this run** (the `CPU `
+   section's run id, random per process): a state from an earlier run refuses (`ECHAIN`, « saved in another run »)
+   until resume entries (XBA-250).
+2. **Freeze** every guest thread (`xbox_ParkFreeze`), then **settle**: each thread in a kernel call must be back from
+   it (its bridge returned: held at the call's end, or queued for the guest CPU behind a frozen thread,
+   `xbox_ParkKernelReturned`). A wait in progress is given the timeout (500 ms from the menu) to end: sleeps and
+   vblank waits do; a wait only another guest thread can end does not, and the load refuses naming it. A thread at a
+   host wait inside lifted code (XBA-251) may still be waiting: the helper touches nothing a load changes. A thread
+   created since the state, or one that ended since, refuses at once.
+3. **Where each thread stands** (`chain_matches` in `xbox_state.c`): the same park point as in the state, the same
+   kernel call (ordinal, guest return address) or a host wait at the same guest VA (a poll loop's back edge is also
+   where the guest CPU lock preempts: either kind matches), with esp at the same place when it was entered. The host
+   frames below the thread are then assumed to be the state's: a title's threads loop through the same chains. This
+   is the hook XBA-247 replaces with the chain signature (every frame's return address and esp, the ebp shadow stack);
+   until then a thread that reaches the same call through another chain with the same esp would load wrongly (not
+   seen in the test titles' shape; a known limit). Any difference: `ECHAIN` (`RECOMP_STATE_EREFUSED` for the menu)
+   with the reason, nothing changed.
+4. **Pre-checks**: every saved guest page is mapped now; the memory manager's `RECOMP_EXT_VMA` page table is what it
+   was (commits are not redone yet).
+5. **Backup**: a capture of now (the same freeze), put back if a section fails part way: never a partial load.
+6. With the dispatch gate and the device threads held (`xbox_DevStateFreeze`): **MEM** (`xbox_MemStateLoad`: the heap's
+   block table and cursor, thread stack counts, the contiguous window's page map, the lazy reservations), **RAM**
+   (every page of every saved range copied or zeroed; the page hashes start again), **KOBJ** (`xbox_KobjLoad`, in
+   session: objects made again under their handles, running threads bound by host thread id, the guest clock),
+   **NV2A**, **APU**, **USB**, any other registered section; then each thread's **registers**
+   (`xbox_ParkRestoreThread`): a « returned » record's registers are what the thread sees when its call returns; an
+   « in the call » record makes the call again from the registers the guest made it with (the restored guest stack
+   holds its arguments): `kernel_thunk_dispatch` loops on `xbox_ParkTakeReissue`, a host-wait helper on
+   `xbox_ParkHostWaitLeave`'s answer.
+7. `xbox_DevStateThaw(1)` (GPU caches dropped, frame generation's history restarted), thaw.
+
+One line per load:
+
+```
+[STATE] load: 4 guest threads back at their calls (2 made again), 5 RAM pages written; 20.32 ms (freeze 0.00, settle 4.79, backup 6.51, sections 9.03)
+[STATE] load refused: the game is not at a point this state can be loaded at (guest thread 1008 is in kernel call 99 from 0x00011068, in call 99 from 0x00011060 in the state)
+```
+
+The capture holds the device threads too since XBA-249 (the NV2A has read its render targets back into guest memory
+before RAM is written), and a device thread that is not running answers at once (`xbox_Nv2aPollHold` -1,
+`xbox_OhciStateHold` 0) instead of after 2 s.
+
+### The front end (`src/kernel/xbox_state_service.c`)
+
+`xbox_kernel_bridge_init` starts the service: once the title's paths are set it attaches to `recomp_states` as console
+`xbox`, slots in `<save dir>/xbox-<TITLE ID>/state<N>.st` (no thumbnail yet), so the Android in-game menu's Save state
+/ Load state, the quick save / load pad chords (Back + RB / Back + LB by default), the slot hotkeys and the rewind
+hold reach the Xbox capture and load like a console's. The pad's hotkeys come from the OHCI controller thread, which
+a capture holds, so they run on the service's own thread. A game held by the menu or the background is let go for
+the length of the capture or load (threads waiting on the GPU behind a parked flip never reach a kernel call
+otherwise). `xbox_StateAvailable(why)` says whether states can be offered now (`MenuNative.nativeStatesAvailable`,
+`nativeStatesReason`): attached with a save folder, guest threads running, no stack switching (fibers), no untracked
+threads. The app shows Save state / Load state for an Xbox title when it is true, but no « Resume where I left off »
+and no automatic slot (states do not survive the run). A refused load shows « The game is not at a point where this
+state can be loaded »; a capture not possible now « A state cannot be saved at this point of the game ».
+
+**Rewind**: the service captures every 500 ms (`RECOMP_REWIND_MS`; at least 20 times the last capture's cost, so it
+never takes more than 5 % of the time) into `recomp_rewind`'s XOR-delta ring of XBXS blobs, from the first pad report
+on, while the game is not held; holding the rewind chord (Back + LT) loads the newest capture every 125 ms and drops
+it. It turns itself off, saying why, when a blob does not fit half the ring (`RECOMP_REWIND_MB`, default 64) or three
+captures in a row fail (a capture's freeze waits 20 ms at most, so a thread that never parks costs that, three
+times). `RECOMP_REWIND=0`: off. A load from a slot clears the ring.
+
+### Measurements
+
+`tests/xbox_state` (« Same-run load »), Linux x86-64 in Docker `xba-deps`, the synthetic XBE and four game-shaped
+threads:
+
+| Measure | Lock and gate off | Guest CPU lock and dispatch gate on |
+|---|---|---|
+| Load (capture then load, 10 in a row) | 30-32 ms mean, 40 ms worst | 35 ms mean, 45 ms worst |
+| of which: settle (waits ending) / backup capture / sections | 5-50 / 6.5 / 7-9 ms | 40 / 6.4 / 7-9 ms |
+| Rewind capture / delta coding | 12 ms / 0.02 ms | 9.6 ms / 0.02 ms |
+| Ring for 8 captures (blob 0.12 MB) | 0.26 MB | 0.26 MB |
+| A step back (load) | 30-60 ms | 30-43 ms |
+
+The settle time is the threads' own sleeps ending (the loader sleeps 50 ms). On the synthetic XBE rewind costs
+little, so it is on; a real title's blob is 40-64 MB and its capture tens of ms (XBA-252 measures): the adaptive
+interval keeps it under 5 % and the budget check turns it off rather than hold a ring of one capture.
+
+Tests: `tests/xbox_state` « Same-run load »: a state captured, then guest RAM, a kernel object (an event created,
+another closed), the heap and an NV2A register changed; the load puts all back, and every thread returns from its
+call with the state's registers; refused, with nothing changed: a thread parked at another call site, a thread
+created since, one ended since, a state of another run; ten round trips; rewind's ring and four steps back; the
+front end (attached as `xbox`, the menu's slot 2 saved and loaded, a refused load answered `RECOMP_STATE_EREFUSED`,
+the quick save chord run on the service's thread); « Host waits »: a state with threads at host waits loads. App:
+`GameMenuTest.xboxStateRows`.
+
 ## Limits
 
 - **Titles outside the class** (above) never offer states. The status file and the app name the reason: fibers or
@@ -441,7 +540,7 @@ xemu-derived `src/nv2a` model (Windows MMIO path, not run by recompiled titles).
 | XBA-246 | Kernel objects with readable, restorable state | |
 | XBA-247 | Lifter: ebp shadow stack across calls, call-site unwind table, chain signatures | |
 | XBA-248 | NV2A, APU and USB capture and restore | |
-| XBA-249 | In-session restore: rewind, quick save / load within a run, attach to `recomp_states` | 245, 246, 247, 248 |
+| XBA-249 | In-session restore: rewind, quick save / load within a run, attach to `recomp_states`: done (`xbox_StateLoad`, `xbox_state_service.c`; the chain check is the innermost park point until XBA-247) | 245, 246, 248 (247: the chain signature) |
 | XBA-250 | Resume entries in lifted code: states across runs, « Resume where I left off » | 247, 249 |
 | XBA-251 | Park points at host waits inside lifted code (guest poll waits, NV2A kick waits, hlt, preempts): done (`CPU ` v2) | |
 | XBA-252 | Park statistics on our titles (Linux arm64, device) | |

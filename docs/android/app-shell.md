@@ -1209,7 +1209,7 @@ chord; « » = the defaults for this game, `recomp.cfg`'s line skipped).
 | Quick save / Quick load | Select + R1 / Select + L1 | the quick slot |
 | Next / Previous quick slot | none | around 1..4, the menu says « Quick slot: N » |
 | Rewind (hold) | Select + L2 | XBA-194: back in time while held, one capture per frame, silent; let go to play on ([Rewind](#rewind)) |
-| Game menu (held ½ s) | Select + Start | an Xbox title has this one and the two fast-forward ones (XBA-240; no save states there, decision 2026-11-14) |
+| Game menu (held ½ s) | Select + Start | an Xbox title has this one and the two fast-forward ones (XBA-240); with states offered by its runtime (XBA-249) also quick save / load, the slots and rewind |
 
 **Controls › Hotkeys** (the end of a GBA / PS1 / N64 game's Controls and of the Xbox Controls, before « Reset
 controls »): one row per action (the menu's and fast-forward's for an Xbox title, XBA-240), its value the chord (« Select + R1 », « None »).

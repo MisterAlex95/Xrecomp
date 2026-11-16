@@ -296,9 +296,17 @@ final class Hotkeys {
 
     /** The actions a game of console c shows: all of them with save states, else the menu and fast-forward. */
     static List<Action> actions(Console c) {
+        return actions(c, false);
+    }
+
+    /**
+     * XBA-249: with states (an Xbox title whose runtime offers them, the in-game menu's Controls page), every action
+     * applies; otherwise those of {@link #actions(Console)}.
+     */
+    static List<Action> actions(Console c, boolean states) {
         List<Action> out = new ArrayList<>();
         for (Action a : Action.values()) {
-            if (a.appliesTo(c))
+            if (states || a.appliesTo(c))
                 out.add(a);
         }
         return out;

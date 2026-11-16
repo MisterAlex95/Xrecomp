@@ -277,6 +277,8 @@ static volatile long     s_catchups;
  * thread stands still between passes while s_test_hold is set, and says so
  * in s_test_held; a held controller is overdue by definition. */
 static volatile int s_test_hold, s_test_held;
+/* The controller thread is in its loop (XBA-249: a hold asked of a thread that is not there answers at once). */
+static volatile int s_thread_running;
 
 static int list_try(void)
 {
@@ -1514,6 +1516,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
     }
     __atomic_store_n(&s_tick_ns, xbox_HostNowNs(), __ATOMIC_RELAXED);
     xbox_IrqSetCatchUpHook(xbox_OhciCatchUp);
+    __atomic_store_n(&s_thread_running, 1, __ATOMIC_RELEASE);
 
     for (;;) {
         OhciController *hc = &s_hc[s_device_hc];
@@ -1752,6 +1755,8 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
         if (gated)
             xbox_DispatchGateLeave();
     }
+    __atomic_store_n(&s_thread_running, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_test_held, 0, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -1976,7 +1981,8 @@ void xbox_OhciReport(void)
 
 int xbox_OhciStateHold(int hold)
 {
-    if (!s_enabled)
+    /* No controller thread (USB off, it gave up waiting for the driver, a test): nothing to hold, at once. */
+    if (!s_enabled || (hold && !__atomic_load_n(&s_thread_running, __ATOMIC_ACQUIRE)))
         return 0;
     return xbox_OhciHoldControllerForTest(hold);
 }

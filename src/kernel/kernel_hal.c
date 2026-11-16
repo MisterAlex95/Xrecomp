@@ -1088,12 +1088,13 @@ void xbox_Halt(uint32_t va)
         }
     }
     xbox_IrqSafePoint();
-    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_HALT, va);
-    held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL, 238 /* NtYieldExecution */);
-    Sleep(1);
-    if (held)
-        xbox_GuestCpuAcquire();
-    xbox_ParkHostWaitLeave();      /* after the acquire, as a kernel call's Leave */
+    do {   /* again when a same-run state load put the thread back in here (XBA-249) */
+        xbox_ParkHostWaitEnter(XBOX_PARK_SITE_HALT, va);
+        held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL, 238 /* NtYieldExecution */);
+        Sleep(1);
+        if (held)
+            xbox_GuestCpuAcquire();
+    } while (xbox_ParkHostWaitLeave());   /* after the acquire, as a kernel call's Leave */
 }
 
 /*

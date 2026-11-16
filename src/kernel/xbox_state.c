@@ -1,6 +1,6 @@
 /*
- * xbox_state.c - Xbox save states: the XBXS container, its sections, the capture and the read side
- * (XBA-245; format and API in xbox_state.h, design in docs/technical/xbox-save-states.md)
+ * xbox_state.c - Xbox save states: the XBXS container, its sections, the capture, the read side (XBA-245)
+ * and the same-run load (XBA-249). Format and API in xbox_state.h, design in docs/technical/xbox-save-states.md.
  *
  * A capture, with every guest thread frozen at a kernel boundary (xbox_ParkFreeze):
  *   1. settle: a thread frozen inside a non-blocking call is still running that call's bridge; wait (a few
@@ -10,7 +10,11 @@
  *   3. read the park records, write every section, and check the records again: a call that returned
  *      during the capture (a wait satisfied) rewrote its record and maybe guest memory, so the capture is
  *      taken again (that thread is held now; a few attempts at most)
- * The built-in sections' save and check callbacks are xbox_state_guest.c.
+ * The device threads (NV2A poll, APU frame, OHCI controller) are held around the sections
+ * (xbox_DevStateFreeze / Thaw, XBA-248), so the NV2A has read its render targets back into guest memory first.
+ *
+ * A load (same run): see xbox_state.h and xbox_StateLoadFrozen below.
+ * The built-in sections' save, check and load callbacks are xbox_state_guest.c.
  */
 #if !defined(_WIN32) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE   /* dl_iterate_phdr, dladdr */
@@ -18,10 +22,13 @@
 #include "xbox_state.h"
 #include "kernel.h"
 #include "kernel_park.h"
+#include "kernel_kobj_state.h"
+#include "xbox_dev_state.h"
 #include "platform/host_time.h"
 #include "platform/recomp_states.h"
 
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +57,16 @@ int xbox_state_ram_check(const uint8_t *p, size_t n, uint32_t version, void *use
 void xbox_state_ram_begin(void);
 void xbox_state_ram_commit(XboxStateStats *st);
 void xbox_state_ram_reset(void);
+/* XBA-249: the loads, the pre-checks, the kernel object and device wrappers. */
+int xbox_state_mem_load(const uint8_t *p, size_t n, uint32_t version, void *user);
+int xbox_state_ram_load(const uint8_t *p, size_t n, uint32_t version, void *user);
+int xbox_state_ram_precheck(const uint8_t *p, size_t n, char *why, size_t why_n);
+uint32_t xbox_state_ram_written(void);
+int xbox_state_kobj_save(XboxStateWriter *w, const XboxStateContext *ctx, void *user);
+int xbox_state_kobj_check(const uint8_t *p, size_t n, uint32_t version, void *user);
+int xbox_state_kobj_load(const uint8_t *p, size_t n, uint32_t version, void *user);
+int xbox_state_dev_save(XboxStateWriter *w, const XboxStateContext *ctx, void *user);
+int xbox_state_dev_load(const uint8_t *p, size_t n, uint32_t version, void *user);
 
 /* Each frozen thread can change its record once (its call returns, then the freeze holds it), so
  * threads + 1 attempts always end with one that saw no change; a few more for threads that start. */
@@ -208,6 +225,7 @@ const char *xbox_StateError(int code)
     case XBOX_STATE_ENOMEM: return "out of memory";
     case XBOX_STATE_ESECTION: return "a component could not save its state";
     case XBOX_STATE_EUNSTABLE: return "guest threads kept moving during the capture";
+    case XBOX_STATE_ECHAIN: return "the game is not at a point this state can be loaded at";
     default: return "error";
     }
 }
@@ -247,17 +265,50 @@ static int register_locked(const XboxStateSection *s)
 
 static void builtin_locked(void)
 {
+    /* CPU's load is the core's (the threads are matched, then put back last: xbox_StateLoadFrozen). */
     static const XboxStateSection builtin[] = {
-        { XBOX_STATE_TAG_CPU, XBOX_STATE_CPU_VERSION, "cpu", xbox_state_cpu_save, xbox_state_cpu_check, NULL },
-        { XBOX_STATE_TAG_MEM, XBOX_MEM_STATE_VERSION, "mem", xbox_state_mem_save, xbox_state_mem_check, NULL },
-        { XBOX_STATE_TAG_RAM, XBOX_STATE_RAM_VERSION, "ram", xbox_state_ram_save, xbox_state_ram_check, NULL },
+        { XBOX_STATE_TAG_CPU, XBOX_STATE_CPU_VERSION, "cpu", xbox_state_cpu_save, xbox_state_cpu_check, NULL,
+          NULL },
+        { XBOX_STATE_TAG_MEM, XBOX_MEM_STATE_VERSION, "mem", xbox_state_mem_save, xbox_state_mem_check, NULL,
+          xbox_state_mem_load },
+        { XBOX_STATE_TAG_RAM, XBOX_STATE_RAM_VERSION, "ram", xbox_state_ram_save, xbox_state_ram_check, NULL,
+          xbox_state_ram_load },
+        { XBOX_STATE_TAG_KOBJ, XBOX_KOBJ_VERSION, "kobj", xbox_state_kobj_save, xbox_state_kobj_check, NULL,
+          xbox_state_kobj_load },
     };
-    size_t i;
+    const XdsSection *dev;
+    int ndev = 0, i;
+    size_t k;
     if (s_builtin_done)
         return;
     s_builtin_done = 1;
-    for (i = 0; i < sizeof builtin / sizeof builtin[0]; i++)
-        register_locked(&builtin[i]);
+    for (k = 0; k < sizeof builtin / sizeof builtin[0]; k++)
+        register_locked(&builtin[k]);
+    /* NV2A, APU, USB (XBA-248): the device models' own payloads. */
+    dev = xbox_DevStateSections(&ndev);
+    for (i = 0; i < ndev; i++) {
+        XboxStateSection s;
+        memset(&s, 0, sizeof s);
+        s.tag = dev[i].tag;          /* XDS_TAG_* == XBOX_STATE_TAG_NV2A / APU / USB */
+        s.version = dev[i].version;
+        s.name = dev[i].name;
+        s.save = xbox_state_dev_save;
+        s.load = xbox_state_dev_load;
+        s.user = (void *)&dev[i];
+        register_locked(&s);
+    }
+}
+
+/* ---- Section reasons ------------------------------------------------------------------------------------- */
+
+static char s_sec_reason[192];   /* one capture or load at a time */
+
+void xbox_StateSectionReason(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(s_sec_reason, sizeof s_sec_reason, fmt, ap);
+    va_end(ap);
 }
 
 static void ensure_builtin(void)
@@ -510,6 +561,7 @@ int xbox_StateContextThread(const XboxStateContext *ctx, int i, XboxStateThread 
     out->tid = (uint32_t)r->tid;
     out->kernel_calls = r->kernel_calls;
     out->site = r->site;
+    out->call_esp = r->call_esp;
     memcpy(&out->cpu, r->cpu, sizeof(RecompCpu));
     out->tib = out->cpu.r_fs_base;
     /* fs:[0x28] names the KTHREAD (XBA-113); the runtime fills its StackBase (+0x1C), StackLimit (+0x20)
@@ -549,13 +601,14 @@ static int capture_once(XboxStateWriter *w, const XboxStateContext *ctx, XboxSta
 
         if (!xbox_StateReserve(w, XBOX_STATE_SECTION_HEAD))
             return XBOX_STATE_ENOMEM;
+        s_sec_reason[0] = 0;
         rc = secs[i].save(w, ctx, secs[i].user);
         if (w->failed)
             return XBOX_STATE_ENOMEM;
         if (rc != XBOX_STATE_OK) {
             tag_str(secs[i].tag, t);
             REASON(st->reason, "section %s (%s) failed: %s", t, secs[i].name ? secs[i].name : "?",
-                   xbox_StateError(rc));
+                   s_sec_reason[0] ? s_sec_reason : xbox_StateError(rc));
             return XBOX_STATE_ESECTION;
         }
         len = w->n - head - XBOX_STATE_SECTION_HEAD;
@@ -637,6 +690,13 @@ int xbox_StateCaptureFrozen(uint8_t **blob, size_t *blob_n, XboxStateStats *st)
         REASON(st->reason, "the dispatch gate is held (by host thread %lu)", xbox_DispatchGateOwner());
         return XBOX_STATE_EBUSY;
     }
+    /* The device threads between two passes (a thread that is not running holds nothing, at once). */
+    if (!xbox_DevStateFreeze()) {
+        xbox_DevStateThaw(0);
+        xbox_DispatchGateLeave();
+        REASON(st->reason, "the NV2A poll thread did not stop within 2 s");
+        return XBOX_STATE_EBUSY;
+    }
 
     /* 3. Capture until no record changed meanwhile. */
     memset(&w, 0, sizeof w);
@@ -657,6 +717,7 @@ int xbox_StateCaptureFrozen(uint8_t **blob, size_t *blob_n, XboxStateStats *st)
         rc = XBOX_STATE_EUNSTABLE;
     }
     st->capture_ms = ms_since(t0);
+    xbox_DevStateThaw(0);
     xbox_DispatchGateLeave();
 
     if (rc == XBOX_STATE_EUNSTABLE)
@@ -932,6 +993,320 @@ int xbox_StateSection(const uint8_t *b, size_t n, uint32_t tag, const uint8_t **
         at += XBOX_STATE_SECTION_HEAD + (size_t)l;
     }
     return XBOX_STATE_EEMPTY;
+}
+
+/* ---- Same-run load (XBA-249) ---------------------------------------------------------------------------- */
+
+/* Whether thread `cur` (held at the end of its park point now) stands where `sv` stood in the state: the same
+ * park point (a kernel call or a host wait inside lifted code), at the same guest return address or site, with
+ * esp at the same place when it was entered. Lifted code keeps the return path and ebp in host frames, so the
+ * host stack below the thread is the state's only if every frame matches; with this check, that is assumed from
+ * the innermost one (a title's threads loop through the same chains). XBA-247 adds the chain signature (each
+ * frame's return address and esp, the ebp shadow stack) to the CPU section: compare it here. */
+static int chain_matches(const XboxStateThread *sv, const XboxParkRecord *cur, char *why, size_t why_n)
+{
+    /* Two host waits at the same guest VA (a poll loop's back edge is also where the guest CPU lock preempts)
+     * are one place: the same lifted frame, and either helper only waits; the thread's own helper resumes. */
+    if ((sv->site == XBOX_PARK_SITE_KERNEL) != (cur->site == XBOX_PARK_SITE_KERNEL)) {
+        snprintf(why, why_n, "guest thread %u is in a %s now, in a %s in the state", sv->tid,
+                 xbox_ParkSiteName(cur->site), xbox_ParkSiteName(sv->site));
+        return 0;
+    }
+    if (sv->site == XBOX_PARK_SITE_KERNEL && (sv->ordinal != cur->ordinal || sv->ret_va != cur->ret_va)) {
+        snprintf(why, why_n, "guest thread %u is in kernel call %u from 0x%08X, in call %u from 0x%08X in the"
+                 " state", sv->tid, cur->ordinal, cur->ret_va, sv->ordinal, sv->ret_va);
+        return 0;
+    }
+    if (sv->site != XBOX_PARK_SITE_KERNEL && sv->ret_va != cur->ret_va) {
+        snprintf(why, why_n, "guest thread %u is in a %s at 0x%08X, at 0x%08X in the state", sv->tid,
+                 xbox_ParkSiteName(sv->site), cur->ret_va, sv->ret_va);
+        return 0;
+    }
+    if (sv->call_esp != cur->call_esp) {
+        snprintf(why, why_n, "guest thread %u is at the same call (0x%08X) with another stack depth (esp 0x%08X,"
+                 " 0x%08X in the state)", sv->tid, cur->ret_va, cur->call_esp, sv->call_esp);
+        return 0;
+    }
+    /* XBA-247: the chain signature, frame by frame, goes here. */
+    return 1;
+}
+
+static volatile int32_t s_loading;
+
+/* Every section but CPU, in the order the load puts them back: MEM, RAM, then the others as registered. */
+static int apply_sections(const uint8_t *blob, size_t n, char *why, size_t why_n)
+{
+    XboxStateSection secs[XBOX_STATE_MAX_SECTIONS];
+    int ns, i, pass, rc;
+    char t[5];
+
+    AcquireSRWLockShared(&s_reg_lock);
+    ns = s_nsections;
+    memcpy(secs, s_sections, (size_t)ns * sizeof secs[0]);
+    ReleaseSRWLockShared(&s_reg_lock);
+    for (pass = 0; pass < 3; pass++)
+        for (i = 0; i < ns; i++) {
+            const uint8_t *p;
+            size_t len;
+            uint32_t ver;
+            uint32_t tag = secs[i].tag;
+            int want = pass == 0 ? tag == XBOX_STATE_TAG_MEM
+                     : pass == 1 ? tag == XBOX_STATE_TAG_RAM
+                     : tag != XBOX_STATE_TAG_MEM && tag != XBOX_STATE_TAG_RAM;
+            if (!want)
+                continue;
+            if (!secs[i].load || tag == XBOX_STATE_TAG_CPU)
+                continue;
+            if (xbox_StateSection(blob, n, tag, &p, &len, &ver) != XBOX_STATE_OK)
+                continue;
+            s_sec_reason[0] = 0;
+            rc = secs[i].load(p, len, ver, secs[i].user);
+            if (rc != XBOX_STATE_OK) {
+                tag_str(tag, t);
+                snprintf(why, why_n, "section %s: %s", t, s_sec_reason[0] ? s_sec_reason : xbox_StateError(rc));
+                return rc;
+            }
+        }
+    return XBOX_STATE_OK;
+}
+
+int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, XboxStateLoadStats *st)
+{
+    static XboxParkRecord recs[XBOX_PARK_MAX_THREADS];   /* one load at a time (s_loading) */
+    static XboxStateThread saved[XBOX_PARK_MAX_THREADS];
+    int pair[XBOX_PARK_MAX_THREADS];
+    XboxStateLoadStats local;
+    XboxStateInfo info;
+    XboxStateStats bst;
+    const uint8_t *cp, *mp, *rp;
+    size_t cl, ml, rl, bn = 0;
+    uint8_t *backup = NULL;
+    uint64_t t0;
+    int rc, ns, nc = 0, i, k, gate;
+    char why[256];
+
+    if (!st)
+        st = &local;
+    {
+        double fz = st->freeze_ms;
+        memset(st, 0, sizeof *st);
+        st->freeze_ms = fz;
+    }
+    ensure_builtin();
+
+    /* 1. The blob, against this title and build. */
+    rc = xbox_StateCheck(blob, n, &info);
+    if (rc != XBOX_STATE_OK) {
+        REASON(st->reason, "%s", info.reason);
+        return rc;
+    }
+    xbox_StateSection(blob, n, XBOX_STATE_TAG_CPU, &cp, &cl, NULL);
+    if (xbox_StateCpuRun(cp, cl) != xbox_StateRunId()) {
+        REASON(st->reason, "saved in another run of the game (a state loads only into the run that saved it,"
+               " until XBA-250)");
+        return XBOX_STATE_ECHAIN;
+    }
+    ns = xbox_StateCpuThreads(cp, cl, saved, XBOX_PARK_MAX_THREADS);
+
+    /* 2. The same threads, each held at the end of its park point: a wait in progress is given settle_ms to
+     * end (a sleep, a vblank); a thread created since, or one that ended, refuses at once. */
+    t0 = xbox_HostNowNs();
+    for (;;) {
+        int pending = -1;
+        nc = xbox_ParkRecords(recs, XBOX_PARK_MAX_THREADS);
+        for (k = 0; k < nc; k++) {
+            for (i = 0; i < ns && saved[i].tid != (uint32_t)recs[k].tid; i++)
+                ;
+            if (i == ns) {
+                REASON(st->reason, "guest thread %lu was created since the state", recs[k].tid);
+                return XBOX_STATE_ECHAIN;
+            }
+            pair[k] = i;
+            /* A kernel call must have returned (its bridge may hold host objects the load replaces); a host
+             * wait inside lifted code (XBA-251) touches nothing a load changes, so it may still be waiting. */
+            if (!(recs[k].state != XBOX_PARK_RUNNING && recs[k].returned)
+                && !(recs[k].state != XBOX_PARK_RUNNING && recs[k].reissue)
+                && !(recs[k].site != XBOX_PARK_SITE_KERNEL && recs[k].state != XBOX_PARK_RUNNING)
+                && pending < 0)
+                pending = k;
+        }
+        for (i = 0; i < ns; i++) {
+            for (k = 0; k < nc && (uint32_t)recs[k].tid != saved[i].tid; k++)
+                ;
+            if (k == nc) {
+                REASON(st->reason, "guest thread %u has ended since the state", saved[i].tid);
+                return XBOX_STATE_ECHAIN;
+            }
+        }
+        if (pending < 0)
+            break;
+        if (ms_since(t0) >= (double)settle_ms) {
+            const XboxParkRecord *r = &recs[pending];
+            if (r->state == XBOX_PARK_RUNNING)
+                REASON(st->reason, "guest thread %lu is running (not frozen)", r->tid);
+            else if (r->site != XBOX_PARK_SITE_KERNEL)
+                REASON(st->reason, "guest thread %lu is still waiting in a %s at 0x%08X after %u ms", r->tid,
+                       xbox_ParkSiteName(r->site), r->ret_va, settle_ms);
+            else
+                REASON(st->reason, "guest thread %lu is still %s kernel call %u from 0x%08X after %u ms (a wait"
+                       " only another guest thread ends cannot end while the game is frozen)", r->tid,
+                       r->state == XBOX_PARK_HELD ? "running a routine inside" : "waiting in", r->ordinal,
+                       r->ret_va, settle_ms);
+            st->settle_ms = ms_since(t0);
+            return XBOX_STATE_ECHAIN;
+        }
+        SwitchToThread();
+    }
+    st->settle_ms = ms_since(t0);
+    st->threads = nc;
+
+    /* 3. Where each thread stands, and what the sections need, before anything changes. */
+    for (k = 0; k < nc; k++) {
+        if (recs[k].dispatch) {
+            REASON(st->reason, "guest thread %lu is held at DISPATCH_LEVEL", recs[k].tid);
+            return XBOX_STATE_EBUSY;
+        }
+        if (!chain_matches(&saved[pair[k]], &recs[k], why, sizeof why)) {
+            REASON(st->reason, "%s", why);
+            return XBOX_STATE_ECHAIN;
+        }
+    }
+    xbox_StateSection(blob, n, XBOX_STATE_TAG_RAM, &rp, &rl, NULL);
+    rc = xbox_state_ram_precheck(rp, rl, why, sizeof why);
+    if (rc != XBOX_STATE_OK) {
+        REASON(st->reason, "%s", why);
+        return rc;
+    }
+    xbox_StateSection(blob, n, XBOX_STATE_TAG_MEM, &mp, &ml, NULL);
+    if (xbox_MemStateLoadCheck(mp, ml, why, sizeof why) != 0) {
+        REASON(st->reason, "%s", why);
+        return XBOX_STATE_ECHAIN;
+    }
+
+    /* 4. A capture of now, put back if a section fails part way: never a partial load. */
+    t0 = xbox_HostNowNs();
+    memset(&bst, 0, sizeof bst);
+    rc = xbox_StateCaptureFrozen(&backup, &bn, &bst);
+    st->backup_ms = ms_since(t0);
+    if (rc != XBOX_STATE_OK) {
+        REASON(st->reason, "the state of now could not be kept first: %s", bst.reason);
+        return rc;
+    }
+
+    /* 5. The sections, the devices held; then each thread's registers. */
+    t0 = xbox_HostNowNs();
+    while (!(gate = xbox_DispatchGateTryEnter()) && ms_since(t0) < (double)GATE_MS)
+        SwitchToThread();
+    if (!gate) {
+        free(backup);
+        REASON(st->reason, "the dispatch gate is held (by host thread %lu)", xbox_DispatchGateOwner());
+        return XBOX_STATE_EBUSY;
+    }
+    if (!xbox_DevStateFreeze()) {
+        xbox_DevStateThaw(0);
+        xbox_DispatchGateLeave();
+        free(backup);
+        REASON(st->reason, "the NV2A poll thread did not stop within 2 s");
+        return XBOX_STATE_EBUSY;
+    }
+    rc = apply_sections(blob, n, why, sizeof why);
+    if (rc != XBOX_STATE_OK) {
+        char again[256];
+        int rb = apply_sections(backup, bn, again, sizeof again);
+        REASON(st->reason, "%s (the state of before the load is back: %s)", why,
+               rb == XBOX_STATE_OK ? "ok" : again);
+        if (rb != XBOX_STATE_OK)
+            fprintf(stderr, "  [STATE] load: putting the state back failed too (%s): the game may not run on\n",
+                    again);
+        xbox_DevStateThaw(1);
+        xbox_DispatchGateLeave();
+        free(backup);
+        return rc == XBOX_STATE_ECHAIN ? rc : XBOX_STATE_ESECTION;
+    }
+    for (k = 0; k < nc; k++) {
+        const XboxStateThread *sv = &saved[pair[k]];
+        int reissue = !sv->returned;
+        if (xbox_ParkRestoreThread(recs[k].slot, &sv->cpu, reissue) != 0)
+            fprintf(stderr, "  [STATE] load: guest thread %u could not take its registers back\n", sv->tid);
+        st->reissued += reissue;
+    }
+    xbox_DevStateThaw(1);
+    xbox_DispatchGateLeave();
+    st->load_ms = ms_since(t0);
+    free(backup);
+    return XBOX_STATE_OK;
+}
+
+static void log_load(int rc, const XboxStateLoadStats *st)
+{
+    if (rc == XBOX_STATE_OK)
+        fprintf(stderr, "  [STATE] load: %d guest thread%s back at their calls (%d made again), %u RAM pages"
+                        " written; %.2f ms (freeze %.2f, settle %.2f, backup %.2f, sections %.2f)\n",
+                st->threads, st->threads == 1 ? "" : "s", st->reissued, xbox_state_ram_written(),
+                st->freeze_ms + st->settle_ms + st->backup_ms + st->load_ms, st->freeze_ms, st->settle_ms,
+                st->backup_ms, st->load_ms);
+    else
+        fprintf(stderr, "  [STATE] load refused: %s (%s)\n", xbox_StateError(rc), st->reason[0] ? st->reason : "-");
+    fflush(stderr);
+}
+
+int xbox_StateLoad(const uint8_t *blob, size_t n, uint32_t timeout_ms, XboxStateLoadStats *st)
+{
+    XboxStateLoadStats local;
+    uint64_t t0;
+    int rc;
+
+    if (!st)
+        st = &local;
+    memset(st, 0, sizeof *st);
+    if (xbox_ParkThisThreadIsGuest()) {
+        REASON(st->reason, "called from a guest thread");
+        rc = XBOX_STATE_EBUSY;
+        goto out;
+    }
+    if (InterlockedCompareExchange((volatile LONG *)&s_capturing, 1, 0) != 0) {
+        REASON(st->reason, "a capture or a load is already running");
+        rc = XBOX_STATE_EBUSY;
+        goto out;
+    }
+    InterlockedExchange((volatile LONG *)&s_loading, 1);
+    t0 = xbox_HostNowNs();
+    if (!xbox_ParkFreeze(timeout_ms, NULL)) {
+        st->freeze_ms = ms_since(t0);
+        REASON(st->reason, "a guest thread did not reach a kernel call within %u ms", timeout_ms);
+        rc = XBOX_STATE_EFREEZE;
+    } else {
+        st->freeze_ms = ms_since(t0);
+        rc = xbox_StateLoadFrozen(blob, n, timeout_ms, st);
+        xbox_ParkThaw();
+    }
+    InterlockedExchange((volatile LONG *)&s_loading, 0);
+    InterlockedExchange((volatile LONG *)&s_capturing, 0);
+out:
+    log_load(rc, st);
+    return rc;
+}
+
+int xbox_StateLoadSlot(const char *path, uint32_t timeout_ms, XboxStateLoadStats *st)
+{
+    XboxStateLoadStats local;
+    XboxStateInfo info;
+    uint8_t *blob = NULL;
+    size_t n = 0;
+    int rc;
+
+    if (!st)
+        st = &local;
+    memset(st, 0, sizeof *st);
+    rc = xbox_StateReadSlot(path, &blob, &n, &info);
+    if (rc != XBOX_STATE_OK) {
+        REASON(st->reason, "%s", info.reason);
+        log_load(rc, st);
+        return rc;
+    }
+    rc = xbox_StateLoad(blob, n, timeout_ms, st);
+    free(blob);
+    return rc;
 }
 
 /* ---- Slot files ------------------------------------------------------------------------------------------ */

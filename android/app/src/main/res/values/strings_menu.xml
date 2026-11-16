@@ -57,6 +57,8 @@
     <string name="MENU_STATE_ERR_READ">Slot %1$d cannot be read</string>
     <string name="MENU_STATE_ERR_DAMAGED">Slot %1$d is damaged</string>
     <string name="MENU_STATE_ERR_NO_GAME">Save states are not available for this game</string>
+    <string name="MENU_STATE_ERR_REFUSED">The game is not at a point where this state can be loaded</string>
+    <string name="MENU_STATE_ERR_NOT_NOW">A state cannot be saved at this point of the game</string>
     <string name="MENU_STATE_SAVE_FAILED">Slot %1$d: the state was not saved</string>
     <string name="MENU_STATE_LOAD_FAILED">Slot %1$d: the state was not loaded</string>
     <!-- The automatic slot and resuming (the hotkeys: strings_hotkeys.xml, XBA-190). -->

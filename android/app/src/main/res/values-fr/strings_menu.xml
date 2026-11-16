@@ -50,6 +50,8 @@
     <string name="MENU_STATE_ERR_READ">L\'emplacement %1$d ne peut pas être lu</string>
     <string name="MENU_STATE_ERR_DAMAGED">L\'emplacement %1$d est endommagé</string>
     <string name="MENU_STATE_ERR_NO_GAME">Pas de sauvegarde d\'état pour ce jeu</string>
+    <string name="MENU_STATE_ERR_REFUSED">Le jeu n\'est pas à un point où cet état peut être chargé</string>
+    <string name="MENU_STATE_ERR_NOT_NOW">Impossible de sauvegarder l\'état à ce point du jeu</string>
     <string name="MENU_STATE_SAVE_FAILED">Emplacement %1$d : l\'état n\'a pas été sauvegardé</string>
     <string name="MENU_STATE_LOAD_FAILED">Emplacement %1$d : l\'état n\'a pas été chargé</string>
     <!-- L'emplacement automatique et la reprise (les raccourcis : strings_hotkeys.xml). -->

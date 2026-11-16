@@ -47,7 +47,8 @@ import java.util.function.LongSupplier;
  *       closing releases the companion's again. A key whose down came while open acts on its release, so nothing of
  *       it reaches the game.</li>
  *   <li>Items: Resume, for a GBA, PS1 or N64 game Save state, Load state (four slots each) and Fast-forward
- *       (XBA-182, XBA-183; an Xbox title has Fast-forward too, XBA-240) and Cheats (XBA-197: each code On / Off, Add a code, Delete a code; written at once),
+ *       (XBA-182, XBA-183; an Xbox title has Fast-forward too, XBA-240, and Save / Load state when its runtime
+ *       says states are available, XBA-249: they load within the run that saved them, no automatic slot) and Cheats (XBA-197: each code On / Off, Add a code, Delete a code; written at once),
  *       Settings (performance overlay, game volume, bottom screen, a console game's scale and filter
  *       and the picture shader (XBA-206): all live; this game's language, widescreen and 480p, internal resolution,
  *       Vulkan driver and most Game settings: read at the start, so « Restart to apply » shows at the top once one
@@ -133,10 +134,18 @@ final class GameMenu {
 
         /**
          * XBA-182 / XBA-183: a GBA, PS1 or N64 game with save states runs (MenuNative.nativeStatesAvailable): the state
-         * rows show.
+         * rows show. XBA-249: an Xbox title too, when its runtime says states are available.
          */
         default boolean statesSupported() {
             return false;
+        }
+
+        /**
+         * XBA-249: the states survive the run (the automatic slot, « Resume where I left off »): a console game's do;
+         * an Xbox title's load only within the run that saved them (until XBA-250).
+         */
+        default boolean resumeSupported() {
+            return statesSupported();
         }
 
         /**
@@ -204,7 +213,7 @@ final class GameMenu {
     /** XBA-182: the save state slots, and the native side's codes (menu_jni.c). */
     static final int SLOTS = 4;
     static final int STATE_OK = 0, STATE_NO_GAME = -1, STATE_EMPTY = -2, STATE_OTHER_GAME = -3, STATE_OTHER_VERSION = -4,
-                     STATE_IO = -5, STATE_BAD_SLOT = -6, STATE_DAMAGED = -7;
+                     STATE_IO = -5, STATE_BAD_SLOT = -6, STATE_DAMAGED = -7, STATE_REFUSED = -8;
     /** The largest thumbnail the native side hands over (anything bigger is not one). */
     static final int THUMB_MAX_W = 160, THUMB_MAX_H = 120;
 
@@ -987,7 +996,7 @@ final class GameMenu {
             r = row(Item.VOLUME, s(R.string.MENU_VOLUME));
             r.setChoices(new String[] { volumeLabel(100), s(R.string.MENU_MUTED) });
             r.cycler = dir -> setVolume(volume + dir * VOLUME_STEP);
-            if (statesSupported()) {   // a GBA, PS1 or N64 game: the automatic slot
+            if (resumeSupported()) {   // a GBA, PS1 or N64 game: the automatic slot (not an Xbox title's, XBA-249)
                 r = row(Item.AUTO_RESUME, s(R.string.MENU_RESUME_AUTO));
                 r.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
                 r.cycler = dir -> setAutoResume(!GameStore.autoResume(activity));
@@ -1105,7 +1114,7 @@ final class GameMenu {
                         kvRow(s(ControlsLabels.source(map.get(c))), s(ControlsLabels.control(c)));
                 }
             }
-            hotkeyRows(Console.XBOX);   // XBA-190 / XBA-240: the menu chord and fast-forward (no save states)
+            hotkeyRows(Console.XBOX);   // XBA-190 / 240 / 249: the menu chord, fast-forward, with states the others
             for (int[] r : kv)
                 kvRow(s(r[0]), s(r[1]));
             row(Item.BACK, s(R.string.MENU_BACK));
@@ -1346,7 +1355,15 @@ final class GameMenu {
 
     /** « Resume where I left off » applies: a GBA, PS1 or N64 game with states, and the setting on. */
     private boolean autoResumes() {
-        return GameStore.autoResume(activity) && statesSupported();
+        return GameStore.autoResume(activity) && resumeSupported();
+    }
+
+    private boolean resumeSupported() {
+        try {
+            return host.resumeSupported();
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /** Saves the automatic slot when resuming applies (leaving the game: quit, background, back to launcher). */
@@ -1403,6 +1420,8 @@ final class GameMenu {
             return activity.getString(R.string.MENU_STATE_ERR_DAMAGED, slot);
         case STATE_NO_GAME:
             return s(R.string.MENU_STATE_ERR_NO_GAME);
+        case STATE_REFUSED:   // XBA-249: an Xbox title not at a point the state loads at (or a capture not possible now)
+            return s(save ? R.string.MENU_STATE_ERR_NOT_NOW : R.string.MENU_STATE_ERR_REFUSED);
         default:
             return activity.getString(save ? R.string.MENU_STATE_SAVE_FAILED : R.string.MENU_STATE_LOAD_FAILED, slot);
         }
@@ -1459,7 +1478,7 @@ final class GameMenu {
     private void hotkeyRows(Console c) {
         kvRow(s(R.string.CTL_MENU), s(R.string.CTL_MENU_X));
         Hotkeys h = hotkeys();
-        for (Hotkeys.Action a : Hotkeys.actions(c)) {
+        for (Hotkeys.Action a : Hotkeys.actions(c, statesSupported())) {
             Hotkeys.Chord ch = h.get(a);
             if (!ch.isNone())
                 kvRow(Hotkeys.chordLabel(activity, ch), s(Hotkeys.label(a)));

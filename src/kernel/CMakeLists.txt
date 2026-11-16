@@ -59,7 +59,7 @@ set(KERNEL_SOURCES
 # Save states (XBA-245): the XBXS container writes recomp_states slot files,
 # which only POSIX hosts build (xbr_host_core).
 if(NOT WIN32)
-    list(APPEND KERNEL_SOURCES xbox_state.c xbox_state_guest.c)
+    list(APPEND KERNEL_SOURCES xbox_state.c xbox_state_guest.c xbox_state_service.c)
 endif()
 
 add_library(xbox_kernel STATIC ${KERNEL_SOURCES})

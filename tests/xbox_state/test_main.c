@@ -36,6 +36,15 @@
  *                 (CPU v2: site kind, ordinal 0, the site's guest VA); the
  *                 reader refuses an unknown site and a host wait with an
  *                 ordinal
+ *   Load          (XBA-249) a state captured, then RAM, kernel objects, the
+ *                 heap and an NV2A register changed: the same-run load puts
+ *                 them back and every thread returns from its call with the
+ *                 state's registers; refused with nothing changed: a thread
+ *                 at another call site, created or ended since, a state of
+ *                 another run; ten round trips; rewind's XOR-delta ring and
+ *                 steps back (measured); the recomp_states front end (slots,
+ *                 a refused load, the quick save chord); a state with
+ *                 threads at host waits loads
  *   Refusals      a thread that never makes a kernel call (freeze times out
  *                 and names it); a capture from a guest thread
  *   Measures      capture time and blob size (printed)
@@ -46,6 +55,8 @@
 #include "xbox_memory_layout.h"
 #include "xbox_state.h"
 #include "platform/recomp_states.h"
+#include "platform/recomp_rewind.h"
+#include "platform/recomp_hotkeys.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -66,11 +77,13 @@ extern ptrdiff_t g_xbox_mem_offset;
 #define G32(va) (*(volatile uint32_t *)((uintptr_t)(va) + g_xbox_mem_offset))
 #define GPTR(va) ((uint8_t *)((uintptr_t)(va) + g_xbox_mem_offset))
 
-enum { ORD_DELAY = 99, ORD_NTCLOSE = 187, ORD_PSCREATE = 255, ORD_PSTERM = 258 };
-static const uint32_t ORDS[] = { ORD_DELAY, ORD_NTCLOSE, ORD_PSCREATE, ORD_PSTERM };
+enum { ORD_DELAY = 99, ORD_NTCLOSE = 187, ORD_NTCREATEEVENT = 189, ORD_NTSETEVENT = 225, ORD_PSCREATE = 255,
+       ORD_PSTERM = 258 };
+static const uint32_t ORDS[] = { ORD_DELAY, ORD_NTCLOSE, ORD_PSCREATE, ORD_PSTERM, ORD_NTCREATEEVENT,
+                                 ORD_NTSETEVENT };
 #define NORDS (sizeof ORDS / sizeof ORDS[0])
 
-enum { K_RENDER, K_AUDIO, K_LOADER, K_SPIN, K_POLL, K_KICK, K_COUNT };
+enum { K_RENDER, K_AUDIO, K_LOADER, K_SPIN, K_POLL, K_KICK, K_SWITCH, K_TEMP, K_COUNT };
 #define RET_VA(kind) (0x00011000u + 0x10u * (uint32_t)(kind))
 #define POLL_VA 0x0001A100u     /* the host-wait sites lifted code passes (XBA-251) */
 #define KICK_VA 0x0001A200u
@@ -81,6 +94,9 @@ enum { K_RENDER, K_AUDIO, K_LOADER, K_SPIN, K_POLL, K_KICK, K_COUNT };
     do { if (__atomic_load_n(&g_xbox_guest_cpu_preempt, __ATOMIC_RELAXED)) xbox_GuestCpuPreempt(va); } while (0)
 
 static int failures;
+static uint32_t g_mark;                    /* guest_call's esi marks */
+static volatile uint32_t g_back_esi[16];   /* per call site: the older mark a load gave back */
+static volatile int g_site, g_switch_stop, g_temp_stop;   /* K_SWITCH: which call site, stop; K_TEMP: stop */
 static uint32_t g_thunks, g_stack, g_handles, g_pattern;
 static volatile int g_stop, g_spin_stop, g_hw_stop;
 static uint32_t g_pollword;
@@ -127,7 +143,15 @@ static uint32_t guest_call(uint32_t ordinal, uint32_t ret_va, int argc, const ui
     g_esp = sp;
     g_eax = 0xDEADBEEFu;
     g_ebx = 0xB0000000u | ret_va;   /* a callee-saved register the state must carry */
-    fn();
+    {
+        /* esi: a mark unique to this call. A same-run load (XBA-249) hands the thread the registers of the
+         * state's call, so the call returns with an older mark: noted per call site. */
+        uint32_t mark = __atomic_add_fetch(&g_mark, 1, __ATOMIC_RELAXED), k = (ret_va - 0x00011000u) / 0x10u;
+        g_esi = mark;
+        fn();
+        if (g_esi != mark && k < 16)
+            g_back_esi[k] = g_esi;
+    }
     g_esp = sp0;
     return g_eax;
 }
@@ -141,6 +165,15 @@ static void guest_sleep(int kind, uint32_t ms)
     G32(iv) = (uint32_t)rel;
     G32(iv + 4) = (uint32_t)((uint64_t)rel >> 32);
     GCALL(ORD_DELAY, RET_VA(kind), 0, 0, iv);
+}
+
+static void switch_sleep_other(void)   /* K_SWITCH's other call site: RET_VA(K_SWITCH) + 8 */
+{
+    uint32_t iv = (g_esp - 256u) & ~7u;
+    int64_t rel = -40000;
+    G32(iv) = (uint32_t)rel;
+    G32(iv + 4) = (uint32_t)((uint64_t)rel >> 32);
+    GCALL(ORD_DELAY, RET_VA(K_SWITCH) + 8u, 0, 0, iv);
 }
 
 static void guest_work(uint64_t us)
@@ -163,6 +196,18 @@ static void worker(void)
         break;
     case K_LOADER:
         while (!g_stop) { guest_sleep(kind, 50); guest_work(8000); }
+        break;
+    case K_SWITCH:  /* sleeps from one call site or another (g_site) */
+        while (!g_stop && !g_switch_stop) {
+            guest_work(500);
+            if (g_site)
+                switch_sleep_other();
+            else
+                guest_sleep(kind, 4);
+        }
+        break;
+    case K_TEMP:
+        while (!g_temp_stop) { guest_work(200); guest_sleep(kind, 3); }
         break;
     case K_SPIN:
         while (!g_spin_stop)
@@ -371,9 +416,11 @@ static void phase_capture(void)
     snprintf(d, sizeof d, "%s: %s", xbox_StateError(rc), info.reason);
     check(rc == XBOX_STATE_OK, "it reads back: identity and every section check", d);
     snprintf(d, sizeof d, "%d sections", info.sections);
-    check(info.sections == 3 && info.section[0].tag == XBOX_STATE_TAG_CPU
-          && info.section[1].tag == XBOX_STATE_TAG_MEM && info.section[2].tag == XBOX_STATE_TAG_RAM,
-          "sections CPU, MEM, RAM in that order", d);
+    check(info.sections == 7 && info.section[0].tag == XBOX_STATE_TAG_CPU
+          && info.section[1].tag == XBOX_STATE_TAG_MEM && info.section[2].tag == XBOX_STATE_TAG_RAM
+          && info.section[3].tag == XBOX_STATE_TAG_KOBJ && info.section[4].tag == XBOX_STATE_TAG_NV2A
+          && info.section[5].tag == XBOX_STATE_TAG_APU && info.section[6].tag == XBOX_STATE_TAG_USB,
+          "sections CPU, MEM, RAM, KOBJ, NV2A, APU, USB in that order", d);
     snprintf(d, sizeof d, "title %08X, toolkit %s, build id %u bytes", info.id.title_id, info.id.toolkit,
              info.id.build_id_len);
     printf("  identity: %s\n", d);
@@ -580,7 +627,7 @@ static void phase_refused(void)
 
 static void phase_sections(void)
 {
-    XboxStateSection s = { TAG_TEST, 1, "test", test_save, test_check, NULL };
+    XboxStateSection s = { TAG_TEST, 1, "test", test_save, test_check, NULL, NULL };
     XboxStateInfo info;
     XboxStateStats st;
     uint8_t *b = NULL;
@@ -595,7 +642,7 @@ static void phase_sections(void)
     rc = xbox_StateCapture(200, &b, &n, &st);
     check(rc == XBOX_STATE_OK && s_test_saves >= 1, "it is saved during the capture", st.reason);
     rc = xbox_StateCheck(b, n, &info);
-    check(rc == XBOX_STATE_OK && info.sections == 4 && info.section[3].tag == TAG_TEST
+    check(rc == XBOX_STATE_OK && info.sections == 8 && info.section[7].tag == TAG_TEST
           && xbox_StateSection(b, n, TAG_TEST, &p, &len, NULL) == XBOX_STATE_OK && len == 16,
           "written after the built-ins, checked, found by tag", info.reason);
     rc = xbox_StateCheck(g_blob, g_blob_n, &info);
@@ -680,7 +727,7 @@ static int retry_save(XboxStateWriter *w, const XboxStateContext *ctx, void *use
 
 static void phase_retry(void)
 {
-    XboxStateSection s = { XBOX_STATE_TAG('R', 'T', 'R', 'Y'), 1, "retry", retry_save, NULL, NULL };
+    XboxStateSection s = { XBOX_STATE_TAG('R', 'T', 'R', 'Y'), 1, "retry", retry_save, NULL, NULL, NULL };
     XboxStateThread th[XBOX_PARK_MAX_THREADS];
     XboxStateStats st;
     pthread_t t;
@@ -748,7 +795,8 @@ static void phase_host_waits(void)
         check(0, "CPU section found", NULL);
         goto out;
     }
-    check(ver == 2 && ver == XBOX_STATE_CPU_VERSION, "CPU section version 2 (the park site)", NULL);
+    check(ver == 3 && ver == XBOX_STATE_CPU_VERSION, "CPU section version 3 (the park site, the run, esp at"
+          " the park point)", NULL);
     cnt = xbox_StateCpuThreads(p, len, th, XBOX_PARK_MAX_THREADS);
     for (k = 0; k < cnt; k++) {
         printf("  thread %u: %s %s, ordinal %u, 0x%08X, ebx 0x%08X\n", th[k].tid,
@@ -776,11 +824,18 @@ static void phase_host_waits(void)
     check(cnt == 5 && poll == 1 && kick == 1, "five threads: the poll and kick threads at their host waits", d);
     check(kernel, "the others in their kernel calls", NULL);
     check(regs, "host-wait records: ordinal 0, the site's VA, registers, KTHREAD, stack", NULL);
+    {   /* XBA-249: a same-run load takes them back at their host waits (waiting again, or resuming) */
+        XboxStateLoadStats ls;
+        usleep(20000);
+        rc = xbox_StateLoad(b, n, 500, &ls);
+        snprintf(d, sizeof d, "%s: %s (%d made again)", xbox_StateError(rc), ls.reason, ls.reissued);
+        check(rc == XBOX_STATE_OK, "the state loads with two threads at host waits", d);
+    }
 
     /* The reader stays strict about the new field. */
     copy = malloc(len);
     if (copy && cnt > 0) {
-        size_t head = 68 + sizeof(RecompCpu), site_at = 8 + 64, ord_at = 8 + 8;
+        size_t head = 68 + sizeof(RecompCpu), site_at = 16 + 64, ord_at = 16 + 8;
         int hw = -1, kn = -1;
         for (k = 0; k < cnt; k++) {
             if (th[k].site != XBOX_PARK_SITE_KERNEL && hw < 0) hw = k;
@@ -808,6 +863,280 @@ out:
     G32(g_pollword) = 1;
     g_hw_stop = 1;
     check(wait_threads(3, 3000), "they end", NULL);
+}
+
+/* ---- Same-run load (XBA-249) ------------------------------------------------------------------------------ */
+
+static uint32_t create_event(void)
+{
+    uint32_t hva = g_handles + 0x80u, sp0 = g_esp, st;
+    g_esp = g_stack - 0x800u;
+    G32(hva) = 0;
+    st = GCALL(ORD_NTCREATEEVENT, 0x00012000u, hva, 0, 0 /* NotificationEvent */, 0);
+    g_esp = sp0;
+    return st == 0 ? G32(hva) : 0;
+}
+
+/* NtSetEvent: 0 on a live event, an error status on a handle that names nothing (NtClose always succeeds). */
+static uint32_t set_event(uint32_t h)
+{
+    uint32_t sp0 = g_esp, st;
+    g_esp = g_stack - 0x800u;
+    st = GCALL(ORD_NTSETEVENT, 0x00012020u, h, 0);
+    g_esp = sp0;
+    return st;
+}
+
+static uint32_t close_handle(uint32_t h)
+{
+    uint32_t sp0 = g_esp, st;
+    g_esp = g_stack - 0x800u;
+    st = GCALL(ORD_NTCLOSE, 0x00012010u, h);
+    g_esp = sp0;
+    return st;
+}
+
+/* The CPU section's run id changed, its hash recomputed: a state from another run. */
+static uint8_t *other_run(const uint8_t *b, size_t n)
+{
+    uint8_t *c = malloc(n);
+    const uint8_t *p;
+    size_t len;
+    uint64_t h;
+    int i;
+    if (!c) return NULL;
+    memcpy(c, b, n);
+    xbox_StateSection(b, n, XBOX_STATE_TAG_CPU, &p, &len, NULL);
+    c[(p - b) + 8] ^= 0x5A;
+    h = xbox_StateHash(c + (p - b), len);
+    for (i = 0; i < 8; i++)
+        c[(p - b) - 8 + i] = (uint8_t)(h >> (8 * i));
+    return c;
+}
+
+static int wait_site(int site, int ms)
+{
+    /* Until K_SWITCH has made a call from that site (its record names it). */
+    XboxParkRecord r[XBOX_PARK_MAX_THREADS];
+    int t, n, i;
+    for (t = 0; t < ms; t++) {
+        n = xbox_ParkRecords(r, XBOX_PARK_MAX_THREADS);
+        for (i = 0; i < n; i++)
+            if (r[i].ret_va == RET_VA(K_SWITCH) + (site ? 8u : 0u))
+                return 1;
+        usleep(1000);
+    }
+    return 0;
+}
+
+static void phase_load(const char *dir)
+{
+    XboxStateStats st;
+    XboxStateLoadStats ls;
+    XboxStateThread th[XBOX_PARK_MAX_THREADS];
+    uint8_t *a = NULL, *c;
+    size_t an = 0, len;
+    const uint8_t *p;
+    volatile uint32_t *nvreg = xbox_Nv2aRegPtr(0x00400750u);   /* a PGRAPH word the walker leaves alone */
+    uint32_t e1, e2, nv_before = 0, alloc_after, alloc_again, back_ok = 1, nth;
+    int rc, k;
+    char d[300];
+
+    printf("Same-run load (XBA-249)\n");
+    g_site = 0;
+    spawn(6, K_SWITCH);
+    check(wait_threads(4, 2000), "a fourth thread that sleeps from one call site or another starts", NULL);
+    e1 = create_event();
+    check(e1 != 0, "an event is created before the capture", NULL);
+    if (nvreg) { *nvreg = 0x13572468u; nv_before = *nvreg; }
+    usleep(20000);
+    rc = xbox_StateCapture(200, &a, &an, &st);
+    check(rc == XBOX_STATE_OK, "state A is captured (KOBJ, NV2A, APU, USB included)", st.reason);
+    if (rc != XBOX_STATE_OK)
+        return;
+
+    /* Change memory, objects, the memory manager and a device. */
+    GPTR(g_pattern)[10] ^= 0xFF;
+    GPTR(g_pattern + 4096)[20] = 0x77;
+    e2 = create_event();
+    check(e2 != 0 && e2 != e1 && set_event(e2) == 0 && close_handle(e1) == 0 && set_event(e1) != 0,
+          "an event created and the first closed after the capture", NULL);
+    alloc_after = xbox_HeapAlloc(0x3000, 4096);
+    if (nvreg) *nvreg = 0xDEADBEEFu;
+    memset((void *)g_back_esi, 0, sizeof g_back_esi);
+    usleep(80000);    /* every thread is in another call than the state's (the loader sleeps 50 ms) */
+
+    rc = xbox_StateLoad(a, an, 500, &ls);
+    snprintf(d, sizeof d, "%s: %s; %d threads, %d calls made again, settle %.1f ms, backup %.1f ms, sections"
+             " %.1f ms", xbox_StateError(rc), ls.reason, ls.threads, ls.reissued, ls.settle_ms, ls.backup_ms,
+             ls.load_ms);
+    printf("  %s\n", d);
+    check(rc == XBOX_STATE_OK && ls.threads == 4, "state A loads: every thread at the same call", d);
+    check(GPTR(g_pattern)[10] == (uint8_t)(10 * 7 + 3) && GPTR(g_pattern + 4096)[20] == 0,
+          "guest RAM is back (a changed page, a page zero in the state)", NULL);
+    check(set_event(e2) != 0, "the event created after the state is gone", NULL);
+    check(set_event(e1) == 0, "the event closed after the state is there again (same handle)", NULL);
+    alloc_again = xbox_HeapAlloc(0x3000, 4096);
+    snprintf(d, sizeof d, "0x%08X then 0x%08X", alloc_after, alloc_again);
+    check(alloc_again == alloc_after, "the heap is back: the same allocation gets the same address", d);
+    if (nvreg) {
+        snprintf(d, sizeof d, "0x%08X", *nvreg);
+        check(*nvreg == nv_before, "the NV2A register file is back", d);
+    }
+    usleep(150000);   /* every thread returns from its call at least once */
+    xbox_StateSection(a, an, XBOX_STATE_TAG_CPU, &p, &len, NULL);
+    nth = (uint32_t)xbox_StateCpuThreads(p, len, th, XBOX_PARK_MAX_THREADS);
+    for (k = 0; k < (int)nth; k++) {
+        uint32_t site = (th[k].ret_va - 0x00011000u) / 0x10u;
+        if (site >= 16 || g_back_esi[site] != th[k].cpu.r_esi) {
+            back_ok = 0;
+            printf("  thread %u at 0x%08X: esi 0x%08X in the state, 0x%08X seen after the load\n", th[k].tid,
+                   th[k].ret_va, th[k].cpu.r_esi, site < 16 ? g_back_esi[site] : 0);
+        }
+    }
+    check(back_ok, "each thread returned from its call with the state's registers (esi)", NULL);
+
+    /* Refused: a thread parked at another call site. */
+    g_site = 1;
+    check(wait_site(1, 2000), "the switching thread now sleeps from its other call site", NULL);
+    rc = xbox_StateLoad(a, an, 500, &ls);
+    snprintf(d, sizeof d, "%s: %s", xbox_StateError(rc), ls.reason);
+    check(rc == XBOX_STATE_ECHAIN && strstr(ls.reason, "kernel call 99 from 0x00011068"),
+          "a thread parked at another call: refused, naming it", d);
+    GPTR(g_pattern)[11] ^= 0xFF;
+    check(GPTR(g_pattern)[11] != (uint8_t)(11 * 7 + 3), "and nothing changed", NULL);
+    GPTR(g_pattern)[11] ^= 0xFF;
+    g_site = 0;
+    usleep(30000);
+    rc = xbox_StateLoad(a, an, 500, &ls);
+    check(rc == XBOX_STATE_OK, "back at the first site: it loads again", ls.reason);
+
+    /* Refused: a thread created since, one ended since, a state of another run. */
+    g_temp_stop = 0;
+    spawn(7, K_TEMP);
+    check(wait_threads(5, 2000), "a fifth thread starts", NULL);
+    rc = xbox_StateLoad(a, an, 500, &ls);
+    snprintf(d, sizeof d, "%s: %s", xbox_StateError(rc), ls.reason);
+    check(rc == XBOX_STATE_ECHAIN && strstr(ls.reason, "created since"), "a thread created since: refused", d);
+    {
+        uint8_t *b5 = NULL;
+        size_t b5n = 0;
+        rc = xbox_StateCapture(200, &b5, &b5n, &st);
+        g_temp_stop = 1;
+        check(wait_threads(4, 2000), "it ends", NULL);
+        rc = rc == XBOX_STATE_OK ? xbox_StateLoad(b5, b5n, 500, &ls) : rc;
+        snprintf(d, sizeof d, "%s: %s", xbox_StateError(rc), ls.reason);
+        check(rc == XBOX_STATE_ECHAIN && strstr(ls.reason, "ended since"), "a thread that ended since: refused", d);
+        free(b5);
+    }
+    c = other_run(a, an);
+    rc = c ? xbox_StateLoad(c, an, 500, &ls) : -1;
+    snprintf(d, sizeof d, "%s: %s", xbox_StateError(rc), ls.reason);
+    check(rc == XBOX_STATE_ECHAIN && strstr(ls.reason, "another run"), "a state of another run: refused", d);
+    free(c);
+
+    /* Ten loads in a row, each capture taken fresh (the game goes on between them). */
+    {
+        double total = 0, worst = 0;
+        int i, ok = 1;
+        for (i = 0; i < 10; i++) {
+            uint8_t *b = NULL;
+            size_t bn = 0;
+            double ms;
+            usleep(3000 + 1700 * (unsigned)i);
+            if (xbox_StateCapture(200, &b, &bn, &st) != XBOX_STATE_OK) { ok = 0; continue; }
+            usleep(8000);
+            rc = xbox_StateLoad(b, bn, 500, &ls);
+            free(b);
+            if (rc != XBOX_STATE_OK) { ok = 0; printf("  load %d: %s\n", i, ls.reason); continue; }
+            ms = ls.freeze_ms + ls.settle_ms + ls.backup_ms + ls.load_ms;
+            total += ms;
+            if (ms > worst) worst = ms;
+        }
+        printf("  load: %.2f ms on average, %.2f ms at worst (freeze, settle, backup capture and sections)\n",
+               total / 10.0, worst);
+        check(ok, "ten capture / load round trips in a row", NULL);
+    }
+
+    /* Rewind's cost on this title: XOR deltas of the blobs (recomp_rewind), then steps back. */
+    {
+        recomp_rewind *ring = recomp_rewind_create((size_t)64 << 20);
+        double cap = 0, push = 0, step = 0;
+        int i, ok = ring != NULL, steps = 0;
+        for (i = 0; ring && i < 12; i++) {
+            uint8_t *b = NULL;
+            size_t bn = 0;
+            uint64_t t0;
+            usleep(20000);
+            t0 = now_ns();
+            if (xbox_StateCapture(200, &b, &bn, &st) != XBOX_STATE_OK) { ok = 0; continue; }
+            cap += (double)(now_ns() - t0) / 1e6;
+            t0 = now_ns();
+            if (recomp_rewind_push(ring, b, bn) != 0) ok = 0;
+            push += (double)(now_ns() - t0) / 1e6;
+            free(b);
+        }
+        for (i = 0; ring && i < 4; i++) {
+            const uint8_t *top;
+            size_t tn = 0;
+            uint64_t t0 = now_ns();
+            top = recomp_rewind_top(ring, &tn);
+            uint8_t *copy = top ? malloc(tn) : NULL;
+            if (copy) memcpy(copy, top, tn);
+            rc = copy ? xbox_StateLoad(copy, tn, 500, &ls) : -1;
+            free(copy);
+            if (rc == XBOX_STATE_OK) steps++;
+            else printf("  rewind step %d: %s\n", i, ls.reason);
+            recomp_rewind_pop(ring);
+            step += (double)(now_ns() - t0) / 1e6;
+        }
+        if (ring)
+            printf("  rewind: 12 captures, %.2f ms each + %.2f ms to code the delta; ring %.2f MB for %zu captures"
+                   " (blob %.2f MB); a step back %.2f ms\n", cap / 12, push / 12,
+                   recomp_rewind_bytes(ring) / 1048576.0, recomp_rewind_count(ring), an / 1048576.0, step / 4);
+        check(ok && steps == 4, "rewind: captures coded as XOR deltas, four steps back load", NULL);
+        recomp_rewind_destroy(ring);
+    }
+
+    /* The front end: the title attached to recomp_states once its paths are set. */
+    {
+        char why[200];
+        extern void xbox_path_init(const char *game_dir, const char *save_dir);
+        xbox_path_init(dir, dir);
+        xbox_StateServiceStart();
+        rc = xbox_StateAvailable(why, sizeof why);
+        check(rc == 1 && recomp_states_available() && !strcmp(recomp_states_console(), "xbox"),
+              "save states available, attached as console xbox", why);
+        rc = recomp_states_save(2);
+        check(rc == RECOMP_STATE_OK, "the menu's Save state (slot 2) captures", recomp_states_error(rc));
+        GPTR(g_pattern)[12] ^= 0xFF;
+        rc = recomp_states_load(2);
+        check(rc == RECOMP_STATE_OK && GPTR(g_pattern)[12] == (uint8_t)(12 * 7 + 3),
+              "the menu's Load state (slot 2) puts it back", recomp_states_error(rc));
+        g_site = 1;
+        wait_site(1, 2000);
+        rc = recomp_states_load(2);
+        check(rc == RECOMP_STATE_EREFUSED, "a refused load says so to the menu (RECOMP_STATE_EREFUSED)",
+              recomp_states_error(rc));
+        g_site = 0;
+        usleep(30000);
+        xbox_StateServiceHotkeys(RECOMP_HK_BIT(RECOMP_HK_QSAVE), 0);
+        {
+            recomp_state_event ev;
+            int t;
+            for (t = 0; t < 200; t++) {
+                recomp_states_last_event(&ev);
+                if (ev.seq && ev.kind == RECOMP_STATE_EV_SAVED)
+                    break;
+                usleep(10000);
+            }
+            check(ev.kind == RECOMP_STATE_EV_SAVED && ev.rc == RECOMP_STATE_OK,
+                  "the quick save chord runs on the service's thread", recomp_states_error(ev.rc));
+        }
+    }
+    g_switch_stop = 1;
+    check(wait_threads(3, 2000), "the switching thread ends", NULL);
+    free(a);
 }
 
 static void phase_refusals(void)
@@ -908,6 +1237,7 @@ int main(int argc, char **argv)
         G32(g_thunks + 4 * i) = 0x80000000u | ORDS[i];
     G32(g_thunks + 4 * NORDS) = 0;
     xbox_kernel_set_thunk_address(g_thunks, NORDS + 1);
+    setenv("RECOMP_REWIND", "0", 1);   /* the service's periodic captures would race the phases (measured below) */
     xbox_kernel_bridge_init();
     xbox_SetThreadMode(XBOX_THREAD_MODE_SPAWN);
     xbox_GuestCpuPart();
@@ -927,6 +1257,7 @@ int main(int argc, char **argv)
     phase_sections();
     phase_retry();
     phase_host_waits();
+    phase_load(tmpl);
     phase_refusals();
     phase_measure();
     phase_probe(tmpl);

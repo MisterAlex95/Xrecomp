@@ -1811,9 +1811,10 @@ static void nv2a_kick_wait(volatile uint32_t *reg, uint32_t mask)
  * recorded (the nested enter counts once). */
 void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask)
 {
-    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_KICK, 0);
-    nv2a_kick_wait(reg, mask);
-    xbox_ParkHostWaitLeave();
+    do {   /* again when a same-run state load put the thread back in here (XBA-249) */
+        xbox_ParkHostWaitEnter(XBOX_PARK_SITE_KICK, 0);
+        nv2a_kick_wait(reg, mask);
+    } while (xbox_ParkHostWaitLeave());
 }
 
 /* RECOMP_POLL_WAIT: lifted code is in a loop that only polls `word` for
@@ -1839,13 +1840,15 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
     }
     if (on && while_set && mask == 0x00010000u && g_nv2a_memory
         && word == (volatile uint32_t *)((char *)g_nv2a_memory + 0x100410u)) {
-        xbox_ParkHostWaitEnter(XBOX_PARK_SITE_KICK, va);
-        xbox_Nv2aKickWait(word, mask);
-        xbox_ParkHostWaitLeave();
+        do {
+            xbox_ParkHostWaitEnter(XBOX_PARK_SITE_KICK, va);
+            xbox_Nv2aKickWait(word, mask);
+        } while (xbox_ParkHostWaitLeave());
         return 1;
     }
+    /* Back inside the poll after a same-run load (XBA-249): the loop tests its word again, as a new turn. */
     xbox_ParkHostWaitEnter(XBOX_PARK_SITE_POLL, va);
-    xbox_ParkHostWaitLeave();
+    (void)xbox_ParkHostWaitLeave();
     return 0;
 }
 
@@ -2146,6 +2149,9 @@ static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
  * a load it drops the back end's caches, again on its own thread, and the
  * next pass re-takes PUT and GET from the restored registers. */
 static volatile LONG s_poll_hold_req, s_poll_held, s_poll_loaded, s_poll_reload;
+/* The poll thread is in its loop: a hold asked while it is not (not started yet, stopped) answers -1 at once
+ * instead of waiting 2 s for a thread that is not there (XBA-249). */
+static volatile LONG s_poll_running;
 
 static void nv2a_poll_hold_point(void)
 {
@@ -2171,6 +2177,8 @@ int xbox_Nv2aPollHold(int hold, int loaded)
     DWORD t0 = GetTickCount();
 
     if (!g_nv2a_ack_thread)
+        return -1;
+    if (hold && !InterlockedCompareExchange(&s_poll_running, 0, 0))
         return -1;
     if (hold) {
         InterlockedExchange(&s_poll_hold_req, 1);
@@ -2219,6 +2227,7 @@ int xbox_Nv2aApertureLoad(XdsReader *r)
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
+    InterlockedExchange(&s_poll_running, 1);
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
         nv2a_poll_hold_point();
         /* A flip held for its vblank (nv2a_flip_hold.h): this pass walks
@@ -2446,6 +2455,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 
         nv2a_ack_wait(regs, flip_held);
     }
+    InterlockedExchange(&s_poll_running, 0);
     return 0;
 }
 
@@ -6284,5 +6294,118 @@ int xbox_MemStateCheck(const uint8_t *in, size_t n, XboxMemStateInfo *info)
 #undef MS_NEED
     if (info)
         *info = d;
+    return 0;
+}
+
+/* Same-run restore (XBA-249). The guest memory itself is the RAM section's; this puts the allocators' tables
+ * back, so what was free at the save is free again and what was allocated since is forgotten. guest_vmem's page
+ * table is compared, not rewritten: committing and decommitting host pages under a frozen title is left for a
+ * later stage, so a state whose RECOMP_EXT_VMA commits differ from now is refused (the RAM section could not be
+ * written back into pages that are no longer there). */
+int xbox_MemStateLoadCheck(const uint8_t *in, size_t n, char *why, size_t why_n)
+{
+    size_t vm_now;
+    uint32_t vm_len;
+    uint8_t *vm_cur;
+
+    if (xbox_MemStateCheck(in, n, NULL) != 0) {
+        if (why && why_n) snprintf(why, why_n, "the memory manager's section is damaged");
+        return -1;
+    }
+    /* Find the vmem payload first (the check above walked the same layout) and compare it. */
+    {
+        size_t a = 0;
+        uint32_t nb, lc, cnt;
+        memcpy(&nb, in + 8, 4);
+        a = 12 + (size_t)nb * 12 + 8;           /* heap, then thread stacks */
+        a += 8 * 4 + CONTIG_PAGES;               /* contig counters, page map */
+        memcpy(&cnt, in + a, 4);
+        a += 4 + (size_t)cnt * 8 + CONTIG_PAGES; /* block lengths, RAM-name map */
+        memcpy(&lc, in + a, 4);
+        a += 5 * 4 + (size_t)lc * 12;            /* lazy */
+        memcpy(&vm_len, in + a, 4);
+        a += 4;
+        vm_now = guest_vmem_state_save(NULL, 0);
+        vm_cur = (uint8_t *)malloc(vm_now ? vm_now : 1);
+        if (!vm_cur) {
+            if (why && why_n) snprintf(why, why_n, "out of memory");
+            return -1;
+        }
+        guest_vmem_state_save(vm_cur, vm_now);
+        if (vm_now != vm_len || memcmp(vm_cur, in + a, vm_len) != 0) {
+            free(vm_cur);
+            if (why && why_n)
+                snprintf(why, why_n, "guest pages were committed or released since the state (RECOMP_EXT_VMA)");
+            return -1;
+        }
+        free(vm_cur);
+    }
+    return 0;
+}
+
+int xbox_MemStateLoad(const uint8_t *in, size_t n, char *why, size_t why_n)
+{
+    size_t at = 0;
+    uint32_t i, count, nblocks, v;
+
+#define ML_GET() (memcpy(&v, in + at, 4), at += 4, v)
+    if (xbox_MemStateLoadCheck(in, n, why, why_n) != 0)
+        return -1;
+
+    AcquireSRWLockExclusive(&g_heap_lock);
+    g_heap_next = ML_GET();
+    g_heap_alloc_count = (int)ML_GET();
+    nblocks = ML_GET();
+    g_heap_block_count = (int)nblocks;
+    for (i = 0; i < nblocks; i++) {
+        uint32_t flags;
+        g_heap_blocks[i].addr = ML_GET();
+        g_heap_blocks[i].size = ML_GET();
+        flags = ML_GET();
+        g_heap_blocks[i].free = (uint8_t)(flags & 1u);
+        g_heap_blocks[i].named = (uint8_t)((flags >> 1) & 1u);
+    }
+    ReleaseSRWLockExclusive(&g_heap_lock);
+    AcquireSRWLockExclusive(&g_thread_stacks_lock);
+    g_thread_stacks_used = (int)ML_GET();
+    g_thread_stacks_high = (int)ML_GET();
+    ReleaseSRWLockExclusive(&g_thread_stacks_lock);
+
+    contig_lock();
+    at += 4;                                     /* CONTIG_PAGES, checked */
+    g_contig_pages_in_use = ML_GET();
+    g_contig_high = ML_GET();
+    g_contig_first_free = ML_GET();
+    g_contig_allocs = ML_GET();
+    g_contig_released = ML_GET();
+    g_contig_free_calls = ML_GET();
+    g_contig_peak_pages = ML_GET();
+    memcpy(g_contig_used, in + at, CONTIG_PAGES);
+    at += CONTIG_PAGES;
+    memset(g_contig_len, 0, sizeof g_contig_len);
+    count = ML_GET();
+    for (i = 0; i < count; i++) {
+        uint32_t idx = ML_GET();
+        g_contig_len[idx] = ML_GET();
+    }
+    for (i = 0; i < CONTIG_PAGES; i++)
+        g_phys_ram_named[i] = in[at + i];
+    at += CONTIG_PAGES;
+    contig_unlock();
+
+    AcquireSRWLockExclusive(&g_lazy_lock);
+    count = ML_GET();
+    g_lazy_count = (int)count;
+    g_lazy_floor = ML_GET();
+    g_lazy_top = ML_GET();
+    g_lazy_next = ML_GET();
+    g_reserve_next = ML_GET();
+    for (i = 0; i < count; i++) {
+        g_lazy[i].base = ML_GET();
+        g_lazy[i].size = ML_GET();
+        g_lazy[i].released = (int)ML_GET();
+    }
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+#undef ML_GET
     return 0;
 }

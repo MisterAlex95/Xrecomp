@@ -27,6 +27,7 @@ const char *recomp_states_error(int code)
     case RECOMP_STATE_EIO: return "file error";
     case RECOMP_STATE_ESLOT: return "bad slot";
     case RECOMP_STATE_ECORRUPT: return "not a state file";
+    case RECOMP_STATE_EREFUSED: return "not possible at this point of the game";
     default: return "?";
     }
 }

@@ -703,20 +703,37 @@ public class ShellActivity extends SDLActivity {
             }
         }
 
-        /** XBA-182 / XBA-183: a GBA, PS1 or N64 game runs, and its runtime can save states. */
+        /**
+         * XBA-182 / XBA-183: a GBA, PS1 or N64 game runs, and its runtime can save states. XBA-249: an Xbox title
+         * (no console ROM launched) when its runtime says states are available; else the reason is logged once.
+         */
         @Override
         public boolean statesSupported() {
-            String tid = GameStore.launchedRom(ShellActivity.this) != null
-                         ? GameStore.launchedTitleId(ShellActivity.this) : null;
+            boolean xbox = GameStore.launchedRom(ShellActivity.this) == null;
+            String tid = !xbox ? GameStore.launchedTitleId(ShellActivity.this) : null;
             Console c = tid == null ? null : Console.ofKey(tid);
-            if (c == null || !c.hasSaveStates())
+            if (!xbox && (c == null || !c.hasSaveStates()))
                 return false;
             try {
-                return MenuNative.nativeStatesAvailable();
+                boolean on = MenuNative.nativeStatesAvailable();
+                if (xbox && !on && !statesReasonLogged) {
+                    statesReasonLogged = true;
+                    Log.i(LauncherActivity.TAG, "shell: menu: no save states for this title: "
+                                                + MenuNative.nativeStatesReason());
+                }
+                return on;
             } catch (UnsatisfiedLinkError e) {
                 Log.w(LauncherActivity.TAG, "shell: menu: no native save states", e);
                 return false;
             }
+        }
+
+        private boolean statesReasonLogged;
+
+        /** XBA-249: an Xbox title's states load only within the run (no automatic slot, no resume). */
+        @Override
+        public boolean resumeSupported() {
+            return GameStore.launchedRom(ShellActivity.this) != null && statesSupported();
         }
 
         /**

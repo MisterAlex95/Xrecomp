@@ -29,13 +29,19 @@ final class MenuNative {
      */
     static native boolean nativePs1ChangeDisc(String path);
 
-    /** XBA-182 / XBA-183: true while a GBA, PS1 or N64 game that supports save states runs (with a save folder). */
+    /**
+     * XBA-182 / XBA-183: true while a GBA, PS1 or N64 game that supports save states runs (with a save folder).
+     * XBA-249: or an Xbox title whose runtime can take and load states now (xbox_StateAvailable).
+     */
     static native boolean nativeStatesAvailable();
+
+    /** XBA-249: why save states are not available ("" when they are): the Xbox runtime's reason, for the log. */
+    static native String nativeStatesReason();
 
     /**
      * XBA-182: saves slot 1..4 (or 0, the automatic slot) between frames. 0 ok, or a negative code: -1 no console game, -2 empty slot, -3 another
      * game's state, -4 saved by another version, -5 the file cannot be written or read, -6 bad slot, -7 not a state
-     * file or damaged.
+     * file or damaged, -8 not possible at this point of the game (XBA-249, an Xbox title).
      */
     static native int nativeStateSave(int slot);
 

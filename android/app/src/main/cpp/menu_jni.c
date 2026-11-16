@@ -19,6 +19,9 @@
 #include "platform/recomp_states.h"
 #include "video/video_player.h"
 
+/* The Xbox runtime's save states (xbox_state_service.c, XBA-249). */
+int xbox_StateAvailable(char *why, size_t why_n);
+
 #define JNI_FN(name) Java_fr_adserver_xrecomp_MenuNative_##name
 
 JNIEXPORT void JNICALL JNI_FN(nativeHold)(JNIEnv *env, jclass cls, jboolean on)
@@ -84,7 +87,24 @@ JNIEXPORT jboolean JNICALL JNI_FN(nativeStatesAvailable)(JNIEnv *env, jclass cls
 {
     (void)env;
     (void)cls;
-    return recomp_states_available() ? JNI_TRUE : JNI_FALSE;
+    if (!recomp_states_available())
+        return JNI_FALSE;
+    /* An Xbox title (XBA-249): attached, and nothing that keeps a state from being taken (stacks switched, too many
+     * threads, none yet). */
+    if (!strcmp(recomp_states_console(), "xbox") && !xbox_StateAvailable(NULL, 0))
+        return JNI_FALSE;
+    return JNI_TRUE;
+}
+
+JNIEXPORT jstring JNICALL JNI_FN(nativeStatesReason)(JNIEnv *env, jclass cls)
+{
+    (void)cls;
+    char why[200] = "";
+    if (!recomp_states_available())
+        snprintf(why, sizeof why, "no game attached to the save states");
+    else if (!strcmp(recomp_states_console(), "xbox"))
+        xbox_StateAvailable(why, sizeof why);
+    return (*env)->NewStringUTF(env, why);
 }
 
 JNIEXPORT jint JNICALL JNI_FN(nativeStateSave)(JNIEnv *env, jclass cls, jint slot)
