@@ -510,6 +510,12 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_GC_TV=pal` | NTSC | The GameCube runtime (XBA-259) starts the machine as a PAL IPL would (the VI on in PAL): libogc picks a PAL mode, 50 Hz fields, 576 lines. | `consoles/gc/runtime/gc_runtime.c` |
 | `RECOMP_GC_YUV=cpu` | GPU | The GameCube XFB (YUV 4:2:2) converted to RGB on the CPU instead of by a fragment shader (`gc_yuv_gl.c`; also the fallback when the shader does not build). | `gc_runtime.c` |
 | `RECOMP_GC_SCALE`, `RECOMP_GC_FILTER`, `RECOMP_GC_SHADER` | `RECOMP_SCALE` / `RECOMP_FILTER` (linear) / `RECOMP_SHADER` | The GameCube picture's scale, filter and shader, as the other consoles'. | `gc_runtime.c` |
+| `RECOMP_GC_GX=0` | on | GameCube: GX parses the GPU's commands but does not draw (no GLES renderer; XBA-262). | `gc_runtime.c` |
+| `RECOMP_GC_UPSCALE=N` | `RECOMP_UPSCALE`, else 1 | GameCube GX internal resolution, 1..8 times the 640 x 528 EFB (EFB copies to textures too); the window shows the XFB copy at that size. | `consoles/gc/runtime/gx/gx_gl.c` |
+| `GC_GX_ASYNC=1\|0\|-1\|2` | 1 | GameCube GX shaders: 1 specialised shaders compiled on a worker thread, the ubershader meanwhile; 0 compiled on first use (blocking); -1 ubershader only; 2 specialised only. | `gx_gl.c` |
+| `GC_GX_EFB_COPY_RAM=1` | off | GameCube GX: EFB copies to textures are also encoded into RAM (CPU readers, a copy read back in another format), at the cost of a GPU readback per copy. | `gx_gl.c` |
+| `GC_GX_SHADER_LIST=FILE` | the title's `gx_shaders.txt` (app) | GameCube GX: the per-title list of TEV / vertex states met, read and compiled ahead at start, written back at exit. | `gx_gl.c`, `gc_runtime.c` |
+| `GC_GX_TRACE=1` | off | GameCube GX: log texture decodes, TLUT loads, new TEV states, fog registers and EFB peeks. | `gx_gl.c`, `gx_fifo.c` |
 | `RECOMP_GC_FRAMES=N` | unbounded | The Android entry (`gc_runtime_start`): stop after N fields (checks). | `gc_runtime.c` |
 
 ## Network

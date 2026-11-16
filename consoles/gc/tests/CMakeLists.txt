@@ -50,12 +50,33 @@ if(TARGET gc_run)
                 ${CMAKE_CURRENT_BINARY_DIR}/hello_rc rc ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png)
     set_tests_properties(gc_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     set_tests_properties(gc_rc_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
-    # GX (XBA-262): one test per program, gx_ref/<prog>.png the expected XFB
-    set(GC_GX_PROGS gxtri gxtex)
+    # GX (XBA-262): one test per program, gx_ref/<prog>.png the expected XFB; variants: the ubershader alone must
+    # give the same pictures (gxtev, gxtex), 2x internal resolution (gxtri, its own reference), EFB copies encoded
+    # into RAM too (gxcopy: the program checks the bytes), the per-title shader list written then compiled ahead.
+    set(GC_GX_PROGS gxtri gxtex gxtev gxcopy gxind gxfog)
+    set(GC_GX_RUN sh ${CMAKE_CURRENT_SOURCE_DIR}/run_gx.sh $<TARGET_FILE:gc_run>)
     foreach(prog ${GC_GX_PROGS})
         add_test(NAME gc_gx_${prog}
-            COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_gx.sh $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/${prog}.dol
-                    ${CMAKE_CURRENT_BINARY_DIR}/gx_${prog} ${CMAKE_CURRENT_SOURCE_DIR}/gx_ref/${prog}.png)
+            COMMAND ${GC_GX_RUN} ${GC_HOMEBREW_DIR}/${prog}.dol ${CMAKE_CURRENT_BINARY_DIR}/gx_${prog}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/gx_ref/${prog}.png)
+    endforeach()
+    foreach(prog gxtev gxtex)
+        add_test(NAME gc_gx_${prog}_uber
+            COMMAND ${GC_GX_RUN} ${GC_HOMEBREW_DIR}/${prog}.dol ${CMAKE_CURRENT_BINARY_DIR}/gx_${prog}_uber
+                    ${CMAKE_CURRENT_SOURCE_DIR}/gx_ref/${prog}.png 40 --gx-shaders uber)
+    endforeach()
+    add_test(NAME gc_gx_gxtri_2x
+        COMMAND ${GC_GX_RUN} ${GC_HOMEBREW_DIR}/gxtri.dol ${CMAKE_CURRENT_BINARY_DIR}/gx_gxtri_2x
+                ${CMAKE_CURRENT_SOURCE_DIR}/gx_ref/gxtri_2x.png 40 --gx-scale 2)
+    add_test(NAME gc_gx_gxcopy_ram
+        COMMAND ${GC_GX_RUN} ${GC_HOMEBREW_DIR}/gxcopy.dol ${CMAKE_CURRENT_BINARY_DIR}/gx_gxcopy_ram
+                ${CMAKE_CURRENT_SOURCE_DIR}/gx_ref/gxcopy_ram.png 40 --gx-copy-ram)
+    add_test(NAME gc_gx_list
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_gx_list.sh $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/gxtev.dol
+                ${CMAKE_CURRENT_BINARY_DIR}/gx_list)
+    set_tests_properties(gc_gx_gxtri_2x gc_gx_gxcopy_ram gc_gx_list gc_gx_gxtev_uber gc_gx_gxtex_uber
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)
+    foreach(prog ${GC_GX_PROGS})
         set_tests_properties(gc_gx_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)
     endforeach()
 endif()

@@ -1496,6 +1496,75 @@ main DOL entry):
   hello world in a GCM reaches the same XFB as the DOL (77 without the corpus). pytest `test_gc_disc.py` runs the same
   with the runtime built by `gc_tools.cbuild`.
 
+**GameCube GX (XBA-262, GC-4).** The Flipper GPU, on OpenGL ES 3.0 (decision of 2026-11-16 in « Decisions taken »:
+the host layer's API, Qualcomm's Vulkan driver on the Thor already fails paraLLEl-RDP; GL entry points loaded at run
+time, so no build dependency). `runtime/gx/`, hooked into the core by `gc_bus.c` (the CP / PE registers, the
+write-gather pipe, the PI FIFO registers, the EFB at physical 0x08000000) and `gc_core.c` (PE interrupts, `gx_field`
+each field); `gx.h` is the API.
+
+- Front end (`gx_fifo.c`): the gather pipe's stores land in the PI FIFO in RAM; with the CPU FIFO linked to the GP one
+  (libogc's immediate mode) the CP parses what is there at each 32-byte burst, synchronously (the GP is never behind:
+  no watermark interrupts, the CP always reads idle). Display lists (CALL_DL from RAM, no nesting), BP loads with the
+  BP mask, XF loads and indexed XF loads (arrays 12..15), CP loads, PE tokens (with and without interrupt) and draw
+  done (`GX_DrawDone`'s finish interrupt), TLUT loads into TMEM.
+- Vertices and transform on the CPU (`gx_vtx.c`): every attribute format (u8 / s8 / u16 / s16 / f32 with fraction
+  bits, the six colour formats), direct / 8-bit / 16-bit indexed, NBT with one or three indices, position and texture
+  matrix indices; position / normal matrices, perspective and orthographic projection, the viewport and scissor
+  offset folded into GL clip space; two colour channels lit (material / ambient from registers or the vertex, eight
+  lights, diffuse none / sign / clamp, attenuation none / specular / spot); texgen (2x4 / 3x4 from position, normal,
+  binormal, tangent or a texture coordinate, emboss, colour sources) and the dual-texture post matrix.
+- Renderer (`gx_gl.c`): the EFB is a framebuffer object (RGBA8 + 24-bit depth texture) at 1..8x internal resolution
+  (`RECOMP_GC_UPSCALE`, else `RECOMP_UPSCALE`); draws are batched while the pixel state stays the same; blending
+  (incl. subtract), Z compare / update, alpha test, culling, scissor, colour / alpha update masks, the EFB formats
+  (RGBA6 / RGB565 quantised in the shader, no destination alpha in RGB8), logic ops CLEAR / COPY / INVCOPY / SET /
+  NOOP, constant destination alpha (exact unless blending reads the source alpha).
+- TEV (`gx_shader.c`): one GLSL function library (stage combiners with the hardware's rounding, the compare modes,
+  konst selects, swap tables, colour channels, bump alpha, four indirect stages with formats, bias, static and
+  dynamic matrices, wrap and add-previous; alpha test, Z textures, fog with its a / b / c registers, EFB formats) used
+  two ways: the ubershader reads the state from its uniform block and draws any state at once, a specialised shader
+  passes the same words as literals (straight-line code once the compiler folds it). Programs are cached by state
+  hash; while one compiles on a worker thread (an EGL context shared with the game's; `GL_KHR_parallel_shader_compile`
+  when there is no EGL; on first use with `GC_GX_ASYNC=0`) the ubershader draws that state. The two give the same
+  pixels (ctest `gc_gx_*_uber`).
+- Per-title shader list (layer 2 of the plan on XBA-262): every TEV state (`T` lines, the key's words) and vertex
+  format (`V` lines) met is written at exit (and by the exit hook) to `gx_shaders.txt` next to the title's
+  `discovered.txt` (`gc_run --gx-list FILE`, `GC_GX_SHADER_LIST`), read back at the next start and compiled ahead.
+  GX state descriptors only, no game data: Prepare can ship it in the pack (GC-6, with program binaries).
+- Textures (`gx_tex.c`): I4 I8 IA4 IA8 RGB565 RGB5A3 RGBA8 C4 C8 C14X2 CMPR, TLUTs (IA8 / RGB565 / RGB5A3) from TMEM,
+  mip levels, wrap / filter / LOD from the mode registers (GL sampler objects); decoded on the CPU into GL textures
+  cached by address, size, format and palette hash, revalidated by a content hash once per epoch (a field, a
+  TX_INVALIDATE, an EFB copy).
+- EFB copies: to a texture (every copy format family: I4 / I8 / IA4 / IA8 by intensity, R / G / B / A / RG / GB,
+  RGB565, RGB5A3, RGBA8, depth Z4 / Z8 / Z16 / Z24X8; the box-filtered half size; the copy filter's vertical taps)
+  rendered at the internal resolution into a cache entry at the destination address (the RAM bytes' hash kept, so a
+  CPU write over them is noticed); `GC_GX_EFB_COPY_RAM=1` / `--gx-copy-ram` also encodes them into RAM. To the XFB:
+  filtered, gamma corrected, converted to YUV 4:2:2 on the GPU, read back into RAM for the VI (Y scaling for
+  `GX_SetDispCopyYScale`); the copy's GL picture at the internal resolution is kept (`gx_xfb_texture`) and
+  `gc_runtime` shows it in the window. EFB peeks (colour, Z, alpha read mode) from a 1x copy of the EFB cached until
+  the next draw; pokes write one pixel.
+- `gc_run --gx`: the renderer on a headless EGL context (surfaceless Mesa; llvmpipe unless `--gx-hw`), `--gx-scale`,
+  `--gx-shaders async|sync|uber|special`, `--gx-list`, `--gx-copy-ram`; 77 without a GLES 3 context. `GC_GX_TRACE=1`
+  logs texture decodes, TLUT loads, new TEV states, fog registers and peeks. In the app, `gc_runtime` attaches it to
+  the window's context; `RECOMP_GC_GX=0` leaves GX undrawn. A desktop GL 3.3 core context works too (gc_play: the
+  same GLSL under `#version 330 core`).
+- Tests: our libogc programs `tests/homebrew/gxtri` (geometry: Gouraud, indexed s16 / RGB565 arrays, a perspective
+  cube culled and Z-buffered, fan / strip with matrix indices, wide lines and points), `gxtex` (every format, encoded
+  by devkitPro's gxtexconv from our own pictures at build time, `gxtex/mktex.py`; CI14x2 with an RGB5A3 palette;
+  mipmaps; repeat / mirror / clamp), `gxtev` (twelve TEV setups with values computed from the arithmetic), `gxind`
+  (indirect offsets, a wave, two stages adding the previous coordinate), `gxcopy` (copies in ten formats drawn back,
+  pokes, peeks, the RGBA8 copy's bytes in RAM), `gxfog` (linear / exponential perspective fog, four blend modes,
+  Z GREATER, logic ops). Each checks pixels itself by EFB peeks (a green square bottom left when all passed) and its
+  XFB is compared with `tests/gx_ref/<prog>.png` within a tolerance (`run_gx.sh`, `gx_compare.py`): ctest
+  `gc_gx_<prog>`, `gc_gx_gxtev_uber` / `gc_gx_gxtex_uber` (ubershader only, same pictures), `gc_gx_gxtri_2x`,
+  `gc_gx_gxcopy_ram`, `gc_gx_list` (the list written, then compiled ahead and unchanged). They run in the homebrew CI
+  job (the linux deps image carries Mesa's EGL / GLES / llvmpipe).
+
+Not there yet (GX): TMEM preloading (`GX_PreloadEntireTexture`, TX_LOADBLOCK), the bounding box, fog range adjustment,
+line / point texture offsets, Z16 compressed EFB formats and EFB format reinterpretation, interlaced field copies,
+logic ops other than the five above, constant destination alpha while blending reads the source alpha (no dual-source
+blending in GLES 3.0), GPU-side transform and lighting (the CPU does it: the first thing to move if the Thor shows
+it), program binaries (GC-6).
+
 **Dreamcast spike (XBA-227, epic XBA-221).** A new frontend: the SH-4. Our KallistiOS hello world boots on Linux
 with no BIOS image, interpreted and recompiled (after the discovery loop over 99.99 % of its instructions run as
 lifted C), its serial output and its framebuffer identical both ways. Linux / macOS headless only (`XBR_CONSOLE_DC`,

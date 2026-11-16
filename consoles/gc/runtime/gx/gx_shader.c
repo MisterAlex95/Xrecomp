@@ -11,8 +11,9 @@
  * The renderer draws with the ubershader while the specialised program compiles on a worker thread (gx_gl.c).
  *
  * TEV arithmetic (facts, the hardware's): inputs a, b, c are 8 bits (c 255 counts as 256), d signed 11 bits;
- * result = d +/- lerp(a, b, c) + bias, scaled by 1 / 2 / 4 / 0.5, rounded, clamped to 0..255 or -1024..1023; bias 3 is
- * the compare mode (R8, GR16, BGR24, RGB8 / A8; greater or equal). The last stage's result is the output whatever its
+ * result = (d + bias) +/- lerp(a, b, c), scaled by 1 / 2 / 4 / 0.5 (the scale applied inside the lerp, before its
+ * rounding, which the colour combiner does when not halving and the alpha combiner only when halving), clamped to
+ * 0..255 or -1024..1023; bias 3 is the compare mode (R8, GR16, BGR24, RGB8 / A8; greater or equal). The last stage's result is the output whatever its
  * destination. Konst selects, swap tables, colour channels, ALPHA_BUMP; indirect stages (texture components s = A,
  * t = B, u = G), indirect commands (format, bias, bump alpha, static and dynamic matrices, wrap, add previous). */
 #include <stdio.h>
@@ -32,7 +33,7 @@ void gx_shader_key_make(gx_state *gx, gx_shader_key *k)
         k->nind = 4;
     k->iref = k->nind ? bp[BP_RAS_IREF] & ((1u << (6 * k->nind)) - 1) : 0;
     k->alpha_cmp = bp[BP_ALPHA_COMPARE] & 0xFF0000u;
-    k->fog = BITS(bp[BP_FOG_C], 20, 4);
+    k->fog = BITS(bp[BP_FOG_C], 21, 3) | BITS(bp[BP_FOG_C], 20, 1) << 3; /* fsel | proj << 3 */
     k->ztex = bp[BP_ZTEX1] & 0xF;
     if (BITS(k->ztex, 2, 2) == 0)
         k->ztex = 0;
@@ -165,15 +166,14 @@ static const char fs_common[] =
     "  }\n"
     "}\n"
     /* lerp, bias, scale, rounding as the hardware does them (signed 11-bit d) */
-    "ivec3 tev_lerp3(ivec3 a, ivec3 b, ivec3 c, ivec3 d, int bias, int op, int shift) {\n"
+    "ivec3 tev_lerp3(ivec3 a, ivec3 b, ivec3 c, ivec3 d, int bias, int op, int shift, bool alpha) {\n"
     "  c += c >> 7;\n"
+    "  if (bias == 1) d += 128; else if (bias == 2) d -= 128;\n"
     "  ivec3 l = (a << 8) + (b - a) * c;\n"
     "  if (shift != 3) { l = l << shift; d = d << shift; }\n"
-    "  l += ((shift == 3) == (op == 1)) ? 127 : 128;\n"
+    "  if ((shift == 3) == alpha) l += op == 1 ? 127 : 128;\n"
     "  l = l >> 8;\n"
     "  ivec3 r = op == 1 ? d - l : d + l;\n"
-    "  int b8 = bias == 1 ? 128 : bias == 2 ? -128 : 0;\n"
-    "  r += shift != 3 ? (b8 << shift) : b8;\n"
     "  if (shift == 3) r = r >> 1;\n"
     "  return r;\n"
     "}\n"
@@ -196,7 +196,7 @@ static const char fs_common[] =
     "      r = d + ivec3(t) * c;\n"
     "    }\n"
     "  } else {\n"
-    "    r = tev_lerp3(a, b, c, d, bias, op, shift);\n"
+    "    r = tev_lerp3(a, b, c, d, bias, op, shift, false);\n"
     "  }\n"
     "  return ((env >> 19) & 1) == 1 ? clamp(r, 0, 255) : clamp(r, -1024, 1023);\n"
     "}\n"
@@ -214,7 +214,7 @@ static const char fs_common[] =
     "    }\n"
     "    r = d + (t ? c : 0);\n"
     "  } else {\n"
-    "    r = tev_lerp3(ivec3(a), ivec3(b), ivec3(c), ivec3(d), bias, op, shift).x;\n"
+    "    r = tev_lerp3(ivec3(a), ivec3(b), ivec3(c), ivec3(d), bias, op, shift, true).x;\n"
     "  }\n"
     "  return ((env >> 19) & 1) == 1 ? clamp(r, 0, 255) : clamp(r, -1024, 1023);\n"
     "}\n"

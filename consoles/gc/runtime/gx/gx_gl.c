@@ -423,6 +423,9 @@ static prog_entry *prog_lookup(gx_gl *g, const gx_shader_key *k, bool create)
     e->hash = h;
     e->next = *b;
     *b = e;
+    if (g->trace)
+        fprintf(stderr, "gx: new TEV state %016llX: %u stage(s), %u indirect, alpha test %06X, fog %X, ztex %X, pe %X\n",
+                (unsigned long long)h, k->nst, k->nind, k->alpha_cmp, k->fog, k->ztex, k->pe);
     record_key(g, k);
     prog_start(g, e);
     return e;
@@ -767,7 +770,7 @@ static void fill_ubo(gx_state *gx, const gx_shader_key *k)
     u->alpharef[3] = 0;
     float a = gx_f32((bp[BP_FOG_A] & 0xFFFFFu) << 12), c = gx_f32((bp[BP_FOG_C] & 0xFFFFFu) << 12);
     u->fog[0] = a;
-    u->fog[1] = (float)BITS(bp[BP_FOG_B_MAG], 0, 24) / 8388638.0f;
+    u->fog[1] = (float)BITS(bp[BP_FOG_B_MAG], 0, 24) / 16777216.0f; /* ze = a / (b_mag / 2^24 - z / 2^shift) */
     u->fog[2] = ldexpf(1.0f, -(int)BITS(bp[BP_FOG_B_SHIFT], 0, 5));
     u->fog[3] = c;
     u->fogcol[0] = (int32_t)BITS(bp[BP_FOG_COLOR], 16, 8);
@@ -775,6 +778,9 @@ static void fill_ubo(gx_state *gx, const gx_shader_key *k)
     u->fogcol[2] = (int32_t)BITS(bp[BP_FOG_COLOR], 0, 8);
     u->fogcol[3] = 0;
     u->zbias[0] = (int32_t)BITS(bp[BP_ZTEX0], 0, 24);
+    if (g->trace && k->fog)
+        fprintf(stderr, "gx: fog %X a %g b %g shift %g c %g colour %d %d %d\n", k->fog, u->fog[0], u->fog[1], u->fog[2],
+                u->fog[3], u->fogcol[0], u->fogcol[1], u->fogcol[2]);
     for (int s = 0; s < 16; s++) {
         u->st[s][0] = (int32_t)k->st_c[s];
         u->st[s][1] = (int32_t)k->st_a[s];

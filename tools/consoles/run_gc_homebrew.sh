@@ -63,8 +63,10 @@ echo "== GameCube ctest in $(($(date +%s) - t0)) s"
 exit $rc'
 
 cid=$(docker create --network none -e JOBS="$jobs" "$image" bash -c "$cmd")
-# tools/ppc: the shared PowerPC frontend; consoles/nds/tests/png_compare.py: the picture comparison
+# tools/ppc: the shared PowerPC frontend; consoles/nds/tests/png_compare.py: the picture comparison; third_party/libchdr
+# (the disc codecs, XBA-261) and src/platform (recomp_pack.c for gc_disc_info)
 tar -C "$repo" --exclude=__pycache__ -cf - consoles/gc tools/__init__.py tools/ppc consoles/nds/tests/png_compare.py \
+    third_party/libchdr src/platform \
     | docker cp - "$cid:/usr/src"
 docker cp "$corpus/gc" "$cid:/usr/src/hb"
 rc=0
