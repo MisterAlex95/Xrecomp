@@ -23,6 +23,7 @@ static int g_fp_cmp;
 static uint16_t g_fp_cc;
 static uint32_t eax;
 #define fp_top() values[g_fp_top]
+#define fp_abstop() (g_fp_top & 7u)
 '''
     for name,mnemonic,op in [('examine','fxam',''),('status','fnstsw','ax'),('testzero','ftst','')]:
         ins=Instruction(0,2,mnemonic,op,'')

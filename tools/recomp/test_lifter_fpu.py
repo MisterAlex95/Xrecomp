@@ -152,7 +152,7 @@ class FpuLifterTest(unittest.TestCase):
         self.assertIn("g_fp_cc", lifted[0])
         self.assertNotIn("_fpu_cmp", lifted[0])
         # C3 (equal) and C0 (less) at their status-word positions, plus TOP
-        self.assertIn("(g_fp_top & 7u) << 11", lifted[0])
+        self.assertIn("(fp_abstop() << 11)", lifted[0])
         self.assertNotIn("/* fnstsw ax - store FPU status word */", lifted[0])
 
     def test_compare_writes_the_shared_result(self):

@@ -342,6 +342,36 @@ FP_STACK_MACROS = [
     "    #define fp_top() g_fp_stack[g_fp_top]",
     "    #define fp_st(i) g_fp_stack[(g_fp_top + (i)) & 7u]",
     "    #define fp_st1() fp_st(1)",
+    "    #define fp_abstop() (g_fp_top & 7u)",
+    # The same accessors on C locals (FP_STACK_LOCALS), for a run of x87
+    # instructions inside one basic block (lifter.py _x87_local_regions,
+    # XBA-238). fpl_load copies the eight slots in, relative to TOP (_fs[k] is
+    # st(k) at the load); at the end of the run fpl_store writes back each
+    # slot the run wrote and fpl_settop TOP, when it moved. _ft starts at 0 at
+    # every load and only moves by constants in straight-line code, so every
+    # index folds to a constant and the compiler keeps the slots in host
+    # registers; the loads nobody reads are dead.
+    "    #define fpl_load() do { _fT = (unsigned)g_fp_top & 7u; _ft = 0u; \\",
+    "        _fs[0] = g_fp_stack[_fT]; _fs[1] = g_fp_stack[(_fT + 1u) & 7u]; \\",
+    "        _fs[2] = g_fp_stack[(_fT + 2u) & 7u]; _fs[3] = g_fp_stack[(_fT + 3u) & 7u]; \\",
+    "        _fs[4] = g_fp_stack[(_fT + 4u) & 7u]; _fs[5] = g_fp_stack[(_fT + 5u) & 7u]; \\",
+    "        _fs[6] = g_fp_stack[(_fT + 6u) & 7u]; _fs[7] = g_fp_stack[(_fT + 7u) & 7u]; } while (0)",
+    "    #define fpl_store(k) (g_fp_stack[(_fT + (k)) & 7u] = _fs[k])",
+    "    #define fpl_settop() (g_fp_top = (int)((_fT + _ft) & 7u))",
+    "    #define fpl_push(v) do { double _fp_value = (v); \\",
+    "        _ft = (_ft + 7u) & 7u; _fs[_ft] = _fp_value; } while (0)",
+    "    #define fpl_pop() (_ft = (_ft + 1u) & 7u)",
+    "    #define fpl_top() _fs[_ft]",
+    "    #define fpl_st(i) _fs[(_ft + (i)) & 7u]",
+    "    #define fpl_st1() fpl_st(1)",
+    "    #define fpl_abstop() ((_fT + _ft) & 7u)",
+]
+
+# The locals the fpl_* accessors work on: declared in the function, after
+# FP_STACK_MACROS.
+FP_STACK_LOCALS = [
+    "    double _fs[8]; unsigned _fT = 0u, _ft = 0u; /* x87 region slots */",
+    "    (void)_fs; (void)_fT; (void)_ft;",
 ]
 
 FP_STACK_UNDEFS = [
@@ -350,6 +380,16 @@ FP_STACK_UNDEFS = [
     "    #undef fp_top",
     "    #undef fp_st",
     "    #undef fp_st1",
+    "    #undef fp_abstop",
+    "    #undef fpl_load",
+    "    #undef fpl_store",
+    "    #undef fpl_settop",
+    "    #undef fpl_push",
+    "    #undef fpl_pop",
+    "    #undef fpl_top",
+    "    #undef fpl_st",
+    "    #undef fpl_st1",
+    "    #undef fpl_abstop",
 ]
 
 
@@ -3550,6 +3590,7 @@ class FunctionTranslator:
         # generated C functions, so function-local storage loses live ST values.
         if has_fpu:
             lines.extend(FP_STACK_MACROS)
+            lines.extend(FP_STACK_LOCALS)
 
         # For fpo_leaf functions that use ebp: initialize from g_seh_ebp.
         # In x86, these functions inherit EBP from their caller (typically

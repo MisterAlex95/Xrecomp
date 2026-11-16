@@ -4355,7 +4355,7 @@ class Lifter:
             return "fp_top()"
         if i == 1:
             return "fp_st1()"
-        return f"g_fp_stack[(g_fp_top + {i}) & 7]"
+        return f"fp_st({i})"
 
     def _fcom_rhs(self, ops):
         """The value an fcom-family instruction compares st0 against.
@@ -4444,8 +4444,7 @@ class Lifter:
                 idx = int(mm.group(1)) if mm else 0
                 parts = []
                 if idx != 0:   # i==0 is a self-copy; skip, just (maybe) pop
-                    dst = "fp_st1()" if idx == 1 else \
-                          f"g_fp_stack[(g_fp_top + {idx}) & 7]"
+                    dst = "fp_st1()" if idx == 1 else f"fp_st({idx})"
                     parts.append(f"{dst} = fp_top();")
                 if m == "fstp":
                     parts.append("fp_pop();")
@@ -4682,7 +4681,7 @@ class Lifter:
             # `test ah, 0x44; jp` -- the standard isnan idiom -- reads exactly
             # those two bits. Reporting equal for a NaN compare sends every
             # float classification in a title down the wrong branch.
-            status = "(uint16_t)(((g_fp_top & 7u) << 11) | g_fp_cc)"
+            status = "(uint16_t)((fp_abstop() << 11) | g_fp_cc)"
             if insn.op_str.strip() in ("ax", "eax"):
                 # `fnstsw ax` writes the whole of AX, not just AH.
                 return [f"eax = (eax & 0xFFFF0000u) | (uint32_t){status};"
@@ -4820,6 +4819,168 @@ def publish_flags(state, note="flags for pushfd"):
             + " | ".join(bits) + f"; /* {note} */"]
 
 
+# ── x87 stack in C locals, per basic block (XBA-238) ──
+#
+# The x87 accessors (translator.FP_STACK_MACROS) work on g_cpu: every fld
+# decrements g_fp_top in memory and writes a slot, every operand is a load
+# indexed by it, and since a guest access must find every guest register in
+# g_cpu (recomp_guest_base, XBA-138), all of it is stored again before each
+# MEMF/MEMD in the run. A run of x87 instructions inside one basic block goes
+# through the fpl_* accessors instead: fpl_load() copies TOP and the eight
+# slots into C locals at its first instruction, fpl_spill() writes them back
+# after its last one. Everything in between is straight-line code that moves
+# the local TOP by constants, so the compiler resolves every slot to a host
+# register (tools/bench w_x87).
+#
+# A region only holds instructions that cannot see or change the x87 state
+# through g_cpu: x87 instructions that use the accessors alone, and plain
+# integer instructions between them. A call, a return, a jump, an interrupt,
+# an instruction that reads g_fp_top or g_fp_stack directly or through a
+# runtime helper (fdecstp, fninit, fnsave, fxsave, ...), a runtime marker,
+# an SEH anchor, or an instruction whose stack effect is conditional
+# (fsincos, fptan) ends the region before it. Every block starts and ends
+# with g_cpu exact, so labels, loops, calls and resumes see what they did.
+#
+# One difference, documented: inside a region the x87 slots and TOP in g_cpu
+# are those of the region's start. A host fault there builds the guest
+# exception from g_cpu, whose CONTEXT carries no x87 state (xbox_seh.c
+# seh_capture), and continue-execution resumes the host code with its
+# registers; only a handler that unwinds to an __except would find the x87
+# stack as it was at the region's start instead of mid-expression, which no
+# compiled code reads (the tags are not modelled either).
+
+_X87_REGION_BARRIER = re.compile(
+    r"\bg_fp_top\b|\bg_fp_stack\b|\brecomp_f(?:nsave|rstor|ninit|nstenv|ldenv|xsave|xrstor)\b"
+    r"|\bRECOMP_|\breturn\b|\bgoto\b|\bsub_[0-9A-Fa-f]|\bloc_[0-9A-Fa-f]|\bxbox_")
+# Allowed in a region besides the accessors: pure helpers of the x87 lifts.
+_X87_REGION_OK_MACROS = re.compile(r"\bRECOMP_(?:FP_PC|FCMP|FCMP_CC)\b")
+# fsincos and fptan leave the stack alone when the operand is out of range.
+_X87_CONDITIONAL_DEPTH = frozenset({"fsincos", "fptan", "fxsave", "fxrstor", "femms"})
+# Non-x87 instructions a region may span: integer data moves and arithmetic,
+# which neither call out nor touch the x87 state.
+_X87_REGION_NEUTRAL = frozenset({
+    "mov", "movzx", "movsx", "lea", "add", "sub", "adc", "sbb", "inc", "dec",
+    "and", "or", "xor", "not", "neg", "cmp", "test", "shl", "sal", "shr",
+    "sar", "rol", "ror", "imul", "push", "pop", "xchg", "cdq", "cwde", "cbw",
+    "cwd", "nop", "sahf", "lahf",
+    "sete", "setne", "setb", "setae", "setbe", "seta", "setl", "setge",
+    "setle", "setg", "sets", "setns", "setp", "setnp", "seto", "setno",
+    "cmove", "cmovne", "cmovb", "cmovae", "cmovbe", "cmova", "cmovl",
+    "cmovge", "cmovle", "cmovg", "cmovs", "cmovns", "cmovp", "cmovnp",
+})
+_X87_ACCESSOR = re.compile(r"\bfp_(push|pop|top|st1|st|abstop)\(")
+
+
+def _x87_span_kind(span_insns, text):
+    """'x87' (may sit in a region and uses the accessors), 'neutral' (may sit
+    between two x87 instructions of a region) or 'barrier'."""
+    if not span_insns:
+        return "barrier"
+    if _X87_REGION_BARRIER.search(_X87_REGION_OK_MACROS.sub("", text)):
+        return "barrier"
+    mnems = [i.mnemonic for i in span_insns]
+    if all(m.startswith("f") for m in mnems):
+        if any(m in _X87_CONDITIONAL_DEPTH for m in mnems):
+            return "barrier"
+        return "x87"
+    if all(m in _X87_REGION_NEUTRAL for m in mnems) and not _X87_ACCESSOR.search(text):
+        return "neutral"
+    return "barrier"
+
+
+def _x87_local_regions(insns, stmts, spans):
+    """stmts with the block's x87 runs on C locals (see above). spans are
+    (first insn, end insn, first stmt, end stmt) per lifted instruction."""
+    kinds = [_x87_span_kind(insns[a:b], " ".join(stmts[s:e])) for a, b, s, e in spans]
+    regions, cur = [], []          # runs of span indices
+    for k, kind in enumerate(kinds):
+        if kind == "x87" or (kind == "neutral" and cur):
+            cur.append(k)
+        else:
+            if cur:
+                regions.append(cur)
+            cur = []
+    if cur:
+        regions.append(cur)
+    edits = []                     # (first span, last span, spill statement)
+    for reg in regions:
+        while kinds[reg[-1]] != "x87":
+            reg.pop()
+        # One instruction alone gains nothing over the g_cpu accessors.
+        if sum(1 for k in reg if kinds[k] == "x87") < 2:
+            continue
+        effect = _x87_stack_effect(" ".join(stmts[spans[reg[0]][2]:spans[reg[-1]][3]]))
+        if effect is None:
+            continue
+        written, depth = effect
+        spill = " ".join("fpl_store(%d);" % k for k in sorted(written))
+        if depth:
+            spill += " fpl_settop();"
+        edits.append((reg[0], reg[-1], spill.strip() or "(void)0;"))
+    if not edits:
+        return stmts
+    out = list(stmts)
+    for first, last, spill in reversed(edits):
+        s0, s1 = spans[first][2], spans[last][3]
+        body = [_X87_ACCESSOR.sub(lambda m: "fpl_%s(" % m.group(1), st) for st in out[s0:s1]]
+        out[s0:s1] = (["fpl_load(); /* x87 stack in locals (XBA-238) */"] + body
+                      + [spill + " /* x87 locals back */"])
+    return out
+
+
+_X87_TOKEN = re.compile(r"\bfp_(push|pop|top|st1|abstop)\(\)?|\bfp_st\((\d+)\)|[()]")
+_X87_WRITE = re.compile(r"\s*(?:[-+*/]?=)(?!=)")
+
+
+def _x87_stack_effect(text):
+    """(slots written, TOP moved by) of a region's C, the slots numbered as
+    _fs (relative to TOP at fpl_load), from the accessor calls in evaluation
+    order -- which is text order in every lifted x87 form: an fp_push's
+    argument is read before TOP moves. None when the text has a shape this
+    does not follow (no region then)."""
+    text = re.sub(r"/\*.*?\*/", " ", text)
+    depth, written = 0, set()
+    pending = []                   # paren depth at which each open fp_push closes
+    parens = 0
+    pos = 0
+    while True:
+        m = _X87_TOKEN.search(text, pos)
+        if not m:
+            break
+        pos = m.end()
+        tok = m.group(0)
+        if tok == "(":
+            parens += 1
+            continue
+        if tok == ")":
+            parens -= 1
+            if pending and pending[-1] == parens:
+                pending.pop()
+                depth = (depth + 7) & 7
+                written.add(depth)
+            continue
+        kind = m.group(1)
+        if kind == "push":
+            if tok.endswith(")"):  # fp_push() with no argument: not a lifted form
+                return None
+            pending.append(parens)
+            parens += 1
+            continue
+        if not tok.endswith(")"):
+            return None
+        if kind == "pop":
+            depth = (depth + 1) & 7
+            continue
+        if kind == "abstop":
+            continue
+        index = 0 if kind == "top" else 1 if kind == "st1" else int(m.group(2))
+        if _X87_WRITE.match(text, pos):
+            written.add((depth + index) & 7)
+    if pending or parens:
+        return None
+    return written, depth
+
+
 def lift_basic_block(lifter, bb, flag_state=None):
     """
     Lift a basic block to C statements.
@@ -4848,8 +5009,15 @@ def lift_basic_block(lifter, bb, flag_state=None):
     # What stc/clc/cmc replaced: after popfd the other flags already sit in
     # g_eflags, so a pushfd there has nothing missing to flag.
     cf_only_over = None
+    # (first insn, end insn, first stmt, end stmt) of each lifted instruction,
+    # for _x87_local_regions.
+    spans = []
+    span_at = (0, 0)
 
     while i < len(insns):
+        if i > span_at[0]:
+            spans.append((span_at[0], i, span_at[1], len(stmts)))
+            span_at = (i, len(stmts))
         curr = insns[i]
 
         if curr.address in lifter.flag_publish_sites:
@@ -5143,6 +5311,11 @@ def lift_basic_block(lifter, bb, flag_state=None):
             last_flag_ops = []
 
         i += 1
+
+    if len(insns) > span_at[0]:
+        spans.append((span_at[0], len(insns), span_at[1], len(stmts)))
+    if getattr(lifter, "x87_locals", True):
+        stmts = _x87_local_regions(insns, stmts, spans)
 
     out_flag_state = (last_flag_setter, last_flag_ops) if last_flag_setter else None
     return stmts, out_flag_state

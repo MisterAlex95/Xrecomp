@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .disasm import BasicBlock, Instruction, Operand
 from .lifter import Lifter, lift_basic_block
-from .translator import FP_STACK_MACROS
+from .translator import FP_STACK_LOCALS, FP_STACK_MACROS
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -70,6 +70,7 @@ static int taken;
 static void sub_00000040(void) { taken = 1; }
 static void crt_sin(void) {
     uint32_t ebp = 0; uint32_t _fa = 0, _fb = 0; (void)ebp; (void)_fa; (void)_fb;
+@LOCALS@
     eax = 0;
 @SIN@
 }
@@ -130,6 +131,7 @@ def _compile_and_run(sin, sincos, tan):
     if not cc:
         raise unittest.SkipTest("C compiler unavailable")
     source = (_SOURCE.replace("@MACROS@", "\n".join(FP_STACK_MACROS))
+              .replace("@LOCALS@", "\n".join(FP_STACK_LOCALS))
               .replace("@SIN@", sin).replace("@SINCOS@", sincos)
               .replace("@TAN@", tan))
     with tempfile.TemporaryDirectory() as tmp:

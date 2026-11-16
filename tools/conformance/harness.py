@@ -316,12 +316,12 @@ static void cmp_sse(const char *name, const char *why, int *shown, int vec) {
 
 def harness_source(prepared, why_of, tol_of):
     """prepared: list of (name, kind, lifted_lines, inputs)."""
-    from tools.recomp.translator import FP_STACK_MACROS, FP_STACK_UNDEFS
+    from tools.recomp.translator import FP_STACK_LOCALS, FP_STACK_MACROS, FP_STACK_UNDEFS
     global _LIFTED_PROLOGUE, _LIFTED_EPILOGUE
     _LIFTED_PROLOGUE = dict(_LIFTED_PROLOGUE)
     _LIFTED_EPILOGUE = dict(_LIFTED_EPILOGUE)
     _LIFTED_PROLOGUE["fpu"] = _LIFTED_PROLOGUE["fpu"].replace(
-        "@FPMACROS@", chr(10).join(FP_STACK_MACROS))
+        "@FPMACROS@", chr(10).join(FP_STACK_MACROS + FP_STACK_LOCALS))
     _LIFTED_EPILOGUE["fpu"] = _LIFTED_EPILOGUE["fpu"].replace(
         "@FPUNDEFS@", chr(10).join(FP_STACK_UNDEFS))
     out = [_PREAMBLE]

@@ -63,7 +63,12 @@ def test_msvc_min_idiom_moves_under_the_test_flags():
     assert move, body
     assert "FPU: fcmove" not in body, body
     # je after `test ah, 1` is ZF = ((ah & 1) == 0).
-    assert move[0].startswith("if (") and "fp_top() = fp_st1();" in move[0], move[0]
+    # fcom..fcmove is one x87 run of the block: it works on the locals
+    # (lifter._x87_local_regions, XBA-238).
+    assert move[0].startswith("if (") and "fpl_top() = fpl_st1();" in move[0], move[0]
+    assert body.splitlines()[0].startswith("fpl_load();"), body
+    # Only st(0) was written (fcmove), and TOP did not move.
+    assert body.splitlines()[-1] == "fpl_store(0); /* x87 locals back */", body
     assert "TEST_Z" in move[0] or "== 0" in move[0], move[0]
 
 
@@ -76,7 +81,7 @@ def test_every_form_moves_its_source_register():
         ]
         body = _lift_block(block)
         assert "FPU: fcmov" not in body, (mnemonic, body)
-        assert "fp_top() = g_fp_stack[(g_fp_top + 3) & 7];" in body, (mnemonic, body)
+        assert "fp_top() = fp_st(3);" in body, (mnemonic, body)
 
 
 def test_parity_forms_read_parity():
@@ -89,4 +94,4 @@ def test_parity_forms_read_parity():
 
 def test_untracked_flags_fall_back_to_flags_variable():
     body = "\n".join(Lifter().lift_instruction(_fcmov("fcmovne", 2)))
-    assert body.startswith("if (_flags") and "g_fp_stack[(g_fp_top + 2) & 7]" in body, body
+    assert body.startswith("if (_flags") and "fp_top() = fp_st(2);" in body, body

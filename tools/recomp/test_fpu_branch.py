@@ -81,7 +81,7 @@ def test_fnstsw_ax_sets_ah_from_fpu_cmp():
     # bits 11-13 as well as the condition codes -- the hardware AH includes it,
     # so a comparison against the real CPU fails without it.
     assert "eax = (eax & 0xFFFF0000u)" in out, out
-    assert "(g_fp_top & 7u) << 11" in out, out
+    assert "(fp_abstop() << 11)" in out, out
     # Classification and comparison instructions publish shared condition bits.
 
 
@@ -169,10 +169,10 @@ def test_arith_honors_operands():
     assert "fp_st1() = RECOMP_FP_PC(fp_st1() + fp_top()); fp_pop();" in o, o
     # faddp st(2): st(2) = st(2) + st0, pop
     o = lift("faddp", [_Op("st2", type="reg", reg="st(2)")], "st(2)")
-    assert "g_fp_stack[(g_fp_top + 2) & 7] = RECOMP_FP_PC(g_fp_stack[(g_fp_top + 2) & 7] + fp_top()); fp_pop();" in o, o
+    assert "fp_st(2) = RECOMP_FP_PC(fp_st(2) + fp_top()); fp_pop();" in o, o
     # fmul st(3): non-pop single operand stays st0 *= st(3), no pop
     o = lift("fmul", [_Op("st3", type="reg", reg="st(3)")], "st(3)")
-    assert "fp_top() = RECOMP_FP_PC(fp_top() * g_fp_stack[(g_fp_top + 3) & 7])" in o and "fp_pop" not in o, o
+    assert "fp_top() = RECOMP_FP_PC(fp_top() * fp_st(3))" in o and "fp_pop" not in o, o
     # fmulp st(1): st1 *= st0, pop
     o = lift("fmulp", [st1], "st(1)")
     assert "fp_st1() = RECOMP_FP_PC(fp_st1() * fp_top()); fp_pop();" in o, o
