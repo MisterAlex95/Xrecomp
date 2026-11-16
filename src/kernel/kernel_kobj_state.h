@@ -41,7 +41,8 @@
  * the thread still running with the same KTHREAD, and fails when there is
  * none (threads are matched by host thread id, which is the process's
  * own); a save for another run (XBOX_KOBJ_ACROSS_RUNS) is refused while any
- * guest thread runs.
+ * guest thread runs, unless XBOX_KOBJ_RESUME_THREADS (XBA-250: a resume makes the
+ * threads again, xbox_KobjResumeThreads names them for the load).
  *
  * The blob is self-describing: "XKOB", a version, then records (u16 type,
  * u16 version, u32 length, payload), little-endian. A reader skips record

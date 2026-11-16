@@ -5,9 +5,10 @@
  * ps1_runtime; n64_runtime can plug in the same way) attaches itself while a game plays: its console name, its
  * state folder (<save dir>/<console>-<KEY>) and two callbacks that save / load a slot between frames (the runtime
  * holds its frame mutex in them, so a state is never taken mid-frame). Xbox titles attach too (console "xbox",
- * xbox_state_service.c, XBA-249): their states freeze every guest thread at a kernel call and load only within the
- * run that saved them, when every thread is back at the same call (else RECOMP_STATE_EREFUSED;
- * docs/technical/xbox-save-states.md).
+ * xbox_state_service.c, XBA-249): their states freeze every guest thread at a kernel call and load within the run
+ * that saved them, when every thread is back at the same call (else RECOMP_STATE_EREFUSED), or, when the state
+ * says its threads can be re-entered, in a fresh process before the game starts (XBA-250: the automatic slot,
+ * Resume; docs/technical/xbox-save-states.md).
  *
  * Slot files: <dir>/state<N>.st, N = 1..RECOMP_STATE_SLOTS, and the automatic slot <dir>/auto.st (slot
  * RECOMP_STATE_AUTO = 0: saved when the player leaves the game, loaded at the next start to resume). A small header (magic "XRSLOT", version, console, game

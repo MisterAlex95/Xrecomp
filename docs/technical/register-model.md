@@ -70,7 +70,9 @@ A local ebp lives only in its function's host frame, which a save state cannot r
 reach a park point records itself on entry in a per-thread shadow stack (`RECOMP_FRAME_ENTRY` / `LEAVE` in
 `recomp_types.h`): the guest esp it was entered with and `g_ebp`, the ebp its caller published before the call. A
 parked thread's whole call chain and every frame's ebp can then be read and compared. Details:
-`docs/technical/xbox-save-states.md` « Guest call chains ».
+`docs/technical/xbox-save-states.md` « Guest call chains ». A save state loaded in another process rebuilds the
+host frames by calling the chain again through each function's resume entry (`RECOMP_FRAME_ENTRY_R`, XBA-250, « Across
+runs »), which gives every frame its ebp back.
 
 ### The SEH Bridge: g_seh_ebp
 
