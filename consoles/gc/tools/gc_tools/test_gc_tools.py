@@ -2,6 +2,7 @@
 interpreter and recompiled (gc_run and the pack built from source with the host cc). No devkitPPC needed."""
 
 import os
+import shlex
 import shutil
 import struct
 import subprocess
@@ -66,7 +67,11 @@ def program():
              asm.fnmsubs(25, 20, 22, 21), asm.stfs(25, 76, 4),
              asm.fnmadds(26, 20, 22, 29), asm.stfs(26, 80, 4),
              asm.ps_nmsub(27, 20, 22, 21), asm.psq_st(27, 84, 4, 0, 2),           # (-0, -6)
-             asm.ps_nmadd(28, 20, 22, 21), asm.psq_st(28, 92, 4, 0, 2)]           # (-6, -0)
+             asm.ps_nmadd(28, 20, 22, 21), asm.psq_st(28, 92, 4, 0, 2),           # (-6, -0)
+             # fmul then fadd round twice (XBA-255): (1 + 2^-27)^2 - 1 = 2^-26, fused 2^-26 + 2^-54. The add
+             # overwrites the product, so a compiler free to contract (GCC on arm64) would fuse the lifted pair
+             asm.lfd(30, 48, 3), asm.lfd(31, 56, 3),
+             asm.fmul(29, 30, 30), asm.fadd(29, 29, 31), asm.stfd(29, 100, 4)]    # 0x3E500000 00000000
     idle = at()
     code += [asm.b(idle, idle)]
     fn = at()
@@ -74,12 +79,14 @@ def program():
     code[call_at] = asm.bl(TEXT + 4 * call_at, fn)
     data = f32(1.5, -2.0, 4.0, 0.25) + bytes([10, 200, 0, 0, 0, 0, 0, 0]) + struct.pack(">I", 0x12345678)
     data += f32(2.0, 1.5, 3.0, -3.0)
+    data += bytes(4) + struct.pack(">2d", 1.0 + 2.0 ** -27, -1.0)                 # at DATA + 48
     return build([(TEXT, struct.pack(">%dI" % len(code), *code))], [(DATA, data)])
 
 
 EXPECTED = [0x41200000, 0xBE800000, 0xC0000000, 0x40800000, 0x00280320, 0x40200000, 0x42480000, 0x40400000,
             0x40400000, 0x40400000, 0x00007800, 5050, 42, 0xFF000000, 1, 7, 0x20000084,
-            0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0xC0C00000, 0xC0C00000, 0x80000000]
+            0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0xC0C00000, 0xC0C00000, 0x80000000,
+            0x3E500000, 0x00000000]
 
 
 def test_dol_round_trip():
@@ -126,12 +133,21 @@ def test_recompile_lifts_the_program(tmp_path):
     assert "RC_MTSPR(915, R(5)); RC_CHECK(0x80003124u);" in text
 
 
+# The core and the pack are built like the CMake core and run_hello.sh's packs: -O2 (where GCC on arm64 contracts a
+# multiply and an add into one fused rounding unless told not to) with -ffp-contract=off. GC_TEST_CC and
+# GC_TEST_EMULATOR run the test for another host, e.g. arm64 from x86-64 (XBA-255):
+#   GC_TEST_CC=aarch64-linux-gnu-gcc GC_TEST_EMULATOR="qemu-aarch64 -L /usr/aarch64-linux-gnu" python3 -m pytest ...
+CC = os.environ.get("GC_TEST_CC", "cc")
+EMULATOR = shlex.split(os.environ.get("GC_TEST_EMULATOR", ""))
+CFLAGS = ["-O2", "-ffp-contract=off", "-Wall", "-Werror"]
+
+
 def _build_gc_run(tmp_path):
     srcs = [os.path.join(RUNTIME, f) for f in ("gc_core.c", "gc_cpu.c", "gc_bus.c", "gc_recomp.c")]
     exe = str(tmp_path / "gc_run")
-    subprocess.run(["cc", "-O1", "-Wall", "-Werror", "-rdynamic", "-I", RUNTIME, "-o", exe,
+    subprocess.run([CC] + CFLAGS + ["-rdynamic", "-I", RUNTIME, "-o", exe,
                     os.path.join(RUNTIME, "tools", "gc_run.c")] + srcs + ["-ldl", "-lm"], check=True)
-    return exe
+    return EMULATOR + [exe]
 
 
 def _peek(out):
@@ -142,13 +158,13 @@ def _peek(out):
     return words
 
 
-@pytest.mark.skipif(not shutil.which("cc") or not sys.platform.startswith("linux"), reason="no C compiler / not Linux")
+@pytest.mark.skipif(not shutil.which(CC) or not sys.platform.startswith("linux"), reason="no C compiler / not Linux")
 def test_interpreter_and_recompiled_agree(tmp_path):
     dol = tmp_path / "t.dol"
     dol.write_bytes(program())
     exe = _build_gc_run(tmp_path)
     peek = ["--peek", "%08X:%d" % (OUT, len(EXPECTED))]
-    r = subprocess.run([exe, str(dol), "--frames", "1", "--stats"] + peek, capture_output=True, text=True,
+    r = subprocess.run(exe + [str(dol), "--frames", "1", "--stats"] + peek, capture_output=True, text=True,
                        timeout=60)
     assert r.returncode == 0, r.stderr
     assert _peek(r.stdout) == EXPECTED
@@ -157,9 +173,9 @@ def test_interpreter_and_recompiled_agree(tmp_path):
                    capture_output=True)
     pack = str(tmp_path / "libt.so")
     srcs = sorted(str(p) for p in (tmp_path / "src").glob("*.c"))
-    subprocess.run(["cc", "-shared", "-fPIC", "-O1", "-Wall", "-Werror", "-Wno-unused-label", "-DGC_RC_COUNT",
+    subprocess.run([CC, "-shared", "-fPIC"] + CFLAGS + ["-Wno-unused-label", "-DGC_RC_COUNT",
                     "-I", RUNTIME, "-o", pack] + srcs + ["-lm"], check=True)
-    r = subprocess.run([exe, str(dol), "--frames", "1", "--stats", "--pack", pack] + peek, capture_output=True,
+    r = subprocess.run(exe + [str(dol), "--frames", "1", "--stats", "--pack", pack] + peek, capture_output=True,
                        text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     assert _peek(r.stdout) == EXPECTED

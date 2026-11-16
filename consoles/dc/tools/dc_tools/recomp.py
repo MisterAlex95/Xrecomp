@@ -5,7 +5,8 @@
 
 Writes OUTDIR/title.h, OUTDIR/rc_NNN.c (the functions, N files) and OUTDIR/table.c (dc_recomp_title_table: the
 entries sorted by address, the spans with their FNV-1a, the program's SHA-256). Build them into one shared library
-with -I consoles/dc/runtime (add -DDC_RC_COUNT to count native instructions) and give it to dc_run --pack.
+with -I consoles/dc/runtime -ffp-contract=off (like dc_core: FMUL then FADD round twice; add -DDC_RC_COUNT to count
+native instructions) and give it to dc_run --pack.
 --discovered: addresses dc_run --missed reported (hex, one per line, '#' comments): lift again with them until the
 interpreter has nothing left to run inside the image. The raw binary must be unscrambled (1ST_READ.BIN as it lies in
 RAM at 0x8C010000).

@@ -1399,13 +1399,15 @@ leaves. Linux / macOS headless only (`XBR_CONSOLE_GC`, off on Android and Window
   returns to the dispatcher on calls, returns and indirect jumps (libogc switches threads under it); its table lists
   every resume point, so dispatch is an exact hash lookup; text spans are hashed before use and again after an icbi.
   `gc_run PROG.dol [--frames N] [--png OUT] [--pack LIB] [--missed FILE] [--stats] [--peek A:N] [-v]` writes the XFB
-  (YUV 4:2:2, BT.601) as a PNG.
+  (YUV 4:2:2, BT.601) as a PNG. The core and packs are built with `-ffp-contract=off` (XBA-255): fmul then fadd
+  round twice, as on the 750, where GCC on arm64 would fuse them; fmadd and friends call `fma()`.
 - `tests/`: ctest `gc_hello` (interpreter) and `gc_rc_hello` (recompiled, discovery loop: two rounds), both compare
   the XFB after 120 fields with `hello_xfb.png` (`consoles/nds/tests/png_compare.py`); skipped (77) without the
   corpus, run by the homebrew CI job (`tools/consoles/run_gc_homebrew.sh`). The Python tests (`tools/ppc/test_ppc.py`,
   `consoles/gc/tools/gc_tools/test_gc_tools.py`) need no toolchain; one builds gc_run and a pack from source and runs
-  a synthetic program (paired singles, quantisation, FP, loops, calls, carries, CR logic) interpreted and
-  recompiled, against known values.
+  a synthetic program (paired singles, quantisation, FP, an fmul + fadd that a fused multiply-add would get wrong,
+  loops, calls, carries, CR logic) interpreted and recompiled at -O2, against known values (`GC_TEST_CC` /
+  `GC_TEST_EMULATOR` run it for arm64 under qemu).
 
 Not there yet: GX / Flipper (CP FIFO, TEV, EFB copies), the DSP (audio), the DVD drive and disc images, pads and
 memory cards, the MMU (BATs, page tables), the estimate tables of fres / frsqrte / ps_res / ps_rsqrte (exact here),
@@ -1441,15 +1443,17 @@ off on Android and Windows), nothing in the app. What is there:
   read-out (FB_R_CTRL / SOF1 / SIZE: 555, 565, 888, 0888, interlace), a BIOS in C (`dc_bios.c`: the syscall
   vectors at 0x8C0000B0-E0 point at stubs the dispatcher serves: sysinfo, ROM font, flash, GD-ROM "no disc", system
   menu; no image). One instruction per cycle at 200 MHz, the TMU at 12.5 MHz. `dc_run PROGRAM [--frames N] [--png
-  OUT] [--png-when TEXT] [--serial OUT] [--pack LIB] [--missed FILE] [--stats]`.
+  OUT] [--png-when TEXT] [--serial OUT] [--pack LIB] [--missed FILE] [--stats]`. The core and packs are built with
+  `-ffp-contract=off` (XBA-255): FMUL then FADD round twice, where GCC on arm64 would fuse them (FMAC, FIPR and
+  FTRV round each step too, as on x86-64).
 - `tests/`: ctest `dc_sh4_ops` (synthetic programs assembled in `dc_sh4_test.c`: division sequences, carries, SHAD /
-  SHLD, MAC.L saturation, delay slots, TRAPA / RTE across the banks, FPU single / double, pairs, FIPR / FSCA; no
-  toolchain), `dc_rc_sh4_ops` (the same programs lifted: same words, nothing interpreted; and the C decoder against
-  `dc_tools.sh4` on all 65536 opcodes), `dc_hello` / `dc_rc_hello` (the hello world interpreted / recompiled: its
-  `hello:` serial lines against `hello_serial.txt`, the framebuffer when it printed `hello: done` against
-  `hello_fb.png`, exit code 0); the last two skip (77) without the corpus and run in the homebrew CI job
-  (`tools/consoles/run_dc_homebrew.sh`). The lifter's pytest (`consoles/dc/tools/dc_tools/test_dc_tools.py`) needs no
-  toolchain.
+  SHLD, MAC.L saturation, delay slots, TRAPA / RTE across the banks, FPU single / double, pairs, FIPR / FSCA,
+  FMUL + FADD unfused; no toolchain), `dc_rc_sh4_ops` (the same programs lifted: same words, nothing interpreted;
+  and the C decoder against `dc_tools.sh4` on all 65536 opcodes), `dc_hello` / `dc_rc_hello` (the hello world
+  interpreted / recompiled: its `hello:` serial lines against `hello_serial.txt`, the framebuffer when it printed
+  `hello: done` against `hello_fb.png`, exit code 0); the last two skip (77) without the corpus and run in the
+  homebrew CI job (`tools/consoles/run_dc_homebrew.sh`). The lifter's pytest
+  (`consoles/dc/tools/dc_tools/test_dc_tools.py`) needs no toolchain.
 
 Not there yet: the PowerVR2 beyond the framebuffer (the TA, tile accelerator lists, ISP / TSP, textures: the next
 big piece), AICA (its ARM7 and the 64 channels), Maple (pads), the GD-ROM (GDI / CHD images), G2 / PVR DMA, the MMU

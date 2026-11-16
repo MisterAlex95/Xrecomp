@@ -2,10 +2,11 @@
 # ctest helper (XBA-225): run_hello.sh GC_RUN DOL WORKDIR interp|rc EXPECTED_PNG
 #
 # interp: DOL under gc_run (interpreter only) for 120 fields, the XFB compared with EXPECTED_PNG.
-# rc:     DOL's text recompiled (python3 -m gc_tools.recomp, the host cc into a pack), with the discovery loop: run,
-#         lift again with the addresses the interpreter had to start at (--missed / --discovered), until a run finds
-#         none new (4 rounds at most); then the last run's XFB compared with EXPECTED_PNG, and most instructions must
-#         have run natively (the pack is built with -DGC_RC_COUNT).
+# rc:     DOL's text recompiled (python3 -m gc_tools.recomp, the host cc into a pack, -ffp-contract=off like the
+#         core; RC_FLAGS adds flags, e.g. -O2), with the discovery loop: run, lift again with the addresses the
+#         interpreter had to start at (--missed / --discovered), until a run finds none new (4 rounds at most); then
+#         the last run's XFB compared with EXPECTED_PNG, and most instructions must have run natively (the pack is
+#         built with -DGC_RC_COUNT).
 # The comparison is consoles/nds/tests/png_compare.py (stdlib only, shared with the DS spike).
 # Exits 77 (skipped) when DOL is absent (tools/consoles/build_homebrew.sh gc), or python3 / cc are missing.
 run=$1
@@ -38,8 +39,8 @@ while :; do
         --discovered "$work/discovered.txt" --no-comments --report "$work/report.json" >/dev/null || exit 1
     rm -f "$work"/src/*.o
     # one object per file, in parallel; RC_FLAGS / CC from the environment
-    (cd "$work/src" && ls *.c | xargs -P "$jobs" -I{} "$cc" -c -fPIC -O1 ${RC_FLAGS:-} -DGC_RC_COUNT \
-        -I "$repo/consoles/gc/runtime" -o {}.o {}) || exit 1
+    (cd "$work/src" && ls *.c | xargs -P "$jobs" -I{} "$cc" -c -fPIC -O1 -ffp-contract=off ${RC_FLAGS:-} \
+        -DGC_RC_COUNT -I "$repo/consoles/gc/runtime" -o {}.o {}) || exit 1
     "$cc" -shared -o "$work/libtitle.so" "$work"/src/*.o -lm || exit 1
     out=$(timeout 120 "$run" "$dol" --frames 120 --pack "$work/libtitle.so" --png "$work/xfb.png" --stats \
         --missed "$work/missed.txt") || { echo "$out"; exit 1; }

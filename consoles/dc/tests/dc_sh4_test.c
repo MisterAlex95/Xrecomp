@@ -9,7 +9,8 @@
  * host. Covers what is easy to get wrong: DIV0U / DIV0S / DIV1 sequences, carries and borrows (ADDC / SUBC / NEGC),
  * SHAD / SHLD both ways, 64-bit and MAC multiplies (S saturation), CMP/STR, delay slots (target taken before the
  * slot, T read before the slot, PR set for the slot), TRAPA and RTE with the register banks, the FPU in single and
- * double precision, 64-bit FMOV pairs into XD, FRCHG, FIPR, FTRV, FSCA, FTRC saturation, FCNVSD / FCNVDS. */
+ * double precision, 64-bit FMOV pairs into XD, FRCHG, FIPR, FTRV, FSCA, FTRC saturation, FCNVSD / FCNVDS, and FMUL
+ * then FADD rounding twice (no fused multiply-add on arm64 hosts). */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -416,11 +417,61 @@ static void p_fpu(prog *p)
     finish(p);
 }
 
+/* fmul then fadd round twice (XBA-255): (1 + 2^-12)^2 rounds to 1 + 2^-11 in single (a tie, to even), so adding -1
+ * gives 2^-11, where a fused multiply-add (GCC contracts by default on arm64) gives 2^-11 + 2^-24. Same in double
+ * with (1 + 2^-27)^2: 2^-26 against 2^-26 + 2^-54. The add overwrites the product's register, so a compiler free to
+ * contract would fuse the lifted pair: the core and the packs are built with -ffp-contract=off. */
+static void p_fmuladd(prog *p)
+{
+    start(p);
+    li(p, 0, fbits(1.0f + 0x1p-12f));
+    e(p, 0x405A); /* lds r0,fpul */
+    e(p, 0xF00D); /* fsts fpul,fr0 */
+    e(p, 0xF10D); /* fsts fpul,fr1 */
+    li(p, 0, fbits(-1.0f));
+    e(p, 0x405A);
+    e(p, 0xF20D); /* fsts fpul,fr2 */
+    e(p, 0xF012); /* fmul fr1,fr0 */
+    e(p, 0xF020); /* fadd fr2,fr0 */
+    e(p, 0xF01D); /* flds fr0,fpul */
+    e(p, 0x005A); /* sts fpul,r0 */
+    st(p, 0, fbits(0x1p-11f));
+    /* double: dr0 = dr2 = 1 + 2^-27 (high word 0x3FF00000, low 0x02000000), dr4 = -1; FR(2k) holds the high word */
+    li(p, 0, 0x3FF00000u);
+    e(p, 0x405A);
+    e(p, 0xF00D); /* fr0 */
+    e(p, 0xF20D); /* fr2 */
+    li(p, 0, 0x02000000u);
+    e(p, 0x405A);
+    e(p, 0xF10D); /* fr1 */
+    e(p, 0xF30D); /* fr3 */
+    li(p, 0, 0xBFF00000u);
+    e(p, 0x405A);
+    e(p, 0xF40D); /* fr4 */
+    e(p, 0xE000); /* mov #0,r0 */
+    e(p, 0x405A);
+    e(p, 0xF50D); /* fr5 */
+    li(p, 0, 0x00080000u); /* PR */
+    e(p, 0x406A);          /* lds r0,fpscr */
+    e(p, 0xF022);          /* fmul dr2,dr0 */
+    e(p, 0xF040);          /* fadd dr4,dr0 */
+    e(p, 0xE000);
+    e(p, 0x406A); /* PR=0 */
+    e(p, 0xF01D); /* flds fr0,fpul: the high word */
+    e(p, 0x005A);
+    st(p, 0, 0x3E500000u); /* 2^-26 */
+    e(p, 0xF11D);          /* flds fr1,fpul: the low word */
+    e(p, 0x005A);
+    st(p, 0, 0);
+    finish(p);
+}
+
 typedef void (*build_fn)(prog *);
 static const struct {
     const char *name;
     build_fn build;
-} progs[] = {{"div", p_div}, {"alu", p_alu}, {"slots", p_slots}, {"trap", p_trap}, {"fpu", p_fpu}};
+} progs[] = {{"div", p_div},   {"alu", p_alu},          {"slots", p_slots},
+             {"trap", p_trap}, {"fpu", p_fpu},          {"fmuladd", p_fmuladd}};
 
 static int run_one(const char *name, prog *p, const char *dir)
 {

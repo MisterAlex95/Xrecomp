@@ -77,6 +77,8 @@ def fa(op, xo, d, a, b_, c=0, rc=0):
 
 
 def fadds(d, a, b_): return fa(59, 21, d, a, b_)
+def fadd(d, a, b_): return fa(63, 21, d, a, b_)
+def fmul(d, a, c): return fa(63, 25, d, a, 0, c)
 def fmadd(d, a, c, b_): return fa(63, 29, d, a, b_, c)
 def fnmsub(d, a, c, b_): return fa(63, 30, d, a, b_, c)
 def fnmadd(d, a, c, b_): return fa(63, 31, d, a, b_, c)

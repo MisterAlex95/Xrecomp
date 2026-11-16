@@ -26,7 +26,8 @@ for bin in "$work"/*.bin; do
     nwords=$(tr ' ' '\n' <"$work/$name.expect" | grep -c '^[0-9A-F]\{8\}$')
     PYTHONPATH="$repo/consoles/dc/tools" timeout 120 "$py" -m dc_tools.recomp "$bin" "$work/$name.src" \
         --no-comments >/dev/null || exit 1
-    "$cc" -shared -fPIC -O1 -DDC_RC_COUNT -I "$repo/consoles/dc/runtime" -o "$work/$name.so" \
+    "$cc" -shared -fPIC -O1 -ffp-contract=off ${RC_FLAGS:-} -DDC_RC_COUNT \
+        -I "$repo/consoles/dc/runtime" -o "$work/$name.so" \
         "$work/$name.src"/*.c -lm || exit 1
     out=$(timeout 60 "$run" "$bin" --frames 2 --pack "$work/$name.so" --stats --peek "8C001000:$nwords")
     got=$(echo "$out" | sed -n '/^peek /,$p')

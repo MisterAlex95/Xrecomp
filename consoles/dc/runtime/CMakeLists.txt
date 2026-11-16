@@ -15,7 +15,9 @@ endif()
 if(NOT TARGET dc_core)
     add_library(dc_core STATIC dc_core.c dc_bus.c dc_hw.c dc_bios.c dc_naomi.c sh4_interp.c)
     target_include_directories(dc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-    target_compile_options(dc_core PRIVATE -Wall -Wextra)
+    # -ffp-contract=off: FMUL then FADD round twice, so the interpreter and lifted code (built the same way,
+    # run_hello.sh) must not fuse them (GCC does by default on arm64); FMAC / FIPR / FTRV too (XBA-255).
+    target_compile_options(dc_core PRIVATE -Wall -Wextra -ffp-contract=off)
     if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(dc_core PRIVATE -O2)
     endif()

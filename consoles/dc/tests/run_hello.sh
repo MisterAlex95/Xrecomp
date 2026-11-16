@@ -1,11 +1,12 @@
 #!/bin/sh
 # dc_hello / dc_rc_hello (XBA-227): our KallistiOS hello world under dc_run.
 #   run_hello.sh DC_RUN HELLO.elf WORKDIR interp|rc
-# interp: the interpreter alone. rc: dc_tools.recomp + cc, then dc_run --pack, with the discovery loop (the
-# addresses the interpreter had to run are lifted in the next round; at most 4 rounds) and at least 99 % of the
-# instructions native. Both: the program returns to the BIOS with code 0, its "hello: " serial lines equal
-# hello_serial.txt and its framebuffer when it printed "hello: done" equals hello_fb.png (png_compare.py --update
-# to rewrite it after an intended change). Skipped (77) when the homebrew is not built.
+# interp: the interpreter alone. rc: dc_tools.recomp + cc (-ffp-contract=off like the core; RC_FLAGS adds flags),
+# then dc_run --pack, with the discovery loop (the addresses the interpreter had to run are lifted in the next round;
+# at most 4 rounds) and at least 99 % of the instructions native. Both: the program returns to the BIOS with code 0,
+# its "hello: " serial lines equal hello_serial.txt and its framebuffer when it printed "hello: done" equals
+# hello_fb.png (png_compare.py --update to rewrite it after an intended change). Skipped (77) when the homebrew is
+# not built.
 run=$1
 elf=$2
 work=$3
@@ -46,7 +47,8 @@ round=1
 while :; do
     PYTHONPATH="$repo/consoles/dc/tools" timeout 300 "$py" -m dc_tools.recomp "$elf" "$work/src" \
         --discovered "$work/discovered.txt" --no-comments --report "$work/report.json" >/dev/null || exit 1
-    "$cc" -shared -fPIC -O1 -DDC_RC_COUNT -I "$repo/consoles/dc/runtime" -o "$work/libtitle.so" \
+    "$cc" -shared -fPIC -O1 -ffp-contract=off ${RC_FLAGS:-} -DDC_RC_COUNT \
+        -I "$repo/consoles/dc/runtime" -o "$work/libtitle.so" \
         "$work"/src/*.c -lm || exit 1
     out=$(timeout 120 "$run" "$elf" --frames 600 --pack "$work/libtitle.so" --serial "$work/serial.txt" \
         --png "$work/fb.png" --png-when "hello: done" --stats --missed "$work/missed.txt")
