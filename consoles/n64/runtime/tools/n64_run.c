@@ -535,8 +535,8 @@ int main(int argc, char **argv)
         if (twin)
             recomp_cheats_load(&cheats_twin, cheats_path);
     }
-    recomp_cheat_bus cbus = {m, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0};
-    recomp_cheat_bus cbus_twin = {twin, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0};
+    recomp_cheat_bus cbus = {m, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0, NULL};
+    recomp_cheat_bus cbus_twin = {twin, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0, NULL};
     long lock_stops = 0;
     for (f = 0; f < frames; f++) {
         if (twin && lockref && lock_cycles > 0) {

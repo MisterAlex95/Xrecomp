@@ -1566,8 +1566,7 @@ public class GameMenuTest {
 
     /**
      * XBA-197: a GBA / PS1 / N64 game's Cheats page: each cheat On / Off (written to its .cheats file at once, which the
-     * runtime reads again by itself), Add a code (the host's dialog), Delete a code (A twice), B back; none for an Xbox
-     * title.
+     * runtime reads again by itself), Add a code (the host's dialog), Delete a code (A twice), B back.
      */
     @Test
     public void cheatsPage() throws Exception {
@@ -1617,5 +1616,27 @@ public class GameMenuTest {
         press(KeyEvent.KEYCODE_BUTTON_B);
         assertEquals(GameMenu.Page.MAIN, menu.page());
         assertSame(menu.row(GameMenu.Item.CHEATS), menu.focusedRow());
+    }
+
+    /** XBA-241: an Xbox title has the Cheats page too, its list under its title ID. */
+    @Test
+    public void xboxCheatsPage() throws Exception {
+        java.io.File dir = new java.io.File(activity.getFilesDir(), "cheat-game");
+        TestSupport.write(new java.io.File(dir, "default.xbe"), TestSupport.xbe(0x4D5300D1, "Game"));
+        Cheats c = Cheats.load(activity.getFilesDir(), "4D5300D1");
+        c.add("Max money", Cheats.normalize("2001A2B8 000F423F"), "x");
+        assertTrue(c.save());
+        GameStore.remember(activity, dir.getPath(), "Game");
+        menu.release();
+        build();
+        menu.open("Back");
+        assertNotNull(menu.row(GameMenu.Item.CHEATS));
+        menu.row(GameMenu.Item.CHEATS).performClick();
+        assertEquals(GameMenu.Page.CHEATS, menu.page());
+        List<Widgets.MenuRow> rows = menu.rowsForTest();
+        assertEquals("Max money", rows.get(0).title);
+        assertEquals(activity.getString(R.string.MENU_ON), rows.get(0).value);
+        rows.get(0).performClick();
+        assertFalse(Cheats.load(activity.getFilesDir(), "4D5300D1").list.get(0).enabled);
     }
 }

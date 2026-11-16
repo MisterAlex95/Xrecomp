@@ -81,7 +81,7 @@ static int g_rom(void *u, uint32_t a, uint16_t v)
 static uint32_t keys_held;
 static recomp_cheat_bus gba_bus(void)
 {
-    recomp_cheat_bus b = {NULL, g_read, g_write, NULL, NULL, 0, g_rom, keys_held};
+    recomp_cheat_bus b = {NULL, g_read, g_write, NULL, NULL, 0, g_rom, keys_held, NULL};
     return b;
 }
 
@@ -122,7 +122,7 @@ static void w_write32(void *u, uint32_t a, uint32_t v)
 static recomp_cheat_bus word_bus(int be)
 {
     ram_be = be;
-    recomp_cheat_bus b = {NULL, NULL, NULL, w_read32, w_write32, be, NULL, 0};
+    recomp_cheat_bus b = {NULL, NULL, NULL, w_read32, w_write32, be, NULL, 0, NULL};
     return b;
 }
 
@@ -666,6 +666,155 @@ static void test_n64(void)
 
 /* ---- The file ---- */
 
+/* ---- Xbox (XBA-241): a fake guest window, [0x10000, 0x200000) mapped, its first page a "code section" ---- */
+
+static unsigned refused;
+
+static int x_ok(void *u, uint32_t a, int size, int write)
+{
+    (void)u;
+    int ok = a >= 0x10000u && (uint64_t)a + (uint64_t)size <= 0x200000u && !(write && a < 0x11000u);
+    refused += !ok;
+    return ok;
+}
+
+static uint32_t x_read(void *u, uint32_t a, int size)
+{
+    if (!x_ok(u, a, size, 0))
+        return 0;
+    uint32_t v = 0;
+    for (int i = 0; i < size; i++)
+        v |= (uint32_t)ram[a + (uint32_t)i] << (8 * i);
+    return v;
+}
+
+static void x_write(void *u, uint32_t a, uint32_t v, int size)
+{
+    writes++;
+    if (!x_ok(u, a, size, 1))
+        return;
+    for (int i = 0; i < size; i++)
+        ram[a + (uint32_t)i] = (uint8_t)(v >> (8 * i));
+}
+
+static uint32_t x32(uint32_t a)
+{
+    return ram[a] | (uint32_t)ram[a + 1] << 8 | (uint32_t)ram[a + 2] << 16 | (uint32_t)ram[a + 3] << 24;
+}
+
+static void test_xbox(void)
+{
+    memset(ram, 0, sizeof ram);
+    recomp_cheat_bus b = {NULL, x_read, x_write, NULL, NULL, 0, NULL, 0, x_ok};
+
+    /* Typed writes of each size, little-endian; auto is the xbox format. */
+    recomp_cheat *c = one(RECOMP_CHEAT_XBOX, "auto",
+                          "00020000 00000063\n"
+                          "10020010 000003E7\n"
+                          "20020020 DEADBEEF\n");
+    CHECK(c && !c->error[0]);
+    CHECK_EQ(c->used, RECOMP_CF_XBOX);
+    CHECK_EQ(c->nops, 3);
+    apply(&b, 1);
+    CHECK_EQ(x32(0x20000), 0x63);
+    CHECK_EQ(x32(0x20010), 0x3E7);
+    CHECK_EQ(x32(0x20020), 0xDEADBEEFu);
+    unsigned w = writes;
+    apply(&b, 1);
+    CHECK_EQ(writes, w); /* unchanged: no write */
+    ram[0x20000] = 1;
+    apply(&b, 1);
+    CHECK_EQ(ram[0x20000], 0x63); /* the game's change is undone at the next vblank */
+
+    /* Raw lines: ADDRESS:VALUE (any value width) and ADDRESS VALUE with a short value; a full 32-bit address. */
+    memset(ram, 0, sizeof ram);
+    c = one(RECOMP_CHEAT_XBOX, "xbox", "00030000:12345678\n0x30010 7F\n00030020 1234\n00030030:00000001");
+    CHECK(c && !c->error[0]);
+    apply(&b, 1);
+    CHECK_EQ(x32(0x30000), 0x12345678u);
+    CHECK_EQ(x32(0x30010), 0x7F);
+    CHECK_EQ(x32(0x30020), 0x1234);
+    CHECK_EQ(x32(0x30030), 1); /* a 32-bit write: 00000001 at 0x30030 (not a typed byte write) */
+    c = one(RECOMP_CHEAT_XBOX, "auto", "7FFD0000:01");
+    CHECK(c && !c->error[0]); /* high addresses are raw lines; the bus decides what is mapped */
+
+    /* Conditionals: the next line only, chains guard together, the line after the guarded one always runs. */
+    memset(ram, 0, sizeof ram);
+    c = one(RECOMP_CHEAT_XBOX, "auto",
+            "40040000 00000005\n"   /* if byte [0x40000] == 5 */
+            "00040010 00000063\n"   /*   byte [0x40010] = 0x63 */
+            "00040011 00000001\n"   /* always */
+            "50040002 00001234\n"   /* if 16-bit [0x40002] == 0x1234 */
+            "60040004 CAFEF00D\n"   /* and 32-bit [0x40004] == 0xCAFEF00D */
+            "20040020 11111111\n"   /*   32-bit [0x40020] = 0x11111111 */
+            "00040030 00000002\n"); /* always */
+    CHECK(c && !c->error[0]);
+    CHECK_EQ(c->nops, 7);
+    apply(&b, 1);
+    CHECK_EQ(ram[0x40010], 0);
+    CHECK_EQ(ram[0x40011], 1);
+    CHECK_EQ(x32(0x40020), 0);
+    CHECK_EQ(ram[0x40030], 2);
+    ram[0x40000] = 5;
+    ram[0x40002] = 0x34;
+    ram[0x40003] = 0x12;
+    apply(&b, 1);
+    CHECK_EQ(ram[0x40010], 0x63);
+    CHECK_EQ(x32(0x40020), 0); /* the second condition still fails */
+    ram[0x40004] = 0x0D;
+    ram[0x40005] = 0xF0;
+    ram[0x40006] = 0xFE;
+    ram[0x40007] = 0xCA;
+    apply(&b, 1);
+    CHECK_EQ(x32(0x40020), 0x11111111u);
+    ram[0x40000] = 4;
+    ram[0x40010] = 0;
+    apply(&b, 1);
+    CHECK_EQ(ram[0x40010], 0); /* condition false again: not written */
+
+    /* Unmapped and code addresses: writes dropped, conditionals on them fail, nothing crashes. */
+    memset(ram, 0, sizeof ram);
+    refused = 0;
+    c = one(RECOMP_CHEAT_XBOX, "auto",
+            "00000100 00000001\n"   /* the low 64 KB */
+            "00010800 00000001\n"   /* the "code section" */
+            "0FFFFFF0 00000001\n"   /* past the mapped window */
+            "40000100 00000000\n"   /* if byte [0x100] == 0: unreadable, fails */
+            "00050000 00000001\n"
+            "40010800 00000000\n"   /* code may be read: [0x10800] == 0 holds */
+            "00050001 00000001\n"
+            "FFFFFFF0:01020304\n"); /* the end of the 32-bit space */
+    CHECK(c && !c->error[0]);
+    apply(&b, 1);
+    CHECK(refused >= 5);
+    CHECK_EQ(ram[0x100], 0);
+    CHECK_EQ(ram[0x10800], 0);
+    CHECK_EQ(ram[0x50000], 0);
+    CHECK_EQ(ram[0x50001], 1);
+
+    /* Refused codes, with a reason. */
+    c = one(RECOMP_CHEAT_XBOX, "auto", "30020000 00000001");
+    CHECK(c && strstr(c->error, "type 3"));
+    c = one(RECOMP_CHEAT_XBOX, "auto", "80020000 00000001");
+    CHECK(c && strstr(c->error, "type 8"));
+    c = one(RECOMP_CHEAT_XBOX, "auto", "00020000 00000100");
+    CHECK(c && strstr(c->error, "does not fit"));
+    c = one(RECOMP_CHEAT_XBOX, "auto", "10020000 00010000");
+    CHECK(c && strstr(c->error, "does not fit"));
+    c = one(RECOMP_CHEAT_XBOX, "auto", "40020000 00000001");
+    CHECK(c && strstr(c->error, "missing a line"));
+    c = one(RECOMP_CHEAT_XBOX, "auto", "00020000 00000001\n40020000 00000001\n50020004 00000001");
+    CHECK(c && strstr(c->error, "missing a line"));
+    c = one(RECOMP_CHEAT_XBOX, "gs", "80012344 03E7");
+    CHECK(c && strstr(c->error, "not for this console"));
+    c = one(RECOMP_CHEAT_XBOX, "auto", "hello");
+    CHECK(c && c->error[0]);
+    c = one(RECOMP_CHEAT_PS1, "xbox", "00020000 00000063");
+    CHECK(c && strstr(c->error, "not for this console"));
+    CHECK_EQ(recomp_cheat_format_parse("xbox"), RECOMP_CF_XBOX);
+    CHECK(!strcmp(recomp_cheat_format_name(RECOMP_CF_XBOX), "xbox"));
+}
+
 static void test_file(const char *dir)
 {
     const char *text = "# cheats\n"
@@ -735,6 +884,7 @@ int main(int argc, char **argv)
     test_gba_cb();
     test_ps1();
     test_n64();
+    test_xbox();
     test_file(argc > 1 ? argv[1] : ".");
     recomp_cheats_free(&S);
     if (failures) {

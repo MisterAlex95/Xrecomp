@@ -72,6 +72,11 @@ void xbox_SmcHostWrite(const void *p, size_t len);
  * named as exec_outside_image; 0 for a wild pointer (null page, unmapped). */
 int xbox_SmcExecOutside(uint32_t target, uint32_t ret);
 
+/* 1 when [va, va + len) touches a section that is executable and not
+ * writable (lifted code: writing it changes nothing the lifted C runs, and
+ * its pages may be write-protected). The cheats skip those (xbox_cheats.h). */
+int xbox_SmcInCode(uint32_t va, uint32_t len);
+
 /* Records made by this process (both kinds) and protected pages left. */
 unsigned xbox_SmcCount(void);
 unsigned xbox_SmcProtectedPages(void);

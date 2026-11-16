@@ -1315,7 +1315,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     recomp_cheats cheats;
     recomp_cheats_init(&cheats, RECOMP_CHEAT_N64);
     recomp_cheats_load_env(&cheats, "n64"); /* RECOMP_CHEATS_FILE (XBA-197) */
-    recomp_cheat_bus cheat_bus = {m, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0};
+    recomp_cheat_bus cheat_bus = {m, NULL, NULL, cheat_peek32, cheat_poke32, 1, NULL, 0, NULL};
     unsigned cheat_polls = 0;
     int resume = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume) {

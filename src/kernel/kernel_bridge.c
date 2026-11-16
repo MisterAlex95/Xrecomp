@@ -39,6 +39,7 @@
 #include "recomp_discovery.h"
 #include "recomp_status.h"
 #include "kernel_disc.h"
+#include "xbox_cheats.h"
 #include <stdio.h>
 /* stdlib.h is load-bearing, not tidiness. Without it C89 implicit declaration
  * makes malloc return `int`, so bridge_spawn_thread truncated its heap pointer
@@ -3698,9 +3699,11 @@ void xbox_VblankHookSet(void (*hook)(void))
     s_vblank_hook = hook;
 }
 
+/* The title's cheat codes (XBA-241, xbox_cheats.h) run first, then the hook. */
 static void kernel_vblank_hook(void)
 {
     void (*hook)(void) = s_vblank_hook;
+    xbox_CheatsVblank();
     if (hook)
         hook();
 }

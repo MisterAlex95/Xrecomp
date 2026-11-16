@@ -1199,7 +1199,7 @@ capture schedule under fast-forward, the steps, the check on a fake machine, a l
 `gba_rewind_hb_*`, `gba_rewind_cap` (a 2 MB cap), `ps1_rewind_hb_*` (with a disc read, `overlay`), `ps1_rewind_cap`,
 `n64_rewind_hb_*`; the hotkey's default and text form in `tests/recomp_states`.
 
-**Cheats (XBA-197).** GameShark, Action Replay, CodeBreaker and raw codes for the three consoles, from a per-game
+**Cheats (XBA-197).** GameShark, Action Replay, CodeBreaker and raw codes for the three consoles (and Xbox titles, below), from a per-game
 list the player edits in the app (in-game menu « Cheats », Game settings › Cheats: [app-shell.md
 « Cheats »](../docs/android/app-shell.md#cheats)). `src/platform/recomp_cheats.h` (in `xbr_host_core`, libc only):
 
@@ -1246,6 +1246,27 @@ Not supported (the cheat is not applied, the log says why): GBA `DEADFACE` resee
 which only matters to a real cartridge's boot). Ignored with a note: master / hook / ID codes (GBA `F`, `C4`, CB
 `0` / `1`, `xxxxxxxx 001DC0DE`), N64 enabler codes (`EE`, `FF`, `CC`). F0 / F1 apply once after the first frame (the
 game's boot code has run by then; a real GameShark writes them before).
+
+**Xbox titles (XBA-241)** use the same file, screens and engine (console `RECOMP_CHEAT_XBOX`, format `xbox`, the only
+one for them, so `auto` means it). It is XRecomp's own format of guest-memory writes, documented here, not a cheat
+device's: little-endian, one code per line.
+
+| Line | Meaning |
+|---|---|
+| `0AAAAAAA 000000VV` / `1AAAAAAA 0000VVVV` / `2AAAAAAA VVVVVVVV` | 8 / 16 / 32-bit write at the 28-bit guest address `AAAAAAA` |
+| `4AAAAAAA 000000VV` / `5AAAAAAA 0000VVVV` / `6AAAAAAA VVVVVVVV` | if the 8 / 16 / 32-bit value at `AAAAAAA` equals V, run the next line (a test followed by a test: both guard the line after them) |
+| `ADDRESS:VALUE`, or `ADDRESS VALUE` unless both have 8 digits | raw write at a full 32-bit address, size from the value's digits (1-2, 3-4, 5-8) |
+
+Other types, and a value wider than its type's size, refuse the cheat with the reason. The kernel runs the enabled
+codes on every vblank (`src/kernel/xbox_cheats.c`, on the timer thread, before the vblank's interrupt), and looks at the
+file again every 30 vblanks. Lifted code cannot be patched, so only data writes mean anything: writes reach guest RAM
+from `0x00010000` to the top of the mapping and the lazy reservations, never a code section (executable, not writable)
+nor the RAM mirrors, MMIO or unmapped memory; a refused write is dropped (the first four are logged) and a test on an
+unmapped address fails. No vblanks (a bare runtime without `RECOMP_VBLANK`; title projects have `paced`), no cheats.
+Tests: `tests/recomp_cheats` (`test_xbox`: types, conditionals and chains, raw lines, refusals on a fake window) and
+`tests/xbox_cheats` (the synthetic `tools/conformance/test.xbe`'s real guest window: codes change heap values, its
+`.text`, the low page and unmapped addresses are refused, the file is read at the first vblank and again when it
+changes).
 
 Headless: `gba_run` / `ps1_run` / `n64_run --cheats FILE [--peek ADDR]...` (with `--lockstep`, on both machines).
 Tests: `tests/recomp_cheats` (every code type on a fake memory, the encryption's round trips and fixed vectors, the

@@ -32,6 +32,7 @@ set(KERNEL_SOURCES
     xbox_xbe_sections.c
     xbox_seh.c
     xbox_seh_fault.c
+    xbox_cheats.c
     guest_vmem.c
     icall_feedback.c
     recomp_trace.c

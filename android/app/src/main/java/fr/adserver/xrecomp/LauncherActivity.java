@@ -6781,8 +6781,7 @@ public class LauncherActivity extends Activity {
                 romVkDriverRow(list, key);
         } else {
             gameControlsRow(list, key, con);
-            if (con != Console.XBOX)
-                cheatsRow(list, key, con);
+            cheatsRow(list, key, con);   // XBA-241: an Xbox title's too
             if (con == Console.XBOX) {
                 gameThemeRow(list, key, gameName);
                 if (Toolchain.available(this) && Pack.titleLayer(getFilesDir(), key) != null)
@@ -6952,7 +6951,7 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * XBA-197: Game settings › « Cheats » of a GBA, PS1 or N64 game: how many are on, A opens the list (CheatsUi.manage:
+     * XBA-197: Game settings › « Cheats » of a GBA, PS1, N64 or (XBA-241) Xbox game: how many are on, A opens the list (CheatsUi.manage:
      * on / off, add, delete, saved at once; the game's in-game menu has the same page). Not touched by « Reset to
      * Settings » (the codes are the player's, in their own file).
      */

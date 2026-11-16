@@ -11,17 +11,21 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * A GBA, PS1 or N64 game's cheat codes (XBA-197, docs/android/app-shell.md « Cheats »): one file per game beside its
+ * A GBA, PS1, N64 or Xbox game's cheat codes (XBA-197, XBA-241, docs/android/app-shell.md « Cheats »): one file per
+ * game beside its
  * settings, files/settings/game/&lt;KEY&gt;.cheats, which the runtime reads (RECOMP_CHEATS_FILE, set by
  * {@link ShellActivity}) and reads again when it changes, so a change made in the in-game menu takes effect at once.
  *
  * <p>The file's format is the native engine's (src/platform/recomp_cheats.h): one section per cheat, its name in
- * brackets, « enabled=1 » or « enabled=0 », an optional « format= » (auto, raw, gsa, gsa-raw, arv3, arv3-raw, cb, gs;
+ * brackets, « enabled=1 » or « enabled=0 », an optional « format= » (auto, raw, gsa, gsa-raw, arv3, arv3-raw, cb, gs, xbox;
  * auto when absent), then the code's lines. Comments start with #. Written through a temporary file and a rename, so
  * the runtime never reads half a file.
  *
  * <p>The app checks a code's shape only ({@link #check}): lines of hex digits, « AAAAAAAA VVVV » or « AAAAAAAA
  * VVVVVVVV » (GBA), or « ADDRESS:VALUE »; the runtime decodes it (and logs why a code it cannot use is not applied).
+ * An Xbox title's codes (XBA-241) are XRecomp's own guest-memory writes (recomp_cheats.h « Xbox »): typed lines
+ * « TAAAAAAA VVVVVVVV » (T 0 / 1 / 2: an 8 / 16 / 32-bit write, 4 / 5 / 6: « if the value equals, run the next line »),
+ * or raw « ADDRESS:VALUE » / « ADDRESS VALUE » writes; {@link #check} checks those fully, types and sizes included.
  */
 final class Cheats {
     static final String SUFFIX = ".cheats";
@@ -182,6 +186,8 @@ final class Cheats {
             return Problem.EMPTY;
         if (lines.size() > MAX_LINES)
             return Problem.TOO_LONG;
+        if (console == Console.XBOX)
+            return checkXbox(lines);
         boolean gba = console == Console.GBA;
         for (String l : lines) {
             String s = l.replace("0X", "");
@@ -197,6 +203,35 @@ final class Cheats {
                 return Problem.SHAPE;
         }
         return null;
+    }
+
+    /**
+     * An Xbox title's lines (XBA-241, the native « xbox » format): « TAAAAAAA VVVVVVVV » with T 0 (value up to FF),
+     * 1 (up to FFFF), 2, 4 (up to FF), 5 (up to FFFF) or 6, a conditional (4-6) followed by a line; else a raw write,
+     * « ADDRESS:VALUE » or « ADDRESS VALUE » (1-8 digits each).
+     */
+    private static Problem checkXbox(List<String> lines) {
+        boolean open = false;   // a conditional waiting for its line
+        for (String l : lines) {
+            String s = l.replace("0X", "");
+            if (!s.matches("[0-9A-F :\\-]+"))
+                return Problem.NOT_HEX;
+            if (s.matches("[0-9A-F]{8}[ \\-][0-9A-F]{8}")) {
+                int t = Character.digit(s.charAt(0), 16);
+                long v = Long.parseLong(s.substring(9), 16);
+                if (t == 3 || t > 6)
+                    return Problem.SHAPE;
+                int size = 1 << (t & 3);
+                if ((size == 1 && v > 0xFFL) || (size == 2 && v > 0xFFFFL))
+                    return Problem.SHAPE;
+                open = t >= 4;
+                continue;
+            }
+            if (!s.matches("[0-9A-F]{1,8} ?[: \\-] ?[0-9A-F]{1,8}"))
+                return Problem.SHAPE;
+            open = false;
+        }
+        return open ? Problem.SHAPE : null;
     }
 
     // ---- Changes ----------------------------------------------------------------------------------------------------

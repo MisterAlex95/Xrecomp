@@ -1,4 +1,4 @@
-/* recomp_cheats -- cheat codes for the console runtimes (XBA-197): GBA, PS1 and N64.
+/* recomp_cheats -- cheat codes for the console runtimes (XBA-197): GBA, PS1 and N64; Xbox titles too (XBA-241).
  *
  * A game's cheat list lives in a text file (the app's files/settings/game/<KEY>.cheats, RECOMP_CHEATS_FILE for the
  * runtime, --cheats FILE for the desktop players), one section per cheat:
@@ -6,7 +6,7 @@
  *     # comment
  *     [Infinite lives]
  *     enabled=1
- *     format=auto            (optional: auto, raw, gsa, gsa-raw, arv3, arv3-raw, cb, gs)
+ *     format=auto            (optional: auto, raw, gsa, gsa-raw, arv3, arv3-raw, cb, gs, xbox)
  *     8003A2C4 0063          (the code, one line per code line)
  *
  * Each cheat's lines are compiled into a small op list (writes with repeat, adds, ORs, ANDs, conditional jumps,
@@ -25,13 +25,27 @@
  *       cb        CodeBreaker / GameShark SP, unencrypted (AAAAAAAA VVVV)
  *  PS1  gs        GameShark / Action Replay (AAAAAAAA VVVV): 30 80 10 11 20 21 D0-D3 E0-E3 50 C0 C1 C2
  *  N64  gs        GameShark / Action Replay (AAAAAAAA VVVV): 80 81 A0 A1 88 89 D0-D3 50 F0 F1
+ *  Xbox xbox      XRecomp's own guest-memory codes (not a cheat device's format), little-endian, one per line:
+ *                   0AAAAAAA 000000VV   byte at AAAAAAA = VV
+ *                   1AAAAAAA 0000VVVV   16-bit at AAAAAAA = VVVV
+ *                   2AAAAAAA VVVVVVVV   32-bit at AAAAAAA = VVVVVVVV
+ *                   4AAAAAAA 000000VV   if the byte at AAAAAAA equals VV, run the next line (else skip it)
+ *                   5AAAAAAA 0000VVVV   the same for a 16-bit value
+ *                   6AAAAAAA VVVVVVVV   the same for a 32-bit value
+ *                 (AAAAAAA: a 28-bit guest address; a conditional followed by a conditional guards both and the
+ *                 line after them). Any other line is a raw write, ADDRESS:VALUE or ADDRESS VALUE with a full
+ *                 32-bit address, its size from the value's digits (1-2: byte, 3-4: 16-bit, 5-8: 32-bit); an
+ *                 8-digit address with an 8-digit value is always a typed line, so a raw 32-bit write there is
+ *                 written ADDRESS:VALUE. Writes reach mapped guest RAM only (src/kernel/xbox_cheats.h: not the
+ *                 low 64 KB, not code sections); a conditional on an address that is not mapped fails.
  *  auto           GBA: raw when a line has ':', cb for 8+4 digit lines, else the encrypted or decrypted GSA / AR v3
- *                 reading whose lines decode to the most plausible codes; PS1 / N64: raw with ':', else gs.
+ *                 reading whose lines decode to the most plausible codes; PS1 / N64: raw with ':', else gs;
+ *                 Xbox: always xbox (whose raw lines cover ADDRESS:VALUE).
  * Not supported (the cheat is refused with a reason): GBA DEADFACE reseeding, encrypted CodeBreaker (9xxxxxxx),
  * AR v3 slowdown; PS1 D4-D6 joker codes; N64 DE (entry point). Ignored with a note: master / hook / ID codes (GBA
  * Fxxxxxxx, C4xxxxxx, 0000xxxx / 1xxxxxxx, xxxxxxxx 001DC0DE), N64 enabler codes (EE, FF, CC).
  *
- * Timing: constant writes, adds and conditionals run after every console frame. GBA button codes (GS 8x, AR v3
+ * Timing: constant writes, adds and conditionals run after every console frame (Xbox: every vblank). GBA button codes (GS 8x, AR v3
  * 00000000 10/12/14) and N64 88 / 89 (the GameShark's button) and F0 / F1 (boot-time writes) apply once, on the
  * first frame after the cheat is turned on (or the game starts with it on). PS1 C1 delays the codes after it by
  * YYYY / 3 frames (about YYYY / 180 s) counted from the start.
@@ -54,6 +68,7 @@ typedef enum recomp_cheat_console {
     RECOMP_CHEAT_GBA = 1,
     RECOMP_CHEAT_PS1 = 2,
     RECOMP_CHEAT_N64 = 3,
+    RECOMP_CHEAT_XBOX = 4,
 } recomp_cheat_console;
 
 typedef enum recomp_cheat_format {
@@ -65,10 +80,11 @@ typedef enum recomp_cheat_format {
     RECOMP_CF_ARV3_RAW, /* the same decrypted */
     RECOMP_CF_CB,       /* GBA CodeBreaker, unencrypted */
     RECOMP_CF_GS,       /* PS1 / N64 GameShark */
+    RECOMP_CF_XBOX,     /* Xbox: XRecomp's guest-memory codes */
     RECOMP_CF_COUNT
 } recomp_cheat_format;
 
-/* "auto", "raw", "gsa", "gsa-raw", "arv3", "arv3-raw", "cb", "gs"; parse returns -1 for an unknown name. */
+/* "auto", "raw", "gsa", "gsa-raw", "arv3", "arv3-raw", "cb", "gs", "xbox"; parse returns -1 for an unknown name. */
 const char *recomp_cheat_format_name(recomp_cheat_format f);
 int recomp_cheat_format_parse(const char *name);
 
@@ -97,7 +113,9 @@ typedef struct recomp_cheat {
 /* What the runtime gives the engine: sized side-effect-free reads and writes that reach RAM (and on the GBA the I/O
  * registers), and on the GBA a cartridge patch. When write is NULL the engine writes words with read-modify-write
  * through read32 / write32 (aligned words, big_endian for the N64): the PS1 / N64 runtimes hand their peek32 /
- * poke32. keys: the console's buttons held this frame (GBA KEYINPUT order, 1 = held) for CodeBreaker D codes. */
+ * poke32. keys: the console's buttons held this frame (GBA KEYINPUT order, 1 = held) for CodeBreaker D codes.
+ * ok (optional, NULL: everything is): whether size bytes at addr may be read (write 0) or written (write 1); a
+ * refused write is dropped and a conditional on a refused read fails (the Xbox: unmapped guest memory). */
 typedef struct recomp_cheat_bus {
     void *user;
     uint32_t (*read)(void *user, uint32_t addr, int size);
@@ -107,6 +125,7 @@ typedef struct recomp_cheat_bus {
     int big_endian;
     int (*rom_write16)(void *user, uint32_t addr, uint16_t v); /* GBA: 0 on success */
     uint32_t keys;
+    int (*ok)(void *user, uint32_t addr, int size, int write);
 } recomp_cheat_bus;
 
 #define RECOMP_CHEATS_MAX 256

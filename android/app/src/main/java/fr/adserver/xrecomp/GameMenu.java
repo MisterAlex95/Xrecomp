@@ -953,7 +953,7 @@ final class GameMenu {
                 ff.cycler = dir -> toggleFastForward();
                 updateValues();
             }
-            if (cheatsSupported())   // XBA-197: a GBA, PS1 or N64 game's cheat codes
+            if (cheatsSupported())   // XBA-197 / XBA-241: the game's cheat codes (GBA, PS1, N64, Xbox)
                 row(Item.CHEATS, s(R.string.CHEATS));
             row(Item.SETTINGS, s(R.string.MENU_SETTINGS));
             row(Item.CONTROLS, s(R.string.MENU_CONTROLS));
@@ -1208,8 +1208,7 @@ final class GameMenu {
 
     /** A GBA, PS1 or N64 game runs (not an Xbox title): its cheat codes can be changed while it plays. */
     private boolean cheatsSupported() {
-        String key = titleId();
-        return key != null && Console.ofKey(key) != Console.XBOX;
+        return titleId() != null;   // every console; an Xbox title's codes too (XBA-241)
     }
 
     /**

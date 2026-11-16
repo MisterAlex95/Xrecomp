@@ -34,7 +34,9 @@ final class CheatsUi {
         case TOO_LONG:
             return c.getString(R.string.CHEATS_P_TOO_LONG);
         default:
-            return c.getString(con == Console.GBA ? R.string.CHEATS_P_SHAPE_GBA : R.string.CHEATS_P_SHAPE);
+            return c.getString(con == Console.GBA    ? R.string.CHEATS_P_SHAPE_GBA
+                               : con == Console.XBOX ? R.string.CHEATS_P_SHAPE_XBOX
+                                                     : R.string.CHEATS_P_SHAPE);
         }
     }
 
@@ -53,7 +55,7 @@ final class CheatsUi {
         name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         box.addView(name);
         EditText code = new EditText(a);
-        code.setHint(R.string.CHEATS_CODE_HINT);
+        code.setHint(con == Console.XBOX ? R.string.CHEATS_CODE_HINT_XBOX : R.string.CHEATS_CODE_HINT);
         code.setTypeface(Typeface.MONOSPACE);
         code.setMinLines(3);
         code.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE

@@ -80,7 +80,8 @@ void recomp_cheat_tea_encrypt(uint32_t *op1, uint32_t *op2, const uint32_t s[4])
 }
 
 static const char *const FORMAT_NAMES[RECOMP_CF_COUNT] = {"auto",     "raw", "gsa", "gsa-raw",
-                                                          "arv3",     "arv3-raw", "cb",  "gs"};
+                                                          "arv3",     "arv3-raw", "cb",  "gs",
+                                                          "xbox"};
 
 const char *recomp_cheat_format_name(recomp_cheat_format f)
 {
@@ -647,6 +648,40 @@ static int n64_gs(cc *k, uint32_t a, uint32_t v)
     }
 }
 
+/* Xbox (XBA-241, recomp_cheats.h): typed lines (8 + 8 digits), else raw writes. A conditional's target is set
+ * once the line it guards is emitted (a chain of conditionals all jump past that line). */
+static int xbox_line(cc *k, uint32_t a, uint32_t v, int la, int lv, int colon)
+{
+    if (colon || la != 8 || lv != 8) {
+        int size = lv <= 2 ? 1 : lv <= 4 ? 2 : 4;
+        if (!emit(k, OP_WRITE, size, a, v))
+            return -1;
+    } else {
+        int t = (int)(a >> 28), size = 1 << (t & 3);
+        uint32_t addr = a & 0x0FFFFFFFu;
+        if ((t & 3) == 3 || (t != 0 && t != 1 && t != 2 && t != 4 && t != 5 && t != 6))
+            return fail(k, "unknown Xbox code type %X", (unsigned)t);
+        if ((size == 1 && v > 0xFFu) || (size == 2 && v > 0xFFFFu))
+            return fail(k, "value %08X does not fit a %d-bit code (a raw write is ADDRESS:VALUE)", (unsigned)v,
+                        size * 8);
+        if (t >= 4) {
+            if (k->nblock >= BLOCKS_MAX)
+                return fail(k, "too many conditionals in a row");
+            if (!emit_if(k, C_EQ, size, addr, v, TARGET_OPEN))
+                return -1;
+            k->block[k->nblock++] = (uint32_t)(k->c->nops - 1);
+            k->pend = PEND_VALUE; /* waiting for the line it guards */
+            return 0;
+        }
+        if (!emit(k, OP_WRITE, size, addr, v))
+            return -1;
+    }
+    while (k->nblock) /* the conditionals before this line skip past it */
+        k->c->ops[k->block[--k->nblock]].count = (uint32_t)k->c->nops;
+    k->pend = PEND_NONE;
+    return 0;
+}
+
 /* raw: address and value, the size from the value's digits. */
 static int raw_line(cc *k, uint32_t a, uint32_t v, int lv)
 {
@@ -739,6 +774,8 @@ static int line_fits(recomp_cheat_format f, const line *l)
     case RECOMP_CF_CB:
     case RECOMP_CF_GS:
         return l->la == 8 && l->lv == 4;
+    case RECOMP_CF_XBOX:
+        return 1;
     default:
         return 0;
     }
@@ -750,6 +787,8 @@ static int formats_ok(recomp_cheat_console con, recomp_cheat_format f)
         return 1;
     if (con == RECOMP_CHEAT_GBA)
         return f >= RECOMP_CF_GSA && f <= RECOMP_CF_CB;
+    if (con == RECOMP_CHEAT_XBOX)
+        return f == RECOMP_CF_XBOX;
     return f == RECOMP_CF_GS;
 }
 
@@ -817,6 +856,9 @@ static int compile_as(recomp_cheat *c, recomp_cheat_console con, recomp_cheat_fo
             break;
         case RECOMP_CF_CB:
             rc = gba_cb(&k, a, v);
+            break;
+        case RECOMP_CF_XBOX:
+            rc = xbox_line(&k, a, v, l.la, l.lv, l.colon);
             break;
         default:
             rc = con == RECOMP_CHEAT_PS1 ? ps1_gs(&k, a, v) : n64_gs(&k, a, v);
@@ -893,6 +935,8 @@ int recomp_cheat_compile(recomp_cheat *c, recomp_cheat_console con, recomp_cheat
         }
         return compile_as(c, con, fmt, code);
     }
+    if (con == RECOMP_CHEAT_XBOX) /* one format, whose raw lines cover ADDRESS:VALUE */
+        return compile_as(c, con, RECOMP_CF_XBOX, code);
     /* AUTO: what the lines look like. */
     int colon = 0, n84 = 0, n88 = 0, nlines = 0;
     const char *p = code ? code : "";
@@ -1106,7 +1150,10 @@ static void log_list(const recomp_cheats *s, const char *tag)
 
 static const char *tag_of(const recomp_cheats *s)
 {
-    return s->console == RECOMP_CHEAT_GBA ? "gba" : s->console == RECOMP_CHEAT_PS1 ? "ps1" : "n64";
+    return s->console == RECOMP_CHEAT_GBA   ? "gba"
+           : s->console == RECOMP_CHEAT_PS1 ? "ps1"
+           : s->console == RECOMP_CHEAT_XBOX ? "xbox"
+                                             : "n64";
 }
 
 int recomp_cheats_load(recomp_cheats *s, const char *path)
@@ -1214,6 +1261,8 @@ static uint32_t bus_read(const recomp_cheat_bus *b, uint32_t addr, int size)
 static void bus_write(const recomp_cheat_bus *b, uint32_t addr, uint32_t v, int size)
 {
     v &= mask_of(size);
+    if (b->ok && !b->ok(b->user, addr, size, 1))
+        return; /* not memory the console lets us write */
     if (bus_read(b, addr, size) == v)
         return; /* unchanged: no write, no code page invalidated */
     if (b->write) {
@@ -1244,6 +1293,8 @@ static int test(const recomp_cheat_op *o, const recomp_cheat_bus *b)
         return (b->keys & o->value) == o->value;
     if (o->cond == C_KEYS_NOT_HELD)
         return (b->keys & o->value) == 0;
+    if (b->ok && !b->ok(b->user, o->addr, o->size, 0))
+        return 0;
     uint32_t x = bus_read(b, o->addr, o->size), y = o->value;
     int32_t sx = o->size == 1 ? (int8_t)x : o->size == 2 ? (int16_t)x : (int32_t)x;
     int32_t sy = o->size == 1 ? (int8_t)y : o->size == 2 ? (int16_t)y : (int32_t)y;

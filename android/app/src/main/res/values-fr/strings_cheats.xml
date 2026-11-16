@@ -10,10 +10,11 @@
     <string name="CHEATS_ADDED">Ajouté : %1$s</string>
     <string name="CHEATS_SAVE_FAILED">Les codes n\'ont pas pu être enregistrés</string>
     <string name="CHEATS_COUNT">%1$d actif(s) sur %2$d</string>
-    <string name="CHEATS_DETAIL">Les codes de triche de ce jeu : codes GameShark, Action Replay et CodeBreaker (GBA), codes GameShark (PS1, N64) ou ADRESSE:VALEUR. Activez ou désactivez chacun, ajoutez-en ou supprimez-en un ; un jeu en cours prend le changement tout de suite (son menu en jeu a la même page).</string>
+    <string name="CHEATS_DETAIL">Les codes de triche de ce jeu : codes GameShark, Action Replay et CodeBreaker (GBA), codes GameShark (PS1, N64), codes mémoire Xbox (TAAAAAAA VVVVVVVV : 0, 1, 2 écrivent 8, 16, 32 bits ; 4, 5, 6 exécutent la ligne suivante si la valeur correspond) ou ADRESSE:VALEUR. Activez ou désactivez chacun, ajoutez-en ou supprimez-en un ; un jeu en cours prend le changement tout de suite (son menu en jeu a la même page).</string>
     <string name="CHEATS_ADD_TITLE">Ajouter un code de triche</string>
     <string name="CHEATS_NAME_HINT">Nom (par ex. Vies infinies)</string>
     <string name="CHEATS_CODE_HINT">Code : une ligne par ligne de code, par ex. 8003A2C4 0063</string>
+    <string name="CHEATS_CODE_HINT_XBOX">Code : une ligne par ligne de code, par ex. 2001A2B4 0000270F</string>
     <string name="CHEATS_DEFAULT_NAME">Code %1$d</string>
     <string name="CHEATS_OK">Ajouter</string>
     <string name="CHEATS_CANCEL">Annuler</string>
@@ -23,5 +24,6 @@
     <string name="CHEATS_P_NOT_HEX">Un code s\'écrit en chiffres hexadécimaux (0-9, A-F).</string>
     <string name="CHEATS_P_SHAPE_GBA">Chaque ligne : AAAAAAAA VVVVVVVV, AAAAAAAA VVVV ou ADRESSE:VALEUR.</string>
     <string name="CHEATS_P_SHAPE">Chaque ligne : AAAAAAAA VVVV (GameShark) ou ADRESSE:VALEUR.</string>
+    <string name="CHEATS_P_SHAPE_XBOX">Chaque ligne : TAAAAAAA VVVVVVVV (T : 0, 1, 2 écriture ; 4, 5, 6 test, puis une ligne) ou ADRESSE:VALEUR.</string>
     <string name="CHEATS_P_TOO_LONG">Ce code est trop long.</string>
 </resources>

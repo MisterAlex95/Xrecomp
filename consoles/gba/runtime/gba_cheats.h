@@ -58,7 +58,7 @@ static inline void gba_cheats_frame(gba_cheats *c, uint16_t keys)
 {
     if (!c->list.n && !c->list.npatch)
         return;
-    recomp_cheat_bus bus = {c->m, gba_cheats_read, gba_cheats_write, NULL, NULL, 0, gba_cheats_rom, keys};
+    recomp_cheat_bus bus = {c->m, gba_cheats_read, gba_cheats_write, NULL, NULL, 0, gba_cheats_rom, keys, NULL};
     size_t patches = recomp_cheats_apply(&c->list, &bus);
     if (c->table && patches && !c->detached) {
         gba_attach_recomp(c->m, NULL);
@@ -82,7 +82,7 @@ static inline void gba_cheats_poll(gba_cheats *c)
 
 static inline void gba_cheats_close(gba_cheats *c)
 {
-    recomp_cheat_bus bus = {c->m, gba_cheats_read, gba_cheats_write, NULL, NULL, 0, gba_cheats_rom, 0};
+    recomp_cheat_bus bus = {c->m, gba_cheats_read, gba_cheats_write, NULL, NULL, 0, gba_cheats_rom, 0, NULL};
     recomp_cheats_restore(&c->list, &bus);
     recomp_cheats_free(&c->list);
 }

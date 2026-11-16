@@ -99,6 +99,46 @@ public class CheatsTest {
         assertEquals(Cheats.Problem.TOO_LONG, Cheats.check(Console.N64, Cheats.normalize(big.toString())));
     }
 
+    /** XBA-241: an Xbox title's codes, the native « xbox » format (recomp_cheats.h): typed lines and raw writes. */
+    @Test
+    public void xboxCodesAreChecked() {
+        // Typed writes of each size, conditionals followed by a line (chains too), raw writes.
+        assertNull(Cheats.check(Console.XBOX, Cheats.normalize("0001A2B4 00000063\n1001A2B6 000003E7\n2001A2B8 DEADBEEF")));
+        assertNull(Cheats.check(Console.XBOX, Cheats.normalize("4001A2B4 00000005\n0001A2B5 00000001")));
+        assertNull(Cheats.check(Console.XBOX, Cheats.normalize("5001A2B4 00001234\n6001A2B8 CAFEF00D\n2001A2C0 00000001")));
+        assertNull(Cheats.check(Console.XBOX, Cheats.normalize("0001A2B4:63\n7FFD0000:DEADBEEF\n1A2B4 7F\n0x0001A2B4 1234")));
+        assertNull("16 digits typed together split 8 + 8",
+                   Cheats.check(Console.XBOX, Cheats.normalize("2001a2b8deadbeef")));
+        // Unknown types, values too wide for the size, a conditional with no line after it, other shapes.
+        assertEquals(Cheats.Problem.SHAPE, Cheats.check(Console.XBOX, Cheats.normalize("3001A2B4 00000001")));
+        assertEquals(Cheats.Problem.SHAPE, Cheats.check(Console.XBOX, Cheats.normalize("8001A2B4 00000001")));
+        assertEquals(Cheats.Problem.SHAPE, Cheats.check(Console.XBOX, Cheats.normalize("0001A2B4 00000100")));
+        assertEquals(Cheats.Problem.SHAPE, Cheats.check(Console.XBOX, Cheats.normalize("5001A2B4 00010000\n0001A2B4 00000001")));
+        assertEquals(Cheats.Problem.SHAPE, Cheats.check(Console.XBOX, Cheats.normalize("0001A2B4 00000001\n4001A2B4 00000001")));
+        assertEquals(Cheats.Problem.SHAPE, Cheats.check(Console.XBOX, Cheats.normalize("123456789:1")));
+        assertEquals(Cheats.Problem.SHAPE, Cheats.check(Console.XBOX, Cheats.normalize("0001A2B4")));
+        assertEquals(Cheats.Problem.NOT_HEX, Cheats.check(Console.XBOX, Cheats.normalize("0001A2B4 0000006G")));
+        assertEquals(Cheats.Problem.EMPTY, Cheats.check(Console.XBOX, Cheats.normalize("# nothing")));
+        // An Xbox shape is not a PS1 one, and the GBA's 8+8 is not checked as an Xbox type.
+        assertEquals(Cheats.Problem.SHAPE, Cheats.check(Console.PS1, Cheats.normalize("2001A2B8 DEADBEEF")));
+        assertNull(Cheats.check(Console.GBA, Cheats.normalize("3001A2B4 00000001")));
+    }
+
+    /** XBA-241: an Xbox title's list lives under its title ID, beside its settings, as the consoles' do. */
+    @Test
+    public void xboxListBesideItsSettings() throws Exception {
+        File files = tmp.getRoot();
+        String xbox = "4d5300d1";
+        assertEquals(new File(files, "settings/game/4D5300D1.cheats"), Cheats.file(files, xbox));
+        Cheats c = Cheats.load(files, xbox);
+        c.add("Money", Cheats.normalize("2001a2b8 000f423f"), "Cheat 1");
+        assertTrue(c.save());
+        Cheats back = Cheats.load(files, xbox);
+        assertEquals(1, back.list.size());
+        assertEquals(Arrays.asList("2001A2B8 000F423F"), back.list.get(0).lines);
+        assertTrue(back.list.get(0).enabled);
+    }
+
     @Test
     public void addToggleDeleteSave() throws Exception {
         File files = tmp.getRoot();

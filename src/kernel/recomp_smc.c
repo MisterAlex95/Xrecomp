@@ -63,6 +63,18 @@ static const char *section_of(uint32_t va)
     return "?";
 }
 
+/* Whether [va, va + len) touches a code section (executable, not writable):
+ * the cheats (xbox_cheats.c) write no byte there. */
+int xbox_SmcInCode(uint32_t va, uint32_t len)
+{
+    uint64_t end = (uint64_t)va + len;
+    for (int i = 0; i < s_nsec; i++)
+        if ((s_sec[i].flags & SEC_EXECUTABLE) && !(s_sec[i].flags & SEC_WRITABLE)
+            && va < s_sec[i].end && end > s_sec[i].va)
+            return 1;
+    return 0;
+}
+
 /* ── Writing into code ───────────────────────────────────────────────────── */
 
 #ifndef _WIN32

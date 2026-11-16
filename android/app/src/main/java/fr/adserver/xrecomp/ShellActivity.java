@@ -372,14 +372,14 @@ public class ShellActivity extends SDLActivity {
     }
 
     /**
-     * RECOMP_CHEATS_FILE for a GBA / PS1 / N64 runtime (XBA-197, {@link Cheats}): the game's cheat list,
+     * RECOMP_CHEATS_FILE for the runtime (XBA-197, {@link Cheats}): the game's cheat list,
      * files/settings/game/&lt;KEY&gt;.cheats, even before it exists (the runtime reads it once it appears, and again at
-     * every change: the in-game menu's Cheats page takes effect at once); unset for an Xbox title.
+     * every change: the in-game menu's Cheats page takes effect at once). A GBA / PS1 / N64 game's key, or an Xbox
+     * title's ID (XBA-241: the kernel applies its codes every vblank, src/kernel/xbox_cheats.h); unset with no game.
      */
     private void applyCheats(boolean romLaunch) {
-        String tid = romLaunch ? GameStore.launchedTitleId(this) : null;
-        boolean console = tid != null && Console.ofKey(tid) != Console.XBOX;
-        File f = console ? Cheats.file(getFilesDir(), tid) : null;
+        String tid = romLaunch ? GameStore.launchedTitleId(this) : GameLanguage.currentTitleId(this);
+        File f = tid != null ? Cheats.file(getFilesDir(), tid) : null;
         try {
             if (f != null)
                 Os.setenv("RECOMP_CHEATS_FILE", f.getPath(), true);
