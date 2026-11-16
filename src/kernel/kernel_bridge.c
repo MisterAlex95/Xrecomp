@@ -2599,6 +2599,71 @@ static void bridge_wait_spin(uint32_t object, uint32_t status, uint32_t timeout_
     }
 }
 
+/* ── A timed wait served before it times out (WP-2, kernel.h) ──
+ *
+ * A timed wait that runs out gives the device models one pass first
+ * (xbox_IrqServiceTimedWait: catch-up hook, posted interrupts, DPCs, on this
+ * thread), then the object is tested again with a zero timeout. On the
+ * console a USB control transfer retires within a frame; here the
+ * controller thread can be starved by the host or held by a save state's
+ * capture past XAPI's 50 ms, and a timeout that is the host's fault made
+ * KOTOR cancel the transfer and drop its pad. Only a non-zero timeout:
+ * a poll must stay a poll, and an untimed wait never times out. */
+static volatile LONG s_wait_served;
+
+static int wait_timeout_is_timed(PLARGE_INTEGER timeout)
+{
+    return timeout && timeout->QuadPart != 0;
+}
+
+static void wait_served_note(uint32_t object, uint32_t ret_va)
+{
+    LONG n = InterlockedIncrement(&s_wait_served);
+    if (n <= 3 || (n & (n - 1)) == 0) {
+        fprintf(stderr, "  [KERNEL] timed wait on 0x%08X from 0x%08X timed out; "
+                        "signalled after a device service pass (%ld so far)\n",
+                object, ret_va, (long)n);
+        fflush(stderr);
+    }
+}
+
+NTSTATUS xbox_KeWaitServiced(PVOID Object, BOOLEAN Alertable, PLARGE_INTEGER Timeout)
+{
+    NTSTATUS st = xbox_KeWaitForSingleObject(Object, 0, 0, Alertable, Timeout);
+    if (st == STATUS_TIMEOUT && wait_timeout_is_timed(Timeout) && xbox_IrqServiceTimedWait()) {
+        LARGE_INTEGER zero;
+        zero.QuadPart = 0;
+        st = xbox_KeWaitForSingleObject(Object, 0, 0, Alertable, &zero);
+    }
+    return st;
+}
+
+/* One wait on a guest object, as the bridge resolves it. Returns the status;
+ * a successful wait consumes a guest-built synchronization event. */
+static NTSTATUS bridge_ke_wait_one(uint32_t object, uint32_t wait_reason, uint32_t wait_mode,
+                                   uint32_t alertable, PLARGE_INTEGER timeout)
+{
+    NTSTATUS st;
+    int type;
+    HANDLE h = ke_guest_event_prepare(object, &type);
+
+    if (h) {    /* An event the title built itself (see ke_guest_event): its
+                 * SignalState in guest memory is the truth -- XDK code resets
+                 * it by writing 0 there -- so the host event was brought in
+                 * line first. */
+        st = xbox_KeWaitForSingleObject(h, wait_reason, wait_mode, (BOOLEAN)alertable, timeout);
+        if (st == 0 && type == 1)               /* synchronization: consumed */
+            BRIDGE_MEM32(object + 4) = 0;
+        return st;
+    }
+    h = ke_shadow_lookup(object);
+    if (!h)
+        h = bridge_resolve_handle(object);
+    if (!h)
+        h = XBOX_TO_NATIVE(object);
+    return xbox_KeWaitForSingleObject(h, wait_reason, wait_mode, (BOOLEAN)alertable, timeout);
+}
+
 static void bridge_KeWaitForSingleObject(void)
 {
     uint32_t object = STACK_ARG(0);
@@ -2608,38 +2673,20 @@ static void bridge_KeWaitForSingleObject(void)
     uint32_t timeout_ptr = STACK_ARG(4);
     uint32_t ret_va = BRIDGE_MEM32(g_esp - 4);   /* the call's return address */
     uint64_t t0 = xbox_wait_stats_begin(bridge_timeout_is_poll(timeout_ptr));
-    HANDLE h;
+    PLARGE_INTEGER timeout = XBOX_TO_NATIVE(timeout_ptr);
+    NTSTATUS st;
 
     if (bridge_run_io_apcs(alertable, wait_mode))
         return;
-    {   /* An event the title built itself (see ke_guest_event). Its
-         * SignalState in guest memory is the truth -- XDK code resets it by
-         * writing 0 there -- so bring the host event in line first. */
-        int type;
-        HANDLE ge = ke_guest_event_prepare(object, &type);
-        if (ge) {
-            g_eax = (uint32_t)xbox_KeWaitForSingleObject(
-                ge, wait_reason, wait_mode,
-                (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
-            bridge_wait_done(alertable, wait_mode);
-            if (g_eax == 0 && type == 1)               /* synchronization: consumed */
-                BRIDGE_MEM32(object + 4) = 0;
-            xbox_wait_stats_wait(object, ret_va, g_eax, t0);
-            if (g_eax != 0)
-                bridge_wait_spin(object, g_eax, timeout_ptr, ret_va);
-            return;
-        }
+    st = bridge_ke_wait_one(object, wait_reason, wait_mode, alertable, timeout);
+    if (st == STATUS_TIMEOUT && wait_timeout_is_timed(timeout) && xbox_IrqServiceTimedWait()) {
+        LARGE_INTEGER zero;
+        zero.QuadPart = 0;
+        st = bridge_ke_wait_one(object, wait_reason, wait_mode, alertable, &zero);
+        if (st == 0)
+            wait_served_note(object, ret_va);
     }
-
-    h = ke_shadow_lookup(object);
-    if (!h)
-        h = bridge_resolve_handle(object);
-    if (!h)
-        h = XBOX_TO_NATIVE(object);
-
-    g_eax = (uint32_t)xbox_KeWaitForSingleObject(
-        h, wait_reason, wait_mode,
-        (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+    g_eax = (uint32_t)st;
     bridge_wait_done(alertable, wait_mode);
     xbox_wait_stats_wait(object, ret_va, g_eax, t0);
     if (g_eax != 0)
@@ -4279,6 +4326,13 @@ static void bridge_KeConnectInterrupt(void)
 uint32_t xbox_GetConnectedInterrupt(uint32_t vector)
 {
     return (vector < XBOX_MAX_VECTORS) ? g_connected_isr[vector] : 0;
+}
+
+/* Tests only: what KeConnectInterrupt records, without a thunk table. */
+void xbox_ConnectInterruptForTest(uint32_t vector, uint32_t kinterrupt_va)
+{
+    if (vector < XBOX_MAX_VECTORS)
+        g_connected_isr[vector] = kinterrupt_va;
 }
 
 /* ── MmClaimGpuInstanceMemory (ordinal 168) ───────────────
@@ -7174,6 +7228,22 @@ static void bridge_KeWaitForMultipleObjects(void)
             STACK_ARG(3), (KPROCESSOR_MODE)STACK_ARG(4),
             (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_va),
             XBOX_TO_NATIVE(STACK_ARG(7)));
+        /* A timed wait served before it times out (bridge_ke_wait_one). */
+        if (g_eax == (uint32_t)STATUS_TIMEOUT
+            && wait_timeout_is_timed(XBOX_TO_NATIVE(timeout_va))
+            && xbox_IrqServiceTimedWait()) {
+            LARGE_INTEGER zero;
+            zero.QuadPart = 0;
+            for (i = 0; i < count; i++)
+                if (guest_events[i])
+                    ke_guest_event_prepare(guest_events[i], &event_types[i]);
+            g_eax = (uint32_t)xbox_KeWaitForMultipleObjects(
+                count, (PVOID *)handles, wait_type,
+                STACK_ARG(3), (KPROCESSOR_MODE)STACK_ARG(4),
+                (BOOLEAN)alertable, &zero, XBOX_TO_NATIVE(STACK_ARG(7)));
+            if (g_eax < count)
+                wait_served_note(objects_va ? BRIDGE_MEM32(objects_va) : 0, site);
+        }
         bridge_wait_done(alertable, STACK_ARG(4));
         xbox_wait_stats_wait_multi(objects_va ? BRIDGE_MEM32(objects_va) : 0, site, g_eax, t0,
                                    count, wait_type == 0);

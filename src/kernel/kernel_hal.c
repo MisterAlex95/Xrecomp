@@ -708,6 +708,78 @@ static void irq_release_point(void)
     gate_leave_raw();
 }
 
+/* A timed wait that times out (xbox_IrqServiceTimedWait, kernel.h).
+ *
+ * The release-point catch-up above serves a guest thread that keeps making
+ * kernel calls. A thread blocked in a timed wait makes none: XAPI waits 50 ms
+ * for each control transfer, and when the host starves the controller thread,
+ * or a save-state capture holds it, the wait runs out although the "hardware"
+ * was only stopped. The title then cancels the transfer and drops the pad
+ * (KOTOR, titles/reports/report-kotor-pad.md). On the console the controller
+ * would have retired it within a frame. So before a timeout is reported the
+ * device models get one pass, here, on the waiting thread: holding the gate,
+ * which also keeps it out of a capture (the capture holds the gate while the
+ * devices are held), the wait hook walks what is owed and raises its line,
+ * the line's ISR runs, then the DPCs it queued, as at a release point. The
+ * caller retests its object with a zero timeout.
+ *
+ * The gate is waited for (bounded, RECOMP_IRQ_SAFE_MS) only when there is
+ * something to serve: a device owes work, a line is posted, or a DPC is
+ * queued. Otherwise the timeout is reported at once, so a title's polling
+ * waits cost one call to the hook. While a save state holds the device
+ * (hook answers 2) the gate is the capture's, and the wait for it lasts
+ * until the capture lets go (WAIT_PASS_CAPTURE_NS at most): the first
+ * capture took 1.2 s on a loaded Mac, and a pass that gave up first left
+ * the title its timeout. The capture waits for nothing from this thread,
+ * which is parked inside its wait. */
+#define WAIT_PASS_CAPTURE_NS (5000ull * 1000000ull)
+static int (*volatile s_irq_wait_catchup)(int run);
+static volatile LONG s_wait_passes;
+
+void xbox_IrqSetWaitCatchUpHook(int (*hook)(int run))
+{
+    s_irq_wait_catchup = hook;
+}
+
+int xbox_IrqServiceTimedWait(void)
+{
+    int (*hook)(int) = s_irq_wait_catchup;
+    uint64_t deadline;
+    int owed, round;
+
+    if (!hook || !t_guest_thread || t_in_isr || t_in_dpc || t_cli
+        || t_gate_depth || g_current_irql != PASSIVE_LEVEL
+        || !xbox_IrqSafePointsOn())
+        return 0;
+    owed = hook(0);
+    if (owed < 0)
+        return 0;                       /* RECOMP_OHCI_CATCHUP=0 */
+    if (!owed && !InterlockedCompareExchange(&s_irq_pending, 0, 0)
+        && !xbox_DpcPending())
+        return 0;
+    deadline = xbox_HostNowNs()
+             + (owed == 2 ? WAIT_PASS_CAPTURE_NS : s_irq_wait_ns);
+    while (!gate_try()) {
+        if (xbox_HostNowNs() >= deadline)
+            return 0;
+        Sleep(1);
+    }
+    /* A second round only when the hook found nothing it could do (the
+     * driver's ISR had masked the controller) and a DPC ran since: that DPC
+     * is what unmasks it. */
+    for (round = 0; round < 2; round++) {
+        int walked = hook(1), dpcs = xbox_DpcPending();
+        irq_run_pending();
+        dpcs |= xbox_DpcPending();
+        dpc_run_here();
+        if (walked || !dpcs)
+            break;
+    }
+    gate_leave_raw();
+    InterlockedIncrement(&s_wait_passes);
+    return 1;
+}
+
 static void irql_release_due(void)
 {
     t_release_due = 0;
