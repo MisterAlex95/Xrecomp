@@ -13,17 +13,32 @@
 
 dc_machine *dc_create(void)
 {
+    return dc_create_model(DC_MODEL_DREAMCAST);
+}
+
+dc_machine *dc_create_model(dc_model model)
+{
     dc_machine *m = calloc(1, sizeof *m);
     if (!m)
         return NULL;
-    m->ram = calloc(1, DC_RAM_SIZE);
+    m->model = model;
+    bool naomi = model == DC_MODEL_NAOMI;
+    m->ram_size = naomi ? NAOMI_RAM_SIZE : DC_RAM_SIZE;
+    m->aram_size = naomi ? NAOMI_ARAM_SIZE : DC_ARAM_SIZE;
+    m->ram = calloc(1, m->ram_size);
     m->vram = calloc(1, DC_VRAM_SIZE);
-    m->aram = calloc(1, DC_ARAM_SIZE);
-    if (!m->ram || !m->vram || !m->aram) {
+    m->aram = calloc(1, m->aram_size);
+    if (naomi) {
+        m->sram = malloc(NAOMI_SRAM_SIZE);
+        if (m->sram)
+            memset(m->sram, 0xFF, NAOMI_SRAM_SIZE); /* fresh battery RAM: the game initialises its settings */
+    }
+    if (!m->ram || !m->vram || !m->aram || (naomi && !m->sram)) {
         dc_destroy(m);
         return NULL;
     }
     m->cpu.ram = m->ram;
+    m->cpu.ram_mask = m->ram_size - 1;
     sh4_decode_init();
     dc_bus_reset(m);
     dc_hw_reset(m);
@@ -34,12 +49,19 @@ void dc_destroy(dc_machine *m)
 {
     if (!m)
         return;
+    dc_naomi_free(m);
+    free(m->sram);
     free(m->ram);
     free(m->vram);
     free(m->aram);
     free(m->serial);
     free(m->missed);
     free(m);
+}
+
+dc_model dc_get_model(const dc_machine *m)
+{
+    return m->model;
 }
 
 sh4_cpu *dc_cpu(dc_machine *m)
@@ -66,9 +88,9 @@ static uint32_t rd16(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
 }
 
-static bool in_ram(uint32_t a, uint32_t size)
+static bool in_ram(const dc_machine *m, uint32_t a, uint32_t size)
 {
-    return sh4_is_ram(a) && (a & (DC_RAM_SIZE - 1)) + (uint64_t)size <= DC_RAM_SIZE;
+    return sh4_is_ram(a) && (a & (m->ram_size - 1)) + (uint64_t)size <= m->ram_size;
 }
 
 int dc_load(dc_machine *m, const uint8_t *data, size_t size, char *err, size_t errlen)
@@ -95,11 +117,11 @@ int dc_load(dc_machine *m, const uint8_t *data, size_t size, char *err, size_t e
                      flags = rd32(ph + 24);
             if (memsz == 0)
                 continue;
-            if (filesz > memsz || (uint64_t)off + filesz > size || !in_ram(vaddr, memsz)) {
+            if (filesz > memsz || (uint64_t)off + filesz > size || !in_ram(m, vaddr, memsz)) {
                 snprintf(err, errlen, "segment %u at %08x does not fit main RAM", i, vaddr);
                 return -1;
             }
-            uint8_t *dst = m->ram + (vaddr & (DC_RAM_SIZE - 1));
+            uint8_t *dst = m->ram + (vaddr & (m->ram_size - 1));
             memcpy(dst, data + off, filesz);
             memset(dst + filesz, 0, memsz - filesz);
             if (flags & 1) { /* PF_X */
@@ -112,7 +134,7 @@ int dc_load(dc_machine *m, const uint8_t *data, size_t size, char *err, size_t e
         }
     } else {
         entry = 0x8C010000u;
-        if (!in_ram(entry, (uint32_t)size) || size > DC_RAM_SIZE - 0x10000u) {
+        if (!in_ram(m, entry, (uint32_t)size) || size > m->ram_size - 0x10000u) {
             snprintf(err, errlen, "binary too large");
             return -1;
         }
@@ -158,7 +180,7 @@ int dc_attach_recomp(dc_machine *m, const dc_recomp_table *t)
     if (t) {
         for (uint32_t i = 0; i < t->nspans; i++) {
             const dc_recomp_span *s = &t->spans[i];
-            if (!in_ram(s->lo, s->hi - s->lo) || fnv1a(m->ram + (s->lo & (DC_RAM_SIZE - 1)), s->hi - s->lo) != s->fnv1a) {
+            if (!in_ram(m, s->lo, s->hi - s->lo) || fnv1a(m->ram + (s->lo & (m->ram_size - 1)), s->hi - s->lo) != s->fnv1a) {
                 fprintf(stderr, "dc: lifted code was made from other bytes (%08x-%08x): not attached\n", s->lo, s->hi);
                 return -1;
             }

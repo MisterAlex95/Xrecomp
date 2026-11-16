@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define DC_RECOMP_ABI 1
+#define DC_RECOMP_ABI 2 /* 2: sh4_cpu.ram_mask (Naomi's 32 MB, XBA-235) */
 
 typedef void (*dc_recomp_fn)(sh4_cpu *c);
 

@@ -7,6 +7,10 @@
 #define DC_RAM_SIZE (16u << 20)
 #define DC_VRAM_SIZE (8u << 20)
 #define DC_ARAM_SIZE (2u << 20)
+/* Naomi (XBA-235): main RAM and sound RAM grow; VRAM is 16 MB on the board but stays 8 MB here (to do). */
+#define NAOMI_RAM_SIZE (32u << 20)
+#define NAOMI_ARAM_SIZE (8u << 20)
+#define NAOMI_SRAM_SIZE (32u << 10)
 
 #define DC_CPU_HZ 200000000u
 #define DC_FRAME_CYCLES (DC_CPU_HZ / 60u)
@@ -26,6 +30,19 @@ enum {
 };
 #define DC_HLE_ID_ADDR 0x8C000880u /* the console ID syscall_sysinfo_id returns a pointer to */
 
+/* The Naomi cartridge (dc_naomi.c): a plain / decrypted ROM image the user supplies, read through the board's
+ * PIO and DMA registers at 0x005F7000. */
+typedef struct dc_naomi_cart {
+    uint8_t *rom;
+    size_t size;
+    uint32_t rom_offset; /* ROM_OFFSETH:L; bit 31 auto-advance, bits 28-30 mode */
+    uint32_t dma_offset; /* DMA_OFFSETH:L */
+    uint32_t dma_count;
+    uint16_t boardid;
+    uint32_t g1[0x100 / 4]; /* G1 DMA block 0x005F7400-0x005F74FF (GDSTAR, GDLEN, GDDIR, GDEN, GDST...) */
+    uint64_t pio_reads, dma_bytes;
+} dc_naomi_cart;
+
 typedef struct dc_tmu {
     uint32_t tcor, tcr;
     uint32_t base_cnt;   /* TCNT at base_cycle */
@@ -35,7 +52,14 @@ typedef struct dc_tmu {
 struct dc_machine {
     sh4_cpu cpu; /* first: the bus functions cast sh4_cpu * to dc_machine * */
     uint8_t *ram, *vram, *aram;
+    uint32_t ram_size, aram_size;
+    dc_model model;
     int verbose;
+
+    /* Naomi (model DC_MODEL_NAOMI): battery SRAM at 0x00200000, the cartridge, the JVS I/O state */
+    uint8_t *sram;
+    dc_naomi_cart cart;
+    dc_jvs_state jvs;
 
     /* SH-4 on-chip */
     uint32_t ccr, mmucr, qacr[2], pmcr[2];
@@ -89,6 +113,11 @@ uint32_t dc_tmu_read(dc_machine *m, uint32_t reg);
 void dc_tmu_write(dc_machine *m, uint32_t reg, uint32_t v);
 uint32_t dc_spg_status(dc_machine *m);
 void dc_hw_kick(dc_machine *m);       /* interrupt state may have changed: return to the dispatcher soon */
+
+/* dc_naomi.c: the board's G1 window (0x005F7000-0x005F70FF) and G1 DMA (0x005F7400-0x005F74FF) */
+uint32_t dc_naomi_g1_read(dc_machine *m, uint32_t p);
+void dc_naomi_g1_write(dc_machine *m, uint32_t p, uint32_t v);
+void dc_naomi_free(dc_machine *m);
 
 /* dc_bios.c */
 void dc_bios_setup(dc_machine *m, uint32_t entry);

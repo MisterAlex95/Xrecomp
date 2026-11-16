@@ -14,7 +14,7 @@
 
 static void w32(dc_machine *m, uint32_t a, uint32_t v)
 {
-    memcpy(m->ram + (a & (DC_RAM_SIZE - 1)), &v, 4);
+    memcpy(m->ram + (a & (m->ram_size - 1)), &v, 4);
 }
 
 static uint32_t stub_addr(int k)
@@ -34,7 +34,7 @@ void dc_bios_setup(dc_machine *m, uint32_t entry)
         w32(m, vecs[i].vec, stub_addr(vecs[i].stub));
     for (int k = 0; k < DC_HLE_COUNT; k++)
         w32(m, stub_addr(k), 0x0009000Bu); /* rts; nop: never run (the dispatcher serves the stub) */
-    memcpy(m->ram + (DC_HLE_ID_ADDR & (DC_RAM_SIZE - 1)), "XRECOMP\0", 8);
+    memcpy(m->ram + (DC_HLE_ID_ADDR & (m->ram_size - 1)), "XRECOMP\0", 8);
 
     memset(c->r, 0, sizeof c->r);
     memset(c->rbank, 0, sizeof c->rbank);

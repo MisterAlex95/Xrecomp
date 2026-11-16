@@ -1456,6 +1456,15 @@ big piece), AICA (its ARM7 and the 64 channels), Maple (pads), the GD-ROM (GDI /
 and the SH-4's own exceptions beyond TRAPA, cycle timing, the scrambled 1ST_READ.BIN and IP.BIN boot. Notes on
 XBA-221.
 
+**Naomi mode (XBA-235 spike, epic XBA-221).** Sega's Dreamcast-based arcade board as a second model of `dc_core`,
+off unless asked for (`dc_create_model(DC_MODEL_NAOMI)`, `dc_run --naomi CART.bin`): 32 MB main RAM (lifted code
+masks with `sh4_cpu.ram_mask`, `DC_RECOMP_ABI` 2), 8 MB sound RAM, the 32 KB SRAM at 0x00200000, the cartridge board
+in the G1 window (ROM_OFFSET / ROM_DATA PIO, DMA_OFFSET + G1 DMA) backed by a ROM image file the user supplies, the
+Naomi BIOS in C (the header's load list and entry point) and a JVS I/O board stub (`dc_jvs_transfer`; the Maple-JVS
+bridge itself is not modelled). Tests: `dc_naomi` (a synthetic cartridge built in the test: memory map, PIO, DMA,
+Dreamcast map unchanged, JVS replies) and `dc_naomi_hello` (our KOS hello world in a synthetic cartridge: same serial
+lines and framebuffer). No BIOS, no game, no decryption: [docs/technical/naomi.md](../docs/technical/naomi.md).
+
 **Xbox 360 spike (XBA-230, epic XBA-229).** The XEX2 container parsed, and leaf functions (64-bit integer, FPU,
 VMX, VMX128) recompiled on the GameCube's PowerPC frontend and checked against values computed independently. No
 runtime yet (no kernel / XAM HLE, no threads, no Xenos), nothing in the app, nothing in CMake: Python and two

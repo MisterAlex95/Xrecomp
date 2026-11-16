@@ -2,6 +2,8 @@
  *
  *   dc_run PROGRAM.elf|1ST_READ.BIN [--frames N] [--png OUT] [--png-when TEXT] [--serial OUT] [--pack LIB.so]
  *          [--missed FILE] [--stats] [--peek ADDR[:WORDS]] [-v] [-v]
+ *   dc_run --naomi CART.bin [same options]   a Naomi cartridge image (XBA-235 spike): boots it as the Naomi BIOS
+ *                                            does (the header's load list and entry point) on the Naomi memory map
  *   dc_run --decode-table OUT     the decoder's view of all 65536 opcodes (compared with dc_tools.sh4 --table)
  *
  * Runs until the program returns to the BIOS or N frames (default 600) have passed. --png: the framebuffer at the
@@ -133,14 +135,15 @@ static uint8_t *read_file(const char *path, size_t *size)
 static int usage(void)
 {
     fprintf(stderr, "usage: dc_run PROGRAM [--frames N] [--png OUT] [--serial OUT] [--pack LIB] [--missed FILE]"
-                    " [--png-when TEXT] [--stats] [--peek ADDR[:WORDS]] [-v]\n       dc_run --decode-table OUT\n");
+                    " [--png-when TEXT] [--stats] [--peek ADDR[:WORDS]] [-v]\n       dc_run --naomi CART [options]\n"
+                    "       dc_run --decode-table OUT\n");
     return 2;
 }
 
 int main(int argc, char **argv)
 {
     const char *path = NULL, *png = NULL, *png_when = NULL, *serial = NULL, *pack = NULL, *missed = NULL;
-    int frames = 600, stats = 0, verbose = 0, npeek = 0;
+    int frames = 600, stats = 0, verbose = 0, npeek = 0, naomi = 0;
     const char *peek[16];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--decode-table") && i + 1 < argc) {
@@ -163,6 +166,8 @@ int main(int argc, char **argv)
             missed = argv[++i];
         else if (!strcmp(argv[i], "--peek") && i + 1 < argc && npeek < 16)
             peek[npeek++] = argv[++i];
+        else if (!strcmp(argv[i], "--naomi"))
+            naomi = 1;
         else if (!strcmp(argv[i], "--stats"))
             stats = 1;
         else if (!strcmp(argv[i], "-v"))
@@ -174,21 +179,31 @@ int main(int argc, char **argv)
     }
     if (!path)
         return usage();
-    size_t size;
-    uint8_t *data = read_file(path, &size);
-    if (!data) {
-        fprintf(stderr, "dc_run: cannot read %s\n", path);
-        return 2;
-    }
-    dc_machine *m = dc_create();
     char why[160];
-    if (!m || dc_load(m, data, size, why, sizeof why)) {
-        fprintf(stderr, "dc_run: %s: %s\n", path, m ? why : "out of memory");
+    dc_machine *m;
+    if (naomi) {
+        m = dc_create_model(DC_MODEL_NAOMI);
+        if (!m || dc_naomi_insert_cart(m, path, why, sizeof why) || dc_naomi_boot(m, why, sizeof why)) {
+            fprintf(stderr, "dc_run: %s: %s\n", path, m ? why : "out of memory");
+            dc_destroy(m);
+            return 2;
+        }
+    } else {
+        size_t size;
+        uint8_t *data = read_file(path, &size);
+        if (!data) {
+            fprintf(stderr, "dc_run: cannot read %s\n", path);
+            return 2;
+        }
+        m = dc_create();
+        if (!m || dc_load(m, data, size, why, sizeof why)) {
+            fprintf(stderr, "dc_run: %s: %s\n", path, m ? why : "out of memory");
+            free(data);
+            dc_destroy(m);
+            return 2;
+        }
         free(data);
-        dc_destroy(m);
-        return 2;
     }
-    free(data);
     dc_set_verbose(m, verbose);
     void *lib = NULL;
     if (pack) {

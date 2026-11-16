@@ -59,10 +59,11 @@ typedef struct sh4_cpu {
     uint32_t tra, expevt, intevt;
     uint64_t cycles;     /* one per instruction since reset */
     uint64_t next_event; /* lifted code returns to the dispatcher once cycles reaches it */
-    uint8_t *ram;        /* main RAM, 16 MB (0x0C000000, mirrored to 0x0FFFFFFF) */
+    uint8_t *ram;        /* main RAM (0x0C000000, mirrored to 0x0FFFFFFF): 16 MB, 32 MB on Naomi */
     uint32_t sleeping;   /* SLEEP until an interrupt */
     uint32_t depth;      /* nested direct calls between lifted functions */
     uint64_t rc_native;  /* instructions lifted code ran (packs built with -DDC_RC_COUNT) */
+    uint32_t ram_mask;   /* main RAM size - 1: 0xFFFFFF (Dreamcast), 0x1FFFFFF (Naomi, XBA-235) */
 } sh4_cpu;
 
 /* The bus (dc_bus.c), exported by the host program for the pack to bind to. Addresses are virtual (P0-P4); the
@@ -82,13 +83,13 @@ static inline bool sh4_is_ram(uint32_t a)
 
 static inline uint8_t sh4_r8(sh4_cpu *c, uint32_t a)
 {
-    return sh4_is_ram(a) ? c->ram[a & 0xFFFFFFu] : dc_read8(c, a);
+    return sh4_is_ram(a) ? c->ram[a & c->ram_mask] : dc_read8(c, a);
 }
 static inline uint16_t sh4_r16(sh4_cpu *c, uint32_t a)
 {
     if (sh4_is_ram(a)) {
         uint16_t v;
-        memcpy(&v, c->ram + (a & 0xFFFFFEu), 2);
+        memcpy(&v, c->ram + (a & (c->ram_mask & ~1u)), 2);
         return v;
     }
     return dc_read16(c, a);
@@ -97,7 +98,7 @@ static inline uint32_t sh4_r32(sh4_cpu *c, uint32_t a)
 {
     if (sh4_is_ram(a)) {
         uint32_t v;
-        memcpy(&v, c->ram + (a & 0xFFFFFCu), 4);
+        memcpy(&v, c->ram + (a & (c->ram_mask & ~3u)), 4);
         return v;
     }
     return dc_read32(c, a);
@@ -105,21 +106,21 @@ static inline uint32_t sh4_r32(sh4_cpu *c, uint32_t a)
 static inline void sh4_w8(sh4_cpu *c, uint32_t a, uint8_t v)
 {
     if (sh4_is_ram(a))
-        c->ram[a & 0xFFFFFFu] = v;
+        c->ram[a & c->ram_mask] = v;
     else
         dc_write8(c, a, v);
 }
 static inline void sh4_w16(sh4_cpu *c, uint32_t a, uint16_t v)
 {
     if (sh4_is_ram(a))
-        memcpy(c->ram + (a & 0xFFFFFEu), &v, 2);
+        memcpy(c->ram + (a & (c->ram_mask & ~1u)), &v, 2);
     else
         dc_write16(c, a, v);
 }
 static inline void sh4_w32(sh4_cpu *c, uint32_t a, uint32_t v)
 {
     if (sh4_is_ram(a))
-        memcpy(c->ram + (a & 0xFFFFFCu), &v, 4);
+        memcpy(c->ram + (a & (c->ram_mask & ~3u)), &v, 4);
     else
         dc_write32(c, a, v);
 }

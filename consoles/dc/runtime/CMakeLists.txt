@@ -3,8 +3,9 @@ project(dc_runtime C)
 
 # dc_core: the Dreamcast spike (XBA-227, epic XBA-221): the SH-4 (interpreter + lifted code, sh4_ops.h shared by
 # both), the memory map, a BIOS in C, the SH-4's TMU / INTC / SCIF / store queues, Holly's interrupts and the
-# PowerVR2 framebuffer read-out. Plain C11, no host layer: Linux headless only for now (dc_run), nothing in the app.
-# See consoles/README.md « Dreamcast ».
+# PowerVR2 framebuffer read-out; dc_naomi.c the Naomi spike (XBA-235, off unless asked for: dc_run --naomi).
+# Plain C11, no host layer: Linux headless only for now (dc_run), nothing in the app.
+# See consoles/README.md « Dreamcast » and docs/technical/naomi.md.
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 if(APPLE)
@@ -12,7 +13,7 @@ if(APPLE)
 endif()
 
 if(NOT TARGET dc_core)
-    add_library(dc_core STATIC dc_core.c dc_bus.c dc_hw.c dc_bios.c sh4_interp.c)
+    add_library(dc_core STATIC dc_core.c dc_bus.c dc_hw.c dc_bios.c dc_naomi.c sh4_interp.c)
     target_include_directories(dc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_options(dc_core PRIVATE -Wall -Wextra)
     if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
