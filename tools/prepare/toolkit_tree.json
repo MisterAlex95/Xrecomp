@@ -6,7 +6,8 @@
                   "consoles/gba/tools/**/*.py", "consoles/ps1/tools/**/*.py",
                   "consoles/n64/tools/**/*.py"],
       "exclude": ["**/test_*.py", "**/tests/**", "**/conftest.py", "**/__pycache__/**", "tools/*/output/**",
-                  "tools/android/**", "tools/docker/**", "tools/ci/**", "tools/conformance/msvc-wine/**"]
+                  "tools/android/**", "tools/docker/**", "tools/ci/**", "tools/conformance/msvc-wine/**",
+                  "tools/xrecomp/**"]
     },
     {
       "include": ["templates/new-game/**", "templates/runtime/**", "profiles/**", "include/**", "src/**/*.h",

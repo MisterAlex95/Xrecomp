@@ -370,7 +370,8 @@ The working directory does not matter; `python -m tools.prepare` needs the toolk
 **Toolkit tree** in the assets (read-only): `tools/` (Python, plus the data files the tools read: `tools/recomp/data/`, `tools/xbe_ident/engines.json`), `include/`, the headers of `src/` (`src/**/*.h`),
 `templates/new-game/`, `templates/runtime/` (the `recomp_types.h` the lifter copies next to the generated C), `profiles/`, `tools/VERSION` (one line: the commit; written by the asset build, git-ignored), and `tools/TOOLKIT_SHA256` (the toolkit digest, written by the asset build). The patterns are in
 `tools/prepare/toolkit_tree.json`, read by both `android/app/build.gradle` (the zip) and `tools/prepare/toolkit.py`
-(the digest on a host).
+(the digest on a host). The desktop command line (`tools/xrecomp`, [cli.md](../desktop/cli.md)) is left out: a change
+to it never makes a pack stale.
 
 **status.json**: the service writes it from the progress lines for the UI and for a restart after the app was killed.
 Its format belongs to the app (prepare-app branch, `android/app`), not to this page; prepare never reads it.
