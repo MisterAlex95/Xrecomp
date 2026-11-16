@@ -16,6 +16,9 @@
 
 #include "kernel.h"
 #include "guest_clock.h"   /* fast-forward: guest spans on the host (XBA-240) */
+#include "kernel_park.h"   /* frozen time (WP-1) */
+#include "xbox_memory_layout.h"   /* RECOMP_TLS */
+#include "usb/ohci.h"      /* the controller's lateness, for the expired-wait line (WP-4) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -229,6 +232,130 @@ static void wait_log(const char *who, HANDLE h, DWORD ms, DWORD result,
             (unsigned long)ms, (unsigned long)result, (unsigned long long)waited);
 }
 
+/* ============================================================================
+ * Frozen time does not count against a guest timeout (WP-1 of the KOTOR pad report)
+ *
+ * A save-state or rewind capture freezes every guest thread (xbox_ParkFreeze) and holds the device threads
+ * (xbox_DevStateFreeze): the guest's machine stands still. A guest thread already inside a timed wait is
+ * parked there, and its host wait goes on counting: XAPI waits 50 ms for a USB control transfer, a first
+ * capture on a slow host holds the OHCI controller longer than that, and the wait expires against hardware
+ * that was stopped (KOTOR then closes the pad). So a timed wait from a guest thread that expired:
+ *   1. waits out a freeze still in force (xbox_ParkWaitThaw: it stays inside its call, its park record
+ *      unchanged, so the capture needs no second attempt);
+ *   2. waits again for the frozen time that fell inside it, capped at its own timeout;
+ *   3. repeats until a timeout with less than 1 ms of frozen time in it (FROZEN_ROUNDS at most).
+ * A freeze that lets waits expire (a same-run load's settle, xbox_ParkFreezeLetWaitsExpire) and a thread not
+ * parked (a wait inside a routine a bridge runs) end at their host timeout, as before. Untimed and zero-timeout
+ * waits are untouched. KeSetTimer is not covered. RECOMP_WAIT_FROZEN=0 turns it off (A/B, the KOTOR
+ * reproduction with RECOMP_STATE_CAPTURE_STALL_MS).
+ * ============================================================================ */
+#define FROZEN_ROUNDS   8
+#define FROZEN_MIN_NS   1000000ull    /* less frozen time than this in a timeout: a real one */
+#define THAW_WAIT_MS    5000u         /* a freeze that lasts longer than this is a stuck freezer */
+
+static int frozen_waits_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_WAIT_FROZEN");
+        on = !(e && *e == '0');
+    }
+    return on;
+}
+
+extern RECOMP_TLS uint32_t g_xbox_kernel_caller;
+
+/* WP-4: one line when a timed guest wait expired while a freeze overlapped it, or with the OHCI controller
+ * thread held or overdue (the two ways a wait for a USB transfer expires without the guest's fault). The first
+ * 10, then every 64th. who NULL: a delay, which always expires. */
+static void expired_note(const char *who, HANDLE h, DWORD ms, uint64_t frozen_ns, int rounds)
+{
+    static volatile long n;
+    uint32_t late_ms = 0;
+    int late = xbox_OhciControllerLate(&late_ms);
+    long k;
+
+    if (!who || (frozen_ns < FROZEN_MIN_NS && late <= 0))
+        return;
+    k = InterlockedIncrement(&n);
+    if (k > 10 && (k & 63) != 0)
+        return;
+    fprintf(stderr, "  [WAIT] %s expired: handle %p from 0x%08X, timeout %lu ms, frozen %.1f ms in it (%d extension%s)"
+                    "%s%s; OHCI controller %s, last pass %u ms ago [%ld so far]\n",
+            who, (void *)h, g_xbox_kernel_caller, (unsigned long)ms, (double)frozen_ns / 1e6, rounds,
+            rounds == 1 ? "" : "s", frozen_waits_on() ? "" : ", RECOMP_WAIT_FROZEN=0",
+            xbox_ParkFreezeInForce() ? ", a freeze in force" : "",
+            late == 2 ? "held" : late == 1 ? "overdue" : late == 0 ? "on time" : "not running", late_ms, k);
+    fflush(stderr);
+}
+
+DWORD xbox_GuestTimedWait(DWORD (*wait)(void *ctx, DWORD ms), void *ctx, DWORD ms, const char *who, HANDLE h)
+{
+    uint64_t f0, frozen = 0;
+    DWORD r;
+    int rounds = 0;
+
+    if (ms == 0 || ms == INFINITE || !xbox_ParkThisThreadIsGuest())
+        return wait(ctx, ms);
+    f0 = xbox_ParkFrozenNs();
+    r = wait(ctx, ms);
+    while (r == WAIT_TIMEOUT && frozen_waits_on() && rounds < FROZEN_ROUNDS) {
+        uint64_t f1, d;
+        DWORD more;
+
+        xbox_ParkWaitThaw(THAW_WAIT_MS);
+        if (xbox_ParkFreezeInForce())
+            break;                      /* let expire, not parked, or a stuck freezer: as before */
+        f1 = xbox_ParkFrozenNs();
+        d = f1 - f0;
+        if (d < FROZEN_MIN_NS)
+            break;
+        frozen += d;
+        f0 = f1;
+        more = (DWORD)((d + 999999ull) / 1000000ull);
+        if (more > ms)
+            more = ms;
+        rounds++;
+        r = wait(ctx, more);
+    }
+    if (r == WAIT_TIMEOUT)
+        expired_note(who, h, ms, frozen + (xbox_ParkFrozenNs() - f0), rounds);
+    return r;
+}
+
+typedef struct { HANDLE h; BOOL alertable; } WaitOne;
+typedef struct { DWORD count; const HANDLE *h; BOOL all, alertable; } WaitMany;
+
+static DWORD wait_one(void *ctx, DWORD ms)
+{
+    WaitOne *w = (WaitOne *)ctx;
+    return WaitForSingleObjectEx(w->h, ms, w->alertable);
+}
+
+static DWORD wait_many(void *ctx, DWORD ms)
+{
+    WaitMany *w = (WaitMany *)ctx;
+    return WaitForMultipleObjectsEx(w->count, w->h, w->all, ms, w->alertable);
+}
+
+static DWORD guest_wait_one(const char *who, HANDLE h, DWORD ms, BOOL alertable)
+{
+    WaitOne w;
+    w.h = h;
+    w.alertable = alertable;
+    return xbox_GuestTimedWait(wait_one, &w, ms, who, h);
+}
+
+static DWORD guest_wait_many(const char *who, DWORD count, const HANDLE *h, BOOL all, DWORD ms, BOOL alertable)
+{
+    WaitMany w;
+    w.count = count;
+    w.h = h;
+    w.all = all;
+    w.alertable = alertable;
+    return xbox_GuestTimedWait(wait_many, &w, ms, who, count ? h[0] : NULL);
+}
+
 NTSTATUS __stdcall xbox_NtWaitForSingleObject(
     HANDLE Handle,
     BOOLEAN Alertable,
@@ -236,7 +363,7 @@ NTSTATUS __stdcall xbox_NtWaitForSingleObject(
 {
     DWORD ms = xbox_nt_timeout_to_ms(Timeout);
     ULONGLONG t0 = wait_log_on() ? GetTickCount64() : 0;
-    DWORD result = WaitForSingleObjectEx(Handle, ms, Alertable);
+    DWORD result = guest_wait_one("NtWaitForSingleObject", Handle, ms, Alertable);
     if (wait_log_on())
         wait_log("NtWaitForSingleObject", Handle, ms, result, t0);
     return xbox_wait_result_to_ntstatus(result, 1);
@@ -259,7 +386,7 @@ NTSTATUS __stdcall xbox_NtWaitForSingleObjectEx(
     (void)WaitMode;
 
     ULONGLONG t0 = wait_log_on() ? GetTickCount64() : 0;
-    result = WaitForSingleObjectEx(Handle, ms, Alertable);
+    result = guest_wait_one("NtWaitForSingleObjectEx", Handle, ms, Alertable);
     if (wait_log_on())
         wait_log("NtWaitForSingleObjectEx", Handle, ms, result, t0);
     return xbox_wait_result_to_ntstatus(result, 1);
@@ -279,7 +406,7 @@ NTSTATUS __stdcall xbox_NtWaitForMultipleObjectsEx(
     /* WaitType: 0 = WaitAll, 1 = WaitAny (matches NT definitions) */
     bWaitAll = (WaitType == 0) ? TRUE : FALSE;
 
-    result = WaitForMultipleObjectsEx(Count, Handles, bWaitAll, ms, Alertable);
+    result = guest_wait_many("NtWaitForMultipleObjectsEx", Count, Handles, bWaitAll, ms, Alertable);
     return xbox_wait_result_to_ntstatus(result, Count);
 }
 
@@ -307,7 +434,7 @@ NTSTATUS __stdcall xbox_KeWaitForSingleObject(
     HANDLE hObject = (HANDLE)Object;
     DWORD ms = xbox_nt_timeout_to_ms(Timeout);
     ULONGLONG t0 = wait_log_on() ? GetTickCount64() : 0;
-    DWORD result = WaitForSingleObjectEx(hObject, ms, Alertable);
+    DWORD result = guest_wait_one("KeWaitForSingleObject", hObject, ms, Alertable);
     if (wait_log_on())
         wait_log("KeWaitForSingleObject", hObject, ms, result, t0);
     return xbox_wait_result_to_ntstatus(result, 1);
@@ -331,8 +458,8 @@ NTSTATUS __stdcall xbox_KeWaitForMultipleObjects(
     DWORD ms = xbox_nt_timeout_to_ms(Timeout);
 
     /* Objects[] is an array of PVOID which we treat as HANDLE[] */
-    DWORD result = WaitForMultipleObjectsEx(Count, (HANDLE*)Objects,
-                                            bWaitAll, ms, Alertable);
+    DWORD result = guest_wait_many("KeWaitForMultipleObjects", Count, (const HANDLE *)Objects,
+                                   bWaitAll, ms, Alertable);
     return xbox_wait_result_to_ntstatus(result, Count);
 }
 

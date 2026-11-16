@@ -166,6 +166,15 @@ NTSTATUS __stdcall xbox_PsTerminateSystemThread(NTSTATUS ExitStatus)
  * Maps to: SleepEx (for alertable waits) or Sleep
  * ============================================================================ */
 
+/* One sleep of the delay: WAIT_TIMEOUT when it ran its length (the "timeout" xbox_GuestTimedWait extends). */
+static DWORD delay_sleep(void *ctx, DWORD ms)
+{
+    if (*(const BOOLEAN *)ctx)
+        return SleepEx(ms, TRUE) == WAIT_IO_COMPLETION ? WAIT_IO_COMPLETION : WAIT_TIMEOUT;
+    Sleep(ms);
+    return WAIT_TIMEOUT;
+}
+
 NTSTATUS __stdcall xbox_KeDelayExecutionThread(
     KPROCESSOR_MODE WaitMode,
     BOOLEAN Alertable,
@@ -205,14 +214,10 @@ NTSTATUS __stdcall xbox_KeDelayExecutionThread(
      * speed 1). */
     ms = xbox_GuestClockHostMs(ms);
 
-    if (Alertable) {
-        DWORD result = SleepEx(ms, TRUE);
-        if (result == WAIT_IO_COMPLETION)
-            return STATUS_ALERTED;
-    } else {
-        Sleep(ms);
-    }
-
+    /* WP-1 (kernel_sync.c, xbox_GuestTimedWait): time a save-state freeze held the game still inside the
+     * delay is slept again (capped at the delay), so a guest waiting a delay for hardware gets it whole. */
+    if (xbox_GuestTimedWait(delay_sleep, &Alertable, ms, NULL, NULL) == WAIT_IO_COMPLETION)
+        return STATUS_ALERTED;
     return STATUS_SUCCESS;
 }
 

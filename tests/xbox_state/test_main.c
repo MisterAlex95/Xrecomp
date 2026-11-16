@@ -48,6 +48,11 @@
  *   Refusals      a thread that never makes a kernel call (freeze times out
  *                 and names it); a capture from a guest thread
  *   Measures      capture time and blob size (printed)
+ *   Stall         RECOMP_STATE_CAPTURE_STALL_MS=40 (the KOTOR pad
+ *                 reproduction): the capture takes at least that long, and
+ *                 the workers' sleeps that end during it wait for the thaw
+ *                 inside their calls (WP-1), so one attempt suffices; with
+ *                 RECOMP_WAIT_FROZEN=0 they would return during it
  *   Probe         RECOMP_STATE_PROBE writes a slot file that reads back
  */
 #include "kernel.h"
@@ -1194,6 +1199,44 @@ static void phase_measure(void)
     check(ok, "every capture succeeds", NULL);
 }
 
+static void phase_stall(void)
+{
+    XboxStateStats st;
+    uint8_t *b = NULL;
+    size_t n = 0;
+    int rc, ok = 1, one = 1, i;
+    double worst = 1e9;
+    char d[256] = "";
+
+    printf("A capture stalled with the devices held (RECOMP_STATE_CAPTURE_STALL_MS=40)\n");
+    setenv("RECOMP_STATE_CAPTURE_STALL_MS", "40", 1);
+    for (i = 0; i < 3; i++) {
+        usleep(7000 + 3100 * (unsigned)i);
+        rc = xbox_StateCapture(200, &b, &n, &st);
+        if (rc != XBOX_STATE_OK) {
+            ok = 0;
+            snprintf(d, sizeof d, "%s: %s", xbox_StateError(rc), st.reason);
+        } else {
+            if (st.capture_ms < worst) worst = st.capture_ms;
+            if (st.attempts != 1) {
+                one = 0;
+                snprintf(d, sizeof d, "%d attempts", st.attempts);
+            }
+        }
+        free(b);
+        b = NULL;
+    }
+    unsetenv("RECOMP_STATE_CAPTURE_STALL_MS");
+    check(ok && worst >= 40.0, "each capture takes at least the stall", d);
+    {
+        const char *off = getenv("RECOMP_WAIT_FROZEN");
+        if (off && *off == '0')
+            printf("  (RECOMP_WAIT_FROZEN=0: sleeps return during the stall, attempts not checked)\n");
+        else
+            check(ok && one, "sleeps ending during it wait for the thaw: one attempt each", d);
+    }
+}
+
 /* RECOMP_STATE_PROBE: started late here (xbox_kernel_bridge_init found no variable), so it does not race
  * the phases above for the one capture at a time. */
 static void phase_probe(const char *dir)
@@ -1263,6 +1306,7 @@ int main(int argc, char **argv)
     phase_load(tmpl);
     phase_refusals();
     phase_measure();
+    phase_stall();
     phase_probe(tmpl);
 
     g_stop = 1;

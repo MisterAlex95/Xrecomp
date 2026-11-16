@@ -78,6 +78,11 @@ static volatile int32_t s_busy;         /* registered and not parked */
 static volatile int32_t s_freeze;       /* a freeze is in force or being reached */
 static volatile int32_t s_freezer;      /* one freezer at a time */
 static volatile int32_t s_dropped;      /* threads that found no slot */
+/* Frozen time (WP-1): the total of freezes ended, and when the one in force began (0: none). One writer, the
+ * freezer (s_freezer); s_fseq is odd while it updates the pair, so a reader never counts a freeze twice. */
+static volatile uint64_t s_frozen_total_ns, s_frozen_since_ns;
+static volatile uint32_t s_fseq;
+static volatile int32_t s_let_expire;   /* the freezer lets timed waits expire until the thaw */
 
 /* All-parked statistics. */
 static volatile uint64_t s_since_ns;    /* when s_busy last reached 0 (0: it is not 0) */
@@ -507,6 +512,27 @@ int xbox_ParkReport(FILE *out)
     return 1;
 }
 
+/* The freezer only (s_freezer held): a freeze begins / ends for the frozen-time total. */
+static void frozen_begin(void)
+{
+    STORE32((volatile int32_t *)&s_fseq, (int32_t)(s_fseq + 1));
+    STORE64(&s_frozen_since_ns, xbox_HostNowNs());
+    STORE32((volatile int32_t *)&s_fseq, (int32_t)(s_fseq + 1));
+}
+
+static void frozen_end(void)
+{
+    uint64_t since = LOAD64(&s_frozen_since_ns), now;
+
+    if (!since)
+        return;
+    now = xbox_HostNowNs();
+    STORE32((volatile int32_t *)&s_fseq, (int32_t)(s_fseq + 1));
+    STORE64(&s_frozen_total_ns, LOAD64(&s_frozen_total_ns) + (now > since ? now - since : 0));
+    STORE64(&s_frozen_since_ns, 0);
+    STORE32((volatile int32_t *)&s_fseq, (int32_t)(s_fseq + 1));
+}
+
 int xbox_ParkFreeze(uint32_t timeout_ms, XboxParkStats *out)
 {
     uint64_t deadline = xbox_HostNowNs() + (uint64_t)timeout_ms * 1000000ull;
@@ -518,6 +544,7 @@ int xbox_ParkFreeze(uint32_t timeout_ms, XboxParkStats *out)
         return 0;
     }
     park_init_once();
+    frozen_begin();
     STORE32(&s_freeze, 1);
     EnterCriticalSection(&s_gate_lock);
     while (LOAD32(&s_busy) > 0 && xbox_HostNowNs() < deadline)
@@ -535,10 +562,72 @@ void xbox_ParkThaw(void)
 {
     park_init_once();
     EnterCriticalSection(&s_gate_lock);
+    frozen_end();
     STORE32(&s_freeze, 0);
+    STORE32(&s_let_expire, 0);
     WakeAllConditionVariable(&s_gate_cv);
     LeaveCriticalSection(&s_gate_lock);
     STORE32(&s_freezer, 0);
+}
+
+uint64_t xbox_ParkFrozenNs(void)
+{
+    for (;;) {
+        uint32_t q = (uint32_t)LOAD32((volatile int32_t *)&s_fseq);
+        uint64_t total, since;
+        if (q & 1u) {
+            SwitchToThread();
+            continue;
+        }
+        FENCE();
+        total = LOAD64(&s_frozen_total_ns);
+        since = LOAD64(&s_frozen_since_ns);
+        FENCE();
+        if ((uint32_t)LOAD32((volatile int32_t *)&s_fseq) != q)
+            continue;
+        if (since) {
+            uint64_t now = xbox_HostNowNs();
+            total += now > since ? now - since : 0;
+        }
+        return total;
+    }
+}
+
+int xbox_ParkFreezeInForce(void)
+{
+    return LOAD32(&s_freeze) != 0;
+}
+
+int xbox_ParkFreezeHoldsWaits(void)
+{
+    return LOAD32(&s_freeze) != 0 && !LOAD32(&s_let_expire);
+}
+
+void xbox_ParkFreezeLetWaitsExpire(void)
+{
+    park_init_once();
+    EnterCriticalSection(&s_gate_lock);
+    STORE32(&s_let_expire, 1);
+    WakeAllConditionVariable(&s_gate_cv);
+    LeaveCriticalSection(&s_gate_lock);
+}
+
+int xbox_ParkWaitThaw(uint32_t max_ms)
+{
+    uint64_t deadline;
+    int waited = 0;
+
+    if (!xbox_ParkFreezeHoldsWaits() || !(t_slot >= 0 && parked_now()))
+        return 0;
+    park_init_once();
+    deadline = xbox_HostNowNs() + (uint64_t)max_ms * 1000000ull;
+    EnterCriticalSection(&s_gate_lock);
+    while (xbox_ParkFreezeHoldsWaits() && xbox_HostNowNs() < deadline) {
+        waited = 1;
+        SleepConditionVariableCS(&s_gate_cv, &s_gate_lock, 50);
+    }
+    LeaveCriticalSection(&s_gate_lock);
+    return waited;
 }
 
 uint32_t xbox_ParkGuestPages(uint32_t *resident, uint32_t *nonzero)
@@ -755,7 +844,8 @@ int xbox_ParkThisThreadIsGuest(void)
 void xbox_ParkReset(void)
 {
     memset((void *)s_slots, 0, sizeof s_slots);
-    s_threads = s_busy = s_freeze = s_freezer = s_dropped = 0;
+    s_threads = s_busy = s_freeze = s_freezer = s_dropped = s_let_expire = 0;
+    s_frozen_since_ns = 0;              /* the total stays: it is monotonic */
     s_since_ns = s_all_ns = s_windows = s_longest_ns = s_reset_ns = 0;
     t_depth = t_cb = t_hw = t_hw_counted = 0;
     t_slot = -1;

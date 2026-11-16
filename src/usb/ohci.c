@@ -1172,12 +1172,32 @@ static void ohci_raise(OhciController *hc, uint32_t source)
 
     claimed = ohci_call_isr(hc);
     if (s_trace || claimed >= 0) {
-        static unsigned n;
-        if (n++ < 20) {
-            fprintf(stderr, "  [OHCI%d] raised %08X -> ISR %s\n",
-                    hc->index, source,
-                    claimed < 0 ? "not callable" :
-                    claimed ? "claimed it" : "declined it");
+        /* The first 20. Under RECOMP_USB_STATS the lines go on past them (an ISR missing later in a run is a
+         * question too), one a second at most with the count since the previous one: every one is over a
+         * hundred lines a second with a pad open. */
+        static unsigned n, since;
+        static unsigned long last;
+        static int stats = -1;
+        unsigned long now = 0;
+        if (stats < 0)
+            stats = getenv("RECOMP_USB_STATS") != NULL;
+        since++;
+        if (n >= 20 && stats)
+            now = (unsigned long)GetTickCount();
+        if (n < 20 || (stats && now - last >= 1000)) {
+            if (n < 20)
+                fprintf(stderr, "  [OHCI%d] raised %08X -> ISR %s\n",
+                        hc->index, source,
+                        claimed < 0 ? "not callable" :
+                        claimed ? "claimed it" : "declined it");
+            else
+                fprintf(stderr, "  [OHCI%d] raised %08X -> ISR %s (%u raised since the last line)\n",
+                        hc->index, source,
+                        claimed < 0 ? "not callable" :
+                        claimed ? "claimed it" : "declined it", since);
+            n++;
+            since = 0;
+            last = now;
             fflush(stderr);
         }
     }
@@ -1510,6 +1530,25 @@ int xbox_OhciHoldControllerForTest(int hold)
         Sleep(1);
     }
     return 0;
+}
+
+int xbox_OhciControllerLate(uint32_t *late_ms)
+{
+    uint64_t now, tick;
+    int held;
+
+    if (late_ms)
+        *late_ms = 0;
+    if (!s_enabled || !__atomic_load_n(&s_thread_running, __ATOMIC_ACQUIRE))
+        return -1;
+    held = __atomic_load_n(&s_test_hold, __ATOMIC_ACQUIRE) || __atomic_load_n(&s_test_held, __ATOMIC_ACQUIRE);
+    tick = __atomic_load_n(&s_tick_ns, __ATOMIC_RELAXED);
+    now = xbox_HostNowNs();
+    if (late_ms && now > tick)
+        *late_ms = (uint32_t)((now - tick) / 1000000ull);
+    if (held)
+        return 2;
+    return now > tick && now - tick >= OHCI_OVERDUE_NS;
 }
 
 static DWORD WINAPI ohci_thread(LPVOID unused)

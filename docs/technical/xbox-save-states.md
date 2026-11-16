@@ -451,6 +451,22 @@ frames are part of the chain signatures. A rebuilt title (a new prepare) cannot 
    thread is held now, so at most one attempt per thread: threads + 3 attempts at most.
 5. Thaw.
 
+**Frozen time does not count against a guest timeout.** The device threads are held during the sections
+(« Device sections » below), so the guest's machine stands still, but a thread parked inside a timed wait is in a
+host wait whose clock goes on. XAPI waits 50 ms for each USB control transfer; KOTOR's first rewind capture held the
+OHCI controller 52 to 65 ms on the AYN Thor, the wait expired against a controller that was stopped, and the title
+closed the pad (2026-11-16). So the park layer keeps a monotonic total of frozen time (`xbox_ParkFrozenNs`, from the
+freeze flag set to the thaw), and every timed wait of a guest thread (`KeWaitForSingleObject`,
+`KeWaitForMultipleObjects`, `NtWaitForSingleObject[Ex]`, `NtWaitForMultipleObjectsEx`, `KeDelayExecutionThread`;
+`xbox_GuestTimedWait` in `kernel_sync.c`) that expires with frozen time inside it stays in its call until the thaw
+(`xbox_ParkWaitThaw`), then waits again for that frozen time, capped at its own timeout, until a timeout with less
+than 1 ms frozen in it. Its record does not change during the capture, so such a wait no longer costs an attempt.
+A load lets waits expire during its settle (`xbox_ParkFreezeLetWaitsExpire`), since it needs every call back.
+`KeSetTimer` timers are not covered. `RECOMP_WAIT_FROZEN=0` turns this off; `RECOMP_STATE_CAPTURE_STALL_MS=N`
+sleeps N ms inside each capture with the devices held, which reproduces the Thor's slow first capture on any host,
+and a `[WAIT] … expired` line names a timed wait that still expired with a freeze in it or the controller held or
+overdue.
+
 A frozen thread is therefore recorded either « in call N from R, registers at the call » (a restore re-issues the
 call, overwriting its partial effects on its outputs) or « returned from N with status S, registers as the call left
 them » (it resumes at R). In the measurements below most threads are « returned »: their sleeps end during the freeze.

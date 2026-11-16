@@ -65,6 +65,12 @@ int  xbox_OhciFrameAdvanceForTest(uint32_t from, uint32_t frames, uint32_t *to);
  * did not within 2 s (it is not running). */
 int  xbox_OhciHoldControllerForTest(int hold);
 
+/* The controller thread's lateness, for a guest wait that timed out (kernel_sync.c, WP-4 of the KOTOR pad
+ * report): 2 held (a save-state capture, xbox_OhciStateHold, or a test), 1 overdue (no pass for four ticks),
+ * 0 on time, -1 no controller thread (USB off, the driver never started it). *late_ms (may be NULL): ms since its
+ * last pass. */
+int  xbox_OhciControllerLate(uint32_t *late_ms);
+
 /* Tests only (XBA-123): one hotplug decision on controller 0 for the pads
  * `wanted` at time now_ms (usb_hotplug.h), applied to its root hub as the
  * controller thread does: +1 a pad plugged in, -1 pulled out (*pad), 0 none. */

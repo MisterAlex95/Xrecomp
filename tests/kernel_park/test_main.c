@@ -36,6 +36,13 @@
  *                   run again after the thaw. The hooks themselves on this
  *                   thread: nesting counts once, a host wait inside a kernel
  *                   call is not a park point of its own.
+ *   Frozen waits    (WP-1, KOTOR's pad) a guest thread in a 50 ms timed wait,
+ *                   frozen 80 ms from 10 ms in: set 5 ms after the thaw it
+ *                   succeeds; never set it times out after ~50 ms of unfrozen
+ *                   time; its record does not change while frozen (a capture
+ *                   needs one attempt); the same for KeWaitForMultipleObjects
+ *                   and KeDelayExecutionThread; a freeze that lets waits expire
+ *                   (a same-run load) gets the timeout during the freeze.
  */
 #include "kernel.h"
 #include "kernel_park.h"
@@ -584,6 +591,129 @@ static void phase_host_waits(void)
     check(wait_threads(3, 3000), "they end", NULL);
 }
 
+/* ---- Frozen waits (WP-1) ---- */
+enum { FW_SINGLE, FW_MULTI, FW_DELAY };
+typedef struct {
+    int kind;
+    HANDLE ev;
+    uint32_t ms;
+    volatile NTSTATUS status;
+    volatile uint64_t ns;
+    volatile int done;
+} FwArg;
+
+static void *fw_thread(void *p)
+{
+    FwArg *a = (FwArg *)p;
+    LARGE_INTEGER to;
+    uint64_t t0;
+    NTSTATUS r;
+
+    to.QuadPart = -(LONGLONG)a->ms * 10000;
+    xbox_ParkThreadStart();
+    xbox_ParkKernelEnter(a->kind == FW_DELAY ? ORD_DELAY : a->kind == FW_MULTI ? 158u : 159u, 0x00012400u);
+    t0 = now_ns();
+    if (a->kind == FW_SINGLE)
+        r = xbox_KeWaitForSingleObject(a->ev, 0, 0, FALSE, &to);
+    else if (a->kind == FW_MULTI)
+        r = xbox_KeWaitForMultipleObjects(1, (PVOID *)&a->ev, 1 /* WaitAny */, 0, 0, FALSE, &to, NULL);
+    else
+        r = xbox_KeDelayExecutionThread(0, FALSE, &to);
+    a->ns = now_ns() - t0;
+    a->status = r;
+    xbox_ParkKernelLeave();      /* held here while a freeze is in force */
+    xbox_ParkThreadEnd();
+    a->done = 1;
+    return NULL;
+}
+
+/* One run: the wait starts, a freeze at 10 ms for freeze_ms, thaw, the event set set_after_ms later (-1: never).
+ * let_expire: the freezer lets timed waits expire (a load). Returns the frozen ns the park layer counted. */
+static uint64_t fw_run(FwArg *a, int kind, int freeze_ms, int set_after_ms, int let_expire, int *unchanged,
+                       int *returned_frozen)
+{
+    pthread_t th;
+    XboxParkRecord r0[XBOX_PARK_MAX_THREADS], r1[XBOX_PARK_MAX_THREADS];
+    uint64_t f0, f1;
+    int n0 = 0, k;
+
+    memset(a, 0, sizeof *a);
+    a->kind = kind;
+    a->ms = 50;
+    a->ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+    pthread_create(&th, NULL, fw_thread, a);
+    usleep(10000);
+    f0 = xbox_ParkFrozenNs();
+    if (freeze_ms > 0) {
+        if (!xbox_ParkFreeze(200, NULL)) {
+            printf("  freeze failed\n");
+            failures++;
+        }
+        if (let_expire)
+            xbox_ParkFreezeLetWaitsExpire();
+        n0 = xbox_ParkRecords(r0, XBOX_PARK_MAX_THREADS);
+        usleep((useconds_t)freeze_ms * 1000u);
+        if (unchanged)
+            *unchanged = n0 == 1 && !xbox_ParkRecordsChanged(r0, n0);
+        if (returned_frozen) {
+            int m = xbox_ParkRecords(r1, XBOX_PARK_MAX_THREADS);
+            *returned_frozen = 0;
+            for (k = 0; k < m; k++)
+                if (r1[k].returned)
+                    *returned_frozen = 1;
+        }
+        xbox_ParkThaw();
+    }
+    f1 = xbox_ParkFrozenNs();
+    if (set_after_ms >= 0) {
+        usleep((useconds_t)set_after_ms * 1000u);
+        SetEvent(a->ev);
+    }
+    pthread_join(th, NULL);
+    CloseHandle(a->ev);
+    return f1 - f0;
+}
+
+static void phase_frozen_waits(void)
+{
+    FwArg a;
+    uint64_t fz, t0, t1;
+    int unchanged = 0, ret = 0;
+    char d[200];
+
+    printf("Frozen waits (WP-1: frozen time does not count against a guest timeout)\n");
+    t0 = xbox_ParkFrozenNs();
+    fz = fw_run(&a, FW_SINGLE, 80, 5, 0, &unchanged, NULL);
+    t1 = xbox_ParkFrozenNs();
+    snprintf(d, sizeof d, "status 0x%08X after %.1f ms, %.1f ms frozen", (unsigned)a.status, a.ns / 1e6, fz / 1e6);
+    check(a.status == 0, "50 ms wait, frozen 80 ms from 10 ms, set 5 ms after the thaw: success", d);
+    check(fz >= 79000000ull && t1 - t0 >= fz, "the park layer counted the frozen time (monotonic)", d);
+    check(unchanged, "its record did not change while frozen (one capture attempt)", NULL);
+
+    fz = fw_run(&a, FW_SINGLE, 80, -1, 0, NULL, NULL);
+    snprintf(d, sizeof d, "status 0x%08X after %.1f ms, %.1f ms frozen", (unsigned)a.status, a.ns / 1e6, fz / 1e6);
+    check(a.status == STATUS_TIMEOUT && a.ns >= fz + 45000000ull && a.ns <= fz + 50000000ull + 60000000ull,
+          "never set: STATUS_TIMEOUT after ~50 ms of unfrozen time", d);
+
+    fz = fw_run(&a, FW_MULTI, 80, 5, 0, NULL, NULL);
+    snprintf(d, sizeof d, "status 0x%08X after %.1f ms", (unsigned)a.status, a.ns / 1e6);
+    check(a.status == 0, "KeWaitForMultipleObjects: the same, success", d);
+
+    fz = fw_run(&a, FW_DELAY, 80, -1, 0, NULL, NULL);
+    snprintf(d, sizeof d, "status 0x%08X after %.1f ms, %.1f ms frozen", (unsigned)a.status, a.ns / 1e6, fz / 1e6);
+    check(a.status == 0 && a.ns >= fz + 45000000ull, "KeDelayExecutionThread 50 ms: ~50 ms of unfrozen time", d);
+
+    fz = fw_run(&a, FW_SINGLE, 80, -1, 1, NULL, &ret);
+    snprintf(d, sizeof d, "status 0x%08X after %.1f ms", (unsigned)a.status, a.ns / 1e6);
+    check(ret && a.status == STATUS_TIMEOUT && a.ns < 75000000ull,
+          "a freeze that lets waits expire (a load): the timeout comes during it", d);
+
+    fz = fw_run(&a, FW_SINGLE, 0, -1, 0, NULL, NULL);
+    snprintf(d, sizeof d, "status 0x%08X after %.1f ms", (unsigned)a.status, a.ns / 1e6);
+    check(a.status == STATUS_TIMEOUT && a.ns >= 45000000ull && a.ns < 90000000ull,
+          "no freeze: STATUS_TIMEOUT at ~50 ms, not extended", d);
+}
+
 int main(int argc, char **argv)
 {
     char tmpl[] = "/tmp/kparkXXXXXX", cmd[300];
@@ -616,6 +746,7 @@ int main(int argc, char **argv)
 
     phase_nesting();
     phase_host_waits_hooks();
+    phase_frozen_waits();
     spawn(0, K_RENDER);
     spawn(1, K_AUDIO);
     spawn(2, K_LOADER);

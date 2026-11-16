@@ -141,6 +141,28 @@ int  xbox_ParkThisThreadParked(void);
 int  xbox_ParkFreeze(uint32_t timeout_ms, XboxParkStats *out);
 void xbox_ParkThaw(void);
 
+/* Frozen time (KOTOR's gamepad lost to the first rewind capture): a guest timeout must not run while the game
+ * stands still. A capture holds the device threads too (xbox_DevStateFreeze): a wait for a USB transfer
+ * that expires during the hold expired against hardware that was stopped.
+ *   xbox_ParkFrozenNs       host ns spent with a freeze in force (or being reached), since the start; monotonic,
+ *                           and counting the freeze in force now. The difference of two readings is the frozen
+ *                           time between them.
+ *   xbox_ParkFreezeInForce  1 while a freeze is in force or being reached.
+ *   xbox_ParkWaitThaw       a parked guest thread whose timed wait expired: blocks while a freeze is in force
+ *                           (max_ms at most), so the expiry neither rewrites its record (the capture needs no
+ *                           second attempt) nor returns before the time it lost is given back. Returns at once
+ *                           when the thread is not parked (it would keep the freeze from being reached) or the
+ *                           freezer lets waits expire. 1 when it waited.
+ *   xbox_ParkFreezeLetWaitsExpire  for the freezer: until the thaw, timed waits end at their host timeout again
+ *                           (a same-run load settles on every wait having returned, xbox_StateLoadFrozen), and
+ *                           threads blocked in xbox_ParkWaitThaw return now. */
+uint64_t xbox_ParkFrozenNs(void);
+int  xbox_ParkFreezeInForce(void);
+int  xbox_ParkWaitThaw(uint32_t max_ms);
+void xbox_ParkFreezeLetWaitsExpire(void);
+/* 1 while timed waits may be held for the freeze in force (not let expire). */
+int  xbox_ParkFreezeHoldsWaits(void);
+
 /* The current picture; reset starts the all-parked statistics again. */
 void xbox_ParkStatsGet(XboxParkStats *out, int reset);
 

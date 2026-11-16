@@ -819,6 +819,11 @@ NTSTATUS __stdcall xbox_PsCreateSystemThreadEx(
 NTSTATUS __stdcall xbox_PsTerminateSystemThread(NTSTATUS ExitStatus);
 
 NTSTATUS __stdcall xbox_KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertable, PLARGE_INTEGER Interval);
+/* A timed host wait of a guest thread (kernel_sync.c, WP-1 of the KOTOR pad report): wait(ctx, ms) once, and
+ * when it returns WAIT_TIMEOUT with a save-state freeze inside it, out of the freeze and again for the frozen
+ * time (capped at ms), so time the game stood still does not count against the guest's timeout. who and h name
+ * the wait for the expired-wait line (who NULL: a delay, no line). RECOMP_WAIT_FROZEN=0: one wait, as before. */
+DWORD xbox_GuestTimedWait(DWORD (*wait)(void *ctx, DWORD ms), void *ctx, DWORD ms, const char *who, HANDLE h);
 LONG     __stdcall xbox_KeSetBasePriorityThread(PVOID Thread, LONG Increment);
 LONG     __stdcall xbox_KeQueryBasePriorityThread(PVOID Thread);
 NTSTATUS __stdcall xbox_KeAlertThread(PVOID Thread, KPROCESSOR_MODE AlertMode);

@@ -701,6 +701,21 @@ static int capture_once(XboxStateWriter *w, const XboxStateContext *ctx, XboxSta
 
 static size_t s_last_blob;   /* the previous capture's size: the next one's first allocation */
 
+/* RECOMP_STATE_CAPTURE_STALL_MS=N (bring-up, docs/runtime/environment-variables.md): each capture sleeps N ms
+ * with the guest frozen and the device threads held, in its first attempt after the park records are read (a
+ * call returning meanwhile makes it take a second one, as a slow section would): a slow host's first capture
+ * (25 MB of pages on the AYN Thor, 52-65 ms) on any host. It reproduces KOTOR's gamepad lost to the first rewind
+ * capture (XAPI's 50 ms control-transfer wait expiring during the hold) and keeps the frozen-time handling of
+ * guest waits (kernel_sync.c, xbox_GuestTimedWait) tested. Read at each capture, so a test can set it. */
+static void capture_stall(void)
+{
+    const char *e = getenv("RECOMP_STATE_CAPTURE_STALL_MS");
+    long ms = e ? strtol(e, NULL, 10) : 0;
+
+    if (ms > 0)
+        Sleep((DWORD)(ms > 10000 ? 10000 : ms));
+}
+
 int xbox_StateCaptureFrozen(uint8_t **blob, size_t *blob_n, XboxStateStats *st)
 {
     static XboxParkRecord recs[XBOX_PARK_MAX_THREADS];   /* one capture at a time (s_capturing) */
@@ -784,6 +799,8 @@ int xbox_StateCaptureFrozen(uint8_t **blob, size_t *blob_n, XboxStateStats *st)
         ctx.threads = n;
         st->attempts = attempt;
         st->threads = n;
+        if (attempt == 1)
+            capture_stall();            /* as if the sections took that long: between the records and their check */
         rc = capture_once(&w, &ctx, st);
         if (rc != XBOX_STATE_OK)
             break;
@@ -1273,7 +1290,10 @@ int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, Xbox
     ns = xbox_StateCpuThreads(cp, cl, saved, XBOX_PARK_MAX_THREADS);
 
     /* 2. The same threads, each held at the end of its park point: a wait in progress is given settle_ms to
-     * end (a sleep, a vblank); a thread created since, or one that ended, refuses at once. */
+     * end (a sleep, a vblank); a thread created since, or one that ended, refuses at once. A timed wait ends at
+     * its host timeout during this freeze (it is not held for the thaw, kernel_park.h): the load replaces what
+     * it waited for anyway. */
+    xbox_ParkFreezeLetWaitsExpire();
     t0 = xbox_HostNowNs();
     for (;;) {
         int pending = -1;
