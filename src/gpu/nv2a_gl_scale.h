@@ -20,7 +20,8 @@
 #define NV2A_GL_SCALE_MAX_TARGETS 8
 
 /* The scale itself comes from RECOMP_GPU_SCALE (nv2a_gl.c scale_from_env:
- * 1-4, or auto from the window's drawable). */
+ * 1-4, or auto from the window's drawable), else from the setting every
+ * console shares, RECOMP_UPSCALE (nv2a_gl_scale_choose, XBA-237). */
 typedef struct {
     float scale;                        /* 1: off */
     int shadow;                         /* depth-only targets scale too */
@@ -72,6 +73,20 @@ float nv2a_gl_surface_scale(const Nv2aGlScaleConfig *cfg, const Nv2aSurface *s);
  * creation) asks this, so draw, depth and target agree. */
 float nv2a_gl_target_scale(const Nv2aGlScaleConfig *cfg, const Nv2aSurface *s,
                            const Nv2aGlHeldTarget *held);
+
+/* Which internal resolution the Xbox draws at (XBA-237), from the values
+ * of RECOMP_GPU_SCALE (gpu_scale: the Xbox's own, a decimal 1-4 or "auto")
+ * and RECOMP_UPSCALE (upscale: Settings > Graphics > Internal resolution,
+ * shared with the PS1 and the N64: 1, 2, 4 or 8), either NULL or empty when
+ * unset. The Xbox's own wins when set, as RECOMP_N64_UPSCALE does over the
+ * shared one; the shared one is held to 1-4 (8, the N64 Vulkan renderer's,
+ * draws at 4). *key is the variable that decided (NULL: neither set).
+ * Returns: NV2A_GL_SCALE_FIXED (*scale set), _AUTO (fit the drawable;
+ * RECOMP_GPU_SCALE only), _UNSET (*scale 1) or _BAD (a value of neither
+ * form; *scale 1). No GL: GL_MAX_TEXTURE_SIZE is the caller's. */
+enum { NV2A_GL_SCALE_UNSET, NV2A_GL_SCALE_FIXED, NV2A_GL_SCALE_AUTO, NV2A_GL_SCALE_BAD };
+int nv2a_gl_scale_choose(const char *gpu_scale, const char *upscale, float *scale,
+                         const char **key);
 
 /* round(v * sc). */
 uint32_t nv2a_gl_scale_px(uint32_t v, float sc);

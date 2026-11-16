@@ -9,8 +9,9 @@ import java.util.Locale;
 /**
  * The picture of a GBA, PS1 or N64 game (XBA-181): its scale on the screen (RECOMP_SCALE: aspect, integer, stretch)
  * and its filter (RECOMP_FILTER: nearest, linear), read by every console runtime (RECOMP_GBA_SCALE and the other
- * per-console variables still win there); for a PS1 or N64 game, its internal resolution (XBA-184,
- * RECOMP_UPSCALE: 1, 2, 4 or 8 times the console's; 8 is the N64 Vulkan renderer's alone, the PS1 stops at 4); and
+ * per-console variables still win there); for a PS1, N64 or (XBA-237) Xbox game, its internal resolution (XBA-184,
+ * RECOMP_UPSCALE: 1, 2, 4 or 8 times the console's; 8 is the N64 Vulkan renderer's alone, the PS1 and the Xbox stop
+ * at 4; an Xbox game exports it through GameSettings.runEnv, and its own RECOMP_GPU_SCALE wins when set); and
  * frame generation on or off (XBA-186, RECOMP_LSFG: offered only by an APK built with it, R.bool.xba_lsfg; its
  * multiplier, performance set and shader cache stay Settings', {@link #LSFG_ENV}). Which one applies, first found
  * wins:
@@ -94,11 +95,14 @@ final class ConsoleVideo {
     private ConsoleVideo() {}
 
     /** Whether a game of console con has setting s: scale and filter every console game, the internal resolution the
-     *  PS1 and the N64 (the GBA draws its own 240 x 160, nothing to upscale). */
+     *  PS1, the N64 and, since XBA-237, the Xbox (its GPU renderer, src/gpu/nv2a_gl.c; 8 draws at 4 there; the GBA
+     *  draws its own 240 x 160, nothing to upscale). */
     static boolean applies(Setting s, Console con) {
-        if (con == null || con == Console.XBOX)
+        if (con == null)
             return false;
-        return s != Setting.UPSCALE || con == Console.PS1 || con == Console.N64;
+        if (s == Setting.UPSCALE)
+            return con == Console.PS1 || con == Console.N64 || con == Console.XBOX;
+        return con != Console.XBOX;
     }
 
     /** The Settings keys a setting writes in the game's file (XBA-188, GameSettings): frame generation's three. */

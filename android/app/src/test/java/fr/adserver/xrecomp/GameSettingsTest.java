@@ -134,6 +134,24 @@ public class GameSettingsTest {
         assertEquals("shared", "0", env.value("RECOMP_RUMBLE"));
     }
 
+    /** XBA-237: an Xbox game's own internal resolution is exported (its GPU renderer reads RECOMP_UPSCALE when
+     *  RECOMP_GPU_SCALE is unset); its « Native » unsets it and skips Settings' line. */
+    @Test
+    public void xboxInternalResolution() throws Exception {
+        File files = tmp.newFolder();
+        RecompConfig g = game(files, XBOX, "RECOMP_UPSCALE", "2");
+        GameSettings.Env env = GameSettings.runEnv(Console.XBOX, cfg(), g, Locale.US, false);
+        assertEquals("2", env.value("RECOMP_UPSCALE"));
+        assertTrue(env.overridden.contains("RECOMP_UPSCALE"));
+        RecompConfig global = cfg();
+        global.set("RECOMP_UPSCALE", "4");
+        RecompConfig n = game(tmp.newFolder(), XBOX, "RECOMP_UPSCALE", "");
+        env = GameSettings.runEnv(Console.XBOX, global, n, Locale.US, false);
+        assertNull(env.value("RECOMP_UPSCALE"));
+        assertTrue(env.value(GameSettings.SKIP_ENV).contains("RECOMP_UPSCALE"));
+        assertTrue(ConsoleVideo.applies(ConsoleVideo.Setting.UPSCALE, Console.XBOX));
+    }
+
     @Test
     public void pictureShaderPerGame() throws Exception {
         // XBA-195: a console game's own shader over Settings', its « None » over Settings' line; XBA-203: an Xbox
@@ -216,7 +234,8 @@ public class GameSettingsTest {
         assertTrue(xbox.contains("OPT_LANGUAGE") && xbox.contains("OPT_WIDESCREEN") && xbox.contains("OPT_GPU_FPS_CAP")
                    && xbox.contains("OPT_VSYNC") && xbox.contains("OPT_RUMBLE") && xbox.contains("OPT_BIG_CORES")
                    && xbox.contains("OPT_HRTF") && xbox.contains("OPT_AUDIO_BUF") && xbox.contains("OPT_GPU"));
-        assertFalse(xbox.contains("OPT_CSCALE") || xbox.contains("OPT_UPSCALE") || xbox.contains("OPT_LSFG"));
+        assertFalse(xbox.contains("OPT_CSCALE") || xbox.contains("OPT_LSFG"));
+        assertTrue("XBA-237: the Xbox GPU renderer's internal resolution", xbox.contains("OPT_UPSCALE"));
         assertFalse("a developer switch", xbox.contains("OPT_SELFTEST"));
         assertTrue(titles(GameSettings.options(Console.XBOX, true)).contains("OPT_LSFG"));
 

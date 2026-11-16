@@ -730,14 +730,14 @@ exist in the runtime and mean something to a player are offered. Graphics and Au
 | Graphics › Vertical sync (all consoles) | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Scale (all consoles; GBA, PS1, N64 only) | Keep shape (default), Whole pixels, Stretch | `RECOMP_SCALE=integer` / `stretch`; Keep shape writes nothing (the runtimes' `aspect`). A game can have its own ([Settings per console](#settings-per-console)) |
 | Graphics › Picture filter (all consoles; GBA, PS1, N64 only) | Console default (default: GBA sharp, PS1 and N64 smooth), Sharp, Smooth | `RECOMP_FILTER=nearest` / `linear`; Console default writes nothing. A game can have its own |
-| Graphics › Internal resolution (all consoles; PS1 and N64 only) | Native (default), 2x, 4x, 8x (N64 Vulkan) | `RECOMP_UPSCALE=2` / `4` / `8`; Native writes nothing (the runtimes' 1x). XBA-184 / XBA-185: the console draws N times its resolution; a PS1 game stops at 4x, 8x is the N64 Vulkan renderer's. A PS1 or N64 game can have its own |
+| Graphics › Internal resolution (all consoles; PS1, N64 and Xbox) | Native (default), 2x, 4x, 8x (N64 Vulkan) | `RECOMP_UPSCALE=2` / `4` / `8`; Native writes nothing (the runtimes' 1x). XBA-184 / XBA-185 / XBA-237: the console draws N times its resolution; a PS1 or Xbox game stops at 4x, 8x is the N64 Vulkan renderer's. An Xbox game: the GPU renderer, and its own Resolution row (`RECOMP_GPU_SCALE`) wins when set. A PS1, N64 or Xbox game can have its own |
 | Graphics › Picture shader (all consoles) | None (default), Sharp bilinear, Scanlines, CRT, LCD grid, Edge smoothing (FXAA), Sharpen (CAS) | `RECOMP_SHADER=sharp` / `scanlines` / `crt` / `lcd` / `fxaa` / `cas`; None writes nothing. A picture larger than the screen (N64 / PS1 at 4x) is averaged whatever the choice (`RECOMP_PRESENT_DOWNSCALE=0` in recomp.cfg: off; no row). XBA-195: drawn by the console window at the screen's resolution, after the internal resolution and frame generation ([HOST_LAYER.md](../../src/platform/HOST_LAYER.md#picture-shaders-xba-195)); XBA-203: an Xbox game too (its presenter, after its resolution and frame generation; LCD grid draws none there). A game can have its own |
 | Graphics › Shader strength (all consoles) | Shader default (default: scanlines and LCD 50 %, CRT 60 %), 25 %, 50 %, 75 %, 100 % | `RECOMP_SHADER_STRENGTH=25` / `50` / `75` / `100`. A game can have its own |
 | Graphics › CRT curvature (all consoles) | Off (default), Slight, Strong | `RECOMP_SHADER_CURVATURE=30` / `70`; only the CRT shader reads it. A game can have its own |
 | Graphics › LCD ghosting (all consoles; GBA, PS1, N64 only) | Off (default), Slight, Strong | `RECOMP_SHADER_GHOSTING=30` / `60`; only the LCD grid shader reads it. A game can have its own |
 | Graphics › Renderer | Auto (default: GPU, unless the title's pack forces `RECOMP_GPU=0`), Software, GPU | `RECOMP_GPU=0` / `1`; Auto writes nothing and the runtime's Android default (GPU, CPU rasteriser when GLES 3.0 cannot start) applies; see [GPU back end](../technical/gpu-backend.md#android) |
 | Graphics › Frame cap (dimmed when the renderer is Software) | Auto (default: `RECOMP_PACING=auto`, the title's own rate or a steady lower one the device sustains, never dividing a title locked to its rate; WP4), 30, 60, Off | Auto writes nothing; `RECOMP_GPU_FPS_CAP=30` / `60` / `0` (a fixed cap, auto off) |
-| Graphics › Resolution (dimmed when the renderer is Software) | Auto (default: the title profile's choice, 1× for now), 1× (original), 2×, 3×, Fit the screen | `RECOMP_GPU_SCALE=1` / `2` / `3` / `auto` (Fit: the screen's height / 480, at most 3); see [GPU back end](../technical/gpu-backend.md#internal-resolution) |
+| Graphics › Resolution (dimmed when the renderer is Software) | Auto (default: Internal resolution decides, XBA-237; native without one), 1× (original), 2×, 3×, Fit the screen | `RECOMP_GPU_SCALE=1` / `2` / `3` / `auto` (Fit: the screen's height / 480, at most 3); any value but Auto wins over Internal resolution; see [GPU back end](../technical/gpu-backend.md#internal-resolution) |
 | Graphics › Aspect ratio | Auto (default), 4:3 (original), 16:9 | `RECOMP_ASPECT=4:3` / `16:9`. Auto: 16:9 for the frames a title draws wide (a title patch declares them; Fable on Android) with menus and videos kept in their shape, 4:3 otherwise; 16:9 stretches every frame of a title that draws no wide frames; see [GPU back end](../technical/gpu-backend.md#aspect-modes) |
 | Graphics › Widescreen | Off (default), On | `RECOMP_WIDESCREEN=1`: the console's widescreen setting (EEPROM `XC_VIDEO` and the AV capabilities, XBA-121); a title that supports it draws 16:9 frames, shown full width with Aspect ratio 16:9 |
 | Graphics › 480p | Off (default), On | `RECOMP_480P=1`: the console's 480p setting (same places); a title that offers progressive output picks it |
@@ -796,7 +796,7 @@ last column says where it could be set per game before, its files now moved into
 | Graphics › Vertical sync (`RECOMP_PRESENT_VSYNC`) | yes | yes | no |
 | Graphics › Scale (`RECOMP_SCALE`) | no | yes | console game: its Home › Options, or the in-game menu (`scale_<KEY>`) |
 | Graphics › Picture filter (`RECOMP_FILTER`) | no | yes | console game: the same (`filter_<KEY>`) |
-| Graphics › Internal resolution (`RECOMP_UPSCALE`) | no | PS1, N64 (the GBA ignores it) | PS1 / N64 game: the same (`upscale_<KEY>`) |
+| Graphics › Internal resolution (`RECOMP_UPSCALE`) | yes (XBA-237: the GPU renderer, 4x at most; `RECOMP_GPU_SCALE` wins) | PS1, N64 (the GBA ignores it) | PS1 / N64 / Xbox game: the same (Xbox: in-game menu › Settings › Resolution, and its Game settings) |
 | Graphics › Picture shader, Shader strength, CRT curvature (`RECOMP_SHADER*`, XBA-195) | yes (XBA-203; LCD grid draws none) | yes | any game: its Home › Game settings |
 | Graphics › LCD ghosting (`RECOMP_SHADER_GHOSTING`) | no | yes | console game: its Home › Game settings |
 | Graphics › Frame generation (`RECOMP_LSFG*`), Choose Lossless.dll | yes | yes (XBA-186: generated frames in place of the repeats) | console game: its Home › Options (`framegen_<KEY>`, on / off) |
@@ -817,12 +817,13 @@ else unsets them (the runtime's default: aspect; GBA nearest, PS1 / N64 linear; 
 (unset without a line). An Xbox game gets `RECOMP_SCALE` / `RECOMP_FILTER` unset. Logcat: « shell: console video
 RECOMP_SCALE=… RECOMP_FILTER=… …, game <KEY> ».
 
-**A PS1 or N64 game's own internal resolution** (XBA-184, `ConsoleVideo.Setting.UPSCALE`). The same way:
+**A PS1, N64 or Xbox game's own internal resolution** (XBA-184, XBA-237 for the Xbox, `ConsoleVideo.Setting.UPSCALE`). The same way:
 `files/settings/upscale_<KEY>` (`1`, `2`, `4`, `8`; empty or absent: follows Settings), an **Internal resolution**
 row after Picture filter in the game's Options (« As in Settings (<Settings' value>) », Native, 2x, 4x, 8x (N64
 Vulkan)) and « Resolution » in the in-game menu › Settings (after « Restart to apply »); a GBA game has neither (its 240 x 160 picture
-is drawn as it is). `ShellActivity` exports `RECOMP_UPSCALE` with the scale and filter: the game's value (PS1 / N64),
-else recomp.cfg's line, else unset; unset for an Xbox game. The PS1 caps 8 at 4 (`ps1_runtime_upscale`).
+is drawn as it is). `ShellActivity` exports `RECOMP_UPSCALE` (`GameSettings.runEnv`): the game's value (PS1 / N64 /
+Xbox), else recomp.cfg's line, else unset. The PS1 caps 8 at 4 (`ps1_runtime_upscale`), the Xbox too
+(`nv2a_gl_scale_choose`; its in-game menu row follows widescreen and 480p).
 
 **A console game's own frame generation** (XBA-186, `ConsoleVideo.Setting.FRAMEGEN`). In an APK with frame generation
 (`R.bool.xba_lsfg`) only: `files/settings/framegen_<KEY>` (`1`, `0`; empty or absent: follows Settings), a **Frame

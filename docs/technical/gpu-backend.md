@@ -26,7 +26,8 @@ presenting from the GPU. The last section lists what 7c–7e have to do.
 | `src/gpu/nv2a_gl_context.c` | Headless context: CGL (macOS), EGL pbuffer or surfaceless (Android, Linux); loss detection. |
 | `src/gpu/nv2a_gl_api.h` | GL headers per platform: `OpenGL/gl3.h`, `GLES3/gl3.h`, libepoxy. |
 | `tests/nv2a_gl_shader` | 400 random combiner programs through the generated shaders, each pixel compared with `nv2a_rc_eval`. |
-| `tests/nv2a_gl_scale` | The internal resolution policy (0x121 / 0x2121 back buffer, swizzled and depth-only targets), the scale sticking to a scaled target's memory (Burnout 3's HUD clip and menu scissor, promotion, other pitch / swizzled), scissor rounding at 2.25, visibility count scaling, `RECOMP_GPU_SCALE_TARGETS` parsing. |
+| `tests/nv2a_gl_scale` | The internal resolution policy (0x121 / 0x2121 back buffer, swizzled and depth-only targets), the scale sticking to a scaled target's memory (Burnout 3's HUD clip and menu scissor, promotion, other pitch / swizzled), scissor rounding at 2.25, visibility count scaling, `RECOMP_GPU_SCALE_TARGETS` parsing, the variable that sets the scale (`RECOMP_GPU_SCALE` over `RECOMP_UPSCALE`, XBA-237). |
+| `tests/nv2a_gl_upscale` | One pushbuffer scene (clears, a clip-rectangle clear, a smooth triangle, a quad under a surface clip, size-4 points, a line) through the real executor at 1x, 2x and 4x (XBA-237): host frames of 640n x 480n that, averaged n x n, match the 1x picture (edge pixels only), points of n² times the pixels, lines n thick where the context has wide lines, and guest read-backs of 640x480 that match 1x and write nothing past the surface; the scale taken from `RECOMP_UPSCALE`. |
 | `tests/nv2a_gl_vsh` | 600 random vertex programs plus ILU/a0 edge cases through the translator (transform feedback), compared with `nv2a_vsh_interp.c`; eight deliberate translator mutations must be caught. |
 | `src/kernel/nv2a_coverage.c` | What is not drawn, by name (XBA-120): the NV2A texture format table, xemu's method names, the registry the report and the status file read. |
 | `tests/nv2a_coverage` | The executor over a fake guest memory: the format table against the decoder, method names, each gap counted once per batch and reaching the status file. |
@@ -209,7 +210,12 @@ XBA-119).
 
 ## Internal resolution
 
-`RECOMP_GPU_SCALE` (default 1): 2, 3, a decimal 1-4, or `auto`. `auto` fits
+`RECOMP_GPU_SCALE` (default 1): 2, 3, a decimal 1-4, or `auto`. Unset, the
+setting every console shares decides (XBA-237): `RECOMP_UPSCALE` (Android:
+Settings › Graphics › Internal resolution, « All consoles », or a game's
+own) = 1, 2 or 4, 8 drawing at 4 (`nv2a_gl_scale_choose`, logged as
+`internal scale 2.00 (RECOMP_UPSCALE=2; ...)`); `RECOMP_GPU_SCALE` wins
+when set, as `RECOMP_N64_UPSCALE` does for the N64. `auto` fits
 the window's drawable height: `nv2a_gl_set_display_size(w, h)` (nv2a_gl.h)
 is called by the SDL presenter with `SDL_GetRendererOutputSize` once its
 renderer exists and before the guest starts, and `ensure_init` reads it:

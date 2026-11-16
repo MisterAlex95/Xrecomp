@@ -217,7 +217,7 @@ final class GameSettings {
 
     /**
      * Whether option o means anything to a game of console c: the GBA / PS1 / N64 picture options (scale, filter)
-     * to those consoles, the internal resolution to the PS1 and the N64, the picture shader (XBA-195) to every game
+     * to those consoles, the internal resolution to the PS1, the N64 and the Xbox (XBA-237), the picture shader (XBA-195) to every game
      * but its LCD ghosting to the console games (the Xbox presenter draws no LCD grid, XBA-203), the others every
      * console reads (« All consoles ») to every game, the Xbox's own to Xbox titles; the shell's self-test (a
      * developer switch) to none.
@@ -234,8 +234,8 @@ final class GameSettings {
             return c != Console.XBOX;   // XBA-203: the LCD grid's ghosting; an Xbox game draws no LCD grid
         if (isShader(o))
             return true;                // XBA-195 / XBA-203: the console window's and the Xbox presenter's
-        if (o.title == R.string.OPT_UPSCALE)
-            return c == Console.PS1 || c == Console.N64;
+        if (o.title == R.string.OPT_UPSCALE)   // XBA-237: the Xbox's GPU renderer too (RECOMP_GPU_SCALE wins)
+            return c == Console.PS1 || c == Console.N64 || c == Console.XBOX;
         return o.shared || c == Console.XBOX;
     }
 

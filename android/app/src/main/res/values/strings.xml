@@ -166,7 +166,7 @@
     <string name="VAL_FPS_30" translatable="false">30</string>
     <string name="VAL_FPS_60" translatable="false">60</string>
     <string name="OPT_GPU_SCALE">Resolution</string>
-    <string name="OPT_GPU_SCALE_DETAIL">The GPU renderer can draw the 3D picture at 2 or 3 times the console\'s resolution, or at the size that fits the screen exactly. Sharper, at the cost of more GPU work, heat and battery. Effects such as bloom and shadows keep their original resolution. Auto: what this game\'s profile chooses (1× for now). No effect with the software renderer. (RECOMP_GPU_SCALE)</string>
+    <string name="OPT_GPU_SCALE_DETAIL">The GPU renderer can draw the 3D picture at 2 or 3 times the console\'s resolution, or at the size that fits the screen exactly. Sharper, at the cost of more GPU work, heat and battery. Effects such as bloom and shadows keep their original resolution. Auto: Internal resolution (All consoles) decides, native by default. No effect with the software renderer. (RECOMP_GPU_SCALE)</string>
     <string name="VAL_SCALE_1">1×</string>
     <string name="VAL_SCALE_2" translatable="false">2×</string>
     <string name="VAL_SCALE_3" translatable="false">3×</string>
