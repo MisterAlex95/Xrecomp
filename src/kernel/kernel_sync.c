@@ -270,10 +270,10 @@ extern RECOMP_TLS uint32_t g_xbox_kernel_caller;
  * 10, then every 64th. who NULL: a delay, which always expires. */
 static void expired_note(const char *who, HANDLE h, DWORD ms, uint64_t frozen_ns, int rounds)
 {
-    static volatile long n;
+    static volatile LONG n;
     uint32_t late_ms = 0;
     int late = xbox_OhciControllerLate(&late_ms);
-    long k;
+    LONG k;
 
     if (!who || (frozen_ns < FROZEN_MIN_NS && late <= 0))
         return;
@@ -285,7 +285,7 @@ static void expired_note(const char *who, HANDLE h, DWORD ms, uint64_t frozen_ns
             who, (void *)h, g_xbox_kernel_caller, (unsigned long)ms, (double)frozen_ns / 1e6, rounds,
             rounds == 1 ? "" : "s", frozen_waits_on() ? "" : ", RECOMP_WAIT_FROZEN=0",
             xbox_ParkFreezeInForce() ? ", a freeze in force" : "",
-            late == 2 ? "held" : late == 1 ? "overdue" : late == 0 ? "on time" : "not running", late_ms, k);
+            late == 2 ? "held" : late == 1 ? "overdue" : late == 0 ? "on time" : "not running", late_ms, (long)k);
     fflush(stderr);
 }
 
