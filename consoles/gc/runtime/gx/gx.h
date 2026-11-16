@@ -61,7 +61,7 @@ void gx_field(gx_state *gx);
 /* ---- renderer ---- */
 
 typedef struct gx_gl_options {
-    int scale;              /* internal resolution: 1..8 (0: RECOMP_GC_SCALE, else RECOMP_UPSCALE, else 1) */
+    int scale;              /* internal resolution: 1..8 (0: RECOMP_GC_UPSCALE, else RECOMP_UPSCALE, else 1) */
     int async_shaders;      /* 1: specialised shaders compile on a worker thread with the ubershader meanwhile (default);
                                0: compile on first use (blocking); -1: ubershader only; 2: specialised only, blocking */
     int efb_copy_ram;       /* 1: EFB copies to textures are also encoded into RAM (CPU readers, reinterpretation);
@@ -74,6 +74,8 @@ typedef struct gx_gl_options {
  * context lacks what it needs; GX then runs without drawing. */
 int gx_gl_attach(gx_state *gx, const gx_gl_options *opt);
 void gx_gl_detach(gx_state *gx);
+/* Writes the per-title shader list now when it has new states (an exit hook; no GL call). */
+void gx_save_shader_list(gx_state *gx);
 bool gx_gl_attached(const gx_state *gx);
 
 /* The last copy to the XFB at RAM address addr (the address the video interface scans out): its GL texture at the

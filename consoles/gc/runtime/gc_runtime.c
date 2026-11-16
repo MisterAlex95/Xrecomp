@@ -12,6 +12,7 @@
 #include "gc_boot.h"
 
 #include "gc_yuv_gl.h"
+#include "gx/gx.h"
 #include "host_pad.h"
 #include "host_perf_hint.h"
 #include "host_perf_line.h"
@@ -164,6 +165,8 @@ static void on_exit_hook(const char *why)
     (void)why;
     pthread_mutex_lock(&s_mu);
     save_missed_locked();
+    if (s_m)
+        gx_save_shader_list(gc_gx(s_m)); /* the GX states met (XBA-262) */
     pthread_mutex_unlock(&s_mu);
 }
 
@@ -356,6 +359,23 @@ started:;
     const char *yuv_env = getenv("RECOMP_GC_YUV");
     int yuv_cpu = o->yuv_cpu >= 0 ? o->yuv_cpu : yuv_env && !strcasecmp(yuv_env, "cpu");
     gc_yuv_gl *gpu = window && !yuv_cpu ? gc_yuv_gl_create(filter) : NULL;
+    /* GX (XBA-262): the GLES renderer draws on the window's context (this thread runs the fields); its copies to the
+     * XFB also land in RAM, and the window shows GX's own picture of the XFB the VI scans (at the internal
+     * resolution, RECOMP_GC_UPSCALE). The TEV / vertex states met go to gx_shaders.txt next to the discovered
+     * addresses, read back and compiled ahead at the next start. RECOMP_GC_GX=0: GX parses but does not draw. */
+    int gx_on = 0;
+    const char *gx_env = getenv("RECOMP_GC_GX");
+    if (window && !(gx_env && !strcmp(gx_env, "0"))) {
+        static char gx_list[1200];
+        gx_list[0] = 0;
+        if (o->discovered_path && *o->discovered_path) {
+            const char *slash = strrchr(o->discovered_path, '/');
+            int dir = slash ? (int)(slash - o->discovered_path) : 0;
+            snprintf(gx_list, sizeof gx_list, "%.*s%sgx_shaders.txt", dir, o->discovered_path, slash ? "/" : "");
+        }
+        gx_gl_options go = {0, 1, 0, gx_list[0] ? gx_list : NULL};
+        gx_on = gx_gl_attach(gc_gx(m), &go) == 0;
+    }
     printf("gc: window %s, XFB to RGB on the %s, audio off (no DSP yet), pads %u\n", window ? "on" : "off",
            gpu ? "GPU" : "CPU", host_pad_mask());
     fflush(stdout);
@@ -451,7 +471,11 @@ started:;
             int w, h;
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
-            if (gpu && gc_xfb_yuv(m, yuv, &w, &h) == 0) {
+            uint32_t xfb_at = gx_on ? gc_xfb_addr(m) : 0;
+            unsigned gx_tex = xfb_at ? gx_xfb_texture(gc_gx(m), xfb_at, &w, &h) : 0;
+            if (gx_tex && host_window_present_texture(gx_tex, w, h, 1)) {
+                /* GX's picture of the XFB */
+            } else if (gpu && gc_xfb_yuv(m, yuv, &w, &h) == 0) {
                 if (!gc_yuv_gl_present(gpu, yuv, w, h)) {
                     fprintf(stderr, "gc: GPU YUV present failed, converting on the CPU from now on\n");
                     gc_yuv_gl_destroy(gpu);
@@ -521,6 +545,8 @@ started:;
             s_motor[p] = 0;
         }
     gc_yuv_gl_destroy(gpu);
+    if (gx_on)
+        gx_gl_detach(gc_gx(m)); /* while the window's context is current; writes the shader list */
     if (window)
         host_window_close();
     pthread_mutex_lock(&s_mu);

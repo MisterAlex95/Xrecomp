@@ -67,14 +67,17 @@ static void *gl_sym(const gx_eglfn *egl, const char *name)
 int gx_gl_load(gx_glfn *gl, const gx_eglfn *egl)
 {
     int missing = 0;
+    /* glClearDepthf and glProgramParameteri are GL 4.1 on a desktop: optional (gx_gl.c copes) */
 #define GX_GL_LOAD(ret, name, args) \
-    if (!(*(void **)&gl->name = gl_sym(egl, #name))) { \
+    if (!(*(void **)&gl->name = gl_sym(egl, #name)) && strcmp(#name, "glClearDepthf") && \
+        strcmp(#name, "glProgramParameteri")) { \
         fprintf(stderr, "gx: GL entry point %s missing\n", #name); \
         missing++; \
     }
     GX_GL_FUNCS(GX_GL_LOAD)
 #undef GX_GL_LOAD
     *(void **)&gl->glMaxShaderCompilerThreadsKHR = egl->eglGetProcAddress("glMaxShaderCompilerThreadsKHR");
+    *(void **)&gl->glClearDepth = gl_sym(egl, "glClearDepth");
     return missing ? -1 : 0;
 }
 

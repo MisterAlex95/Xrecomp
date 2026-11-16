@@ -196,6 +196,7 @@ typedef struct gx_glfn {
     GX_GL_FUNCS(GX_GL_PTR)
 #undef GX_GL_PTR
     void (*glMaxShaderCompilerThreadsKHR)(GLuint);
+    void (*glClearDepth)(double); /* desktop GL before 4.1 has no glClearDepthf */
 } gx_glfn;
 
 /* EGL, the part the renderer and the headless context use. */

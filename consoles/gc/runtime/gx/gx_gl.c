@@ -121,12 +121,35 @@ struct gx_gl {
 
 #define F (g->f)
 
+/* A desktop GL 3.3+ core context (gc_play's window on Linux / macOS) instead of GLES 3: the same GLSL under
+ * #version 330 core. */
+static int desktop_gl;
+
+static void clear_depth(gx_glfn *f, float z)
+{
+    if (f->glClearDepthf)
+        f->glClearDepthf(z);
+    else if (f->glClearDepth)
+        f->glClearDepth(z);
+}
+
 /* ---- programs ---- */
+
+static void shader_source(gx_glfn *f, GLuint s, const char *src)
+{
+    static const char es[] = "#version 300 es\n";
+    if (desktop_gl && !strncmp(src, es, sizeof es - 1)) {
+        const char *parts[2] = {"#version 330 core\n", src + sizeof es - 1};
+        f->glShaderSource(s, 2, parts, NULL);
+    } else {
+        f->glShaderSource(s, 1, &src, NULL);
+    }
+}
 
 static GLuint compile_shader(gx_glfn *f, GLenum type, const char *src, char *log, size_t log_len)
 {
     GLuint s = f->glCreateShader(type);
-    f->glShaderSource(s, 1, &src, NULL);
+    shader_source(f, s, src);
     f->glCompileShader(s);
     GLint ok = 0;
     f->glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
@@ -159,7 +182,8 @@ static GLuint link_program(gx_glfn *f, GLuint vs, GLuint fs, char *log, size_t l
     GLuint p = f->glCreateProgram();
     f->glAttachShader(p, vs);
     f->glAttachShader(p, fs);
-    f->glProgramParameteri(p, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+    if (f->glProgramParameteri)
+        f->glProgramParameteri(p, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
     f->glLinkProgram(p);
     GLint ok = 0;
     f->glGetProgramiv(p, GL_LINK_STATUS, &ok);
@@ -342,9 +366,8 @@ static void prog_start(gx_gl *g, prog_entry *e)
         char *fsrc = gx_shader_fs_source(&e->key);
         e->vs = F.glCreateShader(GL_VERTEX_SHADER);
         e->fs = F.glCreateShader(GL_FRAGMENT_SHADER);
-        const char *vsrc = gx_shader_vs_source(), *fs = fsrc ? fsrc : "";
-        F.glShaderSource(e->vs, 1, &vsrc, NULL);
-        F.glShaderSource(e->fs, 1, &fs, NULL);
+        shader_source(&g->f, e->vs, gx_shader_vs_source());
+        shader_source(&g->f, e->fs, fsrc ? fsrc : "");
         F.glCompileShader(e->vs);
         F.glCompileShader(e->fs);
         e->prog = F.glCreateProgram();
@@ -680,6 +703,7 @@ static void apply_state(gx_state *gx, bool tri)
         F.glDisable(GL_BLEND);
     }
     unsigned cull = BITS(bp[BP_GENMODE], 14, 2);
+    F.glFrontFace(GL_CCW);
     if (tri && cull) {
         F.glEnable(GL_CULL_FACE);
         F.glCullFace(cull == 1 ? GL_BACK : cull == 2 ? GL_FRONT : GL_FRONT_AND_BACK);
@@ -1112,7 +1136,7 @@ static void efb_clear_rect(gx_state *gx, int x, int y, int w, int h)
     }
     if (bp[BP_ZMODE] & 0x10) {
         F.glDepthMask(GL_TRUE);
-        F.glClearDepthf((float)BITS(bp[BP_CLEAR_Z], 0, 24) / 16777215.0f);
+        clear_depth(&g->f, (float)BITS(bp[BP_CLEAR_Z], 0, 24) / 16777215.0f);
         bits |= GL_DEPTH_BUFFER_BIT;
     }
     if (bits)
@@ -1334,7 +1358,7 @@ void gx_efb_poke(gx_state *gx, uint32_t pa, uint32_t v, unsigned size)
     scissor_rect(g, x, y, x + 1, y + 1);
     if (pa & 0x400000) {
         F.glDepthMask(GL_TRUE);
-        F.glClearDepthf((float)(v & 0xFFFFFF) / 16777215.0f);
+        clear_depth(&g->f, (float)(v & 0xFFFFFF) / 16777215.0f);
         F.glClear(GL_DEPTH_BUFFER_BIT);
         g->peek_z_ok = false;
     } else {
@@ -1428,12 +1452,16 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
         return -1;
     }
     const char *ver = (const char *)g->f.glGetString(GL_VERSION);
-    if (!ver || !strstr(ver, "OpenGL ES 3")) {
-        fprintf(stderr, "gx: needs OpenGL ES 3, the context is %s: GX runs without drawing\n", ver ? ver : "?");
+    int major = 0, minor = 0;
+    desktop_gl = ver && !strstr(ver, "OpenGL ES") && sscanf(ver, "%d.%d", &major, &minor) == 2 &&
+                 (major > 3 || (major == 3 && minor >= 3));
+    if (!ver || (!strstr(ver, "OpenGL ES 3") && !desktop_gl)) {
+        fprintf(stderr, "gx: needs OpenGL ES 3 or GL 3.3, the context is %s: GX runs without drawing\n",
+                ver ? ver : "?");
         free(g);
         return -1;
     }
-    int scale = opt && opt->scale ? opt->scale : env_int("RECOMP_GC_SCALE", env_int("RECOMP_UPSCALE", 1));
+    int scale = opt && opt->scale ? opt->scale : env_int("RECOMP_GC_UPSCALE", env_int("RECOMP_UPSCALE", 1));
     if (scale < 1) scale = 1;
     if (scale > 8) scale = 8;
     g->f.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &g->max_tex);
@@ -1480,7 +1508,7 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     F.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     F.glDepthMask(GL_TRUE);
     F.glClearColor(0, 0, 0, 0);
-    F.glClearDepthf(1.0f);
+    clear_depth(&g->f, 1.0f);
     F.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     F.glFrontFace(GL_CCW);
     F.glGenFramebuffers(1, &g->copy_fbo);
@@ -1578,6 +1606,19 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     return 0;
 }
 
+void gx_save_shader_list(gx_state *gx)
+{
+    gx_gl *g = gx ? gx->gl : NULL;
+    if (!g || !g->list_path || !g->list_dirty)
+        return;
+    if (gx_shader_list_write(g->list_path, g->keys, g->nkeys, (const uint32_t(*)[5])g->vfmts, g->nvfmts)) {
+        fprintf(stderr, "gx: cannot write the shader list %s\n", g->list_path);
+        return;
+    }
+    g->list_dirty = false;
+    fprintf(stderr, "gx: shader list %s: %zu TEV states, %zu vertex formats\n", g->list_path, g->nkeys, g->nvfmts);
+}
+
 void gx_gl_detach(gx_state *gx)
 {
     gx_gl *g = gx->gl;
@@ -1585,13 +1626,7 @@ void gx_gl_detach(gx_state *gx)
         return;
     gx_gl_flush(gx);
     worker_stop(g);
-    if (g->list_path && g->list_dirty) {
-        if (gx_shader_list_write(g->list_path, g->keys, g->nkeys, (const uint32_t(*)[5])g->vfmts, g->nvfmts))
-            fprintf(stderr, "gx: cannot write the shader list %s\n", g->list_path);
-        else
-            fprintf(stderr, "gx: shader list %s: %zu TEV states, %zu vertex formats\n", g->list_path, g->nkeys,
-                    g->nvfmts);
-    }
+    gx_save_shader_list(gx);
     for (unsigned i = 0; i < PROG_BUCKETS; i++)
         while (g->progs[i]) {
             prog_entry *e = g->progs[i];

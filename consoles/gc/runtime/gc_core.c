@@ -344,6 +344,13 @@ static int xfb_lines(gc_machine *m, uint32_t *base, int *w, int *h)
     return 0;
 }
 
+uint32_t gc_xfb_addr(gc_machine *m)
+{
+    uint32_t base[GC_XFB_MAX_H];
+    int w, h;
+    return xfb_lines(m, base, &w, &h) ? 0 : base[0];
+}
+
 int gc_xfb_yuv(gc_machine *m, uint8_t *yuv, int *w, int *h)
 {
     uint32_t base[GC_XFB_MAX_H];

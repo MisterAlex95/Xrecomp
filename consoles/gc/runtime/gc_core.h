@@ -67,6 +67,9 @@ int gc_xfb_rgb(gc_machine *m, uint8_t *rgb, int *w, int *h);
 /* The same picture left in YUV 4:2:2 (Y0 U Y1 V, w * 2 bytes per line, lines top to bottom, the two fields woven),
  * for a host that converts on its GPU (gc_runtime). yuv holds GC_XFB_MAX_W * GC_XFB_MAX_H * 2 bytes. */
 int gc_xfb_yuv(gc_machine *m, uint8_t *yuv, int *w, int *h);
+/* The physical address of the XFB the video interface scans (its top field), 0 without one: where GX's copy to the
+ * XFB landed, for a host that shows GX's own picture of it (gx_xfb_texture, XBA-262). */
+uint32_t gc_xfb_addr(gc_machine *m);
 
 uint32_t gc_peek32(gc_machine *m, uint32_t ea);
 
