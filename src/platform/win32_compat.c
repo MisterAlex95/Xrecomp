@@ -1450,6 +1450,113 @@ int w32_query_object(HANDLE h, LONG info[3])
     return kind;
 }
 
+int w32_state_read(HANDLE h, w32_state *out)
+{
+    w32_object *o = obj_from_handle(h);
+    if (!o || !out) return 0;
+    memset(out, 0, sizeof *out);
+    out->fd = -1;
+    pthread_mutex_lock(&o->lock);
+    out->refcount = o->refcount;
+    switch (o->kind) {
+    case K_EVENT:
+        out->kind = W32_STATE_EVENT;
+        out->manual_reset = o->manual_reset;
+        out->signaled = o->signaled;
+        out->grants = o->ev_grants;
+        out->waiters = o->ev_waiters;
+        break;
+    case K_SEM:
+        out->kind = W32_STATE_SEMAPHORE;
+        out->count = (LONG)o->sem_count;
+        out->maximum = (LONG)o->sem_max;
+        break;
+    case K_MUTEX:
+        out->kind = W32_STATE_MUTEX;
+        out->owner_tid = o->mtx_owner;
+        out->recursion = o->mtx_recursion;
+        break;
+    case K_THREAD:
+        out->kind = W32_STATE_THREAD;
+        out->tid = o->tid;
+        out->exited = o->exited;
+        out->exit_code = o->exit_code;
+        out->suspend_count = o->suspend_count;
+        out->priority = o->priority;
+        out->apc_count = o->apc_count;
+        break;
+    case K_WAITABLE_TIMER:
+        out->kind = W32_STATE_TIMER;
+        out->manual_reset = o->waitable_manual_reset;
+        out->signaled = o->waitable_triggered;
+        out->armed = o->waitable_armed;
+        out->period_ms = o->waitable_period_ms;
+        if (o->waitable_armed && !o->waitable_triggered) {
+            struct timespec now;
+            long long left;
+            clock_gettime(W32_WAIT_CLOCK, &now);
+            left = (long long)(o->waitable_due_time.tv_sec - now.tv_sec) * 1000000000LL
+                 + (o->waitable_due_time.tv_nsec - now.tv_nsec);
+            out->due_in_ns = left > 0 ? left : 0;
+        }
+        break;
+    case K_FILE:
+        out->kind = W32_STATE_FILE;
+        out->fd = o->fd;
+        out->has_ext = o->file_ext != NULL;
+        out->path = o->file_path;
+        break;
+    default:
+        out->kind = W32_STATE_OTHER;
+        break;
+    }
+    pthread_mutex_unlock(&o->lock);
+    return out->kind;
+}
+
+HANDLE w32_state_make(const w32_state *s)
+{
+    w32_object *o;
+    if (!s) return NULL;
+    switch (s->kind) {
+    case W32_STATE_EVENT:
+        return CreateEventA(NULL, s->manual_reset, s->signaled, NULL);
+    case W32_STATE_SEMAPHORE:
+        return CreateSemaphoreA(NULL, s->count, s->maximum, NULL);
+    case W32_STATE_MUTEX:
+        o = obj_alloc(K_MUTEX);
+        if (s->owner_tid && s->recursion > 0) {
+            o->mtx_owner = s->owner_tid;
+            o->mtx_recursion = s->recursion;
+        }
+        return obj_handle(o);
+    case W32_STATE_TIMER:
+        o = obj_alloc(K_WAITABLE_TIMER);
+        o->waitable_manual_reset = s->manual_reset;
+        o->waitable_armed = s->armed;
+        o->waitable_triggered = s->signaled;
+        o->waitable_period_ms = s->period_ms;
+        clock_gettime(W32_WAIT_CLOCK, &o->waitable_due_time);
+        if (s->armed && !s->signaled && s->due_in_ns > 0) {
+            long long ns = o->waitable_due_time.tv_nsec + s->due_in_ns;
+            o->waitable_due_time.tv_sec += (time_t)(ns / 1000000000LL);
+            o->waitable_due_time.tv_nsec = (long)(ns % 1000000000LL);
+        }
+        return obj_handle(o);
+    case W32_STATE_THREAD:
+        if (!s->exited) return NULL;      /* a running thread is not made here */
+        o = obj_alloc(K_THREAD);
+        o->tid = s->tid;
+        o->exited = 1;
+        o->signaled = 1;
+        o->exit_code = s->exit_code;
+        o->priority = s->priority;
+        return obj_handle(o);
+    default:
+        return NULL;
+    }
+}
+
 /* ===================================================================== */
 /* Threads                                                               */
 /* ===================================================================== */

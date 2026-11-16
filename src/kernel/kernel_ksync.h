@@ -66,6 +66,27 @@ int      ks_port_post_for_file(void *file, uint32_t ctx, uint32_t status,
                                uint32_t info);
 void     ks_port_forget(void *handle);
 
+/* Save states (XBA-246): the host-side part of the above, read and made
+ * again. list fills up to max ports (the slot and generation a thread's
+ * queue association names, the concurrency counts) and returns how many
+ * there are; packets copies a port's queued packets in order and returns how
+ * many it holds. restore makes a port at p->slot with p->gen and the packets
+ * (0 when the slot is taken); its ident must be a manual-reset event, which
+ * restore sets or resets to match. passoc_list returns the file / port
+ * associations (ks_port_associate makes them again). reset drops every port
+ * and association with their packets. apc_pending is the count of inserted
+ * KAPCs (the queues themselves are in guest memory). */
+typedef struct { void *ident; int slot; unsigned gen; int32_t max, cur, depth; } ks_port_info;
+typedef struct { uint32_t key, ctx, status, info; } ks_packet;
+typedef struct { void *file; void *port; uint32_t key; } ks_passoc_info;
+int      ks_port_list(ks_port_info *out, int max);
+int      ks_port_packets(void *ident, ks_packet *out, int max);
+int      ks_port_restore(const ks_port_info *p, const ks_packet *pk, int n);
+int      ks_passoc_list(ks_passoc_info *out, int max);
+void     ks_port_reset(void);
+long     ks_apc_pending_get(void);
+void     ks_apc_pending_set(long n);
+
 /* KDEVICE_QUEUE (106, 114, 115, 133, 134, 135). */
 void     ks_devq_init(uint32_t dq);
 int      ks_devq_insert(uint32_t dq, uint32_t entry);

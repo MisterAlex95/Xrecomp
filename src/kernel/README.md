@@ -16,6 +16,7 @@ All 371 ordinals are routed: every export now has either a per-ordinal `bridge_*
 | `kernel_park.c` | 560 | Safe-point park detector for save states: guest threads parked at kernel calls, freeze / thaw, `[KERNEL] park:` line (XBA-244); each thread's park record (call, registers) for a capture (XBA-245) |
 | `xbox_state.c` | 1,000 | Save states: the XBXS container of tagged sections, the section registry, the capture (freeze, settle, retry), the read side and the slot files; `RECOMP_STATE_PROBE` (XBA-245) |
 | `xbox_state_guest.c` | 400 | Save states: the built-in sections CPU (park records), MEM (memory manager) and RAM (guest pages, zero pages skipped, dirty-page hashes) (XBA-245) |
+| `kernel_kobj_state.c` | 850 | Kernel objects in a save state: events, semaphores, mutants, timers, threads, files, ports, handle table, KE shadows, timers and DPCs serialised and made again under the same handle values (XBA-246) |
 | `kernel_file.c` | 834 | File I/O — NtCreateFile, NtReadFile, path translation |
 | `kernel_thread.c` | 344 | Threading — PsCreateSystemThreadEx, thread priorities |
 | `kernel_sync.c` | 547 | Synchronization — events, semaphores, mutexes, critical sections |

@@ -30,6 +30,7 @@
 #include <dirent.h>
 #include <fnmatch.h>
 #include "kernel_disc.h"
+#include "kernel_kobj_state.h"
 #endif
 
 /* Get the ANSI path from OBJECT_ATTRIBUTES (platform-independent). */
@@ -2136,6 +2137,118 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     IoStatusBlock->Status = STATUS_SUCCESS;
     IoStatusBlock->Information = header_size + name_len;
     return STATUS_SUCCESS;
+}
+
+/* ── Save states (XBA-246, kernel_kobj_state.h) ──────────────────────────
+ *
+ * A file handle is its host path, how it was opened, and where its position
+ * is. A disc image file is its path in the image and its position. What
+ * cannot be carried: a host directory search in progress (a DIR stream). */
+int xbox_FileStateRead(void *h, XboxFileState *out, char *why, size_t n)
+{
+    w32_state ws;
+    int i, busy = 0;
+
+    if (!w32_state_read((HANDLE)h, &ws) || ws.kind != W32_STATE_FILE)
+        return 0;
+    memset(out, 0, sizeof *out);
+    if (!ws.path || strlen(ws.path) >= sizeof out->path) {
+        snprintf(why, n, "file with no host path, or one too long");
+        return -1;
+    }
+    strcpy(out->path, ws.path);
+    if (ws.has_ext) {
+        disc_file *f = disc_of((HANDLE)h);
+        if (!f || ws.fd >= 0) {
+            snprintf(why, n, "file backed by an object the file layer does not know");
+            return -1;
+        }
+        out->disc = 1;
+        out->is_dir = f->node && xbox_disc_node_is_dir(f->node);
+        out->offset = f->pos;
+        out->disc_next = f->next;
+        out->disc_scanning = f->scanning;
+        memcpy(out->disc_pattern, f->pattern, sizeof out->disc_pattern);
+        out->disc_pattern[sizeof out->disc_pattern - 1] = 0;
+        return 1;
+    }
+    if (ws.fd < 0) {
+        snprintf(why, n, "file handle with no host fd");
+        return -1;
+    }
+    {
+        struct stat st;
+        int fl = fcntl(ws.fd, F_GETFL);
+        off_t pos = lseek(ws.fd, 0, SEEK_CUR);
+        if (fl < 0 || fstat(ws.fd, &st) != 0) {
+            snprintf(why, n, "host fd %d unreadable (errno %d)", ws.fd, errno);
+            return -1;
+        }
+        out->flags = fl & (O_ACCMODE | O_APPEND);
+        out->is_dir = S_ISDIR(st.st_mode);
+        out->offset = pos < 0 ? 0 : (int64_t)pos;
+        out->overwrite_pending = ws.fd < FATX_PENDING_MAX && s_overwrite_pending[ws.fd];
+    }
+    if (s_dir_cs_init) {
+        EnterCriticalSection(&s_dir_cs);
+        for (i = 0; i < MAX_DIR_CONTEXTS; i++)
+            if (s_dir_contexts[i].handle == (HANDLE)h && s_dir_contexts[i].dir)
+                busy = 1;
+        LeaveCriticalSection(&s_dir_cs);
+    }
+    if (busy) {
+        snprintf(why, n, "directory search in progress on %s", out->path);
+        return -1;
+    }
+    return 1;
+}
+
+void *xbox_FileStateReopen(const XboxFileState *s, char *why, size_t n)
+{
+    int fd;
+
+    if (s->disc) {
+        const char *rel = xbox_disc_rel(s->path);
+        const xbox_disc_node *node;
+        disc_file *f;
+        int how = 0;
+        if (!rel || !(node = xbox_disc_find(rel, &how))) {
+            snprintf(why, n, "%s is not on the mounted disc image", s->path);
+            return NULL;
+        }
+        f = (disc_file *)calloc(1, sizeof *f);
+        if (!f) {
+            snprintf(why, n, "out of memory");
+            return NULL;
+        }
+        f->node = node;
+        f->pos = s->offset;
+        f->next = s->disc_next;
+        f->scanning = s->disc_scanning;
+        memcpy(f->pattern, s->disc_pattern, sizeof f->pattern);
+        return w32_open_handle_ext(-1, s->path, f, free);
+    }
+    fd = s->is_dir ? open(s->path, O_RDONLY | O_DIRECTORY)
+                   : open(s->path, s->flags & (O_ACCMODE | O_APPEND));
+    if (fd < 0) {
+        snprintf(why, n, "cannot reopen %s (errno %d)", s->path, errno);
+        return NULL;
+    }
+    if (!s->is_dir && s->offset && lseek(fd, (off_t)s->offset, SEEK_SET) < 0) {
+        snprintf(why, n, "cannot seek %s to %lld (errno %d)", s->path,
+                 (long long)s->offset, errno);
+        close(fd);
+        return NULL;
+    }
+    if (fd < FATX_PENDING_MAX)
+        s_overwrite_pending[fd] = (unsigned char)(s->overwrite_pending != 0);
+    return w32_open_handle(fd, s->path);
+}
+
+void xbox_FileStateForget(void *h)
+{
+    overwrite_take(w32_handle_fd((HANDLE)h));
+    xbox_dir_context_drop((HANDLE)h);
 }
 
 #endif /* _WIN32 */

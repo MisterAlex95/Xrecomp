@@ -155,6 +155,32 @@ Not covered by the prototype: the timer thread's DPCs and the device models' ISR
 the capture, XBA-245), the native-call thunk-table path (`kernel_thunks.c`), and host waits made from inside lifted
 code (`xbox_GuestPollWait`, NV2A kick waits): a thread blocked there counts as busy (XBA-251).
 
+## Kernel objects (`src/kernel/kernel_kobj_state.c`, XBA-246)
+
+`xbox_KobjSave` / `xbox_KobjLoad` serialise the kernel's host side into one self-describing blob ("XKOB", a
+version, then records `u16 type, u16 version, u32 length, payload`; unknown types are skipped), the KOBJ section of
+the container. `xbox_KobjCheck` lists what keeps a save from being taken, each with a reason, so the menu can say
+why. `xbox_KobjReset` empties everything, as a fresh kernel has it.
+
+| Object | Read | Made again |
+|---|---|---|
+| Event, semaphore, mutant, waitable timer | `w32_state_read`: type, signal state, count / limit, owner thread and recursion, remaining time and period, without consuming anything | `w32_state_make` in that state (timer re-armed with the time it had left) |
+| Thread | Host thread id, KTHREAD, exited, exit status, suspend count, priority | Ended: an exited thread object (signalled, its status). Running: in session, bound to the same thread still running (by host thread id); across runs, refused (XBA-250) |
+| File, directory | Host path, `open` mode, position, pending FATX overwrite; disc image files: path in the image, position, search state | Reopened and positioned (`xbox_FileStateReopen`) |
+| I/O completion port | Slot, generation, concurrency counts, queued packets in order | Same slot and generation (threads' queue associations stay valid), packets queued again |
+| Handle table | Every token: its object, the guest thread object or `ObCreateObject` body behind it | Same token values; one object shared by several tokens (`NtDuplicateObject`) stays one object |
+| KE shadows | Guest KEVENT / KMUTANT / KSEMAPHORE / KTIMER / thread object -> host object, guest-built events | Same |
+| Kernel timers, DPC queue | Timer, DPC, time left on the guest clock, period; queued DPCs in order | Re-armed relative to the guest clock; queue refilled |
+| Other tables | Thread alert state, critical-section semaphores, `ObCreateObject` objects, connected interrupts, shutdown and thread notification routines, the APC pool, asynchronous file handles, inserted KAPC count | Same |
+
+The guest structures (KEVENT headers, KTHREAD, APC lists, KQUEUE, device queues) are guest RAM and come with the RAM
+section. What refuses a save: a set on its way to a blocked thread (retry), a host directory search in progress, a
+host object kind we do not carry (file mappings), and, for another run, a running thread, an owned mutant or a held
+host critical section. A held host critical section in session is recorded and must be held by the same thread, as
+deep, when the state loads. A load refuses, changing nothing, while a thread is blocked on an event it would tear
+down: bringing parked threads out of their waits and back is XBA-249's. POSIX hosts only: on Windows the objects are
+real Win32 objects and the save is refused. Test: `tests/kernel_kobj_state`.
+
 ## Data format (XBA-245: `src/kernel/xbox_state.h`)
 
 A state is a slot file of `recomp_states` (`XRSLOT` header, console `xbox`, game key = the title ID as `%08X`,
@@ -177,6 +203,19 @@ header (128 bytes)
   120  u64 hash of bytes 0..119
 sections, in registration order, each:
   u32 tag, u32 version, u64 length, u64 hash of the payload (xbox_StateHash, 64-bit, four lanes), payload
+"XBXS" u32 version
+identity: title ID, XBE SHA-1, build ID of the generated code (hash of the lifted sources), RAM size
+sections, each: u32 tag, u32 version, u64 length, payload
+  RAM    page bitmap (non-zero pages), then the pages (compressed; rewind codes XOR deltas, recomp_rewind.h)
+  CPU    per guest thread: guest thread id, KTHREAD VA, TIB VA, guest stack bounds, RecompCpu, ebp shadow stack,
+         park record (ordinal, guest return address, status when the call already returned), chain signature
+         (return VA and esp per frame, start routine)
+  MEM    heap allocator, contiguous page map, guest_vmem
+  KOBJ   kernel objects and the handle table, open files and directories, guest clock, timer and DPC queues
+         (kernel_kobj_state.h; files are in it because handles name them like any other object)
+  NV2A   register file, pushbuffer GET / PUT, DMA objects, executor state (render targets already read back to RAM)
+  APU    MCPX aperture, VP state
+  USB    OHCI registers, device models
 ```
 
 The sections this ticket writes (built in, always first):

@@ -42,6 +42,7 @@
 #include "recomp_status.h"
 #include "kernel_disc.h"
 #include "xbox_cheats.h"
+#include "kernel_kobj_state.h"   /* save states (XBA-246) */
 #include <stdio.h>
 /* stdlib.h is load-bearing, not tidiness. Without it C89 implicit declaration
  * makes malloc return `int`, so bridge_spawn_thread truncated its heap pointer
@@ -13903,4 +13904,450 @@ void xbox_kernel_bridge_init(void)
     fprintf(stderr, "  Synthetic VA range: 0x%08X-0x%08X\n",
             KERNEL_VA_BASE, KERNEL_VA_BASE + (resolved - 1) * 4);
 
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Save states: the bridge's tables (XBA-246, kernel_kobj_state.h)
+ *
+ * What the bridge keeps for the guest, host-side: the handle table (token ->
+ * host object, and the guest thread object or ObCreateObject body behind a
+ * token), the guest thread object pool, the KE shadows (guest KEVENT /
+ * KMUTANT / KSEMAPHORE / KTIMER / thread object -> host object), kernel
+ * timers, the DPC queue, threads' alert state, ObCreateObject objects, and
+ * the small registration tables. Host objects go through xbox_kobj_ref, which
+ * gives each one id however many tables name it; the records carry ids.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+enum {
+    KOBJ_TAB_ISR = 1, KOBJ_TAB_SHUTDOWN, KOBJ_TAB_NOTIFY, KOBJ_TAB_APC_POOL,
+    KOBJ_TAB_ASYNC, KOBJ_TAB_PROMOTED, KOBJ_TAB_SET_SEEN
+};
+
+static void kobj_u32tab(XboxKobjSaveCtx *c, uint32_t id, const volatile uint32_t *v,
+                        uint32_t n)
+{
+    XboxKobjBuf *b;
+    uint32_t i, used = 0;
+    for (i = 0; i < n; i++)
+        if (v[i]) used = i + 1;
+    if (!used)
+        return;
+    b = xbox_kobj_rec_begin(c, XKOB_R_U32TAB);
+    xbox_kobj_u32(b, id);
+    xbox_kobj_u32(b, used);
+    for (i = 0; i < used; i++)
+        xbox_kobj_u32(b, v[i]);
+    xbox_kobj_rec_end(c);
+}
+
+static void kernel_timer_start_once(void)
+{
+    if (!g_timer_started) {
+        InitializeCriticalSection(&g_timer_lock);
+        g_timer_started = 1;
+        CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
+    }
+}
+
+void xbox_bridge_kobj_handles(void (*fn)(void *ctx, uint32_t guest_va, void *h), void *ctx)
+{
+    uint32_t i;
+
+    for (i = 1; i < BRIDGE_HANDLE_MAX; i++)
+        if (s_handle_table[i])
+            fn(ctx, s_token_thobj[i], s_handle_table[i]);
+    ke_shadow_init();
+    EnterCriticalSection(&g_ke_shadow_cs);
+    for (i = 0; i < KE_SHADOW_SIZE; i++)
+        if (g_ke_shadow[i].in_use && g_ke_shadow[i].host_handle)
+            fn(ctx, g_ke_shadow[i].guest_va, g_ke_shadow[i].host_handle);
+    LeaveCriticalSection(&g_ke_shadow_cs);
+    thalert_lock();
+    for (i = 0; i < THALERT_MAX; i++)
+        if (s_thalert[i].kthread && s_thalert[i].host)
+            fn(ctx, s_thalert[i].kthread, s_thalert[i].host);
+    thalert_unlock();
+}
+
+void xbox_bridge_kobj_save(XboxKobjSaveCtx *c)
+{
+    XboxKobjBuf *b;
+    uint32_t i;
+
+    /* Handle table: one record per live token. */
+    handle_lock();
+    for (i = 1; i < BRIDGE_HANDLE_MAX; i++) {
+        uint32_t id, token = BRIDGE_HANDLE_TAG | i;
+        if (!s_handle_table[i] && !s_token_thobj[i] && !s_ob_token[i])
+            continue;
+        id = xbox_kobj_ref(c, s_handle_table[i], token, s_token_thobj[i]);
+        b = xbox_kobj_rec_begin(c, XKOB_R_HANDLE);
+        xbox_kobj_u32(b, i);
+        xbox_kobj_u32(b, id);
+        xbox_kobj_u32(b, s_token_thobj[i]);
+        xbox_kobj_u32(b, s_ob_token[i]);
+        xbox_kobj_rec_end(c);
+    }
+    handle_unlock();
+
+    /* Guest thread object pool. */
+    thobj_lock();
+    if (s_thobj_count) {
+        b = xbox_kobj_rec_begin(c, XKOB_R_THPOOL);
+        xbox_kobj_u32(b, s_thobj_count);
+        for (i = 0; i < s_thobj_count; i++) {
+            xbox_kobj_u32(b, s_thobj_va[i]);
+            xbox_kobj_u32(b, (uint32_t)s_thobj_refs[i]);
+        }
+        xbox_kobj_rec_end(c);
+    }
+    thobj_unlock();
+
+    /* KE shadows. */
+    ke_shadow_init();
+    EnterCriticalSection(&g_ke_shadow_cs);
+    for (i = 0; i < KE_SHADOW_SIZE; i++) {
+        uint32_t id;
+        if (!g_ke_shadow[i].in_use)
+            continue;
+        id = xbox_kobj_ref(c, g_ke_shadow[i].host_handle, 0, g_ke_shadow[i].guest_va);
+        b = xbox_kobj_rec_begin(c, XKOB_R_SHADOW);
+        xbox_kobj_u32(b, g_ke_shadow[i].guest_va);
+        xbox_kobj_u32(b, id);
+        xbox_kobj_u32(b, g_ke_shadow[i].in_use);
+        xbox_kobj_rec_end(c);
+    }
+    LeaveCriticalSection(&g_ke_shadow_cs);
+
+    /* Kernel timers, due times relative to the guest clock. */
+    if (g_timer_started) {
+        long long now = kernel_timer_clock_ms();
+        EnterCriticalSection(&g_timer_lock);
+        for (i = 0; i < XBOX_MAX_TIMERS; i++) {
+            long long left;
+            if (!g_timers[i].timer_va)
+                continue;
+            left = g_timers[i].due_ms - now;
+            b = xbox_kobj_rec_begin(c, XKOB_R_TIMER);
+            xbox_kobj_u32(b, g_timers[i].timer_va);
+            xbox_kobj_u32(b, g_timers[i].dpc_va);
+            xbox_kobj_u64(b, (uint64_t)(left > 0 ? left : 0));
+            xbox_kobj_u32(b, (uint32_t)g_timers[i].period_ms);
+            xbox_kobj_rec_end(c);
+        }
+        LeaveCriticalSection(&g_timer_lock);
+    }
+
+    /* Queued DPCs, in order. */
+    dpc_lock();
+    for (i = (uint32_t)g_dpc_head; i != (uint32_t)g_dpc_tail; i = (i + 1) % XBOX_MAX_PENDING_DPC) {
+        b = xbox_kobj_rec_begin(c, XKOB_R_DPC);
+        xbox_kobj_u32(b, g_dpc_queue[i].dpc);
+        xbox_kobj_u32(b, g_dpc_queue[i].arg1);
+        xbox_kobj_u32(b, g_dpc_queue[i].arg2);
+        xbox_kobj_rec_end(c);
+    }
+    LeaveCriticalSection(&g_dpc_lock);
+
+    /* Alert state. */
+    thalert_lock();
+    for (i = 0; i < THALERT_MAX; i++) {
+        uint32_t id;
+        if (!s_thalert[i].kthread)
+            continue;
+        id = xbox_kobj_ref(c, s_thalert[i].host, 0, s_thalert[i].kthread);
+        b = xbox_kobj_rec_begin(c, XKOB_R_THALERT);
+        xbox_kobj_u32(b, s_thalert[i].kthread);
+        xbox_kobj_u32(b, id);
+        xbox_kobj_u32(b, (uint32_t)s_thalert[i].waiting);
+        xbox_kobj_u8(b, s_thalert[i].alerted[0]);
+        xbox_kobj_u8(b, s_thalert[i].alerted[1]);
+        xbox_kobj_rec_end(c);
+    }
+    thalert_unlock();
+
+    /* ObCreateObject objects (their bodies and headers are guest memory). */
+    ob_lock();
+    for (i = 0; i < OB_MAX; i++) {
+        if (!s_ob[i].body)
+            continue;
+        b = xbox_kobj_rec_begin(c, XKOB_R_OB);
+        xbox_kobj_u32(b, s_ob[i].body);
+        xbox_kobj_u32(b, s_ob[i].base);
+        xbox_kobj_u32(b, (uint32_t)s_ob[i].inserted);
+        xbox_kobj_str(b, s_ob[i].name);
+        xbox_kobj_rec_end(c);
+    }
+    ob_unlock();
+
+    kobj_u32tab(c, KOBJ_TAB_ISR, g_connected_isr, XBOX_MAX_VECTORS);
+    kobj_u32tab(c, KOBJ_TAB_SHUTDOWN, s_shutdown_reg, SHUTDOWN_NOTIFY_MAX);
+    kobj_u32tab(c, KOBJ_TAB_NOTIFY, s_thread_notify, THREAD_NOTIFY_MAX);
+    kobj_u32tab(c, KOBJ_TAB_APC_POOL, s_apc_pool, APC_POOL_MAX);
+    kobj_u32tab(c, KOBJ_TAB_ASYNC, g_async_handles, BRIDGE_ASYNC_MAX);
+    kobj_u32tab(c, KOBJ_TAB_PROMOTED, g_ke_promoted,
+                g_ke_promoted_n < KE_PROMOTED_MAX ? (uint32_t)g_ke_promoted_n : KE_PROMOTED_MAX);
+    kobj_u32tab(c, KOBJ_TAB_SET_SEEN, g_ke_set_seen,
+                g_ke_set_seen_n < KE_PROMOTED_MAX ? (uint32_t)g_ke_set_seen_n : KE_PROMOTED_MAX);
+}
+
+void xbox_bridge_kobj_reset(void)
+{
+    uint32_t i;
+
+    /* Handle table: every token's reference, as NtClose drops it, but with
+     * nothing settled on disk (xbox_FileStateForget). */
+    for (i = 1; i < BRIDGE_HANDLE_MAX; i++) {
+        HANDLE h;
+        handle_lock();
+        h = s_handle_table[i];
+        s_handle_table[i] = NULL;
+        handle_unlock();
+        if (h && h != INVALID_HANDLE_VALUE) {
+#ifndef _WIN32
+            xbox_FileStateForget(h);
+#endif
+            CloseHandle(h);
+        }
+    }
+    thobj_lock();
+    memset(s_token_thobj, 0, sizeof s_token_thobj);
+    memset(s_thobj_refs, 0, sizeof s_thobj_refs);
+    memset(s_thobj_va, 0, sizeof s_thobj_va);
+    s_thobj_count = 0;
+    thobj_unlock();
+
+    ke_shadow_init();
+    EnterCriticalSection(&g_ke_shadow_cs);
+    for (i = 0; i < KE_SHADOW_SIZE; i++) {
+        if (g_ke_shadow[i].in_use && g_ke_shadow[i].host_handle)
+            CloseHandle(g_ke_shadow[i].host_handle);
+        g_ke_shadow[i].in_use = 0;
+        g_ke_shadow[i].guest_va = 0;
+        g_ke_shadow[i].host_handle = NULL;
+    }
+    LeaveCriticalSection(&g_ke_shadow_cs);
+
+    if (g_timer_started) {
+        EnterCriticalSection(&g_timer_lock);
+        memset(g_timers, 0, sizeof g_timers);
+        LeaveCriticalSection(&g_timer_lock);
+    }
+    dpc_lock();
+    g_dpc_head = g_dpc_tail = 0;
+    memset(g_dpc_queue, 0, sizeof g_dpc_queue);
+    LeaveCriticalSection(&g_dpc_lock);
+
+    thalert_lock();
+    for (i = 0; i < THALERT_MAX; i++)
+        if (s_thalert[i].host)
+            CloseHandle(s_thalert[i].host);
+    memset(s_thalert, 0, sizeof s_thalert);
+    thalert_unlock();
+
+    ob_lock();
+    memset(s_ob, 0, sizeof s_ob);
+    memset(s_ob_token, 0, sizeof s_ob_token);
+    ob_unlock();
+
+    memset(g_connected_isr, 0, sizeof g_connected_isr);
+    memset(s_shutdown_reg, 0, sizeof s_shutdown_reg);
+    memset(s_thread_notify, 0, sizeof s_thread_notify);
+    s_thread_notify_count = 0;
+    memset(s_apc_pool, 0, sizeof s_apc_pool);
+    memset(g_async_handles, 0, sizeof g_async_handles);
+    memset((void *)g_ke_promoted, 0, sizeof g_ke_promoted);
+    g_ke_promoted_n = 0;
+    memset((void *)g_ke_set_seen, 0, sizeof g_ke_set_seen);
+    g_ke_set_seen_n = 0;
+}
+
+static void kobj_load_u32tab(XboxKobjRd *r)
+{
+    uint32_t id = xbox_kobj_get32(r), n = xbox_kobj_get32(r), i, cap = 0;
+    volatile uint32_t *dst = NULL;
+    switch (id) {
+    case KOBJ_TAB_ISR:      dst = g_connected_isr;  cap = XBOX_MAX_VECTORS; break;
+    case KOBJ_TAB_SHUTDOWN: dst = s_shutdown_reg;   cap = SHUTDOWN_NOTIFY_MAX; break;
+    case KOBJ_TAB_NOTIFY:   dst = s_thread_notify;  cap = THREAD_NOTIFY_MAX; break;
+    case KOBJ_TAB_APC_POOL: dst = s_apc_pool;       cap = APC_POOL_MAX; break;
+    case KOBJ_TAB_ASYNC:    dst = g_async_handles;  cap = BRIDGE_ASYNC_MAX; break;
+    case KOBJ_TAB_PROMOTED: dst = g_ke_promoted;    cap = KE_PROMOTED_MAX; break;
+    case KOBJ_TAB_SET_SEEN: dst = g_ke_set_seen;    cap = KE_PROMOTED_MAX; break;
+    default: break;
+    }
+    for (i = 0; i < n; i++) {
+        uint32_t v = xbox_kobj_get32(r);
+        if (dst && i < cap)
+            dst[i] = v;
+    }
+    if (n > cap) n = cap;
+    if (id == KOBJ_TAB_NOTIFY) {
+        LONG k = 0;
+        for (i = 0; i < n; i++) if (s_thread_notify[i]) k++;
+        s_thread_notify_count = k;
+    } else if (id == KOBJ_TAB_PROMOTED) {
+        g_ke_promoted_n = (LONG)n;
+    } else if (id == KOBJ_TAB_SET_SEEN) {
+        g_ke_set_seen_n = (LONG)n;
+    }
+}
+
+int xbox_bridge_kobj_load(XboxKobjLoadCtx *c, uint16_t type, XboxKobjRd *r)
+{
+    uint32_t i;
+
+    switch (type) {
+    case XKOB_R_HANDLE: {
+        uint32_t idx = xbox_kobj_get32(r), id = xbox_kobj_get32(r);
+        uint32_t thobj = xbox_kobj_get32(r), ob = xbox_kobj_get32(r);
+        HANDLE h = id ? (HANDLE)xbox_kobj_obj(c, id) : NULL;
+        if (!idx || idx >= BRIDGE_HANDLE_MAX) {
+            xbox_kobj_fail(c, "handle index %u out of range", idx);
+            if (h) CloseHandle(h);
+            return 1;
+        }
+        if (id && !h) {
+            xbox_kobj_fail(c, "handle 0x%08X: object %u was not made",
+                           BRIDGE_HANDLE_TAG | idx, id);
+            return 1;
+        }
+        handle_lock();
+        if (s_handle_table[idx] && h) {
+            handle_unlock();
+            CloseHandle(h);
+            xbox_kobj_fail(c, "handle 0x%08X twice", BRIDGE_HANDLE_TAG | idx);
+            return 1;
+        }
+        s_handle_table[idx] = h;
+        handle_unlock();
+        s_token_thobj[idx] = thobj;   /* its reference is in the pool's counts */
+        s_ob_token[idx] = ob;
+        return 1;
+    }
+    case XKOB_R_THPOOL: {
+        uint32_t n = xbox_kobj_get32(r);
+        thobj_lock();
+        for (i = 0; i < n; i++) {
+            uint32_t va = xbox_kobj_get32(r), refs = xbox_kobj_get32(r);
+            if (i < THOBJ_MAX) {
+                s_thobj_va[i] = va;
+                s_thobj_refs[i] = (LONG)refs;
+            }
+        }
+        s_thobj_count = n < THOBJ_MAX ? n : THOBJ_MAX;
+        thobj_unlock();
+        return 1;
+    }
+    case XKOB_R_SHADOW: {
+        uint32_t va = xbox_kobj_get32(r), id = xbox_kobj_get32(r), use = xbox_kobj_get32(r);
+        HANDLE h = (HANDLE)xbox_kobj_obj(c, id);
+        int done = 0;
+        if (id && !h) {
+            xbox_kobj_fail(c, "KE shadow of 0x%08X: object %u was not made", va, id);
+            return 1;
+        }
+        ke_shadow_init();
+        EnterCriticalSection(&g_ke_shadow_cs);
+        for (i = 0; i < KE_SHADOW_SIZE; i++)
+            if (!g_ke_shadow[i].in_use) {
+                g_ke_shadow[i].in_use = use ? use : 1;
+                g_ke_shadow[i].guest_va = va;
+                g_ke_shadow[i].host_handle = h;
+                done = 1;
+                break;
+            }
+        LeaveCriticalSection(&g_ke_shadow_cs);
+        if (!done) {
+            if (h) CloseHandle(h);
+            xbox_kobj_fail(c, "KE shadow table full");
+        }
+        return 1;
+    }
+    case XKOB_R_TIMER: {
+        uint32_t tva = xbox_kobj_get32(r), dpc = xbox_kobj_get32(r);
+        long long left = (long long)xbox_kobj_get64(r);
+        long period = (long)(int32_t)xbox_kobj_get32(r);
+        int done = 0;
+        kernel_timer_start_once();
+        EnterCriticalSection(&g_timer_lock);
+        for (i = 0; i < XBOX_MAX_TIMERS; i++)
+            if (!g_timers[i].timer_va) {
+                g_timers[i].timer_va = tva;
+                g_timers[i].dpc_va = dpc;
+                g_timers[i].due_ms = kernel_timer_clock_ms() + left;
+                g_timers[i].period_ms = period;
+                done = 1;
+                break;
+            }
+        LeaveCriticalSection(&g_timer_lock);
+        if (!done)
+            xbox_kobj_fail(c, "kernel timer table full");
+        return 1;
+    }
+    case XKOB_R_DPC: {
+        uint32_t dpc = xbox_kobj_get32(r), a1 = xbox_kobj_get32(r), a2 = xbox_kobj_get32(r);
+        LONG next;
+        dpc_lock();
+        next = (g_dpc_tail + 1) % XBOX_MAX_PENDING_DPC;
+        if (next != g_dpc_head) {
+            g_dpc_queue[g_dpc_tail].dpc = dpc;
+            g_dpc_queue[g_dpc_tail].arg1 = a1;
+            g_dpc_queue[g_dpc_tail].arg2 = a2;
+            g_dpc_tail = next;
+        }
+        LeaveCriticalSection(&g_dpc_lock);
+        return 1;
+    }
+    case XKOB_R_THALERT: {
+        uint32_t kt = xbox_kobj_get32(r), id = xbox_kobj_get32(r), waiting = xbox_kobj_get32(r);
+        uint8_t a0 = xbox_kobj_get8(r), a1 = xbox_kobj_get8(r);
+        HANDLE h = id ? (HANDLE)xbox_kobj_obj(c, id) : NULL;
+        ThAlert *e;
+        thalert_lock();
+        e = thalert_find(kt, 1);
+        if (e) {
+            e->host = h;
+            /* The thread's own APC handle: the same value on POSIX, where a
+             * duplicate is the object's one handle with one more reference. */
+            e->src = h;
+            e->waiting = (int)waiting;
+            e->alerted[0] = a0;
+            e->alerted[1] = a1;
+            h = NULL;
+        }
+        thalert_unlock();
+        if (h) {
+            CloseHandle(h);
+            xbox_kobj_fail(c, "thread alert table full");
+        }
+        return 1;
+    }
+    case XKOB_R_OB: {
+        uint32_t body = xbox_kobj_get32(r), base = xbox_kobj_get32(r);
+        uint32_t ins = xbox_kobj_get32(r);
+        char name[OB_NAME_MAX];
+        int done = 0;
+        xbox_kobj_getstr(r, name, sizeof name);
+        ob_lock();
+        for (i = 0; i < OB_MAX; i++)
+            if (!s_ob[i].body) {
+                s_ob[i].body = body;
+                s_ob[i].base = base;
+                s_ob[i].inserted = (int)ins;
+                memcpy(s_ob[i].name, name, sizeof name);
+                done = 1;
+                break;
+            }
+        ob_unlock();
+        if (!done)
+            xbox_kobj_fail(c, "object table full");
+        return 1;
+    }
+    case XKOB_R_U32TAB:
+        kobj_load_u32tab(r);
+        return 1;
+    default:
+        return 0;
+    }
 }
