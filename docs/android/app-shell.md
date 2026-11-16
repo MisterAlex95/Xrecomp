@@ -2386,6 +2386,41 @@ game code, no CRC in their headers): one pack folder for the three, the last one
    and `prepare.log` if a step fails, and the frame rates.
 10. Switch the Thor to French: the Home lines, the Prepare buttons and the notes in French.
 
+### GameCube homebrew (XBA-259)
+
+The GameCube runtime (`consoles/gc/runtime`, consoles/README.md « GameCube runtime ») plays a homebrew `.dol` from a
+library folder as it is: no Import, no pack, no IPL, no Prepare yet (a GC card has no Home: A or Start launches it).
+`pack_loader.c` logs `PACK_NONE gc DOL-<CRC32> (not prepared, the interpreter runs it)` and calls `gc_runtime_start`;
+logcat then `gc: gc_runtime 0.1.0, program <name>.dol (...), key DOL-..., TV NTSC (60 Hz)` and `gc: window on, XFB
+to RGB on the GPU, audio off (no DSP yet), pads N`. The XFB is converted to RGB on the GPU and shown at 4:3
+(`RECOMP_GC_YUV=cpu` in recomp.cfg: on the CPU; `RECOMP_GC_TV=pal`: the program starts as on a PAL console, 50 Hz).
+Host pad N is controller port N (the device's own controls are port 1, always plugged in): A south, B east, X west,
+Y north, Z on RB, L / R the triggers (analog, the click past 85 %), left stick the main stick, right stick the C
+stick, Start; the game's rumble drives the pad's. `RECOMP_GC_PAD_MAP` remaps (the Controls screen does not offer the
+GameCube yet). No sound yet (the DSP is XBA-263). Back opens the in-game menu (fast-forward works; no save states).
+
+### Device check (GameCube homebrew, XBA-259), for Alex
+
+On the AYN Thor, `adb logcat -s xboxrecomp SDL` throughout. Our homebrew: `tools/consoles/build_homebrew.sh gc out/hb`
+(Docker; `out/hb/gc/hello.dol`, `padtest.dol`), then `adb shell mkdir -p /sdcard/gc && adb push out/hb/gc/hello.dol
+out/hb/gc/padtest.dol /sdcard/gc/`, and `/sdcard/gc` added as a library folder (Y › Library folders › Add a folder).
+
+1. Expected: the cards « hello » and « padtest » with the **GC** badge (with other consoles' games listed), no chip.
+2. A on **hello**. Expected: the game starts at once, white console text on black: « Hello World! », « XRecomp
+   GameCube spike (XBA-225) », « PowerPC: ok », « Gekko: ok », 4:3, sharp enough to read. logcat: `PACK_NONE gc
+   DOL-...`, `XFB to RGB on the GPU`, and every 10 s `gc: perf speed 100 % (60.0 of 60.0 VI/s) ...`. Screenshot.
+3. Back › Quit, then **padtest**. Expected: « Video NTSC 60 Hz », the field counter running, « Port 1 ok », ports 2-4
+   « none ». Press each button in turn: A, B, X, Y, Start, D-pad up / down / left / right, RB (Z, and the pad
+   rumbles while held), LT and RT slowly (L / R go 000 to about 216 smoothly, then 255 and the « L » / « R » name
+   at the click). Move the left stick to each end (stick -128..+127 in x, up is +), then the right stick (C stick).
+   Note any value that does not match. Screenshot with a few held.
+4. With an external pad connected too: « Port 2 ok » within a second or two, its inputs on port 2.
+5. Home, back into the game: it resumes (logcat `gc: paused` / `gc: resumed`). Back › fast-forward: the field
+   counter runs faster.
+6. `RECOMP_GC_YUV=cpu` in recomp.cfg, padtest again: the same picture (logcat `XFB to RGB on the CPU`); then
+   `RECOMP_GC_TV=pal` (and no YUV line): « Video PAL 50 Hz », perf `50.0 of 50.0 VI/s`, the picture still 4:3. Remove
+   both lines after.
+
 ### Device check (N64 games, XBA-174), for Alex
 
 On the AYN Thor, `adb logcat -s xboxrecomp SDL` throughout. Our homebrew: `tools/consoles/build_homebrew.sh n64

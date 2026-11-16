@@ -12,7 +12,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 | `n64/` | Nintendo 64 | MIPS R4300i (big-endian, 64-bit) |
 | `nds/` | Nintendo DS (spike, Linux headless only) | ARM946E-S (ARMv5TE) + ARM7TDMI |
 | `psp/` | PSP (spike, Linux headless only) | Allegrex (MIPS32 R4000-class, little-endian) + FPU + VFPU |
-| `gc/` | GameCube (spike, Linux headless only) | Gekko (PowerPC 750 + paired singles, big-endian) |
+| `gc/` | GameCube (homebrew DOLs in the app, XBA-259) | Gekko (PowerPC 750 + paired singles, big-endian) |
 | `dc/` | Dreamcast (spike, Linux headless only) | Hitachi SH-4 (SH7091, little-endian, FPU) |
 | `ps2/` | PlayStation 2 (spike, Linux headless only) | Emotion Engine: R5900 (MIPS III + 128-bit MMI, non-IEEE FPU) |
 | `x360/` | Xbox 360 (spike, tools and headers only) | Xenon (64-bit PowerPC + VMX128, big-endian) |
@@ -29,18 +29,19 @@ Each one has:
   skipped), and the root build's ctest runs it when the console is ON.
 
 **Title packs (XBA-147).** `pack.json` has an optional `console` field (`xbox` when absent, so every Xbox pack made
-before keeps loading, still format 1) and, for `gba` / `ps1` / `n64`, a `title_key` in place of `title_id`. The key is
+before keeps loading, still format 1) and, for `gba` / `ps1` / `n64` / `gc`, a `title_key` in place of `title_id`. The key is
 read from the game's content (`recomp_pack_rom_identify` in `src/platform/recomp_pack.c`, `Console.identify` in the
 app): GBA game code + CRC32 of the ROM (`AXVE-1A2B3C4D`), PS1 serial from `SYSTEM.CNF` (`SLUS-00594`, or
 `PSX-<CRC32 of the volume descriptor>` without a serial-shaped boot file), N64 game code + header CRC1
-(`NSME-635A2BFF`, any byte order). Such a pack lives in `packs/<console>-<key>/`. The app shell's loader
+(`NSME-635A2BFF`, any byte order), GameCube `DOL-` + CRC32 of a DOL (XBA-259: a DOL has no magic, so its header is
+checked field by field). Such a pack lives in `packs/<console>-<key>/`. The app shell's loader
 (`android/app/src/main/cpp/pack_loader.c`, `xba_pack_load_rom`) checks it and calls `<console>_runtime_start`
-(libmain.so links the three runtimes, which all play games: PS1 XBA-168 and N64 XBA-174 below); the GBA's plays the game, and
+(libmain.so links the four runtimes, which all play: PS1 XBA-168, N64 XBA-174, GameCube homebrew XBA-259 below); the GBA's plays the game, and
 needs no pack (`PACK_NONE`, XBA-157); a GBA pack that Prepare built (`python3 -m tools.prepare game.gba`, XBA-158:
 docs/android/prepare.md « GBA packs ») makes it run natively, checked and loaded by `runtime/gba_pack.c`
 (`PACK_LOADED` / `PACK_STALE`, the game always starts), and the addresses the interpreter had to run are written at
 exit for the next Prepare (`gba_runtime_opts.discovered_path`). Import filter (`Console.java`):
-`.gba`; `.bin`, `.cue`, `.chd`; `.z64`, `.n64`, `.v64`; and `.iso`, which both an Xbox and a PS1 disc use, so its
+`.gba`; `.bin`, `.cue`, `.chd`; `.z64`, `.n64`, `.v64`; `.dol`; and `.iso`, which both an Xbox and a PS1 disc use, so its
 content decides (Xbox volume magic `MICROSOFT*XBOX*MEDIA` first, then an ISO 9660 volume with system ID
 `PLAYSTATION`). CHD is accepted by name but not read yet (no title key).
 
@@ -60,9 +61,9 @@ RDP's command ring worker, fence executor and pipeline compile worker) call the 
 patch in `third_party/parallel-rdp`, given the hook of `n64_rdp_set_thread_hook` when the Vulkan RDP is created), so
 they are in the session, at nice -8 and put back on the fast cores after a resume like the software RDP's bands.
 
-CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1` and `XBR_CONSOLE_N64` are ON by default on Linux and macOS and OFF
-on Android and Windows. A console is turned on for Android once it is ready: the GBA (XBA-157), the PS1 (XBA-168) and
-the N64 (XBA-174) are.
+CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1`, `XBR_CONSOLE_N64` and `XBR_CONSOLE_GC` are ON by default on Linux,
+macOS and Android, OFF on Windows. A console is turned on for Android once it is ready: the GBA (XBA-157), the PS1
+(XBA-168), the N64 (XBA-174) and the GameCube (XBA-259, homebrew DOLs) are.
 
 **GBA core (XBA-152, XBA-153).** Interpreter first (decision of 2026-11-14, XBA-142); the static lifter (below) is an
 acceleration layer. `consoles/gba/runtime/gba_core.h`: an ARM7TDMI interpreter (ARM + Thumb), the memory map, LCD
@@ -1369,7 +1370,7 @@ full list is on XBA-218.
 
 **GameCube spike (XBA-225, epic XBA-219).** The first PowerPC frontend: a libogc hello world, statically
 recompiled, runs on Linux with 99.6 % of its instructions native and leaves on the XFB the picture the interpreter
-leaves. Linux / macOS headless only (`XBR_CONSOLE_GC`, off on Android and Windows), nothing in the app. What is there:
+leaves. Since XBA-259 the core plays on the host layer, in the app too (« GameCube runtime » below). What is there:
 
 - `tests/homebrew/hello`: our test program, libogc 3.2.1 built in `tools/docker/gc-homebrew.Dockerfile` (devkitPro's
   devkitPPC image, pinned by digest, 660 MB compressed / 2.6 GB on disk) by `tools/consoles/build_homebrew.sh gc`.
@@ -1409,9 +1410,44 @@ leaves. Linux / macOS headless only (`XBR_CONSOLE_GC`, off on Android and Window
   loops, calls, carries, CR logic) interpreted and recompiled at -O2, against known values (`GC_TEST_CC` /
   `GC_TEST_EMULATOR` run it for arm64 under qemu).
 
-Not there yet: GX / Flipper (CP FIFO, TEV, EFB copies), the DSP (audio), the DVD drive and disc images, pads and
-memory cards, the MMU (BATs, page tables), the estimate tables of fres / frsqrte / ps_res / ps_rsqrte (exact here),
-FPSCR exceptions and rounding modes, cycle timing, the Wii. What of the frontend carries to the Xbox 360 is on XBA-219.
+Not there yet: GX / Flipper (CP FIFO, TEV, EFB copies), the DSP (audio), the DVD drive and disc images, memory
+cards, the MMU (BATs, page tables), the estimate tables of fres / frsqrte / ps_res / ps_rsqrte (exact here), FPSCR
+exceptions and rounding modes, cycle timing, the Wii. What of the frontend carries to the Xbox 360 is on XBA-219.
+
+**GameCube runtime (XBA-259, GC-1).** The core on the host layer, so every later step (GX, discs, DSP) is tried on the
+AYN Thor first. `XBR_CONSOLE_GC` is ON on Android, Linux and macOS; the app plays a homebrew `.dol` from a library
+folder (no disc, no IPL, no Prepare yet).
+
+- Core additions (`runtime/`): `gc_si.c`, the serial interface with up to four standard controllers
+  (`gc_set_pad`): transfers through the I/O buffer (0x00 / 0xFF type: a standard controller with a motor; 0x41 / 0x42
+  origin / recalibrate; 0x40 direct read), the channels that poll latch their pad at the field start and every X lines
+  of SIPOLL (libogc: two polls per NTSC field), analog modes 0-7, RDST / NOREP / COMERR as libogc's `PAD_Read`
+  reads them, the motor command (`gc_pad_motor`); a port with nothing plugged in answers no command. Video timing
+  from the VI's DCR format at each field start: NTSC 525 lines / 60 fields per second, PAL 625 / 50 (`gc_field_ns`);
+  `gc_set_tv_mode(GC_TV_PAL)` leaves the VI on in PAL as an IPL would, so libogc's `VIDEO_GetPreferredMode` picks a
+  PAL mode (640 x 576). `gc_xfb_yuv`: the scanned-out XFB lines left in YUV 4:2:2 for a GPU.
+- `gc_runtime` (`gc_runtime.h`; the app's `gc_runtime_start`, the desktop's `gc_play`): one thread, one VI field per
+  shown frame paced at the field's own length, the XFB uploaded as an RGBA8 texture of half its width and converted
+  to RGB by a fragment shader (`gc_yuv_gl.c`, BT.601 studio range like `gc_xfb_rgb`; GLSL ES 3.00 / 1.50) into a
+  texture presented by `host_window_present_texture` at 4:3, `RECOMP_GC_YUV=cpu` (or a shader that does not build)
+  converting on the CPU. Pads: host pad N is port N through the player's mapping (`console_pad`, `CONSOLE_PAD_GC`,
+  `RECOMP_GC_PAD_MAP`: A south, B east, X west, Y north, Z right shoulder, L / R the triggers, digital past 85 % of
+  their travel, analog from the host triggers; sticks main = left, C = right), port 1 always plugged in (keyboard on a
+  desktop), the game's motor to `host_pad_rumble`. The perf line (`gc: perf ... VI/s`), the ADPF hint session, the
+  lifecycle pause, fast-forward (the in-game menu's toggle). No audio yet (XBA-263): nothing is opened. A pack
+  (`gc_tools.recomp`'s library) attaches when one is handed over; the interpreter's misses go to
+  `<files>/work/gc-<KEY>/discovered.txt`. Options: `RECOMP_GC_TV=pal`, `RECOMP_GC_YUV=cpu`, `RECOMP_GC_SCALE` /
+  `_FILTER` / `_SHADER`, `RECOMP_GC_FRAMES=N` (docs/runtime/environment-variables.md).
+- The app: `Console.GC` (badge « GC », `.dol` in the import filter, `Console.identify` = `recomp_pack_rom_identify`),
+  plays straight from its card (no Home: nothing to prepare yet); `pack_loader.c` logs `PACK_NONE gc DOL-<CRC32>` and
+  calls `gc_runtime_start`; libmain.so links `gc_runtime` and the whole of `gc_core` (exported, for packs).
+- `tests/homebrew/padtest`: our libogc pad test, every field the four ports as `PAD_Read` gives them (buttons, both
+  sticks, both triggers; Z held rumbles), drawn in place, and the same values in a `report` struct (magic
+  `XBAPADT1`). ctest `gc_padtest` (core, corpus): pad input injected on the SI, what the program read checked on all
+  four ports, hot plug, rumble, then PAL (50 Hz, 576 lines) and the YUV scan-out against the RGB one; `gc_pad_map`
+  (no corpus): the mapping and the DOL key; `gc_play_hello` / `gc_play_pad` (runtime, headless, corpus): the XFB
+  after 120 fields equal to `hello_xfb.png` / `padtest_xfb.png` and the perf line logged. `gc_run --pad
+  PORT:BUTTONS[:SX:SY:CX:CY:L:R]` and `--pal` for checks by hand.
 
 **Dreamcast spike (XBA-227, epic XBA-221).** A new frontend: the SH-4. Our KallistiOS hello world boots on Linux
 with no BIOS image, interpreted and recompiled (after the discovery loop over 99.99 % of its instructions run as
