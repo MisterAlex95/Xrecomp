@@ -837,7 +837,7 @@ public class GameMenuTest {
         assertNull(menu.row(GameMenu.Item.VK_DRIVER));
     }
 
-    /** XBA-181: an Xbox game has no console Scale / Filter rows. */
+    /** XBA-181: an Xbox game has no console Scale / Filter rows; XBA-237: it has its internal resolution. */
     @Test
     public void noConsoleRowsForAnXboxGame() throws Exception {
         java.io.File dir = new java.io.File(activity.getFilesDir(), "xbox-only");
@@ -850,7 +850,7 @@ public class GameMenuTest {
         assertNotNull(menu.row(GameMenu.Item.LANGUAGE));
         assertNull(menu.row(GameMenu.Item.SCALE));
         assertNull(menu.row(GameMenu.Item.FILTER));
-        assertNull(menu.row(GameMenu.Item.UPSCALE));
+        assertNotNull(menu.row(GameMenu.Item.UPSCALE));
     }
 
     @Test

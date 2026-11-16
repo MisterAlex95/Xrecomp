@@ -82,8 +82,9 @@ The APK every title starts from (SDLActivity + `libmain.so` + logcat): see [app-
 The default (XBA-119): the GL back end draws with OpenGL ES 3 on a headless EGL context instead of the CPU
 rasteriser, unless launcher › Settings › Graphics › Renderer says Software (`RECOMP_GPU=0`) or the title's profile
 forces it off; a device without GLES 3.0 falls back to the CPU rasteriser by itself; the Frame cap's Auto (`RECOMP_PACING=auto`, WP4) paces the flips at the title's own rate, or a steady lower one the device sustains, and keeps menus from running at 200+ fps (30 / 60 / Off: a fixed `RECOMP_GPU_FPS_CAP`);
-`RECOMP_GPU_SCALE` (Internal resolution: 1×, 2×, 3×, Fit the screen; default 1×) draws the 3D picture above 640×480
-and hands it to the window at that size.
+Settings › Graphics › Internal resolution (« All consoles », `RECOMP_UPSCALE`: Native, 2x, 4x; a game can have its own,
+XBA-237) or the Xbox's own Resolution row (`RECOMP_GPU_SCALE`: 1×, 2×, 3×, Fit the screen; wins when set) draws the 3D
+picture above 640×480 and hands it to the window at that size; default 1×.
 Context, GLES details and the device check lists:
 [gpu-backend.md « Android »](../technical/gpu-backend.md#android).
 

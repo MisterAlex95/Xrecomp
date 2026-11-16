@@ -182,7 +182,9 @@ public class ConsoleVideoTest {
         assertTrue(ConsoleVideo.applies(u, Console.PS1));
         assertTrue(ConsoleVideo.applies(u, Console.N64));
         assertFalse(ConsoleVideo.applies(u, Console.GBA));
-        assertFalse(ConsoleVideo.applies(u, Console.XBOX));
+        assertTrue("XBA-237: the Xbox GPU renderer", ConsoleVideo.applies(u, Console.XBOX));
+        assertFalse(ConsoleVideo.applies(ConsoleVideo.Setting.SCALE, Console.XBOX));
+        assertFalse(ConsoleVideo.applies(ConsoleVideo.Setting.FRAMEGEN, Console.XBOX));
         assertFalse(ConsoleVideo.applies(u, null));
         assertTrue(ConsoleVideo.applies(ConsoleVideo.Setting.SCALE, Console.GBA));
         String ps1 = "ps1-SLUS-00001", n64 = "n64-NZLP-B2055FBD";

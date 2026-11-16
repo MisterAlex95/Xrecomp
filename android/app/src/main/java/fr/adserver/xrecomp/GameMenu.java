@@ -1032,6 +1032,10 @@ final class GameMenu {
                 r = row(Item.P480, s(R.string.MENU_480P));
                 r.setChoices(video);
                 r.cycler = dir -> stepVideo(GameVideo.Setting.P480, dir);
+                // XBA-237: this game's internal resolution (the GPU renderer's), after « Restart to apply ».
+                r = row(Item.UPSCALE, s(R.string.MENU_UPSCALE));
+                r.setChoices(consoleLabels(ConsoleVideo.Setting.UPSCALE));
+                r.cycler = dir -> stepConsoleVideo(ConsoleVideo.Setting.UPSCALE, dir);
             }
             if (titleId() != null) {
                 // XBA-206: the picture shader (XBA-195 / XBA-203: every console's window and the Xbox presenter), this
