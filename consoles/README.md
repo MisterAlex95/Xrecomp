@@ -1,6 +1,6 @@
 # Other consoles
 
-XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS** and **PSP** spikes), statically recompiled the same way as
+XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS**, **PSP** and **GameCube** spikes), statically recompiled the same way as
 Xbox discs. This is early work: the layout, build options and test corpus are in place, the runtimes are empty, and no
 game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
@@ -12,6 +12,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 | `n64/` | Nintendo 64 | MIPS R4300i (big-endian, 64-bit) |
 | `nds/` | Nintendo DS (spike, Linux headless only) | ARM946E-S (ARMv5TE) + ARM7TDMI |
 | `psp/` | PSP (spike, Linux headless only) | Allegrex (MIPS32 R4000-class, little-endian) + FPU + VFPU |
+| `gc/` | GameCube (spike, Linux headless only) | Gekko (PowerPC 750 + paired singles, big-endian) |
 
 Each one has:
 
@@ -1362,6 +1363,50 @@ marks it, the interpreter stops on it), GE (graphics), audio, IO / UMD / memory 
 beyond DelayThread, more than one module (PRXes loaded at run time would need the PS1's content-keyed entries). The
 full list is on XBA-218.
 
+**GameCube spike (XBA-225, epic XBA-219).** The first PowerPC frontend: a libogc hello world, statically
+recompiled, runs on Linux with 99.6 % of its instructions native and leaves on the XFB the picture the interpreter
+leaves. Linux / macOS headless only (`XBR_CONSOLE_GC`, off on Android and Windows), nothing in the app. What is there:
+
+- `tests/homebrew/hello`: our test program, libogc 3.2.1 built in `tools/docker/gc-homebrew.Dockerfile` (devkitPro's
+  devkitPPC image, pinned by digest, 660 MB compressed / 2.6 GB on disk) by `tools/consoles/build_homebrew.sh gc`.
+  `VIDEO_Init`, `console_init` over the XFB, four lines, a PowerPC check (rlwinm / rlwimi, mulhw(u), divw, cntlzw,
+  addc / adde, srawi's carry, CR logic, fmadd, fctiwz, fsel, fdivs, fnabs: `PowerPC: ok`) and a Gekko check (ps_add,
+  ps_mul, ps_madd, ps_merge10, ps_sum0, ps_muls1, ps_neg, ps_cmpo0, ps_sel, psq_l / psq_st through GQRs in f32, u8
+  and s16 with scales, W = 1, saturation: `Gekko: ok`), then `VIDEO_WaitVSync` forever. Each check's expected value
+  is the manual's, not the runtime's.
+- `tools/ppc` (shared, console-agnostic: meant for the Xbox 360 too, XBA-229): `isa.py` decodes the 750's 32-bit
+  instruction set and leaves opcodes 4, 56, 57, 60, 61 to a layer; `discover.py` finds functions by recursive
+  descent (calls to a fixpoint, tail calls, overlapping functions allowed); `lift.py` writes one C function per
+  function, cut into blocks at resume points, in a macro vocabulary (`R(n)`, `RC_LWZ`, `RC_BLOCK`, `RC_EXIT`,
+  `RC_INTERP`...) that the console's header defines; `asm.py` encodes instructions for tests.
+- `tools/gc_tools` (`python3 -m gc_tools.recomp PROG.dol OUTDIR [--discovered FILE]`): the DOL format (`dol.py`), the
+  Gekko layer (`gekko.py`: paired singles and quantised loads / stores on top of tools.ppc's decoder and lifter),
+  seeds (entry, pointers into text in the data sections, `lis` / `addi` pairs that build text addresses, the
+  interpreter's misses).
+- `runtime/`: `gc_core` (C11 + libm, no host layer): a Gekko interpreter (`gc_cpu.c`: base PowerPC, FPU, paired
+  singles, the exceptions libogc uses: external interrupt, decrementer, system call, FP unavailable for its lazy FPU
+  switch, program for tw), the memory map with no MMU (EA & 0x3FFFFFFF: what libogc's BATs give), and the hardware
+  a libogc program touches before it prints (`gc_bus.c`): PI interrupts, VI timing / beam position / display
+  interrupts / framebuffer registers, the DSP mailbox (the DSP ROM's 0x8071FEED when it leaves halt) and ARAM DMA,
+  EXI / SI / AI transfers that complete at once with nothing attached. The IPL is not needed: the DOL is loaded and
+  low memory set as the IPL leaves it. `ppc_ops.h` holds the PowerPC semantics the interpreter and lifted code share;
+  `gc_recomp_rt.h` the lifted-code ABI (registers in the machine, MEM1 inline and byte-swapped, everything else
+  through `gc_read*` / `gc_write*`, one cycle per instruction, idle loops skip to the next event). Lifted code
+  returns to the dispatcher on calls, returns and indirect jumps (libogc switches threads under it); its table lists
+  every resume point, so dispatch is an exact hash lookup; text spans are hashed before use and again after an icbi.
+  `gc_run PROG.dol [--frames N] [--png OUT] [--pack LIB] [--missed FILE] [--stats] [--peek A:N] [-v]` writes the XFB
+  (YUV 4:2:2, BT.601) as a PNG.
+- `tests/`: ctest `gc_hello` (interpreter) and `gc_rc_hello` (recompiled, discovery loop: two rounds), both compare
+  the XFB after 120 fields with `hello_xfb.png` (`consoles/nds/tests/png_compare.py`); skipped (77) without the
+  corpus, run by the homebrew CI job (`tools/consoles/run_gc_homebrew.sh`). The Python tests (`tools/ppc/test_ppc.py`,
+  `consoles/gc/tools/gc_tools/test_gc_tools.py`) need no toolchain; one builds gc_run and a pack from source and runs
+  a synthetic program (paired singles, quantisation, FP, loops, calls, carries, CR logic) interpreted and
+  recompiled, against known values.
+
+Not there yet: GX / Flipper (CP FIFO, TEV, EFB copies), the DSP (audio), the DVD drive and disc images, pads and
+memory cards, the MMU (BATs, page tables), the estimate tables of fres / frsqrte / ps_res / ps_rsqrte (exact here),
+FPSCR exceptions and rounding modes, cycle timing, the Wii. What of the frontend carries to the Xbox 360 is on XBA-219.
+
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
-build ourselves (devkitARM / libtonc / libnds, PSn00bSDK, libdragon, PSPSDK) and dumps Alex made from his own media, kept outside every
+build ourselves (devkitARM / libtonc / libnds, devkitPPC / libogc, PSn00bSDK, libdragon, PSPSDK) and dumps Alex made from his own media, kept outside every
 repository.

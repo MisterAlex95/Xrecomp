@@ -176,6 +176,9 @@ jobs:
   # XBA-224: the PSP corpus (consoles/psp/tests/homebrew, built in pspdev's official image pinned by digest, about
   # 790 MB on the host) and the PSP spike's ctest (tools/consoles/run_psp_homebrew.sh, same deps image, about 40 s):
   # psp_hello / psp_pbp_hello / psp_rc_hello. Also on consoles/psp/.
+  # XBA-225: the GameCube corpus (consoles/gc/tests/homebrew, devkitPPC image, 660 MB compressed) and the GameCube
+  # spike's ctest (tools/consoles/run_gc_homebrew.sh, same deps image, about 15 s): gc_hello / gc_rc_hello. Also on
+  # consoles/gc/ and tools/ppc/.
   homebrew:
     needs: linux
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -206,7 +209,7 @@ jobs:
           base=${MERGE_BASE:-$BASE_SHA}
           if [ -n "$base" ] && git fetch -q --depth 1 "$url" "$base" 2>/dev/null \
              && files=$(git diff --name-only "$base" HEAD); then
-            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|consoles/n64/|consoles/ps1/|consoles/nds/|consoles/psp/|tools/prepare/|tools/docker/((gba|ps1|n64|nds|psp)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_nds_homebrew\.sh|run_psp_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh|build_gba_suite\.sh|run_n64_homebrew\.sh|build_n64_libdragon_tests\.sh|ps1_test_inputs\.sh|build_ps1_bios\.sh|fetch_ps1_tests\.sh|run_ps1_tests\.sh)$|\.gitea/workflows/ci\.yml$)'; then
+            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|consoles/n64/|consoles/ps1/|consoles/nds/|consoles/psp/|consoles/gc/|tools/ppc/|tools/prepare/|tools/docker/((gba|ps1|n64|nds|psp|gc)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_nds_homebrew\.sh|run_psp_homebrew\.sh|run_gc_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh|build_gba_suite\.sh|run_n64_homebrew\.sh|build_n64_libdragon_tests\.sh|ps1_test_inputs\.sh|build_ps1_bios\.sh|fetch_ps1_tests\.sh|run_ps1_tests\.sh)$|\.gitea/workflows/ci\.yml$)'; then
               echo "build=true" >> "$GITHUB_OUTPUT"
             else
               echo "Nothing the homebrew corpus is built from: skipped."
@@ -221,12 +224,12 @@ jobs:
         if: steps.paths.outputs.build == 'true'
         run: sh tools/ci/heavy_lock.sh acquire
 
-      - name: Build the corpus (GBA, PS1, N64, NDS, PSP)
+      - name: Build the corpus (GBA, PS1, N64, NDS, PSP, GameCube)
         if: steps.paths.outputs.build == 'true'
         run: |
           apk add --no-cache bash coreutils tar >/dev/null
           JOBS=4 bash tools/consoles/build_homebrew.sh all out/homebrew
-          for c in gba ps1 n64 nds psp; do echo "== $c"; cat "out/homebrew/$c/SHA256SUMS"; done
+          for c in gba ps1 n64 nds psp gc; do echo "== $c"; cat "out/homebrew/$c/SHA256SUMS"; done
 
       # A changed screenshot: look at the artefact's PNG; if the change is intended, rewrite the list with
       # tools/consoles/gba_corpus_packs.py CORPUS OUT --gba-run GBA_RUN --update (consoles/README.md).
@@ -263,6 +266,12 @@ jobs:
       - name: PSP corpus through the spike's ctest (interpreter, recompiled)
         if: steps.paths.outputs.build == 'true'
         run: JOBS=4 bash tools/consoles/run_psp_homebrew.sh out/homebrew out/psp-homebrew
+
+      # XBA-225: the GameCube spike's libogc hello world, interpreted and recompiled (discovery loop), XFB against
+      # consoles/gc/tests/hello_xfb.png (about 15 s, same deps image).
+      - name: GameCube corpus through the spike's ctest (interpreter, recompiled)
+        if: steps.paths.outputs.build == 'true'
+        run: JOBS=4 bash tools/consoles/run_gc_homebrew.sh out/homebrew out/gc-homebrew
 
       - name: PS1 test inputs (OpenBIOS, JaCzekanski/ps1-tests; cached)
         if: steps.paths.outputs.build == 'true'
