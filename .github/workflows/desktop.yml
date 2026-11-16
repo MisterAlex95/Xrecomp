@@ -138,6 +138,10 @@ jobs:
           SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout 20 "$t/work/project/build/title_12345678" \
             > "$t/run.log" 2>&1 || true
           grep -q 'XBE loaded' "$t/run.log" || { cat "$t/run.log"; exit 1; }
+          # The command line (docs/desktop/cli.md) over the same source, in a home of its own.
+          "$t/venv/bin/python" xrecomp --home "$t/home" prepare "$t/game" --no-build
+          ls "$t/home/titles/12345678/work/project/src/recomp/gen/recomp_dispatch.c"
+          "$t/venv/bin/python" xrecomp --home "$t/home" list | grep -q '^12345678 '
           # Frame generation is in the default build (XBA-187), from the tarballs the archive carries: no fetch.
           cmake -S . -B "$t/build" -DCMAKE_BUILD_TYPE=Release | tee "$t/configure.log"
           grep -q 'LSFG: bridge built' "$t/configure.log"
@@ -203,7 +207,7 @@ jobs:
             `xattr -dr com.apple.quarantine <the XRecomp folder>` in Terminal (otherwise macOS blocks the app, or
             runs it from a copy that cannot see its toolkit). Setup lists the Homebrew packages and Python it needs.
           - `*-linux.tar.gz`: the toolkit for Linux (x86-64 and arm64): `bash tools/linux/install_deps.sh`, then
-            `python3 -m tools.prepare /path/to/game.iso` (README, « Linux »).
+            `./xrecomp prepare /path/to/game.iso`, `./xrecomp play <game>` (README, « Linux »; docs/desktop/cli.md).
 
           No game inside: you prepare your own games on your computer.
           EOF

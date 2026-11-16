@@ -12,6 +12,7 @@ stuck in.
 - [Decompilation Guide](DECOMP.md) — Using the toolkit as a function splitter instead: one byte-exact `.s` per function, with signatures and the call graph
 - [Runtime Implementation Guide](runtime/README.md) — The four pillars every title needs: memory layout, kernel, graphics, input
 - [macOS Launcher](macos/launcher.md) — The XRecomp Mac app: library, prepare, play, settings; its prepare interface and Mac checklist
+- [Desktop command line](desktop/cli.md) — `xrecomp prepare / play / list / settings`: the Linux (and any desktop) front end, its storage and states
 - [Environment Variables](runtime/environment-variables.md) — Every `RECOMP_*` switch: default, effect, and the source file that reads it
 - [XMV movies](runtime/xmv.md) — The runtime's portable XMV decoder (WMV2 + Xbox ADPCM) and the hook a title layer binds in place of the XDK's movie player
 - [Contributing](../CONTRIBUTING.md) — Setup, where to focus, code style, how to submit

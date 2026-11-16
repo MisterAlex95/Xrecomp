@@ -82,13 +82,20 @@ in its folder. It sets up its own Python environment and prepares and plays your
 
 **Linux** (x86-64 / arm64), or any terminal
 
+Download `xrecomp-v<version>-linux.tar.gz` from the [latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest)
+(or use a checkout), then in its `XRecomp` folder:
+
 ```bash
 bash tools/linux/install_deps.sh            # apt / pacman / dnf  (macOS: bash tools/macos/setup.sh)
-python3 -m pip install capstone
-python3 -m tools.prepare /path/to/game.iso  # → <title id>-work/ with the native executable
+python3 -m pip install capstone pefile numpy
+./xrecomp prepare /path/to/game.iso         # or a disc folder, a .gba, a PS1 .cue / .chd, a .z64
+./xrecomp list                              # your library: Prepared, Prepared · out of date, Not prepared
+./xrecomp play game                         # by title, title ID or path
+./xrecomp settings game RECOMP_GPU=1        # per game; without a game: Default settings
 ```
 
-`--check` tells you whether a game is prepared and up to date, `--help` lists the options.
+Games are read where they are; work folders, settings and saves go to `~/.local/share/xrecomp`
+([command line guide](docs/desktop/cli.md)). `python3 -m tools.prepare` stays there underneath (`--check`, `--help`).
 
 The release archive carries the runtime prebuilt for Linux x86-64 (`runtime/linux-x86_64/`): prepare then compiles
 and links the title with clang (or the system's `cc`) alone, no CMake or Ninja. A `toolchain/bin/clang` next to the

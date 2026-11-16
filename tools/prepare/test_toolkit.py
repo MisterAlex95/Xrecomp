@@ -40,6 +40,7 @@ def test_selection_and_digest(tmp_path):
         "tools/recomp/__pycache__/lifter.cpython-313.pyc": b"pyc",
         "tools/disasm/output/functions.json": b"{}",
         "tools/android/theme_preview/x.py": b"ui",
+        "tools/xrecomp/__main__.py": b"desktop launcher",
         "tools/TOOLKIT_SHA256": b"not hashed",
         "src/kernel/kernel.h": b"h",
         "src/kernel/kernel.c": b"c",
