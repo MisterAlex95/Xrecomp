@@ -28,6 +28,7 @@
 #include "console_pad.h"
 #include "host_pad.h"
 #include "host_perf_hint.h"
+#include "host_perf_line.h"
 #include "host_window.h"
 #include "ps1_core.h"
 #include "ps1_devices.h"
@@ -1104,6 +1105,15 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     uint8_t rumble[2][2] = {{0, 0}, {0, 0}};   /* per port: small, large, as last sent to the host pads */
     int rumble_on = host_pad_rumble_env();     /* RECOMP_RUMBLE=0 turns the DualShock motors off (XBA-181) */
     recomp_perf_hint_begin(16683333);          /* the frame period; each frame's own below */
+    /* The performance line every console logs every 10 s and at the end (host_perf_line.h, XBA-243). */
+    enum { ST_EMU, ST_AUDIO, ST_PRESENT, ST_N };
+    static const host_perf_config hp_cfg = {
+        .console = "ps1", .unit = "fps", .frame_ns = 16683333, .nstages = ST_N,
+        .stage = {"emu", "audio", "present"}, .kind = {HOST_PERF_EMU, HOST_PERF_OTHER, HOST_PERF_RENDER},
+        .rest = "other", .rest_kind = HOST_PERF_OTHER,
+    };
+    host_perf hp;
+    host_perf_init(&hp, &hp_cfg, t0);
 
     for (;;) {
         int running = 1;
@@ -1128,6 +1138,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
                 cards_flush("pause");
                 dirty_at = dirty_first = 0;
                 was_paused = 1;
+                host_perf_pause(&hp, now_ns());
             }
             SDL_Delay(16);
             continue;
@@ -1137,8 +1148,10 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             fflush(stdout);
             was_paused = 0;
             next = now_ns(); /* the time away is not caught up */
+            host_perf_resume(&hp, next);
         }
         uint64_t work_t0 = now_ns(); /* the frame's work, for the performance hint (the sleep after it is not) */
+        host_perf_frame(&hp, work_t0, NULL);
 
         pad_in p1, p2;
         pads_read(0, players, analog, &p1);
@@ -1204,6 +1217,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         if (++cheat_polls % 30 == 0)
             recomp_cheats_poll(&cheats); /* the app changed the list: read it again */
         for (int step = 0; step < steps; step++) {
+            uint64_t te = now_ns();
             pthread_mutex_lock(&s_mu);
             disc_swap_step(m, &swap, frames + 1); /* the frame about to run */
             ps1_set_pad(m, 0, kind, p1.buttons, p1.lx, p1.ly, p1.rx, p1.ry);
@@ -1233,6 +1247,9 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
                 on = ps1_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
             pthread_mutex_unlock(&s_mu);
             frames++;
+            host_perf_stage(&hp, ST_EMU, now_ns() - te);
+            host_perf_guest(&hp, 1);
+            host_perf_set_frame_ns(&hp, frame_ns); /* NTSC or PAL, as the GPU runs */
             if (analog != was_analog) {
                 printf("ps1: the game set port 1 %s at frame %llu\n", pad_name(analog), (unsigned long long)frames);
                 fflush(stdout);
@@ -1242,6 +1259,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
 
             /* Sound: everything the frame made (about 735 sample frames); averaged down while fast-forwarding. */
             size_t got;
+            uint64_t ta = now_ns();
             while ((got = ps1_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2)) > 0) {
                 heard = 1;
                 if (ff)
@@ -1249,6 +1267,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
                 if (audio && got)
                     host_audio_queue(pcm, (uint32_t)got);
             }
+            host_perf_stage(&hp, ST_AUDIO, now_ns() - ta);
             if (last)
                 break;
         }
@@ -1290,11 +1309,15 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
         }
 
         if (window) {
+            uint64_t tp = now_ns();
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
             ps1_runtime_xrgb_to_rgba(xrgb, rgba, (size_t)dw * (size_t)dh);
             host_window_present_rgba(rgba, dw, dh, dw * 4);
+            host_perf_stage(&hp, ST_PRESENT, now_ns() - tp);
+            host_perf_shown(&hp, 1);
         }
+        host_perf_log_due(&hp, now_ns());
         if (o->frames && frames >= o->frames)
             break;
         recomp_perf_hint_frame((int64_t)(now_ns() - work_t0), (int64_t)frame_ns);
@@ -1315,11 +1338,14 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
                 late_resets++;
             } else if (next > t) {
                 sleep_until(next);
+                host_perf_idle(&hp, now_ns() - t);
             }
         }
     }
 
     recomp_perf_hint_end();
+    host_perf_log_run(&hp, now_ns(), NULL);
+    host_perf_live_clear();
     double secs = (double)(now_ns() - t0) / 1e9;
     printf("ps1: %llu frames in %.1f s (%.2f fps), %llu late resets\n", (unsigned long long)frames, secs,
            secs > 0 ? (double)frames / secs : 0.0, (unsigned long long)late_resets);

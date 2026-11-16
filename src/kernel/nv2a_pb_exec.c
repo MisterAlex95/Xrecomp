@@ -403,9 +403,18 @@ static float reg_f(uint32_t method)
 static uint64_t s_render_ns;            /* this frame so far */
 static uint64_t s_render_sum_ns, s_render_max_ns;
 static uint32_t s_render_frames;
+static uint64_t s_render_total_ns;      /* every frame's, never reset (nv2a_pb_exec_render_ns) */
+
+/* The render time of every frame finished so far (ns): the presenter's performance line (XBA-243) reads it at each
+ * flip, on the executor's thread. */
+uint64_t nv2a_pb_exec_render_ns(void)
+{
+    return s_render_total_ns;
+}
 
 static void render_time_frame(void)
 {
+    s_render_total_ns += s_render_ns;
     s_render_sum_ns += s_render_ns;
     if (s_render_ns > s_render_max_ns)
         s_render_max_ns = s_render_ns;

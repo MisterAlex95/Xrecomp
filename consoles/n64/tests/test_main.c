@@ -562,6 +562,15 @@ static void test_runs(const char *hb)
     CHECK(pf.frames == 120 && pf.host_frames >= 118 && pf.host_frames <= 120);
     CHECK(pf.cpu_ms > 0 && pf.vi_ms > 0 && pf.rdp && pf.vi_hz > 49 && pf.vi_hz < 61);
     CHECK(staged <= wall_ms * 1.001 && staged >= wall_ms * 0.9);
+    {
+        /* The run's line as logged ("n64: perf over the run: "), its fields shared with every console's
+         * (host_perf_line.h, XBA-243): speed, the stages per VI, the frames. */
+        char line[1024];
+        n64_runtime_perf_format(&pf, line, sizeof line);
+        printf("n64 perf over the run: %s\n", line);
+        CHECK(strncmp(line, "speed ", 6) == 0 && strstr(line, " VI/s); cpu ") != NULL);
+        CHECK(strstr(line, " ms/frame; worst ") != NULL && strstr(line, " frames; rsp ") != NULL);
+    }
     CHECK(n64_runtime_save_path(dir, "TEST-00000001", N64_SAVE_PAK0, pak, sizeof pak) == 0);
     CHECK(file_size(pak) == -1);
     CHECK(n64_runtime_save_path(dir, "TEST-00000001", N64_SAVE_EEPROM4K, eep, sizeof eep) == 0);

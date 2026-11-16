@@ -1,9 +1,13 @@
-/* A small performance overlay drawn over the game picture by the SDL
- * frame-buffer window (fb_present_sdl.c): FPS, frame time, draws, memory,
- * CPU, battery and temperature, and the title's status line (the window
- * title it sets, e.g. a background preparation percentage, which a phone has
- * no title bar to show). Off by default everywhere; RECOMP_OVERLAY=1 turns it
- * on (Android: Settings › Advanced › Performance overlay). */
+/* A small performance overlay drawn over the game picture by the Xbox
+ * frame-buffer window (fb_present_sdl.c, SDL's renderer) and the consoles'
+ * window (host_window.c, GL): FPS, frame time, draws (Xbox), the performance
+ * line's figures every console shares (host_perf_line.h, XBA-243: speed, the
+ * work per frame and its emulation / drawing split, the worst and slow frames,
+ * pictures shown), memory, CPU, battery and temperature, and the title's
+ * status line (the window title it sets, e.g. a background preparation
+ * percentage, which a phone has no title bar to show). Off by default
+ * everywhere; RECOMP_OVERLAY=1 turns it on (Android: Settings › Advanced ›
+ * Performance overlay). */
 #ifndef PERF_OVERLAY_H
 #define PERF_OVERLAY_H
 
@@ -12,10 +16,19 @@
 
 int  perf_overlay_enabled(void);
 /* Once in a while (every ~500 ms): new figures; returns 1 when the text
- * changed, so the window redraws even without a new guest frame. */
+ * changed, so the window redraws even without a new guest frame. now_ms on
+ * the monotonic clock (the performance line's live figures are dated on it);
+ * draws PERF_OVERLAY_NO_DRAWS: no draw count (the consoles). */
+#define PERF_OVERLAY_NO_DRAWS 0xFFFFFFFFu
 int  perf_overlay_tick(uint64_t now_ms, uint64_t flips, uint32_t draws, const char *status);
 /* Inside the frame, after the game picture, before SDL_RenderPresent. */
 void perf_overlay_draw(SDL_Renderer *ren);
+/* The overlay as 0xAARRGGBB words, row 0 at the top, for a window that
+ * draws it itself (host_window.c): NULL when there is nothing to show;
+ * *serial changes whenever the pixels do. */
+const uint32_t *perf_overlay_pixels(int *w, int *h, unsigned *serial);
+/* The overlay's text, its lines joined with '\n' (tests). */
+void perf_overlay_text(char *out, size_t n);
 void perf_overlay_reset(void);   /* the renderer's textures were lost */
 /* Frame generation figures for the next tick's "LSFG" line: state 0 = no
  * line, 1 = generating (real and shown fps x 100, generation time in us),

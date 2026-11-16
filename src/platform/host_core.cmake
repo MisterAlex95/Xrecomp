@@ -7,12 +7,14 @@
 #   host_cpus         run on the fast cores of a big.LITTLE host (host_cpus.h)
 #   host_perf_hint    a console runtime's frame loop as an Android performance hint session (host_perf_hint.h),
 #                     POSIX; libandroid's ADPF looked up at run time, a no-op elsewhere
+#   host_perf_line    the performance line every console logs every 10 s and at exit, and the overlay's live
+#                     figures (host_perf_line.h, XBA-243), POSIX
 #   recomp_storage    a title's data and save directories on a host without a shell (recomp_storage.h), POSIX
 #   xbr_host_core     the log pump (android_log.c), the app lifecycle (recomp_lifecycle.c), the quit path
 #                     (recomp_quit.c), the consoles' save states / fast-forward (recomp_states.c, XBA-182) and
 #                     hotkeys (recomp_hotkeys.c, XBA-190), rewind (recomp_rewind.c, XBA-194), cheats
 #                     (recomp_cheats.c, XBA-197),
-#                     POSIX; links the first four and host_perf_hint (xbr_host adds recomp_storage)
+#                     POSIX; links the first four, host_perf_hint and host_perf_line (xbr_host adds recomp_storage)
 if(NOT TARGET host_time)
     get_filename_component(_xbr_core_src "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
@@ -36,6 +38,12 @@ if(NOT TARGET host_time)
         target_compile_options(host_perf_hint PRIVATE -Wall -Wextra)
         set_target_properties(host_perf_hint PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+        add_library(host_perf_line STATIC ${CMAKE_CURRENT_LIST_DIR}/host_perf_line.c)
+        target_include_directories(host_perf_line PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+        target_link_libraries(host_perf_line PUBLIC Threads::Threads)
+        target_compile_options(host_perf_line PRIVATE -Wall -Wextra)
+        set_target_properties(host_perf_line PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
         # POSIX hosts (dirent); the Android app shell links it.
         add_library(recomp_storage STATIC ${CMAKE_CURRENT_LIST_DIR}/recomp_storage.c)
         target_include_directories(recomp_storage PUBLIC ${CMAKE_CURRENT_LIST_DIR})
@@ -52,7 +60,7 @@ if(NOT TARGET host_time)
         target_include_directories(xbr_host_core PUBLIC ${_xbr_core_src} ${CMAKE_CURRENT_LIST_DIR})
         find_package(Threads REQUIRED)
         target_link_libraries(xbr_host_core PUBLIC Threads::Threads recomp_exit_hook host_time recomp_cfg host_cpus
-                              host_perf_hint)
+                              host_perf_hint host_perf_line)
         if(NOT APPLE)
             target_link_libraries(xbr_host_core PUBLIC m)   # libSystem has libm on macOS
         endif()

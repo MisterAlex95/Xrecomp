@@ -29,6 +29,7 @@
 #include "console_pad.h"
 #include "host_pad.h"
 #include "host_perf_hint.h"
+#include "host_perf_line.h"
 #include "host_window.h"
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
@@ -669,6 +670,15 @@ int gba_runtime_run(const gba_runtime_opts *o)
     recomp_hotkeys_state hk_keys = {0};
     recomp_ff_carry carry = {{0, 0}, 0};
     recomp_perf_hint_begin(GBA_FRAME_NS); /* the frame loop, one session (no worker threads) */
+    /* The performance line every console logs every 10 s and at the end (host_perf_line.h, XBA-243). */
+    enum { ST_EMU, ST_AUDIO, ST_PRESENT, ST_N };
+    static const host_perf_config hp_cfg = {
+        .console = "gba", .unit = "fps", .frame_ns = GBA_FRAME_NS, .nstages = ST_N,
+        .stage = {"emu", "audio", "present"}, .kind = {HOST_PERF_EMU, HOST_PERF_OTHER, HOST_PERF_RENDER},
+        .rest = "other", .rest_kind = HOST_PERF_OTHER,
+    };
+    host_perf hp;
+    host_perf_init(&hp, &hp_cfg, t0);
 
     for (;;) {
         int running = 1;
@@ -693,6 +703,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
                 save_flush("pause");
                 dirty_at = 0;
                 was_paused = 1;
+                host_perf_pause(&hp, now_ns());
             }
             SDL_Delay(16);
             continue;
@@ -702,8 +713,10 @@ int gba_runtime_run(const gba_runtime_opts *o)
             fflush(stdout);
             was_paused = 0;
             next = now_ns();   /* the time away is not caught up */
+            host_perf_resume(&hp, next);
         }
         uint64_t work_t0 = now_ns(); /* the frame's work, for the performance hint (the sleep after it is not) */
+        host_perf_frame(&hp, work_t0, NULL);
 
         uint32_t hk_held = 0, hk_pressed = 0, key_pressed = 0;
         uint16_t keys = (uint16_t)(o->keys | pads_keys(&hk_held, &hk_pressed) | (window ? keyboard_keys() : 0));
@@ -736,6 +749,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
         uint64_t burst_end = now_ns() + GBA_FRAME_NS * 9 / 10;
         gba_cheats_poll(&cheats); /* the app changed the list: read it again */
         for (int step = 0; step < steps; step++) {
+            uint64_t te = now_ns();
             pthread_mutex_lock(&s_mu);
             gba_set_keys(m, keys);
             gba_run_frame(m, fb);
@@ -748,6 +762,9 @@ int gba_runtime_run(const gba_runtime_opts *o)
             }
             pthread_mutex_unlock(&s_mu);
             frames++;
+            uint64_t ta = now_ns();
+            host_perf_stage(&hp, ST_EMU, ta - te);
+            host_perf_guest(&hp, 1);
 
             /* Sound: everything the frame made (about 803 sample frames); averaged down while fast-forwarding. */
             size_t got;
@@ -758,6 +775,7 @@ int gba_runtime_run(const gba_runtime_opts *o)
                 if (audio && got)
                     host_audio_queue(pcm, (uint32_t)got);
             }
+            host_perf_stage(&hp, ST_AUDIO, now_ns() - ta);
             if (o->frames && frames >= o->frames)
                 break;
             if (ff && !speed && now_ns() >= burst_end)
@@ -773,11 +791,15 @@ int gba_runtime_run(const gba_runtime_opts *o)
         }
 
         if (window) {
+            uint64_t tp = now_ns();
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
             gba_runtime_rgb555_to_rgba(fb, rgba, GBA_SCREEN_W * GBA_SCREEN_H);
             host_window_present_rgba(rgba, GBA_SCREEN_W, GBA_SCREEN_H, GBA_SCREEN_W * 4);
+            host_perf_stage(&hp, ST_PRESENT, now_ns() - tp);
+            host_perf_shown(&hp, 1);
         }
+        host_perf_log_due(&hp, now_ns());
         if (o->frames && frames >= o->frames)
             break;
         recomp_perf_hint_frame((int64_t)(now_ns() - work_t0), (int64_t)GBA_FRAME_NS);
@@ -798,11 +820,14 @@ int gba_runtime_run(const gba_runtime_opts *o)
                 late_resets++;
             } else if (next > t) {
                 sleep_until(next);
+                host_perf_idle(&hp, now_ns() - t);
             }
         }
     }
 
     recomp_perf_hint_end();
+    host_perf_log_run(&hp, now_ns(), NULL);
+    host_perf_live_clear();
     double secs = (double)(now_ns() - t0) / 1e9;
     printf("gba: %llu frames in %.1f s (%.2f fps), %llu late resets\n", (unsigned long long)frames, secs,
            secs > 0 ? (double)frames / secs : 0.0, (unsigned long long)late_resets);

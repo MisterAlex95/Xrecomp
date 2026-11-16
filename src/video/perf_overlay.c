@@ -3,8 +3,10 @@
  * figures come from /proc and /sys where the host has them (Linux, Android)
  * and getrusage elsewhere, refreshed twice a second. */
 #include "perf_overlay.h"
+#include "host_perf_line.h"
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,13 +36,17 @@ static unsigned glyph(int c)
     return 0;
 }
 
-#define MAX_LINES 8
+#define MAX_LINES 11
 #define LINE_CHARS 48
 
 static char s_lines[MAX_LINES][LINE_CHARS];
 static int s_nlines;
 static SDL_Texture *s_tex;
 static int s_tex_w, s_tex_h, s_dirty_tex = 1;
+/* The text drawn (perf_overlay_pixels): rebuilt when the text changes. */
+static uint32_t *s_px;
+static int s_px_w, s_px_h, s_dirty_px = 1;
+static unsigned s_px_serial;
 
 static uint64_t s_last_ms, s_last_flips;
 static double s_last_cpu_s;
@@ -169,6 +175,15 @@ static double cpu_temp_c(void)
     return best;
 }
 
+/* One line of the overlay, cut at LINE_CHARS. */
+__attribute__((format(printf, 2, 3))) static void put_line(char *line, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, LINE_CHARS, fmt, ap);
+    va_end(ap);
+}
+
 int perf_overlay_tick(uint64_t now_ms, uint64_t flips, uint32_t draws, const char *status)
 {
     char old[MAX_LINES][LINE_CHARS];
@@ -182,8 +197,11 @@ int perf_overlay_tick(uint64_t now_ms, uint64_t flips, uint32_t draws, const cha
     if (s_last_ms && now_ms > s_last_ms) {
         double dt = (double)(now_ms - s_last_ms) / 1000.0;
         s_fps = (double)(flips - s_last_flips) / dt;
-        snprintf(s_lines[n++], LINE_CHARS, "FPS %.1f  %.1f MS  DRAWS %u", s_fps,
-                 s_fps > 0.05 ? 1000.0 / s_fps : 0.0, (unsigned)draws);
+        if (draws == PERF_OVERLAY_NO_DRAWS)
+            snprintf(s_lines[n++], LINE_CHARS, "FPS %.1f  %.1f MS", s_fps, s_fps > 0.05 ? 1000.0 / s_fps : 0.0);
+        else
+            snprintf(s_lines[n++], LINE_CHARS, "FPS %.1f  %.1f MS  DRAWS %u", s_fps,
+                     s_fps > 0.05 ? 1000.0 / s_fps : 0.0, (unsigned)draws);
         snprintf(s_lines[n++], LINE_CHARS, "CPU %.0f %%", (cpu - s_last_cpu_s) / dt * 100.0);
     } else {
         snprintf(s_lines[n++], LINE_CHARS, "FPS --");
@@ -191,6 +209,25 @@ int perf_overlay_tick(uint64_t now_ms, uint64_t flips, uint32_t draws, const cha
     s_last_ms = now_ms;
     s_last_flips = flips;
     s_last_cpu_s = cpu;
+
+    /* The performance line's fields, the same on every console (host_perf_line.h): the game's rate against its full
+     * one, the work of a frame and its emulation / drawing split, the worst frame and the slow ones, pictures shown;
+     * over the last half second. */
+    {
+        host_perf_figures f;
+        if (host_perf_live_get(now_ms * 1000000ull, &f)) {
+            const char *unit = f.cfg.unit ? f.cfg.unit : "fps";
+            if (f.full_hz > 0)
+                put_line(s_lines[n++], "SPEED %.0f %%  %.1f/%.1f %s", f.speed_pct, f.guest_fps,
+                         f.full_hz, unit);
+            else
+                put_line(s_lines[n++], "GAME %.1f %s", f.guest_fps, unit);
+            put_line(s_lines[n++], "FRAME %.1f  EMU %.1f  DRAW %.1f MS", f.busy_ms, f.emu_ms,
+                     f.render_ms);
+            put_line(s_lines[n++], "WORST %.0f MS  SLOW %llu/%llu  SHOWN %.0f", f.worst_ms,
+                     (unsigned long long)f.over_1, (unsigned long long)f.host_frames, f.shown_fps);
+        }
+    }
 
     if (s_fg_state == 1)
         snprintf(s_lines[n++], LINE_CHARS, "LSFG %u.%u / %u.%u FPS  GEN %u.%u MS",
@@ -226,9 +263,25 @@ int perf_overlay_tick(uint64_t now_ms, uint64_t flips, uint32_t draws, const cha
     s_nlines = n;
     if (memcmp(old, s_lines, sizeof old) != 0) {
         s_dirty_tex = 1;
+        s_dirty_px = 1;
         return 1;
     }
     return 0;
+}
+
+void perf_overlay_text(char *out, size_t n)
+{
+    size_t o = 0;
+    int i;
+    if (!n)
+        return;
+    out[0] = 0;
+    for (i = 0; i < s_nlines && o < n; i++) {
+        int k = snprintf(out + o, n - o, "%s%s", i ? "\n" : "", s_lines[i]);
+        if (k < 0)
+            break;
+        o += (size_t)k;
+    }
 }
 
 void perf_overlay_reset(void)
@@ -239,12 +292,15 @@ void perf_overlay_reset(void)
     s_dirty_tex = 1;
 }
 
-/* The text at 1 texel per font pixel, white on a translucent black box. */
-static void build_texture(SDL_Renderer *ren)
+/* The text at 1 pixel per font pixel, white on a translucent black box
+ * (0xAARRGGBB words), kept in s_px until the text changes. */
+static int build_pixels(void)
 {
     int cols = 0, i, w, h, pad = 2;
     uint32_t *px;
 
+    if (!s_dirty_px && s_px)
+        return 1;
     for (i = 0; i < s_nlines; i++) {
         int l = (int)strlen(s_lines[i]);
         if (l > cols)
@@ -253,20 +309,15 @@ static void build_texture(SDL_Renderer *ren)
     w = cols * 4 - 1 + 2 * pad;
     h = s_nlines * 7 - 2 + 2 * pad;
     if (w <= 2 * pad || h <= 2 * pad)
-        return;
-    if (!s_tex || w != s_tex_w || h != s_tex_h) {
-        if (s_tex)
-            SDL_DestroyTexture(s_tex);
-        s_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
-        if (!s_tex)
-            return;
-        SDL_SetTextureBlendMode(s_tex, SDL_BLENDMODE_BLEND);
-        s_tex_w = w;
-        s_tex_h = h;
-    }
-    px = (uint32_t *)calloc((size_t)w * (size_t)h, sizeof *px);
+        return 0;
+    px = (uint32_t *)realloc(s_px, (size_t)w * (size_t)h * sizeof *px);
     if (!px)
-        return;
+        return 0;
+    s_px = px;
+    s_px_w = w;
+    s_px_h = h;
+    s_dirty_px = 0;
+    s_px_serial++;
     for (i = 0; i < w * h; i++)
         px[i] = 0xA0000000u;
     for (i = 0; i < s_nlines; i++) {
@@ -282,8 +333,35 @@ static void build_texture(SDL_Renderer *ren)
                         px[(y0 + r) * w + x0 + b] = color;
         }
     }
-    SDL_UpdateTexture(s_tex, NULL, px, w * 4);
-    free(px);
+    return 1;
+}
+
+const uint32_t *perf_overlay_pixels(int *w, int *h, unsigned *serial)
+{
+    if (!perf_overlay_enabled() || !s_nlines || !build_pixels())
+        return NULL;
+    *w = s_px_w;
+    *h = s_px_h;
+    *serial = s_px_serial;
+    return s_px;
+}
+
+/* The pixels into an SDL texture (the Xbox window). */
+static void build_texture(SDL_Renderer *ren)
+{
+    if (!build_pixels())
+        return;
+    if (!s_tex || s_px_w != s_tex_w || s_px_h != s_tex_h) {
+        if (s_tex)
+            SDL_DestroyTexture(s_tex);
+        s_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, s_px_w, s_px_h);
+        if (!s_tex)
+            return;
+        SDL_SetTextureBlendMode(s_tex, SDL_BLENDMODE_BLEND);
+        s_tex_w = s_px_w;
+        s_tex_h = s_px_h;
+    }
+    SDL_UpdateTexture(s_tex, NULL, s_px, s_px_w * 4);
     s_dirty_tex = 0;
 }
 

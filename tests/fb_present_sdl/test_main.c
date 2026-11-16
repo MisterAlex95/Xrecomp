@@ -23,9 +23,13 @@
  *   live        none at the start, scanlines set live (xbox_FramebufferWindowSetShader, the in-game menu) drawn
  *               from the window's next turn, then lcd set live: none
  * Skipped (77) with no display or under XBR_BUILD_ONLY. `fb_present_sdl_test <case>` runs one case.
+ * Before that, with or without a display (XBA-243): the performance line of headless flips
+ * (xbox_FramebufferWindowFrameStats, xbox_FramebufferWindowPresentHost with no window), "xbox: perf over the run: ..."
+ * as every console logs it (host_perf_line.h).
  */
 #include "video_player.h"
 #include "present_shaders.h"
+#include "host_perf_line.h"
 
 #include <SDL.h>
 
@@ -409,6 +413,32 @@ static int probe_child(const void *arg)
     return ok ? 0 : 1;
 }
 
+/* 31 flips 10 ms apart with no window: 30 host frames, nothing shown, the line logged once over the run. */
+static int perf_headless(void)
+{
+    uint32_t *px = grey_frame(0);
+    char line[1024];
+    int fail = 0;
+
+    s_case = "perf";
+    for (int i = 0; i < 31; i++) {
+        xbox_FramebufferWindowFrameStats(10);
+        CHECK(xbox_FramebufferWindowPresentHost(px, FW, FH, FW * 4u, XBOX_FB_HOST_BGRX8888) == 0);
+        sleep_ms(10);
+    }
+    xbox_FramebufferWindowPerfLog();
+    host_perf_last_line(1, line, sizeof line);
+    printf("xbox perf over the run: %s\n", line);
+    CHECK(strncmp(line, "speed ? (", 9) == 0 && strstr(line, " fps); render 0.0 present ") != NULL);
+    CHECK(strstr(line, " idle 0.0 guest ") != NULL && strstr(line, " > 16.7 ms, ") != NULL);
+    CHECK(strstr(line, " of 30 frames; shown 0.0 fps, busy ") != NULL);
+    xbox_FramebufferWindowPerfLog();   /* once: the second does nothing */
+    fail = s_fail;
+    free(px);
+    printf("fb_present_sdl perf (headless) %s\n", fail ? "FAIL" : "PASS");
+    return fail;
+}
+
 int main(int argc, char **argv)
 {
     static const char *const k_renderers[] = { "opengl", "opengles2" };
@@ -417,6 +447,12 @@ int main(int argc, char **argv)
 
     setvbuf(stdout, NULL, _IONBF, 0);   /* nothing buffered is copied into the children */
 
+    if (argc <= 1 || !strcmp(argv[1], "perf")) {
+        if (perf_headless() != 0)
+            return 1;
+        if (argc > 1)
+            return 0;
+    }
     if (getenv("XBR_BUILD_ONLY") && getenv("XBR_BUILD_ONLY")[0]) {
         printf("fb_present_sdl: XBR_BUILD_ONLY, skipped\n");
         return 77;

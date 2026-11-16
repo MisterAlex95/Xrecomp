@@ -9,10 +9,14 @@
  *   host_layer_test shaders  the console window's picture shaders (XBA-195), skipped the same way
  *   host_layer_test present_shaders  the shared shader module (XBA-203): keys and sources on every host, each
  *                            preset built in every GL context the display offers
+ *   host_layer_test overlay  the performance overlay's text (XBA-243), no display: each console's performance line
+ *                            (host_perf_line.h) gives it the same fields
  */
 #include "host_audio.h"
 #include "host_cpus.h"
 #include "host_pad.h"
+#include "host_perf_line.h"
+#include "perf_overlay.h"
 #include "host_time.h"
 #include "host_window.h"
 #include "present_shaders.h"
@@ -1117,6 +1121,70 @@ static int run_present_shaders(void)
     return s_fail;
 }
 
+/* The overlay's text with each console's performance line feeding it (made-up clocks; the overlay dates the live
+ * figures on the same clock): the same three lines for all four, their figures from the window just published. */
+static int run_overlay(void)
+{
+    static const host_perf_config cfgs[4] = {
+        {.console = "gba", .unit = "fps", .frame_ns = 16742706, .nstages = 3, .stage = {"emu", "audio", "present"},
+         .kind = {HOST_PERF_EMU, HOST_PERF_OTHER, HOST_PERF_RENDER}},
+        {.console = "ps1", .unit = "fps", .frame_ns = 16683333, .nstages = 3, .stage = {"emu", "audio", "present"},
+         .kind = {HOST_PERF_EMU, HOST_PERF_OTHER, HOST_PERF_RENDER}},
+        {.console = "n64", .unit = "VI/s", .frame_ns = 16683333, .nstages = 4, .stage = {"core", "vi", "present", "audio"},
+         .kind = {HOST_PERF_EMU, HOST_PERF_RENDER, HOST_PERF_RENDER, HOST_PERF_OTHER}},
+        {.console = "xbox", .unit = "fps", .budget_ns = 16666667, .nstages = 2, .stage = {"render", "present"},
+         .kind = {HOST_PERF_RENDER, HOST_PERF_RENDER}, .rest = "guest", .rest_kind = HOST_PERF_EMU},
+    };
+    char text[1024];
+
+    setenv("RECOMP_OVERLAY", "1", 1);
+    CHECK(perf_overlay_enabled());
+    for (int c = 0; c < 4; c++) {
+        host_perf p;
+        uint64_t t = (uint64_t)(c + 1) * 100000000000ull, period = c == 3 ? 33333333 : 16683333;
+        host_perf_init(&p, &cfgs[c], t);
+        for (int i = 0; i < 40; i++) { /* 4 ms emulation, 1 ms drawing, a 25 ms frame every 10th */
+            host_perf_frame(&p, t, NULL);
+            uint64_t emu = i % 10 == 9 ? 24000000 : 4000000;
+            if (c == 3) {
+                host_perf_stage(&p, 0, 1000000);
+            } else {
+                host_perf_stage(&p, 0, emu);
+                host_perf_stage(&p, 2, 1000000); /* present */
+            }
+            host_perf_guest(&p, 1);
+            host_perf_shown(&p, 1);
+            uint64_t work = c == 3 ? period : emu + 1000000;
+            if (period > work)
+                host_perf_idle(&p, period - work);
+            t += period > work ? period : work;
+        }
+        host_perf_frame(&p, t, NULL);
+        perf_overlay_tick(t / 1000000ull - 500, 0, PERF_OVERLAY_NO_DRAWS, NULL);
+        perf_overlay_tick(t / 1000000ull, 30, c == 3 ? 120 : PERF_OVERLAY_NO_DRAWS, NULL);
+        perf_overlay_text(text, sizeof text);
+        printf("overlay %s:\n%s\n", cfgs[c].console, text);
+        CHECK(strstr(text, "FPS ") == text);
+        CHECK((strstr(text, "DRAWS 120") != NULL) == (c == 3));
+        if (c == 3)
+            CHECK(strstr(text, "\nGAME 30.0 fps\n") != NULL);
+        else
+            CHECK(strstr(text, "\nSPEED ") != NULL && strstr(text, c == 2 ? " VI/s\n" : " fps\n") != NULL);
+        CHECK(strstr(text, "\nFRAME ") != NULL && strstr(text, "  EMU ") != NULL && strstr(text, "  DRAW 1.0 MS\n"));
+        CHECK(c != 3 || strstr(text, "  EMU 32.3  ") != NULL); /* the Xbox: the game's work is the rest */
+        CHECK(strstr(text, "\nWORST ") != NULL && strstr(text, "  SLOW ") != NULL && strstr(text, "  SHOWN ") != NULL);
+        int w = 0, h = 0;
+        unsigned serial = 0;
+        CHECK(perf_overlay_pixels(&w, &h, &serial) != NULL && w > 100 && h > 40);
+    }
+    host_perf_live_clear();
+    perf_overlay_tick(1000000000000ull, 0, PERF_OVERLAY_NO_DRAWS, NULL);
+    perf_overlay_text(text, sizeof text);
+    CHECK(strstr(text, "SPEED") == NULL && strstr(text, "WORST") == NULL); /* the game ended: no figures */
+    printf("%s\n", s_fail ? "host_layer overlay: FAIL" : "host_layer overlay: ok");
+    return s_fail;
+}
+
 int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "core";
@@ -1130,6 +1198,8 @@ int main(int argc, char **argv)
         return run_shaders();
     if (!strcmp(mode, "present_shaders"))
         return run_present_shaders();
-    fprintf(stderr, "usage: %s core|window|shaders|present_shaders\n", argv[0]);
+    if (!strcmp(mode, "overlay"))
+        return run_overlay();
+    fprintf(stderr, "usage: %s core|window|shaders|present_shaders|overlay\n", argv[0]);
     return 2;
 }

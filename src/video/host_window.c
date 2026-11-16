@@ -2,6 +2,7 @@
 #include "host_window.h"
 #include "host_pad.h"
 #include "host_time.h"
+#include "perf_overlay.h"
 #include "recomp_lifecycle.h"
 
 #include <SDL.h>
@@ -56,6 +57,8 @@
 #define XGL_SCISSOR_TEST        0x0C11
 #define XGL_BLEND               0x0BE2
 #define XGL_DEPTH_TEST          0x0B71
+#define XGL_SRC_ALPHA           0x0302
+#define XGL_ONE_MINUS_SRC_ALPHA 0x0303
 
 typedef struct {
     void (APIENTRY *GenTextures)(int, unsigned *);
@@ -69,6 +72,8 @@ typedef struct {
     void (APIENTRY *ClearColor)(float, float, float, float);
     void (APIENTRY *Clear)(unsigned);
     void (APIENTRY *Disable)(unsigned);
+    void (APIENTRY *Enable)(unsigned);
+    void (APIENTRY *BlendFunc)(unsigned, unsigned);
     unsigned (APIENTRY *CreateShader)(unsigned);
     void (APIENTRY *ShaderSource)(unsigned, int, const char *const *, const int *);
     void (APIENTRY *CompileShader)(unsigned);
@@ -113,6 +118,11 @@ static int s_scale = HOST_SCALE_ASPECT, s_filter = HOST_FILTER_LINEAR, s_tex_fil
 static int s_aspect_num, s_aspect_den; /* host_window_set_aspect; 0: the picture's own */
 static char s_capture[1024];
 static int s_drawing_generated; /* the picture being drawn is a generated frame: no capture of it */
+/* The performance overlay (perf_overlay.h, RECOMP_OVERLAY=1): its text as a texture in the top left corner, drawn
+ * over every picture (XBA-243: the same fields as the Xbox window's). */
+static unsigned s_ov_prog, s_ov_tex, s_ov_serial;
+static int s_ov_u_tex, s_ov_u_flip, s_ov_failed;
+static uint64_t s_ov_tick_ms;
 #if defined(XBOXRECOMP_LSFG)
 static void fg_open(void);  /* frame generation (XBA-186), below present_rgba */
 static void fg_close(void);
@@ -158,7 +168,8 @@ static int load_gl(void)
     struct { void **slot; const char *name; } fns[] = {
 #define F(n) { (void **)&s_gl.n, "gl" #n }
         F(GenTextures), F(DeleteTextures), F(BindTexture), F(TexParameteri), F(TexImage2D), F(TexSubImage2D),
-        F(PixelStorei), F(ReadPixels), F(Viewport), F(ClearColor), F(Clear), F(Disable), F(CreateShader),
+        F(PixelStorei), F(ReadPixels), F(Viewport), F(ClearColor), F(Clear), F(Disable), F(Enable), F(BlendFunc),
+        F(CreateShader),
         F(ShaderSource),
         F(CompileShader), F(GetShaderiv), F(GetShaderInfoLog), F(DeleteShader), F(CreateProgram),
         F(AttachShader), F(LinkProgram), F(GetProgramiv), F(GetProgramInfoLog), F(DeleteProgram),
@@ -215,6 +226,14 @@ static const char k_fs[] =
     "uniform sampler2D u_tex;\n"
     "out vec4 o_color;\n"
     "void main() { o_color = vec4(texture(u_tex, v_uv).rgb, 1.0); }\n";
+
+/* The overlay's pixels are 0xAARRGGBB words, bytes B, G, R, A: uploaded as RGBA, swapped back here; its alpha
+ * kept (blended). */
+static const char k_ov_fs[] =
+    "in vec2 v_uv;\n"
+    "uniform sampler2D u_tex;\n"
+    "out vec4 o_color;\n"
+    "void main() { o_color = texture(u_tex, v_uv).bgra; }\n";
 
 static int build_program(void)
 {
@@ -555,6 +574,85 @@ static void keep_shared(host_window_last_fn fn, void *user, int w, int h)
     pthread_mutex_unlock(&s_last_mu);
 }
 
+/* The overlay over the picture just drawn: new figures every 500 ms, the text's texture uploaded when it changed,
+ * about dh / 320 pixels per font pixel (as the Xbox window). */
+static void overlay_draw(int dw, int dh)
+{
+    int w = 0, h = 0, k;
+    unsigned serial = 0;
+    const uint32_t *px;
+    uint64_t now_ms;
+
+    if (!perf_overlay_enabled() || s_ov_failed)
+        return;
+    now_ms = xbox_HostNowNs() / 1000000ull;
+    if (now_ms - s_ov_tick_ms >= 500) {
+        perf_overlay_tick(now_ms, s_frames, PERF_OVERLAY_NO_DRAWS, NULL);
+        s_ov_tick_ms = now_ms;
+    }
+    px = perf_overlay_pixels(&w, &h, &serial);
+    if (!px)
+        return;
+    if (!s_ov_prog) {
+        const char *head_vs = s_gles ? "#version 300 es\n" : "#version 150\n";
+        const char *head_fs = s_gles ? "#version 300 es\nprecision mediump float;\n" : "#version 150\n";
+        unsigned vs = compile(XGL_VERTEX_SHADER, head_vs, k_vs);
+        unsigned fs = vs ? compile(XGL_FRAGMENT_SHADER, head_fs, k_ov_fs) : 0;
+        int ok = 0;
+        if (vs && fs) {
+            s_ov_prog = s_gl.CreateProgram();
+            s_gl.AttachShader(s_ov_prog, vs);
+            s_gl.AttachShader(s_ov_prog, fs);
+            s_gl.LinkProgram(s_ov_prog);
+            s_gl.GetProgramiv(s_ov_prog, XGL_LINK_STATUS, &ok);
+        }
+        if (vs)
+            s_gl.DeleteShader(vs);
+        if (fs)
+            s_gl.DeleteShader(fs);
+        if (!ok) {
+            fprintf(stderr, "  [HOST] window: the performance overlay's program failed; no overlay\n");
+            if (s_ov_prog)
+                s_gl.DeleteProgram(s_ov_prog);
+            s_ov_prog = 0;
+            s_ov_failed = 1;
+            return;
+        }
+        s_ov_u_tex = s_gl.GetUniformLocation(s_ov_prog, "u_tex");
+        s_ov_u_flip = s_gl.GetUniformLocation(s_ov_prog, "u_flip");
+    }
+    s_gl.ActiveTexture(XGL_TEXTURE0);
+    if (!s_ov_tex) {
+        s_gl.GenTextures(1, &s_ov_tex);
+        s_gl.BindTexture(XGL_TEXTURE_2D, s_ov_tex);
+        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_MIN_FILTER, XGL_NEAREST);
+        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_MAG_FILTER, XGL_NEAREST);
+        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_WRAP_S, XGL_CLAMP_TO_EDGE);
+        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_WRAP_T, XGL_CLAMP_TO_EDGE);
+        s_ov_serial = serial - 1;
+    }
+    s_gl.BindTexture(XGL_TEXTURE_2D, s_ov_tex);
+    if (serial != s_ov_serial) {
+        s_gl.PixelStorei(XGL_UNPACK_ALIGNMENT, 4);
+        s_gl.PixelStorei(XGL_UNPACK_ROW_LENGTH, 0);
+        s_gl.TexImage2D(XGL_TEXTURE_2D, 0, (int)XGL_RGBA8, w, h, 0, XGL_RGBA, XGL_UNSIGNED_BYTE, px);
+        s_ov_serial = serial;
+    }
+    k = dh / 320 > 1 ? dh / 320 : 1;
+    if (w * k > dw)
+        k = 1;
+    s_gl.Viewport(k, dh - k - h * k, w * k, h * k);
+    s_gl.Enable(XGL_BLEND);
+    s_gl.BlendFunc(XGL_SRC_ALPHA, XGL_ONE_MINUS_SRC_ALPHA);
+    s_gl.UseProgram(s_ov_prog);
+    s_gl.Uniform1i(s_ov_u_tex, 0);
+    s_gl.Uniform1f(s_ov_u_flip, 1.0f);
+    s_gl.BindVertexArray(s_vao);
+    s_gl.DrawArrays(XGL_TRIANGLES, 0, 3);
+    s_gl.BindVertexArray(0);
+    s_gl.Disable(XGL_BLEND);
+}
+
 static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
 {
     int dw = 0, dh = 0, vw, vh;
@@ -639,6 +737,7 @@ static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
     s_gl.BindVertexArray(s_vao);
     s_gl.DrawArrays(XGL_TRIANGLES, 0, 3);
     s_gl.BindVertexArray(0);
+    overlay_draw(dw, dh);
     unsigned err = s_gl.GetError();
     if (s_capture[0] && !s_drawing_generated)
         capture(dw, dh);
@@ -1195,12 +1294,18 @@ void host_window_close(void)
             s_gl.DeleteVertexArrays(1, &s_vao);
         if (s_gl.DeleteProgram && s_prog)
             s_gl.DeleteProgram(s_prog);
+        if (s_gl.DeleteProgram && s_ov_prog)
+            s_gl.DeleteProgram(s_ov_prog);
+        if (s_gl.DeleteTextures && s_ov_tex)
+            s_gl.DeleteTextures(1, &s_ov_tex);
         SDL_GL_DeleteContext(s_ctx);
     }
     SDL_DestroyWindow(s_win);
     s_win = NULL;
     s_ctx = NULL;
     s_tex = s_vao = s_prog = 0;
+    s_ov_prog = s_ov_tex = 0;
+    s_ov_failed = 0;
     s_tex_w = s_tex_h = 0;
     s_tex_filter = -1;
     s_tex_prev = 0;
