@@ -120,9 +120,9 @@ def configure_from_xbe(xbe_path: str) -> None:
     this module, and any address beyond it is treated as non-code -- which
     fails every function past that point instead of reporting a problem.
     """
-    from tools.xbe_parser.xbe_parser import XBEParser
+    from tools.xbe_parser.xbe_parser import open_image
 
-    xbe = XBEParser(xbe_path).parse()
+    xbe = open_image(xbe_path)
     sections = [
         Section(
             name=s.name,

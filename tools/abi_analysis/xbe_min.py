@@ -50,6 +50,16 @@ class XbeFile:
         with open(path, "rb") as f:
             self.data = f.read()
 
+        if self.data[0:2] == b"MZ":
+            # A Windows PE (XBA-233): sections from the PE front end (needs pefile, imported only here).
+            from tools.pe_parser.pe_parser import parse_pe
+            pe = parse_pe(self.data, path)
+            self.base_address, self.size_of_headers = pe.base_address, pe.headers_size
+            self.entry_point_raw = pe.entry_point
+            self.sections = [XbeSection(s.name, s.flags, s.virtual_addr, s.virtual_size, s.raw_addr, s.raw_size)
+                             for s in pe.sections]
+            self.num_sections, self.section_headers_va = len(self.sections), 0
+            return
         if self.data[0:4] != b"XBEH":
             raise ValueError(f"{path}: not an XBE file (bad magic)")
 

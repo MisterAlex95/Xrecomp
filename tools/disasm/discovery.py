@@ -84,6 +84,9 @@ OFF, STRONG, FULL = 0, 1, 2
 # Kernel calls that never return: a body ends at them.
 NORETURN_IMPORTS = frozenset({
     "HalReturnToFirmware", "KeBugCheck", "KeBugCheckEx", "PsTerminateSystemThread",
+    # A Windows PE's (XBA-233, tools/pe_parser): kernel32 and the CRT's exits. No Xbox kernel export has these names.
+    "ExitProcess", "ExitThread", "FatalExit",
+    "exit", "_exit", "abort", "_amsg_exit",
 })
 
 # Kernel calls taking a code pointer: name -> the argument indices (0 = the
