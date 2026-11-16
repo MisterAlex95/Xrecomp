@@ -5483,14 +5483,19 @@ static void contig_take(uint32_t first, uint32_t n)
  * image's pages out of the pool. The second pass allows them, because an
  * image whose BSS runs past 48 MB would otherwise leave almost no window.
  *
- * Opt-in (RECOMP_CONTIG_AVOID_IMAGE=1): it moves every block above the
- * image, and game glue names some of them by address (a DSP doorbell, say). */
+ * On by default (RECOMP_CONTIG_AVOID_IMAGE=0 turns it off). Upstream made it
+ * opt-in because it moves every block above the image and private game glue
+ * names some blocks by address; nothing in this tree does, and with it off a
+ * title whose image is large has no pad at all: SpikeOut: Battle Street's
+ * XPP built its HCCA, descriptors and setup packets at 0x80302000, inside
+ * the image (up to 0x53xxxx), and the controller read the title's data in
+ * their place -- not one setup reached the pad, physical or on-screen. */
 static int contig_avoid_image(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("RECOMP_CONTIG_AVOID_IMAGE");
-        on = e && atoi(e) != 0;
+        on = !(e && *e && atoi(e) == 0);
     }
     return on;
 }

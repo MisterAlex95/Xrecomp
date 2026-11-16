@@ -605,16 +605,39 @@ static uint32_t bus_resolve(uint32_t addr)
     return addr;
 }
 
+/* The descriptors themselves -- HcHCCA, the EDs and TDs, every link between
+ * them -- are always DMA memory: XPP takes them from MmAllocateContiguousMemory
+ * (or its page-0 arena), never from its statics. So a descriptor address
+ * inside the image that a contiguous block holds right now is that block, not
+ * the image. Only buffer pointers keep bus_resolve's image-first rule (Burnout
+ * 3's GET_DESCRIPTOR buffer in .data).
+ *
+ * The overlap is ours: the allocator fills the window from the bottom and
+ * keeps out of the image only with RECOMP_CONTIG_AVOID_IMAGE=1, so a title
+ * whose image is large meets its descriptors inside it. SpikeOut: Battle
+ * Street (an image up to 0x53xxxx) builds its HCCA at 0x80302000 and its
+ * control EDs at 0x003029A0; resolved to the image they read back as the
+ * title's data, the control list looked empty, and not one setup reached the
+ * pad -- the on-screen and the physical pads alike did nothing. */
+static uint32_t desc_resolve(uint32_t addr)
+{
+    if (addr >= g_xbox_image_lo && addr < g_xbox_image_hi
+            && addr < xbox_ContiguousAllocatedBytes()
+            && xbox_ContiguousPageMap()[addr / 4096u])
+        return OHCI_CONTIG_BASE + addr;
+    return bus_resolve(addr);
+}
+
 static uint32_t rd32(uint32_t va)
 {
-    va = bus_resolve(va);
+    va = desc_resolve(va);
     if (!guest_ok(va, 4))
         return 0;
     return *(uint32_t *)((uint8_t *)xbox_GetMemoryOffset() + va);
 }
 static void wr32(uint32_t va, uint32_t v)
 {
-    va = bus_resolve(va);
+    va = desc_resolve(va);
     if (!guest_ok(va, 4))
         return;
     *(uint32_t *)((uint8_t *)xbox_GetMemoryOffset() + va) = v;
@@ -622,6 +645,14 @@ static void wr32(uint32_t va, uint32_t v)
 static uint8_t *guest_ptr(uint32_t va, uint32_t bytes)
 {
     va = bus_resolve(va);
+    return guest_ok(va, bytes)
+         ? (uint8_t *)xbox_GetMemoryOffset() + va : NULL;
+}
+
+/* A descriptor's bytes (desc_resolve), for the atomic accessors below. */
+static uint8_t *desc_ptr(uint32_t va, uint32_t bytes)
+{
+    va = desc_resolve(va);
     return guest_ok(va, bytes)
          ? (uint8_t *)xbox_GetMemoryOffset() + va : NULL;
 }
@@ -804,26 +835,26 @@ static uint32_t ohci_do_td(OhciController *hc, uint32_t ed0, uint32_t td)
  * only changes by compare-and-swap. */
 static uint32_t rd32_acq(uint32_t va)
 {
-    uint32_t *p = (uint32_t *)guest_ptr(va, 4);
+    uint32_t *p = (uint32_t *)desc_ptr(va, 4);
     return p ? __atomic_load_n(p, __ATOMIC_ACQUIRE) : 0;
 }
 static int cas32(uint32_t va, uint32_t expect, uint32_t want)
 {
-    uint32_t *p = (uint32_t *)guest_ptr(va, 4);
+    uint32_t *p = (uint32_t *)desc_ptr(va, 4);
     return p && __atomic_compare_exchange_n(p, &expect, want, 0,
                                             __ATOMIC_ACQ_REL,
                                             __ATOMIC_ACQUIRE);
 }
 static void or32(uint32_t va, uint32_t bits)
 {
-    uint32_t *p = (uint32_t *)guest_ptr(va, 4);
+    uint32_t *p = (uint32_t *)desc_ptr(va, 4);
     if (p)
         __atomic_fetch_or(p, bits, __ATOMIC_ACQ_REL);
 }
 /* A descriptor link worth following: non-null and inside guest memory. */
 static int td_link_ok(uint32_t link)
 {
-    return link != 0 && guest_ptr(link, 16) != NULL;
+    return link != 0 && desc_ptr(link, 16) != NULL;
 }
 
 /* For the no-report warning: when the last input report completed, and on
