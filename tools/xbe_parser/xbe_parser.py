@@ -28,10 +28,12 @@ XBE_MAGIC = b'XBEH'
 # Entry point XOR keys
 ENTRY_RETAIL_XOR  = 0xA8FC57AB
 ENTRY_DEBUG_XOR   = 0x94859D4B
+ENTRY_CHIHIRO_XOR = 0x40B5C16E   # Sega Chihiro (docs/technical/chihiro.md, XBA-234)
 
 # Kernel thunk XOR keys
 THUNK_RETAIL_XOR  = 0x5B6D40B6
 THUNK_DEBUG_XOR   = 0xEFB1F152
+THUNK_CHIHIRO_XOR = 0x2290059D
 
 # Section flags
 SECTION_WRITABLE         = 0x00000001
@@ -760,9 +762,10 @@ class XBEParser:
         return h
 
     def _decode_keys(self, h: XBEHeader):
-        """Pick the XOR key pair (retail or debug) that decodes the entry point
-        and the kernel thunk address consistently: the entry point in an
-        executable section, both inside the image. Retail wins a tie; when
+        """Pick the XOR key pair (retail, debug or Chihiro) that decodes the entry
+        point and the kernel thunk address consistently: the entry point in an
+        executable section, both inside the image. Retail wins a tie, then
+        debug; when
         neither fits at all, retail is kept and a warning says so. One pair
         for both: a console signs an image with one key set."""
         lo, hi = h.base_address, h.base_address + h.image_size
@@ -773,7 +776,8 @@ class XBEParser:
 
         best = None
         for name, ek, tk in (("retail", ENTRY_RETAIL_XOR, THUNK_RETAIL_XOR),
-                             ("debug", ENTRY_DEBUG_XOR, THUNK_DEBUG_XOR)):
+                             ("debug", ENTRY_DEBUG_XOR, THUNK_DEBUG_XOR),
+                             ("chihiro", ENTRY_CHIHIRO_XOR, THUNK_CHIHIRO_XOR)):
             e = (h.entry_point_raw ^ ek) & 0xFFFFFFFF
             t = (h.kernel_thunk_addr_raw ^ tk) & 0xFFFFFFFF
             score = (2 if in_exec(e) else 0) + (lo <= e < hi) + (lo <= t < hi)

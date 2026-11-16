@@ -28,6 +28,7 @@
 #include "nv2a_flip_hold.h"
 #include "guest_clock.h"     /* fast-forward (XBA-240) */
 #include "xbox_dev_state.h"  /* save states (XBA-248) */
+#include "xbox_chihiro.h"    /* RECOMP_CHIHIRO (XBA-234) */
 #include "platform/host_time.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -3434,6 +3435,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         return FALSE;
     }
 
+    /* Sega Chihiro (XBA-234): the arcade board has 128 MB, and a title sizes its
+     * heap from what the kernel reports, so RAM itself grows here (not only the
+     * mapping, as xbox_SetMapSize does). Off unless RECOMP_CHIHIRO is set. */
+    if (xbox_ChihiroMode()) {
+        g_xbox_total_ram = XBOX_CHIHIRO_RAM;
+        fprintf(stderr, "[CHIHIRO] mode on: %u MB RAM, arcade kernel (XboxHardwareInfo.Flags |= 0x%X)\n",
+                (unsigned)(g_xbox_total_ram >> 20), XBOX_HW_FLAG_ARCADE);
+    }
+
     /*
      * Calculate the full range we need to map.
      * From XBOX_MAP_START (0x0) to the end of the furthest section.
@@ -3923,6 +3933,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
             thunk_va = thunk_retail;
         } else {
             thunk_va = thunk_debug;
+        }
+        /* A Chihiro XBE uses a third key pair (XBA-234); tried in Chihiro mode
+         * only, when neither the retail nor the debug key lands in range. */
+        if (xbox_ChihiroMode() && !(thunk_va >= XBOX_BASE_ADDRESS && thunk_va < XBOX_TOTAL_RAM)) {
+            uint32_t thunk_chihiro = thunk_raw ^ XBE_THUNK_CHIHIRO_XOR;
+            if (thunk_chihiro >= XBOX_BASE_ADDRESS && thunk_chihiro < XBOX_TOTAL_RAM)
+                thunk_va = thunk_chihiro;
         }
 
         /* Validate: thunk VA should be within our mapped region */

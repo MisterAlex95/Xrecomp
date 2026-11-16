@@ -35,6 +35,7 @@
 #include "xbox_resume.h"
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
+#include "xbox_chihiro.h"
 #include "xbox_xbe_sections.h"
 #include "platform/host_time.h"
 #include "guest_clock.h"            /* fast-forward (XBA-240) */
@@ -226,6 +227,10 @@ static void kernel_data_init(void)
      *   +5: UCHAR McpRevision
      */
     BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_HARDWARE_INFO + 0) = 0;   /* Retail */
+    /* The Chihiro kernel (XBA-234, RECOMP_CHIHIRO) sets the arcade bit, which is
+     * how a title knows it runs on the arcade board. */
+    if (xbox_ChihiroMode())
+        BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_HARDWARE_INFO + 0) = XBOX_HW_FLAG_ARCADE;
     BRIDGE_MEM8(XBOX_KERNEL_DATA_BASE + KDATA_HARDWARE_INFO + 4) = 0xA1; /* NV2A A1 */
     BRIDGE_MEM8(XBOX_KERNEL_DATA_BASE + KDATA_HARDWARE_INFO + 5) = 0xB1; /* MCPX B1 */
 

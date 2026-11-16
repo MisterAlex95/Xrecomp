@@ -55,6 +55,7 @@ set(KERNEL_SOURCES
     nv2a_combiner.c
     guest_clock.c
     xbox_dev_state.c
+    xbox_chihiro.c
 )
 
 # Save states (XBA-245): the XBXS container writes recomp_states slot files,
