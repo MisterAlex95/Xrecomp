@@ -113,7 +113,8 @@ bool gc_recomp_dispatch(gc_machine *m)
             record_miss(m, pc);
         return false;
     }
-    if (!span_valid(m, m->rc->entries[idx].span))
+    /* lifted code assumes the code at pc is MEM1[pc & 0x3FFFFFFF]: not so under non-default instruction translation */
+    if (!gc_icode_direct(m, pc) || !span_valid(m, m->rc->entries[idx].span))
         return false;
     m->h.rc_exit = GC_RC_EXIT_NORMAL;
     m->rc->entries[idx].fn(m);

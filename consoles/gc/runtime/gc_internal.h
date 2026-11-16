@@ -2,6 +2,8 @@
 #ifndef GC_INTERNAL_H
 #define GC_INTERNAL_H
 
+#include <fenv.h>
+#include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,7 +12,8 @@
 #include "gc_recomp_rt.h"
 
 /* Clocks: the Gekko at 486 MHz, the time base and decrementer at a twelfth of it (bus clock / 4). The core counts
- * one cycle per instruction. */
+ * an estimate of each instruction's cycles (gc_cycles: 1 for most, more for multiplies, divides, FP divides,
+ * lmw / stmw, synchronisation), lifted code the same sum per block. */
 #define GC_CPU_HZ 486000000u
 #define GC_TB_DIV 12u
 /* Video timing (XBA-259): NTSC 525 lines per frame at 30 frames (60 fields) per second, PAL 625 lines at 25 frames
@@ -43,11 +46,23 @@ struct gc_machine {
     uint32_t frame_lines; /* 525 NTSC, 625 PAL */
     uint32_t field_line;  /* lines since the field started */
     uint64_t line_cycles; /* cycles per line */
-    uint64_t tb_base;     /* time base = tb_base + now / GC_TB_DIV */
-    uint32_t dec;         /* decrementer value written at dec_written */
-    uint64_t dec_written;
-    uint64_t dec_fire;    /* cycle where it goes negative, UINT64_MAX when it does not count down past 0 again */
+    uint64_t tb_base;     /* time base = tb_base + now / GC_TB_DIV (ticks) */
+    uint64_t dec_zero;    /* the tick (now / GC_TB_DIV) where the decrementer reads 0: DEC = dec_zero - tick */
+    uint64_t dec_fire_tick; /* the next 0 -> -1 transition (the exception), every 2^32 ticks after a write */
+    uint64_t dec_fire;    /* ... in cycles */
     bool dec_pending;
+
+    /* address translation (gc_mmu.c): whether the BATs are the default mapping, per MSR[PR] */
+    bool dbats_default[2], ibats_default[2];
+    uint32_t ifast_mask, ifast_val; /* instruction fetch: as gc_rc_head's dfast_mask / dfast_val */
+    /* DSI / ISI from the middle of an instruction: the run loop's resume point */
+    jmp_buf fault_jb;
+    bool fault_armed;
+
+    /* FPSCR[RN] / [NI] applied to the host's floating-point environment while the CPU runs */
+    fenv_t host_fenv;
+    uint32_t host_fp_mode; /* RN | NI bits in force (the host's default: 0) */
+    bool warned_illegal;
 
     /* processor interface */
     uint32_t pi_intsr, pi_intmr;
@@ -87,7 +102,20 @@ struct gc_machine {
 
 /* gc_cpu.c */
 void gc_cpu_step(gc_machine *m);
+unsigned gc_cycles(uint32_t w);
 void gc_exception(gc_machine *m, uint32_t vector, uint32_t srr1_bits);
+void gc_fp_enter(gc_machine *m); /* the host FP environment for guest code (RN, NI), flags cleared */
+void gc_fp_leave(gc_machine *m); /* host exception flags folded into the FPSCR, the host environment back */
+void gc_fpscr_sync(gc_machine *m);
+
+/* gc_mmu.c */
+void gc_mmu_bats(gc_machine *m);        /* after a write to a BAT (then as gc_mmu_update) */
+void gc_mmu_update(gc_machine *m);      /* after a change of MSR (IR, DR, PR) */
+bool gc_ifetch(gc_machine *m, uint32_t pc, uint32_t *w); /* false: ISI raised */
+bool gc_icode_direct(gc_machine *m, uint32_t pc);         /* the code at pc is MEM1[pc & 0x3FFFFFFF] */
+void gc_lc_dma(gc_machine *m);          /* after a write to DMAL with the trigger bit */
+uint32_t gc_phys_read(gc_machine *m, uint32_t pa, unsigned size);
+void gc_phys_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size);
 void gc_check_interrupts(gc_machine *m);
 bool gc_irq_pending(gc_machine *m);
 void gc_stop(gc_machine *m, const char *fmt, ...);

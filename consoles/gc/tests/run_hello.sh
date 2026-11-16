@@ -39,7 +39,7 @@ while :; do
         --discovered "$work/discovered.txt" --no-comments --report "$work/report.json" >/dev/null || exit 1
     rm -f "$work"/src/*.o
     # one object per file, in parallel; RC_FLAGS / CC from the environment
-    (cd "$work/src" && ls *.c | xargs -P "$jobs" -I{} "$cc" -c -fPIC -O1 -ffp-contract=off ${RC_FLAGS:-} \
+    (cd "$work/src" && ls *.c | xargs -P "$jobs" -I{} "$cc" -c -fPIC -O1 -ffp-contract=off -frounding-math ${RC_FLAGS:-} \
         -DGC_RC_COUNT -I "$repo/consoles/gc/runtime" -o {}.o {}) || exit 1
     "$cc" -shared -o "$work/libtitle.so" "$work"/src/*.o -lm || exit 1
     out=$(timeout 120 "$run" "$dol" --frames 120 --pack "$work/libtitle.so" --png "$work/xfb.png" --stats \

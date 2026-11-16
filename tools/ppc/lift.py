@@ -23,7 +23,11 @@ out of it set PC and return to the dispatcher. Rare or privileged instructions (
 string ops, FPSCR moves, OE / record forms of FP) are handed to the interpreter.
 
 A console layer subclasses FnLifter and adds `op_<name>` methods for the mnemonics its decoder adds (`.` in a
-mnemonic becomes `_rec`).
+mnemonic becomes `_rec`). It can also change the vocabulary's shape through a few hooks: `block_head` (the
+RC_BLOCK line of a block, e.g. with a cycle estimate), `mem` (memory macros, e.g. with the instruction's address
+for a precise data-storage exception), `guard` (the checks before FP instructions) and `FSET_LOAD` (the macro lfs
+results go through). While an instruction is lifted, `self.cycles_after` / `self.cycles_from` hold the block's
+cycles (`cycles(i)`, 1 by default) after it / from it on, for layers that keep a cycle-exact clock.
 """
 
 from .isa import BCCTR, BCLR, BCOND, BRANCH, INVALID
@@ -67,6 +71,8 @@ X_STORES = {"stwx": "stw", "stbx": "stb", "sthx": "sth", "stwux": "stw", "stbux"
 
 
 class FnLifter:
+    FSET_LOAD = "RC_FSET_S"
+
     def __init__(self, image, decode, func, name, comments=True):
         """decode: addr -> Insn (the discovery's cache)."""
         self.image = image
@@ -75,7 +81,28 @@ class FnLifter:
         self.name = name
         self.comments = comments
         self.fallbacks = 0
+        self.cycles_after = self.cycles_from = 0
         self.leaders = self.find_leaders()
+
+    # ---- hooks for console layers ----
+    def cycles(self, i):
+        """The instruction's cycle estimate (layers with a clock override it)."""
+        return 1
+
+    def block_head(self, a, insns):
+        """The statement opening the block at a (insns: its instructions)."""
+        return "RC_BLOCK(%s, %d);" % (hx(a), len(insns))
+
+    def mem(self, macro, i, *args):
+        """A memory macro call for instruction i."""
+        return "%s(%s)" % (macro, ", ".join(args))
+
+    def guard(self, i, state):
+        """Checks before instruction i (state: a dict the block's earlier guards filled), or ""."""
+        if self.is_fp(i) and not state.get("fp"):
+            state["fp"] = True
+            return "RC_FPCHECK(%s);" % hx(i.addr)
+        return ""
 
     # ---- what needs the interpreter, what ends a block ----
     def is_fp(self, i):
@@ -137,24 +164,30 @@ class FnLifter:
             k += 1
             if run[0] not in self.leaders:
                 self.leaders.add(run[0])  # reached only by fall-through from a gap: cannot happen, kept safe
-            fp_checked = False
+            state = {}
+            rest = []
             for j, a in enumerate(run):
                 if a in self.leaders:
                     n = 1
                     while j + n < len(run) and run[j + n] not in self.leaders:
                         n += 1
-                    out.append("L_%08X:\n    RC_BLOCK(%s, %d);\n" % (a, hx(a), n))
-                    fp_checked = False
+                    block = [self.decode(x) for x in run[j:j + n]]
+                    rest = [self.cycles(x) for x in block]
+                    out.append("L_%08X:\n    %s\n" % (a, self.block_head(a, block)))
+                    state = {}
                 i = self.decode(a)
+                own = rest.pop(0)
+                self.cycles_after = sum(rest)
+                self.cycles_from = own + self.cycles_after
                 if self.comments:
                     out.append("    /* %08X: %s */\n" % (a, i.text))
                 if self.needs_interp(i):
                     self.fallbacks += 1
                     out.append("    RC_INTERP(%s);\n" % hx(a))
                     continue
-                if self.is_fp(i) and not fp_checked:
-                    out.append("    RC_FPCHECK(%s);\n" % hx(a))
-                    fp_checked = True
+                g = self.guard(i, state)
+                if g:
+                    out.append("    " + g + "\n")
                 body = self.insn(i)
                 if body:
                     out.append("    " + body + "\n")
@@ -372,14 +405,14 @@ class FnLifter:
     def _load(self, i, kind, ea, update):
         fn, conv = LOADS[kind]
         if update:
-            return "{ uint32_t ea_ = %s; %s = %s%s(ea_); %s = ea_; }" % (ea, R(i.rd), conv, fn, R(i.ra))
-        return "%s = %s%s(%s);" % (R(i.rd), conv, fn, ea)
+            return "{ uint32_t ea_ = %s; %s = %s%s; %s = ea_; }" % (ea, R(i.rd), conv, self.mem(fn, i, "ea_"), R(i.ra))
+        return "%s = %s%s;" % (R(i.rd), conv, self.mem(fn, i, ea))
 
     def _store(self, i, kind, ea, update):
         fn = STORES[kind]
         if update:
-            return "{ uint32_t ea_ = %s; %s(ea_, %s); %s = ea_; }" % (ea, fn, R(i.rd), R(i.ra))
-        return "%s(%s, %s);" % (fn, ea, R(i.rd))
+            return "{ uint32_t ea_ = %s; %s; %s = ea_; }" % (ea, self.mem(fn, i, "ea_", R(i.rd)), R(i.ra))
+        return "%s;" % self.mem(fn, i, ea, R(i.rd))
 
     def op_lwz(self, i): return self._load(i, "lwz", self._ea_d(i), False)
     def op_lbz(self, i): return self._load(i, "lbz", self._ea_d(i), False)
@@ -412,29 +445,36 @@ class FnLifter:
     def _eax(self, i):
         return "%s + %s" % (RA0(i.ra), R(i.rb))
 
-    def op_lwbrx(self, i): return "%s = __builtin_bswap32(RC_LWZ(%s));" % (R(i.rd), self._eax(i))
-    def op_lhbrx(self, i): return "%s = __builtin_bswap16((uint16_t)RC_LHZ(%s));" % (R(i.rd), self._eax(i))
-    def op_stwbrx(self, i): return "RC_STW(%s, __builtin_bswap32(%s));" % (self._eax(i), R(i.rd))
-    def op_sthbrx(self, i): return "RC_STH(%s, __builtin_bswap16((uint16_t)%s));" % (self._eax(i), R(i.rd))
+    def op_lwbrx(self, i):
+        return "%s = __builtin_bswap32(%s);" % (R(i.rd), self.mem("RC_LWZ", i, self._eax(i)))
+
+    def op_lhbrx(self, i):
+        return "%s = __builtin_bswap16((uint16_t)%s);" % (R(i.rd), self.mem("RC_LHZ", i, self._eax(i)))
+
+    def op_stwbrx(self, i):
+        return "%s;" % self.mem("RC_STW", i, self._eax(i), "__builtin_bswap32(%s)" % R(i.rd))
+
+    def op_sthbrx(self, i):
+        return "%s;" % self.mem("RC_STH", i, self._eax(i), "__builtin_bswap16((uint16_t)%s)" % R(i.rd))
 
     def op_lwarx(self, i):
-        return "%s = RC_LWZ(%s); c->reserve = 1;" % (R(i.rd), self._eax(i))
+        return "%s = %s; c->reserve = 1;" % (R(i.rd), self.mem("RC_LWZ", i, self._eax(i)))
 
     def op_stwcx_rec(self, i):
-        return ("if (c->reserve) { RC_STW(%s, %s); c->reserve = 0; "
+        return ("if (c->reserve) { %s; c->reserve = 0; "
                 "c->cr = ppc_cr_set(c->cr, 0, PPC_CR_EQ | c->xer_so); } "
-                "else c->cr = ppc_cr_set(c->cr, 0, c->xer_so);" % (self._eax(i), R(i.rd)))
+                "else c->cr = ppc_cr_set(c->cr, 0, c->xer_so);" % self.mem("RC_STW", i, self._eax(i), R(i.rd)))
 
     def op_lmw(self, i):
         parts = ["uint32_t ea_ = %s;" % self._ea_d(i)]
         for k, r in enumerate(range(i.rd, 32)):
-            parts.append("%s = RC_LWZ(ea_ + %du);" % (R(r), 4 * k))
+            parts.append("%s = %s;" % (R(r), self.mem("RC_LWZ", i, "ea_ + %du" % (4 * k))))
         return "{ " + " ".join(parts) + " }"
 
     def op_stmw(self, i):
         parts = ["uint32_t ea_ = %s;" % self._ea_d(i)]
         for k, r in enumerate(range(i.rd, 32)):
-            parts.append("RC_STW(ea_ + %du, %s);" % (4 * k, R(r)))
+            parts.append("%s;" % self.mem("RC_STW", i, "ea_ + %du" % (4 * k), R(r)))
         return "{ " + " ".join(parts) + " }"
 
     # system registers
@@ -474,8 +514,8 @@ class FnLifter:
         return "RC_MTSPR(%d, %s); RC_CHECK(%s);" % (s, R(i.rd), hx(i.addr + 4))
 
     # cache and ordering
-    def op_dcbz(self, i): return "RC_DCBZ(%s);" % self._eax(i)
-    def op_icbi(self, i): return "RC_ICBI(%s); RC_EXIT(%s);" % (self._eax(i), hx(i.addr + 4))
+    def op_dcbz(self, i): return "%s;" % self.mem("RC_DCBZ", i, self._eax(i))
+    def op_icbi(self, i): return "%s; RC_EXIT(%s);" % (self.mem("RC_ICBI", i, self._eax(i)), hx(i.addr + 4))
 
     def _nop(self, i):
         return ""
@@ -497,11 +537,11 @@ class FnLifter:
         base = i.name.rstrip("ux") if i.op == 31 else i.name.rstrip("u")
         d = i.rd
         body = {
-            "lfs": "RC_FSET_S(%d, ppc_lfs_bits(RC_LWZ(ea_)));" % d,
-            "lfd": "F0(%d) = ppc_u2f(RC_LD64(ea_));" % d,
-            "stfs": "RC_STW(ea_, ppc_stfs_bits(F0(%d)));" % d,
-            "stfd": "RC_ST64(ea_, ppc_f2u(F0(%d)));" % d,
-            "stfiw": "RC_STW(ea_, (uint32_t)ppc_f2u(F0(%d)));" % d,
+            "lfs": "%s(%d, ppc_lfs_bits(%s));" % (self.FSET_LOAD, d, self.mem("RC_LWZ", i, "ea_")),
+            "lfd": "F0(%d) = ppc_u2f(%s);" % (d, self.mem("RC_LD64", i, "ea_")),
+            "stfs": "%s;" % self.mem("RC_STW", i, "ea_", "ppc_stfs_bits(F0(%d))" % d),
+            "stfd": "%s;" % self.mem("RC_ST64", i, "ea_", "ppc_f2u(F0(%d))" % d),
+            "stfiw": "%s;" % self.mem("RC_STW", i, "ea_", "(uint32_t)ppc_f2u(F0(%d))" % d),
         }[base]
         return "{ uint32_t ea_ = %s; %s%s }" % (ea, body, " %s = ea_;" % R(i.ra) if upd else "")
 

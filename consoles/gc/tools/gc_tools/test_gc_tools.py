@@ -129,7 +129,7 @@ def test_recompile_lifts_the_program(tmp_path):
     s = recompile(Image(program()), str(tmp_path))
     assert s["functions"] == 2 and s["interp_fallback_insns"] == 0
     text = (tmp_path / "gc_rc_000.c").read_text()
-    assert "RC_PSQ_L(1, ea_, 0, 2);" in text
+    assert "RC_PSQ_L(0x80003124u, 1, ea_, 0, 2);" in text
     assert "RC_MTSPR(915, R(5)); RC_CHECK(0x80003124u);" in text
 
 
@@ -139,11 +139,12 @@ def test_recompile_lifts_the_program(tmp_path):
 #   GC_TEST_CC=aarch64-linux-gnu-gcc GC_TEST_EMULATOR="qemu-aarch64 -L /usr/aarch64-linux-gnu" python3 -m pytest ...
 CC = os.environ.get("GC_TEST_CC", "cc")
 EMULATOR = shlex.split(os.environ.get("GC_TEST_EMULATOR", ""))
-CFLAGS = ["-O2", "-ffp-contract=off", "-Wall", "-Werror"]
+CFLAGS = ["-O2", "-ffp-contract=off", "-frounding-math", "-Wall", "-Werror"]
 
 
 def _build_gc_run(tmp_path):
-    srcs = [os.path.join(RUNTIME, f) for f in ("gc_core.c", "gc_cpu.c", "gc_bus.c", "gc_si.c", "gc_recomp.c")]
+    srcs = [os.path.join(RUNTIME, f) for f in ("gc_core.c", "gc_cpu.c", "gc_bus.c", "gc_si.c", "gc_mmu.c",
+                                               "gc_recomp.c")]
     exe = str(tmp_path / "gc_run")
     subprocess.run([CC] + CFLAGS + ["-rdynamic", "-I", RUNTIME, "-o", exe,
                     os.path.join(RUNTIME, "tools", "gc_run.c")] + srcs + ["-ldl", "-lm"], check=True)

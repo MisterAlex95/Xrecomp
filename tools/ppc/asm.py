@@ -96,3 +96,57 @@ def ps_nmadd(d, a, c, b_): return fa(4, 31, d, a, b_, c)
 def ps_add(d, a, b_): return fa(4, 21, d, a, b_)
 def ps_merge10(d, a, b_): return _x(4, d, a, b_, 592)
 def ps_sum0(d, a, c, b_): return fa(4, 10, d, a, b_, c)
+
+
+# system, traps, cache (XBA-260)
+def oris(ra, rs, uimm): return _d(25, rs, ra, uimm)
+def lbz(rd, d, ra): return _d(34, rd, ra, d)
+def stb(rs, d, ra): return _d(38, rs, ra, d)
+def cmpwi(crf, ra, simm): return _d(11, crf << 2, ra, simm)
+def twi(to, ra, simm): return _d(3, to, ra, simm)
+def tw(to, ra, rb): return _x(31, to, ra, rb, 4)
+def or_(ra, rs, rb): return _x(31, rs, ra, rb, 444)
+def mr(ra, rs): return or_(ra, rs, rs)
+def subf(rd, ra, rb): return _x(31, rd, ra, rb, 40)
+def lwzx(rd, ra, rb): return _x(31, rd, ra, rb, 23)
+def stwx(rs, ra, rb): return _x(31, rs, ra, rb, 151)
+def mfmsr(rd): return _x(31, rd, 0, 0, 83)
+def mtmsr(rs): return _x(31, rs, 0, 0, 146)
+def mtsr(sr, rs): return _x(31, rs, sr, 0, 210)
+def mfsr(rd, sr): return _x(31, rd, sr, 0, 595)
+def dcbz(ra, rb): return _x(31, 0, ra, rb, 1014)
+def dcbz_l(ra, rb): return _x(4, 0, ra, rb, 1014)
+def sync(): return _x(31, 0, 0, 0, 598)
+def isync(): return _x(19, 0, 0, 0, 150)
+def rfi(): return _x(19, 0, 0, 0, 50)
+def sc(): return 0x44000002
+def bctrl(): return 0x4E800421
+
+
+def mftb(rd, tbr=268):
+    return (31 << 26) | (rd << 21) | ((tbr & 31) << 16) | ((tbr >> 5) << 11) | (371 << 1)
+
+
+def mfdec(rd): return mfspr(rd, 22)
+def mtdec(rs): return mtspr(22, rs)
+
+
+# FP (XBA-260)
+def fdivs(d, a, b_): return fa(59, 18, d, a, b_)
+def fdiv(d, a, b_, rc=0): return fa(63, 18, d, a, b_, 0, rc)
+def fsub(d, a, b_): return fa(63, 20, d, a, b_)
+def fmuls(d, a, c): return fa(59, 25, d, a, 0, c)
+def fadd_(d, a, b_, rc=0): return fa(63, 21, d, a, b_, 0, rc)
+def fres(d, b_): return fa(59, 24, d, 0, b_)
+def frsqrte(d, b_): return fa(63, 26, d, 0, b_)
+def fctiw(d, b_): return _x(63, d, 0, b_, 14)
+def frsp(d, b_): return _x(63, d, 0, b_, 12)
+def mffs(d): return _x(63, d, 0, 0, 583)
+def mtfsf(fm, b_): return (63 << 26) | ((fm & 0xFF) << 17) | (b_ << 11) | (711 << 1)
+def mtfsfi(crf, imm): return (63 << 26) | (crf << 23) | ((imm & 15) << 12) | (134 << 1)
+def mtfsb0(bit): return _x(63, bit, 0, 0, 70)
+def mtfsb1(bit): return _x(63, bit, 0, 0, 38)
+def mcrfs(crfd, crfs): return _x(63, crfd << 2, crfs << 2, 0, 64)
+def ps_res(d, b_): return fa(4, 24, d, 0, b_)
+def ps_rsqrte(d, b_): return fa(4, 26, d, 0, b_)
+def ps_mul(d, a, c): return fa(4, 25, d, a, 0, c)

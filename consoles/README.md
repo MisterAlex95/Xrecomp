@@ -1410,9 +1410,24 @@ leaves. Since XBA-259 the core plays on the host layer, in the app too (« GameC
   loops, calls, carries, CR logic) interpreted and recompiled at -O2, against known values (`GC_TEST_CC` /
   `GC_TEST_EMULATOR` run it for arm64 under qemu).
 
+- Gekko layer completed (XBA-260), interpreted and lifted alike: address translation (`gc_mmu.c`: IBATs / DBATs,
+  segment registers and the hashed page table with R / C bits, no TLB; DSI / ISI, a DSI longjmps out of the faulting
+  instruction; the inline `EA & 0x3FFFFFFF` path stays while the BATs map 0x80000000 / 0xC0000000 onto MEM1 as the
+  IPL and the SDK set them, or in real mode), the locked cache (HID2[LCE], 16 KB at 0xE0000000, dcbz_l, the DMAU /
+  DMAL DMA), a cycle estimate per instruction (`gc_cycles`, the same function as `gc_tools.gekko.cycles`; lifted
+  blocks add their sum, time reads mid-block take back what follows) pacing the time base and the decrementer
+  (exception on each 0 -> -1 transition), fres / frsqrte / ps_res / ps_rsqrte from the 750's estimate tables (bit
+  exact), FPSCR[RN] / [NI] as the host's rounding / flush-to-zero modes while guest code runs, sticky OX / UX / ZX /
+  XX / VX from the host's flags, lfs / stfs / quantised float accesses without rounding (an SNaN stays signalling),
+  exceptions from lifted code (DSI, program: trap, privileged, illegal including paired singles / psq / dcbz_l with
+  their HID2 enable clear; FP unavailable, external and decrementer at block boundaries). Synthetic tests
+  (`test_gekko_exact.py`): one program per area, interpreted and recompiled, against values worked out in the test,
+  x86-64 and arm64 (qemu, -O2). Lifted-code ABI 2. Not modelled: a TLB, the VX subtype of a host invalid operation,
+  FR / FI / FPRF after arithmetic, enabled FP exceptions, the 25-bit frC of single multiplies, the double rounding of
+  fmadds-family results, quantisation of NaN (0 here).
+
 Not there yet: GX / Flipper (CP FIFO, TEV, EFB copies), the DSP (audio), the DVD drive and disc images, memory
-cards, the MMU (BATs, page tables), the estimate tables of fres / frsqrte / ps_res / ps_rsqrte (exact here), FPSCR
-exceptions and rounding modes, cycle timing, the Wii. What of the frontend carries to the Xbox 360 is on XBA-219.
+cards, the Wii. What of the frontend carries to the Xbox 360 is on XBA-219.
 
 **GameCube runtime (XBA-259, GC-1).** The core on the host layer, so every later step (GX, discs, DSP) is tried on the
 AYN Thor first. `XBR_CONSOLE_GC` is ON on Android, Linux and macOS; the app plays a homebrew `.dol` from a library

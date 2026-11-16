@@ -160,19 +160,42 @@ static inline double ppc_u2f(uint64_t u)
     return d;
 }
 
+/* lfs: single to double as Book I defines it, in integer arithmetic (no host conversion: an SNaN stays signalling,
+ * a denormal is normalised whatever the host's flush-to-zero mode, no host exception flag is raised). */
 static inline double ppc_lfs_bits(uint32_t bits)
 {
-    float f;
-    memcpy(&f, &bits, 4);
-    return (double)f;
+    uint64_t s = (uint64_t)(bits >> 31) << 63, f = bits & 0x7FFFFFu;
+    unsigned e = (bits >> 23) & 0xFF;
+    if (e == 0xFF)
+        return ppc_u2f(s | 0x7FF0000000000000ull | f << 29);
+    if (e == 0) {
+        if (!f)
+            return ppc_u2f(s);
+        int x = 1;
+        while (!(f & 0x800000u)) {
+            f <<= 1;
+            x--;
+        }
+        return ppc_u2f(s | (uint64_t)(x + 896) << 52 | (f & 0x7FFFFFu) << 29);
+    }
+    return ppc_u2f(s | (uint64_t)(e + 896) << 52 | f << 29);
 }
 
+/* stfs: double to single without rounding, as Book I defines it: in the single range (and for infinities, NaNs and
+ * values too large) the word is bits 0-1 and 5-34 of the double; below it the value is denormalised by truncation;
+ * smaller still (undefined in the architecture) gives a signed zero. */
 static inline uint32_t ppc_stfs_bits(double d)
 {
-    float f = (float)d;
-    uint32_t u;
-    memcpy(&u, &f, 4);
-    return u;
+    uint64_t u = ppc_f2u(d);
+    unsigned e = (unsigned)(u >> 52) & 0x7FF;
+    uint32_t s = (uint32_t)(u >> 32) & 0x80000000u;
+    if (e > 896)
+        return ((uint32_t)(u >> 32) & 0xC0000000u) | ((uint32_t)(u >> 29) & 0x3FFFFFFFu);
+    if (e >= 874) {
+        uint64_t m = (u & 0x000FFFFFFFFFFFFFull) | 0x0010000000000000ull;
+        return s | (uint32_t)(m >> (29 + 897 - e));
+    }
+    return s;
 }
 
 static inline double ppc_single(double d)
@@ -188,8 +211,8 @@ static inline uint32_t ppc_fcmp(double a, double b)
     return a < b ? PPC_CR_LT : a > b ? PPC_CR_GT : PPC_CR_EQ;
 }
 
-/* fctiw (round to nearest even: the FPSCR rounding mode is not modelled) / fctiwz, with the 750's saturation;
- * the FPR gets 0xFFF80000 in its high word, as on hardware. */
+/* fctiw (the current rounding mode: the core keeps the host's in step with FPSCR[RN]) / fctiwz, with the 750's
+ * saturation; the FPR gets 0xFFF80000 in its high word, as on hardware. */
 static inline double ppc_fctiw(double d, int toward_zero)
 {
     int32_t v;
@@ -240,8 +263,8 @@ static inline double ppc_fnma(double r)
     return r != r ? r : ppc_fneg(r);
 }
 
-/* fres / frsqrte: estimates on hardware; exact here (a spike limit: games that depend on the 750's estimate tables
- * will differ in low bits). */
+/* fres / frsqrte: estimates on hardware, exact here. A console layer with known estimate tables uses its own (the
+ * Gekko's: gc_fres / gc_frsqrte in gc_recomp_rt.h). */
 static inline double ppc_fres(double d)
 {
     return ppc_single(1.0 / d);

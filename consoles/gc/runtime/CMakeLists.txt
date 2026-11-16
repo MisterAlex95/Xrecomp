@@ -13,11 +13,12 @@ if(APPLE)
 endif()
 
 if(NOT TARGET gc_core)
-    add_library(gc_core STATIC gc_core.c gc_cpu.c gc_bus.c gc_si.c gc_recomp.c)
+    add_library(gc_core STATIC gc_core.c gc_cpu.c gc_bus.c gc_si.c gc_mmu.c gc_recomp.c)
     target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     # -ffp-contract=off: fmul then fadd round twice on the 750, so the interpreter and lifted code (built the same
     # way, run_hello.sh) must not fuse them (GCC does by default on arm64); fmadd and friends call fma() (XBA-255).
-    target_compile_options(gc_core PRIVATE -Wall -Wextra -ffp-contract=off)
+    # -frounding-math: the core runs guest code under the host rounding mode FPSCR[RN] asks for (XBA-260).
+    target_compile_options(gc_core PRIVATE -Wall -Wextra -ffp-contract=off -frounding-math)
     if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(gc_core PRIVATE -O2)
     endif()

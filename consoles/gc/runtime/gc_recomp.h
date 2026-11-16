@@ -17,7 +17,7 @@ extern "C" {
 
 typedef struct gc_machine gc_machine;
 
-#define GC_RECOMP_ABI 1
+#define GC_RECOMP_ABI 2 /* 2: XBA-260 (cycle estimates, translated memory, Gekko guards) */
 
 typedef void (*gc_recomp_fn)(gc_machine *m);
 
@@ -61,6 +61,7 @@ typedef struct gc_recomp_stats {
     uint64_t interp;      /* instructions the interpreter ran */
     uint64_t calls;       /* calls into lifted code */
     uint64_t span_checks; /* span hashes computed */
+    uint64_t faults;      /* DSIs that cut an instruction short (gc_mmu.c) */
 } gc_recomp_stats;
 void gc_recomp_get_stats(gc_machine *m, gc_recomp_stats *out);
 

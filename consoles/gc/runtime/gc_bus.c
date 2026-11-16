@@ -1,6 +1,6 @@
 /* gc_bus.c -- the GameCube spike's memory map off MEM1 and its hardware registers (XBA-225).
  *
- * Physical addresses (EA & 0x3FFFFFFF, gc_recomp_rt.h):
+ * Physical addresses (gc_mmu.c translates effective ones; EA & 0x3FFFFFFF with the default BATs):
  *   0x00000000  MEM1, 24 MB (inline in gc_recomp_rt.h; here only when an access crosses its end)
  *   0x0C000000  CP, PE (16-bit): stored, no GX
  *   0x0C002000  VI (16-bit): timing registers stored, beam position computed, display interrupts DI0..DI3 raised on
@@ -12,7 +12,7 @@
  *   0x0C006000  DI, EXI, AI (32-bit): transfers complete at once with nothing on the other end (no disc, no
  *               memory cards; EXI reads give zeros: blank SRAM / RTC); SI: standard controllers (gc_si.c, XBA-259)
  *   0x0C008000  GX FIFO: writes dropped
- *   0x20000000  the locked cache (EA 0xE0000000, 16 KB)
+ *   0x20000000  the locked cache (16 KB; gc_mmu.c maps EA 0xE0000000 onto it while HID2[LCE] is set)
  * Anything else reads 0 and drops writes (logged with -v). */
 #include <stdio.h>
 #include <string.h>
@@ -325,11 +325,10 @@ void gc_hw_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size)
         fprintf(stderr, "gc: write%u to unmapped HW %08X = %08X\n", size * 8, pa, v);
 }
 
-/* ---- the slow path of every access ---- */
+/* ---- physical accesses off the inline MEM1 path (gc_mmu.c translates first) ---- */
 
-static uint32_t bus_read(gc_machine *m, uint32_t ea, unsigned size)
+uint32_t gc_phys_read(gc_machine *m, uint32_t pa, unsigned size)
 {
-    uint32_t pa = ea & 0x3FFFFFFFu;
     if (pa < GC_RAM_SIZE) { /* crosses the end of MEM1 */
         uint32_t v = 0;
         for (unsigned i = 0; i < size; i++)
@@ -345,13 +344,12 @@ static uint32_t bus_read(gc_machine *m, uint32_t ea, unsigned size)
         return v;
     }
     if (m->verbose)
-        fprintf(stderr, "gc: read%u of unmapped %08X (pc %08X)\n", size * 8, ea, m->h.cpu.pc);
+        fprintf(stderr, "gc: read%u of unmapped %08X (pc %08X)\n", size * 8, pa, m->h.cpu.pc);
     return 0;
 }
 
-static void bus_write(gc_machine *m, uint32_t ea, uint32_t v, unsigned size)
+void gc_phys_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size)
 {
-    uint32_t pa = ea & 0x3FFFFFFFu;
     if (pa < GC_RAM_SIZE) {
         for (unsigned i = 0; i < size; i++)
             if (pa + i < GC_RAM_SIZE)
@@ -368,12 +366,5 @@ static void bus_write(gc_machine *m, uint32_t ea, uint32_t v, unsigned size)
         return;
     }
     if (m->verbose)
-        fprintf(stderr, "gc: write%u to unmapped %08X = %08X (pc %08X)\n", size * 8, ea, v, m->h.cpu.pc);
+        fprintf(stderr, "gc: write%u to unmapped %08X = %08X (pc %08X)\n", size * 8, pa, v, m->h.cpu.pc);
 }
-
-uint8_t gc_read8(gc_machine *m, uint32_t ea) { return (uint8_t)bus_read(m, ea, 1); }
-uint16_t gc_read16(gc_machine *m, uint32_t ea) { return (uint16_t)bus_read(m, ea, 2); }
-uint32_t gc_read32(gc_machine *m, uint32_t ea) { return bus_read(m, ea, 4); }
-void gc_write8(gc_machine *m, uint32_t ea, uint8_t v) { bus_write(m, ea, v, 1); }
-void gc_write16(gc_machine *m, uint32_t ea, uint16_t v) { bus_write(m, ea, v, 2); }
-void gc_write32(gc_machine *m, uint32_t ea, uint32_t v) { bus_write(m, ea, v, 4); }

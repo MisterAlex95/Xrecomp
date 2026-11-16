@@ -2,8 +2,8 @@
 
 Writes OUTDIR/gc_rc_NNN.c (the lifted functions, a few hundred per file so they compile in parallel) and
 OUTDIR/gc_rc_table.c (the table, exported as gc_recomp_title_table), nothing else: compile every .c of OUTDIR with
--I consoles/gc/runtime -ffp-contract=off (like gc_core: fmul then fadd round twice) into one shared library (contract:
-consoles/gc/runtime/gc_recomp.h).
+-I consoles/gc/runtime -ffp-contract=off -frounding-math (like gc_core: fmul then fadd round twice, and guest code
+runs under the rounding mode FPSCR[RN] asks for) into one shared library (contract: consoles/gc/runtime/gc_recomp.h).
 
 Seeds for the discovery (tools.ppc.discover): the entry point, every aligned word of the data sections that points
 into text (function pointer tables, constructors), every `lis` / `addi` (or `ori`) pair that builds a text address

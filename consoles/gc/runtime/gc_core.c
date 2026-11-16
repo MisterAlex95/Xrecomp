@@ -16,20 +16,10 @@ uint64_t gc_tb(gc_machine *m)
     return m->tb_base + m->h.now / GC_TB_DIV;
 }
 
-/* When the decrementer next goes from 0 to -1 (it counts down at the time-base rate). */
-static void dec_arm(gc_machine *m)
-{
-    if ((int32_t)m->dec < 0) {
-        m->dec_fire = UINT64_MAX;
-        return;
-    }
-    uint64_t tick = m->dec_written / GC_TB_DIV + (uint64_t)m->dec + 1;
-    m->dec_fire = tick * GC_TB_DIV;
-}
-
 void gc_schedule(gc_machine *m)
 {
-    dec_arm(m);
+    /* the decrementer's next 0 -> -1 transition (it counts down at the time-base rate) */
+    m->dec_fire = m->dec_fire_tick * GC_TB_DIV;
     uint64_t t = m->field_end;
     if (m->next_line < t)
         t = m->next_line;
@@ -153,12 +143,19 @@ gc_machine *gc_create(const uint8_t *dol, size_t size, char *why, size_t why_len
     rc_put32(lo + 0xF0, GC_RAM_SIZE);   /* simulated memory size */
     rc_put32(lo + 0xF8, 162000000u);    /* bus clock */
     rc_put32(lo + 0xFC, GC_CPU_HZ);     /* core clock */
-    /* CPU: translation on (BATs as the IPL sets them: not modelled), FP available, entry. */
+    /* CPU: translation on with the BATs the IPL sets (0x80000000 cached and 0xC0000000 uncached, both 256 MB onto
+     * physical 0), FP available, entry. */
     gc_cpu *c = &m->h.cpu;
     c->msr = PPC_MSR_FP | PPC_MSR_IR | PPC_MSR_DR | PPC_MSR_RI | PPC_MSR_ME;
     c->pc = entry;
-    c->spr[PPC_SPR_HID2] = 0xA0000000u; /* paired singles and write-gather pipe on */
-    m->dec = 0xFFFFFFFFu;
+    c->spr[528] = c->spr[536] = 0x80001FFFu; /* IBAT0U, DBAT0U */
+    c->spr[529] = c->spr[537] = 0x00000002u; /* IBAT0L, DBAT0L */
+    c->spr[530] = c->spr[538] = 0xC0001FFFu; /* IBAT1U, DBAT1U */
+    c->spr[531] = c->spr[539] = 0x0000002Au; /* IBAT1L, DBAT1L: cache-inhibited, guarded */
+    c->spr[PPC_SPR_HID2] = GC_HID2_LSQE | GC_HID2_PSE; /* quantised loads / stores and paired singles on */
+    gc_mmu_bats(m);
+    m->dec_zero = 0xFFFFFFFFu; /* DEC = -1 */
+    m->dec_fire_tick = 1ull << 32;
     m->line = 0;
     video_timing(m);
     m->next_line = m->line_cycles;
@@ -215,32 +212,45 @@ static void take_interrupts(gc_machine *m)
     }
 }
 
+/* The CPU until the next event. A DSI raised in the middle of an instruction (lifted or interpreted) longjmps back
+ * here with the exception set up: the instruction had no effect, execution goes on at the handler. */
+static void run_cpu(gc_machine *m)
+{
+    if (setjmp(m->fault_jb))
+        m->stats.faults++; /* resumed after a fault */
+    m->fault_armed = true;
+    while (m->h.now < m->h.next_event && !m->error[0]) {
+        if (!gc_recomp_dispatch(m)) {
+            gc_cpu_step(m);
+            m->stats.interp++;
+        }
+    }
+    m->fault_armed = false;
+}
+
 int gc_run_frame(gc_machine *m)
 {
     if (m->error[0])
         return -1;
+    gc_fp_enter(m);
     while (!m->error[0]) {
         while (m->h.now >= m->next_line) {
             gc_vi_line(m);
             m->next_line += m->line_cycles;
             gc_si_line(m, ++m->field_line);
         }
-        if (m->h.now >= m->dec_fire) {
+        while (m->h.now >= m->dec_fire) { /* the next transition is 2^32 ticks later */
             m->dec_pending = true;
-            m->dec = 0xFFFFFFFFu; /* keeps counting down from -1: no second edge soon */
-            m->dec_written = m->h.now;
+            m->dec_fire_tick += 1ull << 32;
+            m->dec_fire = m->dec_fire_tick * GC_TB_DIV;
         }
         if (m->h.now >= m->field_end)
             break;
         take_interrupts(m);
         gc_schedule(m);
-        while (m->h.now < m->h.next_event && !m->error[0]) {
-            if (!gc_recomp_dispatch(m)) {
-                gc_cpu_step(m);
-                m->stats.interp++;
-            }
-        }
+        run_cpu(m);
     }
+    gc_fp_leave(m);
     if (m->error[0])
         return -1;
     m->frames++;
