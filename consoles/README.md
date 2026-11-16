@@ -1,6 +1,6 @@
 # Other consoles
 
-XRecomp is adding **Game Boy Advance**, **PlayStation** and **Nintendo 64**, statically recompiled the same way as
+XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and a **Nintendo DS** spike), statically recompiled the same way as
 Xbox discs. This is early work: the layout, build options and test corpus are in place, the runtimes are empty, and no
 game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
@@ -10,6 +10,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 | `gba/` | Game Boy Advance | ARM7TDMI (ARM + Thumb) |
 | `ps1/` | PlayStation | MIPS R3000A |
 | `n64/` | Nintendo 64 | MIPS R4300i (big-endian, 64-bit) |
+| `nds/` | Nintendo DS (spike, Linux headless only) | ARM946E-S (ARMv5TE) + ARM7TDMI |
 
 Each one has:
 
@@ -1279,6 +1280,42 @@ our `hello`; `consoles/gba/tests/cheats/`), `gba_rc_cheats_hb_hello` (RAM codes 
 `n64_cheats_hb_hello`; the app's `CheatsTest` and `GameMenuTest.cheatsPage`. No commercial cheat database is in the
 repository: the codes are the player's.
 
+**Nintendo DS spike (XBA-223, epic XBA-217).** Does the GBA's ARM / Thumb lifter carry over to the DS's ARM9
+(ARMv5TE)? Yes: a libnds hello world's ARM9 code runs recompiled on Linux, 98 % of its instructions native, its top
+screen identical to the interpreter's. Linux / macOS headless only (`XBR_CONSOLE_NDS`, off on Android and Windows),
+nothing in the app. What is there:
+
+- `tests/homebrew/hello`: our test program, libnds 2 (devkitPro's calico runtime, its stock ARM7 `ds7_maine.elf`),
+  built in `tools/docker/nds-homebrew.Dockerfile` (the GBA corpus's devkitARM image, same digest: no extra layer) by
+  `tools/consoles/build_homebrew.sh nds`. Console on engine A (top screen), three lines, an ARMv5TE check (CLZ,
+  QADD / QSUB / QDADD / QDSUB and the Q flag, SMULxy / SMLAxy / SMULWy / SMLAWy / SMLALxy, LDRD / STRD, BLX; each
+  result against the ARM ARM's value, `ARMv5TE: ok`), a counter for 30 VBlanks, `done (vblank irq ok)`.
+- `tools/nds_tools` (`python3 -m nds_tools.recomp ROM.nds OUTDIR [--discovered FILE]`): the .nds header, the ARM9 code
+  *as it runs*: calico's boot stub (`MOD9`) copies crt0, crt0 walks a load list that moves .main below where it was
+  loaded and the kernel into ITCM, so `nds.py` applies both statically and lifts those segments (the stub itself stays
+  interpreted). `lift.py` subclasses gba_tools' discovery and lifter (gba_tools unchanged: the GBA's output is
+  byte-identical) with what ARMv5TE adds (BLX in both states, CLZ, saturating and DSP multiplies, LDRD / STRD, PLD,
+  loads to PC that interwork, MCR / MRC that do not end a function) and a scan of the image's data for Thumb
+  function pointers (newlib's and libnds's tables live in .rodata, not in literal pools: 80 % native on the first
+  round without it, 95 % with it).
+- `runtime/`: `nds_core` (C11, no host layer): an ARMv5TE interpreter with banked modes and CP15 (control, TCM
+  regions, wait for interrupt), the ARM9 memory map, IRQs, timers, DMA, divider / square root, VRAM banks, a BIOS in
+  C (no image: SWI trap at 0xFFFF0008, the BIOS IRQ handler), a stub ARM7 (`nds_arm7.c`: answers calico's boot
+  handshake, announces the power PXI channel; the ARM7 binary is not run), the 2D engines' text backgrounds.
+  Lifted code uses the GBA lifter's RC_* vocabulary, which `nds_recomp_rt.h` defines for the DS (one cycle per
+  instruction, inline main RAM, the rest through `nds_read*` / `nds_write*`). Code lives in RAM: the table lists
+  code spans with their hash, and a span's functions run once memory matches (the boot stub runs at 0x02004800
+  before .main is copied there); a span is not checked again after that (overlays will need the PS1's model).
+  `nds_run ROM [--frames N] [--png OUT] [--screen top|bottom] [--pack LIB] [--missed FILE] [--stats] [--peek A:N] [-v]`.
+- `tests/`: ctest `nds_hello` (interpreter) and `nds_rc_hello` (recompiled, discovery loop: two rounds), both compare
+  the top screen after 120 frames with `hello_top.png` (`png_compare.py`, `--update` to rewrite it); skipped (77)
+  without the corpus, run by the homebrew CI job (`tools/consoles/run_nds_homebrew.sh`). The recompiler's pytest
+  (`consoles/nds/tools/nds_tools/test_nds_tools.py`) needs no toolchain.
+
+Not there yet: the ARM7 (its interpreter, SPI / touch / RTC / sound / power), engine B beyond text backgrounds,
+sprites, affine and extended backgrounds, the 3D engine, cartridge reads, the Nintendo SDK's own loader (autoload
+table, compressed ARM9), overlays. The GBA assumptions that broke are listed on XBA-217.
+
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
-build ourselves (devkitARM / libtonc, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every
+build ourselves (devkitARM / libtonc / libnds, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every
 repository.
