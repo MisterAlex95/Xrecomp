@@ -395,6 +395,10 @@ runtime), so with per-game choices each driver keeps its own outcome.
 
 See the [APU](../../src/apu/README.md) and [DirectSound](../../src/audio/README.md) module references.
 
+Always on, no variable: the `[APU] health` line (device underruns, lowest queue, longest submit gap, trap spells, stream
+voice dry time, dropped periods; every 10 s when something went wrong, else once a minute) and the `[READ] window_s=`
+line (guest file reads per 10 s and the longest). Format and fields: [debugging](../pipeline/06-debugging.md#audio-diagnostics).
+
 | Variable | Default | What it does | Where |
 |---|---|---|---|
 | `RECOMP_APU_TRACE` | off | Voice statistics and host playback accounting. | `apu_core.c`, `apu_vp.c`, `apu_mmio_hook.c` |

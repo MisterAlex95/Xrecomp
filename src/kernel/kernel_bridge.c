@@ -5877,6 +5877,64 @@ static int bridge_async_io_enabled(void)
     return on;
 }
 
+/* Read latency, always on: every guest read (NtReadFile, NtReadFileScatter)
+ * is timed on the host, and the first read 10 s or more after the window
+ * began prints the window:
+ *   [READ] window_s=10.0 reads=152 mb=4.9 max_ms=12.3 max_want=65536 max_from=0x0001ABCD
+ * max_ms: the longest single read (the host's time in xbox_NtReadFile, or
+ * the whole scatter request), with its size and caller. A title that
+ * streams music from disc starves its stream voice when one read outlasts
+ * what the voice has queued, which the [APU] health line shows as dry
+ * time. Nothing when no read comes. A spin flag keeps two threads reading
+ * at once from mixing the counters; the cost is two counter reads a read. */
+static struct {
+    volatile LONG busy;
+    long long window_us, max_us;
+    unsigned  count;
+    uint64_t  bytes;
+    uint32_t  max_want, max_from;
+} s_read_lat;
+
+static long long bridge_clock_us(void)
+{
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+
+    if (!freq.QuadPart && !QueryPerformanceFrequency(&freq))
+        return (long long)GetTickCount64() * 1000;
+    QueryPerformanceCounter(&now);
+    return (long long)(now.QuadPart / freq.QuadPart) * 1000000
+           + (long long)(now.QuadPart % freq.QuadPart) * 1000000 / freq.QuadPart;
+}
+
+static void bridge_read_done(long long t0_us, uint32_t want, uint32_t got)
+{
+    long long now = bridge_clock_us(), dur = now - t0_us;
+
+    while (InterlockedCompareExchange(&s_read_lat.busy, 1, 0) != 0)
+        SwitchToThread();
+    if (!s_read_lat.window_us)
+        s_read_lat.window_us = t0_us;
+    s_read_lat.count++;
+    s_read_lat.bytes += got;
+    if (dur > s_read_lat.max_us) {
+        s_read_lat.max_us = dur;
+        s_read_lat.max_want = want;
+        s_read_lat.max_from = g_xbox_kernel_caller;
+    }
+    if (now - s_read_lat.window_us >= 10000000) {
+        fprintf(stderr, "  [READ] window_s=%.1f reads=%u mb=%.1f max_ms=%.1f max_want=%u max_from=0x%08X\n",
+                (now - s_read_lat.window_us) / 1e6, s_read_lat.count,
+                s_read_lat.bytes / 1048576.0, s_read_lat.max_us / 1000.0,
+                s_read_lat.max_want, s_read_lat.max_from);
+        s_read_lat.window_us = now;
+        s_read_lat.count = 0;
+        s_read_lat.bytes = 0;
+        s_read_lat.max_us = 0;
+    }
+    InterlockedExchange(&s_read_lat.busy, 0);
+}
+
 /* ── NtReadFile (ordinal 219, 8 args = 32 bytes) ──────── */
 static void bridge_NtReadFile(void)
 {
@@ -5888,6 +5946,7 @@ static void bridge_NtReadFile(void)
     XBOX_IO_STATUS_BLOCK ios;
     LARGE_INTEGER  off = {0};
     PLARGE_INTEGER poff = NULL;
+    long long t0_us;
 
     memset(&ios, 0, sizeof(ios));
     if (!bridge_buf_ok(buffer_va, length, "NtReadFile")) {
@@ -5900,8 +5959,10 @@ static void bridge_NtReadFile(void)
         off.HighPart = (LONG)BRIDGE_MEM32(offset_va + 4);
         poff = &off;
     }
+    t0_us = bridge_clock_us();
     g_eax = (uint32_t)xbox_NtReadFile(handle, NULL, NULL, NULL, &ios,
                 XBOX_TO_NATIVE(buffer_va), length, poff);
+    bridge_read_done(t0_us, length, (uint32_t)ios.Information);
 
     /* What a read actually delivered. A decoder that rejects its input cannot
      * say whether the bytes were wrong or the read was, and the two look
@@ -11348,6 +11409,7 @@ static void bridge_rw_segments(int write)
     NTSTATUS st = STATUS_SUCCESS;
     LARGE_INTEGER off = {0};
     int have_off = 0;
+    long long t0_us = bridge_clock_us();
 
     if (n && !bridge_buf_ok(seg_va, n * 4, who)) {
         bridge_write_iostatus(ios_va, (NTSTATUS)0xC0000005, 0);
@@ -11383,6 +11445,8 @@ static void bridge_rw_segments(int write)
     /* End of file part-way is a short transfer, not a failure. */
     if (!write && done && st == (NTSTATUS)0xC0000011)
         st = STATUS_SUCCESS;
+    if (!write)
+        bridge_read_done(t0_us, length, done);
     bridge_write_iostatus(ios_va, st, done);
     g_eax = (uint32_t)st;
     bridge_complete_file_io(STACK_ARG(0), STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),

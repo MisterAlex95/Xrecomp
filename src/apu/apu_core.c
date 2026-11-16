@@ -759,19 +759,8 @@ static void hs_rebase(void)
     g_hs.acct.t0_us = 0;
 }
 
-/* The queue is read before the submit. Both backends count an underrun
- * only when a poll sees the queue empty, and a dry spell that begins
- * partway through a period (a front-end trap, a stall) gets no other poll
- * before this one: read after the submit, the queue holds the new period
- * and the spell is never counted, so its loss would be folded into the
- * reference. It also keeps queued= and q_min meaning what was left. */
-static int hs_poll(void)
-{
-    return hs_on() && xa2_is_active() ? xa2_queued_samples() : 0;
-}
-
 /* After handing n samples (stereo frames) to the device; ok is what the
- * backend returned and q the queue hs_poll read just before. A refused
+ * backend returned and q the queue read just before (monitor_frame). A refused
  * submit is in the WAV and counts in the sample index all the same, so the
  * index stays the WAV's; what was lost ends at the index on the refused
  * line (on XAudio2 the whole device buffer the period completed, on SDL2
@@ -842,6 +831,150 @@ static void hs_submit(int n, int ok, int q)
         g_hs.q_min = q;
         g_hs.next_report_us = now + 1000000;
     }
+}
+
+/* ============================================================
+ * Audio health, always on
+ *
+ * One line, at most every 10 s, says whether the output was continuous:
+ *   [APU] health window_s=10.0 underruns=1 underruns_total=3 q_min=0
+ *         gap_max_ms=31.2 traps=230 trap_max_ms=30.4 dry_ms=0.0
+ *         dry_spells=0 dry_max_ms=0.0 dropped=0
+ * underruns: times the device queue was found empty after audio started
+ * (each is silence the device played); q_min: the lowest queue, in samples,
+ * read just before a submit (-1: none yet; the first submit after a start
+ * or a pause is left out, its queue is empty by design); gap_max_ms: the
+ * longest wall-clock gap between two submits; traps / trap_max_ms: spells
+ * with no frame produced (front end trapped, sequencer held) and the
+ * longest that ended in the window; dry_*: persistent stream voices with
+ * nothing to play (apu_vp.c), in voice-milliseconds summed over voices, the
+ * spells and the longest; dropped: periods thrown away while the device
+ * did not consume (mcpx_apu_pace_step's stall fallback).
+ *
+ * A line comes out when the window holds an underrun, dry time, a dropped
+ * period, or a trap spell or submit gap over AH_LONG_US, at the first
+ * submit (or dropped period) 10 s after the window began; otherwise the
+ * window runs on and a line comes out once a minute. Nothing while the
+ * frame thread idles (no audio, a pause). The cost on the audio path is one
+ * clock read and the queue read per period (5.3 ms), and a clock read when
+ * a trap spell begins or ends. RECOMP_AUDIO_HOST has the per-event detail.
+ * ============================================================ */
+#define AH_WINDOW_US  10000000
+#define AH_QUIET_US   60000000
+#define AH_LONG_US    20000
+
+static struct {
+    int64_t  window_us;         /* window start; 0: at the next period */
+    int64_t  last_line_us;
+    unsigned underruns0;        /* xa2_underruns() at the window start */
+    int      q_min;             /* -1: no submit in the window */
+    int64_t  last_submit_us;    /* 0: next submit starts the gap count */
+    int64_t  gap_max_us;
+    int64_t  trap_start_us;     /* 0: not trapped */
+    int64_t  trap_max_us;
+    unsigned traps;
+    unsigned dropped;
+} g_ah;
+
+/* With the frame thread's view each loop iteration: trapped (no frame). */
+static void ah_trap(bool trapped)
+{
+    int64_t now;
+
+    if (trapped == (g_ah.trap_start_us != 0))
+        return;
+    now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    if (trapped) {
+        g_ah.trap_start_us = now ? now : 1;
+        return;
+    }
+    g_ah.traps++;
+    if (now - g_ah.trap_start_us > g_ah.trap_max_us)
+        g_ah.trap_max_us = now - g_ah.trap_start_us;
+    g_ah.trap_start_us = 0;
+}
+
+/* The frame thread idles (a pause, a save-state hold, a load): the gap and
+ * any trap spell across it are not the output's. */
+static void ah_rebase(void)
+{
+    g_ah.last_submit_us = 0;
+    g_ah.trap_start_us = 0;
+}
+
+static void ah_window(int64_t now)
+{
+    g_ah.window_us = now;
+    g_ah.underruns0 = xa2_underruns();
+    g_ah.q_min = -1;
+    g_ah.gap_max_us = 0;
+    g_ah.trap_max_us = 0;
+    g_ah.traps = 0;
+    g_ah.dropped = 0;
+}
+
+/* Print the window if something went wrong in it (or quiet is due), then
+ * start a new one. The VP's dry counters are read here only, so they cover
+ * the window too. */
+static void ah_report(int64_t now, int quiet_due)
+{
+    unsigned u = xa2_underruns();
+    unsigned du = u - g_ah.underruns0;
+    unsigned dry, dry_spells, dry_max;
+    bool bad;
+
+    mcpx_apu_vp_dry_take(&dry, &dry_spells, &dry_max);
+    bad = du || dry || g_ah.dropped || g_ah.trap_max_us > AH_LONG_US
+       || g_ah.gap_max_us > AH_LONG_US;
+    if (!bad && !quiet_due) {
+        /* A clean window runs on toward the quiet line; dry stayed 0. */
+        return;
+    }
+    fprintf(stderr, "[APU] health window_s=%.1f underruns=%u underruns_total=%u q_min=%d"
+            " gap_max_ms=%.1f traps=%u trap_max_ms=%.1f dry_ms=%.1f dry_spells=%u"
+            " dry_max_ms=%.1f dropped=%u\n",
+            (now - g_ah.window_us) / 1e6, du, u, g_ah.q_min,
+            g_ah.gap_max_us / 1000.0, g_ah.traps, g_ah.trap_max_us / 1000.0,
+            dry * (double)NUM_SAMPLES_PER_FRAME / 48.0, dry_spells,
+            dry_max * (double)NUM_SAMPLES_PER_FRAME / 48.0, g_ah.dropped);
+    g_ah.last_line_us = now;
+    ah_window(now);
+}
+
+/* Once per EP period that reached the device (q: the queue read just
+ * before the submit) or was dropped (q < 0). */
+static void ah_period(int q)
+{
+    int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+
+    if (!g_ah.window_us) {
+        ah_window(now);
+        g_ah.last_line_us = now;
+    }
+    if (q >= 0) {
+        /* The first submit after a start or a pause finds the queue empty
+         * by design (xa2_expect_drain): it starts the gap and queue counts. */
+        if (g_ah.last_submit_us) {
+            if (now - g_ah.last_submit_us > g_ah.gap_max_us)
+                g_ah.gap_max_us = now - g_ah.last_submit_us;
+            if (g_ah.q_min < 0 || q < g_ah.q_min)
+                g_ah.q_min = q;
+        }
+        g_ah.last_submit_us = now;
+    } else {
+        g_ah.dropped++;
+    }
+    if (now - g_ah.window_us >= AH_WINDOW_US)
+        ah_report(now, now - g_ah.last_line_us >= AH_QUIET_US);
+}
+
+void apu_health_flush(void)
+{
+    int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+
+    if (!g_ah.window_us)
+        ah_window(now);
+    ah_report(now, 0);
 }
 
 /* Saturating add of a 16-bit stereo block into another. */
@@ -945,10 +1078,21 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
 
     if (xa2_is_active()) {
         if (!d->pace_stalled) {
-            int q = hs_poll();
-            hs_submit(MIXER_FRAME_SAMPLES,
-                      xa2_submit_samples((const int16_t *)period,
-                                         MIXER_FRAME_SAMPLES), q);
+            /* The queue is read before the submit. Both backends count an
+             * underrun only when a poll sees the queue empty, and a dry
+             * spell that begins partway through a period (a front-end trap,
+             * a stall) gets no other poll before this one: pace_step polls
+             * only on a period boundary, and after the submit the queue
+             * holds the new period, so the underrun would never be counted
+             * (nor its loss in the host accounting). It also keeps q_min
+             * and queued= meaning what was left. */
+            int q = xa2_queued_samples();
+            int ok = xa2_submit_samples((const int16_t *)period,
+                                        MIXER_FRAME_SAMPLES);
+            ah_period(q);
+            hs_submit(MIXER_FRAME_SAMPLES, ok, q);
+        } else {
+            ah_period(-1);
         }
         return;
     }
@@ -1287,6 +1431,7 @@ static void *mcpx_apu_frame_thread(void *arg)
             if (xa2_is_active())
                 xa2_expect_drain();     /* a pause, not an underrun */
             hs_rebase();
+            ah_rebase();
             qemu_cond_signal(&d->idle_cond);
             qemu_cond_wait(&d->cond, &d->lock);
             /* Idle until the reason is gone: a wake-up while still held (the
@@ -1315,6 +1460,7 @@ static void *mcpx_apu_frame_thread(void *arg)
         bool seq_held = kind == APU_FRAME_HELD;
 
         hs_trap(fe_trapped || seq_held);
+        ah_trap(fe_trapped || seq_held);
 
         if (kind == APU_FRAME_RENDER) {
             /* Full pipeline: VP voices → DSP → monitor → waveOut */
@@ -1469,6 +1615,7 @@ void mcpx_apu_host_after_load(MCPXAPUState *d)
     d->pace_q_seen = 0;
     d->pace_stalled = false;
     hs_rebase();
+    ah_rebase();
 }
 
 /* The software mixer (the DirectSound bridge's voices): which slots play,
@@ -1555,6 +1702,7 @@ static void apu_diag_reset(void)
 {
     memset(&g_hs, 0, sizeof(g_hs));
     g_hs.on = -1;
+    memset(&g_ah, 0, sizeof(g_ah));
     memset(&apu_irq_stats, 0, sizeof(apu_irq_stats));
     s_irq_trace = -1;
     s_irq_next_ns = 0;
@@ -1645,6 +1793,10 @@ void mcpx_apu_shutdown(MCPXAPUState *d)
      * serialised against shutdown. */
     qemu_thread_join(&d->apu_thread);
     g_state = NULL;
+    /* The last window, if something went wrong in it: before the VP's
+     * counters and the device go. */
+    if (g_ah.window_us)
+        apu_health_flush();
     mcpx_apu_vp_finalize(d);
     mcpx_apu_dsp_finalize(d);
     mcpx_apu_monitor_finalize(d);

@@ -360,7 +360,48 @@ usually moves the stall rather than fixing it. Find the probe that failed.
 
 ## Audio Diagnostics
 
-All off unless set; with none of them set the APU runs exactly as before.
+Always on, with no variable: the audio health line, at most every 10 s
+when something went wrong in the window, else once a minute (nothing while
+the APU idles):
+
+    [APU] health window_s=10.0 underruns=1 underruns_total=3 q_min=0 gap_max_ms=31.2 traps=230 trap_max_ms=30.4 dry_ms=0.0 dry_spells=0 dry_max_ms=0.0 dropped=0
+
+- `underruns` (`underruns_total` since start): times the device queue was
+  found empty after audio had started, each one silence the device played.
+  The queue is polled before every submit as well as at each pacing
+  decision, so a dry spell that begins partway through a period (a trapped
+  front end) is counted too. A pause the frame thread announces is not one.
+- `q_min`: the lowest queue, in samples, read just before a submit (`-1`: no
+  submit yet; the first after a start or a pause, empty by design, is left
+  out); `gap_max_ms`: the longest wall-clock gap between
+  two submits. A gap longer than the queue's high mark (`[APU] Using ...
+  backend (pacing: low..high samples queued)`) is an underrun.
+- `traps`, `trap_max_ms`: spells with no frame produced (the front end
+  trapped, the sequencer held by DirectSound's sample-limit routine) and
+  the longest that ended in the window. A long one means the title's APU
+  interrupt service ran late.
+- `dry_ms`, `dry_spells`, `dry_max_ms`: persistent stream voices found with
+  nothing left to play (the title did not refill its segment list in
+  time), in voice-milliseconds summed over voices, the spells and the
+  longest. A deeper device queue does not help these; underruns it does.
+- `dropped`: periods thrown away while the device did not consume (the
+  stall fallback after `[APU] audio device stopped consuming`).
+
+"Something went wrong" is an underrun, dry time, a dropped period, or a
+trap spell or submit gap over 20 ms. The last window is printed at shutdown
+if anything went wrong in it.
+
+File reads have the same kind of line, also always on: the first guest
+read 10 s or more after the window began prints
+
+    [READ] window_s=10.0 reads=152 mb=4.9 max_ms=12.3 max_want=65536 max_from=0x0001ABCD
+
+the reads in the window, the megabytes delivered, and the longest single
+read on the host (NtReadFile, or a whole NtReadFileScatter) with its size
+and caller. A read longer than what a stream voice has queued shows up as
+dry time on the health line.
+
+The rest are off unless set; with none of them set the APU runs exactly as before.
 The switches (`RECOMP_AUDIO_HOST`, `RECOMP_APU_TRACE`, `RECOMP_APU_RING`)
 are on for any value but empty or one starting with `0`, so `=0` turns
 them off.
