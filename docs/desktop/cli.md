@@ -25,7 +25,7 @@ it from anywhere: `ln -s "$PWD/xrecomp" ~/.local/bin/xrecomp`.
 | `xrecomp folders [add\|remove FOLDER]` | The library folders `list` scans (settings.json `library_folders`; on a Mac the app's, default `~/Documents/xbox`) |
 | `xrecomp where [GAME]` | The data folder, or a game's folders (work, settings, saves, logs, pack, discovered file) |
 
-GAME is a source path, a title ID in any case (`4541005B`, `gba-AXVE-1A2B3C4D`) or a part of a title that names one
+GAME is a source path, a title ID in any case (`12345678`, `gba-AXVE-1A2B3C4D`) or a part of a title that names one
 game only. `--home DIR` (before the command) or `$XRECOMP_HOME` moves the data folder.
 
 ## The library and its states

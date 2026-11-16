@@ -5,7 +5,7 @@ the macOS launcher's (docs/macos/launcher.md « Storage »), so the app and the 
     <root>/
       settings.json         library folders, work root, Python (the Mac app's file; unknown keys are kept)
       defaults/recomp.cfg   Default settings
-      titles/<ID>/          ID: an Xbox title ID (4541005B) or a console title (gba-AXVE-1A2B3C4D, ps1-..., n64-...)
+      titles/<ID>/          ID: an Xbox title ID (12345678) or a console title (gba-AXVE-1A2B3C4D, ps1-..., n64-...)
         work/               prepare --work (or <work_root>/<ID>)
         recomp.cfg          the game's settings over Default settings (XBA-188's per-game format)
         save/               an Xbox title's RECOMP_SAVE_DIR

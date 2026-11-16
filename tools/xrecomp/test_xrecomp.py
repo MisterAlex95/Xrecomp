@@ -63,17 +63,17 @@ def test_default_root_per_platform():
 
 
 def test_title_paths(home, tmp_path):
-    x = home.title("4541005b")
-    assert x.id == "4541005B" and x.console == "xbox"
-    assert x.work == os.path.join(home.root, "titles", "4541005B", "work")
-    assert x.save == os.path.join(home.root, "titles", "4541005B", "save")     # the Mac app's per-title save
+    x = home.title("1234567a")
+    assert x.id == "1234567A" and x.console == "xbox"
+    assert x.work == os.path.join(home.root, "titles", "1234567A", "work")
+    assert x.save == os.path.join(home.root, "titles", "1234567A", "save")     # the Mac app's per-title save
     assert x.discovered.endswith(os.path.join("work", "discovered.jsonl")) and x.pack is None
     g = home.title("gba-AXVE-1A2B3C4D")
     assert g.console == "gba" and g.save == os.path.join(home.root, "save")    # the runtimes add gba-<KEY>/
     assert g.pack == os.path.join(home.root, "packs", "gba-AXVE-1A2B3C4D")
     assert g.discovered.endswith(os.path.join("work", "discovered.txt"))
     home.save_settings({"work_root": str(tmp_path / "big"), "toolkit_path": "/kept"})
-    assert home.title("4541005B").work == str(tmp_path / "big" / "4541005B")
+    assert home.title("12345678").work == str(tmp_path / "big" / "12345678")
     assert home.settings()["toolkit_path"] == "/kept"
 
 

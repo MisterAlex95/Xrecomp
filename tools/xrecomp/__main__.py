@@ -10,7 +10,7 @@ xrecomp: prepare and play your own games from a terminal (Linux, macOS, Windows)
 
 SOURCE is what `python -m tools.prepare` takes: an Xbox disc image, extracted disc folder or default.xbe, a GBA ROM,
 a PS1 disc (.cue / .chd / .bin / .iso) or PS-X EXE, an N64 ROM (.z64 / .v64 / .n64). It is read where it is, never
-copied. GAME is a source path, a title ID (4541005B, gba-AXVE-1A2B3C4D) or a unique part of a title.
+copied. GAME is a source path, a title ID (12345678, gba-AXVE-1A2B3C4D) or a unique part of a title.
 
 Files go to the platform's user data folder ($XRECOMP_HOME moves it; `xrecomp where` prints it).
 """
