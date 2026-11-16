@@ -131,8 +131,10 @@ option(XBR_CONSOLE_PSP "Build the PSP spike (consoles/psp)" ${_xbr_console_defau
 option(XBR_CONSOLE_GC "Build the GameCube spike (consoles/gc)" ${_xbr_console_default})
 # The Dreamcast (XBA-227) is a spike too: Linux / macOS headless only (dc_run), not in the app yet.
 option(XBR_CONSOLE_DC "Build the Dreamcast spike (consoles/dc)" ${_xbr_console_default})
+# The Nintendo 3DS (XBA-228) is a spike too: Linux / macOS headless only (ctr_run), not in the app yet.
+option(XBR_CONSOLE_3DS "Build the Nintendo 3DS spike (consoles/3ds)" ${_xbr_console_default})
 set(XBR_CONSOLES "")
-foreach(_c gba ps1 n64 nds psp gc dc)
+foreach(_c gba ps1 n64 nds psp gc dc 3ds)
     string(TOUPPER ${_c} _C)
     if(XBR_CONSOLE_${_C})
         if(WIN32)

@@ -1,6 +1,6 @@
 # Other consoles
 
-XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS**, **PSP**, **GameCube**, **Dreamcast** and **Xbox 360** spikes), statically recompiled the same way as
+XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS**, **PSP**, **GameCube**, **Dreamcast**, **Xbox 360** and **Nintendo 3DS** spikes), statically recompiled the same way as
 Xbox discs. This is early work: the layout, build options and test corpus are in place, the runtimes are empty, and no
 game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
@@ -15,6 +15,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 | `gc/` | GameCube (spike, Linux headless only) | Gekko (PowerPC 750 + paired singles, big-endian) |
 | `dc/` | Dreamcast (spike, Linux headless only) | Hitachi SH-4 (SH7091, little-endian, FPU) |
 | `x360/` | Xbox 360 (spike, tools and headers only) | Xenon (64-bit PowerPC + VMX128, big-endian) |
+| `3ds/` | Nintendo 3DS (spike, Linux headless only) | ARM11 MPCore (ARMv6K + VFPv2), one Horizon user process |
 
 Each one has:
 
@@ -1500,6 +1501,56 @@ Not there yet: everything of a runtime (XBA-229 steps 2 to 5): kernel / XAM HLE,
 hardware threads, MSVC helpers (__savegprlr / __restgprlr) and bctr jump tables in discovery, Xenos, XMA, LZX. The
 estimate is on XBA-229.
 
+**Nintendo 3DS spike (XBA-228, epic XBA-222).** Does the ARM work extend to the 3DS's ARM11 (ARMv6K + VFPv2), and
+how much of Horizon (the 3DS operating system) must be emulated high-level for a libctru program? A libctru hello
+world (.3dsx) runs recompiled on Linux, 99.9 % of its instructions native after two discovery rounds, its top screen
+identical to the interpreter's. Linux / macOS headless only (`XBR_CONSOLE_3DS`, off on Android and Windows), nothing
+in the app. C and Python names use `ctr` (the 3DS's code name), the directory and CMake option `3ds`. What is there:
+
+- `tests/homebrew/hello`: our test program, libctru 2.7.0 built in `tools/docker/3ds-homebrew.Dockerfile` (the GBA and
+  NDS corpora's devkitARM image, same digest: libctru and 3dsxtool are in it, no extra layer) by
+  `tools/consoles/build_homebrew.sh 3ds`. `gfxInitDefault`, `consoleInit(GFX_TOP)`, three lines, an ARMv6K + VFPv2
+  check (REV / REV16 / REVSH, SXTB / UXTB / SXTH / UXTAH, LDREX / STREX / CLREX, UADD8 + SEL and the GE flags, USAT /
+  SSAT, PKHBT, single and double VFP arithmetic, VSQRT, conversions, compares; each result against the ARM ARM's
+  value, `ARMv6K + VFPv2: ok`), then libctru's usual main loop (`aptMainLoop`, `hidScanInput`, `gfxFlushBuffers`,
+  `gfxSwapBuffers`, `gspWaitForVBlank`) counting 30 frames, `done (keys 00000000)`.
+- `tools/ctr_tools` (`python3 -m ctr_tools.recomp PROG.3dsx OUTDIR [--discovered FILE]`): `threedsx.py` loads and
+  relocates the 3DSX at 0x00100000 as the Homebrew Launcher does (header, three relocation headers, code / rodata /
+  data, absolute and relative relocation runs) and lifts the code segment. `lift.py` subclasses the DS spike's
+  ARMv5TE layer (gba_tools and nds_tools unchanged: their outputs are byte-identical) with the ARM11's additions:
+  LDREX / STREX (B / H / D) and UMAAL, which gba_tools' classifier takes for data processing; the media
+  instructions and every VFP encoding, which it takes for undefined (a function ended there); the hints; SVC (the
+  interpreter runs it: the HLE kernel); MRC of the TLS pointer and the CP15 barriers; ARMv6's unaligned loads (no
+  rotation). Discovery is seeded with the 3DSX's relocations that point into code: every function pointer of the
+  program (C tables, thread entries, callbacks) is named there, 52 entries in the hello world.
+- `runtime/`: `ctr_core` (C11 + libm, no host layer): one user process, high-level. The guest's 4 GB address space is
+  one host reservation (`ctr_mem.c`): a user process has no I/O, so every access, interpreted or lifted, is `mem +
+  address`, unaligned included, and the code segment is read-only on the host too (a pack is checked once, against
+  the loaded image's hash, instead of the DS's code spans). `ctr_cpu.c`: an ARMv6K + VFPv2 interpreter, user mode
+  (the DS interpreter's ARMv5TE part without banked modes). `ctr_recomp_rt.h` gives the RC_* vocabulary its 3DS
+  meaning and holds `rc_media` / `rc_vfp_*`, one static inline function per family that the interpreter calls with
+  the opcode it fetched and lifted code with a constant opcode, so the two cannot disagree (build with
+  `-ffp-contract=off`: VMLA rounds twice). `ctr_kernel.c`: the kernel calls libctru makes (memory, threads and a
+  priority scheduler on one core, events, mutexes, semaphores, address arbiters, waits with timeouts, shared memory,
+  ports and IPC, resource limits); time is the instruction clock and skips ahead when every thread waits, so a run is
+  deterministic. `ctr_services.c`: srv, APT (lock, Initialize, Enable and the WAKEUP parameter, Glance /
+  ReceiveParameter), HID (a shared memory block that stays zero), GSP (rights, the interrupt relay queue: VBlank0 /
+  VBlank1 every frame, the framebuffer info libctru writes into shared memory, SetBufferSwap), FS (Initialize, no
+  archive). The top screen is the framebuffer GSP was told to show, decoded from its format (RGBA8, BGR8, RGB565,
+  RGB5A1, RGBA4) and rotated (the LCDs are portrait).
+  `ctr_run PROG.3dsx [--frames N] [--png OUT] [--screen top|bottom] [--pack LIB] [--missed FILE] [--stats] [--peek A:N] [-v]`
+  (`-v` names the services and commands asked for; a guest access outside the mapped regions is reported with its
+  guest address).
+- `tests/`: ctest `ctr_hello` (interpreter) and `ctr_rc_hello` (recompiled, discovery loop: two rounds), both compare
+  the top screen after 60 frames with `hello_top.png` (`consoles/nds/tests/png_compare.py`); skipped (77) without the
+  corpus, run by the homebrew CI job (`tools/consoles/run_3ds_homebrew.sh`). The recompiler's pytest
+  (`consoles/3ds/tools/ctr_tools/test_ctr_tools.py`) needs no toolchain.
+
+Not there yet: the PICA200 GPU (GX commands are acknowledged, not run), DSP audio, the file system (RomFS, save data,
+SD), the bottom screen's touch and the pads (HID reads zero), the other services, CRO modules, the ARMv6 Thumb
+additions (libctru builds in ARM state), VFP flush-to-zero / default NaN and short vectors, the New 3DS. The services a
+commercial title needs, and an estimate, are on XBA-222.
+
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
-build ourselves (devkitARM / libtonc / libnds, devkitPPC / libogc, PSn00bSDK, libdragon, PSPSDK, KallistiOS) and dumps Alex made from his own media, kept outside every
+build ourselves (devkitARM / libtonc / libnds / libctru, devkitPPC / libogc, PSn00bSDK, libdragon, PSPSDK, KallistiOS) and dumps Alex made from his own media, kept outside every
 repository.
