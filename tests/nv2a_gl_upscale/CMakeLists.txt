@@ -20,7 +20,8 @@ set(SOURCES
     ../../src/platform/host_cpus.c
     ../../src/kernel/nv2a_vsh_interp.c
     ../../src/kernel/nv2a_combiner.c
-    ../../src/kernel/nv2a_flip_hold.c)
+    ../../src/kernel/nv2a_flip_hold.c
+    ../../src/kernel/guest_clock.c)
 set(VARIANTS nv2a-gl-upscale)
 if(NOT APPLE AND NOT ANDROID)
     find_package(PkgConfig REQUIRED)
