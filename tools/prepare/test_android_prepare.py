@@ -777,3 +777,23 @@ def test_android_killed_lift_never_passes_as_up_to_date(tmp_path, monkeypatch):
     assert lifts == ["A", "B", "A"] and len(os.listdir(gen)) == 3
     run(kill=False)                             # and now it is
     assert lifts == ["A", "B", "A"]
+
+
+def test_resume_entries(tmp_path):
+    """XBA-258: pack.json "resume" comes from recomp_dispatch.c's call-site table (XBA-250's resume entries)."""
+    def disp(name, text):
+        p = tmp_path / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        return str(p)
+
+    other = disp("src/game/recomp_0001.c", "static const uint32_t g_recomp_call_site_count = 9u;\n")
+    with_sites = disp("a/recomp_dispatch.c", "static const uint32_t g_recomp_call_site_count = 1234u;\n")
+    none = disp("b/recomp_dispatch.c",
+                "    0u, 0u, 0u   /* none */\nstatic const uint32_t g_recomp_call_site_count = 0u;\n")
+    old = disp("c/recomp_dispatch.c", "int recomp_dispatch_init(void) { return 1; }\n")
+    assert pack.resume_entries([other, with_sites])
+    assert not pack.resume_entries([none])
+    assert not pack.resume_entries([old])                  # a lifter from before XBA-250: no table
+    assert not pack.resume_entries([other])                # the table is only read from recomp_dispatch.c
+    assert not pack.resume_entries([str(tmp_path / "gone/recomp_dispatch.c")])

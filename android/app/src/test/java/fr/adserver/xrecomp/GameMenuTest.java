@@ -112,6 +112,8 @@ public class GameMenuTest {
         @Override public boolean fastForwardSupported() { return ffOnly; }
         Boolean resume;       // XBA-249: null = as statesSupported; false = an Xbox title's states (this run only)
         @Override public boolean resumeSupported() { return resume != null ? resume : states; }
+        boolean needsPrepare; // XBA-258: an Xbox title prepared before its code had resume entries
+        @Override public boolean resumeNeedsPrepare() { return needsPrepare; }
         @Override public long stateTime(int slot) { return times[slot]; }
         @Override public int[] stateThumb(int slot) { return thumbs[slot]; }
         @Override public int saveState(int slot) { saved.add(slot); return saveCode; }
@@ -655,6 +657,11 @@ public class GameMenuTest {
         assertEquals(0, host.volume);
         press(KeyEvent.KEYCODE_BUTTON_A);
         assertEquals(80, host.volume);
+        // XBA-258: Resume where I left off, always listed; no value here (no save states): right changes nothing.
+        press(KeyEvent.KEYCODE_DPAD_DOWN);
+        assertSame(menu.row(GameMenu.Item.AUTO_RESUME), menu.focusedRow());
+        press(KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertTrue(GameStore.autoResume(activity));
         // Bottom screen: Panel -> Black, live.
         press(KeyEvent.KEYCODE_DPAD_DOWN);
         press(KeyEvent.KEYCODE_DPAD_RIGHT);
@@ -1112,8 +1119,18 @@ public class GameMenuTest {
         assertSame(menu.row(GameMenu.Item.FAST_FORWARD), rows.get(3));
         idle(100);
         TestSupport.screenshot(menu.root, "menu-xbox-states");
+        host.needsPrepare = true;
         menu.row(GameMenu.Item.SETTINGS).performClick();
-        assertNull(menu.row(GameMenu.Item.AUTO_RESUME));
+        // XBA-258: the row stays, without a value, and says a Prepare again turns it on; choosing it changes nothing.
+        Widgets.MenuRow ar = menu.row(GameMenu.Item.AUTO_RESUME);
+        assertNotNull(ar);
+        assertNull(ar.value);
+        assertEquals(activity.getString(R.string.MENU_RESUME_WHY_PREPARE), ar.subtitle);
+        ar.performClick();
+        assertTrue(GameStore.autoResume(activity));
+        assertNull(ar.value);
+        idle(100);
+        TestSupport.screenshot(menu.root, "menu-xbox-resume-unavailable");
         press(KeyEvent.KEYCODE_BUTTON_B);
         menu.row(GameMenu.Item.CONTROLS).performClick();
         java.util.List<String> texts = new java.util.ArrayList<>();
@@ -1284,7 +1301,11 @@ public class GameMenuTest {
     public void autoResumeRowOnlyWithStates() {
         menu.open("Back");
         menu.row(GameMenu.Item.SETTINGS).performClick();
-        assertNull(menu.row(GameMenu.Item.AUTO_RESUME));
+        // XBA-258: shown, without a value, with the reason (a game whose states cannot be kept).
+        Widgets.MenuRow ar = menu.row(GameMenu.Item.AUTO_RESUME);
+        assertNotNull(ar);
+        assertNull(ar.value);
+        assertEquals(activity.getString(R.string.MENU_RESUME_WHY_GAME), ar.subtitle);
         menu.close();
         menu.onStop();
         assertTrue(host.saved.isEmpty());                   // an Xbox game: no automatic slot

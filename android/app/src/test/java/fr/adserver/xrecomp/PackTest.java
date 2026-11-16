@@ -39,6 +39,25 @@ public class PackTest {
         TestSupport.write(json, o.toString());
     }
 
+    /** XBA-258: « Resume where I left off » said before a launch, from pack.json's "resume" (Xbox) or the console. */
+    @Test
+    public void resume() throws Exception {
+        assertEquals(Pack.Resume.NO, Pack.resume(files(), TID));             // no pack
+        TestSupport.writePack(files(), TID, 10);
+        assertEquals(Pack.Resume.PREPARE_AGAIN, Pack.resume(files(), TID));  // a pack from before the field
+        edit("resume", true);
+        assertEquals(Pack.Resume.YES, Pack.resume(files(), TID));
+        assertEquals(Pack.Resume.YES, Pack.resume(files(), "0x4d530004"));
+        edit("resume", false);
+        assertEquals(Pack.Resume.NO, Pack.resume(files(), TID));             // generated code without resume entries
+        TestSupport.write(new File(Pack.packDir(files(), TID), "pack.json"), "{not json");
+        assertEquals(Pack.Resume.NO, Pack.resume(files(), TID));
+        assertEquals(Pack.Resume.YES, Pack.resume(files(), "gba-AXVE-1A2B3C4D"));   // a console game always resumes
+        assertEquals(Pack.Resume.YES, Pack.resume(files(), "ps1-SLUS-00594"));
+        assertEquals(Pack.Resume.YES, Pack.resume(files(), "n64-NSME-635A2BFF"));
+        assertEquals(Pack.Resume.NO, Pack.resume(files(), null));
+    }
+
     @Test
     public void valid() throws Exception {
         TestSupport.writePack(files(), TID, 1234);

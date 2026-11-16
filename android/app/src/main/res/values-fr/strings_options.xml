@@ -56,6 +56,7 @@
     <string name="OPT_RUMBLE_DETAIL">Activée : la manette vibre quand le jeu le demande (la DualShock de la PlayStation, le Rumble Pak de la Nintendo 64, la manette Xbox). Désactivée : jamais. Pour toutes les consoles. S\'applique au prochain lancement d\'un jeu. (RECOMP_RUMBLE)</string>
 
     <string name="ROM_RESUME">Reprendre</string>
+    <string name="LIB_RESUME_TAG">Reprise</string>
     <string name="ROM_START">Démarrer</string>
     <string name="ROM_OPTIONS">Réglages du jeu</string>
     <string name="ROM_OPT_PICTURE">L\'image de ce jeu</string>

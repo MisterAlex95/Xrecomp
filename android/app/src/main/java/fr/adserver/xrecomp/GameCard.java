@@ -27,7 +27,7 @@ final class GameCard extends View {
     private Bitmap art;
     private String initials = "";
     private int monoColor = Theme.ACCENT_DEEP;
-    private String title = "", chip = "", badge = "";
+    private String title = "", chip = "", badge = "", resume = "";
     private int chipColor = Theme.TEXT_DIM;
     private boolean chipShown = true, dim, favourite;
     private float focusT;
@@ -59,6 +59,19 @@ final class GameCard extends View {
     void setBadge(String b) {
         badge = b == null ? "" : b;
         invalidate();
+    }
+
+    /**
+     * XBA-258: the game resumes where the player left off: a tag (« Resume ») in the art's bottom left corner; "" or
+     * null for none.
+     */
+    void setResume(String label) {
+        resume = label == null ? "" : label;
+        invalidate();
+    }
+
+    String resumeForTest() {
+        return resume;
     }
 
     /** XBA-206: a favourite, a star in the art's top right corner. */
@@ -200,6 +213,22 @@ final class GameCard extends View {
             c.drawRoundRect(b, bh / 2, bh / 2, fillP);
             badgeP.setColor(Theme.alpha(Theme.TEXT_BRIGHT, dim ? 0.6f : 0.94f));
             c.drawText(badge, b.left + Theme.S2, b.centerY() - (bm.ascent + bm.descent) / 2, badgeP);
+        }
+        if (!resume.isEmpty()) {
+            // XBA-258: a dark pill in the art's bottom left corner, an accent dot before the word (as the badge).
+            Paint.FontMetrics bm = badgeP.getFontMetrics();
+            float dot = 6, bh = bm.descent - bm.ascent + Theme.S1;
+            float bw = badgeP.measureText(resume) + 2 * Theme.S2 + Theme.S1 + 2 * dot;
+            RectF b = new RectF(artR.left + Theme.S2, artR.bottom - Theme.S2 - bh, artR.left + Theme.S2 + bw,
+                                artR.bottom - Theme.S2);
+            fillP.setShader(null);
+            fillP.setColor(0xB0000000);
+            c.drawRoundRect(b, bh / 2, bh / 2, fillP);
+            fillP.setColor(Theme.alpha(Theme.OK, dim ? 0.6f : 1f));
+            c.drawCircle(b.left + Theme.S2 + dot, b.centerY(), dot, fillP);
+            badgeP.setColor(Theme.alpha(Theme.TEXT_BRIGHT, dim ? 0.6f : 0.94f));
+            c.drawText(resume, b.left + Theme.S2 + Theme.S1 + 2 * dot, b.centerY() - (bm.ascent + bm.descent) / 2,
+                       badgeP);
         }
         if (favourite) {
             // A star on a dark disc, in the art's top right corner (XBA-206).

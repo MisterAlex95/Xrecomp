@@ -1962,6 +1962,14 @@ public class LauncherActivity extends Activity {
                 heroLine(info, statusText, statusColor);
             heroLine(info, stateText(st, dir), 0);
         }
+        // XBA-258: whether the title resumes where the player left off, said before a launch (its pack's resume
+        // entries): « Resumes where you left off », or a Prepare again gives it that.
+        Pack.Resume resume = st == State.READY && prep == Prep.PLAYABLE && !copying && tid != null
+                             ? Pack.resume(getFilesDir(), tid) : Pack.Resume.NO;
+        if (resume == Pack.Resume.YES)
+            heroLine(info, getString(R.string.HOME_RESUME_YES), Theme.OK);
+        else if (resume == Pack.Resume.PREPARE_AGAIN && !olderToolkit)   // older toolkit: its line says Prepare again
+            heroLine(info, getString(R.string.HOME_RESUME_PREPARE), Theme.WARN);
 
         LinearLayout buttons = heroButtons(info);
         Widgets.PillButton play;
@@ -5854,6 +5862,8 @@ public class LauncherActivity extends Activity {
         if (libBadges)
             c.setBadge(e.console().badge());
         c.setFavourite(libView().favourite(e.tid));
+        if (LibraryScreen.resumeTag(e))   // XBA-258
+            c.setResume(getString(R.string.LIB_RESUME_TAG));
         c.setDim(e.chip == GameState.Chip.SOURCE_GONE || e.chip == GameState.Chip.DATA_MISSING
                  || e.chip == GameState.Chip.NO_FILE_ACCESS);
         c.setOnClickListener(v -> {

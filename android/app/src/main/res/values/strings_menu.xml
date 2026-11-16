@@ -66,6 +66,8 @@
     <string name="MENU_STATE_RESUMED">Resumed where you left off</string>
     <string name="MENU_STATE_RESUME_FAILED">Could not resume: the game starts from the beginning</string>
     <string name="MENU_RESUME_AUTO">Resume where I left off</string>
+    <string name="MENU_RESUME_WHY_PREPARE">Prepare this game again to turn it on</string>
+    <string name="MENU_RESUME_WHY_GAME">Not possible for this game</string>
     <string name="MENU_QUIT_CONFIRM_KEPT">Your place is kept for next time</string>
     <string name="MENU_RESTART_APPLY">Restart to apply</string>
     <string name="MENU_RESTART_APPLY_SUB">Some changes are waiting for it</string>

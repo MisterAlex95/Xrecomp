@@ -189,6 +189,24 @@ public class LauncherLibraryViewTest {
         }
     }
 
+    // ---- Resume tag (XBA-258) -----------------------------------------------------------------------------------
+
+    /** A card says « Resume » when its game resumes where the player left off: a pack with resume entries. */
+    @Test
+    public void resumeTagOnResumableGames() throws Exception {
+        library(4, new long[0][]);
+        TestSupport.writePack(app.getFilesDir(), tidHex(1), 64);
+        File pj = new File(Pack.packDir(app.getFilesDir(), tidHex(1)), "pack.json");
+        TestSupport.write(pj, new org.json.JSONObject(PrepareProtocol.readText(pj, 1 << 16))
+                                  .put("resume", true).toString());
+        TestSupport.writePack(app.getFilesDir(), tidHex(2), 64);   // from before "resume": no tag
+        LauncherActivity a = launch();
+        assertEquals(app.getString(R.string.LIB_RESUME_TAG), card(a, NAMES[1]).resumeForTest());
+        assertEquals("", card(a, NAMES[2]).resumeForTest());
+        assertEquals("", card(a, NAMES[0]).resumeForTest());       // no pack
+        render("resume-tag", null);
+    }
+
     // ---- Favourites ---------------------------------------------------------------------------------------------
 
     @Test
