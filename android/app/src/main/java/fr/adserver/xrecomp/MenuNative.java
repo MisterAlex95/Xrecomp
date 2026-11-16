@@ -39,6 +39,12 @@ final class MenuNative {
     static native String nativeStatesReason();
 
     /**
+     * XBA-250: the running game's states survive the run (« Resume where I left off », the automatic slot): a console
+     * game's always; an Xbox title's when its generated code has resume entries.
+     */
+    static native boolean nativeStatesResumable();
+
+    /**
      * XBA-182: saves slot 1..4 (or 0, the automatic slot) between frames. 0 ok, or a negative code: -1 no console game, -2 empty slot, -3 another
      * game's state, -4 saved by another version, -5 the file cannot be written or read, -6 bad slot, -7 not a state
      * file or damaged, -8 not possible at this point of the game (XBA-249, an Xbox title).

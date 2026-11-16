@@ -142,7 +142,8 @@ final class GameMenu {
 
         /**
          * XBA-249: the states survive the run (the automatic slot, « Resume where I left off »): a console game's do;
-         * an Xbox title's load only within the run that saved them (until XBA-250).
+         * an Xbox title's when its runtime says so (XBA-250: generated code with resume entries; a state that cannot
+         * be resumed in another run is then not written to the automatic slot, the runtime says why).
          */
         default boolean resumeSupported() {
             return statesSupported();
@@ -996,7 +997,7 @@ final class GameMenu {
             r = row(Item.VOLUME, s(R.string.MENU_VOLUME));
             r.setChoices(new String[] { volumeLabel(100), s(R.string.MENU_MUTED) });
             r.cycler = dir -> setVolume(volume + dir * VOLUME_STEP);
-            if (resumeSupported()) {   // a GBA, PS1 or N64 game: the automatic slot (not an Xbox title's, XBA-249)
+            if (resumeSupported()) {   // the automatic slot: a console game, an Xbox title with resume entries (XBA-250)
                 r = row(Item.AUTO_RESUME, s(R.string.MENU_RESUME_AUTO));
                 r.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
                 r.cycler = dir -> setAutoResume(!GameStore.autoResume(activity));
@@ -1353,7 +1354,7 @@ final class GameMenu {
 
     // ---- Quick save / load and resuming ------------------------------------------------------------------------
 
-    /** « Resume where I left off » applies: a GBA, PS1 or N64 game with states, and the setting on. */
+    /** « Resume where I left off » applies: a game whose states survive the run, and the setting on. */
     private boolean autoResumes() {
         return GameStore.autoResume(activity) && resumeSupported();
     }

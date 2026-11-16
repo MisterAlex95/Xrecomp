@@ -1960,7 +1960,18 @@ public class LauncherActivity extends Activity {
             homeAgain = true;
             pill(buttons, Icon.PLAY, getString(R.string.PLAY), false, this::onPlay);
         } else {
-            play = pill(buttons, Icon.PLAY, getString(R.string.PLAY), true, this::onPlay);
+            // XBA-250: where the player left off saved (« Resume where I left off », the runtime's automatic slot
+            // save/xbox-<TITLE ID>/auto.st): Resume (that point) first, Start (the title's beginning) beside it.
+            String xtid = titleId();
+            boolean resumable = st == State.READY && xtid != null
+                                && GameStore.canResume(this, "xbox-" + xtid.toUpperCase(Locale.ROOT));
+            play = pill(buttons, Icon.PLAY, getString(resumable ? R.string.ROM_RESUME : R.string.PLAY), true,
+                        this::onPlay);
+            if (resumable)
+                pill(buttons, null, getString(R.string.ROM_START), false, () -> {
+                    GameStore.requestFreshStart(this);
+                    onPlay();
+                });
             play.setDim(st != State.READY);
             if (olderToolkit)   // offered, never forced: Play stays first (a Prepare takes 10-30 min)
                 pill(buttons, null, getString(R.string.PREPARE_AGAIN), false, this::onPrepareNewToolkit);

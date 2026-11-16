@@ -40,6 +40,12 @@ volatile int g_recomp_cas64_lock;
 
 recomp_func_t recomp_lookup_kernel(uint32_t va) { (void)va; return NULL; }
 
+/* The resume entries' runtime side (XBA-250, src/kernel/xbox_resume.c): the benchmark never resumes (g_cpu.r_resume
+ * stays NULL), so these are never called; they only have to link. */
+uint32_t recomp_resume_site(uint32_t func, uint32_t *ebp) { (void)func; *ebp = 0; abort(); }
+uint32_t recomp_resume_target(void) { abort(); }
+void recomp_resume_lost(uint32_t func, uint32_t site) { (void)func; (void)site; abort(); }
+
 void recomp_icall_fail_log(uint32_t va)
 {
     fprintf(stderr, "bench: indirect call to 0x%08X has no function\n", va);

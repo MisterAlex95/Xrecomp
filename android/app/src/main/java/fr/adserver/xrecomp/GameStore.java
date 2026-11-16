@@ -117,7 +117,8 @@ final class GameStore {
     }
 
     /*
-     * « Resume where I left off » (GBA / PS1 / N64 games, the in-game menu's Settings): on by default. On, the menu
+     * « Resume where I left off » (GBA / PS1 / N64 games; Xbox titles whose runtime has resume entries, XBA-250; the
+     * in-game menu's Settings): on by default. On, the menu
      * saves the automatic slot when the player leaves the game (Quit, Back to launcher, the background) and the shell
      * passes RECOMP_STATE_RESUME=1 so the runtime loads it before its first frame (recomp_states.h).
      */

@@ -1095,8 +1095,9 @@ public class GameMenuTest {
 
     /**
      * XBA-249: an Xbox title whose runtime offers states: Save state and Load state under Resume, then Fast-forward;
-     * no « Resume where I left off » (its states load only within the run); the Controls page lists the quick save /
-     * load chords; a refused load and a save not possible now say so.
+     * no « Resume where I left off » while its states load only within the run (generated code without resume
+     * entries: xboxResumeRows has the other case); the Controls page lists the quick save / load chords; a refused
+     * load and a save not possible now say so.
      */
     @Test
     public void xboxStateRows() throws Exception {
@@ -1141,6 +1142,34 @@ public class GameMenuTest {
         GameStore.setAutoResume(activity, true);
         menu.autoSave("test");
         assertEquals(List.of(1), host.saved);
+    }
+
+    /**
+     * XBA-250: an Xbox title whose states survive the run (its runtime has resume entries): « Resume where I left
+     * off » in Settings, « Where you left off » among the slots to load, and leaving the game saves the automatic
+     * slot, as for a console game.
+     */
+    @Test
+    public void xboxResumeRows() throws Exception {
+        host.ffOnly = true;
+        host.states = true;
+        host.resume = true;
+        GameStore.setAutoResume(activity, true);
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertNotNull(menu.row(GameMenu.Item.AUTO_RESUME));
+        idle(100);
+        TestSupport.screenshot(menu.root, "menu-xbox-resume");
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        menu.close();
+        host.times[GameMenu.AUTO_SLOT] = System.currentTimeMillis();
+        menu.open("Back");
+        menu.row(GameMenu.Item.STATE_LOAD).performClick();
+        assertEquals(6, menu.rowsForTest().size());   // « Where you left off », four slots, Back
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        menu.close();
+        menu.onStop();                                 // the background: the automatic slot
+        assertEquals(List.of(GameMenu.AUTO_SLOT), host.saved);
     }
 
     /** XBA-249: an Xbox title whose runtime says states are not available keeps the XBA-240 rows. */

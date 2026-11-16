@@ -111,7 +111,7 @@ public class ShellActivity extends SDLActivity {
             }
         }
         ShaderWarmup.cancel(this);   // an N64 shader warm-up never runs next to a game (its GPU memory, its driver)
-        applyAutoResume(rom != null);
+        applyAutoResume();
         applyCheats(rom != null);
         applyVkDriver(rom != null);
         Console console = applyGameSettings(rom != null);
@@ -353,13 +353,14 @@ public class ShellActivity extends SDLActivity {
     }
 
     /**
-     * RECOMP_STATE_RESUME for a GBA / PS1 / N64 runtime (recomp_states.h): « 1 » when « Resume where I left off » is
-     * on, so the automatic slot the menu saved when the player left is loaded before the first frame; unset otherwise,
-     * and for a launch from the Home's « Start » (GameStore.takeFreshStart, one launch only).
+     * RECOMP_STATE_RESUME for the runtime (recomp_states.h): « 1 » when « Resume where I left off » is on, so the
+     * automatic slot the menu saved when the player left is loaded before the first frame (a GBA / PS1 / N64 game; an
+     * Xbox title since XBA-250, whose runtime resumes the slot instead of starting the game when the slot can be
+     * resumed); unset otherwise, and for a launch from the Home's « Start » (GameStore.takeFreshStart, one launch).
      */
-    private void applyAutoResume(boolean consoleGame) {
+    private void applyAutoResume() {
         boolean fresh = GameStore.takeFreshStart(this);
-        boolean on = consoleGame && GameStore.autoResume(this) && !fresh;
+        boolean on = GameStore.autoResume(this) && !fresh;
         try {
             if (on)
                 Os.setenv("RECOMP_STATE_RESUME", "1", true);
@@ -730,10 +731,21 @@ public class ShellActivity extends SDLActivity {
 
         private boolean statesReasonLogged;
 
-        /** XBA-249: an Xbox title's states load only within the run (no automatic slot, no resume). */
+        /**
+         * XBA-249 / XBA-250: an Xbox title's states survive the run (the automatic slot, « Resume where I left off »)
+         * when its runtime can resume them in a fresh process (generated code with resume entries).
+         */
         @Override
         public boolean resumeSupported() {
-            return GameStore.launchedRom(ShellActivity.this) != null && statesSupported();
+            if (GameStore.launchedRom(ShellActivity.this) != null)
+                return statesSupported();
+            if (!statesSupported())
+                return false;
+            try {
+                return MenuNative.nativeStatesResumable();
+            } catch (UnsatisfiedLinkError e) {
+                return false;
+            }
         }
 
         /**

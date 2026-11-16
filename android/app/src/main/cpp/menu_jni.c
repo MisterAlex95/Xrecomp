@@ -21,6 +21,7 @@
 
 /* The Xbox runtime's save states (xbox_state_service.c, XBA-249). */
 int xbox_StateAvailable(char *why, size_t why_n);
+int xbox_StateResumeAvailable(char *why, size_t why_n);   /* XBA-250 */
 
 #define JNI_FN(name) Java_fr_adserver_xrecomp_MenuNative_##name
 
@@ -105,6 +106,19 @@ JNIEXPORT jstring JNICALL JNI_FN(nativeStatesReason)(JNIEnv *env, jclass cls)
     else if (!strcmp(recomp_states_console(), "xbox"))
         xbox_StateAvailable(why, sizeof why);
     return (*env)->NewStringUTF(env, why);
+}
+
+/* XBA-250: an Xbox title's states survive the run when its generated code has resume entries (a state that cannot be
+ * resumed is then not written to the automatic slot); a console game's always do. */
+JNIEXPORT jboolean JNICALL JNI_FN(nativeStatesResumable)(JNIEnv *env, jclass cls)
+{
+    (void)env;
+    (void)cls;
+    if (!recomp_states_available())
+        return JNI_FALSE;
+    if (!strcmp(recomp_states_console(), "xbox"))
+        return xbox_StateResumeAvailable(NULL, 0) ? JNI_TRUE : JNI_FALSE;
+    return JNI_TRUE;
 }
 
 JNIEXPORT jint JNICALL JNI_FN(nativeStateSave)(JNIEnv *env, jclass cls, jint slot)
