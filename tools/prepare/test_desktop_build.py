@@ -194,6 +194,79 @@ def test_windows_clang_cl_and_lld_link_lines():
     assert db.exe_name("t", "windows-x86_64") == "t.exe" and db.exe_name("t", "linux-arm64") == "t"
 
 
+class _FakeProcs:
+    def __init__(self, out, rc=2):
+        self.out, self.rc, self.calls = out, rc, []
+
+    def run(self, args, **kw):
+        self.calls.append(list(args))
+        return self.rc, self.out
+
+
+def test_windows_msvc_cl_and_link():
+    """XBA-89: Visual Studio's cl when there is no clang-cl, linked by the link.exe beside it."""
+    cl = "C:/VS/VC/Tools/MSVC/14.44/bin/Hostx64/x64/cl.exe"
+    procs = _FakeProcs("Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35211 for x64\n"
+                       "usage: cl [ option... ] filename... [ /link linkoption... ]\n")
+    tc = db.find_toolchain(TK, "windows-x86_64", env={}, which=_which(cl=cl), isfile=_files(), procs=procs)
+    assert (tc.kind, tc.lld, tc.source) == ("msvc", None, "system")
+    assert tc.link_driver("C") == ["C:/VS/VC/Tools/MSVC/14.44/bin/Hostx64/x64/link.exe"]
+    assert tc.short_version() == "cl 19.44.35211" and procs.calls == [[cl]]
+    assert db.compiler_kind("C:\\VS\\bin\\CL.EXE") == "msvc"
+    # clang-cl first when both are there.
+    tc = db.find_toolchain(TK, "windows-x86_64", env={}, isfile=_files(),
+                           which=_which(cl=cl, **{"clang-cl": "C:/LLVM/bin/clang-cl.exe",
+                                                  "lld-link.exe": "C:/LLVM/bin/lld-link.exe"}))
+    assert (tc.cc, tc.lld) == ("C:/LLVM/bin/clang-cl.exe", "C:/LLVM/bin/lld-link.exe")
+    with pytest.raises(cc.StepError) as e:
+        db.find_toolchain(TK, "windows-x86_64", env={}, which=_which(), isfile=_files())
+    assert e.value.code == "NO_COMPILER" and "developer prompt" in e.value.msg
+
+
+def test_windows_c_runtime_matches_the_libraries():
+    """CMake writes MSVC's C runtime as -MD: kept, and /MD added when the manifest names none."""
+    tc = _tc("windows-x86_64", "C:/LLVM/bin/clang-cl.exe", lld="C:/LLVM/bin/lld-link.exe")
+    man = _man("C:/rt", compile_flags=["/DWIN32", "/DNDEBUG", "-MD", "/bigobj"])
+    flags = db.compile_flags(tc, man, "C:/tk", "C:/p")
+    assert "-MD" in flags and "/MD" not in flags and "/DWIN32" in flags
+    flags = db.compile_flags(tc, _man("C:/rt", compile_flags=["/DNDEBUG"]), "C:/tk", "C:/p")
+    assert "/MD" in flags and "/bigobj" in flags
+
+
+def test_windows_mingw_gcc_against_a_mingw_runtime():
+    """The Linux check of the Windows route: x86_64-w64-mingw32-gcc (--cc) links like any GNU driver."""
+    tc = db.find_toolchain(TK, "windows-x86_64", cc_path="/usr/bin/x86_64-w64-mingw32-gcc", env={},
+                           which=_which(), isfile=_files())
+    assert (tc.kind, tc.lld) == ("gnu", None)
+    man = _man("/tk/runtime/windows-x86_64", link=[{"arg": "-mwindows", "role": "flags"},
+                                                   {"arg": "{runtime}/lib/libxbox_kernel.a", "role": "libraries"},
+                                                   {"arg": "-ld3d11", "role": "libraries"}])
+    args = db.link_args(tc, man, TK, ["/o/1.o"], "/p/build/t.exe", exists=lambda p: True)
+    assert args == ["/usr/bin/x86_64-w64-mingw32-gcc", "-o", "/p/build/t.exe", "/o/1.o", "-mwindows",
+                    "/tk/runtime/windows-x86_64/lib/libxbox_kernel.a", "-ld3d11"]
+
+
+def test_xba_host_names_a_cross_build_host():
+    assert rt.host_id(env={"XBA_HOST": "windows-x86_64"}) == "windows-x86_64"
+    assert rt.host_id("Linux", "x86_64", env={"XBA_HOST": "windows-x86_64"}) == "linux-x86_64"
+    assert rt.host_id(env={}) == rt.host_id("Linux", "x86_64") or sys.platform != "linux"
+
+
+def test_release_configuration_of_a_multi_config_generator():
+    assert rt.pick_configuration({"configurations": [{"name": "Debug"}, {"name": "Release"}]})["name"] == "Release"
+    assert rt.pick_configuration({"configurations": [{"name": ""}]})["name"] == ""
+
+
+def test_game_data_link_replaces_an_old_one(tmp_path):
+    from tools.prepare import __main__ as prep
+    a, b, link = tmp_path / "a", tmp_path / "b", str(tmp_path / "game")
+    a.mkdir()
+    b.mkdir()
+    prep.link_game_data(str(a), link)
+    prep.link_game_data(str(b), link)
+    assert os.path.realpath(link) == str(b)
+
+
 def test_system_lib():
     assert db.system_lib("/nope/libSDL2-2.0.so.0", exists=lambda p: False) == "-lSDL2-2.0"
     assert db.system_lib("/nope/libepoxy.so", exists=lambda p: False) == "-lepoxy"

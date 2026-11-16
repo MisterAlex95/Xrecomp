@@ -1,9 +1,10 @@
-# Desktop downloads on the public GitHub mirror (docs/releases/README.md « What a release contains »): the Mac app
-# and the Linux toolkit (x86-64 and arm64, XBA-87), built on GitHub's own runners (free for a public repository; nothing runs on the
-# maintainers' machines) and attached to the GitHub release that Gitea's CI publishes with the APK.
+# Desktop downloads on the public GitHub mirror (docs/releases/README.md « What a release contains »): the Mac app,
+# the Linux toolkit (x86-64 and arm64, XBA-87) and the Windows toolkit (x86-64, experimental, XBA-89), built on
+# GitHub's own runners (free for a public repository; nothing runs on the maintainers' machines) and attached to the
+# GitHub release that Gitea's CI publishes with the APK.
 #
-#   tag xrecomp-v<version>   <tag>-macos-arm64.zip, <tag>-linux-x86_64.tar.gz and <tag>-linux-arm64.tar.gz on
-#                            that release
+#   tag xrecomp-v<version>   <tag>-macos-arm64.zip, <tag>-linux-x86_64.tar.gz, <tag>-linux-arm64.tar.gz and
+#                            <tag>-windows-x86_64.zip on that release
 #   push to main             the same named xrecomp-<sha8>-… on xrecomp-latest
 #   manual run               the same for the ref it runs on (a tag or main); any other branch builds without
 #                            publishing (the files stay on the run's page)
@@ -147,9 +148,113 @@ jobs:
           path: out/${{ env.ARCHIVE }}*
           retention-days: 14
 
+  # Windows x86-64, experimental (XBA-89; docs/desktop/windows.md): the runtime built with MSVC (upstream's reference
+  # compiler; clang-cl when cl fails, with a warning), the toolkit, xrecomp.cmd. Smoke test from the zip as a user
+  # would: the synthetic retail XBE prepared by the compile driver (clang-cl + lld-link when LLVM is on PATH, else cl;
+  # then cl explicitly) and started until « XBE loaded » (Win32 + D3D11: no SDL on Windows). Xbox games only: the
+  # console runtimes are POSIX-only. Its failure does not hold back the macOS and Linux files (publish below).
+  windows:
+    needs: meta
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      LABEL: ${{ needs.meta.outputs.label }}
+      PYTHONUTF8: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The files as git has them (LF), so the package hashes and the scripts are those of the other hosts.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # cl, link and the Windows SDK (INCLUDE, LIB) for x64, for this job's steps.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Tools
+        run: |
+          python -m pip install -q ninja capstone pefile numpy pytest
+          set -x
+          python --version; cmake --version | head -1; ninja --version
+          command -v cl clang-cl lld-link || true
+          cl 2>&1 | head -1 || true
+          clang-cl --version 2>&1 | head -1 || true
+      - name: Package (runtime/windows-x86_64 with MSVC)
+        run: |
+          sh tools/ci/package_toolkit.sh out/XRecomp
+          if ! python -m tools.prepare.runtime --toolkit out/XRecomp -- -DCMAKE_C_COMPILER=cl; then
+            echo "::warning::the Windows runtime does not build with MSVC's cl (log above); building it with clang-cl"
+            python -m tools.prepare.runtime --toolkit out/XRecomp -- -DCMAKE_C_COMPILER=clang-cl
+          fi
+          cat out/XRecomp/runtime/windows-x86_64/runtime.json
+          ls out/XRecomp/runtime/windows-x86_64/lib
+          (cd out && python -m zipfile -c "$LABEL-windows-x86_64.zip" XRecomp)
+          (cd out && sha256sum "$LABEL-windows-x86_64.zip" > "$LABEL-windows-x86_64.zip.sha256" && cat ./*.sha256)
+      - name: Smoke test of the zip (prepare with the compile driver, run until « XBE loaded »)
+        run: |
+          t="$(cygpath -m "$RUNNER_TEMP")/smoke"
+          mkdir -p "$t/game" "$t/nocmake"
+          python -m zipfile -e "out/$LABEL-windows-x86_64.zip" "$t"
+          cd "$t/XRecomp"
+          python tools/conformance/mkxbe.py --retail "$t/game/default.xbe"
+          # A cmake that fails comes first on PATH: the prebuilt runtime must be enough.
+          printf '@echo cmake must not run 1>&2\r\n@exit /b 99\r\n' > "$t/nocmake/cmake.cmd"
+          nocmake=$(cygpath -u "$t/nocmake")
+          export PATH="$nocmake:$PATH"
+          if ! python -m tools.prepare "$t/game/default.xbe" --work "$t/work" > "$t/prepare.log" 2>&1; then
+            cat "$t/prepare.log"; echo "--- prepare.log of the work folder"; tail -n 80 "$t/work/prepare.log" || true
+            exit 1
+          fi
+          cat "$t/prepare.log"
+          grep -q 'compile driver:' "$t/prepare.log"
+          exe="$t/work/project/build/title_12345678.exe"
+          ls -la "$(dirname "$exe")"
+          # From the build folder: the title reads game/default.xbe beside it (xrecomp play does the same).
+          (cd "$(dirname "$exe")" && timeout 30 ./title_12345678.exe > "$t/run.log" 2>&1; echo "exit $?" >> "$t/run.log") || true
+          cat "$t/run.log"
+          grep -q 'XBE loaded' "$t/run.log"
+      - name: The command line (xrecomp.cmd) over the same source
+        shell: pwsh
+        run: |
+          $t = "$env:RUNNER_TEMP\smoke"
+          $x = "$t\XRecomp\xrecomp.cmd"
+          & $x --home "$t\home" prepare "$t\game" --no-build
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Test-Path "$t\home\titles\12345678\work\project\src\recomp\gen\recomp_dispatch.c")) { exit 1 }
+          $list = & $x --home "$t\home" list
+          $list
+          if (-not ($list -match '^12345678 ')) { exit 1 }
+          # Console games are refused on Windows, with the reason.
+          python -c "import sys; sys.path.insert(0, r'$t\XRecomp'); from tools.prepare.test_gba_prepare import make_rom; open(r'$t\t.gba', 'wb').write(make_rom())"
+          $out = & $x --home "$t\home" prepare "$t\t.gba" 2>&1 | Out-String
+          $out
+          if ($LASTEXITCODE -eq 0 -or -not ($out -match 'not supported on Windows')) { exit 1 }
+          exit 0
+      - name: The same title with MSVC's cl (informative)
+        continue-on-error: true
+        run: |
+          t="$(cygpath -m "$RUNNER_TEMP")/smoke"
+          cd "$t/XRecomp"
+          python -m tools.prepare "$t/game/default.xbe" --work "$t/work-cl" --cc cl > "$t/prepare-cl.log" 2>&1 \
+            || { cat "$t/prepare-cl.log"; tail -n 80 "$t/work-cl/prepare.log"; exit 1; }
+          grep 'compile driver:' "$t/prepare-cl.log"
+          cd "$t/work-cl/project/build"
+          (timeout 30 ./title_12345678.exe > run.log 2>&1) || true
+          cat run.log
+          grep -q 'XBE loaded' run.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/${{ env.LABEL }}-windows-x86_64.zip*
+          retention-days: 14
+
   publish:
-    needs: [meta, macos, linux]
-    if: needs.meta.outputs.release != ''
+    needs: [meta, macos, linux, windows]
+    # Windows is experimental: its failure leaves its zip out, not the others.
+    if: always() && needs.meta.outputs.release != '' && needs.macos.result == 'success' && needs.linux.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 340
     permissions:
@@ -202,6 +307,15 @@ jobs:
           - `*-linux-x86_64.tar.gz`, `*-linux-arm64.tar.gz`: the toolkit for Linux, with its prebuilt runtime and the
             GBA / PS1 / N64 players: `bash tools/linux/install_deps.sh`, then `./xrecomp prepare /path/to/game.iso`,
             `./xrecomp play <game>` (README, « Linux »; docs/desktop/cli.md).
+          EOF
+            if ls out/*-windows-x86_64.zip >/dev/null 2>&1; then
+              cat >> body.md <<'EOF'
+          - `*-windows-x86_64.zip` (experimental, Xbox games only): the toolkit for Windows 10/11 x86-64. Python 3 and
+            Visual Studio's Build Tools (C++), then `xrecomp.cmd prepare C:\path\to\game.iso` and
+            `xrecomp.cmd play <game>` (docs/desktop/windows.md).
+          EOF
+            fi
+            cat >> body.md <<'EOF'
 
           No game inside: you prepare your own games on your computer.
           EOF

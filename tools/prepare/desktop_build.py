@@ -6,14 +6,19 @@ title against the toolkit package's prebuilt runtime (runtime/<host>/, made by
 tools/prepare/runtime.py when the package is built).
 
 Hosts: Linux (ELF) and macOS (Mach-O) with clang or the system cc, linked by
-lld when the toolchain has it; Windows (PE) with clang-cl and lld-link, the
-same driver (argument construction only, untested on Windows so far).
+lld when the toolchain has it; Windows x86-64 (PE, XBA-89) with clang-cl and
+lld-link, or MSVC's cl and link, against a runtime built by MSVC (the Windows
+download, built and smoke-tested on GitHub's windows runner); a MinGW gcc
+(--cc) against a MinGW-built runtime, which is how the Windows route is
+checked from Linux (docs/desktop/windows.md).
 
 The compiler, in this order (find_toolchain):
   1. --cc, else $XBA_CC
   2. the toolkit's own: <toolkit>/toolchain/bin/clang (clang-cl.exe on Windows)
-  3. clang on PATH (else the newest clang-NN)
-  4. the system's cc / gcc (XBA-85: the system compiler during 0.x)
+  3. clang on PATH (else the newest clang-NN); clang-cl on Windows
+  4. the system's cc / gcc (XBA-85: the system compiler during 0.x); MSVC's
+     cl on Windows (a Visual Studio developer prompt, or xrecomp.cmd, which
+     opens one)
 
 The route (route()): the driver when runtime/<host>/runtime.json is there and
 was built from this toolkit tree (its runtime_sha256), else CMake as before
@@ -46,9 +51,9 @@ def exe_name(name, host):
 
 
 class DesktopToolchain(cc.Toolchain):
-    """A host compiler. kind: "clang", "gnu" (gcc / cc) or "msvc" (clang-cl).
-    lld: the lld binary to link with (ld.lld, ld64.lld or lld-link), or None
-    for the compiler driver's default linker. source: "explicit", "toolkit",
+    """A host compiler. kind: "clang", "gnu" (gcc / cc) or "msvc" (clang-cl,
+    cl). lld: the lld binary to link with (ld.lld, ld64.lld or lld-link), or
+    None for the compiler driver's default linker (cl: link.exe beside it). source: "explicit", "toolkit",
     "system". isysroot: the macOS SDK a non-Apple clang needs."""
 
     def __init__(self, compiler, host, source, kind=None, lld=None, isysroot=None, procs=None):
@@ -64,11 +69,28 @@ class DesktopToolchain(cc.Toolchain):
             return self.cc_argv + flags + ["/c", src, "/Fo" + out]
         return cc.Toolchain.compile_args(self, flags, src, out)
 
+    def is_cl(self):
+        """MSVC's own cl.exe (not clang-cl)."""
+        return is_msvc_cl(self.cc)
+
+    def version_text(self):
+        if not self.is_cl():
+            return cc.Toolchain.version_text(self)
+        if self._version is None:
+            # cl has no --version: alone, it prints its banner and fails for want of a file.
+            rc, out = self.procs.run([self.cc])
+            m = re.search(r"Version (\S+)", out)
+            if not m:
+                raise cc.StepError("COMPILE_FAILED", "%s: no version banner: %s" % (self.cc, out.strip()[:300]))
+            self._version = "cl version %s" % m.group(1)
+        return self._version
+
     def link_driver(self, language):
         """The command that links: the compiler driver (its C++ mode when the
-        runtime links C++: frame generation), or lld-link on Windows."""
+        runtime links C++: frame generation), or lld-link / MSVC's link on
+        Windows."""
         if self.kind == "msvc":
-            return [self.lld or _sibling(self.cc, "lld-link")]
+            return [self.lld or _sibling(self.cc, "link.exe" if self.is_cl() else "lld-link")]
         if language != "CXX":
             return [self.cc]
         if self.kind == "clang":
@@ -79,10 +101,10 @@ class DesktopToolchain(cc.Toolchain):
 
     def short_version(self):
         v = self.version_text()
-        m = re.search(r"clang version (\S+)", v)
+        m = re.search(r"(clang|cl) version (\S+)", v)
         if m:
-            return "clang %s" % m.group(1)
-        m = re.search(r"\)\s+(\d+\.\S+)", v) or re.search(r"(\d+\.\d+\S*)", v)
+            return "%s %s" % m.groups()
+        m = re.search(r"\)\s+(\d+\.\S+)", v) or re.search(r"(\d+\.\d+\S*)", v) or re.search(r"\)\s+(\d+\S*)", v)
         return "%s %s" % (os.path.basename(self.cc), m.group(1) if m else "?")
 
     def describe(self):
@@ -95,11 +117,18 @@ def _sibling(path, name):
     return os.path.join(d, name) if d else name
 
 
+def _base(path):
+    base = os.path.basename(path.replace("\\", "/")).lower()
+    return base[:-4] if base.endswith(".exe") else base
+
+
+def is_msvc_cl(path):
+    return _base(path) == "cl"
+
+
 def compiler_kind(path):
-    base = os.path.basename(path).lower()
-    if base.endswith(".exe"):
-        base = base[:-4]
-    if base.startswith("clang-cl"):
+    base = _base(path)
+    if base.startswith("clang-cl") or base == "cl":
         return "msvc"
     if base.startswith("clang"):
         return "clang"
@@ -139,7 +168,7 @@ def find_toolchain(toolkit, host=None, cc_path=None, env=None, which=shutil.whic
         if isfile(mine):
             compiler, source = mine, "toolkit"
         else:
-            for name in (("clang-cl",) if win else ("clang",)):
+            for name in (("clang-cl", "cl") if win else ("clang",)):
                 if which(name):
                     compiler, source = which(name), "system"
                     break
@@ -153,7 +182,8 @@ def find_toolchain(toolkit, host=None, cc_path=None, env=None, which=shutil.whic
                         break
     if compiler is None:
         raise cc.StepError("NO_COMPILER", "no C compiler: install clang (or gcc), or pass --cc"
-                           if not win else "no clang-cl: install LLVM, or pass --cc")
+                           if not win else "no C compiler: install Visual Studio's Build Tools (C++) or LLVM, "
+                           "and run from a developer prompt (xrecomp.cmd opens one), or pass --cc")
     kind = compiler_kind(compiler)
     if kind == "gnu" and os.path.basename(compiler) in ("cc", "c99") and procs is not None:
         # cc may be clang (macOS, FreeBSD): what it says it is.
@@ -164,7 +194,7 @@ def find_toolchain(toolkit, host=None, cc_path=None, env=None, which=shutil.whic
         except OSError:
             pass
     lld = None
-    if kind != "gnu":
+    if kind != "gnu" and not is_msvc_cl(compiler):
         lld_name = exe_name({"windows": "lld-link", "macos": "ld64.lld"}.get(host_os(host), "ld.lld"), host)
         for cand in (os.path.join(os.path.dirname(compiler), lld_name), os.path.join(tc_bin, lld_name)):
             if os.path.dirname(compiler) and isfile(cand):
@@ -172,7 +202,7 @@ def find_toolchain(toolkit, host=None, cc_path=None, env=None, which=shutil.whic
                 break
         if lld is None and source == "system":
             lld = which(lld_name) if host_os(host) != "macos" else None   # Apple's ld64 is the system's
-        if lld is None and win:
+        if lld is None and win and kind == "msvc":
             lld = which(lld_name) or lld_name
     isysroot = None
     apple = os.path.realpath(compiler).startswith(APPLE_DIRS) or compiler.startswith(APPLE_DIRS)
@@ -278,8 +308,12 @@ def compile_flags(tc, man, toolkit, proj, opt="2", defines=(), include_dirs=()):
     incs += list(include_dirs)
     defs = list(man.get("defines", [])) + list(defines)
     if tc.kind == "msvc":
-        flags = ["/nologo", "/O%s" % ("2" if opt in ("2", "3") else opt), "/w", "/std:c11"]
-        flags += [f for f in man.get("compile_flags", []) if f.startswith("/")]
+        flags = ["/nologo", "/O%s" % ("2" if opt in ("2", "3") else opt), "/w", "/std:c11", "/bigobj"]
+        # MSVC's options start with / or - (CMake writes the C runtime as -MD); a GNU runtime's do not apply.
+        mflags = [f for f in man.get("compile_flags", []) if f.startswith(("/", "-"))]
+        if not any(re.match(r"^[/-]M[DT]d?$", f) for f in mflags):
+            mflags.insert(0, "/MD")     # CMake's default C runtime: the runtime's libraries were built with it
+        flags += mflags
         flags += ["/D" + d for d in defs] + ["/I" + i for i in incs]
         return flags
     flags = ["-O%s" % opt, "-g0", "-std=gnu11", "-w"]
@@ -347,6 +381,28 @@ def route(toolkit, builder="auto", host=None, which=shutil.which, runtime_digest
 
 # ── The build ───────────────────────────────────────────────────
 
+def windows_mem_available():
+    """The available physical memory on Windows (no /proc/meminfo), else None."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        st = MemoryStatus()
+        st.dwLength = ctypes.sizeof(MemoryStatus)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return int(st.ullAvailPhys)
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
 def _link_key(args, man):
     h = hashlib.sha256()
     h.update("\x1f".join(args).encode())
@@ -366,7 +422,7 @@ def build(proj, name, man, tc, toolkit, work_files, opt="2", jobs=0, log=None, o
     os.makedirs(bdir, exist_ok=True)
     sources = cc.collect_sources(proj) + list(extra_sources)
     flags = compile_flags(tc, man, toolkit, proj, opt, title_defines(proj, work_files), include_dirs)
-    jobs = jobs or cc.default_jobs(cc.mem_available(), os.cpu_count())
+    jobs = jobs or cc.default_jobs(cc.mem_available() or windows_mem_available(), os.cpu_count())
     obj_dir = os.path.join(bdir, "obj")
     objects, n = cc.compile_all(sources, flags, tc, obj_dir, jobs, log=log, on_progress=on_progress)
     cc.prune(obj_dir, objects)

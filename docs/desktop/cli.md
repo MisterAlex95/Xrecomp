@@ -119,7 +119,8 @@ compiled in, they win): `settings GAME` shows them as « set by the title ».
   xrecomp; it needs what `tools.prepare` needs (`capstone`, `pefile`, `numpy`; README « Linux »).
 - **The toolkit digest** leaves `tools/xrecomp` out (`tools/prepare/toolkit_tree.json`): a change to the command line
   never makes a pack stale.
-- **Windows**: the paths and the commands are there; Xbox titles follow upstream's route there and the console
-  runtimes are POSIX-only, so play is untested.
+- **Windows** (experimental, [windows.md](windows.md)): `xrecomp.cmd` in the Windows zip, Xbox titles only, built
+  by the compile driver against the MSVC-built runtime. The console runtimes are POSIX-only: `prepare` and `play`
+  refuse GBA, PS1 and N64 games there and say so.
 - Tests: `python3 -m pytest tools/xrecomp` (a temporary home; the synthetic conformance XBE, homebrew-shaped
   synthetic ROMs, a GBA pack built with the fake lifter and the host's `cc`).

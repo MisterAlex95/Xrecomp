@@ -32,10 +32,14 @@ Downloads: the [GitHub releases](https://github.com/MisterAlex95/Xrecomp/release
 - `xrecomp-v<version>-linux-x86_64.tar.gz` and `xrecomp-v<version>-linux-arm64.tar.gz`: the toolkit for Linux
   (README « Linux »), each built and smoke-tested on its own architecture (GitHub's Ubuntu 24.04 runners, XBA-87).
   Up to 0.12 there was one `-linux.tar.gz`, x86-64 only.
+- `xrecomp-v<version>-windows-x86_64.zip` (**experimental**, XBA-89): the toolkit for Windows x86-64 with
+  `xrecomp.cmd`, Xbox games only (the console runtimes are POSIX-only). Needs Python 3 and Visual Studio's Build
+  Tools (docs/desktop/windows.md). Left out of a release when its CI job fails; the other files are not held back.
 - The **prebuilt runtime** of the desktop folders (XBA-86): `runtime/macos-arm64/` in the Mac zip,
-  `runtime/linux-x86_64/` and `runtime/linux-arm64/` in the Linux archives (`tools/prepare/runtime.py`), so prepare
-  builds a title with a C compiler alone, no CMake (`tools/prepare/desktop_build.py`). Its `bin/` has the console
-  players (`gba_play`, `ps1_play`, `n64_play`) that `./xrecomp play` starts (XBA-87).
+  `runtime/linux-x86_64/` and `runtime/linux-arm64/` in the Linux archives, `runtime/windows-x86_64/` (MSVC) in the
+  Windows zip (`tools/prepare/runtime.py`), so prepare builds a title with a C compiler alone, no CMake
+  (`tools/prepare/desktop_build.py`). On Linux and macOS its `bin/` has the console players (`gba_play`, `ps1_play`,
+  `n64_play`) that `./xrecomp play` starts (XBA-87); Windows has none.
 - A `.sha256` next to each.
 - **Frame generation** (LSFG, XBA-187) in every one of them: the APK has the Vulkan bridge in `libmain.so` and the
   shader translator in `libxba_import.so` (Settings › Graphics › Frame generation, « Choose Lossless.dll »); the
@@ -46,8 +50,9 @@ Downloads: the [GitHub releases](https://github.com/MisterAlex95/Xrecomp/release
 
 `xrecomp-latest` carries the same files, named `xrecomp-<commit>…`. The desktop files are built on GitHub's runners
 by `.github/workflows/desktop.yml` (each one is this repository's tree at the commit, `tools/ci/package_toolkit.sh`,
-plus `XRecomp.app` for the Mac) and attached once Gitea has published the release of that commit. No Windows build
-yet: that route is upstream's and untested here.
+plus `XRecomp.app` for the Mac) and attached once Gitea has published the release of that commit. The Windows zip is
+experimental: built and smoke-tested (a synthetic XBE prepared and started) on GitHub's Windows runner, no game played
+on Windows yet.
 
 Every XRecomp APK we publish (releases and `xrecomp-latest`) is signed with the same certificate, SHA-256:
 

@@ -104,9 +104,16 @@ else `--cc` / `$XBA_CC`, else the system's. The GBA / PS1 / N64 players `./xreco
 folder (`bin/`). A git checkout builds with CMake as before; `python3 -m tools.prepare.runtime` makes the prebuilt
 runtime and the players once where CMake is, and `--builder driver|cmake` picks the route.
 
-**Windows** follows upstream's manual route (MSVC, D3D11), not yet tested by this fork:
-[GETTING_STARTED.md](docs/GETTING_STARTED.md) walks through each pipeline stage, which is also the way to bring up
-a new game on any host.
+**Windows** (x86-64, experimental, Xbox games only)
+
+Download `xrecomp-v<version>-windows-x86_64.zip` from the [latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest).
+It carries the runtime prebuilt with MSVC (`runtime/windows-x86_64/`) and `xrecomp.cmd`. You need Python 3
+(`python -m pip install capstone pefile numpy`) and Visual Studio's Build Tools (C++); then, in the `XRecomp` folder,
+`xrecomp.cmd prepare C:\path\to\game.iso` and `xrecomp.cmd play game`. The GBA, PS1 and N64 runtimes are
+POSIX-only, so console games are not supported on Windows (use Linux, macOS or WSL2). It is built and smoke-tested on
+GitHub's Windows runner, but no game has been played on it by this fork yet ([Windows guide](docs/desktop/windows.md)).
+[GETTING_STARTED.md](docs/GETTING_STARTED.md) walks through each pipeline stage by hand (upstream's MSVC route),
+which is also the way to bring up a new game on any host.
 
 ## 🎮 What's running today
 
@@ -122,7 +129,7 @@ a new game on any host.
 | **Android** arm64, GLES 3.0 | ✅ | ✅ on the device | XRecomp app (AYN Thor first): launcher, gamepad UI, dual screen |
 | **macOS** | ✅ | ✅ | XRecomp.app, or the command line |
 | **Linux** x86-64 / arm64 | ✅ | ✅ | command line |
-| **Windows** x86-64 | ⚠️ upstream route | ⚠️ manual | command line |
+| **Windows** x86-64 | ⚠️ experimental, Xbox only | ⚠️ experimental | command line (`xrecomp.cmd`) |
 
 > **Status: experimental, moving fast.** Expect crashes and the odd re-Prepare after an update. Per-game status
 > lives in [`profiles/titles/*/`](profiles/titles/) (`title.json`, `NOTES.md`); what changed is in the

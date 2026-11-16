@@ -13,6 +13,9 @@ a PS1 disc (.cue / .chd / .bin / .iso) or PS-X EXE, an N64 ROM (.z64 / .v64 / .n
 copied. GAME is a source path, a title ID (12345678, gba-AXVE-1A2B3C4D) or a unique part of a title.
 
 Files go to the platform's user data folder ($XRECOMP_HOME moves it; `xrecomp where` prints it).
+
+Windows (XBA-89, experimental): Xbox games only. The GBA, PS1 and N64 runtimes are POSIX-only (src/host); prepare and
+play refuse them there and say so.
 """
 
 import argparse
@@ -35,6 +38,16 @@ RUN_LOGS_KEPT = 10
 
 def err(msg):
     print("xrecomp: " + msg, file=sys.stderr, flush=True)
+
+
+def console_unsupported(console, platform=None):
+    """Why this host cannot prepare or play a console's games, or None. Windows: Xbox games only (XBA-89)."""
+    platform = platform or sys.platform
+    if console and console != "xbox" and platform.startswith("win"):
+        return ("%s games are not supported on Windows: the console runtimes (GBA, PS1, N64) are POSIX-only. "
+                "Use Linux, macOS or WSL2 for them; Xbox games work here (docs/desktop/windows.md)"
+                % console.upper())
+    return None
 
 
 # ── Python and the console players ──────────────────────────────
@@ -132,6 +145,10 @@ def cmd_prepare(home, a):
     if e.error:
         err("%s: %s" % (a.source, e.error))
         return 1
+    why = console_unsupported(e.console)
+    if why:
+        err(why)
+        return 1
     t = home.title(e.id)
     st = t.state()
     if a.title_layer is not None:
@@ -199,6 +216,9 @@ def play_request(home, e, extra=(), inherited=None):
             raise LookupError("%s %s is not prepared: xrecomp prepare %s" % (e.id, e.title, shlex.quote(e.source)))
         env = config.game_env(inherited, defaults, game, t.save)
         return [e.exe] + list(extra), os.path.dirname(e.exe), env
+    why = console_unsupported(e.console)
+    if why:
+        raise LookupError(why)
     player = find_player(e.console, inherited)
     if not player:
         raise LookupError("%s is not built (a release archive has it in runtime/<host>/bin): cmake -S . -B build "

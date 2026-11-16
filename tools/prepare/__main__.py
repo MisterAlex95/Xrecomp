@@ -889,7 +889,7 @@ def desktop(a):
         progress(5, "compiling")
         t = run(["cmake", "--build", build, "--parallel"], log, on_line=BuildProgress() if _REP else None)
         note("built in %.0f s" % t, 90)
-        exe = os.path.join(build, name)
+        exe = os.path.join(build, desktop_build.exe_name(name, desktop_build.rt.host_id()))
     if stamp.get("built") is False or stamp.get("runtime_sha256") != toolkit.runtime_digest():
         stamp["built"] = True
         stamp["runtime_sha256"] = toolkit.runtime_digest()     # what --check compares (XBA-134)
@@ -906,10 +906,7 @@ def desktop(a):
             print("      the game data is read from the disc image in place: %s" % image, flush=True)
     link = os.path.join(build, "game")
     if data_dir:
-        if os.path.islink(link) or os.path.isfile(link):
-            os.remove(link)
-        if not os.path.exists(link):
-            os.symlink(data_dir, link)
+        link_game_data(data_dir, link)
     if not a.image_map and data_dir:
         progress(98, "the disc's other images")
         prepare_other_images(a, py, xbe, data_dir, work, exe, log)
@@ -919,6 +916,40 @@ def desktop(a):
 
 
 IMAGE_MAP = "images.map"
+
+
+def _is_junction(path):
+    isj = getattr(os.path, "isjunction", None)          # Python 3.12+
+    return bool(isj and isj(path))
+
+
+def link_game_data(data_dir, link):
+    """build/game -> the game's data (a folder, or a disc image read in place).
+    A symbolic link; on Windows, where one needs Developer Mode or an
+    administrator, a directory junction for a folder (XBA-89) or a hard link
+    for an image on the same drive."""
+    if _is_junction(link):
+        os.rmdir(link)
+    elif os.path.islink(link) or os.path.isfile(link):
+        os.remove(link)
+    if os.path.exists(link):
+        return
+    try:
+        os.symlink(data_dir, link, target_is_directory=os.path.isdir(data_dir))
+        return
+    except OSError as e:
+        if os.name != "nt":
+            raise
+        why = e
+    try:
+        if os.path.isdir(data_dir):
+            import _winapi
+            _winapi.CreateJunction(os.path.abspath(data_dir), link)
+        else:
+            os.link(data_dir, link)
+    except OSError as e:
+        raise SystemExit("cannot link %s to %s (%s; then %s): turn on Developer Mode in Windows' settings, or "
+                         "extract the disc (--extract)" % (link, data_dir, why, e))
 
 
 def build_with_driver(a, proj, name, man, why, work_files, log):

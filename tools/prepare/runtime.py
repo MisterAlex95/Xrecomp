@@ -54,12 +54,14 @@ PROBE = "xba_runtime_probe"
 PLAYERS = ("gba_play", "ps1_play", "n64_play")
 
 
-def host_id(system=None, machine=None):
+def host_id(system=None, machine=None, env=None):
     """'linux-x86_64', 'linux-arm64', 'macos-arm64', 'windows-x86_64', ...: the
-    runtime folder for this host (or the one given; $XBA_HOST when none is
-    given: another host's runtime, a cross build)."""
-    if system is None and machine is None and os.environ.get("XBA_HOST"):
-        return os.environ["XBA_HOST"]
+    runtime folder for this host (or the one given). $XBA_HOST names another
+    one when neither is given: a cross-build (the MinGW check of the Windows
+    runtime, docs/desktop/windows.md) makes and reads that host's folder."""
+    env = os.environ if env is None else env
+    if system is None and machine is None and env.get("XBA_HOST"):
+        return env["XBA_HOST"]
     system = (system or platform.system()).lower()
     machine = (machine or platform.machine()).lower()
     system = {"darwin": "macos"}.get(system, system)
@@ -133,9 +135,12 @@ def _split_fragment(frag):
     """One link fragment as arguments: CMake joins a target's flags with spaces."""
     import shlex
     try:
-        return shlex.split(frag, posix=(os.name != "nt"))
+        args = shlex.split(frag, posix=(os.name != "nt"))
     except ValueError:
         return frag.split()
+    if os.name == "nt":         # non-POSIX mode keeps the quotes around a path with spaces
+        args = [a[1:-1] if len(a) > 1 and a[0] == a[-1] == '"' else a for a in args]
+    return args
 
 
 # Compile flags of the probe that are not the runtime's: the driver sets its own -O, -g and standard.
@@ -218,6 +223,15 @@ def _reply(build):
         return json.load(f), reply, idx
 
 
+def pick_configuration(model):
+    """The Release configuration of a codemodel: the only one with a
+    single-config generator (Ninja, Makefiles), one of several with Visual
+    Studio's, whose first is Debug."""
+    configs = model["configurations"]
+    return next((c for c in configs if c.get("name") == "Release"), configs[0])
+
+
+
 def _artifact(target_json, build):
     """The first artifact (the executable) of a file API target, absolute."""
     arts = target_json.get("artifacts") or []
@@ -254,7 +268,7 @@ def build(toolkit=ROOT, out=None, build_dir=None, jobs=None, extra=(), players=T
         _run(["cmake", "-S", probe, "-B", build_dir, "-DCMAKE_BUILD_TYPE=Release",
               "-DXBOXRECOMP_DIR=" + toolkit] + gen + list(extra), log)
         model, reply, idx = _reply(build_dir)
-        config = model["configurations"][0]
+        config = pick_configuration(model)
         ref = next((t for t in config["targets"] if t["name"] == PROBE), None)
         if ref is None:
             raise SystemExit("no %s target in the file API reply" % PROBE)
@@ -263,12 +277,13 @@ def build(toolkit=ROOT, out=None, build_dir=None, jobs=None, extra=(), players=T
         names = {t["id"]: t["name"] for t in config["targets"]}
         deps = [names[d["id"]] for d in target.get("dependencies", []) if d["id"] in names]
         play = {}
-        if players:
+        if players and not host.startswith("windows-"):     # the console players are POSIX-only (XBA-89)
             for t in config["targets"]:
                 if t["name"] in PLAYERS and t["name"] not in play:
                     with open(os.path.join(reply, t["jsonFile"])) as f:
                         play[t["name"]] = _artifact(json.load(f), build_dir)
-        cmd = ["cmake", "--build", build_dir, "--parallel"] + (["%d" % jobs] if jobs else [])
+        cmd = ["cmake", "--build", build_dir, "--config", config.get("name") or "Release", "--parallel"]
+        cmd += ["%d" % jobs] if jobs else []
         if deps or play:
             cmd += ["--target"] + deps + sorted(play)
         _run(cmd, log)
