@@ -4,8 +4,8 @@
  * (gba_play, ps1_play: F1-F4 / Shift+F1-F4 / Tab) call, whatever console runs. A console runtime (gba_runtime,
  * ps1_runtime; n64_runtime can plug in the same way) attaches itself while a game plays: its console name, its
  * state folder (<save dir>/<console>-<KEY>) and two callbacks that save / load a slot between frames (the runtime
- * holds its frame mutex in them, so a state is never taken mid-frame). Xbox games never attach: their state is the
- * whole guest memory and GPU, too large to snapshot.
+ * holds its frame mutex in them, so a state is never taken mid-frame). Xbox games do not attach yet: their threads
+ * run on host stacks, so a state needs a safe-point freeze and more (docs/technical/xbox-save-states.md, XBA-249).
  *
  * Slot files: <dir>/state<N>.st, N = 1..RECOMP_STATE_SLOTS, and the automatic slot <dir>/auto.st (slot
  * RECOMP_STATE_AUTO = 0: saved when the player leaves the game, loaded at the next start to resume). A small header (magic "XRSLOT", version, console, game

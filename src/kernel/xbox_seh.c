@@ -15,6 +15,7 @@
  * any of those ends the walk; the exception is then unhandled, and said so.
  */
 #include "xbox_seh.h"
+#include "kernel_park.h"
 #include "kernel.h"
 #include "recomp_discovery.h"
 #include "xbox_memory_layout.h"
@@ -142,15 +143,20 @@ void xbox_SehCallbackLeave(void)
 
 int xbox_SehInRuntime(void) { return t_rt_depth > 0; }
 
+/* Callbacks and bridges, 8 bits each (both nest a handful deep), then the
+ * park detector's kernel-call and callback depths (XBA-244), which a jump
+ * over bridge frames must put back the same way. */
 uint32_t xbox_SehRuntimeSnapshot(void)
 {
-    return ((uint32_t)t_rt_cb << 16) | ((uint32_t)t_rt_depth & 0xFFFFu);
+    return (((uint32_t)t_rt_cb & 0xFFu) << 24) | (((uint32_t)t_rt_depth & 0xFFu) << 16)
+         | (xbox_ParkDepthSnapshot() & 0xFFFFu);
 }
 
 void xbox_SehRuntimeRestore(uint32_t snap)
 {
-    t_rt_cb = (int)(snap >> 16);
-    t_rt_depth = (int)(snap & 0xFFFFu);
+    t_rt_cb = (int)(snap >> 24);
+    t_rt_depth = (int)((snap >> 16) & 0xFFu);
+    xbox_ParkDepthRestore(snap & 0xFFFFu);
 }
 
 int *xbox_SehFaultDepthSlot(void)

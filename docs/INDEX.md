@@ -50,6 +50,7 @@ One per stage, in the order you run them.
 - [Playing from the Disc Image](technical/disc-images.md) — D:\ served straight from an ISO, a split image or a CSO/ZSO/CCI: no extraction; prepare from the image; read speeds; device checks
 - [Discs with Several XBEs](technical/multi-xbe.md) — A launcher image handing over to another XBE: one executable per image, the kernel execs the next
 - [Saves](technical/saves.md) — The XDK save APIs on one host layout for every title: UDATA/TDATA per title in the save dir, no memory units, kept across prepares
+- [Xbox Save States](technical/xbox-save-states.md) — Feasibility and design: safe-point freeze (park detector), in-session restore, resume entries; why process snapshots are out
 - [Network: a Console with No Cable](technical/network.md) — The Ethernet controller model, what a title with Live or system link sees, and the device check list
 - [APU DSP](technical/apu-dsp.md) — The GP/EP: what titles ask of them, handshakes, mixdown, native reverb; check list
 

@@ -32,6 +32,8 @@ fn_t recomp_lookup_kernel(uint32_t v){(void)v;return 0;}
 int xbox_GuestCpuEnterCallback(void){return 0;}
 void xbox_GuestCpuLeaveCallback(int t){(void)t;}
 void xbox_GuestCpuAcquire(void){}
+uint32_t xbox_ParkDepthSnapshot(void){return 0;}
+void xbox_ParkDepthRestore(uint32_t s){(void)s;}
 #define M32(a) (*(volatile uint32_t*)((uintptr_t)(a)+g_xbox_mem_offset))
 static const uint32_t res[] = {0x10100};
 static const recomp_seh_desc desc = {0x10000, 1, res};
