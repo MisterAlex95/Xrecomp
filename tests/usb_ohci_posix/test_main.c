@@ -267,7 +267,15 @@ static int state_round_trip(volatile uint32_t *hc0)
     char detail[160];
 
     printf("\n  save state (XBA-248)\n");
-    check(xbox_OhciStateHold(1), "the controller thread is held between passes", NULL);
+    {
+        /* The controller thread may still be starting: StateHold answers 0 at
+         * once until it runs (no thread, nothing to hold), so give it the
+         * same two seconds the hold itself waits for a pass. */
+        int held = 0, t;
+        for (t = 0; t < 2000 && !(held = xbox_OhciStateHold(1)); t++)
+            Sleep(1);
+        check(held, "the controller thread is held between passes", NULL);
+    }
     /* A pad on the root hub, unaddressed. */
     ev = xbox_OhciHotplugStepForTest(1u, 1000, &pad);
     snprintf(detail, sizeof detail, "event %d pad %d", ev, pad);
