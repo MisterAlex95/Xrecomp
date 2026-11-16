@@ -181,7 +181,7 @@ uint32_t xbox_ParkGuestPages(uint32_t *resident, uint32_t *nonzero);
  * status is eax then, meaningless). A reader that only knows kernel calls tells them apart by `site`
  * (or by ordinal 0: no kernel export has ordinal 0). The field is new at the end of the record: code
  * written against the XBA-245 record compiles unchanged. */
-#define XBOX_PARK_CPU_BYTES 512      /* room for a RecompCpu (sizeof checked in kernel_park.c) */
+#define XBOX_PARK_CPU_BYTES 512      /* room for a RecompCpuRegs (sizeof checked in kernel_park.c) */
 
 typedef struct {
     int slot;                /* 0..XBOX_PARK_MAX_THREADS-1, stable for the thread's life */
@@ -195,8 +195,8 @@ typedef struct {
     unsigned long tid;       /* host thread id */
     uint64_t kernel_calls;
     uint32_t seq;            /* even: the record is complete */
-    uint32_t cpu_bytes;      /* sizeof(RecompCpu) */
-    uint64_t cpu[XBOX_PARK_CPU_BYTES / 8];   /* the RecompCpu, cpu_bytes of it */
+    uint32_t cpu_bytes;      /* sizeof(RecompCpuRegs): the registers, not the frames */
+    uint64_t cpu[XBOX_PARK_CPU_BYTES / 8];   /* the RecompCpuRegs, cpu_bytes of it */
     uint32_t site;           /* XBOX_PARK_SITE_*: a kernel call, or a host wait inside lifted code */
     int reissue;             /* a same-run load set its registers to make its call again at the thaw (XBA-249) */
 } XboxParkRecord;
@@ -214,7 +214,7 @@ int  xbox_ParkRecordsChanged(const XboxParkRecord *r, int n);
  * slot again. Its park record is rewritten to match. A thread at a host wait inside lifted code (XBA-251) may
  * also be still waiting: its registers are set at once, and with reissue the helper waits once more when its
  * xbox_ParkHostWaitLeave returns 1. 0, or -1 (not frozen, not held at a call's end nor at a host wait). */
-int  xbox_ParkRestoreThread(int slot, const void *cpu, int reissue);   /* cpu: a RecompCpu */
+int  xbox_ParkRestoreThread(int slot, const void *cpu, int reissue);   /* cpu: a RecompCpuRegs */
 /* On the calling guest thread, after xbox_ParkKernelLeave: 1 (once) when its call must be issued again. */
 int  xbox_ParkTakeReissue(void);
 
@@ -225,6 +225,36 @@ int  xbox_ParkThisThreadIsGuest(void);
 
 /* Tests: forget every thread and statistic. Not thread safe. */
 void xbox_ParkReset(void);
+
+/* ---- Guest frames and call sites (XBA-247) ------------------------------------------------------------------
+ *
+ * Every lifted function that may park pushes a RecompFrame on its thread's frame shadow stack on entry (its
+ * entry esp, its caller's published ebp) and drops it at its returns (recomp_types.h, RECOMP_FRAME_ENTRY).
+ * xbox_ParkFrames copies a
+ * registered thread's frames: at most max of them, from the bottom of its host thread's stack (*base of
+ * them were there when its routine started: the INLINE main thread runs inside its creator's kernel call);
+ * *depth is the count pushed, which may exceed RECOMP_FRAME_SLOTS (the frames past it were not kept).
+ * Meant for a frozen thread (its frames do not move while it is parked). Returns the frames copied, or -1
+ * (no such thread).
+ *
+ * The call-site table comes with the generated code (tools/recomp: recomp_dispatch.c,
+ * g_recomp_call_sites): per guest call site its return VA, the function it is in and flags, sorted by
+ * return VA. recomp_dispatch_init registers it (count 0 or a NULL table: none). xbox_CallSiteLookup
+ * finds a return VA: 1 with its function and flags, 0 when no lifted call returns there. The chain
+ * reader and its signature are xbox_StateChain (xbox_state.h). */
+enum {
+    XBOX_CALL_SITE_INDIRECT = 0x01,      /* through a register or memory */
+    XBOX_CALL_SITE_NO_EBP = 0x02,        /* the caller has no ebp local: the callee's frame's ebp means nothing */
+    XBOX_CALL_SITE_STACK_SWITCH = 0x04,  /* the caller switches guest stacks (XBA-101) */
+    XBOX_CALL_SITE_JMPBUF = 0x08,        /* setjmp / longjmp */
+    XBOX_CALL_SITE_SEH_HELPER = 0x10,    /* __SEH_prolog / epilog */
+    XBOX_CALL_SITE_MANUAL = 0x20         /* a hand-written replacement */
+};
+struct RecompFrame;
+int  xbox_ParkFrames(int slot, struct RecompFrame *out, uint32_t max, uint32_t *depth, uint32_t *base);
+void recomp_call_sites_register(const uint32_t *sites, uint32_t count);
+uint32_t xbox_CallSiteCount(void);
+int  xbox_CallSiteLookup(uint32_t ret_va, uint32_t *func, uint32_t *flags);
 
 #ifdef __cplusplus
 }

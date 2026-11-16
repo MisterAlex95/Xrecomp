@@ -218,22 +218,112 @@ typedef union RecompXmm {
  * that the two copies match. */
 #ifndef RECOMP_CPU_DEFINED
 #define RECOMP_CPU_DEFINED
-typedef struct RecompCpu {
-    uint32_t r_eax, r_ecx, r_edx, r_esp, r_ebx, r_esi, r_edi;
-    uint32_t r_ebp;             /* last frame published by `mov ebp, esp` */
-    uint32_t r_seh_ebp;         /* SEH prolog/epilog frame bridge */
-    uint32_t r_fs_base;         /* linear base of fs: (this thread's TIB) */
-    uint32_t r_eflags;          /* EFLAGS image: pushfd, popfd, calls */
-    uint32_t r_mxcsr;           /* SSE control/status */
-    int r_df;                   /* EFLAGS.DF */
-    int r_fp_top;               /* x87 stack top */
-    int r_fp_cmp;
-    uint16_t r_fp_control_word;
-    uint16_t r_fp_cc;           /* x87 status word condition bits */
-    double r_fp_stack[8];
-    RecompXmm r_xmm0, r_xmm1, r_xmm2, r_xmm3, r_xmm4, r_xmm5, r_xmm6, r_xmm7;
+/* The guest frame shadow stack (XBA-247, docs/technical/xbox-save-states.md).
+ *
+ * Lifted code keeps its return path in host frames and ebp in a C local, so
+ * the host frames of a parked thread cannot be read. Every lifted function
+ * that may reach a park point (a kernel call or a host wait; the translator's
+ * _park_plan) records itself on entry: one RecompFrame, the guest esp it was
+ * entered with (it points at its return address) and g_ebp, the ebp its
+ * caller published before the call. It drops the frame at every return. So at
+ * any park point the thread's whole guest call chain is in memory: a save
+ * state reads it (the chain signature) and a load compares it. Functions that
+ * can never park, and calls into them, pay nothing.
+ *
+ * The frames are a heap array per host thread (1024 of them and two spare),
+ * allocated the first time the thread enters such a function
+ * (recomp_frames_slow); g_cpu keeps only the pointers, so the thread-local
+ * block stays the register file and fits any static TLS reserve. Past 1024
+ * frames (deep recursion) the frames go to a spare slot, shared and never
+ * read: the code stays correct, the chain is unreadable (OVERFLOW). The
+ * registers come first and are a RecompCpuRegs (the same members,
+ * RECOMP_CPU_REGS): what the park records copy and the state stores. */
+#define RECOMP_FRAME_SLOTS 1024
+typedef struct RecompFrame {
+    uint32_t f_ebp;             /* g_ebp at the function's entry: its caller's published ebp */
+    uint32_t f_esp;             /* guest esp at its entry (at its return address); not `esp`:
+                                 * generated code has a macro of that name */
+} RecompFrame;
+
+#define RECOMP_CPU_REGS \
+    uint32_t r_eax, r_ecx, r_edx, r_esp, r_ebx, r_esi, r_edi; \
+    uint32_t r_ebp;             /* last frame published by `mov ebp, esp` */ \
+    uint32_t r_seh_ebp;         /* SEH prolog/epilog frame bridge */ \
+    uint32_t r_fs_base;         /* linear base of fs: (this thread's TIB) */ \
+    uint32_t r_eflags;          /* EFLAGS image: pushfd, popfd, calls */ \
+    uint32_t r_mxcsr;           /* SSE control/status */ \
+    int r_df;                   /* EFLAGS.DF */ \
+    int r_fp_top;               /* x87 stack top */ \
+    int r_fp_cmp; \
+    uint16_t r_fp_control_word; \
+    uint16_t r_fp_cc;           /* x87 status word condition bits */ \
+    double r_fp_stack[8]; \
+    RecompXmm r_xmm0, r_xmm1, r_xmm2, r_xmm3, r_xmm4, r_xmm5, r_xmm6, r_xmm7; \
     RecompMmx r_mm0, r_mm1, r_mm2, r_mm3, r_mm4, r_mm5, r_mm6, r_mm7;
+
+typedef struct RecompCpuRegs {
+    RECOMP_CPU_REGS
+} RecompCpuRegs;
+
+typedef struct RecompCpu {
+    RECOMP_CPU_REGS
+    RecompFrame *r_ftop;        /* the next frame (XBA-247); NULL until the first */
+    RecompFrame *r_fbase;       /* the thread's frames, RECOMP_FRAME_SLOTS + 2 */
+    RecompFrame *r_flimit;      /* r_fbase + RECOMP_FRAME_SLOTS */
 } RecompCpu;
+
+/* What the lifter emits in a function that may park (XBA-247):
+ *
+ *   void sub_X(void)
+ *   {
+ *       RECOMP_FRAME_ENTRY();
+ *       ...
+ *       RECOMP_FRAME_LEAVE(); return;     (at every return, and at the end)
+ *   }
+ *
+ * ENTRY: one compare on the way in (the array exists and has room), the
+ * frame's two words and the top bumped; LEAVE: the top put back. Nothing per
+ * call. A longjmp or an SEH resume over frames puts the top back too
+ * (xbox_SehRuntimeSnapshot). -DRECOMP_FRAME_SHADOW=0 compiles them out: a
+ * measurement switch for tools/bench, not a build option (no chains then). */
+#if defined(__GNUC__) || defined(__clang__)
+#define RECOMP_FRAME_COLD inline __attribute__((cold))
+#define RECOMP_FRAME_RARE(x) __builtin_expect(!!(x), 0)
+#else
+#define RECOMP_FRAME_COLD __inline
+#define RECOMP_FRAME_RARE(x) (x)
+#endif
+void *calloc(size_t, size_t);
+extern RECOMP_TLS RecompCpu g_cpu;
+/* The thread's first frame (the array allocated), or past the last slot the
+ * spare. Without memory, a scratch pair: frames go nowhere, the chain is
+ * unreadable, the code runs. */
+static RECOMP_FRAME_COLD RecompFrame *recomp_frames_slow(void)
+{
+    static RecompFrame s_nowhere[2];
+    if (!g_cpu.r_fbase) {
+        RecompFrame *f = (RecompFrame *)calloc(RECOMP_FRAME_SLOTS + 2, sizeof *f);
+        if (!f)
+            return s_nowhere;
+        g_cpu.r_fbase = f;
+        g_cpu.r_flimit = f + RECOMP_FRAME_SLOTS;
+        g_cpu.r_ftop = f;
+        return g_cpu.r_ftop;
+    }
+    /* Past the slots: the two spares, the second shared by everything deeper (never read). The first keeps the
+     * top exact for a function 1024 deep; deeper, the chain says OVERFLOW whatever the top. */
+    return g_cpu.r_ftop == g_cpu.r_flimit ? g_cpu.r_flimit : g_cpu.r_flimit + 1;
+}
+#if !defined(RECOMP_FRAME_SHADOW) || RECOMP_FRAME_SHADOW
+#define RECOMP_FRAME_ENTRY() \
+    RecompFrame *_gff = g_cpu.r_ftop; \
+    if (RECOMP_FRAME_RARE((uintptr_t)_gff >= (uintptr_t)g_cpu.r_flimit)) _gff = recomp_frames_slow(); \
+    _gff->f_ebp = g_cpu.r_ebp; _gff->f_esp = g_cpu.r_esp; g_cpu.r_ftop = _gff + 1
+#define RECOMP_FRAME_LEAVE() (g_cpu.r_ftop = _gff)
+#else
+#define RECOMP_FRAME_ENTRY() (void)0
+#define RECOMP_FRAME_LEAVE() (void)0
+#endif
 
 extern RECOMP_TLS RecompCpu g_cpu;
 

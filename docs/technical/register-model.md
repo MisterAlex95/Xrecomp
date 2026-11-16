@@ -64,6 +64,14 @@ Why? Over 20,000 functions in the Burnout 3 binary use Frame Pointer Omission (F
 
 By making ebp local, each function gets its own copy via C's stack frame mechanism. FPO functions can use it freely without corrupting anyone else's value.
 
+### Across calls: the frame shadow stack (XBA-247)
+
+A local ebp lives only in its function's host frame, which a save state cannot read. So every function that may
+reach a park point records itself on entry in a per-thread shadow stack (`RECOMP_FRAME_ENTRY` / `LEAVE` in
+`recomp_types.h`): the guest esp it was entered with and `g_ebp`, the ebp its caller published before the call. A
+parked thread's whole call chain and every frame's ebp can then be read and compared. Details:
+`docs/technical/xbox-save-states.md` « Guest call chains ».
+
 ### The SEH Bridge: g_seh_ebp
 
 The one case where ebp's locality causes a problem is Structured Exception Handling (SEH). The Xbox CRT's `__SEH_prolog` function (at VA 0x00244784) sets up an exception frame and initializes ebp for the calling function. But since ebp is local, the caller cannot see the change that `__SEH_prolog` made to its local ebp.

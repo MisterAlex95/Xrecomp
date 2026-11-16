@@ -479,7 +479,7 @@ void xbox_StateIdentityGet(XboxStateIdentity *out)
     out->ram_size = (uint32_t)g_xbox_total_ram;
     out->mapped_size = (uint32_t)xbox_GetMappedSize();
     out->contig_size = XBOX_CONTIG_SIZE;
-    out->cpu_bytes = (uint32_t)sizeof(RecompCpu);
+    out->cpu_bytes = (uint32_t)sizeof(RecompCpuRegs);
 }
 
 /* Header layout (XBOX_STATE_HEADER_BYTES). */
@@ -543,6 +543,78 @@ static uint32_t guest_read32(uint32_t va)
     return v;
 }
 
+uint64_t xbox_StateChainSignature(const XboxStateFrame *f, uint32_t n)
+{
+    uint64_t h = 0xCBF29CE484222325ull;     /* FNV-1a, 32-bit words */
+    uint32_t i;
+
+#define CHAIN_MIX(w) (h = (h ^ (uint32_t)(w)) * 0x100000001B3ull)
+    CHAIN_MIX(n);
+    for (i = 0; i < n; i++) {
+        CHAIN_MIX(f[i].ret_va);
+        CHAIN_MIX(f[i].esp);
+    }
+#undef CHAIN_MIX
+    return h;
+}
+
+int xbox_StateChain(const XboxStateThread *t, XboxStateFrame *out, uint32_t max, XboxStateChain *info)
+{
+    RecompFrame fr[RECOMP_FRAME_SLOTS];           /* 8 KB, a host thread's stack */
+    XboxStateChain c;
+    uint32_t depth = 0, base = 0, k, n;
+    int got;
+
+    memset(&c, 0, sizeof c);
+    got = xbox_ParkFrames(t->slot, fr, RECOMP_FRAME_SLOTS, &depth, &base);
+    if (got < 0)
+        return -1;
+    n = (uint32_t)got;
+    if (depth > RECOMP_FRAME_SLOTS)
+        c.flags |= XBOX_CHAIN_OVERFLOW;
+    if (base > n)
+        base = n;
+    c.base = base;
+    c.frames = n - base;
+    if (!c.frames)
+        c.flags |= XBOX_CHAIN_EMPTY;
+    else if (!xbox_CallSiteCount())
+        c.flags |= XBOX_CHAIN_NO_TABLE;
+    {   /* xbox_StateChainSignature, on the frames as they are read */
+        uint64_t h = 0xCBF29CE484222325ull;
+#define CHAIN_MIX(w) (h = (h ^ (uint32_t)(w)) * 0x100000001B3ull)
+        CHAIN_MIX(c.frames);
+        for (k = 0; k < n; k++) {
+            XboxStateFrame f;
+            f.esp = fr[k].f_esp;
+            f.ret_va = guest_read32(f.esp);
+            f.func = f.flags = 0;
+            /* The routine's own frame returns into the runtime (its start), not to a call site. */
+            if (!xbox_CallSiteLookup(f.ret_va, &f.func, &f.flags) && k > base && xbox_CallSiteCount())
+                c.flags |= XBOX_CHAIN_UNKNOWN_SITE;
+            f.ebp = fr[k].f_ebp;
+            if (k < base)
+                continue;
+            if (f.flags & XBOX_CALL_SITE_STACK_SWITCH)
+                c.flags |= XBOX_CHAIN_STACK_SWITCH;
+            CHAIN_MIX(f.ret_va);
+            CHAIN_MIX(f.esp);
+            if (out && k - base < max)
+                out[k - base] = f;
+            /* In a kernel call not returned yet, the call's esp (its return address) is below the top frame's
+             * entry esp: the top frame is the function making the call. */
+            if (k == n - 1 && t->site == XBOX_PARK_SITE_KERNEL && !t->returned && depth == n
+                && t->cpu.r_esp >= f.esp)
+                c.flags |= XBOX_CHAIN_MISMATCH;
+        }
+#undef CHAIN_MIX
+        c.signature = h;
+    }
+    if (info)
+        *info = c;
+    return (int)c.frames;
+}
+
 int xbox_StateContextThread(const XboxStateContext *ctx, int i, XboxStateThread *out)
 {
     const XboxParkRecord *r;
@@ -562,7 +634,7 @@ int xbox_StateContextThread(const XboxStateContext *ctx, int i, XboxStateThread 
     out->kernel_calls = r->kernel_calls;
     out->site = r->site;
     out->call_esp = r->call_esp;
-    memcpy(&out->cpu, r->cpu, sizeof(RecompCpu));
+    memcpy(&out->cpu, r->cpu, sizeof(RecompCpuRegs));
     out->tib = out->cpu.r_fs_base;
     /* fs:[0x28] names the KTHREAD (XBA-113); the runtime fills its StackBase (+0x1C), StackLimit (+0x20)
      * and UniqueThread (+0x12C), xbox_InitGuestKthread. fs:[4] is the TLS pointer here, not the stack. */
@@ -573,6 +645,8 @@ int xbox_StateContextThread(const XboxStateContext *ctx, int i, XboxStateThread 
         out->stack_limit = guest_read32(out->kthread + 0x20);
         out->guest_tid = guest_read32(out->kthread + 0x12C);
     }
+    if (xbox_StateChain(out, NULL, 0, &out->chain) < 0)
+        out->chain.flags = XBOX_CHAIN_MISMATCH;     /* gone meanwhile: it cannot be, frozen */
     return 0;
 }
 
@@ -997,14 +1071,61 @@ int xbox_StateSection(const uint8_t *b, size_t n, uint32_t tag, const uint8_t **
 
 /* ---- Same-run load (XBA-249) ---------------------------------------------------------------------------- */
 
+/* Thread `cur` as an XboxStateThread, for xbox_StateChain. */
+static void record_thread(const XboxParkRecord *cur, XboxStateThread *now)
+{
+    memset(now, 0, sizeof *now);
+    now->slot = cur->slot;
+    now->ordinal = cur->ordinal;
+    now->ret_va = cur->ret_va;
+    now->returned = cur->returned;
+    now->site = cur->site;
+    memcpy(&now->cpu, cur->cpu, sizeof now->cpu);
+}
+
+/* Whether the chains of `sv` (in the state) and `cur` (now) can be restored at all: checked for every thread
+ * before any is compared, so the reason a load can never work comes first. */
+static int chain_restorable(const XboxStateThread *sv, const XboxParkRecord *cur, char *why, size_t why_n)
+{
+    XboxStateThread now;
+    XboxStateChain c;
+    uint32_t f;
+
+    record_thread(cur, &now);
+    if (xbox_StateChain(&now, NULL, 0, &c) < 0) {
+        snprintf(why, why_n, "guest thread %u: its call chain cannot be read", sv->tid);
+        return 0;
+    }
+    f = (sv->chain.flags | c.flags) & XBOX_CHAIN_UNRESTORABLE;
+    if (f) {
+        snprintf(why, why_n, "guest thread %u: its call chain cannot be restored (%s)", sv->tid,
+                 (f & XBOX_CHAIN_STACK_SWITCH) ? "through a stack-switching function"
+                 : (f & XBOX_CHAIN_OVERFLOW) ? "deeper than the frame shadow stack"
+                 : (f & XBOX_CHAIN_NO_TABLE) ? "no call-site table: generated code older than the runtime"
+                 : (f & XBOX_CHAIN_UNKNOWN_SITE) ? "a return address no call site names"
+                 : "its frames disagree with its park record");
+        return 0;
+    }
+    return 1;
+}
+
 /* Whether thread `cur` (held at the end of its park point now) stands where `sv` stood in the state: the same
  * park point (a kernel call or a host wait inside lifted code), at the same guest return address or site, with
- * esp at the same place when it was entered. Lifted code keeps the return path and ebp in host frames, so the
- * host stack below the thread is the state's only if every frame matches; with this check, that is assumed from
- * the innermost one (a title's threads loop through the same chains). XBA-247 adds the chain signature (each
- * frame's return address and esp, the ebp shadow stack) to the CPU section: compare it here. */
-static int chain_matches(const XboxStateThread *sv, const XboxParkRecord *cur, char *why, size_t why_n)
+ * esp at the same place when it was entered, and the same guest call chain below it (XBA-247: every lifted
+ * frame's return address and esp, the chain signature of the frame shadow stack). Lifted code keeps the return
+ * path in host frames, so the host stack below the thread is the state's exactly when the chains match. Each
+ * host frame's ebp is a C local nothing can write, so the load also needs the same ebp in every frame (what
+ * its caller published when it was called) and, at a kernel call or a poll or halt site, the same published
+ * ebp of the innermost function: then the host frames are the state's to the last word. */
+static int chain_matches(const XboxStateThread *sv, const XboxParkRecord *cur, const uint8_t *cp, size_t cl,
+                         int idx, char *why, size_t why_n)
 {
+    XboxStateThread now;
+    XboxStateChain c;
+    XboxStateFrame *fs = NULL, *fn = NULL;
+    uint32_t k;
+    int ok = 1;
+
     /* Two host waits at the same guest VA (a poll loop's back edge is also where the guest CPU lock preempts)
      * are one place: the same lifted frame, and either helper only waits; the thread's own helper resumes. */
     if ((sv->site == XBOX_PARK_SITE_KERNEL) != (cur->site == XBOX_PARK_SITE_KERNEL)) {
@@ -1027,8 +1148,45 @@ static int chain_matches(const XboxStateThread *sv, const XboxParkRecord *cur, c
                  " 0x%08X in the state)", sv->tid, cur->ret_va, cur->call_esp, sv->call_esp);
         return 0;
     }
-    /* XBA-247: the chain signature, frame by frame, goes here. */
-    return 1;
+    if (!chain_restorable(sv, cur, why, why_n))
+        return 0;
+    record_thread(cur, &now);
+    if (xbox_StateChain(&now, NULL, 0, &c) < 0) {
+        snprintf(why, why_n, "guest thread %u: its call chain cannot be read", sv->tid);
+        return 0;
+    }
+    if (c.frames != sv->chain.frames || c.base != sv->chain.base || c.signature != sv->chain.signature) {
+        snprintf(why, why_n, "guest thread %u is at the same call with another call chain (%u frames, signature"
+                 " %016llx; %u frames, %016llx in the state)", sv->tid, c.frames, (unsigned long long)c.signature,
+                 sv->chain.frames, (unsigned long long)sv->chain.signature);
+        return 0;
+    }
+    /* The innermost function published its ebp before its kernel call, a poll wait or a hlt (not at a
+     * preempting back edge: there it is not checked). */
+    if (sv->site != XBOX_PARK_SITE_PREEMPT && sv->cpu.r_ebp != now.cpu.r_ebp) {
+        snprintf(why, why_n, "guest thread %u is at the same call chain with another ebp in its innermost"
+                 " function (0x%08X, 0x%08X in the state)", sv->tid, now.cpu.r_ebp, sv->cpu.r_ebp);
+        return 0;
+    }
+    if (!c.frames)
+        return 1;
+    fs = malloc(c.frames * sizeof *fs);
+    fn = malloc(c.frames * sizeof *fn);
+    if (!fs || !fn || xbox_StateCpuChain(cp, cl, idx, fs, c.frames) != (int)c.frames
+        || xbox_StateChain(&now, fn, c.frames, &c) != (int)c.frames) {
+        snprintf(why, why_n, "guest thread %u: its call chain cannot be compared", sv->tid);
+        ok = 0;
+    }
+    /* Frame 0 is the routine's own entry (its ebp is the runtime's); a caller with no ebp local has none. */
+    for (k = 1; ok && k < c.frames; k++)
+        if (!(fn[k].flags & XBOX_CALL_SITE_NO_EBP) && fn[k].ebp != fs[k].ebp) {
+            snprintf(why, why_n, "guest thread %u is at the same call chain with another ebp in frame %u (0x%08X,"
+                     " 0x%08X in the state; called from 0x%08X)", sv->tid, k, fn[k].ebp, fs[k].ebp, fn[k].ret_va);
+            ok = 0;
+        }
+    free(fs);
+    free(fn);
+    return ok;
 }
 
 static volatile int32_t s_loading;
@@ -1166,7 +1324,13 @@ int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, Xbox
             REASON(st->reason, "guest thread %lu is held at DISPATCH_LEVEL", recs[k].tid);
             return XBOX_STATE_EBUSY;
         }
-        if (!chain_matches(&saved[pair[k]], &recs[k], why, sizeof why)) {
+        if (!chain_restorable(&saved[pair[k]], &recs[k], why, sizeof why)) {
+            REASON(st->reason, "%s", why);
+            return XBOX_STATE_ECHAIN;
+        }
+    }
+    for (k = 0; k < nc; k++) {
+        if (!chain_matches(&saved[pair[k]], &recs[k], cp, cl, pair[k], why, sizeof why)) {
             REASON(st->reason, "%s", why);
             return XBOX_STATE_ECHAIN;
         }

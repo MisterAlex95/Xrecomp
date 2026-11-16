@@ -47,7 +47,9 @@
 #define FENCE()        __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #endif
 
-typedef char park_cpu_fits[sizeof(RecompCpu) <= XBOX_PARK_CPU_BYTES ? 1 : -1];
+typedef char park_cpu_fits[sizeof(RecompCpuRegs) <= XBOX_PARK_CPU_BYTES ? 1 : -1];
+/* The registers are RecompCpu's first bytes (RECOMP_CPU_REGS), the frame pointers right after. */
+typedef char park_regs_prefix[offsetof(RecompCpu, r_ftop) == sizeof(RecompCpuRegs) ? 1 : -1];
 
 typedef struct {
     volatile int32_t state;          /* XBOX_PARK_*; written by the owner, read by anyone */
@@ -61,11 +63,13 @@ typedef struct {
     volatile uint32_t status;
     volatile uint32_t site;          /* XBOX_PARK_SITE_* of the current park point */
     volatile uint32_t call_esp;      /* esp at the call's Enter (the return address's slot), kept by Leave */
-    RecompCpu cpu;
+    RecompCpuRegs cpu;               /* the registers, not the frames (XBA-247) */
     /* Same-run restore (XBA-249): the owner's own g_cpu (thread-local, valid while it is registered), and a
-     * call to issue again once the freeze lets it go (xbox_ParkRestoreThread / xbox_ParkTakeReissue). */
+     * call to issue again once the freeze lets it go (xbox_ParkRestoreThread / xbox_ParkTakeReissue). Its
+     * frame shadow stack (XBA-247) is read there too; frame_base: its frame count when its routine started. */
     RecompCpu *live;
     volatile int32_t reissue;
+    volatile uint32_t frame_base;
 } Slot;
 
 static Slot s_slots[XBOX_PARK_MAX_THREADS];
@@ -160,7 +164,7 @@ static void record_write(Slot *s, int returned, uint32_t site, uint32_t ordinal,
     }
     s->returned = returned;
     s->status = returned ? g_eax : 0;
-    memcpy(&s->cpu, (const void *)&g_cpu, sizeof s->cpu);
+    memcpy(&s->cpu, (const void *)&g_cpu, sizeof s->cpu);   /* the registers, not the frames */
     STORE32((volatile int32_t *)&s->seq, (int32_t)(s->seq + 1));
 }
 
@@ -240,6 +244,7 @@ void xbox_ParkThreadStart(void)
             s->live = (RecompCpu *)&g_cpu;
             s->reissue = 0;
             memset(&s->cpu, 0, sizeof s->cpu);
+            s->frame_base = recomp_frames_depth(&g_cpu);
             /* A new generation of the slot: a capture that read the previous thread's record sees it change. */
             STORE32((volatile int32_t *)&s->seq, (int32_t)((s->seq + 2) & ~1u));
             t_slot = i;
@@ -602,8 +607,8 @@ int xbox_ParkRecords(XboxParkRecord *out, int max)
             r->kernel_calls = s->kernel_calls;
             r->site = s->site;
             r->reissue = LOAD32(&s->reissue);
-            r->cpu_bytes = (uint32_t)sizeof(RecompCpu);
-            memcpy(r->cpu, (const void *)&s->cpu, sizeof(RecompCpu));
+            r->cpu_bytes = (uint32_t)sizeof(RecompCpuRegs);
+            memcpy(r->cpu, (const void *)&s->cpu, sizeof(RecompCpuRegs));
             FENCE();
             s2 = (uint32_t)LOAD32((volatile int32_t *)&s->seq);
             if (s1 == s2)
@@ -636,7 +641,7 @@ int xbox_ParkRecordsChanged(const XboxParkRecord *r, int n)
 
 int xbox_ParkRestoreThread(int slot, const void *cpu_bytes, int reissue)
 {
-    const RecompCpu *cpu = (const RecompCpu *)cpu_bytes;
+    const RecompCpuRegs *cpu = (const RecompCpuRegs *)cpu_bytes;   /* the registers; the frames stay */
     Slot *s;
 
     if (slot < 0 || slot >= XBOX_PARK_MAX_THREADS || !cpu || !LOAD32(&s_freeze))
@@ -676,6 +681,65 @@ int xbox_ParkTakeReissue(void)
     if (t_slot < 0)
         return 0;
     return InterlockedExchange((volatile LONG *)&s_slots[t_slot].reissue, 0) != 0;
+}
+
+/* ---- Frames and call sites (XBA-247) ---- */
+
+int xbox_ParkFrames(int slot, struct RecompFrame *out, uint32_t max, uint32_t *depth, uint32_t *base)
+{
+    const Slot *s;
+    const RecompCpu *c;
+    uint32_t d, n;
+
+    if (slot < 0 || slot >= XBOX_PARK_MAX_THREADS)
+        return -1;
+    s = &s_slots[slot];
+    c = s->live;
+    if (LOAD32((volatile int32_t *)&s->state) == XBOX_PARK_FREE || !c)
+        return -1;
+    d = recomp_frames_depth(c);
+    if (depth) *depth = d;
+    if (base) *base = s->frame_base;
+    n = d < RECOMP_FRAME_SLOTS ? d : RECOMP_FRAME_SLOTS;
+    if (n > max)
+        n = max;
+    if (out && n)
+        memcpy(out, (const void *)c->r_fbase, n * sizeof *out);
+    return (int)n;
+}
+
+static const uint32_t *volatile s_sites;
+static volatile uint32_t s_nsites;
+
+void recomp_call_sites_register(const uint32_t *sites, uint32_t count)
+{
+    s_nsites = 0;
+    s_sites = sites;
+    s_nsites = sites ? count : 0;
+}
+
+uint32_t xbox_CallSiteCount(void)
+{
+    return s_nsites;
+}
+
+int xbox_CallSiteLookup(uint32_t ret_va, uint32_t *func, uint32_t *flags)
+{
+    const uint32_t *t = s_sites;
+    uint32_t lo = 0, hi = s_nsites;
+
+    while (t && lo < hi) {             /* sorted by return VA: the first entry of that VA */
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (t[3 * mid] < ret_va)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (!t || lo >= s_nsites || t[3 * lo] != ret_va)
+        return 0;
+    if (func) *func = t[3 * lo + 1];
+    if (flags) *flags = t[3 * lo + 2];
+    return 1;
 }
 
 int xbox_ParkDropped(void)

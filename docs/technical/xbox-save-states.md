@@ -72,7 +72,7 @@ load recreate threads that re-enter their waits. What breaks, and the answer to 
 |---|---|
 | A thread in the middle of lifted code | The freeze holds each thread at its next kernel call; a thread that never makes one defeats the freeze (measured below) and the title is outside the class |
 | The host stack below a parked thread | In-session: it is still there, and equivalent when the thread is parked at the same chain (same call sites, same esp at each frame). Across runs: rebuilt by resume entries |
-| `ebp` in host frames | The lifter passes it through a per-thread shadow stack across calls (XBA-247), so it is in serialisable memory |
+| `ebp` in host frames | The lifter passes it through a per-thread shadow stack across calls (XBA-247, « Guest call chains » below), so it is in serialisable memory |
 | A thread parked inside a guest routine a bridge runs (an APC inside an alertable wait) | Not a safe point: a bridge's host frame sits between its guest frames. The detector only counts the thread's top-level kernel calls |
 | A wait that already returned (the semaphore count is consumed) when the freeze holds the thread | The park record keeps the call's status; a restore returns it instead of waiting again |
 | Handles | Guest handle values are restored as they were; the objects behind them are recreated (XBA-246) |
@@ -181,9 +181,11 @@ poll loop tests its word again, the kick sets a bit already set, a hlt or a pree
 after the call). `xbox_GuestPollWait` parks even when it returns at once: a thread spinning in a marked poll loop is
 held at its next turn, which takes it out of « a thread that never parks ».
 
-The `ebp` caveat is the same as for kernel calls: inside lifted code `ebp` is a C local, so the recorded `r_ebp` is
-not the thread's until XBA-247. The site's VA is the poll loop's `jcc`, the `hlt`, or the back edge's source; the
-chain signatures and the call-site unwind table (XBA-247, XBA-250) need these sites as well as the kernel calls.
+The `ebp` caveat: inside lifted code `ebp` is a C local. The functions the thread is in are in the frame shadow
+stack (XBA-247), each with the `ebp` its caller published; the waiting function publishes its own `ebp` before a poll
+wait and a `hlt` (so `r_ebp` in the record is the thread's there), not at a preempting back edge. The site's VA is the
+poll loop's `jcc`, the `hlt`, or the back edge's source; the chain signature covers these threads like the others
+(its last frame is the waiting function).
 
 The park line names one:
 
@@ -200,6 +202,100 @@ through `xbox_GuestPollWait`, one halting, the loops' back edges calling `xbox_G
 after the thaw; the hooks' nesting) and `tests/xbox_state` (« Host waits »: a capture with a poll thread and a kick
 thread writes them as host-wait records, the reader refuses an unknown site or a host wait with an ordinal), both
 also with the guest CPU lock on (there the kick thread is often held at its preempt).
+
+## Guest call chains (XBA-247)
+
+What a parked thread keeps in host frames is its return path and each frame's `ebp`. The chain of guest functions it
+is in, and the `ebp` each of them holds, are now also in memory, so a frozen thread's chain can be read and compared.
+
+**The frame shadow stack** (`RecompFrame`, `RECOMP_FRAME_ENTRY` / `LEAVE` in `recomp_types.h`). A lifted function
+that may reach a park point records itself on entry: one frame, the guest `esp` it was entered with (it points at
+its return address) and `g_ebp` (the `ebp` its caller published before the call, as lifted code does before every
+call). It drops the frame at every return. Nothing is emitted at a call.
+
+```c
+void sub_00012200(void)
+{
+    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
+    ...
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; RECOMP_FRAME_LEAVE(); return; /* ret */
+}
+```
+
+- **Only functions that may park record.** A chain is only read at a park point, so a function that can never reach
+  one never needs a frame: the translator's `_park_plan` finds, over the whole program, the functions that make no
+  indirect call or jump that is not a switch (a kernel thunk is reached that way), have no `hlt`, poll loop or (with
+  `--back-edge-yield`) back edge, call nothing hand-written, and only call, jump or fall through to such functions
+  (a call into the middle of a function counts as that function; one to no function at all, a stub that only
+  returns, cannot park). They record nothing, so leaf helpers and whole subtrees of plain code cost nothing.
+- **The cost is per call of a function that may park, not per call made**: `ENTRY` is one compare (the array exists
+  and has room), two words stored and the top bumped; `LEAVE` puts the top back. About 8 instructions on arm64, 10-13
+  on x86-64 with a register saved.
+- **The frames are a heap array per host thread** (1024 frames and two spares, 8 KB), allocated the first time the
+  thread enters such a function (`recomp_frames_slow`); `g_cpu` keeps three pointers (`r_ftop`, `r_fbase`,
+  `r_flimit`), so the thread-local block is the register file plus 24 bytes and fits any static TLS reserve.
+  `RecompCpuRegs` is the register part, what the park records copy at every kernel call and what the state stores
+  (`sizeof(RecompCpuRegs)` is the identity's `cpu_bytes`). Past 1024 frames (deep recursion) the frames go to a
+  spare, shared and never read: the code stays correct, the chain is flagged `OVERFLOW`. The array is not freed when
+  its thread ends.
+- A longjmp or an SEH resume over frames puts the top back (`xbox_SehRuntimeSnapshot` carries the frame count in its
+  high half). A thread that switches guest stacks (XBA-101) keeps each context's frames with the context
+  (`recomp_stack_switch.c`).
+- **No `ebp` is written back.** Generated code never reads a frame, so a frame's `ebp` cannot be restored; instead a
+  load needs the same `ebp` in every frame as in the state (below). Writing them back would need a reload after every
+  call, which is what made the first version of this cost +19 % on call-heavy code.
+- `-DRECOMP_FRAME_SHADOW=0` compiles it out, for the benchmark only (`tools/bench` variant `noframes`).
+
+**The call-site table** (`g_recomp_call_sites` in `recomp_dispatch.c`): per call site into a function that may park
+(and every indirect call) its return VA, the function it is in and flags (`XBOX_CALL_SITE_*`: indirect, no `ebp`
+local in the caller, in a stack-switching function, setjmp / longjmp, SEH helper, manual), sorted by return VA.
+`recomp_dispatch_init` hands it to the runtime (`recomp_call_sites_register`, a weak reference: generated code still
+links against a runtime without it); `xbox_CallSiteLookup` finds a return VA. Stack depths at the call are not in the
+table: the frames carry `esp` itself, exact through `alloca` and `_chkstk`.
+
+**The chain and its signature** (`xbox_StateChain`, `xbox_state.h`). For a frozen thread: its frames from its
+routine's (`base`: frames already there when it started, the INLINE main thread's creator's), each with its return VA
+(read at `esp`), `esp`, `ebp` and the function and flags of the call site it returns to; frame 0 is the routine,
+entered by the runtime; the last one is the function making the kernel call (or waiting). The signature is a 64-bit
+FNV-1a of the frame count and each frame's return VA and `esp` (`xbox_StateChainSignature`): two threads in the same
+functions entered from the same call sites at the same guest stack depths have the same one. Flags
+(`XBOX_CHAIN_*`): `EMPTY` (no lifted frame: a host routine), `OVERFLOW`, `NO_TABLE` (generated code older than
+this), `UNKNOWN_SITE` (a return VA no call site names), `STACK_SWITCH` (through a function that switches stacks: not
+restorable), `MISMATCH` (a kernel call not below the top frame); `XBOX_CHAIN_UNRESTORABLE` groups the ones a load
+must refuse.
+
+**In a same-run load** (XBA-249, `chain_restorable` then `chain_matches`): every thread's chain must be restorable;
+then each must have the same signature as in the state, the same `ebp` in every frame whose caller has an `ebp`
+local, and the same published `ebp` in its innermost function (published before a kernel call, a poll wait and a
+`hlt`; not at a preempting back edge). Then every host frame below the thread is the state's. XBA-250 re-enters lifted
+functions at the call sites the frames name.
+
+In the state, `CPU ` v4 follows each thread's registers with its chain (below). Tests: `tools/recomp/
+test_frame_shadow.py` (sites noted, `_park_plan`, `ENTRY` / `LEAVE` only where a function may park, the table in the
+dispatch file and its registration, a chain three calls deep in C read from `g_cpu` and dropped on return, the array
+allocated on first use and past the slots), `tests/park_chain` (game-shaped workers parked through the kernel bridge:
+chains, signatures stable over 12 freezes and different between two call sites, overflow, stack switch, no table, the
+CPU section's chains and its strict reader, and same-run loads: refused for an overflowing chain, then for one
+through a stack switch, accepted at the same chains and frame `ebp`, refused naming the chain when a thread makes the
+same kernel call at the same esp from another call site, and naming the frame when a function holds another `ebp`).
+
+**Measured** (`python -m tools.bench icount`, scale 0.1, instructions executed under qemu-user less a run at scale 0;
+origin/main -> XBA-247 on the same corpus; x86-64 clang 19 exe layout, arm64 NDK clang 19 against an aarch64 glibc
+sysroot, exe and so layouts). `w_vcall` is new: direct calls into a three-instruction function that calls through a
+table (a method making a virtual call), the worst case of this design, every call of it records a frame.
+
+| Workload | x86-64 | arm64 exe | arm64 so |
+|---|---|---|---|
+| w_int, w_mem, w_rep, w_bytes, w_x87, w_sse, w_fib | 0 % | 0 % | 0 % |
+| w_icall (indirect calls to leaves) | 0 % | 0 % | 0 % |
+| w_vcall (calls into a function that makes an indirect call) | +12.6 % (+13 per call) | +6.9 % (+8) | +6.6 % (+8) |
+
+A title pays about 8 (arm64) to 13 (x86-64) instructions per call of a function that may park; frame time on a title
+is not measured yet (XBA-252).
+
+**Every generated pack is stale**: titles must be prepared again (the generated code and the runtime share the
+`RecompCpu` layout, and older code has no frames or table; a stale pack would run with every chain `NO_TABLE` /
+`EMPTY` at best, and with a register block of the wrong size at worst).
 
 ## Kernel objects (`src/kernel/kernel_kobj_state.c`, XBA-246)
 
@@ -253,7 +349,7 @@ sections, in registration order, each:
 identity: title ID, XBE SHA-1, build ID of the generated code (hash of the lifted sources), RAM size
 sections, each: u32 tag, u32 version, u64 length, payload
   RAM    page bitmap (non-zero pages), then the pages (compressed; rewind codes XOR deltas, recomp_rewind.h)
-  CPU    per guest thread: guest thread id, KTHREAD VA, TIB VA, guest stack bounds, RecompCpu, ebp shadow stack,
+  CPU    per guest thread: guest thread id, KTHREAD VA, TIB VA, guest stack bounds, registers, frame shadow stack,
          park record (ordinal, guest return address, status when the call already returned), chain signature
          (return VA and esp per frame, start routine)
   MEM    heap allocator, contiguous page map, guest_vmem
@@ -269,15 +365,16 @@ built in too, so a state has seven sections):
 
 | Tag | Version | Payload |
 |---|---|---|
-| `CPU ` | 3 | u32 thread count, u32 sizeof(RecompCpu), u64 run id (XBA-249); per guest thread a 68-byte head (park slot, park state, ordinal, guest return address, returned, status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base and limit from the KTHREAD, esp at the park point (the call's return address slot, XBA-249), guest thread id, park site) then the raw RecompCpu |
+| `CPU ` | 4 | u32 thread count, u32 sizeof(RecompCpuRegs), u64 run id (XBA-249); per guest thread a 68-byte head (park slot, park state, ordinal, guest return address, returned, status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base and limit from the KTHREAD, esp at the park point (the call's return address slot, XBA-249), guest thread id, park site), the raw RecompCpuRegs, then the call chain (XBA-247): u32 frames, base, flags, 0, u64 signature, and per frame u32 return VA, esp, ebp, function, call-site flags |
 | `MEM ` | 1 | `xbox_MemStateSave`: heap cursor, alloc count and block table, worker stack count; the contiguous window's counters, page map, block lengths (sparse) and RAM-name map; the lazy reservations; guest_vmem's page table as runs |
 | `RAM ` | 1 | u32 range count; per range u32 kind, u32 guest base, u32 pages, a bitmap of the pages stored, then those pages (4 KB each) |
 
-Not in the design's first draft: the ebp shadow stack and the chain signature in `CPU ` (XBA-247 adds them and bumps
-the section's version), compression.
+Not in the design's first draft: compression. The reader stays strict: older versions are refused, a chain's signature
+must be its frames', no unknown flag, nothing after the last thread.
 
 **Park records, two kinds** (`CPU ` v2, XBA-251; v3 since XBA-249 adds the run id and the esp at the park point;
-older versions are refused, `EVERSION`). The head's last word,
+v4 since XBA-247 the registers as a RecompCpuRegs and the call chain; older versions are refused, `EVERSION`). The
+head's last word,
 the park site (`XboxParkRecord.site`, `XboxStateThread.site`, `XBOX_PARK_SITE_*` in `kernel_park.h`), says which:
 
 | Site | Kind | ordinal | guest return address | Resume |
@@ -441,12 +538,11 @@ thread, one capture or load at a time:
    created since the state, or one that ended since, refuses at once.
 3. **Where each thread stands** (`chain_matches` in `xbox_state.c`): the same park point as in the state, the same
    kernel call (ordinal, guest return address) or a host wait at the same guest VA (a poll loop's back edge is also
-   where the guest CPU lock preempts: either kind matches), with esp at the same place when it was entered. The host
-   frames below the thread are then assumed to be the state's: a title's threads loop through the same chains. This
-   is the hook XBA-247 replaces with the chain signature (every frame's return address and esp, the ebp shadow stack);
-   until then a thread that reaches the same call through another chain with the same esp would load wrongly (not
-   seen in the test titles' shape; a known limit). Any difference: `ECHAIN` (`RECOMP_STATE_EREFUSED` for the menu)
-   with the reason, nothing changed.
+   where the guest CPU lock preempts: either kind matches), with esp at the same place when it was entered, and the
+   same call chain (XBA-247: frame count and signature of the frame shadow stack, every lifted frame's return address
+   and esp; neither chain `XBOX_CHAIN_UNRESTORABLE`). The host frames below the thread are then the state's. Any
+   difference: `ECHAIN` (`RECOMP_STATE_EREFUSED` for the menu) with the reason, nothing changed. Every frame must also
+   hold the same `ebp` as in the state, since no host frame's `ebp` can be written (« Guest call chains »).
 4. **Pre-checks**: every saved guest page is mapped now; the memory manager's `RECOMP_EXT_VMA` page table is what it
    was (commits are not redone yet).
 5. **Backup**: a capture of now (the same freeze), put back if a section fails part way: never a partial load.
@@ -528,8 +624,11 @@ the quick save chord run on the service's thread); « Host waits »: a state wit
 - **States are tied to one build** of the generated code.
 - **Network** (the NIC model, system link) is not restored: a state taken during a network session resumes with the
   link down.
-- **Cost**: the park hooks are always on and measured negligible; the lifter's ebp shadow stack (XBA-247) and resume
-  entries (XBA-250) have budgets in their tickets (2 % frame time).
+- **Cost**: the park hooks are always on and measured negligible. The frame shadow stack (XBA-247) costs about 8
+  (arm64) to 13 (x86-64) instructions per call of a function that may park, nothing elsewhere (« Guest call chains »:
+  0 % on every `tools/bench` workload but `w_vcall`, its worst case, +7 % / +13 %). A title's frame time depends on
+  how many of its calls go into functions that may park: not measured on a title yet (XBA-252). Resume entries
+  (XBA-250) have their own budget.
 
 ## Tickets
 
@@ -538,9 +637,9 @@ the quick save chord run on the service's thread); « Host waits »: a state wit
 | XBA-244 | This design, the park detector and its measurements | |
 | XBA-245 | Guest state capture (RAM, registers, memory manager) and the state format: done (`xbox_state.h`, `tests/xbox_state`) | |
 | XBA-246 | Kernel objects with readable, restorable state | |
-| XBA-247 | Lifter: ebp shadow stack across calls, call-site unwind table, chain signatures | |
+| XBA-247 | Lifter: ebp shadow stack across calls, call-site unwind table, chain signatures: done (`CPU ` v4, `tests/park_chain`) | |
 | XBA-248 | NV2A, APU and USB capture and restore | |
-| XBA-249 | In-session restore: rewind, quick save / load within a run, attach to `recomp_states`: done (`xbox_StateLoad`, `xbox_state_service.c`; the chain check is the innermost park point until XBA-247) | 245, 246, 248 (247: the chain signature) |
+| XBA-249 | In-session restore: rewind, quick save / load within a run, attach to `recomp_states`: done (`xbox_StateLoad`, `xbox_state_service.c`; chains compared by signature since XBA-247) | 245, 246, 248 (247: the chain signature) |
 | XBA-250 | Resume entries in lifted code: states across runs, « Resume where I left off » | 247, 249 |
 | XBA-251 | Park points at host waits inside lifted code (guest poll waits, NV2A kick waits, hlt, preempts): done (`CPU ` v2) | |
 | XBA-252 | Park statistics on our titles (Linux arm64, device) | |

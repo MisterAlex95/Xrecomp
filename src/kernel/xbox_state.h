@@ -7,19 +7,21 @@
  *
  *   header   "XBXS", format version, header size, section count, the identity (title ID, SHA-1 of the
  *            XBE's headers, build ID of the binary, toolkit version, RAM / mapped / contiguous sizes,
- *            sizeof(RecompCpu)), when it was taken, a hash of the header
+ *            sizeof(RecompCpuRegs)), when it was taken, a hash of the header
  *   sections each: u32 tag, u32 version, u64 length, u64 hash of the payload, then the payload
  *
  * All integers little-endian (every host we build for is). A state only loads into the binary that
  * saved it (the build ID; call-site addresses and lifted frames are part of a thread's state), so a
- * section's payload may use this build's layouts (a raw RecompCpu); its version changes when its own
+ * section's payload may use this build's layouts (a raw RecompCpuRegs); its version changes when its own
  * format does.
  *
  * Built-in sections (this file's ticket):
  *   CPU   the run it was taken in (XBA-249), then per guest thread its park record (kernel_park.h): the
  *         call it is in (ordinal, guest return address, esp at the call) or the host wait inside lifted code
- *         (site kind and guest VA, XBA-251), whether it returned and its status, the RecompCpu, the TIB, the
- *         KTHREAD, the guest stack bounds and the guest thread id read from the KTHREAD
+ *         (site kind and guest VA, XBA-251), whether it returned and its status, the registers
+ *         (RecompCpuRegs), the TIB, the KTHREAD, the guest stack bounds and the guest thread id read from the
+ *         KTHREAD, and its guest call chain (XBA-247: every frame's return VA, esp and ebp from the frame
+ *         shadow stack, and the chain's signature)
  *   MEM   the memory manager's host-side state (xbox_MemStateSave: heap, contiguous window, lazy
  *         reservations, guest_vmem)
  *   RAM   guest memory, range by range (xbox_StateGuestRanges): a bitmap of the pages stored (not all
@@ -41,12 +43,13 @@
  * Loading (same run, XBA-249: xbox_StateLoad). Every guest thread is frozen, then each must be held at the end
  * of a kernel call (a wait in progress is given until the timeout to end). The state is accepted only when it
  * was taken in this run and its threads are the threads running now, each parked at the same call as in the
- * state (same ordinal, guest return address and esp at the call: the host stack below it is then the one the
- * state's thread had). XBA-247 replaces this check with the chain signature (every frame's return address and
- * esp, the ebp shadow stack): chain_matches in xbox_state.c is the hook. Otherwise ECHAIN with the reason,
- * and nothing changes. Then, with the devices held: MEM, RAM, KOBJ, NV2A, APU, USB and any other section in
- * registration order, and each thread's registers (the ones it sees when its call returns, or the call made
- * again when the state has the thread inside it). A section that fails part way puts back a capture taken
+ * state (same ordinal, guest return address and esp at the call) through the same call chain (XBA-247: the
+ * chain signature of its frame shadow stack, every lifted frame's return address and esp, neither chain
+ * unrestorable) with the same ebp in every frame: the host stack below it is then the one the state's thread
+ * had (chain_matches in xbox_state.c). Otherwise ECHAIN with the reason, and nothing changes. Then, with the
+ * devices held: MEM, RAM, KOBJ, NV2A, APU, USB and any other section in registration order, and each thread's
+ * registers (the ones it sees when its call returns, or the call made again when the state has the thread
+ * inside it). A section that fails part way puts back a capture taken
  * just before (never a partial load).
  *
  * The slot file is recomp_states' (XRSLOT header, console "xbox", game key the title ID in hex,
@@ -83,8 +86,9 @@ extern "C" {
 #define XBOX_STATE_TAG_USB  XBOX_STATE_TAG('U', 'S', 'B', ' ')   /* XBA-248 */
 
 /* CPU v2 (XBA-251): the park site kind (XboxParkRecord.site) in each thread's head. v3 (XBA-249): the run id
- * and the esp at the call. Older versions are refused. */
-#define XBOX_STATE_CPU_VERSION 3
+ * and the esp at the call. v4 (XBA-247): the registers are a RecompCpuRegs (r_frames at the end) and each
+ * thread's call chain follows them. Older versions are refused. */
+#define XBOX_STATE_CPU_VERSION 4
 #define XBOX_STATE_RAM_VERSION 1
 /* MEM: XBOX_MEM_STATE_VERSION (xbox_memory_layout.h) */
 
@@ -181,7 +185,7 @@ typedef struct XboxStateIdentity {
     uint8_t build_id[32];
     char toolkit[16];        /* "0.14.0" */
     uint32_t ram_size, mapped_size, contig_size;
-    uint32_t cpu_bytes;      /* sizeof(RecompCpu) */
+    uint32_t cpu_bytes;      /* sizeof(RecompCpuRegs) */
 } XboxStateIdentity;
 
 /* The running title's identity. The build ID is the binary's (ELF NT_GNU_BUILD_ID of the module this code
@@ -209,6 +213,44 @@ int xbox_StateCapture(uint32_t timeout_ms, uint8_t **blob, size_t *blob_n, XboxS
 /* The same with the freeze already held by the caller (xbox_ParkFreeze returned 1; it stays held). */
 int xbox_StateCaptureFrozen(uint8_t **blob, size_t *blob_n, XboxStateStats *st);
 
+/* A parked thread's guest call chain (XBA-247), from its frame shadow stack (kernel_park.h
+ * xbox_ParkFrames) and the call-site table: one frame per lifted call it is inside, from its routine's
+ * first call (frame 0) to the call it is parked in (the kernel call's own frame, the last one). */
+typedef struct XboxStateFrame {
+    uint32_t ret_va;         /* the guest return address of the call (the word at esp) */
+    uint32_t esp;            /* guest esp at the callee's entry */
+    uint32_t ebp;            /* the caller's ebp at the call (the frame below's when the caller has none) */
+    uint32_t func;           /* the lifted function the call site is in (call-site table; 0: unknown) */
+    uint32_t flags;          /* its XBOX_CALL_SITE_* */
+} XboxStateFrame;
+
+enum {
+    XBOX_CHAIN_EMPTY = 0x01,         /* no lifted frame: the routine is not lifted code (a host routine) */
+    XBOX_CHAIN_OVERFLOW = 0x02,      /* deeper than RECOMP_FRAME_SLOTS frames: the rest was not kept */
+    XBOX_CHAIN_NO_TABLE = 0x04,      /* no call-site table registered (generated code older than XBA-247) */
+    XBOX_CHAIN_UNKNOWN_SITE = 0x08,  /* a return address that no call site names */
+    XBOX_CHAIN_STACK_SWITCH = 0x10,  /* through a function that switches guest stacks (XBA-101) */
+    XBOX_CHAIN_MISMATCH = 0x20,      /* the frames disagree with the park record (count, or the top frame is
+                                      * not the kernel call's) */
+    XBOX_CHAIN_ALL = 0x3F
+};
+/* What makes a chain unusable for a restore: an in-session load compares signatures only when neither
+ * chain has these. */
+#define XBOX_CHAIN_UNRESTORABLE (XBOX_CHAIN_OVERFLOW | XBOX_CHAIN_NO_TABLE | XBOX_CHAIN_UNKNOWN_SITE \
+                                 | XBOX_CHAIN_STACK_SWITCH | XBOX_CHAIN_MISMATCH)
+
+typedef struct XboxStateChain {
+    uint32_t frames;         /* frames in the chain (at most RECOMP_FRAME_SLOTS) */
+    uint32_t base;           /* frames below the thread's routine, not part of its chain */
+    uint32_t flags;          /* XBOX_CHAIN_* */
+    uint64_t signature;      /* xbox_StateChainSignature of the frames */
+} XboxStateChain;
+
+/* The signature of a call chain: a 64-bit hash of the frame count and each frame's return VA and esp (not
+ * ebp, which is state: a restore writes it back). Two threads parked at the same call sites with the same
+ * guest stack depths have the same signature. */
+uint64_t xbox_StateChainSignature(const XboxStateFrame *f, uint32_t n);
+
 /* For a section's save callback: thread i's park record and guest-side location. */
 typedef struct XboxStateThread {
     int slot, state;
@@ -222,11 +264,18 @@ typedef struct XboxStateThread {
     uint32_t tib, kthread;   /* fs base, the KTHREAD at fs:[0x28] (0 when outside guest memory) */
     uint32_t stack_base, stack_limit;   /* the guest stack: KTHREAD StackBase (+0x1C) / StackLimit (+0x20) */
     uint32_t guest_tid;      /* KTHREAD UniqueThread (+0x12C): the id the title sees */
-    RecompCpu cpu;
+    RecompCpuRegs cpu;
     uint32_t site;           /* XBOX_PARK_SITE_*: KERNEL (ordinal, ret_va the call's return address) or a
                               * host wait inside lifted code (ordinal 0, ret_va the site's VA), XBA-251 */
+    XboxStateChain chain;    /* its call chain (XBA-247); the frames: xbox_StateChain / xbox_StateCpuChain */
 } XboxStateThread;
 int xbox_StateContextThread(const XboxStateContext *ctx, int i, XboxStateThread *out);
+
+/* A frozen thread's call chain (XBA-247): its frames (at most max into out, which may be NULL) and *info.
+ * t is the thread's park record (xbox_StateContextThread, or a thread built from xbox_ParkRecords), which
+ * the chain is checked against. Returns the frames in the chain (possibly more than max), or -1 when the
+ * thread is gone. Any thread while the guest threads are frozen (xbox_ParkFreeze). */
+int xbox_StateChain(const XboxStateThread *t, XboxStateFrame *out, uint32_t max, XboxStateChain *info);
 
 /* ---- Reading -------------------------------------------------------------------------------------------- */
 
@@ -255,6 +304,8 @@ int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int m
 uint64_t xbox_StateCpuRun(const uint8_t *p, size_t n);
 /* This run's id: random, fixed for the process. */
 uint64_t xbox_StateRunId(void);
+/* Thread i's chain frames in a CPU payload (at most max into out): the frame count, or -1. */
+int xbox_StateCpuChain(const uint8_t *p, size_t n, int i, XboxStateFrame *out, uint32_t max);
 typedef struct XboxStateRamInfo {
     uint32_t ranges, pages, stored;
 } XboxStateRamInfo;

@@ -42,6 +42,10 @@ static uint32_t ram[1024];
 #define POP32(s,v) ((v)=MEM32(s), (s)+=4)
 #define RECOMP_ABI_CALL(a,f) f()
 #define RECOMP_ICALL_SAFE_AT(a,s,site) sub_00010040()
+/* The frame shadow stack (XBA-247), as recomp_types.h has it. */
+static struct { uint32_t ebp, esp; } frames[64]; static uint32_t nframes;
+#define RECOMP_FRAME_ENTRY() const uint32_t _gfd = nframes; frames[_gfd].ebp = g_ebp; frames[_gfd].esp = esp; nframes = _gfd + 1
+#define RECOMP_FRAME_LEAVE() (nframes = _gfd)
 void sub_00010000(void); void sub_00010030(void); void sub_00010040(void);
 ''' + bodies + r'''
 int main(void) {
@@ -49,6 +53,7 @@ int main(void) {
     sub_00010000();
     assert(eax==0x12345678); assert(esp==4004);
     assert(g_ebp==0xabcdef); assert(g_seh_ebp==0xabcdef);
+    assert(nframes==0);
     return 0;
 }
 '''

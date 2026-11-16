@@ -404,6 +404,7 @@ void sub_00010133(void) { f_inner__seh(0x00010133u); } /* eh3 funclet of 0x00010
  */
 void my_handler3(void)
 {
+    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
     uint32_t ebp = 0;
     ebp = g_ebp;  /* prologue saves caller's frame */
     int _flags = 0; /* fallback flag var */
@@ -480,7 +481,7 @@ loc_00010195: ;
     MEM32(ebx + 0xC) = eax;
     eax = MEM32(edi + ecx * 4 + 8);
     ebp = ebx + 0x10;
-    g_seh_ebp = ebp; RECOMP_ITAIL(eax); return; /* indirect tail jmp */
+    g_seh_ebp = ebp; RECOMP_ITAIL(eax); RECOMP_FRAME_LEAVE(); return; /* indirect tail jmp */
 
 loc_000101A7: ;
     ecx = esi + esi * 2;
@@ -542,8 +543,9 @@ loc_000101F3: ;
     POP32(esp, ebx);
     esp = ebp;
     POP32(esp, ebp);
-    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; return; /* ret */
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; RECOMP_FRAME_LEAVE(); return; /* ret */
 
+    RECOMP_FRAME_LEAVE(); /* falls off its end */
 }
 
 /**
@@ -798,14 +800,16 @@ void sub_00010296(void) { f_cxx_inner__seh(0x00010296u); } /* cxx funclet of 0x0
  */
 void ehstub_cxx(void)
 {
+    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
     uint32_t ebp = 0;
     ebp = g_ebp;  /* frameless: caller's frame */
     ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
 
 loc_0001029E: ;
     eax = 0x20018;
-    g_seh_ebp = ebp; my_cxx_handler(); return; /* tail jmp 0x000102AC */
+    g_seh_ebp = ebp; my_cxx_handler(); RECOMP_FRAME_LEAVE(); return; /* tail jmp 0x000102AC */
 
+    RECOMP_FRAME_LEAVE(); /* falls off its end */
 }
 
 /**
@@ -816,14 +820,16 @@ loc_0001029E: ;
  */
 void ehstub_inner(void)
 {
+    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
     uint32_t ebp = 0;
     ebp = g_ebp;  /* frameless: caller's frame */
     ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
 
 loc_000102A5: ;
     eax = 0x20060;
-    g_seh_ebp = ebp; my_cxx_handler(); return; /* tail jmp 0x000102AC */
+    g_seh_ebp = ebp; my_cxx_handler(); RECOMP_FRAME_LEAVE(); return; /* tail jmp 0x000102AC */
 
+    RECOMP_FRAME_LEAVE(); /* falls off its end */
 }
 
 /**
@@ -834,6 +840,7 @@ loc_000102A5: ;
  */
 void my_cxx_handler(void)
 {
+    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
     uint32_t ebp = 0;
     ebp = g_ebp;  /* prologue saves caller's frame */
     int _flags = 0; /* fallback flag var */
@@ -900,7 +907,7 @@ loc_000102FD: ;
     POP32(esp, ebx);
     ebp = ebx + 0xC;
     esp = MEM32(ebp + -16);
-    g_seh_ebp = ebp; RECOMP_ITAIL(eax); return; /* indirect tail jmp */
+    g_seh_ebp = ebp; RECOMP_ITAIL(eax); RECOMP_FRAME_LEAVE(); return; /* indirect tail jmp */
 
 loc_00010307: ;
     eax = 1;
@@ -944,8 +951,9 @@ loc_00010337: ;
     POP32(esp, esi);
     POP32(esp, ebx);
     POP32(esp, ebp);
-    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; return; /* ret */
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 4; RECOMP_FRAME_LEAVE(); return; /* ret */
 
+    RECOMP_FRAME_LEAVE(); /* falls off its end */
 }
 
 /**
@@ -1344,6 +1352,7 @@ void sub_00010426(void) { f_probe__seh(0x00010426u); } /* eh3 funclet of 0x00010
  */
 void my_lj_unwind(void)
 {
+    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
     uint32_t ebp = 0;
     ebp = g_ebp;  /* frameless: caller's frame */
     int _flags = 0; /* fallback flag var */
@@ -1402,8 +1411,9 @@ loc_000104B5: ;
     POP32(esp, esi);
     POP32(esp, ebx);
     POP32(esp, ebp);
-    g_ebp = ebp; g_seh_ebp = ebp; esp += 8; return; /* ret 4 */
+    g_ebp = ebp; g_seh_ebp = ebp; esp += 8; RECOMP_FRAME_LEAVE(); return; /* ret 4 */
 
+    RECOMP_FRAME_LEAVE(); /* falls off its end */
 }
 
 

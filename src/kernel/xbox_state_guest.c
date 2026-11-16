@@ -3,13 +3,17 @@
  * that make the kernel objects (XBA-246) and the devices (XBA-248) sections of the container (XBA-249).
  * xbox_state.h has the API.
  *
- * CPU v3   u32 thread count, u32 sizeof(RecompCpu), u64 run id (xbox_StateRunId, XBA-249), then per thread a
- *            68-byte head and the RecompCpu: slot, park state, ordinal, guest return address, returned (0 / 1),
- *            status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base, guest stack limit,
- *            esp at the park point (the call's return address slot, XBA-249; v2: esp now), guest thread id,
- *            park site (XBOX_PARK_SITE_*: 0 a kernel call; else a host wait inside lifted code, XBA-251,
- *            whose ordinal is 0 and guest return address the site's VA). Older versions are refused: a state
- *            only loads into the build that wrote it anyway. Its load is xbox_state.c's (threads matched).
+ * CPU v4   u32 thread count, u32 sizeof(RecompCpuRegs), u64 run id (xbox_StateRunId, XBA-249), then per thread
+ *          a 68-byte head, the RecompCpuRegs and the call chain:
+ *            head: slot, park state, ordinal, guest return address, returned (0 / 1), status, dispatch, host
+ *            tid, u64 kernel calls, TIB, KTHREAD, guest stack base, guest stack limit, esp at the park point
+ *            (the call's return address slot, XBA-249), guest thread id, park site (XBOX_PARK_SITE_*: 0 a
+ *            kernel call; else a host wait inside lifted code, XBA-251, whose ordinal is 0 and guest return
+ *            address the site's VA)
+ *            chain (XBA-247, xbox_StateChain): u32 frames, u32 base, u32 flags (XBOX_CHAIN_*), u32 0,
+ *            u64 signature, then per frame u32 return VA, esp, ebp, function, call-site flags
+ *          Older versions are refused (v3 had a RecompCpu without the frame count and no chain): a state only
+ *          loads into the build that wrote it anyway. Its load is xbox_state.c's (threads matched).
  * MEM v1   xbox_MemStateSave / xbox_MemStateLoad (xbox_memory_layout.c)
  * RAM v1   u32 range count, then per range u32 kind (XBOX_RANGE_*), u32 guest base, u32 pages, a bitmap of
  *          the pages stored (bit set: not all zero; (pages + 7) / 8 bytes), then those pages, 4 KB each
@@ -32,7 +36,6 @@
 
 #define PAGE 4096u
 #define CPU_HEAD 68u
-#define CPU_TOP 16u          /* count, sizeof(RecompCpu), run id */
 
 uint64_t xbox_StateRunId(void)
 {
@@ -50,21 +53,32 @@ uint64_t xbox_StateRunId(void)
     }
     return id;
 }
+#define CHAIN_HEAD 24u
+#define CHAIN_FRAME 20u
 
 /* ---- CPU ------------------------------------------------------------------------------------------------- */
 
 int xbox_state_cpu_save(XboxStateWriter *w, const XboxStateContext *ctx, void *user)
 {
-    int i;
+    XboxStateFrame *fr = malloc(RECOMP_FRAME_SLOTS * sizeof *fr);
+    int i, rc = XBOX_STATE_OK;
     (void)user;
 
+    if (!fr)
+        return XBOX_STATE_ENOMEM;
     xbox_StatePut32(w, (uint32_t)ctx->threads);
-    xbox_StatePut32(w, (uint32_t)sizeof(RecompCpu));
+    xbox_StatePut32(w, (uint32_t)sizeof(RecompCpuRegs));
     xbox_StatePut64(w, xbox_StateRunId());
     for (i = 0; i < ctx->threads; i++) {
         XboxStateThread t;
-        if (xbox_StateContextThread(ctx, i, &t) != 0)
-            return XBOX_STATE_ECORRUPT;
+        XboxStateChain c;
+        uint32_t k;
+        int n;
+        if (xbox_StateContextThread(ctx, i, &t) != 0
+            || (n = xbox_StateChain(&t, fr, RECOMP_FRAME_SLOTS, &c)) < 0 || (uint32_t)n != c.frames) {
+            rc = XBOX_STATE_ECORRUPT;
+            break;
+        }
         xbox_StatePut32(w, (uint32_t)t.slot);
         xbox_StatePut32(w, (uint32_t)t.state);
         xbox_StatePut32(w, t.ordinal);
@@ -82,8 +96,57 @@ int xbox_state_cpu_save(XboxStateWriter *w, const XboxStateContext *ctx, void *u
         xbox_StatePut32(w, t.guest_tid);
         xbox_StatePut32(w, t.site);
         xbox_StatePut(w, &t.cpu, sizeof t.cpu);
+        xbox_StatePut32(w, c.frames);
+        xbox_StatePut32(w, c.base);
+        xbox_StatePut32(w, c.flags);
+        xbox_StatePut32(w, 0);
+        xbox_StatePut64(w, c.signature);
+        for (k = 0; k < c.frames; k++) {
+            xbox_StatePut32(w, fr[k].ret_va);
+            xbox_StatePut32(w, fr[k].esp);
+            xbox_StatePut32(w, fr[k].ebp);
+            xbox_StatePut32(w, fr[k].func);
+            xbox_StatePut32(w, fr[k].flags);
+        }
     }
-    return XBOX_STATE_OK;
+    free(fr);
+    return rc;
+}
+
+/* One thread's chain at r (after its registers): its head into *c, the frames (at most max) into out.
+ * -1 when it is malformed: more frames than a thread can have, unknown flags, EMPTY not matching the
+ * count, a signature that is not the frames'. */
+static int chain_read(XboxStateReader *r, XboxStateChain *c, XboxStateFrame *out, uint32_t max)
+{
+    uint64_t h = 0xCBF29CE484222325ull;
+    uint32_t k, pad;
+
+    c->frames = xbox_StateGet32(r);
+    c->base = xbox_StateGet32(r);
+    c->flags = xbox_StateGet32(r);
+    pad = xbox_StateGet32(r);
+    c->signature = xbox_StateGet64(r);
+    if (r->bad || pad || c->frames > RECOMP_FRAME_SLOTS || c->base > RECOMP_FRAME_SLOTS
+        || (c->flags & ~(uint32_t)XBOX_CHAIN_ALL) || !(c->flags & XBOX_CHAIN_EMPTY) != !!c->frames)
+        return -1;
+#define CHAIN_MIX(w) (h = (h ^ (uint32_t)(w)) * 0x100000001B3ull)
+    CHAIN_MIX(c->frames);
+    for (k = 0; k < c->frames; k++) {
+        XboxStateFrame f;
+        f.ret_va = xbox_StateGet32(r);
+        f.esp = xbox_StateGet32(r);
+        f.ebp = xbox_StateGet32(r);
+        f.func = xbox_StateGet32(r);
+        f.flags = xbox_StateGet32(r);
+        if (r->bad || f.flags >= 0x40u)
+            return -1;
+        CHAIN_MIX(f.ret_va);
+        CHAIN_MIX(f.esp);
+        if (out && k < max)
+            out[k] = f;
+    }
+#undef CHAIN_MIX
+    return h == c->signature ? 0 : -1;
 }
 
 int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int max)
@@ -93,8 +156,7 @@ int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int m
     uint64_t used = 0;
 
     (void)xbox_StateGet64(&r);       /* the run id */
-    if (r.bad || count > XBOX_PARK_MAX_THREADS || cpu_bytes != sizeof(RecompCpu)
-        || n != CPU_TOP + (size_t)count * (CPU_HEAD + cpu_bytes))
+    if (r.bad || count > XBOX_PARK_MAX_THREADS || cpu_bytes != sizeof(RecompCpuRegs))
         return -1;
     for (i = 0; i < count; i++) {
         XboxStateThread t;
@@ -124,10 +186,33 @@ int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int m
             return -1;
         used |= 1ull << t.slot;
         memcpy(&t.cpu, cpu, sizeof t.cpu);
+        if (chain_read(&r, &t.chain, NULL, 0) != 0)
+            return -1;
         if ((int)i < max && out)
             out[i] = t;
     }
-    return (int)count;
+    return r.at == n ? (int)count : -1;     /* nothing after the last thread */
+}
+
+int xbox_StateCpuChain(const uint8_t *p, size_t n, int i, XboxStateFrame *out, uint32_t max)
+{
+    XboxStateReader r = { p, n, 0, 0 };
+    uint32_t count, k;
+    XboxStateChain c;
+
+    if (xbox_StateCpuThreads(p, n, NULL, 0) < 0)
+        return -1;
+    count = xbox_StateGet32(&r);
+    (void)xbox_StateGet32(&r);
+    (void)xbox_StateGet64(&r);       /* the run id */
+    if (i < 0 || (uint32_t)i >= count)
+        return -1;
+    for (k = 0; k <= (uint32_t)i; k++) {
+        (void)xbox_StateGet(&r, CPU_HEAD + sizeof(RecompCpuRegs));
+        if (chain_read(&r, &c, k == (uint32_t)i ? out : NULL, max) != 0)
+            return -1;
+    }
+    return (int)c.frames;
 }
 
 uint64_t xbox_StateCpuRun(const uint8_t *p, size_t n)
@@ -142,7 +227,7 @@ int xbox_state_cpu_check(const uint8_t *p, size_t n, uint32_t version, void *use
     (void)user;
     if (version != XBOX_STATE_CPU_VERSION)
         return XBOX_STATE_EVERSION;
-    if (n >= 8 && (p[4] | p[5] << 8 | p[6] << 16 | (uint32_t)p[7] << 24) != sizeof(RecompCpu))
+    if (n >= 8 && (p[4] | p[5] << 8 | p[6] << 16 | (uint32_t)p[7] << 24) != sizeof(RecompCpuRegs))
         return XBOX_STATE_EVERSION;
     return xbox_StateCpuThreads(p, n, NULL, 0) >= 0 ? XBOX_STATE_OK : XBOX_STATE_ECORRUPT;
 }
