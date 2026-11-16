@@ -158,6 +158,44 @@ HANDLE      w32_thread_apc_handle(void);
 #define W32_QUERY_TIMER     4
 int         w32_query_object(HANDLE h, LONG info[3]);
 
+/* Save states (XBA-246, docs/technical/xbox-save-states.md): an object's
+ * whole state read without changing it, and an object made in a given state.
+ * w32_state_read returns the kind (W32_STATE_*), 0 for a handle that is no
+ * live object. w32_state_make makes an event, semaphore, mutex (owner_tid and
+ * recursion as read), waitable timer (due_in_ns from now) or an exited thread
+ * (exit_code; it is signalled and nothing runs), with one reference; NULL for
+ * any other kind. Not Win32 calls. */
+#define W32_STATE_EVENT     1
+#define W32_STATE_SEMAPHORE 2
+#define W32_STATE_MUTEX     3
+#define W32_STATE_THREAD    4
+#define W32_STATE_TIMER     5   /* waitable timer */
+#define W32_STATE_FILE      6
+#define W32_STATE_OTHER     7   /* file mapping, timer-queue timer, heap */
+typedef struct {
+    int      kind;
+    LONG     refcount;
+    int      manual_reset;      /* event, timer */
+    int      signaled;          /* event; timer: triggered */
+    unsigned grants;            /* event: releases handed to blocked waiters, not taken yet */
+    unsigned waiters;           /* event: threads blocked in a single-object wait */
+    LONG     count, maximum;    /* semaphore */
+    DWORD    owner_tid;         /* mutex: 0 when free */
+    int      recursion;
+    DWORD    tid;               /* thread */
+    int      exited;
+    DWORD    exit_code;
+    int      suspend_count, priority, apc_count;
+    int      armed;             /* timer */
+    long long due_in_ns;        /* timer: from now, 0 once due */
+    LONG     period_ms;
+    int      fd;                /* file: -1 with no host fd */
+    int      has_ext;           /* file: backed by the file layer's own object */
+    const char *path;           /* file: the host path (the object's own string) */
+} w32_state;
+int         w32_state_read(HANDLE h, w32_state *out);
+HANDLE      w32_state_make(const w32_state *s);
+
 /* ---- Events ----------------------------------------------------------- */
 HANDLE CreateEventA(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCSTR name);
 HANDLE CreateEventW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCWSTR name);

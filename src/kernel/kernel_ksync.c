@@ -722,6 +722,121 @@ void ks_port_forget(void *handle)
         ks_wake_all();
 }
 
+/* Save states (XBA-246, kernel_ksync.h). */
+int ks_port_list(ks_port_info *out, int max)
+{
+    int i, n = 0;
+    ks_lock();
+    for (i = 0; i < KS_PORT_MAX; i++) {
+        if (!s_ports[i].ident)
+            continue;
+        if (out && n < max) {
+            out[n].ident = s_ports[i].ident;
+            out[n].slot = i;
+            out[n].gen = s_ports[i].gen;
+            out[n].max = s_ports[i].max;
+            out[n].cur = s_ports[i].cur;
+            out[n].depth = s_ports[i].depth;
+        }
+        n++;
+    }
+    ks_unlock();
+    return n;
+}
+
+int ks_port_packets(void *ident, ks_packet *out, int max)
+{
+    int slot, n = 0;
+    ks_pkt *k;
+    ks_lock();
+    slot = port_find(ident);
+    if (slot >= 0)
+        for (k = s_ports[slot].head; k; k = k->next, n++)
+            if (out && n < max) {
+                out[n].key = k->key; out[n].ctx = k->ctx;
+                out[n].status = k->status; out[n].info = k->info;
+            }
+    ks_unlock();
+    return n;
+}
+
+int ks_port_restore(const ks_port_info *p, const ks_packet *pk, int n)
+{
+    ks_port *q;
+    int i;
+    if (!p || !p->ident || p->slot < 0 || p->slot >= KS_PORT_MAX)
+        return 0;
+    ks_lock();
+    q = &s_ports[p->slot];
+    if (q->ident || port_find(p->ident) >= 0) {
+        ks_unlock();
+        return 0;
+    }
+    memset(q, 0, sizeof *q);
+    q->ident = p->ident;
+    q->gen = p->gen;
+    if (s_port_gen < p->gen)
+        s_port_gen = p->gen;
+    q->max = p->max ? p->max : 1;
+    q->cur = p->cur;
+    for (i = 0; i < n; i++) {
+        ks_pkt *k = (ks_pkt *)malloc(sizeof *k);
+        if (!k)
+            break;
+        k->next = NULL;
+        k->key = pk[i].key; k->ctx = pk[i].ctx;
+        k->status = pk[i].status; k->info = pk[i].info;
+        if (q->tail) q->tail->next = k; else q->head = k;
+        q->tail = k;
+        q->depth++;
+    }
+    if (q->depth) SetEvent((HANDLE)q->ident); else ResetEvent((HANDLE)q->ident);
+    ks_unlock();
+    ks_wake_all();
+    return 1;
+}
+
+int ks_passoc_list(ks_passoc_info *out, int max)
+{
+    int i, n = 0;
+    ks_lock();
+    for (i = 0; i < KS_PASSOC_MAX; i++) {
+        int slot = s_passoc[i].port;
+        if (!s_passoc[i].file || !s_ports[slot].ident || s_ports[slot].gen != s_passoc[i].gen)
+            continue;
+        if (out && n < max) {
+            out[n].file = s_passoc[i].file;
+            out[n].port = s_ports[slot].ident;
+            out[n].key = s_passoc[i].key;
+        }
+        n++;
+    }
+    ks_unlock();
+    return n;
+}
+
+void ks_port_reset(void)
+{
+    int i;
+    ks_lock();
+    for (i = 0; i < KS_PORT_MAX; i++) {
+        ks_port *p = &s_ports[i];
+        while (p->head) {
+            ks_pkt *k = p->head;
+            p->head = k->next;
+            free(k);
+        }
+        if (p->ident)
+            p->gen = ++s_port_gen;
+        p->tail = NULL;
+        p->depth = 0;
+        p->ident = NULL;
+    }
+    memset(s_passoc, 0, sizeof s_passoc);
+    ks_unlock();
+    ks_wake_all();
+}
+
 /* ═════════════════════════ KDEVICE_QUEUE ═════════════════════════
  *
  *   KDEVICE_QUEUE: Type (+0, 16 bits, 0x14), Size (+2), Busy (+3),
@@ -971,6 +1086,8 @@ void ks_rwlock_release(uint32_t l)
 static volatile LONG s_apc_pending;
 
 int ks_apc_pending(void) { return s_apc_pending != 0; }
+long ks_apc_pending_get(void) { return (long)s_apc_pending; }
+void ks_apc_pending_set(long n) { InterlockedExchange(&s_apc_pending, (LONG)n); }
 
 void ks_apc_init(uint32_t apc, uint32_t thread, uint32_t kernel_routine,
                  uint32_t rundown_routine, uint32_t normal_routine,

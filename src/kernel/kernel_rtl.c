@@ -10,6 +10,7 @@
 #include "kernel.h"
 /* RECOMP_TLS, and the guest stack pointer the contention report walks. */
 #include "xbox_memory_layout.h"
+#include "kernel_kobj_state.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -338,6 +339,118 @@ static HANDLE xbox_cs_sem(uint32_t cs_va, int create)
     }
     LeaveCriticalSection(&g_cs_sem_lock);
     return h;
+}
+
+/* ── Save states (XBA-246, kernel_kobj_state.h) ──────────────────────────
+ *
+ * The semaphore a contended guest lock sleeps on is a host object, with a
+ * count: carried like any other. The host shadow locks (modes 0 and 1) are
+ * pthread mutexes whose owner is a host thread: they cannot be made again
+ * held. Those held at the save are recorded and must be held by the same
+ * threads, as deep, when the state loads (in session); for another run a
+ * held one refuses the save. */
+void xbox_rtl_kobj_save(XboxKobjSaveCtx *c)
+{
+    size_t i;
+
+    InitOnceExecuteOnce(&g_cs_sem_once, xbox_cs_sem_init, NULL, NULL);
+    EnterCriticalSection(&g_cs_sem_lock);
+    for (i = 0; i < CS_SEM_TABLE; i++) {
+        uint32_t id;
+        XboxKobjBuf *b;
+        if (!g_cs_sem_memo[i].key)
+            continue;
+        id = xbox_kobj_ref(c, g_cs_sem_memo[i].sem, 0, g_cs_sem_memo[i].key);
+        b = xbox_kobj_rec_begin(c, XKOB_R_CSSEM);
+        xbox_kobj_u32(b, g_cs_sem_memo[i].key);
+        xbox_kobj_u32(b, id);
+        xbox_kobj_rec_end(c);
+    }
+    LeaveCriticalSection(&g_cs_sem_lock);
+
+    for (i = 0; i < XBOX_CS_TABLE_SIZE; i++) {
+        XBOX_CS_SLOT *slot = &g_cs_table[i];
+        uint32_t gva;
+        XboxKobjBuf *b;
+        if (!slot->key || slot->depth <= 0)
+            continue;
+        gva = (uint32_t)(slot->key - (uintptr_t)g_xbox_mem_offset);
+        if (xbox_kobj_flags(c) & XBOX_KOBJ_ACROSS_RUNS) {
+            xbox_kobj_refuse(c, 0, gva, "critical section",
+                             "held by host thread %lu (a host lock is not carried across runs)",
+                             (unsigned long)slot->owner_tid);
+            continue;
+        }
+        b = xbox_kobj_rec_begin(c, XKOB_R_CSHELD);
+        xbox_kobj_u32(b, gva);
+        xbox_kobj_u32(b, (uint32_t)slot->owner_tid);
+        xbox_kobj_u32(b, (uint32_t)slot->depth);
+        xbox_kobj_rec_end(c);
+    }
+}
+
+void xbox_rtl_kobj_reset(void)
+{
+    size_t i;
+
+    InitOnceExecuteOnce(&g_cs_sem_once, xbox_cs_sem_init, NULL, NULL);
+    EnterCriticalSection(&g_cs_sem_lock);
+    for (i = 0; i < CS_SEM_TABLE; i++) {
+        if (g_cs_sem_memo[i].key && g_cs_sem_memo[i].sem)
+            CloseHandle(g_cs_sem_memo[i].sem);
+        g_cs_sem_memo[i].key = 0;
+        g_cs_sem_memo[i].sem = NULL;
+    }
+    LeaveCriticalSection(&g_cs_sem_lock);
+}
+
+int xbox_rtl_kobj_load(XboxKobjLoadCtx *c, uint16_t type, XboxKobjRd *r)
+{
+    if (type == XKOB_R_CSSEM) {
+        uint32_t key = xbox_kobj_get32(r), id = xbox_kobj_get32(r);
+        uint32_t home = (key >> 4) & (CS_SEM_TABLE - 1u);
+        HANDLE h = (HANDLE)xbox_kobj_obj(c, id);
+        size_t i;
+        if (!h || !key) {
+            xbox_kobj_fail(c, "critical-section semaphore 0x%08X: object %u missing", key, id);
+            if (h) CloseHandle(h);
+            return 1;
+        }
+        InitOnceExecuteOnce(&g_cs_sem_once, xbox_cs_sem_init, NULL, NULL);
+        EnterCriticalSection(&g_cs_sem_lock);
+        for (i = 0; i < CS_SEM_TABLE; i++) {
+            uint32_t slot = (home + (uint32_t)i) & (CS_SEM_TABLE - 1u);
+            if (g_cs_sem_memo[slot].key == 0) {
+                g_cs_sem_memo[slot].sem = h;
+                g_cs_sem_memo[slot].key = key;
+                h = NULL;
+                break;
+            }
+        }
+        LeaveCriticalSection(&g_cs_sem_lock);
+        if (h) {
+            CloseHandle(h);
+            xbox_kobj_fail(c, "critical-section semaphore table full");
+        }
+        return 1;
+    }
+    if (type == XKOB_R_CSHELD) {
+        uint32_t gva = xbox_kobj_get32(r), tid = xbox_kobj_get32(r), depth = xbox_kobj_get32(r);
+        uintptr_t key = (uintptr_t)gva + (uintptr_t)g_xbox_mem_offset;
+        size_t i;
+        int ok = 0;
+        for (i = 0; i < XBOX_CS_TABLE_SIZE; i++)
+            if (g_cs_table[i].key == key) {
+                ok = g_cs_table[i].depth == (long)depth
+                  && (uint32_t)g_cs_table[i].owner_tid == tid;
+                break;
+            }
+        if (!ok)
+            xbox_kobj_fail(c, "critical section 0x%08X: held by thread %u (depth %u) in the "
+                              "state, not now", gva, tid, depth);
+        return 1;
+    }
+    return 0;
 }
 
 static BOOL CALLBACK xbox_cs_single_init(PINIT_ONCE o, PVOID p, PVOID *c)
