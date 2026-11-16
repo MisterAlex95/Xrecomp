@@ -36,8 +36,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and test (Docker)
         run: |
+          set -o pipefail
+          # Failed C tests become annotations (run_c_tests.sh's "XBR-FAIL" lines): readable without a GitHub login.
           docker build -f tools/docker/linux.Dockerfile --target test --build-arg PART="${{ matrix.part }}" \
-            --progress=plain -t xrecomp-linux .
+            --progress=plain -t xrecomp-linux . 2>&1 | tee build.log || {
+            rc=$?
+            grep -o 'XBR-FAIL .*' build.log | sed 's/^XBR-FAIL //' | awk -F': ' '{ m[$1] = m[$1] "%0A" substr($0, length($1) + 3) }
+              END { for (p in m) print "::error title=" p "::" substr(m[p], 4) }' | head -n 10
+            exit $rc; }
       - name: Test report
         if: always()
         run: |

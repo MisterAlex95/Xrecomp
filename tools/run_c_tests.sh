@@ -110,6 +110,12 @@ for dir in "$ROOT"/tests/*/ ${CONSOLE_TESTS[@]+"${CONSOLE_TESTS[@]}"}; do
     fi
     echo "| $name | $conf | $build | $pass | $skip | $failed |" >> "$REPORT"
     printf '%-32s configure=%-4s build=%-4s pass=%-3s skip=%-3s fail=%s\n' "$name" "$conf" "$build" "$pass" "$skip" "$failed"
+    # Failure details on lines starting "XBR-FAIL <project>: ", which .github/workflows/linux.yml turns into annotations:
+    # GitHub serves annotations without a login, job logs only with one.
+    if [ "$conf" = FAIL ] || [ "$build" = FAIL ] || { [ "$failed" != - ] && [ "$failed" -gt 0 ]; }; then
+        { grep -E 'Test +#[0-9]+: .*(\*\*\*Failed|\*\*\*Timeout|\*\*\*Exception|SEGFAULT|Child aborted)' "$log" \
+            || grep -iE 'error|fail' "$log" | head -n 15; } | tail -n 30 | sed "s|^|XBR-FAIL $name: |"
+    fi
 done
 
 echo
