@@ -8,7 +8,9 @@
  *  - the mask is one core, inside the process's set, and the same on every
  *    call, so a worker created from any core lands with the main thread;
  *  - unset (the default) and RECOMP_GUEST_CPUS=all are no mask at all, so
- *    stock threads are not pinned; =one is the lowest core, =<n> that core;
+ *    stock threads are not pinned; =one is the fastest core (a fake sysfs
+ *    tree: the highest cpufreq maximum, the lowest core on a tie), =<n>
+ *    that core;
  *  - where the host has thread affinity, guest-main and a guest-worker both
  *    run on that one core, and a thread that does not pin itself keeps the
  *    process's mask whether it was created before the main pin or after it
@@ -21,9 +23,15 @@
 #include "kernel.h"
 #include "xbox_memory_layout.h"
 
+#include "platform/host_cpus.h"   /* recomp_host_cpus_set_sysfs_root */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 /* Provided by the generated title; nothing here calls a guest function. */
 typedef void (*recomp_func_t)(void);
@@ -175,8 +183,48 @@ int main(void)
               (unsigned long)xbox_GuestCpuMask());
         test_setenv("RECOMP_GUEST_CPUS", "63");
         CHECK(xbox_GuestCpuMask() == mask || proc == (DWORD_PTR)-1,
-              "RECOMP_GUEST_CPUS=63 falls back to the lowest core");
+              "RECOMP_GUEST_CPUS=63 falls back to =one's core");
     }
+#if !defined(_WIN32)
+    {
+        /* =one on a fake sysfs tree: the process's highest core is the
+         * prime one, the others share a lower maximum; then all alike. */
+        char root[256], path[512];
+        const char *tmp = getenv("TMPDIR");
+        int hi = 0, lo = 0, cpu;
+        FILE *f;
+        while ((proc >> (hi + 1)) != 0) hi++;
+        while (!((proc >> lo) & 1)) lo++;
+        snprintf(root, sizeof root, "%s/guest_cpu_sysfs_%d", tmp && *tmp ? tmp : "/tmp", (int)getpid());
+        mkdir(root, 0755);
+        for (int pass = 0; pass < 2; pass++) {
+            for (cpu = 0; cpu <= hi; cpu++) {
+                snprintf(path, sizeof path, "%s/cpu%d", root, cpu);
+                mkdir(path, 0755);
+                snprintf(path, sizeof path, "%s/cpu%d/cpufreq", root, cpu);
+                mkdir(path, 0755);
+                snprintf(path, sizeof path, "%s/cpu%d/cpufreq/cpuinfo_max_freq", root, cpu);
+                if ((f = fopen(path, "w")) != NULL) {
+                    fprintf(f, "%lu\n", (pass == 0 && cpu == hi) ? 3187200UL : 2803200UL);
+                    fclose(f);
+                }
+            }
+            recomp_host_cpus_set_sysfs_root(root);
+            test_setenv("RECOMP_GUEST_CPUS", "one");
+            if (pass == 0)
+                CHECK(xbox_GuestCpuMask() == ((DWORD_PTR)1 << hi),
+                      "=one on a fake tree: the fastest core %d, got %#lx", hi,
+                      (unsigned long)xbox_GuestCpuMask());
+            else
+                CHECK(xbox_GuestCpuMask() == ((DWORD_PTR)1 << lo),
+                      "=one, all alike: the lowest core %d, got %#lx", lo,
+                      (unsigned long)xbox_GuestCpuMask());
+        }
+        recomp_host_cpus_set_sysfs_root(NULL);
+        snprintf(path, sizeof path, "rm -rf '%s'", root);
+        if (system(path) != 0) { /* best effort */ }
+    }
+#endif
     /* The pin cases below, with the pin asked for. */
     test_setenv("RECOMP_GUEST_CPUS", "one");
 

@@ -506,9 +506,20 @@ void xbox_worker_stack_free(int slot)
  * behind a main thread spinning in its frame wait. The GPU and the audio
  * keep their cores for the same reason.
  *
- * RECOMP_GUEST_CPUS=one pins to the lowest core the process may use, =<n>
- * picks the core (cpu 0 takes most of the IRQ work on Linux), =all lets the
- * title's threads go wherever the host scheduler puts them.
+ * RECOMP_GUEST_CPUS=one pins to the fastest core the process may use (the
+ * highest cpufreq maximum, else cpu_capacity, the lowest index on a tie:
+ * recomp_fastest_core; the lowest core when sysfs says nothing), =<n> picks
+ * the core (cpu 0 takes most of the IRQ work on Linux), =all lets the
+ * title's threads go wherever the host scheduler puts them. On the AYN Thor
+ * the process gets cpus 3-7 and =one is cpu 7, the X3 at 3.2 GHz, not cpu 3
+ * at 2.8 (WP-E, KOTOR sound report).
+ *
+ * The core is not kept for the guest alone: the other runtime threads (GPU
+ * executor and raster pool, APU, timer, USB) are not pinned, they float on
+ * the process's cores and the scheduler moves them off a core a pinned,
+ * always-runnable thread keeps busy. Taking the prime core away from them
+ * would leave the raster pool four cores instead of five; it was not
+ * exclusive on cpu 3 either.
  *
  * Unset: one on arm64 Linux and Android, all elsewhere (XBA-81). Lifted code
  * stores to guest memory with plain stores and assumes x86's ordering (TSO):
@@ -516,8 +527,8 @@ void xbox_worker_stack_free(int slot)
  * thread to see them in that order. x86 hosts keep it; arm64 does not,
  * between cores. On one core the title's threads see each other's stores in
  * program order again, as they did on the console's one CPU. On Android the
- * process runs on the fast cores (host_cpus.c), so the lowest core it may use
- * is a fast one. macOS cannot pin a thread: there the pin does nothing.
+ * process runs on the fast cores (host_cpus.c), and =one takes the fastest
+ * of those. macOS cannot pin a thread: there the pin does nothing.
  */
 #if defined(__aarch64__) && defined(__linux__)
 #define GUEST_CPUS_DEFAULT "one"
@@ -525,10 +536,17 @@ void xbox_worker_stack_free(int slot)
 #define GUEST_CPUS_DEFAULT "all"
 #endif
 
+/* The speed of the chosen core, for the pin's log line: its cpufreq maximum
+ * in kHz, or its cpu_capacity, 0 when unknown. */
+static unsigned long s_guest_core_value;
+static int s_guest_core_by_capacity;
+
 DWORD_PTR xbox_GuestCpuMask(void)
 {
     const char *mode = getenv("RECOMP_GUEST_CPUS");
-    DWORD_PTR proc = 0, sys = 0;
+    DWORD_PTR proc = 0, sys = 0, allowed;
+    unsigned long value = 0;
+    int by_capacity = 0, core;
 
     if (!mode || !*mode)
         mode = GUEST_CPUS_DEFAULT;
@@ -536,17 +554,24 @@ DWORD_PTR xbox_GuestCpuMask(void)
         return 0;
     if (!GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) || !proc)
         return 0;
+    allowed = proc;
     if (*mode >= '0' && *mode <= '9') {
         long n = strtol(mode, NULL, 10);
         if (n >= 0 && n < (long)(8 * sizeof proc) && (proc & ((DWORD_PTR)1 << n)))
-            return (DWORD_PTR)1 << n;
-        fprintf(stderr, "  [KERNEL] RECOMP_GUEST_CPUS=%s: not a core the process"
-                        " may use (mask %#lx); taking the lowest\n", mode,
-                (unsigned long)proc);
+            allowed = (DWORD_PTR)1 << n;      /* that core; read only for the log */
+        else
+            fprintf(stderr, "  [KERNEL] RECOMP_GUEST_CPUS=%s: not a core the process"
+                            " may use (mask %#lx); taking the fastest\n", mode,
+                    (unsigned long)proc);
     }
-    /* The lowest core the process may use: fixed, so every thread lands
-     * on the same one whatever core it was created from. */
-    return proc & (DWORD_PTR)(-(intptr_t)proc);
+    /* The fastest core the process may use: fixed, so every thread lands on
+     * the same one whatever core it was created from. */
+    core = recomp_fastest_core(NULL, (uint64_t)allowed, &value, &by_capacity);
+    if (core < 0 || core >= (int)(8 * sizeof proc))
+        return proc & (DWORD_PTR)(-(intptr_t)proc);
+    s_guest_core_value = value;
+    s_guest_core_by_capacity = by_capacity;
+    return (DWORD_PTR)1 << core;
 }
 
 void xbox_GuestThreadPin(const char *role)
@@ -572,10 +597,17 @@ void xbox_GuestThreadPin(const char *role)
     }
     if (!announced) {
         announced = 1;
-        fprintf(stderr, "  [KERNEL] guest threads on one host core (cpu %d),"
+        char speed[48];
+        if (!s_guest_core_value)
+            snprintf(speed, sizeof speed, "speed unknown");
+        else if (s_guest_core_by_capacity)
+            snprintf(speed, sizeof speed, "capacity %lu", s_guest_core_value);
+        else
+            snprintf(speed, sizeof speed, "max %lu kHz", s_guest_core_value);
+        fprintf(stderr, "  [KERNEL] guest threads on one host core (cpu %d, %s),"
                         " as on the console (RECOMP_GUEST_CPUS=%s)\n",
-                core, getenv("RECOMP_GUEST_CPUS") ? getenv("RECOMP_GUEST_CPUS")
-                                                  : GUEST_CPUS_DEFAULT " by default");
+                core, speed, getenv("RECOMP_GUEST_CPUS") ? getenv("RECOMP_GUEST_CPUS")
+                                                         : GUEST_CPUS_DEFAULT " by default");
         fflush(stderr);
     }
     xbox_log(XBOX_LOG_DEBUG, XBOX_LOG_THREAD, "guest thread %s on cpu %d",

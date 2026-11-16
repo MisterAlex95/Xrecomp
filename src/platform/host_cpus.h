@@ -32,6 +32,22 @@ uint64_t recomp_host_cpus_init(void);
 uint64_t recomp_big_core_mask(const char *root, uint64_t allowed,
                               unsigned long *slow_khz, unsigned long *fast_khz);
 
+/* The fastest core of `allowed`, for the guest threads' one-core pin
+ * (RECOMP_GUEST_CPUS=one, kernel_thread.c): the one with the highest cpufreq
+ * maximum, or, when no allowed core has one, the highest cpu_capacity; the
+ * lowest index on a tie. On the AYN Thor (cpus 3-7 allowed: four A7xx at
+ * 2.8 GHz, one X3 at 3.2 GHz) that is cpu 7. `root` as above; NULL is the
+ * real tree, or the one recomp_host_cpus_set_sysfs_root gave. *value gets
+ * the winning maximum in kHz (or its capacity, with *by_capacity = 1); 0
+ * when nothing could be read, and then the lowest allowed core is returned.
+ * -1 when `allowed` is empty. */
+int recomp_fastest_core(const char *root, uint64_t allowed,
+                        unsigned long *value, int *by_capacity);
+
+/* Tests: the sysfs cpu tree NULL roots stand for (NULL = the real one,
+ * "/sys/devices/system/cpu"). */
+void recomp_host_cpus_set_sysfs_root(const char *root);
+
 /* The runtime's threads and the cores each should run on (XBA-50).
  *
  * Android moves an app between cpusets as it goes to the background and

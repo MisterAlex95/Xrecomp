@@ -1,5 +1,6 @@
-/* recomp_big_core_mask (XBA-25): the fast cores of a big.LITTLE host, read
- * from a fake /sys/devices/system/cpu tree. */
+/* recomp_big_core_mask (XBA-25): the fast cores of a big.LITTLE host, and
+ * recomp_fastest_core (WP-E): the guest's one core, read from a fake
+ * /sys/devices/system/cpu tree. */
 #if !defined(_WIN32)
 #define _GNU_SOURCE   /* sched_getaffinity, CPU_* (XBA-50) */
 #endif
@@ -56,6 +57,33 @@ int main(void)
     CHECK(m == 0xF8, "8 Gen 2: want cpus 3-7 (0xF8), got %#llx", (unsigned long long)m);
     CHECK(lo == 2016000 && hi == 3187200, "8 Gen 2 maxima: %lu %lu", lo, hi);
 
+    /* the guest's one core (RECOMP_GUEST_CPUS=one, WP-E): the prime core, not
+     * the lowest fast one; with capacities alongside, the maxima decide */
+    put(0, "cpu_capacity", 280); put(1, "cpu_capacity", 280); put(2, "cpu_capacity", 280);
+    for (cpu = 3; cpu < 7; cpu++) put(cpu, "cpu_capacity", 855);
+    put(7, "cpu_capacity", 1024);
+    {
+        unsigned long v;
+        int cap = -1, c;
+        c = recomp_fastest_core(root, 0xF8, &v, &cap);        /* the Thor's runtime: cpus 3-7 */
+        CHECK(c == 7 && v == 3187200 && cap == 0, "fastest of 3-7: want cpu 7 at 3187200, got %d at %lu (cap %d)", c, v, cap);
+        c = recomp_fastest_core(root, 0xFF, &v, &cap);
+        CHECK(c == 7, "fastest of 0-7: want cpu 7, got %d", c);
+        c = recomp_fastest_core(root, 0x78, &v, &cap);        /* cpus 3-6 alike: the lowest */
+        CHECK(c == 3 && v == 2803200, "tie among 3-6: want cpu 3, got %d at %lu", c, v);
+        c = recomp_fastest_core(root, 0x50, &v, &cap);        /* cpus 4 and 6 */
+        CHECK(c == 4, "tie of 4 and 6: want cpu 4, got %d", c);
+        c = recomp_fastest_core(root, 0x07, &v, &cap);        /* the slow cluster only */
+        CHECK(c == 0 && v == 2016000, "tie among 0-2: want cpu 0, got %d", c);
+        c = recomp_fastest_core(root, 0, &v, &cap);
+        CHECK(c == -1, "nothing allowed: want -1, got %d", c);
+        /* NULL root: the one set for tests */
+        recomp_host_cpus_set_sysfs_root(root);
+        c = recomp_fastest_core(NULL, 0xF8, &v, &cap);
+        CHECK(c == 7, "set root: want cpu 7, got %d", c);
+        recomp_host_cpus_set_sysfs_root(NULL);
+    }
+
     /* only some cores allowed: the slow cluster is the slowest *allowed* one */
     m = recomp_big_core_mask(root, 0x78, &lo, &hi);         /* cpus 3-6: all alike */
     CHECK(m == 0x78, "cpus 3-6 alike: want them all, got %#llx", (unsigned long long)m);
@@ -73,11 +101,23 @@ int main(void)
     put(0, "cpu_capacity", 400); put(1, "cpu_capacity", 400); put(2, "cpu_capacity", 1024); put(3, "cpu_capacity", 1024);
     m = recomp_big_core_mask(root, 0x0F, &lo, &hi);
     CHECK(m == 0x0C, "cpu_capacity: want cpus 2-3, got %#llx", (unsigned long long)m);
+    {
+        /* no cpufreq: the guest's core by capacity, the lowest of the biggest */
+        unsigned long v;
+        int cap = -1, c = recomp_fastest_core(root, 0x0F, &v, &cap);
+        CHECK(c == 2 && v == 1024 && cap == 1, "capacity: want cpu 2 at 1024, got %d at %lu (cap %d)", c, v, cap);
+    }
 
     /* nothing readable: unchanged */
     clean(); mkdir(root, 0755);
     m = recomp_big_core_mask(root, 0x0F, &lo, &hi);
     CHECK(m == 0x0F, "empty tree: want 0xF, got %#llx", (unsigned long long)m);
+    {
+        /* nothing readable: the lowest allowed core, speed unknown */
+        unsigned long v = 1;
+        int cap = -1, c = recomp_fastest_core(root, 0x0C, &v, &cap);
+        CHECK(c == 2 && v == 0 && cap == 0, "empty tree: want cpu 2 at 0, got %d at %lu", c, v);
+    }
 
     clean();
     /* recomp_host_cpus_init on this host: off unless RECOMP_BIG_CORES=1 outside Android */
