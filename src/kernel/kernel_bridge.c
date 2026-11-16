@@ -31,6 +31,7 @@
 #include "kernel_ksync.h"
 #include "kernel_stubs.h"
 #include "kernel_wait_stats.h"
+#include "kernel_park.h"
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
 #include "xbox_xbe_sections.h"
@@ -802,7 +803,9 @@ static void bridge_run_thread_inline(recomp_func_t fn, uint32_t ctx1,
     g_esp -= 4; BRIDGE_MEM32(g_esp) = ctx1;
     g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
     g_seh_ebp = g_esp;
+    xbox_ParkThreadStart();      /* a guest thread for the park detector (XBA-244) */
     fn();
+    xbox_ParkThreadEnd();
     g_esp += 12;
     xbox_GuestCpuLeaveCallback(took);
 }
@@ -1052,7 +1055,9 @@ static void bridge_PsCreateSystemThreadEx(void)
                  * worker, the race the lock is for. */
                 {
                     int took = xbox_GuestCpuEnterCallback();
+                    xbox_ParkThreadStart();
                     fn();
+                    xbox_ParkThreadEnd();
                     xbox_GuestCpuLeaveCallback(took);
                 }
                 g_esp += 12;
@@ -13458,9 +13463,13 @@ void guest_cpu_part(void)
 static void kernel_thunk_dispatch(void)
 {
     int slot = g_kernel_dispatch_slot;
-    int held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL,
-                                    slot >= 0 && slot < XBOX_KERNEL_THUNK_TABLE_SIZE
-                                    ? g_slot_ordinals[slot] : 0);
+    uint32_t ordinal = slot >= 0 && slot < XBOX_KERNEL_THUNK_TABLE_SIZE
+                     ? g_slot_ordinals[slot] : 0;
+    int held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL, ordinal);
+    /* A kernel boundary: the thread is parked for a snapshot (XBA-244) until
+     * it runs guest code again, so also while it queues for the guest CPU;
+     * a freeze holds it at the end. */
+    xbox_ParkKernelEnter(ordinal, g_esp ? BRIDGE_MEM32(g_esp) : 0);
     ks_thread_kernel_enter();   /* a queue's thread is not running in here (XBA-133) */
     xbox_SehRuntimeEnter();      /* a host fault in the bridge stays the runtime's (XBA-132) */
     kernel_thunk_dispatch_body();
@@ -13468,6 +13477,7 @@ static void kernel_thunk_dispatch(void)
     ks_thread_kernel_leave();
     if (held)
         xbox_GuestCpuAcquire();
+    xbox_ParkKernelLeave();
 }
 
 static void kernel_thunk_dispatch_body(void)
@@ -13540,6 +13550,8 @@ static void kernel_thunk_dispatch_body(void)
             /* And what the threads are waiting on, from where
              * (kernel_wait_stats.h, RECOMP_WAIT_REPORT). */
             xbox_wait_stats_report(stderr);
+            /* And how often a snapshot could have been taken (XBA-244). */
+            xbox_ParkReport(stderr);
             fflush(stderr);
             last_summary_tick = now;
         }

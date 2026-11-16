@@ -48,6 +48,7 @@
  */
 #include "kernel.h"
 #include "xbox_seh.h"         /* xbox_SehCallbackEnter / Leave */
+#include "kernel_park.h"      /* the safe-point park detector (XBA-244) */
 #include "platform/host_time.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -426,15 +427,23 @@ void xbox_GuestCpuPreempt(uint32_t va)
  * call. 1 when this took it, for the leave. */
 int xbox_GuestCpuEnterCallback(void)
 {
+    int took = 0;
+
     xbox_SehCallbackEnter();     /* lifted code again, for host faults (XBA-132) */
-    if (!t_guest || t_held || !xbox_GuestCpuOn())
-        return 0;
-    guest_cpu_acquire(1);
-    return 1;
+    if (t_guest && !t_held && xbox_GuestCpuOn()) {
+        guest_cpu_acquire(1);
+        took = 1;
+    }
+    /* Guest code from here: the thread is no longer parked for a snapshot,
+     * and a freeze holds it here (XBA-244). After the acquire: a thread
+     * queued for the guest CPU has run nothing yet, and stays parked. */
+    xbox_ParkCallbackEnter();
+    return took;
 }
 
 void xbox_GuestCpuLeaveCallback(int took)
 {
+    xbox_ParkCallbackLeave();
     xbox_SehCallbackLeave();
     if (took && t_held)
         guest_cpu_soft_release(XBOX_GUEST_CPU_CALLBACK, 0, 0);
