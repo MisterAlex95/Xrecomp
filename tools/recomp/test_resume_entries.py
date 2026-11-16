@@ -57,7 +57,7 @@ def test_an_indirect_call_takes_its_target_from_the_runtime_before_its_arms():
         if recorded:
             lifter.icall_site_targets = {0x10020: recorded}
         text = "\n".join(lifter.lift_instruction(_call(0x10020, op=Operand(type="reg", reg="eax"))))
-        entry = "if (0) { _rs_00010022: _icall_target = recomp_resume_target(); }"
+        entry = "if (0) { _rs_00010022: _icall_target = eax; }"
         assert text.count(entry) == 1, text
         # After the return address is pushed, before the arms and the fallback.
         assert text.index("PUSH32(esp, 0x00010022u)") < text.index(entry)
@@ -90,7 +90,7 @@ def test_the_same_call_lifted_twice_keeps_one_entry():
     body = tr._resume_dedupe(0x10000, [a, b, c, c])
     text = "\n".join(body)
     assert text.count("_rs_00010015:") == 1 and text.count("RECOMP_ABI_CALL") == 2
-    assert text.count("_rs_00010022:") == 1 and text.count("recomp_resume_target") == 1
+    assert text.count("_rs_00010022:") == 1 and text.count("_rs_00010022: _icall_target = eax") == 1
     assert text.count("RECOMP_ICALL_SAFE_AT") == 2 and text.count("{") == text.count("}")
     assert 0x10099 not in tr.lifter.resume_sites
     assert tr.lifter.call_site_table[(0x10099, 0x10000)] & Lifter.CALL_SITE_NO_RESUME
@@ -123,10 +123,11 @@ def test_resume_block_lists_every_entry_and_host_waits(monkeypatch):
     assert re.search(r"RECOMP_POLL_WAIT\([^;]*0x00010010u\); goto loc_00010006; }", code), code
     assert "_rh_00010010" not in code
     block = code[code.index("_recomp_resume:"):]
-    assert "recomp_resume_site(0x00010000u, &_rs_ebp)" in block
-    assert "case 0x00010005u: ebp = _rs_ebp; goto _rs_00010005;" in block
-    assert "case 0x80010005u: ebp = _rs_ebp; goto _rh_00010005;" in block
-    assert "case 0x80010010u: ebp = _rs_ebp; goto loc_00010006;" in block
+    assert "recomp_resume_site(RECOMP_OPAQUE32(0x00010000u))" in block
+    assert "ebp = g_ebp;" in block
+    assert "case 0x00010005u: goto _rs_00010005;" in block
+    assert "case 0x80010005u: goto _rh_00010005;" in block
+    assert "case 0x80010010u: goto loc_00010006;" in block
     assert "recomp_resume_lost(0x00010000u, _rs_site);" in block
     table = tr.lifter.call_site_table
     assert table[(0x80010005, base)] & Lifter.CALL_SITE_HOST_WAIT
@@ -142,7 +143,7 @@ def test_a_back_edge_publishes_ebp_and_enters_at_its_header(monkeypatch):
     tr.back_edge_yield = True
     code = tr.translate_function(0x10000, db[0x10000])
     assert "{ RECOMP_BACK_EDGE_EBP(ebp, 0x00010004u); goto loc_00010003; }" in code, code
-    assert "case 0x80010004u: ebp = _rs_ebp; goto loc_00010003;" in code
+    assert "case 0x80010004u: goto loc_00010003;" in code
 
 
 def test_a_call_inside_a_loop_is_entered_in_a_copy_of_the_loop(monkeypatch):
@@ -162,7 +163,7 @@ def test_a_call_inside_a_loop_is_entered_in_a_copy_of_the_loop(monkeypatch):
     assert "_rs_00010005: RECOMP_ABI_CALL" in head                 # before the loop: in place
     assert "_rs_0001000A" not in head                              # in the loop: not in the original
     assert "_rs_00010012: RECOMP_ABI_CALL" in head                 # after the loop: in place
-    assert "case 0x0001000Au: ebp = _rs_ebp; goto _rs_0001000A_d0;" in block, block
+    assert "case 0x0001000Au: goto _rs_0001000A_d0;" in block, block
     copy = block[block.index("again, entered by a resume"):]
     assert "loc_00010005_d0: ;" in copy and "_rs_0001000A_d0: RECOMP_ABI_CALL" in copy
     assert "goto loc_00010005_d0;" in copy                        # its back edge stays in the copy

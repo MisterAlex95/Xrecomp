@@ -4071,7 +4071,7 @@ class FunctionTranslator:
                 else:
                     line = ""
                 # Later copies: an indirect entry goes whole, a direct label alone.
-                rest = rest.replace(f"if (0) {{ {tag}_icall_target = recomp_resume_target(); }} ", "")
+                rest = rest.replace(f"if (0) {{ {tag}_icall_target = eax; }} ", "")
                 rest = rest.replace(tag, "")
                 body[i] = line + rest
             if not seen:
@@ -4204,6 +4204,14 @@ class FunctionTranslator:
             last = next((bi for a, bi in blocks if a > hi), len(body))
             after_label = next((a for a in addrs if a > hi), None)
             region_lines = body[first:last]
+            text = "\n".join(region_lines)
+            if text.count("{") != text.count("}") or "#" in "".join(l.lstrip()[:1] for l in region_lines):
+                # Not a whole run of statements (a brace or a directive across its ends): no copy, no entry.
+                for value, label in items:
+                    key = (value, start)
+                    self.lifter.call_site_table[key] = (self.lifter.call_site_table.get(key, 0)
+                                                        | self.lifter.CALL_SITE_NO_RESUME)
+                continue
             defined = set()
             for line in region_lines:
                 defined.update(self._LABEL_DEF_RE.findall(line))
@@ -4222,7 +4230,7 @@ class FunctionTranslator:
             for i, line in enumerate(body):
                 for label in moved:
                     if label + ":" in line:
-                        line = line.replace("if (0) { %s: _icall_target = recomp_resume_target(); } " % label, "")
+                        line = line.replace("if (0) { %s: _icall_target = eax; } " % label, "")
                         line = line.replace(label + ": ; ", "").replace(label + ": ;", "").replace(label + ": ", "")
                 body[i] = line
         return body, sorted(entries), copies
@@ -4237,12 +4245,12 @@ class FunctionTranslator:
         lines = ["    return;",
                  "_recomp_resume: /* re-entered from a save state (XBA-250) */",
                  "    {",
-                 "    uint32_t _rs_ebp = 0, _rs_site = recomp_resume_site(0x%08Xu, &_rs_ebp);" % start,
-                 "    (void)_rs_ebp;",
-                 "    switch (_rs_site) {"]
-        set_ebp = "ebp = _rs_ebp; " if has_ebp else ""
+                 "    uint32_t _rs_site = recomp_resume_site(RECOMP_OPAQUE32(0x%08Xu));" % start]
+        if has_ebp:
+            lines.append("    ebp = g_ebp;   /* recomp_resume_site left it there */")
+        lines.append("    switch (_rs_site) {")
         for value, label in cases:
-            lines.append(f"    case 0x{value:08X}u: {set_ebp}goto {label};")
+            lines.append(f"    case 0x{value:08X}u: goto {label};")
         lines += ["    default: break;",
                   "    }",
                   "    recomp_resume_lost(0x%08Xu, _rs_site);" % start,

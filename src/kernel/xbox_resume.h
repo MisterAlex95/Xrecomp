@@ -81,7 +81,12 @@ XboxResumePlan *xbox_ResumePlanBuild(const XboxResumeChainFrame *fr, uint32_t n,
                                      uint32_t call_esp, const RecompCpuRegs *regs, XboxResumeLookup lookup,
                                      char *why, size_t why_n);
 
-/* On the thread that resumes, just before calling its routine (frame 0's function): resume mode on (the frame
+/* What recomp_resume_site leaves for the lifted code (recomp_types.h): g_ebp is the ebp the function held at its
+ * site (the resume block takes it from there: no second call, no address-taken local), and g_eax the target of an
+ * indirect call made again (garbage on the resume path otherwise: the callee is entered in resume mode, the
+ * innermost kernel call takes the record's registers). recomp_resume_ebp / recomp_resume_target give the same.
+
+ * On the thread that resumes, just before calling its routine (frame 0's function): resume mode on (the frame
  * limit lowered so every RECOMP_FRAME_ENTRY_R takes its slow path), esp and ebp as the routine was entered. The
  * plan must live until the thread has re-entered its innermost frame (plan->done). */
 void xbox_ResumeBegin(XboxResumePlan *p);

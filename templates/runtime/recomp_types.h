@@ -345,11 +345,20 @@ static RECOMP_FRAME_COLD RecompFrame *recomp_frames_slow(void)
 #define RECOMP_FRAME_ENTRY_R() if (0) goto _recomp_resume
 #endif
 /* The runtime's side of a resume entry (src/kernel/xbox_resume.c): the site the function re-enters (a call's
- * return VA, or 0x80000000 | the VA of a host wait) with the ebp it held there, the target of an indirect call
- * re-made, and a site the function has no entry for (fatal). */
-uint32_t recomp_resume_site(uint32_t func, uint32_t *ebp);
+ * return VA, or 0x80000000 | the VA of a host wait), the ebp it held there, the target of an indirect call re-made,
+ * and a site the function has no entry for (fatal). The ebp comes from its own call, not an out-parameter: an
+ * address-taken local would give every function that may park a stack slot and a longer prologue. */
+uint32_t recomp_resume_site(uint32_t func);
+uint32_t recomp_resume_ebp(void);
 uint32_t recomp_resume_target(void);
 void recomp_resume_lost(uint32_t func, uint32_t site);
+/* A constant the compiler must not fold into its neighbours: the resume block's function VA, which it would
+ * otherwise share with the return addresses the normal path pushes (an add more on that path, measured on arm64). */
+#if defined(__GNUC__) || defined(__clang__)
+#define RECOMP_OPAQUE32(x) __extension__ ({ uint32_t _rso = (x); __asm__("" : "+r"(_rso)); _rso; })
+#else
+#define RECOMP_OPAQUE32(x) (x)
+#endif
 
 extern RECOMP_TLS RecompCpu g_cpu;
 

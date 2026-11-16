@@ -11,6 +11,7 @@
 #include <string.h>
 
 static RECOMP_TLS uint32_t t_target;            /* the indirect call's target the next label takes */
+static RECOMP_TLS uint32_t t_ebp;               /* the ebp the function re-entering holds at its site */
 static RECOMP_TLS XboxResumePlan *t_kernel;     /* re-entering its kernel call: the dispatch completes it */
 static volatile int32_t s_completed;
 
@@ -141,7 +142,12 @@ static void resume_fatal(const char *what, uint32_t func, uint32_t site)
     abort();
 }
 
-uint32_t recomp_resume_site(uint32_t func, uint32_t *ebp)
+uint32_t recomp_resume_ebp(void)
+{
+    return t_ebp;
+}
+
+uint32_t recomp_resume_site(uint32_t func)
 {
     XboxResumePlan *p = (XboxResumePlan *)g_cpu.r_resume;
     const XboxResumeFrame *f;
@@ -151,7 +157,7 @@ uint32_t recomp_resume_site(uint32_t func, uint32_t *ebp)
     f = &p->f[p->at];
     if (f->func != func)
         resume_fatal("another function than the plan's was entered", func, f->func);
-    *ebp = f->ebp;
+    t_ebp = f->ebp;
     if (p->at + 1 < p->n) {
         /* An inner frame: the call is made again into the next function, with the esp it was entered with (the
          * guest stack, restored, holds its return address and arguments) and the ebp it recorded. */
@@ -159,6 +165,7 @@ uint32_t recomp_resume_site(uint32_t func, uint32_t *ebp)
         g_ebp = f->next_ebp;
         g_seh_ebp = f->next_ebp;
         t_target = f->target;
+        g_eax = f->target;      /* the lifted code takes an indirect call's target from eax (garbage here anyway) */
         p->at++;
         return f->site;
     }
@@ -172,7 +179,9 @@ uint32_t recomp_resume_site(uint32_t func, uint32_t *ebp)
         /* A kernel call: made again from its call site, esp at its return address; kernel_thunk_dispatch takes
          * the record's registers (xbox_ResumeKernelArrive). */
         g_esp = p->call_esp;
+        g_ebp = f->ebp;
         t_target = f->target;
+        g_eax = f->target;
         t_kernel = p;
     }
     return f->site;

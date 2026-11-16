@@ -147,7 +147,8 @@ static void check(int ok, const char *what, const char *detail)
     return; \
 _recomp_resume: \
     { \
-    uint32_t _rs_ebp = 0, _rs_site = recomp_resume_site((fva), &_rs_ebp); \
+    uint32_t _rs_site = recomp_resume_site(RECOMP_OPAQUE32(fva)); \
+    uint32_t _rs_ebp = recomp_resume_ebp(); \
     (void)_rs_ebp; \
     switch (_rs_site) { cases default: break; } \
     recomp_resume_lost((fva), _rs_site); \

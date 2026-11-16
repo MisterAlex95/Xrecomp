@@ -3122,9 +3122,11 @@ class Lifter:
         """An indirect call's resume entry (XBA-250), after its return address
         is pushed and before its guarded arms: re-entered, the target is the
         next function of the saved chain (or the kernel thunk of the saved
-        call), which the runtime hands over."""
+        call), which the runtime hands over in eax (garbage on the resume path
+        otherwise; a call would cost the normal path a callee-saved register
+        on arm64)."""
         label = self._resume_label(ret_va)
-        return f"if (0) {{ {label}_icall_target = recomp_resume_target(); }} "
+        return f"if (0) {{ {label}_icall_target = eax; }} "   # recomp_resume_site left it there
 
     def _lift_call(self, insn, ops):
         caller_cleans = insn.address in self.caller_cleanup_sites

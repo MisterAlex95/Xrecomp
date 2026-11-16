@@ -16,8 +16,8 @@ features the console runtimes have had since 0.8.0 (XBA-182, XBA-194) and the Xb
   1. **In-session** (rewind, quick save / load within one run): restore in place when every thread is parked at the
      same chain as in the state. Needs one lifter change (`ebp` kept out of host frames across calls).
   2. **Across runs** (save slots on disk, « Resume where I left off »): rebuild the host stacks in a fresh process by
-     re-entering lifted functions at their call sites (resume entries, as Emscripten's Asyncify rewinds). A larger
-     lifter change.
+     re-entering lifted functions at their call sites (resume entries, as Emscripten's Asyncify rewinds). Done for
+     the threads whose chains have resume entries (XBA-250, « Across runs » below); the others refuse with a reason.
 - **Process-level snapshots (fork, CRIU) are rejected**: not available on Android, and they cannot carry the GPU
   context, the audio device or the JVM the app runs in.
 - **The class of titles**: every guest thread regularly enters a kernel wait or call (the usual XDK title: D3D's
@@ -307,7 +307,7 @@ why. `xbox_KobjReset` empties everything, as a fresh kernel has it.
 | Object | Read | Made again |
 |---|---|---|
 | Event, semaphore, mutant, waitable timer | `w32_state_read`: type, signal state, count / limit, owner thread and recursion, remaining time and period, without consuming anything | `w32_state_make` in that state (timer re-armed with the time it had left) |
-| Thread | Host thread id, KTHREAD, exited, exit status, suspend count, priority | Ended: an exited thread object (signalled, its status). Running: in session, bound to the same thread still running (by host thread id); across runs, refused (XBA-250) |
+| Thread | Host thread id, KTHREAD, exited, exit status, suspend count, priority | Ended: an exited thread object (signalled, its status). Running: in session, bound to the same thread still running (by host thread id); across runs, the host thread a resume made for it (XBA-250, `xbox_KobjResumeThreads`) |
 | File, directory | Host path, `open` mode, position, pending FATX overwrite; disc image files: path in the image, position, search state | Reopened and positioned (`xbox_FileStateReopen`) |
 | I/O completion port | Slot, generation, concurrency counts, queued packets in order | Same slot and generation (threads' queue associations stay valid), packets queued again |
 | Handle table | Every token: its object, the guest thread object or `ObCreateObject` body behind it | Same token values; one object shared by several tokens (`NtDuplicateObject`) stays one object |
@@ -318,7 +318,8 @@ why. `xbox_KobjReset` empties everything, as a fresh kernel has it.
 The guest structures (KEVENT headers, KTHREAD, APC lists, KQUEUE, device queues) are guest RAM and come with the RAM
 section. What refuses a save: a set on its way to a blocked thread (retry), a host directory search in progress, a
 host object kind we do not carry (file mappings), and, for another run, a running thread, an owned mutant or a held
-host critical section. A held host critical section in session is recorded and must be held by the same thread, as
+host critical section (with `XBOX_KOBJ_RESUME_THREADS`, XBA-250: running threads the state holds and the mutants they
+own are made again by the resume; a running thread it does not hold refuses). A held host critical section in session is recorded and must be held by the same thread, as
 deep, when the state loads. A load refuses, changing nothing, while a thread is blocked on an event it would tear
 down: the same-run load (XBA-249) waits until every thread is back from its kernel call first. POSIX hosts only: on Windows the objects are
 real Win32 objects and the save is refused. Test: `tests/kernel_kobj_state`.
@@ -365,7 +366,7 @@ built in too, so a state has seven sections):
 
 | Tag | Version | Payload |
 |---|---|---|
-| `CPU ` | 4 | u32 thread count, u32 sizeof(RecompCpuRegs), u64 run id (XBA-249); per guest thread a 68-byte head (park slot, park state, ordinal, guest return address, returned, status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base and limit from the KTHREAD, esp at the park point (the call's return address slot, XBA-249), guest thread id, park site), the raw RecompCpuRegs, then the call chain (XBA-247): u32 frames, base, flags, 0, u64 signature, and per frame u32 return VA, esp, ebp, function, call-site flags |
+| `CPU ` | 5 | u32 thread count, u32 sizeof(RecompCpuRegs), u64 run id (XBA-249), the verdict for another run (XBA-250: u32 1 / 0, u32 length, the reason, at most 200 bytes); per guest thread a 68-byte head (park slot, park state, ordinal, guest return address, returned, status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base and limit from the KTHREAD, esp at the park point (the call's return address slot, XBA-249), guest thread id, park site), the raw RecompCpuRegs, then the call chain (XBA-247): u32 frames, base, flags, 0, u64 signature, and per frame u32 return VA, esp, ebp, function, call-site flags |
 | `MEM ` | 1 | `xbox_MemStateSave`: heap cursor, alloc count and block table, worker stack count; the contiguous window's counters, page map, block lengths (sparse) and RAM-name map; the lazy reservations; guest_vmem's page table as runs |
 | `RAM ` | 1 | u32 range count; per range u32 kind, u32 guest base, u32 pages, a bitmap of the pages stored, then those pages (4 KB each) |
 
@@ -373,7 +374,8 @@ Not in the design's first draft: compression. The reader stays strict: older ver
 must be its frames', no unknown flag, nothing after the last thread.
 
 **Park records, two kinds** (`CPU ` v2, XBA-251; v3 since XBA-249 adds the run id and the esp at the park point;
-v4 since XBA-247 the registers as a RecompCpuRegs and the call chain; older versions are refused, `EVERSION`). The
+v4 since XBA-247 the registers as a RecompCpuRegs and the call chain; v5 since XBA-250 the verdict for another run;
+older versions are refused, `EVERSION`). The
 head's last word,
 the park site (`XboxParkRecord.site`, `XboxStateThread.site`, `XBOX_PARK_SITE_*` in `kernel_park.h`), says which:
 
@@ -528,8 +530,8 @@ xemu-derived `src/nv2a` model (Windows MMIO path, not run by recompiled titles).
 thread, one capture or load at a time:
 
 1. **Check** the blob (`xbox_StateCheck`: title, build, sections) and that it was taken **in this run** (the `CPU `
-   section's run id, random per process): a state from an earlier run refuses (`ECHAIN`, « saved in another run »)
-   until resume entries (XBA-250).
+   section's run id, random per process): a state from an earlier run refuses (`ECHAIN`): « it loads when the game
+   starts » when its verdict says it resumes (XBA-250, « Across runs »), else why it cannot load in another run.
 2. **Freeze** every guest thread (`xbox_ParkFreeze`), then **settle**: each thread in a kernel call must be back from
    it (its bridge returned: held at the call's end, or queued for the guest CPU behind a frozen thread,
    `xbox_ParkKernelReturned`). A wait in progress is given the timeout (500 ms from the menu) to end: sleeps and
@@ -578,9 +580,10 @@ a capture holds, so they run on the service's own thread. A game held by the men
 the length of the capture or load (threads waiting on the GPU behind a parked flip never reach a kernel call
 otherwise). `xbox_StateAvailable(why)` says whether states can be offered now (`MenuNative.nativeStatesAvailable`,
 `nativeStatesReason`): attached with a save folder, guest threads running, no stack switching (fibers), no untracked
-threads. The app shows Save state / Load state for an Xbox title when it is true, but no « Resume where I left off »
-and no automatic slot (states do not survive the run). A refused load shows « The game is not at a point where this
-state can be loaded »; a capture not possible now « A state cannot be saved at this point of the game ».
+threads. The app shows Save state / Load state for an Xbox title when it is true; « Resume where I left off » and the
+automatic slot since XBA-250, when the generated code has resume entries (« Across runs »). A refused load shows « The
+game is not at a point where this state can be loaded »; a capture not possible now « A state cannot be saved at this
+point of the game ».
 
 **Rewind**: the service captures every 500 ms (`RECOMP_REWIND_MS`; at least 20 times the last capture's cost, so it
 never takes more than 5 % of the time) into `recomp_rewind`'s XOR-delta ring of XBXS blobs, from the first pad report
@@ -614,12 +617,179 @@ front end (attached as `xbox`, the menu's slot 2 saved and loaded, a refused loa
 the quick save chord run on the service's thread); « Host waits »: a state with threads at host waits loads. App:
 `GameMenuTest.xboxStateRows`.
 
+## Across runs: resume entries (XBA-250)
+
+A state saved in one process loads in a fresh one: the save slots survive the run, the automatic slot is saved when
+the player leaves and « Resume where I left off » loads it at the next start. A fresh process has no host stacks for
+the saved threads; each thread rebuilds its own by calling its saved chain again, as Emscripten's Asyncify rewinds.
+
+**What the lifter emits.** Every function that may park (`_park_plan`, XBA-247) enters through
+`RECOMP_FRAME_ENTRY_R` and gets a resume block at its end; every call site that may park gets a label (`_rs_<return
+VA>`) just before its call, every host wait one right after its helper (`_rh_<VA>`):
+
+```c
+void sub_00012200(void)
+{
+    RECOMP_FRAME_ENTRY_R();                 /* records the frame; while resuming, goto _recomp_resume */
+    ...
+    g_ebp = ebp; g_seh_ebp = ebp;
+    PUSH32(esp, 0x00012210u); _rs_00012210: RECOMP_ABI_CALL(0x00012300u, sub_00012300);
+    ...                                     /* an indirect call: after its push,
+                                             * if (0) { _rs_<ret>: _icall_target = eax; } */
+    RECOMP_FRAME_LEAVE(); return;
+_recomp_resume:
+    {
+    uint32_t _rs_site = recomp_resume_site(RECOMP_OPAQUE32(0x00012200u));
+    ebp = g_ebp;                            /* the ebp it held at its site, left there by the runtime */
+    switch (_rs_site) {
+    case 0x00012210u: goto _rs_00012210;
+    case 0x80012240u: goto loc_00012230;    /* a poll loop: entered at its header */
+    case 0x00012258u: goto _rs_00012258_d0; /* a call inside a loop: in the loop's copy, below */
+    default: break;
+    }
+    recomp_resume_lost(0x00012200u, _rs_site);   /* fatal: the plan does not match this build */
+    }
+    RECOMP_FRAME_LEAVE(); return;
+    /* the loop 0x00012250..0x0001226F again, entered by a resume (XBA-250) */
+    ...
+}
+```
+
+- **Nothing more on the normal path.** The resume check lives in `RECOMP_FRAME_ENTRY_R`'s slow path: a resuming
+  thread lowers its frame limit to the base (`xbox_ResumeBegin`), so the compare every entry already makes fails and
+  the slow path, after recording the frame, sees `g_cpu.r_resume` and jumps to the resume block. `RecompCpu` grows a
+  pointer (`r_resume`). The resume block makes one call: the runtime leaves the frame's ebp in `g_ebp` and an indirect
+  call's target in `eax` (garbage on the resume path otherwise), because an out-parameter (an address-taken local)
+  or a second call cost every function that may park a stack slot or a callee-saved register on arm64 (measured:
+  +3, then +2 instructions per call on `w_vcall`); `RECOMP_OPAQUE32` keeps the compiler from deriving the normal
+  path's pushed return addresses from the block's function VA.
+- **Loops stay natural loops.** A label inside a loop body would be a second entry into the loop: the loop becomes
+  irreducible and the compiler stops hoisting its invariant loads (measured: +5 instructions per turn of a loop
+  around an indirect call). So an entry inside a loop has no label in the original: the resume block enters a copy
+  of the outermost loop around it (`_resume_loops`: the loop's blocks, labels renamed `_d<k>`), placed after the
+  resume block, which runs the rest of that one call of the function and leaves to the original code after the
+  loop. A host wait that ends with its jump back to the loop header (a poll loop, a back edge) enters at that header
+  when no other loop encloses it. An entry outside any loop keeps its label in place.
+- **Host waits** resume as « returned » whatever their record says (calling the helper again is never needed, XBA-251):
+  the registers are the record's and the thread continues after the helper. A back edge in a function with an ebp
+  local publishes it before preempting (`RECOMP_BACK_EDGE_EBP`), as a poll wait and a hlt already did, so the ebp
+  there is known.
+- **The call-site table** carries the host waits too, keyed `0x80000000 | VA` (`XBOX_CALL_SITE_HOST_WAIT`), and two
+  flags: `SEH_ANCHOR` (the function takes an SEH resume anchor, which a resume would skip) and `NO_RESUME` (a site
+  without an entry: a label the lift dropped, a host wait it cannot tell apart, a loop with no label at its start).
+  `XBOX_CALL_SITE_UNRESUMABLE` groups them with `STACK_SWITCH`, `JMPBUF` (setjmp / longjmp) and `MANUAL` (a
+  hand-written callee: no entry in it).
+
+**The plan** (`xbox_ResumePlanBuild`, `src/kernel/xbox_resume.c`, from a state's chain and this build's table). Frame
+`i` is the function frame `i+1`'s call site is in, the innermost one the function of the park site; it re-enters at
+that site holding the ebp it published there (the next frame's recorded ebp, or the record's `r_ebp` for the
+innermost); before the call is made again, esp and ebp become the callee's entry values (the guest stack, restored,
+holds its return address and arguments); an indirect call's target is the next frame's function, the innermost
+kernel call's the thunk of its ordinal in this run (`xbox_KernelThunkVa`). Refused, with the reason: a frame entered
+by a tail jump (two frames at one esp: the jumper's identity is not in the chain), a site with an unresumable flag or
+no table entry, a routine the runtime did not start (its first frame must return to 0).
+
+**The engine** (`recomp_resume_site`, thread-local). Each function entered in resume mode takes the next frame (it
+must be the plan's function, or the process stops naming both: a state only loads into the build that saved it
+anyway), and the thread goes one frame deeper. At the innermost frame resume mode ends: a host wait gets the
+record's registers and goes on after its helper; a kernel call is made again from its call site and
+`kernel_thunk_dispatch` completes it (`xbox_ResumeKernelArrive`): a record « returned » gives the call's status back
+without calling the bridge, a record « in the call » makes the call again from the registers it was made with.
+
+**The load** (`xbox_StateResume`, `xbox_StateResumeSlot`), in a process where the game has not started (no guest
+thread, nothing resumed yet):
+
+1. The blob against this title and build (`xbox_StateCheck`), its verdict for another run, and every thread's plan
+   against this build's call-site table.
+2. A host thread per saved guest thread, created suspended (`xbox_BridgeResumeThread`): its TIB, KTHREAD and guest
+   stack are the state's (guest memory); the thread with the main TIB is the main thread (its routine ran inside its
+   creator's kernel call, whose frames are not re-entered: if it ever returns, the thread ends and the process main
+   shuts down, as when a main thread returns in the first run).
+3. With the device threads held: MEM, RAM, KOBJ across runs (`XBOX_KOBJ_ACROSS_RUNS`: each running thread object is
+   the new host thread of the saved one, `xbox_KobjResumeThreads`; a mutant a running thread owned is owned by its
+   new thread), NV2A, APU, USB. A section that fails here leaves the game unable to go on (guest memory is the
+   state's in part): the process says so and stops (the resume refuses everything it can before this point).
+4. New guest thread ids come after the restored ones; the INLINE first-thread rule is spent
+   (`xbox_BridgeResumeSetup`). The threads go: each calls its routine in resume mode.
+
+```
+[STATE] resume: 4 guest threads re-entering their call chains (1 calls made again), 14 RAM pages written; 34.07 ms
+[STATE] resume refused: ... (this state cannot be loaded in another run: guest thread 1006: frame 1 was called from 0x00012810, in a function with an exception handler (__try))
+```
+
+**The verdict** (`CPU ` v5, written by every capture): 1 when every frozen thread's plan can be built, the kernel
+objects can be made again in a fresh process (`xbox_KobjCheck` with `XBOX_KOBJ_ACROSS_RUNS | XBOX_KOBJ_RESUME_THREADS`:
+no held host critical section, no file mapping, no running thread the state does not hold) and no thread is
+untracked; else 0 with the first reason. `xbox_StateResumable` reads it (and checks the blob), so the menu and the
+start can decide without loading.
+
+**The front end.** The automatic slot is written only when the state's verdict says it resumes; otherwise the
+older one is removed too (it is not where the player left off) and the save answers « refused » with the reason in
+the log. A slot loaded before the game started resumes (`op_load`); `xbox_StateResumeAtBoot`, called by the
+template's `main` before the entry point, resumes the automatic slot when `RECOMP_STATE_RESUME` is on (the app sets
+it for Xbox titles too now) and starts the game as usual otherwise, logging why. A slot from an earlier run loaded
+into a game already running is refused: « saved in an earlier run of the game: it loads when the game starts », or
+why it cannot load in another run at all. `xbox_StateResumeAvailable` (`MenuNative.nativeStatesResumable`): the
+app's « Resume where I left off » row, its automatic slot at quit and in the background, and the Home's Resume /
+Start for an Xbox title, when the generated code has a call-site table and states are available.
+
+**What is covered** (the largest correct subset; everything else refuses with its reason):
+
+| Covered | Refused (reason in the verdict and the log) |
+|---|---|
+| Threads parked at a top-level kernel call (returned or still in it) or at a host wait (poll loop, NV2A kick, hlt, preempt) | Chains through a function with an SEH anchor (`__try` / `catch` with a resume target, XBA-112): its `setjmp` would have to be re-taken |
+| Chains of any depth up to the frame shadow stack (1024), direct and indirect calls, guarded indirect calls, calls inside loops (nested included) | A frame entered by a tail jump (`jmp` to another function), including a kernel call made through a `jmp [import]` wrapper |
+| Worker threads and the INLINE main thread (its creator's frames dropped) | setjmp / longjmp sites, hand-written callees, stack switches (fibers), overflowing chains |
+| Kernel objects: events, semaphores, mutants (owners mapped), timers, files, ports, thread objects of the running threads | A running thread the state does not hold, a held host critical section, file mappings; Windows hosts (no states) |
+
+Not carried across runs: host thread-local kernel state that is not a kernel object (a thread's I/O completion queue
+association made on that host thread), the HLE DirectSound layer's host buffers, the NIC link. The C fixture's
+threads and `tests/park_resume` are game-shaped; **a real title resumed after a kill on Linux is not done** (no title
+in the repository: Device / Linux check list).
+
+**Measured.** `python -m tools.bench icount`, scale 0.1, instructions executed under qemu-user less a run at scale 0,
+origin/main -> this branch on the same corpus (x86-64 clang 19 exe layout; arm64 NDK clang (r28) against an aarch64
+glibc sysroot, exe and so layouts):
+
+| Workload | x86-64 | arm64 exe | arm64 so |
+|---|---|---|---|
+| w_int, w_mem, w_rep, w_bytes, w_x87, w_sse | 0 % | 0 % | 0 % |
+| w_icall (an indirect call in a loop) | 12,450,470 -> 12,450,472 (0 %) | 12,300,382 -> 12,300,371 (0 %) | 12,900,379 -> 12,900,354 (0 %) |
+| w_vcall (calls into a function that may park) | 23,250,428 -> 23,250,432 (0 %) | 24,700,330 -> 24,700,319 (0 %) | 25,900,324 -> 25,900,295 (0 %) |
+| w_fib (about 500 instructions: jitter of the scale-0 run, as in the `noframes` variant) | 527 -> 525 | 493 -> 493 | 506 -> 543 |
+
+Not resuming, the code runs what it ran: the check is in the frame's slow path and loops keep a single entry. A
+first version with the labels in place inside loops cost +8.0 % on `w_icall` and +1.7 % on `w_vcall` (x86-64): the
+reason for the loop copies; then arm64 paid +2 instructions per call of a function that may park (an extra
+callee-saved register, see above). Code size: `libtitle.so` text of the bench corpus 13,609 -> 14,611 bytes on x86-64
+(+7.4 %), 13,255 -> 14,325 on arm64 (+8.1 %); 4 of its 30 functions may park, 2 loops copied. A title's share is not measured (XBA-252; budget 15 %): it grows with the
+functions that may park and the loops around their calls. The resume itself, on the synthetic XBE with four threads:
+34 ms (most of it the RAM and device sections).
+
+Tests: `tools/recomp/test_resume_entries.py` (labels at direct and indirect calls, before guarded arms, none at
+setjmp / hand-written callees, the same call lifted twice keeps one, SEH anchor flag, host waits in the table and
+the resume block, a back edge publishing ebp and entered at its header, a call inside a loop entered through the
+loop's copy; and a C fixture: a chain four calls deep with a frame pointer, a scratch ebp, a call inside a loop and an
+indirect call, saved from inside its kernel call in one process, the process ending there, resumed in a second process
+with the real engine, at -O0 and -O2, both kinds of record: it ends as an uninterrupted run does), `tests/park_resume`
+(game-shaped workers through the kernel bridge: render four calls deep, audio calling through a pointer in guest
+memory, a hlt loop, a 250 ms wait captured inside its call; captured and written as a slot file, then the process runs
+itself again (fork + exec) and resumes it before any guest thread exists: every thread goes on from the state's count
+with the registers and every frame's ebp it had, the long wait is made again, a second resume is refused, a state
+captured after the resume loads in the same run; a thread through a function with `__try` makes the verdict refuse;
+also with the guest CPU lock and the dispatch gate on). App: `GameMenuTest.xboxResumeRows`.
+
+**Every generated pack is stale again**: the generated code's `RecompCpu` has one more pointer and its functions
+the resume entries; titles must be prepared again.
+
 ## Limits
 
 - **Titles outside the class** (above) never offer states. The status file and the app name the reason: fibers or
   stack-switch contexts, a thread that never parks (with its last call), the native-call path.
 - **In-session loads refuse when a chain differs** (a thread at another call site, created or ended since the
-  state). Across-runs states (resume entries) lift this.
+  state). A state from another run loads only when the game starts (XBA-250), not into a game already running.
+- **Across runs** (XBA-250): chains through a function with an SEH anchor, a tail jump, a setjmp / longjmp site, a
+  hand-written callee or a stack switch refuse; a real title resumed after a kill is not verified yet.
 - **A frozen thread at DISPATCH_LEVEL** (holding the one-CPU gate) makes the capture wait for another freeze.
 - **States are tied to one build** of the generated code.
 - **Network** (the NIC model, system link) is not restored: a state taken during a network session resumes with the
@@ -628,7 +798,8 @@ the quick save chord run on the service's thread); « Host waits »: a state wit
   (arm64) to 13 (x86-64) instructions per call of a function that may park, nothing elsewhere (« Guest call chains »:
   0 % on every `tools/bench` workload but `w_vcall`, its worst case, +7 % / +13 %). A title's frame time depends on
   how many of its calls go into functions that may park: not measured on a title yet (XBA-252). Resume entries
-  (XBA-250) have their own budget.
+  (XBA-250) cost nothing more on any `tools/bench` workload; their code size (loop copies) is to be measured on a
+  title.
 
 ## Tickets
 
@@ -640,6 +811,6 @@ the quick save chord run on the service's thread); « Host waits »: a state wit
 | XBA-247 | Lifter: ebp shadow stack across calls, call-site unwind table, chain signatures: done (`CPU ` v4, `tests/park_chain`) | |
 | XBA-248 | NV2A, APU and USB capture and restore | |
 | XBA-249 | In-session restore: rewind, quick save / load within a run, attach to `recomp_states`: done (`xbox_StateLoad`, `xbox_state_service.c`; chains compared by signature since XBA-247) | 245, 246, 248 (247: the chain signature) |
-| XBA-250 | Resume entries in lifted code: states across runs, « Resume where I left off » | 247, 249 |
+| XBA-250 | Resume entries in lifted code: states across runs, « Resume where I left off »: done for chains with resume entries (`xbox_StateResume`, `CPU ` v5, `tests/park_resume`); a real title not verified yet | 247, 249 |
 | XBA-251 | Park points at host waits inside lifted code (guest poll waits, NV2A kick waits, hlt, preempts): done (`CPU ` v2) | |
 | XBA-252 | Park statistics on our titles (Linux arm64, device) | |
