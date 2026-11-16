@@ -6,6 +6,7 @@ enable_testing()
 # runs the same batches through the GL back end.
 set(EXEC_SOURCES
     ../../src/kernel/nv2a_pb_exec.c
+    ../../src/kernel/guest_clock.c
     ../../src/kernel/nv2a_coverage.c
     ../../src/kernel/recomp_status.c
     ../../src/kernel/recomp_discovery.c

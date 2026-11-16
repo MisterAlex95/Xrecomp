@@ -35,6 +35,7 @@
 #include "xbox_seh.h"
 #include "xbox_xbe_sections.h"
 #include "platform/host_time.h"
+#include "guest_clock.h"            /* fast-forward (XBA-240) */
 #include "recomp_icall_feedback.h"
 #include "recomp_discovery.h"
 #include "recomp_status.h"
@@ -3933,7 +3934,7 @@ static void kernel_vblank_tick(void)
     if (kernel_vblank_mode() != XBOX_VBLANK_TICK)
         return;
 
-    now = (long long)GetTickCount64();
+    now = (long long)xbox_GuestTickCount64();   /* fast-forward runs it faster (XBA-240) */
     if (now < next_ms)
         return;
     next_ms = now + 16;                       /* ~60 Hz */
@@ -4339,11 +4340,13 @@ static int kernel_timer_paced(void)
 }
 
 /* The clock the kernel timers' due times are kept on, the same one the loop
- * that fires them reads. */
+ * that fires them reads: the guest's, ahead of the host's by what
+ * fast-forward has gained (guest_clock.h, XBA-240; nothing until it runs). */
 static long long kernel_timer_clock_ms(void)
 {
-    return kernel_timer_paced() ? kernel_clock_ms()
-                                : (long long)GetTickCount64();
+    return (kernel_timer_paced() ? kernel_clock_ms()
+                                 : (long long)GetTickCount64())
+           + (long long)xbox_GuestClockExtraUnits(1000);
 }
 
 /* Fire every kernel timer due at now_ms. Returns how many fired;
@@ -4427,7 +4430,10 @@ static void kernel_timer_loop_ns(void)
         /* Wakeable: KeInsertQueueDpc ends it, so a DPC that no guest thread
          * drains at a raise runs now rather than at the next edge. */
         xbox_HostTimerSleepNs(wait);
-        kernel_vblank_tick_ns(xbox_HostNowNs(), &vbl_next);
+        xbox_FastForwardPoll();           /* the speed for this pass (XBA-240) */
+        /* The vblank grid and the timers run on the guest clock (the host's
+         * until fast-forward first runs); the waits to them are host time. */
+        kernel_vblank_tick_ns(xbox_GuestNowNs(), &vbl_next);
         busy = kernel_drain_dpcs(&ran);   /* deferred work, before due timers */
         now_ms = kernel_timer_clock_ms();
         kernel_fire_timers(now_ms, &timer_due);
@@ -4439,13 +4445,15 @@ static void kernel_timer_loop_ns(void)
         if (vbl_next) {
             /* Behind the grid (a late pass): catch up one vblank per
              * millisecond, not in a burst. */
-            uint64_t v = vbl_next > now ? vbl_next : now + ms;
+            uint64_t gnow = now + xbox_GuestClockExtraNs();
+            uint64_t v = vbl_next > gnow ? now + xbox_GuestClockHostNs(vbl_next - gnow)
+                                         : now + ms;
             if (v < target)
                 target = v;
         }
         if (timer_due >= 0) {
             uint64_t t = now + (timer_due > now_ms
-                                ? (uint64_t)(timer_due - now_ms) * ms : 0);
+                                ? xbox_GuestClockHostNs((uint64_t)(timer_due - now_ms) * ms) : 0);
             if (t < target)
                 target = t;
         }
@@ -4490,7 +4498,8 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
             long long timer_due;
             int ran;
 
-            Sleep(10);
+            Sleep(xbox_GuestClockHostMs(10));   /* 10 guest ms (XBA-240) */
+            xbox_FastForwardPoll();
             kernel_vblank_tick();  /* the GPU's frame clock */
             kernel_drain_dpcs(&ran);
             kernel_fire_timers(kernel_timer_clock_ms(), &timer_due);
@@ -9232,7 +9241,7 @@ static void bridge_MmGlobalData(void)
 static void bridge_KeInterruptTime(void)
 {
     /* Refresh the 100ns-since-boot counter before handing out the pointer. */
-    ULONGLONG t = (ULONGLONG)GetTickCount64() * 10000ull;
+    ULONGLONG t = (ULONGLONG)xbox_GuestTickCount64() * 10000ull;   /* XBA-240 */
     BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_INTERRUPT_TIME + 0) = (uint32_t)t;
     BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_INTERRUPT_TIME + 4) = (uint32_t)(t >> 32);
     g_eax = XBOX_KERNEL_DATA_BASE + KDATA_INTERRUPT_TIME;
@@ -9244,6 +9253,12 @@ static void bridge_KeSystemTime(void)
     /* Refresh the 100ns-since-1601 clock before handing out the pointer. */
     FILETIME ft;
     GetSystemTimeAsFileTime(&ft);
+    if (xbox_GuestClockActive()) {   /* fast-forward's gain (XBA-240) */
+        ULONGLONG t = ((ULONGLONG)ft.dwHighDateTime << 32 | ft.dwLowDateTime)
+                      + xbox_GuestClockExtraUnits(10000000u);
+        ft.dwLowDateTime = (DWORD)t;
+        ft.dwHighDateTime = (DWORD)(t >> 32);
+    }
     BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_SYSTEM_TIME + 0) = ft.dwLowDateTime;
     BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_SYSTEM_TIME + 4) = ft.dwHighDateTime;
     g_eax = XBOX_KERNEL_DATA_BASE + KDATA_SYSTEM_TIME;

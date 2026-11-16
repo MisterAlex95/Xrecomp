@@ -8,6 +8,7 @@
  * every caller in. Layouts are nxdk's xboxkrnl.h.
  */
 #include "kernel.h"
+#include "guest_clock.h"   /* fast-forward: guest spans on the host (XBA-240) */
 #include "kernel_ksync.h"
 #include "xbox_memory_layout.h"   /* RECOMP_TLS */
 
@@ -104,14 +105,20 @@ static uint64_t ks_deadline(uint32_t timeout_va)
     if (!timeout_va)
         return (uint64_t)-1;
     memcpy(&t, KS_PTR(timeout_va), 8);
+    /* XBA-240: the timeout is guest time: the speed's share of it on the
+     * host's clock (as is at speed 1); an absolute one is against the
+     * guest's clock. */
     if (t <= 0)
-        return ks_now_ms() + (uint64_t)((-t + 9999) / 10000);
+        return ks_now_ms() + xbox_GuestClockHostSpan((uint64_t)((-t + 9999) / 10000),
+                                                     xbox_GuestClockSpeed());
     {
         LARGE_INTEGER now;
         int64_t diff;
         GetSystemTimeAsFileTime((LPFILETIME)&now);
+        now.QuadPart += (LONGLONG)xbox_GuestClockExtraUnits(10000000u);
         diff = t - now.QuadPart;
-        return ks_now_ms() + (diff > 0 ? (uint64_t)(diff / 10000) : 0);
+        return ks_now_ms() + xbox_GuestClockHostSpan(diff > 0 ? (uint64_t)(diff / 10000) : 0,
+                                                     xbox_GuestClockSpeed());
     }
 }
 

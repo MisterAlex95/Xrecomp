@@ -20,7 +20,13 @@ extern "C" {
 void xbox_ApuSetOutputVolume(int percent);
 int  xbox_ApuGetOutputVolume(void);
 
-/* Scales count interleaved samples in place by the current volume. */
+/* XBA-240: silence while fast-forward runs (the kernel's
+ * xbox_FastForwardPoll), whatever the volume; the volume is kept. */
+void xbox_ApuSetFastForwardMute(int on);
+int  xbox_ApuFastForwardMuted(void);
+
+/* Scales count interleaved samples in place by the current volume (silence
+ * while fast-forward mutes). */
 void xbox_ApuApplyOutputVolume(int16_t *samples, int count);
 
 #ifdef __cplusplus

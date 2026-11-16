@@ -3,6 +3,7 @@ project(nv2a_tex_filter_regression C)
 enable_testing()
 add_executable(nv2a-tex-filter-test nv2a_tex_filter_test.c
     ../../src/kernel/nv2a_pb_exec.c
+    ../../src/kernel/guest_clock.c
     ../../src/kernel/nv2a_coverage.c
     ../../src/kernel/recomp_status.c
     ../../src/kernel/recomp_discovery.c

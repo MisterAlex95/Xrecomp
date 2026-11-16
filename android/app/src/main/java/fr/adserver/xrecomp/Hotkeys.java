@@ -41,9 +41,16 @@ final class Hotkeys {
             return null;
         }
 
-        /** Whether it means anything to a game of console c: the menu everywhere, the rest with save states. */
+        /**
+         * Whether it means anything to a game of console c: the menu everywhere, fast-forward (held, on / off) on every
+         * console that fast-forwards (XBA-240: the Xbox too), the rest with save states.
+         */
         boolean appliesTo(Console c) {
-            return this == MENU || (c != null && c.hasSaveStates());
+            if (this == MENU)
+                return true;
+            if (this == FF_HOLD || this == FF_TOGGLE)
+                return c != null && c.hasFastForward();
+            return c != null && c.hasSaveStates();
         }
     }
 
@@ -287,7 +294,7 @@ final class Hotkeys {
         return s;
     }
 
-    /** The actions a game of console c shows: all of them with save states, else the menu only. */
+    /** The actions a game of console c shows: all of them with save states, else the menu and fast-forward. */
     static List<Action> actions(Console c) {
         List<Action> out = new ArrayList<>();
         for (Action a : Action.values()) {

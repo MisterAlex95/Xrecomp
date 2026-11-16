@@ -103,8 +103,10 @@ public class HotkeysTest {
         assertEquals(Collections.singletonList(Hotkeys.Action.QSAVE), h.sharing(Hotkeys.Action.FF_TOGGLE, Console.GBA));
         // The menu's chord against the fast-forward hold.
         assertEquals(Collections.singletonList(Hotkeys.Action.MENU), h.sharing(Hotkeys.Action.FF_HOLD, Console.PS1));
-        // An Xbox title has only the menu: nothing to share with.
-        assertTrue(h.sharing(Hotkeys.Action.MENU, Console.XBOX).isEmpty());
+        // An Xbox title has the menu and fast-forward (XBA-240): the menu's chord is the hold's there too.
+        assertEquals(Collections.singletonList(Hotkeys.Action.FF_HOLD), h.sharing(Hotkeys.Action.MENU, Console.XBOX));
+        assertEquals(Collections.singletonList(Hotkeys.Action.MENU), h.sharing(Hotkeys.Action.FF_HOLD, Console.XBOX));
+        assertTrue(new Hotkeys().sharing(Hotkeys.Action.FF_HOLD, Console.XBOX).isEmpty());
         // A button alone the game's mapping uses (the GBA's A is south + north by default).
         int gba = Hotkeys.sourcesOf(new ConsolePadMap(Console.GBA));
         assertSame(PadMapping.Source.SOUTH, h.gameNeeds(Hotkeys.Action.SLOT_NEXT, gba));
@@ -119,7 +121,11 @@ public class HotkeysTest {
         assertSame(PadMapping.Source.LEFT_STICK_CLICK, h.gameNeeds(Hotkeys.Action.SLOT_NEXT, xbox));
         // The actions a console shows.
         assertEquals(Arrays.asList(Hotkeys.Action.values()), Hotkeys.actions(Console.N64));
-        assertEquals(Collections.singletonList(Hotkeys.Action.MENU), Hotkeys.actions(Console.XBOX));
+        assertEquals(Arrays.asList(Hotkeys.Action.FF_HOLD, Hotkeys.Action.FF_TOGGLE, Hotkeys.Action.MENU),
+                     Hotkeys.actions(Console.XBOX));
+        assertFalse(Hotkeys.Action.QSAVE.appliesTo(Console.XBOX));
+        assertTrue(Hotkeys.Action.FF_TOGGLE.appliesTo(Console.XBOX));
+        assertFalse(Hotkeys.Action.FF_HOLD.appliesTo(null));
     }
 
     @Test

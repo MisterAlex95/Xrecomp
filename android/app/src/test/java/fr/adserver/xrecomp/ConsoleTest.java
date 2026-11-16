@@ -38,6 +38,9 @@ public class ConsoleTest {
         assertTrue(Console.PS1.hasSaveStates());
         assertTrue(Console.N64.hasSaveStates());
         assertFalse(Console.XBOX.hasSaveStates());
+        // XBA-240: every console fast-forwards, the Xbox too.
+        for (Console c : Console.values())
+            assertTrue(c.name(), c.hasFastForward());
     }
 
     private final Console.DiscKeyReader nativeChd = Console.chdReader;

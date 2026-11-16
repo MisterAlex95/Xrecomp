@@ -25,6 +25,7 @@
 #include "guest_vmem.h"
 #include "kernel_missing.h"
 #include "nv2a_flip_hold.h"
+#include "guest_clock.h"     /* fast-forward (XBA-240) */
 #include "platform/host_time.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -2328,9 +2329,13 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          * waits on a tick deadline that never arrives and spins forever bringing
          * up XNet. A live clock is also just the truth -- KeTickCount ticks on
          * hardware whether or not anyone is asleep. GetTickCount() shares the
-         * millisecond unit, so the rate matches. */
+         * millisecond unit, so the rate matches. Plus what fast-forward has
+         * gained (XBA-240, guest_clock.h; 0 until it first runs), whose
+         * speed this thread's passes also pick up. */
+        xbox_FastForwardPoll();
         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
-                               + g_memory_offset) = GetTickCount();
+                               + g_memory_offset)
+            = GetTickCount() + (uint32_t)xbox_GuestClockExtraUnits(1000);
 
         nv2a_ack_wait(regs, flip_held);
     }

@@ -51,6 +51,15 @@ enum Console {
         return this == GBA || this == PS1 || this == N64;
     }
 
+    /**
+     * XBA-240: the console's games fast-forward (the in-game menu's toggle, the fast-forward hotkeys): every console.
+     * GBA, PS1 and N64 run several console frames per shown frame; an Xbox title's guest clock runs faster
+     * (src/kernel/guest_clock.h).
+     */
+    boolean hasFastForward() {
+        return true;
+    }
+
     /** The console's short name on a library card's badge (a product name: not translated). */
     String badge() {
         switch (this) {

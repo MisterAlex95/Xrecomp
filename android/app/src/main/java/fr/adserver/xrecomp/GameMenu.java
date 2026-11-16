@@ -47,7 +47,7 @@ import java.util.function.LongSupplier;
  *       closing releases the companion's again. A key whose down came while open acts on its release, so nothing of
  *       it reaches the game.</li>
  *   <li>Items: Resume, for a GBA, PS1 or N64 game Save state, Load state (four slots each) and Fast-forward
- *       (XBA-182, XBA-183) and Cheats (XBA-197: each code On / Off, Add a code, Delete a code; written at once),
+ *       (XBA-182, XBA-183; an Xbox title has Fast-forward too, XBA-240) and Cheats (XBA-197: each code On / Off, Add a code, Delete a code; written at once),
  *       Settings (performance overlay, game volume, bottom screen, a console game's scale and filter
  *       and the picture shader (XBA-206): all live; this game's language, widescreen and 480p, internal resolution,
  *       Vulkan driver and most Game settings: read at the start, so « Restart to apply » shows at the top once one
@@ -136,6 +136,14 @@ final class GameMenu {
          * rows show.
          */
         default boolean statesSupported() {
+            return false;
+        }
+
+        /**
+         * XBA-240: a game that fast-forwards without save states runs (an Xbox title: its guest clock runs faster):
+         * the Fast-forward row shows.
+         */
+        default boolean fastForwardSupported() {
             return false;
         }
 
@@ -945,9 +953,12 @@ final class GameMenu {
         case MAIN:
             pageV.setVisibility(View.GONE);
             row(Item.RESUME, s(R.string.MENU_RESUME));
-            if (statesSupported()) {   // XBA-182 / XBA-183: a GBA, PS1 or N64 game
+            boolean states = statesSupported();
+            if (states) {   // XBA-182 / XBA-183: a GBA, PS1 or N64 game
                 row(Item.STATE_SAVE, s(R.string.MENU_STATE_SAVE));
                 row(Item.STATE_LOAD, s(R.string.MENU_STATE_LOAD));
+            }
+            if (states || fastForwardSupported()) {   // XBA-240: an Xbox title fast-forwards too
                 Widgets.MenuRow ff = row(Item.FAST_FORWARD, s(R.string.MENU_FAST_FORWARD));
                 ff.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
                 ff.cycler = dir -> toggleFastForward();
@@ -1094,7 +1105,7 @@ final class GameMenu {
                         kvRow(s(ControlsLabels.source(map.get(c))), s(ControlsLabels.control(c)));
                 }
             }
-            hotkeyRows(Console.XBOX);   // XBA-190: the menu chord only (no save states for an Xbox title)
+            hotkeyRows(Console.XBOX);   // XBA-190 / XBA-240: the menu chord and fast-forward (no save states)
             for (int[] r : kv)
                 kvRow(s(r[0]), s(r[1]));
             row(Item.BACK, s(R.string.MENU_BACK));
@@ -1268,6 +1279,15 @@ final class GameMenu {
             return host.statesSupported();
         } catch (RuntimeException e) {
             Log.w(LauncherActivity.TAG, "shell: menu: save states unknown", e);
+            return false;
+        }
+    }
+
+    private boolean fastForwardSupported() {
+        try {
+            return host.fastForwardSupported();
+        } catch (RuntimeException e) {
+            Log.w(LauncherActivity.TAG, "shell: menu: fast-forward unknown", e);
             return false;
         }
     }
