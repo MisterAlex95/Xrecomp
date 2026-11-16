@@ -2,7 +2,7 @@
 # Builds the homebrew test corpus of the other consoles (XBA-149): our own test programs, never a
 # commercial ROM, disc or BIOS.
 #
-#   tools/consoles/build_homebrew.sh [gba|ps1|n64|nds|all] [OUTDIR]  (default: all build/homebrew)
+#   tools/consoles/build_homebrew.sh [gba|ps1|n64|nds|psp|all] [OUTDIR]  (default: all build/homebrew)
 #
 # For each console: builds the toolchain image tools/docker/<console>-homebrew.Dockerfile (tag
 # xba-<console>-homebrew; Docker's layer cache makes a rebuild instant), then builds
@@ -12,6 +12,7 @@
 #   ps1: <prog>.exe + <prog>.elf + <prog>.bin/.cue disc    (hello cpu timer_irq gfx mcard overlay)
 #   n64: <prog>.z64 + <prog>.elf                           (hello cpu timer_irq gfx rsp)
 #   nds: <prog>.nds + <prog>.elf (the ARM9's)              (hello; spike XBA-223)
+#   psp: <prog>.prx + <prog>.pbp (EBOOT) + <prog>.elf      (hello; spike XBA-224)
 # plus SHA256SUMS. Outputs are never committed (build/ is ignored).
 #
 # Sources go in and outputs come out with `docker cp`, not bind mounts, so the script also works
@@ -28,10 +29,10 @@ tmo=${XBA_HOMEBREW_TIMEOUT:-1800}
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 case "$what" in
-gba | ps1 | n64 | nds) consoles=("$what") ;;
-all) consoles=(gba ps1 n64 nds) ;;
+gba | ps1 | n64 | nds | psp) consoles=("$what") ;;
+all) consoles=(gba ps1 n64 nds psp) ;;
 *)
-    echo "usage: $0 [gba|ps1|n64|nds|all] [OUTDIR]" >&2
+    echo "usage: $0 [gba|ps1|n64|nds|psp|all] [OUTDIR]" >&2
     exit 2
     ;;
 esac
@@ -51,6 +52,7 @@ build_cmd_ps1='cmake -S /tmp/work -B /tmp/build -G Ninja -DCMAKE_BUILD_TYPE=Rele
   && cd /tmp/build && cp *.exe *.elf *.bin *.cue /out/'
 build_cmd_n64='make -j"$JOBS" BUILD_DIR=/tmp/build && cp *.z64 /out/ && cp /tmp/build/*.elf /out/'
 build_cmd_nds='make -j"$JOBS" OUT=/tmp/out BUILD=/tmp/build && cp /tmp/out/*.nds /tmp/out/*.elf /out/'
+build_cmd_psp='make -j"$JOBS" OUT=/tmp/out BUILD=/tmp/build && cp /tmp/out/*.prx /tmp/out/*.pbp /tmp/out/*.elf /out/'
 
 cid=
 cleanup() { [ -z "$cid" ] || docker rm -f "$cid" >/dev/null 2>&1 || true; }

@@ -1,6 +1,6 @@
 # Other consoles
 
-XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and a **Nintendo DS** spike), statically recompiled the same way as
+XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS** and **PSP** spikes), statically recompiled the same way as
 Xbox discs. This is early work: the layout, build options and test corpus are in place, the runtimes are empty, and no
 game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
@@ -11,6 +11,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 | `ps1/` | PlayStation | MIPS R3000A |
 | `n64/` | Nintendo 64 | MIPS R4300i (big-endian, 64-bit) |
 | `nds/` | Nintendo DS (spike, Linux headless only) | ARM946E-S (ARMv5TE) + ARM7TDMI |
+| `psp/` | PSP (spike, Linux headless only) | Allegrex (MIPS32 R4000-class, little-endian) + FPU + VFPU |
 
 Each one has:
 
@@ -1316,6 +1317,51 @@ Not there yet: the ARM7 (its interpreter, SPI / touch / RTC / sound / power), en
 sprites, affine and extended backgrounds, the 3D engine, cartridge reads, the Nintendo SDK's own loader (autoload
 table, compressed ARM9), overlays. The GBA assumptions that broke are listed on XBA-217.
 
+**PSP spike (XBA-224, epic XBA-218).** Does the PS1's MIPS frontend carry over to the PSP's Allegrex, with PRX
+loading? Yes: a PSPSDK hello world (a relocatable PRX, as an EBOOT.PBP carries it) runs recompiled on Linux, 99.98 %
+of its instructions native after two discovery rounds, its framebuffer identical to the interpreter's and to
+`consoles/psp/tests/hello.png`. Linux / macOS headless only (`XBR_CONSOLE_PSP`, off on Android and Windows), nothing
+in the app. What is there:
+
+- `tests/homebrew/hello`: our test program, built with PSPSDK's own `build.mak` (`BUILD_PRX=1`, EBOOT.PBP too) in
+  `tools/docker/psp-homebrew.Dockerfile` (pspdev's official image, pinned by digest, about 790 MB) by
+  `tools/consoles/build_homebrew.sh psp`. PSPSDK's debug screen on the 480x272 32-bit framebuffer, an Allegrex check
+  (EXT / INS / SEB / SEH / WSBH / WSBW / BITREV, CLZ / CLO, MAX / MIN, MOVZ / MOVN, MADD / MSUBU, ROTR / ROTRV, likely
+  branches, the FPU; `Allegrex: ok`), the pad read once, 30 VBlanks, `sceKernelExitGame`. PSPSDK's crt0 and libcglue
+  come with it: a `user_main` thread, newlib's heap from a user partition, LwMutexes, pthread-embedded's semaphores.
+- `tools/psp_tools` (`python3 -m psp_tools.recomp MODULE OUTDIR [--discovered FILE]`): `prx.py` loads an EBOOT.PBP,
+  a PRX or an ELF statically as the firmware would: segments at 0x08804000, the SHT_PRXRELOC relocations (R_MIPS_32,
+  R_MIPS_26, R_MIPS_HI16 paired with the next LO16, LO16), module info (gp, export and import tables), module_start and
+  its thread parameters from the exports, and every NID import stub rewritten to `jr ra ; syscall N` (N = the import's
+  index, the HLE's number for it). `isa.py` subclasses ps1_tools' MIPS I decoder, `lift.py` its discovery and lifter
+  (ps1_tools unchanged: the PS1's output is byte-identical) with what the Allegrex adds and what it means differently
+  (below). Seeds: module_start, the exports, the R_MIPS_32 relocations that point at a function start, the
+  interpreter's misses.
+- `runtime/`: `psp_core` (C11, no host layer): an Allegrex interpreter (no load delay; the FPU; no VFPU), the memory
+  map (32 MB RAM at 0x08000000, 2 MB VRAM, the scratchpad, every segment mirror), `psp_load.c` (the same loading as
+  `prx.py`, byte for byte: lifted code is checked against it), and a minimal HLE kernel by NID (`psp_hle.c`): a
+  strict-priority thread scheduler that switches at kernel calls and wake-ups, the module start thread, CreateThread
+  / StartThread / ExitThread / DelayThread / SleepThread, semaphores, LwMutexes, the user partition (bump allocator),
+  stdio (stdout kept), `sceDisplaySetFrameBuf` / `WaitVblankStart`, `sceGeEdramGetAddr`, `sceCtrl`, `ExitGame`; unknown
+  NIDs log once and return 0. Lifted code uses the PS1 lifter's RC_* vocabulary, which `psp_recomp_rt.h` defines for
+  the PSP; the table's entries are checked against memory once, at attach (one module, code never changes).
+  `psp_run MODULE [--frames N] [--png OUT] [--pack LIB] [--missed FILE] [--stats] [--buttons HEX] [-v]`.
+- `tests/`: ctest `psp_hello` (PRX, interpreter), `psp_pbp_hello` (the EBOOT.PBP, interpreter) and `psp_rc_hello`
+  (recompiled, discovery loop: two rounds, at least 90 % native, no stale entry), all compare the framebuffer when the
+  program exits with `hello.png` (`png_compare.py`); skipped (77) without the corpus, run by the homebrew CI job
+  (`tools/consoles/run_psp_homebrew.sh`). The recompiler's pytest (`consoles/psp/tools/psp_tools/test_psp_tools.py`)
+  needs no toolchain: synthetic PRXes (relocations with a carry, stubs, a PBP) and an Allegrex function lifted,
+  compiled with the host cc and run.
+
+The PS1 assumptions that broke on the Allegrex: the load delay slot (the PS1 lifter stops with a load in flight when
+the next instruction reads it: wrong on the PSP, so `commit()` always lands the value); opcode 0x12 / 0x32 / 0x3A are
+the VFPU, not the GTE; the likely branches (0x14-0x17, REGIMM 2 / 3 / 0x12 / 0x13) were "reserved" (they end a
+function in the PS1's discovery); the IO heuristic (`io_accesses`) and the memory macros know the PS1's map; the PS1
+lifter's cycle model is kept for the event checks only. Not there yet: the VFPU (none in this program; its decoder
+marks it, the interpreter stops on it), GE (graphics), audio, IO / UMD / memory stick, callbacks, interrupts, timers
+beyond DelayThread, more than one module (PRXes loaded at run time would need the PS1's content-keyed entries). The
+full list is on XBA-218.
+
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
-build ourselves (devkitARM / libtonc / libnds, PSn00bSDK, libdragon) and dumps Alex made from his own media, kept outside every
+build ourselves (devkitARM / libtonc / libnds, PSn00bSDK, libdragon, PSPSDK) and dumps Alex made from his own media, kept outside every
 repository.
