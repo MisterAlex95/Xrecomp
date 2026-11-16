@@ -1,0 +1,9 @@
+hello: Hello, Dreamcast! (XRecomp SH-4 spike)
+hello: div 10309 30 44277211
+hello: mul64 -77777233331 4294902403668557
+hello: fpu 14142 750 49 rsqrt 500 sin 1000 cos 0 sin30 500
+hello: fipr 70 ftrv 122301 82601 double 333333333
+hello: SH-4: ok
+hello: thread 5 ret 15
+hello: vblank irq 30, timer ok
+hello: done

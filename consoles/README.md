@@ -1,6 +1,6 @@
 # Other consoles
 
-XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS**, **PSP** and **GameCube** spikes), statically recompiled the same way as
+XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS**, **PSP**, **GameCube** and **Dreamcast** spikes), statically recompiled the same way as
 Xbox discs. This is early work: the layout, build options and test corpus are in place, the runtimes are empty, and no
 game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
@@ -13,6 +13,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 | `nds/` | Nintendo DS (spike, Linux headless only) | ARM946E-S (ARMv5TE) + ARM7TDMI |
 | `psp/` | PSP (spike, Linux headless only) | Allegrex (MIPS32 R4000-class, little-endian) + FPU + VFPU |
 | `gc/` | GameCube (spike, Linux headless only) | Gekko (PowerPC 750 + paired singles, big-endian) |
+| `dc/` | Dreamcast (spike, Linux headless only) | Hitachi SH-4 (SH7091, little-endian, FPU) |
 
 Each one has:
 
@@ -1407,6 +1408,51 @@ Not there yet: GX / Flipper (CP FIFO, TEV, EFB copies), the DSP (audio), the DVD
 memory cards, the MMU (BATs, page tables), the estimate tables of fres / frsqrte / ps_res / ps_rsqrte (exact here),
 FPSCR exceptions and rounding modes, cycle timing, the Wii. What of the frontend carries to the Xbox 360 is on XBA-219.
 
+**Dreamcast spike (XBA-227, epic XBA-221).** A new frontend: the SH-4. Our KallistiOS hello world boots on Linux
+with no BIOS image, interpreted and recompiled (after the discovery loop over 99.99 % of its instructions run as
+lifted C), its serial output and its framebuffer identical both ways. Linux / macOS headless only (`XBR_CONSOLE_DC`,
+off on Android and Windows), nothing in the app. What is there:
+
+- `tests/homebrew/hello`: our test program, KallistiOS 2.1 (GCC 14.2), built in `tools/docker/dc-homebrew.Dockerfile`
+  (KallistiOS's own image `kallistios/dc-kos-toolchain:14.2-stable`, pinned by digest, 430 MB compressed, 1.55 GB on
+  disk) by `tools/consoles/build_homebrew.sh dc`: `hello.elf` and `hello.bin` (the same program as a raw,
+  unscrambled 1ST_READ.BIN). KOS boot without maple / CD-ROM, console text on the serial port (KOS's dbgio over the
+  SCIF) and on a 640x480 RGB565 framebuffer (KOS's minifont: no BIOS font), an SH-4 check (libgcc's DIV1 divisions,
+  64-bit multiplies, FSQRT / FSRRA / FSCA / FIPR / FTRV, mat_load's FSCHG + 64-bit FMOV into the XD bank + FRCHG,
+  double precision), a second thread (the scheduler's TMU0 interrupt, banked registers, RTE), 30 VBlank interrupts
+  against the millisecond timer, `thd_sleep`, and the way back to the BIOS (exit code 0).
+- `tools/dc_tools`: `sh4.py` (one table of the 209 SH-4 instructions, the source of `runtime/sh4_optab.h`:
+  `python3 -m dc_tools.sh4 --gen-c`), `image.py` (ELF, or a raw binary at 0x8C010000), `lift.py` and `recomp.py`
+  (`python3 -m dc_tools.recomp PROGRAM OUTDIR [--discovered FILE]`). Function starts: entry, symbols, BSR targets,
+  JSR / JMP / BSRF through a register loaded from a literal, the vectors of a constant `LDC Rn,VBR`, data words
+  pointing at code (raw binaries), the interpreter's misses. GCC's switch tables (`mova` / `mov.b` / `braf`, bounded
+  by the `cmp/hi` before them) become C switches. One C function per function start, entered by a switch at any
+  table entry (start, return sites, loop heads, resume points); each instruction a call to its `sh4_ops.h` semantics
+  with constant operands; delay slots after the branch's condition / target is read; calls nest on the host stack
+  and come back by checking PC against the return site, so thread switches and interrupts (the dispatcher's
+  business) simply unwind it.
+- `runtime/`: `dc_core` (C11, no host layer): `sh4_ops.h` (state and semantics shared by the interpreter and lifted
+  code: banks, FPSCR.PR / SZ / FR, pairs, MAC saturation...), `sh4_interp.c`, the memory map with the MMU off (main
+  RAM, VRAM's 32- and 64-bit views, sound RAM, store queues), the SH-4's TMU / INTC / SCIF / CCN, Holly's ISTNRM /
+  IML levels, the sync generator (scanlines, VBlank in / out from SPG_LOAD / SPG_VBLANK_INT), the framebuffer
+  read-out (FB_R_CTRL / SOF1 / SIZE: 555, 565, 888, 0888, interlace), a BIOS in C (`dc_bios.c`: the syscall
+  vectors at 0x8C0000B0-E0 point at stubs the dispatcher serves: sysinfo, ROM font, flash, GD-ROM "no disc", system
+  menu; no image). One instruction per cycle at 200 MHz, the TMU at 12.5 MHz. `dc_run PROGRAM [--frames N] [--png
+  OUT] [--png-when TEXT] [--serial OUT] [--pack LIB] [--missed FILE] [--stats]`.
+- `tests/`: ctest `dc_sh4_ops` (synthetic programs assembled in `dc_sh4_test.c`: division sequences, carries, SHAD /
+  SHLD, MAC.L saturation, delay slots, TRAPA / RTE across the banks, FPU single / double, pairs, FIPR / FSCA; no
+  toolchain), `dc_rc_sh4_ops` (the same programs lifted: same words, nothing interpreted; and the C decoder against
+  `dc_tools.sh4` on all 65536 opcodes), `dc_hello` / `dc_rc_hello` (the hello world interpreted / recompiled: its
+  `hello:` serial lines against `hello_serial.txt`, the framebuffer when it printed `hello: done` against
+  `hello_fb.png`, exit code 0); the last two skip (77) without the corpus and run in the homebrew CI job
+  (`tools/consoles/run_dc_homebrew.sh`). The lifter's pytest (`consoles/dc/tools/dc_tools/test_dc_tools.py`) needs no
+  toolchain.
+
+Not there yet: the PowerVR2 beyond the framebuffer (the TA, tile accelerator lists, ISP / TSP, textures: the next
+big piece), AICA (its ARM7 and the 64 channels), Maple (pads), the GD-ROM (GDI / CHD images), G2 / PVR DMA, the MMU
+and the SH-4's own exceptions beyond TRAPA, cycle timing, the scrambled 1ST_READ.BIN and IP.BIN boot. Notes on
+XBA-221.
+
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
-build ourselves (devkitARM / libtonc / libnds, devkitPPC / libogc, PSn00bSDK, libdragon, PSPSDK) and dumps Alex made from his own media, kept outside every
+build ourselves (devkitARM / libtonc / libnds, devkitPPC / libogc, PSn00bSDK, libdragon, PSPSDK, KallistiOS) and dumps Alex made from his own media, kept outside every
 repository.
