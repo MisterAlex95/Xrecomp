@@ -78,6 +78,10 @@ def fa(op, xo, d, a, b_, c=0, rc=0):
 
 def fadds(d, a, b_): return fa(59, 21, d, a, b_)
 def fmadd(d, a, c, b_): return fa(63, 29, d, a, b_, c)
+def fnmsub(d, a, c, b_): return fa(63, 30, d, a, b_, c)
+def fnmadd(d, a, c, b_): return fa(63, 31, d, a, b_, c)
+def fnmsubs(d, a, c, b_): return fa(59, 30, d, a, b_, c)
+def fnmadds(d, a, c, b_): return fa(59, 31, d, a, b_, c)
 def fctiwz(d, b_): return _x(63, d, 0, b_, 15)
 
 
@@ -85,6 +89,8 @@ def fctiwz(d, b_): return _x(63, d, 0, b_, 15)
 def psq_l(frd, d, ra, w, i): return (56 << 26) | (frd << 21) | (ra << 16) | (w << 15) | (i << 12) | (d & 0xFFF)
 def psq_st(frs, d, ra, w, i): return (60 << 26) | (frs << 21) | (ra << 16) | (w << 15) | (i << 12) | (d & 0xFFF)
 def ps_madd(d, a, c, b_): return fa(4, 29, d, a, b_, c)
+def ps_nmsub(d, a, c, b_): return fa(4, 30, d, a, b_, c)
+def ps_nmadd(d, a, c, b_): return fa(4, 31, d, a, b_, c)
 def ps_add(d, a, b_): return fa(4, 21, d, a, b_)
 def ps_merge10(d, a, b_): return _x(4, d, a, b_, 592)
 def ps_sum0(d, a, c, b_): return fa(4, 10, d, a, b_, c)

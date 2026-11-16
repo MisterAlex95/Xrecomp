@@ -105,8 +105,9 @@ class GekkoLifter(FnLifter):
     def op_ps_div(self, i): return self._ps(i, "RC_PS(a0 / b0)", "RC_PS(a1 / b1)")
     def op_ps_madd(self, i): return self._ps(i, "RC_PS(fma(a0, c0, b0))", "RC_PS(fma(a1, c1, b1))")
     def op_ps_msub(self, i): return self._ps(i, "RC_PS(fma(a0, c0, -b0))", "RC_PS(fma(a1, c1, -b1))")
-    def op_ps_nmadd(self, i): return self._ps(i, "-RC_PS(fma(a0, c0, b0))", "-RC_PS(fma(a1, c1, b1))")
-    def op_ps_nmsub(self, i): return self._ps(i, "-RC_PS(fma(a0, c0, -b0))", "-RC_PS(fma(a1, c1, -b1))")
+    def op_ps_nmadd(self, i): return self._ps(i, "ppc_fnma(RC_PS(fma(a0, c0, b0)))", "ppc_fnma(RC_PS(fma(a1, c1, b1)))")
+    def op_ps_nmsub(self, i):
+        return self._ps(i, "ppc_fnma(RC_PS(fma(a0, c0, -b0)))", "ppc_fnma(RC_PS(fma(a1, c1, -b1)))")
     def op_ps_sum0(self, i): return self._ps(i, "RC_PS(a0 + b1)", "c1")
     def op_ps_sum1(self, i): return self._ps(i, "c0", "RC_PS(a0 + b1)")
     def op_ps_muls0(self, i): return self._ps(i, "RC_PS(a0 * c0)", "RC_PS(a1 * c0)")

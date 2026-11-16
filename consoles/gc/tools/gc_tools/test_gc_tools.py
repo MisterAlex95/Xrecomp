@@ -57,18 +57,29 @@ def program():
              asm.stw(13, 52, 4), asm.stw(14, 56, 4),                              # 0xFF000000, 1
              asm.fmadd(8, 1, 2, 6), asm.fctiwz(9, 8), asm.li(15, 60), asm.stfiwx(9, 4, 15),  # 7
              asm.cmpw(6, 12, 7), asm.cmplw(7, 12, 7), asm.crxor(2, 25, 29), asm.mfcr(16),
-             asm.stw(16, 64, 4)]                                                  # 0x20000084
+             asm.stw(16, 64, 4),                                                  # 0x20000084
+             # negated multiply-adds whose sum is an exact zero give -0 (XBA-254; AArch64 folding gave +0)
+             asm.psq_l(20, 28, 3, 0, 2), asm.psq_l(21, 36, 3, 0, 2),              # (2, 1.5), (3, -3)
+             asm.ps_merge10(22, 20, 20), asm.ps_merge10(29, 21, 21),              # (1.5, 2), (-3, 3)
+             asm.fnmsub(23, 20, 22, 21), asm.stfs(23, 68, 4),                     # -(2 * 1.5 - 3)
+             asm.fnmadd(24, 20, 22, 29), asm.stfs(24, 72, 4),                     # -(2 * 1.5 + -3)
+             asm.fnmsubs(25, 20, 22, 21), asm.stfs(25, 76, 4),
+             asm.fnmadds(26, 20, 22, 29), asm.stfs(26, 80, 4),
+             asm.ps_nmsub(27, 20, 22, 21), asm.psq_st(27, 84, 4, 0, 2),           # (-0, -6)
+             asm.ps_nmadd(28, 20, 22, 21), asm.psq_st(28, 92, 4, 0, 2)]           # (-6, -0)
     idle = at()
     code += [asm.b(idle, idle)]
     fn = at()
     code += [asm.mulli(11, 11, 6), asm.blr()]
     code[call_at] = asm.bl(TEXT + 4 * call_at, fn)
     data = f32(1.5, -2.0, 4.0, 0.25) + bytes([10, 200, 0, 0, 0, 0, 0, 0]) + struct.pack(">I", 0x12345678)
+    data += f32(2.0, 1.5, 3.0, -3.0)
     return build([(TEXT, struct.pack(">%dI" % len(code), *code))], [(DATA, data)])
 
 
 EXPECTED = [0x41200000, 0xBE800000, 0xC0000000, 0x40800000, 0x00280320, 0x40200000, 0x42480000, 0x40400000,
-            0x40400000, 0x40400000, 0x00007800, 5050, 42, 0xFF000000, 1, 7, 0x20000084]
+            0x40400000, 0x40400000, 0x00007800, 5050, 42, 0xFF000000, 1, 7, 0x20000084,
+            0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0xC0C00000, 0xC0C00000, 0x80000000]
 
 
 def test_dol_round_trip():

@@ -231,6 +231,15 @@ static inline double ppc_fnabs(double d)
     return ppc_u2f(ppc_f2u(d) | 0x8000000000000000ull);
 }
 
+/* fnmadd / fnmsub (and the s and ps_ forms): the multiply-add's rounded result, negated. Written as a sign-bit flip,
+ * not as -fma(...): compilers fold -fma(a, c, -b) into fma(-a, c, b) (AArch64 fmsub / fnmadd), which turns an exact
+ * zero's -0 into +0 (XBA-254, as vnmsubfp in XBA-230). A NaN result keeps its sign, as the 750 manual says
+ * (« QNaNs propagate with no effect on their sign bit »); the default NaN of an invalid operation is the host's. */
+static inline double ppc_fnma(double r)
+{
+    return r != r ? r : ppc_fneg(r);
+}
+
 /* fres / frsqrte: estimates on hardware; exact here (a spike limit: games that depend on the 750's estimate tables
  * will differ in low bits). */
 static inline double ppc_fres(double d)

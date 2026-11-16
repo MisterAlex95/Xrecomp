@@ -10,6 +10,7 @@ endif()
 #   gc_hello      our libogc hello world (consoles/gc/tests/homebrew/hello) under gc_run, interpreter only: the XFB
 #                 after 120 fields must equal hello_xfb.png
 #   gc_rc_hello   the same DOL recompiled (gc_tools.recomp + cc, discovery loop), mostly native: same picture
+#   gc_fnma       fnmadd / fnmsub and their s / ps_ forms keep an exact zero's -0 and a NaN's sign (no homebrew)
 # Both skip (exit 77) when the homebrew is not built (the linux CI job has no corpus; the homebrew job builds it):
 #   tools/consoles/build_homebrew.sh gc build/homebrew    -> GC_HOMEBREW_DIR (default build/homebrew/gc)
 # The frontend's own tests (synthetic code, no toolchain; one runs a program both interpreted and recompiled) run
@@ -27,6 +28,14 @@ enable_testing()
 get_filename_component(GC_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../.. ABSOLUTE)
 set(GC_HOMEBREW_DIR ${GC_REPO_ROOT}/build/homebrew/gc CACHE PATH "Built GameCube homebrew (build_homebrew.sh gc)")
 set(GC_RUN_HELLO ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh)
+
+add_executable(gc_fnma gc_fnma.c)
+target_include_directories(gc_fnma PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime)
+target_compile_options(gc_fnma PRIVATE -Wall -Wextra)
+if(NOT APPLE)
+    target_link_libraries(gc_fnma PRIVATE m)
+endif()
+add_test(NAME gc_fnma COMMAND gc_fnma)
 
 if(TARGET gc_run)
     add_test(NAME gc_hello

@@ -579,8 +579,8 @@ static void op_fp(gc_machine *m, uint32_t pc, uint32_t w, bool single)
         goto rec;
     case 28: r = fma(fa, fc, -fb); break;
     case 29: r = fma(fa, fc, fb); break;
-    case 30: r = -fma(fa, fc, -fb); break;
-    case 31: r = -fma(fa, fc, fb); break;
+    case 30: r = ppc_fnma(fma(fa, fc, -fb)); break;
+    case 31: r = ppc_fnma(fma(fa, fc, fb)); break;
     default:
         illegal(m, pc, w);
         return;
@@ -658,8 +658,14 @@ static void op4(gc_machine *m, uint32_t pc, uint32_t w)
     case 26: r0 = gc_ps_round(ppc_frsqrte(b0)); r1 = gc_ps_round(ppc_frsqrte(b1)); break; /* ps_rsqrte */
     case 28: r0 = gc_ps_round(fma(a0, c0, -b0)); r1 = gc_ps_round(fma(a1, c1, -b1)); break; /* ps_msub */
     case 29: r0 = gc_ps_round(fma(a0, c0, b0)); r1 = gc_ps_round(fma(a1, c1, b1)); break;   /* ps_madd */
-    case 30: r0 = -gc_ps_round(fma(a0, c0, -b0)); r1 = -gc_ps_round(fma(a1, c1, -b1)); break; /* ps_nmsub */
-    case 31: r0 = -gc_ps_round(fma(a0, c0, b0)); r1 = -gc_ps_round(fma(a1, c1, b1)); break;  /* ps_nmadd */
+    case 30: /* ps_nmsub */
+        r0 = ppc_fnma(gc_ps_round(fma(a0, c0, -b0)));
+        r1 = ppc_fnma(gc_ps_round(fma(a1, c1, -b1)));
+        break;
+    case 31: /* ps_nmadd */
+        r0 = ppc_fnma(gc_ps_round(fma(a0, c0, b0)));
+        r1 = ppc_fnma(gc_ps_round(fma(a1, c1, b1)));
+        break;
     default:
         illegal(m, pc, w);
         return;
