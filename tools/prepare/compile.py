@@ -222,6 +222,11 @@ class Toolchain:
     def cc_argv(self):
         return [self.cc] + self.cc_prefix
 
+    def compile_args(self, flags, src, out):
+        """One compile: src into the object out (clang-cl spells it otherwise:
+        tools/prepare/desktop_build.py)."""
+        return self.cc_argv + flags + ["-c", src, "-o", out]
+
     def version_text(self):
         if self._version is None:
             rc, out = self.procs.run(self.cc_argv + ["--version"])
@@ -447,7 +452,7 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
         tmp = "%s.tmp%d.%d" % (obj, os.getpid(), threading.get_ident())
         peak = []
         try:
-            rc, out = tc.procs.run(tc.cc_argv + flags + ["-c", src, "-o", tmp], peak=peak)
+            rc, out = tc.procs.run(tc.compile_args(flags, src, tmp), peak=peak)
         finally:
             leave()
         with lock:
@@ -461,7 +466,7 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
             failed.append((code, "%s: %s" % (os.path.basename(src), _first_error(out))))
             if log:
                 with log_lock, open(log, "a") as f:
-                    f.write("\n$ %s\n%s" % (" ".join(tc.cc_argv + flags + ["-c", src]), out))
+                    f.write("\n$ %s\n%s" % (" ".join(tc.compile_args(flags, src, obj)), out))
             return
         os.replace(tmp, obj)
         with lock:

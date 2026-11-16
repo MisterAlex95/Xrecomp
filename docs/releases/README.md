@@ -30,6 +30,9 @@ Downloads: the [GitHub releases](https://github.com/MisterAlex95/Xrecomp/release
   Ad-hoc signed, not notarized: run `xattr -dr com.apple.quarantine <the XRecomp folder>` once before opening it,
   otherwise macOS blocks it or runs it from a translocated copy that cannot see its toolkit (Setup then asks for it).
 - `xrecomp-v<version>-linux.tar.gz`: the toolkit for Linux (README « Linux »).
+- The **prebuilt runtime** of the desktop folders (XBA-86): `runtime/macos-arm64/` in the Mac zip,
+  `runtime/linux-x86_64/` in the Linux archive (`tools/prepare/runtime.py`), so prepare builds a title with a C
+  compiler alone, no CMake (`tools/prepare/desktop_build.py`). Linux arm64 builds with CMake until it has one.
 - A `.sha256` next to each.
 - **Frame generation** (LSFG, XBA-187) in every one of them: the APK has the Vulkan bridge in `libmain.so` and the
   shader translator in `libxba_import.so` (Settings › Graphics › Frame generation, « Choose Lossless.dll »); the

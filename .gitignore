@@ -51,3 +51,7 @@ third_party/lsfg-sources/
 
 # Device profiles (tools/android/profile.sh): they hold a title's compiled code
 xrecomp-profiles/
+
+# The prebuilt desktop runtime (python3 -m tools.prepare.runtime) and a shipped clang (XBA-86)
+/runtime/
+/toolchain/

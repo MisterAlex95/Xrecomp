@@ -11,6 +11,14 @@ Usage:
     OUT   where to write it (default: test.xbe beside this script, so it
           lands in the same place wherever you run it from)
 
+    python3 tools/conformance/mkxbe.py --retail OUT
+
+    --retail  encode the entry point and the kernel thunk address with the
+              retail keys (the thunk table empty, in the headers), so the lift
+              names xbe_entry_point (add3) and the title links: what the
+              desktop prepare's end-to-end test builds and runs (XBA-86). The
+              committed test.xbe keeps the raw entry point the tests expect.
+
 Then point the conformance XBE phase at it:
     python3 -m tools.conformance --xbe tools/conformance/test.xbe
 
@@ -31,6 +39,9 @@ BASE = 0x00010000
 HDR_SIZE = 0x1000          # headers occupy the first page
 TEXT_VA = 0x00011000
 TEXT_OFF = 0x1000
+# tools/xbe_parser/xbe_parser.py's retail keys (--retail).
+ENTRY_RETAIL_XOR = 0xA8FC57AB
+THUNK_RETAIL_XOR = 0x5B6D40B6
 
 FUNCS = [
     # add3(a,b,c)
@@ -45,7 +56,7 @@ FUNCS = [
     bytes.fromhex("558bec" "8b4508" "23450c" "f7d0" "0fafc0" "5d" "c3"),
 ]
 
-def build():
+def build(retail=False):
     text = b""
     for f in FUNCS:
         text += f
@@ -67,7 +78,9 @@ def build():
     struct.pack_into("<I", hdr, 0x011C, 1)                 # num_sections
     struct.pack_into("<I", hdr, 0x0120, sec_hdrs_va)       # section_headers_addr
     struct.pack_into("<I", hdr, 0x0124, 0)                 # init_flags
-    struct.pack_into("<I", hdr, 0x0128, TEXT_VA)           # entry_point (raw)
+    struct.pack_into("<I", hdr, 0x0128, TEXT_VA ^ ENTRY_RETAIL_XOR if retail else TEXT_VA)   # entry_point
+    if retail:      # an empty kernel thunk table (zeros) in the headers
+        struct.pack_into("<I", hdr, 0x0158, (BASE + 0x800) ^ THUNK_RETAIL_XOR)
     struct.pack_into("<I", hdr, 0x013C, BASE)              # pe_base_address
     struct.pack_into("<I", hdr, 0x0140, HDR_SIZE + text_size)   # pe_size_of_image
 
@@ -98,8 +111,11 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
         print(__doc__.strip())
         sys.exit(0)
-    out = sys.argv[1] if len(sys.argv) > 1 else default_out
-    data = build()
+    args = sys.argv[1:]
+    retail = "--retail" in args
+    args = [a for a in args if a != "--retail"]
+    out = args[0] if args else default_out
+    data = build(retail)
     open(out, "wb").write(data)
     print(f"wrote {out}: {len(data)} bytes, {len(FUNCS)} functions "
           f"in .text @ 0x{TEXT_VA:08X}")

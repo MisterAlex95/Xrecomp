@@ -14,7 +14,10 @@ already there for this XBE, this toolkit and this title profile:
      the optional layers of profiles/ (a title's enhancements; left out with
      --no-title-layer; docs/technical/profiles.md)
   4. the C lift (tools.recomp) into the project
-  5. build it for this host (CMake), with the game data next to it
+  5. build it for this host, with the game data next to it: the compile
+     driver against the toolkit's prebuilt runtime when it has one for this
+     host (runtime/<host>/, no CMake: tools/prepare/desktop_build.py), else
+     CMake
 
 The work folder (default: <title id>-work next to SOURCE) holds everything it
 writes; nothing is written into the toolkit. Nothing from the game is ever
@@ -536,7 +539,12 @@ def main(argv=None):
     an = ap.add_argument_group("Android title pack (docs/android/prepare.md)")
     an.add_argument("--android", action="store_true", help="make a title pack for the Android app")
     an.add_argument("--pack-dir", help="packs folder: the pack goes to PACK_DIR/<TITLEID>/")
-    an.add_argument("--cc", help="clang (or the multicall LLVM binary, with --cc-prefix-arg clang)")
+    ap.add_argument("--builder", choices=("auto", "driver", "cmake"),
+                    help="desktop build: the compile driver against the toolkit's prebuilt runtime (runtime/<host>/), "
+                         "or CMake; default auto (the driver when that runtime is there and current, also "
+                         "$XBA_BUILDER); --cc, --jobs, --opt and --include-dir apply to the driver")
+    an.add_argument("--cc", help="clang (or the multicall LLVM binary, with --cc-prefix-arg clang); desktop: the "
+                                 "compiler (default: $XBA_CC, the toolkit's toolchain/, clang, cc)")
     an.add_argument("--cc-prefix-arg", action="append", default=[], metavar="ARG",
                     help="argument(s) put right after --cc (multicall: clang)")
     an.add_argument("--ld", help="ld.lld (default: CC ld.lld for a multicall CC, else ld.lld next to CC)")
@@ -857,24 +865,36 @@ def desktop(a):
 
     step(5, "building for this computer")
     build = os.path.join(proj, "build")
-    gen_args = ["-G", "Ninja"] if shutil.which("ninja") else []
-    run(["cmake", "-S", proj, "-B", build, "-DCMAKE_BUILD_TYPE=Release",
-         "-DXBOXRECOMP_DIR=" + ROOT,
-         # What a run meets that the analysis missed: the next prepare reads it.
-         "-DXBA_DISCOVERY_FILE=" + os.path.join(work, DISCOVERY_FILE).replace("\\", "/"),
-         # Where a launch of another image of the disc finds its executable (XBA-82).
-         "-DXBA_IMAGE_MAP=" + (a.image_map or os.path.join(work, IMAGE_MAP)).replace("\\", "/"),
-         # Which image this is, when not default.xbe (RECOMP_IMAGE: XeImageFileName).
-         "-DXBA_IMAGE_NAME=" + (a.image_name or "")] + gen_args, log)
-    progress(5, "compiling")
-    t = run(["cmake", "--build", build, "--parallel"], log, on_line=BuildProgress() if _REP else None)
-    note("built in %.0f s" % t, 90)
+    work_files = {
+        # What a run meets that the analysis missed: the next prepare reads it.
+        "XBA_DISCOVERY_FILE": os.path.join(work, DISCOVERY_FILE).replace("\\", "/"),
+        # Where a launch of another image of the disc finds its executable (XBA-82).
+        "XBA_IMAGE_MAP": (a.image_map or os.path.join(work, IMAGE_MAP)).replace("\\", "/"),
+        # Which image this is, when not default.xbe (RECOMP_IMAGE: XeImageFileName).
+        "XBA_IMAGE_NAME": a.image_name or ""}
+    from tools.prepare import desktop_build
+    from tools.prepare import compile as cc
+    try:
+        how, man, why = desktop_build.route(ROOT, getattr(a, "builder", None))
+    except cc.StepError as e:
+        raise SystemExit("%s: %s" % (e.code, e.msg))
+    if how == "driver":
+        exe = build_with_driver(a, proj, name, man, why, work_files, log)
+    else:
+        if why != "CMake (asked for)":
+            note("building with " + why)
+        gen_args = ["-G", "Ninja"] if shutil.which("ninja") else []
+        run(["cmake", "-S", proj, "-B", build, "-DCMAKE_BUILD_TYPE=Release", "-DXBOXRECOMP_DIR=" + ROOT]
+            + ["-D%s=%s" % kv for kv in work_files.items()] + gen_args, log)
+        progress(5, "compiling")
+        t = run(["cmake", "--build", build, "--parallel"], log, on_line=BuildProgress() if _REP else None)
+        note("built in %.0f s" % t, 90)
+        exe = os.path.join(build, name)
     if stamp.get("built") is False or stamp.get("runtime_sha256") != toolkit.runtime_digest():
         stamp["built"] = True
         stamp["runtime_sha256"] = toolkit.runtime_digest()     # what --check compares (XBA-134)
         with open(stamp_path, "w") as f:
             json.dump(stamp, f)
-    exe = os.path.join(build, name)
     if image and not a.no_data:
         if a.extract:
             data_dir = os.path.join(work, "game")
@@ -899,6 +919,32 @@ def desktop(a):
 
 
 IMAGE_MAP = "images.map"
+
+
+def build_with_driver(a, proj, name, man, why, work_files, log):
+    """Step 5 without CMake (XBA-86, tools/prepare/desktop_build.py): the
+    project's C by the compile driver, linked against the toolkit's prebuilt
+    runtime. The executable's path; SystemExit on a failure."""
+    from tools.prepare import compile as cc
+    from tools.prepare import desktop_build
+    procs = cc.Procs()
+    t0 = time.time()
+    try:
+        tc = desktop_build.find_toolchain(ROOT, cc_path=a.cc, procs=procs)
+        note("compile driver: %s; %s" % (tc.describe(), why))
+        progress(5, "compiling")
+
+        def prog(done, total, now, eta):
+            progress(5 + 85 * done // max(1, total), "compiling %d/%d" % (done, total))
+        exe, n, linked = desktop_build.build(proj, name, man, tc, ROOT, work_files, opt=a.opt, jobs=a.jobs,
+                                             log=log, on_progress=prog, include_dirs=a.include_dir)
+    except cc.StepError as e:
+        raise SystemExit("%s: %s (see %s)" % (e.code, e.msg, log))
+    except BaseException:           # a cancel or a crash: no compile left running
+        procs.cancel()
+        raise
+    note("built in %.0f s (%d compiled, %s)" % (time.time() - t0, n, "linked" if linked else "up to date"), 90)
+    return exe
 
 
 def check_state(source, work=None):
@@ -1033,6 +1079,9 @@ def prepare_other_images(a, py, xbe, data_dir, work, exe, log):
                "--image-name", rel.replace(os.sep, "/")]
         if a.force:
             cmd.append("--force")
+        for opt, v in (("--builder", getattr(a, "builder", None)), ("--cc", a.cc)):
+            if v:
+                cmd += [opt, v]
         run(cmd, log)
         from tools.compat.__main__ import project_exe
         sub_exe = project_exe(sub)
