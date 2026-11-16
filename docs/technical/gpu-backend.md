@@ -82,7 +82,8 @@ frame N); a synchronous read made it wait at every flip for the GPU to
 finish the frame, and on a tiler it also ends the render pass early. The
 cost is one frame of display latency, invisible at 30 fps next to the
 title's own input latency. A frame dump (`RECOMP_FB_DUMP_FLIPS`, the
-periodic report dump) needs the frame it names in guest memory, so a flip
+periodic report's dump with `RECOMP_FB_DUMP`; without it the report arms
+nothing) needs the frame it names in guest memory, so a flip
 that dumps reads synchronously; so does every flip with
 `RECOMP_GPU_PRESENT=sync`. A presented surface that was not drawn since its
 last read-back is shown as it is.

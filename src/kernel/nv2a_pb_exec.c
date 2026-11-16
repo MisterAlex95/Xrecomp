@@ -5811,6 +5811,16 @@ static void note_batch_gaps(void)
     }
 }
 
+/* RECOMP_PB_EXEC_VERBOSE, read once: the per-batch trace and the lines that
+ * only make sense next to it. */
+static int pb_exec_verbose(void)
+{
+    static int verbose = -1;
+    if (verbose < 0)
+        verbose = getenv("RECOMP_PB_EXEC_VERBOSE") != NULL;
+    return verbose;
+}
+
 static void draw_primitive(void)
 {
     float v[4];
@@ -5820,7 +5830,11 @@ static void draw_primitive(void)
         return;
     note_batch_gaps();
     s_gpu.draws++;
-    if ((s_gpu.draws % 200) == 0)
+    /* A heartbeat every 200 draws, only with the per-batch trace: a 3D scene
+     * draws hundreds of batches a frame, so this was a line every few frames
+     * on every host (into logcat on Android), and the report's "[GPU] draws"
+     * already gives the count every RECOMP_PB_REPORT_MS. */
+    if ((s_gpu.draws % 200) == 0 && pb_exec_verbose())
         fprintf(stderr, "  [GPU] draw #%u\n", s_gpu.draws);
     s_gpu.verts += s_gpu.idx_count;
     s_frame_tris += prim_triangles(s_gpu.prim, s_gpu.idx_count);
@@ -7715,6 +7729,13 @@ static unsigned long report_now_ms(void)
  * surface as it is. */
 static void fb_dump_report(void)
 {
+    /* Nothing to write without RECOMP_FB_DUMP, so nothing to arm: an armed
+     * flip is synchronous (the back end reads the frame back at the guest's
+     * size instead of presenting its own pixels), which every 10 s rebuilt
+     * the window's texture and frame generation -- a 114-125 ms hitch on
+     * the Thor in every title. Read each report, as dump_surface_bmp does. */
+    if (!getenv("RECOMP_FB_DUMP"))
+        return;
     if (s_flip_dumping)
         return;                           /* every flip is dumped already */
     if (s_gpu.flips && !s_dump_at_flip) {
@@ -7852,6 +7873,13 @@ void nv2a_pb_exec_report(void)
     fprintf(stderr, "[GPU] batches: %u textured, %u with no texcoords,"
                     " %u with texcoords but no usable stage\n",
             s_gpu.batches_textured, s_gpu.batches_no_uv, s_gpu.batches_no_tex);
+    /* One line per texture sampled since boot (100+ in a 3D title). On
+     * Android they go to logcat every report, where nobody reads them: only
+     * with the per-batch trace there. Desktop logs keep them (a file, and
+     * the one place that says which textures the batches used). */
+#ifdef __ANDROID__
+    if (pb_exec_verbose())
+#endif
     for (i = 0; i < s_tex_use_count; i++)
         fprintf(stderr, "  [TEXUSE] 0x%08X %ux%u fmt 0x%02X%s: %u batches\n",
                 s_tex_use[i].offset, s_tex_use[i].width, s_tex_use[i].height,
