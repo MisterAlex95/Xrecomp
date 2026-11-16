@@ -152,6 +152,8 @@ volatile uint32_t g_icall_trace[16]; volatile uint32_t g_icall_trace_idx;
 volatile uint64_t g_icall_count;
 ptrdiff_t g_xbox_mem_offset;
 void recomp_icall_fail_log(uint32_t va) { (void)va; }
+/* div/idiv lift a #DE check (XBA-110); no case divides by zero. */
+void recomp_divide_error(uint32_t va, uint32_t divisor) { (void)va; (void)divisor; }
 
 extern unsigned int g_in_a, g_in_b;
 extern unsigned int g_out_eax;
