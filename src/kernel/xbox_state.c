@@ -509,6 +509,7 @@ int xbox_StateContextThread(const XboxStateContext *ctx, int i, XboxStateThread 
     out->dispatch = r->dispatch;
     out->tid = (uint32_t)r->tid;
     out->kernel_calls = r->kernel_calls;
+    out->site = r->site;
     memcpy(&out->cpu, r->cpu, sizeof(RecompCpu));
     out->tib = out->cpu.r_fs_base;
     /* fs:[0x28] names the KTHREAD (XBA-113); the runtime fills its StackBase (+0x1C), StackLimit (+0x20)
@@ -613,6 +614,11 @@ int xbox_StateCaptureFrozen(uint8_t **blob, size_t *blob_n, XboxStateStats *st)
             REASON(st->reason, "guest thread %lu is running (not frozen)", recs[i].tid);
             return XBOX_STATE_EFREEZE;
         }
+        if (recs[i].dispatch && recs[i].site != XBOX_PARK_SITE_KERNEL) {
+            REASON(st->reason, "guest thread %lu is held at DISPATCH_LEVEL (in %s at 0x%08X)", recs[i].tid,
+                   xbox_ParkSiteName(recs[i].site), recs[i].ret_va);
+            return XBOX_STATE_EBUSY;
+        }
         if (recs[i].dispatch) {
             REASON(st->reason, "guest thread %lu is held at DISPATCH_LEVEL (in ordinal %u from 0x%08X)",
                    recs[i].tid, recs[i].ordinal, recs[i].ret_va);
@@ -713,8 +719,13 @@ int xbox_StateCapture(uint32_t timeout_ms, uint8_t **blob, size_t *blob_n, XboxS
         REASON(st->reason, "no freeze within %u ms", timeout_ms);
         for (k = 0; k < ps.threads; k++)
             if (ps.t[k].state == XBOX_PARK_RUNNING) {
-                REASON(st->reason, "guest thread %lu did not reach a kernel call within %u ms (it last called"
-                       " ordinal %u from 0x%08X)", ps.t[k].tid, timeout_ms, ps.t[k].ordinal, ps.t[k].ret_va);
+                if (ps.t[k].site != XBOX_PARK_SITE_KERNEL)
+                    REASON(st->reason, "guest thread %lu did not reach a kernel call within %u ms (it was last"
+                           " in %s at 0x%08X)", ps.t[k].tid, timeout_ms, xbox_ParkSiteName(ps.t[k].site),
+                           ps.t[k].ret_va);
+                else
+                    REASON(st->reason, "guest thread %lu did not reach a kernel call within %u ms (it last called"
+                           " ordinal %u from 0x%08X)", ps.t[k].tid, timeout_ms, ps.t[k].ordinal, ps.t[k].ret_va);
                 break;
             }
         InterlockedExchange((volatile LONG *)&s_capturing, 0);

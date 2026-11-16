@@ -407,7 +407,9 @@ void xbox_GuestCpuBlocked(void)
  * switched no threads there) and not on a thread that does not hold the CPU
  * (a host thread's callback, the lock off); the flag is cleared when
  * nothing is to be done, and the waiter sets it again at its next poll if
- * it still waits. */
+ * it still waits. Queued for the CPU the thread runs no guest code: a park
+ * point for save states (XBA-251), left after the acquire like a kernel call,
+ * so a freeze holds it there. */
 void xbox_GuestCpuPreempt(uint32_t va)
 {
     if (!t_held)
@@ -417,8 +419,10 @@ void xbox_GuestCpuPreempt(uint32_t va)
         return;
     }
     InterlockedIncrement(&s_preempts);
+    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_PREEMPT, va);
     guest_cpu_handoff(XBOX_GUEST_CPU_PREEMPT, va);
     guest_cpu_acquire(0);
+    xbox_ParkHostWaitLeave();
 }
 
 /* Guest code a bridge runs on a guest thread (an unwind handler, a

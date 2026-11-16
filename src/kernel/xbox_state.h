@@ -16,8 +16,9 @@
  *
  * Built-in sections (this file's ticket):
  *   CPU   per guest thread its park record (kernel_park.h): the call it is in (ordinal, guest return
- *         address), whether it returned and its status, the RecompCpu, the TIB, the KTHREAD, the guest
- *         stack bounds and the guest thread id read from the KTHREAD
+ *         address) or the host wait inside lifted code (site kind and guest VA, XBA-251), whether it
+ *         returned and its status, the RecompCpu, the TIB, the KTHREAD, the guest stack bounds and the
+ *         guest thread id read from the KTHREAD
  *   MEM   the memory manager's host-side state (xbox_MemStateSave: heap, contiguous window, lazy
  *         reservations, guest_vmem)
  *   RAM   guest memory, range by range (xbox_StateGuestRanges): a bitmap of the pages stored (not all
@@ -68,7 +69,8 @@ extern "C" {
 #define XBOX_STATE_TAG_APU  XBOX_STATE_TAG('A', 'P', 'U', ' ')   /* XBA-248 */
 #define XBOX_STATE_TAG_USB  XBOX_STATE_TAG('U', 'S', 'B', ' ')   /* XBA-248 */
 
-#define XBOX_STATE_CPU_VERSION 1
+/* CPU v2 (XBA-251): the park site kind (XboxParkRecord.site) in each thread's head; v1 is refused. */
+#define XBOX_STATE_CPU_VERSION 2
 #define XBOX_STATE_RAM_VERSION 1
 /* MEM: XBOX_MEM_STATE_VERSION (xbox_memory_layout.h) */
 
@@ -197,6 +199,8 @@ typedef struct XboxStateThread {
     uint32_t stack_base, stack_limit;   /* the guest stack: KTHREAD StackBase (+0x1C) / StackLimit (+0x20) */
     uint32_t guest_tid;      /* KTHREAD UniqueThread (+0x12C): the id the title sees */
     RecompCpu cpu;
+    uint32_t site;           /* XBOX_PARK_SITE_*: KERNEL (ordinal, ret_va the call's return address) or a
+                              * host wait inside lifted code (ordinal 0, ret_va the site's VA), XBA-251 */
 } XboxStateThread;
 int xbox_StateContextThread(const XboxStateContext *ctx, int i, XboxStateThread *out);
 

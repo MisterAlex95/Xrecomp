@@ -1,9 +1,12 @@
 /*
  * xbox_state_guest.c - the built-in sections of an Xbox save state: CPU, MEM, RAM (XBA-245, xbox_state.h)
  *
- * CPU v1   u32 thread count, u32 sizeof(RecompCpu), then per thread a 64-byte head and the RecompCpu:
+ * CPU v2   u32 thread count, u32 sizeof(RecompCpu), then per thread a 68-byte head and the RecompCpu:
  *            slot, park state, ordinal, guest return address, returned (0 / 1), status, dispatch, host tid,
- *            u64 kernel calls, TIB, KTHREAD, guest stack base, guest stack limit, esp, guest thread id
+ *            u64 kernel calls, TIB, KTHREAD, guest stack base, guest stack limit, esp, guest thread id,
+ *            park site (XBOX_PARK_SITE_*: 0 a kernel call; else a host wait inside lifted code, XBA-251,
+ *            whose ordinal is 0 and guest return address the site's VA). v1 (64-byte head, no site) is
+ *            refused: a state only loads into the build that wrote it anyway.
  * MEM v1   xbox_MemStateSave (xbox_memory_layout.c)
  * RAM v1   u32 range count, then per range u32 kind (XBOX_RANGE_*), u32 guest base, u32 pages, a bitmap of
  *          the pages stored (bit set: not all zero; (pages + 7) / 8 bytes), then those pages, 4 KB each
@@ -18,7 +21,7 @@
 #include <string.h>
 
 #define PAGE 4096u
-#define CPU_HEAD 64u
+#define CPU_HEAD 68u
 
 /* ---- CPU ------------------------------------------------------------------------------------------------- */
 
@@ -48,6 +51,7 @@ int xbox_state_cpu_save(XboxStateWriter *w, const XboxStateContext *ctx, void *u
         xbox_StatePut32(w, t.stack_limit);
         xbox_StatePut32(w, t.cpu.r_esp);
         xbox_StatePut32(w, t.guest_tid);
+        xbox_StatePut32(w, t.site);
         xbox_StatePut(w, &t.cpu, sizeof t.cpu);
     }
     return XBOX_STATE_OK;
@@ -81,10 +85,12 @@ int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int m
         t.stack_limit = xbox_StateGet32(&r);
         (void)xbox_StateGet32(&r);   /* esp, also in the RecompCpu */
         t.guest_tid = xbox_StateGet32(&r);
+        t.site = xbox_StateGet32(&r);
         cpu = xbox_StateGet(&r, cpu_bytes);
         if (r.bad || t.slot < 0 || t.slot >= XBOX_PARK_MAX_THREADS || (used >> t.slot) & 1u
             || (t.state != XBOX_PARK_KERNEL && t.state != XBOX_PARK_WAITING && t.state != XBOX_PARK_HELD)
-            || (t.returned != 0 && t.returned != 1) || t.dispatch)
+            || (t.returned != 0 && t.returned != 1) || t.dispatch
+            || t.site >= XBOX_PARK_SITE_COUNT || (t.site != XBOX_PARK_SITE_KERNEL && t.ordinal != 0))
             return -1;
         used |= 1ull << t.slot;
         memcpy(&t.cpu, cpu, sizeof t.cpu);

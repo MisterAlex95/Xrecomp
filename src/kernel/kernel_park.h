@@ -21,12 +21,26 @@
  *   xbox_ParkThreadStart / End      around a guest thread's routine (kernel_bridge.c)
  *   xbox_ParkKernelEnter / Leave    around every kernel call (kernel_thunk_dispatch)
  *   xbox_ParkCallbackEnter / Leave  around guest code a bridge runs (xbox_GuestCpuEnterCallback)
+ *   xbox_ParkHostWaitEnter / Leave  around the runtime helpers lifted code calls that wait on the host
+ *                                   (XBA-251, below)
  * Leave and CallbackEnter block while a freeze holds the thread.
+ *
+ * Host waits inside lifted code (XBA-251): a guest thread can also wait in the middle of a lifted
+ * function, in a runtime helper the lifter emits a call to, with no kernel call: xbox_GuestPollWait (the
+ * back edge of a loop that only polls one memory word, RECOMP_POLL_WAIT), xbox_Nv2aKickWait (D3D's PFB
+ * flush kick, from xbox_GuestPollWait or a title override), xbox_Halt (hlt) and xbox_GuestCpuPreempt
+ * (a back edge handing the guest CPU over, RECOMP_BACK_EDGE). Each is a park point like a kernel call:
+ * the thread is between two guest instructions at a known guest VA (the site), its registers are in
+ * g_cpu, and the helper changes no guest state a restore would have to replay (calling it again is
+ * harmless: the poll loop tests its word again, a kick sets a bit already set). Its record says
+ * « in host wait <site kind> at <va> » (ordinal 0, ret_va the site's VA); returned means the helper
+ * returned and the thread resumes in the lifted code right after the call. xbox_GuestPollWait parks
+ * even when it returns at once, so a thread spinning in a marked poll loop is held at its next turn.
  *
  * Not covered: the timer thread's DPCs and the device models' ISRs (host threads that run guest
  * callbacks: quiesced by holding the one-CPU gate, not here), the thunk-table path of native-call
- * titles (kernel_thunks.c), and host waits made from inside lifted code (xbox_GuestPollWait, NV2A kick
- * waits): a thread blocked there counts as busy.
+ * titles (kernel_thunks.c), and a spin loop the lifter did not mark (anything but `test [mem], imm;
+ * jcc itself`, without --back-edge-yield): a thread there counts as busy.
  *
  * Statistics: the share of time every registered guest thread was parked at once, and how many such
  * windows there were, from the busy count's transitions (approximate under races, never wrong by more
@@ -53,19 +67,31 @@ enum {
     XBOX_PARK_HELD           /* held by a freeze at the end of a kernel call, or at a callback's start */
 };
 
+/* Where a parked thread is (XboxParkRecord.site): a kernel call, or a host wait inside lifted code. */
+enum {
+    XBOX_PARK_SITE_KERNEL = 0,   /* a top-level kernel call (ordinal, guest return address) */
+    XBOX_PARK_SITE_POLL,         /* xbox_GuestPollWait returning at once: a poll loop's back edge */
+    XBOX_PARK_SITE_KICK,         /* xbox_Nv2aKickWait: waits for the NV2A ack thread (blocks) */
+    XBOX_PARK_SITE_HALT,         /* xbox_Halt: hlt, the guest CPU let go for a millisecond (blocks) */
+    XBOX_PARK_SITE_PREEMPT,      /* xbox_GuestCpuPreempt: queued for the guest CPU at a back edge (blocks) */
+    XBOX_PARK_SITE_COUNT
+};
+
 typedef struct {
     int state;               /* XBOX_PARK_* */
-    uint32_t ordinal;        /* the top-level kernel call it is in (or last made) */
-    uint32_t ret_va;         /* that call's guest return address */
+    uint32_t ordinal;        /* the top-level kernel call it is in (or last made); 0 at a host wait */
+    uint32_t ret_va;         /* that call's guest return address, or the host wait's site */
     int dispatch;            /* held at DISPATCH_LEVEL (it holds the one-CPU gate) */
     unsigned long tid;       /* host thread id */
     uint64_t kernel_calls;   /* top-level kernel calls so far */
+    uint32_t site;           /* XBOX_PARK_SITE_* of that park point (XBA-251) */
 } XboxParkThread;
 
 typedef struct {
     int threads;             /* registered guest threads */
     int parked;              /* of those, at a kernel boundary (KERNEL, WAITING or HELD) */
-    int waiting;             /* of those, in a blocking call */
+    int waiting;             /* of those, in a blocking call or a blocking host wait */
+    int host_waits;          /* of the parked ones, at a host wait inside lifted code (XBA-251) */
     int frozen;              /* a freeze is in force */
     uint64_t all_parked_ns;  /* time every registered thread was parked at once (since the last reset) */
     uint64_t window_ns;      /* time covered (since the last reset) */
@@ -86,6 +112,13 @@ void xbox_ParkKernelEnter(uint32_t ordinal, uint32_t ret_va);
 void xbox_ParkKernelLeave(void);
 void xbox_ParkCallbackEnter(void);
 void xbox_ParkCallbackLeave(void);
+/* A host wait inside lifted code (XBOX_PARK_SITE_POLL .. PREEMPT, va the guest VA of the call site; 0 when
+ * the caller has none, a title override's call). Nested ones (xbox_GuestPollWait's kick wait) only count
+ * once: the outermost site is recorded. Leave blocks while a freeze holds the thread. */
+void xbox_ParkHostWaitEnter(uint32_t site, uint32_t va);
+void xbox_ParkHostWaitLeave(void);
+/* "kernel call", "poll loop", "NV2A kick wait", "hlt", "guest CPU preempt"; "?" otherwise. */
+const char *xbox_ParkSiteName(uint32_t site);
 
 /* The calling thread's kernel-call and callback depths, packed in 16 bits, and putting them back: an SEH
  * resume or a guest longjmp that jumps over bridge frames skips their Leave hooks (xbox_SehRuntimeSnapshot
@@ -109,6 +142,9 @@ void xbox_ParkStatsGet(XboxParkStats *out, int reset);
 /* One line for the periodic kernel summary, when guest threads are registered:
  *   [KERNEL] park: 3 guest threads, all parked 61.0% of 2000 ms (376 windows, longest so far 5.9 ms); now 1
  *            running (one last called 99 from 0x00011000), 2 waiting
+ * and, when parked threads are at host waits inside lifted code (XBA-251), the count and one of them:
+ *            ..., 2 waiting, 1 at a host wait (NV2A kick wait at 0x0001A2B4)
+ * A running thread whose last park point was a host wait reads « (one last in poll loop at 0x...) ».
  * "now" is the moment of the report; the share and the windows cover the time since the previous report
  * (the statistics xbox_ParkStatsGet reads are not reset).
  * Returns 1 when it printed. */
@@ -133,7 +169,13 @@ uint32_t xbox_ParkGuestPages(uint32_t *resident, uint32_t *nonzero);
  * Each record has a sequence number, odd while its owner rewrites it. xbox_ParkRecords reads them while a
  * freeze holds the threads; a frozen thread can still change its record once (its call returns, then the
  * freeze holds it), so a capture reads the records, captures, and calls xbox_ParkRecordsChanged: a change
- * means a call returned meanwhile and the capture must be taken again (that thread is held now). */
+ * means a call returned meanwhile and the capture must be taken again (that thread is held now).
+ *
+ * A host wait inside lifted code (XBA-251) keeps the same record: site XBOX_PARK_SITE_POLL .. PREEMPT,
+ * ordinal 0, ret_va the site's guest VA, the registers at the call (Enter) or after it (Leave, returned;
+ * status is eax then, meaningless). A reader that only knows kernel calls tells them apart by `site`
+ * (or by ordinal 0: no kernel export has ordinal 0). The field is new at the end of the record: code
+ * written against the XBA-245 record compiles unchanged. */
 #define XBOX_PARK_CPU_BYTES 512      /* room for a RecompCpu (sizeof checked in kernel_park.c) */
 
 typedef struct {
@@ -149,6 +191,7 @@ typedef struct {
     uint32_t seq;            /* even: the record is complete */
     uint32_t cpu_bytes;      /* sizeof(RecompCpu) */
     uint64_t cpu[XBOX_PARK_CPU_BYTES / 8];   /* the RecompCpu, cpu_bytes of it */
+    uint32_t site;           /* XBOX_PARK_SITE_*: a kernel call, or a host wait inside lifted code */
 } XboxParkRecord;
 
 /* The registered threads' records (at most max), each read consistently: a record being rewritten is waited

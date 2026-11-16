@@ -22,7 +22,8 @@ features the console runtimes have had since 0.8.0 (XBA-182, XBA-194) and the Xb
   context, the audio device or the JVM the app runs in.
 - **The class of titles**: every guest thread regularly enters a kernel wait or call (the usual XDK title: D3D's
   present and vblank waits, DirectSound's worker, loaders waiting on events); no guest fibers or hand-made stack
-  switches (XBA-101: Fable is out); no thread spinning on guest memory without kernel calls; built through the
+  switches (XBA-101: Fable is out); no thread spinning on guest memory without kernel calls, except in a poll loop
+  the lifter marks or behind a back edge lifted with `--back-edge-yield` (XBA-251, below); built through the
   kernel bridge (not the native-call thunk table). A title outside the class says so (« save states unavailable:
   <reason> ») instead of offering a state that cannot load.
 
@@ -137,6 +138,7 @@ Always on; one atomic add when a thread changes between parked and busy, a few t
 | `xbox_ParkKernelEnter / Leave` | `kernel_thunk_dispatch`, around every bridge; Leave after the guest CPU is taken back, so a thread queued for the guest CPU is still parked |
 | `xbox_ParkCallbackEnter / Leave` | `xbox_GuestCpuEnterCallback / LeaveCallback` (guest code a bridge runs) |
 | Depth snapshot / restore | Carried in `xbox_SehRuntimeSnapshot / Restore`, so an SEH resume or a guest longjmp over bridge frames leaves the counts right |
+| `xbox_ParkHostWaitEnter / Leave` | The runtime helpers lifted code calls that wait on the host (XBA-251, below): `xbox_GuestPollWait`, `xbox_Nv2aKickWait`, `xbox_Halt`, `xbox_GuestCpuPreempt` |
 
 A thread is **parked** when it is exactly one kernel call deeper than where its routine started and in no further
 callback. `xbox_ParkFreeze(timeout, &stats)` sets a flag and waits until no registered thread is busy; a thread
@@ -152,8 +154,52 @@ The periodic kernel summary (every 2 s) prints one line:
 ```
 
 Not covered by the prototype: the timer thread's DPCs and the device models' ISRs (quiesced by the one-CPU gate in
-the capture, XBA-245), the native-call thunk-table path (`kernel_thunks.c`), and host waits made from inside lifted
-code (`xbox_GuestPollWait`, NV2A kick waits): a thread blocked there counts as busy (XBA-251).
+the capture, XBA-245), the native-call thunk-table path (`kernel_thunks.c`), and a spin loop the lifter did not mark
+(anything but `test [mem], imm; jcc itself`, without `--back-edge-yield`): a thread there counts as busy.
+
+### Host waits inside lifted code (XBA-251)
+
+A thread can also wait in the middle of a lifted function, with no kernel call, in a runtime helper the lifter emits
+a call to. Every such helper (the lifter and `recomp_types.h` were searched for calls that block) is a park point:
+
+| Helper | Emitted for | Site kind | Blocks |
+|---|---|---|---|
+| `xbox_GuestPollWait(word, mask, while_set, va)` | `RECOMP_POLL_WAIT`, the back edge of a loop that only polls one word (`_mark_poll_loops`) | `XBOX_PARK_SITE_POLL` (returns at once) or `_KICK` (the PFB flush word: waits for the NV2A ack thread) | Kick only |
+| `xbox_Nv2aKickWait(reg, mask)` | `xbox_GuestPollWait` on the PFB flush word, or a title override | `XBOX_PARK_SITE_KICK` (site VA 0 from an override) | Yes |
+| `xbox_Halt(va)` | `hlt` | `XBOX_PARK_SITE_HALT` | 1 ms |
+| `xbox_GuestCpuPreempt(va)` | `RECOMP_BACK_EDGE` with the preempt flag set (`--back-edge-yield`, guest CPU lock on) | `XBOX_PARK_SITE_PREEMPT` | Until the guest CPU is free |
+
+The others the lifter emits (`recomp_lookup`, port I/O, cpuid, control registers, SEH anchors, the stack switch
+helpers, `xbox_GuestInterruptFlag`) do not wait on another thread, or only for a lock held for a moment.
+
+Each is entered like a top-level kernel call (one kernel-call level; nested ones, the kick wait inside the poll
+wait, count once; one inside a kernel call leaves the call the park point): Enter records the registers (`g_cpu`,
+as at the site) with the site, the helper runs, Leave records them again as `returned` and blocks while a freeze
+holds the thread. No helper changes guest state a restore would have to replay: calling it again is harmless (the
+poll loop tests its word again, the kick sets a bit already set, a hlt or a preempt just waits). So a record means
+« in host wait K at VA » (re-issue the helper) or « returned from host wait K at VA » (resume in the lifted code right
+after the call). `xbox_GuestPollWait` parks even when it returns at once: a thread spinning in a marked poll loop is
+held at its next turn, which takes it out of « a thread that never parks ».
+
+The `ebp` caveat is the same as for kernel calls: inside lifted code `ebp` is a C local, so the recorded `r_ebp` is
+not the thread's until XBA-247. The site's VA is the poll loop's `jcc`, the `hlt`, or the back edge's source; the
+chain signatures and the call-site unwind table (XBA-247, XBA-250) need these sites as well as the kernel calls.
+
+The park line names one:
+
+```
+[KERNEL] park: 6 guest threads, all parked 69.6% of 1250 ms (...); now 0 running, 0 waiting, 3 at a host wait (poll loop at 0x0001A100)
+```
+
+A thread spinning in a poll loop moves between parked and busy at every turn, so the all-parked window count grows
+with it (thousands per second in the test): the share stays meaningful, the window count and mean do not.
+
+Tests: `tests/kernel_park` (« Host waits »: a thread in a marked poll loop on a guest word, one kicking the PFB flush
+through `xbox_GuestPollWait`, one halting, the loops' back edges calling `xbox_GuestCpuPreempt` as lifted code with
+`--back-edge-yield` does; 20 freezes reach all of them with their sites, nothing runs while frozen, they run again
+after the thaw; the hooks' nesting) and `tests/xbox_state` (« Host waits »: a capture with a poll thread and a kick
+thread writes them as host-wait records, the reader refuses an unknown site or a host wait with an ordinal), both
+also with the guest CPU lock on (there the kick thread is often held at its preempt).
 
 ## Kernel objects (`src/kernel/kernel_kobj_state.c`, XBA-246)
 
@@ -222,12 +268,25 @@ The sections this ticket writes (built in, always first):
 
 | Tag | Version | Payload |
 |---|---|---|
-| `CPU ` | 1 | u32 thread count, u32 sizeof(RecompCpu); per guest thread a 64-byte head (park slot, park state, ordinal, guest return address, returned, status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base and limit from the KTHREAD, esp, guest thread id) then the raw RecompCpu |
+| `CPU ` | 2 | u32 thread count, u32 sizeof(RecompCpu); per guest thread a 68-byte head (park slot, park state, ordinal, guest return address, returned, status, dispatch, host tid, u64 kernel calls, TIB, KTHREAD, guest stack base and limit from the KTHREAD, esp, guest thread id, park site) then the raw RecompCpu |
 | `MEM ` | 1 | `xbox_MemStateSave`: heap cursor, alloc count and block table, worker stack count; the contiguous window's counters, page map, block lengths (sparse) and RAM-name map; the lazy reservations; guest_vmem's page table as runs |
 | `RAM ` | 1 | u32 range count; per range u32 kind, u32 guest base, u32 pages, a bitmap of the pages stored, then those pages (4 KB each) |
 
 Not in the design's first draft: the ebp shadow stack and the chain signature in `CPU ` (XBA-247 adds them and bumps
 the section's version), compression.
+
+**Park records, two kinds** (`CPU ` v2, XBA-251; v1 had no site and is refused, `EVERSION`). The head's last word,
+the park site (`XboxParkRecord.site`, `XboxStateThread.site`, `XBOX_PARK_SITE_*` in `kernel_park.h`), says which:
+
+| Site | Kind | ordinal | guest return address | Resume |
+|---|---|---|---|---|
+| 0 `KERNEL` | Top-level kernel call | The call (never 0) | The call's return address (at esp while in the call) | Not returned: re-issue the call. Returned: eax the status, continue at the return address |
+| 1 `POLL`, 2 `KICK`, 3 `HALT`, 4 `PREEMPT` | Host wait inside lifted code (above) | 0 | The site's guest VA (0: a title override's kick, no site) | Not returned: call the helper again. Returned: continue in the lifted code after the call (the status word is meaningless) |
+
+`xbox_StateCpuThreads` refuses a site of 5 or more and a host-wait record with an ordinal. The record API is
+unchanged otherwise (the field is appended to both structs): a load (XBA-249) that only knows kernel calls tells a
+host wait by `site != XBOX_PARK_SITE_KERNEL` (or ordinal 0) and, in session, treats it like a kernel-call park at the
+same chain; across runs (XBA-250) the resume entry is the helper's call site.
 
 **Ranges** (`xbox_StateGuestRanges`): the RAM view `[0, mapped size)`, the contiguous window up to its high-water
 mark (its own storage, not RAM: the KTHREADs of spawned threads live there), the lazy reservations (POSIX,
@@ -384,5 +443,5 @@ xemu-derived `src/nv2a` model (Windows MMIO path, not run by recompiled titles).
 | XBA-248 | NV2A, APU and USB capture and restore | |
 | XBA-249 | In-session restore: rewind, quick save / load within a run, attach to `recomp_states` | 245, 246, 247, 248 |
 | XBA-250 | Resume entries in lifted code: states across runs, « Resume where I left off » | 247, 249 |
-| XBA-251 | Park points at host waits inside lifted code (guest poll waits, NV2A kick waits) | |
+| XBA-251 | Park points at host waits inside lifted code (guest poll waits, NV2A kick waits, hlt, preempts): done (`CPU ` v2) | |
 | XBA-252 | Park statistics on our titles (Linux arm64, device) | |

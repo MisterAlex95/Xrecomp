@@ -15,6 +15,7 @@
 #include "kernel_missing.h"
 #include "xbox_memory_layout.h"   /* RECOMP_TLS, g_fs_base */
 #include "xbox_seh.h"            /* recomp_divide_error raises #DE (XBA-112) */
+#include "kernel_park.h"          /* hlt is a park point (XBA-251) */
 #include "recomp_discovery.h"     /* an unhandled #DE is recorded (XBA-129) */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1071,7 +1072,9 @@ int xbox_GuestInterruptsMasked(void)
  * millisecond, as NtYieldExecution lets them go, so the threads and device
  * models that raise the interrupt can run. A guest that halts in a loop
  * (`hlt; jmp $-1`) waits that way without spinning a host core. With IF
- * clear the console would stop there for good; that is reported once. */
+ * clear the console would stop there for good; that is reported once.
+ * The wait is a park point for save states (XBA-251): a freeze holds the
+ * thread at the hlt. */
 void xbox_Halt(uint32_t va)
 {
     int held;
@@ -1085,10 +1088,12 @@ void xbox_Halt(uint32_t va)
         }
     }
     xbox_IrqSafePoint();
+    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_HALT, va);
     held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL, 238 /* NtYieldExecution */);
     Sleep(1);
     if (held)
         xbox_GuestCpuAcquire();
+    xbox_ParkHostWaitLeave();      /* after the acquire, as a kernel call's Leave */
 }
 
 /*

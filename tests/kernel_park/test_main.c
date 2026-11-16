@@ -23,6 +23,19 @@
  *   Thread ends     by returning and by PsTerminateSystemThread: unregistered.
  *   Nesting         a guest routine a bridge runs inside a kernel call (an
  *                   APC) is not parked, and its own kernel calls are not.
+ *   Host waits      (XBA-251) threads that wait inside lifted code with no
+ *                   kernel call: one spinning in a marked poll loop on a guest
+ *                   word (xbox_GuestPollWait returning at once), one kicking
+ *                   the PFB flush and blocked until the NV2A ack thread clears
+ *                   it (xbox_GuestPollWait -> xbox_Nv2aKickWait), one halting
+ *                   (xbox_Halt). Each loop's back edge checks the guest CPU's
+ *                   preempt flag as lifted code with --back-edge-yield does
+ *                   (xbox_GuestCpuPreempt, a park point too). Freezes reach
+ *                   them, the threads show their site (kind, guest VA), the
+ *                   summary line names one, none runs while frozen, and they
+ *                   run again after the thaw. The hooks themselves on this
+ *                   thread: nesting counts once, a host wait inside a kernel
+ *                   call is not a park point of its own.
  */
 #include "kernel.h"
 #include "kernel_park.h"
@@ -50,13 +63,21 @@ enum { ORD_DELAY = 99, ORD_NTCLOSE = 187, ORD_PSCREATE = 255, ORD_PSTERM = 258 }
 static const uint32_t ORDS[] = { ORD_DELAY, ORD_NTCLOSE, ORD_PSCREATE, ORD_PSTERM };
 #define NORDS (sizeof ORDS / sizeof ORDS[0])
 
-enum { K_RENDER, K_AUDIO, K_LOADER, K_SPIN, K_TERM, K_COUNT };
-static const char *const KNAME[K_COUNT] = { "render", "audio", "loader", "spin", "term" };
+enum { K_RENDER, K_AUDIO, K_LOADER, K_SPIN, K_TERM, K_POLL, K_KICK, K_HALT, K_COUNT };
+static const char *const KNAME[K_COUNT] = { "render", "audio", "loader", "spin", "term", "poll", "kick", "halt" };
 #define RET_VA(kind) (0x00011000u + 0x10u * (uint32_t)(kind))
+/* The host-wait sites (XBA-251): the guest VA lifted code passes. */
+#define POLL_VA 0x0001A100u
+#define KICK_VA 0x0001A200u
+#define HALT_VA 0x0001A300u
+#define PFB_FLUSH 0x00100410u
+#define FLUSH_BIT 0x00010000u
 
 static int failures;
 static uint32_t g_thunks, g_stack, g_handles;
-static volatile int g_stop, g_spin_stop;
+static volatile int g_stop, g_spin_stop, g_hw_stop;
+static uint32_t g_pollword;                 /* the guest word the poll thread waits on */
+static volatile uint64_t g_kicks, g_halts;
 static volatile unsigned long g_progress;   /* guest "instructions" run */
 
 static void check(int ok, const char *what, const char *detail)
@@ -126,6 +147,14 @@ static void guest_work(uint64_t us)
         __atomic_add_fetch(&g_progress, 1, __ATOMIC_RELAXED);
 }
 
+/* RECOMP_BACK_EDGE (recomp_types.h, lifted with --back-edge-yield): hand the guest CPU over when a
+ * waiter asked. Without it a thread spinning in a poll loop would keep the CPU from the others under the
+ * guest CPU lock. */
+#define RECOMP_BACK_EDGE_TEST(va) \
+    do { if (__atomic_load_n(&g_xbox_guest_cpu_preempt, __ATOMIC_RELAXED)) xbox_GuestCpuPreempt(va); } while (0)
+
+void xbox_Halt(uint32_t va);
+
 static void worker(void)
 {
     int kind = (int)G32(g_esp + 4);   /* ctx1 (return address, ctx1, ctx2) */
@@ -143,6 +172,36 @@ static void worker(void)
     case K_SPIN:
         while (!g_spin_stop)
             __atomic_add_fetch(&g_progress, 1, __ATOMIC_RELAXED);
+        break;
+    case K_POLL:    /* `test [w], 1; je $` with RECOMP_POLL_WAIT on the back edge */
+        while (!g_hw_stop) {
+            while (!(G32(g_pollword) & 1u) && !g_hw_stop) {
+                __atomic_add_fetch(&g_progress, 1, __ATOMIC_RELAXED);
+                xbox_GuestPollWait(&G32(g_pollword), 1u, 0, POLL_VA);
+                RECOMP_BACK_EDGE_TEST(POLL_VA);
+            }
+            guest_sleep(kind, 2);
+        }
+        break;
+    case K_KICK: {  /* D3D's KickOff: set the flush bit, poll until the ack thread clears it */
+        volatile uint32_t *kick = xbox_Nv2aRegPtr(PFB_FLUSH);
+        while (!g_hw_stop && kick) {
+            *kick |= FLUSH_BIT;
+            while (*kick & FLUSH_BIT) {
+                __atomic_add_fetch(&g_progress, 1, __ATOMIC_RELAXED);
+                xbox_GuestPollWait(kick, FLUSH_BIT, 1, KICK_VA);
+            }
+            __atomic_add_fetch(&g_kicks, 1, __ATOMIC_RELAXED);
+            RECOMP_BACK_EDGE_TEST(KICK_VA);
+        }
+        break;
+    }
+    case K_HALT:    /* hlt; jmp $-1 */
+        while (!g_hw_stop) {
+            __atomic_add_fetch(&g_progress, 1, __ATOMIC_RELAXED);
+            xbox_Halt(HALT_VA);
+            __atomic_add_fetch(&g_halts, 1, __ATOMIC_RELAXED);
+        }
         break;
     case K_TERM:
         guest_sleep(kind, 5);
@@ -380,6 +439,151 @@ static void phase_nesting(void)
     check(st.threads == 0, "ended: unregistered", NULL);
 }
 
+static int site_ok(const XboxParkThread *t, uint32_t *seen)
+{
+    if (t->site == XBOX_PARK_SITE_KERNEL)
+        return t->ordinal == ORD_DELAY && kind_of_ret(t->ret_va) >= 0;
+    if (t->ordinal != 0)
+        return 0;
+    *seen |= 1u << t->site;
+    switch (t->site) {
+    case XBOX_PARK_SITE_POLL:    return t->ret_va == POLL_VA;
+    case XBOX_PARK_SITE_KICK:    return t->ret_va == KICK_VA;
+    case XBOX_PARK_SITE_HALT:    return t->ret_va == HALT_VA;
+    case XBOX_PARK_SITE_PREEMPT: return t->ret_va == POLL_VA || t->ret_va == KICK_VA;
+    default:                     return 0;
+    }
+}
+
+static void phase_host_waits_hooks(void)
+{
+    XboxParkStats st;
+
+    printf("Host waits inside lifted code: the hooks (this thread)\n");
+    xbox_ParkThreadStart();
+    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_KICK, KICK_VA);
+    xbox_ParkStatsGet(&st, 0);
+    check(xbox_ParkThisThreadParked() && st.threads == 1 && st.waiting == 1 && st.host_waits == 1
+          && st.t[0].site == XBOX_PARK_SITE_KICK && st.t[0].ordinal == 0 && st.t[0].ret_va == KICK_VA
+          && st.t[0].kernel_calls == 0, "in a kick wait: parked, waiting, at its site", NULL);
+    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_KICK, 0);   /* xbox_Nv2aKickWait inside xbox_GuestPollWait */
+    xbox_ParkStatsGet(&st, 0);
+    check(xbox_ParkThisThreadParked() && st.t[0].ret_va == KICK_VA, "a nested host wait counts once", NULL);
+    xbox_ParkHostWaitLeave();
+    check(xbox_ParkThisThreadParked(), "and leaving it leaves the outer one parked", NULL);
+    xbox_ParkHostWaitLeave();
+    check(!xbox_ParkThisThreadParked(), "out of the wait: running", NULL);
+    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_POLL, POLL_VA);
+    xbox_ParkStatsGet(&st, 0);
+    check(xbox_ParkThisThreadParked() && st.waiting == 0 && st.t[0].state == XBOX_PARK_KERNEL
+          && st.t[0].site == XBOX_PARK_SITE_POLL, "a poll loop's turn: parked, not waiting", NULL);
+    xbox_ParkHostWaitLeave();
+    xbox_ParkKernelEnter(ORD_DELAY, 0x00012340u);
+    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_HALT, HALT_VA);
+    xbox_ParkStatsGet(&st, 0);
+    check(xbox_ParkThisThreadParked() && st.t[0].site == XBOX_PARK_SITE_KERNEL && st.t[0].ret_va == 0x00012340u,
+          "a host wait inside a kernel call: the call stays the park point", NULL);
+    xbox_ParkHostWaitLeave();
+    xbox_ParkKernelLeave();
+    xbox_ParkStatsGet(&st, 0);
+    check(!xbox_ParkThisThreadParked() && st.t[0].site == XBOX_PARK_SITE_KERNEL && st.t[0].kernel_calls == 1,
+          "out of both: running, one kernel call counted", NULL);
+    xbox_ParkThreadEnd();
+}
+
+static void phase_host_waits(void)
+{
+    XboxParkStats st;
+    int i, ok = 1, states_ok = 1, still = 1, sites = 1, named = 0;
+    uint32_t seen = 0;
+    uint64_t worst = 0, k0, h0;
+    char d[256] = "", line[512] = "";
+
+    printf("Host waits inside lifted code (poll loop, NV2A kick wait, hlt), 20 freezes\n");
+    if (!xbox_Nv2aRegPtr(PFB_FLUSH)) {
+        check(0, "NV2A register file mapped", NULL);
+        return;
+    }
+    G32(g_pollword) = 0;
+    spawn(5, K_POLL);
+    spawn(6, K_KICK);
+    spawn(7, K_HALT);
+    check(wait_threads(6, 2000), "three more threads start (six)", NULL);
+    usleep(20000);
+    for (i = 0; i < 20; i++) {
+        uint64_t t0;
+        unsigned long p0;
+        int k;
+
+        usleep(5000 + 1700 * (unsigned)i);
+        t0 = now_ns();
+        if (!xbox_ParkFreeze(200, &st)) {
+            int r;
+            for (r = 0; r < st.threads; r++)
+                if (st.t[r].state == XBOX_PARK_RUNNING)
+                    snprintf(d, sizeof d, "thread %lu running, last site %u at 0x%08X", st.t[r].tid,
+                             st.t[r].site, st.t[r].ret_va);
+            ok = 0;
+            continue;
+        }
+        t0 = now_ns() - t0;
+        if (t0 > worst) worst = t0;
+        for (k = 0; k < st.threads; k++) {
+            if (st.t[k].state == XBOX_PARK_RUNNING || st.t[k].state == XBOX_PARK_FREE)
+                states_ok = 0;
+            if (!site_ok(&st.t[k], &seen))
+                sites = 0;
+        }
+        p0 = __atomic_load_n(&g_progress, __ATOMIC_RELAXED);
+        k0 = __atomic_load_n(&g_kicks, __ATOMIC_RELAXED);
+        h0 = __atomic_load_n(&g_halts, __ATOMIC_RELAXED);
+        usleep(10000);
+        if (__atomic_load_n(&g_progress, __ATOMIC_RELAXED) != p0
+            || __atomic_load_n(&g_kicks, __ATOMIC_RELAXED) != k0
+            || __atomic_load_n(&g_halts, __ATOMIC_RELAXED) != h0)
+            still = 0;
+        if (st.host_waits > 0 && !named) {
+            FILE *f = tmpfile();
+            if (f) {
+                xbox_ParkReport(f);
+                rewind(f);
+                if (!fgets(line, sizeof line, f)) line[0] = 0;
+                fclose(f);
+            }
+            named = strstr(line, " at a host wait (") != NULL;
+        }
+        if (i == 0)
+            for (k = 0; k < st.threads; k++)
+                printf("  thread %lu: %s %s %u at 0x%08X\n", st.t[k].tid,
+                       st.t[k].state == XBOX_PARK_WAITING ? "waiting" :
+                       st.t[k].state == XBOX_PARK_HELD ? "held" : "in",
+                       xbox_ParkSiteName(st.t[k].site), st.t[k].ordinal, st.t[k].ret_va);
+        xbox_ParkThaw();
+    }
+    printf("  freeze reached in %.2f ms at worst; sites seen: poll %s, kick %s, hlt %s, preempt %s\n",
+           worst / 1e6, seen & (1u << XBOX_PARK_SITE_POLL) ? "yes" : "no",
+           seen & (1u << XBOX_PARK_SITE_KICK) ? "yes" : "no", seen & (1u << XBOX_PARK_SITE_HALT) ? "yes" : "no",
+           seen & (1u << XBOX_PARK_SITE_PREEMPT) ? "yes" : "no");
+    printf("%s", line);
+    check(ok, "every freeze reaches all six threads within 200 ms", ok ? NULL : d);
+    check(states_ok, "frozen: none running", NULL);
+    check(sites, "each shows its site: kernel call or host wait kind and guest VA", NULL);
+    check((seen & (1u << XBOX_PARK_SITE_POLL | 1u << XBOX_PARK_SITE_PREEMPT))
+          && (seen & (1u << XBOX_PARK_SITE_KICK | 1u << XBOX_PARK_SITE_PREEMPT))
+          && (seen & (1u << XBOX_PARK_SITE_HALT)), "the poll, kick and hlt threads are held at their waits", NULL);
+    check(still, "no guest code runs while frozen (no poll turn, kick or hlt; 10 ms each)", NULL);
+    check(named, "the [KERNEL] park line names a host wait", line);
+    k0 = __atomic_load_n(&g_kicks, __ATOMIC_RELAXED);
+    h0 = __atomic_load_n(&g_halts, __ATOMIC_RELAXED);
+    usleep(50000);
+    snprintf(d, sizeof d, "%llu kicks, %llu hlts", (unsigned long long)(g_kicks - k0),
+             (unsigned long long)(g_halts - h0));
+    check(g_kicks != k0 && g_halts != h0, "after the thaw they kick and halt again", d);
+    G32(g_pollword) = 1;           /* the poll loop's word changes: it leaves the loop */
+    g_hw_stop = 1;
+    check(wait_threads(3, 3000), "they end", NULL);
+}
+
 int main(int argc, char **argv)
 {
     char tmpl[] = "/tmp/kparkXXXXXX", cmd[300];
@@ -398,6 +602,7 @@ int main(int argc, char **argv)
     g_thunks  = xbox_HeapAlloc(0x1000, 4096);
     g_stack   = xbox_HeapAlloc(0x1000, 4096);
     g_handles = xbox_HeapAlloc(0x100, 4096);
+    g_pollword = xbox_HeapAlloc(0x10, 16);
     for (i = 0; i < NORDS; i++)
         G32(g_thunks + 4 * i) = 0x80000000u | ORDS[i];
     G32(g_thunks + 4 * NORDS) = 0;
@@ -410,12 +615,14 @@ int main(int argc, char **argv)
     printf("guest CPU lock %s\n", xbox_GuestCpuOn() ? "on" : "off");
 
     phase_nesting();
+    phase_host_waits_hooks();
     spawn(0, K_RENDER);
     spawn(1, K_AUDIO);
     spawn(2, K_LOADER);
     check(wait_threads(3, 2000), "three workers start", NULL);
     phase_statistics();
     phase_freeze();
+    phase_host_waits();
     phase_never_parks();
     phase_ends();
 

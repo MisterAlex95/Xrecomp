@@ -22,6 +22,7 @@
 #include "xbox_seh.h"
 #include "xbox_xbe_sections.h"
 #include "kernel.h"
+#include "kernel_park.h"          /* host waits are park points (XBA-251) */
 #include "guest_vmem.h"
 #include "kernel_missing.h"
 #include "nv2a_flip_hold.h"
@@ -1777,7 +1778,7 @@ static void kick_deadline(struct timespec *ts, long ns)
 
 /* The guest side: set `mask` in the register and wait until the ack thread
  * clears it. Same register traffic as D3D's own loop. */
-void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask)
+static void nv2a_kick_wait(volatile uint32_t *reg, uint32_t mask)
 {
 #if defined(_WIN32)
     InterlockedOr((volatile LONG *)reg, (LONG)mask);
@@ -1805,6 +1806,16 @@ void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask)
 #endif
 }
 
+/* A park point for save states (XBA-251, kernel_park.h): a title override's
+ * call names no guest VA (0); from xbox_GuestPollWait the poll loop's site is
+ * recorded (the nested enter counts once). */
+void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask)
+{
+    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_KICK, 0);
+    nv2a_kick_wait(reg, mask);
+    xbox_ParkHostWaitLeave();
+}
+
 /* RECOMP_POLL_WAIT: lifted code is in a loop that only polls `word` for
  * `mask` (recomp_types.h). The one word the runtime answers by events is the
  * PFB flush kick: D3D's KickOff set bit 16 and waits for the ack thread to
@@ -1812,22 +1823,29 @@ void xbox_Nv2aKickWait(volatile uint32_t *reg, uint32_t mask)
  * xbox_Nv2aKickWait. The bit is set already; setting it again changes
  * nothing. Any other word: the loop polls as it always did.
  * RECOMP_POLL_WAIT=0 keeps the bare spin for the flush kick too.
- * Returns 1 when it waited for the ack thread, 0 when it returned at once. */
+ * Returns 1 when it waited for the ack thread, 0 when it returned at once.
+ *
+ * Either way the call is a park point at `va` (XBA-251, kernel_park.h): a
+ * freeze holds the thread here, between two turns of the loop, which tests
+ * its word again when it resumes. */
 int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
                        uint32_t va)
 {
     static int on = -1;
 
-    (void)va;
     if (on < 0) {
         const char *e = getenv("RECOMP_POLL_WAIT");
         on = !(e && e[0] == '0');
     }
     if (on && while_set && mask == 0x00010000u && g_nv2a_memory
         && word == (volatile uint32_t *)((char *)g_nv2a_memory + 0x100410u)) {
+        xbox_ParkHostWaitEnter(XBOX_PARK_SITE_KICK, va);
         xbox_Nv2aKickWait(word, mask);
+        xbox_ParkHostWaitLeave();
         return 1;
     }
+    xbox_ParkHostWaitEnter(XBOX_PARK_SITE_POLL, va);
+    xbox_ParkHostWaitLeave();
     return 0;
 }
 

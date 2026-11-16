@@ -29,6 +29,13 @@
  *   Retry         a call returning during the capture (its record changes)
  *                 makes the capture run again, and the second one records
  *                 the call as returned with its status
+ *   Host waits    (XBA-251) a thread spinning in a marked poll loop and one
+ *                 blocked in the PFB flush kick (xbox_GuestPollWait ->
+ *                 xbox_Nv2aKickWait), with no kernel call: the capture
+ *                 freezes them and writes each as a host-wait park record
+ *                 (CPU v2: site kind, ordinal 0, the site's guest VA); the
+ *                 reader refuses an unknown site and a host wait with an
+ *                 ordinal
  *   Refusals      a thread that never makes a kernel call (freeze times out
  *                 and names it); a capture from a guest thread
  *   Measures      capture time and blob size (printed)
@@ -63,12 +70,20 @@ enum { ORD_DELAY = 99, ORD_NTCLOSE = 187, ORD_PSCREATE = 255, ORD_PSTERM = 258 }
 static const uint32_t ORDS[] = { ORD_DELAY, ORD_NTCLOSE, ORD_PSCREATE, ORD_PSTERM };
 #define NORDS (sizeof ORDS / sizeof ORDS[0])
 
-enum { K_RENDER, K_AUDIO, K_LOADER, K_SPIN, K_COUNT };
+enum { K_RENDER, K_AUDIO, K_LOADER, K_SPIN, K_POLL, K_KICK, K_COUNT };
 #define RET_VA(kind) (0x00011000u + 0x10u * (uint32_t)(kind))
+#define POLL_VA 0x0001A100u     /* the host-wait sites lifted code passes (XBA-251) */
+#define KICK_VA 0x0001A200u
+#define PFB_FLUSH 0x00100410u
+#define FLUSH_BIT 0x00010000u
+/* RECOMP_BACK_EDGE (--back-edge-yield): hand the guest CPU over when a waiter asked. */
+#define BACK_EDGE(va) \
+    do { if (__atomic_load_n(&g_xbox_guest_cpu_preempt, __ATOMIC_RELAXED)) xbox_GuestCpuPreempt(va); } while (0)
 
 static int failures;
 static uint32_t g_thunks, g_stack, g_handles, g_pattern;
-static volatile int g_stop, g_spin_stop;
+static volatile int g_stop, g_spin_stop, g_hw_stop;
+static uint32_t g_pollword;
 static volatile unsigned long g_progress;
 
 static void check(int ok, const char *what, const char *detail)
@@ -153,6 +168,26 @@ static void worker(void)
         while (!g_spin_stop)
             __atomic_add_fetch(&g_progress, 1, __ATOMIC_RELAXED);
         break;
+    case K_POLL:    /* `test [w], 1; je $` with RECOMP_POLL_WAIT on the back edge */
+        g_ebx = 0xB0000000u | POLL_VA;
+        while (!(G32(g_pollword) & 1u) && !g_hw_stop) {
+            xbox_GuestPollWait(&G32(g_pollword), 1u, 0, POLL_VA);
+            BACK_EDGE(POLL_VA);
+        }
+        while (!g_hw_stop)
+            guest_sleep(kind, 2);
+        break;
+    case K_KICK: {  /* D3D's KickOff */
+        volatile uint32_t *kick = xbox_Nv2aRegPtr(PFB_FLUSH);
+        while (!g_hw_stop && kick) {
+            g_ebx = 0xB0000000u | KICK_VA;
+            *kick |= FLUSH_BIT;
+            while (*kick & FLUSH_BIT)
+                xbox_GuestPollWait(kick, FLUSH_BIT, 1, KICK_VA);
+            BACK_EDGE(KICK_VA);
+        }
+        break;
+    }
     }
 }
 
@@ -680,6 +715,101 @@ static void phase_retry(void)
     check(s_fake_done && wait_threads(3, 2000), "the thread runs on after the thaw", NULL);
 }
 
+static void phase_host_waits(void)
+{
+    XboxStateThread th[XBOX_PARK_MAX_THREADS];
+    XboxStateInfo info;
+    XboxStateStats st;
+    uint8_t *b = NULL, *copy;
+    size_t n = 0, len;
+    const uint8_t *p;
+    uint32_t ver = 0;
+    int rc, k, cnt = 0, poll = 0, kick = 0, regs = 1, kernel = 1;
+    char d[256];
+
+    printf("Host waits inside lifted code (a poll loop, an NV2A kick wait)\n");
+    if (!xbox_Nv2aRegPtr(PFB_FLUSH)) {
+        check(0, "NV2A register file mapped", NULL);
+        return;
+    }
+    G32(g_pollword) = 0;
+    spawn(4, K_POLL);
+    spawn(5, K_KICK);
+    check(wait_threads(5, 2000), "two threads that make no kernel call start", NULL);
+    usleep(20000);
+    rc = xbox_StateCapture(200, &b, &n, &st);
+    snprintf(d, sizeof d, "%s: %s", xbox_StateError(rc), st.reason);
+    check(rc == XBOX_STATE_OK && b, "the capture freezes them and is taken", d);
+    if (rc != XBOX_STATE_OK)
+        goto out;
+    rc = xbox_StateCheck(b, n, &info);
+    check(rc == XBOX_STATE_OK, "it reads back", info.reason);
+    if (xbox_StateSection(b, n, XBOX_STATE_TAG_CPU, &p, &len, &ver) != XBOX_STATE_OK) {
+        check(0, "CPU section found", NULL);
+        goto out;
+    }
+    check(ver == 2 && ver == XBOX_STATE_CPU_VERSION, "CPU section version 2 (the park site)", NULL);
+    cnt = xbox_StateCpuThreads(p, len, th, XBOX_PARK_MAX_THREADS);
+    for (k = 0; k < cnt; k++) {
+        printf("  thread %u: %s %s, ordinal %u, 0x%08X, ebx 0x%08X\n", th[k].tid,
+               th[k].returned ? "returned from" : "in", xbox_ParkSiteName(th[k].site), th[k].ordinal,
+               th[k].ret_va, th[k].cpu.r_ebx);
+        if (th[k].site == XBOX_PARK_SITE_KERNEL) {
+            if (th[k].ordinal != ORD_DELAY)
+                kernel = 0;
+            continue;
+        }
+        if (th[k].ordinal != 0)
+            regs = 0;
+        if (th[k].ret_va == POLL_VA && (th[k].site == XBOX_PARK_SITE_POLL || th[k].site == XBOX_PARK_SITE_PREEMPT))
+            poll++;
+        else if (th[k].ret_va == KICK_VA
+                 && (th[k].site == XBOX_PARK_SITE_KICK || th[k].site == XBOX_PARK_SITE_PREEMPT))
+            kick++;
+        else
+            regs = 0;
+        if (th[k].cpu.r_ebx != (0xB0000000u | th[k].ret_va) || !th[k].kthread
+            || !(th[k].stack_limit < th[k].cpu.r_esp && th[k].cpu.r_esp <= th[k].stack_base))
+            regs = 0;
+    }
+    snprintf(d, sizeof d, "%d threads, poll %d, kick %d", cnt, poll, kick);
+    check(cnt == 5 && poll == 1 && kick == 1, "five threads: the poll and kick threads at their host waits", d);
+    check(kernel, "the others in their kernel calls", NULL);
+    check(regs, "host-wait records: ordinal 0, the site's VA, registers, KTHREAD, stack", NULL);
+
+    /* The reader stays strict about the new field. */
+    copy = malloc(len);
+    if (copy && cnt > 0) {
+        size_t head = 68 + sizeof(RecompCpu), site_at = 8 + 64, ord_at = 8 + 8;
+        int hw = -1, kn = -1;
+        for (k = 0; k < cnt; k++) {
+            if (th[k].site != XBOX_PARK_SITE_KERNEL && hw < 0) hw = k;
+            if (th[k].site == XBOX_PARK_SITE_KERNEL && kn < 0) kn = k;
+        }
+        memcpy(copy, p, len);
+        copy[site_at + (size_t)(hw >= 0 ? hw : 0) * head] = 9;
+        check(xbox_StateCpuThreads(copy, len, NULL, 0) < 0, "a record with an unknown site is refused", NULL);
+        if (hw >= 0) {
+            memcpy(copy, p, len);
+            copy[ord_at + (size_t)hw * head] = 99;
+            check(xbox_StateCpuThreads(copy, len, NULL, 0) < 0, "a host-wait record with an ordinal is refused",
+                  NULL);
+        }
+        if (kn >= 0) {
+            memcpy(copy, p, len);
+            copy[site_at + (size_t)kn * head] = XBOX_PARK_SITE_POLL;   /* a kernel call's ordinal with a host site */
+            check(xbox_StateCpuThreads(copy, len, NULL, 0) < 0, "a kernel-call ordinal at a host-wait site is refused",
+                  NULL);
+        }
+    }
+    free(copy);
+out:
+    free(b);
+    G32(g_pollword) = 1;
+    g_hw_stop = 1;
+    check(wait_threads(3, 3000), "they end", NULL);
+}
+
 static void phase_refusals(void)
 {
     XboxStateStats st;
@@ -771,6 +901,7 @@ int main(int argc, char **argv)
     g_stack   = xbox_HeapAlloc(0x1000, 4096);
     g_handles = xbox_HeapAlloc(0x100, 4096);
     g_pattern = xbox_HeapAlloc(0x2000, 4096);
+    g_pollword = xbox_HeapAlloc(0x10, 16);
     for (i = 0; i < 4096; i++)
         GPTR(g_pattern)[i] = (uint8_t)(i * 7 + 3);
     for (i = 0; i < NORDS; i++)
@@ -795,6 +926,7 @@ int main(int argc, char **argv)
     phase_refused();
     phase_sections();
     phase_retry();
+    phase_host_waits();
     phase_refusals();
     phase_measure();
     phase_probe(tmpl);
