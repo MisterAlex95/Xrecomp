@@ -9,6 +9,8 @@
  *   due         the 10 s line logged once due, its window started again; the run's line; the last lines kept
  *   live        the overlay's figures published every 500 ms, stale after 2 s, cleared
  *   budget      the budget follows the frame period unless the config sets one
+ *   frame time  the host frames' length, top to top: mean and 99th percentile per window, the histogram's fine and
+ *               coarse buckets and the one above, a window taken after a restart (XBA-36)
  */
 #include "host_perf_line.h"
 
@@ -78,11 +80,16 @@ static void test_format(void)
     f.host_frames = 597;
     f.shown_fps = 59.7;
     f.busy_ms = 3.9;
+    f.frame_mean_ms = 16.74;
+    f.frame_p99_ms = 17.1;
     host_perf_format(&f, line, sizeof line);
     printf("    %s\n", line);
     check(strcmp(line, "speed 100 % (59.7 of 59.7 fps); emu 3.1 audio 0.1 present 0.4 idle 12.6 other 0.4 ms/frame; "
-                       "worst 9 ms, 3 > 16.7 ms, 1 > 33.5 ms of 597 frames; shown 59.7 fps, busy 3.9 ms/frame") == 0,
+                       "worst 9 ms, 3 > 16.7 ms, 1 > 33.5 ms of 597 frames; shown 59.7 fps, busy 3.9 ms/frame; "
+                       "frame time mean 16.7 ms, p99 17.1 ms") == 0,
           "format: the fields in their order");
+    host_perf_format_frame_time(line, sizeof line, 66.66, 70.1);
+    check(strcmp(line, "frame time mean 66.7 ms, p99 70.1 ms") == 0, "format: the frame time field");
     f.full_hz = 0;
     f.cfg.rest = "guest";
     host_perf_format(&f, line, sizeof line);
@@ -262,6 +269,58 @@ static void test_budget(void)
     check(p.budget_ns == 33 * MS && p.cfg.frame_ns == 20000000, "budget: the config's own stays");
 }
 
+/* n host frames of `len` (work 2 ms, the rest slept), each ended by the next top (the first top: at init). */
+static uint64_t frames_of(host_perf *p, uint64_t t, int n, uint64_t len)
+{
+    for (int i = 0; i < n; i++) {
+        host_perf_stage(p, 0, 2 * MS);
+        host_perf_guest(p, 1);
+        if (len > 2 * MS)
+            host_perf_idle(p, len - 2 * MS);
+        t += len;
+        host_perf_frame(p, t, NULL);
+    }
+    return t;
+}
+
+static void test_frame_time(void)
+{
+    host_perf p;
+    host_perf_config c = gba_cfg();
+    host_perf_figures f;
+    uint64_t t = 0;
+    host_perf_init(&p, &c, t);
+    host_perf_frame(&p, t, NULL);
+    t = frames_of(&p, t, 99, 16 * MS);
+    t = frames_of(&p, t, 1, 30 * MS);
+    host_perf_take(&p, HOST_PERF_WIN_LINE, t, &f, 1);
+    check(f.host_frames == 100 && near(f.frame_mean_ms, (99 * 16.0 + 30) / 100), "frame time: the mean, top to top");
+    check(near(f.frame_p99_ms, 16.1), "frame time: p99 of 99 x 16 ms and one 30 ms");
+    /* the next window: 97 x 16 ms, 3 x 30 ms (from the restart on) */
+    t = frames_of(&p, t, 97, 16 * MS);
+    t = frames_of(&p, t, 3, 30 * MS);
+    host_perf_take(&p, HOST_PERF_WIN_LINE, t, &f, 1);
+    check(f.host_frames == 100 && near(f.frame_p99_ms, 30.1), "frame time: p99 in the window after a restart");
+    host_perf_take(&p, HOST_PERF_WIN_RUN, t, &f, 0);
+    check(f.host_frames == 200 && near(f.frame_p99_ms, 30.1) && near(f.frame_mean_ms, (196 * 16.0 + 4 * 30) / 200),
+          "frame time: the run's");
+    /* the coarse buckets and the one above */
+    host_perf_init(&p, &c, 0);
+    host_perf_frame(&p, 0, NULL);
+    t = frames_of(&p, 0, 10, 50 * MS);
+    host_perf_take(&p, HOST_PERF_WIN_RUN, t, &f, 0);
+    check(near(f.frame_p99_ms, 52.0) && near(f.frame_mean_ms, 50.0), "frame time: 50 ms in the 2 ms buckets");
+    host_perf_init(&p, &c, 0);
+    host_perf_frame(&p, 0, NULL);
+    t = frames_of(&p, 0, 5, 300 * MS);
+    host_perf_take(&p, HOST_PERF_WIN_RUN, t, &f, 0);
+    check(near(f.frame_p99_ms, 200.0) && near(f.frame_mean_ms, 300.0), "frame time: above 200 ms, the last bucket");
+    /* no frame: zeros */
+    host_perf_init(&p, &c, 0);
+    host_perf_take(&p, HOST_PERF_WIN_RUN, 0, &f, 0);
+    check(f.frame_mean_ms == 0 && f.frame_p99_ms == 0, "frame time: none without a frame");
+}
+
 int main(void)
 {
     printf("host_perf_line\n");
@@ -272,6 +331,7 @@ int main(void)
     test_due();
     test_live();
     test_budget();
+    test_frame_time();
     printf("%s (%d failure%s)\n", failures ? "FAIL" : "PASS", failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

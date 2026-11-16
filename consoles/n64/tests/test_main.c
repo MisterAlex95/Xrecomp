@@ -373,6 +373,8 @@ static void test_perf_format(void)
     p.upscale = 2;
     p.cpu = 6;
     p.cpu_khz = 1900800;
+    p.frame_mean_ms = 66.7;
+    p.frame_p99_ms = 70.1;
     n64_runtime_perf_format(&p, line, sizeof line);
     p.rdp_queue_ms = 1.0;
     p.rdp_sync_ms = 2.5;
@@ -383,7 +385,7 @@ static void test_perf_format(void)
                        "0.9 audio 0.0 idle 0.0 other 0.0 ms/frame; worst 41 ms, 120 > 16.7 ms, 30 > 33.4 ms of 150 "
                        "frames; rsp 1.20 M instr, rdp 3400 cmds, 2.0 full syncs /frame; pack 83 % native, 3.1 k "
                        "interp instr/frame, 12 rehashes, 40 slow lookups; rdp vulkan, upscale 2x, rewind off; core 6 @ "
-                       "1.90 GHz") == 0);
+                       "1.90 GHz; frame time mean 66.7 ms, p99 70.1 ms") == 0);
     if (failures)
         printf("perf line: %s\n", line);
     p.pack = 0;
@@ -397,7 +399,7 @@ static void test_perf_format(void)
     CHECK(strstr(line, "GHz") == NULL);
     p.cpu = -1;
     n64_runtime_perf_format(&p, line, sizeof line);
-    CHECK(strstr(line, "; core ?") != NULL);
+    CHECK(strstr(line, "; core ?; frame time mean ") != NULL);
 
     /* The detail line: the pictures against the VIs, the worst frame's own breakdown. */
     memset(&p, 0, sizeof p);

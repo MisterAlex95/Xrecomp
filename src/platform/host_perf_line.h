@@ -4,7 +4,8 @@
  * the whole run when the game ends, as the N64 did first (0.6.0):
  *
  *   gba: perf speed 100 % (59.7 of 59.7 fps); emu 3.1 audio 0.1 present 0.4 idle 12.6 other 0.4 ms/frame;
- *        worst 9 ms, 0 > 16.7 ms, 0 > 33.5 ms of 597 frames; shown 59.7 fps, busy 3.9 ms/frame
+ *        worst 9 ms, 0 > 16.7 ms, 0 > 33.5 ms of 597 frames; shown 59.7 fps, busy 3.9 ms/frame;
+ *        frame time mean 16.7 ms, p99 17.1 ms
  *   gba: perf over the run: ...
  *
  *   speed      guest frames per second against the guest's full rate ("speed ? (29.9 fps)" without one: the Xbox,
@@ -15,6 +16,9 @@
  *   frames     the slowest host frame (its work, not its sleep), host frames longer than the budget and than twice
  *              it, out of the host frames
  *   shown      pictures handed to the window per second, and the mean work time of a host frame
+ *   frame time the host frames' length, top to top (their work and their sleep: the pacing a player sees): the mean
+ *              and the 99th percentile (XBA-36), from a histogram of 0.1 ms buckets to 40 ms, 2 ms buckets to 200 ms
+ *              and one above; the percentile is its bucket's upper edge (200 for the last)
  *
  * A guest frame is one the console ran (a VI field on the N64); a host frame is one turn of the runtime's loop (one
  * flip on the Xbox), which runs several guest frames while fast-forwarding.
@@ -42,6 +46,12 @@ extern "C" {
 #define HOST_PERF_LINE_NS 10000000000ull      /* the line's period */
 #define HOST_PERF_LIVE_NS 500000000ull        /* the overlay's window */
 
+/* The host frames' length histogram (the frame time's percentile): 0.1 ms buckets to 40 ms, 2 ms buckets to 200 ms,
+ * one bucket above. */
+#define HOST_PERF_HIST_FINE 400
+#define HOST_PERF_HIST_COARSE 80
+#define HOST_PERF_HIST (HOST_PERF_HIST_FINE + HOST_PERF_HIST_COARSE + 1)
+
 /* What a stage's time is, for the overlay's two sums: the console's own work (emulation, the Xbox game), drawing
  * and presenting the picture, anything else (sound). */
 enum { HOST_PERF_EMU = 0, HOST_PERF_RENDER = 1, HOST_PERF_OTHER = 2 };
@@ -65,6 +75,8 @@ typedef struct host_perf_totals {
     uint64_t busy_ns;                         /* the host frames' work (their length less their sleep) */
     uint64_t idle_ns;
     uint64_t stage_ns[HOST_PERF_STAGES];
+    uint64_t frame_ns;                        /* the host frames' length (work and sleep) */
+    uint32_t frame_hist[HOST_PERF_HIST];      /* their lengths (a window's: the difference, modulo 2^32) */
 } host_perf_totals;
 
 typedef struct host_perf_window {
@@ -102,6 +114,7 @@ typedef struct host_perf_figures {
     double worst_ms;                          /* the slowest host frame's work */
     double budget_ms;
     uint64_t over_1, over_2;
+    double frame_mean_ms, frame_p99_ms;       /* host frame length (top to top): mean, 99th percentile */
 } host_perf_figures;
 
 void host_perf_init(host_perf *p, const host_perf_config *cfg, uint64_t now_ns);
@@ -147,6 +160,10 @@ void host_perf_live_clear(void);
 int host_perf_format_speed(char *out, size_t n, double guest_fps, double full_hz, const char *unit);
 int host_perf_format_frames(char *out, size_t n, double worst_ms, uint64_t over_1, uint64_t over_2, double budget_ms,
                             uint64_t host_frames);
+/*   "frame time mean 16.7 ms, p99 17.1 ms"   (the line's last field) */
+int host_perf_format_frame_time(char *out, size_t n, double mean_ms, double p99_ms);
+/* The host frames' mean length and 99th percentile between totals a and b (b taken after a); 0 without a frame. */
+void host_perf_frame_time(const host_perf_totals *a, const host_perf_totals *b, double *mean_ms, double *p99_ms);
 
 #ifdef __cplusplus
 }

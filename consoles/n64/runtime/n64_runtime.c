@@ -347,10 +347,11 @@ int n64_runtime_frameskip_picture(int mode, int64_t behind_ns, uint64_t frame_ns
 int n64_runtime_perf_format(const n64_runtime_perf *p, char *out, size_t n)
 {
     double fps = p->seconds > 0 ? (double)p->frames / p->seconds : 0.0;
-    char pack[160], core[64], speed[96], worst[160];
+    char pack[160], core[64], speed[96], worst[160], ftime[96];
     /* The fields every console's line shares (host_perf_line.h, XBA-243). */
     host_perf_format_speed(speed, sizeof speed, fps, p->vi_hz, "VI/s");
     host_perf_format_frames(worst, sizeof worst, p->worst_ms, p->over_1, p->over_2, p->over_ms, p->host_frames);
+    host_perf_format_frame_time(ftime, sizeof ftime, p->frame_mean_ms, p->frame_p99_ms);
     if (p->pack)
         snprintf(pack, sizeof pack, "pack %.0f %% native, %.1f k interp instr/frame, %llu rehashes, %llu slow lookups",
                  p->native_pct, p->interp_instr / 1e3, (unsigned long long)p->rehashes,
@@ -369,11 +370,11 @@ int n64_runtime_perf_format(const n64_runtime_perf *p, char *out, size_t n)
     return snprintf(out, n,
                     "%s; cpu %.1f rsp %.1f rdp %.1f (queue %.1f, sync %.1f, scanout %.1f) sched %.1f vi %.1f "
                     "present %.1f audio %.1f idle %.1f other %.1f ms/frame; %s; rsp %.2f M instr, rdp %.0f cmds, "
-                    "%.1f full syncs /frame; %s; rdp %s%s, upscale %dx, rewind %s; %s",
+                    "%.1f full syncs /frame; %s; rdp %s%s, upscale %dx, rewind %s; %s; %s",
                     speed, p->cpu_ms, p->rsp_ms, p->rdp_ms, p->rdp_queue_ms, p->rdp_sync_ms, p->rdp_scanout_ms,
                     p->sched_ms, p->vi_ms, p->present_ms, p->audio_ms, p->idle_ms, p->other_ms, worst,
                     p->rsp_instr / 1e6, p->rdp_cmds, p->rdp_syncs, pack, p->rdp ? p->rdp : "none", threads,
-                    p->upscale > 0 ? p->upscale : 1, p->rewind ? "on" : "off", core);
+                    p->upscale > 0 ? p->upscale : 1, p->rewind ? "on" : "off", core, ftime);
 }
 
 int n64_runtime_perf_detail_format(const n64_runtime_perf *p, char *out, size_t n)
@@ -986,6 +987,7 @@ static void perf_fill(n64_runtime_perf *p, const rt_perf_mark *a, const rt_perf_
     p->over_ms = (double)frame_ns / 1e6;
     p->over_1 = b->hp.over_1 - a->hp.over_1;
     p->over_2 = b->hp.over_2 - a->hp.over_2;
+    host_perf_frame_time(&a->hp, &b->hp, &p->frame_mean_ms, &p->frame_p99_ms);
     const double fd = f ? (double)f : 1.0;
     p->rsp_instr = (double)(b->core.rsp_instructions - a->core.rsp_instructions) / fd;
     p->rdp_cmds = (double)(b->core.rdp_commands - a->core.rdp_commands) / fd;

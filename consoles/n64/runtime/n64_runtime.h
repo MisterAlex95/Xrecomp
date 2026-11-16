@@ -224,13 +224,15 @@ typedef struct n64_runtime_perf {
      * and the RDP's waits inside it (queue and sync inside core or vi, scanout inside vi). */
     double worst_core_ms, worst_vi_ms, worst_present_ms, worst_audio_ms, worst_other_ms;
     double worst_queue_ms, worst_sync_ms, worst_scanout_ms, worst_deadline_ms;
+    double frame_mean_ms, frame_p99_ms; /* host frame length, top to top (host_perf_frame_time, XBA-36) */
 } n64_runtime_perf;
 /* The line's text after "n64: perf ": "speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (queue 1.0, sync 2.5,
  * scanout 0.5) sched 0.3
  * vi 1.8 present 0.9 audio 0.1 idle 0.0 other 0.2 ms/frame; worst 41 ms, 212 > 16.7 ms, 30 > 33.4 ms of 150 frames;
  * rsp 1.20 M instr, rdp 3400 cmds, 2.0 full syncs /frame; pack 83 % native, 3.1 k interp instr/frame, 12 rehashes,
- * 40 slow lookups; rdp vulkan, upscale 2x, rewind off; core 6 @ 1.90 GHz" ("no pack", "rdp software, 2 threads",
- * "core ?" / "core 6" when unknown). Returns what snprintf returns. */
+ * 40 slow lookups; rdp vulkan, upscale 2x, rewind off; core 6 @ 1.90 GHz; frame time mean 66.7 ms, p99 70.1 ms"
+ * ("no pack", "rdp software, 2 threads", "core ?" / "core 6" when unknown; the last field appended in 0.10,
+ * XBA-36). Returns what snprintf returns. */
 int n64_runtime_perf_format(const n64_runtime_perf *p, char *out, size_t n);
 /* The detail line's text after "n64: perf detail ", logged right after the perf line: "500 VIs, 167 pictures (16.7/s),
  * 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts (160 early), 40 full rings; DP 160 deferred (0

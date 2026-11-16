@@ -194,7 +194,7 @@ Every runtime logs the same line every 10 s and once over the run when the game 
 
 ```
 gba: perf speed 100 % (59.7 of 59.7 fps); emu 3.1 audio 0.1 present 0.4 idle 12.6 other 0.4 ms/frame; worst 9 ms,
-0 > 16.7 ms, 0 > 33.5 ms of 597 frames; shown 59.7 fps, busy 3.9 ms/frame
+0 > 16.7 ms, 0 > 33.5 ms of 597 frames; shown 59.7 fps, busy 3.9 ms/frame; frame time mean 16.7 ms, p99 17.1 ms
 gba: perf over the run: ...
 ```
 
@@ -212,13 +212,17 @@ sleep, `host_perf_guest` / `host_perf_shown` for the frames it ran and the pictu
 - **frames**: the slowest host frame (its work, not its sleep), the host frames longer than the budget (one guest frame,
   60 Hz on the Xbox) and than twice it, out of the host frames.
 - **shown**: pictures handed to the window per second, and the mean work of a host frame.
+- **frame time** (XBA-36): the host frames' length top to top (work and sleep: the pacing a player sees), mean and 99th
+  percentile, from a histogram in the totals (0.1 ms buckets to 40 ms, 2 ms to 200 ms, one above; the percentile is
+  its bucket's upper edge). `host_perf_frame_time` gives them between any two totals,
+  `host_perf_format_frame_time` the text. [docs/android/profiling.md](../../docs/android/profiling.md).
 
 | Runtime | Prefix | Stages | Host frame |
 |---|---|---|---|
 | Xbox (`fb_present_sdl.c`) | `xbox:` | `render` (the executor's drawing, `nv2a_pb_exec_render_ns`), `present` (the copy into the window's slot), rest `guest` | one flip |
 | GBA (`gba_runtime.c`) | `gba:` | `emu`, `audio`, `present` | one loop turn |
 | PS1 (`ps1_runtime.c`) | `ps1:` | `emu`, `audio`, `present` (the full rate follows NTSC / PAL) | one loop turn |
-| N64 (`n64_runtime.c`) | `n64:` | its own longer line (`n64_runtime_perf_format`, unchanged text) built on the same accounting (`core`, `vi`, `present`, `audio`) and the shared fields (`host_perf_format_speed`, `host_perf_format_frames`) | one loop turn |
+| N64 (`n64_runtime.c`) | `n64:` | its own longer line (`n64_runtime_perf_format`, its text unchanged but for the frame time appended at the end) built on the same accounting (`core`, `vi`, `present`, `audio`) and the shared fields (`host_perf_format_speed`, `host_perf_format_frames`, `host_perf_format_frame_time`) | one loop turn |
 
 Every half second the figures of the last half second are published (`host_perf_live_get`): the performance overlay
 (`perf_overlay.c`, `RECOMP_OVERLAY=1`) shows them the same way on all four consoles, under its FPS and CPU lines:

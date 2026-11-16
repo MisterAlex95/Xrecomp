@@ -22,6 +22,46 @@ static uint64_t budget_for(const host_perf_config *c, uint64_t frame_ns)
     return frame_ns ? frame_ns : DEFAULT_BUDGET_NS;
 }
 
+static int hist_bucket(uint64_t ns)
+{
+    if (ns < (uint64_t)HOST_PERF_HIST_FINE * 100000ull)
+        return (int)(ns / 100000ull);
+    ns -= (uint64_t)HOST_PERF_HIST_FINE * 100000ull;
+    if (ns < (uint64_t)HOST_PERF_HIST_COARSE * 2000000ull)
+        return HOST_PERF_HIST_FINE + (int)(ns / 2000000ull);
+    return HOST_PERF_HIST - 1;
+}
+
+/* A bucket's upper edge, ms (the last one's lower edge). */
+static double hist_edge_ms(int i)
+{
+    if (i < HOST_PERF_HIST_FINE)
+        return (double)(i + 1) * 0.1;
+    if (i < HOST_PERF_HIST - 1)
+        return HOST_PERF_HIST_FINE * 0.1 + (double)(i - HOST_PERF_HIST_FINE + 1) * 2.0;
+    return HOST_PERF_HIST_FINE * 0.1 + HOST_PERF_HIST_COARSE * 2.0;
+}
+
+void host_perf_frame_time(const host_perf_totals *a, const host_perf_totals *b, double *mean_ms, double *p99_ms)
+{
+    uint64_t n = 0, seen = 0;
+    *mean_ms = 0;
+    *p99_ms = 0;
+    for (int i = 0; i < HOST_PERF_HIST; i++)
+        n += (uint32_t)(b->frame_hist[i] - a->frame_hist[i]);
+    if (!n)
+        return;
+    *mean_ms = (double)(b->frame_ns - a->frame_ns) / 1e6 / (double)n;
+    uint64_t rank = (99 * n + 99) / 100; /* ceil(0.99 n): the frame at or under which 99 % of them are */
+    for (int i = 0; i < HOST_PERF_HIST; i++) {
+        seen += (uint32_t)(b->frame_hist[i] - a->frame_hist[i]);
+        if (seen >= rank) {
+            *p99_ms = hist_edge_ms(i);
+            return;
+        }
+    }
+}
+
 static void window_start(host_perf *p, int which, uint64_t now_ns)
 {
     p->win[which].t = now_ns;
@@ -79,6 +119,8 @@ int host_perf_frame(host_perf *p, uint64_t now_ns, uint64_t *busy_ns)
         p->tot.busy_ns += busy;
         p->tot.over_1 += busy > p->budget_ns;
         p->tot.over_2 += busy > 2 * p->budget_ns;
+        p->tot.frame_ns += len;
+        p->tot.frame_hist[hist_bucket(len)]++;
         for (int w = 0; w < HOST_PERF_WINDOWS; w++)
             if (busy > p->win[w].worst_ns)
                 p->win[w].worst_ns = busy;
@@ -188,6 +230,7 @@ void host_perf_take(host_perf *p, int which, uint64_t now_ns, host_perf_figures 
     out->budget_ms = (double)p->budget_ns / 1e6;
     out->over_1 = b->over_1 - a->over_1;
     out->over_2 = b->over_2 - a->over_2;
+    host_perf_frame_time(a, b, &out->frame_mean_ms, &out->frame_p99_ms);
     if (restart)
         window_start(p, which, now_ns);
 }
@@ -208,9 +251,14 @@ int host_perf_format_frames(char *out, size_t n, double worst_ms, uint64_t over_
                     (unsigned long long)host_frames);
 }
 
+int host_perf_format_frame_time(char *out, size_t n, double mean_ms, double p99_ms)
+{
+    return snprintf(out, n, "frame time mean %.1f ms, p99 %.1f ms", mean_ms, p99_ms);
+}
+
 int host_perf_format(const host_perf_figures *f, char *out, size_t n)
 {
-    char speed[96], stages[320], frames[160];
+    char speed[96], stages[320], frames[160], ftime[96];
     size_t o = 0;
 
     host_perf_format_speed(speed, sizeof speed, f->guest_fps, f->full_hz, f->cfg.unit ? f->cfg.unit : "fps");
@@ -226,8 +274,9 @@ int host_perf_format(const host_perf_figures *f, char *out, size_t n)
         snprintf(stages + o, sizeof stages - o, "idle %.1f %s %.1f", f->idle_ms, f->cfg.rest ? f->cfg.rest : "other",
                  f->rest_ms);
     host_perf_format_frames(frames, sizeof frames, f->worst_ms, f->over_1, f->over_2, f->budget_ms, f->host_frames);
-    return snprintf(out, n, "%s; %s ms/frame; %s; shown %.1f fps, busy %.1f ms/frame", speed, stages, frames,
-                    f->shown_fps, f->busy_ms);
+    host_perf_format_frame_time(ftime, sizeof ftime, f->frame_mean_ms, f->frame_p99_ms);
+    return snprintf(out, n, "%s; %s ms/frame; %s; shown %.1f fps, busy %.1f ms/frame; %s", speed, stages, frames,
+                    f->shown_fps, f->busy_ms, ftime);
 }
 
 static void keep_line(int run, const char *line)

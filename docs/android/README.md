@@ -93,6 +93,12 @@ Context, GLES details and the device check lists:
 A title pack (`libtitle.so` + `pack.json`) built on the device from the player's disc, `tools.prepare --android`:
 see [prepare.md](prepare.md).
 
+## Profiling on the device
+
+A CPU profile and flame graph of the running game (`tools/android/profile.sh 30`, the NDK's simpleperf, lifted
+functions named after their guest addresses) and the frame times of the performance line: see
+[profiling.md](profiling.md).
+
 ## Tests on a device
 
 The C tests as Android executables, run over adb: see [device-tests.md](device-tests.md).

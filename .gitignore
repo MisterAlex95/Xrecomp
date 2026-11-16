@@ -48,3 +48,6 @@ macos/build/
 
 # Frame generation tarballs fetched by src/framegen/lsfg_sources.cmake (XBA-187)
 third_party/lsfg-sources/
+
+# Device profiles (tools/android/profile.sh): they hold a title's compiled code
+xrecomp-profiles/
