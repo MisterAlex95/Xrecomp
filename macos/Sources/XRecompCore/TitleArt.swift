@@ -3,16 +3,20 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-/// The game's title image: the XBE's « $$XTIMAGE » section, decoded on the Mac and cached as a PNG per title
+/// The game's title image: the XBE's « $$XTIMAGE » section (else « $$XSIMAGE »), decoded on the Mac and cached as a PNG per title
 /// (`titles/<TID>/art.png`), and the monogram fallback. Nothing of the game is in the app or the repo: the image comes
 /// from the player's own default.xbe at run time. A port of the Android launcher's TitleArt.java.
 public enum TitleArt {
     public static let section = "$$XTIMAGE"
+    /// The save image, the cover when the XBE has no title image (as tools/title_art and Android's TitleArt, XBA-242).
+    public static let saveSection = "$$XSIMAGE"
 
-    /// The image from an XBE file, or nil (no section, or a format this cannot read).
+    /// The image from an XBE file: its title image, else its save image; nil when neither decodes.
     public static func decode(xbe: URL) -> ArgbImage? {
-        guard let sec = XbeInfo.section(xbe, named: section) else { return nil }
-        return Xpr.decode(sec)
+        for name in [section, saveSection] {
+            if let sec = XbeInfo.section(xbe, named: name), let img = Xpr.decode(sec) { return img }
+        }
+        return nil
     }
 
     /// The cached PNG, else decoded from `xbe` and cached at `cache`. nil: show the monogram.

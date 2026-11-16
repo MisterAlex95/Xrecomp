@@ -12,7 +12,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
- * The game's title image, for Home's hero: the XBE's « $$XTIMAGE » section, decoded on the device and cached as a PNG
+ * The game's title image, for Home's hero and the library card: the XBE's « $$XTIMAGE » section (else « $$XSIMAGE »,
+ * the save image), decoded on the device (the library scan, LibraryScanner.titleArt) and cached as a PNG
  * per title ID (<files dir>/art/<TITLEID>.png), plus the monogram fallback. The launcher's colours from it: GameTheme.
  * Nothing of the game is in the APK or the repo: the image comes from the player's own default.xbe.
  *
@@ -40,8 +41,9 @@ final class TitleArt {
     }
 
     /**
-     * The title image for titleId: from the cache, else decoded from xbe and cached. null when the XBE has none (or
-     * one this class cannot read); the launcher then shows a monogram.
+     * The title image for titleId: from the cache, else decoded from xbe's $$XTIMAGE (else its $$XSIMAGE, the save
+     * image) and cached. null when the XBE has neither (or none this class can read); the launcher then shows a
+     * monogram. This is the Xbox game's cover on its library card and its Home.
      */
     static Bitmap load(File filesDir, File xbe, String titleId) {
         if (titleId == null)
@@ -54,9 +56,10 @@ final class TitleArt {
         }
         if (xbe == null)
             return null;
-        byte[] sec = xbeSection(xbe, SECTION);
         int[] wh = new int[2];
-        int[] px = sec == null ? null : decodeXpr(sec, wh);
+        int[] px = decodeSection(xbe, SECTION, wh);
+        if (px == null)   // no title image: the save image, as tools/title_art and GameArt fall back (XBA-242)
+            px = decodeSection(xbe, GameArt.SAVE_SECTION, wh);
         if (px == null)
             return null;
         Bitmap b = Bitmap.createBitmap(px, wh[0], wh[1], Bitmap.Config.ARGB_8888);
@@ -68,6 +71,12 @@ final class TitleArt {
         } catch (IOException ignored) {   // shown anyway, decoded again next time
         }
         return b;
+    }
+
+    /** The decoded XPR0 texture of the XBE section called name (wh: width, height), or null. */
+    static int[] decodeSection(File xbe, String name, int[] wh) {
+        byte[] sec = xbeSection(xbe, name);
+        return sec == null ? null : decodeXpr(sec, wh);
     }
 
     // ---- XBE ---------------------------------------------------------------------------------------------------

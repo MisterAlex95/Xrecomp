@@ -141,6 +141,34 @@ public class TitleArtTest {
         assertNull(TitleArt.load(files, plain, "41420001"));
     }
 
+    /** XBA-242: no $$XTIMAGE, the save image is the cover; both present, the title image wins. */
+    @Test
+    public void saveImageWhenNoTitleImage() throws Exception {
+        File files = tmp.newFolder("files");
+        File xbe = tmp.newFile("save.xbe");
+        TestSupport.write(xbe, TestSupport.xbeWithSection(0x41420002, "Saves", GameArt.SAVE_SECTION,
+                                                          TestSupport.xprSolid(4, 4, 0xFF00FF00)));
+        Bitmap b = TitleArt.load(files, xbe, "41420002");
+        assertNotNull(b);
+        assertEquals(4, b.getWidth());
+        assertEquals(0xFF00FF00, b.getPixel(1, 1));
+        assertTrue(TitleArt.cacheFile(files, "41420002").isFile());
+
+        File both = tmp.newFile("both.xbe");
+        TestSupport.write(both, TestSupport.xbeWithSections(0x41420003, "Both",
+                GameArt.SAVE_SECTION, TestSupport.xprSolid(4, 4, 0xFF00FF00),
+                TitleArt.SECTION, TestSupport.xprSolid(8, 8, 0xFFFF0000)));
+        Bitmap t = TitleArt.load(files, both, "41420003");
+        assertNotNull(t);
+        assertEquals(8, t.getWidth());
+        assertEquals(0xFFFF0000, t.getPixel(2, 2));
+
+        // A title image that does not decode and no save image: none, the monogram.
+        File bad = tmp.newFile("bad.xbe");
+        TestSupport.write(bad, TestSupport.xbeWithImage(0x41420004, "Bad", new byte[64]));
+        assertNull(TitleArt.load(files, bad, "41420004"));
+    }
+
     @Test
     public void monogram() {
         assertEquals("SG", TitleArt.initials("Sample Game"));

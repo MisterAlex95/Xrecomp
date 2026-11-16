@@ -86,6 +86,33 @@ final class TestSupport {
         return b;
     }
 
+    /**
+     * xbeWithSection() with two sections, (first, a) then (second, b): headers at 0x300 and 0x338, names at 0x380 and
+     * 0x390, the bytes of a from 0x400 and those of b right after.
+     */
+    static byte[] xbeWithSections(int titleId, String name, String first, byte[] a, String second, byte[] bb) {
+        byte[] head = xbe(titleId, name);
+        byte[] b = new byte[0x400 + a.length + bb.length];
+        System.arraycopy(head, 0, b, 0, head.length);
+        le32(b, 0x108, 0x400);
+        le32(b, 0x11c, 2);
+        le32(b, 0x120, 0x10300);
+        String[] names = { first, second };
+        byte[][] data = { a, bb };
+        int raw = 0x400;
+        for (int i = 0; i < 2; i++) {
+            int sh = 0x300 + 56 * i, no = 0x380 + 16 * i;
+            le32(b, sh + 0x0c, raw);
+            le32(b, sh + 0x10, data[i].length);
+            le32(b, sh + 0x14, 0x10000 + no);
+            byte[] n = names[i].getBytes(StandardCharsets.US_ASCII);
+            System.arraycopy(n, 0, b, no, n.length);
+            System.arraycopy(data[i], 0, b, raw, data[i].length);
+            raw += data[i].length;
+        }
+        return b;
+    }
+
     /** An XPR0 file with one texture: format code fmt, w x h (powers of two), data placed after a 2048-byte header. */
     static byte[] xpr0(int fmt, int w, int h, byte[] data) {
         int hdr = 0x800;

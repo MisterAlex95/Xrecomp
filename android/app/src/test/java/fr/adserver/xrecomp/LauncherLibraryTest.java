@@ -289,6 +289,34 @@ public class LauncherLibraryTest {
         render("7", null);
     }
 
+    /**
+     * XBA-242: Xbox cards show the XBE's title image as their cover ($$XTIMAGE, else $$XSIMAGE), decoded at the scan
+     * and cached; a game with neither keeps its monogram.
+     */
+    @Test
+    public void gridShowsTitleImages() throws Exception {
+        byte[] title = TestSupport.xpr0(0x0C, 128, 128, TestSupport.dxt1Picture());
+        int[] px = new int[64 * 64];
+        for (int y = 0; y < 64; y++)
+            for (int x = 0; x < 64; x++)
+                px[y * 64 + x] = 0xFF000000 | (x * 4) << 16 | (y * 2) << 8 | 0xC0;
+        byte[] saveImage = TestSupport.xprArgb(64, 64, px);
+        TestSupport.write(new File(new File(root, NAMES[0]), "default.xbe"),
+                          TestSupport.xbeWithImage(tid(0), NAMES[0], title));
+        TestSupport.write(new File(new File(root, NAMES[1]), "default.xbe"),
+                          TestSupport.xbeWithSection(tid(1), NAMES[1], GameArt.SAVE_SECTION, saveImage));
+        folderGame(2);
+        useFolder();
+        LauncherActivity a = launch();
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
+        assertTrue("title image", card(a, NAMES[0]).hasArtForTest());
+        assertTrue("save image when there is no title image", card(a, NAMES[1]).hasArtForTest());
+        assertFalse("neither: the monogram", card(a, NAMES[2]).hasArtForTest());
+        assertTrue(TitleArt.cacheFile(app.getFilesDir(), tidHex(0)).isFile());
+        assertTrue(TitleArt.cacheFile(app.getFilesDir(), tidHex(1)).isFile());
+        render("title-art", null);
+    }
+
     @Test
     public void gridSizes() throws Exception {
         useFolder();
