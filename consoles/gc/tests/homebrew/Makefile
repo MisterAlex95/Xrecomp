@@ -4,7 +4,7 @@
 # Each program directory gives <prog>.dol (elf2dol: what the runtime loads) and <prog>.elf (symbols, for debugging
 # only).
 
-PROGS := hello
+PROGS := hello padtest
 OUT ?= out
 BUILD ?= build
 

@@ -166,6 +166,34 @@ static void test_n64_defaults(void)
     CHECK(o.buttons == 0 && o.stick_x[0] == 20000 && o.stick_y[0] == -20000);
 }
 
+static void test_gc_defaults(void)
+{
+    ConsolePadMap m;
+    HostPadState st;
+    ConsolePadOut o;
+    char buf[256];
+    CHECK(console_pad_console("gc") == CONSOLE_PAD_GC);
+    CHECK(strcmp(console_pad_env(CONSOLE_PAD_GC), "RECOMP_GC_PAD_MAP") == 0);
+    CHECK(console_pad_defaults(&m, CONSOLE_PAD_GC) == 0);
+    CHECK(m.n_targets == GC_T_COUNT && m.n_sticks == 2);
+    CHECK(strcmp(console_pad_target_name(CONSOLE_PAD_GC, GC_T_Z), "z") == 0);
+    st = pad(HOST_PAD_A | HOST_PAD_B | HOST_PAD_X | HOST_PAD_Y);
+    CHECK(press(&m, &st) == (T(GC_T_A) | T(GC_T_B) | T(GC_T_X) | T(GC_T_Y)));
+    st = pad(HOST_PAD_RSHOULDER | HOST_PAD_START | HOST_PAD_BACK | HOST_PAD_LSHOULDER); /* no Back, one Z */
+    CHECK(press(&m, &st) == (T(GC_T_Z) | T(GC_T_START)));
+    st = pad(0);
+    st.axis[HOST_PAD_AXIS_LT] = 20000; /* half way: analog only, no click yet */
+    st.axis[HOST_PAD_AXIS_RT] = 32767;
+    CHECK(press(&m, &st) == T(GC_T_R));
+    st = pad(0);
+    st.axis[HOST_PAD_AXIS_LX] = 20000;
+    st.axis[HOST_PAD_AXIS_RY] = -20000;
+    console_pad_apply(&m, &st, &o);
+    CHECK(o.buttons == 0 && o.stick_x[0] == 20000 && o.stick_y[1] == -20000);
+    CHECK(console_pad_load(&m, CONSOLE_PAD_GC, "a=east,b=south,c_stick=none") == 0);
+    CHECK(strcmp(console_pad_format(&m, buf, sizeof buf), "a=east,b=south,c_stick=none") == 0);
+}
+
 static void test_parse_format(void)
 {
     ConsolePadMap m;
@@ -306,6 +334,7 @@ int main(void)
     test_gba_defaults();
     test_ps1_defaults();
     test_n64_defaults();
+    test_gc_defaults();
     test_parse_format();
     test_merge();
     test_swallow();

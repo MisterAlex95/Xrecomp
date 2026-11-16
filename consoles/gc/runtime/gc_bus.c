@@ -9,8 +9,8 @@
  *   0x0C004000  MI (16-bit): stored, no memory protection
  *   0x0C005000  DSP (16-bit): mailboxes (the DSP answers 0x8071FEED when it leaves halt, as its ROM does), control
  *               register, ARAM DMA (16 MB of ARAM, copies at once)
- *   0x0C006000  DI, SI, EXI, AI (32-bit): transfers complete at once with nothing on the other end (no disc, no
- *               pads, no memory cards; EXI reads give zeros: blank SRAM / RTC)
+ *   0x0C006000  DI, EXI, AI (32-bit): transfers complete at once with nothing on the other end (no disc, no
+ *               memory cards; EXI reads give zeros: blank SRAM / RTC); SI: standard controllers (gc_si.c, XBA-259)
  *   0x0C008000  GX FIFO: writes dropped
  *   0x20000000  the locked cache (EA 0xE0000000, 16 KB)
  * Anything else reads 0 and drops writes (logged with -v). */
@@ -44,16 +44,6 @@ static void exi_int_update(gc_machine *m)
         m->pi_intsr &= ~GC_INT_EXI;
 }
 
-static void si_int_update(gc_machine *m)
-{
-    uint32_t cs = m->si[13];
-    bool on = ((cs & 0x80000000u) && (cs & 0x40000000u)) || ((cs & 0x20000000u) && (cs & 0x08000000u));
-    if (on)
-        m->pi_intsr |= GC_INT_SI;
-    else
-        m->pi_intsr &= ~GC_INT_SI;
-}
-
 static void vi_int_update(gc_machine *m)
 {
     bool on = false;
@@ -70,7 +60,7 @@ static void vi_int_update(gc_machine *m)
 /* A line starts: DIn whose line it is raise their interrupt. */
 void gc_vi_line(gc_machine *m)
 {
-    m->line = (m->line + 1) % GC_LINES;
+    m->line = (m->line + 1) % m->frame_lines;
     uint32_t vct = m->line + 1;
     for (int n = 0; n < 4; n++) {
         uint16_t *hi = &m->vi[0x18 + 2 * n];
@@ -89,9 +79,9 @@ static uint16_t vi_read16(gc_machine *m, unsigned idx)
     case 0x16: /* VCT */
         return (uint16_t)(m->line + 1);
     case 0x17: { /* HCT */
-        uint64_t start = m->next_line - GC_CYCLES_PER_LINE;
+        uint64_t start = m->next_line - m->line_cycles;
         uint64_t in = m->h.now > start ? m->h.now - start : 0;
-        return (uint16_t)(1 + in * 858 / GC_CYCLES_PER_LINE);
+        return (uint16_t)(1 + in * 858 / m->line_cycles);
     }
     default:
         return m->vi[idx];
@@ -233,22 +223,6 @@ static uint32_t exi_read32(gc_machine *m, unsigned idx)
     return m->exi[idx];
 }
 
-static void si_write32(gc_machine *m, unsigned idx, uint32_t v)
-{
-    if (idx == 13) { /* COMCSR */
-        uint32_t ints = m->si[13] & 0xA0000000u & ~v;
-        m->si[13] = (v & ~0xA0000001u) | ints;
-        if (v & 1)
-            m->si[13] |= 0x80000000u | 0x20000000u; /* TCINT, and no device: the reply has an error */
-    } else if (idx == 14) { /* SISR */
-        m->si[14] = 0;
-    } else {
-        m->si[idx] = v;
-    }
-    si_int_update(m);
-    gc_check_interrupts(m);
-}
-
 /* ---- dispatch ---- */
 
 static uint16_t hw_read16(gc_machine *m, uint32_t pa)
@@ -305,7 +279,7 @@ uint32_t gc_hw_read(gc_machine *m, uint32_t pa, unsigned size)
     if (off >= 0x6000 && off < 0x6400)
         return 0; /* DI: no drive */
     if (off >= 0x6400 && off < 0x6500)
-        return m->si[(off & 0xFF) >> 2];
+        return gc_si_read(m, (off & 0xFF) >> 2);
     if (off >= 0x6800 && off < 0x683C)
         return exi_read32(m, (off & 0x3F) >> 2);
     if (off >= 0x6C00 && off < 0x6C20)
@@ -342,7 +316,7 @@ void gc_hw_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size)
     else if (off >= 0x6000 && off < 0x6400)
         ;
     else if (off >= 0x6400 && off < 0x6500)
-        si_write32(m, (off & 0xFF) >> 2, v);
+        gc_si_write(m, (off & 0xFF) >> 2, v);
     else if (off >= 0x6800 && off < 0x683C)
         exi_write32(m, (off & 0x3F) >> 2, v);
     else if (off >= 0x6C00 && off < 0x6C20)

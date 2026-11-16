@@ -47,3 +47,34 @@ if(TARGET gc_run)
     set_tests_properties(gc_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     set_tests_properties(gc_rc_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()
+
+# gc_padtest (XBA-259): our libogc pad test (homebrew/padtest) with controller input injected on the serial
+# interface: what PAD_Read gave the program (its report in memory) must be what went in, on all four ports, with
+# hot plug and rumble; then the same program in PAL (50 Hz fields, 576 lines). Skips (77) without the corpus.
+add_executable(gc_padtest gc_padtest.c)
+target_link_libraries(gc_padtest PRIVATE gc_core)
+target_compile_options(gc_padtest PRIVATE -Wall -Wextra)
+add_test(NAME gc_padtest COMMAND gc_padtest ${GC_HOMEBREW_DIR}/padtest.dol)
+set_tests_properties(gc_padtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+# The runtime (XBA-259), where it builds (SDL2 and the host layer: the root build, the linux job):
+#   gc_pad_map     a host pad through the player's mapping as a GameCube controller, the DOL's key (no corpus)
+#   gc_play_hello  the hello world through gc_runtime, headless: its XFB after 120 fields is hello_xfb.png
+#   gc_play_pad    the pad test through gc_runtime with port 1 held (A Z L <, sticks, triggers): padtest_xfb.png
+if(TARGET gc_pad_map)
+    add_executable(gc_pad_map_test gc_pad_map_test.c)
+    target_link_libraries(gc_pad_map_test PRIVATE gc_pad_map)
+    target_compile_options(gc_pad_map_test PRIVATE -Wall -Wextra)
+    add_test(NAME gc_pad_map COMMAND gc_pad_map_test)
+endif()
+if(TARGET gc_play)
+    set(GC_RUN_PLAY ${CMAKE_CURRENT_SOURCE_DIR}/run_play.sh)
+    add_test(NAME gc_play_hello
+        COMMAND sh ${GC_RUN_PLAY} $<TARGET_FILE:gc_play> ${GC_HOMEBREW_DIR}/hello.dol
+                ${CMAKE_CURRENT_BINARY_DIR}/play_hello ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png --frames 120)
+    add_test(NAME gc_play_pad
+        COMMAND sh ${GC_RUN_PLAY} $<TARGET_FILE:gc_play> ${GC_HOMEBREW_DIR}/padtest.dol
+                ${CMAKE_CURRENT_BINARY_DIR}/play_pad ${CMAKE_CURRENT_SOURCE_DIR}/padtest_xfb.png --frames 120
+                --pad 0151:200:30:128:255:77:255)
+    set_tests_properties(gc_play_hello gc_play_pad PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+endif()

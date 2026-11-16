@@ -1,6 +1,6 @@
 /* console_pad -- the player's mapping from a host pad (host_pad.h) to a console's
- * own pad: the GBA's ten keys, a PS1 DualShock, an N64 controller (XBA-158 /
- * XBA-168 / XBA-174). Part of the host layer (src/platform/HOST_LAYER.md):
+ * own pad: the GBA's ten keys, a PS1 DualShock, an N64 controller, a GameCube
+ * controller (XBA-158 / XBA-168 / XBA-174 / XBA-259). Part of the host layer (src/platform/HOST_LAYER.md):
  * pure logic, libc only, no SDL; host_pad.c adds console_pad_read on top.
  *
  * A console has targets (its buttons, in the order below: bit n of
@@ -10,11 +10,13 @@
  * right) or none. The defaults are the fixed mappings the runtimes had before
  * this layer, so a game with no mapping plays as it did.
  *
- * Text form (RECOMP_GBA_PAD_MAP / RECOMP_PS1_PAD_MAP / RECOMP_N64_PAD_MAP in
+ * Text form (RECOMP_GBA_PAD_MAP / RECOMP_PS1_PAD_MAP / RECOMP_N64_PAD_MAP /
+ * RECOMP_GC_PAD_MAP in
  * recomp.cfg, or the per-game value the Android app sets in the environment):
  * entries separated by commas, semicolons or spaces, each
  *   <target>=<source>[+<source>...] | <target>=none
- *   left_stick= / right_stick= (PS1), stick= (N64): left | right | none
+ *   left_stick= / right_stick= (PS1), stick= (N64), stick= / c_stick= (GC):
+ *   left | right | none
  *   range=<1..127>, deadzone=<0..90> (N64: the stick's travel and dead zone in
  *   percent; absent: the runtime's RECOMP_N64_STICK_RANGE / RECOMP_N64_DEADZONE)
  * listing only what differs from the default. Sources are the names
@@ -34,7 +36,7 @@
 extern "C" {
 #endif
 
-enum { CONSOLE_PAD_NONE, CONSOLE_PAD_GBA, CONSOLE_PAD_PS1, CONSOLE_PAD_N64, CONSOLE_PAD_CONSOLES };
+enum { CONSOLE_PAD_NONE, CONSOLE_PAD_GBA, CONSOLE_PAD_PS1, CONSOLE_PAD_N64, CONSOLE_PAD_GC, CONSOLE_PAD_CONSOLES };
 
 /* Host sources, bit n of a source set. */
 enum {
@@ -61,6 +63,12 @@ enum {
     N64_T_A, N64_T_B, N64_T_Z, N64_T_L, N64_T_R, N64_T_START, N64_T_UP, N64_T_DOWN, N64_T_LEFT, N64_T_RIGHT,
     N64_T_C_UP, N64_T_C_DOWN, N64_T_C_LEFT, N64_T_C_RIGHT, N64_T_COUNT
 };
+/* The GameCube controller (XBA-259): digital L / R are the triggers' clicks at the end of their travel (the analog
+ * values come from the host triggers themselves, gc_runtime.c). */
+enum {
+    GC_T_A, GC_T_B, GC_T_X, GC_T_Y, GC_T_Z, GC_T_L, GC_T_R, GC_T_START, GC_T_UP, GC_T_DOWN, GC_T_LEFT, GC_T_RIGHT,
+    GC_T_COUNT
+};
 
 #define CONSOLE_PAD_MAX_TARGETS 16
 #define CONSOLE_PAD_MAX_STICKS 2
@@ -86,7 +94,7 @@ typedef struct ConsolePadOut {
     uint32_t overlay_buttons;                  /* the targets the touch overlay presses (console_pad_merge) */
 } ConsolePadOut;
 
-/* "gba", "ps1", "n64" -> CONSOLE_PAD_*, else CONSOLE_PAD_NONE. */
+/* "gba", "ps1", "n64", "gc" -> CONSOLE_PAD_*, else CONSOLE_PAD_NONE. */
 int console_pad_console(const char *name);
 const char *console_pad_console_name(int console);
 /* The environment variable a console's mapping is read from (RECOMP_GBA_PAD_MAP ...), or NULL. */

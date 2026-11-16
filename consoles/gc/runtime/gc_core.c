@@ -1,5 +1,6 @@
 /* gc_core.c -- the GameCube spike's machine (XBA-225): DOL loading, the state the IPL leaves for an application,
- * the run loop (events, interrupts, lifted code first and the interpreter behind it), the XFB scan-out. */
+ * the run loop (events, interrupts, lifted code first and the interpreter behind it), video timing (NTSC / PAL,
+ * XBA-259), the XFB scan-out. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -39,10 +40,52 @@ void gc_schedule(gc_machine *m)
     m->h.next_event = t;
 }
 
-/* Lines in field f (0: 263, 1: 262; 525 per frame). */
-static uint32_t field_lines(uint64_t f)
+/* Lines in field f: the first field of a frame has the odd line (NTSC 263 + 262, PAL 313 + 312). */
+static uint32_t field_lines(const gc_machine *m, uint64_t f)
 {
-    return (f & 1) ? GC_LINES / 2 : GC_LINES - GC_LINES / 2;
+    return (f & 1) ? m->frame_lines / 2 : m->frame_lines - m->frame_lines / 2;
+}
+
+/* The video standard of the fields to come, from the VI's DCR format (XBA-259): PAL (1) has 625 lines at 25 frames
+ * per second, everything else (NTSC, MPAL, debug) 525 at 30. Taken at a field start, so a field keeps its length. */
+static void video_timing(gc_machine *m)
+{
+    bool pal = ((m->vi[0x01] >> 8) & 3) == 1;
+    m->frame_lines = pal ? GC_LINES_PAL : GC_LINES;
+    m->line_cycles = pal ? GC_CYCLES_PER_LINE_PAL : GC_CYCLES_PER_LINE;
+    if (m->line >= m->frame_lines)
+        m->line = 0;
+}
+
+void gc_set_tv_mode(gc_machine *m, int mode)
+{
+    bool pal = mode == GC_TV_PAL;
+    /* What the IPL leaves: the VI on in the TV's format (libogc's VIDEO_Init keeps an enabled VI's format and reads
+     * it back as the current TV mode, and keeps its timing and display interrupts too), and low memory's TV mode
+     * word. NTSC: the VI off, as before (VIDEO_Init sets it up itself). PAL: the minimal set libogc's own reset
+     * writes, with DI0 at the end of a 313-line field and DI1 at its start, so retrace interrupts come at once;
+     * VIDEO_Configure then programs the real mode. */
+    if (pal) {
+        static const struct { uint8_t idx; uint16_t v; } k_pal[] = {
+            {0x00, 0x0006}, {0x02, 0x4769}, {0x03, 0x01AD}, {0x04, 0x02EA}, {0x05, 0x5140}, {0x06, 0x0005},
+            {0x07, 0x01F6}, {0x08, 0x0004}, {0x09, 0x01F7}, {0x0A, 0x410C}, {0x0B, 0x410C}, {0x0C, 0x40ED},
+            {0x0D, 0x40ED}, {0x18, 0x1000 | 313}, {0x19, 0x01AE}, {0x1A, 0x1001}, {0x1B, 0x0001}, {0x24, 0x2828},
+        };
+        for (size_t i = 0; i < sizeof k_pal / sizeof k_pal[0]; i++)
+            m->vi[k_pal[i].idx] = k_pal[i].v;
+    }
+    m->vi[0x01] = pal ? 0x0101 : 0;
+    rc_put32(m->h.ram + 0xCC, pal ? 1 : 0);
+    video_timing(m);
+    m->next_line = m->h.now + m->line_cycles;
+    m->field_end = m->h.now + (uint64_t)field_lines(m, m->frames) * m->line_cycles;
+    gc_schedule(m);
+}
+
+uint64_t gc_field_ns(const gc_machine *m)
+{
+    /* cycles of the field / 486 MHz */
+    return (uint64_t)field_lines(m, m->frames) * m->line_cycles * 1000000000ull / GC_CPU_HZ;
 }
 
 gc_machine *gc_create(const uint8_t *dol, size_t size, char *why, size_t why_len)
@@ -117,8 +160,9 @@ gc_machine *gc_create(const uint8_t *dol, size_t size, char *why, size_t why_len
     c->spr[PPC_SPR_HID2] = 0xA0000000u; /* paired singles and write-gather pipe on */
     m->dec = 0xFFFFFFFFu;
     m->line = 0;
-    m->next_line = GC_CYCLES_PER_LINE;
-    m->field_end = (uint64_t)field_lines(0) * GC_CYCLES_PER_LINE;
+    video_timing(m);
+    m->next_line = m->line_cycles;
+    m->field_end = (uint64_t)field_lines(m, 0) * m->line_cycles;
     m->vi[0x01] = 0; /* display off until the program configures it */
     gc_schedule(m);
     return m;
@@ -178,7 +222,8 @@ int gc_run_frame(gc_machine *m)
     while (!m->error[0]) {
         while (m->h.now >= m->next_line) {
             gc_vi_line(m);
-            m->next_line += GC_CYCLES_PER_LINE;
+            m->next_line += m->line_cycles;
+            gc_si_line(m, ++m->field_line);
         }
         if (m->h.now >= m->dec_fire) {
             m->dec_pending = true;
@@ -199,7 +244,10 @@ int gc_run_frame(gc_machine *m)
     if (m->error[0])
         return -1;
     m->frames++;
-    m->field_end += (uint64_t)field_lines(m->frames) * GC_CYCLES_PER_LINE;
+    video_timing(m);
+    m->field_end += (uint64_t)field_lines(m, m->frames) * m->line_cycles;
+    m->field_line = 0;
+    gc_si_line(m, 0); /* a poll starts each field */
     return 0;
 }
 
@@ -236,7 +284,8 @@ static uint8_t clamp8(int v)
     return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
 }
 
-int gc_xfb_rgb(gc_machine *m, uint8_t *rgb, int *w, int *h)
+/* Where each line of the picture the VI scans out starts in MEM1, and its size: 0, or -1 without a framebuffer. */
+static int xfb_lines(gc_machine *m, uint32_t *base, int *w, int *h)
 {
     uint32_t top = fb_addr(m->vi[0x0E], m->vi[0x0F]), bot = fb_addr(m->vi[0x12], m->vi[0x13]);
     unsigned wpl = (m->vi[0x24] >> 8) & 0x7F, std = m->vi[0x24] & 0xFF, acv = (m->vi[0x00] >> 4) & 0x3FF;
@@ -247,8 +296,44 @@ int gc_xfb_rgb(gc_machine *m, uint8_t *rgb, int *w, int *h)
     uint32_t stride = std * 32; /* bytes from one line of a field to the next */
     if (width > GC_XFB_MAX_W || height > GC_XFB_MAX_H)
         return -1;
+    for (int y = 0; y < height; y++)
+        base[y] = interlaced ? ((y & 1) ? bot : top) + (uint32_t)(y >> 1) * stride : top + (uint32_t)y * stride;
+    *w = width;
+    *h = height;
+    return 0;
+}
+
+int gc_xfb_yuv(gc_machine *m, uint8_t *yuv, int *w, int *h)
+{
+    uint32_t base[GC_XFB_MAX_H];
+    int width, height;
+    if (xfb_lines(m, base, &width, &height))
+        return -1;
+    size_t row = (size_t)width * 2;
     for (int y = 0; y < height; y++) {
-        uint32_t base = interlaced ? ((y & 1) ? bot : top) + (uint32_t)(y >> 1) * stride : top + (uint32_t)y * stride;
+        uint8_t *o = yuv + (size_t)y * row;
+        if (base[y] + row <= GC_RAM_SIZE) {
+            memcpy(o, m->h.ram + base[y], row);
+        } else {
+            for (size_t i = 0; i < row; i += 2) {
+                o[i] = 16; /* black */
+                o[i + 1] = 128;
+            }
+        }
+    }
+    *w = width;
+    *h = height;
+    return 0;
+}
+
+int gc_xfb_rgb(gc_machine *m, uint8_t *rgb, int *w, int *h)
+{
+    uint32_t lines[GC_XFB_MAX_H];
+    int width, height;
+    if (xfb_lines(m, lines, &width, &height))
+        return -1;
+    for (int y = 0; y < height; y++) {
+        uint32_t base = lines[y];
         for (int x = 0; x < width; x += 2) {
             uint32_t pa = base + (uint32_t)x * 2;
             uint8_t y0 = 0, u = 128, y1 = 0, v = 128;

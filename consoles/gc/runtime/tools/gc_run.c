@@ -1,8 +1,11 @@
 /* gc_run -- runs a GameCube DOL headless on the spike's core (XBA-225) and dumps the XFB.
  *
- *   gc_run PROG.dol [--frames N] [--png OUT] [--pack LIB.so] [--missed FILE] [--stats] [--peek ADDR[:N]] [-v]
+ *   gc_run PROG.dol [--frames N] [--png OUT] [--pack LIB.so] [--missed FILE] [--stats] [--peek ADDR[:N]] [--pal]
+ *          [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]]... [-v]
  *
- * --frames counts video fields (59.94 per second). --png: the framebuffer the video interface scans out after the
+ * --frames counts video fields (60 per second, 50 in PAL). --pal: the IPL's PAL state (gc_set_tv_mode). --pad: a
+ * standard controller on port PORT (0..3) for the whole run, BUTTONS in hex (GC_PAD_*), then sticks and triggers in
+ * decimal (0..255, sticks at rest 128; XBA-259). --png: the framebuffer the video interface scans out after the
  * last field, YUV converted to RGB. --pack: a library built from gc_tools.recomp's C (gc_recomp_title_table); its
  * functions bind to this program's bus symbols. --missed: the text addresses the interpreter had to start at after a
  * jump, one hex per line, for gc_tools.recomp --discovered. Exit status: 0, 1 when the machine stopped (unsupported
@@ -13,100 +16,7 @@
 #include <string.h>
 
 #include "gc_core.h"
-
-static uint32_t crc_table[256];
-
-static void crc_init(void)
-{
-    for (uint32_t n = 0; n < 256; n++) {
-        uint32_t c = n;
-        for (int k = 0; k < 8; k++)
-            c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-        crc_table[n] = c;
-    }
-}
-
-static uint32_t crc32_of(uint32_t crc, const uint8_t *p, size_t n)
-{
-    crc = ~crc;
-    while (n--)
-        crc = crc_table[(crc ^ *p++) & 0xFF] ^ (crc >> 8);
-    return ~crc;
-}
-
-static void put32(FILE *f, uint32_t v)
-{
-    uint8_t b[4] = {(uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v};
-    fwrite(b, 1, 4, f);
-}
-
-static void chunk(FILE *f, const char *type, const uint8_t *data, size_t n)
-{
-    put32(f, (uint32_t)n);
-    fwrite(type, 1, 4, f);
-    if (n)
-        fwrite(data, 1, n, f);
-    uint32_t c = crc32_of(0, (const uint8_t *)type, 4);
-    c = crc32_of(c, data, n);
-    put32(f, c);
-}
-
-/* A W x H RGB PNG, zlib with stored blocks (no compression: no dependency, deterministic bytes). */
-static int write_png(const char *path, const uint8_t *rgb, int w, int h)
-{
-    size_t row = 1 + (size_t)w * 3, n = row * (size_t)h;
-    uint8_t *raw = malloc(n);
-    size_t nblk = (n + 65534) / 65535;
-    size_t zn = 2 + n + nblk * 5 + 4;
-    uint8_t *z = malloc(zn);
-    if (!raw || !z) {
-        free(raw);
-        free(z);
-        return -1;
-    }
-    for (int y = 0; y < h; y++) {
-        raw[y * row] = 0;
-        memcpy(raw + y * row + 1, rgb + (size_t)y * w * 3, (size_t)w * 3);
-    }
-    size_t o = 0;
-    z[o++] = 0x78;
-    z[o++] = 0x01;
-    uint32_t s1 = 1, s2 = 0;
-    for (size_t i = 0; i < n; i++) {
-        s1 = (s1 + raw[i]) % 65521;
-        s2 = (s2 + s1) % 65521;
-    }
-    for (size_t at = 0; at < n; at += 65535) {
-        size_t len = n - at < 65535 ? n - at : 65535;
-        z[o++] = at + len == n ? 1 : 0;
-        z[o++] = (uint8_t)len;
-        z[o++] = (uint8_t)(len >> 8);
-        z[o++] = (uint8_t)~len;
-        z[o++] = (uint8_t)(~len >> 8);
-        memcpy(z + o, raw + at, len);
-        o += len;
-    }
-    uint32_t ad = s2 << 16 | s1;
-    z[o++] = (uint8_t)(ad >> 24);
-    z[o++] = (uint8_t)(ad >> 16);
-    z[o++] = (uint8_t)(ad >> 8);
-    z[o++] = (uint8_t)ad;
-    free(raw);
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        free(z);
-        return -1;
-    }
-    static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 13, 10, 26, 10};
-    fwrite(sig, 1, 8, f);
-    uint8_t ihdr[13] = {(uint8_t)(w >> 24), (uint8_t)(w >> 16), (uint8_t)(w >> 8), (uint8_t)w,
-                        (uint8_t)(h >> 24), (uint8_t)(h >> 16), (uint8_t)(h >> 8), (uint8_t)h, 8, 2, 0, 0, 0};
-    chunk(f, "IHDR", ihdr, 13);
-    chunk(f, "IDAT", z, o);
-    chunk(f, "IEND", NULL, 0);
-    free(z);
-    return fclose(f) ? -1 : 0;
-}
+#include "gc_png.h"
 
 static uint8_t *read_file(const char *path, size_t *size)
 {
@@ -131,6 +41,9 @@ int main(int argc, char **argv)
     const char *dol_path = NULL, *png = NULL, *pack = NULL, *missed = NULL;
     int frames = 60, stats = 0, verbose = 0, npeek = 0;
     const char *peek[16];
+    int pal = 0;
+    gc_pad_state pads[4];
+    memset(pads, 0, sizeof pads);
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             frames = atoi(argv[++i]);
@@ -142,7 +55,18 @@ int main(int argc, char **argv)
             missed = argv[++i];
         else if (!strcmp(argv[i], "--peek") && i + 1 < argc && npeek < 16)
             peek[npeek++] = argv[++i];
-        else if (!strcmp(argv[i], "--stats"))
+        else if (!strcmp(argv[i], "--pal"))
+            pal = 1;
+        else if (!strcmp(argv[i], "--pad") && i + 1 < argc) {
+            unsigned port = 4, b = 0, v[6] = {128, 128, 128, 128, 0, 0};
+            int n = sscanf(argv[++i], "%u:%x:%u:%u:%u:%u:%u:%u", &port, &b, &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+            if (n < 2 || port > 3) {
+                fprintf(stderr, "gc_run: --pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]\n");
+                return 2;
+            }
+            pads[port] = (gc_pad_state){true, (uint16_t)b, (uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2], (uint8_t)v[3],
+                                        (uint8_t)v[4], (uint8_t)v[5]};
+        } else if (!strcmp(argv[i], "--stats"))
             stats = 1;
         else if (!strcmp(argv[i], "-v"))
             verbose++;
@@ -150,7 +74,7 @@ int main(int argc, char **argv)
             dol_path = argv[i];
         else {
             fprintf(stderr, "usage: gc_run PROG.dol [--frames N] [--png OUT] [--pack LIB] [--missed FILE] [--stats]"
-                            " [--peek ADDR[:N]] [-v]\n");
+                            " [--peek ADDR[:N]] [--pal] [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]] [-v]\n");
             return 2;
         }
     }
@@ -172,6 +96,10 @@ int main(int argc, char **argv)
         return 2;
     }
     gc_set_verbose(m, verbose);
+    if (pal)
+        gc_set_tv_mode(m, GC_TV_PAL);
+    for (int p = 0; p < 4; p++)
+        gc_set_pad(m, p, &pads[p]);
     void *lib = NULL;
     if (pack) {
         lib = dlopen(pack, RTLD_NOW | RTLD_LOCAL);
@@ -227,7 +155,6 @@ int main(int argc, char **argv)
     if (png) {
         static uint8_t rgb[GC_XFB_MAX_W * GC_XFB_MAX_H * 3];
         int w, h;
-        crc_init();
         if (gc_xfb_rgb(m, rgb, &w, &h)) {
             fprintf(stderr, "gc_run: the video interface has no framebuffer\n");
             rc = rc ? rc : 1;

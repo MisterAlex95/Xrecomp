@@ -1,4 +1,4 @@
-/* console_pad.c -- see console_pad.h (XBA-158 / XBA-168 / XBA-174). */
+/* console_pad.c -- see console_pad.h (XBA-158 / XBA-168 / XBA-174 / XBA-259). */
 #include "console_pad.h"
 
 #include <ctype.h>
@@ -26,9 +26,13 @@ static const char *const k_n64_targets[N64_T_COUNT] = {
     "a", "b", "z", "l", "r", "start", "dpad_up", "dpad_down", "dpad_left", "dpad_right",
     "c_up", "c_down", "c_left", "c_right",
 };
+static const char *const k_gc_targets[GC_T_COUNT] = {
+    "a", "b", "x", "y", "z", "l", "r", "start", "dpad_up", "dpad_down", "dpad_left", "dpad_right",
+};
 static const char *const k_stick_values[3] = { "left", "right", "none" };
 static const char *const k_ps1_sticks[2] = { "left_stick", "right_stick" };
 static const char *const k_n64_sticks[1] = { "stick" };
+static const char *const k_gc_sticks[2] = { "stick", "c_stick" };
 
 #define B(s) CPS_BIT(CPS_##s)
 #define DPAD_AND_LSTICK(dir, stick) (B(DPAD_##dir) | B(LSTICK_##stick))
@@ -49,6 +53,7 @@ const char *console_pad_console_name(int console)
     case CONSOLE_PAD_GBA: return "gba";
     case CONSOLE_PAD_PS1: return "ps1";
     case CONSOLE_PAD_N64: return "n64";
+    case CONSOLE_PAD_GC: return "gc";
     default: return NULL;
     }
 }
@@ -59,6 +64,7 @@ const char *console_pad_env(int console)
     case CONSOLE_PAD_GBA: return "RECOMP_GBA_PAD_MAP";
     case CONSOLE_PAD_PS1: return "RECOMP_PS1_PAD_MAP";
     case CONSOLE_PAD_N64: return "RECOMP_N64_PAD_MAP";
+    case CONSOLE_PAD_GC: return "RECOMP_GC_PAD_MAP";
     default: return NULL;
     }
 }
@@ -69,6 +75,7 @@ static const char *const *targets_of(int console, int *n)
     case CONSOLE_PAD_GBA: *n = GBA_T_COUNT; return k_gba_targets;
     case CONSOLE_PAD_PS1: *n = PS1_T_COUNT; return k_ps1_targets;
     case CONSOLE_PAD_N64: *n = N64_T_COUNT; return k_n64_targets;
+    case CONSOLE_PAD_GC: *n = GC_T_COUNT; return k_gc_targets;
     default: *n = 0; return NULL;
     }
 }
@@ -78,6 +85,7 @@ static const char *const *sticks_of(int console, int *n)
     switch (console) {
     case CONSOLE_PAD_PS1: *n = 2; return k_ps1_sticks;
     case CONSOLE_PAD_N64: *n = 1; return k_n64_sticks;
+    case CONSOLE_PAD_GC: *n = 2; return k_gc_sticks;
     default: *n = 0; return NULL;
     }
 }
@@ -168,6 +176,29 @@ int console_pad_defaults(ConsolePadMap *m, int console)
         m->stick[0] = CONSOLE_STICK_LEFT;
         m->stick_threshold = 16384;
         m->trigger_threshold = 8192;
+        break;
+    case CONSOLE_PAD_GC:
+        /* XBA-259: the face buttons by name on an Xbox-labelled pad (A south, B east, X west, Y north; the AYN
+         * Thor's), Z on the right shoulder, L / R the triggers (digital past 85 % of their travel: the GameCube's
+         * click at the end), the sticks as they are. */
+        m->n_targets = GC_T_COUNT;
+        m->n_sticks = 2;
+        m->source[GC_T_A] = B(SOUTH);
+        m->source[GC_T_B] = B(EAST);
+        m->source[GC_T_X] = B(WEST);
+        m->source[GC_T_Y] = B(NORTH);
+        m->source[GC_T_Z] = B(RIGHT_SHOULDER);
+        m->source[GC_T_L] = B(LEFT_TRIGGER);
+        m->source[GC_T_R] = B(RIGHT_TRIGGER);
+        m->source[GC_T_START] = B(START);
+        m->source[GC_T_UP] = B(DPAD_UP);
+        m->source[GC_T_DOWN] = B(DPAD_DOWN);
+        m->source[GC_T_LEFT] = B(DPAD_LEFT);
+        m->source[GC_T_RIGHT] = B(DPAD_RIGHT);
+        m->stick[0] = CONSOLE_STICK_LEFT;
+        m->stick[1] = CONSOLE_STICK_RIGHT;
+        m->stick_threshold = 16384;
+        m->trigger_threshold = 27852;
         break;
     default:
         m->range = m->deadzone = 0;

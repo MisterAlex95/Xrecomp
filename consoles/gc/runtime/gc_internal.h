@@ -13,9 +13,12 @@
  * one cycle per instruction. */
 #define GC_CPU_HZ 486000000u
 #define GC_TB_DIV 12u
-/* NTSC: 525 lines per frame, two fields per frame at 59.94 fields per second. */
+/* Video timing (XBA-259): NTSC 525 lines per frame at 30 frames (60 fields) per second, PAL 625 lines at 25 frames
+ * (50 fields). Which one follows the video interface's DCR format (FMT 1 = PAL), read at each field start. */
 #define GC_LINES 525u
 #define GC_CYCLES_PER_LINE (GC_CPU_HZ / 30u / GC_LINES)
+#define GC_LINES_PAL 625u
+#define GC_CYCLES_PER_LINE_PAL (GC_CPU_HZ / 25u / GC_LINES_PAL)
 
 #define GC_ARAM_SIZE 0x01000000u
 #define GC_LC_SIZE 0x4000u  /* the locked L1 cache (dcbz_l), at 0xE0000000 */
@@ -36,7 +39,10 @@ struct gc_machine {
     uint64_t frames;
     uint64_t field_end;   /* cycle where the current field ends */
     uint64_t next_line;   /* cycle of the next line start */
-    uint32_t line;        /* current line, 0..524 */
+    uint32_t line;        /* current line, 0..frame_lines - 1 */
+    uint32_t frame_lines; /* 525 NTSC, 625 PAL */
+    uint32_t field_line;  /* lines since the field started */
+    uint64_t line_cycles; /* cycles per line */
     uint64_t tb_base;     /* time base = tb_base + now / GC_TB_DIV */
     uint32_t dec;         /* decrementer value written at dec_written */
     uint64_t dec_written;
@@ -55,7 +61,8 @@ struct gc_machine {
     bool dsp_booted;
     /* audio interface, serial interface, external interface: 32-bit registers */
     uint32_t ai[8];
-    uint32_t si[0x40];
+    uint32_t si[0x40];    /* gc_si.c: channel buffers, poll, COMCSR, SISR, the 128-byte I/O buffer at 0x20 */
+    gc_pad_state pad[4];  /* what each SI port has plugged in (gc_set_pad) */
     uint32_t exi[15];
     uint32_t mi_reg[0x40];
 
@@ -89,6 +96,13 @@ void gc_stop(gc_machine *m, const char *fmt, ...);
 uint32_t gc_hw_read(gc_machine *m, uint32_t pa, unsigned size);
 void gc_hw_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size);
 void gc_vi_line(gc_machine *m);
+
+/* gc_si.c: the serial interface and the standard controllers on it (XBA-259) */
+uint32_t gc_si_read(gc_machine *m, unsigned idx);
+void gc_si_write(gc_machine *m, unsigned idx, uint32_t v);
+/* A line of the field starts (0: the field's first): every X lines of SIPOLL from the field start, the channels that
+ * poll latch their controller's state (as Dolphin does; Y, the polls per field, follows from X). */
+void gc_si_line(gc_machine *m, uint32_t field_line);
 
 /* gc_core.c */
 void gc_schedule(gc_machine *m);
