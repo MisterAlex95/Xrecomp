@@ -63,7 +63,7 @@ def test_nothing_at_a_call_the_site_is_noted():
     lifter.has_ebp_local = True
     text = "\n".join(lifter.lift_instruction(_call(0x10010, 0x11000)))
     assert "RECOMP_FRAME" not in text
-    assert "PUSH32(esp, 0x00010015u); RECOMP_ABI_CALL(0x00011000u, sub_00011000);" in text
+    assert "PUSH32(esp, 0x00010015u); _rs_00010015: RECOMP_ABI_CALL(0x00011000u, sub_00011000);" in text
     assert lifter.call_site_table == {(0x10015, 0x10000): 0}
 
 
@@ -173,13 +173,13 @@ def test_park_plan_records_only_functions_that_may_park(monkeypatch):
     tr = FunctionTranslator(image, db)
     assert tr._park_plan() == frozenset({base + 0x20, base + 0x80, base + 0x90})
     code = tr.translate_function(base, db[base])
-    assert code.count("RECOMP_FRAME_ENTRY();") == 1
+    assert code.count("RECOMP_FRAME_ENTRY_R();") == 1
     assert "RECOMP_FRAME_LEAVE(); return;" in code
     assert (0x10005, base) not in tr.lifter.call_site_table      # into the quiet leafer
     assert (0x1000A, base) in tr.lifter.call_site_table          # into icaller
     assert "RECOMP_FRAME" not in tr.translate_function(base + 0x20, db[base + 0x20])
     halter = tr.translate_function(base + 0x50, db[base + 0x50])
-    assert "RECOMP_FRAME_ENTRY();" in halter
+    assert "RECOMP_FRAME_ENTRY_R();" in halter
 
 
 # f0 0x10000: push ebp; mov ebp, esp; call f1; mov [0x2008], ebp; pop ebp; ret
@@ -247,7 +247,7 @@ def test_three_deep_chain_in_c(tmp_path, monkeypatch):
     tr.lifter.manual_functions = {base + 0x90}
     bodies = "\n".join(tr.translate_function(a, db[a]) for a in (base, base + 0x30, base + 0x60))
     assert tr._park_plan() == frozenset()
-    assert bodies.count("RECOMP_FRAME_ENTRY();") == 3
+    assert bodies.count("RECOMP_FRAME_ENTRY_R();") == 3
     table = tr.lifter.call_site_table
     assert table[(0x10008, 0x10000)] == 0
     assert table[(0x1003A, 0x10030)] == 0

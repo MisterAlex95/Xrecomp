@@ -29,7 +29,8 @@ def _translate(hexcode, back_edge_yield=True):
 
 def test_a_loop_back_edge_checks_the_quantum():
     code = _translate(COUNT_DOWN)
-    assert ("{ RECOMP_BACK_EDGE(0x%08Xu); goto loc_%08X; }" % (BASE + 1, BASE)) in code, code
+    # The label after the helper is its resume entry (XBA-250).
+    assert ("{ RECOMP_BACK_EDGE(0x%08Xu); _rh_%08X: ; goto loc_%08X; }" % (BASE + 1, BASE + 1, BASE)) in code, code
     assert code.count("RECOMP_BACK_EDGE") == 1
 
 
@@ -91,8 +92,8 @@ POLL_WITH_BODY = "f78010041000000001004975f3c3"
 
 def test_a_loop_that_only_polls_a_word_tells_the_runtime():
     code = _translate(POLL, back_edge_yield=None)
-    assert ("{ RECOMP_POLL_WAIT(eax + 0x100410, 0x10000u, 1, 0x%08Xu); goto loc_%08X; }"
-            % (BASE + 15, BASE + 5)) in code, code
+    assert ("{ RECOMP_POLL_WAIT(eax + 0x100410, 0x10000u, 1, 0x%08Xu); _rh_%08X: ; goto loc_%08X; }"
+            % (BASE + 15, BASE + 15, BASE + 5)) in code, code
     assert code.count("RECOMP_POLL_WAIT") == 1
 
 

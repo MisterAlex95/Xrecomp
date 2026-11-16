@@ -3219,7 +3219,7 @@ class FunctionTranslator:
         frame_line = ("    ebp = g_seh_ebp; /* the funclet runs on its parent's frame */\n"
                       if "uint32_t ebp" in code[:first] else "")
         arms = "".join(f"    case 0x{t:08X}u: goto loc_{t:08X};\n" for t in funclets)
-        leave = ("RECOMP_FRAME_LEAVE(); " if "RECOMP_FRAME_ENTRY()" in code[:first]
+        leave = ("RECOMP_FRAME_LEAVE(); " if "RECOMP_FRAME_ENTRY" in code[:first]
                  else "")   # XBA-247: the copy recorded its frame on entry
         entry = (f"\n    /* entered at an exception funclet of 0x{func_va:08X} */\n"
                  f"{frame_line}"
@@ -3654,6 +3654,8 @@ class FunctionTranslator:
         # The C local ebp is declared exactly when used_regs has it (above):
         # its calls push and reload it through the frame shadow stack.
         self.lifter.has_ebp_local = "ebp" in reg_decls
+        # The resume entries of this function's calls (XBA-250).
+        self.lifter.resume_sites = {}
 
         # The exception frame's resume anchor (XBA-112), emitted by
         # lift_basic_block right after the instruction that makes the frame
@@ -3983,15 +3985,119 @@ class FunctionTranslator:
             if "ebp" in reg_decls:
                 body = [line.replace("RECOMP_POLL_WAIT(", "g_ebp = ebp; RECOMP_POLL_WAIT(")
                         .replace("xbox_Halt(", "g_ebp = ebp; xbox_Halt(") for line in body]
+            body = self._resume_dedupe(start, body)
+            body, waits = self._resume_host_waits(start, body, "ebp" in reg_decls)
             close = len(body) - 1
             while close >= 0 and body[close].strip() != "}":
                 close -= 1
             if close >= 0:
-                body.insert(close, "    RECOMP_FRAME_LEAVE(); /* falls off its end */")
+                body[close:close] = (["    RECOMP_FRAME_LEAVE(); /* falls off its end */"]
+                                     + self._resume_block(start, waits, "ebp" in reg_decls))
             lines[frame_entry_at:] = (
-                ["    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */"] + body)
+                ["    RECOMP_FRAME_ENTRY_R(); /* may park: recorded (XBA-247), resume entry (XBA-250) */"]
+                + body)
 
         return "\n".join(lines)
+
+    _HOST_WAIT_RE = re.compile(
+        r"(?:RECOMP_POLL_WAIT\([^;]*?|RECOMP_BACK_EDGE\(|xbox_Halt\()0x([0-9A-F]{8})u\);")
+
+    def _resume_host_waits(self, start, body, has_ebp):
+        """The host waits of a function that may park (XBA-251), each given a
+        resume entry right after its helper (XBA-250): a thread parked there
+        and re-entered from a save state of another run continues as if the
+        helper had returned (calling it again is never needed: the poll loop
+        tests its word again, a hlt or a preempt only waits). Noted in the
+        call-site table under 0x80000000 | the site's VA (CALL_SITE_HOST_WAIT).
+        A VA with more than one helper call it cannot tell apart (two back
+        edges of one jcc, in two statements) gets no entry (NO_RESUME).
+        With an ebp local, a back edge publishes it before preempting
+        (RECOMP_BACK_EDGE_EBP), as a poll wait and a hlt already do, so the
+        thread's ebp there is known. Returns (body, {VA: label})."""
+        lifter = self.lifter
+        where = {}
+        for i, line in enumerate(body):
+            for m in self._HOST_WAIT_RE.finditer(line):
+                where.setdefault(int(m.group(1), 16), []).append(i)
+        waits = {}
+        base_flags = lifter.CALL_SITE_HOST_WAIT
+        if not has_ebp:
+            base_flags |= lifter.CALL_SITE_NO_EBP
+        if lifter.stack_switch_sites:
+            base_flags |= lifter.CALL_SITE_STACK_SWITCH
+        if getattr(lifter, "seh_anchor_after", None) is not None:
+            base_flags |= lifter.CALL_SITE_SEH_ANCHOR
+        for va, at in sorted(where.items()):
+            flags = base_flags
+            one = len(set(at)) == 1 and (len(at) == 1 or body[at[0]].count("goto ") <= 1)
+            if one:
+                label = f"_rh_{va:08X}"
+                pat = re.compile(r"((?:RECOMP_POLL_WAIT\([^;]*?|RECOMP_BACK_EDGE\(|xbox_Halt\()0x%08Xu\);)" % va)
+                m = None
+                for m in pat.finditer(body[at[0]]):
+                    pass      # the last helper call of that VA in the statement
+                line = body[at[0]]
+                body[at[0]] = line[:m.end()] + f" {label}: ;" + line[m.end():]
+                waits[va] = label
+            else:
+                flags |= lifter.CALL_SITE_NO_RESUME
+            key = (0x80000000 | va, start)
+            lifter.call_site_table[key] = lifter.call_site_table.get(key, 0) | flags
+        if has_ebp:
+            body = [line.replace("RECOMP_BACK_EDGE(", "RECOMP_BACK_EDGE_EBP(ebp, ") for line in body]
+        return body, waits
+
+    def _resume_dedupe(self, start, body):
+        """Each call's resume label exactly once in the function (XBA-250):
+        the first one emitted stays, later copies of the same instruction
+        lose theirs; a site whose label was never emitted (its lift was
+        discarded) leaves the resume block and is flagged NO_RESUME."""
+        lifter = self.lifter
+        for ret_va, label in list(lifter.resume_sites.items()):
+            tag = label + ": "
+            seen = False
+            for i, line in enumerate(body):
+                if tag not in line:
+                    continue
+                head, rest = (line.split(tag, 1) if not seen else ("", line))
+                if not seen:
+                    seen = True
+                    line, rest = head + tag, rest
+                else:
+                    line = ""
+                # Later copies: an indirect entry goes whole, a direct label alone.
+                rest = rest.replace(f"if (0) {{ {tag}_icall_target = recomp_resume_target(); }} ", "")
+                rest = rest.replace(tag, "")
+                body[i] = line + rest
+            if not seen:
+                del lifter.resume_sites[ret_va]
+                key = (ret_va, start)
+                lifter.call_site_table[key] = lifter.call_site_table.get(key, 0) | lifter.CALL_SITE_NO_RESUME
+        return body
+
+    def _resume_block(self, start, waits, has_ebp):
+        """The resume block of a function that may park (XBA-250), after its
+        last statement: RECOMP_FRAME_ENTRY_R jumps here when the thread is
+        re-entering a saved chain. The runtime names the site (a call's
+        return VA, or 0x80000000 | a host wait's VA) and the ebp the function
+        held there; the block restores it and jumps to the site's entry."""
+        lines = ["    return;",
+                 "_recomp_resume: /* re-entered from a save state (XBA-250) */",
+                 "    {",
+                 "    uint32_t _rs_ebp = 0, _rs_site = recomp_resume_site(0x%08Xu, &_rs_ebp);" % start,
+                 "    (void)_rs_ebp;",
+                 "    switch (_rs_site) {"]
+        set_ebp = "ebp = _rs_ebp; " if has_ebp else ""
+        for ret_va, label in sorted(self.lifter.resume_sites.items()):
+            lines.append(f"    case 0x{ret_va:08X}u: {set_ebp}goto {label};")
+        for va, label in sorted(waits.items()):
+            lines.append(f"    case 0x{0x80000000 | va:08X}u: {set_ebp}goto {label};")
+        lines += ["    default: break;",
+                  "    }",
+                  "    recomp_resume_lost(0x%08Xu, _rs_site);" % start,
+                  "    }",
+                  "    RECOMP_FRAME_LEAVE(); return;"]
+        return lines
 
     def _find_used_registers(self, instructions):
         """Find which 32-bit registers are referenced by any instruction."""

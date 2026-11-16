@@ -248,8 +248,14 @@ enum {
     XBOX_CALL_SITE_STACK_SWITCH = 0x04,  /* the caller switches guest stacks (XBA-101) */
     XBOX_CALL_SITE_JMPBUF = 0x08,        /* setjmp / longjmp */
     XBOX_CALL_SITE_SEH_HELPER = 0x10,    /* __SEH_prolog / epilog */
-    XBOX_CALL_SITE_MANUAL = 0x20         /* a hand-written replacement */
+    XBOX_CALL_SITE_MANUAL = 0x20,        /* a hand-written replacement */
+    XBOX_CALL_SITE_SEH_ANCHOR = 0x40,    /* the caller takes an SEH resume anchor a resume would skip (XBA-250) */
+    XBOX_CALL_SITE_NO_RESUME = 0x80,     /* no resume entry at this site (XBA-250) */
+    XBOX_CALL_SITE_HOST_WAIT = 0x100     /* a host wait inside lifted code, keyed 0x80000000 | its VA (XBA-250) */
 };
+/* What keeps a chain through a site from being re-entered in another run (XBA-250, xbox_resume.h). */
+#define XBOX_CALL_SITE_UNRESUMABLE (XBOX_CALL_SITE_STACK_SWITCH | XBOX_CALL_SITE_JMPBUF | XBOX_CALL_SITE_MANUAL \
+                                    | XBOX_CALL_SITE_SEH_ANCHOR | XBOX_CALL_SITE_NO_RESUME)
 struct RecompFrame;
 int  xbox_ParkFrames(int slot, struct RecompFrame *out, uint32_t max, uint32_t *depth, uint32_t *base);
 void recomp_call_sites_register(const uint32_t *sites, uint32_t count);

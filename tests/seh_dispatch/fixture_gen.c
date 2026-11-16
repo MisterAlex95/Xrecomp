@@ -58,7 +58,7 @@ loc_00010000: ;
     PUSH32(esp, esp);
     g_ebp = ebp; /* frame stays current across calls */
     g_seh_ebp = ebp;
-    PUSH32(esp, 0x00010033u); RECOMP_ABI_CALL(0x0001F000u, sub_0001F000); /* call 0x0001F000 */
+    PUSH32(esp, 0x00010033u); _rs_00010033: RECOMP_ABI_CALL(0x0001F000u, sub_0001F000); /* call 0x0001F000 */
 
 loc_00010033: ;
     eax = 0x333;
@@ -98,7 +98,7 @@ loc_0001003C: ;
     PUSH32(esp, esp);
     g_ebp = ebp; /* frame stays current across calls */
     g_seh_ebp = ebp;
-    PUSH32(esp, 0x0001006Fu); RECOMP_ABI_CALL(0x0001F000u, sub_0001F000); /* call 0x0001F000 */
+    PUSH32(esp, 0x0001006Fu); _rs_0001006F: RECOMP_ABI_CALL(0x0001F000u, sub_0001F000); /* call 0x0001F000 */
 
 loc_0001006F: ;
     eax = 0x666;
@@ -303,7 +303,7 @@ loc_00010116: ;
     MEM32(ebp + -4) = 0xFFFFFFFFu;
     g_ebp = ebp; /* frame stays current across calls */
     g_seh_ebp = ebp;
-    PUSH32(esp, 0x00010122u); RECOMP_ABI_CALL(0x00010133u, sub_00010133); /* call 0x00010133 */
+    PUSH32(esp, 0x00010122u); _rs_00010122: RECOMP_ABI_CALL(0x00010133u, sub_00010133); /* call 0x00010133 */
 
 loc_00010122: ;
     ecx = MEM32(ebp + -16);
@@ -373,7 +373,7 @@ loc_00010116: ;
     MEM32(ebp + -4) = 0xFFFFFFFFu;
     g_ebp = ebp; /* frame stays current across calls */
     g_seh_ebp = ebp;
-    PUSH32(esp, 0x00010122u); RECOMP_ABI_CALL(0x00010133u, sub_00010133); /* call 0x00010133 */
+    PUSH32(esp, 0x00010122u); _rs_00010122: RECOMP_ABI_CALL(0x00010133u, sub_00010133); /* call 0x00010133 */
 
 loc_00010122: ;
     ecx = MEM32(ebp + -16);
@@ -404,7 +404,7 @@ void sub_00010133(void) { f_inner__seh(0x00010133u); } /* eh3 funclet of 0x00010
  */
 void my_handler3(void)
 {
-    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
+    RECOMP_FRAME_ENTRY_R(); /* may park: recorded (XBA-247), resume entry (XBA-250) */
     uint32_t ebp = 0;
     ebp = g_ebp;  /* prologue saves caller's frame */
     int _flags = 0; /* fallback flag var */
@@ -454,7 +454,7 @@ loc_00010178: ;
     PUSH32(esp, ebp);
     ebp = ebx + 0x10;
     { uint32_t _icall_esp = g_esp;
-    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x0001017Eu); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x0001017Cu); } /* indirect call */
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x0001017Eu); if (0) { _rs_0001017E: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x0001017Cu); } /* indirect call */
     }
 
 loc_0001017E: ;
@@ -473,7 +473,7 @@ loc_00010186: ;
     PUSH32(esp, ebx);
     g_ebp = ebp; /* frame stays current across calls */
     g_seh_ebp = ebp;
-    PUSH32(esp, 0x00010195u); RECOMP_ABI_CALL(0x0001F010u, sub_0001F010); /* call 0x0001F010 */
+    PUSH32(esp, 0x00010195u); _rs_00010195: RECOMP_ABI_CALL(0x0001F010u, sub_0001F010); /* call 0x0001F010 */
 
 loc_00010195: ;
     ecx = esi + esi * 2;
@@ -522,7 +522,7 @@ loc_000101D9: ;
     PUSH32(esp, ebp);
     ebp = ebx + 0x10;
     { uint32_t _icall_esp = g_esp;
-    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x000101E4u); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000101E2u); } /* indirect call */
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x000101E4u); if (0) { _rs_000101E4: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000101E2u); } /* indirect call */
     }
 
 loc_000101E4: ;
@@ -546,6 +546,20 @@ loc_000101F3: ;
     g_ebp = ebp; g_seh_ebp = ebp; esp += 4; RECOMP_FRAME_LEAVE(); return; /* ret */
 
     RECOMP_FRAME_LEAVE(); /* falls off its end */
+    return;
+_recomp_resume: /* re-entered from a save state (XBA-250) */
+    {
+    uint32_t _rs_ebp = 0, _rs_site = recomp_resume_site(0x0001013Bu, &_rs_ebp);
+    (void)_rs_ebp;
+    switch (_rs_site) {
+    case 0x0001017Eu: ebp = _rs_ebp; goto _rs_0001017E;
+    case 0x00010195u: ebp = _rs_ebp; goto _rs_00010195;
+    case 0x000101E4u: ebp = _rs_ebp; goto _rs_000101E4;
+    default: break;
+    }
+    recomp_resume_lost(0x0001013Bu, _rs_site);
+    }
+    RECOMP_FRAME_LEAVE(); return;
 }
 
 /**
@@ -800,7 +814,7 @@ void sub_00010296(void) { f_cxx_inner__seh(0x00010296u); } /* cxx funclet of 0x0
  */
 void ehstub_cxx(void)
 {
-    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
+    RECOMP_FRAME_ENTRY_R(); /* may park: recorded (XBA-247), resume entry (XBA-250) */
     uint32_t ebp = 0;
     ebp = g_ebp;  /* frameless: caller's frame */
     ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
@@ -810,6 +824,17 @@ loc_0001029E: ;
     g_seh_ebp = ebp; my_cxx_handler(); RECOMP_FRAME_LEAVE(); return; /* tail jmp 0x000102AC */
 
     RECOMP_FRAME_LEAVE(); /* falls off its end */
+    return;
+_recomp_resume: /* re-entered from a save state (XBA-250) */
+    {
+    uint32_t _rs_ebp = 0, _rs_site = recomp_resume_site(0x0001029Eu, &_rs_ebp);
+    (void)_rs_ebp;
+    switch (_rs_site) {
+    default: break;
+    }
+    recomp_resume_lost(0x0001029Eu, _rs_site);
+    }
+    RECOMP_FRAME_LEAVE(); return;
 }
 
 /**
@@ -820,7 +845,7 @@ loc_0001029E: ;
  */
 void ehstub_inner(void)
 {
-    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
+    RECOMP_FRAME_ENTRY_R(); /* may park: recorded (XBA-247), resume entry (XBA-250) */
     uint32_t ebp = 0;
     ebp = g_ebp;  /* frameless: caller's frame */
     ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
@@ -830,6 +855,17 @@ loc_000102A5: ;
     g_seh_ebp = ebp; my_cxx_handler(); RECOMP_FRAME_LEAVE(); return; /* tail jmp 0x000102AC */
 
     RECOMP_FRAME_LEAVE(); /* falls off its end */
+    return;
+_recomp_resume: /* re-entered from a save state (XBA-250) */
+    {
+    uint32_t _rs_ebp = 0, _rs_site = recomp_resume_site(0x000102A5u, &_rs_ebp);
+    (void)_rs_ebp;
+    switch (_rs_site) {
+    default: break;
+    }
+    recomp_resume_lost(0x000102A5u, _rs_site);
+    }
+    RECOMP_FRAME_LEAVE(); return;
 }
 
 /**
@@ -840,7 +876,7 @@ loc_000102A5: ;
  */
 void my_cxx_handler(void)
 {
-    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
+    RECOMP_FRAME_ENTRY_R(); /* may park: recorded (XBA-247), resume entry (XBA-250) */
     uint32_t ebp = 0;
     ebp = g_ebp;  /* prologue saves caller's frame */
     int _flags = 0; /* fallback flag var */
@@ -887,7 +923,7 @@ loc_000102D8: ;
     PUSH32(esp, ebx);
     g_ebp = ebp; /* frame stays current across calls */
     g_seh_ebp = ebp;
-    PUSH32(esp, 0x000102E7u); RECOMP_ABI_CALL(0x0001F010u, sub_0001F010); /* call 0x0001F010 */
+    PUSH32(esp, 0x000102E7u); _rs_000102E7: RECOMP_ABI_CALL(0x0001F010u, sub_0001F010); /* call 0x0001F010 */
 
 loc_000102E7: ;
     ecx = MEM32(edi + 0x10);
@@ -899,7 +935,7 @@ loc_000102E7: ;
     PUSH32(esp, ebp);
     ebp = ebx + 0xC;
     { uint32_t _icall_esp = g_esp;
-    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x000102FDu); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000102FBu); } /* indirect call */
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x000102FDu); if (0) { _rs_000102FD: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000102FBu); } /* indirect call */
     }
 
 loc_000102FD: ;
@@ -935,7 +971,7 @@ loc_00010327: ;
     PUSH32(esp, ebp);
     ebp = ebx + 0xC;
     { uint32_t _icall_esp = g_esp;
-    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x0001032Eu); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x0001032Cu); } /* indirect call */
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x0001032Eu); if (0) { _rs_0001032E: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x0001032Cu); } /* indirect call */
     }
 
 loc_0001032E: ;
@@ -954,6 +990,20 @@ loc_00010337: ;
     g_ebp = ebp; g_seh_ebp = ebp; esp += 4; RECOMP_FRAME_LEAVE(); return; /* ret */
 
     RECOMP_FRAME_LEAVE(); /* falls off its end */
+    return;
+_recomp_resume: /* re-entered from a save state (XBA-250) */
+    {
+    uint32_t _rs_ebp = 0, _rs_site = recomp_resume_site(0x000102ACu, &_rs_ebp);
+    (void)_rs_ebp;
+    switch (_rs_site) {
+    case 0x000102E7u: ebp = _rs_ebp; goto _rs_000102E7;
+    case 0x000102FDu: ebp = _rs_ebp; goto _rs_000102FD;
+    case 0x0001032Eu: ebp = _rs_ebp; goto _rs_0001032E;
+    default: break;
+    }
+    recomp_resume_lost(0x000102ACu, _rs_site);
+    }
+    RECOMP_FRAME_LEAVE(); return;
 }
 
 /**
@@ -1213,7 +1263,7 @@ loc_00010426: ;
 loc_00010470: ;
     g_ebp = ebp; /* frame stays current across calls */
     g_seh_ebp = ebp;
-    PUSH32(esp, 0x00010475u); RECOMP_ABI_CALL(0x0001F020u, sub_0001F020); /* call 0x0001F020 */
+    PUSH32(esp, 0x00010475u); _rs_00010475: RECOMP_ABI_CALL(0x0001F020u, sub_0001F020); /* call 0x0001F020 */
 
 loc_00010475: ;
     eax = 0xFFFFFFFFu;
@@ -1331,7 +1381,7 @@ loc_00010426: ;
 loc_00010470: ;
     g_ebp = ebp; /* frame stays current across calls */
     g_seh_ebp = ebp;
-    PUSH32(esp, 0x00010475u); RECOMP_ABI_CALL(0x0001F020u, sub_0001F020); /* call 0x0001F020 */
+    PUSH32(esp, 0x00010475u); _rs_00010475: RECOMP_ABI_CALL(0x0001F020u, sub_0001F020); /* call 0x0001F020 */
 
 loc_00010475: ;
     eax = 0xFFFFFFFFu;
@@ -1352,7 +1402,7 @@ void sub_00010426(void) { f_probe__seh(0x00010426u); } /* eh3 funclet of 0x00010
  */
 void my_lj_unwind(void)
 {
-    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */
+    RECOMP_FRAME_ENTRY_R(); /* may park: recorded (XBA-247), resume entry (XBA-250) */
     uint32_t ebp = 0;
     ebp = g_ebp;  /* frameless: caller's frame */
     int _flags = 0; /* fallback flag var */
@@ -1396,7 +1446,7 @@ loc_000104AB: ;
     eax = MEM32(edi + ecx * 4 + 8);
     { uint32_t _icall_esp = g_esp;
     PUSH32(esp, edx);
-    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x000104B2u); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000104B0u); } /* indirect call */
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x000104B2u); if (0) { _rs_000104B2: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000104B0u); } /* indirect call */
     }
 
 loc_000104B2: ;
@@ -1414,6 +1464,18 @@ loc_000104B5: ;
     g_ebp = ebp; g_seh_ebp = ebp; esp += 8; RECOMP_FRAME_LEAVE(); return; /* ret 4 */
 
     RECOMP_FRAME_LEAVE(); /* falls off its end */
+    return;
+_recomp_resume: /* re-entered from a save state (XBA-250) */
+    {
+    uint32_t _rs_ebp = 0, _rs_site = recomp_resume_site(0x0001047Bu, &_rs_ebp);
+    (void)_rs_ebp;
+    switch (_rs_site) {
+    case 0x000104B2u: ebp = _rs_ebp; goto _rs_000104B2;
+    default: break;
+    }
+    recomp_resume_lost(0x0001047Bu, _rs_site);
+    }
+    RECOMP_FRAME_LEAVE(); return;
 }
 
 

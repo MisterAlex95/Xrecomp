@@ -84,6 +84,10 @@ uint32_t g_esp, eax, g_ebp, g_seh_ebp;
 #define RECOMP_ABI_CALL(va, fn) (fn)()
 /* The frame shadow stack (XBA-247) is not what this checks. */
 #define RECOMP_FRAME_ENTRY() (void)0
+#define RECOMP_FRAME_ENTRY_R() if (0) goto _recomp_resume
+static uint32_t recomp_resume_site(uint32_t f, uint32_t *e) { (void)f; *e = 0; return 0; }
+static uint32_t recomp_resume_target(void) { return 0; }
+static void recomp_resume_lost(uint32_t f, uint32_t s) { (void)f; (void)s; }
 #define RECOMP_FRAME_LEAVE() (void)0
 FLAT_DISPATCH
 static int hits, misses, lookups, fails, called_a, called_b, called_c;

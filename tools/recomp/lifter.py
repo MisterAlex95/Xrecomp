@@ -1620,6 +1620,12 @@ class Lifter:
         # that can never reach a park point. They record no frame, and a
         # direct call to one is no call site of a chain.
         self.quiet_functions = frozenset()
+        # Per function (reset by the translator before each lift, XBA-250):
+        # the resume entries emitted, {return VA: label}. A save state loaded
+        # in a fresh process re-enters a parked thread's chain through them:
+        # the function's resume block (translator) jumps to the label, just
+        # before the call it was in, and the call is made again.
+        self.resume_sites = {}
         # Set per-function by translator (XBA-101): the esp loads that leave
         # for another stack (stack_switch_sites), and whether the function
         # has a ret to carry them at. See _lift_stack_switch.
@@ -2151,11 +2157,12 @@ class Lifter:
                     f"g_seh_ebp = ebp; RECOMP_ITAIL(0x{off:08X}u); return;"
                     f" /* ljmp 0x{sel:X}:0x{off:08X} */")]
             publish = "g_ebp = ebp; g_seh_ebp = ebp; " if self.publishes_ebp else ""
+            call = self._framed(insn.end_address,
+                                f"RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x{insn.address:08X}u);",
+                                self.CALL_SITE_INDIRECT, label=False)
             return [publish + f"{{ uint32_t _icall_target = 0x{off:08X}u; "
                     f"PUSH32(esp, 0x{sel:X}u); PUSH32(esp, 0x{insn.end_address:08X}u); "
-                    + self._framed(insn.end_address,
-                                   f"RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x{insn.address:08X}u);",
-                                   self.CALL_SITE_INDIRECT) + " }"
+                    + self._resume_indirect(insn.end_address) + call + " }"
                     f" /* lcall 0x{sel:X}:0x{off:08X} */"]
 
         # ── Time stamp counter ──
@@ -3067,23 +3074,57 @@ class Lifter:
     CALL_SITE_JMPBUF = 0x08        # setjmp / longjmp
     CALL_SITE_SEH_HELPER = 0x10    # __SEH_prolog / epilog: the callee sets the caller's ebp
     CALL_SITE_MANUAL = 0x20        # a hand-written replacement
+    CALL_SITE_SEH_ANCHOR = 0x40    # the caller takes an SEH resume anchor (XBA-112) a resume would skip (XBA-250)
+    CALL_SITE_NO_RESUME = 0x80     # no resume entry at this site (XBA-250): a chain through it cannot be re-entered
+    CALL_SITE_HOST_WAIT = 0x100    # a host wait inside lifted code (key 0x80000000 | its VA), XBA-250
+    # Flags that keep a site from being re-entered across runs (XBA-250).
+    CALL_SITE_UNRESUMABLE = (CALL_SITE_STACK_SWITCH | CALL_SITE_JMPBUF | CALL_SITE_MANUAL
+                             | CALL_SITE_SEH_ANCHOR | CALL_SITE_NO_RESUME)
 
-    def _framed(self, ret_va, call, flags=0, target=None):
+    def _framed(self, ret_va, call, flags=0, target=None, label=True):
         """call (C statements making one guest call), the site noted for the
         call-site table (XBA-247) when the callee may park: a parked thread's
         frames are those of the functions it is in, each recorded on entry
         (RECOMP_FRAME_ENTRY), and each frame's return address names one of
-        these sites. Nothing is emitted at the call. A direct call to a
-        function that can never park (quiet_functions) is not noted."""
+        these sites. A direct call to a function that can never park
+        (quiet_functions) is not noted.
+
+        The call gets a resume entry (XBA-250): a label just before it, which
+        the function's resume block jumps to when a save state from another
+        run re-enters the thread's chain (the call is then made again into
+        the next function of the chain). label=False: the caller places it
+        (an indirect call, before its guarded arms) or the site cannot have
+        one (setjmp / longjmp, a hand-written callee: flagged)."""
         if target is not None and target in self.quiet_functions:
             return call
         if not self.has_ebp_local:
             flags |= self.CALL_SITE_NO_EBP
         if self.stack_switch_sites:
             flags |= self.CALL_SITE_STACK_SWITCH
+        if getattr(self, "seh_anchor_after", None) is not None:
+            flags |= self.CALL_SITE_SEH_ANCHOR
         key = (ret_va, self.func_start)
         self.call_site_table[key] = self.call_site_table.get(key, 0) | flags
+        if label and not flags & (self.CALL_SITE_JMPBUF | self.CALL_SITE_MANUAL):
+            return self._resume_label(ret_va) + call
         return call
+
+    def _resume_label(self, ret_va):
+        """The resume entry of the call returning to ret_va (XBA-250):
+        `_rs_<VA>: `. An instruction lifted more than once (a block emitted
+        twice, a discarded attempt) gives the label more than once: the
+        translator keeps the first one emitted (_resume_dedupe)."""
+        label = f"_rs_{ret_va:08X}"
+        self.resume_sites[ret_va] = label
+        return label + ": "
+
+    def _resume_indirect(self, ret_va):
+        """An indirect call's resume entry (XBA-250), after its return address
+        is pushed and before its guarded arms: re-entered, the target is the
+        next function of the saved chain (or the kernel thunk of the saved
+        call), which the runtime hands over."""
+        label = self._resume_label(ret_va)
+        return f"if (0) {{ {label}_icall_target = recomp_resume_target(); }} "
 
     def _lift_call(self, insn, ops):
         caller_cleans = insn.address in self.caller_cleanup_sites
@@ -3216,7 +3257,8 @@ class Lifter:
             if ops[0].type == "mem" and _is_far_call_mem(insn):
                 far = f"PUSH32(esp, (uint32_t)MEM16(({_fmt_mem(ops[0])}) + 4)); "
             head = (publish + f"{{ uint32_t _icall_target = {target}; "
-                    f"{far}PUSH32(esp, 0x{ret_va:08X}u); ")
+                    f"{far}PUSH32(esp, 0x{ret_va:08X}u); "
+                    + self._resume_indirect(ret_va))
             fallback = (f"{safe_at_macro}(_icall_target, _icall_esp, "
                         f"0x{site:08X}u);")
             ind = self.CALL_SITE_INDIRECT
@@ -3230,13 +3272,13 @@ class Lifter:
                 arms = " else ".join(
                     f"if (_icall_target == 0x{t:08X}u) {{ RECOMP_ICALL_GUARD_HIT(); "
                     + self._framed(ret_va, f"RECOMP_ABI_CALL(0x{t:08X}u, {self._call_target_name(t)});",
-                                   ind, t) + " }"
+                                   ind, t, label=False) + " }"
                     for t in sorted(set(guards)))
                 body = (arms + " else { RECOMP_ICALL_GUARD_MISS(); "
-                        + self._framed(ret_va, fallback, ind) + " }")
+                        + self._framed(ret_va, fallback, ind, label=False) + " }")
                 return [head + body + " }"
                         + f" /* indirect call, guarded {len(set(guards))} */"]
-            return [head + self._framed(ret_va, fallback, ind) + " } /* indirect call */"]
+            return [head + self._framed(ret_va, fallback, ind, label=False) + " } /* indirect call */"]
         return ["/* call: no target */"]
 
     def _lift_stack_switch(self, insn):

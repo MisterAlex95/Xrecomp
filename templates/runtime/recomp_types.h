@@ -269,7 +269,8 @@ typedef struct RecompCpu {
     RECOMP_CPU_REGS
     RecompFrame *r_ftop;        /* the next frame (XBA-247); NULL until the first */
     RecompFrame *r_fbase;       /* the thread's frames, RECOMP_FRAME_SLOTS + 2 */
-    RecompFrame *r_flimit;      /* r_fbase + RECOMP_FRAME_SLOTS */
+    RecompFrame *r_flimit;      /* r_fbase + RECOMP_FRAME_SLOTS; r_fbase while resuming (XBA-250) */
+    void *r_resume;             /* the thread's resume plan while it re-enters its chain (XBA-250), else NULL */
 } RecompCpu;
 
 /* What the lifter emits in a function that may park (XBA-247):
@@ -306,10 +307,14 @@ static RECOMP_FRAME_COLD RecompFrame *recomp_frames_slow(void)
         if (!f)
             return s_nowhere;
         g_cpu.r_fbase = f;
-        g_cpu.r_flimit = f + RECOMP_FRAME_SLOTS;
+        g_cpu.r_flimit = g_cpu.r_resume ? f : f + RECOMP_FRAME_SLOTS;
         g_cpu.r_ftop = f;
         return g_cpu.r_ftop;
     }
+    /* Resuming (XBA-250): the limit was lowered to the base so every entry comes here; the frame is the next one.
+     * A plan is never deeper than the slots (an OVERFLOW chain is not resumable). */
+    if (RECOMP_FRAME_RARE(g_cpu.r_resume != 0))
+        return g_cpu.r_ftop && g_cpu.r_ftop < g_cpu.r_fbase + RECOMP_FRAME_SLOTS ? g_cpu.r_ftop : g_cpu.r_fbase;
     /* Past the slots: the two spares, the second shared by everything deeper (never read). The first keeps the
      * top exact for a function 1024 deep; deeper, the chain says OVERFLOW whatever the top. */
     return g_cpu.r_ftop == g_cpu.r_flimit ? g_cpu.r_flimit : g_cpu.r_flimit + 1;
@@ -320,10 +325,31 @@ static RECOMP_FRAME_COLD RecompFrame *recomp_frames_slow(void)
     if (RECOMP_FRAME_RARE((uintptr_t)_gff >= (uintptr_t)g_cpu.r_flimit)) _gff = recomp_frames_slow(); \
     _gff->f_ebp = g_cpu.r_ebp; _gff->f_esp = g_cpu.r_esp; g_cpu.r_ftop = _gff + 1
 #define RECOMP_FRAME_LEAVE() (g_cpu.r_ftop = _gff)
+/* The same with a resume entry (XBA-250): while the thread re-enters its saved chain (r_resume set, the limit
+ * lowered so the compare above already fails), the frame is recorded and the function jumps to its resume
+ * block (_recomp_resume, emitted by the lifter at its end), which goes to the call it was in. The check is
+ * inside the slow path: nothing more on the way in. */
+#define RECOMP_FRAME_ENTRY_R() \
+    RecompFrame *_gff = g_cpu.r_ftop; \
+    if (RECOMP_FRAME_RARE((uintptr_t)_gff >= (uintptr_t)g_cpu.r_flimit)) { \
+        _gff = recomp_frames_slow(); \
+        if (RECOMP_FRAME_RARE(g_cpu.r_resume != 0)) { \
+            _gff->f_ebp = g_cpu.r_ebp; _gff->f_esp = g_cpu.r_esp; g_cpu.r_ftop = _gff + 1; \
+            goto _recomp_resume; \
+        } \
+    } \
+    _gff->f_ebp = g_cpu.r_ebp; _gff->f_esp = g_cpu.r_esp; g_cpu.r_ftop = _gff + 1
 #else
 #define RECOMP_FRAME_ENTRY() (void)0
 #define RECOMP_FRAME_LEAVE() (void)0
+#define RECOMP_FRAME_ENTRY_R() if (0) goto _recomp_resume
 #endif
+/* The runtime's side of a resume entry (src/kernel/xbox_resume.c): the site the function re-enters (a call's
+ * return VA, or 0x80000000 | the VA of a host wait) with the ebp it held there, the target of an indirect call
+ * re-made, and a site the function has no entry for (fatal). */
+uint32_t recomp_resume_site(uint32_t func, uint32_t *ebp);
+uint32_t recomp_resume_target(void);
+void recomp_resume_lost(uint32_t func, uint32_t site);
 
 extern RECOMP_TLS RecompCpu g_cpu;
 
@@ -2206,6 +2232,11 @@ void xbox_GuestCpuPreempt(uint32_t va);
 #define RECOMP_BACK_EDGE(va) \
     do { if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_cpu_preempt)) \
              xbox_GuestCpuPreempt(va); } while (0)
+/* The same in a function with an ebp local (XBA-250): ebp published before the thread may wait, as before a
+ * poll wait or a hlt, so a save state taken there knows it and a resume from another run puts it back. */
+#define RECOMP_BACK_EDGE_EBP(ebp_, va) \
+    do { if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_cpu_preempt)) { \
+             g_ebp = (ebp_); xbox_GuestCpuPreempt(va); } } while (0)
 
 /* The back edge of a loop that only polls one memory word (`test [mem], imm;
  * jne/je itself`; tools/recomp/translator.py, _mark_poll_loops): the thread
