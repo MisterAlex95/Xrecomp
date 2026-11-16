@@ -21,7 +21,8 @@ Work language English (code, comments, commits, Plane). Chat with Alex in French
 - **Public**: Gitea is the dev home; it push-mirrors everything to the public GitHub repo MisterAlex95/Xrecomp
   (2026-11-14), which overwrites GitHub's branches: never merge on GitHub. Everything committed is public: no
   private hosts, IPs, credentials or personal data. Releases: `docs/releases/README.md`.
-- A title runs on Linux arm64 before we debug it on Android.
+- Thor first (Alex, 2026-11-16): titles are brought up and debugged directly on the AYN Thor; Linux arm64 is no
+  longer a gate before Android. Linux stays a build and test host (CI, upstream tests).
 - Agents cannot test on a device: label « Device » + a numbered check list for Alex.
 
 ## Upstream landmarks
