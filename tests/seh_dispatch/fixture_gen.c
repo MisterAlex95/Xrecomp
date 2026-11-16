@@ -454,7 +454,7 @@ loc_00010178: ;
     PUSH32(esp, ebp);
     ebp = ebx + 0x10;
     { uint32_t _icall_esp = g_esp;
-    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x0001017Eu); if (0) { _rs_0001017E: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x0001017Cu); } /* indirect call */
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x0001017Eu); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x0001017Cu); } /* indirect call */
     }
 
 loc_0001017E: ;
@@ -473,7 +473,7 @@ loc_00010186: ;
     PUSH32(esp, ebx);
     g_ebp = ebp; /* frame stays current across calls */
     g_seh_ebp = ebp;
-    PUSH32(esp, 0x00010195u); _rs_00010195: RECOMP_ABI_CALL(0x0001F010u, sub_0001F010); /* call 0x0001F010 */
+    PUSH32(esp, 0x00010195u); RECOMP_ABI_CALL(0x0001F010u, sub_0001F010); /* call 0x0001F010 */
 
 loc_00010195: ;
     ecx = esi + esi * 2;
@@ -522,7 +522,7 @@ loc_000101D9: ;
     PUSH32(esp, ebp);
     ebp = ebx + 0x10;
     { uint32_t _icall_esp = g_esp;
-    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x000101E4u); if (0) { _rs_000101E4: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000101E2u); } /* indirect call */
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x000101E4u); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000101E2u); } /* indirect call */
     }
 
 loc_000101E4: ;
@@ -552,14 +552,100 @@ _recomp_resume: /* re-entered from a save state (XBA-250) */
     uint32_t _rs_ebp = 0, _rs_site = recomp_resume_site(0x0001013Bu, &_rs_ebp);
     (void)_rs_ebp;
     switch (_rs_site) {
-    case 0x0001017Eu: ebp = _rs_ebp; goto _rs_0001017E;
-    case 0x00010195u: ebp = _rs_ebp; goto _rs_00010195;
-    case 0x000101E4u: ebp = _rs_ebp; goto _rs_000101E4;
+    case 0x0001017Eu: ebp = _rs_ebp; goto _rs_0001017E_d0;
+    case 0x00010195u: ebp = _rs_ebp; goto _rs_00010195_d0;
+    case 0x000101E4u: ebp = _rs_ebp; goto _rs_000101E4_d1;
     default: break;
     }
     recomp_resume_lost(0x0001013Bu, _rs_site);
     }
     RECOMP_FRAME_LEAVE(); return;
+    /* the loop 0x00010168..0x000101AE again, entered by a resume (XBA-250) */
+loc_00010168_d0: ;
+    _fa = (uint32_t)(esi) & 0xFFFFFFFFu; _fb = (uint32_t)(0xFFFFFFFFu) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp esi, 0xFFFFFFFFu (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_000101AF; /* je: equal / zero */
+
+loc_0001016D_d0: ;
+    ecx = esi + esi * 2;
+    eax = MEM32(edi + ecx * 4 + 4);
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(0) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, 0 (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_000101A7_d0; /* je: equal / zero */
+
+loc_00010178_d0: ;
+    PUSH32(esp, ebp);
+    ebp = ebx + 0x10;
+    { uint32_t _icall_esp = g_esp;
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x0001017Eu); if (0) { _rs_0001017E_d0: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x0001017Cu); } /* indirect call */
+    }
+
+loc_0001017E_d0: ;
+    POP32(esp, ebp);
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(0) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, 0 (32-bit) */
+    if (CMP_L(_fas, _fbs)) goto loc_000101B6; /* jl: less (signed <) */
+
+loc_00010184_d0: ;
+    if (CMP_EQ(_fa, _fb)) goto loc_000101A7_d0; /* je: equal / zero */
+
+loc_00010186_d0: ;
+    PUSH32(esp, 0);
+    PUSH32(esp, 0);
+    PUSH32(esp, 0x10195);
+    PUSH32(esp, ebx);
+    g_ebp = ebp; /* frame stays current across calls */
+    g_seh_ebp = ebp;
+    PUSH32(esp, 0x00010195u); _rs_00010195_d0: RECOMP_ABI_CALL(0x0001F010u, sub_0001F010); /* call 0x0001F010 */
+
+loc_00010195_d0: ;
+    ecx = esi + esi * 2;
+    eax = MEM32(edi + ecx * 4);
+    MEM32(ebx + 0xC) = eax;
+    eax = MEM32(edi + ecx * 4 + 8);
+    ebp = ebx + 0x10;
+    g_seh_ebp = ebp; RECOMP_ITAIL(eax); RECOMP_FRAME_LEAVE(); return; /* indirect tail jmp */
+
+loc_000101A7_d0: ;
+    ecx = esi + esi * 2;
+    esi = MEM32(edi + ecx * 4);
+    goto loc_00010168_d0;
+
+    goto loc_000101AF;
+    /* the loop 0x000101C3..0x000101ED again, entered by a resume (XBA-250) */
+loc_000101C3_d1: ;
+    _fa = (uint32_t)(esi) & 0xFFFFFFFFu; _fb = (uint32_t)(0xFFFFFFFFu) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp esi, 0xFFFFFFFFu (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_000101EE; /* je: equal / zero */
+
+loc_000101C8_d1: ;
+    ecx = esi + esi * 2;
+    eax = MEM32(edi + ecx * 4);
+    MEM32(ebx + 0xC) = eax;
+    edx = MEM32(edi + ecx * 4 + 4);
+    _fa = (uint32_t)(edx) & 0xFFFFFFFFu; _fb = (uint32_t)(0) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp edx, 0 (32-bit) */
+    if (CMP_NE(_fa, _fb)) goto loc_000101E6_d1; /* jne: not equal / not zero */
+
+loc_000101D9_d1: ;
+    edx = MEM32(edi + ecx * 4 + 8);
+    PUSH32(esp, esi);
+    PUSH32(esp, ebp);
+    ebp = ebx + 0x10;
+    { uint32_t _icall_esp = g_esp;
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x000101E4u); if (0) { _rs_000101E4_d1: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000101E2u); } /* indirect call */
+    }
+
+loc_000101E4_d1: ;
+    POP32(esp, ebp);
+    POP32(esp, esi);
+
+loc_000101E6_d1: ;
+    ecx = esi + esi * 2;
+    esi = MEM32(edi + ecx * 4);
+    goto loc_000101C3_d1;
+
+    goto loc_000101EE;
 }
 
 /**
@@ -971,7 +1057,7 @@ loc_00010327: ;
     PUSH32(esp, ebp);
     ebp = ebx + 0xC;
     { uint32_t _icall_esp = g_esp;
-    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x0001032Eu); if (0) { _rs_0001032E: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x0001032Cu); } /* indirect call */
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x0001032Eu); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x0001032Cu); } /* indirect call */
     }
 
 loc_0001032E: ;
@@ -998,12 +1084,41 @@ _recomp_resume: /* re-entered from a save state (XBA-250) */
     switch (_rs_site) {
     case 0x000102E7u: ebp = _rs_ebp; goto _rs_000102E7;
     case 0x000102FDu: ebp = _rs_ebp; goto _rs_000102FD;
-    case 0x0001032Eu: ebp = _rs_ebp; goto _rs_0001032E;
+    case 0x0001032Eu: ebp = _rs_ebp; goto _rs_0001032E_d0;
     default: break;
     }
     recomp_resume_lost(0x000102ACu, _rs_site);
     }
     RECOMP_FRAME_LEAVE(); return;
+    /* the loop 0x00010311..0x00010331 again, entered by a resume (XBA-250) */
+loc_00010311_d0: ;
+    _fa = (uint32_t)(esi) & 0xFFFFFFFFu; _fb = (uint32_t)(0xFFFFFFFFu) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp esi, 0xFFFFFFFFu (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_00010332; /* je: equal / zero */
+
+loc_00010316_d0: ;
+    ecx = MEM32(edi + 8);
+    edx = MEM32(ecx + esi * 8 + 4);
+    esi = MEM32(ecx + esi * 8);
+    MEM32(ebx + 8) = esi;
+    _fa = (uint32_t)(edx) & 0xFFFFFFFFu; _fb = (uint32_t)(0) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp edx, 0 (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_00010311_d0; /* je: equal / zero */
+
+loc_00010327_d0: ;
+    PUSH32(esp, esi);
+    PUSH32(esp, ebp);
+    ebp = ebx + 0xC;
+    { uint32_t _icall_esp = g_esp;
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = edx; PUSH32(esp, 0x0001032Eu); if (0) { _rs_0001032E_d0: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x0001032Cu); } /* indirect call */
+    }
+
+loc_0001032E_d0: ;
+    POP32(esp, ebp);
+    POP32(esp, esi);
+    goto loc_00010311_d0;
+
+    goto loc_00010332;
 }
 
 /**
@@ -1446,7 +1561,7 @@ loc_000104AB: ;
     eax = MEM32(edi + ecx * 4 + 8);
     { uint32_t _icall_esp = g_esp;
     PUSH32(esp, edx);
-    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x000104B2u); if (0) { _rs_000104B2: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000104B0u); } /* indirect call */
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x000104B2u); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000104B0u); } /* indirect call */
     }
 
 loc_000104B2: ;
@@ -1470,12 +1585,45 @@ _recomp_resume: /* re-entered from a save state (XBA-250) */
     uint32_t _rs_ebp = 0, _rs_site = recomp_resume_site(0x0001047Bu, &_rs_ebp);
     (void)_rs_ebp;
     switch (_rs_site) {
-    case 0x000104B2u: ebp = _rs_ebp; goto _rs_000104B2;
+    case 0x000104B2u: ebp = _rs_ebp; goto _rs_000104B2_d0;
     default: break;
     }
     recomp_resume_lost(0x0001047Bu, _rs_site);
     }
     RECOMP_FRAME_LEAVE(); return;
+    /* the loop 0x0001048E..0x000104B4 again, entered by a resume (XBA-250) */
+loc_0001048E_d0: ;
+    esi = MEM32(ebx + 0xC);
+    _fa = (uint32_t)(esi) & 0xFFFFFFFFu; _fb = (uint32_t)(0xFFFFFFFFu) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp esi, 0xFFFFFFFFu (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_000104B5; /* je: equal / zero */
+
+loc_00010496_d0: ;
+    _fa = (uint32_t)(esi) & 0xFFFFFFFFu; _fb = (uint32_t)(edx) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp esi, edx (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_000104B5; /* je: equal / zero */
+
+loc_0001049A_d0: ;
+    ecx = esi + esi * 2;
+    eax = MEM32(edi + ecx * 4);
+    MEM32(ebx + 0xC) = eax;
+    eax = MEM32(edi + ecx * 4 + 4);
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(0) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, 0 (32-bit) */
+    if (CMP_NE(_fa, _fb)) goto loc_0001048E_d0; /* jne: not equal / not zero */
+
+loc_000104AB_d0: ;
+    eax = MEM32(edi + ecx * 4 + 8);
+    { uint32_t _icall_esp = g_esp;
+    PUSH32(esp, edx);
+    g_ebp = ebp; g_seh_ebp = ebp; { uint32_t _icall_target = eax; PUSH32(esp, 0x000104B2u); if (0) { _rs_000104B2_d0: _icall_target = recomp_resume_target(); } RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000104B0u); } /* indirect call */
+    }
+
+loc_000104B2_d0: ;
+    POP32(esp, edx);
+    goto loc_0001048E_d0;
+
+    goto loc_000104B5;
 }
 
 

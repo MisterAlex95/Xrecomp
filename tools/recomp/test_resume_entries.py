@@ -106,8 +106,9 @@ def test_a_function_with_an_seh_anchor_flags_its_sites():
 def test_resume_block_lists_every_entry_and_host_waits(monkeypatch):
     """A function with a call, a hlt and a poll loop: one case per site in
     its resume block, the host waits keyed 0x80000000 | VA in the call-site
-    table, labels right after their helpers; a function that can never park
-    has neither entry nor block."""
+    table; the call and the hlt (outside any loop) have their labels in
+    place, the poll loop is entered at its header (no label in the loop); a
+    function that can never park has neither entry nor block."""
     image, db = _install(monkeypatch, {
         0x00: "e8 3b000000 f4 f7050020000001000000 75f4 c3",  # call icaller; hlt; poll: test [0x2000],1; jne poll; ret
         0x40: "ffd0 c3",                                       # icaller: call eax
@@ -119,12 +120,13 @@ def test_resume_block_lists_every_entry_and_host_waits(monkeypatch):
     assert "RECOMP_FRAME_ENTRY_R();" in code
     assert "_rs_00010005: RECOMP_ABI_CALL(0x00010040u, sub_00010040);" in code
     assert "xbox_Halt(0x00010005u); _rh_00010005: ;" in code
-    assert re.search(r"RECOMP_POLL_WAIT\([^;]*0x00010010u\); _rh_00010010: ; goto loc_00010006;", code), code
+    assert re.search(r"RECOMP_POLL_WAIT\([^;]*0x00010010u\); goto loc_00010006; }", code), code
+    assert "_rh_00010010" not in code
     block = code[code.index("_recomp_resume:"):]
     assert "recomp_resume_site(0x00010000u, &_rs_ebp)" in block
     assert "case 0x00010005u: ebp = _rs_ebp; goto _rs_00010005;" in block
     assert "case 0x80010005u: ebp = _rs_ebp; goto _rh_00010005;" in block
-    assert "case 0x80010010u: ebp = _rs_ebp; goto _rh_00010010;" in block
+    assert "case 0x80010010u: ebp = _rs_ebp; goto loc_00010006;" in block
     assert "recomp_resume_lost(0x00010000u, _rs_site);" in block
     table = tr.lifter.call_site_table
     assert table[(0x80010005, base)] & Lifter.CALL_SITE_HOST_WAIT
@@ -133,23 +135,69 @@ def test_resume_block_lists_every_entry_and_host_waits(monkeypatch):
     assert "_recomp_resume" not in leaf and "RECOMP_FRAME" not in leaf
 
 
-def test_a_back_edge_publishes_ebp_and_is_an_entry(monkeypatch):
+def test_a_back_edge_publishes_ebp_and_enters_at_its_header(monkeypatch):
     # push ebp; mov ebp, esp; L: dec ecx; jnz L; pop ebp; ret -- with --back-edge-yield
     image, db = _install(monkeypatch, {0x00: "55 8bec 49 75fd 5d c3"})
     tr = FunctionTranslator(image, db)
     tr.back_edge_yield = True
     code = tr.translate_function(0x10000, db[0x10000])
-    assert "RECOMP_BACK_EDGE_EBP(ebp, 0x00010004u); _rh_00010004: ;" in code, code
-    assert "case 0x80010004u: ebp = _rs_ebp; goto _rh_00010004;" in code
+    assert "{ RECOMP_BACK_EDGE_EBP(ebp, 0x00010004u); goto loc_00010003; }" in code, code
+    assert "case 0x80010004u: ebp = _rs_ebp; goto loc_00010003;" in code
+
+
+def test_a_call_inside_a_loop_is_entered_in_a_copy_of_the_loop(monkeypatch):
+    """The label of a call inside a loop would be a second entry into the
+    loop (irreducible: the compiler no longer hoists its invariant loads).
+    The loop has no label; the resume block enters a copy of the loop,
+    placed after it, whose labels are renamed and which leaves to the code
+    after the loop. A call before the loop keeps its label in place."""
+    image, db = _install(monkeypatch, {
+        # call icaller; L: call icaller; dec ecx; jnz L; call icaller; ret
+        0x00: "e8 3b000000 e8 36000000 49 75f8 e8 2e000000 c3",
+        0x40: "ffd0 c3",
+    })
+    tr = FunctionTranslator(image, db)
+    code = tr.translate_function(0x10000, db[0x10000])
+    head, block = code.split("_recomp_resume:", 1)
+    assert "_rs_00010005: RECOMP_ABI_CALL" in head                 # before the loop: in place
+    assert "_rs_0001000A" not in head                              # in the loop: not in the original
+    assert "_rs_00010012: RECOMP_ABI_CALL" in head                 # after the loop: in place
+    assert "case 0x0001000Au: ebp = _rs_ebp; goto _rs_0001000A_d0;" in block, block
+    copy = block[block.index("again, entered by a resume"):]
+    assert "loc_00010005_d0: ;" in copy and "_rs_0001000A_d0: RECOMP_ABI_CALL" in copy
+    assert "goto loc_00010005_d0;" in copy                        # its back edge stays in the copy
+    assert "goto loc_0001000D;" in copy                          # it leaves to the code after the loop
+
+
+def test_a_call_in_nested_loops_copies_the_outermost(monkeypatch):
+    """A call in an inner loop: the copy is the outer loop (the inner one in
+    it), so the original outer loop gets no second entry either."""
+    image, db = _install(monkeypatch, {
+        # mov edi, 2; L1: mov ecx, 3; L2: call icaller; dec ecx; jnz L2; dec edi; jnz L1; ret
+        0x00: "bf02000000 b903000000 e8 31000000 49 75f8 4f 75f0 c3",
+        0x40: "ffd0 c3",
+    })
+    tr = FunctionTranslator(image, db)
+    code = tr.translate_function(0x10000, db[0x10000])
+    head, block = code.split("_recomp_resume:", 1)
+    assert "_rs_0001000F" not in head
+    assert "goto _rs_0001000F_d0;" in block
+    copy = block[block.index("again, entered by a resume"):]
+    assert "the loop 0x00010005..0x" in block
+    for label in ("loc_00010005_d0: ;", "loc_0001000A_d0: ;", "goto loc_0001000A_d0;", "goto loc_00010005_d0;",
+                  "goto loc_00010015;"):
+        assert label in copy, copy
+    assert "goto loc_00010005;" not in copy and "goto loc_0001000A;" not in copy
 
 
 # f0 0x10000: push ebp; mov ebp, esp; mov esi, 0x5150; call f1; mov [0x2008], ebp; mov [0x200C], esi; pop ebp; ret
-# f1 0x10030: mov ebp, 0x11111111; call f2; mov [0x2000], ebp; ret
+# f1 0x10030: mov ebp, 0x11111111; mov edi, 2; L: call f2; dec edi; jnz L; mov [0x2000], ebp; ret
+#             (the call inside a loop: entered through the loop's copy)
 # f2 0x10060: mov eax, [0x2104]; call eax; ret                    (no ebp; an indirect call into f3)
 # f3 0x10090: push ebp; mov ebp, esp; sub esp, 8; mov dword [ebp-4], 0x77; call [0x2100] (the kernel call);
 #             add eax, [ebp-4]; mov [0x2010], eax; mov esp, ebp; pop ebp; ret
 F0 = "55 8bec be50510000 e8 23000000 892d08200000 89350c200000 5d c3"
-F1 = "bd11111111 e8 26000000 892d00200000 c3"
+F1 = "bd11111111 bf02000000 e8 21000000 4f 75f8 892d00200000 c3"
 F2 = "a104210000 ffd0 c3"
 F3 = "55 8bec 83ec08 c745fc77000000 ff1500210000 0345fc a310200000 8be5 5d c3"
 KERNEL_RET = 0x100A3
@@ -221,9 +269,11 @@ static void save_and_die(uint32_t returned, uint32_t call_esp)
 }
 
 /* The kernel call: KeDelayExecutionThread-like, no arguments, returns 0x1000. */
+static int g_kcalls;
 static void kernel(void)
 {
     uint32_t call_esp = g_esp;
+    g_kcalls++;
     if (xbox_ResumeKernelPending()) {
         int returned = xbox_ResumeKernelArrive(ORD);
         WANT(g_esp == g_saved.call_esp + (returned ? 4u : 0u));
@@ -232,11 +282,11 @@ static void kernel(void)
         WANT(MEM32(g_esp) == 0x%(kret)08Xu);              /* made again from its call site */
     }
     WANT(MEM32(g_esp) == 0x%(kret)08Xu);
-    if (!strcmp(g_mode, "save-in"))
+    if (!strcmp(g_mode, "save-in") && g_kcalls == 1)
         save_and_die(0, call_esp);
     g_eax = 0x1000u;
     g_esp += 4;                                           /* ret */
-    if (!strcmp(g_mode, "save-ret"))
+    if (!strcmp(g_mode, "save-ret") && g_kcalls == 1)
         save_and_die(1, call_esp);
 }
 
@@ -285,6 +335,8 @@ int main(int argc, char **argv)
     }
     /* The end of an uninterrupted run. */
     WANT(MEM32(0x2010u) == 0x1077u);                      /* f3: the status plus its local */
+    WANT(g_kcalls == 2);                                  /* f1's loop: the call re-entered, then its second turn */
+    WANT(g_edi == 0u);
     WANT(MEM32(0x2000u) == 0x11111111u);                  /* f1 kept its scratch ebp */
     WANT(MEM32(0x2008u) == STACK - 8u);                   /* f0 its frame */
     WANT(MEM32(0x200Cu) == 0x5150u);                      /* esi from before the call */
@@ -303,6 +355,7 @@ def test_a_chain_four_deep_saved_in_one_process_resumes_in_another(tmp_path, mon
     tr = FunctionTranslator(image, db)
     bodies = "\n".join(tr.translate_function(a, db[a]) for a in (base, base + 0x30, base + 0x60, base + 0x90))
     assert bodies.count("RECOMP_FRAME_ENTRY_R();") == 4
+    assert "goto _rs_0001003F_d0;" in bodies     # f1's call in its loop: through the copy
     table = tr.lifter.call_site_table
     assert KERNEL_RET in {ret for ret, _ in table}
     sites = "\n".join("    0x%08Xu, 0x%08Xu, 0x%02Xu," % (ret, func, flags)

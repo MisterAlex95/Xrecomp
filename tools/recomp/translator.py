@@ -3990,9 +3990,14 @@ class FunctionTranslator:
             close = len(body) - 1
             while close >= 0 and body[close].strip() != "}":
                 close -= 1
+            # Before the FPU macros' #undefs: the loop copies use them.
+            while close > 0 and body[close - 1].lstrip().startswith("#undef "):
+                close -= 1
             if close >= 0:
-                body[close:close] = (["    RECOMP_FRAME_LEAVE(); /* falls off its end */"]
-                                     + self._resume_block(start, waits, "ebp" in reg_decls))
+                main = body[:close]
+                main, cases, copies = self._resume_loops(start, main, waits)
+                body = (main + ["    RECOMP_FRAME_LEAVE(); /* falls off its end */"]
+                        + self._resume_block(start, cases, "ebp" in reg_decls) + copies + body[close:])
             lines[frame_entry_at:] = (
                 ["    RECOMP_FRAME_ENTRY_R(); /* may park: recorded (XBA-247), resume entry (XBA-250) */"]
                 + body)
@@ -4075,12 +4080,160 @@ class FunctionTranslator:
                 lifter.call_site_table[key] = lifter.call_site_table.get(key, 0) | lifter.CALL_SITE_NO_RESUME
         return body
 
-    def _resume_block(self, start, waits, has_ebp):
+    _BLOCK_RE = re.compile(r"^loc_([0-9A-F]{8}): ;")
+    _GOTO_RE = re.compile(r"goto loc_([0-9A-F]{8});")
+    _LABEL_DEF_RE = re.compile(r"\b((?:loc|_rs|_rh)_[0-9A-F]{8})(?=: )")
+
+    def _resume_loops(self, start, body, waits):
+        """Where each resume entry goes in (XBA-250), keeping every loop of the
+        normal path a natural loop.
+
+        A label inside a loop body, entered from the resume block, is a second
+        entry into the loop: the loop becomes irreducible and the compiler
+        stops treating it as a loop (no hoisting of its invariant loads: +5
+        instructions per turn of a loop around an indirect call, measured).
+        So an entry inside a loop is not entered in place. The resume block
+        enters a copy of the outermost loop around it (the loop's blocks, the
+        entry's label in it), placed after the resume block: the copy runs
+        the rest of that one call of the function and leaves to the original
+        code after the loop. The original loop has no extra entry, so normal
+        calls cost nothing more. An entry outside any loop keeps its label in
+        place; a host wait that ends with the jump back to its loop's header
+        (a poll loop, a back edge) enters at that header when no other loop
+        encloses it.
+
+        body: the function's statements; waits: {VA: label} of its host waits.
+        Returns (body without the labels moved to copies, [(case value, target
+        label)], the copies' lines)."""
+        blocks = []
+        for i, line in enumerate(body):
+            m = self._BLOCK_RE.match(line)
+            if m:
+                blocks.append((int(m.group(1), 16), i))
+        if not blocks:
+            entries = ([(r, l) for r, l in sorted(self.lifter.resume_sites.items())]
+                       + [(0x80000000 | va, l) for va, l in sorted(waits.items())])
+            return body, entries, []
+        addrs = [a for a, _ in blocks]
+        import bisect as _bisect
+
+        def block_of(i):
+            k = _bisect.bisect_right([bi for _, bi in blocks], i) - 1
+            return addrs[k] if k >= 0 else start
+
+        def block_end(a):
+            k = _bisect.bisect_right(addrs, a)
+            return addrs[k] - 1 if k < len(addrs) else 0xFFFFFFFF
+
+        loops = set()
+        for i, line in enumerate(body):
+            if "goto loc_" not in line:
+                continue
+            b = block_of(i)
+            for m in self._GOTO_RE.finditer(line):
+                t = int(m.group(1), 16)
+                if t <= b:
+                    loops.add((t, block_end(b)))
+
+        def region(pos, strict_header=None):
+            """The union of the loops around pos (a block address), grown to
+            every loop it overlaps; None when no loop is around it."""
+            lo = hi = None
+            for t, e in loops:
+                inside = (t < pos <= e) if strict_header is not None else (t <= pos <= e)
+                if inside:
+                    lo = t if lo is None else min(lo, t)
+                    hi = e if hi is None else max(hi, e)
+            if lo is None:
+                return None
+            grown = True
+            while grown:
+                grown = False
+                for t, e in loops:
+                    if t <= hi and e >= lo and (t < lo or e > hi):
+                        lo, hi = min(lo, t), max(hi, e)
+                        grown = True
+            return lo, hi
+
+        def line_of(label):
+            tag = label + ":"
+            for i, line in enumerate(body):
+                if tag in line:
+                    return i
+            return None
+
+        entries, to_copy = [], {}      # to_copy: (lo, hi) -> [(case value, label)]
+        for value, label in ([(r, l) for r, l in sorted(self.lifter.resume_sites.items())]
+                             + [(0x80000000 | va, l) for va, l in sorted(waits.items())]):
+            i = line_of(label)
+            if i is None:
+                continue
+            after = body[i].split(label + ": ;", 1)[1] if label.startswith("_rh_") and label + ": ;" in body[i] else ""
+            m = re.match(r"\s*goto loc_([0-9A-F]{8});", after)
+            if m:                                   # a host wait closing its loop: enter at the header
+                header = int(m.group(1), 16)
+                r = region(header, strict_header=True)
+                if r is None:
+                    body[i] = body[i].replace(label + ": ; ", "").replace(label + ": ;", "")
+                    entries.append((value, "loc_%08X" % header))
+                    continue
+            else:
+                r = region(block_of(i))
+                if r is None:
+                    entries.append((value, label))
+                    continue
+            to_copy.setdefault(r, []).append((value, label))
+        # Overlapping regions are one copy.
+        merged = []
+        for r in sorted(to_copy):
+            if merged and r[0] <= merged[-1][0][1]:
+                (lo, hi), items = merged[-1]
+                merged[-1] = ((lo, max(hi, r[1])), items + to_copy[r])
+            else:
+                merged.append((r, list(to_copy[r])))
+        copies = []
+        moved = set()
+        for k, ((lo, hi), items) in enumerate(merged):
+            first = next((bi for a, bi in blocks if a == lo), None)
+            if first is None:            # no label at the loop's start: cannot copy, flag the sites
+                for value, label in items:
+                    key = (value, start)
+                    self.lifter.call_site_table[key] = (self.lifter.call_site_table.get(key, 0)
+                                                        | self.lifter.CALL_SITE_NO_RESUME)
+                continue
+            last = next((bi for a, bi in blocks if a > hi), len(body))
+            after_label = next((a for a in addrs if a > hi), None)
+            region_lines = body[first:last]
+            defined = set()
+            for line in region_lines:
+                defined.update(self._LABEL_DEF_RE.findall(line))
+            suffix = "_d%d" % k
+            pat = re.compile(r"\b(" + "|".join(re.escape(d) for d in sorted(defined)) + r")\b") if defined else None
+            copy = [pat.sub(lambda m: m.group(1) + suffix, line) if pat else line for line in region_lines]
+            copies.append("    /* the loop 0x%08X..0x%08X again, entered by a resume (XBA-250) */" % (lo, hi))
+            copies += copy
+            copies.append(("    goto loc_%08X;" % after_label) if after_label is not None
+                          else "    RECOMP_FRAME_LEAVE(); return;")
+            for value, label in items:
+                entries.append((value, label + suffix))
+                moved.add(label)
+        # The original keeps no entry of the sites its copies take.
+        if moved:
+            for i, line in enumerate(body):
+                for label in moved:
+                    if label + ":" in line:
+                        line = line.replace("if (0) { %s: _icall_target = recomp_resume_target(); } " % label, "")
+                        line = line.replace(label + ": ; ", "").replace(label + ": ;", "").replace(label + ": ", "")
+                body[i] = line
+        return body, sorted(entries), copies
+
+    def _resume_block(self, start, cases, has_ebp):
         """The resume block of a function that may park (XBA-250), after its
         last statement: RECOMP_FRAME_ENTRY_R jumps here when the thread is
         re-entering a saved chain. The runtime names the site (a call's
         return VA, or 0x80000000 | a host wait's VA) and the ebp the function
-        held there; the block restores it and jumps to the site's entry."""
+        held there; the block restores it and jumps to the site's entry
+        (cases: [(site, label)], _resume_loops)."""
         lines = ["    return;",
                  "_recomp_resume: /* re-entered from a save state (XBA-250) */",
                  "    {",
@@ -4088,10 +4241,8 @@ class FunctionTranslator:
                  "    (void)_rs_ebp;",
                  "    switch (_rs_site) {"]
         set_ebp = "ebp = _rs_ebp; " if has_ebp else ""
-        for ret_va, label in sorted(self.lifter.resume_sites.items()):
-            lines.append(f"    case 0x{ret_va:08X}u: {set_ebp}goto {label};")
-        for va, label in sorted(waits.items()):
-            lines.append(f"    case 0x{0x80000000 | va:08X}u: {set_ebp}goto {label};")
+        for value, label in cases:
+            lines.append(f"    case 0x{value:08X}u: {set_ebp}goto {label};")
         lines += ["    default: break;",
                   "    }",
                   "    recomp_resume_lost(0x%08Xu, _rs_site);" % start,
