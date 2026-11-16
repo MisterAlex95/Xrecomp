@@ -268,6 +268,9 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
     InterlockedExchange(&s_frame_draws, (LONG)draws);
 }
 
+/* The performance line (host_perf_line.h) is the POSIX window's. */
+void xbox_FramebufferWindowPerfLog(void) {}
+
 /* Aspect modes (aspect_policy.h) are the SDL window's: the GDI / D3D11
  * window shows every frame at 4:3. */
 void xbox_FramebufferWindowSetWide(int on) { (void)on; }

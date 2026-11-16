@@ -82,6 +82,7 @@
 #include "platform/recomp_quit.h"
 #include "video_player.h"
 #include "perf_overlay.h"
+#include "host_perf_line.h"   /* the performance line (XBA-243) */
 #include "aspect_policy.h"
 #include "present_shaders.h"  /* picture shaders, shared with host_window (XBA-203) */
 #include "pvideo_posix.h"     /* the PVIDEO overlay's scan-out */
@@ -156,6 +157,88 @@ static uint64_t now_ns(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* ── The performance line (host_perf_line.h, XBA-243) ─────────────────────
+ * "xbox: perf ..." every 10 s and over the run, as every console logs it. A host frame is one flip (the executor
+ * calls xbox_FramebufferWindowFrameStats once per flip): render is the executor's drawing time in it
+ * (nv2a_pb_exec_render_ns), present the copy into the window's slot (or the pacer's) in the Present calls, and the
+ * rest is the game's own work and its waits ("guest"). No full rate: a title picks its own (30 or 60 fps), so the
+ * speed field is "speed ? (29.9 fps)" and the slow frames are counted against 60 Hz. A flip the lifecycle held (the
+ * app in the background, the in-game menu) is time away. The executor feeds it; the window's thread logs the run's
+ * line when it ends, hence the lock. */
+extern uint64_t nv2a_pb_exec_render_ns(void);
+enum { XPERF_RENDER, XPERF_PRESENT, XPERF_STAGES };
+static pthread_mutex_t s_perf_mu = PTHREAD_MUTEX_INITIALIZER;
+static host_perf s_perf;
+static int s_perf_on, s_perf_done;
+static uint64_t s_perf_render;   /* nv2a_pb_exec_render_ns at the last flip */
+
+static void perf_log_run_locked(void)
+{
+    if (s_perf_on && !s_perf_done) {
+        host_perf_log_run(&s_perf, now_ns(), NULL);
+        host_perf_live_clear();
+        s_perf_done = 1;
+    }
+}
+
+/* At exit: never waits (exit() may come while the executor is inside perf_flip). */
+static void perf_atexit(void)
+{
+    if (pthread_mutex_trylock(&s_perf_mu) == 0) {
+        perf_log_run_locked();
+        pthread_mutex_unlock(&s_perf_mu);
+    }
+}
+
+/* At a flip (the executor's thread). */
+static void perf_flip(void)
+{
+    static const host_perf_config cfg = {
+        .console = "xbox", .unit = "fps", .frame_ns = 0, .budget_ns = 16666667, .nstages = XPERF_STAGES,
+        .stage = {"render", "present"}, .kind = {HOST_PERF_RENDER, HOST_PERF_RENDER},
+        .rest = "guest", .rest_kind = HOST_PERF_EMU,
+    };
+    uint64_t now = now_ns(), r = nv2a_pb_exec_render_ns();
+
+    pthread_mutex_lock(&s_perf_mu);
+    if (!s_perf_done) {
+        if (!s_perf_on) {
+            host_perf_init(&s_perf, &cfg, now);
+            s_perf_on = 1;
+            atexit(perf_atexit);
+        } else {
+            host_perf_stage(&s_perf, XPERF_RENDER, r - s_perf_render);
+            host_perf_guest(&s_perf, 1);
+        }
+        s_perf_render = r;
+        host_perf_frame(&s_perf, now, NULL);
+        host_perf_log_due(&s_perf, now);
+    }
+    pthread_mutex_unlock(&s_perf_mu);
+}
+
+/* A Present call: t0 on entry, t_held after the lifecycle's hold, t1 on return. */
+static void perf_present(uint64_t t0, uint64_t t_held, uint64_t t1, int shown)
+{
+    pthread_mutex_lock(&s_perf_mu);
+    if (s_perf_on && !s_perf_done) {
+        if (t_held - t0 > 20000000ull) {   /* held: the app was away */
+            host_perf_pause(&s_perf, t0);
+            host_perf_resume(&s_perf, t_held);
+        }
+        host_perf_stage(&s_perf, XPERF_PRESENT, t1 - t_held);
+        host_perf_shown(&s_perf, (uint64_t)!!shown);
+    }
+    pthread_mutex_unlock(&s_perf_mu);
+}
+
+void xbox_FramebufferWindowPerfLog(void)
+{
+    pthread_mutex_lock(&s_perf_mu);
+    perf_log_run_locked();
+    pthread_mutex_unlock(&s_perf_mu);
 }
 
 static uint64_t now_ms(void)
@@ -728,11 +811,13 @@ static void present_guest_locked(uint32_t fb_va, uint32_t pitch)
 void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
 {
     uint32_t bpp = pitch / FB_W;
+    uint64_t t0 = now_ns(), t_held;
 
     /* App in the background: the flip waits here, and the title's other
      * threads stop behind it (they wait for the GPU). Before the handshake
      * below, so a window that closes meanwhile is not kept waiting. */
     recomp_lifecycle_hold();
+    t_held = now_ns();
     pthread_mutex_lock(&s_present_mu);
     /* While the video overlay is up the screen is the frame with the
      * overlay on it: the overlay takes the frame (headless too, for the
@@ -742,6 +827,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
                              FB_W, FB_H, pitch, guest_format(bpp, bpp == 2 && s_fb_x555)))
         present_guest_locked(fb_va, pitch);
     pthread_mutex_unlock(&s_present_mu);
+    perf_present(t0, t_held, now_ns(), __atomic_load_n(&s_running, __ATOMIC_RELAXED));
 }
 
 static uint32_t host_sdl_format(uint32_t format)
@@ -805,8 +891,10 @@ int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
                                       uint32_t pitch, uint32_t format)
 {
     int taken;
+    uint64_t t0 = now_ns(), t_held;
 
     recomp_lifecycle_hold();
+    t_held = now_ns();
     pthread_mutex_lock(&s_present_mu);
     if (px && w && h && w <= 8192 && h <= 8192 && pitch >= w * 4u && host_sdl_format(format)
             && pvideo_frame((const uint8_t *)px, w, h, pitch, host_sdl_format(format)))
@@ -814,6 +902,7 @@ int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
     else
         taken = present_host_locked(px, w, h, pitch, format);
     pthread_mutex_unlock(&s_present_mu);
+    perf_present(t0, t_held, now_ns(), taken);
     return taken;
 }
 
@@ -954,6 +1043,7 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
 {
     __atomic_add_fetch(&s_flips, 1, __ATOMIC_RELAXED);
     __atomic_store_n(&s_frame_draws, draws, __ATOMIC_RELAXED);
+    perf_flip();
 }
 
 /* The title bar's rate, kept for other readers (the Android companion
@@ -1930,6 +2020,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     }
 #endif
     fprintf(stderr, "  [FBWIN] %s\n", quit ? "window closed" : "guest returned");
+    xbox_FramebufferWindowPerfLog();   /* "xbox: perf over the run" (recomp_quit below skips atexit on Android) */
     fflush(stdout);
     fflush(stderr);
 

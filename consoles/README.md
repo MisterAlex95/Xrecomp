@@ -507,7 +507,9 @@ Sound: `n64_audio_pull` (48 kHz) into `host_audio`. Pacing: the frame's length i
 next VI interrupt (NTSC about 60 Hz, PAL 50 Hz, one field per interrupt when interlaced), absolute deadlines nudged ±2 %
 by the audio queue; a line every 10 s gives the frame rate reached (`n64: N fps over the last 10 s`, with the frames
 skipped), followed by a performance line (`n64_runtime_perf`; also once at exit over the whole run, `n64: perf over
-the run:`), for device reports:
+the run:`), for device reports. Its speed and frames fields and its stage accounting are the performance line every
+console logs (`host_perf_line.h`, XBA-243: `gba: perf ...`, `ps1: perf ...`, `xbox: perf ...`, see
+`src/platform/HOST_LAYER.md` « Performance line »):
 
 ```
 n64: perf speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (queue 1.0, sync 2.5, scanout 0.5) sched 0.3 vi 1.8

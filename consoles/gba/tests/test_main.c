@@ -4,6 +4,7 @@
 #include "gba_core.h"
 #include "gba_runtime.h"
 #include "host_pad.h"
+#include "host_perf_line.h"
 #include "host_window.h"
 #include "host_time.h"
 #include "recomp_lifecycle.h"
@@ -214,6 +215,15 @@ static void test_runs(void)
     CHECK(file_size(save) == 32768);
     CHECK(first_byte(save) == 0x5A);
     CHECK(file_size(shot) == (long)(15 + GBA_SCREEN_W * GBA_SCREEN_H * 3));
+    /* The performance line over the run (host_perf_line.h, XBA-243), as every console logs it: 5 GBA frames, the
+     * GBA's own stages, nothing shown headless. */
+    char perf[1024];
+    host_perf_last_line(1, perf, sizeof perf);
+    printf("gba perf over the run: %s\n", perf);
+    CHECK(strncmp(perf, "speed ", 6) == 0 && strstr(perf, " of 59.7 fps); emu ") != NULL);
+    CHECK(strstr(perf, " audio ") != NULL && strstr(perf, " present 0.0 idle 0.0 other ") != NULL);
+    CHECK(strstr(perf, " ms/frame; worst ") != NULL && strstr(perf, " > 16.7 ms, ") != NULL);
+    CHECK(strstr(perf, " of 4 frames; shown 0.0 fps, busy ") != NULL);
 
     /* 2: the save is read back before the first frame; a game that writes another value updates it. Through
      * "fd:N" (the app's documents) with the descriptor's offset elsewhere: read from 0, left open. */

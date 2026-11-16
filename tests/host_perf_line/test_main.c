@@ -1,0 +1,277 @@
+/*
+ * The performance line every console logs (host_perf_line.c, XBA-243), driven with made-up clocks:
+ *   format      the text of a filled window, field by field; the speed without a full rate; the shared fields the
+ *               N64 line uses (their text unchanged from 0.8.0)
+ *   frames      host frames: their work less their sleep, the slow ones against the budget, the worst per window,
+ *               the stages per guest frame and the rest, the kinds' sums for the overlay
+ *   ff          fast-forward: several guest frames per host frame, the stages per guest frame
+ *   pause       a time away counts in no window; the frame in progress is dropped
+ *   due         the 10 s line logged once due, its window started again; the run's line; the last lines kept
+ *   live        the overlay's figures published every 500 ms, stale after 2 s, cleared
+ *   budget      the budget follows the frame period unless the config sets one
+ */
+#include "host_perf_line.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+#define MS 1000000ull
+
+static int failures;
+
+static void check(int ok, const char *what)
+{
+    printf("  %-66s %s\n", what, ok ? "PASS" : "FAIL");
+    if (!ok)
+        failures++;
+}
+
+static int near(double a, double b)
+{
+    return fabs(a - b) < 1e-6 * (fabs(b) > 1 ? fabs(b) : 1) + 1e-9;
+}
+
+static host_perf_config gba_cfg(void)
+{
+    host_perf_config c = {
+        .console = "gba", .unit = "fps", .frame_ns = 16742706, .nstages = 3,
+        .stage = {"emu", "audio", "present"}, .kind = {HOST_PERF_EMU, HOST_PERF_OTHER, HOST_PERF_RENDER},
+        .rest = "other", .rest_kind = HOST_PERF_OTHER,
+    };
+    return c;
+}
+
+/* One host frame of the shape a console loop has: emu, audio, present, then sleep to `period`. */
+static uint64_t frame(host_perf *p, uint64_t t, uint64_t emu, uint64_t audio, uint64_t present, uint64_t period,
+                      int guest)
+{
+    host_perf_frame(p, t, NULL);
+    host_perf_stage(p, 0, emu);
+    host_perf_guest(p, (uint64_t)guest);
+    host_perf_stage(p, 1, audio);
+    host_perf_stage(p, 2, present);
+    host_perf_shown(p, 1);
+    uint64_t work = emu + audio + present;
+    if (period > work)
+        host_perf_idle(p, period - work);
+    return t + (period > work ? period : work);
+}
+
+static void test_format(void)
+{
+    host_perf_figures f;
+    char line[1024];
+    memset(&f, 0, sizeof f);
+    f.cfg = gba_cfg();
+    f.guest_fps = 59.7;
+    f.full_hz = 59.7275;
+    f.stage_ms[0] = 3.14;
+    f.stage_ms[1] = 0.1;
+    f.stage_ms[2] = 0.4;
+    f.idle_ms = 12.6;
+    f.rest_ms = 0.44;
+    f.worst_ms = 9.2;
+    f.over_1 = 3;
+    f.over_2 = 1;
+    f.budget_ms = 16.742706;
+    f.host_frames = 597;
+    f.shown_fps = 59.7;
+    f.busy_ms = 3.9;
+    host_perf_format(&f, line, sizeof line);
+    printf("    %s\n", line);
+    check(strcmp(line, "speed 100 % (59.7 of 59.7 fps); emu 3.1 audio 0.1 present 0.4 idle 12.6 other 0.4 ms/frame; "
+                       "worst 9 ms, 3 > 16.7 ms, 1 > 33.5 ms of 597 frames; shown 59.7 fps, busy 3.9 ms/frame") == 0,
+          "format: the fields in their order");
+    f.full_hz = 0;
+    f.cfg.rest = "guest";
+    host_perf_format(&f, line, sizeof line);
+    check(strncmp(line, "speed ? (59.7 fps); ", 20) == 0 && strstr(line, " other ") == NULL &&
+              strstr(line, "idle 12.6 guest 0.4 ms/frame") != NULL,
+          "format: no full rate, the rest's own name");
+    host_perf_format_speed(line, sizeof line, 15.0, 60.0, "VI/s");
+    check(strcmp(line, "speed 25 % (15.0 of 60.0 VI/s)") == 0, "format: the N64's speed field");
+    host_perf_format_frames(line, sizeof line, 41.2, 120, 30, 16.7, 150);
+    check(strcmp(line, "worst 41 ms, 120 > 16.7 ms, 30 > 33.4 ms of 150 frames") == 0,
+          "format: the N64's frames field");
+    char small[16];
+    int n = host_perf_format(&f, small, sizeof small);
+    check(n > (int)sizeof small && strlen(small) == sizeof small - 1, "format: truncated like snprintf");
+}
+
+static void test_frames(void)
+{
+    host_perf p;
+    host_perf_config c = gba_cfg();
+    host_perf_figures f;
+    uint64_t t = 1000 * MS, busy = 0;
+    host_perf_init(&p, &c, t);
+    check(host_perf_frame(&p, t, &busy) == 0, "frames: the first top ends no frame");
+    /* 4 ms of work, slept to 16 ms: busy 4 ms */
+    host_perf_stage(&p, 0, 3 * MS);
+    host_perf_guest(&p, 1);
+    host_perf_stage(&p, 2, 1 * MS);
+    host_perf_idle(&p, 12 * MS);
+    t += 16 * MS;
+    check(host_perf_frame(&p, t, &busy) == 1 && busy == 4 * MS, "frames: work = length less sleep");
+    /* 20 ms of work (slow), then 40 ms (slower than twice the budget) */
+    host_perf_stage(&p, 0, 20 * MS);
+    host_perf_guest(&p, 1);
+    t += 20 * MS;
+    host_perf_frame(&p, t, &busy);
+    host_perf_stage(&p, 0, 38 * MS);
+    host_perf_stage(&p, 2, 2 * MS);
+    host_perf_guest(&p, 1);
+    t += 40 * MS;
+    host_perf_frame(&p, t, &busy);
+    host_perf_take(&p, HOST_PERF_WIN_LINE, t, &f, 0);
+    check(f.host_frames == 3 && f.guest_frames == 3, "frames: host and guest frames counted");
+    check(f.over_1 == 2 && f.over_2 == 1, "frames: slow against the budget and twice it");
+    check(near(f.worst_ms, 40.0), "frames: the worst frame's work");
+    check(near(f.busy_ms, (4.0 + 20 + 40) / 3), "frames: mean work per host frame");
+    check(near(f.frame_ms, 76.0 / 3) && near(f.stage_ms[0], 61.0 / 3) && near(f.stage_ms[2], 3.0 / 3) &&
+              near(f.idle_ms, 12.0 / 3) && near(f.rest_ms, 0.0),
+          "frames: stages per guest frame, the rest");
+    check(near(f.emu_ms, 61.0 / 3) && near(f.render_ms, 1.0), "frames: the overlay's emu and render sums");
+    check(near(f.seconds, 0.076) && near(f.guest_fps, 3 / 0.076) && near(f.speed_pct, 100.0 * f.guest_fps / f.full_hz),
+          "frames: wall time, fps, speed");
+    /* the rest, with a stage-less config whose rest is the guest's work (the Xbox) */
+    host_perf_config x = {.console = "xbox", .nstages = 2, .stage = {"render", "present"},
+                          .kind = {HOST_PERF_RENDER, HOST_PERF_RENDER}, .rest = "guest", .rest_kind = HOST_PERF_EMU};
+    host_perf_init(&p, &x, 0);
+    t = 0;
+    for (int i = 0; i < 4; i++) {
+        host_perf_frame(&p, t, NULL);
+        host_perf_stage(&p, 0, 5 * MS);
+        host_perf_stage(&p, 1, 1 * MS);
+        host_perf_guest(&p, 1);
+        host_perf_shown(&p, 1);
+        t += 33 * MS;
+    }
+    host_perf_take(&p, HOST_PERF_WIN_RUN, t, &f, 0);
+    check(near(f.rest_ms, 27.0) && near(f.emu_ms, 27.0) && near(f.render_ms, 6.0) && f.full_hz == 0 &&
+              f.speed_pct == 0 && near(f.budget_ms, 16.666667),
+          "frames: rest as the guest's work, no full rate, 60 Hz budget");
+    check(f.host_frames == 3 && f.over_1 == 3 && f.over_2 == 0, "frames: a 30 fps title against 60 Hz");
+}
+
+static void test_ff(void)
+{
+    host_perf p;
+    host_perf_config c = gba_cfg();
+    host_perf_figures f;
+    uint64_t t = 0;
+    host_perf_init(&p, &c, t);
+    for (int i = 0; i < 10; i++)
+        t = frame(&p, t, 16 * MS, 0, 1 * MS, 17 * MS, 4); /* 4 guest frames per 17 ms host frame */
+    host_perf_frame(&p, t, NULL);
+    host_perf_take(&p, HOST_PERF_WIN_LINE, t, &f, 0);
+    check(f.guest_frames == 40 && f.host_frames == 10 && near(f.stage_ms[0], 4.0) && near(f.frame_ms, 17.0 / 4),
+          "ff: stages per guest frame");
+    check(f.speed_pct > 390 && f.speed_pct < 400 && near(f.shown_fps, 10 / 0.17), "ff: speed above 100 %");
+}
+
+static void test_pause(void)
+{
+    host_perf p;
+    host_perf_config c = gba_cfg();
+    host_perf_figures f;
+    uint64_t t = 0, busy;
+    host_perf_init(&p, &c, t);
+    for (int i = 0; i < 5; i++)
+        t = frame(&p, t, 2 * MS, 0, 0, 10 * MS, 1);
+    host_perf_pause(&p, t + 1 * MS);
+    check(host_perf_frame(&p, t + 500 * MS, &busy) == 0, "pause: no frame while paused");
+    t += 60000 * MS; /* a minute away */
+    host_perf_resume(&p, t);
+    check(host_perf_frame(&p, t, &busy) == 0, "pause: the frame in progress is dropped");
+    host_perf_stage(&p, 0, 2 * MS);
+    host_perf_guest(&p, 1);
+    host_perf_idle(&p, 8 * MS);
+    t += 10 * MS;
+    for (int i = 0; i < 4; i++)
+        t = frame(&p, t, 2 * MS, 0, 0, 10 * MS, 1);
+    host_perf_frame(&p, t, NULL);
+    host_perf_take(&p, HOST_PERF_WIN_RUN, t, &f, 0);
+    check(f.seconds < 0.2 && f.guest_frames == 10 && near(f.worst_ms, 2.0), "pause: the run skips the time away");
+    check(f.host_frames == 9, "pause: 4 + 5 host frames ended");
+    host_perf_take(&p, HOST_PERF_WIN_LINE, t, &f, 0);
+    check(f.guest_frames == 5 && near(f.seconds, 0.05), "pause: the line starts again at the resume");
+}
+
+static void test_due(void)
+{
+    host_perf p;
+    host_perf_config c = gba_cfg();
+    host_perf_figures f;
+    char line[1024];
+    uint64_t t = 5 * MS;
+    host_perf_last_line(0, line, sizeof line);
+    check(line[0] == 0, "due: no line before the first");
+    host_perf_init(&p, &c, t);
+    int logged = 0;
+    for (int i = 0; i < 700; i++) {
+        t = frame(&p, t, 3 * MS, 0, 1 * MS, 16742706, 1);
+        logged += host_perf_log_due(&p, t);
+    }
+    check(logged == 1, "due: one line in 11.7 s");
+    host_perf_last_line(0, line, sizeof line);
+    static const char head[] = "speed 100 % (59.7 of 59.7 fps); emu 3.0 audio 0.0 present 1.0 idle 12.7 other 0.0";
+    check(strncmp(line, head, sizeof head - 1) == 0,
+          "due: the line kept");
+    host_perf_take(&p, HOST_PERF_WIN_LINE, t, &f, 0);
+    check(f.guest_frames > 100 && f.guest_frames < 120, "due: the window started again");
+    host_perf_log_run(&p, t, &f);
+    host_perf_last_line(1, line, sizeof line);
+    check(f.guest_frames == 700 && f.host_frames == 699 && strstr(line, " of 699 frames; shown 59.7 fps") != NULL,
+          "due: the run's line");
+}
+
+static void test_live(void)
+{
+    host_perf p;
+    host_perf_config c = gba_cfg();
+    host_perf_figures f;
+    uint64_t t = 100 * MS;
+    host_perf_live_clear();
+    check(host_perf_live_get(t, &f) == 0, "live: none before a publish");
+    host_perf_init(&p, &c, t);
+    for (int i = 0; i < 20; i++)
+        t = frame(&p, t, 8 * MS, 0, 2 * MS, 20 * MS, 1); /* 400 ms */
+    check(host_perf_live_get(t, &f) == 0, "live: nothing before 500 ms");
+    for (int i = 0; i < 10; i++)
+        t = frame(&p, t, 8 * MS, 0, 2 * MS, 20 * MS, 1);
+    check(host_perf_live_get(t, &f) == 1 && f.guest_frames == 25 && near(f.emu_ms, 8.0) && near(f.render_ms, 2.0) &&
+              strcmp(f.cfg.console, "gba") == 0,
+          "live: published at 500 ms with the window's figures");
+    check(host_perf_live_get(t + 3000 * MS, &f) == 0, "live: stale after 2 s");
+    host_perf_live_clear();
+    check(host_perf_live_get(t, &f) == 0, "live: cleared");
+}
+
+static void test_budget(void)
+{
+    host_perf p;
+    host_perf_config c = gba_cfg();
+    host_perf_init(&p, &c, 0);
+    host_perf_set_frame_ns(&p, 20000000);
+    check(p.budget_ns == 20000000, "budget: follows the frame period");
+    c.budget_ns = 33 * MS;
+    host_perf_init(&p, &c, 0);
+    host_perf_set_frame_ns(&p, 20000000);
+    check(p.budget_ns == 33 * MS && p.cfg.frame_ns == 20000000, "budget: the config's own stays");
+}
+
+int main(void)
+{
+    printf("host_perf_line\n");
+    test_format();
+    test_frames();
+    test_ff();
+    test_pause();
+    test_due();
+    test_live();
+    test_budget();
+    printf("%s (%d failure%s)\n", failures ? "FAIL" : "PASS", failures, failures == 1 ? "" : "s");
+    return failures ? 1 : 0;
+}

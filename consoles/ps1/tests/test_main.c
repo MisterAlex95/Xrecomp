@@ -8,6 +8,7 @@
  *
  *   ps1_runtime_test [BIOS HOMEBREW_DIR]     (the runs skip, the helpers still run, when either is absent) */
 #include "host_pad.h"
+#include "host_perf_line.h"
 #include "host_window.h"
 #include "host_time.h"
 #include "ps1_core.h"
@@ -480,6 +481,14 @@ static void test_runs(const char *bios, const char *hb)
     int w = 0, h = 0;
     CHECK(ps1_runtime_run(&o) == 0);
     CHECK(ppm_size(shot, &w, &h) == 0 && w == 320 && h == 240);
+    /* The performance line over the run (host_perf_line.h, XBA-243), as every console logs it: 60 PS1 frames, the
+     * PS1's own stages, nothing shown headless. */
+    char perf[1024];
+    host_perf_last_line(1, perf, sizeof perf);
+    printf("ps1 perf over the run: %s\n", perf);
+    CHECK(strncmp(perf, "speed ", 6) == 0 && strstr(perf, " fps); emu ") != NULL);
+    CHECK(strstr(perf, " audio ") != NULL && strstr(perf, " present 0.0 idle 0.0 other ") != NULL);
+    CHECK(strstr(perf, " ms/frame; worst ") != NULL && strstr(perf, " of 59 frames; shown 0.0 fps, busy ") != NULL);
     CHECK(ps1_runtime_card_path(dir, "TEST-00001", 0, card, sizeof card) == 0);
     CHECK(file_size(card) == -1);
 

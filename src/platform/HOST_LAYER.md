@@ -10,7 +10,7 @@ hosts only (Linux, macOS, Android).
 
 | Target | Sources | Defined in |
 |---|---|---|
-| `xbr_host_core` | `android_log.c`, `recomp_lifecycle.c`, `recomp_quit.c` (+ `host_time`, `host_cpus`, `host_perf_hint`, `recomp_cfg`, `recomp_exit_hook`) | `src/platform/host_core.cmake` |
+| `xbr_host_core` | `android_log.c`, `recomp_lifecycle.c`, `recomp_quit.c` (+ `host_time`, `host_cpus`, `host_perf_hint`, `host_perf_line`, `recomp_cfg`, `recomp_exit_hook`) | `src/platform/host_core.cmake` |
 | `recomp_storage` | `recomp_storage.c` | `src/platform/host_core.cmake` |
 | `input_ports` | `src/input/input_ports.c` | `src/input/mapping/input_ports.cmake` |
 | `host_framegen` | `src/framegen/framegen_pacer.c`, `framegen_fake.c`, `framegen_console.c` (the console window's front end, XBA-186) | `src/framegen/host_framegen.cmake` |
@@ -32,6 +32,7 @@ interface target when there is no Vulkan bridge). The `*.cmake` files have inclu
 | `recomp_lifecycle.[ch]` | G | moved from `platform` to `xbr_host_core` |
 | `recomp_quit.[ch]` | G | moved from `platform` to `xbr_host_core` |
 | `host_time.[ch]`, `host_cpus.[ch]`, `recomp_cfg.[ch]`, `recomp_exit_hook.[ch]` | G | already their own targets, now defined in `host_core.cmake` |
+| `host_perf_line.[ch]` | G (new) | the performance line every runtime logs every 10 s and over the run, and the overlay's live figures (XBA-243, [below](#performance-line-xba-243)) |
 | `recomp_storage.[ch]` | M → split | new `recomp_storage_resolve_entry(ext, int, entry, out)` is the generic call (any entry file, or none). `recomp_storage_resolve` = that call with `"default.xbe"`, unchanged |
 | `recomp_app.[ch]` | M, kept X | the Android start-up: host parts plus `xbox_path_init` and the kernel fault handler; it stays a thin Xbox wrapper |
 | `recomp_pack.[ch]` | M, kept X | pack.json parse/validate/dlopen is generic, the XBE title ID and the exported symbols are Xbox. Generalised with the manifest `console` field (C0-3) |
@@ -43,7 +44,7 @@ interface target when there is no Vulkan bridge). The `*.cmake` files have inclu
 |---|---|---|
 | `host_window.[ch]` | G (new) | SDL window, GL ES 3.0 / 3.2 core context, RGBA or GL-texture present, letterboxed (aspect, integer or stretch scaling, linear or nearest: `host_window_set_scaling`; a fixed display shape such as the PS1's 4:3: `host_window_set_aspect`), a capture of the drawable as presented (`host_window_capture`), events → lifecycle and pads; from any thread, the present rate (`host_window_stats`) and the last picture as a BMP (`host_window_screenshot_bmp`; a picture presented with `host_window_present_rgba_shared` is not copied, the caller gives it on demand); the shared display keys `RECOMP_SCALE` (aspect, integer or stretch) / `RECOMP_FILTER` / `RECOMP_PRESENT_VSYNC` (`host_window_env_*`, XBA-181); picture shaders none / sharp / scanlines / crt / lcd / fxaa / cas (`host_window_set_shader`, `RECOMP_SHADER*`, XBA-195, [below](#picture-shaders-xba-195)); a minified picture's texels averaged (`RECOMP_PRESENT_DOWNSCALE`, [below](#minified-pictures)) |
 | `present_shaders.[ch]` | G (new) | the picture shaders (XBA-203): presets, `RECOMP_SHADER*` keys, GLSL in two dialects, GL program and uniforms, shared by `host_window` and the Xbox presenter ([below](#picture-shaders-xba-195)) |
-| `perf_overlay.[ch]` | G | SDL_Renderer overlay; moved from `xbox_video` to `xbr_host` |
+| `perf_overlay.[ch]` | G | the performance overlay (`RECOMP_OVERLAY=1`); moved from `xbox_video` to `xbr_host`. Drawn by the Xbox presenter through SDL_Renderer and, since XBA-243, by `host_window` (its pixels as a GL texture), with the performance line's fields |
 | `display_vsync_android.[ch]` | M → split | AChoreographer grid; now hands samples to a sink passed to `display_vsync_android_start`, and the Xbox presenter passes `nv2a_pb_exec_display_clock`. Moved to `xbr_host` |
 | `display_clock.h`, `frame_times.h` | G | header-only |
 | `fb_present_sdl.c` | M, kept X | the Xbox presenter: an SDL loop around guest framebuffers, the NV2A executor's pacing and the LSFG feed. Left whole (no behaviour change); its generic helpers moved out. Moving it onto `host_window` is later work |
@@ -186,3 +187,48 @@ difference to none is the shader's own arithmetic): none 13.2, sharp 17.0, scanl
 ghosting 23.8. On a GPU the pass writes the same pixels as none; the shaders add 15 to 40 ALU operations and one
 or two texture fetches per output pixel, about 0.1 GFLOP per 1080p frame: well under 0.2 ms on an Adreno 740-class
 GPU (AYN Thor), to be confirmed on the device.
+
+## Performance line (XBA-243)
+
+Every runtime logs the same line every 10 s and once over the run when the game ends, as the N64 did first (0.6.0):
+
+```
+gba: perf speed 100 % (59.7 of 59.7 fps); emu 3.1 audio 0.1 present 0.4 idle 12.6 other 0.4 ms/frame; worst 9 ms,
+0 > 16.7 ms, 0 > 33.5 ms of 597 frames; shown 59.7 fps, busy 3.9 ms/frame
+gba: perf over the run: ...
+```
+
+`host_perf_line.[ch]` (libc and pthreads, in `xbr_host_core`) holds the accounting and the text. The runtime calls
+`host_perf_frame` at the top of each host frame, `host_perf_stage` / `host_perf_idle` as it times its work and its
+sleep, `host_perf_guest` / `host_perf_shown` for the frames it ran and the pictures it handed to the window,
+`host_perf_pause` / `host_perf_resume` around a time away, then `host_perf_log_due` (the 10 s line) and
+`host_perf_log_run` (the run's). The fields:
+
+- **speed**: guest frames per second against the guest's full rate; `speed ? (29.9 fps)` without one (the Xbox: a
+  title picks its own rate).
+- **stages**: wall time per guest frame in each of the runtime's stages, its sleep to the next deadline (`idle`) and
+  the rest no stage covers (`other`; `guest` on the Xbox, where the game's own work is what the presenter does not
+  time).
+- **frames**: the slowest host frame (its work, not its sleep), the host frames longer than the budget (one guest frame,
+  60 Hz on the Xbox) and than twice it, out of the host frames.
+- **shown**: pictures handed to the window per second, and the mean work of a host frame.
+
+| Runtime | Prefix | Stages | Host frame |
+|---|---|---|---|
+| Xbox (`fb_present_sdl.c`) | `xbox:` | `render` (the executor's drawing, `nv2a_pb_exec_render_ns`), `present` (the copy into the window's slot), rest `guest` | one flip |
+| GBA (`gba_runtime.c`) | `gba:` | `emu`, `audio`, `present` | one loop turn |
+| PS1 (`ps1_runtime.c`) | `ps1:` | `emu`, `audio`, `present` (the full rate follows NTSC / PAL) | one loop turn |
+| N64 (`n64_runtime.c`) | `n64:` | its own longer line (`n64_runtime_perf_format`, unchanged text) built on the same accounting (`core`, `vi`, `present`, `audio`) and the shared fields (`host_perf_format_speed`, `host_perf_format_frames`) | one loop turn |
+
+Every half second the figures of the last half second are published (`host_perf_live_get`): the performance overlay
+(`perf_overlay.c`, `RECOMP_OVERLAY=1`) shows them the same way on all four consoles, under its FPS and CPU lines:
+
+```
+SPEED 100 %  59.7/59.7 fps        (GAME 30.0 fps on the Xbox)
+FRAME 3.9  EMU 3.1  DRAW 0.4 MS   (work per host frame; emulation and drawing per guest frame)
+WORST 9 MS  SLOW 0/30  SHOWN 60   (slowest frame, frames over the budget, pictures per second)
+```
+
+Tests: `tests/host_perf_line` (the helper with made-up clocks), `host_layer_test overlay` (the overlay's lines fed by
+each console's configuration), and each runtime's headless test checks its run line (`gba_runtime`, `ps1_runtime`,
+`n64_runtime`, `fb_present_sdl_test perf`).

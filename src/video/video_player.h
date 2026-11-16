@@ -84,6 +84,10 @@ int  xbox_FramebufferDumpBmp(const char *path);
  * UTF-16 title (40 chars max); the stats come from each flip. */
 void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars);
 void xbox_FramebufferWindowFrameStats(uint32_t draws);
+/* POSIX window: logs the performance line over the run ("xbox: perf over the run: ...", host_perf_line.h) once;
+ * done when the window ends and at exit. The 10 s line comes from the flips (xbox_FramebufferWindowFrameStats).
+ * No-op on Win32. */
+void xbox_FramebufferWindowPerfLog(void);
 /* POSIX window: the rate the title bar shows (frames per second x 100, 0
  * before the first second) and the last frame's draw count. */
 void xbox_FramebufferWindowGetStats(uint32_t *fps_centi, uint32_t *draws);

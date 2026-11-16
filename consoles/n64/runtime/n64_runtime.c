@@ -39,6 +39,7 @@
 #include "n64_core.h"
 #include "n64_pack.h"
 #include "host_perf_hint.h"
+#include "host_perf_line.h"
 #include "n64_rdp.h"
 #include "recomp_cheats.h"
 #include "recomp_exit_hook.h"
@@ -346,7 +347,10 @@ int n64_runtime_frameskip_picture(int mode, int64_t behind_ns, uint64_t frame_ns
 int n64_runtime_perf_format(const n64_runtime_perf *p, char *out, size_t n)
 {
     double fps = p->seconds > 0 ? (double)p->frames / p->seconds : 0.0;
-    char pack[160], core[64];
+    char pack[160], core[64], speed[96], worst[160];
+    /* The fields every console's line shares (host_perf_line.h, XBA-243). */
+    host_perf_format_speed(speed, sizeof speed, fps, p->vi_hz, "VI/s");
+    host_perf_format_frames(worst, sizeof worst, p->worst_ms, p->over_1, p->over_2, p->over_ms, p->host_frames);
     if (p->pack)
         snprintf(pack, sizeof pack, "pack %.0f %% native, %.1f k interp instr/frame, %llu rehashes, %llu slow lookups",
                  p->native_pct, p->interp_instr / 1e3, (unsigned long long)p->rehashes,
@@ -363,17 +367,13 @@ int n64_runtime_perf_format(const n64_runtime_perf *p, char *out, size_t n)
     if (p->rdp && !strcmp(p->rdp, "software"))
         snprintf(threads, sizeof threads, ", %d thread%s", p->rdp_threads, p->rdp_threads == 1 ? "" : "s");
     return snprintf(out, n,
-                    "speed %.0f %% (%.1f of %.1f VI/s); cpu %.1f rsp %.1f rdp %.1f (queue %.1f, sync %.1f, scanout "
-                    "%.1f) sched %.1f vi %.1f "
-                    "present %.1f audio %.1f idle %.1f other %.1f ms/frame; worst %.0f ms, %llu > %.1f ms, %llu > "
-                    "%.1f ms of %llu frames; rsp %.2f M instr, rdp %.0f cmds, %.1f full syncs /frame; %s; rdp %s%s, "
-                    "upscale %dx, rewind %s; %s",
-                    p->vi_hz > 0 ? 100.0 * fps / p->vi_hz : 0.0, fps, p->vi_hz, p->cpu_ms, p->rsp_ms, p->rdp_ms,
-                    p->rdp_queue_ms, p->rdp_sync_ms, p->rdp_scanout_ms, p->sched_ms, p->vi_ms, p->present_ms, p->audio_ms, p->idle_ms, p->other_ms,
-                    p->worst_ms, (unsigned long long)p->over_1, p->over_ms, (unsigned long long)p->over_2,
-                    2 * p->over_ms, (unsigned long long)p->host_frames, p->rsp_instr / 1e6, p->rdp_cmds,
-                    p->rdp_syncs, pack, p->rdp ? p->rdp : "none", threads, p->upscale > 0 ? p->upscale : 1,
-                    p->rewind ? "on" : "off", core);
+                    "%s; cpu %.1f rsp %.1f rdp %.1f (queue %.1f, sync %.1f, scanout %.1f) sched %.1f vi %.1f "
+                    "present %.1f audio %.1f idle %.1f other %.1f ms/frame; %s; rsp %.2f M instr, rdp %.0f cmds, "
+                    "%.1f full syncs /frame; %s; rdp %s%s, upscale %dx, rewind %s; %s",
+                    speed, p->cpu_ms, p->rsp_ms, p->rdp_ms, p->rdp_queue_ms, p->rdp_sync_ms, p->rdp_scanout_ms,
+                    p->sched_ms, p->vi_ms, p->present_ms, p->audio_ms, p->idle_ms, p->other_ms, worst,
+                    p->rsp_instr / 1e6, p->rdp_cmds, p->rdp_syncs, pack, p->rdp ? p->rdp : "none", threads,
+                    p->upscale > 0 ? p->upscale : 1, p->rewind ? "on" : "off", core);
 }
 
 int n64_runtime_perf_detail_format(const n64_runtime_perf *p, char *out, size_t n)
@@ -853,10 +853,10 @@ static uint64_t now_ns(void)
 }
 
 /* ---- The performance line (n64_runtime_perf) ------------------------------------------------------------------ */
-/* The runtime's stage times, totals since the run started (ns), and the host frames. */
+/* The runtime's stages, host frames and sleep are counted by the shared performance line (host_perf_line.h): these
+ * are its stage indices. The pictures are the N64's own counters, totals since the run started. */
+enum { RT_ST_CORE, RT_ST_VI, RT_ST_PRESENT, RT_ST_AUDIO, RT_STAGES };
 typedef struct rt_perf_acc {
-    uint64_t core, vi, present, audio, idle;
-    uint64_t host_frames, over_1, over_2;
     uint64_t pictures, unchanged, skipped; /* n64_runtime_perf's */
 } rt_perf_acc;
 
@@ -869,6 +869,7 @@ typedef struct rt_worst {
 typedef struct rt_perf_mark {
     uint64_t t;
     rt_perf_acc acc;
+    host_perf_totals hp; /* the shared line's totals */
     n64_perf core;
     n64_recomp_stats rc;
     uint64_t instructions;
@@ -883,10 +884,11 @@ void n64_runtime_last_perf(n64_runtime_perf *out)
 }
 
 /* Under s_mu (a save state may be taken meanwhile). */
-static void perf_mark(rt_perf_mark *k, n64_machine *m, const rt_perf_acc *acc, uint64_t t)
+static void perf_mark(rt_perf_mark *k, n64_machine *m, const rt_perf_acc *acc, const host_perf *hp, uint64_t t)
 {
     k->t = t;
     k->acc = *acc;
+    k->hp = hp->tot;
     n64_perf_get(m, &k->core);
     n64_recomp_get_stats(m, &k->rc);
     k->instructions = n64_instructions(m);
@@ -929,10 +931,10 @@ static void perf_fill(n64_runtime_perf *p, const rt_perf_mark *a, const rt_perf_
     const uint64_t f = b->core.frames - a->core.frames;
     p->seconds = (double)wall / 1e9;
     p->frames = f;
-    p->host_frames = b->acc.host_frames - a->acc.host_frames;
+    p->host_frames = b->hp.host_frames - a->hp.host_frames;
     p->vi_hz = frame_ns ? 1e9 / (double)frame_ns : 0.0;
     /* n64_run_frame as a whole (every frame), split as the timed frames split it. */
-    const double core = ms_per(b->acc.core - a->acc.core, f);
+    const double core = ms_per(b->hp.stage_ns[RT_ST_CORE] - a->hp.stage_ns[RT_ST_CORE], f);
     const double tf = (double)(b->core.frame_ns - a->core.frame_ns);
     if (tf > 0) {
         p->cpu_ms = core * (double)(b->core.cpu_ns - a->core.cpu_ns) / tf;
@@ -946,10 +948,10 @@ static void perf_fill(n64_runtime_perf *p, const rt_perf_mark *a, const rt_perf_
     p->rdp_queue_ms = ms_per(b->core.rdp_queue_ns - a->core.rdp_queue_ns, f);
     p->rdp_scanout_ms = ms_per(b->core.rdp_scanout_ns - a->core.rdp_scanout_ns, f);
     p->rdp_sync_ms = p->rdp_wait_ms > p->rdp_scanout_ms ? p->rdp_wait_ms - p->rdp_scanout_ms : 0.0;
-    p->vi_ms = ms_per(b->acc.vi - a->acc.vi, f);
-    p->present_ms = ms_per(b->acc.present - a->acc.present, f);
-    p->audio_ms = ms_per(b->acc.audio - a->acc.audio, f);
-    p->idle_ms = ms_per(b->acc.idle - a->acc.idle, f);
+    p->vi_ms = ms_per(b->hp.stage_ns[RT_ST_VI] - a->hp.stage_ns[RT_ST_VI], f);
+    p->present_ms = ms_per(b->hp.stage_ns[RT_ST_PRESENT] - a->hp.stage_ns[RT_ST_PRESENT], f);
+    p->audio_ms = ms_per(b->hp.stage_ns[RT_ST_AUDIO] - a->hp.stage_ns[RT_ST_AUDIO], f);
+    p->idle_ms = ms_per(b->hp.idle_ns - a->hp.idle_ns, f);
     p->other_ms = ms_per(wall, f) - core - p->vi_ms - p->present_ms - p->audio_ms - p->idle_ms;
     if (p->other_ms < 0)
         p->other_ms = 0;
@@ -982,8 +984,8 @@ static void perf_fill(n64_runtime_perf *p, const rt_perf_mark *a, const rt_perf_
     p->stalled_compiles = b->core.rdp_stalled_compiles - a->core.rdp_stalled_compiles;
     p->stalled_compile_ms = (double)(b->core.rdp_stalled_compile_ns - a->core.rdp_stalled_compile_ns) / 1e6;
     p->over_ms = (double)frame_ns / 1e6;
-    p->over_1 = b->acc.over_1 - a->acc.over_1;
-    p->over_2 = b->acc.over_2 - a->acc.over_2;
+    p->over_1 = b->hp.over_1 - a->hp.over_1;
+    p->over_2 = b->hp.over_2 - a->hp.over_2;
     const double fd = f ? (double)f : 1.0;
     p->rsp_instr = (double)(b->core.rsp_instructions - a->core.rsp_instructions) / fd;
     p->rdp_cmds = (double)(b->core.rdp_commands - a->core.rdp_commands) / fd;
@@ -1396,17 +1398,27 @@ int n64_runtime_run(const n64_runtime_opts *o)
     /* The performance line (n64_runtime_perf): the core times one frame in 8 stage by stage. */
     rt_perf_acc pacc;
     memset(&pacc, 0, sizeof pacc);
+    /* The stages, host frames and sleep: the line every console shares (host_perf_line.h), which also gives the
+     * on-screen overlay its figures. */
+    static const host_perf_config hp_cfg = {
+        .console = "n64", .unit = "VI/s", .frame_ns = 16683333, .nstages = RT_STAGES,
+        .stage = {"core", "vi", "present", "audio"},
+        .kind = {HOST_PERF_EMU, HOST_PERF_RENDER, HOST_PERF_RENDER, HOST_PERF_OTHER},
+        .rest = "other", .rest_kind = HOST_PERF_OTHER,
+    };
+    host_perf hp;
+    host_perf_init(&hp, &hp_cfg, t0);
     rt_perf_mark pm_run, pm_line;
     n64_perf_enable(m, 8);
     pthread_mutex_lock(&s_mu);
-    perf_mark(&pm_run, m, &pacc, t0);
+    perf_mark(&pm_run, m, &pacc, &hp, t0);
     pthread_mutex_unlock(&s_mu);
     pm_line = pm_run;
-    uint64_t p_iter = 0, p_iter_idle = 0, p_paused_at = 0, p_frame_ns = 16683333;
+    uint64_t p_paused_at = 0, p_frame_ns = 16683333;
     rt_worst p_worst, p_worst_run; /* the worst host frame of the line, of the run */
     memset(&p_worst, 0, sizeof p_worst);
     memset(&p_worst_run, 0, sizeof p_worst_run);
-    rt_perf_acc p_iter_acc = pacc; /* the stages and the RDP's counters at the host frame's start */
+    host_perf_totals p_iter_tot = hp.tot; /* the stages and the RDP's counters at the host frame's start */
     n64_rdp_stats p_iter_rdp;
     memset(&p_iter_rdp, 0, sizeof p_iter_rdp);
     recomp_perf_hint_begin(16683333); /* the frame period; each frame's own below */
@@ -1440,6 +1452,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 dirty_at = dirty_first = 0;
                 was_paused = 1;
                 p_paused_at = now_ns();
+                host_perf_pause(&hp, p_paused_at);
             }
             SDL_Delay(16);
             continue;
@@ -1452,11 +1465,11 @@ int n64_runtime_run(const n64_runtime_opts *o)
             fps_t = next;
             fps_frames = 0;
             pm_run.t += next - p_paused_at; /* the time away is not the run's */
+            host_perf_resume(&hp, next); /* the host frame in progress is dropped */
             pthread_mutex_lock(&s_mu);
-            perf_mark(&pm_line, m, &pacc, next);
+            perf_mark(&pm_line, m, &pacc, &hp, next);
             pthread_mutex_unlock(&s_mu);
             memset(&p_worst, 0, sizeof p_worst);
-            p_iter = 0;
         }
         { /* the host frame that ended: its length without the sleep, and for the worst one its own breakdown */
             uint64_t it = now_ns();
@@ -1464,25 +1477,21 @@ int n64_runtime_run(const n64_runtime_opts *o)
             pthread_mutex_lock(&s_mu);
             n64_rdp_get_stats(rdp, &rs);
             pthread_mutex_unlock(&s_mu);
-            if (p_iter) {
-                uint64_t busy = it - p_iter - p_iter_idle;
-                pacc.host_frames++;
-                pacc.over_1 += busy > p_frame_ns;
-                pacc.over_2 += busy > 2 * p_frame_ns;
-                if (busy > p_worst.busy || busy > p_worst_run.busy) {
-                    rt_worst w = {busy, pacc.core - p_iter_acc.core, pacc.vi - p_iter_acc.vi,
-                                  pacc.present - p_iter_acc.present, pacc.audio - p_iter_acc.audio,
-                                  rs.queue_ns - p_iter_rdp.queue_ns, rs.wait_ns - p_iter_rdp.wait_ns,
-                                  rs.scanout_ns - p_iter_rdp.scanout_ns, rs.dp_wait_ns - p_iter_rdp.dp_wait_ns};
-                    if (busy > p_worst.busy)
-                        p_worst = w;
-                    if (busy > p_worst_run.busy)
-                        p_worst_run = w;
-                }
+            uint64_t busy;
+            host_perf_set_frame_ns(&hp, p_frame_ns); /* the budget: one VI frame */
+            const host_perf_totals cur = hp.tot;
+            if (host_perf_frame(&hp, it, &busy) && (busy > p_worst.busy || busy > p_worst_run.busy)) {
+                const uint64_t *s1 = cur.stage_ns, *s0 = p_iter_tot.stage_ns;
+                rt_worst w = {busy, s1[RT_ST_CORE] - s0[RT_ST_CORE], s1[RT_ST_VI] - s0[RT_ST_VI],
+                              s1[RT_ST_PRESENT] - s0[RT_ST_PRESENT], s1[RT_ST_AUDIO] - s0[RT_ST_AUDIO],
+                              rs.queue_ns - p_iter_rdp.queue_ns, rs.wait_ns - p_iter_rdp.wait_ns,
+                              rs.scanout_ns - p_iter_rdp.scanout_ns, rs.dp_wait_ns - p_iter_rdp.dp_wait_ns};
+                if (busy > p_worst.busy)
+                    p_worst = w;
+                if (busy > p_worst_run.busy)
+                    p_worst_run = w;
             }
-            p_iter = it;
-            p_iter_idle = 0;
-            p_iter_acc = pacc;
+            p_iter_tot = cur;
             p_iter_rdp = rs;
         }
         uint64_t work_t0 = now_ns(); /* the frame's work, for the performance hint (the sleep after it is not) */
@@ -1536,7 +1545,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 recomp_states_note_load(); /* a fresh frame generation history */
             uint64_t tv = now_ns();
             on = n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
-            pacc.vi += now_ns() - tv;
+            host_perf_stage(&hp, RT_ST_VI, now_ns() - tv);
+            host_perf_shown(&hp, 1);
             pacc.pictures++;
             pthread_mutex_unlock(&s_mu);
         }
@@ -1548,7 +1558,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 n64_set_controller(m, port, 1, pads[port].buttons, pads[port].x, pads[port].y);
             uint64_t c0 = n64_cycles(m), tc = now_ns();
             n64_run_frame(m);
-            pacc.core += now_ns() - tc;
+            host_perf_stage(&hp, RT_ST_CORE, now_ns() - tc);
             frame_ns = n64_runtime_frame_ns(n64_cycles(m) - c0);
             p_frame_ns = frame_ns;
             if (cheats.n)
@@ -1601,7 +1611,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
                         on = 1;
                     }
                 }
-                pacc.vi += now_ns() - tv;
+                host_perf_stage(&hp, RT_ST_VI, now_ns() - tv);
+                host_perf_shown(&hp, (uint64_t)(fresh && !skip));
                 skipped += (uint64_t)skip;
                 pacc.skipped += (uint64_t)skip;
                 pacc.pictures += (uint64_t)(fresh && !skip);
@@ -1612,6 +1623,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
             pthread_mutex_unlock(&s_mu);
             frames++;
             fps_frames++;
+            host_perf_guest(&hp, 1);
             if (kind != last_kind) {
                 printf("n64: cartridge save type %s at frame %llu\n", save_kind_name(kind), (unsigned long long)frames);
                 last_kind = kind;
@@ -1632,7 +1644,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 if (audio && got)
                     host_audio_queue(pcm, (uint32_t)got);
             }
-            pacc.audio += now_ns() - ta;
+            host_perf_stage(&hp, RT_ST_AUDIO, now_ns() - ta);
             if (last)
                 break;
         }
@@ -1688,7 +1700,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
             n64_runtime_perf pf;
             char line[1024];
             pthread_mutex_lock(&s_mu);
-            perf_mark(&pm_now, m, &pacc, t);
+            perf_mark(&pm_now, m, &pacc, &hp, t);
             pthread_mutex_unlock(&s_mu);
             perf_fill(&pf, &pm_line, &pm_now, t - pm_line.t, &p_worst, frame_ns, pack.table != NULL, rdp,
                       rdp_threads, rw.ring != NULL);
@@ -1707,7 +1719,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
             /* The same picture: the window's texture drawn again (frame generation: nothing, it paces itself). */
             uint64_t tp = now_ns();
             host_window_present_again();
-            pacc.present += now_ns() - tp;
+            host_perf_stage(&hp, RT_ST_PRESENT, now_ns() - tp);
         } else if (window && !skip) {
             uint64_t tp = now_ns();
             if (o->capture_path && o->capture_frame == frames)
@@ -1727,7 +1739,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 n64_runtime_xrgb_to_rgba(xrgb, rgba, (size_t)dw * (size_t)dh);
                 host_window_present_rgba(rgba + 4 * cc, dw - 2 * cc, dh, dw * 4);
             }
-            pacc.present += now_ns() - tp;
+            host_perf_stage(&hp, RT_ST_PRESENT, now_ns() - tp);
         }
         if (o->frames && frames >= o->frames)
             break;
@@ -1751,8 +1763,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
             } else if (next > t) {
                 sleep_until(next);
                 uint64_t slept = now_ns() - t;
-                pacc.idle += slept;
-                p_iter_idle += slept;
+                host_perf_idle(&hp, slept);
             }
         }
     }
@@ -1774,7 +1785,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
         if (was_paused)
             pm_run.t += t_end - p_paused_at;
         pthread_mutex_lock(&s_mu);
-        perf_mark(&pm_end, m, &pacc, t_end);
+        perf_mark(&pm_end, m, &pacc, &hp, t_end);
         pthread_mutex_unlock(&s_mu);
         perf_fill(&s_perf_last, &pm_run, &pm_end, t_end - pm_run.t, &p_worst_run, p_frame_ns,
                   pack.table != NULL, rdp, rdp_threads, rw.ring != NULL);
@@ -1782,6 +1793,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
         printf("n64: perf over the run: %s\n", line);
         n64_runtime_perf_detail_format(&s_perf_last, line, sizeof line);
         printf("n64: perf detail over the run: %s\n", line);
+        host_perf_live_clear(); /* the overlay's figures went with the game */
     }
     saves_flush("exit");
     if (o->screenshot) {
