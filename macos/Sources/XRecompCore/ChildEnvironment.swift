@@ -34,13 +34,25 @@ public enum ChildEnvironment {
 
     /// A game's environment: the fixed PATH, then the global defaults, then the title's recomp.cfg lines (the first
     /// line for a key wins, as the runtime reads the file), then RECOMP_SAVE_DIR. A recomp.cfg value replaces an
-    /// inherited variable of the same name; PATH and RECOMP_SAVE_DIR cannot be set from the file.
+    /// inherited variable of the same name; PATH and RECOMP_SAVE_DIR cannot be set from the file. An empty value
+    /// (`KEY=`: a title's « runtime default » over Default settings, XBA-188) unsets the variable.
+    ///
+    /// With frame generation on (RECOMP_LSFG=1) and no DYLD_FALLBACK_LIBRARY_PATH of its own, the game gets one with
+    /// Homebrew's lib folders: the bridge dlopens libvulkan / MoltenVK by name, and dyld's default fallback
+    /// (~/lib:/usr/local/lib:/usr/lib) misses /opt/homebrew/lib on Apple silicon.
     public static func game(inherited: [String: String], globalDefaults: [String: String] = [:],
                             config: [(key: String, value: String)], saveDir: URL?) -> [String: String] {
         var e = base(inherited)
-        for (k, v) in globalDefaults where k != "PATH" && k != "RECOMP_SAVE_DIR" { e[k] = v }
-        for (k, v) in config where k != "PATH" && k != "RECOMP_SAVE_DIR" { e[k] = v }
+        func put(_ k: String, _ v: String) {
+            guard k != "PATH" && k != "RECOMP_SAVE_DIR" else { return }
+            if v.isEmpty { e.removeValue(forKey: k) } else { e[k] = v }
+        }
+        for (k, v) in globalDefaults { put(k, v) }
+        for (k, v) in config { put(k, v) }
         if let saveDir { e["RECOMP_SAVE_DIR"] = saveDir.path }
+        if e["RECOMP_LSFG"] == "1" && (e["DYLD_FALLBACK_LIBRARY_PATH"] ?? "").isEmpty {
+            e["DYLD_FALLBACK_LIBRARY_PATH"] = VulkanLoader.fallbackPath(home: e["HOME"])
+        }
         return e
     }
 }

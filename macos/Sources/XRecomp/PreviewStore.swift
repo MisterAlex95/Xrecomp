@@ -42,6 +42,7 @@ final class PreviewStore: LauncherActions {
             libraryFolders: ["~/Documents/xbox", "~/Downloads/xboxrecomp/titles"],
             appHome: "~/Library/Application Support/xboxrecomp")
         let first = model.games[0].id
+        refreshLsfg()
         model.liveLogTitle = "Night Ops · run started 21:04"
         model.liveLog = PreviewStore.mockLog
         switch screen {
@@ -52,10 +53,19 @@ final class PreviewStore: LauncherActions {
         case "failed": model.route = .home(model.games[3].id)
         case "running": model.route = .home(first)
         case "settings":
+            // Default settings: the GPU renderer and the CRT shader; the game: its own resolution and aspect, frame
+            // generation 2x, and no shader (« KEY= »: the runtime default over Default settings').
+            var d = RecompConfig()
+            d.set("RECOMP_GPU", "1")
+            d.set("RECOMP_SHADER", "crt")
+            configs["_"] = d
             var c = RecompConfig()
-            c.set("RECOMP_GPU", "1")
             c.set("RECOMP_GPU_SCALE", "2")
             c.set("RECOMP_ASPECT", "16:9")
+            c.set("RECOMP_SHADER", "")
+            c.set("RECOMP_LSFG", "1")
+            c.set("RECOMP_LSFG_MULT", "2")
+            c.set("RECOMP_LSFG_PERF", "")
             configs[model.games[1].id] = c
             SettingsView.initialTab = .graphics
             model.route = .settings(model.games[1].id)
@@ -212,6 +222,16 @@ final class PreviewStore: LauncherActions {
     func setWorkRoot(_ path: String?) { model.setup.workRoot = path }
     func recheckSetup() {}
     func createVenv() {}
+    func refreshLsfg() {
+        var s = LsfgCache.Status()
+        s.key = "3f2a9c41d07e5b88"
+        s.ready31 = true
+        s.readyPerf = true
+        model.lsfg.status = s
+        model.lsfg.base = "~/Library/Caches/xboxrecomp/lsfg"
+        model.lsfg.vulkan = "/opt/homebrew/lib/libvulkan.1.dylib"
+    }
+    func importLossless(_ url: URL) { model.notice = "Demo mode: \(url.lastPathComponent) would be translated." }
     func licences() -> [(String, String)] {
         [("LICENSE", "MIT License\n\nCopyright (c) the xboxrecomp contributors\n\nPermission is hereby granted, free of charge, …"),
          ("NOTICE", "Third-party notices for the toolkit."), ("LICENSES/zlib.txt", "zlib License …")]

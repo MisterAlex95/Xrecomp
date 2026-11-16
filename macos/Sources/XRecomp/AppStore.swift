@@ -42,6 +42,7 @@ final class AppStore: LauncherActions {
             }
         }
         recheckSetup(then: { [weak self] in self?.rescan() })
+        refreshLsfg()
     }
 
     // ---- setup ---------------------------------------------------------------------------------------------------
@@ -468,7 +469,7 @@ final class AppStore: LauncherActions {
             var target = id.flatMap { titlePaths($0) }.map { RecompConfig.load(dir: $0.recompCfgDir) }
                 ?? RecompConfig.load(dir: defaultsDir)
             target.setUnmanagedText(c.unmanagedText())
-            for o in OptionTable.all { if let i = c.choiceIndex(o) { target.set(o, o.choices[i]) } }
+            for key in OptionTable.all.flatMap(\.keys) { target.set(key, c.get(key)) }
             c = target
         }
         do {
@@ -479,6 +480,49 @@ final class AppStore: LauncherActions {
         if id == nil {
             settings.globalDefaults = c.activePairs.reduce(into: [:]) { $0[$1.key] = $1.value }
             saveSettings()
+        }
+    }
+
+    // ---- frame generation ----------------------------------------------------------------------------------------
+
+    /// The desktop cache base the runtime reads when RECOMP_LSFG_DIR is unset.
+    private var lsfgBase: URL { LsfgCache.defaultBase() }
+
+    func refreshLsfg() {
+        let base = lsfgBase
+        work.async {
+            let s = LsfgCache.status(base: base)
+            let vk = VulkanLoader.find()
+            DispatchQueue.main.async { [self] in
+                model.lsfg.status = s
+                model.lsfg.base = base.path
+                model.lsfg.vulkan = vk?.path
+            }
+        }
+    }
+
+    func importLossless(_ url: URL) {
+        guard model.lsfg.busy == nil else { return }
+        guard let tk = toolkit else {
+            model.notice = "Finish Setup first: the shader translator is built from the toolkit."
+            return
+        }
+        let base = lsfgBase, appRoot = basePaths.root
+        model.lsfg.busy = "Starting…"
+        model.lsfg.error = nil
+        model.lsfg.log = []
+        // Not the store's serial queue: the first import builds the translator (minutes) and must not hold scans.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = LsfgCache.importDll(url, toolkit: tk.root, appRoot: appRoot, base: base) { step in
+                DispatchQueue.main.async { self.model.lsfg.busy = step }
+            }
+            DispatchQueue.main.async { [self] in
+                model.lsfg.busy = nil
+                model.lsfg.status = r.status
+                model.lsfg.base = base.path
+                model.lsfg.error = r.message
+                model.lsfg.log = Array(r.log.suffix(300))
+            }
         }
     }
 

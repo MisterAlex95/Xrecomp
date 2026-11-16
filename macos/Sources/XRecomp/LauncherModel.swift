@@ -117,6 +117,20 @@ struct SetupInfo: Equatable {
     var ready: Bool { toolkit != nil && python != nil && DependencyCheck.allRequiredOK(dependencies) }
 }
 
+/// Frame generation's shader cache, for Settings › Graphics (LsfgCache).
+struct LsfgInfo: Equatable {
+    var status = LsfgCache.Status()
+    /// The cache base the runtime reads (`<base>/current`).
+    var base = ""
+    /// The import's current step (nil: idle).
+    var busy: String?
+    var error: String?
+    /// The last import's output (cmake, lsfg_translate).
+    var log: [String] = []
+    /// The Vulkan loader found (nil: none, frame generation cannot start).
+    var vulkan: String?
+}
+
 /// What the views ask for. AppStore does it for real; PreviewStore (--demo) pretends.
 @MainActor
 protocol LauncherActions: AnyObject {
@@ -146,6 +160,10 @@ protocol LauncherActions: AnyObject {
     func recheckSetup()
     func createVenv()
     func licences() -> [(String, String)]
+    /// Re-reads the LSFG shader cache and looks for the Vulkan loader.
+    func refreshLsfg()
+    /// « Choose Lossless.dll… »: builds lsfg_translate when needed and fills the cache from the player's DLL.
+    func importLossless(_ url: URL)
 }
 
 /// The launcher's state, observed by every view.
@@ -166,6 +184,8 @@ final class LauncherModel: ObservableObject {
     @Published var creatingApp: String?
     /// The library was scanned at least once (a game app says « not in the library » only after that).
     @Published var scannedOnce = false
+    /// Frame generation's shader cache.
+    @Published var lsfg = LsfgInfo()
     weak var actions: LauncherActions?
     let demo: Bool
     /// Single-game mode (a game app, Info.plist `XBASingleTitle`): the title ID, upper case. The window then shows

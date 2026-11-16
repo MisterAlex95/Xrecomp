@@ -7,7 +7,8 @@ import Foundation
 /// key is appended at the end under the launcher's header.
 ///
 /// The desktop main.c does not read the file: the launcher passes its lines to the game as environment variables
-/// (ChildEnvironment.game).
+/// (ChildEnvironment.game). A title's file layers over Default settings with the Android per-game semantics
+/// (GameSettings: no line follows Default settings, `KEY=` is the runtime default).
 public struct RecompConfig: Equatable, Sendable {
     public static let fileName = "recomp.cfg"
     public static let header = "# Written by the launcher's Settings screen; lines you add yourself are kept."
@@ -90,10 +91,11 @@ public struct RecompConfig: Equatable, Sendable {
         for (k, key) in option.keys.enumerated() { set(key, choice.values[k]) }
     }
 
-    /// The index of the option's current choice, or nil when the file holds a value the list does not offer.
+    /// The index of the option's current choice, or nil when the file holds a value the list does not offer. An
+    /// empty line (`KEY=`, a title's « runtime default », GameSettings) counts as no line.
     public func choiceIndex(_ option: ConfigOption) -> Int? {
         option.choices.firstIndex { c in
-            option.keys.enumerated().allSatisfy { k, key in c.values[k] == get(key) }
+            option.keys.enumerated().allSatisfy { k, key in c.values[k] == get(key).flatMap { $0.isEmpty ? nil : $0 } }
         }
     }
 

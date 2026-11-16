@@ -42,10 +42,10 @@ public struct ConfigOption: Identifiable, Sendable {
     public var defaultIndex: Int { choices.firstIndex(where: \.isDefault) ?? 0 }
 }
 
-/// The options the Mac launcher offers: the Android table (RecompConfig.java) without the Android-only keys
-/// (RECOMP_BIG_CORES, the shell self-test) and frame generation (desktop builds have it since XBA-187, but it needs
-/// MoltenVK and a shader cache from the player's Lossless.dll, which this launcher cannot import yet:
-/// tools/lsfg/lsfg_translate, then RECOMP_LSFG=1), plus the window options of the SDL presenter.
+/// The options the Mac launcher offers: the Android table (RecompConfig.java) for what the desktop Xbox runtime reads,
+/// without the Android-only keys (RECOMP_BIG_CORES, the shell self-test) and the GBA / PS1 / N64 rows (this launcher
+/// runs Xbox titles only), plus the window options of the SDL presenter. Frame generation needs the shader cache from
+/// the player's Lossless.dll (Settings › Graphics › Choose Lossless.dll, LsfgCache) and a Vulkan loader (MoltenVK).
 public enum OptionTable {
     typealias C = ConfigOption.Choice
 
@@ -56,6 +56,8 @@ public enum OptionTable {
                      [C("System", nil), C("English", "en"), C("Français", "fr"), C("Deutsch", "de"),
                       C("Español", "es"), C("Italiano", "it"), C("Português", "pt"), C("日本語", "ja"),
                       C("한국어", "ko"), C("中文", "zh")]),
+        ConfigOption("rumble", .general, "Controller rumble", "The pad's motors when the game uses them.",
+                     keys: ["RECOMP_RUMBLE"], [C("On", nil), C("Off", "0")]),
         ConfigOption("fullscreen", .general, "Window", "Start in a window or fullscreen.",
                      keys: ["RECOMP_FULLSCREEN"], [C("Window", nil), C("Fullscreen", "1")]),
         ConfigOption("window-scale", .general, "Window size", "The window's size, a multiple of 640 x 480.",
@@ -75,12 +77,34 @@ public enum OptionTable {
         ConfigOption("aspect", .graphics, "Aspect ratio",
                      "Auto: 16:9 where the game draws wide frames, 4:3 elsewhere.",
                      keys: ["RECOMP_ASPECT"], [C("Auto", nil), C("4:3", "4:3"), C("16:9", "16:9")]),
+        ConfigOption("widescreen", .graphics, "Widescreen",
+                     "The console's widescreen setting: games that support it draw 16:9 frames (show them with Aspect "
+                     + "ratio 16:9 or Auto).",
+                     keys: ["RECOMP_WIDESCREEN"], [C("Off", nil), C("On", "1")]),
+        ConfigOption("480p", .graphics, "480p", "The console's 480p setting: games that offer progressive output use it.",
+                     keys: ["RECOMP_480P"], [C("Off", nil), C("On", "1")]),
         ConfigOption("vsync", .graphics, "VSync", "Waits for the display's refresh.",
                      keys: ["RECOMP_PRESENT_VSYNC"], [C("On", nil), C("Off", "0")]),
         ConfigOption("filtering", .graphics, "Texture filtering", "CPU rasteriser only. Smoother is slower.",
                      keys: ["RECOMP_TEX_BILINEAR", "RECOMP_TEX_ANISO"],
                      [C("Sharp", nil, nil), C("Smooth", "1", nil), C("Anisotropic 8x", nil, "8"),
                       C("Anisotropic 16x", nil, "16")]),
+        ConfigOption("shader", .graphics, "Picture shader", "A filter over the finished picture.",
+                     keys: ["RECOMP_SHADER"],
+                     [C("None", nil), C("Sharp", "sharp"), C("Scanlines", "scanlines"), C("CRT", "crt"),
+                      C("FXAA", "fxaa"), C("CAS (sharpen)", "cas")]),
+        ConfigOption("shader-strength", .graphics, "Shader strength",
+                     "How strong the scanlines, CRT or CAS shader is. Default: the shader's own.",
+                     keys: ["RECOMP_SHADER_STRENGTH"],
+                     [C("Default", nil), C("25 %", "25"), C("50 %", "50"), C("75 %", "75"), C("100 %", "100")]),
+        ConfigOption("shader-curvature", .graphics, "CRT curvature", "The CRT shader's screen curve.",
+                     keys: ["RECOMP_SHADER_CURVATURE"], onlyWhen: ("RECOMP_SHADER", "crt"),
+                     [C("Off", nil), C("Slight", "30"), C("Strong", "70")]),
+        ConfigOption("framegen", .graphics, "Frame generation",
+                     "Generated frames between the game's own (LSFG). Needs your Lossless.dll (below) and MoltenVK. "
+                     + "Performance: about 4x cheaper.",
+                     keys: ["RECOMP_LSFG", "RECOMP_LSFG_MULT", "RECOMP_LSFG_PERF"],
+                     [C("Off", nil, nil, nil), C("2x", "1", "2", nil), C("2x performance", "1", "2", "1")]),
         ConfigOption("hrtf", .audio, "3D audio (HRTF)", "Positions 3D sounds for headphones.",
                      keys: ["RECOMP_APU_HRTF"], [C("On", nil), C("Off", "0")]),
         ConfigOption("audio-buffer", .audio, "Audio buffer", "Longer buffers crackle less but lag more.",

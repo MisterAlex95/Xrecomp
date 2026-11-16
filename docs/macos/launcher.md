@@ -36,7 +36,7 @@ games, Setup, Default settings, About) and the detail pane.
 | Home | The blurred title image behind, the title, one status line, a solid **Play** / **Prepare** / **Stop** and three quiet pills: Settings, Controls, Manage. Below: the prepare's progress or failure, a run's problem and log tail, the facts (title ID, source, size, play time, options the title forces). |
 | Preparing | Step *i* of 5 with its name, the overall bar, five step dots, the step's message (`compiling 12/345`), elapsed time, Show log. One prepare at a time, the others queued ("Queued (2)"). Cancel stops the whole process group; the next Prepare resumes. |
 | Prepare failed | The error code in words, prepare's message, the last 40 lines of `prepare.log`, Reveal log in Finder, Copy log. |
-| Settings | Per title, four tabs (General, Graphics, Audio, Advanced) over the [option table](#per-title-settings), saved to the title's `recomp.cfg` at once; Advanced has a free editor for your own lines. **Default settings** (sidebar) is the same for every title. |
+| Settings | Per title, four tabs (General, Graphics, Audio, Advanced) over the [option table](#per-title-settings), saved to the title's `recomp.cfg` at once: each row « As in Default settings (value) » or the title's own value, with a « This game » badge ([Settings per game](#settings-per-game)); Graphics also has [frame generation's Lossless.dll](#frame-generation); Advanced has a free editor for your own lines. **Default settings** (sidebar) is the same screen for every title. |
 | Controls | The pad mapping the game gets (L1 = Black, R1 = White, View = Back) and the connected controller's name (GameController). |
 | Manage | Per title: the size of the work folder, the extracted disc, saves, the Z: cache, logs and the title image, each deletable after a confirmation and revealable in Finder; "Re-prepare…" (`--force`); "Import saves from command-line runs"; for a title the toolkit has optional enhancements for (`--check`'s `title_layer`), an **Enhancements** switch (on by default; off, the title's prepares and checks run with `--no-title-layer` / `XBA_NO_TITLE_LAYER=1`, kept in `state.json` `"enhancements": false`, and a build made the other way shows « Prepare again (enhancements or title profile changed) »); **Create an app for this game** ([Game apps](#game-apps)). |
 | Log | The live output of the running game (or prepare), copyable; run logs are kept in `logs/`. |
@@ -44,7 +44,9 @@ games, Setup, Default settings, About) and the detail pane.
 | About | Version, the toolkit's commit, "No game data included", the licence texts read from the toolkit (`LICENSE`, `NOTICE`, `LICENSES/*.txt`). |
 
 Not in v1: the in-game menu, dual screen and the companion (the game is a separate SDL window; the launcher has
-Stop), frame generation, gamepad navigation of the launcher itself, live fps.
+Stop), gamepad navigation of the launcher itself, live fps, the pad mapping editor (`RECOMP_PAD_MAP`: Advanced
+lines), GBA / PS1 / N64 games (so their hotkeys, internal resolution, rewind and picture options; the Xbox runtime
+has no hotkeys).
 
 ## Building and checking
 
@@ -99,7 +101,8 @@ macos/
     Paths Settings Toolkit PythonEnv ChildEnvironment DependencyCheck      setup
     PrepareProtocol PrepareRunner ProcessGroup TitleState                  prepare
     LibraryScanner LibraryIndex XbeInfo TitleArt Xpr Dxt Accent            library and art
-    GameRunner RecompConfig OptionTable Storage PlayTime SaveImport        play and storage
+    GameRunner RecompConfig OptionTable GameSettings Storage PlayTime      play, settings and storage
+    SaveImport LsfgCache                                                    saves, frame generation's shader cache
     TitleApp                                                               game apps: names, Info.plist, icon, ICNS
   Sources/XRecomp/           the SwiftUI app: main (--smoke/--demo), XRecompApp, AppStore, LauncherModel, views
   Sources/xrecomp-check/     the checks
@@ -140,6 +143,7 @@ library.json            scan cache: source path, size, mtime -> title ID, name, 
 scan/                   default.xbe files identify pulled out of disc images (for their art)
 venv/                   only when the toolkit has no usable .venv
 defaults/recomp.cfg     Default settings
+lsfg-tool/              tools/lsfg built by « Choose Lossless.dll » (lsfg_translate), when the toolkit has no build/lsfg
 titles/<TID>/
   work/                 prepare --work: analysis, project, build, stamp.json, discovered.jsonl, prepare.log,
                         launcher-prepare.log (prepare's stdout as the app saw it); game/ = the extracted disc
@@ -154,6 +158,8 @@ titles/<TID>/
   several GB per title. A folder source is only linked (`project/build/game` points at your folder).
 - **Deletes never follow a symbolic link**: deleting a work folder removes the link to your game folder, never the
   folder. Your ISOs and folders are only read.
+- **Frame generation's shader cache** is not under Application Support: it is the runtime's desktop default,
+  `~/Library/Caches/xboxrecomp/lsfg` (`$RECOMP_LSFG_CACHE`), so a command-line run finds it too.
 - **Saves are per title** (`RECOMP_SAVE_DIR`), so "Delete saves" is one folder. The partition images and the GL
   shader cache stay in the runtime's default save dir (`~/.local/share/xboxrecomp`). Saves made by command-line runs
   live there too (`UDATA/<TID>`): Manage › Import copies them in once, overwriting nothing.
@@ -182,27 +188,74 @@ titles/<TID>/
 ## Per-title settings
 
 `recomp.cfg`, as on Android: one `KEY=VALUE` per line, `#` comments, the first line for a key wins; the Settings rows
-rewrite their key's first line in place, a default value removes the line, and lines you wrote yourself stay
-(Advanced edits them; Reset to defaults keeps them).
+rewrite their key's first line in place, and lines you wrote yourself stay (Advanced edits them; Reset keeps them).
+On Default settings a row's default value removes the line.
 
 | Tab | Option | Key | Choices |
 |---|---|---|---|
 | General | Language | `RECOMP_LANGUAGE` | System (the Mac's, when the disc has it), en, fr, de, es, it, pt, ja, ko, zh |
+| General | Controller rumble | `RECOMP_RUMBLE` | On, Off |
 | General | Window | `RECOMP_FULLSCREEN` | Window, Fullscreen |
 | General | Window size | `RECOMP_WINDOW_SCALE` | 2x (default), 1x, 3x, 4x |
 | Graphics | Renderer | `RECOMP_GPU` | CPU (default), GPU (OpenGL 4.1, opt-in) |
 | Graphics | Frame cap | `RECOMP_GPU_FPS_CAP` | Auto (`RECOMP_PACING=auto`: the game's rate, or a steady lower one), 30, 60, Off; GPU only |
 | Graphics | Internal resolution | `RECOMP_GPU_SCALE` | 1x, 2x, 3x, Fit; GPU only |
 | Graphics | Aspect ratio | `RECOMP_ASPECT` | Auto, 4:3, 16:9 |
+| Graphics | Widescreen | `RECOMP_WIDESCREEN` | Off, On (the console's setting: the game draws 16:9 frames) |
+| Graphics | 480p | `RECOMP_480P` | Off, On |
 | Graphics | VSync | `RECOMP_PRESENT_VSYNC` | On, Off |
 | Graphics | Texture filtering | `RECOMP_TEX_BILINEAR`, `RECOMP_TEX_ANISO` | Sharp, Smooth, Anisotropic 8x / 16x |
+| Graphics | Picture shader | `RECOMP_SHADER` | None, Sharp, Scanlines, CRT, FXAA, CAS (XBA-203; the LCD grid draws nothing on the Xbox picture) |
+| Graphics | Shader strength | `RECOMP_SHADER_STRENGTH` | Default, 25, 50, 75, 100 % |
+| Graphics | CRT curvature | `RECOMP_SHADER_CURVATURE` | Off, Slight (30), Strong (70); CRT only |
+| Graphics | Frame generation | `RECOMP_LSFG`, `RECOMP_LSFG_MULT`, `RECOMP_LSFG_PERF` | Off, 2x, 2x performance ([below](#frame-generation)) |
 | Audio | 3D audio (HRTF) | `RECOMP_APU_HRTF` | On, Off |
 | Audio | Audio buffer | `RECOMP_AUDIO_BUF_SAMPLES` | Short, Normal, Long, Longest |
 | Advanced | Raster threads | `RECOMP_RASTER_THREADS` | Auto, 1, 2, 4, 6, 8 |
 
 Options a title's profile forces (`env_force`, compiled into the binary, they win) show "Set by the title" and are
-locked. Frame generation, `RECOMP_BIG_CORES` and the Android shell switches are left out. Every key:
-[environment-variables.md](../runtime/environment-variables.md).
+locked. `RECOMP_BIG_CORES` and the Android shell switches are left out. Internal resolution stays
+`RECOMP_GPU_SCALE` (the GL renderer's); the Xbox `RECOMP_UPSCALE` of XBA-237 gets its row once the runtime reads
+it. Every key: [environment-variables.md](../runtime/environment-variables.md).
+
+### Settings per game
+
+The Android launcher's semantics (XBA-188, [app-shell.md](../android/app-shell.md#settings-per-game)), in the
+title's own `recomp.cfg` over Default settings (`defaults/recomp.cfg`):
+
+- a key the title's file does not set follows Default settings: the row shows « As in Default settings (value) »;
+- `KEY=VALUE` is the title's own value (a « This game » badge on the row);
+- `KEY=` (empty) is the runtime's default for this title even when Default settings set another: picking Off, Auto,
+  1x... on a title writes it, and the game starts with the variable unset;
+- an option of several keys (frame generation) is the title's own when the file sets any of them; the keys it does
+  not set keep Default settings' values;
+- **Reset to Default settings** removes the option lines and keeps your own.
+
+`GameSettings` does it; `ChildEnvironment.game` unsets a `KEY=` variable (also one inherited or from Default settings).
+A file written before keeps working: a line was already the title's own, a missing one already followed Default
+settings.
+
+### Frame generation
+
+LSFG ([framegen.md](../technical/framegen.md)) is in every desktop build since XBA-187. It needs two things on the
+Mac:
+
+- **The shaders of your own Lossless.dll** (Lossless Scaling, Steam). Settings › Graphics › **Choose
+  Lossless.dll…** runs the toolkit's `lsfg_translate` on it (`lsfg_translate -o <base> <dll>`, DXVK's DXBC compiler),
+  which fills the runtime's desktop cache `~/Library/Caches/xboxrecomp/lsfg/<key>` and makes it current; the game
+  finds it by itself (`RECOMP_LSFG_DIR` stays unset). The tool is the toolkit's `build/lsfg/lsfg_translate` when you
+  built it by hand, else the app builds it once into `lsfg-tool/` under Application Support (`cmake -S tools/lsfg -B
+  ... -DCMAKE_BUILD_TYPE=Release [-G Ninja]`, `cmake --build ... --target lsfg_translate`; the pinned DXVK archive
+  comes from the toolkit's `third_party/lsfg-sources`, else CMake downloads it once). The panel shows the cache's
+  state from its `manifest.txt` (LSFG 3.1 and 3.1 performance complete or not), the import's step, its error and its
+  log. The DLL is only read; nothing of it leaves the Mac.
+- **A Vulkan loader**: MoltenVK (`brew install molten-vk vulkan-loader`). Setup lists it as optional; Settings warns
+  when none is found in `/opt/homebrew/lib`, `/usr/local/lib` or `~/lib`. The bridge dlopens it by name, and dyld's
+  default fallback misses `/opt/homebrew/lib`, so a game started with `RECOMP_LSFG=1` gets
+  `DYLD_FALLBACK_LIBRARY_PATH=~/lib:/opt/homebrew/lib:/usr/local/lib:/usr/lib` unless you set one yourself.
+
+Then **Frame generation** (Off, 2x, 2x performance) on Default settings or per title. A title profile can still
+force it off (« Set by the title »).
 
 ## Look
 
@@ -424,12 +477,37 @@ For Alex, on the Mac (agents cannot click through Finder):
 6. When it is Ready, press Play: the game window opens and Play becomes Stop. Check the pad. Press Stop: the game
    closes within 5 s and Log keeps the output.
 7. Settings › Graphics: Renderer GPU, Frame cap 30, then Play. Log (or `titles/<TID>/logs/run-*.log`) shows
-   `# RECOMP_GPU=1` and `# RECOMP_GPU_FPS_CAP=30`. Add a line in Advanced, Reset to defaults: the line stays.
+   `# RECOMP_GPU=1` and `# RECOMP_GPU_FPS_CAP=30`. Add a line in Advanced, Reset to Default settings: the line stays.
 8. Save in game, quit, play again: the save is there. Manage shows the sizes; Delete saves removes only that title's.
 9. Manage on a title prepared from a **folder** source (`~/Downloads/xboxrecomp/titles/black/game`): delete its work
    folder; the original folder is untouched.
 10. `git status` in the checkout shows nothing new besides code. Send screenshots of Library, Home, Preparing and
     Settings, and `~/Library/Application Support/xboxrecomp/titles/<TID>/work/prepare.log` if something failed.
+
+Settings parity (XBA-196), with `macos/build/XRecomp.app` opened from Finder:
+
+19. `swift run --package-path macos XRecomp --demo settings`: Graphics shows the new rows (Widescreen, 480p,
+    Picture shader, Shader strength, CRT curvature, Frame generation), each with « As in Default settings (…) »
+    first; Internal resolution, Aspect ratio, Picture shader and Frame generation carry « This game »; the
+    Lossless.dll panel says « ready: LSFG 3.1 and 3.1 performance ». Send a screenshot.
+20. Default settings › Graphics: Picture shader CRT. A title's Settings › Graphics: Picture shader reads « As in
+    Default settings (CRT) » and CRT curvature is enabled. Pick None on the title: « This game » appears, its
+    `recomp.cfg` has `RECOMP_SHADER=` (Advanced › Reveal recomp.cfg); Play: the run log has no `# RECOMP_SHADER`
+    line and the picture has no CRT effect. Pick « As in Default settings »: the line is gone. Reset to Default
+    settings clears every « This game ».
+21. Setup lists « Vulkan (MoltenVK) for frame generation · optional », green after `brew install molten-vk
+    vulkan-loader` and Check again.
+22. Settings › Graphics › **Choose Lossless.dll…**, pick your Lossless.dll. First time: « Building the shader
+    translator… » (a few minutes; `~/Library/Application Support/xboxrecomp/lsfg-tool/lsfg_translate` appears),
+    then « Translating the shaders… », then « Lossless.dll <key>… ready: LSFG 3.1 and 3.1 performance ». Reveal
+    cache opens `~/Library/Caches/xboxrecomp/lsfg/<key>`. Show log has the cmake and lsfg_translate output. Pick a
+    file that is not the DLL: a red « lsfg_translate: … » line, the earlier cache still ready.
+23. Frame generation 2x on a GPU title, Play: the run log shows `# RECOMP_LSFG=1`, `# RECOMP_LSFG_MULT=2`, and after
+    the lock verdict (25-50 s) `[LSFG]` lines with « shown » about twice « real »; no `LSFG_E_NOLOADER` /
+    « no shader » line. Then 2x performance: `# RECOMP_LSFG_PERF=1`. If the loader is not found, send the run log
+    and `ls /opt/homebrew/lib | grep -i vulkan`.
+24. Widescreen On + Aspect ratio 16:9 on a game with a widescreen option (Burnout 3): the game offers or uses 16:9.
+    480p On, Controller rumble Off: `# RECOMP_480P=1`, `# RECOMP_RUMBLE=0` in the run log, no rumble.
 
 Game apps ([Game apps](#game-apps)), with `macos/build/XRecomp.app` opened from Finder:
 

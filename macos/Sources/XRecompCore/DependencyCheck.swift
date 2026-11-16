@@ -34,8 +34,10 @@ public enum DependencyCheck {
         s.split(separator: "\n").first.map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
     }
 
-    /// Every item. `python` is the resolved interpreter (nil = none imports the packages yet).
-    public static func run(python: URL?, runner: Runner = defaultRunner) -> [Dependency] {
+    /// Every item. `python` is the resolved interpreter (nil = none imports the packages yet); `vulkan` the Vulkan
+    /// loader frame generation needs (optional).
+    public static func run(python: URL?, vulkan: URL? = VulkanLoader.find(),
+                           runner: Runner = defaultRunner) -> [Dependency] {
         var out: [Dependency] = []
         func tool(_ id: String, _ name: String, _ args: [String], fix: String, optional: Bool = false) {
             let r = runner(id, args)
@@ -63,6 +65,10 @@ public enum DependencyCheck {
                                   detail: "no Python with the packages yet",
                                   fix: "Setup › Create the Python environment (needs brew install python@3.12)"))
         }
+        out.append(Dependency(id: "vulkan", name: "Vulkan (MoltenVK) for frame generation", ok: vulkan != nil,
+                              optional: true, detail: vulkan?.path ?? "no libvulkan or libMoltenVK in "
+                                  + VulkanLoader.dirs.joined(separator: ", "),
+                              fix: "brew install molten-vk vulkan-loader"))
         return out
     }
 

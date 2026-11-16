@@ -79,7 +79,7 @@ func registerGameChecks() {
         for o in OptionTable.all {
             expectEq(o.choices.filter(\.isDefault).count, 1, o.id)
             expect(o.choices.allSatisfy { $0.values.count == o.keys.count }, o.id)
-            expect(!o.keys.contains("RECOMP_BIG_CORES") && !o.keys.contains("RECOMP_LSFG"), o.id)
+            expect(!o.keys.contains("RECOMP_BIG_CORES"), o.id)
         }
     }
 
