@@ -13,6 +13,7 @@ set(NV2A_BACKEND_TEST_SOURCES
     ../../src/kernel/nv2a_flip_hold.c)
 add_executable(nv2a-ffp-backend-test nv2a_ffp_backend_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-present-sync-test nv2a_present_sync_test.c ${NV2A_BACKEND_TEST_SOURCES})
+add_executable(nv2a-report-dump-test nv2a_report_dump_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-zpass-test nv2a_zpass_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-flip-cap-test nv2a_flip_cap_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-pacing-test nv2a_pacing_test.c ${NV2A_BACKEND_TEST_SOURCES})
@@ -24,7 +25,7 @@ add_executable(nv2a-ffp-batch-test nv2a_ffp_batch_test.c ${NV2A_BACKEND_TEST_SOU
 add_executable(nv2a-clear-rect-test nv2a_clear_rect_test.c ${NV2A_BACKEND_TEST_SOURCES})
 # Save states of the executor (XBA-248): captured, overwritten, restored, drawn as without the round trip.
 add_executable(nv2a-state-test nv2a_state_test.c ${NV2A_BACKEND_TEST_SOURCES})
-foreach(target nv2a-ffp-backend-test nv2a-present-sync-test nv2a-zpass-test nv2a-flip-cap-test nv2a-pacing-test
+foreach(target nv2a-ffp-backend-test nv2a-present-sync-test nv2a-report-dump-test nv2a-zpass-test nv2a-flip-cap-test nv2a-pacing-test
                nv2a-pacing-fg-test
                nv2a-ffp-inline-test nv2a-ffp-batch-test nv2a-clear-rect-test nv2a-state-test)
     target_include_directories(${target} PRIVATE ../../src/kernel ../../src)
@@ -40,6 +41,13 @@ add_test(NAME nv2a-present-sync COMMAND nv2a-present-sync-test
          "${CMAKE_CURRENT_BINARY_DIR}/nv2a-present-sync-")
 set_tests_properties(nv2a-present-sync PROPERTIES ENVIRONMENT
     "RECOMP_FB_DUMP_FLIPS=${CMAKE_CURRENT_BINARY_DIR}/nv2a-present-sync-dumping;RECOMP_FB_DUMP=${CMAKE_CURRENT_BINARY_DIR}/nv2a-present-sync-")
+# The [GPU] report arms a synchronous (native-size) present of the next flip only when
+# RECOMP_FB_DUMP has a picture to write (report-kotor-sound WP-B).
+add_test(NAME nv2a-report-dump-off COMMAND nv2a-report-dump-test off)
+add_test(NAME nv2a-report-dump-on COMMAND nv2a-report-dump-test on
+         "${CMAKE_CURRENT_BINARY_DIR}/nv2a-report-dump-")
+set_tests_properties(nv2a-report-dump-on PROPERTIES ENVIRONMENT
+    "RECOMP_FB_DUMP=${CMAKE_CURRENT_BINARY_DIR}/nv2a-report-dump-")
 # Triangle strips alternate their winding only with RECOMP_STRIP_ALT_WINDING; the same test
 # checks the unchanged order without it (the test above) and the swapped one with it.
 add_test(NAME nv2a-ffp-backend-strip-winding COMMAND nv2a-ffp-backend-test)

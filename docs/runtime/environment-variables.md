@@ -230,7 +230,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_NV2A_TRACE` | off | Shows whether `DMA_PUT` moves at all. | `xbox_memory_layout.c` |
 | `RECOMP_POLL_WAIT=0` | on | The lifter marks loops that only poll one memory word (`test dword [mem], imm ; jne/je` to itself) with `RECOMP_POLL_WAIT`. For D3D KickOff's wait on the PFB flush bit (0x100410 bit 16) the thread then blocks until the ack thread clears the bit (`xbox_Nv2aKickWait`) instead of spinning a host core; other words still spin. `0` keeps the spin for the flush bit too. Takes effect on titles prepared with a toolkit that has the lifter change. | `xbox_memory_layout.c`, `tools/recomp/translator.py` |
 | `RECOMP_PB_REPORT_MS=N` | 10000 | Milliseconds between `[GPU]` reports (minimum 100). | `xbox_memory_layout.c` |
-| `RECOMP_PB_EXEC_VERBOSE` | off | Per-batch trace. | `nv2a_pb_exec.c` |
+| `RECOMP_PB_EXEC_VERBOSE` | off | Per-batch trace, plus a `[GPU] draw #N` line every 200 draws (all hosts) and, on Android, the report's `[TEXUSE]` lines (one per texture used; desktop reports always list them). | `nv2a_pb_exec.c` |
 | `RECOMP_PB_UNHANDLED_ALL` | top 10 | Lists every method the executor does not model, not only the top ten. | `nv2a_pb_exec.c` |
 | `RECOMP_VBLANK[=paced]` | `paced` in a title project (XDK default); no vblanks in the bare runtime | Raises vblanks: a ~50 Hz tick, or `paced` for the display's schedule: 60 Hz, or 50 Hz once the title sets a PAL-I mode (before any mode, 50 Hz on a PAL console with `RECOMP_PAL60=0`; XBA-121). `0` or empty is off. | `kernel_bridge.c`, `kernel_hal.c` |
 | `RECOMP_FLIP_PACING[=edge]` | off | Holds each flip to the vblank count. | `nv2a_pb_exec.c` |
@@ -298,7 +298,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_TEX_STATE` | off | Texture state per report. | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_DUMP=<prefix>` | off | Writes each distinct texture as a BMP, first use only. | `nv2a_pb_exec.c` |
 | `RECOMP_TEX_DUMP_EVERY=N` | 0 | Dumps every Nth texture bind instead. | `nv2a_pb_exec.c` |
-| `RECOMP_FB_DUMP=<prefix>` | off | Writes a BMP per report: the frame the next flip presents (complete), or, for a title that has not flipped yet or stopped flipping, the draw surface as it is; before the first flip also the first frames that draw geometry. On POSIX hosts, while the video overlay is up, the overlay's picture over the last frame instead (what the screen shows). | `nv2a_pb_exec.c`, `fb_present.c`, `pvideo_posix.c` |
+| `RECOMP_FB_DUMP=<prefix>` | off | Writes a BMP per report: the frame the next flip presents (complete), or, for a title that has not flipped yet or stopped flipping, the draw surface as it is; before the first flip also the first frames that draw geometry. On POSIX hosts, while the video overlay is up, the overlay's picture over the last frame instead (what the screen shows). The dumped flip is presented synchronously (guest memory, guest size); without this variable the report arms nothing and no flip is forced. | `nv2a_pb_exec.c`, `fb_present.c`, `pvideo_posix.c` |
 | `RECOMP_FB_DUMP_FLIPS` | off | `1` dumps every flip; any other value names a file whose existence turns dumping on. | `nv2a_pb_exec.c` |
 | `RECOMP_FIND_NAN` | off | Scans for NaN matrices at every report. | `nv2a_pb_exec.c` |
 | `RECOMP_FIND_QUAD` | off | Scans once for quad vertices. | `nv2a_pb_exec.c` |
