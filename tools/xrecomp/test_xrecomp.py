@@ -275,6 +275,25 @@ def test_find_player_in_a_build_folder(tmp_path):
     assert cli.find_player("gba", dict(env, XRECOMP_GBA_PLAY="/x/gba_play"), str(tmp_path)) == "/x/gba_play"
 
 
+def test_find_player_in_a_release_archive(tmp_path, monkeypatch):
+    """A release archive's players sit with its prebuilt runtime (runtime/<host>/bin, XBA-87); a build folder of
+    the toolkit wins over them."""
+    from tools.prepare import runtime
+    monkeypatch.delenv("XBA_HOST", raising=False)
+    exe = tmp_path / "runtime" / runtime.host_id() / "bin" / "n64_play"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    exe.chmod(0o755)
+    env = {"PATH": str(tmp_path / "nothing")}
+    assert cli.find_player("n64", env, str(tmp_path)) == str(exe)
+    assert cli.find_player("ps1", env, str(tmp_path)) is None
+    built = tmp_path / "build" / "consoles" / "n64" / "runtime" / "n64_play"
+    built.parent.mkdir(parents=True)
+    built.write_text("")
+    built.chmod(0o755)
+    assert cli.find_player("n64", env, str(tmp_path)) == str(built)
+
+
 @pytest.mark.skipif(not CC, reason="no host C compiler")
 def test_gba_prepare_list_play(home, tmp_path, monkeypatch):
     monkeypatch.setenv("XBA_GBA_RECOMP", "fake_gba_recomp")

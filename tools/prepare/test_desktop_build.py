@@ -55,6 +55,14 @@ def test_host_id(system, machine, want):
     assert rt.host_id(system, machine) == want
 
 
+def test_host_id_from_the_environment(monkeypatch):
+    """$XBA_HOST: another host's runtime (a cross build, XBA-87), when no host is given."""
+    monkeypatch.setenv("XBA_HOST", "linux-arm64")
+    assert rt.host_id() == "linux-arm64"
+    assert rt.runtime_dir("/tk").endswith(os.path.join("runtime", "linux-arm64"))
+    assert rt.host_id("Linux", "x86_64") == "linux-x86_64"
+
+
 def test_explicit_compiler_wins():
     env = {"XBA_CC": "/env/clang"}
     tc = db.find_toolchain(TK, "linux-x86_64", cc_path="/my/clang", env=env,
@@ -371,7 +379,7 @@ def test_e2e_prepare_without_cmake(tmp_path):
     if not (shutil.which("cmake") and _host_compiler()):
         pytest.skip("needs cmake (for the runtime) and a C compiler")
     rdir = tmp_path / "runtime"
-    r = subprocess.run([sys.executable, "-m", "tools.prepare.runtime", "--out", str(rdir)], cwd=ROOT,
+    r = subprocess.run([sys.executable, "-m", "tools.prepare.runtime", "--out", str(rdir), "--no-players"], cwd=ROOT,
                        capture_output=True, text=True, timeout=1800)
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
     # From here on, a cmake or ninja that runs fails the prepare.

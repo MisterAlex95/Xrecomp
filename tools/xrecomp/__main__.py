@@ -55,8 +55,9 @@ def python_for(home, env=None):
 
 
 def find_player(console, env=None, root=ROOT):
-    """gba_play / ps1_play / n64_play: $XRECOMP_<CONSOLE>_PLAY, the PATH, else a build folder of the toolkit (the
-    root build: build*/consoles/<c>/runtime/; a console's own: build*/<c>/<c>_runtime/). None when not built."""
+    """gba_play / ps1_play / n64_play: $XRECOMP_<CONSOLE>_PLAY, the PATH, a build folder of the toolkit (the
+    root build: build*/consoles/<c>/runtime/; a console's own: build*/<c>/<c>_runtime/), else the one a release
+    archive carries with its prebuilt runtime (runtime/<host>/bin/, XBA-87). None when not built."""
     import glob
     import shutil
     env = os.environ if env is None else env
@@ -73,9 +74,11 @@ def find_player(console, env=None, root=ROOT):
     hits = []
     for p in pats:
         hits += [h for h in glob.glob(os.path.join(root, p)) if os.access(h, os.X_OK)]
-    if not hits:
-        return None
-    return max(hits, key=os.path.getmtime)      # the newest build
+    if hits:
+        return max(hits, key=os.path.getmtime)      # the newest build
+    from tools.prepare import runtime
+    packaged = os.path.join(runtime.runtime_dir(root), "bin", exe)
+    return packaged if os.access(packaged, os.X_OK) else None
 
 
 # ── prepare ─────────────────────────────────────────────────────
@@ -198,8 +201,8 @@ def play_request(home, e, extra=(), inherited=None):
         return [e.exe] + list(extra), os.path.dirname(e.exe), env
     player = find_player(e.console, inherited)
     if not player:
-        raise LookupError("%s is not built: cmake -S . -B build && cmake --build build --target %s "
-                          "(or XRECOMP_%s_PLAY=/path/to/%s)" % (PLAYERS[e.console], PLAYERS[e.console],
+        raise LookupError("%s is not built (a release archive has it in runtime/<host>/bin): cmake -S . -B build "
+                          "&& cmake --build build --target %s (or XRECOMP_%s_PLAY=/path/to/%s)" % (PLAYERS[e.console], PLAYERS[e.console],
                                                                 e.console.upper(), PLAYERS[e.console]))
     env = config.game_env(inherited, defaults, game, t.save)
     argv = [player, e.source]

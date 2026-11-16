@@ -1,9 +1,10 @@
 # Desktop downloads on the public GitHub mirror (docs/releases/README.md « What a release contains »): the Mac app
-# and the Linux toolkit, built on GitHub's own runners (free for a public repository; nothing runs on the
+# and the Linux toolkit (x86-64 and arm64, XBA-87), built on GitHub's own runners (free for a public repository; nothing runs on the
 # maintainers' machines) and attached to the GitHub release that Gitea's CI publishes with the APK.
 #
-#   tag xrecomp-v<version>   <tag>-macos-arm64.zip and <tag>-linux.tar.gz on that release
-#   push to main             xrecomp-<sha8>-macos-arm64.zip and xrecomp-<sha8>-linux.tar.gz on xrecomp-latest
+#   tag xrecomp-v<version>   <tag>-macos-arm64.zip, <tag>-linux-x86_64.tar.gz and <tag>-linux-arm64.tar.gz on
+#                            that release
+#   push to main             the same named xrecomp-<sha8>-… on xrecomp-latest
 #   manual run               the same for the ref it runs on (a tag or main); any other branch builds without
 #                            publishing (the files stay on the run's page)
 #
@@ -11,7 +12,10 @@
 # is this repository's tree at the commit (tools/ci/package_toolkit.sh) with the pinned frame generation source tarballs
 # (lsfg-vk framegen, volk, DXVK, SPIRV-Headers: built by default, XBA-187), plus XRecomp.app for the Mac, and the
 # prebuilt runtime of its host (runtime/<host>/, tools/prepare/runtime.py, XBA-86): prepare then builds a title with a
-# C compiler alone, no CMake (tools/prepare/desktop_build.py). Linux arm64 has none yet and builds with CMake.
+# C compiler alone, no CMake (tools/prepare/desktop_build.py); with it, in runtime/<host>/bin/, the console players
+# (gba_play, ps1_play, n64_play) that ./xrecomp play starts. Each Linux archive is built and smoke-tested on its own
+# architecture (GitHub's ubuntu-24.04 and ubuntu-24.04-arm runners), so its runtime matches Ubuntu 24.04's libraries.
+# No pull request runs this (pushes to main, tags, manual runs only).
 #
 # Order with Gitea: tools/ci/github_release.sh deletes and recreates a release (the APK side), which would drop files
 # attached before it. So the publish job waits for the release of this very commit (target_commitish), then attaches.
@@ -101,57 +105,46 @@ jobs:
 
   linux:
     needs: meta
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
-      LABEL: ${{ needs.meta.outputs.label }}
+      ARCHIVE: ${{ needs.meta.outputs.label }}-linux-${{ matrix.arch }}.tar.gz
     steps:
       - uses: actions/checkout@v4
       - name: Package
         run: |
           sh tools/ci/package_toolkit.sh out/XRecomp
-          # The prebuilt runtime for linux-x86_64 (XBA-86), built against the packages install_deps.sh installs.
+          # The prebuilt runtime for linux-<arch> and the console players (XBA-86, XBA-87), built against the
+          # packages install_deps.sh installs.
           bash tools/linux/install_deps.sh
           sudo apt-get install -y ninja-build
           python3 -m tools.prepare.runtime --toolkit out/XRecomp
-          tar -C out -czf "out/$LABEL-linux.tar.gz" XRecomp
-          (cd out && sha256sum "$LABEL-linux.tar.gz" > "$LABEL-linux.tar.gz.sha256" && cat ./*.sha256)
-      # From the archive, as a user would: README « Linux » (the venv because Ubuntu's pip refuses system installs).
-      # The synthetic conformance XBE with a retail-keyed entry point (mkxbe.py --retail) prepares to an executable
-      # with the archive's prebuilt runtime and no CMake (a cmake that fails comes first on PATH), and starts
-      # headless. Then the runtime's CMake build from the same archive.
+          test -f "out/XRecomp/runtime/linux-${{ matrix.arch }}/runtime.json"
+          tar -C out -czf "out/$ARCHIVE" XRecomp
+          (cd out && sha256sum "$ARCHIVE" > "$ARCHIVE.sha256" && cat ./*.sha256)
+      # From the archive, as a user would (README « Linux »; the venv because Ubuntu's pip refuses system installs):
+      # ./xrecomp prepare of the synthetic retail XBE without CMake, the title started headless, the three console
+      # players through ./xrecomp play, then the runtime's CMake build with frame generation (XBA-187).
       - name: Smoke test of the archive
         run: |
           t=$(mktemp -d)
-          tar -C "$t" -xzf "out/$LABEL-linux.tar.gz"
-          cd "$t/XRecomp"
-          bash tools/linux/install_deps.sh
+          tar -C "$t" -xzf "out/$ARCHIVE" XRecomp/tools/linux/install_deps.sh
+          bash "$t/XRecomp/tools/linux/install_deps.sh"
           sudo apt-get install -y python3-venv
           python3 -m venv "$t/venv" && "$t/venv/bin/pip" install -q capstone pefile numpy
-          mkdir -p "$t/game" "$t/nocmake"
-          python3 tools/conformance/mkxbe.py --retail "$t/game/default.xbe"
-          printf '#!/bin/sh\necho "cmake must not run" >&2\nexit 99\n' > "$t/nocmake/cmake"
-          chmod +x "$t/nocmake/cmake"
-          PATH="$t/nocmake:$PATH" "$t/venv/bin/python" -m tools.prepare "$t/game/default.xbe" --work "$t/work" \
-            | tee "$t/prepare.log"
-          grep -q 'compile driver:' "$t/prepare.log"
-          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout 20 "$t/work/project/build/title_12345678" \
-            > "$t/run.log" 2>&1 || true
-          grep -q 'XBE loaded' "$t/run.log" || { cat "$t/run.log"; exit 1; }
-          # The command line (docs/desktop/cli.md) over the same source, in a home of its own.
-          "$t/venv/bin/python" xrecomp --home "$t/home" prepare "$t/game" --no-build
-          ls "$t/home/titles/12345678/work/project/src/recomp/gen/recomp_dispatch.c"
-          "$t/venv/bin/python" xrecomp --home "$t/home" list | grep -q '^12345678 '
-          # Frame generation is in the default build (XBA-187), from the tarballs the archive carries: no fetch.
-          cmake -S . -B "$t/build" -DCMAKE_BUILD_TYPE=Release | tee "$t/configure.log"
-          grep -q 'LSFG: bridge built' "$t/configure.log"
-          if grep -q 'LSFG: fetching' "$t/configure.log"; then echo "the archive's tarballs were not used"; exit 1; fi
-          cmake --build "$t/build" -j"$(nproc)"
-          nm "$t/build/src/framegen/libxbox_framegen.a" | grep -q ' T lsfg_bridge_open$'
+          PYTHON="$t/venv/bin/python" sh tools/ci/smoke_linux_package.sh "out/$ARCHIVE" --cmake
       - uses: actions/upload-artifact@v4
         with:
-          name: linux
-          path: out/${{ env.LABEL }}-linux.tar.gz*
+          name: linux-${{ matrix.arch }}
+          path: out/${{ env.ARCHIVE }}*
           retention-days: 14
 
   publish:
@@ -206,8 +199,9 @@ jobs:
             Keep `XRecomp.app` inside that folder. It is not notarized: before the first launch, run
             `xattr -dr com.apple.quarantine <the XRecomp folder>` in Terminal (otherwise macOS blocks the app, or
             runs it from a copy that cannot see its toolkit). Setup lists the Homebrew packages and Python it needs.
-          - `*-linux.tar.gz`: the toolkit for Linux (x86-64 and arm64): `bash tools/linux/install_deps.sh`, then
-            `./xrecomp prepare /path/to/game.iso`, `./xrecomp play <game>` (README, « Linux »; docs/desktop/cli.md).
+          - `*-linux-x86_64.tar.gz`, `*-linux-arm64.tar.gz`: the toolkit for Linux, with its prebuilt runtime and the
+            GBA / PS1 / N64 players: `bash tools/linux/install_deps.sh`, then `./xrecomp prepare /path/to/game.iso`,
+            `./xrecomp play <game>` (README, « Linux »; docs/desktop/cli.md).
 
           No game inside: you prepare your own games on your computer.
           EOF

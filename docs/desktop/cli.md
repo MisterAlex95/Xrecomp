@@ -82,8 +82,9 @@ ever uploaded.
   <work>/discovered.txt` when the game has a valid pack (the next prepare lifts what the run missed), else in the
   interpreter. Working directory: the toolkit (where `ps1_play` looks for `build/ps1-bios/openbios.bin`). The player
   is `$XRECOMP_<CONSOLE>_PLAY`, else the one on the PATH, else the newest in a build folder of the toolkit
-  (`build*/consoles/<c>/runtime/`, the root build; `build*/<c>/<c>_runtime/`, a console's own). Not built: `cmake -S .
-  -B build && cmake --build build --target gba_play` (or `ps1_play`, `n64_play`).
+  (`build*/consoles/<c>/runtime/`, the root build; `build*/<c>/<c>_runtime/`, a console's own), else the one a
+  release archive carries with its prebuilt runtime (`runtime/<host>/bin/`, XBA-87). In a checkout without a build:
+  `cmake -S . -B build && cmake --build build --target gba_play` (or `ps1_play`, `n64_play`).
 
 The environment: xrecomp's own, then Default settings, then the game's lines (the first line for a key wins), then
 `RECOMP_SAVE_DIR`. `KEY=` (empty) unsets the variable. PATH and RECOMP_SAVE_DIR are never taken from a settings file.

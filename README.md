@@ -82,7 +82,7 @@ in its folder. It sets up its own Python environment and prepares and plays your
 
 **Linux** (x86-64 / arm64), or any terminal
 
-Download `xrecomp-v<version>-linux.tar.gz` from the [latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest)
+Download `xrecomp-v<version>-linux-x86_64.tar.gz` (or `-linux-arm64.tar.gz`) from the [latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest)
 (or use a checkout), then in its `XRecomp` folder:
 
 ```bash
@@ -97,11 +97,12 @@ python3 -m pip install capstone pefile numpy
 Games are read where they are; work folders, settings and saves go to `~/.local/share/xrecomp`
 ([command line guide](docs/desktop/cli.md)). `python3 -m tools.prepare` stays there underneath (`--check`, `--help`).
 
-The release archive carries the runtime prebuilt for Linux x86-64 (`runtime/linux-x86_64/`): prepare then compiles
-and links the title with clang (or the system's `cc`) alone, no CMake or Ninja. A `toolchain/bin/clang` next to the
-toolkit is used first when there is one, else `--cc` / `$XBA_CC`, else the system's. A git checkout, or arm64, builds
-with CMake as before; `python3 -m tools.prepare.runtime` makes the prebuilt runtime once where CMake is, and
-`--builder driver|cmake` picks the route.
+Each release archive carries the runtime prebuilt for its architecture (`runtime/linux-x86_64/` or
+`runtime/linux-arm64/`, built on Ubuntu 24.04): prepare then compiles and links the title with clang (or the
+system's `cc`) alone, no CMake or Ninja. A `toolchain/bin/clang` next to the toolkit is used first when there is one,
+else `--cc` / `$XBA_CC`, else the system's. The GBA / PS1 / N64 players `./xrecomp play` starts are in the same
+folder (`bin/`). A git checkout builds with CMake as before; `python3 -m tools.prepare.runtime` makes the prebuilt
+runtime and the players once where CMake is, and `--builder driver|cmake` picks the route.
 
 **Windows** follows upstream's manual route (MSVC, D3D11), not yet tested by this fork:
 [GETTING_STARTED.md](docs/GETTING_STARTED.md) walks through each pipeline stage, which is also the way to bring up

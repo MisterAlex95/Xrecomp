@@ -15,12 +15,24 @@ manifest into <toolkit>/runtime/<host>/ (default --out):
     runtime/linux-x86_64/runtime.json   what desktop_build reads
     runtime/linux-x86_64/lib/           the static libraries, in link order
     runtime/linux-x86_64/include/N/     headers CMake generated in its build dir
+    runtime/linux-x86_64/bin/           the console players (gba_play, ps1_play,
+                                        n64_play) that `xrecomp play` starts,
+                                        from the same build (--no-players: none)
 
 Paths in runtime.json are "{toolkit}/..." (the package's own tree),
 "{runtime}/..." (this folder) or absolute system paths (SDL2, GL, ...), which
 the user's machine has from tools/linux/install_deps.sh / tools/macos/setup.sh.
 `runtime_sha256` is toolkit.runtime_digest() of the tree it was built from: a
 checkout whose src/ changed since builds with CMake again (desktop_build.find).
+
+Another host's runtime (XBA-87: Linux arm64 from an x86-64 machine): $XBA_HOST
+names the host (linux-arm64) and the CMake toolchain file comes after --:
+
+    XBA_HOST=linux-arm64 python3 -m tools.prepare.runtime -- \
+        -DCMAKE_TOOLCHAIN_FILE=$PWD/cmake/toolchains/linux-aarch64-cross.cmake
+
+$XBA_HOST is read by tools.prepare too (with XBA_CC=aarch64-linux-gnu-gcc it
+prepares a title for that host).
 """
 
 import argparse
@@ -37,11 +49,17 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 FORMAT = 1
 MANIFEST = "runtime.json"
 PROBE = "xba_runtime_probe"
+# The console players `xrecomp play` starts (tools/xrecomp find_player): built with the runtime when the toolkit
+# has them (consoles/<c>/runtime, on by default on Linux and macOS), copied into bin/.
+PLAYERS = ("gba_play", "ps1_play", "n64_play")
 
 
 def host_id(system=None, machine=None):
     """'linux-x86_64', 'linux-arm64', 'macos-arm64', 'windows-x86_64', ...: the
-    runtime folder for this host (or the one given)."""
+    runtime folder for this host (or the one given; $XBA_HOST when none is
+    given: another host's runtime, a cross build)."""
+    if system is None and machine is None and os.environ.get("XBA_HOST"):
+        return os.environ["XBA_HOST"]
     system = (system or platform.system()).lower()
     machine = (machine or platform.machine()).lower()
     system = {"darwin": "macos"}.get(system, system)
@@ -200,8 +218,18 @@ def _reply(build):
         return json.load(f), reply, idx
 
 
-def build(toolkit=ROOT, out=None, build_dir=None, jobs=None, extra=()):
-    """Configure, build and write the runtime folder. Returns its path."""
+def _artifact(target_json, build):
+    """The first artifact (the executable) of a file API target, absolute."""
+    arts = target_json.get("artifacts") or []
+    if not arts:
+        return None
+    p = arts[0]["path"]
+    return p if os.path.isabs(p) else os.path.join(build, p)
+
+
+def build(toolkit=ROOT, out=None, build_dir=None, jobs=None, extra=(), players=True):
+    """Configure, build and write the runtime folder. Returns its path.
+    players: also build the console players the toolkit has, into bin/."""
     toolkit = os.path.abspath(toolkit)
     from tools.prepare import toolkit as tk
     host = host_id()
@@ -234,9 +262,15 @@ def build(toolkit=ROOT, out=None, build_dir=None, jobs=None, extra=()):
             target = json.load(f)
         names = {t["id"]: t["name"] for t in config["targets"]}
         deps = [names[d["id"]] for d in target.get("dependencies", []) if d["id"] in names]
+        play = {}
+        if players:
+            for t in config["targets"]:
+                if t["name"] in PLAYERS and t["name"] not in play:
+                    with open(os.path.join(reply, t["jsonFile"])) as f:
+                        play[t["name"]] = _artifact(json.load(f), build_dir)
         cmd = ["cmake", "--build", build_dir, "--parallel"] + (["%d" % jobs] if jobs else [])
-        if deps:
-            cmd += ["--target"] + deps
+        if deps or play:
+            cmd += ["--target"] + deps + sorted(play)
         _run(cmd, log)
         compiler = ""
         tc = next((o for o in idx["objects"] if o["kind"] == "toolchains"), None)
@@ -250,6 +284,14 @@ def build(toolkit=ROOT, out=None, build_dir=None, jobs=None, extra=()):
         os.makedirs(out)
         reloc = Relocator(toolkit, build_dir, probe, out)
         man = manifest_from_target(target, reloc, tk.runtime_digest(toolkit), compiler.strip(), host)
+        if play:
+            os.makedirs(os.path.join(out, "bin"))
+            man["players"] = {}
+            for name, exe in sorted(play.items()):
+                if not exe or not os.path.isfile(exe):
+                    raise SystemExit("%s not built (%s)" % (name, exe))
+                shutil.copy2(exe, os.path.join(out, "bin", os.path.basename(exe)))
+                man["players"][name.split("_")[0]] = "{runtime}/bin/" + os.path.basename(exe)
         missing = [a["arg"] for a in man["link"] if a["arg"].startswith("{runtime}/")
                    and not os.path.isfile(os.path.join(out, a["arg"][len("{runtime}/"):]))]
         if missing:
@@ -258,8 +300,8 @@ def build(toolkit=ROOT, out=None, build_dir=None, jobs=None, extra=()):
             json.dump(man, f, indent=1)
             f.write("\n")
         size = sum(os.path.getsize(os.path.join(d, n)) for d, _, ns in os.walk(out) for n in ns)
-        print("%s: %d libraries, %.1f MB, link language %s" % (out, len(reloc.libs), size / 1e6,
-                                                                man["link_language"]))
+        print("%s: %d libraries, %d players, %.1f MB, link language %s" % (out, len(reloc.libs), len(play),
+                                                                            size / 1e6, man["link_language"]))
         return out
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -272,9 +314,10 @@ def main(argv=None):
     ap.add_argument("--out", help="default <toolkit>/runtime/<host>")
     ap.add_argument("--build", help="CMake build folder (default: a temporary one, removed)")
     ap.add_argument("--jobs", type=int, help="parallel compiles")
+    ap.add_argument("--no-players", action="store_true", help="leave the console players (bin/) out")
     ap.add_argument("cmake_args", nargs="*", help="more -D options for the configure (after --)")
     a = ap.parse_args(argv)
-    build(a.toolkit, a.out, a.build, a.jobs, a.cmake_args)
+    build(a.toolkit, a.out, a.build, a.jobs, a.cmake_args, players=not a.no_players)
     return 0
 
 

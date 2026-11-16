@@ -29,10 +29,13 @@ Downloads: the [GitHub releases](https://github.com/MisterAlex95/Xrecomp/release
 - `xrecomp-v<version>-macos-arm64.zip`: the Mac app (Apple silicon, macOS 14+) inside the toolkit folder it drives.
   Ad-hoc signed, not notarized: run `xattr -dr com.apple.quarantine <the XRecomp folder>` once before opening it,
   otherwise macOS blocks it or runs it from a translocated copy that cannot see its toolkit (Setup then asks for it).
-- `xrecomp-v<version>-linux.tar.gz`: the toolkit for Linux (README « Linux »).
+- `xrecomp-v<version>-linux-x86_64.tar.gz` and `xrecomp-v<version>-linux-arm64.tar.gz`: the toolkit for Linux
+  (README « Linux »), each built and smoke-tested on its own architecture (GitHub's Ubuntu 24.04 runners, XBA-87).
+  Up to 0.12 there was one `-linux.tar.gz`, x86-64 only.
 - The **prebuilt runtime** of the desktop folders (XBA-86): `runtime/macos-arm64/` in the Mac zip,
-  `runtime/linux-x86_64/` in the Linux archive (`tools/prepare/runtime.py`), so prepare builds a title with a C
-  compiler alone, no CMake (`tools/prepare/desktop_build.py`). Linux arm64 builds with CMake until it has one.
+  `runtime/linux-x86_64/` and `runtime/linux-arm64/` in the Linux archives (`tools/prepare/runtime.py`), so prepare
+  builds a title with a C compiler alone, no CMake (`tools/prepare/desktop_build.py`). Its `bin/` has the console
+  players (`gba_play`, `ps1_play`, `n64_play`) that `./xrecomp play` starts (XBA-87).
 - A `.sha256` next to each.
 - **Frame generation** (LSFG, XBA-187) in every one of them: the APK has the Vulkan bridge in `libmain.so` and the
   shader translator in `libxba_import.so` (Settings › Graphics › Frame generation, « Choose Lossless.dll »); the
@@ -68,9 +71,9 @@ The Mac app and the toolkit can also be built from the source at the tag (README
    publishing when the notes file, the release key or `GH_RELEASE_TOKEN` is missing
    ([toolchain.md « Signing »](../android/toolchain.md#signing) lists the secrets).
 5. GitHub's `Desktop` workflow (`.github/workflows/desktop.yml`) runs on the tag when the mirror pushes it, waits
-   for that release, then attaches the macOS zip and the Linux archive and appends a « Desktop » section to the
+   for that release, then attaches the macOS zip and the two Linux archives and appends a « Desktop » section to the
    notes. A re-run of Gitea's release job recreates the release without them: re-run the Desktop run of the tag.
-6. Check the GitHub release page: the APK, the two desktop files, their checksums, the notes ending with
+6. Check the GitHub release page: the APK, the three desktop files, their checksums, the notes ending with
    `signed with: release key`.
 
 Versions follow [semantic versioning](https://semver.org) loosely while we are below 1.0: the minor number goes up
