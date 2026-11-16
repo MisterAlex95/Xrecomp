@@ -585,6 +585,72 @@ public class LauncherLibraryTest {
         assertTrue("the game kept", new File(GameStore.defaultGameDir(app), "default.xbe").isFile());
     }
 
+    /**
+     * Storage › Export all saves: Android's « create document » picker, then a zip of the saves only; Import saves
+     * puts them back (the current ones kept aside) and says how many games got theirs.
+     */
+    @Test
+    public void storageExportsAndImportsSaves() throws Exception {
+        TestSupport.write(new File(GameStore.defaultGameDir(app), "default.xbe"), TestSupport.xbe(0x4D530004, "Sample"));
+        File saves = new File(GameTheme.saveDir(app), "UDATA/4d530004/save.bin");
+        TestSupport.write(saves, "level 3");
+        TestSupport.write(new File(GameTheme.saveDir(app), "Cache/4d530004/big.bin"), new byte[64]);
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.STORAGE);
+        idle(300);
+        Widgets.MenuRow ex = menuRow(a, app.getString(R.string.SAVES_EXPORT_ALL));
+        assertNotNull(ex);
+        assertEquals(app.getResources().getQuantityString(R.plurals.SAVES_GAMES, 1, 1), ex.value);
+        assertNotNull(menuRow(a, app.getString(R.string.SAVES_IMPORT)));
+        TestSupport.screenshot(a.getWindow().getDecorView(), "library-storage-saves");
+
+        ex.performClick();
+        idle(100);
+        org.robolectric.shadows.ShadowActivity.IntentForResult r = shadowOf(a).getNextStartedActivityForResult();
+        assertEquals(Intent.ACTION_CREATE_DOCUMENT, r.intent.getAction());
+        assertEquals("application/zip", r.intent.getType());
+        assertTrue(r.intent.getStringExtra(Intent.EXTRA_TITLE).startsWith("xrecomp-saves-all-"));
+        android.net.Uri out = android.net.Uri.parse("content://docs.test/document/saves.zip");
+        java.io.ByteArrayOutputStream zip = new java.io.ByteArrayOutputStream();
+        shadowOf(app.getContentResolver()).registerOutputStream(out, zip);
+        shadowOf(a).receiveResult(r.intent, android.app.Activity.RESULT_OK, new Intent().setData(out));
+        waitWorker(a);
+        assertEquals(app.getResources().getQuantityString(R.plurals.SAVES_EXPORTED, 1, 1, "saves.zip"),
+                     a.noteForTest());
+        List<String> names = new ArrayList<>();
+        try (java.util.zip.ZipInputStream z = new java.util.zip.ZipInputStream(
+                 new java.io.ByteArrayInputStream(zip.toByteArray()))) {
+            for (java.util.zip.ZipEntry e; (e = z.getNextEntry()) != null;)
+                names.add(e.getName());
+        }
+        assertEquals(java.util.Arrays.asList(SaveArchive.MANIFEST, "UDATA/4d530004/save.bin"), names);
+
+        TestSupport.write(saves, "level 1");
+        a.goForTest(LauncherActivity.Screen.STORAGE);
+        idle(300);
+        menuRow(a, app.getString(R.string.SAVES_IMPORT)).performClick();
+        idle(100);
+        r = shadowOf(a).getNextStartedActivityForResult();
+        assertEquals(Intent.ACTION_OPEN_DOCUMENT, r.intent.getAction());
+        android.net.Uri in = android.net.Uri.parse("content://docs.test/document/in.zip");
+        shadowOf(app.getContentResolver()).registerInputStream(in, new java.io.ByteArrayInputStream(zip.toByteArray()));
+        shadowOf(a).receiveResult(r.intent, android.app.Activity.RESULT_OK, new Intent().setData(in));
+        waitWorker(a);
+        assertEquals(app.getResources().getQuantityString(R.plurals.SAVES_IMPORTED, 1, 1), a.noteForTest());
+        assertEquals("level 3", new String(java.nio.file.Files.readAllBytes(saves.toPath()), "UTF-8"));
+        assertEquals("level 1", new String(java.nio.file.Files.readAllBytes(
+            new File(GameTheme.saveDir(app), ".backup/4D530004/UDATA/4d530004/save.bin").toPath()), "UTF-8"));
+        assertEquals(LauncherActivity.Screen.STORAGE, a.screenForTest());
+    }
+
+    private static void waitWorker(LauncherActivity a) throws Exception {
+        for (int i = 0; i < 200 && a.workerBusyForTest(); i++) {
+            Thread.sleep(20);
+            idle(50);
+        }
+        idle(100);
+    }
+
     private static List<View> allViews(View v, List<View> out) {
         out.add(v);
         if (v instanceof ViewGroup) {

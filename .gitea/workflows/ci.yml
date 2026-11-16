@@ -642,6 +642,8 @@ jobs:
           KS_B64: ${{ secrets.XBA_RELEASE_KEYSTORE_B64 }}
           XBA_KEYSTORE_PASSWORD: ${{ secrets.XBA_RELEASE_KEYSTORE_PASSWORD }}
           XBA_KEY_ALIAS: ${{ secrets.XBA_RELEASE_KEY_ALIAS }}
+          XBA_GOOGLE_CLIENT_ID: ${{ secrets.XBA_GOOGLE_CLIENT_ID }}
+          XBA_GOOGLE_CLIENT_SECRET: ${{ secrets.XBA_GOOGLE_CLIENT_SECRET }}
         run: |
           sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
           code=$(( $(git log -1 --format=%ct) / 60 ))
@@ -654,6 +656,12 @@ jobs:
           else
             echo "::warning::XRecomp APK DEBUG-SIGNED: the secrets XBA_RELEASE_KEYSTORE_B64 / XBA_RELEASE_KEYSTORE_PASSWORD are not set. It cannot update a release-signed install (docs/android/toolchain.md, Signing)."
             signing=debug
+          fi
+          # Cloud saves' Google client (docs/android/app-shell.md « Cloud saves »): optional, the APK has none without it.
+          if [ -n "$XBA_GOOGLE_CLIENT_ID" ]; then
+            set -- "$@" --secret id=xba_google_client_id,env=XBA_GOOGLE_CLIENT_ID --secret id=xba_google_client_secret,env=XBA_GOOGLE_CLIENT_SECRET
+          else
+            echo "::warning::No cloud saves in this APK: the secrets XBA_GOOGLE_CLIENT_ID / XBA_GOOGLE_CLIENT_SECRET are not set."
           fi
           # The APK carries OpenBIOS (XBA-168): the ps1-bios stage of android.Dockerfile builds it from its pinned
           # source in PCSX-Redux's CI image (pinned by digest, pulled once and kept by the host). It reads nothing of

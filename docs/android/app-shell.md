@@ -151,7 +151,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Screen | What it shows | Reached from |
 |---|---|---|
 | Library | The [game library](#game-library): a full-width grid of the games (five columns), the focused game's state and play time as one context line at the bottom left; Rescan, Storage, Library folders, Settings and About in the **Options** sheet (Y). Over the grid the **Search** and **Sort** pills, « Recently played » and the favourites first, the console tabs in the top bar ([Library view](#library-view-xba-206)). | Every start when the library is on, B from a game's Home. |
-| Storage | What the app stores per game, each deleted on its own ([Storage](#storage)). | Options (Y) on the library. |
+| Storage | What the app stores per game, each deleted on its own ([Storage](#storage)); saves exported to a zip and imported back ([Saves out and back](#saves-out-and-back)), synced through Google Drive ([Cloud saves](#cloud-saves)). | Options (Y) on the library. |
 | Welcome | What the app is (a recompiled game, the game not included: bring your own copy), three plain steps, a « Get started » button. | First start, when no game is set up at all. |
 | Choose your game (source) | A list: **Game folder** (read in place with All files access, otherwise copied; the value says which), **Disc image (ISO)** (extracted once; the free space in the top bar), **Game library folder**; the focused choice explained on the right. | Welcome, Manage › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
 | Read the game in place? | Only without All files access: **Allow all files access** (recommended; opens the system page, then the folder picker) and **Copy into the app** (the folder picker), with the explanation on the right (in place: no copy, fine for a 4 GB disc, only that folder is read; copy: as much free space again, a few minutes, removed with the app). | Game folder. |
@@ -2534,6 +2534,116 @@ the focused row's description. Manage shows the same rows for the selected game.
 Only what the app made is ever deleted: never a folder read in place nor anything in the library folder. Deleting
 the imported copy keeps the game in the library (import it again); its art and theme go only when the title also
 left the library folder.
+
+### Saves out and back
+
+Storage starts with **Export all saves** (how many games have saves as the value) and **Import saves**; Manage (an
+Xbox game) and a console game's Options screen have **Export saves** (only when it has some) and **Import saves**.
+Export opens Android's « create document » picker with `xrecomp-saves-<title ID or all>-<yyyymmdd-hhmm>.zip`: the
+file goes wherever the player picks — a folder, a USB stick, or a cloud drive with a document provider such as
+Google Drive. Import opens the « open document » picker. Both run behind the progress screen and come back with a
+note (« Saves of N games written to … », « Saves of N games restored. »).
+
+The archive (`SaveArchive`) mirrors `files/save/`: `UDATA/<tid>/…` and `TDATA/<tid>/…` for an Xbox title (the
+kernel's lower case folder), `<console>-<KEY>/…` for a GBA, PS1 or N64 game, and `xrecomp-saves.json` first (format
+1, app version, date, per title its key, name and content hash). Only save folders, never the caches, partition
+images, packs or game data.
+
+Import restores **per title**: every entry is checked (no absolute path, no `..`, only a save folder of a valid key,
+256 MB a file, 2 GB in all), the archive is unpacked under `save/.import/` first and refused as a whole when it is not
+a zip or holds no save (« … is not a save file made by XRecomp. »; nothing changed). Then for each title in it the
+current save folders move to `save/.backup/<key>/` (one generation: the next import of that title replaces it) and the
+archive's take their place, by rename. A title the archive does not hold is untouched. A running game whose saves are
+in the archive is ended first. logcat: `launcher: saves: exported N game(s), …`, `launcher: saves: imported [...]`.
+
+### Device check (saves out and back), for Alex
+
+1. Play an Xbox game and a GBA game, save in each, quit.
+2. Library › Options › Storage: « Export all saves » shows « 2 games »; A: the picker offers `xrecomp-saves-all-….zip`;
+   pick Google Drive (or Downloads). The note says « Saves of 2 games written to … ».
+3. Open the zip on a computer: `xrecomp-saves.json`, `UDATA/<tid>/…`, `gba-<KEY>/…`, and no `Cache`, no
+   `Partition*.img`.
+4. Play the Xbox game again and save over the slot (or delete its saves in Storage).
+5. Storage › Import saves › the zip from Drive: « Saves of 2 games restored. »; start the game: the old save is back.
+6. Manage of the Xbox game › Export saves: the file name has its title ID; Import saves of a random zip (not ours):
+   « … is not a save file made by XRecomp. », nothing changed.
+7. Another device (or after uninstalling XRecomp): Import saves from Drive, start the game: the save is there.
+
+### Cloud saves
+
+Storage, Manage and a console game's Options start with **Cloud saves** (value: Off, the Google account, « N games to
+check », or « Not in this build »), which opens its screen:
+
+- **Not connected**: **Connect Google Drive**. Sign-in is Google's [OAuth for TV and limited-input
+  devices](https://developers.google.com/identity/protocols/oauth2/limited-input-device): the screen shows a code and
+  `google.com/device`; the player types it on a phone or a computer (or **Open google.com/device on this device**:
+  a browser here, the code on the clipboard; A on the code copies it), picks the account and allows XRecomp. The screen
+  goes on by itself (polling at Google's interval) and a first sync starts. No Play services: it works the same in
+  XRecomp, in a game's own app (which signs in on its own) and on a handheld without Google apps. Scopes:
+  `drive.appdata` (a hidden folder of the app's own in the player's Drive: it sees nothing else, and the folder does not
+  show in Drive; Google classes it non-sensitive) and `email` (to show the account).
+- **Connected**: **Google account** (A twice disconnects: the grant revoked, saves kept here and in Drive), **Sync now**
+  (Y too; the last sync as the value, its last problem in the description), **Sync automatically** (on by default), and
+  under **Changed on both sides** a row per game in conflict, whose A asks **Keep this device's saves** or **Use the
+  cloud's saves**.
+
+How it syncs (`CloudSaves`, `GoogleDrive`): each game's saves are one zip of [the export's format](#saves-out-and-back)
+(that game only) named `<key>.zip` in the hidden folder, its content hash (`SaveArchive.hash`: paths, sizes and bytes
+of the save files) in the file's `appProperties`. The device keeps, per game, the hash both sides had at the last sync
+(the base) in `files/cloud/state.json`, with the refresh token (private to the app; the access token stays in memory).
+A sync compares this device's hash, the cloud's and the base:
+
+| This device | Cloud | Then |
+|---|---|---|
+| changed | as at the last sync, or no file | upload |
+| as at the last sync, or no saves | changed | download: the device's saves move to `save/.backup/<key>/`, as an import |
+| changed | changed (or both have saves and never synced) | conflict: nothing moves until the player picks |
+| saves deleted here | as at the last sync | nothing: deletions do not go up, the cloud keeps its copy |
+
+A running game's saves are never replaced (that game is pending until it ends); they may go up. A sync covers this
+device's games with saves, the cloud's and those synced before (a game not in this library gets its saves all the
+same, ready for when it comes). Google refusing the refresh token signs the account out (« Google signed you out »).
+
+When, with **Sync automatically** on: every game at each launcher resume (at most once a minute; a note only when saves
+came down, a conflict, or a sign-out), and **before a game starts** (not when a running game is brought back): the sync
+on its way finishes (at most 10 s), then that game is synced with short timeouts (4 s to connect, 8 s to read) under
+« Checking cloud saves… », and the game starts whatever happened (offline, slow, a conflict: this device's saves).
+A game's saves go up at the next resume of the launcher after it, so quit to the launcher before switching devices.
+
+**The Google client** comes with the build, never with the repository: a « TVs and Limited Input devices » OAuth client
+of the project's Google Cloud project, passed as `-PxbaGoogleClientId` / `-PxbaGoogleClientSecret` or the env
+`XBA_GOOGLE_CLIENT_ID` / `XBA_GOOGLE_CLIENT_SECRET` (resources `xba_google_client_id` / `_secret`). CI passes the Gitea
+secrets of the same names to `android.Dockerfile` as BuildKit secrets (`xrecomp-latest` and releases). An installed
+app's client secret is not confidential (it is in the APK), but it stays out of the public repository. A build without
+it (a local one, the unit tests) has no cloud saves: the row says « Not in this build ». Setting it up (once):
+
+1. Google Cloud console › a project › APIs & Services › enable the **Google Drive API**.
+2. OAuth consent screen: External, app name XRecomp, support email; scopes `.../auth/drive.appdata` and `email`;
+   publish it (in « Testing », only listed test users can sign in and refresh tokens expire after 7 days).
+3. Credentials › Create OAuth client ID › **TVs and Limited Input devices**: its client ID and secret into the Gitea
+   secrets `XBA_GOOGLE_CLIENT_ID` and `XBA_GOOGLE_CLIENT_SECRET`.
+
+logcat: `launcher: cloud: signing in`, `cloud: sign-in done|DENIED|EXPIRED`, `cloud: sync up [...] down [...] conflicts
+[...] pending [...] failed [...]`, `cloud: before launch <key>: ...`.
+
+### Device check (cloud saves), for Alex
+
+Needs an APK built with the Google client (the secrets above), two devices (or XRecomp and a game's own app).
+
+1. Storage › Cloud saves › Connect Google Drive: a code and `google.com/device`. Type it on the phone, allow XRecomp:
+   the screen turns to « Google account: <you> » by itself, « Connected as … » then a sync.
+2. Drive on the web: no new visible folder (Settings › Manage apps lists XRecomp with hidden data).
+3. Device 2: connect the same account: the first sync brings back the saves of device 1 (« Newer saves of N games
+   brought back »); start the game: the save is there.
+4. Device 2: play, save, quit to the launcher. Device 1: open XRecomp (or start the game straight away): « Checking
+   cloud saves… », then the game starts with device 2's save.
+5. Conflict: save on both devices without syncing (airplane mode on one), then sync both: the second says « 1 game
+   changed here and on another device »; Cloud saves › the game › Keep this device's saves; the other device's next
+   sync brings it down.
+6. Airplane mode, start a game: « Checking cloud saves… » for at most a few seconds, then the game starts.
+7. Google account › A twice: « Disconnected »; saves still here; Storage shows Cloud saves « Off ».
+8. myaccount.google.com › Security › third-party access › remove XRecomp; on the device, Sync now: « Google signed you
+   out ».
 
 ### Files
 

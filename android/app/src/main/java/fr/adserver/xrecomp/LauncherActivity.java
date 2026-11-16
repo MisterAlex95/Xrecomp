@@ -146,6 +146,8 @@ public class LauncherActivity extends Activity {
     enum Screen {
         WELCOME, SOURCE, FOLDER_ACCESS, IMPORT, HOME, SETTINGS, CONTROLS, GAME_DATA, ABOUT, LICENCES, PREPARE, LIBRARY,
         STORAGE,
+        /** Cloud saves (CloudSaves): the Google account, Sync now, automatic sync, the conflicts. */
+        CLOUD,
         /** A game's own app on its way into the game: its art, its title, one line, at most one action (gameApp). */
         DIRECT,
         /** A GBA game's Home (XBA-158): Play (the interpreter, or its pack) and its Prepare; romEntry. */
@@ -188,6 +190,10 @@ public class LauncherActivity extends Activity {
     private static final int REQ_LIBRARY_TREE = 6;
     static final int REQ_PACK_HANDOVER = 7;
     private static final int REQ_VK_DRIVER = 8;
+    private static final int REQ_SAVES_EXPORT = 9;
+    private static final int REQ_SAVES_IMPORT = 10;
+    /** The titles the pending « Export saves » writes (set before the picker opens), and its key (null: all). */
+    private List<String> exportKeys;
     /** The library re-reads its entries' states (Prepare, queue, running game) every this many polls. */
     private static final int LIBRARY_POLL_EVERY = 4;
 
@@ -572,6 +578,7 @@ public class LauncherActivity extends Activity {
         AppUpdateReceiver.listener = () -> runOnUiThread(this::showAppUpdateOutcome);
         showAppUpdateOutcome();
         updateAtLaunch();
+        cloudAutoSync();
         poller.removeCallbacks(pollTick);
         poller.postDelayed(pollTick, PREPARE_POLL_MS);
         // N64 shader warm-up: after an app update, and what was asked while a game ran (never next to a Prepare)
@@ -692,6 +699,11 @@ public class LauncherActivity extends Activity {
 
     Prep homePrepForTest() {
         return homePrep;
+    }
+
+    /** Tests: a runWorker task has not finished. */
+    boolean workerBusyForTest() {
+        return workerBusy;
     }
 
     String noteForTest() {
@@ -1081,6 +1093,9 @@ public class LauncherActivity extends Activity {
             break;
         case STORAGE:
             buildStorage();
+            break;
+        case CLOUD:
+            buildCloud();
             break;
         case DIRECT:
             buildDirect();
@@ -3240,6 +3255,7 @@ public class LauncherActivity extends Activity {
             for (Storage.Item it : items)
                 storageRow(list, it);
             storageMeasureLater(items);
+            saveTransferRows(list, key);
         }
         describe(change.description, facts, Theme.TEXT_DIM);
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
@@ -5287,6 +5303,15 @@ public class LauncherActivity extends Activity {
             onChooseLibraryFolder();
             return;
         }
+        boolean bringBack = !fresh && e.tid != null && e.tid.equals(GameStore.launchedTitleId(this)) && gameRunning();
+        cloudBeforeLaunch(bringBack ? null : e.tid, () -> launchRomNow(e, fresh));
+    }
+
+    private void launchRomNow(LibraryScreen.Entry e, boolean fresh) {
+        if (e.chip == GameState.Chip.NO_FILE_ACCESS) {
+            onChooseLibraryFolder();
+            return;
+        }
         Library.Folder folder = e.active == null ? null : Library.folderOf(Library.folders(this), e.active);
         String rom = romSpec(e.active, folder == null ? null : folder.tree);
         if (rom == null) {
@@ -7098,6 +7123,7 @@ public class LauncherActivity extends Activity {
                         storageRow(list, it);
                     storageMeasureLater(items);
                 }
+                saveTransferRows(list, key);
             }
         }
         defaultFocus = first;
@@ -7330,6 +7356,7 @@ public class LauncherActivity extends Activity {
         topRight.setText(getString(R.string.LIB_ST_FREE, size(freeSpace())));
         Storage.Dirs dirs = storageDirs();
         LinearLayout list = listTemplate();
+        saveTransferRows(list, null);
         List<Storage.Item> all = new ArrayList<>();
         for (String tid : Storage.titles(dirs, games)) {
             List<Storage.Item> items = Storage.items(dirs, tid, games.get(tid));
@@ -7513,6 +7540,555 @@ public class LauncherActivity extends Activity {
                 setNote(getString(R.string.DELETED), NOTE_OK);
             });
         }, "xba-delete").start();
+    }
+
+    // ---- Saves out and back (SaveArchive; docs/android/app-shell.md « Saves out and back ») ----------------------
+
+    /**
+     * « Export saves » (only when there are some) and « Import saves »: for one game (key) or, in Storage, all of
+     * them (key null). The file goes where the player picks, through Android's file picker: a folder, a USB stick, a
+     * cloud drive such as Google Drive.
+     */
+    private void saveTransferRows(LinearLayout list, String key) {
+        cloudRow(list);
+        Storage.Dirs dirs = storageDirs();
+        int n = 0;
+        if (key == null)
+            n = SaveArchive.titlesWithSaves(dirs, games).size();
+        if (key != null ? SaveArchive.hasSaves(dirs, key) : n > 0) {
+            MenuRow ex = listRow(list, getString(key == null ? R.string.SAVES_EXPORT_ALL : R.string.SAVES_EXPORT),
+                                 getString(R.string.SAVES_EXPORT_DETAIL), () -> onExportSaves(key));
+            if (key == null)
+                ex.setValue(getResources().getQuantityString(R.plurals.SAVES_GAMES, n, n));
+        }
+        listRow(list, getString(R.string.SAVES_IMPORT), getString(R.string.SAVES_IMPORT_DETAIL), this::onImportSaves);
+    }
+
+    private void onExportSaves(String key) {
+        List<String> keys = key != null ? java.util.Collections.singletonList(key)
+                                        : SaveArchive.titlesWithSaves(storageDirs(), games);
+        if (keys.isEmpty() || (key != null && !SaveArchive.hasSaves(storageDirs(), key))) {
+            setNote(getString(R.string.SAVES_NONE), NOTE_WARN);
+            return;
+        }
+        exportKeys = new ArrayList<>(keys);
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                       .setType("application/zip")
+                       .putExtra(Intent.EXTRA_TITLE, SaveArchive.fileName(key, System.currentTimeMillis()));
+        try {
+            startActivityForResult(i, REQ_SAVES_EXPORT);
+        } catch (ActivityNotFoundException e) {
+            setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
+        }
+    }
+
+    private void onImportSaves() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                       .putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "application/zip", "application/x-zip-compressed",
+                                                                         "application/octet-stream" });
+        try {
+            startActivityForResult(i, REQ_SAVES_IMPORT);
+        } catch (ActivityNotFoundException e) {
+            setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
+        }
+    }
+
+    /** The titles' display names for an archive's manifest: the library's titles. */
+    private java.util.Map<String, String> saveNames(List<String> keys) {
+        java.util.Map<String, String> m = new java.util.HashMap<>();
+        for (String k : keys) {
+            Library.Record r = games.get(k);
+            if (r != null && !r.title.isEmpty())
+                m.put(k, r.title);
+        }
+        return m;
+    }
+
+    private String appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            return "";
+        }
+    }
+
+    private void onSavesExportPicked(Uri uri) {
+        List<String> keys = exportKeys;
+        exportKeys = null;
+        if (keys == null || keys.isEmpty())
+            return;
+        java.util.Map<String, String> names = saveNames(keys);
+        String version = appVersion();
+        Storage.Dirs dirs = storageDirs();
+        Log.i(TAG, "launcher: saves: exporting " + keys);
+        runWorker(R.string.SAVES_EXPORTING, () -> {
+            SaveArchive.Summary s;
+            try (OutputStream out = openForWrite(uri)) {
+                s = SaveArchive.export(dirs, keys, names, version, out);
+            }
+            Log.i(TAG, "launcher: saves: exported " + s.titles.size() + " game(s), " + s.files + " file(s), "
+                       + s.bytes + " bytes");
+            workerNoteKind = NOTE_OK;
+            workerNote = getResources().getQuantityString(R.plurals.SAVES_EXPORTED, s.titles.size(),
+                                                          s.titles.size(), displayName(uri));
+        });
+    }
+
+    /** A picked document for writing, truncated (« wt »; « w » for a provider that has no « wt »). */
+    private OutputStream openForWrite(Uri uri) throws IOException {
+        OutputStream out;
+        try {
+            out = getContentResolver().openOutputStream(uri, "wt");
+        } catch (IllegalArgumentException | java.io.FileNotFoundException e) {
+            out = getContentResolver().openOutputStream(uri, "w");
+        }
+        if (out == null)
+            throw new IOException("cannot write " + uri);
+        return out;
+    }
+
+    /**
+     * Worker: the archive is unpacked and checked first; a running game whose saves it holds is ended; then each of
+     * its games gets the archive's saves, its own kept aside (save/.backup/<key>/).
+     */
+    private void onSavesImportPicked(Uri uri) {
+        Storage.Dirs dirs = storageDirs();
+        String name = displayName(uri);
+        Log.i(TAG, "launcher: saves: importing " + name);
+        runWorker(R.string.SAVES_IMPORTING, () -> {
+            SaveArchive.Unpacked u;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null)
+                    throw new IOException("cannot open " + name);
+                u = SaveArchive.unpack(dirs, in);
+            } catch (IOException e) {
+                Log.w(TAG, "launcher: saves: not a save archive", e);
+                fail(getString(R.string.SAVES_NOT_AN_ARCHIVE, name));
+                return;
+            }
+            if (gameRunning() && holdsRunningGame(u.keys()))
+                endRunningGame();
+            SaveArchive.Summary s = SaveArchive.install(dirs, u, null);
+            Log.i(TAG, "launcher: saves: imported " + s.titles + ", " + s.files + " file(s), " + s.skipped
+                       + " entr(ies) skipped");
+            runOnUiThread(() -> {
+                for (String k : s.titles)
+                    storageSizes.remove(k + "/" + Storage.Kind.SAVES);
+            });
+            workerNoteKind = NOTE_OK;
+            workerNote = getResources().getQuantityString(R.plurals.SAVES_IMPORTED, s.titles.size(), s.titles.size());
+        });
+    }
+
+    /** True when keys hold the running game's: its title ID, or for a console game any console game's key. */
+    private boolean holdsRunningGame(List<String> keys) {
+        if (GameStore.launchedRom(this) != null) {
+            for (String k : keys) {
+                if (Console.ofKey(k) != Console.XBOX)
+                    return true;
+            }
+            return false;
+        }
+        String t = launchedTid();
+        return t != null && keys.contains(t.toUpperCase(Locale.ROOT));
+    }
+
+    // ---- Cloud saves (CloudSaves, GoogleDrive; docs/android/app-shell.md « Cloud saves ») ----------------------
+
+    /** Tests: Google, answered in the test. */
+    static java.util.function.Function<android.content.Context, GoogleDrive.Http> cloudHttpFactory;
+    /** The sync on its way (automatic, Sync now, a settled conflict), or null. */
+    private Thread cloudSyncer;
+    /** The sign-in on its way: its code while the player types it, the thread that polls. */
+    private volatile GoogleDrive.DeviceCode cloudCode;
+    private Thread cloudSignIn;
+    private long cloudLastAuto, cloudDisconnectArmedAt;
+    /** A launch waits for the cloud: a second press does nothing. */
+    private boolean cloudLaunching;
+    static final long CLOUD_AUTO_EVERY_MS = 60_000;
+
+    private GoogleDrive cloudDrive(int connectMs, int readMs) {
+        GoogleDrive.Http http = cloudHttpFactory != null ? cloudHttpFactory.apply(this)
+                                                         : new GoogleDrive.UrlHttp(connectMs, readMs);
+        return new GoogleDrive(http, cloudClientId(), cloudClientForTest != null ? cloudClientForTest[1]
+                                                     : getString(R.string.xba_google_client_secret));
+    }
+
+    /** Tests: the Google client (id, secret) a unit-test build has not. */
+    static String[] cloudClientForTest;
+
+    private String cloudClientId() {
+        return cloudClientForTest != null ? cloudClientForTest[0] : getString(R.string.xba_google_client_id);
+    }
+
+    private boolean cloudConfigured() {
+        return !cloudClientId().isEmpty();
+    }
+
+    /** The keys whose saves must not be replaced now: the running game's. */
+    private List<String> cloudBusyKeys() {
+        List<String> l = new ArrayList<>();
+        if (gameRunning()) {
+            String t = GameStore.launchedTitleId(this);
+            if (t != null)
+                l.add(Console.ofKey(t) == Console.XBOX ? t.toUpperCase(Locale.ROOT) : t);
+        }
+        return l;
+    }
+
+    private CloudSaves cloud(int connectMs, int readMs) {
+        return new CloudSaves(cloudDrive(connectMs, readMs), storageDirs(), Build.MODEL, cloudBusyKeys());
+    }
+
+    private boolean cloudSyncing() {
+        return cloudSyncer != null && cloudSyncer.isAlive();
+    }
+
+    /** « Cloud saves » (Storage, Manage, a console game's Options): the account or Off as the value; A opens CLOUD. */
+    private void cloudRow(LinearLayout list) {
+        MenuRow r = listRow(list, getString(R.string.CLOUD_TITLE), getString(R.string.CLOUD_ROW_DETAIL),
+                            () -> go(Screen.CLOUD));
+        CloudSaves.State st = CloudSaves.load(getFilesDir());
+        r.setValue(!cloudConfigured() ? getString(R.string.CLOUD_UNAVAILABLE)
+                   : !st.connected() ? getString(R.string.VAL_OFF)
+                   : !st.conflicts.isEmpty() ? getResources().getQuantityString(R.plurals.CLOUD_CONFLICTS_N,
+                                                                                 st.conflicts.size(),
+                                                                                 st.conflicts.size())
+                   : st.email.isEmpty() ? getString(R.string.VAL_ON) : st.email);
+        if (st.connected() && !st.conflicts.isEmpty())
+            r.setBadge(getString(R.string.CLOUD_CONFLICT_BADGE), Theme.WARN);
+    }
+
+    /**
+     * CLOUD: without the build's Google client, why not; while signing in, the code and where to type it; not
+     * connected, « Connect Google Drive »; connected, the account (A twice disconnects), Sync now (the last sync as
+     * the value), Sync automatically, and a row per game whose saves changed on both sides (A: which to keep).
+     */
+    private void buildCloud() {
+        screenTitle.setText(R.string.CLOUD_TITLE);
+        LinearLayout list = listTemplate();
+        if (!cloudConfigured()) {
+            MenuRow r = listRow(list, getString(R.string.CLOUD_UNAVAILABLE), getString(R.string.CLOUD_UNAVAILABLE_DETAIL),
+                                () -> setNote(getString(R.string.CLOUD_UNAVAILABLE), NOTE_INFO));
+            defaultFocus = r;
+            addHint("B", R.string.HINT_BACK, this::back);
+            return;
+        }
+        addHint("A", R.string.HINT_SELECT, this::clickFocused);
+        GoogleDrive.DeviceCode dc = cloudCode;
+        if (dc != null) {
+            String where = dc.verificationUrl.replaceFirst("^https?://(www\\.)?", "");
+            MenuRow code = listRow(list, getString(R.string.CLOUD_CODE, dc.userCode),
+                                   getString(R.string.CLOUD_CODE_DETAIL, where, dc.userCode), null);
+            code.setValue(getString(R.string.CLOUD_WAITING));
+            code.setOnClickListener(v -> copyCloudCode(dc));
+            listRow(list, getString(R.string.CLOUD_OPEN_HERE, where), getString(R.string.CLOUD_OPEN_HERE_DETAIL),
+                    () -> openCloudPage(dc));
+            listRow(list, getString(R.string.CANCEL), null, this::cancelCloudSignIn);
+            defaultFocus = code;
+            addHint("B", R.string.HINT_BACK, this::back);
+            return;
+        }
+        CloudSaves.State st = CloudSaves.load(getFilesDir());
+        if (!st.connected()) {
+            MenuRow c = listRow(list, getString(R.string.CLOUD_CONNECT), getString(R.string.CLOUD_CONNECT_DETAIL),
+                                this::startCloudSignIn);
+            if (cloudSignIn != null && cloudSignIn.isAlive())
+                c.setValue(getString(R.string.CLOUD_CONNECTING));
+            defaultFocus = c;
+            addHint("B", R.string.HINT_BACK, this::back);
+            return;
+        }
+        MenuRow acc = listRow(list, getString(R.string.CLOUD_ACCOUNT), getString(R.string.CLOUD_ACCOUNT_DETAIL),
+                              null);
+        acc.setValue(st.email.isEmpty() ? getString(R.string.VAL_ON) : st.email);
+        acc.setOnClickListener(v -> onCloudDisconnect(acc));
+        MenuRow now = listRow(list, getString(R.string.CLOUD_SYNC_NOW), getString(R.string.CLOUD_SYNC_NOW_DETAIL),
+                              () -> cloudSync(null, null, true));
+        now.setValue(cloudSyncing() ? getString(R.string.CLOUD_SYNCING)
+                     : st.lastSync <= 0 ? getString(R.string.CLOUD_NEVER)
+                     : DateUtils.getRelativeTimeSpanString(st.lastSync, System.currentTimeMillis(),
+                                                           DateUtils.MINUTE_IN_MILLIS).toString());
+        if (!st.lastError.isEmpty()) {
+            String err = getString(R.string.CLOUD_LAST_ERROR, st.lastError);
+            onFocus(now, () -> describe(now.description, err, Theme.WARN));
+        }
+        launcherToggle(list, R.string.CLOUD_AUTO, R.string.CLOUD_AUTO_DETAIL,
+                       c -> CloudSaves.load(c.getFilesDir()).auto,
+                       (c, on) -> {
+                           try {
+                               CloudSaves.setAuto(c.getFilesDir(), on);
+                           } catch (IOException e) {
+                               Log.w(TAG, "launcher: cloud: cannot save the setting", e);
+                           }
+                           return on;
+                       }, R.string.CLOUD_AUTO_ON, R.string.CLOUD_AUTO_OFF);
+        defaultFocus = now;
+        if (!st.conflicts.isEmpty()) {
+            listLabel(list, getString(R.string.CLOUD_CONFLICTS));
+            for (String k : st.conflicts) {
+                Library.Record rec = games.get(k);
+                String name = rec != null && !rec.title.isEmpty() ? rec.title : k;
+                MenuRow r = listRow(list, name, getString(R.string.CLOUD_CONFLICT_DETAIL), () -> onCloudConflict(k, name));
+                r.setBadge(getString(R.string.CLOUD_CONFLICT_BADGE), Theme.WARN);
+            }
+        }
+        yAction = () -> cloudSync(null, null, true);
+        addHint("Y", R.string.CLOUD_SYNC_NOW, () -> cloudSync(null, null, true));
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /** A conflict: the player keeps this device's saves (they go up) or the cloud's (they come down). */
+    private void onCloudConflict(String key, String name) {
+        openSheet(name);
+        sheet.addText(getString(R.string.CLOUD_CONFLICT_DETAIL), 4);
+        sheetRow(getString(R.string.CLOUD_KEEP_DEVICE), () -> cloudSync(key, CloudSaves.Side.KEEP_DEVICE, true));
+        sheetRow(getString(R.string.CLOUD_KEEP_CLOUD), () -> cloudSync(key, CloudSaves.Side.KEEP_CLOUD, true));
+        sheetReady();
+    }
+
+    private void onCloudDisconnect(MenuRow row) {
+        long now = SystemClock.uptimeMillis();
+        if (now - cloudDisconnectArmedAt > CONFIRM_MS) {
+            cloudDisconnectArmedAt = now;
+            row.setBadge(getString(R.string.DELETE_CONFIRM_BADGE), Theme.WARN);
+            setNote(getString(R.string.CLOUD_DISCONNECT_CONFIRM), NOTE_WARN);
+            return;
+        }
+        cloudDisconnectArmedAt = 0;
+        GoogleDrive drive = cloudDrive(10_000, 15_000);
+        new Thread(() -> {
+            try {
+                CloudSaves.disconnect(getFilesDir(), drive);
+            } catch (IOException e) {
+                Log.w(TAG, "launcher: cloud: disconnect", e);
+            }
+            Log.i(TAG, "launcher: cloud: disconnected");
+            runOnUiThread(() -> {
+                if (screen == Screen.CLOUD)
+                    refreshKeepingFocus();
+                setNote(getString(R.string.CLOUD_DISCONNECTED), NOTE_OK);
+            });
+        }, "xba-cloud-disconnect").start();
+    }
+
+    /** Connect: a code from Google, shown on CLOUD; a thread polls until the player said yes, then a first sync. */
+    private void startCloudSignIn() {
+        if (cloudSignIn != null && cloudSignIn.isAlive())
+            return;
+        GoogleDrive drive = cloudDrive(15_000, 30_000);
+        Log.i(TAG, "launcher: cloud: signing in");
+        cloudSignIn = new Thread(() -> {
+            GoogleDrive.DeviceCode dc;
+            try {
+                dc = drive.deviceCode(System.currentTimeMillis());
+            } catch (IOException e) {
+                Log.w(TAG, "launcher: cloud: no sign-in code", e);
+                runOnUiThread(() -> setNote(getString(R.string.CLOUD_OFFLINE), NOTE_ERROR));
+                return;
+            }
+            runOnUiThread(() -> {
+                cloudCode = dc;
+                if (screen == Screen.CLOUD)
+                    refreshKeepingFocus();
+            });
+            int interval = dc.intervalS;
+            GoogleDrive.PollResult p = null;
+            String failure = null;
+            while (true) {
+                SystemClock.sleep(interval * 1000L);
+                if (cloudCode != dc && cloudCode != null || isFinishing())
+                    return;
+                if (cancelledCloud(dc))
+                    return;
+                try {
+                    p = drive.poll(dc, System.currentTimeMillis());
+                } catch (IOException e) {
+                    Log.w(TAG, "launcher: cloud: sign-in poll", e);
+                    failure = String.valueOf(e.getMessage());
+                    break;
+                }
+                if (p.state == GoogleDrive.Poll.SLOW_DOWN)
+                    interval += 5;
+                else if (p.state != GoogleDrive.Poll.PENDING)
+                    break;
+            }
+            GoogleDrive.PollResult got = p;
+            String err = failure;
+            boolean ok = got != null && got.state == GoogleDrive.Poll.OK;
+            if (ok) {
+                try {
+                    CloudSaves.connect(getFilesDir(), got.tokens);
+                } catch (IOException e) {
+                    ok = false;
+                }
+            }
+            boolean connected = ok;
+            Log.i(TAG, "launcher: cloud: sign-in " + (connected ? "done" : got != null ? got.state : "failed"));
+            runOnUiThread(() -> {
+                if (cloudCode == dc)
+                    cloudCode = null;
+                if (screen == Screen.CLOUD)
+                    refreshKeepingFocus();
+                if (connected) {
+                    setNote(getString(R.string.CLOUD_CONNECTED, got.tokens.email), NOTE_OK);
+                    cloudSync(null, null, false);
+                } else if (got != null && got.state == GoogleDrive.Poll.DENIED) {
+                    setNote(getString(R.string.CLOUD_DENIED), NOTE_WARN);
+                } else if (got != null && got.state == GoogleDrive.Poll.EXPIRED) {
+                    setNote(getString(R.string.CLOUD_EXPIRED), NOTE_WARN);
+                } else {
+                    setNote(getString(R.string.CLOUD_SIGNIN_FAILED, err == null ? "" : err), NOTE_ERROR);
+                }
+            });
+        }, "xba-cloud-signin");
+        cloudSignIn.start();
+        refreshKeepingFocus();
+    }
+
+    /** The sign-in was cancelled (Cancel, B): cloudCode cleared while this code was shown. */
+    private volatile GoogleDrive.DeviceCode cloudCancelled;
+
+    private boolean cancelledCloud(GoogleDrive.DeviceCode dc) {
+        return cloudCancelled == dc;
+    }
+
+    private void cancelCloudSignIn() {
+        cloudCancelled = cloudCode;
+        cloudCode = null;
+        Log.i(TAG, "launcher: cloud: sign-in cancelled");
+        refreshKeepingFocus();
+    }
+
+    private void copyCloudCode(GoogleDrive.DeviceCode dc) {
+        android.content.ClipboardManager cm = getSystemService(android.content.ClipboardManager.class);
+        if (cm != null)
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("code", dc.userCode));
+        setNote(getString(R.string.CLOUD_CODE_COPIED, dc.userCode), NOTE_OK);
+    }
+
+    /** The verification page in a browser on this device, the code on the clipboard to paste there. */
+    private void openCloudPage(GoogleDrive.DeviceCode dc) {
+        copyCloudCode(dc);
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(dc.verificationUrl)));
+        } catch (ActivityNotFoundException e) {
+            setNote(getString(R.string.CLOUD_NO_BROWSER), NOTE_WARN);
+        }
+    }
+
+    /**
+     * A sync on a thread: every game (key null) or one (side: a settled conflict). manual: its outcome is a note
+     * whatever it is; automatic, only what needs the player (conflicts, signed out).
+     */
+    private void cloudSync(String key, CloudSaves.Side side, boolean manual) {
+        if (cloudSyncing()) {
+            if (manual)
+                setNote(getString(R.string.CLOUD_SYNCING), NOTE_INFO);
+            return;
+        }
+        CloudSaves c = cloud(15_000, 60_000);
+        cloudSyncer = new Thread(() -> {
+            long now = System.currentTimeMillis();
+            CloudSaves.Report rep = key == null ? c.syncAll(now) : c.syncOne(key, side, now);
+            Log.i(TAG, "launcher: cloud: sync up " + rep.uploaded + " down " + rep.downloaded + " conflicts "
+                       + rep.conflicts + " pending " + rep.pending + " failed " + rep.failed.keySet()
+                       + (rep.signedOut ? " (signed out)" : ""));
+            runOnUiThread(() -> onCloudSynced(rep, manual));
+        }, "xba-cloud-sync");
+        cloudSyncer.start();
+        if (screen == Screen.CLOUD && !building)
+            refreshKeepingFocus();
+    }
+
+    private void onCloudSynced(CloudSaves.Report rep, boolean manual) {
+        if (isFinishing())
+            return;
+        for (String k : rep.downloaded)
+            storageSizes.remove(k + "/" + Storage.Kind.SAVES);
+        if (screen == Screen.CLOUD || ((screen == Screen.STORAGE || screen == Screen.GAME_DATA) && rep.moved() > 0))
+            refreshKeepingFocus();
+        String text = null;
+        int kind = NOTE_INFO;
+        if (rep.signedOut) {
+            text = getString(R.string.CLOUD_SIGNED_OUT);
+            kind = NOTE_WARN;
+        } else if (!rep.conflicts.isEmpty()) {
+            text = getResources().getQuantityString(R.plurals.CLOUD_CONFLICT_NOTE, rep.conflicts.size(),
+                                                    rep.conflicts.size());
+            kind = NOTE_WARN;
+        } else if (manual && !rep.failed.isEmpty()) {
+            text = getString(R.string.CLOUD_FAILED, rep.failed.values().iterator().next());
+            kind = NOTE_ERROR;
+        } else if (manual) {
+            text = rep.moved() == 0 ? getString(R.string.CLOUD_UP_TO_DATE)
+                                    : getString(R.string.CLOUD_SYNCED, rep.uploaded.size(), rep.downloaded.size());
+            kind = NOTE_OK;
+        } else if (!rep.downloaded.isEmpty()) {
+            text = getResources().getQuantityString(R.plurals.CLOUD_DOWNLOADED, rep.downloaded.size(),
+                                                    rep.downloaded.size());
+            kind = NOTE_OK;
+        }
+        if (text != null)
+            setNote(text, kind);
+    }
+
+    /** At each resume: with the account connected and Sync automatically on, a sync of every game, once a minute. */
+    private void cloudAutoSync() {
+        if (!cloudConfigured() || cloudSyncing())
+            return;
+        long now = SystemClock.uptimeMillis();
+        if (cloudLastAuto != 0 && now - cloudLastAuto < CLOUD_AUTO_EVERY_MS)
+            return;
+        CloudSaves.State st = CloudSaves.load(getFilesDir());
+        if (!st.connected() || !st.auto)
+            return;
+        cloudLastAuto = now;
+        cloudSync(null, null, false);
+    }
+
+    /**
+     * Before a game starts (key: its saves; null: a running game brought back, nothing to check): with the account
+     * connected and Sync automatically on, the sync on its way finishes and this game's saves are synced (the
+     * cloud's come down when newer), with short timeouts; then go. Offline or slow, the game starts all the same.
+     */
+    private void cloudBeforeLaunch(String key, Runnable go) {
+        if (cloudLaunching)
+            return;
+        CloudSaves.State st = key == null || !cloudConfigured() ? null : CloudSaves.load(getFilesDir());
+        if (st == null || !st.connected() || !st.auto) {
+            go.run();
+            return;
+        }
+        cloudLaunching = true;
+        setNote(getString(R.string.CLOUD_CHECKING), NOTE_INFO);
+        Thread before = cloudSyncer;
+        CloudSaves c = cloud(4_000, 8_000);
+        Thread t = new Thread(() -> {
+            try {
+                if (before != null)
+                    before.join(10_000);
+            } catch (InterruptedException ignored) {
+            }
+            CloudSaves.Report rep = c.syncOne(key, null, System.currentTimeMillis());
+            Log.i(TAG, "launcher: cloud: before launch " + key + ": up " + rep.uploaded + " down " + rep.downloaded
+                       + " conflicts " + rep.conflicts + " failed " + rep.failed.keySet());
+            runOnUiThread(() -> {
+                cloudLaunching = false;
+                if (isFinishing())
+                    return;
+                if (!rep.conflicts.isEmpty())
+                    Log.i(TAG, "launcher: cloud: " + key + " starts with this device's saves (conflict)");
+                go.run();
+            });
+        }, "xba-cloud-launch");
+        cloudSyncer = t;
+        t.start();
+    }
+
+    /** Tests: the sync, sign-in or pre-launch thread. */
+    Thread cloudThreadForTest() {
+        return cloudSyncer != null && cloudSyncer.isAlive() ? cloudSyncer : cloudSignIn;
     }
 
     // ---- ABOUT -------------------------------------------------------------------------------------------------
@@ -8185,6 +8761,14 @@ public class LauncherActivity extends Activity {
      * the only place it is written) and the shared caches switch owner (SaveCaches).
      */
     private void launchShell(boolean restart) {
+        String tid = titleId();
+        Library.Record r = rec();
+        String key = tid != null ? tid : r != null ? r.titleId : null;
+        boolean bringBack = !restart && selectedIsLaunched() && gameRunning();
+        cloudBeforeLaunch(bringBack ? null : key, () -> launchShellNow(restart));
+    }
+
+    private void launchShellNow(boolean restart) {
         boolean other = !selectedIsLaunched() && gameDir() != null;
         boolean fromRom = GameStore.launchedRom(this) != null;   // the process runs a GBA ROM: never this game
         int pid = mainProcessPid();
@@ -9032,5 +9616,9 @@ public class LauncherActivity extends Activity {
             onLsfgDllPicked(data.getData());
         else if (requestCode == REQ_VK_DRIVER)
             onVkDriverPicked(data.getData());
+        else if (requestCode == REQ_SAVES_EXPORT && data.getData() != null)
+            onSavesExportPicked(data.getData());
+        else if (requestCode == REQ_SAVES_IMPORT && data.getData() != null)
+            onSavesImportPicked(data.getData());
     }
 }
