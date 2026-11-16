@@ -616,6 +616,16 @@ void apu_starve_rebase(ApuStarve *s, int64_t now_us, uint64_t played);
 int64_t apu_starve_step(ApuStarve *s, int64_t now_us, uint64_t played,
                         int jitter, int dry);
 
+/* Audio health, always on (apu_core.c): one "[APU] health" line every 10 s
+ * when something went wrong (a device underrun, a stream voice dry, a
+ * period dropped, a trap or submit gap over 20 ms), else once a minute.
+ * apu_health_flush prints what the current window holds now, if anything
+ * went wrong in it (shutdown; tests). The VP's share: frames (32 samples)
+ * of persistent stream voices found with nothing to play, summed over
+ * voices, the spells of them, and the longest spell; read and cleared. */
+void apu_health_flush(void);
+void mcpx_apu_vp_dry_take(unsigned *frames, unsigned *spells, unsigned *max_frames);
+
 /* Save states (XBA-248, apu_savestate.c): the software mixer's play
  * positions, and the host side started afresh after a load (the monitor
  * buffer, the pacing clock, the starvation baseline; the device queue is

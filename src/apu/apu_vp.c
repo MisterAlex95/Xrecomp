@@ -840,6 +840,42 @@ static void vp_stat_samples(uint32_t v, const float samples[][2], int n,
     }
 }
 
+/* Stream dry time, always on (the [APU] health line, apu_core.c): a
+ * persistent stream voice the VP finds with no segment left to play -- the
+ * title has not refilled its list in time -- plays silence. Counted once per
+ * VP frame (32 samples) and voice, with the voice's spells of consecutive
+ * dry frames; the frame thread reads and clears the totals with
+ * mcpx_apu_vp_dry_take. One compare and a few stores per dry voice and
+ * frame, nothing on a voice that plays. */
+static uint32_t s_dry_frame;                        /* VP frames run, from 1 */
+static uint32_t s_dry_last[MCPX_HW_MAX_VOICES];     /* frame the voice was last dry */
+static uint32_t s_dry_run[MCPX_HW_MAX_VOICES];      /* frames in its current spell */
+static unsigned s_dry_frames, s_dry_spells, s_dry_max;
+
+static void vp_dry_note(uint32_t v)
+{
+    uint32_t f = s_dry_frame + 1;                   /* this frame */
+
+    if (s_dry_last[v] == f)                         /* fetched twice this frame */
+        return;
+    if (s_dry_last[v] == 0 || s_dry_last[v] != f - 1) {
+        s_dry_run[v] = 0;
+        s_dry_spells++;
+    }
+    s_dry_last[v] = f;
+    s_dry_frames++;
+    if (++s_dry_run[v] > s_dry_max)
+        s_dry_max = s_dry_run[v];
+}
+
+void mcpx_apu_vp_dry_take(unsigned *frames, unsigned *spells, unsigned *max_frames)
+{
+    *frames = s_dry_frames;
+    *spells = s_dry_spells;
+    *max_frames = s_dry_max;
+    s_dry_frames = s_dry_spells = s_dry_max = 0;
+}
+
 static void vp_stat_report(void)
 {
     if (s_vstat_on <= 0 && s_vdump_voice == -1) return;
@@ -1148,6 +1184,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                 d->vp.ssl[v].ssl_index = 0;
                 voice_off(d, (uint16_t)v);
             } else {
+                vp_dry_note(v);
                 set_notify_status(d, v, MCPX_HW_NOTIFIER_SSLA_DONE +
                                   d->vp.ssl[v].ssl_index,
                                   NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
@@ -1710,6 +1747,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
         }
     }
 
+    s_dry_frame++;
     vp_trace_positions(d);
     vp_stat_report();
     if (s_ring_on > 0 && ++s_ring_frames % 1500 == 0)
@@ -1757,6 +1795,9 @@ void mcpx_apu_vp_finalize(MCPXAPUState *d)
         s_ring[v] = NULL;
     }
     memset(s_vdump_failed, 0, sizeof(s_vdump_failed));
+    memset(s_dry_last, 0, sizeof(s_dry_last));
+    memset(s_dry_run, 0, sizeof(s_dry_run));
+    s_dry_frame = s_dry_frames = s_dry_spells = s_dry_max = 0;
     memset(s_vstat, 0, sizeof(s_vstat));
     s_vstat_on = -1;
     s_vdump_voice = -1;

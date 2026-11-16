@@ -136,6 +136,13 @@ It holds the APU lock (`d->lock`) for its whole loop and drops it in
   desktop Linux, which is ignored). macOS: QoS user-interactive. The first
   line of the thread logs the outcome (`[APU] frame thread nice -16: ...`);
   `RECOMP_APU_PRIORITY=0` keeps the default priority.
+- **Audio health, always on.** Each period that reaches the device reads the
+  queue first (so an underrun that began partway through a period, during a
+  trap, is counted), then the clock; trap spells read the clock when they
+  begin and end; the VP counts persistent stream voices with nothing to play.
+  The `[APU] health` line comes out every 10 s when something went wrong,
+  else once a minute ([debugging](../../docs/pipeline/06-debugging.md#audio-diagnostics)).
+  Test: `tests/apu_health`.
 
 ### 2. Software Mixer (Direct API)
 
