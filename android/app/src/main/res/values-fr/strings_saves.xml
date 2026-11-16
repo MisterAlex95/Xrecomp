@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Sauvegardes exportées et importées, sauvegardes en ligne. -->
+<resources>
+    <string name="SAVES_EXPORT">Exporter les sauvegardes</string>
+    <string name="SAVES_EXPORT_ALL">Exporter toutes les sauvegardes</string>
+    <string name="SAVES_EXPORT_DETAIL">Écrit vos sauvegardes dans un fichier zip de votre choix : un dossier, une clé USB ou un stockage en ligne comme Google Drive. Importez-le ici ou sur un autre appareil.</string>
+    <string name="SAVES_IMPORT">Importer des sauvegardes</string>
+    <string name="SAVES_IMPORT_DETAIL">Restaure les sauvegardes d\'un fichier zip fait par Exporter les sauvegardes. Chaque jeu du fichier retrouve ses sauvegardes ; celles qu\'il avait sont mises de côté. Un jeu en cours de ces sauvegardes est d\'abord fermé.</string>
+    <plurals name="SAVES_GAMES">
+        <item quantity="one">%d jeu</item>
+        <item quantity="other">%d jeux</item>
+    </plurals>
+    <string name="SAVES_NONE">Aucune sauvegarde à exporter pour l\'instant.</string>
+    <string name="SAVES_EXPORTING">Export des sauvegardes</string>
+    <string name="SAVES_IMPORTING">Import des sauvegardes</string>
+    <plurals name="SAVES_EXPORTED">
+        <item quantity="one">Sauvegardes de %1$d jeu écrites dans %2$s.</item>
+        <item quantity="other">Sauvegardes de %1$d jeux écrites dans %2$s.</item>
+    </plurals>
+    <plurals name="SAVES_IMPORTED">
+        <item quantity="one">Sauvegardes de %d jeu restaurées.</item>
+        <item quantity="other">Sauvegardes de %d jeux restaurées.</item>
+    </plurals>
+    <string name="SAVES_NOT_AN_ARCHIVE">%s n\'est pas un fichier de sauvegardes fait par XRecomp.</string>
+</resources>

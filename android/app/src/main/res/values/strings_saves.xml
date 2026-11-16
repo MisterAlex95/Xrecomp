@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Saves out and back, and cloud saves (docs/android/app-shell.md « Saves out and back », « Cloud saves »). A file of
+     its own so that it does not collide with other strings edits. -->
+<resources>
+    <string name="SAVES_EXPORT">Export saves</string>
+    <string name="SAVES_EXPORT_ALL">Export all saves</string>
+    <string name="SAVES_EXPORT_DETAIL">Writes your saves to a zip file you choose: a folder, a USB stick or a cloud drive such as Google Drive. Import it here or on another device.</string>
+    <string name="SAVES_IMPORT">Import saves</string>
+    <string name="SAVES_IMPORT_DETAIL">Restores saves from a zip file made by Export saves. Each game in the file gets its saves back; the ones it had are kept aside. A running game of these saves is closed first.</string>
+    <plurals name="SAVES_GAMES">
+        <item quantity="one">%d game</item>
+        <item quantity="other">%d games</item>
+    </plurals>
+    <string name="SAVES_NONE">No saves to export yet.</string>
+    <string name="SAVES_EXPORTING">Exporting saves</string>
+    <string name="SAVES_IMPORTING">Importing saves</string>
+    <plurals name="SAVES_EXPORTED">
+        <item quantity="one">Saves of %1$d game written to %2$s.</item>
+        <item quantity="other">Saves of %1$d games written to %2$s.</item>
+    </plurals>
+    <plurals name="SAVES_IMPORTED">
+        <item quantity="one">Saves of %d game restored.</item>
+        <item quantity="other">Saves of %d games restored.</item>
+    </plurals>
+    <string name="SAVES_NOT_AN_ARCHIVE">%s is not a save file made by XRecomp.</string>
+</resources>

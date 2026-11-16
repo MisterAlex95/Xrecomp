@@ -188,6 +188,10 @@ public class LauncherActivity extends Activity {
     private static final int REQ_LIBRARY_TREE = 6;
     static final int REQ_PACK_HANDOVER = 7;
     private static final int REQ_VK_DRIVER = 8;
+    private static final int REQ_SAVES_EXPORT = 9;
+    private static final int REQ_SAVES_IMPORT = 10;
+    /** The titles the pending « Export saves » writes (set before the picker opens), and its key (null: all). */
+    private List<String> exportKeys;
     /** The library re-reads its entries' states (Prepare, queue, running game) every this many polls. */
     private static final int LIBRARY_POLL_EVERY = 4;
 
@@ -692,6 +696,11 @@ public class LauncherActivity extends Activity {
 
     Prep homePrepForTest() {
         return homePrep;
+    }
+
+    /** Tests: a runWorker task has not finished. */
+    boolean workerBusyForTest() {
+        return workerBusy;
     }
 
     String noteForTest() {
@@ -3240,6 +3249,7 @@ public class LauncherActivity extends Activity {
             for (Storage.Item it : items)
                 storageRow(list, it);
             storageMeasureLater(items);
+            saveTransferRows(list, key);
         }
         describe(change.description, facts, Theme.TEXT_DIM);
         addHint("A", R.string.HINT_SELECT, this::clickFocused);
@@ -7098,6 +7108,7 @@ public class LauncherActivity extends Activity {
                         storageRow(list, it);
                     storageMeasureLater(items);
                 }
+                saveTransferRows(list, key);
             }
         }
         defaultFocus = first;
@@ -7330,6 +7341,7 @@ public class LauncherActivity extends Activity {
         topRight.setText(getString(R.string.LIB_ST_FREE, size(freeSpace())));
         Storage.Dirs dirs = storageDirs();
         LinearLayout list = listTemplate();
+        saveTransferRows(list, null);
         List<Storage.Item> all = new ArrayList<>();
         for (String tid : Storage.titles(dirs, games)) {
             List<Storage.Item> items = Storage.items(dirs, tid, games.get(tid));
@@ -7513,6 +7525,157 @@ public class LauncherActivity extends Activity {
                 setNote(getString(R.string.DELETED), NOTE_OK);
             });
         }, "xba-delete").start();
+    }
+
+    // ---- Saves out and back (SaveArchive; docs/android/app-shell.md « Saves out and back ») ----------------------
+
+    /**
+     * « Export saves » (only when there are some) and « Import saves »: for one game (key) or, in Storage, all of
+     * them (key null). The file goes where the player picks, through Android's file picker: a folder, a USB stick, a
+     * cloud drive such as Google Drive.
+     */
+    private void saveTransferRows(LinearLayout list, String key) {
+        Storage.Dirs dirs = storageDirs();
+        int n = 0;
+        if (key == null)
+            n = SaveArchive.titlesWithSaves(dirs, games).size();
+        if (key != null ? SaveArchive.hasSaves(dirs, key) : n > 0) {
+            MenuRow ex = listRow(list, getString(key == null ? R.string.SAVES_EXPORT_ALL : R.string.SAVES_EXPORT),
+                                 getString(R.string.SAVES_EXPORT_DETAIL), () -> onExportSaves(key));
+            if (key == null)
+                ex.setValue(getResources().getQuantityString(R.plurals.SAVES_GAMES, n, n));
+        }
+        listRow(list, getString(R.string.SAVES_IMPORT), getString(R.string.SAVES_IMPORT_DETAIL), this::onImportSaves);
+    }
+
+    private void onExportSaves(String key) {
+        List<String> keys = key != null ? java.util.Collections.singletonList(key)
+                                        : SaveArchive.titlesWithSaves(storageDirs(), games);
+        if (keys.isEmpty() || (key != null && !SaveArchive.hasSaves(storageDirs(), key))) {
+            setNote(getString(R.string.SAVES_NONE), NOTE_WARN);
+            return;
+        }
+        exportKeys = new ArrayList<>(keys);
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                       .setType("application/zip")
+                       .putExtra(Intent.EXTRA_TITLE, SaveArchive.fileName(key, System.currentTimeMillis()));
+        try {
+            startActivityForResult(i, REQ_SAVES_EXPORT);
+        } catch (ActivityNotFoundException e) {
+            setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
+        }
+    }
+
+    private void onImportSaves() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                       .putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "application/zip", "application/x-zip-compressed",
+                                                                         "application/octet-stream" });
+        try {
+            startActivityForResult(i, REQ_SAVES_IMPORT);
+        } catch (ActivityNotFoundException e) {
+            setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
+        }
+    }
+
+    /** The titles' display names for an archive's manifest: the library's titles. */
+    private java.util.Map<String, String> saveNames(List<String> keys) {
+        java.util.Map<String, String> m = new java.util.HashMap<>();
+        for (String k : keys) {
+            Library.Record r = games.get(k);
+            if (r != null && !r.title.isEmpty())
+                m.put(k, r.title);
+        }
+        return m;
+    }
+
+    private String appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            return "";
+        }
+    }
+
+    private void onSavesExportPicked(Uri uri) {
+        List<String> keys = exportKeys;
+        exportKeys = null;
+        if (keys == null || keys.isEmpty())
+            return;
+        java.util.Map<String, String> names = saveNames(keys);
+        String version = appVersion();
+        Storage.Dirs dirs = storageDirs();
+        Log.i(TAG, "launcher: saves: exporting " + keys);
+        runWorker(R.string.SAVES_EXPORTING, () -> {
+            SaveArchive.Summary s;
+            try (OutputStream out = openForWrite(uri)) {
+                s = SaveArchive.export(dirs, keys, names, version, out);
+            }
+            Log.i(TAG, "launcher: saves: exported " + s.titles.size() + " game(s), " + s.files + " file(s), "
+                       + s.bytes + " bytes");
+            workerNoteKind = NOTE_OK;
+            workerNote = getResources().getQuantityString(R.plurals.SAVES_EXPORTED, s.titles.size(),
+                                                          s.titles.size(), displayName(uri));
+        });
+    }
+
+    /** A picked document for writing, truncated (« wt »; « w » for a provider that has no « wt »). */
+    private OutputStream openForWrite(Uri uri) throws IOException {
+        OutputStream out;
+        try {
+            out = getContentResolver().openOutputStream(uri, "wt");
+        } catch (IllegalArgumentException | java.io.FileNotFoundException e) {
+            out = getContentResolver().openOutputStream(uri, "w");
+        }
+        if (out == null)
+            throw new IOException("cannot write " + uri);
+        return out;
+    }
+
+    /**
+     * Worker: the archive is unpacked and checked first; a running game whose saves it holds is ended; then each of
+     * its games gets the archive's saves, its own kept aside (save/.backup/<key>/).
+     */
+    private void onSavesImportPicked(Uri uri) {
+        Storage.Dirs dirs = storageDirs();
+        String name = displayName(uri);
+        Log.i(TAG, "launcher: saves: importing " + name);
+        runWorker(R.string.SAVES_IMPORTING, () -> {
+            SaveArchive.Unpacked u;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null)
+                    throw new IOException("cannot open " + name);
+                u = SaveArchive.unpack(dirs, in);
+            } catch (IOException e) {
+                SaveArchive.discard(new SaveArchive.Unpacked(new File(dirs.saveDir(), SaveArchive.IMPORT_DIR)));
+                Log.w(TAG, "launcher: saves: not a save archive", e);
+                fail(getString(R.string.SAVES_NOT_AN_ARCHIVE, name));
+                return;
+            }
+            if (gameRunning() && holdsRunningGame(u.keys()))
+                endRunningGame();
+            SaveArchive.Summary s = SaveArchive.install(dirs, u, null);
+            Log.i(TAG, "launcher: saves: imported " + s.titles + ", " + s.files + " file(s), " + s.skipped
+                       + " entr(ies) skipped");
+            runOnUiThread(() -> {
+                for (String k : s.titles)
+                    storageSizes.remove(k + "/" + Storage.Kind.SAVES);
+            });
+            workerNoteKind = NOTE_OK;
+            workerNote = getResources().getQuantityString(R.plurals.SAVES_IMPORTED, s.titles.size(), s.titles.size());
+        });
+    }
+
+    /** True when keys hold the running game's: its title ID, or for a console game any console game's key. */
+    private boolean holdsRunningGame(List<String> keys) {
+        if (GameStore.launchedRom(this) != null) {
+            for (String k : keys) {
+                if (Console.ofKey(k) != Console.XBOX)
+                    return true;
+            }
+            return false;
+        }
+        String t = launchedTid();
+        return t != null && keys.contains(t.toUpperCase(Locale.ROOT));
     }
 
     // ---- ABOUT -------------------------------------------------------------------------------------------------
@@ -9032,5 +9195,9 @@ public class LauncherActivity extends Activity {
             onLsfgDllPicked(data.getData());
         else if (requestCode == REQ_VK_DRIVER)
             onVkDriverPicked(data.getData());
+        else if (requestCode == REQ_SAVES_EXPORT && data.getData() != null)
+            onSavesExportPicked(data.getData());
+        else if (requestCode == REQ_SAVES_IMPORT && data.getData() != null)
+            onSavesImportPicked(data.getData());
     }
 }
