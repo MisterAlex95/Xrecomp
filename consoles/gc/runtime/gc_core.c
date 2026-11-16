@@ -25,6 +25,8 @@ void gc_schedule(gc_machine *m)
         t = m->next_line;
     if (m->dec_fire < t)
         t = m->dec_fire;
+    if (m->di && gc_di_next_event(m) < t)
+        t = gc_di_next_event(m);
     if (((m->h.cpu.msr & PPC_MSR_EE) && gc_irq_pending(m)) || m->error[0])
         t = m->h.now;
     m->h.next_event = t;
@@ -78,12 +80,10 @@ uint64_t gc_field_ns(const gc_machine *m)
     return (uint64_t)field_lines(m, m->frames) * m->line_cycles * 1000000000ull / GC_CPU_HZ;
 }
 
-gc_machine *gc_create(const uint8_t *dol, size_t size, char *why, size_t why_len)
+/* A machine with nothing loaded: MEM1 and ARAM cleared, low memory as the IPL leaves it for an application (boot
+ * info, clocks, TV mode), the CPU with translation and FP on, video timing at the start of a field. */
+gc_machine *gc_alloc_machine(char *why, size_t why_len)
 {
-    if (size < 0x100) {
-        snprintf(why, why_len, "too small for a DOL header (%zu bytes)", size);
-        return NULL;
-    }
     gc_machine *m = calloc(1, sizeof *m);
     if (!m) {
         snprintf(why, why_len, "out of memory");
@@ -96,6 +96,45 @@ gc_machine *gc_create(const uint8_t *dol, size_t size, char *why, size_t why_len
         gc_destroy(m);
         return NULL;
     }
+    uint8_t *lo = m->h.ram;
+    rc_put32(lo + 0x20, 0x0D15EA5Eu);   /* boot magic */
+    rc_put32(lo + 0x24, 1);             /* boot info version */
+    rc_put32(lo + 0x28, GC_RAM_SIZE);   /* physical memory size */
+    rc_put32(lo + 0x2C, 3);             /* console type: retail */
+    rc_put32(lo + 0xCC, 0);             /* TV mode: NTSC */
+    rc_put32(lo + 0xD0, GC_ARAM_SIZE);  /* ARAM size */
+    rc_put32(lo + 0xF0, GC_RAM_SIZE);   /* simulated memory size */
+    rc_put32(lo + 0xF8, 162000000u);    /* bus clock */
+    rc_put32(lo + 0xFC, GC_CPU_HZ);     /* core clock */
+    /* CPU: translation on with the BATs the IPL sets (0x80000000 cached and 0xC0000000 uncached, both 256 MB onto
+     * physical 0), FP available. */
+    gc_cpu *c = &m->h.cpu;
+    c->msr = PPC_MSR_FP | PPC_MSR_IR | PPC_MSR_DR | PPC_MSR_RI | PPC_MSR_ME;
+    c->spr[528] = c->spr[536] = 0x80001FFFu; /* IBAT0U, DBAT0U */
+    c->spr[529] = c->spr[537] = 0x00000002u; /* IBAT0L, DBAT0L */
+    c->spr[530] = c->spr[538] = 0xC0001FFFu; /* IBAT1U, DBAT1U */
+    c->spr[531] = c->spr[539] = 0x0000002Au; /* IBAT1L, DBAT1L: cache-inhibited, guarded */
+    c->spr[PPC_SPR_HID2] = GC_HID2_LSQE | GC_HID2_PSE; /* quantised loads / stores and paired singles on */
+    gc_mmu_bats(m);
+    m->dec_zero = 0xFFFFFFFFu; /* DEC = -1 */
+    m->dec_fire_tick = 1ull << 32;
+    m->line = 0;
+    m->vi[0x01] = 0; /* display off until the program configures it */
+    video_timing(m);
+    m->next_line = m->line_cycles;
+    m->field_end = (uint64_t)field_lines(m, 0) * m->line_cycles;
+    return m;
+}
+
+gc_machine *gc_create(const uint8_t *dol, size_t size, char *why, size_t why_len)
+{
+    if (size < 0x100) {
+        snprintf(why, why_len, "too small for a DOL header (%zu bytes)", size);
+        return NULL;
+    }
+    gc_machine *m = gc_alloc_machine(why, why_len);
+    if (!m)
+        return NULL;
     /* DOL: 7 text and 11 data sections (file offset, address, size), BSS, entry. */
     for (int i = 0; i < 18; i++) {
         uint32_t off = be32(dol + 4 * i), addr = be32(dol + 0x48 + 4 * i), len = be32(dol + 0x90 + 4 * i);
@@ -132,35 +171,7 @@ gc_machine *gc_create(const uint8_t *dol, size_t size, char *why, size_t why_len
         gc_destroy(m);
         return NULL;
     }
-    /* Low memory as the IPL leaves it for an application (boot info, clocks, TV mode). */
-    uint8_t *lo = m->h.ram;
-    rc_put32(lo + 0x20, 0x0D15EA5Eu);   /* boot magic */
-    rc_put32(lo + 0x24, 1);             /* boot info version */
-    rc_put32(lo + 0x28, GC_RAM_SIZE);   /* physical memory size */
-    rc_put32(lo + 0x2C, 3);             /* console type: retail */
-    rc_put32(lo + 0xCC, 0);             /* TV mode: NTSC */
-    rc_put32(lo + 0xD0, GC_ARAM_SIZE);  /* ARAM size */
-    rc_put32(lo + 0xF0, GC_RAM_SIZE);   /* simulated memory size */
-    rc_put32(lo + 0xF8, 162000000u);    /* bus clock */
-    rc_put32(lo + 0xFC, GC_CPU_HZ);     /* core clock */
-    /* CPU: translation on with the BATs the IPL sets (0x80000000 cached and 0xC0000000 uncached, both 256 MB onto
-     * physical 0), FP available, entry. */
-    gc_cpu *c = &m->h.cpu;
-    c->msr = PPC_MSR_FP | PPC_MSR_IR | PPC_MSR_DR | PPC_MSR_RI | PPC_MSR_ME;
-    c->pc = entry;
-    c->spr[528] = c->spr[536] = 0x80001FFFu; /* IBAT0U, DBAT0U */
-    c->spr[529] = c->spr[537] = 0x00000002u; /* IBAT0L, DBAT0L */
-    c->spr[530] = c->spr[538] = 0xC0001FFFu; /* IBAT1U, DBAT1U */
-    c->spr[531] = c->spr[539] = 0x0000002Au; /* IBAT1L, DBAT1L: cache-inhibited, guarded */
-    c->spr[PPC_SPR_HID2] = GC_HID2_LSQE | GC_HID2_PSE; /* quantised loads / stores and paired singles on */
-    gc_mmu_bats(m);
-    m->dec_zero = 0xFFFFFFFFu; /* DEC = -1 */
-    m->dec_fire_tick = 1ull << 32;
-    m->line = 0;
-    video_timing(m);
-    m->next_line = m->line_cycles;
-    m->field_end = (uint64_t)field_lines(m, 0) * m->line_cycles;
-    m->vi[0x01] = 0; /* display off until the program configures it */
+    m->h.cpu.pc = entry;
     gc_schedule(m);
     return m;
 }
@@ -175,6 +186,7 @@ void gc_destroy(gc_machine *m)
     free(m->rc_hash_keys);
     free(m->rc_hash_idx);
     free(m->missed);
+    gc_di_free(m);
     free(m);
 }
 
@@ -244,6 +256,8 @@ int gc_run_frame(gc_machine *m)
             m->dec_fire_tick += 1ull << 32;
             m->dec_fire = m->dec_fire_tick * GC_TB_DIV;
         }
+        if (m->di && m->h.now >= gc_di_next_event(m))
+            gc_di_event(m);
         if (m->h.now >= m->field_end)
             break;
         take_interrupts(m);

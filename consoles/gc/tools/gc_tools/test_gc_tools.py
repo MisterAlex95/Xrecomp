@@ -143,12 +143,8 @@ CFLAGS = ["-O2", "-ffp-contract=off", "-frounding-math", "-Wall", "-Werror"]
 
 
 def _build_gc_run(tmp_path):
-    srcs = [os.path.join(RUNTIME, f) for f in ("gc_core.c", "gc_cpu.c", "gc_bus.c", "gc_si.c", "gc_mmu.c",
-                                               "gc_recomp.c")]
-    exe = str(tmp_path / "gc_run")
-    subprocess.run([CC] + CFLAGS + ["-rdynamic", "-I", RUNTIME, "-o", exe,
-                    os.path.join(RUNTIME, "tools", "gc_run.c")] + srcs + ["-ldl", "-lm"], check=True)
-    return EMULATOR + [exe]
+    from . import cbuild
+    return EMULATOR + [cbuild.gc_run(str(tmp_path / "build"), CC, CFLAGS)]
 
 
 def _peek(out):

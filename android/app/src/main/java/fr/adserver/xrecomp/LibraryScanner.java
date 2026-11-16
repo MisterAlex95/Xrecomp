@@ -376,9 +376,12 @@ final class LibraryScanner {
             case XisoNative.ENOTXISO:
             case XisoNative.ECORRUPT:
                 i.status = LibraryIndex.NOT_XISO;
-                // A plain .iso is an Xbox or a PlayStation disc: only the content tells (Console.sniffIso).
+                // A plain .iso is an Xbox, a PlayStation or a GameCube disc, a .ciso an Xbox or a GameCube one: only
+                // the content tells (Console.sniffIso, Console.identify; XBA-261).
                 if (rc == XisoNative.ENOTXISO && parts.size() == 1 && Console.isPlainIso(n.name))
-                    identify(i, n, Console.PS1);
+                    identify(i, n, null);
+                else if (parts.size() == 1 && n.name.toLowerCase(Locale.ROOT).endsWith(".ciso"))
+                    identify(i, n, Console.GC);
                 break;
             default:
                 i.status = LibraryIndex.UNREADABLE;
@@ -453,7 +456,7 @@ final class LibraryScanner {
 
         /**
          * Reads n's content for its console and title key (Console.identify); i becomes a game of that console when
-         * it has one and it is the console only (the one n's name says).
+         * it has one and it is the console only (the one n's name says; null: any console but the Xbox).
          */
         void identify(LibraryIndex.Item i, Node n, Console only) {
             Console.Identity id = null;
@@ -462,7 +465,8 @@ final class LibraryScanner {
             } catch (IOException | RuntimeException e) {
                 warn("launcher: library: cannot read " + n.loc + ": " + e);
             }
-            String key = id == null || id.console != only ? null : Console.packDirName(id.console, id.key);
+            String key = id == null || (only != null ? id.console != only : id.console == Console.XBOX) ? null
+                         : Console.packDirName(id.console, id.key);
             if (key == null)
                 return;
             i.kind = LibraryIndex.KIND_ROM;

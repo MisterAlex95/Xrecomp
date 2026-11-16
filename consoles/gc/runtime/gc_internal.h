@@ -94,6 +94,8 @@ struct gc_machine {
     size_t nmissed, cap_missed;
     gc_recomp_stats stats;
 
+    struct gc_di *di;     /* the DVD interface and its disc (gc_di.c), NULL until a disc is inserted */
+
     int verbose;
     char error[200];
     uint32_t trace[64];   /* last PCs the interpreter ran */
@@ -133,11 +135,20 @@ void gc_si_write(gc_machine *m, unsigned idx, uint32_t v);
 void gc_si_line(gc_machine *m, uint32_t field_line);
 
 /* gc_core.c */
+gc_machine *gc_alloc_machine(char *why, size_t why_len);
 void gc_schedule(gc_machine *m);
 uint64_t gc_tb(gc_machine *m);
 
 /* gc_recomp.c */
 bool gc_recomp_dispatch(gc_machine *m);
 void gc_recomp_icbi(gc_machine *m, uint32_t ea);
+
+/* gc_di.c (XBA-261): registers 0x0C006000-0x0C00603F (idx = offset / 4), its next event (UINT64_MAX: none), the
+ * event itself (a command completes, the cover closes), freeing it and its discs. */
+uint32_t gc_di_read32(gc_machine *m, unsigned idx);
+void gc_di_write32(gc_machine *m, unsigned idx, uint32_t v);
+uint64_t gc_di_next_event(gc_machine *m);
+void gc_di_event(gc_machine *m);
+void gc_di_free(gc_machine *m);
 
 #endif

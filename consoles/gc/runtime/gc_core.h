@@ -2,8 +2,9 @@
  * lifted code with an interpreter behind it, the console's memory map, and the little hardware a libogc program
  * touches before it draws text on the XFB: the processor interface (interrupts), the video interface (timing,
  * retrace interrupts, the framebuffer address), the DSP's mailbox and ARAM DMA, EXI / SI / AI that complete at
- * once, and standard controllers on the serial interface (XBA-259). No GX, no DSP code, no disc. Played on the host
- * layer by gc_runtime.h (the app, gc_play); headless by gc_run. See consoles/README.md « GameCube ». */
+ * once, and standard controllers on the serial interface (XBA-259). No GX, no DSP code. Discs and the DVD drive:
+ * gc_disc.h, gc_boot.h (XBA-261). Played on the host layer by gc_runtime.h (the app, gc_play); headless by gc_run.
+ * See consoles/README.md « GameCube ». */
 #ifndef GC_CORE_H
 #define GC_CORE_H
 

@@ -56,8 +56,9 @@ target_link_libraries(main PRIVATE -Wl,--whole-archive n64_core n64_rsp n64_rdp 
 # The GameCube core goes in whole too (gc_core.h, gc_recomp_rt.h's gc_read* / gc_write*), exported: a GameCube pack's
 # lifted code binds to its bus functions at dlopen, as gc_run's does (XBA-259).
 target_link_libraries(main PRIVATE -Wl,--whole-archive gc_core -Wl,--no-whole-archive)
-# A .chd PlayStation disc's title key (XBA-159): the PS1 disc reader as recomp_pack_rom_identify's disc hook.
-target_link_libraries(main PRIVATE ps1_identify)
+# A .chd PlayStation disc's title key (XBA-159): the PS1 disc reader as recomp_pack_rom_identify's disc hook; a .gcz
+# GameCube disc's (XBA-261): the GameCube disc readers as its GameCube hook.
+target_link_libraries(main PRIVATE ps1_identify gc_identify)
 set(XBA_CONSOLE_FAST_LIBS gba_core gba_runtime gba_pack   # the interpreters: release flags below too
                           ps1_core ps1_gpu ps1_cd ps1_spu ps1_mdec ps1_runtime
                           n64_core n64_rsp n64_rdp n64_rdp_sw n64_runtime

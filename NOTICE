@@ -182,7 +182,9 @@ libchdr — vendored for PlayStation .chd disc images
   commit 47d794151b2b64f6aba60304e6480f4f5a2bc24b (2026-10-11, after tag v0.3.0),
   unmodified reader sources
   and the dependencies it ships; built as the static library ps1_chdr when
-  XBR_PS1_CHD is ON (consoles/ps1/runtime, ps1_disc.c). Each part keeps its
+  XBR_PS1_CHD is ON (consoles/ps1/runtime, ps1_disc.c). The GameCube disc
+  readers (consoles/gc/runtime/gc_disc*.c: GCZ, RVZ / WIA) use its miniz,
+  zstd and LZMA SDK decoders through the same library. Each part keeps its
   own licence text next to it:
 
     libchdr          BSD 3-Clause, Copyright Romain Tisserand

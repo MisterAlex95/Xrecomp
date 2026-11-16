@@ -380,6 +380,103 @@ public class ConsoleTest {
         assertNull(Ps1Native.titleKey(disc.getPath()));   // no libxba_import.so on the JVM
     }
 
+    // ---- GameCube (XBA-261) ------------------------------------------------------------------------------------
+
+    /** A GameCube disc's start: game code, maker, disc number, revision, magic 0xC2339F3D at 0x1C, padding. */
+    static byte[] gcDisc(String id, int disc, int rev, int size) {
+        byte[] b = new byte[size];
+        System.arraycopy(id.getBytes(StandardCharsets.US_ASCII), 0, b, 0, 6);
+        b[6] = (byte)disc;
+        b[7] = (byte)rev;
+        b[0x1C] = (byte)0xC2;
+        b[0x1D] = 0x33;
+        b[0x1E] = (byte)0x9F;
+        b[0x1F] = 0x3D;
+        for (int i = 0x440; i < size; i++)
+            b[i] = (byte)(i * 13 + (i >> 9));
+        return b;
+    }
+
+    private static void le(byte[] b, int at, long v, int n) {
+        for (int i = 0; i < n; i++)
+            b[at + i] = (byte)(v >> (8 * i));
+    }
+
+    /** A GCZ of iso: blocks of block bytes, zlib unless stored is set (stored blocks carry the top bit). */
+    static byte[] gcz(byte[] iso, int block, boolean stored) {
+        int n = (iso.length + block - 1) / block;
+        ByteArrayOutputStream data = new ByteArrayOutputStream();
+        byte[] head = new byte[32 + 12 * n];
+        for (int i = 0; i < n; i++) {
+            byte[] raw = java.util.Arrays.copyOfRange(iso, i * block, (i + 1) * block);
+            byte[] d = raw;
+            if (!stored) {
+                java.util.zip.Deflater z = new java.util.zip.Deflater(9);
+                z.setInput(raw);
+                z.finish();
+                byte[] buf = new byte[block + 1024];
+                d = java.util.Arrays.copyOf(buf, z.deflate(buf));
+                z.end();
+            }
+            le(head, 32 + 8 * i, data.size() | (stored ? 1L << 63 : 0), 8);
+            java.util.zip.Adler32 a = new java.util.zip.Adler32();
+            a.update(d);
+            le(head, 32 + 8 * n + 4 * i, a.getValue(), 4);
+            data.write(d, 0, d.length);
+        }
+        le(head, 0, 0xB10BC001L, 4);
+        le(head, 8, data.size(), 8);
+        le(head, 16, iso.length, 8);
+        le(head, 24, block, 4);
+        le(head, 28, n, 4);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(head, 0, head.length);
+        byte[] d = data.toByteArray();
+        out.write(d, 0, d.length);
+        return out.toByteArray();
+    }
+
+    @Test
+    public void gameCubeImportFilterAndKeys() throws Exception {
+        for (String n : new String[] { "Game.gcm", "Game.RVZ", "Game.gcz", "Game.wia" })
+            assertEquals(n, Console.GC, Console.byName(n));
+        assertTrue(Console.importable("a.rvz") && Console.importable("a.gcm") && Console.importable("a.gcz"));
+        assertEquals(Console.XBOX, Console.byName("Game.ciso"));   // an Xbox CISO unless its content says otherwise
+        byte[] iso = gcDisc("GALE01", 0, 0, 0x10000);
+        assertEquals(Console.GC, Console.detect(file("Melee.iso", iso)));   // after the Xbox and PS1 checks
+        Console.Identity id = Console.identify(file("Melee.iso", iso));
+        assertEquals(Console.GC, id.console);
+        assertEquals("GALE01-0", id.key);
+        assertEquals("gc-GALE01-0", id.packName());
+        assertEquals("GXXE01-2-D2", Console.identify(file("Disc2.gcm", gcDisc("GXXE01", 1, 2, 0x1000))).key);
+        assertEquals("G___01-0", Console.identify(file("Odd.gcm", gcDisc("G?x 01", 0, 0, 0x1000))).key);
+        // GCZ: block 0 inflated, or stored
+        assertEquals("GALE01-0", Console.identify(file("Melee.gcz", gcz(iso, 0x4000, false))).key);
+        assertEquals("GALE01-0", Console.identify(file("Stored.gcz", gcz(iso, 0x4000, true))).key);
+        // CISO: "CISO", block size, map; block 0 after the 0x8000-byte header
+        byte[] ciso = new byte[0x8000 + 0x8000];
+        System.arraycopy("CISO".getBytes(StandardCharsets.US_ASCII), 0, ciso, 0, 4);
+        le(ciso, 4, 0x8000, 4);
+        ciso[8] = 1;
+        System.arraycopy(iso, 0, ciso, 0x8000, 0x8000);
+        assertEquals("GALE01-0", Console.identify(file("Melee.ciso", ciso)).key);
+        assertEquals(Console.GC, Console.detect(file("Melee.ciso", ciso)));
+        // RVZ / WIA: the disc's first 0x80 bytes at 0x58 of the header
+        byte[] rvz = new byte[0x200];
+        System.arraycopy("RVZ\u0001".getBytes(StandardCharsets.ISO_8859_1), 0, rvz, 0, 4);
+        System.arraycopy(iso, 0, rvz, 0x58, 0x80);
+        assertEquals("GALE01-0", Console.identify(file("Melee.rvz", rvz)).key);
+        rvz[0] = 'W';
+        rvz[1] = 'I';
+        rvz[2] = 'A';
+        assertEquals("GALE01-0", Console.identify(file("Melee.wia", rvz)).key);
+        // not GameCube
+        byte[] bad = iso.clone();
+        bad[0x1F] = 0;
+        assertNull(Console.identify(file("Bad.gcm", bad)));
+        assertNull(Console.detect(file("Bad.iso", bad)));
+    }
+
     @Test
     public void xboxGamesAndOthersHaveNoKey() throws Exception {
         assertNull(Console.identify(file("Halo.iso", xiso())));

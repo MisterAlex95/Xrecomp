@@ -75,6 +75,7 @@
 #include "pack_loader.h"
 #include "gba_runtime.h"
 #include "n64_runtime.h"
+#include "gc_disc.h"
 #include "gc_runtime.h"
 #include "ps1_runtime.h"
 #include "ps1_identify.h"
@@ -297,6 +298,7 @@ int main(int argc, char *argv[])
      * ShellActivity: no Xbox disc image to mount from it (the mount would close that descriptor on its way out). */
     const char *gd = getenv("RECOMP_GAME_DIR");
     ps1_identify_install();   /* a .chd PlayStation disc gets its title key through the PS1 disc reader (XBA-159) */
+    gc_disc_identify_install();   /* a .gcz GameCube disc through the GameCube disc readers (XBA-261) */
     if (gd && *gd && xba_pack_rom_console(gd) != RECOMP_CONSOLE_UNKNOWN)
         setenv("RECOMP_DISC_IMAGE", "0", 1);
     /* Start-up steps, shared with every title (recomp_app.h). */

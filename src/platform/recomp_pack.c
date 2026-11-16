@@ -364,6 +364,55 @@ static int ps1_chd_key(const char *path, char *key, size_t key_n)
     return rc;
 }
 
+/* ---- GameCube (XBA-261) ---- */
+
+static recomp_pack_gc_header_fn s_gc_hook;
+
+void recomp_pack_set_gc_hook(recomp_pack_gc_header_fn fn)
+{
+    s_gc_hook = fn;
+}
+
+static uint32_t be32(const unsigned char *p)
+{
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+#define GC_MAGIC 0xC2339F3Du
+
+/* The key of a disc header's first 0x20 bytes (consoles/gc/runtime/gc_disc.c gc_disc_key_from_header). */
+static int gc_header_key(const unsigned char *d, char *key, size_t key_n)
+{
+    if (be32(d + 0x1C) != GC_MAGIC)
+        return -1;
+    if (d[6])
+        snprintf(key, key_n, "%c%c%c%c%c%c-%u-D%u", code_char(d[0]), code_char(d[1]), code_char(d[2]),
+                 code_char(d[3]), code_char(d[4]), code_char(d[5]), d[7], d[6] + 1u);
+    else
+        snprintf(key, key_n, "%c%c%c%c%c%c-%u", code_char(d[0]), code_char(d[1]), code_char(d[2]), code_char(d[3]),
+                 code_char(d[4]), code_char(d[5]), d[7]);
+    return 0;
+}
+
+/* A GameCube disc image: ISO / GCM, RVZ / WIA (the disc's first 0x80 bytes at 0x58), CISO (block 0 after the
+ * 0x8000-byte header when the map says it is there), GCZ (magic 0xB10BC001 LE) through the hook. */
+static int gc_key(FILE *f, const char *path, const unsigned char *h, size_t hn, char *key, size_t key_n)
+{
+    unsigned char d[0x20];
+    if (hn >= 0x78 && (!memcmp(h, "RVZ\x01", 4) || !memcmp(h, "WIA\x01", 4)))
+        return gc_header_key(h + 0x58, key, key_n);
+    if (hn >= 12 && !memcmp(h, "CISO", 4)) {
+        if (!h[8] || fseek(f, 0x8000, SEEK_SET) != 0 || fread(d, 1, sizeof d, f) != sizeof d)
+            return -1;
+        return gc_header_key(d, key, key_n);
+    }
+    if (hn >= 4 && le32(h) == 0xB10BC001u) {
+        recomp_pack_gc_header_fn hook = s_gc_hook;
+        return hook && hook(path, d) == 0 ? gc_header_key(d, key, key_n) : -1;
+    }
+    return hn >= 0x20 ? gc_header_key(h, key, key_n) : -1;
+}
+
 /* A .cue's first FILE, resolved next to it, into out. */
 static int cue_bin(const char *cue, char *out, size_t n)
 {
@@ -498,6 +547,8 @@ int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t k
         c = RECOMP_CONSOLE_GBA;
     else if (ps1_key(f, key, key_n) == 0)
         c = RECOMP_CONSOLE_PS1;
+    else if (gc_key(f, path, h, hn, key, key_n) == 0)
+        c = RECOMP_CONSOLE_GC;
     else if (dol_key(f, key, key_n) == 0)
         c = RECOMP_CONSOLE_GC;
     fclose(f);

@@ -581,7 +581,8 @@ public class LibraryScannerTest {
         FakeTree n64 = new FakeTree("n64:")
                 .file("Mario.z64", ConsoleTest.n64(0), 60)
                 .file("roms/Mario swapped.v64", ConsoleTest.n64(1), 61)
-                .file("gc/padtest.dol", ConsoleTest.dol(), 62);   // XBA-259: a GameCube homebrew
+                .file("gc/padtest.dol", ConsoleTest.dol(), 62)   // XBA-259: a GameCube homebrew
+                .file("Cube.iso", ConsoleTest.gcDisc("GALE01", 0, 0, 0x10000), 63);   // XBA-261: by content
         return Arrays.asList(root("t:xbox", xbox), root("t:gba", gba), root("t:ps1", ps1), root("t:n64", n64));
     }
 
@@ -631,8 +632,12 @@ public class LibraryScannerTest {
                      r.index.find("n64:/roms/Mario swapped.v64").tid);
 
         java.util.Map<String, List<LibraryIndex.Item>> games = r.index.games();
-        assertEquals(8, games.size());   // Fable, Halo, Sample Quest, Disc, Lone, Plain, Mario (two variants), padtest
+        assertEquals(9, games.size());   // Fable, Halo, Sample Quest, Disc, Lone, Plain, Mario (two), padtest, Cube
         assertEquals(Console.GC, r.index.find("n64:/gc/padtest.dol").console);
+        LibraryIndex.Item cube = r.index.find("n64:/Cube.iso");
+        assertTrue("a GameCube .iso: not an Xbox image, read for its disc header", cube.ok());
+        assertEquals(Console.GC, cube.console);
+        assertEquals("gc-GALE01-0", cube.tid);
         assertEquals(2, games.get("n64-NSME-635A2BFF").size());
         assertEquals(java.util.EnumSet.allOf(Console.class), r.index.consoles());
         List<String> others = new ArrayList<>();

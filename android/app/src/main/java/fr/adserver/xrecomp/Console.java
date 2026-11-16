@@ -116,9 +116,10 @@ enum Console {
 
     /**
      * The console a game file's name says, for the import filter: .gba; PS1 .bin, .cue, .chd; N64 .z64, .n64, .v64;
-     * GameCube .dol (XBA-259: homebrew programs); the Xbox images (DiscImages.isImageName: .xiso .cso .ciso .zso .cci
-     * and split parts). Null for anything else,
-     * and for a plain .iso, which both an Xbox and a PS1 disc use: {@link #detect} reads its content.
+     * GameCube .dol (XBA-259: homebrew programs), .gcm, .rvz, .gcz, .wia (XBA-261: discs); the Xbox images
+     * (DiscImages.isImageName: .xiso .cso .ciso .zso .cci and split parts; a .ciso may also be a GameCube disc:
+     * {@link #detect} reads it). Null for anything else, and for a plain .iso, which an Xbox, a PS1 and a GameCube
+     * disc all use: {@link #detect} reads its content.
      */
     static Console byName(String name) {
         if (name == null)
@@ -132,7 +133,7 @@ enum Console {
             return PS1;
         case "z64": case "n64": case "v64":
             return N64;
-        case "dol":
+        case "dol": case "gcm": case "rvz": case "gcz": case "wia":
             return GC;
         case "iso":
             return null;
@@ -163,6 +164,8 @@ enum Console {
             return null;
         if (isPlainIso(f.getName()))
             return sniffIso(f);
+        if (f.getName().toLowerCase(Locale.ROOT).endsWith(".ciso") && sniffIso(f) == GC)
+            return GC;   // a GameCube CISO; an Xbox one stays XBOX (by name)
         return byName(f.getName());
     }
 
@@ -173,7 +176,8 @@ enum Console {
     /**
      * An .iso's console by content: XBOX for the Xbox volume magic "MICROSOFT*XBOX*MEDIA" at sector 32 of the image or
      * of its game partition (checked first: a redump Xbox image also starts with an ISO 9660 video partition), PS1 for
-     * an ISO 9660 volume whose system ID is "PLAYSTATION" (2048- or 2352-byte sectors), else null.
+     * an ISO 9660 volume whose system ID is "PLAYSTATION" (2048- or 2352-byte sectors), GC for a GameCube disc header
+     * (magic 0xC2339F3D at 0x1C, {@link #gcHeader}: also CISO, GCZ, RVZ / WIA), else null.
      */
     static Console sniffIso(File f) {
         try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
@@ -198,7 +202,12 @@ enum Console {
                     return XBOX;
             }
             Iso iso = Iso.open(r);
-            return iso != null && iso.playstation() ? PS1 : null;
+            if (iso != null && iso.playstation())
+                return PS1;
+            byte[] h = new byte[0xC0];
+            r.seek(0);
+            int hn = r.read(h);
+            return gcHeader(r, h, hn) != null ? GC : null;
         } catch (IOException e) {
             return null;
         }
@@ -233,6 +242,9 @@ enum Console {
      * <li>GameCube DOL (XBA-259): « DOL-&lt;CRC32 of the file&gt; », when every field of its 256-byte header makes
      * sense (no magic: 7 text + 11 data sections inside the file and MEM1, a text section holding the entry, the BSS in
      * MEM1, the header's padding zero).</li>
+     * <li>GameCube (XBA-261): game code + maker + « - » + revision, « -D&lt;n&gt; » added for the second disc of a set
+     * and later (n from 2): « GALE01-0 », « GXXE01-1-D2 » (disc header magic 0xC2339F3D at 0x1C, read after the PS1
+     * check, from an ISO / GCM, CISO, GCZ or RVZ / WIA image: {@link #gcHeader}).</li>
      * </ul>
      * A game code byte outside [A-Z0-9] becomes '_'. A CHD (« MComprHD » at 0: a PlayStation disc, compressed) is read
      * by the native disc reader ({@link #chdReader}, XBA-159). Null for anything else: an Xbox game.
@@ -305,6 +317,9 @@ enum Console {
             Iso iso = Iso.open(r);
             if (iso != null && iso.playstation())
                 return new Identity(PS1, iso.ps1Key());
+            byte[] gc = gcHeader(r, h, hn);
+            if (gc != null)
+                return new Identity(GC, gcKey(gc));
             if ((k = dolKey(r)) != null)
                 return new Identity(GC, k);
             return null;
@@ -400,6 +415,87 @@ enum Console {
         while ((n = r.read(buf)) > 0)
             crc.update(buf, 0, n);
         return String.format(Locale.ROOT, "DOL-%08X", crc.getValue());
+    }
+
+    private static final int GC_MAGIC = 0xC2339F3D;
+
+    private static int gcBe32(byte[] b, int o) {
+        return (b[o] & 0xff) << 24 | (b[o + 1] & 0xff) << 16 | (b[o + 2] & 0xff) << 8 | (b[o + 3] & 0xff);
+    }
+
+    private static long le64(byte[] b, int o) {
+        long v = 0;
+        for (int i = 7; i >= 0; i--)
+            v = v << 8 | (b[o + i] & 0xffL);
+        return v;
+    }
+
+    /**
+     * The first 0x20 bytes of the GameCube disc in an image whose first bytes are h (consoles/gc/runtime/gc_disc.c):
+     * RVZ / WIA (their header keeps the disc's first 0x80 bytes at 0x58), CISO (block 0 after the 0x8000-byte header
+     * when its map has it), GCZ (block 0, inflated unless stored), else the image itself (ISO / GCM). Null when it
+     * carries no GameCube magic.
+     */
+    private static byte[] gcHeader(Rd r, byte[] h, int hn) throws IOException {
+        byte[] d = null;
+        if (hn >= 0x78 && (h[0] == 'R' && h[1] == 'V' && h[2] == 'Z' || h[0] == 'W' && h[1] == 'I' && h[2] == 'A')
+            && h[3] == 1) {
+            d = java.util.Arrays.copyOfRange(h, 0x58, 0x78);
+        } else if (hn >= 12 && h[0] == 'C' && h[1] == 'I' && h[2] == 'S' && h[3] == 'O') {
+            if (h[8] == 0 || r.length() < 0x8020)
+                return null;
+            d = new byte[0x20];
+            r.seek(0x8000);
+            r.readFully(d);
+        } else if (hn >= 32 && gcBe32(h, 0) == 0x01C00BB1) {   // GCZ: 0xB10BC001 little-endian
+            d = gczBlock0(r, h);
+        } else if (hn >= 0x20) {
+            d = java.util.Arrays.copyOf(h, 0x20);
+        }
+        return d != null && d.length >= 0x20 && gcBe32(d, 0x1C) == GC_MAGIC ? d : null;
+    }
+
+    /** A GCZ's block 0 (header: compressed size at 8, block size at 24, block count at 28, little-endian). */
+    private static byte[] gczBlock0(Rd r, byte[] h) throws IOException {
+        long comp = le64(h, 8);
+        long bn = le64(h, 24);
+        long block = bn & 0xffffffffL, n = bn >>> 32;
+        if (n < 1 || n > (1 << 24) || block < 0x20 || block > (64 << 20))
+            return null;
+        byte[] ptrs = new byte[16];
+        r.seek(32);
+        r.readFully(ptrs, 0, n > 1 ? 16 : 8);
+        long p0 = le64(ptrs, 0), end = n > 1 ? le64(ptrs, 8) & Long.MAX_VALUE : comp;
+        long at = 32L + 12L * n + (p0 & Long.MAX_VALUE), len = end - (p0 & Long.MAX_VALUE);
+        if (len <= 0 || len > block + 0x1000L || at + len > r.length())
+            return null;
+        byte[] raw = new byte[(int)len];
+        r.seek(at);
+        r.readFully(raw);
+        if (p0 < 0)   // top bit: stored as is
+            return raw;
+        java.util.zip.Inflater inf = new java.util.zip.Inflater();
+        try {
+            inf.setInput(raw);
+            byte[] out = new byte[0x20];
+            int got = inf.inflate(out);
+            return got == out.length ? out : null;
+        } catch (java.util.zip.DataFormatException e) {
+            return null;
+        } finally {
+            inf.end();
+        }
+    }
+
+    /** The GameCube title key of a disc header's first 0x20 bytes (recomp_pack.c gc_header_key). */
+    static String gcKey(byte[] d) {
+        StringBuilder k = new StringBuilder();
+        for (int i = 0; i < 6; i++)
+            k.append(codeChar(d[i]));
+        k.append('-').append(d[7] & 0xff);
+        if (d[6] != 0)
+            k.append("-D").append((d[6] & 0xff) + 1);
+        return k.toString();
     }
 
     /** A .cue's first FILE, next to the .cue; null when it names none. */

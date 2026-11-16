@@ -76,5 +76,27 @@ if(TARGET gc_play)
         COMMAND sh ${GC_RUN_PLAY} $<TARGET_FILE:gc_play> ${GC_HOMEBREW_DIR}/padtest.dol
                 ${CMAKE_CURRENT_BINARY_DIR}/play_pad ${CMAKE_CURRENT_SOURCE_DIR}/padtest_xfb.png --frames 120
                 --pad 0151:200:30:128:255:77:255)
-    set_tests_properties(gc_play_hello gc_play_pad PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    # XBA-261: the hello world packed as a zstd RVZ disc, booted by gc_runtime through its apploader
+    add_test(NAME gc_play_disc
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_disc.sh play $<TARGET_FILE:gc_play> ${GC_HOMEBREW_DIR}/hello.dol
+                ${CMAKE_CURRENT_BINARY_DIR}/play_disc ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png)
+    set_tests_properties(gc_play_hello gc_play_pad gc_play_disc PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+endif()
+
+# Disc images (XBA-261): gc_disc generates a GCM of our DVD-interface test program and its ISO / CISO / GCZ / RVZ /
+# WIA conversions (gc_tools.disc, no toolchain, no game data): same title key (gc_disc and recomp_pack_rom_identify),
+# DOL and FST from each, and the GCM boots headless through its apploader with the right DVD results.
+# gc_hello_disc packs our libogc hello world into a GCM: same XFB as the DOL (77 without the corpus).
+add_executable(gc_disc_info gc_disc_info.c ${GC_REPO_ROOT}/src/platform/recomp_pack.c
+               ${GC_REPO_ROOT}/src/platform/recomp_cfg.c)
+target_link_libraries(gc_disc_info PRIVATE gc_identify ${CMAKE_DL_LIBS})
+target_compile_options(gc_disc_info PRIVATE -Wall -Wextra)
+if(TARGET gc_run)
+    add_test(NAME gc_disc
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_disc.sh formats $<TARGET_FILE:gc_run> $<TARGET_FILE:gc_disc_info>
+                ${CMAKE_CURRENT_BINARY_DIR}/disc)
+    add_test(NAME gc_hello_disc
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_disc.sh hello $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/hello.dol
+                ${CMAKE_CURRENT_BINARY_DIR}/hello_disc ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png)
+    set_tests_properties(gc_disc gc_hello_disc PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
 endif()

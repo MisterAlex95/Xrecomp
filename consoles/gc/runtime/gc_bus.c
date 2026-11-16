@@ -9,8 +9,9 @@
  *   0x0C004000  MI (16-bit): stored, no memory protection
  *   0x0C005000  DSP (16-bit): mailboxes (the DSP answers 0x8071FEED when it leaves halt, as its ROM does), control
  *               register, ARAM DMA (16 MB of ARAM, copies at once)
- *   0x0C006000  DI, EXI, AI (32-bit): transfers complete at once with nothing on the other end (no disc, no
- *               memory cards; EXI reads give zeros: blank SRAM / RTC); SI: standard controllers (gc_si.c, XBA-259)
+ *   0x0C006000  DI (32-bit): the DVD drive, gc_di.c (XBA-261)
+ *   0x0C006400  SI: standard controllers (gc_si.c, XBA-259); EXI, AI (32-bit): transfers complete at once with
+ *               nothing on the other end (no memory cards; EXI reads give zeros: blank SRAM / RTC)
  *   0x0C008000  GX FIFO: writes dropped
  *   0x20000000  the locked cache (16 KB; gc_mmu.c maps EA 0xE0000000 onto it while HID2[LCE] is set)
  * Anything else reads 0 and drops writes (logged with -v). */
@@ -276,8 +277,10 @@ uint32_t gc_hw_read(gc_machine *m, uint32_t pa, unsigned size)
         return (uint32_t)hw_read16(m, pa) << 16 | hw_read16(m, pa + 2);
     if (off >= 0x3000 && off < 0x3100)
         return pi_read32(m, (off & 0xFF) >> 2);
-    if (off >= 0x6000 && off < 0x6400)
-        return 0; /* DI: no drive */
+    if (off >= 0x6000 && off < 0x6040)
+        return m->di ? gc_di_read32(m, (off & 0x3F) >> 2) : 0; /* DI (gc_di.c); no disc yet: no drive */
+    if (off >= 0x6040 && off < 0x6400)
+        return 0;
     if (off >= 0x6400 && off < 0x6500)
         return gc_si_read(m, (off & 0xFF) >> 2);
     if (off >= 0x6800 && off < 0x683C)
@@ -313,7 +316,9 @@ void gc_hw_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size)
         fprintf(stderr, "gc: HW %08X = %08X\n", pa, v);
     if (off >= 0x3000 && off < 0x3100)
         pi_write32(m, (off & 0xFF) >> 2, v);
-    else if (off >= 0x6000 && off < 0x6400)
+    else if (off >= 0x6000 && off < 0x6040)
+        gc_di_write32(m, (off & 0x3F) >> 2, v);
+    else if (off >= 0x6040 && off < 0x6400)
         ;
     else if (off >= 0x6400 && off < 0x6500)
         gc_si_write(m, (off & 0xFF) >> 2, v);

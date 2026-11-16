@@ -9,6 +9,7 @@
  * shown frame, as many as fit in one display frame at "max". No sound yet (no DSP): nothing is opened. */
 #define _GNU_SOURCE /* pread */
 #include "gc_runtime.h"
+#include "gc_boot.h"
 
 #include "gc_yuv_gl.h"
 #include "host_pad.h"
@@ -260,8 +261,30 @@ static void display(const gc_runtime_opts *o, int *scale, int *filter)
 int gc_runtime_run(const gc_runtime_opts *o)
 {
     size_t dol_n = 0;
-    uint8_t *dol = o && o->dol ? read_all(o->dol, GC_DOL_MAX, &dol_n) : NULL;
-    char key[32], why[160];
+    char key[48], why[160];
+    /* A disc image (XBA-261: ISO / GCM, CISO, GCZ, RVZ, WIA, by content) boots through its apploader, no IPL. */
+    gc_disc *disc = o && o->dol ? gc_disc_open(o->dol, why, sizeof why) : NULL;
+    uint8_t *dol = NULL;
+    gc_machine *m = NULL;
+    bool disc_pal = false;
+    if (disc) {
+        uint8_t hdr[0x20];
+        if (gc_disc_read(disc, 0, hdr, sizeof hdr) == 0)
+            disc_pal = hdr[3] == 'P';
+        if (o->title_key && *o->title_key)
+            snprintf(key, sizeof key, "%s", o->title_key);
+        else if (gc_disc_title_key(disc, key, sizeof key))
+            snprintf(key, sizeof key, "?");
+        printf("gc: disc %s (%s image), key %s\n", base_name(o->dol), gc_disc_format(disc), key);
+        m = gc_create_disc(disc, why, sizeof why);
+        if (!m) {
+            gc_disc_close(disc);
+            fprintf(stderr, "gc: %s does not boot: %s\n", base_name(o->dol), why);
+            return -1;
+        }
+        goto started;
+    }
+    dol = o && o->dol ? read_all(o->dol, GC_DOL_MAX, &dol_n) : NULL;
     if (!dol) {
         fprintf(stderr, "gc: cannot read the program %s (missing, empty or over 16 MB)\n",
                 o && o->dol ? o->dol : "(none)");
@@ -271,18 +294,26 @@ int gc_runtime_run(const gc_runtime_opts *o)
         snprintf(key, sizeof key, "%s", o->title_key);
     else
         gc_runtime_key(dol, dol_n, key, sizeof key);
-    gc_machine *m = gc_create(dol, dol_n, why, sizeof why);
+    m = gc_create(dol, dol_n, why, sizeof why);
     free(dol);
     if (!m) {
         fprintf(stderr, "gc: %s is no DOL the machine can start: %s\n", base_name(o->dol), why);
         return -1;
     }
+started:;
+    /* TV: the option, RECOMP_GC_TV, else a European disc's PAL (gc_create_disc set it), else NTSC */
     const char *tv_env = getenv("RECOMP_GC_TV");
-    int tv = o->tv_mode >= 0 ? o->tv_mode : tv_env && !strcasecmp(tv_env, "pal") ? GC_TV_PAL : GC_TV_NTSC;
-    if (tv == GC_TV_PAL)
-        gc_set_tv_mode(m, GC_TV_PAL);
-    printf("gc: %s, program %s (%zu KB), key %s, TV %s\n", gc_runtime_version(), base_name(o->dol), dol_n / 1024, key,
-           tv == GC_TV_PAL ? "PAL (50 Hz)" : "NTSC (60 Hz)");
+    int tv = o->tv_mode >= 0 ? o->tv_mode
+             : tv_env && *tv_env ? (!strcasecmp(tv_env, "pal") ? GC_TV_PAL : GC_TV_NTSC)
+             : disc_pal ? GC_TV_PAL : GC_TV_NTSC;
+    if (tv != (disc_pal ? GC_TV_PAL : GC_TV_NTSC))
+        gc_set_tv_mode(m, tv);
+    if (disc)
+        printf("gc: %s, disc %s, key %s, TV %s\n", gc_runtime_version(), base_name(o->dol), key,
+               tv == GC_TV_PAL ? "PAL (50 Hz)" : "NTSC (60 Hz)");
+    else
+        printf("gc: %s, program %s (%zu KB), key %s, TV %s\n", gc_runtime_version(), base_name(o->dol), dol_n / 1024,
+               key, tv == GC_TV_PAL ? "PAL (50 Hz)" : "NTSC (60 Hz)");
 
     /* A pack: lifted code where memory still holds what it was lifted from, the interpreter elsewhere. */
     void *lib = NULL;

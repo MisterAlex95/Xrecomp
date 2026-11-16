@@ -12,9 +12,22 @@ if(APPLE)
     add_compile_definitions(_DARWIN_C_SOURCE)
 endif()
 
+# Disc images (XBA-261): gc_disc*.c read ISO / GCM, CISO, GCZ, RVZ / WIA with the codecs vendored in third_party/libchdr
+# (miniz MIT, zstd BSD-3, LZMA SDK public domain; linked through its ps1_chdr library, one copy for both consoles) and
+# our bzip2 decoder; gc_di.c is the DVD interface, gc_boot.c the IPL-free apploader boot.
+set(GC_LIBCHDR ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/libchdr)
+if(NOT TARGET ps1_chdr)
+    add_subdirectory(${GC_LIBCHDR} ${CMAKE_CURRENT_BINARY_DIR}/ps1_chdr)
+endif()
+
 if(NOT TARGET gc_core)
-    add_library(gc_core STATIC gc_core.c gc_cpu.c gc_bus.c gc_si.c gc_mmu.c gc_recomp.c)
+    add_library(gc_core STATIC gc_core.c gc_cpu.c gc_bus.c gc_si.c gc_mmu.c gc_recomp.c
+                gc_disc.c gc_disc_wia.c gc_bzip2.c gc_di.c gc_boot.c)
     target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(gc_core PRIVATE ${GC_LIBCHDR}/deps/miniz-3.1.2 ${GC_LIBCHDR}/deps/zstd-1.5.7
+                                               ${GC_LIBCHDR}/deps/lzma-26.02/include)
+    target_compile_definitions(gc_core PRIVATE MINIZ_NO_ARCHIVE_APIS MINIZ_NO_DEFLATE_APIS MINIZ_NO_STDIO MINIZ_NO_TIME)
+    target_link_libraries(gc_core PUBLIC ps1_chdr)
     # -ffp-contract=off: fmul then fadd round twice on the 750, so the interpreter and lifted code (built the same
     # way, run_hello.sh) must not fuse them (GCC does by default on arm64); fmadd and friends call fma() (XBA-255).
     # -frounding-math: the core runs guest code under the host rounding mode FPSCR[RN] asks for (XBA-260).
@@ -28,14 +41,24 @@ if(NOT TARGET gc_core)
     set_target_properties(gc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
+# recomp_pack_rom_identify's GameCube hook (GCZ), for whoever links src/platform/recomp_pack.c.
+if(NOT TARGET gc_identify)
+    add_library(gc_identify STATIC gc_identify.c)
+    target_include_directories(gc_identify PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+                                                  ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform)
+    target_link_libraries(gc_identify PUBLIC gc_core)
+    target_compile_options(gc_identify PRIVATE -Wall -Wextra)
+    set_target_properties(gc_identify PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # A program that loads a pack exports the core: the lifted code binds to its bus functions at dlopen.
 function(gc_core_exported target)
     set_target_properties(${target} PROPERTIES ENABLE_EXPORTS ON)
     if(APPLE)
         target_link_options(${target} PRIVATE "LINKER:-force_load,$<TARGET_FILE:gc_core>")
-        target_link_libraries(${target} PRIVATE gc_core)
+        target_link_libraries(${target} PRIVATE gc_core ps1_chdr)
     else()
-        target_link_libraries(${target} PRIVATE -Wl,--whole-archive gc_core -Wl,--no-whole-archive m)
+        target_link_libraries(${target} PRIVATE -Wl,--whole-archive gc_core -Wl,--no-whole-archive ps1_chdr m)
     endif()
 endfunction()
 

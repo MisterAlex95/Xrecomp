@@ -95,7 +95,7 @@ enum {
     RECOMP_CONSOLE_GBA = 1,
     RECOMP_CONSOLE_PS1 = 2,
     RECOMP_CONSOLE_N64 = 3,
-    RECOMP_CONSOLE_GC = 4
+    RECOMP_CONSOLE_GC = 4      /* GameCube: DOLs (XBA-259), discs (XBA-261) */
 };
 
 /* "xbox", "gba", "ps1", "n64", "gc" <-> RECOMP_CONSOLE_*. NULL or "" is xbox (a
@@ -117,6 +117,11 @@ const char *recomp_pack_console_name(int console);
  *        (a GameCube program, XBA-259: no magic, so a strict header check:
  *        7 text + 11 data sections inside the file and MEM1, a text section,
  *        the entry in one, the BSS in MEM1, the header's padding zero)
+ *        or, a disc (XBA-261): "<game code><maker>-<revision>", "-D<n>"
+ *        added from a set's second disc (n from 2)  GALE01-0, GXXE01-1-D2
+ *        (disc header magic 0xC2339F3D at 0x1C, checked after the PS1's
+ *        ISO 9660: an ISO / GCM image, CISO, RVZ / WIA (the header's copy of
+ *        the disc's first bytes), GCZ through the GameCube hook below)
  * A game code byte outside [A-Z0-9] becomes '_', so a key names a folder.
  * An Xbox image is none of these (the Xbox path reads it); that is how an
  * .iso is told apart: XISO magic vs ISO 9660 "PLAYSTATION". A CHD (MAME
@@ -141,6 +146,13 @@ typedef struct recomp_pack_disc_hook {
 
 /* Installs the hook (NULL removes it); the struct must outlive its use. */
 void recomp_pack_set_disc_hook(const recomp_pack_disc_hook *hook);
+
+/* The GameCube images libc cannot read (GCZ: zlib blocks, XBA-261): the
+ * disc's first 0x20 bytes of the image at path (a path or "fd:N", left
+ * open), 0 or -1. consoles/gc/runtime/gc_identify.c's
+ * gc_disc_identify_install sets it. NULL removes it. */
+typedef int (*recomp_pack_gc_header_fn)(const char *path, unsigned char hdr[0x20]);
+void recomp_pack_set_gc_hook(recomp_pack_gc_header_fn fn);
 
 /* The pack folder's name: "<console>-<key>" for another console, the
  * normalised title ID for xbox. Returns 0, or -1 when key is empty, longer

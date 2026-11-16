@@ -9,12 +9,17 @@
  * last field, YUV converted to RGB. --pack: a library built from gc_tools.recomp's C (gc_recomp_title_table); its
  * functions bind to this program's bus symbols. --missed: the text addresses the interpreter had to start at after a
  * jump, one hex per line, for gc_tools.recomp --discovered. Exit status: 0, 1 when the machine stopped (unsupported
- * instruction...), 2 on bad arguments or input. */
+ * instruction...), 2 on bad arguments or input.
+ *
+ * Discs (XBA-261): PROG may be a disc image instead (ISO / GCM, CISO, GCZ, RVZ, WIA: decided by content; --disc
+ * forces it): it boots through its apploader with no IPL (gc_boot.h). --disc2 IMAGE --swap-at FIELD swaps discs at
+ * that field (the cover opens, then closes on the second disc), for multi-disc sets. */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "gc_boot.h"
 #include "gc_core.h"
 #include "gc_png.h"
 
@@ -38,8 +43,8 @@ static uint8_t *read_file(const char *path, size_t *size)
 
 int main(int argc, char **argv)
 {
-    const char *dol_path = NULL, *png = NULL, *pack = NULL, *missed = NULL;
-    int frames = 60, stats = 0, verbose = 0, npeek = 0;
+    const char *dol_path = NULL, *png = NULL, *pack = NULL, *missed = NULL, *disc2 = NULL;
+    int frames = 60, stats = 0, verbose = 0, npeek = 0, force_disc = 0, swap_at = -1;
     const char *peek[16];
     int pal = 0;
     gc_pad_state pads[4];
@@ -68,13 +73,20 @@ int main(int argc, char **argv)
                                         (uint8_t)v[4], (uint8_t)v[5]};
         } else if (!strcmp(argv[i], "--stats"))
             stats = 1;
+        else if (!strcmp(argv[i], "--disc") && i + 1 < argc && !dol_path)
+            force_disc = 1, dol_path = argv[++i];
+        else if (!strcmp(argv[i], "--disc2") && i + 1 < argc)
+            disc2 = argv[++i];
+        else if (!strcmp(argv[i], "--swap-at") && i + 1 < argc)
+            swap_at = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v"))
             verbose++;
         else if (argv[i][0] != '-' && !dol_path)
             dol_path = argv[i];
         else {
-            fprintf(stderr, "usage: gc_run PROG.dol [--frames N] [--png OUT] [--pack LIB] [--missed FILE] [--stats]"
-                            " [--peek ADDR[:N]] [--pal] [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]] [-v]\n");
+            fprintf(stderr, "usage: gc_run PROG.dol|DISC [--disc IMAGE] [--disc2 IMAGE --swap-at FIELD] [--frames N]"
+                            " [--png OUT] [--pack LIB] [--missed FILE] [--stats] [--peek ADDR[:N]] [--pal]"
+                            " [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]] [-v]\n");
             return 2;
         }
     }
@@ -82,15 +94,26 @@ int main(int argc, char **argv)
         fprintf(stderr, "gc_run: no DOL\n");
         return 2;
     }
-    size_t size;
-    uint8_t *dol = read_file(dol_path, &size);
-    if (!dol) {
-        fprintf(stderr, "gc_run: cannot read %s\n", dol_path);
-        return 2;
-    }
     char why[160];
-    gc_machine *m = gc_create(dol, size, why, sizeof why);
-    free(dol);
+    gc_machine *m = NULL;
+    gc_disc *disc = gc_disc_open(dol_path, why, sizeof why);
+    if (disc) {
+        m = gc_create_disc(disc, why, sizeof why);
+        if (!m)
+            gc_disc_close(disc);
+    } else if (force_disc) {
+        fprintf(stderr, "gc_run: %s: %s\n", dol_path, why);
+        return 2;
+    } else {
+        size_t size;
+        uint8_t *dol = read_file(dol_path, &size);
+        if (!dol) {
+            fprintf(stderr, "gc_run: cannot read %s\n", dol_path);
+            return 2;
+        }
+        m = gc_create(dol, size, why, sizeof why);
+        free(dol);
+    }
     if (!m) {
         fprintf(stderr, "gc_run: %s: %s\n", dol_path, why);
         return 2;
@@ -112,6 +135,15 @@ int main(int argc, char **argv)
     }
     int rc = 0;
     for (int f = 0; f < frames; f++) {
+        if (disc2 && f == swap_at) {
+            gc_disc *d2 = gc_disc_open(disc2, why, sizeof why);
+            if (!d2) {
+                fprintf(stderr, "gc_run: %s: %s\n", disc2, why);
+                rc = 2;
+                break;
+            }
+            gc_disc_insert(m, d2);
+        }
         if (gc_run_frame(m)) {
             fprintf(stderr, "gc_run: stopped in field %d: %s\n", f, gc_error(m));
             gc_dump_state(m, stderr);
