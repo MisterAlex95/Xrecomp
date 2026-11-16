@@ -51,6 +51,20 @@ static void ansi(XBOX_ANSI_STRING *s, XBOX_OBJECT_ATTRIBUTES *oa, const char *pa
     oa->Attributes = 0x40;
 }
 
+static NTSTATUS open_read_h(const char *path, HANDLE *out)
+{
+    XBOX_ANSI_STRING name;
+    XBOX_OBJECT_ATTRIBUTES oa;
+    XBOX_IO_STATUS_BLOCK ios;
+    HANDLE h = NULL;
+    NTSTATUS st;
+    ansi(&name, &oa, path);
+    st = xbox_NtCreateFile(&h, 0x80100080u /* GENERIC_READ|SYNC|READ_ATTR */, &oa, &ios,
+                           NULL, 0, 1 /* share read */, XBOX_FILE_OPEN, 0x60);
+    *out = h;
+    return st;
+}
+
 static NTSTATUS open_read(const char *path)
 {
     XBOX_ANSI_STRING name;
@@ -116,6 +130,43 @@ int main(int argc, char **argv)
     check((uint32_t)st == 0xC0000034u, "missing file: NAME_NOT_FOUND", (unsigned)st);
     st = query("D:\\media\\event\\CLIP0001.BIN");
     check((uint32_t)st == 0xC0000034u, "missing directory: NAME_NOT_FOUND too", (unsigned)st);
+
+    /* What XFONT asks of a bitmap font it just opened: FileFsVolumeInformation,
+     * then FileInternalInformation. STATUS_NOT_IMPLEMENTED for either and it
+     * never reads the font (SpikeOut: Battle Street drew no text). */
+    printf("volume and file queries on an open file\n");
+    {
+        char host[700];
+        FILE *f;
+        HANDLE h = NULL;
+        XBOX_IO_STATUS_BLOCK ios;
+        uint8_t buf[64];
+        snprintf(host, sizeof host, "%s/Arial10.bmf", adx);
+#if defined(_WIN32)
+        snprintf(host, sizeof host, "%s\\Arial10.bmf", adx);
+#endif
+        f = fopen(host, "wb");
+        if (f) { fputs("font", f); fclose(f); }
+        st = open_read_h("D:\\adx\\Arial10.bmf", &h);
+        check(st == 0, "a file opens", (unsigned)st);
+        memset(&ios, 0, sizeof ios);
+        st = xbox_NtQueryVolumeInformationFile(h, &ios, buf, sizeof buf, XboxFileFsVolumeInformation);
+        check(st == 0 && ios.Information >= 17, "FileFsVolumeInformation answers", (unsigned)st);
+        memset(&ios, 0, sizeof ios);
+        st = xbox_NtQueryVolumeInformationFile(h, &ios, buf, sizeof buf, XboxFileFsDeviceInformation);
+        check(st == 0 && ios.Information == 8, "FileFsDeviceInformation answers", (unsigned)st);
+        memset(&ios, 0, sizeof ios);
+        st = xbox_NtQueryVolumeInformationFile(h, &ios, buf, sizeof buf, XboxFileFsAttributeInformation);
+        check(st == 0 && ios.Information == 16 && !memcmp(buf + 12, "FATX", 4),
+              "FileFsAttributeInformation answers FATX", (unsigned)st);
+        memset(&ios, 0, sizeof ios);
+        st = xbox_NtQueryInformationFile(h, &ios, buf, sizeof buf, XboxFileInternalInformation);
+        check(st == 0 && ios.Information == 8, "FileInternalInformation answers", (unsigned)st);
+        st = xbox_NtQueryVolumeInformationFile(h, &ios, buf, 8, XboxFileFsVolumeInformation);
+        check((uint32_t)st == 0xC0000004u, "a short buffer: INFO_LENGTH_MISMATCH", (unsigned)st);
+        if (h)
+            xbox_NtClose(h);
+    }
 
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "OK", failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;

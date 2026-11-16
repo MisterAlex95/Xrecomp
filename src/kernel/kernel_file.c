@@ -71,6 +71,61 @@ uint32_t xbox_LastFileError(void)
     return g_xbox_last_file_error;
 }
 
+/* NtQueryVolumeInformationFile's classes other than the size, shared by both
+ * backends. Xbox layouts (32-bit, OCHAR strings):
+ *   1 FileFsVolumeInformation: VolumeCreationTime (8), VolumeSerialNumber,
+ *     VolumeLabelLength, SupportsObjects (BOOLEAN), VolumeLabel[] at 17;
+ *   4 FileFsDeviceInformation: DeviceType, Characteristics;
+ *   5 FileFsAttributeInformation: FileSystemAttributes,
+ *     MaximumComponentNameLength, FileSystemNameLength, FileSystemName[] at 12.
+ * Class 1 is what XFONT asks right after it opens a bitmap font: answered
+ * STATUS_NOT_IMPLEMENTED it gives the font up without reading a byte, and a
+ * title drawing its text with XFONT (SpikeOut: Battle Street) shows none.
+ * Returns 0 for a class it does not know (the caller logs it). */
+static NTSTATUS fs_query_common(int disc, PVOID buf, ULONG len, int cls, ULONG *info, int *known)
+{
+    uint8_t *b = (uint8_t *)buf;
+    *known = 1;
+    switch (cls) {
+    case XboxFileFsVolumeInformation: {
+        uint32_t serial = disc ? 0x58424F58u : 0x46415458u;   /* "XBOX" / "FATX" */
+        if (len < 17)
+            return STATUS_INFO_LENGTH_MISMATCH;
+        memset(b, 0, len < 24 ? len : 24);
+        memcpy(b + 8, &serial, 4);                 /* VolumeLabelLength 0, SupportsObjects FALSE */
+        *info = 17;
+        return STATUS_SUCCESS;
+    }
+    case XboxFileFsDeviceInformation: {
+        uint32_t type = disc ? 0x02u : 0x07u;      /* FILE_DEVICE_CD_ROM / FILE_DEVICE_DISK */
+        uint32_t chars = disc ? 0x01u | 0x02u : 0; /* removable, read-only */
+        if (len < 8)
+            return STATUS_INFO_LENGTH_MISMATCH;
+        memcpy(b, &type, 4);
+        memcpy(b + 4, &chars, 4);
+        *info = 8;
+        return STATUS_SUCCESS;
+    }
+    case XboxFileFsAttributeInformation: {
+        const char *name = disc ? "CDFS" : "FATX";
+        uint32_t attrs = disc ? 0x00080000u : 0;   /* FILE_READ_ONLY_VOLUME */
+        uint32_t maxlen = disc ? 255u : 42u, nlen = 4, n;
+        if (len < 12)
+            return STATUS_INFO_LENGTH_MISMATCH;
+        memcpy(b, &attrs, 4);
+        memcpy(b + 4, &maxlen, 4);
+        n = len - 12 < nlen ? len - 12 : nlen;
+        memcpy(b + 8, &nlen, 4);
+        memcpy(b + 12, name, n);
+        *info = 12 + n;
+        return n < nlen ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+    }
+    default:
+        *known = 0;
+        return STATUS_NOT_IMPLEMENTED;
+    }
+}
+
 #if defined(_WIN32)
 /* ====================  Win32 backend  =================================== */
 /* ======================================================================== */
@@ -578,6 +633,18 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
             IoStatusBlock->Information = sizeof(XBOX_FILE_NETWORK_OPEN_INFORMATION);
             return STATUS_SUCCESS;
         }
+        case XboxFileInternalInformation: {   /* IndexNumber (the POSIX side's disc case says why) */
+            BY_HANDLE_FILE_INFORMATION bhi;
+            if (Length < 8)
+                return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GetFileInformationByHandle(FileHandle, &bhi))
+                return STATUS_UNSUCCESSFUL;
+            ((PLARGE_INTEGER)FileInformation)->QuadPart =
+                (LONGLONG)(((ULONGLONG)bhi.nFileIndexHigh << 32) | bhi.nFileIndexLow);
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = 8;
+            return STATUS_SUCCESS;
+        }
         default:
             xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE,
                 "NtQueryInformationFile: unhandled class %d", FileInformationClass);
@@ -736,10 +803,19 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
             IoStatusBlock->Information = sizeof(XBOX_FILE_FS_SIZE_INFORMATION);
             return STATUS_SUCCESS;
         }
-        default:
+        default: {
+            ULONG info = 0;
+            int known;
+            NTSTATUS st = fs_query_common(0, FsInformation, Length, (int)FsInformationClass, &info, &known);
+            if (known) {
+                IoStatusBlock->Status = st;
+                IoStatusBlock->Information = info;
+                return st;
+            }
             xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE,
                 "NtQueryVolumeInformationFile: unhandled class %d", FsInformationClass);
             return STATUS_NOT_IMPLEMENTED;
+        }
     }
 }
 
@@ -1591,6 +1667,19 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
                     IoStatusBlock->Information = sizeof(XBOX_FILE_NETWORK_OPEN_INFORMATION);
                     return STATUS_SUCCESS;
                 }
+                case XboxFileInternalInformation: {
+                    /* FILE_INTERNAL_INFORMATION: IndexNumber, a number unique
+                     * to the file on its volume. XFONT asks it right after it
+                     * opens a bitmap font (with FileFsVolumeInformation); a
+                     * failure there and the font is never read. The node is
+                     * unique and lives as long as the disc is mounted. */
+                    if (Length < 8)
+                        return STATUS_INFO_LENGTH_MISMATCH;
+                    ((PLARGE_INTEGER)FileInformation)->QuadPart = (LONGLONG)(uintptr_t)n;
+                    IoStatusBlock->Status = STATUS_SUCCESS;
+                    IoStatusBlock->Information = 8;
+                    return STATUS_SUCCESS;
+                }
                 default:
                     xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE,
                         "NtQueryInformationFile: unhandled class %d", FileInformationClass);
@@ -1657,6 +1746,13 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
             IoStatusBlock->Information = sizeof(XBOX_FILE_NETWORK_OPEN_INFORMATION);
             return STATUS_SUCCESS;
         }
+        case XboxFileInternalInformation:   /* IndexNumber: the inode (see the disc case) */
+            if (Length < 8)
+                return STATUS_INFO_LENGTH_MISMATCH;
+            ((PLARGE_INTEGER)FileInformation)->QuadPart = (LONGLONG)st.st_ino;
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = 8;
+            return STATUS_SUCCESS;
         default:
             xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE,
                 "NtQueryInformationFile: unhandled class %d", FileInformationClass);
@@ -1892,10 +1988,19 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
             IoStatusBlock->Information = sizeof(XBOX_FILE_FS_SIZE_INFORMATION);
             return STATUS_SUCCESS;
         }
-        default:
+        default: {
+            ULONG info = 0;
+            int known;
+            NTSTATUS st = fs_query_common(disc_of(FileHandle) != NULL, FsInformation, Length, (int)FsInformationClass, &info, &known);
+            if (known) {
+                IoStatusBlock->Status = st;
+                IoStatusBlock->Information = info;
+                return st;
+            }
             xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE,
                 "NtQueryVolumeInformationFile: unhandled class %d", FsInformationClass);
             return STATUS_NOT_IMPLEMENTED;
+        }
     }
 }
 
