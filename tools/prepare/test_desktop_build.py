@@ -488,3 +488,13 @@ def test_e2e_prepare_without_cmake(tmp_path):
         p.kill()
         out, _ = p.communicate()
     assert "=== SYNTH - Static Recompilation ===" in out and "XBE loaded" in out, out[-3000:]
+    # The same title in Sega Chihiro mode (XBA-234): the 128 MB map and the arcade kernel, then it starts.
+    p = subprocess.Popen([str(exe)], cwd=str(exe.parent), env=dict(env, RECOMP_CHIHIRO="1"), stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True)
+    try:
+        out, _ = p.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, _ = p.communicate()
+    assert "[CHIHIRO] mode on: 128 MB RAM" in out and "XBE loaded" in out, out[-3000:]
+    assert "Kernel thunks: 0 entries at Xbox VA 0x00010800" in out, out[-3000:]
