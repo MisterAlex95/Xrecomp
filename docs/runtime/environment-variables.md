@@ -158,7 +158,6 @@ What the title reads as the console's own settings (the dashboard's choices, the
 
 | Variable | Default | What it does | Where |
 |---|---|---|---|
-| `RECOMP_CHIHIRO=1` | off | Sega Chihiro mode (XBA-234, [chihiro.md](../technical/chihiro.md)): 128 MB of RAM (the map, the mirror stride, the heap top and `MmQueryStatistics` follow), `XboxHardwareInfo.Flags` = `XBOX_HW_FLAG_ARCADE` (0x8), and the XBE loader also tries the Chihiro key for the kernel thunk address. Logs `[CHIHIRO] mode on`. The media board and JVS are not modelled yet. | `xbox_chihiro.c`, `xbox_memory_layout.c`, `kernel_bridge.c`, `kernel_memory.c` |
 | `RECOMP_HEAP_RECLAIM` | off | Gives freed guest heap back: freed heap blocks are split instead of handed over whole, and `NtFreeVirtualMemory` returns heap memory. Contiguous memory is `RECOMP_CONTIG_RECLAIM`. | `xbox_memory_layout.c`, `kernel_bridge.c` |
 | `RECOMP_CONTIG_RECLAIM=0` | on | `MmFreeContiguousMemory` gives the block back to the contiguous window, so the next request that fits gets its pages (and possibly its address). `0` keeps every block for good, the behaviour before (when only `RECOMP_HEAP_RECLAIM` freed them): addresses are never seen twice, but a title that frees and reloads textures per scene runs the 64 MB window out (Fable: `[CONTIG] arena exhausted`). The `[CONTIG]` lines count `released=` blocks and `free calls=`. Read once. | `xbox_memory_layout.c` |
 | `RECOMP_EXT_VMA` | off | Extended virtual-memory areas above the mirrors. | `guest_vmem.c`, `xbox_memory_layout.c` |

@@ -36,17 +36,6 @@ def test_a_debug_image_decodes_with_the_debug_keys():
     assert [i.name for i in x.kernel_imports] == ["DbgPrint"]
 
 
-def test_a_chihiro_image_decodes_with_the_chihiro_keys():
-    from tools.xbe_parser.xbe_parser import (ENTRY_CHIHIRO_XOR, ENTRY_RETAIL_XOR, THUNK_CHIHIRO_XOR,
-                                             THUNK_RETAIL_XOR)
-    data = bytearray(build_xbe([Sec(".text", b"\xc3" * 32)], kernel_imports=(49,)))
-    for off, rk, ck in ((0x128, ENTRY_RETAIL_XOR, ENTRY_CHIHIRO_XOR), (0x158, THUNK_RETAIL_XOR, THUNK_CHIHIRO_XOR)):
-        struct.pack_into("<I", data, off, struct.unpack_from("<I", data, off)[0] ^ rk ^ ck)
-    x = parse(bytes(data))
-    assert (x.header.entry_key, x.header.is_debug, x.header.entry_point) == ("chihiro", False, BASE + 0x1000)
-    assert [i.name for i in x.kernel_imports] == ["HalReturnToFirmware"] and x.warnings == []
-
-
 def test_neither_key_keeps_retail_and_warns():
     data = bytearray(build_xbe())
     struct.pack_into("<I", data, 0x128, 0x12345678)      # an entry no key decodes into the image

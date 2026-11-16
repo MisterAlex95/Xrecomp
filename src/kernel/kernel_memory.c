@@ -139,10 +139,9 @@ NTSTATUS __stdcall xbox_MmQueryStatistics(PXBOX_MM_STATISTICS MemoryStatistics)
     memset(MemoryStatistics, 0, sizeof(XBOX_MM_STATISTICS));
     MemoryStatistics->Length = sizeof(XBOX_MM_STATISTICS);
 
-    /* The RAM of this run: 64 MB (16384 pages) on a retail Xbox, 128 MB on a
-     * devkit layout or in Chihiro mode (XBA-234). */
+    /* Xbox has 64MB RAM. Report plausible values. */
     ULONG page_size = 4096;
-    MemoryStatistics->TotalPhysicalPages = (ULONG)(g_xbox_total_ram / page_size);
+    MemoryStatistics->TotalPhysicalPages = 64 * 1024 * 1024 / page_size; /* 16384 pages */
     MemoryStatistics->AvailablePages = (ULONG)(ms.ullAvailPhys / page_size);
     if (MemoryStatistics->AvailablePages > MemoryStatistics->TotalPhysicalPages)
         MemoryStatistics->AvailablePages = MemoryStatistics->TotalPhysicalPages / 2;
