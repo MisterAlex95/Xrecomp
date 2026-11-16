@@ -35,6 +35,7 @@ static int64_t now_us(void) { return qemu_clock_get_us(QEMU_CLOCK_REALTIME); }
 static volatile LONG submits;
 int  xa2_init(void)            { return 1; }
 void xa2_shutdown(void)        {}
+void xa2_clear(void)         {}
 int  xa2_is_active(void)       { return 1; }
 int  xa2_get_buffer_size(void) { return 512; }
 int  xa2_get_buffer_count(void) { return 4; }
