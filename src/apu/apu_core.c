@@ -1281,7 +1281,8 @@ static void *mcpx_apu_frame_thread(void *arg)
     qemu_mutex_lock(&d->lock);
 
     while (!qatomic_read(&d->exiting)) {
-        if (d->pause_requested && !g_test_tone.active && !g_mixer_active_count) {
+        if ((d->pause_requested && !g_test_tone.active && !g_mixer_active_count)
+                || d->state_hold) {
             d->is_idle = true;
             if (xa2_is_active())
                 xa2_expect_drain();     /* a pause, not an underrun */
@@ -1433,6 +1434,90 @@ static void mcpx_apu_resume(MCPXAPUState *d)
 {
     d->pause_requested = false;
     qemu_cond_signal(&d->cond);
+}
+
+/* ============================================================
+ * Save states (XBA-248, apu_savestate.c)
+ * ============================================================ */
+
+int mcpx_apu_state_hold(int hold)
+{
+    MCPXAPUState *d = g_state;
+
+    if (!d)
+        return 0;
+    mcpx_apu_lock_guest(d);
+    d->state_hold = hold != 0;
+    qemu_cond_signal(&d->cond);
+    while (hold && !d->is_idle)
+        qemu_cond_wait(&d->idle_cond, &d->lock);
+    mcpx_apu_unlock_guest(d);
+    return 1;
+}
+
+void mcpx_apu_host_after_load(MCPXAPUState *d)
+{
+    memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
+    /* A fresh EP period: the partial one in frame_buf is gone. */
+    d->ep_frame_div = (d->ep_frame_div + 7) & ~7;
+    d->next_frame_time_us = 0;
+    d->pace_drain_us = 0;
+    d->pace_q_seen = 0;
+    d->pace_stalled = false;
+    hs_rebase();
+}
+
+/* The software mixer (the DirectSound bridge's voices): which slots play,
+ * where, how loud. The PCM they play is the bridge's own (host buffers that
+ * outlive a load within the run), so a slot is restored only when it still
+ * holds a buffer of the same shape. */
+void apu_mixer_state_save(XdsWriter *w)
+{
+    int i;
+
+    EnterCriticalSection(&g_mixer_cs);
+    xds_put_u32(w, APU_MIXER_MAX_VOICES);
+    for (i = 0; i < APU_MIXER_MAX_VOICES; i++) {
+        const APUMixerVoice *v = &g_mixer_voices[i];
+        xds_put_u32(w, (uint32_t)v->active);
+        xds_put_u32(w, (uint32_t)v->looping);
+        xds_put_u32(w, v->pcm_bytes);
+        xds_put_u32(w, v->num_channels);
+        xds_put_u32(w, v->sample_rate);
+        xds_put_u64(w, v->play_offset);
+        xds_put_f32(w, v->volume);
+    }
+    LeaveCriticalSection(&g_mixer_cs);
+}
+
+int apu_mixer_state_load(XdsReader *r)
+{
+    int i, active = 0;
+
+    if (xds_get_u32(r) != APU_MIXER_MAX_VOICES) {
+        xds_fail(r);
+        return 0;
+    }
+    EnterCriticalSection(&g_mixer_cs);
+    for (i = 0; i < APU_MIXER_MAX_VOICES; i++) {
+        APUMixerVoice *v = &g_mixer_voices[i];
+        int act = (int)xds_get_u32(r), loop = (int)xds_get_u32(r);
+        uint32_t bytes = xds_get_u32(r), ch = xds_get_u32(r), rate = xds_get_u32(r);
+        uint64_t off = xds_get_u64(r);
+        float vol = xds_get_f32(r);
+        if (v->pcm_data && v->pcm_bytes == bytes && v->num_channels == ch && v->sample_rate == rate) {
+            v->active = act;
+            v->looping = loop;
+            v->play_offset = off;
+            v->volume = vol;
+        } else {
+            v->active = 0;
+        }
+        active += v->active != 0;
+    }
+    g_mixer_active_count = active;
+    LeaveCriticalSection(&g_mixer_cs);
+    return !r->err;
 }
 
 /* ============================================================

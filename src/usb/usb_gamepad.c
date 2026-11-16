@@ -64,6 +64,19 @@ static uint8_t s_configuration[USB_GAMEPAD_MAX];
 uint8_t usb_gamepad_address(int pad) { return s_address[pad & 3]; }
 int usb_gamepad_configured(int pad) { return s_configuration[pad & 3] != 0; }
 
+void usb_gamepad_state_get(uint8_t address[USB_GAMEPAD_MAX], uint8_t configuration[USB_GAMEPAD_MAX])
+{
+    memcpy(address, s_address, sizeof s_address);
+    memcpy(configuration, s_configuration, sizeof s_configuration);
+}
+
+void usb_gamepad_state_set(const uint8_t address[USB_GAMEPAD_MAX],
+                           const uint8_t configuration[USB_GAMEPAD_MAX])
+{
+    memcpy(s_address, address, sizeof s_address);
+    memcpy(s_configuration, configuration, sizeof s_configuration);
+}
+
 void usb_gamepad_unplugged(int pad)
 {
     s_address[pad & 3] = 0;

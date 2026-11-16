@@ -236,6 +236,18 @@ void xa2_expect_drain(void)
     g_dry = 1;
 }
 
+void xa2_clear(void)
+{
+    uint64_t queued;
+
+    if (!g_initialized || !g_dev) return;
+    queued = SDL_GetQueuedAudioSize(g_dev) / (SDLA_CHANNELS * sizeof(int16_t));
+    SDL_ClearQueuedAudio(g_dev);
+    /* Played stays where it was: the cleared samples were never played. */
+    g_samples_queued -= queued < g_samples_queued ? queued : g_samples_queued;
+    g_dry = 1;
+}
+
 unsigned xa2_underruns(void)
 {
     return g_underruns;

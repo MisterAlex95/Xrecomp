@@ -256,6 +256,13 @@ void xa2_expect_drain(void)
     g_xa2_dry = 1;
 }
 
+void xa2_clear(void)
+{
+    if (!g_xa2_initialized || !g_xa2_source) return;
+    IXAudio2SourceVoice_FlushSourceBuffers(g_xa2_source);
+    g_xa2_dry = 1;
+}
+
 unsigned xa2_underruns(void)
 {
     return g_xa2_underruns;

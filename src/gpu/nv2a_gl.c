@@ -4814,11 +4814,42 @@ static void gl_flip(void)
     gl_check_frame();
 }
 
+/* Save states (XBA-248, nv2a_backend.h's state hook), on the executor
+ * thread with the title frozen. FLUSH: what only the GPU holds goes to guest
+ * memory, as before an out-of-memory reset -- the present read-back in
+ * flight, then every dirty target -- so the state's RAM has the picture.
+ * DROP, after a load: every GL object is forgotten as after a reset, and the
+ * targets, textures, programs and vertex buffers rebuild from the restored
+ * guest memory (programs come back from the disk cache). Depth lives only on
+ * the GPU and is not saved: the first frame after a load starts with it
+ * cleared. */
+static uint32_t s_state_flushes, s_state_drops;   /* for the tests */
+static void gl_state(int op)
+{
+    Nv2aPresentSurface done;
+    int i;
+
+    if (s_init <= 0)
+        return;
+    if (op == NV2A_BACKEND_STATE_FLUSH) {
+        (void)pbo_complete(&done);
+        for (i = 0; i < NV_GL_MAX_RT; i++)
+            if (s_rt[i].tex)
+                rt_readback(&s_rt[i]);
+        s_state_flushes++;
+    } else if (op == NV2A_BACKEND_STATE_DROP) {
+        host_unmap();
+        gl_reset_objects(0);
+        s_state_drops++;
+    }
+}
+
 static Nv2aBackend s_backend = {
     gl_clear, gl_draw, gl_flip,
     NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL | NV2A_BACKEND_CAP_PROGRAM
         | NV2A_BACKEND_CAP_POINTS_LINES | NV2A_BACKEND_CAP_VOLUME,
-    gl_zpass_read, gl_zpass_end, gl_zpass_resolve, gl_draw_program, gl_zpass_flush
+    gl_zpass_read, gl_zpass_end, gl_zpass_resolve, gl_draw_program, gl_zpass_flush,
+    gl_state
 };
 
 static void unregister_self(void)

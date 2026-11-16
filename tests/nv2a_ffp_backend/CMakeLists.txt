@@ -22,9 +22,11 @@ target_compile_definitions(nv2a-pacing-fg-test PRIVATE XBOXRECOMP_LSFG=1)
 add_executable(nv2a-ffp-inline-test nv2a_ffp_inline_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-ffp-batch-test nv2a_ffp_batch_test.c ${NV2A_BACKEND_TEST_SOURCES})
 add_executable(nv2a-clear-rect-test nv2a_clear_rect_test.c ${NV2A_BACKEND_TEST_SOURCES})
+# Save states of the executor (XBA-248): captured, overwritten, restored, drawn as without the round trip.
+add_executable(nv2a-state-test nv2a_state_test.c ${NV2A_BACKEND_TEST_SOURCES})
 foreach(target nv2a-ffp-backend-test nv2a-present-sync-test nv2a-zpass-test nv2a-flip-cap-test nv2a-pacing-test
                nv2a-pacing-fg-test
-               nv2a-ffp-inline-test nv2a-ffp-batch-test nv2a-clear-rect-test)
+               nv2a-ffp-inline-test nv2a-ffp-batch-test nv2a-clear-rect-test nv2a-state-test)
     target_include_directories(${target} PRIVATE ../../src/kernel ../../src)
     if(MSVC)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -76,3 +78,4 @@ set_tests_properties(nv2a-ffp-inline-guess PROPERTIES ENVIRONMENT "RECOMP_FFP_IN
 add_test(NAME nv2a-ffp-batch COMMAND nv2a-ffp-batch-test)
 # CLEAR_SURFACE hands a back end SET_CLEAR_RECT on a swizzled surface, the clip on a linear one.
 add_test(NAME nv2a-clear-rect COMMAND nv2a-clear-rect-test)
+add_test(NAME nv2a-state COMMAND nv2a-state-test)

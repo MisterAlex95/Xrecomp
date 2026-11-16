@@ -24,6 +24,7 @@
 #include "apu_shim.h"
 #include "apu_regs.h"
 #include "apu_debug.h"
+#include "kernel/xbox_dev_state.h"   /* XdsWriter, XdsReader */
 
 /* ============================================================
  * DSP CPU registers
@@ -479,6 +480,9 @@ struct MCPXAPUState {
     QemuCond idle_cond;
     bool pause_requested;
     bool is_idle;
+    /* Save states (XBA-248): the frame thread idles whatever else plays
+     * (mcpx_apu_state_hold). */
+    bool state_hold;
 
     /* d->lock taken by any thread but the frame thread goes through
      * mcpx_apu_lock_guest, which keeps these; the frame thread hands the lock
@@ -611,6 +615,14 @@ void apu_starve_rebase(ApuStarve *s, int64_t now_us, uint64_t played);
  * device ran dry since the previous step. */
 int64_t apu_starve_step(ApuStarve *s, int64_t now_us, uint64_t played,
                         int jitter, int dry);
+
+/* Save states (XBA-248, apu_savestate.c): the software mixer's play
+ * positions, and the host side started afresh after a load (the monitor
+ * buffer, the pacing clock, the starvation baseline; the device queue is
+ * cleared by the caller). d->lock held. */
+void apu_mixer_state_save(XdsWriter *w);
+int  apu_mixer_state_load(XdsReader *r);
+void mcpx_apu_host_after_load(MCPXAPUState *d);
 
 /* Debug globals */
 extern MCPXAPUState *g_state;
