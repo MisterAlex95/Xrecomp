@@ -13,6 +13,7 @@
 
 #include "platform/host_cpus.h"
 #include "kernel.h"
+#include "guest_clock.h"   /* fast-forward: guest spans on the host (XBA-240) */
 #include "xbox_memory_layout.h"   /* XBOX_WORKER_STACK_* + worker-stack decls */
 #include "xbox_seh.h"
 #include <stdio.h>
@@ -194,11 +195,15 @@ NTSTATUS __stdcall xbox_KeDelayExecutionThread(
         /* Positive = absolute time. Calculate relative delay from now. */
         LARGE_INTEGER now;
         GetSystemTimeAsFileTime((LPFILETIME)&now);
+        now.QuadPart += (LONGLONG)xbox_GuestClockExtraUnits(10000000u);   /* XBA-240 */
         LONGLONG diff = Interval->QuadPart - now.QuadPart;
         if (diff <= 0)
             return STATUS_SUCCESS; /* Already past */
         ms = (DWORD)(diff / 10000);
     }
+    /* XBA-240: a guest span: the speed's share of it on the host (as is at
+     * speed 1). */
+    ms = xbox_GuestClockHostMs(ms);
 
     if (Alertable) {
         DWORD result = SleepEx(ms, TRUE);

@@ -13,6 +13,7 @@ set(SOURCES
     ../../src/gpu/nv2a_gl_shader.c
     ../../src/gpu/nv2a_gl_vsh.c
     ../../src/kernel/nv2a_pb_exec.c
+    ../../src/kernel/guest_clock.c
     ../../src/kernel/nv2a_coverage.c
     ../../src/kernel/recomp_status.c
     ../../src/kernel/recomp_discovery.c

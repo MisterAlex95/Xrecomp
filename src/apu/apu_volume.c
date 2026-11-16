@@ -2,6 +2,7 @@
 #include "apu_volume.h"
 
 static volatile int s_volume = 100;
+static volatile int s_ff_mute;   /* XBA-240: fast-forward runs */
 
 void xbox_ApuSetOutputVolume(int percent)
 {
@@ -25,11 +26,31 @@ int xbox_ApuGetOutputVolume(void)
 #endif
 }
 
+void xbox_ApuSetFastForwardMute(int on)
+{
+#if defined(_MSC_VER)
+    s_ff_mute = on != 0;
+#else
+    __atomic_store_n(&s_ff_mute, on != 0, __ATOMIC_RELAXED);
+#endif
+}
+
+int xbox_ApuFastForwardMuted(void)
+{
+#if defined(_MSC_VER)
+    return s_ff_mute;
+#else
+    return __atomic_load_n(&s_ff_mute, __ATOMIC_RELAXED);
+#endif
+}
+
 void xbox_ApuApplyOutputVolume(int16_t *samples, int count)
 {
     int v = xbox_ApuGetOutputVolume(), i;
     int32_t gain;
 
+    if (xbox_ApuFastForwardMuted())
+        v = 0;
     if (v >= 100 || !samples)
         return;
     /* Q15: (v / 100)^2. At most 32767 * 32767 >> 15, so no overflow. */

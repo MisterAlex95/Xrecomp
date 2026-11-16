@@ -719,6 +719,15 @@ public class ShellActivity extends SDLActivity {
             }
         }
 
+        /**
+         * XBA-240: an Xbox title runs (no console ROM was launched; a title without a title ID too). A console ROM
+         * has its row through statesSupported.
+         */
+        @Override
+        public boolean fastForwardSupported() {
+            return GameStore.launchedRom(ShellActivity.this) == null;
+        }
+
         @Override
         public long stateTime(int slot) {
             try {

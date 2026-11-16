@@ -40,6 +40,7 @@
 #include "recomp_status.h"   /* RECOMP_STATUS: frames for the compat runner */
 #include "platform/host_cpus.h"   /* recomp_host_cpus_track (XBA-50) */
 #include "platform/host_time.h"   /* xbox_HostNowNs */
+#include "guest_clock.h"            /* fast-forward: no cap, flips decimated (XBA-240) */
 #ifdef XBOXRECOMP_LSFG
 #include "framegen/framegen_policy.h"   /* frame generation's cap rule */
 #endif
@@ -6641,6 +6642,13 @@ static void flip_cap_book(void)
     uint64_t period, now;
     int cap;
 
+    /* XBA-240: fast-forward holds no frame to a rate (the guest clock runs
+     * faster, and so should the title), and keeps the pacer's measures out
+     * of it; the schedule starts again when it ends. */
+    if (xbox_GuestClockSpeed() > 1) {
+        s_cap_next_ns = s_cap_due_ns = 0;
+        return;
+    }
     if (pacing_auto())
         cap = pacing_cap_at_flip();
     else
@@ -7272,6 +7280,10 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              * color_offset has already moved to the next buffer. */
             Nv2aPresentSurface now, ready;
             int drawn = s_gpu.drawn_offset != 0, have = 0;
+            /* XBA-240: under fast-forward one flip in `speed` is shown (the
+             * read-back and the window's present are what a skipped one
+             * saves); a dump still takes every frame. */
+            int show = s_flip_dumping || s_dump_at_flip || xbox_GuestClockShowFrame();
             uint32_t done = drawn ? s_gpu.drawn_offset : s_gpu.color_offset;
             memset(&now, 0, sizeof now);
             now.va = done ? dma_resolve(done) : 0;
@@ -7283,7 +7295,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             now.w = drawn ? s_gpu.drawn_w : s_gpu.clip_w;
             now.h = drawn ? s_gpu.drawn_h : s_gpu.clip_h;
             ready = now;
-            if (s_backend_present) {
+            if (!show) {
+                have = 0;
+            } else if (s_backend_present) {
                 /* The back end brings the presented surface (and only that)
                  * into guest memory; without a dump it may hand back an
                  * earlier frame whose read-back has completed meanwhile
@@ -7325,7 +7339,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                 s_frame_tris = 0;
             }
             /* The compat runner's view of the frame (recomp_status.h). */
-            if (have && s_backend_present && ready.host_px)
+            if (!show)
+                ;                         /* a fast-forward flip not shown */
+            else if (have && s_backend_present && ready.host_px)
                 recomp_status_frame(ready.host_px, ready.host_w, ready.host_h, ready.host_pitch, 4);
             else if (have)
                 recomp_status_frame((const void *)((uintptr_t)ready.va + (uintptr_t)xbox_GetMemoryOffset()),

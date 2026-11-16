@@ -20,6 +20,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "platform/host_time.h"
+#include "guest_clock.h"          /* fast-forward: the guest clock's speed (XBA-240) */
+#include "apu/apu_volume.h"       /* fast-forward mutes the output */
+#ifndef _WIN32
+#include "platform/recomp_states.h"   /* recomp_ff_active / recomp_ff_speed */
+#endif
 #if defined(_WIN32)
 #include <intrin.h>
 #endif
@@ -1195,6 +1200,46 @@ static void xbox_update_tick_count(void)
     xbox_KeTickCount = GetTickCount();
 }
 
+/* XBA-240: the guest's millisecond tick, GetTickCount64 plus what
+ * fast-forward has gained (guest_clock.h); GetTickCount64 itself until the
+ * speed first leaves 1. KeTickCount, KeQueryInterruptTime, the kernel timers
+ * and the tick-mode vblank read it. */
+uint64_t xbox_GuestTickCount64(void)
+{
+    uint64_t t = (uint64_t)GetTickCount64();
+    if (xbox_GuestClockActive())
+        t += xbox_GuestClockExtraUnits(1000);
+    return t;
+}
+
+/* XBA-240: fast-forward for an Xbox title. The toggle (the in-game menu, a
+ * hotkey) and the hold (the pad chord, usb_gamepad.c) are the consoles'
+ * (recomp_states.h); here they set the guest clock's speed, RECOMP_FF_SPEED
+ * times (2..16, default 4; "max" is 16), and mute the output while it runs
+ * (the consoles average their audio down; an Xbox title's sound is mixed on
+ * the host's clock and would only stutter). Called from the timer thread's
+ * passes, the nv2a ack thread and each pad report: cheap (two atomic loads)
+ * when nothing changed. */
+void xbox_FastForwardPoll(void)
+{
+#ifndef _WIN32
+    uint32_t want = 1, was;
+
+    if (recomp_ff_active()) {
+        int s = recomp_ff_speed();
+        want = s > 0 ? (uint32_t)s : XBOX_GUEST_CLOCK_MAX_SPEED;
+    }
+    was = xbox_GuestClockSpeed();
+    if (want == was)
+        return;
+    xbox_GuestClockSetSpeed(want);
+    xbox_ApuSetFastForwardMute(want > 1);
+    fprintf(stderr, "  [KERNEL] fast-forward %s (guest clock x%u)\n",
+            want > 1 ? "on" : "off", (unsigned)want);
+    fflush(stderr);
+#endif
+}
+
 /* ============================================================================
  * Performance Counters
  *
@@ -1206,6 +1251,11 @@ LARGE_INTEGER __stdcall xbox_KeQueryPerformanceCounter(void)
 {
     LARGE_INTEGER counter;
     QueryPerformanceCounter(&counter);
+    if (xbox_GuestClockActive()) {   /* fast-forward's gain, in counts (XBA-240) */
+        LARGE_INTEGER freq;
+        QueryPerformanceFrequency(&freq);
+        counter.QuadPart += (LONGLONG)xbox_GuestClockExtraUnits((uint64_t)freq.QuadPart);
+    }
     return counter;
 }
 
@@ -1273,6 +1323,8 @@ VOID __stdcall xbox_KeQuerySystemTime(PLARGE_INTEGER CurrentTime)
     CurrentTime->QuadPart = s_time_anchor_100ns
         + (delta / s_time_freq_counts) * 10000000LL
         + (delta % s_time_freq_counts) * 10000000LL / s_time_freq_counts;
+    if (xbox_GuestClockActive())     /* fast-forward's gain (XBA-240) */
+        CurrentTime->QuadPart += (LONGLONG)xbox_GuestClockExtraUnits(10000000u);
 }
 
 /* ============================================================================
@@ -1290,12 +1342,12 @@ VOID __stdcall xbox_KeStallExecutionProcessor(ULONG MicroSeconds)
         return;
 
     QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&start);
+    start = xbox_KeQueryPerformanceCounter();   /* guest time: shorter under fast-forward */
 
     LONGLONG target_counts = (freq.QuadPart * MicroSeconds) / 1000000;
 
     do {
-        QueryPerformanceCounter(&now);
+        now = xbox_KeQueryPerformanceCounter();
     } while ((now.QuadPart - start.QuadPart) < target_counts);
 }
 
@@ -1946,7 +1998,7 @@ ULONGLONG __stdcall xbox_KeQueryInterruptTime(void)
      * scale by 10,000. Resolution is coarser than the real kernel's, but it is
      * monotonic, which is the property callers actually depend on.
      */
-    return (ULONGLONG)GetTickCount64() * 10000ULL;
+    return (ULONGLONG)xbox_GuestTickCount64() * 10000ULL;
 }
 
 /* ============================================================================
@@ -1989,7 +2041,8 @@ uint64_t xbox_ReadTimeStampCounter(void)
         uint64_t secs = ticks / (uint64_t)freq.QuadPart;
         uint64_t rem  = ticks % (uint64_t)freq.QuadPart;
         return secs * XBOX_TSC_HZ
-             + (rem * XBOX_TSC_HZ) / (uint64_t)freq.QuadPart;
+             + (rem * XBOX_TSC_HZ) / (uint64_t)freq.QuadPart
+             + xbox_GuestClockExtraUnits(XBOX_TSC_HZ);   /* fast-forward (XBA-240); 0 until used */
     }
 }
 

@@ -15,6 +15,7 @@
  */
 
 #include "kernel.h"
+#include "guest_clock.h"   /* fast-forward: guest spans on the host (XBA-240) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,22 +37,26 @@ static DWORD xbox_nt_timeout_to_ms(PLARGE_INTEGER Timeout)
     if (Timeout->QuadPart == 0)
         return 0;
 
+    /* XBA-240: a guest span, so it is the speed's share of it on the host
+     * (xbox_GuestClockHostMs: as is at speed 1), and an absolute time is
+     * against the guest's clock. */
     if (Timeout->QuadPart < 0) {
         /* Relative: negative 100ns units */
         LONGLONG relative_100ns = -Timeout->QuadPart;
         DWORD ms = (DWORD)(relative_100ns / 10000);
         if (ms == 0 && relative_100ns > 0)
             ms = 1;
-        return ms;
+        return xbox_GuestClockHostMs(ms);
     }
 
     /* Absolute: compute delta from now */
     LARGE_INTEGER now;
     GetSystemTimeAsFileTime((LPFILETIME)&now);
+    now.QuadPart += (LONGLONG)xbox_GuestClockExtraUnits(10000000u);
     LONGLONG diff = Timeout->QuadPart - now.QuadPart;
     if (diff <= 0)
         return 0;
-    return (DWORD)(diff / 10000);
+    return xbox_GuestClockHostMs((DWORD)(diff / 10000));
 }
 
 /* ============================================================================
@@ -465,11 +470,16 @@ BOOLEAN __stdcall xbox_KeSetTimerEx(
     } else {
         LARGE_INTEGER now;
         GetSystemTimeAsFileTime((LPFILETIME)&now);
+        now.QuadPart += (LONGLONG)xbox_GuestClockExtraUnits(10000000u);   /* XBA-240 */
         LONGLONG diff = DueTime.QuadPart - now.QuadPart;
         due_ms = (diff > 0) ? (DWORD)(diff / 10000) : 0;
     }
 
     period_ms = (Period > 0) ? (DWORD)Period : 0;
+    /* XBA-240: guest spans, on the host's clock at the speed of the moment. */
+    due_ms = xbox_GuestClockHostMs(due_ms);
+    if (period_ms)
+        period_ms = xbox_GuestClockHostMs(period_ms);
 
     DWORD flags = 0;
     if (period_ms == 0)

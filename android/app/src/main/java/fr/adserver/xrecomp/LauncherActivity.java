@@ -6057,7 +6057,7 @@ public class LauncherActivity extends Activity {
         }
         controlsPorts(list);   // XBA-123
         controlsTouch(list);   // XBA-42
-        controlsHotkeys(list, Console.XBOX, padMapTid,   // XBA-190: the menu chord, an Xbox title's only hotkey
+        controlsHotkeys(list, Console.XBOX, padMapTid,   // XBA-190 / XBA-240: the menu chord and fast-forward
                         padMapGame || Hotkeys.gameText(this, padMapTid) != null, () -> Hotkeys.sourcesOf(padMap));
         MenuRow reset = listRow(list, getString(R.string.CTL_RESET), getString(R.string.CTL_RESET_DETAIL),
                                 this::resetControls);
@@ -6324,7 +6324,7 @@ public class LauncherActivity extends Activity {
 
     /**
      * A Controls screen's « Hotkeys » (Hotkeys, src/platform/recomp_hotkeys.h): one row per action a game of console
-     * con has (the menu's alone for an Xbox title), its value the chord; A captures a new one (« press the buttons »),
+     * con has (the menu and fast-forward for an Xbox title, XBA-240), its value the chord; A captures a new one (« press the buttons »),
      * left / right turn it off or put the usual one back; « · conflict » after the chord when two actions share it or a
      * chord without a modifier takes a button the game uses (gameSources: the CPS bits its mapping reads); « Reset
      * hotkeys ». Saved at once: the game's own (key, its GameSettings file) when game, else recomp.cfg's line.

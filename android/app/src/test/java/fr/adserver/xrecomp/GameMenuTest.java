@@ -107,8 +107,9 @@ public class GameMenuTest {
         final int[][] thumbs = new int[GameMenu.SLOTS + 1][];
         final List<Integer> saved = new ArrayList<>(), loaded = new ArrayList<>();
         int saveCode, loadCode;
-        boolean ff;
+        boolean ff, ffOnly;   // ffOnly: XBA-240, an Xbox title (fast-forward without states)
         @Override public boolean statesSupported() { return states; }
+        @Override public boolean fastForwardSupported() { return ffOnly; }
         @Override public long stateTime(int slot) { return times[slot]; }
         @Override public int[] stateThumb(int slot) { return thumbs[slot]; }
         @Override public int saveState(int slot) { saved.add(slot); return saveCode; }
@@ -903,7 +904,8 @@ public class GameMenuTest {
 
     /**
      * XBA-182 / XBA-183 / XBA-190: a GBA game's and an N64 game's Controls page list the hotkeys (fast-forward, quick
-     * save / load, the menu chord: the usual chords); the Xbox list has only the menu's.
+     * save / load, the menu chord: the usual chords); the Xbox list has the menu's and fast-forward's (XBA-240), no
+     * quick save.
      */
     @Test
     public void consoleControlsListFastForward() throws Exception {
@@ -932,7 +934,9 @@ public class GameMenuTest {
         menu.row(GameMenu.Item.CONTROLS).performClick();
         texts.clear();
         collect(menu.drawer, texts);
-        assertFalse(texts.toString(), texts.contains(activity.getString(R.string.HK_FF_HOLD)));
+        assertTrue(texts.toString(), texts.contains(activity.getString(R.string.HK_FF_HOLD)));
+        assertTrue(texts.toString(), texts.contains(ff));
+        assertFalse(texts.toString(), texts.contains(activity.getString(R.string.HK_QSAVE)));
         assertTrue(texts.toString(), texts.contains(activity.getString(R.string.HK_MENU)));
     }
 
@@ -998,6 +1002,32 @@ public class GameMenuTest {
         menu.row(GameMenu.Item.SETTINGS).performClick();
         assertNotNull(menu.row(GameMenu.Item.AUTO_RESUME));
         assertNotNull(menu.row(GameMenu.Item.UPSCALE));
+    }
+
+    /**
+     * XBA-240: an Xbox title (fast-forward, no save states): Fast-forward right under Resume, no state rows, and the
+     * row toggles the host's fast-forward as a console game's does.
+     */
+    @Test
+    public void xboxFastForwardRow() throws Exception {
+        host.ffOnly = true;
+        menu.open("Back");
+        List<Widgets.MenuRow> rows = menu.rowsForTest();
+        assertNull(menu.row(GameMenu.Item.STATE_SAVE));
+        assertNull(menu.row(GameMenu.Item.STATE_LOAD));
+        assertSame(menu.row(GameMenu.Item.RESUME), rows.get(0));
+        assertSame(menu.row(GameMenu.Item.FAST_FORWARD), rows.get(1));
+        assertSame(menu.row(GameMenu.Item.SETTINGS), rows.get(2));
+        Widgets.MenuRow r = menu.row(GameMenu.Item.FAST_FORWARD);
+        assertEquals(activity.getString(R.string.MENU_OFF), r.value);
+        r.performClick();
+        assertTrue(host.ff);
+        assertEquals(activity.getString(R.string.MENU_ON), r.value);
+        idle(100);
+        TestSupport.screenshot(menu.root, "menu-xbox-ff");
+        r.requestFocusFromTouch();
+        press(KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertFalse(host.ff);
     }
 
     @Test

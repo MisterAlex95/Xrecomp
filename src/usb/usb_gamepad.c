@@ -13,6 +13,12 @@
  */
 #include "usb_gamepad.h"
 #include "../kernel/recomp_status.h"   /* RECOMP_STATUS: pad reads for the compat runner */
+#ifndef _WIN32
+#include "../kernel/guest_clock.h"     /* xbox_FastForwardPoll (XBA-240) */
+#include "input/xbox_pad_hotkeys.h"
+#include "platform/recomp_hotkeys.h"
+#include "platform/recomp_states.h"   /* recomp_ff_hold */
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -577,10 +583,49 @@ unsigned usb_gamepad_scripted(void)
     return 0;
 }
 
+#ifndef _WIN32
+/* XBA-240: the fast-forward hotkeys on an Xbox pad, as the consoles read
+ * them (recomp_hotkeys.h: by default Back + right trigger held; a toggle when
+ * the player set one). Only the two fast-forward actions mean anything to an
+ * Xbox title (no states, no rewind; the menu chord is the Android shell's).
+ * A held chord's buttons are taken out of what the title sees. Each report
+ * (the OHCI thread's polls) also picks up the speed (xbox_FastForwardPoll). */
+static void pad_hotkeys(int pad, XBOX_GAMEPAD *g)
+{
+    static recomp_hotkeys hk;
+    static int hk_ready;
+    static recomp_hotkeys_state st[USB_GAMEPAD_MAX];
+    static uint32_t holding;           /* bit n: pad n holds fast-forward */
+    uint32_t pressed = 0, swallow = 0, held;
+
+    if (!hk_ready) {
+        int a;
+        hk = *recomp_hotkeys_get();
+        for (a = 0; a < RECOMP_HK_COUNT; a++)
+            if (a != RECOMP_HK_FF_HOLD && a != RECOMP_HK_FF_TOGGLE)
+                hk.pad[a].mod = hk.pad[a].button = -1;
+        hk_ready = 1;
+    }
+    pad &= USB_GAMEPAD_MAX - 1;
+    held = g ? recomp_hotkeys_pad_update(&hk, &st[pad], xbox_pad_hotkey_sources(g), &pressed, &swallow)
+             : recomp_hotkeys_pad_update(&hk, &st[pad], 0, &pressed, NULL);
+    if (held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD))
+        holding |= 1u << pad;
+    else
+        holding &= ~(1u << pad);
+    recomp_ff_hold(holding != 0);
+    if (pressed)
+        recomp_hotkeys_run(pressed);   /* the toggle */
+    if (g)
+        xbox_pad_hotkey_swallow(g, swallow);
+    xbox_FastForwardPoll();
+}
+#endif
+
 int usb_gamepad_report(int pad, uint8_t *out, int max)
 {
     XBOX_INPUT_STATE state;
-    const XBOX_GAMEPAD *g;
+    XBOX_GAMEPAD *g;
     uint8_t synth = synthetic_buttons();
     int i;
 
@@ -630,12 +675,18 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
     if (pad != 0)
         synth = 0;
     if (xbox_InputGetState((DWORD)pad, &state) != 0) {
+#ifndef _WIN32
+        pad_hotkeys(pad, NULL);        /* unplugged: its chord lets go */
+#endif
         out[2] = synth;
         pad_script_apply(pad, out);
         return 20;
     }
 
     g = &state.Gamepad;
+#ifndef _WIN32
+    pad_hotkeys(pad, g);
+#endif
     out[2] = (uint8_t)((g->wButtons & 0xFF) | synth);
     out[3] = (uint8_t)((g->wButtons >> 8) & 0xFF);
     for (i = 0; i < 8; i++)

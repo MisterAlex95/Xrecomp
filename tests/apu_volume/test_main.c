@@ -50,6 +50,21 @@ int main(void)
     xbox_ApuApplyOutputVolume(NULL, 6);
     xbox_ApuApplyOutputVolume(s, 0);
 
+    /* XBA-240: fast-forward mutes whatever the volume, and keeps it. */
+    xbox_ApuSetOutputVolume(100);
+    CHECK(!xbox_ApuFastForwardMuted());
+    xbox_ApuSetFastForwardMute(1);
+    CHECK(xbox_ApuFastForwardMuted());
+    memcpy(s, ref, sizeof s);
+    xbox_ApuApplyOutputVolume(s, 6);
+    for (int i = 0; i < 6; i++)
+        CHECK(s[i] == 0);
+    CHECK(xbox_ApuGetOutputVolume() == 100);
+    xbox_ApuSetFastForwardMute(0);
+    memcpy(s, ref, sizeof s);
+    xbox_ApuApplyOutputVolume(s, 6);
+    CHECK(memcmp(s, ref, sizeof s) == 0);
+
     if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     printf("apu_volume: all checks passed\n");
     return 0;
