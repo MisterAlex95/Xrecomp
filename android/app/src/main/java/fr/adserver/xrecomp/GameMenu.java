@@ -157,6 +157,11 @@ final class GameMenu {
             return false;
         }
 
+        /** An Xbox title runs (no console ROM was launched). */
+        default boolean xboxTitle() {
+            return false;
+        }
+
         /**
          * XBA-240: a game that fast-forwards without save states runs (an Xbox title: its guest clock runs faster):
          * the Fast-forward row shows.
@@ -1371,6 +1376,14 @@ final class GameMenu {
         return GameStore.autoResume(activity) && resumeSupported();
     }
 
+    private boolean xboxTitle() {
+        try {
+            return host.xboxTitle();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     private boolean resumeSupported() {
         try {
             return host.resumeSupported();
@@ -1395,10 +1408,12 @@ final class GameMenu {
 
     /** Saves the automatic slot when resuming applies (leaving the game: quit, background, back to launcher). */
     void autoSave(String why) {
-        if (!autoResumes())
+        // XBA-265: an Xbox title asks its runtime even when it cannot resume: the runtime writes why beside the slot
+        // (save/xbox-<TID>/auto.why, no capture then), which the title's Home shows.
+        if (!autoResumes() && !(GameStore.autoResume(activity) && xboxTitle()))
             return;
         int code = host.saveState(AUTO_SLOT);
-        Log.i(LauncherActivity.TAG, "shell: menu: automatic slot saved (" + why + "): " + code);
+        Log.i(LauncherActivity.TAG, "shell: menu: automatic slot (" + why + "): " + code);
     }
 
     void setAutoResume(boolean on) {

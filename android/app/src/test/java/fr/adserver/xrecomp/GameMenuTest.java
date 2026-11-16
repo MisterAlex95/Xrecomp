@@ -110,6 +110,7 @@ public class GameMenuTest {
         boolean ff, ffOnly;   // ffOnly: XBA-240, an Xbox title (fast-forward without states)
         @Override public boolean statesSupported() { return states; }
         @Override public boolean fastForwardSupported() { return ffOnly; }
+        @Override public boolean xboxTitle() { return ffOnly; }
         Boolean resume;       // XBA-249: null = as statesSupported; false = an Xbox title's states (this run only)
         @Override public boolean resumeSupported() { return resume != null ? resume : states; }
         boolean needsPrepare; // XBA-258: an Xbox title prepared before its code had resume entries
@@ -1155,10 +1156,15 @@ public class GameMenuTest {
         menu.row(GameMenu.Item.STATE_SAVE).performClick();
         menu.rowsForTest().get(0).performClick();
         assertEquals(activity.getString(R.string.MENU_STATE_ERR_NOT_NOW), menu.flashText());
-        // Leaving the game saves no automatic slot for it.
+        // XBA-265: leaving the game still asks its runtime for the automatic slot, which refuses it without a
+        // capture and writes why beside it (save/xbox-<TID>/auto.why) for the title's Home.
         GameStore.setAutoResume(activity, true);
         menu.autoSave("test");
-        assertEquals(List.of(1), host.saved);
+        assertEquals(List.of(1, GameMenu.AUTO_SLOT), host.saved);
+        // « Resume where I left off » off: not asked at all.
+        GameStore.setAutoResume(activity, false);
+        menu.autoSave("test");
+        assertEquals(List.of(1, GameMenu.AUTO_SLOT), host.saved);
     }
 
     /**

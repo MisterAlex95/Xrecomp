@@ -5,6 +5,7 @@
     <string name="HOME_OLDER_TOOLKIT">Préparé par une version plus ancienne de l\'app</string>
     <string name="HOME_RESUME_YES">Reprend là où vous vous étiez arrêté</string>
     <string name="HOME_RESUME_PREPARE">Préparez à nouveau pour reprendre là où vous vous étiez arrêté</string>
+    <string name="HOME_RESUME_NOT_SAVED">Point de reprise non sauvegardé · %1$s</string>
     <string name="HOME_OLDER_TOOLKIT_NOTE">Cette mise à jour traduit mieux les jeux. Préparer à nouveau (%1$s) pour en profiter ; d\'ici là, le jeu se lance comme avant. Vos sauvegardes sont gardées.</string>
     <string name="ENHANCEMENTS">Améliorations</string>
     <string name="ENHANCEMENTS_DETAIL">Des extras que l\'app a pour %1$s, comme une image en 16:9 ou des menus plus fluides. Le jeu tourne sans eux, comme sur la console. S\'applique à la prochaine préparation.</string>

@@ -1966,7 +1966,13 @@ public class LauncherActivity extends Activity {
         // entries): « Resumes where you left off », or a Prepare again gives it that.
         Pack.Resume resume = st == State.READY && prep == Prep.PLAYABLE && !copying && tid != null
                              ? Pack.resume(getFilesDir(), tid) : Pack.Resume.NO;
-        if (resume == Pack.Resume.YES)
+        // XBA-265: the runtime could not save where the player left off last time: its reason instead.
+        String xboxKey = tid == null ? null : "xbox-" + tid.toUpperCase(Locale.ROOT);
+        String notSaved = st == State.READY && !GameStore.canResume(this, xboxKey)
+                          ? GameStore.resumeWhyNot(this, xboxKey) : null;
+        if (notSaved != null && resume != Pack.Resume.PREPARE_AGAIN)
+            heroLine(info, getString(R.string.HOME_RESUME_NOT_SAVED, notSaved), Theme.WARN);
+        else if (resume == Pack.Resume.YES)
             heroLine(info, getString(R.string.HOME_RESUME_YES), Theme.OK);
         else if (resume == Pack.Resume.PREPARE_AGAIN && !olderToolkit)   // older toolkit: its line says Prepare again
             heroLine(info, getString(R.string.HOME_RESUME_PREPARE), Theme.WARN);

@@ -7,6 +7,7 @@
     <string name="HOME_OLDER_TOOLKIT">Prepared by an older version of the app</string>
     <string name="HOME_RESUME_YES">Resumes where you left off</string>
     <string name="HOME_RESUME_PREPARE">Prepare again to resume where you left off</string>
+    <string name="HOME_RESUME_NOT_SAVED">Where you left off was not saved · %1$s</string>
     <string name="HOME_OLDER_TOOLKIT_NOTE">This update translates games better. Prepare again (%1$s) to get its fixes; until then the game plays as before. Your saves are kept.</string>
     <!-- Settings › General › Enhancements, per game (profile-free WP6: profiles/titles/<id>, optional) -->
     <string name="ENHANCEMENTS">Enhancements</string>

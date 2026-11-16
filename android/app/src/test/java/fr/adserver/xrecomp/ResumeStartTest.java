@@ -1,6 +1,8 @@
 package fr.adserver.xrecomp;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
@@ -13,6 +15,8 @@ import org.robolectric.annotation.Config;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 
 /** A GBA / PS1 / N64 game's Home: Resume when its automatic slot is saved, Start launches once from the boot. */
 @RunWith(RobolectricTestRunner.class)
@@ -41,5 +45,19 @@ public class ResumeStartTest {
         GameStore.requestFreshStart(c);
         assertTrue(GameStore.takeFreshStart(c));
         assertFalse(GameStore.takeFreshStart(c));   // the next process (Restart, another launch) resumes again
+    }
+
+    /** XBA-265: an Xbox title's runtime leaves why the automatic slot was not written (auto.why) for its Home. */
+    @Test
+    public void xboxWhyNotSaved() throws Exception {
+        String tid = "xbox-4D530004";
+        assertNull(GameStore.resumeWhyNot(c, tid));
+        File why = new File(GameStore.resumeState(c, tid).getParentFile(), "auto.why");
+        assertTrue(why.getParentFile().mkdirs() || why.getParentFile().isDirectory());
+        Files.write(why.toPath(), "guest thread 3: a return address no call site names\n".getBytes(StandardCharsets.UTF_8));
+        assertEquals("guest thread 3: a return address no call site names", GameStore.resumeWhyNot(c, tid));
+        Files.write(why.toPath(), "  \n".getBytes(StandardCharsets.UTF_8));
+        assertNull(GameStore.resumeWhyNot(c, tid));
+        assertNull(GameStore.resumeWhyNot(c, null));
     }
 }

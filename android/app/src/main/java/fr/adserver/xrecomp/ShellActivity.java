@@ -770,6 +770,11 @@ public class ShellActivity extends SDLActivity {
         }
 
         @Override
+        public boolean xboxTitle() {
+            return GameStore.launchedRom(ShellActivity.this) == null;
+        }
+
+        @Override
         public long stateTime(int slot) {
             try {
                 return MenuNative.nativeStateTime(slot);

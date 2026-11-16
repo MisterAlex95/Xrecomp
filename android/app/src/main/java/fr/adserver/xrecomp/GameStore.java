@@ -156,6 +156,25 @@ final class GameStore {
         return new File(new File(GameTheme.saveDir(c), tid), "auto.st");
     }
 
+    /**
+     * XBA-265: why an Xbox title's automatic slot was not written when the player last left it (the runtime's
+     * save/xbox-&lt;TID&gt;/auto.why, one line), or null: written, or never tried.
+     */
+    static String resumeWhyNot(Context c, String tid) {
+        if (tid == null)
+            return null;
+        File f = new File(new File(GameTheme.saveDir(c), tid), "auto.why");
+        if (!f.isFile() || f.length() > 4096)
+            return null;
+        try {
+            String s = new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                                  java.nio.charset.StandardCharsets.UTF_8).trim();
+            return s.isEmpty() ? null : s;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
     /** Whether a game's Home offers Resume: « Resume where I left off » on and its automatic slot saved. */
     static boolean canResume(Context c, String tid) {
         return tid != null && autoResume(c) && resumeState(c, tid).isFile();

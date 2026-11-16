@@ -92,6 +92,29 @@ static int to_recomp(int rc)
     return RECOMP_STATE_EIO;
 }
 
+/* XBA-265: why the automatic slot was not written, beside it (<dir>/auto.why, one line), so the launcher can say it
+ * on the title's Home; removed when the slot is written. why NULL: remove. */
+static void auto_why(const char *slot_path, const char *why)
+{
+    char path[1210];
+    size_t n = strlen(slot_path);
+    FILE *f;
+
+    if (n < 3 || n + 2 >= sizeof path)
+        return;
+    memcpy(path, slot_path, n - 3);            /* ".st" -> ".why" */
+    memcpy(path + n - 3, ".why", 5);
+    if (!why) {
+        remove(path);
+        return;
+    }
+    f = fopen(path, "w");
+    if (!f)
+        return;
+    fprintf(f, "%s\n", why);
+    fclose(f);
+}
+
 static int op_save(int slot, void *user)
 {
     char path[1200];
@@ -102,27 +125,40 @@ static int op_save(int slot, void *user)
 
     if (recomp_states_slot_path(s_dir, slot, path, sizeof path) != 0)
         return RECOMP_STATE_ESLOT;
-    held = unhold();
+    memset(&st, 0, sizeof st);
     if (slot == RECOMP_STATE_AUTO) {
         /* The automatic slot is loaded at the next start, in a fresh process (XBA-250): only a state that can be
-         * resumed there is written; otherwise the older one goes too (it is not where the player left off). */
+         * resumed there is written; otherwise the older one goes too (it is not where the player left off).
+         * XBA-265: the reason is kept beside it (auto.why) for the launcher. */
         uint8_t *blob = NULL;
         size_t n = 0;
         char why[220];
-        rc = xbox_StateCapture(OP_TIMEOUT_MS, &blob, &n, &st);
-        if (rc == XBOX_STATE_OK && !xbox_StateResumable(blob, n, why, sizeof why)) {
-            snprintf(st.reason, sizeof st.reason, "not resumable in another run: %s", why);
+        if (!xbox_StateResumeAvailable(why, sizeof why)) {
+            /* No capture: it could not be resumed anyway (code without resume entries, no states yet). */
             rc = XBOX_STATE_ECHAIN;
-            remove(path);
-        } else if (rc == XBOX_STATE_OK) {
-            rc = xbox_StateWriteSlot(path, blob, n, NULL, 0, 0);
-            st.blob_bytes = n;
+        } else {
+            held = unhold();
+            rc = xbox_StateCapture(OP_TIMEOUT_MS, &blob, &n, &st);
+            if (rc == XBOX_STATE_OK && !xbox_StateResumable(blob, n, why, sizeof why))
+                rc = XBOX_STATE_ECHAIN;
+            else if (rc == XBOX_STATE_OK) {
+                rc = xbox_StateWriteSlot(path, blob, n, NULL, 0, 0);
+                st.blob_bytes = n;
+            } else
+                snprintf(why, sizeof why, "%s%s%s", xbox_StateError(rc), st.reason[0] ? ": " : "", st.reason);
+            rehold(held);
+            free(blob);
         }
-        free(blob);
+        if (rc == XBOX_STATE_ECHAIN) {
+            snprintf(st.reason, sizeof st.reason, "not resumable in another run: %.160s", why);
+            remove(path);
+        }
+        auto_why(path, rc == XBOX_STATE_OK ? NULL : why);
     } else {
+        held = unhold();
         rc = xbox_StateSaveSlot(path, OP_TIMEOUT_MS, NULL, 0, 0, &st);
+        rehold(held);
     }
-    rehold(held);
     if (rc == XBOX_STATE_OK)
         printf("xbox: state slot %d saved in %s (%.1f MB)\n", slot, path, st.blob_bytes / 1048576.0);
     else
