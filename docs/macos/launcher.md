@@ -130,7 +130,8 @@ checks reuse the Java tests' cases, so change both sides together.
 - **PATH**: an app opened from Finder gets launchd's PATH, without Homebrew. Every child (prepare, the checks, the
   game) gets `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` first, then the
   inherited entries; otherwise prepare fails at `cmake` only when started from Finder.
-- **Dependencies** (Setup): CMake, Ninja (optional), Clang, Git, `pkg-config` finding `sdl2` (Homebrew's `sdl2-compat`
+- **Dependencies** (Setup): CMake (only for a toolkit without a prebuilt runtime: a checkout; the release zip has
+  `runtime/macos-arm64/` and builds titles with Clang alone, XBA-86), Ninja (optional), Clang, Git, `pkg-config` finding `sdl2` (Homebrew's `sdl2-compat`
   is fine) and `epoxy`, and the Python packages. Each missing item shows its command; the app never runs `brew`.
 
 ## Storage
@@ -415,7 +416,7 @@ reader ignores keys it does not know (`eta=` may come later). `step` never goes 
 | 2 | `analyse` | 0, 2 xbe_parser, 5 disasm, 60 func_id, 80 abi_analysis, 100 done (or 100 "up to date") |
 | 3 | `project` | 0, 100 |
 | 4 | `lift` | 0, 100 (`msg` = C file counts, or "up to date") |
-| 5 | `build` | 0, 5 CMake configure, 5-90 from the build's `[i/n]` (Ninja) or `[ nn%]` (make) lines (`msg` = `compiling 12/345`, at most one line per percent or 2 s), 90 built, 90-98 extracting the disc (image sources), 98 the disc's other images, 100 ready |
+| 5 | `build` | 0, 5 CMake configure, 5-90 from the build's `[i/n]` (Ninja) or `[ nn%]` (make) lines (`msg` = `compiling 12/345`, at most one line per percent or 2 s); with the toolkit's prebuilt runtime (no CMake, `tools/prepare/desktop_build.py`) 5-90 from the compile driver's files done (`msg` = `compiling 12/345`); 90 built, 90-98 extracting the disc (image sources), 98 the disc's other images, 100 ready |
 
 Error codes and exit status:
 
@@ -426,7 +427,7 @@ Error codes and exit status:
 | `BAD_PROFILE` | step 1: a profile layer is not well formed |
 | `ANALYSE_FAILED` | step 2: disasm, func_id or abi_analysis failed |
 | `LIFT_FAILED` | step 4: `tools.recomp` failed |
-| `COMPILE_FAILED` | step 5: CMake configure or build failed, or another image's prepare |
+| `COMPILE_FAILED` | step 5: CMake configure or build failed, the compile driver's compile or link failed (the message starts with `COMPILE_FAILED:`, `LINK_FAILED:`, `NO_COMPILER:` or `NO_BUILDER:`), or another image's prepare |
 | `NO_SPACE` | ENOSPC anywhere |
 | `CANCELLED` | SIGTERM or SIGINT: exit 130 |
 | `BUSY` | another prepare holds the work folder (`<work>/.prepare.lock`); nothing was changed |

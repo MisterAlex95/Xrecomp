@@ -90,6 +90,12 @@ python3 -m tools.prepare /path/to/game.iso  # → <title id>-work/ with the nati
 
 `--check` tells you whether a game is prepared and up to date, `--help` lists the options.
 
+The release archive carries the runtime prebuilt for Linux x86-64 (`runtime/linux-x86_64/`): prepare then compiles
+and links the title with clang (or the system's `cc`) alone, no CMake or Ninja. A `toolchain/bin/clang` next to the
+toolkit is used first when there is one, else `--cc` / `$XBA_CC`, else the system's. A git checkout, or arm64, builds
+with CMake as before; `python3 -m tools.prepare.runtime` makes the prebuilt runtime once where CMake is, and
+`--builder driver|cmake` picks the route.
+
 **Windows** follows upstream's manual route (MSVC, D3D11), not yet tested by this fork:
 [GETTING_STARTED.md](docs/GETTING_STARTED.md) walks through each pipeline stage, which is also the way to bring up
 a new game on any host.

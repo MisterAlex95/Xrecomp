@@ -9,7 +9,9 @@
 #
 # Gitea ignores .github/workflows while .gitea/workflows exists. No game, no game data, no generated C: each download
 # is this repository's tree at the commit (tools/ci/package_toolkit.sh) with the pinned frame generation source tarballs
-# (lsfg-vk framegen, volk, DXVK, SPIRV-Headers: built by default, XBA-187), plus XRecomp.app for the Mac.
+# (lsfg-vk framegen, volk, DXVK, SPIRV-Headers: built by default, XBA-187), plus XRecomp.app for the Mac, and the
+# prebuilt runtime of its host (runtime/<host>/, tools/prepare/runtime.py, XBA-86): prepare then builds a title with a
+# C compiler alone, no CMake (tools/prepare/desktop_build.py). Linux arm64 has none yet and builds with CMake.
 #
 # Order with Gitea: tools/ci/github_release.sh deletes and recreates a release (the APK side), which would drop files
 # attached before it. So the publish job waits for the release of this very commit (target_commitish), then attaches.
@@ -71,6 +73,9 @@ jobs:
           XBA_APP_PORTABLE: '1'
         run: |
           sh tools/ci/package_toolkit.sh out/XRecomp
+          # The prebuilt runtime (XBA-86): SDL2 and libepoxy as tools/macos/setup.sh installs them.
+          brew install pkgconf sdl2-compat libepoxy ninja
+          python3 -m tools.prepare.runtime --toolkit out/XRecomp
           bash macos/scripts/build-app.sh
           ditto macos/build/XRecomp.app out/XRecomp/XRecomp.app
           codesign --verify --strict out/XRecomp/XRecomp.app
@@ -105,10 +110,16 @@ jobs:
       - name: Package
         run: |
           sh tools/ci/package_toolkit.sh out/XRecomp
+          # The prebuilt runtime for linux-x86_64 (XBA-86), built against the packages install_deps.sh installs.
+          bash tools/linux/install_deps.sh
+          sudo apt-get install -y ninja-build
+          python3 -m tools.prepare.runtime --toolkit out/XRecomp
           tar -C out -czf "out/$LABEL-linux.tar.gz" XRecomp
           (cd out && sha256sum "$LABEL-linux.tar.gz" > "$LABEL-linux.tar.gz.sha256" && cat ./*.sha256)
       # From the archive, as a user would: README « Linux » (the venv because Ubuntu's pip refuses system installs).
-      # The synthetic test.xbe lifts but does not link (no xbe_entry_point), hence --no-build, then the runtime build.
+      # The synthetic conformance XBE with a retail-keyed entry point (mkxbe.py --retail) prepares to an executable
+      # with the archive's prebuilt runtime and no CMake (a cmake that fails comes first on PATH), and starts
+      # headless. Then the runtime's CMake build from the same archive.
       - name: Smoke test of the archive
         run: |
           t=$(mktemp -d)
@@ -117,9 +128,16 @@ jobs:
           bash tools/linux/install_deps.sh
           sudo apt-get install -y python3-venv
           python3 -m venv "$t/venv" && "$t/venv/bin/pip" install -q capstone pefile numpy
-          mkdir -p "$t/game" && cp tools/conformance/test.xbe "$t/game/default.xbe"
-          "$t/venv/bin/python" -m tools.prepare "$t/game/default.xbe" --work "$t/work" --no-build
-          ls "$t/work/project/src/recomp/gen/recomp_dispatch.c"
+          mkdir -p "$t/game" "$t/nocmake"
+          python3 tools/conformance/mkxbe.py --retail "$t/game/default.xbe"
+          printf '#!/bin/sh\necho "cmake must not run" >&2\nexit 99\n' > "$t/nocmake/cmake"
+          chmod +x "$t/nocmake/cmake"
+          PATH="$t/nocmake:$PATH" "$t/venv/bin/python" -m tools.prepare "$t/game/default.xbe" --work "$t/work" \
+            | tee "$t/prepare.log"
+          grep -q 'compile driver:' "$t/prepare.log"
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout 20 "$t/work/project/build/title_12345678" \
+            > "$t/run.log" 2>&1 || true
+          grep -q 'XBE loaded' "$t/run.log" || { cat "$t/run.log"; exit 1; }
           # Frame generation is in the default build (XBA-187), from the tarballs the archive carries: no fetch.
           cmake -S . -B "$t/build" -DCMAKE_BUILD_TYPE=Release | tee "$t/configure.log"
           grep -q 'LSFG: bridge built' "$t/configure.log"
