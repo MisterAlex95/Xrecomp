@@ -505,7 +505,21 @@ static int game_main(void *hInstance, void *hPrevInstance, char *lpCmdLine,
     printf("\nStarting game...\n");
     fflush(stdout);
 
+#ifndef _WIN32
+    /* « Resume where I left off » (XBA-250): with RECOMP_STATE_RESUME on and an automatic slot that can be
+     * resumed, the saved threads are made again and re-enter their call chains instead of the entry point
+     * running; this thread waits for the resumed main thread. */
+    {
+        extern int xbox_StateResumeAtBoot(void);
+        extern int xbox_StateResumeWait(void);
+        if (xbox_StateResumeAtBoot())
+            xbox_StateResumeWait();
+        else
+            xbe_entry_point();
+    }
+#else
     xbe_entry_point();
+#endif
 
     printf("\nGame returned. Cleaning up...\n");
 

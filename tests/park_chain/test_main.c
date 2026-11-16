@@ -26,7 +26,7 @@
  *              ebp, functions, flags; the signature is the same over freezes
  *              at the same chain and differs between the audio thread's two
  *              sites
- *   State      xbox_StateCapture: CPU v4 carries each thread's chain; the
+ *   State      xbox_StateCapture: CPU v5 carries each thread's chain; the
  *              reader returns the same frames, and refuses a flipped frame
  *              word (signature), a truncated chain, trailing bytes
  *   Snapshot   xbox_SehRuntimeSnapshot / Restore carry the frame top (a
@@ -434,7 +434,7 @@ static void phase_state(void)
         free(b);
         return;
     }
-    check(ver == 4, "CPU section version 4", NULL);
+    check(ver == 5, "CPU section version 5 (XBA-250: the verdict for another run)", NULL);
     cnt = xbox_StateCpuThreads(p, len, th, XBOX_PARK_MAX_THREADS);
     check(cnt == K_COUNT, "four threads", NULL);
     for (k = 0; k < cnt; k++) {

@@ -28,6 +28,7 @@ set(KERNEL_SOURCES
     kernel_bridge.c
     kernel_wait_stats.c
     kernel_park.c
+    xbox_resume.c
     kernel_kobj_state.c
     xbox_memory_layout.c
     xbox_nic.c

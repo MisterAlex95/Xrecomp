@@ -66,6 +66,9 @@ extern "C" {
 /* Flags. */
 #define XBOX_KOBJ_IN_SESSION  0u   /* load into the process that saved it */
 #define XBOX_KOBJ_ACROSS_RUNS 1u   /* load into a fresh process (refuses running threads) */
+/* With ACROSS_RUNS, for a resume (XBA-250): running threads (and the mutants they own) are not refused, the
+ * resume makes them again; xbox_KobjResumeThreads names the new threads before the load. */
+#define XBOX_KOBJ_RESUME_THREADS 2u
 
 /* Why a save cannot be taken: up to XBOX_KOBJ_REFUSALS_MAX, `count` is all of
  * them. `token` is the guest handle when the object has one, `guest_va` the
@@ -95,6 +98,12 @@ int  xbox_KobjSave(void **out, size_t *len, unsigned flags, XboxKobjRefusals *wh
  * reason in err. A blob that is not whole fails before anything changes;
  * a failure while making objects leaves the kernel reset (empty). */
 int  xbox_KobjLoad(const void *blob, size_t len, unsigned flags, char *err, size_t errlen);
+
+/* For a load with XBOX_KOBJ_ACROSS_RUNS (XBA-250): the host threads made for the saved running threads, by the
+ * host thread id each had at the save (n at most 64; n 0 forgets them). The load takes a reference of its own.
+ * Before a check with XBOX_KOBJ_RESUME_THREADS: the threads the state holds (handles NULL); a running thread not
+ * among them is refused. */
+void xbox_KobjResumeThreads(const uint32_t *tids, void *const *handles, int n);
 
 /* Close every guest-visible kernel object and empty the tables above, as a
  * fresh kernel has them. Running threads go on running; their records are

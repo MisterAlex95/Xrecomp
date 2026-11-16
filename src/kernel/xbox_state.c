@@ -24,6 +24,7 @@
 #include "kernel_park.h"
 #include "kernel_kobj_state.h"
 #include "xbox_dev_state.h"
+#include "xbox_resume.h"
 #include "platform/host_time.h"
 #include "platform/recomp_states.h"
 
@@ -1260,8 +1261,13 @@ int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, Xbox
     }
     xbox_StateSection(blob, n, XBOX_STATE_TAG_CPU, &cp, &cl, NULL);
     if (xbox_StateCpuRun(cp, cl) != xbox_StateRunId()) {
-        REASON(st->reason, "saved in another run of the game (a state loads only into the run that saved it,"
-               " until XBA-250)");
+        char why[220];
+        if (xbox_StateCpuAcross(cp, cl, why, sizeof why) == 1)
+            REASON(st->reason, "saved in an earlier run of the game: it loads when the game starts (« Resume »),"
+                   " not into a game already running");
+        else
+            REASON(st->reason, "saved in an earlier run of the game, and it cannot be loaded in another run (%s)",
+                   why[0] ? why : "a state from before XBA-250");
         return XBOX_STATE_ECHAIN;
     }
     ns = xbox_StateCpuThreads(cp, cl, saved, XBOX_PARK_MAX_THREADS);
@@ -1471,6 +1477,215 @@ int xbox_StateLoadSlot(const char *path, uint32_t timeout_ms, XboxStateLoadStats
     rc = xbox_StateLoad(blob, n, timeout_ms, st);
     free(blob);
     return rc;
+}
+
+/* ---- Another run (XBA-250): a state resumed in a fresh process ------------------------------------------- */
+
+void xbox_state_kobj_load_flags(unsigned flags);                                    /* xbox_state_guest.c */
+XboxResumePlan *xbox_state_resume_plan(const XboxStateThread *t, const XboxStateFrame *fs, char *why, size_t n);
+void *xbox_BridgeResumeThread(uint32_t routine, void *plan, uint32_t tib, uint32_t kthread, uint32_t stack_base,
+                              uint32_t stack_limit, int is_main);                    /* kernel_bridge.c */
+void xbox_BridgeResumeSetup(uint32_t max_guest_tid);
+int xbox_BridgeResumeWaitMain(void);
+
+int xbox_StateResumable(const uint8_t *blob, size_t n, char *why, size_t why_n)
+{
+    XboxStateInfo info;
+    const uint8_t *cp;
+    size_t cl;
+    int rc = xbox_StateCheck(blob, n, &info), across;
+
+    if (why && why_n)
+        why[0] = 0;
+    if (rc != XBOX_STATE_OK) {
+        if (why && why_n)
+            snprintf(why, why_n, "%s", info.reason[0] ? info.reason : xbox_StateError(rc));
+        return 0;
+    }
+    xbox_StateSection(blob, n, XBOX_STATE_TAG_CPU, &cp, &cl, NULL);
+    across = xbox_StateCpuAcross(cp, cl, why, why_n);
+    return across == 1;
+}
+
+/* Plans and threads of one resume (one per process). */
+static XboxResumePlan *s_rs_plans[XBOX_PARK_MAX_THREADS];
+static void *s_rs_threads[XBOX_PARK_MAX_THREADS];
+static int s_rs_count;
+static volatile int32_t s_resumed;
+
+int xbox_StateResume(const uint8_t *blob, size_t n, XboxStateLoadStats *st)
+{
+    static XboxStateThread saved[XBOX_PARK_MAX_THREADS];
+    uint32_t tids[XBOX_PARK_MAX_THREADS], max_gtid = 0;
+    XboxStateLoadStats local;
+    XboxParkStats ps;
+    const uint8_t *cp;
+    size_t cl;
+    uint64_t t0;
+    int rc, ns, i, gate, mains = 0;
+    char why[256];
+
+    if (!st)
+        st = &local;
+    memset(st, 0, sizeof *st);
+    ensure_builtin();
+    if (InterlockedCompareExchange((volatile LONG *)&s_capturing, 1, 0) != 0) {
+        REASON(st->reason, "a capture or a load is already running");
+        rc = XBOX_STATE_EBUSY;
+        goto out;
+    }
+    xbox_ParkStatsGet(&ps, 0);
+    if (ps.threads != 0 || s_resumed) {
+        REASON(st->reason, "the game is already running (a state from another run loads when the game starts)");
+        rc = XBOX_STATE_ECHAIN;
+        goto done;
+    }
+    /* 1. The blob, its verdict for another run, and each thread's plan against this build's call sites. */
+    if (!xbox_StateResumable(blob, n, why, sizeof why)) {
+        rc = xbox_StateCheck(blob, n, NULL);
+        REASON(st->reason, "this state cannot be loaded in another run: %s", why[0] ? why : "-");
+        if (rc == XBOX_STATE_OK)
+            rc = XBOX_STATE_ECHAIN;
+        goto done;
+    }
+    xbox_StateSection(blob, n, XBOX_STATE_TAG_CPU, &cp, &cl, NULL);
+    ns = xbox_StateCpuThreads(cp, cl, saved, XBOX_PARK_MAX_THREADS);
+    if (ns <= 0) {
+        REASON(st->reason, "the state has no guest thread");
+        rc = XBOX_STATE_ECORRUPT;
+        goto done;
+    }
+    t0 = xbox_HostNowNs();
+    s_rs_count = 0;
+    for (i = 0; i < ns; i++) {
+        XboxStateFrame *fs = malloc((saved[i].chain.frames ? saved[i].chain.frames : 1) * sizeof *fs);
+        if (!fs || xbox_StateCpuChain(cp, cl, i, fs, saved[i].chain.frames) != (int)saved[i].chain.frames) {
+            free(fs);
+            REASON(st->reason, "guest thread %u: its chain cannot be read", saved[i].tid);
+            rc = XBOX_STATE_ECORRUPT;
+            goto undo;
+        }
+        s_rs_plans[i] = xbox_state_resume_plan(&saved[i], fs, why, sizeof why);
+        free(fs);
+        if (!s_rs_plans[i]) {
+            REASON(st->reason, "%s", why);
+            rc = XBOX_STATE_ECHAIN;
+            goto undo;
+        }
+        s_rs_count = i + 1;
+    }
+    /* 2. A host thread per guest thread, held until everything is back; the kernel objects name them. */
+    for (i = 0; i < ns; i++) {
+        const XboxStateThread *t = &saved[i];
+        int is_main = t->tib == XBOX_TIB_MAIN && !mains;
+        uint32_t routine = s_rs_plans[i]->f[0].func;
+        mains += is_main;
+        s_rs_threads[i] = xbox_BridgeResumeThread(routine, s_rs_plans[i], t->tib, t->kthread, t->stack_base,
+                                                  t->stack_limit, is_main);
+        if (!s_rs_threads[i]) {
+            REASON(st->reason, "guest thread %u: no host thread for its routine 0x%08X", t->tid, routine);
+            rc = XBOX_STATE_ENOMEM;
+            goto undo;
+        }
+        tids[i] = t->tid;
+        if (t->guest_tid > max_gtid)
+            max_gtid = t->guest_tid;
+    }
+    /* 3. The sections, the device threads held: MEM, RAM, KOBJ (across runs: the threads above), the devices. */
+    gate = xbox_DispatchGateTryEnter();
+    if (!xbox_DevStateFreeze()) {
+        xbox_DevStateThaw(0);
+        if (gate)
+            xbox_DispatchGateLeave();
+        REASON(st->reason, "the NV2A poll thread did not stop within 2 s");
+        rc = XBOX_STATE_EBUSY;
+        goto undo;
+    }
+    xbox_KobjResumeThreads(tids, s_rs_threads, ns);
+    xbox_state_kobj_load_flags(XBOX_KOBJ_ACROSS_RUNS);
+    rc = apply_sections(blob, n, why, sizeof why);
+    xbox_state_kobj_load_flags(XBOX_KOBJ_IN_SESSION);
+    xbox_KobjResumeThreads(NULL, NULL, 0);
+    xbox_DevStateThaw(1);
+    if (gate)
+        xbox_DispatchGateLeave();
+    if (rc != XBOX_STATE_OK) {
+        /* Guest memory and the kernel are the state's in part: the game cannot start from its beginning either. */
+        REASON(st->reason, "%s (the game cannot go on: start it again)", why);
+        fprintf(stderr, "  [STATE] resume failed part way: %s\n", why);
+        rc = rc == XBOX_STATE_ECHAIN ? rc : XBOX_STATE_ESECTION;
+        goto undo;
+    }
+    xbox_BridgeResumeSetup(max_gtid);
+    st->load_ms = ms_since(t0);
+    st->threads = ns;
+    for (i = 0; i < ns; i++)
+        st->reissued += !saved[i].returned;
+    /* 4. The threads go: each re-enters its chain. */
+    InterlockedExchange((volatile LONG *)&s_resumed, 1);
+    for (i = 0; i < ns; i++) {
+        ResumeThread((HANDLE)s_rs_threads[i]);
+        CloseHandle((HANDLE)s_rs_threads[i]);
+        s_rs_threads[i] = NULL;
+    }
+    rc = XBOX_STATE_OK;
+    goto done;
+undo:
+    /* Threads made and not started end at once (no plan); plans go. */
+    for (i = 0; i < ns && i < XBOX_PARK_MAX_THREADS; i++)
+        if (s_rs_threads[i]) {
+            /* bridge_resume_main reads its own copy: no plan means end at once. */
+            CloseHandle((HANDLE)s_rs_threads[i]);
+            s_rs_threads[i] = NULL;
+        }
+    for (i = 0; i < s_rs_count; i++) {
+        free(s_rs_plans[i]);
+        s_rs_plans[i] = NULL;
+    }
+    s_rs_count = 0;
+done:
+    InterlockedExchange((volatile LONG *)&s_capturing, 0);
+out:
+    if (rc == XBOX_STATE_OK)
+        fprintf(stderr, "  [STATE] resume: %d guest thread%s re-entering their call chains (%d calls made again), %u"
+                        " RAM pages written; %.2f ms\n", st->threads, st->threads == 1 ? "" : "s", st->reissued,
+                xbox_state_ram_written(), st->load_ms);
+    else
+        fprintf(stderr, "  [STATE] resume refused: %s (%s)\n", xbox_StateError(rc), st->reason[0] ? st->reason : "-");
+    fflush(stderr);
+    return rc;
+}
+
+int xbox_StateResumeSlot(const char *path, XboxStateLoadStats *st)
+{
+    XboxStateLoadStats local;
+    XboxStateInfo info;
+    uint8_t *blob = NULL;
+    size_t n = 0;
+    int rc;
+
+    if (!st)
+        st = &local;
+    memset(st, 0, sizeof *st);
+    rc = xbox_StateReadSlot(path, &blob, &n, &info);
+    if (rc != XBOX_STATE_OK) {
+        REASON(st->reason, "%s", info.reason);
+        fprintf(stderr, "  [STATE] resume refused: %s (%s)\n", xbox_StateError(rc), st->reason);
+        return rc;
+    }
+    rc = xbox_StateResume(blob, n, st);
+    free(blob);
+    return rc;
+}
+
+int xbox_StateResumed(void)
+{
+    return s_resumed;
+}
+
+int xbox_StateResumeWait(void)
+{
+    return xbox_BridgeResumeWaitMain();
 }
 
 /* ---- Slot files ------------------------------------------------------------------------------------------ */

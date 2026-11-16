@@ -192,6 +192,7 @@ void xbox_kobj_rec_end(XboxKobjSaveCtx *c)
 }
 
 #ifndef _WIN32
+static int kobj_resume_known(uint32_t tid);
 static uint32_t kobj_kthread_of(XboxKobjSaveCtx *c, uint32_t tid)
 {
     size_t i;
@@ -268,7 +269,7 @@ static void kobj_object(XboxKobjSaveCtx *c, void *h, uint32_t id, uint32_t token
         xbox_kobj_u32(b, (uint32_t)ws.maximum);
         break;
     case XKOB_K_MUTANT:
-        if (ws.owner_tid && (c->flags & XBOX_KOBJ_ACROSS_RUNS))
+        if (ws.owner_tid && (c->flags & XBOX_KOBJ_ACROSS_RUNS) && !(c->flags & XBOX_KOBJ_RESUME_THREADS))
             xbox_kobj_refuse(c, token, guest_va, "mutant",
                              "owned by host thread %u, which another run will not have",
                              (unsigned)ws.owner_tid);
@@ -277,9 +278,13 @@ static void kobj_object(XboxKobjSaveCtx *c, void *h, uint32_t id, uint32_t token
         xbox_kobj_u32(b, (uint32_t)ws.recursion);
         break;
     case XKOB_K_THREAD:
-        if (!ws.exited && (c->flags & XBOX_KOBJ_ACROSS_RUNS))
+        if (!ws.exited && (c->flags & XBOX_KOBJ_ACROSS_RUNS) && !(c->flags & XBOX_KOBJ_RESUME_THREADS))
             xbox_kobj_refuse(c, token, guest_va, "thread",
                              "running: its host stack is rebuilt only by resume entries (XBA-250)");
+        else if (!ws.exited && (c->flags & XBOX_KOBJ_RESUME_THREADS) && !kobj_resume_known(ws.tid))
+            xbox_kobj_refuse(c, token, guest_va, "thread",
+                             "running (host thread %u) but not one of the threads the state holds",
+                             (unsigned)ws.tid);
         xbox_kobj_u32(b, ws.tid);
         xbox_kobj_u32(b, kobj_kthread_of(c, ws.tid));
         xbox_kobj_u8(b, (uint8_t)ws.exited);
@@ -552,6 +557,58 @@ void *xbox_kobj_obj(XboxKobjLoadCtx *c, uint32_t id)
     return NULL;
 }
 
+/* The threads a resume across runs made for the saved ones (XBA-250): saved host thread id -> new thread. */
+static struct { uint32_t tid; void *h; } s_resume_thr[64];
+static int s_resume_nthr;
+
+void xbox_KobjResumeThreads(const uint32_t *tids, void *const *handles, int n)
+{
+    int i;
+    s_resume_nthr = 0;
+    for (i = 0; tids && handles && i < n && i < 64; i++) {
+        s_resume_thr[s_resume_nthr].tid = tids[i];
+        s_resume_thr[s_resume_nthr].h = handles[i];
+        s_resume_nthr++;
+    }
+}
+
+#ifndef _WIN32
+/* A save with XBOX_KOBJ_RESUME_THREADS: the running thread is one the state holds (its tid named). */
+static int kobj_resume_known(uint32_t tid)
+{
+    int i;
+    for (i = 0; i < s_resume_nthr; i++)
+        if (s_resume_thr[i].tid == tid)
+            return 1;
+    return 0;
+}
+
+/* The new thread standing for saved host thread `tid` (one more reference), or NULL. */
+static HANDLE kobj_resume_thread(uint32_t tid)
+{
+    int i;
+    HANDLE dup = NULL;
+    for (i = 0; tid && i < s_resume_nthr; i++)
+        if (s_resume_thr[i].tid == tid && s_resume_thr[i].h
+            && DuplicateHandle(GetCurrentProcess(), (HANDLE)s_resume_thr[i].h, GetCurrentProcess(), &dup, 0,
+                               FALSE, DUPLICATE_SAME_ACCESS))
+            return dup;
+    return NULL;
+}
+
+/* Its host thread id now. */
+static uint32_t kobj_resume_tid(uint32_t tid)
+{
+    int i;
+    w32_state ws;
+    for (i = 0; tid && i < s_resume_nthr; i++)
+        if (s_resume_thr[i].tid == tid && s_resume_thr[i].h
+            && w32_state_read((HANDLE)s_resume_thr[i].h, &ws) == W32_STATE_THREAD)
+            return ws.tid;
+    return 0;
+}
+#endif
+
 void *xbox_kobj_live_thread(XboxKobjLoadCtx *c, uint32_t tid)
 {
     size_t i;
@@ -639,6 +696,11 @@ static void kobj_load_object(XboxKobjLoadCtx *c, XboxKobjRd *r)
         ws.owner_tid = xbox_kobj_get32(r);
         (void)xbox_kobj_get32(r);   /* the owner's KTHREAD, informative */
         ws.recursion = (int)xbox_kobj_get32(r);
+        /* Across runs (XBA-250): owned by the thread that stands for its saved owner now. */
+        if (ws.owner_tid && (c->flags & XBOX_KOBJ_ACROSS_RUNS) && !(ws.owner_tid = kobj_resume_tid(ws.owner_tid))) {
+            snprintf(why, sizeof why, "mutant owned by a thread that is not made again");
+            break;
+        }
         h = w32_state_make(&ws);
         break;
     case XKOB_K_THREAD:
@@ -653,8 +715,10 @@ static void kobj_load_object(XboxKobjLoadCtx *c, XboxKobjRd *r)
             if (ws.exited) {
                 h = w32_state_make(&ws);
             } else if (c->flags & XBOX_KOBJ_ACROSS_RUNS) {
-                snprintf(why, sizeof why, "thread (KTHREAD 0x%08X) was running: not made "
-                         "in another run", kt);
+                /* Made again by the resume (XBA-250): the new host thread of the saved one. */
+                if (!(h = kobj_resume_thread(ws.tid)))
+                    snprintf(why, sizeof why, "thread (KTHREAD 0x%08X) was running and is not made "
+                             "again in this run", kt);
             } else if (!(h = xbox_kobj_live_thread(c, ws.tid))) {
                 snprintf(why, sizeof why, "thread %u (KTHREAD 0x%08X) is not running now",
                          (unsigned)ws.tid, kt);

@@ -88,7 +88,7 @@ extern "C" {
 /* CPU v2 (XBA-251): the park site kind (XboxParkRecord.site) in each thread's head. v3 (XBA-249): the run id
  * and the esp at the call. v4 (XBA-247): the registers are a RecompCpuRegs (r_frames at the end) and each
  * thread's call chain follows them. Older versions are refused. */
-#define XBOX_STATE_CPU_VERSION 4
+#define XBOX_STATE_CPU_VERSION 5   /* v5 (XBA-250): the verdict for another run after the run id */
 #define XBOX_STATE_RAM_VERSION 1
 /* MEM: XBOX_MEM_STATE_VERSION (xbox_memory_layout.h) */
 
@@ -302,6 +302,9 @@ int xbox_StateSection(const uint8_t *blob, size_t n, uint32_t tag, const uint8_t
 int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int max);   /* count or -1 */
 /* The run a CPU payload was taken in (xbox_StateRunId), 0 when malformed. */
 uint64_t xbox_StateCpuRun(const uint8_t *p, size_t n);
+/* The verdict a CPU payload carries for another run (XBA-250): 1 when every thread's chain can be re-entered and
+ * the kernel objects made again in a fresh process, 0 with the reason in why, -1 when malformed. */
+int xbox_StateCpuAcross(const uint8_t *p, size_t n, char *why, size_t why_n);
 /* This run's id: random, fixed for the process. */
 uint64_t xbox_StateRunId(void);
 /* Thread i's chain frames in a CPU payload (at most max into out): the frame count, or -1. */
@@ -336,6 +339,32 @@ int xbox_StateLoad(const uint8_t *blob, size_t n, uint32_t timeout_ms, XboxState
 int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, XboxStateLoadStats *st);
 /* Reads a slot file (xbox_StateReadSlot) and loads it. */
 int xbox_StateLoadSlot(const char *path, uint32_t timeout_ms, XboxStateLoadStats *st);
+
+/* ---- Another run (XBA-250: resume entries) -------------------------------------------------------------- */
+
+/* 1 when the blob is this title's and build's and its threads can be re-entered in a fresh process (the verdict
+ * the capture wrote: every chain through sites with resume entries, kernel objects that can be made again), else
+ * 0 with the reason. */
+int xbox_StateResumable(const uint8_t *blob, size_t n, char *why, size_t why_n);
+/* Loads a state into a process where the game has not started (no guest thread yet; before the title's entry
+ * point): one host thread per saved guest thread, with its guest stack, TIB and KTHREAD, then MEM, RAM, KOBJ
+ * (across runs: running threads are these), NV2A, APU, USB; then each thread re-enters its call chain through the
+ * lifted code's resume entries (xbox_resume.h) and its kernel call or host wait. Logs « [STATE] resume: ... ».
+ * XBOX_STATE_OK; _ECHAIN (not resumable, with the reason; or the game already running); any code xbox_StateCheck
+ * returns; _ESECTION when a section failed part way (the game cannot go on then). */
+int xbox_StateResume(const uint8_t *blob, size_t n, XboxStateLoadStats *st);
+int xbox_StateResumeSlot(const char *path, XboxStateLoadStats *st);
+/* 1 once a resume let its threads go (this process runs a resumed state). */
+int xbox_StateResumed(void);
+/* The process main after a resume: waits until the resumed main guest thread ends (0 at once when there is none). */
+int xbox_StateResumeWait(void);
+/* At start, before the title's entry point (templates/new-game/src/main.c): with RECOMP_STATE_RESUME on and an
+ * automatic slot that can be resumed, resumes it (xbox_StateResume) and returns 1: the caller waits
+ * (xbox_StateResumeWait) instead of calling the entry point. 0: start the game as usual (the reason logged). */
+int xbox_StateResumeAtBoot(void);
+/* Save states can survive the run for this title (« Resume where I left off », the automatic slot): the generated
+ * code has resume entries (a call-site table) and states are available now; else 0 with the reason. */
+int xbox_StateResumeAvailable(char *why, size_t why_n);
 
 /* ---- The runtime service (xbox_state_service.c) --------------------------------------------------------- */
 

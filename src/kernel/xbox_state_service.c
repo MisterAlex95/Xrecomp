@@ -4,7 +4,10 @@
  * The title attaches to recomp_states as console "xbox", slots in <save dir>/xbox-<TITLE ID>, so the in-game
  * menu's Save state / Load state, the quick save / load chords and the slot hotkeys reach xbox_StateSaveSlot /
  * xbox_StateLoadSlot as they reach a console runtime. A state is taken with every guest thread frozen at a
- * kernel call and loads only within the run that saved it (xbox_StateLoad: every thread back at the same call).
+ * kernel call and loads within the run that saved it (xbox_StateLoad: every thread back at the same call), or,
+ * when its verdict says so, in a fresh process before the game starts (xbox_StateResume, XBA-250): the automatic
+ * slot (« Resume where I left off ») is saved only then, and loaded at start with RECOMP_STATE_RESUME
+ * (xbox_StateResumeAtBoot).
  *
  * The callbacks run on whatever thread asked: the UI thread (the menu), this service's thread (the pad's
  * hotkeys: they come from the OHCI controller thread, which a capture holds, so they are queued here). The game
@@ -100,7 +103,25 @@ static int op_save(int slot, void *user)
     if (recomp_states_slot_path(s_dir, slot, path, sizeof path) != 0)
         return RECOMP_STATE_ESLOT;
     held = unhold();
-    rc = xbox_StateSaveSlot(path, OP_TIMEOUT_MS, NULL, 0, 0, &st);
+    if (slot == RECOMP_STATE_AUTO) {
+        /* The automatic slot is loaded at the next start, in a fresh process (XBA-250): only a state that can be
+         * resumed there is written; otherwise the older one goes too (it is not where the player left off). */
+        uint8_t *blob = NULL;
+        size_t n = 0;
+        char why[220];
+        rc = xbox_StateCapture(OP_TIMEOUT_MS, &blob, &n, &st);
+        if (rc == XBOX_STATE_OK && !xbox_StateResumable(blob, n, why, sizeof why)) {
+            snprintf(st.reason, sizeof st.reason, "not resumable in another run: %s", why);
+            rc = XBOX_STATE_ECHAIN;
+            remove(path);
+        } else if (rc == XBOX_STATE_OK) {
+            rc = xbox_StateWriteSlot(path, blob, n, NULL, 0, 0);
+            st.blob_bytes = n;
+        }
+        free(blob);
+    } else {
+        rc = xbox_StateSaveSlot(path, OP_TIMEOUT_MS, NULL, 0, 0, &st);
+    }
     rehold(held);
     if (rc == XBOX_STATE_OK)
         printf("xbox: state slot %d saved in %s (%.1f MB)\n", slot, path, st.blob_bytes / 1048576.0);
@@ -122,7 +143,16 @@ static int op_load(int slot, void *user)
     if (recomp_states_slot_path(s_dir, slot, path, sizeof path) != 0)
         return RECOMP_STATE_ESLOT;
     held = unhold();
-    rc = xbox_StateLoadSlot(path, OP_TIMEOUT_MS, &st);
+    {
+        /* Before the game started (no guest thread yet, nothing resumed): a fresh process, the state's threads
+         * are made again and re-enter their chains (XBA-250). */
+        XboxParkStats ps;
+        xbox_ParkStatsGet(&ps, 0);
+        if (ps.threads == 0 && !xbox_StateResumed())
+            rc = xbox_StateResumeSlot(path, &st);
+        else
+            rc = xbox_StateLoadSlot(path, OP_TIMEOUT_MS, &st);
+    }
     rehold(held);
     if (rc == XBOX_STATE_OK) {
         printf("xbox: state slot %d loaded (%s)\n", slot, path);
@@ -159,6 +189,44 @@ int xbox_StateAvailable(char *why, size_t why_n)
     if (why && why_n)
         snprintf(why, why_n, "%s", r ? r : "");
     return r == NULL;
+}
+
+int xbox_StateResumeAvailable(char *why, size_t why_n)
+{
+    if (!xbox_StateAvailable(why, why_n))
+        return 0;
+    if (!xbox_CallSiteCount()) {
+        if (why && why_n)
+            snprintf(why, why_n, "generated code without resume entries (prepare the title again)");
+        return 0;
+    }
+    return 1;
+}
+
+int xbox_StateResumeAtBoot(void)
+{
+    char path[1200];
+    int rc;
+
+    if (!recomp_states_resume_enabled() || !s_dir[0])
+        return 0;
+    if (recomp_states_slot_path(s_dir, RECOMP_STATE_AUTO, path, sizeof path) != 0 || access(path, R_OK) != 0)
+        return 0;
+    rc = recomp_states_resume();
+    if (rc == RECOMP_STATE_OK && xbox_StateResumed()) {
+        printf("xbox: resumed where the player left off (%s)\n", path);
+        fflush(stdout);
+        return 1;
+    }
+    if (xbox_StateResumed()) {
+        /* Sections were loaded in part: nothing sane to start from. */
+        fprintf(stderr, "  [STATE] resume failed after the threads were made: the game cannot start\n");
+        exit(1);
+    }
+    printf("xbox: the automatic slot was not resumed (%s): the game starts from its beginning\n",
+           recomp_states_error(rc));
+    fflush(stdout);
+    return 0;
 }
 
 /* ---- Rewind ---------------------------------------------------------------------------------------------- */

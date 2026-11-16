@@ -795,8 +795,8 @@ static void phase_host_waits(void)
         check(0, "CPU section found", NULL);
         goto out;
     }
-    check(ver == 4 && ver == XBOX_STATE_CPU_VERSION, "CPU section version 4 (the park site, the run, esp at"
-          " the park point, the chain)", NULL);
+    check(ver == 5 && ver == XBOX_STATE_CPU_VERSION, "CPU section version 5 (the park site, the run, esp at"
+          " the park point, the chain, the verdict for another run)", NULL);
     cnt = xbox_StateCpuThreads(p, len, th, XBOX_PARK_MAX_THREADS);
     for (k = 0; k < cnt; k++) {
         printf("  thread %u: %s %s, ordinal %u, 0x%08X, ebx 0x%08X\n", th[k].tid,
@@ -836,7 +836,9 @@ static void phase_host_waits(void)
     copy = malloc(len);
     if (copy && cnt > 0) {
         /* host routines, no lifted frame: every chain is empty (24 bytes), tests/park_chain has real ones */
-        size_t head = 68 + sizeof(RecompCpuRegs) + 24, site_at = 16 + 64, ord_at = 16 + 8;
+        /* the threads start after the verdict for another run (XBA-250): u32 0/1, u32 length, the reason */
+        size_t first = 24 + (size_t)(p[20] | p[21] << 8 | p[22] << 16 | (uint32_t)p[23] << 24);
+        size_t head = 68 + sizeof(RecompCpuRegs) + 24, site_at = first + 64, ord_at = first + 8;
         int hw = -1, kn = -1;
         for (k = 0; k < cnt; k++) {
             if (th[k].site != XBOX_PARK_SITE_KERNEL && hw < 0) hw = k;

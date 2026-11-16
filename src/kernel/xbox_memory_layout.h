@@ -929,6 +929,7 @@ void xbox_InitGuestKthread(uint32_t kt, uint32_t tls_data,
  * thread reads from fs:[0x28]+0x12C (GetCurrentThreadId).
  * xbox_InitGuestKthread keeps a UniqueThread that is already set. */
 uint32_t xbox_NewGuestThreadId(void);
+void xbox_GuestThreadIdAtLeast(uint32_t id);   /* XBA-250: a resumed state's ids stay unique */
 
 /* The guest KPROCESS every KTHREAD's ApcState.Process names; 0 before the
  * loader built it. */

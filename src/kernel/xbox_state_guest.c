@@ -3,8 +3,10 @@
  * that make the kernel objects (XBA-246) and the devices (XBA-248) sections of the container (XBA-249).
  * xbox_state.h has the API.
  *
- * CPU v4   u32 thread count, u32 sizeof(RecompCpuRegs), u64 run id (xbox_StateRunId, XBA-249), then per thread
- *          a 68-byte head, the RecompCpuRegs and the call chain:
+ * CPU v5   u32 thread count, u32 sizeof(RecompCpuRegs), u64 run id (xbox_StateRunId, XBA-249), the verdict for
+ *          another run (XBA-250): u32 1 when every thread's chain can be re-entered and the kernel objects made
+ *          again in a fresh process, else 0, u32 length and the reason (at most 200 bytes, no NUL); then per
+ *          thread a 68-byte head, the RecompCpuRegs and the call chain:
  *            head: slot, park state, ordinal, guest return address, returned (0 / 1), status, dispatch, host
  *            tid, u64 kernel calls, TIB, KTHREAD, guest stack base, guest stack limit, esp at the park point
  *            (the call's return address slot, XBA-249), guest thread id, park site (XBOX_PARK_SITE_*: 0 a
@@ -27,6 +29,7 @@
 #include "kernel_park.h"
 #include "kernel_kobj_state.h"
 #include "xbox_dev_state.h"
+#include "xbox_resume.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,10 +61,105 @@ uint64_t xbox_StateRunId(void)
 
 /* ---- CPU ------------------------------------------------------------------------------------------------- */
 
+#define ACROSS_REASON 200u
+
+uint32_t xbox_KernelThunkVa(uint32_t ordinal);   /* kernel_bridge.c */
+
+const char *xbox_state_chain_problem(uint32_t flags)
+{
+    return (flags & XBOX_CHAIN_STACK_SWITCH) ? "through a stack-switching function"
+         : (flags & XBOX_CHAIN_OVERFLOW) ? "deeper than the frame shadow stack"
+         : (flags & XBOX_CHAIN_NO_TABLE) ? "no call-site table: generated code older than the runtime"
+         : (flags & XBOX_CHAIN_UNKNOWN_SITE) ? "a return address no call site names"
+         : (flags & XBOX_CHAIN_EMPTY) ? "its routine is not lifted code"
+         : "its frames disagree with its park record";
+}
+
+/* The plan that re-enters thread t's chain (frames fs, its chain's count) in a fresh process (XBA-250), or NULL
+ * with the reason. */
+XboxResumePlan *xbox_state_resume_plan(const XboxStateThread *t, const XboxStateFrame *fs, char *why, size_t n)
+{
+    XboxResumeChainFrame *cf;
+    XboxResumePlan *p;
+    uint32_t k, bad = t->chain.flags & (XBOX_CHAIN_UNRESTORABLE | XBOX_CHAIN_EMPTY);
+    char w[160];
+
+    if (bad) {
+        snprintf(why, n, "guest thread %u: its call chain cannot be re-entered (%s)", t->tid,
+                 xbox_state_chain_problem(bad));
+        return NULL;
+    }
+    cf = malloc((t->chain.frames ? t->chain.frames : 1) * sizeof *cf);
+    if (!cf) {
+        snprintf(why, n, "out of memory");
+        return NULL;
+    }
+    for (k = 0; k < t->chain.frames; k++) {
+        cf[k].f_ret = fs[k].ret_va;
+        cf[k].f_esp = fs[k].esp;
+        cf[k].f_ebp = fs[k].ebp;
+    }
+    p = xbox_ResumePlanBuild(cf, t->chain.frames, t->site, t->ret_va, t->ordinal,
+                             t->site == XBOX_PARK_SITE_KERNEL ? xbox_KernelThunkVa(t->ordinal) : 0, t->returned,
+                             t->call_esp, &t->cpu, xbox_CallSiteLookup, w, sizeof w);
+    free(cf);
+    if (!p)
+        snprintf(why, n, "guest thread %u: %s", t->tid, w);
+    return p;
+}
+
+/* Whether the frozen threads of ctx and the kernel objects can be made again in a fresh process (XBA-250). */
+static int across_verdict(const XboxStateContext *ctx, XboxStateFrame *fr, char *why, size_t n)
+{
+    XboxKobjRefusals kr;
+    int i;
+
+    for (i = 0; i < ctx->threads; i++) {
+        XboxStateThread t;
+        XboxResumePlan *p;
+        if (xbox_StateContextThread(ctx, i, &t) != 0 || xbox_StateChain(&t, fr, RECOMP_FRAME_SLOTS, &t.chain) < 0) {
+            snprintf(why, n, "a guest thread could not be read");
+            return 0;
+        }
+        p = xbox_state_resume_plan(&t, fr, why, n);
+        if (!p)
+            return 0;
+        free(p);
+    }
+    memset(&kr, 0, sizeof kr);
+    {
+        uint32_t tids[XBOX_PARK_MAX_THREADS];
+        void *none[XBOX_PARK_MAX_THREADS];
+        int bad;
+        for (i = 0; i < ctx->threads && i < XBOX_PARK_MAX_THREADS; i++) {
+            tids[i] = (uint32_t)ctx->records[i].tid;
+            none[i] = NULL;
+        }
+        xbox_KobjResumeThreads(tids, none, i);
+        bad = xbox_KobjCheck(XBOX_KOBJ_ACROSS_RUNS | XBOX_KOBJ_RESUME_THREADS, &kr);
+        xbox_KobjResumeThreads(NULL, NULL, 0);
+        if (bad <= 0)
+            kr.count = 0;
+    }
+    if (kr.count > 0) {
+        snprintf(why, n, "kernel object %s 0x%08X: %s", kr.r[0].what, kr.r[0].token ? kr.r[0].token : kr.r[0].guest_va,
+                 kr.r[0].reason);
+        return 0;
+    }
+    if (xbox_ParkDropped()) {
+        snprintf(why, n, "guest threads the park detector does not track");
+        return 0;
+    }
+    why[0] = 0;
+    return 1;
+}
+
 int xbox_state_cpu_save(XboxStateWriter *w, const XboxStateContext *ctx, void *user)
 {
     XboxStateFrame *fr = malloc(RECOMP_FRAME_SLOTS * sizeof *fr);
-    int i, rc = XBOX_STATE_OK;
+    int i, rc = XBOX_STATE_OK, across;
+    char why[ACROSS_REASON + 1];
+    size_t wl;
     (void)user;
 
     if (!fr)
@@ -69,6 +167,11 @@ int xbox_state_cpu_save(XboxStateWriter *w, const XboxStateContext *ctx, void *u
     xbox_StatePut32(w, (uint32_t)ctx->threads);
     xbox_StatePut32(w, (uint32_t)sizeof(RecompCpuRegs));
     xbox_StatePut64(w, xbox_StateRunId());
+    across = across_verdict(ctx, fr, why, sizeof why);
+    wl = strlen(why);
+    xbox_StatePut32(w, (uint32_t)across);
+    xbox_StatePut32(w, (uint32_t)wl);
+    xbox_StatePut(w, why, wl);
     for (i = 0; i < ctx->threads; i++) {
         XboxStateThread t;
         XboxStateChain c;
@@ -138,7 +241,7 @@ static int chain_read(XboxStateReader *r, XboxStateChain *c, XboxStateFrame *out
         f.ebp = xbox_StateGet32(r);
         f.func = xbox_StateGet32(r);
         f.flags = xbox_StateGet32(r);
-        if (r->bad || f.flags >= 0x40u)
+        if (r->bad || f.flags >= 0x200u)
             return -1;
         CHAIN_MIX(f.ret_va);
         CHAIN_MIX(f.esp);
@@ -149,6 +252,32 @@ static int chain_read(XboxStateReader *r, XboxStateChain *c, XboxStateFrame *out
     return h == c->signature ? 0 : -1;
 }
 
+/* Past the verdict for another run (XBA-250): 0, or -1 when malformed. */
+static int skip_verdict(XboxStateReader *r)
+{
+    uint32_t across = xbox_StateGet32(r), wl = xbox_StateGet32(r);
+    if (r->bad || across > 1 || wl > ACROSS_REASON || (across && wl))
+        return -1;
+    (void)xbox_StateGet(r, wl);
+    return r->bad ? -1 : 0;
+}
+
+int xbox_StateCpuAcross(const uint8_t *p, size_t n, char *why, size_t why_n)
+{
+    XboxStateReader r = { p, n, 16, 0 };
+    uint32_t across = xbox_StateGet32(&r), wl = xbox_StateGet32(&r);
+    const uint8_t *s;
+
+    if (r.bad || across > 1 || wl > ACROSS_REASON)
+        return -1;
+    s = xbox_StateGet(&r, wl);
+    if (r.bad)
+        return -1;
+    if (why && why_n)
+        snprintf(why, why_n, "%.*s", (int)wl, (const char *)s);
+    return (int)across;
+}
+
 int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int max)
 {
     XboxStateReader r = { p, n, 0, 0 };
@@ -156,7 +285,7 @@ int xbox_StateCpuThreads(const uint8_t *p, size_t n, XboxStateThread *out, int m
     uint64_t used = 0;
 
     (void)xbox_StateGet64(&r);       /* the run id */
-    if (r.bad || count > XBOX_PARK_MAX_THREADS || cpu_bytes != sizeof(RecompCpuRegs))
+    if (r.bad || count > XBOX_PARK_MAX_THREADS || cpu_bytes != sizeof(RecompCpuRegs) || skip_verdict(&r) != 0)
         return -1;
     for (i = 0; i < count; i++) {
         XboxStateThread t;
@@ -205,7 +334,7 @@ int xbox_StateCpuChain(const uint8_t *p, size_t n, int i, XboxStateFrame *out, u
     count = xbox_StateGet32(&r);
     (void)xbox_StateGet32(&r);
     (void)xbox_StateGet64(&r);       /* the run id */
-    if (i < 0 || (uint32_t)i >= count)
+    if (skip_verdict(&r) != 0 || i < 0 || (uint32_t)i >= count)
         return -1;
     for (k = 0; k <= (uint32_t)i; k++) {
         (void)xbox_StateGet(&r, CPU_HEAD + sizeof(RecompCpuRegs));
@@ -688,11 +817,19 @@ int xbox_state_kobj_check(const uint8_t *p, size_t n, uint32_t version, void *us
     return XBOX_STATE_OK;
 }
 
+static unsigned s_kobj_load_flags = XBOX_KOBJ_IN_SESSION;
+
+/* XBOX_KOBJ_ACROSS_RUNS while a resume in a fresh process loads the sections (XBA-250). */
+void xbox_state_kobj_load_flags(unsigned flags)
+{
+    s_kobj_load_flags = flags;
+}
+
 int xbox_state_kobj_load(const uint8_t *p, size_t n, uint32_t version, void *user)
 {
     char err[200];
     (void)version; (void)user;
-    if (!xbox_KobjLoad(p, n, XBOX_KOBJ_IN_SESSION, err, sizeof err)) {
+    if (!xbox_KobjLoad(p, n, s_kobj_load_flags, err, sizeof err)) {
         xbox_StateSectionReason("kernel objects: %s", err[0] ? err : "refused");
         return XBOX_STATE_ESECTION;
     }

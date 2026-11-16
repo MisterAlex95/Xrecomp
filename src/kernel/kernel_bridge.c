@@ -32,6 +32,7 @@
 #include "kernel_stubs.h"
 #include "kernel_wait_stats.h"
 #include "kernel_park.h"
+#include "xbox_resume.h"
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
 #include "xbox_xbe_sections.h"
@@ -886,6 +887,119 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
     thobj_exit(g_thread_obj_va, 0);
     g_thread_obj_va = 0;
     return 0;
+}
+
+/* ── Threads re-entering a save state's chains (XBA-250) ─────────────────────
+ *
+ * A save state loaded in a fresh process (xbox_StateResume) recreates each guest thread on a new host thread,
+ * with the guest stack, TIB and KTHREAD it had (guest memory, restored), and calls its routine in resume mode
+ * (xbox_resume.h): the lifted functions re-enter the saved chain and the innermost one its kernel call or host
+ * wait. Created suspended, before the kernel objects are made again (their thread handles are these threads);
+ * xbox_StateResume lets them go once everything is back. The INLINE main thread too: it ran inside its creator's
+ * kernel call, whose frames are not re-entered; if its routine ever returns, the thread ends and the process
+ * main (xbox_BridgeResumeWaitMain) goes on to shut down, as after a main thread returning in the first run. */
+struct bridge_resume_start {
+    recomp_func_t fn;
+    XboxResumePlan *plan;     /* NULL: the resume was abandoned, end at once */
+    uint32_t tib, kthread, stack_base, stack_limit;
+    int is_main;
+};
+
+static HANDLE s_resume_main_done;
+
+static DWORD WINAPI bridge_resume_main(LPVOID param)
+{
+    struct bridge_resume_start *s = (struct bridge_resume_start *)param;
+    struct bridge_resume_start r = *s;
+
+    free(s);
+    if (!r.plan || !r.fn) {
+        if (r.is_main && s_resume_main_done)
+            SetEvent(s_resume_main_done);
+        return 0;
+    }
+    g_is_spawned_thread = !r.is_main;
+    /* A worker's stack is a slice of the guest heap (xbox_AllocThreadStack: its top less 16), given back when it
+     * ends; the main thread's is the loader's. */
+    g_thread_stack_top = r.is_main ? 0 : r.stack_base - 16;
+    if (r.is_main)
+        xbox_SehSetGuestStack(r.stack_limit, r.stack_base);
+    else
+        xbox_SehSetGuestStack(r.stack_base - XBOX_THREAD_STACK_SIZE, r.stack_base);
+    g_fs_base = r.tib;
+    g_thread_obj_va = r.kthread;
+    xbox_DpcMarkGuestThread();
+    xbox_GuestThreadPin(r.is_main ? "guest-main" : "guest-worker");
+    recomp_status_thread_started();
+    guest_cpu_join();
+    {
+        int took = xbox_GuestCpuEnterCallback();
+        xbox_ParkThreadStart();
+        xbox_ResumeBegin(r.plan);
+        r.fn();
+        xbox_ParkThreadEnd();
+        xbox_GuestCpuLeaveCallback(took);
+    }
+    guest_cpu_part();
+    fprintf(stderr, "  [KERNEL] resumed %s thread returned (eax=0x%08X)\n", r.is_main ? "main" : "worker", g_eax);
+    fflush(stderr);
+    thread_notify_run(g_thread_obj_va, 0);
+    xbox_FreeThreadStack(g_thread_stack_top);
+    g_thread_stack_top = 0;
+    thalert_forget(g_thread_obj_va);
+    ks_thread_exit();
+    thobj_exit(g_thread_obj_va, 0);
+    g_thread_obj_va = 0;
+    if (r.is_main && s_resume_main_done)
+        SetEvent(s_resume_main_done);
+    return 0;
+}
+
+void *xbox_BridgeResumeThread(uint32_t routine, void *plan, uint32_t tib, uint32_t kthread, uint32_t stack_base,
+                              uint32_t stack_limit, int is_main)
+{
+    struct bridge_resume_start *s = (struct bridge_resume_start *)calloc(1, sizeof *s);
+    HANDLE th;
+
+    if (!s)
+        return NULL;
+    s->fn = recomp_lookup(routine);
+    if (!s->fn)
+        s->fn = recomp_lookup_manual(routine);
+    s->plan = (XboxResumePlan *)plan;
+    s->tib = tib;
+    s->kthread = kthread;
+    s->stack_base = stack_base;
+    s->stack_limit = stack_limit;
+    s->is_main = is_main;
+    if (!s->fn) {
+        free(s);
+        return NULL;
+    }
+    if (is_main && !s_resume_main_done)
+        s_resume_main_done = CreateEventA(NULL, TRUE, FALSE, NULL);
+    th = CreateThread(NULL, 0, bridge_resume_main, s, CREATE_SUSPENDED, NULL);
+    if (!th)
+        free(s);
+    else
+        xbox_set_game_thread(th);
+    return th;
+}
+
+void xbox_BridgeResumeSetup(uint32_t max_guest_tid)
+{
+    /* The INLINE main thread was started in the first run: a PsCreateSystemThreadEx now makes a worker. */
+    if (g_thread_call_count == 0)
+        g_thread_call_count = 1;
+    xbox_GuestThreadIdAtLeast(max_guest_tid);
+}
+
+int xbox_BridgeResumeWaitMain(void)
+{
+    if (!s_resume_main_done)
+        return 0;
+    WaitForSingleObject(s_resume_main_done, INFINITE);
+    return 1;
 }
 
 static HANDLE bridge_spawn_thread(recomp_func_t fn, uint32_t ctx1,
@@ -13466,6 +13580,10 @@ static void kernel_thunk_dispatch(void)
     int slot = g_kernel_dispatch_slot;
     uint32_t ordinal = slot >= 0 && slot < XBOX_KERNEL_THUNK_TABLE_SIZE
                      ? g_slot_ordinals[slot] : 0;
+    /* A thread re-entering a save state's chain in a fresh process (XBA-250) arrives at the call it was parked
+     * in: the record's registers, and either the status the call had returned or the call made again. */
+    if (xbox_ResumeKernelPending() && xbox_ResumeKernelArrive(ordinal))
+        return;
     for (;;) {
         int held = xbox_GuestCpuRelease(XBOX_GUEST_CPU_KERNEL, ordinal);
         /* A kernel boundary: the thread is parked for a snapshot (XBA-244) until
@@ -13667,6 +13785,16 @@ static void kernel_thunk_dispatch_body(void)
         fprintf(stderr, "  [KERNEL] → returned 0x%08X\n", g_eax);
         fflush(stderr);
     }
+}
+
+/* The thunk VA a kernel call by ordinal goes through in this run (0: not imported), XBA-250. */
+uint32_t xbox_KernelThunkVa(uint32_t ordinal)
+{
+    int slot;
+    for (slot = 0; slot < XBOX_KERNEL_THUNK_TABLE_SIZE; slot++)
+        if (g_slot_ordinals[slot] == ordinal && ordinal)
+            return KERNEL_VA_BASE + (uint32_t)slot * 4u;
+    return 0;
 }
 
 /* ── Dispatch lookup ────────────────────────────────────── */

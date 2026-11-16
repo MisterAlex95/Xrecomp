@@ -2552,6 +2552,14 @@ uint32_t xbox_NewGuestThreadId(void)
     return (uint32_t)InterlockedIncrement(&g_next_unique_thread) * 4;
 }
 
+/* A save state resumed in a fresh process (XBA-250): new thread ids come after the restored threads' ids. */
+void xbox_GuestThreadIdAtLeast(uint32_t id)
+{
+    LONG want = (LONG)(id / 4);
+    if (g_next_unique_thread < want)
+        InterlockedExchange(&g_next_unique_thread, want);
+}
+
 /* Layout from nxdk's xboxkrnl.h (KTHREAD 0x110 bytes, ETHREAD after it):
  *   +0x00 Header (Type 6 = ThreadObject, Size, SignalState +4, WaitListHead +8)
  *   +0x10 MutantListHead  +0x1C StackBase  +0x20 StackLimit  +0x28 TlsData
