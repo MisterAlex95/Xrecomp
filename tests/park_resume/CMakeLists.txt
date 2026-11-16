@@ -22,6 +22,14 @@ add_test(NAME park_resume_test
 add_test(NAME park_resume_guest_lock
          COMMAND park_resume_test
                  ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/conformance/test.xbe)
+# The test runs itself again (fork + exec): a cross build's binary needs the emulator ctest runs it under
+# (qemu-aarch64 for the arm64 CI), passed comma separated as XBR_TEST_EMULATOR.
+set(_park_env "")
+if(CMAKE_CROSSCOMPILING_EMULATOR)
+    list(JOIN CMAKE_CROSSCOMPILING_EMULATOR "," _park_emu)
+    set(_park_env "XBR_TEST_EMULATOR=${_park_emu}")
+endif()
+set_tests_properties(park_resume_test PROPERTIES ENVIRONMENT "${_park_env}")
 set_tests_properties(park_resume_guest_lock PROPERTIES
-                     ENVIRONMENT "RECOMP_GUEST_LOCK=1;RECOMP_DISPATCH_GATE=1")
+                     ENVIRONMENT "RECOMP_GUEST_LOCK=1;RECOMP_DISPATCH_GATE=1;${_park_env}")
 set_tests_properties(park_resume_test park_resume_guest_lock PROPERTIES TIMEOUT 120)

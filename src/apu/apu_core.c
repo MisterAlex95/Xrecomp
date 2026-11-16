@@ -1289,7 +1289,11 @@ static void *mcpx_apu_frame_thread(void *arg)
             hs_rebase();
             qemu_cond_signal(&d->idle_cond);
             qemu_cond_wait(&d->cond, &d->lock);
-            d->is_idle = false;
+            /* Idle until the reason is gone: a wake-up while still held (the
+             * hold's own signal, a spurious one) must not show the thread as
+             * running to a holder that already saw it idle. */
+            if (!((d->pause_requested && !g_test_tone.active && !g_mixer_active_count) || d->state_hold))
+                d->is_idle = false;
             continue;
         }
 

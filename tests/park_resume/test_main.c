@@ -318,7 +318,7 @@ static void l_wait(void)
     while (!g_stop) {
         before_wait(K_LONG, 0x1A000000u);
         g_ebp = ebp;
-        SLEEP_CALL(_rs_l_sleep, RET_L_SLEEP, 250);
+        SLEEP_CALL(_rs_l_sleep, RET_L_SLEEP, 1000);
         after_wait(K_LONG);
         if (g_ebp != ebp)
             g_bad_ebp[K_LONG]++;
@@ -494,7 +494,21 @@ static int save_and_run_again(const char *self, const char *xbe)
     fflush(stdout);
     pid = fork();
     if (pid == 0) {
-        execl(self, self, xbe, "resume", path, (char *)NULL);
+        /* Under the emulator ctest used (XBR_TEST_EMULATOR, a cross build): its words first. */
+        char *argv2[16], emu[512];
+        int k = 0;
+        const char *e = getenv("XBR_TEST_EMULATOR");
+        if (e && *e) {
+            snprintf(emu, sizeof emu, "%s", e);
+            for (char *t = strtok(emu, ","); t && k < 10; t = strtok(NULL, ","))
+                argv2[k++] = t;
+        }
+        argv2[k++] = (char *)self;
+        argv2[k++] = (char *)xbe;
+        argv2[k++] = (char *)"resume";
+        argv2[k++] = path;
+        argv2[k] = NULL;
+        execvp(argv2[0], argv2);
         _exit(127);
     }
     check(pid > 0 && waitpid(pid, &status, 0) == pid, "a second process runs", NULL);
@@ -629,7 +643,15 @@ int main(int argc, char **argv)
     if (resume) {
         resume_here(argv[3]);
     } else {
-        save_and_run_again("/proc/self/exe", xbe_path);
+        /* The executable's own path, not "/proc/self/exe": under qemu-user (the
+         * arm64 CI) exec of that link starts qemu's binary, not the test. */
+        static char self[4096];
+        ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+        if (n > 0)
+            self[n] = 0;
+        else
+            snprintf(self, sizeof self, "%s", argv[0]);
+        save_and_run_again(self, xbe_path);
         g_stop = 1;
         check(wait_threads(0, 5000), "the first process's workers end", NULL);
     }
