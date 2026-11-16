@@ -96,6 +96,7 @@ struct gx_state {
     size_t cmd_len, cmd_cap;
     int dl_depth;
     unsigned last_vat;         /* VAT of the draw being decoded (the renderer records vertex formats) */
+    uint16_t vsize[8];         /* vertex size + 1 per VAT, 0 when not known (CP writes clear them) */
 
     /* registers */
     uint32_t bp[256];
@@ -109,6 +110,7 @@ struct gx_state {
 
     /* transformed vertices of the current draw */
     gx_vout *vout;
+    unsigned vout_ntex;        /* texture coordinates the draw in vout generated */
     uint32_t tex_epoch;        /* bumped by TX_INVALIDATE and each field: texture contents are hashed again */
     uint64_t field_count;
 

@@ -95,6 +95,8 @@ struct gx_gl {
     uint32_t *bi;
     uint32_t nv, ni;
     bool batch_tri;
+    unsigned batch_ntex;     /* texture coordinates the batch's draws generated (the most of them) */
+    uint8_t *packed;         /* the batch's vertices with only those coordinates, for the upload */
     ubo_t ubo_data;
 
     struct { uint32_t addr; GLuint tex; int w, h; } xfb[4];
@@ -829,9 +831,27 @@ void gx_gl_flush(gx_state *gx)
     }
     fill_ubo(gx, &k);
     F.glUseProgram(prog);
+    /* upload position, colours and only the texture coordinates generated: 24 + 12 x ntex bytes a vertex */
     F.glBindVertexArray(g->vao);
     F.glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
-    F.glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g->nv * sizeof(gx_vout)), g->bv, GL_STREAM_DRAW);
+    unsigned nt = g->batch_ntex;
+    size_t stride = offsetof(gx_vout, tex) + 12 * (size_t)nt;
+    for (uint32_t i = 0; i < g->nv; i++)
+        memcpy(g->packed + i * stride, &g->bv[i], stride);
+    F.glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g->nv * stride), g->packed, GL_STREAM_DRAW);
+    GLsizei st = (GLsizei)stride;
+    F.glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, st, (const void *)offsetof(gx_vout, pos));
+    F.glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)offsetof(gx_vout, c0));
+    F.glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)offsetof(gx_vout, c1));
+    for (unsigned i = 0; i < 8; i++) {
+        if (i < nt) {
+            F.glEnableVertexAttribArray(3 + i);
+            F.glVertexAttribPointer(3 + i, 3, GL_FLOAT, GL_FALSE, st, (const void *)(offsetof(gx_vout, tex) + 12 * i));
+        } else {
+            F.glDisableVertexAttribArray(3 + i);
+            F.glVertexAttrib4f(3 + i, 0, 0, 1, 1);
+        }
+    }
     F.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g->ebo);
     F.glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(g->ni * 4), g->bi, GL_STREAM_DRAW);
     F.glDrawElements(GL_TRIANGLES, (GLsizei)g->ni, GL_UNSIGNED_INT, NULL);
@@ -882,6 +902,10 @@ void gx_gl_draw(gx_state *gx, unsigned prim, unsigned n)
         gx_gl_flush(gx);
     if (g->nv + 2 * n + 4 > BATCH_V || g->ni + 6 * n + 6 > BATCH_I)
         gx_gl_flush(gx);
+    if (!g->ni)
+        g->batch_ntex = 0;
+    if (gx->vout_ntex > g->batch_ntex)
+        g->batch_ntex = gx->vout_ntex;
     g->batch_tri = tri;
     const gx_vout *v = gx->vout;
     if (tri) {
@@ -1483,11 +1507,12 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     if (list && *list)
         g->list_path = strdup(list);
     g->bv = malloc(BATCH_V * sizeof *g->bv);
+    g->packed = malloc(BATCH_V * sizeof *g->bv);
     g->bi = malloc(BATCH_I * sizeof *g->bi);
     g->peek_color = malloc(GX_EFB_W * GX_EFB_H * 4);
     g->peek_z = malloc(GX_EFB_W * GX_EFB_H * 4);
-    if (!g->bv || !g->bi || !g->peek_color || !g->peek_z) {
-        free(g->bv), free(g->bi), free(g->peek_color), free(g->peek_z), free(g);
+    if (!g->bv || !g->packed || !g->bi || !g->peek_color || !g->peek_z) {
+        free(g->bv), free(g->packed), free(g->bi), free(g->peek_color), free(g->peek_z), free(g);
         return -1;
     }
     gx->gl = g;
@@ -1667,6 +1692,7 @@ void gx_gl_detach(gx_state *gx)
     F.glDeleteVertexArrays(1, &g->vao);
     F.glDeleteVertexArrays(1, &g->empty_vao);
     free(g->bv);
+    free(g->packed);
     free(g->bi);
     free(g->peek_color);
     free(g->peek_z);

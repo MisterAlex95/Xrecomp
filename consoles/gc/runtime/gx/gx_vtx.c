@@ -89,7 +89,7 @@ unsigned gx_vertex_size(gx_state *gx, unsigned vat)
     return s;
 }
 
-static float read_comp(const uint8_t *p, unsigned fmt, float scale)
+static inline float read_comp(const uint8_t *p, unsigned fmt, float scale)
 {
     switch (fmt) {
     case 0: return p[0] * scale;
@@ -159,30 +159,29 @@ static inline const float *xfm(gx_state *gx, uint32_t word)
     return &gx->xf.f[word & 0x7FF];
 }
 
-static void mul34(const float *m, const float v[4], float out[3])
+static inline void mul34(const float *m, const float v[4], float out[3])
 {
     for (int r = 0; r < 3; r++)
         out[r] = m[4 * r] * v[0] + m[4 * r + 1] * v[1] + m[4 * r + 2] * v[2] + m[4 * r + 3] * v[3];
 }
 
-static void mul33n(gx_state *gx, unsigned pidx, const float v[3], float out[3])
+static inline void mul33n(gx_state *gx, unsigned pidx, const float v[3], float out[3])
 {
-    uint32_t base = 0x400 + (pidx & 31) * 3;
-    for (int r = 0; r < 3; r++) {
-        const float *m = xfm(gx, base + 3 * r);
-        out[r] = m[0] * v[0] + m[1] * v[1] + m[2] * v[2];
+    const float *m = xfm(gx, 0x400 + (pidx & 31) * 3);
+    for (int r = 0; r < 3; r++)
+        out[r] = m[3 * r] * v[0] + m[3 * r + 1] * v[1] + m[3 * r + 2] * v[2];
+}
+
+static inline void normalize3(float v[3])
+{
+    float l2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+    if (l2 > 0) {
+        float r = 1.0f / sqrtf(l2);
+        v[0] *= r, v[1] *= r, v[2] *= r;
     }
 }
 
-static void normalize3(float v[3])
-{
-    float l = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if (l > 0) {
-        v[0] /= l, v[1] /= l, v[2] /= l;
-    }
-}
-
-static float dot3(const float *a, const float *b)
+static inline float dot3(const float *a, const float *b)
 {
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
@@ -195,71 +194,83 @@ static void unpack_rgba(uint32_t v, float out[4])
     out[3] = (float)(v & 255) / 255.0f;
 }
 
-static float clamp01(float v)
+static inline float clamp01(float v)
 {
     return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
-/* One component group (rgb: comps 0..2, alpha: comp 3) of one channel. */
-static void light_chan(gx_state *gx, uint32_t ctrl, const float vcol[4], uint32_t matreg, uint32_t ambreg,
-                       const float pos[3], const float nrm[3], int c0, int c1, float out[4])
-{
+/* The draw's lights and channel controls, read once per draw (XF registers and memory do not change inside one). */
+typedef struct light_c {
+    float col[4], cosatt[3], distatt[3], pos[3], dir[3];
+} light_c;
+
+typedef struct chan_c { /* the colour or the alpha half of a channel */
+    bool lit, mat_vtx, amb_vtx, atten, spot;
+    unsigned dfn, nl;
+    uint8_t lights[8];
     float mat[4], amb[4];
-    unpack_rgba(matreg, mat);
-    if (ctrl & 1)
-        memcpy(mat, vcol, sizeof mat);
-    if (!(ctrl & 2)) {
+} chan_c;
+
+static void chan_setup(uint32_t ctrl, uint32_t matreg, uint32_t ambreg, chan_c *c)
+{
+    memset(c, 0, sizeof *c);
+    c->mat_vtx = ctrl & 1;
+    c->lit = ctrl & 2;
+    c->amb_vtx = ctrl & 0x40;
+    c->dfn = BITS(ctrl, 7, 2);
+    c->atten = ctrl & 0x200;
+    c->spot = ctrl & 0x400;
+    unpack_rgba(matreg, c->mat);
+    unpack_rgba(ambreg, c->amb);
+    unsigned mask = BITS(ctrl, 2, 4) | BITS(ctrl, 11, 4) << 4;
+    for (unsigned l = 0; l < 8; l++)
+        if (mask & (1u << l))
+            c->lights[c->nl++] = (uint8_t)l;
+}
+
+/* Components c0..c1-1 of one channel half: material x clamp(ambient + sum of lights). */
+static void light_eval(const chan_c *ch, const light_c *L, const float vcol[4], const float pos[3], const float nrm[3],
+                       int c0, int c1, float out[4])
+{
+    const float *mat = ch->mat_vtx ? vcol : ch->mat;
+    if (!ch->lit) {
         for (int c = c0; c < c1; c++)
             out[c] = mat[c];
         return;
     }
-    unpack_rgba(ambreg, amb);
-    if (ctrl & 0x40)
-        memcpy(amb, vcol, sizeof amb);
+    const float *amb = ch->amb_vtx ? vcol : ch->amb;
     float acc[4] = {amb[0], amb[1], amb[2], amb[3]};
-    unsigned mask = BITS(ctrl, 2, 4) | BITS(ctrl, 11, 4) << 4;
-    unsigned dfn = BITS(ctrl, 7, 2);
-    bool atten = ctrl & 0x200, spot = ctrl & 0x400;
-    for (unsigned l = 0; l < 8; l++) {
-        if (!(mask & (1u << l)))
-            continue;
-        uint32_t base = 0x600 + 16 * l;
-        float lcol[4];
-        unpack_rgba(gx->xf.u[base + 3], lcol);
-        const float *cosatt = xfm(gx, base + 4), *distatt = xfm(gx, base + 7);
-        const float *lpos = xfm(gx, base + 10), *ldirv = xfm(gx, base + 13);
-        float ldir[3] = {lpos[0] - pos[0], lpos[1] - pos[1], lpos[2] - pos[2]};
+    for (unsigned i = 0; i < ch->nl; i++) {
+        const light_c *l = &L[ch->lights[i]];
+        float ldir[3] = {l->pos[0] - pos[0], l->pos[1] - pos[1], l->pos[2] - pos[2]};
         float att = 1.0f;
-        if (atten && spot) {
+        if (ch->atten && ch->spot) {
             float d2 = dot3(ldir, ldir), d = sqrtf(d2);
             if (d > 0)
                 ldir[0] /= d, ldir[1] /= d, ldir[2] /= d;
-            float cs = fmaxf(0.0f, dot3(ldir, ldirv));
-            float num = fmaxf(0.0f, cosatt[0] + cosatt[1] * cs + cosatt[2] * cs * cs);
-            float den = distatt[0] + distatt[1] * d + distatt[2] * d2;
+            float cs = fmaxf(0.0f, dot3(ldir, l->dir));
+            float num = fmaxf(0.0f, l->cosatt[0] + l->cosatt[1] * cs + l->cosatt[2] * cs * cs);
+            float den = l->distatt[0] + l->distatt[1] * d + l->distatt[2] * d2;
             att = den != 0 ? num / den : 0;
-        } else if (atten) { /* specular: the direction slot holds the half angle */
+        } else if (ch->atten) { /* specular: the direction slot holds the half angle */
             normalize3(ldir);
-            float cs = dot3(nrm, ldir) >= 0 ? fmaxf(0.0f, dot3(nrm, ldirv)) : 0.0f;
-            float num = fmaxf(0.0f, cosatt[0] + cosatt[1] * cs + cosatt[2] * cs * cs);
-            float den = distatt[0] + distatt[1] * cs + distatt[2] * cs * cs;
+            float cs = dot3(nrm, ldir) >= 0 ? fmaxf(0.0f, dot3(nrm, l->dir)) : 0.0f;
+            float num = fmaxf(0.0f, l->cosatt[0] + l->cosatt[1] * cs + l->cosatt[2] * cs * cs);
+            float den = l->distatt[0] + l->distatt[1] * cs + l->distatt[2] * cs * cs;
             att = den != 0 ? num / den : 0;
         } else {
             normalize3(ldir);
         }
-        float diff = 1.0f;
-        if (dfn == 1)
-            diff = dot3(ldir, nrm);
-        else if (dfn == 2)
-            diff = fmaxf(0.0f, dot3(ldir, nrm));
+        float diff = ch->dfn == 1 ? dot3(ldir, nrm) : ch->dfn == 2 ? fmaxf(0.0f, dot3(ldir, nrm)) : 1.0f;
+        float k = att * diff;
         for (int c = c0; c < c1; c++)
-            acc[c] += att * diff * lcol[c];
+            acc[c] += k * l->col[c];
     }
     for (int c = c0; c < c1; c++)
         out[c] = mat[c] * clamp01(acc[c]);
 }
 
-static uint8_t to8(float v)
+static inline uint8_t to8(float v)
 {
     v = clamp01(v) * 255.0f + 0.5f;
     return (uint8_t)v;
@@ -284,10 +295,50 @@ void gx_load_vertices(gx_state *gx, unsigned vat, const uint8_t *src, unsigned n
         p[k] = gx_f32(xr[0x20 + k]);
     bool ortho = xr[0x26] & 1;
     float offx = (float)(BITS(gx->bp[BP_SCISSOR_OFFSET], 0, 10) * 2), offy = (float)(BITS(gx->bp[BP_SCISSOR_OFFSET], 10, 10) * 2);
+    /* clip -> GL clip: x' = ax * cx + bx * cw, y' = ay * cy + by * cw, z' = az * cz + bz * cw */
+    float ax = 2.0f * sx / GX_EFB_W, bx = 2.0f * (ox - offx) / GX_EFB_W - 1.0f;
+    float ay = -2.0f * sy / GX_EFB_H, by = 1.0f - 2.0f * (oy - offy) / GX_EFB_H;
+    float az = 2.0f * sz / 16777215.0f, bz = 2.0f * oz / 16777215.0f - 1.0f;
     unsigned ntex = xr[0x3F] & 15, ncol = xr[0x09] & 3;
     if (ntex > 8)
         ntex = 8;
     bool dual = xr[0x12] & 1;
+
+    /* what this draw needs */
+    chan_c chan[2][2];
+    bool any_lit = false;
+    for (unsigned c = 0; c < 2; c++) {
+        chan_setup(xr[0x0E + c], xr[0x0C + c], xr[0x0A + c], &chan[c][0]);
+        chan_setup(xr[0x10 + c], xr[0x0C + c], xr[0x0A + c], &chan[c][1]);
+        if (c < (ncol ? ncol : 1))
+            any_lit |= chan[c][0].lit || chan[c][1].lit;
+    }
+    light_c lights[8];
+    if (any_lit)
+        for (unsigned l = 0; l < 8; l++) {
+            uint32_t base = 0x600 + 16 * l;
+            unpack_rgba(gx->xf.u[base + 3], lights[l].col);
+            memcpy(lights[l].cosatt, xfm(gx, base + 4), 12);
+            memcpy(lights[l].distatt, xfm(gx, base + 7), 12);
+            memcpy(lights[l].pos, xfm(gx, base + 10), 12);
+            memcpy(lights[l].dir, xfm(gx, base + 13), 12);
+        }
+    bool need_n = any_lit, need_bt = false, need_litf = false; /* need_litf: texgen reads the lit colours */
+    for (unsigned t = 0; t < ntex; t++) {
+        uint32_t info = xr[0x40 + t];
+        unsigned type = BITS(info, 4, 3), row = BITS(info, 7, 5);
+        if (type == 1)
+            need_bt = true;
+        else if (type == 0 && row == 1)
+            need_n = true;
+        if (type >= 2 || (type == 0 && row == 2))
+            need_litf = true;
+    }
+    bool chan_any_lit[2] = {chan[0][0].lit || chan[0][1].lit, chan[1][0].lit || chan[1][1].lit};
+    uint8_t mat8[2][4];
+    for (unsigned c = 0; c < 2; c++)
+        for (int k = 0; k < 4; k++)
+            mat8[c][k] = (uint8_t)(xr[0x0C + c] >> (24 - 8 * k));
 
     for (unsigned v = 0; v < n; v++) {
         gx_vout *o = &gx->vout[v];
@@ -308,8 +359,7 @@ void gx_load_vertices(gx_state *gx, unsigned vat, const uint8_t *src, unsigned n
                 pos[k] = read_comp(d + k * cs, f.pos_fmt, pos_scale);
         }
         float nbt[3][3] = {{0, 0, 1}, {0, 1, 0}, {1, 0, 0}};
-        bool has_nrm = f.nrm_type != A_NONE;
-        if (has_nrm) {
+        if (f.nrm_type) {
             unsigned cs = comp_size[f.nrm_fmt], nv = f.nrm_nbt ? 3 : 1;
             if (f.nrm_type != A_DIRECT && f.nrm_nbt && f.nrm_idx3) {
                 for (unsigned k = 0; k < 3; k++) {
@@ -342,14 +392,17 @@ void gx_load_vertices(gx_state *gx, unsigned vat, const uint8_t *src, unsigned n
         }
         src += (size_t)(s - src);
 
-        /* position and normals to view space */
+        /* position (and the normals that lighting or texgen use) to view space */
         float vp[3];
         mul34(xfm(gx, pidx * 4), pos, vp);
-        float vn[3][3];
-        for (int k = 0; k < 3; k++) {
-            mul33n(gx, pidx, nbt[k], vn[k]);
-            if (k == 0)
-                normalize3(vn[k]);
+        float vn[3][3] = {{0, 0, 1}, {0, 1, 0}, {1, 0, 0}};
+        if (need_n) {
+            mul33n(gx, pidx, nbt[0], vn[0]);
+            normalize3(vn[0]);
+        }
+        if (need_bt) {
+            mul33n(gx, pidx, nbt[1], vn[1]);
+            mul33n(gx, pidx, nbt[2], vn[2]);
         }
         /* projection, viewport */
         float cx, cy, cz, cw;
@@ -364,25 +417,35 @@ void gx_load_vertices(gx_state *gx, unsigned vat, const uint8_t *src, unsigned n
             cz = p[4] * vp[2] + p[5];
             cw = -vp[2];
         }
-        o->pos[0] = 2.0f * (sx * cx + (ox - offx) * cw) / (float)GX_EFB_W - cw;
-        o->pos[1] = cw - 2.0f * (sy * cy + (oy - offy) * cw) / (float)GX_EFB_H;
-        o->pos[2] = 2.0f * (sz * cz + oz * cw) / 16777215.0f - cw;
+        o->pos[0] = ax * cx + bx * cw;
+        o->pos[1] = ay * cy + by * cw;
+        o->pos[2] = az * cz + bz * cw;
         o->pos[3] = cw;
 
-        /* lighting */
-        float lit[2][4] = {{1, 1, 1, 1}, {1, 1, 1, 1}};
+        /* lighting (an unlit channel passes its 8-bit material through) */
+        float lit[2][4];
+        uint8_t *out8[2] = {o->c0, o->c1};
         for (unsigned c = 0; c < 2; c++) {
-            float vcol[4] = {vc[c][0] / 255.0f, vc[c][1] / 255.0f, vc[c][2] / 255.0f, vc[c][3] / 255.0f};
             if (c >= ncol && ncol) {
                 memcpy(lit[c], lit[0], sizeof lit[c]);
+                memcpy(out8[c], out8[0], 4);
                 continue;
             }
-            light_chan(gx, xr[0x0E + c], vcol, xr[0x0C + c], xr[0x0A + c], vp, vn[0], 0, 3, lit[c]);
-            light_chan(gx, xr[0x10 + c], vcol, xr[0x0C + c], xr[0x0A + c], vp, vn[0], 3, 4, lit[c]);
-        }
-        for (int k = 0; k < 4; k++) {
-            o->c0[k] = to8(lit[0][k]);
-            o->c1[k] = to8(lit[1][k]);
+            if (!chan_any_lit[c]) {
+                const uint8_t *src8 = chan[c][0].mat_vtx ? vc[c] : mat8[c];
+                const uint8_t *srca = chan[c][1].mat_vtx ? vc[c] : mat8[c];
+                out8[c][0] = src8[0], out8[c][1] = src8[1], out8[c][2] = src8[2], out8[c][3] = srca[3];
+                if (need_litf)
+                    for (int k = 0; k < 4; k++)
+                        lit[c][k] = out8[c][k] * (1.0f / 255.0f);
+                continue;
+            }
+            float vcol[4] = {vc[c][0] * (1.0f / 255.0f), vc[c][1] * (1.0f / 255.0f), vc[c][2] * (1.0f / 255.0f),
+                             vc[c][3] * (1.0f / 255.0f)};
+            light_eval(&chan[c][0], lights, vcol, vp, vn[0], 0, 3, lit[c]);
+            light_eval(&chan[c][1], lights, vcol, vp, vn[0], 3, 4, lit[c]);
+            for (int k = 0; k < 4; k++)
+                out8[c][k] = to8(lit[c][k]);
         }
 
         /* texgen */
@@ -434,7 +497,6 @@ void gx_load_vertices(gx_state *gx, unsigned vat, const uint8_t *src, unsigned n
             }
             o->tex[t][0] = stq[0], o->tex[t][1] = stq[1], o->tex[t][2] = stq[2];
         }
-        for (unsigned t = ntex; t < 8; t++)
-            o->tex[t][0] = o->tex[t][1] = 0, o->tex[t][2] = 1;
     }
+    gx->vout_ntex = ntex;
 }

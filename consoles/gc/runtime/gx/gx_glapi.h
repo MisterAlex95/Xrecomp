@@ -183,6 +183,8 @@ typedef struct __GLsync *GLsync;
     X(void, glDeleteVertexArrays, (GLsizei, const GLuint *)) \
     X(void, glVertexAttribPointer, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void *)) \
     X(void, glEnableVertexAttribArray, (GLuint)) \
+    X(void, glDisableVertexAttribArray, (GLuint)) \
+    X(void, glVertexAttrib4f, (GLuint, GLfloat, GLfloat, GLfloat, GLfloat)) \
     X(void, glDrawElements, (GLenum, GLsizei, GLenum, const void *)) \
     X(void, glDrawArrays, (GLenum, GLint, GLsizei)) \
     X(GLsync, glFenceSync, (GLenum, GLbitfield)) \

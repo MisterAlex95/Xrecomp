@@ -114,6 +114,8 @@ static void pe_irq_update(gx_state *gx)
 static void load_cp(gx_state *gx, uint8_t addr, uint32_t v)
 {
     gx->cpr[addr] = v;
+    if (addr == 0x50 || addr == 0x60 || (addr >= 0x70 && addr < 0xA0))
+        memset(gx->vsize, 0, sizeof gx->vsize); /* vertex layouts change */
 }
 
 static void load_xf(gx_state *gx, uint32_t addr, uint32_t v)
@@ -290,7 +292,9 @@ static size_t parse(gx_state *gx, const uint8_t *p, size_t n)
                 break;
             unsigned vat = op & 7, prim = (op >> 3) & 7, cnt = gx_be16(p + at + 1);
             gx->last_vat = vat;
-            size_t vs = gx_vertex_size(gx, vat);
+            if (!gx->vsize[vat])
+                gx->vsize[vat] = (uint16_t)(gx_vertex_size(gx, vat) + 1);
+            size_t vs = gx->vsize[vat] - 1u;
             if (left < 3 + vs * cnt)
                 break;
             if (cnt) { /* cnt < 65536 = GX_MAX_VERTS: gx->vout holds any draw */
@@ -366,6 +370,18 @@ void gx_fifo_write(gx_state *gx, uint32_t v, unsigned size)
     uint32_t base = gx->pi_base & 0x03FFFFE0u, lim = ring_limit(gx->pi_end & 0x03FFFFFFu);
     uint32_t wp = gx->pi_wp & 0x03FFFFFFu;
     bool crossed = false;
+    if ((wp & 3) + size <= 4 && wp + size < lim && wp + size <= gx->ram_size) { /* the common case: no wrap */
+        uint8_t *d = gx->ram + wp;
+        for (unsigned i = 0; i < size; i++)
+            d[i] = (uint8_t)(v >> (8 * (size - 1 - i)));
+        wp += size;
+        gx->pi_wp = (gx->pi_wp & 0x20000000u) | wp;
+        if ((wp & 31) == 0 && (gx->cp_cr & 0x10)) {
+            gx->cp_wp = wp;
+            cp_run(gx);
+        }
+        return;
+    }
     for (unsigned i = 0; i < size; i++) {
         if (wp < gx->ram_size)
             gx->ram[wp] = (uint8_t)(v >> (8 * (size - 1 - i)));
