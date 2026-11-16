@@ -19,11 +19,12 @@ target_include_directories(recomp_pack_test PRIVATE ${SRC})
 target_link_libraries(recomp_pack_test PRIVATE ${CMAKE_DL_LIBS})
 
 # The other consoles' runtimes pack_loader.c routes to (XBA-147). They all play games now (core + SDL host layer, GBA
-# XBA-157, PS1 XBA-168, N64 XBA-174), which this test does not link: stand-ins that log.
+# XBA-157, PS1 XBA-168, N64 XBA-174, GameCube XBA-259), which this test does not link: stand-ins that log.
 set(CONSOLES ${CMAKE_CURRENT_SOURCE_DIR}/../../consoles)
 set(CONSOLE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/fake_gba_runtime.c ${CMAKE_CURRENT_SOURCE_DIR}/fake_ps1_runtime.c
-                ${CMAKE_CURRENT_SOURCE_DIR}/fake_n64_runtime.c)
-set(CONSOLE_INC ${CONSOLES}/gba/runtime ${CONSOLES}/ps1/runtime ${CONSOLES}/n64/runtime)
+                ${CMAKE_CURRENT_SOURCE_DIR}/fake_n64_runtime.c ${CMAKE_CURRENT_SOURCE_DIR}/fake_gc_runtime.c)
+set(CONSOLE_INC ${CONSOLES}/gba/runtime ${CONSOLES}/ps1/runtime ${CONSOLES}/n64/runtime ${CONSOLES}/gc/runtime
+                ${CMAKE_CURRENT_SOURCE_DIR}/../../src/input)
 
 foreach(t fake_shell fake_shell_static)
     add_library(${t} SHARED ${APP}/pack_loader.c ${SRC}/recomp_pack.c ${SRC}/recomp_cfg.c fake_toolkit.c ${CONSOLE_SRC})

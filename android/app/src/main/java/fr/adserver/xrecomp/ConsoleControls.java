@@ -32,6 +32,8 @@ final class ConsoleControls {
             return "RECOMP_PS1_PAD_MAP";
         case N64:
             return "RECOMP_N64_PAD_MAP";
+        case GC:
+            return "RECOMP_GC_PAD_MAP";
         default:
             return null;
         }

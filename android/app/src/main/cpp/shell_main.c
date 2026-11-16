@@ -75,6 +75,7 @@
 #include "pack_loader.h"
 #include "gba_runtime.h"
 #include "n64_runtime.h"
+#include "gc_runtime.h"
 #include "ps1_runtime.h"
 #include "ps1_identify.h"
 
@@ -337,7 +338,9 @@ int main(int argc, char *argv[])
      * game could not start. The PS1 runtime the same (XBA-168: its disc or
      * EXE through the OpenBIOS asset, memory cards under
      * <internal>/save/ps1-<KEY>/). The N64 runtime the same (XBA-174: the
-     * cartridge as it is, no BIOS, saves under <internal>/save/n64-<KEY>/). */
+     * cartridge as it is, no BIOS, saves under <internal>/save/n64-<KEY>/).
+     * The GameCube runtime the same (XBA-259: a homebrew DOL, no IPL, no
+     * saves yet). */
     int console = !s_title_main && have_game <= 0 && store.game_dir[0] ? xba_pack_rom_console(store.game_dir)
                                                                         : RECOMP_CONSOLE_UNKNOWN;
     int console_game = console != RECOMP_CONSOLE_UNKNOWN;
@@ -355,7 +358,8 @@ int main(int argc, char *argv[])
             printf("xboxrecomp: %s runtime returned %d\n", recomp_pack_console_name(console), console_rc);
         else
             printf("xboxrecomp: no usable pack for %s (%s)\n", store.game_dir, pack_reason);
-        if ((console == RECOMP_CONSOLE_GBA || console == RECOMP_CONSOLE_PS1 || console == RECOMP_CONSOLE_N64)
+        if ((console == RECOMP_CONSOLE_GBA || console == RECOMP_CONSOLE_PS1 || console == RECOMP_CONSOLE_N64
+             || console == RECOMP_CONSOLE_GC)
             && pack_rc == RECOMP_PACK_OK) {
             if (console_rc != 0)
                 exit_via_launcher(console == RECOMP_CONSOLE_PS1

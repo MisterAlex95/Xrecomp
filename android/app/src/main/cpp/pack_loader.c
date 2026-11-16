@@ -4,6 +4,7 @@
 #include "pack_loader.h"
 #include "gba_runtime.h"
 #include "n64_runtime.h"
+#include "gc_runtime.h"
 #include "ps1_runtime.h"
 
 #include <stdint.h>
@@ -266,6 +267,7 @@ int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_
     case RECOMP_CONSOLE_GBA: start = gba_runtime_start; break;
     case RECOMP_CONSOLE_PS1: start = ps1_runtime_start; break;
     case RECOMP_CONSOLE_N64: start = n64_runtime_start; break;
+    case RECOMP_CONSOLE_GC: start = gc_runtime_start; break;
     default: break;
     }
     rc = recomp_pack_find_key(files_dir, console, key, xba_shell_abi, &m, lib, sizeof lib, why, sizeof why);
@@ -320,6 +322,26 @@ int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_
         char work[RECOMP_PACK_PATH_MAX + 8];
         snprintf(work, sizeof work, "%s/work", files_dir ? files_dir : ".");
         n64_runtime_set_work_dir(files_dir ? work : NULL);
+        if (rc == RECOMP_PACK_MISSING)
+            printf("PACK_NONE %s %s (not prepared, the interpreter runs it)\n", recomp_pack_console_name(console), key);
+        else if (rc != RECOMP_PACK_OK)
+            printf("PACK_STALE %s %s (%s), running interpreted\n", recomp_pack_console_name(console), key, why);
+        fflush(stdout);
+        why[0] = 0;
+        rc = start(rom_path, rc == RECOMP_PACK_OK ? lib : NULL, key);
+        if (runtime_rc)
+            *runtime_rc = rc;
+        rc = RECOMP_PACK_OK;
+        goto out;
+    }
+    if (console == RECOMP_CONSOLE_GC && start) {
+        /* The GameCube runtime (XBA-259) is an interpreter too, homebrew DOLs for now: the program always starts,
+         * no IPL. No pack: PACK_NONE. A pack this shell refuses: PACK_STALE, interpreted. A pack that passes is
+         * handed over; the runtime attaches its table (PACK_LOADED gc <KEY>), whose code runs only where memory
+         * holds what it was lifted from. The interpreter's misses go to <files>/work/gc-<KEY>/discovered.txt. */
+        char work[RECOMP_PACK_PATH_MAX + 8];
+        snprintf(work, sizeof work, "%s/work", files_dir ? files_dir : ".");
+        gc_runtime_set_work_dir(files_dir ? work : NULL);
         if (rc == RECOMP_PACK_MISSING)
             printf("PACK_NONE %s %s (not prepared, the interpreter runs it)\n", recomp_pack_console_name(console), key);
         else if (rc != RECOMP_PACK_OK)

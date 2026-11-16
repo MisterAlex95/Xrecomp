@@ -346,6 +346,32 @@ static void make_ps1(const char *path, int raw, const char *cnf)
     fclose(f);
 }
 
+/* A minimal DOL: text 0 at file 0x100, loaded at 0x80003100 (0x100 bytes), data 0 after it, a BSS, the entry at the
+ * text's start. */
+static void put_be32(unsigned char *p, uint32_t v)
+{
+    p[0] = (unsigned char)(v >> 24);
+    p[1] = (unsigned char)(v >> 16);
+    p[2] = (unsigned char)(v >> 8);
+    p[3] = (unsigned char)v;
+}
+
+static void make_dol(unsigned char *d, size_t n)
+{
+    memset(d, 0, n);
+    put_be32(d + 0x00, 0x100);        /* text 0 offset */
+    put_be32(d + 0x48, 0x80003100u);  /* text 0 address */
+    put_be32(d + 0x90, 0x100);        /* text 0 size */
+    put_be32(d + 0x1C, 0x200);        /* data 0 offset */
+    put_be32(d + 0x64, 0x80003200u);  /* data 0 address */
+    put_be32(d + 0xAC, 0x100);        /* data 0 size */
+    put_be32(d + 0xD8, 0x80003300u);  /* BSS */
+    put_be32(d + 0xDC, 0x1000);
+    put_be32(d + 0xE0, 0x80003100u);  /* entry */
+    for (size_t i = 0x100; i < n; i++)
+        d[i] = (unsigned char)(i * 7);
+}
+
 static void test_consoles(void)
 {
     char path[1024], path2[1024], key[64], name[64];
@@ -355,6 +381,7 @@ static void test_consoles(void)
     CHECK(recomp_pack_console_id(NULL) == RECOMP_CONSOLE_XBOX && recomp_pack_console_id("") == RECOMP_CONSOLE_XBOX);
     CHECK(recomp_pack_console_id("gba") == RECOMP_CONSOLE_GBA && recomp_pack_console_id("ps1") == RECOMP_CONSOLE_PS1);
     CHECK(recomp_pack_console_id("n64") == RECOMP_CONSOLE_N64 && recomp_pack_console_id("xbox") == RECOMP_CONSOLE_XBOX);
+    CHECK(recomp_pack_console_id("gc") == RECOMP_CONSOLE_GC && !strcmp(recomp_pack_console_name(RECOMP_CONSOLE_GC), "gc"));
     CHECK(recomp_pack_console_id("GBA") == RECOMP_CONSOLE_UNKNOWN && recomp_pack_console_id("snes") == RECOMP_CONSOLE_UNKNOWN);
     CHECK(!strcmp(recomp_pack_console_name(RECOMP_CONSOLE_PS1), "ps1") && !strcmp(recomp_pack_console_name(9), "?"));
 
@@ -410,6 +437,34 @@ static void test_consoles(void)
         write_file(path, v, sizeof v);
         CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_N64
               && !strcmp(key, "NSME-635A2BFF"));
+    }
+
+    /* GameCube DOL (XBA-259): "DOL-" + CRC32 of the file, when every header
+     * field makes sense; one that does not is no DOL. */
+    {
+        unsigned char dol[0x400];
+        char want[32];
+        make_dol(dol, sizeof dol);
+        snprintf(path, sizeof path, "%s/test.dol", root);
+        write_file(path, dol, sizeof dol);
+        snprintf(want, sizeof want, "DOL-%08X", (unsigned)crc32_ref(dol, sizeof dol));
+        CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_GC && !strcmp(key, want));
+        dol[0xE3] = 0x00; /* entry 0x80003100 -> 0x80003100 & ~0xFF: before the text section */
+        dol[0xE2] = 0x30;
+        write_file(path, dol, sizeof dol);
+        CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == -1);
+        make_dol(dol, sizeof dol);
+        dol[0x93] = 0xFF; /* text 0 longer than the file */
+        dol[0x92] = 0x10;
+        write_file(path, dol, sizeof dol);
+        CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == -1);
+        make_dol(dol, sizeof dol);
+        dol[0xF0] = 1; /* the header's padding */
+        write_file(path, dol, sizeof dol);
+        CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == -1);
+        memset(dol, 0, sizeof dol); /* all zero: no text section */
+        write_file(path, dol, sizeof dol);
+        CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == -1);
     }
 
     /* PS1: the serial from SYSTEM.CNF, 2048- and 2352-byte sectors, through a
@@ -895,6 +950,47 @@ static void test_routing(const char *shell_path, const char *title_path, const c
         CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0);
         CHECK(strstr(log, "PACK_STALE n64 NSME-635A2BFF (") != NULL && strstr(log, "shell_abi 2") != NULL);
         CHECK(strstr(log, "pack none") != NULL);
+    }
+
+    /* XBA-259: a GameCube DOL the same way. No pack: the interpreter runs it (PACK_NONE); a pack the shell accepts
+     * is handed to gc_runtime_start (a stand-in here, fake_gc_runtime.c). */
+    {
+        int (*load_rom)(const char *, const char *, int *, char *, size_t) =
+            (int (*)(const char *, const char *, int *, char *, size_t))dlsym(shell, "xba_pack_load_rom");
+        char prog[1100], key[64], dir[1200], so[1300], text[1024], out[1300], log[4096];
+        unsigned char dol[0x400], bytes[64] = { 0 };
+        int c = -1, runtime_rc = -1, rc;
+
+        CHECK(load_rom != NULL);
+        if (!load_rom)
+            return;
+        snprintf(prog, sizeof prog, "%s/gc", root);
+        mkdirs(prog);
+        snprintf(prog, sizeof prog, "%s/gc/padtest.dol", root);
+        make_dol(dol, sizeof dol);
+        write_file(prog, dol, sizeof dol);
+        CHECK(recomp_pack_rom_identify(prog, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_GC);
+
+        snprintf(out, sizeof out, "%s/gc/stdout-none.txt", root);
+        rc = load_rom_logged(load_rom, files, prog, &runtime_rc, reason, sizeof reason, out, log, sizeof log);
+        CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0 && reason[0] == 0);
+        CHECK(strstr(log, "PACK_NONE gc DOL-") != NULL && strstr(log, "(not prepared") != NULL);
+        CHECK(strstr(log, "gc runtime ready") != NULL && strstr(log, "pack none") != NULL);
+        CHECK(strstr(log, "gc work dir ") != NULL && strstr(log, "/work\n") != NULL);
+
+        snprintf(dir, sizeof dir, "%s/packs/gc-%s", files, key);
+        mkdirs(dir);
+        snprintf(so, sizeof so, "%s/libtitle.so", dir);
+        write_file(so, bytes, sizeof bytes);
+        snprintf(text, sizeof text, "{\"format\":1,\"console\":\"gc\",\"title_key\":\"%s\",\"title\":\"Pad test\","
+                 "\"abi\":\"%s\",\"shell_abi\":1,\"lib\":\"libtitle.so\",\"lib_size\":64}", key, recomp_pack_host_abi());
+        snprintf(out, sizeof out, "%s/pack.json", dir);
+        write_file(out, text, strlen(text));
+        snprintf(out, sizeof out, "%s/gc/stdout.txt", root);
+        rc = load_rom_logged(load_rom, files, prog, &runtime_rc, reason, sizeof reason, out, log, sizeof log);
+        CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0);
+        CHECK(strstr(log, "PACK_NONE") == NULL && strstr(log, "PACK_STALE") == NULL);
+        CHECK(strstr(log, "gc runtime ready") != NULL && strstr(log, so) != NULL);
     }
 
     /* A title linked into the shell: its strong symbols, not the forwarders. */

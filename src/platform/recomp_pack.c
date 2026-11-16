@@ -115,7 +115,7 @@ int recomp_pack_norm_title_id(const char *s, char out[9])
 
 /* ---- Other consoles (XBA-147) ---------------------------------------------- */
 
-static const char *const CONSOLE_NAMES[] = { "xbox", "gba", "ps1", "n64" };
+static const char *const CONSOLE_NAMES[] = { "xbox", "gba", "ps1", "n64", "gc" };
 
 int recomp_pack_console_id(const char *name)
 {
@@ -400,6 +400,50 @@ static int cue_bin(const char *cue, char *out, size_t n)
     return rc;
 }
 
+static uint32_t be32_at(const unsigned char *p)
+{
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+/* GameCube DOL (XBA-259): no magic, so every field of the 256-byte header has to make sense: the 7 text and 11 data
+ * sections (file offset, load address, size) inside the file and in MEM1 (0x80000000-0x817FFFFF), at least one text
+ * section and the entry in one, the BSS in MEM1, the padding after the entry zero. Key: "DOL-" + CRC32 of the file. */
+static int dol_key(FILE *f, char *key, size_t key_n)
+{
+    unsigned char h[0x100], buf[65536];
+    long size;
+    int text = 0, entry_in = 0;
+    uint32_t crc = 0;
+    size_t n;
+    if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0x100 || size > 0x1800000 || fseek(f, 0, SEEK_SET) != 0
+        || fread(h, 1, sizeof h, f) != sizeof h)
+        return -1;
+    uint32_t entry = be32_at(h + 0xE0), bss = be32_at(h + 0xD8), bss_n = be32_at(h + 0xDC);
+    for (int i = 0xE4; i < 0x100; i++)
+        if (h[i])
+            return -1;
+    for (int i = 0; i < 18; i++) {
+        uint32_t off = be32_at(h + 4 * i), addr = be32_at(h + 0x48 + 4 * i), len = be32_at(h + 0x90 + 4 * i);
+        if (!len)
+            continue;
+        if (off < 0x100 || (uint64_t)off + len > (uint64_t)size || addr < 0x80000000u
+            || (uint64_t)addr + len > 0x81800000u)
+            return -1;
+        if (i < 7) {
+            text = 1;
+            entry_in |= entry >= addr && entry < addr + len;
+        }
+    }
+    if (!text || !entry_in || (bss_n && (bss < 0x80000000u || (uint64_t)bss + bss_n > 0x81800000u)))
+        return -1;
+    if (fseek(f, 0, SEEK_SET) != 0)
+        return -1;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0)
+        crc = crc32_update(crc, buf, n);
+    snprintf(key, key_n, "DOL-%08X", (unsigned)crc);
+    return 0;
+}
+
 int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t key_n)
 {
     unsigned char h[0xC0];
@@ -454,6 +498,8 @@ int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t k
         c = RECOMP_CONSOLE_GBA;
     else if (ps1_key(f, key, key_n) == 0)
         c = RECOMP_CONSOLE_PS1;
+    else if (dol_key(f, key, key_n) == 0)
+        c = RECOMP_CONSOLE_GC;
     fclose(f);
     if (c == RECOMP_CONSOLE_UNKNOWN)
         return -1;

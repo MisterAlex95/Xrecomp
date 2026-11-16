@@ -14,7 +14,7 @@
  *
  * Other consoles (XBA-147, consoles/README.md): pack.json may carry
  * "console" ("xbox" when absent, so every pack made before stays valid, same
- * format 1) and, for gba / ps1 / n64, "title_key" instead of title_id: the
+ * format 1) and, for gba / ps1 / n64 / gc, "title_key" instead of title_id: the
  * generic title key recomp_pack_rom_identify reads from the game itself. Such
  * a pack lives in <files dir>/packs/<console>-<title_key>/; the loader hands
  * it to that console's runtime instead of dlopening it as an Xbox title.
@@ -94,10 +94,11 @@ enum {
     RECOMP_CONSOLE_XBOX = 0,
     RECOMP_CONSOLE_GBA = 1,
     RECOMP_CONSOLE_PS1 = 2,
-    RECOMP_CONSOLE_N64 = 3
+    RECOMP_CONSOLE_N64 = 3,
+    RECOMP_CONSOLE_GC = 4
 };
 
-/* "xbox", "gba", "ps1", "n64" <-> RECOMP_CONSOLE_*. NULL or "" is xbox (a
+/* "xbox", "gba", "ps1", "n64", "gc" <-> RECOMP_CONSOLE_*. NULL or "" is xbox (a
  * pack from before the field); anything else RECOMP_CONSOLE_UNKNOWN / "?". */
 int recomp_pack_console_id(const char *name);
 const char *recomp_pack_console_name(int console);
@@ -112,6 +113,10 @@ const char *recomp_pack_console_name(int console);
  *        (ISO 9660 in 2048- or 2352-byte sectors, system ID "PLAYSTATION";
  *        no serial-shaped boot file: "PSX-<CRC32 of the volume descriptor>";
  *        a .cue: its first FILE)
+ *   gc   "DOL-<CRC32 of the file>"                    DOL-1A2B3C4D
+ *        (a GameCube program, XBA-259: no magic, so a strict header check:
+ *        7 text + 11 data sections inside the file and MEM1, a text section,
+ *        the entry in one, the BSS in MEM1, the header's padding zero)
  * A game code byte outside [A-Z0-9] becomes '_', so a key names a folder.
  * An Xbox image is none of these (the Xbox path reads it); that is how an
  * .iso is told apart: XISO magic vs ISO 9660 "PLAYSTATION". A CHD (MAME

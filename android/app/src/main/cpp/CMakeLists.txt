@@ -35,10 +35,10 @@ if(TARGET xbox_framegen)
 endif()
 target_link_libraries(main PRIVATE -Wl,--whole-archive ${XBA_TOOLKIT_LIBS} -Wl,--no-whole-archive
                                    SDL2::SDL2 GLESv3 log android m)
-# The other consoles' runtimes (XBA-147, consoles/README.md): pack_loader.c hands a game whose console is gba, ps1 or
-# n64 to <console>_runtime_start. All three play games (GBA XBA-157, PS1 XBA-168, N64 XBA-174): the root build turns
-# them on for Android, so their targets are there already (added here otherwise).
-foreach(_console gba ps1 n64)
+# The other consoles' runtimes (XBA-147, consoles/README.md): pack_loader.c hands a game whose console is gba, ps1,
+# n64 or gc to <console>_runtime_start. All four play (GBA XBA-157, PS1 XBA-168, N64 XBA-174, GameCube homebrew
+# XBA-259): the root build turns them on for Android, so their targets are there already (added here otherwise).
+foreach(_console gba ps1 n64 gc)
     if(NOT TARGET ${_console}_runtime)
         add_subdirectory("${XBOXRECOMP_ROOT}/consoles/${_console}/runtime" ${_console}_runtime)
     endif()
@@ -53,11 +53,15 @@ target_link_libraries(main PRIVATE -Wl,--whole-archive ps1_core -Wl,--no-whole-a
 # The N64 core and its RCP devices go in whole too (n64_core.h, n64_devices.h, n64_rdp.h), exported for the N64
 # title packs to come (XBA-174: the N64 recompiler's lifted code will call into them as the GBA's does).
 target_link_libraries(main PRIVATE -Wl,--whole-archive n64_core n64_rsp n64_rdp -Wl,--no-whole-archive)
+# The GameCube core goes in whole too (gc_core.h, gc_recomp_rt.h's gc_read* / gc_write*), exported: a GameCube pack's
+# lifted code binds to its bus functions at dlopen, as gc_run's does (XBA-259).
+target_link_libraries(main PRIVATE -Wl,--whole-archive gc_core -Wl,--no-whole-archive)
 # A .chd PlayStation disc's title key (XBA-159): the PS1 disc reader as recomp_pack_rom_identify's disc hook.
 target_link_libraries(main PRIVATE ps1_identify)
 set(XBA_CONSOLE_FAST_LIBS gba_core gba_runtime gba_pack   # the interpreters: release flags below too
                           ps1_core ps1_gpu ps1_cd ps1_spu ps1_mdec ps1_runtime
-                          n64_core n64_rsp n64_rdp n64_rdp_sw n64_runtime)
+                          n64_core n64_rsp n64_rdp n64_rdp_sw n64_runtime
+                          gc_core gc_pad_map gc_runtime)
 
 # Release flags for the runtime (the software GPU, the kernel, audio): what a frame on the device spends its time in.
 # Every toolkit library pins -O2 in its own CMakeLists, after the NDK's per-configuration flags, so the NDK's -O3 for

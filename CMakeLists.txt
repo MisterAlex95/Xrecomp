@@ -108,8 +108,8 @@ if(NOT WIN32)
 endif()
 
 # Other consoles (XBA-146, consoles/README.md): each runtime links xbr_host only. ON by default on Linux and macOS,
-# OFF on Android and Windows until each one is ready there. The GBA (XBA-157), the PS1 (XBA-168) and the N64
-# (XBA-174) are ready on Android: the app plays them.
+# OFF on Android and Windows until each one is ready there. The GBA (XBA-157), the PS1 (XBA-168), the N64
+# (XBA-174) and the GameCube (XBA-259: homebrew DOLs) are ready on Android: the app plays them.
 if(ANDROID OR WIN32)
     set(_xbr_console_default OFF)
 else()
@@ -127,8 +127,8 @@ option(XBR_CONSOLE_N64 "Build the Nintendo 64 runtime (consoles/n64)" ${_xbr_gba
 option(XBR_CONSOLE_NDS "Build the Nintendo DS spike (consoles/nds)" ${_xbr_console_default})
 # The PSP (XBA-224) is a spike too: Linux / macOS headless only (psp_run), not in the app yet.
 option(XBR_CONSOLE_PSP "Build the PSP spike (consoles/psp)" ${_xbr_console_default})
-# The GameCube (XBA-225) is a spike too: Linux / macOS headless only (gc_run), not in the app yet.
-option(XBR_CONSOLE_GC "Build the GameCube spike (consoles/gc)" ${_xbr_console_default})
+# The GameCube (XBA-225 spike, XBA-259): in the app (gc_runtime, homebrew DOLs), gc_play / gc_run on desktops.
+option(XBR_CONSOLE_GC "Build the GameCube runtime (consoles/gc)" ${_xbr_gba_default})
 # The Dreamcast (XBA-227) is a spike too: Linux / macOS headless only (dc_run), not in the app yet.
 option(XBR_CONSOLE_DC "Build the Dreamcast spike (consoles/dc)" ${_xbr_console_default})
 # The Nintendo 3DS (XBA-228) is a spike too: Linux / macOS headless only (ctr_run), not in the app yet.

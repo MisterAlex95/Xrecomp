@@ -67,6 +67,19 @@ public class ConsolePadMapTest {
         ConsolePadMap p = new ConsolePadMap(Console.PS1);
         assertEquals(bit(PadMapping.Source.LEFT_TRIGGER), p.source[6]);
         assertEquals(PadMapping.Stick.RIGHT, p.stick[1]);
+        // XBA-259: the GameCube controller, console_pad.c's GC_T_* order and defaults
+        assertArrayEquals(new String[] { "a", "b", "x", "y", "z", "l", "r", "start", "dpad_up", "dpad_down",
+                                         "dpad_left", "dpad_right" }, ConsolePadMap.targets(Console.GC));
+        assertArrayEquals(new String[] { "stick", "c_stick" }, ConsolePadMap.sticks(Console.GC));
+        ConsolePadMap c = new ConsolePadMap(Console.GC);
+        assertEquals(bit(PadMapping.Source.SOUTH), c.source[0]);
+        assertEquals(bit(PadMapping.Source.RIGHT_SHOULDER), c.source[4]);
+        assertEquals(bit(PadMapping.Source.LEFT_TRIGGER), c.source[5]);
+        assertEquals(PadMapping.Stick.RIGHT, c.stick[1]);
+        assertEquals("", c.format());
+        assertEquals("RECOMP_GC_PAD_MAP", ConsoleControls.env(Console.GC));
+        ConsolePadMap r = ConsolePadMap.parse(Console.GC, "a=east,b=south,c_stick=none");
+        assertEquals("a=east,b=south,c_stick=none", r.format());
     }
 
     /** The same texts as tests/console_pad/test_main.c. */

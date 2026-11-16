@@ -80,7 +80,7 @@ int xba_pack_image_state(const char *target);
 int xba_pack_set_pending_image(const char *target);
 
 /* Other consoles (XBA-147): the game is a file of another console (a .gba,
- * a PS1 .bin / .cue / .iso, an N64 .z64 / .v64 / .n64), read by
+ * a PS1 .bin / .cue / .iso, an N64 .z64 / .v64 / .n64, a GameCube .dol), read by
  * recomp_pack_rom_identify. Its pack is <files_dir>/packs/<console>-<key>/,
  * whose pack.json says console and title_key; the loader checks it
  * (recomp_pack_find_key), sets its env_force options, and hands it to that

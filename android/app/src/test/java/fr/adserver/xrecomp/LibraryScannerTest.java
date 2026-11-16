@@ -580,7 +580,8 @@ public class LibraryScannerTest {
                 .file("Plain.iso", ConsoleTest.ps1(false, "BOOT = cdrom:\\SLPS_000.01;1", "PLAYSTATION"), 55);
         FakeTree n64 = new FakeTree("n64:")
                 .file("Mario.z64", ConsoleTest.n64(0), 60)
-                .file("roms/Mario swapped.v64", ConsoleTest.n64(1), 61);
+                .file("roms/Mario swapped.v64", ConsoleTest.n64(1), 61)
+                .file("gc/padtest.dol", ConsoleTest.dol(), 62);   // XBA-259: a GameCube homebrew
         return Arrays.asList(root("t:xbox", xbox), root("t:gba", gba), root("t:ps1", ps1), root("t:n64", n64));
     }
 
@@ -630,7 +631,8 @@ public class LibraryScannerTest {
                      r.index.find("n64:/roms/Mario swapped.v64").tid);
 
         java.util.Map<String, List<LibraryIndex.Item>> games = r.index.games();
-        assertEquals(7, games.size());   // Fable, Halo, Sample Quest, Disc, Lone, Plain, Mario (two variants)
+        assertEquals(8, games.size());   // Fable, Halo, Sample Quest, Disc, Lone, Plain, Mario (two variants), padtest
+        assertEquals(Console.GC, r.index.find("n64:/gc/padtest.dol").console);
         assertEquals(2, games.get("n64-NSME-635A2BFF").size());
         assertEquals(java.util.EnumSet.allOf(Console.class), r.index.consoles());
         List<String> others = new ArrayList<>();

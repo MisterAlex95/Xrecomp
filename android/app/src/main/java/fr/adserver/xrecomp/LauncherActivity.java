@@ -5254,8 +5254,10 @@ public class LauncherActivity extends Activity {
      */
     private void openGame(LibraryScreen.Entry e) {
         if (e.directLaunch()) {
-            // Its Home: Play and Prepare with the toolchain; an N64 game's always (Play and its pak, XBA-174).
-            if ((Toolchain.available(this) || e.console() == Console.N64) && e.chip != GameState.Chip.NO_FILE_ACCESS) {
+            // Its Home: Play and Prepare with the toolchain; an N64 game's always (Play and its pak, XBA-174). A
+            // GameCube DOL (XBA-259) has no Prepare yet: straight into the game.
+            if (((Toolchain.available(this) && e.console().prepares()) || e.console() == Console.N64)
+                && e.chip != GameState.Chip.NO_FILE_ACCESS) {
                 Log.i(TAG, "launcher: library: open " + e.tid + " (" + e.title() + ", " + e.chip + ")");
                 romEntry = e;
                 go(Screen.ROM_HOME);

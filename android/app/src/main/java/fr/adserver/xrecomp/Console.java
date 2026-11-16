@@ -15,7 +15,7 @@ import java.util.zip.CRC32;
 
 /**
  * The consoles XRecomp runs (XBA-147; Plane « Spec · Other consoles », consoles/README.md): Xbox, and Game Boy Advance,
- * PlayStation and Nintendo 64 statically recompiled the same way. pack.json's "console" says which one a title pack is
+ * PlayStation, Nintendo 64 and GameCube (homebrew DOLs for now, XBA-259) statically recompiled the same way. pack.json's "console" says which one a title pack is
  * for (absent: xbox, every pack made before the field); the native loader (pack_loader.c) hands a pack to that
  * console's runtime.
  *
@@ -24,7 +24,7 @@ import java.util.zip.CRC32;
  * (packs/&lt;console&gt;-&lt;key&gt;; an Xbox pack stays packs/&lt;TITLEID&gt;).
  */
 enum Console {
-    XBOX("xbox"), GBA("gba"), PS1("ps1"), N64("n64");
+    XBOX("xbox"), GBA("gba"), PS1("ps1"), N64("n64"), GC("gc");
 
     /** pack.json's spelling. */
     final String id;
@@ -69,6 +69,8 @@ enum Console {
             return "PS1";
         case N64:
             return "N64";
+        case GC:
+            return "GC";
         default:
             return "Xbox";
         }
@@ -76,17 +78,17 @@ enum Console {
 
     /**
      * Its games play in this build: the Xbox (through Prepare and a pack), the Game Boy Advance (XBA-157), the
-     * PlayStation (XBA-168) and the Nintendo 64 (XBA-174), whose runtimes are interpreters: no import, no pack needed,
-     * the game file goes to the game activity as it is. Every console XRecomp lists plays now; « Not playable yet »
-     * stays for the next one.
+     * PlayStation (XBA-168), the Nintendo 64 (XBA-174) and the GameCube (XBA-259: homebrew DOLs), whose runtimes are
+     * interpreters: no import, no pack needed, the game file goes to the game activity as it is. Every console XRecomp
+     * lists plays now; « Not playable yet » stays for the next one.
      */
     boolean playable() {
-        return this == XBOX || this == GBA || this == PS1 || this == N64;
+        return this == XBOX || this == GBA || this == PS1 || this == N64 || this == GC;
     }
 
-    /** A game of this console starts from its file as it is, no Prepare or import (the GBA, the PS1, the N64). */
+    /** A game of this console starts from its file as it is, no Prepare or import (GBA, PS1, N64, GameCube DOL). */
     boolean directLaunch() {
-        return this == GBA || this == PS1 || this == N64;
+        return this == GBA || this == PS1 || this == N64 || this == GC;
     }
 
     /**
@@ -114,7 +116,8 @@ enum Console {
 
     /**
      * The console a game file's name says, for the import filter: .gba; PS1 .bin, .cue, .chd; N64 .z64, .n64, .v64;
-     * the Xbox images (DiscImages.isImageName: .xiso .cso .ciso .zso .cci and split parts). Null for anything else,
+     * GameCube .dol (XBA-259: homebrew programs); the Xbox images (DiscImages.isImageName: .xiso .cso .ciso .zso .cci
+     * and split parts). Null for anything else,
      * and for a plain .iso, which both an Xbox and a PS1 disc use: {@link #detect} reads its content.
      */
     static Console byName(String name) {
@@ -129,6 +132,8 @@ enum Console {
             return PS1;
         case "z64": case "n64": case "v64":
             return N64;
+        case "dol":
+            return GC;
         case "iso":
             return null;
         default:
@@ -225,6 +230,9 @@ enum Console {
      * <li>PS1: the serial of SYSTEM.CNF's BOOT line, « SLUS-00594 » (ISO 9660 in 2048- or 2352-byte sectors, system
      * ID PLAYSTATION; without a serial-shaped boot file « PSX-&lt;CRC32 of the volume descriptor&gt; »; a .cue: its
      * first FILE).</li>
+     * <li>GameCube DOL (XBA-259): « DOL-&lt;CRC32 of the file&gt; », when every field of its 256-byte header makes
+     * sense (no magic: 7 text + 11 data sections inside the file and MEM1, a text section holding the entry, the BSS in
+     * MEM1, the header's padding zero).</li>
      * </ul>
      * A game code byte outside [A-Z0-9] becomes '_'. A CHD (« MComprHD » at 0: a PlayStation disc, compressed) is read
      * by the native disc reader ({@link #chdReader}, XBA-159). Null for anything else: an Xbox game.
@@ -297,6 +305,8 @@ enum Console {
             Iso iso = Iso.open(r);
             if (iso != null && iso.playstation())
                 return new Identity(PS1, iso.ps1Key());
+            if ((k = dolKey(r)) != null)
+                return new Identity(GC, k);
             return null;
         } catch (IOException e) {
             return null;
@@ -351,6 +361,45 @@ enum Console {
         return String.format(Locale.ROOT, "%c%c%c%c-%02X%02X%02X%02X", codeChar(b[0x3B]), codeChar(b[0x3C]),
                              codeChar(b[0x3D]), codeChar(b[0x3E]), b[0x10] & 0xff, b[0x11] & 0xff, b[0x12] & 0xff,
                              b[0x13] & 0xff);
+    }
+
+    private static long be32(byte[] b, int o) {
+        return (b[o] & 0xffL) << 24 | (b[o + 1] & 0xffL) << 16 | (b[o + 2] & 0xffL) << 8 | (b[o + 3] & 0xffL);
+    }
+
+    /** A GameCube DOL's key, recomp_pack.c's dol_key: the header checked field by field, then the file's CRC32. */
+    private static String dolKey(Rd r) throws IOException {
+        long size = r.length();
+        if (size < 0x100 || size > 0x1800000)
+            return null;
+        byte[] h = new byte[0x100];
+        r.seek(0);
+        r.readFully(h);
+        long entry = be32(h, 0xE0), bss = be32(h, 0xD8), bssLen = be32(h, 0xDC);
+        for (int i = 0xE4; i < 0x100; i++)
+            if (h[i] != 0)
+                return null;
+        boolean text = false, entryIn = false;
+        for (int i = 0; i < 18; i++) {
+            long off = be32(h, 4 * i), addr = be32(h, 0x48 + 4 * i), len = be32(h, 0x90 + 4 * i);
+            if (len == 0)
+                continue;
+            if (off < 0x100 || off + len > size || addr < 0x80000000L || addr + len > 0x81800000L)
+                return null;
+            if (i < 7) {
+                text = true;
+                entryIn |= entry >= addr && entry < addr + len;
+            }
+        }
+        if (!text || !entryIn || (bssLen != 0 && (bss < 0x80000000L || bss + bssLen > 0x81800000L)))
+            return null;
+        CRC32 crc = new CRC32();
+        byte[] buf = new byte[65536];
+        r.seek(0);
+        int n;
+        while ((n = r.read(buf)) > 0)
+            crc.update(buf, 0, n);
+        return String.format(Locale.ROOT, "DOL-%08X", crc.getValue());
     }
 
     /** A .cue's first FILE, next to the .cue; null when it names none. */

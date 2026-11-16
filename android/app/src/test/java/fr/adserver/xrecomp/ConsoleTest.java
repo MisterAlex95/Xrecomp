@@ -79,6 +79,18 @@ public class ConsoleTest {
         return v;
     }
 
+    /** A GameCube DOL (XBA-259): text 0 at file 0x100 loaded at 0x80003100, data 0 after it, a BSS, the entry. */
+    static byte[] dol() {
+        byte[] d = new byte[0x400];
+        for (int i = 0x100; i < d.length; i++)
+            d[i] = (byte)(i * 7);
+        be32(d, 0x00, 0x100); be32(d, 0x48, 0x80003100L); be32(d, 0x90, 0x100);
+        be32(d, 0x1C, 0x200); be32(d, 0x64, 0x80003200L); be32(d, 0xAC, 0x100);
+        be32(d, 0xD8, 0x80003300L); be32(d, 0xDC, 0x1000);
+        be32(d, 0xE0, 0x80003100L);
+        return d;
+    }
+
     private static void put32(byte[] b, int o, long v) {
         b[o] = (byte)v; b[o + 1] = (byte)(v >> 8); b[o + 2] = (byte)(v >> 16); b[o + 3] = (byte)(v >> 24);
     }
@@ -214,6 +226,8 @@ public class ConsoleTest {
         assertEquals(Console.N64, Console.byName("Game.z64"));
         assertEquals(Console.N64, Console.byName("Game.n64"));
         assertEquals(Console.N64, Console.byName("Game.V64"));
+        assertEquals(Console.GC, Console.byName("padtest.dol"));
+        assertEquals(Console.GC, Console.byName("BOOT.DOL"));
         assertEquals(Console.XBOX, Console.byName("Halo.xiso"));
         assertEquals(Console.XBOX, Console.byName("Halo.cso"));
         assertEquals(Console.XBOX, Console.byName("Halo.1.cci"));
@@ -225,7 +239,7 @@ public class ConsoleTest {
         assertNull(Console.byName(null));
 
         for (String n : new String[] { "a.gba", "a.bin", "a.cue", "a.chd", "a.iso", "a.z64", "a.n64", "a.v64",
-                                       "a.xiso", "a.iso.1", "a.part1.iso" })
+                                       "a.dol", "a.xiso", "a.iso.1", "a.part1.iso" })
             assertTrue(n, Console.importable(n));
         for (String n : new String[] { "a.txt", "a.zip", "a.sav", "a.xbe", "a", "" })
             assertFalse(n, Console.importable(n));
@@ -270,6 +284,34 @@ public class ConsoleTest {
             assertEquals(Console.N64, id.console);
             assertEquals("NSME-635A2BFF", id.key);
         }
+    }
+
+    /** XBA-259: a DOL's key is its CRC32; a header that does not hold up is no DOL. */
+    @Test
+    public void gcKeyIsTheDolCrc() throws Exception {
+        byte[] d = dol();
+        Console.Identity id = Console.identify(file("padtest.dol", d));
+        assertNotNull(id);
+        assertEquals(Console.GC, id.console);
+        assertEquals("DOL-" + crc(d), id.key);
+        assertEquals("gc-DOL-" + crc(d), id.packName());
+        assertEquals(Console.GC, Console.ofKey(id.packName()));
+        assertEquals("GC", Console.GC.badge());
+        assertTrue(Console.GC.playable() && Console.GC.directLaunch());
+        assertFalse(Console.GC.prepares() || Console.GC.hasSaveStates());
+        assertEquals(Console.GC, Console.fromPack("gc"));
+
+        byte[] entryOut = dol();
+        be32(entryOut, 0xE0, 0x80003000L);   // before the text section
+        assertNull(Console.identify(file("a.dol", entryOut)));
+        byte[] tooLong = dol();
+        be32(tooLong, 0x90, 0x10FF);        // text 0 past the end of the file
+        assertNull(Console.identify(file("b.dol", tooLong)));
+        byte[] padding = dol();
+        padding[0xF0] = 1;
+        assertNull(Console.identify(file("c.dol", padding)));
+        assertNull(Console.identify(file("d.dol", new byte[0x400])));   // no text section
+        assertNull(Console.identify(file("e.dol", new byte[0x80])));    // shorter than a header
     }
 
     @Test

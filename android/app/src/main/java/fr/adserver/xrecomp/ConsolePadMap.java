@@ -3,8 +3,9 @@ package fr.adserver.xrecomp;
 import java.util.Locale;
 
 /**
- * The player's mapping for a GBA, PS1 or N64 game (XBA-158 / XBA-168 / XBA-174): which of their pad's controls each of
- * the console's buttons takes, and which stick its analog sticks follow. The Java twin of src/input/console_pad.c,
+ * The player's mapping for a GBA, PS1, N64 or GameCube game (XBA-158 / XBA-168 / XBA-174 / XBA-259): which of their
+ * pad's controls each of the console's buttons takes, and which stick its analog sticks follow. The Java twin of
+ * src/input/console_pad.c,
  * which each console's runtime applies: the same targets in the same order, the same sources (PadMapping.Source, whose
  * order is console_pad.h's CPS_* bits), the same text ("target=source[+source...]", "none", "left_stick=",
  * "right_stick=" / "stick=", "range=", "deadzone=", only what differs from the default). The defaults are the fixed
@@ -39,7 +40,7 @@ final class ConsolePadMap {
         return b;
     }
 
-    /** The console's targets, console_pad.h's order (GBA_T_*, PS1_T_*, N64_T_*). */
+    /** The console's targets, console_pad.h's order (GBA_T_*, PS1_T_*, N64_T_*, GC_T_*). */
     static String[] targets(Console c) {
         switch (c) {
         case GBA:
@@ -51,6 +52,9 @@ final class ConsolePadMap {
         case N64:
             return new String[] { "a", "b", "z", "l", "r", "start", "dpad_up", "dpad_down", "dpad_left", "dpad_right",
                                   "c_up", "c_down", "c_left", "c_right" };
+        case GC:
+            return new String[] { "a", "b", "x", "y", "z", "l", "r", "start", "dpad_up", "dpad_down", "dpad_left",
+                                  "dpad_right" };
         default:
             return new String[0];
         }
@@ -63,6 +67,8 @@ final class ConsolePadMap {
             return new String[] { "left_stick", "right_stick" };
         case N64:
             return new String[] { "stick" };
+        case GC:
+            return new String[] { "stick", "c_stick" };
         default:
             return new String[0];
         }
@@ -93,6 +99,8 @@ final class ConsolePadMap {
             return new int[] { bit(S), bits(E, W), l2 | r2, l1, r1, start, up, down, left, right,
                                bit(N) | bit(PadMapping.Source.RSTICK_UP), bit(PadMapping.Source.RSTICK_DOWN),
                                bit(PadMapping.Source.RSTICK_LEFT), bit(PadMapping.Source.RSTICK_RIGHT) };
+        case GC:   // XBA-259: the face buttons by name, Z on the right shoulder, L / R the triggers
+            return new int[] { bit(S), bit(E), bit(W), bit(N), r1, l2, r2, start, up, down, left, right };
         default:
             return new int[0];
         }
@@ -104,6 +112,8 @@ final class ConsolePadMap {
             return new PadMapping.Stick[] { PadMapping.Stick.LEFT, PadMapping.Stick.RIGHT };
         case N64:
             return new PadMapping.Stick[] { PadMapping.Stick.LEFT };
+        case GC:
+            return new PadMapping.Stick[] { PadMapping.Stick.LEFT, PadMapping.Stick.RIGHT };
         default:
             return new PadMapping.Stick[0];
         }

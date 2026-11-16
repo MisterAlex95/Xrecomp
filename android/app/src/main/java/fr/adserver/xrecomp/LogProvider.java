@@ -111,7 +111,8 @@ public class LogProvider extends ContentProvider {
         String tid = seg.get(1);
         if (!tid.matches("[0-9A-Fa-f]{1,8}") && !tid.matches("gba-[A-Z0-9_]{4}-[0-9A-F]{8}")   // XBA-158: a GBA game
             && !tid.matches("ps1-[A-Z]{3,4}-[0-9A-F]{5,8}")                                      // XBA-168: a PS1 disc
-            && !tid.matches("n64-[A-Z0-9_]{4}-[0-9A-F]{8}"))                                     // XBA-174: an N64 ROM
+            && !tid.matches("n64-[A-Z0-9_]{4}-[0-9A-F]{8}")                                      // XBA-174: an N64 ROM
+            && !tid.matches("gc-DOL-[0-9A-F]{8}"))                                               // XBA-259: a DOL
             return null;
         File f = new File(new File(new File(c.getFilesDir(), "prepare"), tid), "prepare.log");
         try {
