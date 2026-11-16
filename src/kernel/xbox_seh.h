@@ -236,8 +236,8 @@ void     xbox_SehRuntimeLeave(void);
 void     xbox_SehCallbackEnter(void);
 void     xbox_SehCallbackLeave(void);
 int      xbox_SehInRuntime(void);          /* async-signal-safe */
-uint32_t xbox_SehRuntimeSnapshot(void);
-void     xbox_SehRuntimeRestore(uint32_t snap);
+uint64_t xbox_SehRuntimeSnapshot(void);
+void     xbox_SehRuntimeRestore(uint64_t snap);
 
 /* Counters, for tests and the status report. */
 typedef struct {

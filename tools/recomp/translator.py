@@ -684,6 +684,8 @@ class FunctionTranslator:
         self.seh_lost = {}
         # _flag_boundaries, computed once the function list is final.
         self._flag_plan = None
+        # _park_plan (XBA-247), the same way.
+        self._park_plan_cache = None
         # The guest CPU's quantum check at every loop back edge
         # (RECOMP_BACK_EDGE), with --back-edge-yield; off, edges stay bare.
         self.back_edge_yield = False
@@ -698,6 +700,7 @@ class FunctionTranslator:
     def discover_static_indirect_targets(self, *, coalescing=False):
         """Recover callbacks and the gap entries their bodies reference."""
         self._flag_plan = None
+        self._park_plan_cache = None
         # _recover_cfg reads only the image, so one run can share results.
         self._reach_memo = {}
         callers = None
@@ -1186,6 +1189,7 @@ class FunctionTranslator:
         mismatches before changing any function metadata.
         """
         self._flag_plan = None
+        self._park_plan_cache = None
 
         def reject(reason):
             raise ValueError(
@@ -2228,6 +2232,100 @@ class FunctionTranslator:
                            frozenset(live_after))
         return self._flag_plan
 
+    def _park_plan(self):
+        """The functions that can never reach a park point (XBA-247).
+
+        A guest thread parks at a kernel call or at a host wait inside lifted
+        code (kernel_park.h), and only then is its chain read. A call whose
+        callee cannot get there, whatever it calls, never has a park point
+        below it, so it needs no frame on the shadow stack: the lifter frames
+        only the other calls (Lifter.quiet_functions), which takes the cost
+        off the calls to leaf helpers and to whole subtrees of plain code.
+
+        A function may park when it makes an indirect call or an indirect
+        jump that is not a switch (a kernel thunk is reached that way), calls
+        or jumps to a function the project replaces by hand, or into the
+        middle of a function that may park, has a hlt, a poll loop (the
+        _mark_poll_loops shape) or, with --back-edge-yield, a backward jump;
+        or when it calls, jumps or falls through to a function that may.
+        What cannot be decoded may park. Returns the others, a frozenset.
+        """
+        if self._park_plan_cache is not None:
+            return self._park_plan_cache
+        manual = getattr(self.lifter, "manual_functions", set()) or set()
+        may, deps = set(), {}
+        import bisect as _bisect
+        spans = sorted((s, info.get("end") or s + info.get("size", 0))
+                       for s, info in self.func_db.items())
+        starts = [s for s, _ in spans]
+
+        def holder(va):
+            i = _bisect.bisect_right(starts, va) - 1
+            return spans[i][0] if i >= 0 and spans[i][0] < va < spans[i][1] else None
+        for start, info in self.func_db.items():
+            recovered = self._recovered_cfg.get(start)
+            end = (recovered["end"] if recovered
+                   else info.get("end") or start + info.get("size", 0))
+            instructions = []
+            if end > start:
+                if recovered:
+                    instructions = recovered["instructions"]
+                else:
+                    raw = self._read_func_bytes(start, end)
+                    instructions = (self.disasm.scan_function(raw, start, end)
+                                    if raw else [])
+            if not instructions or start in manual:
+                may.add(start)
+                continue
+            out = set()
+            prev = None
+            for insn in instructions:
+                m = insn.mnemonic
+                if m == "hlt":
+                    may.add(start)
+                if insn.is_call:
+                    out.add(insn.call_target)
+                elif insn.is_branch:
+                    target = insn.jump_target
+                    if target is None:
+                        if not self._is_switch_jump(insn):
+                            out.add(None)
+                    elif not start <= target < end:
+                        out.add(target)
+                    elif (target <= insn.address and self.back_edge_yield):
+                        may.add(start)
+                    elif (prev is not None and target == prev.address
+                          and prev.mnemonic == "test"
+                          and insn.mnemonic in ("jne", "jnz", "je", "jz")
+                          and "[" in prev.op_str):
+                        may.add(start)      # a poll loop: RECOMP_POLL_WAIT
+                prev = insn
+            last = instructions[-1]
+            if (end in self.func_db and not last.is_terminator
+                    and last.mnemonic not in ("int3", "ud2", "hlt", "iret", "iretd")):
+                out.add(end)
+            # An address that is no function start is either inside a
+            # function (an entry stub runs that function's code from there:
+            # it may park when the function may) or nowhere (a stub that only
+            # returns: it cannot park).
+            for target in out:
+                if target is None or target in manual:
+                    may.add(start)
+                    continue
+                if target not in self.func_db:
+                    target = holder(target)
+                    if target is None:
+                        continue
+                deps.setdefault(target, set()).add(start)
+        work = list(may)
+        while work:
+            for caller in deps.get(work.pop(), ()):
+                if caller not in may:
+                    may.add(caller)
+                    work.append(caller)
+        self._park_plan_cache = frozenset(set(self.func_db) - may)
+        return self._park_plan_cache
+
     @staticmethod
     def _is_switch_jump(insn):
         """jmp [table + reg*4]: an indexed jump that stays in its function."""
@@ -3121,10 +3219,12 @@ class FunctionTranslator:
         frame_line = ("    ebp = g_seh_ebp; /* the funclet runs on its parent's frame */\n"
                       if "uint32_t ebp" in code[:first] else "")
         arms = "".join(f"    case 0x{t:08X}u: goto loc_{t:08X};\n" for t in funclets)
+        leave = ("RECOMP_FRAME_LEAVE(); " if "RECOMP_FRAME_ENTRY()" in code[:first]
+                 else "")   # XBA-247: the copy recorded its frame on entry
         entry = (f"\n    /* entered at an exception funclet of 0x{func_va:08X} */\n"
                  f"{frame_line}"
                  f"    switch (_seh_target) {{\n{arms}"
-                 f"    default: g_esp += 4; return; /* not a funclet: pop and return */\n"
+                 f"    default: g_esp += 4; {leave}return; /* not a funclet: pop and return */\n"
                  f"    }}\n")
         copy = code[:first] + entry + code[first:]
         copy = copy.replace(head, f"void {copy_name}(uint32_t _seh_target)", 1)
@@ -3390,6 +3490,7 @@ class FunctionTranslator:
         # Function signature
         lines.append(f"{ret_type} {name}({param_str})")
         lines.append(f"{{")
+        frame_entry_at = len(lines)
         if func_addr in ENTRY_HOOKS:
             lines.append(f"    extern void sub_{func_addr:08X}_enter(void);")
             lines.append(f"    sub_{func_addr:08X}_enter();")
@@ -3530,6 +3631,8 @@ class FunctionTranslator:
         # for the reader on the far side, and one that reads its caller's
         # flags starts from the carry the caller published.
         reads_in, _, _, live_after = self._flag_boundaries()
+        # Calls into functions that can never park need no frame (XBA-247).
+        self.lifter.quiet_functions = self._park_plan()
         caller_flags = start in reads_in
         publish_sites, publish_tail = self._flag_sites(
             start, instructions, fallthrough_target)
@@ -3548,6 +3651,9 @@ class FunctionTranslator:
         # EBP is also a general register in frame-pointer-omitted code, so any
         # function that uses it or calls out publishes it, not only frame owners.
         self.lifter.publishes_ebp = "ebp" in used_regs
+        # The C local ebp is declared exactly when used_regs has it (above):
+        # its calls push and reload it through the frame shadow stack.
+        self.lifter.has_ebp_local = "ebp" in reg_decls
 
         # The exception frame's resume anchor (XBA-112), emitted by
         # lift_basic_block right after the instruction that makes the frame
@@ -3863,6 +3969,27 @@ class FunctionTranslator:
 
         lines.append(f"}}")
         lines.append(f"")
+
+        # The frame shadow stack (XBA-247): a function that may park records
+        # itself on entry and drops its frame at every way out. The ones that
+        # can never park record nothing. Its ebp is published at a poll wait
+        # and a hlt, as before a call, so a parked thread's innermost ebp is
+        # known there too.
+        if start not in self.lifter.quiet_functions:
+            body = lines[frame_entry_at:]
+            body = [line.replace("return;", "RECOMP_FRAME_LEAVE(); return;")
+                    if "return;" in line and not line.lstrip().startswith(("/*", "*", "#"))
+                    else line for line in body]
+            if "ebp" in reg_decls:
+                body = [line.replace("RECOMP_POLL_WAIT(", "g_ebp = ebp; RECOMP_POLL_WAIT(")
+                        .replace("xbox_Halt(", "g_ebp = ebp; xbox_Halt(") for line in body]
+            close = len(body) - 1
+            while close >= 0 and body[close].strip() != "}":
+                close -= 1
+            if close >= 0:
+                body.insert(close, "    RECOMP_FRAME_LEAVE(); /* falls off its end */")
+            lines[frame_entry_at:] = (
+                ["    RECOMP_FRAME_ENTRY(); /* may park: recorded (XBA-247) */"] + body)
 
         return "\n".join(lines)
 
@@ -4662,7 +4789,17 @@ class BatchTranslator:
             + [(addr, name, None) for addr, name in manual_decls.items()],
             key=lambda e: e[0])
         dispatch_path = os.path.join(output_dir, f"{prefix}_dispatch.c")
-        self._write_dispatch_table(dispatch_entries, dispatch_path, header_name)
+        # The call-site table (XBA-247): every guest call site of the bodies
+        # emitted, by return VA, for the runtime's chain reader. Sites a
+        # discarded lift attempt noted are left out.
+        emitted = {addr for addr, _, code in translations if code}
+        call_sites = sorted(
+            (ret, func, flags) for (ret, func), flags
+            in getattr(self.translator.lifter, "call_site_table", {}).items()
+            if func in emitted)
+        stats["call_sites"] = len(call_sites)
+        self._write_dispatch_table(dispatch_entries, dispatch_path, header_name,
+                                   call_sites)
         generated_files.append(dispatch_path)
 
         stats["files"] = generated_files
@@ -4672,11 +4809,16 @@ class BatchTranslator:
             stats["chunk_bytes"] = chunk_bytes
         return stats
 
-    def _write_dispatch_table(self, translations, output_path, header_name):
+    def _write_dispatch_table(self, translations, output_path, header_name,
+                              call_sites=()):
         """
         Generate a dispatch table mapping Xbox VA -> function pointer.
 
         Uses a sorted array + binary search for O(log n) lookup.
+
+        call_sites: (return VA, function VA, flags) of every guest call site,
+        sorted (XBA-247); written as g_recomp_call_sites, which
+        recomp_dispatch_init hands to the runtime.
         """
         lines = [
             "/**",
@@ -4768,9 +4910,36 @@ class BatchTranslator:
             "static size_t g_flat_overrides = 0;   /* slots holding a manual override */",
             f"recomp_flat_dispatch_t g_recomp_flat = {{ NULL, 0x{flat_base:08X}u, 0u, 0u }};",
             "",
+            "/* ----------------------------------------------------------------",
+            " * Call sites (XBA-247): return VA, function VA, flags (Lifter",
+            " * CALL_SITE_*, kernel_park.h XBOX_CALL_SITE_*), sorted by return",
+            " * VA. The runtime walks a parked thread's frame shadow stack",
+            " * against it to name and check its guest call chain (the chain",
+            " * signature a save state carries). recomp_dispatch_init registers",
+            " * it; a runtime without the hook (weak, absent) never sees it.",
+            " * ---------------------------------------------------------------- */",
+            f"static const uint32_t g_recomp_call_sites[] = {{",
+        ])
+        for ret, func, flags in call_sites:
+            lines.append(f"    0x{ret:08X}u, 0x{func:08X}u, 0x{flags:02X}u,")
+        if not call_sites:
+            lines.append("    0u, 0u, 0u   /* none (an empty array is not C) */")
+        lines.extend([
+            "};",
+            f"static const uint32_t g_recomp_call_site_count = {len(call_sites)}u;",
+            "#if (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)",
+            "void recomp_call_sites_register(const uint32_t *sites, uint32_t count)",
+            "    __attribute__((weak));",
+            "#define RECOMP_CALL_SITES_HOOK 1",
+            "#endif",
+            "",
             "int recomp_dispatch_init(void)",
             "{",
             "    size_t i;",
+            "#ifdef RECOMP_CALL_SITES_HOOK",
+            "    if (recomp_call_sites_register)",
+            "        recomp_call_sites_register(g_recomp_call_sites, g_recomp_call_site_count);",
+            "#endif",
             "    const char *trace = getenv(\"RECOMP_ICALL_TRACE\");",
             "    g_recomp_flat.trace = (trace && *trace && *trace != '0') ? 1u : 0u;",
             "    if (g_flat_table) return 1;          /* already built */",

@@ -68,6 +68,7 @@ WORKLOADS = (
     ("w_sse", 1500),
     ("w_icall", 2000000),
     ("w_fib", 25),
+    ("w_vcall", 2000000),
 )
 DATA_SYMS = ("matrix", "src_buf", "byte_buf", "vec_in")
 
@@ -96,6 +97,8 @@ VARIANTS = {
     "cpuslot0": ["-DRECOMP_CPU_SLOT=0"],
     "memalias": ["-DRECOMP_GUEST_MEM_NOALIAS=1"],
     "memalias0": ["-DRECOMP_GUEST_MEM_NOALIAS=0"],
+    # The frame shadow stack compiled out (XBA-247, recomp_types.h): its cost, on one lift.
+    "noframes": ["-DRECOMP_FRAME_SHADOW=0"],
 }
 
 

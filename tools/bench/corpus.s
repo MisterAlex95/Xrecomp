@@ -1,7 +1,9 @@
 # Benchmark corpus for the lifted code (XBA-37, XBA-38): synthetic x86 of our
 # own, shaped like the hot code of a title -- flag-heavy integer loops, memory
 # copies through guest memory, x87 and SSE float loops, indirect calls through
-# the dispatch, a call-heavy recursion, byte code with partial registers.
+# the dispatch, a call-heavy recursion, byte code with partial registers,
+# direct calls into small functions that call through a table (a C++ method
+# making a virtual call: each may reach a kernel call, XBA-247).
 #
 # Every workload is cdecl: `uint32_t w_xxx(uint32_t n)`, n = iterations, the
 # result in eax (a checksum the bench compares across builds). Data are
@@ -28,6 +30,7 @@ _start:
     call w_sse
     call w_icall
     call w_fib
+    call w_vcall
     call w_leaf0
     call w_leaf1
     call w_leaf2
@@ -355,6 +358,36 @@ w_fib:
     pop edx
     add eax, edx
     pop ebx
+    ret
+
+# ── direct calls into a function that calls through the table (XBA-247:
+#    every call of w_vthunk records a frame, it may park) ──
+    .globl w_vcall
+w_vcall:
+    push ebx
+    push esi
+    mov esi, [esp+12]
+    xor ebx, ebx
+    xor eax, eax
+1:
+    push eax
+    push ebx
+    call w_vthunk
+    add esp, 8
+    inc ebx
+    cmp ebx, esi
+    jne 1b
+    pop esi
+    pop ebx
+    ret
+
+    .globl w_vthunk
+w_vthunk:
+    mov edx, [esp+4]
+    and edx, 3
+    push dword ptr [esp+8]
+    call dword ptr [fn_table+edx*4]
+    add esp, 4
     ret
 
 # @data

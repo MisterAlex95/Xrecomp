@@ -268,6 +268,12 @@ typedef struct ss_ctx {
     void    *sp;            /* host stack pointer while not running */
     uint8_t *snap;          /* suspended: its guest stack from saved_esp */
     uint32_t snap_len, snap_cap;
+    /* suspended: its frame shadow stack (XBA-247). Every context of a thread pushes on the one g_cpu,
+     * so a context that is left keeps its frames here and gets them back when it is resumed: the
+     * frames its host frames will pop are its own, whatever the others pushed meanwhile. */
+    RecompFrame *frames;
+    uint32_t frames_n, frames_cap, frames_depth;
+    int frames_kept;
 } ss_ctx;
 
 typedef struct ss_thread {
@@ -295,6 +301,7 @@ static void ss_thread_free(void *p)
             munmap(c->map, s_stack_bytes + s_page);
         if (c != t->cur) {
             free(c->snap);
+            free(c->frames);
             free(c);
         }
     }
@@ -505,6 +512,7 @@ static ss_ctx *ss_alloc(ss_thread *t, uint32_t site)
         mprotect(m, s_page, PROT_NONE);     /* guard page: an overflow faults */
         c->map = m;
     }
+    c->frames_kept = 0;     /* a new context starts on the frames of the one that switched */
     c->id = __atomic_add_fetch(&s_next_id, 1, __ATOMIC_RELAXED);
     return c;
 }
@@ -553,6 +561,38 @@ static void ss_main(void *arg)
         f();
         va = next;
     }
+}
+
+/* The frame shadow stack of the context being left, and back into g_cpu for the one resumed: every context of
+ * a thread records its frames in the one array. Out of memory, a context keeps none: its chain is then wrong
+ * (a chain through a stack switch is never restored anyway), the code is not affected. */
+static void ss_frames_keep(ss_ctx *c)
+{
+    uint32_t depth = recomp_frames_depth(&g_cpu), n = depth < RECOMP_FRAME_SLOTS ? depth : RECOMP_FRAME_SLOTS;
+
+    c->frames_kept = 0;
+    if (n > c->frames_cap) {
+        RecompFrame *f = realloc(c->frames, (size_t)n * sizeof *f);
+        if (!f) {
+            fprintf(stderr, "[STACK] context %u: no memory to keep %u guest frames\n", c->id, n);
+            return;
+        }
+        c->frames = f;
+        c->frames_cap = n;
+    }
+    if (n)
+        memcpy(c->frames, (const void *)g_cpu.r_fbase, (size_t)n * sizeof *c->frames);
+    c->frames_n = n;
+    c->frames_depth = depth;
+    c->frames_kept = 1;
+}
+
+static void ss_frames_give(ss_ctx *c)
+{
+    if (c->frames_n)
+        memcpy((void *)g_cpu.r_fbase, c->frames, (size_t)c->frames_n * sizeof *c->frames);
+    recomp_frames_set_depth(&g_cpu, c->frames_depth);
+    c->frames_kept = 0;
 }
 
 void recomp_stack_switch_ret(uint32_t saved_esp, uint32_t loaded_esp, uint32_t entry_ret,
@@ -617,6 +657,9 @@ void recomp_stack_switch_ret(uint32_t saved_esp, uint32_t loaded_esp, uint32_t e
     cur->entry_ret = entry_ret;
     cur->ret_imm = ret_imm;
     ss_snap(t, cur, saved_esp);
+    ss_frames_keep(cur);
+    if (to->frames_kept)
+        ss_frames_give(to);     /* a new context goes on above the frames of the one that started it */
     cur->state = SS_SUSPENDED;
     cur->last = ++t->tick;
     /* The dispatcher follows the switch: the side left keeps its guest stack

@@ -82,6 +82,9 @@ uint32_t g_esp, eax, g_ebp, g_seh_ebp;
 #define RECOMP_ICALL_OBSERVE(va, flags) ((void)0)
 #define RECOMP_ICALL_OBSERVE_SITE(site, va) ((void)0)
 #define RECOMP_ABI_CALL(va, fn) (fn)()
+/* The frame shadow stack (XBA-247) is not what this checks. */
+#define RECOMP_FRAME_ENTRY() (void)0
+#define RECOMP_FRAME_LEAVE() (void)0
 FLAT_DISPATCH
 static int hits, misses, lookups, fails, called_a, called_b, called_c;
 #define RECOMP_ICALL_GUARD_HIT()  ((void)hits++)

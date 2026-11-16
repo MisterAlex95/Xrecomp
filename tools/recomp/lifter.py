@@ -1607,6 +1607,19 @@ class Lifter:
         self.flag_publish_sites = frozenset()
         self.flag_live_returns = frozenset()
         self.publishes_ebp = False  # Set per-function: has a real frame
+        # Set per-function by translator: the function declares the C local
+        # ebp, and so publishes it in g_ebp before its calls, which is what
+        # its callees record in their frames (XBA-247).
+        self.has_ebp_local = False
+        # Every guest call site lifted, as {(return VA, function VA): flags}
+        # (CALL_SITE_* below): the call-site table the batch translator emits
+        # with the dispatch table, which the runtime reads a parked thread's
+        # chain against (recomp_call_sites_register, kernel_park.h).
+        self.call_site_table = {}
+        # Set by the translator (FunctionTranslator._park_plan): functions
+        # that can never reach a park point. They record no frame, and a
+        # direct call to one is no call site of a chain.
+        self.quiet_functions = frozenset()
         # Set per-function by translator (XBA-101): the esp loads that leave
         # for another stack (stack_switch_sites), and whether the function
         # has a ret to carry them at. See _lift_stack_switch.
@@ -2140,7 +2153,9 @@ class Lifter:
             publish = "g_ebp = ebp; g_seh_ebp = ebp; " if self.publishes_ebp else ""
             return [publish + f"{{ uint32_t _icall_target = 0x{off:08X}u; "
                     f"PUSH32(esp, 0x{sel:X}u); PUSH32(esp, 0x{insn.end_address:08X}u); "
-                    f"RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x{insn.address:08X}u); }}"
+                    + self._framed(insn.end_address,
+                                   f"RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x{insn.address:08X}u);",
+                                   self.CALL_SITE_INDIRECT) + " }"
                     f" /* lcall 0x{sel:X}:0x{off:08X} */"]
 
         # ── Time stamp counter ──
@@ -3045,6 +3060,31 @@ class Lifter:
     SETJMP_FN = None
     LONGJMP_FN = None
 
+    # Call-site table flags (XBA-247; kernel_park.h XBOX_CALL_SITE_*).
+    CALL_SITE_INDIRECT = 0x01      # through a register or memory
+    CALL_SITE_NO_EBP = 0x02        # the caller has no ebp local: the ebp the callee records means nothing
+    CALL_SITE_STACK_SWITCH = 0x04  # the caller switches stacks (XBA-101): a chain through it is not restorable
+    CALL_SITE_JMPBUF = 0x08        # setjmp / longjmp
+    CALL_SITE_SEH_HELPER = 0x10    # __SEH_prolog / epilog: the callee sets the caller's ebp
+    CALL_SITE_MANUAL = 0x20        # a hand-written replacement
+
+    def _framed(self, ret_va, call, flags=0, target=None):
+        """call (C statements making one guest call), the site noted for the
+        call-site table (XBA-247) when the callee may park: a parked thread's
+        frames are those of the functions it is in, each recorded on entry
+        (RECOMP_FRAME_ENTRY), and each frame's return address names one of
+        these sites. Nothing is emitted at the call. A direct call to a
+        function that can never park (quiet_functions) is not noted."""
+        if target is not None and target in self.quiet_functions:
+            return call
+        if not self.has_ebp_local:
+            flags |= self.CALL_SITE_NO_EBP
+        if self.stack_switch_sites:
+            flags |= self.CALL_SITE_STACK_SWITCH
+        key = (ret_va, self.func_start)
+        self.call_site_table[key] = self.call_site_table.get(key, 0) | flags
+        return call
+
     def _lift_call(self, insn, ops):
         caller_cleans = insn.address in self.caller_cleanup_sites
         safe_macro = "RECOMP_ICALL_SAFE_CC" if caller_cleans else "RECOMP_ICALL_SAFE"
@@ -3098,22 +3138,25 @@ class Lifter:
                 lines.append(
                     "{ int _sjv = setjmp(*recomp_setjmp_slot(MEM32(esp)));"
                     " if (_sjv) { ebp = g_seh_ebp; eax = (uint32_t)_sjv; }"
-                    f" else {{ PUSH32(esp, 0x{ret_va:08X}u); {name}(); }} }}"
+                    f" else {{ PUSH32(esp, 0x{ret_va:08X}u); "
+                    f"{self._framed(ret_va, f'{name}();', self.CALL_SITE_JMPBUF)} }} }}"
                     f" /* setjmp 0x{insn.call_target:08X} */")
             elif insn.call_target == self.LONGJMP_FN:
                 lines.append(
                     "if (!recomp_guest_longjmp(MEM32(esp), MEM32(esp + 4)))"
-                    f" {{ PUSH32(esp, 0x{ret_va:08X}u); {name}(); }}"
+                    f" {{ PUSH32(esp, 0x{ret_va:08X}u); "
+                    f"{self._framed(ret_va, f'{name}();', self.CALL_SITE_JMPBUF)} }}"
                     f" /* longjmp 0x{insn.call_target:08X} */")
             elif insn.call_target in self.manual_functions:
                 # A function the project replaces by hand. recomp_lookup_manual
                 # is consulted on indirect calls, and without this a direct
                 # caller went straight to the generated body and bypassed the
                 # replacement silently. Contributed in #15.
+                call = (f"{safe_macro}(0x{insn.call_target:08X}u, "
+                        "_icall_esp);")
                 lines.append(
                     f"PUSH32(esp, 0x{ret_va:08X}u); "
-                    f"{safe_macro}(0x{insn.call_target:08X}u, "
-                    "_icall_esp); "
+                    f"{self._framed(ret_va, call, self.CALL_SITE_MANUAL)} "
                     f"/* manual call 0x{insn.call_target:08X} */")
             else:
                 # Routed through RECOMP_ABI_CALL so -DRECOMP_ABI_CHECK covers
@@ -3121,9 +3164,12 @@ class Lifter:
                 # ones, and CRT and static-init paths -- where callee-saved
                 # clobbers actually bite -- are almost entirely direct. Expands
                 # to a plain call when the flag is off.
+                seh = (self.CALL_SITE_SEH_HELPER
+                       if insn.call_target in self.SEH_HELPERS else 0)
+                call = f"RECOMP_ABI_CALL(0x{insn.call_target:08X}u, {name});"
                 lines.append(
                     f"PUSH32(esp, 0x{ret_va:08X}u); "
-                    f"RECOMP_ABI_CALL(0x{insn.call_target:08X}u, {name}); "
+                    f"{self._framed(ret_va, call, seh, insn.call_target)} "
                     f"/* call 0x{insn.call_target:08X} */")
             # esp immediately after the callee returns. A per-call delta is the
             # only way to attribute a leak to one callee rather than to the
@@ -3172,19 +3218,25 @@ class Lifter:
             head = (publish + f"{{ uint32_t _icall_target = {target}; "
                     f"{far}PUSH32(esp, 0x{ret_va:08X}u); ")
             fallback = (f"{safe_at_macro}(_icall_target, _icall_esp, "
-                        f"0x{site:08X}u); }}")
+                        f"0x{site:08X}u);")
+            ind = self.CALL_SITE_INDIRECT
             recorded = self.icall_site_targets.get(site)
             guards = [t for t in (recorded or [])
                       if t in self.func_db and t not in self.manual_functions]
             if recorded and 0 < len(recorded) <= 4 and len(guards) == len(recorded):
+                # The site is noted for the call-site table (XBA-247) when an
+                # arm's target may park, and always for the fallback, which
+                # can reach anything.
                 arms = " else ".join(
                     f"if (_icall_target == 0x{t:08X}u) {{ RECOMP_ICALL_GUARD_HIT(); "
-                    f"RECOMP_ABI_CALL(0x{t:08X}u, {self._call_target_name(t)}); }}"
+                    + self._framed(ret_va, f"RECOMP_ABI_CALL(0x{t:08X}u, {self._call_target_name(t)});",
+                                   ind, t) + " }"
                     for t in sorted(set(guards)))
-                return [head + arms + " else { RECOMP_ICALL_GUARD_MISS(); "
-                        + fallback + " }"
+                body = (arms + " else { RECOMP_ICALL_GUARD_MISS(); "
+                        + self._framed(ret_va, fallback, ind) + " }")
+                return [head + body + " }"
                         + f" /* indirect call, guarded {len(set(guards))} */"]
-            return [head + fallback + " /* indirect call */"]
+            return [head + self._framed(ret_va, fallback, ind) + " } /* indirect call */"]
         return ["/* call: no target */"]
 
     def _lift_stack_switch(self, insn):

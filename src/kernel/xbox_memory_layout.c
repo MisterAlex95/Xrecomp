@@ -2678,7 +2678,7 @@ int g_force_return = 0;
 typedef struct {
     uint32_t buf_va;
     uint32_t ctx;           /* recomp_stack_context() when armed */
-    uint32_t runtime;       /* xbox_SehRuntimeSnapshot() when armed */
+    uint64_t runtime;       /* xbox_SehRuntimeSnapshot() when armed */
     jmp_buf  native;
 } recomp_jmp_slot;
 

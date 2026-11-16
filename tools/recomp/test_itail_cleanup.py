@@ -60,7 +60,7 @@ def test_thunk_passes_its_ret_amount():
     c = _translate(THUNK, BASE, len(THUNK))
     line = _tail_line(c)
     assert "RECOMP_ITAIL_RET(MEM32(eax + 0x38), 24u);" in line, c
-    assert "esp += 28; return; /* ret 24 */" in c, c
+    assert "esp += 28; RECOMP_FRAME_LEAVE(); return; /* ret 24 */" in c, c   # XBA-247: it may park
 
 
 def test_plain_ret_keeps_the_plain_dispatch():
@@ -115,6 +115,8 @@ uint32_t g_esp, g_eax, g_seh_ebp, slot;
 #define MEM32(a) ((void)(a), slot)
 #define RECOMP_ICALL_OBSERVE(va, flags) ((void)0)
 #define RECOMP_ABI_CALL(va, fn) (fn)()
+#define RECOMP_FRAME_ENTRY() (void)0   /* the frame shadow stack (XBA-247) is not what this checks */
+#define RECOMP_FRAME_LEAVE() (void)0
 typedef struct recomp_flat_dispatch { void (**table)(void); uint32_t base, span, trace; } recomp_flat_dispatch_t;
 recomp_flat_dispatch_t g_recomp_flat;   /* span 0: the slow path */
 FLAT_LOOKUP

@@ -65,7 +65,7 @@ typedef struct {
     uintptr_t              host;     /* host stack token when taken */
     int                    depth;    /* dispatch nesting when taken */
     int                    faults;   /* host-fault trampolines in flight when taken */
-    uint32_t               runtime;  /* xbox_SehRuntimeSnapshot() when taken */
+    uint64_t               runtime;  /* xbox_SehRuntimeSnapshot() when taken */
     jmp_buf                jb;
 } seh_anchor;
 
@@ -145,18 +145,23 @@ int xbox_SehInRuntime(void) { return t_rt_depth > 0; }
 
 /* Callbacks and bridges, 8 bits each (both nest a handful deep), then the
  * park detector's kernel-call and callback depths (XBA-244), which a jump
- * over bridge frames must put back the same way. */
-uint32_t xbox_SehRuntimeSnapshot(void)
+ * over bridge frames must put back the same way; in the high half the frame
+ * shadow stack's count (XBA-247): the frames of the C frames jumped over are
+ * gone with them. */
+uint64_t xbox_SehRuntimeSnapshot(void)
 {
-    return (((uint32_t)t_rt_cb & 0xFFu) << 24) | (((uint32_t)t_rt_depth & 0xFFu) << 16)
+    return ((uint64_t)recomp_frames_depth(&g_cpu) << 32)
+         | (((uint32_t)t_rt_cb & 0xFFu) << 24) | (((uint32_t)t_rt_depth & 0xFFu) << 16)
          | (xbox_ParkDepthSnapshot() & 0xFFFFu);
 }
 
-void xbox_SehRuntimeRestore(uint32_t snap)
+void xbox_SehRuntimeRestore(uint64_t snap)
 {
-    t_rt_cb = (int)(snap >> 24);
-    t_rt_depth = (int)((snap >> 16) & 0xFFu);
-    xbox_ParkDepthRestore(snap & 0xFFFFu);
+    uint32_t lo = (uint32_t)snap;
+    t_rt_cb = (int)(lo >> 24);
+    t_rt_depth = (int)((lo >> 16) & 0xFFu);
+    xbox_ParkDepthRestore(lo & 0xFFFFu);
+    recomp_frames_set_depth(&g_cpu, (uint32_t)(snap >> 32));
 }
 
 int *xbox_SehFaultDepthSlot(void)
@@ -640,10 +645,11 @@ static uint32_t seh_fault_build_esp(const seh_thread *t, uint32_t esp)
 int xbox_SehRaiseHostFault(uint32_t va, uint32_t access, uintptr_t host_pc)
 {
     seh_thread *t = seh_self();
-    RecompCpu saved = g_cpu;
+    RecompCpuRegs saved;            /* the registers; the frames above stay as they are */
     uint32_t params[2], esp = g_esp;
     int handled;
 
+    memcpy(&saved, (const void *)&g_cpu, sizeof saved);
     params[0] = access;
     params[1] = va;
     t->st.host_faults++;
@@ -678,7 +684,7 @@ int xbox_SehRaiseHostFault(uint32_t va, uint32_t access, uintptr_t host_pc)
             fflush(stderr);
         }
     }
-    g_cpu = saved;
+    memcpy((void *)&g_cpu, &saved, sizeof saved);
     return handled;
 }
 

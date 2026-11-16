@@ -424,9 +424,9 @@ static void phase_capture(void)
     snprintf(d, sizeof d, "title %08X, toolkit %s, build id %u bytes", info.id.title_id, info.id.toolkit,
              info.id.build_id_len);
     printf("  identity: %s\n", d);
-    check(info.id.title_id == xbox_path_title_id() && info.id.cpu_bytes == sizeof(RecompCpu)
+    check(info.id.title_id == xbox_path_title_id() && info.id.cpu_bytes == sizeof(RecompCpuRegs)
           && info.id.toolkit[0] && strcmp(info.id.toolkit, "unknown") != 0,
-          "identity: the title ID, the toolkit version, sizeof(RecompCpu)", d);
+          "identity: the title ID, the toolkit version, sizeof(RecompCpuRegs)", d);
 
     if (xbox_StateSection(g_blob, g_blob_n, XBOX_STATE_TAG_CPU, &p, &len, &ver) != XBOX_STATE_OK) {
         check(0, "CPU section found", NULL);
@@ -795,8 +795,8 @@ static void phase_host_waits(void)
         check(0, "CPU section found", NULL);
         goto out;
     }
-    check(ver == 3 && ver == XBOX_STATE_CPU_VERSION, "CPU section version 3 (the park site, the run, esp at"
-          " the park point)", NULL);
+    check(ver == 4 && ver == XBOX_STATE_CPU_VERSION, "CPU section version 4 (the park site, the run, esp at"
+          " the park point, the chain)", NULL);
     cnt = xbox_StateCpuThreads(p, len, th, XBOX_PARK_MAX_THREADS);
     for (k = 0; k < cnt; k++) {
         printf("  thread %u: %s %s, ordinal %u, 0x%08X, ebx 0x%08X\n", th[k].tid,
@@ -835,7 +835,8 @@ static void phase_host_waits(void)
     /* The reader stays strict about the new field. */
     copy = malloc(len);
     if (copy && cnt > 0) {
-        size_t head = 68 + sizeof(RecompCpu), site_at = 16 + 64, ord_at = 16 + 8;
+        /* host routines, no lifted frame: every chain is empty (24 bytes), tests/park_chain has real ones */
+        size_t head = 68 + sizeof(RecompCpuRegs) + 24, site_at = 16 + 64, ord_at = 16 + 8;
         int hw = -1, kn = -1;
         for (k = 0; k < cnt; k++) {
             if (th[k].site != XBOX_PARK_SITE_KERNEL && hw < 0) hw = k;
