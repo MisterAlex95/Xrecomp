@@ -24,6 +24,12 @@
 # SDL_AUDIODRIVER says otherwise.
 set -uo pipefail
 
+# No core files: several tests fault on purpose in forked children (memory_layout_posix reads unmapped mirrors,
+# mmio_fault_chain_posix, seh_dispatch, ...), and a child of a process holding the guest reservation dumps several
+# GB to tens of GB each. With cores on (GitHub's runners), memory_layout_posix alone wrote 28 GB, filled the disk and
+# every project after it failed to configure (2026-11-16).
+ulimit -c 0 2>/dev/null || true
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-$ROOT/build/c-tests}
 REPORT=${2:-$OUT/report.md}

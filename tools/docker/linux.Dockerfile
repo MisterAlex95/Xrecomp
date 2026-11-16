@@ -50,7 +50,7 @@ RUN --mount=type=cache,id=xba-ccache-linux,target=/ccache mkdir -p /work && trap
     && case "$PART" in all|python) \
          cmake -S . -B /work/build/root -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DXBOXRECOMP_BUILD_TESTS=ON \
          && cmake --build /work/build/root -j"$JOBS" \
-         && ctest --test-dir /work/build/root --output-on-failure --timeout 300 ;; esac \
+         && (ulimit -c 0; ctest --test-dir /work/build/root --output-on-failure --timeout 300) ;; esac \
     && case "$PART" in all) tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md ;; \
          c-*) XBR_SHARD=${PART#c-} tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md ;; esac \
     && case "$PART" in all|python) python3 -m pytest -q -p no:cacheprovider tools/ consoles/ | tee /reports/pytest.txt ;; esac \

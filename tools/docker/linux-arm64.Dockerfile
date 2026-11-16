@@ -42,7 +42,7 @@ RUN --mount=type=cache,id=xba-ccache-arm64,target=/ccache mkdir -p /work && trap
     && mkdir -p /reports/junit \
     && cmake -S . -B /work/build/root -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo $XBR_CMAKE_ARGS \
     && cmake --build /work/build/root -j"$JOBS" 2>&1 | tee /reports/build-root.log \
-    && (ctest --test-dir /work/build/root --output-on-failure --timeout 600 --output-junit /reports/junit/root.xml || true) \
+    && (ulimit -c 0; ctest --test-dir /work/build/root --output-on-failure --timeout 600 --output-junit /reports/junit/root.xml || true) \
     && (tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md || true) \
     && (file /work/build/c-tests/mmx_helpers/mmx_helpers_test* || true) | tee /reports/arch.txt \
     && awk -F'|' 'NR > 2 && ($3 ~ /FAIL/ || $4 ~ /FAIL/ || $7 + 0 > 0) { gsub(/ /, "", $2); print $2 }' /reports/c-tests.md \
