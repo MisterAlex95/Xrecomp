@@ -1,6 +1,6 @@
 # Other consoles
 
-XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS**, **PSP**, **GameCube** and **Dreamcast** spikes), statically recompiled the same way as
+XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS**, **PSP**, **GameCube**, **Dreamcast** and **Xbox 360** spikes), statically recompiled the same way as
 Xbox discs. This is early work: the layout, build options and test corpus are in place, the runtimes are empty, and no
 game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
@@ -14,6 +14,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 | `psp/` | PSP (spike, Linux headless only) | Allegrex (MIPS32 R4000-class, little-endian) + FPU + VFPU |
 | `gc/` | GameCube (spike, Linux headless only) | Gekko (PowerPC 750 + paired singles, big-endian) |
 | `dc/` | Dreamcast (spike, Linux headless only) | Hitachi SH-4 (SH7091, little-endian, FPU) |
+| `x360/` | Xbox 360 (spike, tools and headers only) | Xenon (64-bit PowerPC + VMX128, big-endian) |
 
 Each one has:
 
@@ -1452,6 +1453,52 @@ Not there yet: the PowerVR2 beyond the framebuffer (the TA, tile accelerator lis
 big piece), AICA (its ARM7 and the 64 channels), Maple (pads), the GD-ROM (GDI / CHD images), G2 / PVR DMA, the MMU
 and the SH-4's own exceptions beyond TRAPA, cycle timing, the scrambled 1ST_READ.BIN and IP.BIN boot. Notes on
 XBA-221.
+
+**Xbox 360 spike (XBA-230, epic XBA-229).** The XEX2 container parsed, and leaf functions (64-bit integer, FPU,
+VMX, VMX128) recompiled on the GameCube's PowerPC frontend and checked against values computed independently. No
+runtime yet (no kernel / XAM HLE, no threads, no Xenos), nothing in the app, nothing in CMake: Python and two
+headers. What is there:
+
+- `tools/xex` (`python3 -m tools.xex FILE.xex [--key-file KEY]... [--json F] [--image OUT]`): the XEX2 header, every
+  optional header (kept raw, these decoded: entry point, image base, import libraries with their version and the
+  import records of each, read from the image: address, variable or thunk, ordinal; TLS, stack / heap size,
+  execution info, original PE name, static libraries, resources, file format), the security info (image size,
+  flags, load address, page descriptors), decryption (AES-128: the session key ECB-decrypted with a key the user
+  gives, then the image CBC-decrypted; pure Python, `cryptography` used when installed), basic decompression, and the
+  PE inside (sections, `.pdata`: exact function starts). **No key is in the repository**: `--key-file` or
+  `$XEX_KEY_FILE` point at a file of your own (16 raw bytes or 32 hex digits); each key given is tried, the right
+  one yields an MZ header. Not done: LZX ("normal") compression (the parser says so; most retail XEX use it, so
+  decompress with a tool of your own first), delta patches, signature / digest checks. `synth.py` writes synthetic
+  XEX2 files for the tests (our own PE, imports from `xboxkrnl.exe` / `xam.xex`, basic compression, encrypted with a
+  made-up test key).
+- `tools/x360_tools` (`python3 -m x360_tools.recomp FILE.xex [OUTDIR] [--key-file KEY] [--sweep] [--compile]`):
+  `xenon.py` is the Xenon layer on `tools/ppc`: the decoder adds the 64-bit forms (ld / std / lwa, rld*, mulld /
+  mulhd(u) / divd(u), sld / srd / srad(i), cntlzd, extsw, cmpd..., fctid(z) / fcfid, dcbz128), VMX (opcode 4 VX /
+  VC / VA forms, the opcode-31 loads and stores incl. Xenon's lvlx / lvrx / stvlx / stvrx) and all 75 VMX128
+  encodings (opcodes 4, 5, 6, registers up to v127 split over their fields; checked against Xenia's opcode
+  constants); the lifter makes R(n) 64-bit with 64-bit-mode rules (CR0 on the 64-bit result, rlw* replicate the low
+  word, word shifts / extends sign-extend), 32-bit effective addresses, and lifts the float VMX subset (add / sub /
+  mul / madd / nmsub in both encodings, msum3 / msum4, max / min, compares with CR6, converts, rounds), logic,
+  vsel, vperm, vsldoi, splats, merges, word shifts, vpermwi128, vrlimi128 and the loads / stores. Not lifted (they
+  go to `RC_INTERP`, and `--sweep` counts them on a title): saturating / pack / unpack integer VMX, vpkd3d128 /
+  vupkd3d128, vexptefp / vlogefp, traps. `recomp.py` seeds discovery with the entry point and every `.pdata` start
+  (import thunks are not code), lifts each function to `x360_rc_NNN.c` + `x360_rc_table.c`.
+- `runtime/`: `xenon_ops.h` (64-bit helpers next to the GameCube's `ppc_ops.h`, the VMX semantics on a 128-bit
+  union in PowerPC element order) and `xenon_rt.h` (the lifted-code ABI of the spike: one hardware thread, a flat
+  big-endian memory window, no events). Build lifted code with `-ffp-contract=off` so hosts agree.
+- Tests (`tools/xex/test_xex.py`, `consoles/x360/tools/x360_tools/test_x360_tools.py`, no toolchain): parser round
+  trips (none / basic, clear / encrypted, wrong or missing key, LZX gap), the decoder on known words and every VMX128
+  constant, register fields up to v127, and six leaf functions written in assembly in the test (FNV-1a 64, a
+  64-bit mix of mulld / mulhdu / sradi / divd / cntlzd / rld* / rlwinm's 64-bit mask / lwa / carries / cmpd vs cmpw,
+  a Horner polynomial with fmadd / fctidz / fcfid / fsel, a VMX128 4x4 transform with vmsum4fp128 / vrlimi128, a
+  VMX128 mix with unaligned lvlx / lvrx / stvlx / stvrx, vmaddfp128, vpermwi128, a record compare branching on CR6,
+  vsel128, converts and shifts, and a classic AltiVec one with vperm byte swaps and the lvsl unaligned load) packed
+  in a synthetic encrypted XEX2, recompiled, built with the host cc and run: every result matches values computed
+  in Python from the manual.
+
+Not there yet: everything of a runtime (XBA-229 steps 2 to 5): kernel / XAM HLE, threads and reservations across
+hardware threads, MSVC helpers (__savegprlr / __restgprlr) and bctr jump tables in discovery, Xenos, XMA, LZX. The
+estimate is on XBA-229.
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc / libnds, devkitPPC / libogc, PSn00bSDK, libdragon, PSPSDK, KallistiOS) and dumps Alex made from his own media, kept outside every
