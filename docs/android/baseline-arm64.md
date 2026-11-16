@@ -64,10 +64,11 @@ the reservation in one `mmap`, shutdown unmaps the span in one call. 0 crashes i
 ## Skips that are expected
 
 - `mmio_decode_a64` on x86-64: arm64-only.
-- `mmx_helpers`, `mmx_integer`, `xmm_helpers` on arm64: they compare the scalar fallback with the x86-64 intrinsics,
-  so there is nothing to compare on arm64. They exit 77. `mmx_helpers` and `xmm_helpers` did not declare
-  `SKIP_RETURN_CODE 77` and showed up as failures: fixed in this fork. The scalar fallback that arm64 uses is still
-  checked, against the intrinsics, on x86-64.
+- `mmx_helpers`, `mmx_integer` on arm64: they compare the scalar fallback with the x86-64 intrinsics, so there is
+  nothing to compare on arm64. They exit 77. `mmx_helpers` and `xmm_helpers` did not declare `SKIP_RETURN_CODE 77`
+  and showed up as failures: fixed in this fork. The scalar fallback that arm64 uses is still checked, against the
+  intrinsics, on x86-64. `xmm_helpers` runs on arm64 since XBA-238: it holds the NEON forms of the XMM helpers to the
+  scalar reference.
 
 ## Per project
 
@@ -147,4 +148,4 @@ kernel_irql_abi, kernel_physical_address, kernel_regressions, mmio_decode, nv2a_
 | win32_waitable_timer_posix | 1 pass | 1 pass |
 | wma_decoder | 1 pass | 1 pass |
 | x87_trig | 2 pass | 2 pass |
-| xmm_helpers | 1 pass | 1 skip |
+| xmm_helpers | 1 pass | 1 pass |

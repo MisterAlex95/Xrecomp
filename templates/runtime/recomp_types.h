@@ -1528,7 +1528,93 @@ static inline uint32_t XMM_MOVEMASK(RecompXmm a) {
 RECOMP_XMM_INTRIN2(XMM_UNPACK_LOW,  _mm_unpacklo_ps)
 RECOMP_XMM_INTRIN2(XMM_UNPACK_HIGH, _mm_unpackhi_ps)
 
-#else /* x86-64 XMM intrinsics */
+#elif defined(__aarch64__) && defined(__ARM_NEON) && !defined(RECOMP_XMM_NO_NEON)
+
+/* arm64 (XBA-238): the same set on Advanced SIMD. The scalar lane loops
+ * below compiled to a vector of 64-bit pairs split and rejoined around
+ * every float op (clang and gcc both: the union is passed as two x
+ * registers), several instructions per mulps. Each helper here is the
+ * per-lane IEEE operation the loop spells out, so the results are the
+ * loop's on the same core, bit for bit (tests/xmm_helpers compares them
+ * on arm64): add/sub/mul/div/sqrt are the scalar instructions' vector
+ * forms under the same FPCR, MINPS/MAXPS keep the second operand when
+ * unordered or equal (a compare and a select, not fmin/fmax), EQ/LT/LE
+ * are the ordered compares and NEQ their negation. RCP/RSQRT, the
+ * predicate switch and movmskps stay as the loops. RECOMP_XMM_NO_NEON
+ * builds the loops instead. */
+#include <arm_neon.h>
+#define RECOMP_XMM_NEON 1
+
+static inline float32x4_t recomp_xn_f(RecompXmm a) { return vld1q_f32(a.f); }
+static inline uint32x4_t  recomp_xn_u(RecompXmm a) { return vld1q_u32(a.u); }
+static inline RecompXmm recomp_xn_from_f(float32x4_t v) {
+    RecompXmm r; vst1q_f32(r.f, v); return r;
+}
+static inline RecompXmm recomp_xn_from_u(uint32x4_t v) {
+    RecompXmm r; vst1q_u32(r.u, v); return r;
+}
+#define RECOMP_XMM_NEON_F(NAME, EXPR)                                     \
+    static inline RecompXmm NAME(RecompXmm a, RecompXmm b) {              \
+        float32x4_t x = recomp_xn_f(a), y = recomp_xn_f(b);               \
+        (void)x; (void)y;                                                 \
+        return recomp_xn_from_f(EXPR);                                    \
+    }
+#define RECOMP_XMM_NEON_U(NAME, EXPR)                                     \
+    static inline RecompXmm NAME(RecompXmm a, RecompXmm b) {              \
+        float32x4_t x = recomp_xn_f(a), y = recomp_xn_f(b);               \
+        uint32x4_t ux = recomp_xn_u(a), uy = recomp_xn_u(b);              \
+        (void)x; (void)y; (void)ux; (void)uy;                             \
+        return recomp_xn_from_u(EXPR);                                    \
+    }
+
+RECOMP_XMM_NEON_F(XMM_ADD, vaddq_f32(x, y))
+RECOMP_XMM_NEON_F(XMM_SUB, vsubq_f32(x, y))
+RECOMP_XMM_NEON_F(XMM_MUL, vmulq_f32(x, y))
+RECOMP_XMM_NEON_F(XMM_DIV, vdivq_f32(x, y))
+RECOMP_XMM_NEON_F(XMM_MIN, vbslq_f32(vcltq_f32(x, y), x, y))
+RECOMP_XMM_NEON_F(XMM_MAX, vbslq_f32(vcgtq_f32(x, y), x, y))
+
+RECOMP_XMM_NEON_U(XMM_AND,  vandq_u32(ux, uy))
+RECOMP_XMM_NEON_U(XMM_OR,   vorrq_u32(ux, uy))
+RECOMP_XMM_NEON_U(XMM_XOR,  veorq_u32(ux, uy))
+/* ANDNPS is ~dst & src: bic is first & ~second. */
+RECOMP_XMM_NEON_U(XMM_ANDN, vbicq_u32(uy, ux))
+
+RECOMP_XMM_NEON_U(XMM_CMP_EQ,  vceqq_f32(x, y))
+RECOMP_XMM_NEON_U(XMM_CMP_LT,  vcltq_f32(x, y))
+RECOMP_XMM_NEON_U(XMM_CMP_LE,  vcleq_f32(x, y))
+RECOMP_XMM_NEON_U(XMM_CMP_NEQ, vmvnq_u32(vceqq_f32(x, y)))
+
+static inline RecompXmm XMM_CMP_PRED(RecompXmm a, RecompXmm b, int p) {
+    RecompXmm r; int i;
+    for (i = 0; i < 4; ++i)
+        r.u[i] = recomp_cmp_pred(a.f[i], b.f[i], p) ? 0xFFFFFFFFu : 0u;
+    return r;
+}
+/* Packed unary ops; the first argument is unused, as for the binary forms. */
+RECOMP_XMM_NEON_F(XMM_SQRT, vsqrtq_f32(y))
+static inline RecompXmm XMM_RSQRT(RecompXmm a, RecompXmm b) {
+    RecompXmm r; int i; (void)a;
+    for (i = 0; i < 4; ++i) r.f[i] = recomp_rsqrtss(b.f[i]);
+    return r;
+}
+static inline RecompXmm XMM_RCP(RecompXmm a, RecompXmm b) {
+    RecompXmm r; int i; (void)a;
+    for (i = 0; i < 4; ++i) r.f[i] = recomp_rcpss(b.f[i]);
+    return r;
+}
+
+/** movmskps: the four lane sign bits, packed into the low nibble. */
+static inline uint32_t XMM_MOVEMASK(RecompXmm a) {
+    return ((a.u[0] >> 31) & 1u) | (((a.u[1] >> 31) & 1u) << 1)
+         | (((a.u[2] >> 31) & 1u) << 2) | (((a.u[3] >> 31) & 1u) << 3);
+}
+
+/** unpcklps / unpckhps: interleave the low or high halves (raw bits). */
+RECOMP_XMM_NEON_U(XMM_UNPACK_LOW,  vzip1q_u32(ux, uy))
+RECOMP_XMM_NEON_U(XMM_UNPACK_HIGH, vzip2q_u32(ux, uy))
+
+#else /* arm64 Advanced SIMD */
 
 #define RECOMP_XMM_LANEWISE(name, expr)                                   \
     static inline RecompXmm name(RecompXmm a, RecompXmm b) {              \

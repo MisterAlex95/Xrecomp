@@ -245,7 +245,9 @@ def build(out, variant, cc="clang", target=None, sysroot=None, jobs=2):
     obj_bytes = sum(os.path.getsize(o) for o in objs)
     rt_flags = tflags + base_flags() + ["-I" + os.path.join(out, "gen"), "-I" + out]
     ldx = []
-    if (target and "android" in target) or lto:     # ThinLTO needs lld (its --thinlto-jobs)
+    # ThinLTO needs lld (its --thinlto-jobs); so does a cross build (no GNU ld
+    # for the target: NDK clang with --target=aarch64-linux-gnu, see above).
+    if (target and ("android" in target or target.startswith("aarch64"))) or lto:
         ldx = ["-fuse-ld=lld"]
     lto_link = (["-flto=thin", "-Wl,--thinlto-jobs=%d" % jobs] if lto else []) + \
         [f for f in extra if f.startswith("-O")]

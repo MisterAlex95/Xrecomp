@@ -4,9 +4,10 @@ project(xmm_helpers_test C)
 # match the scalar reference this test carries -- lane for lane, bit for
 # bit, across NaN, infinity and denormal inputs (the compare predicates'
 # unordered behaviour and RCP/RSQRT's NaN pass-through live exactly
-# there). On other hosts the header falls back to the scalar path and the
-# comparison is trivially true, so the test reports a skip rather than a
-# pass (see test_main.c).
+# there). On arm64 the NEON forms are held to the same reference (XBA-238;
+# RCP/RSQRT and the conversions stay scalar there). On other hosts the
+# header falls back to the scalar path and the comparison is trivially
+# true, so the test reports a skip rather than a pass (see test_main.c).
 set(CMAKE_C_STANDARD 11)
 add_executable(xmm_helpers_test test_main.c)
 target_include_directories(xmm_helpers_test PRIVATE ../../templates/runtime)
@@ -15,5 +16,5 @@ if(UNIX)
 endif()
 enable_testing()
 add_test(NAME xmm_helpers COMMAND xmm_helpers_test)
-# Without the x86-64 intrinsics (arm64) there is nothing to compare against: the test exits 77.
+# Without the x86-64 intrinsics or the arm64 NEON forms there is nothing to compare against: the test exits 77.
 set_tests_properties(xmm_helpers PROPERTIES SKIP_RETURN_CODE 77)

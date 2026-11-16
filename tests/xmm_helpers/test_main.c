@@ -1,5 +1,5 @@
-/* The XMM float helpers: the x86-64 intrinsics behave exactly as the
- * scalar lane loops they replaced.
+/* The XMM float helpers: the x86-64 intrinsics (and the arm64 NEON forms,
+ * XBA-238) behave exactly as the scalar lane loops they replaced.
  *
  * The reference here is an independent copy of the scalar implementations
  * the header carried before the intrinsics -- lane loops over the same
@@ -121,6 +121,13 @@ static void comparex(const char *name, RecompXmm s, RecompXmm n) {
 }
 
 #if defined(_M_X64) || defined(__x86_64__)
+#  define XMM_TEST_X86 1
+#endif
+/* arm64 Advanced SIMD (XBA-238): the same comparison for the helpers the
+ * header has in NEON; RCP/RSQRT and the conversions stay scalar there and
+ * their x86 references below need the SSE intrinsics, so those are
+ * x86-64 only. */
+#if defined(XMM_TEST_X86) || defined(RECOMP_XMM_NEON)
 
 /* -- independent scalar references: the loops the header had --------- */
 
@@ -151,6 +158,7 @@ REF_U2(REF_XOR,  a.u[i] ^ b.u[i])
 REF_U2(REF_ANDN, (~a.u[i]) & b.u[i])
 
 REF_F2(REF_SQRT,  sqrtf(b.f[i]))
+#ifdef XMM_TEST_X86
 /* The packed forms are the per-lane .ss approximation, which is what
  * the scalar helpers always were. */
 static inline float ref_rsqrtss(float x) {
@@ -161,6 +169,7 @@ static inline float ref_rcpss(float x) {
 }
 REF_F2(REF_RSQRT, ref_rsqrtss(b.f[i]))
 REF_F2(REF_RCP,   ref_rcpss(b.f[i]))
+#endif
 
 REF_U2(REF_CMP_EQ,  (a.f[i] == b.f[i]) ? 0xFFFFFFFFu : 0u)
 REF_U2(REF_CMP_LT,  (a.f[i] <  b.f[i]) ? 0xFFFFFFFFu : 0u)
@@ -210,6 +219,7 @@ static inline RecompXmm REF_SHUFFLE(RecompXmm a, RecompXmm b, uint32_t imm) {
     return r;
 }
 
+#ifdef XMM_TEST_X86
 /* cvtps2dq/cvttps2dq: the per-lane cvtss2si/cvttss2si the header loops
  * over, MXCSR rounding and integer indefinite included. */
 static inline int32_t ref_f2i(float v, int truncate) {
@@ -227,6 +237,7 @@ static inline RecompXmm REF_FROM_PI(RecompXmm dst, RecompMmx src) {
     r.f[1] = (float)src.d[1];
     return r;
 }
+#endif
 
 /* -- directed NaN semantics, stated independently of both copies -----
  * For a pair where either lane is NaN the SSE predicates read:
@@ -339,8 +350,10 @@ int main(void) {
     CHECK2(REF_XOR,  XMM_XOR);
     CHECK2(REF_ANDN, XMM_ANDN);
     CHECK2(REF_SQRT,  XMM_SQRT);
+#ifdef XMM_TEST_X86
     CHECK2(REF_RSQRT, XMM_RSQRT);
     CHECK2(REF_RCP,   XMM_RCP);
+#endif
     CHECK2(REF_CMP_EQ,  XMM_CMP_EQ);
     CHECK2(REF_CMP_LT,  XMM_CMP_LT);
     CHECK2(REF_CMP_LE,  XMM_CMP_LE);
@@ -395,6 +408,7 @@ int main(void) {
         }
     }
 
+#ifdef XMM_TEST_X86
     /* cvtps2dq / cvttps2dq: randoms plus the rounding corners. */
     {
         static const uint32_t corners[] = {
@@ -463,6 +477,7 @@ int main(void) {
             }
         }
     }
+#endif
 
     printf("%s: %ld comparacoes (%ld lanes), %d divergencias, "
            "%ld lanes NaN-para-NaN (payload nao especificado)\n",
@@ -471,7 +486,7 @@ int main(void) {
     return failures ? 1 : 0;
 }
 
-#else /* x86-64 */
+#else /* x86-64 or arm64 NEON */
 int main(void) {
     /* The header took the scalar fallback: there is no intrinsic path to
      * compare against, and the scalar reference would be compared with
@@ -479,4 +494,4 @@ int main(void) {
     printf("skip: sem intrinsecos x86-64 neste host\n");
     return 77;
 }
-#endif /* x86-64 */
+#endif /* x86-64 or arm64 NEON */
