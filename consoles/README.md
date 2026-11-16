@@ -1,6 +1,6 @@
 # Other consoles
 
-XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS**, **PSP**, **GameCube**, **Dreamcast**, **Xbox 360** and **Nintendo 3DS** spikes), statically recompiled the same way as
+XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS**, **PSP**, **GameCube**, **Dreamcast**, **Xbox 360**, **Nintendo 3DS** and **PlayStation 2** spikes), statically recompiled the same way as
 Xbox discs. This is early work: the layout, build options and test corpus are in place, the runtimes are empty, and no
 game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
@@ -14,6 +14,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 | `psp/` | PSP (spike, Linux headless only) | Allegrex (MIPS32 R4000-class, little-endian) + FPU + VFPU |
 | `gc/` | GameCube (spike, Linux headless only) | Gekko (PowerPC 750 + paired singles, big-endian) |
 | `dc/` | Dreamcast (spike, Linux headless only) | Hitachi SH-4 (SH7091, little-endian, FPU) |
+| `ps2/` | PlayStation 2 (spike, Linux headless only) | Emotion Engine: R5900 (MIPS III + 128-bit MMI, non-IEEE FPU) |
 | `x360/` | Xbox 360 (spike, tools and headers only) | Xenon (64-bit PowerPC + VMX128, big-endian) |
 | `3ds/` | Nintendo 3DS (spike, Linux headless only) | ARM11 MPCore (ARMv6K + VFPv2), one Horizon user process |
 
@@ -1553,4 +1554,45 @@ commercial title needs, and an estimate, are on XBA-222.
 
 **Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
 build ourselves (devkitARM / libtonc / libnds / libctru, devkitPPC / libogc, PSn00bSDK, libdragon, PSPSDK, KallistiOS) and dumps Alex made from his own media, kept outside every
+**PlayStation 2 spike (XBA-226, epic XBA-220).** Do the MIPS frontends carry over to the EE's R5900 (64-bit GPRs,
+128-bit MMI, the non-IEEE FPU), with a minimal HLE of the EE kernel? Yes: a PS2SDK hello world runs recompiled on
+Linux (x86-64, and arm64 under qemu), 98 % of its instructions native after two discovery rounds, and what it writes
+to the EE's SIO is `consoles/ps2/tests/hello.txt`, byte for byte, as under the interpreter. Linux / macOS headless only
+(`XBR_CONSOLE_PS2`, off on Android and Windows), nothing in the app. What is there:
+
+- `tests/homebrew/hello`: our test program, PS2SDK's crt0, libkernel, libcglue and newlib, built in
+  `tools/docker/ps2-homebrew.Dockerfile` (ps2dev's official image v2.0.0, pinned by digest, 281 MB compressed / 1 GB
+  on disk) by `tools/consoles/build_homebrew.sh ps2`. It prints to the SIO (`sio_putsn`: the TX FIFO at 0x1000F180,
+  no IOP and no GS needed) 64-bit integer results, an R5900 check (three-operand MULT, MADD, MULT1 / DIV1 / MFLO1,
+  PLZCW, BEQL, MOVZ / MOVN), 33 MMI operations through LQ / SQ, and the FPU's R5900 behaviour (clamping, 2^128 for
+  0x7F800000, denormals as zero, rounding toward zero, ACC), then returns from `main`.
+- `tools/ps2_tools` (`python3 -m ps2_tools.recomp PROG.elf OUTDIR [--discovered FILE]`): `elf.py` loads the ELF as
+  the runtime does; `isa.py` is an R5900 decoder of its own on ps1_tools' `Ins` (the R3000A decode mis-reads too much:
+  0x1C is MMI, 0x1E / 0x1F LQ / SQ, the 64-bit loads, stores and SPECIAL ops, MULT's rd, the likely branches);
+  `lift.py` subclasses ps1_tools' discovery and lifter (ps1_tools unchanged: the PS1's output is byte-identical):
+  uint64_t register locals with every 32-bit result sign-extended, the GPRs' high halves and HI1 / LO1 in the head,
+  no load delay, likely branches, the FPU and MMI through the helpers the interpreter uses. Seeds: the entry, the
+  image's words that point at a function start, the interpreter's misses.
+- `runtime/`: `ps2_core` (C11 + libm, no host layer): an R5900 interpreter (`ps2_cpu.c`; no COP2 / VU0, no
+  parallel multiplies / divides), `ps2_alu.h` (the semantics both share: MMI lanes, the FPU computed in double and
+  narrowed with truncation and clamping, LWL ... SDR), 32 MB of RAM in every segment, the scratchpad, latched EE and
+  GS registers, the SIO; `ps2_hle.c`, the EE kernel in C (`ps2_core.h`): SetupThread / SetupHeap, SetSyscall (the
+  handler then runs as guest code: PS2SDK's kernel patches install themselves as on a PS2), a strict-priority thread
+  scheduler switching at syscalls (PS2SDK's `InitThread` starts a thread before `main`), semaphores, the OSD
+  configuration, the SIF registers with no IOP behind them, Exit. `ps2_recomp_rt.h` gives the PS1 lifter's RC_*
+  vocabulary its EE meaning. `ps2_run PROG.elf [--insns N] [--sio OUT] [--pack LIB] [--missed FILE] [--stats] [-v]`.
+- `tests/`: ctest `ps2_hello` (interpreter) and `ps2_rc_hello` (recompiled, discovery loop: two rounds, at least 90 %
+  native, no stale entry), both compare the SIO output with `hello.txt`; skipped (77) without the corpus, run by the
+  homebrew CI job (`tools/consoles/run_ps2_homebrew.sh`). The recompiler's pytest
+  (`consoles/ps2/tools/ps2_tools/test_ps2_tools.py`) needs no toolchain: the decoder against ps1_tools' where MIPS I
+  keeps its meaning, the MMI table against `ps2_alu.h`'s, ELF loading, and a synthetic R5900 function (64-bit ops,
+  LQ / SQ, MMI, FPU clamping, a likely branch) lifted, compiled with the host cc and run.
+
+Not there yet: the IOP (no IRX modules: SIF RPC, file I/O, pads, sound all wait on it), VU0 / VU1 (COP2 macro mode,
+micro mode, VIF), the GS and GIF / DMA, timers, interrupts and alarms, the parallel multiply / divide MMI ops, QFSRV
+and the SA register in lifted code, the FPU's sticky flags and the adder's guard-bit behaviour, cycle timing, disc
+images. The estimates for those steps and the PS1 / PSP lifter assumptions that broke are on XBA-220.
+
+**Legal**: no ROM, disc image, BIOS or game data in this repository, its CI or its artifacts. Tests use homebrew we
+build ourselves (devkitARM / libtonc / libnds, devkitPPC / libogc, PSn00bSDK, libdragon, PSPSDK, KallistiOS, PS2SDK) and dumps Alex made from his own media, kept outside every
 repository.

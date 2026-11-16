@@ -185,6 +185,9 @@ jobs:
   # XBA-228: the 3DS corpus (consoles/3ds/tests/homebrew, libctru in the same devkitARM image as the GBA and NDS ones)
   # and the 3DS spike's ctest (tools/consoles/run_3ds_homebrew.sh, same deps image, about 25 s): ctr_hello /
   # ctr_rc_hello. Also on consoles/3ds/.
+  # XBA-226: the PS2 corpus (consoles/ps2/tests/homebrew, ps2dev's official image pinned by digest, 281 MB compressed)
+  # and the PS2 spike's ctest (tools/consoles/run_ps2_homebrew.sh, same deps image, about 40 s): ps2_hello /
+  # ps2_rc_hello. Also on consoles/ps2/.
   homebrew:
     needs: linux
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -215,7 +218,7 @@ jobs:
           base=${MERGE_BASE:-$BASE_SHA}
           if [ -n "$base" ] && git fetch -q --depth 1 "$url" "$base" 2>/dev/null \
              && files=$(git diff --name-only "$base" HEAD); then
-            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|consoles/n64/|consoles/ps1/|consoles/nds/|consoles/psp/|consoles/gc/|consoles/dc/|consoles/3ds/|tools/ppc/|tools/prepare/|tools/docker/((gba|ps1|n64|nds|psp|gc|dc|3ds)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_nds_homebrew\.sh|run_dc_homebrew\.sh|run_psp_homebrew\.sh|run_gc_homebrew\.sh|run_3ds_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh|build_gba_suite\.sh|run_n64_homebrew\.sh|build_n64_libdragon_tests\.sh|ps1_test_inputs\.sh|build_ps1_bios\.sh|fetch_ps1_tests\.sh|run_ps1_tests\.sh)$|\.gitea/workflows/ci\.yml$)'; then
+            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|consoles/n64/|consoles/ps1/|consoles/nds/|consoles/psp/|consoles/gc/|consoles/dc/|consoles/3ds/|consoles/ps2/|tools/ppc/|tools/prepare/|tools/docker/((gba|ps1|n64|nds|psp|gc|dc|3ds|ps2)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_nds_homebrew\.sh|run_dc_homebrew\.sh|run_psp_homebrew\.sh|run_gc_homebrew\.sh|run_3ds_homebrew\.sh|run_ps2_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh|build_gba_suite\.sh|run_n64_homebrew\.sh|build_n64_libdragon_tests\.sh|ps1_test_inputs\.sh|build_ps1_bios\.sh|fetch_ps1_tests\.sh|run_ps1_tests\.sh)$|\.gitea/workflows/ci\.yml$)'; then
               echo "build=true" >> "$GITHUB_OUTPUT"
             else
               echo "Nothing the homebrew corpus is built from: skipped."
@@ -231,11 +234,12 @@ jobs:
         run: sh tools/ci/heavy_lock.sh acquire
 
       - name: Build the corpus (GBA, PS1, N64, NDS, PSP, GameCube, DC, 3DS)
+      - name: Build the corpus (GBA, PS1, N64, NDS, PSP, GameCube, DC, PS2)
         if: steps.paths.outputs.build == 'true'
         run: |
           apk add --no-cache bash coreutils tar >/dev/null
           JOBS=4 bash tools/consoles/build_homebrew.sh all out/homebrew
-          for c in gba ps1 n64 nds psp gc dc 3ds; do echo "== $c"; cat "out/homebrew/$c/SHA256SUMS"; done
+          for c in gba ps1 n64 nds psp gc dc 3ds ps2; do echo "== $c"; cat "out/homebrew/$c/SHA256SUMS"; done
 
       # A changed screenshot: look at the artefact's PNG; if the change is intended, rewrite the list with
       # tools/consoles/gba_corpus_packs.py CORPUS OUT --gba-run GBA_RUN --update (consoles/README.md).
@@ -290,6 +294,11 @@ jobs:
       - name: 3DS corpus through the spike's ctest (interpreter, recompiled)
         if: steps.paths.outputs.build == 'true'
         run: JOBS=4 bash tools/consoles/run_3ds_homebrew.sh out/homebrew out/3ds-homebrew
+      # XBA-226: the PS2 spike's PS2SDK hello world, interpreted and recompiled (discovery loop), its SIO output
+      # against consoles/ps2/tests/hello.txt (about 40 s, same deps image).
+      - name: PS2 corpus through the spike's ctest (interpreter, recompiled)
+        if: steps.paths.outputs.build == 'true'
+        run: JOBS=4 bash tools/consoles/run_ps2_homebrew.sh out/homebrew out/ps2-homebrew
 
       - name: PS1 test inputs (OpenBIOS, JaCzekanski/ps1-tests; cached)
         if: steps.paths.outputs.build == 'true'
