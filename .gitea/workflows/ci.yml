@@ -233,8 +233,7 @@ jobs:
         if: steps.paths.outputs.build == 'true'
         run: sh tools/ci/heavy_lock.sh acquire
 
-      - name: Build the corpus (GBA, PS1, N64, NDS, PSP, GameCube, DC, 3DS)
-      - name: Build the corpus (GBA, PS1, N64, NDS, PSP, GameCube, DC, PS2)
+      - name: Build the corpus (GBA, PS1, N64, NDS, PSP, GameCube, DC, 3DS, PS2)
         if: steps.paths.outputs.build == 'true'
         run: |
           apk add --no-cache bash coreutils tar >/dev/null
