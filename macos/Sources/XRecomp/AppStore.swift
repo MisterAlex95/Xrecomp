@@ -56,7 +56,8 @@ final class AppStore: LauncherActions {
             let tk = Toolkit.resolveForApp(settings: s)
             let py = PythonEnv.resolve(settingPath: s.pythonPath, toolkit: tk?.root, appVenv: base.venv)
             let commit = tk?.commit()
-            let deps = DependencyCheck.run(python: py)
+            let deps = DependencyCheck.run(python: py,
+                                           prebuiltRuntime: DependencyCheck.hasPrebuiltRuntime(toolkit: tk?.root))
             DispatchQueue.main.async { [self] in
                 toolkit = tk
                 python = py

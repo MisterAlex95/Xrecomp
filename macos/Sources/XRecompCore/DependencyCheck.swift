@@ -34,9 +34,17 @@ public enum DependencyCheck {
         s.split(separator: "\n").first.map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
     }
 
+    /// True when the toolkit carries the prebuilt runtime for this Mac (`runtime/macos-arm64/runtime.json`, XBA-86):
+    /// prepare then builds titles with the compile driver and Clang alone (tools/prepare/desktop_build.py), no CMake.
+    public static func hasPrebuiltRuntime(toolkit: URL?) -> Bool {
+        guard let toolkit else { return false }
+        return FileManager.default.fileExists(
+            atPath: toolkit.appendingPathComponent("runtime/macos-arm64/runtime.json").path)
+    }
+
     /// Every item. `python` is the resolved interpreter (nil = none imports the packages yet); `vulkan` the Vulkan
-    /// loader frame generation needs (optional).
-    public static func run(python: URL?, vulkan: URL? = VulkanLoader.find(),
+    /// loader frame generation needs (optional); `prebuiltRuntime` makes CMake optional (see hasPrebuiltRuntime).
+    public static func run(python: URL?, vulkan: URL? = VulkanLoader.find(), prebuiltRuntime: Bool = false,
                            runner: Runner = defaultRunner) -> [Dependency] {
         var out: [Dependency] = []
         func tool(_ id: String, _ name: String, _ args: [String], fix: String, optional: Bool = false) {
@@ -44,7 +52,12 @@ public enum DependencyCheck {
             out.append(Dependency(id: id, name: name, ok: r.ok, optional: optional,
                                   detail: r.ok ? firstLine(r.output) : "not found", fix: fix))
         }
-        tool("cmake", "CMake", ["--version"], fix: "brew install cmake")
+        if prebuiltRuntime {
+            tool("cmake", "CMake (not needed: the toolkit has a prebuilt runtime)", ["--version"],
+                 fix: "brew install cmake", optional: true)
+        } else {
+            tool("cmake", "CMake", ["--version"], fix: "brew install cmake")
+        }
         tool("ninja", "Ninja (faster builds)", ["--version"], fix: "brew install ninja", optional: true)
         tool("clang", "Clang (Command Line Tools)", ["--version"], fix: "xcode-select --install")
         tool("git", "Git", ["--version"], fix: "xcode-select --install")

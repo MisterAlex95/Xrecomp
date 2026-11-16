@@ -130,9 +130,13 @@ checks reuse the Java tests' cases, so change both sides together.
 - **PATH**: an app opened from Finder gets launchd's PATH, without Homebrew. Every child (prepare, the checks, the
   game) gets `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` first, then the
   inherited entries; otherwise prepare fails at `cmake` only when started from Finder.
-- **Dependencies** (Setup): CMake (only for a toolkit without a prebuilt runtime: a checkout; the release zip has
-  `runtime/macos-arm64/` and builds titles with Clang alone, XBA-86), Ninja (optional), Clang, Git, `pkg-config` finding `sdl2` (Homebrew's `sdl2-compat`
-  is fine) and `epoxy`, and the Python packages. Each missing item shows its command; the app never runs `brew`.
+- **Dependencies** (Setup): CMake, Ninja (optional), Clang, Git, `pkg-config` finding `sdl2` (Homebrew's
+  `sdl2-compat` is fine) and `epoxy`, and the Python packages. Each missing item shows its command; the app never
+  runs `brew`. CMake is required only for a toolkit without a prebuilt runtime (a checkout): when the toolkit has
+  `runtime/macos-arm64/runtime.json` (the release zip, XBA-86), prepare builds titles with the compile driver and
+  Clang alone (`tools/prepare/desktop_build.py`) and Setup lists CMake as optional (XBA-253). Setup only checks that
+  the file is there; prepare still falls back to CMake when the runtime was built from another toolkit tree
+  (`runtime_sha256`), which a release zip never is.
 
 ## Storage
 

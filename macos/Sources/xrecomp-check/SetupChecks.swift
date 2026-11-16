@@ -155,6 +155,27 @@ func registerSetupChecks() {
         expect(DependencyCheck.allRequiredOK(fine), "a missing optional item does not block")
     }
 
+    check("dependencies: CMake optional with the toolkit's prebuilt runtime") {
+        let tk = tempDir("tkrt")
+        expect(!DependencyCheck.hasPrebuiltRuntime(toolkit: nil))
+        expect(!DependencyCheck.hasPrebuiltRuntime(toolkit: tk))
+        write(tk.appendingPathComponent("runtime/macos-arm64/runtime.json"), "{\"format\": 1}\n")
+        expect(DependencyCheck.hasPrebuiltRuntime(toolkit: tk))
+        let noCmake: DependencyCheck.Runner = { exe, _ in
+            exe == "cmake" ? Shell.Result(status: 127, output: "") : Shell.Result(status: 0, output: "ok 1.0")
+        }
+        let py = URL(fileURLWithPath: "/x/python3")
+        let checkout = DependencyCheck.run(python: py, vulkan: nil, runner: noCmake)
+        expectEq(checkout.first { $0.id == "cmake" }?.optional, false)
+        expect(!DependencyCheck.allRequiredOK(checkout), "a checkout without the runtime still needs CMake")
+        let release = DependencyCheck.run(python: py, vulkan: nil, prebuiltRuntime: true, runner: noCmake)
+        let cm = release.first { $0.id == "cmake" }
+        expectEq(cm?.optional, true)
+        expectEq(cm?.ok, false)
+        expectEq(cm?.fix, "brew install cmake")
+        expect(DependencyCheck.allRequiredOK(release), "no CMake is fine with the prebuilt runtime")
+    }
+
     check("shell: output, status, timeout") {
         let r = Shell.run("/bin/sh", ["-c", "echo hi; echo err >&2; exit 3"])
         expectEq(r.status, 3)
