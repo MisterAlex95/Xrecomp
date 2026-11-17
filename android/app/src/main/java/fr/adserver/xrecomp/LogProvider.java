@@ -100,6 +100,22 @@ public class LogProvider extends ContentProvider {
         return f;
     }
 
+    /**
+     * A key a Prepare log can be under: an Xbox title ID, or « &lt;console&gt;-&lt;key&gt; » for a console that
+     * prepares, with the key rule of Console.packDirName (a GameCube disc is « gc-GALE01-0 », « gc-GALE01-0-D2 »).
+     * Derived from Console so a new console cannot be forgotten here; the canonical-path check still keeps the file
+     * under files/prepare.
+     */
+    static boolean preparedKey(String tid) {
+        if (tid == null)
+            return false;
+        if (tid.matches("[0-9A-Fa-f]{1,8}"))
+            return true;
+        Console con = Console.ofKey(tid);
+        return con != Console.XBOX && con.prepares()
+               && tid.substring(con.id.length() + 1).matches("[A-Za-z0-9_-]{1,40}");
+    }
+
     private static File servable(Context c, Uri uri) {
         java.util.List<String> seg = uri.getPathSegments();
         if (seg.size() == 2 && seg.get(0).equals("game") && seg.get(1).equals("game.log"))
@@ -109,10 +125,7 @@ public class LogProvider extends ContentProvider {
         if (seg.size() != 3 || !seg.get(0).equals("prepare") || !seg.get(2).equals("prepare.log"))
             return null;
         String tid = seg.get(1);
-        if (!tid.matches("[0-9A-Fa-f]{1,8}") && !tid.matches("gba-[A-Z0-9_]{4}-[0-9A-F]{8}")   // XBA-158: a GBA game
-            && !tid.matches("ps1-[A-Z]{3,4}-[0-9A-F]{5,8}")                                      // XBA-168: a PS1 disc
-            && !tid.matches("n64-[A-Z0-9_]{4}-[0-9A-F]{8}")                                      // XBA-174: an N64 ROM
-            && !tid.matches("gc-DOL-[0-9A-F]{8}"))                                               // XBA-259: a DOL
+        if (!preparedKey(tid))
             return null;
         File f = new File(new File(new File(c.getFilesDir(), "prepare"), tid), "prepare.log");
         try {
