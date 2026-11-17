@@ -229,7 +229,9 @@ void pgraph_d3d11_shutdown(void)
 
 static void submit_draw(void)
 {
-    if (g_pg.inline_count == 0 || g_pg.vert_stride == 0)
+    /* Each vertex is read as x, y, u, v, colour: five dwords at least
+     * (CONVERT_VERT reads src[_b + 4] whatever the stride). */
+    if (g_pg.inline_count == 0 || g_pg.vert_stride < 5)
         return;
 
     uint32_t num_verts = g_pg.inline_count / g_pg.vert_stride;
@@ -261,8 +263,19 @@ static void submit_draw(void)
     if (prim_count == 0)
         return;
 
-    /* Convert inline vertices to OutputVertex (28 bytes) */
-    OutputVertex *out = (OutputVertex *)_alloca(out_vert_count * sizeof(OutputVertex));
+    /* Convert inline vertices to OutputVertex (28 bytes). The count comes
+     * from guest data (up to ~80,000 vertices): a buffer kept between
+     * draws, not the stack. */
+    static OutputVertex *s_out;
+    static uint32_t s_out_cap;
+    if (out_vert_count > s_out_cap) {
+        OutputVertex *grown = (OutputVertex *)realloc(s_out, out_vert_count * sizeof(OutputVertex));
+        if (!grown)
+            return;
+        s_out = grown;
+        s_out_cap = out_vert_count;
+    }
+    OutputVertex *out = s_out;
 
     /* Helper to convert one inline vertex */
     #define CONVERT_VERT(dst_idx, src_idx) do { \
