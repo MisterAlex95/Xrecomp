@@ -190,10 +190,15 @@ public class LauncherActivity extends Activity {
     private static final int REQ_LIBRARY_TREE = 6;
     static final int REQ_PACK_HANDOVER = 7;
     private static final int REQ_VK_DRIVER = 8;
-    private static final int REQ_SAVES_EXPORT = 9;
+    static final int REQ_SAVES_EXPORT = 9;
     private static final int REQ_SAVES_IMPORT = 10;
     /** The titles the pending « Export saves » writes (set before the picker opens), and its key (null: all). */
+    /**
+     * The games of an export waiting on the file picker: kept in the saved state (STATE_EXPORT_KEYS), since the
+     * system may end the app's process while the picker is in front and the result then reaches a new activity.
+     */
     private List<String> exportKeys;
+    static final String STATE_EXPORT_KEYS = "xba.exportKeys";
     /** The library re-reads its entries' states (Prepare, queue, running game) every this many polls. */
     private static final int LIBRARY_POLL_EVERY = 4;
 
@@ -380,6 +385,8 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (savedInstanceState != null)
+            exportKeys = savedInstanceState.getStringArrayList(STATE_EXPORT_KEYS);
         publishShortcuts();
 
         Intent in = getIntent();
@@ -7631,11 +7638,27 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    @Override
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        if (exportKeys != null)
+            out.putStringArrayList(STATE_EXPORT_KEYS, new ArrayList<>(exportKeys));
+    }
+
     private void onSavesExportPicked(Uri uri) {
         List<String> keys = exportKeys;
         exportKeys = null;
-        if (keys == null || keys.isEmpty())
+        if (keys == null || keys.isEmpty()) {
+            // Which games is not known any more: the picker made an empty file, which is not left as an export.
+            Log.w(TAG, "launcher: saves: an export came back without its games: " + uri + " removed");
+            try {
+                android.provider.DocumentsContract.deleteDocument(getContentResolver(), uri);
+            } catch (Exception e) {   // FileNotFoundException, SecurityException, a provider that cannot delete
+                Log.w(TAG, "launcher: saves: cannot remove " + uri, e);
+            }
+            setNote(getString(R.string.SAVES_EXPORT_LOST), NOTE_WARN);
             return;
+        }
         java.util.Map<String, String> names = saveNames(keys);
         String version = appVersion();
         Storage.Dirs dirs = storageDirs();

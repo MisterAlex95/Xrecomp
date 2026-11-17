@@ -12,6 +12,7 @@
         <item quantity="other">%d games</item>
     </plurals>
     <string name="SAVES_NONE">No saves to export yet.</string>
+    <string name="SAVES_EXPORT_LOST">The export was interrupted and nothing was written. Export again.</string>
     <string name="SAVES_EXPORTING">Exporting saves</string>
     <string name="SAVES_IMPORTING">Importing saves</string>
     <plurals name="SAVES_EXPORTED">

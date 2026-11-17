@@ -643,6 +643,63 @@ public class LauncherLibraryTest {
         assertEquals(LauncherActivity.Screen.STORAGE, a.screenForTest());
     }
 
+    /**
+     * Export saves, and the system ends the app's process while the picker is in front: the activity made again
+     * from its saved state still knows which games to export, and writes them to the picked file.
+     */
+    @Test
+    public void exportSurvivesTheProcessEndingBehindThePicker() throws Exception {
+        TestSupport.write(new File(GameStore.defaultGameDir(app), "default.xbe"), TestSupport.xbe(0x4D530004, "Sample"));
+        TestSupport.write(new File(GameTheme.saveDir(app), "UDATA/4d530004/save.bin"), "level 3");
+        org.robolectric.android.controller.ActivityController<LauncherActivity> c =
+            Robolectric.buildActivity(LauncherActivity.class).setup();
+        idle(300);
+        LauncherActivity a = c.get();
+        waitScan(a);
+        a.goForTest(LauncherActivity.Screen.STORAGE);
+        idle(300);
+        menuRow(a, app.getString(R.string.SAVES_EXPORT_ALL)).performClick();
+        idle(100);
+        assertEquals(Intent.ACTION_CREATE_DOCUMENT, shadowOf(a).getNextStartedActivityForResult().intent.getAction());
+        android.os.Bundle state = new android.os.Bundle();
+        c.pause().saveInstanceState(state).stop();
+        assertEquals(Collections.singletonList("4D530004"), state.getStringArrayList(LauncherActivity.STATE_EXPORT_KEYS));
+
+        LauncherActivity again = Robolectric.buildActivity(LauncherActivity.class).setup(state).get();
+        idle(300);
+        waitScan(again);
+        android.net.Uri out = android.net.Uri.parse("content://docs.test/document/saves.zip");
+        java.io.ByteArrayOutputStream zip = new java.io.ByteArrayOutputStream();
+        shadowOf(app.getContentResolver()).registerOutputStream(out, zip);
+        shadowOf(again).callOnActivityResult(LauncherActivity.REQ_SAVES_EXPORT, android.app.Activity.RESULT_OK,
+                                             new Intent().setData(out));
+        waitWorker(again);
+        assertEquals(app.getResources().getQuantityString(R.plurals.SAVES_EXPORTED, 1, 1, "saves.zip"),
+                     again.noteForTest());
+        List<String> names = new ArrayList<>();
+        try (java.util.zip.ZipInputStream z = new java.util.zip.ZipInputStream(
+                 new java.io.ByteArrayInputStream(zip.toByteArray()))) {
+            for (java.util.zip.ZipEntry e; (e = z.getNextEntry()) != null;)
+                names.add(e.getName());
+        }
+        assertEquals(java.util.Arrays.asList(SaveArchive.MANIFEST, "UDATA/4d530004/save.bin"), names);
+    }
+
+    /** An export result whose games are not known (no saved state): said, not an empty file left as the export. */
+    @Test
+    public void exportWithoutItsGamesIsSaid() throws Exception {
+        LauncherActivity a = launch();
+        android.net.Uri out = android.net.Uri.parse("content://docs.test/document/saves.zip");
+        java.io.ByteArrayOutputStream zip = new java.io.ByteArrayOutputStream();
+        shadowOf(app.getContentResolver()).registerOutputStream(out, zip);
+        shadowOf(a).callOnActivityResult(LauncherActivity.REQ_SAVES_EXPORT, android.app.Activity.RESULT_OK,
+                                         new Intent().setData(out));
+        waitWorker(a);
+        assertEquals(app.getString(R.string.SAVES_EXPORT_LOST), a.noteForTest());
+        assertFalse(a.workerBusyForTest());
+        assertEquals(0, zip.size());
+    }
+
     private static void waitWorker(LauncherActivity a) throws Exception {
         for (int i = 0; i < 200 && a.workerBusyForTest(); i++) {
             Thread.sleep(20);
