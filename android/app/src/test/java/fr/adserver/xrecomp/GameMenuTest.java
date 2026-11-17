@@ -81,6 +81,7 @@ public class GameMenuTest {
         @Override public void shareLog() { shareLogs++; }
         @Override public void backToLauncher() { launchers++; }
         @Override public void quit() { quits++; }
+        int quitsAtLastSave = -1;   // AND-1: how many quits had run when the last state was saved
         /** The pictures sent live, and the « Restart to apply » restarts. */
         final List<ConsoleVideo.Picture> pictures = new ArrayList<>();
         int restarts;
@@ -117,7 +118,7 @@ public class GameMenuTest {
         @Override public boolean resumeNeedsPrepare() { return needsPrepare; }
         @Override public long stateTime(int slot) { return times[slot]; }
         @Override public int[] stateThumb(int slot) { return thumbs[slot]; }
-        @Override public int saveState(int slot) { saved.add(slot); return saveCode; }
+        @Override public int saveState(int slot) { saved.add(slot); quitsAtLastSave = quits; return saveCode; }
         @Override public int loadState(int slot) { loaded.add(slot); return loadCode; }
         @Override public boolean fastForward() { return ff; }
         @Override public void setFastForward(boolean on) { ff = on; }
@@ -1284,6 +1285,17 @@ public class GameMenuTest {
         menu.row(GameMenu.Item.QUIT).performClick();
         assertEquals(1, host.quits);
         assertEquals(List.of(GameMenu.AUTO_SLOT, GameMenu.AUTO_SLOT), host.saved);
+    }
+
+    /** AND-1: the bottom screen's held Quit (GameMenu.quitNow) saves the automatic slot before the process ends. */
+    @Test
+    public void panelQuitSavesTheAutomaticSlotFirst() {
+        statesGame();
+        menu.quitNow();
+        assertEquals(1, host.quits);
+        assertEquals(1, host.overlayReleases);
+        assertEquals(List.of(GameMenu.AUTO_SLOT), host.saved);
+        assertEquals("saved before the quit", 0, host.quitsAtLastSave);
     }
 
     @Test

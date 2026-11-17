@@ -27,7 +27,4 @@ final class CompanionNative {
 
     /** The last frame as a 24-bit BMP (xbox_FramebufferDumpBmp); false when there is no frame or it failed. */
     static native boolean nativeScreenshot(String path);
-
-    /** Ends the game as Back twice does: recomp_quit(0) (flush, drain logcat, _exit). Does not return. */
-    static native void nativeQuit();
 }

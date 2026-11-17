@@ -3127,7 +3127,8 @@ The buttons reach the pad through the touch overlay (`src/input/input_overlay.c`
 into port 0 (`xbox_InputMap_PadMerge`, after the keyboard), and with no gamepad attached it stands in for one
 (success on port 0 while the panel is up). Each change bumps the packet number. JNI:
 `android/app/src/main/cpp/companion_jni.c` (`CompanionNative`: `nativeOverlay`, `nativeOverlayOff`, `nativeStats`,
-`nativeScreenshot`, `nativeQuit`). Test: `tests/input_overlay` (Linux, fake SDL: merge over a pad, release, no pad,
+`nativeScreenshot`; the panel's held Quit goes through `GameMenu.quitNow`, as the menu's Quit: automatic slot, then
+`MenuNative.nativeQuit`). Test: `tests/input_overlay` (Linux, fake SDL: merge over a pad, release, no pad,
 keyboard stand-in, a concurrent writer).
 
 ### Focus: Plan A and Plan B

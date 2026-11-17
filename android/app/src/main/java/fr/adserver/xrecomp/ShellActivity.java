@@ -1006,15 +1006,10 @@ public class ShellActivity extends SDLActivity {
                 break;
             case CompanionPanel.QUIT:
                 Log.i(LauncherActivity.TAG, "shell: companion: quit (held)");
-                overlayOff();
-                playOnScreen(false);
-                if (gameApp())
-                    finishAndRemoveTask();
-                try {
-                    CompanionNative.nativeQuit();
-                } catch (UnsatisfiedLinkError e) {
-                    finish();
-                }
+                if (menu != null)
+                    menu.quitNow();         // the automatic slot first, as the menu's Quit (AND-1)
+                else
+                    new MenuHost().quit();
                 break;
             case CompanionPanel.SCREENSHOT:
                 screenshot();

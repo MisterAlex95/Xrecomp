@@ -1695,13 +1695,22 @@ final class GameMenu {
         host.backToLauncher();
     }
 
+    /**
+     * Quits the game the way every quit must: the panel's buttons let go, the automatic slot saved when resuming
+     * applies (the process ends in host.quit, so onStop's save never runs), then the native quit. The menu's confirmed
+     * Quit and the bottom screen's held Quit both come here.
+     */
+    void quitNow() {
+        host.releaseOverlay();
+        autoSave("quit");
+        host.quit();
+    }
+
     private void quitPressed() {
         long now = clock.getAsLong();
         if (quitArmedAt >= 0 && now - quitArmedAt <= QUIT_ARM_MS) {
             Log.i(LauncherActivity.TAG, "shell: menu: quit (confirmed)");
-            host.releaseOverlay();
-            autoSave("quit");
-            host.quit();
+            quitNow();
             return;
         }
         quitArmedAt = now;

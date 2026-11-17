@@ -1,8 +1,9 @@
 /* The companion panel's JNI (fr.adserver.xrecomp.CompanionNative, docs/android/app-shell.md « Dual screen »):
  * the touch overlay pad (src/input/input_overlay.h for an Xbox game, and the same pad as host_pad's overlay for the
  * GBA, PS1 and N64 runtimes, which read it through console_pad_read), the window's frame stats, a screenshot of the
- * last frame (both from the Xbox presenter, or from host_window while a GBA / PS1 / N64 game has it open, XBA-181),
- * and quit. Called on the UI thread (the overlay, quit) or a worker thread (the screenshot). */
+ * last frame (both from the Xbox presenter, or from host_window while a GBA / PS1 / N64 game has it open, XBA-181).
+ * The panel's Quit goes through GameMenu.quitNow and MenuNative.nativeQuit (automatic slot, holds lifted, sync).
+ * Called on the UI thread (the overlay) or a worker thread (the screenshot). */
 #include <jni.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,7 +12,6 @@
 #include "host_pad.h"
 #include "host_window.h"
 #include "input_overlay.h"
-#include "platform/recomp_quit.h"
 #include "video/video_player.h"
 
 #define JNI_FN(name) Java_fr_adserver_xrecomp_CompanionNative_##name
@@ -159,11 +159,4 @@ JNIEXPORT jboolean JNICALL JNI_FN(nativeScreenshot)(JNIEnv *env, jclass cls, jst
     rc = host_window_stats(NULL, NULL) ? host_window_screenshot_bmp(p) : xbox_FramebufferDumpBmp(p);
     (*env)->ReleaseStringUTFChars(env, path, p);
     return rc == 0 ? JNI_TRUE : JNI_FALSE;
-}
-
-JNIEXPORT void JNICALL JNI_FN(nativeQuit)(JNIEnv *env, jclass cls)
-{
-    (void)env;
-    (void)cls;
-    recomp_quit(0);
 }
