@@ -18,7 +18,7 @@ final class AppStore: LauncherActions {
     private var paths: AppPaths
     private var toolkit: Toolkit?
     private var python: URL?
-    private var queue: [String] = []
+    private var queue = PrepareQueue()
     private var preparing: (id: String, runner: PrepareRunner)?
     private var game: (id: String, runner: GameRunner)?
     private var ticker: Timer?
@@ -293,7 +293,8 @@ final class AppStore: LauncherActions {
             }
         }
         if preparing != nil {
-            if !queue.contains(id) && preparing?.id != id { queue.append(id) }
+            // Queued with its own --force: a Re-prepare… asked while another title prepares stays a full rebuild.
+            if preparing?.id != id { queue.enqueue(id, force: force) }
             updateQueuePositions()
             return
         }
@@ -370,16 +371,15 @@ final class AppStore: LauncherActions {
     }
 
     private func nextInQueue() {
-        guard preparing == nil, !queue.isEmpty else { return updateQueuePositions() }
-        let id = queue.removeFirst()
+        guard preparing == nil, let next = queue.next() else { return updateQueuePositions() }
         updateQueuePositions()
-        startPrepare(id, force: false)
+        startPrepare(next.id, force: next.force)
     }
 
     private func updateQueuePositions() {
         for g in model.games {
-            if let i = queue.firstIndex(of: g.id) {
-                model.update(g.id) { $0.prepare = .queued(position: i + 1) }
+            if let position = queue.position(of: g.id) {
+                model.update(g.id) { $0.prepare = .queued(position: position) }
             } else if case .queued? = g.prepare {
                 model.update(g.id) { $0.prepare = nil }
             }
@@ -387,8 +387,7 @@ final class AppStore: LauncherActions {
     }
 
     func cancelPrepare(_ id: String) {
-        if let i = queue.firstIndex(of: id) {
-            queue.remove(at: i)
+        if queue.remove(id) {
             updateQueuePositions()
             return
         }
