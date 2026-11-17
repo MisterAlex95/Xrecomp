@@ -247,7 +247,8 @@ def format_record(mid, base, bss, h, co=()):
 # ---- building (tests) ----
 
 def build(rel_id, sections, imports, prolog=None, epilog=None, unresolved=None, bss_size=0, version=3):
-    """A REL file: sections [(bytes or None for bss, exec)], section 0 left empty as the SDK does; imports
+    """A REL file: sections [(bytes, b"" for an empty one, or None for the bss; exec)], section 0 left empty as the
+    SDK does; imports
     {module id: [(section, offset, type, target section, addend)]} with offsets inside that section; prolog / epilog /
     unresolved (section, offset)."""
     hdr = {1: 0x40, 2: 0x48, 3: 0x4C}[version]
@@ -262,6 +263,9 @@ def build(rel_id, sections, imports, prolog=None, epilog=None, unresolved=None, 
         if data is None:
             table.append((0, bss_size))
             bss_index = k
+            continue
+        if not data:
+            table.append((0, 0))
             continue
         while len(body) % 32:
             body.append(0)

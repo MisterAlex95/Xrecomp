@@ -4,7 +4,7 @@
 # Each program directory gives <prog>.dol (elf2dol: what the runtime loads) and <prog>.elf (symbols, for debugging
 # only).
 
-PROGS := hello padtest cardtest asnd gxtri gxtex gxtev gxcopy gxind gxfog
+PROGS := hello padtest cardtest asnd gxtri gxtex gxtev gxcopy gxind gxfog relload
 # Programs with data made at build time: <prog>/mktex.py OUTDIR writes OUTDIR/textures.c / .h (gxtex: our pictures
 # through gxtexconv, XBA-262).
 GEN_PROGS := gxtex
@@ -24,7 +24,17 @@ LDFLAGS := $(MACHDEP) -g -L$(LIBOGC)/lib/cube
 LIBS := -logc -lm
 asnd_LIBS := -lasnd   # libogc's ASND (XBA-263), ahead of -logc
 
-all: $(addprefix $(OUT)/,$(addsuffix .dol,$(PROGS)))
+# REL modules (XBA-264): relload/mod/<m>.c compiled as a relocatable object, $(OUT)/relload_mod<m>.elf, which
+# gc_tools.elf2rel turns into a REL against relload.elf's symbols (consoles/gc/tests/run_relload.py). No small data
+# (r2 / r13 are the DOL's), no unwind tables.
+REL_MODS := a b
+MOD_CFLAGS := $(MACHDEP) -O2 -Wall -Wextra -Werror -std=gnu11 -G0 -msdata=none -fno-common \
+              -fno-asynchronous-unwind-tables -fno-exceptions -fno-builtin
+
+all: $(addprefix $(OUT)/,$(addsuffix .dol,$(PROGS))) $(foreach m,$(REL_MODS),$(OUT)/relload_mod$(m).elf)
+
+$(OUT)/relload_mod%.elf: relload/mod/%.c | $(OUT)
+	$(CC) $(MOD_CFLAGS) -c -o $@ $<
 
 define prog_rules
 $(1)_OBJS := $$(patsubst %.c,$(BUILD)/%.o,$$(wildcard $(1)/*.c))

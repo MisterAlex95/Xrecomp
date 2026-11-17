@@ -71,6 +71,13 @@ if(TARGET gc_run)
                 ${CMAKE_CURRENT_BINARY_DIR}/hello_rc rc ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png)
     set_tests_properties(gc_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     set_tests_properties(gc_rc_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+    # gc_relload (XBA-264): our homebrew links REL modules at run time (homebrew/relload: a small OSLink; the modules
+    # made by gc_tools.elf2rel, put on a GCM); the runtime records them, gc_tools.recomp lifts them at their load
+    # address (two modules at one address), the pack runs them natively with the same results (run_relload.py).
+    add_test(NAME gc_relload
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_relload.py $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}
+                ${CMAKE_CURRENT_BINARY_DIR}/relload)
+    set_tests_properties(gc_relload PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
     # GX (XBA-262): one test per program, gx_ref/<prog>.png the expected XFB; variants: the ubershader alone must
     # give the same pictures (gxtev, gxtex), 2x internal resolution (gxtri, its own reference), EFB copies encoded
     # into RAM too (gxcopy: the program checks the bytes), the per-title shader list written then compiled ahead.
