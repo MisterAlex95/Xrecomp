@@ -674,3 +674,91 @@ def thread_wrapper_title(al=16, fill=0xCC):
     d.label("ptd").pad(32, 0)
     t._layout()
     return t
+
+
+NORETURN_INT3_IMPORTS = (258,)          # PsTerminateSystemThread
+
+
+def noreturn_int3_title(al=16, fill=0xCC):
+    """A title whose functions end in a call to a routine that never returns
+    but reads as one that does (exit, _CxxThrowException, the library's
+    ExitThread): no CFG proves them noreturn, their callers do -- MSVC emits
+    nothing after such a call, so when it is the last instruction of a
+    function the alignment int3 sits right behind it. Without that rule the
+    body runs on over the int3 and swallows the function after it, whose
+    address is then an immediate inside a body, no evidence to any pass:
+
+      quit         push 1; call do_exit; int3, padding, then T_after_exit
+      fail         call throw_fn; int3, nop padding, then T_getter
+      end_thread   push [esp+4]; call exit_thread; int3 -- one int3, no
+                   padding -- then T_crt (the CRT packs its functions)
+
+    and the bodies that must not be cut, where the same calls go on:
+
+      keep_going   jz over the call and its int3: the code after is the body's
+      trapped      jz onto the int3 itself: a trap, not padding
+      after_code   call throw_fn followed by code, no int3
+
+    T_ labels are reached only through an immediate (register_cbs)."""
+    t = Title()
+    x = t.section(".text")
+    d = t.section(".data", DATA)
+    a = lambda: x.align(al, fill)
+
+    x.label("entry").hex("558bec")
+    for f in ("register_cbs", "quit", "fail", "end_thread", "keep_going",
+              "trapped", "after_code"):
+        x.call(f)
+    x.hex("ebfe")
+    a()
+    # The routines are callbacks: their addresses stored, never called.
+    x.label("register_cbs").hex("c705").abs("cbs").abs("T_after_exit")
+    x.hex("c705").abs("cbs", 4).abs("T_getter")
+    x.push("T_crt").hex("8f05").abs("cbs", 8).hex("c3")
+    a()
+    # exit(): returns as far as its body tells.
+    x.label("do_exit").hex("6a00 6a00").call("doexit_impl").hex("59 59 c3")
+    a()
+    x.label("doexit_impl").hex("33c0 c3")
+    a()
+    # _CxxThrowException: an ebp frame, a call, leave; ret 8.
+    x.label("throw_fn").hex("558bec 83ec20 8b4508 50").call("doexit_impl").hex("c9 c20800")
+    a()
+    # ExitThread: the kernel call that never returns.
+    x.label("exit_thread").hex("6a00").call("doexit_impl").hex("ff742404")
+    x.call_kernel(0).hex("cc")
+    a()
+    x.label("helper").hex("8b442404 c3")
+    a()
+    x.label("quit").hex("6a01").call("do_exit")
+    x.label("quit_end").hex("cc")
+    a()
+    x.label("T_after_exit").hex("8b442404 50").call("helper").hex("83c404 c3")
+    a()
+    x.label("fail").hex("8b442420").push("cbs").hex("8d4c2424 51 89442428").call("throw_fn")
+    x.label("fail_end").hex("cc 90 90 90")
+    x.align(al, 0x90)
+    x.label("T_getter").hex("b8").abs("cbs").hex("c3")
+    a()
+    x.label("end_thread").hex("ff742404").call("exit_thread")
+    x.label("end_thread_end").hex("cc")
+    x.label("T_crt").hex("6a0c").push("cbs").call("helper").hex("83c408 c3")
+    a()
+    x.label("keep_going").hex("8b442404 85c0 74").rel8("K_ok").hex("6a00 6a00").call("throw_fn")
+    x.hex("cc")
+    x.label("K_ok").hex("33c0 40 c3")
+    x.label("keep_going_end")
+    a()
+    x.label("trapped").hex("8b442404 85c0 74").rel8("TR_trap").hex("6a00 6a00").call("throw_fn")
+    x.label("TR_trap").hex("cc")
+    x.label("TR_rest").hex("b801000000 c3")
+    x.label("trapped_end")
+    a()
+    x.label("after_code").hex("6a00 6a00").call("throw_fn")
+    x.label("AC_rest").hex("b802000000 c3")
+    x.label("after_code_end")
+    a()
+    x.label("last").hex("c3")
+    d.label("cbs").pad(32, 0)
+    t._layout()
+    return t
