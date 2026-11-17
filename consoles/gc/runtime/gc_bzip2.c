@@ -3,6 +3,7 @@
  * RUNA / RUNB zero runs, the Burrows-Wheeler transform undone, the initial run-length step undone), the end-of-stream
  * magic 0x177245385090 and the combined CRC. Every block's CRC is checked. Randomised blocks (an obsolete encoder
  * option) are refused. One stream, decoded whole into a buffer of known size. */
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,17 +30,23 @@ static uint32_t get(bits *b, unsigned k)
 }
 
 static uint32_t crc_table[256];
+static pthread_once_t crc_once = PTHREAD_ONCE_INIT;
 
-static void crc_init(void)
+/* Once per process (pthread_once): the emulation thread's DVD reads and an extraction may decode at the same time,
+ * and a table filled by one while the other already reads it would give that one wrong CRCs. */
+static void crc_fill(void)
 {
-    if (crc_table[1])
-        return;
     for (uint32_t i = 0; i < 256; i++) {
         uint32_t c = i << 24;
         for (int k = 0; k < 8; k++)
             c = (c & 0x80000000u) ? c << 1 ^ 0x04C11DB7u : c << 1;
         crc_table[i] = c;
     }
+}
+
+static void crc_init(void)
+{
+    pthread_once(&crc_once, crc_fill);
 }
 
 #define MAX_ALPHA 258

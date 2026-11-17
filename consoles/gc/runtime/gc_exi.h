@@ -70,6 +70,9 @@ void gc_exi_sram(const gc_machine *m, uint8_t out[64]);
 size_t gc_exi_state_size(void);
 size_t gc_exi_state_save(const gc_machine *m, uint8_t *out, size_t cap);
 int gc_exi_state_load(gc_machine *m, const uint8_t *in, size_t n);
+/* What gc_exi_state_load checks before it changes anything (size, magic): 0, or -1. gc_state_check calls it, so a
+ * damaged EXI section refuses the whole state instead of failing half way through a load. */
+int gc_exi_state_check(const uint8_t *in, size_t n);
 
 #ifdef __cplusplus
 }

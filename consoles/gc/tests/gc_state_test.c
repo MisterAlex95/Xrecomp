@@ -124,6 +124,7 @@ static void test_round_trip(void)
     m->gx->creg[1][2] = -300;
     m->gx->cmd_len = 3;
     memcpy(m->gx->cmd, "\x61\x41\x00", 3);
+    m->gx->vsize[2] = (uint16_t)(gx_vertex_size(m->gx, 2) + 1); /* a size known for VAT 2, as after a draw */
     gc_cpu cpu = m->h.cpu;
     uint64_t now = m->h.now, frames = gc_frames(m);
     size_t n;
@@ -162,11 +163,26 @@ static void test_round_trip(void)
     CHECK(m->gx->tmem[0x80000] == 0x5A && m->gx->tmem[0x90000] == 0, "TMEM");
     CHECK(m->gx->cmd_len == 3 && !memcmp(m->gx->cmd, "\x61\x41\x00", 3), "GX staging bytes");
     CHECK(m->gx->tex_epoch != epoch, "the texture cache is checked again");
+    CHECK(m->gx->vsize[2] == gx_vertex_size(m->gx, 2) + 1 && m->gx->vsize[3] == 0, "vertex sizes %u %u",
+          m->gx->vsize[2], m->gx->vsize[3]);
     /* The same state again, byte for byte */
     size_t n2;
     uint8_t *b2 = save(m, "DOL-12345678", &n2);
     CHECK(n2 == n && !memcmp(b, b2, n), "a loaded state saves the same bytes");
     free(b2);
+    /* The GX caches derived from registers are derived again on a load, never taken from the state: a vertex size
+     * that disagrees with the CP registers bounded draws wrongly (the loader reads by the registers), a display
+     * list depth left set turned display lists off. */
+    size_t gx_at = find(b, n, "GX  ");
+    CHECK(gx_at != 0, "GX section");
+    m->gx->vsize[2] = 0x7777;
+    m->gx->dl_depth = 1;
+    size_t n3;
+    uint8_t *b3 = save(m, "DOL-12345678", &n3);
+    CHECK(gc_state_load(m, "DOL-12345678", b3, n3, why, sizeof why) == GC_STATE_OK, "load: %s", why);
+    CHECK(m->gx->vsize[2] == gx_vertex_size(m->gx, 2) + 1, "a stale vertex size %u kept", m->gx->vsize[2]);
+    CHECK(m->gx->dl_depth == 0, "display list depth %d kept", m->gx->dl_depth);
+    free(b3);
     /* And it runs on as before */
     CHECK(gc_run_frame(m) == 0, "a field after the load: %s", gc_error(m));
     CHECK(gc_peek32(m, 0x80004000u) > count, "the program counts on");
@@ -259,6 +275,22 @@ static void test_refused(void)
 
     /* The EXI and DSP hooks are there (empty until their devices fill them) */
     CHECK(find(b, n, "EXI ") && find(b, n, "DSP "), "EXI / DSP sections");
+
+    /* A damaged EXI blob (its magic): refused by the check, before CPU / MEM1 / GX are written. It used to pass the
+     * check, stop the machine half loaded ("section EXI did not load") with MEM1 already the state's. */
+    size_t exi = find(b, n, "EXI ");
+    if (exi && get32(b + exi + 8) >= 4) {
+        memcpy(c, b, n);
+        c[exi + 12] ^= 0xFF;
+        gc_run_frame(m);
+        uint32_t before = gc_peek32(m, 0x80004000u);
+        CHECK(gc_state_check(m, NULL, c, n, why, sizeof why) == GC_STATE_ECORRUPT, "damaged EXI passes the check");
+        CHECK(gc_state_load(m, NULL, c, n, why, sizeof why) == GC_STATE_ECORRUPT, "damaged EXI loads");
+        CHECK(strstr(why, "EXI") != NULL, "why: %s", why);
+        CHECK(gc_peek32(m, 0x80004000u) == before && !gc_error(m), "a refused EXI section changed the machine");
+    } else {
+        CHECK(0, "no EXI blob in the state");
+    }
     free(b);
     free(c);
     gc_destroy(m);

@@ -20,8 +20,10 @@
 
 enum { A_NONE = 0, A_DIRECT = 1, A_IDX8 = 2, A_IDX16 = 3 };
 
-static const unsigned comp_size[8] = {1, 1, 2, 2, 4, 0, 0, 0};
-static const unsigned color_size[8] = {2, 3, 4, 2, 3, 4, 0, 0};
+/* The reserved formats (components 5-7, colours 6-7) count as read_comp / read_color read them, as float and
+ * RGBA8888: sized 0, the stream did not move while 4 bytes were read, up to past the end of a command or MEM1. */
+static const unsigned comp_size[8] = {1, 1, 2, 2, 4, 4, 4, 4};
+static const unsigned color_size[8] = {2, 3, 4, 2, 3, 4, 4, 4};
 
 typedef struct vfmt {
     uint32_t vcd_lo, vcd_hi, a, b, c;

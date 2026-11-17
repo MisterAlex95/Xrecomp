@@ -524,11 +524,11 @@ uint32_t gc_disc_dol_size(gc_disc *d)
     uint8_t b[0x100];
     if (gc_disc_header_read(d, &h) || gc_disc_read(d, h.dol_off, b, sizeof b))
         return 0;
-    uint32_t end = 0x100;
+    uint64_t end = 0x100; /* 64-bit: a section at 0xFFFFFF00 + 0x200 must not wrap to a short DOL */
     for (int i = 0; i < 18; i++) {
-        uint32_t off = gc_be32(b + 4 * i), len = gc_be32(b + 0x90 + 4 * i);
+        uint64_t off = gc_be32(b + 4 * i), len = gc_be32(b + 0x90 + 4 * i);
         if (len && off + len > end)
             end = off + len;
     }
-    return end;
+    return end > UINT32_MAX ? 0 : (uint32_t)end;
 }

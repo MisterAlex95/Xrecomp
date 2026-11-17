@@ -320,12 +320,20 @@ static int write_file_atomic(const char *path, const uint8_t *data, size_t n)
     FILE *f = fopen(tmp, "wb");
     if (!f)
         return -1;
-    int ok = fwrite(data, 1, n, f) == n;
-    ok &= fflush(f) == 0;
-    ok &= fsync(fileno(f)) == 0;
-    ok &= fclose(f) == 0;
-    if (!ok || rename(tmp, path) != 0) {
+    int ok = 1, err = 0;
+#define STEP(x) do { if (ok && !(x)) { ok = 0; err = errno; } } while (0)
+    STEP(fwrite(data, 1, n, f) == n);
+    STEP(fflush(f) == 0);
+    STEP(fsync(fileno(f)) == 0);
+    if (fclose(f) != 0 && ok) {
+        ok = 0;
+        err = errno;
+    }
+    STEP(rename(tmp, path) == 0);
+#undef STEP
+    if (!ok) {
         unlink(tmp);
+        errno = err; /* the step's reason, not unlink's */
         return -1;
     }
     return 0;
@@ -343,6 +351,9 @@ static void cards_flush_locked(const char *why)
         if (write_file_atomic(s_card_path[slot], d, n) != 0) {
             fprintf(stderr, "gc: cannot write memory card %c to %s: %s\n", 'A' + slot, s_card_path[slot],
                     strerror(errno));
+            /* tried again CARD_FLUSH_NS from now (or at the next pause / exit), not after every field: a full or
+             * read-only folder made it write the whole card, sync and log 60 times a second */
+            s_card_changed_ns[slot] = now_ns();
             continue;
         }
         s_card_flushed[slot] = s_card_seen[slot] = w;
@@ -844,7 +855,8 @@ started:;
             field_ns = gc_field_ns(m);
             int r = gc_run_frame(m);
             if (!r) {
-                if (cheats.n)
+                /* not "cheats.n": a list emptied in the app must still take its C2 hooks out of the code */
+                if (recomp_cheats_pending(&cheats))
                     recomp_cheats_apply(&cheats, &cheat_bus);
                 recomp_rewinder_frame(&rw, rewind_size, rewind_save, m);
             }
@@ -867,7 +879,15 @@ started:;
             /* Sound: what the field played (800 frames at 60 Hz); averaged down while fast-forwarding. */
             uint64_t ta = now_ns();
             size_t got;
-            while ((got = gc_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2)) > 0) {
+            /* Pulled under s_mu: a state loaded from the menu's thread resets the output ring (sec_dsp), and a
+             * reset between the pull's test of the count and its decrement wrapped the count to 4 billion frames.
+             * Queued to the host outside it. */
+            for (;;) {
+                pthread_mutex_lock(&s_mu);
+                got = gc_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2);
+                pthread_mutex_unlock(&s_mu);
+                if (!got)
+                    break;
                 if (wav)
                     wav_frames += wav_write_frames(wav, pcm, got);
                 for (size_t i = 0; i < 2 * got && !heard; i++)

@@ -288,7 +288,7 @@ static void put_buf(gc_machine *m, uint32_t addr, const int32_t *b)
 static void add_buf(gc_machine *m, uint32_t addr, int32_t *b)
 {
     for (int i = 0; i < GC_AX_SAMPLES; i++)
-        b[i] += (int32_t)dsp_rd32(m, addr + 4u * (uint32_t)i);
+        b[i] = (int32_t)((uint32_t)b[i] + dsp_rd32(m, addr + 4u * (uint32_t)i)); /* guest words: wraps, no UB */
 }
 
 static void cmd_setup(gc_machine *m, gc_ax *ax, uint32_t addr)
@@ -297,7 +297,7 @@ static void cmd_setup(gc_machine *m, gc_ax *ax, uint32_t addr)
         int32_t v = (int32_t)dsp_rd32(m, addr + 6u * (uint32_t)b);
         int16_t d = (int16_t)dsp_rd16(m, addr + 6u * (uint32_t)b + 4);
         for (int i = 0; i < GC_AX_SAMPLES; i++)
-            ax->buf[b][i] = v ? v + i * d : 0;
+            ax->buf[b][i] = v ? (int32_t)((uint32_t)v + (uint32_t)(i * d)) : 0; /* guest values: wraps, no UB */
     }
 }
 
@@ -307,7 +307,7 @@ static void cmd_dl_vol_mix(gc_machine *m, gc_ax *ax, uint32_t addr, const uint16
         for (int c = 0; c < 3; c++)
             for (int i = 0; i < GC_AX_SAMPLES; i++) {
                 int64_t s = (int32_t)dsp_rd32(m, addr + 4u * (uint32_t)(c * GC_AX_SAMPLES + i));
-                ax->buf[3 * g + c][i] += (int32_t)((s * vol[g]) >> 15);
+                ax->buf[3 * g + c][i] = (int32_t)((uint32_t)ax->buf[3 * g + c][i] + (uint32_t)((s * vol[g]) >> 15));
             }
 }
 

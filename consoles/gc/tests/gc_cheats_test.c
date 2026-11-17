@@ -111,7 +111,18 @@ static void test_synthetic(void)
     gc_run_frame(m);
     uint32_t r1 = gc_peek32(m, 0x80004000u);
     CHECK(r1 > r0 && (r1 - r0) % 5 == 0, "hooked counter %u -> %u (want steps of 5)", r0, r1);
-    /* turned off: the add comes back */
+    /* the list emptied (the app's file reloaded with no cheat): the runtime still applies once, the hook goes */
+    recomp_cheats_parse_text(&S, "");
+    CHECK(S.n == 0 && recomp_cheats_pending(&S), "an emptied list with a hook in place is not pending");
+    if (recomp_cheats_pending(&S))
+        recomp_cheats_apply(&S, &b);
+    CHECK(gc_peek32(m, 0x80003104u) == 0x38630001u, "hook left after the list emptied: %08X",
+          gc_peek32(m, 0x80003104u));
+    CHECK(!recomp_cheats_pending(&S), "still pending after the hook went");
+    /* back on, then turned off: the add comes back */
+    set_cheats("[add 5]\nenabled=1\nC2003104 00000001\n38630005 00000000\n");
+    recomp_cheats_apply(&S, &b);
+    CHECK((gc_peek32(m, 0x80003104u) & 0xFC000003u) == 0x48000000u, "hook back: %08X", gc_peek32(m, 0x80003104u));
     S.list[0].enabled = 0;
     recomp_cheats_apply(&S, &b);
     CHECK(gc_peek32(m, 0x80003104u) == 0x38630001u, "instruction put back: %08X", gc_peek32(m, 0x80003104u));
@@ -126,6 +137,54 @@ static void test_synthetic(void)
     field(m, &b);
     CHECK(gc_peek32(m, 0x80005000u) == 0x1234u, "AR conditional write %08X", gc_peek32(m, 0x80005000u));
     CHECK(gc_peek32(m, 0x80005010u) == 0xBEEFBEEFu, "AR fill %08X", gc_peek32(m, 0x80005010u));
+    recomp_cheats_free(&S);
+    gc_destroy(m);
+}
+
+/* A bus that counts the writes it is asked for (the Gecko write budget). */
+static size_t s_writes;
+static void wr_count(void *m, uint32_t a, uint32_t v)
+{
+    s_writes++;
+    gc_cheat_write32(m, a, v);
+}
+
+/* Malformed and runaway Gecko codes: the engine stays inside the cheat's lines and inside its write budget. */
+static void test_gecko_bounds(void)
+{
+    static uint8_t dol[0x100 + 32];
+    memset(dol, 0, sizeof dol);
+    be32(dol + 0x00, 0x100);
+    be32(dol + 0x48, 0x80003100u);
+    be32(dol + 0x90, 32);
+    be32(dol + 0xE0, 0x80003100u);
+    be32(dol + 0x100, 0x48000000u); /* b . */
+    char why[160];
+    gc_machine *m = gc_create(dol, sizeof dol, why, sizeof why);
+    if (!m) {
+        printf("FAIL gc_create: %s\n", why);
+        failures++;
+        return;
+    }
+    recomp_cheat_bus b = {m, NULL, NULL, rd, wr, 1, NULL, 0, NULL};
+    /* A goto (66, always) over the F0 that ends the checked lines, onto a 06 whose length (0xFFFFFFF0 bytes) was
+     * never checked: it read up to 2^29 lines past the cheat. Nothing may be written, nothing read past the end. */
+    set_cheats("[jump]\nenabled=1\nformat=gecko\n66000001 00000000\nF0000000 00000000\n06006000 FFFFFFF0\n");
+    recomp_cheats_apply(&S, &b);
+    CHECK(gc_peek32(m, 0x80006000u) == 0, "a 06 past the F0 wrote %08X", gc_peek32(m, 0x80006000u));
+    /* The same onto an 08 (two lines) on the last line */
+    set_cheats("[jump08]\nenabled=1\nformat=gecko\n66000001 00000000\nF0000000 00000000\n08006000 12345678\n");
+    recomp_cheats_apply(&S, &b);
+    CHECK(gc_peek32(m, 0x80006000u) == 0, "an 08 on the last line wrote %08X", gc_peek32(m, 0x80006000u));
+    /* A 16-bit fill of 65536 halfwords repeated 65536 times (60 / 62): billions of writes in one frame before the
+     * budget; now at most 65536 a frame (each one a read-modify-write of a word on this bus). */
+    set_cheats("[runaway]\nenabled=1\nformat=gecko\n6000FFFF 00000000\n02100000 FFFF0001\n62000000 00000000\n");
+    b.write32 = wr_count;
+    s_writes = 0;
+    recomp_cheats_apply(&S, &b);
+    CHECK(s_writes > 0 && s_writes <= 2 * 65536, "runaway fill: %zu bus writes in a frame", s_writes);
+    CHECK((gc_peek32(m, 0x80100000u) & 0xFFFF) == 0x0001, "the fill wrote while within its budget: %08X",
+          gc_peek32(m, 0x80100000u));
     recomp_cheats_free(&S);
     gc_destroy(m);
 }
@@ -196,8 +255,10 @@ int main(int argc, char **argv)
     int rc = 0;
     if (argc > 1)
         rc = test_padtest(argv[1]);
-    else
+    else {
         test_synthetic();
+        test_gecko_bounds();
+    }
     if (rc == 77)
         return 77;
     if (failures) {

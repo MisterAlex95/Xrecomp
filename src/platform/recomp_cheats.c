@@ -1572,6 +1572,7 @@ typedef struct gecko_ctx {
     uint32_t hook_at;          /* where this cheat's C2 code goes in the hook area */
     recomp_cheat_hook *want;   /* the hooks wanted after this frame */
     size_t *nwant;
+    size_t budget;             /* data writes left for this cheat this frame (as run()'s for AR codes) */
 } gecko_ctx;
 
 static uint32_t gk_read(const recomp_cheat_bus *b, uint32_t addr, int size)
@@ -1585,6 +1586,17 @@ static void gk_write(const recomp_cheat_bus *b, uint32_t addr, uint32_t v, int s
 {
     if (ptr_ok(RECOMP_CHEAT_GC, addr) && ptr_ok(RECOMP_CHEAT_GC, addr + (uint32_t)size - 1))
         bus_write(b, addr, v, size);
+}
+
+/* A data write counted against the cheat's budget: a 65536-byte fill or copy repeated by a 60 / 62 block (each step
+ * of GECKO_STEPS can write 65536 times) would otherwise make billions of writes in one frame. The C2 / C6 hook writes
+ * are not counted: half a hook is worse than none. */
+static void gk_put(gecko_ctx *x, uint32_t addr, uint32_t v, int size)
+{
+    if (!x->budget)
+        return;
+    x->budget--;
+    gk_write(x->b, addr, v, size);
 }
 
 static uint32_t f2u(float f)
@@ -1647,6 +1659,11 @@ static void gecko_run(gecko_ctx *x, const uint32_t *w, uint32_t n)
         uint32_t a = w[2 * i], v = w[2 * i + 1], t = a >> 24;
         const char *why;
         uint32_t len = gecko_len(w + 2 * i, n - i - 1, &why), next = i + (len ? len : 1);
+        /* gecko_finish checked the lines in order up to the first F0; a goto (64 / 66 / 68, a 62 repeat) can land
+         * past it or inside a code's data, where a length was never checked: a 06 there read up to 2^29 lines past
+         * the cheat, an 08 on the last line one line past. The run ends there. */
+        if (len > n - i)
+            break;
         uint32_t base = (t & 0x10) ? po : ba, off = a & 0x01FFFFFFu;
         unsigned T = (a >> 20) & 0xF, Y = (a >> 16) & 0xF, N = a & 0xF;
         if (t < 0x20) { /* writes */
@@ -1654,28 +1671,28 @@ static void gecko_run(gecko_ctx *x, const uint32_t *w, uint32_t n)
                 uint32_t addr = base + off;
                 switch (t & 0x0E) {
                 case 0x00:
-                    for (uint32_t r = 0; r <= (v >> 16); r++)
-                        gk_write(b, addr + r, v & 0xFF, 1);
+                    for (uint32_t r = 0; r <= (v >> 16) && x->budget; r++)
+                        gk_put(x, addr + r, v & 0xFF, 1);
                     break;
                 case 0x02:
-                    for (uint32_t r = 0; r <= (v >> 16); r++)
-                        gk_write(b, addr + 2 * r, v & 0xFFFF, 2);
+                    for (uint32_t r = 0; r <= (v >> 16) && x->budget; r++)
+                        gk_put(x, addr + 2 * r, v & 0xFFFF, 2);
                     break;
                 case 0x04:
-                    gk_write(b, addr, v, 4);
+                    gk_put(x, addr, v, 4);
                     break;
                 case 0x06:
-                    for (uint32_t k = 0; k < v && k / 8 + 1 < len; k++) {
+                    for (uint32_t k = 0; k < v && k / 8 + 1 < len && x->budget; k++) {
                         uint32_t word = w[2 * (i + 1) + k / 4];
-                        gk_write(b, addr + k, (word >> (24 - 8 * (k & 3))) & 0xFF, 1);
+                        gk_put(x, addr + k, (word >> (24 - 8 * (k & 3))) & 0xFF, 1);
                     }
                     break;
                 case 0x08: {
                     uint32_t a2 = w[2 * i + 2], v2 = w[2 * i + 3];
                     int sz = (a2 >> 28) == 0 ? 1 : (a2 >> 28) == 1 ? 2 : 4;
                     uint32_t cnt = ((a2 >> 16) & 0xFFF) + 1, step = a2 & 0xFFFF, val = v;
-                    for (uint32_t r = 0; r < cnt; r++, addr += step, val += v2)
-                        gk_write(b, addr, val, sz);
+                    for (uint32_t r = 0; r < cnt && x->budget; r++, addr += step, val += v2)
+                        gk_put(x, addr, val, sz);
                     break;
                 }
                 }
@@ -1776,7 +1793,7 @@ static void gecko_run(gecko_ctx *x, const uint32_t *w, uint32_t n)
             switch (t & 0x06) {
             case 0x00: *r = (T == 1 ? *r : 0) + gk_read(b, addr, 4); break; /* load */
             case 0x02: *r = (T == 1 ? *r : 0) + addr; break;               /* set */
-            case 0x04: gk_write(b, addr, *r, 4); break;                    /* store */
+            case 0x04: gk_put(x, addr, *r, 4); break;                      /* store */
             }
             break;
         }
@@ -1791,8 +1808,8 @@ static void gecko_run(gecko_ctx *x, const uint32_t *w, uint32_t n)
         case 0x84: case 0x94: { /* store gr, (a >> 4 & 0xFFF) + 1 times */
             int sz = T == 0 ? 1 : T == 1 ? 2 : 4;
             uint32_t addr = v + (Y == 1 ? (t & 0x10 ? po : ba) : 0), cnt = ((a >> 4) & 0xFFF) + 1;
-            for (uint32_t r = 0; r < cnt; r++)
-                gk_write(b, addr + r * (uint32_t)sz, gr[N], sz);
+            for (uint32_t r = 0; r < cnt && x->budget; r++)
+                gk_put(x, addr + r * (uint32_t)sz, gr[N], sz);
             break;
         }
         case 0x86: case 0x88: { /* gr operations: with a value / with grM */
@@ -1806,15 +1823,15 @@ static void gecko_run(gecko_ctx *x, const uint32_t *w, uint32_t n)
         case 0x8A: { /* 8AYYYYNM: copy YYYY bytes from the address in grN to grM's + X (M = F: ba + X) */
             unsigned M = a & 0xF, nn = (a >> 4) & 0xF;
             uint32_t cnt = (a >> 8) & 0xFFFF, src = gr[nn], dst = (M == 0xF ? ba : gr[M]) + v;
-            for (uint32_t k = 0; k < cnt && k < 0x10000; k++)
-                gk_write(b, dst + k, gk_read(b, src + k, 1), 1);
+            for (uint32_t k = 0; k < cnt && k < 0x10000 && x->budget; k++)
+                gk_put(x, dst + k, gk_read(b, src + k, 1), 1);
             break;
         }
         case 0x8C: { /* 8CYYYYNM: copy YYYY bytes from grN's address + X (N = F: ba + X) to grM's */
             unsigned M = a & 0xF, nn = (a >> 4) & 0xF;
             uint32_t cnt = (a >> 8) & 0xFFFF, src = (nn == 0xF ? ba : gr[nn]) + v, dst = gr[M];
-            for (uint32_t k = 0; k < cnt && k < 0x10000; k++)
-                gk_write(b, dst + k, gk_read(b, src + k, 1), 1);
+            for (uint32_t k = 0; k < cnt && k < 0x10000 && x->budget; k++)
+                gk_put(x, dst + k, gk_read(b, src + k, 1), 1);
             break;
         }
         case 0xC2: { /* insert ASM at base + X: the code in the hook area, its last word a branch back */
@@ -1910,6 +1927,7 @@ static void run(recomp_cheats *s, recomp_cheat *c, const recomp_cheat_bus *b, re
         case OP_GECKO:
             if (gk && o->value + (size_t)o->count * 8 <= c->ndata) {
                 uint32_t at = gk->hook_at;
+                gk->budget = 65536;
                 gecko_run(gk, (const uint32_t *)(void *)(c->data + o->value), o->count);
                 gk->hook_at = at + o->astep; /* this cheat's room, used or not */
             }
@@ -1983,13 +2001,18 @@ static uint32_t hook_room(const recomp_cheat *c)
     return n;
 }
 
+int recomp_cheats_pending(const recomp_cheats *s)
+{
+    return s->n || s->nhook || s->npatch;
+}
+
 size_t recomp_cheats_apply(recomp_cheats *s, const recomp_cheat_bus *b)
 {
     recomp_cheat_patch want[RECOMP_CHEAT_PATCHES_MAX];
     size_t nwant = 0;
     recomp_cheat_hook hooks[RECOMP_CHEAT_HOOKS_MAX];
     size_t nhooks = 0;
-    gecko_ctx gk = {s, b, RECOMP_CHEAT_GC_HOOK_LO, hooks, &nhooks};
+    gecko_ctx gk = {s, b, RECOMP_CHEAT_GC_HOOK_LO, hooks, &nhooks, 0};
     for (size_t i = 0; i < s->n; i++) {
         recomp_cheat *c = &s->list[i];
         uint32_t room = s->console == RECOMP_CHEAT_GC ? hook_room(c) : 0, at = gk.hook_at;

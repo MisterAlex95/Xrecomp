@@ -556,14 +556,21 @@ size_t gc_exi_state_save(const gc_machine *m, uint8_t *out, size_t cap)
     return sizeof p;
 }
 
-int gc_exi_state_load(gc_machine *m, const uint8_t *in, size_t n)
+int gc_exi_state_check(const uint8_t *in, size_t n)
 {
     exi_pod p;
     if (n != sizeof p)
         return -1;
     memcpy(&p, in, sizeof p);
-    if (p.magic != STATE_MAGIC || p.size != sizeof p)
+    return p.magic == STATE_MAGIC && p.size == sizeof p ? 0 : -1;
+}
+
+int gc_exi_state_load(gc_machine *m, const uint8_t *in, size_t n)
+{
+    exi_pod p;
+    if (gc_exi_state_check(in, n))
         return -1;
+    memcpy(&p, in, sizeof p);
     struct gc_exi *x = m->exidev;
     memcpy(m->exi, p.regs, sizeof p.regs);
     for (int s = 0; s < 2; s++) {

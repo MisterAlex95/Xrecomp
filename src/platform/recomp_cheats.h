@@ -208,6 +208,9 @@ void recomp_cheat_clear(recomp_cheat *c);
 
 /* Runs the enabled cheats once (after a console frame). Returns the number of GBA cartridge patches in place. */
 size_t recomp_cheats_apply(recomp_cheats *s, const recomp_cheat_bus *bus);
+/* Whether recomp_cheats_apply has anything to do: cheats listed, or GameCube C2 hooks / cartridge patches still in
+ * place (a list emptied by a reload must still take them out, so "s->n == 0: skip" is not enough). */
+int recomp_cheats_pending(const recomp_cheats *s);
 /* Puts back the cartridge bytes the patches replaced (and the instructions GameCube C2 hooks replaced). */
 void recomp_cheats_restore(recomp_cheats *s, const recomp_cheat_bus *bus);
 /* Cheats that are on and compiled. */
