@@ -376,6 +376,16 @@ static void sec_gx(gc_machine *m, io *s)
     io_bytes(s, g->kreg, sizeof g->kreg);
     io_u64(s, &g->field_count);
     io_pages(s, g->tmem, GX_TMEM_SIZE);
+    if (s->load && !s->bad && !s->dry) {
+        /* Derived state is derived again, never trusted: parse() bounds a draw by vsize while the vertex loader
+         * reads by the CP registers, so a vsize that disagrees with them (another build, a damaged file) let the
+         * loader read past the command or display list; and a state is taken between fields, never inside a
+         * display list, so a non-zero depth would only turn display lists off for good. */
+        g->dl_depth = 0;
+        for (unsigned v = 0; v < 8; v++)
+            if (g->vsize[v])
+                g->vsize[v] = (uint16_t)(gx_vertex_size(g, v) + 1);
+    }
 }
 
 static void sec_di(gc_machine *m, io *s)
@@ -462,8 +472,12 @@ static void sec_exi(gc_machine *m, io *s)
 {
     size_t start = s->at;
     io_blob(s, m->exidev ? gc_exi_state_size() : 0, exi_save, m);
-    if (s->load && !s->bad && !s->dry && s->at > start && gc_exi_state_load(m, s->in + start, s->at - start) != 0)
-        s->bad = 1;
+    if (s->load && !s->bad && s->at > start) {
+        /* the dry run checks the blob too: the real load comes after CPU, MEM1, GX..., too late to refuse it */
+        if (s->dry ? gc_exi_state_check(s->in + start, s->at - start) != 0
+                   : gc_exi_state_load(m, s->in + start, s->at - start) != 0)
+            s->bad = 1;
+    }
 }
 
 /* The sound hardware (gc_dsp.c / gc_ai.c and the microcodes' HLE: gc_ax.c, gc_asnd.c, gc_zelda.c, gc_aesnd.c; XBA-263,
