@@ -506,6 +506,28 @@ static RECOMP_TLS int g_is_spawned_thread = 0;
  * ExitThread from PsTerminateSystemThread -- bridge_thread_main's own return
  * path is the rare one. */
 static RECOMP_TLS uint32_t g_thread_stack_top = 0;
+/* The worker's own TIB + TLS + KTHREAD block (xbox_AllocThreadTib), given
+ * back with its stack when it ends (KRN-8); 0 when it is not ours to free. */
+static RECOMP_TLS uint32_t g_thread_tib = 0;
+
+/* KRN-8: each worker's TIB block (0x40 + image TLS + KTHREAD + 0x140 bytes
+ * of guest heap) was never freed, though its stack was: a title that starts
+ * a thread per streamed asset (the dashboard, one per WAV) leaked one block
+ * and one heap-table entry per thread until creates failed with
+ * STATUS_INSUFFICIENT_RESOURCES. Called on both exit paths, after
+ * thobj_exit. Only a worker with a pool object remembers its block: one
+ * without keeps its KTHREAD inside the TIB, and other threads may still
+ * hold that. */
+static void bridge_free_thread_tib(void)
+{
+    uint32_t tib = g_thread_tib;
+    g_thread_tib = 0;
+    if (tib) {
+        if (g_fs_base == tib)
+            g_fs_base = 0;
+        xbox_HeapFree(tib);
+    }
+}
 
 /* Deferred file I/O APCs; see xbox_SetDeferredIoApc and deliver_one_apc.
  *
@@ -849,6 +871,11 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
         if (tib && s->obj_va) {
             uint32_t top = (s->stack_top + 16) & ~0xFu;
             uint32_t tib_kt = BRIDGE_MEM32(tib + 0x28);
+            /* The object is the KTHREAD from here on, so the block is the
+             * thread's alone. (Without a TlsDataSize the object borrows the
+             * block's TlsData: only this thread's code reads it, and not
+             * after the thread has ended.) */
+            g_thread_tib = tib;
             xbox_InitGuestKthread(s->obj_va,
                                   tib_kt ? BRIDGE_MEM32(tib_kt + 0x28) : 0,
                                   top, top - 0x80000u);
@@ -886,6 +913,7 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
     ks_thread_exit();
     thobj_exit(g_thread_obj_va, 0);
     g_thread_obj_va = 0;
+    bridge_free_thread_tib();
     return 0;
 }
 
@@ -1383,11 +1411,39 @@ static void bridge_MmAllocateContiguousMemoryEx(void)
     if (low && high >= low && (high - low + 1) <= size + 0x1000) {
         xbox_va = XBOX_PHYSICAL_MIRROR_BASE + low;
 
+        /* Inside the window, or refused (KRN-15): a low beyond it wrote
+         * outside the mapping, a host fault inside the runtime with no
+         * status for the guest. */
+        if ((uint64_t)low + size > (uint64_t)XBOX_CONTIG_SIZE) {
+            static int said;
+            if (said++ < 8)
+                fprintf(stderr, "  [CONTIG] refused: pinned phys 0x%08X size=%u is outside "
+                                "the %u MB window (caller 0x%08X)\n",
+                        low, size, (unsigned)XBOX_CONTIG_MB, g_xbox_kernel_caller);
+            g_eax = 0;
+            return;
+        }
+
         /* The console hands out zeroed pages here, and titles rely on it:
          * pool headers and free-list roots are assumed clear, so whatever the
          * backing view happened to contain shows up later as structures that
-         * are "allocated" but full of garbage. */
-        memset((void *)((uintptr_t)xbox_va + g_xbox_mem_offset), 0, size);
+         * are "allocated" but full of garbage. Only the pages no block owns
+         * yet: the claim leaves owned pages to their owner, and zeroing them
+         * first wiped a live texture or pushbuffer of the title. (Reading
+         * the map before the claim leaves a window against a concurrent
+         * allocation; zeroing inside the claim, under the arena lock, would
+         * close it.) */
+        {
+            const volatile uint8_t *map = xbox_ContiguousPageMap();
+            uint32_t end = low + size, p;
+            for (p = low & ~0xFFFu; p < end; p += 0x1000u) {
+                uint32_t from = p < low ? low : p;
+                uint32_t to = p + 0x1000u < end ? p + 0x1000u : end;
+                if (!map || !map[p >> 12])
+                    memset((void *)((uintptr_t)(XBOX_PHYSICAL_MIRROR_BASE + from)
+                                    + g_xbox_mem_offset), 0, to - from);
+            }
+        }
         /* Keep the arena from handing the same pages to someone else. */
         xbox_ContiguousClaim(xbox_va, size);
 
@@ -2353,12 +2409,15 @@ static void bridge_NtCreateEvent(void)
 
 static HANDLE ke_shadow_lookup(uint32_t guest_va);
 static void ke_shadow_insert(uint32_t guest_va, HANDLE host);
+static void ke_shadow_note_header(uint32_t guest_va);
 static HANDLE bridge_resolve_handle(uint32_t token);
 static HANDLE ke_guest_event(uint32_t guest_va, int *type);
 static int ke_promote(uint32_t guest_va);
 static void ke_note_set_attempt(uint32_t guest_va);
 static int ke_set_seen(uint32_t guest_va);
 static int ke_is_promoted(uint32_t guest_va);
+static int ke_title_kevents_on(void);
+static void ke_shadow_remove(uint32_t guest_va);
 
 /* Wait accounting (kernel_wait_stats.h): a zero timeout is a poll, not timed. */
 static int bridge_timeout_is_poll(uint32_t timeout_ptr)
@@ -3193,6 +3252,7 @@ static void bridge_PsTerminateSystemThread(void)
         ks_thread_exit();
         thobj_exit(g_thread_obj_va, exit_status);
         g_thread_obj_va = 0;
+        bridge_free_thread_tib();
         ExitThread(exit_status);
     }
 }
@@ -4462,6 +4522,7 @@ static void bridge_KeInitializeTimerEx(void)
         return;
     }
     ke_shadow_insert(timer_va, ev);
+    ke_shadow_note_header(timer_va);
     g_eax = 0;
 }
 
@@ -4486,7 +4547,11 @@ static void bridge_KeInitializeTimerEx(void)
  * audio off a timer. A title that needs better wants the host's timer queue,
  * not a smaller sleep.
  */
-#define XBOX_MAX_TIMERS 32
+/* 128 armed at once (KRN-9): with 32, the 33rd KeSetTimer returned as if
+ * armed, reset the timer's event and never fired it, with no log line; a
+ * title arming one per device or per stream waited for ever on it. A full
+ * table now says so once. */
+#define XBOX_MAX_TIMERS 128
 typedef struct {
     uint32_t timer_va;      /* the guest KTIMER, 0 for a free slot */
     uint32_t dpc_va;
@@ -4495,7 +4560,9 @@ typedef struct {
 } XboxTimer;
 static XboxTimer g_timers[XBOX_MAX_TIMERS];
 static CRITICAL_SECTION g_timer_lock;
-static int g_timer_started;
+static volatile int g_timer_started;
+static INIT_ONCE g_timer_once = INIT_ONCE_STATIC_INIT;
+static void kernel_timer_start_once(void);
 
 /* Whether the timer thread runs the paced loop below (kernel_timer_loop_ns):
  * only for what needs it, the 60 Hz vblank (RECOMP_VBLANK=paced) and the
@@ -4707,11 +4774,7 @@ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
     int i, free_slot = -1;
     uint32_t was_set = 0;
 
-    if (!g_timer_started) {
-        InitializeCriticalSection(&g_timer_lock);
-        g_timer_started = 1;
-        CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
-    }
+    kernel_timer_start_once();
 
     EnterCriticalSection(&g_timer_lock);
     for (i = 0; i < XBOX_MAX_TIMERS; i++) {
@@ -4725,6 +4788,12 @@ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
         g_timers[free_slot].period_ms = period_ms;
     }
     LeaveCriticalSection(&g_timer_lock);
+    if (free_slot < 0) {
+        static volatile LONG said;
+        if (InterlockedExchange(&said, 1) == 0)
+            fprintf(stderr, "  [KERNEL] KeSetTimer: all %d kernel timers are armed; timer "
+                            "0x%08X will not fire (said once)\n", XBOX_MAX_TIMERS, timer_va);
+    }
 
     /* A freshly set timer starts unsignaled, like the real KeSetTimer. */
     {
@@ -4924,21 +4993,47 @@ static void handle_unlock(void) { InterlockedExchange(&s_handle_lock, 0); }
  * must not: on POSIX, DuplicateHandle returns its source pointer with one
  * more reference. If the duplicate shared the source's token, NtClose on
  * either one would clear the slot that both of them use. */
+/* Both searches below ran over all 16,384 slots under the spin lock, so a
+ * new handle (never in the table) read 128 KB twice: ~10 us per
+ * NtCreateFile / NtCreateEvent / thread, with every other guest thread
+ * spinning meanwhile (KRN-11). The table now keeps two bounds, both under
+ * handle_lock: s_handle_hi, one past the highest slot in use, which bounds
+ * the "same HANDLE" search; and s_handle_free, below which no slot is free,
+ * where the free search starts. In practice both stay near the number of
+ * handles open at once. */
+static uint32_t s_handle_hi = 1, s_handle_free = 1;
+
+static void handle_slot_set(uint32_t i, HANDLE h)    /* under handle_lock */
+{
+    s_handle_table[i] = h;
+    if (h) {
+        if (i >= s_handle_hi)
+            s_handle_hi = i + 1;
+        if (i == s_handle_free)
+            s_handle_free = i + 1;
+    } else {
+        if (i < s_handle_free)
+            s_handle_free = i;
+        while (s_handle_hi > 1 && !s_handle_table[s_handle_hi - 1])
+            s_handle_hi--;
+    }
+}
+
 static uint32_t bridge_handle_token_ex(HANDLE h, int fresh)
 {
-    int i;
+    uint32_t i;
     if (!h || h == INVALID_HANDLE_VALUE) return 0;
     handle_lock();
-    for (i = 1; !fresh && i < BRIDGE_HANDLE_MAX; i++)
+    for (i = 1; !fresh && i < s_handle_hi; i++)
         if (s_handle_table[i] == h) {
             handle_unlock();
-            return BRIDGE_HANDLE_TAG | (uint32_t)i;
+            return BRIDGE_HANDLE_TAG | i;
         }
-    for (i = 1; i < BRIDGE_HANDLE_MAX; i++)
+    for (i = s_handle_free ? s_handle_free : 1; i < BRIDGE_HANDLE_MAX; i++)
         if (s_handle_table[i] == NULL) {
-            s_handle_table[i] = h;
+            handle_slot_set(i, h);
             handle_unlock();
-            return BRIDGE_HANDLE_TAG | (uint32_t)i;
+            return BRIDGE_HANDLE_TAG | i;
         }
     handle_unlock();
     fprintf(stderr, "  [BRIDGE] handle table full\n");
@@ -5006,7 +5101,7 @@ static HANDLE bridge_take_handle(uint32_t token)
             HANDLE h;
             handle_lock();
             h = s_handle_table[i];
-            s_handle_table[i] = NULL;
+            handle_slot_set(i, NULL);
             handle_unlock();
             return h;
         }
@@ -5101,6 +5196,39 @@ static NTSTATUS bridge_create_file_open(
     return st;
 }
 
+/* The per-call [READ] and [FILE] success lines (KRN-5).
+ *
+ * They printed and flushed on every guest read and every successful
+ * NtCreateFile. On Android stderr is a pipe a thread pumps to logcat
+ * (android_log.h), so a title streaming in small reads paid a formatted
+ * line and a write per read on the thread whose stall is audio dry time,
+ * and blocked when the 64 KB pipe filled. Now the first IO_LOG_FIRST of
+ * each kind print, then only failures, unless RECOMP_READ_LOG=1 (every
+ * read) or RECOMP_MISSING_FILES=all (every open); RECOMP_READ_LOG=0 drops
+ * the successful ones from the start. The [READ] window summary still
+ * gives the health figure every 10 s. */
+#define IO_LOG_FIRST 64
+
+static int bridge_read_log_mode(void)       /* 0 never, 1 first N, 2 every */
+{
+    static volatile int mode = -1;
+    if (mode < 0) {
+        const char *v = getenv("RECOMP_READ_LOG");
+        mode = !v || !*v ? 1 : (v[0] == '0' ? 0 : 2);
+    }
+    return mode;
+}
+
+static int bridge_io_log_success(volatile LONG *count, int every)
+{
+    int mode = bridge_read_log_mode();
+    if (every || mode == 2)
+        return 1;
+    if (mode == 0)
+        return 0;
+    return InterlockedIncrement(count) <= IO_LOG_FIRST;
+}
+
 /* Every guest open -- NtCreateFile, NtOpenFile, IoCreateFile -- comes through
  * here, so this is where each attempt is logged and where the missing-file
  * report (kernel_missing.c) sees it. NtOpenFile and IoCreateFile used to
@@ -5119,6 +5247,8 @@ static NTSTATUS bridge_create_file_impl(
                                           iostatus_va, file_attrs, share,
                                           disposition, options, &name);
     uint32_t status = (uint32_t)st;
+    static volatile LONG opens_logged;
+    int printed = 0;
 
     /* Paired with the [PATH] line the translation just printed: that says what
      * was asked for, this says whether it opened. A failed open is not itself
@@ -5143,7 +5273,7 @@ static NTSTATUS bridge_create_file_impl(
              * are counted rather than printed: a looping stream re-opens a
              * missing file every loop (97 lines in 100 s on one title). The
              * report decides; with it off, every attempt prints as before. */
-            if (!xbox_missing_is_reported(gpath))
+            if (!xbox_missing_is_reported(gpath) && (printed = 1))
                 fprintf(stderr, "  [FILE] %s (disp %u) -> 0x%08X FAILED (win32 err=%u%s)\n",
                         gpath, (unsigned)disposition, status, _e,
                         _e == 32u ? " ERROR_SHARING_VIOLATION"
@@ -5152,12 +5282,16 @@ static NTSTATUS bridge_create_file_impl(
             if (name.Buffer)
                 xbox_missing_note(gpath, status, (uint32_t)access,
                                   (uint32_t)disposition, (uint32_t)options, 0);
-        } else if (ntcreate || xbox_missing_verbose())
+        } else if (xbox_missing_verbose()
+                   || (ntcreate && bridge_io_log_success(&opens_logged, 0))) {
             fprintf(stderr, "  [FILE] %s (disp %u opts 0x%X from 0x%08X) -> 0x%08X\n",
                     gpath, (unsigned)disposition, (unsigned)options,
                     g_xbox_kernel_caller, status);
+            printed = 1;
+        }
     }
-    fflush(stderr);
+    if (printed)
+        fflush(stderr);
     return st;
 }
 
@@ -5968,27 +6102,32 @@ static void bridge_NtReadFile(void)
      * say whether the bytes were wrong or the read was, and the two look
      * identical from inside the title -- the first bytes settle it. */
     {
+        static volatile LONG reads_logged;
         const uint8_t *p = (const uint8_t *)XBOX_TO_NATIVE(buffer_va);
         uint32_t got = (uint32_t)ios.Information;
-        /* The offset matters as much as the length. A title streaming a pack
-         * file reads sector-aligned chunks, so the first bytes belong to
-         * whatever precedes the file it actually wants, and a read that stops
-         * early looks identical to one that never started -- until you can
-         * see where each one landed. */
-        if (poff)
-            fprintf(stderr, "  [READ] from=0x%08X ev=%08X apc=%08X buf=0x%08X @%lld want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
-                    g_xbox_kernel_caller, STACK_ARG(1), STACK_ARG(2), buffer_va,
-                    (long long)off.QuadPart, length, got,
-                    (uint32_t)ios.Status,
-                    got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
-                    got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
-        else
-            fprintf(stderr, "  [READ] from=0x%08X buf=0x%08X esp=0x%08X @seq want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
-                    g_xbox_kernel_caller, buffer_va, g_esp,
-                    length, got, (uint32_t)ios.Status,
-                    got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
-                    got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
-        fflush(stderr);
+        /* Failures and short reads always print (KRN-5). */
+        int failed = ios.Status != 0 || got != length;
+        if (bridge_io_log_success(&reads_logged, failed)) {
+            /* The offset matters as much as the length. A title streaming a pack
+             * file reads sector-aligned chunks, so the first bytes belong to
+             * whatever precedes the file it actually wants, and a read that stops
+             * early looks identical to one that never started -- until you can
+             * see where each one landed. */
+            if (poff)
+                fprintf(stderr, "  [READ] from=0x%08X ev=%08X apc=%08X buf=0x%08X @%lld want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
+                        g_xbox_kernel_caller, STACK_ARG(1), STACK_ARG(2), buffer_va,
+                        (long long)off.QuadPart, length, got,
+                        (uint32_t)ios.Status,
+                        got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
+                        got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
+            else
+                fprintf(stderr, "  [READ] from=0x%08X buf=0x%08X esp=0x%08X @seq want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
+                        g_xbox_kernel_caller, buffer_va, g_esp,
+                        length, got, (uint32_t)ios.Status,
+                        got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
+                        got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
+            fflush(stderr);
+        }
     }
     bridge_write_iostatus(iostatus, ios.Status, (uint32_t)ios.Information);
     bridge_complete_file_io(STACK_ARG(0), STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),
@@ -6229,11 +6368,25 @@ static void bridge_NtQueryDirectoryFile(void)
     PXBOX_ANSI_STRING    pfn = NULL;
 
     memset(&ios, 0, sizeof(ios));
+    /* The guest's buffer and pattern are checked like the other file
+     * bridges' (KRN-13): a bad info_va or Length faulted inside the
+     * runtime instead of returning STATUS_ACCESS_VIOLATION. */
+    if (!bridge_buf_ok(info_va, length, "NtQueryDirectoryFile")
+            || (filename_va && !bridge_buf_ok(filename_va, 8, "NtQueryDirectoryFile"))) {
+        bridge_write_iostatus(ios_va, (NTSTATUS)0xC0000005, 0);
+        g_eax = 0xC0000005u;                 /* STATUS_ACCESS_VIOLATION */
+        return;
+    }
     if (filename_va) {
         /* Xbox ANSI_STRING: 0=Length(u16), 2=MaximumLength(u16), 4=Buffer(u32) */
         uint32_t fn_buf  = BRIDGE_MEM32(filename_va + 4);
         fn.Length        = BRIDGE_MEM16(filename_va);
         fn.MaximumLength = BRIDGE_MEM16(filename_va + 2);
+        if (fn_buf && !bridge_buf_ok(fn_buf, fn.Length, "NtQueryDirectoryFile")) {
+            bridge_write_iostatus(ios_va, (NTSTATUS)0xC0000005, 0);
+            g_eax = 0xC0000005u;
+            return;
+        }
         fn.Buffer        = fn_buf ? (PCHAR)XBOX_TO_NATIVE(fn_buf) : NULL;
         if (fn.Buffer) pfn = &fn;
     }
@@ -6243,23 +6396,74 @@ static void bridge_NtQueryDirectoryFile(void)
     bridge_write_iostatus(ios_va, ios.Status, (uint32_t)ios.Information);
 }
 
+/* Symbolic link objects (KRN-14).
+ *
+ * NtOpenSymbolicLinkObject succeeded for any name and
+ * NtQuerySymbolicLinkObject answered \Device\CdRom0 for any handle, though
+ * kernel_io.c's table knows every link the title (or XAPI) made: a title
+ * asking where T: or its own Z: points was told the DVD. The open now
+ * resolves the name -- a link in the table, or \??\D:, which the kernel
+ * itself makes for the DVD -- and fails with STATUS_OBJECT_NAME_NOT_FOUND
+ * otherwise, as the console does. The handle names a slot that remembers
+ * the target; it stays untagged (0xDEAD0001 for D:, 0xDEAD1000 | slot for
+ * the others), so NtClose skips it as before. */
+#define SYMLINK_SLOTS 16
+static char s_symlink_target[SYMLINK_SLOTS][128];
+static volatile LONG s_symlink_next;
+static const char s_cdrom_target[] = "\\Device\\CdRom0";
+
+static int symlink_is_dvd(const char *name)
+{
+    if (name[0] == '\\' && name[1] == '?' && name[2] == '?' && name[3] == '\\')
+        name += 4;
+    return (name[0] == 'D' || name[0] == 'd') && name[1] == ':' && name[2] == '\0';
+}
+
+static const char *symlink_target_of(uint32_t handle)
+{
+    if ((handle & 0xFFFFF000u) == 0xDEAD1000u && (handle & 0xFFFu) < SYMLINK_SLOTS)
+        return s_symlink_target[handle & 0xFFFu];
+    return s_cdrom_target;                 /* 0xDEAD0001, and anything older */
+}
+
 /* ── NtOpenSymbolicLinkObject (ordinal 203, 2 args = 8 bytes) */
 static void bridge_NtOpenSymbolicLinkObject(void)
 {
     uint32_t handle_va = STACK_ARG(0);
-    /* arg1: POBJECT_ATTRIBUTES - ignored, we return a synthetic handle.
-     * Written raw (untagged) so NtClose recognises it and skips it. */
-    if (handle_va) BRIDGE_MEM32(handle_va) = 0xDEAD0001u;
+    const char *name = bridge_get_xbox_path(STACK_ARG(1));
+    const char *target = name ? xbox_LookupSymbolicLink(name) : NULL;
+    uint32_t handle;
+
+    if (!name) {
+        g_eax = 0xC0000033u;               /* STATUS_OBJECT_NAME_INVALID */
+        return;
+    }
+    if (!target && !symlink_is_dvd(name)) {
+        static int said;
+        if (said++ < 8)
+            fprintf(stderr, "  [KERNEL] NtOpenSymbolicLinkObject: no link named %s\n", name);
+        if (handle_va) BRIDGE_MEM32(handle_va) = 0;
+        g_eax = 0xC0000034u;               /* STATUS_OBJECT_NAME_NOT_FOUND */
+        return;
+    }
+    if (!target) {
+        handle = 0xDEAD0001u;
+    } else {
+        uint32_t slot = (uint32_t)(InterlockedIncrement(&s_symlink_next) - 1) % SYMLINK_SLOTS;
+        snprintf(s_symlink_target[slot], sizeof s_symlink_target[slot], "%s", target);
+        handle = 0xDEAD1000u | slot;
+    }
+    if (handle_va) BRIDGE_MEM32(handle_va) = handle;
     g_eax = STATUS_SUCCESS;
 }
 
 /* ── NtQuerySymbolicLinkObject (ordinal 215, 3 args = 12 bytes) */
 static void bridge_NtQuerySymbolicLinkObject(void)
 {
-    /* uint32_t handle = STACK_ARG(0); */
+    uint32_t handle = STACK_ARG(0);
     uint32_t target_va = STACK_ARG(1);
     uint32_t retlen_va = STACK_ARG(2);
-    const char* target = "\\Device\\CdRom0";
+    const char* target = symlink_target_of(handle);
     USHORT len = (USHORT)strlen(target);
 
     if (retlen_va) BRIDGE_MEM32(retlen_va) = (uint32_t)len;
@@ -8081,7 +8285,7 @@ static void bridge_RtlAnsiStringToUnicodeString(void)
     }
     s_len   = BRIDGE_MEM16(src_va + 0);
     s_buf_va = BRIDGE_MEM32(src_va + 4);
-    if (!s_buf_va) {
+    if (!s_buf_va && s_len) {          /* an empty string may have no buffer */
         g_eax = 0xC000000Du;
         return;
     }
@@ -8108,14 +8312,22 @@ static void bridge_RtlAnsiStringToUnicodeString(void)
         }
     }
 
-    result = MultiByteToWideChar(CP_ACP, 0,
+    /* An empty source converts to an empty string (KRN-12): the
+     * conversion returns 0 for it, which read as a failure, left Length
+     * unset and leaked the buffer just allocated. NT answers success. */
+    result = s_len == 0 ? 0 : MultiByteToWideChar(CP_ACP, 0,
         (const char*)XBOX_TO_NATIVE(s_buf_va), (int)s_len,
         (WCHAR*)XBOX_TO_NATIVE(d_buf_va), (int)(unicode_bytes / sizeof(WCHAR)));
-    if (result > 0) {
+    if (result > 0 || s_len == 0) {
         BRIDGE_MEM16(dst_va + 0) = (uint16_t)(result * sizeof(WCHAR));
         ((WCHAR*)XBOX_TO_NATIVE(d_buf_va))[result] = 0;
         g_eax = 0;
     } else {
+        if (do_alloc) {
+            xbox_HeapFree(d_buf_va);
+            BRIDGE_MEM16(dst_va + 2) = 0;
+            BRIDGE_MEM32(dst_va + 4) = 0;
+        }
         g_eax = 0xC0000001u;   /* STATUS_UNSUCCESSFUL */
     }
 }
@@ -8137,7 +8349,7 @@ static void bridge_RtlUnicodeStringToAnsiString(void)
     }
     s_len   = BRIDGE_MEM16(src_va + 0);
     s_buf_va = BRIDGE_MEM32(src_va + 4);
-    if (!s_buf_va) {
+    if (!s_buf_va && s_len) {          /* an empty string may have no buffer */
         g_eax = 0xC000000Du;
         return;
     }
@@ -8152,6 +8364,7 @@ static void bridge_RtlUnicodeStringToAnsiString(void)
         }
         BRIDGE_MEM16(dst_va + 2) = (uint16_t)ansi_bytes;
         BRIDGE_MEM32(dst_va + 4) = d_buf_va;
+        d_max = ansi_bytes;            /* the room the terminator check uses */
     } else {
         if (d_max < ansi_bytes) {
             g_eax = 0xC0000205u;
@@ -8164,15 +8377,20 @@ static void bridge_RtlUnicodeStringToAnsiString(void)
         }
     }
 
-    result = WideCharToMultiByte(CP_ACP, 0,
+    result = s_len / sizeof(WCHAR) == 0 ? 0 : WideCharToMultiByte(CP_ACP, 0,
         (const WCHAR*)XBOX_TO_NATIVE(s_buf_va), (int)(s_len / sizeof(WCHAR)),
         (char*)XBOX_TO_NATIVE(d_buf_va), (int)ansi_bytes, NULL, NULL);
-    if (result > 0) {
+    if (result > 0 || s_len / sizeof(WCHAR) == 0) {   /* empty: success (KRN-12) */
         BRIDGE_MEM16(dst_va + 0) = (uint16_t)result;
         if ((uint16_t)result < d_max)
             ((char*)XBOX_TO_NATIVE(d_buf_va))[result] = 0;
         g_eax = 0;
     } else {
+        if (do_alloc) {
+            xbox_HeapFree(d_buf_va);
+            BRIDGE_MEM16(dst_va + 2) = 0;
+            BRIDGE_MEM32(dst_va + 4) = 0;
+        }
         g_eax = 0xC0000001u;
     }
 }
@@ -9210,10 +9428,36 @@ static void bridge_RtlCaptureStackBackTrace(void)
 }
 
 
-/* --- Ke Object Shadow Table --- */
-#define KE_SHADOW_SIZE 4096
-typedef struct { uint32_t guest_va; HANDLE host_handle; uint32_t in_use; } KE_SHADOW_SLOT;
-static KE_SHADOW_SLOT g_ke_shadow[KE_SHADOW_SIZE];
+/* --- Ke Object Shadow Table ---
+ *
+ * Guest dispatcher object VA -> host object. Every KeInitializeEvent /
+ * Mutant / Semaphore / TimerEx, every event a title builds itself
+ * (ke_guest_event, in_use 2) and every spawned thread's KTHREAD has one.
+ *
+ * It was 4096 slots scanned from index 0 under one lock, and only threads
+ * were ever removed (thobj_unref). XDK code puts KEVENTs on the stack and
+ * in heap objects (overlapped requests, USB requests, stream buffers), so
+ * the distinct addresses grow with play time; after 4096 ke_guest_event
+ * returned NULL without a word, the guest address went to the host as a
+ * HANDLE, SetEvent failed silently and the wait failed at once -- the
+ * KOTOR / T()NY failures described below, reached by a long session. Every
+ * KeSetEvent / KeWaitFor* walked the array, a miss all 4096 slots (KRN-2).
+ *
+ * Now an open-addressed hash on the VA (linear probing, deletion by
+ * backward shift, so no tombstones), doubled at half load. Before it grows
+ * past KE_SHADOW_SWEEP entries it drops the shadows whose guest memory no
+ * longer holds the object they were made for: the header's Type or Size
+ * byte changed since the insert (a title-built event's stack frame or heap
+ * block was reused). `hdr` is that snapshot, Type | Size << 8, taken once
+ * the header is written (ke_shadow_note_header, or at the insert of a
+ * title-built event); 0 means the shadow is never dropped this way: a
+ * thread's KTHREAD (thobj_unref removes it) and a slot restored by a save
+ * state. */
+#define KE_SHADOW_SWEEP 4096u
+typedef struct { uint32_t guest_va; HANDLE host_handle; uint32_t in_use; uint32_t hdr; } KE_SHADOW_SLOT;
+static KE_SHADOW_SLOT *g_ke_shadow;
+static uint32_t g_ke_shadow_cap;            /* a power of two, 0 before first use */
+static uint32_t g_ke_shadow_count;
 static CRITICAL_SECTION g_ke_shadow_cs;
 static int g_ke_shadow_init;
 
@@ -9222,16 +9466,141 @@ static void ke_shadow_init(void)
     if (g_ke_shadow_init)
         return;
     InitializeCriticalSection(&g_ke_shadow_cs);
-    /* Wipe any stale pointers from a prior lifecycle (defensive). */
-    memset(g_ke_shadow, 0, sizeof(g_ke_shadow));
     g_ke_shadow_init = 1;
 }
 
-/* Insert a mapping guest_va -> host HANDLE. Replaces any prior mapping for
- * the same guest_va (closing the old handle and inserting the new one). */
-static void ke_shadow_insert(uint32_t guest_va, HANDLE host)
+static uint32_t ke_shadow_home(uint32_t va, uint32_t cap)
+{
+    va ^= va >> 13;
+    va *= 0x9E3779B1u;
+    return (va >> 8) & (cap - 1u);
+}
+
+/* The header bytes that identify the object at va: Type | Size << 8. */
+static uint32_t ke_shadow_hdr(uint32_t va)
+{
+    if (!bridge_va_mapped(va, 4))
+        return 0xFFFFFFFFu;
+    return (uint32_t)BRIDGE_MEM8(va) | (uint32_t)BRIDGE_MEM8(va + 2) << 8;
+}
+
+/* The slot index holding va, or -1. Under g_ke_shadow_cs. */
+static int ke_shadow_find_locked(uint32_t va)
 {
     uint32_t i;
+    if (!g_ke_shadow_cap)
+        return -1;
+    for (i = ke_shadow_home(va, g_ke_shadow_cap); g_ke_shadow[i].in_use;
+         i = (i + 1) & (g_ke_shadow_cap - 1u))
+        if (g_ke_shadow[i].guest_va == va)
+            return (int)i;
+    return -1;
+}
+
+/* Empty slot i and shift the run after it back, so lookups need no
+ * tombstones. The host object is the caller's. Under g_ke_shadow_cs. */
+static void ke_shadow_erase_locked(uint32_t i)
+{
+    uint32_t mask = g_ke_shadow_cap - 1u, j = i;
+    for (;;) {
+        uint32_t k;
+        j = (j + 1) & mask;
+        if (!g_ke_shadow[j].in_use)
+            break;
+        k = ke_shadow_home(g_ke_shadow[j].guest_va, g_ke_shadow_cap);
+        /* Move j back to i unless its home lies cyclically in (i, j]. */
+        if (i <= j ? (i < k && k <= j) : (i < k || k <= j))
+            continue;
+        g_ke_shadow[i] = g_ke_shadow[j];
+        i = j;
+    }
+    memset(&g_ke_shadow[i], 0, sizeof g_ke_shadow[i]);
+    g_ke_shadow_count--;
+}
+
+static int ke_shadow_stale_locked(uint32_t i)
+{
+    KE_SHADOW_SLOT *sl = &g_ke_shadow[i];
+    return sl->hdr && ke_shadow_hdr(sl->guest_va) != sl->hdr;
+}
+
+/* Drop the shadows whose object is gone. Returns how many. */
+static uint32_t ke_shadow_sweep_locked(void)
+{
+    uint32_t i = 0, n = 0;
+    while (i < g_ke_shadow_cap) {
+        if (g_ke_shadow[i].in_use && ke_shadow_stale_locked(i)) {
+            if (g_ke_shadow[i].host_handle)
+                CloseHandle(g_ke_shadow[i].host_handle);
+            ke_shadow_erase_locked(i);  /* may pull a later entry into i */
+            n++;
+            continue;
+        }
+        i++;
+    }
+    return n;
+}
+
+/* Room for one more entry. 0 only when out of memory. */
+static int ke_shadow_reserve_locked(void)
+{
+    KE_SHADOW_SLOT *grown, *old = g_ke_shadow;
+    uint32_t cap, i, old_cap = g_ke_shadow_cap;
+
+    if (old_cap && (g_ke_shadow_count + 1u) * 2u <= old_cap)
+        return 1;
+    if (g_ke_shadow_count >= KE_SHADOW_SWEEP) {
+        uint32_t freed = ke_shadow_sweep_locked();
+        static int said;
+        if (freed && said++ < 4)
+            fprintf(stderr, "  [KERNEL] Ke shadow table: %u stale object(s) dropped, %u live\n",
+                    freed, g_ke_shadow_count);
+        if ((g_ke_shadow_count + 1u) * 2u <= old_cap)
+            return 1;
+    }
+    cap = old_cap ? old_cap * 2u : 8192u;
+    grown = (KE_SHADOW_SLOT *)calloc(cap, sizeof *grown);
+    if (!grown)
+        return 0;
+    for (i = 0; i < old_cap; i++) {
+        uint32_t j;
+        if (!old[i].in_use)
+            continue;
+        for (j = ke_shadow_home(old[i].guest_va, cap); grown[j].in_use; j = (j + 1) & (cap - 1u))
+            ;
+        grown[j] = old[i];
+    }
+    g_ke_shadow = grown;
+    g_ke_shadow_cap = cap;
+    free(old);
+    return 1;
+}
+
+/* Add va -> host (absent from the table). Returns 0 when out of memory;
+ * the host object is then the caller's. Under g_ke_shadow_cs. */
+static int ke_shadow_add_locked(uint32_t va, HANDLE host, uint32_t in_use)
+{
+    uint32_t j;
+    if (!ke_shadow_reserve_locked())
+        return 0;
+    for (j = ke_shadow_home(va, g_ke_shadow_cap); g_ke_shadow[j].in_use;
+         j = (j + 1) & (g_ke_shadow_cap - 1u))
+        ;
+    g_ke_shadow[j].guest_va = va;
+    g_ke_shadow[j].host_handle = host;
+    g_ke_shadow[j].in_use = in_use;
+    g_ke_shadow[j].hdr = ke_shadow_hdr(va);
+    g_ke_shadow_count++;
+    return 1;
+}
+
+/* Insert a mapping guest_va -> host HANDLE. Replaces any prior mapping for
+ * the same guest_va (closing the old handle and inserting the new one).
+ * The shadow is never swept until ke_shadow_note_header, which the
+ * KeInitialize* bridges call once they have written the guest header. */
+static void ke_shadow_insert(uint32_t guest_va, HANDLE host)
+{
+    int i;
 
     if (!guest_va || !host)
         return;
@@ -9239,42 +9608,47 @@ static void ke_shadow_insert(uint32_t guest_va, HANDLE host)
     ke_shadow_init();
 
     EnterCriticalSection(&g_ke_shadow_cs);
-
-    /* Reuse an existing slot for this VA, if present. */
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (g_ke_shadow[i].in_use && g_ke_shadow[i].guest_va == guest_va) {
-            if (g_ke_shadow[i].host_handle && g_ke_shadow[i].host_handle != host)
-                CloseHandle(g_ke_shadow[i].host_handle);
-            g_ke_shadow[i].host_handle = host;
-            LeaveCriticalSection(&g_ke_shadow_cs);
-            return;
-        }
+    i = ke_shadow_find_locked(guest_va);
+    if (i >= 0) {
+        if (g_ke_shadow[i].host_handle && g_ke_shadow[i].host_handle != host)
+            CloseHandle(g_ke_shadow[i].host_handle);
+        g_ke_shadow[i].host_handle = host;
+        g_ke_shadow[i].in_use = 1;
+        g_ke_shadow[i].hdr = 0;                 /* until ke_shadow_note_header */
+        LeaveCriticalSection(&g_ke_shadow_cs);
+        return;
+    }
+    if (ke_shadow_add_locked(guest_va, host, 1)) {
+        g_ke_shadow[ke_shadow_find_locked(guest_va)].hdr = 0;
+        LeaveCriticalSection(&g_ke_shadow_cs);
+        return;
     }
 
-    /* Otherwise find a free slot. */
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (!g_ke_shadow[i].in_use) {
-            g_ke_shadow[i].in_use      = 1;
-            g_ke_shadow[i].guest_va    = guest_va;
-            g_ke_shadow[i].host_handle = host;
-            LeaveCriticalSection(&g_ke_shadow_cs);
-            return;
-        }
-    }
-
-    /* Table full -- log and drop the new object. The caller's subsequent
+    /* Out of memory -- log and drop the new object. The caller's subsequent
      * waits will fall back to XBOX_TO_NATIVE and fail gracefully. */
-    fprintf(stderr, "  [KERNEL] Ke shadow table full; dropping VA 0x%08X\n",
+    fprintf(stderr, "  [KERNEL] Ke shadow table: out of memory; dropping VA 0x%08X\n",
             guest_va);
     LeaveCriticalSection(&g_ke_shadow_cs);
     CloseHandle(host);
 }
 
+/* The header of guest_va is written: it is what the shadow was made for. */
+static void ke_shadow_note_header(uint32_t guest_va)
+{
+    int i;
+    ke_shadow_init();
+    EnterCriticalSection(&g_ke_shadow_cs);
+    i = ke_shadow_find_locked(guest_va);
+    if (i >= 0)
+        g_ke_shadow[i].hdr = ke_shadow_hdr(guest_va);
+    LeaveCriticalSection(&g_ke_shadow_cs);
+}
+
 /* Look up the host HANDLE for a guest object VA. Returns NULL if not found. */
 static HANDLE ke_shadow_lookup(uint32_t guest_va)
 {
-    uint32_t i;
     HANDLE h = NULL;
+    int i;
 
     if (!guest_va)
         return NULL;
@@ -9282,12 +9656,9 @@ static HANDLE ke_shadow_lookup(uint32_t guest_va)
     ke_shadow_init();
 
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (g_ke_shadow[i].in_use && g_ke_shadow[i].guest_va == guest_va) {
-            h = g_ke_shadow[i].host_handle;
-            break;
-        }
-    }
+    i = ke_shadow_find_locked(guest_va);
+    if (i >= 0)
+        h = g_ke_shadow[i].host_handle;
     LeaveCriticalSection(&g_ke_shadow_cs);
     return h;
 }
@@ -9295,7 +9666,7 @@ static HANDLE ke_shadow_lookup(uint32_t guest_va)
 /* Remove (and close) the mapping for a guest object VA. */
 static void ke_shadow_remove(uint32_t guest_va)
 {
-    uint32_t i;
+    int i;
 
     if (!guest_va)
         return;
@@ -9303,15 +9674,11 @@ static void ke_shadow_remove(uint32_t guest_va)
     ke_shadow_init();
 
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (g_ke_shadow[i].in_use && g_ke_shadow[i].guest_va == guest_va) {
-            if (g_ke_shadow[i].host_handle)
-                CloseHandle(g_ke_shadow[i].host_handle);
-            g_ke_shadow[i].in_use      = 0;
-            g_ke_shadow[i].guest_va    = 0;
-            g_ke_shadow[i].host_handle = NULL;
-            break;
-        }
+    i = ke_shadow_find_locked(guest_va);
+    if (i >= 0) {
+        if (g_ke_shadow[i].host_handle)
+            CloseHandle(g_ke_shadow[i].host_handle);
+        ke_shadow_erase_locked((uint32_t)i);
     }
     LeaveCriticalSection(&g_ke_shadow_cs);
 }
@@ -9398,17 +9765,22 @@ static int ke_promote(uint32_t guest_va)
     return 1;
 }
 
-static HANDLE ke_guest_event(uint32_t guest_va, int *type)
+static int ke_title_kevents_on(void)
 {
     static int enabled = -1;
-    uint32_t hdr, i;
-    HANDLE h = NULL;
-
     if (enabled < 0) {
         const char *e = getenv("RECOMP_TITLE_KEVENTS");
         enabled = !(e && *e == '0');    /* on unless turned off */
     }
-    if (!enabled && !ke_is_promoted(guest_va))
+    return enabled;
+}
+
+static HANDLE ke_guest_event(uint32_t guest_va, int *type)
+{
+    uint32_t hdr;
+    HANDLE h = NULL;
+
+    if (!ke_title_kevents_on() && !ke_is_promoted(guest_va))
         return NULL;
     if (guest_va < 0x10000u || (guest_va & 3u))
         return NULL;
@@ -9421,23 +9793,36 @@ static HANDLE ke_guest_event(uint32_t guest_va, int *type)
 
     ke_shadow_init();
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (g_ke_shadow[i].in_use && g_ke_shadow[i].guest_va == guest_va) {
-            h = g_ke_shadow[i].in_use == 2 ? g_ke_shadow[i].host_handle : NULL;
+    {
+        int k = ke_shadow_find_locked(guest_va);
+        if (k >= 0 && g_ke_shadow[k].in_use != 2) {
             LeaveCriticalSection(&g_ke_shadow_cs);
-            return h;                              /* a KeInitializeEvent shadow: old path */
+            return NULL;                           /* a KeInitializeEvent shadow: old path */
+        }
+        if (k >= 0 && !g_ke_shadow[k].hdr)            /* restored by a save state */
+            g_ke_shadow[k].hdr = ke_shadow_hdr(guest_va);
+        if (k >= 0 && (g_ke_shadow[k].hdr & 0xFFu) == (uint32_t)*type) {
+            h = g_ke_shadow[k].host_handle;
+            LeaveCriticalSection(&g_ke_shadow_cs);
+            return h;
+        }
+        if (k >= 0) {
+            /* The address now holds an event of the other type (its
+             * memory was reused): a host event of the right reset kind,
+             * from the guest's state. */
+            if (g_ke_shadow[k].host_handle)
+                CloseHandle(g_ke_shadow[k].host_handle);
+            ke_shadow_erase_locked((uint32_t)k);
         }
     }
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (!g_ke_shadow[i].in_use) {
-            h = CreateEventA(NULL, *type == 0, BRIDGE_MEM32(guest_va + 4) != 0, NULL);
-            if (h) {
-                g_ke_shadow[i].in_use      = 2;
-                g_ke_shadow[i].guest_va    = guest_va;
-                g_ke_shadow[i].host_handle = h;
-            }
-            break;
-        }
+    h = CreateEventA(NULL, *type == 0, BRIDGE_MEM32(guest_va + 4) != 0, NULL);
+    if (h && !ke_shadow_add_locked(guest_va, h, 2)) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [KERNEL] Ke shadow table: out of memory; title-built event "
+                            "0x%08X left without a host event\n", guest_va);
+        CloseHandle(h);
+        h = NULL;
     }
     LeaveCriticalSection(&g_ke_shadow_cs);
     if (h) {
@@ -10227,6 +10612,32 @@ static void bridge_KeInitializeEvent(void)
     uint32_t event_type = STACK_ARG(1); /* 0=Notification(manual-reset), 1=Synchronization(auto-reset) */
     uint32_t initial_state = STACK_ARG(2);
 
+    /* The header the console's KeInitializeEvent writes (KRN-10): Size 4
+     * (in LONGs), Inserted 0, a self-linked wait list, and SignalState as
+     * the event's state from then on. The shadow below wrote Size 16, so
+     * ke_guest_event (which wants 4) never treated the event as
+     * header-owned and its SignalState was written once and never again:
+     * an inline KeReadStateEvent read the initial state for ever, and XDK
+     * code clearing the event by storing 0 there left the host event set.
+     * With guest events on (the default) the event is now made exactly
+     * like one XDK code builds inline; RECOMP_TITLE_KEVENTS=0 keeps the
+     * shadow, as does an address guest events do not cover. */
+    if (ke_title_kevents_on()) {
+        int type;
+        BRIDGE_MEM8(guest_va + 0)  = (uint8_t)(event_type ? 1 : 0);
+        BRIDGE_MEM8(guest_va + 1)  = 0;
+        BRIDGE_MEM8(guest_va + 2)  = 4;
+        BRIDGE_MEM8(guest_va + 3)  = 0;
+        BRIDGE_MEM32(guest_va + 4) = initial_state ? 1 : 0;
+        BRIDGE_MEM32(guest_va + 8) = guest_va + 8;
+        BRIDGE_MEM32(guest_va + 12) = guest_va + 8;
+        ke_shadow_remove(guest_va);        /* an earlier object at this address */
+        if (ke_guest_event(guest_va, &type)) {
+            g_eax = 0;
+            return;
+        }
+    }
+
     BOOL manual_reset = (event_type == 0) ? TRUE : FALSE;
     HANDLE h = CreateEventW(NULL, manual_reset, initial_state ? TRUE : FALSE, NULL);
     if (!h) {
@@ -10250,6 +10661,7 @@ static void bridge_KeInitializeEvent(void)
     BRIDGE_MEM32(guest_va + 4) = initial_state ? 1 : 0; /* SignalState */
     BRIDGE_MEM32(guest_va + 8) = 0;  /* WaitListHead.Flink (self/empty) */
     BRIDGE_MEM32(guest_va + 12) = 0; /* WaitListHead.Blink (self/empty) */
+    ke_shadow_note_header(guest_va);
 
     g_eax = 0;
 }
@@ -10280,6 +10692,7 @@ static void bridge_KeInitializeMutant(void)
     BRIDGE_MEM32(guest_va + 4) = initial_owner ? 1 : 0; /* SignalState */
     BRIDGE_MEM32(guest_va + 8) = 0;   /* WaitListHead */
     BRIDGE_MEM32(guest_va + 12) = 0;
+    ke_shadow_note_header(guest_va);
 
     g_eax = 0;
 }
@@ -10308,6 +10721,7 @@ static void bridge_KeInitializeSemaphore(void)
     BRIDGE_MEM32(guest_va + 4) = (LONG)count; /* SignalState = count */
     BRIDGE_MEM32(guest_va + 8) = 0;   /* WaitListHead */
     BRIDGE_MEM32(guest_va + 12) = 0;
+    ke_shadow_note_header(guest_va);
 
     g_eax = 0;
 }
@@ -14218,13 +14632,23 @@ static void kobj_u32tab(XboxKobjSaveCtx *c, uint32_t id, const volatile uint32_t
     xbox_kobj_rec_end(c);
 }
 
+/* The timer thread and its lock, made once. This ran on whichever guest
+ * threads called KeSetTimer first, unguarded: two at once initialised the
+ * lock twice (on POSIX that replaces a mutex another thread may hold) and
+ * started two timer threads, after which every timer DPC and vblank tick
+ * was delivered twice (KRN-9). */
+static BOOL CALLBACK kernel_timer_init(PINIT_ONCE o, PVOID p, PVOID *c)
+{
+    (void)o; (void)p; (void)c;
+    InitializeCriticalSection(&g_timer_lock);
+    g_timer_started = 1;
+    CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
+    return TRUE;
+}
+
 static void kernel_timer_start_once(void)
 {
-    if (!g_timer_started) {
-        InitializeCriticalSection(&g_timer_lock);
-        g_timer_started = 1;
-        CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
-    }
+    InitOnceExecuteOnce(&g_timer_once, kernel_timer_init, NULL, NULL);
 }
 
 void xbox_bridge_kobj_handles(void (*fn)(void *ctx, uint32_t guest_va, void *h), void *ctx)
@@ -14236,7 +14660,7 @@ void xbox_bridge_kobj_handles(void (*fn)(void *ctx, uint32_t guest_va, void *h),
             fn(ctx, s_token_thobj[i], s_handle_table[i]);
     ke_shadow_init();
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++)
+    for (i = 0; i < g_ke_shadow_cap; i++)
         if (g_ke_shadow[i].in_use && g_ke_shadow[i].host_handle)
             fn(ctx, g_ke_shadow[i].guest_va, g_ke_shadow[i].host_handle);
     LeaveCriticalSection(&g_ke_shadow_cs);
@@ -14284,7 +14708,7 @@ void xbox_bridge_kobj_save(XboxKobjSaveCtx *c)
     /* KE shadows. */
     ke_shadow_init();
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
+    for (i = 0; i < g_ke_shadow_cap; i++) {
         uint32_t id;
         if (!g_ke_shadow[i].in_use)
             continue;
@@ -14379,7 +14803,7 @@ void xbox_bridge_kobj_reset(void)
         HANDLE h;
         handle_lock();
         h = s_handle_table[i];
-        s_handle_table[i] = NULL;
+        handle_slot_set(i, NULL);
         handle_unlock();
         if (h && h != INVALID_HANDLE_VALUE) {
 #ifndef _WIN32
@@ -14397,13 +14821,12 @@ void xbox_bridge_kobj_reset(void)
 
     ke_shadow_init();
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
+    for (i = 0; i < g_ke_shadow_cap; i++) {
         if (g_ke_shadow[i].in_use && g_ke_shadow[i].host_handle)
             CloseHandle(g_ke_shadow[i].host_handle);
-        g_ke_shadow[i].in_use = 0;
-        g_ke_shadow[i].guest_va = 0;
-        g_ke_shadow[i].host_handle = NULL;
+        memset(&g_ke_shadow[i], 0, sizeof g_ke_shadow[i]);
     }
+    g_ke_shadow_count = 0;
     LeaveCriticalSection(&g_ke_shadow_cs);
 
     if (g_timer_started) {
@@ -14497,7 +14920,7 @@ int xbox_bridge_kobj_load(XboxKobjLoadCtx *c, uint16_t type, XboxKobjRd *r)
             xbox_kobj_fail(c, "handle 0x%08X twice", BRIDGE_HANDLE_TAG | idx);
             return 1;
         }
-        s_handle_table[idx] = h;
+        handle_slot_set(idx, h);
         handle_unlock();
         s_token_thobj[idx] = thobj;   /* its reference is in the pool's counts */
         s_ob_token[idx] = ob;
@@ -14527,18 +14950,21 @@ int xbox_bridge_kobj_load(XboxKobjLoadCtx *c, uint16_t type, XboxKobjRd *r)
         }
         ke_shadow_init();
         EnterCriticalSection(&g_ke_shadow_cs);
-        for (i = 0; i < KE_SHADOW_SIZE; i++)
-            if (!g_ke_shadow[i].in_use) {
-                g_ke_shadow[i].in_use = use ? use : 1;
-                g_ke_shadow[i].guest_va = va;
-                g_ke_shadow[i].host_handle = h;
-                done = 1;
-                break;
+        {
+            int k = ke_shadow_find_locked(va);
+            if (k >= 0) {                      /* a duplicate record: the last wins */
+                if (g_ke_shadow[k].host_handle && g_ke_shadow[k].host_handle != h)
+                    CloseHandle(g_ke_shadow[k].host_handle);
+                ke_shadow_erase_locked((uint32_t)k);
             }
+            done = ke_shadow_add_locked(va, h, use ? use : 1);
+            if (done)                          /* restored: never swept (see the table) */
+                g_ke_shadow[ke_shadow_find_locked(va)].hdr = 0;
+        }
         LeaveCriticalSection(&g_ke_shadow_cs);
         if (!done) {
             if (h) CloseHandle(h);
-            xbox_kobj_fail(c, "KE shadow table full");
+            xbox_kobj_fail(c, "KE shadow table: out of memory");
         }
         return 1;
     }

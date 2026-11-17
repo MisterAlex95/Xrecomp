@@ -61,12 +61,13 @@ enum { ORD_MMALLOC = 165, ORD_MMALLOCEX = 166, ORD_MMFREE = 171,
        ORD_KEWAIT = 159, ORD_NTDUP = 197, ORD_NTWAIT = 233, ORD_OBREF = 246,
        ORD_OBDEREF = 250, ORD_PSCREATE = 255, ORD_PSTERM = 258,
        ORD_NTWRITE = 236, ORD_NTQUERYINFO = 211,
-       ORD_KEQUERYPRIO = 124, ORD_KESETPRIO = 143 };
+       ORD_KEQUERYPRIO = 124, ORD_KESETPRIO = 143,
+       ORD_A2U = 260, ORD_U2A = 308, ORD_KEINITTIMER = 113, ORD_KESETTIMER = 149 };
 static const uint32_t ORDS[] = { ORD_MMALLOC, ORD_MMALLOCEX, ORD_MMFREE,
     ORD_MMQUERYSIZE, ORD_NTALLOC, ORD_NTCLOSE, ORD_NTCREATE, ORD_NTFREE,
     ORD_NTSETINFO, ORD_KEWAIT, ORD_NTDUP, ORD_NTWAIT, ORD_OBREF, ORD_OBDEREF,
     ORD_PSCREATE, ORD_PSTERM, ORD_NTWRITE, ORD_NTQUERYINFO,
-    ORD_KEQUERYPRIO, ORD_KESETPRIO };
+    ORD_KEQUERYPRIO, ORD_KESETPRIO, ORD_A2U, ORD_U2A, ORD_KEINITTIMER, ORD_KESETTIMER };
 #define NORDS (sizeof ORDS / sizeof ORDS[0])
 
 static uint32_t g_thunks, g_stack, g_scratch;
@@ -212,6 +213,125 @@ static void test_virtual_memory(void)
     G32(psize) = 0;
     st = CALL(ORD_NTFREE, pbase, psize, 0x8000);
     check(st == 0xC00000A0u, "free below the heap is refused, not zeroed", NULL);
+}
+
+/* ---- MmAllocateContiguousMemoryEx pinned to one address (KRN-15) ------ */
+static void test_pinned_contiguous(void)
+{
+    char d[160];
+    uint32_t a, phys, va, i;
+    int kept = 1, zeroed = 1;
+    const volatile uint8_t *map = xbox_ContiguousPageMap();
+
+    printf("pinned contiguous allocations\n");
+    a = CALL(ORD_MMALLOC, 0x2000);
+    check(a >= 0x80000000u, "a 8 KB contiguous block", NULL);
+    if (a < 0x80000000u)
+        return;
+    memset(GP(a), 0x5A, 0x2000);
+    phys = a - 0x80000000u;
+    /* Over the block's second page and the page after it. */
+    {
+        uint32_t after = phys + 0x2000u;
+        int after_free = map && !map[after >> 12];
+        if (after_free)
+            memset(GP(0x80000000u + after), 0x77, 0x1000);
+        va = CALL(ORD_MMALLOCEX, 0x2000, phys + 0x1000u, phys + 0x2FFFu, 0, 4);
+        snprintf(d, sizeof d, "got 0x%08X, want 0x%08X", va, a + 0x1000u);
+        check(va == a + 0x1000u, "a pinned range is returned at that address", d);
+        for (i = 0; i < 0x2000; i++)
+            kept &= GP(a)[i] == 0x5A;
+        check(kept, "the block it overlaps keeps its bytes", NULL);
+        if (after_free) {
+            for (i = 0; i < 0x1000; i++)
+                zeroed &= GP(0x80000000u + after)[i] == 0;
+            check(zeroed, "the page no block owned is zeroed", NULL);
+        }
+    }
+    va = CALL(ORD_MMALLOCEX, 0x2000, XBOX_CONTIG_SIZE - 0x1000u, XBOX_CONTIG_SIZE + 0xFFFu, 0, 4);
+    snprintf(d, sizeof d, "got 0x%08X", va);
+    check(va == 0, "a pinned range past the end of the window: 0", d);
+    va = CALL(ORD_MMALLOCEX, 0x1000, 0x10000000u, 0x10000FFFu, 0, 4);
+    snprintf(d, sizeof d, "got 0x%08X", va);
+    check(va == 0, "a pinned range far outside the window: 0", d);
+}
+
+/* ---- Rtl string conversions of an empty string (KRN-12) --------------- */
+static void test_empty_strings(void)
+{
+    char d[160];
+    uint32_t src = g_scratch + 0x800, dst = g_scratch + 0x810, buf = g_scratch + 0x900, st;
+
+    printf("empty string conversions\n");
+    /* ANSI -> Unicode, allocating: Length 0, success, a terminated buffer. */
+    G16(src) = 0; G16(src + 2) = 1; G32(src + 4) = buf; G8(buf) = 0;
+    G16(dst) = 0xFFFF; G16(dst + 2) = 0; G32(dst + 4) = 0;
+    st = CALL(ORD_A2U, dst, src, 1);
+    snprintf(d, sizeof d, "status 0x%08X Length %u Buffer 0x%08X", st, G16(dst), G32(dst + 4));
+    check(st == 0 && G16(dst) == 0 && G32(dst + 4) && G16(G32(dst + 4)) == 0,
+          "RtlAnsiStringToUnicodeString(\"\", alloc): success, Length 0", d);
+    /* Not allocating, into the title's buffer. */
+    G16(dst) = 0xFFFF; G16(dst + 2) = 16; G32(dst + 4) = buf + 0x40; G16(buf + 0x40) = 0xAAAA;
+    st = CALL(ORD_A2U, dst, src, 0);
+    snprintf(d, sizeof d, "status 0x%08X Length %u", st, G16(dst));
+    check(st == 0 && G16(dst) == 0 && G16(buf + 0x40) == 0,
+          "RtlAnsiStringToUnicodeString(\"\") into a buffer: success, terminated", d);
+    /* An empty string with no buffer at all is still an empty string. */
+    G32(src + 4) = 0;
+    G16(dst) = 0xFFFF;
+    st = CALL(ORD_A2U, dst, src, 0);
+    check(st == 0 && G16(dst) == 0, "an empty source with a NULL Buffer: success", NULL);
+
+    /* Unicode -> ANSI, both ways. */
+    G16(src) = 0; G16(src + 2) = 2; G32(src + 4) = buf; G16(buf) = 0;
+    G16(dst) = 0xFFFF; G16(dst + 2) = 0; G32(dst + 4) = 0;
+    st = CALL(ORD_U2A, dst, src, 1);
+    snprintf(d, sizeof d, "status 0x%08X Length %u Buffer 0x%08X", st, G16(dst), G32(dst + 4));
+    check(st == 0 && G16(dst) == 0 && G32(dst + 4) && G8(G32(dst + 4)) == 0,
+          "RtlUnicodeStringToAnsiString(L\"\", alloc): success, Length 0", d);
+    G16(dst) = 0xFFFF; G16(dst + 2) = 8; G32(dst + 4) = buf + 0x80; G8(buf + 0x80) = 0xAA;
+    st = CALL(ORD_U2A, dst, src, 0);
+    snprintf(d, sizeof d, "status 0x%08X Length %u", st, G16(dst));
+    check(st == 0 && G16(dst) == 0 && G8(buf + 0x80) == 0,
+          "RtlUnicodeStringToAnsiString(L\"\") into a buffer: success, terminated", d);
+
+    /* A non-empty one still converts. */
+    G16(src) = 3; G16(src + 2) = 4; G32(src + 4) = buf + 0xC0; memcpy(GP(buf + 0xC0), "abc", 4);
+    G16(dst) = 0; G16(dst + 2) = 0; G32(dst + 4) = 0;
+    st = CALL(ORD_A2U, dst, src, 1);
+    check(st == 0 && G16(dst) == 6 && G16(G32(dst + 4)) == 'a' && G16(G32(dst + 4) + 6) == 0,
+          "\"abc\" still converts (Length 6, terminated)", NULL);
+}
+
+/* ---- Many kernel timers at once (KRN-9) ------------------------------- */
+static void test_many_timers(void)
+{
+    enum { N = 40 };
+    char d[160];
+    uint32_t t = xbox_HeapAlloc(N * 40u, 16), timeout = g_scratch + 0xA00, i, fired = 0, st = 0,
+             first_late = 0;
+
+    printf("kernel timers\n");
+    if (!t) { check(0, "40 KTIMERs allocated", NULL); return; }
+    for (i = 0; i < N; i++)
+        CALL(ORD_KEINITTIMER, t + i * 40u, 0);                 /* notification */
+    for (i = 0; i < N; i++)                                    /* 20 ms, relative, no DPC */
+        CALL(ORD_KESETTIMER, t + i * 40u, (uint32_t)-200000, 0xFFFFFFFFu, 0);
+    G32(timeout) = (uint32_t)-20000000;                        /* 2 s, relative */
+    G32(timeout + 4) = 0xFFFFFFFFu;
+    for (i = 0; i < N; i++) {
+        uint32_t r = CALL(ORD_KEWAIT, t + i * 40u, 0, 0, 0, timeout);
+        if (r == 0) {
+            fired++;
+        } else if (!first_late) {
+            first_late = i + 1;
+            st = r;
+            G32(timeout) = 0;                                  /* the rest: no waiting */
+            G32(timeout + 4) = 0;
+        }
+    }
+    snprintf(d, sizeof d, "%u of %u fired; timer #%u: 0x%08X", fired, (unsigned)N, first_late, st);
+    check(fired == N, "40 kernel timers armed at once all fire", d);
 }
 
 /* ---- FileRenameInformation -------------------------------------------- */
@@ -488,6 +608,9 @@ int main(int argc, char **argv)
     xbox_kernel_bridge_init();
 
     test_virtual_memory();
+    test_pinned_contiguous();
+    test_empty_strings();
+    test_many_timers();
     test_rename(cache);
     test_overwrite(cache);
     test_threads();

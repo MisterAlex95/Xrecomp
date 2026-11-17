@@ -11,6 +11,7 @@
 
 #include "kernel.h"
 #include <string.h>
+#include <ctype.h>
 
 /* ============================================================================
  * Type Object Pointers
@@ -352,11 +353,24 @@ static void xbox_copy_ansi(char* dst, size_t dst_size, PXBOX_ANSI_STRING src)
     dst[n] = '\0';
 }
 
+/* The object manager ignores case: "\??\z:" and "\??\Z:" are one link.
+ * With strcmp a title that registered the lower-case form was never found
+ * (kernel_path.c looks the letter up in upper case), and the two spellings
+ * did not collide. */
+static int xbox_link_name_eq(const char* a, const char* b)
+{
+    for (; *a && *b; a++, b++) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+            return 0;
+    }
+    return *a == *b;
+}
+
 static XBOX_SYMLINK* xbox_find_symlink(const char* name)
 {
     int i;
     for (i = 0; i < XBOX_MAX_SYMLINKS; i++) {
-        if (g_symlinks[i].used && strcmp(g_symlinks[i].link, name) == 0)
+        if (g_symlinks[i].used && xbox_link_name_eq(g_symlinks[i].link, name))
             return &g_symlinks[i];
     }
     return NULL;

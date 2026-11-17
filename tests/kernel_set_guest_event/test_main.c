@@ -276,6 +276,36 @@ int main(int argc, char **argv)
         check(r == 1 && G(OTHER_VA)[1] == 1, "4c. a set still returns 1, SignalState 1", NULL);
         r = (int)ke_wait(STACK_MAIN, OTHER_VA, ZERO_VA);
         check(r == 0, "4d. the next wait succeeds", NULL);
+
+        /* 5. KRN-2: events at many distinct addresses, each cleared after
+         * use as a stack frame or heap block is. The shadow table held
+         * 4096 and never let one go: from then on a set returned 0 and the
+         * wait failed at once. */
+        {
+            enum { N = 6000 };
+            uint32_t base = xbox_HeapAlloc(N * 16u, 4096), i, bad = 0, first_bad = 0;
+            for (i = 0; base && i < N; i++) {
+                uint32_t va = base + i * 16u, st;
+                build_event(va, 1, 0);
+                r = xbox_KeSetGuestEvent(va);
+                st = ke_wait(STACK_MAIN, va, ZERO_VA);
+                if (r != 1 || st != 0) {
+                    if (!bad++) first_bad = i;
+                }
+                G(va)[0] = G(va)[1] = G(va)[2] = G(va)[3] = 0;   /* the frame is gone */
+            }
+            snprintf(d, sizeof d, "%u of %u failed, the first at #%u", bad, (unsigned)N, first_bad);
+            check(base && bad == 0, "5a. 6000 events at distinct addresses: each set wakes its wait", d);
+            /* An address reused for the other kind of event gets that kind. */
+            build_event(base, 0, 0);                          /* notification now */
+            r = xbox_KeSetGuestEvent(base);
+            {
+                uint32_t a = ke_wait(STACK_MAIN, base, ZERO_VA), b = ke_wait(STACK_MAIN, base, ZERO_VA);
+                snprintf(d, sizeof d, "set %d, waits 0x%08X 0x%08X", r, a, b);
+                check(r == 1 && a == 0 && b == 0,
+                      "5b. reused as a notification event: stays set for two waits", d);
+            }
+        }
     }
 
     xbox_MemoryLayoutShutdown();

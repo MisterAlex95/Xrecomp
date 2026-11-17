@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.20)
+project(kernel_file_pread_test C)
+# Positioned NtReadFile / NtWriteFile from two threads on one handle (KRN-1).
+# POSIX backend; the Win32 one passes an OVERLAPPED offset and is skipped (77).
+set(CMAKE_C_STANDARD 11)
+add_subdirectory(../.. runtime)
+add_executable(kernel_file_pread_test test_main.c)
+target_include_directories(kernel_file_pread_test PRIVATE ../../src/kernel)
+target_link_libraries(kernel_file_pread_test PRIVATE xboxrecomp)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(kernel_file_pread_test PRIVATE Threads::Threads)
+endif()
+enable_testing()
+add_test(NAME kernel_file_pread_test COMMAND kernel_file_pread_test)
+set_tests_properties(kernel_file_pread_test PROPERTIES SKIP_RETURN_CODE 77)

@@ -470,6 +470,60 @@ static void test_case_folding(void)
 }
 #endif
 
+/* Nothing leaves the game and save trees (KRN-7), and links are matched
+ * ignoring case and followed a bounded number of times (KRN-14). */
+static int translates(const char *guest)
+{
+    xbox_host_char buf[MAX_PATH];
+    return xbox_translate_path(guest, buf, MAX_PATH) ? 1 : 0;
+}
+
+static void link_set(const char *name, const char *target, int create)
+{
+    XBOX_ANSI_STRING l, t;
+    l.Buffer = (PCHAR)name; l.Length = (USHORT)strlen(name); l.MaximumLength = (USHORT)(l.Length + 1);
+    t.Buffer = (PCHAR)target; t.Length = (USHORT)strlen(target); t.MaximumLength = (USHORT)(t.Length + 1);
+    if (create)
+        xbox_IoCreateSymbolicLink(&l, &t);
+    else
+        xbox_IoDeleteSymbolicLink(&l);
+}
+
+static void test_refusals_and_links(void)
+{
+    char want[1200];
+    XBOX_ANSI_STRING l, t;
+
+    printf("\npaths that leave the sandbox, and links\n");
+    set_env("RECOMP_SAVE_DIR", NULL);
+    xbox_path_init(g_game, g_save);
+
+    check(!translates("D:\\..\\x"), "D:\\..\\x is refused");
+    check(!translates("T:\\a\\..\\..\\x"), "T:\\a\\..\\..\\x is refused");
+    check(!translates("\\Device\\Harddisk0\\Partition1\\..\\..\\x"), "Partition1\\..\\..\\x is refused");
+    check(!translates("D:\\a/../../x"), "a '..' after a forward slash is refused");
+    check(!translates("\\Nope\\x"), "an unrecognized device path is refused");
+    check(!translates("x.dat"), "a bare name is refused");
+    snprintf(want, sizeof want, "%s" SEP "a..b" SEP "..x", g_game);
+    expect("D:\\a..b\\..x", want, "names that only contain dots still translate");
+
+    /* "\??\z:" and "\??\Z:" are one link. */
+    link_set("\\??\\w:", "\\Device\\Harddisk0\\Partition1\\", 1);
+    snprintf(want, sizeof want, "%s" SEP "media" SEP "a.ipk", g_game);
+    expect("W:\\media\\a.ipk", want, "a link registered in lower case is found");
+    l.Buffer = (PCHAR)"\\??\\W:"; l.Length = 6; l.MaximumLength = 7;
+    t.Buffer = (PCHAR)"\\Device\\CdRom0\\"; t.Length = (USHORT)strlen(t.Buffer);
+    t.MaximumLength = (USHORT)(t.Length + 1);
+    check(xbox_IoCreateSymbolicLink(&l, &t) == STATUS_OBJECT_NAME_COLLISION,
+          "the upper-case spelling collides with it");
+    check(xbox_IoDeleteSymbolicLink(&l) == STATUS_SUCCESS, "and deletes it");
+
+    /* A link to its own letter: bounded, not a host stack overflow. */
+    link_set("\\??\\Z:", "Z:\\", 1);
+    check(!translates("Z:\\loop.bin"), "a link to itself is refused, not followed for ever");
+    link_set("\\??\\Z:", "", 0);
+}
+
 int main(int argc, char **argv)
 {
     /* argv[1]: write the report there (Proton drops a console exe's stdout) */
@@ -501,6 +555,7 @@ int main(int argc, char **argv)
     test_save_dir_root();
     test_legacy_saves();
     test_utility_drive();
+    test_refusals_and_links();
 #if !defined(_WIN32)
     test_case_folding();
 #endif

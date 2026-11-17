@@ -90,6 +90,28 @@ static NTSTATUS open_for_delete(const char *path, HANDLE *out)
                              NULL, 0x80, 0x7 /* share all */, XBOX_FILE_OPEN, 0x20);
 }
 
+static NTSTATUS open_dir_for_delete(const char *path, HANDLE *out)
+{
+    XBOX_ANSI_STRING name;
+    XBOX_OBJECT_ATTRIBUTES oa;
+    XBOX_IO_STATUS_BLOCK ios;
+    attrs(&name, &oa, path);
+    *out = NULL;
+    return xbox_NtCreateFile(out, 0x00110000u /* DELETE|SYNC */, &oa, &ios,
+                             NULL, 0, 0x7, XBOX_FILE_OPEN, XBOX_FILE_DIRECTORY_FILE | 0x20);
+}
+
+static int dir_exists(const char *p)
+{
+#if defined(_WIN32)
+    DWORD a = GetFileAttributesA(p);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
 static NTSTATUS set_disposition(HANDLE h, BOOLEAN del)
 {
     XBOX_FILE_DISPOSITION_INFORMATION info;
@@ -182,6 +204,34 @@ int main(void)
     check(has_delete_line(buf, "by_path.dat"), "NtDeleteFile's line names its file");
     check(has_delete_line(buf, "by_handle.dat"), "the disposition's line names its file");
     check(!has_delete_line(buf, "kept.dat"), "the file left alone has no delete line");
+
+    /* XAPI's RemoveDirectory: open the directory, set the disposition,
+     * close. unlink() alone left it there and reported success (KRN-3). */
+    {
+        char d[700], inner[720];
+        snprintf(d, sizeof d, "%s" SEP "Save1", g_cache);
+#if defined(_WIN32)
+        CreateDirectoryA(d, NULL);
+#else
+        mkdir(d, 0755);
+#endif
+        snprintf(inner, sizeof inner, "%s" SEP "Save1" SEP "x.dat", g_cache);
+        f = fopen(inner, "wb");
+        if (f) fclose(f);
+        check(open_dir_for_delete("z:\\Save1", &h) == STATUS_SUCCESS && h, "open a save directory for delete");
+        check(set_disposition(h, TRUE) == STATUS_DIRECTORY_NOT_EMPTY,
+              "disposition on a non-empty directory: DIRECTORY_NOT_EMPTY");
+        xbox_NtClose(h);
+        check(dir_exists(d), "... and it is still there");
+        check(delete_path("z:\\Save1") == STATUS_DIRECTORY_NOT_EMPTY,
+              "NtDeleteFile on a non-empty directory: DIRECTORY_NOT_EMPTY");
+        check(delete_path("z:\\Save1\\x.dat") == STATUS_SUCCESS, "delete the file in it");
+        check(open_dir_for_delete("z:\\Save1", &h) == STATUS_SUCCESS && h, "open the empty directory for delete");
+        check(set_disposition(h, TRUE) == STATUS_SUCCESS, "disposition on the empty directory");
+        xbox_NtClose(h);
+        check(!dir_exists(d), "the disposition removed the directory");
+        check(delete_path("z:\\Save1") == STATUS_OBJECT_NAME_NOT_FOUND, "deleting it again: NAME_NOT_FOUND");
+    }
 
     {
         char cmd[700];

@@ -17,6 +17,7 @@
 #define _GNU_SOURCE   /* FNM_CASEFOLD */
 #include "kernel.h"
 #include "prep_progress.h"
+#include <stddef.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,6 +125,47 @@ static NTSTATUS fs_query_common(int disc, PVOID buf, ULONG len, int cls, ULONG *
         *known = 0;
         return STATUS_NOT_IMPLEMENTED;
     }
+}
+
+/* IoStatusBlock->Information after a successful create: what happened, as
+ * NT reports it (FILE_SUPERSEDED 0, FILE_OPENED 1, FILE_CREATED 2,
+ * FILE_OVERWRITTEN 3). XAPI's CreateFile derives its last error from it:
+ * OPEN_ALWAYS + FILE_OPENED and CREATE_ALWAYS + FILE_OVERWRITTEN set
+ * ERROR_ALREADY_EXISTS. It was "2 for FILE_CREATE, else 1", so an
+ * OPEN_ALWAYS that created the file said it already existed. */
+static ULONG create_information(ULONG disposition, int existed)
+{
+    if (!existed)
+        return 2;                                   /* FILE_CREATED */
+    switch (disposition) {
+        case XBOX_FILE_SUPERSEDE:    return 0;      /* FILE_SUPERSEDED */
+        case XBOX_FILE_OVERWRITE:
+        case XBOX_FILE_OVERWRITE_IF: return 3;      /* FILE_OVERWRITTEN */
+        default:                     return 1;      /* FILE_OPENED */
+    }
+}
+
+/* NtQueryDirectoryFile's buffer rules, for every backend. A buffer smaller
+ * than the entry header is STATUS_INFO_LENGTH_MISMATCH before anything is
+ * consumed; the header was written whatever Length said, past the end of a
+ * short buffer. A name that does not fit is copied as far as it goes and
+ * the call answers STATUS_BUFFER_OVERFLOW with the bytes actually returned;
+ * it answered success and counted a name it had not copied. */
+#define DIR_ENTRY_HEADER ((ULONG)offsetof(XBOX_FILE_DIRECTORY_INFORMATION, FileName))
+
+static NTSTATUS dir_entry_name(PXBOX_FILE_DIRECTORY_INFORMATION entry, ULONG Length,
+                               const char *name, ULONG name_len,
+                               PXBOX_IO_STATUS_BLOCK IoStatusBlock)
+{
+    ULONG room = Length - DIR_ENTRY_HEADER;
+    ULONG copy = name_len < room ? name_len : room;
+    NTSTATUS st = copy < name_len ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+    entry->FileNameLength = name_len;
+    if (copy)
+        memcpy(entry->FileName, name, copy);
+    IoStatusBlock->Status = st;
+    IoStatusBlock->Information = DIR_ENTRY_HEADER + copy;
+    return st;
 }
 
 #if defined(_WIN32)
@@ -309,7 +351,10 @@ static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
         return FALSE;
     if (ObjectAttributes->RootDirectory && xbox_path[0] != '\\' &&
         !(xbox_path[0] && xbox_path[1] == ':')) {
-        /* XDeleteSaveGame opens each child relative to its save directory. */
+        /* XDeleteSaveGame opens each child relative to its save directory.
+         * No "..": it would climb out of the directory (KRN-7). */
+        if (xbox_path_has_dot_dot(xbox_path))
+            return FALSE;
         DWORD used = GetFinalPathNameByHandleW(ObjectAttributes->RootDirectory,
             win_path, buf_size, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
         if (!used || used >= buf_size || used + 1 >= buf_size) return FALSE;
@@ -330,6 +375,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     WCHAR win_path[MAX_PATH];
     HANDLE h;
     DWORD flags_and_attrs = FILE_ATTRIBUTE_NORMAL;
+    int existed = 1, device_dir = 0;
     (void)AllocationSize;
 
     if (!FileHandle || !ObjectAttributes)
@@ -358,6 +404,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
         WCHAR *slash = wcsrchr(win_path, L'\\');
         if (slash && slash != win_path) {
             *slash = 0;
+            device_dir = 1;
             xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE,
                      "NtCreateFile: directory open of a device image, "
                      "using its containing directory instead");
@@ -373,8 +420,21 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     }
 
     if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
-        if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
-            CreateDirectoryW(win_path, NULL);
+        if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF) {
+            if (CreateDirectoryW(win_path, NULL))
+                existed = 0;
+            else if (GetLastError() == ERROR_ALREADY_EXISTS
+                     && CreateDisposition == XBOX_FILE_CREATE && !device_dir) {
+                /* CreateDirectory / XCreateSaveGame(CREATE_NEW) on an
+                 * existing one must fail, as on the console. */
+                g_xbox_last_file_error = ERROR_ALREADY_EXISTS;
+                if (IoStatusBlock) {
+                    IoStatusBlock->Status = STATUS_OBJECT_NAME_COLLISION;
+                    IoStatusBlock->Information = 0;
+                }
+                return STATUS_OBJECT_NAME_COLLISION;
+            }
+        }
         h = CreateFileW(win_path, xbox_access_to_win32(DesiredAccess),
             xbox_share_to_win32(ShareAccess), NULL, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS, NULL);
@@ -407,6 +467,15 @@ NTSTATUS __stdcall xbox_NtCreateFile(
             h = CreateFileW(win_path, access,
                 xbox_share_to_win32(ShareAccess), NULL,
                 xbox_disposition_to_win32(CreateDisposition), flags_and_attrs, NULL);
+            /* OPEN_ALWAYS / CREATE_ALWAYS say ERROR_ALREADY_EXISTS on success
+             * when the file was there; CREATE_NEW always creates. */
+            if (h != INVALID_HANDLE_VALUE) {
+                DWORD how = xbox_disposition_to_win32(CreateDisposition);
+                if (how == CREATE_NEW)
+                    existed = 0;
+                else if (how == OPEN_ALWAYS || how == CREATE_ALWAYS)
+                    existed = GetLastError() == ERROR_ALREADY_EXISTS;
+            }
             /* A HANDLE value is reused once closed, and a pending handle
              * closed by DuplicateHandle(DUPLICATE_CLOSE_SOURCE) never went
              * through xbox_NtClose, so its mark may still be in the table.
@@ -448,7 +517,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     *FileHandle = h;
     if (IoStatusBlock) {
         IoStatusBlock->Status = STATUS_SUCCESS;
-        IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
+        IoStatusBlock->Information = create_information(CreateDisposition, existed);
     }
     XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile: %S -> handle=%p", win_path, h);
     return STATUS_SUCCESS;
@@ -554,6 +623,8 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE, "delete %S", win_path);
     if (DeleteFileW(win_path))    return STATUS_SUCCESS;
     if (RemoveDirectoryW(win_path)) return STATUS_SUCCESS;
+    if (GetLastError() == ERROR_DIR_NOT_EMPTY)
+        return STATUS_DIRECTORY_NOT_EMPTY;
     return STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
@@ -743,9 +814,17 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
                     wcscpy_s(p, MAX_PATH, L"(handle)");
                 xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE, "delete %S", p);
             }
-            if (!SetFileInformationByHandle(FileHandle, FileDispositionInfo, &fdi, sizeof(fdi)))
+            if (!SetFileInformationByHandle(FileHandle, FileDispositionInfo, &fdi, sizeof(fdi))) {
+                DWORD err = GetLastError();
                 xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE,
-                         "SetFileDispositionInfo failed: err=%u", GetLastError());
+                         "SetFileDispositionInfo failed: err=%u", err);
+                /* XAPI's RemoveDirectory reports this one to the title, as the
+                 * POSIX backend does (ENOTEMPTY). */
+                if (err == ERROR_DIR_NOT_EMPTY) {
+                    IoStatusBlock->Status = STATUS_DIRECTORY_NOT_EMPTY;
+                    return STATUS_DIRECTORY_NOT_EMPTY;
+                }
+            }
             IoStatusBlock->Status = STATUS_SUCCESS;
             return STATUS_SUCCESS;
         }
@@ -935,6 +1014,10 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
         IoStatusBlock->Status = STATUS_INVALID_INFO_CLASS;
         return STATUS_INVALID_INFO_CLASS;
     }
+    if (Length < DIR_ENTRY_HEADER) {
+        IoStatusBlock->Status = STATUS_INFO_LENGTH_MISMATCH;
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
 
     ctx = find_or_create_dir_context(FileHandle, TRUE);
     if (!ctx)
@@ -1013,15 +1096,8 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     entry->EndOfFile.QuadPart = ((LONGLONG)ctx->find_data.nFileSizeHigh << 32) | ctx->find_data.nFileSizeLow;
     entry->AllocationSize.QuadPart = (entry->EndOfFile.QuadPart + 4095) & ~4095LL;
     entry->FileAttributes = ctx->find_data.dwFileAttributes;
-    entry->FileNameLength = name_len;
-    {
-        ULONG header_size = (ULONG)((ULONG_PTR)&((PXBOX_FILE_DIRECTORY_INFORMATION)0)->FileName);
-        if (name_len > 0 && (header_size + name_len) <= Length)
-            memcpy(entry->FileName, filename_ansi, name_len);
-        IoStatusBlock->Status = STATUS_SUCCESS;
-        IoStatusBlock->Information = header_size + name_len;
-    }
-    return STATUS_SUCCESS;
+    return dir_entry_name(entry, Length, filename_ansi, name_len > 0 ? (ULONG)name_len : 0,
+                          IoStatusBlock);
 }
 
 
@@ -1038,6 +1114,8 @@ NTSTATUS __stdcall xbox_RenameFileByHandle(
 
     if (!name || !*name)
         return STATUS_INVALID_PARAMETER;
+    if (xbox_path_has_dot_dot(name))
+        return STATUS_OBJECT_NAME_INVALID;
     n = GetFinalPathNameByHandleW(FileHandle, src, MAX_PATH,
                                   FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     if (!n || n >= MAX_PATH)
@@ -1167,6 +1245,62 @@ static int overwrite_take(int fd)
     return 0;
 }
 
+/* Reads and writes at an explicit ByteOffset.
+ *
+ * They were lseek() then read()/write(): two calls on a file position that
+ * every user of the handle shares (a duplicated handle is the same object,
+ * so the same fd). Two guest threads streaming from one pack file with
+ * explicit offsets -- a loader and a music stream -- interleaved as
+ * lseek(A), lseek(B), read -> the bytes at B, reported as a successful read
+ * at A. Kernel calls drop the guest CPU lock, so that lock does not order
+ * them. pread()/pwrite() take the offset in the call. A regular file is read
+ * until Length or end of file, so a short read does not look like the end.
+ * Afterwards the position is left after the bytes moved, as NT does for a
+ * synchronous handle and as the lseek() version did; reads without an offset
+ * still use it. (The Win32 backend passes an OVERLAPPED offset, which is
+ * already positioned I/O.) */
+static ssize_t positioned_read(int fd, void *buf, size_t len, off_t off)
+{
+    size_t done = 0;
+
+    while (done < len) {
+        ssize_t n = pread(fd, (char *)buf + done, len - done, off + (off_t)done);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            if (done == 0)
+                return -1;
+            break;
+        }
+        if (n == 0)
+            break;
+        done += (size_t)n;
+    }
+    lseek(fd, off + (off_t)done, SEEK_SET);
+    return (ssize_t)done;
+}
+
+static ssize_t positioned_write(int fd, const void *buf, size_t len, off_t off)
+{
+    size_t done = 0;
+
+    while (done < len) {
+        ssize_t n = pwrite(fd, (const char *)buf + done, len - done, off + (off_t)done);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            if (done == 0)
+                return -1;
+            break;
+        }
+        if (n == 0)
+            break;
+        done += (size_t)n;
+    }
+    lseek(fd, off + (off_t)done, SEEK_SET);
+    return (ssize_t)done;
+}
+
 static void unix_to_filetime(time_t sec, long nsec, LARGE_INTEGER* out)
 {
     /* 100-ns ticks since 1601-01-01 */
@@ -1221,6 +1355,22 @@ static NTSTATUS errno_to_status(int e)
     }
 }
 
+/* Remove a file or an empty directory: unlink for a file, rmdir for a
+ * directory, which unlink refuses. A directory that still has entries is
+ * STATUS_DIRECTORY_NOT_EMPTY, as on the console; the rest through
+ * errno_to_status. An open file or directory goes on its last close on
+ * Linux, which matches NT's delete-on-close closely enough. */
+static NTSTATUS delete_host_path(const char *p, int is_dir)
+{
+    int e;
+    if ((is_dir ? rmdir(p) : unlink(p)) == 0)
+        return STATUS_SUCCESS;
+    e = errno;
+    if (e == ENOTEMPTY || e == EEXIST)
+        return STATUS_DIRECTORY_NOT_EMPTY;
+    return errno_to_status(e);
+}
+
 /* Translate an Xbox OBJECT_ATTRIBUTES path to a host path.
  *
  * A name relative to a RootDirectory handle is joined to that handle's host
@@ -1242,7 +1392,9 @@ static int posix_obj_path(PXBOX_OBJECT_ATTRIBUTES oa, char* host_path, size_t n)
         size_t dir;
         char* p;
 
-        if (!base)
+        /* No "..", no host-absolute name: either would leave the
+         * directory the handle names (KRN-7). */
+        if (!base || xbox_path[0] == '/' || xbox_path_has_dot_dot(xbox_path))
             return 0;
         dir = strlen(base);
         while (dir > 1 && base[dir - 1] == '/')
@@ -1254,6 +1406,11 @@ static int posix_obj_path(PXBOX_OBJECT_ATTRIBUTES oa, char* host_path, size_t n)
         strcpy(host_path + dir + 1, xbox_path);
         for (p = host_path + dir + 1; *p; p++)
             if (*p == '\\') *p = '/';
+        /* Case-insensitive like a full path: "DATA.SSX" relative to the
+         * save directory opens Data.ssx. The disc image ignores case
+         * already. */
+        if (!xbox_disc_rel(host_path))
+            xbox_path_fold_case(host_path, dir);
         return 1;
     }
     return xbox_translate_path(xbox_path, host_path, (DWORD)n) ? 1 : 0;
@@ -1367,7 +1524,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
                                CreateDisposition, CreateOptions);
     }
 
-    int fd;
+    int fd, existed = 1, device_dir = 0;
     /* A partition device opened as a directory: the volume, for a free-space
      * query, rather than the image's bytes. As in the Win32 backend, the
      * directory holding the image answers that. */
@@ -1377,6 +1534,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
             char *slash = strrchr(host_path, '/');
             if (slash && slash != host_path) {
                 *slash = '\0';
+                device_dir = 1;
                 xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE,
                          "NtCreateFile: directory open of a device image, "
                          "using its containing directory instead");
@@ -1384,9 +1542,22 @@ NTSTATUS __stdcall xbox_NtCreateFile(
         }
     }
     if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
-        if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
-            mkdir(host_path, 0755);   /* EEXIST is fine */
-        fd = open(host_path, O_RDONLY | O_DIRECTORY);
+        /* EEXIST is an open for FILE_OPEN_IF, and for FILE_CREATE the
+         * console's STATUS_OBJECT_NAME_COLLISION: CreateDirectory or
+         * XCreateSaveGame(CREATE_NEW) on an existing one fails. */
+        int collide = 0;
+        if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF) {
+            if (mkdir(host_path, 0755) == 0)
+                existed = 0;
+            else if (errno == EEXIST && CreateDisposition == XBOX_FILE_CREATE && !device_dir)
+                collide = 1;
+        }
+        if (collide) {
+            fd = -1;
+            errno = EEXIST;
+        } else {
+            fd = open(host_path, O_RDONLY | O_DIRECTORY);
+        }
     } else {
         int flags = posix_open_flags(DesiredAccess, CreateDisposition);
         struct stat st;
@@ -1395,7 +1566,21 @@ NTSTATUS __stdcall xbox_NtCreateFile(
                  && st.st_size > 0;
         if (defer)
             flags &= ~O_TRUNC;
-        fd = open(host_path, flags, 0644);
+        /* Did the open create the file? O_EXCL first tells, without a
+         * stat that another open could race. */
+        if (flags & O_EXCL) {
+            fd = open(host_path, flags, 0644);
+            existed = 0;
+        } else if ((flags & O_CREAT) && !defer) {
+            fd = open(host_path, flags | O_EXCL, 0644);
+            existed = 0;
+            if (fd < 0 && errno == EEXIST) {
+                fd = open(host_path, flags, 0644);
+                existed = 1;
+            }
+        } else {
+            fd = open(host_path, flags, 0644);
+        }
         /* open(2) hands back a directory fd for a read-only open; the console
          * refuses a directory under FILE_NON_DIRECTORY_FILE, and so does the
          * Win32 backend (CreateFileW without backup semantics). */
@@ -1449,7 +1634,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     *FileHandle = w32_open_handle(fd, host_path);
     if (IoStatusBlock) {
         IoStatusBlock->Status = STATUS_SUCCESS;
-        IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
+        IoStatusBlock->Information = create_information(CreateDisposition, existed);
     }
     XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile: %s -> handle=%p", host_path, *FileHandle);
     return STATUS_SUCCESS;
@@ -1516,14 +1701,16 @@ NTSTATUS __stdcall xbox_NtReadFile(
     }
 
     overwrite_settle(fd);
-    if (ByteOffset && ByteOffset->QuadPart >= 0)
-        lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
 
     /* read() into a write-protected code page would fail with EFAULT, not
      * fault: open it first, which names it (XBA-118, recomp_smc.h). Weak:
      * a test that links this file alone has no recomp_smc.c. */
     xbox_SmcHostWrite(Buffer, Length);
-    ssize_t n = read(fd, Buffer, Length);
+    ssize_t n;
+    if (ByteOffset && ByteOffset->QuadPart >= 0)
+        n = positioned_read(fd, Buffer, Length, (off_t)ByteOffset->QuadPart);
+    else
+        n = read(fd, Buffer, Length);
     if (n < 0) {
         XBOX_TRACE(XBOX_LOG_FILE, "NtReadFile(handle=%p) errno=%d", FileHandle, errno);
         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
@@ -1563,10 +1750,12 @@ NTSTATUS __stdcall xbox_NtWriteFile(
     }
 
     overwrite_settle(fd);
-    if (ByteOffset && ByteOffset->QuadPart >= 0)
-        lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
 
-    ssize_t n = write(fd, Buffer, Length);
+    ssize_t n;
+    if (ByteOffset && ByteOffset->QuadPart >= 0)
+        n = positioned_write(fd, Buffer, Length, (off_t)ByteOffset->QuadPart);
+    else
+        n = write(fd, Buffer, Length);
     if (n < 0) {
         XBOX_TRACE(XBOX_LOG_FILE, "NtWriteFile(handle=%p) errno=%d", FileHandle, errno);
         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
@@ -1606,9 +1795,16 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
         return STATUS_ACCESS_DENIED;
     }
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE, "delete %s", host_path);
-    if (unlink(host_path) == 0) return STATUS_SUCCESS;
-    if (rmdir(host_path)  == 0) return STATUS_SUCCESS;
-    return STATUS_OBJECT_NAME_NOT_FOUND;
+    {
+        struct stat st;
+        if (lstat(host_path, &st) != 0) {
+            int e = errno;
+            if (e == ENOTDIR || (e == ENOENT && !xbox_host_parent_exists(host_path)))
+                return STATUS_OBJECT_PATH_NOT_FOUND;
+            return errno_to_status(e);
+        }
+        return delete_host_path(host_path, S_ISDIR(st.st_mode));
+    }
 }
 
 NTSTATUS __stdcall xbox_NtQueryInformationFile(
@@ -1846,11 +2042,24 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
             PXBOX_FILE_DISPOSITION_INFORMATION info = (PXBOX_FILE_DISPOSITION_INFORMATION)FileInformation;
             /* POSIX: unlinking an open file removes it on last close -- this
              * matches NT "delete on close" semantics exactly. */
+            /* A directory (XAPI's RemoveDirectory: open it with
+             * FILE_DIRECTORY_FILE, set the disposition, close) needs rmdir:
+             * unlink() fails on it with EISDIR / EPERM, and the directory
+             * used to stay while the call reported success, so a deleted
+             * save's folder came back in the next enumeration. */
             if (info->DeleteFile) {
                 const char* p = w32_handle_path(FileHandle);
                 if (p) {
+                    struct stat st;
+                    NTSTATUS st_del;
                     xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE, "delete %s", p);
-                    unlink(p);
+                    st_del = delete_host_path(p, fstat(fd, &st) == 0 && S_ISDIR(st.st_mode));
+                    /* Already gone: a second disposition on the handle. */
+                    if (st_del != STATUS_SUCCESS && st_del != STATUS_OBJECT_NAME_NOT_FOUND) {
+                        IoStatusBlock->Status = st_del;
+                        IoStatusBlock->Information = 0;
+                        return st_del;
+                    }
                 }
             }
             IoStatusBlock->Status = STATUS_SUCCESS;
@@ -1899,6 +2108,8 @@ NTSTATUS __stdcall xbox_RenameFileByHandle(
         return STATUS_INVALID_HANDLE;
     if (!name || !*name)
         return STATUS_INVALID_PARAMETER;
+    if (xbox_path_has_dot_dot(name))
+        return STATUS_OBJECT_NAME_INVALID;   /* FATX has no "..": no way out of the tree */
     if (disc_of(FileHandle) || xbox_disc_rel(src)) {
         disc_denied_note(src, "rename");
         return STATUS_ACCESS_DENIED;
@@ -2103,6 +2314,10 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
         IoStatusBlock->Status = STATUS_INVALID_INFO_CLASS;
         return STATUS_INVALID_INFO_CLASS;
     }
+    if (Length < DIR_ENTRY_HEADER) {
+        IoStatusBlock->Status = STATUS_INFO_LENGTH_MISMATCH;
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
 
     {
         /* A directory of the disc image: the same rules as below (pattern
@@ -2139,7 +2354,6 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
                 return STATUS_NO_MORE_FILES;
             }
             PXBOX_FILE_DIRECTORY_INFORMATION entry = (PXBOX_FILE_DIRECTORY_INFORMATION)FileInformation;
-            ULONG header_size = (ULONG)((ULONG_PTR)&((PXBOX_FILE_DIRECTORY_INFORMATION)0)->FileName);
             const char *name = xbox_disc_node_name(c);
             int name_len = (int)strlen(name);
             LONGLONG size = (LONGLONG)xbox_disc_node_size(c);
@@ -2151,12 +2365,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
             entry->EndOfFile.QuadPart = size;
             entry->AllocationSize.QuadPart = (size + 4095) & ~4095LL;
             entry->FileAttributes = disc_attrs(c);
-            entry->FileNameLength = name_len;
-            if (name_len > 0 && (header_size + (ULONG)name_len) <= Length)
-                memcpy(entry->FileName, name, name_len);
-            IoStatusBlock->Status = STATUS_SUCCESS;
-            IoStatusBlock->Information = header_size + name_len;
-            return STATUS_SUCCESS;
+            return dir_entry_name(entry, Length, name, (ULONG)name_len, IoStatusBlock);
         }
     }
 
@@ -2215,8 +2424,9 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
             break;
     }
 
-    char full[MAX_PATH];
+    char full[MAX_PATH], name[256];
     snprintf(full, sizeof(full), "%s/%s", dpath ? dpath : ".", de->d_name);
+    snprintf(name, sizeof(name), "%s", de->d_name);
     if (stat(full, &st) != 0)
         memset(&st, 0, sizeof(st));
     LeaveCriticalSection(&s_dir_cs);
@@ -2224,7 +2434,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     PXBOX_FILE_DIRECTORY_INFORMATION entry = (PXBOX_FILE_DIRECTORY_INFORMATION)FileInformation;
     memset(entry, 0, Length);
 
-    int name_len = (int)strlen(de->d_name);
+    int name_len = (int)strlen(name);
     entry->NextEntryOffset = 0;
     entry->FileIndex = 0;
     unix_to_filetime(st.st_ctime, 0, &entry->CreationTime);
@@ -2234,14 +2444,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     entry->EndOfFile.QuadPart = st.st_size;
     entry->AllocationSize.QuadPart = (st.st_size + 4095) & ~4095LL;
     entry->FileAttributes = mode_to_xbox_attrs(st.st_mode);
-    entry->FileNameLength = name_len;
-
-    ULONG header_size = (ULONG)((ULONG_PTR)&((PXBOX_FILE_DIRECTORY_INFORMATION)0)->FileName);
-    if (name_len > 0 && (header_size + (ULONG)name_len) <= Length)
-        memcpy(entry->FileName, de->d_name, name_len);
-    IoStatusBlock->Status = STATUS_SUCCESS;
-    IoStatusBlock->Information = header_size + name_len;
-    return STATUS_SUCCESS;
+    return dir_entry_name(entry, Length, name, (ULONG)name_len, IoStatusBlock);
 }
 
 /* ── Save states (XBA-246, kernel_kobj_state.h) ──────────────────────────

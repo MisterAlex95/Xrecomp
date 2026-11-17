@@ -187,11 +187,22 @@ ULONG __stdcall xbox_RtlCompareMemoryUlong(PVOID Source, ULONG Length, ULONG Pat
  * Lazily created on first use rather than in RtlInitializeCriticalSection,
  * because a title can perfectly well use a statically zeroed one it never
  * announced.
+ *
+ * The table grows (KRN-6). It was 4096 fixed slots, insert-only: a title
+ * whose objects embed a lock (per stream, per sound buffer) and that
+ * allocates them at new heap addresses all session reached the end, after
+ * which every new lock was a silent no-op -- the Half-Life 2 races above,
+ * back -- and every such call probed all 4096 slots twice. Slots are now
+ * allocated one by one (a lock's address never moves while a thread holds
+ * it) and found through an open-addressed index of pointers that doubles at
+ * half load. Slots are not reclaimed: a guest heap hands addresses back, so
+ * their number is bounded by the distinct addresses ever used as a lock,
+ * and freeing one a thread has just looked up would split the lock.
  */
-#define XBOX_CS_TABLE_SIZE 4096
+#define XBOX_CS_INDEX_START 4096u
 
-typedef struct {
-    uintptr_t        key;        /* guest critical section; 0 means free */
+typedef struct XBOX_CS_SLOT {
+    uintptr_t        key;        /* guest critical section */
     CRITICAL_SECTION cs;
     /* Who holds it, and the guest call site that took it.
      *
@@ -204,22 +215,83 @@ typedef struct {
     volatile uint32_t      owner_site;
     volatile unsigned long owner_tid;
     volatile long          depth;
+    /* The lock this one replaced: RtlInitializeCriticalSection on an
+     * address whose lock was still held (an object freed inside its lock,
+     * a thread that ended in it) gets a fresh lock, as the console resets
+     * LockCount. The old holder's Leave still releases the old one. */
+    struct XBOX_CS_SLOT*   prev;
 } XBOX_CS_SLOT;
 
-static XBOX_CS_SLOT g_cs_table[XBOX_CS_TABLE_SIZE];
+static XBOX_CS_SLOT** g_cs_index;          /* open-addressed, NULL = empty */
+static size_t         g_cs_index_cap;      /* a power of two */
+static size_t         g_cs_count;
+
+static CRITICAL_SECTION g_cs_single;
 
 /* The slot a shadow lock lives in, or NULL if it is not one of ours --
  * RECOMP_CS_MODE=single hands out a lock that belongs to no slot. */
 static XBOX_CS_SLOT* xbox_cs_slot_of(CRITICAL_SECTION* cs)
 {
-    char* p = (char*)cs;
-    if (p < (char*)&g_cs_table[0]
-            || p >= (char*)&g_cs_table[XBOX_CS_TABLE_SIZE])
+    if (!cs || cs == &g_cs_single)
         return NULL;
-    return (XBOX_CS_SLOT*)(p - offsetof(XBOX_CS_SLOT, cs));
+    return (XBOX_CS_SLOT*)((char*)cs - offsetof(XBOX_CS_SLOT, cs));
 }
 static SRWLOCK      g_cs_table_lock = SRWLOCK_INIT;
 static int          g_cs_table_full;
+
+static size_t xbox_cs_home(uintptr_t key, size_t cap)
+{
+    return (size_t)((key >> 4) ^ (key >> 16)) & (cap - 1);
+}
+
+/* The index position holding key, or of the empty slot where it would go.
+ * Under g_cs_table_lock, shared or exclusive. */
+static size_t xbox_cs_probe(uintptr_t key)
+{
+    size_t cap = g_cs_index_cap, i = xbox_cs_home(key, cap);
+    while (g_cs_index[i] && g_cs_index[i]->key != key)
+        i = (i + 1) & (cap - 1);
+    return i;
+}
+
+/* Exclusive. Room for one more entry at most half full; 0 when out of
+ * memory. */
+static int xbox_cs_reserve(void)
+{
+    XBOX_CS_SLOT** grown;
+    size_t cap, i;
+
+    if (g_cs_index && (g_cs_count + 1) * 2 <= g_cs_index_cap)
+        return 1;
+    cap = g_cs_index ? g_cs_index_cap * 2 : XBOX_CS_INDEX_START;
+    grown = (XBOX_CS_SLOT**)calloc(cap, sizeof *grown);
+    if (!grown)
+        return 0;
+    for (i = 0; i < g_cs_index_cap; i++) {
+        XBOX_CS_SLOT* slot = g_cs_index[i];
+        size_t j;
+        if (!slot)
+            continue;
+        j = xbox_cs_home(slot->key, cap);
+        while (grown[j])
+            j = (j + 1) & (cap - 1);
+        grown[j] = slot;
+    }
+    free(g_cs_index);
+    g_cs_index = grown;
+    g_cs_index_cap = cap;
+    return 1;
+}
+
+static XBOX_CS_SLOT* xbox_cs_new_slot(uintptr_t key)
+{
+    XBOX_CS_SLOT* slot = (XBOX_CS_SLOT*)calloc(1, sizeof *slot);
+    if (!slot)
+        return NULL;
+    InitializeCriticalSection(&slot->cs);
+    slot->key = key;
+    return slot;
+}
 
 /* RECOMP_CS_MODE=single puts every guest critical section behind one recursive
  * lock.
@@ -236,7 +308,6 @@ static int          g_cs_table_full;
  * guest thread to make progress -- the runtime's own I/O completes
  * synchronously. That would not hold in general.
  */
-static CRITICAL_SECTION g_cs_single;
 static INIT_ONCE g_cs_single_once = INIT_ONCE_STATIC_INIT;
 static int g_cs_single_mode = -1;   /* 0 shadow, 1 single, 2 guest-struct */
 
@@ -368,11 +439,12 @@ void xbox_rtl_kobj_save(XboxKobjSaveCtx *c)
     }
     LeaveCriticalSection(&g_cs_sem_lock);
 
-    for (i = 0; i < XBOX_CS_TABLE_SIZE; i++) {
-        XBOX_CS_SLOT *slot = &g_cs_table[i];
+    AcquireSRWLockShared(&g_cs_table_lock);
+    for (i = 0; i < g_cs_index_cap; i++) {
+        XBOX_CS_SLOT *slot = g_cs_index[i];
         uint32_t gva;
         XboxKobjBuf *b;
-        if (!slot->key || slot->depth <= 0)
+        if (!slot || slot->depth <= 0)
             continue;
         gva = (uint32_t)(slot->key - (uintptr_t)g_xbox_mem_offset);
         if (xbox_kobj_flags(c) & XBOX_KOBJ_ACROSS_RUNS) {
@@ -387,6 +459,7 @@ void xbox_rtl_kobj_save(XboxKobjSaveCtx *c)
         xbox_kobj_u32(b, (uint32_t)slot->depth);
         xbox_kobj_rec_end(c);
     }
+    ReleaseSRWLockShared(&g_cs_table_lock);
 }
 
 void xbox_rtl_kobj_reset(void)
@@ -437,14 +510,13 @@ int xbox_rtl_kobj_load(XboxKobjLoadCtx *c, uint16_t type, XboxKobjRd *r)
     if (type == XKOB_R_CSHELD) {
         uint32_t gva = xbox_kobj_get32(r), tid = xbox_kobj_get32(r), depth = xbox_kobj_get32(r);
         uintptr_t key = (uintptr_t)gva + (uintptr_t)g_xbox_mem_offset;
-        size_t i;
         int ok = 0;
-        for (i = 0; i < XBOX_CS_TABLE_SIZE; i++)
-            if (g_cs_table[i].key == key) {
-                ok = g_cs_table[i].depth == (long)depth
-                  && (uint32_t)g_cs_table[i].owner_tid == tid;
-                break;
-            }
+        AcquireSRWLockShared(&g_cs_table_lock);
+        if (g_cs_index) {
+            XBOX_CS_SLOT *slot = g_cs_index[xbox_cs_probe(key)];
+            ok = slot && slot->depth == (long)depth && (uint32_t)slot->owner_tid == tid;
+        }
+        ReleaseSRWLockShared(&g_cs_table_lock);
         if (!ok)
             xbox_kobj_fail(c, "critical section 0x%08X: held by thread %u (depth %u) in the "
                               "state, not now", gva, tid, depth);
@@ -485,47 +557,74 @@ static CRITICAL_SECTION* xbox_cs_shadow(PRTL_CRITICAL_SECTION guest)
      * against each other, which mode 0 never did. */
     uintptr_t key = (uintptr_t)guest;
     CRITICAL_SECTION* found = NULL;
-    size_t home, i;
 
     if (!key)
         return NULL;
-    home = (size_t)((key >> 4) % XBOX_CS_TABLE_SIZE);
 
     /* Shared pass first: after start-up almost every call finds an existing
      * entry, and taking the table exclusively for each of those would put a
      * global serialisation point in front of the title's own locks. */
     AcquireSRWLockShared(&g_cs_table_lock);
-    for (i = 0; i < XBOX_CS_TABLE_SIZE; i++) {
-        XBOX_CS_SLOT* slot = &g_cs_table[(home + i) % XBOX_CS_TABLE_SIZE];
-        if (slot->key == key) { found = &slot->cs; break; }
-        if (slot->key == 0) break;
+    if (g_cs_index) {
+        XBOX_CS_SLOT* slot = g_cs_index[xbox_cs_probe(key)];
+        if (slot)
+            found = &slot->cs;
     }
     ReleaseSRWLockShared(&g_cs_table_lock);
     if (found)
         return found;
 
     AcquireSRWLockExclusive(&g_cs_table_lock);
-    for (i = 0; i < XBOX_CS_TABLE_SIZE; i++) {
-        XBOX_CS_SLOT* slot = &g_cs_table[(home + i) % XBOX_CS_TABLE_SIZE];
-        if (slot->key == key) { found = &slot->cs; break; }
-        if (slot->key == 0) {
-            InitializeCriticalSection(&slot->cs);
-            slot->key = key;             /* published last: a shared reader
-                                          * that sees the key sees a live
-                                          * lock behind it */
-            found = &slot->cs;
-            break;
-        }
+    if (xbox_cs_reserve()) {
+        size_t i = xbox_cs_probe(key);
+        if (!g_cs_index[i] && (g_cs_index[i] = xbox_cs_new_slot(key)) != NULL)
+            g_cs_count++;
+        if (g_cs_index[i])
+            found = &g_cs_index[i]->cs;
     }
     ReleaseSRWLockExclusive(&g_cs_table_lock);
 
     if (!found && !g_cs_table_full) {
         g_cs_table_full = 1;
         xbox_log(XBOX_LOG_ERROR, XBOX_LOG_RTL,
-                 "critical-section table full at %d entries; further locks "
-                 "are unprotected", XBOX_CS_TABLE_SIZE);
+                 "critical-section table: out of memory at %lu entries; further "
+                 "locks are unprotected", (unsigned long)g_cs_count);
     }
     return found;
+}
+
+/* RtlInitializeCriticalSection on a lock that is still held: give the
+ * address a fresh host lock. The console resets LockCount to -1, so the
+ * object initialised there starts free; here the old host mutex stayed
+ * owned at depth 1 by the old holder, another thread's Enter blocked for
+ * ever and the same thread's Leave never let it go. The old slot stays
+ * allocated, linked from the new one, for the old holder's Leave. */
+static void xbox_cs_reinit(PRTL_CRITICAL_SECTION guest)
+{
+    uintptr_t key = (uintptr_t)guest;
+    XBOX_CS_SLOT *old = NULL, *fresh = NULL;
+
+    if (!key)
+        return;
+    AcquireSRWLockExclusive(&g_cs_table_lock);
+    if (g_cs_index) {
+        size_t i = xbox_cs_probe(key);
+        old = g_cs_index[i];
+        if (old && old->depth > 0 && (fresh = xbox_cs_new_slot(key)) != NULL) {
+            fresh->prev = old;
+            g_cs_index[i] = fresh;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_cs_table_lock);
+    if (fresh) {
+        static LONG said;
+        if (InterlockedExchange(&said, 1) == 0)
+            fprintf(stderr, "  [CS] guest lock 0x%08X initialised again while thread %lu "
+                            "held it (depth %ld): it starts free with a new host lock "
+                            "(said once)\n",
+                    (uint32_t)(key - (uintptr_t)g_xbox_mem_offset),
+                    (unsigned long)old->owner_tid, old->depth);
+    }
 }
 
 /* Contention is worth saying out loud.
@@ -878,6 +977,18 @@ VOID __stdcall xbox_RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSectio
     {
     CRITICAL_SECTION* cs = xbox_cs_shadow(CriticalSection);
     if (cs) {
+        XBOX_CS_SLOT* slot = xbox_cs_slot_of(cs);
+        unsigned long me = (unsigned long)GetCurrentThreadId();
+        /* The holder of a lock replaced by a re-initialise releases the one
+         * it took, not the fresh one. */
+        if (slot && slot->owner_tid != me) {
+            XBOX_CS_SLOT* old;
+            for (old = slot->prev; old; old = old->prev)
+                if (old->owner_tid == me && old->depth > 0)
+                    break;
+            if (old)
+                cs = &old->cs;
+        }
         InterlockedIncrement(&g_cs_leaves);
         crt_lock_trace("drop", CriticalSection);
         xbox_cs_clear_owner(cs);
@@ -901,7 +1012,8 @@ VOID __stdcall xbox_RtlInitializeCriticalSection(PRTL_CRITICAL_SECTION CriticalS
     }
     /* Creating the shadow here is not required -- Enter does it -- but doing
      * it now keeps the first Enter off the exclusive path. */
-    (void)xbox_cs_shadow(CriticalSection);
+    if (xbox_cs_shadow(CriticalSection) && g_cs_single_mode == 0)
+        xbox_cs_reinit(CriticalSection);
 }
 
 /* ============================================================================

@@ -300,6 +300,25 @@ int main(int argc, char **argv)
         st = ke_multi(SYNC_VA, EXPLICIT_VA, 1);
         check(st == 0 && G(SYNC_VA)[1] == 0,
               "mixed header and explicitly initialized event resolves", NULL);
+
+        /* KRN-10: KeInitializeEvent writes the console's header and keeps
+         * SignalState as the truth, as for an event XDK code builds. */
+        {
+            uint32_t va = scratch + 0x3A00, args[3] = { va, 1, 0 };  /* sync, unset */
+            call(S_INIT, 3, args);
+            snprintf(d, sizeof d, "header 0x%08X list 0x%08X/0x%08X", G(va)[0], G(va)[2], G(va)[3]);
+            check(G(va)[0] == (1u | (4u << 16)) && G(va)[2] == va + 8 && G(va)[3] == va + 8,
+                  "KeInitializeEvent: Type 1, Size 4, Inserted 0, self-linked list", d);
+            ke_set(va);
+            check(G(va)[1] == 1, "KeSetEvent on it writes SignalState 1 (KeReadStateEvent)", NULL);
+            G(va)[1] = 0;                                        /* XDK clears it inline */
+            st = ke_wait(va);
+            snprintf(d, sizeof d, "status 0x%08X", st);
+            check(st == STATUS_TIMEOUT, "SignalState cleared by the title: the wait times out", d);
+            G(va)[1] = 1;
+            st = ke_wait(va);
+            check(st == 0 && G(va)[1] == 0, "set by the title: the wait succeeds and consumes it", NULL);
+        }
     }
 
     if (!on) {
