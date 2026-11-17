@@ -867,7 +867,15 @@ started:;
             /* Sound: what the field played (800 frames at 60 Hz); averaged down while fast-forwarding. */
             uint64_t ta = now_ns();
             size_t got;
-            while ((got = gc_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2)) > 0) {
+            /* Pulled under s_mu: a state loaded from the menu's thread resets the output ring (sec_dsp), and a
+             * reset between the pull's test of the count and its decrement wrapped the count to 4 billion frames.
+             * Queued to the host outside it. */
+            for (;;) {
+                pthread_mutex_lock(&s_mu);
+                got = gc_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2);
+                pthread_mutex_unlock(&s_mu);
+                if (!got)
+                    break;
                 if (wav)
                     wav_frames += wav_write_frames(wav, pcm, got);
                 for (size_t i = 0; i < 2 * got && !heard; i++)
