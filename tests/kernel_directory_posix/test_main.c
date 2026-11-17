@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -95,6 +96,49 @@ static void independent_searches(void)
     check(ok,"ordinary file close");
     check(xbox_NtClose(NULL)==STATUS_INVALID_HANDLE,"null close retains invalid-handle status");
 }
+/* KRN-13: the guest's Length is honoured. Below the header nothing is
+ * written and nothing consumed; a cut name is STATUS_BUFFER_OVERFLOW with
+ * the bytes actually returned. Names here are "dir3-a.sav" (10 chars). */
+static void short_buffers(void)
+{
+    union { uint64_t alignment; unsigned char bytes[512]; } buf;
+    const ULONG header = (ULONG)offsetof(XBOX_FILE_DIRECTORY_INFORMATION, FileName);
+    XBOX_IO_STATUS_BLOCK ios;
+    XBOX_ANSI_STRING mask = {5, 6, "*.sav"};
+    PXBOX_FILE_DIRECTORY_INFORMATION entry = (void *)buf.bytes;
+    HANDLE h = NULL;
+    NTSTATUS st;
+    int untouched = 1;
+
+    if (open_guest("z:\\dir3", XBOX_FILE_DIRECTORY_FILE, &h) != STATUS_SUCCESS || !h) {
+        check(0, "open z:\\dir3");
+        return;
+    }
+    memset(buf.bytes, 0xAB, sizeof buf.bytes);
+    memset(&ios, 0, sizeof ios);
+    st = xbox_NtQueryDirectoryFile(h, NULL, NULL, NULL, &ios, buf.bytes, 32,
+                                   XboxFileDirectoryInformation, &mask, 1);
+    for (int i = 0; i < (int)sizeof buf.bytes; i++)
+        untouched &= buf.bytes[i] == 0xAB;
+    check(st == STATUS_INFO_LENGTH_MISMATCH && untouched,
+          "Length 32: INFO_LENGTH_MISMATCH, buffer untouched");
+
+    memset(buf.bytes, 0xAB, sizeof buf.bytes);
+    memset(&ios, 0, sizeof ios);
+    st = xbox_NtQueryDirectoryFile(h, NULL, NULL, NULL, &ios, buf.bytes, header + 2,
+                                   XboxFileDirectoryInformation, &mask, 1);
+    check(st == STATUS_BUFFER_OVERFLOW && entry->FileNameLength == 10
+          && ios.Information == header + 2 && memcmp(entry->FileName, "di", 2) == 0
+          && buf.bytes[header + 2] == 0xAB,
+          "Length header+2: BUFFER_OVERFLOW, 2 name bytes, nothing past Length");
+
+    memset(&ios, 0, sizeof ios);
+    st = xbox_NtQueryDirectoryFile(h, NULL, NULL, NULL, &ios, buf.bytes, sizeof buf.bytes,
+                                   XboxFileDirectoryInformation, &mask, 1);
+    check(st == STATUS_SUCCESS && ios.Information == header + 10,
+          "a full buffer: SUCCESS, header + name");
+    xbox_NtClose(h);
+}
 int main(void)
 {
     char root[]="/tmp/xbox-dir-search-XXXXXX",path[512];
@@ -108,7 +152,7 @@ int main(void)
         }
     }
     xbox_path_init(root,root);
-    lifetime();independent_searches();
+    lifetime();independent_searches();short_buffers();
     for(int i=0;i<8;i++) {
         for(int j=0;j<4;j++) {
             snprintf(path,sizeof path,"%s/Cache/dir%d/dir%d-%c.%s",root,i,i,'a'+j,j<3?"sav":"txt");unlink(path);

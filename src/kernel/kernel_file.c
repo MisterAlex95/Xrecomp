@@ -17,6 +17,7 @@
 #define _GNU_SOURCE   /* FNM_CASEFOLD */
 #include "kernel.h"
 #include "prep_progress.h"
+#include <stddef.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -142,6 +143,29 @@ static ULONG create_information(ULONG disposition, int existed)
         case XBOX_FILE_OVERWRITE_IF: return 3;      /* FILE_OVERWRITTEN */
         default:                     return 1;      /* FILE_OPENED */
     }
+}
+
+/* NtQueryDirectoryFile's buffer rules, for every backend. A buffer smaller
+ * than the entry header is STATUS_INFO_LENGTH_MISMATCH before anything is
+ * consumed; the header was written whatever Length said, past the end of a
+ * short buffer. A name that does not fit is copied as far as it goes and
+ * the call answers STATUS_BUFFER_OVERFLOW with the bytes actually returned;
+ * it answered success and counted a name it had not copied. */
+#define DIR_ENTRY_HEADER ((ULONG)offsetof(XBOX_FILE_DIRECTORY_INFORMATION, FileName))
+
+static NTSTATUS dir_entry_name(PXBOX_FILE_DIRECTORY_INFORMATION entry, ULONG Length,
+                               const char *name, ULONG name_len,
+                               PXBOX_IO_STATUS_BLOCK IoStatusBlock)
+{
+    ULONG room = Length - DIR_ENTRY_HEADER;
+    ULONG copy = name_len < room ? name_len : room;
+    NTSTATUS st = copy < name_len ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+    entry->FileNameLength = name_len;
+    if (copy)
+        memcpy(entry->FileName, name, copy);
+    IoStatusBlock->Status = st;
+    IoStatusBlock->Information = DIR_ENTRY_HEADER + copy;
+    return st;
 }
 
 #if defined(_WIN32)
@@ -987,6 +1011,10 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
         IoStatusBlock->Status = STATUS_INVALID_INFO_CLASS;
         return STATUS_INVALID_INFO_CLASS;
     }
+    if (Length < DIR_ENTRY_HEADER) {
+        IoStatusBlock->Status = STATUS_INFO_LENGTH_MISMATCH;
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
 
     ctx = find_or_create_dir_context(FileHandle, TRUE);
     if (!ctx)
@@ -1065,15 +1093,8 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     entry->EndOfFile.QuadPart = ((LONGLONG)ctx->find_data.nFileSizeHigh << 32) | ctx->find_data.nFileSizeLow;
     entry->AllocationSize.QuadPart = (entry->EndOfFile.QuadPart + 4095) & ~4095LL;
     entry->FileAttributes = ctx->find_data.dwFileAttributes;
-    entry->FileNameLength = name_len;
-    {
-        ULONG header_size = (ULONG)((ULONG_PTR)&((PXBOX_FILE_DIRECTORY_INFORMATION)0)->FileName);
-        if (name_len > 0 && (header_size + name_len) <= Length)
-            memcpy(entry->FileName, filename_ansi, name_len);
-        IoStatusBlock->Status = STATUS_SUCCESS;
-        IoStatusBlock->Information = header_size + name_len;
-    }
-    return STATUS_SUCCESS;
+    return dir_entry_name(entry, Length, filename_ansi, name_len > 0 ? (ULONG)name_len : 0,
+                          IoStatusBlock);
 }
 
 
@@ -2279,6 +2300,10 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
         IoStatusBlock->Status = STATUS_INVALID_INFO_CLASS;
         return STATUS_INVALID_INFO_CLASS;
     }
+    if (Length < DIR_ENTRY_HEADER) {
+        IoStatusBlock->Status = STATUS_INFO_LENGTH_MISMATCH;
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
 
     {
         /* A directory of the disc image: the same rules as below (pattern
@@ -2315,7 +2340,6 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
                 return STATUS_NO_MORE_FILES;
             }
             PXBOX_FILE_DIRECTORY_INFORMATION entry = (PXBOX_FILE_DIRECTORY_INFORMATION)FileInformation;
-            ULONG header_size = (ULONG)((ULONG_PTR)&((PXBOX_FILE_DIRECTORY_INFORMATION)0)->FileName);
             const char *name = xbox_disc_node_name(c);
             int name_len = (int)strlen(name);
             LONGLONG size = (LONGLONG)xbox_disc_node_size(c);
@@ -2327,12 +2351,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
             entry->EndOfFile.QuadPart = size;
             entry->AllocationSize.QuadPart = (size + 4095) & ~4095LL;
             entry->FileAttributes = disc_attrs(c);
-            entry->FileNameLength = name_len;
-            if (name_len > 0 && (header_size + (ULONG)name_len) <= Length)
-                memcpy(entry->FileName, name, name_len);
-            IoStatusBlock->Status = STATUS_SUCCESS;
-            IoStatusBlock->Information = header_size + name_len;
-            return STATUS_SUCCESS;
+            return dir_entry_name(entry, Length, name, (ULONG)name_len, IoStatusBlock);
         }
     }
 
@@ -2391,8 +2410,9 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
             break;
     }
 
-    char full[MAX_PATH];
+    char full[MAX_PATH], name[256];
     snprintf(full, sizeof(full), "%s/%s", dpath ? dpath : ".", de->d_name);
+    snprintf(name, sizeof(name), "%s", de->d_name);
     if (stat(full, &st) != 0)
         memset(&st, 0, sizeof(st));
     LeaveCriticalSection(&s_dir_cs);
@@ -2400,7 +2420,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     PXBOX_FILE_DIRECTORY_INFORMATION entry = (PXBOX_FILE_DIRECTORY_INFORMATION)FileInformation;
     memset(entry, 0, Length);
 
-    int name_len = (int)strlen(de->d_name);
+    int name_len = (int)strlen(name);
     entry->NextEntryOffset = 0;
     entry->FileIndex = 0;
     unix_to_filetime(st.st_ctime, 0, &entry->CreationTime);
@@ -2410,14 +2430,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     entry->EndOfFile.QuadPart = st.st_size;
     entry->AllocationSize.QuadPart = (st.st_size + 4095) & ~4095LL;
     entry->FileAttributes = mode_to_xbox_attrs(st.st_mode);
-    entry->FileNameLength = name_len;
-
-    ULONG header_size = (ULONG)((ULONG_PTR)&((PXBOX_FILE_DIRECTORY_INFORMATION)0)->FileName);
-    if (name_len > 0 && (header_size + (ULONG)name_len) <= Length)
-        memcpy(entry->FileName, de->d_name, name_len);
-    IoStatusBlock->Status = STATUS_SUCCESS;
-    IoStatusBlock->Information = header_size + name_len;
-    return STATUS_SUCCESS;
+    return dir_entry_name(entry, Length, name, (ULONG)name_len, IoStatusBlock);
 }
 
 /* ── Save states (XBA-246, kernel_kobj_state.h) ──────────────────────────
