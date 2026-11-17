@@ -47,6 +47,7 @@ static int failures;
 static uint32_t g_thunks, g_stack, g_handles;
 static pthread_t g_main;
 static volatile int g_go, g_started, g_inline;
+static volatile uint32_t g_tibs[64];
 
 static void check(int ok, const char *what, const char *detail)
 {
@@ -88,7 +89,11 @@ static void worker(void)
         __atomic_add_fetch(&g_inline, 1, __ATOMIC_SEQ_CST);
         return;
     }
-    __atomic_add_fetch(&g_started, 1, __ATOMIC_SEQ_CST);
+    {
+        int k = __atomic_fetch_add(&g_started, 1, __ATOMIC_SEQ_CST);
+        if (k < 64)
+            g_tibs[k] = g_fs_base;              /* its own TIB (KRN-8) */
+    }
     while (!__atomic_load_n(&g_go, __ATOMIC_SEQ_CST))
         usleep(1000);
 }
@@ -219,6 +224,26 @@ int main(int argc, char **argv)
     check(st == 0 && wait_started(1) == 1 && g_inline == 0,
           "a new worker starts once the others have ended", d);
     check(release(1), "and ends", NULL);
+
+    /* KRN-8: a worker's TIB + TLS + KTHREAD block goes back with its stack.
+     * It never did, so a title starting a thread per asset leaked one block
+     * per thread until creates failed. */
+    printf("TIBs come back\n");
+    g_started = 0;
+    memset((void *)g_tibs, 0, sizeof g_tibs);
+    for (i = 0, bad = 0; i < 8; i++)
+        bad += spawn(i) != 0;
+    n = wait_started(8);
+    check(bad == 0 && n == 8, "8 workers start", NULL);
+    for (i = 0, bad = 0; i < 8; i++)
+        bad += !g_tibs[i] || !xbox_HeapBlockSize(g_tibs[i]);
+    snprintf(d, sizeof d, "%d without a live TIB block", bad);
+    check(bad == 0, "each runs on a TIB of its own from the guest heap", d);
+    check(release(8), "they end", NULL);
+    for (i = 0, bad = 0; i < 8; i++)
+        bad += xbox_HeapBlockSize(g_tibs[i]) != 0;
+    snprintf(d, sizeof d, "%d of 8 still allocated", bad);
+    check(bad == 0, "their TIB blocks are given back", d);
 
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", tmpl);
     (void)system(cmd);

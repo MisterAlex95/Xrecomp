@@ -506,6 +506,28 @@ static RECOMP_TLS int g_is_spawned_thread = 0;
  * ExitThread from PsTerminateSystemThread -- bridge_thread_main's own return
  * path is the rare one. */
 static RECOMP_TLS uint32_t g_thread_stack_top = 0;
+/* The worker's own TIB + TLS + KTHREAD block (xbox_AllocThreadTib), given
+ * back with its stack when it ends (KRN-8); 0 when it is not ours to free. */
+static RECOMP_TLS uint32_t g_thread_tib = 0;
+
+/* KRN-8: each worker's TIB block (0x40 + image TLS + KTHREAD + 0x140 bytes
+ * of guest heap) was never freed, though its stack was: a title that starts
+ * a thread per streamed asset (the dashboard, one per WAV) leaked one block
+ * and one heap-table entry per thread until creates failed with
+ * STATUS_INSUFFICIENT_RESOURCES. Called on both exit paths, after
+ * thobj_exit. Only a worker with a pool object remembers its block: one
+ * without keeps its KTHREAD inside the TIB, and other threads may still
+ * hold that. */
+static void bridge_free_thread_tib(void)
+{
+    uint32_t tib = g_thread_tib;
+    g_thread_tib = 0;
+    if (tib) {
+        if (g_fs_base == tib)
+            g_fs_base = 0;
+        xbox_HeapFree(tib);
+    }
+}
 
 /* Deferred file I/O APCs; see xbox_SetDeferredIoApc and deliver_one_apc.
  *
@@ -849,6 +871,11 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
         if (tib && s->obj_va) {
             uint32_t top = (s->stack_top + 16) & ~0xFu;
             uint32_t tib_kt = BRIDGE_MEM32(tib + 0x28);
+            /* The object is the KTHREAD from here on, so the block is the
+             * thread's alone. (Without a TlsDataSize the object borrows the
+             * block's TlsData: only this thread's code reads it, and not
+             * after the thread has ended.) */
+            g_thread_tib = tib;
             xbox_InitGuestKthread(s->obj_va,
                                   tib_kt ? BRIDGE_MEM32(tib_kt + 0x28) : 0,
                                   top, top - 0x80000u);
@@ -886,6 +913,7 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
     ks_thread_exit();
     thobj_exit(g_thread_obj_va, 0);
     g_thread_obj_va = 0;
+    bridge_free_thread_tib();
     return 0;
 }
 
@@ -3224,6 +3252,7 @@ static void bridge_PsTerminateSystemThread(void)
         ks_thread_exit();
         thobj_exit(g_thread_obj_va, exit_status);
         g_thread_obj_va = 0;
+        bridge_free_thread_tib();
         ExitThread(exit_status);
     }
 }
