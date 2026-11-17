@@ -29,6 +29,18 @@ final class AppStore: LauncherActions {
     private let storageWork = DispatchQueue(label: "xrecomp.storage", qos: .userInitiated)
     /// Titles with a delete or a save import running: no prepare or game for them until it ends.
     private var storageBusy = Set<String>()
+    /// `prepare --check` runs (a Python start, its imports and a toolkit digest each): three at a time, not on the
+    /// serial queue the scan and the venv use. Read-only, so they can overlap.
+    private let checkWork: OperationQueue = {
+        let q = OperationQueue()
+        q.name = "xrecomp.check"
+        q.maxConcurrentOperationCount = 3
+        q.qualityOfService = .userInitiated
+        return q
+    }()
+    /// Titles whose check is queued or running, and those asked again meanwhile (the answer may be old by then).
+    private var checking = Set<String>()
+    private var checkAgain = Set<String>()
 
     init() {
         settings = Settings.load(from: basePaths.settingsFile)
@@ -128,6 +140,7 @@ final class AppStore: LauncherActions {
     }
 
     func createVenv() {
+        guard !model.setup.creatingVenv else { return }
         guard let base = PythonEnv.findBase() else {
             model.notice = "No Python 3.10 or later found. Install one with: brew install python@3.12"
             return
@@ -135,7 +148,8 @@ final class AppStore: LauncherActions {
         model.setup.creatingVenv = true
         model.setup.venvLog = []
         let venv = basePaths.venv
-        work.async {
+        // Not the store's serial queue: pip can take many minutes and must not hold scans and checks.
+        DispatchQueue.global(qos: .userInitiated).async {
             let ok = PythonEnv.createVenv(at: venv, base: base) { line in
                 DispatchQueue.main.async { self.model.setup.venvLog.append(line) }
             }
@@ -252,18 +266,29 @@ final class AppStore: LauncherActions {
         for g in model.games where g.titleId != nil { refreshState(g.id) }
     }
 
-    /// `prepare --check --json` for one title, off the main thread.
+    /// `prepare --check --json` for one title, off the main thread. One check per title at a time: a request while
+    /// it is queued or running runs it once more when it ends, rather than stacking up.
     private func refreshState(_ id: String) {
         guard let g = model.game(id), let tid = g.titleId, let tk = toolkit, let py = python else { return }
         if case .unreadable = g.status { return }
+        guard !checking.contains(id) else {
+            checkAgain.insert(id)
+            return
+        }
+        checking.insert(id)
         let source = URL(fileURLWithPath: g.entry.path), workDir = paths.title(tid).work
         // The stamp is compared with the prepare this title would get: its enhancements off, a build made with them
         // is stale (reason "profile"), and the other way round.
         let env = ChildEnvironment.prepare(enhancements: TitleRecord.load(from: paths.title(tid).state).enhancementsOn)
-        work.async {
+        checkWork.addOperation {
             let st = TitleState.check(python: py.path, toolkit: tk.root, source: source, work: workDir,
                                       environment: env)
             DispatchQueue.main.async { [self] in
+                checking.remove(id)
+                if checkAgain.remove(id) != nil {
+                    // Something changed while it ran (a prepare ended, the enhancements switch): ask again.
+                    return refreshState(id)
+                }
                 model.update(id) { item in
                     guard let st else {
                         item.status = .error(code: "CHECK_FAILED", message: "prepare --check did not answer")
