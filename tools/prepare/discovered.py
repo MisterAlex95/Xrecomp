@@ -80,7 +80,8 @@ def refresh(work, xbe, functions_json, analysis_json=None, log=print, checker=No
     was_rejected = _addr_set(_read_json(rejected_path, []))
     was_held = _addr_set(_read_json(held_path, []))
     candidates = scan_discovery(text)
-    new = [va for va in candidates if va not in old | was_rejected | was_held]
+    known = old | was_rejected | was_held      # once: the union per candidate was quadratic (20 s for 30,000)
+    new = [va for va in candidates if va not in known]
     if checker is None:
         from tools.seed_from_log.__main__ import SeedChecker
         checker = SeedChecker(xbe, functions_json if have_functions else None, analysis_json,
@@ -146,7 +147,8 @@ def changed(work):
     seeds = _addr_set(e.get("start") for e in _read_json(os.path.join(work, SEEDS), []) if isinstance(e, dict))
     rejected = _addr_set(_read_json(os.path.join(work, REJECTED), []))
     held = _addr_set(_read_json(os.path.join(work, HELD), []))
-    return any(va not in seeds | rejected | held or (va in held and c["clean_v2"]) for va, c in cls.items())
+    known = seeds | rejected | held
+    return any(va not in known or (va in held and c["clean_v2"]) for va, c in cls.items())
 
 
 def digest(path):
