@@ -175,4 +175,20 @@ public class StorageTest {
         TestSupport.write(new File(d.saveDir(), "UDATA/notatitle/x"), new byte[1]);
         assertEquals(List.of("4541000D", "4D530004", "4D5300D1", "58420001"), new ArrayList<>(Storage.titles(d, g)));
     }
+
+    /** A documents provider's display name is used as a path component of a copy only when it is a file name. */
+    @Test
+    public void documentNamesThatAreNotFileNamesAreRefused() {
+        assertTrue(Storage.safeName("default.xbe"));
+        assertTrue(Storage.safeName("Fable (disc 1)"));
+        assertTrue(Storage.safeName("..data"));
+        assertFalse(Storage.safeName(null));
+        assertFalse(Storage.safeName(""));
+        assertFalse(Storage.safeName("."));
+        assertFalse(Storage.safeName(".."));
+        assertFalse(Storage.safeName("../../files/packs/4D5300D1/libtitle.so"));
+        assertFalse(Storage.safeName("a/b"));
+        assertFalse(Storage.safeName("a\\b"));
+        assertFalse(Storage.safeName("a\0b"));
+    }
 }

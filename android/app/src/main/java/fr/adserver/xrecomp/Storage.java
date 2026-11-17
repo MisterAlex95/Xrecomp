@@ -235,6 +235,15 @@ final class Storage {
         }
     }
 
+    /**
+     * Whether a document's display name can be one path component of a copy: a documents provider chooses the name
+     * (any app can be one), and « ../../files/packs/... » as a name would make the copy write outside its folder.
+     */
+    static boolean safeName(String name) {
+        return name != null && !name.isEmpty() && !name.equals(".") && !name.equals("..")
+               && name.indexOf('/') < 0 && name.indexOf('\\') < 0 && name.indexOf('\0') < 0;
+    }
+
     static boolean inside(File f, File root) {
         if (f == null || root == null)
             return false;

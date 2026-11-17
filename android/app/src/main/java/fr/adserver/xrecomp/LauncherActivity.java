@@ -9082,6 +9082,11 @@ public class LauncherActivity extends Activity {
                 if (cancelRequested)
                     return;
                 String name = c.getString(1);
+                if (!Storage.safeName(name)) {
+                    // The provider's name becomes a path under the copy (copyTree): never « .. » or a separator.
+                    Log.w(TAG, "launcher: copy: entry left out, its name is not a file name: " + prefix + name);
+                    continue;
+                }
                 boolean isDir = DocumentsContract.Document.MIME_TYPE_DIR.equals(c.getString(2));
                 Doc d = new Doc(c.getString(0), prefix + name, isDir, c.isNull(3) ? 0 : c.getLong(3));
                 out.add(d);
@@ -9143,6 +9148,8 @@ public class LauncherActivity extends Activity {
             long done = 0;
             for (Doc d : docs) {
                 File dst = new File(staged, d.path);
+                if (!Storage.inside(dst, staged))
+                    throw new IOException("not inside the copy: " + d.path);
                 if (d.dir) {
                     if (!dst.mkdirs() && !dst.isDirectory())
                         throw new IOException("cannot create " + dst);
