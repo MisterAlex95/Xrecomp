@@ -71,11 +71,14 @@ int main(void)
     /* Two imports, in the form an XBE stores them: 0x80000000 | ordinal. */
     *(uint32_t *)(mem + THUNK_VA) = 0x80000000u | 173u;
     *(uint32_t *)(mem + THUNK_VA + 4) = 0x80000000u | 197u;
+    *(uint32_t *)(mem + THUNK_VA + 8) = 0x80000000u | 67u;    /* IoCreateSymbolicLink */
+    *(uint32_t *)(mem + THUNK_VA + 12) = 0x80000000u | 203u;  /* NtOpenSymbolicLinkObject */
+    *(uint32_t *)(mem + THUNK_VA + 16) = 0x80000000u | 215u;  /* NtQuerySymbolicLinkObject */
     *(uint32_t *)(mem + THUNK_VA - 4) = 0x80000000u | 173u;
     *(uint32_t *)(mem + THUNK_VA - 8) = 0xF2345678u;
     *(uint32_t *)(mem + THUNK_VA - 12) = 0x80000000u;
     *(uint32_t *)(mem + THUNK_VA - 16) = 0x80000000u | 379u;
-    xbox_kernel_set_thunk_address(THUNK_VA, 2);
+    xbox_kernel_set_thunk_address(THUNK_VA, 5);
     xbox_kernel_bridge_init();
 
     check(recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA - 4)) != NULL,
@@ -151,6 +154,71 @@ int main(void)
                      g_esp, STACK_VA + 16);
             check(g_esp == STACK_VA + 16,
                   "ordinal 197 pops its three stdcall arguments", detail);
+        }
+    }
+
+    /* KRN-14: NtOpenSymbolicLinkObject resolves the name and
+     * NtQuerySymbolicLinkObject answers the link's own target; both said
+     * \Device\CdRom0 for anything. The dispatcher a lookup returns serves
+     * the slot looked up last, so each call looks its slot up again. */
+    {
+        recomp_func_t mk = recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 8));
+        recomp_func_t op = recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 12));
+        recomp_func_t qu = recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 16));
+        const uint32_t S = 0x40000;   /* strings and out-parameters live here */
+        char detail[160];
+        check(mk && op && qu, "ordinals 67, 203, 215 resolve", NULL);
+        if (mk && op && qu) {
+            uint32_t *sp = (uint32_t *)(mem + STACK_VA), h;
+            /* ANSI_STRINGs: link at S, target at S+0x10, name for open at
+             * S+0x20 (in an OBJECT_ATTRIBUTES at S+0x30), out string S+0x40 */
+            #define ANSI(at, text) do { strcpy((char *)mem + (at) + 0x100, text); \
+                *(uint16_t *)(mem + (at)) = (uint16_t)strlen(text); \
+                *(uint16_t *)(mem + (at) + 2) = (uint16_t)strlen(text) + 1; \
+                *(uint32_t *)(mem + (at) + 4) = (at) + 0x100; } while (0)
+            ANSI(S, "\\??\\w:");
+            ANSI(S + 0x10, "\\Device\\Harddisk0\\Partition1\\TDATA\\4d530004");
+            sp[0] = 0xBEEF0003u; sp[1] = S; sp[2] = S + 0x10;
+            g_esp = STACK_VA; recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 8))();
+            check(g_eax == 0, "IoCreateSymbolicLink(\\??\\w:) succeeds", NULL);
+
+            *(uint32_t *)(mem + S + 0x30) = 0;
+            *(uint32_t *)(mem + S + 0x34) = S + 0x20;
+            *(uint32_t *)(mem + S + 0x38) = 0x40;
+            ANSI(S + 0x20, "\\??\\W:");
+            *(uint32_t *)(mem + S + 0x50) = 0;
+            sp[0] = 0xBEEF0004u; sp[1] = S + 0x50; sp[2] = S + 0x30;
+            g_esp = STACK_VA; recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 12))();
+            h = *(uint32_t *)(mem + S + 0x50);
+            snprintf(detail, sizeof detail, "status 0x%08X handle 0x%08X", g_eax, h);
+            check(g_eax == 0 && h, "open \\??\\W: (made as w:) succeeds", detail);
+
+            *(uint16_t *)(mem + S + 0x40) = 0;
+            *(uint16_t *)(mem + S + 0x42) = 128;
+            *(uint32_t *)(mem + S + 0x44) = S + 0x200;
+            sp[0] = 0xBEEF0005u; sp[1] = h; sp[2] = S + 0x40; sp[3] = 0;
+            g_esp = STACK_VA; recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 16))();
+            snprintf(detail, sizeof detail, "status 0x%08X target '%.*s'", g_eax,
+                     *(uint16_t *)(mem + S + 0x40), (char *)mem + S + 0x200);
+            check(g_eax == 0 && !strcmp((char *)mem + S + 0x200,
+                                        "\\Device\\Harddisk0\\Partition1\\TDATA\\4d530004"),
+                  "query answers the link's own target", detail);
+
+            ANSI(S + 0x20, "\\??\\D:");
+            sp[0] = 0xBEEF0006u; sp[1] = S + 0x50; sp[2] = S + 0x30;
+            g_esp = STACK_VA; recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 12))();
+            h = *(uint32_t *)(mem + S + 0x50);
+            sp[0] = 0xBEEF0007u; sp[1] = h; sp[2] = S + 0x40; sp[3] = 0;
+            g_esp = STACK_VA; recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 16))();
+            check(g_eax == 0 && !strcmp((char *)mem + S + 0x200, "\\Device\\CdRom0"),
+                  "\\??\\D: is still the DVD", NULL);
+
+            ANSI(S + 0x20, "\\??\\Q:");
+            sp[0] = 0xBEEF0008u; sp[1] = S + 0x50; sp[2] = S + 0x30;
+            g_esp = STACK_VA; recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 12))();
+            snprintf(detail, sizeof detail, "status 0x%08X", g_eax);
+            check(g_eax == 0xC0000034u, "a link nobody made: OBJECT_NAME_NOT_FOUND", detail);
+            #undef ANSI
         }
     }
 

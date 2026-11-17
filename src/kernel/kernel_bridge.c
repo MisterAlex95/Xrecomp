@@ -6331,23 +6331,74 @@ static void bridge_NtQueryDirectoryFile(void)
     bridge_write_iostatus(ios_va, ios.Status, (uint32_t)ios.Information);
 }
 
+/* Symbolic link objects (KRN-14).
+ *
+ * NtOpenSymbolicLinkObject succeeded for any name and
+ * NtQuerySymbolicLinkObject answered \Device\CdRom0 for any handle, though
+ * kernel_io.c's table knows every link the title (or XAPI) made: a title
+ * asking where T: or its own Z: points was told the DVD. The open now
+ * resolves the name -- a link in the table, or \??\D:, which the kernel
+ * itself makes for the DVD -- and fails with STATUS_OBJECT_NAME_NOT_FOUND
+ * otherwise, as the console does. The handle names a slot that remembers
+ * the target; it stays untagged (0xDEAD0001 for D:, 0xDEAD1000 | slot for
+ * the others), so NtClose skips it as before. */
+#define SYMLINK_SLOTS 16
+static char s_symlink_target[SYMLINK_SLOTS][128];
+static volatile LONG s_symlink_next;
+static const char s_cdrom_target[] = "\\Device\\CdRom0";
+
+static int symlink_is_dvd(const char *name)
+{
+    if (name[0] == '\\' && name[1] == '?' && name[2] == '?' && name[3] == '\\')
+        name += 4;
+    return (name[0] == 'D' || name[0] == 'd') && name[1] == ':' && name[2] == '\0';
+}
+
+static const char *symlink_target_of(uint32_t handle)
+{
+    if ((handle & 0xFFFFF000u) == 0xDEAD1000u && (handle & 0xFFFu) < SYMLINK_SLOTS)
+        return s_symlink_target[handle & 0xFFFu];
+    return s_cdrom_target;                 /* 0xDEAD0001, and anything older */
+}
+
 /* ── NtOpenSymbolicLinkObject (ordinal 203, 2 args = 8 bytes) */
 static void bridge_NtOpenSymbolicLinkObject(void)
 {
     uint32_t handle_va = STACK_ARG(0);
-    /* arg1: POBJECT_ATTRIBUTES - ignored, we return a synthetic handle.
-     * Written raw (untagged) so NtClose recognises it and skips it. */
-    if (handle_va) BRIDGE_MEM32(handle_va) = 0xDEAD0001u;
+    const char *name = bridge_get_xbox_path(STACK_ARG(1));
+    const char *target = name ? xbox_LookupSymbolicLink(name) : NULL;
+    uint32_t handle;
+
+    if (!name) {
+        g_eax = 0xC0000033u;               /* STATUS_OBJECT_NAME_INVALID */
+        return;
+    }
+    if (!target && !symlink_is_dvd(name)) {
+        static int said;
+        if (said++ < 8)
+            fprintf(stderr, "  [KERNEL] NtOpenSymbolicLinkObject: no link named %s\n", name);
+        if (handle_va) BRIDGE_MEM32(handle_va) = 0;
+        g_eax = 0xC0000034u;               /* STATUS_OBJECT_NAME_NOT_FOUND */
+        return;
+    }
+    if (!target) {
+        handle = 0xDEAD0001u;
+    } else {
+        uint32_t slot = (uint32_t)(InterlockedIncrement(&s_symlink_next) - 1) % SYMLINK_SLOTS;
+        snprintf(s_symlink_target[slot], sizeof s_symlink_target[slot], "%s", target);
+        handle = 0xDEAD1000u | slot;
+    }
+    if (handle_va) BRIDGE_MEM32(handle_va) = handle;
     g_eax = STATUS_SUCCESS;
 }
 
 /* ── NtQuerySymbolicLinkObject (ordinal 215, 3 args = 12 bytes) */
 static void bridge_NtQuerySymbolicLinkObject(void)
 {
-    /* uint32_t handle = STACK_ARG(0); */
+    uint32_t handle = STACK_ARG(0);
     uint32_t target_va = STACK_ARG(1);
     uint32_t retlen_va = STACK_ARG(2);
-    const char* target = "\\Device\\CdRom0";
+    const char* target = symlink_target_of(handle);
     USHORT len = (USHORT)strlen(target);
 
     if (retlen_va) BRIDGE_MEM32(retlen_va) = (uint32_t)len;
