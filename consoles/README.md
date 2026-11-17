@@ -1264,9 +1264,9 @@ Not supported (the cheat is not applied, the log says why): GBA `DEADFACE` resee
 (`9xxxxxxx` first line: use the decrypted ones), AR v3 slowdown; PS1 joker codes `D4`-`D6`; N64 `DE` (entry point,
 which only matters to a real cartridge's boot); GameCube encrypted Action Replay codes (`XXXX-XXXX-XXXXX`: their
 decryption, seed tables, bit scrambling and checksums, is not cheaply documented; enter the decrypted code), AR memory
-copy and row zero codes, Gecko `C0` (execute ASM: guest code called from the engine), `46` / `4E` (code-list
+copy codes, Gecko `C0` (execute ASM: guest code called from the engine), `46` / `4E` (code-list
 addresses), `A0`-`AE` (counters / register ifs), `CC`, `F2`-`F6`. Ignored with a note: master / hook / ID codes (GBA `F`, `C4`, CB
-`0` / `1`, `xxxxxxxx 001DC0DE`), N64 enabler codes (`EE`, `FF`, `CC`). F0 / F1 apply once after the first frame (the
+`0` / `1`, `xxxxxxxx 001DC0DE`), N64 enabler codes (`EE`, `FF`, `CC`), the GameCube AR row zero code (`00000000 60000000`). F0 / F1 apply once after the first frame (the
 game's boot code has run by then; a real GameShark writes them before).
 
 **Xbox titles (XBA-241)** use the same file, screens and engine (console `RECOMP_CHEAT_XBOX`, format `xbox`, the only
@@ -1443,7 +1443,7 @@ Not there yet: Wii discs, the Wii (GX: « GameCube GX », sound: « GameCube sou
 
 **GameCube runtime (XBA-259, GC-1).** The core on the host layer, so every later step (GX, discs, DSP) is tried on the
 AYN Thor first. `XBR_CONSOLE_GC` is ON on Android, Linux and macOS; the app plays a homebrew `.dol` from a library
-folder (no disc, no IPL, no Prepare yet).
+folder (at this step no disc, no IPL, no Prepare: discs came with XBA-261, Prepare with XBA-264, below).
 
 - Core additions (`runtime/`): `gc_si.c`, the serial interface with up to four standard controllers
   (`gc_set_pad`): transfers through the I/O buffer (0x00 / 0xFF type: a standard controller with a motor; 0x41 / 0x42
@@ -1466,7 +1466,7 @@ folder (no disc, no IPL, no Prepare yet).
   `<files>/work/gc-<KEY>/discovered.txt`. Options: `RECOMP_GC_TV=pal`, `RECOMP_GC_YUV=cpu`, `RECOMP_GC_SCALE` /
   `_FILTER` / `_SHADER`, `RECOMP_GC_FRAMES=N` (docs/runtime/environment-variables.md).
 - The app: `Console.GC` (badge « GC », `.dol` in the import filter, `Console.identify` = `recomp_pack_rom_identify`),
-  plays straight from its card (no Home: nothing to prepare yet); `pack_loader.c` logs `PACK_NONE gc DOL-<CRC32>` and
+  played straight from its card at this step (no Home, nothing to prepare; Prepare since XBA-264); `pack_loader.c` logs `PACK_NONE gc DOL-<CRC32>` and
   calls `gc_runtime_start`; libmain.so links `gc_runtime` and the whole of `gc_core` (exported, for packs).
 - `tests/homebrew/padtest`: our libogc pad test, every field the four ports as `PAD_Read` gives them (buttons, both
   sticks, both triggers; Z held rumbles), drawn in place, and the same values in a `report` struct (magic
@@ -1751,7 +1751,7 @@ as the client side, and Dolphin's behaviour read for facts only.
 - `runtime/gc_state.c` (`gc_core.h` « Save states »): `gc_state_size` / `gc_state_save` / `gc_state_check` /
   `gc_state_load`, results sharing `RECOMP_STATE_*`'s values, a refused state with its reason (`why`). The blob: a
   header (magic, console `gc`, `GC_STATE_VERSION`, the title key), then tagged sections, each with its own version
-  and length, every field written one by one in little-endian order (no struct copied): `CPU` (GPRs, ps0 / ps1, PC, LR, CTR, CR, XER, MSR, FPSCR, the reservation, SRs, the whole SPR file: SRR0/1,
+  and length, every field written one by one in little-endian order (no struct copied, except `EXI`: gc_exi.c's own blob, its device struct as the host lays it out, with a magic and size): `CPU` (GPRs, ps0 / ps1, PC, LR, CTR, CR, XER, MSR, FPSCR, the reservation, SRs, the whole SPR file: SRR0/1,
   GQRs, HIDs, WPAR, DMAU / DMAL, BATs, SPRGs, DEC / TB through the clock), `TIME` (video timing, decrementer, time
   base), `HW` (PI, VI, SI and the pads plugged in, EXI and MI registers), `MEM1` (a bitmap of the non-zero 4 KB pages,
   then those pages: about 1 MB for our homebrew), `LC` (the locked cache), `ARAM` (pages), `GX` (the PI FIFO, CP / PE
@@ -1764,7 +1764,7 @@ as the client side, and Dolphin's behaviour read for facts only.
   raw struct of before, is skipped and the sound kept as it is). Required sections (CPU, TIME, HW, MEM1) refuse a state that lacks them; an optional one
   missing is kept as the machine has it; a section this build does not know is skipped; one with a newer version, or
   a fixed one of another length, refuses the state. A state of another title key, console or format version is
-  refused whole before anything changes (sizes and page bitmaps checked by a dry run first).
+  refused whole before anything changes (sizes, page bitmaps and the EXI blob's magic checked by a dry run first).
 - After a load: the BAT fast paths and the next event recomputed, every recompiled span checked against memory again
   before it runs, GX's texture cache hashed against RAM again, the renderer's EFB copies and XFB pictures dropped
   (`gx_gl_state_loaded`), the disc read cache emptied. Host resources (GL objects, the disc handle, the pack) are
