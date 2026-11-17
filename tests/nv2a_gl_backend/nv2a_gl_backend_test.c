@@ -194,7 +194,7 @@ int main(void)
 {
     const char *e = getenv("RECOMP_GPU_CPU_WRITES");
     Nv2aSurface s32 = surf(FB32, 64, 32, 256, 4, 0x0108);
-    uint32_t bad;
+    uint32_t bad, up0;
 
     s_cpu_on = !(e && strcmp(e, "0") == 0);
     s_mem = (uint8_t *)calloc(1, MEM_BYTES);
@@ -223,10 +223,12 @@ int main(void)
     printf("GL: %s | %s (%s path)\n", (const char *)glGetString(GL_RENDERER),
            (const char *)glGetString(GL_VERSION), NV2A_GL_ES ? "GLES" : "desktop GL");
 
-    /* 1. Clean target: read back, CPU rectangle, GPU clear elsewhere. */
+    /* 1. Clean target: read back, CPU rectangle, GPU clear elsewhere. The
+     * rectangle's three rows go up in one upload. */
     present(&s32, 1, NULL);
     flip();
     CHECK(count_bad(FB32, 0, 0, 0, 0, 0, 0) == 0);
+    up0 = s_cpu_uploads;
     rect32(FB32, 256, 10, 5, 20, 8, 0xFF0000FFu);
     {
         Nv2aSurface g = clip(s32, 40, 0, 10, 32);
@@ -237,6 +239,7 @@ int main(void)
     bad = count_bad(FB32, 10, 5, 20, 8, 40, 50);
     printf("1. clean target, CPU rectangle then GPU clear: %u pixels wrong\n", bad);
     CHECK(s_cpu_on ? bad == 0 : bad == 30);
+    CHECK(s_cpu_uploads - up0 == (s_cpu_on ? 1u : 0u));
 
     /* 2. Dirty target: GPU clear, CPU rectangle, read-back. */
     clear(&s32, 0xFFFF0000u);
@@ -259,6 +262,7 @@ int main(void)
             present(&h, 0, &ready);
             flip();
         }
+        up0 = s_cpu_uploads;
         rect32(FBHOST, 256, 0, 0, 64, 32, 0xFF204080u);
         for (i = 0; i < 3; i++) {
             int ok;
@@ -279,6 +283,9 @@ int main(void)
         }
         printf("3. host present of a CPU-written frame: shows 0x%06X\n", shown);
         CHECK(s_cpu_on ? shown == 0x204080u : shown != 0x204080u);
+        /* The whole frame changed: one upload, not one a row. */
+        printf("3. whole frame merged in %u upload(s)\n", s_cpu_uploads - up0);
+        CHECK(s_cpu_uploads - up0 == (s_cpu_on ? 1u : 0u));
     }
 
     /* 4. 640x480 R5G6B5: the frame class, drawn at scale 2. */

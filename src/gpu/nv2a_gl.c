@@ -1409,19 +1409,44 @@ static void snap_refresh(uint32_t va, uint32_t len)
  * inside it the guest bytes win, also where the GPU drew since. */
 #define NV_GL_CPU_MAX_RUNS 4096
 
+static uint32_t s_cpu_uploads;      /* glTexSubImage2D calls of rt_cpu_merge (tests) */
+
+/* Row m of a change mask, inside [x0, x1): 1 when it holds exactly one run
+ * of changed pixels, [*a, *b). */
+static int mask_one_run(const uint8_t *m, uint32_t x0, uint32_t x1, uint32_t *a, uint32_t *b)
+{
+    uint32_t x = x0, e;
+
+    while (x < x1 && !m[x])
+        x++;
+    if (x == x1)
+        return 0;
+    for (e = x; e < x1 && m[e]; e++)
+        ;
+    *a = x;
+    *b = e;
+    for (; e < x1; e++)
+        if (m[e])
+            return 0;
+    return 1;
+}
+
 /* The pixels of target r whose guest bytes differ from r->snap, into the GL
- * texture: run by run along each row (a movie frame is one run a row), at
- * guest size -- a scaled target gets them in its resolve (made current
- * first), and the box around them is blitted up (nearest). */
+ * texture, at guest size -- a scaled target gets them in its resolve (made
+ * current first), and the box around them is blitted up (nearest). A box
+ * that changed whole (a movie frame) goes up in one upload; otherwise run
+ * by run, with consecutive rows of one same run (a rectangle the CPU
+ * drew) as one upload. */
 static void rt_cpu_merge(GlRT *r)
 {
     const uint8_t *mem = guest(r->va);
-    uint8_t *buf = scratch((size_t)r->w * r->h * 4), *mask;
+    uint8_t *buf = scratch((size_t)r->w * r->h * 5), *mask;
     uint32_t x, y, mx = 0, my = 0, x0 = r->w, y0 = r->h, x1 = 0, y1 = 0, runs = 0, px = 0;
     GLuint dst;
 
-    if (!buf || !(mask = (uint8_t *)malloc((size_t)r->w * r->h)))
+    if (!buf)
         return;
+    mask = buf + (size_t)r->w * r->h * 4;   /* the scratch buffer's tail */
     if (r->swz)
         xbox_swizzle_masks(r->w, r->h, &mx, &my);
     for (y = 0; y < r->h; y++) {
@@ -1443,10 +1468,8 @@ static void rt_cpu_merge(GlRT *r)
             prev = ch;
         }
     }
-    if (!px) {
-        free(mask);
+    if (!px)
         return;
-    }
     if (r->sc != 1.0f) {
         rt_resolve(r);
         dst = r->rtex;
@@ -1454,20 +1477,33 @@ static void rt_cpu_merge(GlRT *r)
         dst = r->tex;
     }
     sh_tex_scratch(GL_TEXTURE_2D, dst);
-    if (runs > NV_GL_CPU_MAX_RUNS) {
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)r->w);
+    if (runs > NV_GL_CPU_MAX_RUNS || px == (x1 - x0) * (y1 - y0)) {
         for (y = y0; y < y1; y++)
             for (x = x0; x < x1; x++)
                 if (!mask[(size_t)y * r->w + x])
                     rt_guest_rgba(r, mem + rt_px_off(r, x, y, mx, my),
                                   buf + ((size_t)y * r->w + x) * 4);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)r->w);
         glTexSubImage2D(GL_TEXTURE_2D, 0, (GLint)x0, (GLint)y0, (GLsizei)(x1 - x0),
                         (GLsizei)(y1 - y0), GL_RGBA, GL_UNSIGNED_BYTE,
                         buf + ((size_t)y0 * r->w + x0) * 4);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        s_cpu_uploads++;
     } else {
         for (y = y0; y < y1; y++) {
             const uint8_t *m = mask + (size_t)y * r->w;
+            uint32_t a, b, a2, b2, ye;
+            if (mask_one_run(m, x0, x1, &a, &b)) {
+                for (ye = y + 1; ye < y1
+                     && mask_one_run(mask + (size_t)ye * r->w, x0, x1, &a2, &b2)
+                     && a2 == a && b2 == b; ye++)
+                    ;
+                glTexSubImage2D(GL_TEXTURE_2D, 0, (GLint)a, (GLint)y, (GLsizei)(b - a),
+                                (GLsizei)(ye - y), GL_RGBA, GL_UNSIGNED_BYTE,
+                                buf + ((size_t)y * r->w + a) * 4);
+                s_cpu_uploads++;
+                y = ye - 1;
+                continue;
+            }
             for (x = x0; x < x1; ) {
                 uint32_t e;
                 if (!m[x]) {
@@ -1478,10 +1514,12 @@ static void rt_cpu_merge(GlRT *r)
                     ;
                 glTexSubImage2D(GL_TEXTURE_2D, 0, (GLint)x, (GLint)y, (GLsizei)(e - x), 1,
                                 GL_RGBA, GL_UNSIGNED_BYTE, buf + ((size_t)y * r->w + x) * 4);
+                s_cpu_uploads++;
                 x = e;
             }
         }
     }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     r->serial = ++s_rt_serial;
     if (r->sc != 1.0f) {
         const GLint sr[4] = { (GLint)x0, (GLint)y0, (GLint)x1, (GLint)y1 };
@@ -1496,7 +1534,6 @@ static void rt_cpu_merge(GlRT *r)
         fprintf(stderr, "  [GPUGL] guest CPU wrote target 0x%08X: %u pixels in %u runs,"
                         " box %u,%u-%u,%u%s\n", r->va, px, runs, x0, y0, x1, y1,
                 r->dirty ? " (merged over GPU pixels)" : "");
-    free(mask);
 }
 
 /* once: at most once a frame for this target (binds, direct sampling). */
