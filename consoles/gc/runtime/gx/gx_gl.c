@@ -1078,7 +1078,11 @@ void gx_gl_draw(gx_state *gx, unsigned prim, unsigned n)
     bool tri = prim < 5;
     if (g->ni && tri != g->batch_tri)
         gx_gl_flush(gx);
-    if (g->nv + 2 * n + 4 > BATCH_V || g->ni + 6 * n + 6 > BATCH_I)
+    /* What this draw adds: its vertices as they are for triangles; lines and points are drawn as quads, 4 vertices
+     * and 6 indices per segment or point (a strip has n - 1 segments, a list n / 2). One draw (n < 65536) always
+     * fits an empty batch: 4 * 65535 <= BATCH_V. */
+    uint32_t need_v = tri ? n : prim == 5 ? 2 * n : 4 * n, need_i = tri ? 3 * n : prim == 5 ? 3 * n : 6 * n;
+    if (g->nv + need_v > BATCH_V || g->ni + need_i > BATCH_I)
         gx_gl_flush(gx);
     if (!g->ni)
         g->batch_ntex = 0;
