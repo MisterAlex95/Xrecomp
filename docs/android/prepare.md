@@ -1080,7 +1080,8 @@ decides, before the PS1 check) makes a GameCube pack with the PS1's five steps a
    the run's (consoles/README.md « GameCube Prepare »). A module whose bytes differ is logged in prepare.log (`REL not
    lifted: ...`) and stays interpreted.
 4. compile: `-O2` at most (`--opt 3` compiles at 2), `-ffp-contract=off -frounding-math` as the core, no SLP
-   vectorizer, `-I consoles/gc/runtime`; 384 MB per clang job in the job count.
+   vectorizer, `-DGC_RC_COUNT` (one add per block: the runtime's `gc: pack N % native, ...` line after each perf
+   line and over the run), `-I consoles/gc/runtime`; 384 MB per clang job in the job count.
 5. pack: `packs/gc-<KEY>/{libtitle.so, pack.json}` (`"console": "gc"`, `"title_key"`, `"source_sha256"` = the main
    DOL's, `"entry": "gc_recomp_title_table"`, `"discovered"`, `"boot": "main.dol"`), then the title's GX shader list
    (`<work>/gx_shaders.txt`, consoles/README.md « GameCube GX ») copied next to it.

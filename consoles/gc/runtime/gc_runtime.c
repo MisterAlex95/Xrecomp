@@ -417,6 +417,32 @@ static void cards_insert(gc_machine *m, const gc_runtime_opts *o, const char *ke
         listening = 1;
 }
 
+/* ---- The pack's share (XBA-264) ------------------------------------------------------------------------------- */
+
+/* "gc: pack 97.3 % native, 41.2 k interpreted instructions / s, 812 missed addresses" since the last line (run: since
+ * the start). Packs count their instructions (-DGC_RC_COUNT, tools/prepare/gc.py), the interpreter its own. */
+static void pack_line(gc_machine *m, int run)
+{
+    static uint64_t last_native, last_interp, last_ns;
+    static uint64_t first_ns;
+    gc_recomp_stats rs;
+    gc_recomp_get_stats(m, &rs);
+    uint64_t t = now_ns();
+    if (!first_ns)
+        first_ns = last_ns = t;
+    uint64_t n = run ? rs.native : rs.native - last_native, i = run ? rs.interp : rs.interp - last_interp;
+    double secs = (double)(t - (run ? first_ns : last_ns)) / 1e9;
+    if (n + i)
+        printf("gc: pack %.1f %% native%s, %.1f k interpreted instructions / s, %zu missed address(es)\n",
+               100.0 * (double)n / (double)(n + i), run ? " over the run" : "",
+               secs > 0 ? (double)i / secs / 1e3 : 0.0, gc_recomp_missed(m, NULL, 0));
+    last_native = rs.native;
+    last_interp = rs.interp;
+    last_ns = t;
+    if (run)
+        first_ns = 0;
+}
+
 /* ---- The run ---------------------------------------------------------------------------------------------------- */
 
 static void display(const gc_runtime_opts *o, int *scale, int *filter)
@@ -702,7 +728,8 @@ started:;
             host_perf_stage(&hp, ST_PRESENT, now_ns() - tp);
             host_perf_shown(&hp, 1);
         }
-        host_perf_log_due(&hp, now_ns());
+        if (host_perf_log_due(&hp, now_ns()) && pack.table)
+            pack_line(m, 0); /* with the perf line: how much of the guest code ran natively (XBA-264) */
         cards_flush_due(now_ns());
         if (stopped) {
             rc = -1;
@@ -752,6 +779,8 @@ started:;
         host_audio_close();
     host_perf_live_clear();
     double secs = (double)(now_ns() - t0) / 1e9;
+    if (pack.table)
+        pack_line(m, 1);
     gc_recomp_stats rs;
     gc_recomp_get_stats(m, &rs);
     printf("gc: %llu fields in %.1f s (%.2f fields/s), %llu late resets; %llu instructions interpreted, %llu lifted "

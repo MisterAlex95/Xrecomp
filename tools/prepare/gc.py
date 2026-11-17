@@ -261,8 +261,9 @@ def lifted_opt(opt):
 
 def lifted_cflags(opt):
     """The optimisation and floating-point flags of lifted GameCube code (gc_core's: no contraction, the rounding mode
-    honoured), no SLP vectorizer (as GBA / PS1 code)."""
-    return gba.lifted_cflags(opt) + ["-ffp-contract=off", "-frounding-math"]
+    honoured), no SLP vectorizer (as GBA / PS1 code), and the instruction count (one add per block) behind the
+    runtime's « gc: pack N % native » line."""
+    return gba.lifted_cflags(opt) + ["-ffp-contract=off", "-frounding-math", "-DGC_RC_COUNT"]
 
 
 def compile_flags(opt, root, gen, sysroot=None, include_dirs=()):
