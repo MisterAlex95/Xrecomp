@@ -47,6 +47,13 @@ void recomp_lifecycle_pause_for(unsigned reasons);
 void recomp_lifecycle_resume_for(unsigned reasons);
 unsigned recomp_lifecycle_reasons(void);
 
+/* Lets the guest run although reasons are set, until the matching lift_end (an Xbox save state needs every guest
+ * thread to reach a kernel call, which a thread waiting behind the held flip never does). The reasons are kept:
+ * a pause_for or resume_for meanwhile changes them as usual, and at lift_end the guest is held again only when a
+ * reason is still set. Listeners see a resume and a pause as for any other. Lifts nest. */
+void recomp_lifecycle_lift_begin(void);
+void recomp_lifecycle_lift_end(void);
+
 /* Blocks while paused, without spinning. Returns at once (0) when not
  * paused, 1 after having waited. */
 int  recomp_lifecycle_hold(void);

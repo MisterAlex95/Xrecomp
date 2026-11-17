@@ -66,19 +66,19 @@ static uint64_t now_ms(void)
 
 /* ---- The slots ------------------------------------------------------------------------------------------- */
 
-/* The game held by the menu or the background is let go for the length of fn. */
+/* The game held by the menu or the background is let go for the length of a capture or a load. A lift, not a
+ * resume and a pause of the reasons read before: the menu closing or the app coming back meanwhile would
+ * otherwise be undone at the end, and the game left held with nothing to let it go. */
 static unsigned unhold(void)
 {
-    unsigned r = recomp_lifecycle_reasons();
-    if (r)
-        recomp_lifecycle_resume_for(r);
-    return r;
+    recomp_lifecycle_lift_begin();
+    return 1;
 }
 
 static void rehold(unsigned r)
 {
-    if (r)
-        recomp_lifecycle_pause_for(r);
+    (void)r;
+    recomp_lifecycle_lift_end();
 }
 
 /* XBOX_STATE_* to what the menu shows: the first codes are recomp_states' own; a capture that cannot be taken

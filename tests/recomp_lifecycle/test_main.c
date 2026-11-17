@@ -133,6 +133,46 @@ int main(void)
     recomp_lifecycle_pause_for(0);                   /* no reason: nothing */
     CHECK(recomp_lifecycle_paused() == 0);
 
+    /* A lift (an Xbox save state taken while the game is held): the guest runs, the reasons stay. Still held at
+     * the end when nothing changed meanwhile. */
+    s_log[0] = 0;
+    recomp_lifecycle_pause_for(RECOMP_HOLD_MENU);
+    sleep_ms(30);
+    frames = s_frames;
+    recomp_lifecycle_lift_begin();
+    CHECK(recomp_lifecycle_paused() == 0);
+    CHECK(recomp_lifecycle_reasons() == RECOMP_HOLD_MENU);
+    sleep_ms(50);
+    CHECK(s_frames > frames);                        /* frames during the lift */
+    recomp_lifecycle_lift_end();
+    CHECK(recomp_lifecycle_paused() == 1);
+    CHECK(strcmp(s_log, "A+B+A+A-B-A-A+B+A+") == 0);
+    /* The menu closes during a lift: not held again at its end (a resume and a pause of the reasons read before
+     * the capture left the game held for good). */
+    s_log[0] = 0;
+    recomp_lifecycle_lift_begin();
+    recomp_lifecycle_resume_for(RECOMP_HOLD_MENU);
+    CHECK(recomp_lifecycle_reasons() == 0);
+    recomp_lifecycle_lift_end();
+    CHECK(recomp_lifecycle_paused() == 0);
+    CHECK(strcmp(s_log, "A-B-A-") == 0);
+    /* The app goes to the background during a lift: held from the lift's end; lifts nest. */
+    s_log[0] = 0;
+    recomp_lifecycle_lift_begin();
+    recomp_lifecycle_lift_begin();
+    recomp_lifecycle_pause();
+    CHECK(recomp_lifecycle_paused() == 0);
+    CHECK(recomp_lifecycle_reasons() == RECOMP_HOLD_BACKGROUND);
+    recomp_lifecycle_lift_end();
+    CHECK(recomp_lifecycle_paused() == 0);
+    recomp_lifecycle_lift_end();
+    CHECK(recomp_lifecycle_paused() == 1);
+    CHECK(strcmp(s_log, "A+B+A+") == 0);
+    recomp_lifecycle_lift_end();                     /* one too many: nothing */
+    CHECK(recomp_lifecycle_paused() == 1);
+    recomp_lifecycle_resume();
+    CHECK(recomp_lifecycle_paused() == 0);
+
     /* Full listener table. */
     for (int i = 0; i < 5; i++)
         CHECK(recomp_lifecycle_listen(listener_b, NULL) == 0);
