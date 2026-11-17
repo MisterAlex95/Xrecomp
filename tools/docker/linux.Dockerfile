@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
         python3 python3-venv ccache \
     && rm -rf /var/lib/apt/lists/*
-RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --quiet --no-cache-dir capstone pytest pefile numpy
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --quiet --no-cache-dir capstone pytest pytest-xdist==3.8.0 pefile numpy
 ENV PATH=/opt/venv/bin:$PATH
 
 FROM deps AS test
@@ -37,7 +37,7 @@ ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS} \
 # job made it thrash on 2026-11-09. JOBS caps the parallel compiles for the same reason.
 # 1. the toolkit itself, and the two tests the root build lists
 # 2. every self-contained C test project under tests/ (report in /reports/c-tests.md)
-# 3. the Python side (lifter unit tests, and the console pipelines' under consoles/, XBA-146)
+# 3. the Python side (lifter unit tests, and the console pipelines' under consoles/, XBA-146), on pytest-xdist workers
 # PART splits that for parallel CI jobs (.github/workflows/linux.yml): all (default, everything, as Gitea runs it),
 # python (1 and 3), or c-K/N (the K-th of N slices of 2, tools/run_c_tests.sh XBR_SHARD).
 # ccache (tools/run_c_tests.sh): the projects that rebuild the runtime share its objects within a run, and the cache
@@ -45,7 +45,14 @@ ENV SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy JOBS=${JOBS} \
 # empty). The env makes every CMake configure here use it, the root build and pytest's builds included.
 ENV CCACHE_DIR=/ccache CCACHE_MAXSIZE=2G CCACHE_BASEDIR=/ CCACHE_NOHASHDIR=1 \
     CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+# pytest runs on PYTEST_WORKERS pytest-xdist workers (default JOBS; 0 = serially, in one process). worksteal: the e2e
+# tests (tools/compat/test_e2e.py, minutes together) sit side by side in the collection, and plain load scheduling
+# leaves them queued on one worker. Each worker's CMake builds get JOBS / workers compiles, but at least 2
+# (CMAKE_BUILD_PARALLEL_LEVEL; 1 if JOBS is 1): each e2e test builds the runtime, and with a cold ccache (a fresh
+# GitHub runner) 4 workers at 1 compile each took 6:12 against 3:38 at 2. That is at most 2 x JOBS compiles, below the
+# CPU count + 2 of Ninja's default those builds had before (measured 2026-11-17, 12 CPUs).
 ARG PART=all
+ARG PYTEST_WORKERS=
 RUN --mount=type=cache,id=xba-ccache-linux,target=/ccache mkdir -p /work && trap 'rm -rf /work; find /tmp -mindepth 1 -delete' EXIT \
     && case "$PART" in all|python|c-[1-9]*/[1-9]*) ;; *) echo "PART: all, python or c-K/N, not $PART"; exit 2 ;; esac \
     && export TMPDIR=/work TMP=/work TEMP=/work \
@@ -56,5 +63,8 @@ RUN --mount=type=cache,id=xba-ccache-linux,target=/ccache mkdir -p /work && trap
          && (ulimit -c 0; ctest --test-dir /work/build/root --output-on-failure --timeout 300) ;; esac \
     && case "$PART" in all) tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md ;; \
          c-*) XBR_SHARD=${PART#c-} tools/run_c_tests.sh /work/build/c-tests /reports/c-tests.md ;; esac \
-    && case "$PART" in all|python) python3 -m pytest -q -p no:cacheprovider tools/ consoles/ | tee /reports/pytest.txt ;; esac \
+    && case "$PART" in all|python) w=${PYTEST_WORKERS:-$JOBS} && per=$(( JOBS / (w > 1 ? w : 1) )) && min=$(( JOBS > 1 ? 2 : 1 )) \
+         && export CMAKE_BUILD_PARALLEL_LEVEL=$(( per > min ? per : min )) \
+         && python3 -m pytest -q -p no:cacheprovider -n "$w" --dist worksteal tools/ consoles/ \
+            | tee /reports/pytest.txt ;; esac \
     && ccache -s | tee /reports/ccache.txt
