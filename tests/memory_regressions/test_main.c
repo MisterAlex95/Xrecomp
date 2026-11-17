@@ -479,7 +479,18 @@ int main(int argc, char **argv)
             base = hi; size = 0x100000;
             st = nt_alloc_at(&base, &size, 0x2000);
             snprintf(d, sizeof d, "status 0x%08X, base 0x%08X", st, base);
-            check(base != hi, "default: an explicit high base is not honoured", d);
+#if !defined(_WIN32)
+            /* With the lazy reservations (POSIX, the default) the address the
+             * title asked for is what it gets, as on the console; without
+             * them the heap substitutes its own. */
+            if (!lazy_off) {
+                check(st == 0 && base == hi,
+                      "default: an explicit high base is honoured", d);
+                if (st == 0)
+                    nt_release(base);
+            } else
+#endif
+            check(base != hi, "lazy-off: an explicit high base is not honoured", d);
         } else if (ext) {
             /* The layout's own reservations (the Windows placeholder window,
              * the POSIX span) cover this range; it must hand it over, or the
@@ -597,6 +608,95 @@ int main(int argc, char **argv)
         check(st == 0 && size < want && base < 0x04000000u,
               "lazy-off: a 608 MB reserve is clamped to the heap", d);
     }
+#if !defined(_WIN32)
+    /* 10. A reservation at the address the title asks for, above RAM, with the
+     *     lazy reservations (the default on POSIX). Intrinsic Alchemy's sbrk
+     *     looks for a free run with NtQueryVirtualMemory, reserves exactly
+     *     there and gives up on any other address. */
+    if (!strcmp(mode, "default")) {
+        const uint32_t at = 0x7F000000u;
+        uint32_t mbi[7], st, b, s, n = 0, a;
+
+        b = at; s = 0x30000;
+        st = nt_alloc_at(&b, &s, 0x2000);
+        snprintf(d, sizeof d, "status 0x%08X, base 0x%08X, size 0x%X", st, b, s);
+        check(st == 0 && b == at && s == 0x30000,
+              "a reserve at 0x7F000000 gets that address", d);
+        b = at + 0x1000; s = 0x2000;
+        st = nt_alloc_at(&b, &s, 0x1000);
+        check(st == 0 && b == at + 0x1000, "a commit inside it succeeds", NULL);
+        *G(at + 0x1000) = 0xA1C4E3Bu;
+        check(*G(at + 0x1000) == 0xA1C4E3Bu && *G((at + 0x1000) % 0x04000000u) != 0xA1C4E3Bu,
+              "its pages are its own, not a RAM mirror", NULL);
+        b = at + 0x10000; s = 0x10000;
+        st = nt_alloc_at(&b, &s, 0x2000);
+        snprintf(d, sizeof d, "status 0x%08X", st);
+        check(st == 0xC0000018u, "a reserve over it is STATUS_CONFLICTING_ADDRESSES", d);
+
+        st = nt_query(at + 0x8000, mbi);
+        snprintf(d, sizeof d, "status 0x%08X state 0x%X base 0x%X size 0x%X", st, mbi[4], mbi[1], mbi[3]);
+        check(st == 0 && mbi[0] == at + 0x8000 && mbi[1] == at && mbi[4] == 0x1000
+              && mbi[3] == 0x28000, "query inside it: committed, to its end", d);
+        st = nt_query(0x7E000000u, mbi);
+        snprintf(d, sizeof d, "status 0x%08X state 0x%X size 0x%X", st, mbi[4], mbi[3]);
+        check(st == 0 && mbi[4] == 0x10000 && mbi[3] >= 0x100000u
+              && (uint64_t)mbi[0] + mbi[3] <= at,
+              "query below it: one free run, not 4 KB pieces", d);
+        for (a = 0x04000000u; n < 100000u; n++) {
+            st = nt_query(a, mbi);
+            if (st >= 0x80000000u || !mbi[3] || (uint64_t)a + mbi[3] > 0xFFFFFFFFu)
+                break;
+            a = mbi[0] + mbi[3];
+        }
+        snprintf(d, sizeof d, "%u queries", n);
+        check(n < 1000u, "a region walk above RAM takes a handful of queries", d);
+
+        /* A large reserve with no address comes down from the top and steps
+         * below the placed one instead of mapping over it. */
+        b = 0; s = 96u << 20;
+        st = nt_alloc_at(&b, &s, 0x2000);
+        snprintf(d, sizeof d, "status 0x%08X, base 0x%08X, size %u", st, b, s);
+        check(st == 0 && s == (96u << 20) && ((uint64_t)b + s <= at || b >= at + 0x30000u),
+              "a 96 MB reserve with no address goes around it", d);
+        check(*G(at + 0x1000) == 0xA1C4E3Bu, "and leaves its pages alone", NULL);
+        if (st == 0)
+            nt_release(b);
+
+        st = nt_release(at);
+        check(st == 0, "release of the placed reservation succeeds", NULL);
+        st = nt_query(at, mbi);
+        check(st == 0 && mbi[4] == 0x10000, "query: it reads as free again", NULL);
+        b = at; s = 0x10000;
+        st = nt_alloc_at(&b, &s, 0x2000);
+        check(st == 0 && b == at && *G(at + 0x1000) == 0,
+              "reserving it again works, and the memory is zero", NULL);
+        nt_release(at);
+
+        /* Inside the first RAM mirror, where Alchemy's walk finds room first:
+         * the pages must stop aliasing low RAM, or the title's writes land in
+         * its own code (a 17 MB pool at 0x04020000 overwrote .text). */
+        {
+            /* 1 MB over low RAM 0x20000..0x120000 (the image), read only on
+             * the low side; clear of the page the mirror check below uses. */
+            const uint32_t lo = 0x04020000u, probe = 0x00030000u;
+            uint32_t low_before = *G(probe);
+
+            b = lo; s = 0x00100000u;
+            st = nt_alloc_at(&b, &s, 0x2000);
+            snprintf(d, sizeof d, "status 0x%08X, base 0x%08X", st, b);
+            check(st == 0 && b == lo, "a reserve inside the first mirror gets its address", d);
+            if (st == 0) {
+                *G(0x04000000u + probe) = ~low_before;
+                snprintf(d, sizeof d, "low 0x%08X now 0x%08X", probe, *G(probe));
+                check(*G(probe) == low_before && *G(0x04000000u + probe) == ~low_before,
+                      "a write in it does not reach low RAM", d);
+            }
+            if (st == 0)
+                nt_release(lo);
+        }
+    }
+#endif
+
 #if !defined(_WIN32)
     if (!strcmp(mode, "default")) {
         const uint32_t MB = 1024u * 1024u, want = 608u * MB, ram = 64u * MB;

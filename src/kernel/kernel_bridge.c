@@ -1568,6 +1568,32 @@ static void bridge_NtAllocateVirtualMemory(void)
      * so MEM_COMMIT on an already-reserved region is a no-op.
      * Only allocate new memory when MEM_RESERVE is requested.
      */
+    /* A reservation at an address the title chose, above RAM: the address
+     * it asked for, or STATUS_CONFLICTING_ADDRESSES, as on the console. The
+     * heap path below never honours a base, and Intrinsic Alchemy's sbrk
+     * reserves exactly the run VirtualQuery called free and gives up on any
+     * other answer: its arena then fails every allocation (Yu-Gi-Oh! The Dawn
+     * of Destiny). RECOMP_EXT_VMA's tracker, when on, already answered above. */
+    if (base_hint && (alloc_type & 0x2000) && base_ptr && size_ptr) {
+        uint32_t rb = base_hint, rs = size;
+        int st = xbox_ReserveAt(&rb, &rs);
+
+        if (st != -1) {         /* -1: not ours, carry on */
+            if (KERNEL_LOG_ON()) {
+                fprintf(stderr, "  [KERNEL] NtAllocateVirtualMemory (at the asked "
+                                "address): base=0x%08X size=%u status=0x%08X\n",
+                        rb, rs, (uint32_t)st);
+                fflush(stderr);
+            }
+            if (st == 0) {
+                BRIDGE_MEM32(base_ptr) = rb;
+                BRIDGE_MEM32(size_ptr) = rs;
+            }
+            g_eax = (uint32_t)st;
+            return;
+        }
+    }
+
     /* An address above physical RAM is not free memory -- it aliases.
      *
      * The runtime maps 64 MB and then mirrors it at 64 MB intervals,
@@ -1761,6 +1787,20 @@ static void bridge_NtQueryVirtualMemory(void)
     if (base_va >= GUEST_VMEM_TOP) {
         g_eax = 0xC000000Du;               /* STATUS_INVALID_PARAMETER */
         return;
+    }
+
+    /* Above the RAM view, the lazy reservations answer: theirs read as
+     * committed, the rest as one free run up to the next reservation. */
+    {
+        uint32_t lz[7];
+
+        if (xbox_ReserveQuery(base_va, lz)) {
+            int k;
+            for (k = 0; k < 7; k++)
+                BRIDGE_MEM32(info_va + 4u * (uint32_t)k) = lz[k];
+            g_eax = 0;
+            return;
+        }
     }
 
     BRIDGE_MEM32(info_va + 0x00) = page_base;          /* BaseAddress */
