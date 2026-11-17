@@ -6,10 +6,17 @@
  * drift); vsync is on, so a swap may wait for the display too, and a field late by more than three periods resets the
  * clock instead of running fast to catch up. While the app is paused (background, the in-game menu:
  * recomp_lifecycle) no field runs. Fast-forward (recomp_ff_active: the in-game menu's toggle) runs `speed` fields per
- * shown frame, as many as fit in one display frame at "max". No sound yet (no DSP): nothing is opened. */
+ * shown frame, as many as fit in one display frame at "max".
+ *
+ * Sound (XBA-263): what the machine played during each field (gc_audio_pull, 48 kHz stereo) goes to host_audio;
+ * the clock is nudged by the queue (above twice its 50 ms target: a field 2 % longer, under half of it: 2 % shorter)
+ * so the host's audio clock and the guest's never drift apart; fast-forward averages it down (recomp_ff_audio). */
 #define _GNU_SOURCE /* pread */
 #include "gc_runtime.h"
+#include "gc_audio.h"
 #include "gc_boot.h"
+
+#include "host_audio.h"
 
 #include "gc_yuv_gl.h"
 #include "gx/gx.h"
@@ -38,6 +45,7 @@
 
 #define GC_DOL_MAX (16u * 1024 * 1024)
 #define GC_FIELD_NS_NTSC 16666667ull
+#define AUDIO_TARGET_FRAMES (GC_AUDIO_RATE / 20) /* 50 ms queued */
 
 const char *gc_runtime_version(void)
 {
@@ -51,6 +59,29 @@ void gc_runtime_opts_init(gc_runtime_opts *o)
     o->yuv_cpu = -1;
     o->scale = -1;
     o->filter = -1;
+}
+
+/* A 48 kHz 16-bit stereo WAV of what was played (tests): the header, rewritten with the sizes at the end. */
+static void wav_write_header(FILE *f, uint32_t frames)
+{
+    uint8_t h[44] = "RIFF____WAVEfmt \x10\0\0\0\x01\0\x02\0________\x04\0\x10\0data____";
+    uint32_t v[4] = {36 + frames * 4, GC_AUDIO_RATE, GC_AUDIO_RATE * 4, frames * 4};
+    const int at[4] = {4, 24, 28, 40};
+    for (int k = 0; k < 4; k++)
+        for (int b = 0; b < 4; b++)
+            h[at[k] + b] = (uint8_t)(v[k] >> (8 * b));
+    fseek(f, 0, SEEK_SET);
+    fwrite(h, 1, 44, f);
+    fseek(f, 0, SEEK_END);
+}
+
+static uint32_t wav_write_frames(FILE *f, const int16_t *lr, size_t n)
+{
+    for (size_t i = 0; i < 2 * n; i++) {
+        uint8_t le[2] = {(uint8_t)lr[i], (uint8_t)((uint16_t)lr[i] >> 8)};
+        fwrite(le, 1, 2, f);
+    }
+    return (uint32_t)n;
 }
 
 /* A whole file, or "fd:N" read from offset 0 (the descriptor stays open and its offset is not used). */
@@ -376,22 +407,35 @@ started:;
         gx_gl_options go = {0, 1, 0, gx_list[0] ? gx_list : NULL};
         gx_on = gx_gl_attach(gc_gx(m), &go) == 0;
     }
-    printf("gc: window %s, XFB to RGB on the %s, audio off (no DSP yet), pads %u\n", window ? "on" : "off",
-           gpu ? "GPU" : "CPU", host_pad_mask());
+    int audio = host_audio_open(GC_AUDIO_RATE, 2);
+    FILE *wav = NULL;
+    uint32_t wav_frames = 0;
+    if (o->wav_path && *o->wav_path) {
+        wav = fopen(o->wav_path, "wb");
+        if (wav)
+            wav_write_header(wav, 0);
+        else
+            fprintf(stderr, "gc: cannot write %s\n", o->wav_path);
+    }
+    printf("gc: window %s, XFB to RGB on the %s, audio %s (48 kHz), pads %u\n", window ? "on" : "off",
+           gpu ? "GPU" : "CPU", audio ? "on" : "off (no device)", host_pad_mask());
     fflush(stdout);
 
     static uint8_t yuv[GC_XFB_MAX_W * GC_XFB_MAX_H * 2];
     static uint8_t rgb[GC_XFB_MAX_W * GC_XFB_MAX_H * 3];
     static uint8_t rgba[GC_XFB_MAX_W * GC_XFB_MAX_H * 4];
     uint64_t frames = 0, t0 = now_ns(), next = t0, late_resets = 0;
-    int was_paused = 0, rc = 0, was_ff = 0, stopped = 0;
+    int was_paused = 0, rc = 0, was_ff = 0, stopped = 0, heard = 0;
+    static int16_t pcm[GC_AUDIO_RATE / 10 * 2];
+    recomp_ff_carry ff_carry;
+    memset(&ff_carry, 0, sizeof ff_carry);
     uint64_t field_ns = gc_field_ns(m);
     recomp_perf_hint_begin((int64_t)field_ns); /* the frame loop, one session (no worker threads) */
     /* The performance line every console logs every 10 s and at the end (host_perf_line.h, XBA-243). */
-    enum { ST_EMU, ST_PRESENT, ST_N };
+    enum { ST_EMU, ST_AUDIO, ST_PRESENT, ST_N };
     host_perf_config hp_cfg = {
         .console = "gc", .unit = "VI/s", .nstages = ST_N,
-        .stage = {"emu", "present"}, .kind = {HOST_PERF_EMU, HOST_PERF_RENDER},
+        .stage = {"emu", "audio", "present"}, .kind = {HOST_PERF_EMU, HOST_PERF_OTHER, HOST_PERF_RENDER},
         .rest = "other", .rest_kind = HOST_PERF_OTHER,
     };
     hp_cfg.frame_ns = tv == GC_TV_PAL ? 20000000ull : GC_FIELD_NS_NTSC;
@@ -459,6 +503,21 @@ started:;
             }
             frames++;
             host_perf_guest(&hp, 1);
+
+            /* Sound: what the field played (800 frames at 60 Hz); averaged down while fast-forwarding. */
+            uint64_t ta = now_ns();
+            size_t got;
+            while ((got = gc_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2)) > 0) {
+                if (wav)
+                    wav_frames += wav_write_frames(wav, pcm, got);
+                for (size_t i = 0; i < 2 * got && !heard; i++)
+                    heard = pcm[i] != 0;
+                if (ff)
+                    got = speed ? recomp_ff_audio(pcm, got, speed, &ff_carry) : 0;
+                if (audio && got)
+                    host_audio_queue(pcm, (uint32_t)got);
+            }
+            host_perf_stage(&hp, ST_AUDIO, now_ns() - ta);
             if (o->frames && frames >= o->frames)
                 break;
             if (ff && !speed && now_ns() >= burst_end)
@@ -507,6 +566,13 @@ started:;
 
         if (!o->unpaced && !(ff && !speed)) {
             next += field_ns;
+            if (audio && heard) { /* audio-driven: the queue keeps the clock honest (±2 %) */
+                uint32_t q = host_audio_queued();
+                if (q > AUDIO_TARGET_FRAMES * 2)
+                    next += field_ns / 50;
+                else if (q < AUDIO_TARGET_FRAMES / 2)
+                    next -= field_ns / 50;
+            }
             uint64_t t = now_ns();
             if (t > next + 3 * field_ns) {
                 next = t; /* a stall (a slow host, the debugger): no burst to catch up */
@@ -520,6 +586,22 @@ started:;
 
     recomp_perf_hint_end();
     host_perf_log_run(&hp, now_ns(), NULL);
+    {
+        gc_audio_info ai;
+        gc_audio_get_info(m, &ai);
+        printf("gc: audio: ucode %s (%08X), %u started (%u unknown), %llu command lists, %llu DMA blocks, "
+               "%llu stream frames, %llu frames out, %llu dropped\n",
+               ai.ucode, ai.ucode_crc, ai.ucodes_booted, ai.unknown_ucodes, (unsigned long long)ai.cmd_lists,
+               (unsigned long long)ai.dma_blocks, (unsigned long long)ai.stream_frames,
+               (unsigned long long)ai.frames_out, (unsigned long long)ai.overruns);
+    }
+    if (wav) {
+        wav_write_header(wav, wav_frames);
+        fclose(wav);
+        printf("gc: %u audio frames written to %s\n", wav_frames, o->wav_path);
+    }
+    if (audio)
+        host_audio_close();
     host_perf_live_clear();
     double secs = (double)(now_ns() - t0) / 1e9;
     gc_recomp_stats rs;

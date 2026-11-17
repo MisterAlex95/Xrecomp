@@ -7,7 +7,8 @@
  * shader that does not build) converts on the CPU and presents RGBA instead. Timing: one VI field per shown frame,
  * paced at the field's own length (60 Hz NTSC, 50 Hz PAL: RECOMP_GC_TV=pal starts the machine as a PAL IPL would).
  * Pads: host pad n is the controller in port n (console_pad, CONSOLE_PAD_GC: RECOMP_GC_PAD_MAP), port 1 always
- * plugged in; Z held by the game's motor command rumbles the host pad. Audio: none yet (no DSP, XBA-263): silent.
+ * plugged in; Z held by the game's motor command rumbles the host pad. Audio (XBA-263): the machine's 48 kHz output
+ * (gc_audio.h: the DSP's audio DMA and the disc stream) through host_audio, the pacing nudged by its queue.
  * consoles/README.md « GameCube », Plane « Spec · Other consoles ». */
 #ifndef XBR_GC_RUNTIME_H
 #define XBR_GC_RUNTIME_H
@@ -62,6 +63,8 @@ typedef struct gc_runtime_opts {
     /* Window scaling / filter: -1 = $RECOMP_GC_SCALE / _FILTER, else the shared $RECOMP_SCALE / $RECOMP_FILTER, else
      * aspect and linear (host_window_env_scale / _filter); else HOST_SCALE_* / HOST_FILTER_*. */
     int scale, filter;
+    /* Everything played also written here as a 48 kHz stereo WAV (tests); NULL: none. */
+    const char *wav_path;
 } gc_runtime_opts;
 
 void gc_runtime_opts_init(gc_runtime_opts *o);

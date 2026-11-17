@@ -9,8 +9,8 @@
  *
  * The DVD interface (0xCC006000, gc_di.c): status / cover / command / DMA / immediate registers; commands read
  * (0xA8, and 0xA8..40 the disc ID), seek (0xAB), inquiry (0x12), request error (0xE0), audio streaming (0xE1 play
- * / stop, 0xE2 status, 0xE4 buffer config; the stream's position advances in time, no samples are decoded yet:
- * DSP / AI audio is XBA-263), stop motor (0xE3), the drive-unlock debug commands (accepted). A command completes
+ * / stop, 0xE2 status, 0xE4 buffer config; the stream is decoded as the audio interface plays it, gc_di_stream_frame,
+ * XBA-263), stop motor (0xE3), the drive-unlock debug commands (accepted). A command completes
  * after an estimate of the drive's time (seek over the distance from the head, a constant-angular-velocity transfer
  * rate from 2 MB/s inside to 3.1 MB/s outside), then its DMA lands and the transfer-complete interrupt is raised.
  * Disc change (multi-disc sets): the cover opens, half a second later it closes on the new disc. */

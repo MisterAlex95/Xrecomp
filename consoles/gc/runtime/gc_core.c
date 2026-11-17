@@ -27,6 +27,8 @@ void gc_schedule(gc_machine *m)
         t = m->dec_fire;
     if (m->di && gc_di_next_event(m) < t)
         t = gc_di_next_event(m);
+    if (gc_audio_next_event(m) < t)
+        t = gc_audio_next_event(m);
     if (((m->h.cpu.msr & PPC_MSR_EE) && gc_irq_pending(m)) || m->error[0])
         t = m->h.now;
     m->h.next_event = t;
@@ -105,7 +107,7 @@ gc_machine *gc_alloc_machine(char *why, size_t why_len)
     m->h.ram = calloc(1, GC_RAM_SIZE);
     m->aram = calloc(1, GC_ARAM_SIZE);
     m->gx = m->h.ram ? gx_create(m->h.ram, GC_RAM_SIZE, gx_irq, m) : NULL;
-    if (!m->h.ram || !m->aram || !m->gx) {
+    if (!m->h.ram || !m->aram || !m->gx || !gc_audio_init(m)) {
         snprintf(why, why_len, "out of memory");
         gc_destroy(m);
         return NULL;
@@ -202,6 +204,7 @@ void gc_destroy(gc_machine *m)
     free(m->rc_hash_idx);
     free(m->missed);
     gc_di_free(m);
+    gc_audio_free(m);
     free(m);
 }
 
@@ -274,6 +277,8 @@ int gc_run_frame(gc_machine *m)
         }
         if (m->di && m->h.now >= gc_di_next_event(m))
             gc_di_event(m);
+        if (m->h.now >= gc_audio_next_event(m))
+            gc_audio_event(m);
         if (m->h.now >= m->field_end)
             break;
         take_interrupts(m);

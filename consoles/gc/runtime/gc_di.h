@@ -32,10 +32,18 @@ typedef struct gc_di {
     bool fail;                /* the command in flight ends with DEINT */
     uint64_t head;            /* where the drive's head is (byte offset) */
     bool motor_off;
-    /* audio streaming */
-    bool stream_on;
-    uint64_t stream_start, stream_len, stream_t0;
+    /* audio streaming (DTK): the track playing, the one queued behind it (it loops by default), the decoder
+     * (XBA-263: gc_di_stream_frame, pulled by the audio interface at its streaming rate while it plays) */
+    bool stream_on, stream_stop_at_end;
+    uint64_t stream_start, stream_len, stream_pos; /* stream_pos: the next block's offset on the disc */
+    uint64_t stream_next_start, stream_next_len;
     uint32_t stream_cfg;
+    int16_t stream_blk[56];
+    int stream_blk_at;                           /* frames of stream_blk already played (28: none left) */
+    int32_t stream_hist[4];
+    uint8_t stream_cache[0x8000];
+    uint64_t stream_cache_off;
+    uint32_t stream_cache_n;
     /* boot */
     uint32_t boot_entry;
     unsigned boot_reads;

@@ -1,10 +1,10 @@
 /* gc_play -- plays a GameCube DOL on a desktop through gc_runtime (window, pads; XBA-259).
  *
  *   gc_play PROG.dol [--frames N] [--headless] [--unpaced] [--screenshot OUT.png] [--capture FIELD OUT.ppm]
- *           [--pal] [--cpu-yuv] [--pack LIB.so] [--pad BUTTONS[:SX:SY:CX:CY:L:R]]
+ *           [--pal] [--cpu-yuv] [--pack LIB.so] [--pad BUTTONS[:SX:SY:CX:CY:L:R]] [--wav OUT.wav]
  *
  * --pad holds port 1's buttons (hex, GC_PAD_*) and sets its sticks and triggers (0..255, sticks at rest 128) for the
- * whole run, on top of the real pads (tests). Exit 0, 1 when the program cannot start or the machine stopped. */
+ * whole run, on top of the real pads (tests). --wav: everything played, also as a 48 kHz WAV (XBA-263). Exit 0, 1 when the program cannot start or the machine stopped. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +24,8 @@ int main(int argc, char **argv)
             o.unpaced = 1;
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc)
             o.screenshot = argv[++i];
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc)
+            o.wav_path = argv[++i];
         else if (!strcmp(argv[i], "--capture") && i + 2 < argc) {
             o.capture_frame = strtoull(argv[++i], NULL, 10);
             o.capture_path = argv[++i];
@@ -47,7 +49,7 @@ int main(int argc, char **argv)
         else {
             fprintf(stderr, "usage: gc_play PROG.dol [--frames N] [--headless] [--unpaced] [--screenshot OUT.png]"
                             " [--capture FIELD OUT.ppm] [--pal] [--cpu-yuv] [--pack LIB.so]"
-                            " [--pad BUTTONS[:SX:SY:CX:CY:L:R]]\n");
+                            " [--pad BUTTONS[:SX:SY:CX:CY:L:R]] [--wav OUT.wav]\n");
             return 2;
         }
     }

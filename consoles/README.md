@@ -1430,8 +1430,7 @@ leaves. Since XBA-259 the core plays on the host layer, in the app too (« GameC
   FR / FI / FPRF after arithmetic, enabled FP exceptions, the 25-bit frC of single multiplies, the double rounding of
   fmadds-family results, quantisation of NaN (0 here).
 
-Not there yet: GX / Flipper (CP FIFO, TEV, EFB copies), the DSP (audio, and the streamed disc audio's samples), memory
-cards, Wii discs, the Wii. What of the frontend carries to the Xbox 360 is on XBA-219.
+Not there yet: memory cards, Wii discs, the Wii (GX: « GameCube GX », sound: « GameCube sound » below). What of the frontend carries to the Xbox 360 is on XBA-219.
 
 **GameCube runtime (XBA-259, GC-1).** The core on the host layer, so every later step (GX, discs, DSP) is tried on the
 AYN Thor first. `XBR_CONSOLE_GC` is ON on Android, Linux and macOS; the app plays a homebrew `.dol` from a library
@@ -1453,7 +1452,7 @@ folder (no disc, no IPL, no Prepare yet).
   `RECOMP_GC_PAD_MAP`: A south, B east, X west, Y north, Z right shoulder, L / R the triggers, digital past 85 % of
   their travel, analog from the host triggers; sticks main = left, C = right), port 1 always plugged in (keyboard on a
   desktop), the game's motor to `host_pad_rumble`. The perf line (`gc: perf ... VI/s`), the ADPF hint session, the
-  lifecycle pause, fast-forward (the in-game menu's toggle). No audio yet (XBA-263): nothing is opened. A pack
+  lifecycle pause, fast-forward (the in-game menu's toggle). Sound since XBA-263 (« GameCube sound »). A pack
   (`gc_tools.recomp`'s library) attaches when one is handed over; the interpreter's misses go to
   `<files>/work/gc-<KEY>/discovered.txt`. Options: `RECOMP_GC_TV=pal`, `RECOMP_GC_YUV=cpu`, `RECOMP_GC_SCALE` /
   `_FILTER` / `_SHADER`, `RECOMP_GC_FRAMES=N` (docs/runtime/environment-variables.md).
@@ -1484,7 +1483,7 @@ main DOL entry):
   until it asks for nothing, each read served from the disc, close for the entry), then the FST and bi2 under the top
   of memory if the apploader left them, the main DOL's text ranges, and the jump (`gc: boot: ... main DOL entry`).
 - `runtime/gc_di.c`: the DVD interface at 0xCC006000: read (and the disc ID), seek, inquiry, request error, audio
-  streaming play / stop / status / buffer config (the position advances in time; no samples yet, XBA-263), stop
+  streaming play / stop / status / buffer config (its samples decoded since XBA-263, « GameCube sound »), stop
   motor, the unlock commands; DMA when the command completes after a read-time estimate (seek over the head's
   distance, CAV transfer 2 to 3.1 MB/s, spin-up), transfer-complete / error / break / cover interrupts. Disc change
   (`gc_disc_insert`, `gc_run --disc2 IMAGE --swap-at FIELD`): the cover opens, closes on the new disc 0.5 s later.
@@ -1564,6 +1563,59 @@ line / point texture offsets, Z16 compressed EFB formats and EFB format reinterp
 logic ops other than the five above, constant destination alpha while blending reads the source alpha (no dual-source
 blending in GLES 3.0), GPU-side transform and lighting (the CPU does it: the first thing to move if the Thor shows
 it), program binaries (GC-6).
+
+**GameCube sound (XBA-263).** DSP audio, ARAM, the audio interface and the disc's streamed audio, at a high level
+(no DSP ROM dump, no LLE), out through the host layer at 48 kHz (`gc_runtime`, the app included; `gc_run --wav`
+headless). Our own code, written from the hardware's documentation (Dolphin's notes and source read for facts only).
+
+- `runtime/gc_dsp.c`: the DSP interface at 0xCC005000: both mailboxes (mail from the DSP is visible once the halt bit
+  is clear; a mail that asks for an interrupt behind another raises it when the one before is read), the control
+  register (reset back to the ROM, halt, the init bit whose clearing runs the init code, the DSP / ARAM / audio DMA
+  interrupts and masks), the ARAM DMA (16 MB, 246 cycles per 32 bytes, busy bit, its interrupt), the audio DMA's
+  registers. The DSP side: the ROM's greeting (0x8071FEED) and boot protocol (0x80F3xxxx parameters), the init code's
+  answer, the task protocol (DSP_INIT / RESUME / YIELD / DONE / SYNC, the CPU's 0xCDD1000x), switching to a new ucode
+  and back (the one left resumes). A ucode is recognised by the hash of the image the game uploads (`gc_ucode_hash`:
+  xor then rotate by 3, the hash Dolphin's list of known images is keyed by): AX (4 hashes, plus the 2001 one with
+  its own PB layout and mixer bits), libogc's ASND (every release), the card unlock; the Zelda / JAudio family, the
+  GBA link and libogc's AESND are recognised and logged as not emulated (they start and say DSP_INIT, nothing else:
+  XBA-266); any other image is logged (`gc: dsp: ucode XXXXXXXX ... unknown (as ax) -- please report this hash`) and
+  played as AX.
+- `runtime/gc_ax.c`: AX: command lists (0xBABE0000 | size, then the address; DSP_YIELD after each, 2500 cycles
+  later): setup, the PB list, aux A / B out to the CPU's effects and back, upload / set / opposite L R, the
+  compressor, more, output (16-bit right-then-left frames for the audio DMA, surround as 32-bit), the send-aux-and-mix
+  of later versions. A PB is processed 1 ms (32 samples at 32 kHz) at a time with its per-millisecond updates:
+  samples through the accelerator (`gc_accel_read`: ADPCM frames with their header bytes, PCM8 / PCM16 with gain, the
+  end exception: loop with the loop context, or the voice stops; streams count their loops), sample-rate conversion
+  (linear between the two oldest of the last four samples as the ucode does, or none; the polyphase filter needs the
+  DSP ROM's coefficients and falls back to linear), the signed volume envelope, the low-pass filter, the nine buffers
+  with volume ramps. Not modelled: the initial time delay, Dolby Pro Logic II, depop.
+- `runtime/gc_asnd.c`: libasnd's ucode (0x0123 voice address, 0x0111 / 0x0222 mix a voice, 0x0666 out, 0x0999
+  terminate): eight sample formats, rates stepped against 48 kHz, volumes, the delay, the second buffer and loops,
+  the 2011 flag layout and the input channel order before 2024 told apart by hash.
+- `runtime/gc_ai.c`: the audio DMA (32-byte blocks every 1/4000 or 1/6000 s as AICR's DMA rate says, its interrupt
+  when a buffer is latched, then the registers as they are reloaded at its end, blocks left), the audio interface at
+  0xCC006C00 (stream rate, play bit, volume, the streaming sample counter from the clock, its match with AIIT raising
+  the AI interrupt), the mix: the DMA's frames and the disc stream (at the AI volume) each resampled to 48 kHz
+  (`gc_resampler`: 4-point cubic, exact over any length, so it never drifts) into a 0.68 s ring `gc_audio_pull`
+  empties.
+- `runtime/gc_di.c`: the stream (DTK) is decoded as the AI plays it (`gc_dtk_decode_block`: the drive's 4-bit
+  ADPCM, 28 stereo frames per 32-byte block, the CD-XA filters); a play command queues its track behind the one
+  playing (it loops), a zero length stops at the end of the track, stop and stop-motor stop it.
+- `gc_runtime`: each field's frames go to `host_audio` (48 kHz stereo; the in-game menu's volume applies); the field
+  clock is nudged ±2 % by the queue (50 ms target) so the guest's audio clock and the host's never drift apart;
+  fast-forward averages it down (`recomp_ff_audio`). The log's `gc: audio: ucode ...` line at the end sums it up (and
+  `gc_run`'s `audio:` line).
+- Tests: ctest `gc_audio` (no toolchain, no game data: `tests/gc_audio_test.c`): unit checks worked out by hand (the
+  stream ADPCM's filters and shifts, AX ADPCM frames and headers, PCM8 / PCM16, the end exception, the resampler's
+  length / DC / identity / a 32 to 48 kHz sine, the hash) and round trips through encoders of ours; then through the
+  machine's registers only: the DSP reset and booted with an image of ours (unknown hash: AX), 400 hand-written AX
+  command lists for an ADPCM voice (looped, 16 to 32 kHz), a PCM16 one (a volume ramp) and a PCM8 one (8 to 32 kHz),
+  the 2 s they rendered played by the audio DMA; a disc in memory with a stream of ours played through the DVD and
+  audio interfaces (volume, sample counter, its interrupt, position, stop at the end). `gc_asnd`: `tests/homebrew/asnd`,
+  our libasnd program, five scenes (left / right / stereo / mixed / silence) under `gc_run`; `gc_play_asnd`: the same
+  through `gc_runtime` (SDL's dummy audio). Each WAV is compared with a reference `tests/audio_check.py` synthesises
+  from the scene list (per channel and scene: every tone's level within 5 %, RMS, what is left once the tones are taken
+  out under 8 %).
 
 **Dreamcast spike (XBA-227, epic XBA-221).** A new frontend: the SH-4. Our KallistiOS hello world boots on Linux
 with no BIOS image, interpreted and recompiled (after the discovery loop over 99.99 % of its instructions run as

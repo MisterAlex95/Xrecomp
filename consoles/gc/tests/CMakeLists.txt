@@ -133,3 +133,26 @@ if(TARGET gc_run)
                 ${CMAKE_CURRENT_BINARY_DIR}/hello_disc ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png)
     set_tests_properties(gc_disc gc_hello_disc PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
 endif()
+
+# Sound (XBA-263): gc_audio needs no toolchain and no game data (unit checks of the stream ADPCM, the accelerator,
+# the resampler; AX voices rendered through the DSP interface's mailboxes and played by the audio DMA; a disc stream
+# through the DVD and audio interfaces; WAVs against audio_check.py's references). gc_asnd: our libasnd homebrew
+# under gc_run, its output scene by scene (77 without the corpus); gc_play_asnd: the same through gc_runtime and the
+# host audio path.
+add_executable(gc_audio_test gc_audio_test.c)
+target_include_directories(gc_audio_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime)
+target_link_libraries(gc_audio_test PRIVATE gc_core)
+target_compile_options(gc_audio_test PRIVATE -Wall -Wextra)
+set(GC_RUN_AUDIO ${CMAKE_CURRENT_SOURCE_DIR}/run_audio.sh)
+add_test(NAME gc_audio COMMAND sh ${GC_RUN_AUDIO} unit $<TARGET_FILE:gc_audio_test> ${CMAKE_CURRENT_BINARY_DIR}/audio)
+set_tests_properties(gc_audio PROPERTIES TIMEOUT 600)
+if(TARGET gc_run)
+    add_test(NAME gc_asnd COMMAND sh ${GC_RUN_AUDIO} asnd $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/asnd.dol
+                                  ${CMAKE_CURRENT_BINARY_DIR}/asnd)
+    set_tests_properties(gc_asnd PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+endif()
+if(TARGET gc_play)
+    add_test(NAME gc_play_asnd COMMAND sh ${GC_RUN_AUDIO} play $<TARGET_FILE:gc_play> ${GC_HOMEBREW_DIR}/asnd.dol
+                                       ${CMAKE_CURRENT_BINARY_DIR}/play_asnd)
+    set_tests_properties(gc_play_asnd PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+endif()

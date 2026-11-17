@@ -1,9 +1,11 @@
 /* gc_di.c -- the DVD interface (XBA-261): registers at 0xCC006000, drive commands with DMA, a read-time estimate,
- * the transfer-complete / error / break / cover interrupts, audio streaming state, disc change. See gc_boot.h. */
+ * the transfer-complete / error / break / cover interrupts, audio streaming (its ADPCM decoded for the audio
+ * interface, XBA-263), disc change. See gc_boot.h. */
 #include <stdlib.h>
 #include <string.h>
 
 #include "gc_di.h"
+#include "gc_audio.h"
 
 /* A GameCube disc: 1,459,978,240 bytes. Reads past an image shorter than that (test images) give zeros. */
 #define DI_DISC_MAX 0x57058000ull
@@ -102,19 +104,67 @@ unsigned gc_boot_reads(const gc_machine *m)
     return m->di ? m->di->boot_reads : 0;
 }
 
-/* The audio stream's play position (bytes from the disc start): 48 kHz, 28 stereo samples per 32-byte block. */
+/* The audio stream's play position (bytes from the disc start): where its decoder is (32-byte blocks of 28 stereo
+ * frames, pulled at the audio interface's streaming rate). Not playing: the end of the last track. */
 static uint64_t stream_pos(gc_machine *m)
 {
     gc_di *d = m->di;
-    if (!d->stream_on)
-        return d->stream_start + d->stream_len;
-    uint64_t samples = (m->h.now - d->stream_t0) * 48000u / GC_CPU_HZ;
-    uint64_t pos = samples / 28 * 32;
-    if (pos >= d->stream_len) {
-        d->stream_on = false;
-        return d->stream_start + d->stream_len;
+    return d->stream_on ? d->stream_pos : d->stream_start + d->stream_len;
+}
+
+static void stream_begin(gc_di *d, uint64_t start, uint64_t len)
+{
+    d->stream_on = true;
+    d->stream_start = start;
+    d->stream_len = len;
+    d->stream_pos = start;
+    d->stream_blk_at = 28;
+    memset(d->stream_hist, 0, sizeof d->stream_hist);
+}
+
+int gc_di_stream_frame(gc_machine *m, int16_t lr[2])
+{
+    gc_di *d = m->di;
+    if (!d || !d->stream_on || d->cover_open || !d->disc)
+        return 0;
+    if (d->stream_blk_at >= 28) {
+        if (d->stream_pos + 32 > d->stream_start + d->stream_len) { /* the track ends: the next, or stop */
+            if (d->stream_stop_at_end || !d->stream_next_len) {
+                d->stream_on = false;
+                d->stream_stop_at_end = false;
+                return 0;
+            }
+            stream_begin(d, d->stream_next_start, d->stream_next_len);
+            if (d->stream_len < 32) {
+                d->stream_on = false;
+                return 0;
+            }
+        }
+        uint64_t off = d->stream_pos;
+        if (off < d->stream_cache_off || off + 32 > d->stream_cache_off + d->stream_cache_n) {
+            uint64_t base = off & ~31ull;
+            uint32_t n = sizeof d->stream_cache;
+            uint64_t size = gc_disc_size(d->disc);
+            if (base >= size) {
+                memset(d->stream_cache, 0, n);
+            } else {
+                uint32_t have = base + n <= size ? n : (uint32_t)(size - base);
+                memset(d->stream_cache + have, 0, n - have);
+                if (gc_disc_read(d->disc, base, d->stream_cache, have))
+                    memset(d->stream_cache, 0, have);
+            }
+            d->stream_cache_off = base;
+            d->stream_cache_n = n;
+            d->head = base + n;
+        }
+        gc_dtk_decode_block(d->stream_cache + (off - d->stream_cache_off), d->stream_blk, d->stream_hist);
+        d->stream_pos += 32;
+        d->stream_blk_at = 0;
     }
-    return d->stream_start + pos;
+    lr[0] = d->stream_blk[2 * d->stream_blk_at];
+    lr[1] = d->stream_blk[2 * d->stream_blk_at + 1];
+    d->stream_blk_at++;
+    return 1;
 }
 
 /* How long the drive takes to read len bytes at off: command overhead, a seek over the distance from the head
@@ -219,15 +269,20 @@ static void finish_command(gc_machine *m)
             d->reg[DI_IMM] = d->error;
             d->error = DI_ERR_NONE;
             break;
-        case 0xE1: {
+        case 0xE1: { /* audio stream: 0 play (queued behind the track playing; length 0: stop at its end), 1 stop */
             unsigned sub = (d->cmd0 >> 16) & 0xFF;
+            uint64_t start = (uint64_t)d->cmd1 << 2;
             if (sub == 0 && d->cmd2) {
-                d->stream_on = true;
-                d->stream_start = (uint64_t)d->cmd1 << 2;
-                d->stream_len = d->cmd2;
-                d->stream_t0 = m->h.now;
+                d->stream_next_start = start;
+                d->stream_next_len = d->cmd2;
+                d->stream_stop_at_end = false;
+                if (!d->stream_on)
+                    stream_begin(d, start, d->cmd2);
+            } else if (sub == 0) {
+                d->stream_stop_at_end = true;
             } else {
                 d->stream_on = false;
+                d->stream_next_len = 0;
             }
             break;
         }

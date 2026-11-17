@@ -20,16 +20,51 @@
  * 77 when there is no GLES 3 context to be had. --gx-scale: internal resolution; --gx-shaders: async (ubershader
  * until the specialised shader is ready), sync, uber (ubershader only), special (specialised only, compiled on first
  * use); --gx-list: the per-title shader list (read, then written back); --gx-copy-ram: EFB copies to textures are
- * also encoded into RAM. */
+ * also encoded into RAM.
+ *
+ * Sound (XBA-263): --wav OUT writes everything the machine played (48 kHz 16-bit stereo, from power-on) as a WAV;
+ * the line "audio: ..." sums up the DSP's microcode and what was played. */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "gc_audio.h"
 #include "gc_boot.h"
 #include "gc_core.h"
 #include "gx/gx.h"
 #include "gc_png.h"
+
+/* A 48 kHz 16-bit stereo WAV, its sizes patched at the end. */
+static void wav_header(FILE *f, uint32_t frames)
+{
+    uint32_t data = frames * 4;
+    uint8_t h[44] = "RIFF____WAVEfmt \x10\0\0\0\x01\0\x02\0________\x04\0\x10\0data____";
+    uint32_t v[4] = {36 + data, GC_AUDIO_RATE, GC_AUDIO_RATE * 4, data};
+    int at[4] = {4, 24, 28, 40};
+    for (int k = 0; k < 4; k++)
+        for (int b = 0; b < 4; b++)
+            h[at[k] + b] = (uint8_t)(v[k] >> (8 * b));
+    fseek(f, 0, SEEK_SET);
+    fwrite(h, 1, 44, f);
+}
+
+static void wav_drain(gc_machine *m, FILE *f, uint32_t *frames)
+{
+    static int16_t pcm[4096 * 2];
+    size_t n;
+    while ((n = gc_audio_pull(m, pcm, 4096)) > 0) {
+        if (f) {
+            uint8_t le[4096 * 4];
+            for (size_t i = 0; i < 2 * n; i++) {
+                le[2 * i] = (uint8_t)pcm[i];
+                le[2 * i + 1] = (uint8_t)((uint16_t)pcm[i] >> 8);
+            }
+            fwrite(le, 4, n, f);
+            *frames += (uint32_t)n;
+        }
+    }
+}
 
 static uint8_t *read_file(const char *path, size_t *size)
 {
@@ -51,7 +86,7 @@ static uint8_t *read_file(const char *path, size_t *size)
 
 int main(int argc, char **argv)
 {
-    const char *dol_path = NULL, *png = NULL, *pack = NULL, *missed = NULL, *disc2 = NULL;
+    const char *dol_path = NULL, *png = NULL, *pack = NULL, *missed = NULL, *disc2 = NULL, *wav = NULL;
     int frames = 60, stats = 0, verbose = 0, npeek = 0, force_disc = 0, swap_at = -1, use_gx = 0, gx_hw = 0;
     gx_gl_options gxo = {0, 1, 0, NULL};
     const char *peek[16];
@@ -63,6 +98,8 @@ int main(int argc, char **argv)
             frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--png") && i + 1 < argc)
             png = argv[++i];
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc)
+            wav = argv[++i];
         else if (!strcmp(argv[i], "--pack") && i + 1 < argc)
             pack = argv[++i];
         else if (!strcmp(argv[i], "--missed") && i + 1 < argc)
@@ -109,7 +146,7 @@ int main(int argc, char **argv)
         else {
             fprintf(stderr, "usage: gc_run PROG.dol|DISC [--disc IMAGE] [--disc2 IMAGE --swap-at FIELD] [--frames N]"
                             " [--png OUT] [--pack LIB] [--missed FILE] [--stats] [--peek ADDR[:N]] [--pal]"
-                            " [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]] [-v] [--gx] [--gx-hw] [--gx-scale N]"
+                            " [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]] [--wav OUT] [-v] [--gx] [--gx-hw] [--gx-scale N]"
                             " [--gx-shaders MODE] [--gx-list FILE] [--gx-copy-ram]\n");
             return 2;
         }
@@ -166,6 +203,17 @@ int main(int argc, char **argv)
         }
     }
     int rc = 0;
+    FILE *wf = NULL;
+    uint32_t wav_frames = 0;
+    if (wav) {
+        wf = fopen(wav, "wb");
+        if (!wf) {
+            fprintf(stderr, "gc_run: cannot write %s\n", wav);
+            gc_destroy(m);
+            return 2;
+        }
+        wav_header(wf, 0);
+    }
     for (int f = 0; f < frames; f++) {
         if (disc2 && f == swap_at) {
             gc_disc *d2 = gc_disc_open(disc2, why, sizeof why);
@@ -182,8 +230,24 @@ int main(int argc, char **argv)
             rc = 1;
             break;
         }
+        wav_drain(m, wf, &wav_frames);
     }
     printf("frames %llu\n", (unsigned long long)gc_frames(m));
+    {
+        gc_audio_info ai;
+        gc_audio_get_info(m, &ai);
+        printf("audio: ucode %s (%08X), %u booted (%u unknown), %llu mails in / %llu out, %llu command lists, "
+               "%llu DMA blocks, %llu stream frames, %llu frames out\n",
+               ai.ucode, ai.ucode_crc, ai.ucodes_booted, ai.unknown_ucodes, (unsigned long long)ai.mails_to_dsp,
+               (unsigned long long)ai.mails_from_dsp, (unsigned long long)ai.cmd_lists,
+               (unsigned long long)ai.dma_blocks, (unsigned long long)ai.stream_frames,
+               (unsigned long long)ai.frames_out);
+    }
+    if (wf) {
+        wav_header(wf, wav_frames);
+        fclose(wf);
+        printf("wav %u frames\n", wav_frames);
+    }
     if (verbose)
         gc_dump_state(m, stdout);
     if (stats) {

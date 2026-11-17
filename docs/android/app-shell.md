@@ -2397,7 +2397,9 @@ to RGB on the GPU, audio off (no DSP yet), pads N`. The XFB is converted to RGB 
 Host pad N is controller port N (the device's own controls are port 1, always plugged in): A south, B east, X west,
 Y north, Z on RB, L / R the triggers (analog, the click past 85 %), left stick the main stick, right stick the C
 stick, Start; the game's rumble drives the pad's. `RECOMP_GC_PAD_MAP` remaps (the Controls screen does not offer the
-GameCube yet). No sound yet (the DSP is XBA-263). Back opens the in-game menu (fast-forward works; no save states).
+GameCube yet). Sound through the same audio output as the other consoles (XBA-263: AX and libogc's ASND ucodes,
+the disc's streamed audio; the in-game menu's volume applies). Back opens the in-game menu (fast-forward works; no
+save states).
 
 ### Device check (GameCube homebrew, XBA-259), for Alex
 

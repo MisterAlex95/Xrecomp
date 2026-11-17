@@ -1,9 +1,10 @@
 /* gc_core.h -- the GameCube spike's machine (XBA-225, epic XBA-219): a Gekko (PowerPC 750 + paired singles) that runs
  * lifted code with an interpreter behind it, the console's memory map, and the little hardware a libogc program
  * touches before it draws text on the XFB: the processor interface (interrupts), the video interface (timing,
- * retrace interrupts, the framebuffer address), the DSP's mailbox and ARAM DMA, EXI / SI / AI that complete at
- * once, and standard controllers on the serial interface (XBA-259). No GX, no DSP code. Discs and the DVD drive:
- * gc_disc.h, gc_boot.h (XBA-261). Played on the host layer by gc_runtime.h (the app, gc_play); headless by gc_run.
+ * retrace interrupts, the framebuffer address), EXI that completes at once, and standard controllers on the serial
+ * interface (XBA-259). Sound: the DSP interface, ARAM, the audio DMA and interface, the DSP's microcode at a high
+ * level, the disc's streamed audio (gc_audio.h, XBA-263). No GX yet. Discs and the DVD drive: gc_disc.h, gc_boot.h
+ * (XBA-261). Played on the host layer by gc_runtime.h (the app, gc_play); headless by gc_run.
  * See consoles/README.md « GameCube ». */
 #ifndef GC_CORE_H
 #define GC_CORE_H

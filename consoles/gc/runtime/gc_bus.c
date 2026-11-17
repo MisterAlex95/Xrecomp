@@ -7,11 +7,12 @@
  *               their line, framebuffer address and picture configuration read by gc_xfb_rgb
  *   0x0C003000  PI (32-bit): interrupt cause / mask, the reset switch (never pressed), the Flipper revision
  *   0x0C004000  MI (16-bit): stored, no memory protection
- *   0x0C005000  DSP (16-bit): mailboxes (the DSP answers 0x8071FEED when it leaves halt, as its ROM does), control
- *               register, ARAM DMA (16 MB of ARAM, copies at once)
+ *   0x0C005000  DSP (16-bit): mailboxes, control register, ARAM DMA, audio DMA, the microcode's HLE: gc_dsp.c
+ *               (XBA-263)
  *   0x0C006000  DI (32-bit): the DVD drive, gc_di.c (XBA-261)
- *   0x0C006400  SI: standard controllers (gc_si.c, XBA-259); EXI, AI (32-bit): transfers complete at once with
+ *   0x0C006400  SI: standard controllers (gc_si.c, XBA-259); EXI (32-bit): transfers complete at once with
  *               nothing on the other end (no memory cards; EXI reads give zeros: blank SRAM / RTC)
+ *   0x0C006C00  AI (32-bit): rates, streaming volume and sample counter, gc_ai.c (XBA-263)
  *   0x0C008000  the write-gather pipe: into the GX FIFO (gx_fifo_write, XBA-262)
  *   0x08000000  the EFB as the CPU peeks and pokes it (gx_efb_peek / gx_efb_poke)
  *   0x20000000  the locked cache (16 KB; gc_mmu.c maps EA 0xE0000000 onto it while HID2[LCE] is set)
@@ -22,16 +23,6 @@
 #include "gc_internal.h"
 
 /* ---- interrupts ---- */
-
-static void dsp_int_update(gc_machine *m)
-{
-    uint16_t cr = m->dsp[5];
-    bool on = ((cr & 0x08) && (cr & 0x10)) || ((cr & 0x20) && (cr & 0x40)) || ((cr & 0x80) && (cr & 0x100));
-    if (on)
-        m->pi_intsr |= GC_INT_DSP;
-    else
-        m->pi_intsr &= ~GC_INT_DSP;
-}
 
 static void exi_int_update(gc_machine *m)
 {
@@ -97,66 +88,6 @@ static void vi_write16(gc_machine *m, unsigned idx, uint16_t v)
     m->vi[idx] = v;
     if (idx >= 0x18 && idx < 0x20)
         vi_int_update(m), gc_check_interrupts(m);
-}
-
-static void aram_dma(gc_machine *m)
-{
-    uint32_t mm = ((uint32_t)m->dsp[0x10] << 16 | m->dsp[0x11]) & 0x03FFFFE0u;
-    uint32_t ar = ((uint32_t)m->dsp[0x12] << 16 | m->dsp[0x13]) & 0x03FFFFE0u;
-    uint32_t cnt = ((uint32_t)(m->dsp[0x14] & 0x7FFF) << 16 | m->dsp[0x15]) & ~31u;
-    bool to_mram = m->dsp[0x14] & 0x8000;
-    for (uint32_t i = 0; i < cnt; i++) {
-        uint32_t a = (ar + i) & (GC_ARAM_SIZE - 1), p = mm + i;
-        if (p >= GC_RAM_SIZE)
-            break;
-        if (to_mram)
-            m->h.ram[p] = m->aram[a];
-        else
-            m->aram[a] = m->h.ram[p];
-    }
-    m->dsp[0x14] &= 0x8000;
-    m->dsp[0x15] = 0;
-    m->dsp[5] |= 0x20; /* ARINT */
-    dsp_int_update(m);
-    gc_check_interrupts(m);
-}
-
-static uint16_t dsp_read16(gc_machine *m, unsigned idx)
-{
-    switch (idx) {
-    case 0: /* CPU -> DSP mailbox: the DSP takes mail at once */
-        return m->dsp[0] & 0x7FFF;
-    case 2:
-        return (uint16_t)((m->dsp_mail_full ? 0x8000 : 0) | ((m->dsp_mail >> 16) & 0x7FFF));
-    case 3:
-        m->dsp_mail_full = false;
-        return (uint16_t)m->dsp_mail;
-    case 5:
-        return m->dsp[5] & ~0x0401; /* RES and the boot-busy bit read as done */
-    default:
-        return m->dsp[idx];
-    }
-}
-
-static void dsp_write16(gc_machine *m, unsigned idx, uint16_t v)
-{
-    if (m->verbose >= 2)
-        fprintf(stderr, "gc: DSP[%02X] = %04X\n", idx * 2, v);
-    if (idx == 5) {
-        uint16_t old = m->dsp[5];
-        uint16_t ints = (uint16_t)(old & 0xA8 & ~v); /* AIINT ARINT DSPINT: write 1 to clear */
-        m->dsp[5] = (uint16_t)((v & ~0xA8 & ~0x0401) | ints);
-        if ((old & 0x04) && !(v & 0x04) && !(v & 0x01)) { /* leaves halt: the DSP ROM's greeting */
-            m->dsp_mail = 0x8071FEEDu;
-            m->dsp_mail_full = true;
-        }
-        dsp_int_update(m);
-        gc_check_interrupts(m);
-        return;
-    }
-    m->dsp[idx] = v;
-    if (idx == 0x15)
-        aram_dma(m);
 }
 
 /* ---- 32-bit register blocks ---- */
@@ -237,8 +168,8 @@ static uint16_t hw_read16(gc_machine *m, uint32_t pa)
     uint32_t off = pa & 0xFFFF;
     if (off >= 0x2000 && off < 0x2100)
         return vi_read16(m, (off & 0xFF) >> 1);
-    if (off >= 0x5000 && off < 0x5080)
-        return dsp_read16(m, (off & 0x7F) >> 1);
+    if (off >= 0x5000 && off < 0x5200)
+        return gc_dsp_read16(m, (off & 0x1FF) >> 1); /* gc_dsp.c (XBA-263) */
     if (off >= 0x4000 && off < 0x4080)
         return (uint16_t)m->mi_reg[(off & 0x7F) >> 1];
     if (off < 0x1000)
@@ -259,8 +190,8 @@ static void hw_write16(gc_machine *m, uint32_t pa, uint16_t v)
         vi_write16(m, (off & 0xFF) >> 1, v);
         return;
     }
-    if (off >= 0x5000 && off < 0x5080) {
-        dsp_write16(m, (off & 0x7F) >> 1, v);
+    if (off >= 0x5000 && off < 0x5200) {
+        gc_dsp_write16(m, (off & 0x1FF) >> 1, v);
         return;
     }
     if (off >= 0x4000 && off < 0x4080) {
@@ -304,7 +235,7 @@ uint32_t gc_hw_read(gc_machine *m, uint32_t pa, unsigned size)
     if (off >= 0x6800 && off < 0x683C)
         return exi_read32(m, (off & 0x3F) >> 2);
     if (off >= 0x6C00 && off < 0x6C20)
-        return m->ai[(off & 0x1F) >> 2];
+        return gc_ai_read32(m, (off & 0x1F) >> 2); /* gc_ai.c (XBA-263) */
     if (m->verbose)
         fprintf(stderr, "gc: read%u of unmapped HW %08X\n", size * 8, pa);
     return 0;
@@ -345,7 +276,7 @@ void gc_hw_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size)
     else if (off >= 0x6800 && off < 0x683C)
         exi_write32(m, (off & 0x3F) >> 2, v);
     else if (off >= 0x6C00 && off < 0x6C20)
-        m->ai[(off & 0x1F) >> 2] = v;
+        gc_ai_write32(m, (off & 0x1F) >> 2, v);
     else if (m->verbose)
         fprintf(stderr, "gc: write%u to unmapped HW %08X = %08X\n", size * 8, pa, v);
 }

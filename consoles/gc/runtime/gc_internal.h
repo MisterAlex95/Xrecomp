@@ -70,13 +70,9 @@ struct gc_machine {
     uint32_t pi_reg[0x40];
     /* video interface: 16-bit registers */
     uint16_t vi[0x80];
-    /* DSP interface: 16-bit registers, mailbox, ARAM DMA */
-    uint16_t dsp[0x40];
-    uint32_t dsp_mail;    /* DSP -> CPU mailbox */
-    bool dsp_mail_full;
-    bool dsp_booted;
-    /* audio interface, serial interface, external interface: 32-bit registers */
-    uint32_t ai[8];
+    /* DSP interface, ARAM DMA, audio DMA, audio interface, the microcode's HLE (gc_dsp.c, gc_ai.c; XBA-263) */
+    struct gc_audio *audio;
+    /* serial interface, external interface: 32-bit registers */
     uint32_t si[0x40];    /* gc_si.c: channel buffers, poll, COMCSR, SISR, the 128-byte I/O buffer at 0x20 */
     gc_pad_state pad[4];  /* what each SI port has plugged in (gc_set_pad) */
     uint32_t exi[15];
@@ -153,5 +149,19 @@ void gc_di_write32(gc_machine *m, unsigned idx, uint32_t v);
 uint64_t gc_di_next_event(gc_machine *m);
 void gc_di_event(gc_machine *m);
 void gc_di_free(gc_machine *m);
+/* The disc's audio stream (XBA-263): its next frame (L, R) at the streaming rate; 0 when nothing plays. */
+int gc_di_stream_frame(gc_machine *m, int16_t lr[2]);
+
+/* gc_dsp.c / gc_ai.c (XBA-263): the DSP interface's registers 0x0C005000.. (idx = offset / 2), the audio
+ * interface's 0x0C006C00.. (idx = offset / 4), set-up at power-on, the next event (DSP mail interrupts, ARAM DMA
+ * done, audio DMA blocks, the streaming counter's interrupt) and handling it, freeing. */
+uint16_t gc_dsp_read16(gc_machine *m, unsigned idx);
+void gc_dsp_write16(gc_machine *m, unsigned idx, uint16_t v);
+uint32_t gc_ai_read32(gc_machine *m, unsigned idx);
+void gc_ai_write32(gc_machine *m, unsigned idx, uint32_t v);
+bool gc_audio_init(gc_machine *m);
+uint64_t gc_audio_next_event(gc_machine *m);
+void gc_audio_event(gc_machine *m);
+void gc_audio_free(gc_machine *m);
 
 #endif

@@ -11,7 +11,8 @@ REPO = os.path.normpath(os.path.join(HERE, "..", "..", "..", ".."))
 RUNTIME = os.path.join(REPO, "consoles", "gc", "runtime")
 CHDR = os.path.join(REPO, "third_party", "libchdr")
 CORE = ["gc_core.c", "gc_cpu.c", "gc_bus.c", "gc_si.c", "gc_mmu.c", "gc_recomp.c", "gc_disc.c", "gc_disc_wia.c", "gc_bzip2.c", "gc_di.c",
-        "gc_boot.c", "gx/gx_fifo.c", "gx/gx_vtx.c", "gx/gx_tex.c", "gx/gx_shader.c", "gx/gx_gl.c", "gx/gx_egl.c"]
+        "gc_boot.c", "gx/gx_fifo.c", "gx/gx_vtx.c", "gx/gx_tex.c", "gx/gx_shader.c", "gx/gx_gl.c", "gx/gx_egl.c",
+        "gc_dsp.c", "gc_ai.c", "gc_ax.c", "gc_asnd.c", "gc_audio_util.c"]
 CODECS = [os.path.join(CHDR, "deps", "miniz-3.1.2", "miniz.c"), os.path.join(CHDR, "deps", "zstd-1.5.7", "zstddeclib.c"),
           os.path.join(CHDR, "deps", "lzma-26.02", "src", "LzmaDec.c")]
 DEFINES = ["-DMINIZ_NO_ARCHIVE_APIS", "-DMINIZ_NO_DEFLATE_APIS", "-DMINIZ_NO_STDIO", "-DMINIZ_NO_TIME"]
