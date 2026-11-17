@@ -463,6 +463,28 @@ void ps1_mdec_state_save(ps1_mdec *d, uint8_t *out)
         memcpy(out + sizeof c, d->out + base, c.out_len * sizeof(uint32_t));
 }
 
+/* The size (the output words that follow), then the fields the decoder indexes with: the inverse zigzag (a constant
+ * table, blk[zagzig[k]]), the coefficient index of the block in progress, the block of the macroblock (cr, cb,
+ * y[0..3]), the output depth (0..3: mb_words and the colour path know no other) and the quantizer scale (6 bits). */
+int ps1_mdec_state_valid(const uint8_t *in, size_t n)
+{
+    ps1_mdec c;
+    if (n < sizeof c)
+        return -1;
+    memcpy(&c, in, sizeof c);
+    if (c.out_len > (n - sizeof c) / sizeof(uint32_t) || n != sizeof c + c.out_len * sizeof(uint32_t))
+        return -1;
+    if (c.out_pos > c.out_len)
+        return -2;
+    for (int i = 0; i < 64; i++)
+        if (c.zagzig[zigzag[i]] != i)
+            return -2;
+    if ((c.in_block && (c.k < 0 || c.k > 62)) || c.blk_index < 0 || c.blk_index > 5 || c.depth < 0 || c.depth > 3 ||
+        c.qscale < 0 || c.qscale > 63)
+        return -2;
+    return 0;
+}
+
 int ps1_mdec_state_load(ps1_mdec *d, const uint8_t *in, size_t n)
 {
     ps1_mdec c;

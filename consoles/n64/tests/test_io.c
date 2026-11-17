@@ -1,9 +1,10 @@
 /* N64 core unit tests (XBA-169, XBA-172): ROM byte orders and header, the HLE PIF boot state, joybus (controllers,
  * controller pak with its CRC, rumble pak, EEPROM), SRAM and FlashRAM through the PI, PI DMA, the AI (queue,
- * interrupt, 48 kHz output), the VI picture and save states (XBA-183). Register sequences and data are made here; no
+ * interrupt, 48 kHz output), the VI picture and save states (XBA-183) with the crafted ones they refuse. Register sequences and data are made here; no
  * ROM files. */
 #include "n64_internal.h"
 #include "n64_rdp.h"
+#include "n64_rdp_backend.h" /* n64_rdp_common_state: the RDP section's layout */
 #include "n64_recomp.h"
 
 #include <math.h>
@@ -1301,6 +1302,209 @@ static void test_states(void)
     n64_destroy(m);
 }
 
+/* A state's section (n64_state.c: a 40-byte header, then per section its id, its size, its bytes; little-endian): the
+ * offset of its bytes in the blob (0: absent) and their size. */
+static size_t state_sec(const uint8_t *st, size_t n, uint32_t id, size_t *len)
+{
+    size_t off = 40;
+    while (off + 8 <= n) {
+        uint32_t sid = (uint32_t)st[off] | (uint32_t)st[off + 1] << 8 | (uint32_t)st[off + 2] << 16 |
+                       (uint32_t)st[off + 3] << 24;
+        uint32_t sz = (uint32_t)st[off + 4] | (uint32_t)st[off + 5] << 8 | (uint32_t)st[off + 6] << 16 |
+                      (uint32_t)st[off + 7] << 24;
+        if (sid == id) {
+            *len = sz;
+            return off + 8;
+        }
+        off += 8 + (size_t)sz;
+    }
+    *len = 0;
+    return 0;
+}
+
+static uint8_t *state_of(n64_machine *m, size_t *n)
+{
+    size_t cap = n64_state_size(m);
+    uint8_t *st = malloc(cap);
+    *n = st ? n64_state_save(m, st, cap) : 0;
+    return st;
+}
+
+enum { SEC_MACHINE = 1, SEC_RSP = 3, SEC_RDP = 4 };
+
+/* st with len bytes at off in section sec replaced by val: refused as corrupt by n64_state_check and n64_state_load,
+ * and c's state is the same bytes after (ref) as before. */
+static void refused(n64_machine *c, const uint8_t *ref, size_t refn, const uint8_t *st, size_t n, uint32_t sec,
+                    size_t off, const void *val, size_t len, const char *what)
+{
+    size_t sl, so = state_sec(st, n, sec, &sl);
+    if (!so || off + len > sl) {
+        CHECK(0, "%s: section %u has no offset %zu", what, sec, off);
+        return;
+    }
+    uint8_t *bad = malloc(n);
+    memcpy(bad, st, n);
+    memcpy(bad + so + off, val, len);
+    CHECK(n64_state_check(c, bad, n) == N64_STATE_ECORRUPT, "%s: refused by the check", what);
+    CHECK(n64_state_load(c, bad, n) == N64_STATE_ECORRUPT, "%s: refused by the load", what);
+    size_t an;
+    uint8_t *after = state_of(c, &an);
+    CHECK(after && an == refn && memcmp(after, ref, refn) == 0, "%s: the machine is unchanged", what);
+    free(after);
+    free(bad);
+}
+
+#define MOFF(f) offsetof(n64_machine, f)
+#define COFF(f) (24 + offsetof(n64_rdp_common_state, f)) /* after the RDP section's header (n64_rdp_select.c) */
+
+static void test_state_refusals(void)
+{
+    /* The state: FlashRAM, a few frames, SP_PC set, a SET_TILE run by the RDP (tile 5, distinctive fields). */
+    n64_machine *a = mk(NULL);
+    n64_save_set_kind(a, N64_SAVE_FLASH);
+    for (int i = 0; i < 2; i++)
+        n64_run_frame(a);
+    w32(a, 0x04080000, 0xABC); /* SP_PC */
+    const uint64_t set_tile = 0x35ull << 56 | 3ull << 53 | 2ull << 51 | 0x1Aull << 41 | 0x55ull << 32 | 5ull << 24 |
+                              10ull << 20 | 1ull << 19 | 1ull << 18 | 13ull << 14 | 9ull << 10 | 1ull << 9 | 1ull << 8 |
+                              12ull << 4 | 7ull;
+    n64_poke32(a, 0x80001000u, (uint32_t)(set_tile >> 32));
+    n64_poke32(a, 0x80001004u, (uint32_t)set_tile);
+    w32(a, 0x04100000, 0x1000); /* DPC_START */
+    w32(a, 0x04100004, 0x1008); /* DPC_END: runs it */
+    size_t n;
+    uint8_t *st = state_of(a, &n);
+    CHECK(st && n && n64_state_check(a, st, n) == N64_STATE_OK, "the state checks");
+
+    /* Another machine, its own state: every refusal must leave it so. No FlashRAM. */
+    n64_machine *c = mk(NULL);
+    for (int i = 0; i < 3; i++)
+        n64_run_frame(c);
+    size_t refn;
+    uint8_t *ref = state_of(c, &refn);
+
+    /* The machine. */
+    uint32_t u32v;
+    int32_t i32v;
+    uint64_t u64v;
+    double dv;
+    i32v = N64_SAVE_PAK0;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(save_kind), &i32v, 4, "save_kind PAK0");
+    i32v = 3;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(ai_count), &i32v, 4, "ai_count 3");
+    i32v = -1;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(ai_count), &i32v, 4, "ai_count -1");
+    u32v = 0xFFFFFFFFu;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(ai_dacrate), &u32v, 4, "ai_dacrate 0xFFFFFFFF");
+    dv = NAN;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(ai_out_phase), &dv, 8, "ai_out_phase NaN");
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(ai_src_phase), &dv, 8, "ai_src_phase NaN");
+    u32v = 2;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(vi_field), &u32v, 4, "vi_field 2");
+    u64v = 0;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(vi_line_ticks), &u64v, 8, "vi_line_ticks 0");
+    u32v = 0xFFFFFFC0u;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(si_dram), &u32v, 4, "si_dram 0xFFFFFFC0");
+    u32v = 96;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(cpu.wired_prev), &u32v, 4, "wired_prev 96");
+    u32v = 0x40;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(flash_offset), &u32v, 4, "flash_offset not a page");
+    u64v = a->now + 1;
+    refused(c, ref, refn, st, n, SEC_MACHINE, MOFF(rsp_tick), &u64v, 8, "rsp_tick after now");
+    /* FlashRAM without its section: c's own state, no FlashRAM there. */
+    i32v = N64_SAVE_FLASH;
+    refused(c, ref, refn, ref, refn, SEC_MACHINE, MOFF(save_kind), &i32v, 4, "save_kind FLASH without FlashRAM");
+
+    /* The RSP: PC / NPC found by value (0xABC, then 0xAC0; the struct is n64_rsp.c's). */
+    size_t rl, ro = state_sec(st, n, SEC_RSP, &rl), pc_at = 0;
+    int found = 0;
+    for (size_t i = 0; ro && i + 8 <= rl; i += 4) {
+        uint32_t p, q;
+        memcpy(&p, st + ro + i, 4);
+        memcpy(&q, st + ro + i + 4, 4);
+        if (p == 0xABC && q == 0xAC0) {
+            pc_at = i;
+            found++;
+        }
+    }
+    CHECK(found == 1, "RSP PC found once (%d)", found);
+    if (found == 1) {
+        u32v = 0x1000;
+        refused(c, ref, refn, st, n, SEC_RSP, pc_at, &u32v, 4, "RSP pc 0x1000");
+        u32v = 0xFFE;
+        refused(c, ref, refn, st, n, SEC_RSP, pc_at + 4, &u32v, 4, "RSP npc 0xFFE");
+    }
+
+    /* The RDP's common part: the command being collected (a 22-word triangle: at most 21 of its words). */
+    uint64_t tri = 0x0Full << 56;
+    uint8_t *ok = malloc(n);
+    size_t dl, dO = state_sec(st, n, SEC_RDP, &dl);
+    memcpy(ok, st, n);
+    memcpy(ok + dO + COFF(pend), &tri, 8);
+    u32v = 21;
+    memcpy(ok + dO + COFF(npend), &u32v, 4);
+    CHECK(n64_state_check(c, ok, n) == N64_STATE_OK, "npend 21 of a triangle's 22 words checks");
+    u32v = 22;
+    refused(c, ref, refn, ok, n, SEC_RDP, COFF(npend), &u32v, 4, "npend 22 of a triangle's 22 words");
+    u32v = 23;
+    refused(c, ref, refn, ok, n, SEC_RDP, COFF(npend), &u32v, 4, "npend 23");
+    u32v = 24;
+    refused(c, ref, refn, ok, n, SEC_RDP, COFF(npend), &u32v, 4, "npend 24");
+    u32v = 0xFFFFFFF8u;
+    refused(c, ref, refn, st, n, SEC_RDP, COFF(end), &u32v, 4, "DPC_END past RDRAM's 24 bits");
+    u32v = 0x1004;
+    refused(c, ref, refn, st, n, SEC_RDP, COFF(current), &u32v, 4, "DPC_CURRENT not 8-byte aligned");
+    i32v = 4;
+    refused(c, ref, refn, st, n, SEC_RDP, COFF(fe_ci_size), &i32v, 4, "fe_ci_size 4");
+
+    /* The software RDP's drawing state: tile 5's fields found by value (rdp_tile's byte fields, n64_rdp.c). */
+    if (!strcmp(n64_rdp_backend_name(a->rdp), "software")) {
+        static const uint8_t pat[11] = {3, 2, 10, 1, 1, 1, 1, 12, 13, 7, 9};
+        size_t x0 = 24 + sizeof(n64_rdp_common_state), tile_at = 0;
+        found = 0;
+        for (size_t i = x0; i + sizeof pat <= dl; i++)
+            if (!memcmp(st + dO + i, pat, sizeof pat)) {
+                tile_at = i;
+                found++;
+            }
+        CHECK(found == 1, "tile 5 found once (%d)", found);
+        if (found == 1) {
+            uint8_t b = 16;
+            refused(c, ref, refn, st, n, SEC_RDP, tile_at + 9, &b, 1, "tile shift_s 16");
+            refused(c, ref, refn, st, n, SEC_RDP, tile_at + 10, &b, 1, "tile shift_t 16");
+        }
+    }
+
+    /* The untouched states load. */
+    CHECK(n64_state_check(c, ref, refn) == N64_STATE_OK, "c's own state checks");
+    CHECK(n64_state_load(c, st, n) == N64_STATE_OK, "the untouched state loads");
+    char why[160] = "";
+    CHECK(n64_recomp_compare(a, c, why, sizeof why) == 0, "same machine after the load: %s", why);
+    free(ok);
+    free(ref);
+    free(st);
+    n64_destroy(c);
+    n64_destroy(a);
+
+    /* FlashRAM: a program after a chip erase (offset 0xFFFFFFFF) writes nothing (offset + 128 wrapped); the last page
+     * still programs. */
+    n64_machine *f = mk(NULL);
+    static const uint32_t cmds[] = {0x3C000000u, 0xB4000000u, 0xD2000000u}; /* chip erase, write mode, execute */
+    for (size_t i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {
+        w32(f, 0x08010000, cmds[i]);
+        n64_run_cycles(f, 1000);
+    }
+    CHECK(f->flash && f->flash_offset == 0xFFFFFFFFu && f->flash[0] == 0xFF && f->flash[N64_FLASH_SIZE - 1] == 0xFF,
+          "a program at the chip erase's offset writes nothing");
+    memset(f->flash_buf, 0x5A, sizeof f->flash_buf);
+    w32(f, 0x08010000, 0xA5000000u | (N64_FLASH_SIZE / 128 - 1)); /* the last page */
+    n64_run_cycles(f, 1000);
+    w32(f, 0x08010000, 0xD2000000u);
+    n64_run_cycles(f, 1000);
+    CHECK(f->flash[N64_FLASH_SIZE - 128] == 0x5A && f->flash[N64_FLASH_SIZE - 1] == 0x5A, "the last page programs");
+    n64_destroy(f);
+}
+
 int main(void)
 {
     test_rom();
@@ -1315,6 +1519,7 @@ int main(void)
     test_display_changed();
     test_dp_defer();
     test_states();
+    test_state_refusals();
     printf("n64_io: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

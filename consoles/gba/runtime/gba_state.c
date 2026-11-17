@@ -105,6 +105,91 @@ size_t gba_state_save(gba_machine *m, uint8_t *out, size_t cap)
     return need;
 }
 
+/* The ROM and BIOS hashes say which game a state is for, not that its bytes are sane: a crafted (or damaged) state
+ * passes them with any value in any field. These are the saved fields the core later uses without masking them, as
+ * an index or an offset (a host out-of-bounds access), a shift count or a loop step (undefined behaviour, a loop that
+ * never ends); everything else is masked at each use. Each range is what the core itself ever writes. t: the
+ * state's machine bytes, copied (not the live machine). */
+static bool bool_ok(const bool *b)
+{
+    uint8_t v;
+    memcpy(&v, b, 1); /* a bool holding another byte is undefined to read as a bool */
+    return v <= 1;
+}
+
+static bool machine_ok(const gba_machine *t)
+{
+    const uint64_t frame = GBA_CYCLES_PER_FRAME, never = UINT64_MAX;
+    const gba_save *s = &t->save;
+    const gba_apu *a = &t->apu;
+
+    /* The CPU: the flags index a shift (cond_lut[cc] >> nzcv), the bools are bytes. */
+    if ((t->cpu.n | t->cpu.z | t->cpu.c | t->cpu.v) > 1 || !bool_ok(&t->cpu.branched) || !bool_ok(&t->cpu.halted) ||
+        !bool_ok(&t->cpu.stopped) || !bool_ok(&t->prefetch) || !bool_ok(&t->irq_line) || !bool_ok(&t->frame_done) ||
+        !bool_ok(&t->pf.valid) || !bool_ok(&t->pf.run) || !bool_ok(&t->pf.thumb) || !bool_ok(&t->dma_active) ||
+        !bool_ok(&t->dbg_open))
+        return false;
+    /* Wait states: a zero cost lets the CPU loop run without time passing. */
+    for (int r = 0; r < 16; r++)
+        if (!t->wait16[r][0] || !t->wait16[r][1] || !t->wait32[r][0] || !t->wait32[r][1] || !t->fetch16[r] ||
+            !t->fetch32[r] || !t->fetchmax16[r] || !t->fetchmax32[r])
+            return false;
+    /* The video line: phase_offset[line_phase]; vcount past the last line never wraps (no VBlank, no frame end). */
+    if (t->line_phase < 0 || t->line_phase > 2 || t->vcount >= GBA_LINES)
+        return false;
+    /* Times: one far in the past makes the catch-up loops run for ages, the next event far ahead stalls the frame. */
+    if (t->line_start > t->now || t->now - t->line_start >= frame || t->next_event > t->now + frame ||
+        (t->irq_at != never && t->irq_at + frame < t->now) || (t->dma_due != never && t->dma_due + frame < t->now) ||
+        (t->sio_at != never && t->sio_at + frame < t->now) || a->time + frame < t->now || a->time > t->now + frame)
+        return false;
+    for (int i = 0; i < 4; i++) {
+        const gba_timer *tm = &t->timer[i];
+        /* The prescaler: a shift count (1u << shift, counter << shift); one of timer_shift[] (gba_io.c). */
+        if (tm->shift != 0 && tm->shift != 6 && tm->shift != 8 && tm->shift != 10)
+            return false;
+        if ((tm->overflow_at != never && tm->overflow_at + frame < t->now) || tm->base_time > t->now + frame)
+            return false;
+        const gba_dma *d = &t->dma[i];
+        if (d->count > 0x10000 || !bool_ok(&d->active_special) || !bool_ok(&d->due))
+            return false;
+    }
+    /* The save chip: flash_bank offsets data[] (data[flash_bank + 0xFFFF]); the EEPROM's address offsets it too
+     * (eeprom_addr * 64 bits) and is at most abits wide, abits following the kind (set_kind, gba_eeprom_dma_hint). */
+    if ((unsigned)s->kind > GBA_SAVE_EEPROM8K)
+        return false;
+    if (s->flash_bank != 0 && !(s->flash_bank == 0x10000 && s->kind == GBA_SAVE_FLASH128))
+        return false;
+    if (s->eeprom_abits != (s->kind == GBA_SAVE_EEPROM8K ? 14 : 6) || s->eeprom_addr >= 1u << s->eeprom_abits ||
+        s->eeprom_nbits < 0 || s->eeprom_nbits > 2 + s->eeprom_abits + 64 || s->eeprom_cmd < 0 ||
+        s->eeprom_cmd > 3 || s->eeprom_read_left < 0 || s->eeprom_read_left > 68)
+        return false;
+    if (!bool_ok(&s->flash_id) || !bool_ok(&s->flash_erase) || !bool_ok(&s->flash_program) ||
+        !bool_ok(&s->flash_bank_sel))
+        return false;
+    /* The APU: duty_masks[duty], pat >> pos, shadow >> sw_shift, wave_ram[bank from pos], fifo[f][fifo_r]; a period
+     * of 0 or less never ends the channel's step loop, a mixing position past the window or a frame-sequencer count
+     * of 0 or less never reaches its wrap, out_rem 0 never ends the resampler's loop. */
+    for (int i = 0; i < 2; i++) {
+        const gba_psg_square *q = &a->sq[i];
+        if (q->duty < 0 || q->duty > 3 || q->pos < 0 || q->pos > 7 || q->sw_shift < 0 || q->sw_shift > 7 ||
+            q->freq > 2047 || (q->on && q->period < 1))
+            return false;
+        if (!bool_ok(&q->on) || !bool_ok(&q->env_up) || !bool_ok(&q->len_en) || !bool_ok(&q->sw_down) ||
+            !bool_ok(&q->sw_en))
+            return false;
+        if (a->fifo_r[i] < 0 || a->fifo_r[i] > 31 || a->fifo_n[i] < 0 || a->fifo_n[i] > 32)
+            return false;
+    }
+    if (a->wave.pos < 0 || a->wave.pos > 63 || (a->wave.on && a->wave.period < 1) || a->noise.period < 0 ||
+        !bool_ok(&a->wave.on) || !bool_ok(&a->wave.len_en) || !bool_ok(&a->noise.on) || !bool_ok(&a->noise.env_up) ||
+        !bool_ok(&a->noise.len_en) || !bool_ok(&a->noise.out))
+        return false;
+    if (a->win_pos < 0 || a->win_pos >= GBA_APU_WINDOW || a->fs_windows < 1 || a->fs_windows > 32768 / GBA_APU_WINDOW ||
+        a->out_rem < 1 || a->out_rem > (1u << 24) || a->ring_n > GBA_AUDIO_RING)
+        return false;
+    return true;
+}
+
 int gba_state_check(gba_machine *m, const uint8_t *data, size_t size)
 {
     if (!m || !data || size < HEADER_BYTES || memcmp(data, STATE_MAGIC, 8) != 0 || memcmp(data + 8, "gba", 4) != 0)
@@ -119,7 +204,14 @@ int gba_state_check(gba_machine *m, const uint8_t *data, size_t size)
         return GBA_STATE_EVERSION;
     if (size < HEADER_BYTES + 8 + GBA_MACHINE_SAVED)
         return GBA_STATE_ECORRUPT;
-    return GBA_STATE_OK;
+    /* The fields, on a copy: the blob may not be aligned, and a refused state leaves the machine as it was. */
+    gba_machine *t = malloc(sizeof *t);
+    if (!t)
+        return GBA_STATE_ECORRUPT;
+    memcpy(t, data + HEADER_BYTES + 8, GBA_MACHINE_SAVED);
+    bool ok = machine_ok(t);
+    free(t);
+    return ok ? GBA_STATE_OK : GBA_STATE_ECORRUPT;
 }
 
 int gba_state_load(gba_machine *m, const uint8_t *data, size_t size)

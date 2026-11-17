@@ -29,6 +29,7 @@ void n64_rdp_sw_flush(n64_rdp_sw *d);
 size_t n64_rdp_sw_state_extra_size(n64_rdp_sw *d);
 void n64_rdp_sw_state_save(n64_rdp_sw *d, n64_rdp_common_state *c, uint8_t *extra);
 int n64_rdp_sw_state_load(n64_rdp_sw *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n);
+int n64_rdp_sw_state_check(n64_rdp_sw *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n);
 void n64_rdp_sw_get_stats(n64_rdp_sw *d, n64_rdp_stats *out);
 
 static void *sw_create(n64_rcp_bus bus) { return n64_rdp_sw_create(bus); }
@@ -46,12 +47,16 @@ static int sw_state_load(void *d, const n64_rdp_common_state *c, const uint8_t *
 {
     return n64_rdp_sw_state_load(d, c, extra, n);
 }
+static int sw_state_check(void *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
+{
+    return n64_rdp_sw_state_check(d, c, extra, n);
+}
 static void sw_stats(void *d, n64_rdp_stats *out) { n64_rdp_sw_get_stats(d, out); }
 
 const n64_rdp_ops n64_rdp_sw_ops = { "software", sw_create, sw_destroy, sw_reset, sw_attach_dmem,
                                      sw_read_reg, sw_write_reg, sw_run, sw_set_threads, sw_flush, NULL,
                                      NULL, NULL, NULL, sw_state_extra_size, sw_state_save, sw_state_load,
-                                     sw_stats, NULL, NULL, NULL, NULL, NULL };
+                                     sw_stats, NULL, NULL, NULL, NULL, NULL, sw_state_check };
 
 struct n64_rdp {
     const n64_rdp_ops *ops;
@@ -495,26 +500,83 @@ void n64_rdp_state_save(n64_rdp *d, uint8_t *out)
     memcpy(out + RDP_STATE_HEAD, &c, sizeof c);
 }
 
-int n64_rdp_state_load(n64_rdp *d, const uint8_t *in, size_t n)
+/* A command's 64-bit words (n64_rdp.c / n64_rdp_vk.cpp cmd_len). */
+static uint32_t cmd_words(uint32_t id)
+{
+    if (id >= 0x08 && id <= 0x0F)
+        return 4 + ((id & 4) ? 8 : 0) + ((id & 2) ? 8 : 0) + ((id & 1) ? 2 : 0);
+    return id == 0x24 || id == 0x25 ? 2 : 1;
+}
+
+/* The common part holds only what a back end can reach (the front ends mask each register and field as they set it):
+ * the loops and shifts that use them unmasked then stay in their bounds. 0, or -2. */
+static int common_check(const n64_rdp_common_state *c)
+{
+    /* DPC_START / END / CURRENT: 8-byte aligned RDRAM addresses (CURRENT += 8 while < END never wraps). */
+    if ((c->start | c->end | c->current) & ~0xFFFFF8u)
+        return -2;
+    /* The command being collected: always fewer words than it needs (a complete one runs at once), so the next word
+     * fits (pend[24] in the software RDP, 22 words in the Vulkan one: the longest command is 22 words). */
+    if (c->npend && c->npend >= cmd_words((uint32_t)(c->pend[0] >> 56) & 0x3F))
+        return -2;
+    if (c->start_pending > 1 || (uint32_t)c->fe_cycle > 3 || (uint32_t)c->fe_ci_size > 3 ||
+        (uint32_t)c->fe_ti_size > 3 || (uint32_t)c->fe_zon > 1 || (uint32_t)c->fe_sc_y0 > 0xFFF ||
+        (uint32_t)c->fe_sc_y1 > 0xFFF || c->fe_ci_width < 1 || c->fe_ci_width > 1024 || c->fe_ti_width < 1 ||
+        c->fe_ti_width > 1024 || (c->fe_ci_addr | c->fe_zi_addr | c->fe_ti_addr) > 0xFFFFFF)
+        return -2;
+    return 0;
+}
+
+/* The header: this build's layout (-1 otherwise). Fills the common part, whether the back end is the one that wrote
+ * it, and its own bytes' size. */
+static int state_head(n64_rdp *d, const uint8_t *in, size_t n, n64_rdp_common_state *c, int *same, size_t *xn)
 {
     if (n < RDP_STATE_HEAD + sizeof(n64_rdp_common_state) || get32(in) != RDP_STATE_MAGIC ||
         get32(in + 16) != sizeof(n64_rdp_common_state) || !d->ops->state_load)
         return -1;
-    size_t xn = get32(in + 20);
-    if (xn != n - RDP_STATE_HEAD - sizeof(n64_rdp_common_state))
+    *xn = get32(in + 20);
+    if (*xn != n - RDP_STATE_HEAD - sizeof(n64_rdp_common_state))
         return -1;
     char name[12];
     memcpy(name, in + 4, sizeof name);
     name[sizeof name - 1] = 0;
-    const int same = strcmp(name, d->ops->name) == 0;
-    if (same && xn != extra_size(d))
+    *same = strcmp(name, d->ops->name) == 0;
+    if (*same && *xn != extra_size(d))
         return -1;
+    memcpy(c, in + RDP_STATE_HEAD, sizeof *c);
+    return 0;
+}
+
+int n64_rdp_state_check(n64_rdp *d, const uint8_t *in, size_t n)
+{
     n64_rdp_common_state c;
-    memcpy(&c, in + RDP_STATE_HEAD, sizeof c);
-    if (!same)
+    int same = 0;
+    size_t xn = 0;
+    int rc = state_head(d, in, n, &c, &same, &xn);
+    if (rc == 0)
+        rc = common_check(&c);
+    if (rc == 0 && d->ops->state_check)
+        rc = d->ops->state_check(d->impl, &c, same ? in + RDP_STATE_HEAD + sizeof c : NULL, xn);
+    return rc;
+}
+
+int n64_rdp_state_load(n64_rdp *d, const uint8_t *in, size_t n)
+{
+    int rc = n64_rdp_state_check(d, in, n);
+    if (rc != 0)
+        return rc;
+    n64_rdp_common_state c;
+    int same = 0;
+    size_t xn = 0;
+    state_head(d, in, n, &c, &same, &xn);
+    if (!same) {
+        char name[12];
+        memcpy(name, in + 4, sizeof name);
+        name[sizeof name - 1] = 0;
         fprintf(stderr, "n64: state saved with the %s RDP, loaded on the %s RDP: its drawing state starts afresh\n",
                 name, d->ops->name);
-    int rc = d->ops->state_load(d->impl, &c, same ? in + RDP_STATE_HEAD + sizeof c : NULL, xn);
+    }
+    rc = d->ops->state_load(d->impl, &c, same ? in + RDP_STATE_HEAD + sizeof c : NULL, xn);
     if (rc == 0)
         d->dp_held = 0; /* the machine's own events are the state's now (none pending: n64_state_save) */
     return rc;

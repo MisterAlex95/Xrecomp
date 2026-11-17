@@ -155,8 +155,40 @@ size_t ps1_state_save(ps1_machine *m, uint8_t *out, size_t cap)
     return need;
 }
 
-/* Walks the sections: each id once, in order, sizes this build's (the MDEC's checked by its own load). Fills at[]
- * with each section's bytes. */
+/* The machine's fields used as indices or bounds, in the ranges the core keeps them: a pending load's register
+ * (m->r[ld_reg]), the SIO byte index (the pad's poll bytes and rumble map at step - 3, the card's ID / buffer / data
+ * at step - 4.. step - 10, up to a read's last byte 139; a card read past its address check needs the sector inside
+ * the card), the scanline and the video timing get_timing (ps1_io.c) keeps. */
+static int machine_valid(const uint8_t *in)
+{
+    uint32_t ld_reg, pend_reg;
+    int device, step, line;
+    uint8_t cmd;
+    uint16_t sector;
+    ps1_gpu_timing t;
+    PS1_STATE_GET(ld_reg, in, ps1_machine, ld_reg);
+    PS1_STATE_GET(pend_reg, in, ps1_machine, pend_reg);
+    PS1_STATE_GET(device, in, ps1_machine, sio.device);
+    PS1_STATE_GET(step, in, ps1_machine, sio.step);
+    PS1_STATE_GET(cmd, in, ps1_machine, sio.cmd);
+    PS1_STATE_GET(sector, in, ps1_machine, sio.sector);
+    PS1_STATE_GET(line, in, ps1_machine, line);
+    PS1_STATE_GET(t, in, ps1_machine, timing);
+    if (ld_reg > 31 || pend_reg > 31)
+        return 0;
+    if (device < -1 || device > 2 || step < 0 || step > 140 || (device > 0 && step < 1))
+        return 0;
+    if (device == 2 && cmd == 'R' && step >= 9 && sector > 0x3FF)
+        return 0;
+    if (t.lines < 200 || t.lines > 400 || t.cycles_per_line < 2600 || t.cycles_per_line > 4000 ||
+        t.dot_divider <= 0 || line < 0 || line >= t.lines)
+        return 0;
+    return 1;
+}
+
+/* Walks the sections: each id once, in order, sizes this build's (the MDEC's checked by its own valid). Fills at[]
+ * with each section's bytes. Then every section's indices and bounds, before anything is loaded: a refused state
+ * leaves the machine as it was. */
 static int parse(ps1_machine *m, const uint8_t *data, size_t size, const uint8_t *at[], size_t len[])
 {
     if (!m || !data || size < HEADER_BYTES || memcmp(data, STATE_MAGIC, 8) != 0 || memcmp(data + 8, "ps1", 4) != 0)
@@ -181,6 +213,20 @@ static int parse(ps1_machine *m, const uint8_t *data, size_t size, const uint8_t
         len[id] = n;
         off += n;
     }
+    int v[] = {
+        machine_valid(at[SEC_MACHINE]) ? 0 : -2,
+        m->gpu ? ps1_gpu_state_valid(at[SEC_GPU], len[SEC_GPU]) : 0,
+        m->cdrom ? ps1_cdrom_state_valid(at[SEC_CDROM], len[SEC_CDROM]) : 0,
+        m->spu ? ps1_spu_state_valid(at[SEC_SPU], len[SEC_SPU]) : 0,
+        m->mdec ? ps1_mdec_state_valid(at[SEC_MDEC], len[SEC_MDEC]) : len[SEC_MDEC] ? -1 : 0,
+        ps1_hle_state_valid(m, at[SEC_HLE], len[SEC_HLE]),
+    };
+    for (size_t i = 0; i < sizeof v / sizeof v[0]; i++)
+        if (v[i] == -1)
+            return PS1_STATE_EVERSION; /* another build's MDEC section (the others' sizes were checked above) */
+    for (size_t i = 0; i < sizeof v / sizeof v[0]; i++)
+        if (v[i])
+            return PS1_STATE_ECORRUPT;
     return PS1_STATE_OK;
 }
 
@@ -198,7 +244,8 @@ int ps1_state_load(ps1_machine *m, const uint8_t *data, size_t size)
     int rc = parse(m, data, size, at, len);
     if (rc != PS1_STATE_OK)
         return rc;
-    /* The MDEC first: the only section whose size its own load checks, so a refusal leaves everything as it was. */
+    /* The MDEC first: the only load that can still fail (its output buffer grows), so a refusal leaves everything as
+     * it was. */
     if (m->mdec ? ps1_mdec_state_load(m->mdec, at[SEC_MDEC], len[SEC_MDEC]) != 0 : len[SEC_MDEC] != 0)
         return PS1_STATE_EVERSION;
     if ((m->gpu && ps1_gpu_state_load(m->gpu, at[SEC_GPU], len[SEC_GPU]) != 0) ||

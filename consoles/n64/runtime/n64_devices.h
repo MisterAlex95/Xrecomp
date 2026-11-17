@@ -95,12 +95,16 @@ uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles);
  * state (the software RDP: modes, combiner, tiles, TMEM, the hidden RDRAM bits; the Vulkan RDP: nothing, it is drawn
  * out and synchronised first); a state from the other back end loads its registers only. _size first, then _save
  * into that many bytes (the RDP flushes what is batched first: take states between frames). _load returns 0, or -1
- * when the bytes are not this build's (wrong size or kind), the device then left as it was. */
+ * when the bytes are not this build's (wrong size or kind), -2 when they hold values the device could never reach
+ * (a crafted or damaged state: an index or address past its range), the device then left as it was. _check: what
+ * _load would answer, changing nothing (n64_state.c checks every section before it loads any). */
 size_t n64_rsp_state_size(n64_rsp *s);
 void n64_rsp_state_save(n64_rsp *s, uint8_t *out);
+int n64_rsp_state_check(n64_rsp *s, const uint8_t *in, size_t n);
 int n64_rsp_state_load(n64_rsp *s, const uint8_t *in, size_t n);
 size_t n64_rdp_state_size(n64_rdp *d);
 void n64_rdp_state_save(n64_rdp *d, uint8_t *out);
+int n64_rdp_state_check(n64_rdp *d, const uint8_t *in, size_t n);
 int n64_rdp_state_load(n64_rdp *d, const uint8_t *in, size_t n);
 
 /* ---- RDP ------------------------------------------------------------------------------------------------------------ */

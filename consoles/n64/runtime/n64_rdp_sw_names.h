@@ -19,6 +19,7 @@
 #define n64_rdp_state_extra_size n64_rdp_sw_state_extra_size
 #define n64_rdp_state_save_sw n64_rdp_sw_state_save
 #define n64_rdp_state_load_sw n64_rdp_sw_state_load
+#define n64_rdp_state_check_sw n64_rdp_sw_state_check
 /* n64_rdp.h's back-end selection belongs to the dispatcher: renamed out of the way in the software RDP's view. */
 #define n64_rdp_set_backend n64_rdp_sw_unused_set_backend
 #define n64_rdp_backend_name n64_rdp_sw_unused_backend_name

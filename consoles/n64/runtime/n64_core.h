@@ -201,8 +201,8 @@ int n64_save_load(n64_machine *m, n64_save_kind kind, const uint8_t *data, size_
  * after a load).
  * n64_state_size: the bytes n64_state_save needs now (RDRAM's zero pages depend on its contents: call it right
  * before). n64_state_save: the size written, 0 when cap is too small. n64_state_check / n64_state_load:
- * N64_STATE_OK, or why the state is refused (another ROM, another version / build or RDRAM size, not a state); the
- * machine is left as it was. The values match recomp_states.h's RECOMP_STATE_*. */
+ * N64_STATE_OK, or why the state is refused (another ROM, another version / build or RDRAM size, not a state, or
+ * corrupt: an index, address or rate the machine could never hold); the machine is left as it was. The values match recomp_states.h's RECOMP_STATE_*. */
 #define N64_STATE_VERSION 1
 enum {
     N64_STATE_OK = 0,

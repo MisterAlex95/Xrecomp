@@ -473,6 +473,8 @@ void n64_dp_state_loaded(n64_machine *m);   /* the policy starts again */
 
 /* ---- Video / audio (n64_io.c) ---------------------------------------------------------------------------------- */
 void n64_vi_reset(n64_machine *m);
+/* The line length (ticks) and lines per field the VI registers V_SYNC / H_SYNC give (vi: the 16 registers). */
+void n64_vi_timing_of(const uint32_t *vi, bool pal, uint64_t *line_ticks, uint32_t *lines);
 uint32_t n64_vi_read(n64_machine *m, uint32_t reg);
 void n64_vi_write(n64_machine *m, uint32_t reg, uint32_t v);
 void n64_vi_event(n64_machine *m);

@@ -50,11 +50,13 @@ int ps1_hle_implemented(int table, int fn, const char **name);
 int ps1_hle_unimplemented_count(ps1_machine *m);
 
 /* Save states (XBA-182, ps1_state.c): the HLE BIOS's state as bytes (0 without the HLE BIOS). busy: a guest call
- * from C is in progress (C frames on the host stack): no state can be taken then. load: 0, or -1 on a size
- * mismatch. */
+ * from C is in progress (C frames on the host stack): no state can be taken then. valid: the bytes checked before
+ * anything is loaded, as ps1_devices.h's (0, -1 on a size mismatch, -2 when a field is out of range). load: 0, or -1
+ * on a size mismatch. */
 size_t ps1_hle_state_size(ps1_machine *m);
 int ps1_hle_state_busy(ps1_machine *m);
 void ps1_hle_state_save(ps1_machine *m, uint8_t *out);
+int ps1_hle_state_valid(ps1_machine *m, const uint8_t *in, size_t n);
 int ps1_hle_state_load(ps1_machine *m, const uint8_t *in, size_t n);
 
 #endif

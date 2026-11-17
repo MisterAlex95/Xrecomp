@@ -67,6 +67,10 @@ typedef struct n64_rdp_ops {
     void (*scanout_forget)(void *d);
     /* n64_rdp.h n64_rdp_scanout_rgba (NULL: none; the back end's scanout op then serves n64_rdp_scanout alone). */
     int (*scanout_rgba)(void *d, const uint32_t *vi, uint32_t field, const uint8_t **rgba, int *w, int *h, int *pitch);
+    /* Save states: what state_load would answer for these bytes, changing nothing (n64_rdp_select.c has checked the
+     * common part's ranges first; extra NULL as for state_load): 0, -1 (the extra bytes are not this build's) or -2
+     * (they hold values this back end could never reach: a crafted or damaged state). NULL: nothing more to check. */
+    int (*state_check)(void *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n);
 } n64_rdp_ops;
 
 /* The factor the next back end is asked to draw at (n64_rdp_select.c: n64_rdp_set_upscale, else the environment). */

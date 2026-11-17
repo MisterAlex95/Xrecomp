@@ -93,6 +93,22 @@ foreach(t cpu gte pad hle)
     add_test(NAME ps1_${t} COMMAND ps1_${t}_test)
     set_tests_properties(ps1_${t} PROPERTIES TIMEOUT 60)
 endforeach()
+# Save state refusals (XBA-182): fields out of range in a state are refused before anything loads (test_state.c).
+# test_state_fields.c gives the private fields' offsets, built once per device with its source included (that copy
+# links in place of the library's).
+add_executable(ps1_state_test test_state.c)
+foreach(dev GPU CDROM SPU MDEC HLE)
+    add_library(ps1_state_fields_${dev} OBJECT test_state_fields.c)
+    target_compile_definitions(ps1_state_fields_${dev} PRIVATE STATE_${dev}=1)
+    target_include_directories(ps1_state_fields_${dev} PRIVATE ../runtime)
+    target_link_libraries(ps1_state_fields_${dev} PRIVATE ps1_core) # its include directories
+    target_compile_options(ps1_state_fields_${dev} PRIVATE -Wall -Wextra)
+    target_sources(ps1_state_test PRIVATE $<TARGET_OBJECTS:ps1_state_fields_${dev}>)
+endforeach()
+target_link_libraries(ps1_state_test PRIVATE ps1_core)
+target_compile_options(ps1_state_test PRIVATE -Wall -Wextra)
+add_test(NAME ps1_state COMMAND ps1_state_test)
+set_tests_properties(ps1_state PROPERTIES TIMEOUT 60)
 
 get_filename_component(PS1_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../.. ABSOLUTE)
 set(PS1_HOMEBREW_DIR ${PS1_REPO_ROOT}/build/homebrew/ps1 CACHE PATH "Built PS1 homebrew (build_homebrew.sh ps1)")
