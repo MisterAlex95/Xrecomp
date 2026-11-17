@@ -219,6 +219,28 @@ static uint64_t hash_bytes(const uint8_t *p, size_t n)
     return h;
 }
 
+/* The same idea in four independent lanes: one multiply chain is latency
+ * bound, and textures (every sampled one hashed once a frame) and vertex
+ * ranges (~3 MB a frame in Oakvale) are the bulk of what is hashed. No
+ * statistics: the callers count. */
+static uint64_t hash4_bytes(const uint8_t *p, size_t n)
+{
+    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full,
+             h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull, w[4];
+    size_t i;
+
+    for (i = 0; i + 32 <= n; i += 32) {
+        memcpy(w, p + i, 32);
+        h0 = (h0 ^ w[0]) * 0xFF51AFD7ED558CCDull; h0 ^= h0 >> 29;
+        h1 = (h1 ^ w[1]) * 0xFF51AFD7ED558CCDull; h1 ^= h1 >> 29;
+        h2 = (h2 ^ w[2]) * 0xFF51AFD7ED558CCDull; h2 ^= h2 >> 29;
+        h3 = (h3 ^ w[3]) * 0xFF51AFD7ED558CCDull; h3 ^= h3 >> 29;
+    }
+    for (; i < n; i++)
+        h0 = (h0 ^ p[i]) * 0x100000001B3ull;
+    return h0 ^ (h1 * 31u) ^ (h2 * 961u) ^ (h3 * 29791u);
+}
+
 static int has_ext(const char *name)
 {
     GLint n = 0, i;
@@ -1085,15 +1107,12 @@ static uint8_t *scratch(size_t n)
     return s_scratch;
 }
 
-/* Byte offset of pixel (x, y) in the guest surface. */
-static size_t rt_offset(const GlRT *r, uint32_t x, uint32_t y)
+/* Byte offset of pixel (x, y) in the guest surface; mx, my: the swizzle
+ * masks of a swizzled target (xbox_swizzle_masks, once per surface). */
+static size_t rt_px_off(const GlRT *r, uint32_t x, uint32_t y, uint32_t mx, uint32_t my)
 {
-    if (r->swz) {
-        uint32_t mx, my;
-        xbox_swizzle_masks(r->w, r->h, &mx, &my);
-        return (size_t)(swizzle_deposit(x, mx) | swizzle_deposit(y, my)) * r->bpp;
-    }
-    return (size_t)y * r->pitch + (size_t)x * r->bpp;
+    return r->swz ? (size_t)(swizzle_deposit(x, mx) | swizzle_deposit(y, my)) * r->bpp
+                  : (size_t)y * r->pitch + (size_t)x * r->bpp;
 }
 
 /* Real (GL) size of a logical length on target r. */
@@ -1188,13 +1207,16 @@ static void rt_snap_take(GlRT *r);
 static void rt_upload(GlRT *r)
 {
     uint8_t *buf = scratch((size_t)r->w * r->h * 4), *mem = guest(r->va);
-    uint32_t x, y;
+    uint32_t x, y, mx = 0, my = 0;
 
     if (!buf)
         return;
+    if (r->swz)
+        xbox_swizzle_masks(r->w, r->h, &mx, &my);
     for (y = 0; y < r->h; y++)
         for (x = 0; x < r->w; x++)
-            rt_guest_rgba(r, mem + rt_offset(r, x, y), buf + ((size_t)y * r->w + x) * 4);
+            rt_guest_rgba(r, mem + rt_px_off(r, x, y, mx, my),
+                          buf + ((size_t)y * r->w + x) * 4);
     rt_snap_take(r);
     if (r->sc != 1.0f) {
         rt_resolve_alloc(r);
@@ -1387,25 +1409,44 @@ static void snap_refresh(uint32_t va, uint32_t len)
  * inside it the guest bytes win, also where the GPU drew since. */
 #define NV_GL_CPU_MAX_RUNS 4096
 
-static size_t rt_px_off(const GlRT *r, uint32_t x, uint32_t y, uint32_t mx, uint32_t my)
+static uint32_t s_cpu_uploads;      /* glTexSubImage2D calls of rt_cpu_merge (tests) */
+
+/* Row m of a change mask, inside [x0, x1): 1 when it holds exactly one run
+ * of changed pixels, [*a, *b). */
+static int mask_one_run(const uint8_t *m, uint32_t x0, uint32_t x1, uint32_t *a, uint32_t *b)
 {
-    return r->swz ? (size_t)(swizzle_deposit(x, mx) | swizzle_deposit(y, my)) * r->bpp
-                  : (size_t)y * r->pitch + (size_t)x * r->bpp;
+    uint32_t x = x0, e;
+
+    while (x < x1 && !m[x])
+        x++;
+    if (x == x1)
+        return 0;
+    for (e = x; e < x1 && m[e]; e++)
+        ;
+    *a = x;
+    *b = e;
+    for (; e < x1; e++)
+        if (m[e])
+            return 0;
+    return 1;
 }
 
 /* The pixels of target r whose guest bytes differ from r->snap, into the GL
- * texture: run by run along each row (a movie frame is one run a row), at
- * guest size -- a scaled target gets them in its resolve (made current
- * first), and the box around them is blitted up (nearest). */
+ * texture, at guest size -- a scaled target gets them in its resolve (made
+ * current first), and the box around them is blitted up (nearest). A box
+ * that changed whole (a movie frame) goes up in one upload; otherwise run
+ * by run, with consecutive rows of one same run (a rectangle the CPU
+ * drew) as one upload. */
 static void rt_cpu_merge(GlRT *r)
 {
     const uint8_t *mem = guest(r->va);
-    uint8_t *buf = scratch((size_t)r->w * r->h * 4), *mask;
+    uint8_t *buf = scratch((size_t)r->w * r->h * 5), *mask;
     uint32_t x, y, mx = 0, my = 0, x0 = r->w, y0 = r->h, x1 = 0, y1 = 0, runs = 0, px = 0;
     GLuint dst;
 
-    if (!buf || !(mask = (uint8_t *)malloc((size_t)r->w * r->h)))
+    if (!buf)
         return;
+    mask = buf + (size_t)r->w * r->h * 4;   /* the scratch buffer's tail */
     if (r->swz)
         xbox_swizzle_masks(r->w, r->h, &mx, &my);
     for (y = 0; y < r->h; y++) {
@@ -1427,10 +1468,8 @@ static void rt_cpu_merge(GlRT *r)
             prev = ch;
         }
     }
-    if (!px) {
-        free(mask);
+    if (!px)
         return;
-    }
     if (r->sc != 1.0f) {
         rt_resolve(r);
         dst = r->rtex;
@@ -1438,20 +1477,33 @@ static void rt_cpu_merge(GlRT *r)
         dst = r->tex;
     }
     sh_tex_scratch(GL_TEXTURE_2D, dst);
-    if (runs > NV_GL_CPU_MAX_RUNS) {
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)r->w);
+    if (runs > NV_GL_CPU_MAX_RUNS || px == (x1 - x0) * (y1 - y0)) {
         for (y = y0; y < y1; y++)
             for (x = x0; x < x1; x++)
                 if (!mask[(size_t)y * r->w + x])
                     rt_guest_rgba(r, mem + rt_px_off(r, x, y, mx, my),
                                   buf + ((size_t)y * r->w + x) * 4);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)r->w);
         glTexSubImage2D(GL_TEXTURE_2D, 0, (GLint)x0, (GLint)y0, (GLsizei)(x1 - x0),
                         (GLsizei)(y1 - y0), GL_RGBA, GL_UNSIGNED_BYTE,
                         buf + ((size_t)y0 * r->w + x0) * 4);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        s_cpu_uploads++;
     } else {
         for (y = y0; y < y1; y++) {
             const uint8_t *m = mask + (size_t)y * r->w;
+            uint32_t a, b, a2, b2, ye;
+            if (mask_one_run(m, x0, x1, &a, &b)) {
+                for (ye = y + 1; ye < y1
+                     && mask_one_run(mask + (size_t)ye * r->w, x0, x1, &a2, &b2)
+                     && a2 == a && b2 == b; ye++)
+                    ;
+                glTexSubImage2D(GL_TEXTURE_2D, 0, (GLint)a, (GLint)y, (GLsizei)(b - a),
+                                (GLsizei)(ye - y), GL_RGBA, GL_UNSIGNED_BYTE,
+                                buf + ((size_t)y * r->w + a) * 4);
+                s_cpu_uploads++;
+                y = ye - 1;
+                continue;
+            }
             for (x = x0; x < x1; ) {
                 uint32_t e;
                 if (!m[x]) {
@@ -1462,10 +1514,12 @@ static void rt_cpu_merge(GlRT *r)
                     ;
                 glTexSubImage2D(GL_TEXTURE_2D, 0, (GLint)x, (GLint)y, (GLsizei)(e - x), 1,
                                 GL_RGBA, GL_UNSIGNED_BYTE, buf + ((size_t)y * r->w + x) * 4);
+                s_cpu_uploads++;
                 x = e;
             }
         }
     }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     r->serial = ++s_rt_serial;
     if (r->sc != 1.0f) {
         const GLint sr[4] = { (GLint)x0, (GLint)y0, (GLint)x1, (GLint)y1 };
@@ -1480,7 +1534,6 @@ static void rt_cpu_merge(GlRT *r)
         fprintf(stderr, "  [GPUGL] guest CPU wrote target 0x%08X: %u pixels in %u runs,"
                         " box %u,%u-%u,%u%s\n", r->va, px, runs, x0, y0, x1, y1,
                 r->dirty ? " (merged over GPU pixels)" : "");
-    free(mask);
 }
 
 /* once: at most once a frame for this target (binds, direct sampling). */
@@ -2065,6 +2118,7 @@ typedef struct {
     uint64_t hash;
     GLuint tex;
     uint32_t checked;               /* frame of the last hash check */
+    uint32_t used;                  /* frame of the last tex_get hit (eviction) */
     GlSamp samp;                    /* sampler state last set */
     /* The last upload failed (a format the decoder does not know, such as
      * Fable's Z16 shadow map bound as 0x30): drawn as "no texture" until the
@@ -2086,16 +2140,23 @@ typedef struct {
     GLint wrap_r;                   /* a volume's GL_TEXTURE_WRAP_R as last set */
 } GlTex;
 
-#define NV_GL_MAX_TEX 512           /* power of two */
+#define NV_GL_MAX_TEX 2048          /* power of two */
 static GlTex s_tex[NV_GL_MAX_TEX];
 static int s_ntex;
 static const GlTex *s_bound[4];     /* what each unit sampled last batch */
+static uint32_t s_tex_evictions, s_tex_drops;   /* for the tests */
+
+static uint32_t tex_slot_key(uint32_t offset, uint32_t color, uint32_t width,
+                             uint32_t height, uint32_t cube)
+{
+    uint32_t h = (offset >> 7) ^ (offset >> 19) ^ color * 0x9E37u
+               ^ width * 31u ^ height * 131u ^ cube;
+    return h & (NV_GL_MAX_TEX - 1);
+}
 
 static uint32_t tex_slot(const Nv2aTexture *t, uint32_t cube)
 {
-    uint32_t h = (t->offset >> 7) ^ (t->offset >> 19) ^ t->color * 0x9E37u
-               ^ t->width * 31u ^ t->height * 131u ^ cube;
-    return h & (NV_GL_MAX_TEX - 1);
+    return tex_slot_key(t->offset, t->color, t->width, t->height, cube);
 }
 
 static void tex_drop_all(void)
@@ -2107,13 +2168,66 @@ static void tex_drop_all(void)
     memset(s_tex, 0, sizeof s_tex);
     memset(s_bound, 0, sizeof s_bound);
     s_ntex = 0;
+    s_tex_drops++;
+}
+
+/* The table is 3/4 full: delete the entries not sampled in the last `age`
+ * frames and put the others back in their probe order (linear probing has
+ * no deletion of its own). Returns the entries left. Entries sampled this
+ * frame always stay, so a texture already bound for this batch keeps its
+ * GL name; s_bound is cleared because the entries move. */
+static int tex_evict(uint32_t age)
+{
+    static GlTex keep[NV_GL_MAX_TEX];
+    int i, n = 0;
+
+    for (i = 0; i < NV_GL_MAX_TEX; i++) {
+        GlTex *c = &s_tex[i];
+        if (!c->tex && !c->bytes)
+            continue;
+        if (s_frame - c->used < age)
+            keep[n++] = *c;
+        else if (c->tex)
+            sh_delete_textures(1, &c->tex);
+    }
+    memset(s_tex, 0, sizeof s_tex);
+    memset(s_bound, 0, sizeof s_bound);
+    for (i = 0; i < n; i++) {
+        uint32_t slot = tex_slot_key(keep[i].offset, keep[i].color, keep[i].width,
+                                     keep[i].height, keep[i].cube);
+        while (s_tex[slot].tex || s_tex[slot].bytes)
+            slot = (slot + 1) & (NV_GL_MAX_TEX - 1);
+        s_tex[slot] = keep[i];
+    }
+    if (s_verbose)
+        fprintf(stderr, "  [GPUGL] texture cache: %d of %d entries not sampled in %u frames"
+                        " deleted at frame %u\n", s_ntex - n, s_ntex, age, s_frame);
+    s_ntex = n;
+    s_tex_evictions++;
+    return n;
+}
+
+/* Room for more entries (the whole table used to be dropped here, and every live texture decoded and uploaded again in the
+ * same frame): the textures unused for a second go first, then those not
+ * sampled this frame or the last; everything only when the live set of two
+ * frames alone nearly fills the table. */
+static void tex_make_room(void)
+{
+    if (tex_evict(60) < NV_GL_MAX_TEX / 2)
+        return;
+    if (tex_evict(2) < NV_GL_MAX_TEX * 5 / 8)
+        return;
+    tex_drop_all();
 }
 
 static uint64_t tex_hash(const Nv2aTexture *t, uint32_t bytes)
 {
-    uint64_t h = hash_bytes(guest(t->offset), bytes);
-    if (t->color == 0x0B && t->palette)          /* the palette is content too */
-        h ^= hash_bytes(guest(t->palette), 1024) * 31u;
+    uint64_t h = hash4_bytes(guest(t->offset), bytes);
+    s_st.hashes_kb += bytes >> 10;
+    if (t->color == 0x0B && t->palette) {        /* the palette is content too */
+        h ^= hash4_bytes(guest(t->palette), 1024) * 31u;
+        s_st.hashes_kb += 1;
+    }
     return h;
 }
 
@@ -2301,9 +2415,12 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
         }
     }
     if (!e || (!e->tex && s_ntex >= NV_GL_MAX_TEX * 3 / 4)) {
-        tex_drop_all();
-        e = &s_tex[slot];
+        /* Entries are only made under 3/4, so an empty slot is always
+         * found again after this. */
+        tex_make_room();
+        return tex_get(t, cube, unit);
     }
+    e->used = s_frame;
     if (e->tex) {
         uint32_t serial = 0;
         int ov = s_recheck_switch ? 0 : tex_gpu_overlap(t->offset, e->bytes, &serial);
@@ -2535,8 +2652,59 @@ typedef struct {
 #define NV_GL_MAX_PROG 2048         /* power of two; pipelines x programs */
 #define NV_GL_MAX_VSH  512          /* power of two */
 static GlProg s_prog[NV_GL_MAX_PROG];
+static uint32_t s_nprog;            /* slots taken, failed ones included */
 
 static GlVsh s_vsh[NV_GL_MAX_VSH];
+static uint32_t s_nvsh;
+static uint32_t s_prog_drops, s_vsh_drops;   /* for the tests */
+
+/* The tables are dropped whole when 3/4 full, as the VB/IB/VAO caches
+ * are: entries were never retired, so a long session across many areas
+ * ended with every new pipeline refused (batches skipped, or drawn on the
+ * CPU) and every miss probing the whole table. A dropped program comes
+ * back from the program binary cache (glProgramBinary, no compile) when it
+ * is on; a dropped vertex shader is translated again. Neither is called
+ * between a lookup and its use: gl_draw and gl_draw_program take the
+ * vertex shader first, then the program, and use both at once. */
+static void prog_drop_all(void)
+{
+    uint32_t i;
+
+    if (s_verbose)
+        fprintf(stderr, "  [GPUGL] program table full (%u entries): dropping it at frame %u\n",
+                s_nprog, s_frame);
+    for (i = 0; i < NV_GL_MAX_PROG; i++) {
+        if (s_prog[i].prog) {
+            if (s_sh.prog == s_prog[i].prog)
+                sh_program(0);
+            glDeleteProgram(s_prog[i].prog);
+        }
+        free(s_prog[i].cloc);
+    }
+    memset(s_prog, 0, sizeof s_prog);
+    s_nprog = 0;
+    s_prog_drops++;
+}
+
+/* The programs keep their vertex shader's hash (it is computed from the
+ * batch, not stored), so they stay valid; a linked program keeps a deleted
+ * shader's code. */
+static void vsh_drop_all(void)
+{
+    uint32_t i;
+
+    if (s_verbose)
+        fprintf(stderr, "  [GPUGL] vertex shader table full (%u entries): dropping it at"
+                        " frame %u\n", s_nvsh, s_frame);
+    for (i = 0; i < NV_GL_MAX_VSH; i++) {
+        if (s_vsh[i].sh)
+            glDeleteShader(s_vsh[i].sh);
+        free(s_vsh[i].src);
+    }
+    memset(s_vsh, 0, sizeof s_vsh);
+    s_nvsh = 0;
+    s_vsh_drops++;
+}
 
 /* 64-bit FNV-1a, continuing from h (shader sources; not hash_bytes, whose
  * byte count is the texture statistics'). */
@@ -2567,8 +2735,11 @@ static GlVsh *vsh_get(const Nv2aProgramBatch *pb, uint64_t fmt)
         if (c->hash == h && c->count == pb->ins_count && c->fmt == fmt)
             return c->failed ? NULL : c;
     }
-    if (!v)
-        return NULL;                /* ponytail: 512 programs, then the CPU */
+    if (!v || s_nvsh >= NV_GL_MAX_VSH * 3 / 4) {
+        vsh_drop_all();
+        return vsh_get(pb, fmt);
+    }
+    s_nvsh++;
     v->hash = h;
     v->count = pb->ins_count;
     v->fmt = fmt;
@@ -2945,8 +3116,11 @@ static GlProg *prog_get(const Nv2aGlShaderKey *key, GlVsh *vsh)
         if (c->hash == h && c->vsh_hash == vh && memcmp(&c->key, key, sizeof *key) == 0)
             return c->failed ? NULL : c;
     }
-    if (!p)
-        return NULL;                /* ponytail: 2048 pipelines, then no more */
+    if (!p || s_nprog >= NV_GL_MAX_PROG * 3 / 4) {
+        prog_drop_all();
+        return prog_get(key, vsh);
+    }
+    s_nprog++;
     p->key = *key;
     p->hash = h;
     p->vsh_hash = vh;
@@ -3799,25 +3973,11 @@ static GlVao *s_vao_cache;          /* NV_GL_MAX_VAO, allocated at first use */
 static uint32_t s_nvao;
 static int s_vbo_on;                /* RECOMP_GPU_VBO, default on */
 
-/* hash_bytes in four independent lanes: vertex ranges are hashed every
- * frame (~3 MB in Oakvale), and one multiply chain is latency bound. */
+/* Vertex ranges and index lists: hash4_bytes, counted. */
 static uint64_t vb_hash(const uint8_t *p, size_t n)
 {
-    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full,
-             h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull, w[4];
-    size_t i;
-
-    for (i = 0; i + 32 <= n; i += 32) {
-        memcpy(w, p + i, 32);
-        h0 = (h0 ^ w[0]) * 0xFF51AFD7ED558CCDull; h0 ^= h0 >> 29;
-        h1 = (h1 ^ w[1]) * 0xFF51AFD7ED558CCDull; h1 ^= h1 >> 29;
-        h2 = (h2 ^ w[2]) * 0xFF51AFD7ED558CCDull; h2 ^= h2 >> 29;
-        h3 = (h3 ^ w[3]) * 0xFF51AFD7ED558CCDull; h3 ^= h3 >> 29;
-    }
-    for (; i < n; i++)
-        h0 = (h0 ^ p[i]) * 0x100000001B3ull;
     s_st.vbo_hash_kb += (uint32_t)(n >> 10);
-    return h0 ^ (h1 * 31u) ^ (h2 * 961u) ^ (h3 * 29791u);
+    return hash4_bytes(p, n);
 }
 
 static void vao_drop_all(void)
@@ -4292,6 +4452,7 @@ static void gl_reset_objects(int lost)
         if (s_pebo) glDeleteBuffers(1, &s_pebo);
         if (s_pvao) glDeleteVertexArrays(1, &s_pvao);
         vb_drop_all();
+        ib_drop_all();              /* element buffers: up to NV_GL_IB_BYTES */
         for (i = 0; (uint32_t)i < s_qcount; i++)
             glDeleteQueries(1, &s_qring[(s_qhead + (uint32_t)i) & (NV_GL_MAX_QUERY - 1)].q);
         if (s_nqfree) glDeleteQueries((GLsizei)s_nqfree, s_qfree);
@@ -4313,16 +4474,19 @@ static void gl_reset_objects(int lost)
     for (i = 0; i < NV_GL_MAX_PROG; i++)
         free(s_prog[i].cloc);
     memset(s_prog, 0, sizeof s_prog);
+    s_nprog = 0;
     for (i = 0; i < NV_GL_MAX_VSH; i++)
         free(s_vsh[i].src);
     memset(s_vsh, 0, sizeof s_vsh);
+    s_nvsh = 0;
     s_nwarm = 0;
     free(s_pc_list);                /* ensure_init scans the cache again */
     s_pc_list = NULL;
     s_pc_nlist = s_pc_next = 0;
     s_pc_on = 0;
     s_pvao = s_pvbo = s_pebo = 0;
-    /* Lost context: the names are only forgotten. */
+    /* The cache tables, emptied: with a live context their GL objects were
+     * deleted above; with a lost one the names are only forgotten. */
     memset(s_vb, 0, sizeof s_vb);
     s_nvb = 0;
     s_vb_bytes = 0;
@@ -4808,7 +4972,6 @@ static void gl_flip(void)
                             " %u target rescales, %u depth re-creations\n",
                     (double)s_scale_cfg.scale, s_sst.resolves, s_sst.seed_blits, s_sst.rescales,
                     s_sst.depth_recreates);
-        memset(&s_st, 0, sizeof s_st);
         memset(&s_sst, 0, sizeof s_sst);
     }
     gl_check_frame();

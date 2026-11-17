@@ -1,6 +1,7 @@
 # GPU render back end for the pushbuffer executor (XBA-27): OpenGL 3.3/4.1
-# core on desktop POSIX, OpenGL ES 3.0 on Android. Selected at run time with
-# RECOMP_GPU=1; the CPU rasteriser stays the default.
+# core on desktop POSIX, OpenGL ES 3.0 on Android. Selected at run time by
+# RECOMP_GPU (nv2a_gl_install_from_env): on by default on Android, where
+# RECOMP_GPU=0 picks the CPU rasteriser; elsewhere RECOMP_GPU=1 turns it on.
 #
 #   macOS    system OpenGL framework, headless CGL context
 #   Android  GLESv3 + EGL from the NDK

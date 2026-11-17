@@ -36,7 +36,14 @@
  *      captured; more drawn and presented: the reference. The memory
  *      restored, DROP (every GL object forgotten), the same drawn again:
  *      the same pixels. Without the FLUSH the capture misses the GPU's
- *      pixels and the picture differs (the control).
+ *      pixels and the picture differs (the control). The DROP deletes the
+ *      cached index buffers too: a name made before it is no buffer after
+ *      (it was only forgotten, and leaked up to 32 MB a load).
+ * Texture cache (case 10): more distinct textures than the table holds,
+ * streamed over frames, retire the old entries; a texture sampled every
+ * frame is decoded once (the table used to be dropped whole at 384 keys).
+ * Program table (case 11): a full table is dropped and the new pipeline
+ * linked (it used to be refused for the rest of the run).
  * Also: RECOMP_GPU unset selects the platform's default (gpu_selected).
  * RECOMP_GPU_CPU_WRITES=0 (another ctest entry) checks that the same cases
  * fail without the merge, so the test tells the two apart. */
@@ -60,9 +67,21 @@ static int s_fail, s_cpu_on = 1;
 
 ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem; }
 const char *xbox_path_save_dir_utf8(void) { return NULL; }
+/* Textures: LIN_A8R8G8B8 only, read as is; decodes counted per address. */
+#define TEX_LIVE 0x00F00000u        /* 4x4, sampled every frame (case 10) */
+static uint32_t s_live_decodes;
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
-{ (void)tex; (void)argb_out; return 0; }
-uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex) { (void)tex; return 0; }
+{
+    if (tex->color != 0x12)
+        return 0;
+    memcpy(argb_out, s_mem + tex->offset, (size_t)tex->width * tex->height * 4u);
+    s_live_decodes += tex->offset == TEX_LIVE;
+    return 1;
+}
+uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex)
+{
+    return tex->color == 0x12 ? tex->width * tex->height * 4u : 0;
+}
 int nv2a_backend_texture_level(const Nv2aTexture *tex, uint32_t level, Nv2aTexture *out)
 { (void)tex; (void)level; (void)out; return 0; }
 
@@ -175,7 +194,7 @@ int main(void)
 {
     const char *e = getenv("RECOMP_GPU_CPU_WRITES");
     Nv2aSurface s32 = surf(FB32, 64, 32, 256, 4, 0x0108);
-    uint32_t bad;
+    uint32_t bad, up0;
 
     s_cpu_on = !(e && strcmp(e, "0") == 0);
     s_mem = (uint8_t *)calloc(1, MEM_BYTES);
@@ -204,10 +223,12 @@ int main(void)
     printf("GL: %s | %s (%s path)\n", (const char *)glGetString(GL_RENDERER),
            (const char *)glGetString(GL_VERSION), NV2A_GL_ES ? "GLES" : "desktop GL");
 
-    /* 1. Clean target: read back, CPU rectangle, GPU clear elsewhere. */
+    /* 1. Clean target: read back, CPU rectangle, GPU clear elsewhere. The
+     * rectangle's three rows go up in one upload. */
     present(&s32, 1, NULL);
     flip();
     CHECK(count_bad(FB32, 0, 0, 0, 0, 0, 0) == 0);
+    up0 = s_cpu_uploads;
     rect32(FB32, 256, 10, 5, 20, 8, 0xFF0000FFu);
     {
         Nv2aSurface g = clip(s32, 40, 0, 10, 32);
@@ -218,6 +239,7 @@ int main(void)
     bad = count_bad(FB32, 10, 5, 20, 8, 40, 50);
     printf("1. clean target, CPU rectangle then GPU clear: %u pixels wrong\n", bad);
     CHECK(s_cpu_on ? bad == 0 : bad == 30);
+    CHECK(s_cpu_uploads - up0 == (s_cpu_on ? 1u : 0u));
 
     /* 2. Dirty target: GPU clear, CPU rectangle, read-back. */
     clear(&s32, 0xFFFF0000u);
@@ -240,6 +262,7 @@ int main(void)
             present(&h, 0, &ready);
             flip();
         }
+        up0 = s_cpu_uploads;
         rect32(FBHOST, 256, 0, 0, 64, 32, 0xFF204080u);
         for (i = 0; i < 3; i++) {
             int ok;
@@ -260,6 +283,9 @@ int main(void)
         }
         printf("3. host present of a CPU-written frame: shows 0x%06X\n", shown);
         CHECK(s_cpu_on ? shown == 0x204080u : shown != 0x204080u);
+        /* The whole frame changed: one upload, not one a row. */
+        printf("3. whole frame merged in %u upload(s)\n", s_cpu_uploads - up0);
+        CHECK(s_cpu_uploads - up0 == (s_cpu_on ? 1u : 0u));
     }
 
     /* 4. 640x480 R5G6B5: the frame class, drawn at scale 2. */
@@ -424,7 +450,15 @@ int main(void)
 
             memset(s_mem, 0x77, MEM_BYTES);
             memcpy(s_mem, snap, MEM_BYTES);
-            s_backend.state(NV2A_BACKEND_STATE_DROP);
+            {
+                static const uint16_t idx[6] = { 0, 1, 2, 2, 1, 3 };
+                GLuint ib = ib_get(idx, 6);
+                CHECK(ib != 0 && glIsBuffer(ib));
+                s_backend.state(NV2A_BACKEND_STATE_DROP);
+                /* Before anything can make a new GL name that reuses it. */
+                CHECK(!glIsBuffer(ib));
+                CHECK(s_nib == 0 && s_ib_bytes == 0);
+            }
             {
                 Nv2aSurface g = clip(st, 30, 10, 20, 12);
                 clear(&g, 0xFF0000FFu);
@@ -446,6 +480,71 @@ int main(void)
             }
         }
         CHECK(s_state_flushes == flushes + 1 && s_state_drops == drops + 2);
+    }
+
+    /* 10. Texture cache eviction: 400 new textures a frame for 6 frames
+     * (2400 keys, more than the table holds) and one texture sampled every
+     * frame. The cache retires the old keys instead of dropping everything:
+     * the live texture is decoded once, and nothing is dropped whole. */
+    {
+        Nv2aTexture t;
+        uint32_t f, i, drops = s_tex_drops, evictions = s_tex_evictions, nul = 0;
+        memset(&t, 0, sizeof t);
+        t.width = t.height = 4;
+        t.pitch = 16;
+        t.color = 0x12;
+        t.levels = 1;
+        memset(s_mem + TEX_LIVE, 0x5A, 0x40000);
+        s_live_decodes = 0;
+        for (f = 0; f < 6; f++) {
+            t.offset = TEX_LIVE;
+            nul += tex_get(&t, 0, 0) == NULL;
+            for (i = 0; i < 400; i++) {
+                t.offset = TEX_LIVE + 0x100u + (f * 400u + i) * 64u;
+                nul += tex_get(&t, 1, 1) == NULL;
+            }
+            t.offset = TEX_LIVE;            /* again after the stream: still there */
+            nul += tex_get(&t, 0, 0) == NULL;
+            flip();
+        }
+        printf("10. texture cache, 2400 keys over 6 frames: live texture decoded %u times,"
+               " %u evictions, %u full drops\n", s_live_decodes,
+               s_tex_evictions - evictions, s_tex_drops - drops);
+        CHECK(nul == 0);
+        CHECK(s_live_decodes == 1);
+        CHECK(s_tex_evictions > evictions);
+        CHECK(s_tex_drops == drops);
+        /* A live set too big for the table still falls back to the drop. */
+        for (i = 0; i < NV_GL_MAX_TEX; i++) {
+            t.offset = TEX_LIVE + 0x100u + i * 64u;
+            nul += tex_get(&t, 0, 2) == NULL;
+        }
+        CHECK(nul == 0 && s_tex_drops == drops + 1);
+        flip();
+    }
+
+    /* 11. A full program table is dropped, not refused: every slot taken
+     * (failed entries, as a long session leaves them), a new pipeline still
+     * gets a linked program. */
+    {
+        Nv2aGlShaderKey key;
+        GlProg *p;
+        uint32_t i, drops = s_prog_drops;
+        memset(&key, 0, sizeof key);
+        p = prog_get(&key, NULL);
+        CHECK(p != NULL && p->prog != 0);
+        for (i = 0; i < NV_GL_MAX_PROG; i++)
+            if (!s_prog[i].prog && !s_prog[i].failed) {
+                s_prog[i].failed = 1;
+                s_prog[i].hash = 0xDEAD0000u + i;
+                s_nprog++;
+            }
+        key.final0 = 0x12345678u;           /* a pipeline not in the table */
+        p = prog_get(&key, NULL);
+        printf("11. program table full: new pipeline %s, %u drop(s)\n",
+               p && p->prog ? "linked" : "refused", s_prog_drops - drops);
+        CHECK(p != NULL && p->prog != 0);
+        CHECK(s_prog_drops == drops + 1 && s_nprog == 1);
     }
 
     CHECK(glGetError() == GL_NO_ERROR);

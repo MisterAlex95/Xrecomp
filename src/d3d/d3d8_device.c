@@ -16,7 +16,9 @@
  */
 
 #include "d3d8_internal.h"
+#include "d3d8_prim.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "recomp_exit_hook.h"
 
@@ -831,6 +833,55 @@ static UINT up_ring_upload(const void *data, UINT size)
     return offset;
 }
 
+/* The bound index buffer back in the input assembler, after a draw that
+ * bound its own. */
+static void restore_cur_ib(void)
+{
+    if (g_cur_ib) {
+        D3D8IndexBuffer *ib = (D3D8IndexBuffer *)g_cur_ib;
+        DXGI_FORMAT fmt = (ib->format == D3DFMT_INDEX32) ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
+        ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context,
+            ib->d3d11_buffer, fmt, 0);
+    }
+}
+
+/* A triangle fan or quad list from vertex buffers (D3D11 has neither, and
+ * the buffer's vertices cannot be rewritten as convert_fan_or_quad does for
+ * DrawPrimitiveUP): a triangle list through a temporary buffer of 32-bit
+ * indices (d3d8_prim.h). src: the draw's indices (src_bytes 2 or 4), NULL
+ * for vertices 0, 1, ...; base: added to every index (the start vertex, or
+ * the base vertex index). The pipeline is prepared by the caller. */
+static HRESULT draw_fan_quad_indexed(D3DPRIMITIVETYPE pt, UINT prims, const void *src,
+                                     UINT src_bytes, INT base)
+{
+    int quads = pt == D3DPT_QUADLIST;
+    UINT n = prims * (quads ? 6u : 3u);
+    UINT *idx = (UINT *)malloc((size_t)n * sizeof *idx);
+    D3D11_BUFFER_DESC bd;
+    D3D11_SUBRESOURCE_DATA sd;
+    ID3D11Buffer *ib = NULL;
+    HRESULT hr;
+
+    if (!idx) return E_OUTOFMEMORY;
+    d3d8_fan_quad_indices(quads, prims, src, src_bytes, (uint32_t *)idx);
+    memset(&bd, 0, sizeof(bd));
+    bd.ByteWidth = n * (UINT)sizeof *idx;
+    bd.Usage = D3D11_USAGE_IMMUTABLE;
+    bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    memset(&sd, 0, sizeof(sd));
+    sd.pSysMem = idx;
+    hr = ID3D11Device_CreateBuffer(g_device_state.d3d11_device, &bd, &sd, &ib);
+    free(idx);
+    if (FAILED(hr)) return hr;
+    ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context, ib, DXGI_FORMAT_R32_UINT, 0);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context,
+        D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, n, 0, base);
+    ID3D11Buffer_Release(ib);
+    restore_cur_ib();
+    return S_OK;
+}
+
 static HRESULT __stdcall dev_DrawPrimitive(IDirect3DDevice8 *self, D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, UINT PrimitiveCount)
 {
     (void)self;
@@ -845,6 +896,11 @@ static HRESULT __stdcall dev_DrawPrimitive(IDirect3DDevice8 *self, D3DPRIMITIVET
     d3d8_shaders_prepare_draw(g_device_state.vertex_shader);
     d3d8_combiners_prepare_draw(); /* overrides PS if combiner shader is active */
     d3d8_states_apply();
+
+    /* map_primitive_type's fan/quad count is that of converted vertices:
+     * from a buffer they go through indices instead. */
+    if (PrimitiveType == D3DPT_TRIANGLEFAN || PrimitiveType == D3DPT_QUADLIST)
+        return draw_fan_quad_indexed(PrimitiveType, PrimitiveCount, NULL, 0, (INT)StartVertex);
 
     ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context, topology);
     ID3D11DeviceContext_Draw(g_device_state.d3d11_context, vertex_count, StartVertex);
@@ -865,6 +921,18 @@ static HRESULT __stdcall dev_DrawIndexedPrimitive(IDirect3DDevice8 *self, D3DPRI
     d3d8_shaders_prepare_draw(g_device_state.vertex_shader);
     d3d8_combiners_prepare_draw(); /* overrides PS if combiner shader is active */
     d3d8_states_apply();
+
+    if (PrimitiveType == D3DPT_TRIANGLEFAN || PrimitiveType == D3DPT_QUADLIST) {
+        /* The bound buffer's indices, remapped into a triangle list. */
+        D3D8IndexBuffer *ib = (D3D8IndexBuffer *)g_cur_ib;
+        UINT isz, nsrc = d3d8_fan_quad_source_count(PrimitiveType == D3DPT_QUADLIST, PrimitiveCount);
+        if (!ib || !ib->sys_mem) return E_FAIL;
+        isz = (ib->format == D3DFMT_INDEX32) ? 4u : 2u;
+        if ((size_t)(StartIndex + nsrc) * isz > ib->size) return E_INVALIDARG;
+        return draw_fan_quad_indexed(PrimitiveType, PrimitiveCount,
+                                     ib->sys_mem + (size_t)StartIndex * isz, isz,
+                                     (INT)g_cur_ib_base_vertex);
+    }
 
     ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context, topology);
     ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, index_count, StartIndex, (INT)g_cur_ib_base_vertex);
@@ -925,7 +993,7 @@ static HRESULT __stdcall dev_DrawPrimitiveUP(IDirect3DDevice8 *self, D3DPRIMITIV
 
 static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DPRIMITIVETYPE PrimitiveType, UINT MinVertexIndex, UINT NumVertices, UINT PrimitiveCount, const void *pIndexData, D3DFORMAT IndexDataFormat, const void *pVertexData, UINT VertexStreamZeroStride)
 {
-    (void)self; (void)MinVertexIndex;
+    (void)self;
     g_d3d_draw_count++;
     D3D11_PRIMITIVE_TOPOLOGY topology;
     D3D11_BUFFER_DESC bd;
@@ -935,6 +1003,7 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
     UINT idx_bytes;
     DXGI_FORMAT ib_fmt;
     HRESULT hr;
+    UINT *expanded = NULL;
 
     if (!pVertexData || !pIndexData || !VertexStreamZeroStride) return E_INVALIDARG;
 
@@ -943,7 +1012,20 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
 
     idx_bytes = (IndexDataFormat == D3DFMT_INDEX32) ? 4 : 2;
     ib_fmt = (IndexDataFormat == D3DFMT_INDEX32) ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
-    vb_size = NumVertices * VertexStreamZeroStride;
+    if (PrimitiveType == D3DPT_TRIANGLEFAN || PrimitiveType == D3DPT_QUADLIST) {
+        /* map_primitive_type counted the triangle list's indices; the
+         * source indices are a fan or quads: remap them (d3d8_prim.h). */
+        expanded = (UINT *)malloc((size_t)index_count * sizeof *expanded);
+        if (!expanded) return E_OUTOFMEMORY;
+        d3d8_fan_quad_indices(PrimitiveType == D3DPT_QUADLIST, PrimitiveCount, pIndexData,
+                              idx_bytes, (uint32_t *)expanded);
+        pIndexData = expanded;
+        idx_bytes = 4;
+        ib_fmt = DXGI_FORMAT_R32_UINT;
+    }
+    /* The indices address vertices MinVertexIndex .. MinVertexIndex +
+     * NumVertices - 1 from pVertexData: everything up to the last. */
+    vb_size = (MinVertexIndex + NumVertices) * VertexStreamZeroStride;
     ib_size = index_count * idx_bytes;
 
     /* Create temp vertex buffer */
@@ -954,13 +1036,14 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
     memset(&sd, 0, sizeof(sd));
     sd.pSysMem = pVertexData;
     hr = ID3D11Device_CreateBuffer(g_device_state.d3d11_device, &bd, &sd, &tmp_vb);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) { free(expanded); return hr; }
 
     /* Create temp index buffer */
     bd.ByteWidth = ib_size;
     bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
     sd.pSysMem = pIndexData;
     hr = ID3D11Device_CreateBuffer(g_device_state.d3d11_device, &bd, &sd, &tmp_ib);
+    free(expanded);
     if (FAILED(hr)) { ID3D11Buffer_Release(tmp_vb); return hr; }
 
     /* Bind, prepare, draw */
@@ -988,12 +1071,7 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
         ID3D11DeviceContext_IASetVertexBuffers(g_device_state.d3d11_context,
             0, 1, &vb->d3d11_buffer, &g_cur_vb_stride, &offset);
     }
-    if (g_cur_ib) {
-        D3D8IndexBuffer *ib = (D3D8IndexBuffer *)g_cur_ib;
-        DXGI_FORMAT fmt = (ib->format == D3DFMT_INDEX32) ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
-        ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context,
-            ib->d3d11_buffer, fmt, 0);
-    }
+    restore_cur_ib();
     return S_OK;
 }
 

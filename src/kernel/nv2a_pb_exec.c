@@ -1379,6 +1379,64 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
         s_gpu.texs[0] = saved;
         return ok;
     }
+    if (!d3d8_format_dxt_block_bytes(tex->color)) {
+        /* What sample_texture(x, y) reads for every texel inside the image
+         * (the clamp and the border test change nothing there), without
+         * its per-texel cost: the Morton offsets are walked with the
+         * masked increment (off = (off - mask) & mask, as
+         * xbox_unswizzle_rect) instead of rebuilding the masks and
+         * depositing both coordinates bit by bit for every texel, and the
+         * common 32-bit formats skip the format switch. A 512x512 swizzled
+         * A8R8G8B8 level was 15-25 ms on arm64 through the sampler; the
+         * GL back end decodes every upload here. */
+        const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+        const Texture *t = &s_gpu.texs[0];
+        uint32_t w = tex->width, h = tex->height, fmt = tex->color;
+        uint32_t *out = argb_out;
+
+        if (d3d8_format_is_swizzled(fmt)) {
+            const uint8_t *p = mem + tex->offset;
+            const uint32_t *p32 = (const uint32_t *)p;
+            uint32_t mx, my, oy = 0;
+            fmt = linear_twin(fmt);
+            xbox_swizzle_masks(w, h, &mx, &my);
+            for (y = 0; y < h && ok; y++, oy = (oy - my) & my, out += w) {
+                uint32_t ox = 0;
+                if (fmt == 0x12) {                      /* A8R8G8B8 */
+                    for (x = 0; x < w; x++, ox = (ox - mx) & mx)
+                        out[x] = p32[ox | oy];
+                } else if (fmt == 0x1E) {               /* X8R8G8B8 */
+                    for (x = 0; x < w; x++, ox = (ox - mx) & mx)
+                        out[x] = p32[ox | oy] | 0xFF000000u;
+                } else {
+                    for (x = 0; x < w; x++, ox = (ox - mx) & mx)
+                        if (!decode_texel(t, fmt, p, ox | oy, &out[x])) {
+                            ok = 0;
+                            break;
+                        }
+                }
+            }
+        } else {
+            for (y = 0; y < h && ok; y++, out += w) {
+                const uint8_t *row = mem + tex->offset + (size_t)y * tex->pitch;
+                if (fmt == 0x12) {                      /* LIN_A8R8G8B8 */
+                    memcpy(out, row, (size_t)w * 4u);
+                } else if (fmt == 0x1E) {               /* LIN_X8R8G8B8 */
+                    const uint32_t *r32 = (const uint32_t *)row;
+                    for (x = 0; x < w; x++)
+                        out[x] = r32[x] | 0xFF000000u;
+                } else {
+                    for (x = 0; x < w; x++)
+                        if (!decode_texel(t, fmt, row, x, &out[x])) {
+                            ok = 0;
+                            break;
+                        }
+                }
+            }
+        }
+        s_gpu.texs[0] = saved;
+        return ok;
+    }
     for (y = 0; y < tex->height && ok; y++)
         for (x = 0; x < tex->width; x++)
             if (!sample_texture(x, y, &argb_out[(size_t)y * tex->width + x])) {

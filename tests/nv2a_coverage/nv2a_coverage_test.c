@@ -15,6 +15,11 @@
  *      status file's "unsupported";
  *   4. the [GPU] report runs and the status file's "unmodelled" names the
  *      method nothing models (SET_LOGIC_OP).
+ *   5. whole-image decode (the GL back end's uploads) reads, for every
+ *      decoded uncompressed format and random images of several sizes,
+ *      the same texels as decoding each texel alone at the address the
+ *      per-texel sampler computes (swizzle_offset, or the row and pitch);
+ *      also prints the time of 512x512 SZ_R5G6B5 and SZ_A8R8G8B8 decodes.
  *
  * Guest memory is a buffer addressed by the offsets the title would use. */
 #include <math.h>
@@ -23,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "nv2a_backend.h"
 #include "nv2a_coverage.h"
 #include "recomp_status.h"
@@ -240,6 +246,105 @@ static void check_new_formats(void)
     printf("2c. added formats: %d of %d wrong\n", bad, (int)(sizeof c / sizeof c[0]));
 }
 
+/* 5. Whole-image decode against one texel at a time. */
+static uint32_t s_rng = 12345u;
+static uint32_t rnd(void)
+{
+    s_rng = s_rng * 1103515245u + 12345u;
+    return s_rng >> 8;
+}
+
+#define DEC_AT  0x100000u
+#define DEC_PAL 0x300000u
+static int decode_matches(uint32_t fmt, uint32_t w, uint32_t h, uint32_t pitch)
+{
+    static uint32_t img[256 * 256];
+    const Nv2aTexFormat *f = nv2a_tex_format(fmt);
+    Nv2aTexture t;
+    uint32_t x, y, bad = 0;
+
+    memset(&t, 0, sizeof t);
+    t.offset = DEC_AT;
+    t.width = w;
+    t.height = h;
+    t.pitch = pitch;
+    t.color = fmt;
+    t.levels = 1;
+    t.palette = DEC_PAL;
+    if (!nv2a_backend_decode_texture(&t, img))
+        return 0;
+    for (y = 0; y < h; y++)
+        for (x = 0; x < w; x++) {
+            Nv2aTexture one = t;
+            uint32_t want[2] = { 0, 0 }, k = 0;
+            one.width = one.height = 1;
+            one.pitch = 4;
+            if (f->swizzled) {
+                one.offset = DEC_AT + swizzle_offset(x, y, w, h) * f->bytes;
+            } else if (fmt == 0x24 || fmt == 0x25) {    /* YUV: two texels a group */
+                one.offset = DEC_AT + y * pitch + (x & ~1u) * 2u;
+                one.width = 2;
+                one.pitch = 4;
+                k = x & 1u;
+            } else {
+                one.offset = DEC_AT + y * pitch + x * f->bytes;
+            }
+            if (!nv2a_backend_decode_texture(&one, want) || want[k] != img[y * w + x])
+                bad++;
+        }
+    if (bad)
+        printf("format 0x%02X %ux%u pitch %u: %u texels differ\n", fmt, w, h, pitch, bad);
+    return bad == 0;
+}
+
+static void check_decode_walk(void)
+{
+    static const uint32_t sz[][2] = { { 8, 8 }, { 256, 64 }, { 16, 128 }, { 1, 32 }, { 64, 1 },
+                                      { 32, 32 } };
+    uint32_t fmt, i, n = 0, bad = 0;
+    double ms;
+    clock_t c0;
+
+    for (i = 0; i < 0x80000; i++)
+        s_mem[DEC_AT + i] = (uint8_t)rnd();
+    for (i = 0; i < 1024; i++)
+        s_mem[DEC_PAL + i] = (uint8_t)rnd();
+    for (fmt = 0; fmt <= 0x41; fmt++) {
+        const Nv2aTexFormat *f = nv2a_tex_format(fmt);
+        if (!f->name || !f->decoded || !f->bytes)
+            continue;
+        for (i = 0; i < sizeof sz / sizeof sz[0]; i++) {
+            uint32_t w = sz[i][0], h = sz[i][1], pitch = w * f->bytes;
+            if (!f->swizzled) {                     /* odd sizes, padded rows */
+                w = 1 + rnd() % 100u;
+                if (fmt == 0x24 || fmt == 0x25)
+                    w = (w + 1) & ~1u;
+                h = 1 + rnd() % 60u;
+                pitch = (w * f->bytes + 4u * (rnd() % 4u) + 3u) & ~3u;
+            }
+            n++;
+            bad += !decode_matches(fmt, w, h, pitch);
+        }
+    }
+    printf("5. whole-image decode: %u of %u images differ from the per-texel decode\n", bad, n);
+    CHECK(n > 100 && bad == 0);
+    for (fmt = 0x05; fmt <= 0x06; fmt++) {      /* SZ_R5G6B5, SZ_A8R8G8B8 */
+        static uint32_t out[512 * 512];
+        Nv2aTexture t;
+        memset(&t, 0, sizeof t);
+        t.offset = 0;
+        t.width = t.height = 512;
+        t.pitch = 2048;
+        t.color = fmt;
+        t.levels = 1;
+        c0 = clock();
+        for (i = 0; i < 20; i++)
+            CHECK(nv2a_backend_decode_texture(&t, out));
+        ms = (double)(clock() - c0) * 1000.0 / CLOCKS_PER_SEC / 20.0;
+        printf("5. 512x512 %s decode: %.3f ms\n", nv2a_tex_format(fmt)->name, ms);
+    }
+}
+
 /* Mip levels (XBA-120): one after another, each in the base layout. */
 static void check_levels(void)
 {
@@ -357,6 +462,7 @@ int main(void)
     check_method_names();
     check_levels();
     check_new_formats();
+    check_decode_walk();
 
     /* 3. Gaps, on the CPU rasteriser. */
     setup_ffp();
