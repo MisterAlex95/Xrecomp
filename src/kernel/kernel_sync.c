@@ -272,10 +272,13 @@ static void expired_note(const char *who, HANDLE h, DWORD ms, uint64_t frozen_ns
 {
     static volatile LONG n;
     uint32_t late_ms = 0;
-    int late = xbox_OhciControllerLate(&late_ms);
+    int late;
     LONG k;
 
-    if (!who || (frozen_ns < FROZEN_MIN_NS && late <= 0))
+    if (!who)
+        return;   /* before xbox_OhciControllerLate: it reads the clock, and a delay expires every time */
+    late = xbox_OhciControllerLate(&late_ms);
+    if (frozen_ns < FROZEN_MIN_NS && late <= 0)
         return;
     k = InterlockedIncrement(&n);
     if (k > 10 && (k & 63) != 0)
@@ -318,7 +321,7 @@ DWORD xbox_GuestTimedWait(DWORD (*wait)(void *ctx, DWORD ms), void *ctx, DWORD m
         rounds++;
         r = wait(ctx, more);
     }
-    if (r == WAIT_TIMEOUT)
+    if (r == WAIT_TIMEOUT && who)   /* a delay (who NULL) always expires: nothing to note */
         expired_note(who, h, ms, frozen + (xbox_ParkFrozenNs() - f0), rounds);
     return r;
 }
