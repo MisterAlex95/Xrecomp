@@ -179,5 +179,50 @@ class BitTestCarryCompiledTest(unittest.TestCase):
         self._check(BT_BELOW_ITS_JC, [("eax = 8;", 1), ("eax = 7;", 0)])
 
 
+
+class BitOffsetWidthTest(unittest.TestCase):
+    """The bit offset is taken modulo the operand width, immediate or not.
+
+    `bt eax, 0x28` emitted `eax >> (0x28)`, a shift by more than the width
+    (undefined C), and `bts ax, cx` masked the offset with 31, so offsets
+    16..31 set a bit SET_LO16 then dropped where x86 sets bit cx & 15.
+    """
+
+    def setUp(self):
+        from .lift_fixture import gnu_cc
+        if not gnu_cc():
+            self.skipTest("no GNU C compiler available")
+
+    def test_compiled_at_O2_and_under_ubsan(self):
+        from .lift_fixture import build_and_run, translate
+        functions = [
+            # bt eax, 0x28 ; jc L ; (eax = 0 / 1)
+            translate("0fbae028 7206 b800000000 c3 b801000000 c3",
+                      name="bt_imm40"),
+            # bts ax, cx ; ret
+            translate("660fabc8 c3", name="bts16"),
+            # bt ax, 0x14 ; jc L
+            translate("660fbae014 7206 b800000000 c3 b801000000 c3",
+                      name="bt16_imm20"),
+        ]
+        body = """
+    int bad = 0;
+    static volatile uint32_t v[] = {0x100u, 0xFEFFu, 0x14u, 0x10u};
+    guest_reset(); eax = v[0]; bt_imm40();
+    if (eax != 1) { printf("bt 0x28 on 0x100 -> %u\\n", eax); bad++; }
+    guest_reset(); eax = v[1]; bt_imm40();
+    if (eax != 0) { printf("bt 0x28 on 0xFEFF -> %u\\n", eax); bad++; }
+    guest_reset(); eax = 0xAAAA0000u; ecx = v[2]; bts16();
+    if (eax != 0xAAAA0010u) { printf("bts ax, 20 -> %08X\\n", eax); bad++; }
+    guest_reset(); eax = v[3]; bt16_imm20();
+    if (eax != 1) { printf("bt ax, 0x14 on 0x10 -> %u\\n", eax); bad++; }
+    return bad != 0;"""
+        rc, out = build_and_run(functions, body)
+        self.assertEqual(rc, 0, out)
+        rc, out = build_and_run(functions, body, extra_flags=(
+            "-fsanitize=shift", "-fsanitize-trap=all"))
+        self.assertEqual(rc, 0, "a shift by the width or more:\n" + out)
+
+
 if __name__ == "__main__":
     unittest.main()

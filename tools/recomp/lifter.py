@@ -564,6 +564,17 @@ def _opcode_bytes(insn):
     return raw[i:]
 
 
+def _has_operand_size_prefix(insn):
+    """A 0x66 among the legacy prefixes: the 16-bit form of the opcode."""
+    raw = bytes.fromhex(getattr(insn, "bytes_hex", "") or "")
+    for b in raw:
+        if b == 0x66:
+            return True
+        if b not in _PREFIX_BYTES:
+            return False
+    return False
+
+
 def _is_far_call_mem(insn):
     """`call far [mem]` (FF /3). Capstone names it `call ptr [mem]`, with
     the same operand as the near FF /2, so only the ModRM reg field tells
@@ -1954,8 +1965,12 @@ class Lifter:
                     out.append(f"/* bt {insn.op_str}: no CF consumer */")
                 return out
 
-            index = (f"({_fmt_imm(bit.imm)})" if bit.type == "imm"
-                     else f"({_fmt_operand_read(bit)} & 31)")
+            # The offset is taken modulo the operand width, for an immediate
+            # as for a register: `bt eax, 0x28` tests bit 8 (an unmasked
+            # shift by 40 is undefined C), `bts ax, cx` sets bit cx & 15.
+            top = (_operand_width(dst) or 4) * 8 - 1
+            index = (f"({_fmt_imm(bit.imm & top)})" if bit.type == "imm"
+                     else f"({_fmt_operand_read(bit)} & {top})")
             value = _fmt_operand_read(dst)
             out = []
             if self.needs_cf:
@@ -2562,9 +2577,14 @@ class Lifter:
         if len(ops) < 1:
             return ["/* push: no operand */"]
         val = _fmt_operand_read(ops[0])
-        if _is_word_operand(ops[0]):
-            # A 66-prefixed push moves esp by 2, not 4.
-            return [f"esp -= 2; MEM16(esp) = (uint16_t)({val});"]
+        # A 66-prefixed push moves esp by 2, not 4. An immediate is never a
+        # "word operand", so `pushw imm` (66 6A / 66 68) is told apart by its
+        # prefix. The value is read before esp moves, as PUSH32 does: x86
+        # computes `push word ptr [esp+4]`'s source address from the old esp.
+        if _is_word_operand(ops[0]) or (ops[0].type == "imm"
+                                        and _has_operand_size_prefix(insn)):
+            return [f"{{ uint16_t _pv = (uint16_t)({val}); esp -= 2;"
+                    " MEM16(esp) = _pv; }"]
         return [f"PUSH32(esp, {val});"]
 
     def _lift_pop(self, insn, ops):
