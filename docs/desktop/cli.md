@@ -51,7 +51,7 @@ The platform's user data folder, `$XRECOMP_HOME` first:
 | Host | Folder |
 |---|---|
 | Linux and other Unix | `$XDG_DATA_HOME/xrecomp` (`~/.local/share/xrecomp`), where `gba_play` / `ps1_play` / `n64_play` and `python -m tools.prepare game.gba` already keep saves and packs |
-| macOS | `~/Library/Application Support/xboxrecomp`: the XRecomp app's ([launcher.md « Storage »](../macos/launcher.md#storage)); the app and the command line share titles, settings and saves |
+| macOS | `~/Library/Application Support/xboxrecomp`: the XRecomp app's ([launcher.md « Storage »](../macos/launcher.md#storage)); the app and the command line share titles, settings and saves, and each keeps the keys the other writes in `settings.json` and a title's `state.json` (the app has no use for `title` and `console` but saves them back) |
 | Windows | `%APPDATA%\xrecomp` |
 
 ```

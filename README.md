@@ -168,7 +168,7 @@ There's room for you whether you like compilers, GPUs, Android or just testing g
 | **Trying games** | Run a game you own, report how far it gets (device, version from About, logcat). [Candidate games](docs/technical/candidate-games.md) lists likely next targets |
 | **Compilers & reverse engineering** | The lifters in `tools/` and `consoles/*/tools/`, indirect calls, function discovery. Start with [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
 | **Graphics** | NV2A / D3D8 on GLES, N64 upscaling, PS1 GPU. [GPU back end](docs/technical/gpu-backend.md) |
-| **Android / macOS apps** | Editable touch layouts, CHD support, launcher polish. [App shell](docs/android/app-shell.md), [Mac launcher](docs/macos/launcher.md) |
+| **Android / macOS apps** | Editable touch layouts, launcher polish. [App shell](docs/android/app-shell.md), [Mac launcher](docs/macos/launcher.md) |
 | **Emulation accuracy** | Save states for Xbox and N64, kernel and APU behaviour, test ROM coverage |
 | **Windows** | Bring the Windows host up to par with Linux and macOS |
 
