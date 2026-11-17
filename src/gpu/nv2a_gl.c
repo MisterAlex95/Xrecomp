@@ -1085,15 +1085,12 @@ static uint8_t *scratch(size_t n)
     return s_scratch;
 }
 
-/* Byte offset of pixel (x, y) in the guest surface. */
-static size_t rt_offset(const GlRT *r, uint32_t x, uint32_t y)
+/* Byte offset of pixel (x, y) in the guest surface; mx, my: the swizzle
+ * masks of a swizzled target (xbox_swizzle_masks, once per surface). */
+static size_t rt_px_off(const GlRT *r, uint32_t x, uint32_t y, uint32_t mx, uint32_t my)
 {
-    if (r->swz) {
-        uint32_t mx, my;
-        xbox_swizzle_masks(r->w, r->h, &mx, &my);
-        return (size_t)(swizzle_deposit(x, mx) | swizzle_deposit(y, my)) * r->bpp;
-    }
-    return (size_t)y * r->pitch + (size_t)x * r->bpp;
+    return r->swz ? (size_t)(swizzle_deposit(x, mx) | swizzle_deposit(y, my)) * r->bpp
+                  : (size_t)y * r->pitch + (size_t)x * r->bpp;
 }
 
 /* Real (GL) size of a logical length on target r. */
@@ -1188,13 +1185,16 @@ static void rt_snap_take(GlRT *r);
 static void rt_upload(GlRT *r)
 {
     uint8_t *buf = scratch((size_t)r->w * r->h * 4), *mem = guest(r->va);
-    uint32_t x, y;
+    uint32_t x, y, mx = 0, my = 0;
 
     if (!buf)
         return;
+    if (r->swz)
+        xbox_swizzle_masks(r->w, r->h, &mx, &my);
     for (y = 0; y < r->h; y++)
         for (x = 0; x < r->w; x++)
-            rt_guest_rgba(r, mem + rt_offset(r, x, y), buf + ((size_t)y * r->w + x) * 4);
+            rt_guest_rgba(r, mem + rt_px_off(r, x, y, mx, my),
+                          buf + ((size_t)y * r->w + x) * 4);
     rt_snap_take(r);
     if (r->sc != 1.0f) {
         rt_resolve_alloc(r);
@@ -1386,12 +1386,6 @@ static void snap_refresh(uint32_t va, uint32_t len)
 /* Past this many runs of changed pixels the bounding box goes up whole:
  * inside it the guest bytes win, also where the GPU drew since. */
 #define NV_GL_CPU_MAX_RUNS 4096
-
-static size_t rt_px_off(const GlRT *r, uint32_t x, uint32_t y, uint32_t mx, uint32_t my)
-{
-    return r->swz ? (size_t)(swizzle_deposit(x, mx) | swizzle_deposit(y, my)) * r->bpp
-                  : (size_t)y * r->pitch + (size_t)x * r->bpp;
-}
 
 /* The pixels of target r whose guest bytes differ from r->snap, into the GL
  * texture: run by run along each row (a movie frame is one run a row), at
@@ -4871,7 +4865,6 @@ static void gl_flip(void)
                             " %u target rescales, %u depth re-creations\n",
                     (double)s_scale_cfg.scale, s_sst.resolves, s_sst.seed_blits, s_sst.rescales,
                     s_sst.depth_recreates);
-        memset(&s_st, 0, sizeof s_st);
         memset(&s_sst, 0, sizeof s_sst);
     }
     gl_check_frame();
