@@ -28,12 +28,56 @@ def _scan(mnemonic, dst="eax", src="ecx", size=4):
 
 def test_bsf_scans_from_the_low_bit():
     body = "".join(Lifter().lift_instruction(_scan("bsf")))
-    assert "_bs_i = 0" in body and "_bs_i++" in body
+    assert "eax = RECOMP_BSF32(_bs_v)" in body and "for (" not in body
 
 
 def test_bsr_scans_from_the_high_bit():
     body = "".join(Lifter().lift_instruction(_scan("bsr")))
-    assert "_bs_i = 31" in body and "_bs_i--" in body
+    assert "eax = RECOMP_BSR32(_bs_v)" in body and "for (" not in body
+
+
+def test_scans_compiled_at_O2_against_the_runtime_header():
+    """Real bytes, translated, built at -O2 against recomp_types.h: every
+    single bit, a few mixed values, the 16-bit forms, and the zero source
+    (destination kept, ZF set)."""
+    import pytest
+    pytest.importorskip("capstone")
+    from tools.recomp.lift_fixture import build_and_run, gnu_cc, translate
+    if not gnu_cc():
+        pytest.skip("no GNU C compiler available")
+    functions = [
+        translate("0fbcc1 0f94c3 c3", name="bsf32"),     # bsf eax, ecx ; sete bl
+        translate("0fbdc1 0f94c3 c3", name="bsr32"),     # bsr eax, ecx ; sete bl
+        translate("660fbcc1 c3", name="bsf16"),          # bsf ax, cx
+        translate("660fbdc1 c3", name="bsr16"),          # bsr ax, cx
+    ]
+    body = r"""
+    int bad = 0; unsigned i;
+    static volatile uint32_t mixed[] = {0x80000001u, 0x00F00F00u, 0xFFFFFFFFu, 0x00010000u};
+    static const uint32_t lo[] = {0, 8, 0, 16}, hi[] = {31, 23, 31, 16};
+    for (i = 0; i < 32; i++) {
+        guest_reset(); ecx = 1u << i; eax = 99; ebx = 7; bsf32();
+        if (eax != i || (ebx & 0xFF) != 0) { printf("bsf bit %u -> %u\n", i, eax); bad++; }
+        guest_reset(); ecx = 1u << i; eax = 99; bsr32();
+        if (eax != i) { printf("bsr bit %u -> %u\n", i, eax); bad++; }
+    }
+    for (i = 0; i < 4; i++) {
+        guest_reset(); ecx = mixed[i]; bsf32();
+        if (eax != lo[i]) { printf("bsf %08X -> %u\n", mixed[i], eax); bad++; }
+        guest_reset(); ecx = mixed[i]; bsr32();
+        if (eax != hi[i]) { printf("bsr %08X -> %u\n", mixed[i], eax); bad++; }
+    }
+    guest_reset(); ecx = 0; eax = 0x1234u; ebx = 0; bsf32();
+    if (eax != 0x1234u || (ebx & 0xFF) != 1) { printf("bsf 0 -> %08X zf %u\n", eax, ebx & 0xFF); bad++; }
+    guest_reset(); ecx = 0; eax = 0x1234u; ebx = 0; bsr32();
+    if (eax != 0x1234u || (ebx & 0xFF) != 1) { printf("bsr 0 -> %08X zf %u\n", eax, ebx & 0xFF); bad++; }
+    guest_reset(); ecx = 0xFFFF0300u; eax = 0xAAAA0000u; bsf16();
+    if (eax != 0xAAAA0008u) { printf("bsf16 -> %08X\n", eax); bad++; }
+    guest_reset(); ecx = 0xFFFF0300u; eax = 0xAAAA0000u; bsr16();
+    if (eax != 0xAAAA0009u) { printf("bsr16 -> %08X\n", eax); bad++; }
+    return bad != 0;"""
+    rc, out = build_and_run(functions, body)
+    assert rc == 0, out
 
 
 def test_zero_source_leaves_the_destination_untouched():

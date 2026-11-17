@@ -2049,6 +2049,23 @@ static inline uint16_t BSWAP16(uint16_t v) {
     return (uint16_t)((v >> 8) | (v << 8));
 }
 
+/* bsf/bsr: the index of the lowest / highest set bit of a NON-ZERO value
+ * (the lift tests for zero first: x86 then leaves the destination alone).
+ * One host instruction each, where a C loop over the 32 bits stayed a loop
+ * at -O2; RtlAllocateHeap's free-list bitmap is the hot user. */
+#if defined(_MSC_VER)
+#include <intrin.h>
+static inline uint32_t RECOMP_BSF32(uint32_t v) {
+    unsigned long i; _BitScanForward(&i, v); return (uint32_t)i;
+}
+static inline uint32_t RECOMP_BSR32(uint32_t v) {
+    unsigned long i; _BitScanReverse(&i, v); return (uint32_t)i;
+}
+#else
+#define RECOMP_BSF32(v) ((uint32_t)__builtin_ctz((uint32_t)(v)))
+#define RECOMP_BSR32(v) ((uint32_t)(31 - __builtin_clz((uint32_t)(v))))
+#endif
+
 /* ================================================================
  * Indirect call dispatch
  *

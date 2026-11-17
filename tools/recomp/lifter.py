@@ -2267,21 +2267,21 @@ class Lifter:
         if m in ("bsf", "bsr"):
             if len(ops) < 2:
                 return self._unimplemented(insn, m)
+            # The index comes from RECOMP_BSF32/RECOMP_BSR32 (recomp_types.h:
+            # ctz/clz, _BitScanForward/Reverse on MSVC), which compile to the
+            # host's bit-scan instruction; a 32-step C loop stayed a loop at
+            # -O2. A narrow source reads zero-extended, so the 32-bit scan
+            # gives the 16-bit answer too, and the zero case never reaches
+            # the builtin (undefined there).
             dst = _fmt_operand_read(ops[0])
             src = _fmt_operand_read(ops[1])
-            width = (_operand_width(ops[1]) or 4) * 8
-            if m == "bsr":
-                init, cond, step = f"{width - 1}", "_bs_i >= 0", "_bs_i--"
-            else:
-                init, cond, step = "0", f"_bs_i < {width}", "_bs_i++"
+            scan = "RECOMP_BSR32" if m == "bsr" else "RECOMP_BSF32"
             return [
-                f"{{ uint32_t _bs_v = (uint32_t)({src}); int _bs_i;",
+                f"{{ uint32_t _bs_v = (uint32_t)({src});",
                 f"  _fa = _bs_v; _fb = 0; _fas = (int32_t)_fa; _fbs = 0;"
                 f" /* {m}: ZF = src == 0 */",
                 "  if (_bs_v) {",
-                f"    for (_bs_i = {init}; {cond}; {step})",
-                "      if (_bs_v & (1u << _bs_i)) break;",
-                "    " + _fmt_operand_write(ops[0], "(uint32_t)_bs_i") + ";",
+                "    " + _fmt_operand_write(ops[0], f"{scan}(_bs_v)") + ";",
                 f"  }} else {{ (void)({dst}); }} }}",
             ]
 
