@@ -71,6 +71,20 @@ final class Pack {
      * file, or nothing new. The runtime only ever adds to the file (sorted, no repeats).
      */
     static int newlyDiscovered(File filesDir, String libraryKey) {
+        return newlyDiscovered(filesDir, libraryKey, true);
+    }
+
+    /**
+     * {@link #newlyDiscovered(File, String)} without a long read, for the UI thread (AND-3: Home is built again at
+     * every refresh): the count of a discovered file seen before with the same length and modification time, or of a
+     * small one; -1 when a large file would have to be read (count it on a worker with newlyDiscovered, then build
+     * again).
+     */
+    static int newlyDiscoveredNow(File filesDir, String libraryKey) {
+        return newlyDiscovered(filesDir, libraryKey, false);
+    }
+
+    private static int newlyDiscovered(File filesDir, String libraryKey, boolean mayRead) {
         File json = new File(packDir(filesDir, libraryKey), JSON);
         int used;
         try {
@@ -78,7 +92,38 @@ final class Pack {
         } catch (IOException | JSONException e) {
             return 0;
         }
-        return Math.max(0, countAddresses(discoveredFile(filesDir, libraryKey)) - used);
+        int n = countAddressesCached(discoveredFile(filesDir, libraryKey), mayRead);
+        return n < 0 ? -1 : Math.max(0, n - used);
+    }
+
+    /** A discovered file read at once on the UI thread: up to 256 KB (a GBA's, a short N64 history). */
+    static final long COUNT_NOW_MAX = 256 << 10;
+    /** path -> { length, lastModified, records } of the discovered files counted in this process. */
+    private static final Map<String, long[]> COUNTS = new java.util.HashMap<>();
+    static int countReadsForTest;
+
+    /**
+     * countAddresses, remembered by (length, lastModified): the runtime only appends, so a file that kept both is
+     * not read again. -1 when it is not known, larger than COUNT_NOW_MAX, and mayRead is false.
+     */
+    static int countAddressesCached(File f, boolean mayRead) {
+        long len = f.length(), mod = f.lastModified();
+        if (len == 0 && !f.isFile())
+            return 0;
+        String k = f.getAbsolutePath();
+        synchronized (COUNTS) {
+            long[] c = COUNTS.get(k);
+            if (c != null && c[0] == len && c[1] == mod)
+                return (int)c[2];
+        }
+        if (!mayRead && len > COUNT_NOW_MAX)
+            return -1;
+        int n = countAddresses(f);
+        synchronized (COUNTS) {
+            countReadsForTest++;
+            COUNTS.put(k, new long[] { len, mod, n });
+        }
+        return n;
     }
 
     /**

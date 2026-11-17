@@ -286,6 +286,44 @@ public class PackTest {
         assertEquals(20000, Pack.countAddresses(disc));
     }
 
+    /**
+     * AND-3: Home asks newlyDiscoveredNow at every build. A large discovered file is not read on that path (-1: a
+     * worker counts it); once counted, the same length and modification time are not read again; a change recounts.
+     */
+    @Test
+    public void discoveredCountIsCachedAndLargeFilesWaitForAWorker() throws Exception {
+        File files = files();
+        String key = "n64-NSME-0123ABCD";
+        File dir = new File(new File(files, "packs"), key);
+        TestSupport.write(new File(dir, "pack.json"), new JSONObject().put("discovered", 1).toString());
+        File disc = Pack.discoveredFile(files, key);
+        disc.getParentFile().mkdirs();
+        StringBuilder sb = new StringBuilder();
+        while (sb.length() <= Pack.COUNT_NOW_MAX)
+            sb.append(String.format(java.util.Locale.ROOT, "%08X %0200d\n", 0x80000000L + sb.length(), 0));
+        TestSupport.write(disc, sb.toString());
+        int records = sb.toString().split("\n").length;
+        assertTrue(disc.setLastModified(1_000_000L));
+
+        int reads = Pack.countReadsForTest;
+        assertEquals("large and never counted: left to a worker", -1, Pack.newlyDiscoveredNow(files, key));
+        assertEquals(reads, Pack.countReadsForTest);
+        assertEquals(records - 1, Pack.newlyDiscovered(files, key));                 // the worker
+        assertEquals(reads + 1, Pack.countReadsForTest);
+        assertEquals(records - 1, Pack.newlyDiscoveredNow(files, key));              // cached: not read again
+        assertEquals(records - 1, Pack.newlyDiscovered(files, key));
+        assertEquals(reads + 1, Pack.countReadsForTest);
+
+        TestSupport.write(disc, sb + "80FFFFF0 0\n");                                // the runtime appended
+        assertTrue(disc.setLastModified(2_000_000L));
+        assertEquals(-1, Pack.newlyDiscoveredNow(files, key));
+        assertEquals(records, Pack.newlyDiscovered(files, key));
+        assertEquals(reads + 2, Pack.countReadsForTest);
+
+        TestSupport.write(disc, "80000000\n80000004\n80000008\n");                   // small: counted at once
+        assertEquals(2, Pack.newlyDiscoveredNow(files, key));
+    }
+
     @Test
     public void readsTheToolkitDigestOfAConsolePack() throws Exception {
         File files = tmp.newFolder("files");

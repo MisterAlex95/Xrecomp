@@ -4943,13 +4943,37 @@ public class LauncherActivity extends Activity {
      * first (always: the interpreter needs no pack) and the Prepare action beside it (not without the
      * toolchain, which only an N64 Home is opened without: Play and its pak then), the N64's pak last.
      */
+    /** The ROM Homes whose discovered file a worker counts now (UI thread). */
+    private final java.util.Set<String> discoveredCounting = new java.util.HashSet<>();
+
+    /** Counts tid's discovered file (Pack caches it), then builds its Home again if it still shows. */
+    private void countDiscoveredLater(String tid) {
+        if (!discoveredCounting.add(tid))
+            return;
+        File files = getFilesDir();
+        new Thread(() -> {
+            Pack.newlyDiscovered(files, tid);
+            runOnUiThread(() -> {
+                discoveredCounting.remove(tid);
+                if (isFinishing() || isDestroyed())
+                    return;
+                if (screen == Screen.ROM_HOME && romEntry != null && tid.equals(romEntry.tid))
+                    refreshKeepingFocus();
+            });
+        }, "discovered-count").start();
+    }
+
     private void buildRomHome() {
         LibraryScreen.Entry e = romEntry();
         Prep p = romPrep(e);
         romPrepShown = p;
         PrepareProtocol.Status ps = e.facts.prepare;
         boolean prepares = romPrepares(e) && p != Prep.OFF;   // OFF: no toolchain
-        int found = p == Prep.PLAYABLE ? Pack.newlyDiscovered(getFilesDir(), e.tid) : 0;
+        int found = p == Prep.PLAYABLE ? Pack.newlyDiscoveredNow(getFilesDir(), e.tid) : 0;
+        if (found < 0) {   // a large discovered file not counted yet: on a worker, Home built again after (AND-3)
+            found = 0;
+            countDiscoveredLater(e.tid);
+        }
         // As an Xbox title's Home (XBA-127): a pack lifted by another toolkit than this APK's still plays, but misses
         // the lifter's fixes since, so Prepare again is offered.
         boolean older = prepares && p == Prep.PLAYABLE
