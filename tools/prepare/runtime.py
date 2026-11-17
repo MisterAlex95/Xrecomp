@@ -54,6 +54,16 @@ PROBE = "xba_runtime_probe"
 PLAYERS = ("gba_play", "ps1_play", "n64_play")
 
 
+def cmake_parallel(jobs=None, env=None):
+    """`cmake --build`'s parallel arguments: --parallel <jobs> when given; none when CMAKE_BUILD_PARALLEL_LEVEL is set
+    (CMake reads it itself, and a bare --parallel would override it with the build tool's default: Ninja's is the
+    CPU count + 2); else a bare --parallel. The CI caps the e2e builds with that variable (tools/docker/linux.Dockerfile)."""
+    if jobs:
+        return ["--parallel", "%d" % jobs]
+    env = os.environ if env is None else env
+    return [] if env.get("CMAKE_BUILD_PARALLEL_LEVEL") else ["--parallel"]
+
+
 def host_id(system=None, machine=None, env=None):
     """'linux-x86_64', 'linux-arm64', 'macos-arm64', 'windows-x86_64', ...: the
     runtime folder for this host (or the one given). $XBA_HOST names another
@@ -282,8 +292,7 @@ def build(toolkit=ROOT, out=None, build_dir=None, jobs=None, extra=(), players=T
                 if t["name"] in PLAYERS and t["name"] not in play:
                     with open(os.path.join(reply, t["jsonFile"])) as f:
                         play[t["name"]] = _artifact(json.load(f), build_dir)
-        cmd = ["cmake", "--build", build_dir, "--config", config.get("name") or "Release", "--parallel"]
-        cmd += ["%d" % jobs] if jobs else []
+        cmd = ["cmake", "--build", build_dir, "--config", config.get("name") or "Release"] + cmake_parallel(jobs)
         if deps or play:
             cmd += ["--target"] + deps + sorted(play)
         _run(cmd, log)

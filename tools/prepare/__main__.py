@@ -912,7 +912,7 @@ def desktop(a):
         run(["cmake", "-S", proj, "-B", build, "-DCMAKE_BUILD_TYPE=Release", "-DXBOXRECOMP_DIR=" + ROOT]
             + ["-D%s=%s" % kv for kv in work_files.items()] + gen_args, log)
         progress(5, "compiling")
-        t = run(["cmake", "--build", build, "--parallel"], log, on_line=BuildProgress() if _REP else None)
+        t = run(["cmake", "--build", build] + desktop_build.rt.cmake_parallel(), log, on_line=BuildProgress() if _REP else None)
         note("built in %.0f s" % t, 90)
         exe = os.path.join(build, desktop_build.exe_name(name, desktop_build.rt.host_id()))
     if stamp.get("built") is False or stamp.get("runtime_sha256") != toolkit.runtime_digest():

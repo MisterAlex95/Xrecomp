@@ -252,6 +252,13 @@ def test_xba_host_names_a_cross_build_host():
     assert rt.host_id(env={}) == rt.host_id("Linux", "x86_64") or sys.platform != "linux"
 
 
+def test_cmake_parallel_leaves_cmake_build_parallel_level_alone():
+    assert rt.cmake_parallel(3, env={"CMAKE_BUILD_PARALLEL_LEVEL": "1"}) == ["--parallel", "3"]
+    assert rt.cmake_parallel(env={"CMAKE_BUILD_PARALLEL_LEVEL": "1"}) == []     # CMake reads it
+    assert rt.cmake_parallel(env={"CMAKE_BUILD_PARALLEL_LEVEL": ""}) == ["--parallel"]
+    assert rt.cmake_parallel(env={}) == ["--parallel"]
+
+
 def test_release_configuration_of_a_multi_config_generator():
     assert rt.pick_configuration({"configurations": [{"name": "Debug"}, {"name": "Release"}]})["name"] == "Release"
     assert rt.pick_configuration({"configurations": [{"name": ""}]})["name"] == ""
