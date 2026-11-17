@@ -560,6 +560,33 @@ int main(int argc, char **argv)
         }
     }
 
+    /* 9. NtQueryVirtualMemory ends at the top of user space, so a scanner
+     *    walking region by region from 0 stops instead of wrapping round
+     *    the 4 GB space for ever. */
+    {
+        uint32_t mbi[7], st, a = 0, n = 0, last = 0;
+
+        st = nt_query(0x80000000u, mbi);
+        snprintf(d, sizeof d, "status 0x%08X", st);
+        check(st == 0xC000000Du, "query above user space is STATUS_INVALID_PARAMETER", d);
+        st = nt_query(0xFFFFF000u, mbi);
+        snprintf(d, sizeof d, "status 0x%08X", st);
+        check(st == 0xC000000Du, "query at the top page is STATUS_INVALID_PARAMETER", d);
+        for (;;) {
+            st = nt_query(a, mbi);
+            if (st >= 0x80000000u || !mbi[3] || n > 4000000u)
+                break;
+            last = a;
+            n++;
+            if ((uint64_t)a + mbi[3] > 0xFFFFFFFFu)
+                break;
+            a = mbi[0] + mbi[3];
+        }
+        snprintf(d, sizeof d, "%u queries, last 0x%08X, status 0x%08X", n, last, st);
+        check(st == 0xC000000Du && last < GUEST_VMEM_TOP,
+              "a region walk from 0 ends at the top of user space", d);
+    }
+
     /* 8. A 608 MB reservation without a map size (XBA-103). */
     if (lazy_off) {
         const uint32_t want = 608u << 20;

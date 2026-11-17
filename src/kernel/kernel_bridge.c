@@ -1752,6 +1752,17 @@ static void bridge_NtQueryVirtualMemory(void)
         }
     }
 
+    /* Past the highest VAD address there is no user memory to describe, and
+     * the console says so: STATUS_INVALID_PARAMETER. Scanners rely on it to
+     * stop -- `for (a = 0; NtQueryVirtualMemory(a, &mbi) >= 0; a += size)`.
+     * Answering MEM_FREE up there instead kept such a loop wrapping round the
+     * 4 GB space for ever (Yu-Gi-Oh! The Dawn of Destiny, black screen and
+     * millions of queries a second). */
+    if (base_va >= GUEST_VMEM_TOP) {
+        g_eax = 0xC000000Du;               /* STATUS_INVALID_PARAMETER */
+        return;
+    }
+
     BRIDGE_MEM32(info_va + 0x00) = page_base;          /* BaseAddress */
     BRIDGE_MEM32(info_va + 0x04) = page_base;          /* AllocationBase */
     BRIDGE_MEM32(info_va + 0x08) = 0x04;               /* PAGE_READWRITE */
@@ -1777,8 +1788,6 @@ static void bridge_NtQueryVirtualMemory(void)
 
             if (page_base < g_xbox_code_lo)
                 end = g_xbox_code_lo;
-            else if (page_base >= GUEST_VMEM_TOP)
-                end = 0xFFFFFFFFu;
             if (end > page_base)
                 region = end - page_base;
         }
