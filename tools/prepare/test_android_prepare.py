@@ -906,3 +906,117 @@ def test_procs_start_kills_a_child_a_cancel_interrupts(monkeypatch):
     with pytest.raises(cc.Cancelled):
         procs.start([sys.executable, "-c", "import time; time.sleep(60)"])
     assert started[0].wait(timeout=10) != 0
+
+
+# ── The key cache (keys.json): a Prepare with nothing to compile reads nothing ──
+
+class _TouchTc:
+    """A toolchain whose "compile" only creates the object."""
+
+    def __init__(self):
+        self.procs = cc.Procs()
+
+    def compiler_id(self):
+        return "clang version 19 (test)"
+
+    def compile_args(self, flags, src, out):
+        return [sys.executable, "-c", "import sys; open(sys.argv[1], 'w').close()", out]
+
+
+def _key_project(tmp_path):
+    """A title project with a generated chunk, main.c and a header, all
+    dated a minute ago (older than keys.json's racy window)."""
+    proj = tmp_path / "proj"
+    gen = proj / "src" / "recomp" / "gen"
+    gen.mkdir(parents=True)
+    (gen / "recomp_funcs.h").write_text("void sub_1(void);\n")
+    (gen / "recomp_0000.c").write_text('#include "recomp_funcs.h"\nvoid sub_1(void) {}\n')
+    (proj / "src" / "main.c").write_text("int main(void) { return 0; }\n")
+    _age(proj)
+    flags = ["-O2", "-I" + str(proj / "src"), "-I" + str(gen)]
+    return proj, flags
+
+
+def _age(top, seconds=60):
+    t = __import__("time").time() - seconds
+    for d, _, files in os.walk(str(top)):
+        for fn in files:
+            os.utime(os.path.join(d, fn), (t, t))
+
+
+def _compile(proj, flags, obj):
+    stats = {}
+    objs, n = cc.compile_all(cc.collect_sources(str(proj)), flags, _TouchTc(), str(obj), 2, stats=stats)
+    return objs, n, stats["hashed"]
+
+
+def test_keys_cache_skips_the_rehash_and_keeps_the_keys(tmp_path):
+    proj, flags = _key_project(tmp_path)
+    obj = tmp_path / "obj"
+    objs, n, hashed = _compile(proj, flags, obj)
+    assert (n, hashed) == (2, 2) and (obj / cc.KEYS_FILE).is_file()
+    # Nothing changed: nothing read, nothing compiled, the same objects.
+    assert _compile(proj, flags, obj) == (objs, 0, 0)
+    # The keys are the ones computed from the bytes: without keys.json, the same objects.
+    os.remove(str(obj / cc.KEYS_FILE))
+    assert _compile(proj, flags, obj) == (objs, 0, 2)
+    # Other flags: every key again.
+    assert _compile(proj, flags + ["-DX"], obj)[1:] == (2, 2)
+    # A stale or broken keys.json is not trusted.
+    (obj / cc.KEYS_FILE).write_text("{not json")
+    assert _compile(proj, flags, obj) == (objs, 0, 2)
+    (obj / cc.KEYS_FILE).write_text('{"v": 0, "files": {}}')
+    assert _compile(proj, flags, obj) == (objs, 0, 2)
+
+
+def test_keys_cache_sees_a_change_that_keeps_size_and_mtime(tmp_path):
+    """A source rewritten with the same size and its old mtime put back (cp -p,
+    an unzip) is still read again: ctime and the inode are in the stat."""
+    proj, flags = _key_project(tmp_path)
+    obj = tmp_path / "obj"
+    objs, _, _ = _compile(proj, flags, obj)
+    main = proj / "src" / "main.c"
+    st = os.stat(str(main))
+    main.write_text("int main(void) { return 1; }\n")
+    os.utime(str(main), ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert os.stat(str(main)).st_size == st.st_size
+    objs2, n, hashed = _compile(proj, flags, obj)
+    assert (n, hashed) == (1, 1) and objs2[0] != objs[0] and objs2[1] == objs[1]      # main.c, the chunk
+
+
+@pytest.mark.skipif(os.name == "nt", reason="ctime is the creation time on Windows")
+def test_keys_cache_sees_a_header_change(tmp_path):
+    proj, flags = _key_project(tmp_path)
+    obj = tmp_path / "obj"
+    objs, _, _ = _compile(proj, flags, obj)
+    h = proj / "src" / "recomp" / "gen" / "recomp_funcs.h"
+    st = os.stat(str(h))
+    h.write_text("void sub_2(void);\n")             # same size, mtime put back
+    os.utime(str(h), ns=(st.st_atime_ns, st.st_mtime_ns))
+    _age(proj)
+    objs2, n, hashed = _compile(proj, flags, obj)
+    # Every key computed again; main.c includes the whole header, the chunk not its declarations.
+    assert hashed == 2 and n == 1 and objs2[0] != objs[0] and objs2[1] == objs[1]
+
+
+def test_keys_cache_does_not_remember_a_racy_file(tmp_path):
+    """A file written just now could be written again within the same
+    timestamp step and size: keys.json leaves it out, it is read next time."""
+    proj, flags = _key_project(tmp_path)
+    obj = tmp_path / "obj"
+    _compile(proj, flags, obj)
+    (proj / "src" / "main.c").write_text("int main(void) { return 2; }\n")     # now
+    assert _compile(proj, flags, obj)[1:] == (1, 1)
+    assert _compile(proj, flags, obj)[1:] == (0, 1)       # still racy: read again
+    _age(proj)
+    assert _compile(proj, flags, obj)[1:] == (0, 2)       # aged (utime moves ctime too): read once more
+    assert _compile(proj, flags, obj)[1:] == (0, 0)
+
+
+def test_prune_keeps_keys_json(tmp_path):
+    proj, flags = _key_project(tmp_path)
+    obj = tmp_path / "obj"
+    objs, _, _ = _compile(proj, flags, obj)
+    (obj / "old.o").write_bytes(b"x")
+    cc.prune(str(obj), objs)
+    assert sorted(os.listdir(str(obj))) == sorted([os.path.basename(o) for o in objs] + [cc.KEYS_FILE])
