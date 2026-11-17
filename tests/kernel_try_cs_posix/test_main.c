@@ -56,6 +56,17 @@ static void *enter_once(void *arg)
     return NULL;
 }
 
+static RTL_CRITICAL_SECTION *g_target;
+
+static void *try_target(void *arg)
+{
+    (void)arg;
+    g_try_result = xbox_RtlTryEnterCriticalSection(g_target) ? 1 : 0;
+    if (g_try_result)
+        xbox_RtlLeaveCriticalSection(g_target);
+    return NULL;
+}
+
 static int run(void *(*fn)(void *))
 {
     pthread_t t;
@@ -98,6 +109,50 @@ int main(void)
     xbox_RtlLeaveCriticalSection(&g_cs);
     run(try_once);
     check(g_try_result == 1, "4c. the second Leave frees it");
+
+    /* KRN-6: a lock initialised again while held starts free, and the
+     * shadow table does not run out. */
+    printf("re-initialised and many locks\n");
+    {
+        static RTL_CRITICAL_SECTION reused;
+        memset(&reused, 0, sizeof reused);
+        xbox_RtlInitializeCriticalSection(&reused);
+        xbox_RtlEnterCriticalSection(&reused);           /* held, never left */
+        xbox_RtlInitializeCriticalSection(&reused);      /* a new object there */
+        g_target = &reused;
+        run(try_target);
+        check(g_try_result == 1, "5a. initialised again while held: another thread gets it");
+        xbox_RtlLeaveCriticalSection(&reused);           /* the old holder's Leave */
+        run(try_target);
+        check(g_try_result == 1, "5b. the old holder's Leave does not break the new lock");
+        check(xbox_RtlTryEnterCriticalSection(&reused), "5c. and this thread can take it");
+        g_target = &reused;
+        run(try_target);
+        check(g_try_result == 0, "5d. which then excludes the other thread");
+        xbox_RtlLeaveCriticalSection(&reused);
+    }
+    {
+        enum { N = 6000 };
+        static RTL_CRITICAL_SECTION many[N];
+        int i;
+        for (i = 0; i < N; i++) {
+            xbox_RtlInitializeCriticalSection(&many[i]);
+            xbox_RtlEnterCriticalSection(&many[i]);
+            xbox_RtlLeaveCriticalSection(&many[i]);
+        }
+        xbox_RtlEnterCriticalSection(&many[N - 1]);
+        g_target = &many[N - 1];
+        run(try_target);
+        check(g_try_result == 0, "6a. after 6000 distinct locks the last one still excludes");
+        xbox_RtlLeaveCriticalSection(&many[N - 1]);
+        run(try_target);
+        check(g_try_result == 1, "6b. and is free after its Leave");
+        xbox_RtlEnterCriticalSection(&many[0]);
+        g_target = &many[0];
+        run(try_target);
+        check(g_try_result == 0, "6c. the first one still excludes too");
+        xbox_RtlLeaveCriticalSection(&many[0]);
+    }
 
     printf("%s\n", failures ? "FAILED" : "all passed");
     return failures ? 1 : 0;
