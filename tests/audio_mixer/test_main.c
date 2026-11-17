@@ -85,10 +85,62 @@ static void check_playback(WORD channels)
     buf->lpVtbl->Release(buf);
 }
 
+static IDirectSoundBuffer8 *create_only(DWORD bytes)
+{
+    IDirectSound8 *ds;
+    IDirectSoundBuffer8 *buf;
+    XBOX_WAVEFORMATEX format = {0};
+    format.nChannels = 1;
+    format.nSamplesPerSec = 48000;
+    format.wBitsPerSample = 16;
+    DSBUFFERDESC desc = {0};
+    desc.lpwfxFormat = &format;
+    desc.dwBufferBytes = bytes;
+    assert(xbox_DirectSoundCreate(NULL, &ds, NULL) == S_OK);
+    assert(ds->lpVtbl->CreateSoundBuffer(ds, &desc, &buf, NULL) == S_OK);
+    return buf;
+}
+
+/* Buffers created before any data (the usual order) each get their own
+ * voice, and a buffer filled through Lock / Unlock plays. */
+static void check_independent_buffers(void)
+{
+    const int16_t pa[] = {111, 111}, pb[] = {222, 222};
+    IDirectSoundBuffer8 *a = create_only(0), *b = create_only(0);
+    assert(a->lpVtbl->SetBufferData(a, pa, sizeof pa) == S_OK);
+    assert(b->lpVtbl->SetBufferData(b, pb, sizeof pb) == S_OK);
+    assert(a->lpVtbl->Play(a, 0, 0, DSBPLAY_LOOPING) == S_OK);
+    check_state(b, 0, 0);                      /* B is not A's voice */
+    check_sample(111);                         /* A plays its own PCM */
+    b->lpVtbl->Release(b);                     /* releasing B leaves A playing */
+    check_sample(111);
+    assert(a->lpVtbl->Stop(a) == S_OK);
+    a->lpVtbl->Release(a);
+    assert(g_mixer_active_count == 0);
+
+    IDirectSoundBuffer8 *l = create_only(4 * sizeof(int16_t)), *other = create_only(0);
+    void *p1 = NULL, *p2 = NULL;
+    DWORD n1 = 0, n2 = 0;
+    assert(l->lpVtbl->Lock(l, 0, 0, &p1, &n1, &p2, &n2, 0) == S_OK);
+    assert(p1 && n1 == 4 * sizeof(int16_t));
+    for (int i = 0; i < 4; i++) ((int16_t *)p1)[i] = (int16_t)(500 + i);
+    assert(l->lpVtbl->Unlock(l, p1, n1, p2, n2) == S_OK);
+    assert(l->lpVtbl->Play(l, 0, 0, 0) == S_OK);
+    check_state(l, 0, DSBSTATUS_PLAYING);
+    check_state(other, 0, 0);
+    check_sample(500);
+    check_sample(501);
+    assert(l->lpVtbl->Stop(l) == S_OK);
+    l->lpVtbl->Release(l);
+    other->lpVtbl->Release(other);
+    assert(g_mixer_active_count == 0);
+}
+
 int main(void)
 {
     check_playback(1);
     check_playback(2);
+    check_independent_buffers();
 
     /* Fractional source frames survive a loop and a Stop/Play boundary. */
     const int16_t pcm[] = {100, 200, 300, 400};

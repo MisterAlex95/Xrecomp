@@ -83,16 +83,9 @@ static HRESULT __stdcall buf_SetBufferData(IDirectSoundBuffer8 *self, const void
     }
 
     /* Update mixer voice with new buffer data */
-    if (buf->mixer_slot >= 0 && buf->bits_per_sample == 16) {
-        APUMixerVoice *v = apu_mixer_get_voice(buf->mixer_slot);
-        if (v) {
-            v->pcm_data = (const int16_t *)buf->buffer_data;
-            v->pcm_bytes = buf->buffer_data ? dwBufferBytes : 0;
-            v->play_offset = 0;
-            v->num_channels = buf->channels;
-            v->sample_rate = buf->frequency;
-        }
-    }
+    if (buf->mixer_slot >= 0 && buf->bits_per_sample == 16)
+        apu_mixer_set_pcm(buf->mixer_slot, (const int16_t *)buf->buffer_data,
+                          dwBufferBytes, buf->channels, buf->frequency);
     return S_OK;
 }
 
@@ -284,10 +277,15 @@ static HRESULT __stdcall ds_CreateSoundBuffer(IDirectSound8 *self, const DSBUFFE
         }
     }
 
-    /* Pre-allocate buffer if size specified */
+    /* Pre-allocate buffer if size specified. The voice plays it from the
+     * start: a title fills it through Lock / Unlock, which write in place,
+     * and never calls SetBufferData (the buffer used to stay silent). */
     if (desc && desc->dwBufferBytes > 0) {
         buf->buffer_data = calloc(1, desc->dwBufferBytes);
-        buf->buffer_size = desc->dwBufferBytes;
+        buf->buffer_size = buf->buffer_data ? desc->dwBufferBytes : 0;
+        if (buf->mixer_slot >= 0 && buf->bits_per_sample == 16 && buf->buffer_data)
+            apu_mixer_set_pcm(buf->mixer_slot, (const int16_t *)buf->buffer_data,
+                              buf->buffer_size, buf->channels, buf->frequency);
     }
 
     static int create_log_count = 0;

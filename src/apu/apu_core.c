@@ -1934,11 +1934,20 @@ int apu_mixer_alloc_voice(void)
 {
     if (!g_mixer_initialized) mixer_init();
     EnterCriticalSection(&g_mixer_cs);
+    /* A slot is taken from its allocation, not from its first PCM: buffers
+     * created before any SetBufferData (or filled through Lock) used to all
+     * get the same free-looking slot. */
     for (int i = 0; i < APU_MIXER_MAX_VOICES; i++) {
-        if (!g_mixer_voices[i].active && !g_mixer_voices[i].pcm_data) {
-            g_mixer_voices[i].volume = 1.0f;
-            g_mixer_voices[i].sample_rate = 44100;
-            g_mixer_voices[i].num_channels = 2;
+        APUMixerVoice *v = &g_mixer_voices[i];
+        if (!v->allocated && !v->active) {
+            v->allocated = 1;
+            v->looping = 0;
+            v->pcm_data = NULL;
+            v->pcm_bytes = 0;
+            v->play_offset = 0;
+            v->volume = 1.0f;
+            v->sample_rate = 44100;
+            v->num_channels = 2;
             LeaveCriticalSection(&g_mixer_cs);
             return i;
         }
@@ -1955,6 +1964,23 @@ void apu_mixer_free_voice(int slot)
     g_mixer_voices[slot].pcm_data = NULL;
     g_mixer_voices[slot].pcm_bytes = 0;
     g_mixer_voices[slot].play_offset = 0;
+    g_mixer_voices[slot].allocated = 0;
+    LeaveCriticalSection(&g_mixer_cs);
+}
+
+void apu_mixer_set_pcm(int slot, const int16_t *pcm, uint32_t bytes,
+                       uint32_t num_channels, uint32_t sample_rate)
+{
+    if (slot < 0 || slot >= APU_MIXER_MAX_VOICES) return;
+    if (!g_mixer_initialized) mixer_init();
+    EnterCriticalSection(&g_mixer_cs);
+    apu_mixer_stop(slot);
+    APUMixerVoice *v = &g_mixer_voices[slot];
+    v->pcm_data = pcm;
+    v->pcm_bytes = pcm ? bytes : 0;
+    v->play_offset = 0;
+    v->num_channels = num_channels;
+    v->sample_rate = sample_rate;
     LeaveCriticalSection(&g_mixer_cs);
 }
 
