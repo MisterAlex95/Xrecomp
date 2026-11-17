@@ -230,7 +230,8 @@ discovery, [discovery.md](../technical/discovery.md#static-discovery-at-the-firs
 thread routines and other callbacks pushed for kernel calls, vtables a
 constructor installs or RTTI describes, exception handlers, a call to a
 noreturn kernel routine as the end of a body (the third pattern below, for the
-kernel's own; a CRT exit helper that is not an import still runs on), switch
+kernel's own, and a direct call the compiler padded with int3, such as
+`call exit; int3`; a CRT exit helper followed by code still runs on), switch
 tables outside the code, and code in gaps that nothing references.
 
 Where the failed address lands tells the patterns apart. Ask Ghidra with

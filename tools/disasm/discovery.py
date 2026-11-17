@@ -11,7 +11,10 @@ own CFG there. This module adds the evidence they do not use, in two levels:
   1 (strong evidence: the address is code, the question is only where)
     * noreturn kernel calls (HalReturnToFirmware, KeBugCheck(Ex),
       PsTerminateSystemThread) end a body, so the function packed after one is
-      no longer swallowed by it;
+      no longer swallowed by it; and so does a direct call the compiler padded
+      with int3 (`call exit; int3`, `call _CxxThrowException; int3`): MSVC
+      emits nothing after a call it knows never returns, so the alignment
+      int3 lands right behind it (noreturn_targets);
     * callback arguments: the routine pushed for PsCreateSystemThread(Ex)
       (start routine and StartContext1), KeInitializeDpc, KeInitializeApc,
       NtQueueApcThread, KeInitializeInterrupt -- and for a function that
@@ -311,6 +314,11 @@ class StaticDiscovery:
         self.capped = False
         self.packed_completed = 0
         self.noreturn_slots: Set[int] = set()
+        # Direct call targets the compiler treats as noreturn, and where the
+        # sweep's branches land, by target -> their sources (an int3 a branch
+        # reaches is a trap, not padding): find_noreturn_targets.
+        self.noreturn_targets: Set[int] = set()
+        self._branch_sources: Dict[int, List[int]] = {}
         self.callback_slots: Dict[int, Tuple[int, ...]] = {}
         # Functions that forward an argument of their own as a routine
         # (callback_args): start -> the argument indices, for summary.json.
@@ -321,6 +329,67 @@ class StaticDiscovery:
                     self.noreturn_slots.add(ki.thunk_addr)
                 if ki.name in CALLBACK_ARGS:
                     self.callback_slots[ki.thunk_addr] = CALLBACK_ARGS[ki.name]
+
+    # -- noreturn calls ---------------------------------------------------
+
+    def find_noreturn_targets(self) -> None:
+        """Direct call targets that never return, from the sweep (level 1).
+
+        A title's exit(), _CxxThrowException or ExitThread returns as far as
+        its own body tells (it ends in a call to another routine, a raise, a
+        kernel call through a pointer), so no CFG proves it. Its callers do:
+        MSVC emits nothing after a call it knows never returns, and when that
+        call is the last instruction of a function the alignment int3 sits
+        right behind it -- `push [esp+4]; call ExitThread; int3` then the next
+        function. A call that returned would land on that int3, so the int3
+        is the compiler's word that the target is noreturn.
+
+        A call site still ends a body only when it is itself followed by an
+        int3 nothing branches to (is_noreturn_call): a call to such a target
+        followed by code is not cut, since the code after may be reached by a
+        branch the walk has not seen yet (a backward one, or one from a later
+        path), and a cut body crashes the title."""
+        self.noreturn_targets = set()
+        self._branch_sources = {}
+        if self.level < STRONG:
+            return
+        insns = list(self.engine.instructions.values())
+        for i in insns:
+            if getattr(i, "is_branch", False) and i.jump_target is not None:
+                self._branch_sources.setdefault(i.jump_target, []).append(i.address)
+        for insn in insns:
+            target = getattr(insn, "call_target", None)
+            if (target is None or target in self.noreturn_targets
+                    or not self._int3_pad_at(insn.end_address)):
+                continue
+            section = self.image.get_section_at_va(target)
+            if section is not None and section.executable:
+                self.noreturn_targets.add(target)
+
+    def _int3_pad_at(self, addr: int) -> bool:
+        """An int3 at addr that no branch reaches: padding, not a trap."""
+        if addr in self._branch_sources:
+            return False
+        b = self.image.read_bytes_at_va(addr, 1)
+        return bool(b) and b[0] == 0xCC
+
+    def is_noreturn_call(self, insn) -> bool:
+        """Does the path end at this call? A noreturn kernel call, or a call
+        to a noreturn target the compiler padded with int3 right here."""
+        if insn is None or not getattr(insn, "is_call", False):
+            return False
+        if insn.memory_ref is not None and insn.memory_ref in self.noreturn_slots:
+            return True
+        return (insn.call_target is not None
+                and insn.call_target in self.noreturn_targets
+                and self._int3_pad_at(insn.end_address))
+
+    def branched_over(self, addr: int, window: int = 0x400) -> bool:
+        """Does a branch shortly before addr land on it? Then addr is the
+        rest of the body a noreturn call sits in (`jz ok; call throw; int3;
+        ok:`), not the next function, even with int3 in front."""
+        return any(addr - window <= src < addr
+                   for src in self._branch_sources.get(addr, ()))
 
     # -- bookkeeping ------------------------------------------------------
 
@@ -993,8 +1062,7 @@ class StaticDiscovery:
             for lo, hi in gaps:
                 prev = self._prev_insn(lo)
                 ends_path = prev is not None and (
-                    prev.is_ret or prev.is_jump
-                    or (prev.is_call and prev.memory_ref in self.noreturn_slots))
+                    prev.is_ret or prev.is_jump or self.is_noreturn_call(prev))
                 addr = self._skip_fill(lo, hi)
                 after_terminator = ends_path and addr == lo
                 for _ in range(64):
@@ -1019,7 +1087,8 @@ class StaticDiscovery:
                     nxt = self._skip_fill(end, hi)
                     last = self._prev_insn(end)
                     after_terminator = (nxt == end and last is not None
-                                        and (last.is_ret or last.is_jump))
+                                        and (last.is_ret or last.is_jump
+                                             or self.is_noreturn_call(last)))
                     addr = nxt
         if added:
             print(f"  static discovery: {self.stats['gap_body']} function(s) in gaps")

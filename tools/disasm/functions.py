@@ -93,7 +93,6 @@ class FunctionDetector:
     # Defaults for a detector made without __init__ (some tests): static
     # discovery off. See _disc.
     discovery = None
-    _noreturn_slots: frozenset = frozenset()
     # Seeds on an instruction boundary inside a body (Disassembler.run): alias
     # entries only, never function starts (WP2). See _pass_seed_aliases.
     seed_aliases: frozenset = frozenset()
@@ -106,6 +105,11 @@ class FunctionDetector:
             self.discovery = StaticDiscovery(self, 0)
             self._extra_targets = {}
         return self.discovery
+
+    def _is_noreturn_call(self, insn) -> bool:
+        """Does the path end at this call (discovery.is_noreturn_call)? Never
+        for a detector made without __init__ (static discovery off)."""
+        return self.discovery is not None and self.discovery.is_noreturn_call(insn)
 
     def __init__(self, engine: DisasmEngine, image: BinaryImage,
                  xrefs: XRefTracker, labels: LabelManager,
@@ -136,8 +140,6 @@ class FunctionDetector:
         from .discovery import StaticDiscovery
         self.discovery = StaticDiscovery(self, static_discovery, discovery_cap,
                                          rtti_methods)
-        # Kernel calls that never return end a body (level 1 and up).
-        self._noreturn_slots: Set[int] = self.discovery.noreturn_slots
         # Exception-frame resume targets past a function's measured end, by
         # function start: the body runs on to cover them.
         self._extra_targets: Dict[int, Set[int]] = {}
@@ -154,6 +156,10 @@ class FunctionDetector:
         """
         if sections is None:
             sections = self.image.get_code_sections()
+
+        # Direct call targets the compiler padded with int3 (`call exit;
+        # int3`): a call to one, int3 behind it, ends a body (discovery.py).
+        self._disc().find_noreturn_targets()
 
         # Pass 1: Known addresses
         self._pass_known_addresses()
@@ -901,17 +907,38 @@ class FunctionDetector:
                     # are considered, so this cannot invent a misaligned one.
                     before_addr = va_start + cc_start
                     found_ret = False
+                    after_noreturn = False
                     for check_offset in range(1, 8):
                         check_addr = before_addr - check_offset
                         insn = self.engine.get_instruction(check_addr)
+                        # A call that never returns ends the function as
+                        # well: `call exit; int3` or `call
+                        # _CxxThrowException; int3` then the next function
+                        # (discovery.py's noreturn targets, level 1). Without
+                        # it the body before ran on over the padding and
+                        # swallowed the next function, whose address is then
+                        # an immediate inside a body: no evidence to any pass.
                         if (insn and insn.end_address == before_addr
-                                and (insn.is_ret or insn.is_jump)):
+                                and (insn.is_ret or insn.is_jump
+                                     or self._is_noreturn_call(insn))):
                             found_ret = True
+                            after_noreturn = not (insn.is_ret or insn.is_jump)
                             break
 
                     if found_ret:
                         next_addr = va_start + i
+                        if after_noreturn:
+                            # The CRT's `call ...; int3` then nop (or zero)
+                            # alignment: the function starts after it.
+                            j = i
+                            while j < len(data) and data[j] in (0x90, 0x00):
+                                j += 1
+                            next_addr = va_start + j
                         if (next_addr in self.engine.instructions
+                                # past a noreturn call, code a branch just
+                                # before jumps to is the same body's
+                                and not (after_noreturn
+                                         and self._disc().branched_over(next_addr))
                                 and (self.engine.probes_as_prologue(next_addr)
                                      or (self.engine.probes_as_callback_body(
                                          next_addr, va_start + len(data),
@@ -2032,9 +2059,12 @@ class FunctionDetector:
             # A call to a kernel routine that never returns ends the path
             # like a ret: without this, the function packed straight after
             # `call [PsTerminateSystemThread]` (the CRT's _threadstartex
-            # after _endthreadex) was swallowed by it (XBA-137).
-            noreturn = (bool(self._noreturn_slots) and insn.is_call
-                        and insn.memory_ref in self._noreturn_slots)
+            # after _endthreadex) was swallowed by it (XBA-137). So does a
+            # direct call to a noreturn target with an int3 right behind it
+            # (Yu-Gi-Oh's `push [esp+4]; call ExitThread; int3`): only there,
+            # a call to the same target followed by code goes on, and the
+            # max_target guard below still runs past any branch over it.
+            noreturn = self._is_noreturn_call(insn)
             if insn.is_ret or noreturn or (insn.is_jump and not insn.is_cond_jump):
                 # Stop only once we have decoded *past* every internal branch
                 # target. A target is an address that must be inside the
