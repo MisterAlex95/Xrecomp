@@ -2065,6 +2065,7 @@ typedef struct {
     uint64_t hash;
     GLuint tex;
     uint32_t checked;               /* frame of the last hash check */
+    uint32_t used;                  /* frame of the last tex_get hit (eviction) */
     GlSamp samp;                    /* sampler state last set */
     /* The last upload failed (a format the decoder does not know, such as
      * Fable's Z16 shadow map bound as 0x30): drawn as "no texture" until the
@@ -2086,16 +2087,23 @@ typedef struct {
     GLint wrap_r;                   /* a volume's GL_TEXTURE_WRAP_R as last set */
 } GlTex;
 
-#define NV_GL_MAX_TEX 512           /* power of two */
+#define NV_GL_MAX_TEX 2048          /* power of two */
 static GlTex s_tex[NV_GL_MAX_TEX];
 static int s_ntex;
 static const GlTex *s_bound[4];     /* what each unit sampled last batch */
+static uint32_t s_tex_evictions, s_tex_drops;   /* for the tests */
+
+static uint32_t tex_slot_key(uint32_t offset, uint32_t color, uint32_t width,
+                             uint32_t height, uint32_t cube)
+{
+    uint32_t h = (offset >> 7) ^ (offset >> 19) ^ color * 0x9E37u
+               ^ width * 31u ^ height * 131u ^ cube;
+    return h & (NV_GL_MAX_TEX - 1);
+}
 
 static uint32_t tex_slot(const Nv2aTexture *t, uint32_t cube)
 {
-    uint32_t h = (t->offset >> 7) ^ (t->offset >> 19) ^ t->color * 0x9E37u
-               ^ t->width * 31u ^ t->height * 131u ^ cube;
-    return h & (NV_GL_MAX_TEX - 1);
+    return tex_slot_key(t->offset, t->color, t->width, t->height, cube);
 }
 
 static void tex_drop_all(void)
@@ -2107,6 +2115,56 @@ static void tex_drop_all(void)
     memset(s_tex, 0, sizeof s_tex);
     memset(s_bound, 0, sizeof s_bound);
     s_ntex = 0;
+    s_tex_drops++;
+}
+
+/* The table is 3/4 full: delete the entries not sampled in the last `age`
+ * frames and put the others back in their probe order (linear probing has
+ * no deletion of its own). Returns the entries left. Entries sampled this
+ * frame always stay, so a texture already bound for this batch keeps its
+ * GL name; s_bound is cleared because the entries move. */
+static int tex_evict(uint32_t age)
+{
+    static GlTex keep[NV_GL_MAX_TEX];
+    int i, n = 0;
+
+    for (i = 0; i < NV_GL_MAX_TEX; i++) {
+        GlTex *c = &s_tex[i];
+        if (!c->tex && !c->bytes)
+            continue;
+        if (s_frame - c->used < age)
+            keep[n++] = *c;
+        else if (c->tex)
+            sh_delete_textures(1, &c->tex);
+    }
+    memset(s_tex, 0, sizeof s_tex);
+    memset(s_bound, 0, sizeof s_bound);
+    for (i = 0; i < n; i++) {
+        uint32_t slot = tex_slot_key(keep[i].offset, keep[i].color, keep[i].width,
+                                     keep[i].height, keep[i].cube);
+        while (s_tex[slot].tex || s_tex[slot].bytes)
+            slot = (slot + 1) & (NV_GL_MAX_TEX - 1);
+        s_tex[slot] = keep[i];
+    }
+    if (s_verbose)
+        fprintf(stderr, "  [GPUGL] texture cache: %d of %d entries not sampled in %u frames"
+                        " deleted at frame %u\n", s_ntex - n, s_ntex, age, s_frame);
+    s_ntex = n;
+    s_tex_evictions++;
+    return n;
+}
+
+/* Room for more entries (the whole table used to be dropped here, and every live texture decoded and uploaded again in the
+ * same frame): the textures unused for a second go first, then those not
+ * sampled this frame or the last; everything only when the live set of two
+ * frames alone nearly fills the table. */
+static void tex_make_room(void)
+{
+    if (tex_evict(60) < NV_GL_MAX_TEX / 2)
+        return;
+    if (tex_evict(2) < NV_GL_MAX_TEX * 5 / 8)
+        return;
+    tex_drop_all();
 }
 
 static uint64_t tex_hash(const Nv2aTexture *t, uint32_t bytes)
@@ -2301,9 +2359,12 @@ static GlTex *tex_get(const Nv2aTexture *t, uint32_t cube, int unit)
         }
     }
     if (!e || (!e->tex && s_ntex >= NV_GL_MAX_TEX * 3 / 4)) {
-        tex_drop_all();
-        e = &s_tex[slot];
+        /* Entries are only made under 3/4, so an empty slot is always
+         * found again after this. */
+        tex_make_room();
+        return tex_get(t, cube, unit);
     }
+    e->used = s_frame;
     if (e->tex) {
         uint32_t serial = 0;
         int ov = s_recheck_switch ? 0 : tex_gpu_overlap(t->offset, e->bytes, &serial);

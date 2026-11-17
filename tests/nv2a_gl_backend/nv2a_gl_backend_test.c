@@ -39,6 +39,9 @@
  *      pixels and the picture differs (the control). The DROP deletes the
  *      cached index buffers too: a name made before it is no buffer after
  *      (it was only forgotten, and leaked up to 32 MB a load).
+ * Texture cache (case 10): more distinct textures than the table holds,
+ * streamed over frames, retire the old entries; a texture sampled every
+ * frame is decoded once (the table used to be dropped whole at 384 keys).
  * Also: RECOMP_GPU unset selects the platform's default (gpu_selected).
  * RECOMP_GPU_CPU_WRITES=0 (another ctest entry) checks that the same cases
  * fail without the merge, so the test tells the two apart. */
@@ -62,9 +65,21 @@ static int s_fail, s_cpu_on = 1;
 
 ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem; }
 const char *xbox_path_save_dir_utf8(void) { return NULL; }
+/* Textures: LIN_A8R8G8B8 only, read as is; decodes counted per address. */
+#define TEX_LIVE 0x00F00000u        /* 4x4, sampled every frame (case 10) */
+static uint32_t s_live_decodes;
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
-{ (void)tex; (void)argb_out; return 0; }
-uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex) { (void)tex; return 0; }
+{
+    if (tex->color != 0x12)
+        return 0;
+    memcpy(argb_out, s_mem + tex->offset, (size_t)tex->width * tex->height * 4u);
+    s_live_decodes += tex->offset == TEX_LIVE;
+    return 1;
+}
+uint32_t nv2a_backend_texture_bytes(const Nv2aTexture *tex)
+{
+    return tex->color == 0x12 ? tex->width * tex->height * 4u : 0;
+}
 int nv2a_backend_texture_level(const Nv2aTexture *tex, uint32_t level, Nv2aTexture *out)
 { (void)tex; (void)level; (void)out; return 0; }
 
@@ -456,6 +471,47 @@ int main(void)
             }
         }
         CHECK(s_state_flushes == flushes + 1 && s_state_drops == drops + 2);
+    }
+
+    /* 10. Texture cache eviction: 400 new textures a frame for 6 frames
+     * (2400 keys, more than the table holds) and one texture sampled every
+     * frame. The cache retires the old keys instead of dropping everything:
+     * the live texture is decoded once, and nothing is dropped whole. */
+    {
+        Nv2aTexture t;
+        uint32_t f, i, drops = s_tex_drops, evictions = s_tex_evictions, nul = 0;
+        memset(&t, 0, sizeof t);
+        t.width = t.height = 4;
+        t.pitch = 16;
+        t.color = 0x12;
+        t.levels = 1;
+        memset(s_mem + TEX_LIVE, 0x5A, 0x40000);
+        s_live_decodes = 0;
+        for (f = 0; f < 6; f++) {
+            t.offset = TEX_LIVE;
+            nul += tex_get(&t, 0, 0) == NULL;
+            for (i = 0; i < 400; i++) {
+                t.offset = TEX_LIVE + 0x100u + (f * 400u + i) * 64u;
+                nul += tex_get(&t, 1, 1) == NULL;
+            }
+            t.offset = TEX_LIVE;            /* again after the stream: still there */
+            nul += tex_get(&t, 0, 0) == NULL;
+            flip();
+        }
+        printf("10. texture cache, 2400 keys over 6 frames: live texture decoded %u times,"
+               " %u evictions, %u full drops\n", s_live_decodes,
+               s_tex_evictions - evictions, s_tex_drops - drops);
+        CHECK(nul == 0);
+        CHECK(s_live_decodes == 1);
+        CHECK(s_tex_evictions > evictions);
+        CHECK(s_tex_drops == drops);
+        /* A live set too big for the table still falls back to the drop. */
+        for (i = 0; i < NV_GL_MAX_TEX; i++) {
+            t.offset = TEX_LIVE + 0x100u + i * 64u;
+            nul += tex_get(&t, 0, 2) == NULL;
+        }
+        CHECK(nul == 0 && s_tex_drops == drops + 1);
+        flip();
     }
 
     CHECK(glGetError() == GL_NO_ERROR);
