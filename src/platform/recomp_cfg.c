@@ -61,10 +61,58 @@ static int skipped(const char *key)
     return 0;
 }
 
+/* A line longer than this is skipped (a value is a path or a number; this is
+ * a corrupt file). */
+#define CFG_LINE_MAX (64u * 1024u)
+
+/* Reads one whole line into *buf (grown as needed), newline kept when there
+ * was one. Returns 1 for a line, 0 at the end of the file (or with no
+ * memory for a buffer at all), -1 for a line over CFG_LINE_MAX or one that
+ * memory ran out for (read through and dropped). */
+static int read_line(FILE *f, char **buf, size_t *cap)
+{
+    size_t len = 0;
+    int too_long = 0;
+
+    for (;;) {
+        if (*cap - len < 2) {
+            size_t ncap = *cap ? *cap * 2 : 256;
+            char *nb;
+            if (ncap > CFG_LINE_MAX + 2) {
+                /* Over the limit: keep reading into the same buffer until the line ends. */
+                too_long = 1;
+                len = 0;
+            } else {
+                nb = (char *)realloc(*buf, ncap);
+                if (!nb) {
+                    too_long = 1;
+                    len = 0;
+                } else {
+                    *buf = nb;
+                    *cap = ncap;
+                }
+            }
+            if (*cap - len < 2)
+                return 0;    /* no buffer at all (out of memory): stop reading */
+        }
+        if (!fgets(*buf + len, (int)(*cap - len), f)) {
+            if (len == 0 && !too_long)
+                return 0;
+            break;           /* the last line, with no newline */
+        }
+        len += strlen(*buf + len);
+        if (len && (*buf)[len - 1] == '\n')
+            break;
+    }
+    return too_long ? -1 : 1;
+}
+
 int recomp_cfg_load(const char *path)
 {
     FILE *f;
-    char line[1024];
+    char *line = NULL;
+    size_t line_cap = 0;
+    int got;
     char summary[2048];
     size_t used = 0;
     int count = 0, lineno = 0;
@@ -77,9 +125,13 @@ int recomp_cfg_load(const char *path)
         return -1;
     }
     summary[0] = '\0';
-    while (fgets(line, sizeof line, f)) {
+    while ((got = read_line(f, &line, &line_cap)) != 0) {
         char *s, *eq, *key, *val;
         lineno++;
+        if (got < 0) {
+            fprintf(stderr, "recomp.cfg:%d: line longer than %u bytes, skipped\n", lineno, CFG_LINE_MAX);
+            continue;
+        }
         s = trim(line);
         if (!*s || *s == '#') continue;
         eq = strchr(s, '=');
@@ -113,6 +165,7 @@ int recomp_cfg_load(const char *path)
         append(summary, sizeof summary, &used, "%s=%s", key, val);
         count++;
     }
+    free(line);
     fclose(f);
     printf("recomp.cfg: %d option(s) from %s%s%s\n", count, path, count ? ": " : "", summary);
     fflush(stdout);
