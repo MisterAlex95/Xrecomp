@@ -1,17 +1,25 @@
-# xbox_d3d8 — D3D8 to D3D11 Graphics Compatibility
+# xbox_d3d8 — D3D8 Graphics Compatibility
 
-Implements the Xbox's modified Direct3D 8 interface backed by a Direct3D 11 device. The Xbox D3D8 API is similar to PC D3D8 but has Xbox-specific extensions (push buffers, swizzled textures, pixel shader combiners, etc.).
+Implements the Xbox's modified Direct3D 8 interface. The Xbox D3D8 API is similar to PC D3D8 but has Xbox-specific extensions (push buffers, swizzled textures, pixel shader combiners, etc.). Two back ends, picked by `CMakeLists.txt`:
+
+- **Windows**: a Direct3D 11 device. Most of this page describes it.
+- **POSIX**: OpenGL 3.3 core through SDL2 and libepoxy (`d3d8_gl.c`), a first cut: one fixed GLSL program for position, diffuse and one texture coordinate set. It needs desktop GL; on Android the file compiles (`gl_host.h`) but cannot draw, and the GPU rendering there is the NV2A GL back end (`src/gpu`), which draws the pushbuffer instead of this layer.
 
 ## Files
 
-| File | LOC | Purpose |
-|------|-----|---------|
-| `d3d8_xbox.h` | 716 | Public header — all D3D8 types, enums, COM interfaces |
-| `d3d8_internal.h` | 129 | Internal wrapper structs (D3D8 interface → D3D11 resource) |
-| `d3d8_device.c` | 1,107 | Device creation, render state, draw calls, frame present |
-| `d3d8_resources.c` | 541 | Vertex/index buffers, textures, format conversion |
-| `d3d8_shaders.c` | 529 | Shader compilation, input layout, constant buffers |
-| `d3d8_states.c` | 350 | Render state translation (D3D8 → D3D11), sampler states |
+| File | Back end | Purpose |
+|------|----------|---------|
+| `d3d8_xbox.h` | both | Public header — all D3D8 types, enums, COM interfaces |
+| `d3d8_fvf.h`, `d3d8_prim.h`, `d3d8_swizzle.h` | both | Pure helpers: FVF layout, fan/quad-list triangle indices, swizzle and texture formats |
+| `d3d8_internal.h` | D3D11 | Internal wrapper structs (D3D8 interface → D3D11 resource) |
+| `d3d8_device.c` | D3D11 | Device creation, render state, draw calls, frame present |
+| `d3d8_resources.c` | D3D11 | Vertex/index buffers, textures, format conversion |
+| `d3d8_shaders.c` | D3D11 | Shader compilation, input layout, constant buffers |
+| `d3d8_states.c` | D3D11 | Render state translation (D3D8 → D3D11), sampler states |
+| `d3d8_combiners.c` | D3D11 | NV2A register combiners → HLSL pixel shaders |
+| `d3d8_vsh.c` | D3D11 | Xbox vertex shader microcode → HLSL |
+| `d3d8_gamma.c` | D3D11 | Gamma ramp |
+| `d3d8_gl.c`, `gl_host.h` | GL | The POSIX back end and its GL entry points |
 
 ## Quick Start
 
