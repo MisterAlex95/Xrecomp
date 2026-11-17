@@ -154,16 +154,19 @@ def run(args, log, cwd=ROOT, on_line=None, tick=None):
     tick=(pct_from, pct_to, msg, typical_s) and --progress, a long silent step
     still moves: every few seconds the step's percent creeps from pct_from
     towards pct_to (never reaching it) and the message carries the elapsed
-    time, so a launcher does not look stuck on "disassembling"."""
+    time, so a launcher does not look stuck on "disassembling". The command
+    heads its own process group: a cancel or a crash kills it and all it
+    started (cmake --build's ninja and compilers too, not cmake alone)."""
+    from tools.prepare import proctree
     t0 = time.time()
     with open(log, "a") as f:
         f.write("\n$ %s\n" % " ".join(args))
         f.flush()
         if on_line is None:
-            p = subprocess.Popen(args, cwd=cwd, stdout=f, stderr=subprocess.STDOUT)
+            p = subprocess.Popen(args, cwd=cwd, stdout=f, stderr=subprocess.STDOUT, **proctree.popen_kw())
         else:
             p = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 universal_newlines=True, errors="replace", bufsize=1)
+                                 universal_newlines=True, errors="replace", bufsize=1, **proctree.popen_kw())
         try:
             if on_line is not None:
                 for line in p.stdout:
@@ -183,8 +186,8 @@ def run(args, log, cwd=ROOT, on_line=None, tick=None):
                         progress(int(lo + (hi - lo) * frac), "%s (%s)" % (msg, _elapsed(el)))
             else:
                 rc = p.wait()
-        except BaseException:       # as subprocess.call: never leave the child running
-            p.kill()
+        except BaseException:       # never leave the child, or what it started, running
+            proctree.kill_tree(p)
             p.wait()
             raise
     if rc != 0:

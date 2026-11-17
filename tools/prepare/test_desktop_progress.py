@@ -278,6 +278,84 @@ def test_sigterm_kills_the_child(tmp_path):
             time.sleep(0.05)
 
 
+def _gone(pid):
+    """True once pid has exited: no such process, or a zombie (an orphan
+    reparented to a PID 1 that does not reap, as in a container)."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return True
+    return False
+
+
+def test_sigterm_kills_the_whole_tree(tmp_path):
+    """The command's own children go too (cmake --build: ninja and the
+    compilers, not only cmake): SIGTERM mid-command leaves no grandchild."""
+    pidfile = tmp_path / "grandchild.pid"
+    cc = tmp_path / "compiler.py"
+    cc.write_text("import os, time\nopen(%r, 'w').write(str(os.getpid()))\ntime.sleep(60)\n" % str(pidfile))
+    script = tmp_path / "build.py"
+    # A "cmake" that starts a "compiler" and waits for it, like cmake --build.
+    script.write_text("import subprocess, sys\nsubprocess.Popen([sys.executable, %r]).wait()\n" % str(cc))
+    code = ("import sys, signal; sys.path.insert(0, %r)\n"
+            "from tools.prepare import __main__ as prep\n"
+            "from tools.prepare.progress import DESKTOP_STEP_IDS, Reporter\n"
+            "prep._REP = Reporter(ids=DESKTOP_STEP_IDS)\n"
+            "def body(a):\n"
+            "    prep.step(5, 'building')\n"
+            "    prep.run([sys.executable, %r], %r, on_line=lambda line: None)\n"
+            "prep.desktop = body\n"
+            "sys.exit(prep.main(['x', '--progress']))\n") % (ROOT, str(script), str(tmp_path / "log"))
+    p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    import time
+    for _ in range(200):
+        if pidfile.exists() and pidfile.read_text():
+            break
+        time.sleep(0.05)
+    grandchild = int(pidfile.read_text())
+    try:
+        p.send_signal(signal.SIGTERM)
+        out, _ = p.communicate(timeout=10)
+        assert p.returncode == 130
+        last = parse_line(out.splitlines()[-1])
+        assert (last["ok"], last["code"]) == (False, "CANCELLED")
+        for _ in range(100):
+            if _gone(grandchild):
+                break
+            time.sleep(0.05)
+        assert _gone(grandchild), "the build's grandchild %d still runs" % grandchild
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def test_kill_tree_unit():
+    """proctree on its own: a child and its grandchild, one kill_tree."""
+    from tools.prepare import proctree
+    p = subprocess.Popen([sys.executable, "-c",
+                          "import subprocess, sys; print(subprocess.Popen([sys.executable, '-c', "
+                          "'import time; time.sleep(60)']).pid, flush=True); import time; time.sleep(60)"],
+                         stdout=subprocess.PIPE, text=True, **proctree.popen_kw())
+    grandchild = int(p.stdout.readline())
+    proctree.kill_tree(p)
+    p.wait(timeout=10)
+    p.stdout.close()
+    import time
+    for _ in range(100):
+        if _gone(grandchild):
+            break
+        time.sleep(0.05)
+    assert _gone(grandchild)
+    proctree.kill_tree(p)           # again, on a dead group: no error
+
+
 # ── --check ──
 
 def _tree(path):
