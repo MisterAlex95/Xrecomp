@@ -247,6 +247,31 @@ static int wait_threads(int n, int ms)
     return 0;
 }
 
+/* Liveness after a thaw: the counter moves within `ms`. A fixed short window failed on a loaded host (qemu-user
+ * under a parallel ctest): six threads take turns on the guest CPU, and a woken thread can wait tens of ms for a
+ * core. A thread that stays held never moves, so a bound of seconds still catches it. */
+static int moves_within(volatile uint64_t *c, uint64_t c0, int ms)
+{
+    int t;
+    for (t = 0; t < ms; t++) {
+        if (__atomic_load_n(c, __ATOMIC_RELAXED) != c0)
+            return 1;
+        usleep(1000);
+    }
+    return 0;
+}
+
+static int progress_within(unsigned long p0, int ms)
+{
+    int t;
+    for (t = 0; t < ms; t++) {
+        if (__atomic_load_n(&g_progress, __ATOMIC_RELAXED) != p0)
+            return 1;
+        usleep(1000);
+    }
+    return 0;
+}
+
 static int kind_of_ret(uint32_t ret)
 {
     int k;
@@ -361,8 +386,7 @@ static void phase_freeze(void)
     check(still, "no guest code runs while frozen (20 ms each)", NULL);
     {
         unsigned long p0 = __atomic_load_n(&g_progress, __ATOMIC_RELAXED);
-        usleep(50000);
-        check(__atomic_load_n(&g_progress, __ATOMIC_RELAXED) != p0, "after the thaw they run again", NULL);
+        check(progress_within(p0, 2000), "after the thaw they run again", NULL);
     }
 }
 
@@ -376,6 +400,18 @@ static void phase_never_parks(void)
     printf("A thread that never makes a kernel call\n");
     spawn(3, K_SPIN);
     check(wait_threads(4, 2000), "it registers", NULL);
+    /* Running guest code before the freeze: a thread registers (its slot taken) before it counts as busy, and a
+     * freeze reached in between holds it at its start, legitimately, before it ever spins. */
+    for (k = 0; k < 2000; k++) {
+        int r, spinning = 0;
+        xbox_ParkStatsGet(&st, 0);
+        for (r = 0; r < st.threads; r++)
+            if (st.t[r].state == XBOX_PARK_RUNNING && st.t[r].kernel_calls == 0)
+                spinning = 1;
+        if (spinning)
+            break;
+        usleep(1000);
+    }
     frozen = xbox_ParkFreeze(100, &st);
     for (k = 0; k < st.threads; k++)
         if (st.t[k].state == XBOX_PARK_RUNNING) {
@@ -390,8 +426,7 @@ static void phase_never_parks(void)
     p0 = __atomic_load_n(&g_progress, __ATOMIC_RELAXED);
     g_spin_stop = 1;
     check(wait_threads(3, 2000), "it ends and unregisters", NULL);
-    usleep(30000);
-    check(__atomic_load_n(&g_progress, __ATOMIC_RELAXED) != p0, "the others ran on", NULL);
+    check(progress_within(p0, 2000), "the others ran on", NULL);
 }
 
 static void phase_ends(void)
@@ -582,10 +617,12 @@ static void phase_host_waits(void)
     check(named, "the [KERNEL] park line names a host wait", line);
     k0 = __atomic_load_n(&g_kicks, __ATOMIC_RELAXED);
     h0 = __atomic_load_n(&g_halts, __ATOMIC_RELAXED);
-    usleep(50000);
-    snprintf(d, sizeof d, "%llu kicks, %llu hlts", (unsigned long long)(g_kicks - k0),
-             (unsigned long long)(g_halts - h0));
-    check(g_kicks != k0 && g_halts != h0, "after the thaw they kick and halt again", d);
+    {
+        int kicked = moves_within(&g_kicks, k0, 2000), halted = moves_within(&g_halts, h0, 2000);
+        snprintf(d, sizeof d, "%llu kicks, %llu hlts", (unsigned long long)(g_kicks - k0),
+                 (unsigned long long)(g_halts - h0));
+        check(kicked && halted, "after the thaw they kick and halt again", d);
+    }
     G32(g_pollword) = 1;           /* the poll loop's word changes: it leaves the loop */
     g_hw_stop = 1;
     check(wait_threads(3, 3000), "they end", NULL);
@@ -642,6 +679,18 @@ static uint64_t fw_run(FwArg *a, int kind, int freeze_ms, int set_after_ms, int 
     a->ms = 50;
     a->ev = CreateEventW(NULL, FALSE, FALSE, NULL);
     pthread_create(&th, NULL, fw_thread, a);
+    /* In its wait before the freeze: a fixed 10 ms was not enough for the thread to start on a loaded host, and
+     * the freeze then held it at its start, so it never waited while frozen. */
+    {
+        XboxParkStats st;
+        int t;
+        for (t = 0; t < 2000; t++) {
+            xbox_ParkStatsGet(&st, 0);
+            if (st.threads == 1 && st.waiting == 1)
+                break;
+            usleep(1000);
+        }
+    }
     usleep(10000);
     f0 = xbox_ParkFrozenNs();
     if (freeze_ms > 0) {
