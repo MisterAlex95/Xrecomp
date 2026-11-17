@@ -242,14 +242,18 @@ static void finish_command(gc_machine *m)
             uint32_t n = id ? 0x20 : d->cmd2;
             if (n > d->len)
                 n = d->len;
-            uint8_t *buf = malloc(n ? n : 1);
-            if (!buf || gc_disc_read(d->disc, off, buf, n)) {
+            /* Only what lands in MEM1 is read: DMA lengths are guest values, and a read of up to the whole disc
+             * would otherwise be allocated and decoded here for bytes dma_to_ram drops. */
+            uint32_t room = d->mar < GC_RAM_SIZE ? GC_RAM_SIZE - d->mar : 0;
+            uint32_t want = n < room ? n : room;
+            uint8_t *buf = malloc(want ? want : 1);
+            if (!buf || gc_disc_read(d->disc, off, buf, want)) {
                 d->fail = true;
                 d->error = 0x030200u; /* unrecovered read error */
                 if (gc_disc_error(d->disc))
                     fprintf(stderr, "gc: dvd: %s\n", gc_disc_error(d->disc));
             } else {
-                dma_to_ram(m, d->mar, buf, n);
+                dma_to_ram(m, d->mar, buf, want);
                 d->head = off + n;
                 d->motor_off = false;
             }
