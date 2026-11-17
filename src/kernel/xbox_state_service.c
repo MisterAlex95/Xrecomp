@@ -115,6 +115,8 @@ static void auto_why(const char *slot_path, const char *why)
     fclose(f);
 }
 
+static int resume_available(int attached, char *why, size_t why_n);
+
 static int op_save(int slot, void *user)
 {
     char path[1200];
@@ -133,7 +135,7 @@ static int op_save(int slot, void *user)
         uint8_t *blob = NULL;
         size_t n = 0;
         char why[220];
-        if (!xbox_StateResumeAvailable(why, sizeof why)) {
+        if (!resume_available(1, why, sizeof why)) {   /* 1: under recomp_states' lock, see unavailable() */
             /* No capture: it could not be resumed anyway (code without resume entries, no states yet). */
             rc = XBOX_STATE_ECHAIN;
         } else {
@@ -211,24 +213,46 @@ static int op_load(int slot, void *user)
     return to_recomp(rc);
 }
 
-int xbox_StateAvailable(char *why, size_t why_n)
+/* Why no state can be taken now, or NULL. attached: the caller knows the title is attached to recomp_states:
+ * op_save / op_load run under the registry's lock (recomp_states.c run_op), where asking it again would wait for
+ * that lock for ever. */
+static const char *unavailable(int attached, char *buf, size_t buf_n)
 {
     XboxParkStats ps;
-    const char *r = NULL;
-    char buf[160];
 
     xbox_ParkStatsGet(&ps, 0);
     if (!s_dir[0])
-        r = "no save folder";
-    else if (!recomp_states_available() || strcmp(recomp_states_console(), "xbox") != 0)
-        r = "the title is not attached to the save states";
-    else if (recomp_stack_switch_started() > 0)
-        r = "the title switches stacks (fibers or hand-made contexts): a state cannot hold them";
-    else if (xbox_ParkDropped() > 0) {
-        snprintf(buf, sizeof buf, "more than %d guest threads at once", XBOX_PARK_MAX_THREADS);
-        r = buf;
-    } else if (ps.threads == 0)
-        r = "no guest thread runs yet";
+        return "no save folder";
+    if (!attached && (!recomp_states_available() || strcmp(recomp_states_console(), "xbox") != 0))
+        return "the title is not attached to the save states";
+    if (recomp_stack_switch_started() > 0)
+        return "the title switches stacks (fibers or hand-made contexts): a state cannot hold them";
+    if (xbox_ParkDropped() > 0) {
+        snprintf(buf, buf_n, "more than %d guest threads at once", XBOX_PARK_MAX_THREADS);
+        return buf;
+    }
+    if (ps.threads == 0)
+        return "no guest thread runs yet";
+    return NULL;
+}
+
+static int resume_available(int attached, char *why, size_t why_n)
+{
+    char buf[160];
+    const char *r = unavailable(attached, buf, sizeof buf);
+
+    if (!r && !xbox_CallSiteCount())
+        r = "generated code without resume entries (prepare the title again)";
+    if (why && why_n)
+        snprintf(why, why_n, "%s", r ? r : "");
+    return r == NULL;
+}
+
+int xbox_StateAvailable(char *why, size_t why_n)
+{
+    char buf[160];
+    const char *r = unavailable(0, buf, sizeof buf);
+
     if (why && why_n)
         snprintf(why, why_n, "%s", r ? r : "");
     return r == NULL;
@@ -236,14 +260,7 @@ int xbox_StateAvailable(char *why, size_t why_n)
 
 int xbox_StateResumeAvailable(char *why, size_t why_n)
 {
-    if (!xbox_StateAvailable(why, why_n))
-        return 0;
-    if (!xbox_CallSiteCount()) {
-        if (why && why_n)
-            snprintf(why, why_n, "generated code without resume entries (prepare the title again)");
-        return 0;
-    }
-    return 1;
+    return resume_available(0, why, why_n);
 }
 
 int xbox_StateResumeAtBoot(void)

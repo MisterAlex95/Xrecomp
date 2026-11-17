@@ -1141,6 +1141,43 @@ static void phase_load(const char *dir)
             check(ev.kind == RECOMP_STATE_EV_SAVED && ev.rc == RECOMP_STATE_OK,
                   "the quick save chord runs on the service's thread", recomp_states_error(ev.rc));
         }
+        /* The automatic slot (« Resume where I left off », XBA-250 / XBA-265) through the front end, as the app's
+         * menu asks for it when the player leaves: it runs under recomp_states' lock, so it must not ask
+         * recomp_states anything (it once did, and never came back). Code without resume entries: refused with
+         * no capture, the reason beside the slot. */
+        {
+            static const uint32_t one_site[3] = {0x00011000u, 0x00011000u, 0u};
+            char whyp[400], line[300] = "";
+            FILE *f;
+            snprintf(whyp, sizeof whyp, "%s/xbox-%08X/auto.why", xbox_path_save_dir_utf8(), xbox_path_title_id());
+            alarm(60);                      /* a deadlock ends the test instead of ctest's timeout */
+            rc = recomp_states_save(RECOMP_STATE_AUTO);
+            f = fopen(whyp, "r");
+            if (f) {
+                if (!fgets(line, sizeof line, f))
+                    line[0] = 0;
+                fclose(f);
+            }
+            check(rc == RECOMP_STATE_EREFUSED && strstr(line, "resume entries"),
+                  "the automatic slot without resume entries: refused, auto.why says so", line);
+            /* With a call-site table the state is captured; whatever the verdict, the save returns and either
+             * the slot or a reason is there. */
+            recomp_call_sites_register(one_site, 1);
+            rc = recomp_states_save(RECOMP_STATE_AUTO);
+            alarm(0);
+            line[0] = 0;
+            f = fopen(whyp, "r");
+            if (f) {
+                if (!fgets(line, sizeof line, f))
+                    line[0] = 0;
+                fclose(f);
+            }
+            printf("  automatic slot with a call-site table: %s%s%s\n", recomp_states_error(rc),
+                   line[0] ? " -- " : "", line);
+            check((rc == RECOMP_STATE_OK) == (line[0] == 0) && (rc == RECOMP_STATE_OK || strlen(line) > 1),
+                  "the automatic slot with resume entries: saved, or auto.why holds the reason", line);
+            recomp_call_sites_register(NULL, 0);
+        }
     }
     g_switch_stop = 1;
     check(wait_threads(3, 2000), "the switching thread ends", NULL);
