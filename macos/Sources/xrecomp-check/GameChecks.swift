@@ -203,6 +203,21 @@ func registerGameChecks() {
     }
 
     // ---- logs, play time, storage --------------------------------------------------------------------------------
+    check("game: a crash's tail comes from its own run log") {
+        // The store shows this tail on « Stopped unexpectedly »; the live log can hold a prepare's output by then.
+        let (exe, d) = fakeGame("i=0; while [ $i -lt 60 ]; do echo out$i; i=$((i+1)); done; exit 3")
+        let sink = GameSink()
+        let log = d.appendingPathComponent("logs/run-1.log")
+        let g = GameRunner(.init(exe: exe, environment: ChildEnvironment.base(), log: log)) { sink.take($0) }
+        try g.start()
+        expect(waitFor(5) { sink.exit != nil })
+        expectEq(sink.exit?.0, .exited(3))
+        let tail = tailLines(log, 40)
+        expectEq(tail.count, 40)
+        expectEq(tail.first, "out21")
+        expect(tail.last?.hasPrefix("# ended: exit 3") == true, tail.last ?? "")
+    }
+
     check("logs: rotation keeps 10") {
         let r = RunLog(dir: tempDir("logs"))
         let base = Date(timeIntervalSince1970: 1_800_000_000)

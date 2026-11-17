@@ -440,9 +440,12 @@ final class AppStore: LauncherActions {
         case .line(let l):
             model.appendLog(l)
         case .exited(let exit, let byUser, let seconds):
+            let runLog = game?.id == id ? game?.runner.request.log : nil
             game = nil
             let problem = GameRunner.exitProblem(exit, stoppedByUser: byUser)
-            let tail = Array(model.liveLog.suffix(40))
+            // The tail comes from this run's own log: the live log is shared with a prepare that may have started
+            // (and reset it) meanwhile, and would show that prepare's output as the crash.
+            let tail = runLog.map { tailLines($0, 40) } ?? Array(model.liveLog.suffix(40))
             model.update(id) {
                 $0.runningSince = nil
                 $0.lastExit = problem
