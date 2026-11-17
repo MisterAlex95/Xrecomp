@@ -519,13 +519,19 @@ static void obj_unregister(w32_object *o)
 
 static __thread w32_object *t_self_obj = NULL;
 static __thread DWORD       t_tid      = 0;
-/* The thread object of a thread CreateThread did not start, made by
- * w32_thread_apc_handle so that its alertable waits can be woken by a
- * QueueUserAPC from another thread (XBA-133). Never released. */
+/* The thread object of a thread CreateThread did not start -- the main
+ * guest thread is a raw pthread -- made on first need: by
+ * w32_thread_apc_handle, so that its alertable waits can be woken by a
+ * QueueUserAPC from another thread (XBA-133), or by a DuplicateHandle of the
+ * pseudo handle. The thread holds one reference, dropped by ExitThread (a
+ * thread that just returns keeps it). */
 static __thread w32_object *t_adopted  = NULL;
 
-/* The object APCs for this thread are queued on. */
-static w32_object *self_apc_obj(void)
+/* This thread's object: the one APCs for it are queued on, and the one the
+ * pseudo handle names wherever it and a real handle to the calling thread
+ * must agree (suspend, priority, affinity). NULL for a thread with neither:
+ * a mere query adopts nothing. */
+static w32_object *self_thread_obj(void)
 {
     return t_self_obj ? t_self_obj : t_adopted;
 }
@@ -794,9 +800,17 @@ BOOL DuplicateHandle(HANDLE srcProc, HANDLE src, HANDLE dstProc, PHANDLE dst,
 {
     (void)srcProc; (void)dstProc; (void)access; (void)inherit;
     if (!dst) return FALSE;
-    if (src == PSEUDO_CURRENT_THREAD)  src = GetCurrentThread();
-    if (src == PSEUDO_CURRENT_PROCESS) { *dst = src; return TRUE; }
-    if (src == PSEUDO_CURRENT_THREAD || !src) { *dst = src; return TRUE; }
+    if (src == PSEUDO_CURRENT_PROCESS || !src) { *dst = src; return TRUE; }
+    if (src == PSEUDO_CURRENT_THREAD) {
+        /* A real handle to the calling thread, never the pseudo handle: that
+         * token names whichever thread uses it, and a save state cannot bind
+         * it to a thread. A raw pthread (the main guest thread) has no object
+         * of its own and gets its adopted one, the object
+         * w32_thread_apc_handle returns. DUPLICATE_CLOSE_SOURCE: a pseudo
+         * handle has nothing to close. */
+        *dst = w32_thread_apc_handle();
+        return *dst != NULL;
+    }
     w32_object *o = obj_from_handle(src);
     if (!o) { SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
     InterlockedIncrement(&o->refcount);
@@ -832,7 +846,7 @@ static void deadline_from_ms(DWORD ms, struct timespec *ts)
 /* Run any pending user-APCs for the calling thread. Returns count run. */
 static int drain_apcs(void)
 {
-    w32_object *o = self_apc_obj();
+    w32_object *o = self_thread_obj();
     int run = 0;
     if (!o) return 0;
     pthread_mutex_lock(&o->lock);
@@ -995,7 +1009,7 @@ DWORD WaitForSingleObjectEx(HANDLE h, DWORD ms, BOOL alertable)
 {
     if (alertable && drain_apcs() > 0)
         return WAIT_IO_COMPLETION;
-    if (alertable && self_apc_obj() && h && obj_from_handle(h))
+    if (alertable && self_thread_obj() && h && obj_from_handle(h))
         return WaitForMultipleObjectsEx(1, &h, FALSE, ms, TRUE);
     return WaitForSingleObject(h, ms);
 }
@@ -1148,7 +1162,7 @@ DWORD WaitForMultipleObjectsEx(DWORD count, const HANDLE *handles, BOOL waitAll,
     w32_multiwait w;
     w32_waitblock wb;
     w32_waitlink links[MAXIMUM_WAIT_OBJECTS + 1];
-    w32_object *self = alertable ? self_apc_obj() : NULL;
+    w32_object *self = alertable ? self_thread_obj() : NULL;
 
     /* Win32 rejects the whole call when any handle is not one, before waiting
      * on any of them. Polling each with a zero timeout instead never reported
@@ -1760,7 +1774,11 @@ HANDLE CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stackSize,
 
 VOID ExitThread(DWORD exitCode)
 {
-    w32_object *o = t_self_obj;
+    /* An adopted object too: a waiter on a duplicate of the pseudo handle
+     * wakes with the exit code. */
+    w32_object *o = self_thread_obj();
+    t_self_obj = NULL;
+    t_adopted  = NULL;
     if (o) {
         pthread_mutex_lock(&o->lock);
         o->exit_code = exitCode;
@@ -1804,14 +1822,14 @@ DWORD SuspendThread(HANDLE h)
      * CREATE_SUSPENDED uses until a ResumeThread brings the count to zero.
      * Worker pools idle that way; returning at once turned one title's pool
      * into a suspend/check spin of millions of calls a second. */
-    if (h == PSEUDO_CURRENT_THREAD) h = GetCurrentThread();
-    w32_object *o = obj_from_handle(h);
+    w32_object *self = self_thread_obj();
+    w32_object *o = (h == PSEUDO_CURRENT_THREAD) ? self : obj_from_handle(h);
     if (!o || o->kind != K_THREAD)
         return (DWORD)-1;
     pthread_mutex_lock(&o->lock);
     DWORD prev = (DWORD)o->suspend_count;
     o->suspend_count++;
-    if (o == t_self_obj)
+    if (o == self)
         while (o->suspend_count > 0)
             pthread_cond_wait(&o->gate, &o->lock);
     pthread_mutex_unlock(&o->lock);
@@ -1853,14 +1871,14 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
 
 BOOL SetThreadPriority(HANDLE h, int priority)
 {
-    w32_object *o = (h == PSEUDO_CURRENT_THREAD) ? t_self_obj : obj_from_handle(h);
+    w32_object *o = (h == PSEUDO_CURRENT_THREAD) ? self_thread_obj() : obj_from_handle(h);
     if (o && o->kind == K_THREAD) o->priority = priority;
     return TRUE;   /* real RT priorities need privileges; tracked only */
 }
 
 int GetThreadPriority(HANDLE h)
 {
-    w32_object *o = (h == PSEUDO_CURRENT_THREAD) ? t_self_obj : obj_from_handle(h);
+    w32_object *o = (h == PSEUDO_CURRENT_THREAD) ? self_thread_obj() : obj_from_handle(h);
     return (o && o->kind == K_THREAD) ? o->priority : THREAD_PRIORITY_NORMAL;
 }
 
@@ -1886,7 +1904,7 @@ static DWORD_PTR thread_affinity_set(pthread_t th, DWORD_PTR mask)
 
 DWORD_PTR SetThreadAffinityMask(HANDLE h, DWORD_PTR mask)
 {
-    w32_object *o = (h == PSEUDO_CURRENT_THREAD) ? t_self_obj : obj_from_handle(h);
+    w32_object *o = (h == PSEUDO_CURRENT_THREAD) ? self_thread_obj() : obj_from_handle(h);
     if (o && o->kind != K_THREAD)
         o = NULL;
     if (!mask)
@@ -1895,7 +1913,7 @@ DWORD_PTR SetThreadAffinityMask(HANDLE h, DWORD_PTR mask)
 #if defined(__linux__)
     {
         DWORD_PTR prev;
-        if (!o || o == t_self_obj)
+        if (!o || o == self_thread_obj())
             return thread_affinity_set(pthread_self(), mask);
         /* Another shim thread, detached (XBA-56): its pthread_t is valid
          * only until it marks itself exited, which it does under o->lock. */
@@ -1929,7 +1947,7 @@ VOID SwitchToThread(void) { sched_yield(); }
 
 DWORD QueueUserAPC(PAPCFUNC func, HANDLE thread, ULONG_PTR data)
 {
-    w32_object *o = (thread == PSEUDO_CURRENT_THREAD) ? self_apc_obj() : obj_from_handle(thread);
+    w32_object *o = (thread == PSEUDO_CURRENT_THREAD) ? self_thread_obj() : obj_from_handle(thread);
     if (!o || o->kind != K_THREAD) return 0;
     pthread_mutex_lock(&o->lock);
     DWORD ok = 0;
@@ -1960,7 +1978,7 @@ VOID Sleep(DWORD ms)
  * block for it, as in WaitForMultipleObjectsEx (XBA-133). */
 DWORD SleepEx(DWORD ms, BOOL alertable)
 {
-    w32_object *self = alertable ? self_apc_obj() : NULL;
+    w32_object *self = alertable ? self_thread_obj() : NULL;
     struct timespec ts;
     w32_waitblock wb;
     w32_waitlink link;
@@ -2008,8 +2026,9 @@ DWORD SleepEx(DWORD ms, BOOL alertable)
 
 HANDLE w32_thread_apc_handle(void)
 {
-    w32_object *o = self_apc_obj();
+    w32_object *o = self_thread_obj();
     if (!o) {
+        /* Adopted: obj_alloc's reference is the thread's own. */
         o = obj_alloc(K_THREAD);
         o->thread = pthread_self();
         o->tid = GetCurrentThreadId();
