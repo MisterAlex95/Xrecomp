@@ -8155,7 +8155,7 @@ static void bridge_RtlAnsiStringToUnicodeString(void)
     }
     s_len   = BRIDGE_MEM16(src_va + 0);
     s_buf_va = BRIDGE_MEM32(src_va + 4);
-    if (!s_buf_va) {
+    if (!s_buf_va && s_len) {          /* an empty string may have no buffer */
         g_eax = 0xC000000Du;
         return;
     }
@@ -8182,14 +8182,22 @@ static void bridge_RtlAnsiStringToUnicodeString(void)
         }
     }
 
-    result = MultiByteToWideChar(CP_ACP, 0,
+    /* An empty source converts to an empty string (KRN-12): the
+     * conversion returns 0 for it, which read as a failure, left Length
+     * unset and leaked the buffer just allocated. NT answers success. */
+    result = s_len == 0 ? 0 : MultiByteToWideChar(CP_ACP, 0,
         (const char*)XBOX_TO_NATIVE(s_buf_va), (int)s_len,
         (WCHAR*)XBOX_TO_NATIVE(d_buf_va), (int)(unicode_bytes / sizeof(WCHAR)));
-    if (result > 0) {
+    if (result > 0 || s_len == 0) {
         BRIDGE_MEM16(dst_va + 0) = (uint16_t)(result * sizeof(WCHAR));
         ((WCHAR*)XBOX_TO_NATIVE(d_buf_va))[result] = 0;
         g_eax = 0;
     } else {
+        if (do_alloc) {
+            xbox_HeapFree(d_buf_va);
+            BRIDGE_MEM16(dst_va + 2) = 0;
+            BRIDGE_MEM32(dst_va + 4) = 0;
+        }
         g_eax = 0xC0000001u;   /* STATUS_UNSUCCESSFUL */
     }
 }
@@ -8211,7 +8219,7 @@ static void bridge_RtlUnicodeStringToAnsiString(void)
     }
     s_len   = BRIDGE_MEM16(src_va + 0);
     s_buf_va = BRIDGE_MEM32(src_va + 4);
-    if (!s_buf_va) {
+    if (!s_buf_va && s_len) {          /* an empty string may have no buffer */
         g_eax = 0xC000000Du;
         return;
     }
@@ -8226,6 +8234,7 @@ static void bridge_RtlUnicodeStringToAnsiString(void)
         }
         BRIDGE_MEM16(dst_va + 2) = (uint16_t)ansi_bytes;
         BRIDGE_MEM32(dst_va + 4) = d_buf_va;
+        d_max = ansi_bytes;            /* the room the terminator check uses */
     } else {
         if (d_max < ansi_bytes) {
             g_eax = 0xC0000205u;
@@ -8238,15 +8247,20 @@ static void bridge_RtlUnicodeStringToAnsiString(void)
         }
     }
 
-    result = WideCharToMultiByte(CP_ACP, 0,
+    result = s_len / sizeof(WCHAR) == 0 ? 0 : WideCharToMultiByte(CP_ACP, 0,
         (const WCHAR*)XBOX_TO_NATIVE(s_buf_va), (int)(s_len / sizeof(WCHAR)),
         (char*)XBOX_TO_NATIVE(d_buf_va), (int)ansi_bytes, NULL, NULL);
-    if (result > 0) {
+    if (result > 0 || s_len / sizeof(WCHAR) == 0) {   /* empty: success (KRN-12) */
         BRIDGE_MEM16(dst_va + 0) = (uint16_t)result;
         if ((uint16_t)result < d_max)
             ((char*)XBOX_TO_NATIVE(d_buf_va))[result] = 0;
         g_eax = 0;
     } else {
+        if (do_alloc) {
+            xbox_HeapFree(d_buf_va);
+            BRIDGE_MEM16(dst_va + 2) = 0;
+            BRIDGE_MEM32(dst_va + 4) = 0;
+        }
         g_eax = 0xC0000001u;
     }
 }

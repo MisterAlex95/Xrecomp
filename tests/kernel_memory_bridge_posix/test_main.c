@@ -61,12 +61,13 @@ enum { ORD_MMALLOC = 165, ORD_MMALLOCEX = 166, ORD_MMFREE = 171,
        ORD_KEWAIT = 159, ORD_NTDUP = 197, ORD_NTWAIT = 233, ORD_OBREF = 246,
        ORD_OBDEREF = 250, ORD_PSCREATE = 255, ORD_PSTERM = 258,
        ORD_NTWRITE = 236, ORD_NTQUERYINFO = 211,
-       ORD_KEQUERYPRIO = 124, ORD_KESETPRIO = 143 };
+       ORD_KEQUERYPRIO = 124, ORD_KESETPRIO = 143,
+       ORD_A2U = 260, ORD_U2A = 308 };
 static const uint32_t ORDS[] = { ORD_MMALLOC, ORD_MMALLOCEX, ORD_MMFREE,
     ORD_MMQUERYSIZE, ORD_NTALLOC, ORD_NTCLOSE, ORD_NTCREATE, ORD_NTFREE,
     ORD_NTSETINFO, ORD_KEWAIT, ORD_NTDUP, ORD_NTWAIT, ORD_OBREF, ORD_OBDEREF,
     ORD_PSCREATE, ORD_PSTERM, ORD_NTWRITE, ORD_NTQUERYINFO,
-    ORD_KEQUERYPRIO, ORD_KESETPRIO };
+    ORD_KEQUERYPRIO, ORD_KESETPRIO, ORD_A2U, ORD_U2A };
 #define NORDS (sizeof ORDS / sizeof ORDS[0])
 
 static uint32_t g_thunks, g_stack, g_scratch;
@@ -253,6 +254,53 @@ static void test_pinned_contiguous(void)
     va = CALL(ORD_MMALLOCEX, 0x1000, 0x10000000u, 0x10000FFFu, 0, 4);
     snprintf(d, sizeof d, "got 0x%08X", va);
     check(va == 0, "a pinned range far outside the window: 0", d);
+}
+
+/* ---- Rtl string conversions of an empty string (KRN-12) --------------- */
+static void test_empty_strings(void)
+{
+    char d[160];
+    uint32_t src = g_scratch + 0x800, dst = g_scratch + 0x810, buf = g_scratch + 0x900, st;
+
+    printf("empty string conversions\n");
+    /* ANSI -> Unicode, allocating: Length 0, success, a terminated buffer. */
+    G16(src) = 0; G16(src + 2) = 1; G32(src + 4) = buf; G8(buf) = 0;
+    G16(dst) = 0xFFFF; G16(dst + 2) = 0; G32(dst + 4) = 0;
+    st = CALL(ORD_A2U, dst, src, 1);
+    snprintf(d, sizeof d, "status 0x%08X Length %u Buffer 0x%08X", st, G16(dst), G32(dst + 4));
+    check(st == 0 && G16(dst) == 0 && G32(dst + 4) && G16(G32(dst + 4)) == 0,
+          "RtlAnsiStringToUnicodeString(\"\", alloc): success, Length 0", d);
+    /* Not allocating, into the title's buffer. */
+    G16(dst) = 0xFFFF; G16(dst + 2) = 16; G32(dst + 4) = buf + 0x40; G16(buf + 0x40) = 0xAAAA;
+    st = CALL(ORD_A2U, dst, src, 0);
+    snprintf(d, sizeof d, "status 0x%08X Length %u", st, G16(dst));
+    check(st == 0 && G16(dst) == 0 && G16(buf + 0x40) == 0,
+          "RtlAnsiStringToUnicodeString(\"\") into a buffer: success, terminated", d);
+    /* An empty string with no buffer at all is still an empty string. */
+    G32(src + 4) = 0;
+    G16(dst) = 0xFFFF;
+    st = CALL(ORD_A2U, dst, src, 0);
+    check(st == 0 && G16(dst) == 0, "an empty source with a NULL Buffer: success", NULL);
+
+    /* Unicode -> ANSI, both ways. */
+    G16(src) = 0; G16(src + 2) = 2; G32(src + 4) = buf; G16(buf) = 0;
+    G16(dst) = 0xFFFF; G16(dst + 2) = 0; G32(dst + 4) = 0;
+    st = CALL(ORD_U2A, dst, src, 1);
+    snprintf(d, sizeof d, "status 0x%08X Length %u Buffer 0x%08X", st, G16(dst), G32(dst + 4));
+    check(st == 0 && G16(dst) == 0 && G32(dst + 4) && G8(G32(dst + 4)) == 0,
+          "RtlUnicodeStringToAnsiString(L\"\", alloc): success, Length 0", d);
+    G16(dst) = 0xFFFF; G16(dst + 2) = 8; G32(dst + 4) = buf + 0x80; G8(buf + 0x80) = 0xAA;
+    st = CALL(ORD_U2A, dst, src, 0);
+    snprintf(d, sizeof d, "status 0x%08X Length %u", st, G16(dst));
+    check(st == 0 && G16(dst) == 0 && G8(buf + 0x80) == 0,
+          "RtlUnicodeStringToAnsiString(L\"\") into a buffer: success, terminated", d);
+
+    /* A non-empty one still converts. */
+    G16(src) = 3; G16(src + 2) = 4; G32(src + 4) = buf + 0xC0; memcpy(GP(buf + 0xC0), "abc", 4);
+    G16(dst) = 0; G16(dst + 2) = 0; G32(dst + 4) = 0;
+    st = CALL(ORD_A2U, dst, src, 1);
+    check(st == 0 && G16(dst) == 6 && G16(G32(dst + 4)) == 'a' && G16(G32(dst + 4) + 6) == 0,
+          "\"abc\" still converts (Length 6, terminated)", NULL);
 }
 
 /* ---- FileRenameInformation -------------------------------------------- */
@@ -530,6 +578,7 @@ int main(int argc, char **argv)
 
     test_virtual_memory();
     test_pinned_contiguous();
+    test_empty_strings();
     test_rename(cache);
     test_overwrite(cache);
     test_threads();
