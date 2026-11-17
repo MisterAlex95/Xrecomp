@@ -62,12 +62,12 @@ enum { ORD_MMALLOC = 165, ORD_MMALLOCEX = 166, ORD_MMFREE = 171,
        ORD_OBDEREF = 250, ORD_PSCREATE = 255, ORD_PSTERM = 258,
        ORD_NTWRITE = 236, ORD_NTQUERYINFO = 211,
        ORD_KEQUERYPRIO = 124, ORD_KESETPRIO = 143,
-       ORD_A2U = 260, ORD_U2A = 308 };
+       ORD_A2U = 260, ORD_U2A = 308, ORD_KEINITTIMER = 113, ORD_KESETTIMER = 149 };
 static const uint32_t ORDS[] = { ORD_MMALLOC, ORD_MMALLOCEX, ORD_MMFREE,
     ORD_MMQUERYSIZE, ORD_NTALLOC, ORD_NTCLOSE, ORD_NTCREATE, ORD_NTFREE,
     ORD_NTSETINFO, ORD_KEWAIT, ORD_NTDUP, ORD_NTWAIT, ORD_OBREF, ORD_OBDEREF,
     ORD_PSCREATE, ORD_PSTERM, ORD_NTWRITE, ORD_NTQUERYINFO,
-    ORD_KEQUERYPRIO, ORD_KESETPRIO, ORD_A2U, ORD_U2A };
+    ORD_KEQUERYPRIO, ORD_KESETPRIO, ORD_A2U, ORD_U2A, ORD_KEINITTIMER, ORD_KESETTIMER };
 #define NORDS (sizeof ORDS / sizeof ORDS[0])
 
 static uint32_t g_thunks, g_stack, g_scratch;
@@ -301,6 +301,37 @@ static void test_empty_strings(void)
     st = CALL(ORD_A2U, dst, src, 1);
     check(st == 0 && G16(dst) == 6 && G16(G32(dst + 4)) == 'a' && G16(G32(dst + 4) + 6) == 0,
           "\"abc\" still converts (Length 6, terminated)", NULL);
+}
+
+/* ---- Many kernel timers at once (KRN-9) ------------------------------- */
+static void test_many_timers(void)
+{
+    enum { N = 40 };
+    char d[160];
+    uint32_t t = xbox_HeapAlloc(N * 40u, 16), timeout = g_scratch + 0xA00, i, fired = 0, st = 0,
+             first_late = 0;
+
+    printf("kernel timers\n");
+    if (!t) { check(0, "40 KTIMERs allocated", NULL); return; }
+    for (i = 0; i < N; i++)
+        CALL(ORD_KEINITTIMER, t + i * 40u, 0);                 /* notification */
+    for (i = 0; i < N; i++)                                    /* 20 ms, relative, no DPC */
+        CALL(ORD_KESETTIMER, t + i * 40u, (uint32_t)-200000, 0xFFFFFFFFu, 0);
+    G32(timeout) = (uint32_t)-20000000;                        /* 2 s, relative */
+    G32(timeout + 4) = 0xFFFFFFFFu;
+    for (i = 0; i < N; i++) {
+        uint32_t r = CALL(ORD_KEWAIT, t + i * 40u, 0, 0, 0, timeout);
+        if (r == 0) {
+            fired++;
+        } else if (!first_late) {
+            first_late = i + 1;
+            st = r;
+            G32(timeout) = 0;                                  /* the rest: no waiting */
+            G32(timeout + 4) = 0;
+        }
+    }
+    snprintf(d, sizeof d, "%u of %u fired; timer #%u: 0x%08X", fired, (unsigned)N, first_late, st);
+    check(fired == N, "40 kernel timers armed at once all fire", d);
 }
 
 /* ---- FileRenameInformation -------------------------------------------- */
@@ -579,6 +610,7 @@ int main(int argc, char **argv)
     test_virtual_memory();
     test_pinned_contiguous();
     test_empty_strings();
+    test_many_timers();
     test_rename(cache);
     test_overwrite(cache);
     test_threads();

@@ -4516,7 +4516,11 @@ static void bridge_KeInitializeTimerEx(void)
  * audio off a timer. A title that needs better wants the host's timer queue,
  * not a smaller sleep.
  */
-#define XBOX_MAX_TIMERS 32
+/* 128 armed at once (KRN-9): with 32, the 33rd KeSetTimer returned as if
+ * armed, reset the timer's event and never fired it, with no log line; a
+ * title arming one per device or per stream waited for ever on it. A full
+ * table now says so once. */
+#define XBOX_MAX_TIMERS 128
 typedef struct {
     uint32_t timer_va;      /* the guest KTIMER, 0 for a free slot */
     uint32_t dpc_va;
@@ -4525,7 +4529,9 @@ typedef struct {
 } XboxTimer;
 static XboxTimer g_timers[XBOX_MAX_TIMERS];
 static CRITICAL_SECTION g_timer_lock;
-static int g_timer_started;
+static volatile int g_timer_started;
+static INIT_ONCE g_timer_once = INIT_ONCE_STATIC_INIT;
+static void kernel_timer_start_once(void);
 
 /* Whether the timer thread runs the paced loop below (kernel_timer_loop_ns):
  * only for what needs it, the 60 Hz vblank (RECOMP_VBLANK=paced) and the
@@ -4737,11 +4743,7 @@ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
     int i, free_slot = -1;
     uint32_t was_set = 0;
 
-    if (!g_timer_started) {
-        InitializeCriticalSection(&g_timer_lock);
-        g_timer_started = 1;
-        CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
-    }
+    kernel_timer_start_once();
 
     EnterCriticalSection(&g_timer_lock);
     for (i = 0; i < XBOX_MAX_TIMERS; i++) {
@@ -4755,6 +4757,12 @@ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
         g_timers[free_slot].period_ms = period_ms;
     }
     LeaveCriticalSection(&g_timer_lock);
+    if (free_slot < 0) {
+        static volatile LONG said;
+        if (InterlockedExchange(&said, 1) == 0)
+            fprintf(stderr, "  [KERNEL] KeSetTimer: all %d kernel timers are armed; timer "
+                            "0x%08X will not fire (said once)\n", XBOX_MAX_TIMERS, timer_va);
+    }
 
     /* A freshly set timer starts unsignaled, like the real KeSetTimer. */
     {
@@ -14536,13 +14544,23 @@ static void kobj_u32tab(XboxKobjSaveCtx *c, uint32_t id, const volatile uint32_t
     xbox_kobj_rec_end(c);
 }
 
+/* The timer thread and its lock, made once. This ran on whichever guest
+ * threads called KeSetTimer first, unguarded: two at once initialised the
+ * lock twice (on POSIX that replaces a mutex another thread may hold) and
+ * started two timer threads, after which every timer DPC and vblank tick
+ * was delivered twice (KRN-9). */
+static BOOL CALLBACK kernel_timer_init(PINIT_ONCE o, PVOID p, PVOID *c)
+{
+    (void)o; (void)p; (void)c;
+    InitializeCriticalSection(&g_timer_lock);
+    g_timer_started = 1;
+    CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
+    return TRUE;
+}
+
 static void kernel_timer_start_once(void)
 {
-    if (!g_timer_started) {
-        InitializeCriticalSection(&g_timer_lock);
-        g_timer_started = 1;
-        CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
-    }
+    InitOnceExecuteOnce(&g_timer_once, kernel_timer_init, NULL, NULL);
 }
 
 void xbox_bridge_kobj_handles(void (*fn)(void *ctx, uint32_t guest_va, void *h), void *ctx)
