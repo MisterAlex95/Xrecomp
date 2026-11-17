@@ -6,9 +6,10 @@
 #
 # Gating (XBA-53, docs/android/toolchain.md « CI gating »):
 #   pull request   linux, then android-toolkit (NDK compile, app unit tests) when the PR touches the Android build
-#   push to main   linux, then linux-arm64 (fails on a failure not in tools/ci/arm64-expected.txt), then android-image,
-#                  then android-toolchain (rebuilt only when its key changes, XBA-125), then android-apk (xrecomp-latest)
-#   both           homebrew after linux (XBA-149: the GBA / PS1 / N64 test corpus, then the GBA programs as recompiled
+#   push to main   linux, then android-image, then android-toolchain (rebuilt only when its key changes, XBA-125),
+#                  then android-apk (xrecomp-latest); then linux-arm64 (fails on a failure not in
+#                  tools/ci/arm64-expected.txt; no longer a gate before the APK: Thor first, XBA-269)
+#   both           homebrew after linux (on main after the APK chain) (XBA-149: the GBA / PS1 / N64 test corpus, then the GBA programs as recompiled
 #                  packs with screenshots, XBA-180; on PRs only when it is touched)
 #   weekly         linux, then device-tests (the device test bundle; fails when a project stops building)
 # Heavy jobs (everything but linux) take tools/ci/heavy_lock.sh: one at a time on the shared host, queued, never
@@ -189,8 +190,10 @@ jobs:
   # and the PS2 spike's ctest (tools/consoles/run_ps2_homebrew.sh, same deps image, about 40 s): ps2_hello /
   # ps2_rc_hello. Also on consoles/ps2/.
   homebrew:
-    needs: linux
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # After the APK chain on main (XBA-269): the heavy-job lock is not FIFO, so without this order the corpus could take
+    # it first and hold xrecomp-latest back. !cancelled(): on PRs android-apk is skipped and homebrew still runs.
+    needs: [linux, android-apk]
+    if: ${{ !cancelled() && needs.linux.result == 'success' && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     container:
       image: docker:29.8.1-cli
@@ -350,8 +353,10 @@ jobs:
   # runs: on 2026-11-09 the first PR running them in parallel saturated the shared Proxmox storage (Gitea and Plane
   # stopped answering). On PRs only the toolkit compile runs (android-toolkit).
   linux-arm64:
-    needs: linux
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # Thor first (2026-11-16): no longer a gate before the APK; it runs after the Android chain, still red on an
+    # unexpected failure (XBA-269).
+    needs: [linux, android-apk]
+    if: ${{ !cancelled() && needs.linux.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     container:
       image: docker:29.8.1-cli
@@ -385,7 +390,7 @@ jobs:
 
   # The Android toolchain image (docs/android/toolchain.md) builds, and its NDK builds SDL2 for arm64-v8a / API 30.
   android-image:
-    needs: linux-arm64
+    needs: linux
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     container:

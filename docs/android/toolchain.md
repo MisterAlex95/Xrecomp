@@ -305,7 +305,7 @@ is chosen to keep that host up (on 2026-11-09, heavy jobs in parallel took Gitea
 |---|---|---|
 | Every PR from a branch of this repository | `linux`, then `android-toolkit` | a Linux test fails; the toolkit does not build with the NDK |
 | A PR from a fork | nothing (XBA-100: someone else's code never drives the host's Docker); a maintainer pushes the branch here to test it | |
-| Push to `main`, or by hand | `linux`, then `linux-arm64`, then `android-image` (publishes `shell-latest`), then `android-toolchain` (builds only on a key miss), then `android-apk` (publishes `xrecomp-latest`) | a Linux test fails; an arm64 failure that is not expected; the image, the toolkit or the shell APK does not build; the toolchain does not build or check; the XRecomp APK does not build or lacks a toolchain file or a licence |
+| Push to `main`, or by hand | `linux`, then `android-image` (publishes `shell-latest`), then `android-toolchain` (builds only on a key miss), then `android-apk` (publishes `xrecomp-latest`); then `linux-arm64` and `homebrew` (XBA-269: Thor first, arm64 is no longer a gate before the APK, and the APK chain takes the heavy-job lock first) | a Linux test fails; an arm64 failure that is not expected; the image, the toolkit or the shell APK does not build; the toolchain does not build or check; the XRecomp APK does not build or lacks a toolchain file or a licence |
 | Monday 02:30 (server time), or by hand with `device_tests` | `linux`, then `device-tests` | a test project that should build for Android does not |
 
 - **`android-toolkit`** builds the `toolkit` target of `android.Dockerfile` (compile only, `JOBS=4`) when the PR
