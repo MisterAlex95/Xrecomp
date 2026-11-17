@@ -2353,6 +2353,7 @@ static void bridge_NtCreateEvent(void)
 
 static HANDLE ke_shadow_lookup(uint32_t guest_va);
 static void ke_shadow_insert(uint32_t guest_va, HANDLE host);
+static void ke_shadow_note_header(uint32_t guest_va);
 static HANDLE bridge_resolve_handle(uint32_t token);
 static HANDLE ke_guest_event(uint32_t guest_va, int *type);
 static int ke_promote(uint32_t guest_va);
@@ -4462,6 +4463,7 @@ static void bridge_KeInitializeTimerEx(void)
         return;
     }
     ke_shadow_insert(timer_va, ev);
+    ke_shadow_note_header(timer_va);
     g_eax = 0;
 }
 
@@ -9254,10 +9256,36 @@ static void bridge_RtlCaptureStackBackTrace(void)
 }
 
 
-/* --- Ke Object Shadow Table --- */
-#define KE_SHADOW_SIZE 4096
-typedef struct { uint32_t guest_va; HANDLE host_handle; uint32_t in_use; } KE_SHADOW_SLOT;
-static KE_SHADOW_SLOT g_ke_shadow[KE_SHADOW_SIZE];
+/* --- Ke Object Shadow Table ---
+ *
+ * Guest dispatcher object VA -> host object. Every KeInitializeEvent /
+ * Mutant / Semaphore / TimerEx, every event a title builds itself
+ * (ke_guest_event, in_use 2) and every spawned thread's KTHREAD has one.
+ *
+ * It was 4096 slots scanned from index 0 under one lock, and only threads
+ * were ever removed (thobj_unref). XDK code puts KEVENTs on the stack and
+ * in heap objects (overlapped requests, USB requests, stream buffers), so
+ * the distinct addresses grow with play time; after 4096 ke_guest_event
+ * returned NULL without a word, the guest address went to the host as a
+ * HANDLE, SetEvent failed silently and the wait failed at once -- the
+ * KOTOR / T()NY failures described below, reached by a long session. Every
+ * KeSetEvent / KeWaitFor* walked the array, a miss all 4096 slots (KRN-2).
+ *
+ * Now an open-addressed hash on the VA (linear probing, deletion by
+ * backward shift, so no tombstones), doubled at half load. Before it grows
+ * past KE_SHADOW_SWEEP entries it drops the shadows whose guest memory no
+ * longer holds the object they were made for: the header's Type or Size
+ * byte changed since the insert (a title-built event's stack frame or heap
+ * block was reused). `hdr` is that snapshot, Type | Size << 8, taken once
+ * the header is written (ke_shadow_note_header, or at the insert of a
+ * title-built event); 0 means the shadow is never dropped this way: a
+ * thread's KTHREAD (thobj_unref removes it) and a slot restored by a save
+ * state. */
+#define KE_SHADOW_SWEEP 4096u
+typedef struct { uint32_t guest_va; HANDLE host_handle; uint32_t in_use; uint32_t hdr; } KE_SHADOW_SLOT;
+static KE_SHADOW_SLOT *g_ke_shadow;
+static uint32_t g_ke_shadow_cap;            /* a power of two, 0 before first use */
+static uint32_t g_ke_shadow_count;
 static CRITICAL_SECTION g_ke_shadow_cs;
 static int g_ke_shadow_init;
 
@@ -9266,16 +9294,141 @@ static void ke_shadow_init(void)
     if (g_ke_shadow_init)
         return;
     InitializeCriticalSection(&g_ke_shadow_cs);
-    /* Wipe any stale pointers from a prior lifecycle (defensive). */
-    memset(g_ke_shadow, 0, sizeof(g_ke_shadow));
     g_ke_shadow_init = 1;
 }
 
-/* Insert a mapping guest_va -> host HANDLE. Replaces any prior mapping for
- * the same guest_va (closing the old handle and inserting the new one). */
-static void ke_shadow_insert(uint32_t guest_va, HANDLE host)
+static uint32_t ke_shadow_home(uint32_t va, uint32_t cap)
+{
+    va ^= va >> 13;
+    va *= 0x9E3779B1u;
+    return (va >> 8) & (cap - 1u);
+}
+
+/* The header bytes that identify the object at va: Type | Size << 8. */
+static uint32_t ke_shadow_hdr(uint32_t va)
+{
+    if (!bridge_va_mapped(va, 4))
+        return 0xFFFFFFFFu;
+    return (uint32_t)BRIDGE_MEM8(va) | (uint32_t)BRIDGE_MEM8(va + 2) << 8;
+}
+
+/* The slot index holding va, or -1. Under g_ke_shadow_cs. */
+static int ke_shadow_find_locked(uint32_t va)
 {
     uint32_t i;
+    if (!g_ke_shadow_cap)
+        return -1;
+    for (i = ke_shadow_home(va, g_ke_shadow_cap); g_ke_shadow[i].in_use;
+         i = (i + 1) & (g_ke_shadow_cap - 1u))
+        if (g_ke_shadow[i].guest_va == va)
+            return (int)i;
+    return -1;
+}
+
+/* Empty slot i and shift the run after it back, so lookups need no
+ * tombstones. The host object is the caller's. Under g_ke_shadow_cs. */
+static void ke_shadow_erase_locked(uint32_t i)
+{
+    uint32_t mask = g_ke_shadow_cap - 1u, j = i;
+    for (;;) {
+        uint32_t k;
+        j = (j + 1) & mask;
+        if (!g_ke_shadow[j].in_use)
+            break;
+        k = ke_shadow_home(g_ke_shadow[j].guest_va, g_ke_shadow_cap);
+        /* Move j back to i unless its home lies cyclically in (i, j]. */
+        if (i <= j ? (i < k && k <= j) : (i < k || k <= j))
+            continue;
+        g_ke_shadow[i] = g_ke_shadow[j];
+        i = j;
+    }
+    memset(&g_ke_shadow[i], 0, sizeof g_ke_shadow[i]);
+    g_ke_shadow_count--;
+}
+
+static int ke_shadow_stale_locked(uint32_t i)
+{
+    KE_SHADOW_SLOT *sl = &g_ke_shadow[i];
+    return sl->hdr && ke_shadow_hdr(sl->guest_va) != sl->hdr;
+}
+
+/* Drop the shadows whose object is gone. Returns how many. */
+static uint32_t ke_shadow_sweep_locked(void)
+{
+    uint32_t i = 0, n = 0;
+    while (i < g_ke_shadow_cap) {
+        if (g_ke_shadow[i].in_use && ke_shadow_stale_locked(i)) {
+            if (g_ke_shadow[i].host_handle)
+                CloseHandle(g_ke_shadow[i].host_handle);
+            ke_shadow_erase_locked(i);  /* may pull a later entry into i */
+            n++;
+            continue;
+        }
+        i++;
+    }
+    return n;
+}
+
+/* Room for one more entry. 0 only when out of memory. */
+static int ke_shadow_reserve_locked(void)
+{
+    KE_SHADOW_SLOT *grown, *old = g_ke_shadow;
+    uint32_t cap, i, old_cap = g_ke_shadow_cap;
+
+    if (old_cap && (g_ke_shadow_count + 1u) * 2u <= old_cap)
+        return 1;
+    if (g_ke_shadow_count >= KE_SHADOW_SWEEP) {
+        uint32_t freed = ke_shadow_sweep_locked();
+        static int said;
+        if (freed && said++ < 4)
+            fprintf(stderr, "  [KERNEL] Ke shadow table: %u stale object(s) dropped, %u live\n",
+                    freed, g_ke_shadow_count);
+        if ((g_ke_shadow_count + 1u) * 2u <= old_cap)
+            return 1;
+    }
+    cap = old_cap ? old_cap * 2u : 8192u;
+    grown = (KE_SHADOW_SLOT *)calloc(cap, sizeof *grown);
+    if (!grown)
+        return 0;
+    for (i = 0; i < old_cap; i++) {
+        uint32_t j;
+        if (!old[i].in_use)
+            continue;
+        for (j = ke_shadow_home(old[i].guest_va, cap); grown[j].in_use; j = (j + 1) & (cap - 1u))
+            ;
+        grown[j] = old[i];
+    }
+    g_ke_shadow = grown;
+    g_ke_shadow_cap = cap;
+    free(old);
+    return 1;
+}
+
+/* Add va -> host (absent from the table). Returns 0 when out of memory;
+ * the host object is then the caller's. Under g_ke_shadow_cs. */
+static int ke_shadow_add_locked(uint32_t va, HANDLE host, uint32_t in_use)
+{
+    uint32_t j;
+    if (!ke_shadow_reserve_locked())
+        return 0;
+    for (j = ke_shadow_home(va, g_ke_shadow_cap); g_ke_shadow[j].in_use;
+         j = (j + 1) & (g_ke_shadow_cap - 1u))
+        ;
+    g_ke_shadow[j].guest_va = va;
+    g_ke_shadow[j].host_handle = host;
+    g_ke_shadow[j].in_use = in_use;
+    g_ke_shadow[j].hdr = ke_shadow_hdr(va);
+    g_ke_shadow_count++;
+    return 1;
+}
+
+/* Insert a mapping guest_va -> host HANDLE. Replaces any prior mapping for
+ * the same guest_va (closing the old handle and inserting the new one).
+ * The shadow is never swept until ke_shadow_note_header, which the
+ * KeInitialize* bridges call once they have written the guest header. */
+static void ke_shadow_insert(uint32_t guest_va, HANDLE host)
+{
+    int i;
 
     if (!guest_va || !host)
         return;
@@ -9283,42 +9436,47 @@ static void ke_shadow_insert(uint32_t guest_va, HANDLE host)
     ke_shadow_init();
 
     EnterCriticalSection(&g_ke_shadow_cs);
-
-    /* Reuse an existing slot for this VA, if present. */
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (g_ke_shadow[i].in_use && g_ke_shadow[i].guest_va == guest_va) {
-            if (g_ke_shadow[i].host_handle && g_ke_shadow[i].host_handle != host)
-                CloseHandle(g_ke_shadow[i].host_handle);
-            g_ke_shadow[i].host_handle = host;
-            LeaveCriticalSection(&g_ke_shadow_cs);
-            return;
-        }
+    i = ke_shadow_find_locked(guest_va);
+    if (i >= 0) {
+        if (g_ke_shadow[i].host_handle && g_ke_shadow[i].host_handle != host)
+            CloseHandle(g_ke_shadow[i].host_handle);
+        g_ke_shadow[i].host_handle = host;
+        g_ke_shadow[i].in_use = 1;
+        g_ke_shadow[i].hdr = 0;                 /* until ke_shadow_note_header */
+        LeaveCriticalSection(&g_ke_shadow_cs);
+        return;
+    }
+    if (ke_shadow_add_locked(guest_va, host, 1)) {
+        g_ke_shadow[ke_shadow_find_locked(guest_va)].hdr = 0;
+        LeaveCriticalSection(&g_ke_shadow_cs);
+        return;
     }
 
-    /* Otherwise find a free slot. */
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (!g_ke_shadow[i].in_use) {
-            g_ke_shadow[i].in_use      = 1;
-            g_ke_shadow[i].guest_va    = guest_va;
-            g_ke_shadow[i].host_handle = host;
-            LeaveCriticalSection(&g_ke_shadow_cs);
-            return;
-        }
-    }
-
-    /* Table full -- log and drop the new object. The caller's subsequent
+    /* Out of memory -- log and drop the new object. The caller's subsequent
      * waits will fall back to XBOX_TO_NATIVE and fail gracefully. */
-    fprintf(stderr, "  [KERNEL] Ke shadow table full; dropping VA 0x%08X\n",
+    fprintf(stderr, "  [KERNEL] Ke shadow table: out of memory; dropping VA 0x%08X\n",
             guest_va);
     LeaveCriticalSection(&g_ke_shadow_cs);
     CloseHandle(host);
 }
 
+/* The header of guest_va is written: it is what the shadow was made for. */
+static void ke_shadow_note_header(uint32_t guest_va)
+{
+    int i;
+    ke_shadow_init();
+    EnterCriticalSection(&g_ke_shadow_cs);
+    i = ke_shadow_find_locked(guest_va);
+    if (i >= 0)
+        g_ke_shadow[i].hdr = ke_shadow_hdr(guest_va);
+    LeaveCriticalSection(&g_ke_shadow_cs);
+}
+
 /* Look up the host HANDLE for a guest object VA. Returns NULL if not found. */
 static HANDLE ke_shadow_lookup(uint32_t guest_va)
 {
-    uint32_t i;
     HANDLE h = NULL;
+    int i;
 
     if (!guest_va)
         return NULL;
@@ -9326,12 +9484,9 @@ static HANDLE ke_shadow_lookup(uint32_t guest_va)
     ke_shadow_init();
 
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (g_ke_shadow[i].in_use && g_ke_shadow[i].guest_va == guest_va) {
-            h = g_ke_shadow[i].host_handle;
-            break;
-        }
-    }
+    i = ke_shadow_find_locked(guest_va);
+    if (i >= 0)
+        h = g_ke_shadow[i].host_handle;
     LeaveCriticalSection(&g_ke_shadow_cs);
     return h;
 }
@@ -9339,7 +9494,7 @@ static HANDLE ke_shadow_lookup(uint32_t guest_va)
 /* Remove (and close) the mapping for a guest object VA. */
 static void ke_shadow_remove(uint32_t guest_va)
 {
-    uint32_t i;
+    int i;
 
     if (!guest_va)
         return;
@@ -9347,15 +9502,11 @@ static void ke_shadow_remove(uint32_t guest_va)
     ke_shadow_init();
 
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (g_ke_shadow[i].in_use && g_ke_shadow[i].guest_va == guest_va) {
-            if (g_ke_shadow[i].host_handle)
-                CloseHandle(g_ke_shadow[i].host_handle);
-            g_ke_shadow[i].in_use      = 0;
-            g_ke_shadow[i].guest_va    = 0;
-            g_ke_shadow[i].host_handle = NULL;
-            break;
-        }
+    i = ke_shadow_find_locked(guest_va);
+    if (i >= 0) {
+        if (g_ke_shadow[i].host_handle)
+            CloseHandle(g_ke_shadow[i].host_handle);
+        ke_shadow_erase_locked((uint32_t)i);
     }
     LeaveCriticalSection(&g_ke_shadow_cs);
 }
@@ -9445,7 +9596,7 @@ static int ke_promote(uint32_t guest_va)
 static HANDLE ke_guest_event(uint32_t guest_va, int *type)
 {
     static int enabled = -1;
-    uint32_t hdr, i;
+    uint32_t hdr;
     HANDLE h = NULL;
 
     if (enabled < 0) {
@@ -9465,23 +9616,36 @@ static HANDLE ke_guest_event(uint32_t guest_va, int *type)
 
     ke_shadow_init();
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (g_ke_shadow[i].in_use && g_ke_shadow[i].guest_va == guest_va) {
-            h = g_ke_shadow[i].in_use == 2 ? g_ke_shadow[i].host_handle : NULL;
+    {
+        int k = ke_shadow_find_locked(guest_va);
+        if (k >= 0 && g_ke_shadow[k].in_use != 2) {
             LeaveCriticalSection(&g_ke_shadow_cs);
-            return h;                              /* a KeInitializeEvent shadow: old path */
+            return NULL;                           /* a KeInitializeEvent shadow: old path */
+        }
+        if (k >= 0 && !g_ke_shadow[k].hdr)            /* restored by a save state */
+            g_ke_shadow[k].hdr = ke_shadow_hdr(guest_va);
+        if (k >= 0 && (g_ke_shadow[k].hdr & 0xFFu) == (uint32_t)*type) {
+            h = g_ke_shadow[k].host_handle;
+            LeaveCriticalSection(&g_ke_shadow_cs);
+            return h;
+        }
+        if (k >= 0) {
+            /* The address now holds an event of the other type (its
+             * memory was reused): a host event of the right reset kind,
+             * from the guest's state. */
+            if (g_ke_shadow[k].host_handle)
+                CloseHandle(g_ke_shadow[k].host_handle);
+            ke_shadow_erase_locked((uint32_t)k);
         }
     }
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
-        if (!g_ke_shadow[i].in_use) {
-            h = CreateEventA(NULL, *type == 0, BRIDGE_MEM32(guest_va + 4) != 0, NULL);
-            if (h) {
-                g_ke_shadow[i].in_use      = 2;
-                g_ke_shadow[i].guest_va    = guest_va;
-                g_ke_shadow[i].host_handle = h;
-            }
-            break;
-        }
+    h = CreateEventA(NULL, *type == 0, BRIDGE_MEM32(guest_va + 4) != 0, NULL);
+    if (h && !ke_shadow_add_locked(guest_va, h, 2)) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [KERNEL] Ke shadow table: out of memory; title-built event "
+                            "0x%08X left without a host event\n", guest_va);
+        CloseHandle(h);
+        h = NULL;
     }
     LeaveCriticalSection(&g_ke_shadow_cs);
     if (h) {
@@ -10294,6 +10458,7 @@ static void bridge_KeInitializeEvent(void)
     BRIDGE_MEM32(guest_va + 4) = initial_state ? 1 : 0; /* SignalState */
     BRIDGE_MEM32(guest_va + 8) = 0;  /* WaitListHead.Flink (self/empty) */
     BRIDGE_MEM32(guest_va + 12) = 0; /* WaitListHead.Blink (self/empty) */
+    ke_shadow_note_header(guest_va);
 
     g_eax = 0;
 }
@@ -10324,6 +10489,7 @@ static void bridge_KeInitializeMutant(void)
     BRIDGE_MEM32(guest_va + 4) = initial_owner ? 1 : 0; /* SignalState */
     BRIDGE_MEM32(guest_va + 8) = 0;   /* WaitListHead */
     BRIDGE_MEM32(guest_va + 12) = 0;
+    ke_shadow_note_header(guest_va);
 
     g_eax = 0;
 }
@@ -10352,6 +10518,7 @@ static void bridge_KeInitializeSemaphore(void)
     BRIDGE_MEM32(guest_va + 4) = (LONG)count; /* SignalState = count */
     BRIDGE_MEM32(guest_va + 8) = 0;   /* WaitListHead */
     BRIDGE_MEM32(guest_va + 12) = 0;
+    ke_shadow_note_header(guest_va);
 
     g_eax = 0;
 }
@@ -14280,7 +14447,7 @@ void xbox_bridge_kobj_handles(void (*fn)(void *ctx, uint32_t guest_va, void *h),
             fn(ctx, s_token_thobj[i], s_handle_table[i]);
     ke_shadow_init();
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++)
+    for (i = 0; i < g_ke_shadow_cap; i++)
         if (g_ke_shadow[i].in_use && g_ke_shadow[i].host_handle)
             fn(ctx, g_ke_shadow[i].guest_va, g_ke_shadow[i].host_handle);
     LeaveCriticalSection(&g_ke_shadow_cs);
@@ -14328,7 +14495,7 @@ void xbox_bridge_kobj_save(XboxKobjSaveCtx *c)
     /* KE shadows. */
     ke_shadow_init();
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
+    for (i = 0; i < g_ke_shadow_cap; i++) {
         uint32_t id;
         if (!g_ke_shadow[i].in_use)
             continue;
@@ -14441,13 +14608,12 @@ void xbox_bridge_kobj_reset(void)
 
     ke_shadow_init();
     EnterCriticalSection(&g_ke_shadow_cs);
-    for (i = 0; i < KE_SHADOW_SIZE; i++) {
+    for (i = 0; i < g_ke_shadow_cap; i++) {
         if (g_ke_shadow[i].in_use && g_ke_shadow[i].host_handle)
             CloseHandle(g_ke_shadow[i].host_handle);
-        g_ke_shadow[i].in_use = 0;
-        g_ke_shadow[i].guest_va = 0;
-        g_ke_shadow[i].host_handle = NULL;
+        memset(&g_ke_shadow[i], 0, sizeof g_ke_shadow[i]);
     }
+    g_ke_shadow_count = 0;
     LeaveCriticalSection(&g_ke_shadow_cs);
 
     if (g_timer_started) {
@@ -14571,18 +14737,21 @@ int xbox_bridge_kobj_load(XboxKobjLoadCtx *c, uint16_t type, XboxKobjRd *r)
         }
         ke_shadow_init();
         EnterCriticalSection(&g_ke_shadow_cs);
-        for (i = 0; i < KE_SHADOW_SIZE; i++)
-            if (!g_ke_shadow[i].in_use) {
-                g_ke_shadow[i].in_use = use ? use : 1;
-                g_ke_shadow[i].guest_va = va;
-                g_ke_shadow[i].host_handle = h;
-                done = 1;
-                break;
+        {
+            int k = ke_shadow_find_locked(va);
+            if (k >= 0) {                      /* a duplicate record: the last wins */
+                if (g_ke_shadow[k].host_handle && g_ke_shadow[k].host_handle != h)
+                    CloseHandle(g_ke_shadow[k].host_handle);
+                ke_shadow_erase_locked((uint32_t)k);
             }
+            done = ke_shadow_add_locked(va, h, use ? use : 1);
+            if (done)                          /* restored: never swept (see the table) */
+                g_ke_shadow[ke_shadow_find_locked(va)].hdr = 0;
+        }
         LeaveCriticalSection(&g_ke_shadow_cs);
         if (!done) {
             if (h) CloseHandle(h);
-            xbox_kobj_fail(c, "KE shadow table full");
+            xbox_kobj_fail(c, "KE shadow table: out of memory");
         }
         return 1;
     }
