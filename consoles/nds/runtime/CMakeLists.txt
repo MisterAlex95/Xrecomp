@@ -25,6 +25,8 @@ function(nds_core_exported target)
     set_target_properties(${target} PROPERTIES ENABLE_EXPORTS ON)
     if(APPLE)
         target_link_options(${target} PRIVATE "LINKER:-force_load,$<TARGET_FILE:nds_core>")
+        # -force_load is a linker option only: the plain link also gives the core's include path and build order.
+        target_link_libraries(${target} PRIVATE nds_core)
     else()
         target_link_libraries(${target} PRIVATE -Wl,--whole-archive nds_core -Wl,--no-whole-archive)
     endif()
