@@ -1,7 +1,7 @@
 import Foundation
 
-/// settings.json: the launcher's global settings. Unknown keys are dropped on save; a missing or broken file reads as
-/// the defaults.
+/// settings.json: the launcher's global settings, shared with the `xrecomp` command line. Keys the app does not know
+/// are kept on save; a missing or broken file reads as the defaults.
 public struct Settings: Codable, Equatable, Sendable {
     /// The repository checkout the launcher drives (docs/macos/launcher.md « Toolkit »); nil = found by itself.
     public var toolkitPath: String?
@@ -25,7 +25,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.globalDefaults = globalDefaults
     }
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case toolkitPath = "toolkit_path", libraryFolders = "library_folders", workRoot = "work_root"
         case pythonPath = "python_path", globalDefaults = "global_defaults"
     }
@@ -46,7 +46,8 @@ public struct Settings: Codable, Equatable, Sendable {
     }
 
     public func save(to url: URL) throws {
-        try writeAtomically(try JSONEncoder.pretty.encode(self), to: url)
+        let known = Set(CodingKeys.allCases.map(\.rawValue))
+        try writeAtomically(try keepingUnknownKeys(try JSONEncoder.pretty.encode(self), of: url, known: known), to: url)
     }
 
     /// The library folders as absolute URLs (`~` expanded), duplicates removed, order kept.

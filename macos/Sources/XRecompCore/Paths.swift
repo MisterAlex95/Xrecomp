@@ -92,6 +92,24 @@ public func writeAtomically(_ data: Data, to url: URL) throws {
     }
 }
 
+/// `encoded` (a JSON object) with the keys of the file now at url that `known` does not list put back. The `xrecomp`
+/// command line shares these files on a Mac (docs/desktop/cli.md « Storage ») and writes keys the app does not know
+/// (state.json's `title` and `console`): rewriting the file must not drop them. The file is read at save time, so a
+/// key written since the app loaded it survives too. `encoded` as it is when nothing is to be kept.
+public func keepingUnknownKeys(_ encoded: Data, of url: URL, known: Set<String>) throws -> Data {
+    guard let old = try? Data(contentsOf: url),
+          let oldObject = (try? JSONSerialization.jsonObject(with: old)) as? [String: Any] else { return encoded }
+    let extra = oldObject.filter { !known.contains($0.key) }
+    guard !extra.isEmpty, var object = (try JSONSerialization.jsonObject(with: encoded)) as? [String: Any] else {
+        return encoded
+    }
+    for (k, v) in extra where object[k] == nil { object[k] = v }
+    var data = try JSONSerialization.data(withJSONObject: object,
+                                          options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+    data.append(0x0A)
+    return data
+}
+
 public extension JSONEncoder {
     static var pretty: JSONEncoder {
         let e = JSONEncoder()

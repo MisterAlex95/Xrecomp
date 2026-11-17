@@ -1,6 +1,8 @@
 import Foundation
 
-/// titles/<TID>/state.json: what the launcher remembers about a title between runs.
+/// titles/<TID>/state.json: what the launcher remembers about a title between runs. The `xrecomp` command line
+/// writes the same file and adds `title` and `console`, which it reads back when the source is gone: a save keeps
+/// every key this type does not know.
 public struct TitleRecord: Codable, Equatable, Sendable {
     public var sourcePath: String?
     public var lastPlayed: Date?
@@ -29,7 +31,7 @@ public struct TitleRecord: Codable, Equatable, Sendable {
         }
     }
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case sourcePath = "source_path", lastPlayed = "last_played", playSeconds = "play_seconds", runs
         case lastPrepare = "last_prepare", enhancements
     }
@@ -58,7 +60,8 @@ public struct TitleRecord: Codable, Equatable, Sendable {
     }
 
     public func save(to url: URL) throws {
-        try writeAtomically(try TitleRecord.encoder.encode(self), to: url)
+        let known = Set(CodingKeys.allCases.map(\.rawValue))
+        try writeAtomically(try keepingUnknownKeys(try TitleRecord.encoder.encode(self), of: url, known: known), to: url)
     }
 
     /// A run that lasted `seconds` and ended at `end`.

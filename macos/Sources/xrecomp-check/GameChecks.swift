@@ -272,6 +272,32 @@ func registerGameChecks() {
         expectEq(r.runs, 2)
     }
 
+    check("state: keys written by the xrecomp command line survive the app's save") {
+        let f = tempDir("state-cli").appendingPathComponent("state.json")
+        // What tools/xrecomp writes (update_state: source_path, title, console, play time).
+        write(f, "{\n  \"console\": \"xbox\",\n  \"play_seconds\": 60.0,\n  \"runs\": 1,\n"
+                 + "  \"source_path\": \"/g/x.iso\",\n  \"title\": \"Synthetic Game\",\n"
+                 + "  \"extra\": {\"nested\": [1, true]}\n}\n")
+        var r = TitleRecord.load(from: f)
+        expectEq(r.runs, 1)
+        r.recordRun(seconds: 30)
+        r.enhancements = false
+        try r.save(to: f)
+        let back = (try JSONSerialization.jsonObject(with: Data(contentsOf: f))) as? [String: Any] ?? [:]
+        expectEq(back["title"] as? String, "Synthetic Game")
+        expectEq(back["console"] as? String, "xbox")
+        expectEq(((back["extra"] as? [String: Any])?["nested"] as? [Any])?.count, 2)
+        expectEq(back["runs"] as? Int, 2, "the app's own keys are the app's")
+        expectEq(back["enhancements"] as? Bool, false)
+        expectEq(TitleRecord.load(from: f), r)
+        // A key the app knows and has cleared is not brought back from the old file.
+        r.enhancements = nil
+        try r.save(to: f)
+        let again = (try JSONSerialization.jsonObject(with: Data(contentsOf: f))) as? [String: Any] ?? [:]
+        expectNil(again["enhancements"])
+        expectEq(again["title"] as? String, "Synthetic Game")
+    }
+
     check("storage: sizes, deletes never follow the game link") {
         let home = AppPaths(root: tempDir("store"))
         let t = home.title("12345678")

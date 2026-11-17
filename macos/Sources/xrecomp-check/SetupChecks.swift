@@ -99,6 +99,12 @@ func registerSetupChecks() {
         let partial = Settings.load(from: f)
         expectEq(partial.toolkitPath, "/t")
         expectEq(partial.libraryFolders, ["~/Documents/xbox"])
+        // ... and kept on save (the xrecomp command line shares the file).
+        var changed = partial
+        changed.workRoot = "/w"
+        try changed.save(to: f)
+        expect(read(f).contains("\"future\""), read(f))
+        expectEq(Settings.load(from: f), changed)
     }
 
     check("paths: XRECOMP_HOME, title layout, work root") {
