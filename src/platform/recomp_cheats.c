@@ -1661,8 +1661,10 @@ static void gecko_run(gecko_ctx *x, const uint32_t *w, uint32_t n)
         uint32_t len = gecko_len(w + 2 * i, n - i - 1, &why), next = i + (len ? len : 1);
         /* gecko_finish checked the lines in order up to the first F0; a goto (64 / 66 / 68, a 62 repeat) can land
          * past it or inside a code's data, where a length was never checked: a 06 there read up to 2^29 lines past
-         * the cheat, an 08 on the last line one line past. The run ends there. */
-        if (len > n - i)
+         * the cheat, an 08 on the last line one line past. The run ends there, and at a code gecko_len refuses (0):
+         * a C2 whose line count runs past the cheat returns 0, and its case would copy its count of words from past
+         * the end into the hook area. */
+        if (!len || len > n - i)
             break;
         uint32_t base = (t & 0x10) ? po : ba, off = a & 0x01FFFFFFu;
         unsigned T = (a >> 20) & 0xF, Y = (a >> 16) & 0xF, N = a & 0xF;

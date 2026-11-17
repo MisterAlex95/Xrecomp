@@ -908,6 +908,26 @@ static void test_gc_gecko(void)
     apply(&b, 1);
     CHECK_EQ(r32(0x4200), 0x48000100u);
 
+    /* A goto onto a data line whose code runs past the end (a C2 / 06 count, an 08's second line), or the same
+     * code after an F0: the run stops there, nothing is read past the code and nothing is written */
+    static const char *const past_end[] = {
+        "66000001 00000000\n06001000 00000008\nC2004100 000000FF\n",
+        "66000001 00000000\n06001000 00000008\n06001000 00010000\n",
+        "66000001 00000000\n06001000 00000008\n08001000 00000001\n",
+        "68000001 00000000\n06001000 00000008\nC2004100 000000FF\n",
+        "F0000000 00000000\nC2004100 000000FF\n",
+    };
+    for (size_t k = 0; k < sizeof past_end / sizeof *past_end; k++) {
+        memset(ram, 0, sizeof ram);
+        c = one(RECOMP_CHEAT_GC, "gecko", past_end[k]);
+        CHECK(c && !c->error[0]);
+        before = writes;
+        apply(&b, 1);
+        CHECK_EQ(writes, before);
+        CHECK_EQ(r32(0x1800), 0);
+        CHECK_EQ(r32(0x4100), 0);
+    }
+
     /* refused with a reason */
     c = one(RECOMP_CHEAT_GC, "gecko", "C0000000 00000001\n4E800020 00000000\n");
     CHECK(c && strstr(c->error, "C0"));
