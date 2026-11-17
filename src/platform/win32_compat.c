@@ -445,6 +445,9 @@ typedef struct w32_object {
 
 static w32_object    **s_htab;
 static uint32_t        s_htab_len;
+/* No free slot below this one: obj_handle scans from here, not from 0, so
+ * creating a handle with N live ones is not O(N) under the lock. */
+static uint32_t        s_htab_free_hint;
 static pthread_mutex_t s_htab_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Register o and return its handle. Idempotent: an object keeps one id for
@@ -461,7 +464,7 @@ static HANDLE obj_handle(w32_object *o)
         pthread_mutex_unlock(&s_htab_lock);
         return existing;
     }
-    for (slot = 0; slot < s_htab_len; slot++)
+    for (slot = s_htab_free_hint; slot < s_htab_len; slot++)
         if (!s_htab[slot]) break;
     if (slot == s_htab_len) {
         uint32_t grown = s_htab_len ? s_htab_len * 2 : 256;
@@ -472,6 +475,7 @@ static HANDLE obj_handle(w32_object *o)
         s_htab_len = grown;
     }
     s_htab[slot] = o;
+    s_htab_free_hint = slot + 1;
     o->handle_id = HTAB_TAG | ((slot + 1) * HTAB_STRIDE);
     h = (HANDLE)(uintptr_t)o->handle_id;
     pthread_mutex_unlock(&s_htab_lock);
@@ -504,7 +508,10 @@ static void obj_unregister(w32_object *o)
     if (!o || !o->handle_id) return;
     pthread_mutex_lock(&s_htab_lock);
     slot = (o->handle_id & HTAB_MASK) / HTAB_STRIDE - 1;
-    if (slot < s_htab_len && s_htab[slot] == o) s_htab[slot] = NULL;
+    if (slot < s_htab_len && s_htab[slot] == o) {
+        s_htab[slot] = NULL;
+        if (slot < s_htab_free_hint) s_htab_free_hint = slot;
+    }
     o->handle_id = 0;
     pthread_mutex_unlock(&s_htab_lock);
 }
