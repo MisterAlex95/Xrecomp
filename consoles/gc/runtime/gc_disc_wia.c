@@ -130,7 +130,12 @@ static int lzma2_decode(const uint8_t *src, size_t n, uint8_t *out, size_t out_l
     uint32_t dict = dict_prop == 40 ? 0xFFFFFFFFu : (2u | (dict_prop & 1u)) << (dict_prop / 2 + 11);
     CLzmaDec dec;
     LzmaDec_Construct(&dec);
-    bool have_props = false;
+    /* Construct sets the pointers only. A stream whose first chunk does not reset the dictionary (not LZMA2,
+     * but a damaged file can say so) would otherwise decode with whatever the stack held here, and a match
+     * distance checked against it can reach outside the output. */
+    dec.processedPos = 0;
+    dec.checkDicSize = 0;
+    bool have_props = false, dict_reset = false;
     size_t i = 0;
     int rc = -1;
     dec.dicPos = 0;
@@ -148,6 +153,10 @@ static int lzma2_decode(const uint8_t *src, size_t n, uint8_t *out, size_t out_l
             size_t len = ((size_t)src[i] << 8 | src[i + 1]) + 1;
             i += 2;
             if (i + len > n || dec.dicPos + len > out_len || (c == 2 && !have_props && !dec.probs && dec.dicPos == 0))
+                goto done;
+            if (c == 1)
+                dict_reset = true;
+            else if (!dict_reset)
                 goto done;
             if (!dec.probs) { /* stored data before any LZMA chunk: a decoder to keep the dictionary state */
                 uint8_t p5[5] = {0, (uint8_t)dict, (uint8_t)(dict >> 8), (uint8_t)(dict >> 16), (uint8_t)(dict >> 24)};
@@ -185,6 +194,10 @@ static int lzma2_decode(const uint8_t *src, size_t n, uint8_t *out, size_t out_l
         }
         if (i + pack > n || dec.dicPos + unpack > out_len)
             goto done;
+        if (mode == 3)
+            dict_reset = true;
+        else if (!dict_reset)
+            goto done; /* the first chunk of an LZMA2 stream resets the dictionary */
         LzmaDec_InitDicAndState(&dec, mode == 3, mode >= 1);
         SizeT src_len = pack;
         ELzmaStatus st;

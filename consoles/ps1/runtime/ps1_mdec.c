@@ -469,7 +469,10 @@ int ps1_mdec_state_load(ps1_mdec *d, const uint8_t *in, size_t n)
     if (n < sizeof c)
         return -1;
     memcpy(&c, in, sizeof c);
-    if (c.out_pos > c.out_len || n != sizeof c + c.out_len * sizeof(uint32_t))
+    /* out_len comes from the file: bounded by what the file holds before it is multiplied (a huge value
+     * wrapped the product, passed the check and left out_len far past the buffer). */
+    if (c.out_len > (n - sizeof c) / sizeof(uint32_t) || c.out_pos > c.out_len
+        || n != sizeof c + c.out_len * sizeof(uint32_t))
         return -1;
     uint32_t *buf = d->out;
     size_t cap = d->out_cap;
