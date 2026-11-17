@@ -12,6 +12,7 @@
 #include "host_pad.h"
 #include "host_window.h"
 #include "input_overlay.h"
+#include "jni_text.h"
 #include "video/video_player.h"
 
 #define JNI_FN(name) Java_fr_adserver_xrecomp_CompanionNative_##name
@@ -116,7 +117,7 @@ JNIEXPORT jstring JNICALL JNI_FN(nativePorts)(JNIEnv *env, jclass cls)
         if (len >= sizeof out)
             break;
     }
-    return (*env)->NewStringUTF(env, out);
+    return jni_utf8_string(env, out);   /* the names come from the pad, cut by snprintf: may not be UTF-8 */
 }
 
 JNIEXPORT void JNICALL JNI_FN(nativeOverlayOff)(JNIEnv *env, jclass cls)

@@ -18,25 +18,14 @@
 
 #include <android/log.h>
 
+#include "jni_text.h"
 #include "xiso.h"
 
 #define TAG "xboxrecomp"
 #define PROGRESS_MIN_NS 100000000LL   /* at most ~10 calls into Java per second, plus every file start */
 
 /* Paths in an XISO are 8-bit names; NewStringUTF wants modified UTF-8. Anything outside ASCII becomes '?' (the path
- * is only shown in the progress line). */
-static jstring ascii_string(JNIEnv *env, const char *s)
-{
-    char buf[512];
-    size_t i = 0;
-
-    for (; s && s[i] && i < sizeof buf - 1; i++) {
-        unsigned char c = (unsigned char)s[i];
-        buf[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
-    }
-    buf[i] = '\0';
-    return (*env)->NewStringUTF(env, buf);
-}
+ * is only shown in the progress line): jni_ascii_string (jni_text.h). */
 
 static int64_t now_ns(void)
 {
@@ -59,7 +48,7 @@ Java_fr_adserver_xrecomp_XisoNative_probe(JNIEnv *env, jclass cls, jint fd, jobj
                         rc, rc == 0 ? "ok" : xiso_strerror(rc), title, (unsigned long long)total,
                         has_xbe ? "found" : "missing");
     if (title_out && (*env)->GetArrayLength(env, title_out) > 0) {
-        jstring t = ascii_string(env, title);
+        jstring t = jni_ascii_string(env, title);
         (*env)->SetObjectArrayElement(env, title_out, 0, t);
         (*env)->DeleteLocalRef(env, t);
     }
@@ -89,7 +78,7 @@ static int progress_cb(uint64_t done, uint64_t total, const char *path, void *us
         return 0;
     ctx->last_ns = t;
 
-    jstring p = ascii_string(env, path ? path : "");
+    jstring p = jni_ascii_string(env, path ? path : "");
     jboolean cancel = (*env)->CallBooleanMethod(env, ctx->listener, ctx->on_progress, (jlong)done, (jlong)total, p);
     (*env)->DeleteLocalRef(env, p);
     if ((*env)->ExceptionCheck(env)) {
@@ -216,7 +205,7 @@ Java_fr_adserver_xrecomp_XisoNative_probeParts(JNIEnv *env, jclass cls, jintArra
                         has_xbe ? "found" : "missing");
     xiso_source_close(src);
     if (title_out && (*env)->GetArrayLength(env, title_out) > 0) {
-        jstring t = ascii_string(env, title);
+        jstring t = jni_ascii_string(env, title);
         (*env)->SetObjectArrayElement(env, title_out, 0, t);
         (*env)->DeleteLocalRef(env, t);
     }
