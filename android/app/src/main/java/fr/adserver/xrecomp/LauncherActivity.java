@@ -7755,8 +7755,9 @@ public class LauncherActivity extends Activity {
         return l;
     }
 
+    /** The running game's keys asked at each download (CloudSaves.busy): the sync runs on its own thread. */
     private CloudSaves cloud(int connectMs, int readMs) {
-        return new CloudSaves(cloudDrive(connectMs, readMs), storageDirs(), Build.MODEL, cloudBusyKeys());
+        return CloudSaves.live(cloudDrive(connectMs, readMs), storageDirs(), Build.MODEL, this::cloudBusyKeys);
     }
 
     private boolean cloudSyncing() {
@@ -8070,13 +8071,35 @@ public class LauncherActivity extends Activity {
      * Before a game starts (key: its saves; null: a running game brought back, nothing to check): with the account
      * connected and Sync automatically on, the sync on its way finishes and this game's saves are synced (the
      * cloud's come down when newer), with short timeouts; then go. Offline or slow, the game starts all the same.
+     * Sync automatically off, a sync on its way (Sync now) still finishes first: it could otherwise install the
+     * cloud's saves into this game's folder while the game runs.
      */
     private void cloudBeforeLaunch(String key, Runnable go) {
         if (cloudLaunching)
             return;
         CloudSaves.State st = key == null || !cloudConfigured() ? null : CloudSaves.load(getFilesDir());
         if (st == null || !st.connected() || !st.auto) {
-            go.run();
+            Thread running = key != null && cloudSyncing() ? cloudSyncer : null;
+            if (running == null) {
+                go.run();
+                return;
+            }
+            cloudLaunching = true;
+            setNote(getString(R.string.CLOUD_CHECKING), NOTE_INFO);
+            Thread t = new Thread(() -> {
+                try {
+                    running.join();
+                } catch (InterruptedException ignored) {
+                }
+                Log.i(TAG, "launcher: cloud: " + key + " starts after the sync on its way");
+                runOnUiThread(() -> {
+                    cloudLaunching = false;
+                    if (!isFinishing())
+                        go.run();
+                });
+            }, "xba-cloud-launch");
+            cloudSyncer = t;
+            t.start();
             return;
         }
         cloudLaunching = true;

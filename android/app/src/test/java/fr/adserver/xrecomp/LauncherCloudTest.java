@@ -188,6 +188,59 @@ public class LauncherCloudTest {
     }
 
     /**
+     * Sync automatically off: Sync now, then Play while the sync is still on its way. The game waits for the sync
+     * (« Checking cloud saves… »), which could otherwise install the cloud's saves into its folder while it runs.
+     */
+    @Test
+    public void playWaitsForTheSyncOnItsWay() throws Exception {
+        LauncherActivity.cloudClientForTest = new String[] { "client", "secret" };
+        LauncherActivity.cloudHttpFactory = c -> google;
+        GoogleDrive drive = new GoogleDrive(google, "client", "secret");
+        GoogleDrive.Tokens t = new GoogleDrive.Tokens();
+        t.refresh = "rt";
+        t.email = "player@example.com";
+        CloudSaves.connect(app.getFilesDir(), t);
+        CloudSaves.setAuto(app.getFilesDir(), false);
+        Storage.Dirs other = new Storage.Dirs(tmp.newFolder("other"), tmp.newFolder("othere"));
+        CloudSaves.connect(other.filesDir, t);
+        new CloudSaves(drive, new Storage.Dirs(app.getFilesDir(), null), "here", null).syncAll(0);
+        new CloudSaves(drive, other, "other", null).syncAll(0);
+        TestSupport.write(new File(other.saveDir(), "UDATA/4d530004/save.bin"), "level 5 elsewhere");
+        new CloudSaves(drive, other, "other", null).syncAll(0);
+
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch downloading = new java.util.concurrent.CountDownLatch(1);
+        google.onDownload = () -> {
+            downloading.countDown();
+            try {
+                release.await(20, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+            }
+        };
+        LauncherActivity a = launch();
+        a.goForTest(LauncherActivity.Screen.CLOUD);
+        idle(300);
+        menuRow(a, app.getString(R.string.CLOUD_SYNC_NOW)).performClick();
+        assertTrue("the sync is downloading", downloading.await(10, java.util.concurrent.TimeUnit.SECONDS));
+        a.goForTest(LauncherActivity.Screen.HOME);
+        idle(300);
+        a.forceFocusForTest();
+        idle(300);
+        a.dispatchKeyEvent(new android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN,
+                                                     android.view.KeyEvent.KEYCODE_BUTTON_START));
+        a.dispatchKeyEvent(new android.view.KeyEvent(android.view.KeyEvent.ACTION_UP,
+                                                     android.view.KeyEvent.KEYCODE_BUTTON_START));
+        idle(300);
+        assertEquals(app.getString(R.string.CLOUD_CHECKING), a.noteForTest());
+        assertNull("the game waits for the sync", shadowOf(a).getNextStartedActivity());
+        release.countDown();
+        waitCloud(a);
+        File save = new File(GameTheme.saveDir(app), "UDATA/4d530004/save.bin");
+        assertEquals("level 5 elsewhere", new String(java.nio.file.Files.readAllBytes(save.toPath()), "UTF-8"));
+        assertEquals(ShellActivity.class.getName(), shadowOf(a).getNextStartedActivity().getComponent().getClassName());
+    }
+
+    /**
      * Connected, Sync automatically on: the launcher's resume brings back what another device sent; a game started
      * later gets the cloud's newer saves first (« Checking cloud saves… »), then starts.
      */

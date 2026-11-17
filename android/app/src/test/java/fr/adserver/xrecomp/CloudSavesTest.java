@@ -49,6 +49,8 @@ public class CloudSavesTest {
         /** False: the player has not said yes yet (pending at every poll). */
         volatile boolean allow = true;
         String pendingUntilPoll = "2";
+        /** Runs as a file's content is served (a download on its way), or null. */
+        volatile Runnable onDownload;
 
         @Override
         public GoogleDrive.Reply send(String method, String url, Map<String, String> h, byte[] body)
@@ -86,6 +88,9 @@ public class CloudSavesTest {
                     return json(200, new JSONObject().put("files", files));
                 }
                 if (method.equals("GET") && url.contains("alt=media")) {
+                    Runnable hook = onDownload;
+                    if (hook != null)
+                        hook.run();
                     String id = url.substring(GoogleDrive.FILES_URL.length() + 1, url.indexOf('?'));
                     return new GoogleDrive.Reply(200, content.get(id));
                 }
@@ -264,6 +269,28 @@ public class CloudSavesTest {
         assertEquals(Collections.singletonList(TID), r.pending);
         assertFalse(new File(b.saveDir(), "UDATA/4d530004").exists());
         assertEquals(Collections.singletonList(TID), sync(b).downloaded);
+    }
+
+    /**
+     * The game starts while the sync is downloading its saves (Sync now, then Play): the running game is asked again
+     * before the install, so its folder is not replaced under it; pending, it comes down at the next sync.
+     */
+    @Test
+    public void gameStartedDuringTheSyncIsNotReplaced() throws Exception {
+        signIn(a);
+        signIn(b);
+        save(a, "UDATA/4d530004/save.dat", "a");
+        sync(a);
+        java.util.Set<String> running = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        google.onDownload = () -> running.add(TID);
+        CloudSaves.Report r = CloudSaves.live(drive, b, "test", () -> running).syncAll(System.currentTimeMillis());
+        assertEquals(Collections.singletonList(TID), r.pending);
+        assertTrue(r.downloaded.isEmpty());
+        assertFalse(new File(b.saveDir(), "UDATA/4d530004").exists());
+        google.onDownload = null;
+        running.clear();
+        assertEquals(Collections.singletonList(TID), sync(b).downloaded);
+        assertEquals("a", read(b, "UDATA/4d530004/save.dat"));
     }
 
     @Test

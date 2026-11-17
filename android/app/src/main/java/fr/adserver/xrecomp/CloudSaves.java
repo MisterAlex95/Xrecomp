@@ -16,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.function.Supplier;
 
 /**
  * Cloud saves (docs/android/app-shell.md « Cloud saves »): each game's saves as one zip (SaveArchive, one title) in
@@ -25,7 +26,7 @@ import java.util.TreeSet;
  * hash, the cloud's and the base: only this device changed → upload; only the cloud changed → download (the device's
  * saves kept in save/.backup/<key>/ as an import does); both changed → a conflict, nothing moves until the player
  * picks a side. Saves deleted on this device stay in the cloud (no deletion goes up). A running game's saves are
- * never downloaded (pending until it ends); they may go up.
+ * never downloaded (pending until it ends; asked at each download, not once per sync); they may go up.
  *
  * State in <files>/cloud/state.json (the account's refresh token and email, « sync automatically », per game its base
  * and conflict), private to the app. One sync at a time (a static lock). Plain Java.
@@ -142,17 +143,34 @@ final class CloudSaves {
     final Storage.Dirs dirs;
     final File filesDir;
     final String device;
-    /** Keys whose saves must not be replaced now (the running game's). */
-    final Collection<String> busy;
+    /**
+     * Keys whose saves must not be replaced now (the running game's), asked again at each download: a sync lasts,
+     * and a game can start meanwhile, so a list taken when the sync began is not enough.
+     */
+    final Supplier<Collection<String>> busy;
     private String access;
     private long accessUntil;
 
     CloudSaves(GoogleDrive drive, Storage.Dirs dirs, String device, Collection<String> busy) {
+        this(drive, dirs, busy == null ? null : () -> busy, device);
+    }
+
+    /** busy asked again at each download. */
+    static CloudSaves live(GoogleDrive drive, Storage.Dirs dirs, String device, Supplier<Collection<String>> busy) {
+        return new CloudSaves(drive, dirs, busy, device);
+    }
+
+    private CloudSaves(GoogleDrive drive, Storage.Dirs dirs, Supplier<Collection<String>> busy, String device) {
         this.drive = drive;
         this.dirs = dirs;
         this.filesDir = dirs.filesDir;
         this.device = device == null ? "" : device;
-        this.busy = busy == null ? Collections.emptySet() : busy;
+        this.busy = busy == null ? Collections::emptySet : busy;
+    }
+
+    private boolean busy(String key) {
+        Collection<String> b = busy.get();
+        return b != null && b.contains(key);
     }
 
     /** Connected: the tokens of a finished sign-in are kept (any earlier account's bases are dropped). */
@@ -299,11 +317,15 @@ final class CloudSaves {
             break;
         }
         case DOWNLOAD: {
-            if (busy.contains(key)) {
+            if (busy(key)) {
                 rep.pending.add(key);
                 break;
             }
             byte[] zip = withToken(s, t -> drive.download(t, rf.id));
+            if (busy(key)) {   // its game started during the download: its folder is not renamed under it
+                rep.pending.add(key);
+                break;
+            }
             SaveArchive.Unpacked u = SaveArchive.unpack(dirs, new ByteArrayInputStream(zip));
             SaveArchive.install(dirs, u, Collections.singletonList(key));
             // The base is the cloud's hash: should this device's differ after all, its next sync uploads it.
