@@ -1167,6 +1167,62 @@ static int overwrite_take(int fd)
     return 0;
 }
 
+/* Reads and writes at an explicit ByteOffset.
+ *
+ * They were lseek() then read()/write(): two calls on a file position that
+ * every user of the handle shares (a duplicated handle is the same object,
+ * so the same fd). Two guest threads streaming from one pack file with
+ * explicit offsets -- a loader and a music stream -- interleaved as
+ * lseek(A), lseek(B), read -> the bytes at B, reported as a successful read
+ * at A. Kernel calls drop the guest CPU lock, so that lock does not order
+ * them. pread()/pwrite() take the offset in the call. A regular file is read
+ * until Length or end of file, so a short read does not look like the end.
+ * Afterwards the position is left after the bytes moved, as NT does for a
+ * synchronous handle and as the lseek() version did; reads without an offset
+ * still use it. (The Win32 backend passes an OVERLAPPED offset, which is
+ * already positioned I/O.) */
+static ssize_t positioned_read(int fd, void *buf, size_t len, off_t off)
+{
+    size_t done = 0;
+
+    while (done < len) {
+        ssize_t n = pread(fd, (char *)buf + done, len - done, off + (off_t)done);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            if (done == 0)
+                return -1;
+            break;
+        }
+        if (n == 0)
+            break;
+        done += (size_t)n;
+    }
+    lseek(fd, off + (off_t)done, SEEK_SET);
+    return (ssize_t)done;
+}
+
+static ssize_t positioned_write(int fd, const void *buf, size_t len, off_t off)
+{
+    size_t done = 0;
+
+    while (done < len) {
+        ssize_t n = pwrite(fd, (const char *)buf + done, len - done, off + (off_t)done);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            if (done == 0)
+                return -1;
+            break;
+        }
+        if (n == 0)
+            break;
+        done += (size_t)n;
+    }
+    lseek(fd, off + (off_t)done, SEEK_SET);
+    return (ssize_t)done;
+}
+
 static void unix_to_filetime(time_t sec, long nsec, LARGE_INTEGER* out)
 {
     /* 100-ns ticks since 1601-01-01 */
@@ -1516,14 +1572,16 @@ NTSTATUS __stdcall xbox_NtReadFile(
     }
 
     overwrite_settle(fd);
-    if (ByteOffset && ByteOffset->QuadPart >= 0)
-        lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
 
     /* read() into a write-protected code page would fail with EFAULT, not
      * fault: open it first, which names it (XBA-118, recomp_smc.h). Weak:
      * a test that links this file alone has no recomp_smc.c. */
     xbox_SmcHostWrite(Buffer, Length);
-    ssize_t n = read(fd, Buffer, Length);
+    ssize_t n;
+    if (ByteOffset && ByteOffset->QuadPart >= 0)
+        n = positioned_read(fd, Buffer, Length, (off_t)ByteOffset->QuadPart);
+    else
+        n = read(fd, Buffer, Length);
     if (n < 0) {
         XBOX_TRACE(XBOX_LOG_FILE, "NtReadFile(handle=%p) errno=%d", FileHandle, errno);
         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
@@ -1563,10 +1621,12 @@ NTSTATUS __stdcall xbox_NtWriteFile(
     }
 
     overwrite_settle(fd);
-    if (ByteOffset && ByteOffset->QuadPart >= 0)
-        lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
 
-    ssize_t n = write(fd, Buffer, Length);
+    ssize_t n;
+    if (ByteOffset && ByteOffset->QuadPart >= 0)
+        n = positioned_write(fd, Buffer, Length, (off_t)ByteOffset->QuadPart);
+    else
+        n = write(fd, Buffer, Length);
     if (n < 0) {
         XBOX_TRACE(XBOX_LOG_FILE, "NtWriteFile(handle=%p) errno=%d", FileHandle, errno);
         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
