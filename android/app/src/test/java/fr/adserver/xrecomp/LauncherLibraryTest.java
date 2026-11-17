@@ -644,6 +644,31 @@ public class LauncherLibraryTest {
     }
 
     /**
+     * AND-5: the scan thread outlives its activity. A launcher that goes for good (Play finishes it) cancels its
+     * scan; one the system destroys to make it again lets it finish.
+     */
+    @Test
+    public void aFinishedLauncherCancelsItsScan() throws Exception {
+        org.robolectric.android.controller.ActivityController<LauncherActivity> c =
+            Robolectric.buildActivity(LauncherActivity.class).setup();
+        idle(300);
+        LauncherActivity a = c.get();
+        waitScan(a);
+        assertFalse(a.scanCancelledForTest());
+        c.pause().stop().destroy();                  // not finishing: a recreation
+        assertFalse(a.scanCancelledForTest());
+
+        org.robolectric.android.controller.ActivityController<LauncherActivity> d =
+            Robolectric.buildActivity(LauncherActivity.class).setup();
+        idle(300);
+        LauncherActivity b = d.get();
+        waitScan(b);
+        b.finish();
+        d.pause().stop().destroy();
+        assertTrue("the scan of a finished launcher is cancelled", b.scanCancelledForTest());
+    }
+
+    /**
      * Export saves, and the system ends the app's process while the picker is in front: the activity made again
      * from its saved state still knows which games to export, and writes them to the picked file.
      */

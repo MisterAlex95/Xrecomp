@@ -52,6 +52,46 @@ public class LibraryStoreTest {
         return r;
     }
 
+    /**
+     * AND-5: two writers of one file (two library scans writing index.json) each go through a temporary file of
+     * their own: the file always holds one writer's complete text, and no temporary file is left.
+     */
+    @Test
+    public void concurrentAtomicWritesNeverMix() throws Exception {
+        File f = new File(files, "index.json");
+        StringBuilder a = new StringBuilder(), b = new StringBuilder();
+        for (int i = 0; i < 20000; i++) {
+            a.append('a');
+            b.append('b');
+        }
+        String ta = a.toString(), tb = b.append("tail").toString();
+        java.util.concurrent.atomic.AtomicReference<Throwable> failed = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread[] ws = new Thread[2];
+        for (int w = 0; w < 2; w++) {
+            String text = w == 0 ? ta : tb;
+            ws[w] = new Thread(() -> {
+                try {
+                    for (int i = 0; i < 300; i++) {
+                        Library.writeAtomically(f, text);
+                        String got = new String(java.nio.file.Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8);
+                        if (!got.equals(ta) && !got.equals(tb))
+                            throw new AssertionError("mixed text, " + got.length() + " chars");
+                    }
+                } catch (Throwable t) {
+                    failed.compareAndSet(null, t);
+                }
+            });
+            ws[w].start();
+        }
+        for (Thread t : ws)
+            t.join(60_000);
+        if (failed.get() != null)
+            throw new AssertionError(failed.get());
+        String got = new String(java.nio.file.Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(got.equals(ta) || got.equals(tb));
+        assertEquals("no temporary file left", Arrays.asList("index.json"), Arrays.asList(files.list()));
+    }
+
     @Test
     public void gamesRoundTrip() throws Exception {
         Library.Games g = new Library.Games();

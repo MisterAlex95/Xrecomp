@@ -263,17 +263,30 @@ final class Library {
         }
     }
 
+    /**
+     * Writes file through a temporary file of its own beside it, then a rename: a reader sees the old text or the new
+     * one. The temporary name is unique (AND-5): two writers of one file (two library scans, a scan and Remove folder)
+     * never fill the same temporary file; the last rename wins with one writer's complete text.
+     */
     static void writeAtomically(File file, String text) throws IOException {
-        File dir = file.getParentFile();
+        File dir = file.getAbsoluteFile().getParentFile();
         if (dir != null && !(dir.mkdirs() || dir.isDirectory()))
             throw new IOException("cannot create " + dir);
-        File tmp = new File(file.getPath() + ".tmp");
-        try (FileOutputStream out = new FileOutputStream(tmp)) {
-            out.write(text.getBytes(StandardCharsets.UTF_8));
-            out.getFD().sync();
+        File tmp = File.createTempFile("." + file.getName() + ".", ".tmp", dir);
+        boolean done = false;
+        try {
+            try (FileOutputStream out = new FileOutputStream(tmp)) {
+                out.write(text.getBytes(StandardCharsets.UTF_8));
+                out.getFD().sync();
+            }
+            if (!tmp.renameTo(file))
+                throw new IOException("cannot rename " + tmp + " to " + file);
+            done = true;
+        } finally {
+            if (!done)
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
         }
-        if (!tmp.renameTo(file))
-            throw new IOException("cannot rename " + tmp + " to " + file);
     }
 
     /** « local-xxxxxxxx »: the key of a game whose XBE has no title ID, from a hash of its path. */

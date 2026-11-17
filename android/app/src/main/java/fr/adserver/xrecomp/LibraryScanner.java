@@ -875,9 +875,19 @@ final class LibraryScanner {
         return scanLibrary(c, java.util.Collections.singletonList(new Root(first, t)), listener, cancel);
     }
 
+    /** One library scan at a time in the process (AND-5): a launcher's scan can outlive its activity. */
+    private static final Object SCAN_LOCK = new Object();
+
     static Result scanLibrary(Context c, List<Root> roots, Listener listener, Cancel cancel) {
         if (roots == null || roots.isEmpty())
             return null;
+        // A second scan waits for the first and then starts from the index it wrote, never from an older one.
+        synchronized (SCAN_LOCK) {
+            return scanLibraryLocked(c, roots, listener, cancel);
+        }
+    }
+
+    private static Result scanLibraryLocked(Context c, List<Root> roots, Listener listener, Cancel cancel) {
         File files = c.getFilesDir();
         File indexFile = Library.indexFile(files);
         LibraryIndex prev = LibraryIndex.read(indexFile);

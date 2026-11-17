@@ -648,6 +648,10 @@ public class LauncherActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        // AND-5: the scan thread outlives the activity (Play finishes it): a launcher that goes for good stops it; the
+        // next one scans again. A recreation by the system lets it finish (it writes index.json).
+        if (isFinishing())
+            scanCancel = true;
         if (feedback != null)
             feedback.release();
         super.onDestroy();
@@ -5632,6 +5636,10 @@ public class LauncherActivity extends Activity {
 
     Thread scannerForTest() {
         return scanner;
+    }
+
+    boolean scanCancelledForTest() {
+        return scanCancel;
     }
 
     Thread workerForTest() {
