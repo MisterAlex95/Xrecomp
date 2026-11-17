@@ -5101,6 +5101,39 @@ static NTSTATUS bridge_create_file_open(
     return st;
 }
 
+/* The per-call [READ] and [FILE] success lines (KRN-5).
+ *
+ * They printed and flushed on every guest read and every successful
+ * NtCreateFile. On Android stderr is a pipe a thread pumps to logcat
+ * (android_log.h), so a title streaming in small reads paid a formatted
+ * line and a write per read on the thread whose stall is audio dry time,
+ * and blocked when the 64 KB pipe filled. Now the first IO_LOG_FIRST of
+ * each kind print, then only failures, unless RECOMP_READ_LOG=1 (every
+ * read) or RECOMP_MISSING_FILES=all (every open); RECOMP_READ_LOG=0 drops
+ * the successful ones from the start. The [READ] window summary still
+ * gives the health figure every 10 s. */
+#define IO_LOG_FIRST 64
+
+static int bridge_read_log_mode(void)       /* 0 never, 1 first N, 2 every */
+{
+    static volatile int mode = -1;
+    if (mode < 0) {
+        const char *v = getenv("RECOMP_READ_LOG");
+        mode = !v || !*v ? 1 : (v[0] == '0' ? 0 : 2);
+    }
+    return mode;
+}
+
+static int bridge_io_log_success(volatile LONG *count, int every)
+{
+    int mode = bridge_read_log_mode();
+    if (every || mode == 2)
+        return 1;
+    if (mode == 0)
+        return 0;
+    return InterlockedIncrement(count) <= IO_LOG_FIRST;
+}
+
 /* Every guest open -- NtCreateFile, NtOpenFile, IoCreateFile -- comes through
  * here, so this is where each attempt is logged and where the missing-file
  * report (kernel_missing.c) sees it. NtOpenFile and IoCreateFile used to
@@ -5119,6 +5152,8 @@ static NTSTATUS bridge_create_file_impl(
                                           iostatus_va, file_attrs, share,
                                           disposition, options, &name);
     uint32_t status = (uint32_t)st;
+    static volatile LONG opens_logged;
+    int printed = 0;
 
     /* Paired with the [PATH] line the translation just printed: that says what
      * was asked for, this says whether it opened. A failed open is not itself
@@ -5143,7 +5178,7 @@ static NTSTATUS bridge_create_file_impl(
              * are counted rather than printed: a looping stream re-opens a
              * missing file every loop (97 lines in 100 s on one title). The
              * report decides; with it off, every attempt prints as before. */
-            if (!xbox_missing_is_reported(gpath))
+            if (!xbox_missing_is_reported(gpath) && (printed = 1))
                 fprintf(stderr, "  [FILE] %s (disp %u) -> 0x%08X FAILED (win32 err=%u%s)\n",
                         gpath, (unsigned)disposition, status, _e,
                         _e == 32u ? " ERROR_SHARING_VIOLATION"
@@ -5152,12 +5187,16 @@ static NTSTATUS bridge_create_file_impl(
             if (name.Buffer)
                 xbox_missing_note(gpath, status, (uint32_t)access,
                                   (uint32_t)disposition, (uint32_t)options, 0);
-        } else if (ntcreate || xbox_missing_verbose())
+        } else if (xbox_missing_verbose()
+                   || (ntcreate && bridge_io_log_success(&opens_logged, 0))) {
             fprintf(stderr, "  [FILE] %s (disp %u opts 0x%X from 0x%08X) -> 0x%08X\n",
                     gpath, (unsigned)disposition, (unsigned)options,
                     g_xbox_kernel_caller, status);
+            printed = 1;
+        }
     }
-    fflush(stderr);
+    if (printed)
+        fflush(stderr);
     return st;
 }
 
@@ -5968,27 +6007,32 @@ static void bridge_NtReadFile(void)
      * say whether the bytes were wrong or the read was, and the two look
      * identical from inside the title -- the first bytes settle it. */
     {
+        static volatile LONG reads_logged;
         const uint8_t *p = (const uint8_t *)XBOX_TO_NATIVE(buffer_va);
         uint32_t got = (uint32_t)ios.Information;
-        /* The offset matters as much as the length. A title streaming a pack
-         * file reads sector-aligned chunks, so the first bytes belong to
-         * whatever precedes the file it actually wants, and a read that stops
-         * early looks identical to one that never started -- until you can
-         * see where each one landed. */
-        if (poff)
-            fprintf(stderr, "  [READ] from=0x%08X ev=%08X apc=%08X buf=0x%08X @%lld want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
-                    g_xbox_kernel_caller, STACK_ARG(1), STACK_ARG(2), buffer_va,
-                    (long long)off.QuadPart, length, got,
-                    (uint32_t)ios.Status,
-                    got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
-                    got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
-        else
-            fprintf(stderr, "  [READ] from=0x%08X buf=0x%08X esp=0x%08X @seq want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
-                    g_xbox_kernel_caller, buffer_va, g_esp,
-                    length, got, (uint32_t)ios.Status,
-                    got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
-                    got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
-        fflush(stderr);
+        /* Failures and short reads always print (KRN-5). */
+        int failed = ios.Status != 0 || got != length;
+        if (bridge_io_log_success(&reads_logged, failed)) {
+            /* The offset matters as much as the length. A title streaming a pack
+             * file reads sector-aligned chunks, so the first bytes belong to
+             * whatever precedes the file it actually wants, and a read that stops
+             * early looks identical to one that never started -- until you can
+             * see where each one landed. */
+            if (poff)
+                fprintf(stderr, "  [READ] from=0x%08X ev=%08X apc=%08X buf=0x%08X @%lld want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
+                        g_xbox_kernel_caller, STACK_ARG(1), STACK_ARG(2), buffer_va,
+                        (long long)off.QuadPart, length, got,
+                        (uint32_t)ios.Status,
+                        got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
+                        got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
+            else
+                fprintf(stderr, "  [READ] from=0x%08X buf=0x%08X esp=0x%08X @seq want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
+                        g_xbox_kernel_caller, buffer_va, g_esp,
+                        length, got, (uint32_t)ios.Status,
+                        got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
+                        got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
+            fflush(stderr);
+        }
     }
     bridge_write_iostatus(iostatus, ios.Status, (uint32_t)ios.Information);
     bridge_complete_file_io(STACK_ARG(0), STACK_ARG(1), STACK_ARG(2), STACK_ARG(3),
