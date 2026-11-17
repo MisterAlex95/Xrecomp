@@ -1753,8 +1753,12 @@ static void framebuffer_probe_tick(void)
 #include <pthread.h>
 #include <sched.h>
 static pthread_mutex_t s_kick_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  s_kick_kicked = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t  s_kick_acked = PTHREAD_COND_INITIALIZER;
+/* Both made by kick_init (xbox_HostCondInit): their 1 ms and 50 us waits
+ * count on the monotonic clock, so a step of the wall clock does not stall
+ * them for the length of the step. */
+static pthread_once_t  s_kick_once = PTHREAD_ONCE_INIT;
+static pthread_cond_t  s_kick_kicked;
+static pthread_cond_t  s_kick_acked;
 static int      s_kick_events;            /* a title waits through xbox_Nv2aKickWait */
 static int      s_kick_waiters;           /* guests waiting on "acked" */
 static int      s_kick_idle;              /* the ack thread waits on "kicked" */
@@ -1765,14 +1769,15 @@ static uint64_t s_kick_released_ns;       /* the last ack that released a waiter
  * DMA_PUT that follows (a woken thread's latency on a loaded host). */
 #define NV2A_KICK_PUT_NS  (200u * 1000u)
 
-static void kick_deadline(struct timespec *ts, long ns)
+static void kick_init_once(void)
 {
-    clock_gettime(CLOCK_REALTIME, ts);
-    ts->tv_nsec += ns;
-    if (ts->tv_nsec >= 1000000000L) {
-        ts->tv_sec++;
-        ts->tv_nsec -= 1000000000L;
-    }
+    xbox_HostCondInit(&s_kick_kicked);
+    xbox_HostCondInit(&s_kick_acked);
+}
+
+static void kick_init(void)
+{
+    pthread_once(&s_kick_once, kick_init_once);
 }
 #endif
 
@@ -1785,6 +1790,7 @@ static void nv2a_kick_wait(volatile uint32_t *reg, uint32_t mask)
     while (*reg & mask)
         Sleep(0);
 #else
+    kick_init();
     __atomic_fetch_or(reg, mask, __ATOMIC_SEQ_CST);
     pthread_mutex_lock(&s_kick_mu);
     s_kick_events = 1;
@@ -1792,14 +1798,13 @@ static void nv2a_kick_wait(volatile uint32_t *reg, uint32_t mask)
     if (s_kick_idle)
         pthread_cond_signal(&s_kick_kicked);
     for (;;) {
-        struct timespec ts;
         __atomic_add_fetch(&s_kick_waiters, 1, __ATOMIC_SEQ_CST);
         if (!(__atomic_load_n(reg, __ATOMIC_SEQ_CST) & mask)) {
             __atomic_sub_fetch(&s_kick_waiters, 1, __ATOMIC_SEQ_CST);
             break;
         }
-        kick_deadline(&ts, 1000000L);     /* 1 ms: the lost-wake-up bound */
-        pthread_cond_timedwait(&s_kick_acked, &s_kick_mu, &ts);
+        /* 1 ms: the lost-wake-up bound */
+        xbox_HostCondWaitNs(&s_kick_acked, &s_kick_mu, 1000000u);
         __atomic_sub_fetch(&s_kick_waiters, 1, __ATOMIC_SEQ_CST);
     }
     pthread_mutex_unlock(&s_kick_mu);
@@ -1858,6 +1863,7 @@ static void kick_acked(void)
 #if !defined(_WIN32)
     if (!__atomic_load_n(&s_kick_waiters, __ATOMIC_SEQ_CST))
         return;
+    kick_init();
     pthread_mutex_lock(&s_kick_mu);
     s_kick_released_ns = xbox_HostNowNs();
     pthread_cond_broadcast(&s_kick_acked);
@@ -2095,9 +2101,9 @@ static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
          * rather than poll. Except right after an ack released a waiter:
          * KickOff writes DMA_PUT just after its wait, and that store wakes
          * nothing, so it is polled for, briefly. */
-        struct timespec ts;
         if (regs[NV2A_USER_DMA_GET / 4] != put || nv2a_ack_wanted(regs, put))
             return;
+        kick_init();
         if (now - __atomic_load_n(&s_kick_released_ns, __ATOMIC_RELAXED)
                 < NV2A_KICK_PUT_NS) {
             sched_yield();
@@ -2113,8 +2119,8 @@ static void nv2a_ack_wait(volatile uint32_t *regs, int flip_held)
             pthread_mutex_lock(&s_kick_mu);
             if (s_kick_seq == s_kick_seen && !nv2a_ack_wanted(regs, put)) {
                 s_kick_idle = 1;
-                kick_deadline(&ts, NV2A_ACK_STEP_US * 1000L);
-                pthread_cond_timedwait(&s_kick_kicked, &s_kick_mu, &ts);
+                xbox_HostCondWaitNs(&s_kick_kicked, &s_kick_mu,
+                                    NV2A_ACK_STEP_US * 1000u);
                 s_kick_idle = 0;
             }
             kicked = s_kick_seq != s_kick_seen;

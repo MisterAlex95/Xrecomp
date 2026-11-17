@@ -44,6 +44,23 @@ void xbox_HostTimerThreadInit(void);
 void xbox_HostTimerSleepNs(uint64_t ns);
 void xbox_HostTimerWake(void);
 
+#if !defined(_WIN32)
+#include <pthread.h>
+
+/* Short timed waits on a condition variable that count on the monotonic
+ * clock, so a step of the wall clock (NTP, a phone's carrier time) neither
+ * stretches nor cuts them. xbox_HostCondInit makes `cv` such a variable
+ * (pthread_condattr_setclock(CLOCK_MONOTONIC); Darwin has no such call and
+ * xbox_HostCondWaitNs waits there with the relative wait, monotonic
+ * already). A variable that xbox_HostCondWaitNs waits on must be made here,
+ * not with PTHREAD_COND_INITIALIZER. Returns 0 on success. */
+int xbox_HostCondInit(pthread_cond_t *cv);
+
+/* Waits on `cv` (made by xbox_HostCondInit) with `mu` held, at most `ns`
+ * nanoseconds. Returns what pthread_cond_timedwait returns (0, ETIMEDOUT). */
+int xbox_HostCondWaitNs(pthread_cond_t *cv, pthread_mutex_t *mu, uint64_t ns);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

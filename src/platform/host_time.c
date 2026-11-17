@@ -149,43 +149,55 @@ static pthread_cond_t s_timer_wake_cv;
 static pthread_once_t s_timer_wake_once = PTHREAD_ONCE_INIT;
 static int s_timer_wake_pending;
 
-static void timer_wake_init(void)
+int xbox_HostCondInit(pthread_cond_t *cv)
 {
 #ifdef __APPLE__
-    /* No pthread_condattr_setclock: the relative wait below is on the
-     * monotonic clock already. */
-    pthread_cond_init(&s_timer_wake_cv, NULL);
+    /* No pthread_condattr_setclock: xbox_HostCondWaitNs's relative wait is
+     * on the monotonic clock already. */
+    return pthread_cond_init(cv, NULL);
 #else
     pthread_condattr_t a;
-    pthread_condattr_init(&a);
-    pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
-    pthread_cond_init(&s_timer_wake_cv, &a);
+    int rc = pthread_condattr_init(&a);
+    if (rc)
+        return rc;
+    rc = pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+    if (!rc)
+        rc = pthread_cond_init(cv, &a);
     pthread_condattr_destroy(&a);
+    return rc;
 #endif
+}
+
+int xbox_HostCondWaitNs(pthread_cond_t *cv, pthread_mutex_t *mu, uint64_t ns)
+{
+#ifdef __APPLE__
+    struct timespec rel = { (time_t)(ns / 1000000000u),
+                            (long)(ns % 1000000000u) };
+    return pthread_cond_timedwait_relative_np(cv, mu, &rel);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_sec += (time_t)(ns / 1000000000u);
+    ts.tv_nsec += (long)(ns % 1000000000u);
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+    return pthread_cond_timedwait(cv, mu, &ts);
+#endif
+}
+
+static void timer_wake_init(void)
+{
+    xbox_HostCondInit(&s_timer_wake_cv);
 }
 
 void xbox_HostTimerSleepNs(uint64_t ns)
 {
     pthread_once(&s_timer_wake_once, timer_wake_init);
     pthread_mutex_lock(&s_timer_wake_lock);
-    if (ns && !s_timer_wake_pending) {
-#ifdef __APPLE__
-        struct timespec rel = { (time_t)(ns / 1000000000u),
-                                (long)(ns % 1000000000u) };
-        pthread_cond_timedwait_relative_np(&s_timer_wake_cv,
-                                           &s_timer_wake_lock, &rel);
-#else
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        ts.tv_sec += (time_t)(ns / 1000000000u);
-        ts.tv_nsec += (long)(ns % 1000000000u);
-        if (ts.tv_nsec >= 1000000000L) {
-            ts.tv_sec += 1;
-            ts.tv_nsec -= 1000000000L;
-        }
-        pthread_cond_timedwait(&s_timer_wake_cv, &s_timer_wake_lock, &ts);
-#endif
-    }
+    if (ns && !s_timer_wake_pending)
+        xbox_HostCondWaitNs(&s_timer_wake_cv, &s_timer_wake_lock, ns);
     s_timer_wake_pending = 0;
     pthread_mutex_unlock(&s_timer_wake_lock);
 }

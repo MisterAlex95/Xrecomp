@@ -50,7 +50,18 @@ int xbox_path_is_initialized(void);   /* kernel_path.c */
 
 static char s_dir[1100];
 static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t s_cv = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t s_cv;   /* made by cv_init: the service's 20 ms tick counts on the monotonic clock */
+static pthread_once_t s_cv_once = PTHREAD_ONCE_INIT;
+
+static void cv_init_once(void)
+{
+    xbox_HostCondInit(&s_cv);
+}
+
+static void cv_init(void)
+{
+    pthread_once(&s_cv_once, cv_init_once);
+}
 static uint32_t s_pressed;           /* hotkey actions queued for this thread */
 static volatile int s_rw_held, s_armed;
 
@@ -419,17 +430,10 @@ static void *service_main(void *arg)
     for (;;) {
         uint32_t pressed;
         int held;
-        struct timespec ts;
 
         pthread_mutex_lock(&s_mu);
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 20 * 1000000L;
-        if (ts.tv_nsec >= 1000000000L) {
-            ts.tv_sec++;
-            ts.tv_nsec -= 1000000000L;
-        }
         if (!s_pressed)
-            pthread_cond_timedwait(&s_cv, &s_mu, &ts);
+            xbox_HostCondWaitNs(&s_cv, &s_mu, 20u * 1000000u);
         pressed = s_pressed;
         s_pressed = 0;
         pthread_mutex_unlock(&s_mu);
@@ -465,6 +469,7 @@ void xbox_StateServiceHotkeys(uint32_t pressed, int rewind_held)
     s_rw_held = rewind_held;
     if (!pressed)
         return;
+    cv_init();
     pthread_mutex_lock(&s_mu);
     s_pressed |= pressed;
     pthread_cond_signal(&s_cv);
@@ -517,6 +522,7 @@ void xbox_StateServiceStart(void)
                     " first pad report)\n", s_dir[0] ? "in " : "off (no save dir)", s_dir,
             s_rw.on ? "on" : "off", cfg.budget >> 20, rw_interval_ms());
     fflush(stderr);
+    cv_init();
     if (pthread_create(&t, NULL, service_main, NULL) == 0)
         pthread_detach(t);
 }
