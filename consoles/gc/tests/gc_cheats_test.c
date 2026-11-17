@@ -111,7 +111,18 @@ static void test_synthetic(void)
     gc_run_frame(m);
     uint32_t r1 = gc_peek32(m, 0x80004000u);
     CHECK(r1 > r0 && (r1 - r0) % 5 == 0, "hooked counter %u -> %u (want steps of 5)", r0, r1);
-    /* turned off: the add comes back */
+    /* the list emptied (the app's file reloaded with no cheat): the runtime still applies once, the hook goes */
+    recomp_cheats_parse_text(&S, "");
+    CHECK(S.n == 0 && recomp_cheats_pending(&S), "an emptied list with a hook in place is not pending");
+    if (recomp_cheats_pending(&S))
+        recomp_cheats_apply(&S, &b);
+    CHECK(gc_peek32(m, 0x80003104u) == 0x38630001u, "hook left after the list emptied: %08X",
+          gc_peek32(m, 0x80003104u));
+    CHECK(!recomp_cheats_pending(&S), "still pending after the hook went");
+    /* back on, then turned off: the add comes back */
+    set_cheats("[add 5]\nenabled=1\nC2003104 00000001\n38630005 00000000\n");
+    recomp_cheats_apply(&S, &b);
+    CHECK((gc_peek32(m, 0x80003104u) & 0xFC000003u) == 0x48000000u, "hook back: %08X", gc_peek32(m, 0x80003104u));
     S.list[0].enabled = 0;
     recomp_cheats_apply(&S, &b);
     CHECK(gc_peek32(m, 0x80003104u) == 0x38630001u, "instruction put back: %08X", gc_peek32(m, 0x80003104u));

@@ -844,7 +844,8 @@ started:;
             field_ns = gc_field_ns(m);
             int r = gc_run_frame(m);
             if (!r) {
-                if (cheats.n)
+                /* not "cheats.n": a list emptied in the app must still take its C2 hooks out of the code */
+                if (recomp_cheats_pending(&cheats))
                     recomp_cheats_apply(&cheats, &cheat_bus);
                 recomp_rewinder_frame(&rw, rewind_size, rewind_save, m);
             }
