@@ -24,6 +24,8 @@
     <string name="CHEATS_P_NOT_HEX">Un code s\'écrit en chiffres hexadécimaux (0-9, A-F).</string>
     <string name="CHEATS_P_SHAPE_GBA">Chaque ligne : AAAAAAAA VVVVVVVV, AAAAAAAA VVVV ou ADRESSE:VALEUR.</string>
     <string name="CHEATS_P_SHAPE">Chaque ligne : AAAAAAAA VVVV (GameShark) ou ADRESSE:VALEUR.</string>
+    <string name="CHEATS_P_SHAPE_GC">Chaque ligne : AAAAAAAA VVVVVVVV (Action Replay ou Gecko) ou ADRESSE:VALEUR.</string>
+    <string name="CHEATS_P_ENCRYPTED">Les codes Action Replay chiffrés (XXXX-XXXX-XXXXX) ne sont pas pris en charge : saisissez le code déchiffré (AAAAAAAA VVVVVVVV).</string>
     <string name="CHEATS_P_SHAPE_XBOX">Chaque ligne : TAAAAAAA VVVVVVVV (T : 0, 1, 2 écriture ; 4, 5, 6 test, puis une ligne) ou ADRESSE:VALEUR.</string>
     <string name="CHEATS_P_TOO_LONG">Ce code est trop long.</string>
 </resources>

@@ -27,5 +27,7 @@
     <string name="CHEATS_P_SHAPE_GBA">Each line: AAAAAAAA VVVVVVVV, AAAAAAAA VVVV or ADDRESS:VALUE.</string>
     <string name="CHEATS_P_SHAPE">Each line: AAAAAAAA VVVV (GameShark) or ADDRESS:VALUE.</string>
     <string name="CHEATS_P_SHAPE_XBOX">Each line: TAAAAAAA VVVVVVVV (T: 0, 1, 2 write; 4, 5, 6 test, then a line) or ADDRESS:VALUE.</string>
+    <string name="CHEATS_P_SHAPE_GC">Each line: AAAAAAAA VVVVVVVV (Action Replay or Gecko) or ADDRESS:VALUE.</string>
+    <string name="CHEATS_P_ENCRYPTED">Encrypted Action Replay codes (XXXX-XXXX-XXXXX) are not supported: enter the decrypted code (AAAAAAAA VVVVVVVV).</string>
     <string name="CHEATS_P_TOO_LONG">This code is too long.</string>
 </resources>

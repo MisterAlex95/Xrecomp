@@ -37,6 +37,7 @@ public class ConsoleTest {
         assertTrue(Console.GBA.hasSaveStates());
         assertTrue(Console.PS1.hasSaveStates());
         assertTrue(Console.N64.hasSaveStates());
+        assertTrue(Console.GC.hasSaveStates());   // XBA-264
         assertFalse(Console.XBOX.hasSaveStates());
         // XBA-240: every console fast-forwards, the Xbox too.
         for (Console c : Console.values())
@@ -299,6 +300,7 @@ public class ConsoleTest {
         assertEquals("GC", Console.GC.badge());
         assertTrue(Console.GC.playable() && Console.GC.directLaunch());
         assertTrue(Console.GC.prepares());   // XBA-264
+        assertTrue(Console.GC.hasSaveStates());   // XBA-264
         assertEquals(Console.GC, Console.fromPack("gc"));
 
         byte[] entryOut = dol();

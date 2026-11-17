@@ -1244,7 +1244,10 @@ final class GameMenu {
 
     // ---- Cheats (XBA-197) ----------------------------------------------------------------------------------------
 
-    /** A GBA, PS1 or N64 game runs (not an Xbox title): its cheat codes can be changed while it plays. */
+    /**
+     * A game runs whose cheat codes can be changed while it plays: every console (GBA, PS1, N64, GameCube: XBA-264,
+     * Action Replay / Gecko codes; an Xbox title's codes too, XBA-241).
+     */
     private boolean cheatsSupported() {
         return titleId() != null;   // every console; an Xbox title's codes too (XBA-241)
     }

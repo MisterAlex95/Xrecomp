@@ -122,6 +122,14 @@ public class CheatsTest {
         // An Xbox shape is not a PS1 one, and the GBA's 8+8 is not checked as an Xbox type.
         assertEquals(Cheats.Problem.SHAPE, Cheats.check(Console.PS1, Cheats.normalize("2001A2B8 DEADBEEF")));
         assertNull(Cheats.check(Console.GBA, Cheats.normalize("3001A2B4 00000001")));
+        // XBA-264: GameCube Action Replay (decrypted) / Gecko lines, raw writes; encrypted AR codes refused
+        assertNull(Cheats.check(Console.GC, Cheats.normalize("04001000 12345678\nC2004100 00000001\n38600001 00000000")));
+        assertNull(Cheats.check(Console.GC, Cheats.normalize("00000000 40000000\n80001000:12")));
+        assertNull(Cheats.check(Console.GC, Cheats.normalize("0400100012345678")));
+        assertEquals(Cheats.Problem.ENCRYPTED, Cheats.check(Console.GC, Cheats.normalize("ABCD-EFGH-12345")));
+        assertEquals(Cheats.Problem.ENCRYPTED, Cheats.check(Console.GC, Cheats.normalize("04001000 12345678\nwxyz-1234-abcde")));
+        assertEquals(Cheats.Problem.SHAPE, Cheats.check(Console.GC, Cheats.normalize("8003A2C4 0063")));
+        assertEquals(Cheats.Problem.NOT_HEX, Cheats.check(Console.GC, Cheats.normalize("04001000 1234567G")));
     }
 
     /** XBA-241: an Xbox title's list lives under its title ID, beside its settings, as the consoles' do. */

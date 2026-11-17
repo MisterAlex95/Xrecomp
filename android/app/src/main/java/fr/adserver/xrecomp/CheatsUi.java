@@ -33,9 +33,12 @@ final class CheatsUi {
             return c.getString(R.string.CHEATS_P_NOT_HEX);
         case TOO_LONG:
             return c.getString(R.string.CHEATS_P_TOO_LONG);
+        case ENCRYPTED:
+            return c.getString(R.string.CHEATS_P_ENCRYPTED);
         default:
             return c.getString(con == Console.GBA    ? R.string.CHEATS_P_SHAPE_GBA
                                : con == Console.XBOX ? R.string.CHEATS_P_SHAPE_XBOX
+                               : con == Console.GC   ? R.string.CHEATS_P_SHAPE_GC
                                                      : R.string.CHEATS_P_SHAPE);
         }
     }

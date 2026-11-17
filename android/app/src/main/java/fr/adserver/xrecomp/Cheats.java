@@ -11,14 +11,15 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * A GBA, PS1, N64 or Xbox game's cheat codes (XBA-197, XBA-241, docs/android/app-shell.md « Cheats »): one file per
+ * A GBA, PS1, N64, GameCube or Xbox game's cheat codes (XBA-197, XBA-241, XBA-264, docs/android/app-shell.md « Cheats »): one file per
  * game beside its
  * settings, files/settings/game/&lt;KEY&gt;.cheats, which the runtime reads (RECOMP_CHEATS_FILE, set by
  * {@link ShellActivity}) and reads again when it changes, so a change made in the in-game menu takes effect at once.
  *
  * <p>The file's format is the native engine's (src/platform/recomp_cheats.h): one section per cheat, its name in
- * brackets, « enabled=1 » or « enabled=0 », an optional « format= » (auto, raw, gsa, gsa-raw, arv3, arv3-raw, cb, gs, xbox;
- * auto when absent), then the code's lines. Comments start with #. Written through a temporary file and a rename, so
+ * brackets, « enabled=1 » or « enabled=0 », an optional « format= » (auto, raw, gsa, gsa-raw, arv3, arv3-raw, cb, gs, xbox,
+ * ar, gecko; auto when absent), then the code's lines. Formats per console: GBA raw, gsa, gsa-raw, arv3, arv3-raw, cb;
+ * PS1 and N64 raw, gs; GameCube raw, ar (Action Replay, decrypted), gecko; Xbox xbox. Comments start with #. Written through a temporary file and a rename, so
  * the runtime never reads half a file.
  *
  * <p>The app checks a code's shape only ({@link #check}): lines of hex digits, « AAAAAAAA VVVV » or « AAAAAAAA
@@ -26,6 +27,9 @@ import java.util.Locale;
  * An Xbox title's codes (XBA-241) are XRecomp's own guest-memory writes (recomp_cheats.h « Xbox »): typed lines
  * « TAAAAAAA VVVVVVVV » (T 0 / 1 / 2: an 8 / 16 / 32-bit write, 4 / 5 / 6: « if the value equals, run the next line »),
  * or raw « ADDRESS:VALUE » / « ADDRESS VALUE » writes; {@link #check} checks those fully, types and sizes included.
+ * A GameCube game's codes (XBA-264) are « AAAAAAAA VVVVVVVV » lines (Action Replay decrypted or Gecko, the runtime
+ * tells them apart) or « ADDRESS:VALUE »; an encrypted Action Replay code (« XXXX-XXXX-XXXXX ») is refused with its own
+ * message ({@link Problem#ENCRYPTED}): the runtime does not decrypt them.
  */
 final class Cheats {
     static final String SUFFIX = ".cheats";
@@ -50,7 +54,7 @@ final class Cheats {
     }
 
     /** Why a code cannot be added ({@link #check}). */
-    enum Problem { EMPTY, NOT_HEX, SHAPE, TOO_LONG }
+    enum Problem { EMPTY, NOT_HEX, SHAPE, TOO_LONG, ENCRYPTED }
 
     final File file;
     final List<Cheat> list;
@@ -188,6 +192,8 @@ final class Cheats {
             return Problem.TOO_LONG;
         if (console == Console.XBOX)
             return checkXbox(lines);
+        if (console == Console.GC)
+            return checkGc(lines);
         boolean gba = console == Console.GBA;
         for (String l : lines) {
             String s = l.replace("0X", "");
@@ -232,6 +238,30 @@ final class Cheats {
             open = false;
         }
         return open ? Problem.SHAPE : null;
+    }
+
+    /**
+     * A GameCube game's lines (XBA-264): « AAAAAAAA VVVVVVVV » (Action Replay decrypted, Gecko, a Gecko code's data
+     * lines) or « ADDRESS:VALUE »; an encrypted Action Replay line (« XXXX-XXXX-XXXXX », letters and digits) is
+     * {@link Problem#ENCRYPTED}.
+     */
+    private static Problem checkGc(List<String> lines) {
+        for (String l : lines)
+            if (l.replace(" ", "").matches("[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{5}"))
+                return Problem.ENCRYPTED;
+        for (String l : lines) {
+            String s = l.replace("0X", "");
+            if (!s.matches("[0-9A-F :\\-]+"))
+                return Problem.NOT_HEX;
+            if (s.contains(":")) {
+                if (!s.matches("[0-9A-F]{1,8} ?: ?[0-9A-F]{1,8}"))
+                    return Problem.SHAPE;
+                continue;
+            }
+            if (!s.matches("[0-9A-F]{8}[ \\-][0-9A-F]{8}"))
+                return Problem.SHAPE;
+        }
+        return null;
     }
 
     // ---- Changes ----------------------------------------------------------------------------------------------------

@@ -44,11 +44,12 @@ enum Console {
     }
 
     /**
-     * XBA-182 / XBA-183: the console's runtime saves states and fast-forwards (recomp_states.h): GBA, PS1 and N64. An
-     * Xbox game never does (its state is the whole guest memory and GPU).
+     * XBA-182 / XBA-183: the console's runtime saves states and fast-forwards (recomp_states.h): GBA, PS1, N64 and
+     * GameCube (XBA-264: gc_state.c, rewind and the automatic slot too). An Xbox game goes through its own path
+     * (XBA-249: the runtime says whether states are available).
      */
     boolean hasSaveStates() {
-        return this == GBA || this == PS1 || this == N64;
+        return this == GBA || this == PS1 || this == N64 || this == GC;
     }
 
     /**
