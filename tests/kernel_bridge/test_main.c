@@ -156,11 +156,15 @@ int main(void)
     *(uint32_t *)(mem + THUNK_VA + 16) = 0x80000000u | 215u;  /* NtQuerySymbolicLinkObject */
     *(uint32_t *)(mem + THUNK_VA + 20) = 0x80000000u | 95u;   /* KeBugCheck */
     *(uint32_t *)(mem + THUNK_VA + 24) = 0x80000000u | 96u;   /* KeBugCheckEx */
+    *(uint32_t *)(mem + THUNK_VA + 28) = 0x80000000u | 104u;  /* KeGetCurrentThread */
+    *(uint32_t *)(mem + THUNK_VA + 32) = 0x80000000u | 246u;  /* ObReferenceObjectByHandle */
+    *(uint32_t *)(mem + THUNK_VA + 36) = 0x80000000u | 187u;  /* NtClose */
+    *(uint32_t *)(mem + THUNK_VA + 40) = 0x80000000u | 189u;  /* NtCreateEvent */
     *(uint32_t *)(mem + THUNK_VA - 4) = 0x80000000u | 173u;
     *(uint32_t *)(mem + THUNK_VA - 8) = 0xF2345678u;
     *(uint32_t *)(mem + THUNK_VA - 12) = 0x80000000u;
     *(uint32_t *)(mem + THUNK_VA - 16) = 0x80000000u | 379u;
-    xbox_kernel_set_thunk_address(THUNK_VA, 7);
+    xbox_kernel_set_thunk_address(THUNK_VA, 11);
     xbox_kernel_bridge_init();
 
     check(recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA - 4)) != NULL,
@@ -211,7 +215,6 @@ int main(void)
     check(fn != NULL, "ordinal 197 resolves to a bridge entry point", NULL);
     if (fn) {
         static const struct { uint32_t src; const char *what; } pseudo[] = {
-            { 0xFFFFFFFEu, "NtDuplicateObject(NtCurrentThread()) succeeds" },
             { 0xFFFFFFFFu, "NtDuplicateObject(NtCurrentProcess()) succeeds" },
         };
         const uint32_t TARGET_VA = 0x30000;
@@ -237,6 +240,122 @@ int main(void)
             check(g_esp == STACK_VA + 16,
                   "ordinal 197 pops its three stdcall arguments", detail);
         }
+    }
+
+    /* NtDuplicateObject(NtCurrentThread()) from the main thread. The host
+     * may give the thread a real handle (the duplicate is then a fresh token
+     * that leads to the caller's own KTHREAD) or hand back the -2
+     * pseudo-handle itself, which is no duplicate: the call must then fail
+     * with no token allocated. It once landed -2 in the handle table, which
+     * made every later save-state capture refuse, and attached no KTHREAD to
+     * the token on either host. Either way the thread stays usable after
+     * NtClose, and a second duplicate is a token of its own. */
+    {
+        const uint32_t ENTRY_DUP = *(uint32_t *)(mem + THUNK_VA + 4);
+        const uint32_t ENTRY_KT = *(uint32_t *)(mem + THUNK_VA + 28);
+        const uint32_t ENTRY_REF = *(uint32_t *)(mem + THUNK_VA + 32);
+        const uint32_t ENTRY_CLOSE = *(uint32_t *)(mem + THUNK_VA + 36);
+        const uint32_t ENTRY_EVENT = *(uint32_t *)(mem + THUNK_VA + 40);
+        const uint32_t OUT_VA = 0x31000, OA_VA = 0x31100;
+        const uint32_t TIB_VA = 0x32000, KTHREAD_VA = 0x33000;
+        uint32_t fs_saved = g_fs_base;
+        uint32_t *sp = (uint32_t *)(mem + STACK_VA);
+        uint32_t *out = (uint32_t *)(mem + OUT_VA);
+        uint32_t kthread, dup1, dup2, st1, st2, probe1, probe2;
+        char detail[160];
+
+        #define CALL(entry) do { g_esp = STACK_VA; g_eax = 0xDEADBEEFu; \
+            recomp_lookup_kernel(entry)(); } while (0)
+        #define DUP(status, token) do { sp[0] = 0xBEEF0003u; sp[1] = 0xFFFFFFFEu; \
+            sp[2] = OUT_VA; sp[3] = 0x2u; out[0] = 0; CALL(ENTRY_DUP); \
+            (status) = g_eax; (token) = out[0]; } while (0)
+        #define CLOSE(token) do { sp[0] = 0xBEEF0004u; sp[1] = (token); \
+            CALL(ENTRY_CLOSE); } while (0)
+        /* ObReferenceObjectByHandle(token, NULL, &object): the KTHREAD it
+         * reaches, 0 when none (status in g_eax). */
+        #define REF(token, obj) do { sp[0] = 0xBEEF0005u; sp[1] = (token); \
+            sp[2] = 0; sp[3] = OUT_VA + 4; out[1] = 0; CALL(ENTRY_REF); \
+            (obj) = g_eax == 0 ? out[1] : 0; } while (0)
+        /* NtCreateEvent with an unnamed OBJECT_ATTRIBUTES: the next table
+         * token, closed again, so the lowest free slot can be compared. */
+        #define PROBE(token) do { memset(mem + OA_VA, 0, 16); \
+            sp[0] = 0xBEEF0006u; sp[1] = OUT_VA + 8; sp[2] = OA_VA; sp[3] = 0; \
+            sp[4] = 0; out[2] = 0; CALL(ENTRY_EVENT); (token) = out[2]; \
+            CLOSE(token); } while (0)
+
+        /* The thread's KTHREAD, as a TIB names it: the stand-in has no
+         * contiguous window to build a pool object in. */
+        memset(mem + KTHREAD_VA, 0, 0x200);
+        memset(mem + TIB_VA, 0, 0x100);
+        *(uint32_t *)(mem + TIB_VA + 0x28) = KTHREAD_VA;
+        g_fs_base = TIB_VA;
+        CALL(ENTRY_KT);
+        kthread = g_eax;
+        snprintf(detail, sizeof detail, "0x%08X", kthread);
+        check(kthread == KTHREAD_VA, "the main thread's KTHREAD is its TIB's",
+              detail);
+
+        PROBE(probe1);
+        DUP(st1, dup1);
+        PROBE(probe2);
+        snprintf(detail, sizeof detail, "status 0x%08X, token 0x%08X",
+                 st1, dup1);
+        check((st1 == 0 && dup1 != 0 && dup1 != 0xFFFFFFFEu
+               && dup1 != 0xFFFFFFFFu) || (st1 == 0xC0000001u && dup1 == 0),
+              "NtDuplicateObject(NtCurrentThread()): a token or a clean failure",
+              detail);
+        if (st1 == 0) {
+            uint32_t obj;
+            REF(dup1, obj);
+            snprintf(detail, sizeof detail, "object 0x%08X, KTHREAD 0x%08X",
+                     obj, kthread);
+            check(obj == kthread,
+                  "the duplicate leads to the caller's own KTHREAD", detail);
+            check(probe2 != probe1 && probe1 != 0,
+                  "the duplicate holds a handle-table slot", NULL);
+        } else {
+            snprintf(detail, sizeof detail, "slot 0x%08X before, 0x%08X after",
+                     probe1, probe2);
+            check(probe1 != 0 && probe2 == probe1,
+                  "a failed duplicate allocates no handle-table slot", detail);
+        }
+
+        DUP(st2, dup2);
+        check(st2 == st1, "a second duplicate behaves as the first", NULL);
+        if (st1 == 0 && st2 == 0) {
+            uint32_t obj;
+            snprintf(detail, sizeof detail, "0x%08X twice", dup1);
+            check(dup2 != dup1, "a second duplicate is a token of its own",
+                  detail);
+            REF(dup2, obj);
+            check(obj == kthread,
+                  "the second duplicate leads to the same KTHREAD", NULL);
+            CLOSE(dup1);
+            REF(dup1, obj);
+            check(obj == 0, "a closed duplicate leads nowhere", NULL);
+            REF(dup2, obj);
+            check(obj == kthread,
+                  "closing one duplicate leaves the other's thread", NULL);
+            CLOSE(dup2);
+        } else {
+            check(dup2 == 0, "a second failed duplicate allocates nothing",
+                  NULL);
+        }
+        {
+            uint32_t obj;
+            CALL(ENTRY_KT);
+            check(g_eax == kthread,
+                  "the thread keeps its KTHREAD after NtClose", NULL);
+            REF(0xFFFFFFFEu, obj);
+            check(obj == kthread,
+                  "NtCurrentThread() still resolves after NtClose", NULL);
+        }
+        g_fs_base = fs_saved;
+        #undef CALL
+        #undef DUP
+        #undef CLOSE
+        #undef REF
+        #undef PROBE
     }
 
     /* KRN-14: NtOpenSymbolicLinkObject resolves the name and

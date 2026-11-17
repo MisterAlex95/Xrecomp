@@ -23,7 +23,7 @@ both places rather than only one.
 ## What it guarantees
 
 Checks on ordinal 173, `MmGetPhysicalAddress`, and ordinal 197,
-`NtDuplicateObject`.
+`NtDuplicateObject` (with 104, 187, 189 and 246 to observe its result).
 
 **A thunk entry resolves to a bridge entry point.** Given an import in the
 form an XBE stores it (`0x80000000 | ordinal`), `xbox_kernel_bridge_init()`
@@ -47,8 +47,21 @@ and `NtCurrentProcess()` are the 32-bit values -2 and -1. A by-value handle
 token that is not a table token must be sign-extended for these two: widened
 with zero extension they are not the host's pseudo-handles, so Windows fails
 the duplicate and the POSIX shim dereferences the value as an object and
-faults. Each call must succeed, write a target token, and pop 12 bytes of
-arguments.
+faults. The process duplicate must succeed, write a target token, and pop 12
+bytes of arguments.
+
+**A duplicate of `NtCurrentThread()` is a real token or a clean failure.** A
+title's main thread duplicating -2 once got the host's -2 pseudo-handle back
+(the POSIX shim, on a thread with no thread object), and the bridge stored it
+in the handle table, after which every save-state capture refused; nor did
+the token lead to a KTHREAD on any host. Now either the host gives the thread
+a real handle and the duplicate is a fresh table token that
+`ObReferenceObjectByHandle` resolves to the caller's own KTHREAD (the one its
+TIB names at `fs:[0x28]`), a second duplicate being another token, or the
+call answers `STATUS_UNSUCCESSFUL` with no target token and no table slot
+taken (an `NtCreateEvent` probe gets the same slot before and after). Either
+way, after `NtClose` the thread keeps its KTHREAD and `NtCurrentThread()`
+still resolves.
 
 **Ordinals 95 and 96, `KeBugCheck` and `KeBugCheckEx`, stop the title.**
 POSIX only (fork). A child calls each through the dispatcher with a guest
