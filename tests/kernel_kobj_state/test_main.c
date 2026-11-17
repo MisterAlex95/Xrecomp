@@ -25,6 +25,12 @@
  *               record of an unknown type is skipped.
  *   Blocked     a load refuses, changing nothing, while a thread is blocked
  *               in a wait on an event it would tear down.
+ *   Main thread a handle to this thread (not started by CreateThread: the
+ *               main guest thread's case) is its adopted thread object; it
+ *               saves in session and, named by a resume, across runs, and a
+ *               load binds the token to this thread again. A table slot
+ *               holding the NtCurrentThread() pseudo value is refused as a
+ *               runtime bug.
  */
 #include "kernel.h"
 #include "kernel_kobj_state.h"
@@ -187,10 +193,38 @@ static unsigned char *load(const char *path, size_t *n)
     return b;
 }
 
+/* xbox_bridge_kobj_handles: the bridge's entries naming this running
+ * thread, and pseudo values stored as handles. */
+typedef struct { uint32_t tid; int self, pseudo; } scan_t;
+static void scan_one(void *ctx, uint32_t guest_va, void *h)
+{
+    scan_t *sc = (scan_t *)ctx;
+    w32_state ws;
+    (void)guest_va;
+    if (h == (void *)(intptr_t)-2 || h == (void *)(intptr_t)-1)
+        sc->pseudo++;
+    else if (w32_state_read((HANDLE)h, &ws) == W32_STATE_THREAD && ws.tid == sc->tid && !ws.exited)
+        sc->self++;
+}
+static scan_t scan(uint32_t tid)
+{
+    scan_t sc = { tid, 0, 0 };
+    xbox_bridge_kobj_handles(scan_one, &sc);
+    return sc;
+}
+
+static void show(const XboxKobjRefusals *why)
+{
+    int k;
+    for (k = 0; k < why->count && k < XBOX_KOBJ_REFUSALS_MAX; k++)
+        printf("    %s 0x%08X / 0x%08X: %s\n", why->r[k].what, why->r[k].token,
+               why->r[k].guest_va, why->r[k].reason);
+}
+
 /* Handles live in guest memory: the title's variables. */
 enum {
     H_EVN, H_EVS, H_EVDUP, H_SEM, H_MUT, H_TMR, H_PORT, H_FILE, H_EXIT, H_LIVE, H_GO, H_NEW, H_BLOCK,
-    H_COUNT
+    H_SELF, H_PSEUDO, H_COUNT
 };
 static uint32_t g_hva;
 #define HVA(i) (g_hva + 4u * (uint32_t)(i))
@@ -440,6 +474,88 @@ int main(int argc, char **argv)
     st = (uint32_t)xbox_KobjLoad(blob, blob_len, XBOX_KOBJ_IN_SESSION, err, sizeof err);
     check(!st && strstr(err, "not running"),
           "a state whose running thread has ended does not load in session", err);
+
+    printf("The main thread (not started by CreateThread)\n");
+    xbox_KobjReset();
+    {
+        uint32_t tid = GetCurrentThreadId();
+        HANDLE self = w32_thread_apc_handle();   /* its adopted thread object, referenced */
+        void *self_v = self;
+        void *blob2 = NULL, *blob3 = NULL;
+        size_t blob2_len = 0, blob3_len = 0;
+        scan_t sc;
+        w32_state ws;
+
+        check(self && w32_state_read(self, &ws) == W32_STATE_THREAD && ws.tid == tid && !ws.exited,
+              "w32_thread_apc_handle: a running thread object, this thread's id", NULL);
+
+        /* NtCurrentThread() duplicated: a shim that hands the pseudo value
+         * back puts it in the table; one that duplicates it to the adopted
+         * object makes a real thread handle (then there is nothing to
+         * refuse). */
+        st = GCALL(ORD_DUPLICATE, 0xFFFFFFFEu, HVA(H_PSEUDO), 2);
+        sc = scan(tid);
+        if (st == 0 && sc.pseudo) {
+            st = (uint32_t)xbox_KobjCheck(XBOX_KOBJ_IN_SESSION, &why);
+            show(&why);
+            check(st == 1 && why.r[0].token == TOK(H_PSEUDO) && !strcmp(why.r[0].what, "handle")
+                  && strstr(why.r[0].reason, "a pseudo handle stored as a real one")
+                  && strstr(why.r[0].reason, "runtime bug, report it"),
+                  "a table slot holding NtCurrentThread() is refused as a runtime bug",
+                  why.count ? why.r[0].reason : "no refusal");
+            check(!xbox_KobjSave(&blob2, &blob2_len, XBOX_KOBJ_IN_SESSION, NULL) && !blob2,
+                  "  and no blob comes out", NULL);
+        } else {
+            printf("    NtDuplicateObject(NtCurrentThread()) = 0x%08X, %s: no pseudo value "
+                   "in the table to refuse\n", st, sc.self ? "a real thread handle" : "nothing stored");
+        }
+        xbox_KobjReset();
+
+        /* A real handle to this thread in the table, as the fixed shim's
+         * duplicate of NtCurrentThread() is: the host handle goes in as an
+         * untagged token (resolved as is) and NtDuplicateObject stores its
+         * duplicate, the same adopted object, as a table handle. */
+        st = GCALL(ORD_DUPLICATE, (uint32_t)(uintptr_t)self, HVA(H_SELF), 2);
+        sc = scan(tid);
+        checkv(st == 0 && (TOK(H_SELF) & 0xFF000000u) == 0x48000000u && sc.self == 1 && !sc.pseudo,
+               "a table handle to this thread's adopted object", TOK(H_SELF));
+        st = GCALL(ORD_WAIT, TOK(H_SELF), 0, rel_ms(15, 0));
+        checkv(st == STATUS_TIMEOUT, "  it waits as a running thread", st);
+
+        st = (uint32_t)xbox_KobjCheck(XBOX_KOBJ_IN_SESSION, &why);
+        show(&why);
+        check(st == 0, "in session: nothing refused", why.count ? why.r[0].reason : NULL);
+        st = (uint32_t)xbox_KobjSave(&blob2, &blob2_len, XBOX_KOBJ_IN_SESSION, &why);
+        check(st == 1 && blob2, "  saved", why.count ? why.r[0].reason : NULL);
+
+        st = (uint32_t)xbox_KobjCheck(XBOX_KOBJ_ACROSS_RUNS, &why);
+        check(st > 0 && !strcmp(why.r[0].what, "thread"),
+              "across runs without a resume: the running thread is named", NULL);
+        xbox_KobjResumeThreads(&tid, &self_v, 1);
+        st = (uint32_t)xbox_KobjCheck(XBOX_KOBJ_ACROSS_RUNS | XBOX_KOBJ_RESUME_THREADS, &why);
+        show(&why);
+        check(st == 0, "across runs, a resume naming this thread's id: nothing refused",
+              why.count ? why.r[0].reason : NULL);
+        st = (uint32_t)xbox_KobjSave(&blob3, &blob3_len,
+                                     XBOX_KOBJ_ACROSS_RUNS | XBOX_KOBJ_RESUME_THREADS, &why);
+        check(st == 1 && blob3, "  saved", why.count ? why.r[0].reason : NULL);
+        free(blob3);
+        xbox_KobjResumeThreads(NULL, NULL, 0);
+
+        if (blob2) {
+            st = (uint32_t)xbox_KobjLoad(blob2, blob2_len, XBOX_KOBJ_IN_SESSION, err, sizeof err);
+            check(st == 1, "in session: loaded", err);
+            sc = scan(tid);
+            check(sc.self == 1 && !sc.pseudo,
+                  "  the table holds a running thread object with this thread's id", NULL);
+            st = GCALL(ORD_WAIT, TOK(H_SELF), 0, rel_ms(16, 0));
+            checkv(st == STATUS_TIMEOUT, "  the same token waits on it as a running thread", st);
+            check(xbox_KobjCheck(XBOX_KOBJ_IN_SESSION, NULL) == 0, "  and saves again", NULL);
+        }
+        free(blob2);
+        xbox_KobjReset();
+        CloseHandle(self);
+    }
 
     free(blob);
     free(xbe);
