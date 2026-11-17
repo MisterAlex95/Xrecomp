@@ -27,6 +27,7 @@ static ID3D11SamplerState      *g_sampler_states[4] = { NULL, NULL, NULL, NULL }
 static DWORD g_last_blend_hash = 0;
 static DWORD g_last_raster_hash = 0;
 static D3D11_DEPTH_STENCIL_DESC g_last_ds_desc;
+static D3D11_SAMPLER_DESC       g_last_sampler_desc[4];
 
 /* ================================================================
  * D3D8 → D3D11 enum translation
@@ -277,12 +278,6 @@ void d3d8_states_apply_sampler(DWORD stage)
     tss = d3d8_GetTSS(stage);
     if (!tss) return;
 
-    /* Release old sampler */
-    if (g_sampler_states[stage]) {
-        ID3D11SamplerState_Release(g_sampler_states[stage]);
-        g_sampler_states[stage] = NULL;
-    }
-
     memset(&sd, 0, sizeof(sd));
     sd.Filter = d3d8_to_d3d11_filter(
         tss[D3DTSS_MAGFILTER],
@@ -295,10 +290,21 @@ void d3d8_states_apply_sampler(DWORD stage)
     sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
     sd.MaxLOD = D3D11_FLOAT32_MAX;
 
-    hr = ID3D11Device_CreateSamplerState(d3d8_GetD3D11Device(), &sd, &g_sampler_states[stage]);
-    if (SUCCEEDED(hr)) {
-        ID3D11DeviceContext_PSSetSamplers(ctx, stage, 1, &g_sampler_states[stage]);
+    /* Called for all four stages before every draw: the state object is
+     * made again only when its description changed (zeroed padding makes
+     * the descriptor comparable, as in update_depth_stencil_state). It is
+     * bound every time, as before. */
+    if (!g_sampler_states[stage] || memcmp(&sd, &g_last_sampler_desc[stage], sizeof(sd)) != 0) {
+        if (g_sampler_states[stage]) {
+            ID3D11SamplerState_Release(g_sampler_states[stage]);
+            g_sampler_states[stage] = NULL;
+        }
+        hr = ID3D11Device_CreateSamplerState(d3d8_GetD3D11Device(), &sd, &g_sampler_states[stage]);
+        if (FAILED(hr))
+            return;
+        memcpy(&g_last_sampler_desc[stage], &sd, sizeof(sd));
     }
+    ID3D11DeviceContext_PSSetSamplers(ctx, stage, 1, &g_sampler_states[stage]);
 }
 
 /* ================================================================
