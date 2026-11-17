@@ -25,6 +25,10 @@
  *                   counter: the total is exact, round after round (the
  *                   first-use creation of the mutex used to race, each thread
  *                   installing its own)
+ *   7. dup thread   DuplicateHandle(GetCurrentThread()) on a raw pthread is a
+ *                   real handle to an adopted thread object, shared with
+ *                   w32_thread_apc_handle, signalled by ExitThread; never the
+ *                   pseudo handle, which a save state cannot bind
  *
  * The addresses come from the OS: map anonymously, note where it landed,
  * unmap. Nothing here assumes a fixed host layout.
@@ -66,6 +70,54 @@ static void check(int ok, const char *what)
 {
     printf("  %-60s %s\n", what, ok ? "PASS" : "FAIL");
     if (!ok) failures++;
+}
+
+/* 7. DuplicateHandle of the pseudo current-thread handle. */
+#define TEST_STILL_ACTIVE 259u
+typedef struct {
+    HANDLE h;              /* the main thread's duplicate */
+    DWORD  exit_code;
+    DWORD  wait;
+    BOOL   got_code;
+} dup_probe;
+
+static void *dup_probe_thread(void *arg)
+{
+    dup_probe *p = (dup_probe *)arg;
+    p->got_code  = GetExitCodeThread(p->h, &p->exit_code);
+    p->wait      = WaitForSingleObject(p->h, 0);
+    SetThreadPriority(p->h, THREAD_PRIORITY_HIGHEST);
+    return NULL;
+}
+
+/* A raw pthread that duplicates itself, hands the handle over and exits. */
+static HANDLE volatile g_raw_dup;
+static volatile int    g_raw_go;
+static void *dup_raw_exit_thread(void *arg)
+{
+    HANDLE h = NULL;
+    (void)arg;
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                    &h, 0, FALSE, 0);
+    __atomic_store_n(&g_raw_dup, h, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_raw_go, __ATOMIC_ACQUIRE)) sched_yield();
+    usleep(20000);   /* let the waiter block first */
+    ExitThread(0x1234);
+    return NULL;
+}
+
+/* A CreateThread thread: its duplicate is its own handle, as before. */
+static HANDLE volatile g_ct_dup;
+static HANDLE volatile g_ct_cur;
+static DWORD WINAPI dup_ct_thread(LPVOID arg)
+{
+    HANDLE h = NULL;
+    (void)arg;
+    g_ct_cur = GetCurrentThread();
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                    &h, 0, FALSE, 0);
+    g_ct_dup = h;
+    return 7;
 }
 
 #if defined(__linux__)
@@ -219,6 +271,89 @@ int main(void)
             DeleteCriticalSection(&g_lazy_cs);
         }
         check(bad == 0, "zeroed CRITICAL_SECTION: first use from 8 threads at once excludes");
+    }
+
+    /* 7. DuplicateHandle(GetCurrentThread()) on a thread CreateThread did not
+     *    start (this main thread, like the main guest thread) is a real
+     *    handle to an adopted thread object, never the pseudo handle: a save
+     *    state cannot bind the pseudo handle, and it names whichever thread
+     *    uses it. */
+    {
+        HANDLE cur = GetCurrentThread();
+        HANDLE d1 = NULL, d2 = NULL, apc;
+        w32_state st;
+        int kind;
+
+        check(cur == (HANDLE)(LONG_PTR)-2, "main thread: GetCurrentThread is the pseudo handle");
+        check(DuplicateHandle(GetCurrentProcess(), cur, GetCurrentProcess(), &d1, 0, FALSE, 0),
+              "main thread: DuplicateHandle(GetCurrentThread()) succeeds");
+        check(d1 && d1 != cur, "...and does not hand back the pseudo handle");
+        memset(&st, 0, sizeof st);
+        kind = w32_state_read(d1, &st);
+        check(kind == W32_STATE_THREAD && st.tid == GetCurrentThreadId() && !st.exited,
+              "...a live thread object with this thread's tid");
+        check(DuplicateHandle(GetCurrentProcess(), cur, GetCurrentProcess(), &d2, 0, FALSE,
+                              DUPLICATE_CLOSE_SOURCE) && d2 == d1,
+              "a second duplicate (CLOSE_SOURCE) names the same object");
+        apc = w32_thread_apc_handle();
+        check(apc == d1, "...the one w32_thread_apc_handle returns");
+        check(GetCurrentThread() == cur, "GetCurrentThread still answers the pseudo handle");
+        CloseHandle(d2);
+        CloseHandle(apc);
+        memset(&st, 0, sizeof st);
+        check(w32_state_read(d1, &st) == W32_STATE_THREAD,
+              "closing duplicates leaves the object live");
+
+        /* From another thread: running, unsignalled, and a priority set
+         * through the duplicate is the one the pseudo handle reads. */
+        {
+            dup_probe p;
+            pthread_t t;
+            memset(&p, 0, sizeof p);
+            p.h = d1;
+            pthread_create(&t, NULL, dup_probe_thread, &p);
+            pthread_join(t, NULL);
+            check(p.got_code && p.exit_code == TEST_STILL_ACTIVE,
+                  "another thread: GetExitCodeThread == STILL_ACTIVE");
+            check(p.wait == WAIT_TIMEOUT, "another thread: WaitForSingleObject(h, 0) times out");
+            check(GetThreadPriority(GetCurrentThread()) == THREAD_PRIORITY_HIGHEST,
+                  "SetThreadPriority(dup) reads back through the pseudo handle");
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+            check(GetThreadPriority(d1) == THREAD_PRIORITY_LOWEST,
+                  "SetThreadPriority(pseudo) reads back through the duplicate");
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+        }
+        CloseHandle(d1);
+    }
+
+    /* 7b. A raw pthread duplicates itself and calls ExitThread: a waiter on
+     *     the duplicate wakes, with the exit code. */
+    {
+        pthread_t t;
+        HANDLE h;
+        DWORD code = 0, w;
+        g_raw_dup = NULL;
+        g_raw_go  = 0;
+        pthread_create(&t, NULL, dup_raw_exit_thread, NULL);
+        while (!(h = __atomic_load_n(&g_raw_dup, __ATOMIC_ACQUIRE))) sched_yield();
+        __atomic_store_n(&g_raw_go, 1, __ATOMIC_RELEASE);
+        w = WaitForSingleObject(h, 5000);
+        check(w == WAIT_OBJECT_0, "raw pthread: ExitThread wakes a waiter on its duplicate");
+        check(GetExitCodeThread(h, &code) && code == 0x1234, "...with its exit code");
+        pthread_join(t, NULL);
+        CloseHandle(h);
+    }
+
+    /* 7c. A CreateThread thread: unchanged, its duplicate is its own handle. */
+    {
+        DWORD tid = 0, code = 0;
+        HANDLE th = CreateThread(NULL, 0, dup_ct_thread, NULL, 0, &tid);
+        check(th && WaitForSingleObject(th, 5000) == WAIT_OBJECT_0, "CreateThread thread ran");
+        check(g_ct_cur == th && g_ct_dup == th,
+              "CreateThread thread: GetCurrentThread and its duplicate are its handle");
+        check(GetExitCodeThread(th, &code) && code == 7, "...exit code 7");
+        CloseHandle(g_ct_dup);
+        CloseHandle(th);
     }
 
     printf("\n%d failure(s)\n", failures);

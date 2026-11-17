@@ -141,9 +141,11 @@ int         w32_raise_fd_limit(unsigned long long *before, unsigned long long *a
 /* A handle (one more reference, for CloseHandle) to the calling thread's
  * thread object, the one QueueUserAPC queues to and an alertable wait of
  * this thread wakes for. A thread CreateThread did not start -- the main
- * thread -- gets one of its own here, kept for its lifetime; GetCurrentThread
- * still answers the pseudo-handle for it. On Windows: DuplicateHandle of
- * GetCurrentThread() (XBA-133). */
+ * thread -- gets one of its own here (adopted), kept until ExitThread;
+ * GetCurrentThread still answers the pseudo-handle for it. On Windows:
+ * DuplicateHandle of GetCurrentThread() (XBA-133) -- which is what the shim's
+ * DuplicateHandle of the pseudo handle returns too: never the pseudo handle
+ * itself, which a save state cannot bind to a thread. */
 HANDLE      w32_thread_apc_handle(void);
 /* The state of a waitable object, for the kernel's NtQuery* (XBA-114).
  * Returns the kind (W32_QUERY_*) or 0 for a handle that is none of them:
