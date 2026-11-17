@@ -12339,8 +12339,9 @@ static void bridge_RtlRaiseStatus(void)
  * read the wrong fixed arguments for the two non-counted variants: RtlSprintf's
  * "count" was the format pointer, and the vararg list started one slot early.
  * This walks the format itself and formats each conversion with the host CRT,
- * reading 32-bit argument slots from guest memory (64-bit args 8-aligned, as
- * on x86).
+ * reading 32-bit argument slots from guest memory. A 64-bit argument (a
+ * double, an __int64) is two consecutive slots: x86 cdecl aligns stack
+ * arguments to 4 bytes, never to 8.
  */
 
 /* Guest cursor over the variadic argument slots. */
@@ -12353,10 +12354,9 @@ static uint32_t bridge_va_next32(uint32_t *pos)
 
 static uint64_t bridge_va_next64(uint32_t *pos)
 {
-    uint32_t p = (*pos + 7) & ~7u;
-    uint32_t lo = BRIDGE_MEM32(p);
-    uint32_t hi = BRIDGE_MEM32(p + 4);
-    *pos = p + 8;
+    uint32_t lo = BRIDGE_MEM32(*pos);
+    uint32_t hi = BRIDGE_MEM32(*pos + 4);
+    *pos += 8;
     return (uint64_t)lo | ((uint64_t)hi << 32);
 }
 
@@ -12386,7 +12386,7 @@ static int bridge_format_printf(char *out, size_t cap, const char *fmt,
         {
             char flags[8];
             int  nflags = 0;
-            char conv[32];
+            char conv[48];         /* %, 7 flags, width, '.', precision, "ll", the specifier: 35 at most */
             char *cp = conv;
             int  width = 0, have_width = 0, width_star = 0;
             int  prec  = 0, have_prec  = 0, prec_star  = 0;
@@ -12403,7 +12403,8 @@ static int bridge_format_printf(char *out, size_t cap, const char *fmt,
             else if (fmt[i] >= '0' && fmt[i] <= '9') {
                 have_width = 1;
                 while (fmt[i] >= '0' && fmt[i] <= '9') {
-                    width = width * 10 + (fmt[i] - '0');
+                    if (width < 100000)                /* tmp is 512 bytes anyway; no overflow */
+                        width = width * 10 + (fmt[i] - '0');
                     i++;
                 }
             }
@@ -12413,7 +12414,8 @@ static int bridge_format_printf(char *out, size_t cap, const char *fmt,
                 have_prec = 1;
                 if (fmt[i] == '*') { prec_star = 1; i++; }
                 else while (fmt[i] >= '0' && fmt[i] <= '9') {
-                    prec = prec * 10 + (fmt[i] - '0');
+                    if (prec < 100000)
+                        prec = prec * 10 + (fmt[i] - '0');
                     i++;
                 }
             }
@@ -12522,7 +12524,10 @@ static int bridge_format_printf(char *out, size_t cap, const char *fmt,
                 break;
             }
             case 'f': case 'e': case 'g': case 'E': case 'G': {
-                double v = (double)bridge_va_next64(&pos);
+                /* The argument's bits are the double (not an integer to convert). */
+                uint64_t bits = bridge_va_next64(&pos);
+                double v;
+                memcpy(&v, &bits, sizeof v);
                 *cp++ = spec; *cp = 0;
                 snprintf(tmp, sizeof tmp, conv, v);
                 break;
