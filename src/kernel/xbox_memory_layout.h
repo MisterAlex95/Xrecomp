@@ -107,6 +107,24 @@ int xbox_ReserveHolds(uint32_t va, uint32_t bytes);
 int xbox_ReserveFree(uint32_t va, uint32_t size, int release,
                      uint32_t *out_base, uint32_t *out_size);
 
+/* NtAllocateVirtualMemory MEM_RESERVE at an address the title chose, above the
+ * RAM view: the range is mapped with fresh zero pages and listed with the lazy
+ * reservations (released by xbox_ReserveFree), so the title gets the address
+ * it asked for, as on the console. Intrinsic Alchemy's sbrk reserves the run
+ * VirtualQuery called free and gives up on any other answer. Returns -1 when
+ * the address is not ours (below the floor, the lazy reservations off, or
+ * RECOMP_EXT_VMA's tracker on), else an NTSTATUS: 0 with the 64 KB-rounded base
+ * and the page-rounded size written back, STATUS_CONFLICTING_ADDRESSES when a
+ * live reservation is in the way. */
+int xbox_ReserveAt(uint32_t *base, uint32_t *size);
+
+/* NtQueryVirtualMemory above the RAM view, when the lazy reservations are on:
+ * a live reservation reads as committed, anything else as free up to the next
+ * reservation (or the top of user space), in one region. Fills the 7 guest
+ * MEMORY_BASIC_INFORMATION fields and returns 1, or returns 0 when the address
+ * is not ours. */
+int xbox_ReserveQuery(uint32_t va, uint32_t info[7]);
+
 /* Bounds of the guest's executable sections, derived from the XBE at load.
  *
  * recomp_types.h declares these too, for RECOMP_ICALL_IS_CODE. They are
