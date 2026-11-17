@@ -664,6 +664,267 @@ static void test_n64(void)
     CHECK(c && c->error[0]);
 }
 
+/* ---- GameCube (XBA-264): MEM1 big-endian words (0x80000000 + the fake RAM's offset) ---- */
+
+static uint32_t r32(uint32_t a)
+{
+    a &= 0x1FFFFC;
+    return (uint32_t)ram[a] << 24 | (uint32_t)ram[a + 1] << 16 | (uint32_t)ram[a + 2] << 8 | ram[a + 3];
+}
+static void w32(uint32_t a, uint32_t v)
+{
+    a &= 0x1FFFFC;
+    for (int i = 0; i < 4; i++)
+        ram[a + i] = (uint8_t)(v >> (24 - 8 * i));
+}
+
+static void test_gc_ar(void)
+{
+    memset(ram, 0, sizeof ram);
+    recomp_cheat_bus b = word_bus(1);
+    /* writes: 32-bit, 8-bit fill (4 bytes), 16-bit fill (3 halfwords), pointer write (8-bit at [ptr] + 0x10), add,
+     * float add */
+    w32(0x3000, 0x80004000u);
+    w32(0x3100, 10);
+    w32(0x3200, 0x40000000u); /* 2.0f */
+    recomp_cheat *c = one(RECOMP_CHEAT_GC, "ar",
+                          "04001000 12345678\n"
+                          "00002000 000003AB\n"
+                          "02002010 0002BEEF\n"
+                          "40003000 000010AA\n"
+                          "84003100 00000005\n"
+                          "86003200 3F800000\n");
+    CHECK(c && !c->error[0] && c->used == RECOMP_CF_AR);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x1000), 0x12345678u);
+    CHECK_EQ(r32(0x2000), 0xABABABABu);
+    CHECK_EQ(r8(0x2004), 0);
+    CHECK_EQ(r16(0x2010), 0xBEEF);
+    CHECK_EQ(r16(0x2014), 0xBEEF);
+    CHECK_EQ(r16(0x2016), 0);
+    CHECK_EQ(r8(0x4010), 0xAA);
+    CHECK_EQ(r32(0x3100), 15);
+    CHECK_EQ(r32(0x3200), 0x40400000u); /* 3.0f */
+
+    /* conditionals: equal skip 1 / not equal skip 2 / greater signed until the end-if zero code / skip all */
+    memset(ram, 0, sizeof ram);
+    c = one(RECOMP_CHEAT_GC, "auto",
+            "0C003300 0000BEEF\n" /* if [3300] == BEEF (32-bit) */
+            "04003304 00000001\n"
+            "52003310 00000001\n" /* if (16-bit at 3310) != 1: type 2, sub 1, skip 2 */
+            "04003314 00000002\n"
+            "04003318 00000003\n"
+            "A4003320 00000000\n" /* if [3320] > 0 signed: type 4, sub 2, until 00000000 40000000 */
+            "0400331C 00000004\n"
+            "00000000 40000000\n"
+            "04003324 00000005\n"
+            "F4003330 00000000\n" /* if [3330] > 0 unsigned: type 6, sub 3: skip all */
+            "04003334 00000006\n");
+    CHECK(c && !c->error[0] && c->used == RECOMP_CF_AR); /* a zero code: AR */
+    w16(0x3310, 1);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x3304), 0);
+    CHECK_EQ(r32(0x3314), 0);
+    CHECK_EQ(r32(0x3318), 0);
+    CHECK_EQ(r32(0x331C), 0);
+    CHECK_EQ(r32(0x3324), 5);
+    CHECK_EQ(r32(0x3334), 0);
+    w32(0x3300, 0xBEEF);
+    w16(0x3310, 2);
+    w32(0x3320, 7);
+    w32(0x3330, 1);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x3304), 1);
+    CHECK_EQ(r32(0x3314), 2);
+    CHECK_EQ(r32(0x3318), 3);
+    CHECK_EQ(r32(0x331C), 4);
+    CHECK_EQ(r32(0x3334), 6);
+    w32(0x3320, 0xFFFFFFFFu); /* -1: not greater than 0, signed */
+    w32(0x331C, 0);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x331C), 0);
+
+    /* fill and slide: 32-bit 0x10, 0x11, 0x12 every 4 bytes; the end zero code stops the rest */
+    memset(ram, 0, sizeof ram);
+    c = one(RECOMP_CHEAT_GC, "ar", "00000000 84005000\n00000010 01030001\n00000000 00000000\n04005100 00000001\n");
+    CHECK(c && !c->error[0]);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x5000), 0x10);
+    CHECK_EQ(r32(0x5004), 0x11);
+    CHECK_EQ(r32(0x5008), 0x12);
+    CHECK_EQ(r32(0x500C), 0);
+    CHECK_EQ(r32(0x5100), 0);
+
+    /* master codes are ignored with a note; encrypted codes refused with a reason */
+    c = one(RECOMP_CHEAT_GC, "ar", "C4123456 0000FF00\n04001000 00000001\n");
+    CHECK(c && !c->error[0] && c->note[0]);
+    c = one(RECOMP_CHEAT_GC, "auto", "ABCD-EFGH-12345\nWXYZ-1234-ABCDE\n");
+    CHECK(c && strstr(c->error, "encrypted"));
+    c = one(RECOMP_CHEAT_GC, "gs", "80001000 0001\n");
+    CHECK(c && c->error[0]); /* not a GameCube format */
+}
+
+static void test_gc_gecko(void)
+{
+    memset(ram, 0, sizeof ram);
+    recomp_cheat_bus b = word_bus(1);
+    recomp_cheat *c = one(RECOMP_CHEAT_GC, "auto",
+                          "00001000 000200AB\n"
+                          "02001010 0001BEEF\n"
+                          "04001020 DEADBEEF\n"
+                          "06001030 00000005\n"
+                          "48656C6C 6F000000\n"
+                          "08001040 00000001\n"
+                          "10020004 00000002\n");
+    CHECK(c && !c->error[0] && c->used == RECOMP_CF_GECKO);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x1000), 0xABABAB00u);
+    CHECK_EQ(r32(0x1010), 0xBEEFBEEFu);
+    CHECK_EQ(r32(0x1020), 0xDEADBEEFu);
+    CHECK_EQ(r32(0x1030), 0x48656C6Cu);
+    CHECK_EQ(r8(0x1034), 0x6F);
+    CHECK_EQ(r16(0x1040), 1);
+    CHECK_EQ(r16(0x1044), 3);
+    CHECK_EQ(r16(0x1048), 5);
+    CHECK_EQ(r16(0x104C), 0);
+
+    /* ifs: 32-bit equal with an endif, 16-bit with a mask, an odd address applying an endif first, else */
+    memset(ram, 0, sizeof ram);
+    c = one(RECOMP_CHEAT_GC, "gecko",
+            "20001100 00000007\n"
+            "04001104 00000001\n"
+            "E2000001 00000000\n"
+            "04001108 00000002\n"
+            "28001110 FF000012\n"
+            "0400110C 00000003\n"
+            "22001101 00000007\n" /* endif, then if [1100] != 7 */
+            "04001114 00000004\n"
+            "E2100000 00000000\n" /* else */
+            "04001118 00000005\n"
+            "E0000000 80008000\n"
+            "2C001120 00000010\n" /* if 16-bit [1120] > 0x10 */
+            "0400111C 00000006\n"
+            "E0000000 80008000\n");
+    CHECK(c && !c->error[0]);
+    w16(0x1110, 0x3412); /* & 0x00FF = 0x12 */
+    apply(&b, 1);
+    CHECK_EQ(r32(0x1104), 0);
+    CHECK_EQ(r32(0x1108), 2);
+    CHECK_EQ(r32(0x110C), 3);
+    CHECK_EQ(r32(0x1114), 4);
+    CHECK_EQ(r32(0x1118), 0);
+    CHECK_EQ(r32(0x111C), 0);
+    memset(ram + 0x1104, 0, 0x20);
+    w32(0x1100, 7);
+    w16(0x1120, 0x11);
+    w16(0x1110, 0x3413);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x1104), 1);
+    CHECK_EQ(r32(0x110C), 0);
+    CHECK_EQ(r32(0x1114), 0);
+    CHECK_EQ(r32(0x1118), 5);
+    CHECK_EQ(r32(0x111C), 6);
+
+    /* ba / po: set ba, write at ba + X; po loaded from a pointer, checked in range (DE), written at po + X */
+    memset(ram, 0, sizeof ram);
+    w32(0x3000, 0x80006000u);
+    c = one(RECOMP_CHEAT_GC, "gecko",
+            "42000000 80002000\n"
+            "04000010 11111111\n"
+            "E0000000 80008000\n"
+            "48000000 80003000\n"
+            "DE000000 80008180\n"
+            "14000020 CAFEBABE\n"
+            "E0000000 80008000\n"
+            "48000000 80003004\n" /* po = 0: out of range, nothing written */
+            "DE000000 80008180\n"
+            "14000024 CAFEBABE\n"
+            "E0000000 80008000\n"
+            "44000000 80003008\n"); /* store ba */
+    CHECK(c && !c->error[0]);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x2010), 0x11111111u);
+    CHECK_EQ(r32(0x6020), 0xCAFEBABEu);
+    CHECK_EQ(r32(0x0024), 0);
+    CHECK_EQ(r32(0x3008), 0x80000000u);
+
+    /* Gecko registers, repeat, goto */
+    memset(ram, 0, sizeof ram);
+    c = one(RECOMP_CHEAT_GC, "gecko",
+            "80000001 00000005\n" /* gr1 = 5 */
+            "86000001 00000003\n" /* gr1 += 3 */
+            "84200001 80001200\n" /* [1200] = gr1 */
+            "82200002 80001200\n" /* gr2 = [1200] */
+            "88000002 00000001\n" /* gr2 += gr1 */
+            "84200002 80001204\n"
+            "80000003 00000000\n"
+            "60000003 00000000\n" /* repeat 3 times (block 0) */
+            "86000003 00000001\n"
+            "62000000 00000000\n"
+            "84200003 80001208\n"
+            "86500002 00000002\n" /* gr2 <<= 2 */
+            "84200002 8000120C\n"
+            "66000001 00000000\n" /* goto: skip one line */
+            "04001300 11111111\n"
+            "04001304 22222222\n"
+            "80000004 80001200\n" /* gr4 = 0x80001200, gr5 = 0x80001400 */
+            "80000005 80001400\n"
+            "8A000845 00000000\n" /* copy 8 bytes from gr4's address to gr5's */
+            "F0000000 00000000\n"
+            "04001308 33333333\n");
+    CHECK(c && !c->error[0]);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x1200), 8);
+    CHECK_EQ(r32(0x1204), 16);
+    CHECK_EQ(r32(0x1208), 4);
+    CHECK_EQ(r32(0x120C), 64);
+    CHECK_EQ(r32(0x1300), 0);
+    CHECK_EQ(r32(0x1304), 0x22222222u);
+    CHECK_EQ(r32(0x1400), 8);
+    CHECK_EQ(r32(0x1404), 16);
+    CHECK_EQ(r32(0x1308), 0); /* after F0 */
+
+    /* C2: the code in the hook area, a branch to it at the address, a branch back as its last word; turned off,
+     * the instruction comes back */
+    memset(ram, 0, sizeof ram);
+    w32(0x4100, 0x7C0802A6u);
+    c = one(RECOMP_CHEAT_GC, "gecko", "C2004100 00000002\n38600001 38800002\n38A00003 00000000\n");
+    CHECK(c && !c->error[0]);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x4100), 0x48000000u | ((0x80001800u - 0x80004100u) & 0x03FFFFFCu));
+    CHECK_EQ(r32(0x1800), 0x38600001u);
+    CHECK_EQ(r32(0x1804), 0x38800002u);
+    CHECK_EQ(r32(0x1808), 0x38A00003u);
+    CHECK_EQ(r32(0x180C), 0x48000000u | ((0x80004104u - 0x8000180Cu) & 0x03FFFFFCu));
+    unsigned before = writes;
+    apply(&b, 3); /* the same words: nothing written */
+    CHECK_EQ(writes, before);
+    S.list[0].enabled = 0;
+    apply(&b, 1);
+    CHECK_EQ(r32(0x4100), 0x7C0802A6u);
+    /* C6 branch */
+    c = one(RECOMP_CHEAT_GC, "gecko", "C6004200 80004300\n");
+    CHECK(c && !c->error[0]);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x4200), 0x48000100u);
+
+    /* refused with a reason */
+    c = one(RECOMP_CHEAT_GC, "gecko", "C0000000 00000001\n4E800020 00000000\n");
+    CHECK(c && strstr(c->error, "C0"));
+    c = one(RECOMP_CHEAT_GC, "gecko", "A8000000 00000001\n");
+    CHECK(c && c->error[0]);
+    c = one(RECOMP_CHEAT_GC, "gecko", "C2004100 00000003\n38600001 00000000\n");
+    CHECK(c && c->error[0]); /* the code is missing lines */
+    c = one(RECOMP_CHEAT_GC, "gecko", "04001000 0001\n");
+    CHECK(c && c->error[0]); /* not 8 + 8 digits */
+    /* raw lines */
+    memset(ram, 0, sizeof ram);
+    c = one(RECOMP_CHEAT_GC, "auto", "80001000:12\n80001002:3456\n");
+    CHECK(c && !c->error[0] && c->used == RECOMP_CF_RAW);
+    apply(&b, 1);
+    CHECK_EQ(r32(0x1000), 0x12003456u);
+}
+
 /* ---- The file ---- */
 
 /* ---- Xbox (XBA-241): a fake guest window, [0x10000, 0x200000) mapped, its first page a "code section" ---- */
@@ -885,6 +1146,8 @@ int main(int argc, char **argv)
     test_ps1();
     test_n64();
     test_xbox();
+    test_gc_ar();
+    test_gc_gecko();
     test_file(argc > 1 ? argv[1] : ".");
     recomp_cheats_free(&S);
     if (failures) {

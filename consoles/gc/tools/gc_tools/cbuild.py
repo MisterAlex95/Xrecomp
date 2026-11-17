@@ -10,7 +10,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", "..", "..", ".."))
 RUNTIME = os.path.join(REPO, "consoles", "gc", "runtime")
 CHDR = os.path.join(REPO, "third_party", "libchdr")
-CORE = ["gc_core.c", "gc_cpu.c", "gc_bus.c", "gc_exi.c", "gc_si.c", "gc_mmu.c", "gc_recomp.c", "gc_rel.c", "gc_pack.c", "gc_extract.c", "gc_disc.c", "gc_disc_wia.c", "gc_bzip2.c", "gc_di.c",
+CORE = ["gc_core.c", "gc_cpu.c", "gc_bus.c", "gc_exi.c", "gc_si.c", "gc_mmu.c", "gc_recomp.c", "gc_rel.c", "gc_state.c", "gc_pack.c", "gc_extract.c", "gc_disc.c", "gc_disc_wia.c", "gc_bzip2.c", "gc_di.c",
         "gc_boot.c", "gx/gx_fifo.c", "gx/gx_vtx.c", "gx/gx_tex.c", "gx/gx_shader.c", "gx/gx_gl.c", "gx/gx_egl.c", "gx/gx_progcache.c",
         "gc_dsp.c", "gc_ai.c", "gc_ax.c", "gc_asnd.c", "gc_audio_util.c"]
 CODECS = [os.path.join(CHDR, "deps", "miniz-3.1.2", "miniz.c"), os.path.join(CHDR, "deps", "zstd-1.5.7", "zstddeclib.c"),
@@ -46,8 +46,10 @@ def core_objects(outdir, cc="cc", cflags=()):
 def gc_run(outdir, cc="cc", cflags=()):
     exe = os.path.join(outdir, "gc_run")
     objs = core_objects(outdir, cc, cflags)
-    subprocess.run([cc] + list(cflags) + ["-rdynamic"] + INCLUDES + ["-o", exe, os.path.join(RUNTIME, "tools", "gc_run.c")]
-                   + objs + ["-ldl", "-lm", "-lpthread"], check=True)
+    platform = os.path.join(REPO, "src", "platform")  # --rewind / --cheats (XBA-264)
+    subprocess.run([cc] + list(cflags) + ["-rdynamic", "-DGC_RUN_PLATFORM=1", "-I", platform] + INCLUDES
+                   + ["-o", exe, os.path.join(RUNTIME, "tools", "gc_run.c"), os.path.join(platform, "recomp_rewind.c"),
+                      os.path.join(platform, "recomp_cheats.c")] + objs + ["-ldl", "-lm", "-lpthread"], check=True)
     return exe
 
 

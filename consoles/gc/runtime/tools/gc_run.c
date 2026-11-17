@@ -35,7 +35,16 @@
  * Prepare (XBA-264): --discovered FILE merges the missed addresses and the REL modules seen loaded into FILE (the
  * runtime's discovered.txt format, gc_recomp_write_discovered). `gc_run --extract OUT.gcm IMAGE` writes the sparse
  * GCM tools.prepare reads (header, apploader, FST, main DOL, REL modules; gc_extract.h) out of any image format and
- * prints "key <KEY> dol_sha256 <HEX> rels <N>". */
+ * prints "key <KEY> dol_sha256 <HEX> rels <N>".
+ *
+ * Save states (XBA-264): --state-check N:M runs N fields, saves a state (gc_state_save), runs M more fields recording
+ * each field's XFB, loads the state and runs the M fields again: every XFB and the state after them must be the same
+ * as the first time ("STATE OK ...", else "STATE FAIL ..." and exit 1). With --pack, lifted code runs on both sides
+ * (every span is checked again after the load). --rewind C:R [--rewind-mb M]: the rewind round trip
+ * (recomp_rewind_check, XBA-194 / XBA-264): --frames fields with pseudo-random pads on port 1, a capture every C
+ * fields into a ring capped at M MB (default 64), R steps back, then the fields after it must be the first run's
+ * (picture and sound). --cheats FILE: the cheat list (recomp_cheats.h: Action Replay / Gecko codes) applied after
+ * every field. Both need src/platform (GC_RUN_PLATFORM; not in a copy of consoles/gc alone). */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,6 +56,11 @@
 #include "gc_extract.h"
 #include "gx/gx.h"
 #include "gc_png.h"
+#include "gc_audio.h"
+#ifdef GC_RUN_PLATFORM
+#include "recomp_cheats.h"
+#include "recomp_rewind.h"
+#endif
 
 /* A 48 kHz 16-bit stereo WAV, its sizes patched at the end. */
 static void wav_header(FILE *f, uint32_t frames)
@@ -97,6 +111,133 @@ static uint8_t *read_file(const char *path, size_t *size)
     return p;
 }
 
+/* FNV-1a 64 of the XFB as the VI scans it (YUV), 0 without one. */
+static uint64_t xfb_hash(gc_machine *m)
+{
+    static uint8_t yuv[GC_XFB_MAX_W * GC_XFB_MAX_H * 2];
+    int w, h;
+    if (gc_xfb_yuv(m, yuv, &w, &h))
+        return 0;
+    uint64_t x = 0xCBF29CE484222325ull;
+    for (size_t i = 0; i < (size_t)w * h * 2; i++)
+        x = (x ^ yuv[i]) * 0x100000001B3ull;
+    return x ^ (uint64_t)w << 48 ^ (uint64_t)h << 32;
+}
+
+#ifdef GC_RUN_PLATFORM
+/* --rewind (XBA-264): pads that change every few fields, the same for a field. */
+static void rw_input(void *m, long f)
+{
+    uint32_t x = (uint32_t)(f / 7) * 2654435761u;
+    x ^= x >> 15;
+    gc_pad_state p = {true, (uint16_t)(x & 0x1F7F), (uint8_t)(64 + (x >> 8) % 128), (uint8_t)(64 + (x >> 16) % 128),
+                      128, 128, 0, 0};
+    gc_set_pad(m, 0, &p);
+}
+static void rw_run(void *m)
+{
+    gc_run_frame(m);
+}
+static uint64_t xfb_hash(gc_machine *m);
+static uint64_t rw_picture(void *m)
+{
+    return xfb_hash(m);
+}
+static uint64_t rw_audio(void *m)
+{
+    int16_t buf[1024 * 2];
+    size_t n;
+    uint64_t x = 0xCBF29CE484222325ull;
+    while ((n = gc_audio_pull(m, buf, 1024)) > 0)
+        for (size_t i = 0; i < 2 * n; i++)
+            x = (x ^ (uint16_t)buf[i]) * 0x100000001B3ull;
+    return x;
+}
+static size_t rw_size(void *m)
+{
+    return gc_state_size(m);
+}
+static size_t rw_save(uint8_t *out, size_t cap, void *m)
+{
+    return gc_state_save(m, "rewind", out, cap);
+}
+static int rw_load(const uint8_t *in, size_t n, void *m)
+{
+    return gc_state_load(m, "rewind", in, n, NULL, 0) == GC_STATE_OK ? 0 : -1;
+}
+static uint32_t ch_read32(void *m, uint32_t a)
+{
+    return gc_cheat_read32(m, a);
+}
+static void ch_write32(void *m, uint32_t a, uint32_t v)
+{
+    gc_cheat_write32(m, a, v);
+}
+#endif
+
+/* --state-check N:M (XBA-264). 0, 1 on a difference, 2 when a state cannot be taken. */
+static int state_check(gc_machine *m, int n, int fields)
+{
+    for (int f = 0; f < n; f++)
+        if (gc_run_frame(m)) {
+            fprintf(stderr, "gc_run: stopped in field %d: %s\n", f, gc_error(m));
+            return 1;
+        }
+    size_t cap = gc_state_size(m) + (1u << 20), len = 0, len2 = 0;
+    uint8_t *st = malloc(cap), *st2 = malloc(cap), *st3 = malloc(cap);
+    uint64_t *seen = calloc((size_t)fields, sizeof *seen);
+    int rc = 2;
+    char why[200] = "";
+    if (!st || !st2 || !st3 || !seen || !(len = gc_state_save(m, "check", st, cap)))
+        goto out;
+    for (int f = 0; f < fields; f++) {
+        if (gc_run_frame(m))
+            goto out;
+        seen[f] = xfb_hash(m);
+    }
+    len2 = gc_state_save(m, "check", st2, cap);
+    int lr = gc_state_load(m, "check", st, len, why, sizeof why);
+    if (lr != GC_STATE_OK) {
+        printf("STATE FAIL load: %d %s\n", lr, why);
+        rc = 1;
+        goto out;
+    }
+    rc = 0;
+    for (int f = 0; f < fields; f++) {
+        if (gc_run_frame(m)) {
+            printf("STATE FAIL field %d after the load: the machine stopped: %s\n", n + 1 + f, gc_error(m));
+            rc = 1;
+            goto out;
+        }
+        uint64_t hsh = xfb_hash(m);
+        if (hsh != seen[f]) {
+            printf("STATE FAIL field %d after the load: XFB %016llX, %016llX the first time\n", n + 1 + f,
+                   (unsigned long long)hsh, (unsigned long long)seen[f]);
+            rc = 1;
+        }
+    }
+    size_t len3 = gc_state_save(m, "check", st3, cap);
+    if (len3 != len2 || memcmp(st2, st3, len2) != 0) {
+        size_t i = 0;
+        while (i < len2 && i < len3 && st2[i] == st3[i])
+            i++;
+        printf("STATE FAIL the state after %d more fields differs (%zu / %zu bytes, first at %zu)\n", fields, len2,
+               len3, i);
+        rc = 1;
+    }
+    if (!rc)
+        printf("STATE OK saved at field %d (%zu bytes), %d fields replayed identically (XFB %016llX)\n", n, len,
+               fields, (unsigned long long)seen[fields - 1]);
+out:
+    if (rc == 2)
+        printf("STATE FAIL no state taken\n");
+    free(st);
+    free(st2);
+    free(st3);
+    free(seen);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     const char *dol_path = NULL, *png = NULL, *pack = NULL, *missed = NULL, *disc2 = NULL, *wav = NULL;
@@ -105,7 +246,9 @@ int main(int argc, char **argv)
     gx_gl_options gxo = {0, 1, 0, NULL, NULL};
     const char *warm_lists = NULL, *warm_cache = NULL;
     const char *peek[16];
-    int pal = 0;
+    int pal = 0, state_n = -1, state_m = 0, rewind_every = 0, rewind_back = 0;
+    double rewind_mb = 64;
+    const char *cheats_path = NULL;
     gc_pad_state pads[4];
     memset(pads, 0, sizeof pads);
     for (int i = 1; i < argc; i++) {
@@ -164,6 +307,21 @@ int main(int argc, char **argv)
             swap_at = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v"))
             verbose++;
+        else if (!strcmp(argv[i], "--rewind") && i + 1 < argc) {
+            if (sscanf(argv[++i], "%d:%d", &rewind_every, &rewind_back) != 2 || rewind_every < 1 || rewind_back < 1) {
+                fprintf(stderr, "gc_run: --rewind C:R (a capture every C fields, R steps back)\n");
+                return 2;
+            }
+        } else if (!strcmp(argv[i], "--rewind-mb") && i + 1 < argc)
+            rewind_mb = strtod(argv[++i], NULL);
+        else if (!strcmp(argv[i], "--cheats") && i + 1 < argc)
+            cheats_path = argv[++i];
+        else if (!strcmp(argv[i], "--state-check") && i + 1 < argc) {
+            if (sscanf(argv[++i], "%d:%d", &state_n, &state_m) != 2 || state_n < 0 || state_m < 1) {
+                fprintf(stderr, "gc_run: --state-check N:M (N >= 0 fields before the save, M >= 1 after)\n");
+                return 2;
+            }
+        }
         else if (argv[i][0] != '-' && !dol_path)
             dol_path = argv[i];
         else {
@@ -171,7 +329,7 @@ int main(int argc, char **argv)
                             " [--png OUT] [--pack LIB] [--missed FILE] [--stats] [--peek ADDR[:N]] [--pal]"
                             " [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]] [--wav OUT] [-v] [--gx] [--gx-hw] [--gx-scale N]"
                             " [--gx-shaders MODE] [--gx-list FILE] [--gx-copy-ram] [--gx-programs FILE]"
-                            " [--discovered FILE]\n"
+                            " [--discovered FILE] [--state-check N:M] [--rewind C:R [--rewind-mb M]] [--cheats FILE]\n"
                             "       gc_run --gx-warmup LIST[,LIST...] CACHE [--gx-hw]\n"
                             "       gc_run --extract OUT.gcm IMAGE\n");
             return 2;
@@ -259,6 +417,30 @@ int main(int argc, char **argv)
         }
     }
     int rc = 0;
+    if (state_n >= 0) {
+        rc = state_check(m, state_n, state_m);
+        frames = 0;
+    }
+#ifdef GC_RUN_PLATFORM
+    if (rewind_every > 0) {
+        recomp_rewind_machine mc = {m, rw_input, rw_run, rw_picture, rw_audio, rw_size, rw_save, rw_load};
+        int r = recomp_rewind_check("gc", &mc, frames, rewind_every, rewind_back,
+                                    (size_t)((rewind_mb > 0 ? rewind_mb : 1) * 1048576.0));
+        rc = r ? 1 : 0;
+        frames = 0;
+    }
+    recomp_cheats cheats;
+    recomp_cheats_init(&cheats, RECOMP_CHEAT_GC);
+    recomp_cheat_bus cheat_bus = {m, NULL, NULL, ch_read32, ch_write32, 1, NULL, 0, NULL};
+    if (cheats_path && recomp_cheats_load(&cheats, cheats_path) < 0)
+        rc = 2, frames = 0;
+#else
+    if (rewind_every > 0 || cheats_path) {
+        fprintf(stderr, "gc_run: --rewind / --cheats need src/platform (built without GC_RUN_PLATFORM)\n");
+        rc = 2;
+        frames = 0;
+    }
+#endif
     FILE *wf = NULL;
     uint32_t wav_frames = 0;
     if (wav) {
@@ -286,6 +468,10 @@ int main(int argc, char **argv)
             rc = 1;
             break;
         }
+#ifdef GC_RUN_PLATFORM
+        if (cheats.n)
+            recomp_cheats_apply(&cheats, &cheat_bus);
+#endif
         wav_drain(m, wf, &wav_frames);
     }
     printf("frames %llu\n", (unsigned long long)gc_frames(m));

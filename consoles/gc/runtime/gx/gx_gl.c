@@ -1616,6 +1616,23 @@ void gx_gl_frame(gx_state *gx)
     gx->stats.shaders_pending = pending;
 }
 
+/* A save state was loaded (XBA-264): RAM holds another moment. EFB copies kept as textures no longer match RAM (their
+ * hash is spoilt, so the next use decodes RAM, or the next copy replaces them); the XFB pictures belong to the
+ * fields before the load (the presenter shows the XFB in RAM until GX copies again); peeks read the EFB again. */
+void gx_gl_state_loaded(gx_state *gx)
+{
+    gx_gl *g = gx->gl;
+    if (!g)
+        return;
+    for (unsigned i = 0; i < TEX_BUCKETS; i++)
+        for (tex_entry *e = g->texs[i]; e; e = e->next)
+            if (e->from_efb)
+                e->hash = ~e->hash;
+    for (unsigned i = 0; i < 4; i++)
+        g->xfb[i].addr = 0;
+    g->peek_color_ok = g->peek_z_ok = false;
+}
+
 unsigned gx_xfb_texture(gx_state *gx, uint32_t addr, int *w, int *h)
 {
     gx_gl *g = gx->gl;

@@ -79,6 +79,36 @@ uint32_t gc_peek32(gc_machine *m, uint32_t ea);
 typedef struct gx_state gx_state;
 gx_state *gc_gx(gc_machine *m);
 
+/* ---- Save states (XBA-264, gc_state.c) ----
+ * A state is the whole machine between two fields (call these between gc_run_frame calls, on the thread that runs
+ * them: the renderer's queued draws are flushed): the Gekko, MEM1, the locked cache, ARAM, the hardware registers
+ * and their timers, GX's register files, FIFO state and TMEM, the DVD drive's state (not the disc), the pads; tagged,
+ * versioned sections (gc_state.c says which, and what is left out: the EFB, host resources). key: the title key
+ * (gc_runtime_key / the disc's), written in the state and checked at load (NULL or "": not checked). Results share
+ * recomp_states.h's RECOMP_STATE_* values; why (may be NULL) says what refused a state. */
+#define GC_STATE_VERSION 1
+enum {
+    GC_STATE_OK = 0,
+    GC_STATE_EGAME = -3,    /* another title's state, or another console's */
+    GC_STATE_EVERSION = -4, /* another format version, or a section newer than this build reads */
+    GC_STATE_ECORRUPT = -7, /* not a state, truncated, damaged, a required section missing */
+};
+/* The bytes gc_state_save needs now (MEM1 / ARAM / TMEM pages that are all zero are left out). */
+size_t gc_state_size(gc_machine *m);
+/* Writes the state into out: its size, or 0 when cap is too small or the machine stopped. */
+size_t gc_state_save(gc_machine *m, const char *key, uint8_t *out, size_t cap);
+/* Whether a state would load (nothing changes). */
+int gc_state_check(gc_machine *m, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n);
+/* Loads a state (checked whole first: a refused state changes nothing). Lifted code is checked against memory again
+ * before it runs; the renderer forgets its EFB copies and XFB pictures. */
+int gc_state_load(gc_machine *m, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n);
+
+/* ---- Cheats' memory (XBA-264): MEM1 words at an effective address (0x80000000 / 0xC0000000 / physical alike),
+ * big-endian values, no side effect; a write that changes a word invalidates lifted code there (gc_recomp_icbi), so
+ * patched code runs in the interpreter. Outside MEM1: reads 0, writes are dropped. */
+uint32_t gc_cheat_read32(gc_machine *m, uint32_t ea);
+void gc_cheat_write32(gc_machine *m, uint32_t ea, uint32_t v);
+
 #ifdef __cplusplus
 }
 #endif

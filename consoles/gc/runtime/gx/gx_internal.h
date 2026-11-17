@@ -165,6 +165,9 @@ void gx_gl_draw(gx_state *gx, unsigned prim, unsigned n);
 void gx_gl_copy(gx_state *gx, uint32_t exec);
 void gx_gl_tex_invalidate(gx_state *gx);
 void gx_gl_frame(gx_state *gx);
+/* A save state was loaded (gc_state.c, XBA-264): EFB copies are checked against RAM again, the XFB pictures and the
+ * EFB peek caches dropped. */
+void gx_gl_state_loaded(gx_state *gx);
 
 /* ---- gx_shader.c ---- */
 void gx_shader_key_make(gx_state *gx, gx_shader_key *k);

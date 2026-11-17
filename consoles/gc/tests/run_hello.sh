@@ -1,5 +1,5 @@
 #!/bin/sh
-# ctest helper (XBA-225): run_hello.sh GC_RUN DOL WORKDIR interp|rc EXPECTED_PNG
+# ctest helper (XBA-225): run_hello.sh GC_RUN DOL WORKDIR interp|rc EXPECTED_PNG [STATE_CHECK]
 #
 # interp: DOL under gc_run (interpreter only) for 120 fields, the XFB compared with EXPECTED_PNG.
 # rc:     DOL's text recompiled (python3 -m gc_tools.recomp, the host cc into a pack, -ffp-contract=off like the
@@ -7,6 +7,7 @@
 #         interpreter had to start at (--missed / --discovered), until a run finds none new (4 rounds at most); then
 #         the last run's XFB compared with EXPECTED_PNG, and most instructions must have run natively (the pack is
 #         built with -DGC_RC_COUNT).
+# STATE_CHECK (N:M, XBA-264): then a save-state round trip with the same pack (gc_run --state-check N:M).
 # The comparison is consoles/nds/tests/png_compare.py (stdlib only, shared with the DS spike).
 # Exits 77 (skipped) when DOL is absent (tools/consoles/build_homebrew.sh gc), or python3 / cc are missing.
 run=$1
@@ -14,6 +15,7 @@ dol=$2
 work=$3
 mode=$4
 expected=$5
+state=$6
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
 compare="$repo/consoles/nds/tests/png_compare.py"
@@ -62,5 +64,10 @@ interp=$(echo "$out" | sed -n 's/^stats: native \([0-9]*\) interpreted \([0-9]*\
 if [ -z "$native" ] || [ "$native" -le $((interp * 9)) ]; then
     echo "too little native code: native ${native:-?}, interpreted ${interp:-?} (want 90 % native)"
     exit 1
+fi
+if [ -n "$state" ]; then
+    out=$(timeout 300 "$run" "$dol" --pack "$work/libtitle.so" --state-check "$state" --stats) || { echo "$out"; exit 1; }
+    echo "$out" | grep -E '^(STATE|stats)'
+    echo "$out" | grep -q '^STATE OK' || exit 1
 fi
 exec "$py" "$compare" "$work/xfb.png" "$expected"

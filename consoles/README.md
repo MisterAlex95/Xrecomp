@@ -1213,7 +1213,7 @@ capture schedule under fast-forward, the steps, the check on a fake machine, a l
 `gba_rewind_hb_*`, `gba_rewind_cap` (a 2 MB cap), `ps1_rewind_hb_*` (with a disc read, `overlay`), `ps1_rewind_cap`,
 `n64_rewind_hb_*`; the hotkey's default and text form in `tests/recomp_states`.
 
-**Cheats (XBA-197).** GameShark, Action Replay, CodeBreaker and raw codes for the three consoles (and Xbox titles, below), from a per-game
+**Cheats (XBA-197).** GameShark, Action Replay, CodeBreaker, Gecko and raw codes for the GBA, PS1, N64 and GameCube (XBA-264) (and Xbox titles, below), from a per-game
 list the player edits in the app (in-game menu « Cheats », Game settings › Cheats: [app-shell.md
 « Cheats »](../docs/android/app-shell.md#cheats)). `src/platform/recomp_cheats.h` (in `xbr_host_core`, libc only):
 
@@ -1248,16 +1248,22 @@ list the player edits in the app (in-game menu « Cheats », Game settings › C
 | GBA | `cb` | CodeBreaker, unencrypted: `2` OR, `3` / `8` writes, `4` slide, `5` super code, `6` AND, `7` / `A` / `B` / `C` / `F` conditionals, `D` keys held / not held, `E` add |
 | PS1 | `gs` | GameShark: `30` / `80` writes, `10` / `11` / `20` / `21` increment / decrement, `D0`-`D3` (16-bit ==, !=, <, >) and `E0`-`E3` (8-bit) for the next code, `50` serial repeater, `C0` master activator, `C1` delay (YYYY / 3 frames), `C2` copy |
 | N64 | `gs` | GameShark: `80` / `81` (and `A0` / `A1`) writes, `88` / `89` (the GameShark button: once, when turned on), `D0`-`D3` (8 / 16-bit ==, !=), `50` serial repeater, `F0` / `F1` boot-time writes (once, after the first frame) |
+| GC | `ar` | Action Replay GameCube, decrypted (`AAAAAAAA VVVVVVVV`; address word: bits 0-24 the MEM1 address, 25-26 the size 8 / 16 / 32 / float, 27-29 the type, 30-31 the subtype): type 0 write and fill (8-bit `(V >> 8) + 1` bytes, 16-bit `(V >> 16) + 1` halfwords), pointer write (`[addr]` + offset), add (float add for size 3); types 1-7 if ==, !=, < / > signed, < / > unsigned, AND, skipping 1 code, 2 codes, up to `00000000 40000000`, or all; zero codes `00000000 00000000` (end), `00000000 40000000` (end of the blocks), `00000000 8AAAAAAA` + `VVVVVVVV IICCSSSS` fill and slide; master codes ignored with a note |
+| GC | `gecko` | Gecko: `00` / `02` / `04` writes (8 / 16-bit with fill), `06` string, `08` serial; `20`-`2E` if ==, !=, >, < (32-bit; 16-bit with a mask), an odd address applying an endif first; `CE` / `DE` ba / po in a range; `E0` full terminator, `E2` endifs / else (both may set ba / po); `40`-`4C` load / set / store ba and po; `60`-`68` repeat, return, goto, gosub; `80`-`8C` Gecko registers set / load / store / operations (add, mul, or, and, xor, slw, srw, rotl, asr, fadds, fmuls) / memory copy; `C2` insert ASM (the code goes to the hook area 0x80001800-0x80003000, each cheat its own room there, the instruction becomes a branch to it and the code's last word a branch back; the instruction comes back when the cheat goes off); `C6` branch; `F0` end. The `+0x10` forms use po |
 
 `auto` (the default): `raw` when a line has `:`; on the GBA `cb` for `AAAAAAAA VVVV` lines, else the reading
 (encrypted or decrypted GameShark v1-v2 or Action Replay v3) whose lines decode to the most plausible codes (real RAM
-/ I/O addresses, ID codes); `gs` on the PS1 and N64. The GBA encryption is the devices' TEA variant (32 rounds, delta
+/ I/O addresses, ID codes); `gs` on the PS1 and N64; on the GameCube `ar` when a line is an AR zero code (`00000000
+...`), else `gecko` (both read `04` as a 32-bit write; set `format=ar` for other AR codes). The GBA encryption is the devices' TEA variant (32 rounds, delta
 0x9E3779B9) with their default seeds (GS v1-v2 `09F4FBBD 9681884A 352027E9 F3DEE5A7`, AR v3 `7AA9648F 7FAE6994
 C0EFAAD5 42712C57`, both derived from the devices' DEADFACE tables with parameter 0).
 
 Not supported (the cheat is not applied, the log says why): GBA `DEADFACE` reseeding, encrypted CodeBreaker codes
 (`9xxxxxxx` first line: use the decrypted ones), AR v3 slowdown; PS1 joker codes `D4`-`D6`; N64 `DE` (entry point,
-which only matters to a real cartridge's boot). Ignored with a note: master / hook / ID codes (GBA `F`, `C4`, CB
+which only matters to a real cartridge's boot); GameCube encrypted Action Replay codes (`XXXX-XXXX-XXXXX`: their
+decryption, seed tables, bit scrambling and checksums, is not cheaply documented; enter the decrypted code), AR memory
+copy and row zero codes, Gecko `C0` (execute ASM: guest code called from the engine), `46` / `4E` (code-list
+addresses), `A0`-`AE` (counters / register ifs), `CC`, `F2`-`F6`. Ignored with a note: master / hook / ID codes (GBA `F`, `C4`, CB
 `0` / `1`, `xxxxxxxx 001DC0DE`), N64 enabler codes (`EE`, `FF`, `CC`). F0 / F1 apply once after the first frame (the
 game's boot code has run by then; a real GameShark writes them before).
 
@@ -1282,13 +1288,14 @@ Tests: `tests/recomp_cheats` (`test_xbox`: types, conditionals and chains, raw l
 `.text`, the low page and unmapped addresses are refused, the file is read at the first vblank and again when it
 changes).
 
-Headless: `gba_run` / `ps1_run` / `n64_run --cheats FILE [--peek ADDR]...` (with `--lockstep`, on both machines).
+Headless: `gba_run` / `ps1_run` / `n64_run --cheats FILE [--peek ADDR]...` (with `--lockstep`, on both machines),
+`gc_run --cheats FILE [--peek ADDR]` (« GameCube save states, rewind, fast-forward, cheats »).
 Tests: `tests/recomp_cheats` (every code type on a fake memory, the encryption's round trips and fixed vectors, the
 format detection, blocks, once-codes, cartridge patches in and back, writes only on a change, the file and its
 reload), `gba_cheats_hb_hello` (raw, encrypted GS v1-v2 and AR v3, CodeBreaker, a cartridge patch, a cheat off, on
 our `hello`; `consoles/gba/tests/cheats/`), `gba_rc_cheats_hb_hello` (RAM codes on the pack in lockstep) and
 `gba_rc_cheats_hb_hello_rompatch` (the pack set aside), `ps1_cheats_hb_hello`, `ps1_hle_rc_cheats_hb_hello`,
-`n64_cheats_hb_hello`; the app's `CheatsTest` and `GameMenuTest.cheatsPage`. No commercial cheat database is in the
+`n64_cheats_hb_hello`, `gc_cheats_core` / `gc_cheats_padtest`; the app's `CheatsTest` and `GameMenuTest.cheatsPage`. No commercial cheat database is in the
 repository: the codes are the player's.
 
 **Nintendo DS spike (XBA-223, epic XBA-217).** Does the GBA's ARM / Thumb lifter carry over to the DS's ARM9
@@ -1702,6 +1709,55 @@ as the client side, and Dolphin's behaviour read for facts only.
   `cardA.raw` 2 MB / 512 KB / 8 MB, the write two seconds after the game's, slot B, a foreign file left alone.
   Not done: `.gci` import / export (one save of a card), the IPL font (a free replacement), card hot-swap from the
   app's menu.
+
+**GameCube save states, rewind, fast-forward, cheats (XBA-264).** The shared interfaces of XBA-182 / 194 / 197
+(`recomp_states.h`, `recomp_rewind.h`, `recomp_cheats.h`), plugged in the N64's way.
+
+- `runtime/gc_state.c` (`gc_core.h` « Save states »): `gc_state_size` / `gc_state_save` / `gc_state_check` /
+  `gc_state_load`, results sharing `RECOMP_STATE_*`'s values, a refused state with its reason (`why`). The blob: a
+  header (magic, console `gc`, `GC_STATE_VERSION`, the title key), then tagged sections, each with its own version
+  and length, every field written one by one in little-endian order (no struct copied, except the sound hardware's,
+  below): `CPU` (GPRs, ps0 / ps1, PC, LR, CTR, CR, XER, MSR, FPSCR, the reservation, SRs, the whole SPR file: SRR0/1,
+  GQRs, HIDs, WPAR, DMAU / DMAL, BATs, SPRGs, DEC / TB through the clock), `TIME` (video timing, decrementer, time
+  base), `HW` (PI, VI, SI and the pads plugged in, EXI and MI registers), `MEM1` (a bitmap of the non-zero 4 KB pages,
+  then those pages: about 1 MB for our homebrew), `LC` (the locked cache), `ARAM` (pages), `GX` (the PI FIFO, CP / PE
+  registers, the FIFO bytes not parsed yet, BP / CP / XF register files, XF memory, TEV colour registers, TMEM),
+  `DI` (the drive's registers, the command in flight, the head, the cover, the stream position and decoder; not the
+  disc), `EXI` (`gc_exi_state_save`: card commands under way, status, the IPL chip, SRAM, the RTC offset; never a
+  card's contents, which are the save files), `DSP` (struct `gc_audio` without its output ring: DSP interface,
+  mailboxes, the microcode HLE's state, ARAM / audio DMA, AI, resamplers; host layout, so a build whose struct differs
+  refuses that section). Required sections (CPU, TIME, HW, MEM1) refuse a state that lacks them; an optional one
+  missing is kept as the machine has it; a section this build does not know is skipped; one with a newer version, or
+  a fixed one of another length, refuses the state. A state of another title key, console or format version is
+  refused whole before anything changes (sizes and page bitmaps checked by a dry run first).
+- After a load: the BAT fast paths and the next event recomputed, every recompiled span checked against memory again
+  before it runs, GX's texture cache hashed against RAM again, the renderer's EFB copies and XFB pictures dropped
+  (`gx_gl_state_loaded`), the disc read cache emptied. Host resources (GL objects, the disc handle, the pack) are
+  never in a state. **The EFB is not saved** (the robust minimum): it lives in the renderer's framebuffer at the
+  internal resolution; games clear and redraw it every frame, so the first field after a load draws it again, and
+  the picture shown meanwhile is the XFB in MEM1 (restored). With `GC_GX_XFB_RAM=0` (copies to the XFB kept on the
+  GPU only) that first picture is whatever RAM holds.
+- `gc_runtime`: states in `<save dir>/gc-<KEY>/state<N>.st` beside the memory cards (`recomp_states_attach`, console
+  `gc`), saved and loaded between fields under the run's mutex by any thread, a thumbnail of the XFB, the clock reset
+  after a load, the automatic slot when the player leaves (Resume). Rewind (`recomp_rewinder`) is off unless
+  `RECOMP_REWIND=1` (a capture every 4 fields; a state is up to ~42 MB with MEM1 and ARAM full, XOR-delta coded in the
+  ring, `RECOMP_REWIND_MB` caps it: about 15-25 KB a capture for our homebrew, 2-8 ms each). The hotkeys
+  (`recomp_hotkeys.h`): pad chords and the desktop keys (Tab hold fast-forward, F1-F4, Shift+F1-F4) save / load /
+  step the slot, hold fast-forward or rewind; fast-forward runs `speed` fields per shown frame (audio averaged down).
+- Cheats: `RECOMP_CHEAT_GC`, formats `ar` (Action Replay GameCube, decrypted) and `gecko`, plus `raw`; the runtime
+  applies them after every field through `gc_cheat_read32` / `gc_cheat_write32` (MEM1, big-endian; a write that changes
+  a word calls `gc_recomp_icbi`, so patched code runs in the interpreter: spans are whole text sections, so one code
+  patch puts that section's lifted code aside — right, but slower). See « Cheats » above for the code types.
+- Headless: `gc_run --state-check N:M` (N fields, save, M fields recorded, load, the M fields again: every XFB and the
+  state after them identical), `gc_run --rewind C:R [--rewind-mb M]` (`recomp_rewind_check`: pseudo-random pads,
+  picture and sound after R steps back as the first time), `gc_run --cheats FILE`.
+- Tests: `gc_state_format` (no corpus: the format on a synthetic program: every section's data round trip, key,
+  version, damaged / truncated states refused with the machine untouched, unknown / missing sections, newer section,
+  the cheats' memory access invalidating a span), `gc_state_hello` / `_padtest` / `_asnd` (the DSP's state too) /
+  `_gxcopy` (with the GLES renderer on llvmpipe), `gc_rc_hello` (the round trip again with the recompiled pack),
+  `gc_rewind_padtest`, `gc_cheats_core` (a Gecko 04 patch and a C2 hook run by the CPU on a synthetic program, the
+  instruction put back when the cheat goes off, AR codes), `gc_cheats_padtest` (Gecko / AR codes writing into our
+  pad test's report: the program counts on from their values), `tests/recomp_cheats` (`test_gc_ar`, `test_gc_gecko`).
 
 **Dreamcast spike (XBA-227, epic XBA-221).** A new frontend: the SH-4. Our KallistiOS hello world boots on Linux
 with no BIOS image, interpreted and recompiled (after the discovery loop over 99.99 % of its instructions run as

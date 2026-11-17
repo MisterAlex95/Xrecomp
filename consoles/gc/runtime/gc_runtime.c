@@ -10,7 +10,17 @@
  *
  * Sound (XBA-263): what the machine played during each field (gc_audio_pull, 48 kHz stereo) goes to host_audio;
  * the clock is nudged by the queue (above twice its 50 ms target: a field 2 % longer, under half of it: 2 % shorter)
- * so the host's audio clock and the guest's never drift apart; fast-forward averages it down (recomp_ff_audio). */
+ * so the host's audio clock and the guest's never drift apart; fast-forward averages it down (recomp_ff_audio).
+ *
+ * Save states, rewind, cheats (XBA-264; recomp_states.h, recomp_rewind.h, recomp_cheats.h), the N64 runtime's way:
+ * states (gc_state.c) in <save dir>/gc-<KEY>/state<N>.st beside the memory cards, saved and loaded between fields
+ * under s_mu by any thread (the in-game menu, the hotkeys), a thumbnail from the XFB in RAM, the clock reset after a
+ * load; the automatic slot (Resume) when the player leaves. Rewind is off unless RECOMP_REWIND=1 (a capture is the
+ * state, about 1 MB for homebrew and up to ~42 MB with MEM1 and ARAM full, XOR-delta coded in the ring under
+ * RECOMP_REWIND_MB). Cheats: RECOMP_CHEATS_FILE's Action Replay / Gecko codes after every field, on MEM1 through
+ * gc_cheat_read32 / _write32 (a code patch makes the lifted code there check its span again: the interpreter runs
+ * it). The hotkeys (recomp_hotkeys.h: pad chords, desktop keys Tab, F1-F4, Shift+F1-F4) save / load / step the slot,
+ * hold fast-forward and rewind. */
 #define _GNU_SOURCE /* pread */
 #include "gc_runtime.h"
 #include "gc_audio.h"
@@ -27,8 +37,11 @@
 #include "host_perf_hint.h"
 #include "host_perf_line.h"
 #include "host_window.h"
+#include "recomp_cheats.h"
 #include "recomp_exit_hook.h"
+#include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
+#include "recomp_rewind.h"
 #include "recomp_states.h"
 #include "tools/gc_png.h"
 
@@ -220,9 +233,12 @@ static uint16_t keyboard_buttons(void)
     return b;
 }
 
+static recomp_hotkeys_state s_hk_pad[HOST_PAD_PORTS]; /* recomp_hotkeys_pad_update's state per host pad (XBA-264) */
+
 /* Host pad n (and the on-screen pad on port 1) is the controller in port n; port 1 is always plugged in, so a game
- * that waits for a controller starts with the device's own controls or the keyboard. */
-static void pads_to_si(gc_machine *m, const gc_runtime_opts *o, int window)
+ * that waits for a controller starts with the device's own controls or the keyboard. The hotkeys (recomp_hotkeys.h)
+ * each pad holds / pressed are or'ed into *hk_held / *hk_pressed; a held chord's buttons do not reach the game. */
+static void pads_to_si(gc_machine *m, const gc_runtime_opts *o, int window, uint32_t *hk_held, uint32_t *hk_pressed)
 {
     for (int p = 0; p < 4 && p < HOST_PAD_PORTS; p++) {
         ConsolePadOut out;
@@ -234,6 +250,11 @@ static void pads_to_si(gc_machine *m, const gc_runtime_opts *o, int window)
             if (host_pad_read(p, &raw)) {
                 lt = raw.axis[HOST_PAD_AXIS_LT];
                 rt = raw.axis[HOST_PAD_AXIS_RT];
+                uint32_t pressed = 0, swallow = 0;
+                uint32_t src = console_pad_sources(&raw, s_pad_map.stick_threshold, RECOMP_HK_TRIGGER);
+                *hk_held |= recomp_hotkeys_pad_update(recomp_hotkeys_get(), &s_hk_pad[p], src, &pressed, &swallow);
+                *hk_pressed |= pressed;
+                console_pad_swallow(&s_pad_map, &out, swallow);
             }
             gc_runtime_pad_of(&s_pad_map, &out, lt, rt, &st);
         } else {
@@ -445,6 +466,117 @@ static void pack_line(gc_machine *m, int run)
 
 /* ---- The run ---------------------------------------------------------------------------------------------------- */
 
+/* ---- Save states, rewind, cheats (XBA-264) ----------------------------------------------------------------------- */
+
+static char s_state_dir[1200]; /* <save dir>/gc-<KEY>, "" without a save dir */
+static char s_state_key[48];   /* the title key states are written with and checked against */
+static int s_state_loaded;     /* a state was loaded: the loop resets its clock (under s_mu) */
+
+/* recomp_states_save's callback, any thread: the state and a thumbnail of the XFB in RAM, taken under s_mu (between
+ * fields), then written to <dir>/state<slot>.st. */
+static int state_save_op(int slot, void *user)
+{
+    (void)user;
+    char path[1300];
+    if (recomp_states_slot_path(s_state_dir, slot, path, sizeof path) != 0)
+        return RECOMP_STATE_ESLOT;
+    static uint8_t rgb[GC_XFB_MAX_W * GC_XFB_MAX_H * 3], rgba[GC_XFB_MAX_W * GC_XFB_MAX_H * 4];
+    static uint16_t thumb[RECOMP_STATE_THUMB_W * RECOMP_STATE_THUMB_H];
+    recomp_state_meta meta;
+    memset(&meta, 0, sizeof meta);
+    snprintf(meta.console, sizeof meta.console, "gc");
+    snprintf(meta.key, sizeof meta.key, "%.47s", s_state_key);
+    int w = 0, h = 0;
+    pthread_mutex_lock(&s_mu);
+    if (!s_m) {
+        pthread_mutex_unlock(&s_mu);
+        return RECOMP_STATE_ENOGAME;
+    }
+    size_t cap = gc_state_size(s_m), n = 0;
+    uint8_t *blob = malloc(cap);
+    if (blob)
+        n = gc_state_save(s_m, s_state_key, blob, cap);
+    meta.frames = gc_frames(s_m);
+    if (gc_xfb_rgb(s_m, rgb, &w, &h) != 0) {
+        w = 320;
+        h = 240;
+        memset(rgb, 0, (size_t)w * h * 3);
+    }
+    pthread_mutex_unlock(&s_mu);
+    for (int i = 0; i < w * h; i++) {
+        rgba[4 * i] = rgb[3 * i];
+        rgba[4 * i + 1] = rgb[3 * i + 1];
+        rgba[4 * i + 2] = rgb[3 * i + 2];
+        rgba[4 * i + 3] = 255;
+    }
+    recomp_states_thumb(rgba, w, h, w * 4, 4, 3, thumb, &meta.thumb_w, &meta.thumb_h);
+    int rc = n ? recomp_states_write(path, &meta, thumb, blob, n) : RECOMP_STATE_EIO;
+    free(blob);
+    printf("gc: state slot %d %s (%zu bytes, field %llu) %s\n", slot, rc == 0 ? "saved" : "not saved", n,
+           (unsigned long long)meta.frames, rc == 0 ? path : recomp_states_error(rc));
+    fflush(stdout);
+    return rc;
+}
+
+static int state_load_op(int slot, void *user)
+{
+    (void)user;
+    char path[1300], why[200] = "";
+    if (recomp_states_slot_path(s_state_dir, slot, path, sizeof path) != 0)
+        return RECOMP_STATE_ESLOT;
+    recomp_state_meta meta;
+    uint8_t *blob = NULL;
+    size_t n = 0;
+    int rc = recomp_states_read(path, &meta, NULL, &blob, &n);
+    if (rc == RECOMP_STATE_OK && strcmp(meta.console, "gc") != 0)
+        rc = RECOMP_STATE_EGAME;
+    if (rc == RECOMP_STATE_OK) {
+        pthread_mutex_lock(&s_mu);
+        if (!s_m) {
+            rc = RECOMP_STATE_ENOGAME;
+        } else {
+            rc = gc_state_load(s_m, s_state_key, blob, n, why, sizeof why); /* GC_STATE_* = RECOMP_STATE_* */
+            if (rc == GC_STATE_OK)
+                s_state_loaded = 1;
+        }
+        pthread_mutex_unlock(&s_mu);
+    }
+    free(blob);
+    if (rc == 0)
+        printf("gc: state slot %d loaded (%s)\n", slot, path);
+    else
+        printf("gc: state slot %d not loaded: %s%s%s\n", slot, recomp_states_error(rc), why[0] ? ": " : "", why);
+    fflush(stdout);
+    return rc;
+}
+
+/* Rewind (XBA-194): a capture is the state (the picture is the XFB in MEM1). Under s_mu. */
+static size_t rewind_size(void *user)
+{
+    return gc_state_size((gc_machine *)user);
+}
+
+static size_t rewind_save(uint8_t *out, size_t cap, void *user)
+{
+    return gc_state_save((gc_machine *)user, s_state_key, out, cap);
+}
+
+static int rewind_load(const uint8_t *in, size_t n, void *user)
+{
+    return gc_state_load((gc_machine *)user, s_state_key, in, n, NULL, 0) == GC_STATE_OK ? 0 : -1;
+}
+
+/* Cheats (XBA-197): MEM1 words, big-endian; a write over code drops the lifted code there (gc_cheat_write32). */
+static uint32_t cheat_read32(void *m, uint32_t addr)
+{
+    return gc_cheat_read32(m, addr);
+}
+
+static void cheat_write32(void *m, uint32_t addr, uint32_t v)
+{
+    gc_cheat_write32(m, addr, v);
+}
+
 static void display(const gc_runtime_opts *o, int *scale, int *filter)
 {
     /* RECOMP_GC_SCALE / _FILTER, else the shared RECOMP_SCALE / RECOMP_FILTER (XBA-181): a 640-pixel picture on a
@@ -528,6 +660,32 @@ started:;
     cards_insert(m, o, key);
     pthread_mutex_unlock(&s_mu);
     recomp_exit_hook_set(on_exit_hook);
+
+    /* Save states (XBA-264): <save dir>/gc-<KEY>/state<N>.st, beside the memory cards (none without a save dir);
+     * rewind (off unless RECOMP_REWIND=1); cheats (RECOMP_CHEATS_FILE). */
+    snprintf(s_state_key, sizeof s_state_key, "%s", key);
+    if (!o->save_dir || !*o->save_dir ||
+        snprintf(s_state_dir, sizeof s_state_dir, "%s/gc-%s", o->save_dir, key) >= (int)sizeof s_state_dir)
+        s_state_dir[0] = 0;
+    recomp_state_ops sops = {"gc", state_save_op, state_load_op, NULL};
+    recomp_states_attach(&sops, s_state_dir);
+    printf("gc: save states %s%s, fast-forward x%d%s\n", s_state_dir[0] ? "in " : "off (no save dir)", s_state_dir,
+           recomp_ff_speed(), recomp_ff_speed() ? "" : " (max)");
+    recomp_rewinder rw;
+    recomp_rewinder_init(&rw, "gc", NULL);
+    recomp_cheats cheats;
+    recomp_cheats_init(&cheats, RECOMP_CHEAT_GC);
+    recomp_cheats_load_env(&cheats, "gc");
+    recomp_cheat_bus cheat_bus = {m, NULL, NULL, cheat_read32, cheat_write32, 1, NULL, 0, NULL};
+    unsigned cheat_polls = 0;
+    int resume = recomp_states_resume_enabled() && s_state_dir[0];
+    if (resume) {
+        int r = recomp_states_resume();
+        printf("gc: resume from the automatic slot: %s\n", r == RECOMP_STATE_EEMPTY ? "nothing saved yet"
+                                                                                    : recomp_states_error(r));
+    }
+    recomp_hotkeys_state hk_keys;
+    memset(&hk_keys, 0, sizeof hk_keys);
 
     /* The window, or none (headless checks: SDL dummy drivers). */
     int window = !o->headless && !host_window_headless();
@@ -616,6 +774,8 @@ started:;
         }
         if (!running) {
             printf("gc: quit asked after %llu fields\n", (unsigned long long)frames);
+            if (resume && frames > 0) /* the player closed the window: the next start resumes here */
+                printf("gc: automatic slot %s\n", recomp_states_error(recomp_states_save(RECOMP_STATE_AUTO)));
             break;
         }
         if (recomp_lifecycle_paused()) {
@@ -643,22 +803,55 @@ started:;
         uint64_t work_t0 = now_ns(); /* the frame's work, for the performance hint (the sleep after it is not) */
         host_perf_frame(&hp, work_t0, NULL);
 
+        /* The hotkeys (XBA-190): the pads' chords (read with the pads below) and the desktop keys. */
+        uint32_t hk_held = 0, hk_pressed = 0;
+        pads_to_si(m, o, window, &hk_held, &hk_pressed);
+        if (window) {
+            int nks = 0;
+            uint32_t key_pressed = 0;
+            const Uint8 *ks = SDL_GetKeyboardState(&nks);
+            hk_held |= recomp_hotkeys_keys_update(recomp_hotkeys_get(), &hk_keys, ks, nks, &key_pressed);
+            hk_pressed |= key_pressed;
+        }
+        recomp_hotkeys_run(hk_pressed); /* quick save / load, slot steps, the fast-forward toggle */
+        recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
+        int rewinding = recomp_rewinder_begin(&rw, !!(hk_held & RECOMP_HK_BIT(RECOMP_HK_REWIND)));
         int ff = recomp_ff_active(), speed = recomp_ff_speed();
         if (ff != was_ff) {
             printf("gc: fast-forward %s at field %llu\n", ff ? (speed ? "on" : "on (max)") : "off",
                    (unsigned long long)frames);
             fflush(stdout);
+            memset(&ff_carry, 0, sizeof ff_carry);
             was_ff = ff;
             next = now_ns();
         }
-        int steps = ff ? (speed ? speed : 64) : 1;
+        int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1;
         uint64_t burst_end = now_ns() + field_ns * 9 / 10;
-        pads_to_si(m, o, window);
+        if (rewinding) { /* rewind held: one capture back per shown frame, no field runs, nothing heard */
+            pthread_mutex_lock(&s_mu);
+            if (recomp_rewinder_step(&rw, rewind_load, m) == 0)
+                recomp_states_note_load();
+            while (gc_audio_pull(m, pcm, sizeof pcm / sizeof pcm[0] / 2) > 0)
+                ;
+            pthread_mutex_unlock(&s_mu);
+            next = now_ns();
+        }
+        if (++cheat_polls % 30 == 0)
+            recomp_cheats_poll(&cheats); /* the app changed the list: read it again */
         for (int step = 0; step < steps; step++) {
             uint64_t te = now_ns();
             pthread_mutex_lock(&s_mu);
             field_ns = gc_field_ns(m);
             int r = gc_run_frame(m);
+            if (!r) {
+                if (cheats.n)
+                    recomp_cheats_apply(&cheats, &cheat_bus);
+                recomp_rewinder_frame(&rw, rewind_size, rewind_save, m);
+            }
+            if (s_state_loaded) { /* a state came in (the menu, a hotkey): the clock starts again from it */
+                s_state_loaded = 0;
+                next = now_ns();
+            }
             pthread_mutex_unlock(&s_mu);
             host_perf_stage(&hp, ST_EMU, now_ns() - te);
             if (r) {
@@ -761,6 +954,12 @@ started:;
 
     recomp_perf_hint_end();
     host_perf_log_run(&hp, now_ns(), NULL);
+    recomp_states_detach(); /* before the machine goes: a save / load in progress finishes first (s_mu) */
+    recomp_ff_hold(0);
+    recomp_rewinder_free(&rw); /* logs the capture cost */
+    recomp_cheats_restore(&cheats, &cheat_bus); /* C2 hooks out (the machine is going anyway) */
+    recomp_cheats_free(&cheats);
+    s_state_dir[0] = 0;
     {
         gc_audio_info ai;
         gc_audio_get_info(m, &ai);

@@ -82,7 +82,7 @@ typedef struct recomp_rewind_cfg {
     size_t budget;   /* bytes */
 } recomp_rewind_cfg;
 
-/* A console's defaults (on, every N frames: gba on / 2, ps1 on / 3, n64 off / 4), then RECOMP_REWIND (0 / 1),
+/* A console's defaults (on, every N frames: gba on / 2, ps1 on / 3, n64 and gc off / 4), then RECOMP_REWIND (0 / 1),
  * RECOMP_REWIND_MB (8..1024, default 64) and RECOMP_REWIND_FRAMES (1..60) over them. */
 void recomp_rewind_config(const char *console, recomp_rewind_cfg *cfg);
 

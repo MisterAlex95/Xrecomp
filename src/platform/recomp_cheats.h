@@ -1,4 +1,5 @@
-/* recomp_cheats -- cheat codes for the console runtimes (XBA-197): GBA, PS1 and N64; Xbox titles too (XBA-241).
+/* recomp_cheats -- cheat codes for the console runtimes (XBA-197): GBA, PS1 and N64; Xbox titles too (XBA-241),
+ * GameCube (XBA-264).
  *
  * A game's cheat list lives in a text file (the app's files/settings/game/<KEY>.cheats, RECOMP_CHEATS_FILE for the
  * runtime, --cheats FILE for the desktop players), one section per cheat:
@@ -6,7 +7,7 @@
  *     # comment
  *     [Infinite lives]
  *     enabled=1
- *     format=auto            (optional: auto, raw, gsa, gsa-raw, arv3, arv3-raw, cb, gs, xbox)
+ *     format=auto            (optional: auto, raw, gsa, gsa-raw, arv3, arv3-raw, cb, gs, xbox, ar, gecko)
  *     8003A2C4 0063          (the code, one line per code line)
  *
  * Each cheat's lines are compiled into a small op list (writes with repeat, adds, ORs, ANDs, conditional jumps,
@@ -38,9 +39,31 @@
  *                 8-digit address with an 8-digit value is always a typed line, so a raw 32-bit write there is
  *                 written ADDRESS:VALUE. Writes reach mapped guest RAM only (src/kernel/xbox_cheats.h: not the
  *                 low 64 KB, not code sections); a conditional on an address that is not mapped fails.
+ *  GC   ar        Action Replay GameCube, decrypted (AAAAAAAA VVVVVVVV; the address word: bits 0-24 the address in
+ *                 MEM1 (0x80000000 | ...), 25-26 the size (8 / 16 / 32 bits, 3: 32-bit float), 27-29 the type, 30-31
+ *                 the subtype): type 0: write and fill (8-bit: VV written (V >> 8) + 1 times, 16-bit: (V >> 16) + 1
+ *                 times), pointer write ([address] + offset; 8-bit offset V >> 8, 16-bit (V >> 16) * 2), add (float
+ *                 add for size 3); types 1-7: if equal / not equal / less signed / greater signed / less unsigned /
+ *                 greater unsigned / AND, skipping 1 code, 2 codes, the codes up to 00000000 40000000, or all;
+ *                 zero codes 00000000 00000000 (end), 00000000 40000000 (end of the conditional blocks), 00000000
+ *                 8AAAAAAA + VVVVVVVV IICCSSSS (fill and slide: start value, value step II, count CC, address step
+ *                 SSSS in units). Encrypted codes (XXXX-XXXX-XXXXX) are refused: their decryption (seed tables, bit
+ *                 scrambling, checksums) is not cheaply documented; enter the decrypted form.
+ *       gecko     Gecko codes: 00 / 02 / 04 writes (8 / 16 bits with fill, 32), 06 string, 08 serial write; 20-2E
+ *                 if equal / not equal / greater / lower (32-bit; 16-bit with a mask), an odd address first applying
+ *                 an endif; CE / DE if ba / po in a range; E0 full terminator, E2 endif / else (with ba / po set);
+ *                 40-4C load / set / store ba and po; 60-68 repeat, return, goto, gosub; 80-8C Gecko registers set /
+ *                 load / store / operations / memory copy; C2 insert ASM (the code goes to the hook area
+ *                 0x80001800-0x80003000, the instruction at the address becomes a branch to it, the code's last
+ *                 word a branch back; put back when the cheat is turned off); C6 branch; F0 end. The +0x10 forms use po
+ *                 instead of ba. Refused with a reason: C0 (execute ASM: guest code called from the engine), 46 / 4E
+ *                 (code-list addresses), A0-AE counters / masks, CC, F2-F6.
+ *                 Writes reach MEM1 only, big-endian; a write that changes code invalidates the lifted code there
+ *                 (gc_cheat_write32: the interpreter runs the patched function, slower but right).
  *  auto           GBA: raw when a line has ':', cb for 8+4 digit lines, else the encrypted or decrypted GSA / AR v3
  *                 reading whose lines decode to the most plausible codes; PS1 / N64: raw with ':', else gs;
- *                 Xbox: always xbox (whose raw lines cover ADDRESS:VALUE).
+ *                 Xbox: always xbox (whose raw lines cover ADDRESS:VALUE); GC: raw with ':', ar when a line is an
+ *                 AR zero code (00000000 ...), else gecko (the two share their 04 writes; set format=ar otherwise).
  * Not supported (the cheat is refused with a reason): GBA DEADFACE reseeding, encrypted CodeBreaker (9xxxxxxx),
  * AR v3 slowdown; PS1 D4-D6 joker codes; N64 DE (entry point). Ignored with a note: master / hook / ID codes (GBA
  * Fxxxxxxx, C4xxxxxx, 0000xxxx / 1xxxxxxx, xxxxxxxx 001DC0DE), N64 enabler codes (EE, FF, CC).
@@ -69,6 +92,7 @@ typedef enum recomp_cheat_console {
     RECOMP_CHEAT_PS1 = 2,
     RECOMP_CHEAT_N64 = 3,
     RECOMP_CHEAT_XBOX = 4,
+    RECOMP_CHEAT_GC = 5,
 } recomp_cheat_console;
 
 typedef enum recomp_cheat_format {
@@ -81,10 +105,13 @@ typedef enum recomp_cheat_format {
     RECOMP_CF_CB,       /* GBA CodeBreaker, unencrypted */
     RECOMP_CF_GS,       /* PS1 / N64 GameShark */
     RECOMP_CF_XBOX,     /* Xbox: XRecomp's guest-memory codes */
+    RECOMP_CF_AR,       /* GameCube Action Replay, decrypted */
+    RECOMP_CF_GECKO,    /* GameCube Gecko codes */
     RECOMP_CF_COUNT
 } recomp_cheat_format;
 
-/* "auto", "raw", "gsa", "gsa-raw", "arv3", "arv3-raw", "cb", "gs", "xbox"; parse returns -1 for an unknown name. */
+/* "auto", "raw", "gsa", "gsa-raw", "arv3", "arv3-raw", "cb", "gs", "xbox", "ar", "gecko"; parse returns -1 for an
+ * unknown name. */
 const char *recomp_cheat_format_name(recomp_cheat_format f);
 int recomp_cheat_format_parse(const char *name);
 
@@ -136,6 +163,14 @@ typedef struct recomp_cheat_patch {
     uint16_t value, old;
 } recomp_cheat_patch;
 
+/* A GameCube C2 hook in place: the instruction at addr was old, it is now branch (a branch into the hook area). */
+typedef struct recomp_cheat_hook {
+    uint32_t addr, old, branch;
+} recomp_cheat_hook;
+#define RECOMP_CHEAT_HOOKS_MAX 64
+#define RECOMP_CHEAT_GC_HOOK_LO 0x80001800u /* the GameCube hook area (Gecko's code handler area) */
+#define RECOMP_CHEAT_GC_HOOK_HI 0x80003000u
+
 typedef struct recomp_cheats {
     recomp_cheat_console console;
     recomp_cheat *list;
@@ -145,6 +180,9 @@ typedef struct recomp_cheats {
     recomp_cheat_patch patch[RECOMP_CHEAT_PATCHES_MAX]; /* GBA cartridge patches in place */
     size_t npatch;
     uint64_t frames;               /* applies so far (PS1 C1 delays) */
+    uint32_t gr[16];               /* GameCube Gecko registers (kept across frames) */
+    recomp_cheat_hook hook[RECOMP_CHEAT_HOOKS_MAX]; /* GameCube C2 hooks in place */
+    size_t nhook;
 } recomp_cheats;
 
 void recomp_cheats_init(recomp_cheats *s, recomp_cheat_console console);
@@ -170,7 +208,7 @@ void recomp_cheat_clear(recomp_cheat *c);
 
 /* Runs the enabled cheats once (after a console frame). Returns the number of GBA cartridge patches in place. */
 size_t recomp_cheats_apply(recomp_cheats *s, const recomp_cheat_bus *bus);
-/* Puts back the cartridge bytes the patches replaced. */
+/* Puts back the cartridge bytes the patches replaced (and the instructions GameCube C2 hooks replaced). */
 void recomp_cheats_restore(recomp_cheats *s, const recomp_cheat_bus *bus);
 /* Cheats that are on and compiled. */
 size_t recomp_cheats_active(const recomp_cheats *s);

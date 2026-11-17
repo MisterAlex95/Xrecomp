@@ -9,7 +9,8 @@ endif()
 #
 #   gc_hello      our libogc hello world (consoles/gc/tests/homebrew/hello) under gc_run, interpreter only: the XFB
 #                 after 120 fields must equal hello_xfb.png
-#   gc_rc_hello   the same DOL recompiled (gc_tools.recomp + cc, discovery loop), mostly native: same picture
+#   gc_rc_hello   the same DOL recompiled (gc_tools.recomp + cc, discovery loop), mostly native: same picture; then a
+#                 save-state round trip with the pack (gc_run --state-check, XBA-264)
 #   gc_fnma       fnmadd / fnmsub and their s / ps_ forms keep an exact zero's -0 and a NaN's sign (no homebrew)
 #   gc_gx_<prog>  our libogc GX programs (homebrew gx*) under gc_run --gx: the GLES renderer on a headless EGL
 #                 context (llvmpipe), the XFB compared with gx_ref/<prog>.png within a tolerance (run_gx.sh,
@@ -68,7 +69,7 @@ if(TARGET gc_run)
                 ${CMAKE_CURRENT_BINARY_DIR}/hello_interp interp ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png)
     add_test(NAME gc_rc_hello
         COMMAND sh ${GC_RUN_HELLO} $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/hello.dol
-                ${CMAKE_CURRENT_BINARY_DIR}/hello_rc rc ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png)
+                ${CMAKE_CURRENT_BINARY_DIR}/hello_rc rc ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png 60:60)
     set_tests_properties(gc_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     set_tests_properties(gc_rc_hello PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
     # gc_relload (XBA-264): our homebrew links REL modules at run time (homebrew/relload: a small OSLink; the modules
@@ -113,6 +114,44 @@ if(TARGET gc_run)
         set_tests_properties(gc_gx_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)
     endforeach()
 endif()
+
+# Save states (XBA-264): gc_state_format, the format on a synthetic program (round trip, title key, version, damaged /
+# truncated states, unknown / missing sections, the cheats' memory access; no corpus); gc_state_<prog>, our homebrew
+# saved, run on, loaded and run again with identical XFBs and state (run_state.sh, gc_run --state-check; 77 without
+# the corpus, the GX one without a GLES 3 context; asnd's with the DSP's state). gc_rc_hello checks the same with its
+# recompiled pack.
+add_executable(gc_state_test gc_state_test.c)
+target_link_libraries(gc_state_test PRIVATE gc_core)
+target_compile_options(gc_state_test PRIVATE -Wall -Wextra)
+add_test(NAME gc_state_format COMMAND gc_state_test)
+set_tests_properties(gc_state_format PROPERTIES TIMEOUT 120)
+if(TARGET gc_run)
+    set(GC_RUN_STATE sh ${CMAKE_CURRENT_SOURCE_DIR}/run_state.sh $<TARGET_FILE:gc_run>)
+    add_test(NAME gc_state_hello COMMAND ${GC_RUN_STATE} ${GC_HOMEBREW_DIR}/hello.dol 60:60)
+    add_test(NAME gc_state_padtest COMMAND ${GC_RUN_STATE} ${GC_HOMEBREW_DIR}/padtest.dol 30:90
+             --pad 0:0151:200:30:128:255:77:255)
+    add_test(NAME gc_state_gxcopy COMMAND ${GC_RUN_STATE} ${GC_HOMEBREW_DIR}/gxcopy.dol 20:20 --gx)
+    add_test(NAME gc_state_asnd COMMAND ${GC_RUN_STATE} ${GC_HOMEBREW_DIR}/asnd.dol 100:120)
+    set_tests_properties(gc_state_hello gc_state_padtest gc_state_gxcopy gc_state_asnd
+                         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    # Rewind (gc_run --rewind, recomp_rewind_check): 600 fields of the pad test with pseudo-random pads, a capture
+    # every 4 fields, 45 steps back: the picture there and every field after it as the first time.
+    add_test(NAME gc_rewind_padtest COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_state.sh $<TARGET_FILE:gc_run>
+             ${GC_HOMEBREW_DIR}/padtest.dol rewind --frames 600 --rewind 4:45)
+    set_tests_properties(gc_rewind_padtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+endif()
+
+# Cheats (XBA-264): gc_cheats_core, Gecko writes / C2 hooks / AR codes on a synthetic program run by the core (the
+# CPU runs the hook and branches back; turned off, the instruction comes back); gc_cheats_padtest, codes writing into
+# our pad test's report, the program counting on from their values (77 without the corpus). The engine's own tests:
+# tests/recomp_cheats.
+add_executable(gc_cheats_test gc_cheats_test.c ${GC_REPO_ROOT}/src/platform/recomp_cheats.c)
+target_include_directories(gc_cheats_test PRIVATE ${GC_REPO_ROOT}/src/platform)
+target_link_libraries(gc_cheats_test PRIVATE gc_core)
+target_compile_options(gc_cheats_test PRIVATE -Wall -Wextra)
+add_test(NAME gc_cheats_core COMMAND gc_cheats_test)
+add_test(NAME gc_cheats_padtest COMMAND gc_cheats_test ${GC_HOMEBREW_DIR}/padtest.dol)
+set_tests_properties(gc_cheats_core gc_cheats_padtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 
 # gc_padtest (XBA-259): our libogc pad test (homebrew/padtest) with controller input injected on the serial
 # interface: what PAD_Read gave the program (its report in memory) must be what went in, on all four ports, with

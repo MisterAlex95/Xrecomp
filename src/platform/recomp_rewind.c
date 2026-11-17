@@ -321,8 +321,8 @@ void recomp_rewind_config(const char *console, recomp_rewind_cfg *cfg)
     int on = 1, interval = 2;
     if (console && !strcasecmp(console, "ps1")) {
         interval = 3;
-    } else if (console && !strcasecmp(console, "n64")) {
-        on = 0;
+    } else if (console && (!strcasecmp(console, "n64") || !strcasecmp(console, "gc"))) {
+        on = 0; /* N64: 4 / 8 MB a capture; GameCube (XBA-264): up to ~42 MB (MEM1, ARAM) */
         interval = 4;
     }
     const char *v = getenv("RECOMP_REWIND");

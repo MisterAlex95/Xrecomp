@@ -27,7 +27,7 @@ if(NOT TARGET gc_core)
     # copies, on OpenGL ES 3.0 loaded at run time (no GL headers or libraries at build time; dlopen + pthreads).
     set(GC_GX_SRCS gx/gx_fifo.c gx/gx_vtx.c gx/gx_tex.c gx/gx_shader.c gx/gx_gl.c gx/gx_egl.c
                    gx/gx_progcache.c)
-    add_library(gc_core STATIC gc_core.c gc_cpu.c gc_bus.c gc_exi.c gc_si.c gc_mmu.c gc_recomp.c gc_rel.c gc_pack.c gc_extract.c
+    add_library(gc_core STATIC gc_core.c gc_cpu.c gc_bus.c gc_exi.c gc_si.c gc_mmu.c gc_recomp.c gc_rel.c gc_state.c gc_pack.c gc_extract.c
                 gc_disc.c gc_disc_wia.c gc_bzip2.c gc_di.c gc_boot.c ${GC_GX_SRCS}
                 gc_dsp.c gc_ai.c gc_ax.c gc_asnd.c gc_audio_util.c)
     target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -120,4 +120,10 @@ if(NOT ANDROID AND NOT TARGET gc_run)
     gc_core_exported(gc_run)
     target_link_libraries(gc_run PRIVATE ${CMAKE_DL_LIBS})
     target_compile_options(gc_run PRIVATE -Wall -Wextra)
+    # --rewind / --cheats (XBA-264): the shared rewind ring and cheat engine (libc only), when the repository is there
+    if(EXISTS ${GC_REPO_SRC}/platform/recomp_cheats.c)
+        target_sources(gc_run PRIVATE ${GC_REPO_SRC}/platform/recomp_rewind.c ${GC_REPO_SRC}/platform/recomp_cheats.c)
+        target_include_directories(gc_run PRIVATE ${GC_REPO_SRC}/platform)
+        target_compile_definitions(gc_run PRIVATE GC_RUN_PLATFORM=1)
+    endif()
 endif()

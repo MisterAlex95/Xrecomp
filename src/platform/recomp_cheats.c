@@ -39,6 +39,9 @@ enum {
     OP_SUPER,     /* count bytes of data from offset value written from addr */
     OP_GROUP,     /* 32-bit value written to count addresses (data, 4 bytes each, from offset astep) */
     OP_DELAY,     /* PS1 C1: jump to count while fewer than value frames have run */
+    OP_FADD,      /* GameCube AR: 32-bit float at addr += value (as a float) */
+    OP_GECKO,     /* GameCube Gecko: count code lines (8 bytes each) of data from offset value, run by gecko_run;
+                   * astep: the bytes its C2 hooks take in the hook area */
 };
 
 enum {
@@ -81,7 +84,7 @@ void recomp_cheat_tea_encrypt(uint32_t *op1, uint32_t *op2, const uint32_t s[4])
 
 static const char *const FORMAT_NAMES[RECOMP_CF_COUNT] = {"auto",     "raw", "gsa", "gsa-raw",
                                                           "arv3",     "arv3-raw", "cb",  "gs",
-                                                          "xbox"};
+                                                          "xbox",     "ar",       "gecko"};
 
 const char *recomp_cheat_format_name(recomp_cheat_format f)
 {
@@ -115,7 +118,8 @@ typedef struct cc {
     int ids;                  /* GBA ID codes (xxxxxxxx 001DC0DE) */
 } cc;
 
-enum { PEND_NONE, PEND_VALUE, PEND_SLIDE, PEND_PATCH, PEND_GROUP, PEND_SUPER, PEND_SERIAL, PEND_COPY, PEND_CBSLIDE };
+enum { PEND_NONE, PEND_VALUE, PEND_SLIDE, PEND_PATCH, PEND_GROUP, PEND_SUPER, PEND_SERIAL, PEND_COPY, PEND_CBSLIDE,
+       PEND_GCSLIDE };
 
 static int fail(cc *k, const char *fmt, ...)
 {
@@ -682,6 +686,196 @@ static int xbox_line(cc *k, uint32_t a, uint32_t v, int la, int lv, int colon)
     return 0;
 }
 
+/* ---- GameCube (XBA-264) ---- */
+
+/* Action Replay GameCube, decrypted (recomp_cheats.h « GC ar »). One code = one op, so a conditional's "skip 1 / 2"
+ * counts codes (a fill and slide is one). */
+static int gc_ar(cc *k, uint32_t a, uint32_t v)
+{
+    recomp_cheat_op *o;
+    if (k->pend == PEND_GCSLIDE) { /* start value, then value step << 24 | count << 16 | address step (units) */
+        o = &k->c->ops[k->c->nops - 1];
+        o->value = o->size == 1 ? a & 0xFF : o->size == 2 ? a & 0xFFFF : a;
+        o->vstep = (uint32_t)(int32_t)(int8_t)(v >> 24);
+        o->count = (v >> 16) & 0xFF;
+        o->astep = (uint32_t)((int32_t)(int16_t)(v & 0xFFFF) * o->size);
+        k->pend = PEND_NONE;
+        return 0;
+    }
+    if (k->ended)
+        return 0;
+    if (a == 0) { /* zero codes */
+        switch (v >> 29) {
+        case 0:
+            if (v)
+                return fail(k, "unknown Action Replay zero code %08X", (unsigned)v);
+            k->ended = 1; /* end of the codes */
+            return 0;
+        case 2: /* 40000000: the conditional blocks end */
+            while (k->nblock)
+                k->c->ops[k->block[--k->nblock]].count = (uint32_t)k->c->nops;
+            return 0;
+        case 3:
+            return note(k, "row code (00000000 60000000)");
+        case 4: { /* 8AAAAAAA: fill and slide, its values on the next line */
+            unsigned sz = (v >> 25) & 3;
+            o = emit(k, OP_WRITE, sz == 0 ? 1 : sz == 1 ? 2 : 4, 0x80000000u | (v & 0x01FFFFFFu), 0);
+            if (!o)
+                return -1;
+            k->pend = PEND_GCSLIDE;
+            return 0;
+        }
+        default:
+            return fail(k, "Action Replay zero code %08X is not supported (memory copy)", (unsigned)v);
+        }
+    }
+    unsigned sz = (a >> 25) & 3, type = (a >> 27) & 7, sub = (a >> 30) & 3;
+    int size = sz == 0 ? 1 : sz == 1 ? 2 : 4;
+    uint32_t addr = 0x80000000u | (a & 0x01FFFFFFu);
+    if (type == 0) {
+        switch (sub) {
+        case 0: /* write and fill */
+            o = emit(k, OP_WRITE, size, addr, v);
+            if (!o)
+                return -1;
+            o->astep = (uint32_t)size;
+            o->count = sz == 0 ? ((v >> 8) & 0xFFFFFFu) + 1 : sz == 1 ? (v >> 16) + 1 : 1;
+            return 0;
+        case 1: /* pointer write: [addr] + offset */
+            o = emit(k, OP_PTR, size, addr, v);
+            if (!o)
+                return -1;
+            o->astep = sz == 0 ? v >> 8 : sz == 1 ? (v >> 16) * 2 : 0;
+            return 0;
+        case 2: /* add */
+            return emit(k, sz == 3 ? OP_FADD : OP_ADD, size, addr, v) ? 0 : -1;
+        default:
+            return note(k, "master code");
+        }
+    }
+    static const uint8_t cond[8] = {0, C_EQ, C_NE, C_LTS, C_GTS, C_LTU, C_GTU, C_AND};
+    uint32_t target = sub == 0 ? TARGET_REL | 1 : sub == 1 ? TARGET_REL | 2 : sub == 2 ? TARGET_OPEN : TARGET_END;
+    if (!emit_if(k, cond[type], size, addr, v, target))
+        return -1;
+    return sub == 2 ? open_block(k) : 0;
+}
+
+/* Gecko: the lines are kept as they are (data, two words each) and run by gecko_run; compiling checks each code
+ * type and how many lines it takes. */
+static int gecko_line(cc *k, uint32_t a, uint32_t v)
+{
+    uint32_t w[2] = {a, v};
+    return push_data(k, w, 8);
+}
+
+/* Lines a code takes (>= 1), or 0 for a code type that is not supported (why set). */
+static uint32_t gecko_len(const uint32_t *w, size_t left, const char **why)
+{
+    uint32_t a = w[0], v = w[1], t = a >> 24;
+    *why = NULL;
+    if (t < 0x20) { /* writes, ba (00-0E) / po (10-1E) */
+        switch (t & 0x0E) {
+        case 0x00: case 0x02: case 0x04: return 1;
+        case 0x06: return 1 + (v + 7) / 8;
+        case 0x08: return 2;
+        default: *why = "unknown write code type"; return 0;
+        }
+    }
+    if (t < 0x40) /* ifs (the low bit is the address's) */
+        return 1;
+    switch (t & 0xFE) {
+    case 0x40: case 0x42: case 0x44: case 0x48: case 0x4A: case 0x4C:
+        return 1;
+    case 0x46: case 0x4E:
+        *why = "46 / 4E (code list addresses) are not supported";
+        return 0;
+    case 0x60: case 0x62: case 0x64: case 0x66: case 0x68:
+        return 1;
+    case 0x80: case 0x82: case 0x84: case 0x86: case 0x88: case 0x8A: case 0x8C:
+    case 0x90: case 0x92: case 0x94:
+        return 1;
+    case 0xC0:
+        *why = "C0 (execute ASM) is not supported: it needs guest code called from the cheat engine";
+        return 0;
+    case 0xC2:
+        if (!v || v > left) {
+            *why = "a C2 code with a wrong line count";
+            return 0;
+        }
+        return 1 + v;
+    case 0xC6: case 0xCE: case 0xDE: case 0xE0: case 0xE2: case 0xF0:
+        return 1;
+    default:
+        break;
+    }
+    (void)left;
+    *why = (t & 0xE0) == 0xA0 ? "A0-AE (register / counter conditionals) are not supported"
+                              : "this code type is not supported";
+    return 0;
+}
+
+static int gecko_finish(cc *k, size_t first)
+{
+    recomp_cheat *c = k->c;
+    const uint32_t *w = (const uint32_t *)(void *)(c->data + first);
+    size_t n = (c->ndata - first) / 8, hook = 0;
+    for (size_t i = 0; i < n;) {
+        const char *why;
+        uint32_t len = gecko_len(w + 2 * i, n - i - 1, &why);
+        k->line = (int)i + 1;
+        if (!len)
+            return fail(k, "Gecko code type %02X: %s", (unsigned)(w[2 * i] >> 24), why);
+        if (i + len > n)
+            return fail(k, "Gecko code type %02X: the code is missing lines", (unsigned)(w[2 * i] >> 24));
+        if ((w[2 * i] >> 24 & 0xFE) == 0xC2)
+            hook += (len - 1) * 8;
+        if ((w[2 * i] >> 24) == 0xF0)
+            break;
+        i += len;
+    }
+    if (hook > RECOMP_CHEAT_GC_HOOK_HI - RECOMP_CHEAT_GC_HOOK_LO)
+        return fail(k, "the C2 codes do not fit the hook area (%zu bytes)", hook);
+    recomp_cheat_op *o = emit(k, OP_GECKO, 4, 0, (uint32_t)first);
+    if (!o)
+        return -1;
+    o->count = (uint32_t)n;
+    o->astep = (uint32_t)hook;
+    return 0;
+}
+
+/* XXXX-XXXX-XXXXX: an encrypted Action Replay GameCube code. */
+static int gc_encrypted_line(const char *p, size_t n)
+{
+    char t[16];
+    size_t m = 0;
+    for (size_t i = 0; i < n && m < sizeof t - 1; i++) {
+        if (p[i] == '#')
+            break;
+        if (p[i] != ' ' && p[i] != '\t' && p[i] != '\r')
+            t[m++] = p[i];
+    }
+    t[m] = 0;
+    if (m != 15 || t[4] != '-' || t[9] != '-')
+        return 0;
+    for (size_t i = 0; i < m; i++)
+        if (i != 4 && i != 9 && !isalnum((unsigned char)t[i]))
+            return 0;
+    return 1;
+}
+
+static int gc_encrypted(const char *code)
+{
+    const char *p = code ? code : "";
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (gc_encrypted_line(p, n))
+            return 1;
+        p += n + (e ? 1 : 0);
+    }
+    return 0;
+}
+
 /* raw: address and value, the size from the value's digits. */
 static int raw_line(cc *k, uint32_t a, uint32_t v, int lv)
 {
@@ -776,6 +970,9 @@ static int line_fits(recomp_cheat_format f, const line *l)
         return l->la == 8 && l->lv == 4;
     case RECOMP_CF_XBOX:
         return 1;
+    case RECOMP_CF_AR:
+    case RECOMP_CF_GECKO:
+        return l->la == 8 && l->lv == 8;
     default:
         return 0;
     }
@@ -789,6 +986,8 @@ static int formats_ok(recomp_cheat_console con, recomp_cheat_format f)
         return f >= RECOMP_CF_GSA && f <= RECOMP_CF_CB;
     if (con == RECOMP_CHEAT_XBOX)
         return f == RECOMP_CF_XBOX;
+    if (con == RECOMP_CHEAT_GC)
+        return f == RECOMP_CF_AR || f == RECOMP_CF_GECKO;
     return f == RECOMP_CF_GS;
 }
 
@@ -817,6 +1016,7 @@ static int compile_as(recomp_cheat *c, recomp_cheat_console con, recomp_cheat_fo
     k.con = con;
     k.fmt = f;
     c->used = f;
+    size_t gecko_first = c->ndata;
     const char *p = code ? code : "";
     while (*p) {
         const char *e = strchr(p, '\n');
@@ -860,6 +1060,12 @@ static int compile_as(recomp_cheat *c, recomp_cheat_console con, recomp_cheat_fo
         case RECOMP_CF_XBOX:
             rc = xbox_line(&k, a, v, l.la, l.lv, l.colon);
             break;
+        case RECOMP_CF_AR:
+            rc = gc_ar(&k, a, v);
+            break;
+        case RECOMP_CF_GECKO:
+            rc = gecko_line(&k, a, v);
+            break;
         default:
             rc = con == RECOMP_CHEAT_PS1 ? ps1_gs(&k, a, v) : n64_gs(&k, a, v);
             break;
@@ -867,6 +1073,8 @@ static int compile_as(recomp_cheat *c, recomp_cheat_console con, recomp_cheat_fo
         if (rc)
             return -1;
     }
+    if (f == RECOMP_CF_GECKO && c->ndata > gecko_first && gecko_finish(&k, gecko_first))
+        return -1;
     if (k.pend != PEND_NONE)
         return fail(&k, "the last code is missing a line");
     if (!c->nops && !k.ignored)
@@ -927,6 +1135,13 @@ void recomp_cheat_clear(recomp_cheat *c)
 int recomp_cheat_compile(recomp_cheat *c, recomp_cheat_console con, recomp_cheat_format fmt, const char *code)
 {
     clear_ops(c);
+    if (con == RECOMP_CHEAT_GC && gc_encrypted(code)) {
+        snprintf(c->error, sizeof c->error,
+                 "encrypted Action Replay codes (XXXX-XXXX-XXXXX) are not supported: enter the decrypted form "
+                 "(AAAAAAAA VVVVVVVV)");
+        c->used = RECOMP_CF_AR;
+        return -1;
+    }
     if (fmt != RECOMP_CF_AUTO) {
         if (!formats_ok(con, fmt)) {
             snprintf(c->error, sizeof c->error, "format %s is not for this console", recomp_cheat_format_name(fmt));
@@ -937,6 +1152,21 @@ int recomp_cheat_compile(recomp_cheat *c, recomp_cheat_console con, recomp_cheat
     }
     if (con == RECOMP_CHEAT_XBOX) /* one format, whose raw lines cover ADDRESS:VALUE */
         return compile_as(c, con, RECOMP_CF_XBOX, code);
+    if (con == RECOMP_CHEAT_GC) { /* raw with ':', AR when a line is a zero code, else Gecko */
+        int colon = 0, zero = 0;
+        const char *q = code ? code : "";
+        while (*q) {
+            const char *e = strchr(q, '\n');
+            size_t n = e ? (size_t)(e - q) : strlen(q);
+            line l;
+            if (parse_line(q, n, &l) > 0) {
+                colon |= l.colon;
+                zero |= l.a == 0 && l.la == 8 && l.lv == 8;
+            }
+            q += n + (e ? 1 : 0);
+        }
+        return compile_as(c, con, colon ? RECOMP_CF_RAW : zero ? RECOMP_CF_AR : RECOMP_CF_GECKO, code);
+    }
     /* AUTO: what the lines look like. */
     int colon = 0, n84 = 0, n88 = 0, nlines = 0;
     const char *p = code ? code : "";
@@ -1153,6 +1383,7 @@ static const char *tag_of(const recomp_cheats *s)
     return s->console == RECOMP_CHEAT_GBA   ? "gba"
            : s->console == RECOMP_CHEAT_PS1 ? "ps1"
            : s->console == RECOMP_CHEAT_XBOX ? "xbox"
+           : s->console == RECOMP_CHEAT_GC   ? "gc"
                                              : "n64";
 }
 
@@ -1319,8 +1550,326 @@ static int ptr_ok(recomp_cheat_console con, uint32_t p)
         return (p >= 0x02000000u && p < 0x02040000u) || (p >= 0x03000000u && p < 0x03008000u);
     case RECOMP_CHEAT_PS1:
         return (p & 0x1FFFFFFFu) < 0x00200000u;
+    case RECOMP_CHEAT_GC:
+        return (p & 0x3FFFFFFFu) < 0x01800000u && (p >> 30) == 2; /* MEM1, cached or uncached */
     default:
         return p >= 0x80000000u && p < 0x80800000u;
+    }
+}
+
+/* ---- GameCube Gecko codes (XBA-264): the code handler's machine -------------------------------------------------
+ *
+ * ba / po start at 0x80000000 for each cheat, every frame; the Gecko registers gr0-gr15 stay across frames (s->gr);
+ * the repeat / gosub blocks b0-b15 live for one run. Conditionals push the code execution status on a bit stack: while
+ * it is false only ifs (pushing false), endifs, terminators and the 6x flow codes (their T says when) act. A run takes
+ * at most GECKO_STEPS codes (a goto loop cannot hang the frame). */
+#define GECKO_STEPS 100000
+#define GC_BASE 0x80000000u
+
+typedef struct gecko_ctx {
+    recomp_cheats *s;
+    const recomp_cheat_bus *b;
+    uint32_t hook_at;          /* where this cheat's C2 code goes in the hook area */
+    recomp_cheat_hook *want;   /* the hooks wanted after this frame */
+    size_t *nwant;
+} gecko_ctx;
+
+static uint32_t gk_read(const recomp_cheat_bus *b, uint32_t addr, int size)
+{
+    if (!ptr_ok(RECOMP_CHEAT_GC, addr) || !ptr_ok(RECOMP_CHEAT_GC, addr + (uint32_t)size - 1))
+        return 0;
+    return bus_read(b, addr, size);
+}
+
+static void gk_write(const recomp_cheat_bus *b, uint32_t addr, uint32_t v, int size)
+{
+    if (ptr_ok(RECOMP_CHEAT_GC, addr) && ptr_ok(RECOMP_CHEAT_GC, addr + (uint32_t)size - 1))
+        bus_write(b, addr, v, size);
+}
+
+static uint32_t f2u(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    return u;
+}
+static float u2f(uint32_t u)
+{
+    float f;
+    memcpy(&f, &u, 4);
+    return f;
+}
+
+static uint32_t gk_op(unsigned t, uint32_t x, uint32_t y)
+{
+    switch (t) {
+    case 0x0: return x + y;
+    case 0x1: return x * y;
+    case 0x2: return x | y;
+    case 0x3: return x & y;
+    case 0x4: return x ^ y;
+    case 0x5: return (y & 32) ? 0 : x << (y & 31);
+    case 0x6: return (y & 32) ? 0 : x >> (y & 31);
+    case 0x7: return (x << (y & 31)) | (y & 31 ? x >> (32 - (y & 31)) : 0);
+    case 0x8: return (uint32_t)((int32_t)x >> ((y & 32) ? 31 : (y & 31)));
+    case 0x9: return f2u(u2f(x) + u2f(y));
+    case 0xA: return f2u(u2f(x) * u2f(y));
+    default: return x;
+    }
+}
+
+static uint32_t gk_branch(uint32_t from, uint32_t to)
+{
+    return 0x48000000u | ((to - from) & 0x03FFFFFCu);
+}
+
+static void gk_hook(gecko_ctx *x, uint32_t target)
+{
+    for (size_t i = 0; i < *x->nwant; i++)
+        if (x->want[i].addr == target)
+            return;
+    if (*x->nwant >= RECOMP_CHEAT_HOOKS_MAX)
+        return;
+    recomp_cheat_hook *h = &x->want[(*x->nwant)++];
+    h->addr = target;
+    h->branch = gk_branch(target, x->hook_at);
+    h->old = 0;
+}
+
+static void gecko_run(gecko_ctx *x, const uint32_t *w, uint32_t n)
+{
+    const recomp_cheat_bus *b = x->b;
+    uint32_t *gr = x->s->gr, ba = GC_BASE, po = GC_BASE;
+    uint32_t stack = 0, blk_line[16] = {0}, blk_count[16] = {0};
+    int exec = 1;
+    unsigned steps = 0;
+    for (uint32_t i = 0; i < n && steps < GECKO_STEPS; steps++) {
+        uint32_t a = w[2 * i], v = w[2 * i + 1], t = a >> 24;
+        const char *why;
+        uint32_t len = gecko_len(w + 2 * i, n - i - 1, &why), next = i + (len ? len : 1);
+        uint32_t base = (t & 0x10) ? po : ba, off = a & 0x01FFFFFFu;
+        unsigned T = (a >> 20) & 0xF, Y = (a >> 16) & 0xF, N = a & 0xF;
+        if (t < 0x20) { /* writes */
+            if (exec) {
+                uint32_t addr = base + off;
+                switch (t & 0x0E) {
+                case 0x00:
+                    for (uint32_t r = 0; r <= (v >> 16); r++)
+                        gk_write(b, addr + r, v & 0xFF, 1);
+                    break;
+                case 0x02:
+                    for (uint32_t r = 0; r <= (v >> 16); r++)
+                        gk_write(b, addr + 2 * r, v & 0xFFFF, 2);
+                    break;
+                case 0x04:
+                    gk_write(b, addr, v, 4);
+                    break;
+                case 0x06:
+                    for (uint32_t k = 0; k < v && k / 8 + 1 < len; k++) {
+                        uint32_t word = w[2 * (i + 1) + k / 4];
+                        gk_write(b, addr + k, (word >> (24 - 8 * (k & 3))) & 0xFF, 1);
+                    }
+                    break;
+                case 0x08: {
+                    uint32_t a2 = w[2 * i + 2], v2 = w[2 * i + 3];
+                    int sz = (a2 >> 28) == 0 ? 1 : (a2 >> 28) == 1 ? 2 : 4;
+                    uint32_t cnt = ((a2 >> 16) & 0xFFF) + 1, step = a2 & 0xFFFF, val = v;
+                    for (uint32_t r = 0; r < cnt; r++, addr += step, val += v2)
+                        gk_write(b, addr, val, sz);
+                    break;
+                }
+                }
+            }
+            i = next;
+            continue;
+        }
+        if (t < 0x40 || t == 0xCE || t == 0xDE) { /* ifs */
+            if (t < 0x40 && (a & 1)) { /* an endif first */
+                exec = stack & 1;
+                stack >>= 1;
+            }
+            int ok = 0;
+            if (t == 0xCE || t == 0xDE) {
+                uint32_t r = t == 0xCE ? ba : po;
+                ok = r >= (v & 0xFFFF0000u) && r < (v << 16);
+            } else {
+                uint32_t addr = base + (off & ~1u);
+                unsigned c = (t >> 1) & 3;
+                uint32_t xv, yv;
+                if (t & 0x08) {
+                    xv = gk_read(b, addr, 2) & ~(v >> 16) & 0xFFFF;
+                    yv = v & 0xFFFF;
+                } else {
+                    xv = gk_read(b, addr, 4);
+                    yv = v;
+                }
+                ok = c == 0 ? xv == yv : c == 1 ? xv != yv : c == 2 ? xv > yv : xv < yv;
+            }
+            stack = stack << 1 | (uint32_t)exec;
+            exec = exec && ok;
+            i = next;
+            continue;
+        }
+        switch (t & 0xFE) {
+        case 0xE0: /* full terminator */
+        case 0xE2:
+            if (t == 0xE0) {
+                exec = 1;
+                stack = 0;
+                if (v >> 16)
+                    ba = v & 0xFFFF0000u;
+                if (v & 0xFFFF)
+                    po = v << 16;
+            } else if (t == 0xE2) { /* endifs, else */
+                for (uint32_t k = 0; k < (a & 0xFF); k++) {
+                    exec = stack & 1;
+                    stack >>= 1;
+                }
+                if (T == 1)
+                    exec = (stack & 1) ? !exec : 0;
+                if (v >> 16)
+                    ba = v & 0xFFFF0000u;
+                if (v & 0xFFFF)
+                    po = v << 16;
+            }
+            i = next;
+            continue;
+        case 0xF0:
+            if (t == 0xF0)
+                return;
+            break;
+        case 0x60: case 0x62: case 0x64: case 0x66: case 0x68: {
+            unsigned P = v & 0xF, kind = t & 0xFE;
+            int go = kind == 0x60 ? exec : T == 0 ? 1 : T == 1 ? exec : T == 2 ? !exec : 0;
+            if (go) {
+                switch (kind) {
+                case 0x60: blk_line[P] = next; blk_count[P] = a & 0xFFFF; break;
+                case 0x62:
+                    if (blk_count[P]) {
+                        blk_count[P]--;
+                        next = blk_line[P];
+                    }
+                    break;
+                case 0x64: next = blk_line[P]; break;
+                case 0x66: next = (uint32_t)((int32_t)next + (int16_t)(a & 0xFFFF)); break;
+                case 0x68:
+                    blk_line[P] = next;
+                    next = (uint32_t)((int32_t)next + (int16_t)(a & 0xFFFF));
+                    break;
+                }
+            }
+            i = next;
+            continue;
+        }
+        default:
+            break;
+        }
+        if (!exec) {
+            i = next;
+            continue;
+        }
+        switch (t & 0xFE) {
+        case 0x40: case 0x42: case 0x44: case 0x48: case 0x4A: case 0x4C: {
+            int ispo = (t & 0xFE) >= 0x48;
+            uint32_t *r = ispo ? &po : &ba;
+            uint32_t addr = v + (Y == 1 ? *r : Y == 2 ? (ispo ? ba : po) : 0) + (((a >> 12) & 0xF) == 1 ? gr[N] : 0);
+            switch (t & 0x06) {
+            case 0x00: *r = (T == 1 ? *r : 0) + gk_read(b, addr, 4); break; /* load */
+            case 0x02: *r = (T == 1 ? *r : 0) + addr; break;               /* set */
+            case 0x04: gk_write(b, addr, *r, 4); break;                    /* store */
+            }
+            break;
+        }
+        case 0x80: case 0x90: /* set gr */
+            gr[N] = (T == 1 ? gr[N] : 0) + v + (Y == 1 ? (t & 0x10 ? po : ba) : 0);
+            break;
+        case 0x82: case 0x92: { /* load gr */
+            int sz = T == 0 ? 1 : T == 1 ? 2 : 4;
+            gr[N] = gk_read(b, v + (Y == 1 ? (t & 0x10 ? po : ba) : 0), sz);
+            break;
+        }
+        case 0x84: case 0x94: { /* store gr, (a >> 4 & 0xFFF) + 1 times */
+            int sz = T == 0 ? 1 : T == 1 ? 2 : 4;
+            uint32_t addr = v + (Y == 1 ? (t & 0x10 ? po : ba) : 0), cnt = ((a >> 4) & 0xFFF) + 1;
+            for (uint32_t r = 0; r < cnt; r++)
+                gk_write(b, addr + r * (uint32_t)sz, gr[N], sz);
+            break;
+        }
+        case 0x86: case 0x88: { /* gr operations: with a value / with grM */
+            uint32_t y = (t & 0xFE) == 0x86 ? v : gr[v & 0xF];
+            uint32_t xv = (Y & 1) ? gk_read(b, gr[N], 4) : gr[N];
+            if (Y & 2)
+                y = gk_read(b, y, 4);
+            gr[N] = gk_op(T, xv, y);
+            break;
+        }
+        case 0x8A: { /* 8AYYYYNM: copy YYYY bytes from the address in grN to grM's + X (M = F: ba + X) */
+            unsigned M = a & 0xF, nn = (a >> 4) & 0xF;
+            uint32_t cnt = (a >> 8) & 0xFFFF, src = gr[nn], dst = (M == 0xF ? ba : gr[M]) + v;
+            for (uint32_t k = 0; k < cnt && k < 0x10000; k++)
+                gk_write(b, dst + k, gk_read(b, src + k, 1), 1);
+            break;
+        }
+        case 0x8C: { /* 8CYYYYNM: copy YYYY bytes from grN's address + X (N = F: ba + X) to grM's */
+            unsigned M = a & 0xF, nn = (a >> 4) & 0xF;
+            uint32_t cnt = (a >> 8) & 0xFFFF, src = (nn == 0xF ? ba : gr[nn]) + v, dst = gr[M];
+            for (uint32_t k = 0; k < cnt && k < 0x10000; k++)
+                gk_write(b, dst + k, gk_read(b, src + k, 1), 1);
+            break;
+        }
+        case 0xC2: { /* insert ASM at base + X: the code in the hook area, its last word a branch back */
+            uint32_t target = base + off, words = 2 * v, hook = x->hook_at;
+            if (hook + words * 4 > RECOMP_CHEAT_GC_HOOK_HI || !ptr_ok(RECOMP_CHEAT_GC, target))
+                break;
+            for (uint32_t k = 0; k + 1 < words; k++)
+                gk_write(b, hook + 4 * k, w[2 * (i + 1) + k], 4);
+            gk_write(b, hook + 4 * (words - 1), gk_branch(hook + 4 * (words - 1), target + 4), 4);
+            gk_hook(x, target);
+            x->hook_at += words * 4;
+            break;
+        }
+        case 0xC6: /* branch from base + X to v */
+            if (ptr_ok(RECOMP_CHEAT_GC, v))
+                gk_write(b, base + off, gk_branch(base + off, v), 4);
+            break;
+        default:
+            break;
+        }
+        i = next;
+    }
+}
+
+/* The C2 hooks of this frame: the ones no longer wanted get their instruction back (when the branch is still there),
+ * the new ones their branch (the instruction it replaces kept). */
+static void gc_hooks_update(recomp_cheats *s, const recomp_cheat_bus *b, recomp_cheat_hook *want, size_t nwant)
+{
+    for (size_t i = 0; i < s->nhook;) {
+        size_t j = 0;
+        while (j < nwant && want[j].addr != s->hook[i].addr)
+            j++;
+        if (j == nwant) {
+            if (bus_read(b, s->hook[i].addr, 4) == s->hook[i].branch)
+                bus_write(b, s->hook[i].addr, s->hook[i].old, 4);
+            s->hook[i] = s->hook[--s->nhook];
+            continue;
+        }
+        i++;
+    }
+    for (size_t j = 0; j < nwant; j++) {
+        size_t i = 0;
+        while (i < s->nhook && s->hook[i].addr != want[j].addr)
+            i++;
+        uint32_t cur = bus_read(b, want[j].addr, 4);
+        if (i == s->nhook) {
+            if (s->nhook >= RECOMP_CHEAT_HOOKS_MAX)
+                continue;
+            s->hook[s->nhook] = want[j];
+            s->hook[s->nhook].old = cur == want[j].branch ? 0x60000000u : cur; /* already there (a state): a nop */
+            s->nhook++;
+        } else {
+            s->hook[i].branch = want[j].branch;
+        }
+        bus_write(b, want[j].addr, want[j].branch, 4);
     }
 }
 
@@ -1338,8 +1887,8 @@ static void want_patch(recomp_cheat_patch *w, size_t *nw, uint32_t addr, uint16_
     }
 }
 
-static void run(const recomp_cheats *s, recomp_cheat *c, const recomp_cheat_bus *b, recomp_cheat_patch *want,
-                size_t *nwant)
+static void run(recomp_cheats *s, recomp_cheat *c, const recomp_cheat_bus *b, recomp_cheat_patch *want,
+                size_t *nwant, gecko_ctx *gk)
 {
     int once = !c->ran;
     size_t budget = 65536; /* writes per cheat per frame, at most (a runaway fill / repeat) */
@@ -1354,6 +1903,16 @@ static void run(const recomp_cheats *s, recomp_cheat *c, const recomp_cheat_bus 
             break;
         case OP_ADD:
             bus_write(b, o->addr, bus_read(b, o->addr, o->size) + o->value, o->size);
+            break;
+        case OP_FADD:
+            bus_write(b, o->addr, f2u(u2f(bus_read(b, o->addr, 4)) + u2f(o->value)), 4);
+            break;
+        case OP_GECKO:
+            if (gk && o->value + (size_t)o->count * 8 <= c->ndata) {
+                uint32_t at = gk->hook_at;
+                gecko_run(gk, (const uint32_t *)(void *)(c->data + o->value), o->count);
+                gk->hook_at = at + o->astep; /* this cheat's room, used or not */
+            }
             break;
         case OP_OR:
             bus_write(b, o->addr, bus_read(b, o->addr, o->size) | o->value, o->size);
@@ -1414,18 +1973,35 @@ static void patch_rom(const recomp_cheat_bus *b, uint32_t addr, uint16_t v)
         b->rom_write16(b->user, addr, v);
 }
 
+/* The hook area bytes a cheat's Gecko C2 codes take (its room, whether it is on or not: stable addresses). */
+static uint32_t hook_room(const recomp_cheat *c)
+{
+    uint32_t n = 0;
+    for (size_t i = 0; i < c->nops; i++)
+        if (c->ops[i].kind == OP_GECKO)
+            n += c->ops[i].astep;
+    return n;
+}
+
 size_t recomp_cheats_apply(recomp_cheats *s, const recomp_cheat_bus *b)
 {
     recomp_cheat_patch want[RECOMP_CHEAT_PATCHES_MAX];
     size_t nwant = 0;
+    recomp_cheat_hook hooks[RECOMP_CHEAT_HOOKS_MAX];
+    size_t nhooks = 0;
+    gecko_ctx gk = {s, b, RECOMP_CHEAT_GC_HOOK_LO, hooks, &nhooks};
     for (size_t i = 0; i < s->n; i++) {
         recomp_cheat *c = &s->list[i];
+        uint32_t room = s->console == RECOMP_CHEAT_GC ? hook_room(c) : 0, at = gk.hook_at;
         if (c->enabled && !c->error[0])
-            run(s, c, b, want, &nwant);
+            run(s, c, b, want, &nwant, s->console == RECOMP_CHEAT_GC ? &gk : NULL);
         else
             c->ran = 0; /* turned on later: its once-codes then */
+        gk.hook_at = at + room;
     }
     s->frames++;
+    if (s->console == RECOMP_CHEAT_GC && (nhooks || s->nhook))
+        gc_hooks_update(s, b, hooks, nhooks);
     /* Cartridge patches: put back the ones no longer wanted, then the new ones. */
     if (b->rom_write16 && (nwant || s->npatch)) {
         for (size_t i = 0; i < s->npatch;) {
@@ -1461,6 +2037,8 @@ size_t recomp_cheats_apply(recomp_cheats *s, const recomp_cheat_bus *b)
 
 void recomp_cheats_restore(recomp_cheats *s, const recomp_cheat_bus *b)
 {
+    if (s->console == RECOMP_CHEAT_GC && s->nhook)
+        gc_hooks_update(s, b, NULL, 0);
     while (s->npatch) {
         s->npatch--;
         patch_rom(b, s->patch[s->npatch].addr, s->patch[s->npatch].old);
