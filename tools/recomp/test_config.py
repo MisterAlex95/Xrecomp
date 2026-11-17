@@ -10,6 +10,7 @@ failed to lift -- silently, and looking like an instruction-coverage problem
 rather than a configuration one.
 """
 
+import importlib
 import os
 import sys
 
@@ -30,14 +31,21 @@ def _halo_like():
 
 
 def test_fallback_is_replaced():
-    assert config.configured_from() is None
-    config._install(_halo_like(), entry_point=0x001D43B4,
-                    kernel_thunk_addr=0x00253090, origin="halo-test")
-    assert config.configured_from() == "halo-test"
-    assert config.TEXT_VA_START == 0x00012000
-    assert config.TEXT_VA_END == 0x00012000 + 0x001D49CC
-    assert config.ENTRY_POINT == 0x001D43B4
-    assert config.KERNEL_THUNK_ADDR == 0x00253090
+    # The module as a fresh process loads it: another test in this process (pytest-xdist runs them in any order)
+    # may have installed its own layout already. Put back as found after.
+    saved = dict(vars(config))
+    importlib.reload(config)
+    try:
+        assert config.configured_from() is None
+        config._install(_halo_like(), entry_point=0x001D43B4,
+                        kernel_thunk_addr=0x00253090, origin="halo-test")
+        assert config.configured_from() == "halo-test"
+        assert config.TEXT_VA_START == 0x00012000
+        assert config.TEXT_VA_END == 0x00012000 + 0x001D49CC
+        assert config.ENTRY_POINT == 0x001D43B4
+        assert config.KERNEL_THUNK_ADDR == 0x00253090
+    finally:
+        vars(config).update(saved)
     print("ok  fallback_is_replaced")
 
 
