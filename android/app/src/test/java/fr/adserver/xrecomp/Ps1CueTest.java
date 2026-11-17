@@ -15,7 +15,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -81,20 +83,49 @@ public class Ps1CueTest {
                 throw new IOException("no " + u);
             return new ByteArrayInputStream(CUE.getBytes(StandardCharsets.ISO_8859_1));
         };
-        String path = Ps1Cue.runtimeCue("content://t/document/cue", parts, reader, names::get, fds::get, out);
+        // The fds here are fake numbers, not descriptors this JVM owns: the closer only records them.
+        List<Integer> closed = new ArrayList<>();
+        String path = Ps1Cue.runtimeCue("content://t/document/cue", parts, reader, names::get, fds::get, closed::add,
+                                        out);
         assertNotNull(path);
         assertEquals(new File(out, "disc.cue").getAbsolutePath(), path);
+        assertEquals("a disc that opens keeps its tracks open", Collections.emptyList(), closed);
         String text = new String(Files.readAllBytes(new File(path).toPath()), StandardCharsets.ISO_8859_1);
         assertEquals(2, text.split("/proc/self/fd/4", -1).length - 1);
         assertEquals(true, text.contains("FILE \"/proc/self/fd/41\" BINARY\n  TRACK 01 MODE2/2352"));
         assertEquals(true, text.contains("FILE \"/proc/self/fd/42\" BINARY\n  TRACK 02 AUDIO"));
 
-        // A track that is not beside it, one that cannot be opened, a .cue that cannot be read: no disc.
-        assertNull(Ps1Cue.runtimeCue("content://t/document/cue", parts.subList(0, 1), reader, names::get, fds::get,
-                                     out));
+        // A track that is not beside it, one that cannot be opened, a .cue that cannot be read: no disc, and the
+        // track already opened (track 1, opened first) is given back.
+        assertNull(Ps1Cue.runtimeCue("content://t/document/cue", parts.subList(1, 2), reader, names::get, fds::get,
+                                     closed::add, out));
+        assertEquals("track 2 missing: track 1 closed", Collections.singletonList(41), closed);
+        closed.clear();
+        assertNull(Ps1Cue.runtimeCue("content://t/document/cue", parts, reader, names::get, u -> {
+            if (u.endsWith("/2"))
+                throw new IOException("gone");
+            return fds.get(u);
+        }, closed::add, out));
+        assertEquals("track 2 unopenable: track 1 closed", Collections.singletonList(41), closed);
+        closed.clear();
+        assertNull(Ps1Cue.runtimeCue("content://t/document/cue", parts, reader, names::get,
+                                     u -> u.endsWith("/2") ? -1 : fds.get(u), closed::add, out));
+        assertEquals("track 2 refused (-1): track 1 closed", Collections.singletonList(41), closed);
+        closed.clear();
         assertNull(Ps1Cue.runtimeCue("content://t/document/cue", parts, reader, names::get, u -> {
             throw new IOException("gone");
-        }, out));
-        assertNull(Ps1Cue.runtimeCue("content://t/document/other", parts, reader, names::get, fds::get, out));
+        }, closed::add, out));
+        assertEquals("nothing opened, nothing closed", Collections.emptyList(), closed);
+        assertNull(Ps1Cue.runtimeCue("content://t/document/other", parts, reader, names::get, fds::get, closed::add,
+                                     out));
+        assertEquals(Collections.emptyList(), closed);
+
+        // The sheet cannot be written (its folder is a file): both tracks are given back.
+        File blocked = new File(tmp.getRoot(), "blocked");
+        Files.write(blocked.toPath(), new byte[] {1});
+        assertNull(Ps1Cue.runtimeCue("content://t/document/cue", parts, reader, names::get, fds::get, closed::add,
+                                     blocked));
+        Collections.sort(closed);
+        assertEquals(Arrays.asList(41, 42), closed);
     }
 }

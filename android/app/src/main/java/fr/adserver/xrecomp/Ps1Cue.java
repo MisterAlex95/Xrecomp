@@ -11,6 +11,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.IntConsumer;
 
 /**
  * A PlayStation disc's .cue in a library folder seen through the Storage Access Framework (XBA-168): the runtime
@@ -84,6 +85,26 @@ final class Ps1Cue {
      */
     static String runtimeCue(String cueUri, List<String> parts, Reader reader, Namer namer,
                              DiscImages.Opener opener, File outDir) {
+        return runtimeCue(cueUri, parts, reader, namer, opener, DiscImages::closeFd, outDir);
+    }
+
+    /**
+     * As above, with the closer that gives back a track descriptor already opened when the disc then fails (a later
+     * track missing or unopenable, the sheet not rewritten or not written): the fds are detached, nothing else would
+     * close them. A test passes its own, since its fake fd numbers are not descriptors it owns.
+     */
+    static String runtimeCue(String cueUri, List<String> parts, Reader reader, Namer namer,
+                             DiscImages.Opener opener, IntConsumer closer, File outDir) {
+        List<Integer> opened = new java.util.ArrayList<>();
+        String path = runtimeCue(cueUri, parts, reader, namer, opener, outDir, opened);
+        if (path == null)
+            for (int fd : opened)
+                closer.accept(fd);
+        return path;
+    }
+
+    private static String runtimeCue(String cueUri, List<String> parts, Reader reader, Namer namer,
+                                     DiscImages.Opener opener, File outDir, List<Integer> opened) {
         String text;
         try (InputStream in = reader.open(cueUri)) {
             byte[] buf = new byte[MAX_CUE];
@@ -116,6 +137,7 @@ final class Ps1Cue {
                 int fd = opener.open(uri);
                 if (fd < 0)
                     return null;
+                opened.add(fd);
                 paths.put(key, "/proc/self/fd/" + fd);
             } catch (IOException | RuntimeException e) {
                 Log.w(LauncherActivity.TAG, "shell: cannot open the track " + uri, e);
