@@ -186,4 +186,18 @@ func registerSetupChecks() {
         expect(Date().timeIntervalSince(t0) < 4)
         expectEq(Shell.run("/nonexistent/x", []).status, -1)
     }
+
+    check("shell: a grandchild holding the pipe does not hold the call past its timeout") {
+        let t0 = Date()
+        let r = Shell.run("/bin/sh", ["-c", "echo started; sleep 30 & sleep 30"], timeout: 1)
+        expectEq(r.status, -2)
+        expect(Date().timeIntervalSince(t0) < 6, "returned after \(Date().timeIntervalSince(t0)) s")
+        expect(r.output.contains("started"), r.output)
+        // A normal exit still returns everything the child wrote, in order.
+        let many = Shell.run("/bin/sh", ["-c", "i=0; while [ $i -lt 2000 ]; do echo line$i; i=$((i+1)); done"])
+        expectEq(many.status, 0)
+        let lines = many.output.split(separator: "\n")
+        expectEq(lines.count, 2000)
+        expectEq(lines.last.map(String.init), "line1999")
+    }
 }
