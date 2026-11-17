@@ -227,6 +227,21 @@ func registerGameChecks() {
         expectEq(tailLines(t, 3), ["98", "99", "100"])
     }
 
+    check("logs: a failed log write is reported, not raised (full disk)") {
+        let f = tempDir("logw").appendingPathComponent("a.log")
+        write(f, "")
+        let w = try FileHandle(forWritingTo: f)
+        expect(appendLogLine("one", to: w))
+        try w.close()
+        expectEq(read(f), "one\n")
+        // A write the system refuses (here EBADF on a read-only handle; ENOSPC on a full disk) comes back as false:
+        // the legacy write(_:) raised an Objective-C exception there and the launcher aborted.
+        let r = try FileHandle(forReadingFrom: f)
+        expect(!appendLogLine("two", to: r))
+        try r.close()
+        expectEq(read(f), "one\n")
+    }
+
     check("state: play time and prepare record round trip") {
         let f = tempDir("state").appendingPathComponent("state.json")
         var r = TitleRecord.load(from: f)

@@ -82,7 +82,7 @@ public final class GameRunner: @unchecked Sendable {
     private func write(_ s: String) {
         lock.lock()
         defer { lock.unlock() }
-        logHandle?.write(Data((s + "\n").utf8))
+        if let h = logHandle, !appendLogLine(s, to: h) { logHandle = nil }
     }
 
     private func ended(_ e: ChildExit) {
@@ -146,6 +146,19 @@ public struct RunLog: Sendable {
     }
 
     public var latest: URL? { logs().last }
+}
+
+/// Appends `s` and a newline to a log. The throwing `write(contentsOf:)`, never the legacy `write(_:)`: that one
+/// raises an Objective-C exception on ENOSPC / EIO (a full disk, an unplugged work root) that Swift cannot catch, and
+/// the launcher would abort mid-prepare. False when the write failed: the caller drops the handle and goes on
+/// without a log.
+public func appendLogLine(_ s: String, to handle: FileHandle) -> Bool {
+    do {
+        try handle.write(contentsOf: Data((s + "\n").utf8))
+        return true
+    } catch {
+        return false
+    }
 }
 
 /// The last `n` lines of a text file (reads at most the last 256 KB).
