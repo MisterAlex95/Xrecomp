@@ -198,6 +198,12 @@ endif()
 # WIA conversions (gc_tools.disc, no toolchain, no game data): same title key (gc_disc and recomp_pack_rom_identify),
 # DOL and FST from each, and the GCM boots headless through its apploader with the right DVD results.
 # gc_hello_disc packs our libogc hello world into a GCM: same XFB as the DOL (77 without the corpus).
+# gc_disc_bad: damaged images built in memory (a DOL section end past 4 GB, WIA tables larger than the file,
+# garbage behind each magic): refused or read, never a crash or a huge allocation
+add_executable(gc_disc_bad_test gc_disc_bad_test.c)
+target_link_libraries(gc_disc_bad_test PRIVATE gc_core)
+target_compile_options(gc_disc_bad_test PRIVATE -Wall -Wextra)
+add_test(NAME gc_disc_bad COMMAND gc_disc_bad_test)
 add_executable(gc_disc_info gc_disc_info.c ${GC_REPO_ROOT}/src/platform/recomp_pack.c
                ${GC_REPO_ROOT}/src/platform/recomp_cfg.c)
 target_link_libraries(gc_disc_info PRIVATE gc_identify ${CMAKE_DL_LIBS})

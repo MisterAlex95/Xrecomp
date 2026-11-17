@@ -49,6 +49,8 @@ typedef struct {
     uint32_t ngroups;
     uint8_t *cache;          /* one group's disc bytes */
     int64_t cached;          /* its group index */
+    uint64_t cached_base;    /* and the disc range it was decoded for (two raw entries may name one group) */
+    size_t cached_len;
     uint8_t *stored, *unpack;
     size_t stored_cap, unpack_cap;
     ZSTD_DCtx *zstd;
@@ -284,6 +286,10 @@ static int grow(gc_disc *d, uint8_t **buf, size_t *cap, size_t n)
 static int read_table(gc_disc *d, uint64_t off, uint32_t n, uint8_t *out, size_t out_len)
 {
     wia_priv *p = d->priv;
+    /* the header's size is checked against the file first: 4 GB asked by a damaged header is never allocated */
+    if (off > d->file_size || n > d->file_size - off)
+        return gc_disc_fail(d, "%s: table of %u bytes at 0x%llX past the file's end", d->format, n,
+                            (unsigned long long)off);
     if (grow(d, &p->stored, &p->stored_cap, n ? n : 1) || gc_disc_file_read(d, off, p->stored, n))
         return -1;
     return decompress(d, p->method, p->stored, n, out, out_len);
@@ -325,7 +331,7 @@ static int rvz_unpack(gc_disc *d, const uint8_t *src, size_t n, uint8_t *out, si
 static int load_group(gc_disc *d, uint32_t gi, uint64_t base, size_t len)
 {
     wia_priv *p = d->priv;
-    if (p->cached == gi)
+    if (p->cached == gi && p->cached_base == base && p->cached_len == len)
         return 0;
     p->cached = -1;
     const wia_group *g = &p->groups[gi];
@@ -345,6 +351,8 @@ static int load_group(gc_disc *d, uint32_t gi, uint64_t base, size_t len)
         }
     }
     p->cached = gi;
+    p->cached_base = base;
+    p->cached_len = len;
     return 0;
 }
 
