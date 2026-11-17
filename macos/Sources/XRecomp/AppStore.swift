@@ -22,6 +22,8 @@ final class AppStore: LauncherActions {
     private var preparing: (id: String, runner: PrepareRunner)?
     private var game: (id: String, runner: GameRunner)?
     private var ticker: Timer?
+    /// A rescan asked for while one ran (a folder dropped, Setup found Python): run again once it ends.
+    private var rescanPending = false
     private let work = DispatchQueue(label: "xrecomp.store", qos: .userInitiated)
 
     init() {
@@ -152,7 +154,10 @@ final class AppStore: LauncherActions {
     // ---- library -------------------------------------------------------------------------------------------------
 
     func rescan() {
-        guard !model.scanning else { return }
+        guard !model.scanning else {
+            rescanPending = true
+            return
+        }
         model.scanning = true
         let folders = settings.libraryURLs, p = paths, tk = toolkit, py = python
         work.async {
@@ -168,7 +173,13 @@ final class AppStore: LauncherActions {
                 merge(items)
                 model.scanning = false
                 model.scannedOnce = true
-                refreshStates()
+                if rescanPending {
+                    // The folders or the toolkit / Python changed during this scan: its results are already old.
+                    rescanPending = false
+                    rescan()
+                } else {
+                    refreshStates()
+                }
             }
         }
     }
