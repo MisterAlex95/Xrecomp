@@ -594,7 +594,10 @@ before RAM is written), and a device thread that is not running answers at once 
 hold reach the Xbox capture and load like a console's. The pad's hotkeys come from the OHCI controller thread, which
 a capture holds, so they run on the service's own thread. A game held by the menu or the background is let go for
 the length of the capture or load (threads waiting on the GPU behind a parked flip never reach a kernel call
-otherwise). `xbox_StateAvailable(why)` says whether states can be offered now (`MenuNative.nativeStatesAvailable`,
+otherwise) with `recomp_lifecycle_lift_begin` / `lift_end`: the hold's reasons stay tracked, so the menu closing or
+the app coming back meanwhile is not undone at the end. The save / load callbacks run under `recomp_states`' lock and
+must not call back into it (`recomp_states_available`, `recomp_states_console`): they use the service's own checks.
+`xbox_StateAvailable(why)` says whether states can be offered now (`MenuNative.nativeStatesAvailable`,
 `nativeStatesReason`): attached with a save folder, guest threads running, no stack switching (fibers), no untracked
 threads. The app shows Save state / Load state for an Xbox title when it is true; « Resume where I left off » and the
 automatic slot since XBA-250, when the generated code has resume entries (« Across runs »). A refused load shows « The
