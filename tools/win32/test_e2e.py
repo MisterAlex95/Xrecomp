@@ -81,6 +81,34 @@ def test_an_import_without_hle_stops_the_program(tmp_path):
     assert b"WS2_32.dll!#115 called: no HLE for it" in r.stderr
 
 
+@pytest.mark.skipif(not E2E, reason="XBA_E2E=1 builds and runs the recompiled program")
+def test_a_malformed_pe_is_refused(tmp_path):
+    """w32_load trusts no header field: an e_lfanew near 4 GiB (the bound check wrapped: a read 4 GiB past the
+    file) and SizeOfHeaders larger than SizeOfImage (copied past the committed image) are refused with a reason,
+    exit status 1, not a crash."""
+    import struct
+    cc = _cc()
+    if not cc:
+        pytest.skip("no GCC/Clang-style C compiler")
+    good = hello_pe()
+    exe = tmp_path / "hello.exe"
+    exe.write_bytes(good)
+    prog = w32.build(str(exe), str(tmp_path / "w"), cc)
+
+    wrap = bytearray(good)
+    struct.pack_into("<I", wrap, 0x3C, 0xFFFFFF10)
+    nt = struct.unpack_from("<I", good, 0x3C)[0]
+    image_size = struct.unpack_from("<I", good, nt + 24 + 56)[0]
+    big = bytearray(good) + bytes(image_size + 0x2000 - len(good) if image_size + 0x2000 > len(good) else 0)
+    struct.pack_into("<I", big, nt + 24 + 60, image_size + 0x1000)
+    for name, data, why in (("wrap", wrap, b"not a PE32"), ("headers", big, b"larger than the image")):
+        bad = tmp_path / (name + ".exe")
+        bad.write_bytes(bytes(data))
+        r = _run(prog, bad)
+        assert r.returncode == 1, (name, r.returncode, r.stderr.decode(errors="replace"))
+        assert why in r.stderr, (name, r.stderr.decode(errors="replace"))
+
+
 def _mingw_hellos(tmp_path):
     d = os.environ.get("XBA_WIN32_HELLO_DIR")
     if d:

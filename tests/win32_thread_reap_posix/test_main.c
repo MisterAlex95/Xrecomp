@@ -18,6 +18,13 @@
  *      code, before and after CloseHandle of the other handles.
  *   3. SetThreadAffinityMask and (not on Android) TerminateThread on an ended
  *      thread's handle return without touching the gone pthread.
+ *   4. Timer-queue timers: 200 timers with a 60 s due time, each deleted at
+ *      once, give their threads back within a second (Linux, counted in
+ *      /proc/self/task; they used to sleep out the due time), and a deleted
+ *      timer never calls back. A 5 ms periodic timer whose callback takes
+ *      2 ms fires about 200 times a second (not every 7 ms). Deleting with
+ *      INVALID_HANDLE_VALUE waits for a running callback, and returns when
+ *      called from that callback.
  */
 #if defined(__linux__)
 #define _GNU_SOURCE
@@ -73,6 +80,111 @@ static DWORD WINAPI worker(LPVOID arg)
     if (code % 4u == 0)
         ExitThread(code);
     return code + touch[0] - (char)code;
+}
+
+/* Threads of the process, 0 when the host has no /proc. */
+static unsigned thread_count(void)
+{
+    unsigned n = 0;
+#if defined(__linux__)
+    char line[256];
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return 0;
+    while (fgets(line, sizeof line, f))
+        if (strncmp(line, "Threads:", 8) == 0) {
+            n = (unsigned)strtoul(line + 8, NULL, 10);
+            break;
+        }
+    fclose(f);
+#endif
+    return n;
+}
+
+static volatile LONG s_fired, s_entered, s_done;
+static HANDLE s_self_timer;
+static volatile LONG s_self_deleted;
+
+static VOID CALLBACK count_cb(PVOID p, BOOLEAN f)
+{
+    (void)p; (void)f;
+    InterlockedIncrement(&s_fired);
+}
+
+static VOID CALLBACK slow_cb(PVOID p, BOOLEAN f)
+{
+    (void)f;
+    InterlockedIncrement(&s_fired);
+    Sleep((DWORD)(uintptr_t)p);
+}
+
+static VOID CALLBACK long_cb(PVOID p, BOOLEAN f)
+{
+    (void)p; (void)f;
+    InterlockedExchange(&s_entered, 1);
+    Sleep(150);
+    InterlockedExchange(&s_done, 1);
+}
+
+static VOID CALLBACK self_delete_cb(PVOID p, BOOLEAN f)
+{
+    (void)p; (void)f;
+    while (!s_self_timer) Sleep(1);
+    DeleteTimerQueueTimer(NULL, s_self_timer, INVALID_HANDLE_VALUE);
+    InterlockedExchange(&s_self_deleted, 1);
+}
+
+static void test_timer_queue(void)
+{
+    HANDLE t;
+    unsigned i, bad = 0, base, now = 0;
+
+    /* A deleted timer does not call back. */
+    s_fired = 0;
+    if (CreateTimerQueueTimer(&t, NULL, count_cb, NULL, 50, 0, WT_EXECUTEONLYONCE))
+        DeleteTimerQueueTimer(NULL, t, NULL);
+    Sleep(150);
+    check(s_fired == 0, "timer deleted before its due time: no callback");
+
+    base = thread_count();
+    for (i = 0; i < 200; i++) {
+        if (!CreateTimerQueueTimer(&t, NULL, count_cb, NULL, 60000, 0, WT_EXECUTEONLYONCE)) { bad++; continue; }
+        DeleteTimerQueueTimer(NULL, t, NULL);
+    }
+    check(bad == 0, "200 timers created and deleted");
+    if (base) {
+        for (i = 0; i < 100; i++) {           /* up to a second */
+            now = thread_count();
+            if (now <= base) break;
+            Sleep(10);
+        }
+        printf("    threads %u -> %u\n", base, now);
+        check(now <= base, "deleted 60 s timers: their threads are gone within a second");
+    }
+
+    /* Periods from the previous deadline: the callback's 2 ms is not added. */
+    s_fired = 0;
+    if (CreateTimerQueueTimer(&t, NULL, slow_cb, (PVOID)(uintptr_t)2, 5, 5, 0)) {
+        Sleep(1000);
+        DeleteTimerQueueTimer(NULL, t, INVALID_HANDLE_VALUE);
+    }
+    printf("    5 ms periodic timer, 2 ms callback: %ld callbacks in 1 s\n", (long)s_fired);
+    check(s_fired >= 180 && s_fired <= 205, "5 ms periodic timer fires about 200 times a second");
+
+    /* INVALID_HANDLE_VALUE: back once the running callback has returned. */
+    s_entered = s_done = 0;
+    if (CreateTimerQueueTimer(&t, NULL, long_cb, NULL, 0, 0, WT_EXECUTEONLYONCE)) {
+        while (!s_entered) Sleep(1);
+        DeleteTimerQueueTimer(NULL, t, INVALID_HANDLE_VALUE);
+    }
+    check(s_done == 1, "delete with INVALID_HANDLE_VALUE waits for the running callback");
+
+    /* ... but not for itself. */
+    s_self_timer = NULL;
+    s_self_deleted = 0;
+    if (CreateTimerQueueTimer(&t, NULL, self_delete_cb, NULL, 0, 0, WT_EXECUTEONLYONCE))
+        s_self_timer = t;
+    for (i = 0; i < 200 && !s_self_deleted; i++) Sleep(5);
+    check(s_self_deleted == 1, "delete with INVALID_HANDLE_VALUE from its own callback returns");
 }
 
 /* Detached threads unmap their stack a moment after they signal. */
@@ -193,6 +305,8 @@ int main(void)
 
     for (i = 0; i < KEPT_THREADS; i += 2)
         CloseHandle(kept[i]);
+
+    test_timer_queue();
 
     printf("%s\n", failures ? "FAILED" : "all passed");
     return failures ? 1 : 0;

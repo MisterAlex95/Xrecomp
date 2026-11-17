@@ -31,6 +31,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <time.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -229,6 +230,42 @@ int main(void)
                  (unsigned long long)(uintptr_t)first,
                  (unsigned long long)(uintptr_t)last);
         check(last == first, "a closed handle's slot is reused", detail);
+    }
+
+    /* 5b. With many live handles: a create does not rescan them all (a
+     * free-slot hint), and still takes the lowest free slot -- a hole left
+     * low in the table is filled before the table grows. */
+    {
+        enum { LIVE = 10000, CYCLES = 50000 };
+        HANDLE *live = (HANDLE *)calloc(LIVE, sizeof *live);
+        int ok = live != NULL;
+        for (int i = 0; ok && i < LIVE; i++)
+            if (!(live[i] = CreateEventA(NULL, TRUE, FALSE, NULL))) ok = 0;
+        check(ok, "10000 live events", NULL);
+        if (ok) {
+            struct timespec t0, t1;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            for (int i = 0; ok && i < CYCLES; i++) {
+                HANDLE e = CreateEventA(NULL, TRUE, FALSE, NULL);
+                if (!e) ok = 0;
+                CloseHandle(e);
+            }
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+            char detail[96];
+            snprintf(detail, sizeof detail, "%.1f ms", ms);
+            printf("    %s\n", detail);
+            check(ok && ms < 2000.0, "50000 create/close cycles over 10000 live handles, under 2 s", detail);
+
+            HANDLE hole = live[LIVE / 2];
+            CloseHandle(hole);
+            HANDLE again = CreateEventA(NULL, TRUE, FALSE, NULL);
+            check(again == hole, "a hole low in the table is filled first", NULL);
+            live[LIVE / 2] = again;
+        }
+        for (int i = 0; live && i < LIVE; i++)
+            if (live[i]) CloseHandle(live[i]);
+        free(live);
     }
 
     /* 6. A handle the shim never issued must be rejected, not dereferenced.

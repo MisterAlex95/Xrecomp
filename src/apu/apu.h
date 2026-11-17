@@ -54,6 +54,7 @@ typedef struct APUMixerVoice {
     uint32_t         sample_rate;   /* e.g. 22050, 44100, 48000 */
     uint64_t         play_offset; /* Source frame position, 16 fractional bits */
     float            volume;       /* 0.0 to 1.0 */
+    int              allocated;    /* handed out by apu_mixer_alloc_voice, until apu_mixer_free_voice */
 } APUMixerVoice;
 
 /* Allocate a mixer voice slot. Returns slot index or -1 if full. */
@@ -64,6 +65,11 @@ void apu_mixer_free_voice(int slot);
 
 /* Get pointer to a mixer voice for configuration. */
 APUMixerVoice *apu_mixer_get_voice(int slot);
+
+/* Give a voice its PCM (16-bit, NULL / 0 for none) and format, under the
+ * mixer lock; the position goes back to the start. The voice is stopped first. */
+void apu_mixer_set_pcm(int slot, const int16_t *pcm, uint32_t bytes,
+                       uint32_t num_channels, uint32_t sample_rate);
 
 /* Seek in PCM bytes (rounded down to a whole frame). Returns 0 if invalid. */
 int apu_mixer_set_position(int slot, uint32_t byte_offset);

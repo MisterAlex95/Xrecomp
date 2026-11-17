@@ -100,16 +100,41 @@ PVOID InterlockedCompareExchangePointer(PVOID volatile *p, PVOID xchg, PVOID cmp
 /* Critical sections (recursive pthread mutex)                           */
 /* ===================================================================== */
 
-VOID InitializeCriticalSection(LPCRITICAL_SECTION cs)
+static pthread_mutex_t *cs_new_mutex(void)
 {
-    memset(cs, 0, sizeof(*cs));
     pthread_mutex_t *m = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(m, &attr);
     pthread_mutexattr_destroy(&attr);
-    cs->LockSemaphore = m;
+    return m;
+}
+
+VOID InitializeCriticalSection(LPCRITICAL_SECTION cs)
+{
+    memset(cs, 0, sizeof(*cs));
+    cs->LockSemaphore = cs_new_mutex();
+}
+
+/* A zeroed (never initialised) section gets its mutex on first use. Two
+ * threads can reach that first use together: as for SRW locks below, the
+ * creation is serialised and the pointer published atomically, so both end
+ * up on the same mutex (each used to install its own and both "held" it). */
+static pthread_mutex_t *cs_mutex(LPCRITICAL_SECTION cs)
+{
+    pthread_mutex_t *m = __atomic_load_n((pthread_mutex_t **)&cs->LockSemaphore, __ATOMIC_ACQUIRE);
+    if (!m) {
+        static pthread_mutex_t init_lock = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&init_lock);
+        m = (pthread_mutex_t *)cs->LockSemaphore;
+        if (!m) {
+            m = cs_new_mutex();
+            __atomic_store_n((pthread_mutex_t **)&cs->LockSemaphore, m, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&init_lock);
+    }
+    return m;
 }
 
 VOID InitializeCriticalSectionAndSpinCount(LPCRITICAL_SECTION cs, DWORD spin)
@@ -120,8 +145,7 @@ VOID InitializeCriticalSectionAndSpinCount(LPCRITICAL_SECTION cs, DWORD spin)
 
 VOID EnterCriticalSection(LPCRITICAL_SECTION cs)
 {
-    if (!cs->LockSemaphore) InitializeCriticalSection(cs);
-    pthread_mutex_lock((pthread_mutex_t *)cs->LockSemaphore);
+    pthread_mutex_lock(cs_mutex(cs));
     cs->RecursionCount++;
 }
 
@@ -134,8 +158,7 @@ VOID LeaveCriticalSection(LPCRITICAL_SECTION cs)
 
 BOOL TryEnterCriticalSection(LPCRITICAL_SECTION cs)
 {
-    if (!cs->LockSemaphore) InitializeCriticalSection(cs);
-    if (pthread_mutex_trylock((pthread_mutex_t *)cs->LockSemaphore) == 0) {
+    if (pthread_mutex_trylock(cs_mutex(cs)) == 0) {
         cs->RecursionCount++;
         return TRUE;
     }
@@ -247,13 +270,19 @@ static void cond_init_wait_clock(pthread_cond_t *c)
 /* Forward decl; the definition lives further down with the wait helpers. */
 static void deadline_from_ms(DWORD ms, struct timespec *ts);
 
+/* As cs_mutex: a Wake can come with no lock held, at the same moment as a
+ * first Sleep, so the creation is serialised too. */
 static void cv_lazy_init(PCONDITION_VARIABLE cv)
 {
-    if (!cv->Ptr) {
-        pthread_cond_t *c = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
-        cond_init_wait_clock(c);
-        /* Race window OK for typical Win32 usage (the CS is held). */
-        cv->Ptr = c;
+    if (!__atomic_load_n(&cv->Ptr, __ATOMIC_ACQUIRE)) {
+        static pthread_mutex_t init_lock = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&init_lock);
+        if (!cv->Ptr) {
+            pthread_cond_t *c = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
+            cond_init_wait_clock(c);
+            __atomic_store_n(&cv->Ptr, (PVOID)c, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&init_lock);
     }
 }
 
@@ -266,9 +295,8 @@ VOID InitializeConditionVariable(PCONDITION_VARIABLE cv)
 BOOL SleepConditionVariableCS(PCONDITION_VARIABLE cv, PCRITICAL_SECTION cs, DWORD ms)
 {
     cv_lazy_init(cv);
-    if (!cs->LockSemaphore) InitializeCriticalSection(cs);
     pthread_cond_t  *c = (pthread_cond_t  *)cv->Ptr;
-    pthread_mutex_t *m = (pthread_mutex_t *)cs->LockSemaphore;
+    pthread_mutex_t *m = cs_mutex(cs);
     if (ms == INFINITE) {
         pthread_cond_wait(c, m);
         return TRUE;
@@ -355,8 +383,10 @@ typedef struct w32_object {
     ULONG_PTR       apc_data[W32_MAX_APC];
     int             apc_count;
 
-    /* timer-queue timer */
+    /* timer-queue timer: the fields are read and written under lock */
     int             timer_cancel;
+    int             timer_running;   /* the thread is inside the callback */
+    unsigned        timer_seq;       /* one more per ChangeTimerQueueTimer */
     DWORD           timer_due;
     DWORD           timer_period;
     WAITORTIMERCALLBACK timer_cb;
@@ -415,6 +445,9 @@ typedef struct w32_object {
 
 static w32_object    **s_htab;
 static uint32_t        s_htab_len;
+/* No free slot below this one: obj_handle scans from here, not from 0, so
+ * creating a handle with N live ones is not O(N) under the lock. */
+static uint32_t        s_htab_free_hint;
 static pthread_mutex_t s_htab_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Register o and return its handle. Idempotent: an object keeps one id for
@@ -431,7 +464,7 @@ static HANDLE obj_handle(w32_object *o)
         pthread_mutex_unlock(&s_htab_lock);
         return existing;
     }
-    for (slot = 0; slot < s_htab_len; slot++)
+    for (slot = s_htab_free_hint; slot < s_htab_len; slot++)
         if (!s_htab[slot]) break;
     if (slot == s_htab_len) {
         uint32_t grown = s_htab_len ? s_htab_len * 2 : 256;
@@ -442,6 +475,7 @@ static HANDLE obj_handle(w32_object *o)
         s_htab_len = grown;
     }
     s_htab[slot] = o;
+    s_htab_free_hint = slot + 1;
     o->handle_id = HTAB_TAG | ((slot + 1) * HTAB_STRIDE);
     h = (HANDLE)(uintptr_t)o->handle_id;
     pthread_mutex_unlock(&s_htab_lock);
@@ -474,7 +508,10 @@ static void obj_unregister(w32_object *o)
     if (!o || !o->handle_id) return;
     pthread_mutex_lock(&s_htab_lock);
     slot = (o->handle_id & HTAB_MASK) / HTAB_STRIDE - 1;
-    if (slot < s_htab_len && s_htab[slot] == o) s_htab[slot] = NULL;
+    if (slot < s_htab_len && s_htab[slot] == o) {
+        s_htab[slot] = NULL;
+        if (slot < s_htab_free_hint) s_htab_free_hint = slot;
+    }
     o->handle_id = 0;
     pthread_mutex_unlock(&s_htab_lock);
 }
@@ -1986,21 +2023,66 @@ HANDLE w32_thread_apc_handle(void)
 /* Timer queues (one helper thread per timer)                            */
 /* ===================================================================== */
 
+/* The timer whose callback this thread is running: DeleteTimerQueueTimer
+ * called from it does not wait for itself. */
+static __thread w32_object *t_timer_obj = NULL;
+
+static void timespec_add_ms(struct timespec *t, DWORD ms)
+{
+    long long ns = t->tv_nsec + (long long)(ms % 1000) * 1000000LL;
+    t->tv_sec += (time_t)(ms / 1000) + (time_t)(ns / 1000000000LL);
+    t->tv_nsec = (long)(ns % 1000000000LL);
+}
+
+/* The thread waits on o->cond under o->lock for an absolute deadline, so a
+ * DeleteTimerQueueTimer wakes it at once and it exits, its stack with it,
+ * instead of sleeping out the due time (a timer re-armed every frame used to
+ * leave one sleeping thread per arm). A periodic timer's next deadline is one
+ * period after the previous one, not after the callback's end, so it does not
+ * drift; when it falls a whole period behind it fires once and goes on from
+ * now (no burst of late callbacks). */
 static void *timer_thread(void *arg)
 {
     w32_object *o = (w32_object *)arg;
-    int once = (o->timer_period == 0);
+    struct timespec due, now;
+    unsigned seq;
 
-    /* initial due time */
-    if (o->timer_due) Sleep(o->timer_due);
-    if (!o->timer_cancel && o->timer_cb)
-        o->timer_cb(o->timer_param, TRUE);
-
-    while (!once && !o->timer_cancel) {
-        Sleep(o->timer_period);
-        if (o->timer_cancel) break;
-        if (o->timer_cb) o->timer_cb(o->timer_param, TRUE);
+    t_timer_obj = o;
+    pthread_mutex_lock(&o->lock);
+    seq = o->timer_seq;
+    deadline_from_ms(o->timer_due, &due);
+    while (!o->timer_cancel) {
+        if (o->timer_seq != seq) {               /* ChangeTimerQueueTimer */
+            seq = o->timer_seq;
+            deadline_from_ms(o->timer_due, &due);
+        }
+        clock_gettime(W32_WAIT_CLOCK, &now);
+        if (timespec_before(&now, &due)) {
+            pthread_cond_timedwait(&o->cond, &o->lock, &due);
+            continue;                            /* re-check cancel, change, time */
+        }
+        WAITORTIMERCALLBACK cb = o->timer_cb;
+        PVOID param = o->timer_param;
+        DWORD period = o->timer_period;
+        o->timer_running = 1;
+        pthread_mutex_unlock(&o->lock);
+        if (cb) cb(param, TRUE);
+        pthread_mutex_lock(&o->lock);
+        o->timer_running = 0;
+        pthread_cond_broadcast(&o->cond);        /* a DeleteTimerQueueTimer waiting */
+        if (!period || o->timer_seq != seq) {
+            if (o->timer_seq != seq) continue;   /* changed from the callback */
+            break;
+        }
+        timespec_add_ms(&due, period);
+        clock_gettime(W32_WAIT_CLOCK, &now);
+        if (!timespec_before(&now, &due)) {      /* a period or more late */
+            due = now;
+            timespec_add_ms(&due, period);
+        }
     }
+    pthread_mutex_unlock(&o->lock);
+    t_timer_obj = NULL;
     obj_release(o);
     return NULL;
 }
@@ -2031,37 +2113,52 @@ BOOL CreateTimerQueueTimer(PHANDLE newTimer, HANDLE timerQueue,
 
     /* The callback can be a guest DPC (KeSetTimerEx): lifted code. */
     pthread_attr_t attr;
+    pthread_t th;
     int rc;
     thread_attr_init(&attr, 0);
-    rc = pthread_create(&o->thread, &attr, timer_thread, o);
+    rc = pthread_create(&th, &attr, timer_thread, o);
     pthread_attr_destroy(&attr);
     if (rc != 0) {
         o->refcount = 1;
         obj_release(o);
         return FALSE;
     }
-    pthread_detach(o->thread);
+    pthread_detach(th);
     if (newTimer) *newTimer = obj_handle(o);
     return TRUE;
 }
 
+/* Win32: the timer is started again, dueTime from now. */
 BOOL ChangeTimerQueueTimer(HANDLE timerQueue, HANDLE timer, ULONG dueTime, ULONG period)
 {
     (void)timerQueue;
     w32_object *o = obj_from_handle(timer);
     if (!o || o->kind != K_TIMER) return FALSE;
+    pthread_mutex_lock(&o->lock);
     o->timer_due    = dueTime;
     o->timer_period = period;
+    o->timer_seq++;
+    pthread_cond_broadcast(&o->cond);
+    pthread_mutex_unlock(&o->lock);
     return TRUE;
 }
 
+/* The timer thread is woken and exits without another callback. With
+ * INVALID_HANDLE_VALUE, as on Win32, the call returns once a callback
+ * running at that moment has returned (unless called from that callback). */
 BOOL DeleteTimerQueueTimer(HANDLE timerQueue, HANDLE timer, HANDLE completionEvent)
 {
     (void)timerQueue;
     w32_object *o = obj_from_handle(timer);
     if (!o || o->kind != K_TIMER) return FALSE;
+    pthread_mutex_lock(&o->lock);
     o->timer_cancel = 1;
-    if (completionEvent) SetEvent(completionEvent);
+    pthread_cond_broadcast(&o->cond);
+    if (completionEvent == INVALID_HANDLE_VALUE && t_timer_obj != o)
+        while (o->timer_running)
+            pthread_cond_wait(&o->cond, &o->lock);
+    pthread_mutex_unlock(&o->lock);
+    if (completionEvent && completionEvent != INVALID_HANDLE_VALUE) SetEvent(completionEvent);
     obj_release(o);
     return TRUE;
 }

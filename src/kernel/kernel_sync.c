@@ -477,29 +477,27 @@ NTSTATUS __stdcall xbox_KeWaitForMultipleObjects(
  * When the timer fires, it signals the event and optionally invokes the DPC.
  * ============================================================================ */
 
-/* Global timer queue - created lazily on first timer use */
+/* Global timer queue - created lazily on first timer use. Two guest threads
+ * can make their first KeSetTimerEx together: a one-time init, not a plain
+ * flag, decides who creates it. A failed creation is tried again next call. */
 static HANDLE g_timer_queue = NULL;
-static CRITICAL_SECTION g_timer_cs;
-static BOOL g_timer_cs_init = FALSE;
+static INIT_ONCE g_timer_queue_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK xbox_timer_queue_init(PINIT_ONCE once, PVOID param, PVOID *ctx)
+{
+    (void)once; (void)param; (void)ctx;
+    g_timer_queue = CreateTimerQueue();
+    if (!g_timer_queue) {
+        xbox_log(XBOX_LOG_ERROR, XBOX_LOG_SYNC,
+            "Failed to create timer queue (error %u)", GetLastError());
+        return FALSE;
+    }
+    return TRUE;
+}
 
 static void xbox_ensure_timer_queue(void)
 {
-    if (!g_timer_cs_init) {
-        InitializeCriticalSection(&g_timer_cs);
-        g_timer_cs_init = TRUE;
-    }
-
-    if (!g_timer_queue) {
-        EnterCriticalSection(&g_timer_cs);
-        if (!g_timer_queue) {
-            g_timer_queue = CreateTimerQueue();
-            if (!g_timer_queue) {
-                xbox_log(XBOX_LOG_ERROR, XBOX_LOG_SYNC,
-                    "Failed to create timer queue (error %u)", GetLastError());
-            }
-        }
-        LeaveCriticalSection(&g_timer_cs);
-    }
+    InitOnceExecuteOnce(&g_timer_queue_once, xbox_timer_queue_init, NULL, NULL);
 }
 
 /*

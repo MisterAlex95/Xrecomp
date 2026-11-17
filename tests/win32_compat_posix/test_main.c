@@ -20,6 +20,11 @@
  *                   write access and without PROT_EXEC (XBA-51): nothing runs
  *                   guest memory, and an Android app may not get an
  *                   executable memfd or anonymous mapping
+ *   6. lazy CS      8 threads released together enter one zeroed (never
+ *                   initialised) CRITICAL_SECTION and increment a plain
+ *                   counter: the total is exact, round after round (the
+ *                   first-use creation of the mutex used to race, each thread
+ *                   installing its own)
  *
  * The addresses come from the OS: map anonymously, note where it landed,
  * unmap. Nothing here assumes a fixed host layout.
@@ -33,6 +38,29 @@
 #include <sys/mman.h>
 
 static int failures = 0;
+
+#include <pthread.h>
+#include <sched.h>
+
+#define CS_THREADS 8
+#define CS_ITERS   2000
+static CRITICAL_SECTION g_lazy_cs;
+static volatile int     g_go;
+static volatile long    g_counter;
+
+static void *cs_worker(void *arg)
+{
+    (void)arg;
+    while (!__atomic_load_n(&g_go, __ATOMIC_ACQUIRE)) { }
+    for (int i = 0; i < CS_ITERS; i++) {
+        EnterCriticalSection(&g_lazy_cs);
+        long v = g_counter;
+        if ((i & 63) == 0) sched_yield();
+        g_counter = v + 1;
+        LeaveCriticalSection(&g_lazy_cs);
+    }
+    return NULL;
+}
 
 static void check(int ok, const char *what)
 {
@@ -173,6 +201,25 @@ int main(void)
     }
 
     CloseHandle(map);
+
+    /* 6. A zeroed CRITICAL_SECTION entered by several threads at once. */
+    {
+        int bad = 0;
+        for (int round = 0; round < 50; round++) {
+            pthread_t t[CS_THREADS];
+            memset(&g_lazy_cs, 0, sizeof g_lazy_cs);
+            g_counter = 0;
+            g_go = 0;
+            for (int i = 0; i < CS_THREADS; i++)
+                pthread_create(&t[i], NULL, cs_worker, NULL);
+            __atomic_store_n(&g_go, 1, __ATOMIC_RELEASE);
+            for (int i = 0; i < CS_THREADS; i++)
+                pthread_join(t[i], NULL);
+            if (g_counter != (long)CS_THREADS * CS_ITERS) bad++;
+            DeleteCriticalSection(&g_lazy_cs);
+        }
+        check(bad == 0, "zeroed CRITICAL_SECTION: first use from 8 threads at once excludes");
+    }
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
