@@ -324,6 +324,14 @@ deep, when the state loads. A load refuses, changing nothing, while a thread is 
 down: the same-run load (XBA-249) waits until every thread is back from its kernel call first. POSIX hosts only: on Windows the objects are
 real Win32 objects and the save is refused. Test: `tests/kernel_kobj_state`.
 
+Threads not started by `CreateThread` (the main guest thread, a raw host thread) have no thread object of their own:
+the shim gives each one an adopted thread object (`w32_thread_apc_handle`), and a handle to such a thread (its
+`NtCurrentThread()` duplicated) is a handle to that object. It is saved as a thread record like any other, bound by
+host thread id: in session to the same thread still running, across runs to the thread a resume names for that id.
+A table slot holding the pseudo value itself (`(HANDLE)-2` or `-1`) is not an object and refuses the save as « a
+pseudo handle stored as a real one (runtime bug, report it) »: a duplicate handed the pseudo value back instead of a
+real handle (Yu-Gi-Oh, 2026-11).
+
 ## Data format (XBA-245: `src/kernel/xbox_state.h`)
 
 A state is a slot file of `recomp_states` (`XRSLOT` header, console `xbox`, game key = the title ID as `%08X`,
