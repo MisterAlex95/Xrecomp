@@ -76,6 +76,7 @@ struct gc_machine {
     uint32_t si[0x40];    /* gc_si.c: channel buffers, poll, COMCSR, SISR, the 128-byte I/O buffer at 0x20 */
     gc_pad_state pad[4];  /* what each SI port has plugged in (gc_set_pad) */
     uint32_t exi[15];
+    struct gc_exi *exidev; /* gc_exi.c: the devices on the EXI (memory cards, RTC, SRAM; XBA-264) */
     uint32_t mi_reg[0x40];
     /* the GPU (gx/: FIFO, CP, PE, renderer; XBA-262) */
     gx_state *gx;
@@ -125,6 +126,13 @@ void gc_stop(gc_machine *m, const char *fmt, ...);
 uint32_t gc_hw_read(gc_machine *m, uint32_t pa, unsigned size);
 void gc_hw_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size);
 void gc_vi_line(gc_machine *m);
+
+/* gc_exi.c (XBA-264): the EXI registers 0x0C006800-0x0C00683B (idx = offset / 4) and their devices */
+struct gc_exi *gc_exi_create(void);
+void gc_exi_free(struct gc_exi *x);
+uint32_t gc_exi_read32(gc_machine *m, unsigned idx);
+void gc_exi_write32(gc_machine *m, unsigned idx, uint32_t v);
+void gc_exi_tv_mode(gc_machine *m, int pal); /* SRAM's video mode follows the TV mode the IPL left */
 
 /* gc_si.c: the serial interface and the standard controllers on it (XBA-259) */
 uint32_t gc_si_read(gc_machine *m, unsigned idx);

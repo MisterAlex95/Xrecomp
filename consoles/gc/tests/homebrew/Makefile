@@ -4,7 +4,7 @@
 # Each program directory gives <prog>.dol (elf2dol: what the runtime loads) and <prog>.elf (symbols, for debugging
 # only).
 
-PROGS := hello padtest asnd gxtri gxtex gxtev gxcopy gxind gxfog
+PROGS := hello padtest cardtest asnd gxtri gxtex gxtev gxcopy gxind gxfog
 # Programs with data made at build time: <prog>/mktex.py OUTDIR writes OUTDIR/textures.c / .h (gxtex: our pictures
 # through gxtexconv, XBA-262).
 GEN_PROGS := gxtex

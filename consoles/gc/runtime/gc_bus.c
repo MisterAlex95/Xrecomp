@@ -10,8 +10,8 @@
  *   0x0C005000  DSP (16-bit): mailboxes, control register, ARAM DMA, audio DMA, the microcode's HLE: gc_dsp.c
  *               (XBA-263)
  *   0x0C006000  DI (32-bit): the DVD drive, gc_di.c (XBA-261)
- *   0x0C006400  SI: standard controllers (gc_si.c, XBA-259); EXI (32-bit): transfers complete at once with
- *               nothing on the other end (no memory cards; EXI reads give zeros: blank SRAM / RTC)
+ *   0x0C006400  SI: standard controllers (gc_si.c, XBA-259); EXI (32-bit): memory cards, RTC, SRAM (gc_exi.c,
+ *               XBA-264)
  *   0x0C006C00  AI (32-bit): rates, streaming volume and sample counter, gc_ai.c (XBA-263)
  *   0x0C008000  the write-gather pipe: into the GX FIFO (gx_fifo_write, XBA-262)
  *   0x08000000  the EFB as the CPU peeks and pokes it (gx_efb_peek / gx_efb_poke)
@@ -23,19 +23,6 @@
 #include "gc_internal.h"
 
 /* ---- interrupts ---- */
-
-static void exi_int_update(gc_machine *m)
-{
-    bool on = false;
-    for (int ch = 0; ch < 3; ch++) {
-        uint32_t csr = m->exi[ch * 5];
-        on |= ((csr & 2) && (csr & 1)) || ((csr & 8) && (csr & 4)) || ((csr & 0x800) && (csr & 0x400));
-    }
-    if (on)
-        m->pi_intsr |= GC_INT_EXI;
-    else
-        m->pi_intsr &= ~GC_INT_EXI;
-}
 
 static void vi_int_update(gc_machine *m)
 {
@@ -127,40 +114,6 @@ static void pi_write32(gc_machine *m, unsigned idx, uint32_t v)
     gc_check_interrupts(m);
 }
 
-static void exi_write32(gc_machine *m, unsigned idx, uint32_t v)
-{
-    unsigned ch = idx / 5, reg = idx % 5;
-    uint32_t *r = &m->exi[ch * 5];
-    if (reg == 0) {
-        uint32_t ints = r[0] & 0x80Au & ~v; /* EXIINT TCINT EXTINT: write 1 to clear */
-        r[0] = (v & ~0x180Au) | ints;
-    } else if (reg == 3) {
-        r[3] = v;
-        if (v & 1) { /* TSTART: done at once, nothing answers */
-            if ((v & 2) && ((v >> 2) & 3) == 0) { /* DMA read: zeros */
-                uint32_t mar = r[1] & 0x03FFFFE0u, len = r[2] & 0x03FFFFE0u;
-                for (uint32_t i = 0; i < len && mar + i < GC_RAM_SIZE; i++)
-                    m->h.ram[mar + i] = 0;
-            } else if (!(v & 2) && ((v >> 2) & 3) != 1) {
-                r[4] = 0;
-            }
-            r[3] &= ~1u;
-            r[0] |= 8; /* TCINT */
-        }
-    } else {
-        r[reg] = v;
-    }
-    exi_int_update(m);
-    gc_check_interrupts(m);
-}
-
-static uint32_t exi_read32(gc_machine *m, unsigned idx)
-{
-    if (idx % 5 == 0)
-        return m->exi[idx] & ~0x1000u; /* EXT: nothing plugged */
-    return m->exi[idx];
-}
-
 /* ---- dispatch ---- */
 
 static uint16_t hw_read16(gc_machine *m, uint32_t pa)
@@ -233,7 +186,7 @@ uint32_t gc_hw_read(gc_machine *m, uint32_t pa, unsigned size)
     if (off >= 0x6400 && off < 0x6500)
         return gc_si_read(m, (off & 0xFF) >> 2);
     if (off >= 0x6800 && off < 0x683C)
-        return exi_read32(m, (off & 0x3F) >> 2);
+        return gc_exi_read32(m, (off & 0x3F) >> 2);
     if (off >= 0x6C00 && off < 0x6C20)
         return gc_ai_read32(m, (off & 0x1F) >> 2); /* gc_ai.c (XBA-263) */
     if (m->verbose)
@@ -274,7 +227,7 @@ void gc_hw_write(gc_machine *m, uint32_t pa, uint32_t v, unsigned size)
     else if (off >= 0x6400 && off < 0x6500)
         gc_si_write(m, (off & 0xFF) >> 2, v);
     else if (off >= 0x6800 && off < 0x683C)
-        exi_write32(m, (off & 0x3F) >> 2, v);
+        gc_exi_write32(m, (off & 0x3F) >> 2, v);
     else if (off >= 0x6C00 && off < 0x6C20)
         gc_ai_write32(m, (off & 0x1F) >> 2, v);
     else if (m->verbose)

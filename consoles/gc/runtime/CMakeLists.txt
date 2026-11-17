@@ -26,7 +26,7 @@ if(NOT TARGET gc_core)
     # gx/: the GPU (XBA-262): FIFO, command processor, vertex loader and transform, TEV shaders, textures, EFB
     # copies, on OpenGL ES 3.0 loaded at run time (no GL headers or libraries at build time; dlopen + pthreads).
     set(GC_GX_SRCS gx/gx_fifo.c gx/gx_vtx.c gx/gx_tex.c gx/gx_shader.c gx/gx_gl.c gx/gx_egl.c)
-    add_library(gc_core STATIC gc_core.c gc_cpu.c gc_bus.c gc_si.c gc_mmu.c gc_recomp.c
+    add_library(gc_core STATIC gc_core.c gc_cpu.c gc_bus.c gc_exi.c gc_si.c gc_mmu.c gc_recomp.c
                 gc_disc.c gc_disc_wia.c gc_bzip2.c gc_di.c gc_boot.c ${GC_GX_SRCS}
                 gc_dsp.c gc_ai.c gc_ax.c gc_asnd.c gc_audio_util.c)
     target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

@@ -83,6 +83,7 @@ void gc_set_tv_mode(gc_machine *m, int mode)
     }
     m->vi[0x01] = pal ? 0x0101 : 0;
     rc_put32(m->h.ram + 0xCC, pal ? 1 : 0);
+    gc_exi_tv_mode(m, pal);
     video_timing(m);
     m->next_line = m->h.now + m->line_cycles;
     m->field_end = m->h.now + (uint64_t)field_lines(m, m->frames) * m->line_cycles;
@@ -107,7 +108,8 @@ gc_machine *gc_alloc_machine(char *why, size_t why_len)
     m->h.ram = calloc(1, GC_RAM_SIZE);
     m->aram = calloc(1, GC_ARAM_SIZE);
     m->gx = m->h.ram ? gx_create(m->h.ram, GC_RAM_SIZE, gx_irq, m) : NULL;
-    if (!m->h.ram || !m->aram || !m->gx || !gc_audio_init(m)) {
+    m->exidev = gc_exi_create();
+    if (!m->h.ram || !m->aram || !m->gx || !gc_audio_init(m) || !m->exidev) {
         snprintf(why, why_len, "out of memory");
         gc_destroy(m);
         return NULL;
@@ -197,6 +199,7 @@ void gc_destroy(gc_machine *m)
     if (!m)
         return;
     gx_destroy(m->gx);
+    gc_exi_free(m->exidev);
     free(m->h.ram);
     free(m->aram);
     free(m->span_state);

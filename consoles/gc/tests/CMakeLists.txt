@@ -41,6 +41,20 @@ if(NOT APPLE)
 endif()
 add_test(NAME gc_fnma COMMAND gc_fnma)
 
+# gc_exi (XBA-264): the EXI devices driven through their registers (memory card commands, RTC, SRAM), no homebrew
+add_executable(gc_exi_test gc_exi_test.c)
+target_link_libraries(gc_exi_test PRIVATE gc_core)
+target_compile_options(gc_exi_test PRIVATE -Wall -Wextra)
+add_test(NAME gc_exi COMMAND gc_exi_test)
+# gc_cardtest (XBA-264): our libogc memory card test (homebrew/cardtest) on the core: a blank card formatted, a file
+# created, written and read back, found again by a second machine on the same card; 59 / 251 / 1019 blocks; the RTC
+# and SRAM as libogc reads them. Skips (77) without the corpus.
+add_executable(gc_cardtest gc_cardtest.c)
+target_link_libraries(gc_cardtest PRIVATE gc_core)
+target_compile_options(gc_cardtest PRIVATE -Wall -Wextra)
+add_test(NAME gc_cardtest COMMAND gc_cardtest ${GC_HOMEBREW_DIR}/cardtest.dol)
+set_tests_properties(gc_cardtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
 if(TARGET gc_run)
     add_test(NAME gc_hello
         COMMAND sh ${GC_RUN_HELLO} $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/hello.dol
