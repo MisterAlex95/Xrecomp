@@ -93,6 +93,8 @@ Releases are cut through a **release PR**, in the spirit of semantic-release / r
    `major`, `minor`, `patch` or `none`; no trailer counts as `patch` (upstream's commits included). The next version
    is the last `xrecomp-v*` tag bumped by the largest trailer since it. A finished roadmap milestone (Plane vX.Y) that
    no commit marked: push `git commit --allow-empty -m "Release: v0.14 milestone is done" -m "Release: minor"`.
+   A trailer only pushes the version up; to take a bump back (the roadmap goes from 0.13 to 1.0, say), a commit with
+   `Release-As: <version>` sets the next version outright (the newest one since the last tag wins).
 2. **After every push to `main`**, `release-pr.yml` keeps one open PR « Release: XRecomp <version> » (branch
    `release/next`). It adds `docs/releases/xrecomp-v<version>.md`, whose « Changes » section is generated from the
    commits grouped by area, and its row in the table above. Write the highlights (what changed, what works, known
