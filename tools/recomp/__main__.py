@@ -674,9 +674,17 @@ def main():
               file=sys.stderr)
         print_stats(stats)
 
-    # Write summary
-    output_dir = args.output_dir or os.path.join(
-        os.path.dirname(__file__), "output")
+    # Write summary. With --gen-dir and no --output-dir it goes beside the
+    # generated folder, not into the toolkit: the Prepare passes only
+    # --gen-dir, and a read-only toolkit (or one shared between titles) got
+    # tools/recomp/output/summary.json written into it, or failed at the
+    # very end of the lift.
+    if args.output_dir:
+        output_dir = args.output_dir
+    elif args.gen_dir:
+        output_dir = os.path.dirname(os.path.abspath(args.gen_dir.rstrip("/\\")))
+    else:
+        output_dir = os.path.join(os.path.dirname(__file__), "output")
     summary_path = write_summary(stats, output_dir)
     print(f"\nSummary: {summary_path}", file=sys.stderr)
 
