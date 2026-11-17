@@ -6,6 +6,9 @@
 # (--gx: the GLES renderer on a headless context; --pad ...). With "rewind" instead of N:M the options say it all
 # (--frames F --rewind C:R): the line "REWIND OK" must come. Exits 77 (skipped) when DOL is absent
 # (tools/consoles/build_homebrew.sh gc) or, with --gx, when there is no GLES 3 context.
+# A cross build's binaries run under the emulator ctest uses (XBR_TEST_EMULATOR, comma separated: qemu-aarch64
+# for the arm64 CI); empty on a native build.
+emu=$(printf '%s' "${XBR_TEST_EMULATOR:-}" | tr ',' ' ')
 run=$1
 dol=$2
 nm=$3
@@ -15,11 +18,11 @@ if [ ! -f "$dol" ]; then
     exit 77
 fi
 if [ "$nm" = rewind ]; then
-    out=$(timeout 300 "$run" "$dol" "$@" 2>&1)
+    out=$(timeout 300 $emu "$run" "$dol" "$@" 2>&1)
     rc=$?
     want='^REWIND OK'
 else
-    out=$(timeout 300 "$run" "$dol" --state-check "$nm" "$@" 2>&1)
+    out=$(timeout 300 $emu "$run" "$dol" --state-check "$nm" "$@" 2>&1)
     rc=$?
     want='^STATE OK'
 fi

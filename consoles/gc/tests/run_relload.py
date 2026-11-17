@@ -36,8 +36,12 @@ def fail(msg):
     sys.exit(1)
 
 
+# A cross build's gc_run runs under the emulator ctest uses (XBR_TEST_EMULATOR, comma separated); none when native.
+EMULATOR = [w for w in os.environ.get("XBR_TEST_EMULATOR", "").split(",") if w]
+
+
 def run(gc_run, args):
-    r = subprocess.run([gc_run] + args, capture_output=True, text=True, timeout=600)
+    r = subprocess.run(EMULATOR + [gc_run] + args, capture_output=True, text=True, timeout=600)
     if r.returncode != 0:
         fail("gc_run %s: exit %d\n%s\n%s" % (" ".join(args), r.returncode, r.stdout[-2000:], r.stderr[-2000:]))
     return r.stdout

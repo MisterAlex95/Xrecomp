@@ -8,6 +8,9 @@
 # reference cannot hide a wrong pixel there.
 # Exits 77 (skipped) when DOL is absent (tools/consoles/build_homebrew.sh gc), python3 is missing, or there is no
 # GLES 3 context to be had (gc_run exits 77). GX_UPDATE=1 rewrites EXPECTED_PNG from this run.
+# A cross build's binaries run under the emulator ctest uses (XBR_TEST_EMULATOR, comma separated: qemu-aarch64
+# for the arm64 CI); empty on a native build.
+emu=$(printf '%s' "${XBR_TEST_EMULATOR:-}" | tr ',' ' ')
 run=$1
 dol=$2
 work=$3
@@ -24,7 +27,7 @@ py=${PYTHON:-python3}
 command -v "$py" >/dev/null 2>&1 || { echo "skipped: no $py"; exit 77; }
 rm -rf "$work"
 mkdir -p "$work"
-LIBGL_ALWAYS_SOFTWARE=1 timeout 300 "$run" "$dol" --frames "$fields" --gx --png "$work/xfb.png" --stats "$@"
+LIBGL_ALWAYS_SOFTWARE=1 timeout 300 $emu "$run" "$dol" --frames "$fields" --gx --png "$work/xfb.png" --stats "$@"
 rc=$?
 [ $rc -eq 77 ] && exit 77
 [ $rc -eq 0 ] || exit 1

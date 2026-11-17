@@ -266,3 +266,12 @@ if(TARGET gc_play)
                                        ${CMAKE_CURRENT_BINARY_DIR}/play_asnd)
     set_tests_properties(gc_play_asnd PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 endif()
+
+# The helper scripts above start our binaries themselves: ctest's CMAKE_CROSSCOMPILING_EMULATOR wraps only a test's
+# COMMAND (here sh or python3), so a cross build (qemu-aarch64 in the arm64 CI) hands them the emulator as
+# XBR_TEST_EMULATOR, comma separated (as tests/park_resume), and each script runs its binaries under it.
+if(CMAKE_CROSSCOMPILING_EMULATOR)
+    list(JOIN CMAKE_CROSSCOMPILING_EMULATOR "," _gc_emu)
+    get_property(_gc_tests DIRECTORY PROPERTY TESTS)
+    set_property(TEST ${_gc_tests} APPEND PROPERTY ENVIRONMENT "XBR_TEST_EMULATOR=${_gc_emu}")
+endif()

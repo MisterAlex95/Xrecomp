@@ -10,6 +10,9 @@
 # STATE_CHECK (N:M, XBA-264): then a save-state round trip with the same pack (gc_run --state-check N:M).
 # The comparison is consoles/nds/tests/png_compare.py (stdlib only, shared with the DS spike).
 # Exits 77 (skipped) when DOL is absent (tools/consoles/build_homebrew.sh gc), or python3 / cc are missing.
+# A cross build's binaries run under the emulator ctest uses (XBR_TEST_EMULATOR, comma separated: qemu-aarch64
+# for the arm64 CI); empty on a native build.
+emu=$(printf '%s' "${XBR_TEST_EMULATOR:-}" | tr ',' ' ')
 run=$1
 dol=$2
 work=$3
@@ -28,7 +31,7 @@ command -v "$py" >/dev/null 2>&1 || { echo "skipped: no $py"; exit 77; }
 rm -rf "$work"
 mkdir -p "$work"
 if [ "$mode" = interp ]; then
-    timeout 120 "$run" "$dol" --frames 120 --png "$work/xfb.png" --stats || exit 1
+    timeout 120 $emu "$run" "$dol" --frames 120 --png "$work/xfb.png" --stats || exit 1
     exec "$py" "$compare" "$work/xfb.png" "$expected"
 fi
 cc=${CC:-cc}
@@ -44,7 +47,7 @@ while :; do
     (cd "$work/src" && ls *.c | xargs -P "$jobs" -I{} "$cc" -c -fPIC -O1 -ffp-contract=off -frounding-math ${RC_FLAGS:-} \
         -DGC_RC_COUNT -I "$repo/consoles/gc/runtime" -o {}.o {}) || exit 1
     "$cc" -shared -o "$work/libtitle.so" "$work"/src/*.o -lm || exit 1
-    out=$(timeout 120 "$run" "$dol" --frames 120 --pack "$work/libtitle.so" --png "$work/xfb.png" --stats \
+    out=$(timeout 120 $emu "$run" "$dol" --frames 120 --pack "$work/libtitle.so" --png "$work/xfb.png" --stats \
         --missed "$work/missed.txt") || { echo "$out"; exit 1; }
     new=$(grep -v '^#' "$work/missed.txt" | sort -u | comm -23 - "$work/discovered.txt" | wc -l)
     echo "round $round: $(echo "$out" | grep '^stats'), $new new address(es)"
@@ -66,7 +69,7 @@ if [ -z "$native" ] || [ "$native" -le $((interp * 9)) ]; then
     exit 1
 fi
 if [ -n "$state" ]; then
-    out=$(timeout 300 "$run" "$dol" --pack "$work/libtitle.so" --state-check "$state" --stats) || { echo "$out"; exit 1; }
+    out=$(timeout 300 $emu "$run" "$dol" --pack "$work/libtitle.so" --state-check "$state" --stats) || { echo "$out"; exit 1; }
     echo "$out" | grep -E '^(STATE|stats)'
     echo "$out" | grep -q '^STATE OK' || exit 1
 fi

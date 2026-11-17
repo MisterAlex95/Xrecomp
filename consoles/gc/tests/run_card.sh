@@ -11,6 +11,9 @@
 #   4. RECOMP_GC_CARD_SIZE=1019 with slot B on: cardA.raw is 8 MB, cardB.raw never written (the program uses slot A)
 #   5. a file of no card's size is left alone
 # Exits 77 (skipped) when the DOL is absent (tools/consoles/build_homebrew.sh gc).
+# A cross build's binaries run under the emulator ctest uses (XBR_TEST_EMULATOR, comma separated: qemu-aarch64
+# for the arm64 CI); empty on a native build.
+emu=$(printf '%s' "${XBR_TEST_EMULATOR:-}" | tr ',' ' ')
 play=$1
 dol=$2
 work=$3
@@ -30,7 +33,7 @@ run() {
     name=$1
     save=$2
     shift 2
-    SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout 120 "$play" "$dol" --headless --frames 240 \
+    SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout 120 $emu "$play" "$dol" --headless --frames 240 \
         --save-dir "$save" "$@" >"$work/$name.log" 2>&1
     rc=$?
     sed "s/^/[$name] /" "$work/$name.log" | grep -E "memory card|gc: [0-9]+ fields|stopped"
@@ -85,7 +88,7 @@ chmod 555 "$ro"
 if [ -w "$ro" ]; then
     echo "read-only folder: writable anyway (root?), skipped"
 else
-    SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout 120 "$play" "$dol" --headless --frames 300 \
+    SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout 120 $emu "$play" "$dol" --headless --frames 300 \
         --save-dir "$work/savero" >"$work/ro.log" 2>&1
     rc=$?
     chmod 755 "$ro"

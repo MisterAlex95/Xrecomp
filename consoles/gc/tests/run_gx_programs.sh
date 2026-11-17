@@ -11,6 +11,9 @@
 #     loaded whole by the next;
 #  4. no list and no warm-up: the programs compiled during play are written at the end, loaded by the next run.
 # Exits 77 like run_gx.sh when the DOL or GLES is missing, and when the driver has no program binaries.
+# A cross build's binaries run under the emulator ctest uses (XBR_TEST_EMULATOR, comma separated: qemu-aarch64
+# for the arm64 CI); empty on a native build.
+emu=$(printf '%s' "${XBR_TEST_EMULATOR:-}" | tr ',' ' ')
 run=$1
 dol=$2
 work=$3
@@ -33,7 +36,7 @@ fail() {
 gx() { # gx LOG ARGS...: one run of the DOL
     log=$1
     shift
-    timeout 300 "$run" "$dol" --frames 10 --gx "$@" >"$log" 2>&1
+    timeout 300 $emu "$run" "$dol" --frames 10 --gx "$@" >"$log" 2>&1
     rc=$?
     [ $rc -eq 77 ] && { cat "$log"; exit 77; }
     [ $rc -eq 0 ] || fail "gc_run exited $rc" "$log"
@@ -43,7 +46,7 @@ gx() { # gx LOG ARGS...: one run of the DOL
 gx "$work/list.log" --gx-list "$list"
 t=$(grep -c '^T ' "$list")
 [ "$t" -ge 5 ] || fail "too few states in the list ($t)" "$work/list.log"
-timeout 300 "$run" --gx-warmup "$work/none.txt,$list" "$cache" >"$work/warm1.log" 2>&1
+timeout 300 $emu "$run" --gx-warmup "$work/none.txt,$list" "$cache" >"$work/warm1.log" 2>&1
 rc=$?
 [ $rc -eq 77 ] && { cat "$work/warm1.log"; exit 77; }
 if [ $rc -eq 3 ]; then
@@ -55,7 +58,7 @@ fi
 grep -q "gx warm-up: rc 0, $t states, 0 cached, $t compiled, 0 failed" "$work/warm1.log" ||
     fail "the warm-up did not compile the $t states" "$work/warm1.log"
 [ -f "$cache" ] || fail "no cache written" "$work/warm1.log"
-timeout 300 "$run" --gx-warmup "$list" "$cache" >"$work/warm2.log" 2>&1 || fail "second warm-up" "$work/warm2.log"
+timeout 300 $emu "$run" --gx-warmup "$list" "$cache" >"$work/warm2.log" 2>&1 || fail "second warm-up" "$work/warm2.log"
 grep -q "gx warm-up: rc 0, $t states, $t cached, 0 compiled" "$work/warm2.log" ||
     fail "the second warm-up compiled again" "$work/warm2.log"
 echo "warm-up: $t states compiled into $(wc -c <"$cache") bytes, then all cached"
@@ -70,7 +73,7 @@ grep -q "programs written" "$work/run2.log" && fail "the cache was rewritten wit
 cmp -s "$cache" "$work/warm.bin" || fail "the cache changed"
 if [ -n "$expected" ] && command -v python3 >/dev/null 2>&1; then
     cp "$cache" "$work/special.bin"
-    timeout 300 "$run" "$dol" --frames 40 --gx --png "$work/xfb.png" --gx-programs "$work/special.bin" \
+    timeout 300 $emu "$run" "$dol" --frames 40 --gx --png "$work/xfb.png" --gx-programs "$work/special.bin" \
         --gx-shaders special >"$work/special.log" 2>&1 || fail "the run drawn with the cached programs" "$work/special.log"
     grep -q "program binaries .*: $t loaded" "$work/special.log" || fail "special: not loaded" "$work/special.log"
     python3 "$(dirname "$0")/gx_compare.py" "$work/xfb.png" "$expected" || fail "the picture drawn by the cached programs"
