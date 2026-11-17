@@ -5179,6 +5179,159 @@ def _x87_stack_effect(text):
     return written, depth
 
 
+def _flag_transition(curr, setter, ops, cf_only_over):
+    """The tracked flag state after `curr`: (setter, ops, cf_only_over,
+    via_call). lift_basic_block applies it to every instruction it does not
+    consume as a flag reader, and block_flag_out_state walks a block with it
+    alone. via_call says the state became the callee's ("eflags")."""
+    via_call = False
+    if (curr.mnemonic in _BARE_STRING_COMPARES
+            and not _has_xmm_operand(curr.operands)):
+        # A single cmps/scas sets the flags like cmp. "cmpsd" is also
+        # the SSE2 scalar compare, which is why it sits in
+        # _EFLAGS_PRESERVE and has to be caught before that test.
+        setter = curr.mnemonic
+        ops = list(curr.operands)
+    elif curr.mnemonic in _SSE_CMP_NAMED:
+        pass  # SSE compares write a mask, not EFLAGS
+    elif (curr.mnemonic in ("shl", "sal", "shr", "sar")
+          and len(curr.operands) >= 2 and curr.operands[1].type == "imm"
+          and not curr.operands[1].imm & 31):
+        pass  # a count of zero (masked) leaves every flag alone
+    elif (curr.mnemonic in ("shl", "sal", "shr", "sar")
+          and len(curr.operands) >= 2 and curr.operands[1].type != "imm"):
+        # The count may be zero at run time (see _shift_count_guard). A
+        # previous shift by a register is not kept underneath: its
+        # answer reads _shz, which this shift has just overwritten.
+        shift, shift_ops = normalise_zero_test(curr.mnemonic,
+                                               list(curr.operands))
+        prev = setter
+        if prev == "__shift_cl":
+            prev, ops = None, []
+        ops = [shift, shift_ops, prev, ops]
+        setter = "__shift_cl"
+    elif curr.mnemonic in FLAG_SETTERS:
+        setter, ops = normalise_zero_test(
+            curr.mnemonic, list(curr.operands))
+    elif curr.mnemonic in ("rol", "ror"):
+        # CF is now _cf; ZF/SF/PF stay the previous setter's, which the
+        # state keeps (see _make_condition). A count of zero changes
+        # nothing; one in a register may be zero, and the lift then
+        # leaves _cf alone, so lift_basic_block loads the incoming CF first.
+        rot = curr.operands
+        if not (len(rot) >= 2 and rot[1].type == "imm"
+                and not rot[1].imm & 31):
+            if setter == "__cf_over":
+                pass        # still the same setter underneath
+            else:
+                ops = [setter, ops]
+                setter = "__cf_over"
+    elif curr.mnemonic in ("stc", "clc", "cmc"):
+        # CF is now _cf (the lift writes it); nothing else is tracked.
+        if setter != "__cf_only":
+            cf_only_over = setter
+        setter, ops = "__cf_only", []
+    elif curr.mnemonic == "popfd":
+        # Every flag now comes from the image popfd loaded.
+        setter, ops = "eflags", []
+    elif curr.mnemonic in _FLAGS_UNDEFINED:
+        # Flags are undefined after these - clear tracking
+        setter = None
+        ops = []
+    elif curr.mnemonic in ("lock xadd", "lock cmpxchg", "lock cmpxchg8b"):
+        # Capstone keeps the lock prefix in the mnemonic; the flags are
+        # those of the bare instruction, which the lowering snapshots.
+        setter = curr.mnemonic[5:]
+        ops = list(curr.operands)
+    elif curr.mnemonic.startswith("lock ") and curr.mnemonic[5:] in _EFLAGS_PRESERVE:
+        pass  # lock not: no flags, as without the prefix
+    elif curr.mnemonic.startswith("lock ") and (curr.mnemonic[5:] in FLAG_SETTERS
+                                                or curr.mnemonic[5:] in _EFLAGS_SETTERS):
+        # lock inc/dec/add/... (XBA-78): the lowering lifts the bare
+        # instruction on a copy inside a compare-and-swap loop and leaves
+        # the same snapshots (_fa, _fas, _cf), so the flags are the bare
+        # instruction's. Without this a `lock dec [x]; jnz`, the shape of
+        # InterlockedDecrement, cleared the tracking and the jnz read the
+        # unassigned _flags.
+        setter, ops = normalise_zero_test(
+            curr.mnemonic[5:], list(curr.operands))
+    elif curr.mnemonic in _EFLAGS_SETTERS:
+        # Additional flag-setting instructions
+        setter, ops = normalise_zero_test(
+            curr.mnemonic, list(curr.operands))
+    elif curr.is_call:
+        setter, ops = "eflags", []
+        via_call = True
+    elif curr.mnemonic in _EFLAGS_PRESERVE:
+        pass  # These don't affect EFLAGS
+    elif curr.mnemonic in ("fcompi", "fcomip", "fucomi", "fucompi",
+                            "fucomip", "fcomi"):
+        # FPU compare-to-EFLAGS: sets CF, ZF, PF directly
+        setter = curr.mnemonic
+        ops = list(curr.operands)
+    elif curr.mnemonic == "sahf":
+        # sahf loads AH into flags - typically after fnstsw ax
+        # in the fcomp/fnstsw/sahf pattern for FPU comparisons
+        setter = "sahf"
+        ops = list(curr.operands)
+    elif curr.mnemonic.startswith("f") or curr.mnemonic.startswith("cmov"):
+        pass  # FPU and already-handled CMOVcc
+    elif curr.mnemonic.startswith("j"):
+        pass  # Jumps don't set flags
+    elif curr.mnemonic.startswith("set"):
+        pass  # SETcc doesn't set flags
+    elif curr.mnemonic.startswith("rep"):
+        # rep movsb/movsd = data copy, preserves flags
+        # repe cmpsb/repne scasb = comparison, sets flags
+        rest = curr.op_str.strip() if hasattr(curr, 'op_str') else ""
+        raw_m = curr.mnemonic
+        # Every width sets flags, not just the byte forms: a
+        # `repe cmpsd` left the xor before it as the tracked setter, so
+        # the sbb that follows read the xor's CF instead of the compare's.
+        _cmp_forms = ("cmpsb", "cmpsw", "cmpsd",
+                      "scasb", "scasw", "scasd")
+        if any(f in raw_m for f in _cmp_forms):
+            setter = raw_m
+            ops = list(curr.operands)
+        elif any(f in rest for f in _cmp_forms):
+            setter = raw_m
+            ops = list(curr.operands)
+        else:
+            pass  # rep movs/stos = data movement, flags preserved
+    else:
+        # Unknown instruction - conservatively clear flag state
+        setter = None
+        ops = []
+
+    return setter, ops, cf_only_over, via_call
+
+
+def block_flag_out_state(bb, flag_state=None):
+    """The flag state lift_basic_block(lifter, bb, flag_state) returns,
+    without lifting the block.
+
+    The translator iterates out-states to a fixed point over a function's
+    back edges, and a full lift per probe threw its statements away: on a
+    title-size image that was a fifth of tools.recomp. The instructions
+    lift_basic_block consumes without the transition (LOOP/JECXZ, lahf
+    with a tracked setter, the flag readers it answers from the state) are
+    skipped here the same way; the readers leave the state alone either way.
+    """
+    if flag_state:
+        setter, ops = flag_state
+    else:
+        setter, ops = None, []
+    cf_only_over = None
+    for curr in bb.instructions:
+        m = curr.mnemonic
+        if (m in ("jecxz", "jcxz") or m in LOOP_JUMPS
+                or (m == "lahf" and setter)):
+            continue
+        setter, ops, cf_only_over, _ = _flag_transition(
+            curr, setter, ops, cf_only_over)
+    return (setter, ops) if setter else None
+
+
 def lift_basic_block(lifter, bb, flag_state=None):
     """
     Lift a basic block to C statements.
@@ -5427,124 +5580,12 @@ def lift_basic_block(lifter, bb, flag_state=None):
             stmts.extend(lifter.seh_anchor_lines)
 
         # Track flag-setting instructions
-        if (curr.mnemonic in _BARE_STRING_COMPARES
-                and not _has_xmm_operand(curr.operands)):
-            # A single cmps/scas sets the flags like cmp. "cmpsd" is also
-            # the SSE2 scalar compare, which is why it sits in
-            # _EFLAGS_PRESERVE and has to be caught before that test.
-            last_flag_setter = curr.mnemonic
-            last_flag_ops = list(curr.operands)
-        elif curr.mnemonic in _SSE_CMP_NAMED:
-            pass  # SSE compares write a mask, not EFLAGS
-        elif (curr.mnemonic in ("shl", "sal", "shr", "sar")
-              and len(curr.operands) >= 2 and curr.operands[1].type == "imm"
-              and not curr.operands[1].imm & 31):
-            pass  # a count of zero (masked) leaves every flag alone
-        elif (curr.mnemonic in ("shl", "sal", "shr", "sar")
-              and len(curr.operands) >= 2 and curr.operands[1].type != "imm"):
-            # The count may be zero at run time (see _shift_count_guard). A
-            # previous shift by a register is not kept underneath: its
-            # answer reads _shz, which this shift has just overwritten.
-            setter, ops = normalise_zero_test(curr.mnemonic,
-                                              list(curr.operands))
-            prev = last_flag_setter
-            if prev == "__shift_cl":
-                prev, last_flag_ops = None, []
-            last_flag_ops = [setter, ops, prev, last_flag_ops]
-            last_flag_setter = "__shift_cl"
-        elif curr.mnemonic in FLAG_SETTERS:
-            last_flag_setter, last_flag_ops = normalise_zero_test(
-                curr.mnemonic, list(curr.operands))
-        elif curr.mnemonic in ("rol", "ror"):
-            # CF is now _cf; ZF/SF/PF stay the previous setter's, which the
-            # state keeps (see _make_condition). A count of zero changes
-            # nothing; one in a register may be zero, and the lift then
-            # leaves _cf alone, so it was loaded with the incoming CF above.
-            ops = curr.operands
-            if not (len(ops) >= 2 and ops[1].type == "imm"
-                    and not ops[1].imm & 31):
-                if last_flag_setter == "__cf_over":
-                    pass        # still the same setter underneath
-                else:
-                    last_flag_ops = [last_flag_setter, last_flag_ops]
-                    last_flag_setter = "__cf_over"
-        elif curr.mnemonic in ("stc", "clc", "cmc"):
-            # CF is now _cf (the lift writes it); nothing else is tracked.
-            if last_flag_setter != "__cf_only":
-                cf_only_over = last_flag_setter
-            last_flag_setter, last_flag_ops = "__cf_only", []
-        elif curr.mnemonic == "popfd":
-            # Every flag now comes from the image popfd loaded.
-            last_flag_setter, last_flag_ops = "eflags", []
-        elif curr.mnemonic in _FLAGS_UNDEFINED:
-            # Flags are undefined after these - clear tracking
-            last_flag_setter = None
-            last_flag_ops = []
-        elif curr.mnemonic in ("lock xadd", "lock cmpxchg", "lock cmpxchg8b"):
-            # Capstone keeps the lock prefix in the mnemonic; the flags are
-            # those of the bare instruction, which the lowering snapshots.
-            last_flag_setter = curr.mnemonic[5:]
-            last_flag_ops = list(curr.operands)
-        elif curr.mnemonic.startswith("lock ") and curr.mnemonic[5:] in _EFLAGS_PRESERVE:
-            pass  # lock not: no flags, as without the prefix
-        elif curr.mnemonic.startswith("lock ") and (curr.mnemonic[5:] in FLAG_SETTERS
-                                                    or curr.mnemonic[5:] in _EFLAGS_SETTERS):
-            # lock inc/dec/add/... (XBA-78): the lowering lifts the bare
-            # instruction on a copy inside a compare-and-swap loop and leaves
-            # the same snapshots (_fa, _fas, _cf), so the flags are the bare
-            # instruction's. Without this a `lock dec [x]; jnz`, the shape of
-            # InterlockedDecrement, cleared the tracking and the jnz read the
-            # unassigned _flags.
-            last_flag_setter, last_flag_ops = normalise_zero_test(
-                curr.mnemonic[5:], list(curr.operands))
-        elif curr.mnemonic in _EFLAGS_SETTERS:
-            # Additional flag-setting instructions
-            last_flag_setter, last_flag_ops = normalise_zero_test(
-                curr.mnemonic, list(curr.operands))
-        elif curr.is_call:
-            last_flag_setter, last_flag_ops = "eflags", []
-            if lifter.needs_cf and curr.address in lifter.flag_live_returns:
-                stmts.append("_cf = g_eflags & 1u; /* callee carry */")
-        elif curr.mnemonic in _EFLAGS_PRESERVE:
-            pass  # These don't affect EFLAGS
-        elif curr.mnemonic in ("fcompi", "fcomip", "fucomi", "fucompi",
-                                "fucomip", "fcomi"):
-            # FPU compare-to-EFLAGS: sets CF, ZF, PF directly
-            last_flag_setter = curr.mnemonic
-            last_flag_ops = list(curr.operands)
-        elif curr.mnemonic == "sahf":
-            # sahf loads AH into flags - typically after fnstsw ax
-            # in the fcomp/fnstsw/sahf pattern for FPU comparisons
-            last_flag_setter = "sahf"
-            last_flag_ops = list(curr.operands)
-        elif curr.mnemonic.startswith("f") or curr.mnemonic.startswith("cmov"):
-            pass  # FPU and already-handled CMOVcc
-        elif curr.mnemonic.startswith("j"):
-            pass  # Jumps don't set flags
-        elif curr.mnemonic.startswith("set"):
-            pass  # SETcc doesn't set flags
-        elif curr.mnemonic.startswith("rep"):
-            # rep movsb/movsd = data copy, preserves flags
-            # repe cmpsb/repne scasb = comparison, sets flags
-            rest = curr.op_str.strip() if hasattr(curr, 'op_str') else ""
-            raw_m = curr.mnemonic
-            # Every width sets flags, not just the byte forms: a
-            # `repe cmpsd` left the xor before it as the tracked setter, so
-            # the sbb that follows read the xor's CF instead of the compare's.
-            _cmp_forms = ("cmpsb", "cmpsw", "cmpsd",
-                          "scasb", "scasw", "scasd")
-            if any(f in raw_m for f in _cmp_forms):
-                last_flag_setter = raw_m
-                last_flag_ops = list(curr.operands)
-            elif any(f in rest for f in _cmp_forms):
-                last_flag_setter = raw_m
-                last_flag_ops = list(curr.operands)
-            else:
-                pass  # rep movs/stos = data movement, flags preserved
-        else:
-            # Unknown instruction - conservatively clear flag state
-            last_flag_setter = None
-            last_flag_ops = []
+        (last_flag_setter, last_flag_ops, cf_only_over,
+         via_call) = _flag_transition(curr, last_flag_setter, last_flag_ops,
+                                      cf_only_over)
+        if (via_call and lifter.needs_cf
+                and curr.address in lifter.flag_live_returns):
+            stmts.append("_cf = g_eflags & 1u; /* callee carry */")
 
         i += 1
 
