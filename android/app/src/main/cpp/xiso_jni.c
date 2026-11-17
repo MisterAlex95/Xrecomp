@@ -11,8 +11,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -292,49 +290,11 @@ Java_fr_adserver_xrecomp_XisoNative_extractFileParts(JNIEnv *env, jclass cls, ji
     return rc;
 }
 
-/* XisoNative.extractXbes(int[] fds, String outDir, long maxBytes) -> int: every *.xbe of the image (any directory,
- * at most 16, each at most maxBytes) copied into outDir with its directory, nothing else: the companion folder of an
- * image read in place (default.xbe for the art, hash and Prepare, the other images for XBA-82). Returns the count,
- * or a negative XISO_* code. */
-static int xbes_walk(xiso_image *img, const xiso_stat *dir, const char *out_dir, const char *rel, int depth,
-                     uint64_t max_bytes, xiso_source *src, int *count)
-{
-    xiso_dirent *d = NULL;
-    size_t n = 0;
-    int rc = xiso_list(img, dir, &d, &n);
-    if (rc)
-        return rc;
-    for (size_t i = 0; i < n && !rc; i++) {
-        char sub[1024];
-        snprintf(sub, sizeof sub, "%s%s%s", rel, rel[0] ? "/" : "", d[i].name);
-        if (d[i].is_dir) {
-            if (depth < 8) {
-                xiso_stat st = { d[i].offset, d[i].size, 1 };
-                rc = xbes_walk(img, &st, out_dir, sub, depth + 1, max_bytes, src, count);
-            }
-            continue;
-        }
-        size_t nl = strlen(d[i].name);
-        if (nl < 4 || strcasecmp(d[i].name + nl - 4, ".xbe") != 0 || d[i].size > max_bytes || *count >= 16)
-            continue;
-        char path[2048];
-        snprintf(path, sizeof path, "%s/%s", out_dir, sub);
-        for (char *p = path + strlen(out_dir) + 1; *p; p++) {   /* the directories on the way */
-            if (*p != '/')
-                continue;
-            *p = 0;
-            mkdir(path, 0755);
-            *p = '/';
-        }
-        unlink(path);
-        rc = xiso_extract_file_source(src, sub, path, max_bytes);
-        if (!rc)
-            (*count)++;
-    }
-    free(d);
-    return rc;
-}
-
+/* XisoNative.extractXbes(int[] fds, String outDir, long maxBytes) -> int: every *.xbe of the image (directories up
+ * to 8 deep, at most 16, each at most maxBytes) copied into outDir with its directory, nothing else: the companion
+ * folder of an image read in place (default.xbe for the art, hash and Prepare, the other images for XBA-82). The walk
+ * is xiso_extract_xbes_source's, which refuses a crafted image whose directories loop (XISO_ECORRUPT) instead of
+ * walking the cycle. Returns the count, or a negative XISO_* code. */
 JNIEXPORT jint JNICALL
 Java_fr_adserver_xrecomp_XisoNative_extractXbes(JNIEnv *env, jclass cls, jintArray fds, jstring out_dir,
                                                    jlong max_bytes)
@@ -343,20 +303,21 @@ Java_fr_adserver_xrecomp_XisoNative_extractXbes(JNIEnv *env, jclass cls, jintArr
     if (!out_dir || max_bytes < 0)
         return XISO_EINVAL;
     xiso_source *src = NULL;
-    xiso_image *img = NULL;
     int rc = open_parts(env, fds, &src), count = 0;
-    if (!rc)
-        rc = xiso_open_source(src, &img);
     const char *dir = rc ? NULL : (*env)->GetStringUTFChars(env, out_dir, NULL);
     if (!rc && !dir)
         rc = XISO_ENOMEM;
-    if (!rc)
-        rc = xbes_walk(img, NULL, dir, "", 0, (uint64_t)max_bytes, src, &count);
+    if (!rc) {
+        rc = xiso_extract_xbes_source(src, dir, (uint64_t)max_bytes, 16);
+        if (rc > 0) {
+            count = rc;
+            rc = 0;
+        }
+    }
     __android_log_print(ANDROID_LOG_INFO, TAG, "import: %d XBE(s) copied out of the image: %d (%s)", count, rc,
                         rc == 0 ? "ok" : xiso_strerror(rc));
     if (dir)
         (*env)->ReleaseStringUTFChars(env, out_dir, dir);
-    xiso_close(img);
     xiso_source_close(src);
     return rc ? rc : count;
 }

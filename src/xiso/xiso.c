@@ -887,6 +887,108 @@ int xiso_pread(xiso_image *img, const xiso_stat *st, void *buf, size_t len, uint
     return rc ? rc : (int)len;
 }
 
+/* ── Every XBE of the image (the app's companion folder) ─────────────────── */
+
+typedef struct {
+    vol_t *v;
+    const char *out_dir;
+    uint64_t max_bytes;
+    int max_count, count;
+    uint8_t *buf;
+} xbes_ctx;
+
+/* One XBE entry to out_dir/<v->path>, its directories made on the way (an existing file is replaced). */
+static int xbes_copy(xbes_ctx *c, const entry_t *e)
+{
+    char path[sizeof c->v->path + 4096];
+    if ((size_t)snprintf(path, sizeof path, "%s/%s", c->out_dir, c->v->path) >= sizeof path)
+        return XISO_EINVAL;
+    int rc = make_parents(path);
+    if (rc)
+        return rc;
+    unlink(path);
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return write_err(errno);
+    uint64_t src = c->v->base + (uint64_t)e->sector * SECTOR_SIZE;
+    uint32_t left = e->size;
+    while (left > 0 && !rc) {
+        size_t chunk = left < BUF_SIZE ? left : BUF_SIZE;
+        rc = read_full(c->v, c->buf, chunk, src);
+        if (!rc)
+            rc = write_full(fd, c->buf, chunk);
+        src += chunk;
+        left -= (uint32_t)chunk;
+    }
+    if (close(fd) != 0 && !rc && errno != EINTR)
+        rc = write_err(errno);
+    if (rc)
+        unlink(path);
+    return rc;
+}
+
+/* Through read_dir, whose seen set is not reset during the walk: a directory table reached twice (a crafted image's
+ * cycle, or two entries sharing a subtree) is XISO_ECORRUPT, and MAX_ENTRIES bounds the whole walk, so a crafted
+ * tree cannot make it loop or grow exponentially. Directories deeper than XBES_DEPTH are not searched. */
+#define XBES_DEPTH 8
+static int xbes_walk(xbes_ctx *c, uint32_t sector, uint32_t size, int depth, size_t plen)
+{
+    vol_t *v = c->v;
+    entry_t *ents;
+    size_t n;
+    int rc = read_dir(v, sector, size, &ents, &n);
+    if (rc)
+        return rc;
+    for (size_t i = 0; i < n && !rc; i++) {
+        const entry_t *e = &ents[i];
+        int is_dir = (e->attr & ATTR_DIRECTORY) != 0;
+        size_t nl = strlen(e->name);
+        if (plen + 1 + nl >= sizeof v->path) {
+            rc = XISO_ECORRUPT;
+            break;
+        }
+        size_t sub = plen;
+        if (plen)
+            v->path[sub++] = '/';
+        memcpy(v->path + sub, e->name, nl + 1);
+        sub += nl;
+        if (is_dir) {
+            if (depth < XBES_DEPTH)
+                rc = xbes_walk(c, e->sector, e->size, depth + 1, sub);
+        } else if (nl >= 4 && strcasecmp(e->name + nl - 4, ".xbe") == 0 && e->size <= c->max_bytes
+                   && c->count < c->max_count) {
+            if (e->size > 0 && !in_image(v, e->sector, e->size))
+                rc = XISO_ECORRUPT;
+            else if ((rc = xbes_copy(c, e)) == 0)
+                c->count++;
+        }
+        v->path[plen] = 0;
+    }
+    free(ents);
+    return rc;
+}
+
+int xiso_extract_xbes_source(xiso_source *src, const char *out_dir, uint64_t max_bytes, int max_count)
+{
+    if (!src || !out_dir || !out_dir[0] || max_count < 0)
+        return XISO_EINVAL;
+    xiso_image *img;
+    int rc = xiso_open_source(src, &img);
+    if (rc)
+        return rc;
+    xbes_ctx c = { &img->v, out_dir, max_bytes, max_count, 0, malloc(BUF_SIZE) };
+    if (!c.buf) {
+        xiso_close(img);
+        return XISO_ENOMEM;
+    }
+    seen_reset(&img->v);
+    img->v.path[0] = 0;
+    rc = xbes_walk(&c, img->v.root_sector, img->v.root_size, 0, 0);
+    free(c.buf);
+    xiso_close(img);
+    return rc ? rc : c.count;
+}
+
 int xiso_extract_file_fd(int fd, const char *path, const char *out_file, uint64_t max_bytes)
 {
     xiso_source *src;
