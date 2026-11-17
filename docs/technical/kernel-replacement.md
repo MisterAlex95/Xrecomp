@@ -248,7 +248,7 @@ Frame" in `docs/pipeline/06-debugging.md` and `RECOMP_AC97_READY`.
 |---------------|---------------|
 | HalReadSMCTrayState | Returns "disc present" |
 | HalReadWritePCISpace | Returns 0 (no PCI) |
-| KeBugCheck / KeBugCheckEx | Logs and continues (does not crash) |
+| KeBugCheck / KeBugCheckEx | Logs the code, parameters and caller, then stops the title (never returns) |
 | KeQueryPerformanceCounter | QueryPerformanceCounter |
 | KeQueryPerformanceFrequency | QueryPerformanceFrequency |
 | RtlEnterCriticalSection | No-op (single-threaded) |

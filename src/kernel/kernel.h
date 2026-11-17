@@ -1090,6 +1090,13 @@ NTSTATUS __stdcall xbox_KeRestoreFloatingPointState(PVOID FloatingPointState);
 
 VOID    __stdcall xbox_KeBugCheck(ULONG BugCheckCode);
 VOID    __stdcall xbox_KeBugCheckEx(ULONG BugCheckCode, ULONG_PTR Param1, ULONG_PTR Param2, ULONG_PTR Param3, ULONG_PTR Param4);
+/* Both end here (kernel_hal.c): one [BUGCHECK] line with the code, the
+ * parameters (ex: KeBugCheckEx's four) and caller -- the guest return address
+ * of the call, 0 for the runtime's own stops --, the discovery file flushed,
+ * then xbox_title_stop. Does not return, on any thread. */
+void xbox_BugCheckStop(int ex, uint32_t caller, ULONG BugCheckCode,
+                       ULONG_PTR Param1, ULONG_PTR Param2,
+                       ULONG_PTR Param3, ULONG_PTR Param4);
 
 VOID    __stdcall xbox_KeInitializeInterrupt(PXBOX_KINTERRUPT Interrupt, PVOID ServiceRoutine, PVOID ServiceContext, ULONG Vector, KIRQL Irql, ULONG InterruptMode, BOOLEAN ShareVector);
 BOOLEAN __stdcall xbox_KeConnectInterrupt(PXBOX_KINTERRUPT Interrupt);
@@ -1592,6 +1599,14 @@ void xbox_exit_reason(char *out, size_t n, int shutdown, unsigned routine,
  * destructors), elsewhere ExitProcess(0) as before. why NULL: the routine's
  * default reason. Does not return. */
 void xbox_title_exit(unsigned routine, const char *why);
+
+/* xbox_title_exit with the process's exit status given: the same "[EXIT]
+ * <why>" line, exit handler and ending, with `status` in place of 0. A title
+ * that stops on an error (KeBugCheck) ends here with a non-zero status, so a
+ * script or the compat runner sees a failure, and on Android the launcher
+ * still shows the reason. why NULL or empty: "the game stopped". Does not
+ * return. */
+void xbox_title_stop(int status, const char *why);
 
 /* xbox_HalReturnToFirmware with the bridge's reason (kernel_hal.c). */
 void xbox_HalReturnToFirmwareWhy(ULONG Routine, const char *why);

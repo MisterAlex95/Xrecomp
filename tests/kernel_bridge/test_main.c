@@ -19,6 +19,14 @@
  * unchanged. The bridge now calls the latter, and that delegation is what
  * these checks pin: asserting only on xbox_MmGetPhysicalAddress leaves a
  * bridge that stops delegating entirely green.
+ *
+ * Ordinals 95 and 96, KeBugCheck and KeBugCheckEx, stop the title: a forked
+ * child calls each through the dispatcher and must never get control back
+ * (it returned, 2.9 M times in 40 s, before -- Yu-Gi-Oh's abort()). The
+ * child ends with the bug-check code as its status (1 for KeBugCheck(0)),
+ * after one [BUGCHECK] line naming the code, the parameters and the guest
+ * return address, the exit handler getting the reason, and an exception
+ * entry in the discovery file. POSIX only: it needs fork.
  */
 /* kernel.h brings the NT type vocabulary: <windows.h> on Windows, the
  * shim in platform/xbox_winnt.h elsewhere. Nothing below is
@@ -29,6 +37,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* Provided by the generated title; a regression harness has no title, and a
  * static archive resolves only what gets pulled in. Nothing here calls a
@@ -53,6 +66,73 @@ static void check(int ok, const char *what, const char *detail)
     if (!ok) failures++;
 }
 
+#ifndef _WIN32
+/* KeBugCheck(Ex) from a forked child, through the dispatcher for the thunk
+ * entry `entry` (looked up there: a dispatcher serves the slot looked up
+ * last), with the guest stack laid out at stack_va: the child's exit status (-1 on a signal),
+ * what it printed to stderr in err, what its exit handler got in why. */
+static int bugcheck_exit_fd = -1;
+
+static void bugcheck_exit_handler(const char *why)
+{
+    if (bugcheck_exit_fd >= 0 && write(bugcheck_exit_fd, why, strlen(why)) < 0)
+        bugcheck_exit_fd = -1;
+}
+
+static void read_all(int fd, char *out, size_t cap)
+{
+    size_t used = 0;
+    ssize_t n;
+    char sink[256];
+
+    /* To EOF: closing early would kill the child on SIGPIPE. */
+    while ((n = read(fd, used < cap - 1 ? out + used : sink,
+                     used < cap - 1 ? cap - 1 - used : sizeof sink)) > 0)
+        if (used < cap - 1)
+            used += (size_t)n;
+    out[used] = 0;
+}
+
+static int bugcheck_child(uint32_t entry, uint8_t *mem, uint32_t stack_va,
+                          const uint32_t *args, int nargs,
+                          char *err, size_t err_cap, char *why, size_t why_cap)
+{
+    int efd[2], wfd[2], status = 0;
+    pid_t pid;
+
+    if (pipe(efd) != 0 || pipe(wfd) != 0)
+        return -2;
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        uint32_t *sp = (uint32_t *)(mem + stack_va);
+        int i;
+
+        dup2(efd[1], 2);
+        close(efd[0]);
+        close(wfd[0]);
+        bugcheck_exit_fd = wfd[1];
+        xbox_SetExitHandler(bugcheck_exit_handler);
+        sp[0] = 0x00012345u;          /* the guest return address */
+        for (i = 0; i < nargs; i++)
+            sp[1 + i] = args[i];
+        g_esp = stack_va;
+        recomp_lookup_kernel(entry)();
+        /* Guest code after the call: it must never run. */
+        fprintf(stderr, "RETURNED TO THE GUEST\n");
+        _exit(99);
+    }
+    close(efd[1]);
+    close(wfd[1]);
+    read_all(efd[0], err, err_cap);
+    read_all(wfd[0], why, why_cap);
+    close(efd[0]);
+    close(wfd[0]);
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+#endif
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -74,11 +154,13 @@ int main(void)
     *(uint32_t *)(mem + THUNK_VA + 8) = 0x80000000u | 67u;    /* IoCreateSymbolicLink */
     *(uint32_t *)(mem + THUNK_VA + 12) = 0x80000000u | 203u;  /* NtOpenSymbolicLinkObject */
     *(uint32_t *)(mem + THUNK_VA + 16) = 0x80000000u | 215u;  /* NtQuerySymbolicLinkObject */
+    *(uint32_t *)(mem + THUNK_VA + 20) = 0x80000000u | 95u;   /* KeBugCheck */
+    *(uint32_t *)(mem + THUNK_VA + 24) = 0x80000000u | 96u;   /* KeBugCheckEx */
     *(uint32_t *)(mem + THUNK_VA - 4) = 0x80000000u | 173u;
     *(uint32_t *)(mem + THUNK_VA - 8) = 0xF2345678u;
     *(uint32_t *)(mem + THUNK_VA - 12) = 0x80000000u;
     *(uint32_t *)(mem + THUNK_VA - 16) = 0x80000000u | 379u;
-    xbox_kernel_set_thunk_address(THUNK_VA, 5);
+    xbox_kernel_set_thunk_address(THUNK_VA, 7);
     xbox_kernel_bridge_init();
 
     check(recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA - 4)) != NULL,
@@ -221,6 +303,66 @@ int main(void)
             #undef ANSI
         }
     }
+
+#ifndef _WIN32
+    /* Ordinals 95 / 96: the title asking the kernel to die never gets
+     * control back, and the run ends with the code, the parameters and the
+     * call site named. */
+    {
+        recomp_func_t bc = recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 20));
+        recomp_func_t bcx = recomp_lookup_kernel(*(uint32_t *)(mem + THUNK_VA + 24));
+        char err[4096], why[512], disc_path[512], text[1024] = "", detail[600];
+        const char *tmp = getenv("TMPDIR");
+        FILE *f;
+        int rc;
+
+        check(bc && bcx, "ordinals 95, 96 resolve", NULL);
+        snprintf(disc_path, sizeof disc_path, "%s/kernel_bridge_bugcheck_%d.jsonl",
+                 tmp && *tmp ? tmp : "/tmp", (int)getpid());
+        remove(disc_path);
+        setenv("RECOMP_DISCOVERY", disc_path, 1);
+        if (bc) {
+            /* abort() in the title's CRT: KeBugCheck(0). */
+            const uint32_t args[1] = { 0 };
+            rc = bugcheck_child(*(uint32_t *)(mem + THUNK_VA + 20), mem, STACK_VA, args, 1, err, sizeof err,
+                                why, sizeof why);
+            snprintf(detail, sizeof detail, "status %d, stderr: %.400s", rc, err);
+            check(rc == 1 && !strstr(err, "RETURNED TO THE GUEST"),
+                  "KeBugCheck(0) never returns, ends with status 1", detail);
+            check(strstr(err, "[BUGCHECK] KeBugCheck(0x00000000) called from"
+                              " 0x00012345") != NULL,
+                  "one [BUGCHECK] line names the code and the caller", detail);
+            check(strstr(err, "[EXIT] KeBugCheck 0x00000000") != NULL,
+                  "and the [EXIT] line the compat runner reads", detail);
+            check(strstr(why, "bug check 0x00000000 at 0x00012345") != NULL,
+                  "the exit handler gets the reason", why);
+        }
+        if (bcx) {
+            const uint32_t args[5] = { 0xDEADu, 0x11111111u, 0x22222222u,
+                                       0x33333333u, 0x44444444u };
+            rc = bugcheck_child(*(uint32_t *)(mem + THUNK_VA + 24), mem, STACK_VA, args, 5, err, sizeof err,
+                                why, sizeof why);
+            snprintf(detail, sizeof detail, "status %d, stderr: %.400s", rc, err);
+            check(rc == 0xAD && !strstr(err, "RETURNED TO THE GUEST"),
+                  "KeBugCheckEx never returns, status is the code", detail);
+            check(strstr(err, "[BUGCHECK] KeBugCheckEx(0x0000DEAD, 0x11111111,"
+                              " 0x22222222, 0x33333333, 0x44444444) called from"
+                              " 0x00012345") != NULL,
+                  "its line names the four parameters too", detail);
+        }
+        unsetenv("RECOMP_DISCOVERY");
+        f = fopen(disc_path, "rb");
+        if (f) {
+            size_t n = fread(text, 1, sizeof text - 1, f);
+            text[n] = 0;
+            fclose(f);
+        }
+        remove(disc_path);
+        check(strstr(text, "{\"t\":\"exception\",\"va\":\"0x00012345\","
+                           "\"code\":\"0x00000000\",\"why\":\"KeBugCheck(") != NULL,
+              "the discovery file has the stop as an exception", text);
+    }
+#endif
 
     VirtualFree(mem, 0, MEM_RELEASE);
     printf("\n%d failure(s)\n", failures);

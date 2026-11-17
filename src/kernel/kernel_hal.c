@@ -1453,24 +1453,90 @@ NTSTATUS __stdcall xbox_KeRestoreFloatingPointState(PVOID FloatingPointState)
 /* ============================================================================
  * Bug Check (Blue Screen of Death)
  *
- * KeBugCheck/KeBugCheckEx are the Xbox equivalent of BSOD. In our
- * recompilation, we log the error and terminate the process.
+ * KeBugCheck/KeBugCheckEx are the Xbox equivalent of BSOD: the console stops
+ * and never comes back to the caller. The title's CRT gets here from abort()
+ * (KeBugCheck(0)), the runtime from a guest fault nothing handled
+ * (recomp_divide_error, recomp_cut_body, recomp_misdecoded: 0x1E).
+ *
+ * Returning would run the code the bug check was there to stop: Yu-Gi-Oh's
+ * abort() came back 2.9 M times in 40 s, its stack walking down through the
+ * image until a SIGILL far from the cause. So one clear line, the discovery
+ * file put on storage, and the run ends the way a title leaving ends it
+ * (xbox_title_stop, kernel_reboot.c): on Android back to the launcher with
+ * the reason, elsewhere ExitProcess. The exit status is the bug-check code
+ * (0x1E for the runtime's stops), or 1 when its low byte is 0 -- abort()'s
+ * KeBugCheck(0) must not read as a clean exit.
  * ============================================================================ */
 
-VOID __stdcall xbox_KeBugCheck(ULONG BugCheckCode)
+void xbox_BugCheckStop(int ex, uint32_t caller, ULONG BugCheckCode,
+                       ULONG_PTR Param1, ULONG_PTR Param2,
+                       ULONG_PTR Param3, ULONG_PTR Param4)
 {
+    static volatile LONG s_stopping;
+    const char *name = ex ? "KeBugCheckEx" : "KeBugCheck";
+    char from[48], why[200];
+    int status;
+
+    /* Another thread is already ending the run: it does not come back
+     * either, and two exit handlers would race for the launcher. */
+    if (InterlockedExchange(&s_stopping, 1)) {
+        for (;;)
+            Sleep(1000);
+    }
+
+    if (caller)
+        snprintf(from, sizeof from, "called from 0x%08X", (unsigned)caller);
+    else
+        snprintf(from, sizeof from, "called by the runtime");
+    if (ex)
+        fprintf(stderr, "[BUGCHECK] KeBugCheckEx(0x%08X, 0x%08X, 0x%08X, 0x%08X,"
+                " 0x%08X) %s: the title stops here\n", (unsigned)BugCheckCode,
+                (unsigned)Param1, (unsigned)Param2, (unsigned)Param3,
+                (unsigned)Param4, from);
+    else
+        fprintf(stderr, "[BUGCHECK] KeBugCheck(0x%08X) %s: the title stops here\n",
+                (unsigned)BugCheckCode, from);
+    /* The compat runner and its tests read this line (tools/compat). */
+    fprintf(stderr, "[EXIT] %s 0x%08X\n", name, (unsigned)BugCheckCode);
+    fflush(stderr);
     xbox_log(XBOX_LOG_ERROR, XBOX_LOG_HAL,
-        "*** KeBugCheck: code=0x%08X ***", BugCheckCode);
-    fprintf(stderr, "[EXIT] KeBugCheck 0x%08X\n", (unsigned)BugCheckCode);
+        "*** %s: code=0x%08X, params=(0x%08X, 0x%08X, 0x%08X, 0x%08X),"
+        " caller=0x%08X ***", name, (unsigned)BugCheckCode, (unsigned)Param1,
+        (unsigned)Param2, (unsigned)Param3, (unsigned)Param4, (unsigned)caller);
 
 #ifdef _DEBUG
     DebugBreak();
 #endif
 
+    /* A guest call: recorded like an exception nothing handled (the
+     * runtime's own stops recorded theirs already). */
+    if (caller) {
+        char what[64];
+        snprintf(what, sizeof what, "%s(0x%08X) called", name,
+                 (unsigned)BugCheckCode);
+        recomp_discovery_exception(caller, BugCheckCode, what);
+    }
     /* ExitProcess skips atexit. Guest code calls this, never from inside
      * the report's lock, so the summary's list write may take it. */
     xbox_missing_summary("bugcheck");
-    ExitProcess(BugCheckCode);
+    recomp_discovery_flush();
+
+    if (caller)
+        snprintf(why, sizeof why, "the game stopped on a fatal error"
+                 " (bug check 0x%08X at 0x%08X)", (unsigned)BugCheckCode,
+                 (unsigned)caller);
+    else
+        snprintf(why, sizeof why, "the game stopped on a fatal error"
+                 " (bug check 0x%08X)", (unsigned)BugCheckCode);
+    status = (BugCheckCode & 0xFF) ? (int)BugCheckCode : 1;
+    xbox_title_stop(status, why);
+    for (;;)                    /* xbox_title_stop does not return */
+        Sleep(1000);
+}
+
+VOID __stdcall xbox_KeBugCheck(ULONG BugCheckCode)
+{
+    xbox_BugCheckStop(0, 0, BugCheckCode, 0, 0, 0, 0);
 }
 
 VOID __stdcall xbox_KeBugCheckEx(
@@ -1480,19 +1546,7 @@ VOID __stdcall xbox_KeBugCheckEx(
     ULONG_PTR Param3,
     ULONG_PTR Param4)
 {
-    xbox_log(XBOX_LOG_ERROR, XBOX_LOG_HAL,
-        "*** KeBugCheckEx: code=0x%08X, params=(0x%p, 0x%p, 0x%p, 0x%p) ***",
-        BugCheckCode, (void*)Param1, (void*)Param2, (void*)Param3, (void*)Param4);
-    fprintf(stderr, "[EXIT] KeBugCheckEx 0x%08X\n", (unsigned)BugCheckCode);
-
-#ifdef _DEBUG
-    DebugBreak();
-#endif
-
-    /* ExitProcess skips atexit. Guest code calls this, never from inside
-     * the report's lock, so the summary's list write may take it. */
-    xbox_missing_summary("bugcheck");
-    ExitProcess(BugCheckCode);
+    xbox_BugCheckStop(1, 0, BugCheckCode, Param1, Param2, Param3, Param4);
 }
 
 /* ============================================================================

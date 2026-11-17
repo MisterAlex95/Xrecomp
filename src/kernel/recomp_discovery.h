@@ -55,7 +55,10 @@
  *   {"t":"exception","va":"0x00012345","code":"0xC0000094","why":"..."}
  *                                                          a guest exception nothing handled: a
  *                                                          divide error that stops the title
- *                                                          (kernel_hal.c) or a raise no handler
+ *                                                          (kernel_hal.c), a KeBugCheck the title
+ *                                                          called (code: the bug-check code, va:
+ *                                                          the call's return address, why
+ *                                                          "KeBugCheck..."), or a raise no handler
  *                                                          took (xbox_seh.c); a Prepare cannot fix
  *                                                          it (XBA-129)
  *   {"t":"d3d_layout","va":"0x1A2B3C4D","lib":"D3D8LTCG","build":5933,"rule":"fence_event","used":"0x00001DCC"}
@@ -109,6 +112,10 @@ unsigned recomp_discovery_written(void);
 /* Of them, the code addresses the next Prepare can seed (icall, thread,
  * thread_ctx, untainted): the status line's "seeds" (XBA-129). */
 unsigned recomp_discovery_seeds(void);
+
+/* Before the process ends on an error (KeBugCheck): what was written goes to
+ * the storage now (fsync). No-op when nothing is open. */
+void recomp_discovery_flush(void);
 
 /* Tests: forget the open file and what was seen, read $RECOMP_DISCOVERY again. */
 void recomp_discovery_reset(void);

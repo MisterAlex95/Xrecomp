@@ -596,6 +596,13 @@ void xbox_title_exit(unsigned routine, const char *why)
         xbox_exit_reason(text, sizeof text, 0, routine, NULL, 0);
         why = text;
     }
+    xbox_title_stop(0, why);
+}
+
+void xbox_title_stop(int status, const char *why)
+{
+    if (!why || !why[0])
+        why = "the game stopped";
     fprintf(stderr, "[EXIT] %s\n", why);
     fflush(stdout);
     fflush(stderr);
@@ -608,8 +615,8 @@ void xbox_title_exit(unsigned routine, const char *why)
     /* Not exit(): the guest's other threads, SDL's and the GPU executor are
      * still running, and atexit handlers / destructors pull their mutexes
      * from under them (FORTIFY abort, a tombstone for a title that quit). */
-    recomp_quit(0);
+    recomp_quit(status);
 #else
-    ExitProcess(0);
+    ExitProcess((UINT)status);
 #endif
 }
