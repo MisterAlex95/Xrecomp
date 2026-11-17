@@ -31,6 +31,21 @@
 #define DPRINTF(fmt, ...) do { } while (0)
 #endif
 
+/* A value the title wrote (a method argument, a voice handle, a segment
+ * descriptor) that the hardware model cannot take. These were asserts
+ * inherited from xemu: a build without NDEBUG (the default desktop build, the
+ * Android debug variant) aborted the runtime, a release build indexed past
+ * the VP's arrays. Now the method is ignored or the voice skipped, and the
+ * site says so once. */
+#define VP_GUEST_BAD(...) do { \
+        static int vp_warned_; \
+        if (!vp_warned_++) { \
+            fprintf(stderr, "[APU] "); \
+            fprintf(stderr, __VA_ARGS__); \
+            fputc('\n', stderr); \
+        } \
+    } while (0)
+
 /* ============================================================
  * Voice list register table
  * ============================================================ */
@@ -199,6 +214,11 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
     switch (method) {
     case NV1BA0_PIO_VOICE_LOCK:
+        if (d->regs[NV_PAPU_FECV] >= MCPX_HW_MAX_VOICES) {
+            VP_GUEST_BAD("VOICE_LOCK on voice %u: no such voice; ignored",
+                         d->regs[NV_PAPU_FECV]);
+            break;
+        }
         voice_lock(d, (uint16_t)d->regs[NV_PAPU_FECV], argument & 1);
         break;
 
@@ -208,6 +228,17 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
     case NV1BA0_PIO_VOICE_ON: {
         selected_handle = argument & NV1BA0_PIO_VOICE_ON_HANDLE;
+        if (selected_handle >= MCPX_HW_MAX_VOICES) {
+            VP_GUEST_BAD("VOICE_ON of voice %u: no such voice; ignored", selected_handle);
+            break;
+        }
+        if (GET_MASK(d->regs[NV_PAPU_FEAV], NV_PAPU_FEAV_LST) ==
+                NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_INHERIT &&
+            GET_MASK(d->regs[NV_PAPU_FEAV], NV_PAPU_FEAV_VALUE) >= MCPX_HW_MAX_VOICES) {
+            VP_GUEST_BAD("VOICE_ON of voice %u after antecedent voice %u: no such voice; ignored",
+                         selected_handle, GET_MASK(d->regs[NV_PAPU_FEAV], NV_PAPU_FEAV_VALUE));
+            break;
+        }
 
         bool locked = is_voice_locked(d, (uint16_t)selected_handle);
         if (!locked) voice_lock(d, (uint16_t)selected_handle, true);
@@ -223,7 +254,6 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         } else {
             unsigned int antecedent_voice =
                 GET_MASK(d->regs[NV_PAPU_FEAV], NV_PAPU_FEAV_VALUE);
-            assert(antecedent_voice != 0xFFFF);
 
             uint32_t next_handle = voice_get_mask(
                 d, (uint16_t)antecedent_voice, NV_PAVS_VOICE_TAR_PITCH_LINK,
@@ -293,6 +323,10 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
     case NV1BA0_PIO_VOICE_RELEASE: {
         selected_handle = argument & NV1BA0_PIO_VOICE_ON_HANDLE;
+        if (selected_handle >= MCPX_HW_MAX_VOICES) {
+            VP_GUEST_BAD("VOICE_RELEASE of voice %u: no such voice; ignored", selected_handle);
+            break;
+        }
 
         bool locked = is_voice_locked(d, (uint16_t)selected_handle);
         if (!locked) voice_lock(d, (uint16_t)selected_handle, true);
@@ -319,6 +353,11 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     }
 
     case NV1BA0_PIO_VOICE_OFF:
+        if ((argument & NV1BA0_PIO_VOICE_OFF_HANDLE) >= MCPX_HW_MAX_VOICES) {
+            VP_GUEST_BAD("VOICE_OFF of voice %u: no such voice; ignored",
+                         argument & NV1BA0_PIO_VOICE_OFF_HANDLE);
+            break;
+        }
         voice_off(d, (uint16_t)(argument & NV1BA0_PIO_VOICE_OFF_HANDLE));
         break;
 
@@ -373,8 +412,11 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
                        NV_PAVS_VOICE_CFG_HRTF_TARGET,
                        NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE, handle);
         if (current_voice < MCPX_HW_MAX_3D_VOICES &&
+            handle != HRTF_NULL_HANDLE && handle >= HRTF_ENTRY_COUNT) {
+            VP_GUEST_BAD("voice %d: HRTF entry %d is past the %d entries; filter left as it was",
+                         current_voice, handle, HRTF_ENTRY_COUNT);
+        } else if (current_voice < MCPX_HW_MAX_3D_VOICES &&
             handle != HRTF_NULL_HANDLE) {
-            assert(handle < HRTF_ENTRY_COUNT);
             hrtf_filter_set_target_params(&d->vp.filters[current_voice].hrtf,
                                           d->vp.hrtf.entries[handle].hrir,
                                           d->vp.hrtf.entries[handle].itd);
@@ -460,8 +502,11 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
     case NV1BA0_PIO_SET_VOICE_SSL_A: {
         int ssl = 0;
-        int current_voice = d->regs[NV_PAPU_FECV];
-        assert(current_voice < MCPX_HW_MAX_VOICES);
+        uint32_t current_voice = d->regs[NV_PAPU_FECV];
+        if (current_voice >= MCPX_HW_MAX_VOICES) {
+            VP_GUEST_BAD("SET_VOICE_SSL on voice %u: no such voice; ignored", current_voice);
+            break;
+        }
         d->vp.ssl[current_voice].base[ssl] =
             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
         d->vp.ssl[current_voice].count[ssl] =
@@ -470,8 +515,11 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     }
     case NV1BA0_PIO_SET_VOICE_SSL_B: {
         int ssl = 1;
-        int current_voice = d->regs[NV_PAPU_FECV];
-        assert(current_voice < MCPX_HW_MAX_VOICES);
+        uint32_t current_voice = d->regs[NV_PAPU_FECV];
+        if (current_voice >= MCPX_HW_MAX_VOICES) {
+            VP_GUEST_BAD("SET_VOICE_SSL on voice %u: no such voice; ignored", current_voice);
+            break;
+        }
         d->vp.ssl[current_voice].base[ssl] =
             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
         d->vp.ssl[current_voice].count[ssl] =
@@ -480,8 +528,11 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     }
 
     case NV1BA0_PIO_SET_CURRENT_SSL: {
-        assert((argument & 0x3f) == 0);
-        assert(argument < (MCPX_HW_MAX_SSL_PRDS * NV_PSGE_SIZE));
+        if ((argument & 0x3f) != 0 || argument >= (MCPX_HW_MAX_SSL_PRDS * NV_PSGE_SIZE)) {
+            VP_GUEST_BAD("SET_CURRENT_SSL 0x%X: not a 64-byte aligned page under 0x%X; ignored",
+                         argument, (unsigned)(MCPX_HW_MAX_SSL_PRDS * NV_PSGE_SIZE));
+            break;
+        }
         d->vp.ssl_base_page = argument;
         break;
     }
@@ -513,8 +564,11 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
     default:
         /* Handle range-based cases that can't use case ranges in MSVC */
-        if (method >= NV1BA0_PIO_SET_HRIR && method < NV1BA0_PIO_SET_HRIR_X) {
-            assert(d->vp.hrtf.current_entry < HRTF_ENTRY_COUNT);
+        if ((method >= NV1BA0_PIO_SET_HRIR && method <= NV1BA0_PIO_SET_HRIR_X) &&
+            d->vp.hrtf.current_entry >= HRTF_ENTRY_COUNT) {
+            VP_GUEST_BAD("SET_HRIR on HRTF entry %u: past the %d entries; ignored",
+                         (unsigned)d->vp.hrtf.current_entry, HRTF_ENTRY_COUNT);
+        } else if (method >= NV1BA0_PIO_SET_HRIR && method < NV1BA0_PIO_SET_HRIR_X) {
             slot = (method - NV1BA0_PIO_SET_HRIR) / 4;
             int8_t left0 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_LEFT0);
             int8_t right0 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_RIGHT0);
@@ -526,7 +580,6 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
             set_hrir_coeff_tar(d, 0, coeff_idx + 1, left1);
             set_hrir_coeff_tar(d, 1, coeff_idx + 1, right1);
         } else if (method == NV1BA0_PIO_SET_HRIR_X) {
-            assert(d->vp.hrtf.current_entry < HRTF_ENTRY_COUNT);
             int8_t left30 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_X_LEFT30);
             int8_t right30 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_X_RIGHT30);
             int16_t itd = (int16_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_X_ITD);
@@ -535,14 +588,20 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
             d->vp.hrtf.entries[d->vp.hrtf.current_entry].itd = s6p9_to_float(itd);
         } else if (method >= NV1BA0_PIO_SET_SSL_SEGMENT_OFFSET &&
                    method < NV1BA0_PIO_SET_SSL_SEGMENT_LENGTH + 8 * 64) {
-            assert((method & 0x3) == 0);
+            if ((method & 0x3) != 0) {
+                VP_GUEST_BAD("method 0x%X: not word aligned; ignored", method);
+                break;
+            }
             hwaddr addr = d->regs[NV_PAPU_VPSSLADDR]
                           + (d->vp.ssl_base_page * 8)
                           + (method - NV1BA0_PIO_SET_SSL_SEGMENT_OFFSET);
             stl_le_phys(address_space_memory, addr, argument);
         } else if (method >= NV1BA0_PIO_SET_SUBMIX_HEADROOM &&
                    method <= NV1BA0_PIO_SET_SUBMIX_HEADROOM + 4 * (NUM_MIXBINS - 1)) {
-            assert((method & 3) == 0);
+            if ((method & 3) != 0) {
+                VP_GUEST_BAD("method 0x%X: not word aligned; ignored", method);
+                break;
+            }
             slot = (method - NV1BA0_PIO_SET_SUBMIX_HEADROOM) / 4;
             d->vp.submix_headroom[slot] =
                 (uint8_t)(argument & NV1BA0_PIO_SET_SUBMIX_HEADROOM_AMOUNT);
@@ -597,6 +656,53 @@ static hwaddr get_data_ptr(hwaddr sge_base, unsigned int max_sge, uint32_t addr)
     uint32_t prd_address =
         ldl_le_phys(address_space_memory, sge_base + entry * 4 * 2);
     return prd_address + addr % TARGET_PAGE_SIZE;
+}
+
+/* Per-page caches for voice_get_samples: the SGE entry of the current linear
+ * page, and the host pointer of the current physical page. A PCM sample used
+ * to resolve its address two or three times (the SGE entry, then each
+ * channel through mcpx_apu_phys, a heap page with a lock and a binary search
+ * in xbox_PhysRamNamedAt); a frame of a voice stays on one or two pages. */
+typedef struct VpSgeCache {
+    uint32_t entry;           /* linear page, UINT32_MAX for none */
+    uint32_t prd;             /* its physical page address */
+} VpSgeCache;
+
+typedef struct VpPageCache {
+    uint32_t page;            /* physical page number, UINT32_MAX for none */
+    uint8_t *host;            /* where its first byte is */
+} VpPageCache;
+
+static hwaddr vp_sge_ptr(VpSgeCache *c, hwaddr sge_base, uint32_t addr)
+{
+    uint32_t entry = addr / TARGET_PAGE_SIZE;
+    if (entry != c->entry) {
+        c->prd = ldl_le_phys(address_space_memory, sge_base + (hwaddr)entry * 4 * 2);
+        c->entry = entry;
+    }
+    return (hwaddr)c->prd + addr % TARGET_PAGE_SIZE;
+}
+
+/* The host bytes of [addr, addr + size), size <= 4. mcpx_apu_phys maps each
+ * case as base + address, so a page is linear when its first and last bytes
+ * resolve 4095 apart (a page split between two cases, which only a boundary
+ * not on a page could do, is resolved byte by byte as before). */
+static const uint8_t *vp_phys(VpPageCache *c, hwaddr addr, unsigned size)
+{
+    uint32_t a = (uint32_t)addr, page = a / TARGET_PAGE_SIZE, off = a % TARGET_PAGE_SIZE;
+    if (off + size > TARGET_PAGE_SIZE)
+        return mcpx_apu_phys(addr);
+    if (page != c->page) {
+        hwaddr base = addr - off;
+        uint8_t *first = mcpx_apu_phys(base);
+        if (mcpx_apu_phys(base + TARGET_PAGE_SIZE - 1) != first + TARGET_PAGE_SIZE - 1) {
+            c->page = UINT32_MAX;
+            return mcpx_apu_phys(addr);
+        }
+        c->page = page;
+        c->host = first;
+    }
+    return c->host + off;
 }
 
 /* ============================================================
@@ -1151,6 +1257,8 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
     size_t block_size;
 
     int adpcm_block_index = -1;
+    VpSgeCache sge_cache = { UINT32_MAX, 0 };
+    VpPageCache page_cache = { UINT32_MAX, NULL };
     /* Room for the largest block the MCPX accepts (see the check below). */
     uint32_t adpcm_block[36 * ADPCM_MAX_BLOCKS / 4];
     int16_t adpcm_decoded[65 * ADPCM_MAX_BLOCKS * 2];
@@ -1170,7 +1278,8 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
             }
         }
 
-        assert(!loop);
+        if (loop) /* not a stream's mode: played without it, as a release build did */
+            VP_GUEST_BAD("voice %u: a stream voice with the loop bit; loop ignored", v);
         ssl_index = d->vp.ssl[v].ssl_index;
         ssl_seg = d->vp.ssl[v].ssl_seg;
         page = d->vp.ssl[v].base[ssl_index] + ssl_seg;
@@ -1195,8 +1304,11 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
         hwaddr addr = d->regs[NV_PAPU_VPSSLADDR] + page * 8;
         segment_offset = ldl_le_phys(address_space_memory, addr);
         segment_length = ldl_le_phys(address_space_memory, addr + 4);
-        assert(segment_offset != 0);
-        assert(segment_length != 0);
+        if (segment_offset == 0 || (segment_length & 0xffff) == 0) {
+            VP_GUEST_BAD("voice %u: SSL segment at page %d has offset 0x%X, length 0x%X; voice skipped",
+                         v, page, (unsigned)segment_offset, segment_length);
+            return -1;
+        }
         seg_len = (segment_length >> 0) & 0xffff;
         seg_cs = (segment_length >> 16) & 3;
         seg_spb = (segment_length >> 18) & 0x1f;
@@ -1205,7 +1317,6 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
         if (seg_cs == NV_PAVS_VOICE_CFG_FMT_CONTAINER_SIZE_ADPCM) {
             sample_size = NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S24;
         }
-        assert(seg_len > 0);
         ebo = seg_len - 1;
     }
 
@@ -1254,10 +1365,9 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                     linear_addr += ba;
                     for (unsigned int word_index = 0;
                          word_index < (9 * samples_per_block); word_index++) {
-                        hwaddr addr = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR],
-                                                   0xFFFFFFFF, linear_addr);
-                        adpcm_block[word_index] =
-                            ldl_le_phys(address_space_memory, addr);
+                        hwaddr addr = vp_sge_ptr(&sge_cache, d->regs[NV_PAPU_VPSGEADDR],
+                                                 linear_addr);
+                        memcpy(&adpcm_block[word_index], vp_phys(&page_cache, addr, 4), 4);
                         linear_addr += 4;
                     }
                 }
@@ -1278,28 +1388,28 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                 addr = segment_offset + cbo * block_size;
             } else {
                 uint32_t linear_addr = ba + cbo * (uint32_t)block_size;
-                addr = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR], 0xFFFFFFFF,
-                                    linear_addr);
+                addr = vp_sge_ptr(&sge_cache, d->regs[NV_PAPU_VPSGEADDR], linear_addr);
             }
 
             for (unsigned int channel = 0; channel < channels; channel++) {
                 uint32_t ival;
+                uint16_t hval;
                 float fval;
                 switch (sample_size) {
                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_U8:
-                    ival = ldub_phys(address_space_memory, addr);
+                    ival = *vp_phys(&page_cache, addr, 1);
                     fval = uint8_to_float((uint8_t)(ival & 0xff));
                     break;
                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S16:
-                    ival = lduw_le_phys(address_space_memory, addr);
-                    fval = int16_to_float((int16_t)(ival & 0xffff));
+                    memcpy(&hval, vp_phys(&page_cache, addr, 2), 2);
+                    fval = int16_to_float((int16_t)hval);
                     break;
                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S24:
-                    ival = ldl_le_phys(address_space_memory, addr);
+                    memcpy(&ival, vp_phys(&page_cache, addr, 4), 4);
                     fval = int24_to_float(ival);
                     break;
                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S32:
-                    ival = ldl_le_phys(address_space_memory, addr);
+                    memcpy(&ival, vp_phys(&page_cache, addr, 4), 4);
                     fval = int32_to_float(ival);
                     break;
                 default:
@@ -1724,6 +1834,11 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
                 break;
             }
 
+            if (d->regs[current] >= MCPX_HW_MAX_VOICES) {
+                VP_GUEST_BAD("voice list %d names voice %u: no such voice; rest of the list skipped",
+                             list, d->regs[current]);
+                break;
+            }
             uint16_t v = (uint16_t)d->regs[current];
             d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
                                NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);

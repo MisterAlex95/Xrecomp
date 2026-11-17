@@ -12,6 +12,13 @@
  *   - mono_hrtf_*: a mono 3D voice was filtered into two HRTF channels, but
  *     the bin mixer still selected channels using the one-channel source
  *     format and copied the left result into every bin.
+ *   - pcm_*: every PCM sample resolved its SGE entry and each channel's
+ *     address through mcpx_apu_phys (three calls a stereo sample); now once
+ *     per page, the samples the same across an SGE page boundary.
+ *   - guest_*: values the title wrote (a zero-length stream segment, voice
+ *     handles and HRTF entries past the arrays, a misaligned SSL page) hit
+ *     asserts that aborted a build without NDEBUG, or indexed past the VP's
+ *     arrays in one with it; now ignored.
  *
  * Run with: ctest --test-dir <build> */
 #include "../../src/apu/apu_vp.c"
@@ -34,9 +41,11 @@ uint8_t *g_apu_ram_ptr;
 
 static uint8_t *s_ram;
 static int s_failures;
+static unsigned long s_phys_calls;
 
 uint8_t *mcpx_apu_phys(uint64_t addr)
 {
+    s_phys_calls++;
     if (addr >= RAM_SIZE) {
         fprintf(stderr, "FAIL: guest access at 0x%llX is outside the fake RAM\n",
                 (unsigned long long)addr);
@@ -257,6 +266,89 @@ static void mono_hrtf_keeps_binaural_channels(void)
     }
 }
 
+/* Voice 0: S16 stereo buffer voice, read through SGE entries 0 and 1, which
+ * name pages that are not next to each other; the frame starts 16 frames
+ * before the end of the first page. */
+static void pcm_resolves_once_per_page(void)
+{
+    static MCPXAPUState d;
+    float samples[NUM_SAMPLES_PER_FRAME][2];
+    const uint32_t page1 = 0x50000u, ba = 0x1000u - 16u * 4u;
+    uint32_t sge[4] = { DATA_BASE, 0, page1, 0 };
+    uint32_t fmt = (NV_PAVS_VOICE_CFG_FMT_CONTAINER_SIZE_B16 << 30) |
+                   (NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S16 << 28) |
+                   NV_PAVS_VOICE_CFG_FMT_STEREO | (1u << 16);  /* 2 samples a block */
+
+    memset(s_ram, 0, RAM_SIZE);
+    memset(&d, 0, sizeof(d));
+    d.regs[NV_PAPU_VPVADDR] = VOICE_BASE;
+    d.regs[NV_PAPU_VPSGEADDR] = SGE_BASE;
+    memcpy(s_ram + SGE_BASE, sge, sizeof(sge));
+    set_voice_reg(0, NV_PAVS_VOICE_CFG_FMT, fmt);
+    set_voice_reg(0, NV_PAVS_VOICE_CUR_PSL_START, ba);
+    set_voice_reg(0, NV_PAVS_VOICE_PAR_NEXT, 0x1000);         /* EBO */
+    for (int k = 0; k < NUM_SAMPLES_PER_FRAME; k++) {
+        uint32_t lin = ba + 4u * (uint32_t)k;
+        uint32_t phys = sge[2 * (lin / 4096u)] + lin % 4096u;
+        int16_t l = (int16_t)(1000 + k), r = (int16_t)(-1000 - k);
+        memcpy(s_ram + phys, &l, 2);
+        memcpy(s_ram + phys + 2, &r, 2);
+    }
+
+    s_phys_calls = 0;
+    int n = voice_get_samples(&d, 0, samples, NUM_SAMPLES_PER_FRAME);
+    unsigned long calls = s_phys_calls;
+    CHECK(n == NUM_SAMPLES_PER_FRAME, "pcm: %d samples", n);
+    for (int k = 0; k < n; k++)
+        if (samples[k][0] != int16_to_float((int16_t)(1000 + k)) ||
+            samples[k][1] != int16_to_float((int16_t)(-1000 - k))) {
+            CHECK(0, "pcm: frame %d is %f / %f", k, samples[k][0], samples[k][1]);
+            break;
+        }
+    printf("pcm: %lu physical address resolutions for a %d-sample stereo frame\n",
+           calls, NUM_SAMPLES_PER_FRAME);
+    /* The voice's own registers take about 15; the samples used to take 96. */
+    CHECK(calls < 40, "pcm: %lu resolutions, expected under 40", calls);
+}
+
+static void guest_values_are_ignored(void)
+{
+    static MCPXAPUState d;
+    float samples[NUM_SAMPLES_PER_FRAME][2];
+    const uint32_t ssl_base = 0x40000u;
+
+    /* A stream voice whose segment descriptor is all zero: skipped. */
+    memset(s_ram, 0, RAM_SIZE);
+    memset(&d, 0, sizeof(d));
+    d.regs[NV_PAPU_VPVADDR] = VOICE_BASE;
+    d.regs[NV_PAPU_VPSSLADDR] = ssl_base;
+    set_voice_reg(0, NV_PAVS_VOICE_CFG_FMT,
+                  NV_PAVS_VOICE_CFG_FMT_DATA_TYPE | NV_PAVS_VOICE_CFG_FMT_PERSIST |
+                  NV_PAVS_VOICE_CFG_FMT_LOOP);
+    d.vp.ssl[0].count[0] = 1;
+    CHECK(voice_get_samples(&d, 0, samples, NUM_SAMPLES_PER_FRAME) == -1,
+          "a zero-length stream segment is not skipped");
+
+    /* Methods naming voices / HRTF entries past the arrays, a misaligned
+     * SSL page: each ignored. */
+    fe_method(&d, NV1BA0_PIO_VOICE_OFF, 0x1234);
+    fe_method(&d, NV1BA0_PIO_VOICE_ON, 0x1234);
+    fe_method(&d, NV1BA0_PIO_VOICE_RELEASE, 0x1234);
+    fe_method(&d, NV1BA0_PIO_SET_CURRENT_VOICE, 0x1000);
+    fe_method(&d, NV1BA0_PIO_VOICE_LOCK, 1);
+    fe_method(&d, NV1BA0_PIO_SET_VOICE_SSL_A, 0x12345678);
+    fe_method(&d, NV1BA0_PIO_SET_VOICE_SSL_B, 0x12345678);
+    fe_method(&d, NV1BA0_PIO_SET_CURRENT_VOICE, 0);
+    fe_method(&d, NV1BA0_PIO_SET_VOICE_TAR_HRTF, 0x1FF);
+    fe_method(&d, NV1BA0_PIO_SET_CURRENT_HRTF_ENTRY, 0x200);
+    fe_method(&d, NV1BA0_PIO_SET_HRIR, 0x01020304);
+    fe_method(&d, NV1BA0_PIO_SET_HRIR_X, 0x01020304);
+    fe_method(&d, NV1BA0_PIO_SET_CURRENT_SSL, 0x41);
+    CHECK(d.vp.ssl_base_page == 0, "a misaligned SSL page was taken");
+    fe_method(&d, NV1BA0_PIO_SET_SSL_SEGMENT_OFFSET + 1, 0);
+    CHECK(1, "unreached");
+}
+
 int main(void)
 {
     s_ram = (uint8_t *)calloc(1, RAM_SIZE);
@@ -267,6 +359,8 @@ int main(void)
     adpcm_whole_field_fits();
     gain_ramps_across_a_frame();
     mono_hrtf_keeps_binaural_channels();
+    pcm_resolves_once_per_page();
+    guest_values_are_ignored();
 
     free(s_ram);
     if (s_failures) {
