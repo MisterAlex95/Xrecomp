@@ -3172,27 +3172,21 @@ static void bridge_KeDelayExecutionThread(void)
 
 /* ── KeBugCheck (ordinal 95) / KeBugCheckEx (96) ─────────── */
 /*
- * The title asking the kernel to die. Unbridged this returned 0 and execution
- * carried on into whatever the bug check was there to prevent, so the real
- * failure surfaced later somewhere unrelated. Report the code and stop
- * pretending the call succeeded.
+ * The title asking the kernel to die; its CRT's abort() is KeBugCheck(0).
+ * Neither returns on the console, and neither does it here: returning ran the
+ * code the bug check was there to stop (Yu-Gi-Oh: 2.9 M bug checks in 40 s,
+ * then a SIGILL deep in the image). xbox_BugCheckStop names the code, the
+ * parameters and the call site, and ends the run like a title that quits.
  */
 static void bridge_KeBugCheck(void)
 {
-    fprintf(stderr, "  [KERNEL] *** KeBugCheck: code=0x%08X ***\n",
-            STACK_ARG(0));
-    fflush(stderr);
-    g_eax = 0;
+    xbox_BugCheckStop(0, g_xbox_kernel_caller, STACK_ARG(0), 0, 0, 0, 0);
 }
 
 static void bridge_KeBugCheckEx(void)
 {
-    fprintf(stderr, "  [KERNEL] *** KeBugCheckEx: code=0x%08X "
-            "(0x%08X, 0x%08X, 0x%08X, 0x%08X) ***\n",
-            STACK_ARG(0), STACK_ARG(1), STACK_ARG(2),
-            STACK_ARG(3), STACK_ARG(4));
-    fflush(stderr);
-    g_eax = 0;
+    xbox_BugCheckStop(1, g_xbox_kernel_caller, STACK_ARG(0), STACK_ARG(1),
+                      STACK_ARG(2), STACK_ARG(3), STACK_ARG(4));
 }
 
 /* ── NtYieldExecution (ordinal 238) ──────────────────────── */

@@ -190,6 +190,22 @@ atexit handlers and destructors would pull their mutexes away (it aborted with
 `tests/kernel_reboot` checks the wording and, on POSIX, that a forked child's
 handler gets the reason and the process then exits with status 0.
 
+`KeBugCheck` / `KeBugCheckEx` stop the run the same way, never returning to
+the caller (`xbox_BugCheckStop`, `kernel_hal.c`): a title's `abort()` is
+`KeBugCheck(0)`, and returning from it ran the code it was there to stop
+(Yu-Gi-Oh: 2.9 M bug checks in 40 s, then a `SIGILL` deep in the image). It
+prints one line, `[BUGCHECK] KeBugCheckEx(code, p1, p2, p3, p4) called from
+0x<guest return address>: the title stops here` (`called by the runtime` for
+the runtime's own stops: an unhandled divide error, a cut body, a misdecode),
+then `[EXIT] KeBugCheck(Ex) 0x<code>`, records a guest call as an `exception`
+discovery entry and puts the discovery file on storage, then ends through
+`xbox_title_stop(status, why)` -- `xbox_title_exit` with a status -- with the
+reason `the game stopped on a fatal error (bug check 0x<code> at 0x<caller>)`.
+The status is the code, or 1 when its low byte is 0, so `abort()` does not
+read as a clean exit. One thread stops the run; another that bug checks
+meanwhile waits for the end. `tests/kernel_bridge` checks it through the
+dispatcher.
+
 ## DVD security sector
 
 XAPI start-up of a title whose certificate has bit 0 set in the dword at

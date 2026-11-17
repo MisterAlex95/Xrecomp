@@ -50,6 +50,16 @@ the duplicate and the POSIX shim dereferences the value as an object and
 faults. Each call must succeed, write a target token, and pop 12 bytes of
 arguments.
 
+**Ordinals 95 and 96, `KeBugCheck` and `KeBugCheckEx`, stop the title.**
+POSIX only (fork). A child calls each through the dispatcher with a guest
+return address of `0x00012345`; code after the call must never run (the
+bridge returned before, and Yu-Gi-Oh's `abort()` came back 2.9 M times in
+40 s before a `SIGILL`). The child must end with the bug-check code as its
+status (`KeBugCheckEx(0xDEAD, ...)`: `0xAD`; `KeBugCheck(0)`: 1, never 0),
+print one `[BUGCHECK]` line with the code, the parameters and the caller and
+the `[EXIT] KeBugCheck 0x...` line `tools/compat` reads, hand the reason to
+the exit handler, and leave an `exception` entry in the discovery file.
+
 ## Why this is a separate project
 
 Two reasons, one practical and one about what the checks are worth.

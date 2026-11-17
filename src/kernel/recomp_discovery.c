@@ -17,6 +17,7 @@
 #define d_write        _write
 #define d_close        _close
 #define d_mkdir(p)     _mkdir(p)
+#define d_sync         _commit
 static SRWLOCK s_lock = SRWLOCK_INIT;
 #define LOCK()   AcquireSRWLockExclusive(&s_lock)
 #define UNLOCK() ReleaseSRWLockExclusive(&s_lock)
@@ -28,6 +29,7 @@ static SRWLOCK s_lock = SRWLOCK_INIT;
 #define d_write        write
 #define d_close        close
 #define d_mkdir(p)     mkdir((p), 0755)
+#define d_sync         fsync
 static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #define LOCK()   pthread_mutex_lock(&s_lock)
 #define UNLOCK() pthread_mutex_unlock(&s_lock)
@@ -484,6 +486,17 @@ unsigned recomp_discovery_written(void)
 unsigned recomp_discovery_seeds(void)
 {
     return s_seeds;
+}
+
+void recomp_discovery_flush(void)
+{
+    /* Entries go out with write(), unbuffered: this only asks the system to
+     * put them on the storage now. Once, at a stop, where the per-entry cost
+     * that rules it out in note() does not matter. */
+    LOCK();
+    if (s_fd >= 0)
+        (void)d_sync(s_fd);
+    UNLOCK();
 }
 
 void recomp_discovery_reset(void)
