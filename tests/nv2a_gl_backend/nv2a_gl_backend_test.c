@@ -42,6 +42,8 @@
  * Texture cache (case 10): more distinct textures than the table holds,
  * streamed over frames, retire the old entries; a texture sampled every
  * frame is decoded once (the table used to be dropped whole at 384 keys).
+ * Program table (case 11): a full table is dropped and the new pipeline
+ * linked (it used to be refused for the rest of the run).
  * Also: RECOMP_GPU unset selects the platform's default (gpu_selected).
  * RECOMP_GPU_CPU_WRITES=0 (another ctest entry) checks that the same cases
  * fail without the merge, so the test tells the two apart. */
@@ -512,6 +514,30 @@ int main(void)
         }
         CHECK(nul == 0 && s_tex_drops == drops + 1);
         flip();
+    }
+
+    /* 11. A full program table is dropped, not refused: every slot taken
+     * (failed entries, as a long session leaves them), a new pipeline still
+     * gets a linked program. */
+    {
+        Nv2aGlShaderKey key;
+        GlProg *p;
+        uint32_t i, drops = s_prog_drops;
+        memset(&key, 0, sizeof key);
+        p = prog_get(&key, NULL);
+        CHECK(p != NULL && p->prog != 0);
+        for (i = 0; i < NV_GL_MAX_PROG; i++)
+            if (!s_prog[i].prog && !s_prog[i].failed) {
+                s_prog[i].failed = 1;
+                s_prog[i].hash = 0xDEAD0000u + i;
+                s_nprog++;
+            }
+        key.final0 = 0x12345678u;           /* a pipeline not in the table */
+        p = prog_get(&key, NULL);
+        printf("11. program table full: new pipeline %s, %u drop(s)\n",
+               p && p->prog ? "linked" : "refused", s_prog_drops - drops);
+        CHECK(p != NULL && p->prog != 0);
+        CHECK(s_prog_drops == drops + 1 && s_nprog == 1);
     }
 
     CHECK(glGetError() == GL_NO_ERROR);

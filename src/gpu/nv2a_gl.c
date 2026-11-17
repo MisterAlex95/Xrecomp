@@ -2615,8 +2615,59 @@ typedef struct {
 #define NV_GL_MAX_PROG 2048         /* power of two; pipelines x programs */
 #define NV_GL_MAX_VSH  512          /* power of two */
 static GlProg s_prog[NV_GL_MAX_PROG];
+static uint32_t s_nprog;            /* slots taken, failed ones included */
 
 static GlVsh s_vsh[NV_GL_MAX_VSH];
+static uint32_t s_nvsh;
+static uint32_t s_prog_drops, s_vsh_drops;   /* for the tests */
+
+/* The tables are dropped whole when 3/4 full, as the VB/IB/VAO caches
+ * are: entries were never retired, so a long session across many areas
+ * ended with every new pipeline refused (batches skipped, or drawn on the
+ * CPU) and every miss probing the whole table. A dropped program comes
+ * back from the program binary cache (glProgramBinary, no compile) when it
+ * is on; a dropped vertex shader is translated again. Neither is called
+ * between a lookup and its use: gl_draw and gl_draw_program take the
+ * vertex shader first, then the program, and use both at once. */
+static void prog_drop_all(void)
+{
+    uint32_t i;
+
+    if (s_verbose)
+        fprintf(stderr, "  [GPUGL] program table full (%u entries): dropping it at frame %u\n",
+                s_nprog, s_frame);
+    for (i = 0; i < NV_GL_MAX_PROG; i++) {
+        if (s_prog[i].prog) {
+            if (s_sh.prog == s_prog[i].prog)
+                sh_program(0);
+            glDeleteProgram(s_prog[i].prog);
+        }
+        free(s_prog[i].cloc);
+    }
+    memset(s_prog, 0, sizeof s_prog);
+    s_nprog = 0;
+    s_prog_drops++;
+}
+
+/* The programs keep their vertex shader's hash (it is computed from the
+ * batch, not stored), so they stay valid; a linked program keeps a deleted
+ * shader's code. */
+static void vsh_drop_all(void)
+{
+    uint32_t i;
+
+    if (s_verbose)
+        fprintf(stderr, "  [GPUGL] vertex shader table full (%u entries): dropping it at"
+                        " frame %u\n", s_nvsh, s_frame);
+    for (i = 0; i < NV_GL_MAX_VSH; i++) {
+        if (s_vsh[i].sh)
+            glDeleteShader(s_vsh[i].sh);
+        free(s_vsh[i].src);
+    }
+    memset(s_vsh, 0, sizeof s_vsh);
+    s_nvsh = 0;
+    s_vsh_drops++;
+}
 
 /* 64-bit FNV-1a, continuing from h (shader sources; not hash_bytes, whose
  * byte count is the texture statistics'). */
@@ -2647,8 +2698,11 @@ static GlVsh *vsh_get(const Nv2aProgramBatch *pb, uint64_t fmt)
         if (c->hash == h && c->count == pb->ins_count && c->fmt == fmt)
             return c->failed ? NULL : c;
     }
-    if (!v)
-        return NULL;                /* ponytail: 512 programs, then the CPU */
+    if (!v || s_nvsh >= NV_GL_MAX_VSH * 3 / 4) {
+        vsh_drop_all();
+        return vsh_get(pb, fmt);
+    }
+    s_nvsh++;
     v->hash = h;
     v->count = pb->ins_count;
     v->fmt = fmt;
@@ -3025,8 +3079,11 @@ static GlProg *prog_get(const Nv2aGlShaderKey *key, GlVsh *vsh)
         if (c->hash == h && c->vsh_hash == vh && memcmp(&c->key, key, sizeof *key) == 0)
             return c->failed ? NULL : c;
     }
-    if (!p)
-        return NULL;                /* ponytail: 2048 pipelines, then no more */
+    if (!p || s_nprog >= NV_GL_MAX_PROG * 3 / 4) {
+        prog_drop_all();
+        return prog_get(key, vsh);
+    }
+    s_nprog++;
     p->key = *key;
     p->hash = h;
     p->vsh_hash = vh;
@@ -4380,9 +4437,11 @@ static void gl_reset_objects(int lost)
     for (i = 0; i < NV_GL_MAX_PROG; i++)
         free(s_prog[i].cloc);
     memset(s_prog, 0, sizeof s_prog);
+    s_nprog = 0;
     for (i = 0; i < NV_GL_MAX_VSH; i++)
         free(s_vsh[i].src);
     memset(s_vsh, 0, sizeof s_vsh);
+    s_nvsh = 0;
     s_nwarm = 0;
     free(s_pc_list);                /* ensure_init scans the cache again */
     s_pc_list = NULL;
