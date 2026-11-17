@@ -114,6 +114,14 @@ public class PrepareService extends Service {
         return worker;
     }
 
+    /**
+     * True while a job is this service's (main thread): from startJob to its onJobEnd. The worker thread can be dead
+     * already while its onJobEnd waits in the main looper; a start in that window must queue, not run beside it (AND-4).
+     */
+    private static boolean jobOwned() {
+        return current != null;
+    }
+
     static Intent startIntent(Context c, String gameDir, String titleId, String title) {
         return new Intent(c, PrepareService.class).setAction(ACTION_START).putExtra(EXTRA_GAME_DIR, gameDir)
                 .putExtra(EXTRA_TITLE_ID, titleId).putExtra(EXTRA_TITLE, title);
@@ -164,7 +172,7 @@ public class PrepareService extends Service {
             return START_NOT_STICKY;
         }
         if (!ACTION_START.equals(action)) {
-            if (!busy())
+            if (!jobOwned())
                 stopSelf(startId);
             return START_NOT_STICKY;
         }
@@ -203,7 +211,7 @@ public class PrepareService extends Service {
             if (resumes > 0)
                 Log.i(TAG, "prepare: resuming " + titleId + " after its process died (" + resumes + ")");
         }
-        boolean busy = busy();
+        boolean busy = jobOwned();
         if (gameDir == null || titleId == null || titleId.isEmpty()) {
             Log.w(TAG, "prepare: start without a game or title ID");
             if (!busy) {
@@ -310,12 +318,12 @@ public class PrepareService extends Service {
             saveQueue();
             markCancelled(titleId, PrepareProtocol.QUEUED);
             Log.i(TAG, "prepare: " + titleId + " taken out of the queue");
-            if (!busy())
+            if (!jobOwned())
                 stopSelf();
             return;
         }
         PrepareRunner r = current;
-        if (r != null && busy()) {
+        if (r != null) {   // its worker may have just ended: cancel is then a no-op, its onJobEnd follows
             if (titleId != null && !titleId.isEmpty() && !titleId.equals(currentTid)) {
                 Log.i(TAG, "prepare: cancel for " + titleId + ", which neither runs nor waits: ignored");
                 return;
@@ -333,7 +341,7 @@ public class PrepareService extends Service {
 
     /** A start that runs nothing: out of the foreground and stopped, unless a Prepare runs. */
     private void dropStart(int startId) {
-        if (busy())
+        if (jobOwned())
             return;
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf(startId);
@@ -446,7 +454,7 @@ public class PrepareService extends Service {
             }
         }
         PrepareProtocol.Status fin = end;
-        new android.os.Handler(getMainLooper()).post(() -> onJobEnd(fin));
+        new android.os.Handler(getMainLooper()).post(() -> onJobEnd(runner, fin));
     }
 
     /** The real tools: the zips installed, then the command of docs/android/prepare.md. */
@@ -791,8 +799,11 @@ public class PrepareService extends Service {
         return out;
     }
 
-    private void onJobEnd(PrepareProtocol.Status s) {
-        PrepareRunner done = current;
+    private void onJobEnd(PrepareRunner done, PrepareProtocol.Status s) {
+        if (current != done) {   // not this service's job any more: its end must not touch the one that runs
+            Log.w(TAG, "prepare: the end of " + s.titleId + " came after another job started: ignored");
+            return;
+        }
         current = null;
         currentTid = null;
         if (monitor != null)

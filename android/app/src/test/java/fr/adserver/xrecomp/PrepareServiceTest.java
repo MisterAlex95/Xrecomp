@@ -288,6 +288,30 @@ public class PrepareServiceTest {
         assertNotNull(shadowOf(nm).getNotification(TID2, PrepareService.NOTIF_DONE_ID));
     }
 
+    /**
+     * AND-4: a start that arrives after the worker died but before its end reached the main thread. The old job's end
+     * must not disown the new one (clear it, stop its monitor and wake lock, stopSelf).
+     */
+    @Test
+    public void aStartBetweenTheWorkersEndAndItsJobEndIsKept() throws Exception {
+        useScript(GATED_PACK_SCRIPT);
+        go(TID);
+        ServiceController<PrepareService> sc = start();
+        Thread first = PrepareService.workerThread();
+        first.join(30000);
+        assertFalse(first.isAlive());       // its onJobEnd is posted, not run: the main looper is paused
+        sc.withIntent(PrepareService.startIntent(app, "/games/b", TID2, "Second")).startCommand(0, 2);
+        shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(PrepareProtocol.DONE, status(TID).state);
+        Thread second = PrepareService.workerThread();
+        assertTrue("the second one runs", second != first && second.isAlive());
+        assertFalse("still running: not stopped", shadowOf(sc.get()).isStoppedBySelf());
+        go(TID2);
+        waitWorker();
+        assertEquals(PrepareProtocol.DONE, status(TID2).state);
+        assertTrue(shadowOf(sc.get()).isStoppedBySelf());
+    }
+
     @Test
     public void nextRunsAfterAFailureToo() throws Exception {
         useScript("if [ \"$(basename \"$2\")\" = " + TID + " ]; then echo 'XBA_RESULT error code=BOOM msg=x'; exit 1; fi\n"
