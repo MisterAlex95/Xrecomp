@@ -3611,6 +3611,12 @@ class FunctionTranslator:
             lines.append("    uint32_t _fa = 0, _fb = 0;")
             lines.append("    int32_t _fas = 0, _fbs = 0;")
             lines.append("    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;")
+        # A shift by a register count records whether that count was zero
+        # (Lifter._shift_count_guard).
+        if any(insn.mnemonic.removeprefix("lock ") in ("shl", "sal", "shr", "sar")
+               and len(insn.operands) >= 2 and insn.operands[1].type != "imm"
+               for insn in instructions):
+            lines.append("    int _shz = 0; (void)_shz;")
             # Flag snapshot: a cmp/test that is not fused with its jcc records
             # its operands here, zero- and sign-extended to the compare's own
             # width, so the branch tests what the compare saw.

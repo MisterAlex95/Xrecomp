@@ -623,6 +623,21 @@ def _make_condition(jcc, flag_setter, flag_ops):
             return "(_fa != 0)", desc
         return None
 
+    # A shift by a register count: _shz says the count was zero, and then
+    # every flag is still the previous setter's (whose snapshot the shift
+    # did not overwrite, the write being guarded by the same test). With no
+    # answer for the previous setter, the shift's own answer stands, as it
+    # did before the guard existed.
+    if flag_setter == "__shift_cl":
+        shift, shift_ops, prev, prev_ops = flag_ops
+        mine = _make_condition(jcc, shift, shift_ops)
+        if not mine:
+            return None
+        before = _make_condition(jcc, prev, prev_ops) if prev else None
+        if not before:
+            return mine
+        return f"(_shz ? ({before[0]}) : ({mine[0]}))", mine[1]
+
     # rol/ror write CF (into _cf) and OF, and leave ZF/SF/PF as the setter
     # before them made them. That setter rides along in the state, so
     # `test eax, eax; rol ecx, 1; jz` still answers from the test; OF is not
@@ -2880,16 +2895,37 @@ class Lifter:
             return [f"/* shift: bad operands */"]
         dst = _fmt_operand_read(ops[0])
         cnt = f"(({_fmt_operand_read(ops[1])}) & 31u)"
-        out = []
+        out, guard = self._shift_count_guard(ops, cnt)
         if self.needs_cf:
             w = (_operand_width(ops[0]) or 4) * 8
             # Counts beyond a narrow operand have undefined CF, but the C
             # must stay defined. A masked zero preserves the incoming carry.
             bit = f"(({cnt}) - 1) & 31u" if c_op == ">>" else f"({w} - ({cnt})) & 31u"
-            out.append(f"if ({cnt}) _cf = (int)(((uint32_t)({dst}) >> ({bit})) & 1u);")
+            out.append(f"if ({guard}) _cf = (int)(((uint32_t)({dst}) >> ({bit})) & 1u);")
         out.append(_fmt_operand_write(ops[0], f"(uint32_t)({dst}) {c_op} {cnt}"))
-        out.append(self._result_snapshot(ops, "shift"))
+        out.append(self._guarded_snapshot(ops, "shift", guard))
         return out
+
+    @staticmethod
+    def _shift_count_guard(ops, cnt):
+        """The statements and the C test for "the masked count is not zero".
+
+        x86 leaves every flag alone when a shift's masked count is 0. An
+        immediate count is known here; a count in a register is recorded in
+        _shz, before the write (`shl cl, cl`), so the result snapshot is
+        skipped and the consumer can answer from the setter before the shift
+        (the "__shift_cl" state, see _make_condition).
+        """
+        if ops[1].type == "imm":
+            return [], cnt
+        return [f"_shz = !{cnt}; /* a zero count keeps every flag */"], "!_shz"
+
+    def _guarded_snapshot(self, ops, m, guard):
+        if ops[1].type != "imm":
+            return f"if ({guard}) {{ {self._result_snapshot(ops, m)} }}"
+        if ops[1].imm & 31:
+            return self._result_snapshot(ops, m)
+        return f"/* {m} by 0: the flags are kept */"
 
     def _lift_sar(self, insn, ops):
         """Arithmetic shift right, at the operand's own width.
@@ -2925,11 +2961,11 @@ class Lifter:
         cnt = f"(({_fmt_operand_read(ops[1])}) & 31u)"
         width = (_operand_width(ops[0]) or 4) * 8
         signed = f"(int32_t)(int{width}_t)({dst})"
-        out = []
+        out, guard = self._shift_count_guard(ops, cnt)
         if self.needs_cf:
-            out.append(f"if ({cnt}) _cf = (int)(((uint32_t)({signed}) >> ((({cnt}) - 1) & 31u)) & 1);")
+            out.append(f"if ({guard}) _cf = (int)(((uint32_t)({signed}) >> ((({cnt}) - 1) & 31u)) & 1);")
         out.append(_fmt_operand_write(ops[0], f"(uint32_t)(({signed}) >> {cnt})"))
-        out.append(self._result_snapshot(ops, "sar"))
+        out.append(self._guarded_snapshot(ops, "sar", guard))
         return out
 
     def _lift_rotate_carry(self, insn, ops, m):
@@ -5374,6 +5410,22 @@ def lift_basic_block(lifter, bb, flag_state=None):
             last_flag_ops = list(curr.operands)
         elif curr.mnemonic in _SSE_CMP_NAMED:
             pass  # SSE compares write a mask, not EFLAGS
+        elif (curr.mnemonic in ("shl", "sal", "shr", "sar")
+              and len(curr.operands) >= 2 and curr.operands[1].type == "imm"
+              and not curr.operands[1].imm & 31):
+            pass  # a count of zero (masked) leaves every flag alone
+        elif (curr.mnemonic in ("shl", "sal", "shr", "sar")
+              and len(curr.operands) >= 2 and curr.operands[1].type != "imm"):
+            # The count may be zero at run time (see _shift_count_guard). A
+            # previous shift by a register is not kept underneath: its
+            # answer reads _shz, which this shift has just overwritten.
+            setter, ops = normalise_zero_test(curr.mnemonic,
+                                              list(curr.operands))
+            prev = last_flag_setter
+            if prev == "__shift_cl":
+                prev, last_flag_ops = None, []
+            last_flag_ops = [setter, ops, prev, last_flag_ops]
+            last_flag_setter = "__shift_cl"
         elif curr.mnemonic in FLAG_SETTERS:
             last_flag_setter, last_flag_ops = normalise_zero_test(
                 curr.mnemonic, list(curr.operands))
