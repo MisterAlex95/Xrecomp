@@ -1,8 +1,10 @@
 # Other consoles
 
-XRecomp is adding **Game Boy Advance**, **PlayStation**, **Nintendo 64** (and **Nintendo DS**, **PSP**, **GameCube**, **Dreamcast**, **Xbox 360**, **Nintendo 3DS** and **PlayStation 2** spikes), statically recompiled the same way as
-Xbox discs. This is early work: the layout, build options and test corpus are in place, the runtimes are empty, and no
-game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first), layout, pipeline and milestones are in the Plane spec:
+XRecomp plays **Game Boy Advance**, **PlayStation** and **Nintendo 64** games, statically recompiled the same way as
+Xbox discs, on the shared host layer and in the Android app. **GameCube** has its runtime in the app too (homebrew
+DOLs and disc images, « GameCube runtime » below). **Nintendo DS**, **PSP**, **Dreamcast**, **Xbox 360**,
+**Nintendo 3DS** and **PlayStation 2** are spikes: tools, headers or a headless Linux runtime, nothing a player can
+use yet. Goal, order, rules (legal), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
 
 | Directory | Console | CPU |
@@ -12,7 +14,7 @@ game for these consoles runs yet. Goal, order, rules (legal, Linux arm64 first),
 | `n64/` | Nintendo 64 | MIPS R4300i (big-endian, 64-bit) |
 | `nds/` | Nintendo DS (spike, Linux headless only) | ARM946E-S (ARMv5TE) + ARM7TDMI |
 | `psp/` | PSP (spike, Linux headless only) | Allegrex (MIPS32 R4000-class, little-endian) + FPU + VFPU |
-| `gc/` | GameCube (homebrew DOLs in the app, XBA-259) | Gekko (PowerPC 750 + paired singles, big-endian) |
+| `gc/` | GameCube (DOLs and disc images in the app, XBA-259, XBA-261) | Gekko (PowerPC 750 + paired singles, big-endian) |
 | `dc/` | Dreamcast (spike, Linux headless only) | Hitachi SH-4 (SH7091, little-endian, FPU) |
 | `ps2/` | PlayStation 2 (spike, Linux headless only) | Emotion Engine: R5900 (MIPS III + 128-bit MMI, non-IEEE FPU) |
 | `x360/` | Xbox 360 (spike, tools and headers only) | Xenon (64-bit PowerPC + VMX128, big-endian) |
