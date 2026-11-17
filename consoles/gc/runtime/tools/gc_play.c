@@ -2,9 +2,12 @@
  *
  *   gc_play PROG.dol [--frames N] [--headless] [--unpaced] [--screenshot OUT.png] [--capture FIELD OUT.ppm]
  *           [--pal] [--cpu-yuv] [--pack LIB.so] [--pad BUTTONS[:SX:SY:CX:CY:L:R]] [--wav OUT.wav]
+ *           [--save-dir DIR] [--card-size 59|251|1019] [--card-b] [--no-card]
  *
  * --pad holds port 1's buttons (hex, GC_PAD_*) and sets its sticks and triggers (0..255, sticks at rest 128) for the
- * whole run, on top of the real pads (tests). --wav: everything played, also as a 48 kHz WAV (XBA-263). Exit 0, 1 when the program cannot start or the machine stopped. */
+ * whole run, on top of the real pads (tests). --wav: everything played, also as a 48 kHz WAV (XBA-263). --save-dir:
+ * the memory cards' folder, DIR/gc-<KEY>/cardA.raw (XBA-264); --card-size for a new card; --card-b a card in slot B
+ * too; --no-card slot A empty. Exit 0, 1 when the program cannot start or the machine stopped. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +27,14 @@ int main(int argc, char **argv)
             o.unpaced = 1;
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc)
             o.screenshot = argv[++i];
+        else if (!strcmp(argv[i], "--save-dir") && i + 1 < argc)
+            o.save_dir = argv[++i];
+        else if (!strcmp(argv[i], "--card-size") && i + 1 < argc)
+            o.card_blocks = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--card-b"))
+            o.card_b = 1;
+        else if (!strcmp(argv[i], "--no-card"))
+            o.card_a = 0;
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc)
             o.wav_path = argv[++i];
         else if (!strcmp(argv[i], "--capture") && i + 2 < argc) {
@@ -49,7 +60,8 @@ int main(int argc, char **argv)
         else {
             fprintf(stderr, "usage: gc_play PROG.dol [--frames N] [--headless] [--unpaced] [--screenshot OUT.png]"
                             " [--capture FIELD OUT.ppm] [--pal] [--cpu-yuv] [--pack LIB.so]"
-                            " [--pad BUTTONS[:SX:SY:CX:CY:L:R]] [--wav OUT.wav]\n");
+                            " [--pad BUTTONS[:SX:SY:CX:CY:L:R]] [--wav OUT.wav] [--save-dir DIR]"
+                            " [--card-size 59|251|1019] [--card-b] [--no-card]\n");
             return 2;
         }
     }

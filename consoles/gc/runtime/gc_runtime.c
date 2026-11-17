@@ -15,6 +15,7 @@
 #include "gc_runtime.h"
 #include "gc_audio.h"
 #include "gc_boot.h"
+#include "gc_exi.h"
 
 #include "host_audio.h"
 
@@ -56,6 +57,7 @@ void gc_runtime_opts_init(gc_runtime_opts *o)
 {
     memset(o, 0, sizeof *o);
     o->tv_mode = -1;
+    o->card_a = o->card_b = -1;
     o->yuv_cpu = -1;
     o->scale = -1;
     o->filter = -1;
@@ -191,11 +193,14 @@ static void save_missed_locked(void)
     free(list);
 }
 
+static void cards_flush_locked(const char *why);
+
 static void on_exit_hook(const char *why)
 {
     (void)why;
     pthread_mutex_lock(&s_mu);
     save_missed_locked();
+    cards_flush_locked("exit");
     if (s_m)
         gx_save_shader_list(gc_gx(s_m)); /* the GX states met (XBA-262) */
     pthread_mutex_unlock(&s_mu);
@@ -280,6 +285,148 @@ static void rumble(gc_machine *m)
             host_pad_rumble(p, 0, 0, 0);
         s_motor[p] = on;
     }
+}
+
+/* ---- Memory cards (XBA-264) ------------------------------------------------------------------------------------ */
+
+#define CARD_FLUSH_NS (2ull * 1000000000ull) /* written back two seconds after the game's last write */
+static char s_card_path[2][1200];            /* "": the card lives in memory only */
+static uint64_t s_card_flushed[2];           /* gc_card_writes as last written (or loaded) */
+static uint64_t s_card_seen[2], s_card_changed_ns[2];
+
+int gc_runtime_card_path(const char *save_dir, const char *key, int slot, char *out, size_t out_n)
+{
+    if (!save_dir || !*save_dir || !key || !*key || slot < 0 || slot > 1 || !out)
+        return -1;
+    int n = snprintf(out, out_n, "%s/gc-%s/card%c.raw", save_dir, key, slot ? 'B' : 'A');
+    return n < 0 || (size_t)n >= out_n ? -1 : 0;
+}
+
+/* Atomically: a temporary file beside it, synced, then renamed over it. */
+static int write_file_atomic(const char *path, const uint8_t *data, size_t n)
+{
+    char tmp[1300];
+    mkdirs_for(path);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f)
+        return -1;
+    int ok = fwrite(data, 1, n, f) == n;
+    ok &= fflush(f) == 0;
+    ok &= fsync(fileno(f)) == 0;
+    ok &= fclose(f) == 0;
+    if (!ok || rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+/* Under s_mu: each card the game wrote since it was last written goes to its file. */
+static void cards_flush_locked(const char *why)
+{
+    for (int slot = 0; slot < 2 && s_m; slot++) {
+        size_t n = 0;
+        const uint8_t *d = gc_card_data(s_m, slot, &n);
+        uint64_t w = gc_card_writes(s_m, slot);
+        if (!d || !s_card_path[slot][0] || w == s_card_flushed[slot])
+            continue;
+        if (write_file_atomic(s_card_path[slot], d, n) != 0) {
+            fprintf(stderr, "gc: cannot write memory card %c to %s: %s\n", 'A' + slot, s_card_path[slot],
+                    strerror(errno));
+            continue;
+        }
+        s_card_flushed[slot] = s_card_seen[slot] = w;
+        printf("gc: memory card %c written (%s) to %s\n", 'A' + slot, why, s_card_path[slot]);
+    }
+    fflush(stdout);
+}
+
+/* Between fields: a card whose writes stopped CARD_FLUSH_NS ago is written. */
+static void cards_flush_due(uint64_t now)
+{
+    pthread_mutex_lock(&s_mu);
+    int due = 0;
+    for (int slot = 0; slot < 2 && s_m; slot++) {
+        uint64_t w = gc_card_writes(s_m, slot);
+        if (w != s_card_seen[slot]) {
+            s_card_seen[slot] = w;
+            s_card_changed_ns[slot] = now;
+        }
+        due |= w != s_card_flushed[slot] && now - s_card_changed_ns[slot] >= CARD_FLUSH_NS;
+    }
+    if (due)
+        cards_flush_locked("after the game's writes");
+    pthread_mutex_unlock(&s_mu);
+}
+
+/* The app paused (background, the in-game menu): the cards go to disk from the thread that paused it (the process
+ * can be killed in the background). Registered once; no run, no-op. */
+static void on_lifecycle_cards(int paused, void *user)
+{
+    (void)user;
+    if (paused) {
+        pthread_mutex_lock(&s_mu);
+        cards_flush_locked("pause");
+        pthread_mutex_unlock(&s_mu);
+    }
+}
+
+static int env_int(const char *name, int dflt)
+{
+    const char *v = getenv(name);
+    return v && *v ? atoi(v) : dflt;
+}
+
+/* Under s_mu, before the first field: the cards the options ask for, from their files when there. A file of another
+ * card size keeps its size; one of no card's size is left alone (the slot gets a blank card kept in memory only).
+ * $RECOMP_GC_LANGUAGE (0 English .. 5 Dutch) sets SRAM's language. */
+static void cards_insert(gc_machine *m, const gc_runtime_opts *o, const char *key)
+{
+    int on[2] = {o->card_a >= 0 ? o->card_a : 1, o->card_b >= 0 ? o->card_b : env_int("RECOMP_GC_CARD_B", 0) == 1};
+    int blocks = o->card_blocks > 0 ? o->card_blocks : env_int("RECOMP_GC_CARD_SIZE", 251);
+    int mbit = gc_card_mbit_of_blocks(blocks);
+    if (!mbit) {
+        fprintf(stderr, "gc: no memory card has %d blocks (59, 251 or 1019): 251\n", blocks);
+        mbit = GC_CARD_MBIT_251;
+    }
+    int lang = env_int("RECOMP_GC_LANGUAGE", -1);
+    if (lang >= 0)
+        gc_exi_set_language(m, lang);
+    for (int slot = 0; slot < 2; slot++) {
+        s_card_path[slot][0] = 0;
+        s_card_flushed[slot] = s_card_seen[slot] = s_card_changed_ns[slot] = 0;
+        if (!on[slot])
+            continue;
+        char path[1200];
+        int have_path = gc_runtime_card_path(o->save_dir, key, slot, path, sizeof path) == 0;
+        size_t n = 0;
+        uint8_t *img = have_path ? read_all(path, gc_card_bytes(GC_CARD_MBIT_1019), &n) : NULL;
+        int file_mbit = img ? gc_card_mbit_of_size(n) : 0;
+        if (img && file_mbit) {
+            gc_card_insert(m, slot, file_mbit, img);
+            printf("gc: memory card %c (%d blocks) loaded from %s\n", 'A' + slot, (file_mbit << 4) - 5, path);
+        } else {
+            gc_card_insert(m, slot, mbit, NULL);
+            if (img || (have_path && access(path, F_OK) == 0)) {
+                fprintf(stderr, "gc: %s is no memory card image (%zu bytes), left alone: slot %c has a blank card "
+                                "in memory only\n", path, n, 'A' + slot);
+                have_path = 0;
+            } else {
+                printf("gc: memory card %c: blank, %d blocks (unformatted: the game offers to format it), %s%s\n",
+                       'A' + slot, (mbit << 4) - 5,
+                       have_path ? "saved once the game writes, to " : "in memory only (no save dir)",
+                       have_path ? path : "");
+            }
+        }
+        free(img);
+        if (have_path)
+            snprintf(s_card_path[slot], sizeof s_card_path[slot], "%s", path);
+    }
+    fflush(stdout);
+    static int listening;
+    if (!listening && recomp_lifecycle_listen(on_lifecycle_cards, NULL) == 0)
+        listening = 1;
 }
 
 /* ---- The run ---------------------------------------------------------------------------------------------------- */
@@ -368,6 +515,7 @@ started:;
     pthread_mutex_lock(&s_mu);
     s_m = m;
     snprintf(s_discovered, sizeof s_discovered, "%s", o->discovered_path ? o->discovered_path : "");
+    cards_insert(m, o, key);
     pthread_mutex_unlock(&s_mu);
     recomp_exit_hook_set(on_exit_hook);
 
@@ -562,6 +710,7 @@ started:;
             host_perf_shown(&hp, 1);
         }
         host_perf_log_due(&hp, now_ns());
+        cards_flush_due(now_ns());
         if (stopped) {
             rc = -1;
             break;
@@ -639,6 +788,7 @@ started:;
         host_window_close();
     pthread_mutex_lock(&s_mu);
     save_missed_locked();
+    cards_flush_locked("exit");
     s_m = NULL;
     s_discovered[0] = 0;
     pthread_mutex_unlock(&s_mu);
@@ -651,6 +801,12 @@ started:;
 /* ---- The app shell's entry -------------------------------------------------------------------------------------- */
 
 static char s_start_work_dir[1024];
+static char s_start_save_dir[1024];
+
+void gc_runtime_set_save_dir(const char *dir)
+{
+    snprintf(s_start_save_dir, sizeof s_start_save_dir, "%s", dir ? dir : "");
+}
 
 void gc_runtime_set_work_dir(const char *dir)
 {
@@ -664,6 +820,7 @@ int gc_runtime_start(const char *dol, const char *pack_lib, const char *title_ke
     o.dol = dol;
     o.title_key = title_key;
     o.pack_lib = pack_lib;
+    o.save_dir = s_start_save_dir[0] ? s_start_save_dir : NULL; /* memory cards (XBA-264) */
     char discovered[1200];
     if (s_start_work_dir[0] && title_key && *title_key) {
         snprintf(discovered, sizeof discovered, "%s/gc-%s/discovered.txt", s_start_work_dir, title_key);

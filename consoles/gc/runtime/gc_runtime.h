@@ -65,6 +65,12 @@ typedef struct gc_runtime_opts {
     int scale, filter;
     /* Everything played also written here as a 48 kHz stereo WAV (tests); NULL: none. */
     const char *wav_path;
+    /* Memory cards (XBA-264): <save_dir>/gc-<KEY>/cardA.raw and cardB.raw, loaded at start and written back (temp +
+     * rename) two seconds after the game's last write, at pause and at exit; NULL or "": in memory only. card_a /
+     * card_b: 1 a card in the slot, 0 none, -1 the default (A in, B out unless $RECOMP_GC_CARD_B=1). card_blocks: 59,
+     * 251 or 1019 for a new card (0: $RECOMP_GC_CARD_SIZE, else 251); a file there keeps its own size. */
+    const char *save_dir;
+    int card_a, card_b, card_blocks;
 } gc_runtime_opts;
 
 void gc_runtime_opts_init(gc_runtime_opts *o);
@@ -76,6 +82,14 @@ int gc_runtime_run(const gc_runtime_opts *o);
 /* Where gc_runtime_start writes the discovered addresses: <dir>/gc-<KEY>/discovered.txt (the app shell's
  * <internal files>/work); NULL: not written. */
 void gc_runtime_set_work_dir(const char *dir);
+
+/* Where gc_runtime_start keeps the memory cards: <dir>/gc-<KEY>/cardA.raw (the app shell's <internal files>/save,
+ * XBA-264); NULL: in memory only. */
+void gc_runtime_set_save_dir(const char *dir);
+
+/* <save_dir>/gc-<key>/cardA.raw (slot 0) or cardB.raw (slot 1): 0, or -1 when an argument is missing or out is too
+ * small. */
+int gc_runtime_card_path(const char *save_dir, const char *key, int slot, char *out, size_t out_n);
 
 /* The app shell's entry point (android/app/src/main/cpp/pack_loader.c): dol is the program (a path or "fd:N"),
  * pack_lib a title pack's library or NULL, title_key the game's key. Plays it with gc_runtime_run and returns its

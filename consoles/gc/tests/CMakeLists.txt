@@ -140,6 +140,12 @@ if(TARGET gc_play)
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_disc.sh play $<TARGET_FILE:gc_play> ${GC_HOMEBREW_DIR}/hello.dol
                 ${CMAKE_CURRENT_BINARY_DIR}/play_disc ${CMAKE_CURRENT_SOURCE_DIR}/hello_xfb.png)
     set_tests_properties(gc_play_hello gc_play_pad gc_play_disc PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    # XBA-264: the memory card test through gc_runtime with a save dir: cardA.raw across two launches, written at exit
+    # and two seconds after the game's writes, 59 / 251 / 1019 blocks, slot B, a foreign file left alone
+    add_test(NAME gc_play_card
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_card.sh $<TARGET_FILE:gc_play> ${GC_HOMEBREW_DIR}/cardtest.dol
+                ${CMAKE_CURRENT_BINARY_DIR}/play_card)
+    set_tests_properties(gc_play_card PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 endif()
 
 # Disc images (XBA-261): gc_disc generates a GCM of our DVD-interface test program and its ISO / CISO / GCZ / RVZ /

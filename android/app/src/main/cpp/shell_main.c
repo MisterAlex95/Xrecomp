@@ -341,8 +341,8 @@ int main(int argc, char *argv[])
      * EXE through the OpenBIOS asset, memory cards under
      * <internal>/save/ps1-<KEY>/). The N64 runtime the same (XBA-174: the
      * cartridge as it is, no BIOS, saves under <internal>/save/n64-<KEY>/).
-     * The GameCube runtime the same (XBA-259: a homebrew DOL, no IPL, no
-     * saves yet). */
+     * The GameCube runtime the same (XBA-259: a DOL or a disc, no IPL,
+     * memory cards under <internal>/save/gc-<KEY>/, XBA-264). */
     int console = !s_title_main && have_game <= 0 && store.game_dir[0] ? xba_pack_rom_console(store.game_dir)
                                                                         : RECOMP_CONSOLE_UNKNOWN;
     int console_game = console != RECOMP_CONSOLE_UNKNOWN;
@@ -354,6 +354,8 @@ int main(int argc, char *argv[])
             ps1_runtime_set_save_dir(store.save_dir);   /* memory cards: <internal>/save/ps1-<KEY>/card1.mcr */
         if (console == RECOMP_CONSOLE_N64)
             n64_runtime_set_save_dir(store.save_dir);   /* <internal>/save/n64-<KEY>/game.eep, pak1.mpk... */
+        if (console == RECOMP_CONSOLE_GC)
+            gc_runtime_set_save_dir(store.save_dir);    /* memory cards: <internal>/save/gc-<KEY>/cardA.raw */
         pack_rc = xba_pack_load_rom(SDL_AndroidGetInternalStoragePath(), store.game_dir, &console_rc,
                                     pack_reason, sizeof pack_reason);
         if (pack_rc == RECOMP_PACK_OK)
