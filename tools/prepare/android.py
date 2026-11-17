@@ -37,6 +37,24 @@ def image_norm(p):
     return p.strip().replace("\\", "/").lstrip("/").lower()
 
 
+def seeds_suffix(files):
+    """What the analysis stamp keeps of the profile layers' seed_functions
+    files: "" without any; else "|seeds=" + sha256 over their contents in
+    order (not their paths: the toolkit moves with an app update). A file
+    that cannot be read counts by its name, so it changes the key too."""
+    if not files:
+        return ""
+    h = hashlib.sha256()
+    for fn in files:
+        try:
+            with open(fn, "rb") as f:
+                h.update(hashlib.sha256(f.read()).digest())
+        except OSError:
+            h.update(b"missing:" + os.path.basename(fn).encode())
+        h.update(b"\0")
+    return "|seeds=" + h.hexdigest()
+
+
 class _ImageReporter:
     """Another image's steps, shown inside step 4: « game.xbe: analysing: disasm »."""
 
@@ -170,7 +188,11 @@ class Run:
         # Also when the seeds file went away (removed to drop a bad seed): the
         # analysis made with it must not be kept.
         # The static discovery switches too (XBA-137): "" for the default.
-        key = discovered.digest(disc) + discovered.mode_suffix()
+        # And the profile's own seeds: "" without any, so a stamp made before
+        # they counted stays valid (the « Enhancements » switch changes the
+        # profile without changing the toolkit digest).
+        key = discovered.digest(disc) + discovered.mode_suffix() + \
+            seeds_suffix((self.profile or {}).get("seed_functions", []))
         if self.stamp.get("discovered", "") != key:
             for name in ("disasm", "func_id", "abi", "lift"):
                 self.stamp.pop(name, None)

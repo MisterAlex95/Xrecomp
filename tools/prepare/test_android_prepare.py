@@ -797,3 +797,62 @@ def test_resume_entries(tmp_path):
     assert not pack.resume_entries([old])                  # a lifter from before XBA-250: no table
     assert not pack.resume_entries([other])                # the table is only read from recomp_dispatch.c
     assert not pack.resume_entries([str(tmp_path / "gone/recomp_dispatch.c")])
+
+
+def test_android_analysis_stamp_follows_the_profile_seeds(tmp_path, monkeypatch):
+    """The analysis is redone when the profile's seed_functions change (a
+    layer with seeds added or dropped, as the « Enhancements » switch does,
+    or a seeds file edited), and kept when they do not; a stamp made without
+    profile seeds stays valid."""
+    from tools.prepare import android, discovered
+    monkeypatch.setattr(discovered, "refresh", lambda *a, **k: None)
+    monkeypatch.setattr(discovered, "analysis_counts", lambda an: None)
+    for k in ("RECOMP_STATIC_DISCOVERY", "RECOMP_STATIC_DISCOVERY_CAP", "RECOMP_STATIC_DISCOVERY_STRICT"):
+        monkeypatch.delenv(k, raising=False)
+    a = _Args(tmp_path, str(tmp_path / "libmain.so"))
+    os.makedirs(a.work, exist_ok=True)
+    xbe = tmp_path / "default.xbe"
+    xbe.write_bytes(b"XBEH" + b"\0" * 60)
+    seeds = tmp_path / "seeds.txt"
+    seeds.write_text("0x00011000\n")
+    ran = []
+
+    def analyse(profile):
+        r = android.Run(a, None)
+        r.rep = Reporter()
+        with open(r.stamp_path) as f:
+            r.stamp = json.load(f)
+        r.xbe, r.xjson, r.profile = str(xbe), str(tmp_path / "x.json"), profile
+        del ran[:]
+        monkeypatch.setattr(r, "py_step", lambda args, *rest: ran.append(args[0]))
+        r.analyse()
+        return r.stamp
+
+    every = ["tools.disasm", "tools.func_id", "tools.abi_analysis"]
+    # A stamp from before the profile seeds counted, everything done: kept.
+    pack.write_json_atomic(os.path.join(a.work, "stamp.json"),
+                           {"disasm": True, "func_id": True, "abi": True, "lift": "k", "discovered": ""})
+    analyse(None)
+    assert ran == []
+    analyse({"seed_functions": []})
+    assert ran == []
+    st = analyse({"seed_functions": [str(seeds)]})      # a layer with seeds comes in
+    assert ran == every and "lift" not in st
+    analyse({"seed_functions": [str(seeds)]})
+    assert ran == []
+    seeds.write_text("0x00011000\n0x00012000\n")      # its seeds file changes
+    analyse({"seed_functions": [str(seeds)]})
+    assert ran == every
+    analyse(None)                                       # the layer goes out
+    assert ran == every
+
+
+def test_android_seeds_suffix(tmp_path):
+    from tools.prepare import android
+    assert android.seeds_suffix([]) == ""
+    f = tmp_path / "s.txt"
+    f.write_text("0x1000\n")
+    one = android.seeds_suffix([str(f)])
+    assert one.startswith("|seeds=") and one == android.seeds_suffix([str(f)])
+    assert android.seeds_suffix([str(f), str(f)]) != one
+    assert android.seeds_suffix(["/nonexistent/a"]) != android.seeds_suffix(["/nonexistent/b"])
