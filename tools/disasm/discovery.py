@@ -14,7 +14,10 @@ own CFG there. This module adds the evidence they do not use, in two levels:
       no longer swallowed by it;
     * callback arguments: the routine pushed for PsCreateSystemThread(Ex)
       (start routine and StartContext1), KeInitializeDpc, KeInitializeApc,
-      NtQueueApcThread, KeInitializeInterrupt;
+      NtQueueApcThread, KeInitializeInterrupt -- and for a function that
+      forwards an argument of its own there (the library's CreateThread
+      hands its lpStartAddress on as StartContext1), through any number of
+      such wrappers;
     * C++ vtables named by a constructor's `mov dword ptr [reg(+n)], vtable`,
       and the vtables MSVC RTTI describes (tools.rtti);
     * the handlers and filters of exception frames (tools.recomp.seh_frames):
@@ -73,6 +76,7 @@ tools.disasm --static-discovery / --discovery-cap override them.
 import array
 import bisect
 import os
+import re
 import sys
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -308,6 +312,9 @@ class StaticDiscovery:
         self.packed_completed = 0
         self.noreturn_slots: Set[int] = set()
         self.callback_slots: Dict[int, Tuple[int, ...]] = {}
+        # Functions that forward an argument of their own as a routine
+        # (callback_args): start -> the argument indices, for summary.json.
+        self.callback_wrappers: Dict[int, Tuple[int, ...]] = {}
         if level >= STRONG:
             for ki in self.image.kernel_imports:
                 if ki.name in NORETURN_IMPORTS:
@@ -347,7 +354,10 @@ class StaticDiscovery:
         return {"level": self.level, "strict": self.strict, "cap": self.cap, "capped": self.capped,
                 "added": dict(self.stats), "refused": dict(sorted(self.refused.items())),
                 # Of added["packed_table"]: the aliases a table's completion made.
-                "packed_completed": self.packed_completed}
+                "packed_completed": self.packed_completed,
+                # Functions that forward an argument of their own to a
+                # callback-taking kernel call (a library's CreateThread).
+                "callback_wrappers": len(self.callback_wrappers)}
 
     # -- shared tests -----------------------------------------------------
 
@@ -514,20 +524,142 @@ class StaticDiscovery:
             addr = prev.address
         return None
 
+    # A function's own stack argument, as an operand: `dword ptr [ebp + 0x10]`.
+    _ARG_OPERAND = re.compile(r"^dword ptr \[(ebp|esp) \+ (0x[0-9a-f]+|\d+)\]$")
+
+    def _incoming_arg(self, insn, operand: str, start: int) -> Optional[int]:
+        """The index (0 = the first) of the argument of the function at
+        `start` that `operand` of `insn` reads, or None.
+
+        `[ebp + 8 + 4k]` in a function that opens with `push ebp; mov ebp,
+        esp`; `[esp + n]` when the stack depth at `insn` is known: only
+        pushes, pops and `sub/add esp, imm` in a straight line from the
+        start (no call, no branch: what a small forwarding wrapper is)."""
+        m = self._ARG_OPERAND.match(operand.strip())
+        if m is None:
+            return None
+        disp = int(m.group(2), 0)
+        get = self.engine.instructions.get
+        if m.group(1) == "ebp":
+            first = get(start)
+            second = get(first.end_address) if first is not None else None
+            if (first is None or second is None or insn.address < second.end_address
+                    or first.mnemonic != "push" or first.op_str.strip() != "ebp"
+                    or second.mnemonic != "mov" or second.op_str.replace(" ", "") != "ebp,esp"):
+                return None
+            off = disp - 8
+        else:
+            depth, addr = 0, start
+            for _ in range(64):
+                if addr >= insn.address:
+                    break
+                cur = get(addr)
+                if cur is None or cur.is_call or cur.is_ret or cur.is_branch:
+                    return None
+                ops = cur.op_str.replace(" ", "")
+                if cur.mnemonic == "push":
+                    depth += 4
+                elif cur.mnemonic == "pop":
+                    depth -= 4
+                elif cur.mnemonic in ("sub", "add") and ops.startswith("esp,"):
+                    try:
+                        n = int(ops[4:], 0)
+                    except ValueError:
+                        return None
+                    depth += n if cur.mnemonic == "sub" else -n
+                elif ops.startswith("esp,") or cur.mnemonic in ("leave", "pushal", "popal",
+                                                                 "pushfd", "popfd", "enter"):
+                    return None
+                addr = cur.end_address
+            if addr != insn.address:
+                return None
+            off = disp - depth - 4
+        return off // 4 if off >= 0 and off % 4 == 0 else None
+
+    def _forwarded_arg(self, push, start: int) -> Optional[int]:
+        """The index of the argument of the function at `start` that `push`
+        hands on: `push dword ptr [ebp + n]`, or `push reg` after `mov reg,
+        dword ptr [ebp + n]` (the esp forms too, _incoming_arg)."""
+        operand = push.op_str.strip()
+        if operand not in ("eax", "ebx", "ecx", "edx", "esi", "edi"):
+            return self._incoming_arg(push, operand, start)
+        addr = push.address
+        for _ in range(16):
+            prev = self._prev_insn(addr)
+            if (prev is None or prev.address < start or prev.is_call or prev.is_ret
+                    or prev.is_branch):
+                return None
+            ops = prev.op_str.replace(" ", "")
+            if ops.startswith(operand + ","):
+                if prev.mnemonic != "mov":
+                    return None
+                return self._incoming_arg(prev, prev.op_str.split(",", 1)[1], start)
+            addr = prev.address
+        return None
+
     def callback_args(self) -> Dict[int, str]:
+        """The routines handed to the kernel calls of CALLBACK_ARGS, and to
+        the functions that forward an argument of their own to one.
+
+        An XDK title does not call PsCreateSystemThreadEx with its thread
+        routine: its library's CreateThread does, with the library's startup
+        as the routine and its own lpStartAddress argument as StartContext1
+        (the CRT's _beginthreadex in turn calls CreateThread with its
+        _threadstartex). So a function that pushes an argument of its own
+        where a routine goes takes a routine there too, and what its callers
+        push for it is the same evidence, through as many wrappers as there
+        are. Without this the start address is an ordinary immediate, which
+        the passes before take only in a gap with a closed body: a routine
+        packed after a call that never returns, or one that ends in such a
+        call (`_endthreadex`), did not exist, and its threads ended at once
+        (GitHub issue 1: three workers, « [ICALL] Failed to resolve VA », a
+        black screen once the title waited for them)."""
         out = {}
         if not self.callback_slots:
             return out
+        bodies = sorted((f.start, f.end) for f in self.d.functions.values())
+        starts = [b[0] for b in bodies]
+
+        def owner(addr: int) -> Optional[int]:
+            i = bisect.bisect_right(starts, addr) - 1
+            return bodies[i][0] if i >= 0 and addr < bodies[i][1] else None
+
+        kernel_calls, direct_calls = [], {}
         for insn in list(self.engine.instructions.values()):
-            if not insn.is_call or insn.memory_ref not in self.callback_slots:
+            if not insn.is_call:
                 continue
-            indices = self.callback_slots[insn.memory_ref]
+            if insn.memory_ref in self.callback_slots:
+                kernel_calls.append(insn)
+            elif insn.call_target is not None:
+                direct_calls.setdefault(insn.call_target, []).append(insn)
+
+        wrappers: Dict[int, Set[int]] = {}      # function start -> its arguments that are routines
+        pending: List[Tuple[int, int]] = []
+
+        def scan(insn, indices) -> None:
             pushes = self._pushed_args(insn, max(indices) + 1)
+            start = owner(insn.address)
             for i in indices:
-                if i < len(pushes):
-                    v = self._pushed_value(pushes[i])
-                    if v is not None:
-                        out.setdefault(v, "callback_arg")
+                if i >= len(pushes):
+                    continue
+                v = self._pushed_value(pushes[i])
+                if v is not None:
+                    out.setdefault(v, "callback_arg")
+                    continue
+                if start is None:
+                    continue
+                k = self._forwarded_arg(pushes[i], start)
+                if k is not None and k not in wrappers.setdefault(start, set()):
+                    wrappers[start].add(k)
+                    pending.append((start, k))
+
+        for insn in kernel_calls:
+            scan(insn, self.callback_slots[insn.memory_ref])
+        while pending:
+            start, k = pending.pop()
+            for insn in direct_calls.get(start, ()):
+                scan(insn, (k,))
+        self.callback_wrappers = {a: tuple(sorted(ks)) for a, ks in wrappers.items() if ks}
         return out
 
     def _vtable_words(self, vtable: int, code_ranges) -> List[int]:

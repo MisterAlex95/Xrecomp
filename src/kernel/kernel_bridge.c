@@ -811,8 +811,23 @@ extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
 static void bridge_discover_thread_ctx(uint32_t routine, uint32_t ctx1)
 {
     if (g_xbox_code_hi && ctx1 >= g_xbox_code_lo && ctx1 < g_xbox_code_hi
-        && !recomp_lookup(ctx1) && !recomp_lookup_manual(ctx1))
+        && !recomp_lookup(ctx1) && !recomp_lookup_manual(ctx1)) {
+        /* Said here, by name: the routine's call of it is skipped (« [ICALL]
+         * Failed to resolve VA ») and the thread ends at once, which reads as
+         * a thread that had nothing to do; whatever waits for its work then
+         * hangs much later with nothing in the log (GitHub issue 1: three
+         * such workers, a black screen after the title screen). */
+        static int said;
+        if (said < 8) {
+            said++;
+            fprintf(stderr, "  [KERNEL] PsCreateSystemThread: StartContext1 0x%08X is in the title's code but "
+                            "the pack has no function there (the analysis missed it). If routine 0x%08X "
+                            "calls it, as a library's thread startup does, this thread ends without running: "
+                            "prepare the title again (the discovery file names it)\n", ctx1, routine);
+            fflush(stderr);
+        }
         recomp_discovery_thread_ctx(ctx1, routine);
+    }
 }
 
 static void bridge_run_thread_inline(recomp_func_t fn, uint32_t ctx1,
