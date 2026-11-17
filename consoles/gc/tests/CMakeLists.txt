@@ -224,6 +224,25 @@ target_compile_options(gc_audio_test PRIVATE -Wall -Wextra)
 set(GC_RUN_AUDIO ${CMAKE_CURRENT_SOURCE_DIR}/run_audio.sh)
 add_test(NAME gc_audio COMMAND sh ${GC_RUN_AUDIO} unit $<TARGET_FILE:gc_audio_test> ${CMAKE_CURRENT_BINARY_DIR}/audio)
 set_tests_properties(gc_audio PROPERTIES TIMEOUT 600)
+# Zelda / JAudio ucode and AESND (XBA-266): gc_zelda needs no toolchain and no game data (images of ours forged to the
+# versions' hashes; the protocols through the mailboxes, voices checked sample by sample against our models of the
+# formats, zelda.wav against audio_check.py). gc_aesnd / gc_play_aesnd: our libaesnd homebrew (77 without the corpus).
+add_executable(gc_zelda_test gc_zelda_test.c)
+target_include_directories(gc_zelda_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime)
+target_link_libraries(gc_zelda_test PRIVATE gc_core)
+target_compile_options(gc_zelda_test PRIVATE -Wall -Wextra)
+add_test(NAME gc_zelda COMMAND sh ${GC_RUN_AUDIO} zelda $<TARGET_FILE:gc_zelda_test> ${CMAKE_CURRENT_BINARY_DIR}/zelda)
+set_tests_properties(gc_zelda PROPERTIES TIMEOUT 600)
+if(TARGET gc_run)
+    add_test(NAME gc_aesnd COMMAND sh ${GC_RUN_AUDIO} aesnd $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/aesnd.dol
+                                   ${CMAKE_CURRENT_BINARY_DIR}/aesnd)
+    set_tests_properties(gc_aesnd PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+endif()
+if(TARGET gc_play)
+    add_test(NAME gc_play_aesnd COMMAND sh ${GC_RUN_AUDIO} play $<TARGET_FILE:gc_play> ${GC_HOMEBREW_DIR}/aesnd.dol
+                                        ${CMAKE_CURRENT_BINARY_DIR}/play_aesnd aesnd)
+    set_tests_properties(gc_play_aesnd PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+endif()
 if(TARGET gc_run)
     add_test(NAME gc_asnd COMMAND sh ${GC_RUN_AUDIO} asnd $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/asnd.dol
                                   ${CMAKE_CURRENT_BINARY_DIR}/asnd)

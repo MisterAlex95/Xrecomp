@@ -13,8 +13,8 @@
 #   n64: <prog>.z64 + <prog>.elf                           (hello cpu timer_irq gfx rsp)
 #   nds: <prog>.nds + <prog>.elf (the ARM9's)              (hello; spike XBA-223)
 #   psp: <prog>.prx + <prog>.pbp (EBOOT) + <prog>.elf      (hello; spike XBA-224)
-#   gc:  <prog>.dol + <prog>.elf                           (hello, padtest, asnd, cardtest, gx*, relload and its
-#                                                          relload_mod<m>.elf objects; XBA-225 .. XBA-264)
+#   gc:  <prog>.dol + <prog>.elf                           (hello, padtest, asnd, aesnd, cardtest, gx*, relload and
+#                                                          its relload_mod<m>.elf objects; XBA-225 .. XBA-266)
 #   dc:  <prog>.elf + <prog>.bin (raw, unscrambled)        (hello; spike XBA-227)
 #   3ds: <prog>.3dsx + <prog>.elf                          (hello; spike XBA-228)
 #   ps2: <prog>.elf (the EE executable)                    (hello; spike XBA-226)

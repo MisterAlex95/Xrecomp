@@ -1627,10 +1627,10 @@ headless). Our own code, written from the hardware's documentation (Dolphin's no
   answer, the task protocol (DSP_INIT / RESUME / YIELD / DONE / SYNC, the CPU's 0xCDD1000x), switching to a new ucode
   and back (the one left resumes). A ucode is recognised by the hash of the image the game uploads (`gc_ucode_hash`:
   xor then rotate by 3, the hash Dolphin's list of known images is keyed by): AX (4 hashes, plus the 2001 one with
-  its own PB layout and mixer bits), libogc's ASND (every release), the card unlock; the Zelda / JAudio family, the
-  GBA link and libogc's AESND are recognised and logged as not emulated (they start and say DSP_INIT, nothing else:
-  XBA-266); any other image is logged (`gc: dsp: ucode XXXXXXXX ... unknown (as ax) -- please report this hash`) and
-  played as AX.
+  its own PB layout and mixer bits), libogc's ASND (every release), the Zelda / JAudio family and libogc's AESND
+  (XBA-266, below), the card unlock; the GBA link is recognised and logged as not emulated (it starts and says
+  DSP_INIT, nothing else); any other image is logged (`gc: dsp: ucode XXXXXXXX ... unknown (as ax) -- please report
+  this hash`) and played as AX.
 - `runtime/gc_ax.c`: AX: command lists (0xBABE0000 | size, then the address; DSP_YIELD after each, 2500 cycles
   later): setup, the PB list, aux A / B out to the CPU's effects and back, upload / set / opposite L R, the
   compressor, more, output (16-bit right-then-left frames for the audio DMA, surround as 32-bit), the send-aux-and-mix
@@ -1643,6 +1643,29 @@ headless). Our own code, written from the hardware's documentation (Dolphin's no
 - `runtime/gc_asnd.c`: libasnd's ucode (0x0123 voice address, 0x0111 / 0x0222 mix a voice, 0x0666 out, 0x0999
   terminate): eight sample formats, rates stepped against 48 kHz, volumes, the delay, the second buffer and loops,
   the 2011 flag layout and the input channel order before 2024 told apart by hash.
+- `runtime/gc_zelda.c` (XBA-266): Nintendo's Zelda / JAudio ("DAC") ucode family (The Wind Waker, Twilight Princess
+  GC, Sunshine, Pikmin 1 / 2, Luigi's Mansion, Mario Kart: Double Dash, Four Swords Adventures, Animal Crossing, the
+  IPL), its ten versions told apart by hash and described by flags (light protocol, 4 or 6 destinations, 0x80-word
+  VPBs, explicit ramp steps, per-frame syncs, louder positional mixing, command 0C / 0D variants). Protocol: the
+  greeting (DSP_INIT + 0xF3551111, or 0x88881111 on the light versions), commands as a word count then words, each
+  acknowledged DSP_SYNC + 0xF355xxxx (light: 0x80000000 | the handler's address, no interrupt); 01 setup (VPB base,
+  the game's resampling filter / patterns / panning sine, AFC predictors, reverb blocks), 02 render n frames (output
+  volume, left / right buffers), voices released by sync mails per 16 voices (or per frame, Sunshine / Pikmin PAL),
+  0xFF00 | frame after each frame, DSP_FRAME_END after the render, further commands held until 0xCDD10003; a crashing
+  command halts it as on hardware. Rendering: 80-sample frames at 32 kHz; sources AFC 4-bit / 2-bit (9- / 5-byte
+  blocks, loops inside a block with the loop history), PCM8 / PCM16 from ARAM, PCM16 from main memory, square / 25 %
+  square / saw synths, four 64-sample patterns (two moving noise), a constant; the game's 4-tap polyphase resampler
+  (nearest sample from 4:1); low-pass and biquad; six (or four) destinations named by DSP address with volume ramps,
+  or positional mixing (sine-table quadrants + reverb send); end requests fade out then mark the voice done; the
+  front buffers at the output volume to the two output buffers (JAudio interleaves them for the audio DMA); four
+  reverb rings in main memory (an echo one ring later through an 8-tap filter into two buffers, fed back). Not
+  modelled: the variable FIR filter, the back buffers' surround downmix, Twilight Princess's extra output filtering,
+  the GBA link's key exchange (command 0C on Pikmin / Animal Crossing: acknowledged only), the DSP's processing time.
+- `runtime/gc_aesnd.c` (XBA-266): libogc's AESND ucode (mails 0xFACE0080 block address, 0010 / 0020 mix the first /
+  next voice, 0100 send the 96-frame buffer, DEAD terminate, answered even by the releases that never answer it on
+  hardware): PCM8 / PCM16, mono / stereo, signed / unsigned (2020+) through the accelerator from libaesnd's ARAM ring,
+  16.16 stepping with the sample held, volumes, the delay; channel order (2012+) and flag layout (2020+, EDuke32's
+  fork) by hash.
 - `runtime/gc_ai.c`: the audio DMA (32-byte blocks every 1/4000 or 1/6000 s as AICR's DMA rate says, its interrupt
   when a buffer is latched, then the registers as they are reloaded at its end, blocks left), the audio interface at
   0xCC006C00 (stream rate, play bit, volume, the streaming sample counter from the clock, its match with AIIT raising
@@ -1666,7 +1689,17 @@ headless). Our own code, written from the hardware's documentation (Dolphin's no
   our libasnd program, five scenes (left / right / stereo / mixed / silence) under `gc_run`; `gc_play_asnd`: the same
   through `gc_runtime` (SDL's dummy audio). Each WAV is compared with a reference `tests/audio_check.py` synthesises
   from the scene list (per channel and scene: every tone's level within 5 %, RMS, what is left once the tones are taken
-  out under 8 %).
+  out under 8 %). ctest `gc_zelda` (XBA-266, no toolchain, no game data: `tests/gc_zelda_test.c`): no Nintendo
+  image, so each run boots 2 KB of our own bytes whose last 32 bytes set the hash to the version's (the hash is
+  linear); then through the mailboxes only: the standard protocol's every mail, voice release by sync bits (a voice
+  whose bit is clear is left alone), Sunshine's per-frame syncs, commands held until 0xCDD10003, a crash halting it,
+  the light protocol (Pikmin, and the IPL's 0x80-word VPBs), a ucode switch and back (DSP_RESUME, state kept); voices
+  compared sample by sample with our models (AFC 4- / 2-bit from our encoder with a loop inside a block and a short
+  last block, PCM16 / PCM8 loops and one-shots, main-memory PCM16, the synths, a pattern, the constant voice, the
+  reverb ring's echoes); AESND's mails (mono16, stereo8 unsigned at half rate with a delay); then 2 s of voices
+  (PCM16, AFC 16 -> 32 kHz, PCM8 8 -> 32 kHz, positional, main memory, fades) played through the audio DMA ->
+  `zelda.wav` against `audio_check.py zelda`. `gc_aesnd` / `gc_play_aesnd`: `tests/homebrew/aesnd`, asnd's five scenes
+  through libaesnd (same reference).
 
 **GameCube memory cards (XBA-264).** The external interface with devices behind it: memory cards in slots A and B,
 the IPL chip's clock and SRAM. Our own code from public documentation (YAGCD), libogc's CARD / EXI / system sources

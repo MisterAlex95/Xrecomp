@@ -4,8 +4,8 @@ project(gc_runtime C)
 # gc_core: the GameCube machine (XBA-225 spike, epic XBA-219): the Gekko (PowerPC 750 interpreter + paired singles +
 # lifted code), its memory map, the processor and video interfaces (NTSC / PAL timing), EXI that completes at once,
 # the serial interface with standard controllers (XBA-259), the sound (XBA-263: gc_dsp.c DSP interface, ARAM and
-# audio DMA, ucode detection; gc_ax.c / gc_asnd.c the microcodes' HLE; gc_ai.c the audio interface and the mix to
-# 48 kHz; gc_audio_util.c the pure pieces). Plain C11 + libm,
+# audio DMA, ucode detection; gc_ax.c / gc_asnd.c, XBA-266 gc_zelda.c / gc_aesnd.c the microcodes' HLE; gc_ai.c the
+# audio interface and the mix to 48 kHz; gc_audio_util.c the pure pieces). Plain C11 + libm,
 # no host layer: gc_run and the tests build anywhere. gc_runtime (XBA-259) plays it on the host layer: the Android
 # app (gc_runtime_start) and gc_play. See consoles/README.md « GameCube ».
 set(CMAKE_C_STANDARD 11)
@@ -29,7 +29,7 @@ if(NOT TARGET gc_core)
                    gx/gx_progcache.c)
     add_library(gc_core STATIC gc_core.c gc_cpu.c gc_bus.c gc_exi.c gc_si.c gc_mmu.c gc_recomp.c gc_rel.c gc_state.c gc_pack.c gc_extract.c
                 gc_disc.c gc_disc_wia.c gc_bzip2.c gc_di.c gc_boot.c ${GC_GX_SRCS}
-                gc_dsp.c gc_ai.c gc_ax.c gc_asnd.c gc_audio_util.c)
+                gc_dsp.c gc_ai.c gc_ax.c gc_asnd.c gc_zelda.c gc_aesnd.c gc_audio_util.c)
     target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_include_directories(gc_core PRIVATE ${GC_LIBCHDR}/deps/miniz-3.1.2 ${GC_LIBCHDR}/deps/zstd-1.5.7
                                                ${GC_LIBCHDR}/deps/lzma-26.02/include)

@@ -2,9 +2,9 @@
  *
  * The core (gc_core.h) runs the DSP interface (mailboxes, control register, ARAM DMA, the audio DMA), the audio
  * interface (sample rates, the streaming sample counter and its interrupt) and the drive's streamed audio (DTK)
- * itself; the DSP's microcode is emulated at a high level (HLE: AX, libogc's ASND, the ROM / init / card ucodes),
- * picked by a hash of the image the game uploads (gc_dsp.c). What the speakers would get comes out here: 48 kHz
- * signed 16-bit stereo, left then right, the audio DMA's samples (32 or 48 kHz) and the disc stream (32 or 48 kHz,
+ * itself; the DSP's microcode is emulated at a high level (HLE: AX, the Zelda / JAudio family, libogc's ASND and
+ * AESND, the ROM / init / card ucodes), picked by a hash of the image the game uploads (gc_dsp.c). What the
+ * speakers would get comes out here: 48 kHz signed 16-bit stereo, left then right, the audio DMA's samples (32 or 48 kHz) and the disc stream (32 or 48 kHz,
  * at the AI's streaming volume) resampled and mixed. See consoles/README.md « GameCube sound ». */
 #ifndef GC_AUDIO_H
 #define GC_AUDIO_H
@@ -29,11 +29,11 @@ size_t gc_audio_queued(const gc_machine *m);
 /* What the sound hardware did, for logs and tests. */
 typedef struct gc_audio_info {
     uint32_t ucode_crc;       /* the running microcode's hash (0: the ROM) */
-    const char *ucode;        /* its kind: "rom", "init", "ax", "ax-old", "asnd", "card", "zelda (not emulated)"... */
+    const char *ucode;        /* its kind: "rom", "init", "ax", "ax-old", "asnd", "zelda", "aesnd", "card"... */
     unsigned ucodes_booted;   /* microcodes started since power-on */
     unsigned unknown_ucodes;  /* of which unknown (played as AX, logged) */
     uint64_t mails_to_dsp, mails_from_dsp;
-    uint64_t cmd_lists;       /* AX command lists, ASND mix commands */
+    uint64_t cmd_lists;       /* AX command lists, ASND / AESND mix commands, Zelda frames */
     uint64_t dma_blocks;      /* 32-byte audio DMA blocks played */
     uint64_t stream_frames;   /* disc stream frames played */
     uint64_t frames_out;      /* 48 kHz frames produced */

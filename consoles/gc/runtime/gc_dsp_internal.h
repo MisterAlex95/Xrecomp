@@ -1,6 +1,7 @@
 /* gc_dsp_internal.h -- the GameCube sound hardware's state, shared by gc_dsp.c (DSP interface, mailboxes, ucode
- * detection, ARAM DMA, the audio DMA), gc_ai.c (audio interface, mixing to 48 kHz), gc_ax.c and gc_asnd.c (the
- * microcodes' HLE) (XBA-263). */
+ * detection, ARAM DMA, the audio DMA), gc_ai.c (audio interface, mixing to 48 kHz), gc_ax.c, gc_asnd.c (XBA-263),
+ * gc_zelda.c and gc_aesnd.c (XBA-266) (the microcodes' HLE). Every state here is a plain struct (no pointers), so a
+ * save state can copy it as is. */
 #ifndef GC_DSP_INTERNAL_H
 #define GC_DSP_INTERNAL_H
 
@@ -29,6 +30,7 @@ enum {
 #define DSP_MAIL_YIELD 0xDCD10002u
 #define DSP_MAIL_DONE 0xDCD10003u
 #define DSP_MAIL_SYNC 0xDCD10004u
+#define DSP_MAIL_FRAME_END 0xDCD10005u /* the Zelda ucode: a render command's frames are done */
 #define CPU_MAIL_RESUME 0xCDD10000u
 #define CPU_MAIL_NEW_UCODE 0xCDD10001u
 #define CPU_MAIL_RESET 0xCDD10002u
@@ -59,6 +61,51 @@ typedef struct gc_asnd {
     uint16_t out[1024 * 2];        /* its output buffer, right then left */
     uint32_t v[16];                /* the voice structure, 64 bytes as words */
 } gc_asnd;
+
+/* The Zelda / JAudio ucode family (gc_zelda.c, XBA-266). */
+#define GC_ZELDA_SAMPLES 0x50 /* one frame: 80 samples at 32 kHz (2.5 ms) */
+enum {
+    ZB_FRONT_L, ZB_FRONT_R, ZB_BACK_L, ZB_BACK_R, ZB_FRONT_L_REV, ZB_FRONT_R_REV, ZB_BACK_L_REV, ZB_BACK_R_REV,
+    ZB_UNK0_REV, ZB_UNK1_REV, ZB_UNK0, ZB_UNK1, ZB_UNK2, ZB_COUNT,
+};
+
+typedef struct gc_zelda {
+    uint32_t flags;                /* the version's behaviour (ZF_* in gc_zelda.c), from the image's hash */
+    /* the mail state machine */
+    int state;                     /* waiting, rendering (sync mails), writing a command, halted */
+    uint32_t expect;               /* command mails still to come */
+    uint32_t sync_max_voice;       /* voices the CPU has released for this frame */
+    uint16_t skip[256];            /* per 16 voices: bit 15 - (voice & 15) set = render it */
+    bool sync_second_half;
+    uint32_t cmd[64];              /* the command ring */
+    unsigned rd, wr, pending;
+    bool can_execute;              /* cleared after a render until the CPU's 0xCDD10003 */
+    /* rendering */
+    uint32_t req_frames, cur_frame, cur_voice;
+    uint16_t voices_per_frame;
+    bool prepared;
+    uint32_t out_l, out_r;         /* where the next frame's left / right samples go (main memory) */
+    uint16_t out_vol;              /* 4.12 */
+    int16_t buf[ZB_COUNT][GC_ZELDA_SAMPLES];
+    uint32_t vpb_base, reverb_base;
+    int16_t resample_coefs[0x100]; /* 64 phases x 4 taps, from the game (command 01) */
+    int16_t patterns[0x100];       /* 4 x 64 samples of the pattern voices (2 and 3 move every frame) */
+    int16_t sine[0x80];            /* the positional (Dolby) panning table */
+    int16_t afc_coefs[0x20];       /* 16 predictor pairs of the AFC voices */
+    uint16_t reverb_pos[4];        /* each reverb block's frame in its ring */
+    int16_t reverb_last8[4][8];
+    uint64_t voices, frames;
+    bool warned_src, warned_cmd;
+} gc_zelda;
+
+/* libogc's AESND ucode (gc_aesnd.c, XBA-266): one voice parameter block at a time, 96 stereo frames per buffer. */
+#define GC_AESND_FRAMES 96
+typedef struct gc_aesnd {
+    bool next_is_pb, new_flags, swap_lr, fixed_terminate;
+    uint32_t pb_addr;
+    uint32_t out_buf;              /* from the last voice's block: where 0xFACE0100 writes the buffer */
+    int16_t out[GC_AESND_FRAMES * 2]; /* right then left */
+} gc_aesnd;
 
 typedef struct gc_mail {
     uint32_t v;
@@ -92,6 +139,8 @@ typedef struct gc_audio {
     uint32_t prev_crc;
     gc_ax ax, prev_ax;
     gc_asnd asnd, prev_asnd;
+    gc_zelda zelda, prev_zelda;
+    gc_aesnd aesnd, prev_aesnd;
     /* ---- audio DMA (registers in the DSP block) ---- */
     uint32_t aid_cur, aid_left;
     bool aid_on;
@@ -121,6 +170,7 @@ void gc_dsp_write16(gc_machine *m, unsigned idx, uint16_t v);
 void gc_dsp_push_mail(gc_machine *m, uint32_t mail, bool irq, uint64_t delay);
 void gc_dsp_set_ucode(gc_machine *m, int ucode, uint32_t crc);
 void gc_dsp_irq(gc_machine *m, uint16_t bit);       /* AIDINT / ARINT / DSPINT now */
+void gc_dsp_schedule_int(gc_machine *m, uint64_t delay); /* DSPINT `delay` cycles from now, with no mail */
 void gc_dsp_events(gc_machine *m);                  /* due DSP interface events */
 uint64_t gc_dsp_next_event(gc_machine *m);
 /* A running ucode got MAIL_NEW_UCODE's ten parameters: hand over to the next one. */
@@ -157,6 +207,12 @@ void gc_ax_mail(gc_machine *m, uint32_t mail);
 /* gc_asnd.c */
 void gc_asnd_init(gc_machine *m, uint32_t crc);
 void gc_asnd_mail(gc_machine *m, uint32_t mail);
+/* gc_zelda.c */
+void gc_zelda_init(gc_machine *m, uint32_t crc);    /* also sends the version's greeting */
+void gc_zelda_mail(gc_machine *m, uint32_t mail);
+/* gc_aesnd.c */
+void gc_aesnd_init(gc_machine *m, uint32_t crc);
+void gc_aesnd_mail(gc_machine *m, uint32_t mail);
 
 /* gc_ai.c */
 void gc_ai_dma_control(gc_machine *m, uint16_t old, uint16_t v); /* AUDIO_DMA_CONTROL_LEN written */

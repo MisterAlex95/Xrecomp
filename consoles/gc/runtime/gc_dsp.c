@@ -1,7 +1,8 @@
 /* gc_dsp.c -- the DSP interface at 0xCC005000 (XBA-263): mailboxes both ways, the control / status register and
  * its three interrupts (DSP, ARAM DMA, audio DMA), the ARAM DMA (16 MB, timed), the audio DMA's registers, and the
  * DSP itself at a high level: the ROM's boot protocol, the init code, and the microcode a game uploads, recognised
- * by the hash of its image (gc_ucode_hash) and emulated by gc_ax.c / gc_asnd.c; an unknown image is logged and
+ * by the hash of its image (gc_ucode_hash) and emulated by gc_ax.c / gc_asnd.c / gc_zelda.c / gc_aesnd.c (XBA-266:
+ * the Zelda / JAudio family and libogc's AESND); an unknown image is logged and
  * played as AX (most GameCube games use the AX family). No DSP ROM dump, no LLE. Facts from the hardware's
  * documentation (Dolphin's notes and ucode hash list among them); our own code.
  *
@@ -35,7 +36,7 @@ void gc_dsp_irq(gc_machine *m, uint16_t bit)
     dsp_pi_update(m);
 }
 
-static void schedule_dspint(gc_machine *m, uint64_t delay)
+void gc_dsp_schedule_int(gc_machine *m, uint64_t delay)
 {
     gc_audio *a = m->audio;
     uint64_t t = m->h.now + delay;
@@ -55,7 +56,7 @@ void gc_dsp_push_mail(gc_machine *m, uint32_t mail, bool irq, uint64_t delay)
     }
     if (irq) {
         if (a->qn == 0)
-            schedule_dspint(m, delay);
+            gc_dsp_schedule_int(m, delay);
         else
             a->q[(a->qh + a->qn - 1) % GC_MAILQ].irq_next = true; /* when the one before it is read */
     }
@@ -83,7 +84,7 @@ static uint16_t mail_from_lo(gc_machine *m)
         a->qn--;
         a->last_mail = ml.v;
         if (ml.irq_next)
-            schedule_dspint(m, 0);
+            gc_dsp_schedule_int(m, 0);
     }
     uint16_t lo = (uint16_t)a->last_mail;
     a->last_mail &= 0x7FFFFFFFu; /* read: the high half's full bit clears, the rest reads the same */
@@ -108,7 +109,7 @@ static const struct {
     {0x8D69A19Bu, UC_ASND}, {0xCC2FD441u, UC_ASND}, {0xA81582E2u, UC_ASND}, {0xDBBEEB61u, UC_ASND},
     {0xBAD876EFu, UC_ASND}, {0xFA9C576Fu, UC_ASND}, {0x614DD145u, UC_ASND}, {0x5DBF8BF1u, UC_ASND},
     {0x373A950Eu, UC_ASND},
-    /* libogc's AESND (not emulated yet) */
+    /* libogc's AESND: 2010, 2012, EDuke32's, 2020, 2020 padded, 2022 padded, 2023 */
     {0x008366AFu, UC_AESND}, {0x078066ABu, UC_AESND}, {0x5AD4D933u, UC_AESND}, {0x84C680A9u, UC_AESND},
     {0xA02A6131u, UC_AESND}, {0x2E5E4100u, UC_AESND}, {0x002E5E41u, UC_AESND},
 };
@@ -123,9 +124,9 @@ static const char *ucode_name(int kind)
     case UC_UNKNOWN_AX: return "unknown (as ax)";
     case UC_ASND: return "asnd";
     case UC_CARD: return "card";
-    case UC_ZELDA: return "zelda (not emulated, XBA-266)";
+    case UC_ZELDA: return "zelda";
     case UC_GBA: return "gba (not emulated)";
-    case UC_AESND: return "aesnd (not emulated, XBA-266)";
+    case UC_AESND: return "aesnd";
     default: return "?";
     }
 }
@@ -165,6 +166,13 @@ void gc_dsp_set_ucode(gc_machine *m, int kind, uint32_t crc)
         gc_asnd_init(m, crc);
         gc_dsp_push_mail(m, DSP_MAIL_INIT, true, 0);
         break;
+    case UC_ZELDA:
+        gc_zelda_init(m, crc); /* its greeting depends on the version */
+        break;
+    case UC_AESND:
+        gc_aesnd_init(m, crc);
+        gc_dsp_push_mail(m, DSP_MAIL_INIT, true, 0);
+        break;
     default: /* card, and the ones not emulated: the task starts, then nothing */
         gc_dsp_push_mail(m, DSP_MAIL_INIT, true, 0);
         break;
@@ -189,14 +197,25 @@ static void boot_image(gc_machine *m, uint32_t addr, uint32_t len, uint32_t star
         uint32_t c = a->crc;
         gc_ax ax = a->ax;
         gc_asnd asnd = a->asnd;
+        gc_aesnd aesnd = a->aesnd;
         a->ucode = a->prev_ucode;
         a->crc = a->prev_crc;
         a->ax = a->prev_ax;
         a->asnd = a->prev_asnd;
+        a->aesnd = a->prev_aesnd;
         a->prev_ucode = k;
         a->prev_crc = c;
         a->prev_ax = ax;
         a->prev_asnd = asnd;
+        a->prev_aesnd = aesnd;
+        { /* 6 KB: swapped in place rather than through the stack */
+            uint8_t *x = (uint8_t *)&a->zelda, *y = (uint8_t *)&a->prev_zelda;
+            for (size_t i = 0; i < sizeof a->zelda; i++) {
+                uint8_t t = x[i];
+                x[i] = y[i];
+                y[i] = t;
+            }
+        }
         a->qn = a->qh = 0;
         a->uploading = false;
         a->up_step = 0;
@@ -210,6 +229,8 @@ static void boot_image(gc_machine *m, uint32_t addr, uint32_t len, uint32_t star
         a->prev_crc = a->crc;
         a->prev_ax = a->ax;
         a->prev_asnd = a->asnd;
+        a->prev_zelda = a->zelda;
+        a->prev_aesnd = a->aesnd;
     } else {
         a->prev_ucode = UC_ROM;
     }
@@ -286,6 +307,8 @@ static void mail_to_dsp(gc_machine *m, uint32_t mail)
     case UC_AX_OLD:
     case UC_UNKNOWN_AX: gc_ax_mail(m, mail); break;
     case UC_ASND: gc_asnd_mail(m, mail); break;
+    case UC_ZELDA: gc_zelda_mail(m, mail); break;
+    case UC_AESND: gc_aesnd_mail(m, mail); break;
     default: other_mail(m, mail); break;
     }
 }

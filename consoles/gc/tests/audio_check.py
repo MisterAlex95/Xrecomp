@@ -3,7 +3,8 @@
 
     audio_check.py OUT.wav SPEC [--ref REF.wav]
 
-SPEC names a scene list below (asnd: the libasnd homebrew; ax: gc_audio_test's AX voices; dtk: its disc stream).
+SPEC names a scene list below (asnd / aesnd: the libasnd / libaesnd homebrew; ax: gc_audio_test's AX voices; dtk: its
+disc stream; zelda: gc_zelda_test's Zelda ucode voices).
 The reference is synthesised from the list (ideal sines at the expected levels, written to --ref for listening) and
 both files are measured the same way in each scene (its first and last 0.1 s left out): per channel, the level of
 each expected tone (Goertzel), the RMS, and what is left once the tones are taken out (noise, distortion, a wrong
@@ -41,6 +42,19 @@ SPECS = {
             (1.5, 0.5, [], []),
         ],
     },
+    # gc_zelda_test's Zelda ucode run (XBA-266; times from the file's start): PCM16 1000 Hz left and AFC 500 Hz
+    # right (16 -> 32 kHz), amplitude 16000 at a destination volume of 0x7FFF (the ucode mixes at half scale); then a
+    # PCM8 750 Hz (100 << 8, 8 -> 32 kHz) on both; then a positional voice front left (1000 Hz, quadrant volume
+    # 0x3FFF x 0x7FFF >> 16 on The Wind Waker's version: 1 / 8) and a main-memory PCM16 1250 Hz right; then silence
+    "zelda": {
+        "onset": False,
+        "scenes": [
+            (0.0, 0.5, [(1000, 8000)], [(500, 8000)]),
+            (0.5, 0.5, [(750, 12800)], [(750, 12800)]),
+            (1.0, 0.5, [(1000, 16000 * 8191 / 65536)], [(1250, 8000)]),
+            (1.5, 0.5, [], []),
+        ],
+    },
     # gc_audio_test's disc stream: 750 Hz left, 1250 Hz right at amplitude 12000, AI volume 255 / 128
     "dtk": {
         "onset": False,
@@ -49,6 +63,10 @@ SPECS = {
         ],
     },
 }
+
+
+# homebrew/aesnd plays asnd's five scenes through libaesnd (XBA-266)
+SPECS["aesnd"] = SPECS["asnd"]
 
 
 def read_wav(path):

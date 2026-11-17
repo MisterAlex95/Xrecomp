@@ -15,6 +15,7 @@ Nintendo code.
 | `gxcopy` | EFB copies to textures in ten formats drawn back, pokes and peeks, the copy's bytes in RAM | `gxcopy.dol` |
 | `gxfog` | perspective linear and exponential fog, alpha / additive / subtractive / multiplicative blending, Z GREATER, logic ops | `gxfog.dol` |
 | `asnd` | libogc's ASND library and its DSP microcode (XBA-263): five one-second scenes of looped tones (mono 16-bit left, mono 8-bit at 12 kHz right, stereo 16-bit, two voices mixed, silence), timed by VI fields; `report` (magic `XBAASND1`) | `asnd.dol` |
+| `aesnd` | libogc's AESND library and its DSP microcode (XBA-266): `asnd`'s five scenes through libaesnd, each table played at the DSP's own rate (or a quarter of it) and filling libaesnd's 2304-byte ARAM ring; `report` (magic `XBAAESN1`) | `aesnd.dol` |
 
 `hello`'s XFB after 120 fields is `consoles/gc/tests/hello_xfb.png`: `PowerPC: ok` means each of rlwinm, rlwimi,
 mulhw, mulhwu, divw, cntlzw, addc / adde, srawi's carry, cmpw / cmplw / crxor / mfcr, fmadd, fctiwz, fsel, fdivs and
@@ -51,4 +52,5 @@ The expected picture holds libogc's console font (same licence as libogc).
 `asnd`'s 48 kHz output (`gc_run --wav`) is compared scene by scene with a reference synthesised by
 `consoles/gc/tests/audio_check.py` (per channel: each tone's level, the RMS, what is left once the tones are taken out),
 ctest `gc_asnd` and `gc_play_asnd` (through gc_runtime and the host audio path). libasnd (BSD-3-Clause, Hermes) is
-linked from libogc.
+linked from libogc. `aesnd`: the same reference (`audio_check.py aesnd`), ctest `gc_aesnd` and `gc_play_aesnd`;
+libaesnd (zlib licence) is linked from libogc.
