@@ -126,6 +126,24 @@ static NTSTATUS fs_query_common(int disc, PVOID buf, ULONG len, int cls, ULONG *
     }
 }
 
+/* IoStatusBlock->Information after a successful create: what happened, as
+ * NT reports it (FILE_SUPERSEDED 0, FILE_OPENED 1, FILE_CREATED 2,
+ * FILE_OVERWRITTEN 3). XAPI's CreateFile derives its last error from it:
+ * OPEN_ALWAYS + FILE_OPENED and CREATE_ALWAYS + FILE_OVERWRITTEN set
+ * ERROR_ALREADY_EXISTS. It was "2 for FILE_CREATE, else 1", so an
+ * OPEN_ALWAYS that created the file said it already existed. */
+static ULONG create_information(ULONG disposition, int existed)
+{
+    if (!existed)
+        return 2;                                   /* FILE_CREATED */
+    switch (disposition) {
+        case XBOX_FILE_SUPERSEDE:    return 0;      /* FILE_SUPERSEDED */
+        case XBOX_FILE_OVERWRITE:
+        case XBOX_FILE_OVERWRITE_IF: return 3;      /* FILE_OVERWRITTEN */
+        default:                     return 1;      /* FILE_OPENED */
+    }
+}
+
 #if defined(_WIN32)
 /* ====================  Win32 backend  =================================== */
 /* ======================================================================== */
@@ -330,6 +348,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     WCHAR win_path[MAX_PATH];
     HANDLE h;
     DWORD flags_and_attrs = FILE_ATTRIBUTE_NORMAL;
+    int existed = 1, device_dir = 0;
     (void)AllocationSize;
 
     if (!FileHandle || !ObjectAttributes)
@@ -358,6 +377,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
         WCHAR *slash = wcsrchr(win_path, L'\\');
         if (slash && slash != win_path) {
             *slash = 0;
+            device_dir = 1;
             xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE,
                      "NtCreateFile: directory open of a device image, "
                      "using its containing directory instead");
@@ -373,8 +393,21 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     }
 
     if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
-        if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
-            CreateDirectoryW(win_path, NULL);
+        if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF) {
+            if (CreateDirectoryW(win_path, NULL))
+                existed = 0;
+            else if (GetLastError() == ERROR_ALREADY_EXISTS
+                     && CreateDisposition == XBOX_FILE_CREATE && !device_dir) {
+                /* CreateDirectory / XCreateSaveGame(CREATE_NEW) on an
+                 * existing one must fail, as on the console. */
+                g_xbox_last_file_error = ERROR_ALREADY_EXISTS;
+                if (IoStatusBlock) {
+                    IoStatusBlock->Status = STATUS_OBJECT_NAME_COLLISION;
+                    IoStatusBlock->Information = 0;
+                }
+                return STATUS_OBJECT_NAME_COLLISION;
+            }
+        }
         h = CreateFileW(win_path, xbox_access_to_win32(DesiredAccess),
             xbox_share_to_win32(ShareAccess), NULL, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS, NULL);
@@ -407,6 +440,15 @@ NTSTATUS __stdcall xbox_NtCreateFile(
             h = CreateFileW(win_path, access,
                 xbox_share_to_win32(ShareAccess), NULL,
                 xbox_disposition_to_win32(CreateDisposition), flags_and_attrs, NULL);
+            /* OPEN_ALWAYS / CREATE_ALWAYS say ERROR_ALREADY_EXISTS on success
+             * when the file was there; CREATE_NEW always creates. */
+            if (h != INVALID_HANDLE_VALUE) {
+                DWORD how = xbox_disposition_to_win32(CreateDisposition);
+                if (how == CREATE_NEW)
+                    existed = 0;
+                else if (how == OPEN_ALWAYS || how == CREATE_ALWAYS)
+                    existed = GetLastError() == ERROR_ALREADY_EXISTS;
+            }
             /* A HANDLE value is reused once closed, and a pending handle
              * closed by DuplicateHandle(DUPLICATE_CLOSE_SOURCE) never went
              * through xbox_NtClose, so its mark may still be in the table.
@@ -448,7 +490,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     *FileHandle = h;
     if (IoStatusBlock) {
         IoStatusBlock->Status = STATUS_SUCCESS;
-        IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
+        IoStatusBlock->Information = create_information(CreateDisposition, existed);
     }
     XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile: %S -> handle=%p", win_path, h);
     return STATUS_SUCCESS;
@@ -1449,7 +1491,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
                                CreateDisposition, CreateOptions);
     }
 
-    int fd;
+    int fd, existed = 1, device_dir = 0;
     /* A partition device opened as a directory: the volume, for a free-space
      * query, rather than the image's bytes. As in the Win32 backend, the
      * directory holding the image answers that. */
@@ -1459,6 +1501,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
             char *slash = strrchr(host_path, '/');
             if (slash && slash != host_path) {
                 *slash = '\0';
+                device_dir = 1;
                 xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE,
                          "NtCreateFile: directory open of a device image, "
                          "using its containing directory instead");
@@ -1466,9 +1509,22 @@ NTSTATUS __stdcall xbox_NtCreateFile(
         }
     }
     if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
-        if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
-            mkdir(host_path, 0755);   /* EEXIST is fine */
-        fd = open(host_path, O_RDONLY | O_DIRECTORY);
+        /* EEXIST is an open for FILE_OPEN_IF, and for FILE_CREATE the
+         * console's STATUS_OBJECT_NAME_COLLISION: CreateDirectory or
+         * XCreateSaveGame(CREATE_NEW) on an existing one fails. */
+        int collide = 0;
+        if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF) {
+            if (mkdir(host_path, 0755) == 0)
+                existed = 0;
+            else if (errno == EEXIST && CreateDisposition == XBOX_FILE_CREATE && !device_dir)
+                collide = 1;
+        }
+        if (collide) {
+            fd = -1;
+            errno = EEXIST;
+        } else {
+            fd = open(host_path, O_RDONLY | O_DIRECTORY);
+        }
     } else {
         int flags = posix_open_flags(DesiredAccess, CreateDisposition);
         struct stat st;
@@ -1477,7 +1533,21 @@ NTSTATUS __stdcall xbox_NtCreateFile(
                  && st.st_size > 0;
         if (defer)
             flags &= ~O_TRUNC;
-        fd = open(host_path, flags, 0644);
+        /* Did the open create the file? O_EXCL first tells, without a
+         * stat that another open could race. */
+        if (flags & O_EXCL) {
+            fd = open(host_path, flags, 0644);
+            existed = 0;
+        } else if ((flags & O_CREAT) && !defer) {
+            fd = open(host_path, flags | O_EXCL, 0644);
+            existed = 0;
+            if (fd < 0 && errno == EEXIST) {
+                fd = open(host_path, flags, 0644);
+                existed = 1;
+            }
+        } else {
+            fd = open(host_path, flags, 0644);
+        }
         /* open(2) hands back a directory fd for a read-only open; the console
          * refuses a directory under FILE_NON_DIRECTORY_FILE, and so does the
          * Win32 backend (CreateFileW without backup semantics). */
@@ -1531,7 +1601,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     *FileHandle = w32_open_handle(fd, host_path);
     if (IoStatusBlock) {
         IoStatusBlock->Status = STATUS_SUCCESS;
-        IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
+        IoStatusBlock->Information = create_information(CreateDisposition, existed);
     }
     XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile: %s -> handle=%p", host_path, *FileHandle);
     return STATUS_SUCCESS;
