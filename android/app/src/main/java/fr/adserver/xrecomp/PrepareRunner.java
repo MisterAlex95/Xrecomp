@@ -73,6 +73,8 @@ final class PrepareRunner {
     private volatile boolean cancelRequested;
     private volatile Process process;
     private volatile int pgid;
+    /** The group leader's start time (startTime) when pgid was read, or -1. */
+    private volatile long pgidStart = -1;
     private Thread killer;
     private long lastWrite;
     private PrintStream log;
@@ -167,20 +169,36 @@ final class PrepareRunner {
      * A Prepare whose process died (killed by the system: no onDestroy, no cancel) leaves tools.prepare and its
      * compilers in their own process group, which setsid took out of the app's: they would compile beside the new run.
      * The group's id was written when it started; it is ended before anything else runs.
+     *
+     * The id alone is not enough: the file outlives the group (the app died after the run ended, a reboot), and the
+     * number may by now be another process's group, one of ours (a game). The file also holds the leader's start
+     * time and the boot's id, and the group is ended only when it is still that one (groupIsThatOne). A file without
+     * them (an older build) is not trusted.
      */
     void killOrphans() {
         File f = pgidFile();
         if (!f.isFile())
             return;
         int id = 0;
+        long start = -1;
+        String boot = "";
         try {
-            id = Integer.parseInt(PrepareProtocol.readText(f, 64).trim());
+            String[] w = PrepareProtocol.readText(f, 256).trim().split("\\s+");
+            id = Integer.parseInt(w[0]);
+            if (w.length >= 2)
+                start = Long.parseLong(w[1]);
+            if (w.length >= 3)
+                boot = w[2];
         } catch (IOException | NumberFormatException ignored) {
         }
         //noinspection ResultOfMethodCallIgnored
         f.delete();
         if (id <= 1)
             return;
+        if (start < 0 || !boot.equals(bootId()) || !groupIsThatOne(id, start)) {
+            Log.i(TAG, "prepare: process group " + id + " left by an earlier Prepare is gone: nothing to end");
+            return;
+        }
         Log.w(TAG, "prepare: process group " + id + " left by a Prepare whose process died: ended");
         try {
             android.system.Os.kill(-id, 9);
@@ -294,6 +312,7 @@ final class PrepareRunner {
             return out;
         }
         pgid = 0;
+        pgidStart = -1;
         synchronized (this) {
             killer = null;
         }
@@ -307,9 +326,12 @@ final class PrepareRunner {
             while ((line = r.readLine()) != null) {
                 if (pgid == 0 && line.startsWith("XBA_PGID ")) {
                     try {
-                        pgid = Integer.parseInt(line.substring(9).trim());
+                        int id = Integer.parseInt(line.substring(9).trim());
+                        pgidStart = startTime(id);
+                        pgid = id;
                         try (FileOutputStream o = new FileOutputStream(pgidFile())) {   // for killOrphans
-                            o.write(String.valueOf(pgid).getBytes(StandardCharsets.US_ASCII));
+                            o.write((id + " " + pgidStart + " " + bootId()).trim()
+                                    .getBytes(StandardCharsets.US_ASCII));
                         } catch (IOException e) {
                             Log.w(TAG, "prepare: cannot write " + pgidFile() + ": " + e);
                         }
@@ -464,8 +486,11 @@ final class PrepareRunner {
 
     private void signal(Signal s) {
         int id = pgid;
+        long start = pgidStart;
         Process p = process;
-        if (id > 0) {
+        // A signal that comes after the group has ended (a cancel racing the exit) must not reach a group that has
+        // since taken its number; a start time unknown (no /proc) keeps the plain group signal of a live run.
+        if (id > 0 && (start < 0 || groupIsThatOne(id, start))) {
             // The group: kill(2) with a negative pid (android.system.Os), and the kill command as well (toybox on
             // a device, util-linux / procps on Linux): Os is a stub in JVM tests, and a second signal to a group
             // that is gone is harmless.
@@ -485,6 +510,73 @@ final class PrepareRunner {
             else
                 p.destroyForcibly();
         }
+    }
+
+    /** /proc, a field for the tests. */
+    static File proc = new File("/proc");
+
+    /** A process's /proc/<pid>/stat fields after its name: [0] state, [1] ppid, [2] pgrp, [19] start time. */
+    private static String[] statFields(int pid) {
+        try {
+            String st = PrepareProtocol.readText(new File(proc, pid + "/stat"), 4096);
+            int close = st.lastIndexOf(')');
+            if (close < 0)
+                return null;
+            String[] f = st.substring(close + 1).trim().split("\\s+");
+            return f.length >= 20 ? f : null;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** A process's start time (clock ticks after boot), or -1 when it is not there or /proc cannot be read. */
+    static long startTime(int pid) {
+        String[] f = statFields(pid);
+        try {
+            return f == null ? -1 : Long.parseLong(f[19]);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    /** This boot's id (changes at every boot), or "" when it cannot be read. */
+    static String bootId() {
+        try {
+            return PrepareProtocol.readText(new File(proc, "sys/kernel/random/boot_id"), 256).trim();
+        } catch (IOException | RuntimeException e) {
+            return "";
+        }
+    }
+
+    /**
+     * Whether process group id is still the one whose leader started at start: the leader is there with that start
+     * time, or it has exited and a live process is still in group id (Linux gives no new process a pid number that a
+     * group still has as its id, so those are the leader's own descendants). False when the leader's number is
+     * another process's now, or when nothing is left in the group.
+     */
+    static boolean groupIsThatOne(int id, long start) {
+        if (id <= 1 || start < 0)
+            return false;
+        if (new File(proc, String.valueOf(id)).exists())
+            return start == startTime(id);
+        File[] all = proc.listFiles();
+        if (all == null)
+            return false;
+        String want = String.valueOf(id);
+        for (File d : all) {
+            String n = d.getName();
+            if (n.isEmpty() || !Character.isDigit(n.charAt(0)))
+                continue;
+            String[] f;
+            try {
+                f = statFields(Integer.parseInt(n));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (f != null && want.equals(f[2]) && !"Z".equals(f[0]))
+                return true;
+        }
+        return false;
     }
 
     private static boolean runKill(String... args) {

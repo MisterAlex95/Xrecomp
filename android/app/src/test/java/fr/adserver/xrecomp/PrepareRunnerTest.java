@@ -5,6 +5,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -14,6 +15,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
 import java.io.File;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -240,6 +242,86 @@ public class PrepareRunnerTest {
         assertEquals(PrepareRunner.KILLED, end.code);
         assertEquals(2, end.attempt);
         assertEquals(1, end.jobs);
+    }
+
+    /** A process group of its own (PrepareRunner.wrap: setsid), as a Prepare's; its id from the XBA_PGID line. */
+    private static final class Group {
+        final Process p;
+        final int id;
+
+        Group(String script) throws Exception {
+            p = new ProcessBuilder(PrepareRunner.wrap(Arrays.asList("/bin/sh", "-c", script)))
+                    .redirectErrorStream(true).start();
+            String line = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream())).readLine();
+            assertNotNull(line);
+            assertTrue(line, line.startsWith("XBA_PGID "));
+            id = Integer.parseInt(line.substring(9).trim());
+        }
+
+        void kill() throws Exception {
+            new ProcessBuilder("kill", "-KILL", "--", "-" + id).start().waitFor(3, TimeUnit.SECONDS);
+            p.destroyForcibly();
+            p.waitFor(3, TimeUnit.SECONDS);
+        }
+    }
+
+    private static boolean hasSetsid() {
+        return PrepareRunner.findBinary("/system/bin/setsid", "/usr/bin/setsid", "/bin/setsid") != null;
+    }
+
+    /**
+     * killOrphans ends the group named in the pgid file only when it is still that group: its leader's start time
+     * and the boot's id match. A number now held by another process (the start time differs), another boot, or an
+     * older file with the bare id: left alone, and the file removed all the same.
+     */
+    @Test
+    public void killOrphansOnlyEndsThatGroup() throws Exception {
+        Assume.assumeTrue("setsid", hasSetsid());
+        PrepareRunner r = runner(script("true\n"), 1, () -> null);
+        File f = r.pgidFile();
+        assertTrue(f.getParentFile().mkdirs() || f.getParentFile().isDirectory());
+        Group g = new Group("sleep 30");
+        try {
+            long start = PrepareRunner.startTime(g.id);
+            assertTrue("start time read from /proc", start > 0);
+            String boot = PrepareRunner.bootId();
+            for (String stale : new String[] {String.valueOf(g.id), g.id + " " + (start + 1) + " " + boot,
+                                              g.id + " " + start + " another-boot"}) {
+                TestSupport.write(f, stale);
+                r.killOrphans();
+                assertFalse("the file is removed: " + stale, f.exists());
+                assertFalse("not killed for a stale file: " + stale, g.p.waitFor(300, TimeUnit.MILLISECONDS));
+            }
+            TestSupport.write(f, (g.id + " " + start + " " + boot).trim());
+            r.killOrphans();
+            assertFalse(f.exists());
+            assertTrue("that group is ended", g.p.waitFor(10, TimeUnit.SECONDS));
+        } finally {
+            g.kill();
+        }
+    }
+
+    /** A group whose leader has exited is still that group while a child is in it; not once it is empty. */
+    @Test
+    public void groupOutlivesItsLeader() throws Exception {
+        Assume.assumeTrue("setsid", hasSetsid());
+        Group g = new Group("sleep 30 & sleep 1");
+        try {
+            long start = PrepareRunner.startTime(g.id);
+            assertTrue(start > 0);
+            assertTrue(PrepareRunner.groupIsThatOne(g.id, start));
+            assertFalse("another start time", PrepareRunner.groupIsThatOne(g.id, start + 1));
+            assertTrue(g.p.waitFor(10, TimeUnit.SECONDS));
+            assertFalse("the leader is gone", new File("/proc/" + g.id).exists());
+            assertTrue("its child still holds the group", PrepareRunner.groupIsThatOne(g.id, start));
+            g.kill();
+            long until = System.currentTimeMillis() + 10000;
+            while (PrepareRunner.groupIsThatOne(g.id, start) && System.currentTimeMillis() < until)
+                Thread.sleep(50);
+            assertFalse("an empty group", PrepareRunner.groupIsThatOne(g.id, start));
+        } finally {
+            g.kill();
+        }
     }
 
     @Test
