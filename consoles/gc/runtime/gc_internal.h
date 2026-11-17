@@ -93,6 +93,7 @@ struct gc_machine {
     uint32_t *missed;
     size_t nmissed, cap_missed;
     gc_recomp_stats stats;
+    struct gc_rel_state *rel; /* REL modules the game loaded (gc_rel.c, XBA-264) */
 
     struct gc_di *di;     /* the DVD interface and its disc (gc_di.c), NULL until a disc is inserted */
 
@@ -149,6 +150,12 @@ uint64_t gc_tb(gc_machine *m);
 /* gc_recomp.c */
 bool gc_recomp_dispatch(gc_machine *m);
 void gc_recomp_icbi(gc_machine *m, uint32_t ea);
+
+/* gc_rel.c (XBA-264): after each field, the loaded REL modules (OSLink's list at 0x800030C8) and their records;
+ * whether pc is in a loaded module's code; freeing it. */
+void gc_rel_field(gc_machine *m);
+bool gc_rel_in_code(gc_machine *m, uint32_t pc);
+void gc_rel_free(gc_machine *m);
 
 /* gc_di.c (XBA-261): registers 0x0C006000-0x0C00603F (idx = offset / 4), its next event (UINT64_MAX: none), the
  * event itself (a command completes, the cover closes), freeing it and its discs. */

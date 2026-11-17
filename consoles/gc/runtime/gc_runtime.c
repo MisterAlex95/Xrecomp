@@ -16,6 +16,8 @@
 #include "gc_audio.h"
 #include "gc_boot.h"
 #include "gc_exi.h"
+#include "gc_extract.h"
+#include "gc_pack.h"
 
 #include "host_audio.h"
 
@@ -169,28 +171,14 @@ static void mkdirs_for(const char *path)
         }
 }
 
-/* Under s_mu: one hex address per line (gc_run --missed's format). */
+/* Under s_mu: the missed addresses and the REL modules seen, merged into the work folder's discovered.txt (the next
+ * Prepare's input, XBA-264). */
 static void save_missed_locked(void)
 {
     if (!s_m || !s_discovered[0])
         return;
-    size_t n = gc_recomp_missed(s_m, NULL, 0);
-    if (!n)
-        return;
-    uint32_t *list = malloc(n * sizeof *list);
-    if (!list)
-        return;
-    gc_recomp_missed(s_m, list, n);
     mkdirs_for(s_discovered);
-    FILE *f = fopen(s_discovered, "w");
-    if (f) {
-        fprintf(f, "# gc_runtime: text addresses the interpreter started at after a jump\n");
-        for (size_t i = 0; i < n; i++)
-            fprintf(f, "%08X\n", list[i]);
-        fclose(f);
-        printf("gc: %zu address(es) the interpreter started at written to %s\n", n, s_discovered);
-    }
-    free(list);
+    gc_pack_save_discovered(s_m, s_discovered);
 }
 
 static void cards_flush_locked(const char *why);
@@ -442,7 +430,7 @@ static void display(const gc_runtime_opts *o, int *scale, int *filter)
 int gc_runtime_run(const gc_runtime_opts *o)
 {
     size_t dol_n = 0;
-    char key[48], why[160];
+    char key[48], why[160], source_sha[65] = "";
     /* A disc image (XBA-261: ISO / GCM, CISO, GCZ, RVZ, WIA, by content) boots through its apploader, no IPL. */
     gc_disc *disc = o && o->dol ? gc_disc_open(o->dol, why, sizeof why) : NULL;
     uint8_t *dol = NULL;
@@ -457,6 +445,8 @@ int gc_runtime_run(const gc_runtime_opts *o)
         else if (gc_disc_title_key(disc, key, sizeof key))
             snprintf(key, sizeof key, "?");
         printf("gc: disc %s (%s image), key %s\n", base_name(o->dol), gc_disc_format(disc), key);
+        if (o->pack_lib && *o->pack_lib)
+            gc_extract_dol_sha256(disc, source_sha); /* the pack's source identity: the main DOL's SHA-256 */
         m = gc_create_disc(disc, why, sizeof why);
         if (!m) {
             gc_disc_close(disc);
@@ -475,6 +465,11 @@ int gc_runtime_run(const gc_runtime_opts *o)
         snprintf(key, sizeof key, "%s", o->title_key);
     else
         gc_runtime_key(dol, dol_n, key, sizeof key);
+    {
+        uint8_t sum[32];
+        gc_pack_sha256(dol, dol_n, sum); /* the pack's source identity: the main DOL's SHA-256 */
+        gc_pack_hex(sum, source_sha);
+    }
     m = gc_create(dol, dol_n, why, sizeof why);
     free(dol);
     if (!m) {
@@ -496,22 +491,11 @@ started:;
         printf("gc: %s, program %s (%zu KB), key %s, TV %s\n", gc_runtime_version(), base_name(o->dol), dol_n / 1024,
                key, tv == GC_TV_PAL ? "PAL (50 Hz)" : "NTSC (60 Hz)");
 
-    /* A pack: lifted code where memory still holds what it was lifted from, the interpreter elsewhere. */
-    void *lib = NULL;
-    if (o->pack_lib && *o->pack_lib) {
-        lib = dlopen(o->pack_lib, RTLD_NOW | RTLD_LOCAL);
-        gc_recomp_title_table_fn get = lib ? (gc_recomp_title_table_fn)dlsym(lib, GC_RECOMP_ENTRY_SYMBOL) : NULL;
-        const gc_recomp_table *t = get ? get() : NULL;
-        if (t && gc_attach_recomp(m, t) == 0) {
-            printf("PACK_LOADED gc %s (%u resume points, %u spans)\n", key, t->count, t->nspans);
-        } else {
-            printf("PACK_STALE gc %s (%s), running interpreted\n", key,
-                   !lib ? dlerror() : !t ? "no gc_recomp_title_table" : "recompiler ABI differs");
-            if (lib)
-                dlclose(lib);
-            lib = NULL;
-        }
-    }
+    /* A pack (XBA-264): checked against pack.json and the main DOL (gc_pack.h); lifted code where memory still holds
+     * what it was lifted from, the interpreter elsewhere. The game always starts. */
+    gc_pack pack = {0};
+    if (o->pack_lib && *o->pack_lib)
+        gc_pack_load(m, o->pack_lib, key, source_sha, &pack);
     pthread_mutex_lock(&s_mu);
     s_m = m;
     snprintf(s_discovered, sizeof s_discovered, "%s", o->discovered_path ? o->discovered_path : "");
@@ -576,7 +560,7 @@ started:;
     static uint8_t yuv[GC_XFB_MAX_W * GC_XFB_MAX_H * 2];
     static uint8_t rgb[GC_XFB_MAX_W * GC_XFB_MAX_H * 3];
     static uint8_t rgba[GC_XFB_MAX_W * GC_XFB_MAX_H * 4];
-    uint64_t frames = 0, t0 = now_ns(), next = t0, late_resets = 0;
+    uint64_t frames = 0, t0 = now_ns(), next = t0, late_resets = 0, last_save = 0;
     int was_paused = 0, rc = 0, was_ff = 0, stopped = 0, heard = 0;
     static int16_t pcm[GC_AUDIO_RATE / 10 * 2];
     recomp_ff_carry ff_carry;
@@ -610,6 +594,9 @@ started:;
         }
         if (recomp_lifecycle_paused()) {
             if (!was_paused) {
+                pthread_mutex_lock(&s_mu);
+                save_missed_locked(); /* the app may be killed in the background */
+                pthread_mutex_unlock(&s_mu);
                 printf("gc: paused at field %llu\n", (unsigned long long)frames);
                 fflush(stdout);
                 was_paused = 1;
@@ -678,6 +665,12 @@ started:;
                 break;
         }
         rumble(m);
+        if (frames - last_save >= 3ull * 60 * 60) { /* every few minutes of play: the discovered file */
+            last_save = frames;
+            pthread_mutex_lock(&s_mu);
+            save_missed_locked();
+            pthread_mutex_unlock(&s_mu);
+        }
 
         if (window && !stopped) {
             uint64_t tp = now_ns();
@@ -793,8 +786,7 @@ started:;
     s_discovered[0] = 0;
     pthread_mutex_unlock(&s_mu);
     gc_destroy(m);
-    if (lib)
-        dlclose(lib);
+    gc_pack_close(&pack);
     return rc;
 }
 

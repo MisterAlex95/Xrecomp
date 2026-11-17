@@ -17,7 +17,8 @@ extern "C" {
 
 typedef struct gc_machine gc_machine;
 
-#define GC_RECOMP_ABI 2 /* 2: XBA-260 (cycle estimates, translated memory, Gekko guards) */
+#define GC_RECOMP_ABI 3 /* 2: XBA-260 (cycle estimates, translated memory, Gekko guards); 3: XBA-264 (REL module
+                         * units: an address may be listed several times, with different spans) */
 
 typedef void (*gc_recomp_fn)(gc_machine *m);
 
@@ -39,7 +40,8 @@ typedef struct gc_recomp_span {
 
 typedef struct gc_recomp_table {
     uint32_t abi;               /* GC_RECOMP_ABI */
-    uint32_t count;             /* entries, sorted by addr */
+    uint32_t count;             /* entries, sorted by addr (an address may come several times: REL modules loaded in
+                                 * turn at one place; the one whose span matches memory runs) */
     const gc_recomp_entry *entries;
     uint32_t nspans;
     const gc_recomp_span *spans;
@@ -53,8 +55,18 @@ typedef const gc_recomp_table *(*gc_recomp_title_table_fn)(void);
 int gc_attach_recomp(gc_machine *m, const gc_recomp_table *t);
 
 /* Text addresses where the interpreter had to start after a jump (not a resume point of the table): copies at
- * most max, returns the total. */
+ * most max, returns the total. In the DOL's text or in a loaded REL module's code (XBA-264). */
 size_t gc_recomp_missed(gc_machine *m, uint32_t *out, size_t max);
+
+/* The REL modules seen loaded (gc_rel.c, XBA-264): one line per module and load address,
+ * "REL <id> <base> <bss> <fnv1a of its executable sections> [<id>@<base> of the modules loaded with it]"; the
+ * pointers stay valid until the machine is destroyed. Copies at most max, returns the total. */
+size_t gc_recomp_rel_records(gc_machine *m, const char **out, size_t max);
+
+/* The discovered file the next Prepare reads (gc_tools.recomp --discovered): the missed addresses and the REL
+ * records merged into what path already holds, without repeats, written through a temporary file and a rename
+ * (directories made). Returns how many new lines it added (0: the file is left as it was), or -1. */
+int gc_recomp_write_discovered(gc_machine *m, const char *path);
 
 typedef struct gc_recomp_stats {
     uint64_t native;      /* instructions lifted code ran (packs built with -DGC_RC_COUNT) */

@@ -30,7 +30,12 @@
  * Prepare. Exit status: 0 done, 3 the driver has no program binaries, 77 no GLES 3 context, 1 CACHE not written.
  *
  * Sound (XBA-263): --wav OUT writes everything the machine played (48 kHz 16-bit stereo, from power-on) as a WAV;
- * the line "audio: ..." sums up the DSP's microcode and what was played. */
+ * the line "audio: ..." sums up the DSP's microcode and what was played.
+ *
+ * Prepare (XBA-264): --discovered FILE merges the missed addresses and the REL modules seen loaded into FILE (the
+ * runtime's discovered.txt format, gc_recomp_write_discovered). `gc_run --extract OUT.gcm IMAGE` writes the sparse
+ * GCM tools.prepare reads (header, apploader, FST, main DOL, REL modules; gc_extract.h) out of any image format and
+ * prints "key <KEY> dol_sha256 <HEX> rels <N>". */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +44,7 @@
 #include "gc_audio.h"
 #include "gc_boot.h"
 #include "gc_core.h"
+#include "gc_extract.h"
 #include "gx/gx.h"
 #include "gc_png.h"
 
@@ -94,6 +100,7 @@ static uint8_t *read_file(const char *path, size_t *size)
 int main(int argc, char **argv)
 {
     const char *dol_path = NULL, *png = NULL, *pack = NULL, *missed = NULL, *disc2 = NULL, *wav = NULL;
+    const char *discovered = NULL, *extract = NULL;
     int frames = 60, stats = 0, verbose = 0, npeek = 0, force_disc = 0, swap_at = -1, use_gx = 0, gx_hw = 0;
     gx_gl_options gxo = {0, 1, 0, NULL, NULL};
     const char *warm_lists = NULL, *warm_cache = NULL;
@@ -112,6 +119,10 @@ int main(int argc, char **argv)
             pack = argv[++i];
         else if (!strcmp(argv[i], "--missed") && i + 1 < argc)
             missed = argv[++i];
+        else if (!strcmp(argv[i], "--discovered") && i + 1 < argc)
+            discovered = argv[++i];
+        else if (!strcmp(argv[i], "--extract") && i + 1 < argc)
+            extract = argv[++i];
         else if (!strcmp(argv[i], "--peek") && i + 1 < argc && npeek < 16)
             peek[npeek++] = argv[++i];
         else if (!strcmp(argv[i], "--pal"))
@@ -159,8 +170,10 @@ int main(int argc, char **argv)
             fprintf(stderr, "usage: gc_run PROG.dol|DISC [--disc IMAGE] [--disc2 IMAGE --swap-at FIELD] [--frames N]"
                             " [--png OUT] [--pack LIB] [--missed FILE] [--stats] [--peek ADDR[:N]] [--pal]"
                             " [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]] [--wav OUT] [-v] [--gx] [--gx-hw] [--gx-scale N]"
-                            " [--gx-shaders MODE] [--gx-list FILE] [--gx-copy-ram] [--gx-programs FILE]\n"
-                            "       gc_run --gx-warmup LIST[,LIST...] CACHE [--gx-hw]\n");
+                            " [--gx-shaders MODE] [--gx-list FILE] [--gx-copy-ram] [--gx-programs FILE]"
+                            " [--discovered FILE]\n"
+                            "       gc_run --gx-warmup LIST[,LIST...] CACHE [--gx-hw]\n"
+                            "       gc_run --extract OUT.gcm IMAGE\n");
             return 2;
         }
     }
@@ -180,6 +193,23 @@ int main(int argc, char **argv)
     if (!dol_path) {
         fprintf(stderr, "gc_run: no DOL\n");
         return 2;
+    }
+    if (extract) {
+        char ewhy[300], key[48] = "?", hex[65];
+        gc_extract_info info;
+        gc_disc *d = gc_disc_open(dol_path, ewhy, sizeof ewhy);
+        if (!d || gc_extract_sparse(d, extract, &info, ewhy, sizeof ewhy)) {
+            fprintf(stderr, "gc_run: --extract %s: %s\n", dol_path, ewhy);
+            if (d)
+                gc_disc_close(d);
+            return 2;
+        }
+        gc_disc_title_key(d, key, sizeof key);
+        gc_extract_dol_sha256(d, hex);
+        printf("key %s dol_sha256 %s rels %u (%llu bytes)\n", key, hex, info.rels,
+               (unsigned long long)info.rel_bytes);
+        gc_disc_close(d);
+        return 0;
     }
     char why[160];
     gc_machine *m = NULL;
@@ -316,6 +346,14 @@ int main(int argc, char **argv)
         if (f)
             fclose(f);
         free(list);
+    }
+    if (discovered) {
+        int added = gc_recomp_write_discovered(m, discovered);
+        if (added < 0)
+            fprintf(stderr, "gc_run: cannot write %s\n", discovered);
+        else
+            printf("discovered +%d (%zu missed, %zu REL records)\n", added, gc_recomp_missed(m, NULL, 0),
+                   gc_recomp_rel_records(m, NULL, 0));
     }
     if (png) {
         static uint8_t rgb[GC_XFB_MAX_W * GC_XFB_MAX_H * 3];

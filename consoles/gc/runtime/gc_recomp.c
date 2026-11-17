@@ -45,17 +45,6 @@ int gc_attach_recomp(gc_machine *m, const gc_recomp_table *t)
     return 0;
 }
 
-static int lookup(gc_machine *m, uint32_t pc)
-{
-    uint32_t s = (pc >> 2) * 0x9E3779B1u;
-    for (;;) {
-        int32_t i = m->rc_hash_idx[s & m->rc_hash_mask];
-        if (i < 0 || m->rc_hash_keys[s & m->rc_hash_mask] == pc)
-            return i;
-        s++;
-    }
-}
-
 static bool span_valid(gc_machine *m, uint32_t s)
 {
     if (m->span_state[s] == 1)
@@ -106,16 +95,34 @@ bool gc_recomp_dispatch(gc_machine *m)
 {
     if (!m->rc)
         return false;
-    uint32_t pc = m->h.cpu.pc;
-    int idx = lookup(m, pc);
+    uint32_t pc = m->h.cpu.pc, s = (pc >> 2) * 0x9E3779B1u;
+    int idx = -1;
+    bool listed = false, direct = true;
+    /* an address may be listed several times (REL modules loaded in turn at one place, XBA-264): the entry whose
+     * span holds what memory holds runs */
+    for (;; s++) {
+        int32_t i = m->rc_hash_idx[s & m->rc_hash_mask];
+        if (i < 0)
+            break;
+        if (m->rc_hash_keys[s & m->rc_hash_mask] != pc)
+            continue;
+        if (!listed) {
+            listed = true;
+            /* lifted code assumes the code at pc is MEM1[pc & 0x3FFFFFFF]: not so under non-default translation */
+            direct = gc_icode_direct(m, pc);
+        }
+        if (!direct)
+            break;
+        if (span_valid(m, m->rc->entries[i].span)) {
+            idx = i;
+            break;
+        }
+    }
     if (idx < 0) {
-        if (m->branched && in_text(m, pc))
+        if (m->branched && direct && (listed ? gc_rel_in_code(m, pc) : in_text(m, pc) || gc_rel_in_code(m, pc)))
             record_miss(m, pc);
         return false;
     }
-    /* lifted code assumes the code at pc is MEM1[pc & 0x3FFFFFFF]: not so under non-default instruction translation */
-    if (!gc_icode_direct(m, pc) || !span_valid(m, m->rc->entries[idx].span))
-        return false;
     m->h.rc_exit = GC_RC_EXIT_NORMAL;
     m->rc->entries[idx].fn(m);
     if (m->h.rc_exit == GC_RC_EXIT_NOT_COVERED)

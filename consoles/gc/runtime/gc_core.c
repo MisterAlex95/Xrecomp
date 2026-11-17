@@ -206,6 +206,7 @@ void gc_destroy(gc_machine *m)
     free(m->rc_hash_keys);
     free(m->rc_hash_idx);
     free(m->missed);
+    gc_rel_free(m);
     gc_di_free(m);
     gc_audio_free(m);
     free(m);
@@ -297,6 +298,7 @@ int gc_run_frame(gc_machine *m)
     m->field_end += (uint64_t)field_lines(m, m->frames) * m->line_cycles;
     m->field_line = 0;
     gc_si_line(m, 0); /* a poll starts each field */
+    gc_rel_field(m);  /* REL modules loaded or unloaded (XBA-264) */
     return 0;
 }
 

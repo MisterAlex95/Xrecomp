@@ -36,7 +36,9 @@ A Game Boy Advance ROM (.gba) makes a GBA title pack, with --android for the
 app or for gba_play on this host (tools/prepare/gba.py); a PlayStation disc
 (.cue / .bin / .iso) or PS-X EXE a PS1 title pack, for the app or for
 ps1_play (tools/prepare/ps1.py); a Nintendo 64 ROM (.z64 / .v64 / .n64) an
-N64 title pack, for the app or for n64_play / n64_run (tools/prepare/n64.py).
+N64 title pack, for the app or for n64_play / n64_run (tools/prepare/n64.py); a
+GameCube disc (.iso / .gcm / .ciso / .gcz / .rvz / .wia) or DOL a GameCube title
+pack, for the app or for gc_play (tools/prepare/gc.py).
 """
 
 import argparse
@@ -585,6 +587,9 @@ def main(argv=None):
     from tools.prepare import gba
     if gba.is_gba(a.source):            # a GBA ROM: its own steps, --android or a desktop pack (XBA-157 / 158)
         return gba.run(a, sys.modules[__name__], a.android)
+    from tools.prepare import gc
+    if gc.is_gc(a.source):              # a GameCube disc (by content) or DOL: the PS1's steps, REL modules (XBA-264)
+        return gc.run(a, sys.modules[__name__], a.android)
     from tools.prepare import ps1
     if ps1.is_ps1(a.source):            # a PS1 disc or EXE: the GBA's steps for a disc (XBA-168)
         return ps1.run(a, sys.modules[__name__], a.android)
