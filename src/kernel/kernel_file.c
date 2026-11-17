@@ -554,6 +554,8 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE, "delete %S", win_path);
     if (DeleteFileW(win_path))    return STATUS_SUCCESS;
     if (RemoveDirectoryW(win_path)) return STATUS_SUCCESS;
+    if (GetLastError() == ERROR_DIR_NOT_EMPTY)
+        return STATUS_DIRECTORY_NOT_EMPTY;
     return STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
@@ -743,9 +745,17 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
                     wcscpy_s(p, MAX_PATH, L"(handle)");
                 xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE, "delete %S", p);
             }
-            if (!SetFileInformationByHandle(FileHandle, FileDispositionInfo, &fdi, sizeof(fdi)))
+            if (!SetFileInformationByHandle(FileHandle, FileDispositionInfo, &fdi, sizeof(fdi))) {
+                DWORD err = GetLastError();
                 xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE,
-                         "SetFileDispositionInfo failed: err=%u", GetLastError());
+                         "SetFileDispositionInfo failed: err=%u", err);
+                /* XAPI's RemoveDirectory reports this one to the title, as the
+                 * POSIX backend does (ENOTEMPTY). */
+                if (err == ERROR_DIR_NOT_EMPTY) {
+                    IoStatusBlock->Status = STATUS_DIRECTORY_NOT_EMPTY;
+                    return STATUS_DIRECTORY_NOT_EMPTY;
+                }
+            }
             IoStatusBlock->Status = STATUS_SUCCESS;
             return STATUS_SUCCESS;
         }
@@ -1277,6 +1287,22 @@ static NTSTATUS errno_to_status(int e)
     }
 }
 
+/* Remove a file or an empty directory: unlink for a file, rmdir for a
+ * directory, which unlink refuses. A directory that still has entries is
+ * STATUS_DIRECTORY_NOT_EMPTY, as on the console; the rest through
+ * errno_to_status. An open file or directory goes on its last close on
+ * Linux, which matches NT's delete-on-close closely enough. */
+static NTSTATUS delete_host_path(const char *p, int is_dir)
+{
+    int e;
+    if ((is_dir ? rmdir(p) : unlink(p)) == 0)
+        return STATUS_SUCCESS;
+    e = errno;
+    if (e == ENOTEMPTY || e == EEXIST)
+        return STATUS_DIRECTORY_NOT_EMPTY;
+    return errno_to_status(e);
+}
+
 /* Translate an Xbox OBJECT_ATTRIBUTES path to a host path.
  *
  * A name relative to a RootDirectory handle is joined to that handle's host
@@ -1666,9 +1692,16 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
         return STATUS_ACCESS_DENIED;
     }
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE, "delete %s", host_path);
-    if (unlink(host_path) == 0) return STATUS_SUCCESS;
-    if (rmdir(host_path)  == 0) return STATUS_SUCCESS;
-    return STATUS_OBJECT_NAME_NOT_FOUND;
+    {
+        struct stat st;
+        if (lstat(host_path, &st) != 0) {
+            int e = errno;
+            if (e == ENOTDIR || (e == ENOENT && !xbox_host_parent_exists(host_path)))
+                return STATUS_OBJECT_PATH_NOT_FOUND;
+            return errno_to_status(e);
+        }
+        return delete_host_path(host_path, S_ISDIR(st.st_mode));
+    }
 }
 
 NTSTATUS __stdcall xbox_NtQueryInformationFile(
@@ -1906,11 +1939,24 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
             PXBOX_FILE_DISPOSITION_INFORMATION info = (PXBOX_FILE_DISPOSITION_INFORMATION)FileInformation;
             /* POSIX: unlinking an open file removes it on last close -- this
              * matches NT "delete on close" semantics exactly. */
+            /* A directory (XAPI's RemoveDirectory: open it with
+             * FILE_DIRECTORY_FILE, set the disposition, close) needs rmdir:
+             * unlink() fails on it with EISDIR / EPERM, and the directory
+             * used to stay while the call reported success, so a deleted
+             * save's folder came back in the next enumeration. */
             if (info->DeleteFile) {
                 const char* p = w32_handle_path(FileHandle);
                 if (p) {
+                    struct stat st;
+                    NTSTATUS st_del;
                     xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE, "delete %s", p);
-                    unlink(p);
+                    st_del = delete_host_path(p, fstat(fd, &st) == 0 && S_ISDIR(st.st_mode));
+                    /* Already gone: a second disposition on the handle. */
+                    if (st_del != STATUS_SUCCESS && st_del != STATUS_OBJECT_NAME_NOT_FOUND) {
+                        IoStatusBlock->Status = st_del;
+                        IoStatusBlock->Information = 0;
+                        return st_del;
+                    }
                 }
             }
             IoStatusBlock->Status = STATUS_SUCCESS;
