@@ -499,6 +499,7 @@ public class PrepareService extends Service {
         final String source = !rom ? gameDir
                               : console == Console.PS1 ? ps1Source(c, gameDir, titleId, work, runner)
                               : console == Console.N64 ? romSource(c, gameDir, work, runner, N64_ROM_COPY, N64_ROM_MAX)
+                              : console == Console.GC ? gcSource(c, gameDir, work, runner)
                               : romSource(c, gameDir, work, runner);
         return new PrepareRunner.CommandFactory() {
             @Override
@@ -567,6 +568,56 @@ public class PrepareService extends Service {
         return romSource(c, spec, work, runner, "rom.gba", ROM_MAX);
     }
 
+    /** The largest DOL copied for a GameCube Prepare (gc_runtime.c GC_DOL_MAX), and the copy's name. */
+    static final long GC_DOL_MAX = 16L << 20;
+    static final String GC_DOL_COPY = "game.dol";
+    /** The sparse GCM a GameCube disc's Prepare reads, in the work folder. */
+    static final String GC_SPARSE = "disc.gcm";
+
+    /**
+     * The file tools.prepare reads for a GameCube game (XBA-264): a DOL, its path as it is or a document copied (16 MB
+     * at most); a plain ISO / GCM, CISO or GCZ path as it is (tools.prepare reads them); an RVZ / WIA, or any disc seen
+     * as a document: the sparse GCM of what Prepare reads (the header, the apploader, the FST, the main DOL, the REL
+     * modules: a few MB on disk), written into the work folder by the native disc readers the game uses (GcNative).
+     */
+    static String gcSource(Context c, String spec, File work, PrepareRunner runner) throws IOException {
+        boolean doc = spec.startsWith("content:");
+        String name = doc ? documentName(c, spec) : new File(spec).getName();
+        String low = (name != null ? name : android.net.Uri.parse(spec).getLastPathSegment() + "")
+                .toLowerCase(java.util.Locale.ROOT);
+        if (low.endsWith(".dol"))
+            return romSource(c, spec, work, runner, GC_DOL_COPY, GC_DOL_MAX);
+        boolean nativeOnly = low.endsWith(".rvz") || low.endsWith(".wia");
+        if (!doc && !nativeOnly)
+            return spec;
+        File out = new File(work, GC_SPARSE);
+        String r;
+        android.os.ParcelFileDescriptor pfd = null;
+        try {
+            String nativePath = spec;
+            if (doc) {
+                pfd = c.getContentResolver().openFileDescriptor(android.net.Uri.parse(spec), "r");
+                if (pfd == null)
+                    throw new IOException("cannot open " + spec);
+                nativePath = "fd:" + pfd.getFd();
+            }
+            r = GcNative.extractor.extract(nativePath, out.getAbsolutePath());
+        } catch (SecurityException e) {
+            throw new IOException("no access to " + spec + ": " + e.getMessage());
+        } finally {
+            if (pfd != null)
+                pfd.close();
+        }
+        if (r == null)
+            throw new IOException(spec + ": a GameCube " + (nativeOnly ? "RVZ / WIA image" : "disc document")
+                                  + " needs the native disc reader (libxba_import.so)");
+        if (!r.startsWith("OK "))
+            throw new IOException(spec + ": " + (r.startsWith("ERR ") ? r.substring(4) : r));
+        if (runner != null)
+            runner.logLine("disc: " + spec + " -> " + out + " (" + r.substring(3) + ": key, REL modules, main DOL bytes)");
+        return out.getAbsolutePath();
+    }
+
     /** The largest ROM copied for an N64 Prepare (n64_core.h N64_ROM_MAX), and the copy's name in the work folder. */
     static final long N64_ROM_MAX = 64L << 20;
     static final String N64_ROM_COPY = "rom.z64";   // tools.prepare reads its first word: any byte order
@@ -588,7 +639,8 @@ public class PrepareService extends Service {
                 n += r;
                 if (n > max)
                     throw new IOException(spec + " is over " + (max >> 20) + " MB: not a "
-                                          + (max == ROM_MAX ? "GBA" : "N64") + " ROM");
+                                          + (max == ROM_MAX ? "GBA ROM" : max == GC_DOL_MAX ? "GameCube DOL"
+                                                                               : "N64 ROM"));
                 o.write(buf, 0, r);
             }
             o.getFD().sync();

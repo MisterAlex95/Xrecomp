@@ -93,10 +93,11 @@ enum Console {
 
     /**
      * A game of this console that starts from its file can also be prepared (translated for the device into a pack):
-     * the GBA (XBA-158), the PS1 (XBA-168; a .chd too) and the N64 (XBA-174).
+     * the GBA (XBA-158), the PS1 (XBA-168; a .chd too), the N64 (XBA-174) and the GameCube (XBA-264: a disc in any
+     * image format, or a DOL).
      */
     boolean prepares() {
-        return this == GBA || this == PS1 || this == N64;
+        return this == GBA || this == PS1 || this == N64 || this == GC;
     }
 
     /**

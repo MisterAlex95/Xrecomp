@@ -109,8 +109,10 @@ include("${XBOXRECOMP_ROOT}/src/framegen/lsfg_shaders.cmake")
 # ps1_jni.c (Ps1Native.java, XBA-159): the title key of a .chd PlayStation disc for the library scan
 # (Console.identify): recomp_pack_rom_identify with the PS1 disc reader (ps1_disc.c + the vendored libchdr) as its
 # disc hook. libc only, no SDL: the launcher process stays free of the runtime.
-add_library(xba_import SHARED xiso_jni.c lsfg_jni.c ps1_jni.c)
-target_link_libraries(xba_import PRIVATE xiso lsfg_shaders recomp_pack ps1_identify log)
+# gc_jni.c (GcNative.java, XBA-264): a GameCube Prepare's sparse GCM out of any disc image format (gc_extract.h),
+# through the GameCube disc readers (gc_core; no SDL, GL is only ever loaded at run time by the game process).
+add_library(xba_import SHARED xiso_jni.c lsfg_jni.c ps1_jni.c gc_jni.c)
+target_link_libraries(xba_import PRIVATE xiso lsfg_shaders recomp_pack ps1_identify gc_core log)
 if(TARGET lsfg_dxbc)
     target_link_libraries(xba_import PRIVATE lsfg_dxbc)
     target_compile_definitions(xba_import PRIVATE XBA_LSFG_TRANSLATOR=1)

@@ -1057,6 +1057,43 @@ orders; the real `n64_tools` on gfx.z64 when the homebrew is built, run by `n64_
 too; the NDK case where `ANDROID_NDK_HOME` is set), `consoles/n64/tests` `n64_pack` and `n64_rdp` (the `wrote`
 ranges), `tests/recomp_pack`, the app's `PrepareServiceTest.n64Source`, `LauncherLibraryTest.n64HomePrepares`.
 
+## GameCube packs (XBA-264)
+
+`python -m tools.prepare GAME.iso` (or `.gcm`, `.ciso`, `.gcz`, `.rvz`, `.wia`, a homebrew `.dol`; the content
+decides, before the PS1 check) makes a GameCube pack with the PS1's five steps and progress lines (tools/prepare/gc.py,
+`--android` for the app, the host's cc otherwise):
+
+1. identify: the title key (game code + maker + "-" + revision, `GALE01-0`, `-D2` from a set's second disc;
+   `DOL-<CRC32>` for a DOL), the main DOL read through the disc header and copied to `<work>/main.dol` (its SHA-256 is
+   the pack's source identity: the same for an ISO, an RVZ or a GCZ of one disc), and every REL module of the FST
+   (`*.rel`) copied to `<work>/rel/`. ISO / GCM, CISO and GCZ are read in Python (consoles/gc/tools/gc_tools/gcm.py);
+   RVZ / WIA through the runtime's readers: the app writes `<work>/disc.gcm` first (PrepareService.gcSource,
+   GcNative in libxba_import.so: a sparse GCM holding only the header, apploader, FST, main DOL, REL modules and
+   name tables), a desktop runs `gc_run --extract` ($XBA_GC_RUN, else gc_run on PATH; without it BAD_DISC says so).
+   A disc seen as a document goes the same native way, by its descriptor; a DOL document is copied (16 MB at most).
+2. analyse: `<work>/discovered.txt` (the runtime merges into it at exit, at every pause and every 3 minutes of play:
+   gc_recomp_write_discovered) holds the addresses the interpreter had to start at, one hex per line, and one
+   `REL <id> <base> <bss> <hash> [<id>@<base>...]` line per REL module and load address the game used; with
+   `--discovered FILE`, merged without repeats into `<work>/discovered-seeds.txt`.
+3. lift: `python -m gc_tools.recomp <work>/main.dol <work>/gen --discovered seeds --rel <work>/rel/...`: the DOL's
+   text, and each recorded REL module relocated at its recorded address and lifted when its bytes hash the same as
+   the run's (consoles/README.md « GameCube Prepare »). A module whose bytes differ is logged in prepare.log (`REL not
+   lifted: ...`) and stays interpreted.
+4. compile: `-O2` at most (`--opt 3` compiles at 2), `-ffp-contract=off -frounding-math` as the core, no SLP
+   vectorizer, `-I consoles/gc/runtime`; 384 MB per clang job in the job count.
+5. pack: `packs/gc-<KEY>/{libtitle.so, pack.json}` (`"console": "gc"`, `"title_key"`, `"source_sha256"` = the main
+   DOL's, `"entry": "gc_recomp_title_table"`, `"discovered"`, `"boot": "main.dol"`), then the title's GX shader list
+   (`<work>/gx_shaders.txt`, consoles/README.md « GameCube GX ») copied next to it.
+
+The game always starts. pack_loader.c hands the pack to gc_runtime_start when pack.json passes recomp_pack's checks
+(console, key, abi, shell_abi); gc_pack.c checks the rest (lib size and SHA-256, the table's ABI and its
+`dol_sha256` = the main DOL's) and logs `PACK_LOADED gc <KEY> (<N> resume points, <S> spans)` or `PACK_STALE gc <KEY>
+(<why>), running interpreted`; no pack: `PACK_NONE`. The discovery rounds are the player's sessions: each run grows
+discovered.txt, each Prepare lifts what it found (Prepare again after playing new areas: new REL modules, code the
+static seeds missed). The toolkit tree carries `consoles/gc/tools/**/*.py` and `consoles/gc/runtime/*.h`.
+Tests: tools/prepare/test_gc_prepare.py (a disc made here, its module recorded by gc_run, lifted by the next Prepare and
+run natively; RVZ through `gc_run --extract`), consoles/gc/tools/gc_tools/test_gc_rel.py, PrepareServiceTest.gcSource.
+
 ## GameCube shader warm-up (XBA-264)
 
 After a GameCube Prepare ends `DONE`, PrepareService asks `ShaderWarmup.request`, which hands a GameCube title to

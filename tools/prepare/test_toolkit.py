@@ -127,6 +127,11 @@ PACK_INPUTS = (
     "tools/prepare/n64.py", "consoles/n64/tools/n64_tools/recomp.py", "consoles/n64/tools/n64_tools/lift.py",
     "consoles/n64/runtime/n64_recomp.h", "consoles/n64/runtime/n64_recomp_rt.h", "consoles/n64/runtime/n64_core.h",
     "consoles/n64/runtime/n64_devices.h",
+    # GameCube packs (XBA-264): the Prepare's GameCube path, the lifter (its disc and REL readers), the PowerPC
+    # frontend, the headers its C includes.
+    "tools/prepare/gc.py", "consoles/gc/tools/gc_tools/recomp.py", "consoles/gc/tools/gc_tools/rel.py",
+    "consoles/gc/tools/gc_tools/gcm.py", "consoles/gc/tools/gc_tools/gekko.py", "tools/ppc/lift.py",
+    "consoles/gc/runtime/gc_recomp.h", "consoles/gc/runtime/gc_recomp_rt.h", "consoles/gc/runtime/ppc_ops.h",
 )
 
 
@@ -140,6 +145,7 @@ def test_the_tree_covers_what_a_pack_is_made_of():
     assert "consoles/ps1/runtime/ps1_cpu.c" not in sel
     assert "consoles/n64/runtime/n64_cpu.c" not in sel
     assert "consoles/n64/tools/n64_tools/test_recomp.py" not in sel
+    assert "consoles/gc/runtime/gc_cpu.c" not in sel and "consoles/gc/tools/gc_tools/test_gc_rel.py" not in sel
     assert not [p for p in sel if "/test_" in p]
 
 

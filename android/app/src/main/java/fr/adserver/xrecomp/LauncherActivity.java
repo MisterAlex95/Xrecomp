@@ -5057,7 +5057,8 @@ public class LauncherActivity extends Activity {
 
     /**
      * Whether a game that starts from its file has a Prepare: its console's (Console.prepares: the GBA, the PS1, the
-     * N64). A PS1 .chd too (XBA-168: PrepareService.ps1Source reads its boot EXE through the native disc reader).
+     * N64, the GameCube). A PS1 .chd too (XBA-168: PrepareService.ps1Source reads its boot EXE through the native disc
+     * reader); a GameCube RVZ too (XBA-264: PrepareService.gcSource, the sparse GCM through the native reader).
      */
     static boolean romPrepares(LibraryScreen.Entry e) {
         return e.console().prepares();
@@ -5260,8 +5261,8 @@ public class LauncherActivity extends Activity {
      */
     private void openGame(LibraryScreen.Entry e) {
         if (e.directLaunch()) {
-            // Its Home: Play and Prepare with the toolchain; an N64 game's always (Play and its pak, XBA-174). A
-            // GameCube DOL (XBA-259) has no Prepare yet: straight into the game.
+            // Its Home: Play and Prepare with the toolchain (GBA, PS1, N64, GameCube: XBA-264); an N64 game's always
+            // (Play and its pak, XBA-174).
             if (((Toolchain.available(this) && e.console().prepares()) || e.console() == Console.N64)
                 && e.chip != GameState.Chip.NO_FILE_ACCESS) {
                 Log.i(TAG, "launcher: library: open " + e.tid + " (" + e.title() + ", " + e.chip + ")");

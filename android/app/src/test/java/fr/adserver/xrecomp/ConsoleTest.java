@@ -298,7 +298,7 @@ public class ConsoleTest {
         assertEquals(Console.GC, Console.ofKey(id.packName()));
         assertEquals("GC", Console.GC.badge());
         assertTrue(Console.GC.playable() && Console.GC.directLaunch());
-        assertFalse(Console.GC.prepares() || Console.GC.hasSaveStates());
+        assertTrue(Console.GC.prepares());   // XBA-264
         assertEquals(Console.GC, Console.fromPack("gc"));
 
         byte[] entryOut = dol();

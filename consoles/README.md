@@ -1582,6 +1582,32 @@ logic ops other than the five above, constant destination alpha while blending r
 blending in GLES 3.0), GPU-side transform and lighting (the CPU does it: the first thing to move if the Thor shows
 it), program binaries (GC-6).
 
+**GameCube Prepare (XBA-264, GC-6).** A disc (or DOL) prepared into a pack on the device or a desktop
+(docs/android/prepare.md « GameCube packs »), the game always starting in the interpreter:
+
+- **REL modules, per load address.** A REL is a module the game loads at run time (the SDK's OSLink: the file read
+  into a heap buffer, its sections relocated where they lie, its bss allocated apart, itself linked on the list at
+  0x800030C8). Its address comes from the heap, so it cannot be known from the disc, and lifting it position-free
+  would mean rewriting every relocated immediate as an expression. Instead `runtime/gc_rel.c` walks OSLink's list after
+  every field; when it changed, every span check is reset, and once it held for a field each module is recorded as
+  `REL <id> <base> <bss> <FNV-1a of its executable sections> <id>@<base> of the modules loaded with it`. Prepare reads
+  the module from the FST by its id, applies its relocations for that base / bss against the DOL (module 0), itself
+  and the co-loaded modules (`tools/gc_tools/rel.py`: ADDR32 / 24 / 16 / LO / HI / HA, ADDR14, REL24 / REL14,
+  DOLPHIN_SECTION / NOP / END), and lifts it only when the result hashes the same: same bytes, same native code.
+  Each module instance is its own unit (discovered on its own, its calls into the DOL leaving through the dispatcher);
+  modules loaded in turn at one place each keep their functions: the table may list an address several times
+  (GC_RECOMP_ABI 3) and dispatch runs the entry whose span matches memory. A module loaded elsewhere next time runs in
+  the interpreter and is recorded at its new address; interpreter misses inside a loaded module's code are recorded
+  like misses in the DOL's text. A module whose imports another module patched since (OSLink resolves both ways) is
+  recorded again with its new co-loaded set; one whose bytes Prepare cannot reproduce (e.g. a module unloaded since,
+  whose references OSUnlink pointed at `unresolved`) is skipped with a line in prepare.log.
+- **The pack, checked at load** (`runtime/gc_pack.c`, the N64's checks): pack.json's console / key / main DOL SHA-256 /
+  abi / shell_abi / lib size and SHA-256, the table's ABI and `dol_sha256`; `PACK_LOADED` / `PACK_STALE` / `PACK_NONE`.
+- **The discovered file** (`gc_recomp_write_discovered`): addresses and REL records merged into what the file holds
+  (temp file + rename), at exit, at every pause and every 3 minutes; `gc_run --discovered FILE` does the same.
+- **Any image format for Prepare** (`runtime/gc_extract.c`): the sparse GCM of what Prepare reads, out of an RVZ / WIA
+  or a document's descriptor (`gc_run --extract OUT.gcm IMAGE`, the app's GcNative).
+
 **GameCube sound (XBA-263).** DSP audio, ARAM, the audio interface and the disc's streamed audio, at a high level
 (no DSP ROM dump, no LLE), out through the host layer at 48 kHz (`gc_runtime`, the app included; `gc_run --wav`
 headless). Our own code, written from the hardware's documentation (Dolphin's notes and source read for facts only).

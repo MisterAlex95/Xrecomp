@@ -400,6 +400,57 @@ public class PrepareServiceTest {
     }
 
     /**
+     * XBA-264: what a GameCube Prepare reads. A DOL or a plain ISO / GCM / CISO / GCZ path goes as it is; an RVZ / WIA
+     * path, or any disc document (by its descriptor), goes through the native reader into &lt;work&gt;/disc.gcm; a DOL
+     * document is copied (16 MB at most); without the native reader an RVZ fails with why.
+     */
+    @Test
+    public void gcSource() throws Exception {
+        File work = tmp.newFolder("work-gc");
+        assertEquals("/sdcard/gc/Game.iso", PrepareService.gcSource(app, "/sdcard/gc/Game.iso", work, null));
+        assertEquals("/sdcard/gc/Game.gcz", PrepareService.gcSource(app, "/sdcard/gc/Game.gcz", work, null));
+        assertEquals("/sdcard/gc/hb.dol", PrepareService.gcSource(app, "/sdcard/gc/hb.dol", work, null));
+        GcNative.Extractor saved = GcNative.extractor;
+        final String[] seen = new String[2];
+        try {
+            GcNative.extractor = (path, out) -> {
+                seen[0] = path;
+                seen[1] = out;
+                return "OK GALE01-0 3 4096000";
+            };
+            String got = PrepareService.gcSource(app, "/sdcard/gc/Game.rvz", work, null);
+            assertEquals(new File(work, PrepareService.GC_SPARSE).getAbsolutePath(), got);
+            assertEquals("/sdcard/gc/Game.rvz", seen[0]);
+            assertEquals(got, seen[1]);
+            GcNative.extractor = (path, out) -> "ERR RVZ: bad group table";
+            try {
+                PrepareService.gcSource(app, "/sdcard/gc/Bad.rvz", work, null);
+                org.junit.Assert.fail("a bad RVZ");
+            } catch (java.io.IOException e) {
+                assertTrue(e.getMessage(), e.getMessage().contains("bad group table"));
+            }
+            GcNative.extractor = (path, out) -> null;
+            try {
+                PrepareService.gcSource(app, "/sdcard/gc/Game.WIA", work, null);
+                org.junit.Assert.fail("no native reader");
+            } catch (java.io.IOException e) {
+                assertTrue(e.getMessage(), e.getMessage().contains("native disc reader"));
+            }
+        } finally {
+            GcNative.extractor = saved;
+        }
+        android.net.Uri u = android.net.Uri.parse(
+            "content://com.android.externalstorage.documents/tree/primary%3Agc/document/primary%3Agc%2Fhb.dol");
+        byte[] dol = new byte[0x200];
+        org.robolectric.Shadows.shadowOf(app.getContentResolver())
+            .registerInputStream(u, new java.io.ByteArrayInputStream(dol));
+        String out = PrepareService.romSource(app, u.toString(), work, null, PrepareService.GC_DOL_COPY,
+                                              PrepareService.GC_DOL_MAX);
+        assertEquals(new File(work, "game.dol").getAbsolutePath(), out);
+        assertTrue(Console.GC.prepares());
+    }
+
+    /**
      * XBA-168: the disc a PS1 Prepare reads. A path goes as it is (tools.prepare opens a .cue and its tracks itself);
      * a .cue document's track documents come from the library index (its item's parts, under the same tree).
      */
