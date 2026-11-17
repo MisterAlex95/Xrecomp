@@ -6303,11 +6303,25 @@ static void bridge_NtQueryDirectoryFile(void)
     PXBOX_ANSI_STRING    pfn = NULL;
 
     memset(&ios, 0, sizeof(ios));
+    /* The guest's buffer and pattern are checked like the other file
+     * bridges' (KRN-13): a bad info_va or Length faulted inside the
+     * runtime instead of returning STATUS_ACCESS_VIOLATION. */
+    if (!bridge_buf_ok(info_va, length, "NtQueryDirectoryFile")
+            || (filename_va && !bridge_buf_ok(filename_va, 8, "NtQueryDirectoryFile"))) {
+        bridge_write_iostatus(ios_va, (NTSTATUS)0xC0000005, 0);
+        g_eax = 0xC0000005u;                 /* STATUS_ACCESS_VIOLATION */
+        return;
+    }
     if (filename_va) {
         /* Xbox ANSI_STRING: 0=Length(u16), 2=MaximumLength(u16), 4=Buffer(u32) */
         uint32_t fn_buf  = BRIDGE_MEM32(filename_va + 4);
         fn.Length        = BRIDGE_MEM16(filename_va);
         fn.MaximumLength = BRIDGE_MEM16(filename_va + 2);
+        if (fn_buf && !bridge_buf_ok(fn_buf, fn.Length, "NtQueryDirectoryFile")) {
+            bridge_write_iostatus(ios_va, (NTSTATUS)0xC0000005, 0);
+            g_eax = 0xC0000005u;
+            return;
+        }
         fn.Buffer        = fn_buf ? (PCHAR)XBOX_TO_NATIVE(fn_buf) : NULL;
         if (fn.Buffer) pfn = &fn;
     }

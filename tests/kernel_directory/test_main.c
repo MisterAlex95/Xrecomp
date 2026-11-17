@@ -52,6 +52,36 @@ static HANDLE guest_open(void) {
     if(g_eax || g_esp!=0x2001C) return INVALID_HANDLE_VALUE;
     return (HANDLE)(uintptr_t)*(uint32_t *)(mem+0x40500);
 }
+/* KRN-13: the guest's buffer, length and pattern are checked. Returns the
+ * status, or 0xFFFFFFFF when the stack or the I/O status block is wrong. */
+static uint32_t invoke_raw(HANDLE h, uint32_t info_va, uint32_t length, uint32_t pattern_va) {
+    uint32_t *sp=(uint32_t *)(mem+0x20000);
+    memset(sp,0,64); sp[0]=0xBEEF0001;
+    sp[1]=(uint32_t)(uintptr_t)h; sp[5]=0x30000; sp[6]=info_va;
+    sp[7]=length; sp[8]=1; sp[9]=pattern_va; sp[10]=1;
+    memset(mem+0x30000,0xCC,8);
+    g_esp=0x20000;
+    recomp_lookup_kernel(*(uint32_t *)(mem+0x10000))();
+    if(g_esp!=0x2002C || *(uint32_t *)(mem+0x30000)!=g_eax) return 0xFFFFFFFFu;
+    return g_eax;
+}
+static int check_buffers(HANDLE h) {
+    int ok=1;
+    uint32_t st;
+    /* Far outside guest memory: refused, not a host fault. */
+    st=invoke_raw(h,0x7F000000u,512,0);
+    if(st!=0xC0000005u){fprintf(stderr,"FAIL unmapped buffer: %08X\n",st);ok=0;}
+    /* A pattern whose Buffer is not mapped. */
+    *(uint16_t *)(mem+0x32000)=1; *(uint16_t *)(mem+0x32002)=2; *(uint32_t *)(mem+0x32004)=0x7F000000u;
+    st=invoke_raw(h,0x31000,512,0x32000);
+    if(st!=0xC0000005u){fprintf(stderr,"FAIL unmapped pattern: %08X\n",st);ok=0;}
+    /* Shorter than the entry header: nothing written. */
+    memset(mem+0x31000,0xAB,512);
+    st=invoke_raw(h,0x31000,32,0);
+    if(st!=0xC0000004u || mem[0x31000]!=0xAB || mem[0x31000+63]!=0xAB){
+        fprintf(stderr,"FAIL length 32: %08X\n",st);ok=0;}
+    return ok;
+}
 static int check_status_mapping(uint32_t status, uint32_t error) {
     uint32_t *sp = (uint32_t *)(mem + 0x20000);
     sp[0] = 0xBEEF0001; sp[1] = status;
@@ -106,6 +136,7 @@ int main(void) {
     if(ok) ok=invoke(h,"Save*",1,1) && g_eax==0;
     if(ok) ok=invoke(h,"*",1,1) && g_eax==0 && e->FileNameLength==8 && !memcmp(e->FileName,"SaveSlot",8);
     if(ok) ok=invoke(h,"*",1,2) && g_eax==0xC0000003u;
+    if(ok) ok=check_buffers(h);
     if(ok) ok=check_status_mapping(0x80000006u,18) && check_status_mapping(0,0)
         && check_status_mapping(0xC0000008u,6);
     if(ok) ok=active_searches()==1 && xbox_NtClose(h)==STATUS_SUCCESS && active_searches()==0;
@@ -137,6 +168,7 @@ int main(void) {
     if(h!=INVALID_HANDLE_VALUE) guest_close(h);
     RemoveDirectoryA(child); RemoveDirectoryA(path); VirtualFree(mem,0,MEM_RELEASE);
     if(!ok) return 1;
+    puts("PASS: buffer/pattern/length checks (KRN-13)");
     puts("PASS: directory ABI/filter/restart/status, guest/direct close, 144 slot-reuse cycles and fresh searches"); return 0;
 }
 
