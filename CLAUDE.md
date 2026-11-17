@@ -1,6 +1,7 @@
 # XRecomp
 
-Console games statically recompiled to native code: original Xbox today, GBA / PS1 / N64 under way (`consoles/`).
+Console games statically recompiled to native code: original Xbox (the 1.0 goal), GBA / PS1 / N64 done, GameCube in the
+app since 0.13, DS / PSP / PS2 / Dreamcast / 3DS / Xbox 360 / Win32 as spikes (`consoles/`).
 Fork of [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) (remote `upstream`, our work on `main`) that adds
 **Android arm64** as a host (NDK build, OpenGL ES 3.0, the XRecomp app with on-device Prepare), a macOS launcher
 (`macos/`) and a console-agnostic host layer (`src/host`). Hosts: Android, macOS, Linux (x86-64 / arm64), Windows.
