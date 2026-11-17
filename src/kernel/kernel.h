@@ -607,6 +607,17 @@ const wchar_t *xbox_LastHostPath(void);
 
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size);
 
+/* Nonzero when a guest path has a ".." component, which FATX and the object
+ * manager do not have; xbox_translate_path and the relative-name join refuse
+ * such a path so it cannot leave the game and save trees. */
+int xbox_path_has_dot_dot(const char *path);
+#if !defined(_WIN32)
+/* POSIX: give each component of path after its first `keep` bytes the
+ * spelling an entry in its directory has, ignoring case, as a translated
+ * path gets (the Xbox's file systems ignore case). */
+void xbox_path_fold_case(char *path, size_t keep);
+#endif
+
 /* Optional: a project sets this to see the guest paths the kernel translates
  * (for example to print who opened a file). NULL by default; called before the
  * path is translated, on the calling guest thread. Only paths a drive or

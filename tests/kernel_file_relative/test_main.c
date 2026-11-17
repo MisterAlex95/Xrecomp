@@ -135,6 +135,30 @@ int main(int argc, char **argv)
     st = create(dir, "Missing.ssx", XBOX_FILE_OPEN, 0x60, &file);
     check((uint32_t)st == 0xC0000034u, "a missing relative name: NAME_NOT_FOUND", (unsigned)st);
 
+    /* KRN-7: a relative name cannot climb out of its directory, and it
+     * ignores case like a full path ("DATA.SSX" is Data.ssx). */
+    printf("relative names stay inside, ignoring case\n");
+    st = create(dir, "..\\escape.bin", XBOX_FILE_OVERWRITE_IF, 0x60, &file);
+    check(st != 0 && !file, "..\\escape.bin relative to it is refused", (unsigned)st);
+    if (file) xbox_NtClose(file);
+    st = create(dir, "sub\\..\\..\\escape.bin", XBOX_FILE_OVERWRITE_IF, 0x60, &file);
+    check(st != 0 && !file, "sub\\..\\..\\escape.bin is refused", (unsigned)st);
+    if (file) xbox_NtClose(file);
+    {
+        char esc[700];
+        snprintf(esc, sizeof esc, "%s%sescape.bin", root,
+#if defined(_WIN32)
+                 "\\"
+#else
+                 "/"
+#endif
+                 );
+        check(!host_exists(esc), "... and nothing was created above it", 0);
+    }
+    st = create(dir, "DATA.SSX", XBOX_FILE_OPEN, 0x60, &file);
+    check(st == 0 && file, "DATA.SSX relative to it opens Data.ssx", (unsigned)st);
+    if (file) xbox_NtClose(file);
+
     printf("full paths ignore the handle\n");
     st = query(dir, "D:\\save1\\Data.ssx");
     check(st == 0, "full path with a RootDirectory set", (unsigned)st);

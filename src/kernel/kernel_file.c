@@ -351,7 +351,10 @@ static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
         return FALSE;
     if (ObjectAttributes->RootDirectory && xbox_path[0] != '\\' &&
         !(xbox_path[0] && xbox_path[1] == ':')) {
-        /* XDeleteSaveGame opens each child relative to its save directory. */
+        /* XDeleteSaveGame opens each child relative to its save directory.
+         * No "..": it would climb out of the directory (KRN-7). */
+        if (xbox_path_has_dot_dot(xbox_path))
+            return FALSE;
         DWORD used = GetFinalPathNameByHandleW(ObjectAttributes->RootDirectory,
             win_path, buf_size, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
         if (!used || used >= buf_size || used + 1 >= buf_size) return FALSE;
@@ -1111,6 +1114,8 @@ NTSTATUS __stdcall xbox_RenameFileByHandle(
 
     if (!name || !*name)
         return STATUS_INVALID_PARAMETER;
+    if (xbox_path_has_dot_dot(name))
+        return STATUS_OBJECT_NAME_INVALID;
     n = GetFinalPathNameByHandleW(FileHandle, src, MAX_PATH,
                                   FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     if (!n || n >= MAX_PATH)
@@ -1387,7 +1392,9 @@ static int posix_obj_path(PXBOX_OBJECT_ATTRIBUTES oa, char* host_path, size_t n)
         size_t dir;
         char* p;
 
-        if (!base)
+        /* No "..", no host-absolute name: either would leave the
+         * directory the handle names (KRN-7). */
+        if (!base || xbox_path[0] == '/' || xbox_path_has_dot_dot(xbox_path))
             return 0;
         dir = strlen(base);
         while (dir > 1 && base[dir - 1] == '/')
@@ -1399,6 +1406,11 @@ static int posix_obj_path(PXBOX_OBJECT_ATTRIBUTES oa, char* host_path, size_t n)
         strcpy(host_path + dir + 1, xbox_path);
         for (p = host_path + dir + 1; *p; p++)
             if (*p == '\\') *p = '/';
+        /* Case-insensitive like a full path: "DATA.SSX" relative to the
+         * save directory opens Data.ssx. The disc image ignores case
+         * already. */
+        if (!xbox_disc_rel(host_path))
+            xbox_path_fold_case(host_path, dir);
         return 1;
     }
     return xbox_translate_path(xbox_path, host_path, (DWORD)n) ? 1 : 0;
@@ -2096,6 +2108,8 @@ NTSTATUS __stdcall xbox_RenameFileByHandle(
         return STATUS_INVALID_HANDLE;
     if (!name || !*name)
         return STATUS_INVALID_PARAMETER;
+    if (xbox_path_has_dot_dot(name))
+        return STATUS_OBJECT_NAME_INVALID;   /* FATX has no "..": no way out of the tree */
     if (disc_of(FileHandle) || xbox_disc_rel(src)) {
         disc_denied_note(src, "rename");
         return STATUS_ACCESS_DENIED;

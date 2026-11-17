@@ -269,6 +269,39 @@ static int resolve_symlink(const char* xbox_path, char* out, size_t out_size)
     return 0;
 }
 
+/*
+ * A ".." component anywhere in a guest path.
+ *
+ * FATX and the Xbox object manager have no "..": the console answers
+ * STATUS_OBJECT_NAME_INVALID. Joined to a host directory as it was,
+ * "T:\..\..\x" named a host file outside the game and save trees, which a
+ * title (or a file name read from a modified save) could then create,
+ * truncate or delete -- on Android, anything in the app's data directory.
+ * Shared by both backends and by the relative-name join in kernel_file.c.
+ */
+int xbox_path_has_dot_dot(const char *p)
+{
+    const char *c = p;
+
+    if (!p)
+        return 0;
+    for (;;) {
+        if (*p == '\\' || *p == '/' || *p == '\0') {
+            if (p - c == 2 && c[0] == '.' && c[1] == '.')
+                return 1;
+            if (*p == '\0')
+                return 0;
+            c = p + 1;
+        }
+        p++;
+    }
+}
+
+/* Links a title chains (Z: -> Q:\ -> Partition1\) are followed this far, as
+ * xbox_path_tree does; a link to itself ("\??\Z:" -> "Z:\") recursed until
+ * the host stack was gone. */
+#define XBOX_LINK_HOPS 8
+
 /* ======================================================================== */
 /* Shared by both backends, for the same reason as xbox_LastFileError: the
  * bridge calls it unconditionally, and a _WIN32-only definition breaks every
@@ -660,7 +693,21 @@ const char *xbox_path_utility_dir_utf8(void)
     return utf8;
 }
 
+static BOOL translate_hops(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size,
+                           int hops);
+
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
+{
+    if (xbox_path_has_dot_dot(xbox_path)) {
+        xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "Refused Xbox path with a '..' component: %s",
+                 xbox_path);
+        return FALSE;
+    }
+    return translate_hops(xbox_path, host_path_buf, buf_size, 0);
+}
+
+static BOOL translate_hops(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size,
+                           int hops)
 {
     const char*  remainder = NULL;
     const WCHAR* base_dir  = NULL;
@@ -676,8 +723,15 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
 
     {
         char linked[512];
-        if (resolve_symlink(xbox_path, linked, sizeof(linked)))
-            return xbox_translate_path(linked, host_path_buf, buf_size);
+        if (resolve_symlink(xbox_path, linked, sizeof(linked))) {
+            if (hops >= XBOX_LINK_HOPS) {
+                xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH,
+                         "Symbolic links nested deeper than %d (a loop?): %s",
+                         XBOX_LINK_HOPS, xbox_path);
+                return FALSE;
+            }
+            return translate_hops(linked, host_path_buf, buf_size, hops + 1);
+        }
     }
 
     if (xbox_partition_device_path(xbox_path, host_path_buf, buf_size)) {
@@ -700,9 +754,13 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
         }
     }
 
+    /* Unrecognized: refused. It was passed through as a host path, so
+     * "\\Foo\\bar" named a host file outside the sandbox and a bare name a
+     * file in the working directory. The callers answer
+     * STATUS_OBJECT_PATH_NOT_FOUND, as the console does for a name no
+     * device or link carries. */
     xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "Unrecognized Xbox path: %s", xbox_path);
-    MultiByteToWideChar(CP_ACP, 0, xbox_path, -1, host_path_buf, buf_size);
-    return TRUE;
+    return FALSE;
 
 translate:
     if (g_xbox_path_hook)
@@ -852,6 +910,13 @@ static void fold_case(char *path, size_t keep)
             return;
         comp = end + 1;
     }
+}
+
+/* For a name joined to a directory handle's host path (kernel_file.c):
+ * the same case folding as a translated path, below `keep`. */
+void xbox_path_fold_case(char *path, size_t keep)
+{
+    fold_case(path, keep);
 }
 
 /* A title update or content the owner copied into this title's TDATA
@@ -1035,7 +1100,21 @@ const char *xbox_path_utility_dir_utf8(void)
     return out;
 }
 
+static BOOL translate_hops(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size,
+                           int hops);
+
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
+{
+    if (xbox_path_has_dot_dot(xbox_path)) {
+        xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "Refused Xbox path with a '..' component: %s",
+                 xbox_path);
+        return FALSE;
+    }
+    return translate_hops(xbox_path, host_path_buf, buf_size, 0);
+}
+
+static BOOL translate_hops(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size,
+                           int hops)
 {
     const char* remainder = NULL;
     const char* base_dir  = NULL;
@@ -1051,8 +1130,15 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
 
     {
         char linked[512];
-        if (resolve_symlink(xbox_path, linked, sizeof(linked)))
-            return xbox_translate_path(linked, host_path_buf, buf_size);
+        if (resolve_symlink(xbox_path, linked, sizeof(linked))) {
+            if (hops >= XBOX_LINK_HOPS) {
+                xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH,
+                         "Symbolic links nested deeper than %d (a loop?): %s",
+                         XBOX_LINK_HOPS, xbox_path);
+                return FALSE;
+            }
+            return translate_hops(linked, host_path_buf, buf_size, hops + 1);
+        }
     }
 
     {
@@ -1080,12 +1166,11 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
         }
     }
 
-    /* Unrecognized path: pass through, just normalize separators. */
+    /* Unrecognized: refused, as in the Win32 backend. It was passed
+     * through with '\\' turned into '/', so "\\Foo\\bar" became the host
+     * path /Foo/bar and a bare name a file in the working directory. */
     xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "Unrecognized Xbox path: %s", xbox_path);
-    snprintf(host_path_buf, buf_size, "%s", xbox_path);
-    for (char* p = host_path_buf; *p; p++)
-        if (*p == '\\') *p = '/';
-    return TRUE;
+    return FALSE;
 
 translate:
     {
