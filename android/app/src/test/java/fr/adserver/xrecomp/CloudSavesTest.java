@@ -1,5 +1,6 @@
 package fr.adserver.xrecomp;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -308,5 +309,22 @@ public class CloudSavesTest {
         CloudSaves.Report r = new CloudSaves(new GoogleDrive(google, "", ""), a, "x", null).syncAll(0);
         assertEquals(0, r.moved());
         assertNull(google.meta.isEmpty() ? null : "uploaded");
+    }
+
+    /** A GameCube memory card (XBA-264, save/gc-<KEY>/cardA.raw) goes up from one device and down to the other. */
+    @Test
+    public void gameCubeCardSyncs() throws Exception {
+        signIn(a);
+        signIn(b);
+        String key = "gc-GALE01-0";
+        byte[] card = new byte[64 * 1024];
+        for (int i = 0; i < card.length; i++)
+            card[i] = (byte) (i * 7 ^ i >> 8);
+        TestSupport.write(new File(a.saveDir(), key + "/cardA.raw"), card);
+        CloudSaves.Report r = sync(a);
+        assertEquals(Collections.singletonList(key), r.uploaded);
+        r = sync(b);
+        assertEquals(Collections.singletonList(key), r.downloaded);
+        assertArrayEquals(card, Files.readAllBytes(new File(b.saveDir(), key + "/cardA.raw").toPath()));
     }
 }

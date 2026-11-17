@@ -95,7 +95,8 @@ final class Storage {
     static List<File> saves(Dirs d, String tid) {
         List<File> l = new ArrayList<>();
         if (Console.ofKey(tid) != Console.XBOX) {
-            // A GBA, PS1 or N64 game (XBA-181): save/<console>-<KEY>/ (game.sav, card1.mcr, game.eep, pak1.mpk...).
+            // A GBA, PS1, N64 or GameCube game (XBA-181, XBA-264): save/<console>-<KEY>/ (game.sav, card1.mcr,
+            // game.eep, cardA.raw...).
             l.add(new File(d.saveDir(), tid));
             return l;
         }

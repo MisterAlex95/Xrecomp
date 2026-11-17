@@ -1,5 +1,6 @@
 package fr.adserver.xrecomp;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
@@ -22,6 +23,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -218,5 +220,33 @@ public class SaveArchiveTest {
         String n = SaveArchive.fileName(TID, 0);
         assertTrue(n, n.startsWith("xrecomp-saves-4d530004-") && n.endsWith(".zip"));
         assertTrue(SaveArchive.fileName(null, 0).startsWith("xrecomp-saves-all-"));
+    }
+
+    /** GameCube memory cards (XBA-264): save/gc-<KEY>/cardA.raw for a disc's key and a DOL's, out and back as is. */
+    @Test
+    public void gameCubeCards() throws Exception {
+        String disc = "gc-GALE01-0", dol = "gc-DOL-0C687E8B";
+        assertEquals(Console.GC, Console.ofKey(disc));
+        assertEquals(Console.GC, Console.ofKey(dol));
+        assertEquals(disc, SaveArchive.keyOf(disc + "/cardA.raw"));
+        assertEquals(dol, SaveArchive.keyOf(dol + "/cardB.raw"));
+        byte[] card = new byte[512 * 1024];   // a 59-block card
+        for (int i = 0; i < card.length; i++)
+            card[i] = (byte) (i * 31 + (i >> 9));
+        TestSupport.write(new File(d.saveDir(), disc + "/cardA.raw"), card);
+        save(dol + "/cardA.raw", "dol card");
+        List<String> titles = SaveArchive.titlesWithSaves(d, new Library.Games());
+        assertTrue(titles.toString(), titles.contains(disc) && titles.contains(dol));
+        byte[] zip = export(disc, dol);
+
+        Storage.Dirs mine = d;
+        d = new Storage.Dirs(tmp.newFolder("files3"), tmp.newFolder("ext3"));
+        SaveArchive.Summary s = importAll(zip);
+        assertEquals(2, s.titles.size());
+        assertTrue(s.titles.contains(disc) && s.titles.contains(dol));
+        assertArrayEquals(card, Files.readAllBytes(new File(d.saveDir(), disc + "/cardA.raw").toPath()));
+        assertEquals("dol card", read(new File(d.saveDir(), dol + "/cardA.raw")));
+        assertEquals(SaveArchive.hash(mine, disc), SaveArchive.hash(d, disc));
+        d = mine;
     }
 }

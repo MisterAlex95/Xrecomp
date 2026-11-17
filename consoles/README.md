@@ -1430,7 +1430,7 @@ leaves. Since XBA-259 the core plays on the host layer, in the app too (« GameC
   FR / FI / FPRF after arithmetic, enabled FP exceptions, the 25-bit frC of single multiplies, the double rounding of
   fmadds-family results, quantisation of NaN (0 here).
 
-Not there yet: memory cards, Wii discs, the Wii (GX: « GameCube GX », sound: « GameCube sound » below). What of the frontend carries to the Xbox 360 is on XBA-219.
+Not there yet: Wii discs, the Wii (GX: « GameCube GX », sound: « GameCube sound » below). What of the frontend carries to the Xbox 360 is on XBA-219.
 
 **GameCube runtime (XBA-259, GC-1).** The core on the host layer, so every later step (GX, discs, DSP) is tried on the
 AYN Thor first. `XBR_CONSOLE_GC` is ON on Android, Linux and macOS; the app plays a homebrew `.dol` from a library
@@ -1634,6 +1634,48 @@ headless). Our own code, written from the hardware's documentation (Dolphin's no
   through `gc_runtime` (SDL's dummy audio). Each WAV is compared with a reference `tests/audio_check.py` synthesises
   from the scene list (per channel and scene: every tone's level within 5 %, RMS, what is left once the tones are taken
   out under 8 %).
+
+**GameCube memory cards (XBA-264).** The external interface with devices behind it: memory cards in slots A and B,
+the IPL chip's clock and SRAM. Our own code from public documentation (YAGCD), libogc's CARD / EXI / system sources
+as the client side, and Dolphin's behaviour read for facts only.
+
+- `runtime/gc_exi.c` (`gc_exi.h`): the three EXI channels at 0xCC006800 (CSR with the chip selects, interrupt masks
+  and write-1-to-clear causes, EXT while a card is in; immediate transfers of 1-4 bytes from DATA's top and DMA in
+  32-byte units, complete at once with TCINT). Channel 0 device 0 / channel 1 device 0: a memory card of 4, 16 or 64
+  Mbit (59 / 251 / 1019 blocks of 8 KB plus 5 system blocks: 512 KB, 2 MB, 8 MB), the flash command set the SDK and
+  libogc use: ID 0x00 (the size in Mbit, latency 4, 8 KB sectors), status 0x83 (always unlocked: no DSP handshake),
+  clear status 0x89, vendor ID 0x85, read array 0x52 (address bytes, 4 latency bytes, then data wrapping within the
+  512-byte page), page program 0xF2 (128-byte page), sector erase 0xF1, chip erase 0xF4, interrupt enable 0x81,
+  sleep / wake 0x88 / 0x87. Programs and erases happen at the chip select's falling edge and raise the card's EXIINT
+  when enabled (the CARD libraries wait for it, a timeout behind). A blank card is all 0xFF, as an erased chip: the
+  game finds it unformatted and offers to format it. Inserting or removing a card while the machine runs raises
+  EXTINT. Channel 0 device 1: the IPL chip, a 4-byte command (bit 31 write, address in bits 6-30): the ROM reads zeros
+  (no IPL, no font: a game that draws with the IPL font gets blanks), the RTC (seconds since 2000-01-01 in local
+  time, from the host's clock; the game can set it; `gc_exi_set_rtc` fixes it for tests), the SRAM (checksums kept
+  valid, English, stereo, setup done, the video mode following the TV mode, `gc_exi_set_language`), UART writes
+  dropped. A card's header sets its slot's flash ID in SRAM (the format's serial run backwards), so the SDK takes a
+  card formatted elsewhere as this console's.
+- `gc_runtime`: `<save dir>/gc-<KEY>/cardA.raw` (and `cardB.raw`), raw images like Dolphin's and card dumps; loaded
+  at start (a file keeps its own size; one of no card's size is left alone and the slot gets a blank card in memory
+  only), written back atomically (temp file, fsync, rename) two seconds after the game's last write, at pause and at
+  exit. `RECOMP_GC_CARD_SIZE=59|251|1019` (default 251) for a new card, `RECOMP_GC_CARD_B=1` for slot B (off by
+  default), `RECOMP_GC_LANGUAGE=0..5` (English, German, French, Spanish, Italian, Dutch). The app hands the save dir
+  over (`gc_runtime_set_save_dir`), so the saves zip and Google Drive carry `gc-<KEY>/` like the other consoles';
+  `gc_play --save-dir DIR [--card-size N] [--card-b] [--no-card]`.
+- Save states: `gc_exi_state_size` / `_save` / `_load` serialize the EXI registers and the devices' transfer state
+  (a command under way, status and interrupt bits, the IPL's command, SRAM, the RTC's offset), not the cards'
+  contents (the save files, as in Dolphin).
+- Tests: ctest `gc_exi` (no toolchain: the registers driven as the libraries do: ID, status, vendor ID, reads with
+  latency and page wrap, erase / program / chip erase, the card's interrupt and its clear, sleep, EXT / EXTINT, the
+  three sizes, RTC fixed then set, SRAM checksum / language / video mode / writes, the flash ID from a header, a save
+  state in the middle of a page program); `gc_cardtest` (core, corpus): `tests/homebrew/cardtest`, our libogc program
+  (probe, mount, format a blank card, create a file, write a block, read it back; the RTC, the time base libogc sets
+  from it, SRAM's language / video / sound modes, in a `report` with magic `XBACARDT`), run on a blank 251-block card,
+  again on the card it left (the file found, run 2 written), on 59 and 1019 blocks (PAL), and with no card;
+  `gc_play_card` (runtime, corpus, `run_card.sh`): the same through `gc_play --save-dir` across two launches,
+  `cardA.raw` 2 MB / 512 KB / 8 MB, the write two seconds after the game's, slot B, a foreign file left alone.
+  Not done: `.gci` import / export (one save of a card), the IPL font (a free replacement), card hot-swap from the
+  app's menu.
 
 **Dreamcast spike (XBA-227, epic XBA-221).** A new frontend: the SH-4. Our KallistiOS hello world boots on Linux
 with no BIOS image, interpreted and recompiled (after the discovery loop over 99.99 % of its instructions run as

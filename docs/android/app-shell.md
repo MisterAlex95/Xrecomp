@@ -843,7 +843,7 @@ Not in a game's own app. Details in [Vulkan drivers](#vulkan-drivers).
 
 **Game data of a console game.** The same Options screen lists the game's stored things (`Storage.items`), each
 with its size, A twice to delete (saves: the stronger warning): **Saves** = `<internal>/save/<console>-<KEY>/`
-(`game.sav`, `card1.mcr`, `game.eep`, `pak1.mpk`...; `Storage.saves`), the pack and the Prepare's files when there
+(`game.sav`, `card1.mcr`, `game.eep`, `pak1.mpk`, `cardA.raw`...; `Storage.saves`), the pack and the Prepare's files when there
 are any. Storage (the library's) lists a console game's save folder too.
 
 **The running game's title ID** (`GameLanguage.runningTitleId`). A GBA, PS1 or N64 launch
@@ -2401,6 +2401,16 @@ GameCube yet). Sound through the same audio output as the other consoles (XBA-26
 the disc's streamed audio; the in-game menu's volume applies). Back opens the in-game menu (fast-forward works; no
 save states).
 
+**Memory cards (XBA-264).** Slot A holds `<internal files>/save/gc-<KEY>/cardA.raw` (a disc's key `gc-GALE01-0`, a
+DOL's `gc-DOL-<CRC32>`): a raw card image, the `.raw` Dolphin reads and writes, so a card can be copied in or out
+with `adb` or through the saves zip / Google Drive. None yet: a blank 251-block card, which the game offers to format
+(logcat `gc: memory card A: blank, 251 blocks ...`); a file there keeps its size (59 / 251 / 1019 blocks: 512 KB,
+2 MB, 8 MB); a file of no card's size is left alone. Written two seconds after the game's last write, at once when the
+app pauses and at exit, through `.tmp` + rename (logcat `gc: memory card A written (...)`). recomp.cfg:
+`RECOMP_GC_CARD_SIZE=59|251|1019` for a new card, `RECOMP_GC_CARD_B=1` for slot B (`cardB.raw`), `RECOMP_GC_LANGUAGE=0..5`
+(the console's language in SRAM: English, German, French, Spanish, Italian, Dutch). The clock is the device's local
+time.
+
 ### Device check (GameCube homebrew, XBA-259), for Alex
 
 On the AYN Thor, `adb logcat -s xboxrecomp SDL` throughout. Our homebrew: `tools/consoles/build_homebrew.sh gc out/hb`
@@ -2422,6 +2432,25 @@ out/hb/gc/padtest.dol /sdcard/gc/`, and `/sdcard/gc` added as a library folder (
 6. `RECOMP_GC_YUV=cpu` in recomp.cfg, padtest again: the same picture (logcat `XFB to RGB on the CPU`); then
    `RECOMP_GC_TV=pal` (and no YUV line): « Video PAL 50 Hz », perf `50.0 of 50.0 VI/s`, the picture still 4:3. Remove
    both lines after.
+
+### Device check (GameCube memory cards, XBA-264), for Alex
+
+On the AYN Thor, `adb logcat -s xboxrecomp SDL` throughout. Our card test: `tools/consoles/build_homebrew.sh gc out/hb`,
+`adb push out/hb/gc/cardtest.dol /sdcard/gc/` (the GameCube library folder of the check above).
+
+1. A on **cardtest**. Expected: « Slot A: probe 0, 16 Mbit », « Mount -6 », « Format 0, mount 0 », « Created the file:
+   0 », « Run 1 written: write 0, read 0, same; 250 blocks free », « PASS », and the RTC line's seconds about the
+   device's local time since 2000. logcat: `memory card A: blank, 251 blocks`, then `memory card A written (after the
+   game's writes) to .../save/gc-DOL-.../cardA.raw` about two seconds later. Screenshot.
+2. Back › Quit, A on cardtest again. Expected: « Mount 0 », « Found the file: run 1, pattern ok », « Run 2 written »,
+   « PASS »; logcat `memory card A (251 blocks) loaded from ...`.
+3. Home while it runs: logcat shows no new write (nothing changed); swipe the app away, start cardtest a third time:
+   « run 2, pattern ok », « Run 3 written ».
+4. Storage (Y) › the cardtest game: **Saves** lists about 2 MB. Saves out and back › Export to a zip, then open the zip
+   on a computer: it holds `gc-DOL-<CRC32>/cardA.raw` (2 097 152 bytes). Delete the game's saves, import the zip,
+   start cardtest: « Found the file: run 3 ».
+5. With Cloud saves connected: the game's row syncs `gc-DOL-....zip` (Storage › Cloud saves › Sync now).
+6. `RECOMP_GC_CARD_SIZE=59` in recomp.cfg and the saves deleted: « 4 Mbit », « 58 blocks free ». Remove the line.
 
 ### Device check (N64 games, XBA-174), for Alex
 
@@ -2582,7 +2611,8 @@ Google Drive. Import opens the « open document » picker. Both run behind the p
 note (« Saves of N games written to … », « Saves of N games restored. »).
 
 The archive (`SaveArchive`) mirrors `files/save/`: `UDATA/<tid>/…` and `TDATA/<tid>/…` for an Xbox title (the
-kernel's lower case folder), `<console>-<KEY>/…` for a GBA, PS1 or N64 game, and `xrecomp-saves.json` first (format
+kernel's lower case folder), `<console>-<KEY>/…` for a GBA, PS1, N64 or GameCube game (`gc-GALE01-0/cardA.raw`,
+`gc-DOL-<CRC32>/…`), and `xrecomp-saves.json` first (format
 1, app version, date, per title its key, name and content hash). Only save folders, never the caches, partition
 images, packs or game data.
 

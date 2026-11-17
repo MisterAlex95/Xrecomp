@@ -6,6 +6,7 @@ Nintendo code.
 | Program | What it exercises | Output |
 |---|---|---|
 | `hello` | libogc's boot (crt0, the tuxedo kernel's threads and interrupts, SRAM / RTC over EXI, the DSP bootstrap and ARAM DMA), `VIDEO_Init` and `console_init` over the XFB, a PowerPC check, a Gekko paired-single and quantisation check, VI retrace interrupts (`VIDEO_WaitVSync`) | `hello.dol` |
+| `cardtest` | libogc's CARD library on slot A (XBA-264): probe, mount, format a blank card, create a file, write a block and read it back; a second run finds the first's file; the RTC and SRAM's language / video / sound modes | `cardtest.dol` |
 | `gxtri` | GX geometry (XBA-262): a Gouraud triangle, a perspective cube from indexed s16 / RGB565 arrays with back faces culled and the Z buffer, quads crossing in depth, a fan and a strip with per-vertex matrix indices, wide lines and points | `gxtri.dol` |
 | `gxtex` | every texture format (gxtexconv-encoded from our pictures at build time by `gxtex/mktex.py`), CI14x2 with an RGB5A3 palette, mipmaps, repeat / mirror / clamp, alpha blending | `gxtex.dol` |
 | `gxtev` | twelve TEV setups: konst colours and fractions, bias, registers, scale and subtract, the R8 compare, swap tables, alpha test, three and sixteen stages, a modulated texture | `gxtev.dol` |

@@ -517,6 +517,9 @@ apply to them too; the pad mappings are under [Input](#input).
 | `GC_GX_XFB_RAM=0` | on | GameCube GX: copies to the XFB stay on the GPU (the window shows them) instead of also being converted to YUV and read back into RAM each field; a screenshot or anything reading the XFB from RAM then sees an old picture. | `gx_gl.c` |
 | `GC_GX_SHADER_LIST=FILE` | the title's `gx_shaders.txt` (app) | GameCube GX: the per-title list of TEV / vertex states met, read and compiled ahead at start, written back at exit. | `gx_gl.c`, `gc_runtime.c` |
 | `GC_GX_TRACE=1` | off | GameCube GX: log texture decodes, TLUT loads, new TEV states, fog registers and EFB peeks. | `gx_gl.c`, `gx_fifo.c` |
+| `RECOMP_GC_CARD_SIZE=59\|251\|1019` | 251 | GameCube: the blocks of a new memory card (4 / 16 / 64 Mbit: 512 KB, 2 MB, 8 MB); a card file that exists keeps its size (XBA-264). | `gc_runtime.c` |
+| `RECOMP_GC_CARD_B=1` | off | GameCube: a memory card in slot B too, `<save dir>/gc-<KEY>/cardB.raw` (XBA-264). | `gc_runtime.c` |
+| `RECOMP_GC_LANGUAGE=0..5` | 0 | GameCube: the console's language in SRAM (English, German, French, Spanish, Italian, Dutch; XBA-264). | `gc_runtime.c` |
 | `RECOMP_GC_FRAMES=N` | unbounded | The Android entry (`gc_runtime_start`): stop after N fields (checks). | `gc_runtime.c` |
 
 ## Network

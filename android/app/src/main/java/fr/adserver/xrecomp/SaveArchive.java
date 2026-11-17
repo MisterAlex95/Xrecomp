@@ -29,8 +29,8 @@ import java.util.zip.ZipOutputStream;
  * Saves in and out of the app as a zip (docs/android/app-shell.md « Saves out and back »; XBA cloud saves build on it).
  *
  * The archive mirrors <files>/save: UDATA/<tid>/..., TDATA/<tid>/... for an Xbox title (the kernel's lower case
- * folders), <console>-<KEY>/... for a GBA, PS1 or N64 game (Storage.saves), and MANIFEST first (format, app version,
- * date, and per title its key, name and content hash). Only save folders: never the caches, packs or game data.
+ * folders), <console>-<KEY>/... for a GBA, PS1, N64 or GameCube game (Storage.saves), and MANIFEST first (format,
+ * app version, date, and per title its key, name and content hash). Only save folders: never the caches, packs or game data.
  *
  * Import restores per title: every entry is checked (no absolute path, no « .. », only a save folder of a valid key,
  * bounded sizes), the archive is unpacked under save/.import-<n> first, then for each title in it the current save
