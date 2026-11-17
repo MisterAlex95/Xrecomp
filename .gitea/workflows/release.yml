@@ -2,6 +2,10 @@
 # APK release-signed and not debuggable, and publishes it as a release (not a prerelease) both here and on the public
 # GitHub mirror, with docs/releases/<tag>.md as its notes.
 #
+# Usually the tag is not pushed by hand: merging the release PR (release-pr.yml) into main adds the notes file, and the
+# detect job below sees it (tools/release/release.py pending), creates the tag on that commit through the API and the
+# release job carries on in the same run. A tag created with the workflow token starts no workflow of its own.
+#
 # It reuses the on-device toolchain that CI cached for that commit (release toolchain-<key>): tag a commit whose main
 # build went green. It fails rather than publish half a release: no notes file, no release key, no GitHub token.
 # Runs on the maintainers' shared host under the heavy-job lock, like android-apk in ci.yml.
@@ -9,13 +13,52 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ['xrecomp-v*']
 
 jobs:
-  release:
+  detect:
     runs-on: ubuntu-latest
     container:
       image: docker:29.8.1-cli
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Tag a merged release PR
+        id: tag
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/*) echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          apk add --no-cache git curl jq python3 >/dev/null
+          git init -q .
+          git fetch -q --depth 2 --tags "$(printf '%s' "$GITHUB_SERVER_URL" | sed "s#://#://ci:$TOKEN@#")/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+          git rev-parse -q --verify HEAD^1 >/dev/null || exit 0
+          tag=$(python3 tools/release/release.py pending HEAD^1 HEAD)
+          [ -n "$tag" ] || { echo "no release in this push"; exit 0; }
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          auth="Authorization: token $TOKEN"
+          if curl -fsS -o /dev/null -H "$auth" "$api/releases/tags/$tag" 2>/dev/null; then
+            echo "$tag is already released"; exit 0
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            jq -n --arg t "$tag" --arg sha "$GITHUB_SHA" '{tag_name: $t, target: $sha, message: ("XRecomp " + ($t | ltrimstr("xrecomp-v")))}' \
+              | curl -fsS -X POST -H "$auth" -H "Content-Type: application/json" -d @- "$api/tags" >/dev/null
+            echo "tagged $tag at $GITHUB_SHA"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: detect
+    if: needs.detect.outputs.tag != ''
+    runs-on: ubuntu-latest
+    container:
+      image: docker:29.8.1-cli
+    env:
+      TAG: ${{ needs.detect.outputs.tag }}
     steps:
       - name: Checkout
         env:
@@ -32,10 +75,26 @@ jobs:
           KS_B64: ${{ secrets.XBA_RELEASE_KEYSTORE_B64 }}
           GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
         run: |
-          tag=${GITHUB_REF#refs/tags/}
+          tag=$TAG
           [ -s "docs/releases/$tag.md" ] || { echo "docs/releases/$tag.md is missing: write the notes, then tag"; exit 1; }
           [ -n "$KS_B64" ] || { echo "the release key (secret XBA_RELEASE_KEYSTORE_B64) is not set"; exit 1; }
           [ -n "$GH_TOKEN" ] || { echo "the secret GH_RELEASE_TOKEN is not set"; exit 1; }
+
+      # A merged release PR only adds notes, so its toolchain key is the one main's CI is building or has just built:
+      # wait for it (up to 2 h) before taking the lock, which that CI job needs too.
+      - name: Wait for the toolchain (toolchain-<key>)
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          key=$(sh tools/ci/toolchain_key.sh)
+          i=0
+          until curl -fsS -o /dev/null -H "Authorization: token $TOKEN" \
+                  "$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/releases/tags/toolchain-$key" 2>/dev/null; do
+            i=$((i + 1))
+            [ $i -le 120 ] || { echo "no release toolchain-$key after 2 h: tag a commit whose main build is green"; exit 1; }
+            [ $i -gt 1 ] || echo "waiting for toolchain-$key (main's CI)..."
+            sleep 60
+          done
 
       - name: Wait for the heavy-job lock
         run: sh tools/ci/heavy_lock.sh acquire
@@ -67,7 +126,7 @@ jobs:
           XBA_GOOGLE_CLIENT_ID: ${{ secrets.XBA_GOOGLE_CLIENT_ID }}
           XBA_GOOGLE_CLIENT_SECRET: ${{ secrets.XBA_GOOGLE_CLIENT_SECRET }}
         run: |
-          tag=${GITHUB_REF#refs/tags/}
+          tag=$TAG
           sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
           code=$(( $(git log -1 --format=%ct) / 60 ))
           (umask 077 && mkdir -p sec && printf '%s' "$KS_B64" | base64 -d > sec/release.p12)
@@ -96,7 +155,7 @@ jobs:
         env:
           TOKEN: ${{ github.token }}
         run: |
-          tag=${GITHUB_REF#refs/tags/}
+          tag=$TAG
           api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
           auth="Authorization: token $TOKEN"
           body=$(jq -n --arg tag "$tag" --rawfile notes out/notes.md \
@@ -112,7 +171,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
           GH_REPO: ${{ vars.GH_RELEASE_REPO }}
         run: |
-          tag=${GITHUB_REF#refs/tags/}
+          tag=$TAG
           sh tools/ci/github_release.sh "$tag" "$GITHUB_SHA" "XRecomp ${tag#xrecomp-}" false out/notes.md \
             "out/$tag.apk" "out/$tag.apk.sha256"
 
