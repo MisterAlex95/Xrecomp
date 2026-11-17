@@ -141,6 +141,11 @@ final class Library {
     static final class Games {
         String selected = "";
         final LinkedHashMap<String, Record> games = new LinkedHashMap<>();
+        /**
+         * games.json is there but could not be read (an I/O error, a file over MAX_GAMES): this empty library stands
+         * in for it and write() refuses it, so the file is not replaced by an empty one. The next read tries again.
+         */
+        boolean unreadable;
 
         Record get(String titleId) {
             return titleId == null ? null : games.get(titleId);
@@ -208,16 +213,37 @@ final class Library {
         }
     }
 
+    /** The largest games.json read (a record is a few hundred bytes: tens of thousands of games). */
+    static final int MAX_GAMES = 32 << 20;
+
     /**
      * games.json, or an empty library when it is missing. A file that cannot be parsed is kept aside as
      * games.json.bad (never silently lost) and the library starts empty; migrate() then rebuilds the current game.
+     * A file that cannot be read (an I/O error, tried twice; a file over MAX_GAMES) is left where it is: the library
+     * returned is empty and marked unreadable, which write() refuses.
      */
     static Games read(File gamesFile) {
         if (!gamesFile.isFile())
             return new Games();
+        String text = null;
+        IOException failed = null;
+        for (int attempt = 0; attempt < 2 && text == null; attempt++) {
+            try {
+                text = PrepareProtocol.readText(gamesFile, MAX_GAMES);
+            } catch (IOException e) {
+                failed = e;
+            }
+        }
+        if (text == null) {
+            Log.w(TAG, "launcher: library: cannot read " + gamesFile + " (left as it is)", failed);
+            Games g = new Games();
+            g.unreadable = true;
+            return g;
+        }
         try {
-            return Games.fromJson(new JSONObject(PrepareProtocol.readText(gamesFile, 4 << 20)));
-        } catch (IOException | JSONException e) {
+            return Games.fromJson(new JSONObject(text));
+        } catch (JSONException e) {
+            Log.w(TAG, "launcher: library: " + gamesFile + " cannot be parsed: kept aside as .bad", e);
             File bad = new File(gamesFile.getPath() + ".bad");
             //noinspection ResultOfMethodCallIgnored
             bad.delete();
@@ -228,6 +254,8 @@ final class Library {
     }
 
     static void write(File gamesFile, Games g) throws IOException {
+        if (g.unreadable)
+            throw new IOException(gamesFile + " could not be read: not replaced by an empty library");
         try {
             writeAtomically(gamesFile, g.toJson().toString(1));
         } catch (JSONException e) {

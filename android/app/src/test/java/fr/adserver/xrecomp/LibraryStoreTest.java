@@ -5,6 +5,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import org.junit.Before;
 import org.junit.Rule;
@@ -93,6 +94,53 @@ public class LibraryStoreTest {
         Library.Games g = Library.read(f);
         assertEquals(1, g.games.size());
         assertEquals(0, g.get("A").playMs);
+    }
+
+    /**
+     * A games.json that cannot be read (here: over MAX_GAMES) is not a corrupt one: it stays where it is, the library
+     * read is empty and marked unreadable, and neither write() nor migrate() replaces the file with it.
+     */
+    @Test
+    public void unreadableGamesIsKept() throws Exception {
+        File f = Library.gamesFile(files);
+        assertTrue(f.getParentFile().mkdirs());
+        try (java.io.RandomAccessFile r = new java.io.RandomAccessFile(f, "rw")) {
+            r.setLength(Library.MAX_GAMES + 1L);   // sparse: no disk used
+        }
+        Library.Games g = Library.read(f);
+        assertTrue(g.games.isEmpty());
+        assertTrue(g.unreadable);
+        assertTrue("left as it is", f.isFile());
+        assertEquals(Library.MAX_GAMES + 1L, f.length());
+        assertFalse("not taken for a corrupt file", new File(f.getPath() + ".bad").exists());
+        g.put(record("4D530004", "Halo", 1));
+        try {
+            Library.write(f, g);
+            fail("an unreadable library must not be written over the file");
+        } catch (java.io.IOException expected) {
+        }
+        assertEquals(Library.MAX_GAMES + 1L, f.length());
+        Library.Legacy l = new Library.Legacy();
+        l.chosenDir = new File(ext, "game").getAbsolutePath();
+        assertTrue(Library.migrate(files, l, 1000).unreadable);
+        assertEquals("migrate does not start over either", Library.MAX_GAMES + 1L, f.length());
+    }
+
+    /** A library over the old 4 MB cap is read, not reset. */
+    @Test
+    public void bigGamesIsRead() throws Exception {
+        File f = Library.gamesFile(files);
+        Library.Games g = new Library.Games();
+        char[] pad = new char[1000];
+        Arrays.fill(pad, 'x');
+        for (int i = 0; i < 5000; i++)
+            g.put(record(String.format(java.util.Locale.ROOT, "4D53%04X", i), "Game " + i + " " + new String(pad), i));
+        Library.write(f, g);
+        assertTrue(f.length() > 4 << 20);
+        Library.Games back = Library.read(f);
+        assertFalse(back.unreadable);
+        assertEquals(5000, back.games.size());
+        assertFalse(new File(f.getPath() + ".bad").exists());
     }
 
     @Test
