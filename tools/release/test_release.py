@@ -73,6 +73,17 @@ def test_major(repo):
     assert release.next_release()[0] == "1.0.0"
 
 
+def test_release_as_overrides_the_bump(repo):
+    commit(repo, "Recomp: a pass\n\nRelease: minor")
+    commit(repo, "Release: the roadmap has no 0.14\n\nRelease: none\nRelease-As: 0.13.2")
+    assert release.next_release()[:2] == ("0.13.2", "release-as")
+
+
+def test_release_as_below_the_last_tag_is_ignored(repo):
+    commit(repo, "Recomp: a pass\n\nRelease-As: 0.13.1")
+    assert release.next_release()[:2] == ("0.13.2", "patch")
+
+
 def test_a_trailer_in_the_middle_of_the_body_is_not_one(repo):
     commit(repo, "Recomp: a pass\n\nRelease: minor\n\nThis paragraph comes after.")
     assert release.next_release()[1] == "patch"

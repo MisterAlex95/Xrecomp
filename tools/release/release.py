@@ -5,6 +5,7 @@ Commits keep our `Area: sentence` subjects. A commit chooses how far the next re
 last paragraph of its message:
 
     Release: major | minor | patch | none
+    Release-As: 0.13.2      (optional: the newest one since the last tag sets the version outright)
 
 No trailer counts as `patch` (upstream's commits, which we merge as they are, included). The next version is the
 last `xrecomp-v*` tag reachable from HEAD bumped by the largest trailer since it; `none` everywhere means no release.
@@ -64,19 +65,21 @@ def commits_since(tag: str | None) -> list[dict]:
     """Non-merge commits since tag, newest first: sha, subject, body, bump."""
     rng = f"{tag}..HEAD" if tag else "HEAD"
     sep, end = "\x1f", "\x1e"
-    out = git("log", "--no-merges", f"--format=%H{sep}%s{sep}%b{sep}%(trailers:key=Release,valueonly,separator=%x2C){end}", rng)
+    out = git("log", "--no-merges", f"--format=%H{sep}%s{sep}%b{sep}%(trailers:key=Release,valueonly,separator=%x2C){sep}%(trailers:key=Release-As,valueonly,separator=%x2C){end}", rng)
     commits = []
     for rec in out.split(end):
         rec = rec.strip("\n")
         if not rec:
             continue
-        sha, subject, body, trailer = rec.split(sep)
+        sha, subject, body, trailer, release_as = rec.split(sep)
         if subject.startswith(RELEASE_SUBJECT):
             continue
         values = [v.strip().lower() for v in trailer.split(",") if v.strip()]
         values = [v for v in values if v in BUMPS]
         bump = max(values, key=BUMPS.index) if values else "patch"
-        commits.append({"sha": sha, "subject": subject, "body": body, "bump": bump})
+        forced = [v.strip() for v in release_as.split(",") if VERSION_RE.match(v.strip())]
+        commits.append({"sha": sha, "subject": subject, "body": body, "bump": bump,
+                        "release_as": forced[-1] if forced else None})
     return commits
 
 
@@ -97,7 +100,13 @@ def next_release() -> tuple[str, str, list[dict]] | None:
     bump = max((c["bump"] for c in commits), key=BUMPS.index, default="none")
     if bump == "none":
         return None
-    return bump_version(tag[len(TAG_PREFIX):] if tag else None, bump), bump, commits
+    current = tag[len(TAG_PREFIX):] if tag else None
+    # Release-As: x.y.z on the newest commit that has one overrides the bump (a trailer can only push the version up:
+    # this is how a `minor` that the roadmap does not want is taken back). Ignored when not above the last tag.
+    forced = next((c["release_as"] for c in commits if c["release_as"]), None)
+    if forced and (current is None or parse_version(forced) > parse_version(current)):
+        return forced, "release-as", commits
+    return bump_version(current, bump), bump, commits
 
 
 def split_subject(subject: str) -> tuple[str, str]:
