@@ -546,10 +546,22 @@ int xbox_ParkFreeze(uint32_t timeout_ms, XboxParkStats *out)
     park_init_once();
     frozen_begin();
     STORE32(&s_freeze, 1);
+    /* The freeze is reached the first time s_busy is seen at 0 with the flag set, and the verdict comes from that
+     * read. s_busy does not stay at 0: a thread leaving a park point adds its one before it looks at the flag
+     * (go_busy), then takes it back and is held. A second read for the verdict caught that transient one now
+     * and then and failed a freeze that had been reached (kernel_park_guest_lock, ~2 % of runs under qemu). */
     EnterCriticalSection(&s_gate_lock);
-    while (LOAD32(&s_busy) > 0 && xbox_HostNowNs() < deadline)
+    for (;;) {
+        if (LOAD32(&s_busy) <= 0) {
+            ok = 1;
+            break;
+        }
+        if (xbox_HostNowNs() >= deadline) {
+            ok = 0;
+            break;
+        }
         SleepConditionVariableCS(&s_gate_cv, &s_gate_lock, 1);
-    ok = LOAD32(&s_busy) <= 0;
+    }
     LeaveCriticalSection(&s_gate_lock);
     if (out)
         xbox_ParkStatsGet(out, 0);
