@@ -59,7 +59,9 @@ void recomp_lifecycle_lift_end(void);
 int  recomp_lifecycle_hold(void);
 
 /* Up to 8 listeners; returns 0, or -1 when full. A listener registered
- * while paused is called with paused=1 at once. */
+ * while paused is called with paused=1 at once. A registration made while a
+ * pause or resume runs its listeners waits for it to end, so a listener
+ * must not register another (nor wait for a thread that does). */
 int  recomp_lifecycle_listen(recomp_lifecycle_fn fn, void *user);
 
 /* Number of pauses since start (for logs and tests). */

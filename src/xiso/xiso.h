@@ -174,6 +174,13 @@ int xiso_probe_source(xiso_source *src, char *title_out, size_t title_cap, uint6
 int xiso_extract_source(xiso_source *src, const char *out_dir, xiso_progress_fn progress, void *user);
 int xiso_extract_file_source(xiso_source *src, const char *path, const char *out_file, uint64_t max_bytes);
 
+/* Every *.xbe of the image (directories up to 8 deep, at most max_count, each at most max_bytes; larger ones are
+ * passed over) copied to out_dir/<its path in the image>, its directories made on the way and an existing file
+ * replaced; nothing else. The Android app's companion folder of an image read in place. Returns the number copied,
+ * or a negative XISO_* code: XISO_ECORRUPT for a bad table or a directory table reached twice (a crafted image's
+ * cycle or shared subtree: the walk never loops), a write error for out_dir. */
+int xiso_extract_xbes_source(xiso_source *src, const char *out_dir, uint64_t max_bytes, int max_count);
+
 /* One directory's entries (xiso_lookup gave dir, or dir NULL for the root), sorted by name (strcmp). *out is
  * malloc'd (free it), *count entries. Same checks as xiso_lookup. */
 typedef struct {

@@ -16,7 +16,8 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  s_cond = PTHREAD_COND_INITIALIZER;
 /* Held across a whole pause or resume, listeners included, so a pause that
  * arrives while resume's listeners run waits its turn instead of being lost
- * (s_lock alone is released around the listeners). */
+ * (s_lock alone is released around the listeners). recomp_lifecycle_listen
+ * takes it too, so a registration lands between two transitions. */
 static pthread_mutex_t s_transition = PTHREAD_MUTEX_INITIALIZER;
 static int      s_paused;
 static unsigned s_pauses;
@@ -212,9 +213,16 @@ int recomp_lifecycle_listen(recomp_lifecycle_fn fn, void *user)
 
     if (!fn)
         return -1;
+    /* Between two transitions: while a resume's listeners run, s_paused is
+     * still 1 and the new listener is not in that resume's snapshot, so it
+     * would get a "paused" call no resume ever answers; and a call made
+     * after s_lock is released could land after the resume ended. Under
+     * s_transition, s_paused is settled and the call below is in order. */
+    pthread_mutex_lock(&s_transition);
     pthread_mutex_lock(&s_lock);
     if (s_nlisteners == MAX_LISTENERS) {
         pthread_mutex_unlock(&s_lock);
+        pthread_mutex_unlock(&s_transition);
         return -1;
     }
     s_listeners[s_nlisteners].fn = fn;
@@ -224,6 +232,7 @@ int recomp_lifecycle_listen(recomp_lifecycle_fn fn, void *user)
     pthread_mutex_unlock(&s_lock);
     if (paused)
         fn(1, user);
+    pthread_mutex_unlock(&s_transition);
     return 0;
 }
 

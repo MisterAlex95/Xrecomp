@@ -1704,6 +1704,49 @@ void ps1_gpu_state_save(ps1_gpu *g, uint8_t *out)
     memset(out + offsetof(ps1_gpu, irq), 0, n); /* the host's sink, not state */
 }
 
+static int in_range(int v, int lo, int hi) { return v >= lo && v <= hi; }
+
+/* The fields the GPU indexes or clips with, in the ranges its own writers keep them: the command words collected
+ * (cmd[16]), the drawing area (the only clip of VRAM drawing), the offset and the polyline's last vertex (11-bit
+ * coordinates plus the offset), the display start; a transfer in progress has pixels left. */
+int ps1_gpu_state_valid(const uint8_t *in, size_t n)
+{
+    if (n != GPU_STATE_SIZE)
+        return -1;
+    int cmd_len, cmd_need, x1, y1, x2, y2, off_x, off_y, pl_x, pl_y, disp_x, disp_y, mode, rd_active;
+    uint32_t wr_left, rd_left;
+    PS1_STATE_GET(cmd_len, in, ps1_gpu, cmd_len);
+    PS1_STATE_GET(cmd_need, in, ps1_gpu, cmd_need);
+    PS1_STATE_GET(x1, in, ps1_gpu, area_x1);
+    PS1_STATE_GET(y1, in, ps1_gpu, area_y1);
+    PS1_STATE_GET(x2, in, ps1_gpu, area_x2);
+    PS1_STATE_GET(y2, in, ps1_gpu, area_y2);
+    PS1_STATE_GET(off_x, in, ps1_gpu, off_x);
+    PS1_STATE_GET(off_y, in, ps1_gpu, off_y);
+    PS1_STATE_GET(pl_x, in, ps1_gpu, pl_x);
+    PS1_STATE_GET(pl_y, in, ps1_gpu, pl_y);
+    PS1_STATE_GET(disp_x, in, ps1_gpu, disp_x);
+    PS1_STATE_GET(disp_y, in, ps1_gpu, disp_y);
+    PS1_STATE_GET(mode, in, ps1_gpu, mode);
+    PS1_STATE_GET(wr_left, in, ps1_gpu, wr_left);
+    PS1_STATE_GET(rd_active, in, ps1_gpu, rd_active);
+    PS1_STATE_GET(rd_left, in, ps1_gpu, rd_left);
+    /* cmd_len < 16 and cmd_need <= 16 keep the next word inside cmd[] (the longest command is 12 words) */
+    if (!in_range(cmd_len, 0, 15) || !in_range(cmd_need, 0, 16))
+        return -2;
+    if (!in_range(x1, 0, VRAM_W - 1) || !in_range(x2, 0, VRAM_W - 1) || !in_range(y1, 0, VRAM_H - 1) ||
+        !in_range(y2, 0, VRAM_H - 1))
+        return -2;
+    if (!in_range(off_x, -1024, 1023) || !in_range(off_y, -1024, 1023) || !in_range(pl_x, -2048, 2046) ||
+        !in_range(pl_y, -2048, 2046))
+        return -2;
+    if (!in_range(disp_x, 0, VRAM_W - 1) || !in_range(disp_y, 0, VRAM_H - 1))
+        return -2;
+    if (!in_range(mode, MODE_CMD, MODE_WRITE) || (mode == MODE_WRITE && !wr_left) || (rd_active && !rd_left))
+        return -2;
+    return 0;
+}
+
 int ps1_gpu_state_load(ps1_gpu *g, const uint8_t *in, size_t n)
 {
     if (n != GPU_STATE_SIZE)

@@ -666,6 +666,50 @@ static void test_extract_file(void)
     printf("extract one file: ok\n");
 }
 
+/* xiso_extract_xbes_source: the app's companion folder (every XBE, nothing else); a crafted directory cycle is
+ * refused, not walked. */
+static int xbes_from(const char *image, const char *out_dir, uint64_t max_bytes, int max_count)
+{
+    xiso_source *src = NULL;
+    int rc = xiso_source_open_path(fixture(image), &src);
+    if (rc)
+        return rc;
+    rc = xiso_extract_xbes_source(src, out_dir, max_bytes, max_count);
+    xiso_source_close(src);
+    return rc;
+}
+
+static void test_extract_xbes(void)
+{
+    size_t xlen, len;
+    uint8_t *xbe = read_file(fixture("default.xbe.ref"), &xlen);
+    char *out = tmp_path("xbes");
+    char path[4200];
+    rm_rf(out);
+    mkdir(out, 0755);
+    CHECK_RC(xbes_from("tree.iso", out, 32u << 20, 16), 1);
+    snprintf(path, sizeof path, "%s/default.xbe", out);
+    uint8_t *got = read_file(path, &len);
+    CHECK(got && len == xlen && memcmp(got, xbe, xlen) == 0);
+    free(got);
+    CHECK(count_entries(out) == 1);                                       /* nothing else */
+    CHECK_RC(xbes_from("tree.iso", out, 32u << 20, 16), 1);               /* again: the file is replaced */
+    CHECK_RC(xbes_from("tree.iso", out, xlen - 1, 16), 0);                /* larger than max_bytes: passed over */
+    CHECK_RC(xbes_from("tree.iso", out, 32u << 20, 0), 0);                /* max_count */
+    /* A subdirectory pointing back at the root: the walk used to go round it (up to its depth limit, once per
+     * directory entry on the way, so a table of N such entries cost N^depth reads); a table reached twice is now
+     * corrupt. The self-referencing tree node: corrupt too. */
+    rm_rf(out);
+    mkdir(out, 0755);
+    CHECK_RC(xbes_from("dir_cycle.iso", out, 32u << 20, 16), XISO_ECORRUPT);
+    CHECK_RC(xbes_from("self_loop.iso", out, 32u << 20, 16), XISO_ECORRUPT);
+    CHECK_RC(xbes_from("bad_magic.iso", out, 32u << 20, 16), XISO_ENOTXISO);
+    CHECK_RC(xiso_extract_xbes_source(NULL, out, 1, 1), XISO_EINVAL);
+    rm_rf(out);
+    free(xbe);
+    printf("extract every XBE: ok\n");
+}
+
 /* Random byte flips in the descriptor and directory tables, and random truncations: no crash, no write outside. */
 static void test_mutations(void)
 {
@@ -944,6 +988,7 @@ int main(int argc, char **argv)
     test_lookup();
     test_lookup_corrupt();
     test_extract_file();
+    test_extract_xbes();
     test_mutations();
     test_sources();
     rm_rf(g_tmp);

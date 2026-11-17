@@ -63,6 +63,12 @@ void ps1_mdec_state_save(ps1_mdec *x, uint8_t *out)
     (void)out;
 }
 
+int ps1_mdec_state_valid(const uint8_t *in, size_t n)
+{
+    (void)in;
+    return n == 0 ? 0 : -1;
+}
+
 int ps1_mdec_state_load(ps1_mdec *x, const uint8_t *in, size_t n)
 {
     (void)x;

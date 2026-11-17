@@ -202,8 +202,98 @@ size_t n64_state_save(n64_machine *m, uint8_t *out, size_t cap)
     return need;
 }
 
-/* Walks the sections: each id once, in order, sizes this build's (the RDP's checked by its own load). Fills at[] with
- * each section's bytes. */
+/* The machine's saved fields that the core uses as indices, offsets, divisors or loop bounds without masking them: each
+ * within what the core itself can reach (a crafted state can hold anything; the ROM's hash only names the game). Read
+ * by offset (the blob may not be aligned). flash: the FlashRAM section's size. 0, or -1. */
+#define MFIELD(dst, f)                                                                                                 \
+    do {                                                                                                               \
+        (void)sizeof(char[sizeof(dst) == sizeof(((n64_machine *)0)->f) ? 1 : -1]);                                     \
+        memcpy(&(dst), in + offsetof(n64_machine, f), sizeof(dst));                                                    \
+    } while (0)
+
+static int finite_in(double v, double lo, double hi) { return v >= lo && v <= hi; } /* false for NaN */
+
+static int machine_check(const uint8_t *in, size_t flash)
+{
+    uint64_t now, rsp_tick, vi_line_ticks;
+    uint32_t vi[16], vi_line, vi_field, vi_lines, ai_dacrate, audio_rd, audio_wr, si_dram, flash_offset, wired_prev;
+    int ai_count;
+    double ai_src_phase, ai_out_phase;
+    bool pal;
+    n64_save_kind save_kind;
+    n64_flash_mode flash_mode;
+    int64_t rtc_offset;
+    MFIELD(now, now);
+    MFIELD(rsp_tick, rsp_tick);
+    MFIELD(vi, vi);
+    MFIELD(vi_line, vi_line);
+    MFIELD(vi_field, vi_field);
+    MFIELD(vi_line_ticks, vi_line_ticks);
+    MFIELD(vi_lines, vi_lines);
+    MFIELD(pal, pal);
+    MFIELD(ai_dacrate, ai_dacrate);
+    MFIELD(ai_count, ai_count);
+    MFIELD(ai_src_phase, ai_src_phase);
+    MFIELD(ai_out_phase, ai_out_phase);
+    MFIELD(audio_rd, audio_rd);
+    MFIELD(audio_wr, audio_wr);
+    MFIELD(si_dram, si_dram);
+    MFIELD(save_kind, save_kind);
+    MFIELD(flash_mode, flash_mode);
+    MFIELD(flash_offset, flash_offset);
+    MFIELD(wired_prev, cpu.wired_prev);
+    MFIELD(rtc_offset, rtc_offset);
+
+    /* The cartridge save's kind indexes per-kind tables (n64_runtime.c); FlashRAM needs its buffer (n64_pif.c). */
+    if ((unsigned)save_kind > N64_SAVE_FLASH || (save_kind == N64_SAVE_FLASH && flash != N64_FLASH_SIZE))
+        return -1;
+    /* FlashRAM: the mode, and an erase / program target a command can set (0xFFFFFFFF: chip erase; a page, 16 bits). */
+    if ((unsigned)flash_mode > FLASH_WRITE ||
+        (flash_offset != 0xFFFFFFFFu && (flash_offset % 128 || flash_offset > 0xFFFFu * 128)))
+        return -1;
+    /* RANDOM's span divides by (32 - WIRED) or (96 - WIRED) (n64_cpu.c random_reg): WIRED is 6 bits. */
+    if (wired_prev > 63)
+        return -1;
+    /* SI DMA: si_dram + 64 must not wrap (n64_bus.c si_write); the register is masked so. */
+    if (si_dram & ~0x00FFFFFCu)
+        return -1;
+    /* The RSP catches up with (now - rsp_tick) (n64_core.c). */
+    if (rsp_tick > now)
+        return -1;
+    /* VI: the field picks a canvas row parity (n64_vi.c), the line length paces the VI event (0: it never advances)
+     * and both come from V_SYNC / H_SYNC (n64_io.c vi_timing). */
+    uint64_t ticks;
+    uint32_t lines;
+    n64_vi_timing_of(vi, pal, &ticks, &lines);
+    if (vi_field > 1 || vi_line_ticks != ticks || vi_lines != lines || vi_line >= vi_lines)
+        return -1;
+    /* AI: two buffers queue (ai_fifo[ai_count]), the DAC rate divides the VI clock (n64_audio_source_rate), the phases
+     * pick resampler rows ((int) of them: finite), the output ring holds N64_AUDIO_RING frames. */
+    if (ai_count < 0 || ai_count > 2 || ai_dacrate > 0x3FFF || audio_wr - audio_rd > N64_AUDIO_RING)
+        return -1;
+    if (!finite_in(ai_src_phase, 0, 1e12) || !finite_in(ai_out_phase, 0, (double)N64_TICK_HZ / N64_AUDIO_RATE))
+        return -1;
+    for (size_t i = 0; i < 2 * AI_HIST; i++) { /* the DAC's 16-bit samples */
+        float h;
+        memcpy(&h, in + offsetof(n64_machine, ai_hist) + i * sizeof h, sizeof h);
+        if (!finite_in(h, -32768.0, 32767.0))
+            return -1;
+    }
+    for (size_t i = 0; i < (AI_PHASES + 1) * AI_TAPS; i++) { /* windowed-sinc taps, each row summing to 1 */
+        float k;
+        memcpy(&k, in + offsetof(n64_machine, ai_kernel) + i * sizeof k, sizeof k);
+        if (!finite_in(k, -4.0, 4.0))
+            return -1;
+    }
+    /* The RTC: seconds added to the host clock (a game sets a date of 1900..2099); gmtime_r must stay in range. */
+    if (rtc_offset < -((int64_t)1 << 40) || rtc_offset > ((int64_t)1 << 40))
+        return -1;
+    return 0;
+}
+#undef MFIELD
+
+/* Walks the sections: each id once, in order, sizes this build's, then the values of the machine, the RSP and the RDP
+ * (every section checked before n64_state_load changes anything). Fills at[] with each section's bytes. */
 static int parse(n64_machine *m, const uint8_t *data, size_t size, const uint8_t *at[], size_t len[])
 {
     if (!m || !data || size < HEADER_BYTES || memcmp(data, STATE_MAGIC, 8) != 0 || memcmp(data + 8, "n64", 4) != 0)
@@ -227,7 +317,7 @@ static int parse(n64_machine *m, const uint8_t *data, size_t size, const uint8_t
         case SEC_MACHINE: ok = n == N64_MACHINE_STATE_BYTES; break;
         case SEC_RDRAM: ok = rdram_check(m, data + off, n) == 0; break;
         case SEC_RSP: ok = n == n64_rsp_state_size(m->rsp); break;
-        case SEC_RDP: ok = 1; break; /* its own load checks it, first */
+        case SEC_RDP: ok = 1; break; /* n64_rdp_state_check, below */
         case SEC_FLASH: ok = n == 0 || n == N64_FLASH_SIZE; break;
         case SEC_ISV: ok = n == 0 || n == ISV_SIZE; break;
         default: ok = n == 4; break;
@@ -238,6 +328,12 @@ static int parse(n64_machine *m, const uint8_t *data, size_t size, const uint8_t
         len[id] = n;
         off += n;
     }
+    int rdp = n64_rdp_state_check(m->rdp, at[SEC_RDP], len[SEC_RDP]);
+    if (rdp == -1)
+        return N64_STATE_EVERSION;
+    if (rdp != 0 || machine_check(at[SEC_MACHINE], len[SEC_FLASH]) != 0 ||
+        n64_rsp_state_check(m->rsp, at[SEC_RSP], len[SEC_RSP]) != 0)
+        return N64_STATE_ECORRUPT;
     return N64_STATE_OK;
 }
 
@@ -255,7 +351,7 @@ int n64_state_load(n64_machine *m, const uint8_t *data, size_t size)
     int rc = parse(m, data, size, at, len);
     if (rc != N64_STATE_OK)
         return rc;
-    /* What may still fail first: the buffers the state needs, then the RDP (the only section its own load checks). */
+    /* What may still fail first: the buffers the state needs, then the RDP's load (parse checked its bytes). */
     uint8_t *flash = m->flash, *isv = m->isv;
     if (len[SEC_FLASH] && !flash && !(flash = malloc(N64_FLASH_SIZE)))
         return N64_STATE_ECORRUPT;

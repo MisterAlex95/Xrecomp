@@ -2923,6 +2923,28 @@ void ps1_hle_state_save(ps1_machine *m, uint8_t *out)
     memcpy(out, &c, sizeof c);
 }
 
+/* No guest call from C in progress (save refuses to take one), the kernel object counts within the tables, each open
+ * file's device (anything else is read as a card file), a card file's first block and nextfile's next block within
+ * the card's 15 (card frames are reached from them), the firstfile pattern terminated. */
+int ps1_hle_state_valid(ps1_machine *m, const uint8_t *in, size_t n)
+{
+    if (n != ps1_hle_state_size(m))
+        return -1;
+    if (!m->hle)
+        return 0;
+    struct ps1_hle h;
+    memcpy(&h, in, sizeof h);
+    if (h.depth != 0 || h.tcb_count > TCB_MAX || h.evcb_count > EVCB_MAX)
+        return -2;
+    for (int i = 0; i < NFILES; i++)
+        if (h.files[i].dev < DEV_NONE || h.files[i].dev > DEV_BU || (h.files[i].dev == DEV_BU && h.files[i].first > 14))
+            return -2;
+    if (h.find_dev < DEV_NONE || h.find_dev > DEV_BU || (h.find_dev == DEV_BU && h.find_pos > 15) ||
+        !memchr(h.find_pat, 0, sizeof h.find_pat))
+        return -2;
+    return 0;
+}
+
 int ps1_hle_state_load(ps1_machine *m, const uint8_t *in, size_t n)
 {
     if (n != ps1_hle_state_size(m))

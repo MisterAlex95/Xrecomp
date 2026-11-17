@@ -230,7 +230,7 @@ static void flash_command(n64_machine *m, uint32_t v)
             m->save_dirty = true;
             m->flash_status = (m->flash_status & ~0xFFu) | 0x08; /* erase done */
         } else if (m->flash_mode == FLASH_WRITE) {
-            if (m->flash_offset + 128 <= N64_FLASH_SIZE) {
+            if (m->flash_offset <= N64_FLASH_SIZE - 128) { /* (not offset + 128: 0xFFFFFFFF after a chip erase wraps) */
                 memcpy(m->flash + m->flash_offset, m->flash_buf, 128);
                 m->save_dirty = true;
             }

@@ -58,6 +58,13 @@ void n64_rdp_state_save_sw(n64_rdp *d, n64_rdp_common_state *c, uint8_t *extra)
     c->status = d->status;
 }
 
+int n64_rdp_state_check_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
+{
+    (void)d;
+    (void)c;
+    return extra && n != 0 ? -1 : 0;
+}
+
 int n64_rdp_state_load_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
 {
     if (extra && n != 0)

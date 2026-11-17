@@ -227,10 +227,25 @@ size_t n64_rsp_state_size(n64_rsp *s)
 
 void n64_rsp_state_save(n64_rsp *s, uint8_t *out) { memcpy(out, s, RSP_STATE_SIZE); }
 
-int n64_rsp_state_load(n64_rsp *s, const uint8_t *in, size_t n)
+/* PC and the next PC index IMEM (and dec[pc / 4]) unmasked in n64_rsp_run: word offsets of 12 bits. */
+int n64_rsp_state_check(n64_rsp *s, const uint8_t *in, size_t n)
 {
+    (void)s;
     if (n != RSP_STATE_SIZE)
         return -1;
+    uint32_t pc, npc;
+    memcpy(&pc, in + offsetof(n64_rsp, pc), 4);
+    memcpy(&npc, in + offsetof(n64_rsp, npc), 4);
+    if ((pc & ~0xFFCu) || (npc & ~0xFFCu))
+        return -2;
+    return 0;
+}
+
+int n64_rsp_state_load(n64_rsp *s, const uint8_t *in, size_t n)
+{
+    int rc = n64_rsp_state_check(s, in, n);
+    if (rc != 0)
+        return rc;
     memcpy(s, in, RSP_STATE_SIZE);
     return 0;
 }

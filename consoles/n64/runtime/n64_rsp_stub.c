@@ -59,6 +59,12 @@ size_t n64_rsp_state_size(n64_rsp *s)
     return RSP_STATE_SIZE;
 }
 void n64_rsp_state_save(n64_rsp *s, uint8_t *out) { memcpy(out, (uint8_t *)s + RSP_STATE_OFF, RSP_STATE_SIZE); }
+int n64_rsp_state_check(n64_rsp *s, const uint8_t *in, size_t n)
+{
+    (void)s;
+    (void)in;
+    return n == RSP_STATE_SIZE ? 0 : -1;
+}
 int n64_rsp_state_load(n64_rsp *s, const uint8_t *in, size_t n)
 {
     if (n != RSP_STATE_SIZE)

@@ -54,6 +54,27 @@ static int run_core(void)
     CHECK(t1 > t0);
     CHECK(t1 - t0 >= 1000000);
 
+    /* A timed condition-variable wait on the monotonic clock: its deadline
+     * and the variable's clock agree (a variable left on CLOCK_REALTIME
+     * would take the monotonic deadline as long past and return at once),
+     * and it lasts what it was asked. */
+    {
+        pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+        pthread_cond_t cv;
+        int rc;
+        CHECK(xbox_HostCondInit(&cv) == 0);
+        pthread_mutex_lock(&mu);
+        t0 = xbox_HostNowNs();
+        rc = xbox_HostCondWaitNs(&cv, &mu, 20000000u);
+        while (rc == 0 && xbox_HostNowNs() - t0 < 20000000u)   /* a spurious wake-up: wait the rest */
+            rc = xbox_HostCondWaitNs(&cv, &mu, 20000000u - (xbox_HostNowNs() - t0));
+        t1 = xbox_HostNowNs();
+        pthread_mutex_unlock(&mu);
+        CHECK(t1 - t0 >= 19000000u);
+        CHECK(t1 - t0 < 2000000000u);
+        pthread_cond_destroy(&cv);
+    }
+
     /* Lifecycle: one listener call per pause and per resume. */
     CHECK(recomp_lifecycle_listen(on_lifecycle, NULL) == 0);
     recomp_lifecycle_pause();

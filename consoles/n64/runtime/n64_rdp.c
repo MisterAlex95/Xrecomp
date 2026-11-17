@@ -3393,12 +3393,67 @@ void n64_rdp_state_save_sw(n64_rdp *d, n64_rdp_common_state *c, uint8_t *extra)
     hidden_pack(d->hidden, hidden_n(d), h);
 }
 
-int n64_rdp_state_load_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
+/* The drawing state holds only what the commands can set (exec_cmd, set_other_modes masks every field): its indices
+ * (blender inputs, combiner selectors), shifts (tile shifts, texel sizes) and scissor stay in their tables' bounds. */
+static int state_valid(const rdp_state *s)
+{
+    const rdp_modes *m = &s->om;
+    int ok = m->cycle <= 3 && m->persp <= 1 && m->detail <= 1 && m->sharpen <= 1 && m->lod_en <= 1 && m->tlut <= 1 &&
+             m->tlut_ia <= 1 && m->bilinear <= 1 && m->mid_texel <= 1 && m->bilerp[0] <= 1 && m->bilerp[1] <= 1 &&
+             m->convert_one <= 1 && m->key <= 1 && m->rgb_dither <= 3 && m->alpha_dither <= 3 &&
+             m->force_blend <= 1 && m->alpha_cvg_sel <= 1 && m->cvg_x_alpha <= 1 && m->z_mode <= 3 &&
+             m->cvg_dest <= 3 && m->color_on_cvg <= 1 && m->image_read <= 1 && m->z_update <= 1 &&
+             m->z_compare <= 1 && m->aa <= 1 && m->z_prim <= 1 && m->dither_alpha <= 1 && m->alpha_compare <= 1;
+    for (int c = 0; c < 2; c++) {
+        ok = ok && m->m1a[c] <= 3 && m->m1b[c] <= 3 && m->m2a[c] <= 3 && m->m2b[c] <= 3;
+        ok = ok && s->cc[c][0] <= 15 && s->cc[c][1] <= 15 && s->cc[c][2] <= 31;
+        for (int k = 3; k < 8; k++)
+            ok = ok && s->cc[c][k] <= 7;
+    }
+    for (int i = 0; i < 4; i++)
+        ok = ok && (uint32_t)s->prim[i] <= 0xFF && (uint32_t)s->env[i] <= 0xFF && (uint32_t)s->blend[i] <= 0xFF &&
+             (uint32_t)s->fog[i] <= 0xFF;
+    for (int i = 0; i < 6; i++)
+        ok = ok && s->k[i] >= -256 && s->k[i] <= 255;
+    for (int i = 0; i < 3; i++)
+        ok = ok && (uint32_t)s->key_center[i] <= 0xFF && (uint32_t)s->key_scale[i] <= 0xFF &&
+             (uint32_t)s->key_width[i] <= 0xFFF;
+    ok = ok && (uint32_t)s->prim_lod_frac <= 0xFF && (uint32_t)s->min_level <= 0x1F && (uint32_t)s->max_level <= 7;
+    ok = ok && (uint32_t)s->sc_x0 <= 0xFFF && (uint32_t)s->sc_y0 <= 0xFFF && (uint32_t)s->sc_x1 <= 0xFFF &&
+         (uint32_t)s->sc_y1 <= 0xFFF && (uint32_t)s->sc_field <= 1 && (uint32_t)s->sc_odd <= 1;
+    ok = ok && (uint32_t)s->ci_fmt <= 7 && (uint32_t)s->ci_size <= 3 && s->ci_width >= 1 && s->ci_width <= 1024 &&
+         (uint32_t)s->ti_fmt <= 7 && (uint32_t)s->ti_size <= 3 && s->ti_width >= 1 && s->ti_width <= 1024 &&
+         (s->ci_addr | s->zi_addr | s->ti_addr) <= 0xFFFFFF;
+    for (int i = 0; i < 8; i++) {
+        const rdp_tile *t = &s->tile[i];
+        ok = ok && t->fmt <= 7 && t->size <= 3 && t->pal <= 15 && t->ct <= 1 && t->mt <= 1 && t->cs <= 1 &&
+             t->ms <= 1 && t->mask_s <= 15 && t->mask_t <= 15 && t->shift_s <= 15 && t->shift_t <= 15 &&
+             !(t->line & 7) && t->line <= 0x1FF * 8 && !(t->tmem & 7) && t->tmem <= 0x1FF * 8 && t->sl <= 0xFFF &&
+             t->tl <= 0xFFF && t->sh <= 0xFFF && t->th <= 0xFFF;
+    }
+    return ok;
+}
+
+int n64_rdp_state_check_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
 {
     if (extra && n != n64_rdp_state_extra_size(d))
         return -1;
-    if (c->npend > 24)
-        return -1;
+    if (c->npend >= 24) /* the next word goes to pend[npend] (n64_rdp_run); n64_rdp_select.c checks it closer */
+        return -2;
+    if (extra) {
+        rdp_state st; /* (the bytes may not be aligned) */
+        memcpy(&st, extra, sizeof st);
+        if (!state_valid(&st))
+            return -2;
+    }
+    return 0;
+}
+
+int n64_rdp_state_load_sw(n64_rdp *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
+{
+    int rc = n64_rdp_state_check_sw(d, c, extra, n);
+    if (rc != 0)
+        return rc;
     n64_rdp_flush(d);
     d->start = c->start;
     d->end = c->end;

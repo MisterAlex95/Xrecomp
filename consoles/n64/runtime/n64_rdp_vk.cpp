@@ -1399,11 +1399,43 @@ void vk_state_save(void *p, n64_rdp_common_state *c, uint8_t *extra)
     memcpy(extra, &sh, sizeof sh);
 }
 
+/* The shadow holds state commands only, each in its own slot (shadow_record): replayed as 2-word commands, anything
+ * else (a triangle's first word, a load) would make paraLLEl-RDP read past them or touch RDRAM / TMEM. */
+int vk_state_check(void *p, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
+{
+    (void)p;
+    if (extra && n != sizeof(VkShadow))
+        return -1;
+    if (c->npend >= 22) /* the next word goes to pend[2 * npend] of 44 (vk_run); n64_rdp_select.c checks it closer */
+        return -2;
+    if (!extra)
+        return 0;
+    VkShadow sh;
+    memcpy(&sh, extra, sizeof sh);
+    for (int id = 0; id < 0x40; id++) {
+        if (!(sh.valid >> id & 1))
+            continue;
+        const bool state = (id >= 0x2A && id <= 0x2F) || (id >= 0x37 && id <= 0x3F);
+        if (!state || (int)(sh.cmd[id] >> 56 & 0x3F) != id)
+            return -2;
+    }
+    if ((sh.tiles | sh.sizes) & ~0xFFu)
+        return -2;
+    for (int t = 0; t < 8; t++) {
+        if ((sh.tiles >> t & 1) && ((sh.tile[t] >> 56 & 0x3F) != 0x35 || (int)(sh.tile[t] >> 24 & 7) != t))
+            return -2;
+        if ((sh.sizes >> t & 1) && ((sh.size[t] >> 56 & 0x3F) != 0x32 || (int)(sh.size[t] >> 24 & 7) != t))
+            return -2;
+    }
+    return 0;
+}
+
 int vk_state_load(void *p, const n64_rdp_common_state *c, const uint8_t *extra, size_t n)
 {
     VkRdp *d = static_cast<VkRdp *>(p);
-    if ((extra && n != sizeof(VkShadow)) || c->npend > 22)
-        return -1;
+    const int rc = vk_state_check(p, c, extra, n);
+    if (rc != 0)
+        return rc;
     on_thread();
     sync(d);
     d->dp_owed = d->dp_after = false; /* the machine's events are the state's (none pending) */
@@ -1592,4 +1624,4 @@ extern "C" const n64_rdp_ops n64_rdp_vk_ops = { "vulkan", vk_create, vk_destroy,
                                                 vk_failed, vk_upscale, vk_scanout_scale, vk_scanout,
                                                 vk_state_extra_size, vk_state_save, vk_state_load,
                                                 vk_stats, vk_unreported, vk_dp_complete, vk_scanout_prefetch,
-                                                vk_scanout_forget, vk_scanout_rgba };
+                                                vk_scanout_forget, vk_scanout_rgba, vk_state_check };

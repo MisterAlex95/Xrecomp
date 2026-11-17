@@ -293,6 +293,70 @@ static void test_eeprom(void)
     gba_destroy(m);
 }
 
+/* A save state whose hashes match but whose fields are out of range (crafted, or damaged) is refused, and the machine
+ * is left as it was: flash_bank offsets the save memory (data[flash_bank + addr]), and the others index arrays, count
+ * shifts or step loops (gba_state.c machine_ok). */
+#define STATE_MACHINE_AT (40 + 8) /* gba_state.c: the header, then the machine section's id and size */
+static void test_state_fields(void)
+{
+    static uint16_t fb[GBA_SCREEN_W * GBA_SCREEN_H];
+    gba_machine *m = machine_rom("FLASH1M_V103", 0x1000);
+    gba_machine *m64 = machine("FLASH_V126");
+    gba_run_frame(m, fb);
+    gba_run_frame(m64, fb);
+    size_t n = gba_state_size(m);
+    uint8_t *good = malloc(n), *bad = malloc(n), *again = malloc(n);
+    CHECK(good && bad && again && gba_state_save(m, good, n) == n, "save");
+    CHECK(gba_state_load(m, good, n) == GBA_STATE_OK, "a state as saved loads");
+
+#define CORRUPT(field, value)                                                                                  \
+    do {                                                                                                       \
+        __typeof__(((gba_machine *)0)->field) v_ = (value);                                                    \
+        memcpy(bad, good, n);                                                                                  \
+        memcpy(bad + STATE_MACHINE_AT + offsetof(gba_machine, field), &v_, sizeof v_);                         \
+        CHECK(gba_state_check(m, bad, n) == GBA_STATE_ECORRUPT, "%s = %s: check refuses", #field, #value);     \
+        CHECK(gba_state_load(m, bad, n) == GBA_STATE_ECORRUPT, "%s = %s: load refuses", #field, #value);       \
+        CHECK(gba_state_save(m, again, n) == n && memcmp(again, good, n) == 0, "%s: machine unchanged", #field); \
+    } while (0)
+    CORRUPT(save.flash_bank, 0x20000u);
+    CORRUPT(save.flash_bank, 0xFFFF0000u);
+    CORRUPT(save.kind, (gba_save_kind)9);
+    CORRUPT(save.eeprom_addr, 1u << 20);
+    CORRUPT(apu.sq[0].duty, 4);
+    CORRUPT(apu.sq[1].pos, -1);
+    CORRUPT(apu.wave.pos, 64);
+    CORRUPT(apu.fifo_r[1], 32);
+    CORRUPT(apu.out_rem, 0u);
+    CORRUPT(timer[2].shift, 40);
+    CORRUPT(line_phase, 3);
+    CORRUPT(vcount, 228u);
+    CORRUPT(cpu.z, 2u);
+    CORRUPT(wait16[8][1], 0);
+    {   /* a bool holding another byte */
+        memcpy(bad, good, n);
+        bad[STATE_MACHINE_AT + offsetof(gba_machine, cpu.halted)] = 2;
+        CHECK(gba_state_load(m, bad, n) == GBA_STATE_ECORRUPT, "cpu.halted = 2: refused");
+    }
+#undef CORRUPT
+    /* The second flash bank exists on a 128 KB chip only: the same state's bank 1 on a 64 KB game is refused. */
+    size_t n64 = gba_state_size(m64);
+    uint8_t *s64 = malloc(n64);
+    uint32_t bank1 = 0x10000;
+    CHECK(s64 && gba_state_save(m64, s64, n64) == n64, "save (64 KB flash)");
+    memcpy(s64 + STATE_MACHINE_AT + offsetof(gba_machine, save.flash_bank), &bank1, 4);
+    CHECK(gba_state_load(m64, s64, n64) == GBA_STATE_ECORRUPT, "flash bank 1 on a 64 KB chip: refused");
+    memcpy(bad, good, n);
+    memcpy(bad + STATE_MACHINE_AT + offsetof(gba_machine, save.flash_bank), &bank1, 4);
+    CHECK(gba_state_load(m, bad, n) == GBA_STATE_OK, "flash bank 1 on a 128 KB chip: loads");
+    CHECK(m->save.flash_bank == 0x10000, "bank 1 selected");
+    free(s64);
+    free(good);
+    free(bad);
+    free(again);
+    gba_destroy(m);
+    gba_destroy(m64);
+}
+
 int main(void)
 {
     test_detect();
@@ -300,6 +364,7 @@ int main(void)
     test_sram();
     test_flash();
     test_eeprom();
+    test_state_fields();
     if (failures) {
         printf("gba_save_test: %d failure(s)\n", failures);
         return 1;

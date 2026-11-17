@@ -165,19 +165,34 @@ size_t ps1_mdec_out_pending(ps1_mdec *d); /* output words not read yet (what DMA
 /* Each device's state as opaque bytes of this build (its own struct without host pointers: the IRQ sink, the disc,
  * buffers; the SPU adds its RAM, the MDEC its output not read yet). size: the bytes save writes (the MDEC's depends
  * on its output queue). load: 0, or -1 when n is not what this build writes (the device is left as it was). The
- * placeholders keep nothing (size 0). The core's ps1_state_save / ps1_state_load (ps1_core.h) put them together. */
+ * placeholders keep nothing (size 0). The core's ps1_state_save / ps1_state_load (ps1_core.h) put them together.
+ * valid: checks the bytes before anything is loaded (a state is only identified by hashes, so a crafted one can hold
+ * any value, and the fields used as indices or bounds would reach outside host arrays): 0 when load accepts them and
+ * the device can run them, -1 when n is not what this build writes (as load), -2 when a field is out of range. */
 size_t ps1_gpu_state_size(ps1_gpu *g);
 void ps1_gpu_state_save(ps1_gpu *g, uint8_t *out);
+int ps1_gpu_state_valid(const uint8_t *in, size_t n);
 int ps1_gpu_state_load(ps1_gpu *g, const uint8_t *in, size_t n);
 size_t ps1_cdrom_state_size(ps1_cdrom *c);
 void ps1_cdrom_state_save(ps1_cdrom *c, uint8_t *out);
+int ps1_cdrom_state_valid(const uint8_t *in, size_t n);
 int ps1_cdrom_state_load(ps1_cdrom *c, const uint8_t *in, size_t n);
 size_t ps1_spu_state_size(ps1_spu *s);
 void ps1_spu_state_save(ps1_spu *s, uint8_t *out);
+int ps1_spu_state_valid(const uint8_t *in, size_t n);
 int ps1_spu_state_load(ps1_spu *s, const uint8_t *in, size_t n);
 size_t ps1_mdec_state_size(ps1_mdec *d);
 void ps1_mdec_state_save(ps1_mdec *d, uint8_t *out);
+int ps1_mdec_state_valid(const uint8_t *in, size_t n);
 int ps1_mdec_state_load(ps1_mdec *d, const uint8_t *in, size_t n);
+
+/* For the valid functions: var = the struct field `field` of type `type` from state bytes `in` laid out as the struct
+ * (by offset: the blob may not be aligned). Needs <string.h>. */
+#define PS1_STATE_GET(var, in, type, field)                                                                         \
+    do {                                                                                                            \
+        _Static_assert(sizeof(var) == sizeof(((type *)0)->field), "PS1_STATE_GET: " #field);                       \
+        memcpy(&(var), (in) + offsetof(type, field), sizeof(var));                                                  \
+    } while (0)
 
 #ifdef __cplusplus
 }

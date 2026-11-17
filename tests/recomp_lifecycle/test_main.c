@@ -49,6 +49,31 @@ static char s_log[64];
 static void listener_a(int paused, void *u) { (void)u; strcat(s_log, paused ? "A+" : "A-"); }
 static void listener_b(int paused, void *u) { (void)u; strcat(s_log, paused ? "B+" : "B-"); }
 
+/* A listener registered from another thread while a resume's listeners run (an audio device opened then). */
+static volatile int s_late_calls, s_late_paused, s_spawn_armed;
+static pthread_t s_spawned;
+static void listener_late(int paused, void *u)
+{
+    (void)u;
+    s_late_paused = paused;
+    __atomic_add_fetch(&s_late_calls, 1, __ATOMIC_ACQ_REL);
+}
+static void *register_late(void *arg)
+{
+    (void)arg;
+    CHECK(recomp_lifecycle_listen(listener_late, NULL) == 0);
+    return NULL;
+}
+static void listener_spawn(int paused, void *u)
+{
+    (void)u;
+    if (paused || !s_spawn_armed)
+        return;
+    s_spawn_armed = 0;
+    CHECK(pthread_create(&s_spawned, NULL, register_late, NULL) == 0);
+    sleep_ms(100);   /* the registration's chance to run while this resume is in progress */
+}
+
 int main(void)
 {
     pthread_t th;
@@ -173,8 +198,21 @@ int main(void)
     recomp_lifecycle_resume();
     CHECK(recomp_lifecycle_paused() == 0);
 
+    /* A listener registered while a resume's listeners run: no "paused" call for a pause that is ending (the
+     * resume would never tell it, and the audio device stayed silent until the next pause / resume). */
+    CHECK(recomp_lifecycle_listen(listener_spawn, NULL) == 0);
+    recomp_lifecycle_pause();
+    s_spawn_armed = 1;
+    recomp_lifecycle_resume();
+    pthread_join(s_spawned, NULL);
+    CHECK(recomp_lifecycle_paused() == 0);
+    CHECK(s_late_calls == 0 || s_late_paused == 0);
+    recomp_lifecycle_pause();                        /* and it hears the next pause and resume */
+    recomp_lifecycle_resume();
+    CHECK(s_late_paused == 0 && s_late_calls >= 2);
+
     /* Full listener table. */
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 3; i++)
         CHECK(recomp_lifecycle_listen(listener_b, NULL) == 0);
     CHECK(recomp_lifecycle_listen(listener_b, NULL) == -1);
 

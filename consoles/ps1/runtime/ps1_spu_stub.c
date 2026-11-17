@@ -118,6 +118,12 @@ void ps1_spu_state_save(ps1_spu *x, uint8_t *out)
     (void)out;
 }
 
+int ps1_spu_state_valid(const uint8_t *in, size_t n)
+{
+    (void)in;
+    return n == 0 ? 0 : -1;
+}
+
 int ps1_spu_state_load(ps1_spu *x, const uint8_t *in, size_t n)
 {
     (void)x;

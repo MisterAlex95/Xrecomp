@@ -200,6 +200,12 @@ void ps1_cdrom_state_save(ps1_cdrom *x, uint8_t *out)
     (void)out;
 }
 
+int ps1_cdrom_state_valid(const uint8_t *in, size_t n)
+{
+    (void)in;
+    return n == 0 ? 0 : -1;
+}
+
 int ps1_cdrom_state_load(ps1_cdrom *x, const uint8_t *in, size_t n)
 {
     (void)x;

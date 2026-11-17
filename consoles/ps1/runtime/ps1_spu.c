@@ -850,6 +850,33 @@ void ps1_spu_state_save(ps1_spu *s, uint8_t *out)
     memcpy(out + sizeof *s, s->ram, RAM_SIZE);
 }
 
+/* The fields the SPU indexes or counts with: each voice's pitch counter (its sample index within the block's s[]:
+ * below 28 once a sample is done) and key-on delay, the transfer FIFO, the output ring, the cycles not yet turned
+ * into a sample (a tick runs one sample per 768: a huge value would stall the host for millions). */
+int ps1_spu_state_valid(const uint8_t *in, size_t n)
+{
+    if (n != sizeof(ps1_spu) + RAM_SIZE)
+        return -1;
+    for (int i = 0; i < 24; i++) {
+        const uint8_t *v = in + offsetof(ps1_spu, v) + (size_t)i * sizeof(voice);
+        uint32_t counter;
+        int delay;
+        PS1_STATE_GET(counter, v, voice, counter);
+        PS1_STATE_GET(delay, v, voice, delay);
+        if (counter >= 28u << 12 || delay < 0 || delay > KON_DELAY)
+            return -2;
+    }
+    int fifo_n;
+    uint32_t cycles, ring_head, ring_count;
+    PS1_STATE_GET(fifo_n, in, ps1_spu, fifo_n);
+    PS1_STATE_GET(cycles, in, ps1_spu, cycles);
+    PS1_STATE_GET(ring_head, in, ps1_spu, ring_head);
+    PS1_STATE_GET(ring_count, in, ps1_spu, ring_count);
+    if (fifo_n < 0 || fifo_n > 32 || cycles >= CYCLES_PER_SAMPLE || ring_head >= OUT_RING || ring_count > OUT_RING)
+        return -2;
+    return 0;
+}
+
 int ps1_spu_state_load(ps1_spu *s, const uint8_t *in, size_t n)
 {
     if (n != sizeof *s + RAM_SIZE)

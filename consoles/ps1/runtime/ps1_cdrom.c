@@ -1279,6 +1279,34 @@ void ps1_cdrom_state_save(ps1_cdrom *c, uint8_t *out)
     memset(out + offsetof(ps1_cdrom, disc), 0, nd);
 }
 
+/* The fields the controller indexes with: the response queue (head, count, each response's length copied into
+ * resp[16]), the data FIFO (a sector's 800h or 924h bytes, the read position within), the audio ring. */
+int ps1_cdrom_state_valid(const uint8_t *in, size_t n)
+{
+    if (n != sizeof(ps1_cdrom))
+        return -1;
+    int qhead, qcount;
+    uint32_t data_len, data_pos, ring_head, ring_count;
+    PS1_STATE_GET(qhead, in, ps1_cdrom, qhead);
+    PS1_STATE_GET(qcount, in, ps1_cdrom, qcount);
+    PS1_STATE_GET(data_len, in, ps1_cdrom, data_len);
+    PS1_STATE_GET(data_pos, in, ps1_cdrom, data_pos);
+    PS1_STATE_GET(ring_head, in, ps1_cdrom, ring_head);
+    PS1_STATE_GET(ring_count, in, ps1_cdrom, ring_count);
+    if (qhead < 0 || qhead >= QUEUE || qcount < 0 || qcount > QUEUE)
+        return -2;
+    for (int i = 0; i < QUEUE; i++) { /* every slot: one is filled before it counts */
+        uint8_t len = in[offsetof(ps1_cdrom, queue) + (size_t)i * sizeof(response) + offsetof(response, len)];
+        if (len > sizeof ((response *)0)->data)
+            return -2;
+    }
+    if ((data_len != 0 && data_len != 0x800 && data_len != 0x924) || data_pos > data_len)
+        return -2;
+    if (ring_head >= AUDIO_RING || ring_count > AUDIO_RING)
+        return -2;
+    return 0;
+}
+
 int ps1_cdrom_state_load(ps1_cdrom *c, const uint8_t *in, size_t n)
 {
     if (n != sizeof *c)

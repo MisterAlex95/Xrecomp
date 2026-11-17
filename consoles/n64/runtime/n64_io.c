@@ -15,22 +15,25 @@
 
 #define AI_PI 3.14159265358979323846
 
-static uint32_t vi_clock(const n64_machine *m)
-{
-    return m->pal ? 49656530u : 48681812u;
-}
+static uint32_t vi_clock_of(bool pal) { return pal ? 49656530u : 48681812u; }
+static uint32_t vi_clock(const n64_machine *m) { return vi_clock_of(m->pal); }
 
 /* ---- VI -------------------------------------------------------------------------------------------------------- */
 
+void n64_vi_timing_of(const uint32_t *vi, bool pal, uint64_t *line_ticks, uint32_t *lines)
+{
+    uint32_t hsync = vi[7] & 0xFFF, vsync = vi[6] & 0x3FF;
+    if (hsync == 0)
+        hsync = pal ? 3177 : 3093;
+    if (vsync < 16)
+        vsync = pal ? 625 : 525;
+    *line_ticks = (uint64_t)(hsync + 1) * N64_TICK_HZ / vi_clock_of(pal);
+    *lines = (vsync + 1) / 2;
+}
+
 static void vi_timing(n64_machine *m)
 {
-    uint32_t hsync = m->vi[7] & 0xFFF, vsync = m->vi[6] & 0x3FF;
-    if (hsync == 0)
-        hsync = m->pal ? 3177 : 3093;
-    if (vsync < 16)
-        vsync = m->pal ? 625 : 525;
-    m->vi_line_ticks = (uint64_t)(hsync + 1) * N64_TICK_HZ / vi_clock(m);
-    m->vi_lines = (vsync + 1) / 2;
+    n64_vi_timing_of(m->vi, m->pal, &m->vi_line_ticks, &m->vi_lines);
     if (m->vi_line >= m->vi_lines)
         m->vi_line = 0;
 }

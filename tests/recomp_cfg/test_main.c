@@ -122,6 +122,27 @@ int main(void)
         unset("RECOMP_CFG_SKIP");
     }
 
+    /* Long lines: read whole (a 1023-byte buffer cut a long value and took its tail for a line of its own), and a
+     * line over the limit is skipped without losing the next one. */
+    unset("RECOMP_CFG_LONG"); unset("RECOMP_CFG_AFTER"); unset("RECOMP_CFG_HUGE"); unset("RECOMP_CFG_TAIL");
+    f = fopen(path, "w");
+    if (f) {
+        static char val[3001], huge[100001];
+        memset(val, 'v', sizeof val - 1);
+        val[sizeof val - 1] = 0;
+        memset(huge, 'h', sizeof huge - 1);
+        huge[sizeof huge - 1] = 0;
+        fprintf(f, "RECOMP_CFG_LONG=%s\nRECOMP_CFG_AFTER=1\nRECOMP_CFG_HUGE=%s\nRECOMP_CFG_TAIL=2", val, huge);
+        fclose(f);
+        n = recomp_cfg_load(path);
+        CHECK(n == 3, "expected 3 options (the huge line skipped), got %d", n);
+        CHECK(env_is("RECOMP_CFG_LONG", val), "a 3000-byte value is read whole");
+        CHECK(env_is("RECOMP_CFG_AFTER", "1"), "the line after a long one");
+        CHECK(getenv("RECOMP_CFG_HUGE") == NULL, "a line over the limit is skipped");
+        CHECK(env_is("RECOMP_CFG_TAIL", "2"), "the last line, after a skipped one, without a newline");
+        unset("RECOMP_CFG_LONG"); unset("RECOMP_CFG_AFTER"); unset("RECOMP_CFG_TAIL");
+    }
+
     remove(path);
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     puts("PASS: recomp.cfg");
