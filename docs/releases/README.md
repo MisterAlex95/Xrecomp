@@ -5,6 +5,7 @@ upstream xboxrecomp's history (its `v0.x` tags are upstream's, not ours): our ta
 
 | Release | Notes |
 |---|---|
+| `xrecomp-v0.13.3` | [xrecomp-v0.13.3.md](xrecomp-v0.13.3.md) |
 | `xrecomp-v0.13.2` | [xrecomp-v0.13.2.md](xrecomp-v0.13.2.md) |
 | `xrecomp-v0.13.1` | [xrecomp-v0.13.1.md](xrecomp-v0.13.1.md) |
 | `xrecomp-v0.13.0` | [xrecomp-v0.13.0.md](xrecomp-v0.13.0.md) |
