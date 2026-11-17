@@ -20,7 +20,7 @@ stuck in.
 - [Upstream README](upstream/README.md) — xboxrecomp's own README: background, library table, FAQ, community ports, test notes
 - [Releases](releases/README.md) — XRecomp releases: notes per version, how a release is made
 - [Changelog](../CHANGELOG.md) — Upstream xboxrecomp releases, v0.1.0 to today (not XRecomp's)
-- [Other consoles](../consoles/README.md) — GBA, PS1, N64: layout and rules of the early work
+- [Other consoles](../consoles/README.md) — GBA, PS1, N64 and GameCube (in the app), DS / PSP / PS2 / Dreamcast / 3DS / Xbox 360 (spikes): layout, cores, pipelines
 
 ## Pipeline Guides
 
