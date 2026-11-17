@@ -4292,6 +4292,7 @@ static void gl_reset_objects(int lost)
         if (s_pebo) glDeleteBuffers(1, &s_pebo);
         if (s_pvao) glDeleteVertexArrays(1, &s_pvao);
         vb_drop_all();
+        ib_drop_all();              /* element buffers: up to NV_GL_IB_BYTES */
         for (i = 0; (uint32_t)i < s_qcount; i++)
             glDeleteQueries(1, &s_qring[(s_qhead + (uint32_t)i) & (NV_GL_MAX_QUERY - 1)].q);
         if (s_nqfree) glDeleteQueries((GLsizei)s_nqfree, s_qfree);
@@ -4322,7 +4323,8 @@ static void gl_reset_objects(int lost)
     s_pc_nlist = s_pc_next = 0;
     s_pc_on = 0;
     s_pvao = s_pvbo = s_pebo = 0;
-    /* Lost context: the names are only forgotten. */
+    /* The cache tables, emptied: with a live context their GL objects were
+     * deleted above; with a lost one the names are only forgotten. */
     memset(s_vb, 0, sizeof s_vb);
     s_nvb = 0;
     s_vb_bytes = 0;

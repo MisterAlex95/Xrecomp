@@ -36,7 +36,9 @@
  *      captured; more drawn and presented: the reference. The memory
  *      restored, DROP (every GL object forgotten), the same drawn again:
  *      the same pixels. Without the FLUSH the capture misses the GPU's
- *      pixels and the picture differs (the control).
+ *      pixels and the picture differs (the control). The DROP deletes the
+ *      cached index buffers too: a name made before it is no buffer after
+ *      (it was only forgotten, and leaked up to 32 MB a load).
  * Also: RECOMP_GPU unset selects the platform's default (gpu_selected).
  * RECOMP_GPU_CPU_WRITES=0 (another ctest entry) checks that the same cases
  * fail without the merge, so the test tells the two apart. */
@@ -424,7 +426,15 @@ int main(void)
 
             memset(s_mem, 0x77, MEM_BYTES);
             memcpy(s_mem, snap, MEM_BYTES);
-            s_backend.state(NV2A_BACKEND_STATE_DROP);
+            {
+                static const uint16_t idx[6] = { 0, 1, 2, 2, 1, 3 };
+                GLuint ib = ib_get(idx, 6);
+                CHECK(ib != 0 && glIsBuffer(ib));
+                s_backend.state(NV2A_BACKEND_STATE_DROP);
+                /* Before anything can make a new GL name that reuses it. */
+                CHECK(!glIsBuffer(ib));
+                CHECK(s_nib == 0 && s_ib_bytes == 0);
+            }
             {
                 Nv2aSurface g = clip(st, 30, 10, 20, 12);
                 clear(&g, 0xFF0000FFu);
