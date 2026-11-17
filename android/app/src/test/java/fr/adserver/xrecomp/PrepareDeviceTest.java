@@ -251,7 +251,8 @@ public class PrepareDeviceTest {
         Process orphan = new ProcessBuilder("setsid", "sh", "-c", "echo $$; exec sleep 60").start();
         String pgid = new BufferedReader(new InputStreamReader(orphan.getInputStream())).readLine().trim();
         File dir = tmp.newFolder("status");
-        TestSupport.write(new File(dir, "pgid"), pgid);
+        int id = Integer.parseInt(pgid);   // the format PrepareRunner writes: id, leader start time, boot id
+        TestSupport.write(new File(dir, "pgid"), id + " " + PrepareRunner.startTime(id) + " " + PrepareRunner.bootId());
         PrepareRunner r = new PrepareRunner(dir, TID, 1, null, null, null);
         r.killOrphans();
         assertTrue("ended", orphan.waitFor(10, TimeUnit.SECONDS));
