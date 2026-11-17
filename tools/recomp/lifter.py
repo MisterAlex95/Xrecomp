@@ -2750,11 +2750,19 @@ class Lifter:
             return self._lift_product(ops, signed=True)
         elif nops in (2, 3):
             # dst = dst * src, or dst = src * imm
+            #
+            # The product is written from an UNSIGNED multiply. The low bits
+            # of a product do not depend on signedness, and x86 wraps, but a
+            # signed C multiply that overflows is undefined: gcc -O2 took
+            # `eax = (int32_t)ecx * 3` as overflow-free and folded a later
+            # `test eax, eax; js` into `ecx < 0`. The 16-bit form was worse:
+            # LO16() reads zero-extended, so 0xFFFF * 0xFFFF overflowed int
+            # although the x86 result (1) is ordinary.
             a, b = _fmt_operand_read(ops[nops - 2]), _fmt_operand_read(ops[nops - 1])
             sx = self._SNAP_SX.get(_operand_width(ops[0]) or 4, "(int32_t)")
             return [f"_fa = ((int64_t){sx}({a}) * (int64_t){sx}({b})"
                     f" != (int64_t){sx}((uint32_t)({a}) * (uint32_t)({b})));",
-                    _fmt_operand_write(ops[0], f"(uint32_t)((int32_t){a} * (int32_t){b})")]
+                    _fmt_operand_write(ops[0], f"((uint32_t)({a}) * (uint32_t)({b}))")]
         return ["/* imul: unexpected form */"]
 
     def _lift_product(self, ops, signed):
