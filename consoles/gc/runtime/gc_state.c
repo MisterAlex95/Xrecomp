@@ -21,8 +21,9 @@
  *                   (not the disc: the run's disc stays in the drive)
  *   EXI   optional  the EXI devices' transfer state, as gc_exi.c saves it (memory cards' commands and status, the
  *                   IPL chip, SRAM, the RTC offset); a memory card's file content is never in a state
- *   DSP   optional  the sound hardware (XBA-263): DSP interface and mailboxes, the microcode HLE's state, ARAM / audio
- *                   DMA in flight, the AI and its streaming counter (struct gc_audio, host layout; see sec_dsp)
+ *   DSP   optional  the sound hardware (XBA-263, XBA-266; version 2: field by field): DSP interface and mailboxes,
+ *                   the microcodes' HLE state (AX, ASND, Zelda, AESND), ARAM / audio DMA in flight, the AI and its
+ *                   streaming counter, the resamplers (see sec_dsp)
  *
  * Not state: host resources (GL objects, the renderer's caches, the disc handle, the attached pack, the dlopen'd
  * table), statistics, the trace of interpreted PCs, the discovery record. After a load: every recompiled span is
@@ -61,6 +62,7 @@ typedef struct io {
     int load;
     int dry;            /* load: check only (what the section reads fits its length), nothing changes */
     int bad;            /* load: ran past the section, or a value out of range */
+    uint32_t ver;       /* load: the section's version in the state (a walk may read older layouts) */
 } io;
 
 static void put32(uint8_t *p, uint32_t v)
@@ -464,29 +466,209 @@ static void sec_exi(gc_machine *m, io *s)
         s->bad = 1;
 }
 
-/* The sound hardware (gc_dsp*.c / gc_ai.c / gc_ax.c / gc_asnd.c, XBA-263): the DSP interface, mailboxes, the
- * microcode's HLE state (AX / ASND), ARAM and audio DMA in flight, the AI and its streaming counter, the resamplers:
- * struct gc_audio as it is (it holds no pointer), without its output ring for the host (dropped at a load: what was
- * queued belongs to the moment before). Host layout: a build whose gc_audio differs refuses the section (its
- * length). TODO(DSP work, XBA-263): a field-by-field walk would make it layout-proof; bump the version then. */
-#define AUDIO_STATE_BYTES offsetof(gc_audio, ring)
+/* The sound hardware (gc_dsp.c / gc_ai.c and the microcodes' HLE: gc_ax.c, gc_asnd.c, gc_zelda.c, gc_aesnd.c; XBA-263,
+ * XBA-266), field by field: the DSP interface and its mailboxes, the running ucode and the one switched away from
+ * (both with their HLE state: AX, ASND, Zelda, AESND), ARAM and audio DMA in flight, the AI and its streaming counter,
+ * the DMA's frames waiting for the resampler and both resamplers. Not saved: the 48 kHz ring for the host (emptied at
+ * a load: what was queued belongs to the moment before), the statistics (mails, lists, blocks, overruns...) and the
+ * "warned once" flags. Version 1 was struct gc_audio copied as it was: a state with it loads without its sound (the
+ * hardware is left as it is). Indices are checked against their arrays at a load, so a damaged section is refused
+ * before anything changes. */
+#define DSP_STATE_VERSION 2
 
-static size_t audio_save(gc_machine *m, uint8_t *out, size_t cap)
+static void io_i16s(io *s, int16_t *v, size_t n)
 {
-    if (!m->audio || cap < AUDIO_STATE_BYTES)
-        return 0;
-    memcpy(out, m->audio, AUDIO_STATE_BYTES);
-    return AUDIO_STATE_BYTES;
+    for (size_t i = 0; i < n; i++) {
+        uint16_t x = (uint16_t)v[i];
+        io_u16(s, &x);
+        if (s->load && !s->bad && !s->dry)
+            v[i] = (int16_t)x;
+    }
+}
+
+static void io_i32s(io *s, int32_t *v, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        uint32_t x = (uint32_t)v[i];
+        io_u32(s, &x);
+        if (s->load && !s->bad && !s->dry)
+            v[i] = (int32_t)x;
+    }
+}
+
+/* An index or a count: read even in a dry run, refused past max. */
+static void io_idx(io *s, unsigned *v, unsigned max)
+{
+    uint32_t x = *v;
+    if (s->load) {
+        io_get32(s, &x);
+        if (x > max)
+            s->bad = 1;
+        if (!s->bad && !s->dry)
+            *v = x;
+        return;
+    }
+    io_u32(s, &x);
+}
+
+static void io_int(io *s, int *v, int max)
+{
+    unsigned x = (unsigned)*v;
+    io_idx(s, &x, (unsigned)max);
+    if (s->load && !s->bad && !s->dry)
+        *v = (int)x;
+}
+
+static void io_ax(io *s, gc_ax *ax)
+{
+    for (int b = 0; b < 9; b++)
+        io_i32s(s, ax->buf[b], GC_AX_SAMPLES);
+    io_u16s(s, ax->cmd, GC_AX_CMDLIST_MAX);
+    io_u16(s, &ax->cmd_size);
+    io_int(s, &ax->state, 2);
+    io_u16(s, &ax->compressor_pos);
+    io_bool(s, &ax->old);
+}
+
+static void io_asnd(io *s, gc_asnd *a)
+{
+    io_u32(s, &a->voice_addr);
+    io_bool(s, &a->next_is_voice);
+    io_bool(s, &a->new_flags);
+    io_bool(s, &a->swap_lr);
+    io_bool(s, &a->has_terminate);
+    io_u16s(s, a->in, 32);
+    io_u16s(s, a->out, 1024 * 2);
+    io_u32s(s, a->v, 16);
+}
+
+static void io_zelda(io *s, gc_zelda *z)
+{
+    io_u32(s, &z->flags);
+    io_int(s, &z->state, 3);
+    io_u32(s, &z->expect);
+    io_u32(s, &z->sync_max_voice);
+    io_u16s(s, z->skip, 256);
+    io_bool(s, &z->sync_second_half);
+    io_u32s(s, z->cmd, 64);
+    io_idx(s, &z->rd, 63);
+    io_idx(s, &z->wr, 63);
+    io_idx(s, &z->pending, 64);
+    io_bool(s, &z->can_execute);
+    io_u32(s, &z->req_frames);
+    io_u32(s, &z->cur_frame);
+    io_u32(s, &z->cur_voice);
+    io_u16(s, &z->voices_per_frame);
+    io_bool(s, &z->prepared);
+    io_u32(s, &z->out_l);
+    io_u32(s, &z->out_r);
+    io_u16(s, &z->out_vol);
+    for (int b = 0; b < ZB_COUNT; b++)
+        io_i16s(s, z->buf[b], GC_ZELDA_SAMPLES);
+    io_u32(s, &z->vpb_base);
+    io_u32(s, &z->reverb_base);
+    io_i16s(s, z->resample_coefs, 0x100);
+    io_i16s(s, z->patterns, 0x100);
+    io_i16s(s, z->sine, 0x80);
+    io_i16s(s, z->afc_coefs, 0x20);
+    io_u16s(s, z->reverb_pos, 4);
+    for (int r = 0; r < 4; r++)
+        io_i16s(s, z->reverb_last8[r], 8);
+    io_u64(s, &z->voices);
+    io_u64(s, &z->frames);
+}
+
+static void io_aesnd(io *s, gc_aesnd *a)
+{
+    io_bool(s, &a->next_is_pb);
+    io_bool(s, &a->new_flags);
+    io_bool(s, &a->swap_lr);
+    io_bool(s, &a->fixed_terminate);
+    io_u32(s, &a->pb_addr);
+    io_u32(s, &a->out_buf);
+    io_i16s(s, a->out, GC_AESND_FRAMES * 2);
+}
+
+static void io_resampler(io *s, gc_resampler *r)
+{
+    io_u32(s, &r->in_rate);
+    io_u32(s, &r->out_rate);
+    io_u32(s, &r->phase);
+    for (int k = 0; k < 4; k++)
+        io_i32s(s, r->hist[k], 2);
+    if (s->load && !s->dry && !s->bad && (!r->in_rate || !r->out_rate)) /* a divisor: never 0 */
+        r->in_rate = r->out_rate = 1;
 }
 
 static void sec_dsp(gc_machine *m, io *s)
 {
-    size_t start = s->at;
-    io_blob(s, m->audio ? AUDIO_STATE_BYTES : 0, audio_save, m);
-    if (s->load && !s->bad && !s->dry && s->at > start) {
-        memcpy(m->audio, s->in + start, AUDIO_STATE_BYTES);
-        m->audio->rh = m->audio->rn = 0;
+    gc_audio *a = m->audio;
+    if (s->load && s->ver < DSP_STATE_VERSION) { /* the raw struct of version 1: skipped, the sound kept as it is */
+        s->at = s->cap;
+        return;
     }
+    if (!a) /* no sound hardware: an empty section (and one is skipped) */
+        return;
+    if (s->load && s->cap == 0)
+        return;
+    uint32_t ver = DSP_STATE_VERSION;
+    io_u32(s, &ver);
+    io_u16(s, &a->csr);
+    io_u16s(s, a->reg, 0x100);
+    io_u32(s, &a->cpu_mail);
+    for (int i = 0; i < GC_MAILQ; i++) {
+        io_u32(s, &a->q[i].v);
+        io_bool(s, &a->q[i].irq_next);
+    }
+    io_idx(s, &a->qh, GC_MAILQ - 1);
+    io_idx(s, &a->qn, GC_MAILQ);
+    io_u32(s, &a->last_mail);
+    io_u64(s, &a->dspint_at);
+    io_u64(s, &a->aidint_at);
+    io_u64(s, &a->initcode_clear_at);
+    io_u64(s, &a->aram_done_at);
+    io_int(s, &a->ucode, UC_UNKNOWN_AX);
+    io_u32(s, &a->crc);
+    io_idx(s, &a->booted, 0xFFFFFFFFu);
+    io_idx(s, &a->unknown, 0xFFFFFFFFu);
+    io_u32(s, &a->rom_param);
+    io_u32(s, &a->boot_addr);
+    io_u32(s, &a->boot_len);
+    io_u32(s, &a->boot_imem);
+    io_u32(s, &a->boot_dmem_len);
+    io_bool(s, &a->uploading);
+    io_idx(s, &a->up_step, 9);
+    io_u32s(s, a->up, 10);
+    io_bool(s, &a->resume_mail);
+    io_int(s, &a->prev_ucode, UC_UNKNOWN_AX);
+    io_u32(s, &a->prev_crc);
+    io_ax(s, &a->ax);
+    io_ax(s, &a->prev_ax);
+    io_asnd(s, &a->asnd);
+    io_asnd(s, &a->prev_asnd);
+    io_zelda(s, &a->zelda);
+    io_zelda(s, &a->prev_zelda);
+    io_aesnd(s, &a->aesnd);
+    io_aesnd(s, &a->prev_aesnd);
+    io_u32(s, &a->aid_cur);
+    io_u32(s, &a->aid_left);
+    io_bool(s, &a->aid_on);
+    io_u32(s, &a->aicr);
+    io_u32(s, &a->aivr);
+    io_u32(s, &a->aiit);
+    io_u32(s, &a->scnt_base);
+    io_u64(s, &a->scnt_t0);
+    io_u64(s, &a->aiit_at);
+    io_u64(s, &a->tick_at);
+    io_u64(s, &a->out_done);
+    for (int i = 0; i < GC_AID_FIFO; i++)
+        io_i16s(s, a->fifo[i], 2);
+    io_idx(s, &a->fh, GC_AID_FIFO - 1);
+    io_idx(s, &a->fn, GC_AID_FIFO);
+    io_resampler(s, &a->rs_dma);
+    io_resampler(s, &a->rs_stream);
+    if (s->load && !s->bad && !s->dry)
+        a->rh = a->rn = 0;
 }
 
 typedef struct section {
@@ -506,7 +688,7 @@ static const section k_sections[] = {
     {{'G', 'X', ' ', ' '}, 1, 0, sec_gx},
     {{'D', 'I', ' ', ' '}, 1, 0, sec_di},
     {{'E', 'X', 'I', ' '}, 1, 0, sec_exi},
-    {{'D', 'S', 'P', ' '}, 1, 0, sec_dsp},
+    {{'D', 'S', 'P', ' '}, DSP_STATE_VERSION, 0, sec_dsp},
 };
 #define NSEC (sizeof k_sections / sizeof k_sections[0])
 #define SEC_HEAD 12u /* tag, version, length */
@@ -624,10 +806,11 @@ static int parse(gc_machine *m, const char *key, const uint8_t *data, size_t siz
 }
 
 /* A dry run of a section's walk: what it reads fits its length exactly (nothing changes). */
-static int dry_ok(gc_machine *m, const section *k, const uint8_t *p, size_t n)
+static int dry_ok(gc_machine *m, const section *k, const uint8_t *p, size_t n, uint32_t ver)
 {
     io s = {0};
     s.load = 1;
+    s.ver = ver;
     s.dry = 1;
     s.in = p;
     s.cap = n;
@@ -644,7 +827,7 @@ int gc_state_check(gc_machine *m, const char *key, const uint8_t *data, size_t s
     if (rc != GC_STATE_OK)
         return rc;
     for (size_t i = 0; i < NSEC; i++)
-        if (at[i] && !dry_ok(m, &k_sections[i], at[i], len[i]))
+        if (at[i] && !dry_ok(m, &k_sections[i], at[i], len[i], ver[i]))
             return why_set(why, why_n, GC_STATE_ECORRUPT, "section %.4s is damaged%s", k_sections[i].tag, "");
     return GC_STATE_OK;
 }
@@ -677,6 +860,7 @@ int gc_state_load(gc_machine *m, const char *key, const uint8_t *data, size_t si
         s.load = 1;
         s.in = at[i];
         s.cap = len[i];
+        s.ver = ver[i];
         k->walk(m, &s);
         /* checked before (sizes, page bitmaps): a failure here would be a bug, the machine half loaded */
         if (s.bad)

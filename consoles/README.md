@@ -1749,17 +1749,17 @@ as the client side, and Dolphin's behaviour read for facts only.
 - `runtime/gc_state.c` (`gc_core.h` « Save states »): `gc_state_size` / `gc_state_save` / `gc_state_check` /
   `gc_state_load`, results sharing `RECOMP_STATE_*`'s values, a refused state with its reason (`why`). The blob: a
   header (magic, console `gc`, `GC_STATE_VERSION`, the title key), then tagged sections, each with its own version
-  and length, every field written one by one in little-endian order (no struct copied, except the sound hardware's,
-  below): `CPU` (GPRs, ps0 / ps1, PC, LR, CTR, CR, XER, MSR, FPSCR, the reservation, SRs, the whole SPR file: SRR0/1,
+  and length, every field written one by one in little-endian order (no struct copied): `CPU` (GPRs, ps0 / ps1, PC, LR, CTR, CR, XER, MSR, FPSCR, the reservation, SRs, the whole SPR file: SRR0/1,
   GQRs, HIDs, WPAR, DMAU / DMAL, BATs, SPRGs, DEC / TB through the clock), `TIME` (video timing, decrementer, time
   base), `HW` (PI, VI, SI and the pads plugged in, EXI and MI registers), `MEM1` (a bitmap of the non-zero 4 KB pages,
   then those pages: about 1 MB for our homebrew), `LC` (the locked cache), `ARAM` (pages), `GX` (the PI FIFO, CP / PE
   registers, the FIFO bytes not parsed yet, BP / CP / XF register files, XF memory, TEV colour registers, TMEM),
   `DI` (the drive's registers, the command in flight, the head, the cover, the stream position and decoder; not the
   disc), `EXI` (`gc_exi_state_save`: card commands under way, status, the IPL chip, SRAM, the RTC offset; never a
-  card's contents, which are the save files), `DSP` (struct `gc_audio` without its output ring: DSP interface,
-  mailboxes, the microcode HLE's state, ARAM / audio DMA, AI, resamplers; host layout, so a build whose struct differs
-  refuses that section). Required sections (CPU, TIME, HW, MEM1) refuse a state that lacks them; an optional one
+  card's contents, which are the save files), `DSP` (version 2, XBA-266, field by field: DSP interface, mailboxes,
+  the running and the switched-away ucode with their HLE state (AX, ASND, Zelda, AESND), ARAM / audio DMA, AI, the
+  DMA's FIFO, resamplers; not the host's output ring nor statistics; indices range-checked; a version-1 section, the
+  raw struct of before, is skipped and the sound kept as it is). Required sections (CPU, TIME, HW, MEM1) refuse a state that lacks them; an optional one
   missing is kept as the machine has it; a section this build does not know is skipped; one with a newer version, or
   a fixed one of another length, refuses the state. A state of another title key, console or format version is
   refused whole before anything changes (sizes and page bitmaps checked by a dry run first).
@@ -1786,7 +1786,8 @@ as the client side, and Dolphin's behaviour read for facts only.
   picture and sound after R steps back as the first time), `gc_run --cheats FILE`.
 - Tests: `gc_state_format` (no corpus: the format on a synthetic program: every section's data round trip, key,
   version, damaged / truncated states refused with the machine untouched, unknown / missing sections, newer section,
-  the cheats' memory access invalidating a span), `gc_state_hello` / `_padtest` / `_asnd` (the DSP's state too) /
+  the cheats' memory access invalidating a span), `gc_state_hello` / `_padtest` / `_asnd` (the DSP's state too; `gc_zelda`'s state part: a state taken mid-render
+  with an acknowledgement in the mailbox and the audio DMA playing gives the same 0.5 s of output after a load) /
   `_gxcopy` (with the GLES renderer on llvmpipe), `gc_rc_hello` (the round trip again with the recompiled pack),
   `gc_rewind_padtest`, `gc_cheats_core` (a Gecko 04 patch and a C2 hook run by the CPU on a synthetic program, the
   instruction put back when the cheat goes off, AR codes), `gc_cheats_padtest` (Gecko / AR codes writing into our

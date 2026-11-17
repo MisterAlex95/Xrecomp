@@ -22,6 +22,9 @@
  *              audio DMA as JAudio does: PCM16 1000 Hz left + AFC 500 Hz (16 -> 32 kHz) right; then both fade out
  *              (end requested) and a PCM8 750 Hz (8 -> 32 kHz) plays on both; then a positional voice front left at
  *              1000 Hz and a main-memory PCM16 1250 Hz right that ends by itself; then silence
+ *   state      a save state taken in the middle of a render (a frame done, its acknowledgement in the mailbox, the
+ *              audio DMA playing): the next 0.5 s of rendering and 48 kHz output identical after loading it; a
+ *              damaged DSP section refused
  *   aesnd      the mails prefixed 0xFACE: voice block address, first / next voice, send samples, terminate; mono16,
  *              stereo8 unsigned at half rate, the delay, the "finished" flag, the 2012+ channel order
  * Exit 0, 1 on a mismatch. */
@@ -819,7 +822,8 @@ static uint32_t record(gc_machine *m, FILE *f, double seconds)
     return frames;
 }
 
-static void test_wav(const char *dir)
+/* The voices of zelda.wav (also the save state test's): a machine booted, set up, voices 0 and 1 playing. */
+static gc_machine *wav_setup(void)
 {
     gc_machine *m = machine();
     boot(m, 0x86840740u, "zelda");
@@ -892,11 +896,16 @@ static void test_wav(const char *dir)
     vput(m, 4, V_LOOPING, 1);
     vput32(m, 4, V_LOOP_START, 320);
     vput32(m, 4, V_BASE, A_SINE);
+    return m;
+}
 
-    enum { RENDERS = 200, FR = 4 };
-    uint16_t masks[1] = {0xFFFF};
-    for (int r = 0; r < RENDERS; r++) {
-        if (r == 50) { /* 0.5 s */
+enum { WAV_RENDERS = 200, WAV_FR = 4 };
+
+/* What the CPU changes before render r (4 frames, 10 ms each), and the render's output interleaved for the audio
+ * DMA (right then left) at its place in DMA_OUT. */
+static void wav_changes(gc_machine *m, int r)
+{
+    if (r == 50) { /* 0.5 s */
             vput(m, 0, V_END_REQ, 1);
             vput(m, 1, V_END_REQ, 1);
             vput(m, 2, V_ENABLED, 1);
@@ -910,27 +919,134 @@ static void test_wav(const char *dir)
         }
         if (r == 150)
             vput(m, 4, V_END_REQ, 1);
-        zrender(m, FR, 0x1000, masks, 1, false, OUT_L, OUT_R);
-        zcontinue(m);
-        for (int i = 0; i < FR * 80; i++) { /* interleaved for the audio DMA: right then left */
-            uint32_t d = DMA_OUT + 4u * (uint32_t)(r * FR * 80 + i);
-            put16(m, d, get16(m, OUT_R + 2u * (uint32_t)i));
-            put16(m, d + 2, get16(m, OUT_L + 2u * (uint32_t)i));
-        }
+}
+
+static void wav_interleave(gc_machine *m, int r)
+{
+    for (int i = 0; i < WAV_FR * 80; i++) {
+        uint32_t d = DMA_OUT + 4u * (uint32_t)(r * WAV_FR * 80 + i);
+        put16(m, d, get16(m, OUT_R + 2u * (uint32_t)i));
+        put16(m, d + 2, get16(m, OUT_L + 2u * (uint32_t)i));
     }
+}
+
+static void wav_render(gc_machine *m, int r)
+{
+    uint16_t masks[1] = {0xFFFF};
+    wav_changes(m, r);
+    zrender(m, WAV_FR, 0x1000, masks, 1, false, OUT_L, OUT_R);
+    zcontinue(m);
+    wav_interleave(m, r);
+}
+
+static void wav_dma_start(gc_machine *m)
+{
+    uint32_t blocks = WAV_RENDERS * WAV_FR * 80 * 4 / 32;
+    w16(m, 0x5030, (uint16_t)(DMA_OUT >> 16));
+    w16(m, 0x5032, (uint16_t)DMA_OUT);
+    w16(m, 0x5036, (uint16_t)(0x8000 | blocks));
+}
+
+static void test_wav(const char *dir)
+{
+    gc_machine *m = wav_setup();
+    for (int r = 0; r < WAV_RENDERS; r++)
+        wav_render(m, r);
     CHECK(vget(m, 3, V_DONE) && vget(m, 4, V_DONE), "voices 3 / 4 not done: %u %u", vget(m, 3, V_DONE),
           vget(m, 4, V_DONE));
     gc_audio_info info;
     gc_audio_get_info(m, &info);
     printf("zelda: %llu frames rendered, %llu mails from the DSP\n", (unsigned long long)info.cmd_lists,
            (unsigned long long)info.mails_from_dsp);
-    uint32_t blocks = RENDERS * FR * 80 * 4 / 32;
-    w16(m, 0x5030, (uint16_t)(DMA_OUT >> 16));
-    w16(m, 0x5032, (uint16_t)DMA_OUT);
-    w16(m, 0x5036, (uint16_t)(0x8000 | blocks));
+    wav_dma_start(m);
     FILE *f = wav_open(dir, "zelda.wav");
     uint32_t frames = record(m, f, 2.05);
     wav_close(f, frames);
+    gc_destroy(m);
+}
+
+/* ---- save states: the sound hardware field by field (gc_state.c's DSP section, version 2) ---- */
+
+enum { TAIL_RENDERS = 50, TAIL_PCM = 48 * 10 * TAIL_RENDERS + 4800 };
+
+/* From the state on: the rest of render 60 (frame 0 already rendered, its acknowledgement still in the mailbox),
+ * then renders 61..110, each followed by 10 ms of the audio DMA playing; pcm gets the machine's 48 kHz output. */
+static size_t tail(gc_machine *m, int16_t *pcm)
+{
+    uint16_t masks[1] = {0xFFFF};
+    size_t got = 0;
+    zack(m, 0xFF00, "frame 0 after the state");
+    for (unsigned f = 1; f < WAV_FR; f++) {
+        send_mail(m, 0);
+        send_mail(m, masks[0]);
+        zack(m, (uint16_t)(0xFF00 | f), "frame");
+    }
+    expect_mail(m, DSP_MAIL_FRAME_END, "render end after the state");
+    expect_int(m, "render after the state");
+    zcontinue(m);
+    wav_interleave(m, 60);
+    for (int r = 61; r <= 60 + TAIL_RENDERS; r++) {
+        wav_render(m, r);
+        advance(m, GC_CPU_HZ / 100);
+        size_t n;
+        while (got < TAIL_PCM && (n = gc_audio_pull(m, pcm + 2 * got, (TAIL_PCM - got) < 256 ? TAIL_PCM - got : 256)))
+            got += n;
+    }
+    return got;
+}
+
+static void test_state(void)
+{
+    gc_machine *m = wav_setup();
+    for (int r = 0; r < 60; r++)
+        wav_render(m, r);
+    wav_dma_start(m);
+    advance(m, GC_CPU_HZ / 5); /* the audio DMA well under way, its FIFO and resampler busy */
+    int16_t drop[512];
+    while (gc_audio_pull(m, drop, 256))
+        ;
+    /* in the middle of a render: frame 0 rendered, its acknowledgement queued, frames 1..3 waiting for their syncs */
+    wav_changes(m, 60);
+    uint32_t w[3] = {0x82000000u | WAV_FR << 16 | 0x1000, OUT_L, OUT_R};
+    zsend(m, w, 3);
+    send_mail(m, 0);
+    send_mail(m, 0xFFFF);
+    size_t size = gc_state_size(m);
+    uint8_t *st = malloc(size);
+    size_t n = st ? gc_state_save(m, "zelda", st, size) : 0;
+    CHECK(n > 0, "state not saved (%zu bytes wanted)", size);
+    static int16_t a[2 * TAIL_PCM], b[2 * TAIL_PCM];
+    static uint8_t dma_a[WAV_RENDERS * WAV_FR * 80 * 4];
+    size_t na = tail(m, a);
+    memcpy(dma_a, m->h.ram + DMA_OUT, sizeof dma_a);
+    char why[200] = "";
+    int rc = n ? gc_state_load(m, "zelda", st, n, why, sizeof why) : -1;
+    CHECK(rc == 0, "state not loaded: %d %s", rc, why);
+    CHECK(gc_audio_queued(m) == 0, "the host ring kept frames across a load");
+    size_t nb = tail(m, b);
+    CHECK(na == nb && na > 48 * 10 * (TAIL_RENDERS - 2), "48 kHz frames after the state: %zu then %zu", na, nb);
+    CHECK(memcmp(a, b, 2 * na * sizeof a[0]) == 0, "the 48 kHz output after a load differs");
+    CHECK(memcmp(dma_a, m->h.ram + DMA_OUT, sizeof dma_a) == 0, "the rendered frames after a load differ");
+    int loud = 0;
+    for (size_t i = 0; i < 2 * na; i++)
+        loud |= abs(a[i]) > 4000;
+    CHECK(loud, "the run after the state is silent");
+    /* a damaged DSP section is refused before anything changes: the mail queue's head past its end */
+    if (n) {
+        size_t at = 72;
+        while (at + 12 <= n && memcmp(st + at, "DSP ", 4) != 0)
+            at += 12 + (st[at + 8] | st[at + 9] << 8 | (size_t)st[at + 10] << 16 | (size_t)st[at + 11] << 24);
+        CHECK(at + 12 <= n, "no DSP section in the state");
+        if (at + 12 <= n) {
+            size_t qh = at + 12 + 4 + 4 * (1 + 0x100) + 4 + 5 * GC_MAILQ; /* version, csr, regs, cpu mail, queue */
+            st[qh] = 0xFF;
+            rc = gc_state_load(m, "zelda", st, n, why, sizeof why);
+            CHECK(rc != 0, "a damaged DSP section was accepted");
+        }
+    }
+    if (!failures)
+        printf("zelda: save state in the middle of a render: %zu frames of 48 kHz output identical after a load\n", na);
+    free(st);
     gc_destroy(m);
 }
 
@@ -1027,6 +1143,7 @@ int main(int argc, char **argv)
     test_light(0x24B22038u, true);
     test_aesnd();
     test_wav(dir);
+    test_state();
     printf("%s\n", failures ? "gc_zelda_test: FAILED" : "gc_zelda_test: ok");
     return failures ? 1 : 0;
 }
