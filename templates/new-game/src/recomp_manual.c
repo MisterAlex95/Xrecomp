@@ -142,8 +142,45 @@ void recomp_icall_fail_log(uint32_t va)
         recomp_discovery_wild(va, ret);
     else
         recomp_discovery_icall(va, ret);
-    fprintf(stderr, "[ICALL] Failed to resolve VA 0x%08X (total calls: %llu)\n",
-            va, (unsigned long long)g_icall_count);
+
+    /* Rate-limited per address, at 1, 10, 100 ... hits: the same unresolved
+     * target in a loop wrote 10 000 lines in 50 ms on a device and the
+     * 20 000-line « Share log » dump held nothing else, so everything that
+     * said how the run got there was lost. */
+    {
+        enum { SLOTS = 32 };
+        static uint32_t seen[SLOTS];
+        static uint64_t hits[SLOTS];
+        static int count;
+        uint64_t n;
+        int i;
+
+        for (i = 0; i < count; i++)
+            if (seen[i] == va)
+                break;
+        if (i == count) {
+            if (count == SLOTS)
+                return;               /* 32 distinct targets already named */
+            seen[count] = va;
+            hits[count] = 0;
+            count++;
+        }
+        n = ++hits[i];
+        {
+            uint64_t p = 1;
+            while (p < n && p <= UINT64_MAX / 10)
+                p *= 10;
+            if (p != n)
+                return;
+        }
+        fprintf(stderr, "[ICALL] Failed to resolve VA 0x%08X (total calls: %llu) "
+                        "from 0x%08X, hit %llu time(s)\n",
+                va, (unsigned long long)g_icall_count, ret, (unsigned long long)n);
+        if (n > 1) {
+            fflush(stderr);
+            return;
+        }
+    }
 
     /* Dump last 16 call targets from the ring buffer */
     fprintf(stderr, "  Recent ICALL targets:\n");
