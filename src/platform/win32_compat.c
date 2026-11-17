@@ -100,16 +100,41 @@ PVOID InterlockedCompareExchangePointer(PVOID volatile *p, PVOID xchg, PVOID cmp
 /* Critical sections (recursive pthread mutex)                           */
 /* ===================================================================== */
 
-VOID InitializeCriticalSection(LPCRITICAL_SECTION cs)
+static pthread_mutex_t *cs_new_mutex(void)
 {
-    memset(cs, 0, sizeof(*cs));
     pthread_mutex_t *m = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(m, &attr);
     pthread_mutexattr_destroy(&attr);
-    cs->LockSemaphore = m;
+    return m;
+}
+
+VOID InitializeCriticalSection(LPCRITICAL_SECTION cs)
+{
+    memset(cs, 0, sizeof(*cs));
+    cs->LockSemaphore = cs_new_mutex();
+}
+
+/* A zeroed (never initialised) section gets its mutex on first use. Two
+ * threads can reach that first use together: as for SRW locks below, the
+ * creation is serialised and the pointer published atomically, so both end
+ * up on the same mutex (each used to install its own and both "held" it). */
+static pthread_mutex_t *cs_mutex(LPCRITICAL_SECTION cs)
+{
+    pthread_mutex_t *m = __atomic_load_n((pthread_mutex_t **)&cs->LockSemaphore, __ATOMIC_ACQUIRE);
+    if (!m) {
+        static pthread_mutex_t init_lock = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&init_lock);
+        m = (pthread_mutex_t *)cs->LockSemaphore;
+        if (!m) {
+            m = cs_new_mutex();
+            __atomic_store_n((pthread_mutex_t **)&cs->LockSemaphore, m, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&init_lock);
+    }
+    return m;
 }
 
 VOID InitializeCriticalSectionAndSpinCount(LPCRITICAL_SECTION cs, DWORD spin)
@@ -120,8 +145,7 @@ VOID InitializeCriticalSectionAndSpinCount(LPCRITICAL_SECTION cs, DWORD spin)
 
 VOID EnterCriticalSection(LPCRITICAL_SECTION cs)
 {
-    if (!cs->LockSemaphore) InitializeCriticalSection(cs);
-    pthread_mutex_lock((pthread_mutex_t *)cs->LockSemaphore);
+    pthread_mutex_lock(cs_mutex(cs));
     cs->RecursionCount++;
 }
 
@@ -134,8 +158,7 @@ VOID LeaveCriticalSection(LPCRITICAL_SECTION cs)
 
 BOOL TryEnterCriticalSection(LPCRITICAL_SECTION cs)
 {
-    if (!cs->LockSemaphore) InitializeCriticalSection(cs);
-    if (pthread_mutex_trylock((pthread_mutex_t *)cs->LockSemaphore) == 0) {
+    if (pthread_mutex_trylock(cs_mutex(cs)) == 0) {
         cs->RecursionCount++;
         return TRUE;
     }
@@ -247,13 +270,19 @@ static void cond_init_wait_clock(pthread_cond_t *c)
 /* Forward decl; the definition lives further down with the wait helpers. */
 static void deadline_from_ms(DWORD ms, struct timespec *ts);
 
+/* As cs_mutex: a Wake can come with no lock held, at the same moment as a
+ * first Sleep, so the creation is serialised too. */
 static void cv_lazy_init(PCONDITION_VARIABLE cv)
 {
-    if (!cv->Ptr) {
-        pthread_cond_t *c = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
-        cond_init_wait_clock(c);
-        /* Race window OK for typical Win32 usage (the CS is held). */
-        cv->Ptr = c;
+    if (!__atomic_load_n(&cv->Ptr, __ATOMIC_ACQUIRE)) {
+        static pthread_mutex_t init_lock = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&init_lock);
+        if (!cv->Ptr) {
+            pthread_cond_t *c = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
+            cond_init_wait_clock(c);
+            __atomic_store_n(&cv->Ptr, (PVOID)c, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&init_lock);
     }
 }
 
@@ -266,9 +295,8 @@ VOID InitializeConditionVariable(PCONDITION_VARIABLE cv)
 BOOL SleepConditionVariableCS(PCONDITION_VARIABLE cv, PCRITICAL_SECTION cs, DWORD ms)
 {
     cv_lazy_init(cv);
-    if (!cs->LockSemaphore) InitializeCriticalSection(cs);
     pthread_cond_t  *c = (pthread_cond_t  *)cv->Ptr;
-    pthread_mutex_t *m = (pthread_mutex_t *)cs->LockSemaphore;
+    pthread_mutex_t *m = cs_mutex(cs);
     if (ms == INFINITE) {
         pthread_cond_wait(c, m);
         return TRUE;
