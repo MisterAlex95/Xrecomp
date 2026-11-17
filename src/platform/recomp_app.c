@@ -80,18 +80,19 @@ int recomp_app_start(const char *external, const char *internal,
     memset(store, 0, sizeof *store);
     if (external && internal)
         have_game = recomp_storage_resolve(external, internal, store);
-    if (have_game >= 0)
+    if (have_game >= 0) {
         xbox_path_init(store->game_dir, store->save_dir);
-    /* A disc image the kernel could not mount (kernel_disc.c said why): no
-     * game, as for a folder without default.xbe. */
-    if (have_game > 0 && xbox_disc_spec_is_image(store->game_dir) && !xbox_disc_mounted()) {
-        fprintf(stderr, "xboxrecomp: %s: the disc image cannot be read\n", store->game_dir);
-        store->xbe[0] = '\0';
-        have_game = 0;
-    }
-    else
+        /* A disc image the kernel could not mount (kernel_disc.c said why): no
+         * game, as for a folder without default.xbe. */
+        if (have_game > 0 && xbox_disc_spec_is_image(store->game_dir) && !xbox_disc_mounted()) {
+            fprintf(stderr, "xboxrecomp: %s: the disc image cannot be read\n", store->game_dir);
+            store->xbe[0] = '\0';
+            have_game = 0;
+        }
+    } else {
         fprintf(stderr, "xboxrecomp: no usable storage paths (external %s)\n",
                 external ? external : "none");
+    }
 
     /* After recomp.cfg, which may say RECOMP_BIG_CORES=0; before SDL_Init,
      * whose threads should inherit the mask too. */

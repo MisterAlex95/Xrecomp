@@ -6,7 +6,10 @@
  *   - recomp_app_start: recomp.cfg is read from <external> before storage
  *     (it may set RECOMP_GAME_DIR), the resolved directories go to
  *     xbox_path_init, the fault handler is installed, and the return value
- *     says whether default.xbe is there; no paths, no xbox_path_init. */
+ *     says whether default.xbe is there; no paths, no xbox_path_init;
+ *   - "no usable storage paths" goes to stderr only when there are none (it
+ *     used to be printed on every normal start: the else had moved to the
+ *     disc-image check). */
 #define _GNU_SOURCE
 #include "recomp_app.h"
 
@@ -40,6 +43,31 @@ static int env_is(const char *name, const char *want)
 {
     const char *v = getenv(name);
     return want ? v && strcmp(v, want) == 0 : v == NULL;
+}
+
+/* recomp_app_start with stderr caught: 1 when what it printed has `needle`. */
+static int start_says(const char *ext, const char *in, recomp_storage *s, int *ret, const char *needle)
+{
+    const char *tmp = getenv("TMPDIR");
+    char path[512], buf[8192];
+    snprintf(path, sizeof path, "%s/recomp_app_err_XXXXXX", tmp && tmp[0] ? tmp : "/tmp");
+    int fd = mkstemp(path), saved;
+    size_t n = 0;
+    if (fd < 0) { perror("mkstemp"); return -1; }
+    fflush(stderr);
+    saved = dup(2);
+    dup2(fd, 2);
+    *ret = recomp_app_start(ext, in, s);
+    fflush(stderr);
+    dup2(saved, 2);
+    close(saved);
+    lseek(fd, 0, SEEK_SET);
+    ssize_t r;
+    while (n < sizeof buf - 1 && (r = read(fd, buf + n, sizeof buf - 1 - n)) > 0) n += (size_t)r;
+    buf[n] = '\0';
+    close(fd);
+    unlink(path);
+    return strstr(buf, needle) != NULL;
 }
 
 static void write_file(const char *path, const char *text)
@@ -95,12 +123,20 @@ int main(void)
 
     snprintf(p, sizeof p, "%s/disc/default.xbe", root);
     write_file(p, "XBEH");
-    CHECK(recomp_app_start(ext, in, &s) == 1);
+    {
+        int r = -2;
+        CHECK(start_says(ext, in, &s, &r, "no usable storage paths") == 0);   /* a normal start */
+        CHECK(r == 1);
+    }
     CHECK(strcmp(s.xbe, p) == 0);
     CHECK(s_path_calls == 2);
 
     /* 3. No paths: no storage, no xbox_path_init, the handler all the same. */
-    CHECK(recomp_app_start(NULL, NULL, &s) == -1);
+    {
+        int r = -2;
+        CHECK(start_says(NULL, NULL, &s, &r, "no usable storage paths") == 1);
+        CHECK(r == -1);
+    }
     CHECK(s.game_dir[0] == '\0' && s.xbe[0] == '\0');
     CHECK(s_path_calls == 2);
     CHECK(s_handler_calls == 3);
