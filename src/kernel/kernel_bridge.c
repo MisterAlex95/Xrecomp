@@ -1383,11 +1383,39 @@ static void bridge_MmAllocateContiguousMemoryEx(void)
     if (low && high >= low && (high - low + 1) <= size + 0x1000) {
         xbox_va = XBOX_PHYSICAL_MIRROR_BASE + low;
 
+        /* Inside the window, or refused (KRN-15): a low beyond it wrote
+         * outside the mapping, a host fault inside the runtime with no
+         * status for the guest. */
+        if ((uint64_t)low + size > (uint64_t)XBOX_CONTIG_SIZE) {
+            static int said;
+            if (said++ < 8)
+                fprintf(stderr, "  [CONTIG] refused: pinned phys 0x%08X size=%u is outside "
+                                "the %u MB window (caller 0x%08X)\n",
+                        low, size, (unsigned)XBOX_CONTIG_MB, g_xbox_kernel_caller);
+            g_eax = 0;
+            return;
+        }
+
         /* The console hands out zeroed pages here, and titles rely on it:
          * pool headers and free-list roots are assumed clear, so whatever the
          * backing view happened to contain shows up later as structures that
-         * are "allocated" but full of garbage. */
-        memset((void *)((uintptr_t)xbox_va + g_xbox_mem_offset), 0, size);
+         * are "allocated" but full of garbage. Only the pages no block owns
+         * yet: the claim leaves owned pages to their owner, and zeroing them
+         * first wiped a live texture or pushbuffer of the title. (Reading
+         * the map before the claim leaves a window against a concurrent
+         * allocation; zeroing inside the claim, under the arena lock, would
+         * close it.) */
+        {
+            const volatile uint8_t *map = xbox_ContiguousPageMap();
+            uint32_t end = low + size, p;
+            for (p = low & ~0xFFFu; p < end; p += 0x1000u) {
+                uint32_t from = p < low ? low : p;
+                uint32_t to = p + 0x1000u < end ? p + 0x1000u : end;
+                if (!map || !map[p >> 12])
+                    memset((void *)((uintptr_t)(XBOX_PHYSICAL_MIRROR_BASE + from)
+                                    + g_xbox_mem_offset), 0, to - from);
+            }
+        }
         /* Keep the arena from handing the same pages to someone else. */
         xbox_ContiguousClaim(xbox_va, size);
 

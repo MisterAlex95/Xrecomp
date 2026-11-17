@@ -214,6 +214,47 @@ static void test_virtual_memory(void)
     check(st == 0xC00000A0u, "free below the heap is refused, not zeroed", NULL);
 }
 
+/* ---- MmAllocateContiguousMemoryEx pinned to one address (KRN-15) ------ */
+static void test_pinned_contiguous(void)
+{
+    char d[160];
+    uint32_t a, phys, va, i;
+    int kept = 1, zeroed = 1;
+    const volatile uint8_t *map = xbox_ContiguousPageMap();
+
+    printf("pinned contiguous allocations\n");
+    a = CALL(ORD_MMALLOC, 0x2000);
+    check(a >= 0x80000000u, "a 8 KB contiguous block", NULL);
+    if (a < 0x80000000u)
+        return;
+    memset(GP(a), 0x5A, 0x2000);
+    phys = a - 0x80000000u;
+    /* Over the block's second page and the page after it. */
+    {
+        uint32_t after = phys + 0x2000u;
+        int after_free = map && !map[after >> 12];
+        if (after_free)
+            memset(GP(0x80000000u + after), 0x77, 0x1000);
+        va = CALL(ORD_MMALLOCEX, 0x2000, phys + 0x1000u, phys + 0x2FFFu, 0, 4);
+        snprintf(d, sizeof d, "got 0x%08X, want 0x%08X", va, a + 0x1000u);
+        check(va == a + 0x1000u, "a pinned range is returned at that address", d);
+        for (i = 0; i < 0x2000; i++)
+            kept &= GP(a)[i] == 0x5A;
+        check(kept, "the block it overlaps keeps its bytes", NULL);
+        if (after_free) {
+            for (i = 0; i < 0x1000; i++)
+                zeroed &= GP(0x80000000u + after)[i] == 0;
+            check(zeroed, "the page no block owned is zeroed", NULL);
+        }
+    }
+    va = CALL(ORD_MMALLOCEX, 0x2000, XBOX_CONTIG_SIZE - 0x1000u, XBOX_CONTIG_SIZE + 0xFFFu, 0, 4);
+    snprintf(d, sizeof d, "got 0x%08X", va);
+    check(va == 0, "a pinned range past the end of the window: 0", d);
+    va = CALL(ORD_MMALLOCEX, 0x1000, 0x10000000u, 0x10000FFFu, 0, 4);
+    snprintf(d, sizeof d, "got 0x%08X", va);
+    check(va == 0, "a pinned range far outside the window: 0", d);
+}
+
 /* ---- FileRenameInformation -------------------------------------------- */
 static uint32_t put_str(uint32_t at, const char *s)
 {
@@ -488,6 +529,7 @@ int main(int argc, char **argv)
     xbox_kernel_bridge_init();
 
     test_virtual_memory();
+    test_pinned_contiguous();
     test_rename(cache);
     test_overwrite(cache);
     test_threads();
