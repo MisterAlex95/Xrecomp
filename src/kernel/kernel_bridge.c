@@ -2388,6 +2388,8 @@ static int ke_promote(uint32_t guest_va);
 static void ke_note_set_attempt(uint32_t guest_va);
 static int ke_set_seen(uint32_t guest_va);
 static int ke_is_promoted(uint32_t guest_va);
+static int ke_title_kevents_on(void);
+static void ke_shadow_remove(uint32_t guest_va);
 
 /* Wait accounting (kernel_wait_stats.h): a zero timeout is a poll, not timed. */
 static int bridge_timeout_is_poll(uint32_t timeout_ptr)
@@ -9708,17 +9710,22 @@ static int ke_promote(uint32_t guest_va)
     return 1;
 }
 
-static HANDLE ke_guest_event(uint32_t guest_va, int *type)
+static int ke_title_kevents_on(void)
 {
     static int enabled = -1;
-    uint32_t hdr;
-    HANDLE h = NULL;
-
     if (enabled < 0) {
         const char *e = getenv("RECOMP_TITLE_KEVENTS");
         enabled = !(e && *e == '0');    /* on unless turned off */
     }
-    if (!enabled && !ke_is_promoted(guest_va))
+    return enabled;
+}
+
+static HANDLE ke_guest_event(uint32_t guest_va, int *type)
+{
+    uint32_t hdr;
+    HANDLE h = NULL;
+
+    if (!ke_title_kevents_on() && !ke_is_promoted(guest_va))
         return NULL;
     if (guest_va < 0x10000u || (guest_va & 3u))
         return NULL;
@@ -10549,6 +10556,32 @@ static void bridge_KeInitializeEvent(void)
     uint32_t guest_va = STACK_ARG(0);
     uint32_t event_type = STACK_ARG(1); /* 0=Notification(manual-reset), 1=Synchronization(auto-reset) */
     uint32_t initial_state = STACK_ARG(2);
+
+    /* The header the console's KeInitializeEvent writes (KRN-10): Size 4
+     * (in LONGs), Inserted 0, a self-linked wait list, and SignalState as
+     * the event's state from then on. The shadow below wrote Size 16, so
+     * ke_guest_event (which wants 4) never treated the event as
+     * header-owned and its SignalState was written once and never again:
+     * an inline KeReadStateEvent read the initial state for ever, and XDK
+     * code clearing the event by storing 0 there left the host event set.
+     * With guest events on (the default) the event is now made exactly
+     * like one XDK code builds inline; RECOMP_TITLE_KEVENTS=0 keeps the
+     * shadow, as does an address guest events do not cover. */
+    if (ke_title_kevents_on()) {
+        int type;
+        BRIDGE_MEM8(guest_va + 0)  = (uint8_t)(event_type ? 1 : 0);
+        BRIDGE_MEM8(guest_va + 1)  = 0;
+        BRIDGE_MEM8(guest_va + 2)  = 4;
+        BRIDGE_MEM8(guest_va + 3)  = 0;
+        BRIDGE_MEM32(guest_va + 4) = initial_state ? 1 : 0;
+        BRIDGE_MEM32(guest_va + 8) = guest_va + 8;
+        BRIDGE_MEM32(guest_va + 12) = guest_va + 8;
+        ke_shadow_remove(guest_va);        /* an earlier object at this address */
+        if (ke_guest_event(guest_va, &type)) {
+            g_eax = 0;
+            return;
+        }
+    }
 
     BOOL manual_reset = (event_type == 0) ? TRUE : FALSE;
     HANDLE h = CreateEventW(NULL, manual_reset, initial_state ? TRUE : FALSE, NULL);
