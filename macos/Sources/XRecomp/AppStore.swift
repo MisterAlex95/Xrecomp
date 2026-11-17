@@ -43,10 +43,15 @@ final class AppStore: LauncherActions {
     private var checkAgain = Set<String>()
 
     init() {
-        settings = Settings.load(from: basePaths.settingsFile)
+        var broken: URL?
+        settings = Settings.load(from: basePaths.settingsFile, onBroken: { broken = $0 })
         paths = settings.paths(base: basePaths)
         model.actions = self
         AppStore.current = self
+        if let broken {
+            model.notice = "settings.json could not be read: XRecomp starts from its defaults. Your file is kept as "
+                + "\(broken.path)."
+        }
     }
 
     func start() {

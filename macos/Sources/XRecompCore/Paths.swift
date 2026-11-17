@@ -80,16 +80,35 @@ extension FileManager {
     }
 }
 
-/// Writes data through `<file>.tmp` and a rename, so a reader sees the old or the new file, never half of one.
+/// Writes data through a temporary file and a rename, so a reader sees the old or the new file, never half of one.
+/// The temporary name is the writer's own (`<file>.<pid>.<random>.tmp`): a game app and XRecomp.app share the data
+/// tree, and two writers on one `<file>.tmp` could publish each other's half-written bytes.
 public func writeAtomically(_ data: Data, to url: URL) throws {
     let fm = FileManager.default
     try fm.ensureDirectory(url.deletingLastPathComponent())
-    let tmp = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".tmp")
-    try data.write(to: tmp)
+    let tmp = url.deletingLastPathComponent()
+        .appendingPathComponent("\(url.lastPathComponent).\(getpid()).\(UUID().uuidString.prefix(8)).tmp")
+    do {
+        try data.write(to: tmp)
+    } catch {
+        try? fm.removeItem(at: tmp)
+        throw error
+    }
     if rename(tmp.path, url.path) != 0 {
         try? fm.removeItem(at: tmp)
         throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
     }
+}
+
+/// A file that exists but does not read as what it should be is moved to `<file>.bad` (replacing an older one), so the
+/// next save of the defaults does not overwrite what the player had (a hand edit with a syntax error). The `.bad`
+/// path, or nil when nothing was moved (an empty file holds nothing to keep).
+@discardableResult
+public func setAsideBroken(_ url: URL) -> URL? {
+    guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber,
+          size.intValue > 0 else { return nil }
+    let bad = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".bad")
+    return rename(url.path, bad.path) == 0 ? bad : nil
 }
 
 /// `encoded` (a JSON object) with the keys of the file now at url that `known` does not list put back. The `xrecomp`

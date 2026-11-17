@@ -272,6 +272,29 @@ func registerGameChecks() {
         expectEq(r.runs, 2)
     }
 
+    check("state: a torn state.json is kept aside, and writers use their own temporary file") {
+        let d = tempDir("state-bad")
+        let f = d.appendingPathComponent("state.json")
+        write(f, "{\"play_seconds\": 3600, \"runs\": ")
+        expectEq(TitleRecord.load(from: f), TitleRecord())
+        expectEq(read(d.appendingPathComponent("state.json.bad")), "{\"play_seconds\": 3600, \"runs\": ")
+        expect(!FileManager.default.fileExists(atPath: f.path))
+        // Two writers at once (a game app and XRecomp.app): each rename publishes a whole file.
+        let group = DispatchGroup()
+        for i in 0..<8 {
+            DispatchQueue.global().async(group: group) {
+                var r = TitleRecord(sourcePath: "/g/\(i).iso")
+                r.runs = i
+                try? r.save(to: f)
+            }
+        }
+        group.wait()
+        expect(TitleRecord.load(from: f).sourcePath?.hasPrefix("/g/") == true, read(f))
+        expect(!FileManager.default.fileExists(atPath: f.path + ".bad.bad"))
+        let names = (try FileManager.default.contentsOfDirectory(atPath: d.path)).sorted()
+        expectEq(names, ["state.json", "state.json.bad"])
+    }
+
     check("state: keys written by the xrecomp command line survive the app's save") {
         let f = tempDir("state-cli").appendingPathComponent("state.json")
         // What tools/xrecomp writes (update_state: source_path, title, console, play time).

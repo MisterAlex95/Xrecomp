@@ -52,8 +52,12 @@ public struct TitleRecord: Codable, Equatable, Sendable {
         return e
     }
 
+    /// The record at url; an empty one when there is none. A file that does not decode is set aside as
+    /// state.json.bad rather than overwritten (with the play time in it) by the next save.
     public static func load(from url: URL) -> TitleRecord {
-        guard let d = try? Data(contentsOf: url), let r = try? decoder.decode(TitleRecord.self, from: d) else {
+        guard let d = try? Data(contentsOf: url) else { return TitleRecord() }
+        guard let r = try? decoder.decode(TitleRecord.self, from: d) else {
+            setAsideBroken(url)
             return TitleRecord()
         }
         return r

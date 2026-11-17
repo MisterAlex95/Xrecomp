@@ -93,7 +93,15 @@ func registerSetupChecks() {
         expectEq(back.libraryURLs.first?.path, NSHomeDirectory() + "/Documents/xbox")
         expect(read(f).contains("\"library_folders\""))
         write(f, "{\"toolkit_path\": ")
-        expectEq(Settings.load(from: f), Settings())
+        var setAside: URL?
+        expectEq(Settings.load(from: f, onBroken: { setAside = $0 }), Settings())
+        // The broken file is kept aside, not overwritten by the next save of the defaults.
+        expectEq(setAside?.lastPathComponent, "settings.json.bad")
+        expectEq(read(d.appendingPathComponent("settings.json.bad")), "{\"toolkit_path\": ")
+        try Settings().save(to: f)
+        expectEq(read(d.appendingPathComponent("settings.json.bad")), "{\"toolkit_path\": ")
+        let leftovers = (try FileManager.default.contentsOfDirectory(atPath: d.path)).filter { $0.hasSuffix(".tmp") }
+        expectEq(leftovers, [], "no temporary file left")
         // Unknown keys are tolerated, missing ones defaulted.
         write(f, "{\"toolkit_path\": \"/t\", \"future\": 3}")
         let partial = Settings.load(from: f)
