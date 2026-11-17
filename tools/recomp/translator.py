@@ -3000,7 +3000,20 @@ class FunctionTranslator:
 
     def _control_flow_census(self, instructions, start, end, coalesced=False,
                              jump_table_targets=None):
-        """Build the shared census of computed CFG edges and entry leaders."""
+        """Build the shared census of computed CFG edges and entry leaders.
+
+        decode_function takes it of its final instruction list, and
+        translate_function again of the reachable instructions decode
+        returns -- usually the same instructions, and then the same answer
+        (it was a sixth of tools.recomp). The last census is kept and reused
+        when the instruction objects, bounds and table census are the same;
+        callers only read the result.
+        """
+        key = (start, end, coalesced, tuple(map(id, instructions)))
+        memo = self.__dict__.get("_census_memo")
+        if (memo is not None and memo[0] == key
+                and memo[1] is jump_table_targets):
+            return memo[2]
         table_edges = self._computed_jump_edges(
             instructions, start, end, jump_table_targets=jump_table_targets)
         imm_refs, register_edges = self._indirect_code_refs(
@@ -3034,8 +3047,13 @@ class FunctionTranslator:
                 if (insn.mnemonic == "int3"
                     and insn.end_address in instruction_starts))
 
-        return (imm_refs, computed_jump_edges, debug_slide_int3s,
-                debug_slide_bypasses, switch_leaders)
+        result = (imm_refs, computed_jump_edges, debug_slide_int3s,
+                  debug_slide_bypasses, switch_leaders)
+        # The instructions are pinned with it, so their ids in the key
+        # cannot be reused by other objects while it is kept.
+        self._census_memo = (key, jump_table_targets, result,
+                             tuple(instructions))
+        return result
 
     def _read_u32(self, va):
         """A guest dword from the image, or None outside it."""
