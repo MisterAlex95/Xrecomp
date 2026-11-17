@@ -8,10 +8,13 @@ path the tests cover is the one the device runs.
 Objects live in a cache keyed by sha256(source path + source + flags +
 compiler id + headers): an object whose key exists is not compiled again, so
 a killed run resumes where it stopped and a second run compiles nothing.
+<obj>/keys.json remembers each key with its inputs' stat (size, mtime,
+ctime, inode): a second run re-reads and re-hashes only what changed.
 """
 
 import errno
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -73,20 +76,45 @@ class Cancelled(Exception):
 
 # ── Child processes ─────────────────────────────────────────────
 
+class _Flag:
+    """threading.Event's set() / is_set() without its lock: set from a
+    signal handler, which must not take a lock the thread it interrupted
+    may hold. One attribute store or load is atomic under the GIL."""
+
+    def __init__(self):
+        self._set = False
+
+    def set(self):
+        self._set = True
+
+    def is_set(self):
+        return self._set
+
+
 class Procs:
-    """Every child process, so that a cancel kills them all at once."""
+    """Every child process, so that a cancel kills them all at once.
+
+    cancel() runs in the SIGTERM / SIGINT handlers (tools/prepare/android.py,
+    gba.py), on the main thread, between two of its bytecodes: wherever it
+    stopped, inside `with self.lock` too. So cancel() takes no lock: a
+    non-reentrant lock held by the code it interrupted would never be
+    released (the Prepare hung instead of cancelling)."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.live = set()
-        self.cancelled = threading.Event()
+        self.cancelled = _Flag()
 
     def start(self, args, **kw):
         if self.cancelled.is_set():
             raise Cancelled()
         p = subprocess.Popen(args, **kw)
-        with self.lock:
-            self.live.add(p)
+        try:
+            with self.lock:
+                self.live.add(p)
+        except BaseException:   # a signal handler's Cancelled before p was in live: cancel() missed it
+            p.kill()
+            raise
         if self.cancelled.is_set():          # cancel() ran between the check and add()
             p.kill()
         return p
@@ -139,9 +167,17 @@ class Procs:
         return p.returncode, time.time() - t0
 
     def cancel(self):
+        """Kill every live child. Safe in a signal handler: no lock (see the
+        class). The flag first: a start() that adds its child after the
+        copy below sees it and kills that child itself."""
         self.cancelled.set()
-        with self.lock:
-            live = list(self.live)
+        live = ()
+        for _ in range(100):
+            try:
+                live = tuple(self.live)     # one C call: no other thread runs during it
+                break
+            except RuntimeError:            # "set changed size during iteration": once more
+                continue
         for p in live:
             try:
                 p.kill()
@@ -317,6 +353,22 @@ _FUNC_DECL = re.compile(rb"^void [A-Za-z_]\w*\(void\);[^\n]*\n?", re.M)
 _COMMENT = re.compile(rb"/\*.*?\*/", re.S)
 
 
+def _headers(dirs):
+    """Every .h under `dirs` once, in digest order: (real path, file name)."""
+    seen = set()
+    for top in dirs:
+        for d, subs, files in os.walk(top):
+            subs.sort()
+            for fn in sorted(files):
+                if not fn.endswith(".h"):
+                    continue
+                p = os.path.realpath(os.path.join(d, fn))
+                if p in seen:
+                    continue
+                seen.add(p)
+                yield p, fn
+
+
 def header_digest(dirs, generated=False):
     """sha256 over every .h under `dirs` (paths and contents): an object
     depends on its headers too, and a lift rewrites recomp_funcs.h.
@@ -330,26 +382,126 @@ def header_digest(dirs, generated=False):
     chunks that changed, not all of them. The project's own C (main.c,
     src/title, src/extra) keeps the whole header in its key."""
     h = hashlib.sha256()
-    seen = set()
-    for top in dirs:
-        for d, subs, files in os.walk(top):
-            subs.sort()
-            for fn in sorted(files):
-                if not fn.endswith(".h"):
-                    continue
-                p = os.path.realpath(os.path.join(d, fn))
-                if p in seen:
-                    continue
-                seen.add(p)
-                h.update(p.encode() + b"\0")
-                with open(p, "rb") as f:
-                    if generated and fn == FUNCS_H:
-                        h.update(_FUNC_DECL.sub(b"", _COMMENT.sub(b"", f.read())))
-                    else:
-                        for chunk in iter(lambda: f.read(1 << 20), b""):
-                            h.update(chunk)
-                h.update(b"\0")
+    for p, fn in _headers(dirs):
+        h.update(p.encode() + b"\0")
+        with open(p, "rb") as f:
+            if generated and fn == FUNCS_H:
+                h.update(_FUNC_DECL.sub(b"", _COMMENT.sub(b"", f.read())))
+            else:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        h.update(b"\0")
     return h.hexdigest()
+
+
+# ── The key cache ───────────────────────────────────────────────
+#
+# A Prepare with nothing to compile still computed every key: a few hundred
+# MB of lifted C and every header read and hashed (about a second on a
+# desktop core with the built-in SHA-2 the device's Python has, more from
+# the device's storage). <obj>/keys.json keeps each key with the stat of
+# what it was computed from; a file whose stat is unchanged keeps its key
+# without being read. The keys themselves are unchanged: an object cache
+# made before keys.json existed stays valid.
+
+KEYS_FILE = "keys.json"
+KEYS_VERSION = 1             # bump when header_digest() or cache_key() changes what it computes
+# A file changed less than this before keys.json is written is not
+# remembered: a second write within the file system's timestamp step, with
+# the same size, would keep the stat (git's « racily clean » entries).
+RACY_NS = 2 * 10 ** 9
+
+
+def stat_sig(path):
+    """What says a file is unchanged without reading it: [size, mtime_ns,
+    ctime_ns, inode]. ctime and inode change on any write or replace, also
+    one that puts the old mtime back (cp -p, an unzip)."""
+    st = os.stat(path)
+    # Windows' st_ctime is the creation time (and deprecated): not a change.
+    return [st.st_size, st.st_mtime_ns, 0 if os.name == "nt" else st.st_ctime_ns, st.st_ino]
+
+
+def _headers_sig(dirs):
+    """(sha256 over every header's path and stat, newest mtime_ns)."""
+    h = hashlib.sha256()
+    newest = 0
+    for p, _ in _headers(dirs):
+        sig = stat_sig(p)
+        newest = max(newest, sig[1])
+        h.update(("%s\0%s\0" % (p, sig)).encode())
+    return h.hexdigest(), newest
+
+
+def _load_keys(obj_dir):
+    try:
+        with open(os.path.join(obj_dir, KEYS_FILE)) as f:
+            k = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(k, dict) or k.get("v") != KEYS_VERSION:
+        return {}
+    return k
+
+
+def _save_keys(obj_dir, keys):
+    """keys.json, atomically; a failure (no space) only costs the next run a re-hash."""
+    path = os.path.join(obj_dir, KEYS_FILE)
+    tmp = "%s.tmp%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w") as f:
+            json.dump(keys, f)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def plan_keys(sources, flags, cid, obj_dir):
+    """[(source, size, object path)] for `sources`, each object named by its
+    cache_key(); what keys.json remembers is reused, the rest is read and
+    hashed, and keys.json is written again. Returns (plan, files hashed)."""
+    old = _load_keys(obj_dir)
+    now = time.time_ns()
+    dirs = include_dirs_of(flags)
+    hsig, hnewest = _headers_sig(dirs)
+    hk = old.get("headers")
+    if isinstance(hk, list) and len(hk) == 3 and hk[0] == hsig:
+        headers, gen_headers = hk[1], hk[2]
+    else:
+        headers = header_digest(dirs)
+        gen_headers = header_digest(dirs, generated=True)
+    ctx = {}
+    for name, hd in (("all", headers), ("gen", gen_headers)):
+        h = hashlib.sha256()
+        h.update(("\x1f".join(flags) + "\0" + cid + "\0" + hd).encode())
+        ctx[name] = h.hexdigest()
+    files = old.get("files") if isinstance(old.get("files"), dict) else {}
+    new_files = {}
+    plan = []
+    hashed = 0
+    for s in sources:
+        sig = stat_sig(s)
+        which = "gen" if is_generated(s) else "all"
+        got = files.get(s)
+        if isinstance(got, list) and len(got) == 6 and got[:4] == sig and got[4] == ctx[which]:
+            key = got[5]
+        else:
+            with open(s, "rb") as f:
+                data = f.read()
+            # sig is from before the read: a change during it is hashed again next time.
+            key = cache_key(s, data, flags, cid, gen_headers if which == "gen" else headers)
+            hashed += 1
+        if sig[1] < now - RACY_NS:
+            new_files[s] = sig + [ctx[which], key]
+        plan.append((s, sig[0], os.path.join(obj_dir, key + ".o")))
+    keys = {"v": KEYS_VERSION, "files": new_files}
+    if hnewest < now - RACY_NS:
+        keys["headers"] = [hsig, headers, gen_headers]
+    if keys != old:
+        _save_keys(obj_dir, keys)
+    return plan, hashed
 
 
 def cache_key(path, source, flags, compiler_id, headers):
@@ -390,19 +542,13 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     tools/prepare/metrics.py: fewer when the device is hot, 0 holds); read
     before each compile starts, never above `jobs`. stats: a dict that gets
     "peak_kb" (each compile's peak RSS), "compiled" and "held_s" (wall time
-    limit() held every compile, 0 jobs).
+    limit() held every compile, 0 jobs) and "hashed" (the sources read and
+    hashed for their key: plan_keys()).
     Raises StepError (COMPILE_FAILED / NO_SPACE) or Cancelled."""
     os.makedirs(obj_dir, exist_ok=True)
-    cid = tc.compiler_id()
-    dirs = include_dirs_of(flags)
-    headers = header_digest(dirs)
-    gen_headers = header_digest(dirs, generated=True)
-    plan = []
-    for s in sources:
-        with open(s, "rb") as f:
-            data = f.read()
-        hd = gen_headers if is_generated(s) else headers
-        plan.append((s, len(data), os.path.join(obj_dir, cache_key(s, data, flags, cid, hd) + ".o")))
+    plan, hashed = plan_keys(sources, flags, tc.compiler_id(), obj_dir)
+    if stats is not None:
+        stats["hashed"] = hashed
     total = len(plan)
     todo = [p for p in plan if not os.path.isfile(p[2])]
     todo.sort(key=lambda p: -p[1])
@@ -505,8 +651,9 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
 
 def prune(obj_dir, keep):
     """Remove the cached objects not in `keep` (an old lift's, or an old -O):
-    the device's storage is not free."""
+    the device's storage is not free. keys.json stays."""
     keep = {os.path.abspath(k) for k in keep}
+    keep.add(os.path.abspath(os.path.join(obj_dir, KEYS_FILE)))
     for fn in os.listdir(obj_dir):
         p = os.path.abspath(os.path.join(obj_dir, fn))
         if p not in keep:

@@ -227,6 +227,10 @@ definitions, a Release-type build). Sources: `src/main.c`, `src/recomp_manual.c`
 **Object cache.** `key = sha256(source path, source bytes, flags, compiler id, headers digest)`; compiler id = the
 `--version` line + the binary's size and mtime; headers digest = every `.h` under the include directories. A second
 run with nothing changed compiles 0 files. After a successful link, objects not used by it are deleted (storage).
+`<work>/obj/keys.json` keeps each key with the stat of its inputs (size, mtime, ctime, inode of the source; of every
+header for the headers digests): a file whose stat is unchanged keeps its key without being read, so that run reads
+and hashes nothing either (250 MB of lifted C: 1.16 s → 0.01 s on a desktop core with the built-in SHA-2 the device's
+Python has). A file changed less than 2 s before keys.json is written is left out of it (read again next time).
 
 **A re-lift recompiles what changed (XBA-209).** The discovery loop re-prepares a title with a few more functions
 ([discovery.md](../technical/discovery.md)); until XBA-209 that recompiled all of it. Two things make it cheap:

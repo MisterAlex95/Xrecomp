@@ -389,7 +389,7 @@ def test_incremental_rebuild(tmp_path, monkeypatch):
     n, linked, calls = build()
     assert (n, linked) == (0, True) and calls == ["link " + str(proj / "build" / "title.tmp")]
     # The old object of gen_0001.c is gone from the cache.
-    assert len(os.listdir(proj / "build" / "obj")) == 5
+    assert len([fn for fn in os.listdir(proj / "build" / "obj") if fn.endswith(".o")]) == 5
 
 
 # ── the runtime manifest from CMake's file API ──
