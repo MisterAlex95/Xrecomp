@@ -320,12 +320,20 @@ static int write_file_atomic(const char *path, const uint8_t *data, size_t n)
     FILE *f = fopen(tmp, "wb");
     if (!f)
         return -1;
-    int ok = fwrite(data, 1, n, f) == n;
-    ok &= fflush(f) == 0;
-    ok &= fsync(fileno(f)) == 0;
-    ok &= fclose(f) == 0;
-    if (!ok || rename(tmp, path) != 0) {
+    int ok = 1, err = 0;
+#define STEP(x) do { if (ok && !(x)) { ok = 0; err = errno; } } while (0)
+    STEP(fwrite(data, 1, n, f) == n);
+    STEP(fflush(f) == 0);
+    STEP(fsync(fileno(f)) == 0);
+    if (fclose(f) != 0 && ok) {
+        ok = 0;
+        err = errno;
+    }
+    STEP(rename(tmp, path) == 0);
+#undef STEP
+    if (!ok) {
         unlink(tmp);
+        errno = err; /* the step's reason, not unlink's */
         return -1;
     }
     return 0;
@@ -343,6 +351,9 @@ static void cards_flush_locked(const char *why)
         if (write_file_atomic(s_card_path[slot], d, n) != 0) {
             fprintf(stderr, "gc: cannot write memory card %c to %s: %s\n", 'A' + slot, s_card_path[slot],
                     strerror(errno));
+            /* tried again CARD_FLUSH_NS from now (or at the next pause / exit), not after every field: a full or
+             * read-only folder made it write the whole card, sync and log 60 times a second */
+            s_card_changed_ns[slot] = now_ns();
             continue;
         }
         s_card_flushed[slot] = s_card_seen[slot] = w;

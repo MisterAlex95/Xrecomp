@@ -77,4 +77,22 @@ head -c 1000 /dev/zero >"$work/savebad/${dir##*/}/cardA.raw"
 run bad "$work/savebad" --unpaced
 grep -q "is no memory card image (1000 bytes), left alone" "$work/bad.log" || fail "bad file: no warning"
 [ "$(size "$work/savebad/${dir##*/}/cardA.raw")" = 1000 ] || fail "bad file overwritten"
+
+# 6. a card that cannot be written (a read-only folder): an error, tried again two seconds later, not every field
+ro="$work/savero/${dir##*/}"
+mkdir -p "$ro"
+chmod 555 "$ro"
+if [ -w "$ro" ]; then
+    echo "read-only folder: writable anyway (root?), skipped"
+else
+    SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout 120 "$play" "$dol" --headless --frames 300 \
+        --save-dir "$work/savero" >"$work/ro.log" 2>&1
+    rc=$?
+    chmod 755 "$ro"
+    [ "$rc" -eq 0 ] || fail "read-only: gc_play exit $rc"
+    n=$(grep -c "cannot write memory card A" "$work/ro.log")
+    echo "read-only folder: $n failed write(s) in 300 fields"
+    [ "$n" -ge 1 ] && [ "$n" -le 4 ] || fail "read-only: $n failed writes, want 1-4 (one every 2 s, then exit)"
+fi
+chmod 755 "$ro" 2>/dev/null
 echo "run_card: all passed"
