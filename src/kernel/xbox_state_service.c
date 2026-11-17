@@ -144,6 +144,13 @@ static int op_save(int slot, void *user)
             else if (rc == XBOX_STATE_OK) {
                 rc = xbox_StateWriteSlot(path, blob, n, NULL, 0, 0);
                 st.blob_bytes = n;
+                if (rc != XBOX_STATE_OK) {
+                    /* Captured and resumable, but not on the disk: say so (why is empty here, and an empty
+                     * auto.why reads as « never tried » in the launcher). */
+                    snprintf(why, sizeof why, "the state (%.1f MB) could not be written to the save folder",
+                             (double)n / 1048576.0);
+                    snprintf(st.reason, sizeof st.reason, "%s", why);
+                }
             } else
                 snprintf(why, sizeof why, "%s%s%s", xbox_StateError(rc), st.reason[0] ? ": " : "", st.reason);
             rehold(held);

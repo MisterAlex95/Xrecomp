@@ -14,7 +14,10 @@
 
 #define SLOT_MAGIC "XRSLOT\0\0"
 #define HEADER_BYTES 96u
-#define BLOB_MAX (64u << 20)
+/* The largest core blob a slot holds. An Xbox title's state carries its RAM page by page with no compressor
+ * (xbox_state.h): most of 64 MB, 128 MB for the titles that ask for it, plus the contiguous window and the devices.
+ * A read checks the blob against the file's size before it allocates, so a damaged header cannot ask for this. */
+#define BLOB_MAX (256u << 20)
 
 const char *recomp_states_error(int code)
 {
@@ -169,6 +172,11 @@ int recomp_states_read(const char *path, recomp_state_meta *meta, uint16_t *thum
             thumb[i] = (uint16_t)get16(px);
     }
     if (blob) {
+        /* The blob must be in the file: a damaged length must not cost an allocation of BLOB_MAX. */
+        struct stat sb;
+        long at = ftell(f);
+        if (at < 0 || fstat(fileno(f), &sb) != 0 || sb.st_size < (off_t)at || (uint64_t)(sb.st_size - at) < n)
+            goto out;
         uint8_t *b = malloc(n);
         if (!b) {
             rc = RECOMP_STATE_EIO;

@@ -91,7 +91,7 @@ typedef struct recomp_state_meta {
 } recomp_state_meta;
 
 /* Writes a slot file: meta (saved_ms 0: now), the thumbnail (thumb_w x thumb_h RGB565, may be NULL), the core blob.
- * Returns RECOMP_STATE_OK or RECOMP_STATE_EIO. */
+ * Returns RECOMP_STATE_OK or RECOMP_STATE_EIO (the file, or a blob that is empty or past 256 MB). */
 int recomp_states_write(const char *path, const recomp_state_meta *meta, const uint16_t *thumb, const uint8_t *blob,
                         size_t blob_n);
 /* Reads a slot file: meta, the thumbnail into thumb (RECOMP_STATE_THUMB_W * _H entries; may be NULL), the blob into

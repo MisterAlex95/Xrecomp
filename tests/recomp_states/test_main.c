@@ -127,6 +127,39 @@ static void test_files(void)
     CHECK(recomp_states_read(path, &r, NULL, NULL, NULL) == RECOMP_STATE_EVERSION);
     CHECK(recomp_states_write(path, &m, NULL, NULL, 0) == RECOMP_STATE_EIO);
     CHECK(strcmp(recomp_states_error(RECOMP_STATE_EGAME), "?") != 0);
+
+    /* A blob past 64 MB (an Xbox title's state: its RAM, page by page) is written and read back whole. */
+    {
+        size_t big_n = (80u << 20) + 123;
+        uint8_t *big = malloc(big_n);
+        CHECK(big != NULL);
+        if (big) {
+            memset(big, 0x5A, big_n);
+            big[0] = 1;
+            big[big_n - 1] = 2;
+            CHECK(recomp_states_write(path, &m, NULL, big, big_n) == RECOMP_STATE_OK);
+            got = NULL;
+            n = 0;
+            CHECK(recomp_states_read(path, &r, NULL, &got, &n) == RECOMP_STATE_OK);
+            CHECK(n == big_n && got && got[0] == 1 && got[big_n - 1] == 2 && got[big_n / 2] == 0x5A);
+            free(got);
+            free(big);
+        }
+        /* A length in the header the file does not hold: refused before anything is allocated for it. */
+        CHECK(recomp_states_write(path, &m, NULL, blob, sizeof blob) == RECOMP_STATE_OK);
+        f = fopen(path, "r+b");
+        CHECK(f != NULL);
+        if (f) {
+            const uint8_t huge[4] = {0, 0, 0, 0x0F};   /* 240 MB, little-endian, at the blob length */
+            fseek(f, 92, SEEK_SET);
+            fwrite(huge, 1, 4, f);
+            fclose(f);
+        }
+        got = (uint8_t *)1;
+        CHECK(recomp_states_read(path, &r, NULL, &got, &n) == RECOMP_STATE_ECORRUPT && got == NULL);
+        CHECK(recomp_states_read(path, &r, NULL, NULL, NULL) == RECOMP_STATE_OK);   /* header only: still read */
+        unlink(path);
+    }
 }
 
 static void test_thumb(void)
