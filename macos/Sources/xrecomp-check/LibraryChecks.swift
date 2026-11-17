@@ -235,6 +235,24 @@ func registerLibraryChecks() {
     }
 
     // ---- the scanner -------------------------------------------------------------------------------------------
+    check("scan: every image name the pipeline takes, a split image once") {
+        for n in ["a.iso", "b.XISO", "c.cso", "d.ciso", "e.zso", "f.cci", "g.iso.1", "h.iso.001", "i.cso.0",
+                  "j.part1.iso", "k.part2.iso"] {
+            expect(LibraryScanner.isImageName(n), n)
+        }
+        for n in ["a.iso.2", "a.iso.002", "a.bin", "a.txt", "a.1", "iso", "a.isos", "a.iso.12345"] {
+            expect(!LibraryScanner.isImageName(n), n)
+        }
+        let lib = tempDir("lib-ext")
+        write(lib.appendingPathComponent("A/a.cso"), "cso")
+        write(lib.appendingPathComponent("B/b.iso.1"), "part 1")
+        write(lib.appendingPathComponent("B/b.iso.2"), "part 2")
+        write(lib.appendingPathComponent("C/c.zso"), "zso")
+        var s = LibraryScanner { _ in .failure(.init("x")) }
+        let found = s.findSources(in: [lib]).map { $0.0.lastPathComponent }.sorted()
+        expectEq(found, ["a.cso", "b.iso.1", "c.zso"])
+    }
+
     check("scan: folders with default.xbe in any case, images through identify") {
         let lib = tempDir("lib")
         write(lib.appendingPathComponent("Sample Game/default.xbe"), Data(synthXbe(0x4D53_0004, "Sample Game")))

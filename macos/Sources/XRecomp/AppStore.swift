@@ -256,12 +256,13 @@ final class AppStore: LauncherActions {
         let isDir = FileManager.default.isDirectory(url)
         if isDir {
             addLibraryFolder(url.path)
-        } else if LibraryScanner.imageExtensions.contains(url.pathExtension.lowercased()) {
+        } else if LibraryScanner.isImageName(url.lastPathComponent) {
             addLibraryFolder(url.deletingLastPathComponent().path)
         } else if url.lastPathComponent.lowercased() == "default.xbe" {
             addLibraryFolder(url.deletingLastPathComponent().path)
         } else {
-            model.notice = "\(url.lastPathComponent) is not a disc image (.iso) or a folder holding default.xbe."
+            model.notice = "\(url.lastPathComponent) is not a disc image (.iso, .xiso, .cso, .zso, .cci) or a folder "
+                + "holding default.xbe."
         }
     }
 
