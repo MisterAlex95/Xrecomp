@@ -72,19 +72,48 @@ The Mac app and the toolkit can also be built from the source at the tag (README
 
 ## Making a release (maintainers)
 
-1. Pick a commit of `main` whose CI run is green (its on-device toolchain is then cached as `toolchain-<key>`).
-2. Write `docs/releases/xrecomp-v<version>.md` (what changed, what works, known problems) and add it to the table
-   above; merge that into `main` and let CI go green again.
-3. Tag and push: `git tag -a xrecomp-v<version> -m "XRecomp <version>" && git push origin xrecomp-v<version>`.
-4. `.gitea/workflows/release.yml` builds the APK (release key, not debuggable, version name
-   `<version>+<commit>`) and publishes the release on Gitea and on GitHub with the notes. It stops without
-   publishing when the notes file, the release key or `GH_RELEASE_TOKEN` is missing
+Releases are cut through a **release PR**, in the spirit of semantic-release / release-please
+(`tools/release/release.py`, `.gitea/workflows/release-pr.yml`):
+
+1. **Commits say how far the version moves**, with a trailer in the last paragraph of the message (the subject keeps
+   our `Area: sentence` style):
+
+   ```
+   Recomp: the x87 pass keeps locals in registers
+
+   Longer explanation.
+
+   Release: minor
+   Co-Authored-By: ...
+   ```
+
+   Git reads trailers in the last paragraph only: `Release:` goes in the same block as `Co-Authored-By:`, with no
+   blank line between them (`git log -1 --format='%(trailers:key=Release)'` shows whether it was seen).
+
+   `major`, `minor`, `patch` or `none`; no trailer counts as `patch` (upstream's commits included). The next version
+   is the last `xrecomp-v*` tag bumped by the largest trailer since it. A finished roadmap milestone (Plane vX.Y) that
+   no commit marked: push `git commit --allow-empty -m "Release: v0.14 milestone is done" -m "Release: minor"`.
+2. **After every push to `main`**, `release-pr.yml` keeps one open PR « Release: XRecomp <version> » (branch
+   `release/next`). It adds `docs/releases/xrecomp-v<version>.md`, whose « Changes » section is generated from the
+   commits grouped by area, and its row in the table above. Write the highlights (what changed, what works, known
+   problems) above « Changes » on that branch: they are kept when main moves on, even when the version changes; the
+   generated section is rewritten each time.
+3. **Merge the PR into `main`.** `.gitea/workflows/release.yml` sees that the push added a notes file whose tag does
+   not exist, creates the tag `xrecomp-v<version>` on the merge commit, waits for main's CI to have cached the
+   on-device toolchain of that commit (`toolchain-<key>`, up to 2 h), builds the APK (release key, not debuggable,
+   version name `<version>+<commit>`) and publishes the release on Gitea and on GitHub with the notes. It stops
+   without publishing when the notes file, the release key or `GH_RELEASE_TOKEN` is missing
    ([toolchain.md « Signing »](../android/toolchain.md#signing) lists the secrets).
-5. GitHub's `Desktop` workflow (`.github/workflows/desktop.yml`) runs on the tag when the mirror pushes it, waits
+4. GitHub's `Desktop` workflow (`.github/workflows/desktop.yml`) runs on the tag when the mirror pushes it, waits
    for that release, then attaches the macOS zip and the two Linux archives and appends a « Desktop » section to the
    notes. A re-run of Gitea's release job recreates the release without them: re-run the Desktop run of the tag.
-6. Check the GitHub release page: the APK, the three desktop files, their checksums, the notes ending with
+5. Check the GitHub release page: the APK, the three desktop files, their checksums, the notes ending with
    `signed with: release key`.
+
+By hand, without the PR, still works: write `docs/releases/xrecomp-v<version>.md` and its table row, merge them,
+and either let `release.yml` tag that merge (the notes file must be added by the last commit of the push) or tag a
+green commit yourself: `git tag -a xrecomp-v<version> -m "XRecomp <version>" && git push origin xrecomp-v<version>`.
+`python3 tools/release/release.py next` prints the version the commits ask for.
 
 Versions follow [semantic versioning](https://semver.org) loosely while we are below 1.0: the minor number goes up
 with a release that adds something, the patch number with a release that only fixes.
