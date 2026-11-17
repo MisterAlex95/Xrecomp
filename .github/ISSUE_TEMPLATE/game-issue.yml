@@ -1,0 +1,81 @@
+name: Game issue
+description: A game crashes, hangs, shows a black screen or renders wrong
+labels: ["game", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! Never attach game files, disc images or XBEs: only the log.
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      description: Title and region (e.g. Sonic Heroes, PAL)
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Exact model and GPU, Android version (e.g. Galaxy Tab A9 SM-X110, Mali-G57, Android 14)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Settings > Advanced > About (or About in the library's options menu)
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What happens
+      options:
+        - Black screen
+        - Hangs / freezes
+        - Crashes back to Android
+        - Graphics wrong
+        - Sound wrong
+        - Controls / input
+        - Prepare fails
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: when
+    attributes:
+      label: When
+      description: What you did just before (e.g. title screen fine, black after pressing Start). How long you waited.
+    validations:
+      required: true
+  - type: dropdown
+    id: sound
+    attributes:
+      label: Sound during the problem
+      options:
+        - Sound keeps playing
+        - Silence
+        - Not sure
+  - type: dropdown
+    id: always
+    attributes:
+      label: Every time?
+      options:
+        - Every time
+        - Sometimes
+        - Once
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        Reproduce the problem, then open the in-game menu (swipe) > Share log, and drag the file here.
+        Without a log we usually cannot do anything.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Settings you changed, screenshot, other devices tried
