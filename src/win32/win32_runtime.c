@@ -211,7 +211,8 @@ int w32_load(const char *path, w32_image *img)
     }
     fclose(f);
     uint32_t nt = rd32(file + 0x3C);
-    if (file[0] != 'M' || file[1] != 'Z' || nt + 0xF8 > (uint32_t)len || memcmp(file + nt, "PE\0\0", 4)
+    /* 64-bit: e_lfanew near 4 GiB wrapped the sum and passed the check. */
+    if (file[0] != 'M' || file[1] != 'Z' || (uint64_t)nt + 0xF8 > (uint64_t)len || memcmp(file + nt, "PE\0\0", 4)
         || rd16(file + nt + 4) != 0x014C || rd16(file + nt + 24) != 0x10B) {
         fprintf(stderr, "[win32] %s: not a PE32 i386 image\n", path);
         free(file);
@@ -226,8 +227,15 @@ int w32_load(const char *path, w32_image *img)
     uint32_t headers = rd32(opt + 60), ndirs = rd32(opt + 92);
     uint32_t import_rva = ndirs > 1 ? rd32(opt + 96 + 8) : 0, tls_rva = ndirs > 9 ? rd32(opt + 96 + 72) : 0;
     const uint8_t *sec = opt + optsize;
-    if (sec + nsec * 40u > file + len || headers > (uint32_t)len) {
+    if ((uint64_t)nt + 24 + optsize + nsec * 40u > (uint64_t)len || headers > (uint64_t)len) {
         fprintf(stderr, "[win32] %s: section table outside the file\n", path);
+        free(file);
+        return -1;
+    }
+    /* The headers are copied to the image's base: no more than it commits. */
+    if (headers > img->size) {
+        fprintf(stderr, "[win32] %s: headers (0x%X bytes) larger than the image (0x%X)\n", path, headers,
+                img->size);
         free(file);
         return -1;
     }
