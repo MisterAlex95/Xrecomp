@@ -75,11 +75,39 @@ static bool in_text(gc_machine *m, uint32_t pc)
     return false;
 }
 
+#define GC_MISSED_MAX 65536u /* as the discovered file keeps (gc_rel.c) */
+
+static bool missed_set_add(gc_machine *m, uint32_t pc)
+{
+    if ((m->nmissed + 1) * 2 > m->missed_set_cap) { /* grow and rehash (load factor 1/2) */
+        size_t cap = m->missed_set_cap ? m->missed_set_cap * 2 : 1024;
+        uint32_t *set = calloc(cap, sizeof *set);
+        if (!set)
+            return false;
+        for (size_t i = 0; i < m->nmissed; i++) {
+            size_t s = ((m->missed[i] >> 2) * 0x9E3779B1u) & (cap - 1);
+            while (set[s])
+                s = (s + 1) & (cap - 1);
+            set[s] = m->missed[i];
+        }
+        free(m->missed_set);
+        m->missed_set = set;
+        m->missed_set_cap = cap;
+    }
+    size_t s = ((pc >> 2) * 0x9E3779B1u) & (m->missed_set_cap - 1);
+    while (m->missed_set[s]) {
+        if (m->missed_set[s] == pc)
+            return false;
+        s = (s + 1) & (m->missed_set_cap - 1);
+    }
+    m->missed_set[s] = pc;
+    return true;
+}
+
 static void record_miss(gc_machine *m, uint32_t pc)
 {
-    for (size_t i = 0; i < m->nmissed; i++)
-        if (m->missed[i] == pc)
-            return;
+    if (!pc || m->nmissed >= GC_MISSED_MAX || !missed_set_add(m, pc))
+        return;
     if (m->nmissed == m->cap_missed) {
         size_t cap = m->cap_missed ? m->cap_missed * 2 : 64;
         uint32_t *p = realloc(m->missed, cap * sizeof *p);

@@ -92,6 +92,8 @@ struct gc_machine {
     int ntext;
     uint32_t *missed;
     size_t nmissed, cap_missed;
+    uint32_t *missed_set;  /* open hash of missed (0: empty slot), so a miss hit again costs one probe */
+    size_t missed_set_cap;
     gc_recomp_stats stats;
     struct gc_rel_state *rel; /* REL modules the game loaded (gc_rel.c, XBA-264) */
 

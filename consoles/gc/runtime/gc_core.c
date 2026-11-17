@@ -206,6 +206,7 @@ void gc_destroy(gc_machine *m)
     free(m->rc_hash_keys);
     free(m->rc_hash_idx);
     free(m->missed);
+    free(m->missed_set);
     gc_rel_free(m);
     gc_di_free(m);
     gc_audio_free(m);
