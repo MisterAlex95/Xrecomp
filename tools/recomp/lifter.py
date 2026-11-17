@@ -5083,6 +5083,12 @@ def _x87_span_kind(span_insns, text):
 def _x87_local_regions(insns, stmts, spans):
     """stmts with the block's x87 runs on C locals (see above). spans are
     (first insn, end insn, first stmt, end stmt) per lifted instruction."""
+    # A region needs two "x87" spans, and a span is "x87" only when all its
+    # mnemonics start with "f": a block with fewer than two such
+    # instructions cannot change, and most blocks have none. Skipping them
+    # saves the joins and regexes below on ~95% of the calls.
+    if sum(1 for insn in insns if insn.mnemonic.startswith("f")) < 2:
+        return stmts
     kinds = [_x87_span_kind(insns[a:b], " ".join(stmts[s:e])) for a, b, s, e in spans]
     regions, cur = [], []          # runs of span indices
     for k, kind in enumerate(kinds):
