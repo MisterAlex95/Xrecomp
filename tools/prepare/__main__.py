@@ -330,10 +330,30 @@ def find_xbe(source, work):
                 e = iso.find("default.xbe")
                 if e is None:
                     raise SystemExit("%s: no default.xbe in the image" % src)
-                iso.extract(e, dest)
+                # Whole or not there: a run killed part way must not leave a short default.xbe that
+                # every later run takes for the extracted one.
+                part = dest + ".part"
+                iso.extract(e, part)
+                os.replace(part, dest)
         return dest, None, src
     raise SystemExit("%s: expected a disc image (.iso/.xiso/.cso/.zso/.cci, or a split part), a folder with "
                      "default.xbe, or default.xbe" % src)
+
+
+def merge_tree(src, dst):
+    """Moves everything under src into dst and removes src. A folder that is already in dst is merged, a
+    file replaced: shutil.move would put the folder inside the one that is there (xbe/xbe/default.xbe on
+    a second run, an error on the third)."""
+    os.makedirs(dst, exist_ok=True)
+    for fn in os.listdir(src):
+        s, d = os.path.join(src, fn), os.path.join(dst, fn)
+        if os.path.isdir(s) and not os.path.islink(s):
+            merge_tree(s, d)
+        else:
+            if os.path.isdir(d) and not os.path.islink(d):
+                shutil.rmtree(d)
+            os.replace(s, d)
+    os.rmdir(src)
 
 
 def unpack_image(image, dest):
@@ -713,10 +733,7 @@ def desktop(a):
     tid = info["title_id"][2:].upper()
     work = a.work or os.path.join(os.path.dirname(src), "%s-work" % tid)
     if work != tmp_work:
-        os.makedirs(work, exist_ok=True)
-        for fn in os.listdir(tmp_work):
-            shutil.move(os.path.join(tmp_work, fn), os.path.join(work, fn))
-        os.rmdir(tmp_work)
+        merge_tree(tmp_work, work)
         if image:
             xbe = os.path.join(work, "xbe", "default.xbe")
     log = os.path.join(work, "prepare.log")

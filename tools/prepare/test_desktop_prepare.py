@@ -82,3 +82,23 @@ def test_sync_generated_keeps_unchanged_files(tmp_path):
     assert sorted(os.listdir(gen)) == ["a.c", "b.c", "c.c"] and not new.exists()
     assert os.stat(gen / "a.c").st_mtime == 1000             # untouched: no rebuild
     assert (gen / "b.c").read_text() == "new"
+
+
+def test_merge_tree_into_a_work_folder_from_an_earlier_run(tmp_path):
+    """A disc image prepared without --work: the first work folder (xboxrecomp-work) is moved into
+    <TITLE ID>-work once the title ID is known. On a second run that folder is there already: the fresh
+    xbe/default.xbe must replace the old one, not land in xbe/xbe/ (and fail on the third run)."""
+    from tools.prepare.__main__ import merge_tree
+    work = tmp_path / "4C410015-work"
+    for run in (b"first", b"second", b"third"):
+        tmp = tmp_path / "xboxrecomp-work"
+        (tmp / "xbe").mkdir(parents=True)
+        (tmp / "xbe" / "default.xbe").write_bytes(run)
+        (tmp / "xbe_info.json").write_bytes(run)
+        merge_tree(str(tmp), str(work))
+        assert not tmp.exists()
+        assert (work / "xbe" / "default.xbe").read_bytes() == run
+        assert (work / "xbe_info.json").read_bytes() == run
+        assert not (work / "xbe" / "xbe").exists()
+        (work / "stamp.json").write_text("{}")            # what the run leaves in the work folder stays
+    assert sorted(os.listdir(work)) == ["stamp.json", "xbe", "xbe_info.json"]
