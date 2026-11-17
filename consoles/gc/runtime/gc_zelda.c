@@ -164,7 +164,9 @@ static int32_t mix_ramp(int16_t *dst, const int16_t *src, int32_t vol, int32_t s
         return vol;
     for (int i = 0; i < N; i++) {
         dst[i] = sat16(dst[i] + (((int64_t)(vol >> 16) * src[i]) >> 16));
-        vol += step;
+        /* wraps as the DSP's 32-bit accumulator does: a ramp past +-32767 (a wrapped delta, an explicit step) was
+         * signed overflow, undefined in C */
+        vol = (int32_t)((uint32_t)vol + (uint32_t)step);
     }
     return vol;
 }
