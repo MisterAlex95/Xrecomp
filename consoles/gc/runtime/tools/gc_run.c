@@ -3,6 +3,8 @@
  *   gc_run PROG.dol [--frames N] [--png OUT] [--pack LIB.so] [--missed FILE] [--stats] [--peek ADDR[:N]] [--pal]
  *          [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]]... [-v]
  *          [--gx] [--gx-hw] [--gx-scale N] [--gx-shaders async|sync|uber|special] [--gx-list FILE] [--gx-copy-ram]
+ *          [--gx-programs FILE]
+ *   gc_run --gx-warmup LIST[,LIST...] CACHE [--gx-hw]
  *
  * --frames counts video fields (60 per second, 50 in PAL). --pal: the IPL's PAL state (gc_set_tv_mode). --pad: a
  * standard controller on port PORT (0..3) for the whole run, BUTTONS in hex (GC_PAD_*), then sticks and triggers in
@@ -20,7 +22,12 @@
  * 77 when there is no GLES 3 context to be had. --gx-scale: internal resolution; --gx-shaders: async (ubershader
  * until the specialised shader is ready), sync, uber (ubershader only), special (specialised only, compiled on first
  * use); --gx-list: the per-title shader list (read, then written back); --gx-copy-ram: EFB copies to textures are
- * also encoded into RAM.
+ * also encoded into RAM. --gx-programs: the per-title program binary cache (gx_progcache.h, XBA-264: loaded at
+ * the start, rewritten at the end when it grew).
+ *
+ * --gx-warmup (XBA-264): no program runs; the TEV states of the shader lists (comma separated, missing ones skipped)
+ * are compiled on a headless context and their program binaries written to CACHE, as the app's warm-up does after a
+ * Prepare. Exit status: 0 done, 3 the driver has no program binaries, 77 no GLES 3 context, 1 CACHE not written.
  *
  * Sound (XBA-263): --wav OUT writes everything the machine played (48 kHz 16-bit stereo, from power-on) as a WAV;
  * the line "audio: ..." sums up the DSP's microcode and what was played. */
@@ -88,7 +95,8 @@ int main(int argc, char **argv)
 {
     const char *dol_path = NULL, *png = NULL, *pack = NULL, *missed = NULL, *disc2 = NULL, *wav = NULL;
     int frames = 60, stats = 0, verbose = 0, npeek = 0, force_disc = 0, swap_at = -1, use_gx = 0, gx_hw = 0;
-    gx_gl_options gxo = {0, 1, 0, NULL};
+    gx_gl_options gxo = {0, 1, 0, NULL, NULL};
+    const char *warm_lists = NULL, *warm_cache = NULL;
     const char *peek[16];
     int pal = 0;
     gc_pad_state pads[4];
@@ -127,6 +135,10 @@ int main(int argc, char **argv)
             gxo.scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gx-list") && i + 1 < argc)
             gxo.shader_list = argv[++i];
+        else if (!strcmp(argv[i], "--gx-programs") && i + 1 < argc)
+            gxo.program_cache = argv[++i];
+        else if (!strcmp(argv[i], "--gx-warmup") && i + 2 < argc)
+            warm_lists = argv[i + 1], warm_cache = argv[i + 2], i += 2;
         else if (!strcmp(argv[i], "--gx-copy-ram"))
             gxo.efb_copy_ram = 1;
         else if (!strcmp(argv[i], "--gx-shaders") && i + 1 < argc) {
@@ -147,9 +159,23 @@ int main(int argc, char **argv)
             fprintf(stderr, "usage: gc_run PROG.dol|DISC [--disc IMAGE] [--disc2 IMAGE --swap-at FIELD] [--frames N]"
                             " [--png OUT] [--pack LIB] [--missed FILE] [--stats] [--peek ADDR[:N]] [--pal]"
                             " [--pad PORT:BUTTONS[:SX:SY:CX:CY:L:R]] [--wav OUT] [-v] [--gx] [--gx-hw] [--gx-scale N]"
-                            " [--gx-shaders MODE] [--gx-list FILE] [--gx-copy-ram]\n");
+                            " [--gx-shaders MODE] [--gx-list FILE] [--gx-copy-ram] [--gx-programs FILE]\n"
+                            "       gc_run --gx-warmup LIST[,LIST...] CACHE [--gx-hw]\n");
             return 2;
         }
+    }
+    if (warm_lists) {
+        char buf[4096];
+        snprintf(buf, sizeof buf, "%s", warm_lists);
+        const char *lists[16];
+        size_t n = 0;
+        for (char *t = strtok(buf, ","); t && n < 16; t = strtok(NULL, ","))
+            lists[n++] = t;
+        gx_warmup_result r;
+        int wrc = gx_warmup_headless(lists, n, warm_cache, !gx_hw, &r);
+        printf("gx warm-up: rc %d, %d states, %d cached, %d compiled, %d failed\n", wrc, r.states, r.cached,
+               r.compiled, r.failed);
+        return wrc == 0 ? 0 : wrc == 1 ? 3 : wrc == 2 ? 77 : 1;
     }
     if (!dol_path) {
         fprintf(stderr, "gc_run: no DOL\n");

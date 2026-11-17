@@ -30,7 +30,8 @@ import java.util.List;
  *   <li>once per (driver, factor, app install): the service writes vk_cache/&lt;driver&gt;/warmup-&lt;f&gt;x, and a
  *       request finding it skips; a driver whose last start failed is skipped (the game's start reports it).</li>
  * </ul>
- * The decisions are pure ({@link #decide}, {@link #factor}, {@link #isWarm}) for the tests.
+ * The decisions are pure ({@link #decide}, {@link #factor}, {@link #isWarm}) for the tests. A GameCube title's
+ * request goes to {@link GcShaderWarmup} (its program binaries, XBA-264), in the same process and service.
  */
 final class ShaderWarmup {
     private ShaderWarmup() {}
@@ -41,7 +42,7 @@ final class ShaderWarmup {
 
     enum Reason { PREPARE, SETTING, UPDATE }
 
-    enum Decision { RUN, PENDING, SKIP_WARM, SKIP_DRIVER_FAILED, SKIP_NOT_N64 }
+    enum Decision { RUN, PENDING, SKIP_WARM, SKIP_DRIVER_FAILED, SKIP_NOT_N64, SKIP_NO_LIST }
 
     /** What to warm: a game's (or Settings', tid null) driver (null: the system's) and internal resolution. */
     static final class Target {
@@ -199,6 +200,8 @@ final class ShaderWarmup {
      * (a game runs), or skipped; logged. Any process; returns the decision.
      */
     static Decision request(Context c, String tid, Reason r) {
+        if (GcShaderWarmup.isGc(tid))   // the GameCube's program binaries (XBA-264): same process, its own work
+            return GcShaderWarmup.request(c, tid, r);
         boolean n64 = tid == null || Console.ofKey(tid) == Console.N64;
         Target t = n64 ? target(c, tid) : null;
         boolean busy = gameRunning(c) || (r != Reason.PREPARE && processPid(c, ":prepare") != 0);
@@ -249,7 +252,7 @@ final class ShaderWarmup {
             return;
         write(f, v + "\n");
         String tid = GameStore.launchedTitleId(c);
-        if (tid != null && Console.ofKey(tid) == Console.N64)
+        if (tid != null && (Console.ofKey(tid) == Console.N64 || GcShaderWarmup.isGc(tid)))
             request(c, tid, Reason.UPDATE);
     }
 

@@ -68,6 +68,9 @@ typedef struct gx_gl_options {
                                0: texture only, RAM content tracked by hash (default; env GC_GX_EFB_COPY_RAM) */
     const char *shader_list;/* per-title list of the TEV / vertex states met (read at attach and compiled ahead,
                                written back with the new ones at gx_gl_detach / gx_destroy); NULL: none */
+    const char *program_cache;/* per-title program binaries of this device's driver (gx_progcache.h, XBA-264): loaded
+                               at attach (states ready before the first frame), rewritten by gx_save_program_cache /
+                               gx_gl_detach when programs were added; NULL: env GC_GX_PROGRAM_CACHE, else none */
 } gx_gl_options;
 
 /* Attaches the GLES 3.0 renderer to the context current on this thread. Returns 0, or -1 (why in the log) when the
@@ -77,6 +80,28 @@ void gx_gl_detach(gx_state *gx);
 /* Writes the per-title shader list now when it has new states (an exit hook; no GL call). */
 void gx_save_shader_list(gx_state *gx);
 bool gx_gl_attached(const gx_state *gx);
+/* Adds the programs compiled since attach to the program binary cache and rewrites it when it grew (gx_gl_detach does
+ * it too). GL calls: on the renderer's thread with its context current (a pause, the end). */
+void gx_save_program_cache(gx_state *gx);
+
+/* ---- shader warm-up (XBA-264): the per-title lists compiled ahead into the program binary cache ---- */
+
+typedef struct gx_warmup_result {
+    int states;              /* distinct TEV states in the lists */
+    int cached;              /* already in the cache file, of this driver */
+    int compiled;            /* compiled now and added */
+    int failed;              /* would not compile or gave no binary */
+    double seconds;
+} gx_warmup_result;
+
+/* Compiles every TEV state of the lists (gx_shaders.txt files; missing ones are skipped) that the cache file does not
+ * hold for the current context's driver and writes it. Needs a current GLES 3 (or GL 3.3 core) context. Returns 0
+ * done, 1 the driver has no program binaries (nothing written), 2 no usable context, 3 the cache cannot be written. */
+int gx_gl_warmup(const char *const *lists, size_t nlists, const char *cache, gx_warmup_result *r);
+/* The same on a headless EGL context of its own (gx_egl_headless_create; software: prefer llvmpipe), destroyed after:
+ * the app's warm-up process and gc_run --gx-warmup. */
+int gx_warmup_headless(const char *const *lists, size_t nlists, const char *cache, bool software,
+                       gx_warmup_result *r);
 
 /* The last copy to the XFB at RAM address addr (the address the video interface scans out): its GL texture at the
  * internal resolution, for a presenter that shows it without going through RAM. 0 when there is none. */

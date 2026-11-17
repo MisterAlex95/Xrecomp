@@ -15,6 +15,8 @@ endif()
 #                 context (llvmpipe), the XFB compared with gx_ref/<prog>.png within a tolerance (run_gx.sh,
 #                 gx_compare.py); each program also checks pixels itself by EFB peeks (green square = all passed).
 #                 Skipped (77) without the corpus or without a GLES 3 context (XBA-262)
+#   gc_gx_progcache  the program binary cache file format (no GL); gc_gx_programs: program binaries end to end
+#                 (warm-up, start, driver change, corrupt file; XBA-264)
 # Both skip (exit 77) when the homebrew is not built (the linux CI job has no corpus; the homebrew job builds it):
 #   tools/consoles/build_homebrew.sh gc build/homebrew    -> GC_HOMEBREW_DIR (default build/homebrew/gc)
 # The frontend's own tests (synthetic code, no toolchain; one runs a program both interpreted and recompiled) run
@@ -54,6 +56,11 @@ target_link_libraries(gc_cardtest PRIVATE gc_core)
 target_compile_options(gc_cardtest PRIVATE -Wall -Wextra)
 add_test(NAME gc_cardtest COMMAND gc_cardtest ${GC_HOMEBREW_DIR}/cardtest.dol)
 set_tests_properties(gc_cardtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+# gx_progcache (XBA-264): the GX program binary cache file without GL (save / load, another key, truncated, corrupt)
+add_executable(gc_gx_progcache_test gx_progcache_test.c)
+target_link_libraries(gc_gx_progcache_test PRIVATE gc_core)
+target_compile_options(gc_gx_progcache_test PRIVATE -Wall -Wextra)
+add_test(NAME gc_gx_progcache COMMAND gc_gx_progcache_test ${CMAKE_CURRENT_BINARY_DIR})
 
 if(TARGET gc_run)
     add_test(NAME gc_hello
@@ -88,7 +95,12 @@ if(TARGET gc_run)
     add_test(NAME gc_gx_list
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_gx_list.sh $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/gxtev.dol
                 ${CMAKE_CURRENT_BINARY_DIR}/gx_list)
-    set_tests_properties(gc_gx_gxtri_2x gc_gx_gxcopy_ram gc_gx_list gc_gx_gxtev_uber gc_gx_gxtex_uber
+    # XBA-264: program binaries: warm-up from the list, all loaded at the next start, another driver / a corrupt
+    # file ignored and rebuilt, programs compiled during play kept (run_gx_programs.sh)
+    add_test(NAME gc_gx_programs
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_gx_programs.sh $<TARGET_FILE:gc_run> ${GC_HOMEBREW_DIR}/gxtev.dol
+                ${CMAKE_CURRENT_BINARY_DIR}/gx_programs ${CMAKE_CURRENT_SOURCE_DIR}/gx_ref/gxtev.png)
+    set_tests_properties(gc_gx_gxtri_2x gc_gx_gxcopy_ram gc_gx_list gc_gx_gxtev_uber gc_gx_gxtex_uber gc_gx_programs
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)
     foreach(prog ${GC_GX_PROGS})
         set_tests_properties(gc_gx_${prog} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)

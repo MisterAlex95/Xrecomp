@@ -393,18 +393,22 @@ started:;
     /* GX (XBA-262): the GLES renderer draws on the window's context (this thread runs the fields); its copies to the
      * XFB also land in RAM, and the window shows GX's own picture of the XFB the VI scans (at the internal
      * resolution, RECOMP_GC_UPSCALE). The TEV / vertex states met go to gx_shaders.txt next to the discovered
-     * addresses, read back and compiled ahead at the next start. RECOMP_GC_GX=0: GX parses but does not draw. */
+     * addresses, read back and compiled ahead at the next start; the program binaries of this device's driver go to
+     * gx_programs.bin next to it (XBA-264: in the work folder, not the pack's, which a Prepare replaces whole), loaded
+     * at the start and rewritten at a pause and at the end when they grew. RECOMP_GC_GX=0: GX parses but does not
+     * draw. */
     int gx_on = 0;
     const char *gx_env = getenv("RECOMP_GC_GX");
     if (window && !(gx_env && !strcmp(gx_env, "0"))) {
-        static char gx_list[1200];
-        gx_list[0] = 0;
+        static char gx_list[1200], gx_progs[1200];
+        gx_list[0] = gx_progs[0] = 0;
         if (o->discovered_path && *o->discovered_path) {
             const char *slash = strrchr(o->discovered_path, '/');
             int dir = slash ? (int)(slash - o->discovered_path) : 0;
             snprintf(gx_list, sizeof gx_list, "%.*s%sgx_shaders.txt", dir, o->discovered_path, slash ? "/" : "");
+            snprintf(gx_progs, sizeof gx_progs, "%.*s%sgx_programs.bin", dir, o->discovered_path, slash ? "/" : "");
         }
-        gx_gl_options go = {0, 1, 0, gx_list[0] ? gx_list : NULL};
+        gx_gl_options go = {0, 1, 0, gx_list[0] ? gx_list : NULL, gx_progs[0] ? gx_progs : NULL};
         gx_on = gx_gl_attach(gc_gx(m), &go) == 0;
     }
     int audio = host_audio_open(GC_AUDIO_RATE, 2);
@@ -462,6 +466,8 @@ started:;
                 fflush(stdout);
                 was_paused = 1;
                 host_perf_pause(&hp, now_ns());
+                if (gx_on)
+                    gx_save_program_cache(gc_gx(m)); /* XBA-264: the programs compiled so far */
             }
             SDL_Delay(16);
             continue;

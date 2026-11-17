@@ -1057,6 +1057,20 @@ orders; the real `n64_tools` on gfx.z64 when the homebrew is built, run by `n64_
 too; the NDK case where `ANDROID_NDK_HOME` is set), `consoles/n64/tests` `n64_pack` and `n64_rdp` (the `wrote`
 ranges), `tests/recomp_pack`, the app's `PrepareServiceTest.n64Source`, `LauncherLibraryTest.n64HomePrepares`.
 
+## GameCube shader warm-up (XBA-264)
+
+After a GameCube Prepare ends `DONE`, PrepareService asks `ShaderWarmup.request`, which hands a GameCube title to
+`GcShaderWarmup`: in the `:warmup` process (ShaderWarmupService, as the N64's warm-up; never next to a game, kept for
+later while one runs) `WarmupNative.nativeGcWarmup` compiles the TEV states of the title's shader lists (the work
+folder's `gx_shaders.txt`, which the runs write, and the pack's when its Prepare copied one there; their union) with
+the device's GLES driver on a headless EGL context and writes their program binaries to
+`<files>/work/gc-<KEY>/gx_programs.bin`, the file the game loads at its start (consoles/README.md « GameCube GX »):
+the work folder, not the pack, since publishing a pack replaces its directory. No list yet (a title never run):
+nothing to do, the game adds the programs it compiles itself. Also after an app update for the last GameCube game
+played. A driver update changes the file's key: the game ignores it and rebuilds it. The log: `warmup: <tid> GX
+programs rc 0, N states, C cached, K compiled, F failed, T ms` and the native `gx: warm-up …` line. Tests: ctest
+`gc_gx_programs` (`gc_run --gx-warmup` on llvmpipe), the app's `GcShaderWarmupTest`.
+
 ## The loader
 
 The app shell's side (`android/app/src/main/cpp/pack_loader.{c,h}`, `src/platform/recomp_pack.{c,h}`; details and

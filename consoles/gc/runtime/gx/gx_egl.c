@@ -78,6 +78,8 @@ int gx_gl_load(gx_glfn *gl, const gx_eglfn *egl)
 #undef GX_GL_LOAD
     *(void **)&gl->glMaxShaderCompilerThreadsKHR = egl->eglGetProcAddress("glMaxShaderCompilerThreadsKHR");
     *(void **)&gl->glClearDepth = gl_sym(egl, "glClearDepth");
+    *(void **)&gl->glGetProgramBinary = gl_sym(egl, "glGetProgramBinary");
+    *(void **)&gl->glProgramBinary = gl_sym(egl, "glProgramBinary");
     return missing ? -1 : 0;
 }
 
@@ -86,6 +88,7 @@ int gx_gl_load(gx_glfn *gl, const gx_eglfn *egl)
 static gx_eglfn hl;
 static EGLDisplay hl_dpy;
 static EGLContext hl_ctx;
+static EGLSurface hl_surf;
 
 int gx_egl_headless_create(bool software, char *why, size_t why_len)
 {
@@ -96,6 +99,7 @@ int gx_egl_headless_create(bool software, char *why, size_t why_len)
         return -1;
     }
     hl_dpy = EGL_NO_DISPLAY;
+    hl_surf = EGL_NO_SURFACE;
     const char *client = hl.eglQueryString ? hl.eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS) : NULL;
     if (hl.eglGetPlatformDisplayEXT && client && strstr(client, "EGL_MESA_platform_surfaceless"))
         hl_dpy = hl.eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
@@ -119,10 +123,23 @@ int gx_egl_headless_create(bool software, char *why, size_t why_len)
         return -1;
     }
     if (!hl.eglMakeCurrent(hl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, hl_ctx)) {
-        snprintf(why, why_len, "surfaceless eglMakeCurrent failed (0x%X)", hl.eglGetError ? hl.eglGetError() : 0);
+        /* no EGL_KHR_surfaceless_context: a 1 x 1 pbuffer (the GX renderer draws into its own FBOs anyway) */
+        EGLint err = hl.eglGetError ? hl.eglGetError() : 0;
         hl.eglDestroyContext(hl_dpy, hl_ctx);
         hl_ctx = EGL_NO_CONTEXT;
-        return -1;
+        static const EGLint pcfg[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+                                      EGL_NONE};
+        static const EGLint pattr[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
+        n = 0;
+        if (hl.eglChooseConfig(hl_dpy, pcfg, &cfg, 1, &n) && n >= 1 && hl.eglCreatePbufferSurface)
+            hl_surf = hl.eglCreatePbufferSurface(hl_dpy, cfg, pattr);
+        if (hl_surf != EGL_NO_SURFACE)
+            hl_ctx = hl.eglCreateContext(hl_dpy, cfg, EGL_NO_CONTEXT, attr);
+        if (hl_ctx == EGL_NO_CONTEXT || !hl.eglMakeCurrent(hl_dpy, hl_surf, hl_surf, hl_ctx)) {
+            snprintf(why, why_len, "surfaceless eglMakeCurrent failed (0x%X), no pbuffer either", err);
+            gx_egl_headless_destroy();
+            return -1;
+        }
     }
     return 0;
 }
@@ -133,6 +150,10 @@ void gx_egl_headless_destroy(void)
         hl.eglMakeCurrent(hl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         hl.eglDestroyContext(hl_dpy, hl_ctx);
         hl_ctx = EGL_NO_CONTEXT;
+    }
+    if (hl_surf != EGL_NO_SURFACE) {
+        hl.eglDestroySurface(hl_dpy, hl_surf);
+        hl_surf = EGL_NO_SURFACE;
     }
     if (hl_dpy != EGL_NO_DISPLAY) {
         hl.eglTerminate(hl_dpy);

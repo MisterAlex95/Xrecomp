@@ -20,7 +20,8 @@ import java.util.List;
  * Vulkan environment set as ShellActivity sets it (VkDrivers.runEnv, cacheEnv), libmain.so loaded, then
  * n64_rdp_vk_warmup on a background-priority thread; its record written, « Shaders prêts » when it compiled anything,
  * then the process ends (the driver it loaded and the buffers it took go with it). One warm-up per process: a new
- * request ends this one first (ShaderWarmup.request), and so does a game's start (ShellActivity).
+ * request ends this one first (ShaderWarmup.request), and so does a game's start (ShellActivity). A GameCube title
+ * (XBA-264) compiles its GX shader lists into program binaries instead (GcShaderWarmup.run).
  */
 public class ShaderWarmupService extends Service {
     private Thread worker;
@@ -44,6 +45,16 @@ public class ShaderWarmupService extends Service {
     }
 
     private void run(String tid) {
+        if (GcShaderWarmup.isGc(tid)) {   // XBA-264: the GameCube's GX program binaries
+            if (ShaderWarmup.gameRunning(this)) {
+                ShaderWarmup.keepPending(this, tid);
+                end(false);
+                return;
+            }
+            int[] r = GcShaderWarmup.run(this, tid);
+            end(r != null && r[0] == 0 && r[3] > 0);
+            return;
+        }
         ShaderWarmup.Target t = ShaderWarmup.target(this, tid);
         if (ShaderWarmup.gameRunning(this)) {   // a game started since the request: later
             Log.i(LauncherActivity.TAG, "warmup: " + t + ": a game runs, kept for later");

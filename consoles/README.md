@@ -1529,6 +1529,22 @@ each field); `gx.h` is the API.
   format (`V` lines) met is written at exit (and by the exit hook) to `gx_shaders.txt` next to the title's
   `discovered.txt` (`gc_run --gx-list FILE`, `GC_GX_SHADER_LIST`), read back at the next start and compiled ahead.
   GX state descriptors only, no game data: Prepare can ship it in the pack (GC-6, with program binaries).
+- Program binaries (layer 3, XBA-264; `gx_progcache.{h,c}`): the TEV programs compiled by this device's driver, kept
+  with `glGetProgramBinary` in `gx_programs.bin` next to `gx_shaders.txt` in the title's **work** folder
+  (`<files>/work/gc-<KEY>/`; not the pack: a Prepare publishes the pack directory whole, the work folder survives it,
+  an interpreted title has one too, and the binaries belong to the device, not to what a pack carries). At attach
+  the file's programs are linked with `glProgramBinary` before the first frame (a refused one is compiled again);
+  programs compiled during play are added at a pause and at the end. The file's key hashes `GL_VENDOR`,
+  `GL_RENDERER`, `GL_VERSION`, the GL flavour and our vertex / ubershader sources (each entry also its own fragment
+  source's hash): a driver update or a change of our GLSL makes it ignored and rebuilt. Header, entries, FNV-1a
+  checksum, temporary file + rename; truncated / corrupt / other key: ignored. Log: `gx: program binaries <path>: N
+  loaded, M rebuilt (driver <renderer> <version>)`, or why ignored. `gc_run --gx-programs FILE`,
+  `GC_GX_PROGRAM_CACHE`; `GC_GX_DRIVER_KEY` mixes a string into the key (tests: a pretend driver update). Needs
+  `GL_NUM_PROGRAM_BINARY_FORMATS > 0` (Mesa llvmpipe: 1; otherwise logged and skipped).
+- Warm-up (XBA-264): `gx_gl_warmup` / `gx_warmup_headless` compile every TEV state of one or more lists into the
+  cache on a headless EGL context (surfaceless, else a 1 x 1 pbuffer): the app runs it after a GameCube Prepare
+  (`GcShaderWarmup`, docs/android/prepare.md), `gc_run --gx-warmup LIST[,LIST...] CACHE` on a host (exit 0, 3 no
+  program binaries, 77 no GLES 3). gxtev's 23 states: 0.8 s on llvmpipe.
 - Textures (`gx_tex.c`): I4 I8 IA4 IA8 RGB565 RGB5A3 RGBA8 C4 C8 C14X2 CMPR, TLUTs (IA8 / RGB565 / RGB5A3) from TMEM,
   mip levels, wrap / filter / LOD from the mode registers (GL sampler objects); decoded on the CPU into GL textures
   cached by address, size, format and palette hash, revalidated by a content hash once per epoch (a field, a
@@ -1542,7 +1558,7 @@ each field); `gx.h` is the API.
   `gc_runtime` shows it in the window (`GC_GX_XFB_RAM=0` skips the readback into RAM: a GPU sync less per field). EFB peeks (colour, Z, alpha read mode) from a 1x copy of the EFB cached until
   the next draw; pokes write one pixel.
 - `gc_run --gx`: the renderer on a headless EGL context (surfaceless Mesa; llvmpipe unless `--gx-hw`), `--gx-scale`,
-  `--gx-shaders async|sync|uber|special`, `--gx-list`, `--gx-copy-ram`; 77 without a GLES 3 context. `GC_GX_TRACE=1`
+  `--gx-shaders async|sync|uber|special`, `--gx-list`, `--gx-copy-ram`, `--gx-programs`; 77 without a GLES 3 context. `GC_GX_TRACE=1`
   logs texture decodes, TLUT loads, new TEV states, fog registers and peeks. In the app, `gc_runtime` attaches it to
   the window's context; `RECOMP_GC_GX=0` leaves GX undrawn. A desktop GL 3.3 core context works too (gc_play: the
   same GLSL under `#version 330 core`).
@@ -1555,7 +1571,9 @@ each field); `gx.h` is the API.
   Z GREATER, logic ops). Each checks pixels itself by EFB peeks (a green square bottom left when all passed) and its
   XFB is compared with `tests/gx_ref/<prog>.png` within a tolerance (`run_gx.sh`, `gx_compare.py`): ctest
   `gc_gx_<prog>`, `gc_gx_gxtev_uber` / `gc_gx_gxtex_uber` (ubershader only, same pictures), `gc_gx_gxtri_2x`,
-  `gc_gx_gxcopy_ram`, `gc_gx_list` (the list written, then compiled ahead and unchanged). They run in the homebrew CI
+  `gc_gx_gxcopy_ram`, `gc_gx_list` (the list written, then compiled ahead and unchanged), `gc_gx_programs` (XBA-264:
+  warm-up, a start with every state from binaries and the picture they draw, a pretend driver update and a corrupt
+  file ignored and rebuilt, the programs of a run kept), `gc_gx_progcache` (the file format, no GL). They run in the homebrew CI
   job (the linux deps image carries Mesa's EGL / GLES / llvmpipe).
 
 Not there yet (GX): TMEM preloading (`GX_PreloadEntireTexture`, TX_LOADBLOCK), the bounding box, fog range adjustment,

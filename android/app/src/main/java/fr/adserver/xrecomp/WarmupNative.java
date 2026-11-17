@@ -29,4 +29,12 @@ final class WarmupNative {
      * cannot run on this driver, 2 no cache directory or memory, 3 no Vulkan RDP in this build. Blocks for seconds.
      */
     static native int[] nativeWarmup(int factor);
+
+    /**
+     * The GameCube warm-up (XBA-264, GcShaderWarmup): gx_warmup_headless(lists, cache), the TEV states of the shader
+     * lists (missing files skipped) compiled on a headless EGL context and their program binaries written to cache:
+     * { rc, states, already cached, compiled, failed, ms }; rc 0 done, 1 the driver has no program binaries, 2 no GLES 3
+     * context, 3 the cache cannot be written, 4 bad arguments. Blocks (a second or so per hundred states).
+     */
+    static native int[] nativeGcWarmup(String[] lists, String cache);
 }

@@ -765,8 +765,10 @@ public class PrepareService extends Service {
             nm.notify(s.titleId, NOTIF_DONE_ID, endNotification(s));
         PrepareProtocol.Job next = queue == null ? null : queue.pop();
         // An N64 game prepared: its shaders warmed now (ShaderWarmup; while we are still a foreground service, so the
-        // start is allowed), or after the queue's next jobs (kept: the launcher makes it when it shows again).
-        if (PrepareProtocol.DONE.equals(s.state) && Console.ofKey(s.titleId) == Console.N64) {
+        // start is allowed), or after the queue's next jobs (kept: the launcher makes it when it shows again). A
+        // GameCube game: its GX shader lists compiled into program binaries the same way (GcShaderWarmup, XBA-264).
+        if (PrepareProtocol.DONE.equals(s.state)
+            && (Console.ofKey(s.titleId) == Console.N64 || GcShaderWarmup.isGc(s.titleId))) {
             if (next == null)
                 ShaderWarmup.request(this, s.titleId, ShaderWarmup.Reason.PREPARE);
             else

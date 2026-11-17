@@ -8,7 +8,9 @@
  * draws it (the same functions, so the same pixels). Programs compile on a worker thread that owns an EGL context
  * shared with the game's, or through GL_KHR_parallel_shader_compile when that is all there is, or on first use
  * (async_shaders = 0). Every state met goes into the per-title list (written at detach) and the list read at attach is
- * compiled ahead.
+ * compiled ahead. Program binaries (XBA-264, gx_progcache.h): the programs of the title's cache file, when it is of
+ * this driver, are linked with glProgramBinary at attach (ready before the first frame); programs compiled later are
+ * added to it at a pause and at detach. gx_gl_warmup fills it ahead from the lists (the app's warm-up after Prepare).
  *
  * Textures: decoded on the CPU (gx_tex.c) into GL textures with their mip levels, cached by address / size / format /
  * palette, revalidated by a content hash once per epoch (each field and each TX_INVALIDATE). EFB copies to a texture
@@ -22,9 +24,11 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "gx_glapi.h"
 #include "gx_internal.h"
+#include "gx_progcache.h"
 #include "gx_shader.h"
 
 #define BATCH_V (1u << 18)
@@ -41,6 +45,7 @@ typedef struct prog_entry {
     GLuint prog;
     GLuint vs, fs;           /* KHR_parallel_shader_compile: still attached */
     int state;               /* P_*, atomic */
+    bool in_cache;           /* its binary is in the program cache (loaded from it, or added) */
     struct prog_entry *next; /* bucket chain */
     struct prog_entry *qnext;/* worker queue */
 } prog_entry;
@@ -119,6 +124,11 @@ struct gx_gl {
     uint32_t (*vfmts)[5];
     size_t nvfmts, cap_vfmts;
     bool list_dirty;
+
+    /* program binaries (XBA-264) */
+    char *pc_path;
+    gx_progcache pc;
+    bool pc_dirty;
 };
 
 #define F (g->f)
@@ -126,6 +136,15 @@ struct gx_gl {
 /* A desktop GL 3.3+ core context (gc_play's window on Linux / macOS) instead of GLES 3: the same GLSL under
  * #version 330 core. */
 static int desktop_gl;
+
+/* GLES 3.x, or desktop GL 3.3+ (sets desktop_gl). 0 when the context is neither. */
+static int gl_flavour_ok(const char *ver)
+{
+    int major = 0, minor = 0;
+    desktop_gl = ver && !strstr(ver, "OpenGL ES") && sscanf(ver, "%d.%d", &major, &minor) == 2 &&
+                 (major > 3 || (major == 3 && minor >= 3));
+    return ver && (strstr(ver, "OpenGL ES 3") || desktop_gl);
+}
 
 static void clear_depth(gx_glfn *f, float z)
 {
@@ -409,6 +428,21 @@ static void prog_poll(gx_gl *g, prog_entry *e)
     }
 }
 
+/* A new entry for k (recorded in the per-title list), its program not started. */
+static prog_entry *prog_new(gx_gl *g, const gx_shader_key *k, uint64_t h)
+{
+    prog_entry **b = &g->progs[h & (PROG_BUCKETS - 1)];
+    prog_entry *e = calloc(1, sizeof *e);
+    if (!e)
+        return NULL;
+    e->key = *k;
+    e->hash = h;
+    e->next = *b;
+    *b = e;
+    record_key(g, k);
+    return e;
+}
+
 static prog_entry *prog_lookup(gx_gl *g, const gx_shader_key *k, bool create)
 {
     uint64_t h = gx_shader_key_hash(k);
@@ -418,17 +452,12 @@ static prog_entry *prog_lookup(gx_gl *g, const gx_shader_key *k, bool create)
             return e;
     if (!create)
         return NULL;
-    prog_entry *e = calloc(1, sizeof *e);
+    prog_entry *e = prog_new(g, k, h);
     if (!e)
         return NULL;
-    e->key = *k;
-    e->hash = h;
-    e->next = *b;
-    *b = e;
     if (g->trace)
         fprintf(stderr, "gx: new TEV state %016llX: %u stage(s), %u indirect, alpha test %06X, fog %X, ztex %X, pe %X\n",
                 (unsigned long long)h, k->nst, k->nind, k->alpha_cmp, k->fog, k->ztex, k->pe);
-    record_key(g, k);
     prog_start(g, e);
     return e;
 }
@@ -451,6 +480,155 @@ static GLuint prog_for(gx_state *gx, const gx_shader_key *k, bool *uber)
         return e->prog;
     }
     return g->uber;
+}
+
+/* ---- program binaries (XBA-264) ---- */
+
+static void gl_clear_errors(gx_glfn *f)
+{
+    for (int i = 0; i < 16 && f->glGetError() != GL_NO_ERROR; i++) {
+    }
+}
+
+static bool binaries_supported(gx_glfn *f)
+{
+    if (!f->glGetProgramBinary || !f->glProgramBinary || !f->glProgramParameteri)
+        return false;
+    GLint n = 0;
+    f->glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &n);
+    gl_clear_errors(f);
+    return n > 0;
+}
+
+static const char *gl_str(gx_glfn *f, GLenum e)
+{
+    const char *s = (const char *)f->glGetString(e);
+    return s ? s : "?";
+}
+
+/* The cache key and driver text of the current context. */
+static uint64_t driver_key(gx_glfn *f, char *text, size_t n)
+{
+    snprintf(text, n, "%s | %s | %s", gl_str(f, GL_VENDOR), gl_str(f, GL_RENDERER), gl_str(f, GL_VERSION));
+    return gx_progcache_key(gl_str(f, GL_VENDOR), gl_str(f, GL_RENDERER), gl_str(f, GL_VERSION), desktop_gl);
+}
+
+/* A program from a cached binary, set up; 0 when the driver refuses it. */
+static GLuint program_from_binary(gx_glfn *f, const gx_progbin *b)
+{
+    if (b->key.nst < 1 || b->key.nst > 16 || b->key.nind > 4)
+        return 0;
+    GLuint p = f->glCreateProgram();
+    f->glProgramBinary(p, b->format, b->data, (GLsizei)b->len);
+    GLint ok = 0;
+    f->glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    gl_clear_errors(f);
+    if (!ok) {
+        f->glDeleteProgram(p);
+        return 0;
+    }
+    program_setup(f, p);
+    return p;
+}
+
+/* p's binary into the cache under k. 0, or -1 (no binary). */
+static int cache_program(gx_glfn *f, gx_progcache *c, const gx_shader_key *k, GLuint p)
+{
+    GLint len = 0;
+    gl_clear_errors(f);
+    f->glGetProgramiv(p, GL_PROGRAM_BINARY_LENGTH, &len);
+    if (len <= 0 || (uint32_t)len > GX_PROGCACHE_MAX_BINARY)
+        return -1;
+    void *data = malloc((size_t)len);
+    if (!data)
+        return -1;
+    GLsizei got = 0;
+    GLenum fmt = 0;
+    f->glGetProgramBinary(p, len, &got, &fmt, data);
+    int rc = got > 0 && f->glGetError() == GL_NO_ERROR
+                 ? gx_progcache_put(c, k, gx_progcache_src_hash(k), fmt, data, (uint32_t)got)
+                 : -1;
+    free(data);
+    return rc;
+}
+
+/* At attach: the cache file's programs of this driver linked from their binaries, the others compiled again. */
+static void progcache_attach(gx_gl *g)
+{
+    char drv[512], was[512];
+    const char *ren = gl_str(&g->f, GL_RENDERER), *ver = gl_str(&g->f, GL_VERSION);
+    if (g->async == -1 || !binaries_supported(&g->f)) {
+        if (g->async != -1)
+            fprintf(stderr, "gx: program binaries %s: ignored (the driver has none; driver %s %s)\n", g->pc_path, ren,
+                    ver);
+        free(g->pc_path);
+        g->pc_path = NULL;
+        return;
+    }
+    uint64_t key = driver_key(&g->f, drv, sizeof drv);
+    const char *why = NULL;
+    if (gx_progcache_load(g->pc_path, key, drv, &g->pc, &why, was, sizeof was)) {
+        if (!strcmp(why, "none"))
+            fprintf(stderr, "gx: program binaries %s: none yet (driver %s %s)\n", g->pc_path, ren, ver);
+        else
+            fprintf(stderr, "gx: program binaries %s: ignored (%s%s%s), rebuilt from scratch (driver %s %s)\n",
+                    g->pc_path, why, was[0] ? "; was " : "", was, ren, ver);
+        g->pc_dirty = strcmp(why, "none") != 0;
+        return;
+    }
+    size_t loaded = 0, rebuilt = 0;
+    for (size_t i = 0; i < g->pc.n;) {
+        gx_progbin *b = &g->pc.e[i];
+        GLuint p = gx_progcache_src_hash(&b->key) == b->src_hash ? program_from_binary(&g->f, b) : 0;
+        gx_shader_key k = b->key;
+        if (!p) {
+            gx_progcache_drop(&g->pc, i);
+            g->pc_dirty = true;
+            rebuilt++;
+            if (k.nst >= 1 && k.nst <= 16 && k.nind <= 4)
+                prog_lookup(g, &k, true); /* compiled the usual way, added back at the next save */
+            continue;
+        }
+        prog_entry *e = prog_lookup(g, &k, false);
+        if (!e)
+            e = prog_new(g, &k, gx_shader_key_hash(&k));
+        if (!e || e->prog) {
+            g->f.glDeleteProgram(p);
+            i++;
+            continue;
+        }
+        e->prog = p;
+        e->in_cache = true;
+        e->state = P_READY;
+        loaded++;
+        i++;
+    }
+    fprintf(stderr, "gx: program binaries %s: %zu loaded, %zu rebuilt (driver %s %s)\n", g->pc_path, loaded, rebuilt,
+            ren, ver);
+}
+
+void gx_save_program_cache(gx_state *gx)
+{
+    gx_gl *g = gx ? gx->gl : NULL;
+    if (!g || !g->pc_path || !F.glGetString(GL_VERSION)) /* no current context (Android while paused): later */
+        return;
+    size_t added = 0;
+    for (unsigned i = 0; i < PROG_BUCKETS; i++)
+        for (prog_entry *e = g->progs[i]; e; e = e->next) {
+            if (e->in_cache || __atomic_load_n(&e->state, __ATOMIC_ACQUIRE) != P_READY || !e->prog)
+                continue;
+            e->in_cache = true; /* tried once: a program without a binary is not asked again */
+            if (!cache_program(&g->f, &g->pc, &e->key, e->prog))
+                added++;
+        }
+    if (!added && !g->pc_dirty)
+        return;
+    if (gx_progcache_save(g->pc_path, &g->pc)) {
+        fprintf(stderr, "gx: cannot write the program binaries %s\n", g->pc_path);
+        return;
+    }
+    g->pc_dirty = false;
+    fprintf(stderr, "gx: program binaries %s: %zu programs written (%zu new)\n", g->pc_path, g->pc.n, added);
 }
 
 /* ---- textures ---- */
@@ -1484,10 +1662,7 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
         return -1;
     }
     const char *ver = (const char *)g->f.glGetString(GL_VERSION);
-    int major = 0, minor = 0;
-    desktop_gl = ver && !strstr(ver, "OpenGL ES") && sscanf(ver, "%d.%d", &major, &minor) == 2 &&
-                 (major > 3 || (major == 3 && minor >= 3));
-    if (!ver || (!strstr(ver, "OpenGL ES 3") && !desktop_gl)) {
+    if (!gl_flavour_ok(ver)) {
         fprintf(stderr, "gx: needs OpenGL ES 3 or GL 3.3, the context is %s: GX runs without drawing\n",
                 ver ? ver : "?");
         free(g);
@@ -1509,6 +1684,9 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     const char *list = opt && opt->shader_list ? opt->shader_list : getenv("GC_GX_SHADER_LIST");
     if (list && *list)
         g->list_path = strdup(list);
+    const char *pcp = opt && opt->program_cache ? opt->program_cache : getenv("GC_GX_PROGRAM_CACHE");
+    if (pcp && *pcp)
+        g->pc_path = strdup(pcp);
     g->bv = malloc(BATCH_V * sizeof *g->bv);
     g->packed = malloc(BATCH_V * sizeof *g->bv);
     g->bi = malloc(BATCH_I * sizeof *g->bi);
@@ -1621,19 +1799,29 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
             g->async == 1 ? (g->worker_ok ? "async (worker thread)" : "async (KHR_parallel_shader_compile)")
             : g->async == -1 ? "ubershader only" : "on first use",
             g->efb_copy_ram ? "to texture and RAM" : "to texture");
+    /* program binaries of this driver: those states ready before the first frame */
+    if (g->pc_path)
+        progcache_attach(g);
     /* the per-title list: compile ahead what earlier runs met */
     if (g->list_path) {
         gx_shader_key *keys;
-        size_t n;
+        size_t n, ready = 0;
         if (!gx_shader_list_read(g->list_path, &keys, &n)) {
             for (size_t i = 0; i < n; i++)
-                if (g->async != -1)
-                    prog_lookup(g, &keys[i], true);
-                else
+                if (g->async != -1) {
+                    prog_entry *e = prog_lookup(g, &keys[i], false);
+                    if (e && e->in_cache)
+                        ready++;
+                    else if (!e)
+                        prog_lookup(g, &keys[i], true);
+                } else {
                     record_key(g, &keys[i]);
+                }
             free(keys);
-            g->list_dirty = false;
-            fprintf(stderr, "gx: shader list %s: %zu states queued\n", g->list_path, n);
+            /* written again only with states it lacks (the program cache's included) */
+            g->list_dirty = g->nkeys > n;
+            fprintf(stderr, "gx: shader list %s: %zu states queued (%zu ready from program binaries)\n", g->list_path,
+                    n, ready);
         }
     }
     efb_bind(g);
@@ -1661,6 +1849,7 @@ void gx_gl_detach(gx_state *gx)
     gx_gl_flush(gx);
     worker_stop(g);
     gx_save_shader_list(gx);
+    gx_save_program_cache(gx);
     for (unsigned i = 0; i < PROG_BUCKETS; i++)
         while (g->progs[i]) {
             prog_entry *e = g->progs[i];
@@ -1703,6 +1892,121 @@ void gx_gl_detach(gx_state *gx)
     free(g->keys);
     free(g->vfmts);
     free(g->list_path);
+    gx_progcache_free(&g->pc);
+    free(g->pc_path);
     free(g);
     gx->gl = NULL;
+}
+
+/* ---- shader warm-up (XBA-264) ---- */
+
+static double warm_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+int gx_gl_warmup(const char *const *lists, size_t nlists, const char *cache, gx_warmup_result *r)
+{
+    gx_warmup_result res = {0};
+    double t0 = warm_now();
+    if (r)
+        *r = res;
+    gx_eglfn egl;
+    gx_glfn fn;
+    if (!cache || !*cache || gx_egl_load(&egl) || gx_gl_load(&fn, &egl)) {
+        fprintf(stderr, "gx: warm-up: no cache path or no GLES 3 entry points\n");
+        return 2;
+    }
+    gx_glfn *f = &fn;
+    const char *ver = (const char *)f->glGetString(GL_VERSION);
+    if (!gl_flavour_ok(ver)) {
+        fprintf(stderr, "gx: warm-up: needs OpenGL ES 3 or GL 3.3, the context is %s\n", ver ? ver : "none");
+        return 2;
+    }
+    const char *ren = gl_str(f, GL_RENDERER);
+    if (!binaries_supported(f)) {
+        fprintf(stderr, "gx: warm-up %s: the driver has no program binaries (driver %s %s): nothing to do\n", cache,
+                ren, ver);
+        return 1;
+    }
+    char drv[512];
+    uint64_t key = driver_key(f, drv, sizeof drv);
+    gx_progcache pc;
+    const char *why = NULL;
+    bool dirty = gx_progcache_load(cache, key, drv, &pc, &why, NULL, 0) != 0 && strcmp(why, "none") != 0;
+    if (why && strcmp(why, "none"))
+        fprintf(stderr, "gx: warm-up %s: the cache was ignored (%s), rebuilt\n", cache, why);
+    /* the union of the lists */
+    gx_shader_key *all = NULL;
+    size_t nall = 0, cap = 0;
+    for (size_t l = 0; l < nlists; l++) {
+        gx_shader_key *keys;
+        size_t n;
+        if (!lists[l] || !*lists[l] || gx_shader_list_read(lists[l], &keys, &n))
+            continue;
+        for (size_t i = 0; i < n; i++) {
+            size_t j = 0;
+            while (j < nall && memcmp(&all[j], &keys[i], sizeof keys[i]))
+                j++;
+            if (j < nall)
+                continue;
+            if (nall == cap) {
+                cap = cap ? cap * 2 : 64;
+                gx_shader_key *na = realloc(all, cap * sizeof *na);
+                if (!na)
+                    break;
+                all = na;
+            }
+            all[nall++] = keys[i];
+        }
+        free(keys);
+    }
+    res.states = (int)nall;
+    for (size_t i = 0; i < nall; i++) {
+        gx_progbin *b = gx_progcache_find(&pc, &all[i]);
+        if (b && b->src_hash == gx_progcache_src_hash(&all[i])) {
+            res.cached++;
+            continue;
+        }
+        GLuint p = build_program(f, &all[i]);
+        if (p && !cache_program(f, &pc, &all[i], p)) {
+            res.compiled++;
+            dirty = true;
+        } else {
+            res.failed++;
+        }
+        if (p)
+            f->glDeleteProgram(p);
+    }
+    free(all);
+    int rc = 0;
+    if (dirty && gx_progcache_save(cache, &pc)) {
+        fprintf(stderr, "gx: warm-up: cannot write %s\n", cache);
+        rc = 3;
+    }
+    res.seconds = warm_now() - t0;
+    fprintf(stderr, "gx: warm-up %s: %d states, %d already cached, %d compiled, %d failed, %zu programs in the file, "
+                    "%.2f s (driver %s %s)\n",
+            cache, res.states, res.cached, res.compiled, res.failed, pc.n, res.seconds, ren, ver);
+    gx_progcache_free(&pc);
+    if (r)
+        *r = res;
+    return rc;
+}
+
+int gx_warmup_headless(const char *const *lists, size_t nlists, const char *cache, bool software,
+                       gx_warmup_result *r)
+{
+    char why[160] = "";
+    if (r)
+        memset(r, 0, sizeof *r);
+    if (gx_egl_headless_create(software, why, sizeof why)) {
+        fprintf(stderr, "gx: warm-up: no GLES 3 context (%s)\n", why);
+        return 2;
+    }
+    int rc = gx_gl_warmup(lists, nlists, cache, r);
+    gx_egl_headless_destroy();
+    return rc;
 }

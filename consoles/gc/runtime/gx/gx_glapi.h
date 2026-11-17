@@ -109,6 +109,8 @@ typedef struct __GLsync *GLsync;
 #define GL_MAP_INVALIDATE_BUFFER_BIT 0x0008
 #define GL_PROGRAM_BINARY_RETRIEVABLE_HINT 0x8257
 #define GL_COMPLETION_STATUS_KHR 0x91B1
+#define GL_PROGRAM_BINARY_LENGTH 0x8741
+#define GL_NUM_PROGRAM_BINARY_FORMATS 0x87FE
 #define GL_INVALID_INDEX 0xFFFFFFFFu
 
 /* X(return type, name, parameters) */
@@ -199,6 +201,9 @@ typedef struct gx_glfn {
 #undef GX_GL_PTR
     void (*glMaxShaderCompilerThreadsKHR)(GLuint);
     void (*glClearDepth)(double); /* desktop GL before 4.1 has no glClearDepthf */
+    /* program binaries (XBA-264; GLES 3.0, desktop GL 4.1 / ARB_get_program_binary): NULL when missing */
+    void (*glGetProgramBinary)(GLuint, GLsizei, GLsizei *, GLenum *, void *);
+    void (*glProgramBinary)(GLuint, GLenum, const void *, GLsizei);
 } gx_glfn;
 
 /* EGL, the part the renderer and the headless context use. */
