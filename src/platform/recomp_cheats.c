@@ -2001,6 +2001,11 @@ static uint32_t hook_room(const recomp_cheat *c)
     return n;
 }
 
+int recomp_cheats_pending(const recomp_cheats *s)
+{
+    return s->n || s->nhook || s->npatch;
+}
+
 size_t recomp_cheats_apply(recomp_cheats *s, const recomp_cheat_bus *b)
 {
     recomp_cheat_patch want[RECOMP_CHEAT_PATCHES_MAX];
