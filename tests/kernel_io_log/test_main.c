@@ -152,13 +152,35 @@ int main(void)
              );
     if (!freopen(log, "w", stderr)) return 2;
 
-    for (i = 0; i < 100; i++) {
+    {
+        uint32_t first = 0;
+        int same = 1;
+        for (i = 0; i < 100; i++) {
+            h = guest_create();
+            if (!h) { reads_ok = 0; break; }
+            if (!first) first = h;
+            same &= h == first;
+            guest_close(h);
+        }
         h = guest_create();
-        if (!h) { reads_ok = 0; break; }
-        guest_close(h);
+        check(h != 0 && reads_ok, "101 guest NtCreateFile calls succeed");
+        /* KRN-11: a closed handle's token slot is the next one handed out
+         * (the free search starts at the lowest free slot). */
+        check(same && h == first, "open/close/open reuses the same token");
     }
-    h = guest_create();
-    check(h != 0 && reads_ok, "101 guest NtCreateFile calls succeed");
+    {   /* KRN-11, a figure rather than a check: what a guest file open and
+         * close pair costs through the handle table (host-dependent). */
+        LARGE_INTEGER f, t0, t1;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&t0);
+        for (i = 0; i < 20000; i++) {
+            uint32_t hh = guest_create();
+            guest_close(hh);
+        }
+        QueryPerformanceCounter(&t1);
+        printf("  (20000 guest open/close pairs: %.2f us each)\n",
+               (double)(t1.QuadPart - t0.QuadPart) * 1e6 / (double)f.QuadPart / 20000.0);
+    }
     for (i = 0; i < 2000 && h; i++)
         if (guest_read(h, (uint32_t)(i % 256) * 16u, 16) != 0
                 || *(uint32_t *)(mem + IOSB_VA + 4) != 16)

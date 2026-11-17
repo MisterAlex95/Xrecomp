@@ -4964,21 +4964,47 @@ static void handle_unlock(void) { InterlockedExchange(&s_handle_lock, 0); }
  * must not: on POSIX, DuplicateHandle returns its source pointer with one
  * more reference. If the duplicate shared the source's token, NtClose on
  * either one would clear the slot that both of them use. */
+/* Both searches below ran over all 16,384 slots under the spin lock, so a
+ * new handle (never in the table) read 128 KB twice: ~10 us per
+ * NtCreateFile / NtCreateEvent / thread, with every other guest thread
+ * spinning meanwhile (KRN-11). The table now keeps two bounds, both under
+ * handle_lock: s_handle_hi, one past the highest slot in use, which bounds
+ * the "same HANDLE" search; and s_handle_free, below which no slot is free,
+ * where the free search starts. In practice both stay near the number of
+ * handles open at once. */
+static uint32_t s_handle_hi = 1, s_handle_free = 1;
+
+static void handle_slot_set(uint32_t i, HANDLE h)    /* under handle_lock */
+{
+    s_handle_table[i] = h;
+    if (h) {
+        if (i >= s_handle_hi)
+            s_handle_hi = i + 1;
+        if (i == s_handle_free)
+            s_handle_free = i + 1;
+    } else {
+        if (i < s_handle_free)
+            s_handle_free = i;
+        while (s_handle_hi > 1 && !s_handle_table[s_handle_hi - 1])
+            s_handle_hi--;
+    }
+}
+
 static uint32_t bridge_handle_token_ex(HANDLE h, int fresh)
 {
-    int i;
+    uint32_t i;
     if (!h || h == INVALID_HANDLE_VALUE) return 0;
     handle_lock();
-    for (i = 1; !fresh && i < BRIDGE_HANDLE_MAX; i++)
+    for (i = 1; !fresh && i < s_handle_hi; i++)
         if (s_handle_table[i] == h) {
             handle_unlock();
-            return BRIDGE_HANDLE_TAG | (uint32_t)i;
+            return BRIDGE_HANDLE_TAG | i;
         }
-    for (i = 1; i < BRIDGE_HANDLE_MAX; i++)
+    for (i = s_handle_free ? s_handle_free : 1; i < BRIDGE_HANDLE_MAX; i++)
         if (s_handle_table[i] == NULL) {
-            s_handle_table[i] = h;
+            handle_slot_set(i, h);
             handle_unlock();
-            return BRIDGE_HANDLE_TAG | (uint32_t)i;
+            return BRIDGE_HANDLE_TAG | i;
         }
     handle_unlock();
     fprintf(stderr, "  [BRIDGE] handle table full\n");
@@ -5046,7 +5072,7 @@ static HANDLE bridge_take_handle(uint32_t token)
             HANDLE h;
             handle_lock();
             h = s_handle_table[i];
-            s_handle_table[i] = NULL;
+            handle_slot_set(i, NULL);
             handle_unlock();
             return h;
         }
@@ -14748,7 +14774,7 @@ void xbox_bridge_kobj_reset(void)
         HANDLE h;
         handle_lock();
         h = s_handle_table[i];
-        s_handle_table[i] = NULL;
+        handle_slot_set(i, NULL);
         handle_unlock();
         if (h && h != INVALID_HANDLE_VALUE) {
 #ifndef _WIN32
@@ -14865,7 +14891,7 @@ int xbox_bridge_kobj_load(XboxKobjLoadCtx *c, uint16_t type, XboxKobjRd *r)
             xbox_kobj_fail(c, "handle 0x%08X twice", BRIDGE_HANDLE_TAG | idx);
             return 1;
         }
-        s_handle_table[idx] = h;
+        handle_slot_set(idx, h);
         handle_unlock();
         s_token_thobj[idx] = thobj;   /* its reference is in the pool's counts */
         s_ob_token[idx] = ob;
