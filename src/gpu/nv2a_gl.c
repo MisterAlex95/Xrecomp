@@ -219,6 +219,28 @@ static uint64_t hash_bytes(const uint8_t *p, size_t n)
     return h;
 }
 
+/* The same idea in four independent lanes: one multiply chain is latency
+ * bound, and textures (every sampled one hashed once a frame) and vertex
+ * ranges (~3 MB a frame in Oakvale) are the bulk of what is hashed. No
+ * statistics: the callers count. */
+static uint64_t hash4_bytes(const uint8_t *p, size_t n)
+{
+    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full,
+             h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull, w[4];
+    size_t i;
+
+    for (i = 0; i + 32 <= n; i += 32) {
+        memcpy(w, p + i, 32);
+        h0 = (h0 ^ w[0]) * 0xFF51AFD7ED558CCDull; h0 ^= h0 >> 29;
+        h1 = (h1 ^ w[1]) * 0xFF51AFD7ED558CCDull; h1 ^= h1 >> 29;
+        h2 = (h2 ^ w[2]) * 0xFF51AFD7ED558CCDull; h2 ^= h2 >> 29;
+        h3 = (h3 ^ w[3]) * 0xFF51AFD7ED558CCDull; h3 ^= h3 >> 29;
+    }
+    for (; i < n; i++)
+        h0 = (h0 ^ p[i]) * 0x100000001B3ull;
+    return h0 ^ (h1 * 31u) ^ (h2 * 961u) ^ (h3 * 29791u);
+}
+
 static int has_ext(const char *name)
 {
     GLint n = 0, i;
@@ -2163,9 +2185,12 @@ static void tex_make_room(void)
 
 static uint64_t tex_hash(const Nv2aTexture *t, uint32_t bytes)
 {
-    uint64_t h = hash_bytes(guest(t->offset), bytes);
-    if (t->color == 0x0B && t->palette)          /* the palette is content too */
-        h ^= hash_bytes(guest(t->palette), 1024) * 31u;
+    uint64_t h = hash4_bytes(guest(t->offset), bytes);
+    s_st.hashes_kb += bytes >> 10;
+    if (t->color == 0x0B && t->palette) {        /* the palette is content too */
+        h ^= hash4_bytes(guest(t->palette), 1024) * 31u;
+        s_st.hashes_kb += 1;
+    }
     return h;
 }
 
@@ -3854,25 +3879,11 @@ static GlVao *s_vao_cache;          /* NV_GL_MAX_VAO, allocated at first use */
 static uint32_t s_nvao;
 static int s_vbo_on;                /* RECOMP_GPU_VBO, default on */
 
-/* hash_bytes in four independent lanes: vertex ranges are hashed every
- * frame (~3 MB in Oakvale), and one multiply chain is latency bound. */
+/* Vertex ranges and index lists: hash4_bytes, counted. */
 static uint64_t vb_hash(const uint8_t *p, size_t n)
 {
-    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full,
-             h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull, w[4];
-    size_t i;
-
-    for (i = 0; i + 32 <= n; i += 32) {
-        memcpy(w, p + i, 32);
-        h0 = (h0 ^ w[0]) * 0xFF51AFD7ED558CCDull; h0 ^= h0 >> 29;
-        h1 = (h1 ^ w[1]) * 0xFF51AFD7ED558CCDull; h1 ^= h1 >> 29;
-        h2 = (h2 ^ w[2]) * 0xFF51AFD7ED558CCDull; h2 ^= h2 >> 29;
-        h3 = (h3 ^ w[3]) * 0xFF51AFD7ED558CCDull; h3 ^= h3 >> 29;
-    }
-    for (; i < n; i++)
-        h0 = (h0 ^ p[i]) * 0x100000001B3ull;
     s_st.vbo_hash_kb += (uint32_t)(n >> 10);
-    return h0 ^ (h1 * 31u) ^ (h2 * 961u) ^ (h3 * 29791u);
+    return hash4_bytes(p, n);
 }
 
 static void vao_drop_all(void)
