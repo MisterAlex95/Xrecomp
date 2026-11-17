@@ -3913,10 +3913,17 @@ class Lifter:
         lines = [
             f"{{ int32_t _st = RECOMP_DF_STEP({step});",
             "while (ecx != 0) {",
-            f"    _flags = ({first} == {second});",
         ]
         if self.needs_cf:
-            lines.append(f"    _cf = ({first} < {second});")
+            # Each element read once: the guest accessors are volatile, so
+            # `_flags = (A == B); _cf = (A < B);` loaded both twice, and the
+            # two answers could come from different bytes if another guest
+            # thread wrote in between.
+            t = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t"}[step]
+            lines.append(f"    {{ {t} _x = {first}, _y = {second};"
+                         " _flags = (_x == _y); _cf = (_x < _y); }")
+        else:
+            lines.append(f"    _flags = ({first} == {second});")
         lines += [
             f"    {advance}",
             f"    if ({stop_condition}) break;",
