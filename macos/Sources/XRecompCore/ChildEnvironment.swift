@@ -71,9 +71,13 @@ public enum Shell {
     }
 
     /// Runs `exe args`; status -1 when it could not start, -2 on timeout (it is then killed).
+    ///
+    /// The output is read on a thread of its own until EOF. After the exit (or the kill on timeout) the call waits
+    /// at most `drainLimit` seconds for that EOF: a grandchild that keeps the pipe open (a compiler under
+    /// `cmake --build`, a build step of `pip install`) must not hold the call far past its timeout.
     @discardableResult
     public static func run(_ exe: String, _ args: [String], cwd: URL? = nil, environment: [String: String]? = nil,
-                           timeout: TimeInterval = 60) -> Result {
+                           timeout: TimeInterval = 60, drainLimit: TimeInterval = 2) -> Result {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args
@@ -83,16 +87,30 @@ public enum Shell {
         p.standardOutput = pipe
         p.standardError = pipe
         p.standardInput = FileHandle.nullDevice
-        let collected = LockedData()
-        pipe.fileHandleForReading.readabilityHandler = { h in
-            let d = h.availableData
-            if d.isEmpty { h.readabilityHandler = nil } else { collected.append(d) }
-        }
         let done = DispatchSemaphore(value: 0)
         p.terminationHandler = { _ in done.signal() }
         do { try p.run() } catch {
-            pipe.fileHandleForReading.readabilityHandler = nil
             return Result(status: -1, output: "\(error.localizedDescription)")
+        }
+        // The reader owns a duplicate of the read end, so the Pipe closing its own when it goes away cannot pull
+        // the descriptor from under a read that outlives this call.
+        let collected = LockedData()
+        let drained = DispatchSemaphore(value: 0)
+        let fd = dup(pipe.fileHandleForReading.fileDescriptor)
+        if fd >= 0 {
+            Thread.detachNewThread {
+                var buf = [UInt8](repeating: 0, count: 16384)
+                while true {
+                    let n = read(fd, &buf, buf.count)
+                    if n < 0 && errno == EINTR { continue }
+                    if n <= 0 { break }
+                    collected.append(Data(buf[0..<n]))
+                }
+                close(fd)
+                drained.signal()
+            }
+        } else {
+            drained.signal()
         }
         var status: Int32
         if done.wait(timeout: .now() + timeout) == .timedOut {
@@ -102,9 +120,7 @@ public enum Shell {
         } else {
             status = p.terminationStatus
         }
-        // Drain what is left in the pipe.
-        pipe.fileHandleForReading.readabilityHandler = nil
-        if let rest = try? pipe.fileHandleForReading.readToEnd() { collected.append(rest) }
+        _ = drained.wait(timeout: .now() + drainLimit)
         return Result(status: status, output: String(decoding: collected.data, as: UTF8.self))
     }
 

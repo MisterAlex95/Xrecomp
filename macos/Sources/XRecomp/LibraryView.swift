@@ -209,7 +209,7 @@ struct Sidebar: View {
         p.canChooseDirectories = true
         p.canChooseFiles = true
         p.allowsMultipleSelection = false
-        p.message = "Choose a disc image (.iso) or a folder holding default.xbe"
+        p.message = "Choose a disc image (.iso, .xiso, .cso, .zso, .cci) or a folder holding default.xbe"
         if p.runModal() == .OK, let u = p.url { model.actions?.addGame(u) }
     }
 }
@@ -261,7 +261,7 @@ struct EmptyLibrary: View {
             VStack(alignment: .leading, spacing: Theme.s2) {
                 Image(systemName: "opticaldisc").font(.system(size: 34)).foregroundStyle(Theme.accent)
                 Text("No games found").font(.title3.weight(.semibold)).foregroundStyle(Theme.text)
-                Text("XRecomp looks for disc images (.iso) and folders holding default.xbe in "
+                Text("XRecomp looks for disc images (.iso, .cso…) and folders holding default.xbe in "
                      + (model.setup.libraryFolders.first ?? Settings.defaultLibrary)
                      + ". Add a folder in Setup, drop a game on this window, or use Add game….")
                     .foregroundStyle(Theme.textDim)

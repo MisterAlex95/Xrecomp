@@ -203,6 +203,21 @@ func registerGameChecks() {
     }
 
     // ---- logs, play time, storage --------------------------------------------------------------------------------
+    check("game: a crash's tail comes from its own run log") {
+        // The store shows this tail on « Stopped unexpectedly »; the live log can hold a prepare's output by then.
+        let (exe, d) = fakeGame("i=0; while [ $i -lt 60 ]; do echo out$i; i=$((i+1)); done; exit 3")
+        let sink = GameSink()
+        let log = d.appendingPathComponent("logs/run-1.log")
+        let g = GameRunner(.init(exe: exe, environment: ChildEnvironment.base(), log: log)) { sink.take($0) }
+        try g.start()
+        expect(waitFor(5) { sink.exit != nil })
+        expectEq(sink.exit?.0, .exited(3))
+        let tail = tailLines(log, 40)
+        expectEq(tail.count, 40)
+        expectEq(tail.first, "out21")
+        expect(tail.last?.hasPrefix("# ended: exit 3") == true, tail.last ?? "")
+    }
+
     check("logs: rotation keeps 10") {
         let r = RunLog(dir: tempDir("logs"))
         let base = Date(timeIntervalSince1970: 1_800_000_000)
@@ -227,6 +242,21 @@ func registerGameChecks() {
         expectEq(tailLines(t, 3), ["98", "99", "100"])
     }
 
+    check("logs: a failed log write is reported, not raised (full disk)") {
+        let f = tempDir("logw").appendingPathComponent("a.log")
+        write(f, "")
+        let w = try FileHandle(forWritingTo: f)
+        expect(appendLogLine("one", to: w))
+        try w.close()
+        expectEq(read(f), "one\n")
+        // A write the system refuses (here EBADF on a read-only handle; ENOSPC on a full disk) comes back as false:
+        // the legacy write(_:) raised an Objective-C exception there and the launcher aborted.
+        let r = try FileHandle(forReadingFrom: f)
+        expect(!appendLogLine("two", to: r))
+        try r.close()
+        expectEq(read(f), "one\n")
+    }
+
     check("state: play time and prepare record round trip") {
         let f = tempDir("state").appendingPathComponent("state.json")
         var r = TitleRecord.load(from: f)
@@ -240,6 +270,55 @@ func registerGameChecks() {
         try r.save(to: f)
         expectEq(TitleRecord.load(from: f), r)
         expectEq(r.runs, 2)
+    }
+
+    check("state: a torn state.json is kept aside, and writers use their own temporary file") {
+        let d = tempDir("state-bad")
+        let f = d.appendingPathComponent("state.json")
+        write(f, "{\"play_seconds\": 3600, \"runs\": ")
+        expectEq(TitleRecord.load(from: f), TitleRecord())
+        expectEq(read(d.appendingPathComponent("state.json.bad")), "{\"play_seconds\": 3600, \"runs\": ")
+        expect(!FileManager.default.fileExists(atPath: f.path))
+        // Two writers at once (a game app and XRecomp.app): each rename publishes a whole file.
+        let group = DispatchGroup()
+        for i in 0..<8 {
+            DispatchQueue.global().async(group: group) {
+                var r = TitleRecord(sourcePath: "/g/\(i).iso")
+                r.runs = i
+                try? r.save(to: f)
+            }
+        }
+        group.wait()
+        expect(TitleRecord.load(from: f).sourcePath?.hasPrefix("/g/") == true, read(f))
+        expect(!FileManager.default.fileExists(atPath: f.path + ".bad.bad"))
+        let names = (try FileManager.default.contentsOfDirectory(atPath: d.path)).sorted()
+        expectEq(names, ["state.json", "state.json.bad"])
+    }
+
+    check("state: keys written by the xrecomp command line survive the app's save") {
+        let f = tempDir("state-cli").appendingPathComponent("state.json")
+        // What tools/xrecomp writes (update_state: source_path, title, console, play time).
+        write(f, "{\n  \"console\": \"xbox\",\n  \"play_seconds\": 60.0,\n  \"runs\": 1,\n"
+                 + "  \"source_path\": \"/g/x.iso\",\n  \"title\": \"Synthetic Game\",\n"
+                 + "  \"extra\": {\"nested\": [1, true]}\n}\n")
+        var r = TitleRecord.load(from: f)
+        expectEq(r.runs, 1)
+        r.recordRun(seconds: 30)
+        r.enhancements = false
+        try r.save(to: f)
+        let back = (try JSONSerialization.jsonObject(with: Data(contentsOf: f))) as? [String: Any] ?? [:]
+        expectEq(back["title"] as? String, "Synthetic Game")
+        expectEq(back["console"] as? String, "xbox")
+        expectEq(((back["extra"] as? [String: Any])?["nested"] as? [Any])?.count, 2)
+        expectEq(back["runs"] as? Int, 2, "the app's own keys are the app's")
+        expectEq(back["enhancements"] as? Bool, false)
+        expectEq(TitleRecord.load(from: f), r)
+        // A key the app knows and has cleared is not brought back from the old file.
+        r.enhancements = nil
+        try r.save(to: f)
+        let again = (try JSONSerialization.jsonObject(with: Data(contentsOf: f))) as? [String: Any] ?? [:]
+        expectNil(again["enhancements"])
+        expectEq(again["title"] as? String, "Synthetic Game")
     }
 
     check("storage: sizes, deletes never follow the game link") {
@@ -272,7 +351,18 @@ func registerGameChecks() {
         expect(!FileManager.default.fileExists(atPath: t.save.path))
         try Storage.delete(.saves, t)   // already gone: no error
         expect(Storage.freeSpace(at: t.work)! > 0)
-        expectEq(Storage.estimate(sourceKind: .folder, sourceSize: 5), 2 << 30)
+        // A disc image is read in place (XBA-126): a first prepare needs the same 2 GB as a folder.
+        expectEq(Storage.prepareEstimate, 2 << 30)
+    }
+
+    check("storage: the Z: cache is the runtime's lower-case folder") {
+        let t = AppPaths(root: tempDir("zcache")).title("4541005b")
+        expectEq(Storage.url(.utilityCache, t).lastPathComponent, "4541005b")
+        expectEq(Storage.url(.utilityCache, t).deletingLastPathComponent().lastPathComponent, "Cache")
+        // Only an upper-case folder there (made by hand): that one, so its size and Delete still mean something.
+        write(t.save.appendingPathComponent("Cache/4541005B/z.bin"), "z")
+        let found = Storage.url(.utilityCache, t)
+        expect(FileManager.default.fileExists(atPath: found.appendingPathComponent("z.bin").path), found.path)
     }
 
     check("saves: import from command-line runs, never overwriting") {

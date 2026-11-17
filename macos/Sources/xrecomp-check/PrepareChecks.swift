@@ -291,4 +291,26 @@ func registerPrepareChecks() {
         write(w.appendingPathComponent("project/build/Synth"), "#!/bin/sh\n", executable: true)
         expectEq(TitleState.projectExe(work: w)?.lastPathComponent, "Synth")
     }
+
+    check("queue: order, one entry per title, a forced request is kept") {
+        var q = PrepareQueue()
+        expect(q.isEmpty)
+        q.enqueue("a", force: false)
+        q.enqueue("b", force: true)
+        q.enqueue("c", force: false)
+        expectEq(q.position(of: "b"), 2)
+        expectNil(q.position(of: "z"))
+        // Re-prepare… of a title already queued: same place, now forced; a plain request never drops the force.
+        q.enqueue("a", force: true)
+        q.enqueue("b", force: false)
+        expectEq(q.entries.map(\.id), ["a", "b", "c"])
+        expectEq(q.entries.map(\.force), [true, true, false])
+        expect(q.remove("b"))
+        expect(!q.remove("b"))
+        expectEq(q.position(of: "c"), 2)
+        expectEq(q.next(), PrepareQueue.Entry(id: "a", force: true))
+        expectEq(q.next(), PrepareQueue.Entry(id: "c", force: false))
+        expectNil(q.next())
+        expect(q.isEmpty)
+    }
 }

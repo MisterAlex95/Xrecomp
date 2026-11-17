@@ -1,7 +1,7 @@
 import Foundation
 
-/// settings.json: the launcher's global settings. Unknown keys are dropped on save; a missing or broken file reads as
-/// the defaults.
+/// settings.json: the launcher's global settings, shared with the `xrecomp` command line. Keys the app does not know
+/// are kept on save; a missing file reads as the defaults, and so does a broken one, once moved to settings.json.bad.
 public struct Settings: Codable, Equatable, Sendable {
     /// The repository checkout the launcher drives (docs/macos/launcher.md « Toolkit »); nil = found by itself.
     public var toolkitPath: String?
@@ -25,7 +25,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.globalDefaults = globalDefaults
     }
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case toolkitPath = "toolkit_path", libraryFolders = "library_folders", workRoot = "work_root"
         case pythonPath = "python_path", globalDefaults = "global_defaults"
     }
@@ -39,14 +39,20 @@ public struct Settings: Codable, Equatable, Sendable {
         globalDefaults = try c.decodeIfPresent([String: String].self, forKey: .globalDefaults) ?? [:]
     }
 
-    public static func load(from url: URL) -> Settings {
-        guard let data = try? Data(contentsOf: url),
-              let s = try? JSONDecoder().decode(Settings.self, from: data) else { return Settings() }
+    /// The settings at url. A file that does not decode is set aside (setAsideBroken) and `onBroken` gets the copy's
+    /// path, for the launcher to say so.
+    public static func load(from url: URL, onBroken: ((URL) -> Void)? = nil) -> Settings {
+        guard let data = try? Data(contentsOf: url) else { return Settings() }
+        guard let s = try? JSONDecoder().decode(Settings.self, from: data) else {
+            if let bad = setAsideBroken(url) { onBroken?(bad) }
+            return Settings()
+        }
         return s
     }
 
     public func save(to url: URL) throws {
-        try writeAtomically(try JSONEncoder.pretty.encode(self), to: url)
+        let known = Set(CodingKeys.allCases.map(\.rawValue))
+        try writeAtomically(try keepingUnknownKeys(try JSONEncoder.pretty.encode(self), of: url, known: known), to: url)
     }
 
     /// The library folders as absolute URLs (`~` expanded), duplicates removed, order kept.

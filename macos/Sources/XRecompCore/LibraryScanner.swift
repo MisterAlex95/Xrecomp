@@ -4,7 +4,7 @@ import Foundation
 public struct LibraryEntry: Codable, Equatable, Sendable, Identifiable {
     public enum Kind: String, Codable, Sendable {
         case folder   // a folder holding default.xbe (an extracted disc)
-        case image    // a .iso / .xiso disc image
+        case image    // a disc image (.iso, .xiso, .cso, .ciso, .zso, .cci, or a split part)
     }
 
     /// The source path, which prepare takes.
@@ -109,7 +109,7 @@ public struct Identity: Codable, Equatable, Sendable {
 }
 
 /// Finds games in the library folders, by content rather than by name: a folder holding default.xbe (any case) is a
-/// game, so is a .iso / .xiso file. Hidden entries and packages are skipped; the walk stops at `maxDepth` levels
+/// game, so is a disc image the pipeline reads (isImageName). Hidden entries and packages are skipped; the walk stops at `maxDepth` levels
 /// below each library folder and after `maxEntries` directory entries in all.
 public struct LibraryScanner {
     public typealias Identify = (URL) -> Result<Identity, IdentifyError>
@@ -132,7 +132,22 @@ public struct LibraryScanner {
         self.identifyImage = identifyImage
     }
 
-    public static let imageExtensions: Set<String> = ["iso", "xiso"]
+    /// The disc image extensions the pipeline reads (tools/xiso/source.py, EXTS).
+    public static let imageExtensions: Set<String> = ["iso", "xiso", "cso", "ciso", "zso", "cci"]
+
+    /// A name the pipeline takes for a disc image (tools/xiso/source.py, is_image_name): `Game.iso` with any of
+    /// imageExtensions, or a split image's first part named `Game.iso.1` / `Game.iso.001` / `Game.iso.0` (prepare
+    /// finds the other parts from it; later ones would only repeat the title). Parts named `Game.part2.iso` end in an
+    /// image extension and are taken: the scan keeps one entry per title ID.
+    public static func isImageName(_ name: String) -> Bool {
+        let low = name.lowercased() as NSString
+        let ext = low.pathExtension
+        if imageExtensions.contains(ext) { return true }
+        guard !ext.isEmpty, ext.count <= 4, ext.allSatisfy({ $0 >= "0" && $0 <= "9" }), let n = Int(ext), n <= 1 else {
+            return false
+        }
+        return imageExtensions.contains((low.deletingPathExtension as NSString).pathExtension)
+    }
 
     /// Every source under the folders (identified or not), in walk order; no dedupe.
     public mutating func findSources(in folders: [URL]) -> [(URL, LibraryEntry.Kind)] {
@@ -166,7 +181,7 @@ public struct LibraryScanner {
                 if depth < maxDepth - 1 || (depth < maxDepth && hasDefaultXbe(u)) {
                     walk(u, depth: depth + 1, &out, &seen)
                 }
-            } else if LibraryScanner.imageExtensions.contains(u.pathExtension.lowercased()) {
+            } else if LibraryScanner.isImageName(name) {
                 out.append((u, .image))
             }
         }

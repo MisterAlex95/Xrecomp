@@ -94,7 +94,7 @@ public final class PrepareRunner: @unchecked Sendable {
     private func log(_ s: String) {
         lock.lock()
         defer { lock.unlock() }
-        logHandle?.write(Data((s + "\n").utf8))
+        if let h = logHandle, !appendLogLine(s, to: h) { logHandle = nil }
     }
 
     private func line(_ s: String) {

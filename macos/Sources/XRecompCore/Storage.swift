@@ -17,10 +17,23 @@ public enum Storage {
         case .work: return t.work
         case .extractedDisc: return t.extractedGame
         case .saves: return t.save
-        case .utilityCache: return t.save.appendingPathComponent("Cache/\(t.titleId)", isDirectory: true)
+        case .utilityCache: return utilityCache(t)
         case .logs: return t.logs
         case .art: return t.art
         }
+    }
+
+    /// Z:, `<save>/Cache/<id>`: the runtime names it with the lower-case title ID (src/kernel/kernel_path.c,
+    /// utility_sub). The upper-case folder only when it alone exists (a tree made by hand); on a case-sensitive
+    /// volume the two differ.
+    public static func utilityCache(_ t: TitlePaths) -> URL {
+        let cache = t.save.appendingPathComponent("Cache", isDirectory: true)
+        let lower = cache.appendingPathComponent(t.titleId.lowercased(), isDirectory: true)
+        let upper = cache.appendingPathComponent(t.titleId.uppercased(), isDirectory: true)
+        if !FileManager.default.fileExists(atPath: lower.path) && FileManager.default.fileExists(atPath: upper.path) {
+            return upper
+        }
+        return lower
     }
 
     /// Bytes under url, symbolic links counted as links (their targets are not walked).
@@ -67,12 +80,9 @@ public enum Storage {
         return v?.volumeAvailableCapacityForImportantUsage
     }
 
-    /// What a first prepare needs: the extracted disc for an image (its size), plus about 2 GB of analysis,
-    /// generated C and build.
-    public static func estimate(sourceKind: LibraryEntry.Kind, sourceSize: Int64) -> Int64 {
-        let base: Int64 = 2 << 30
-        return sourceKind == .image ? base + sourceSize : base
-    }
+    /// What a first prepare needs: about 2 GB of analysis, generated C and build, for a folder or a disc image alike.
+    /// An image is read in place (XBA-126: the launcher never passes `--extract`), so its size does not count.
+    public static let prepareEstimate: Int64 = 2 << 30
 
     public static func format(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)

@@ -7,7 +7,8 @@ import Foundation
 ///       titles/<TID>/ work/ recomp.cfg save/ art.png theme.json logs/ state.json
 ///
 /// `XRECOMP_HOME` moves the whole tree (the checks and the smoke run use a temporary one). The work folders can
-/// live elsewhere (Settings.workRoot): an ISO source is extracted into `<work>/game`, several GB per title.
+/// live elsewhere (Settings.workRoot): about 2 GB per title of analysis, generated C and build. A disc image is read
+/// in place (XBA-126); only work folders made before that hold an extracted disc in `<work>/game`.
 public struct AppPaths: Sendable {
     public let root: URL
     /// The folder that holds `<TID>/` work folders when the player moved them; nil = under `titles/<TID>/work`.
@@ -52,7 +53,8 @@ public struct TitlePaths: Sendable {
 
     public var recompCfgDir: URL { dir }
     public var recompCfg: URL { dir.appendingPathComponent(RecompConfig.fileName) }
-    /// RECOMP_SAVE_DIR: UDATA/<TID>, TDATA/<TID>, Cache/<TID> (Z:).
+    /// RECOMP_SAVE_DIR: UDATA/<tid>, TDATA/<tid>, Cache/<tid> (Z:), the title ID in lower case as the runtime names
+    /// them (docs/technical/saves.md).
     public var save: URL { dir.appendingPathComponent("save", isDirectory: true) }
     public var art: URL { dir.appendingPathComponent("art.png") }
     public var theme: URL { dir.appendingPathComponent("theme.json") }
@@ -61,7 +63,7 @@ public struct TitlePaths: Sendable {
     public var prepareLog: URL { work.appendingPathComponent("prepare.log") }
     public var project: URL { work.appendingPathComponent("project", isDirectory: true) }
     public var build: URL { project.appendingPathComponent("build", isDirectory: true) }
-    /// The disc extracted by prepare (ISO sources only).
+    /// The disc a prepare extracted from an image before XBA-126 (or with `prepare --extract`); absent otherwise.
     public var extractedGame: URL { work.appendingPathComponent("game", isDirectory: true) }
     public var discovered: URL { work.appendingPathComponent("discovered.jsonl") }
 }
@@ -78,16 +80,53 @@ extension FileManager {
     }
 }
 
-/// Writes data through `<file>.tmp` and a rename, so a reader sees the old or the new file, never half of one.
+/// Writes data through a temporary file and a rename, so a reader sees the old or the new file, never half of one.
+/// The temporary name is the writer's own (`<file>.<pid>.<random>.tmp`): a game app and XRecomp.app share the data
+/// tree, and two writers on one `<file>.tmp` could publish each other's half-written bytes.
 public func writeAtomically(_ data: Data, to url: URL) throws {
     let fm = FileManager.default
     try fm.ensureDirectory(url.deletingLastPathComponent())
-    let tmp = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".tmp")
-    try data.write(to: tmp)
+    let tmp = url.deletingLastPathComponent()
+        .appendingPathComponent("\(url.lastPathComponent).\(getpid()).\(UUID().uuidString.prefix(8)).tmp")
+    do {
+        try data.write(to: tmp)
+    } catch {
+        try? fm.removeItem(at: tmp)
+        throw error
+    }
     if rename(tmp.path, url.path) != 0 {
         try? fm.removeItem(at: tmp)
         throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
     }
+}
+
+/// A file that exists but does not read as what it should be is moved to `<file>.bad` (replacing an older one), so the
+/// next save of the defaults does not overwrite what the player had (a hand edit with a syntax error). The `.bad`
+/// path, or nil when nothing was moved (an empty file holds nothing to keep).
+@discardableResult
+public func setAsideBroken(_ url: URL) -> URL? {
+    guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber,
+          size.intValue > 0 else { return nil }
+    let bad = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".bad")
+    return rename(url.path, bad.path) == 0 ? bad : nil
+}
+
+/// `encoded` (a JSON object) with the keys of the file now at url that `known` does not list put back. The `xrecomp`
+/// command line shares these files on a Mac (docs/desktop/cli.md « Storage ») and writes keys the app does not know
+/// (state.json's `title` and `console`): rewriting the file must not drop them. The file is read at save time, so a
+/// key written since the app loaded it survives too. `encoded` as it is when nothing is to be kept.
+public func keepingUnknownKeys(_ encoded: Data, of url: URL, known: Set<String>) throws -> Data {
+    guard let old = try? Data(contentsOf: url),
+          let oldObject = (try? JSONSerialization.jsonObject(with: old)) as? [String: Any] else { return encoded }
+    let extra = oldObject.filter { !known.contains($0.key) }
+    guard !extra.isEmpty, var object = (try JSONSerialization.jsonObject(with: encoded)) as? [String: Any] else {
+        return encoded
+    }
+    for (k, v) in extra where object[k] == nil { object[k] = v }
+    var data = try JSONSerialization.data(withJSONObject: object,
+                                          options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+    data.append(0x0A)
+    return data
 }
 
 public extension JSONEncoder {

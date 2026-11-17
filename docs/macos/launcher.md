@@ -32,13 +32,13 @@ games, Setup, Default settings, About) and the detail pane.
 
 | Screen | What it does |
 |---|---|
-| Library | A grid of cards: the title image (decoded from the game's own `default.xbe`) or a monogram, the name, one status line with a dot. Right-click: Settings, Manage, Show source in Finder. Drop an `.iso` or a game folder on the window, or use **Add game…**: its folder joins the library. |
+| Library | A grid of cards: the title image (decoded from the game's own `default.xbe`) or a monogram, the name, one status line with a dot. Right-click: Settings, Manage, Show source in Finder. Drop a disc image (`.iso`, `.xiso`, `.cso`, `.zso`, `.cci`) or a game folder on the window, or use **Add game…**: its folder joins the library. |
 | Home | The blurred title image behind, the title, one status line, a solid **Play** / **Prepare** / **Stop** and three quiet pills: Settings, Controls, Manage. Below: the prepare's progress or failure, a run's problem and log tail, the facts (title ID, source, size, play time, options the title forces). |
 | Preparing | Step *i* of 5 with its name, the overall bar, five step dots, the step's message (`compiling 12/345`), elapsed time, Show log. One prepare at a time, the others queued ("Queued (2)"). Cancel stops the whole process group; the next Prepare resumes. |
 | Prepare failed | The error code in words, prepare's message, the last 40 lines of `prepare.log`, Reveal log in Finder, Copy log. |
 | Settings | Per title, four tabs (General, Graphics, Audio, Advanced) over the [option table](#per-title-settings), saved to the title's `recomp.cfg` at once: each row « As in Default settings (value) » or the title's own value, with a « This game » badge ([Settings per game](#settings-per-game)); Graphics also has [frame generation's Lossless.dll](#frame-generation); Advanced has a free editor for your own lines. **Default settings** (sidebar) is the same screen for every title. |
 | Controls | The pad mapping the game gets (L1 = Black, R1 = White, View = Back) and the connected controller's name (GameController). |
-| Manage | Per title: the size of the work folder, the extracted disc, saves, the Z: cache, logs and the title image, each deletable after a confirmation and revealable in Finder; "Re-prepare…" (`--force`); "Import saves from command-line runs"; for a title the toolkit has optional enhancements for (`--check`'s `title_layer`), an **Enhancements** switch (on by default; off, the title's prepares and checks run with `--no-title-layer` / `XBA_NO_TITLE_LAYER=1`, kept in `state.json` `"enhancements": false`, and a build made the other way shows « Prepare again (enhancements or title profile changed) »); **Create an app for this game** ([Game apps](#game-apps)). |
+| Manage | Per title: the size of the work folder, saves, the Z: cache, logs and the title image (and an extracted disc, only in a work folder made before XBA-126), each deletable after a confirmation and revealable in Finder; "Re-prepare…" (`--force`); "Import saves from command-line runs"; for a title the toolkit has optional enhancements for (`--check`'s `title_layer`), an **Enhancements** switch (on by default; off, the title's prepares and checks run with `--no-title-layer` / `XBA_NO_TITLE_LAYER=1`, kept in `state.json` `"enhancements": false`, and a build made the other way shows « Prepare again (enhancements or title profile changed) »); **Create an app for this game** ([Game apps](#game-apps)). |
 | Log | The live output of the running game (or prepare), copyable; run logs are kept in `logs/`. |
 | Setup | The toolkit found (and from where), every dependency with the command that installs it, the Python environment (with **Create it**), the library folders, the work folder location. Shown first when the toolkit is not found. |
 | About | Version, the toolkit's commit, "No game data included", the licence texts read from the toolkit (`LICENSE`, `NOTICE`, `LICENSES/*.txt`). |
@@ -99,7 +99,7 @@ macos/
   Package.swift              swift-tools 5.9, macOS 14; no third-party packages
   Sources/XRecompCore/       all logic, Foundation (+ CoreGraphics/ImageIO for art), no SwiftUI
     Paths Settings Toolkit PythonEnv ChildEnvironment DependencyCheck      setup
-    PrepareProtocol PrepareRunner ProcessGroup TitleState                  prepare
+    PrepareProtocol PrepareRunner PrepareQueue ProcessGroup TitleState     prepare
     LibraryScanner LibraryIndex XbeInfo TitleArt Xpr Dxt Accent            library and art
     GameRunner RecompConfig OptionTable GameSettings Storage PlayTime      play, settings and storage
     SaveImport LsfgCache                                                    saves, frame generation's shader cache
@@ -151,28 +151,33 @@ defaults/recomp.cfg     Default settings
 lsfg-tool/              tools/lsfg built by « Choose Lossless.dll » (lsfg_translate), when the toolkit has no build/lsfg
 titles/<TID>/
   work/                 prepare --work: analysis, project, build, stamp.json, discovered.jsonl, prepare.log,
-                        launcher-prepare.log (prepare's stdout as the app saw it); game/ = the extracted disc
+                        launcher-prepare.log (prepare's stdout as the app saw it); an image is read in place,
+                        so game/ (an extracted disc) is only in work folders made before XBA-126
   recomp.cfg            the title's settings (the Android file format)
-  save/                 RECOMP_SAVE_DIR: UDATA/<TID>, TDATA/<TID>, Cache/<TID> (Z:)
+  save/                 RECOMP_SAVE_DIR: UDATA/<tid>, TDATA/<tid>, Cache/<tid> (Z:), the title ID in lower case
+                        as the runtime names them (technical/saves.md)
   art.png               the decoded title image
   logs/run-*.log        the last 10 runs
-  state.json            source path, last played, play time, runs, last prepare result
+  state.json            source path, last played, play time, runs, last prepare result, enhancements; the keys the
+                        xrecomp command line adds (title, console) are kept when the app saves
 ```
 
-- **Work folders can move** (Setup › Work folders) to another disk: an ISO source is extracted into `work/game`,
-  several GB per title. A folder source is only linked (`project/build/game` points at your folder).
+- **Work folders can move** (Setup › Work folders) to another disk: about 2 GB per title of analysis, generated C
+  and build. A disc image is read in place (XBA-126: `project/build/game` points at the image, the runtime mounts
+  it) and a folder source is only linked (`project/build/game` points at your folder): neither is copied.
 - **Deletes never follow a symbolic link**: deleting a work folder removes the link to your game folder, never the
   folder. Your ISOs and folders are only read.
 - **Frame generation's shader cache** is not under Application Support: it is the runtime's desktop default,
   `~/Library/Caches/xboxrecomp/lsfg` (`$RECOMP_LSFG_CACHE`), so a command-line run finds it too.
 - **Saves are per title** (`RECOMP_SAVE_DIR`), so "Delete saves" is one folder. The partition images and the GL
   shader cache stay in the runtime's default save dir (`~/.local/share/xboxrecomp`). Saves made by command-line runs
-  live there too (`UDATA/<TID>`): Manage › Import copies them in once, overwriting nothing.
+  live there too (`UDATA/<tid>`): Manage › Import copies them in once, overwriting nothing.
 
 ## Prepare, play, stop
 
 - **Scan**: every library folder (default `~/Documents/xbox`), 3 levels deep, by content: a folder holding
-  `default.xbe` (any case) or an `.iso`/`.xiso`. Images are identified with `python -m tools.prepare.identify`
+  `default.xbe` (any case) or a disc image the pipeline reads (`.iso`, `.xiso`, `.cso`, `.ciso`, `.zso`, `.cci`, or
+  a split image's first part, `Game.iso.1`). Images are identified with `python -m tools.prepare.identify`
   (cached in `library.json` by path, size and mtime); folders are read in Swift. A partial ISO (still being copied)
   is listed as "Not readable yet" and retried at the next scan. One entry per title ID: the first found wins, the
   others are listed under "Also at".
@@ -181,7 +186,7 @@ titles/<TID>/
   stale title can still be played.
 - **Prepare**: `python -u -m tools.prepare SOURCE --work titles/<TID>/work --progress` from the toolkit, in its own
   process group; the [Prepare interface](#prepare-interface) lines drive the screen. Before a first prepare the free
-  space is checked against an estimate (the image's size + 2 GB). **Cancel**: SIGTERM to the group, SIGKILL after
+  space is checked against an estimate of 2 GB (an image is read in place, so its size does not count). **Cancel**: SIGTERM to the group, SIGKILL after
   5 s.
 - **Play**: `work/project/build/<name>` (from `XBA_RESULT ok exe=` or `--check`), cwd its build folder, with the
   environment: the fixed PATH, then Default settings, then the title's `recomp.cfg` lines (first line for a key
@@ -321,8 +326,11 @@ Only for a prepared game (playable, as on Android): before that the row says « 
   and `LICENSES/` are unchanged. The only asset is the app icon, original art.
 - Title images, extracted XBEs and discs, generated C and logs stay in Application Support; nothing of a game enters
   the repo or the app. The checks use synthetic bytes and `tools/conformance/test.xbe` (ours).
-- Linux CI is unaffected: `macos/` is not referenced by the root `CMakeLists.txt` and holds no Python. There is no
-  macOS runner; `check.sh` is the local gate.
+- Linux CI is unaffected: `macos/` is not referenced by the root `CMakeLists.txt` and holds no Python.
+- Mac CI: Gitea's `.gitea/workflows/macos.yml` builds the toolkit's C libraries with AppleClang on the Mac runner at
+  every push to main (not the Swift package). The Swift package is built and checked by GitHub's
+  `.github/workflows/desktop.yml` (`check.sh`, then `build-app.sh`) on pushes to main and release tags of the public
+  mirror. `check.sh` on a Mac is the gate before a change lands.
 
 ## Prepare interface
 
@@ -335,8 +343,8 @@ what it printed before. Tests: `tools/prepare/test_desktop_progress.py`, `tools/
 
 ### 1. Identify a source: `python -m tools.prepare.identify SOURCE --json [--xbe-out FILE]`
 
-For the library scan. `SOURCE` is what prepare takes: a `.iso`/`.xiso`, a folder holding `default.xbe`, or a
-`default.xbe`. It reads only the XBE header and certificate; for an image only `default.xbe` is read, never the rest
+For the library scan. `SOURCE` is what prepare takes: a disc image (`.iso`/`.xiso`/`.cso`/`.zso`/`.cci`, or a split
+part), a folder holding `default.xbe`, or a `default.xbe`. It reads only the XBE header and certificate; for an image only `default.xbe` is read, never the rest
 of the disc. `--xbe-out FILE` writes the source's `default.xbe` to `FILE` (temp file + rename, any source kind) so
 the launcher can decode the `$$XTIMAGE` art from it. Nothing else is written. About 50 ms per source.
 
@@ -420,7 +428,7 @@ reader ignores keys it does not know (`eta=` may come later). `step` never goes 
 | 2 | `analyse` | 0, 2 xbe_parser, 5 disasm, 60 func_id, 80 abi_analysis, 100 done (or 100 "up to date") |
 | 3 | `project` | 0, 100 |
 | 4 | `lift` | 0, 100 (`msg` = C file counts, or "up to date") |
-| 5 | `build` | 0, 5 CMake configure, 5-90 from the build's `[i/n]` (Ninja) or `[ nn%]` (make) lines (`msg` = `compiling 12/345`, at most one line per percent or 2 s); with the toolkit's prebuilt runtime (no CMake, `tools/prepare/desktop_build.py`) 5-90 from the compile driver's files done (`msg` = `compiling 12/345`); 90 built, 90-98 extracting the disc (image sources), 98 the disc's other images, 100 ready |
+| 5 | `build` | 0, 5 CMake configure, 5-90 from the build's `[i/n]` (Ninja) or `[ nn%]` (make) lines (`msg` = `compiling 12/345`, at most one line per percent or 2 s); with the toolkit's prebuilt runtime (no CMake, `tools/prepare/desktop_build.py`) 5-90 from the compile driver's files done (`msg` = `compiling 12/345`); 90 built, 90-98 extracting the disc (only with `--extract`; by default an image is read in place), 98 the disc's other images, 100 ready |
 
 Error codes and exit status:
 

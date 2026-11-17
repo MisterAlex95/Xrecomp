@@ -93,12 +93,26 @@ func registerSetupChecks() {
         expectEq(back.libraryURLs.first?.path, NSHomeDirectory() + "/Documents/xbox")
         expect(read(f).contains("\"library_folders\""))
         write(f, "{\"toolkit_path\": ")
-        expectEq(Settings.load(from: f), Settings())
+        var setAside: URL?
+        expectEq(Settings.load(from: f, onBroken: { setAside = $0 }), Settings())
+        // The broken file is kept aside, not overwritten by the next save of the defaults.
+        expectEq(setAside?.lastPathComponent, "settings.json.bad")
+        expectEq(read(d.appendingPathComponent("settings.json.bad")), "{\"toolkit_path\": ")
+        try Settings().save(to: f)
+        expectEq(read(d.appendingPathComponent("settings.json.bad")), "{\"toolkit_path\": ")
+        let leftovers = (try FileManager.default.contentsOfDirectory(atPath: d.path)).filter { $0.hasSuffix(".tmp") }
+        expectEq(leftovers, [], "no temporary file left")
         // Unknown keys are tolerated, missing ones defaulted.
         write(f, "{\"toolkit_path\": \"/t\", \"future\": 3}")
         let partial = Settings.load(from: f)
         expectEq(partial.toolkitPath, "/t")
         expectEq(partial.libraryFolders, ["~/Documents/xbox"])
+        // ... and kept on save (the xrecomp command line shares the file).
+        var changed = partial
+        changed.workRoot = "/w"
+        try changed.save(to: f)
+        expect(read(f).contains("\"future\""), read(f))
+        expectEq(Settings.load(from: f), changed)
     }
 
     check("paths: XRECOMP_HOME, title layout, work root") {
@@ -185,5 +199,19 @@ func registerSetupChecks() {
         expectEq(slow.status, -2)
         expect(Date().timeIntervalSince(t0) < 4)
         expectEq(Shell.run("/nonexistent/x", []).status, -1)
+    }
+
+    check("shell: a grandchild holding the pipe does not hold the call past its timeout") {
+        let t0 = Date()
+        let r = Shell.run("/bin/sh", ["-c", "echo started; sleep 30 & sleep 30"], timeout: 1)
+        expectEq(r.status, -2)
+        expect(Date().timeIntervalSince(t0) < 6, "returned after \(Date().timeIntervalSince(t0)) s")
+        expect(r.output.contains("started"), r.output)
+        // A normal exit still returns everything the child wrote, in order.
+        let many = Shell.run("/bin/sh", ["-c", "i=0; while [ $i -lt 2000 ]; do echo line$i; i=$((i+1)); done"])
+        expectEq(many.status, 0)
+        let lines = many.output.split(separator: "\n")
+        expectEq(lines.count, 2000)
+        expectEq(lines.last.map(String.init), "line1999")
     }
 }
