@@ -142,9 +142,13 @@ protocol LauncherActions: AnyObject {
     func stop(_ id: String)
     func loadConfig(_ id: String?) -> RecompConfig
     func saveConfig(_ config: RecompConfig, for id: String?)
-    func storage(_ id: String) -> [(Storage.Item, Int64)]
-    func delete(_ item: Storage.Item, of id: String)
-    func importSaves(_ id: String) -> Int
+    /// The title's storage, measured off the main thread (a work folder is GBs of build tree); `done` on the main
+    /// thread.
+    func storage(_ id: String, done: @escaping ([(Storage.Item, Int64)]) -> Void)
+    /// Deletes off the main thread; `done` on the main thread once it is gone (a failure is a notice).
+    func delete(_ item: Storage.Item, of id: String, done: @escaping () -> Void)
+    /// Copies command-line saves off the main thread; `done` gets the folders copied, nil on a failure (a notice).
+    func importSaves(_ id: String, done: @escaping (Int?) -> Void)
     /// The title's optional enhancements on or off for its next prepare (profile-free WP6).
     func setEnhancements(_ id: String, on: Bool)
     /// « Create an app for this game »: `<Game title>.app` at url (docs/macos/launcher.md « Game apps »).

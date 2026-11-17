@@ -12,21 +12,39 @@ struct ManageView: View {
     @Local private var sizes: [(Storage.Item, Int64)] = []
     @Local private var confirm: Storage.Item?
     @Local private var confirmForce = false
+    /// Sizes being measured, or a delete / import running (off the main thread, AppStore.storageWork).
+    @Local private var measuring = false
+    @Local private var working = false
 
     private var game: GameItem? { model.game(gameId) }
+
+    /// The extracted disc and the Z: cache are inside the work folder and the saves: not counted twice.
+    private var total: Int64 {
+        sizes.filter { $0.0 != .extractedDisc && $0.0 != .utilityCache }.map(\.1).reduce(0, +)
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.s3) {
                 PageHeader(title: (game?.name ?? "Game") + " · Manage",
-                           subtitle: "Total \(Storage.format(sizes.filter { $0.0 != .extractedDisc && $0.0 != .utilityCache }.map(\.1).reduce(0, +)))"
+                           subtitle: (sizes.isEmpty && measuring ? "Measuring…" : "Total \(Storage.format(total))")
                                      + " · the game's own files are never touched",
                            back: { model.route = .home(gameId) }) {
                     Button { refresh() } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(PillButtonStyle(compact: true))
+                        .disabled(measuring || working)
                 }
                 Panel(padding: 0) {
                     VStack(spacing: 0) {
+                        if sizes.isEmpty && measuring {
+                            HStack(spacing: Theme.s2) {
+                                ProgressView().controlSize(.small)
+                                Text("Measuring…").foregroundStyle(Theme.textDim)
+                                Spacer()
+                            }
+                            .padding(.horizontal, Theme.s2)
+                            .padding(.vertical, 10)
+                        }
                         ForEach(Array(sizes.enumerated()), id: \.offset) { i, s in
                             row(s.0, s.1)
                             if i < sizes.count - 1 { Divider().overlay(Theme.lineSoft) }
@@ -48,7 +66,7 @@ struct ManageView: View {
                             }
                             Spacer()
                             Button("Re-prepare…") { confirmForce = true }.buttonStyle(PillButtonStyle())
-                                .disabled(game?.runningSince != nil || game?.prepare != nil)
+                                .disabled(game?.runningSince != nil || game?.prepare != nil || working)
                         }
                         Divider().overlay(Theme.lineSoft)
                         HStack {
@@ -59,11 +77,15 @@ struct ManageView: View {
                             }
                             Spacer()
                             Button("Import") {
-                                let n = model.actions?.importSaves(gameId) ?? 0
-                                model.notice = n == 0 ? "No saves to import." : "Imported \(n) save folder(s)."
-                                refresh()
+                                working = true
+                                model.actions?.importSaves(gameId) { n in
+                                    working = false
+                                    if let n { model.notice = n == 0 ? "No saves to import." : "Imported \(n) save folder(s)." }
+                                    refresh()
+                                }
                             }
                             .buttonStyle(PillButtonStyle())
+                            .disabled(working || game?.runningSince != nil)
                         }
                         if model.singleTitle == nil && game?.titleId != nil {
                             Divider().overlay(Theme.lineSoft)
@@ -81,9 +103,14 @@ struct ManageView: View {
                             isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } }),
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
-                if let c = confirm { model.actions?.delete(c, of: gameId) }
+                if let c = confirm {
+                    working = true
+                    model.actions?.delete(c, of: gameId) {
+                        working = false
+                        refresh()
+                    }
+                }
                 confirm = nil
-                refresh()
             }
         } message: {
             Text(confirm.map(consequence) ?? "")
@@ -162,7 +189,7 @@ struct ManageView: View {
                 Text(note(item)).font(.caption).foregroundStyle(Theme.textFaint)
             }
             Spacer()
-            Text(size == 0 ? "—" : Storage.format(size)).monospacedDigit().foregroundStyle(Theme.textDim)
+            Text(measuring ? "…" : size == 0 ? "—" : Storage.format(size)).monospacedDigit().foregroundStyle(Theme.textDim)
                 .frame(minWidth: 70, alignment: .trailing)
             Button { if let p = model.actions?.titlePaths(gameId) { model.actions?.reveal(Storage.url(item, p)) } } label: {
                 Image(systemName: "folder")
@@ -173,7 +200,7 @@ struct ManageView: View {
             Button { confirm = item } label: { Image(systemName: "trash") }
                 .buttonStyle(PillButtonStyle(compact: true, tint: Theme.error))
                 .help("Delete")
-                .disabled(size == 0 || game?.runningSince != nil || isPreparing)
+                .disabled(size == 0 || game?.runningSince != nil || isPreparing || working)
         }
         .padding(.horizontal, Theme.s2)
         .padding(.vertical, 10)
@@ -214,7 +241,13 @@ struct ManageView: View {
         }
     }
 
+    /// Measured off the main thread: opening Manage on a large title no longer stalls the window.
     private func refresh() {
-        sizes = model.actions?.storage(gameId) ?? []
+        guard let actions = model.actions else { return }
+        measuring = true
+        actions.storage(gameId) { s in
+            sizes = s
+            measuring = false
+        }
     }
 }

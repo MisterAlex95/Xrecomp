@@ -203,12 +203,15 @@ final class PreviewStore: LauncherActions {
     func stop(_ id: String) { model.update(id) { $0.runningSince = nil } }
     func loadConfig(_ id: String?) -> RecompConfig { configs[id ?? "_"] ?? RecompConfig() }
     func saveConfig(_ config: RecompConfig, for id: String?) { configs[id ?? "_"] = config }
-    func storage(_ id: String) -> [(Storage.Item, Int64)] {
-        [(.work, 9_812_000_000), (.extractedDisc, 3_100_000_000), (.saves, 1_420_000), (.utilityCache, 880_000),
-         (.logs, 2_300_000), (.art, 21_000)]
+    func storage(_ id: String, done: @escaping ([(Storage.Item, Int64)]) -> Void) {
+        done([(.work, 9_812_000_000), (.extractedDisc, 3_100_000_000), (.saves, 1_420_000), (.utilityCache, 880_000),
+              (.logs, 2_300_000), (.art, 21_000)])
     }
-    func delete(_ item: Storage.Item, of id: String) { model.notice = "Demo mode: nothing deleted." }
-    func importSaves(_ id: String) -> Int { 0 }
+    func delete(_ item: Storage.Item, of id: String, done: @escaping () -> Void) {
+        model.notice = "Demo mode: nothing deleted."
+        done()
+    }
+    func importSaves(_ id: String, done: @escaping (Int?) -> Void) { done(0) }
     func setEnhancements(_ id: String, on: Bool) { model.update(id) { $0.record.enhancements = on ? nil : false } }
     func createTitleApp(_ id: String, at url: URL) {
         model.notice = "Demo mode: \(url.lastPathComponent) would be made in \(url.deletingLastPathComponent().path)."

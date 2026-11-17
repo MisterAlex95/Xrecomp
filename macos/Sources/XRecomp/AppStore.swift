@@ -25,6 +25,10 @@ final class AppStore: LauncherActions {
     /// A rescan asked for while one ran (a folder dropped, Setup found Python): run again once it ends.
     private var rescanPending = false
     private let work = DispatchQueue(label: "xrecomp.store", qos: .userInitiated)
+    /// Manage's walks, deletes and save imports: multi-GB trees, never on the main thread, nor behind a scan.
+    private let storageWork = DispatchQueue(label: "xrecomp.storage", qos: .userInitiated)
+    /// Titles with a delete or a save import running: no prepare or game for them until it ends.
+    private var storageBusy = Set<String>()
 
     init() {
         settings = Settings.load(from: basePaths.settingsFile)
@@ -293,6 +297,9 @@ final class AppStore: LauncherActions {
             model.route = .setup
             return
         }
+        guard !storageBusy.contains(id) else {
+            return model.notice = "\(g.name): wait for the delete or the save import to finish."
+        }
         let t = paths.title(tid)
         // A first prepare of an image extracts the disc: check the room for it.
         if g.status == .absent, let free = Storage.freeSpace(at: t.work) {
@@ -411,6 +418,9 @@ final class AppStore: LauncherActions {
     func play(_ id: String) {
         guard game == nil else { return model.notice = "Another game is running: stop it first." }
         guard let g = model.game(id), let tid = g.titleId, let exe = g.exe else { return }
+        guard !storageBusy.contains(id) else {
+            return model.notice = "\(g.name): wait for the delete or the save import to finish."
+        }
         let t = paths.title(tid)
         let cfg = RecompConfig.load(dir: t.recompCfgDir)
         let defaults = loadConfig(nil).activePairs.reduce(into: [String: String]()) { $0[$1.key] = $1.value }
@@ -542,20 +552,36 @@ final class AppStore: LauncherActions {
 
     // ---- storage -------------------------------------------------------------------------------------------------
 
-    func storage(_ id: String) -> [(Storage.Item, Int64)] {
-        guard let t = titlePaths(id) else { return [] }
-        return Storage.sizes(t)
+    func storage(_ id: String, done: @escaping ([(Storage.Item, Int64)]) -> Void) {
+        guard let t = titlePaths(id) else { return done([]) }
+        storageWork.async {
+            let sizes = Storage.sizes(t)
+            DispatchQueue.main.async { done(sizes) }
+        }
     }
 
-    func delete(_ item: Storage.Item, of id: String) {
-        guard let t = titlePaths(id) else { return }
-        if game?.id == id || preparing?.id == id { return model.notice = "Stop the game or the prepare first." }
-        do {
-            try Storage.delete(item, t)
-        } catch {
-            model.notice = "Cannot delete: \(error.localizedDescription)"
+    func delete(_ item: Storage.Item, of id: String, done: @escaping () -> Void) {
+        guard let t = titlePaths(id) else { return done() }
+        if game?.id == id || preparing?.id == id || queue.position(of: id) != nil || storageBusy.contains(id) {
+            model.notice = "Stop the game or the prepare first."
+            return done()
         }
-        if item == .work || item == .extractedDisc { refreshState(id) }
+        storageBusy.insert(id)
+        storageWork.async {
+            let problem: String?
+            do {
+                try Storage.delete(item, t)
+                problem = nil
+            } catch {
+                problem = error.localizedDescription
+            }
+            DispatchQueue.main.async { [self] in
+                storageBusy.remove(id)
+                if let problem { model.notice = "Cannot delete: \(problem)" }
+                if item == .work || item == .extractedDisc { refreshState(id) }
+                done()
+            }
+        }
     }
 
     func setEnhancements(_ id: String, on: Bool) {
@@ -571,11 +597,27 @@ final class AppStore: LauncherActions {
         refreshState(id)     // a build made the other way is stale now: Home offers Prepare again
     }
 
-    func importSaves(_ id: String) -> Int {
-        guard let t = titlePaths(id) else { return 0 }
-        do { return try SaveImport.run(titleId: t.titleId, to: t.save) } catch {
-            model.notice = "Import failed: \(error.localizedDescription)"
-            return 0
+    func importSaves(_ id: String, done: @escaping (Int?) -> Void) {
+        guard let t = titlePaths(id) else { return done(0) }
+        if game?.id == id || storageBusy.contains(id) {
+            model.notice = "Stop the game first: it writes these saves."
+            return done(nil)
+        }
+        storageBusy.insert(id)
+        storageWork.async {
+            let count: Int?, problem: String?
+            do {
+                count = try SaveImport.run(titleId: t.titleId, to: t.save)
+                problem = nil
+            } catch {
+                count = nil
+                problem = error.localizedDescription
+            }
+            DispatchQueue.main.async { [self] in
+                storageBusy.remove(id)
+                if let problem { model.notice = "Import failed: \(problem)" }
+                done(count)
+            }
         }
     }
 
