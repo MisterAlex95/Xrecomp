@@ -108,14 +108,17 @@ int recomp_states_write(const char *path, const recomp_state_meta *meta, const u
     put16(hdr + 90, (uint32_t)th);
     put32(hdr + 92, (uint32_t)blob_n);
 
+    /* A path that does not fit is refused: cut short, the folder made would be another one and the temporary
+     * file could be the slot itself (callers hold paths of up to 1200 bytes). */
     char dir[1024], tmp[1100];
-    snprintf(dir, sizeof dir, "%s", path);
+    if (snprintf(dir, sizeof dir, "%s", path) >= (int)sizeof dir
+        || snprintf(tmp, sizeof tmp, "%s.tmp", path) >= (int)sizeof tmp)
+        return RECOMP_STATE_EIO;
     char *slash = strrchr(dir, '/');
     if (slash) {
         *slash = 0;
         mkdirs(dir);
     }
-    snprintf(tmp, sizeof tmp, "%s.tmp", path);
     FILE *f = fopen(tmp, "wb");
     if (!f)
         return RECOMP_STATE_EIO;
