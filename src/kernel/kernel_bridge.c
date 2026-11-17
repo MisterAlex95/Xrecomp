@@ -5081,6 +5081,18 @@ static uint32_t bridge_handle_token_ex(HANDLE h, int fresh)
 {
     uint32_t i;
     if (!h || h == INVALID_HANDLE_VALUE) return 0;
+    /* The current-thread pseudo-handle names whichever thread uses it: in
+     * the table it would follow every later caller, and a save state cannot
+     * carry it. Nothing should hand it over; refuse it if something does. */
+    if (h == (HANDLE)(intptr_t)-2) {
+        static int logged = 0;
+        if (!logged++) {
+            fprintf(stderr, "  [BRIDGE] refusing to tokenize the current-thread "
+                    "pseudo-handle\n");
+            fflush(stderr);
+        }
+        return 0;
+    }
     handle_lock();
     for (i = 1; !fresh && i < s_handle_hi; i++)
         if (s_handle_table[i] == h) {
@@ -8497,8 +8509,26 @@ static void bridge_NtDuplicateObject(void)
         g_eax = 0;
         return;
     }
+    /* The current-thread pseudo-handle back is no duplicate: it names
+     * whoever holds it, not this thread, and in the table it made every
+     * save-state capture refuse. A host that cannot give the thread a real
+     * handle fails the call, and no token is allocated. */
+    if (dup == (HANDLE)(intptr_t)-2) {
+        static int logged = 0;
+        if (!logged++) {
+            fprintf(stderr, "  [KERNEL] NtDuplicateObject: token=0x%08X: the "
+                    "host returned the current-thread pseudo-handle; "
+                    "failing\n", STACK_ARG(0));
+            fflush(stderr);
+        }
+        g_eax = 0xC0000001u;   /* STATUS_UNSUCCESSFUL */
+        return;
+    }
     BRIDGE_MEM32(target_va) = bridge_handle_token_ex(dup, 1);
-    thobj_attach_token(BRIDGE_MEM32(target_va), thobj_from_token(STACK_ARG(0)));
+    /* NtCurrentThread() is no table token: its thread is the caller's. */
+    thobj_attach_token(BRIDGE_MEM32(target_va),
+                       STACK_ARG(0) == 0xFFFFFFFEu ? thobj_current()
+                                                   : thobj_from_token(STACK_ARG(0)));
     if (opts & DUPLICATE_CLOSE_SOURCE)
         thobj_detach_token(STACK_ARG(0));
     g_eax = 0;
