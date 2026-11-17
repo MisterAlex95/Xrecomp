@@ -17,10 +17,23 @@ public enum Storage {
         case .work: return t.work
         case .extractedDisc: return t.extractedGame
         case .saves: return t.save
-        case .utilityCache: return t.save.appendingPathComponent("Cache/\(t.titleId)", isDirectory: true)
+        case .utilityCache: return utilityCache(t)
         case .logs: return t.logs
         case .art: return t.art
         }
+    }
+
+    /// Z:, `<save>/Cache/<id>`: the runtime names it with the lower-case title ID (src/kernel/kernel_path.c,
+    /// utility_sub). The upper-case folder only when it alone exists (a tree made by hand); on a case-sensitive
+    /// volume the two differ.
+    public static func utilityCache(_ t: TitlePaths) -> URL {
+        let cache = t.save.appendingPathComponent("Cache", isDirectory: true)
+        let lower = cache.appendingPathComponent(t.titleId.lowercased(), isDirectory: true)
+        let upper = cache.appendingPathComponent(t.titleId.uppercased(), isDirectory: true)
+        if !FileManager.default.fileExists(atPath: lower.path) && FileManager.default.fileExists(atPath: upper.path) {
+            return upper
+        }
+        return lower
     }
 
     /// Bytes under url, symbolic links counted as links (their targets are not walked).

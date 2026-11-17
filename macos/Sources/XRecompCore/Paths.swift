@@ -53,7 +53,8 @@ public struct TitlePaths: Sendable {
 
     public var recompCfgDir: URL { dir }
     public var recompCfg: URL { dir.appendingPathComponent(RecompConfig.fileName) }
-    /// RECOMP_SAVE_DIR: UDATA/<TID>, TDATA/<TID>, Cache/<TID> (Z:).
+    /// RECOMP_SAVE_DIR: UDATA/<tid>, TDATA/<tid>, Cache/<tid> (Z:), the title ID in lower case as the runtime names
+    /// them (docs/technical/saves.md).
     public var save: URL { dir.appendingPathComponent("save", isDirectory: true) }
     public var art: URL { dir.appendingPathComponent("art.png") }
     public var theme: URL { dir.appendingPathComponent("theme.json") }

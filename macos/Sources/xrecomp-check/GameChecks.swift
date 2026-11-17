@@ -306,6 +306,16 @@ func registerGameChecks() {
         expectEq(Storage.prepareEstimate, 2 << 30)
     }
 
+    check("storage: the Z: cache is the runtime's lower-case folder") {
+        let t = AppPaths(root: tempDir("zcache")).title("4541005b")
+        expectEq(Storage.url(.utilityCache, t).lastPathComponent, "4541005b")
+        expectEq(Storage.url(.utilityCache, t).deletingLastPathComponent().lastPathComponent, "Cache")
+        // Only an upper-case folder there (made by hand): that one, so its size and Delete still mean something.
+        write(t.save.appendingPathComponent("Cache/4541005B/z.bin"), "z")
+        let found = Storage.url(.utilityCache, t)
+        expect(FileManager.default.fileExists(atPath: found.appendingPathComponent("z.bin").path), found.path)
+    }
+
     check("saves: import from command-line runs, never overwriting") {
         let old = tempDir("xdg"), save = tempDir("save")
         write(old.appendingPathComponent("UDATA/4541005B/slot/a.sav"), "old save")
