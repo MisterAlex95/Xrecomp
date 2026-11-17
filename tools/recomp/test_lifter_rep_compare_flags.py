@@ -158,7 +158,7 @@ def _build_and_run(sources):
         src = Path(temp) / "t.c"
         src.write_text(code)
         exe = Path(temp) / "t"
-        built = subprocess.run([cc, "-O1", str(src), "-o", str(exe)],
+        built = subprocess.run([cc, "-O2", str(src), "-o", str(exe)],
                                capture_output=True, text=True)
         assert built.returncode == 0, built.stderr
         return subprocess.run([str(exe)], capture_output=True, text=True)
@@ -171,9 +171,9 @@ def test_rep_compare_matches_x86_for_every_count_and_order():
 
 
 def test_negative_control_without_cf_the_order_is_lost():
-    srcs = {n: re.sub(r"\n\s*_cf = \(M[^\n]*;", "", s)
+    srcs = {n: s.replace(" _cf = (_x < _y);", "")
             for n, s in _generated().items()}
-    assert all("_cf = (M" not in s for s in srcs.values())
+    assert all("_cf = (_x" not in s for s in srcs.values())
     ran = _build_and_run(srcs)
     assert ran.returncode == 1, "dropping CF should make a -1 come out +1"
     assert "want -1" in ran.stderr, ran.stderr
@@ -186,6 +186,15 @@ def test_negative_control_without_the_zf_preload_a_zero_count_fails():
     ran = _build_and_run(srcs)
     assert ran.returncode == 1, "a zero count should then read 'not equal'"
     assert "count 0" in ran.stderr, ran.stderr
+
+
+def test_each_element_is_read_once_when_cf_is_tracked():
+    # The accessors are volatile: `_flags = (A == B); _cf = (A < B);` read
+    # every element twice. Both answers now come from one read of each.
+    for name, code in _generated().items():
+        assert code.count("MEM8(edi)") + code.count("MEM16(edi)") \
+            + code.count("MEM32(edi)") == 1, (name, code)
+        assert "_flags = (_x == _y); _cf = (_x < _y);" in code, code
 
 
 def test_cf_is_only_computed_where_the_function_reads_it():

@@ -34,9 +34,11 @@ def _sar(dst, cnt):
     insn.operands = [dst, cnt]
     lifted = Lifter().lift_instruction(insn)
     # needs_cf is off, so the statements are the write and the result
-    # snapshot the condition reads -- see Lifter._result_snapshot. The sweep
-    # is about the write; the snapshot rides along harmlessly.
-    assert len(lifted) == 2, lifted
+    # snapshot the condition reads -- see Lifter._result_snapshot -- and, for
+    # a register count, the record of whether it was zero (_shz), which
+    # guards the snapshot. The sweep is about the write; the rest rides
+    # along harmlessly.
+    assert len(lifted) == (2 if cnt.type == "imm" else 3), lifted
     return " ".join(lifted)
 
 
@@ -69,6 +71,7 @@ PRELUDE = r"""
    has since overwritten. */
 static uint32_t _fa, _fb;
 static int32_t _fas, _fbs;
+static int _shz;
 static uint8_t g_ram[64];
 #define MEM8(a)  (*(volatile uint8_t *)(g_ram + (a)))
 #define MEM16(a) (*(volatile uint16_t *)(g_ram + (a)))

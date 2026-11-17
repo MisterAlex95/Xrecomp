@@ -226,6 +226,13 @@ CASES = [
     # -- arithmetic ----------------------------------------------------------
     Case("imul_32", "signed multiply, low half",
          ["imul eax, ecx"], _PAIRS),
+    # The product wraps on x86; a signed C multiply that overflows is
+    # undefined, and gcc -O2 once folded this sign test into ecx's sign.
+    Case("imul_imm_sign", "imul's wrapped product decides the sign test",
+         ["imul eax, ecx, 3", "test eax, eax", "sets al", "movzx eax, al"],
+         [(0, b) for b in _EDGES + [0x30000000, 0x2AAAAAAB, 0xD5555556]]),
+    Case("imul_16", "16-bit imul: sign-extended words, low word kept",
+         ["imul ax, cx"], _PAIRS),
     Case("add_adc_64", "the 64-bit add idiom: add produces carry, adc consumes",
          ["add eax, ecx", "adc edx, 0", "mov eax, edx"], _PAIRS),
     Case("sub_sbb_64", "the 64-bit subtract idiom",
@@ -527,6 +534,32 @@ CASES = [
             "sete al", "movzx eax, al", "emms"], [(0, 0), (1, 0)])
       for op in ("paddusw", "psubusw")],
 
+    # Flags read after something changed what produced them: CF is the bit
+    # bt saw, not a re-read of the overwritten register; rotates write CF
+    # and keep ZF/SF/PF; shld/shrd/imul/xadd produce CF for an adc/rcr; a
+    # shift by cl = 0 (or 32) changes no flag.
+    Case("bt_then_overwrite", "bt's CF is the bit it tested, after a mov",
+         ["bt eax, 3", "mov eax, ecx", "setc al", "movzx eax, al"], _PAIRS),
+    Case("test_rol_setz", "rol keeps the ZF of the test before it",
+         ["test eax, eax", "rol ecx, 1", "setz al", "movzx eax, al"], _PAIRS),
+    Case("rol_adc", "rol's CF feeds adc",
+         ["stc", "rol eax, 1", "mov eax, 0", "adc eax, 0"], _PAIRS),
+    Case("ror8_setc", "ror al: CF is the byte's top bit",
+         ["ror al, 1", "setc al", "movzx eax, al"], _PAIRS),
+    Case("shrd_rcr", "shrd's last bit out feeds rcr",
+         ["stc", "shrd eax, ecx, 1", "rcr edx, 1", "mov eax, edx"], _PAIRS),
+    Case("imul_adc", "2-operand imul's CF (product did not fit) feeds adc",
+         ["stc", "imul eax, ecx", "mov eax, 0", "adc eax, 0"], _PAIRS),
+    Case("xadd_setc", "xadd's CF is the carry of the sum",
+         ["xadd eax, ecx", "setc al", "movzx eax, al"], _PAIRS),
+    Case("cmp_shl_cl_setz", "shl by cl = 0 or 32 keeps the cmp's ZF",
+         ["cmp eax, eax", "mov edx, 5", "shl edx, cl", "setz al",
+          "movzx eax, al"],
+         [(0, b) for b in (0, 1, 2, 31, 32, 33, 0x100)]),
+    Case("cmp_sar_cl_setl", "sar by cl = 0 keeps the cmp's SF != OF",
+         ["cmp eax, 1", "mov edx, 0xFFFFFFFE", "sar edx, cl", "setl al",
+          "movzx eax, al"],
+         [(a, b) for a in (0, 1, 2, 0x80000000) for b in (0, 1, 32)]),
     # bt/btr/bts/btc are 386 instructions, so real Xbox code has them. They
     # were unhandled until the corpus lifted the CRT's float-to-int helper,
     # which uses btr to clear a rounding-control bit of the x87 control word.

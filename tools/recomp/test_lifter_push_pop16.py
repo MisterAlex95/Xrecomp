@@ -73,3 +73,42 @@ class RuntimeTest(unittest.TestCase):
         # kept its high half; [edi] took 0x1234 into its low word only; the
         # 32-bit pair is untouched by the word traffic around it.
         self.assertEqual(out, ["8000", "BBBB5678", "DDDD1234", "AAAA1234"])
+
+
+class EdgeEncodingsTest(unittest.TestCase):
+    """Real bytes, translated as a function, built at -O2, run.
+
+    `push word ptr [esp+4]` computed its source after esp moved (2 bytes
+    too low), and `pushw imm` (66 6A / 66 68) pushed 4 bytes, because an
+    immediate is never a "word operand".
+    """
+
+    def setUp(self):
+        from .lift_fixture import gnu_cc
+        if not gnu_cc():
+            self.skipTest("no GNU C compiler available")
+
+    def test_word_pushes(self):
+        from .lift_fixture import build_and_run, translate
+        cases = {
+            # push word ptr [esp+4] ; pop ax ; ret
+            "push_mem16": "66ff742404 6658 c3",
+            # pushw 5 ; pop ax ; ret
+            "push_imm8_16": "666a05 6658 c3",
+            # pushw 0x1234 ; pop ax ; ret
+            "push_imm16": "66683412 6658 c3",
+        }
+        functions = [translate(h, name=n) for n, h in cases.items()]
+        body = """
+    int bad = 0;
+    guest_reset(); eax = 0xAAAA0000u;
+    MEM16(0x8002) = 0xBEEF; MEM16(0x8004) = 0x1234;
+    push_mem16();
+    if (eax != 0xAAAA1234u || esp != 0x8004u) { printf("mem16 %08X %08X\\n", eax, esp); bad++; }
+    guest_reset(); eax = 0xAAAA0000u; push_imm8_16();
+    if (eax != 0xAAAA0005u || esp != 0x8004u) { printf("imm8 %08X %08X\\n", eax, esp); bad++; }
+    guest_reset(); eax = 0xAAAA0000u; push_imm16();
+    if (eax != 0xAAAA1234u || esp != 0x8004u) { printf("imm16 %08X %08X\\n", eax, esp); bad++; }
+    return bad != 0;"""
+        rc, out = build_and_run(functions, body)
+        self.assertEqual(rc, 0, out)

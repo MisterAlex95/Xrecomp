@@ -26,7 +26,8 @@ from .config import va_to_file_offset, is_code_address
 from . import config as _config
 from .disasm import Disassembler
 from .seh_frames import analyze_seh_frame
-from .lifter import (Lifter, lift_basic_block, detect_seh_helpers,
+from .lifter import (Lifter, lift_basic_block, block_flag_out_state,
+                     detect_seh_helpers,
                      _RESULT_SNAPSHOT_SETTERS, _as_addr_set,
                      detect_setjmp_helpers, _func_ident, _operand_width,
                      publish_flags, stack_switch_sites, ret_cleanup)
@@ -2068,11 +2069,20 @@ class FunctionTranslator:
     @staticmethod
     def _function_needs_cf(instructions):
         """True when something in the function reads CF."""
-        from .lifter import (FLAG_SETTERS, CF_TRACKED, BT_MODIFY,
+        from .lifter import (FLAG_SETTERS, CF_TRACKED, BT_FAMILY,
                              _EFLAGS_SETTERS, _FLAGS_UNDEFINED,
                              _is_rep_compare)
 
+        # These keep their carry in _cf alone (the 2/3-operand imul's jc
+        # reads _fa, but an adc after it reads _cf, and adc already counts).
+        _CF_IN_CARRY = ("rol", "ror", "shld", "shrd", "xadd")
         last_setter = None
+        # The walk is in address order, not along the edges: a carry test
+        # placed before the bt it reads (a loop whose bt sits at the bottom)
+        # would see some other setter. The bt family answers only from _cf,
+        # which must then be declared, so any bt plus any carry test anywhere
+        # in the function counts.
+        saw_bt = saw_carry_test = False
         for insn in instructions:
             m = insn.mnemonic
             # A lock-prefixed form sets the flags of its bare instruction
@@ -2093,10 +2103,15 @@ class FunctionTranslator:
                 # Both copy CF out of the tracked setter, through _cf when
                 # that setter keeps its carry there.
                 cc = "b"
+            if cc in FunctionTranslator._CARRY_CC:
+                saw_carry_test = True
+            if m in BT_FAMILY:
+                saw_bt = True
             if (cc in FunctionTranslator._CARRY_CC
                     and (last_setter in CF_TRACKED
                          or last_setter in ("inc", "dec")
-                         or last_setter in BT_MODIFY
+                         or last_setter in BT_FAMILY
+                         or last_setter in _CF_IN_CARRY
                          or last_setter == "rep-compare")):
                 return True
             if cc in FunctionTranslator._OF_CC and last_setter in ("shl", "sal"):
@@ -2111,7 +2126,7 @@ class FunctionTranslator:
             elif m in _FLAGS_UNDEFINED or m == "popfd":
                 # A carry test after popfd reads g_eflags, not _cf.
                 last_setter = None
-        return False
+        return saw_bt and saw_carry_test
 
     def _flag_boundaries(self):
         """Which calls, rets and tail jumps must carry the flags in g_eflags.
@@ -2985,7 +3000,20 @@ class FunctionTranslator:
 
     def _control_flow_census(self, instructions, start, end, coalesced=False,
                              jump_table_targets=None):
-        """Build the shared census of computed CFG edges and entry leaders."""
+        """Build the shared census of computed CFG edges and entry leaders.
+
+        decode_function takes it of its final instruction list, and
+        translate_function again of the reachable instructions decode
+        returns -- usually the same instructions, and then the same answer
+        (it was a sixth of tools.recomp). The last census is kept and reused
+        when the instruction objects, bounds and table census are the same;
+        callers only read the result.
+        """
+        key = (start, end, coalesced, tuple(map(id, instructions)))
+        memo = self.__dict__.get("_census_memo")
+        if (memo is not None and memo[0] == key
+                and memo[1] is jump_table_targets):
+            return memo[2]
         table_edges = self._computed_jump_edges(
             instructions, start, end, jump_table_targets=jump_table_targets)
         imm_refs, register_edges = self._indirect_code_refs(
@@ -3019,8 +3047,13 @@ class FunctionTranslator:
                 if (insn.mnemonic == "int3"
                     and insn.end_address in instruction_starts))
 
-        return (imm_refs, computed_jump_edges, debug_slide_int3s,
-                debug_slide_bypasses, switch_leaders)
+        result = (imm_refs, computed_jump_edges, debug_slide_int3s,
+                  debug_slide_bypasses, switch_leaders)
+        # The instructions are pinned with it, so their ids in the key
+        # cannot be reused by other objects while it is kept.
+        self._census_memo = (key, jump_table_targets, result,
+                             tuple(instructions))
+        return result
 
     def _read_u32(self, va):
         """A guest dword from the image, or None outside it."""
@@ -3597,6 +3630,12 @@ class FunctionTranslator:
             lines.append("    uint32_t _fa = 0, _fb = 0;")
             lines.append("    int32_t _fas = 0, _fbs = 0;")
             lines.append("    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;")
+        # A shift by a register count records whether that count was zero
+        # (Lifter._shift_count_guard).
+        if any(insn.mnemonic.removeprefix("lock ") in ("shl", "sal", "shr", "sar")
+               and len(insn.operands) >= 2 and insn.operands[1].type != "imm"
+               for insn in instructions):
+            lines.append("    int _shz = 0; (void)_shz;")
             # Flag snapshot: a cmp/test that is not fused with its jcc records
             # its operands here, zero- and sign-extended to the compare's own
             # width, so the branch tests what the compare saw.
@@ -3772,14 +3811,11 @@ class FunctionTranslator:
         # Iterating to a fixed point fixes it. A block's out-state depends on
         # its own instructions unless it has no flag setter at all, in which
         # case it passes its incoming state through, so the pass converges;
-        # three rounds is more than any real loop nest needs. The lines are
-        # discarded here, only the out-states are kept.
-        #
-        # lift_basic_block accumulates two things on the Lifter across calls.
-        # referenced_calls is a dict keyed by address, so re-lifting a block
-        # rewrites the same entries. unimplemented appends, and its counts are
-        # a report about the title rather than about how many times the lifter
-        # ran, so they are saved and restored around the probe.
+        # three rounds is more than any real loop nest needs. Only the
+        # out-states are wanted, so the probe walks the blocks with
+        # block_flag_out_state, which applies lift_basic_block's state
+        # transition without lifting (a full lift per probe was a fifth of
+        # tools.recomp on a title-size image).
         # Without a back edge, address order already visits every predecessor
         # before the block it reaches, so the emit pass settles the state as
         # it goes and the probe would only repeat its work. Aliasing
@@ -3789,24 +3825,18 @@ class FunctionTranslator:
         out_state = {}
         settled_state = out_state
         if any(p >= bb.start for bb in blocks for p in preds[bb.start]):
-            saved_unimplemented = {
-                k: list(v) for k, v in self.lifter.unimplemented.items()
-            }
             for _ in range(3):
                 changed = False
                 for bb in blocks:
                     incoming = _incoming_flag_state(
                         preds[bb.start], out_state, bb.start == start,
                         caller_flags)
-                    _, new_out = lift_basic_block(
-                        self.lifter, bb, flag_state=incoming)
+                    new_out = block_flag_out_state(bb, flag_state=incoming)
                     if out_state.get(bb.start) != new_out:
                         out_state[bb.start] = new_out
                         changed = True
                 if not changed:
                     break
-            self.lifter.unimplemented.clear()
-            self.lifter.unimplemented.update(saved_unimplemented)
             settled_state = out_state
             out_state = {}
 

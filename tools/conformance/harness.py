@@ -333,10 +333,10 @@ def harness_source(prepared, why_of, tol_of):
     for name, kind, lines, _ in prepared:
         body = "\n".join(f"    {l}" for l in lines) or "    /* nothing */"
         out.append(f"""static void lif_{name}(void) {{
-    uint32_t ebp = 0; int _cf = 0; int _flags = 0;
+    uint32_t ebp = 0; int _cf = 0; int _flags = 0; int _shz = 0;
     uint32_t _fa = 0, _fb = 0; int32_t _fas = 0, _fbs = 0;
     double _fca = 0, _fcb = 0;
-    (void)ebp; (void)_cf; (void)_flags;
+    (void)ebp; (void)_cf; (void)_flags; (void)_shz;
     (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
 {_LIFTED_PROLOGUE[kind]}
     g_esp = (uint32_t)(uintptr_t)(g_guest_stack + sizeof(g_guest_stack) / 2);

@@ -375,44 +375,65 @@ def main_with_args(argv, allow_container=True):
         if args.verbose:
             print(f"  {c['name']:<20} {code.hex():<28} {len(lines)} C lines")
 
-    # 3. Run both and compare.
+    # 3. Run both and compare -- with the lifted side built several ways.
+    #
+    # Titles are built at -O2 (tools/prepare/compile.py), so a lift that is
+    # only right at -O0 is wrong where it matters: signed overflow, a shift
+    # by the width or more, anything the optimiser may assume away. The
+    # 2/3-operand imul was exactly that (a signed C multiply, folded by gcc
+    # -O2 into the sign of one operand) and passed here because this side
+    # was only ever built at -O0. So the lifted side runs at -O0, at -O2,
+    # and at -O2 under UBSan's signed-overflow and shift checks, trapping
+    # (no runtime library needed) so an undefined lift fails the run even
+    # where this compiler happens to answer right. The native side is the
+    # same object every time.
     with open(os.path.join(workdir, "harness.c"), "w") as f:
         f.write(harness_source(prepared, _WHY, _TOL))
     if backend == "msvc":
-        r = _cl(vcvars, workdir,
-                f'/W3 /I"{runtime_inc}" harness.c native.obj /Feharness.exe')
-        if r.returncode != 0:
-            print("harness build failed:\n" + r.stdout + r.stderr,
-                  file=sys.stderr)
-            if dk:
-                dk.close()
-            return 1
-        run = subprocess.run([os.path.join(workdir, "harness.exe")],
-                             capture_output=True, text=True)
+        passes = (("/Od", "/Od"), ("/O2", "/O2"))
     else:
-        r = dk.run("gcc -m32 -msse2 -mfpmath=sse -fno-pic -no-pie -O0 -I/rt "
-                   "harness.c native.o "
-                   "-o harness -lm")
+        passes = (("-O0", "-O0"), ("-O2", "-O2"),
+                  ("-O2, UBSan", "-O2 -fsanitize=signed-integer-overflow,shift"
+                                 " -fsanitize-trap=all"))
+    rc = 0
+    for label, flags in passes:
+        print(f"lifted side at {label}:")
+        if backend == "msvc":
+            r = _cl(vcvars, workdir,
+                    f'/W3 {flags} /I"{runtime_inc}" harness.c native.obj '
+                    f'/Feharness.exe')
+        else:
+            r = dk.run(f"gcc -m32 -msse2 -mfpmath=sse -fno-pic -no-pie {flags}"
+                       " -I/rt harness.c native.o -o harness -lm")
         if r.returncode != 0:
-            print("harness build failed:\n" + r.stdout + r.stderr,
+            print(f"harness build failed ({label}):\n" + r.stdout + r.stderr,
                   file=sys.stderr)
             if dk:
                 dk.close()
             return 1
-
-        run = dk.run("./harness")
-    print(run.stdout.strip())
-    if run.returncode < 0 or run.returncode > 1:
-        # A snippet faulted on the native side (idiv overflow, a bad memory
-        # operand). Say so -- otherwise the run looks like a silent pass.
-        print(f"\nharness terminated abnormally: exit {run.returncode} "
-              f"(0x{run.returncode & 0xFFFFFFFF:08X}). The case that faulted is "
-              f"the one after the last line printed above.", file=sys.stderr)
-        if run.stderr.strip():
-            print(run.stderr.strip(), file=sys.stderr)
-        if dk:
-            dk.close()
-        return 1
+        if backend == "msvc":
+            run = subprocess.run([os.path.join(workdir, "harness.exe")],
+                                 capture_output=True, text=True)
+        else:
+            run = dk.run("./harness")
+        print(run.stdout.strip())
+        if run.returncode < 0 or run.returncode > 1:
+            # A snippet faulted on the native side (idiv overflow, a bad
+            # memory operand), or, in the UBSan pass, a lift is undefined.
+            # Say so -- otherwise the run looks like a silent pass.
+            print(f"\nharness terminated abnormally at {label}: exit "
+                  f"{run.returncode} (0x{run.returncode & 0xFFFFFFFF:08X}). "
+                  f"The case that faulted is the one after the last line "
+                  f"printed above"
+                  + ("; in the UBSan pass, a trap is an undefined lift (narrow"
+                     " it down with -k)" if "UBSan" in label else "")
+                  + ".", file=sys.stderr)
+            if run.stderr.strip():
+                print(run.stderr.strip(), file=sys.stderr)
+            if dk:
+                dk.close()
+            return 1
+        rc = rc or run.returncode
 
     if unlifted:
         print("\nInstructions that lifted to a comment (silently no-ops, so the "
@@ -422,7 +443,7 @@ def main_with_args(argv, allow_container=True):
             for d in dropped:
                 print(f"      {d.strip()}")
 
-    rc = run.returncode or (1 if unlifted else 0)
+    rc = rc or (1 if unlifted else 0)
 
     if args.only != "snippets":
         rc = _run_corpus(vcvars, workdir, runtime_inc, args) or rc
