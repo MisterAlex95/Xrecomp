@@ -433,9 +433,6 @@ static void cards_insert(gc_machine *m, const gc_runtime_opts *o, const char *ke
             snprintf(s_card_path[slot], sizeof s_card_path[slot], "%s", path);
     }
     fflush(stdout);
-    static int listening;
-    if (!listening && recomp_lifecycle_listen(on_lifecycle_cards, NULL) == 0)
-        listening = 1;
 }
 
 /* ---- The pack's share (XBA-264) ------------------------------------------------------------------------------- */
@@ -659,6 +656,11 @@ started:;
     snprintf(s_discovered, sizeof s_discovered, "%s", o->discovered_path ? o->discovered_path : "");
     cards_insert(m, o, key);
     pthread_mutex_unlock(&s_mu);
+    /* Outside s_mu: the listener takes it, and a registration waits for a pause or resume in progress, whose
+     * listeners would wait for s_mu in turn. */
+    static int listening;
+    if (!listening && recomp_lifecycle_listen(on_lifecycle_cards, NULL) == 0)
+        listening = 1;
     recomp_exit_hook_set(on_exit_hook);
 
     /* Save states (XBA-264): <save dir>/gc-<KEY>/state<N>.st, beside the memory cards (none without a save dir);
