@@ -226,6 +226,13 @@ CASES = [
     # -- arithmetic ----------------------------------------------------------
     Case("imul_32", "signed multiply, low half",
          ["imul eax, ecx"], _PAIRS),
+    # The product wraps on x86; a signed C multiply that overflows is
+    # undefined, and gcc -O2 once folded this sign test into ecx's sign.
+    Case("imul_imm_sign", "imul's wrapped product decides the sign test",
+         ["imul eax, ecx, 3", "test eax, eax", "sets al", "movzx eax, al"],
+         [(0, b) for b in _EDGES + [0x30000000, 0x2AAAAAAB, 0xD5555556]]),
+    Case("imul_16", "16-bit imul: sign-extended words, low word kept",
+         ["imul ax, cx"], _PAIRS),
     Case("add_adc_64", "the 64-bit add idiom: add produces carry, adc consumes",
          ["add eax, ecx", "adc edx, 0", "mov eax, edx"], _PAIRS),
     Case("sub_sbb_64", "the 64-bit subtract idiom",
