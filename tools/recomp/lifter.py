@@ -623,6 +623,28 @@ def _make_condition(jcc, flag_setter, flag_ops):
             return "(_fa != 0)", desc
         return None
 
+    # rol/ror write CF (into _cf) and OF, and leave ZF/SF/PF as the setter
+    # before them made them. That setter rides along in the state, so
+    # `test eax, eax; rol ecx, 1; jz` still answers from the test; OF is not
+    # modelled (it is defined only for a count of 1) and has no rule.
+    if flag_setter == "__cf_over":
+        prev, prev_ops = flag_ops if flag_ops else (None, [])
+        if jcc in ("jb", "jnae", "jc"):
+            return "_cf", desc
+        if jcc in ("jae", "jnb", "jnc"):
+            return "!_cf", desc
+        if jcc in ("jo", "jno", "jl", "jnge", "jge", "jnl", "jle", "jng",
+                   "jg", "jnle") or not prev:
+            return None
+        if jcc in ("jbe", "jna", "ja", "jnbe"):
+            zf = _make_condition("je", prev, prev_ops)
+            if not zf:
+                return None
+            if jcc in ("jbe", "jna"):
+                return f"(_cf || ({zf[0]}))", desc
+            return f"(!_cf && !({zf[0]}))", desc
+        return _make_condition(jcc, prev, prev_ops)
+
     # After stc/clc/cmc, CF is _cf (the lift writes it) and nothing else is
     # known: the other flags keep whatever the instruction before left, and
     # that setter is no longer the tracked one.
@@ -1109,7 +1131,12 @@ def _make_condition(jcc, flag_setter, flag_ops):
         return None
 
     # ── shld/shrd: double-precision shift, result-based ──
+    # CF is the last bit shifted out, which the lift keeps in _cf.
     if flag_setter in ("shld", "shrd"):
+        if jcc in ("jb", "jnae", "jc"):
+            return "_cf", desc
+        if jcc in ("jae", "jnb", "jnc"):
+            return "!_cf", desc
         if jcc in ("je", "jz"):
             return f"({lhs} == 0)", desc
         if jcc in ("jne", "jnz"):
@@ -1178,6 +1205,11 @@ def _make_condition(jcc, flag_setter, flag_ops):
     # again, corrupting the title's heap (Jet Set Radio Future, after
     # Direct3D device creation).
     if flag_setter == "xadd":
+        # CF is the carry out of the sum, which the lift keeps in _cf.
+        if jcc in ("jb", "jnae", "jc"):
+            return "_cf", desc
+        if jcc in ("jae", "jnb", "jnc"):
+            return "!_cf", desc
         if jcc in ("je", "jz"):
             return f"({lhs} == 0)", desc
         if jcc in ("jne", "jnz"):
@@ -2263,7 +2295,8 @@ class Lifter:
                 return [
                     f"{{ uint{bits}_t _a = (uint{bits}_t)({dst}), _b = (uint{bits}_t)({src});",
                     f"  uint{bits}_t _s = (uint{bits}_t)(_a + _b);",
-                    f"  _fa = (uint32_t)_s; _fas = (int32_t)(int{bits}_t)_s; /* {m} result */",
+                    f"  _fa = (uint32_t)_s; _fas = (int32_t)(int{bits}_t)_s; /* {m} result */"
+                    + (" _cf = (int)(_s < _a);" if self.needs_cf else ""),
                     "  " + _fmt_operand_write(ops[1], "_a"),
                     "  " + _fmt_operand_write(ops[0], "_s") + " }" f"  /* {m} */",
                 ]
@@ -2289,7 +2322,8 @@ class Lifter:
                     f"{{ uint{bits}_t _add = (uint{bits}_t)({src}), _old, _new;",
                     f"  do {{ _old = MEM{bits}({addr}); _new = (uint{bits}_t)(_old + _add); }}",
                     f"  while (RECOMP_ATOMIC_CAS{bits}(XBOX_PTR({addr}), _old, _new) != _old);",
-                    f"  _fa = (uint32_t)_new; _fas = (int32_t)(int{bits}_t)_new; /* {m} result */",
+                    f"  _fa = (uint32_t)_new; _fas = (int32_t)(int{bits}_t)_new; /* {m} result */"
+                    + (" _cf = (int)(_new < _old);" if self.needs_cf else ""),
                     "  " + _fmt_operand_write(ops[1], "_old") + " }" f"  /* {m} */",
                 ]
             acc = {1: "al", 2: "ax"}[width]
@@ -2317,7 +2351,8 @@ class Lifter:
                         "  uint32_t _old = RECOMP_ATOMIC_ADD32("
                         f"XBOX_PTR({addr}), _add);",
                         "  _fa = _old + _add; _fas = (int32_t)_fa;"
-                        f" /* {m} result */",
+                        f" /* {m} result */"
+                        + (" _cf = (int)(_fa < _old);" if self.needs_cf else ""),
                         "  " + _fmt_operand_write(ops[1], "_old") + " }"
                         f"  /* {m} */",
                     ]
@@ -2709,11 +2744,17 @@ class Lifter:
         w = (_operand_width(ops[0]) or 4) * 8
         expr = (f"({dst} << _c) | ({src} >> ({w} - _c))" if m == "shld"
                 else f"({dst} >> _c) | ({src} << ({w} - _c))")
+        # CF is the last bit shifted out of the destination, read before
+        # the write: bit w-c for shld, bit c-1 for shrd.
+        carry = ""
+        if self.needs_cf:
+            out_bit = f"({w} - _c)" if m == "shld" else "(_c - 1)"
+            carry = f"_cf = (int)(((uint32_t)({dst}) >> {out_bit}) & 1u); "
         # A masked count of zero leaves the destination AND the flags alone,
         # so the result snapshot lives inside the guard with the write.
         return ["{ uint32_t _c = (uint32_t)(%s) & 31u; if (_c && _c < %uu) {"
-                " %s %s } }  /* %s */"
-                % (cnt, w, _fmt_operand_write(ops[0], expr),
+                " %s%s %s } }  /* %s */"
+                % (cnt, w, carry, _fmt_operand_write(ops[0], expr),
                    self._result_snapshot(ops, m), m)]
 
     def _lift_shld(self, insn, ops):
@@ -2738,8 +2779,10 @@ class Lifter:
             # although the x86 result (1) is ordinary.
             a, b = _fmt_operand_read(ops[nops - 2]), _fmt_operand_read(ops[nops - 1])
             sx = self._SNAP_SX.get(_operand_width(ops[0]) or 4, "(int32_t)")
+            carry = " _cf = (int)_fa;" if self.needs_cf else ""
             return [f"_fa = ((int64_t){sx}({a}) * (int64_t){sx}({b})"
-                    f" != (int64_t){sx}((uint32_t)({a}) * (uint32_t)({b})));",
+                    f" != (int64_t){sx}((uint32_t)({a}) * (uint32_t)({b})));"
+                    + carry,
                     _fmt_operand_write(ops[0], f"((uint32_t)({a}) * (uint32_t)({b}))")]
         return ["/* imul: unexpected form */"]
 
@@ -2943,7 +2986,18 @@ class Lifter:
         bits = (_operand_width(ops[0]) or 4) * 8
         suffix = {8: "8", 16: "16"}.get(bits, "32")
         func = ("ROL" if m == "rol" else "ROR") + suffix
-        return [_fmt_operand_write(ops[0], f"{func}({dst}, {cnt})")]
+        write = _fmt_operand_write(ops[0], f"{func}({dst}, {cnt})")
+        if not self.needs_cf:
+            return [write]
+        # CF is the bit that wrapped round: the result's bit 0 after rol,
+        # its top bit after ror. A masked count of zero leaves every flag
+        # alone, and the count is captured first (`rol cl, cl`).
+        carry = (f"_cf = (int)((uint32_t)({dst}) & 1u);" if m == "rol"
+                 else f"_cf = (int)(((uint32_t)({dst}) >> {bits - 1}) & 1u);")
+        if ops[1].type == "imm":
+            return [write] + ([carry] if ops[1].imm & 31 else [])
+        return [f"{{ uint32_t _rc = (uint32_t)({cnt}) & 31u; {write}"
+                f" if (_rc) {carry} }}"]
 
     # ── Compare / Test (standalone) ──
 
@@ -5189,8 +5243,9 @@ def lift_basic_block(lifter, bb, flag_state=None):
                                               ("jo", "OF"))
                        if not in_eflags and not _make_condition(jcc, *state)]
             if missing:
-                source = ("stc/clc/cmc" if last_flag_setter == "__cf_only"
-                          else last_flag_setter)
+                source = {"__cf_only": "stc/clc/cmc",
+                          "__cf_over": "rol/ror"}.get(last_flag_setter,
+                                                      last_flag_setter)
                 lifter.unimplemented.setdefault("pushfd (flags)", []).append(
                     curr.address)
                 stmts.append(f'RECOMP_UNIMPL("pushfd: {",".join(missing)} not'
@@ -5281,6 +5336,14 @@ def lift_basic_block(lifter, bb, flag_state=None):
             results = lifter._lift_neg(
                 curr, curr.operands, preserve_carry=preserve)
         else:
+            if (curr.mnemonic in ("rol", "ror") and lifter.needs_cf
+                    and len(curr.operands) >= 2
+                    and curr.operands[1].type != "imm"):
+                cf_in = (_make_condition("jb", last_flag_setter, last_flag_ops)
+                         if last_flag_setter else None)
+                if cf_in and cf_in[0] != "_cf":
+                    stmts.append(f"_cf = ({cf_in[0]}) ? 1 : 0;"
+                                 " /* CF in: a zero count keeps it */")
             results = lifter.lift_instruction(insns[i])
             # A REPE/REPNE compare whose count is zero leaves EFLAGS alone,
             # but `_flags` would keep whatever it last held -- 0 on entry --
@@ -5314,6 +5377,19 @@ def lift_basic_block(lifter, bb, flag_state=None):
         elif curr.mnemonic in FLAG_SETTERS:
             last_flag_setter, last_flag_ops = normalise_zero_test(
                 curr.mnemonic, list(curr.operands))
+        elif curr.mnemonic in ("rol", "ror"):
+            # CF is now _cf; ZF/SF/PF stay the previous setter's, which the
+            # state keeps (see _make_condition). A count of zero changes
+            # nothing; one in a register may be zero, and the lift then
+            # leaves _cf alone, so it was loaded with the incoming CF above.
+            ops = curr.operands
+            if not (len(ops) >= 2 and ops[1].type == "imm"
+                    and not ops[1].imm & 31):
+                if last_flag_setter == "__cf_over":
+                    pass        # still the same setter underneath
+                else:
+                    last_flag_ops = [last_flag_setter, last_flag_ops]
+                    last_flag_setter = "__cf_over"
         elif curr.mnemonic in ("stc", "clc", "cmc"):
             # CF is now _cf (the lift writes it); nothing else is tracked.
             if last_flag_setter != "__cf_only":

@@ -2072,6 +2072,9 @@ class FunctionTranslator:
                              _EFLAGS_SETTERS, _FLAGS_UNDEFINED,
                              _is_rep_compare)
 
+        # These keep their carry in _cf alone (the 2/3-operand imul's jc
+        # reads _fa, but an adc after it reads _cf, and adc already counts).
+        _CF_IN_CARRY = ("rol", "ror", "shld", "shrd", "xadd")
         last_setter = None
         # The walk is in address order, not along the edges: a carry test
         # placed before the bt it reads (a loop whose bt sits at the bottom)
@@ -2107,6 +2110,7 @@ class FunctionTranslator:
                     and (last_setter in CF_TRACKED
                          or last_setter in ("inc", "dec")
                          or last_setter in BT_FAMILY
+                         or last_setter in _CF_IN_CARRY
                          or last_setter == "rep-compare")):
                 return True
             if cc in FunctionTranslator._OF_CC and last_setter in ("shl", "sal"):
