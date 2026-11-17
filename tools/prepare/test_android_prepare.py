@@ -4,6 +4,7 @@ cache key, pack.json and the atomic publish (docs/android/prepare.md)."""
 import datetime
 import json
 import os
+import subprocess
 import sys
 
 import pytest
@@ -856,3 +857,52 @@ def test_android_seeds_suffix(tmp_path):
     assert one.startswith("|seeds=") and one == android.seeds_suffix([str(f)])
     assert android.seeds_suffix([str(f), str(f)]) != one
     assert android.seeds_suffix(["/nonexistent/a"]) != android.seeds_suffix(["/nonexistent/b"])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="no SIGUSR1 on Windows")
+def test_procs_cancel_in_a_signal_handler_does_not_deadlock(tmp_path):
+    """The SIGTERM handler calls Procs.cancel() on the main thread, wherever
+    it was interrupted: inside `with procs.lock` (start() / done()) too. It
+    must still kill the children and return, not wait forever for the lock
+    the interrupted code holds. In a child process, so a hang fails the
+    test instead of stopping the suite."""
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    code = ("import os, signal, sys; sys.path.insert(0, %r)\n"
+            "from tools.prepare import compile as cc\n"
+            "procs = cc.Procs()\n"
+            "p = procs.start([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "signal.signal(signal.SIGUSR1, lambda n, f: procs.cancel())\n"
+            "with procs.lock:\n"
+            "    os.kill(os.getpid(), signal.SIGUSR1)\n"
+            "    for _ in range(1000):\n"
+            "        pass\n"
+            "assert procs.cancelled.is_set()\n"
+            "p.wait(timeout=10)\n"
+            "print('rc', p.returncode)\n") % root
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "rc -9"
+
+
+def test_procs_start_kills_a_child_a_cancel_interrupts(monkeypatch):
+    """A signal handler's Cancelled raised in start() after Popen but before
+    the child is in `live` (cancel() could not see it): start() kills it."""
+    procs = cc.Procs()
+    started = []
+    real = subprocess.Popen
+
+    class Lock:
+        def __enter__(self):
+            raise cc.Cancelled("signal 15")
+
+        def __exit__(self, *exc):
+            return False
+
+    def popen(*a, **k):
+        started.append(real(*a, **k))
+        return started[-1]
+    procs.lock = Lock()
+    monkeypatch.setattr(cc.subprocess, "Popen", popen)
+    with pytest.raises(cc.Cancelled):
+        procs.start([sys.executable, "-c", "import time; time.sleep(60)"])
+    assert started[0].wait(timeout=10) != 0

@@ -73,20 +73,45 @@ class Cancelled(Exception):
 
 # ── Child processes ─────────────────────────────────────────────
 
+class _Flag:
+    """threading.Event's set() / is_set() without its lock: set from a
+    signal handler, which must not take a lock the thread it interrupted
+    may hold. One attribute store or load is atomic under the GIL."""
+
+    def __init__(self):
+        self._set = False
+
+    def set(self):
+        self._set = True
+
+    def is_set(self):
+        return self._set
+
+
 class Procs:
-    """Every child process, so that a cancel kills them all at once."""
+    """Every child process, so that a cancel kills them all at once.
+
+    cancel() runs in the SIGTERM / SIGINT handlers (tools/prepare/android.py,
+    gba.py), on the main thread, between two of its bytecodes: wherever it
+    stopped, inside `with self.lock` too. So cancel() takes no lock: a
+    non-reentrant lock held by the code it interrupted would never be
+    released (the Prepare hung instead of cancelling)."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.live = set()
-        self.cancelled = threading.Event()
+        self.cancelled = _Flag()
 
     def start(self, args, **kw):
         if self.cancelled.is_set():
             raise Cancelled()
         p = subprocess.Popen(args, **kw)
-        with self.lock:
-            self.live.add(p)
+        try:
+            with self.lock:
+                self.live.add(p)
+        except BaseException:   # a signal handler's Cancelled before p was in live: cancel() missed it
+            p.kill()
+            raise
         if self.cancelled.is_set():          # cancel() ran between the check and add()
             p.kill()
         return p
@@ -139,9 +164,17 @@ class Procs:
         return p.returncode, time.time() - t0
 
     def cancel(self):
+        """Kill every live child. Safe in a signal handler: no lock (see the
+        class). The flag first: a start() that adds its child after the
+        copy below sees it and kills that child itself."""
         self.cancelled.set()
-        with self.lock:
-            live = list(self.live)
+        live = ()
+        for _ in range(100):
+            try:
+                live = tuple(self.live)     # one C call: no other thread runs during it
+                break
+            except RuntimeError:            # "set changed size during iteration": once more
+                continue
         for p in live:
             try:
                 p.kill()
