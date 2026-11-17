@@ -5,7 +5,7 @@
 <p align="center"><b>Your console games, rebuilt as native apps.</b><br>
 No emulator. No JIT. The game's machine code becomes C, then a real executable for your phone or computer.</p>
 
-<p align="center"><a href="https://github.com/MisterAlex95/Xrecomp/actions/workflows/linux.yml"><img src="https://github.com/MisterAlex95/Xrecomp/actions/workflows/linux.yml/badge.svg" alt="Linux tests"></a> <a href="https://github.com/MisterAlex95/Xrecomp/releases/latest"><img src="https://img.shields.io/github/v/release/MisterAlex95/Xrecomp?label=release" alt="Latest release"></a> <img src="https://img.shields.io/badge/licence-MIT-blue" alt="MIT licence"> <img src="https://img.shields.io/badge/consoles-Xbox%20%C2%B7%20N64%20%C2%B7%20PS1%20%C2%B7%20GBA-green" alt="Consoles"></p>
+<p align="center"><a href="https://github.com/MisterAlex95/Xrecomp/actions/workflows/linux.yml"><img src="https://github.com/MisterAlex95/Xrecomp/actions/workflows/linux.yml/badge.svg" alt="Linux tests"></a> <a href="https://github.com/MisterAlex95/Xrecomp/releases/latest"><img src="https://img.shields.io/github/v/release/MisterAlex95/Xrecomp?label=release" alt="Latest release"></a> <img src="https://img.shields.io/badge/licence-MIT-blue" alt="MIT licence"> <img src="https://img.shields.io/badge/consoles-Xbox%20%C2%B7%20GameCube%20%C2%B7%20N64%20%C2%B7%20PS1%20%C2%B7%20GBA-green" alt="Consoles"></p>
 
 <p align="center">
 <a href="#-try-it-in-five-minutes">Try it</a> ·
@@ -43,8 +43,8 @@ once, press **Play**. The whole recompiler (Python, capstone, LLVM) runs on the 
 
 ## ✨ Why it's interesting
 
-- 🔁 **Static recompilation, four CPUs.** x86 (Xbox), MIPS R4300i (N64), MIPS R3000A (PS1) and ARM7TDMI (GBA) all
-  lift to portable C. When the static pass misses code, an interpreter takes over and records the address so the
+- 🔁 **Static recompilation, five CPUs.** x86 (Xbox), PowerPC Gekko (GameCube), MIPS R4300i (N64), MIPS R3000A (PS1)
+  and ARM7TDMI (GBA) all lift to portable C. When the static pass misses code, an interpreter takes over and records the address so the
   next Prepare compiles it too.
 - 📱 **Prepare on the device.** Analysis, lifting and compilation happen inside the app. No toolchain to install, no
   desktop step.
@@ -67,7 +67,8 @@ once, press **Play**. The whole recompiler (Python, capstone, LLVM) runs on the 
 1. Install `xrecomp-v<version>.apk` from the [latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest)
    (or [`xrecomp-latest`](https://github.com/MisterAlex95/Xrecomp/releases/tag/xrecomp-latest), rebuilt from every
    push; both update each other in place).
-2. Add a game: an ISO or extracted Xbox folder, a `.gba`, a PS1 `.cue` / `.bin` / `.iso`, a `.z64` / `.n64` / `.v64`.
+2. Add a game: an ISO or extracted Xbox folder, a `.gba`, a PS1 `.cue` / `.bin` / `.iso`, a `.z64` / `.n64` / `.v64`, a
+   GameCube `.iso` / `.gcm` / `.ciso` / `.rvz` / `.gcz` / `.wia` or homebrew `.dol`.
 3. **Prepare**, then **Play**.
 
 For N64 on Adreno GPUs, pick a Turnip driver in Settings › Graphics › Vulkan driver: the app lists and downloads them
@@ -122,6 +123,7 @@ which is also the way to bring up a new game on any host.
 | **Nintendo 64** | MIPS R4300i | 🧪 Playable | *The Legend of Zelda: Ocarina of Time* (PAL) at full speed on an AYN Thor. LLE RSP, RDP on Vulkan (paraLLEl-RDP) with upscaling, software fallback, emulated PIF, no symbols needed |
 | **PlayStation** | MIPS R3000A | 🧪 Playable | *Crash Bandicoot*. No BIOS image needed (HLE BIOS in C, OpenBIOS optional), overlays recompiled, save states, upscaling |
 | **Game Boy Advance** | ARM7TDMI | 🧪 Playable | *Pokémon Pinball: Ruby & Sapphire*. ARM + Thumb, all save types, save states |
+| **GameCube** | PowerPC Gekko | 🌱 First version (0.13) | In the Android app: disc images and homebrew DOLs, Prepare on the device, GX on GLES 3.0 with upscaling and a shader cache, DSP sound, memory cards, save states, cheats. Tested with homebrew so far: expect commercial games to fail or glitch. Desktop: `gc_play` from a CMake build, not yet in `xrecomp` |
 | **Original Xbox** | x86 (Pentium III) | ⚙️ Booting games | *Fable: The Lost Chapters* reaches Oakvale with music and pad. Several games boot, a few are playable; D3D8 / NV2A → OpenGL (ES) or D3D11 |
 
 | Host | Play | Prepare | Front end |
@@ -130,6 +132,10 @@ which is also the way to bring up a new game on any host.
 | **macOS** | ✅ | ✅ | XRecomp.app, or the command line |
 | **Linux** x86-64 / arm64 | ✅ | ✅ | command line |
 | **Windows** x86-64 | ⚠️ experimental, Xbox only | ⚠️ experimental | command line (`xrecomp.cmd`) |
+
+Coming next, as spikes for now (a homebrew hello world recompiled and checked headless on Linux, nothing in the
+app): Nintendo DS, PSP, PlayStation 2, Dreamcast, Nintendo 3DS, Xbox 360 and Windows PC games. Order and scope:
+[Other consoles](consoles/README.md).
 
 > **Status: experimental, moving fast.** Expect crashes and the odd re-Prepare after an update. Per-game status
 > lives in [`profiles/titles/*/`](profiles/titles/) (`title.json`, `NOTES.md`); what changed is in the
@@ -192,7 +198,7 @@ qemu, Android build): [docs/upstream/README.md](docs/upstream/README.md#running-
 |---|---|
 | `tools/` | Xbox pipeline: `xbe_parser`, `disasm`, `func_id`, `abi_analysis`, `recomp`, `prepare`, `compat`, … |
 | `src/`, `include/` | Runtime: kernel, d3d, nv2a, apu, audio, input, usb, video, platform, host |
-| `consoles/` | GBA, PS1, N64: runtime, recompiler pipeline and tests for each |
+| `consoles/` | GBA, PS1, N64, GameCube: runtime, recompiler pipeline and tests for each; DS, PSP, PS2, Dreamcast, 3DS, Xbox 360: spikes (Linux, headless) |
 | `profiles/` | Per-title and per-engine layers applied by Prepare |
 | `templates/new-game/` | The game project Prepare (or you) fills with generated C |
 | `android/` | Android app (launcher, embedded Prepare) |

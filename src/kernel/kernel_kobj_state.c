@@ -241,7 +241,13 @@ static void kobj_object(XboxKobjSaveCtx *c, void *h, uint32_t id, uint32_t token
     case W32_STATE_TIMER:     xk = XKOB_K_TIMER; break;
     case W32_STATE_FILE:      xk = XKOB_K_FILE; break;
     case 0:
-        xbox_kobj_refuse(c, token, guest_va, "handle", "names no live host object (%p)", h);
+        /* NtCurrentThread() / NtCurrentProcess() are not objects: one in a
+         * table slot means a duplicate handed the pseudo value back. */
+        if (h == (void *)(intptr_t)-2 || h == (void *)(intptr_t)-1)
+            xbox_kobj_refuse(c, token, guest_va, "handle",
+                             "a pseudo handle stored as a real one (%p; runtime bug, report it)", h);
+        else
+            xbox_kobj_refuse(c, token, guest_va, "handle", "names no live host object (%p)", h);
         return;
     default:
         xbox_kobj_refuse(c, token, guest_va, "host object",
