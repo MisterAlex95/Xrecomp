@@ -154,7 +154,7 @@ struct SetupView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(model.setup.workRoot ?? (model.setup.appHome + "/titles/<title ID>/work"))
                             .foregroundStyle(Theme.text).textSelection(.enabled)
-                        Text("A prepared disc image takes several GB here (the disc is extracted).")
+                        Text("About 2 GB per prepared game: analysis, generated code and the build. Disc images are read where they are.")
                             .font(.caption).foregroundStyle(Theme.textFaint)
                     }
                     Spacer()

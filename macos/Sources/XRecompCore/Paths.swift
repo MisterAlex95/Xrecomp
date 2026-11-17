@@ -7,7 +7,8 @@ import Foundation
 ///       titles/<TID>/ work/ recomp.cfg save/ art.png theme.json logs/ state.json
 ///
 /// `XRECOMP_HOME` moves the whole tree (the checks and the smoke run use a temporary one). The work folders can
-/// live elsewhere (Settings.workRoot): an ISO source is extracted into `<work>/game`, several GB per title.
+/// live elsewhere (Settings.workRoot): about 2 GB per title of analysis, generated C and build. A disc image is read
+/// in place (XBA-126); only work folders made before that hold an extracted disc in `<work>/game`.
 public struct AppPaths: Sendable {
     public let root: URL
     /// The folder that holds `<TID>/` work folders when the player moved them; nil = under `titles/<TID>/work`.
@@ -61,7 +62,7 @@ public struct TitlePaths: Sendable {
     public var prepareLog: URL { work.appendingPathComponent("prepare.log") }
     public var project: URL { work.appendingPathComponent("project", isDirectory: true) }
     public var build: URL { project.appendingPathComponent("build", isDirectory: true) }
-    /// The disc extracted by prepare (ISO sources only).
+    /// The disc a prepare extracted from an image before XBA-126 (or with `prepare --extract`); absent otherwise.
     public var extractedGame: URL { work.appendingPathComponent("game", isDirectory: true) }
     public var discovered: URL { work.appendingPathComponent("discovered.jsonl") }
 }

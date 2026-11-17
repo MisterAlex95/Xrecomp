@@ -326,9 +326,9 @@ final class AppStore: LauncherActions {
             return model.notice = "\(g.name): wait for the delete or the save import to finish."
         }
         let t = paths.title(tid)
-        // A first prepare of an image extracts the disc: check the room for it.
+        // A first prepare writes about 2 GB (an image is read in place, not extracted): check the room for it.
         if g.status == .absent, let free = Storage.freeSpace(at: t.work) {
-            let need = Storage.estimate(sourceKind: g.entry.kind, sourceSize: g.entry.size)
+            let need = Storage.prepareEstimate
             if free < need {
                 model.notice = "Not enough free space: preparing \(g.name) needs about \(Storage.format(need)), "
                     + "\(Storage.format(free)) is free on that disk. Free some space or move the work folders (Setup)."

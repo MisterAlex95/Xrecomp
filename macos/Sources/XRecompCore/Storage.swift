@@ -67,12 +67,9 @@ public enum Storage {
         return v?.volumeAvailableCapacityForImportantUsage
     }
 
-    /// What a first prepare needs: the extracted disc for an image (its size), plus about 2 GB of analysis,
-    /// generated C and build.
-    public static func estimate(sourceKind: LibraryEntry.Kind, sourceSize: Int64) -> Int64 {
-        let base: Int64 = 2 << 30
-        return sourceKind == .image ? base + sourceSize : base
-    }
+    /// What a first prepare needs: about 2 GB of analysis, generated C and build, for a folder or a disc image alike.
+    /// An image is read in place (XBA-126: the launcher never passes `--extract`), so its size does not count.
+    public static let prepareEstimate: Int64 = 2 << 30
 
     public static func format(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)

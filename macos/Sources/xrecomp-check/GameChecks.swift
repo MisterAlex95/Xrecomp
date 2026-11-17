@@ -302,7 +302,8 @@ func registerGameChecks() {
         expect(!FileManager.default.fileExists(atPath: t.save.path))
         try Storage.delete(.saves, t)   // already gone: no error
         expect(Storage.freeSpace(at: t.work)! > 0)
-        expectEq(Storage.estimate(sourceKind: .folder, sourceSize: 5), 2 << 30)
+        // A disc image is read in place (XBA-126): a first prepare needs the same 2 GB as a folder.
+        expectEq(Storage.prepareEstimate, 2 << 30)
     }
 
     check("saves: import from command-line runs, never overwriting") {

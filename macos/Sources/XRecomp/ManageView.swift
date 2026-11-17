@@ -18,6 +18,12 @@ struct ManageView: View {
 
     private var game: GameItem? { model.game(gameId) }
 
+    /// The rows shown: the extracted disc only when there is one (a work folder made before XBA-126; an image is read
+    /// in place now).
+    private var rows: [(Storage.Item, Int64)] {
+        sizes.filter { $0.0 != .extractedDisc || $0.1 > 0 }
+    }
+
     /// The extracted disc and the Z: cache are inside the work folder and the saves: not counted twice.
     private var total: Int64 {
         sizes.filter { $0.0 != .extractedDisc && $0.0 != .utilityCache }.map(\.1).reduce(0, +)
@@ -45,9 +51,9 @@ struct ManageView: View {
                             .padding(.horizontal, Theme.s2)
                             .padding(.vertical, 10)
                         }
-                        ForEach(Array(sizes.enumerated()), id: \.offset) { i, s in
+                        ForEach(Array(rows.enumerated()), id: \.offset) { i, s in
                             row(s.0, s.1)
-                            if i < sizes.count - 1 { Divider().overlay(Theme.lineSoft) }
+                            if i < rows.count - 1 { Divider().overlay(Theme.lineSoft) }
                         }
                     }
                 }
@@ -224,8 +230,8 @@ struct ManageView: View {
 
     private func note(_ i: Storage.Item) -> String {
         switch i {
-        case .work: return "Analysis, generated C and the build; the disc extracted from an image is inside."
-        case .extractedDisc: return "Part of the work folder (image sources only)."
+        case .work: return "Analysis, generated C and the build. A disc image is read where it is, not copied."
+        case .extractedDisc: return "A disc copied out of its image by an older prepare; part of the work folder."
         case .saves: return "Saved games and title data (RECOMP_SAVE_DIR)."
         case .utilityCache: return "The game's scratch drive, part of the saves."
         case .logs: return "The last 10 runs."
