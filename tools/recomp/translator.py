@@ -2068,11 +2068,17 @@ class FunctionTranslator:
     @staticmethod
     def _function_needs_cf(instructions):
         """True when something in the function reads CF."""
-        from .lifter import (FLAG_SETTERS, CF_TRACKED, BT_MODIFY,
+        from .lifter import (FLAG_SETTERS, CF_TRACKED, BT_FAMILY,
                              _EFLAGS_SETTERS, _FLAGS_UNDEFINED,
                              _is_rep_compare)
 
         last_setter = None
+        # The walk is in address order, not along the edges: a carry test
+        # placed before the bt it reads (a loop whose bt sits at the bottom)
+        # would see some other setter. The bt family answers only from _cf,
+        # which must then be declared, so any bt plus any carry test anywhere
+        # in the function counts.
+        saw_bt = saw_carry_test = False
         for insn in instructions:
             m = insn.mnemonic
             # A lock-prefixed form sets the flags of its bare instruction
@@ -2093,10 +2099,14 @@ class FunctionTranslator:
                 # Both copy CF out of the tracked setter, through _cf when
                 # that setter keeps its carry there.
                 cc = "b"
+            if cc in FunctionTranslator._CARRY_CC:
+                saw_carry_test = True
+            if m in BT_FAMILY:
+                saw_bt = True
             if (cc in FunctionTranslator._CARRY_CC
                     and (last_setter in CF_TRACKED
                          or last_setter in ("inc", "dec")
-                         or last_setter in BT_MODIFY
+                         or last_setter in BT_FAMILY
                          or last_setter == "rep-compare")):
                 return True
             if cc in FunctionTranslator._OF_CC and last_setter in ("shl", "sal"):
@@ -2111,7 +2121,7 @@ class FunctionTranslator:
             elif m in _FLAGS_UNDEFINED or m == "popfd":
                 # A carry test after popfd reads g_eflags, not _cf.
                 last_setter = None
-        return False
+        return saw_bt and saw_carry_test
 
     def _flag_boundaries(self):
         """Which calls, rets and tail jumps must carry the flags in g_eflags.

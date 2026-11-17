@@ -408,13 +408,15 @@ CF_TRACKED = frozenset({
     "add", "sub", "adc", "sbb", "shl", "shr", "sar",
 })
 
-# bt reports CF without touching the operand, so its CF can be rebuilt at the
-# consumer by reading the bit again. The other three WRITE the bit they report,
-# so the same read gives the value after the write -- always 1 after bts,
-# always 0 after btr, inverted after btc. Their CF only exists if it was
-# captured before the write, which is what _cf is for, so they are listed
-# separately and _function_needs_cf treats them as CF producers.
+# bts/btr/btc WRITE the bit they report, so a read at the consumer gives the
+# value after the write -- always 1 after bts, always 0 after btr, inverted
+# after btc. Their CF only exists if it was captured before the write, which
+# is what _cf is for. (The locked forms are lifted as atomics on this set.)
 BT_MODIFY = frozenset({"bts", "btr", "btc"})
+# All four report CF, and all four report it through _cf: a consumer re-reading
+# even plain bt's bit sees whatever was written to the base or the offset in
+# between (`bt eax, 3; mov eax, ebx; jc` tested ebx).
+BT_FAMILY = BT_MODIFY | {"bt"}
 
 # Read-modify-writes the lock prefix makes atomic and _lift_locked_rmw lifts
 # (xadd and cmpxchg have their own path; adc/sbb are left unhandled).
@@ -1132,50 +1134,26 @@ def _make_condition(jcc, flag_setter, flag_ops):
 
     # ── bsf/bsr: bit scan, ZF set if source is zero ──
     # ── bt/bts/btr/btc: bit test, sets CF ──
-    if flag_setter in ("bt", "bts", "btr", "btc"):
-        # THE THREE THAT WRITE THE BIT CANNOT BE REBUILT BY READING IT.
+    if flag_setter in BT_FAMILY:
+        # CF IS THE SNAPSHOT TAKEN AT THE INSTRUCTION, NEVER A SECOND READ.
         #
-        # Every form below answers CF by reading the tested bit a second time,
-        # at the consumer. That is exact for `bt`, which reports the bit and
-        # leaves it alone. bts/btr/btc report the bit and then MODIFY it, so by
-        # the time the consumer looks, the answer is the value they wrote:
-        # always 1 after bts, always 0 after btr, inverted after btc. The
-        # test-and-set idiom -- "did I just claim this, or was it already
-        # taken?" -- therefore always answered "already taken" after bts and
-        # "free" after btr, with no way for guest code to observe the truth.
+        # bts/btr/btc report the bit and then MODIFY it, so a consumer that
+        # read the bit again saw the value they wrote: always 1 after bts,
+        # always 0 after btr, inverted after btc -- the test-and-set idiom
+        # answering "already taken" every time.
         #
-        # The lift already captures the pre-write value into _cf (see the
-        # bt/bts/btr/btc arm of _lift_misc), and _function_needs_cf now counts
-        # these three as CF producers so that capture is always emitted when a
-        # carry condition consumes it. So answer from the snapshot.
-        if flag_setter in BT_MODIFY:
-            if jcc in ("jb", "jnae", "jc"):
-                return "_cf", desc
-            if jcc in ("jae", "jnb", "jnc"):
-                return "!_cf", desc
-            return None
-        if rhs is None:
-            return None
-        # Same bit-string rule as the lifter above: a memory bit base with a
-        # register offset addresses a string, so the dword is chosen by
-        # offset/32 and only then is the bit offset%32. This is the half that
-        # does the testing -- MSVC's strpbrk loop is "bt [esp], eax" fused with
-        # the jae that follows it.
-        if (len(flag_ops) >= 2 and flag_ops[0].type == "mem"
-                and flag_ops[1].type != "imm"):
-            base = _fmt_mem(flag_ops[0])
-            off = _fmt_operand_read(flag_ops[1])
-            bit = (f"((MEM32(({base}) + (((int32_t)({off}) >> 5) * 4))"
-                   f" >> (({off}) & 31)) & 1)")
-            if jcc in ("jb", "jnae", "jc"):
-                return bit, desc
-            if jcc in ("jae", "jnb", "jnc"):
-                return f"!{bit}", desc
-            return None
+        # Plain `bt` leaves the bit alone, and used to keep that re-read on
+        # the grounds that it was exact. It is exact only while nothing
+        # between the bt and its consumer writes the bit base, the offset or
+        # (memory form) the address registers: `bt eax, 3; mov eax, ebx; jc`
+        # tested ebx's bit, and the state is inherited across block
+        # boundaries too. So all four answer from _cf, which the lift of the
+        # bt family captures (the bt/bts/btr/btc arm of _lift_misc) and
+        # _function_needs_cf declares whenever a carry condition reads it.
         if jcc in ("jb", "jnae", "jc"):
-            return f"(({lhs} >> ({rhs} & 31)) & 1)", desc
+            return "_cf", desc
         if jcc in ("jae", "jnb", "jnc"):
-            return f"!(({lhs} >> ({rhs} & 31)) & 1)", desc
+            return "!_cf", desc
         return None
 
     # ── cmpxchg: compares accumulator with dest, sets ZF on match ──
