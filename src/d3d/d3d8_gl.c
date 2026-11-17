@@ -23,6 +23,7 @@
 
 #include "d3d8_xbox.h"
 #include "d3d8_fvf.h"
+#include "d3d8_prim.h"
 
 #include <SDL.h>
 #include "gl_host.h"
@@ -132,6 +133,8 @@ static GLenum gl_prim(D3DPRIMITIVETYPE t, UINT prim_count, UINT *out_vcount)
     case D3DPT_TRIANGLELIST:  *out_vcount = prim_count * 3;   return GL_TRIANGLES;
     case D3DPT_TRIANGLESTRIP: *out_vcount = prim_count + 2;   return GL_TRIANGLE_STRIP;
     case D3DPT_TRIANGLEFAN:   *out_vcount = prim_count + 2;   return GL_TRIANGLE_FAN;
+    /* No GL quads: two triangles a quad, drawn through quad_indices. */
+    case D3DPT_QUADLIST:      *out_vcount = prim_count * 6;   return GL_TRIANGLES;
     default:                  *out_vcount = prim_count * 3;   return GL_TRIANGLES;
     }
 }
@@ -726,6 +729,34 @@ static void update_mvp(DWORD fvf)
     glUniform1i(g.u_use_xform, d3d8_fvf_transformed(fvf) ? 0 : 1);
 }
 
+/* A quad list's triangle indices (d3d8_prim.h), through the draw's indices
+ * src (NULL: none). Into a buffer kept between draws; NULL without memory. */
+static const uint32_t *quad_indices(UINT prim_count, const void *src, UINT src_bytes)
+{
+    static uint32_t *buf;
+    static size_t cap;
+    size_t n = (size_t)prim_count * 6;
+    if (n > cap) {
+        uint32_t *p = (uint32_t *)realloc(buf, n * sizeof *p);
+        if (!p) return NULL;
+        buf = p;
+        cap = n;
+    }
+    d3d8_fan_quad_indices(1, prim_count, src, src_bytes, buf);
+    return buf;
+}
+
+static void stream_indices(const void *idx, GLsizeiptr ibytes)
+{
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.stream_ibo);
+    if (ibytes > g.stream_ibo_size) {
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, ibytes, idx, GL_STREAM_DRAW);
+        g.stream_ibo_size = ibytes;
+    } else {
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, ibytes, idx);
+    }
+}
+
 static HRESULT __stdcall dev_DrawPrimitiveUP(IDirect3DDevice8 *s, D3DPRIMITIVETYPE pt,
                                               UINT prim_count, const void *verts, UINT stride)
 {
@@ -733,7 +764,12 @@ static HRESULT __stdcall dev_DrawPrimitiveUP(IDirect3DDevice8 *s, D3DPRIMITIVETY
     if (!verts || prim_count == 0 || stride == 0) return D3D_OK;
     UINT vcount = 0;
     GLenum mode = gl_prim(pt, prim_count, &vcount);
-    GLsizeiptr size = (GLsizeiptr)vcount * stride;
+    const uint32_t *quads = NULL;
+    if (pt == D3DPT_QUADLIST) {
+        /* Four vertices a quad; vcount is the six indices of its triangles. */
+        if (!(quads = quad_indices(prim_count, NULL, 0))) return E_OUTOFMEMORY;
+    }
+    GLsizeiptr size = (GLsizeiptr)(quads ? prim_count * 4 : vcount) * stride;
     glUseProgram(g.prog);
     glBindVertexArray(g.vao);
     glBindBuffer(GL_ARRAY_BUFFER, g.stream_vbo);
@@ -743,11 +779,16 @@ static HRESULT __stdcall dev_DrawPrimitiveUP(IDirect3DDevice8 *s, D3DPRIMITIVETY
     } else {
         glBufferSubData(GL_ARRAY_BUFFER, 0, size, verts);
     }
+    if (quads)
+        stream_indices(quads, (GLsizeiptr)vcount * 4);
     setup_fvf_attribs(g.current_fvf, stride);
     bind_texture0();
     update_mvp(g.current_fvf);
     apply_render_states();
-    glDrawArrays(mode, 0, (GLsizei)vcount);
+    if (quads)
+        glDrawElements(mode, (GLsizei)vcount, GL_UNSIGNED_INT, 0);
+    else
+        glDrawArrays(mode, 0, (GLsizei)vcount);
     return D3D_OK;
 }
 
@@ -755,21 +796,28 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *s, D3DPRIM
         UINT min_vi, UINT nv, UINT prim_count, const void *idx, D3DFORMAT idx_fmt,
         const void *verts, UINT stride)
 {
-    (void)s; (void)min_vi;
-    if (!verts || !idx || prim_count == 0) return D3D_OK;
+    (void)s;
+    if (!verts || !idx || prim_count == 0 || stride == 0) return D3D_OK;
     UINT icount = 0;
     GLenum mode = gl_prim(pt, prim_count, &icount);
     GLenum itype = (idx_fmt == D3DFMT_INDEX32) ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
+    if (pt == D3DPT_QUADLIST) {
+        idx = quad_indices(prim_count, idx, itype == GL_UNSIGNED_INT ? 4 : 2);
+        if (!idx) return E_OUTOFMEMORY;
+        itype = GL_UNSIGNED_INT;
+    }
     GLsizeiptr ibytes = (GLsizeiptr)icount * ((itype == GL_UNSIGNED_INT) ? 4 : 2);
-    GLsizeiptr vbytes = (GLsizeiptr)nv * stride;
+    /* The indices address vertices min_vi .. min_vi + nv - 1 from verts:
+     * MinVertexIndex is the lowest one used, not where the vertices start,
+     * so everything up to the last is uploaded (the indices stay as
+     * they are). */
+    GLsizeiptr vbytes = (GLsizeiptr)(min_vi + nv) * stride;
     glUseProgram(g.prog);
     glBindVertexArray(g.vao);
     glBindBuffer(GL_ARRAY_BUFFER, g.stream_vbo);
     if (vbytes > g.stream_vbo_size) { glBufferData(GL_ARRAY_BUFFER, vbytes, verts, GL_STREAM_DRAW); g.stream_vbo_size = vbytes; }
     else glBufferSubData(GL_ARRAY_BUFFER, 0, vbytes, verts);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.stream_ibo);
-    if (ibytes > g.stream_ibo_size) { glBufferData(GL_ELEMENT_ARRAY_BUFFER, ibytes, idx, GL_STREAM_DRAW); g.stream_ibo_size = ibytes; }
-    else glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, ibytes, idx);
+    stream_indices(idx, ibytes);
     setup_fvf_attribs(g.current_fvf, stride);
     bind_texture0();
     update_mvp(g.current_fvf);
@@ -784,11 +832,8 @@ static HRESULT __stdcall dev_DrawPrimitive(IDirect3DDevice8 *s, D3DPRIMITIVETYPE
     (void)s;
     GLVertexBuffer *vb = (GLVertexBuffer *)g.vb;
     if (!vb || !vb->sys_mem) return D3D_OK;
-    UINT vcount = 0;
-    GLenum mode = gl_prim(pt, prim_count, &vcount);
     const BYTE *base = vb->sys_mem + start * g.vb_stride;
     return dev_DrawPrimitiveUP(s, pt, prim_count, base, g.vb_stride);
-    (void)mode; (void)vcount;
 }
 
 static HRESULT __stdcall dev_DrawIndexedPrimitive(IDirect3DDevice8 *s, D3DPRIMITIVETYPE pt,
@@ -799,10 +844,23 @@ static HRESULT __stdcall dev_DrawIndexedPrimitive(IDirect3DDevice8 *s, D3DPRIMIT
     GLIndexBuffer  *ib = (GLIndexBuffer  *)g.ib;
     if (!vb || !ib || !vb->sys_mem || !ib->sys_mem) return D3D_OK;
     D3DFORMAT ifmt = ib->format;
-    UINT istride = (ifmt == D3DFMT_INDEX32) ? 4 : 2;
+    UINT istride = (ifmt == D3DFMT_INDEX32) ? 4 : 2, stride = g.vb_stride, icount = 0;
+    (void)gl_prim(pt, prim_count, &icount);
+    if (pt == D3DPT_QUADLIST)
+        icount = d3d8_fan_quad_source_count(1, prim_count);
+    if (!stride || (size_t)(start_idx + icount) * istride > ib->size) return D3D_OK;
+    /* SetIndices' BaseVertexIndex is added to every index: the vertices
+     * start there, and the indices then reach min_vi + nv - 1. */
+    size_t vstart = (size_t)g.ib_base * stride, avail;
+    if (vstart >= vb->size) return D3D_OK;
+    avail = (vb->size - vstart) / stride;      /* a NumVertices past the buffer: what is there */
+    if ((size_t)min_vi + nv > avail) {
+        if (avail <= min_vi) return D3D_OK;
+        nv = (UINT)(avail - min_vi);
+    }
     const BYTE *iptr = ib->sys_mem + start_idx * istride;
     return dev_DrawIndexedPrimitiveUP(s, pt, min_vi, nv, prim_count,
-                                       iptr, ifmt, vb->sys_mem, g.vb_stride);
+                                       iptr, ifmt, vb->sys_mem + vstart, stride);
 }
 
 static HRESULT __stdcall dev_CreateTexture(IDirect3DDevice8 *s, UINT w, UINT h, UINT lvls,
