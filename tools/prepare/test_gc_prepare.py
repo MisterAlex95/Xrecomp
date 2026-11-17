@@ -71,6 +71,12 @@ def test_identify_disc_formats_and_dol(tmp_path):
     assert gc.read_source(str(d)) == ("DOL-%08X" % (zlib.crc32(dol) & 0xFFFFFFFF), "prog", dol, {})
     (tmp_path / "x.bin").write_bytes(b"\x00" * 0x400)
     assert not gc.is_gc(str(tmp_path / "x.bin"))
+    # an Xbox (or PSP) CSO starts with "CISO" too: its header size where a GameCube CISO has its block size
+    sys.path.insert(0, os.path.join(ROOT, "tools", "xiso"))
+    import mkcso
+    for fmt in ("cso1", "cso2"):
+        (tmp_path / "x.cso").write_bytes(mkcso.compress(b"\x00" * 0x10000, fmt))
+        assert not gc.is_gc(str(tmp_path / "x.cso")), fmt
     # an RVZ without the runtime's reader: why, and what to do
     (tmp_path / "g.rvz").write_bytes(gcdisc.to_wia(g, "zstd", rvz=True))
     assert gc.is_gc(str(tmp_path / "g.rvz"))

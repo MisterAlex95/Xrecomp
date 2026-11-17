@@ -114,6 +114,15 @@ def key_from_header(h):
     return "%s-%d" % (ident, h[7])
 
 
+def _ciso_header(head):
+    """A GameCube CISO header: a power-of-two block size of 0x800 or more, then a map of 0 / 1 bytes. A CSO (PSP or
+    Xbox tools, also "CISO") has its header size (24, or 0) there instead, then the image size."""
+    if len(head) < 0x20:
+        return False
+    block = struct.unpack_from("<I", head, 4)[0]
+    return block >= 0x800 and not block & (block - 1) and all(b in (0, 1) for b in head[8:0x20])
+
+
 def is_disc(path):
     """A GameCube disc image this module or the runtime reads, by content."""
     try:
@@ -121,7 +130,7 @@ def is_disc(path):
             head = f.read(0x20)
             if len(head) >= 0x20 and struct.unpack_from(">I", head, 0x1C)[0] == MAGIC:
                 return True
-            if head[:4] == b"CISO":
+            if head[:4] == b"CISO" and _ciso_header(head):
                 return True
             if head[:4] in (b"\x01\xC0\x0B\xB1", b"WIA\x01", b"RVZ\x01"):
                 return True
