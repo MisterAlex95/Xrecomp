@@ -583,3 +583,94 @@ def crt_math_table_title(al=16, fill=0xCC):
         for name, add in row:
             decoys["%s+%d" % (name, add)] = t.va(name) + add
     return t, decoys
+
+
+WRAPPER_IMPORTS = (255, 258)            # PsCreateSystemThreadEx, PsTerminateSystemThread
+
+
+def thread_wrapper_title(al=16, fill=0xCC):
+    """A title that starts its threads the way an XDK title does (GitHub
+    issue 1): never by calling PsCreateSystemThreadEx itself, but through a
+    CreateThread of its own library, which hands the kernel its startup as
+    the routine and forwards its lpStartAddress argument as StartContext1.
+    The start address is then an immediate pushed for an ordinary function,
+    which is no evidence that it is code where a body already covers it:
+
+      create_thread      stdcall (attrs, stack, start, param, flags, id), an
+                         ebp frame: push [ebp+0x10] as StartContext1
+      create_thread_esp  cdecl (param, start), frameless: StartContext1
+                         through a register loaded from [esp+8]
+      begin_thread       cdecl (start, param): a wrapper of the wrapper
+      T_start*           the thread routines, frameless, each packed straight
+                         after a function that ends in a call that never
+                         returns (end_thread -> exit_thread -> the kernel),
+                         so that function's body swallows them
+      T_open             a routine in a gap that ends in such a call itself,
+                         the next function packed after it: no closed body
+      note_ctx           forwards its argument as StartContext2 only: what
+                         its callers push is data (D_note names the middle
+                         of an instruction)
+
+    T_ labels are what only the wrapper rule finds; the D_ label and the
+    data address pushed as a start address must not become functions."""
+    t = Title()
+    x = t.section(".text")
+    d = t.section(".data", DATA)
+    a = lambda: x.align(al, fill)
+    ps_create, ps_terminate = 0, 1
+
+    x.label("entry").hex("558bec").call("start_workers").call("quit").hex("ebfe")
+    a()
+    # What calls the functions in front of the routines, so that each is a
+    # function with a body (a body in a gap is what the older passes take).
+    x.label("quit").call("end_thread").call("end_thread2").call("end_thread3").call("end_thread4")
+    x.call("after_open").hex("c3")
+    a()
+    x.label("start_workers")
+    # create_thread(0, 0, T_start, ptd, 0, 0): the start address an immediate.
+    x.hex("6a00 6a00").push("ptd").push("T_start").hex("6a00 6a00").call("create_thread")
+    # ... and through a register.
+    x.hex("be").abs("T_start2").hex("6a00 6a00").push("ptd").hex("56 6a00 6a00").call("create_thread")
+    # create_thread_esp(ptd, T_start3); cdecl.
+    x.push("T_start3").push("ptd").call("create_thread_esp").hex("83c408")
+    # begin_thread(T_start4, ptd); cdecl.
+    x.push("ptd").push("T_start4").call("begin_thread").hex("83c408")
+    x.push("ptd").push("T_open").call("begin_thread").hex("83c408")
+    # Not code: a data address as the start address, and a word into the
+    # middle of code handed on as a context.
+    x.hex("6a00 6a00").push("ptd").push("ptd", 8).hex("6a00 6a00").call("create_thread")
+    x.push("D_note", 1).call("note_ctx")
+    x.hex("c3")
+    a()
+    x.label("create_thread").hex("558bec").push("xapi_start").hex("6a00 6a00 ff7514 ff7510")
+    x.hex("6a00" * 5).call_kernel(ps_create).hex("5d c21800")
+    a()
+    x.label("create_thread_esp").hex("8b442408 8b4c2404").push("xapi_start").hex("6a00 6a00 51 50")
+    x.hex("6a00" * 5).call_kernel(ps_create).hex("c3")
+    a()
+    x.label("begin_thread").hex("558bec 6a00 6a00 ff750c ff7508 6a00 6a00").call("create_thread").hex("5d c3")
+    a()
+    x.label("note_ctx").hex("558bec").push("xapi_start").hex("6a00 6a00 ff7508").push("xapi_start")
+    x.hex("6a00" * 5).call_kernel(ps_create).hex("5d c20400")
+    a()
+    # The library's startup: calls StartContext1 with StartContext2.
+    x.label("xapi_start").hex("558bec ff750c ff5508").call("end_thread")
+    a()
+    x.label("exit_thread").hex("6a00").call_kernel(ps_terminate)
+    a()
+    for n in ("", "2", "3", "4"):
+        x.label("end_thread" + n).hex("6a00").call("exit_thread")
+        x.label("T_start" + n).hex("8b442404 8b00 c20400")
+        a()
+    x.label("D_note").hex("b801000000 c3")
+    a()
+    # In a gap, but open: it ends in the call that never returns and the
+    # next function follows (the CRT's _threadstartex: `call _endthreadex`,
+    # then _endthreadex), so no body closes there.
+    x.label("T_open").hex("8b442404 50").call("end_thread")
+    x.label("after_open").hex("33c0 c3")
+    a()
+    x.label("last").hex("c3")
+    d.label("ptd").pad(32, 0)
+    t._layout()
+    return t
