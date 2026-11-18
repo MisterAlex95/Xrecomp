@@ -129,6 +129,8 @@ class GekkoLifter(FnLifter):
     tw / twi raise the program exception themselves, lfs loads without rounding, fres / frsqrte use the 750's
     estimate tables."""
 
+    IDLE_POLL = True  # one CPU: a polled flag only changes at an event (interrupt, DMA)
+
     FSET_LOAD = "RC_FSET_L"
 
     def cycles(self, i):

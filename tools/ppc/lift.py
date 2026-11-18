@@ -72,6 +72,11 @@ X_STORES = {"stwx": "stw", "stbx": "stb", "sthx": "sth", "stwux": "stw", "stbux"
 
 class FnLifter:
     FSET_LOAD = "RC_FSET_S"
+    # A load, a compare of what it loaded and a conditional branch back to the load (a flag polled until an interrupt
+    # or a DMA changes it) is an idle loop too: RC_IDLE when the branch is taken and the flag is in RAM (RC_IN_RAM(ea),
+    # the layer's). Layers with one CPU turn it on; with several (the Xbox 360), another thread could store the flag.
+    IDLE_POLL = False
+    POLL_LOADS = ("lwz", "lbz", "lhz", "lha")
 
     def __init__(self, image, decode, func, name, comments=True):
         """decode: addr -> Insn (the discovery's cache)."""
@@ -239,12 +244,26 @@ class FnLifter:
             return "RC_IDLE(%s);" % hx(t)
         return self.go(t) if t in self.f.addrs else "RC_EXIT(%s);" % hx(t)
 
+    def is_poll_loop(self, i):
+        """i (a bc) closes `load rD, d(rA); cmp(l)i rD, imm; bc` back to the load, its counter left alone."""
+        t = i.target
+        if not self.IDLE_POLL or i.lk or not (i.rd & 4) or t != i.addr - 8 or t not in self.leaders:
+            return False
+        ld, cmp = self.decode(t), self.decode(t + 4)
+        if ld is None or cmp is None or (t + 4) in self.leaders:
+            return False
+        return (ld.name in self.POLL_LOADS and ld.ra != ld.rd and ld.ra != 0
+                and cmp.name in ("cmpi", "cmpli") and cmp.ra == ld.rd)
+
     def op_bc(self, i):
         pre, cond = self.cond(i)
         t = i.target
         lr = "c->lr = %s; " % hx(i.addr + 4) if i.lk else ""
         if i.lk:
             then = "RC_EXIT(%s);" % hx(t)
+        elif self.is_poll_loop(i):
+            # only a flag in RAM: a hardware register polled (a beam position, a timer) changes with time alone
+            then = "if (RC_IN_RAM(%s)) RC_IDLE(%s); %s" % (self._ea_d(self.decode(t)), hx(t), self.go(t))
         else:
             then = self.go(t) if t in self.f.addrs else "RC_EXIT(%s);" % hx(t)
         if not cond:
