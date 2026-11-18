@@ -156,7 +156,8 @@ def test_compile_flags():
     f = cc.compile_flags("1", "/tk", "/w/project", "/sys", profile=True)
     for want in ("--target=aarch64-linux-android30", "--sysroot=/sys", "-O1", "-g0", "-fPIC", "-std=gnu11",
                  "-w", "-DXBOXRECOMP_SHELL_TITLE=1", "-DXBA_TITLE_PROFILE=1", "-I/w/project/src",
-                 "-I/w/project/src/recomp", "-I/tk/include", "-I/tk/src", "-I/tk/src/kernel"):
+                 "-I/w/project/src/recomp", "-I/tk/include", "-I/tk/src", "-I/tk/src/kernel",
+                 "-mno-outline-atomics"):         # lock-prefixed instructions inline (XBA-277)
         assert want in f
     assert "-DXBA_TITLE_PROFILE=1" not in cc.compile_flags("1", "/tk", "/w/p", "/sys")
 

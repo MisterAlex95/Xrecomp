@@ -106,6 +106,10 @@ VARIANTS = {
     "memalias0": ["-DRECOMP_GUEST_MEM_NOALIAS=0"],
     # The frame shadow stack compiled out (XBA-247, recomp_types.h): its cost, on one lift.
     "noframes": ["-DRECOMP_FRAME_SHADOW=0"],
+    # Lock-prefixed instructions on arm64 (XBA-277): atomics inline as LL/SC loops (ARMv8.0, every device), or
+    # inline LSE (ARMv8.1 atomics; not every Android device has them), instead of the outline helpers.
+    "noola": ["-mno-outline-atomics"],
+    "lse": ["-march=armv8-a+lse"],
 }
 
 
