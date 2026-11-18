@@ -63,6 +63,12 @@ set_tests_properties(host_layer_shaders PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1
 # GL context the display offers (none: those builds are skipped, the rest still runs)
 add_test(NAME host_layer_present_shaders COMMAND host_layer_test present_shaders)
 set_tests_properties(host_layer_present_shaders PROPERTIES TIMEOUT 120)
+# GC-003: frame generation's read-back of a GPU picture through pack buffers. host_window.c is compiled into the test
+# with frame generation on (xbr_host's own copy, without it, is not linked); skipped (77) like the window test
+add_executable(host_layer_fg_readback test_fg_readback.c)
+target_link_libraries(host_layer_fg_readback PRIVATE xbr_host)
+add_test(NAME host_layer_fg_readback COMMAND host_layer_fg_readback)
+set_tests_properties(host_layer_fg_readback PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 ENVIRONMENT "SDL_AUDIODRIVER=dummy")
 # XBA-243: the performance overlay's text fed by each console's performance line, no display
 add_test(NAME host_layer_overlay COMMAND host_layer_test overlay)
 set_tests_properties(host_layer_overlay PROPERTIES TIMEOUT 60)

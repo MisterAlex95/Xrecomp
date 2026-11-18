@@ -39,6 +39,14 @@
 #define XGL_NEAREST             0x2600
 #define XGL_LINEAR              0x2601
 #define XGL_PACK_ALIGNMENT      0x0D05
+#define XGL_PACK_ROW_LENGTH     0x0D02
+#define XGL_PACK_SKIP_ROWS      0x0D03
+#define XGL_PACK_SKIP_PIXELS    0x0D04
+#define XGL_PIXEL_PACK_BUFFER   0x88EB
+#define XGL_PIXEL_PACK_BUFFER_BINDING 0x88ED
+#define XGL_STREAM_READ         0x88E1
+#define XGL_BUFFER_SIZE         0x8764
+#define XGL_MAP_READ_BIT        0x0001
 #define XGL_TEXTURE_MAG_FILTER  0x2800
 #define XGL_TEXTURE_MIN_FILTER  0x2801
 #define XGL_TEXTURE_WRAP_S      0x2802
@@ -105,6 +113,7 @@ typedef struct {
     void (APIENTRY *DrawArrays)(unsigned, int, int);
     unsigned (APIENTRY *GetError)(void);
     void (APIENTRY *ReadPixels)(int, int, int, int, unsigned, unsigned, void *);
+    void (APIENTRY *GetIntegerv)(unsigned, int *);
 } HostGl;
 
 static SDL_Window *s_win;
@@ -125,6 +134,7 @@ static int s_aspect_num, s_aspect_den; /* host_window_set_aspect; 0: the picture
 static char s_capture[1024];
 static int s_shot_req; /* F12 (XBA-278): a screenshot of the picture shown next (written at its present) */
 static int s_drawing_generated; /* the picture being drawn is a generated frame: no capture of it */
+static int s_read_lost; /* atomic: SDL made a new GL context (Android, on resume): the read-back's objects are gone */
 /* The performance overlay (perf_overlay.h, RECOMP_OVERLAY=1): its text as a texture in the top left corner, drawn
  * over every picture (XBA-243: the same fields as the Xbox window's). */
 static unsigned s_ov_prog, s_ov_tex, s_ov_serial;
@@ -182,7 +192,7 @@ static int load_gl(void)
         F(AttachShader), F(LinkProgram), F(GetProgramiv), F(GetProgramInfoLog), F(DeleteProgram),
         F(UseProgram), F(GetUniformLocation), F(Uniform1i), F(Uniform1f), F(Uniform2f), F(GenVertexArrays),
         F(DeleteVertexArrays), F(BindVertexArray), F(BindFramebuffer), F(ActiveTexture), F(DrawArrays),
-        F(GetError),
+        F(GetError), F(GetIntegerv),
 #undef F
     };
     for (size_t i = 0; i < sizeof fns / sizeof fns[0]; i++) {
@@ -534,6 +544,9 @@ int host_window_pump(void)
             if (ev.window.event == SDL_WINDOWEVENT_CLOSE)
                 s_quit = 1;
             break;
+        case SDL_RENDER_DEVICE_RESET:
+            __atomic_store_n(&s_read_lost, 1, __ATOMIC_RELEASE);
+            break;
         default:
             break;
         }
@@ -811,6 +824,9 @@ static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
 #if defined(XBOXRECOMP_LSFG)
 static int s_fg;   /* below: framegen_console running for this window (a tentative definition) */
 static int fg_present(const void *px, int w, int h, int pitch);
+static const uint8_t *rb_picture(unsigned tex, int w, int h, int top_down);
+static void rb_idle(void);
+static int s_rb_feeding;   /* fg_present is given the picture rb_picture returned */
 #endif
 static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down);
 
@@ -827,11 +843,17 @@ int host_window_present_texture(unsigned tex, int w, int h, int top_down)
 #if defined(XBOXRECOMP_LSFG)
     /* XBA-274: frame generation for a picture the runtime drew on the GPU (the GameCube's GX and GPU-YUV paths):
      * read back while frame generation runs (not under fast-forward, which draws directly, nor once the pacer fell
-     * back: nothing would take the copy), then as present_rgba. */
+     * back: nothing would take the copy), then as present_rgba. The pacer gets the previous present's picture
+     * (rb_picture); a screenshot, above, always reads the current one. */
     if (s_fg && framegen_pacer_active() && !recomp_ff_active()) {
-        const uint8_t *px = texture_pixels(tex, w, h, top_down);
-        if (px && fg_present(px, w, h, w * 4))
+        const uint8_t *px = rb_picture(tex, w, h, top_down);
+        s_rb_feeding = 1;
+        int taken = px && fg_present(px, w, h, w * 4);
+        s_rb_feeding = 0;
+        if (taken)
             return 1;
+    } else {
+        rb_idle();
     }
 #endif
     return draw(tex, 0, w, h, top_down);
@@ -905,11 +927,14 @@ static int s_fg_off_logged;      /* the pacer fell back: logged once */
 static unsigned s_fg_loads;      /* recomp_states_loads() at the last frame */
 static uint64_t s_fg_log_at;     /* the next statistics line */
 static uint64_t s_fg_drawn, s_fg_drawn_gen;
+static int s_rb_discard;         /* atomic: the read-back in flight shows a moment that is over (any thread sets it) */
+static uint64_t s_rb_mapped, s_rb_direct; /* pictures given to the pacer: through a pack buffer, read synchronously */
 
 static void fg_lifecycle(int paused, void *user)
 {
     (void)paused;
     (void)user;
+    __atomic_store_n(&s_rb_discard, 1, __ATOMIC_RELEASE);
     fgc_reset();
 }
 
@@ -925,12 +950,13 @@ static void fg_log(const char *when)
     fprintf(stderr,
             "[LSFG] console%s: real %.2f / shown %.2f fps, generation %.2f ms; pictures %llu (distinct %llu, repeats "
             "%llu, direct %llu, downscaled %llu), generated %llu, window drew %llu (%llu generated), late %llu, FIFO "
-            "full %llu, skipped pairs %llu, resets %llu%s\n",
+            "full %llu, skipped pairs %llu, resets %llu, GPU read-backs %llu mapped / %llu synchronous%s\n",
             when, real / 100.0, shown / 100.0, gen_us / 1000.0, (unsigned long long)c.frames,
             (unsigned long long)c.distinct, (unsigned long long)c.repeats, (unsigned long long)c.direct,
             (unsigned long long)c.downscaled, (unsigned long long)p.generated, (unsigned long long)s_fg_drawn,
             (unsigned long long)s_fg_drawn_gen, (unsigned long long)c.late, (unsigned long long)c.fifo_full,
-            (unsigned long long)p.skipped, (unsigned long long)c.resets, c.passthrough ? ", pass-through" : "");
+            (unsigned long long)p.skipped, (unsigned long long)c.resets, (unsigned long long)s_rb_mapped,
+            (unsigned long long)s_rb_direct, c.passthrough ? ", pass-through" : "");
 }
 
 static void fg_open(void)
@@ -955,6 +981,7 @@ static void fg_open(void)
     s_fg_loads = recomp_states_loads();
     s_fg_log_at = xbox_HostNowNs() + 5000000000ull;
     s_fg_drawn = s_fg_drawn_gen = 0;
+    s_rb_mapped = s_rb_direct = 0;
     if (!listening)
         listening = recomp_lifecycle_listen(fg_lifecycle, NULL) == 0;
 }
@@ -986,26 +1013,108 @@ static void fg_service(uint64_t now)
     s_fg_drawn_gen += (uint64_t)e.generated;
 }
 
-/* The pixels of a texture of the window's context (RGBA, packed, row 0 at the top) through a framebuffer of our
- * own, for frame generation; NULL when it cannot be read (no framebuffer objects, an incomplete attachment). The
- * buffer stays valid until the next call. */
 #endif /* XBOXRECOMP_LSFG */
 
 /* A GPU picture read back (frame generation's pacer, the F12 screenshot): RGBA, row 0 at the top. */
 static void (APIENTRY *s_gen_fbs)(int, unsigned *);
+static void (APIENTRY *s_del_fbs)(int, const unsigned *);
 static void (APIENTRY *s_fb_tex2d)(unsigned, unsigned, unsigned, unsigned, int);
 static unsigned (APIENTRY *s_fb_status)(unsigned);
+static void (APIENTRY *s_bind_buffer)(unsigned, unsigned);
 static unsigned s_read_fb;
 static uint8_t *s_read_px;
 static size_t s_read_cap;
 static int s_read_failed;
+static SDL_GLContext s_read_ctx;   /* the context s_read_fb and the pack buffers belong to */
 
+/* The pack state a read needs, and what the renderer sharing this context had set (put back by pack_leave). */
+typedef struct {
+    int buffer, alignment, row_length, skip_rows, skip_pixels;
+} PackState;
+
+static void pack_enter(PackState *p)
+{
+    s_gl.GetIntegerv(XGL_PACK_ALIGNMENT, &p->alignment);
+    s_gl.GetIntegerv(XGL_PACK_ROW_LENGTH, &p->row_length);
+    s_gl.GetIntegerv(XGL_PACK_SKIP_ROWS, &p->skip_rows);
+    s_gl.GetIntegerv(XGL_PACK_SKIP_PIXELS, &p->skip_pixels);
+    s_gl.GetIntegerv(XGL_PIXEL_PACK_BUFFER_BINDING, &p->buffer);
+    s_gl.PixelStorei(XGL_PACK_ALIGNMENT, 4);
+    s_gl.PixelStorei(XGL_PACK_ROW_LENGTH, 0);
+    s_gl.PixelStorei(XGL_PACK_SKIP_ROWS, 0);
+    s_gl.PixelStorei(XGL_PACK_SKIP_PIXELS, 0);
+    if (p->buffer && s_bind_buffer)
+        s_bind_buffer(XGL_PIXEL_PACK_BUFFER, 0);
+}
+
+static void pack_leave(const PackState *p)
+{
+    s_gl.PixelStorei(XGL_PACK_ALIGNMENT, p->alignment);
+    s_gl.PixelStorei(XGL_PACK_ROW_LENGTH, p->row_length);
+    s_gl.PixelStorei(XGL_PACK_SKIP_ROWS, p->skip_rows);
+    s_gl.PixelStorei(XGL_PACK_SKIP_PIXELS, p->skip_pixels);
+    if (s_bind_buffer)
+        s_bind_buffer(XGL_PIXEL_PACK_BUFFER, (unsigned)p->buffer);
+}
+
+/* s_read_px holds at least need bytes; 0 when it cannot. */
+static int read_room(size_t need)
+{
+    if (need > s_read_cap) {
+        uint8_t *n = realloc(s_read_px, need);
+        if (!n)
+            return 0;
+        s_read_px = n;
+        s_read_cap = need;
+    }
+    return 1;
+}
+
+#if defined(XBOXRECOMP_LSFG)
+static void rb_forget(void);
+#endif
+
+/* A context SDL replaced (Android, on resume) took our objects with it: their names mean nothing any more. */
+static void read_context_check(void)
+{
+    SDL_GLContext now = SDL_GL_GetCurrentContext();
+
+    if (!__atomic_exchange_n(&s_read_lost, 0, __ATOMIC_ACQ_REL) && now == s_read_ctx)
+        return;
+    s_read_ctx = now;
+    s_read_fb = 0;
+    s_read_failed = 0;
+#if defined(XBOXRECOMP_LSFG)
+    rb_forget();
+#endif
+}
+
+/* The read-back's framebuffer bound with tex attached; 0 when that is incomplete (read_detach in both cases). */
+static int read_attach(unsigned tex)
+{
+    s_gl.BindFramebuffer(XGL_FRAMEBUFFER, s_read_fb);
+    s_fb_tex2d(XGL_FRAMEBUFFER, XGL_COLOR_ATTACHMENT0, XGL_TEXTURE_2D, tex, 0);
+    return s_fb_status(XGL_FRAMEBUFFER) == XGL_FRAMEBUFFER_COMPLETE;
+}
+
+static void read_detach(void)
+{
+    s_fb_tex2d(XGL_FRAMEBUFFER, XGL_COLOR_ATTACHMENT0, XGL_TEXTURE_2D, 0, 0);
+    s_gl.BindFramebuffer(XGL_FRAMEBUFFER, 0);
+}
+
+/* The pixels of a texture of the window's context as they are now (RGBA, packed, row 0 at the top), through a
+ * framebuffer of our own: the F12 screenshot, and frame generation when no earlier read-back can serve. NULL when it
+ * cannot be read (no framebuffer objects, an incomplete attachment). The buffer stays valid until the next read. */
 static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
 {
+    read_context_check();
     if (s_read_failed || !tex || w <= 0 || h <= 0)
         return NULL;
     if (!s_read_fb) {
         s_gen_fbs = (void (APIENTRY *)(int, unsigned *))SDL_GL_GetProcAddress("glGenFramebuffers");
+        s_del_fbs = (void (APIENTRY *)(int, const unsigned *))SDL_GL_GetProcAddress("glDeleteFramebuffers");
+        s_bind_buffer = (void (APIENTRY *)(unsigned, unsigned))SDL_GL_GetProcAddress("glBindBuffer");
         s_fb_tex2d = (void (APIENTRY *)(unsigned, unsigned, unsigned, unsigned, int))
             SDL_GL_GetProcAddress("glFramebufferTexture2D");
         s_fb_status = (unsigned (APIENTRY *)(unsigned))SDL_GL_GetProcAddress("glCheckFramebufferStatus");
@@ -1018,23 +1127,16 @@ static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
             return NULL;
         }
     }
-    size_t need = (size_t)w * (size_t)h * 4;
-    if (need > s_read_cap) {
-        uint8_t *n = realloc(s_read_px, need);
-        if (!n)
-            return NULL;
-        s_read_px = n;
-        s_read_cap = need;
-    }
-    s_gl.BindFramebuffer(XGL_FRAMEBUFFER, s_read_fb);
-    s_fb_tex2d(XGL_FRAMEBUFFER, XGL_COLOR_ATTACHMENT0, XGL_TEXTURE_2D, tex, 0);
-    int ok = s_fb_status(XGL_FRAMEBUFFER) == XGL_FRAMEBUFFER_COMPLETE;
+    if (!read_room((size_t)w * (size_t)h * 4))
+        return NULL;
+    int ok = read_attach(tex);
     if (ok) {
-        s_gl.PixelStorei(XGL_PACK_ALIGNMENT, 4);
+        PackState pack;
+        pack_enter(&pack);
         s_gl.ReadPixels(0, 0, w, h, XGL_RGBA, XGL_UNSIGNED_BYTE, s_read_px);
+        pack_leave(&pack);
     }
-    s_fb_tex2d(XGL_FRAMEBUFFER, XGL_COLOR_ATTACHMENT0, XGL_TEXTURE_2D, 0, 0);
-    s_gl.BindFramebuffer(XGL_FRAMEBUFFER, 0);
+    read_detach();
     if (!ok) {
         s_read_failed = 1;
         fprintf(stderr, "  [HOST] window: a GPU picture cannot be read back: frame generation and screenshots skip "
@@ -1058,7 +1160,197 @@ static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
     return s_read_px;
 }
 
+/* The read-back's framebuffer and memory, while the window's context is current. */
+static void read_release(void)
+{
+    if (s_read_fb && s_del_fbs && SDL_GL_GetCurrentContext() == s_read_ctx)
+        s_del_fbs(1, &s_read_fb);
+    s_read_fb = 0;
+    s_read_failed = 0;
+    s_read_ctx = NULL;
+    free(s_read_px);
+    s_read_px = NULL;
+    s_read_cap = 0;
+}
+
 #if defined(XBOXRECOMP_LSFG)
+/* ── Frame generation's read-back (GC-003) ──────────────────────────────
+ * glReadPixels into client memory makes the driver finish the frame first, on every present. Here each present
+ * starts reading its picture into one of two pack buffers and takes the picture the previous present started, which
+ * the GPU has usually finished by then: the pacer sees every picture one present late.
+ *
+ * Only the picture of the present just before can be taken, of the same size and orientation, with nothing in
+ * between that makes it old (a state load, the app paused or resumed, fast-forward, a picture from another path).
+ * Otherwise this present primes: it reads its own picture synchronously, so the pacer never gets an empty buffer, and
+ * starts the next read; the next present then gives the same picture again, which fgc_frame drops as a repeat.
+ * Screenshots never come here (texture_pixels). */
+static void (APIENTRY *s_gen_buffers)(int, unsigned *);
+static void (APIENTRY *s_del_buffers)(int, const unsigned *);
+static void (APIENTRY *s_buffer_data)(unsigned, intptr_t, const void *, unsigned);
+static void (APIENTRY *s_buffer_param)(unsigned, unsigned, int *);
+static void *(APIENTRY *s_map_range)(unsigned, intptr_t, intptr_t, unsigned);
+static unsigned char (APIENTRY *s_unmap)(unsigned);
+static void (APIENTRY *s_flush)(void);
+
+static struct {
+    int loaded;            /* 1: the entry points are there, -1: they are not (always synchronous) */
+    unsigned pbo[2];
+    size_t size[2];        /* bytes allocated in each */
+    int slot;              /* the buffer of the read in flight */
+    int pending;           /* a read is in flight in pbo[slot]: */
+    int w, h, top_down;    /* its picture */
+    unsigned loads;        /* recomp_states_loads() when it started */
+} s_rb;
+
+static int rb_load(void)
+{
+    if (s_rb.loaded)
+        return s_rb.loaded > 0;
+    s_gen_buffers = (void (APIENTRY *)(int, unsigned *))SDL_GL_GetProcAddress("glGenBuffers");
+    s_del_buffers = (void (APIENTRY *)(int, const unsigned *))SDL_GL_GetProcAddress("glDeleteBuffers");
+    s_buffer_data = (void (APIENTRY *)(unsigned, intptr_t, const void *, unsigned))
+        SDL_GL_GetProcAddress("glBufferData");
+    s_buffer_param = (void (APIENTRY *)(unsigned, unsigned, int *))SDL_GL_GetProcAddress("glGetBufferParameteriv");
+    s_map_range = (void *(APIENTRY *)(unsigned, intptr_t, intptr_t, unsigned))
+        SDL_GL_GetProcAddress("glMapBufferRange");
+    s_unmap = (unsigned char (APIENTRY *)(unsigned))SDL_GL_GetProcAddress("glUnmapBuffer");
+    s_flush = (void (APIENTRY *)(void))SDL_GL_GetProcAddress("glFlush");
+    s_rb.loaded = s_gen_buffers && s_del_buffers && s_buffer_data && s_buffer_param && s_map_range && s_unmap &&
+                  s_flush && s_bind_buffer ? 1 : -1;
+    fprintf(stderr, "  [HOST] window: frame generation reads GPU pictures %s\n",
+            s_rb.loaded > 0 ? "through pack buffers" : "synchronously (no pack buffers)");
+    return s_rb.loaded > 0;
+}
+
+/* The context is gone and its buffers with it: only the names are dropped. */
+static void rb_forget(void)
+{
+    s_rb.pbo[0] = s_rb.pbo[1] = 0;
+    s_rb.size[0] = s_rb.size[1] = 0;
+    s_rb.pending = 0;
+}
+
+/* The buffers go, in their living context. */
+static void rb_release(void)
+{
+    if (s_rb.pbo[0] && s_del_buffers)
+        s_del_buffers(2, s_rb.pbo);
+    rb_forget();
+}
+
+/* A present that gives the pacer nothing: what is in flight is older than the next picture. Frame generation off for
+ * good (the pacer fell back): the buffers go too. */
+static void rb_idle(void)
+{
+    s_rb.pending = 0;
+    if (!s_rb.pbo[0] || (s_fg && framegen_pacer_active()))
+        return;
+    read_context_check();   /* names of a context SDL replaced are not deleted in the new one */
+    rb_release();
+}
+
+/* Starts reading tex into the buffer not in flight; s_rb then describes it. 0: nothing was started. */
+static int rb_issue(unsigned tex, int w, int h, int top_down)
+{
+    int slot = !s_rb.slot;
+    size_t need = (size_t)w * (size_t)h * 4;
+    PackState pack;
+
+    s_rb.pending = 0;
+    if (!s_read_fb)
+        return 0;
+    if (!s_rb.pbo[0]) {
+        s_gen_buffers(2, s_rb.pbo);
+        s_rb.size[0] = s_rb.size[1] = 0;
+        if (!s_rb.pbo[0] || !s_rb.pbo[1])
+            return 0;
+    }
+    if (!read_attach(tex)) {
+        read_detach();
+        return 0;
+    }
+    pack_enter(&pack);
+    s_bind_buffer(XGL_PIXEL_PACK_BUFFER, s_rb.pbo[slot]);
+    if (need > s_rb.size[slot]) {
+        int got = 0;
+        s_buffer_data(XGL_PIXEL_PACK_BUFFER, (intptr_t)need, NULL, XGL_STREAM_READ);
+        s_buffer_param(XGL_PIXEL_PACK_BUFFER, XGL_BUFFER_SIZE, &got);
+        s_rb.size[slot] = got > 0 ? (size_t)got : 0;
+    }
+    int ok = need <= s_rb.size[slot];
+    if (ok)
+        s_gl.ReadPixels(0, 0, w, h, XGL_RGBA, XGL_UNSIGNED_BYTE, NULL);
+    pack_leave(&pack);
+    read_detach();
+    if (!ok)
+        return 0;
+    s_flush();   /* a tiler starts on it now, not at the next swap */
+    s_rb.slot = slot;
+    s_rb.pending = 1;
+    s_rb.w = w;
+    s_rb.h = h;
+    s_rb.top_down = top_down;
+    s_rb.loads = recomp_states_loads();
+    return 1;
+}
+
+/* The finished read in pbo[slot] into s_read_px, row 0 at the top; unmapped and unbound when it returns, as the
+ * caller may draw next. NULL when it cannot be had. */
+static const uint8_t *rb_take(int slot, int w, int h, int top_down)
+{
+    size_t row = (size_t)w * 4, need = row * (size_t)h;
+    PackState pack;
+    int ok = 0;
+
+    if (need > s_rb.size[slot] || !read_room(need))
+        return NULL;
+    pack_enter(&pack);
+    s_bind_buffer(XGL_PIXEL_PACK_BUFFER, s_rb.pbo[slot]);
+    const uint8_t *p = s_map_range(XGL_PIXEL_PACK_BUFFER, 0, (intptr_t)need, XGL_MAP_READ_BIT);
+    if (p) {
+        if (top_down) {
+            memcpy(s_read_px, p, need);
+        } else {   /* the texture's row 0 is the picture's bottom */
+            for (int y = 0; y < h; y++)
+                memcpy(s_read_px + (size_t)y * row, p + (size_t)(h - 1 - y) * row, row);
+        }
+        ok = s_unmap(XGL_PIXEL_PACK_BUFFER) != 0;   /* 0: the store was corrupted while mapped */
+    }
+    pack_leave(&pack);
+    return ok ? s_read_px : NULL;
+}
+
+/* The picture to give the pacer at this present (see above), NULL when it cannot be read. */
+static const uint8_t *rb_picture(unsigned tex, int w, int h, int top_down)
+{
+    read_context_check();
+    int discard = __atomic_exchange_n(&s_rb_discard, 0, __ATOMIC_ACQ_REL);
+    if (discard)
+        rb_release();   /* the app paused or resumed: made again below, whatever the driver did meanwhile */
+    int have = s_rb.pending && !discard && s_rb.w == w && s_rb.h == h && s_rb.top_down == top_down &&
+               s_rb.loads == recomp_states_loads();
+    int slot = s_rb.slot;
+    const uint8_t *px = NULL;
+
+    s_rb.pending = 0;
+    if (!have) {   /* priming: this picture now, and the next present takes it from the buffer */
+        px = texture_pixels(tex, w, h, top_down);
+        s_rb_direct += px != NULL;
+    }
+    if ((have || px) && rb_load())
+        rb_issue(tex, w, h, top_down);
+    if (!have)
+        return px;
+    px = rb_take(slot, w, h, top_down);   /* have: the read in flight is of this very shape */
+    if (px) {
+        s_rb_mapped++;
+        return px;
+    }
+    px = texture_pixels(tex, w, h, top_down);
+    s_rb_direct += px != NULL;
+    return px;
+}
+
 /* 1 when the picture was taken by frame generation (nothing to draw now), 0 to draw it as usual. */
 static int fg_present(const void *px, int w, int h, int pitch)
 {
@@ -1067,6 +1359,8 @@ static int fg_present(const void *px, int w, int h, int pitch)
 
     if (!s_fg)
         return 0;
+    if (!s_rb_feeding)
+        s_rb.pending = 0;   /* a picture from another path: the read in flight is older than it */
     if (recomp_ff_active())
         flags |= FGC_BYPASS;
     loads = recomp_states_loads();
@@ -1450,6 +1744,12 @@ void host_window_close(void)
         if (s_gl.DeleteTextures && s_tex_prev)
             s_gl.DeleteTextures(1, &s_tex_prev);
         shader_free();
+        read_context_check();   /* names of a context SDL replaced are not deleted in this one */
+#if defined(XBOXRECOMP_LSFG)
+        rb_release();
+        memset(&s_rb, 0, sizeof s_rb);   /* the entry points are looked up again with the next context */
+#endif
+        read_release();
         if (s_gl.DeleteVertexArrays && s_vao)
             s_gl.DeleteVertexArrays(1, &s_vao);
         if (s_gl.DeleteProgram && s_prog)
