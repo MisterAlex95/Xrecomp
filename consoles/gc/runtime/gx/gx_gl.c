@@ -721,14 +721,12 @@ static uint64_t tex_hash(gx_state *gx, const uint8_t *p, size_t n, uint64_t seed
     return gx_hash(p, n, seed);
 }
 
-/* The GL texture for map n as the registers describe it now; *gw / *gh its texel size as GX sees it. */
-static GLuint tex_for(gx_state *gx, unsigned map, unsigned *tw, unsigned *th)
+/* The GL texture for map n as the registers describe it now; *info: those registers, decoded. */
+static GLuint tex_for(gx_state *gx, unsigned map, gx_texinfo *info)
 {
     gx_gl *g = gx->gl;
-    gx_texinfo ti;
-    gx_tex_info(gx, map, &ti);
-    *tw = ti.w;
-    *th = ti.h;
+    gx_tex_info(gx, map, info);
+    const gx_texinfo ti = *info;
     if (!ti.addr || ti.addr >= gx->ram_size || ti.size > gx->ram_size - ti.addr)
         return g->white_tex;
     tex_entry **b = &g->texs[(ti.addr >> 5) & (TEX_BUCKETS - 1)];
@@ -826,13 +824,11 @@ static GLint gl_wrap(unsigned w)
 static void bind_map(gx_state *gx, unsigned map)
 {
     gx_gl *g = gx->gl;
-    unsigned tw, th;
-    GLuint t = tex_for(gx, map, &tw, &th);
+    gx_texinfo ti;
+    GLuint t = tex_for(gx, map, &ti);
     F.glActiveTexture(GL_TEXTURE0 + map);
     F.glBindTexture(GL_TEXTURE_2D, t);
     uint32_t m0 = gx->bp[bp_tex_reg(BP_TX_MODE0, map)], m1 = gx->bp[bp_tex_reg(BP_TX_MODE1, map)];
-    gx_texinfo ti;
-    gx_tex_info(gx, map, &ti);
     GLuint s = g->samplers[map];
     F.glSamplerParameteri(s, GL_TEXTURE_WRAP_S, gl_wrap(BITS(m0, 0, 2)));
     F.glSamplerParameteri(s, GL_TEXTURE_WRAP_T, gl_wrap(BITS(m0, 2, 2)));
@@ -851,8 +847,8 @@ static void bind_map(gx_state *gx, unsigned map)
     F.glSamplerParameterf(s, GL_TEXTURE_MAX_LOD, (float)BITS(m1, 8, 8) / 16.0f);
     F.glBindSampler(map, s);
     float *d = g->ubo_data.texdim[map];
-    d[0] = (float)tw;
-    d[1] = (float)th;
+    d[0] = (float)ti.w;
+    d[1] = (float)ti.h;
     d[2] = (float)(int8_t)BITS(m0, 9, 8) / 32.0f;
     d[3] = 0;
 }
