@@ -257,10 +257,46 @@ void gx_tex_encode(unsigned fmt, const uint8_t *rgba, unsigned w, unsigned h, ui
     }
 }
 
+static inline uint64_t hash_rotl(uint64_t v, unsigned r)
+{
+    return v << r | v >> (64 - r);
+}
+
+static inline uint64_t hash_lane(uint64_t v, const uint8_t *p)
+{
+    uint64_t w;
+    memcpy(&w, p, 8);
+    return hash_rotl(v + w * 0xC2B2AE3D27D4EB4Full, 31) * 0x9E3779B185EBCA87ull;
+}
+
+static inline uint64_t hash_merge(uint64_t h, uint64_t v)
+{
+    h ^= hash_rotl(v * 0xC2B2AE3D27D4EB4Full, 31) * 0x9E3779B185EBCA87ull;
+    return h * 0x9E3779B185EBCA87ull + 0x85EBCA77C2B2AE63ull;
+}
+
+/* Every byte counts: a texture is reused on this value alone. Inputs of 32 bytes and more go through four independent
+ * lanes, so the multiplications of one block run side by side instead of waiting for each other (one serial chain
+ * was the limit before). The value lives only in this process's caches: nothing stores it. */
 uint64_t gx_hash(const uint8_t *p, size_t n, uint64_t seed)
 {
     uint64_t h = seed ^ (0x9E3779B97F4A7C15ull * (n + 1));
     size_t i = 0;
+    if (n >= 32) {
+        uint64_t a = h + 0x9E3779B185EBCA87ull + 0xC2B2AE3D27D4EB4Full, b = h + 0xC2B2AE3D27D4EB4Full, c = h,
+                 d = h - 0x9E3779B185EBCA87ull;
+        for (; i + 32 <= n; i += 32) {
+            a = hash_lane(a, p + i);
+            b = hash_lane(b, p + i + 8);
+            c = hash_lane(c, p + i + 16);
+            d = hash_lane(d, p + i + 24);
+        }
+        h = hash_rotl(a, 1) + hash_rotl(b, 7) + hash_rotl(c, 12) + hash_rotl(d, 18);
+        h = hash_merge(h, a);
+        h = hash_merge(h, b);
+        h = hash_merge(h, c);
+        h = hash_merge(h, d);
+    }
     for (; i + 8 <= n; i += 8) {
         uint64_t w;
         memcpy(&w, p + i, 8);

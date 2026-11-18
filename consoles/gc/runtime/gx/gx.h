@@ -120,6 +120,11 @@ typedef struct gx_stats {
     /* RECOMP_GC_GX_STREAM=storage: whether it is in use, the waits for a fence the GPU had not signalled yet and their
      * total time, the wraps of each ring (vertices, indices, uniforms), the uploads too large for a ring */
     uint64_t stream_storage, stream_waits, stream_wait_us, stream_wraps[3], stream_oversize;
+    /* Texture bytes hashed to check the cache against RAM (contents, palettes, EFB copies): in all, in the last
+     * field, in the busiest field so far. */
+    uint64_t tex_hash_bytes, tex_hash_bytes_field, tex_hash_bytes_field_max;
+    /* The pixel state of each batch: values that differed from what GL already had, and values that did not. */
+    uint64_t gl_state_sent, gl_state_skipped;
 } gx_stats;
 void gx_get_stats(const gx_state *gx, gx_stats *s);
 

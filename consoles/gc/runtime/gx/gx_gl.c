@@ -74,6 +74,24 @@ typedef struct tex_entry {
     struct tex_entry *next;
 } tex_entry;
 
+/* What a sampler object was last told (bind_map). The objects are the renderer's alone, so this stays true
+ * whatever else happens to the context; which sampler is bound to a unit does not, and is set every time. */
+typedef struct sampler_params {
+    GLint wrap_s, wrap_t, mag, min;
+    uint32_t lods;           /* TX_MODE1: minimum and maximum LOD */
+    uint32_t set;
+} sampler_params;
+
+/* The pixel state apply_state last gave GL, to leave out what a batch does not change. It only holds while nothing
+ * else touches that state: whatever does (copies, peeks, pokes, clears, and the window's presenter, which shares this
+ * context between two fields) calls shadow_invalidate, and the next batch sends everything again. */
+typedef struct gl_shadow {
+    GLboolean efb_ready;     /* the EFB bound with its viewport, the scissor test on, GL_CCW */
+    GLboolean depth_on, depth_mask, cmask, amask, blend_on, cull_on;
+    GLenum depth_func, blend_eq, blend_s, blend_d, cull_mode;
+    GLint scissor[4];
+} gl_shadow;
+
 typedef struct ubo_t {
     int32_t creg[4][4], kreg[4][4], swap[4][4];
     float tcscale[8][4], texdim[8][4], indm[6][4], indscale[4][4];
@@ -92,7 +110,9 @@ struct gx_gl {
     GLint max_tex;
 
     GLuint efb_fbo, efb_color, efb_depth;
-    GLuint vao, vbo, ebo, ubo, empty_vao;
+    GLuint vao[9];           /* per number of texture coordinates in the batch: the attributes it enables */
+    GLuint vbo, ebo, ubo, empty_vao;
+    bool attr_defaults_set;  /* this field's batches: unused coordinates read (0, 0, 1, 1) */
     size_t ring_size[3], ring_off[3]; /* vbo, ebo, ubo as streaming rings (ring_put) */
     GLint ubo_align;
     int stream; /* STREAM_* */
@@ -104,6 +124,7 @@ struct gx_gl {
     uint64_t sr_waits, sr_wait_ns, sr_wait_max_ns, sr_oversize;
     bool sr_wait_warned;
     GLuint samplers[8];
+    sampler_params sampler_set[8];
     GLuint white_tex;
     GLuint uber;
     GLuint copy_prog, copy_fbo;
@@ -124,6 +145,7 @@ struct gx_gl {
     unsigned batch_ntex;     /* texture coordinates the batch's draws generated (the most of them) */
     uint8_t *packed;         /* the batch's vertices with only those coordinates, for the upload */
     ubo_t ubo_data;
+    gl_shadow sh;
 
     struct {
         uint32_t addr, stride, lines;
@@ -190,6 +212,12 @@ static int gl_flavour_ok(const char *ver)
     desktop_gl = ver && !strstr(ver, "OpenGL ES") && sscanf(ver, "%d.%d", &major, &minor) == 2 &&
                  (major > 3 || (major == 3 && minor >= 3));
     return ver && (strstr(ver, "OpenGL ES 3") || desktop_gl);
+}
+
+/* Every value becomes one GL can never hold (no enum or boolean is all ones, no scissor box negative). */
+static void shadow_invalidate(gx_gl *g)
+{
+    memset(&g->sh, 0xFF, sizeof g->sh);
 }
 
 static void clear_depth(gx_glfn *f, float z)
@@ -714,14 +742,19 @@ static void tex_free(gx_gl *g, tex_entry *e)
     free(e);
 }
 
-/* The GL texture for map n as the registers describe it now; *gw / *gh its texel size as GX sees it. */
-static GLuint tex_for(gx_state *gx, unsigned map, unsigned *tw, unsigned *th)
+/* gx_hash of texture bytes, counted for the statistics (per field: gx_field). */
+static uint64_t tex_hash(gx_state *gx, const uint8_t *p, size_t n, uint64_t seed)
+{
+    gx->stats.tex_hash_bytes += n;
+    return gx_hash(p, n, seed);
+}
+
+/* The GL texture for map n as the registers describe it now; *info: those registers, decoded. */
+static GLuint tex_for(gx_state *gx, unsigned map, gx_texinfo *info)
 {
     gx_gl *g = gx->gl;
-    gx_texinfo ti;
-    gx_tex_info(gx, map, &ti);
-    *tw = ti.w;
-    *th = ti.h;
+    gx_tex_info(gx, map, info);
+    const gx_texinfo ti = *info;
     if (!ti.addr || ti.addr >= gx->ram_size || ti.size > gx->ram_size - ti.addr)
         return g->white_tex;
     tex_entry **b = &g->texs[(ti.addr >> 5) & (TEX_BUCKETS - 1)];
@@ -732,7 +765,7 @@ static GLuint tex_for(gx_state *gx, unsigned map, unsigned *tw, unsigned *th)
             continue;
         if (e->w == ti.w && e->h == ti.h && e->fmt == tex_family(ti.fmt)) {
             if (e->epoch != gx->tex_epoch) {
-                if (gx_hash(gx->ram + e->addr, e->size, 0) != e->hash)
+                if (tex_hash(gx, gx->ram + e->addr, e->size, 0) != e->hash)
                     break; /* the CPU wrote over it: decode RAM */
                 e->epoch = gx->tex_epoch;
             }
@@ -747,7 +780,7 @@ static GLuint tex_for(gx_state *gx, unsigned map, unsigned *tw, unsigned *th)
         uint32_t a = ti.tlut_addr;
         if (a + tb > GX_TMEM_SIZE)
             a = GX_TMEM_SIZE - tb;
-        th_hash = gx_hash(gx->tmem + a, tb, ti.tlut_fmt);
+        th_hash = tex_hash(gx, gx->tmem + a, tb, ti.tlut_fmt);
     }
     tex_entry *e = NULL;
     for (tex_entry *x = *b; x; x = x->next)
@@ -761,7 +794,7 @@ static GLuint tex_for(gx_state *gx, unsigned map, unsigned *tw, unsigned *th)
         gx->stats.tex_hits++;
         return e->tex;
     }
-    uint64_t h = gx_hash(gx->ram + ti.addr, ti.size, ti.fmt);
+    uint64_t h = tex_hash(gx, gx->ram + ti.addr, ti.size, ti.fmt);
     if (e && e->hash == h) {
         e->epoch = gx->tex_epoch;
         e->last_field = gx->field_count;
@@ -819,17 +852,12 @@ static GLint gl_wrap(unsigned w)
 static void bind_map(gx_state *gx, unsigned map)
 {
     gx_gl *g = gx->gl;
-    unsigned tw, th;
-    GLuint t = tex_for(gx, map, &tw, &th);
+    gx_texinfo ti;
+    GLuint t = tex_for(gx, map, &ti);
     F.glActiveTexture(GL_TEXTURE0 + map);
     F.glBindTexture(GL_TEXTURE_2D, t);
     uint32_t m0 = gx->bp[bp_tex_reg(BP_TX_MODE0, map)], m1 = gx->bp[bp_tex_reg(BP_TX_MODE1, map)];
-    gx_texinfo ti;
-    gx_tex_info(gx, map, &ti);
     GLuint s = g->samplers[map];
-    F.glSamplerParameteri(s, GL_TEXTURE_WRAP_S, gl_wrap(BITS(m0, 0, 2)));
-    F.glSamplerParameteri(s, GL_TEXTURE_WRAP_T, gl_wrap(BITS(m0, 2, 2)));
-    F.glSamplerParameteri(s, GL_TEXTURE_MAG_FILTER, (m0 & 0x10) ? GL_LINEAR : GL_NEAREST);
     unsigned mf = BITS(m0, 5, 3);
     GLint min;
     if (ti.levels <= 1 || t == g->white_tex)
@@ -839,13 +867,21 @@ static void bind_map(gx_state *gx, unsigned map)
                                       GL_LINEAR, GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR};
         min = mins[mf];
     }
-    F.glSamplerParameteri(s, GL_TEXTURE_MIN_FILTER, min);
-    F.glSamplerParameterf(s, GL_TEXTURE_MIN_LOD, (float)BITS(m1, 0, 8) / 16.0f);
-    F.glSamplerParameterf(s, GL_TEXTURE_MAX_LOD, (float)BITS(m1, 8, 8) / 16.0f);
+    const sampler_params want = {gl_wrap(BITS(m0, 0, 2)), gl_wrap(BITS(m0, 2, 2)),
+                                 (m0 & 0x10) ? GL_LINEAR : GL_NEAREST, min, m1 & 0xFFFFu, 1};
+    if (memcmp(&g->sampler_set[map], &want, sizeof want)) {
+        F.glSamplerParameteri(s, GL_TEXTURE_WRAP_S, want.wrap_s);
+        F.glSamplerParameteri(s, GL_TEXTURE_WRAP_T, want.wrap_t);
+        F.glSamplerParameteri(s, GL_TEXTURE_MAG_FILTER, want.mag);
+        F.glSamplerParameteri(s, GL_TEXTURE_MIN_FILTER, want.min);
+        F.glSamplerParameterf(s, GL_TEXTURE_MIN_LOD, (float)BITS(m1, 0, 8) / 16.0f);
+        F.glSamplerParameterf(s, GL_TEXTURE_MAX_LOD, (float)BITS(m1, 8, 8) / 16.0f);
+        g->sampler_set[map] = want;
+    }
     F.glBindSampler(map, s);
     float *d = g->ubo_data.texdim[map];
-    d[0] = (float)tw;
-    d[1] = (float)th;
+    d[0] = (float)ti.w;
+    d[1] = (float)ti.h;
     d[2] = (float)(int8_t)BITS(m0, 9, 8) / 32.0f;
     d[3] = 0;
 }
@@ -877,8 +913,8 @@ static void efb_bind(gx_gl *g)
     F.glViewport(0, 0, GX_EFB_W * g->scale, GX_EFB_H * g->scale);
 }
 
-/* The EFB rectangle x0..x1, y0..y1 (top-down) as a GL scissor. */
-static void scissor_rect(gx_gl *g, int x0, int y0, int x1, int y1)
+/* The EFB rectangle x0..x1, y0..y1 (top-down) as a GL scissor box. */
+static void scissor_box(const gx_gl *g, int x0, int y0, int x1, int y1, GLint box[4])
 {
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
@@ -887,29 +923,57 @@ static void scissor_rect(gx_gl *g, int x0, int y0, int x1, int y1)
     if (x1 < x0) x1 = x0;
     if (y1 < y0) y1 = y0;
     int s = g->scale;
-    F.glEnable(GL_SCISSOR_TEST);
-    F.glScissor(x0 * s, (GX_EFB_H - y1) * s, (x1 - x0) * s, (y1 - y0) * s);
+    box[0] = x0 * s, box[1] = (GX_EFB_H - y1) * s, box[2] = (x1 - x0) * s, box[3] = (y1 - y0) * s;
 }
+
+/* Outside apply_state: the caller invalidates the shadow. */
+static void scissor_rect(gx_gl *g, int x0, int y0, int x1, int y1)
+{
+    GLint box[4];
+    scissor_box(g, x0, y0, x1, y1, box);
+    F.glEnable(GL_SCISSOR_TEST);
+    F.glScissor(box[0], box[1], box[2], box[3]);
+}
+
+/* True when a shadowed value differs from what GL was last told: it is recorded, and the caller sends it. */
+#define SH_CHANGED(field, value)                                                                                      \
+    (g->sh.field != (value) ? (g->sh.field = (value), gx->stats.gl_state_sent++, true)                                \
+                            : (gx->stats.gl_state_skipped++, false))
 
 static void apply_state(gx_state *gx, bool tri)
 {
     gx_gl *g = gx->gl;
     const uint32_t *bp = gx->bp;
-    efb_bind(g);
+    if (SH_CHANGED(efb_ready, GL_TRUE)) {
+        efb_bind(g);
+        F.glEnable(GL_SCISSOR_TEST);
+        F.glFrontFace(GL_CCW);
+    }
     int offx = (int)BITS(bp[BP_SCISSOR_OFFSET], 0, 10) * 2, offy = (int)BITS(bp[BP_SCISSOR_OFFSET], 10, 10) * 2;
     int top = (int)BITS(bp[BP_SCISSOR_TL], 0, 11), left = (int)BITS(bp[BP_SCISSOR_TL], 12, 11);
     int bottom = (int)BITS(bp[BP_SCISSOR_BR], 0, 11), right = (int)BITS(bp[BP_SCISSOR_BR], 12, 11);
-    scissor_rect(g, left - offx, top - offy, right - offx + 1, bottom - offy + 1);
+    GLint box[4];
+    scissor_box(g, left - offx, top - offy, right - offx + 1, bottom - offy + 1, box);
+    if (memcmp(g->sh.scissor, box, sizeof box)) {
+        memcpy(g->sh.scissor, box, sizeof box);
+        F.glScissor(box[0], box[1], box[2], box[3]);
+        gx->stats.gl_state_sent++;
+    } else {
+        gx->stats.gl_state_skipped++;
+    }
 
     uint32_t zm = bp[BP_ZMODE];
-    if (zm & 1) {
-        F.glEnable(GL_DEPTH_TEST);
-        F.glDepthFunc(GL_NEVER + BITS(zm, 1, 3));
-        F.glDepthMask((zm & 0x10) ? GL_TRUE : GL_FALSE);
-    } else {
-        F.glDisable(GL_DEPTH_TEST);
-        F.glDepthMask(GL_FALSE);
+    GLboolean depth_on = (zm & 1) ? GL_TRUE : GL_FALSE, depth_mask = (zm & 1) && (zm & 0x10) ? GL_TRUE : GL_FALSE;
+    if (SH_CHANGED(depth_on, depth_on)) {
+        if (depth_on)
+            F.glEnable(GL_DEPTH_TEST);
+        else
+            F.glDisable(GL_DEPTH_TEST);
     }
+    if (depth_on && SH_CHANGED(depth_func, GL_NEVER + BITS(zm, 1, 3)))
+        F.glDepthFunc(g->sh.depth_func);
+    if (SH_CHANGED(depth_mask, depth_mask))
+        F.glDepthMask(depth_mask);
     uint32_t cm0 = bp[BP_CMODE0];
     unsigned fmt = BITS(bp[BP_PE_CONTROL], 0, 3);
     bool has_alpha = fmt == 1;
@@ -917,32 +981,42 @@ static void apply_state(gx_state *gx, bool tri)
     GLboolean cmask = (cm0 & 8) ? GL_TRUE : GL_FALSE, amask = ((cm0 & 0x10) && has_alpha) ? GL_TRUE : GL_FALSE;
     if (logic && BITS(cm0, 12, 4) == 5) /* NOOP */
         cmask = amask = GL_FALSE;
-    F.glColorMask(cmask, cmask, cmask, amask);
+    bool cmask_new = SH_CHANGED(cmask, cmask), amask_new = SH_CHANGED(amask, amask);
+    if (cmask_new || amask_new)
+        F.glColorMask(cmask, cmask, cmask, amask);
+    if (SH_CHANGED(blend_on, blend ? GL_TRUE : GL_FALSE)) {
+        if (blend)
+            F.glEnable(GL_BLEND);
+        else
+            F.glDisable(GL_BLEND);
+    }
     if (blend) {
-        F.glEnable(GL_BLEND);
+        GLenum eq = GL_FUNC_ADD, s = GL_ONE, d = GL_ONE;
         if (cm0 & 0x800) {
-            F.glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT);
-            F.glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
+            eq = GL_FUNC_REVERSE_SUBTRACT;
         } else {
-            GLenum s = blend_src(BITS(cm0, 8, 3)), d = blend_dst(BITS(cm0, 5, 3));
+            s = blend_src(BITS(cm0, 8, 3)), d = blend_dst(BITS(cm0, 5, 3));
             if (!has_alpha)
                 s = no_dst_alpha(s), d = no_dst_alpha(d);
-            F.glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
-            F.glBlendFuncSeparate(s, d, s, d);
         }
-    } else {
-        F.glDisable(GL_BLEND);
+        if (SH_CHANGED(blend_eq, eq))
+            F.glBlendEquationSeparate(eq, eq);
+        bool s_new = SH_CHANGED(blend_s, s), d_new = SH_CHANGED(blend_d, d);
+        if (s_new || d_new)
+            F.glBlendFuncSeparate(s, d, s, d);
     }
     /* A GX front face is clockwise on screen and the EFB is upright in GL, so with GL's front = counter-clockwise a
      * GX back face is a GL front face: genmode 1 (cull back) removes GL_FRONT, 2 (cull front) GL_BACK. */
     unsigned cull = BITS(bp[BP_GENMODE], 14, 2);
-    F.glFrontFace(GL_CCW);
-    if (tri && cull) {
-        F.glEnable(GL_CULL_FACE);
-        F.glCullFace(cull == 1 ? GL_FRONT : cull == 2 ? GL_BACK : GL_FRONT_AND_BACK);
-    } else {
-        F.glDisable(GL_CULL_FACE);
+    bool cull_on = tri && cull;
+    if (SH_CHANGED(cull_on, cull_on ? GL_TRUE : GL_FALSE)) {
+        if (cull_on)
+            F.glEnable(GL_CULL_FACE);
+        else
+            F.glDisable(GL_CULL_FACE);
     }
+    if (cull_on && SH_CHANGED(cull_mode, cull == 1 ? GL_FRONT : cull == 2 ? GL_BACK : GL_FRONT_AND_BACK))
+        F.glCullFace(g->sh.cull_mode);
 }
 
 static int sext11(uint32_t v)
@@ -1126,6 +1200,7 @@ static size_t ring_put(gx_gl *g, unsigned r, GLuint buf, GLenum target, const vo
     if (g->stream == STREAM_STORAGE && g->egl.eglGetCurrentContext() != g->sr_ctx) {
         /* The mappings died with their context: never write through them. Plain buffers from here on. */
         fprintf(stderr, "gx: buffer streaming: the GL context changed, storage rings dropped, now map\n");
+        shadow_invalidate(g);
         const GLuint bufs[3] = {g->vbo, g->ebo, g->ubo};
         stream_storage_destroy(g, bufs);
         g->stream = STREAM_MAP;
@@ -1278,26 +1353,28 @@ void gx_gl_flush(gx_state *gx)
     fill_ubo(gx, &k);
     F.glUseProgram(prog);
     /* upload position, colours and only the texture coordinates generated: 24 + 12 x ntex bytes a vertex */
-    F.glBindVertexArray(g->vao);
     unsigned nt = g->batch_ntex;
+    F.glBindVertexArray(g->vao[nt]);
+    if (!g->attr_defaults_set) { /* context state, not the vertex arrays': the window may change it between fields */
+        for (unsigned i = 0; i < 8; i++)
+            F.glVertexAttrib4f(3 + i, 0, 0, 1, 1);
+        g->attr_defaults_set = true;
+    }
     size_t stride = offsetof(gx_vout, tex) + 12 * (size_t)nt;
-    for (uint32_t i = 0; i < g->nv; i++)
-        memcpy(g->packed + i * stride, &g->bv[i], stride);
-    size_t vo = ring_put(g, 0, g->vbo, GL_ARRAY_BUFFER, g->packed, g->nv * stride, 16);
+    const void *verts = g->bv; /* all eight coordinates: the batch is packed already */
+    if (stride != sizeof(gx_vout)) {
+        for (uint32_t i = 0; i < g->nv; i++)
+            memcpy(g->packed + i * stride, &g->bv[i], stride);
+        verts = g->packed;
+    }
+    size_t vo = ring_put(g, 0, g->vbo, GL_ARRAY_BUFFER, verts, g->nv * stride, 16);
     GLsizei st = (GLsizei)stride;
     F.glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, st, (const void *)(vo + offsetof(gx_vout, pos)));
     F.glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)(vo + offsetof(gx_vout, c0)));
     F.glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)(vo + offsetof(gx_vout, c1)));
-    for (unsigned i = 0; i < 8; i++) {
-        if (i < nt) {
-            F.glEnableVertexAttribArray(3 + i);
-            F.glVertexAttribPointer(3 + i, 3, GL_FLOAT, GL_FALSE, st,
-                                    (const void *)(vo + offsetof(gx_vout, tex) + 12 * i));
-        } else {
-            F.glDisableVertexAttribArray(3 + i);
-            F.glVertexAttrib4f(3 + i, 0, 0, 1, 1);
-        }
-    }
+    for (unsigned i = 0; i < nt; i++)
+        F.glVertexAttribPointer(3 + i, 3, GL_FLOAT, GL_FALSE, st,
+                                (const void *)(vo + offsetof(gx_vout, tex) + 12 * i));
     size_t io = ring_put(g, 1, g->ebo, GL_ELEMENT_ARRAY_BUFFER, g->bi, (size_t)g->ni * 4, 4);
     F.glDrawElements(GL_TRIANGLES, (GLsizei)g->ni, GL_UNSIGNED_INT, (const void *)io);
     stream_after_draw(gx);
@@ -1554,6 +1631,7 @@ static void copy_pass(gx_state *gx, GLuint dst, int ow, int oh, const float src[
 {
     gx_gl *g = gx->gl;
     const uint32_t *bp = gx->bp;
+    shadow_invalidate(g);
     F.glBindFramebuffer(GL_FRAMEBUFFER, g->copy_fbo);
     F.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst, 0);
     g->copy_att = dst;
@@ -1597,6 +1675,7 @@ static void efb_clear_rect(gx_state *gx, int x, int y, int w, int h)
 {
     gx_gl *g = gx->gl;
     const uint32_t *bp = gx->bp;
+    shadow_invalidate(g);
     efb_bind(g);
     scissor_rect(g, x, y, x + w, y + h);
     uint32_t cm0 = bp[BP_CMODE0];
@@ -1769,6 +1848,7 @@ static void xfb_keep(gx_state *gx, uint32_t addr, uint32_t stride, int lines, in
 {
     gx_gl *g = gx->gl;
     unsigned slot = 4;
+    shadow_invalidate(g);
     for (unsigned i = 0; i < 4; i++)
         if (g->xfb[i].tex && g->xfb[i].addr == addr)
             slot = i;
@@ -1931,7 +2011,7 @@ void gx_gl_copy(gx_state *gx, uint32_t exec)
                 e->w = (unsigned)ow, e->h = (unsigned)oh, e->fmt = fam, e->levels = 1;
                 copy_pass(gx, e->tex, ow * s, oh * s, src, 0, fam, s0, s1, depth, 0);
                 e->size = size;
-                e->hash = gx_hash(gx->ram + dst, size, 0);
+                e->hash = tex_hash(gx, gx->ram + dst, size, 0);
                 gx->tex_epoch++;
                 e->epoch = gx->tex_epoch;
                 e->last_field = gx->field_count;
@@ -1941,6 +2021,7 @@ void gx_gl_copy(gx_state *gx, uint32_t exec)
     }
     if (exec & 0x800)
         efb_clear_rect(gx, x, y, w, h);
+    shadow_invalidate(g);
     efb_bind(g);
 }
 
@@ -1957,6 +2038,7 @@ static void peek_fill(gx_state *gx, bool z)
         g->peek_z_ok = true;
     else
         g->peek_color_ok = true;
+    shadow_invalidate(g);
     efb_bind(g);
 }
 
@@ -1995,6 +2077,7 @@ void gx_efb_poke(gx_state *gx, uint32_t pa, uint32_t v, unsigned size)
         return;
     gx_gl_flush(gx);
     int x = (int)BITS(pa, 2, 10), y = (int)BITS(pa, 12, 10);
+    shadow_invalidate(g);
     efb_bind(g);
     scissor_rect(g, x, y, x + 1, y + 1);
     if (pa & 0x400000) {
@@ -2019,6 +2102,7 @@ void gx_gl_frame(gx_state *gx)
     if (!g)
         return;
     gx_gl_flush(gx);
+    shadow_invalidate(g); /* the window presents between two fields, on this context */
     if (g->stream == STREAM_STORAGE && gx->field_count % STREAM_LOG_FIELDS == 0)
         stream_storage_log(g);
     if (gx->field_count % 60 == 0) { /* drop textures unused for a while */
@@ -2047,6 +2131,7 @@ void gx_gl_frame(gx_state *gx)
         }
     gx->stats.shaders_ready = ready;
     gx->stats.shaders_pending = pending;
+    g->attr_defaults_set = false;
 }
 
 /* A save state was loaded (XBA-264): RAM holds another moment. EFB copies kept as textures no longer match RAM (their
@@ -2064,6 +2149,7 @@ void gx_gl_state_loaded(gx_state *gx)
     for (unsigned i = 0; i < 4; i++)
         g->xfb[i].addr = 0;
     g->peek_color_ok = g->peek_z_ok = false;
+    shadow_invalidate(g);
 }
 
 /* The slot holding the picture the VI scans at addr, or -1. *offset: found by the VI-offset rule, not at its address. */
@@ -2091,6 +2177,7 @@ unsigned gx_xfb_texture(gx_state *gx, uint32_t addr, int *w, int *h)
     gx_gl *g = gx->gl;
     if (!g)
         return 0;
+    shadow_invalidate(g);
     /* the window presents next: it must not sample through the last draw's samplers (bind_map sets them per draw) */
     F.glBindSampler(0, 0);
     F.glBindSampler(1, 0);
@@ -2275,6 +2362,7 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
         return -1;
     }
     gx->gl = g;
+    shadow_invalidate(g);
     /* EFB */
     int W = GX_EFB_W * scale, H = GX_EFB_H * scale;
     g->efb_color = new_tex(g);
@@ -2309,7 +2397,7 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     F.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
     F.glGenSamplers(8, g->samplers);
     /* vertex layout */
-    F.glGenVertexArrays(1, &g->vao);
+    F.glGenVertexArrays(9, g->vao);
     F.glGenVertexArrays(1, &g->empty_vao);
     F.glGenBuffers(1, &g->vbo);
     F.glGenBuffers(1, &g->ebo);
@@ -2350,19 +2438,11 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     F.glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &g->ubo_align);
     if (g->ubo_align < 16)
         g->ubo_align = 256;
-    F.glBindVertexArray(g->vao);
-    F.glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
-    GLsizei st = (GLsizei)sizeof(gx_vout);
-    F.glEnableVertexAttribArray(0);
-    F.glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, st, (const void *)offsetof(gx_vout, pos));
-    F.glEnableVertexAttribArray(1);
-    F.glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)offsetof(gx_vout, c0));
-    F.glEnableVertexAttribArray(2);
-    F.glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)offsetof(gx_vout, c1));
-    for (int i = 0; i < 8; i++) {
-        F.glEnableVertexAttribArray((GLuint)(3 + i));
-        F.glVertexAttribPointer((GLuint)(3 + i), 3, GL_FLOAT, GL_FALSE, st,
-                                (const void *)(offsetof(gx_vout, tex) + 12 * (size_t)i));
+    /* the enabled attributes of a batch of nt coordinates; their pointers follow the ring, batch by batch */
+    for (unsigned nt = 0; nt < 9; nt++) {
+        F.glBindVertexArray(g->vao[nt]);
+        for (unsigned a = 0; a < 3 + nt; a++)
+            F.glEnableVertexAttribArray(a);
     }
     F.glBindVertexArray(0);
     /* programs */
@@ -2482,6 +2562,7 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
                     n, ready);
         }
     }
+    shadow_invalidate(g);
     efb_bind(g);
     return 0;
 }
@@ -2552,7 +2633,7 @@ void gx_gl_detach(gx_state *gx)
     F.glDeleteBuffers(1, &g->vbo);
     F.glDeleteBuffers(1, &g->ebo);
     F.glDeleteBuffers(1, &g->ubo);
-    F.glDeleteVertexArrays(1, &g->vao);
+    F.glDeleteVertexArrays(9, g->vao);
     F.glDeleteVertexArrays(1, &g->empty_vao);
     free(g->bv);
     free(g->packed);
