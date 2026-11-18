@@ -1153,6 +1153,15 @@ blocks run past the handed ones). N64 without the frame pointer (one more regist
 of every console is stale (the toolkit digest); GBA packs built now carry ABI 5 (refused by older cores), and N64 packs
 change compile flags.
 
+**GBA: speed 4 (XBA-281).** Lifted code's inline EWRAM / IWRAM stores skip the bus and its code map, so the
+interpreter's predecoded block of RAM code kept running old opcodes after cartridge code rewrote them (`iwram_copy`
+proves it: main's core fails it). After lifted code ran, a RAM block now has its opcodes compared with RAM before it
+runs again; old packs are covered too. Instructions handed to the interpreter run in one loop
+(`gba_cpu_step_handed`), segment starts are resume points, and MRS SPSR / MSR are lifted (a write to the CPSR's control
+byte leaves for the dispatcher). The NDS lifter keeps both off: its output is byte-identical. The GBA bench goes from
+9.85M to 9.06M x86-64 instructions per frame (-8 %), with the same hashes over 600 frames and lockstep with the
+interpreter. Every pack of every console is stale (the toolkit digest).
+
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
 presents each one twice at 60 Hz), the generated frames take the repeats' slots, and the runtimes' frame sleep goes
