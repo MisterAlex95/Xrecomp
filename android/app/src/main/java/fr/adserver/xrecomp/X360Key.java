@@ -11,8 +11,9 @@ import java.nio.charset.StandardCharsets;
 /**
  * The player's Xbox 360 key file (XBA-282; docs/android/prepare.md « Xbox 360 packs »).
  *
- * <p>A retail title's XEX is encrypted; tools.prepare opens it with the key the player picked in the app (the game's
- * Home, « Key file »). The app ships no key. The picked file is checked (16 raw bytes, or 32 hex digits on its first
+ * <p>A retail title's XEX is encrypted; tools.prepare opens it with the key built into the APK, when the build was given
+ * one (the secret XBA_X360_KEY, XBA-300: never in the repository), and with the key the player picked in the app (the
+ * game's Home, « Key file »). The picked file is checked (16 raw bytes, or 32 hex digits on its first
  * line: tools/xex/xex.py load_keys) and copied to {@code <no backup files>/keys/x360.key}: private to the app, never
  * in a backup, a save archive or the cloud, never logged. The Prepare process gets its path in {@code XEX_KEY_FILE}.
  */
@@ -23,6 +24,9 @@ final class X360Key {
     static final String ENV = "XEX_KEY_FILE";
     /** A key file is small: more than this is not one. */
     static final int MAX = 4096;
+    /** The build's key in the APK (android/app/build.gradle), and where Prepare's process finds a copy of it. */
+    static final String BUILTIN_ASSET = "x360/builtin.key";
+    static final String BUILTIN_NAME = "builtin.key";
 
     private X360Key() {}
 
@@ -36,6 +40,41 @@ final class X360Key {
 
     static boolean present(Context c) {
         return file(c).isFile();
+    }
+
+    /** This APK was built with a key: most retail games need no key file. */
+    static boolean builtin(Context c) {
+        try (InputStream in = c.getAssets().open(BUILTIN_ASSET)) {
+            return in.read() >= 0;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /** The built-in key as a private file for Prepare's process; null when this APK has none or it cannot be written. */
+    static File installBuiltin(Context c) {
+        File f = new File(new File(c.getNoBackupFilesDir(), DIR), BUILTIN_NAME);
+        try (InputStream in = c.getAssets().open(BUILTIN_ASSET)) {
+            //noinspection ResultOfMethodCallIgnored
+            f.getParentFile().mkdirs();
+            try (FileOutputStream o = new FileOutputStream(f)) {
+                byte[] buf = new byte[64];
+                for (int n; (n = in.read(buf)) > 0; )
+                    o.write(buf, 0, n);
+            }
+            return f;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** XEX_KEY_FILE's value: the player's key first, then the built-in one; null when neither file exists. */
+    static String keyFiles(File player, File builtin) {
+        StringBuilder s = new StringBuilder();
+        for (File f : new File[] {player, builtin})
+            if (f != null && f.isFile())
+                s.append(s.length() > 0 ? File.pathSeparator : "").append(f.getAbsolutePath());
+        return s.length() > 0 ? s.toString() : null;
     }
 
     /** The 16 key bytes of a key file's content, or null when it is not one (load_keys' two forms). */

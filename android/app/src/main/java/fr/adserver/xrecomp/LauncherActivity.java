@@ -5084,7 +5084,9 @@ public class LauncherActivity extends Activity {
         pill(buttons, Icon.PAD, getString(R.string.CONTROLS), false, () -> go(Screen.ROM_CONTROLS));
         // XBA-181: this game's picture (scale, filter) and its stored files (saves, Prepare files): ROM_OPTIONS.
         boolean x360 = e.console() == Console.X360;
-        if (x360)   // XBA-282: the player's key file, which Prepare opens an encrypted title with (X360Key)
+        // XBA-282: the player's key file, which Prepare opens an encrypted title with (X360Key). With a key in the APK
+        // (XBA-300) it is offered only once that key has failed on this game, or to change a file already picked.
+        if (x360 && (!X360Key.builtin(this) || X360Key.present(this) || e.facts.prepare != null && "NO_KEY".equals(e.facts.prepare.code)))
             pill(buttons, Icon.KEY, getString(X360Key.present(this) ? R.string.X360_KEY_CHANGE : R.string.X360_KEY_PICK),
                  false, this::openX360KeyPicker);
         pill(buttons, null, getString(R.string.ROM_OPTIONS), false, () -> go(Screen.ROM_OPTIONS))
@@ -5115,7 +5117,7 @@ public class LauncherActivity extends Activity {
                     : found > 0 ? getString(R.string.ROM_NEW_CODE_NOTE, found) : getString(R.string.ROM_PREPARED_NOTE),
                     NOTE_INFO);
         else if (p == Prep.NEEDED || p == Prep.CANCELLED || p == Prep.INTERRUPTED)
-            setNote(getString(x360 ? (X360Key.present(this) ? R.string.ROM_X360_NOT_PREPARED_NOTE
+            setNote(getString(x360 ? (X360Key.present(this) || X360Key.builtin(this) ? R.string.ROM_X360_NOT_PREPARED_NOTE
                                                               : R.string.ROM_X360_NO_KEY_NOTE)
                               : n64 ? R.string.ROM_N64_NOT_PREPARED_NOTE : R.string.ROM_NOT_PREPARED_NOTE), NOTE_INFO);
     }

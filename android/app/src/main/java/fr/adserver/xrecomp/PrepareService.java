@@ -510,7 +510,7 @@ public class PrepareService extends Service {
                               : console == Console.GC ? gcSource(c, gameDir, work, runner)
                               : console == Console.X360 ? x360Source(c, gameDir, work, runner)
                               : romSource(c, gameDir, work, runner);
-        final File x360Key = console == Console.X360 ? X360Key.file(c) : null;
+        final String x360Keys = console == Console.X360 ? X360Key.keyFiles(X360Key.file(c), X360Key.installBuiltin(c)) : null;
         return new PrepareRunner.CommandFactory() {
             @Override
             public List<String> command(int jobs) {
@@ -557,8 +557,8 @@ public class PrepareService extends Service {
                 e.put("XBA_PYTHON", new File(nat, Toolchain.PYTHON).getAbsolutePath());
                 if (!rom && !GameStore.enhancements(c, titleId))   // Settings › Enhancements off (profile-free WP6)
                     e.put("XBA_NO_TITLE_LAYER", "1");
-                if (x360Key != null && x360Key.isFile())   // XBA-282: the player's key file (X360Key), by path only
-                    e.put(X360Key.ENV, x360Key.getAbsolutePath());
+                if (x360Keys != null)   // XBA-282, XBA-300: the player's key file and the APK's (X360Key), by path only
+                    e.put(X360Key.ENV, x360Keys);
                 return e;
             }
 

@@ -38,6 +38,19 @@ public class X360AppTest {
     }
 
     @Test
+    public void thePlayersKeyComesBeforeTheBuiltInOne() throws Exception {
+        File dir = java.nio.file.Files.createTempDirectory("x360keys").toFile();
+        File player = new File(dir, "x360.key"), builtin = new File(dir, "builtin.key");
+        assertNull(X360Key.keyFiles(player, null));
+        assertNull(X360Key.keyFiles(player, builtin));
+        java.nio.file.Files.write(builtin.toPath(), KEY);
+        org.junit.Assert.assertEquals(builtin.getAbsolutePath(), X360Key.keyFiles(player, builtin));
+        java.nio.file.Files.write(player.toPath(), KEY);
+        org.junit.Assert.assertEquals(player.getAbsolutePath() + File.pathSeparator + builtin.getAbsolutePath(),
+                                      X360Key.keyFiles(player, builtin));
+    }
+
+    @Test
     public void parsesTheTwoForms() {
         assertArrayEquals(KEY, X360Key.parse(KEY, 16));
         byte[] text = (hex(KEY) + "\n# a comment\n").getBytes(StandardCharsets.US_ASCII);

@@ -132,8 +132,8 @@
     <string name="X360_KEY_CHANGE">Changer de clé</string>
     <string name="X360_KEY_SET">Fichier de clé enregistré. Il reste privé à XRecomp : jamais sauvegardé, exporté ni partagé.</string>
     <string name="X360_KEY_BAD">Ce n\'est pas un fichier de clé (%1$s).</string>
-    <string name="X360_NO_KEY_NOTE">Ce jeu Xbox 360 est chiffré : choisissez le fichier de clé de votre console (Fichier de clé), puis préparez-le à nouveau. XRecomp ne fournit aucune clé.</string>
-    <string name="ROM_X360_NO_KEY_NOTE">Un jeu Xbox 360 se joue une fois préparé pour cet appareil. Un jeu du commerce est chiffré : choisissez d\'abord le fichier de clé de votre console (Fichier de clé), puis Préparer.</string>
+    <string name="X360_NO_KEY_NOTE">Ce jeu Xbox 360 est chiffré et aucune clé ne l\'ouvre : choisissez un fichier de clé Xbox 360 (Fichier de clé), puis relancez Préparer.</string>
+    <string name="ROM_X360_NO_KEY_NOTE">Un jeu Xbox 360 se joue une fois préparé pour cet appareil. Un jeu du commerce est chiffré : choisissez d\'abord un fichier de clé Xbox 360 (Fichier de clé), puis lancez Préparer.</string>
     <string name="ROM_X360_NOT_PREPARED_NOTE">Un jeu Xbox 360 se joue une fois préparé pour cet appareil : Préparer le traduit (long pour un jeu entier). Chaque partie note le code et les shaders rencontrés ; Préparer à nouveau les ajoute.</string>
     <string name="ROM_X360_FAILED_NOTE">La préparation a échoué (%1$s). Voir ce qui a échoué pour le journal.</string>
 </resources>

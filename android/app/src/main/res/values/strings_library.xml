@@ -139,8 +139,8 @@
     <string name="X360_KEY_CHANGE">Change key file</string>
     <string name="X360_KEY_SET">Key file saved. It stays private to XRecomp: never backed up, exported or shared.</string>
     <string name="X360_KEY_BAD">This is not a key file (%1$s).</string>
-    <string name="X360_NO_KEY_NOTE">This Xbox 360 game is encrypted: pick your console\'s key file (Key file), then Prepare again. XRecomp ships no key.</string>
-    <string name="ROM_X360_NO_KEY_NOTE">An Xbox 360 game plays once prepared for this device. A retail game is encrypted: pick your console\'s key file first (Key file), then Prepare.</string>
+    <string name="X360_NO_KEY_NOTE">This Xbox 360 game is encrypted and no key opens it: pick an Xbox 360 key file (Key file), then Prepare again.</string>
+    <string name="ROM_X360_NO_KEY_NOTE">An Xbox 360 game plays once prepared for this device. A retail game is encrypted: pick an Xbox 360 key file first (Key file), then Prepare.</string>
     <string name="ROM_X360_NOT_PREPARED_NOTE">An Xbox 360 game plays once prepared for this device: Prepare translates it (a long job for a whole game). Each run notes the code and shaders it met; Prepare again adds them.</string>
     <string name="ROM_X360_FAILED_NOTE">The preparation failed (%1$s). See what failed for the log.</string>
 </resources>
