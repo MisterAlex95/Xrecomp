@@ -1164,8 +1164,9 @@ An Xbox 360 game (an XEX, or a disc image holding `default.xex`) is prepared on 
 interpreter (XBA-283) only runs the code a pack does not hold.
 
 - **The key.** A retail XEX is encrypted. An APK built with the secret `XBA_X360_KEY` (32 hex digits, XBA-300) carries
-  the retail key as the asset `x360/builtin.key`; the repository never holds it, and a build without the secret has
-  none. Prepare tries the player's key file first, then the built-in key. The « Key file » button then shows only after
+  the retail key as the asset `x360/builtin.key`, and with `XBA_X360_DEVKIT_KEY` the devkit key as
+  `x360/builtin-devkit.key`; the repository never holds them, and a build without the secrets has none. Prepare tries
+  the player's key file first, then the retail key, then the devkit key. The « Key file » button then shows only after
   a `NO_KEY` failure or when a file is already picked. Otherwise the player picks a key file on the game's Home:
   `X360Key` checks it (16 raw bytes, or 32 hex digits) and keeps the 16 bytes in `<no backup files>/keys/x360.key`,
   never backed up, exported or logged. PrepareService hands its path to tools.prepare in `XEX_KEY_FILE`

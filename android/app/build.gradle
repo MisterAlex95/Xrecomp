@@ -63,22 +63,31 @@ abstract class XbaLicencesAsset extends DefaultTask {
         }
     }
 }
-// The Xbox 360 retail key (XBA-300): only from the build's secret (-PxbaX360Key or XBA_X360_KEY, 32 hex digits), never in
-// the repository. Without it the APK has none and the player picks a key file. The value is never printed.
+// The Xbox 360 retail and devkit keys (XBA-300): only from the build's secrets (-PxbaX360Key / XBA_X360_KEY and
+// -PxbaX360DevkitKey / XBA_X360_DEVKIT_KEY, 32 hex digits each), never in the repository. Without the retail key the
+// player picks a key file. The values are never printed.
 abstract class XbaX360KeyAsset extends DefaultTask {
     @Input abstract Property<String> getHex()
+    @Input abstract Property<String> getDevkitHex()
     @OutputDirectory abstract DirectoryProperty getOutputDir()
     @TaskAction void write() {
         def dir = new File(outputDir.get().asFile, 'x360')
         outputDir.get().asFile.deleteDir()
         dir.mkdirs()
-        new File(dir, 'builtin.key').bytes = hex.get().decodeHex()
+        if (hex.get()) new File(dir, 'builtin.key').bytes = hex.get().decodeHex()
+        if (devkitHex.get()) new File(dir, 'builtin-devkit.key').bytes = devkitHex.get().decodeHex()
     }
 }
 def xbaX360Key = ((findProperty('xbaX360Key') ?: System.getenv('XBA_X360_KEY') ?: '') as String).trim()
 if (xbaX360Key && !(xbaX360Key ==~ /[0-9a-fA-F]{32}/))
     throw new GradleException('XBA_X360_KEY must be 32 hex digits')
-def x360KeyAsset = xbaX360Key ? tasks.register('xbaX360KeyAsset', XbaX360KeyAsset) { hex = xbaX360Key } : null
+def xbaX360DevkitKey = ((findProperty('xbaX360DevkitKey') ?: System.getenv('XBA_X360_DEVKIT_KEY') ?: '') as String).trim()
+if (xbaX360DevkitKey && !(xbaX360DevkitKey ==~ /[0-9a-fA-F]{32}/))
+    throw new GradleException('XBA_X360_DEVKIT_KEY must be 32 hex digits')
+def x360KeyAsset = xbaX360Key || xbaX360DevkitKey ? tasks.register('xbaX360KeyAsset', XbaX360KeyAsset) {
+    hex = xbaX360Key
+    devkitHex = xbaX360DevkitKey
+} : null
 def licencesAsset = tasks.register('xbaLicencesAsset', XbaLicencesAsset) {
     texts.from(rootProject.file('../LICENSE'), rootProject.file('../NOTICE'),
                fileTree(rootProject.file('../LICENSES')) { include '*.txt' })

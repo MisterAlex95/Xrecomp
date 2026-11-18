@@ -665,6 +665,7 @@ jobs:
           XBA_GOOGLE_CLIENT_ID: ${{ secrets.XBA_GOOGLE_CLIENT_ID }}
           XBA_GOOGLE_CLIENT_SECRET: ${{ secrets.XBA_GOOGLE_CLIENT_SECRET }}
           XBA_X360_KEY: ${{ secrets.XBA_X360_KEY }}
+          XBA_X360_DEVKIT_KEY: ${{ secrets.XBA_X360_DEVKIT_KEY }}
         run: |
           sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
           code=$(( $(git log -1 --format=%ct) / 60 ))
@@ -691,6 +692,10 @@ jobs:
             x360key=1
           else
             echo "::warning::No Xbox 360 key in this APK: the secret XBA_X360_KEY is not set."
+          fi
+          if [ -n "$XBA_X360_DEVKIT_KEY" ]; then
+            set -- "$@" --secret id=xba_x360_devkit_key,env=XBA_X360_DEVKIT_KEY
+            x360key=$((x360key + 2))
           fi
           # The APK carries OpenBIOS (XBA-168): the ps1-bios stage of android.Dockerfile builds it from its pinned
           # source in PCSX-Redux's CI image (pinned by digest, pulled once and kept by the host). It reads nothing of

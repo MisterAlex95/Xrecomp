@@ -40,14 +40,17 @@ public class X360AppTest {
     @Test
     public void thePlayersKeyComesBeforeTheBuiltInOne() throws Exception {
         File dir = java.nio.file.Files.createTempDirectory("x360keys").toFile();
-        File player = new File(dir, "x360.key"), builtin = new File(dir, "builtin.key");
-        assertNull(X360Key.keyFiles(player, null));
-        assertNull(X360Key.keyFiles(player, builtin));
-        java.nio.file.Files.write(builtin.toPath(), KEY);
-        org.junit.Assert.assertEquals(builtin.getAbsolutePath(), X360Key.keyFiles(player, builtin));
+        File player = new File(dir, "x360.key"), retail = new File(dir, "builtin.key"),
+             devkit = new File(dir, "builtin-devkit.key");
+        File[] built = {retail, devkit};
+        assertNull(X360Key.keyFiles(player, new File[] {null, null}));
+        assertNull(X360Key.keyFiles(player, built));
+        java.nio.file.Files.write(devkit.toPath(), KEY);
+        org.junit.Assert.assertEquals(devkit.getAbsolutePath(), X360Key.keyFiles(player, built));
+        java.nio.file.Files.write(retail.toPath(), KEY);
         java.nio.file.Files.write(player.toPath(), KEY);
-        org.junit.Assert.assertEquals(player.getAbsolutePath() + File.pathSeparator + builtin.getAbsolutePath(),
-                                      X360Key.keyFiles(player, builtin));
+        org.junit.Assert.assertEquals(player.getAbsolutePath() + File.pathSeparator + retail.getAbsolutePath()
+                                      + File.pathSeparator + devkit.getAbsolutePath(), X360Key.keyFiles(player, built));
     }
 
     @Test
