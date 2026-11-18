@@ -267,7 +267,11 @@ Xbox 360 — references (no code taken)
   name, kind) made by x360_tools/gen_exports.py from Xenia's
   xboxkrnl_table.inc and xam_table.inc: the console's ABI, with Xenia
   credited. The MSVC helper patterns checked by the tests are the ones
-  XenonRecomp (hedge-dev, MIT) publishes. tools/xex/lzx.py is written from
+  XenonRecomp (hedge-dev, MIT) publishes; its instruction list was compared
+  with the lifter's. The Xenos shader microcode decoder's tests pack
+  instructions from the field order of Mesa freedreno's a2xx definitions
+  (src/freedreno/ir2/instr-a2xx.h, MIT, Copyright Rob Clark): field widths
+  only, no code. tools/xex/lzx.py is written from
   Microsoft's [MS-PATCH] LZX specification; libmspack and wimlib (LGPL) and
   Free Pascal's chmcmd were used only as tools to make and check test
   vectors (tools/xex/lzx_vectors/gen.sh), none of their code is here.

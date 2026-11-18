@@ -49,7 +49,7 @@ cmake -S consoles/x360/tests -B /tmp/build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDe
 rc=0
 t0=$(date +%s)
 echo "== ctest x360"
-ctest --test-dir /tmp/build -R "^x360_" -j"$JOBS" --output-on-failure --timeout 900 -V >/out/ctest.log 2>&1 || rc=1
+ctest --test-dir /tmp/build -R "^(x360_|xenos_)" -j"$JOBS" --output-on-failure --timeout 900 -V >/out/ctest.log 2>&1 || rc=1
 grep -E "^ *[0-9]+/[0-9]+ Test|tests passed|tests failed|recomp:|stats:|DbgPrint output" /out/ctest.log
 grep -q "Skipped" /out/ctest.log && { echo "a test skipped although the corpus is here"; rc=1; }
 [ "$rc" = 0 ] || grep -A30 "The following tests FAILED" /out/ctest.log || true
