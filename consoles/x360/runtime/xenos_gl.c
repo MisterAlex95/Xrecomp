@@ -205,12 +205,15 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glGetIntegerv, (GLenum, GLint *))                                                                          \
     X(void, glGetFloatv, (GLenum, GLfloat *))                                                                          \
     X(void, glUniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat))                                              \
+    X(void, glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei))                            \
+    X(void, glGetInternalformativ, (GLenum, GLenum, GLenum, GLsizei, GLint *))                                        \
     X(void, glUniform3i, (GLint, GLint, GLint, GLint))
 
 #define MAX_PROGRAMS 256
 #define MAX_ATTRS 16
 #define MAX_SAMPLERS 16
 #define MAX_TEXTURES 128
+#define MAX_REASONS 32
 
 typedef struct attr {
     uint32_t fetch_constant, offset, format, stride, is_signed, is_integer;
@@ -231,6 +234,9 @@ typedef struct program {
     int nsamplers;
     uint32_t sampler_fetch[MAX_SAMPLERS], sampler_dim[MAX_SAMPLERS]; /* texture fetch constant, dimension */
     int memexport;    /* XBA-282: the vertex shader exports to memory (GLSL ES 3.10, the log buffer at binding 0) */
+    int ntq;          /* XBA-296: texture queries: the fetch constants whose size / border modes xe_tq<k> carries */
+    uint32_t tq_fetch[MAX_SAMPLERS];
+    GLint tq_loc[MAX_SAMPLERS];
 } program;
 
 /* a texture as last uploaded: its fetch constant's words (address, format, size, layout) and the source's hash */
@@ -241,15 +247,20 @@ typedef struct texture {
     int used;
     uint32_t checked; /* the epoch its memory was last compared in */
     int copy;         /* 1 + the resolve copy it was made from (its host picture, at the internal resolution) */
+    int levels;       /* mip levels uploaded */
 } texture;
 
 /* ---- the eDRAM model ----
  * The 10 MB of eDRAM hold the render targets at tile bases (80 x 16 samples of 32 bits per tile) that RB_COLOR_INFO,
  * RB_COLOR1..3_INFO and RB_DEPTH_INFO name, with RB_SURFACE_INFO's pitch and MSAA mode. Each (base, pitch, format,
  * MSAA) a draw or resolve meets is a host texture of guest width x height at the internal resolution (scale): its
- * height grows to what the window scissor asks for. Surfaces are kept least recently used first; two keys at the same
- * base are two surfaces (a title reinterpreting a target's eDRAM in another format starts from a clear one). MSAA
- * targets are rendered single-sampled at the pixel grid (a resolve of any sample gives the pixel). */
+ * height grows to what the window scissor asks for. Surfaces are kept least recently used first; two keys over the
+ * same tiles are two surfaces, and the one bound or resolved takes what the other wrote since (sync_surface): the raw
+ * bits at the same pitch for formats of one bit width, else the rows are cleared and counted. An MSAA target (2x or 4x
+ * in RB_SURFACE_INFO) is drawn into a multisampled renderbuffer at the internal resolution when every attachment of the
+ * draw has one of the same sample count (the driver's list for each format, RECOMP_X360_MSAA=0 turns it off); `tex`
+ * stays the resolved picture every read uses, brought up to date by surface_flush. Otherwise it is drawn single-sampled
+ * at the pixel grid, as a resolve of any sample gives the pixel. */
 #define MAX_SURFACES 32
 #define MAX_COPIES 16
 
@@ -260,6 +271,14 @@ typedef struct surface {
     GLenum ifmt, rfmt, rtype;              /* host internal format, format / type of glReadPixels */
     int kind;                              /* 0 unorm, 1 float, 2 depth */
     unsigned used;
+    unsigned written;                      /* the write clock of its last contents (XBA-296) */
+    int dirty_h;                           /* guest rows written so far */
+    int unbounded;                         /* the last draw's extent is unknown (no scissor, no viewport): dirty_h is
+                                            * only the surface's height, not grounds for overwriting a neighbour */
+    GLuint rb;                            /* the multisampled colour or depth / stencil buffer, 0: none */
+    int samples;
+    int ms_dirty;                          /* rb has what tex does not yet */
+    int ms_reload;                         /* tex has what rb does not yet */
 } surface;
 
 /* what a resolve wrote to guest memory, kept as a host picture too (the front buffer at the internal resolution,
@@ -296,6 +315,8 @@ struct xenos_gl {
     GLuint dprog, dtex;       /* depth resolves: the pass that packs depth into RGBA8, its target */
     GLint dprog_at;
     int dtex_w, dtex_h, dprog_failed;
+    GLuint sprog, stex;       /* the stencil of depth resolves: the pass marking one bit, its target */
+    int stex_w, stex_h, sprog_failed;
     int rtex_w, rtex_h;
     GLenum rtex_fmt;
     int width, height;        /* the default target (a surface with pitch 0 / no scissor) and the frame size */
@@ -304,7 +325,14 @@ struct xenos_gl {
     int no_float;             /* float targets are not renderable here (no EXT_color_buffer_*): 8_8_8_8 instead */
     int readback;             /* read each swap's frame back to memory (xenos_gl_frame, PPM frames) */
     surface surf[MAX_SURFACES];
-    unsigned surf_clock;
+    unsigned surf_clock, write_clock;
+    GLuint aprog;             /* eDRAM aliasing: the pass that reinterprets a surface's bits in another format */
+    GLint aprog_off, aprog_sc, aprog_dc;
+    int aprog_failed;
+    GLuint zprog;             /* MSAA: the pass that writes a resolved depth back into a multisampled buffer */
+    int zprog_failed;
+    int msaa_on;              /* multisampled render targets are allowed (RECOMP_X360_MSAA=0: not) */
+    int cur_ms;               /* the draw FBO has the renderbuffers attached rather than the textures */
     int cur[4], cur_ds;       /* the surfaces bound (index into surf, -1 none) */
     int tw, th;               /* the guest size of the bound colour target 0 (the viewport's frame of reference) */
     rt_copy copies[MAX_COPIES];
@@ -330,13 +358,42 @@ struct xenos_gl {
     float tex_aniso;          /* RECOMP_TEX_ANISO 8 / 16 when EXT_texture_filter_anisotropic is there, else 0 */
     int gl_major, gl_minor;   /* the context's GLES version (3.1 and up: memory export through SSBOs) */
     int memexport;            /* XBA-282: memory export shaders run (GLES 3.1, vertex storage blocks) */
+    int memexport_ps;         /* XBA-296: in pixel shaders too (fragment storage blocks) */
     void (*glMemoryBarrier)(GLbitfield);
     GLuint mxbuf;             /* their log: count, capacity, then (byte address, dword) pairs */
     int mx_warned;
     FILE *log;
+    const char *why[MAX_REASONS]; /* the distinct reasons behind st.unsupported, each logged once */
+    uint64_t why_n[MAX_REASONS];
+    int nwhy;
 };
 
 static unsigned parse_outputs(const char *src);
+
+/* a draw or resolve that cannot be handled: counted, with its reason (a string literal) */
+static void unsupported(xenos_gl *g, const char *reason)
+{
+    g->st.unsupported++;
+    for (int i = 0; i < g->nwhy; i++)
+        if (!strcmp(g->why[i], reason)) {
+            g->why_n[i]++;
+            return;
+        }
+    fprintf(g->log, "xenos_gl: unsupported: %s\n", reason);
+    if (g->nwhy < MAX_REASONS) {
+        g->why[g->nwhy] = reason;
+        g->why_n[g->nwhy++] = 1;
+    }
+}
+
+const char *xenos_gl_unsupported_reason(const xenos_gl *g, int i, uint64_t *count)
+{
+    if (i < 0 || i >= g->nwhy)
+        return NULL;
+    if (count)
+        *count = g->why_n[i];
+    return g->why[i];
+}
 
 static void *open_first(const char *const *names)
 {
@@ -430,18 +487,21 @@ static void texture_options(xenos_gl *g)
 static void memexport_caps(xenos_gl *g)
 {
     const char *env = getenv("RECOMP_X360_MEMEXPORT");
-    GLint blocks = 0;
-    g->memexport = 0;
+    GLint blocks = 0, fblocks = 0;
+    g->memexport = g->memexport_ps = 0;
     if (g->gl_major > 3 || (g->gl_major == 3 && g->gl_minor >= 1)) {
         g->glGetIntegerv(0x90D6 /* GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS */, &blocks);
+        g->glGetIntegerv(0x90DA /* GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS */, &fblocks);
         *(void **)&g->glMemoryBarrier = g->eglGetProcAddress ? g->eglGetProcAddress("glMemoryBarrier") : NULL;
         if (!g->glMemoryBarrier && g->gles_lib)
             *(void **)&g->glMemoryBarrier = dlsym(g->gles_lib, "glMemoryBarrier");
-        g->memexport = blocks > 0 && g->glMemoryBarrier && !(env && !strcmp(env, "0"));
+        int allowed = g->glMemoryBarrier && !(env && !strcmp(env, "0"));
+        g->memexport = blocks > 0 && allowed;
+        g->memexport_ps = fblocks > 0 && allowed;
     }
-    fprintf(g->log, "xenos: memory export %s (GLES %d.%d, %d vertex storage block(s))\n",
-            g->memexport ? "on" : env && !strcmp(env, "0") ? "off (RECOMP_X360_MEMEXPORT=0)" : "off",
-            g->gl_major, g->gl_minor, (int)blocks);
+    fprintf(g->log, "xenos: memory export %s (GLES %d.%d, %d vertex, %d fragment storage block(s))\n",
+            g->memexport || g->memexport_ps ? "on" : env && !strcmp(env, "0") ? "off (RECOMP_X360_MEMEXPORT=0)" : "off",
+            g->gl_major, g->gl_minor, (int)blocks, (int)fblocks);
 }
 
 static int setup(xenos_gl *g, char *why, size_t why_n)
@@ -452,6 +512,8 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     g->glGetIntegerv(0x821C /* GL_MINOR_VERSION */, &g->gl_minor);
     texture_options(g);
     memexport_caps(g);
+    const char *msaa_env = getenv("RECOMP_X360_MSAA");
+    g->msaa_on = !(msaa_env && !strcmp(msaa_env, "0"));
     while (g->scale > 1 && (g->width * g->scale > g->max_tex || g->height * g->scale > g->max_tex))
         g->scale--;
     g->glGenFramebuffers(1, &g->fbo);
@@ -578,9 +640,14 @@ void xenos_gl_destroy(xenos_gl *g)
         for (int i = 0; i < MAX_TEXTURES; i++)
             if (g->textures[i].tex)
                 g->glDeleteTextures(1, &g->textures[i].tex);
-        for (int i = 0; i < MAX_SURFACES; i++)
+        for (int i = 0; i < MAX_SURFACES; i++) {
             if (g->surf[i].tex)
                 g->glDeleteTextures(1, &g->surf[i].tex);
+            if (g->surf[i].rb)
+                g->glDeleteRenderbuffers(1, &g->surf[i].rb);
+        }
+        if (g->zprog)
+            g->glDeleteProgram(g->zprog);
         for (int i = 0; i < MAX_COPIES; i++)
             if (g->copies[i].tex)
                 g->glDeleteTextures(1, &g->copies[i].tex);
@@ -593,6 +660,12 @@ void xenos_gl_destroy(xenos_gl *g)
             g->glDeleteTextures(1, &g->dtex);
         if (g->dprog)
             g->glDeleteProgram(g->dprog);
+        if (g->stex)
+            g->glDeleteTextures(1, &g->stex);
+        if (g->sprog)
+            g->glDeleteProgram(g->sprog);
+        if (g->aprog)
+            g->glDeleteProgram(g->aprog);
         if (g->frame_tex)
             g->glDeleteTextures(1, &g->frame_tex);
         g->glDeleteVertexArrays(1, &g->vao);
@@ -642,6 +715,8 @@ static void do_reset(xenos_gl *g)
     for (int i = 0; i < MAX_SURFACES; i++)
         if (g->surf[i].tex) {
             g->glDeleteTextures(1, &g->surf[i].tex);
+            if (g->surf[i].rb)
+                g->glDeleteRenderbuffers(1, &g->surf[i].rb);
             memset(&g->surf[i], 0, sizeof g->surf[i]);
         }
     for (int i = 0; i < MAX_COPIES; i++)
@@ -723,7 +798,7 @@ static char *slurp(const char *path)
 }
 
 /* the translator version the cache must have been made with (x360_tools.xenos_glsl GLSL_VERSION) */
-#define XENOS_GLSL_STAMP "// xenos_glsl 2\n"
+#define XENOS_GLSL_STAMP "// xenos_glsl 4\n"
 
 static void report_missing(xenos_gl *g, int pixel, uint32_t crc)
 {
@@ -771,6 +846,20 @@ static void parse_samplers(const char *src, program *p)
                 p->sampler_dim[p->nsamplers++] = kind == 0 ? 1 : kind == 1 ? 2 : 3;
             }
         }
+    }
+}
+
+/* "uniform highp vec4 xe_tqK;" lines of both stages: the fetch constants the texture queries read (XBA-296) */
+static void parse_tqueries(const char *src, program *p)
+{
+    static const char pat[] = "uniform highp vec4 xe_tq";
+    for (const char *s = strstr(src, pat); s && p->ntq < MAX_SAMPLERS; s = strstr(s + 1, pat)) {
+        uint32_t k = (uint32_t)atoi(s + sizeof pat - 1);
+        int seen = 0;
+        for (int i = 0; i < p->ntq; i++)
+            seen |= p->tq_fetch[i] == k;
+        if (!seen)
+            p->tq_fetch[p->ntq++] = k;
     }
 }
 
@@ -854,23 +943,30 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
         if (!psrc)
             report_missing(g, 1, pc);
     }
-    /* XBA-282: a vertex shader that exports to memory is GLSL ES 3.10: it needs the capability, and its pixel shader
-     * is linked as 3.10 too (GLES links one version only; 3.00 source is 3.10 source) */
-    if (vsrc && !strncmp(vsrc, "#version 310 es", 15)) {
-        if (!g->memexport) {
+    /* XBA-282, XBA-296: a shader that exports to memory is GLSL ES 3.10: it needs the capability of its stage, and the
+     * other stage is linked as 3.10 too (GLES links one version only; 3.00 source is 3.10 source) */
+    int vs310 = vsrc && !strncmp(vsrc, "#version 310 es", 15), ps310 = psrc && !strncmp(psrc, "#version 310 es", 15);
+    char rect_vs[sizeof RECT_VS], capture_fs[sizeof CAPTURE_FS];
+    memcpy(rect_vs, RECT_VS, sizeof RECT_VS);
+    memcpy(capture_fs, CAPTURE_FS, sizeof CAPTURE_FS);
+    if (vs310 || ps310) {
+        if ((vs310 && !g->memexport) || (ps310 && !g->memexport_ps)) {
             if (!g->mx_warned++)
-                fprintf(g->log, "xenos_gl: vs_%08X exports to memory: its draws are skipped (no GLES 3.1 storage "
-                                "blocks in vertex shaders here)\n", vc);
+                fprintf(g->log, "xenos_gl: %s_%08X exports to memory: its draws are skipped (no GLES 3.1 storage "
+                                "blocks in that stage here)\n", vs310 ? "vs" : "ps", vs310 ? vc : pc);
             g->st.memexport_skipped++;
             free(vsrc);
             free(psrc);
             return NULL;
         }
         p->memexport = 1;
-        if (psrc && !strncmp(psrc, "#version 300 es", 15))
+        if (vsrc)
+            vsrc[10] = '1';
+        if (psrc)
             psrc[10] = '1';
+        rect_vs[10] = capture_fs[10] = '1';
     }
-    const char *vtext = kind == 2 ? RECT_VS : vsrc, *ftext = kind == 1 ? CAPTURE_FS : psrc;
+    const char *vtext = kind == 2 ? rect_vs : vsrc, *ftext = kind == 1 ? capture_fs : psrc;
     if (vtext && ftext) {
         snprintf(name, sizeof name, kind == 2 ? "rect pass-through" : "vs_%08X", vc);
         GLuint v = compile(g, GL_VERTEX_SHADER, vtext, name);
@@ -909,11 +1005,19 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
                         p->loc[i] = g->glGetAttribLocation(p->prog, an);
                     }
                 }
-                if (vsrc)
+                if (vsrc) {
                     parse_samplers(vsrc, p);
+                    parse_tqueries(vsrc, p);
+                }
                 if (psrc) {
                     parse_samplers(psrc, p);
+                    parse_tqueries(psrc, p);
                     p->outputs = parse_outputs(psrc);
+                }
+                for (int i = 0; i < p->ntq; i++) {
+                    char un[16];
+                    snprintf(un, sizeof un, "xe_tq%u", p->tq_fetch[i]);
+                    p->tq_loc[i] = g->glGetUniformLocation(p->prog, un);
                 }
                 g->glUseProgram(p->prog);
                 for (int i = 0; i < p->nvb; i++) {
@@ -1086,8 +1190,57 @@ static int gl_prim(uint32_t t)
     case 6: return 5; /* triangle strip */
     case 13: return 4; /* quad list: drawn as two triangles per quad */
     case 8: return 4;  /* rectangle list: the fourth corners made after the vertex shader, then triangles */
-    default: return -1; /* line loops, quad strips, polygons: not yet */
+    case 12: return 1; /* line loop: drawn as a line list (convert_indices) */
+    case 14: return 4; /* quad strip: two triangles per quad */
+    case 15: return 4; /* polygon: a fan from its first vertex, as triangles */
+    default: return -1;
     }
+}
+
+/* the primitive types VGT_MULTI_PRIM_IB_RESET_INDX cuts (Xenia's primitive_processor.cc): not the lists */
+static int prim_resets(uint32_t t)
+{
+    return t == 3 || t == 5 || t == 6 || t == 12 || t == 14 || t == 15;
+}
+
+#define INDEX_RESTART 0xFFFFFFFFu
+
+/* Line loops, quad lists, quad strips and polygons as what GLES draws, each run between reset indices on its own. The
+ * first vertex of each output primitive is the first of the guest's (Direct3D's provoking vertex); the interpolators
+ * are not flat, so it only shows in the order. Returns the list and its length (0 entries: nothing to draw), NULL when
+ * out of memory. */
+static uint32_t *convert_indices(uint32_t type, const uint32_t *in, uint32_t n, uint32_t *out_n)
+{
+    uint32_t *o = malloc(((size_t)n + 1) * 6 * sizeof *o), m = 0;
+    if (!o)
+        return NULL;
+    for (uint32_t s = 0; s < n;) {
+        uint32_t e = s;
+        while (e < n && in[e] != INDEX_RESTART)
+            e++;
+        const uint32_t *r = in + s;
+        uint32_t len = e - s;
+        if (type == 12 && len >= 2) {
+            for (uint32_t k = 0; k < len; k++)
+                o[m++] = r[k], o[m++] = r[(k + 1) % len];
+        } else if (type == 13) { /* (a, b, c, d) -> (a, b, c), (a, c, d) */
+            for (uint32_t k = 0; k + 4 <= len; k += 4) {
+                o[m++] = r[k], o[m++] = r[k + 1], o[m++] = r[k + 2];
+                o[m++] = r[k], o[m++] = r[k + 2], o[m++] = r[k + 3];
+            }
+        } else if (type == 14) { /* (a, b, c, d) goes round as a, b, d, c -> (a, b, d), (a, d, c) */
+            for (uint32_t k = 0; k + 4 <= len; k += 2) {
+                o[m++] = r[k], o[m++] = r[k + 1], o[m++] = r[k + 3];
+                o[m++] = r[k], o[m++] = r[k + 3], o[m++] = r[k + 2];
+            }
+        } else if (type == 15) {
+            for (uint32_t k = 1; k + 1 < len; k++)
+                o[m++] = r[0], o[m++] = r[k], o[m++] = r[k + 1];
+        }
+        s = e + 1;
+    }
+    *out_n = m;
+    return o;
 }
 
 /* ---- eDRAM surfaces (see the model above) ----
@@ -1164,6 +1317,67 @@ static void clear_texture(xenos_gl *g, const surface *s, GLuint tex)
                               GL_TEXTURE_2D, 0, 0);
 }
 
+/* the 64-bit colour formats: 16_16_16_16, its _FLOAT form, 32_32_FLOAT */
+static int fmt_wide(uint32_t fmt)
+{
+    return fmt == 5 || fmt == 7 || fmt == 15;
+}
+
+static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound);
+static void surface_reload(xenos_gl *g, surface *s);
+
+/* the multisampled buffer of an MSAA surface: the smallest sample count the driver lists for its format that is at
+ * least the guest's; none (single-sampled) when it lists no such count */
+static void surface_ms_alloc(xenos_gl *g, surface *s)
+{
+    s->rb = 0, s->samples = 0, s->ms_dirty = 0, s->ms_reload = 0;
+    if (!s->msaa || !g->msaa_on)
+        return;
+    GLint n = 0, list[16];
+    int want = s->msaa == 1 ? 2 : 4, pick = 0;
+    g->glGetInternalformativ(GL_RENDERBUFFER, s->ifmt, 0x9380 /* GL_NUM_SAMPLE_COUNTS */, 1, &n);
+    n = n > 16 ? 16 : n;
+    if (n > 0)
+        g->glGetInternalformativ(GL_RENDERBUFFER, s->ifmt, 0x80A9 /* GL_SAMPLES */, n, list);
+    for (GLint i = 0; i < n; i++)
+        if (list[i] >= want && (!pick || list[i] < pick))
+            pick = list[i];
+    if (!pick)
+        return;
+    g->glGenRenderbuffers(1, &s->rb);
+    g->glBindRenderbuffer(GL_RENDERBUFFER, s->rb);
+    g->glRenderbufferStorageMultisample(GL_RENDERBUFFER, pick, s->ifmt, s->w * g->scale, s->h * g->scale);
+    s->samples = pick;
+    s->ms_reload = 1; /* it starts as the texture does */
+    g->st.msaa_surfaces++;
+}
+
+/* the texture brought up to date with the multisampled buffer: the samples resolved (the whole surface: GLES 3.0
+ * resolves identical rectangles only) */
+static void surface_flush(xenos_gl *g, surface *s)
+{
+    if (!s->rb || !s->ms_dirty)
+        return;
+    GLenum att = s->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
+    int hw = s->w * g->scale, hh = s->h * g->scale;
+    g->glBindFramebuffer(GL_READ_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferRenderbuffer(GL_READ_FRAMEBUFFER, att, GL_RENDERBUFFER, s->rb);
+    g->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g->tfbo_draw);
+    g->glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, att, GL_TEXTURE_2D, s->tex, 0);
+    if (s->kind != 2) {
+        static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+        g->glReadBuffer(GL_COLOR_ATTACHMENT0);
+        g->glDrawBuffers(1, &b0);
+    }
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glBlitFramebuffer(0, 0, hw, hh, 0, 0, hw, hh,
+                         s->kind == 2 ? GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT : GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    g->glFramebufferRenderbuffer(GL_READ_FRAMEBUFFER, att, GL_RENDERBUFFER, 0);
+    g->glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, att, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    s->ms_dirty = 0;
+}
+
 /* the surface for an eDRAM key, made (or grown to need_h rows) when needed; its index */
 static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt, int depth, uint32_t msaa,
                        uint32_t alias, int need_h)
@@ -1175,7 +1389,7 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
     /* the eDRAM's 2048 tiles of 80 x 16 samples (32-bit; 40 x 16 for the 64-bit formats); 2x MSAA doubles the
      * samples vertically, 4x both ways: a title's scissor left at its maximum does not make an 8192-row surface */
     {
-        int wide = !depth && (fmt == 4 || fmt == 5 || fmt == 7 || fmt == 15);
+        int wide = !depth && fmt_wide(fmt);
         uint32_t sx = msaa == 2 ? 2 : 1, sy = msaa ? 2 : 1, tw = wide ? 40 : 80;
         uint32_t per_row = (pitch * sx + tw - 1) / tw, left = base < 2048 ? 2048 - base : 1;
         int max_h = per_row ? (int)(left / per_row * 16 / sy) : need_h;
@@ -1199,6 +1413,7 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
             if (s->h >= need_h)
                 return i;
             /* taller: a new texture, the old rows copied to the top */
+            surface_flush(g, s);
             GLenum tf, tt;
             surface n = *s;
             host_format(g, fmt, depth, &n, &tf, &tt);
@@ -1226,6 +1441,11 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
             g->glDeleteTextures(1, &s->tex);
             s->tex = t;
             s->h = need_h;
+            if (s->rb) { /* a blit cannot write a multisampled buffer: a new one, filled from the texture */
+                g->glDeleteRenderbuffers(1, &s->rb);
+                g->st.msaa_surfaces--;
+                surface_ms_alloc(g, s);
+            }
             for (int k = 0; k < 4; k++)
                 if (g->cur[k] == i)
                     g->cur[k] = -2; /* attached again */
@@ -1249,6 +1469,8 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
     surface *s = &g->surf[victim];
     if (s->tex)
         g->glDeleteTextures(1, &s->tex);
+    if (s->rb)
+        g->glDeleteRenderbuffers(1, &s->rb);
     for (int k = 0; k < 4; k++)
         if (g->cur[k] == victim)
             g->cur[k] = -1;
@@ -1262,6 +1484,7 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
     s->tex = new_texture(g, s->ifmt, tf, tt, s->w * g->scale, s->h * g->scale);
     s->used = ++g->surf_clock;
     clear_texture(g, s, s->tex);
+    surface_ms_alloc(g, s);
     g->st.surfaces++;
     return victim;
 }
@@ -1305,21 +1528,76 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         for (int i = 0; i < 4; i++) /* a later get_surface may have reused an earlier one's slot */
             if (want[i] >= 0 && !g->surf[want[i]].tex)
                 want[i] = -1;
+        /* what another format or position left in these tiles since (not what is bound together with them) */
+        int together[5] = {want[0], want[1], want[2], want[3], ds};
+        for (int i = 0; i < 5; i++)
+            if (together[i] >= 0)
+                sync_surface(g, together[i], together, 5);
+        /* multisampled only when every attachment is, with one sample count */
+        int use_ms = 1, samples = 0;
+        for (int i = 0; i < 5; i++)
+            if (together[i] >= 0) {
+                const surface *w = &g->surf[together[i]];
+                use_ms &= w->rb != 0 && (!samples || samples == w->samples);
+                samples = w->samples;
+            }
+        for (int i = 0; i < 5; i++)
+            if (together[i] >= 0 && g->surf[together[i]].rb) {
+                surface *w = &g->surf[together[i]];
+                if (use_ms) {
+                    if (w->ms_reload)
+                        surface_reload(g, w);
+                    w->ms_dirty = 1;
+                } else { /* this draw goes to the texture: the buffer takes it up again when next used */
+                    surface_flush(g, w);
+                    w->ms_reload = 1;
+                }
+            }
         g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+        int reattach = use_ms != g->cur_ms;
+        g->cur_ms = use_ms;
         GLenum bufs[4];
         for (int i = 0; i < 4; i++) {
-            if (g->cur[i] != want[i])
-                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + (GLenum)i, GL_TEXTURE_2D,
-                                          want[i] >= 0 ? g->surf[want[i]].tex : 0, 0);
+            if (g->cur[i] != want[i] || reattach) {
+                GLenum att = GL_COLOR_ATTACHMENT0 + (GLenum)i;
+                if (want[i] >= 0 && use_ms)
+                    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, g->surf[want[i]].rb);
+                else
+                    g->glFramebufferTexture2D(GL_FRAMEBUFFER, att, GL_TEXTURE_2D, want[i] >= 0 ? g->surf[want[i]].tex : 0,
+                                              0);
+            }
             g->cur[i] = want[i];
             bufs[i] = want[i] >= 0 ? GL_COLOR_ATTACHMENT0 + (GLenum)i : 0 /* GL_NONE */;
         }
-        if (g->cur_ds != ds)
-            g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g->surf[ds].tex, 0);
+        if (g->cur_ds != ds || reattach) {
+            if (use_ms)
+                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, g->surf[ds].rb);
+            else
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g->surf[ds].tex, 0);
+        }
         g->cur_ds = ds;
         g->glDrawBuffers(4, bufs);
         if (g->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
             const surface *ref = want[0] >= 0 ? &g->surf[want[0]] : &g->surf[ds];
+            unsigned stamp = ++g->write_clock;
+            /* how far down this draw can reach: the scissor unless it is left at its maximum, and the viewport */
+            int reach = need_h > 0 && need_h < 8191 ? need_h : 0x7FFFFFFF, bounded = reach != 0x7FFFFFFF;
+            if ((cp->regs[0x2206] & 12) == 12) { /* VTE: y scale and offset on */
+                float vy = fabsf(as_float(cp->regs[0x2111])) + as_float(cp->regs[0x2112]);
+                if (vy > 0.0f && vy < 16384.0f) {
+                    int rows = (int)ceilf(vy);
+                    reach = rows < reach ? rows : reach;
+                    bounded = 1;
+                }
+            }
+            for (int i = 0; i < 5; i++)
+                if (together[i] >= 0) {
+                    surface *w = &g->surf[together[i]];
+                    int rows = reach < w->h ? reach : w->h;
+                    w->written = stamp;
+                    w->unbounded = !bounded;
+                    w->dirty_h = rows > w->dirty_h ? rows : w->dirty_h;
+                }
             g->tw = ref->w, g->th = ref->h;
             g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
             return 1;
@@ -1330,6 +1608,8 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
             if (g->surf[i].tex && g->surf[i].kind == 1) {
                 had_float = 1;
                 g->glDeleteTextures(1, &g->surf[i].tex);
+                if (g->surf[i].rb)
+                    g->glDeleteRenderbuffers(1, &g->surf[i].rb);
                 memset(&g->surf[i], 0, sizeof g->surf[i]);
             }
         for (int i = 0; i < 4; i++)
@@ -1482,10 +1762,9 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp)
  * 16_16, 16_16_16_16 (unsigned or signed normalised), their _FLOAT forms, 32_FLOAT, 32_32_FLOAT, 32_32_32_FLOAT
  * (linear), 32_32_32_32_FLOAT, 24_8 / 24_8_FLOAT (depth in X), DXT1, DXT2_3, DXT4_5 (and _AS_16), DXN, DXT3A,
  * DXT5A, CTX1; unsigned-normalised ones decoded to RGBA8, the others to floats (RGBA16F), X in red; the fetch
- * constant's swizzle goes to GL's texture swizzle. Mip levels from the mip address: each level max(1, pow2(size) >>
- * level) with its own 32-block-aligned pitch and height, levels 4 KB aligned one after the other; a packed mip tail
- * (levels whose smaller side is 16 texels or less, packed_mips set) is not decoded yet: sampling stops at the last
- * level before it. 1D, 2D, 3D and cube. */
+ * constant's swizzle goes to GL's texture swizzle. Mip levels from the mip address: each stored in max(1, pow2(size) >>
+ * level) with its own 32-block-aligned pitch and height, levels 4 KB aligned one after the other; with packed_mips set
+ * the levels whose smaller side is 16 texels or less share one tile (packed_offset). 1D, 2D, 3D and cube. */
 
 typedef struct texfmt {
     uint32_t format, block, bytes; /* block size in texels (1 or 4), bytes per block */
@@ -1783,6 +2062,70 @@ static uint32_t pow2_ceil(uint32_t v)
     return p;
 }
 
+static uint32_t log2_ceil(uint32_t v)
+{
+    uint32_t n = 0;
+    while ((1u << n) < v)
+        n++;
+    return n;
+}
+
+/* Packed mip tails (the layout Xenia's texture_util describes): once a level's smaller side is 16 texels or less, it and
+ * the levels after it share one 32 x 32 block tile, each at its own offset. The level whose storage holds the tail: */
+static uint32_t packed_level(uint32_t w, uint32_t h)
+{
+    uint32_t a = log2_ceil(w), b = log2_ceil(h), s = a < b ? a : b;
+    return s > 4 ? s - 4 : 0;
+}
+
+/* where level `mip` lies inside that tile, in blocks */
+static void packed_offset(uint32_t w, uint32_t h, uint32_t depth, uint32_t dim, uint32_t block, uint32_t mip,
+                          uint32_t *x, uint32_t *y, uint32_t *z)
+{
+    uint32_t lw = log2_ceil(w), lh = log2_ceil(h), base = packed_level(w, h), k = mip - base;
+    *x = *y = *z = 0;
+    if (k < 3) { /* 16, 8, 4 blocks along the short side's axis */
+        if (lw > lh)
+            *y = 16 >> k;
+        else
+            *x = 16 >> k;
+    } else { /* the smallest ones, along the long side */
+        uint32_t off = (1u << ((lw > lh ? lw : lh) - base)) >> (k - 2);
+        if (lw > lh)
+            *x = off;
+        else
+            *y = off;
+        if (off < 4 && dim == 2) { /* 3D: the last ones go along Z */
+            uint32_t ld = log2_ceil(depth);
+            *z = ld > 1 + k ? (ld - k) * 4 : 4;
+        }
+    }
+    *x /= block, *y /= block;
+}
+
+/* a level's storage: level 0 at the base address with the fetch constant's pitch; levels from 1 one after the other
+ * at the mip address, sized from the base's next powers of two */
+typedef struct tex_storage {
+    uint32_t pitch_blocks, height_blocks, row_bytes, z_stride; /* a row; a 3D slice */
+    uint32_t stride;                                           /* a face, or the whole of a 3D level */
+} tex_storage;
+
+static tex_storage storage_of(const texfmt *tf, uint32_t dim, uint32_t w, uint32_t h, uint32_t depth, uint32_t pitch,
+                              uint32_t tiled, uint32_t level, int is_base)
+{
+    tex_storage s;
+    uint32_t pw = is_base ? pitch : pow2_ceil(w) >> level, ph = is_base ? h : pow2_ceil(h) >> level;
+    pw = pw ? pw : 1, ph = ph ? ph : 1;
+    s.pitch_blocks = (((pw + tf->block - 1) / tf->block) + 31) & ~31u;
+    s.height_blocks = (((ph + tf->block - 1) / tf->block) + 31) & ~31u;
+    s.row_bytes = s.pitch_blocks * tf->bytes;
+    if (!is_base && !tiled)
+        s.row_bytes = (s.row_bytes + 255) & ~255u; /* linear mip rows are 256-byte aligned */
+    s.z_stride = s.row_bytes * (dim == 0 ? 1 : s.height_blocks);
+    s.stride = (s.z_stride * (dim == 2 ? (depth + 3) & ~3u : 1) + 4095) & ~4095u;
+    return s;
+}
+
 /* decode the texture a 6-dword fetch constant describes (the layout of Xenia's texture_util.cc
  * GetGuestTextureLayout: rows of the pitch aligned to 32 blocks, linear ones too, as Direct3D's pitches already
  * are; slices of the height aligned to 32 blocks; cube faces (+X, -X, +Y, -Y, +Z, -Z, GL's order) 4 KB apart; 3D
@@ -1813,74 +2156,74 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
     if (!pitch)
         pitch = w;
     unsigned bpb_log2 = tf->bytes == 1 ? 0 : tf->bytes == 2 ? 1 : tf->bytes == 4 ? 2 : tf->bytes == 8 ? 3 : 4;
-    /* mip levels: from the mip address, up to the fetch constant's last level, stopping before a packed tail */
+    /* mip levels: from the mip address, up to the fetch constant's last level */
     uint32_t mip_addr = fc[5] & 0xFFFFF000u, max_level = (fc[4] >> 6) & 15, packed = (fc[5] >> 11) & 1;
-    uint32_t mip_filter = (fc[3] >> 23) & 3;
+    uint32_t mip_filter = (fc[3] >> 23) & 3, h1 = dim == 0 ? 1 : h, d3 = dim == 2 ? depth : 1;
     int levels = 1;
-    if (mip_addr && max_level && mip_filter != 2 && dim != 2) {
-        uint32_t p2w = pow2_ceil(w), p2h = pow2_ceil(dim == 0 ? 1 : h);
+    if (mip_addr && max_level && mip_filter != 2) {
         for (uint32_t l = 1; l <= max_level && l < 14; l++) {
-            uint32_t lw = p2w >> l ? p2w >> l : 1, lh = p2h >> l ? p2h >> l : 1;
-            if (packed && (lw < lh ? lw : lh) <= 16)
-                break; /* the packed tail: not decoded (left) */
+            if (!(w >> (l - 1) > 1 || h1 >> (l - 1) > 1 || d3 >> (l - 1) > 1))
+                break; /* the level before was 1 x 1 x 1 */
             levels++;
-            if (lw == 1 && lh == 1)
-                break;
         }
     }
+    uint32_t tail = packed ? packed_level(w, h1) : 0xFFFFFFFFu; /* the level whose storage holds the tail */
     out->levels = levels;
     out->is_float = tf->is_float;
-    out->w = w, out->h = h, out->slices = slices, out->dim = dim;
+    out->w = w, out->h = h1, out->slices = slices, out->dim = dim;
     uint64_t hash = (uint64_t)fc[3] << 32 ^ (uint64_t)levels;
-    uint32_t level_addr = fc[1] & 0xFFFFF000u, chain = mip_addr;
     for (int l = 0; l < levels; l++) {
-        uint32_t lw = l ? (pow2_ceil(w) >> l ? pow2_ceil(w) >> l : 1) : w;
-        uint32_t lh = l ? (pow2_ceil(h) >> l ? pow2_ceil(h) >> l : 1) : h;
-        if (dim == 0)
-            lh = 1;
-        uint32_t lpitch = l ? lw : pitch;
-        uint32_t bw = (lw + tf->block - 1) / tf->block, bh = (lh + tf->block - 1) / tf->block;
-        uint32_t pitch_blocks = (((lpitch + tf->block - 1) / tf->block) + 31) & ~31u;
-        uint32_t height_blocks = (bh + 31) & ~31u;
-        uint32_t row_bytes = pitch_blocks * tf->bytes;
-        uint32_t z_stride = row_bytes * (dim == 0 ? 1 : height_blocks);
-        uint32_t face_stride = (z_stride + 4095) & ~4095u;
-        if (l) {
-            level_addr = chain;
-            chain += (dim == 3 ? face_stride * 6 : (z_stride * slices + 4095) & ~4095u);
+        /* what is drawn: the guest's size at this level (a compressed level is read in whole blocks, then cropped) */
+        uint32_t lw = w >> l ? w >> l : 1, lh = h1 >> l ? h1 >> l : 1, ld = dim == 2 ? (depth >> l ? depth >> l : 1) : slices;
+        /* where it is stored: the base, its own mip storage, or inside the tail's (the base of a texture that is
+         * all tail keeps its level 0 in the base storage, the mips in the first mip storage) */
+        uint32_t stored = (uint32_t)l;
+        if (packed && stored > (tail ? tail : 1))
+            stored = tail ? tail : 1;
+        /* a texture that is all tail sizes its mips' storage from level 0, not 1 (Xenia's GetGuestTextureLayout) */
+        tex_storage st = storage_of(tf, dim, w, h1, depth, pitch, tiled, packed && !tail ? 0 : stored, !stored);
+        uint32_t level_addr = fc[1] & 0xFFFFF000u;
+        if (stored) {
+            level_addr = mip_addr;
+            for (uint32_t k = 1; k < stored; k++) {
+                tex_storage before = storage_of(tf, dim, w, h1, depth, pitch, tiled, k, 0);
+                level_addr += before.stride * (dim == 3 ? 6 : 1);
+            }
         }
-        size_t slice_n = (size_t)bw * bh * tf->bytes, src_n = slice_n * slices;
+        uint32_t ox = 0, oy = 0, oz = 0;
+        if (packed && (uint32_t)l >= tail)
+            packed_offset(w, h1, depth, dim, tf->block, (uint32_t)l, &ox, &oy, &oz);
+        uint32_t bw = (lw + tf->block - 1) / tf->block, bh = (lh + tf->block - 1) / tf->block;
+        size_t slice_n = (size_t)bw * bh * tf->bytes, src_n = slice_n * ld;
         uint8_t *src = malloc(src_n);
         if (!src) {
             free_decoded(out);
             return 0;
         }
-        for (uint32_t z = 0; z < slices; z++)
+        for (uint32_t z = 0; z < ld; z++)
             for (uint32_t by = 0; by < bh; by++) {
                 uint8_t *row = src + z * slice_n + (size_t)by * bw * tf->bytes;
                 if (!tiled) { /* a whole row at once */
-                    uint32_t off = z * (dim == 3 ? face_stride : z_stride) + by * row_bytes;
+                    uint32_t off = (dim == 2 ? (z + oz) * st.z_stride : z * st.stride) + (by + oy) * st.row_bytes +
+                                   ox * tf->bytes;
                     read_bytes(cp, level_addr + off, bw * tf->bytes, endian, row);
                     continue;
                 }
                 for (uint32_t bx = 0; bx < bw; bx++) {
-                    uint32_t off = dim == 2 ? (uint32_t)tiled3d((int32_t)bx, (int32_t)by, (int32_t)z, pitch_blocks,
-                                                                height_blocks, bpb_log2)
-                                            : z * face_stride + (uint32_t)tiled2d((int32_t)bx, (int32_t)by,
-                                                                                  pitch_blocks, bpb_log2);
+                    uint32_t off = dim == 2 ? (uint32_t)tiled3d((int32_t)(bx + ox), (int32_t)(by + oy), (int32_t)(z + oz),
+                                                                st.pitch_blocks, st.height_blocks, bpb_log2)
+                                            : z * st.stride + (uint32_t)tiled2d((int32_t)(bx + ox), (int32_t)(by + oy),
+                                                                                st.pitch_blocks, bpb_log2);
                     read_bytes(cp, level_addr + off, tf->bytes, endian, row + (size_t)bx * tf->bytes);
                 }
             }
         hash = (hash * 1099511628211ull) ^ fnv(src, src_n);
-        uint32_t tw = bw * tf->block, th = bh * tf->block;
-        out->lw[l] = tw, out->lh[l] = th, out->ld[l] = slices;
-        if (l == 0)
-            out->w = tw, out->h = th;
+        out->lw[l] = lw, out->lh[l] = lh, out->ld[l] = ld;
         if (hash_only) {
             free(src);
             continue;
         }
-        size_t px = (size_t)tw * th * slices;
+        size_t px = (size_t)lw * lh * ld;
         out->level[l] = malloc(px * (tf->is_float ? 16 : 4));
         if (!out->level[l]) {
             free(src);
@@ -1888,21 +2231,24 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
             return 0;
         }
         uint32_t sign = (fc[0] >> 2) & 3;
-        for (uint32_t z = 0; z < slices; z++) {
+        for (uint32_t z = 0; z < ld; z++) {
+            size_t at = (size_t)z * lw * lh;
             for (uint32_t by = 0; by < bh; by++)
                 for (uint32_t bx = 0; bx < bw; bx++) {
                     const uint8_t *s = src + z * slice_n + ((size_t)by * bw + bx) * tf->bytes;
-                    size_t at = (size_t)z * tw * th;
                     if (tf->block == 4) {
                         uint8_t q[16][4];
                         dxt_block(s, tf->format, q);
                         uint8_t *o = out->level[l];
-                        for (int i = 0; i < 16; i++)
-                            memcpy(o + (at + ((size_t)by * 4 + i / 4) * tw + bx * 4 + i % 4) * 4, q[i], 4);
+                        for (uint32_t i = 0; i < 16; i++) {
+                            uint32_t tx = bx * 4 + i % 4, ty = by * 4 + i / 4;
+                            if (tx < lw && ty < lh)
+                                memcpy(o + (at + (size_t)ty * lw + tx) * 4, q[i], 4);
+                        }
                     } else if (tf->is_float) {
-                        texel_f(tf->format, s, sign, (float *)out->level[l] + (at + (size_t)by * tw + bx) * 4);
+                        texel_f(tf->format, s, sign, (float *)out->level[l] + (at + (size_t)by * lw + bx) * 4);
                     } else {
-                        texel(tf->format, s, (uint8_t *)out->level[l] + (at + (size_t)by * tw + bx) * 4);
+                        texel(tf->format, s, (uint8_t *)out->level[l] + (at + (size_t)by * lw + bx) * 4);
                     }
                 }
         }
@@ -2063,6 +2409,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     }
     g->glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
     g->glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, d.levels - 1);
+    t->levels = d.levels;
     if (d.levels > 1)
         g->st.mipmapped++;
     free_decoded(&d);
@@ -2097,8 +2444,29 @@ static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mi
     }
 }
 
+/* what the texture queries read of a fetch constant (XBA-296): the guest size, and two bits an axis for its border
+ * mode: 1 clamp to border (clamp mode 6), 2 mirror then clamp to border (7), 0 for the others */
+static void set_tquery(xenos_gl *g, GLint loc, const uint32_t *fc)
+{
+    uint32_t dim = (fc[5] >> 9) & 3, w, h = 1, d = 1, modes = 0;
+    if (dim == 0)
+        w = (fc[2] & 0xFFFFFF) + 1;
+    else if (dim == 2)
+        w = (fc[2] & 0x7FF) + 1, h = ((fc[2] >> 11) & 0x7FF) + 1, d = ((fc[2] >> 22) & 0x3FF) + 1;
+    else
+        w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
+    for (int axis = 0; axis < 3; axis++) {
+        uint32_t c = (fc[0] >> (10 + 3 * axis)) & 7;
+        modes |= (c == 6 ? 1u : c == 7 ? 2u : 0u) << (2 * axis);
+    }
+    g->glUniform4f(loc, (GLfloat)w, (GLfloat)h, (GLfloat)d, (GLfloat)modes);
+}
+
 static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
 {
+    for (int i = 0; i < p->ntq; i++)
+        if (p->tq_loc[i] >= 0)
+            set_tquery(g, p->tq_loc[i], &cp->regs[0x4800 + 6 * (p->tq_fetch[i] & 31)]);
     for (int i = 0; i < p->nsamplers; i++) {
         uint32_t k = p->sampler_fetch[i], dim = p->sampler_dim[i];
         GLenum target = dim == 2 ? GL_TEXTURE_3D : dim == 3 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
@@ -2113,8 +2481,7 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
         int mipped = 0;
         for (int t = 0; t < MAX_TEXTURES; t++)
             if (g->textures[t].tex == tex) {
-                mipped = !g->textures[t].copy && ((fc[4] >> 6) & 15) && (fc[5] & 0xFFFFF000u) &&
-                         ((fc[3] >> 23) & 3) != 2 && dim != 2;
+                mipped = !g->textures[t].copy && g->textures[t].levels > 1;
                 break;
             }
         sampler_state(g, target, fc, mipped);
@@ -2323,15 +2690,20 @@ static int resolve_source(xenos_gl *g, const xenos_cp *cp, uint32_t src)
     if (src < 4) {
         uint32_t info = cp->regs[info_reg[src]];
         int c = g->cur[src];
-        if (c >= 0 && g->surf[c].tex && g->surf[c].base == (info & 0xFFF))
+        if (c >= 0 && g->surf[c].tex && g->surf[c].base == (info & 0xFFF) &&
+            (g->surf[c].fmt & 255) == ((info >> 16) & 15) && (!pitch || g->surf[c].pitch == pitch))
             return c;
-        return get_surface(g, info & 0xFFF, pitch, (info >> 16) & 15, 0, msaa, 0, 0);
+        c = get_surface(g, info & 0xFFF, pitch, (info >> 16) & 15, 0, msaa, 0, 0);
+        sync_surface(g, c, NULL, 0);
+        return c;
     }
     uint32_t dinfo = cp->regs[0x2002];
     int c = g->cur_ds;
     if (c >= 0 && g->surf[c].tex && g->surf[c].base == (dinfo & 0xFFF))
         return c;
-    return get_surface(g, dinfo & 0xFFF, pitch, (dinfo >> 16) & 1, 1, msaa, 0, 0);
+    c = get_surface(g, dinfo & 0xFFF, pitch, (dinfo >> 16) & 1, 1, msaa, 0, 0);
+    sync_surface(g, c, NULL, 0);
+    return c;
 }
 
 /* the raw eDRAM clear value of a colour format as floats (RB_COLOR_CLEAR, RB_COLOR_CLEAR_LO for 64-bit formats) */
@@ -2362,8 +2734,8 @@ static void clear_colour(uint32_t fmt, uint32_t hi, uint32_t lo, float c[4])
 
 /* Depth out of the eDRAM (a resolve whose source is the depth buffer): GLES 3.0 reads no depth with glReadPixels, so
  * a pass samples the depth texture (texelFetch at the guest pixel's host texel) and packs its 24 bits into an RGBA8
- * target read back as bytes; the stencil is not readable in GLES 3.0 (0). Returns w * h depth values (0..2^24-1),
- * top row first, or NULL. */
+ * target read back as bytes (the stencil: read_stencil). Returns w * h depth values (0..2^24-1), top row first, or
+ * NULL. */
 static const char DEPTH_VS[] =
     "#version 300 es\nvoid main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));"
     " gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
@@ -2443,6 +2815,399 @@ static uint32_t *read_depth(xenos_gl *g, const surface *s, int x0, int y0, int w
     return out;
 }
 
+/* ---- eDRAM aliasing (XBA-296) ----
+ * Each surface knows when it was last written. A surface about to be drawn to or resolved takes, oldest first, what
+ * overlapping surfaces wrote after it: at the same pitch and MSAA mode, whole tile rows apart, the raw bits go through
+ * a pass that encodes them from the source's format and decodes them in its own (32-bit formats among themselves, 64-bit
+ * ones too), depth by a blit. Anything else (another pitch, another bit width, 7e3 formats, float targets
+ * stood in for by 8_8_8_8) cannot be carried over: the overlapping rows are cleared rather than left stale, and counted.
+ * Colour over depth or depth over colour is counted and left as it is. */
+static const char ALIAS_FS[] =
+    "#version 300 es\nprecision highp float;\nprecision highp int;\nuniform highp sampler2D t;\nuniform ivec3 off;\n"
+    "uniform int sc, dc;\nout vec4 c;\n"
+    "float gam(float v) { return v <= 0.0031308 ? 12.92 * v : 1.055 * pow(v, 1.0 / 2.4) - 0.055; }\n"
+    "float lin(float v) { return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4); }\n"
+    "uint fx(float v) { return uint(int(round(clamp(v, -32.0, 32.0) * 32767.0 / 32.0))) & 0xFFFFu; }\n"
+    "float xf(uint v) { return float(int(v << 16) >> 16) * 32.0 / 32767.0; }\n"
+    "uvec2 enc(vec4 v, int k) {\n"
+    " if (k == 1) { v.r = gam(v.r); v.g = gam(v.g); v.b = gam(v.b); k = 0; }\n"
+    " if (k == 0) { uvec4 b = uvec4(round(clamp(v, 0.0, 1.0) * 255.0));\n"
+    "  return uvec2(b.r | b.g << 8 | b.b << 16 | b.a << 24, 0u); }\n"
+    " if (k == 2) { uvec4 b = uvec4(round(clamp(v, 0.0, 1.0) * vec4(1023.0, 1023.0, 1023.0, 3.0)));\n"
+    "  return uvec2(b.r | b.g << 10 | b.b << 20 | b.a << 30, 0u); }\n"
+    " if (k == 3) return uvec2(fx(v.r) | fx(v.g) << 16, 0u);\n"
+    " if (k == 4) return uvec2(packHalf2x16(v.rg), 0u);\n"
+    " if (k == 5) return uvec2(floatBitsToUint(v.r), 0u);\n"
+    " if (k == 6) return uvec2(fx(v.r) | fx(v.g) << 16, fx(v.b) | fx(v.a) << 16);\n"
+    " if (k == 7) return uvec2(packHalf2x16(v.rg), packHalf2x16(v.ba));\n"
+    " return uvec2(floatBitsToUint(v.r), floatBitsToUint(v.g)); }\n"
+    "vec4 dec(uvec2 r, int k) {\n"
+    " uint a = r.x, b = r.y;\n"
+    " if (k <= 1) { vec4 v = vec4(a & 255u, (a >> 8) & 255u, (a >> 16) & 255u, a >> 24) / 255.0;\n"
+    "  return k == 1 ? vec4(lin(v.r), lin(v.g), lin(v.b), v.a) : v; }\n"
+    " if (k == 2) return vec4(a & 1023u, (a >> 10) & 1023u, (a >> 20) & 1023u, a >> 30) / vec4(1023.0, 1023.0, 1023.0, 3.0);\n"
+    " if (k == 3) return vec4(xf(a & 0xFFFFu), xf(a >> 16), 0.0, 1.0);\n"
+    " if (k == 4) return vec4(unpackHalf2x16(a), 0.0, 1.0);\n"
+    " if (k == 5) return vec4(uintBitsToFloat(a), 0.0, 0.0, 1.0);\n"
+    " if (k == 6) return vec4(xf(a & 0xFFFFu), xf(a >> 16), xf(b & 0xFFFFu), xf(b >> 16));\n"
+    " if (k == 7) return vec4(unpackHalf2x16(a), unpackHalf2x16(b));\n"
+    " return vec4(uintBitsToFloat(a), uintBitsToFloat(b), 0.0, 1.0); }\n"
+    "void main() { vec4 v = texelFetch(t, ivec2(gl_FragCoord.xy) + off.xy, 0); c = sc < 0 ? v : dec(enc(v, sc), dc); }\n";
+static const char RELOAD_DEPTH_FS[] =
+    "#version 300 es\nprecision highp float;\nuniform highp sampler2D d;\n"
+    "void main() { gl_FragDepth = texelFetch(d, ivec2(gl_FragCoord.xy), 0).r; }\n";
+
+/* the pass's name for a surface's format, -1 when its bits cannot be recovered */
+static int alias_class(const xenos_gl *g, const surface *s)
+{
+    static const signed char map[16] = {0, 1, 2, -1, 3, 6, 4, 7, 0, 0, 2, 0, -1, 0, 5, 8};
+    int k = map[s->fmt & 15];
+    return k >= 3 && g->no_float ? -1 : k;
+}
+
+static uint32_t surface_row_tiles(const surface *s)
+{
+    uint32_t sx = s->msaa == 2 ? 2 : 1, tw = !s->depth && fmt_wide(s->fmt & 255) ? 40 : 80;
+    return (s->pitch * sx + tw - 1) / tw;
+}
+
+static int alias_program(xenos_gl *g)
+{
+    if (g->aprog || g->aprog_failed)
+        return g->aprog != 0;
+    GLuint v = compile(g, GL_VERTEX_SHADER, DEPTH_VS, "eDRAM alias vs");
+    GLuint f = compile(g, GL_FRAGMENT_SHADER, ALIAS_FS, "eDRAM alias fs");
+    GLint ok = 0;
+    if (v && f) {
+        g->aprog = g->glCreateProgram();
+        g->glAttachShader(g->aprog, v);
+        g->glAttachShader(g->aprog, f);
+        g->glLinkProgram(g->aprog);
+        g->glGetProgramiv(g->aprog, GL_LINK_STATUS, &ok);
+    }
+    if (v)
+        g->glDeleteShader(v);
+    if (f)
+        g->glDeleteShader(f);
+    if (!ok) {
+        if (g->aprog)
+            g->glDeleteProgram(g->aprog);
+        g->aprog = 0;
+        g->aprog_failed = 1;
+        return 0;
+    }
+    g->aprog_off = g->glGetUniformLocation(g->aprog, "off");
+    g->aprog_sc = g->glGetUniformLocation(g->aprog, "sc");
+    g->aprog_dc = g->glGetUniformLocation(g->aprog, "dc");
+    return 1;
+}
+
+/* rows y0..y1 of colour surface d from surface s, whose row y - dy they are */
+static int alias_copy(xenos_gl *g, const surface *d, const surface *s, int dy, int y0, int y1)
+{
+    int dc = alias_class(g, d), sc = alias_class(g, s);
+    if (dc < 0 || sc < 0 || fmt_wide(d->fmt & 255) != fmt_wide(s->fmt & 255) || !alias_program(g))
+        return 0;
+    static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+    int k = g->scale;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d->tex, 0);
+    g->glDrawBuffers(1, &b0);
+    g->glDisable(GL_BLEND);
+    g->glDisable(GL_DEPTH_TEST);
+    g->glDisable(GL_STENCIL_TEST);
+    g->glDisable(GL_CULL_FACE);
+    g->glColorMask(1, 1, 1, 1);
+    g->glEnable(GL_SCISSOR_TEST);
+    g->glScissor(0, y0 * k, d->w * k, (y1 - y0) * k);
+    g->glViewport(0, 0, d->w * k, d->h * k);
+    g->glUseProgram(g->aprog);
+    g->glActiveTexture(GL_TEXTURE0);
+    g->glBindTexture(GL_TEXTURE_2D, s->tex);
+    g->glUniform1i(g->glGetUniformLocation(g->aprog, "t"), 0);
+    g->glUniform3i(g->aprog_off, 0, -dy * k, 0);
+    g->glUniform1i(g->aprog_sc, sc);
+    g->glUniform1i(g->aprog_dc, dc);
+    g->glBindVertexArray(g->vao);
+    g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    return 1;
+}
+
+/* rows y0..y1 of depth surface d from depth surface s */
+static void alias_depth(xenos_gl *g, const surface *d, const surface *s, int dy, int y0, int y1)
+{
+    int k = g->scale, hw = d->w * k;
+    g->glBindFramebuffer(GL_READ_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, s->tex, 0);
+    g->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g->tfbo_draw);
+    g->glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, d->tex, 0);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glBlitFramebuffer(0, (y0 - dy) * k, hw, (y1 - dy) * k, 0, y0 * k, hw, y1 * k,
+                         GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+    g->glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    g->glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+}
+
+/* rows y0..y1 of a surface whose eDRAM was overwritten in a way that cannot be carried over */
+static void alias_clear(xenos_gl *g, const surface *d, int y0, int y1)
+{
+    int k = g->scale;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0,
+                              GL_TEXTURE_2D, d->tex, 0);
+    g->glEnable(GL_SCISSOR_TEST);
+    g->glScissor(0, y0 * k, d->w * k, (y1 - y0) * k);
+    if (d->kind == 2) {
+        g->glDepthMask(1);
+        g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+        g->glClearDepthf(1.0f);
+        g->glClearStencil(0);
+        g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    } else {
+        static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+        g->glDrawBuffers(1, &b0);
+        g->glColorMask(1, 1, 1, 1);
+        g->glClearColor(0, 0, 0, 0);
+        g->glClear(GL_COLOR_BUFFER_BIT);
+    }
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0,
+                              GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+}
+
+/* the multisampled buffer filled from the texture, every sample of a pixel alike: a pass, as a blit cannot write a
+ * multisampled buffer. GLES 3.0 cannot sample stencil: a depth buffer's stencil starts at 0 again (counted once it
+ * had contents). */
+static void surface_reload(xenos_gl *g, surface *s)
+{
+    int hw = s->w * g->scale, hh = s->h * g->scale, depth = s->kind == 2;
+    s->ms_reload = 0;
+    s->ms_dirty = 0;
+    if (depth && !g->zprog && !g->zprog_failed) {
+        GLuint v = compile(g, GL_VERTEX_SHADER, DEPTH_VS, "MSAA reload vs");
+        GLuint f = compile(g, GL_FRAGMENT_SHADER, RELOAD_DEPTH_FS, "MSAA reload fs");
+        GLint ok = 0;
+        if (v && f) {
+            g->zprog = g->glCreateProgram();
+            g->glAttachShader(g->zprog, v);
+            g->glAttachShader(g->zprog, f);
+            g->glLinkProgram(g->zprog);
+            g->glGetProgramiv(g->zprog, GL_LINK_STATUS, &ok);
+        }
+        if (v)
+            g->glDeleteShader(v);
+        if (f)
+            g->glDeleteShader(f);
+        if (!ok) {
+            if (g->zprog)
+                g->glDeleteProgram(g->zprog);
+            g->zprog = 0;
+            g->zprog_failed = 1;
+        }
+    }
+    if (depth ? !g->zprog : !alias_program(g)) {
+        g->st.edram_stale++;
+        return;
+    }
+    GLenum att = depth ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, s->rb);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glDisable(GL_BLEND);
+    g->glDisable(GL_STENCIL_TEST);
+    g->glDisable(GL_CULL_FACE);
+    g->glViewport(0, 0, hw, hh);
+    g->glActiveTexture(GL_TEXTURE0);
+    g->glBindTexture(GL_TEXTURE_2D, s->tex);
+    g->glBindVertexArray(g->vao);
+    if (depth) {
+        static const GLenum none = 0;
+        g->glDrawBuffers(1, &none);
+        g->glEnable(GL_DEPTH_TEST);
+        g->glDepthFunc(GL_NEVER + 7 /* GL_ALWAYS */);
+        g->glDepthMask(1);
+        g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+        g->glClearStencil(0);
+        g->glClear(GL_STENCIL_BUFFER_BIT);
+        g->glUseProgram(g->zprog);
+        g->glUniform1i(g->glGetUniformLocation(g->zprog, "d"), 0);
+        if (s->written)
+            g->st.edram_stale++;
+    } else {
+        static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+        g->glDrawBuffers(1, &b0);
+        g->glDisable(GL_DEPTH_TEST);
+        g->glColorMask(1, 1, 1, 1);
+        g->glUseProgram(g->aprog);
+        g->glUniform1i(g->glGetUniformLocation(g->aprog, "t"), 0);
+        g->glUniform3i(g->aprog_off, 0, 0, 0);
+        g->glUniform1i(g->aprog_sc, -1);
+        g->glUniform1i(g->aprog_dc, -1);
+    }
+    g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+    g->glDisable(GL_DEPTH_TEST);
+    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
+}
+
+static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
+{
+    surface *d = &g->surf[si];
+    uint32_t dsy = d->msaa ? 2 : 1, dper = surface_row_tiles(d);
+    uint32_t dend = d->base + dper * (((uint32_t)d->h * dsy + 15) / 16);
+    unsigned since = d->written, newest = d->written;
+    uint32_t done = 0; /* surfaces bound together share one stamp: each is taken in its turn */
+    int touched = 0;
+    for (;;) {
+        const surface *s = NULL;
+        for (int i = 0; i < MAX_SURFACES; i++) {
+            const surface *o = &g->surf[i];
+            int together = i == si || ((done >> i) & 1);
+            for (int k = 0; k < nbound; k++)
+                together |= bound[k] == i;
+            if (together || !o->tex || o->written <= since || !o->dirty_h || (o->fmt >> 8) || (d->fmt >> 8))
+                continue;
+            uint32_t osy = o->msaa ? 2 : 1;
+            uint32_t oend = o->base + surface_row_tiles(o) * (((uint32_t)o->dirty_h * osy + 15) / 16);
+            if (o->base < dend && d->base < oend && (!s || o->written < s->written))
+                s = o;
+        }
+        if (!s)
+            break;
+        done |= 1u << (s - g->surf);
+        newest = s->written > newest ? s->written : newest;
+        touched = 1;
+        /* colour and depth over one another are not reinterpreted; a draw of unknown extent proves no overlap */
+        if ((s->kind == 2) != (d->kind == 2) || s->unbounded) {
+            g->st.edram_stale++;
+            continue;
+        }
+        surface_flush(g, &g->surf[s - g->surf]); /* the source's samples resolved, this surface's own rows kept */
+        surface_flush(g, d);
+        if (d->rb)
+            d->ms_reload = 1;
+        uint32_t sper = surface_row_tiles(s);
+        int64_t tiles = (int64_t)s->base - (int64_t)d->base;
+        int same_grid = s->pitch == d->pitch && s->msaa == d->msaa && sper == dper && tiles % (int64_t)dper == 0;
+        int dy = same_grid ? (int)(tiles / (int64_t)dper) * 16 / (int)dsy : 0;
+        int y0 = dy > 0 ? dy : 0, y1 = dy + s->dirty_h < d->h ? dy + s->dirty_h : d->h;
+        if (same_grid && y1 > y0) {
+            if (d->kind == 2) {
+                alias_depth(g, d, s, dy, y0, y1);
+                g->st.edram_reinterpreted++;
+                continue;
+            }
+            if (alias_copy(g, d, s, dy, y0, y1)) {
+                g->st.edram_reinterpreted++;
+                continue;
+            }
+        }
+        /* the rows of this surface the other one's tiles reach */
+        uint32_t from = s->base > d->base ? s->base - d->base : 0;
+        uint32_t send = s->base + sper * (((uint32_t)s->dirty_h * (s->msaa ? 2 : 1) + 15) / 16);
+        uint32_t to = (send < dend ? send : dend) - d->base;
+        int r0 = (int)(from / dper * 16 / dsy), r1 = (int)((to + dper - 1) / dper * 16 / dsy);
+        r1 = r1 < d->h ? r1 : d->h;
+        if (r1 > r0)
+            alias_clear(g, d, r0, r1);
+        g->st.edram_stale++;
+    }
+    if (touched) {
+        d->written = newest;
+        g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
+    }
+}
+
+/* The stencil of a depth resolve (XBA-296). GLES 3.0 cannot sample stencil, so it is read a bit at a time: for each of
+ * the 8 bits a full-target pass with the stencil test on that bit marks the pixels that have it, read back at the host
+ * texel of each guest pixel (the one read_depth takes). Returns w * h values, top row first, or NULL. */
+static const char STENCIL_FS[] =
+    "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(1.0); }\n";
+
+static uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0, int w, int h)
+{
+    if (!g->sprog && !g->sprog_failed) {
+        GLuint v = compile(g, GL_VERTEX_SHADER, DEPTH_VS, "stencil resolve vs");
+        GLuint f = compile(g, GL_FRAGMENT_SHADER, STENCIL_FS, "stencil resolve fs");
+        GLint ok = 0;
+        if (v && f) {
+            g->sprog = g->glCreateProgram();
+            g->glAttachShader(g->sprog, v);
+            g->glAttachShader(g->sprog, f);
+            g->glLinkProgram(g->sprog);
+            g->glGetProgramiv(g->sprog, GL_LINK_STATUS, &ok);
+        }
+        if (v)
+            g->glDeleteShader(v);
+        if (f)
+            g->glDeleteShader(f);
+        if (!ok) {
+            if (g->sprog)
+                g->glDeleteProgram(g->sprog);
+            g->sprog = 0;
+            g->sprog_failed = 1;
+        }
+    }
+    if (!g->sprog)
+        return NULL;
+    int sc = g->scale, hw = s->w * sc, hh = s->h * sc;
+    if (!g->stex || g->stex_w != hw || g->stex_h != hh) {
+        if (g->stex)
+            g->glDeleteTextures(1, &g->stex);
+        g->stex = new_texture(g, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, hw, hh);
+        g->stex_w = hw, g->stex_h = hh;
+    }
+    size_t n = (size_t)w * h;
+    uint8_t *out = calloc(n, 1), *rows = malloc((size_t)hw * h * sc * 4);
+    if (!out || !rows) {
+        free(out);
+        free(rows);
+        return NULL;
+    }
+    static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g->stex, 0);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, s->tex, 0);
+    g->glDrawBuffers(1, &b0);
+    g->glReadBuffer(GL_COLOR_ATTACHMENT0);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glDisable(GL_BLEND);
+    g->glDisable(GL_DEPTH_TEST);
+    g->glDisable(GL_CULL_FACE);
+    g->glDepthMask(0);
+    g->glColorMask(1, 1, 1, 1);
+    g->glEnable(GL_STENCIL_TEST);
+    g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0);
+    g->glStencilOpSeparate(GL_FRONT_AND_BACK, 0x1E00, 0x1E00, 0x1E00); /* GL_KEEP */
+    g->glViewport(0, 0, hw, hh);
+    g->glUseProgram(g->sprog);
+    g->glBindVertexArray(g->vao);
+    for (int bit = 0; bit < 8; bit++) {
+        g->glClearColor(0, 0, 0, 0);
+        g->glClear(GL_COLOR_BUFFER_BIT);
+        g->glStencilFuncSeparate(GL_FRONT_AND_BACK, 0x0202 /* GL_EQUAL */, 0xFF, 1u << bit);
+        g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+        g->glReadPixels(0, y0 * sc, hw, h * sc, GL_RGBA, GL_UNSIGNED_BYTE, rows);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                if (rows[((size_t)y * sc * hw + (size_t)(x0 + x) * sc) * 4])
+                    out[(size_t)y * w + x] |= (uint8_t)(1u << bit);
+    }
+    free(rows);
+    g->glDisable(GL_STENCIL_TEST);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
+    return out;
+}
+
 static void resolve(xenos_gl *g, const xenos_cp *cp)
 {
     uint32_t c0 = cp->regs[0x4800], c1 = cp->regs[0x4801];
@@ -2457,15 +3222,18 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
     int x0 = (int)(fx0 + 0.5f), y0 = (int)(fy0 + 0.5f), x1 = (int)(fx1 + 0.5f), y1 = (int)(fy1 + 0.5f);
     uint32_t ctl = cp->regs[0x2318], cmd = (ctl >> 20) & 3, src = ctl & 7;
     if (src > 4) {
-        g->st.unsupported++;
+        unsupported(g, "resolve source");
         return;
     }
+    if (cmd == 2)
+        unsupported(g, "resolve of constant one"); /* the clears below still happen; 3 is no copy at all */
     int si = resolve_source(g, cp, src);
     surface *s = &g->surf[si];
+    surface_flush(g, s); /* multisampled: the samples averaged into the picture the copy reads */
     x0 = x0 < 0 ? 0 : x0, y0 = y0 < 0 ? 0 : y0;
     x1 = x1 > s->w ? s->w : x1, y1 = y1 > s->h ? s->h : y1;
     if (x1 <= x0 || y1 <= y0) {
-        g->st.unsupported++;
+        unsupported(g, "empty resolve rectangle");
         return;
     }
     int sc = g->scale;
@@ -2540,9 +3308,9 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                 rc->used = ++g->copy_clock;
             }
         } else {
-            g->st.unsupported++;
+            unsupported(g, "resolve destination format");
         }
-    } else if (cmd <= 1) { /* depth out: 24_8 (depth in the high 24 bits, stencil 0), tiled 32-bit */
+    } else if (cmd <= 1) { /* depth out: 24_8 (depth in the high 24 bits, stencil in the low 8), tiled 32-bit */
         uint32_t info = cp->regs[0x231B], fmt = (info >> 7) & 63, endian = info & 7;
         uint32_t pitch = cp->regs[0x231A] & 0x3FFF, base = cp->regs[0x2319] & 0x1FFFFFFFu;
         uint32_t *dv = (fmt == 22 || fmt == 6 || fmt == 33) && endian < 4 && cp->write32 && cp->read32
@@ -2550,18 +3318,23 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                            : NULL;
         if (dv) {
             uint32_t pitch_aligned = (pitch + 31) & ~31u;
+            uint8_t *sv = read_stencil(g, s, x0, y0, x1 - x0, y1 - y0);
+            if (!sv)
+                unsupported(g, "stencil of a depth resolve (written as 0)");
             for (int y = y0; y < y1; y++)
                 for (int x = x0; x < x1; x++) {
-                    uint32_t d = dv[(size_t)(y - y0) * (x1 - x0) + (x - x0)] << 8;
+                    size_t at = (size_t)(y - y0) * (x1 - x0) + (x - x0);
+                    uint32_t d = dv[at] << 8 | (sv ? sv[at] : 0);
                     uint8_t b4[4] = {(uint8_t)d, (uint8_t)(d >> 8), (uint8_t)(d >> 16), (uint8_t)(d >> 24)};
                     put_bytes(cp, base + (uint32_t)tiled2d(x, y, pitch_aligned, 2), b4, 4, endian);
                 }
             free(dv);
+            free(sv);
             g->st.resolves++;
             g->st.depth_resolves++;
             g->epoch++;
         } else {
-            g->st.unsupported++;
+            unsupported(g, "depth resolve destination format");
         }
     }
     int clear_c = (ctl >> 8) & 1, clear_d = (ctl >> 9) & 1;
@@ -2572,23 +3345,49 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
         if (clear_c && src < 4) { /* the resolved render target (none when the source is depth) */
             float colour[4];
             clear_colour(s->fmt, cp->regs[0x231E], cp->regs[0x231F], colour);
-            g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
+            if (s->rb) {
+                if (s->ms_reload)
+                    surface_reload(g, s);
+                g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+                g->glEnable(GL_SCISSOR_TEST);
+                g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
+                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s->rb);
+                s->ms_dirty = 1;
+            } else {
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
+            }
             static const GLenum b0 = GL_COLOR_ATTACHMENT0;
             g->glDrawBuffers(1, &b0);
             g->glColorMask(1, 1, 1, 1);
             g->glClearBufferfv(0x1800 /* GL_COLOR */, 0, colour);
             g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            s->written = ++g->write_clock;
+            s->dirty_h = y1 > s->dirty_h ? y1 : s->dirty_h;
         }
         if (clear_d) {
             int di = resolve_source(g, cp, 4);
             uint32_t dc = cp->regs[0x231D];
-            g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g->surf[di].tex, 0);
+            surface *ds = &g->surf[di];
+            if (ds->rb) {
+                if (ds->ms_reload)
+                    surface_reload(g, ds);
+                ds->ms_dirty = 1;
+            }
+            g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+            g->glEnable(GL_SCISSOR_TEST);
+            g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
+            if (ds->rb)
+                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ds->rb);
+            else
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds->tex, 0);
             g->glDepthMask(1);
             g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
             g->glClearDepthf((float)(dc >> 8) / 16777215.0f);
             g->glClearStencil((GLint)(dc & 0xFF));
             g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+            g->surf[di].written = ++g->write_clock;
+            g->surf[di].dirty_h = y1 > g->surf[di].dirty_h ? y1 : g->surf[di].dirty_h;
         }
         g->glDisable(GL_SCISSOR_TEST);
         g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
@@ -2660,7 +3459,7 @@ static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const
     if (!tri) {
         if (cap)
             g->glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
-        g->st.unsupported++;
+        unsupported(g, "rectangle list capture");
         return;
     }
     for (uint32_t r = 0; r < nr; r++) {
@@ -2742,8 +3541,18 @@ static void memexport_end(xenos_gl *g, const xenos_cp *cp)
     if (n && cp->write32) {
         const uint32_t *log = g->glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 8, 8 * (GLsizeiptr)n, GL_MAP_READ_BIT);
         if (log) {
-            for (uint32_t i = 0; i < n; i++) /* the dword's bytes in memory order: big-endian word = its bswap */
-                cp->write32(cp->ctx, log[2 * i] & 0x1FFFFFFCu, __builtin_bswap32(log[2 * i + 1]));
+            for (uint32_t i = 0; i < n; i++) { /* the dword's bytes in memory order: big-endian word = its bswap */
+                uint32_t a = log[2 * i], pa = a & 0x1FFFFFFCu, v = __builtin_bswap32(log[2 * i + 1]);
+                uint32_t keep = (a & 3) | (a >> 30) << 2; /* bytes of the dword left as they are (XBA-296) */
+                if (keep && cp->read32) {
+                    uint32_t mask = 0;
+                    for (int k = 0; k < 4; k++)
+                        if ((keep >> k) & 1)
+                            mask |= 0xFF000000u >> (8 * k);
+                    v = (cp->read32(cp->ctx, pa) & mask) | (v & ~mask);
+                }
+                cp->write32(cp->ctx, pa, v);
+            }
             g->glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
         }
         g->st.memexport_dwords += n;
@@ -2761,8 +3570,21 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         return;
     }
     int prim = gl_prim(d->prim_type);
-    if (prim < 0 || d->source_select == 1 || !d->num_indices) {
-        g->st.unsupported++;
+    if (prim < 0) {
+        unsupported(g, "primitive type");
+        return;
+    }
+    if (!d->num_indices) {
+        unsupported(g, "draw of no indices");
+        return;
+    }
+    if (d->source_select > 2) {
+        unsupported(g, "index source");
+        return;
+    }
+    if (d->source_select == 1 &&
+        (!d->imm || d->imm_words < (d->index_size ? d->num_indices : (d->num_indices + 1) / 2))) {
+        unsupported(g, "immediate indices shorter than the draw");
         return;
     }
     program *p = get_program(g, cp, d->prim_type == 8 ? 1 : 0);
@@ -2771,38 +3593,35 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         g->st.no_shader++;
         return;
     }
-    /* indices: from the DMA buffer (16 or 32 bits, VGT_DMA_SIZE's swap mode) or 0..n-1 */
+    /* indices: from the DMA buffer or the packet (16 or 32 bits, VGT_DMA_SIZE's swap mode) or 0..n-1 */
     uint32_t n = d->num_indices, *idx = NULL, max_index = n - 1;
-    if (d->prim_type == 13 && (n /= 4) * 4 == 0) {
-        g->st.unsupported++;
-        return;
-    } else if (d->prim_type == 13) {
-        n *= 4; /* whole quads */
-    }
+    int convert = d->prim_type >= 12 && d->prim_type <= 15;
     /* VGT_INDX_OFFSET is added to every index (Direct3D's base vertex); with PA_SU_SC_MODE_CNTL's
-     * multi_prim_ib_ena, VGT_MULTI_PRIM_IB_RESET_INDX restarts a strip / fan (GL's fixed restart index) */
+     * multi_prim_ib_ena, VGT_MULTI_PRIM_IB_RESET_INDX cuts the strips, fans, loops and polygons */
     uint32_t index_offset = cp->regs[0x2102];
-    int restart = d->source_select == 0 && (cp->regs[0x2205] >> 21) & 1;
+    int restart = d->source_select != 2 && (cp->regs[0x2205] >> 21) & 1 && prim_resets(d->prim_type);
     uint32_t reset_index = cp->regs[0x2103] & (d->index_size ? 0xFFFFFFFFu : 0xFFFFu);
     int restarted = 0;
-    if (d->source_select == 0 || index_offset) {
+    if (d->source_select != 2 || index_offset || convert) {
         idx = malloc(4 * (size_t)n);
-        if (!idx)
+        if (!idx) {
+            unsupported(g, "out of memory");
             return;
+        }
         uint32_t endian = cp->regs[XENOS_REG_VGT_DMA_SIZE] >> 30;
         max_index = 0;
         for (uint32_t i = 0; i < n; i++) {
-            uint32_t v;
-            if (d->source_select != 0) {
+            uint32_t v, at = d->index_size ? i : i / 2, w = 0;
+            if (d->source_select == 0)
+                w = gpu_read(cp, d->dma_base + 4 * at, endian);
+            else if (d->source_select == 1) /* the packet's dword, as the same dword in an index buffer would read */
+                w = gpu_swap(__builtin_bswap32(d->imm[at]), endian);
+            if (d->source_select == 2)
                 v = i;
-            } else if (d->index_size) {
-                v = gpu_read(cp, d->dma_base + 4 * i, endian);
-            } else {
-                uint32_t w = gpu_read(cp, d->dma_base + 4 * (i / 2), endian);
-                v = (w >> (16 * (i & 1))) & 0xFFFF;
-            }
+            else
+                v = d->index_size ? w : (w >> (16 * (i & 1))) & 0xFFFF;
             if (restart && v == reset_index) {
-                idx[i] = 0xFFFFFFFFu;
+                idx[i] = INDEX_RESTART;
                 restarted = 1;
                 continue;
             }
@@ -2813,32 +3632,28 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         }
         if (max_index > 0xFFFFF) {
             free(idx);
-            g->st.unsupported++;
+            unsupported(g, "vertex index past 2^20");
             return;
         }
     }
-    if (d->prim_type == 13) { /* quads (a, b, c, d) -> triangles (a, b, c), (a, c, d) */
-        uint32_t *t = malloc(6 * (size_t)(n / 4) * 4);
-        if (!t) {
-            free(idx);
-            return;
-        }
-        for (uint32_t q = 0; q < n / 4; q++) {
-            uint32_t v[4];
-            for (int k = 0; k < 4; k++)
-                v[k] = idx ? idx[4 * q + k] : 4 * q + k;
-            uint32_t *o = &t[6 * q];
-            o[0] = v[0], o[1] = v[1], o[2] = v[2], o[3] = v[0], o[4] = v[2], o[5] = v[3];
-        }
+    if (convert) {
+        uint32_t m = 0, *t = convert_indices(d->prim_type, idx, n, &m);
         free(idx);
         idx = t;
-        n = n / 4 * 6;
+        if (!t || !m) {
+            free(idx);
+            unsupported(g, t ? "primitive with too few vertices" : "out of memory");
+            return;
+        }
+        n = m;
+        restarted = 0; /* every run is its own primitives now */
     }
     /* vertices: every attribute converted to vec4, interleaved */
     uint32_t nv = max_index + 1, na = (uint32_t)p->nattr;
     float *vb = na ? malloc((size_t)nv * na * 16) : NULL;
     if (na && !vb) {
         free(idx);
+        unsupported(g, "out of memory");
         return;
     }
     for (uint32_t a = 0; a < na; a++) {
@@ -2848,14 +3663,14 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
             if (!fetch_vertex(cp, c0 & ~3u, c1 & 3, at, v, &vb[(v * na + a) * 4])) {
                 free(vb);
                 free(idx);
-                g->st.unsupported++;
+                unsupported(g, "vertex format");
                 return;
             }
     }
     if (!bind_targets(g, cp, (rp ? rp : p)->outputs)) { /* the eDRAM surfaces; the host viewport over them */
         free(vb);
         free(idx);
-        g->st.unsupported++;
+        unsupported(g, "no complete framebuffer for the render targets");
         return;
     }
     g->glUseProgram(p->prog);
@@ -2865,7 +3680,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     if (p->nvb && !bind_vertex_buffers(g, cp, p)) {
         free(vb);
         free(idx);
-        g->st.unsupported++;
+        unsupported(g, "vertex format of a computed-index fetch");
         return;
     }
     g->glBindVertexArray(g->vao);
@@ -2877,7 +3692,8 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
             g->glVertexAttribPointer((GLuint)p->loc[a], 4, GL_FLOAT, 0, (GLsizei)(na * 16),
                                      (void *)(uintptr_t)(a * 16));
         }
-    if (p->memexport)
+    int exports = p->memexport || (rp && rp->memexport);
+    if (exports)
         memexport_begin(g);
     if (d->prim_type == 8) {
         draw_rects(g, cp, rp, idx, n);
@@ -2892,7 +3708,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     } else {
         g->glDrawArrays((GLenum)prim, 0, (GLsizei)n);
     }
-    if (p->memexport)
+    if (exports)
         memexport_end(g, cp);
     for (uint32_t a = 0; a < na; a++)
         if (p->loc[a] >= 0)
@@ -2983,7 +3799,8 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
             fw = g->width, fh = g->height, swizzle = ident;
     }
     if (!done && !src && g->cur[0] >= 0 && g->surf[g->cur[0]].tex) { /* render target 0 as it stands */
-        const surface *s = &g->surf[g->cur[0]];
+        surface *s = &g->surf[g->cur[0]];
+        surface_flush(g, s);
         src = s->tex, src_fmt = s->ifmt;
         fw = fw < s->w ? fw : s->w, fh = fh < s->h ? fh : s->h;
         swizzle = ident;
@@ -3039,8 +3856,10 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
         if (g->cur[i] >= 0) {
             static const GLfloat black[4] = {0, 0, 0, 1};
             g->glClearBufferfv(0x1800 /* GL_COLOR */, i, black);
+            g->surf[g->cur[i]].ms_dirty = g->cur_ms;
         }
     if (g->cur_ds >= 0) {
+        g->surf[g->cur_ds].ms_dirty = g->cur_ms;
         g->glClearDepthf(1.0f);
         g->glClearStencil(0);
         g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);

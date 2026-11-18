@@ -1996,7 +1996,7 @@ What is there:
   Direct3D 9 multiplication, max / min, predicates, kills, ps, exports with their 0 / 1 components, cube), exec
   clauses on booleans / p0, loops / calls / jumps as a state machine with the sequencer's stacks and loop constants,
   aL / a0 relative addressing, vertex fetches as attributes, 1D / 2D / 3D / cube texture fetches with offsets, LOD
-  bias, register LOD and gradients; constants in std140 blocks. Left: memory export and the texture queries.
+  bias, register LOD and gradients, the texture queries (XBA-296); constants in std140 blocks.
   Translation is ahead of time (a shader cache by microcode CRC), like the code.
 - `runtime/` (CMake `x360_core` + `x360_run`): `x360_mem.c` reserves 4 GB of host address space (guest address a is
   host base + a: no translation, no bounds check in lifted code) with the console's map: virtual 4 KB and 64 KB
@@ -2111,8 +2111,7 @@ What is there:
 - **Textures**: 38 formats (DXN, DXT3A / DXT5A, CTX1, 10_11_11 / 11_11_10, 16-bit normalised (signed per the fetch
   constant), half and full floats to RGBA16F, 24_8 / 24_8_FLOAT depth, the _AS_16_16_16_16 variants) and **mip
   levels** from the mip address (each level max(1, pow2(size) >> level), 32-block-aligned pitch and height, 4 KB
-  aligned); a packed mip tail (levels of 16 texels or less with packed_mips) is not decoded yet: sampling stops at the
-  level before it.
+  aligned), packed mip tails included (levels of 16 texels or less sharing one tile, for 2D, cube and 3D).
 - **Vertex fetch at a computed index** (instancing): `xenos_glsl` keeps a fetch at the untouched r0.x an attribute;
   any other index (another register or component, r0 once written) reads `xe_vb<n>`, the whole buffer converted to
   vec4s in an RGBA32F texture (texelFetch: GLES 3.0 has no buffer textures). PsParamGen takes the target's orientation
@@ -2149,8 +2148,9 @@ What is there:
   the 360 pad. A pack is always needed: `x360_tools.bringup ... --app-pack DIR --app-cc <NDK clang>` writes
   `DIR/x360-<KEY>/` (pack.json console x360, the library built for the device, default.xex, shaders/) to copy into the
   app's `files/packs/`; `pack_loader.c` hands it to `x360_runtime_start` with the imported image as the disc.
-- Tests: `xenos_draw` (30 frames: eDRAM bases, 2_10_10_10 and float targets resolved to their formats, a depth
-  resolve, mips, a computed-index fetch) and `xenos_draw_x2` (the same at scale 2), `x360_hle` (XMA flow on synthetic packets, the mix,
+- Tests: `xenos_draw` (eDRAM bases, 2_10_10_10 and float targets resolved to their formats, depth and stencil
+  resolves, mips and packed tails, a computed-index fetch, line loops, quad strips, polygons, immediate indices, eDRAM
+  aliasing, MSAA) and `xenos_draw_x2` (the same at scale 2), `x360_hle` (XMA flow on synthetic packets, the mix,
   the motors), `x360_window` (the renderer on a window's context, presented and captured: `xvfb-run -a ctest -R
   x360_window`), `x360_pad_map`, `x360_play` (the test title, sleeping 2 s with `make_hello.py --linger`, played headless
   frame by frame to frame 120, rewind capturing), `x360_bringup` (the app pack), `tests/recomp_pack` (`test_x360`), the
@@ -2186,12 +2186,11 @@ XBA-282 (X360-3):
     with `RECOMP_X360_MEMEXPORT=0`).
 
 Not there yet (XBA-229):
-- the stencil in depth resolves, the packed mip tail, real MSAA, eDRAM aliasing between formats;
+- run-time shader translation (a shader first met in a run skips its draws until the next Prepare);
 - XMA decoding itself (a backend to decide) and XMA loops;
 - several conventions (winding, channel orders, cube faces, RB_COLOR_CLEAR) that follow Xenia's descriptions and wait
   for a real title;
 - real parallel hardware threads and the network;
-- 1- and 2-byte memory export formats;
 - whatever `hle_coverage` lists as missing on Alex's titles.
 
 **Nintendo 3DS spike (XBA-228, epic XBA-222).** Does the ARM work extend to the 3DS's ARM11 (ARMv6K + VFPv2), and

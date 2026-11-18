@@ -47,7 +47,7 @@
 #include "xenos_cp.h"
 #include "xenos_gl.h"
 
-#define MEM_SIZE 0x40000u
+#define MEM_SIZE 0x100000u
 #define W 64
 #define H 64
 
@@ -157,12 +157,36 @@ static uint32_t tiled_off_log2(int x, int y, unsigned log2)
                       ((oi >> 5) & 7) << 8 | (oi >> 8) << 12);
 }
 
+/* the same for any pitch (texels, a multiple of 32) */
+static uint32_t tiled_off_pitch(int x, int y, int pitch, unsigned log2)
+{
+    int32_t outer = ((y >> 5) * (pitch >> 5) + (x >> 5)) << 6, inner = (((y >> 1) & 7) << 3) | (x & 7);
+    int32_t oi = (outer | inner) << log2;
+    uint32_t bank = (y >> 4) & 1, pipe = ((x >> 3) & 3) ^ (((y >> 3) & 1) << 1);
+    return (uint32_t)((int32_t)((uint32_t)(y & 1) << 4 | pipe << 6 | bank << 11) | (oi & 15) | ((oi >> 4) & 1) << 5 |
+                      ((oi >> 5) & 7) << 8 | (oi >> 8) << 12);
+}
+
 static void run(xenos_cp *cp)
 {
     for (uint32_t i = 0; i < npk; i++)
         w32(0x8000 + 4 * i, pk[i]);
     xenos_cp_execute(cp, 0x8000, npk);
     npk = 0;
+}
+
+/* XBA-296's frames: the target black again (a title that clears through resolves gets no clear at the swap): frame 1's
+ * quad at 0x2000 with the pixel shader's c0 at 0, then c0 back to 1 */
+static void black(void)
+{
+    uint32_t strip = 6u | 2u << 6 | 4u << 16;
+    for (uint32_t i = 0; i < 4; i++)
+        reg(0x4400 + i, 0);
+    reg(0x4800, 0x2000u | 3u);
+    reg(0x4801, 2u | (32u << 2));
+    type3(PM4_DRAW_INDX_2, &strip, 1);
+    for (uint32_t i = 0; i < 4; i++)
+        reg(0x4400 + i, fbits(1.0f));
 }
 
 static void vertex_z(uint32_t at, float x, float y, float z, float r, float g, float b)
@@ -764,15 +788,15 @@ int main(int argc, char **argv)
         reg(0x2001, 0), reg(0x2000, 0), reg(0x4400, fbits(1.0f));
 
         /* frame 27: mips: a linear 32x32 8_8_8_8 texture (red), its level 1 (16x16, green) and level 2 (8x8,
-         * blue) from the mip address, 4 KB apart (rows of 32 texels); a full-target quad with texture coordinates
-         * 0..8 (repeat) minifies 4x: level 2, blue */
+         * blue) from the mip address (linear mip rows are 256 bytes, a level 32 rows: 8 KB apart); a full-target quad
+         * with texture coordinates 0..8 (repeat) minifies 4x: level 2, blue */
         for (uint32_t y = 0; y < 32; y++)
             for (uint32_t x = 0; x < 32; x++) {
                 w32(0x3C000 + y * 128 + x * 4, 0xFF0000FFu);
                 if (x < 16 && y < 16)
-                    w32(0x3D000 + y * 128 + x * 4, 0xFF00FF00u);
+                    w32(0x3D000 + y * 256 + x * 4, 0xFF00FF00u);
                 if (x < 8 && y < 8)
-                    w32(0x3E000 + y * 128 + x * 4, 0xFFFF0000u);
+                    w32(0x3F000 + y * 256 + x * 4, 0xFFFF0000u);
             }
         uint32_t nt;
         uint32_t *pt = load(argv[1], "ps_tex.bin", &nt);
@@ -934,6 +958,507 @@ int main(int argc, char **argv)
           (unsigned long long)st.no_shader, (unsigned long long)st.unsupported,
           (unsigned long long)st.computed_fetches, (unsigned long long)st.mipmapped,
           (unsigned long long)st.surfaces, (unsigned long long)st.copy_textures);
+
+    /* ---- XBA-296: each block below checks its own frames; the totals above stay those of frames 0-30 ---- */
+    reg(0x2200, 0), reg(0x2205, 0), reg(0x2208, 4), reg(0x2000, 0), reg(0x2001, 0), reg(0x2102, 0);
+    full_viewport();
+    for (int i = 0; i < 4; i++)
+        reg(0x4400 + (uint32_t)i, fbits(1.0f));
+    im[0] = 1, im[1] = nps;
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    run(&cp);
+
+    /* line loops: only the closing edge (last to first vertex) draws the left side of the square */
+    {
+        vertex(0x40000, -0.5f, -0.5f, 1, 0, 0);
+        vertex(0x40020, 0.5f, -0.5f, 1, 0, 0);
+        vertex(0x40040, 0.5f, 0.5f, 1, 0, 0);
+        vertex(0x40060, -0.5f, 0.5f, 1, 0, 0);
+        black();
+        reg(0x4800, 0x40000u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        uint32_t loop = 12u | 2u << 6 | 4u << 16;
+        type3(PM4_DRAW_INDX_2, &loop, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        CHECK(px(g, 16, 32)[0] > 40 && px(g, 48, 32)[0] > 40 && px(g, 32, 16)[0] > 40 && px(g, 32, 48)[0] > 40 &&
+                  px(g, 32, 32)[0] == 0,
+              "line loop: left %u right %u top %u bottom %u inside %u", px(g, 16, 32)[0], px(g, 48, 32)[0],
+              px(g, 32, 16)[0], px(g, 32, 48)[0], px(g, 32, 32)[0]);
+        /* two loops cut by the reset index, 16-bit DMA: each closes on its own first vertex, none joins the two */
+        vertex(0x40080, -0.75f, -0.5f, 1, 0, 0);
+        vertex(0x400A0, -0.25f, -0.5f, 1, 0, 0);
+        vertex(0x400C0, -0.25f, 0.5f, 1, 0, 0);
+        vertex(0x400E0, -0.75f, 0.5f, 1, 0, 0);
+        vertex(0x40100, 0.25f, -0.5f, 1, 0, 0);
+        vertex(0x40120, 0.75f, -0.5f, 1, 0, 0);
+        vertex(0x40140, 0.75f, 0.5f, 1, 0, 0);
+        vertex(0x40160, 0.25f, 0.5f, 1, 0, 0);
+        static const uint16_t cut[9] = {0, 1, 2, 3, 0xFFFF, 4, 5, 6, 7};
+        for (int i = 0; i < 9; i++)
+            mem[0x40200 + 2 * i] = (uint8_t)(cut[i] >> 8), mem[0x40200 + 2 * i + 1] = (uint8_t)cut[i];
+        black();
+        reg(0x4800, 0x40080u | 3u);
+        reg(0x4801, 2u | (64u << 2));
+        reg(0x2103, 0xFFFF), reg(0x2205, 1u << 21);
+        uint32_t loops[3] = {12u | 0u << 6 | 9u << 16, 0x40200, 5u | 1u << 30};
+        type3(PM4_DRAW_INDX_2, loops, 3);
+        reg(0x2205, 0);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        CHECK(px(g, 8, 32)[0] > 40 && px(g, 40, 32)[0] > 40 && px(g, 32, 16)[0] == 0 && px(g, 32, 48)[0] == 0,
+              "two line loops: closing edges %u %u, between them %u %u", px(g, 8, 32)[0], px(g, 40, 32)[0],
+              px(g, 32, 16)[0], px(g, 32, 48)[0]);
+    }
+
+    /* a quad strip of two quads covers the target (taken as a quad list its quads would be bow ties); a polygon */
+    {
+        static const float qs[7][2] = {{-1, -1}, {-1, 1}, {0, -1}, {0, 1}, {1, -1}, {1, 1}, {1, 1}};
+        for (uint32_t i = 0; i < 7; i++)
+            vertex(0x40400 + 32 * i, qs[i][0], qs[i][1], 0, 1, 0);
+        black();
+        reg(0x4800, 0x40400u | 3u);
+        reg(0x4801, 2u | (56u << 2));
+        uint32_t strip = 14u | 2u << 6 | 7u << 16; /* the seventh vertex completes no quad */
+        type3(PM4_DRAW_INDX_2, &strip, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        static const int at[6][2] = {{4, 4}, {4, 59}, {28, 8}, {36, 56}, {59, 4}, {59, 59}};
+        for (int i = 0; i < 6; i++)
+            CHECK(px(g, at[i][0], at[i][1])[1] == 255, "quad strip: (%d, %d) green %u", at[i][0], at[i][1],
+                  px(g, at[i][0], at[i][1])[1]);
+        static const float pg[5][2] = {{0, 0.75f}, {0.75f, 0.25f}, {0.5f, -0.75f}, {-0.5f, -0.75f}, {-0.75f, 0.25f}};
+        for (uint32_t i = 0; i < 5; i++)
+            vertex(0x40500 + 32 * i, pg[i][0], pg[i][1], 0, 0, 1);
+        black();
+        reg(0x4800, 0x40500u | 3u);
+        reg(0x4801, 2u | (40u << 2));
+        uint32_t poly = 15u | 2u << 6 | 5u << 16;
+        type3(PM4_DRAW_INDX_2, &poly, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        CHECK(px(g, 32, 32)[2] == 255 && px(g, 32, 12)[2] == 255 && px(g, 12, 26)[2] == 255 && px(g, 50, 26)[2] == 255 &&
+                  px(g, 20, 54)[2] == 255 && px(g, 2, 2)[2] == 0 && px(g, 61, 61)[2] == 0,
+              "polygon: centre %u top %u left %u right %u bottom %u, outside %u %u", px(g, 32, 32)[2], px(g, 32, 12)[2],
+              px(g, 12, 26)[2], px(g, 50, 26)[2], px(g, 20, 54)[2], px(g, 2, 2)[2], px(g, 61, 61)[2]);
+    }
+
+    /* immediate indices: the quad of frame 1 (vertices at 0x2000), 16-bit in 8-in-16 and 32-bit in 8-in-32 */
+    {
+        black();
+        reg(0x4800, 0x2000u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        reg(XENOS_REG_VGT_DMA_SIZE, 1u << 30);
+        uint32_t i16[4] = {4u | 1u << 6 | 6u << 16, 0u << 16 | 1u, 2u << 16 | 2u, 1u << 16 | 3u};
+        type3(PM4_DRAW_INDX_2, i16, 4);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        CHECK(px(g, 4, 4)[1] == 255 && px(g, 59, 59)[1] == 255 && px(g, 4, 59)[1] == 255 && px(g, 59, 4)[1] == 255,
+              "immediate 16-bit indices: corners %u %u %u %u", px(g, 4, 4)[1], px(g, 59, 59)[1], px(g, 4, 59)[1],
+              px(g, 59, 4)[1]);
+        black();
+        reg(0x4400, 0), reg(0x4401, fbits(0.5f));
+        reg(XENOS_REG_VGT_DMA_SIZE, 2u << 30);
+        uint32_t i32[7] = {4u | 1u << 6 | 1u << 11 | 6u << 16, 0, 1, 2, 2, 1, 3};
+        type3(PM4_DRAW_INDX_2, i32, 7);
+        reg(0x4401, fbits(1.0f)), reg(0x4400, fbits(1.0f));
+        reg(XENOS_REG_VGT_DMA_SIZE, 0);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        CHECK(px(g, 4, 4)[1] >= 126 && px(g, 4, 4)[1] <= 129 && px(g, 59, 59)[1] >= 126 && px(g, 59, 59)[1] <= 129,
+              "immediate 32-bit indices: corners %u %u", px(g, 4, 4)[1], px(g, 59, 59)[1]);
+    }
+    /* packed mip tails: every level a colour of its own, written where the layout puts it (offsets worked out by hand
+     * from the rule, not with the renderer's code); each frame samples one level through setTexLOD */
+    {
+        static const uint32_t lc[7] = {0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u, 0xFF00FFFFu,
+                                       0xFFFFFF00u, 0xFFFF00FFu, 0xFFFFFFFFu};
+        static const uint8_t lrgb[7][3] = {{255, 0, 0},   {0, 255, 0},   {0, 0, 255},    {255, 255, 0},
+                                           {0, 255, 255}, {255, 0, 255}, {255, 255, 255}};
+        uint32_t nl;
+        uint32_t *pl[3];
+        static const char *const lname[3] = {"ps_lod1.bin", "ps_lod2.bin", "ps_lod3.bin"};
+        for (int i = 0; i < 3; i++) {
+            pl[i] = load(argv[1], lname[i], &nl);
+            CHECK(pl[i] != NULL, "no %s", lname[i]);
+        }
+        /* draw with shader s, coordinates (u, v, w), level `lod`, fetch constant f: the centre pixel's colour */
+#define LOD_FRAME(s, u, v, w, lod, f)                                                                                  \
+    do {                                                                                                               \
+        im[0] = 1, im[1] = nl;                                                                                         \
+        memcpy(im + 2, pl[s], 4 * nl);                                                                                 \
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nl);                                                                      \
+        vertex(0x41000, -1, -1, u, v, w), vertex(0x41020, 1, -1, u, v, w);                                             \
+        vertex(0x41040, -1, 1, u, v, w), vertex(0x41060, 1, 1, u, v, w);                                               \
+        reg(0x4800, 0x41000u | 3u);                                                                                    \
+        reg(0x4801, 2u | (32u << 2));                                                                                  \
+        reg(0x4404, fbits((float)(lod)));                                                                              \
+        for (int r_ = 0; r_ < 6; r_++)                                                                                 \
+            reg(0x480C + (uint32_t)r_, (f)[r_]);                                                                       \
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);                                                                           \
+        type3(PM4_XE_SWAP, swap, 4);                                                                                   \
+        run(&cp);                                                                                                      \
+    } while (0)
+        /* 64x64 linear, levels 0-6: the tail starts at level 2 (16x16). Level 1: 0x60000, rows of 256 bytes, 8 KB. The
+         * tail's storage at 0x62000: level 2 at x 16, level 3 at x 8, level 4 at x 4, level 5 at y 8, level 6 at y 4 */
+        for (uint32_t y = 0; y < 64; y++)
+            for (uint32_t x = 0; x < 64; x++)
+                w32(0x50000 + y * 256 + x * 4, lc[0]);
+        for (uint32_t y = 0; y < 32; y++)
+            for (uint32_t x = 0; x < 32; x++)
+                w32(0x60000 + y * 256 + x * 4, lc[1]);
+        static const uint32_t t2d[5][3] = {{16, 0, 16}, {8, 0, 8}, {4, 0, 4}, {0, 8, 2}, {0, 4, 1}};
+        for (uint32_t l = 0; l < 5; l++)
+            for (uint32_t y = 0; y < t2d[l][2]; y++)
+                for (uint32_t x = 0; x < t2d[l][2]; x++)
+                    w32(0x62000 + (y + t2d[l][1]) * 256 + (x + t2d[l][0]) * 4, lc[2 + l]);
+        uint32_t f2d[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22, 6u | 2u << 6 | 0x50000u, 63u | 63u << 13, sw_id << 1,
+                           6u << 6, 1u << 9 | 1u << 11 | 0x60000u};
+        for (int l = 0; l < 7; l++) {
+            LOD_FRAME(0, 0.5f, 0.5f, 0.0f, l, f2d);
+            c = px(g, W / 2, H / 2);
+            CHECK(c[0] == lrgb[l][0] && c[1] == lrgb[l][1] && c[2] == lrgb[l][2], "packed 2D level %d: %u,%u,%u", l, c[0],
+                  c[1], c[2]);
+        }
+        /* 16x16 tiled, all tail: level 0 at x 16 of the base's tile, levels 1 and 2 at x 8 and x 4 of the mips' */
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++)
+                w32(0x68000 + tiled_off_pitch(x + 16, y, 32, 2), lc[3]);
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+                w32(0x69000 + tiled_off_pitch(x + 8, y, 32, 2), lc[4]);
+        for (int y = 0; y < 4; y++)
+            for (int x = 0; x < 4; x++)
+                w32(0x69000 + tiled_off_pitch(x + 4, y, 32, 2), lc[5]);
+        uint32_t f16[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22 | 1u << 31, 6u | 2u << 6 | 0x68000u, 15u | 15u << 13,
+                           sw_id << 1, 2u << 6, 1u << 9 | 1u << 11 | 0x69000u};
+        for (int l = 0; l < 3; l++) {
+            LOD_FRAME(0, 0.5f, 0.5f, 0.0f, l, f16);
+            c = px(g, W / 2, H / 2);
+            CHECK(c[0] == lrgb[3 + l][0] && c[1] == lrgb[3 + l][1] && c[2] == lrgb[3 + l][2],
+                  "packed 16x16 level %d: %u,%u,%u", l, c[0], c[1], c[2]);
+        }
+        /* a 32x32 cube: level 1 (16x16) and 2 (8x8) in the tail at 0x70000, faces 8 KB apart: +Z is face 4 */
+        for (uint32_t f = 0; f < 6; f++) {
+            for (uint32_t y = 0; y < 32; y++)
+                for (uint32_t x = 0; x < 32; x++)
+                    w32(0x6A000 + f * 4096 + y * 128 + x * 4, lc[0]);
+            for (uint32_t y = 0; y < 16; y++)
+                for (uint32_t x = 0; x < 16; x++)
+                    w32(0x70000 + f * 8192 + y * 256 + (x + 16) * 4, f == 4 ? lc[1] : lc[6]);
+            for (uint32_t y = 0; y < 8; y++)
+                for (uint32_t x = 0; x < 8; x++)
+                    w32(0x70000 + f * 8192 + y * 256 + (x + 8) * 4, f == 4 ? lc[2] : lc[6]);
+        }
+        uint32_t fcu[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | 0x6A000u, 31u | 31u << 13, sw_id << 1,
+                           2u << 6, 3u << 9 | 1u << 11 | 0x70000u};
+        for (int l = 1; l < 3; l++) {
+            LOD_FRAME(2, 1.5f, 1.5f, 4.0f, l, fcu);
+            c = px(g, W / 2, H / 2);
+            CHECK(c[0] == lrgb[l][0] && c[1] == lrgb[l][1] && c[2] == lrgb[l][2], "packed cube level %d: %u,%u,%u", l, c[0],
+                  c[1], c[2]);
+        }
+        /* 32x32x4 3D: level 1 (16x16x2) at x 16 of the tail at 0x80000, its slices 8 KB apart; level 2 (8x8x1) at x 8 */
+        for (uint32_t z = 0; z < 4; z++)
+            for (uint32_t y = 0; y < 32; y++)
+                for (uint32_t x = 0; x < 32; x++)
+                    w32(0x7C000 + z * 4096 + y * 128 + x * 4, lc[0]);
+        for (uint32_t z = 0; z < 2; z++)
+            for (uint32_t y = 0; y < 16; y++)
+                for (uint32_t x = 0; x < 16; x++)
+                    w32(0x80000 + z * 8192 + y * 256 + (x + 16) * 4, z ? lc[3] : lc[6]);
+        for (uint32_t y = 0; y < 8; y++)
+            for (uint32_t x = 0; x < 8; x++)
+                w32(0x80000 + y * 256 + (x + 8) * 4, lc[5]);
+        uint32_t f3d[6] = {2u | 2u << 10 | 2u << 13 | 2u << 16 | 1u << 22, 6u | 2u << 6 | 0x7C000u,
+                           31u | 31u << 11 | 3u << 22, sw_id << 1, 2u << 6, 2u << 9 | 1u << 11 | 0x80000u};
+        LOD_FRAME(1, 0.5f, 0.5f, 0.75f, 1, f3d);
+        c = px(g, W / 2, H / 2);
+        CHECK(c[0] == lrgb[3][0] && c[1] == lrgb[3][1] && c[2] == lrgb[3][2], "packed 3D level 1, slice 1: %u,%u,%u", c[0],
+              c[1], c[2]);
+        LOD_FRAME(1, 0.5f, 0.5f, 0.5f, 2, f3d);
+        c = px(g, W / 2, H / 2);
+        CHECK(c[0] == lrgb[5][0] && c[1] == lrgb[5][1] && c[2] == lrgb[5][2], "packed 3D level 2: %u,%u,%u", c[0], c[1],
+              c[2]);
+        /* 64x16, 8 bytes a texel, linear, all tail: level 0 at y 16 of the base (rows of 512 bytes); levels 1 and 2 at
+         * y 8 and y 4 of the mips' storage, whose rows are sized from level 0 too: 512 bytes, not 256 */
+        for (uint32_t y = 0; y < 16; y++)
+            for (uint32_t x = 0; x < 64; x++)
+                w32(0x90000 + (y + 16) * 512 + x * 8, 0x3C000000u), w32(0x90000 + (y + 16) * 512 + x * 8 + 4, 0x3C000000u);
+        for (uint32_t y = 0; y < 8; y++)
+            for (uint32_t x = 0; x < 32; x++)
+                w32(0x94000 + (y + 8) * 512 + x * 8, 0x00003C00u), w32(0x94000 + (y + 8) * 512 + x * 8 + 4, 0x3C000000u);
+        for (uint32_t y = 0; y < 4; y++)
+            for (uint32_t x = 0; x < 16; x++)
+                w32(0x94000 + (y + 4) * 512 + x * 8, 0), w32(0x94000 + (y + 4) * 512 + x * 8 + 4, 0x3C003C00u);
+        uint32_t fwide[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22, 32u | 2u << 6 | 0x90000u, 63u | 15u << 13, sw_id << 1,
+                             2u << 6, 1u << 9 | 1u << 11 | 0x94000u};
+        static const int wide_want[3] = {1, 0, 2}; /* green, red, blue */
+        for (int l = 0; l < 3; l++) {
+            LOD_FRAME(0, 0.5f, 0.5f, 0.0f, l, fwide);
+            c = px(g, W / 2, H / 2);
+            const uint8_t *w_ = lrgb[wide_want[l]];
+            CHECK(c[0] == w_[0] && c[1] == w_[1] && c[2] == w_[2], "packed 64x16 level %d: %u,%u,%u", l, c[0], c[1], c[2]);
+        }
+#undef LOD_FRAME
+        for (int i = 0; i < 3; i++)
+            free(pl[i]);
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
+    /* the texture queries through the renderer: xe_tq<k> comes from the fetch constant (an 8x8 texture, X clamped to its
+     * border). getWeights at (0.28125, 0.3125): fract(2.25 - 0.5 + 1.5 / 1024), fract(2.5 - 0.5 + 1.5 / 1024); getBCF at
+     * u = -0.5: the whole footprint is outside */
+    {
+        static const char *const qn[2] = {"ps_q19.bin", "ps_q16.bin"};
+        static const float qc[2][2] = {{0.28125f, 0.3125f}, {-0.5f, 0.5f}};
+        uint32_t fq[6] = {2u | 6u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | 0x50000u, 7u | 7u << 13, sw_id << 1, 0, 1u << 9};
+        for (int q = 0; q < 2; q++) {
+            uint32_t nq;
+            uint32_t *pq = load(argv[1], qn[q], &nq);
+            CHECK(pq != NULL, "no %s", qn[q]);
+            if (!pq)
+                continue;
+            im[0] = 1, im[1] = nq;
+            memcpy(im + 2, pq, 4 * nq);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nq);
+            free(pq);
+            for (uint32_t k = 0; k < 4; k++)
+                vertex(0x41300 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? 1.0f : -1.0f, qc[q][0], qc[q][1], 0.0f);
+            reg(0x4800, 0x41300u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            for (int i = 0; i < 6; i++)
+                reg(0x480C + (uint32_t)i, fq[i]);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            c = px(g, W / 2, H / 2);
+            if (q == 0)
+                CHECK(c[0] >= 190 && c[0] <= 193 && c[1] <= 2, "getWeights through the renderer: %u,%u, want 191,0", c[0], c[1]);
+            else
+                CHECK(c[0] == 255, "getBCF through the renderer: %u, want 255", c[0]);
+        }
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
+    /* a pixel shader exports one byte (format 8, index 1 of the dword at 0x41800): the dword's other bytes stay; without
+     * GLES 3.1 fragment storage blocks the draw is skipped and counted, memory untouched */
+    {
+        uint32_t nm;
+        uint32_t *pm = load(argv[1], "ps_mx.bin", &nm);
+        CHECK(pm != NULL, "no ps_mx.bin");
+        if (pm) {
+            w32(0x41800, 0xAABBCCDDu);
+            im[0] = 1, im[1] = nm;
+            memcpy(im + 2, pm, 4 * nm);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nm);
+            free(pm);
+            reg(0x4410, 0x40000000u | (0x41800u >> 2)); /* c4.x: the base in dwords */
+            reg(0x4411, 0x4B000000u | 1u);              /* c4.y: index 1 */
+            reg(0x4412, 0x4B000000u | 2u << 8);         /* c4.z: format 8 */
+            reg(0x4413, 0x4B000000u | 2u);              /* c4.w: bound 2 */
+            reg(0x4414, fbits(1.0f));                   /* c5.x */
+            reg(0x4800, 0x2000u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            xenos_gl_stats s0, s1;
+            xenos_gl_get_stats(g, &s0);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            xenos_gl_get_stats(g, &s1);
+            uint32_t got = rd32(NULL, 0x41800);
+            if (s1.memexport_skipped > s0.memexport_skipped)
+                CHECK(got == 0xAABBCCDDu, "pixel memory export skipped, yet memory is %08X", got);
+            else
+                CHECK(got == 0xAAFFCCDDu && s1.memexport_draws == s0.memexport_draws + 1,
+                      "pixel memory export of one byte: %08X, want AAFFCCDD", got);
+            im[0] = 1, im[1] = nps;
+            memcpy(im + 2, ps, 4 * nps);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+            run(&cp);
+        }
+    }
+
+    /* the stencil of a depth resolve: the square of the line loops (z 0.5) writes stencil 0x5A where it covers; the 24_8
+     * copy holds it in the low byte there, 0 outside. A depth surface of its own, at tile 0x300 */
+    {
+        reg(0x2002, 0x300u);
+        reg(0x4800, 0x40000u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        reg(0x210D, 0x5Au | 0xFFu << 8 | 0xFFu << 16);              /* reference, mask, write mask */
+        reg(0x2200, 1u | 2u | 4u | 7u << 4 | 7u << 8 | 2u << 14);  /* stencil always, replace on pass; depth always */
+        uint32_t fan = 5u | 2u << 6 | 4u << 16;
+        type3(PM4_DRAW_INDX_2, &fan, 1);
+        reg(0x2200, 0);
+        reg(0x4800, 0x7000u | 3u);
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);
+        reg(0x2318, 4u);                                            /* source: depth, no clear, raw */
+        reg(0x2319, 0x44000);
+        reg(0x231A, W | (uint32_t)H << 16);
+        reg(0x231B, 2u | 22u << 7);                                 /* 8-in-32, 24_8 */
+        type3(PM4_DRAW_INDX_2, &rect, 1);
+        reg(0x2208, 4), reg(0x2002, 0);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        uint32_t in_s = rd32(NULL, 0x44000 + tiled_off(32, 32)), out_s = rd32(NULL, 0x44000 + tiled_off(4, 4));
+        CHECK((in_s & 0xFF) == 0x5A && (in_s >> 8) >= 0x7FFFF0u && (in_s >> 8) <= 0x800010u && (out_s & 0xFF) == 0,
+              "depth resolve with stencil: inside %08X (want 800000 << 8 | 5A), outside %08X", in_s, out_s);
+    }
+
+    /* eDRAM aliasing: draw into one format, resolve the same tiles as another: the raw bits must come through */
+    {
+        /* resolve render target 0 (64 x 64) to `dest` in texture format `tf` */
+#define RESOLVE_TO(dest, tf)                                                                                           \
+    do {                                                                                                               \
+        reg(0x4800, 0x7000u | 3u);                                                                                     \
+        reg(0x4801, 2u | (6u << 2));                                                                                   \
+        reg(0x2208, 6);                                                                                                \
+        reg(0x2318, 0u);                                                                                               \
+        reg(0x2319, dest);                                                                                             \
+        reg(0x231A, W | (uint32_t)H << 16);                                                                            \
+        reg(0x231B, 2u | (uint32_t)(tf) << 7);                                                                         \
+        type3(PM4_DRAW_INDX_2, &rect, 1);                                                                              \
+        reg(0x2208, 4);                                                                                                \
+    } while (0)
+#define FILL(r_, g_, b_, a_)                                                                                           \
+    do {                                                                                                               \
+        reg(0x4400, fbits(r_)), reg(0x4401, fbits(g_)), reg(0x4402, fbits(b_)), reg(0x4403, fbits(a_));                \
+        vertex(0x41100, -1, -1, 1, 1, 1), vertex(0x41120, 1, -1, 1, 1, 1);                                             \
+        vertex(0x41140, -1, 1, 1, 1, 1), vertex(0x41160, 1, 1, 1, 1, 1);                                               \
+        reg(0x4800, 0x41100u | 3u);                                                                                    \
+        reg(0x4801, 2u | (32u << 2));                                                                                  \
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);                                                                           \
+    } while (0)
+        xenos_gl_stats a0, a1;
+        reg(0x2002, 0x700u); /* a depth buffer out of the way */
+        reg(0x2000, 64u);
+        /* 8_8_8_8 (FF, 00, 00, FF) read as 2_10_10_10: the same dword */
+        reg(0x2001, 0x400u | 0u << 16);
+        FILL(1.0f, 0.0f, 0.0f, 1.0f);
+        reg(0x2001, 0x400u | 2u << 16);
+        RESOLVE_TO(0x46000u, 7);
+        run(&cp);
+        uint32_t v = rd32(NULL, 0x46000 + tiled_off(9, 9));
+        CHECK(v == 0xFF0000FFu, "8_8_8_8 read as 2_10_10_10: %08X, want FF0000FF", v);
+        /* 8_8_8_8 (00, 3C, 00, 3C) read as 16_16_FLOAT: two halves of 1.0 */
+        reg(0x2001, 0x420u | 0u << 16);
+        FILL(0.0f, 60.0f / 255.0f, 0.0f, 60.0f / 255.0f);
+        reg(0x2001, 0x420u | 6u << 16);
+        RESOLVE_TO(0x48000u, 31);
+        run(&cp);
+        v = rd32(NULL, 0x48000 + tiled_off(9, 9));
+        CHECK(v == 0x3C003C00u, "8_8_8_8 read as 16_16_FLOAT: %08X, want 3C003C00", v);
+        /* the same format one tile row further on: rows 0-47 of the later surface are rows 16-63 of the earlier */
+        reg(0x2001, 0x441u);
+        FILL(0.0f, 1.0f, 0.0f, 1.0f);
+        reg(0x2001, 0x440u);
+        FILL(1.0f, 0.0f, 0.0f, 1.0f);
+        reg(0x2001, 0x441u);
+        RESOLVE_TO(0x4A000u, 6);
+        run(&cp);
+        uint32_t top = rd32(NULL, 0x4A000 + tiled_off(3, 3)), low = rd32(NULL, 0x4A000 + tiled_off(3, 60));
+        CHECK(top == 0xFF0000FFu && low == 0xFF00FF00u, "a surface one tile row on: top %08X (want FF0000FF), bottom %08X "
+              "(want FF00FF00)", top, low);
+        /* another pitch over the same tiles cannot be carried over: green must not survive, and it is counted */
+        xenos_gl_get_stats(g, &a0);
+        reg(0x2000, 128u), reg(0x2001, 0x480u);
+        FILL(0.0f, 1.0f, 0.0f, 1.0f);
+        reg(0x2000, 64u);
+        FILL(1.0f, 1.0f, 1.0f, 1.0f);
+        reg(0x2000, 128u);
+        RESOLVE_TO(0x4C000u, 6);
+        reg(0x2000, 64u), reg(0x2001, 0), reg(0x2002, 0), reg(0x2000, 0);
+        for (int i = 0; i < 4; i++)
+            reg(0x4400 + (uint32_t)i, fbits(1.0f));
+        run(&cp);
+        xenos_gl_get_stats(g, &a1);
+        v = rd32(NULL, 0x4C000 + tiled_off(5, 5));
+        CHECK((v & 0x0000FF00u) == 0 && a1.edram_stale > a0.edram_stale,
+              "another pitch: %08X must not be the stale green, %llu overlaps counted", v,
+              (unsigned long long)(a1.edram_stale - a0.edram_stale));
+        CHECK(a1.edram_reinterpreted >= 3, "reinterpreted surfaces: %llu", (unsigned long long)a1.edram_reinterpreted);
+        /* the scissor left at its maximum says nothing of a draw's extent: two targets at disjoint bases stay apart
+         * (of different pitches: an overlap between those would clear the rows) */
+        reg(0x2002, 0x700u), reg(0x2082, 8191u | 8191u << 16);
+        reg(0x2000, 64u), reg(0x2001, 0x610u);
+        FILL(1.0f, 0.0f, 0.0f, 1.0f);
+        reg(0x2000, 128u), reg(0x2001, 0x620u);
+        FILL(0.0f, 0.0f, 1.0f, 1.0f);
+        reg(0x2000, 64u), reg(0x2001, 0x610u);
+        FILL(1.0f, 0.0f, 0.0f, 1.0f);
+        reg(0x2000, 128u), reg(0x2001, 0x620u);
+        RESOLVE_TO(0x4D000u, 6);
+        reg(0x2082, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2000, 0);
+        for (int i = 0; i < 4; i++)
+            reg(0x4400 + (uint32_t)i, fbits(1.0f));
+        run(&cp);
+        v = rd32(NULL, 0x4D000 + tiled_off(5, 5));
+        CHECK(v == 0xFFFF0000u, "a neighbour under a maximum scissor: %08X, want FFFF0000 (blue)", v);
+#undef RESOLVE_TO
+#undef FILL
+    }
+
+    /* MSAA: a 4x target at tile 0x500: a triangle's diagonal edge resolves to values between red and black where the
+     * driver gives multisampled buffers; inside and outside are exact either way (RECOMP_X360_MSAA=0: the fallback) */
+    {
+        xenos_gl_stats m0, m1;
+        xenos_gl_get_stats(g, &m0);
+        reg(0x2000, 64u | 2u << 16), reg(0x2001, 0x500u), reg(0x2002, 0x540u);
+        black();
+        vertex(0x41200, -1, -1, 1, 0, 0), vertex(0x41220, 1, -1, 1, 0, 0), vertex(0x41240, -1, 1, 1, 0, 0);
+        reg(0x4800, 0x41200u | 3u);
+        reg(0x4801, 2u | (24u << 2));
+        type3(PM4_DRAW_INDX_2, &init, 1);
+        reg(0x4800, 0x7000u | 3u);
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);
+        reg(0x2318, 0u);
+        reg(0x2319, 0x4E000);
+        reg(0x231A, W | (uint32_t)H << 16);
+        reg(0x231B, 2u | 6u << 7);
+        type3(PM4_DRAW_INDX_2, &rect, 1);
+        reg(0x2208, 4);
+        reg(0x2000, 0), reg(0x2001, 0), reg(0x2002, 0);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        xenos_gl_get_stats(g, &m1);
+        int between = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                uint32_t r = rd32(NULL, 0x4E000 + tiled_off(x, y)) & 0xFF;
+                between += r > 20 && r < 235;
+            }
+        uint32_t inside = rd32(NULL, 0x4E000 + tiled_off(8, 55)) & 0xFF, outside = rd32(NULL, 0x4E000 + tiled_off(55, 8)) & 0xFF;
+        CHECK(inside == 255 && outside == 0, "MSAA target: inside %u, outside %u", inside, outside);
+        if (m1.msaa_surfaces > m0.msaa_surfaces)
+            CHECK(between >= 16, "MSAA target: %d edge pixels between red and black", between);
+        else
+            printf("MSAA: no multisampled buffers here, drawn single-sampled (fallback)\n");
+    }
+
+    /* a draw whose packet holds fewer indices than it says is counted, with its reason */
+    {
+        xenos_gl_stats s0, s1;
+        xenos_gl_get_stats(g, &s0);
+        uint32_t cutshort[2] = {4u | 1u << 6 | 6u << 16, 0};
+        type3(PM4_DRAW_INDX_2, cutshort, 2);
+        run(&cp);
+        xenos_gl_get_stats(g, &s1);
+        uint64_t count = 0;
+        const char *why = xenos_gl_unsupported_reason(g, 0, &count);
+        CHECK(s1.unsupported == s0.unsupported + 1 && s1.drawn == s0.drawn && why && count == 1 &&
+                  strstr(why, "immediate"),
+              "short immediate draw: unsupported +%llu, reason %s", (unsigned long long)(s1.unsupported - s0.unsupported),
+              why ? why : "(none)");
+    }
     xenos_gl_destroy(g);
     free(pst);
     free(vs);
@@ -942,6 +1467,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: 31 frames drawn and read back as expected, five resolves (one of depth)\n");
+    printf("xenos_gl: every frame drawn and read back as expected (the first 31 with five resolves, then XBA-296's)\n");
     return 0;
 }

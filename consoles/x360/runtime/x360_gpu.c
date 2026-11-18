@@ -119,6 +119,13 @@ void x360_render_stats(x360_machine *x, FILE *out)
             (unsigned long long)s.computed_fetches, (unsigned long long)s.memexport_draws,
             (unsigned long long)s.memexport_dwords, (unsigned long long)s.memexport_dropped,
             (unsigned long long)s.memexport_skipped);
+    fprintf(out, "render: eDRAM overlaps: %llu carried over, %llu not; multisampled targets: %llu\n",
+            (unsigned long long)s.edram_reinterpreted, (unsigned long long)s.edram_stale,
+            (unsigned long long)s.msaa_surfaces);
+    uint64_t count;
+    const char *why;
+    for (int i = 0; (why = xenos_gl_unsupported_reason(x->gpu->gl, i, &count)) != NULL; i++)
+        fprintf(out, "render: unsupported: %s: %llu\n", why, (unsigned long long)count);
 }
 
 unsigned x360_render_texture(x360_machine *x, int *width, int *height)

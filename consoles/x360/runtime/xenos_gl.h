@@ -20,7 +20,7 @@
  *
  * Textures: 1D, 2D, 3D and cube from the texture fetch constants, linear or tiled, 8 / 8_8 / 8_8_8_8 / 1_5_5_5 /
  * 5_6_5 / 4_4_4_4 / DXT1 / DXT2_3 / DXT4_5 decoded to RGBA8 (their memory compared once per frame and after each
- * resolve, decoded again when it changed), clamp, filter and swizzle from the fetch constant; base level only.
+ * resolve, decoded again when it changed), clamp, filter and swizzle from the fetch constant; mip levels, packed mip tails included.
  *
  * Resolves (eDRAM mode "copy"): the colour copied to guest memory as a tiled 8_8_8_8 or 5_6_5 texture at the
  * resolve rectangle, colour / depth / stencil cleared there; once a title clears through resolves, swaps stop
@@ -28,10 +28,9 @@
  * depth / stencil target stand for the eDRAM (no eDRAM model: surface pitch, base, formats, MSAA ignored;
  * RB_COLOR_MASK's target 0 bits apply to all four: GLES 3.0 has no per-target mask).
  *
- * Not there yet: the eDRAM model (render target bases, formats, MSAA), the other resolve formats, mips, the other
- * texture formats, vertex fetches at a computed index (instancing), memory export, the
- * viewport's exact conventions (the scale / offset registers map to glViewport when enabled). A Vulkan back end (the
- * epic's plan) would take the same state; the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
+ * The eDRAM model, its aliasing between formats, MSAA and the rest are described where they live, in xenos_gl.c. Every
+ * draw that cannot be handled is counted in `unsupported` with a reason (xenos_gl_unsupported_reason). A Vulkan back end
+ * (the epic's plan) would take the same state; the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
 #ifndef XENOS_GL_H
 #define XENOS_GL_H
 
@@ -64,6 +63,9 @@ typedef struct xenos_gl_stats {
     uint64_t memexport_dwords;     /* dwords they wrote to guest memory */
     uint64_t memexport_dropped;    /* dwords past the log's capacity */
     uint64_t memexport_skipped;    /* shaders not run: memory export without GLES 3.1 vertex storage blocks */
+    uint64_t edram_reinterpreted;  /* XBA-296: surfaces given what another format / position left in their eDRAM */
+    uint64_t edram_stale;          /* overlaps that could not be carried over: the rows cleared (colour / depth: kept) */
+    uint64_t msaa_surfaces;        /* render targets with a multisampled buffer */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */
@@ -95,6 +97,8 @@ void xenos_gl_set_frames_dir(xenos_gl *g, const char *dir, unsigned max_frames);
 /* the last frame read back: RGBA, top row first */
 const uint8_t *xenos_gl_frame(const xenos_gl *g, int *width, int *height);
 void xenos_gl_get_stats(const xenos_gl *g, xenos_gl_stats *s);
+/* why draws were counted in `unsupported`: the i-th distinct reason and its count, NULL past the last one */
+const char *xenos_gl_unsupported_reason(const xenos_gl *g, int i, uint64_t *count);
 /* where a missing shader is reported (one line per distinct shader: "vs_XXXXXXXX" / "ps_XXXXXXXX"); NULL: stderr */
 void xenos_gl_set_log(xenos_gl *g, void *file);
 

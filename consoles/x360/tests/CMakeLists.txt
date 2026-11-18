@@ -6,7 +6,7 @@ project(console_x360_tests C)
 #
 #   xenos_cp         the PM4 command processor on hand-built packets (xenos_cp_test.c)
 #   xenos_draw       the GLES renderer draws a hand-built PM4 stream, read back (skipped without EGL / GLES 3.0):
-#                    30 frames, among them (XBA-280) eDRAM surfaces at tile bases, a 2_10_10_10 and a float target
+#                    its frames, among them (XBA-280) eDRAM surfaces at tile bases, a 2_10_10_10 and a float target
 #                    resolved to their formats, a depth resolve, mip levels, a computed-index fetch; xenos_draw_x2 the
 #                    same at an internal resolution of 2
 #   x360_render      the renderer through the machine: a ring, VdSwap, a front buffer frame, a save state loaded
