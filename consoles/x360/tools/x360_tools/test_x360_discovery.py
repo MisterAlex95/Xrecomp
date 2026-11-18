@@ -356,3 +356,16 @@ def test_helpers_and_tables_run(tmp_path):
             assert got == expect, (name, got.hex(), expect.hex())
         else:
             assert res[name][what] == expect, (name, what, hex(res[name][what]), hex(expect))
+
+
+def test_helper_words_match_xenonrecomp():
+    """The first words of each helper as assembled here equal the byte patterns XenonRecomp's README publishes for
+    MSVC's helpers (hedge-dev/XenonRecomp, MIT): an outside reference for the shapes find_helpers accepts."""
+    published = {"__restgprlr_14": "e9c1ff68", "__savegprlr_14": "f9c1ff68", "__restfpr_14": "c9ccff70",
+                 "__savefpr_14": "d9ccff70", "__restvmx_14": "3960fee07dcb60ce", "__savevmx_14": "3960fee07dcb61ce",
+                 "__restvmx_64": "3960fc00100b60cb", "__savevmx_64": "3960fc00100b61cb"}
+    words, funcs, labels = program()
+    for name, hexa in published.items():
+        k = (labels[name] - TEXT) // 4
+        got = "".join("%08x" % w for w in words[k:k + len(hexa) // 8])
+        assert got == hexa, (name, got, hexa)
