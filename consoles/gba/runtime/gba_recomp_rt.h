@@ -273,6 +273,63 @@ static inline uint32_t rc_pf_fetch(gba_rc_head *h, uint64_t now, uint32_t addr, 
     return c;
 }
 
+/* rc_pf_fetch out of line: rc_pf_fetch_i's tail call for the rare cases. */
+static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_ool(gba_rc_head *h, uint64_t now, uint32_t addr,
+                                                                  bool thumb, uint32_t ncost)
+{
+    return rc_pf_fetch(h, now, addr, thumb, ncost);
+}
+
+/* rc_pf_fetch for every instruction of lifted code in the cartridge with the buffer on (RC_I, XBA-277), one copy per
+ * file: the fetch at the buffer's head inline (the opcode is in the buffer, or being read), every other case through
+ * rc_pf_fetch (a tail call). The state ends exactly as rc_pf_fetch leaves it (consoles/gba/tests/test_prefetch.c). */
+static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_i(gba_rc_head *h, uint64_t now, uint32_t addr,
+                                                                bool thumb, uint32_t ncost)
+{
+    gba_rc_prefetch *p = &h->pf;
+    if (p->valid && addr == p->head && p->thumb == thumb) {
+        uint32_t w = thumb ? 2u : 4u;
+        if (!p->run) {
+            if (p->count) { /* full: advancing only moves `time` */
+                if (now > p->time)
+                    p->time = now;
+                p->count--;
+                p->head += w;
+                p->run = true;
+                p->left = p->duty;
+                return 1;
+            }
+        } else {
+            if (now > p->time) { /* rc_pf_advance */
+                uint64_t e = now - p->time;
+                uint32_t left = p->left;
+                p->time = now;
+                while (e >= left) {
+                    e -= left;
+                    if (++p->count >= p->cap) { /* full, the head in it: the fetch makes room, reading resumes */
+                        p->count--;
+                        p->head += w;
+                        p->left = p->duty;
+                        return 1;
+                    }
+                    left = p->duty;
+                }
+                p->left = left - (uint32_t)e;
+            }
+            p->head += w;
+            if (p->count) {
+                p->count--;
+                return 1;
+            }
+            uint32_t c = p->left;
+            p->left = p->duty;
+            p->time = now + c;
+            return c;
+        }
+    }
+    return rc_pf_fetch_ool(h, now, addr, thumb, ncost);
+}
+
 /* The opcode fetch at the start of the instruction at pc (the pipeline reads the opcode at pc + 8 / + 4 meanwhile):
  * sequential, from the prefetch buffer in the cartridge when it is on. */
 static inline uint32_t rc_fetch_cost(gba_rc_head *h, uint64_t now, uint32_t pc, bool thumb)
@@ -290,8 +347,9 @@ static inline uint32_t rc_refill_cost(gba_rc_head *h, uint64_t now, uint32_t r15
     uint32_t r = (r15 >> 24) & 15;
     if (rc_cart(r15) && h->prefetch) {
         uint32_t w = thumb ? 2u : 4u, t = r15 - 2 * w;
-        uint32_t c = rc_pf_fetch(h, now, t, thumb, thumb ? h->wait16[r][0] : h->wait32[r][0]);
-        return c + rc_pf_fetch(h, now + c, t + w, thumb, thumb ? h->wait16[r][1] : h->wait32[r][1]);
+        /* the target (rarely the buffer's head: rc_pf_fetch out of line), then the next opcode */
+        uint32_t c = rc_pf_fetch_ool(h, now, t, thumb, thumb ? h->wait16[r][0] : h->wait32[r][0]);
+        return c + rc_pf_fetch_i(h, now + c, t + w, thumb, thumb ? h->wait16[r][1] : h->wait32[r][1]);
     }
     return thumb ? (uint32_t)h->wait16[r][0] + h->wait16[r][1] : (uint32_t)h->wait32[r][0] + h->wait32[r][1];
 }
@@ -338,12 +396,12 @@ static inline uint32_t rc_refill_cost(gba_rc_head *h, uint64_t now, uint32_t r15
 #define RC_COUNT() ((void)0)
 #endif
 
-/* Start of the instruction at A: its opcode fetch (from the prefetch buffer in the cartridge when it is on). */
+/* Start of the instruction at A: its opcode fetch (from the prefetch buffer in the cartridge when it is on: no branch
+ * hint, games turn it on). */
 #define RC_I(A)                                                                                                      \
     do {                                                                                                             \
-        now += __builtin_expect(pf_, 0)                                                                              \
-                   ? rc_pf_fetch(h, now, (uint32_t)(A) + RC_PIPE, RC_T,                                              \
-                                 RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0])                           \
+        now += pf_ ? rc_pf_fetch_i(h, now, (uint32_t)(A) + RC_PIPE, RC_T,                                            \
+                                   RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0])                         \
                    : fc;                                                                                             \
         RC_COUNT();                                                                                                  \
     } while (0)
