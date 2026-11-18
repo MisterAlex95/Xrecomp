@@ -882,6 +882,377 @@ static void k_XeCryptDesParity(x360_machine *x, x360_thread *t, xe_cpu *c)
     }
 }
 
+/* ---- big numbers: arrays of 32- or 64-bit digits, the least significant digit first ("Ne": each digit in the
+ * console's byte order, big-endian in guest memory) ---- */
+
+static void k_XeCryptBnDw_Zero(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    memset(x->base + A(0), 0, 4 * (size_t)A(1));
+}
+
+static void k_XeCryptBnQw_Zero(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    memset(x->base + A(0), 0, 8 * (size_t)A(1));
+}
+
+static void k_XeCryptBnDw_Copy(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    memmove(x->base + A(1), x->base + A(0), 4 * (size_t)A(2));
+}
+
+static void k_XeCryptBnQw_Copy(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    memmove(x->base + A(1), x->base + A(0), 8 * (size_t)A(2));
+}
+
+/* (source, destination, digits): every `unit` bytes of each digit reversed; the source may be the destination */
+static void swap_units(x360_machine *x, uint32_t src, uint32_t dst, size_t bytes, uint32_t unit)
+{
+    for (size_t at = 0; at + unit <= bytes; at += unit) {
+        uint8_t v[8];
+        memcpy(v, x->base + src + at, unit);
+        for (uint32_t i = 0; i < unit; i++)
+            x->base[dst + at + i] = v[unit - 1 - i];
+    }
+}
+
+static void k_XeCryptBnDw_SwapLeBe(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    swap_units(x, A(0), A(1), 4 * (size_t)A(2), 4);
+}
+
+/* the bytes of each 32-bit half reversed, the halves staying where they are */
+static void k_XeCryptBnQw_SwapLeBe(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    swap_units(x, A(0), A(1), 8 * (size_t)A(2), 4);
+}
+
+/* the two 32-bit halves of each digit exchanged, the bytes of each half unchanged */
+static void k_XeCryptBnQw_SwapDwQw(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    for (uint32_t i = 0; i < A(2); i++) {
+        uint8_t v[8];
+        memcpy(v, x->base + A(0) + 8 * i, 8);
+        memcpy(x->base + A(1) + 8 * i, v + 4, 4);
+        memcpy(x->base + A(1) + 8 * i + 4, v, 4);
+    }
+}
+
+/* all eight bytes of each digit reversed */
+static void k_XeCryptBnQw_SwapDwQwLeBe(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    swap_units(x, A(0), A(1), 8 * (size_t)A(2), 8);
+}
+
+/* (a, b, digits): -1, 0 or 1 as a is below, equal to or above b */
+static void k_XeCryptBnQwNeCompare(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    int64_t r = 0;
+    for (uint32_t i = A(2); i-- && !r;) {
+        uint64_t a = x360_r64(x, A(0) + 8 * i), b = x360_r64(x, A(1) + 8 * i);
+        r = a < b ? -1 : a > b;
+    }
+    c->gpr[3] = (uint64_t)r;
+}
+
+/* ---- modular arithmetic: Montgomery multiplication with R = 2^(64 * digits) ---- */
+
+#define BN_MAX 64 /* 4096 bits, the largest modulus the kernel's RSA structures hold */
+
+/* a * b + c + d, returns the low half and leaves the high half in *hi (the sum cannot overflow 128 bits) */
+static uint64_t mul_add(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t *hi)
+{
+    uint64_t a0 = (uint32_t)a, a1 = a >> 32, b0 = (uint32_t)b, b1 = b >> 32;
+    uint64_t p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    uint64_t mid = (p00 >> 32) + (uint32_t)p01 + (uint32_t)p10;
+    uint64_t lo = (mid << 32) | (uint32_t)p00, h = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    lo += c;
+    h += lo < c;
+    lo += d;
+    h += lo < d;
+    *hi = h;
+    return lo;
+}
+
+static int bn_cmp(const uint64_t *a, const uint64_t *b, uint32_t n)
+{
+    for (uint32_t i = n; i--;)
+        if (a[i] != b[i])
+            return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+
+/* a -= b, returns the borrow */
+static uint64_t bn_sub(uint64_t *a, const uint64_t *b, uint32_t n)
+{
+    uint64_t borrow = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t v = a[i] - b[i], next = a[i] < b[i];
+        next |= v < borrow;
+        a[i] = v - borrow;
+        borrow = next;
+    }
+    return borrow;
+}
+
+/* the n + 1 digits of t reduced modulo m, one bit at a time: for values far above m */
+static void bn_reduce(uint64_t *t, const uint64_t *m, uint32_t n)
+{
+    uint64_t r[BN_MAX] = {0};
+    for (uint32_t bit = 64 * (n + 1); bit--;) {
+        uint64_t top = r[n - 1] >> 63;
+        for (uint32_t i = n - 1; i; i--)
+            r[i] = r[i] << 1 | r[i - 1] >> 63;
+        r[0] = r[0] << 1 | (t[bit / 64] >> (bit % 64) & 1);
+        if (top || bn_cmp(r, m, n) >= 0)
+            bn_sub(r, m, n);
+    }
+    memcpy(t, r, 8 * n);
+    t[n] = 0;
+}
+
+/* out = a * b / R mod m. m odd, inv = m^-1 mod 2^64 (XeCryptBnQwNeModInv's answer); out may be a or b */
+static void mont_mul(uint64_t *out, const uint64_t *a, const uint64_t *b, const uint64_t *m, uint64_t inv, uint32_t n)
+{
+    uint64_t t[BN_MAX + 2] = {0}, hi, q = 0 - inv;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t carry = 0;
+        for (uint32_t j = 0; j < n; j++) {
+            t[j] = mul_add(a[j], b[i], t[j], carry, &hi);
+            carry = hi;
+        }
+        t[n] += carry;
+        t[n + 1] = t[n] < carry;
+
+        uint64_t f = t[0] * q;
+        mul_add(f, m[0], t[0], 0, &carry);
+        for (uint32_t j = 1; j < n; j++) {
+            t[j - 1] = mul_add(f, m[j], t[j], carry, &hi);
+            carry = hi;
+        }
+        t[n - 1] = t[n] + carry;
+        t[n] = t[n + 1] + (t[n - 1] < carry);
+    }
+    if (t[n] || bn_cmp(t, m, n) >= 0) {
+        t[n] -= bn_sub(t, m, n);
+        if (t[n] || bn_cmp(t, m, n) >= 0) /* an input was far above the modulus */
+            bn_reduce(t, m, n);
+    }
+    memcpy(out, t, 8 * n);
+}
+
+static uint64_t mod_inv64(uint64_t v) /* v^-1 mod 2^64, v odd: Newton doubles the correct bits */
+{
+    uint64_t r = (v * 3) ^ 2;
+    for (int i = 0; i < 4; i++)
+        r *= 2 - v * r;
+    return r;
+}
+
+static void bn_read(x360_machine *x, uint32_t g, uint64_t *v, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++)
+        v[i] = x360_r64(x, g + 8 * i);
+}
+
+static void bn_write(x360_machine *x, uint32_t g, const uint64_t *v, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++)
+        x360_w64(x, g + 8 * i, v[i]);
+}
+
+/* (digit): its inverse modulo 2^64 */
+static void k_XeCryptBnQwNeModInv(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)x, (void)t;
+    c->gpr[3] = mod_inv64(c->gpr[3]);
+}
+
+/* (a, b, out, inverse of the modulus' lowest digit, modulus, digits): out = a * b / 2^(64 * digits) mod the modulus */
+static void k_XeCryptBnQwNeModMul(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint64_t a[BN_MAX], b[BN_MAX], m[BN_MAX], r[BN_MAX];
+    uint32_t n = A(5);
+    if (!n || n > BN_MAX)
+        return;
+    bn_read(x, A(4), m, n);
+    if (!(m[0] & 1))
+        return; /* Montgomery's form needs an odd modulus */
+    bn_read(x, A(0), a, n);
+    bn_read(x, A(1), b, n);
+    mont_mul(r, a, b, m, c->gpr[6], n);
+    bn_write(x, A(2), r, n);
+}
+
+/* (input, output, XECRYPT_RSA key {be32 digits, be32 public exponent, be64 reserved, modulus}): TRUE when the output
+ * holds input ^ exponent mod modulus. No padding is looked at: raw RSA, as the kernel's export does. */
+static void k_XeCryptBnQwNeRsaPubCrypt(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t key = A(2), n = x360_r32(x, key), e = x360_r32(x, key + 4);
+    uint64_t m[BN_MAX], in[BN_MAX], r2[BN_MAX + 1] = {0}, base[BN_MAX], acc[BN_MAX], one[BN_MAX] = {1};
+    if (!n || n > BN_MAX || !e) {
+        RET(0);
+        return;
+    }
+    bn_read(x, key + 16, m, n);
+    if (!(m[0] & 1)) {
+        RET(0);
+        return;
+    }
+    bn_read(x, A(0), in, n);
+    uint64_t inv = mod_inv64(m[0]);
+
+    /* R^2 mod m, by doubling 1 */
+    r2[0] = 1;
+    if (bn_cmp(r2, m, n) >= 0)
+        bn_sub(r2, m, n);
+    for (uint32_t bit = 0; bit < 128 * n; bit++) {
+        uint64_t top = r2[n - 1] >> 63;
+        for (uint32_t i = n - 1; i; i--)
+            r2[i] = r2[i] << 1 | r2[i - 1] >> 63;
+        r2[0] <<= 1;
+        if (top || bn_cmp(r2, m, n) >= 0)
+            bn_sub(r2, m, n);
+    }
+
+    mont_mul(base, in, r2, m, inv, n);
+    memcpy(acc, base, 8 * n);
+    int top = 31;
+    while (!(e >> top & 1))
+        top--;
+    while (top--) {
+        mont_mul(acc, acc, acc, m, inv, n);
+        if (e >> top & 1)
+            mont_mul(acc, acc, base, m, inv, n);
+    }
+    mont_mul(acc, acc, one, m, inv, n);
+    bn_write(x, A(1), acc, n);
+    RET(1);
+}
+
+/* ---- PKCS #1 v1.5 blocks over a SHA-1 digest, byte-reversed ("Le"): the block's last byte is its first ---- */
+
+/* (digest, format, block, size): format 0 is the DigestInfo of RFC 8017 9.2 with its NULL parameters, 1 the same
+ * without them, 2 none. A size outside 39..512 leaves the block filled with 0xFF. */
+static void pkcs1_format(const uint8_t *digest, uint32_t format, uint8_t *sig, uint32_t size)
+{
+    static const uint8_t with_null[16] = {0x14, 0x04, 0x00, 0x05, 0x1A, 0x02, 0x03, 0x0E,
+                                          0x2B, 0x05, 0x06, 0x09, 0x30, 0x21, 0x30, 0x00};
+    static const uint8_t without[14] = {0x14, 0x04, 0x1A, 0x02, 0x03, 0x0E, 0x2B,
+                                        0x05, 0x06, 0x07, 0x30, 0x1F, 0x30, 0x00};
+    memset(sig, 0xFF, size);
+    if (size < 39 || size > 512)
+        return;
+    sig[size - 1] = 0;
+    sig[size - 2] = 1;
+    for (int i = 0; i < 20; i++)
+        sig[i] = digest[19 - i];
+    if (format == 0)
+        memcpy(sig + 20, with_null, sizeof with_null);
+    else if (format == 1)
+        memcpy(sig + 20, without, sizeof without);
+    else if (format == 2)
+        sig[20] = 0;
+}
+
+static void k_XeCryptBnDwLePkcs1Format(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    pkcs1_format(x->base + A(0), A(1), x->base + A(2), A(3));
+}
+
+/* (digest, block, size): TRUE when the block is the one its format byte announces */
+static void k_XeCryptBnDwLePkcs1Verify(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t size = A(2);
+    const uint8_t *sig = x->base + A(1);
+    uint8_t want[512];
+    if (size < 39 || size > 512) {
+        RET(0);
+        return;
+    }
+    pkcs1_format(x->base + A(0), sig[0x16] == 0 ? 0 : sig[0x16] == 0x1A ? 1 : 2, want, size);
+    RET(!memcmp(want, sig, size));
+}
+
+/* ---- the Parve cipher and the chain-and-sum MAC, as ExCrypt documents them: there is no published standard ---- */
+
+/* (key, 256-byte substitution table, 8 bytes in, 8 bytes out) */
+static void parve_block(const uint8_t *key, const uint8_t *sbox, const uint8_t *in, uint8_t *out)
+{
+    uint8_t b[9];
+    memcpy(b, in, 8);
+    b[8] = b[0];
+    for (int round = 8; round > 0; round--) {
+        for (int j = 0; j < 8; j++) {
+            uint8_t y = (uint8_t)(sbox[(uint8_t)(key[j] + b[j] + round)] + b[j + 1]);
+            b[j + 1] = (uint8_t)(y << 1 | y >> 7);
+        }
+        b[0] = b[8];
+    }
+    memcpy(out, b, 8);
+}
+
+static void k_XeCryptParveEcb(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    parve_block(x->base + A(0), x->base + A(1), x->base + A(2), x->base + A(3));
+}
+
+/* (key, table, 8-byte IV, input, size, 8-byte MAC): whole blocks only */
+static void k_XeCryptParveCbcMac(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint8_t mac[8];
+    const uint8_t *in = x->base + A(3);
+    memcpy(mac, x->base + A(2), 8);
+    for (uint32_t n = A(4) / 8; n; n--, in += 8) {
+        for (int i = 0; i < 8; i++)
+            mac[i] ^= in[i];
+        parve_block(x->base + A(0), x->base + A(1), mac, mac);
+    }
+    memcpy(x->base + A(5), mac, 8);
+}
+
+/* (cd[2], ab[2], input, 32-bit words, output[2]): the words are the console's, big-endian; pairs only */
+static void k_XeCryptChainAndSumMac(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    const uint64_t M = 0x7FFFFFFF;
+    uint64_t cd0 = x360_r32(x, A(0)) % M, cd1 = x360_r32(x, A(0) + 4) % M;
+    uint64_t ab0 = x360_r32(x, A(1)) % M, ab1 = x360_r32(x, A(1) + 4) % M;
+    uint64_t out0 = 0, out1 = 0;
+    for (uint32_t i = 0; i < A(3) / 2; i++) {
+        out0 += (uint64_t)x360_r32(x, A(2) + 8 * i) * 0xE79A9C1;
+        out0 = ((out0 % M) * ab0 + ab1) % M;
+        out1 += out0;
+        out0 = (((x360_r32(x, A(2) + 8 * i + 4) + out0) * cd0) % M + cd1) % M;
+        out1 += out0;
+    }
+    x360_w32(x, A(4), (uint32_t)((out0 + ab1) % M));
+    x360_w32(x, A(4) + 4, (uint32_t)((out1 + cd1) % M));
+}
+
+/* ---- what needs a private key: refused, never a pretended success ---- */
+
+static void k_crypt_refused(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)x, (void)t;
+    RET(0);
+}
+
 const x360_hle_row x360_tab_crypt2[] = {
     X360_HK(XeCryptMd5Init, k_XeCryptMd5Init),
     X360_HK(XeCryptMd5Update, k_XeCryptMd5Update),
@@ -922,5 +1293,26 @@ const x360_hle_row x360_tab_crypt2[] = {
     X360_HK(XeCryptDes3Key, k_XeCryptDes3Key),
     X360_HK(XeCryptDes3Ecb, k_XeCryptDes3Ecb),
     X360_HK(XeCryptDes3Cbc, k_XeCryptDes3Cbc),
+    X360_HK(XeCryptBnDw_Zero, k_XeCryptBnDw_Zero),
+    X360_HK(XeCryptBnDw_Copy, k_XeCryptBnDw_Copy),
+    X360_HK(XeCryptBnDw_SwapLeBe, k_XeCryptBnDw_SwapLeBe),
+    X360_HK(XeCryptBnQw_Zero, k_XeCryptBnQw_Zero),
+    X360_HK(XeCryptBnQw_Copy, k_XeCryptBnQw_Copy),
+    X360_HK(XeCryptBnQw_SwapLeBe, k_XeCryptBnQw_SwapLeBe),
+    X360_HK(XeCryptBnQw_SwapDwQw, k_XeCryptBnQw_SwapDwQw),
+    X360_HK(XeCryptBnQw_SwapDwQwLeBe, k_XeCryptBnQw_SwapDwQwLeBe),
+    X360_HK(XeCryptBnQwNeCompare, k_XeCryptBnQwNeCompare),
+    X360_HK(XeCryptBnQwNeModInv, k_XeCryptBnQwNeModInv),
+    X360_HK(XeCryptBnQwNeModMul, k_XeCryptBnQwNeModMul),
+    X360_HK(XeCryptBnQwNeRsaPubCrypt, k_XeCryptBnQwNeRsaPubCrypt),
+    X360_HK(XeCryptBnDwLePkcs1Format, k_XeCryptBnDwLePkcs1Format),
+    X360_HK(XeCryptBnDwLePkcs1Verify, k_XeCryptBnDwLePkcs1Verify),
+    X360_HK(XeCryptParveEcb, k_XeCryptParveEcb),
+    X360_HK(XeCryptParveCbcMac, k_XeCryptParveCbcMac),
+    X360_HK(XeCryptChainAndSumMac, k_XeCryptChainAndSumMac),
+    X360_HK(XeCryptBnQwBeSigCreate, k_crypt_refused),
+    X360_HK(XeCryptBnQwBeSigFormat, k_crypt_refused),
+    X360_HK(XeCryptBnQwNeRsaPrvCrypt, k_crypt_refused),
+    X360_HK(XeCryptBnQwNeRsaKeyGen, k_crypt_refused),
 };
 const unsigned x360_tab_crypt2_n = sizeof x360_tab_crypt2 / sizeof x360_tab_crypt2[0];

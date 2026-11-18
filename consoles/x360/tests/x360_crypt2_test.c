@@ -1,5 +1,7 @@
-/* x360_crypt2_test -- the crypt2 HLE group called directly (XBA-296). Every expected value below is a published
- * known answer, the source named beside it; none comes from this code. */
+/* x360_crypt2_test -- the crypt2 HLE group called directly (XBA-296). Every hash and cipher is checked against a
+ * published known answer, the source named beside it. The big-number values come from Python's integers; Parve and the
+ * chain-and-sum MAC have no published vectors and are checked against what their definition gives by hand. No expected
+ * value comes from this code. */
 #include "x360_hle_util.h"
 
 #define GUARD 0xA5
@@ -431,10 +433,229 @@ static void test_des(void)
     ecb_both("TDEA with one key", X360_xboxkrnl_XeCryptDes3Ecb, st3, "4e6f772069732074", "3fa40e8a984d4815");
 
     /* FIPS 46-3: every key byte has odd parity, its low bit adjusting it */
-    uint32_t in = ghex("0001020 3feff807f", &n), out = gstate(8);
+    uint32_t in = ghex("00010203feff807f", &n), out = gstate(8);
     KX(XeCryptDesParity, 3, in, 8u, out);
     expect_hex("DES parity", out, "01010202fefe807f");
     OK(guard_ok(out, 8), "DesParity wrote past the output");
+}
+
+/* ---- big numbers ---- */
+
+/* a call whose arguments do not fit K(): 64-bit registers, 64-bit answer */
+static uint64_t call64(unsigned ord, const uint64_t *regs, int n)
+{
+    xe_cpu *c = cpu();
+    c->gpr[1] = stack_top;
+    for (int k = 0; k < n; k++)
+        c->gpr[3 + k] = regs[k];
+    x360_thunk th = {0, (uint16_t)ord, X360_LIB_XBOXKRNL};
+    X->m.slice = 1000;
+    x360_hle_call(X, &th);
+    return c->gpr[3];
+}
+
+/* digits given least significant first, stored as the guest holds them */
+static uint32_t gqw(const uint64_t *v, uint32_t n)
+{
+    uint32_t a = gstate(8 * n);
+    for (uint32_t i = 0; i < n; i++)
+        x360_w64(X, a + 8 * i, v[i]);
+    return a;
+}
+
+static void expect_qw(const char *what, uint32_t a, const uint64_t *v, uint32_t n)
+{
+    int same = 1;
+    for (uint32_t i = 0; i < n; i++)
+        same &= x360_r64(X, a + 8 * i) == v[i];
+    OK(same, "%s: wrong digits", what);
+    OK(guard_ok(a, 8 * n), "%s: wrote past the number", what);
+}
+
+static void test_bn_helpers(void)
+{
+    uint32_t n, src = ghex("0102030405060708 1112131415161718", &n), dst = gstate(16);
+
+    KX(XeCryptBnDw_SwapLeBe, 3, src, dst, 4u);
+    expect_hex("BnDw_SwapLeBe", dst, "0403020108070605 1413121118171615");
+    KX(XeCryptBnQw_SwapLeBe, 3, src, dst, 2u);
+    expect_hex("BnQw_SwapLeBe", dst, "0403020108070605 1413121118171615");
+    KX(XeCryptBnQw_SwapDwQw, 3, src, dst, 2u);
+    expect_hex("BnQw_SwapDwQw", dst, "0506070801020304 1516171811121314");
+    KX(XeCryptBnQw_SwapDwQwLeBe, 3, src, dst, 2u);
+    expect_hex("BnQw_SwapDwQwLeBe", dst, "0807060504030201 1817161514131211");
+    OK(guard_ok(dst, 16), "a swap wrote past the destination");
+
+    /* in place */
+    memcpy(X->base + dst, X->base + src, 16);
+    KX(XeCryptBnQw_SwapDwQwLeBe, 3, dst, dst, 2u);
+    expect_hex("BnQw_SwapDwQwLeBe in place", dst, "0807060504030201 1817161514131211");
+    memcpy(X->base + dst, X->base + src, 16);
+    KX(XeCryptBnQw_SwapDwQw, 3, dst, dst, 2u);
+    expect_hex("BnQw_SwapDwQw in place", dst, "0506070801020304 1516171811121314");
+
+    memset(X->base + dst, 0, 16);
+    KX(XeCryptBnDw_Copy, 3, src, dst, 3u);
+    expect_hex("BnDw_Copy", dst, "0102030405060708 1112131400000000");
+    KX(XeCryptBnDw_Zero, 2, dst, 1u);
+    expect_hex("BnDw_Zero", dst, "0000000005060708 1112131400000000");
+    KX(XeCryptBnQw_Copy, 3, src, dst, 2u);
+    OK(!memcmp(X->base + dst, X->base + src, 16), "BnQw_Copy");
+    KX(XeCryptBnQw_Zero, 2, dst, 2u);
+    expect_hex("BnQw_Zero", dst, "0000000000000000 0000000000000000");
+    OK(guard_ok(dst, 16), "BnQw_Zero wrote past the number");
+
+    /* the most significant digit is the last one, each compared as an unsigned 64-bit number */
+    static const uint64_t lo[2] = {0xFFFFFFFFFFFFFFFFull, 1}, hi[2] = {0, 2}, big[2] = {0, 0x8000000000000000ull};
+    uint32_t a = gqw(lo, 2), b = gqw(hi, 2), d = gqw(big, 2);
+    OK(KX(XeCryptBnQwNeCompare, 3, a, b, 2u) == 0xFFFFFFFFu, "Compare: below");
+    OK(cpu()->gpr[3] == ~0ull, "Compare: -1 is sign-extended");
+    OK(KX(XeCryptBnQwNeCompare, 3, b, a, 2u) == 1, "Compare: above");
+    OK(KX(XeCryptBnQwNeCompare, 3, a, a, 2u) == 0, "Compare: equal");
+    OK(KX(XeCryptBnQwNeCompare, 3, d, b, 2u) == 1, "Compare: digits are unsigned");
+    OK(KX(XeCryptBnQwNeCompare, 3, a, b, 0u) == 0, "Compare: no digits");
+}
+
+static void test_bn_mod(void)
+{
+    uint64_t r[6] = {3};
+    OK(call64(X360_xboxkrnl_XeCryptBnQwNeModInv, r, 1) == 0xAAAAAAAAAAAAAAABull, "ModInv(3)");
+    r[0] = 0xF00DBABE12345679ull;
+    OK(call64(X360_xboxkrnl_XeCryptBnQwNeModInv, r, 1) == 0x50D0095EF19E33C9ull, "ModInv of a modulus digit");
+
+    /* a * b / 2^192 mod N (values from Python's integers) */
+    static const uint64_t N[3] = {0xF00DBABE12345679ull, 0x0FEDCBA987654321ull, 0xF123456789ABCDEFull};
+    static const uint64_t A_[3] = {0xCCCCCCCCCCCCCCCCull, 0xBBBBBBBBBBBBBBBBull, 0xAAAAAAAAAAAAAAAAull};
+    static const uint64_t B_[3] = {0x8899AABBCCDDEEFFull, 0x0011223344556677ull, 0x0123456789ABCDEFull};
+    static const uint64_t C_[3] = {0x6904137B2230DAEFull, 0xFD6A07B97C0A0AD7ull, 0x31D3EF4A9807F571ull};
+    uint32_t ga = gqw(A_, 3), gb = gqw(B_, 3), gn = gqw(N, 3), out = gstate(24);
+    uint64_t args[6] = {ga, gb, out, 0x50D0095EF19E33C9ull, gn, 3};
+    call64(X360_xboxkrnl_XeCryptBnQwNeModMul, args, 6);
+    expect_qw("ModMul", out, C_, 3);
+    args[2] = ga; /* the output may be an input */
+    call64(X360_xboxkrnl_XeCryptBnQwNeModMul, args, 6);
+    for (uint32_t i = 0; i < 3; i++)
+        OK(x360_r64(X, ga + 8 * i) == C_[i], "ModMul in place");
+
+    /* RSA: the textbook 3233 = 61 * 53, e = 17, 65 -> 2790 */
+    static const uint64_t c2790[1] = {2790};
+    uint32_t key = gstate(0x18), in = gstate(8), res = gstate(8);
+    x360_w32(X, key, 1), x360_w32(X, key + 4, 17), x360_w64(X, key + 8, 0), x360_w64(X, key + 16, 3233);
+    x360_w64(X, in, 65);
+    OK(KX(XeCryptBnQwNeRsaPubCrypt, 3, in, res, key) == 1, "RsaPubCrypt refused a good key");
+    expect_qw("RsaPubCrypt 65^17 mod 3233", res, c2790, 1);
+
+    /* two digits, e = 65537 (the value from Python's pow) */
+    static const uint64_t M127[2] = {0xFFFFFFFFFFFFFFFFull, 0x7FFFFFFFFFFFFFFFull};
+    static const uint64_t msg[2] = {0x0011223344556677ull, 0x0123456789ABCDEFull};
+    static const uint64_t cph[2] = {0x5D4DEF23C39BE5D7ull, 0x392246F7ABDBA6B0ull};
+    uint32_t key2 = gstate(0x20), in2 = gqw(msg, 2), res2 = gstate(16);
+    x360_w32(X, key2, 2), x360_w32(X, key2 + 4, 65537), x360_w64(X, key2 + 8, 0);
+    x360_w64(X, key2 + 16, M127[0]), x360_w64(X, key2 + 24, M127[1]);
+    OK(KX(XeCryptBnQwNeRsaPubCrypt, 3, in2, res2, key2) == 1, "RsaPubCrypt refused a 2-digit key");
+    expect_qw("RsaPubCrypt, two digits", res2, cph, 2);
+
+    /* keys it cannot use are refused */
+    x360_w64(X, key + 16, 3232);
+    OK(KX(XeCryptBnQwNeRsaPubCrypt, 3, in, res, key) == 0, "RsaPubCrypt took an even modulus");
+    x360_w64(X, key + 16, 3233), x360_w32(X, key, 65);
+    OK(KX(XeCryptBnQwNeRsaPubCrypt, 3, in, res, key) == 0, "RsaPubCrypt took 65 digits");
+    x360_w32(X, key, 0);
+    OK(KX(XeCryptBnQwNeRsaPubCrypt, 3, in, res, key) == 0, "RsaPubCrypt took no digits");
+}
+
+static void test_pkcs1(void)
+{
+    /* RFC 8017 9.2 note 1: the DigestInfo prefix of SHA-1, 30 21 30 09 06 05 2b 0e 03 02 1a 05 00 04 14. The block is
+     * 00 01 FF.. 00 prefix digest, here byte-reversed. */
+    static const uint8_t prefix[15] = {0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e,
+                                       0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14};
+    uint8_t digest[20], want[128];
+    for (int i = 0; i < 20; i++)
+        digest[i] = (uint8_t)(0xA0 + i);
+    memset(want, 0xFF, sizeof want);
+    want[0] = 0x00, want[1] = 0x01;
+    want[128 - 36] = 0x00;
+    memcpy(want + 128 - 35, prefix, 15);
+    memcpy(want + 128 - 20, digest, 20);
+
+    uint32_t d = gbytes(digest, 20), sig = gstate(128);
+    KX(XeCryptBnDwLePkcs1Format, 4, d, 0u, sig, 128u);
+    int same = 1;
+    for (int i = 0; i < 128; i++)
+        same &= X->base[sig + (uint32_t)i] == want[127 - i];
+    OK(same, "Pkcs1Format: not the RFC 8017 block, reversed");
+    OK(guard_ok(sig, 128), "Pkcs1Format wrote past the block");
+    OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 128u) == 1, "Pkcs1Verify refused its own format");
+    X->base[sig + 3] ^= 1;
+    OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 128u) == 0, "Pkcs1Verify accepted another digest");
+    X->base[sig + 3] ^= 1;
+    X->base[sig + 60] ^= 1;
+    OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 128u) == 0, "Pkcs1Verify accepted damaged padding");
+    OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 38u) == 0, "Pkcs1Verify accepted a block too short");
+    OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 513u) == 0, "Pkcs1Verify accepted a block too long");
+
+    for (uint32_t format = 1; format <= 2; format++) {
+        KX(XeCryptBnDwLePkcs1Format, 4, d, format, sig, 128u);
+        OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 128u) == 1, "Pkcs1Verify: format %u", format);
+    }
+}
+
+/* no published vectors exist for these two: what the documented definition gives by hand */
+static void test_parve(void)
+{
+    uint8_t zero[256] = {0}, key[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint32_t n, sbox = gbytes(zero, 256), k = gbytes(key, 8), out = gstate(8);
+    uint32_t in = ghex("0123456789abcdef", &n);
+
+    /* an all-zero table leaves only the rotations: eight of one bit give each byte back */
+    KX(XeCryptParveEcb, 4, k, sbox, in, out);
+    expect_hex("ParveEcb, zero table", out, "0123456789abcdef");
+    OK(guard_ok(out, 8), "ParveEcb wrote past the block");
+    KX(XeCryptParveEcb, 4, k, sbox, in, in); /* in place */
+    expect_hex("ParveEcb in place", in, "0123456789abcdef");
+
+    /* the MAC: nothing but the IV without a whole block; one block is the cipher of block xor IV; the tail is ignored */
+    uint32_t iv = ghex("1000000000000002", &n), msg = ghex("0123456789abcdef ffff", &n), mac = gstate(8);
+    uint64_t a[6] = {k, sbox, iv, msg, 7, mac};
+    call64(X360_xboxkrnl_XeCryptParveCbcMac, a, 6);
+    expect_hex("ParveCbcMac, under one block", mac, "1000000000000002");
+    a[4] = 10;
+    call64(X360_xboxkrnl_XeCryptParveCbcMac, a, 6);
+    expect_hex("ParveCbcMac, one block and a tail", mac, "1123456789abcded");
+    OK(guard_ok(mac, 8), "ParveCbcMac wrote past the MAC");
+}
+
+static void test_chain_and_sum(void)
+{
+    /* ab = {1, 0}, cd = {1, 0}, one pair {1, 0}. By the definition's steps: out0 = 0xE79A9C1 after the first half and
+     * unchanged by the second, out1 = twice that. */
+    uint32_t cd = gstate(8), ab = gstate(8), in = gstate(12), out = gstate(8);
+    x360_w32(X, cd, 1), x360_w32(X, cd + 4, 0), x360_w32(X, ab, 1), x360_w32(X, ab + 4, 0);
+    x360_w32(X, in, 1), x360_w32(X, in + 4, 0), x360_w32(X, in + 8, 0xDEADBEEF);
+    KX(XeCryptChainAndSumMac, 5, cd, ab, in, 2u, out);
+    OK(x360_r32(X, out) == 0xE79A9C1 && x360_r32(X, out + 4) == 0x1CF35382, "ChainAndSumMac, one pair");
+    OK(guard_ok(out, 8), "ChainAndSumMac wrote past the output");
+    KX(XeCryptChainAndSumMac, 5, cd, ab, in, 3u, out); /* the odd word is ignored */
+    OK(x360_r32(X, out) == 0xE79A9C1 && x360_r32(X, out + 4) == 0x1CF35382, "ChainAndSumMac, odd word");
+
+    /* no input: the two additive constants, reduced modulo 2^31 - 1 */
+    x360_w32(X, ab + 4, 0x80000005), x360_w32(X, cd + 4, 7);
+    KX(XeCryptChainAndSumMac, 5, cd, ab, in, 0u, out);
+    OK(x360_r32(X, out) == 6 && x360_r32(X, out + 4) == 7, "ChainAndSumMac, no input");
+}
+
+/* private-key operations and formats answer an error, and leave the caller's buffers alone */
+static void test_refused(void)
+{
+    static const unsigned refused[] = {X360_xboxkrnl_XeCryptBnQwBeSigCreate, X360_xboxkrnl_XeCryptBnQwBeSigFormat,
+                                       X360_xboxkrnl_XeCryptBnQwNeRsaPrvCrypt, X360_xboxkrnl_XeCryptBnQwNeRsaKeyGen};
+    uint32_t buf = gstate(0x100);
+    for (unsigned k = 0; k < sizeof refused / sizeof refused[0]; k++) {
+        memset(X->base + buf, 0x77, 0x100);
+        OK(K(refused[k], 4, buf, buf, buf, buf) == 0, "export %u answered success", refused[k]);
+        OK(X->base[buf] == 0x77 && X->base[buf + 0xFF] == 0x77, "export %u wrote to the buffer", refused[k]);
+    }
 }
 
 int main(void)
@@ -446,6 +667,12 @@ int main(void)
     test_hmac();
     test_aes();
     test_des();
+    test_bn_helpers();
+    test_bn_mod();
+    test_pkcs1();
+    test_parve();
+    test_chain_and_sum();
+    test_refused();
     printf("x360_crypt2: %d checks\n", checks);
     return hle_util_end("x360_crypt2");
 }
