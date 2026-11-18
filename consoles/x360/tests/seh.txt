@@ -1,0 +1,7 @@
+seh: start
+filter sees E0001234
+finally ran (abnormal 1)
+caught E0001234, r31 1234, r28 77
+filter2 sees E0005678
+continued after E0005678, r30 4242
+seh: end

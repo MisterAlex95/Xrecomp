@@ -520,3 +520,80 @@ def test_against_mesa(tmp_path):
     print("xenos_glsl on GLES:", seen)
     # the pixel shaders did run (unless the implementation has no float target), some of them killed
     assert seen["vert"] > 400 and (seen["linked"] or (seen["frag"] > 50 and seen["killed"] > 5)), seen
+
+
+# ---- memory export (XBA-282) ----
+
+def _bits_f(u):
+    return struct.unpack("<f", struct.pack("<I", u))[0]
+
+
+def _ea(base, index, bound, fmt, endian=0, signed=0, swap_rb=0):
+    """eA as a title sets it (Xenia's reading): X the base in dwords (top bits 01), Y / W the index and its bound, Z the
+    format bits, Y / Z / W as floats in [2^23, 2^24)."""
+    info = endian | fmt << 8 | signed << 16 | swap_rb << 19
+    return [_bits_f(0x40000000 | base >> 2), _bits_f(0x4B000000 | index), _bits_f(0x4B000000 | info),
+            _bits_f(0x4B000000 | bound)]
+
+
+def _memexport_program(n_data):
+    """eA = c0, eM0.. = c1.. (mov through max(c, c)), then a position export."""
+    body = [("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1, srcs=((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))))]
+    for k in range(n_data):
+        body.append(("alu", alu_words(vop=2, vdest=33 + k, vmask=0xF, export=1,
+                                      srcs=((1 + k, 0, 0, 0), (1 + k, 0, 0, 0), (0, 0, 0, 0)))))
+    body.append(("alu", alu_words(**export(62, 0))))
+    return program([(2, body, {})])
+
+
+def _bswap(v):
+    return struct.unpack("<I", struct.pack(">I", v))[0]
+
+
+def _fbits(x):
+    return struct.unpack("<I", struct.pack("<f", x))[0]
+
+
+MEMEXPORT_CASES = [
+    # 32_32_32_32_FLOAT, 8in32: two elements at index 3, 4 (bound 5)
+    ("f32x4", _ea(0x10000, 3, 5, 38, endian=2), [[1.0, 2.0, 3.0, 4.0], [-1.0, 0.5, 0.0, 8.0]],
+     [(0x10000 + 3 * 16 + 4 * j, _bswap(_fbits(v))) for j, v in enumerate([1.0, 2.0, 3.0, 4.0])] +
+     [(0x10000 + 4 * 16 + 4 * j, _bswap(_fbits(v))) for j, v in enumerate([-1.0, 0.5, 0.0, 8.0])]),
+    # 8_8_8_8 unorm, no swap, three data registers but a bound of index + 2: two writes
+    ("rgba8", _ea(0x20000, 7, 9, 6), [[1.0, 0.0, 0.5, 1.0], [0.0, 1.0, 0.0, 0.25], [1.0, 1.0, 1.0, 1.0]],
+     [(0x20000 + 7 * 4, 0xFF | 0 << 8 | 128 << 16 | 0xFF << 24), (0x20000 + 8 * 4, 0 | 0xFF << 8 | 0 << 16 | 64 << 24)]),
+    # 32_FLOAT, 16in32
+    ("f32", _ea(0x30000, 0, 1, 36, endian=3), [[2.0, 9.0, 9.0, 9.0]],
+     [(0x30000, ((_fbits(2.0) << 16) | (_fbits(2.0) >> 16)) & 0xFFFFFFFF)]),
+]
+
+
+def test_memexport_translation():
+    words = _memexport_program(2)
+    with pytest.raises(Unsupported):
+        translate(words, "vertex")                 # without memexport: as before
+    src_, info = translate(words, "vertex", memexport=True)
+    assert info["memexport"] and src_.startswith("#version 310 es")
+    assert "buffer XeMemExport" in src_ and "xe_eMw |= 2u;" in src_ and "if (xe_eMw != 0u) xe_mx_flush();" in src_
+    plain, info = translate(to_words([dict(vop=2, vdest=1, vmask=0xF)]), "vertex", memexport=True)
+    assert plain.startswith("#version 300 es") and not info["memexport"]   # no export: GLSL ES 3.00 as before
+
+
+@pytest.mark.skipif(not os.path.isfile(RUN), reason="$XENOS_GLSL_RUN not set (tests/run_glsl_mesa.sh sets it)")
+def test_memexport_against_mesa(tmp_path):
+    for n, (name, ea, data, want) in enumerate(MEMEXPORT_CASES):
+        src_, _ = translate(_memexport_program(len(data)), "vertex", memexport=True)
+        (tmp_path / ("%d.vert" % n)).write_text(src_)
+        consts = [ea] + data + [[0.0] * 4] * (255 - len(data))
+        (tmp_path / ("%d.in" % n)).write_bytes(consts_blob(consts))
+        (tmp_path / ("%d.nout" % n)).write_text("1")
+    r = subprocess.run([RUN, str(tmp_path)], capture_output=True, text=True, timeout=600)
+    got = {}
+    for line in r.stdout.splitlines():
+        p = line.split()
+        if len(p) >= 3 and p[1] == "mem":
+            vals = [int(x, 16) for x in p[3:]]
+            got[int(p[0])] = sorted(zip(vals[0::2], vals[1::2]))
+    assert "error" not in r.stdout, r.stdout + r.stderr
+    for n, (name, _, _, want) in enumerate(MEMEXPORT_CASES):
+        assert got.get(n) == sorted(want), (name, got.get(n), sorted(want))

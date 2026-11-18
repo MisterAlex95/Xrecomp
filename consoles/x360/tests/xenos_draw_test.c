@@ -839,6 +839,44 @@ int main(int argc, char **argv)
         CHECK(top28[0] > 200 && top28[1] < 50 && bot28[1] > 200 && bot28[0] < 50,
               "frame 28 (computed index): top %u,%u,%u bottom %u,%u,%u", top28[0], top28[1], top28[2], bot28[0],
               bot28[1], bot28[2]);
+        /* XBA-282: vs_mx exports c5 to memory at 0x7C00 (eA = c4: base 0x7C00 in dwords, index 0, bound 1,
+         * 32_32_32_32_FLOAT, 8-in-32): with GLES 3.1 vertex storage blocks the four floats land there big-endian;
+         * without, the draw is skipped and counted (the fallback) */
+        uint32_t nm;
+        uint32_t *pm = load(argv[1], "vs_mx.bin", &nm);
+        CHECK(pm != NULL, "no vs_mx.bin");
+        if (pm) {
+            im[0] = 0, im[1] = nm;
+            memcpy(im + 2, pm, 4 * nm);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nm);
+            free(pm);
+            reg(0x4010, 0x40000000u | (0x7C00u >> 2));     /* c4.x: the base in dwords */
+            reg(0x4011, 0x4B000000u);                      /* c4.y: index 0 */
+            reg(0x4012, 0x4B000000u | 2u | 38u << 8);      /* c4.z: 8-in-32, 32_32_32_32_FLOAT */
+            reg(0x4013, 0x4B000000u | 1u);                 /* c4.w: bound 1 */
+            static const float mxv[4] = {1.5f, -2.0f, 0.25f, 100.0f};
+            for (int i = 0; i < 4; i++)
+                reg(0x4014 + (uint32_t)i, fbits(mxv[i]));
+            xenos_gl_stats s0, s1;
+            xenos_gl_get_stats(g, &s0);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            xenos_gl_get_stats(g, &s1);
+            if (s1.memexport_skipped > s0.memexport_skipped) {
+                printf("memory export: not available here, the draw was skipped (fallback)\n");
+            } else {
+                int ok = s1.memexport_draws == s0.memexport_draws + 1;
+                for (int i = 0; i < 4; i++)
+                    ok &= rd32(NULL, 0x7C00 + 4 * (uint32_t)i) == fbits(mxv[i]);
+                CHECK(ok, "memory export: draws %llu, at 0x7C00 %08X %08X %08X %08X",
+                      (unsigned long long)(s1.memexport_draws - s0.memexport_draws), rd32(NULL, 0x7C00),
+                      rd32(NULL, 0x7C04), rd32(NULL, 0x7C08), rd32(NULL, 0x7C0C));
+                if (ok)
+                    printf("memory export: c5 written to 0x7C00 (%llu dwords)\n",
+                           (unsigned long long)(s1.memexport_dwords - s0.memexport_dwords));
+            }
+        }
         im[0] = 0, im[1] = nvs;
         memcpy(im + 2, vs, 4 * nvs);
         type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nvs);
@@ -886,7 +924,8 @@ int main(int argc, char **argv)
 
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 33 && st.frames == 30 && st.resolves == 5 && st.depth_resolves == 1 && st.no_shader == 0 &&
+    CHECK(st.drawn == 33 + st.memexport_draws && st.frames == 31 && st.resolves == 5 && st.depth_resolves == 1 &&
+              st.no_shader == (st.memexport_skipped ? 1u : 0u) && /* XBA-282: the memory export draw, or its fallback */
               st.unsupported == 0 &&
               st.unsupported_textures == 0 && st.computed_fetches >= 1 && st.mipmapped >= 1 && st.surfaces >= 4 &&
               st.copy_textures >= 1,
@@ -903,6 +942,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: 30 frames drawn and read back as expected, five resolves (one of depth)\n");
+    printf("xenos_gl: 31 frames drawn and read back as expected, five resolves (one of depth)\n");
     return 0;
 }

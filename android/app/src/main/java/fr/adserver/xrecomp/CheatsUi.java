@@ -39,6 +39,7 @@ final class CheatsUi {
             return c.getString(con == Console.GBA    ? R.string.CHEATS_P_SHAPE_GBA
                                : con == Console.XBOX ? R.string.CHEATS_P_SHAPE_XBOX
                                : con == Console.GC   ? R.string.CHEATS_P_SHAPE_GC
+                               : con == Console.X360 ? R.string.CHEATS_P_SHAPE_X360
                                                      : R.string.CHEATS_P_SHAPE);
         }
     }

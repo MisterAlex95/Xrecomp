@@ -30,6 +30,7 @@ from tools.xex.xex import IMPORT_THUNK, XexError, load_keys, parse_xex
 
 from .discover360 import XenonDiscovery, find_helpers
 from .lift360 import TitleLifter
+from .seh import seh_seeds
 from .xenon import XenonDecoder, XenonLifter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -81,6 +82,7 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     seeds = {img.entry} | set(extra_seeds)
     if use_pdata:
         seeds |= {start for start, _ in img.pdata}
+        seeds |= seh_seeds(img)   # XBA-282: __except blocks, filters, __finally (scope tables only name them)
     seeds = {a for a in seeds if a not in view.hidden}
     disc = XenonDiscovery(view, dec, sorted(seeds))
     funcs = disc.run()

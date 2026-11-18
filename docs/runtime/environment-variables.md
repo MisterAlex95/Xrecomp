@@ -528,6 +528,8 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_X360_DISC=PATH` | the imported image | The Android entry (`x360_runtime_start`): the title's disc (`pack_loader.c` sets it to the image the player imported). | `x360_runtime.c` |
 | `RECOMP_X360_SHADERS=DIR` | the pack's `shaders/` | The Android entry: the GLSL ES shader cache. | `x360_runtime.c` |
 | `RECOMP_X360_FRAMES=N` | unbounded | The Android entry: stop after N frames (checks). | `x360_runtime.c` |
+| `RECOMP_X360_MEMEXPORT=0` | on where the context allows | Xbox 360 memory export off (XBA-282): shaders that export to memory need GLES 3.1 with vertex storage blocks and `glMemoryBarrier`, checked at run time (`xenos: memory export on/off` in the log); off or unavailable, their draws are skipped and counted. | `consoles/x360/runtime/xenos_gl.c` |
+| `RECOMP_TEX_BILINEAR` / `RECOMP_TEX_ANISO` (Xbox 360) | the title's filters | Since XBA-282 the Xbox 360 renderer reads the Xbox's texture filter options too: every texture sampled linearly; 8 / 16, anisotropic as well where `EXT_texture_filter_anisotropic` is there. | `xenos_gl.c` |
 
 ## Network
 

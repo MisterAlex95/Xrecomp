@@ -22,7 +22,7 @@ python3 -m x360_tools.recomp "$work/hello.xex" "$work/src" --no-comments
     -o "$work/libtitle.so" "$work"/src/*.c -lm
 "$cc" -O2 -ffp-contract=off -DXE_RUNTIME=1 -D_GNU_SOURCE -I "$rt" -I "$repo/consoles/gc/runtime" \
     -o "$work/x360_run" "$rt"/x360_mem.c "$rt"/x360_load.c "$rt"/x360_thread.c "$rt"/x360_kernel.c \
-    "$rt"/x360_interp.c "$rt"/x360_file.c "$rt"/x360_xam.c "$rt"/x360_gpu.c "$rt"/xenos_cp.c "$rt"/x360_state.c "$rt"/x360_crypt.c "$rt"/x360_more.c "$rt"/x360_input.c "$rt"/x360_xma.c \
+    "$rt"/x360_interp.c "$rt"/x360_file.c "$rt"/x360_xam.c "$rt"/x360_gpu.c "$rt"/xenos_cp.c "$rt"/x360_state.c "$rt"/x360_crypt.c "$rt"/x360_more.c "$rt"/x360_input.c "$rt"/x360_xma.c "$rt"/x360_seh.c \
     "$rt"/xenos_gl.c "$rt"/tools/x360_run.c -I "$repo/src/xiso" "$repo"/src/xiso/xiso.c \
     "$repo"/src/xiso/xiso_source.c -ldl -lm -lpthread
 mkdir -p "$work/disc/data"
@@ -36,7 +36,7 @@ cmp "$work/dbg.txt" "$here/hello.txt"
 echo "arm64 (qemu): DbgPrint output matches hello.txt"
 # the HLE and command processor tests too
 core="$rt/x360_mem.c $rt/x360_load.c $rt/x360_thread.c $rt/x360_kernel.c $rt/x360_interp.c $rt/x360_file.c
-      $rt/x360_xam.c $rt/x360_gpu.c $rt/xenos_cp.c $rt/x360_state.c $rt/x360_crypt.c $rt/x360_more.c $rt/x360_input.c $rt/x360_xma.c
+      $rt/x360_xam.c $rt/x360_gpu.c $rt/xenos_cp.c $rt/x360_state.c $rt/x360_crypt.c $rt/x360_more.c $rt/x360_input.c $rt/x360_xma.c $rt/x360_seh.c
       $rt/xenos_gl.c
       $repo/src/xiso/xiso.c $repo/src/xiso/xiso_source.c"
 for t in x360_hle_test xenos_cp_test xenos_draw_test; do

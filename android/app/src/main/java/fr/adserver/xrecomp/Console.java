@@ -91,8 +91,9 @@ enum Console {
 
     /**
      * A game of this console starts from its file as it is, no Prepare or import (GBA, PS1, N64, GameCube DOL). The
-     * Xbox 360 (XBA-280) too: the game process looks for its pack (packs/x360-&lt;KEY&gt;/, made on a desktop by
-     * x360_tools.bringup --app-pack for now) and says PACK_MISSING without one.
+     * Xbox 360 (XBA-280) too: the game process looks for its pack (packs/x360-&lt;KEY&gt;/, made by Prepare on the
+     * device since XBA-282, or on a desktop by x360_tools.bringup --app-pack) and goes back to the launcher without
+     * one.
      */
     boolean directLaunch() {
         return this == GBA || this == PS1 || this == N64 || this == GC || this == X360;
@@ -101,10 +102,11 @@ enum Console {
     /**
      * A game of this console that starts from its file can also be prepared (translated for the device into a pack):
      * the GBA (XBA-158), the PS1 (XBA-168; a .chd too), the N64 (XBA-174) and the GameCube (XBA-264: a disc in any
-     * image format, or a DOL).
+     * image format, or a DOL) and the Xbox 360 (XBA-282: an XEX or a disc image, with the player's key file; its
+     * runtime has no interpreter, so a 360 game plays only once prepared).
      */
     boolean prepares() {
-        return this == GBA || this == PS1 || this == N64 || this == GC;
+        return this == GBA || this == PS1 || this == N64 || this == GC || this == X360;
     }
 
     /**
@@ -392,6 +394,25 @@ enum Console {
 
     /** default.xex in the root of the XDVDFS volume at base: its key; null without a volume or such a file. */
     static String x360DiscKey(Rd r, long base) throws IOException {
+        long[] at = x360DiscXex(r, base);
+        return at == null ? null : xexKeyAt(r, at[0]);
+    }
+
+    /**
+     * XBA-282: where default.xex lies in an Xbox 360 disc image, { offset, size } (an XDVDFS file is contiguous), or
+     * null when the image holds none at any 360 partition offset. PrepareService copies it out of a disc document.
+     */
+    static long[] x360DiscXex(Source src) throws IOException {
+        Rd r = new Rd(src);
+        for (long base : X360_OFFSETS) {
+            long[] at = x360DiscXex(r, base);
+            if (at != null)
+                return at;
+        }
+        return null;
+    }
+
+    private static long[] x360DiscXex(Rd r, long base) throws IOException {
         byte[] vd = new byte[0x800];
         if (base + 0x10000L + vd.length > r.length())
             return null;
@@ -418,7 +439,7 @@ enum Console {
                 continue;
             if (len == 11 && o + 14 + len <= size
                 && new String(dir, o + 14, len, StandardCharsets.ISO_8859_1).equalsIgnoreCase("default.xex"))
-                return xexKeyAt(r, base + le32x(dir, o + 4) * 2048);
+                return new long[] { base + le32x(dir, o + 4) * 2048, le32x(dir, o + 8) };
             if (left != 0 && left != 0xFFFF && todo.size() < 256)
                 todo.push(left * 4);
             if (right != 0 && right != 0xFFFF && todo.size() < 256)

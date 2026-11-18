@@ -109,13 +109,16 @@ void x360_render_stats(x360_machine *x, FILE *out)
     fprintf(out,
             "render: drawn %llu, resolves %llu, frames %llu (%llu from the front buffer); skipped: no shader %llu, "
             "unsupported %llu; textures not handled %llu; shaders missing from the cache %u; eDRAM surfaces %llu, "
-            "resolve pictures sampled %llu, mipmapped %llu, computed-index fetches %llu\n",
+            "resolve pictures sampled %llu, mipmapped %llu, computed-index fetches %llu; memory export: %llu draws, "
+            "%llu dwords, %llu dropped, %llu shaders skipped\n",
             (unsigned long long)s.drawn, (unsigned long long)s.resolves, (unsigned long long)s.frames,
             (unsigned long long)s.front_buffer_frames,
             (unsigned long long)s.no_shader, (unsigned long long)s.unsupported,
             (unsigned long long)s.unsupported_textures, s.missing_shaders, (unsigned long long)s.surfaces,
             (unsigned long long)s.copy_textures, (unsigned long long)s.mipmapped,
-            (unsigned long long)s.computed_fetches);
+            (unsigned long long)s.computed_fetches, (unsigned long long)s.memexport_draws,
+            (unsigned long long)s.memexport_dwords, (unsigned long long)s.memexport_dropped,
+            (unsigned long long)s.memexport_skipped);
 }
 
 unsigned x360_render_texture(x360_machine *x, int *width, int *height)

@@ -508,7 +508,9 @@ public class PrepareService extends Service {
                               : console == Console.PS1 ? ps1Source(c, gameDir, titleId, work, runner)
                               : console == Console.N64 ? romSource(c, gameDir, work, runner, N64_ROM_COPY, N64_ROM_MAX)
                               : console == Console.GC ? gcSource(c, gameDir, work, runner)
+                              : console == Console.X360 ? x360Source(c, gameDir, work, runner)
                               : romSource(c, gameDir, work, runner);
+        final File x360Key = console == Console.X360 ? X360Key.file(c) : null;
         return new PrepareRunner.CommandFactory() {
             @Override
             public List<String> command(int jobs) {
@@ -555,6 +557,8 @@ public class PrepareService extends Service {
                 e.put("XBA_PYTHON", new File(nat, Toolchain.PYTHON).getAbsolutePath());
                 if (!rom && !GameStore.enhancements(c, titleId))   // Settings › Enhancements off (profile-free WP6)
                     e.put("XBA_NO_TITLE_LAYER", "1");
+                if (x360Key != null && x360Key.isFile())   // XBA-282: the player's key file (X360Key), by path only
+                    e.put(X360Key.ENV, x360Key.getAbsolutePath());
                 return e;
             }
 
@@ -574,6 +578,62 @@ public class PrepareService extends Service {
      */
     static String romSource(Context c, String spec, File work, PrepareRunner runner) throws IOException {
         return romSource(c, spec, work, runner, "rom.gba", ROM_MAX);
+    }
+
+    /** The largest XEX copied for an Xbox 360 Prepare (tools/prepare/x360.py XEX_MAX), and the copy's name. */
+    static final long X360_XEX_MAX = 256L << 20;
+    static final String X360_XEX_COPY = "source.xex";
+
+    /**
+     * The file tools.prepare reads for an Xbox 360 game (XBA-282): an XEX or a disc image by path, as it is
+     * (tools/prepare/x360.py reads default.xex out of the image); an XEX document copied into the work folder; a disc
+     * image document: its default.xex copied out (Console.x360DiscXex: the XDVDFS root at a 360 partition offset), a
+     * few MB to tens of MB, never the 7 GB image.
+     */
+    static String x360Source(Context c, String spec, File work, PrepareRunner runner) throws IOException {
+        if (!spec.startsWith("content:"))
+            return spec;
+        File out = new File(work, X360_XEX_COPY), tmp = new File(work, X360_XEX_COPY + ".tmp");
+        long n;
+        try (android.os.ParcelFileDescriptor pfd = c.getContentResolver().openFileDescriptor(
+                 android.net.Uri.parse(spec), "r")) {
+            if (pfd == null)
+                throw new IOException("cannot open " + spec);
+            try (java.io.FileInputStream in = new java.io.FileInputStream(pfd.getFileDescriptor());
+                 java.io.FileOutputStream o = new java.io.FileOutputStream(tmp)) {
+                java.nio.channels.FileChannel ch = in.getChannel();
+                byte[] magic = new byte[4];
+                java.nio.ByteBuffer mb = java.nio.ByteBuffer.wrap(magic);
+                ch.read(mb, 0);
+                long from = 0, size;
+                if (magic[0] == 'X' && magic[1] == 'E' && magic[2] == 'X' && magic[3] == '2') {
+                    size = ch.size();
+                } else {
+                    long[] at = Console.x360DiscXex(Console.source(ch));
+                    if (at == null)
+                        throw new IOException(spec + ": not an XEX nor an Xbox 360 disc image with default.xex");
+                    from = at[0];
+                    size = at[1];
+                }
+                if (size > X360_XEX_MAX)
+                    throw new IOException(spec + ": the XEX is over " + (X360_XEX_MAX >> 20) + " MB");
+                n = ch.transferTo(from, size, o.getChannel());
+                while (n < size) {
+                    long m = ch.transferTo(from + n, size - n, o.getChannel());
+                    if (m <= 0)
+                        throw new IOException(spec + ": cut short at " + n + " of " + size + " bytes");
+                    n += m;
+                }
+                o.getFD().sync();
+            }
+        } catch (SecurityException e) {
+            throw new IOException("no access to " + spec + ": " + e.getMessage());
+        }
+        if (!tmp.renameTo(out))
+            throw new IOException("cannot write " + out);
+        if (runner != null)
+            runner.logLine("xex: " + spec + " -> " + out + " (" + n + " bytes)");
+        return out.getAbsolutePath();
     }
 
     /** The largest DOL copied for a GameCube Prepare (gc_runtime.c GC_DOL_MAX), and the copy's name. */

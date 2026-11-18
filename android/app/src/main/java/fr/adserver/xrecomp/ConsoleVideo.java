@@ -101,7 +101,8 @@ final class ConsoleVideo {
         if (con == null)
             return false;
         if (s == Setting.UPSCALE)
-            return con == Console.PS1 || con == Console.N64 || con == Console.GC || con == Console.XBOX;
+            return con == Console.PS1 || con == Console.N64 || con == Console.GC || con == Console.XBOX
+                   || con == Console.X360;   // XBA-282: x360_runtime.c (RECOMP_X360_UPSCALE / RECOMP_UPSCALE, 1..8x)
         return con != Console.XBOX;
     }
 

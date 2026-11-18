@@ -555,6 +555,13 @@ public class ConsoleTest {
         assertEquals(want, Console.identify(xgd3).key);
         File extracted = xdvdfs("Game360.xiso", 0, "DEFAULT.XEX", x);
         assertEquals(Console.X360, Console.detect(extracted));
+        // XBA-282: the 360 prepares; PrepareService copies default.xex out of a disc document at the place found here
+        assertTrue(Console.X360.prepares());
+        try (java.io.FileInputStream in = new java.io.FileInputStream(xgd3)) {
+            long[] at = Console.x360DiscXex(Console.source(in.getChannel()));
+            assertEquals(0x2080000L + 48 * 2048L, at[0]);
+            assertEquals(x.length, at[1]);
+        }
         // an Xbox image (default.xbe) stays the Xbox's
         File xbox = xdvdfs("Xbox.iso", 0, "default.xbe", new byte[] { 'X', 'B', 'E', 'H' });
         assertEquals(Console.XBOX, Console.detect(xbox));

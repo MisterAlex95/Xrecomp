@@ -338,10 +338,7 @@ static void k_KeBugCheckEx(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 static void k_RtlRaiseException(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
-    (void)t;
-    uint32_t rec = A(0);
-    x360_fail(x, "RtlRaiseException: code %08X at %08X", rec ? x360_r32(x, rec) : 0,
-              rec ? x360_r32(x, rec + 12) : 0);
+    x360_seh_raise(x, t, A(0)); /* XBA-282: dispatched to the frames' handlers (x360_seh.c) */
 }
 
 static void k_HalReturnToFirmware(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -1350,8 +1347,7 @@ static void k_NtQueryEvent(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 static void k_RtlUnwind(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
-    (void)t;
-    x360_fail(x, "RtlUnwind(%08X, %08X): structured exception unwinding is not emulated yet", A(0), A(1));
+    x360_seh_unwind(x, t, A(0), A(1), A(2), A(3)); /* XBA-282: TargetFrame, TargetIp, ExceptionRecord, ReturnValue */
 }
 
 /* FILETIME (100 ns since 1601-01-01) <-> TIME_FIELDS (year, month, day, hour, minute, second, ms, weekday) */

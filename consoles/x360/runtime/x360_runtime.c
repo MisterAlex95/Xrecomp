@@ -143,6 +143,12 @@ static x360_machine *s_x;
 static char s_work[1100], s_key[48], s_state_dir[1200];
 static int s_state_loaded;
 
+static int cmp_u32(const void *a, const void *b)
+{
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
 static void save_missed_locked(void)
 {
     if (!s_x || !s_work[0])
@@ -151,15 +157,41 @@ static void save_missed_locked(void)
     unsigned n = x360_missed(s_x, &m);
     if (!n)
         return;
-    char path[1300];
+    char path[1300], tmp[1320];
     snprintf(path, sizeof path, "%s/discovered.txt", s_work);
-    FILE *f = fopen(path, "w");
-    if (!f)
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    /* XBA-282: the file only grows (what earlier runs found stays: the launcher counts it against pack.json's
+     * "discovered", and the next Prepare seeds the lifter with all of it) */
+    uint32_t *all = malloc(sizeof *all * (n + 65536));
+    unsigned na = 0;
+    if (!all)
         return;
-    fprintf(f, "# x360_runtime: addresses reached without lifted code (x360_tools.recomp --discovered)\n");
+    FILE *old = fopen(path, "r");
+    if (old) {
+        char line[64];
+        while (na < 65536 && fgets(line, sizeof line, old)) {
+            char *end;
+            unsigned long v = strtoul(line, &end, 16);
+            if (end != line && line[0] != '#')
+                all[na++] = (uint32_t)v;
+        }
+        fclose(old);
+    }
     for (unsigned k = 0; k < n; k++)
-        fprintf(f, "%08X\n", m[k]);
-    fclose(f);
+        all[na++] = m[k];
+    qsort(all, na, sizeof *all, cmp_u32);
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        free(all);
+        return;
+    }
+    fprintf(f, "# x360_runtime: addresses reached without lifted code (x360_tools.recomp --discovered)\n");
+    for (unsigned k = 0; k < na; k++)
+        if (!k || all[k] != all[k - 1])
+            fprintf(f, "%08X\n", all[k]);
+    free(all);
+    if (fclose(f) == 0)
+        rename(tmp, path);
 }
 
 static void on_exit_hook(const char *why)
@@ -749,6 +781,28 @@ int x360_runtime_start(const char *xex, const char *pack_lib, const char *title_
         o.work_dir = work;
         snprintf(data, sizeof data, "%s/data", work); /* cache: / hdd: and save data */
         o.data_dir = data;
+    }
+    char saved[1300];
+    if (s_start_save[0] && title_key && *title_key) {
+        /* XBA-282: the title's own saves (hdd:, cache:) live with its states in <save>/x360-<KEY>/data, the folder
+         * the app exports, imports and syncs (SaveArchive, CloudSaves); a work/x360-<KEY>/data an earlier build
+         * wrote is moved there once (kept where it is when the move fails: another file system) */
+        snprintf(saved, sizeof saved, "%s/x360-%s/data", s_start_save, title_key);
+        struct stat st;
+        int have_new = stat(saved, &st) == 0;
+        if (!have_new && o.data_dir && stat(o.data_dir, &st) == 0) {
+            char parent[1100];
+            snprintf(parent, sizeof parent, "%s/x360-%s", s_start_save, title_key);
+            mkdirs(parent);
+            if (rename(o.data_dir, saved) == 0) {
+                printf("x360: save data moved to %s\n", saved);
+                o.data_dir = saved;
+            } else {
+                fprintf(stderr, "x360: save data stays in %s (cannot move it: %s)\n", o.data_dir, strerror(errno));
+            }
+        } else {
+            o.data_dir = saved;
+        }
     }
     const char *frames = getenv("RECOMP_X360_FRAMES");
     if (frames && *frames)

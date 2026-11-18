@@ -137,8 +137,12 @@ def build_xex(text, rdata=b"", data=b"", imports=None, entry=0, functions=(), co
         lib_records.append((lib, addrs))
     tls_addr = BASE + rec_at
     img[rec_at:rec_at + len(tls_data)] = tls_data
-    for k, (off, length) in enumerate(functions):
-        struct.pack_into(">II", img, pdata_rva + 8 * k, lay.text + off, ((length // 4) << 8) | 0x80000000 | 2)
+    for k, fn in enumerate(functions):
+        # (offset, length): the old fixed info (prolog 2 words, bit 31); XBA-282: (offset, length, prolog words, high
+        # bits) to give an exception flag and a real prolog length
+        off, length = fn[0], fn[1]
+        prolog, high = (fn[2], fn[3]) if len(fn) > 2 else (2, 0x80000000)
+        struct.pack_into(">II", img, pdata_rva + 8 * k, lay.text + off, ((length // 4) << 8) | high | (prolog & 0xFF))
     sections = [(".text", PAGE, text_size, 0x60000020), (".rdata", rdata_rva, rdata_size, 0x40000040),
                 (".data", data_rva, len(data), 0xC0000040), (".pdata", pdata_rva, 8 * len(functions), 0x40000040)]
     img[0:PAGE] = _pe_headers(PAGE + entry, sections, image_size)

@@ -195,6 +195,7 @@ int x360_thread_restart(x360_machine *x, x360_thread *t, uint32_t entry, uint32_
     c->vscr = 0x00010000u;
     c->msr = 0x9030;
     x360_w32(x, t->kthread + 4, 0);
+    memset(&t->seh, 0, sizeof t->seh);
     t->state = TH_READY;
     t->suspend = 0;
     t->exit_code = 0;
@@ -386,7 +387,7 @@ static uint64_t next_deadline(x360_machine *x)
 
 static uint32_t fault_pc; /* where the running lifted function was entered (for the fault report) */
 
-static const x360_thunk *thunk_at(x360_machine *x, uint32_t pc)
+const x360_thunk *x360_thunk_at(x360_machine *x, uint32_t pc)
 {
     if (pc < x->thunk_lo || pc >= x->thunk_hi)
         return NULL;
@@ -425,7 +426,11 @@ static void run_thread(x360_machine *x, x360_thread *t)
             x360_thread_exit(x, t, (uint32_t)c->gpr[3]);
             break;
         }
-        const x360_thunk *th = thunk_at(x, pc);
+        if (pc == X360_SEH_RETURN) { /* an exception handler returned (XBA-282) */
+            x360_seh_return(x, t);
+            continue;
+        }
+        const x360_thunk *th = x360_thunk_at(x, pc);
         if (th) {
             c->pc = (uint32_t)c->lr & ~3u;
             x->st.hle_calls++;

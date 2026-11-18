@@ -236,7 +236,10 @@ final class GameSettings {
         if (isShader(o))
             return true;                // XBA-195 / XBA-203: the console window's and the Xbox presenter's
         if (o.title == R.string.OPT_UPSCALE)   // XBA-237: the Xbox's GPU renderer too (RECOMP_GPU_SCALE wins)
-            return c == Console.PS1 || c == Console.N64 || c == Console.GC || c == Console.XBOX;   // XBA-274: GX
+            return c == Console.PS1 || c == Console.N64 || c == Console.GC || c == Console.XBOX   // XBA-274: GX
+                   || c == Console.X360;   // XBA-282: every eDRAM surface (xenos_gl.c)
+        if (o.title == R.string.OPT_TEX)   // XBA-282: the 360's renderer reads RECOMP_TEX_BILINEAR / _ANISO too
+            return c == Console.XBOX || c == Console.X360;
         return o.shared || c == Console.XBOX;
     }
 

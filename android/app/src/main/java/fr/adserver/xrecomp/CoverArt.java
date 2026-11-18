@@ -124,9 +124,20 @@ final class CoverArt {
         return new File(artFile(filesDir, key).getParentFile(), key + ".miss");
     }
 
-    /** The game's cover: the downloaded one, else the captured frame; null when there is neither. */
+    /**
+     * XBA-282: the title image its pack carries (an Xbox 360 XEX's XDBF tile, written by tools/prepare/x360.py), or
+     * null when the key names no pack folder.
+     */
+    static File packArtFile(File filesDir, String key) {
+        File d = Pack.packDir(filesDir, key);
+        return d == null ? null : new File(d, "cover.png");
+    }
+
+    /** The game's cover: the downloaded one, its pack's title image, else the captured frame; null without any. */
     static Bitmap load(File filesDir, String key) {
-        for (File f : new File[] { artFile(filesDir, key), shotFile(filesDir, key) }) {
+        for (File f : new File[] { artFile(filesDir, key), packArtFile(filesDir, key), shotFile(filesDir, key) }) {
+            if (f == null)
+                continue;
             if (f.isFile()) {
                 Bitmap b = BitmapFactory.decodeFile(f.getPath());
                 if (b != null)

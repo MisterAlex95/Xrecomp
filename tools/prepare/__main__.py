@@ -38,7 +38,8 @@ app or for gba_play on this host (tools/prepare/gba.py); a PlayStation disc
 ps1_play (tools/prepare/ps1.py); a Nintendo 64 ROM (.z64 / .v64 / .n64) an
 N64 title pack, for the app or for n64_play / n64_run (tools/prepare/n64.py); a
 GameCube disc (.iso / .gcm / .ciso / .gcz / .rvz / .wia) or DOL a GameCube title
-pack, for the app or for gc_play (tools/prepare/gc.py).
+pack, for the app or for gc_play (tools/prepare/gc.py); an Xbox 360 XEX or disc image an Xbox 360 title pack, with
+the player's key in $XEX_KEY_FILE (tools/prepare/x360.py).
 """
 
 import argparse
@@ -604,6 +605,9 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.no_title_layer:
         os.environ["XBA_NO_TITLE_LAYER"] = "1"
+    from tools.prepare import x360
+    if x360.is_x360(a.source):          # an XEX or an Xbox 360 disc (first, as recomp_pack_rom_identify): XBA-282
+        return x360.run(a, sys.modules[__name__], a.android)
     from tools.prepare import n64
     if n64.is_n64(a.source):            # an N64 ROM (its first word, any byte order): the PS1's steps (XBA-174)
         return n64.run(a, sys.modules[__name__], a.android)

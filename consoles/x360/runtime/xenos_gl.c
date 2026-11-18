@@ -121,6 +121,8 @@ typedef unsigned int EGLBoolean, EGLenum;
 
 #define GLFUNCS(X)                                                                                                     \
     X(const unsigned char *, glGetString, (GLenum))                                                                   \
+    X(const unsigned char *, glGetStringi, (GLenum, GLuint))                                                          \
+    X(void, glTexParameterf, (GLenum, GLenum, GLfloat))                                                               \
     X(GLuint, glCreateShader, (GLenum))                                                                                \
     X(void, glShaderSource, (GLuint, GLsizei, const GLchar *const *, const GLint *))                                  \
     X(void, glCompileShader, (GLuint))                                                                                 \
@@ -137,6 +139,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(GLuint, glGetUniformBlockIndex, (GLuint, const GLchar *))                                                        \
     X(void, glUniformBlockBinding, (GLuint, GLuint, GLuint))                                                           \
     X(void, glGenBuffers, (GLsizei, GLuint *))                                                                         \
+    X(void, glBufferSubData, (GLenum, GLintptr, GLsizeiptr, const void *))                                             \
     X(void, glDeleteBuffers, (GLsizei, const GLuint *))                                                                \
     X(void, glBindBuffer, (GLenum, GLuint))                                                                            \
     X(void, glBufferData, (GLenum, GLsizeiptr, const void *, GLenum))                                                  \
@@ -200,6 +203,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glFramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint))                                          \
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum))          \
     X(void, glGetIntegerv, (GLenum, GLint *))                                                                          \
+    X(void, glGetFloatv, (GLenum, GLfloat *))                                                                          \
     X(void, glUniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat))                                              \
     X(void, glUniform3i, (GLint, GLint, GLint, GLint))
 
@@ -226,6 +230,7 @@ typedef struct program {
     attr vbufs[MAX_ATTRS];
     int nsamplers;
     uint32_t sampler_fetch[MAX_SAMPLERS], sampler_dim[MAX_SAMPLERS]; /* texture fetch constant, dimension */
+    int memexport;    /* XBA-282: the vertex shader exports to memory (GLSL ES 3.10, the log buffer at binding 0) */
 } program;
 
 /* a texture as last uploaded: its fetch constant's words (address, format, size, layout) and the source's hash */
@@ -321,6 +326,13 @@ struct xenos_gl {
     int nresolved;
     int title_clears;
     volatile int reset_pending; /* xenos_gl_reset asked (maybe from another thread): done at the next draw / swap */
+    int tex_linear;           /* XBA-282: RECOMP_TEX_BILINEAR (the app's texture filter, shared with the Xbox) */
+    float tex_aniso;          /* RECOMP_TEX_ANISO 8 / 16 when EXT_texture_filter_anisotropic is there, else 0 */
+    int gl_major, gl_minor;   /* the context's GLES version (3.1 and up: memory export through SSBOs) */
+    int memexport;            /* XBA-282: memory export shaders run (GLES 3.1, vertex storage blocks) */
+    void (*glMemoryBarrier)(GLbitfield);
+    GLuint mxbuf;             /* their log: count, capacity, then (byte address, dword) pairs */
+    int mx_warned;
     FILE *log;
 };
 
@@ -382,10 +394,64 @@ static int load_gl(xenos_gl *g, char *why, size_t why_n)
 }
 
 /* the objects every draw uses; the default surfaces come with the first draw */
+static int has_ext(xenos_gl *g, const char *name)
+{
+    GLint n = 0;
+    g->glGetIntegerv(0x821D /* GL_NUM_EXTENSIONS */, &n);
+    for (GLint i = 0; i < n; i++) {
+        const char *e = (const char *)g->glGetStringi(0x1F03 /* GL_EXTENSIONS */, (GLuint)i);
+        if (e && !strcmp(e, name))
+            return 1;
+    }
+    return 0;
+}
+
+/* XBA-282: the texture filter options the app shares with the Xbox (Settings › Graphics › Texture filter, or a game's
+ * own): RECOMP_TEX_BILINEAR=1 samples every texture linearly; RECOMP_TEX_ANISO=8 / 16 too, with that much anisotropic
+ * filtering when the driver has EXT_texture_filter_anisotropic (clamped to its maximum). */
+static void texture_options(xenos_gl *g)
+{
+    const char *b = getenv("RECOMP_TEX_BILINEAR"), *a = getenv("RECOMP_TEX_ANISO");
+    int aniso = a ? atoi(a) : 0;
+    g->tex_linear = (b && *b && strcmp(b, "0")) || aniso > 1;
+    g->tex_aniso = 0;
+    if (aniso > 1 && has_ext(g, "GL_EXT_texture_filter_anisotropic")) {
+        GLfloat max = 1;
+        g->glGetFloatv(0x84FF /* GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT */, &max);
+        g->tex_aniso = (float)aniso < max ? (float)aniso : max;
+    }
+    if (g->tex_linear)
+        fprintf(g->log, "xenos: texture filter forced linear%s\n", g->tex_aniso > 1 ? ", anisotropic" : "");
+}
+
+/* XBA-282: memory export needs GLES 3.1 with storage blocks in vertex shaders (3.1 allows none there) and
+ * glMemoryBarrier, checked on the context at run time; RECOMP_X360_MEMEXPORT=0 turns it off. Without it a shader that
+ * exports to memory is not compiled and its draws are skipped (counted), as a missing shader's. */
+static void memexport_caps(xenos_gl *g)
+{
+    const char *env = getenv("RECOMP_X360_MEMEXPORT");
+    GLint blocks = 0;
+    g->memexport = 0;
+    if (g->gl_major > 3 || (g->gl_major == 3 && g->gl_minor >= 1)) {
+        g->glGetIntegerv(0x90D6 /* GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS */, &blocks);
+        *(void **)&g->glMemoryBarrier = g->eglGetProcAddress ? g->eglGetProcAddress("glMemoryBarrier") : NULL;
+        if (!g->glMemoryBarrier && g->gles_lib)
+            *(void **)&g->glMemoryBarrier = dlsym(g->gles_lib, "glMemoryBarrier");
+        g->memexport = blocks > 0 && g->glMemoryBarrier && !(env && !strcmp(env, "0"));
+    }
+    fprintf(g->log, "xenos: memory export %s (GLES %d.%d, %d vertex storage block(s))\n",
+            g->memexport ? "on" : env && !strcmp(env, "0") ? "off (RECOMP_X360_MEMEXPORT=0)" : "off",
+            g->gl_major, g->gl_minor, (int)blocks);
+}
+
 static int setup(xenos_gl *g, char *why, size_t why_n)
 {
     g->max_tex = 4096;
     g->glGetIntegerv(GL_MAX_TEXTURE_SIZE, &g->max_tex);
+    g->glGetIntegerv(0x821B /* GL_MAJOR_VERSION */, &g->gl_major);
+    g->glGetIntegerv(0x821C /* GL_MINOR_VERSION */, &g->gl_minor);
+    texture_options(g);
+    memexport_caps(g);
     while (g->scale > 1 && (g->width * g->scale > g->max_tex || g->height * g->scale > g->max_tex))
         g->scale--;
     g->glGenFramebuffers(1, &g->fbo);
@@ -507,6 +573,8 @@ void xenos_gl_destroy(xenos_gl *g)
         g->glDeleteBuffers(1, &g->ibo);
         g->glDeleteBuffers(2, g->ubo);
         g->glDeleteBuffers(1, &g->tfbo);
+        if (g->mxbuf)
+            g->glDeleteBuffers(1, &g->mxbuf);
         for (int i = 0; i < MAX_TEXTURES; i++)
             if (g->textures[i].tex)
                 g->glDeleteTextures(1, &g->textures[i].tex);
@@ -785,6 +853,22 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
         }
         if (!psrc)
             report_missing(g, 1, pc);
+    }
+    /* XBA-282: a vertex shader that exports to memory is GLSL ES 3.10: it needs the capability, and its pixel shader
+     * is linked as 3.10 too (GLES links one version only; 3.00 source is 3.10 source) */
+    if (vsrc && !strncmp(vsrc, "#version 310 es", 15)) {
+        if (!g->memexport) {
+            if (!g->mx_warned++)
+                fprintf(g->log, "xenos_gl: vs_%08X exports to memory: its draws are skipped (no GLES 3.1 storage "
+                                "blocks in vertex shaders here)\n", vc);
+            g->st.memexport_skipped++;
+            free(vsrc);
+            free(psrc);
+            return NULL;
+        }
+        p->memexport = 1;
+        if (psrc && !strncmp(psrc, "#version 300 es", 15))
+            psrc[10] = '1';
     }
     const char *vtext = kind == 2 ? RECT_VS : vsrc, *ftext = kind == 1 ? CAPTURE_FS : psrc;
     if (vtext && ftext) {
@@ -1998,6 +2082,10 @@ static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mi
     g->glTexParameteri(target, GL_TEXTURE_WRAP_T, wrap_mode((fc[0] >> 13) & 7));
     g->glTexParameteri(target, GL_TEXTURE_WRAP_R, wrap_mode((fc[0] >> 16) & 7));
     int mag = ((fc[3] >> 19) & 3) == 1, min = ((fc[3] >> 21) & 3) == 1, mip = ((fc[3] >> 23) & 3) == 1;
+    if (g->tex_linear) /* XBA-282: the app's texture filter */
+        mag = min = mip = 1;
+    if (g->tex_aniso > 1)
+        g->glTexParameterf(target, 0x84FE /* GL_TEXTURE_MAX_ANISOTROPY_EXT */, mipped ? g->tex_aniso : 1.0f);
     g->glTexParameteri(target, GL_TEXTURE_MAG_FILTER, mag ? GL_LINEAR : GL_NEAREST);
     g->glTexParameteri(target, GL_TEXTURE_MIN_FILTER,
                        !mipped ? (min ? GL_LINEAR : GL_NEAREST)
@@ -2617,6 +2705,53 @@ static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const
     free(tri);
 }
 
+/* ---- memory export (XBA-282) ----
+ * A draw whose vertex shader exports to memory logs (byte address, dword in memory order) pairs into a storage
+ * buffer (xenos_glsl.py MEMEXPORT); after the draw the log is read back and written to guest memory through the
+ * command processor's write32 (big-endian words: the pair's bytes as they lie in memory). Textures and vertex buffers
+ * see the writes at their next check. A log that overflows keeps its first MX_CAPACITY dwords (counted). */
+#define GL_SHADER_STORAGE_BUFFER 0x90D2
+#define GL_DYNAMIC_READ 0x88E9
+#define MX_CAPACITY (1u << 18)
+
+static void memexport_begin(xenos_gl *g)
+{
+    uint32_t head[2] = {0, MX_CAPACITY};
+    if (!g->mxbuf) {
+        g->glGenBuffers(1, &g->mxbuf);
+        g->glBindBuffer(GL_SHADER_STORAGE_BUFFER, g->mxbuf);
+        g->glBufferData(GL_SHADER_STORAGE_BUFFER, 8 + 8 * (GLsizeiptr)MX_CAPACITY, NULL, GL_DYNAMIC_READ);
+    }
+    g->glBindBuffer(GL_SHADER_STORAGE_BUFFER, g->mxbuf);
+    g->glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof head, head);
+    g->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, g->mxbuf);
+}
+
+static void memexport_end(xenos_gl *g, const xenos_cp *cp)
+{
+    g->glMemoryBarrier(0xFFFFFFFFu); /* GL_ALL_BARRIER_BITS: the shader's writes before the map */
+    g->glBindBuffer(GL_SHADER_STORAGE_BUFFER, g->mxbuf);
+    const uint32_t *head = g->glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 8, GL_MAP_READ_BIT);
+    uint32_t n = head ? head[0] : 0;
+    if (head)
+        g->glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+    if (n > MX_CAPACITY) {
+        g->st.memexport_dropped += n - MX_CAPACITY;
+        n = MX_CAPACITY;
+    }
+    if (n && cp->write32) {
+        const uint32_t *log = g->glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 8, 8 * (GLsizeiptr)n, GL_MAP_READ_BIT);
+        if (log) {
+            for (uint32_t i = 0; i < n; i++) /* the dword's bytes in memory order: big-endian word = its bswap */
+                cp->write32(cp->ctx, log[2 * i] & 0x1FFFFFFCu, __builtin_bswap32(log[2 * i + 1]));
+            g->glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+        }
+        g->st.memexport_dwords += n;
+    }
+    g->st.memexport_draws++;
+    g->epoch++; /* memory changed under the cached textures: compare them again */
+}
+
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
 {
     if (g->reset_pending)
@@ -2742,6 +2877,8 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
             g->glVertexAttribPointer((GLuint)p->loc[a], 4, GL_FLOAT, 0, (GLsizei)(na * 16),
                                      (void *)(uintptr_t)(a * 16));
         }
+    if (p->memexport)
+        memexport_begin(g);
     if (d->prim_type == 8) {
         draw_rects(g, cp, rp, idx, n);
     } else if (idx) {
@@ -2755,6 +2892,8 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     } else {
         g->glDrawArrays((GLenum)prim, 0, (GLsizei)n);
     }
+    if (p->memexport)
+        memexport_end(g, cp);
     for (uint32_t a = 0; a < na; a++)
         if (p->loc[a] >= 0)
             g->glDisableVertexAttribArray((GLuint)p->loc[a]);
