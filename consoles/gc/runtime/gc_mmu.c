@@ -37,40 +37,35 @@ enum { ACC_READ = 0, ACC_WRITE = 1, ACC_FETCH = 2 };
 #define SPR_DMAU 922
 #define SPR_DMAL 923
 
-/* BAT pair (u, l) valid for pr maps [base, base + MEM1) to [0, MEM1) read / write. */
-static bool bat_maps_mem1(uint32_t u, uint32_t l, unsigned pr, uint32_t base)
+/* The BATs valid for pr map [base, base + MEM1) to [0, MEM1) read / write, as xlate sees them: for every 128 KB block
+ * (the BATs' granularity) the first matching BAT translates it to block - base. One BAT of 32 MB or 256 MB (the IPL,
+ * older SDKs) or several (later SDKs split MEM1: 16 MB at 0x80000000 and 8 MB at 0x81000000, Prince of Persia: The
+ * Two Thrones) alike. */
+static bool bats_map_mem1(const uint32_t *bat, unsigned pr, uint32_t base)
 {
-    if (!(u & (pr ? 1u : 2u)))
-        return false;
-    uint32_t mask = (((u >> 2) & 0x7FFu) << 17) | 0x1FFFFu;
-    if (mask < GC_RAM_SIZE - 1)
-        return false;
-    return (u & 0xFFFE0000u & ~mask) == base && (l & 0xFFFE0000u & ~mask) == 0 && (l & 3u) == 2;
-}
-
-/* XBA-279: the first BAT valid for pr that touches [base, base + MEM1) maps all of it to [0, MEM1) read / write (so
- * xlate, which takes the first match, translates every EA there to EA - base). */
-static bool bat_first_maps_mem1(const uint32_t *bat, unsigned pr, uint32_t base)
-{
-    for (int i = 0; i < 4; i++) {
-        uint32_t u = bat[2 * i];
-        if (!(u & (pr ? 1u : 2u)))
-            continue;
-        uint32_t mask = (((u >> 2) & 0x7FFu) << 17) | 0x1FFFFu, lo = u & 0xFFFE0000u & ~mask;
-        if (lo <= base + GC_RAM_SIZE - 1 && base <= lo + mask)
-            return bat_maps_mem1(u, bat[2 * i + 1], pr, base);
+    for (uint32_t off = 0; off < GC_RAM_SIZE; off += 0x20000u) {
+        uint32_t ea = base + off;
+        int i;
+        for (i = 0; i < 4; i++) {
+            uint32_t u = bat[2 * i], l = bat[2 * i + 1];
+            if (!(u & (pr ? 1u : 2u)))
+                continue;
+            uint32_t mask = (((u >> 2) & 0x7FFu) << 17) | 0x1FFFFu;
+            if ((ea & ~mask) != (u & 0xFFFE0000u & ~mask))
+                continue;
+            if ((l & 3u) != 2 || ((l & 0xFFFE0000u & ~mask) | (ea & mask)) != off)
+                return false;
+            break;
+        }
+        if (i == 4)
+            return false;
     }
-    return false;
+    return true;
 }
 
 static bool bats_default(const uint32_t *bat, unsigned pr)
 {
-    bool lo = false, hi = false;
-    for (int i = 0; i < 4; i++) {
-        lo |= bat_maps_mem1(bat[2 * i], bat[2 * i + 1], pr, 0x80000000u);
-        hi |= bat_maps_mem1(bat[2 * i], bat[2 * i + 1], pr, 0xC0000000u);
-    }
-    return lo && hi;
+    return bats_map_mem1(bat, pr, 0x80000000u) && bats_map_mem1(bat, pr, 0xC0000000u);
 }
 
 void gc_mmu_bats(gc_machine *m)
@@ -79,7 +74,7 @@ void gc_mmu_bats(gc_machine *m)
     for (unsigned pr = 0; pr < 2; pr++) {
         m->dbats_default[pr] = bats_default(&c->spr[SPR_DBAT0U], pr);
         m->ibats_default[pr] = bats_default(&c->spr[SPR_IBAT0U], pr);
-        m->ibats_lo[pr] = bat_first_maps_mem1(&c->spr[SPR_IBAT0U], pr, 0x80000000u);
+        m->ibats_lo[pr] = bats_map_mem1(&c->spr[SPR_IBAT0U], pr, 0x80000000u);
     }
     gc_mmu_update(m);
 }
