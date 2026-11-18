@@ -1,0 +1,468 @@
+"""Xenos shader microcode to GLSL ES 3.00 (XBA-270, epic XBA-229 step 3: the first cut of the shader translator).
+
+    src, info = translate(words, "vertex")        # or "pixel", interpolators=N
+    python3 -m x360_tools.xenos_glsl FILE.bin [--pixel] [--interpolators N]
+
+On top of xenos_ucode's decoder. Semantics follow the instruction descriptions in Xenia's ucode.h (BSD; no code
+taken), among them: the scalar unit's operands `a` (the W of src3's swizzle) and `b` (X); mulsc / addsc / subsc's
+constant + temporary pair; Direct3D 9 multiplication (+-0 or a denormal times anything is +0: mul, mad, dot products,
+muls); max / min as `a >= b ? a : b` / `a < b ? a : b`; the predicate and kill instructions; exports (vector and
+scalar results both go to the export register, components written by both get 1.0); ps, the previous scalar result,
+kept when an instruction's predicate fails.
+
+What the GLSL expects of the host (the Vulkan / GLES back end, XBA-229 step 3): `uniform vec4 xe_c[256]` (this stage's
+float constants), `uniform uint xe_b[8]` (the 256 boolean constants), `in vec4 xe_v<n>` per vertex fetch (info's
+`attributes`: fetch constant, offset, format, stride, signedness: the host converts formats), `uniform sampler*D
+xe_t<n>` per texture fetch constant used (info's `textures`), the pixel shader's interpolators `in vec4 xe_i<n>`
+(copied to r0..),
+the vertex shader's outputs `out vec4 xe_o<n>`, gl_Position (Xenos's, before the host's viewport / clip-space
+conversion) and gl_PointSize; the pixel shader's `layout(location = n) out vec4 xe_color<n>` and gl_FragDepth.
+
+Not translated yet (Unsupported is raised, naming the instruction): loops, calls, jumps, relative addressing (aL, a0),
+cube, memory export, the texture queries, texture fetches with offsets, register LOD / gradients; multiply-add is
+written unfused (Xenos rounds once: small differences); log / rsq / sqrt of negative numbers are left to the host
+(GLSL ES leaves them undefined: llvmpipe gives 0). Integer and signed-normalised vertex formats are the host's
+conversion, exp_adjust too.
+"""
+
+import re
+import struct
+import sys
+
+from .xenos_ucode import EXEC_OPS, VECTOR, decode_alu, decode_cf, decode_fetch, unpack_cf
+
+FLT_MAX = "3.402823466e+38"
+
+
+class Unsupported(Exception):
+    pass
+
+
+PRELUDE = """const float XE_FLT_MAX = 3.402823466e+38;
+const float XE_TINY = 1.17549435e-38;
+float xe_mul(float a, float b) { return (abs(a) < XE_TINY || abs(b) < XE_TINY) ? 0.0 : a * b; }
+vec4 xe_mul(vec4 a, vec4 b) {
+    bvec4 z = bvec4(uvec4(lessThan(abs(a), vec4(XE_TINY))) | uvec4(lessThan(abs(b), vec4(XE_TINY))));
+    return mix(a * b, vec4(0.0), z);
+}
+vec4 xe_max(vec4 a, vec4 b) { return mix(b, a, greaterThanEqual(a, b)); }
+vec4 xe_min(vec4 a, vec4 b) { return mix(b, a, lessThan(a, b)); }
+float xe_dot4(vec4 a, vec4 b) { vec4 m = xe_mul(a, b); return m.x + m.y + m.z + m.w; }
+float xe_dot3(vec4 a, vec4 b) { vec4 m = xe_mul(a, b); return m.x + m.y + m.z; }
+float xe_max4(vec4 a) {
+    if (a.x > a.y && a.x > a.z && a.x > a.w) return a.x;
+    if (a.y > a.z && a.y > a.w) return a.y;
+    return a.z > a.w ? a.z : a.w;
+}
+bool xe_bool(int n) { return ((xe_b[n >> 5] >> uint(n & 31)) & 1u) != 0u; }
+float xe_clampinf(float t, float lo, float hi) { return isinf(t) ? (t < 0.0 ? lo : hi) : t; }
+"""
+
+# scalar ops: name -> GLSL of a (and b, ps); None = handled specially
+SCALAR_EXPR = {
+    0: "A + B", 1: "A + ps", 2: "xe_mul(A, B)", 3: "xe_mul(A, ps)",
+    4: "(ps == -XE_FLT_MAX || isinf(ps) || isnan(ps) || isinf(B) || isnan(B) || B <= 0.0) ? -XE_FLT_MAX : "
+       "xe_mul(A, ps)",
+    5: "(A >= B ? A : B)", 6: "(A < B ? A : B)", 7: "(A == 0.0 ? 1.0 : 0.0)", 8: "(A > 0.0 ? 1.0 : 0.0)",
+    9: "(A >= 0.0 ? 1.0 : 0.0)", 10: "(A != 0.0 ? 1.0 : 0.0)", 11: "(A - floor(A))", 12: "trunc(A)", 13: "floor(A)",
+    14: "(A == 0.0 ? 1.0 : exp2(A))", 15: "xe_clampinf(A == 1.0 ? 0.0 : log2(A), -XE_FLT_MAX, XE_FLT_MAX)",
+    16: "(A == 1.0 ? 0.0 : log2(A))", 17: "xe_clampinf(A == 1.0 ? 1.0 : 1.0 / A, -XE_FLT_MAX, XE_FLT_MAX)",
+    18: "xe_clampinf(A == 1.0 ? 1.0 : 1.0 / A, -0.0, 0.0)", 19: "(A == 1.0 ? 1.0 : 1.0 / A)",
+    20: "xe_clampinf(A == 1.0 ? 1.0 : inversesqrt(A), -XE_FLT_MAX, XE_FLT_MAX)",
+    21: "xe_clampinf(A == 1.0 ? 1.0 : inversesqrt(A), -0.0, 0.0)", 22: "(A == 1.0 ? 1.0 : inversesqrt(A))",
+    23: "(A >= B ? A : B)", 24: "(A >= B ? A : B)", 25: "A - B", 26: "A - ps", 40: "sqrt(A)",
+    42: "xe_mul(A, B)", 43: "xe_mul(A, B)", 44: "A + B", 45: "A + B", 46: "A - B", 47: "A - B",
+    48: "sin(A)", 49: "cos(A)", 50: "ps",
+}
+SCALAR_TWO = {0, 2, 4, 5, 6, 23, 24, 25}          # operand: W and X of src3
+SCALAR_NONE = {33, 50}                            # no operand
+SCALAR_CONST_TEMP = {42, 43, 44, 45, 46, 47}      # c.w (op) r.x
+SETP = {27: "A == 0.0", 28: "A != 0.0", 29: "A > 0.0", 30: "A >= 0.0"}
+KILLS = {35: "A == 0.0", 36: "A > 0.0", 37: "A >= 0.0", 38: "A != 0.0", 39: "A == 1.0"}
+PUSH = {20: "==", 21: "!=", 22: ">", 23: ">="}
+KILLV = {24: "equal", 25: "greaterThan", 26: "greaterThanEqual", 27: "notEqual"}
+VSRCS = {8: 1, 9: 1, 10: 1, 11: 3, 12: 3, 13: 3, 14: 3, 17: 3, 19: 1}
+
+
+def _subst(expr, a, b):
+    """the scalar operands into a SCALAR_EXPR / SETP / KILLS pattern (whole words A and B only)"""
+    return re.sub(r"\b[AB]\b", lambda m: a if m.group(0) == "A" else b, expr)
+
+
+def _comp(swz, j):
+    return "xyzw"[(j + ((swz >> (2 * j)) & 3)) & 3]
+
+
+class _Shader:
+    def __init__(self, stage, interpolators):
+        self.stage = stage
+        self.interpolators = interpolators
+        self.attributes = []      # (key, dict)
+        self.textures = {}        # const index -> dimension
+        self.outputs = set()      # vertex interpolators / pixel colours written
+        self.body = []
+        self.depth = 1
+        self.uses_a0 = False
+
+    def emit(self, line):
+        self.body.append("    " * self.depth + line)
+
+    # ---- operands ----
+    def _const_addressed(self, a, n):
+        if n == 1:
+            return a["const_0_rel_abs"]
+        if n == 2:
+            return a["const_0_rel_abs"] if a["src1"]["temp"] else a["const_1_rel_abs"]
+        return a["const_0_rel_abs"] if (a["src1"]["temp"] and a["src2"]["temp"]) else a["const_1_rel_abs"]
+
+    def operand(self, a, n, where):
+        """src n (1..3) as a GLSL vec4 with its swizzle, absolute value and negation."""
+        s = a["src%d" % n]
+        if s["temp"]:
+            if s["reg"] & 0x40:
+                raise Unsupported("%s: loop-relative temporary" % where)
+            base, absolute = "r[%d]" % (s["reg"] & 0x3F), s["reg"] >> 7
+        else:
+            if self._const_addressed(a, n):
+                raise Unsupported("%s: relative constant" % where)
+            base, absolute = "xe_c[%d]" % s["reg"], a["abs_constants"]
+        e = base + "." + "".join(_comp(s["swizzle"], j) for j in range(4))
+        if absolute:
+            e = "abs(%s)" % e
+        return "(-%s)" % e if s["negate"] else e
+
+    def scalar_operands(self, a, op, where):
+        s = a["src3"]
+        if op in SCALAR_CONST_TEMP:
+            if self._const_addressed(a, 3):
+                raise Unsupported("%s: relative constant" % where)
+            temp = (op & 1) | (s["temp"] << 1) | (s["swizzle"] & 0x3C)
+            ca = "xe_c[%d].%s" % (s["reg"], _comp(s["swizzle"], 3))
+            tb = "r[%d].%s" % (temp, _comp(s["swizzle"], 0))
+            if a["abs_constants"]:
+                ca, tb = "abs(%s)" % ca, "abs(%s)" % tb
+            if s["negate"]:
+                ca, tb = "(-%s)" % ca, "(-%s)" % tb
+            return ca, tb
+        v = self.operand(a, 3, where)
+        # the vec4 expression's components are already swizzled: W is a, X is b
+        return "(%s).w" % v, "(%s).x" % v
+
+    # ---- destinations ----
+    def export_target(self, reg, where):
+        if self.stage == "vertex":
+            if reg == 62:
+                return "xe_pos"
+            if reg == 63:
+                return "xe_psize"
+            if reg < 16:
+                self.outputs.add(reg)
+                return "xe_o%d" % reg
+        else:
+            if reg < 4:
+                self.outputs.add(reg)
+                return "xe_color%d" % reg
+            if reg == 61:
+                return "xe_depth"
+        raise Unsupported("%s: export to register %d" % (where, reg))
+
+    def write(self, target, mask, value, clamp):
+        if not mask:
+            return
+        comps = "".join("xyzw"[i] for i in range(4) if mask >> i & 1)
+        v = "clamp(%s, 0.0, 1.0)" % value if clamp else value
+        self.emit("%s.%s = (%s).%s;" % (target, comps, v, comps))
+
+    # ---- instructions ----
+    def alu(self, words, at):
+        a = decode_alu(*words)
+        where = "alu %d" % at
+        if a["vector_dest_rel"] or (a["scalar_dest_rel"] and not a["export"]):
+            raise Unsupported("%s: relative destination" % where)
+        vop, sop = a["vector_op"], a["scalar_op"]
+        export = a["export"]
+        vmask, smask = a["vector_mask"], a["scalar_mask"]
+        if export:
+            target = self.export_target(a["vector_dest"], where)
+            v_write, s_write = vmask & ~smask, smask & ~vmask
+            one_mask = vmask & smask
+            zero_mask = (0xF & ~(vmask | smask)) if a["scalar_dest_rel"] else 0
+            v_target = s_target = target
+        else:
+            v_write, s_write, one_mask, zero_mask = vmask, smask, 0, 0
+            v_target, s_target = "r[%d]" % a["vector_dest"], "r[%d]" % a["scalar_dest"]
+        pre, post = [], []
+        # vector
+        vname = VECTOR[vop] if vop < len(VECTOR) else None
+        if vname is None or vname == "nop":
+            vexpr = None
+        else:
+            n = VSRCS.get(vop, 2)
+            if vop == 18:
+                raise Unsupported("%s: cube" % where)
+            S = [self.operand(a, k, where) for k in range(1, n + 1)]
+            vexpr = {
+                0: lambda: "%s + %s" % (S[0], S[1]), 1: lambda: "xe_mul(%s, %s)" % (S[0], S[1]),
+                2: lambda: "xe_max(%s, %s)" % (S[0], S[1]), 3: lambda: "xe_min(%s, %s)" % (S[0], S[1]),
+                4: lambda: "vec4(equal(%s, %s))" % (S[0], S[1]), 5: lambda: "vec4(greaterThan(%s, %s))" % (S[0], S[1]),
+                6: lambda: "vec4(greaterThanEqual(%s, %s))" % (S[0], S[1]),
+                7: lambda: "vec4(notEqual(%s, %s))" % (S[0], S[1]),
+                8: lambda: "%s - floor(%s)" % (S[0], S[0]), 9: lambda: "trunc(%s)" % S[0],
+                10: lambda: "floor(%s)" % S[0], 11: lambda: "xe_mul(%s, %s) + %s" % (S[0], S[1], S[2]),
+                12: lambda: "mix(%s, %s, equal(%s, vec4(0.0)))" % (S[2], S[1], S[0]),
+                13: lambda: "mix(%s, %s, greaterThanEqual(%s, vec4(0.0)))" % (S[2], S[1], S[0]),
+                14: lambda: "mix(%s, %s, greaterThan(%s, vec4(0.0)))" % (S[2], S[1], S[0]),
+                15: lambda: "vec4(xe_dot4(%s, %s))" % (S[0], S[1]), 16: lambda: "vec4(xe_dot3(%s, %s))" % (S[0], S[1]),
+                17: lambda: "vec4(xe_mul((%s).x, (%s).x) + xe_mul((%s).y, (%s).y) + (%s).x)" % (S[0], S[1], S[0], S[1],
+                                                                                               S[2]),
+                19: lambda: "vec4(xe_max4(%s))" % S[0],
+                28: lambda: "vec4(1.0, xe_mul((%s).y, (%s).y), (%s).z, (%s).w)" % (S[0], S[1], S[0], S[1]),
+                29: lambda: "xe_max(%s, %s)" % (S[0], S[1]),
+            }.get(vop)
+            if vop in PUSH:
+                o = PUSH[vop]
+                pre.append("vec4 pa_ = %s, pb_ = %s;" % (S[0], S[1]))
+                vexpr = "((pa_.x == 0.0 && pb_.x %s 0.0) ? vec4(0.0) : vec4(pa_.x + 1.0))" % o
+                post.append("p0 = (pa_.w == 0.0 && pb_.w %s 0.0);" % o)
+            elif vop in KILLV:
+                pre.append("bool kv_ = any(%s(%s, %s));" % (KILLV[vop], S[0], S[1]))
+                vexpr = "(kv_ ? vec4(1.0) : vec4(0.0))"
+                if self.stage == "pixel":
+                    post.append("if (kv_) discard;")
+            elif vop == 29:
+                self.uses_a0 = True
+                post.append("a0 = int(clamp(floor((%s).w + 0.5), -256.0, 255.0));" % S[0])
+                vexpr = vexpr()
+            elif vexpr is None:
+                raise Unsupported("%s: vector op %s" % (where, vname))
+            else:
+                vexpr = vexpr()
+        # scalar
+        sexpr = None
+        known = sop in SCALAR_EXPR or sop in SETP or sop in KILLS or sop in (31, 32, 33, 34)
+        if sop != 63 and not known:
+            raise Unsupported("%s: scalar op %d" % (where, sop))
+        if sop != 63:
+            A = B = "0.0"
+            if sop not in SCALAR_NONE:
+                A, B = self.scalar_operands(a, sop, where)
+            pre.append("float A_ = %s, B_ = %s;" % (A, B))
+            A, B = "A_", "B_"
+            if sop in SETP:
+                pre.append("bool sp_ = %s;" % _subst(SETP[sop], A, B))
+                sexpr = "(sp_ ? 0.0 : 1.0)"
+                post.append("p0 = sp_;")
+            elif sop in KILLS:
+                pre.append("bool ks_ = %s;" % _subst(KILLS[sop], A, B))
+                sexpr = "(ks_ ? 1.0 : 0.0)"
+                if self.stage == "pixel":
+                    post.append("if (ks_) discard;")
+            elif sop == 31:
+                sexpr = "(%s == 1.0 ? 0.0 : (%s == 0.0 ? 1.0 : %s))" % (A, A, A)
+                post.append("p0 = (%s == 1.0);" % A)
+            elif sop == 32:
+                sexpr = "(%s - 1.0 <= 0.0 ? 0.0 : %s - 1.0)" % (A, A)
+                post.append("p0 = (%s - 1.0 <= 0.0);" % A)
+            elif sop == 33:
+                sexpr = "XE_FLT_MAX"
+                post.append("p0 = false;")
+            elif sop == 34:
+                sexpr = "(%s == 0.0 ? 0.0 : %s)" % (A, A)
+                post.append("p0 = (%s == 0.0);" % A)
+            else:
+                sexpr = _subst(SCALAR_EXPR[sop], A, B)
+                if sop in (23, 24):
+                    self.uses_a0 = True
+                    post.append("a0 = int(clamp(floor(%s%s), -256.0, 255.0));" % (A, " + 0.5" if sop == 23 else ""))
+        if vexpr is None and sexpr is None:
+            return
+        pred = a["predicated"]
+        if pred:
+            self.emit("if (%sp0) {" % ("" if a["pred_condition"] else "!"))
+            self.depth += 1
+        self.emit("{")
+        self.depth += 1
+        for line in pre:
+            self.emit(line)
+        if vexpr is not None:
+            self.emit("vec4 v_ = %s;" % vexpr)
+        if sexpr is not None:
+            self.emit("float s_ = %s;" % sexpr)
+        if vexpr is not None:
+            self.write(v_target, v_write, "v_", a["vector_clamp"])
+        if sexpr is not None:
+            self.write(s_target, s_write, "vec4(s_)", a["scalar_clamp"])
+            if sop != 50:
+                self.emit("ps = s_;")
+        if one_mask:
+            self.write(v_target, one_mask, "vec4(1.0)", False)
+        if zero_mask:
+            self.write(v_target, zero_mask, "vec4(0.0)", False)
+        for line in post:
+            self.emit(line)
+        self.depth -= 1
+        self.emit("}")
+        if pred:
+            self.depth -= 1
+            self.emit("}")
+
+    def fetch(self, words, at):
+        f = decode_fetch(*words)
+        where = "fetch %d" % at
+        if f["src_rel"] or f["dst_rel"]:
+            raise Unsupported("%s: relative register" % where)
+        if f["op"] == 0:
+            key = (f["const_index"] * 3 + f["const_index_sel"], f["offset"])
+            names = [k for k, _ in self.attributes]
+            if key not in names:
+                self.attributes.append((key, {"fetch_constant": key[0], "offset": f["offset"], "format": f["format"],
+                                              "stride": f["stride"], "signed": f["signed"], "integer": f["integer"],
+                                              "exp_adjust": f["exp_adjust"]}))
+                names.append(key)
+            src = "xe_v%d" % names.index(key)
+        elif f["op"] == 1:
+            if f["offset_x"] or f["offset_y"] or f["offset_z"] or f["use_reg_lod"] or f["use_reg_gradients"]:
+                raise Unsupported("%s: texture fetch offsets / register LOD" % where)
+            dim = f["dimension"]
+            if dim == 3:
+                raise Unsupported("%s: cube texture fetch" % where)
+            k = f["const_index"]
+            if self.textures.setdefault(k, dim) != dim:
+                raise Unsupported("%s: texture %d fetched with two dimensions" % (where, k))
+            sw = f["src_swizzle"]
+            c = "r[%d].%s" % (f["src_reg"], "".join("xyzw"[(sw >> (2 * i)) & 3] for i in range(3)))
+            coord = {0: "vec2((%s).x, 0.5)" % c, 1: "(%s).xy" % c, 2: "(%s).xyz" % c}[dim]
+            if f["unnormalized"]:
+                coord = "%s / vec%d(textureSize(xe_t%d, 0))" % (coord, 2 if dim < 2 else 3, k)
+            if self.stage == "vertex":
+                src = "textureLod(xe_t%d, %s, 0.0)" % (k, coord)
+            elif f["lod_bias"]:
+                src = "texture(xe_t%d, %s, %s)" % (k, coord, repr(f["lod_bias"] / 32.0))
+            else:
+                src = "texture(xe_t%d, %s)" % (k, coord)
+        else:
+            raise Unsupported("%s: %s" % (where, f["name"]))
+        parts, mask = [], 0
+        for i in range(4):
+            sel = (f["dst_swizzle"] >> (3 * i)) & 7
+            if sel == 7:
+                continue
+            mask |= 1 << i
+            parts.append("f_.%s" % "xyzw"[sel] if sel < 4 else ("0.0" if sel == 4 else "1.0"))
+        if not mask:
+            return
+        pred = f["predicated"]
+        if pred:
+            self.emit("if (%sp0) {" % ("" if f["pred_condition"] else "!"))
+            self.depth += 1
+        comps = "".join("xyzw"[i] for i in range(4) if mask >> i & 1)
+        value = "vec%d(%s)" % (len(parts), ", ".join(parts)) if len(parts) > 1 else parts[0]
+        self.emit("{ vec4 f_ = %s; r[%d].%s = %s; }" % (src, f["dst_reg"], comps, value))
+        if pred:
+            self.depth -= 1
+            self.emit("}")
+
+
+def translate(words, stage="vertex", interpolators=0):
+    """GLSL ES 3.00 source of one shader and what it needs from the host:
+    {"attributes": [...], "textures": {index: dimension}, "outputs": [...], "uses_a0": bool}."""
+    if stage not in ("vertex", "pixel"):
+        raise ValueError(stage)
+    words = list(words) + [0] * (-len(words) % 3)
+    sh = _Shader(stage, interpolators)
+    cfs, limit, k = [], len(words) // 3, 0
+    while k < limit:
+        for w0, w1 in unpack_cf(*words[3 * k:3 * k + 3]):
+            cf = decode_cf(w0, w1)
+            cfs.append(cf)
+            if cf["op"] in EXEC_OPS and cf["count"]:
+                limit = min(limit, cf["address"])
+        k += 1
+    for cf in cfs:
+        op = cf["op"]
+        if op in EXEC_OPS:
+            cond = None
+            if op in (3, 4):
+                cond = "%sxe_bool(%d)" % ("" if cf["condition"] else "!", cf["bool_address"])
+            elif op in (5, 6, 13, 14):
+                cond = "%sp0" % ("" if cf["condition"] else "!")
+            if cond:
+                sh.emit("if (%s) {" % cond)
+                sh.depth += 1
+            for i in range(cf["count"]):
+                at = cf["address"] + i
+                d = words[3 * at:3 * at + 3]
+                if len(d) < 3:
+                    raise Unsupported("clause past the end of the shader")
+                if cf["sequence"] >> (2 * i) & 1:
+                    sh.fetch(d, at)
+                else:
+                    sh.alu(d, at)
+            if cond:
+                sh.depth -= 1
+                sh.emit("}")
+            if op in (2, 4, 6, 14):
+                break
+        elif op in (0, 12, 15):
+            continue
+        elif op == 10:
+            break
+        else:
+            raise Unsupported("control flow: %s" % cf["name"])
+    out = ["#version 300 es", "precision highp float;", "precision highp int;", "precision highp sampler3D;",
+           "uniform vec4 xe_c[256];", "uniform uint xe_b[8];"]
+    for i, (_, a) in enumerate(sh.attributes):
+        out.append("in vec4 xe_v%d;  // fetch constant %d, offset %d, format %d" % (i, a["fetch_constant"],
+                                                                                    a["offset"], a["format"]))
+    for t, dim in sorted(sh.textures.items()):
+        out.append("uniform %s xe_t%d;" % ({0: "sampler2D", 1: "sampler2D", 2: "sampler3D"}[dim], t))
+    if stage == "vertex":
+        out += ["out vec4 xe_o%d;" % o for o in sorted(sh.outputs)]
+    else:
+        out += ["in vec4 xe_i%d;" % i for i in range(interpolators)]
+        out += ["layout(location = %d) out vec4 xe_color%d;" % (o, o) for o in sorted(sh.outputs)]
+    out.append(PRELUDE.rstrip())
+    out.append("void main() {")
+    out.append("    vec4 r[64];")
+    out.append("    for (int i = 0; i < 64; i++) r[i] = vec4(0.0);")
+    out.append("    float ps = 0.0;")
+    out.append("    bool p0 = false;")
+    out.append("    int a0 = 0;")
+    if stage == "vertex":
+        out.append("    r[0].x = float(gl_VertexID);")
+        out.append("    vec4 xe_pos = vec4(0.0), xe_psize = vec4(0.0);")
+        out += ["    xe_o%d = vec4(0.0);" % o for o in sorted(sh.outputs)]
+    else:
+        out += ["    r[%d] = xe_i%d;" % (i, i) for i in range(interpolators)]
+        out.append("    vec4 xe_depth = vec4(gl_FragCoord.z);")
+        out += ["    xe_color%d = vec4(0.0);" % o for o in sorted(sh.outputs)]
+    out += sh.body
+    if stage == "vertex":
+        out.append("    gl_Position = xe_pos;")
+        out.append("    gl_PointSize = xe_psize.x;")
+    else:
+        out.append("    gl_FragDepth = xe_depth.x;")
+    out.append("}")
+    info = {"attributes": [a for _, a in sh.attributes], "textures": dict(sh.textures),
+            "outputs": sorted(sh.outputs), "uses_a0": sh.uses_a0}
+    return "\n".join(out) + "\n", info
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    stage = "pixel" if "--pixel" in argv else "vertex"
+    n = int(argv[argv.index("--interpolators") + 1]) if "--interpolators" in argv else 0
+    path = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] != "--interpolators")][0]
+    raw = open(path, "rb").read()
+    words = list(struct.unpack(">%dI" % (len(raw) // 4), raw[:len(raw) // 4 * 4]))
+    try:
+        src, _ = translate(words, stage, n)
+    except Unsupported as ex:
+        print("unsupported: %s" % ex, file=sys.stderr)
+        return 1
+    sys.stdout.write(src)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

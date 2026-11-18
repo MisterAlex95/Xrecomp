@@ -18,7 +18,7 @@ descends from Xenos; instr-a2xx.h, MIT): test_xenos_ucode encodes instructions f
 them here. Where the two differ, Xenos (Xenia) is followed: 12-bit exec addresses and 13-bit loop / jump / call
 addresses (Mesa: 9 + 3 reserved, 10), alloc size 3 bits (Mesa 4), ALU dword 0 bit 7 "abs constants" (Mesa: low
 precision), vertex fetch prefetch count and a signed 23-bit offset (Mesa: reserved, 22 bits), texture fetch
-use_reg_lod 1 bit + 1 unknown (Mesa: 2 bits). Decode only: nothing runs or translates these yet.
+use_reg_lod 1 bit + 1 unknown (Mesa: 2 bits). xenos_glsl.py translates shaders to GLSL ES on top of this.
 """
 
 import struct
