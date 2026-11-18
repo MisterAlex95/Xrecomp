@@ -91,7 +91,7 @@ def recompile(rom, outdir, discovered=(), comments=True):
         path = os.path.join(outdir, "gba_rc_%08X%s.c" % (chunk[0].entry, "t" if chunk[0].thumb else "a"))
         parts = [HEADER % rom.sha256]
         for f in chunk:
-            lifter = FnLifter(rom, f.thumb, f.addrs)
+            lifter = FnLifter(rom, f.thumb, f.addrs, seg_resume=True)
             parts.append("\n" + lifter.function(fn_name(f), region_of(f), comments))
             fallbacks += lifter.fallbacks
         with open(path, "w", encoding="utf-8") as out:
@@ -101,7 +101,7 @@ def recompile(rom, outdir, discovered=(), comments=True):
         path = os.path.join(outdir, "gba_rc_iw_%08X%s.c" % (chunk[0].entry, "t" if chunk[0].thumb else "a"))
         parts = [HEADER % rom.sha256]
         for f in chunk:
-            lifter = iwram.IwramLifter(iw_image[f.key], f.thumb, f.addrs)
+            lifter = iwram.IwramLifter(iw_image[f.key], f.thumb, f.addrs, seg_resume=True)
             parts.append("\n" + lifter.function(fn_name(f), region_of(f), comments))
             fallbacks += lifter.fallbacks
         with open(path, "w", encoding="utf-8") as out:

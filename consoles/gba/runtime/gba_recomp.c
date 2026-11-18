@@ -332,22 +332,15 @@ void gba_recomp_run(gba_machine *m)
             /* The instruction lifted code left to the interpreter: run it now, after the loop's checks (the
              * scheduler may have been due, or an IRQ pending, when the lifted code stopped in front of it). Then
              * the rest of its block, while execution stays in sequence: inside a block nothing is a resume point. */
-            s->interp_key = KEY_NONE;
-            s->stats.fallbacks++;
-            s->stats.interp_rom++;
-            gba_cpu_step(m);
+            bool chained;
+            uint32_t n = gba_cpu_step_handed(m, &s->interp_left, &chained, s->iw_lo, s->iw_hi);
+            s->stats.fallbacks += n;
+            s->stats.interp_rom += n;
             if (in_iwram(pc))
                 s->iw_expect = KEY_NONE;
             else
                 s->expect = KEY_NONE;
-            if (s->interp_left > 1) {
-                uint32_t next = key + (thumb ? 2 : 4);
-                uint32_t now_key = gba_cpu_pc(m) | ((m->cpu.cpsr_ctl & CPSR_T) ? 1u : 0u);
-                if (now_key == next) {
-                    s->interp_key = next;
-                    s->interp_left--;
-                }
-            }
+            s->interp_key = chained ? key + n * (thumb ? 2 : 4) : KEY_NONE;
             continue;
         }
         s->interp_key = KEY_NONE;
@@ -375,6 +368,7 @@ void gba_recomp_run(gba_machine *m)
                 memcpy(s->verify, m, sizeof *m);
             uint64_t before = m->now;
             ln->fn(m);
+            m->rc_ran = true; /* its RAM stores did not go through the code map (gba_cpu.c « predecoded blocks ») */
             if (s->verify && m->rc_exit != GBA_RC_EXIT_NOT_COVERED)
                 verify_call(s->verify, m, pc | thumb);
             if (m->rc_exit == GBA_RC_EXIT_NORMAL && m->now == before && m->cpu.r[15] - (thumb ? 4 : 8) == pc &&

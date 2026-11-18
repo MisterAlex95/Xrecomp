@@ -246,6 +246,8 @@ struct gba_machine {
     uint8_t *code_map;      /* = blocks->code: a bit per RAM halfword some block was decoded from (gba_code_write) */
     uint32_t blk_attn;      /* bumped by what a running block cannot see coming: IO register writes, DMA transfers,
                              * wait-state changes, writes to code (gba_cpu.c « predecoded blocks ») */
+    bool rc_ran;            /* lifted code ran since the interpreter's blocks last ran (gba_recomp.c): its inline RAM
+                             * stores skip the code map, so RAM blocks are checked against RAM before they run again */
     uint64_t cpu_cap;       /* gba_run_cycles: the CPU loop also stops at this cycle (UINT64_MAX: no cap) */
     bool interp_ref;        /* the reference interpreter loop (gba_cpu_set_reference) */
 };
@@ -374,6 +376,12 @@ static inline void gba_code_write(gba_machine *m, uint32_t idx, unsigned nhalf)
 }
 #define GBA_CODE_IWRAM(addr) ((addr) & (GBA_IWRAM_SIZE - 1))
 #define GBA_CODE_EWRAM(addr) (GBA_IWRAM_SIZE + ((addr) & (GBA_EWRAM_SIZE - 1)))
+/* The recompiler's loop for the instructions lifted code hands over (GBA_RC_EXIT_INTERP, gba_recomp_run): steps from
+ * PC while *left > 1 and execution stays in sequence, as that loop would one call at a time: while the time is not up,
+ * the CPU not halted, no IRQ due, and the next instruction in the cartridge or in [iw_lo, iw_hi). One step at least;
+ * returns how many ran. *chained: the last one went on in sequence (*left counted down for it): the next instruction
+ * is still handed over. */
+uint32_t gba_cpu_step_handed(gba_machine *m, uint32_t *left, bool *chained, uint32_t iw_lo, uint32_t iw_hi);
 /* Runs instructions until m->now >= m->next_event (or the CPU halts). */
 void gba_cpu_run(gba_machine *m);
 /* Executes exactly one instruction (or takes a pending IRQ). For tests. */
