@@ -57,10 +57,13 @@ static void test_overlapped(void)
     CHECK(XAM(X360_xam_XGetOverlappedResult, 3, ov, len, 1) == 0, "XGetOverlappedResult");
 
     uint32_t ev2, ov2 = ov_new(&ev2);
-    CHECK(XAM(X360_xam_XamContentGetDeviceState, 2, 9, ov2) == IO_PENDING && x360_r32(X, ov2) == 0x48F &&
+    CHECK(XAM(X360_xam_XamContentGetDeviceState, 2, 9, ov2) == IO_PENDING && x360_r32(X, ov2) == FUNCTION_FAILED &&
               x360_r32(X, ov2 + 0x18) == 0x48F && event_state(ev2) == 1, "an error completes the overlapped too");
     CHECK(XAM(X360_xam_XGetOverlappedExtendedError, 1, ov2) == 0x48F, "extended error");
-    CHECK(XAM(X360_xam_XamGetOverlappedResult, 3, ov2, len, 0) == 0x48F, "the failed result");
+    CHECK(XAM(X360_xam_XamGetOverlappedResult, 3, ov2, len, 0) == FUNCTION_FAILED, "the failed result");
+    uint32_t ev4, ov4 = ov_new(&ev4);
+    CHECK(XAM(X360_xam_XamContentOpenFile, 7, 0, 0, 0, 0, 0, 0, ov4) == IO_PENDING && x360_r32(X, ov4) == 2 &&
+              x360_r32(X, ov4 + 4) == 0xFFFFFFFFu && x360_r32(X, ov4 + 0x18) == 2, "a plain failure: length -1");
     CHECK(XAM(X360_xam_XamContentGetDeviceState, 2, 9, 0) == 0x48F, "no overlapped: the result itself");
 
     uint32_t ev3, ov3 = ov_new(&ev3);
@@ -207,8 +210,10 @@ static void test_user(void)
     uint32_t out = galloc(16), xs = galloc(8), ev, ov = ov_new(&ev);
     CHECK(XAM(X360_xam_XamUserGetMembershipTier, 1, 0) == 0, "a local profile has no membership");
     x360_w32(X, out, 9);
-    CHECK(XAM(X360_xam_XamUserAreUsersFriends, 5, 0, xs, 1, out, ov) == IO_PENDING && x360_r32(X, ov) == NOT_LOGGED_ON &&
-              x360_r32(X, out) == 0 && event_state(ev) == 1, "friends need Live");
+    CHECK(XAM(X360_xam_XamUserAreUsersFriends, 5, 0, xs, 1, out, ov) == IO_PENDING && x360_r32(X, ov) == FUNCTION_FAILED &&
+              x360_r32(X, ov + 0x18) == (0x80070000u | NOT_LOGGED_ON) && x360_r32(X, out) == 0 && event_state(ev) == 1,
+          "friends need Live");
+    CHECK(XAM(X360_xam_XamUserAreUsersFriends, 5, 0, xs, 1, out, 0) == NOT_LOGGED_ON, "friends: no overlapped");
     CHECK(XAM(X360_xam_XamUserAreUsersFriends, 5, 4, xs, 1, out, 0) == 0x57, "friends: a bad index");
     CHECK(XAM(X360_xam_XamUserContentRestrictionGetFlags, 2, 0, out) == 0 && x360_r32(X, out) == 0, "no restrictions");
     CHECK(XAM(X360_xam_XamUserContentRestrictionGetRating, 4, 0, 0, out, out + 4) == 0 && x360_r32(X, out) == 0x3F,
@@ -253,7 +258,8 @@ static void test_enumerators(void)
               x360_r32(X, sizep) == 36 * 4, "achievements");
     uint32_t ev, ov = ov_new(&ev);
     CHECK(XAM(X360_xam_XamEnumerate, 6, x360_r32(X, hp), 0, buf, 0x100, 0, ov) == IO_PENDING &&
-              x360_r32(X, ov) == NO_MORE_FILES && event_state(ev) == 1, "no achievement");
+              x360_r32(X, ov) == NO_MORE_FILES && x360_r32(X, ov + 0x18) == 0x80070012u && x360_r32(X, ov + 4) == 0 &&
+              event_state(ev) == 1, "no achievement");
     CHECK(XAM(X360_xam_XamUserCreateAchievementEnumerator, 8, 0, 0, 0, 1, 0, 2, sizep, hp) == 0 &&
               x360_r32(X, sizep) == 500 * 2, "achievements with their strings");
     CHECK(XAM(X360_xam_XamUserCreateAchievementEnumerator, 8, 0, 0, 0, 0, 0, 0, sizep, hp) == 0x57, "no count");
@@ -397,6 +403,7 @@ static void test_info(void)
     CHECK(s && x360_r32(X, s) == s + 8 && x360_r32(X, s + 4) == 0x2C, "online schema");
     CHECK(XAM(X360_xam_XamGetOnlineSchema, 0) == s, "one schema");
     CHECK(XAM(X360_xam_XamQueryLiveHiveW, 4, 0, 0, 0, 0) == 0xC00000EFu, "no Live hive");
+    CHECK(XAM(X360_xam_XamLoaderGetDvdTrayState, 0) == 2, "the tray is closed");
 
     /* locale */
     CHECK(XAM(X360_xam_XamGetLocale, 0) == 36 && XAM(X360_xam_XamGetLocaleEx, 2, 111, 43) == 36, "United States");

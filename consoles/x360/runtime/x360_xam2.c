@@ -63,20 +63,32 @@
 
 /* ---- overlapped ---- */
 
-/* the event signalled and IO_PENDING answered with an overlapped, the result itself without one */
-static uint32_t finish(x360_machine *x, x360_thread *t, uint32_t ov, uint32_t result, uint32_t length)
+/* the event signalled and IO_PENDING answered with an overlapped; sync_result without one */
+static uint32_t finish_ex(x360_machine *x, x360_thread *t, uint32_t ov, uint32_t sync_result, uint32_t result,
+                          uint32_t extended, uint32_t length)
 {
     if (!ov)
-        return result;
+        return sync_result;
     x360_w32(x, ov, result);
     x360_w32(x, ov + 4, length);
     x360_w32(x, ov + 8, t->handle);
-    x360_w32(x, ov + 0x18, result);
+    x360_w32(x, ov + 0x18, extended);
     uint32_t ev = x360_r32(x, ov + 0xC);
     uint32_t o = ev ? x360_handle_obj(x, ev) : 0;
     if (o)
         x360_w32(x, o + 4, 1);
     return X_ERROR_IO_PENDING;
+}
+
+/* the plain completion: the result is its own extended error, a failure's length is -1 */
+static uint32_t finish(x360_machine *x, x360_thread *t, uint32_t ov, uint32_t result, uint32_t length)
+{
+    return finish_ex(x, t, ov, result, result, result, result ? 0xFFFFFFFFu : length);
+}
+
+static uint32_t hresult_of(uint32_t win32)
+{
+    return win32 ? 0x80070000u | (win32 & 0xFFFF) : 0;
 }
 
 static void x_XamGetOverlappedResult(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -722,7 +734,11 @@ static void x_XamContentGetDeviceData(x360_machine *x, x360_thread *t, xe_cpu *c
 
 static void x_XamContentGetDeviceState(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
-    RET(finish(x, t, A(1), A(0) == HDD_ID ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED, 0));
+    if (A(0) == HDD_ID)
+        RET(finish(x, t, A(1), X_ERROR_SUCCESS, 0));
+    else
+        RET(finish_ex(x, t, A(1), X_ERROR_DEVICE_NOT_CONNECTED, X_ERROR_FUNCTION_FAILED, X_ERROR_DEVICE_NOT_CONNECTED,
+                      0));
 }
 
 static void x_XamContentGetDeviceName(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -842,7 +858,7 @@ static void x_XamEnumerate(x360_machine *x, x360_thread *t, xe_cpu *c)
     x360_w32(x, e + EN_POS, pos + count);
     if (outp)
         x360_w32(x, outp, count);
-    RET(finish(x, t, ov, result, count));
+    RET(finish_ex(x, t, ov, result, result, hresult_of(result), count));
 }
 
 static void x_XamContentCreateEnumerator(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -1004,7 +1020,7 @@ static uint32_t read_profile(x360_machine *x, x360_thread *t, xe_cpu *c, uint32_
     uint32_t need = (uint32_t)need64;
     if (!buf || x360_r32(x, sizep) < need) {
         x360_w32(x, sizep, need);
-        return finish(x, t, ov, X_ERROR_INSUFFICIENT_BUFFER, 0);
+        return X_ERROR_INSUFFICIENT_BUFFER; /* answered directly, with an overlapped or without */
     }
     memset(x->base + buf, 0, need);
     x360_w32(x, buf, rows * n);
@@ -1192,7 +1208,8 @@ static void x_XamUserAreUsersFriends(x360_machine *x, x360_thread *t, xe_cpu *c)
     }
     if (out)
         x360_w32(x, out, 0);
-    RET(finish(x, t, ov, user ? X_ERROR_NO_SUCH_USER : X_ERROR_NOT_LOGGED_ON, 0));
+    uint32_t result = user ? X_ERROR_NO_SUCH_USER : X_ERROR_NOT_LOGGED_ON;
+    RET(finish_ex(x, t, ov, result, X_ERROR_FUNCTION_FAILED, hresult_of(result), 0));
 }
 
 static void x_XamParseGamerTileKey(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -1418,6 +1435,12 @@ static void x_XamQueryLiveHiveW(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)x, (void)t;
     RET(X_STATUS_INVALID_PARAMETER_1); /* the Live hive is a service */
+}
+
+static void x_XamLoaderGetDvdTrayState(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)x, (void)t;
+    RET(2); /* closed, the title's disc inside */
 }
 
 static void x_XGetAudioFlags(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -1777,6 +1800,7 @@ const x360_hle_row x360_tab_xam2[] = {
     X360_HX(XamBuildXamResourceLocator, x_XamBuildXamResourceLocator),
     X360_HX(XamQueryLiveHiveW, x_XamQueryLiveHiveW),
     X360_HX(XCustomRegisterDynamicActions, x_ret0),
+    X360_HX(XamLoaderGetDvdTrayState, x_XamLoaderGetDvdTrayState),
     X360_HX(XGetAudioFlags, x_XGetAudioFlags),
     X360_HX(XGetVideoCapabilities, x_ret0),
     /* locale */
