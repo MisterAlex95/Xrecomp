@@ -599,10 +599,255 @@ static void test_utf8(void)
     x360_heap_free(X, &X->heap_v4k, buf);
 }
 
+/* ---- image and stack: a small PE in guest memory, three functions A -> B -> C with real prologs ---- */
+
+enum { IMG_SIZE = 0x4000, RVA_A = 0x1000, RVA_B = 0x1100, RVA_C = 0x1200, RVA_PDATA = 0x2000, FN_WORDS = 16 };
+enum { OPT = 0x98, SECTIONS = OPT + 0xE0 };
+
+static uint32_t img;
+
+static void le32_put(uint32_t a, uint32_t v)
+{
+    for (int k = 0; k < 4; k++)
+        x360_w8(X, a + (uint32_t)k, (v >> (8 * k)) & 0xFF);
+}
+
+static void le16_put(uint32_t a, uint32_t v)
+{
+    x360_w8(X, a, v & 0xFF);
+    x360_w8(X, a + 1, v >> 8);
+}
+
+static void section(unsigned k, const char *name, uint32_t va, uint32_t raw_size, uint32_t raw_ptr)
+{
+    uint32_t s = img + SECTIONS + 40 * k;
+    memcpy(X->base + s, name, strlen(name));
+    le32_put(s + 8, raw_size);
+    le32_put(s + 12, va);
+    le32_put(s + 16, raw_size);
+    le32_put(s + 20, raw_ptr);
+}
+
+static void function(uint32_t rva, unsigned index)
+{
+    static const uint32_t prolog[4] = {
+        0x7D8802A6u, /* mflr r12 */
+        0x9181FFF8u, /* stw r12, -8(r1) */
+        0xFBE1FFF0u, /* std r31, -16(r1) */
+        0x9421FFA0u, /* stwu r1, -0x60(r1) */
+    };
+    for (uint32_t k = 0; k < FN_WORDS; k++)
+        x360_w32(X, img + rva + 4 * k, k < 4 ? prolog[k] : 0x60000000u);
+    x360_w32(X, img + RVA_PDATA + 8 * index, img + rva);
+    x360_w32(X, img + RVA_PDATA + 8 * index + 4, 4u | FN_WORDS << 8);
+}
+
+static void image_build(void)
+{
+    img = x360_heap_alloc(X, &X->heap_v4k, IMG_SIZE, 0);
+    x360_w8(X, img, 'M'), x360_w8(X, img + 1, 'Z');
+    le32_put(img + 0x3C, 0x80);
+    memcpy(X->base + img + 0x80, "PE\0\0", 4);
+    le16_put(img + 0x86, 2);    /* sections */
+    le16_put(img + 0x94, 0xE0); /* optional header size */
+    le16_put(img + OPT, 0x10B);
+    le32_put(img + OPT + 60, 0x400); /* SizeOfHeaders */
+    le32_put(img + OPT + 92, 16);    /* directories */
+    le32_put(img + OPT + 96 + 8 * 1, 0x300), le32_put(img + OPT + 96 + 8 * 1 + 4, 8);        /* inside the headers */
+    le32_put(img + OPT + 96 + 8 * 3, RVA_PDATA), le32_put(img + OPT + 96 + 8 * 3 + 4, 24);   /* .pdata */
+    le32_put(img + OPT + 96 + 8 * 4, 0x3800), le32_put(img + OPT + 96 + 8 * 4 + 4, 4);       /* in no section */
+    section(0, ".text", 0x1000, 0x1000, 0x400);
+    section(1, ".pdata", RVA_PDATA, 0x200, 0x1400);
+    function(RVA_A, 0);
+    function(RVA_B, 1);
+    function(RVA_C, 2);
+    X->image_base = img;
+    X->image_size = IMG_SIZE;
+    X->pdata_scanned = 0;
+}
+
+static void test_image(void)
+{
+    T(K(X360_xboxkrnl_RtlImageNtHeader, 1, img) == img + 0x80, "NT headers");
+    T(K(X360_xboxkrnl_RtlImageNtHeader, 1, X->module) == img + 0x80, "NT headers from the module handle");
+    T(K(X360_xboxkrnl_RtlImageNtHeader, 1, 0) == 0, "no image");
+    T(K(X360_xboxkrnl_RtlImageNtHeader, 1, gstr("not an image")) == 0, "no MZ");
+    le32_put(img + 0x3C, 0x7FFFFFFFu);
+    T(K(X360_xboxkrnl_RtlImageNtHeader, 1, img) == 0, "headers out of reach");
+    le32_put(img + 0x3C, 0x90);
+    T(K(X360_xboxkrnl_RtlImageNtHeader, 1, img) == 0, "no PE signature");
+    le32_put(img + 0x3C, 0x80);
+
+#define DIR(base, mapped, entry) K(X360_xboxkrnl_RtlImageDirectoryEntryToData, 4, base, mapped, entry, size)
+    uint32_t size = galloc(4);
+    T(DIR(img, 1, 3) == img + RVA_PDATA && x360_r32(X, size) == 24, "mapped");
+    T(DIR(X->module, 1, 3) == img + RVA_PDATA, "by module handle");
+    T(DIR(img, 0, 3) == img + 0x1400, "as a file: through the section table");
+    T(DIR(img | 1, 1, 3) == img + 0x1400, "bit 0 of the base means a file");
+    T(DIR(img, 0, 1) == img + 0x300 && x360_r32(X, size) == 8, "inside the headers");
+    x360_w32(X, size, 0x55);
+    T(DIR(img, 1, 2) == 0 && x360_r32(X, size) == 0x55, "an empty directory");
+    T(DIR(img, 1, 16) == 0 && x360_r32(X, size) == 0x55, "past the directories");
+    T(DIR(img, 0, 4) == 0, "an address in no section");
+    T(DIR(0, 1, 3) == 0, "no image");
+    T(K(X360_xboxkrnl_RtlImageDirectoryEntryToData, 4, img, 1, 3, 0) == img + RVA_PDATA, "no size wanted");
+    le16_put(img + OPT, 0x20B); /* PE32+: the directories sit 16 bytes further */
+    le32_put(img + OPT + 108, 16);
+    le32_put(img + OPT + 112 + 8 * 3, 0x2100);
+    T(DIR(img, 1, 3) == img + 0x2100, "PE32+");
+    le16_put(img + OPT, 0x999);
+    T(DIR(img, 1, 3) == 0, "an unknown optional header");
+    le16_put(img + OPT, 0x10B);
+    le32_put(img + OPT + 92, 16);
+    le32_put(img + OPT + 96 + 8 * 3, RVA_PDATA);
+
+    uint32_t out = galloc(4);
+    T(K(X360_xboxkrnl_XexPcToFileHeader, 2, img + RVA_B, out) == img && x360_r32(X, out) == X->module, "pc in the image");
+    T(K(X360_xboxkrnl_XexPcToFileHeader, 2, img, out) == img, "its first byte");
+    T(K(X360_xboxkrnl_XexPcToFileHeader, 2, img + IMG_SIZE - 1, 0) == img, "its last byte, no out-pointer");
+    T(K(X360_xboxkrnl_XexPcToFileHeader, 2, img + IMG_SIZE, out) == 0 && x360_r32(X, out) == 0, "just past it");
+    T(K(X360_xboxkrnl_XexPcToFileHeader, 2, img - 1, out) == 0, "just before it");
+
+    x360_w32(X, out, 0x1234);
+    T(K(X360_xboxkrnl_XexLoadImage, 4, gstr("other.xex"), 8, 0, out) == 0xC0000034u && x360_r32(X, out) == 0, "XexLoadImage");
+    T(K(X360_xboxkrnl_XexLoadImage, 4, gstr("other.xex"), 8, 0, 0) == 0xC0000034u, "XexLoadImage without an out-pointer");
+    T(K(X360_xboxkrnl_XexUnloadImage, 1, X->module) == 0, "the title's own handle");
+    T(K(X360_xboxkrnl_XexUnloadImage, 1, 0x1234) == 0xC0000008u, "an unknown handle");
+    T(K(X360_xboxkrnl_XexUnloadImage, 1, 0) == 0xC0000008u, "no handle");
+}
+
+static void test_crc(void)
+{
+    uint32_t s = gstr("123456789");
+    T(K(X360_xboxkrnl_RtlComputeCrc32, 3, 0, s, 9) == 0xCBF43926u, "the check value");
+    T(K(X360_xboxkrnl_RtlComputeCrc32, 3, 0x1234, s, 0) == 0x1234, "no bytes keep the seed");
+    uint32_t part = K(X360_xboxkrnl_RtlComputeCrc32, 3, 0, s, 4);
+    T(K(X360_xboxkrnl_RtlComputeCrc32, 3, part, s + 4, 5) == 0xCBF43926u, "chained");
+    T(x360_crc32(X->base + s, 9) == 0xCBF43926u, "agrees with the loader's CRC");
+}
+
+/* frames C (at stack_top), B and A above it; a return address where each prolog stored it */
+#define RET_B (img + RVA_B + 0x20)
+#define RET_A (img + RVA_A + 0x20)
+#define PC_C (img + RVA_C + 0x20)
+
+static void frames_build(void)
+{
+    uint32_t c = stack_top, b = c + 0x60, a = b + 0x60, top = a + 0x60;
+    x360_w32(X, c, b), x360_w32(X, b, a), x360_w32(X, a, top), x360_w32(X, top, 0);
+    x360_w32(X, b - 8, RET_B), x360_w32(X, a - 8, RET_A), x360_w32(X, top - 8, X360_THREAD_EXIT);
+    x360_w64(X, b - 16, 0x1111222233334444ull); /* B's r31, saved by C */
+    cpu()->pc = PC_C;
+}
+
+static void test_unwind(void)
+{
+    x360_thread *th = x360_cur(X);
+    uint32_t low = th->stack_limit, high = th->stack_base;
+    th->stack_limit = scratch, th->stack_base = scratch + 0x10000;
+    frames_build();
+
+    /* .pdata */
+    T(K(X360_xboxkrnl_RtlLookupFunctionEntry, 1, PC_C) == img + RVA_PDATA + 16, "the function of a pc");
+    T(K(X360_xboxkrnl_RtlLookupFunctionEntry, 1, img + RVA_A) == img + RVA_PDATA, "its first instruction");
+    T(K(X360_xboxkrnl_RtlLookupFunctionEntry, 1, img + RVA_C + 4 * FN_WORDS - 4) == img + RVA_PDATA + 16, "its last");
+    T(K(X360_xboxkrnl_RtlLookupFunctionEntry, 1, img + RVA_C + 4 * FN_WORDS) == 0, "just past it");
+    T(K(X360_xboxkrnl_RtlLookupFunctionEntry, 1, img + RVA_A - 4) == 0, "before the first function");
+    T(K(X360_xboxkrnl_RtlLookupFunctionEntry, 1, 0x10) == 0, "outside the image");
+
+    /* one frame up, in the body of C */
+    uint32_t rec = galloc(0x400), in_fn = galloc(4), est = galloc(4), entry = img + RVA_PDATA + 16;
+    x360_seh_ctx k;
+    memset(&k, 0, sizeof k);
+    k.gpr[1] = stack_top, k.gpr[31] = 0x99, k.gpr[14] = 0x77, k.pc = PC_C, k.lr = 0x1;
+    x360_seh_write_context(X, rec, &k);
+    T(K(X360_xboxkrnl_RtlVirtualUnwind, 8, PC_C, entry, rec, in_fn, est, 0, 0, 0) == RET_B, "the caller's pc");
+    x360_seh_ctx up;
+    x360_seh_read_context(X, rec, &up);
+    T(up.pc == RET_B && up.lr == RET_B, "its pc and lr in the record");
+    T(up.gpr[1] == stack_top + 0x60, "its stack pointer: %08X", (uint32_t)up.gpr[1]);
+    T(up.gpr[31] == 0x1111222233334444ull, "the register the prolog saved");
+    T(up.gpr[14] == 0x77, "a register it did not save");
+    T(x360_r32(X, est) == stack_top, "the establisher frame");
+    T(x360_r8(X, in_fn) == 1, "past the prolog");
+
+    /* the same with the entry looked up, and no out-pointers */
+    x360_seh_write_context(X, rec, &k);
+    T(K(X360_xboxkrnl_RtlVirtualUnwind, 8, PC_C, 0, rec, 0, 0, 0, 0, 0) == RET_B, "the entry found from the pc");
+
+    /* at the function's first instruction nothing is saved yet: the caller is in LR */
+    k.pc = img + RVA_C, k.lr = RET_B;
+    x360_seh_write_context(X, rec, &k);
+    T(K(X360_xboxkrnl_RtlVirtualUnwind, 8, img + RVA_C, entry, rec, in_fn, est, 0, 0, 0) == RET_B, "at the entry");
+    x360_seh_read_context(X, rec, &up);
+    T(up.gpr[1] == stack_top && up.gpr[31] == 0x99, "the frame is not allocated yet");
+    T(x360_r8(X, in_fn) == 0, "inside the prolog");
+
+    /* no function: a leaf, the caller in LR */
+    k.pc = 0x10, k.lr = RET_A;
+    x360_seh_write_context(X, rec, &k);
+    T(K(X360_xboxkrnl_RtlVirtualUnwind, 8, 0x10, 0, rec, in_fn, est, 0, 0, 0) == RET_A, "a leaf");
+    T(x360_r8(X, in_fn) == 0, "a leaf is in no function");
+
+    /* the whole chain */
+    uint32_t arr = galloc(32), hash = galloc(4);
+#define TRACE(skip, want, h) K(X360_xboxkrnl_RtlCaptureStackBackTrace, 4, skip, want, arr, h)
+    T(TRACE(0, 8, hash) == 3, "three frames");
+    T(x360_r32(X, arr) == PC_C && x360_r32(X, arr + 4) == RET_B && x360_r32(X, arr + 8) == RET_A, "their addresses");
+    T(x360_r32(X, hash) == PC_C + RET_B + RET_A, "the hash");
+    T(TRACE(1, 8, hash) == 2 && x360_r32(X, arr) == RET_B && x360_r32(X, hash) == RET_B + RET_A, "one skipped");
+    x360_w32(X, arr + 4, 0x55);
+    T(TRACE(0, 1, 0) == 1 && x360_r32(X, arr) == PC_C && x360_r32(X, arr + 4) == 0x55, "the array's size is kept");
+    T(TRACE(3, 8, hash) == 0 && x360_r32(X, hash) == 0, "all skipped");
+    T(TRACE(0, 0, hash) == 0, "none wanted");
+
+    uint32_t a = galloc(4), b = galloc(4);
+    K(X360_xboxkrnl_RtlGetCallersAddress, 2, a, b);
+    T(x360_r32(X, a) == RET_B && x360_r32(X, b) == RET_A, "the callers: %08X %08X", x360_r32(X, a), x360_r32(X, b));
+    K(X360_xboxkrnl_RtlGetCallersAddress, 2, 0, b);
+    T(x360_r32(X, b) == RET_A, "only the second");
+
+    /* a chain that leaves the stack ends there */
+    x360_w32(X, stack_top + 0x60, 0x10);
+    T(TRACE(0, 8, 0) == 2, "a back chain off the stack");
+    x360_w32(X, stack_top + 0x60, stack_top + 0xC0);
+    /* a pc outside the image has no frames */
+    cpu()->pc = 0x10;
+    T(TRACE(0, 8, hash) == 0 && x360_r32(X, hash) == 0, "no frames outside the image");
+    K(X360_xboxkrnl_RtlGetCallersAddress, 2, a, b);
+    T(x360_r32(X, a) == 0 && x360_r32(X, b) == 0, "no callers outside the image");
+
+    th->stack_limit = low, th->stack_base = high;
+    K(X360_xboxkrnl_RtlGetStackLimits, 2, a, b);
+    T(x360_r32(X, a) == low && x360_r32(X, b) == high && low < high, "the stack limits");
+    K(X360_xboxkrnl_RtlGetStackLimits, 2, 0, 0);
+}
+
+/* last: with no handler in this bare machine the raise ends the run */
+static void test_raise(void)
+{
+    uint64_t raised = X->st.seh_raised;
+    cpu()->pc = PC_C;
+    K(X360_xboxkrnl_RtlRaiseStatus, 1, 0xC0000123u);
+    uint32_t rec = (stack_top - 0x60) & ~7u;
+    T(X->st.seh_raised == raised + 1, "dispatched");
+    T(x360_r32(X, rec) == 0xC0000123u, "the code in the record");
+    T(x360_r32(X, rec + 4) == 1, "noncontinuable");
+    T(x360_r32(X, rec + 8) == 0 && x360_r32(X, rec + 16) == 0, "no chained record, no parameters");
+    T(x360_r32(X, rec + 12) == PC_C, "the address");
+    T(X->status == X360_ERROR && strstr(X->error, "C0000123"), "unhandled: \"%s\"", X->error);
+    T(x360_cur(X)->seh.depth == 0, "the dispatch ended");
+    X->status = 0;
+}
+
 int main(void)
 {
     if (hle_util_start())
         return 1;
+    image_build();
+    test_image();
+    test_crc();
+    test_unwind();
     test_conversions();
     test_truncation();
     test_long_output();
@@ -612,6 +857,7 @@ int main(void)
     test_append();
     test_convert();
     test_utf8();
+    test_raise();
     printf("x360_rtl: %d checks\n", checks);
     return hle_util_end("x360_rtl");
 }

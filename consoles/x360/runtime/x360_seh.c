@@ -38,9 +38,7 @@ enum { EXC_NONCONTINUABLE = 1, EXC_UNWINDING = 2, EXC_EXIT_UNWIND = 4 };
 #define AREA_SIZE 0x1000    /* below the raising frame's r1 */
 #define HANDLER_STACK 0x200 /* the handlers' frames start this far below the area */
 
-typedef struct pfn {
-    uint32_t start, len, prolog, info;
-} pfn;
+typedef x360_seh_fn pfn;
 
 /* ---- .pdata ---- */
 
@@ -73,7 +71,7 @@ static void find_pdata(x360_machine *x)
     }
 }
 
-static int lookup(x360_machine *x, uint32_t pc, pfn *f)
+int x360_seh_lookup(x360_machine *x, uint32_t pc, x360_seh_fn *f)
 {
     if (!x->pdata_scanned)
         find_pdata(x);
@@ -88,6 +86,7 @@ static int lookup(x360_machine *x, uint32_t pc, pfn *f)
     if (!lo)
         return 0;
     uint32_t a = x->pdata_va + 8 * (lo - 1);
+    f->entry = a;
     f->start = x360_r32(x, a);
     f->info = x360_r32(x, a + 4);
     f->prolog = f->info & 0xFF;
@@ -153,7 +152,7 @@ void x360_seh_write_context(x360_machine *x, uint32_t a, const x360_seh_ctx *k)
     x360_w64(x, a + 0x220, 0);
 }
 
-static void read_context(x360_machine *x, uint32_t a, x360_seh_ctx *k)
+void x360_seh_read_context(x360_machine *x, uint32_t a, x360_seh_ctx *k)
 {
     k->pc = x360_r32(x, a + 0x8);
     k->lr = x360_r32(x, a + 0xC);
@@ -250,7 +249,7 @@ static void read_prolog(x360_machine *x, const pfn *f, uint32_t until, saves *s)
 }
 
 /* next = the caller's state of the frame cur is in (f: its function, or NULL for a leaf without .pdata). */
-static void unwind(x360_machine *x, const x360_seh_ctx *cur, const pfn *f, x360_seh_ctx *next)
+void x360_seh_virtual_unwind(x360_machine *x, const x360_seh_ctx *cur, const x360_seh_fn *f, x360_seh_ctx *next)
 {
     *next = *cur;
     if (!f) {
@@ -360,7 +359,7 @@ static void continue_execution(x360_machine *x, x360_thread *t, x360_seh_level *
         return;
     }
     x360_seh_ctx k = lv->exc;
-    read_context(x, lv->area + AREA_CONTEXT, &k); /* what the filter / handler left in the record */
+    x360_seh_read_context(x, lv->area + AREA_CONTEXT, &k); /* what the filter / handler left in the record */
     cpu_from_ctx(&t->cpu, &k);
     pop(t);
 }
@@ -411,8 +410,8 @@ static int next_frame(x360_machine *x, x360_seh_level *lv, int *have_handler)
     if (!x360_seh_code_pc(x, lv->cur.pc) || lv->cur.pc == X360_THREAD_EXIT)
         return 0;
     pfn f;
-    int have = lookup(x, lv->cur.pc - 4, &f);
-    unwind(x, &lv->cur, have ? &f : NULL, &lv->next);
+    int have = x360_seh_lookup(x, lv->cur.pc - 4, &f);
+    x360_seh_virtual_unwind(x, &lv->cur, have ? &f : NULL, &lv->next);
     lv->establisher = (uint32_t)lv->cur.gpr[1];
     if (have && frame_handler(x, &f, &lv->handler, &lv->hdata)) {
         lv->fstart = f.start, lv->flen = f.len, lv->fprolog = f.prolog;

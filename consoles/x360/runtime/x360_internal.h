@@ -297,6 +297,15 @@ void x360_seh_return(x360_machine *x, x360_thread *t);
 void x360_seh_bind(x360_machine *x);
 int x360_seh_code_pc(x360_machine *x, uint32_t pc);
 void x360_seh_write_context(x360_machine *x, uint32_t a, const x360_seh_ctx *k);
+void x360_seh_read_context(x360_machine *x, uint32_t a, x360_seh_ctx *k);
+/* one function of the image's .pdata: the guest address of its entry, start, length in bytes, prolog in instructions,
+ * the entry's info word */
+typedef struct x360_seh_fn {
+    uint32_t entry, start, len, prolog, info;
+} x360_seh_fn;
+int x360_seh_lookup(x360_machine *x, uint32_t pc, x360_seh_fn *f); /* 1 when pc is inside a function of .pdata */
+/* next = the caller's state of the frame cur is in (f: its function, or NULL for a leaf without .pdata) */
+void x360_seh_virtual_unwind(x360_machine *x, const x360_seh_ctx *cur, const x360_seh_fn *f, x360_seh_ctx *next);
 void x360_thread_exit(x360_machine *x, x360_thread *t, uint32_t code);
 uint32_t x360_handle_new(x360_machine *x, uint32_t obj);
 uint32_t x360_handle_obj(x360_machine *x, uint32_t handle);

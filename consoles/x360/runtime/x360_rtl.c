@@ -842,7 +842,277 @@ static void k_RtlUnicodeToUtf8Size(x360_machine *x, x360_thread *t, xe_cpu *c)
     RET(X_STATUS_SUCCESS);
 }
 
+/* ---- the stack: frames walked with x360_seh.c, from the .pdata of the image ---- */
+
+static void k_RtlLookupFunctionEntry(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    x360_seh_fn f;
+    RET(x360_seh_lookup(x, A(0), &f) ? f.entry : 0);
+}
+
+/* NT's PowerPC form: (ControlPc, FunctionEntry, ContextRecord, InFunction*, EstablisherFrame*, ContextPointers,
+ * LowStackLimit, HighStackLimit), the caller's PC as the result and the caller's state in the record. The optional
+ * ContextPointers are not filled in; the limits are not needed, the frames are read from the back chain. */
+static void k_RtlVirtualUnwind(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t pc = A(0), entry = A(1), rec = A(2), in_fn = A(3), frame = A(4);
+    x360_seh_ctx cur, next;
+    x360_seh_fn f;
+    memset(&cur, 0, sizeof cur);
+    x360_seh_read_context(x, rec, &cur);
+    cur.pc = pc;
+    int have;
+    if (entry) {
+        uint32_t info = x360_r32(x, entry + 4);
+        f.entry = entry, f.start = x360_r32(x, entry), f.info = info;
+        f.prolog = info & 0xFF, f.len = ((info >> 8) & 0x3FFFFF) * 4;
+        have = 1;
+    } else {
+        have = x360_seh_lookup(x, pc, &f);
+    }
+    x360_seh_virtual_unwind(x, &cur, have ? &f : NULL, &next);
+    if (in_fn)
+        x360_w8(x, in_fn, have && pc >= f.start + 4 * f.prolog && pc - f.start < f.len);
+    if (frame)
+        x360_w32(x, frame, (uint32_t)cur.gpr[1]);
+    x360_seh_write_context(x, rec, &next);
+    RET(next.pc);
+}
+
+typedef struct walker {
+    x360_seh_ctx cur;
+    int done;
+} walker;
+
+static int in_image(const x360_machine *x, uint32_t pc)
+{
+    return x->image_size && pc >= x->image_base && pc - x->image_base < x->image_size;
+}
+
+static int on_stack(const x360_thread *t, uint32_t sp)
+{
+    return sp >= t->stack_limit && sp <= t->stack_base;
+}
+
+/* frame 0 is the code the export returns to */
+static void walk_start(walker *w, const xe_cpu *c)
+{
+    memset(w, 0, sizeof *w);
+    memcpy(w->cur.gpr, c->gpr, sizeof w->cur.gpr);
+    w->cur.lr = c->lr;
+    w->cur.pc = c->pc;
+}
+
+/* the next frame's PC, 0 at the end of the chain */
+static uint32_t walk_next(x360_machine *x, const x360_thread *t, walker *w)
+{
+    uint32_t pc = w->cur.pc, sp = (uint32_t)w->cur.gpr[1];
+    if (w->done || !in_image(x, pc)) {
+        w->done = 1;
+        return 0;
+    }
+    x360_seh_fn f;
+    x360_seh_ctx next;
+    /* the back chain is checked before the unwind reads the slots it points at: a bad one ends the walk, not the run */
+    if (!on_stack(t, sp) || !on_stack(t, x360_r32(x, sp)) || !x360_seh_lookup(x, pc - 4, &f)) {
+        w->done = 1; /* this frame is known, its caller cannot be read */
+        return pc;
+    }
+    x360_seh_virtual_unwind(x, &w->cur, &f, &next);
+    uint32_t up = (uint32_t)next.gpr[1];
+    if (up < sp || !on_stack(t, up) || (up == sp && next.pc == pc))
+        w->done = 1;
+    w->cur = next;
+    return pc;
+}
+
+static void k_RtlCaptureStackBackTrace(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    /* (frames to skip, frames to capture, array*, hash*): the number captured, the hash is the sum of their PCs */
+    uint32_t skip = A(0), want = A(1), out = A(2), hash = A(3), n = 0, sum = 0;
+    walker w;
+    walk_start(&w, c);
+    for (uint32_t k = 0; k < 4096 && n < want; k++) {
+        uint32_t pc = walk_next(x, t, &w);
+        if (!pc)
+            break;
+        if (k < skip)
+            continue;
+        if (out)
+            x360_w32(x, out + 4 * n, pc);
+        sum += pc;
+        n++;
+    }
+    if (hash)
+        x360_w32(x, hash, sum);
+    RET(n);
+}
+
+static void k_RtlGetCallersAddress(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    /* (caller*, caller's caller*) of the function that asks: the frames after its own */
+    uint32_t out1 = A(0), out2 = A(1);
+    walker w;
+    walk_start(&w, c);
+    uint32_t self = walk_next(x, t, &w), a = self ? walk_next(x, t, &w) : 0, b = a ? walk_next(x, t, &w) : 0;
+    if (out1)
+        x360_w32(x, out1, a);
+    if (out2)
+        x360_w32(x, out2, b);
+    RET(0);
+}
+
+static void k_RtlGetStackLimits(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    if (A(0))
+        x360_w32(x, A(0), t->stack_limit);
+    if (A(1))
+        x360_w32(x, A(1), t->stack_base);
+    RET(0);
+}
+
+static void k_RtlRaiseStatus(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    /* an EXCEPTION_RECORD (code, flags, record, address, parameter count, 15 parameters) just below the caller's frame,
+     * above the area x360_seh.c dispatches from */
+    uint32_t rec = ((uint32_t)c->gpr[1] - 0x60) & ~7u;
+    for (uint32_t k = 0; k < 0x50; k += 4)
+        x360_w32(x, rec + k, 0);
+    x360_w32(x, rec, A(0));
+    x360_w32(x, rec + 4, 1); /* EXCEPTION_NONCONTINUABLE */
+    x360_w32(x, rec + 12, c->pc);
+    x360_seh_raise(x, t, rec);
+}
+
+/* ---- the image: PE headers are little-endian in guest memory ---- */
+
+static uint32_t le16(x360_machine *x, uint32_t a)
+{
+    return x360_r8(x, a) | (uint32_t)x360_r8(x, a + 1) << 8;
+}
+
+static uint32_t le32(x360_machine *x, uint32_t a)
+{
+    return le16(x, a) | le16(x, a + 2) << 16;
+}
+
+/* a module handle stands for its image */
+static uint32_t image_of(const x360_machine *x, uint32_t base)
+{
+    return base && base == x->module ? x->image_base : base;
+}
+
+/* IMAGE_NT_HEADERS of the image at base, 0 when it has none; the headers are in its first page */
+static uint32_t nt_headers(x360_machine *x, uint32_t base)
+{
+    if (!base || x360_r8(x, base) != 'M' || x360_r8(x, base + 1) != 'Z')
+        return 0;
+    uint32_t lfanew = le32(x, base + 0x3C);
+    if (lfanew > 0x1000 - 0x18 || le32(x, base + lfanew) != 0x00004550u)
+        return 0;
+    return base + lfanew;
+}
+
+static void k_RtlImageNtHeader(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    RET(nt_headers(x, image_of(x, A(0))));
+}
+
+/* (base, mapped as image, directory, size*): bit 0 of the base marks an image mapped as a data file */
+static void k_RtlImageDirectoryEntryToData(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t base = image_of(x, A(0)), mapped = A(1) & 0xFF, dir = A(2) & 0xFFFF, size = A(3);
+    if (base & 1) {
+        base &= ~1u;
+        mapped = 0;
+    }
+    uint32_t nt = nt_headers(x, base);
+    uint32_t opt = nt + 24, magic = nt ? le16(x, opt) : 0;
+    if (magic != 0x10B && magic != 0x20B) { /* PE32, PE32+ */
+        RET(0);
+        return;
+    }
+    uint32_t count = le32(x, opt + (magic == 0x10B ? 92 : 108)), dirs = opt + (magic == 0x10B ? 96 : 112);
+    uint32_t rva = dir < count ? le32(x, dirs + 8 * dir) : 0;
+    if (!rva) {
+        RET(0);
+        return;
+    }
+    if (size)
+        x360_w32(x, size, le32(x, dirs + 8 * dir + 4));
+    if (mapped || rva < le32(x, opt + 60)) { /* SizeOfHeaders: the same offset in either view */
+        RET(base + rva);
+        return;
+    }
+    uint32_t sec = opt + le16(x, nt + 20), nsec = le16(x, nt + 6);
+    for (uint32_t k = 0; k < nsec && k < 96; k++, sec += 40) {
+        uint32_t va = le32(x, sec + 12), raw = le32(x, sec + 16), ptr = le32(x, sec + 20);
+        if (rva >= va && rva - va < raw) {
+            RET(base + ptr + (rva - va));
+            return;
+        }
+    }
+    RET(0);
+}
+
+static void k_XexPcToFileHeader(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* (pc, loader entry*): the image holding pc */
+    int hit = in_image(x, A(0));
+    if (A(1))
+        x360_w32(x, A(1), hit ? x->module : 0);
+    RET(hit ? x->image_base : 0);
+}
+
+/* The title is the only module this runtime has: nothing else can be loaded. */
+static void k_XexLoadImage(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    if (A(3))
+        x360_w32(x, A(3), 0);
+    RET(0xC0000034u); /* STATUS_OBJECT_NAME_NOT_FOUND */
+}
+
+static void k_XexUnloadImage(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    RET(A(0) && A(0) == x->module ? X_STATUS_SUCCESS : X_STATUS_INVALID_HANDLE);
+}
+
+/* CRC-32 (IEEE, reflected), four bits at a time */
+static void k_RtlComputeCrc32(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    static const uint32_t nibble[16] = {0x00000000u, 0x1DB71064u, 0x3B6E20C8u, 0x26D930ACu, 0x76DC4190u, 0x6B6B51F4u,
+                                        0x4DB26158u, 0x5005713Cu, 0xEDB88320u, 0xF00F9344u, 0xD6D6A3E8u, 0xCB61B38Cu,
+                                        0x9B64C2B0u, 0x86D3D2D4u, 0xA00AE278u, 0xBDBDF21Cu};
+    uint32_t crc = ~A(0), p = A(1), n = A(2);
+    for (uint32_t k = 0; k < n; k++) {
+        crc ^= x360_r8(x, p + k);
+        crc = crc >> 4 ^ nibble[crc & 15];
+        crc = crc >> 4 ^ nibble[crc & 15];
+    }
+    RET(~crc);
+}
+
 const x360_hle_row x360_tab_rtl[] = {
+    X360_HK(RtlLookupFunctionEntry, k_RtlLookupFunctionEntry),
+    X360_HK(RtlVirtualUnwind, k_RtlVirtualUnwind),
+    X360_HK(RtlCaptureStackBackTrace, k_RtlCaptureStackBackTrace),
+    X360_HK(RtlGetCallersAddress, k_RtlGetCallersAddress),
+    X360_HK(RtlGetStackLimits, k_RtlGetStackLimits),
+    X360_HK(RtlRaiseStatus, k_RtlRaiseStatus),
+    X360_HK(RtlImageNtHeader, k_RtlImageNtHeader),
+    X360_HK(RtlImageDirectoryEntryToData, k_RtlImageDirectoryEntryToData),
+    X360_HK(XexPcToFileHeader, k_XexPcToFileHeader),
+    X360_HK(XexLoadImage, k_XexLoadImage),
+    X360_HK(XexUnloadImage, k_XexUnloadImage),
+    X360_HK(RtlComputeCrc32, k_RtlComputeCrc32),
     X360_HK(RtlCompareMemory, k_RtlCompareMemory),
     X360_HK(RtlUpperChar, k_RtlUpperChar),
     X360_HK(RtlLowerChar, k_RtlLowerChar),
