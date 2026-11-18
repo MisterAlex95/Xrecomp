@@ -23,3 +23,7 @@ add_test(NAME memory_regressions_ext_vma_stress COMMAND memory_regressions_test 
 set_tests_properties(memory_regressions_ext_vma_stress PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 add_test(NAME memory_regressions_ext_vma_128 COMMAND memory_regressions_test ext-vma-128 ${XBE})
 add_test(NAME memory_regressions_lazy_off COMMAND memory_regressions_test lazy-off ${XBE})
+add_test(NAME memory_regressions_lazy_reuse COMMAND memory_regressions_test lazy-reuse ${XBE})
+add_test(NAME memory_regressions_lazy_slots COMMAND memory_regressions_test lazy-slots ${XBE})
+set_tests_properties(memory_regressions_lazy_reuse memory_regressions_lazy_slots
+                     PROPERTIES SKIP_RETURN_CODE 77)
