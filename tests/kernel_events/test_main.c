@@ -170,6 +170,37 @@ static long long timer_due(void)
     return next;
 }
 
+/* XB-001: a periodic timer keeps its own schedule, however late the pass that
+ * fires it, and a stall restarts it instead of firing a burst. */
+static void timers_periodic(void)
+{
+    long long due, next = -1, t;
+    char d[120];
+    int fired, n = 0;
+
+    ke_set_timer_ex(-ONE_HOUR_100NS, 16);
+    due = timer_due();
+    fired = xbox_TimerFireForTest(due + 3, &next);
+    snprintf(d, sizeof d, "fired %d, next due +%lld", fired, next - due);
+    check(fired == 1 && next == due + 16, "fired 3 ms late: the next is one period after the due time", d);
+    fired = xbox_TimerFireForTest(due + 19, &next);
+    snprintf(d, sizeof d, "fired %d, next due +%lld", fired, next - due);
+    check(fired == 1 && next == due + 32, "late again: still on the 16 ms schedule", d);
+    fired = xbox_TimerFireForTest(due + 500, &next);
+    snprintf(d, sizeof d, "fired %d, next due +%lld", fired, next - due);
+    check(fired == 1 && next > due + 500 && next <= due + 516,
+          "a stall fires once and restarts one period on", d);
+    check(xbox_TimerFireForTest(due + 500, &next) == 0, "no burst after the stall", NULL);
+
+    /* The legacy loop's 10 ms tick, for 1.6 s: 16 ms is 62.5 Hz, not 50. */
+    ke_set_timer_ex(-ONE_HOUR_100NS, 16);
+    due = timer_due();
+    for (t = 0; t < 1600; t += 10)
+        n += xbox_TimerFireForTest(due + t, &next);
+    snprintf(d, sizeof d, "%d fires", n);
+    check(n == 100, "a 16 ms timer on the 10 ms tick fires 100 times in 1.6 s", d);
+}
+
 static void timers_seam(void)
 {
     long long due, next = -1;
@@ -251,6 +282,7 @@ int main(int argc, char **argv)
     printf("mode: %s\n", mode);
 
     if (timers) {
+        timers_periodic();
         timers_seam();
         /* The timer thread is still running: no layout shutdown under it. */
         printf("\n%d failure(s)\n", failures);

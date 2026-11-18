@@ -4602,8 +4602,8 @@ static void bridge_KeInitializeTimerEx(void)
  * has not come up in practice.
  *
  * ponytail: one thread, a fixed table, and a 10 ms tick, so a due time is late
- * by up to a tick and a periodic timer drifts. Nothing here is scheduling
- * audio off a timer. A title that needs better wants the host's timer queue,
+ * by up to a tick; a periodic timer keeps its schedule all the same (see
+ * kernel_fire_timers). A title that needs better wants the host's timer queue,
  * not a smaller sleep.
  */
 /* 128 armed at once (KRN-9): with 32, the 33rd KeSetTimer returned as if
@@ -4670,7 +4670,13 @@ static int kernel_fire_timers(long long now, long long *next_due_ms)
         fired_va = g_timers[i].timer_va;
         dpc = g_timers[i].dpc_va;
         if (g_timers[i].period_ms > 0) {
-            g_timers[i].due_ms = now + g_timers[i].period_ms;
+            /* From the time it was due, not the time this pass noticed: from
+             * `now`, each period grew by the pass's lateness and a 16 ms timer
+             * on the 10 ms tick ran at 50 Hz. Behind by a whole period (the
+             * host stalled), it starts again rather than firing a burst. */
+            g_timers[i].due_ms += g_timers[i].period_ms;
+            if (g_timers[i].due_ms <= now)
+                g_timers[i].due_ms = now + g_timers[i].period_ms;
             if (*next_due_ms < 0 || g_timers[i].due_ms < *next_due_ms)
                 *next_due_ms = g_timers[i].due_ms;
         } else {
