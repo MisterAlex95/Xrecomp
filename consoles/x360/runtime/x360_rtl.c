@@ -852,26 +852,20 @@ static void k_RtlLookupFunctionEntry(x360_machine *x, x360_thread *t, xe_cpu *c)
 }
 
 /* NT's PowerPC form: (ControlPc, FunctionEntry, ContextRecord, InFunction*, EstablisherFrame*, ContextPointers,
- * LowStackLimit, HighStackLimit), the caller's PC as the result and the caller's state in the record. The optional
- * ContextPointers are not filled in; the limits are not needed, the frames are read from the back chain. */
+ * LowStackLimit, HighStackLimit), the caller's PC as the result and the caller's state in the record. The function is
+ * always found from ControlPc: FunctionEntry comes in two shapes (a .pdata entry from RtlLookupFunctionEntry, the
+ * expanded record of a DISPATCHER_CONTEXT from x360_seh.c) and says nothing more. The optional ContextPointers are not
+ * filled in; the limits are not needed, the frames are read from the back chain. */
 static void k_RtlVirtualUnwind(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    uint32_t pc = A(0), entry = A(1), rec = A(2), in_fn = A(3), frame = A(4);
+    uint32_t pc = A(0), rec = A(2), in_fn = A(3), frame = A(4);
     x360_seh_ctx cur, next;
     x360_seh_fn f;
     memset(&cur, 0, sizeof cur);
     x360_seh_read_context(x, rec, &cur);
     cur.pc = pc;
-    int have;
-    if (entry) {
-        uint32_t info = x360_r32(x, entry + 4);
-        f.entry = entry, f.start = x360_r32(x, entry), f.info = info;
-        f.prolog = info & 0xFF, f.len = ((info >> 8) & 0x3FFFFF) * 4;
-        have = 1;
-    } else {
-        have = x360_seh_lookup(x, pc, &f);
-    }
+    int have = x360_seh_lookup(x, pc, &f);
     x360_seh_virtual_unwind(x, &cur, have ? &f : NULL, &next);
     if (in_fn)
         x360_w8(x, in_fn, have && pc >= f.start + 4 * f.prolog && pc - f.start < f.len);

@@ -775,6 +775,17 @@ static void test_unwind(void)
     x360_seh_write_context(X, rec, &k);
     T(K(X360_xboxkrnl_RtlVirtualUnwind, 8, PC_C, 0, rec, 0, 0, 0, 0, 0) == RET_B, "the entry found from the pc");
 
+    /* a handler forwards its DISPATCHER_CONTEXT's FunctionEntry: the expanded record {Begin, End, Handler, Data, PrologEnd} */
+    uint32_t expanded = galloc(20);
+    x360_w32(X, expanded, img + RVA_C);
+    x360_w32(X, expanded + 4, img + RVA_C + 4 * FN_WORDS);
+    x360_w32(X, expanded + 16, img + RVA_C + 16);
+    x360_seh_write_context(X, rec, &k);
+    T(K(X360_xboxkrnl_RtlVirtualUnwind, 8, PC_C, expanded, rec, in_fn, est, 0, 0, 0) == RET_B, "an expanded entry");
+    x360_seh_read_context(X, rec, &up);
+    T(up.gpr[1] == stack_top + 0x60 && up.gpr[31] == 0x1111222233334444ull, "the frame read through an expanded entry");
+    T(x360_r8(X, in_fn) == 1, "past the prolog with an expanded entry");
+
     /* at the function's first instruction nothing is saved yet: the caller is in LR */
     k.pc = img + RVA_C, k.lr = RET_B;
     x360_seh_write_context(X, rec, &k);
