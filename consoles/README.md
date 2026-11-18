@@ -1936,17 +1936,23 @@ What is there:
   states** in the other consoles' format (`gc_state.c`: threads, kernel objects, heaps, guest memory without its zero
   pages, the GPU, open files and links, the pads), taken between time slices. `x360_cheat_read32` / `write32`: the
   host layer's data cheats, on allocated guest memory only. Disc images: `src/xiso` also probes XGD3's game
-  partition base (0x02080000; XGD2's 0x0FD90000 was there) and Xenia's two other offsets. `xenos_gl.c`: **the first
-  renderer**, OpenGL ES 3.0 (the GameCube's choice for the Thor; the epic planned Vulkan: to settle), EGL / GLES
-  loaded at run time (no build dependency): at each draw the shaders come from the cache, the vertex fetch constants
-  give the buffers (32-bit float, 8_8_8_8 and 16_16 normalised formats converted on the CPU with the GPU's endian
-  swaps), DMA or auto indices, constants into the uniform blocks, the viewport registers; points / lines / triangle
-  lists, fans and strips into an off-screen target read back at each swap (PPM frames). Not yet: render state
-  (blending, depth, culling, masks), eDRAM and resolves (the guest's front buffer is not written), textures,
-  rectangle / quad lists, more formats.
+  partition base (0x02080000; XGD2's 0x0FD90000 was there) and Xenia's two other offsets. `xenos_gl.c`: **the renderer**,
+  OpenGL ES 3.0 (the GameCube's choice for the Thor; the epic planned Vulkan: to settle), EGL / GLES loaded at run
+  time (no build dependency). At each draw: the shaders from the cache; vertex fetch constants give the buffers
+  (float, 8_8_8_8, 2_10_10_10, 10_11_11, 16-bit, half-float and 32-bit integer formats, normalised or not, exp_adjust,
+  converted on the CPU with the GPU's endian swaps); DMA or auto indices with VGT_INDX_OFFSET and the reset index;
+  float / boolean / loop constants, the alpha test, the pixel parameters (position, face) and the guest viewport
+  (screen-space positions when it is off, window offset, half pixel) through the uniform blocks; render state
+  (blending, colour mask, depth / stencil, culling and winding, scissor); points, lines, strips, triangle lists /
+  fans / strips, quad lists and rectangle lists (transform feedback for their fourth corners); four render targets;
+  textures 1D / 2D / 3D / cube, linear or tiled (Xenia's tiling formulas), 8 / 16 / 32-bit and DXT formats, clamp,
+  filter and swizzle, checked against their memory once per frame. Resolves (eDRAM mode copy) write the render
+  target to guest memory as a tiled texture (8_8_8_8, 5_6_5) and clear colour / depth / stencil; a swap's frame is
+  the front buffer VdSwap names when a resolve wrote it, else render target 0 (PPM frames, up to `--frame-limit`).
+  `--audio FILE.wav` keeps what titles submit to the render driver (6-channel float, 48 kHz).
 - `x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--gpu-trace FILE] [--dump-shaders DIR]
-  [--save-state FILE] [--load-state FILE] [--pad-script FILE] [--render SHADER_CACHE [--frames DIR] [--render-size
-  WxH]] [--seconds N] [--strict-imports] [--missed FILE] [--stats]`: LIB.so is
+  [--save-state FILE] [--load-state FILE] [--pad-script FILE] [--audio FILE.wav] [--render SHADER_CACHE [--frames
+  DIR] [--frame-limit N] [--render-size WxH]] [--seconds N] [--strict-imports] [--missed FILE] [--stats]`: LIB.so is
   `x360_tools.recomp`'s C built with `-DXE_RUNTIME -shared` (stale packs are refused by CRC). A synthetic tight loop
   runs about 380 million guest instructions a second (x86-64, the pack at -O1); a recompile of 20,000 functions takes
   about 9 s and their pack about 100 s on three cores.
@@ -1955,7 +1961,11 @@ What is there:
   microcode decoding, HLE coverage), the shader translator on a real GLES implementation (`tests/run_glsl_mesa.sh`,
   Mesa llvmpipe in a container, homebrew CI job: ~570 random vertex and pixel shaders, control flow, fetches, kills,
   against a reference interpreter, then `xenos_draw_test`), ctest `xenos_cp` (hand-built PM4 packets), `xenos_draw`
-  (the renderer draws a hand-built PM4 stream: triangle, indexed quad, viewport; skipped without EGL / GLES),
+  (the renderer on a hand-built PM4 stream, 25 frames read back: indices, viewport and screen space, depth, blending,
+  culling, quad and rectangle lists, textures of every kind, resolves and render to texture, four render targets,
+  alpha test, pixel parameters, packed vertex formats; skipped without EGL / GLES, runs in the homebrew job),
+  `x360_render` (the same renderer through the machine as `x360_run --render` drives it: a guest ring, VdSwap and a
+  front buffer frame, a save state loaded),
   `x360_hle` (the exports called
   directly, incl. FIPS / RFC crypto vectors), `x360_hello` / `x360_hello_lzx` (our assembly title: MSVC-shaped
   prologues, a jump table, imports by real ordinal; plain, then encrypted with a made-up key and LZX-compressed and
@@ -1966,9 +1976,11 @@ What is there:
   by the homebrew job through `tools/consoles/run_x360_homebrew.sh`). `tests/run_hello_arm64.sh` runs the hello test
   on arm64 under qemu (same text).
 
-Not there yet (XBA-229): the rest of rendering (render state, eDRAM and resolves, textures and their tiling, memory
-export, run-time translation of shaders the cache lacks, the GLES / Vulkan choice), audio output
-(XMA decoding, the render driver's frames), vibration, real parallel hardware threads, structured exception
+Not there yet (XBA-229): the rest of rendering (an eDRAM model with render target bases, formats and MSAA, mips,
+the other texture and resolve formats, vertex fetches at a computed index (instancing), memory export, run-time
+translation of shaders the cache lacks, the GLES / Vulkan choice; several conventions -- winding, channel orders,
+cube faces -- follow Xenia's descriptions and wait for a real title), XMA decoding (XMA voices are silent), audio
+output to a device, vibration, real parallel hardware threads, structured exception
 handling (`__C_specific_handler` continues the search, `RtlUnwind` stops the title), the network, and whatever
 `hle_coverage` lists as missing on Alex's titles.
 
