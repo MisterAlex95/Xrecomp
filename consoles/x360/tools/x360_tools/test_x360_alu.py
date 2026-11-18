@@ -1,8 +1,8 @@
 """Instruction-level differential test of the Xenon lifter (XBA-270): about seventy integer and floating-point
 instructions, each in its own function of a synthetic XEX2, lifted, built with the host cc and run on edge values and
 random operands; every result is checked against a reference written here from the PowerPC architecture's definitions
-in 64-bit mode (Book I: 64-bit results, CR0 from the 64-bit result, the carry out of bit 0, word instructions on the
-low word, rlw* replicating the low word), not from the runtime's C. Where the architecture leaves bits undefined
+as a title runs them: 64-bit registers and results in 32-bit mode (MSR[SF] = 0: CR0 from the low word, the carry out of
+the low word; Book I), word instructions on the low word, rlw* replicating the low word, not from the runtime's C. Where the architecture leaves bits undefined
 (the high word of mulhw / mulhwu / divw / divwu, of fctiw), only the defined bits are compared."""
 
 import math
@@ -95,7 +95,8 @@ def rotl32x2(v, n):
 
 
 def cr_of(v):
-    v = s64(v)
+    """CR0 of a record form: titles run in 32-bit mode, the low word compared with 0."""
+    v = s32(v)
     return 8 if v < 0 else 4 if v > 0 else 2
 
 
@@ -104,7 +105,8 @@ def cmp_bits(a, b):
 
 
 def carry_add(*xs):
-    return 1 if sum(xs) > M64 else 0
+    """XER[CA] in 32-bit mode: the carry out of the low words."""
+    return 1 if sum(x & M32 for x in xs) > M32 else 0
 
 
 # ---- the integer instructions: (name, word, reference(a, b, c, ca) -> (r7, ca_out, cr_field_value, low32_only))

@@ -42,6 +42,16 @@ static inline uint32_t ppc_carry64(uint64_t a, uint64_t b, uint32_t cin)
     return c | (t < s);
 }
 
+/* Titles run in 32-bit mode (MSR[SF] = 0, XBA-270): 64-bit registers and instructions, but XER[CA] is the carry
+ * out of the low word and record forms set CR0 from the low word (as Xenia's and XenonRecomp's code generators
+ * do: AddDidCarry / UpdateCR truncate to 32 bits, compare<int32_t>). The add / subtract family uses this. */
+static inline uint32_t xe_carry(uint64_t a, uint64_t b, uint32_t cin)
+{
+    uint32_t x = (uint32_t)a, y = (uint32_t)b;
+    uint32_t s = x + y;
+    return (s < x) | ((uint32_t)(s + cin) < s);
+}
+
 static inline uint64_t ppc_rotl64(uint64_t v, unsigned n)
 {
     n &= 63;

@@ -263,7 +263,7 @@ def ref_mix(a, b, n):
     r32 = (((b & 0xFFFFFFFF) << 4) | ((b & 0xFFFFFFFF) >> 28)) & 0xFFFFFFFF
     m32 = 0xF000000F                                             # MASK(28, 3), wrapping
     rlw = (r32 << 32) | (r32 & m32)                              # 64-bit mode: high word replicated
-    carry = 1 if x + b > M64 else 0
+    carry = 1 if (x & 0xFFFFFFFF) + (b & 0xFFFFFFFF) > 0xFFFFFFFF else 0  # 32-bit mode: the low words' carry
     m = ((M64 >> 8) & ~(M64 >> 48)) & M64                        # MASK(8, 47)
     ins = (rotl64(b, 16) & m) | (x & ~m & M64)
     out = [x, hi, q & M64, rlw, s32(s) & M64, s32(x) & M64, x >> clz if clz < 64 else 0,

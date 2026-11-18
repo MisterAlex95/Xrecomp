@@ -14,9 +14,11 @@ adds, on opcodes the base leaves open or does not know:
   vrlimi128, vpkd3d128 / vupkd3d128).
 
 Encodings and field layouts follow Xenia's PowerPC tables (ppc_opcode_lookup_gen.cc / ppc_decode_data.h, BSD), checked
-against the opcode constants in the tests. 64-bit semantics: R(n) is 64-bit; word instructions follow 64-bit mode
-rules (CR0 compares the 64-bit result, rlw* replicate the low word, sraw / extsh sign-extend to 64 bits); effective
-addresses are 32-bit (titles run with 32-bit pointers in 64-bit registers: the memory macros take uint32_t).
+against the opcode constants in the tests. Semantics: R(n) is 64-bit and 64-bit instructions compute 64 bits, but
+titles run in 32-bit mode (MSR[SF] = 0, XBA-270; as Xenia's and XenonRecomp's code generators assume): record forms
+set CR0 from the low word, XER[CA] is the carry out of the low word, CTR-decrementing branches test the low word of
+CTR, effective addresses are 32-bit (the memory macros take uint32_t); rlw* replicate the low word, sraw / extsh
+sign-extend to 64 bits.
 
 The lifter emits the C vocabulary of tools/ppc/lift.py plus V(n) (a 128-bit vector register, union xe_v128 with
 PPC element order: element 0 is the first in memory) and the xv_* helpers of consoles/x360/runtime/xenon_ops.h.
@@ -322,6 +324,12 @@ OE_64 = {"mulld", "mulhd", "mulhdu", "divd", "divdu"}
 
 
 class XenonLifter(FnLifter):
+    @staticmethod
+    def cond(i):
+        """32-bit mode: bdnz and the other CTR-decrementing branches test the low word of CTR."""
+        pre, c = FnLifter.cond(i)
+        return pre, c.replace("c->ctr == 0", "(uint32_t)c->ctr == 0").replace("c->ctr != 0", "(uint32_t)c->ctr != 0")
+
     def needs_interp(self, i):
         n = i.name
         if n in XENON_INTERP:
@@ -343,14 +351,14 @@ class XenonLifter(FnLifter):
         return "%s = %s + %s;" % (R(i.rd), RA0(i.ra), k64(i.simm << 16))
 
     def op_addic(self, i):
-        return "{ uint64_t a_ = %s; %s = a_ + %s; c->xer_ca = ppc_carry64(a_, %s, 0); }" % (
+        return "{ uint64_t a_ = %s; %s = a_ + %s; c->xer_ca = xe_carry(a_, %s, 0); }" % (
             R(i.ra), R(i.rd), k64(i.simm), k64(i.simm))
 
     def op_addic_rec(self, i):
         return self.op_addic(i) + " RC_CR0(%s);" % R(i.rd)
 
     def op_subfic(self, i):
-        return "{ uint64_t a_ = %s; %s = ~a_ + %s + 1u; c->xer_ca = ppc_carry64(~a_, %s, 1); }" % (
+        return "{ uint64_t a_ = %s; %s = ~a_ + %s + 1u; c->xer_ca = xe_carry(~a_, %s, 1); }" % (
             R(i.ra), R(i.rd), k64(i.simm), k64(i.simm))
 
     def op_mulli(self, i):
@@ -408,33 +416,33 @@ class XenonLifter(FnLifter):
     def _xo(self, i, body):
         return "{ uint64_t a_ = %s, b_ = %s; (void)b_; %s }%s" % (R(i.ra), R(i.rb), body, self.rec(i, i.rd))
 
-    def op_addc(self, i): return self._xo(i, "%s = a_ + b_; c->xer_ca = ppc_carry64(a_, b_, 0);" % R(i.rd))
+    def op_addc(self, i): return self._xo(i, "%s = a_ + b_; c->xer_ca = xe_carry(a_, b_, 0);" % R(i.rd))
 
     def op_subfc(self, i):
-        return self._xo(i, "%s = ~a_ + b_ + 1u; c->xer_ca = ppc_carry64(~a_, b_, 1);" % R(i.rd))
+        return self._xo(i, "%s = ~a_ + b_ + 1u; c->xer_ca = xe_carry(~a_, b_, 1);" % R(i.rd))
 
     def op_adde(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ + b_ + ci_; c->xer_ca = ppc_carry64(a_, b_, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ + b_ + ci_; c->xer_ca = xe_carry(a_, b_, ci_);"
                         % R(i.rd))
 
     def op_subfe(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ + b_ + ci_; c->xer_ca = ppc_carry64(~a_, b_, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ + b_ + ci_; c->xer_ca = xe_carry(~a_, b_, ci_);"
                         % R(i.rd))
 
     def op_addze(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ + ci_; c->xer_ca = ppc_carry64(a_, 0, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ + ci_; c->xer_ca = xe_carry(a_, 0, ci_);"
                         % R(i.rd))
 
     def op_subfze(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ + ci_; c->xer_ca = ppc_carry64(~a_, 0, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ + ci_; c->xer_ca = xe_carry(~a_, 0, ci_);"
                         % R(i.rd))
 
     def op_addme(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ - 1u + ci_; c->xer_ca = ppc_carry64(a_, ~0ULL, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ - 1u + ci_; c->xer_ca = xe_carry(a_, ~0ULL, ci_);"
                         % R(i.rd))
 
     def op_subfme(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ - 1u + ci_; c->xer_ca = ppc_carry64(~a_, ~0ULL, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ - 1u + ci_; c->xer_ca = xe_carry(~a_, ~0ULL, ci_);"
                         % R(i.rd))
 
     def op_mullw(self, i):

@@ -312,8 +312,9 @@ static inline void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
         c->xer_ov = (x_ >> 30) & 1;                                                                                    \
         c->xer_ca = (x_ >> 29) & 1;                                                                                    \
     } while (0)
-/* Record forms in 64-bit mode: CR0 compares the whole 64-bit result. */
-#define RC_CR0(v) (c->cr = ppc_cr_set(c->cr, 0, ppc_cmps64((int64_t)(v), 0, c->xer_so)))
+/* Record forms: titles run in 32-bit mode (MSR[SF] = 0), CR0 compares the low word of the result with 0 (xenon_ops.h
+ * xe_carry says more). */
+#define RC_CR0(v) (c->cr = ppc_cr_set(c->cr, 0, ppc_cmps((int32_t)(uint32_t)(v), 0, c->xer_so)))
 #define RC_FSET_S(d, v) (c->fpr[d] = ppc_single(v))
 #define RC_FSET_D(d, v) (c->fpr[d] = (v))
 
