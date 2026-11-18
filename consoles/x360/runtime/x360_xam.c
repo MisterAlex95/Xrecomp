@@ -2,7 +2,7 @@
  * frame. Signatures and return values follow Xenia's xam_info.cc / xam_user.cc / xam_input.cc / xam_notify.cc (BSD).
  *
  * The machine looks like a console with user 0 signed in locally ("Player", offline), English, all regions, HDMI,
- * no launch data, no notifications; the controllers are x360_input.c's. */
+ * no launch data; notifications are x360_xam2.c's; the controllers are x360_input.c's. */
 #include <string.h>
 
 #include "x360_internal.h"
@@ -193,27 +193,6 @@ void x360_x_XamUserIsOnlineEnabled(x360_machine *x, x360_thread *t, xe_cpu *c)
 }
 
 void x360_x_XamEnableInactivityProcessing(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)x, (void)t;
-    RET(X_ERROR_SUCCESS);
-}
-
-void x360_x_XamNotifyCreateListener(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    /* a notification object that is never signalled: no system notifications yet */
-    uint32_t o = x360_kalloc(x, 16);
-    x360_w8(x, o, X_OBJ_EVENT_NOTIFICATION);
-    RET(x360_handle_new(x, o));
-}
-
-void x360_x_XNotifyGetNext(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)x, (void)t;
-    RET(0); /* nothing pending */
-}
-
-void x360_x_XamShowSigninUI(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)x, (void)t;
     RET(X_ERROR_SUCCESS);

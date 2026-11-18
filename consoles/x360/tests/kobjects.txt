@@ -1,0 +1,7 @@
+slist: 256 nodes, 0 twice, depth 0
+rwlock: 3000 writes, 0 torn reads
+queue: 300 entries, sum 45150
+port: 300 packets, sum 46950
+dpc: inserted 1, routine saw 3211
+apc: queued 0, the delay ended with C0, routine saw 321
+timer: 5 periods

@@ -30,5 +30,26 @@ SECTIONS
     KeTlsSetValue = __thunks + 17 * 16;
     KeTlsGetValue = __thunks + 18 * 16;
     sprintf = __thunks + 19 * 16;
+    InterlockedPushEntrySList = __thunks + 20 * 16;
+    InterlockedPopEntrySList = __thunks + 21 * 16;
+    ExInitializeReadWriteLock = __thunks + 22 * 16;
+    ExAcquireReadWriteLockExclusive = __thunks + 23 * 16;
+    ExAcquireReadWriteLockShared = __thunks + 24 * 16;
+    ExReleaseReadWriteLock = __thunks + 25 * 16;
+    KeInitializeQueue = __thunks + 26 * 16;
+    KeInsertQueue = __thunks + 27 * 16;
+    KeRemoveQueue = __thunks + 28 * 16;
+    NtCreateIoCompletion = __thunks + 29 * 16;
+    NtSetIoCompletion = __thunks + 30 * 16;
+    NtRemoveIoCompletion = __thunks + 31 * 16;
+    KeInitializeDpc = __thunks + 32 * 16;
+    KeInsertQueueDpc = __thunks + 33 * 16;
+    KeInitializeEvent = __thunks + 34 * 16;
+    KeSetEvent = __thunks + 35 * 16;
+    KeWaitForSingleObject = __thunks + 36 * 16;
+    NtQueueApcThread = __thunks + 37 * 16;
+    NtCreateTimer = __thunks + 38 * 16;
+    NtSetTimerEx = __thunks + 39 * 16;
+    NtCancelTimer = __thunks + 40 * 16;
     /DISCARD/ : { *(.comment) *(.eh_frame) *(.gnu.attributes) }
 }
