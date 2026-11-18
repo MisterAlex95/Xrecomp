@@ -4597,9 +4597,7 @@ static void bridge_KeInitializeTimerEx(void)
  * during XInitDevices and enumerates from it.
  *
  * A due time is in 100 ns units, negative for relative and positive for an
- * absolute time since 1601. Only the relative form is honoured here; an
- * absolute due time is treated as immediate, which is wrong in principle and
- * has not come up in practice.
+ * absolute time since 1601 (kernel_timer_delay_ms).
  *
  * ponytail: one thread, a fixed table, and a 10 ms tick, so a due time is late
  * by up to a tick; a periodic timer keeps its schedule all the same (see
@@ -4841,11 +4839,33 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
     return 0;
 }
 
+/* A due time as a delay in whole milliseconds, rounded up: a timer may fire
+ * late, never early. An absolute time is against the system time the guest
+ * reads, which like the timer table is on the guest clock (fast-forward's gain
+ * is in both), so the delay is guest time and takes no scaling. One already
+ * past is due now. */
+static long long kernel_timer_delay_ms(long long due_100ns)
+{
+    unsigned long long span;
+
+    if (due_100ns < 0) {
+        span = 0ull - (unsigned long long)due_100ns;
+    } else {
+        LARGE_INTEGER now;
+
+        xbox_KeQuerySystemTime(&now);
+        if (due_100ns <= now.QuadPart)
+            return 0;
+        span = (unsigned long long)(due_100ns - now.QuadPart);
+    }
+    return (long long)(span / 10000u + (span % 10000u != 0));
+}
+
 /* Shared by KeSetTimer and KeSetTimerEx; period is 0 for the former. */
 static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
                              long period_ms, uint32_t dpc_va)
 {
-    long long delay_ms = (due_100ns < 0) ? (-due_100ns) / 10000 : 0;
+    long long delay_ms = kernel_timer_delay_ms(due_100ns);
     int i, free_slot = -1;
     uint32_t was_set = 0;
 

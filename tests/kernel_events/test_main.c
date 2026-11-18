@@ -212,6 +212,46 @@ static void timers_seam(void)
           "it does not fire before its due time", NULL);
 }
 
+/* XB-002: a positive due time is an absolute system time, and a relative one
+ * is never cut short by its fraction of a millisecond. */
+static void timers_due_time(void)
+{
+    LARGE_INTEGER now;
+    long long rel, abs_due, past, next = -1, gap;
+    char d[120];
+    int i, later = 0;
+    enum { ROUNDS = 20 };
+
+    ke_set_timer_ex(-ONE_HOUR_100NS, 0);
+    rel = timer_due();
+    xbox_KeQuerySystemTime(&now);
+    ke_set_timer_ex(now.QuadPart + ONE_HOUR_100NS, 0);
+    abs_due = timer_due();
+    gap = abs_due > rel ? abs_due - rel : rel - abs_due;
+    snprintf(d, sizeof d, "%lld ms from the relative timer", gap);
+    check(gap <= 2000, "an absolute due time an hour ahead is due in an hour", d);
+    check(xbox_TimerFireForTest(abs_due - 1, &next) == 0, "not due 1 ms before it", NULL);
+    check(xbox_TimerFireForTest(abs_due, &next) == 1 && next == -1,
+          "due at it, once (a one-shot)", NULL);
+
+    /* Long past: at once. The real timer thread may take it first. */
+    ke_set_timer_ex(1, 0);
+    past = timer_due();
+    check(past == -1 || past < rel - 3000000, "an absolute time in the past is due now", NULL);
+
+    /* Same millisecond or not, the longer delay must end later. */
+    for (i = 0; i < ROUNDS; i++) {
+        long long whole, frac;
+        ke_set_timer_ex(-ONE_HOUR_100NS, 0);
+        whole = timer_due();
+        ke_set_timer_ex(-(ONE_HOUR_100NS + 5000), 0);
+        frac = timer_due();
+        later += frac > whole;
+    }
+    snprintf(d, sizeof d, "%d of %d rounds", later, ROUNDS);
+    check(later == ROUNDS, "half a millisecond more is rounded up, not dropped", d);
+}
+
 static unsigned char *load_file(const char *path, size_t *len)
 {
     FILE *f = fopen(path, "rb");
@@ -284,6 +324,7 @@ int main(int argc, char **argv)
     if (timers) {
         timers_periodic();
         timers_seam();
+        timers_due_time();
         /* The timer thread is still running: no layout shutdown under it. */
         printf("\n%d failure(s)\n", failures);
         return failures ? 1 : 0;
