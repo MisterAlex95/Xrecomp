@@ -26,30 +26,37 @@ enum { X360_LIB_XBOXKRNL = 0, X360_LIB_XAM = 1, X360_LIB_OTHER = 2 };
 #define X360_INTERP_RET_BITS 12 /* x360_interp.c: the return-address set holds up to 2048 */
 #define X360_MAX_HANDLES 4096
 #define X360_MAX_WAIT 64
-#define X360_MAX_TIMERS 64
+#define X360_MAX_TIMERS 256
+#define X360_KERN_TIMERS 64  /* the timers the KERN section of a save state holds; KOBJ has the rest */
+#define X360_MAX_PROT 128    /* NtProtectVirtualMemory: ranges not read-write */
 #define X360_TLS_SLOTS 64
 #define X360_THREAD_EXIT 0xBCBCBCBCu /* a thread's first LR: returning there ends the thread */
 #define X360_SEH_RETURN 0xBCBCBCB8u  /* an exception handler's LR: returning there goes back to x360_seh.c */
+#define X360_APC_RETURN 0xBCBCBCB4u /* an APC routine's LR: returning there goes back to x360_kdpc.c */
 #define X360_SEH_DEPTH 3             /* exceptions raised inside handlers, nested */
 #define X360_SLICE 4096              /* blocks per time slice */
 #define X360_EPOCH 0x01D7000000000000ull /* system time at boot (100 ns since 1601): fixed, runs are reproducible */
 
 /* NTSTATUS */
 #define X_STATUS_SUCCESS 0x00000000u
+#define X_STATUS_USER_APC 0x000000C0u
+#define X_STATUS_ALERTED 0x00000101u
 #define X_STATUS_TIMEOUT 0x00000102u
 #define X_STATUS_ABANDONED_WAIT_0 0x00000080u
 #define X_STATUS_UNSUCCESSFUL 0xC0000001u
 #define X_STATUS_NOT_IMPLEMENTED 0xC0000002u
+#define X_STATUS_INFO_LENGTH_MISMATCH 0xC0000004u
 #define X_STATUS_INVALID_HANDLE 0xC0000008u
 #define X_STATUS_INVALID_PARAMETER 0xC000000Du
 #define X_STATUS_NO_MEMORY 0xC0000017u
 #define X_STATUS_CONFLICTING_ADDRESSES 0xC0000018u
+#define X_STATUS_NOT_COMMITTED 0xC000002Du
 #define X_STATUS_MUTANT_NOT_OWNED 0xC0000046u
 #define X_STATUS_SEMAPHORE_LIMIT_EXCEEDED 0xC0000047u
 #define X_STATUS_NOT_FOUND 0xC0000225u
 
 /* dispatcher object types (X_DISPATCH_HEADER.type) */
-enum { X_OBJ_EVENT_NOTIFICATION = 0, X_OBJ_EVENT_SYNC = 1, X_OBJ_MUTANT = 2, X_OBJ_SEMAPHORE = 5, X_OBJ_THREAD = 6,
+enum { X_OBJ_EVENT_NOTIFICATION = 0, X_OBJ_EVENT_SYNC = 1, X_OBJ_MUTANT = 2, X_OBJ_QUEUE = 4, X_OBJ_SEMAPHORE = 5, X_OBJ_THREAD = 6,
        X_OBJ_TIMER_NOTIFICATION = 8, X_OBJ_TIMER_SYNC = 9 };
 
 typedef struct x360_heap {
@@ -62,7 +69,7 @@ typedef struct x360_heap {
 } x360_heap;
 
 enum { TH_FREE = 0, TH_READY, TH_WAIT, TH_SUSPENDED, TH_DONE };
-enum { WAIT_OBJECTS = 0, WAIT_CRITSEC, WAIT_DELAY };
+enum { WAIT_OBJECTS = 0, WAIT_CRITSEC, WAIT_DELAY, WAIT_QUEUE };
 
 /* x360_seh.c (XBA-282): one exception being dispatched on a thread; plain data (save states carry it) */
 typedef struct x360_seh_ctx {
@@ -101,6 +108,18 @@ typedef struct x360_thread {
     int interrupt; /* runs a graphics interrupt callback (x360_gpu.c) */
     int interp;    /* XBA-283: its time slice ran out inside interpreted code (not state: re-entry is not a miss) */
     x360_seh seh;  /* XBA-282: the exception being dispatched, if any */
+    /* XBA-296 (x360_kdpc.c; save states: section KOBJ) */
+    int wait_alertable, alerted;
+    uint32_t irql;
+    uint32_t apc_head, apc_tail, apc_cur, apc_scratch; /* queued KAPCs (guest list), the one running, its arguments */
+    int apc_stage, apc_konly, apc_rewait;              /* 0: none running; the wait to go back to afterwards */
+    uint32_t apc_ret_pc, apc_ret_r3;
+    uint64_t apc_ret_lr, apc_ret_r1;
+    uint32_t queue;                     /* the KQUEUE this thread serves */
+    int queue_active, queue_parked;     /* counted in its current count; blocked elsewhere for a moment */
+    int wait_iocp;                      /* NtRemoveIoCompletion: wait_out = key*, context*, IO_STATUS_BLOCK* */
+    uint32_t wait_out[3];
+    uint64_t wait_stamp;                /* queue waits: the newest is served first */
 } x360_thread;
 
 typedef struct x360_handle {
@@ -112,7 +131,22 @@ typedef struct x360_timer {
     uint32_t obj;
     uint64_t due;     /* 0: not armed */
     uint32_t period;  /* ms, 0: one shot */
+    uint32_t apc_routine, apc_ctx, apc_thread; /* NtSetTimerEx's APC and the thread that set it */
 } x360_timer;
+
+typedef struct x360_prot {
+    uint32_t base, size, prot;
+} x360_prot;
+
+/* x360_kdpc.c: what the kernel objects keep outside guest memory (save states: section KOBJ) */
+typedef struct x360_kobj {
+    uint32_t dpc_head, dpc_tail;  /* queued KDPCs (guest list) */
+    int dpc_slot;                 /* the DPC context's thread + 1, 0: none yet */
+    uint32_t apc_free, iocp_free; /* recycled KAPC blocks and I/O completion packets */
+    uint64_t wait_stamp;
+    uint32_t nprot;
+    x360_prot prot[X360_MAX_PROT];
+} x360_kobj;
 
 typedef struct x360_audio_client {
     uint32_t callback, arg;  /* XAudioRegisterRenderDriverClient's routine and argument */
@@ -214,6 +248,7 @@ struct x360_machine {
     int verbose;
     x360_stats st;
     x360_hle_fn hle[2][4096]; /* every export with an HLE, by library and ordinal (x360_kernel_init; not state) */
+    x360_kobj kobj;
     int hle_conflict;         /* two tables gave one export different functions: the machine is not created */
 };
 
@@ -269,10 +304,29 @@ uint64_t x360_now(x360_machine *x);
 /* start a wait for thread t (objects / delay); timeout_ptr: guest pointer to a 64-bit timeout, 0 = infinite */
 void x360_wait(x360_machine *x, x360_thread *t, int kind, const uint32_t *objs, int count, int wait_all,
                uint32_t timeout_ptr);
+void x360_wait_alertable(x360_machine *x, x360_thread *t, int kind, const uint32_t *objs, int count, int wait_all,
+                         uint32_t timeout_ptr, int alertable);
 void x360_fail(x360_machine *x, const char *fmt, ...);
 void x360_logf(x360_machine *x, const char *fmt, ...);
 void x360_timer_set(x360_machine *x, uint32_t obj, uint64_t due, uint32_t period);
-void x360_timer_cancel(x360_machine *x, uint32_t obj);
+int x360_timer_arm(x360_machine *x, uint32_t obj, uint64_t due, uint32_t period, uint32_t dpc, uint32_t apc_routine,
+                   uint32_t apc_ctx, uint32_t kthread);
+int x360_timer_cancel(x360_machine *x, uint32_t obj);
+uint64_t x360_due_time(x360_machine *x, int64_t v); /* a guest timeout (negative: relative) as virtual time */
+/* x360_kdpc.c: the scheduler's side of DPCs, APCs and queues */
+void x360_kdpc_poll(x360_machine *x);
+int x360_kdpc_ready(x360_machine *x);
+void x360_apc_return(x360_machine *x, x360_thread *t);
+void x360_apc_after_hle(x360_machine *x, x360_thread *t);
+int x360_apc_wait_check(x360_machine *x, x360_thread *t, uint32_t *status);
+void x360_apc_wait_done(x360_machine *x, x360_thread *t, uint32_t status);
+int x360_queue_wait_check(x360_machine *x, x360_thread *t, uint32_t *status);
+void x360_queue_parked(x360_machine *x, x360_thread *t, int kind);
+void x360_queue_unparked(x360_machine *x, x360_thread *t);
+void x360_queue_thread_exit(x360_machine *x, x360_thread *t);
+void x360_kobj_reset(x360_machine *x);
+void x360_kobj_state(x360_machine *x, void *io, void (*u32)(void *, uint32_t *), void (*u64)(void *, uint64_t *),
+                     void (*i32)(void *, int *));
 int x360_wait_check(x360_machine *x, x360_thread *t);
 void x360_timers_fire(x360_machine *x);
 void x360_install_fault_handler(x360_machine *x);

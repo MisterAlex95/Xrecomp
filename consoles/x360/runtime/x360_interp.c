@@ -699,7 +699,7 @@ int x360_interp_ret(const x360_machine *x, uint32_t a)
 /* where the dispatcher takes over: lifted code, a thunk, the runtime's own return addresses */
 static int handled_elsewhere(x360_machine *x, uint32_t pc)
 {
-    if (pc == X360_THREAD_EXIT || pc == X360_SEH_RETURN)
+    if (pc == X360_THREAD_EXIT || pc == X360_SEH_RETURN || pc == X360_APC_RETURN)
         return 1;
     if (pc >= x->code_lo && pc < x->code_hi && !(pc & 3) && x->fn_tab[(pc - x->code_lo) >> 2])
         return 1;
