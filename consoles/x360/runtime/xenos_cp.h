@@ -7,8 +7,9 @@
  * waits on), shader constants, draw initiators (recorded, not drawn), interrupts, waits on a register or memory
  * value (the processor stalls there until the condition holds), and the swap token VdSwap leaves in the ring.
  *
- * No rendering: the register file is kept, draws and swaps are counted and traced. A renderer (Vulkan, XBA-229)
- * will consume the same state. Packet formats and semantics follow Xenia's xenos.h / command_processor.cc (BSD);
+ * The register file is kept, draws and swaps are counted and traced, and handed to a renderer when one is attached
+ * (draw_hook / swap_hook: xenos_gl.c, GLES 3.0). Packet formats and semantics follow Xenia's xenos.h /
+ * command_processor.cc (BSD);
  * the opcode values are the R400-family PM4 ones they list. The state is plain data (save states). */
 #ifndef XENOS_CP_H
 #define XENOS_CP_H
@@ -72,6 +73,10 @@ typedef struct xenos_cp {
     void (*write32)(void *ctx, uint32_t phys, uint32_t value);
     void (*interrupt)(void *ctx, uint32_t source, uint32_t cpu_mask);
     void (*shader_loaded)(void *ctx, int pixel, const uint32_t *code, uint32_t words); /* optional */
+    /* a renderer (xenos_gl.c): each draw initiator and each swap, with the state as it stands (optional) */
+    void *render_ctx;
+    void (*draw_hook)(void *render_ctx, const struct xenos_cp *cp, const xenos_draw *d);
+    void (*swap_hook)(void *render_ctx, const struct xenos_cp *cp);
     FILE *trace;
 } xenos_cp;
 

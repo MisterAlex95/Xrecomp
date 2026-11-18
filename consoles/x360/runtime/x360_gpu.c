@@ -13,6 +13,7 @@
 
 #include "x360_internal.h"
 #include "xenos_cp.h"
+#include "xenos_gl.h"
 
 #define A(n) ((uint32_t)c->gpr[3 + (n)])
 #define RET(v) (c->gpr[3] = (uint64_t)(uint32_t)(v))
@@ -29,7 +30,18 @@ struct x360_gpu {
     int ring;
     int irq_thread; /* the interrupt context's slot, -1 before the first interrupt */
     char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
+    xenos_gl *gl;         /* --render: the GLES renderer (host state: not in save states) */
 };
+
+static void gl_draw(void *ctx, const xenos_cp *cp, const xenos_draw *d)
+{
+    xenos_gl_draw(ctx, cp, d);
+}
+
+static void gl_swap(void *ctx, const xenos_cp *cp)
+{
+    xenos_gl_swap(ctx, cp);
+}
 
 static struct x360_gpu *gpu_of(x360_machine *x);
 
@@ -58,6 +70,37 @@ static void shader_loaded(void *ctx, int pixel, const uint32_t *code, uint32_t w
         fwrite(be, 4, words, f);
         fclose(f);
     }
+}
+
+int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, int width, int height,
+                      char *why, size_t why_n)
+{
+    struct x360_gpu *g = gpu_of(x);
+    if (!g)
+        return -1;
+    xenos_gl *gl = xenos_gl_create(shader_cache, width, height, why, why_n);
+    if (!gl)
+        return -1;
+    xenos_gl_set_frames_dir(gl, frames_dir);
+    if (x->log)
+        xenos_gl_set_log(gl, x->log);
+    g->gl = gl;
+    g->cp.render_ctx = gl;
+    g->cp.draw_hook = gl_draw;
+    g->cp.swap_hook = gl_swap;
+    return 0;
+}
+
+void x360_render_stats(x360_machine *x, FILE *out)
+{
+    if (!x->gpu || !x->gpu->gl)
+        return;
+    xenos_gl_stats s;
+    xenos_gl_get_stats(x->gpu->gl, &s);
+    fprintf(out,
+            "render: drawn %llu, no shader %llu, unsupported %llu, frames %llu, shaders missing from the cache %u\n",
+            (unsigned long long)s.drawn, (unsigned long long)s.no_shader, (unsigned long long)s.unsupported,
+            (unsigned long long)s.frames, s.missing_shaders);
 }
 
 void x360_set_shader_dump(x360_machine *x, const char *dir)
@@ -129,6 +172,8 @@ int x360_gpu_init(x360_machine *x)
 
 void x360_gpu_free(x360_machine *x)
 {
+    if (x->gpu)
+        xenos_gl_destroy(x->gpu->gl);
     free(x->gpu);
     x->gpu = NULL;
 }

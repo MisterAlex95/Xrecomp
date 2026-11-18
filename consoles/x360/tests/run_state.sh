@@ -23,16 +23,19 @@ export PYTHONPATH="$repo:$repo/consoles/x360/tools"
 "$py" -m x360_tools.recomp "$work/hello.xex" "$work/src" --no-comments >/dev/null || exit 1
 "$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 -I "$repo/consoles/x360/runtime" \
     -I "$repo/consoles/gc/runtime" -o "$work/libtitle.so" "$work"/src/*.c -lm || exit 1
-timeout 60 "$run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$work/disc" --pad-script "$work/pads.txt" --stats --dbg "$work/full.txt" \
+timeout 60 "$run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$work/disc" --pad-script "$work/pads.txt" \
+    --stats --dbg "$work/full.txt" \
     --log "$work/full.log" || exit 1
 # instructions, HLE calls and the clock carry over a state; thread switches and threads created are per process
 want=$(grep '^stats' "$work/full.log" | sed 's/ switches [0-9]*//; s/ threads [0-9]*//')
 for budget in 1 300 900 1500 2100; do
     rm -f "$work/s.st"
-    timeout 60 "$run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$work/disc" --pad-script "$work/pads.txt" --insns "$budget" \
+    timeout 60 "$run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$work/disc" --pad-script "$work/pads.txt" \
+        --insns "$budget" \
         --save-state "$work/s.st" --dbg "$work/a.txt" --log "$work/a.log"
     [ -f "$work/s.st" ] || { echo "budget $budget: no state saved"; cat "$work/a.log"; exit 1; }
-    timeout 60 "$run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$work/disc" --pad-script "$work/pads.txt" --load-state "$work/s.st" \
+    timeout 60 "$run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$work/disc" --pad-script "$work/pads.txt" \
+        --load-state "$work/s.st" \
         --stats --dbg "$work/b.txt" --log "$work/b.log" || { echo "budget $budget: the resumed run failed"
         cat "$work/b.log"; exit 1; }
     got=$(grep '^stats' "$work/b.log" | sed 's/ switches [0-9]*//; s/ threads [0-9]*//')

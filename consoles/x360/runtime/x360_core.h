@@ -53,6 +53,12 @@ void x360_set_strict_imports(x360_machine *x, int on);
  * x360_tools.xenos_ucode disassembles them); the type-3 packet counts of the GPU stream. */
 void x360_set_shader_dump(x360_machine *x, const char *dir);
 void x360_gpu_opcode_histogram(x360_machine *x, FILE *out);
+/* Draw with the GLES 3.0 renderer (xenos_gl.c): shaders from SHADER_CACHE (GLSL ES by x360_tools.xenos_glsl, named
+ * by microcode CRC), a width x height target, each swap written to FRAMES_DIR as PPM (NULL: none). -1 with a reason
+ * when EGL / GLES cannot be had (the run goes on without drawing). x360_render_stats: one line, nothing when off. */
+int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, int width, int height,
+                      char *why, size_t why_n);
+void x360_render_stats(x360_machine *x, FILE *out);
 /* A trace of the GPU command stream (PM4 packets, register blocks, draws, swaps), or NULL. */
 void x360_set_gpu_trace(x360_machine *x, FILE *f);
 /* Where DbgPrint and the runtime's own messages go (default stdout / stderr), verbosity (0 quiet, 1 HLE calls). */

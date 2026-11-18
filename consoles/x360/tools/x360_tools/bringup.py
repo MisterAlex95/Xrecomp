@@ -202,10 +202,10 @@ def main(argv=None):
             f.write("".join("%08X\n" % v for v in sorted(discovered)))
         say("  %d address(es) reached without lifted code: recompiling with them" % len(new))
     shaders = shader_report(shader_dir)
+    todo = sorted(shaders["unsupported"].items(), key=lambda kv: -kv[1])
     say("shaders: %d loaded, %d translated to GLSL ES%s" % (
         shaders["total"], shaders["translated"],
-        "; not yet: " + ", ".join("%s (%d)" % kv for kv in sorted(shaders["unsupported"].items(),
-                                                              key=lambda kv: -kv[1])) if shaders["unsupported"] else ""))
+        "; not yet: " + ", ".join("%s (%d)" % kv for kv in todo) if todo else ""))
     dbg = os.path.join(a.work, "dbg.txt")
     say("DbgPrint: %d lines (in %s, not copied here)" % (
         sum(1 for _ in open(dbg, errors="replace")) if os.path.exists(dbg) else 0, dbg))

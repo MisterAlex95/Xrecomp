@@ -11,7 +11,13 @@ void xenos_cp_init(xenos_cp *cp)
     void (*irq)(void *, uint32_t, uint32_t) = cp->interrupt;
     void (*sh)(void *, int, const uint32_t *, uint32_t) = cp->shader_loaded;
     FILE *trace = cp->trace;
+    void *rctx = cp->render_ctx;
+    void (*dh)(void *, const xenos_cp *, const xenos_draw *) = cp->draw_hook;
+    void (*sw)(void *, const xenos_cp *) = cp->swap_hook;
     memset(cp, 0, sizeof *cp);
+    cp->render_ctx = rctx;
+    cp->draw_hook = dh;
+    cp->swap_hook = sw;
     cp->ctx = ctx;
     cp->read32 = r;
     cp->write32 = w;
@@ -168,6 +174,8 @@ static void draw(xenos_cp *cp, reader *r, uint32_t words, const char *name)
         rd(cp, r);
     cp->last_draw = d;
     cp->draws++;
+    if (cp->draw_hook)
+        cp->draw_hook(cp->render_ctx, cp, &d);
     TRACE("draw %s prim %u source %s indices %u%s", name, d.prim_type,
           d.source_select == 0 ? "dma" : d.source_select == 1 ? "immediate" : "auto", d.num_indices,
           d.source_select == 0 ? "" : "\n");
@@ -371,6 +379,8 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
         cp->last_swap_h = rd(cp, r);
         cp->swaps++;
         cp->counter++;
+        if (cp->swap_hook)
+            cp->swap_hook(cp->render_ctx, cp);
         TRACE("swap front buffer %08X %ux%u\n", cp->last_swap_fb, cp->last_swap_w, cp->last_swap_h);
         break;
     }

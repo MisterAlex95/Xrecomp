@@ -10,16 +10,15 @@ muls); max / min as `a >= b ? a : b` / `a < b ? a : b`; the predicate and kill i
 scalar results both go to the export register, components written by both get 1.0); ps, the previous scalar result,
 kept when an instruction's predicate fails.
 
-What the GLSL expects of the host (the Vulkan / GLES back end, XBA-229 step 3): one std140 uniform block per stage,
-`XeVertexConstants` / `XePixelConstants` { vec4 xe_c[256] (the stage's float constants); uvec4 xe_b[2] (the 256
-boolean constants); uvec4 xe_l[8] (the 32 loop constants) } -- 4256 bytes, the host picks the binding points (GLES 3.0
+What the GLSL expects of the host (the renderer, xenos_gl.c): one std140 uniform block per stage,
+`XeVertexConstants` / `XePixelConstants` { vec4 c[256] (the stage's float constants); uvec4 b[2] (the 256 boolean
+constants); uvec4 l[8] (the 32 loop constants) } xe_k -- 4256 bytes, the host picks the binding points (GLES 3.0
 guarantees 16 KB blocks, while 256 loose vec4 would take all of a pixel shader's guaranteed uniforms); `in vec4
-xe_v<n>` per vertex fetch (info's
-`attributes`: fetch constant, offset, format, stride, signedness: the host converts formats), `uniform sampler*D
-xe_t<n>` per texture fetch constant used (info's `textures`), the pixel shader's interpolators `in vec4 xe_i<n>`
-(copied to r0..),
-the vertex shader's outputs `out vec4 xe_o<n>`, gl_Position (Xenos's, before the host's viewport / clip-space
-conversion) and gl_PointSize; the pixel shader's `layout(location = n) out vec4 xe_color<n>` and gl_FragDepth.
+xe_v<n>` per vertex fetch, its comment giving the fetch constant, offset, format, stride and signedness (the renderer
+reads it back and converts formats); `uniform sampler*D xe_t<n>` per texture fetch constant used (info's
+`textures`); the interpolators `xe_i<n>`, the vertex shader's outputs (all sixteen, so any pixel shader links) and the
+pixel shader's inputs (copied to r0..); gl_Position (Xenos's, before the host's viewport conversion) and gl_PointSize;
+the pixel shader's `layout(location = n) out vec4 xe_color<n>` and gl_FragDepth (written only when exported).
 
 Control flow: exec clauses (conditional on a boolean or p0, ends only when the condition holds), and when a shader
 has loops, calls or jumps, a state machine on the control-flow index with the sequencer's four-deep loop (counter, aL)
@@ -201,7 +200,7 @@ class _Shader:
                 return "xe_psize"
             if reg < 16:
                 self.outputs.add(reg)
-                return "xe_o%d" % reg
+                return "xe_i%d" % reg
         else:
             if reg < 4:
                 self.outputs.add(reg)
@@ -564,16 +563,20 @@ def translate(words, stage="vertex", interpolators=0):
         _straight_body(sh, cfs, words)
     out = ["#version 300 es", "precision highp float;", "precision highp int;", "precision highp sampler2D;",
            "precision highp sampler3D;", "precision highp samplerCube;",
-           "layout(std140) uniform %s { vec4 xe_c[256]; uvec4 xe_b[2]; uvec4 xe_l[8]; };" % (
-               "XeVertexConstants" if stage == "vertex" else "XePixelConstants")]
+           # an instance name: block members are global to a program, and both stages have xe_c / xe_b / xe_l
+           "layout(std140) uniform %s { vec4 c[256]; uvec4 b[2]; uvec4 l[8]; } xe_k;" % (
+               "XeVertexConstants" if stage == "vertex" else "XePixelConstants"),
+           "#define xe_c xe_k.c", "#define xe_b xe_k.b", "#define xe_l xe_k.l"]
     for i, (_, a) in enumerate(sh.attributes):
-        out.append("in vec4 xe_v%d;  // fetch constant %d, offset %d, format %d" % (i, a["fetch_constant"],
-                                                                                    a["offset"], a["format"]))
+        # the renderer reads this comment back (fetch constant, offset and stride in dwords, format, signedness)
+        out.append("in vec4 xe_v%d;  // fetch constant %d, offset %d, format %d, stride %d, signed %d" % (
+            i, a["fetch_constant"], a["offset"], a["format"], a["stride"], a["signed"]))
     for t, dim in sorted(sh.textures.items()):
         out.append("uniform %s xe_t%d;" % ({0: "sampler2D", 1: "sampler2D", 2: "sampler3D", 3: "samplerCube"}[dim],
                                             t))
     if stage == "vertex":
-        out += ["out vec4 xe_o%d;" % o for o in sorted(sh.outputs)]
+        # all sixteen interpolators, written or not, so that any pixel shader links with any vertex shader
+        out += ["out vec4 xe_i%d;" % o for o in range(16)]
     else:
         out += ["in vec4 xe_i%d;" % i for i in range(interpolators)]
         out += ["layout(location = %d) out vec4 xe_color%d;" % (o, o) for o in sorted(sh.outputs)]
@@ -589,7 +592,7 @@ def translate(words, stage="vertex", interpolators=0):
     if stage == "vertex":
         out.append("    r[0].x = float(gl_VertexID);")
         out.append("    vec4 xe_pos = vec4(0.0), xe_psize = vec4(0.0);")
-        out += ["    xe_o%d = vec4(0.0);" % o for o in sorted(sh.outputs)]
+        out += ["    xe_i%d = vec4(0.0);" % o for o in range(16)]
     else:
         out += ["    r[%d] = xe_i%d;" % (i, i) for i in range(interpolators)]
         out.append("    vec4 xe_depth = vec4(gl_FragCoord.z);")

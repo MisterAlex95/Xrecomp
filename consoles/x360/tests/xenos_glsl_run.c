@@ -8,7 +8,7 @@
  * XePixelConstants) as one std140 buffer.
  *
  * For N = 0, 1, ...:
- * - DIR/N.vert is linked with transform feedback on its xe_o0 .. xe_o<k-1> outputs (k from DIR/N.nout), drawn as one
+ * - DIR/N.vert is linked with transform feedback on its xe_i0 .. xe_i<k-1> outputs (k from DIR/N.nout), drawn as one
  *   point with rasterisation off, the attributes as the generic values of xe_v0..15; prints "N vert" and 4k hex words.
  * - DIR/N.frag runs behind a vertex shader that passes the 16 vec4 as interpolators xe_i0..15 on one point covering
  *   a 1x1 RGBA32F target cleared to a sentinel; prints "N frag" and the 4 hex words of xe_color0, or "N frag killed"
@@ -139,7 +139,7 @@ static void run_vertex(const char *dir, int n, const char *src)
     char names[16][8];
     const char *pn[16];
     for (int i = 0; i < nout; i++) {
-        snprintf(names[i], sizeof names[i], "xe_o%d", i);
+        snprintf(names[i], sizeof names[i], "xe_i%d", i);
         pn[i] = names[i];
     }
     glTransformFeedbackVaryings(p, nout, pn, GL_INTERLEAVED_ATTRIBS);

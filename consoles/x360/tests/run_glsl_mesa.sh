@@ -2,9 +2,10 @@
 # run_glsl_mesa.sh (XBA-270): test_xenos_glsl against a real GLES 3.0 implementation -- Mesa's llvmpipe on EGL's
 # surfaceless platform, in a throwaway Debian container (no display, no GPU): builds xenos_glsl_run.c there and runs
 # pytest on test_xenos_glsl.py with $XENOS_GLSL_RUN set (vertex shaders through transform feedback, pixel shaders
-# into a float target, against the test's reference interpreter). Sources go in with `docker cp` (CI runs docker
-# without bind mounts); the run has no network, the image build needs it for its packages. About 30 s once the
-# image exists. Exits non-zero when a case differs or the harness cannot run.
+# into a float target, against the test's reference interpreter), then xenos_draw_test (the renderer's first
+# pixels). Sources go in with `docker cp` (CI runs docker without bind mounts); the run has no network, the image
+# build needs it for its packages. About 30 s once the image exists. Exits non-zero when a case differs or the
+# harness cannot run.
 #
 #   consoles/x360/tests/run_glsl_mesa.sh
 set -eu
@@ -25,7 +26,13 @@ cid=$(docker create --network none -e PYTHONDONTWRITEBYTECODE=1 -e EGL_PLATFORM=
     -e LIBGL_ALWAYS_SOFTWARE=1 "$image" sh -c '
     cd /usr/src && gcc -O1 -o /tmp/xenos_glsl_run consoles/x360/tests/xenos_glsl_run.c -lEGL -lGLESv2 || exit 1
     cd /usr/src/consoles/x360/tools && XENOS_GLSL_RUN=/tmp/xenos_glsl_run \
-        python3 -m pytest -q -s -p no:cacheprovider -rs x360_tools/test_xenos_glsl.py')
-tar -C "$repo" --exclude=__pycache__ -cf - consoles/x360/tests/xenos_glsl_run.c consoles/x360/tools tools/__init__.py \
+        python3 -m pytest -q -s -p no:cacheprovider -rs x360_tools/test_xenos_glsl.py || exit 1
+    echo "== the renderer (xenos_gl) on a hand-built PM4 stream"
+    cd /usr/src && rt=consoles/x360/runtime && gcc -O1 -I $rt -o /tmp/xenos_draw_test \
+        consoles/x360/tests/xenos_draw_test.c $rt/xenos_cp.c $rt/xenos_gl.c -ldl || exit 1
+    python3 consoles/x360/tests/make_draw.py /tmp/draw && /tmp/xenos_draw_test /tmp/draw')
+tar -C "$repo" --exclude=__pycache__ -cf - consoles/x360/tests/xenos_glsl_run.c consoles/x360/tests/xenos_draw_test.c \
+    consoles/x360/tests/make_draw.py consoles/x360/runtime/xenos_cp.c consoles/x360/runtime/xenos_cp.h \
+    consoles/x360/runtime/xenos_gl.c consoles/x360/runtime/xenos_gl.h consoles/x360/tools tools/__init__.py \
     tools/ppc tools/xex | docker cp - "$cid:/usr/src"
 timeout 1800 docker start -a "$cid"

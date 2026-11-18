@@ -42,7 +42,7 @@ def test_shader_report(tmp_path):
     import struct
 
     from .bringup import shader_report
-    from .test_xenos_glsl import alu_words, export, program
+    from .xenos_asm import alu_words, export, program
     good = program([(2, [("alu", alu_words(**export(0, 1)))], {})])
     loop = program([(2, [("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1))], {})])   # memory export
     for name, words in (("vs_00000001.bin", good), ("ps_00000002.bin", good), ("vs_00000003.bin", loop)):

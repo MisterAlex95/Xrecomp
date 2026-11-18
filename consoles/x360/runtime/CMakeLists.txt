@@ -17,14 +17,14 @@ if(NOT TARGET x360_core)
     endif()
     add_library(x360_core STATIC x360_mem.c x360_load.c x360_thread.c x360_kernel.c x360_interp.c x360_file.c
         x360_xam.c x360_gpu.c xenos_cp.c x360_state.c
-        x360_crypt.c x360_more.c x360_input.c)
+        x360_crypt.c x360_more.c x360_input.c xenos_gl.c)
     target_include_directories(x360_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${X360_GC_RUNTIME})
     target_compile_definitions(x360_core PUBLIC XE_RUNTIME=1 _GNU_SOURCE)
     target_compile_options(x360_core PRIVATE -Wall -Wextra -ffp-contract=off)
     if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(x360_core PRIVATE -O2)
     endif()
-    target_link_libraries(x360_core PUBLIC xiso m)
+    target_link_libraries(x360_core PUBLIC xiso m ${CMAKE_DL_LIBS})
     set_target_properties(x360_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
