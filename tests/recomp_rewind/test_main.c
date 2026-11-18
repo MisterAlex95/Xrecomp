@@ -526,6 +526,26 @@ static void test_big(void)
     CHECK(w.interval >= 4 && w.interval <= 60);
     CHECK(w.cost_avg_ns < 4000000ull || w.interval > 4);
     recomp_rewinder_free(&w);
+
+    /* HOST-002: what the 64 MB cap means. The history stays within it and keeps its length (about 31 captures of this
+     * machine); the spare capture buffer, a capture and 12.5 %, is outside it. The spacing is held at the setting's so
+     * that the deltas' size does not depend on this machine's speed. */
+    CHECK(recomp_rewinder_init(&w, "big", &cfg) == 1);
+    for (int f = 0; f < 240; f++) {
+        recomp_rewinder_begin(&w, 0);
+        big_run(&b);
+        w.interval = 4;
+        recomp_rewinder_frame(&w, big_size, big_save, &b);
+    }
+    held = recomp_rewind_count(w.ring);
+    bytes = recomp_rewind_bytes(w.ring);
+    printf("recomp_rewind big: %zu held at 64 MB: %.1f MB of history, %.1f MB spare, %.1f MB in all\n", held,
+           (double)bytes / 1048576.0, (double)w.buf_cap / 1048576.0, (double)(bytes + w.buf_cap) / 1048576.0);
+    CHECK(recomp_rewind_dropped(w.ring) > 0); /* the cap was reached */
+    CHECK(held >= 24 && held <= 40);
+    CHECK(bytes <= (size_t)RECOMP_REWIND_MB_DEFAULT << 20);
+    CHECK(w.buf_cap == big_size(&b) + big_size(&b) / 8);
+    recomp_rewinder_free(&w);
     free(b.mem);
 }
 

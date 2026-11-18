@@ -1281,8 +1281,9 @@ let go and it plays on from there. `src/platform/recomp_rewind.h` (in `xbr_host_
   The newest capture is held whole; each older one is the XOR with the capture after it, coded as runs of zero bytes
   skipped and literal bytes kept (no dependency, a few dozen lines). Stepping back decodes one delta onto the newest,
   so a step costs the same at any depth, and the oldest capture goes for free when the memory cap
-  (`RECOMP_REWIND_MB`, default 64; it counts the deltas, the newest capture and the coding buffer) is reached: these
-  backward deltas need no keyframe. Captures of different sizes code the same way. XBA-278: the coding buffer is
+  (`RECOMP_REWIND_MB`, default 64; it counts the deltas, the newest capture and the coding buffer, while one spare
+  capture buffer, a capture's size plus 12.5 %, is held outside it: about 110 MB in all for a GameCube game at 64) is
+  reached: these backward deltas need no keyframe. Captures of different sizes code the same way. XBA-278: the coding buffer is
   only as large as the deltas (a worst case of 1.125 captures used to fill 64 MB with a GameCube capture), a capture
   is saved straight into the last capture's buffer (the size walk only when it does not fit) and swapped into the
   ring, the N64 and GameCube captures store every page (`*_state_save_rewind`: a layout that does not shift when a

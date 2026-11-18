@@ -20,6 +20,12 @@
  * state took the whole 64 MB with the newest and no history stayed), and a capture enters the ring by a swap of
  * buffers (recomp_rewind_push_swap), not a copy.
  *
+ * What the cap does not count (HOST-002): the spare capture buffer, the one recomp_rewind_push_swap hands back for the
+ * next capture. So a runtime really holds the history, up to RECOMP_REWIND_MB, plus one spare capture outside it: a
+ * capture's size and 12.5 % (recomp_rewinder_frame's room for a capture that grows; without it, a capture growing a
+ * little each time takes the slow path every time, and that path's cost escapes the spacing below). A 41 MB GameCube
+ * capture at the default 64 MB: about 110 MB in all.
+ *
  * The runtimes' side (recomp_rewinder): the settings (RECOMP_REWIND, RECOMP_REWIND_MB, RECOMP_REWIND_FRAMES), the
  * capture schedule (every N console frames, at most one per shown frame, so fast-forward never captures more than
  * one per display frame), the steps while the hotkey is held (one capture back per shown frame), the cost measured
@@ -59,7 +65,7 @@ const uint8_t *recomp_rewind_top(const recomp_rewind *r, size_t *n);
 int recomp_rewind_pop(recomp_rewind *r);
 
 size_t recomp_rewind_count(const recomp_rewind *r);   /* captures held (0 when empty) */
-size_t recomp_rewind_bytes(const recomp_rewind *r);   /* memory held (what the budget counts) */
+size_t recomp_rewind_bytes(const recomp_rewind *r);   /* memory held (what the budget counts: not the spare buffer) */
 size_t recomp_rewind_budget(const recomp_rewind *r);
 uint64_t recomp_rewind_dropped(const recomp_rewind *r); /* oldest captures dropped for the budget so far */
 
