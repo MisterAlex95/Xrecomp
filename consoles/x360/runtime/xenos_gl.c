@@ -59,6 +59,24 @@ typedef unsigned int EGLBoolean, EGLenum;
 #define GL_CW 0x0900
 #define GL_CCW 0x0901
 #define GL_FUNC_ADD 0x8006
+#define GL_TEXTURE_2D 0x0DE1
+#define GL_TEXTURE0 0x84C0
+#define GL_TEXTURE_MAG_FILTER 0x2800
+#define GL_TEXTURE_MIN_FILTER 0x2801
+#define GL_TEXTURE_WRAP_S 0x2802
+#define GL_TEXTURE_WRAP_T 0x2803
+#define GL_TEXTURE_SWIZZLE_R 0x8E42
+#define GL_NEAREST 0x2600
+#define GL_LINEAR 0x2601
+#define GL_REPEAT 0x2901
+#define GL_CLAMP_TO_EDGE 0x812F
+#define GL_MIRRORED_REPEAT 0x8370
+#define GL_RED 0x1903
+#define GL_GREEN 0x1904
+#define GL_BLUE 0x1905
+#define GL_ALPHA 0x1906
+#define GL_ZERO 0
+#define GL_ONE 1
 
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
 #define EGL_RENDERABLE_TYPE 0x3040
@@ -128,10 +146,20 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glFrontFace, (GLenum))                                                                                     \
     X(void, glScissor, (GLint, GLint, GLsizei, GLsizei))                                                               \
     X(void, glClearDepthf, (GLfloat))                                                                                  \
-    X(void, glClearStencil, (GLint))
+    X(void, glClearStencil, (GLint))                                                                                   \
+    X(GLint, glGetUniformLocation, (GLuint, const GLchar *))                                                           \
+    X(void, glUniform1i, (GLint, GLint))                                                                               \
+    X(void, glActiveTexture, (GLenum))                                                                                 \
+    X(void, glGenTextures, (GLsizei, GLuint *))                                                                        \
+    X(void, glDeleteTextures, (GLsizei, const GLuint *))                                                               \
+    X(void, glBindTexture, (GLenum, GLuint))                                                                           \
+    X(void, glTexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *))              \
+    X(void, glTexParameteri, (GLenum, GLenum, GLint))
 
 #define MAX_PROGRAMS 256
 #define MAX_ATTRS 16
+#define MAX_SAMPLERS 16
+#define MAX_TEXTURES 128
 
 typedef struct attr {
     uint32_t fetch_constant, offset, format, stride, is_signed;
@@ -144,7 +172,17 @@ typedef struct program {
     int nattr;
     attr attrs[MAX_ATTRS];
     GLint loc[MAX_ATTRS];
+    int nsamplers;
+    uint32_t sampler_fetch[MAX_SAMPLERS], sampler_dim[MAX_SAMPLERS]; /* texture fetch constant, dimension */
 } program;
+
+/* a texture as last uploaded: its fetch constant's words (address, format, size, layout) and the source's hash */
+typedef struct texture {
+    uint32_t key[6];
+    uint64_t hash;
+    GLuint tex;
+    int used;
+} texture;
 
 struct xenos_gl {
 #define DECL(ret, name, args) ret(*name) args;
@@ -171,6 +209,8 @@ struct xenos_gl {
     uint32_t missing[64];
     int nmissing;
     xenos_gl_stats st;
+    texture textures[MAX_TEXTURES];
+    unsigned tex_clock;
     FILE *log;
 };
 
@@ -305,6 +345,9 @@ void xenos_gl_destroy(xenos_gl *g)
         g->glDeleteBuffers(1, &g->vbo);
         g->glDeleteBuffers(1, &g->ibo);
         g->glDeleteBuffers(2, g->ubo);
+        for (int i = 0; i < MAX_TEXTURES; i++)
+            if (g->textures[i].tex)
+                g->glDeleteTextures(1, &g->textures[i].tex);
         g->glDeleteVertexArrays(1, &g->vao);
         g->glDeleteRenderbuffers(1, &g->rb);
         g->glDeleteRenderbuffers(1, &g->ds);
@@ -411,6 +454,26 @@ static GLuint compile(xenos_gl *g, GLenum type, const char *src, const char *nam
 }
 
 /* "in vec4 xe_vN;  // fetch constant F, offset O, format T, stride S, signed G" lines of the vertex shader */
+/* "uniform sampler2D xe_tK;" lines of both stages: the texture fetch constants the program samples */
+static void parse_samplers(const char *src, program *p)
+{
+    static const char *const kinds[3] = {"sampler2D", "sampler3D", "samplerCube"};
+    for (int kind = 0; kind < 3; kind++) {
+        char pat[40];
+        snprintf(pat, sizeof pat, "uniform %s xe_t", kinds[kind]);
+        for (const char *s = strstr(src, pat); s && p->nsamplers < MAX_SAMPLERS; s = strstr(s + 1, pat)) {
+            unsigned k = (unsigned)atoi(s + strlen(pat));
+            int seen = 0;
+            for (int i = 0; i < p->nsamplers; i++)
+                seen |= p->sampler_fetch[i] == k;
+            if (!seen) {
+                p->sampler_fetch[p->nsamplers] = k;
+                p->sampler_dim[p->nsamplers++] = kind == 0 ? 1 : kind == 1 ? 2 : 3;
+            }
+        }
+    }
+}
+
 static int parse_attrs(const char *src, attr *out)
 {
     int n = 0;
@@ -469,6 +532,16 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp)
                     char an[16];
                     snprintf(an, sizeof an, "xe_v%d", i);
                     p->loc[i] = g->glGetAttribLocation(p->prog, an);
+                }
+                parse_samplers(vsrc, p);
+                parse_samplers(psrc, p);
+                g->glUseProgram(p->prog);
+                for (int i = 0; i < p->nsamplers; i++) {
+                    char un[16];
+                    snprintf(un, sizeof un, "xe_t%u", p->sampler_fetch[i]);
+                    GLint l = g->glGetUniformLocation(p->prog, un);
+                    if (l >= 0)
+                        g->glUniform1i(l, i);
                 }
                 GLuint b = g->glGetUniformBlockIndex(p->prog, "XeVertexConstants");
                 if (b != GL_INVALID_INDEX)
@@ -672,6 +745,234 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp)
     }
 }
 
+/* ---- textures ----
+ * The texture fetch constant (six dwords from 0x4800 + 6 * index; Xenia's xenos.h): dword 0 type, signs, clamps,
+ * pitch (texels >> 5), tiled; dword 1 format, endian swap, base address >> 12; dword 2 width - 1, height - 1;
+ * dword 3 swizzle (3 bits per component: X, Y, Z, W, 0, 1), filters. Tiled textures use the Xenos 2D tiling:
+ * 32x32-block macro tiles, banks and pipes (the address formula of Xenia's texture_address.h, Tiled2D). Formats
+ * here: 8, 8_8, 8_8_8_8, 1_5_5_5, 5_6_5, 4_4_4_4, DXT1, DXT2/3, DXT4/5, decoded to RGBA8 on the CPU with X in red;
+ * the fetch constant's swizzle goes to GL's texture swizzle. Base level only (no mips), 2D (and 1D) only. */
+
+typedef struct texfmt {
+    uint32_t format, block, bytes; /* block size in texels (1 or 4), bytes per block */
+} texfmt;
+
+static const texfmt *tex_format(uint32_t f)
+{
+    static const texfmt fmts[] = {{2, 1, 1},  {10, 1, 2}, {6, 1, 4},   {3, 1, 2},  {4, 1, 2},
+                                  {15, 1, 2}, {18, 4, 8}, {19, 4, 16}, {20, 4, 16}};
+    for (size_t i = 0; i < sizeof fmts / sizeof fmts[0]; i++)
+        if (fmts[i].format == f)
+            return &fmts[i];
+    return NULL;
+}
+
+static int32_t tiled2d(int32_t x, int32_t y, uint32_t pitch_blocks, unsigned bpb_log2)
+{
+    int32_t outer = ((y >> 5) * (int32_t)(pitch_blocks >> 5) + (x >> 5)) << 6;
+    int32_t inner = (((y >> 1) & 7) << 3) | (x & 7);
+    int32_t oi = (outer | inner) << bpb_log2;
+    uint32_t bank = (y >> 4) & 1, pipe = ((x >> 3) & 3) ^ (((y >> 3) & 1) << 1);
+    return (int32_t)((uint32_t)(y & 1) << 4 | pipe << 6 | bank << 11) | (oi & 15) | ((oi >> 4) & 1) << 5 |
+           ((oi >> 5) & 7) << 8 | (oi >> 8) << 12;
+}
+
+static void unpack_565(uint32_t v, uint8_t out[4])
+{
+    out[0] = (uint8_t)(((v & 31) * 255 + 15) / 31);
+    out[1] = (uint8_t)((((v >> 5) & 63) * 255 + 31) / 63);
+    out[2] = (uint8_t)((((v >> 11) & 31) * 255 + 15) / 31);
+    out[3] = 255;
+}
+
+/* one 4x4 block of a DXT format at `b` (bytes after the endian swap) to 16 RGBA texels; colours are 5:6:5 with
+ * the 5 low bits first (X) */
+static void dxt_block(const uint8_t *b, uint32_t format, uint8_t out[16][4])
+{
+    const uint8_t *cb = format == 18 ? b : b + 8;
+    uint32_t c0 = cb[0] | cb[1] << 8, c1 = cb[2] | cb[3] << 8, bits = cb[4] | cb[5] << 8 | cb[6] << 16 |
+                                                                        (uint32_t)cb[7] << 24;
+    uint8_t pal[4][4];
+    unpack_565(c0, pal[0]);
+    unpack_565(c1, pal[1]);
+    int three = format == 18 && c0 <= c1;
+    for (int k = 0; k < 3; k++) {
+        if (three) {
+            pal[2][k] = (uint8_t)((pal[0][k] + pal[1][k]) / 2);
+            pal[3][k] = 0;
+        } else {
+            pal[2][k] = (uint8_t)((2 * pal[0][k] + pal[1][k]) / 3);
+            pal[3][k] = (uint8_t)((pal[0][k] + 2 * pal[1][k]) / 3);
+        }
+    }
+    pal[2][3] = 255;
+    pal[3][3] = three ? 0 : 255;
+    for (int i = 0; i < 16; i++)
+        memcpy(out[i], pal[(bits >> (2 * i)) & 3], 4);
+    if (format == 19) { /* explicit 4-bit alpha */
+        for (int i = 0; i < 16; i++) {
+            uint32_t a = (b[i / 2] >> (4 * (i & 1))) & 15;
+            out[i][3] = (uint8_t)(a * 17);
+        }
+    } else if (format == 20) { /* interpolated alpha */
+        uint32_t a0 = b[0], a1 = b[1];
+        uint64_t ab = 0;
+        for (int k = 0; k < 6; k++)
+            ab |= (uint64_t)b[2 + k] << (8 * k);
+        uint32_t ap[8] = {a0, a1};
+        for (int k = 2; k < 8; k++)
+            ap[k] = a0 > a1 ? ((8 - k) * a0 + (k - 1) * a1) / 7
+                    : k < 6  ? ((6 - k) * a0 + (k - 1) * a1) / 5
+                    : k == 6 ? 0
+                             : 255;
+        for (int i = 0; i < 16; i++)
+            out[i][3] = (uint8_t)ap[(ab >> (3 * i)) & 7];
+    }
+}
+
+static void texel(uint32_t format, const uint8_t *s, uint8_t out[4])
+{
+    uint32_t v = s[0] | (uint32_t)s[1] << 8;
+    switch (format) {
+    case 2: out[0] = out[1] = out[2] = out[3] = s[0]; break; /* 8: replicated, the swizzle picks */
+    case 10: out[0] = s[0], out[1] = s[1], out[2] = 0, out[3] = 255; break;
+    case 6: memcpy(out, s, 4); break;
+    case 3:
+        out[0] = (uint8_t)((v & 31) * 255 / 31), out[1] = (uint8_t)(((v >> 5) & 31) * 255 / 31);
+        out[2] = (uint8_t)(((v >> 10) & 31) * 255 / 31), out[3] = (v >> 15) ? 255 : 0;
+        break;
+    case 4: unpack_565(v, out); break;
+    case 15:
+        for (int k = 0; k < 4; k++)
+            out[k] = (uint8_t)(((v >> (4 * k)) & 15) * 17);
+        break;
+    default: memset(out, 0, 4);
+    }
+}
+
+static uint64_t fnv(const uint8_t *p, size_t n)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++)
+        h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+
+/* the texture behind fetch constant k as a GL texture (decoded again when its memory changed); 0 if unsupported */
+static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, uint32_t k)
+{
+    const uint32_t *fc = &cp->regs[0x4800 + 6 * k];
+    const texfmt *tf = tex_format(fc[1] & 63);
+    uint32_t dim = (fc[5] >> 9) & 3; /* 0 1D, 1 2D, 2 3D, 3 cube */
+    if ((fc[0] & 3) != 2 || !tf || dim > 1)
+        return 0;
+    uint32_t w = (dim == 0 ? fc[2] & 0xFFFFFF : fc[2] & 0x1FFF) + 1, h = dim == 0 ? 1 : ((fc[2] >> 13) & 0x1FFF) + 1;
+    if (w > 8192 || h > 8192)
+        return 0;
+    uint32_t endian = (fc[1] >> 6) & 3, base = fc[1] & 0xFFFFF000u, tiled = fc[0] >> 31;
+    uint32_t pitch = ((fc[0] >> 22) & 0x1FF) << 5; /* texels */
+    if (!pitch)
+        pitch = w;
+    uint32_t bw = (w + tf->block - 1) / tf->block, bh = (h + tf->block - 1) / tf->block;
+    uint32_t pitch_blocks = (pitch + tf->block - 1) / tf->block;
+    unsigned bpb_log2 = tf->bytes == 1 ? 0 : tf->bytes == 2 ? 1 : tf->bytes == 4 ? 2 : tf->bytes == 8 ? 3 : 4;
+    uint32_t row_bytes = (pitch_blocks * tf->bytes + 255) & ~255u; /* linear rows: 256-byte aligned */
+    uint32_t pitch_tiled = (pitch_blocks + 31) & ~31u;
+    /* the source bytes, block by block, after the endian swap */
+    size_t src_n = (size_t)bw * bh * tf->bytes;
+    uint8_t *src = malloc(src_n);
+    uint8_t *rgba = malloc((size_t)bw * tf->block * bh * tf->block * 4);
+    if (!src || !rgba) {
+        free(src);
+        free(rgba);
+        return 0;
+    }
+    for (uint32_t by = 0; by < bh; by++)
+        for (uint32_t bx = 0; bx < bw; bx++) {
+            uint32_t off = tiled ? (uint32_t)tiled2d((int32_t)bx, (int32_t)by, pitch_tiled, bpb_log2)
+                                 : by * row_bytes + bx * tf->bytes;
+            uint8_t *d = src + ((size_t)by * bw + bx) * tf->bytes;
+            for (uint32_t i = 0; i < tf->bytes; i++) {
+                uint32_t a = base + off + i, word = gpu_read(cp, a & ~3u, endian);
+                d[i] = (uint8_t)(word >> (8 * (a & 3)));
+            }
+        }
+    uint64_t hash = fnv(src, src_n) ^ ((uint64_t)fc[3] << 32);
+    texture *t = NULL, *victim = &g->textures[0];
+    for (int i = 0; i < MAX_TEXTURES; i++) {
+        texture *c = &g->textures[i];
+        if (c->tex && !memcmp(c->key, fc, sizeof c->key)) {
+            t = c;
+            break;
+        }
+        if (!c->tex || (victim->tex && c->used < victim->used))
+            victim = c;
+    }
+    if (t && t->hash == hash) {
+        t->used = (int)++g->tex_clock;
+        free(src);
+        free(rgba);
+        return t->tex;
+    }
+    if (!t) {
+        t = victim;
+        if (!t->tex)
+            g->glGenTextures(1, &t->tex);
+        memcpy(t->key, fc, sizeof t->key);
+    }
+    t->hash = hash;
+    t->used = (int)++g->tex_clock;
+    uint32_t tw = bw * tf->block;
+    for (uint32_t by = 0; by < bh; by++)
+        for (uint32_t bx = 0; bx < bw; bx++) {
+            const uint8_t *s = src + ((size_t)by * bw + bx) * tf->bytes;
+            if (tf->block == 4) {
+                uint8_t px[16][4];
+                dxt_block(s, tf->format, px);
+                for (int i = 0; i < 16; i++)
+                    memcpy(rgba + (((size_t)by * 4 + i / 4) * tw + bx * 4 + i % 4) * 4, px[i], 4);
+            } else {
+                texel(tf->format, s, rgba + ((size_t)by * tw + bx) * 4);
+            }
+        }
+    g->glBindTexture(GL_TEXTURE_2D, t->tex);
+    g->glTexImage2D(GL_TEXTURE_2D, 0, (GLint)GL_RGBA8, (GLsizei)tw, (GLsizei)(bh * tf->block), 0, GL_RGBA,
+                    GL_UNSIGNED_BYTE, rgba);
+    free(src);
+    free(rgba);
+    return t->tex;
+}
+
+static GLint wrap_mode(uint32_t c)
+{
+    return c == 0 ? GL_REPEAT : c == 1 ? GL_MIRRORED_REPEAT : GL_CLAMP_TO_EDGE;
+}
+
+static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
+{
+    static const GLint swz[6] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};
+    for (int i = 0; i < p->nsamplers; i++) {
+        uint32_t k = p->sampler_fetch[i];
+        GLuint tex = p->sampler_dim[i] <= 1 && k < 32 ? texture_of(g, cp, k) : 0;
+        g->glActiveTexture(GL_TEXTURE0 + (GLenum)i);
+        g->glBindTexture(GL_TEXTURE_2D, tex);
+        if (!tex) {
+            g->st.unsupported_textures++;
+            continue;
+        }
+        const uint32_t *fc = &cp->regs[0x4800 + 6 * k];
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode((fc[0] >> 10) & 7));
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode((fc[0] >> 13) & 7));
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, ((fc[3] >> 19) & 3) == 1 ? GL_LINEAR : GL_NEAREST);
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, ((fc[3] >> 21) & 3) == 1 ? GL_LINEAR : GL_NEAREST);
+        for (int c = 0; c < 4; c++) {
+            uint32_t s = (fc[3] >> (1 + 3 * c)) & 7;
+            g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R + (GLenum)c, s < 6 ? swz[s] : GL_ZERO);
+        }
+    }
+    g->glActiveTexture(GL_TEXTURE0);
+}
+
 static void set_viewport(xenos_gl *g, const xenos_cp *cp)
 {
     uint32_t vte = cp->regs[0x2206];
@@ -769,6 +1070,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     g->glUseProgram(p->prog);
     upload_constants(g, cp);
     apply_state(g, cp);
+    bind_textures(g, cp, p);
     set_viewport(g, cp);
     g->glBindVertexArray(g->vao);
     g->glBindBuffer(GL_ARRAY_BUFFER, g->vbo);

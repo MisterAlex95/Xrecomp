@@ -3,7 +3,8 @@ DIR/vs.bin and DIR/ps.bin (big-endian microcode words) and their GLSL ES in DIR/
 ps_<crc>.frag, translated by x360_tools.xenos_glsl, the way bringup fills a title's shader cache.
 
 Vertex shader: two vertex fetches from fetch constant 0 (position at offset 0, colour at offset 4, stride 8 dwords,
-32_32_32_32_FLOAT), position exported to oPos, colour to interpolator 0. Pixel shader: oC0 = interpolator 0 * c0."""
+32_32_32_32_FLOAT), position exported to oPos, colour to interpolator 0. Pixel shader: oC0 = interpolator 0 * c0.
+Textured pixel shader (ps_tex): oC0 = a 2D fetch from texture fetch constant 2 at interpolator 0's xy."""
 
 import os
 import struct
@@ -25,17 +26,20 @@ def shaders():
                        ("alu", alu_words(**export(62, 1))), ("alu", alu_words(**export(0, 2)))], {})])
     ps = program([(2, [("alu", alu_words(vop=1, vdest=0, vmask=0xF, export=1,
                                          srcs=((0, 1, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))))], {})])
-    return vs, ps
+    ps_tex = program([(2, [("fetch", fetch_words(1, 0, 1, XYZW, 2, dimension=1)),
+                           ("alu", alu_words(**export(0, 1)))], {})])
+    return vs, ps, ps_tex
 
 
 def main(out):
-    vs, ps = shaders()
+    vs, ps, ps_tex = shaders()
     os.makedirs(os.path.join(out, "cache"), exist_ok=True)
-    for name, words, stage, ext in (("vs", vs, "vertex", "vert"), ("ps", ps, "pixel", "frag")):
+    for name, words, stage, ext in (("vs", vs, "vertex", "vert"), ("ps", ps, "pixel", "frag"),
+                                    ("ps_tex", ps_tex, "pixel", "frag")):
         raw = struct.pack(">%dI" % len(words), *words)
         open(os.path.join(out, name + ".bin"), "wb").write(raw)
         src, _ = translate(words, stage, interpolators=1)
-        with open(os.path.join(out, "cache", "%s_%08X.%s" % (name, zlib.crc32(raw), ext)), "w") as f:
+        with open(os.path.join(out, "cache", "%s_%08X.%s" % (name[:2], zlib.crc32(raw), ext)), "w") as f:
             f.write(src)
     return 0
 

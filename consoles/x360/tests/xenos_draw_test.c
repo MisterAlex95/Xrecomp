@@ -11,7 +11,12 @@
  *   frame 4: blending: red, then green at alpha 0.5 with src alpha / one minus src alpha: (0.5, 0.5, 0);
  *   frame 5: culling of back faces: the red triangle (counter-clockwise on screen) is drawn with "front is CCW" and
  *            culled with "front is CW";
- *   frame 6: a quad list (one quad of four vertices) covers the target.
+ *   frame 6: a quad list (one quad of four vertices) covers the target;
+ *   frames 7-10, textures (ps_tex.bin: a 2D fetch from texture fetch constant 2 at the interpolated colour's xy, a
+ *            full-target quad with D3D texture coordinates, point sampling): a linear 2x2 8_8_8_8 texture (each
+ *            quarter of the target one texel), the same with a red / blue swizzle, a tiled 32x32 8_8_8_8 texture
+ *            (texel x, y = 8x, 8y, 0), a linear DXT1 block (8-in-16 swap, big-endian 16-bit words as the CPU writes
+ *            them).
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -288,9 +293,87 @@ int main(int argc, char **argv)
     CHECK(q0[2] == 255 && q1[2] == 255 && q2[2] == 255 && q3[2] == 255, "frame 7 (quad list): corners %u %u %u %u",
           q0[2], q1[2], q2[2], q3[2]);
 
+    /* frames 8..11: textures */
+    uint32_t ntex;
+    uint32_t *pst = load(argv[1], "ps_tex.bin", &ntex);
+    CHECK(pst != NULL, "no ps_tex.bin");
+    if (pst) {
+        im[0] = 1, im[1] = ntex;
+        memcpy(im + 2, pst, 4 * ntex);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
+        free(pst);
+    }
+    /* the quad: colour = texture coordinates (u, v), v = 0 at the top */
+    vertex(0x6000, -1, 1, 0, 0, 0);
+    vertex(0x6020, 1, 1, 1, 0, 0);
+    vertex(0x6040, -1, -1, 0, 1, 0);
+    vertex(0x6060, 1, -1, 1, 1, 0);
+    reg(0x4800, 0x6000u | 3u);
+    static const uint32_t texels[4] = {0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u, 0xFFFFFFFFu}; /* X in the low byte */
+    for (int i = 0; i < 4; i++)
+        w32(0x10000 + 256 * (i / 2) + 4 * (i % 2), texels[i]); /* rows 256-byte aligned */
+    uint32_t sw_id = 0u | 1u << 3 | 2u << 6 | 3u << 9, sw_rb = 2u | 1u << 3 | 0u << 6 | 3u << 9;
+    uint32_t fc[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | 0x10000u, 1u | 1u << 13, sw_id << 1, 0,
+                      1u << 9};
+    for (int i = 0; i < 6; i++)
+        reg(0x480C + i, fc[i]);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    const uint8_t *tl = px(g, 8, 8), *tr = px(g, W - 8, 8), *bl = px(g, 8, H - 8), *brp = px(g, W - 8, H - 8);
+    CHECK(tl[0] == 255 && tl[1] == 0 && tr[1] == 255 && tr[0] == 0 && bl[2] == 255 && bl[0] == 0 && brp[0] == 255 &&
+              brp[1] == 255 && brp[2] == 255,
+          "frame 8 (linear texture): %u,%u,%u %u,%u,%u %u,%u,%u %u,%u,%u", tl[0], tl[1], tl[2], tr[0], tr[1], tr[2],
+          bl[0], bl[1], bl[2], brp[0], brp[1], brp[2]);
+    reg(0x480F, sw_rb << 1);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    tl = px(g, 8, 8);
+    CHECK(tl[2] == 255 && tl[0] == 0, "frame 9 (swizzle): top-left %u,%u,%u, want blue", tl[0], tl[1], tl[2]);
+    /* tiled 32x32: the Xenos 2D tiling (same formula as the renderer: this checks the plumbing, not the formula) */
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) {
+            int32_t outer = ((y >> 5) * (32 >> 5) + (x >> 5)) << 6, inner = (((y >> 1) & 7) << 3) | (x & 7);
+            int32_t oi = (outer | inner) << 2;
+            uint32_t bank = (y >> 4) & 1, pipe = ((x >> 3) & 3) ^ (((y >> 3) & 1) << 1);
+            int32_t off = (int32_t)((uint32_t)(y & 1) << 4 | pipe << 6 | bank << 11) | (oi & 15) |
+                          ((oi >> 4) & 1) << 5 | ((oi >> 5) & 7) << 8 | (oi >> 8) << 12;
+            w32(0x12000 + (uint32_t)off, 0xFF000000u | (uint32_t)(8 * y) << 8 | (uint32_t)(8 * x));
+        }
+    uint32_t fct[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22 | 1u << 31, 6u | 2u << 6 | 0x12000u, 31u | 31u << 13,
+                       sw_id << 1, 0, 1u << 9};
+    for (int i = 0; i < 6; i++)
+        reg(0x480C + i, fct[i]);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    static const int probe[4][2] = {{5, 9}, {31, 0}, {17, 23}, {0, 31}};
+    int tiles_ok = 1;
+    for (int i = 0; i < 4; i++) {
+        const uint8_t *p = px(g, 2 * probe[i][0] + 1, 2 * probe[i][1] + 1);
+        if (p[0] != 8 * probe[i][0] || p[1] != 8 * probe[i][1])
+            tiles_ok = 0, fprintf(stderr, "  texel %d,%d read %u,%u\n", probe[i][0], probe[i][1], p[0], p[1]);
+    }
+    CHECK(tiles_ok, "frame 10 (tiled texture)");
+    /* DXT1: one block, colour 0 = 5:6:5 0x001F (X = 31), colour 1 = 0, every index 0 */
+    static const uint16_t blk[4] = {0x001F, 0x0000, 0x0000, 0x0000};
+    for (int i = 0; i < 4; i++)
+        mem[0x14000 + 2 * i] = (uint8_t)(blk[i] >> 8), mem[0x14000 + 2 * i + 1] = (uint8_t)blk[i];
+    uint32_t fcd[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 18u | 1u << 6 | 0x14000u, 3u | 3u << 13, sw_id << 1, 0,
+                       1u << 9};
+    for (int i = 0; i < 6; i++)
+        reg(0x480C + i, fcd[i]);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    c = px(g, W / 2, H / 2);
+    CHECK(c[0] == 255 && c[1] == 0 && c[2] == 0, "frame 11 (DXT1): %u,%u,%u, want red", c[0], c[1], c[2]);
+
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 10 && st.frames == 8 && st.no_shader == 0 && st.unsupported == 0,
+    CHECK(st.drawn == 14 && st.frames == 12 && st.no_shader == 0 && st.unsupported == 0 &&
+              st.unsupported_textures == 0,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
           (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
     xenos_gl_destroy(g);
@@ -300,6 +383,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: eight frames drawn and read back as expected\n");
+    printf("xenos_gl: twelve frames drawn and read back as expected\n");
     return 0;
 }

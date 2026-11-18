@@ -15,10 +15,14 @@
  * buffer, stencil (front and back), culling and winding, the window scissor; quad lists become triangles. The vertex
  * shaders convert Direct3D's 0..w depth range to GL's (xenos_glsl).
  *
- * Not there yet: eDRAM and resolves (the guest's front buffer is not written; each swap clears), textures, rectangle
- * lists, alpha test, more vertex formats, multiple render targets, the viewport's exact conventions (the scale /
- * offset registers map to glViewport when enabled). A Vulkan back end (the epic's plan) would take the same state;
- * the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
+ * Textures: 2D (and 1D) from the texture fetch constants, linear or tiled, 8 / 8_8 / 8_8_8_8 / 1_5_5_5 / 5_6_5 /
+ * 4_4_4_4 / DXT1 / DXT2_3 / DXT4_5 decoded to RGBA8 (decoded again when their memory changes), clamp, filter and
+ * swizzle from the fetch constant; base level only.
+ *
+ * Not there yet: eDRAM and resolves (the guest's front buffer is not written; each swap clears), mips, 3D / cube and
+ * the other texture formats, rectangle lists, alpha test, more vertex formats, multiple render targets, the
+ * viewport's exact conventions (the scale / offset registers map to glViewport when enabled). A Vulkan back end (the
+ * epic's plan) would take the same state; the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
 #ifndef XENOS_GL_H
 #define XENOS_GL_H
 
@@ -39,6 +43,7 @@ typedef struct xenos_gl_stats {
     uint64_t unsupported;    /* skipped: primitive type, vertex format or index source not handled yet */
     uint64_t frames;         /* swaps read back */
     uint32_t missing_shaders; /* distinct shaders missing from the cache */
+    uint64_t unsupported_textures; /* texture bindings left empty: format / dimension not handled yet */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */
