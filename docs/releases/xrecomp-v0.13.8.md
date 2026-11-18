@@ -2,6 +2,30 @@
 
 <!-- Highlights: what changed, what works, known problems. Written by hand, kept across updates. -->
 
+The Xbox 360 takes a large step towards real games. **No retail game has run on it yet**: everything below is tested on
+our own homebrew and synthetic data, on a computer, and nothing has been tried on a device.
+
+- **Prepare fits on a handheld.** Translating a large game peaks at about 240 MB of memory instead of 3.9 GB (measured on
+  a computer, with 24 MB of game code).
+- **Far more of the system is there.** 820 of the 887 xboxkrnl functions now answer, 333 of them with an explicit refusal
+  (USB, network, console keys). DPCs, APCs, timers, queues and locks really run, and they are part of save states.
+- **Sound.** XMA music and voices are decoded by FFmpeg's libavcodec, shipped as separate LGPL libraries. Its source is
+  attached to this release.
+- **Graphics.** Texture queries, line loops, quad strips, polygons, immediate indices, packed mip tails, MSAA, stencil in
+  depth resolves, eDRAM aliasing, more memory export formats.
+- **Keys.** Prepare tries the player's key file, then the keys this build carries. The Key file button stays for a game
+  those cannot open.
+- **GameCube and Xbox 360 CPUs.** The multiply-add family returns the NaN the architecture names.
+
+Every Xbox 360 pack must be prepared again.
+
+**Known problems**
+
+- Whether a retail Xbox 360 game starts, draws or sounds right is unknown.
+- XMA has never been heard on real game audio, and music loops may click at the loop point.
+- A shader met for the first time is drawn only after the next Prepare.
+- 67 xboxkrnl exports and about 22 known xam exports are still missing.
+
 ## Changes
 
 <!-- release:changes start (generated from the commits; rewritten on every push to main) -->
