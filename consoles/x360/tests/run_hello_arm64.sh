@@ -33,3 +33,13 @@ sysroot=$(dirname "$(dirname "$("$cc" -print-file-name=libc.so.6)")")
 qemu-aarch64 -L "$sysroot" "$work/x360_run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$work/disc.iso" --dbg "$work/dbg.txt" --stats
 cmp "$work/dbg.txt" "$here/hello.txt"
 echo "arm64 (qemu): DbgPrint output matches hello.txt"
+# the HLE and command processor tests too
+core="$rt/x360_mem.c $rt/x360_load.c $rt/x360_thread.c $rt/x360_kernel.c $rt/x360_interp.c $rt/x360_file.c
+      $rt/x360_xam.c $rt/x360_gpu.c $rt/xenos_cp.c $rt/x360_state.c $rt/x360_crypt.c $rt/x360_more.c
+      $repo/src/xiso/xiso.c $repo/src/xiso/xiso_source.c"
+for t in x360_hle_test xenos_cp_test; do
+    # shellcheck disable=SC2086
+    "$cc" -O2 -ffp-contract=off -DXE_RUNTIME=1 -D_GNU_SOURCE -I "$rt" -I "$repo/consoles/gc/runtime" \
+        -I "$repo/src/xiso" -o "$work/$t" "$here/$t.c" $core -lm -lpthread
+    qemu-aarch64 -L "$sysroot" "$work/$t"
+done
