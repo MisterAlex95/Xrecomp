@@ -74,6 +74,14 @@ typedef struct tex_entry {
     struct tex_entry *next;
 } tex_entry;
 
+/* What a sampler object was last told (bind_map). The objects are the renderer's alone, so this stays true
+ * whatever else happens to the context; which sampler is bound to a unit does not, and is set every time. */
+typedef struct sampler_params {
+    GLint wrap_s, wrap_t, mag, min;
+    uint32_t lods;           /* TX_MODE1: minimum and maximum LOD */
+    uint32_t set;
+} sampler_params;
+
 typedef struct ubo_t {
     int32_t creg[4][4], kreg[4][4], swap[4][4];
     float tcscale[8][4], texdim[8][4], indm[6][4], indscale[4][4];
@@ -104,6 +112,7 @@ struct gx_gl {
     uint64_t sr_waits, sr_wait_ns, sr_wait_max_ns, sr_oversize;
     bool sr_wait_warned;
     GLuint samplers[8];
+    sampler_params sampler_set[8];
     GLuint white_tex;
     GLuint uber;
     GLuint copy_prog, copy_fbo;
@@ -830,9 +839,6 @@ static void bind_map(gx_state *gx, unsigned map)
     F.glBindTexture(GL_TEXTURE_2D, t);
     uint32_t m0 = gx->bp[bp_tex_reg(BP_TX_MODE0, map)], m1 = gx->bp[bp_tex_reg(BP_TX_MODE1, map)];
     GLuint s = g->samplers[map];
-    F.glSamplerParameteri(s, GL_TEXTURE_WRAP_S, gl_wrap(BITS(m0, 0, 2)));
-    F.glSamplerParameteri(s, GL_TEXTURE_WRAP_T, gl_wrap(BITS(m0, 2, 2)));
-    F.glSamplerParameteri(s, GL_TEXTURE_MAG_FILTER, (m0 & 0x10) ? GL_LINEAR : GL_NEAREST);
     unsigned mf = BITS(m0, 5, 3);
     GLint min;
     if (ti.levels <= 1 || t == g->white_tex)
@@ -842,9 +848,17 @@ static void bind_map(gx_state *gx, unsigned map)
                                       GL_LINEAR, GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR};
         min = mins[mf];
     }
-    F.glSamplerParameteri(s, GL_TEXTURE_MIN_FILTER, min);
-    F.glSamplerParameterf(s, GL_TEXTURE_MIN_LOD, (float)BITS(m1, 0, 8) / 16.0f);
-    F.glSamplerParameterf(s, GL_TEXTURE_MAX_LOD, (float)BITS(m1, 8, 8) / 16.0f);
+    const sampler_params want = {gl_wrap(BITS(m0, 0, 2)), gl_wrap(BITS(m0, 2, 2)),
+                                 (m0 & 0x10) ? GL_LINEAR : GL_NEAREST, min, m1 & 0xFFFFu, 1};
+    if (memcmp(&g->sampler_set[map], &want, sizeof want)) {
+        F.glSamplerParameteri(s, GL_TEXTURE_WRAP_S, want.wrap_s);
+        F.glSamplerParameteri(s, GL_TEXTURE_WRAP_T, want.wrap_t);
+        F.glSamplerParameteri(s, GL_TEXTURE_MAG_FILTER, want.mag);
+        F.glSamplerParameteri(s, GL_TEXTURE_MIN_FILTER, want.min);
+        F.glSamplerParameterf(s, GL_TEXTURE_MIN_LOD, (float)BITS(m1, 0, 8) / 16.0f);
+        F.glSamplerParameterf(s, GL_TEXTURE_MAX_LOD, (float)BITS(m1, 8, 8) / 16.0f);
+        g->sampler_set[map] = want;
+    }
     F.glBindSampler(map, s);
     float *d = g->ubo_data.texdim[map];
     d[0] = (float)ti.w;
