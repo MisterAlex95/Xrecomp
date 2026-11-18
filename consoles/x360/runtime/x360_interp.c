@@ -374,7 +374,10 @@ static int exec(x360_machine *x, xe_cpu *c, uint32_t pc, uint32_t w)
         case 759: xe_std(M_, eau, ppc_f2u(c->fpr[rd])); R(ra) = eau; break;
         case 983: xe_stw(M_, ea, (uint32_t)ppc_f2u(c->fpr[rd])); break;
         case 1014: xe_zero(M_, ea, rd == 1 ? 128 : 32); break; /* dcbz, dcbz128 */
-        case 54: case 86: case 246: case 278: case 470: case 598: case 854: case 982: /* cache hints, sync, icbi */
+        case 598: case 854: /* sync / lwsync, eieio: a host fence, as lifted code (RC_SYNC) */
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            break;
+        case 54: case 86: case 246: case 278: case 470: case 982: /* cache hints, icbi */
             break;
         /* system registers */
         case 19: R(rd) = c->cr; break; /* mfcr (mfocrf reads the whole CR too) */

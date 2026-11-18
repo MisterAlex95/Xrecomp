@@ -574,6 +574,12 @@ class XenonLifter(FnLifter):
     def op_ldarx(self, i):
         return "%s = RC_LDARX((uint32_t)(%s));" % (R(i.rd), self._eax(i))
 
+    # sync / lwsync / eieio: a host fence (guest threads on host threads: arm64 reorders as the Xenon does)
+    def op_sync(self, i):
+        return "RC_SYNC();"
+
+    op_eieio = op_sync
+
     def op_stdcx_rec(self, i):
         return "RC_STDCX((uint32_t)(%s), %s);" % (self._eax(i), R(i.rd))
 
