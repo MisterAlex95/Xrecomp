@@ -45,6 +45,28 @@ u32 KeTlsAlloc(void);
 u32 KeTlsSetValue(u32 slot, u32 value);
 u32 KeTlsGetValue(u32 slot);
 int sprintf(char *out, const char *fmt, ...);
+/* XBA-296 (homebrew/kobjects) */
+void *InterlockedPushEntrySList(void *header, void *entry);
+void *InterlockedPopEntrySList(void *header);
+void ExInitializeReadWriteLock(void *lock);
+void ExAcquireReadWriteLockExclusive(void *lock);
+void ExAcquireReadWriteLockShared(void *lock);
+void ExReleaseReadWriteLock(void *lock);
+void KeInitializeQueue(void *queue, u32 count);
+s32 KeInsertQueue(void *queue, void *entry);
+void *KeRemoveQueue(void *queue, u32 mode, LARGE_TIME *timeout);
+NTSTATUS NtCreateIoCompletion(HANDLE *h, u32 access, void *attributes, u32 threads);
+NTSTATUS NtSetIoCompletion(HANDLE h, u32 key, u32 context, u32 status, u32 information);
+NTSTATUS NtRemoveIoCompletion(HANDLE h, u32 *key, u32 *context, u32 *iosb, LARGE_TIME *timeout);
+void KeInitializeDpc(void *dpc, void (*routine)(void *, void *, void *, void *), void *context);
+u32 KeInsertQueueDpc(void *dpc, void *arg1, void *arg2);
+void KeInitializeEvent(void *event, u32 type, u32 state);
+s32 KeSetEvent(void *event, u32 increment, u32 wait);
+NTSTATUS KeWaitForSingleObject(void *object, u32 reason, u32 mode, u32 alertable, LARGE_TIME *timeout);
+NTSTATUS NtQueueApcThread(HANDLE thread, void (*routine)(void *, void *, void *), void *context, void *arg1, void *arg2);
+NTSTATUS NtCreateTimer(HANDLE *h, void *attributes, u32 type);
+NTSTATUS NtSetTimerEx(HANDLE h, LARGE_TIME *due, void *apc, u32 mode, void *context, u32 resume, u32 period_ms, u32 unused);
+NTSTATUS NtCancelTimer(HANDLE h, u32 *state);
 
 #define MEM_COMMIT 0x1000
 #define MEM_RESERVE 0x2000

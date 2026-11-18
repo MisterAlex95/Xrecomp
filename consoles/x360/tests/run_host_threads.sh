@@ -2,7 +2,7 @@
 # ctest helper (XBA-283): run_host_threads.sh X360_RUN WORKDIR HOMEBREW_DIR -- guest threads on host threads
 # (x360_run --host-threads, experimental). The devkitPPC titles (tools/consoles/build_homebrew.sh x360; skipped (77)
 # when not built): atomics (four threads on shared counters with lwarx / stwcx. and ldarx / stdcx. loops and a spin
-# lock) must print atomics.txt cooperatively and, three times, in parallel; hello_c (two workers, a critical section,
+# lock) and kobjects (XBA-296: the kernel objects) must print their text cooperatively and, three times, in parallel; hello_c (two workers, a critical section,
 # events) must print hello_c.txt in parallel; both again lifted from the entry point only (--no-pdata: the threads'
 # code interpreted, under the lock). A pack without atomic reservations (no xe_rc_features) is refused
 # (exit 2). Exits 77 when python3 or cc is missing.
@@ -15,7 +15,7 @@ py=${PYTHON:-python3}
 command -v "$py" >/dev/null 2>&1 || { echo "skipped: no $py"; exit 77; }
 cc=${CC:-cc}
 command -v "$cc" >/dev/null 2>&1 || { echo "skipped: no C compiler"; exit 77; }
-for p in atomics hello_c; do
+for p in atomics hello_c kobjects; do
     [ -f "$hb/$p.elf" ] || { echo "skipped: $hb/$p.elf not built (tools/consoles/build_homebrew.sh x360)"; exit 77; }
 done
 rm -rf "$work"
@@ -50,6 +50,12 @@ for i in 1 2 3; do
     check atomics "$here/atomics.txt" "atomics-host-$i" --host-threads
 done
 check hello_c "$here/hello_c.txt" hello_c-host --host-threads
+# XBA-296: SLists, a read-write lock, queues, a port, a DPC, an APC and a timer through lifted code
+pack kobjects
+check kobjects "$here/kobjects.txt" kobjects-cooperative
+for i in 1 2 3; do
+    check kobjects "$here/kobjects.txt" "kobjects-host-$i" --host-threads
+done
 # with the interpreter: lifted from the entry point only, the threads' code is interpreted (under the lock)
 pack atomics --no-pdata
 check atomics "$here/atomics.txt" atomics-host-interp --host-threads

@@ -20,7 +20,11 @@ from x360_tools.exports import ordinal  # noqa: E402
 KERNEL = ["DbgPrint", "NtAllocateVirtualMemory", "NtFreeVirtualMemory", "RtlInitializeCriticalSection",
           "RtlEnterCriticalSection", "RtlLeaveCriticalSection", "NtCreateEvent", "NtSetEvent", "NtWaitForSingleObjectEx",
           "NtWaitForMultipleObjectsEx", "ExCreateThread", "NtClose", "KeDelayExecutionThread", "NtCreateSemaphore",
-          "NtReleaseSemaphore", "MmAllocatePhysicalMemoryEx", "KeTlsAlloc", "KeTlsSetValue", "KeTlsGetValue", "sprintf"]
+          "NtReleaseSemaphore", "MmAllocatePhysicalMemoryEx", "KeTlsAlloc", "KeTlsSetValue", "KeTlsGetValue", "sprintf",
+          "InterlockedPushEntrySList", "InterlockedPopEntrySList", "ExInitializeReadWriteLock", "ExAcquireReadWriteLockExclusive",
+          "ExAcquireReadWriteLockShared", "ExReleaseReadWriteLock", "KeInitializeQueue", "KeInsertQueue", "KeRemoveQueue",
+          "NtCreateIoCompletion", "NtSetIoCompletion", "NtRemoveIoCompletion", "KeInitializeDpc", "KeInsertQueueDpc",
+          "KeInitializeEvent", "KeSetEvent", "KeWaitForSingleObject", "NtQueueApcThread", "NtCreateTimer", "NtSetTimerEx", "NtCancelTimer"]
 TEXT = BASE + PAGE
 
 
