@@ -68,6 +68,10 @@ def shaders():
         ("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1, srcs=((4, 0, 0, 0), (4, 0, 0, 0), (0, 0, 0, 0)))),
         ("alu", alu_words(vop=2, vdest=33, vmask=0xF, export=1, srcs=((5, 0, 0, 0), (5, 0, 0, 0), (0, 0, 0, 0))))],
         {})])
+    # ps_q16 / ps_q19 (XBA-296): getBCF / getWeights of texture fetch constant 2 at interpolator 0's xy, as the colour
+    for name, op in (("ps_q16", 16), ("ps_q19", 19)):
+        packed[name] = program([(2, [("fetch", fetch_words(op, 0, 1, XYZW, 2, dimension=1)),
+                                     ("alu", alu_words(**export(0, 1)))], {})])
     # ps_mx (XBA-296): a pixel shader's memory export: eA = c4, eM0 = c5, oC0 = interpolator 0
     packed["ps_mx"] = program([(2, [
         ("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1, srcs=((4, 0, 0, 0), (4, 0, 0, 0), (0, 0, 0, 0)))),

@@ -1181,9 +1181,67 @@ int main(int argc, char **argv)
         c = px(g, W / 2, H / 2);
         CHECK(c[0] == lrgb[5][0] && c[1] == lrgb[5][1] && c[2] == lrgb[5][2], "packed 3D level 2: %u,%u,%u", c[0], c[1],
               c[2]);
+        /* 64x16, 8 bytes a texel, linear, all tail: level 0 at y 16 of the base (rows of 512 bytes); levels 1 and 2 at
+         * y 8 and y 4 of the mips' storage, whose rows are sized from level 0 too: 512 bytes, not 256 */
+        for (uint32_t y = 0; y < 16; y++)
+            for (uint32_t x = 0; x < 64; x++)
+                w32(0x90000 + (y + 16) * 512 + x * 8, 0x3C000000u), w32(0x90000 + (y + 16) * 512 + x * 8 + 4, 0x3C000000u);
+        for (uint32_t y = 0; y < 8; y++)
+            for (uint32_t x = 0; x < 32; x++)
+                w32(0x94000 + (y + 8) * 512 + x * 8, 0x00003C00u), w32(0x94000 + (y + 8) * 512 + x * 8 + 4, 0x3C000000u);
+        for (uint32_t y = 0; y < 4; y++)
+            for (uint32_t x = 0; x < 16; x++)
+                w32(0x94000 + (y + 4) * 512 + x * 8, 0), w32(0x94000 + (y + 4) * 512 + x * 8 + 4, 0x3C003C00u);
+        uint32_t fwide[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22, 32u | 2u << 6 | 0x90000u, 63u | 15u << 13, sw_id << 1,
+                             2u << 6, 1u << 9 | 1u << 11 | 0x94000u};
+        static const int wide_want[3] = {1, 0, 2}; /* green, red, blue */
+        for (int l = 0; l < 3; l++) {
+            LOD_FRAME(0, 0.5f, 0.5f, 0.0f, l, fwide);
+            c = px(g, W / 2, H / 2);
+            const uint8_t *w_ = lrgb[wide_want[l]];
+            CHECK(c[0] == w_[0] && c[1] == w_[1] && c[2] == w_[2], "packed 64x16 level %d: %u,%u,%u", l, c[0], c[1], c[2]);
+        }
 #undef LOD_FRAME
         for (int i = 0; i < 3; i++)
             free(pl[i]);
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
+    /* the texture queries through the renderer: xe_tq<k> comes from the fetch constant (an 8x8 texture, X clamped to its
+     * border). getWeights at (0.28125, 0.3125): fract(2.25 - 0.5 + 1.5 / 1024), fract(2.5 - 0.5 + 1.5 / 1024); getBCF at
+     * u = -0.5: the whole footprint is outside */
+    {
+        static const char *const qn[2] = {"ps_q19.bin", "ps_q16.bin"};
+        static const float qc[2][2] = {{0.28125f, 0.3125f}, {-0.5f, 0.5f}};
+        uint32_t fq[6] = {2u | 6u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | 0x50000u, 7u | 7u << 13, sw_id << 1, 0, 1u << 9};
+        for (int q = 0; q < 2; q++) {
+            uint32_t nq;
+            uint32_t *pq = load(argv[1], qn[q], &nq);
+            CHECK(pq != NULL, "no %s", qn[q]);
+            if (!pq)
+                continue;
+            im[0] = 1, im[1] = nq;
+            memcpy(im + 2, pq, 4 * nq);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nq);
+            free(pq);
+            for (uint32_t k = 0; k < 4; k++)
+                vertex(0x41300 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? 1.0f : -1.0f, qc[q][0], qc[q][1], 0.0f);
+            reg(0x4800, 0x41300u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            for (int i = 0; i < 6; i++)
+                reg(0x480C + (uint32_t)i, fq[i]);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            c = px(g, W / 2, H / 2);
+            if (q == 0)
+                CHECK(c[0] >= 190 && c[0] <= 193 && c[1] <= 2, "getWeights through the renderer: %u,%u, want 191,0", c[0], c[1]);
+            else
+                CHECK(c[0] == 255, "getBCF through the renderer: %u, want 255", c[0]);
+        }
         im[0] = 1, im[1] = nps;
         memcpy(im + 2, ps, 4 * nps);
         type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
@@ -1327,6 +1385,23 @@ int main(int argc, char **argv)
               "another pitch: %08X must not be the stale green, %llu overlaps counted", v,
               (unsigned long long)(a1.edram_stale - a0.edram_stale));
         CHECK(a1.edram_reinterpreted >= 3, "reinterpreted surfaces: %llu", (unsigned long long)a1.edram_reinterpreted);
+        /* the scissor left at its maximum says nothing of a draw's extent: two targets at disjoint bases stay apart
+         * (of different pitches: an overlap between those would clear the rows) */
+        reg(0x2002, 0x700u), reg(0x2082, 8191u | 8191u << 16);
+        reg(0x2000, 64u), reg(0x2001, 0x610u);
+        FILL(1.0f, 0.0f, 0.0f, 1.0f);
+        reg(0x2000, 128u), reg(0x2001, 0x620u);
+        FILL(0.0f, 0.0f, 1.0f, 1.0f);
+        reg(0x2000, 64u), reg(0x2001, 0x610u);
+        FILL(1.0f, 0.0f, 0.0f, 1.0f);
+        reg(0x2000, 128u), reg(0x2001, 0x620u);
+        RESOLVE_TO(0x4D000u, 6);
+        reg(0x2082, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2000, 0);
+        for (int i = 0; i < 4; i++)
+            reg(0x4400 + (uint32_t)i, fbits(1.0f));
+        run(&cp);
+        v = rd32(NULL, 0x4D000 + tiled_off(5, 5));
+        CHECK(v == 0xFFFF0000u, "a neighbour under a maximum scissor: %08X, want FFFF0000 (blue)", v);
 #undef RESOLVE_TO
 #undef FILL
     }
@@ -1392,6 +1467,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: 31 frames drawn and read back as expected, five resolves (one of depth)\n");
+    printf("xenos_gl: every frame drawn and read back as expected (the first 31 with five resolves, then XBA-296's)\n");
     return 0;
 }

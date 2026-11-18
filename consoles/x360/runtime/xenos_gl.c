@@ -273,7 +273,9 @@ typedef struct surface {
     unsigned used;
     unsigned written;                      /* the write clock of its last contents (XBA-296) */
     int dirty_h;                           /* guest rows written so far */
-    GLuint rb;                             /* the multisampled colour or depth / stencil buffer, 0: none */
+    int unbounded;                         /* the last draw's extent is unknown (no scissor, no viewport): dirty_h is
+                                            * only the surface's height, not grounds for overwriting a neighbour */
+    GLuint rb;                            /* the multisampled colour or depth / stencil buffer, 0: none */
     int samples;
     int ms_dirty;                          /* rb has what tex does not yet */
     int ms_reload;                         /* tex has what rb does not yet */
@@ -1578,11 +1580,22 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         if (g->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
             const surface *ref = want[0] >= 0 ? &g->surf[want[0]] : &g->surf[ds];
             unsigned stamp = ++g->write_clock;
+            /* how far down this draw can reach: the scissor unless it is left at its maximum, and the viewport */
+            int reach = need_h > 0 && need_h < 8191 ? need_h : 0x7FFFFFFF, bounded = reach != 0x7FFFFFFF;
+            if ((cp->regs[0x2206] & 12) == 12) { /* VTE: y scale and offset on */
+                float vy = fabsf(as_float(cp->regs[0x2111])) + as_float(cp->regs[0x2112]);
+                if (vy > 0.0f && vy < 16384.0f) {
+                    int rows = (int)ceilf(vy);
+                    reach = rows < reach ? rows : reach;
+                    bounded = 1;
+                }
+            }
             for (int i = 0; i < 5; i++)
                 if (together[i] >= 0) {
                     surface *w = &g->surf[together[i]];
-                    int rows = need_h > 0 && need_h < w->h ? need_h : w->h;
+                    int rows = reach < w->h ? reach : w->h;
                     w->written = stamp;
+                    w->unbounded = !bounded;
                     w->dirty_h = rows > w->dirty_h ? rows : w->dirty_h;
                 }
             g->tw = ref->w, g->th = ref->h;
@@ -2098,15 +2111,15 @@ typedef struct tex_storage {
 } tex_storage;
 
 static tex_storage storage_of(const texfmt *tf, uint32_t dim, uint32_t w, uint32_t h, uint32_t depth, uint32_t pitch,
-                              uint32_t tiled, uint32_t level)
+                              uint32_t tiled, uint32_t level, int is_base)
 {
     tex_storage s;
-    uint32_t pw = level ? pow2_ceil(w) >> level : pitch, ph = level ? pow2_ceil(h) >> level : h;
+    uint32_t pw = is_base ? pitch : pow2_ceil(w) >> level, ph = is_base ? h : pow2_ceil(h) >> level;
     pw = pw ? pw : 1, ph = ph ? ph : 1;
     s.pitch_blocks = (((pw + tf->block - 1) / tf->block) + 31) & ~31u;
     s.height_blocks = (((ph + tf->block - 1) / tf->block) + 31) & ~31u;
     s.row_bytes = s.pitch_blocks * tf->bytes;
-    if (level && !tiled)
+    if (!is_base && !tiled)
         s.row_bytes = (s.row_bytes + 255) & ~255u; /* linear mip rows are 256-byte aligned */
     s.z_stride = s.row_bytes * (dim == 0 ? 1 : s.height_blocks);
     s.stride = (s.z_stride * (dim == 2 ? (depth + 3) & ~3u : 1) + 4095) & ~4095u;
@@ -2167,12 +2180,13 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
         uint32_t stored = (uint32_t)l;
         if (packed && stored > (tail ? tail : 1))
             stored = tail ? tail : 1;
-        tex_storage st = storage_of(tf, dim, w, h1, depth, pitch, tiled, stored);
+        /* a texture that is all tail sizes its mips' storage from level 0, not 1 (Xenia's GetGuestTextureLayout) */
+        tex_storage st = storage_of(tf, dim, w, h1, depth, pitch, tiled, packed && !tail ? 0 : stored, !stored);
         uint32_t level_addr = fc[1] & 0xFFFFF000u;
         if (stored) {
             level_addr = mip_addr;
             for (uint32_t k = 1; k < stored; k++) {
-                tex_storage before = storage_of(tf, dim, w, h1, depth, pitch, tiled, k);
+                tex_storage before = storage_of(tf, dim, w, h1, depth, pitch, tiled, k, 0);
                 level_addr += before.stride * (dim == 3 ? 6 : 1);
             }
         }
@@ -3047,13 +3061,14 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
     surface *d = &g->surf[si];
     uint32_t dsy = d->msaa ? 2 : 1, dper = surface_row_tiles(d);
     uint32_t dend = d->base + dper * (((uint32_t)d->h * dsy + 15) / 16);
-    unsigned since = d->written;
+    unsigned since = d->written, newest = d->written;
+    uint32_t done = 0; /* surfaces bound together share one stamp: each is taken in its turn */
     int touched = 0;
     for (;;) {
         const surface *s = NULL;
         for (int i = 0; i < MAX_SURFACES; i++) {
             const surface *o = &g->surf[i];
-            int together = i == si;
+            int together = i == si || ((done >> i) & 1);
             for (int k = 0; k < nbound; k++)
                 together |= bound[k] == i;
             if (together || !o->tex || o->written <= since || !o->dirty_h || (o->fmt >> 8) || (d->fmt >> 8))
@@ -3065,9 +3080,11 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
         }
         if (!s)
             break;
-        since = s->written;
+        done |= 1u << (s - g->surf);
+        newest = s->written > newest ? s->written : newest;
         touched = 1;
-        if ((s->kind == 2) != (d->kind == 2)) { /* colour and depth over one another: not reinterpreted */
+        /* colour and depth over one another are not reinterpreted; a draw of unknown extent proves no overlap */
+        if ((s->kind == 2) != (d->kind == 2) || s->unbounded) {
             g->st.edram_stale++;
             continue;
         }
@@ -3102,7 +3119,7 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
         g->st.edram_stale++;
     }
     if (touched) {
-        d->written = since;
+        d->written = newest;
         g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
     }
 }
@@ -3147,10 +3164,10 @@ static uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0, int 
         g->stex_w = hw, g->stex_h = hh;
     }
     size_t n = (size_t)w * h;
-    uint8_t *out = calloc(n, 1), *row = malloc((size_t)hw * 4);
-    if (!out || !row) {
+    uint8_t *out = calloc(n, 1), *rows = malloc((size_t)hw * h * sc * 4);
+    if (!out || !rows) {
         free(out);
-        free(row);
+        free(rows);
         return NULL;
     }
     static const GLenum b0 = GL_COLOR_ATTACHMENT0;
@@ -3176,14 +3193,13 @@ static uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0, int 
         g->glClear(GL_COLOR_BUFFER_BIT);
         g->glStencilFuncSeparate(GL_FRONT_AND_BACK, 0x0202 /* GL_EQUAL */, 0xFF, 1u << bit);
         g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
-        for (int y = 0; y < h; y++) {
-            g->glReadPixels(0, (y0 + y) * sc, hw, 1, GL_RGBA, GL_UNSIGNED_BYTE, row);
+        g->glReadPixels(0, y0 * sc, hw, h * sc, GL_RGBA, GL_UNSIGNED_BYTE, rows);
+        for (int y = 0; y < h; y++)
             for (int x = 0; x < w; x++)
-                if (row[4 * (x0 + x) * sc])
+                if (rows[((size_t)y * sc * hw + (size_t)(x0 + x) * sc) * 4])
                     out[(size_t)y * w + x] |= (uint8_t)(1u << bit);
-        }
     }
-    free(row);
+    free(rows);
     g->glDisable(GL_STENCIL_TEST);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
