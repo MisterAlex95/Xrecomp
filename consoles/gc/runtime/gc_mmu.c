@@ -18,6 +18,8 @@
  * re-examines the BATs after a BAT write, gc_mmu_update picks the mode after every MSR change (gc_rc_head's
  * dfast_mask / dfast_val, the machine's ifast_*), so lifted code keeps one AND / XOR / OR and a compare per access
  * whatever the program does with the other BATs (the SDK maps the locked cache with DBAT3) or the page table.
+ * Instruction fetches also take it with 0x80000000 mapped alone (libogc maps no code at 0xC0000000, XBA-279): EAs
+ * 0x80000000 .. 0xBFFFFFFF then, when the first IBAT touching that MEM1 view maps it (xlate takes the first match).
  *
  * Locked cache (HID2[LCE]): the upper 16 KB of the data cache become memory at EA 0xE0000000 (where the SDK maps
  * it); dcbz_l zeroes one of its lines, the locked-cache DMA (DMAU / DMAL, SPR 922 / 923) copies between it and
@@ -46,6 +48,21 @@ static bool bat_maps_mem1(uint32_t u, uint32_t l, unsigned pr, uint32_t base)
     return (u & 0xFFFE0000u & ~mask) == base && (l & 0xFFFE0000u & ~mask) == 0 && (l & 3u) == 2;
 }
 
+/* XBA-279: the first BAT valid for pr that touches [base, base + MEM1) maps all of it to [0, MEM1) read / write (so
+ * xlate, which takes the first match, translates every EA there to EA - base). */
+static bool bat_first_maps_mem1(const uint32_t *bat, unsigned pr, uint32_t base)
+{
+    for (int i = 0; i < 4; i++) {
+        uint32_t u = bat[2 * i];
+        if (!(u & (pr ? 1u : 2u)))
+            continue;
+        uint32_t mask = (((u >> 2) & 0x7FFu) << 17) | 0x1FFFFu, lo = u & 0xFFFE0000u & ~mask;
+        if (lo <= base + GC_RAM_SIZE - 1 && base <= lo + mask)
+            return bat_maps_mem1(u, bat[2 * i + 1], pr, base);
+    }
+    return false;
+}
+
 static bool bats_default(const uint32_t *bat, unsigned pr)
 {
     bool lo = false, hi = false;
@@ -62,6 +79,7 @@ void gc_mmu_bats(gc_machine *m)
     for (unsigned pr = 0; pr < 2; pr++) {
         m->dbats_default[pr] = bats_default(&c->spr[SPR_DBAT0U], pr);
         m->ibats_default[pr] = bats_default(&c->spr[SPR_IBAT0U], pr);
+        m->ibats_lo[pr] = bat_first_maps_mem1(&c->spr[SPR_IBAT0U], pr, 0x80000000u);
     }
     gc_mmu_update(m);
 }
@@ -80,6 +98,8 @@ void gc_mmu_update(gc_machine *m)
         m->ifast_mask = m->ifast_val = 0;
     else if (m->ibats_default[pr])
         m->ifast_mask = m->ifast_val = 0x80000000u;
+    else if (m->ibats_lo[pr]) /* the SDK maps no code at 0xC0000000: 0x80000000 .. 0xBFFFFFFF alone (XBA-279) */
+        m->ifast_mask = 0xC0000000u, m->ifast_val = 0x80000000u;
     else
         m->ifast_mask = 0, m->ifast_val = 0xFFFFFFFFu;
 }
@@ -186,6 +206,10 @@ void gc_store(gc_machine *m, uint32_t ea, uint32_t v, unsigned size, uint32_t pc
     int r = xlate(m, ea, ACC_WRITE, &pa);
     if (r) {
         dsi(m, ea, r, true, pc);
+        return;
+    }
+    if ((pa & 0xFFFF8000u) == 0x0C008000u) { /* the write-gather pipe, where gc_phys_write sends it (XBA-279) */
+        gx_fifo_write(m->gx, v, size);
         return;
     }
     gc_phys_write(m, pa, v, size);

@@ -55,6 +55,7 @@ struct gc_machine {
 
     /* address translation (gc_mmu.c): whether the BATs are the default mapping, per MSR[PR] */
     bool dbats_default[2], ibats_default[2];
+    bool ibats_lo[2];     /* the IBATs map 0x80000000 onto MEM1 (the first one there), per MSR[PR] (XBA-279) */
     uint32_t ifast_mask, ifast_val; /* instruction fetch: as gc_rc_head's dfast_mask / dfast_val */
     /* DSI / ISI from the middle of an instruction: the run loop's resume point */
     jmp_buf fault_jb;
