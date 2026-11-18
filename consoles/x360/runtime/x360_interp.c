@@ -77,7 +77,7 @@ static int bcond(xe_cpu *c, unsigned bo, unsigned bi, int ctr_ok)
         ok = (bo & 2) ? (uint32_t)c->ctr == 0 : (uint32_t)c->ctr != 0;
     }
     if (!(bo & 16)) {
-        int bit = (c->cr >> (31 - bi)) & 1;
+        unsigned bit = (c->cr >> (31 - bi)) & 1;
         ok = ok && bit == ((bo >> 3) & 1);
     }
     return ok;

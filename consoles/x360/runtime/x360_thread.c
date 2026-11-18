@@ -39,7 +39,8 @@ void x360_fail(x360_machine *x, const char *fmt, ...)
 
 uint64_t x360_now(x360_machine *x)
 {
-    return x->m.rc_native / 320 + x->st.interpreted / 320 + x->st.hle_calls * 2 + x->time_skip;
+    /* interpreted instructions are in rc_native too (RC_BLOCK counts an RC_INTERP one, x360_interp_run the rest) */
+    return x->m.rc_native / 320 + x->st.hle_calls * 2 + x->time_skip;
 }
 
 static void sync_tb(x360_machine *x)

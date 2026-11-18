@@ -107,8 +107,10 @@ static void sec_threads(x360_machine *x, io *s)
     for (int k = 0; k < x->nthreads; k++) {
         x360_thread *t = &x->threads[k];
         xe_cpu *c = &t->cpu;
-        if (s->load)
+        if (s->load) {
             memset(&t->seh, 0, sizeof t->seh); /* the SEH section, when the state has one, sets it again */
+            t->interp = 1; /* XBA-283: a thread stopped in interpreted code resumes there, not a new miss */
+        }
         for (int r = 0; r < 32; r++)
             io_u64(s, &c->gpr[r]);
         for (int r = 0; r < 32; r++)
