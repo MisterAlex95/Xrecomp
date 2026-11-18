@@ -1812,6 +1812,8 @@ static int exc_walk(ps1_machine *m)
         K_EPI();                                                                                                       \
     } while (0)
 
+    if (nd || npc != pc + 4)
+        return 0; /* entered in a delay slot or after a jump (a state load, a program jumping in): step() */
     switch (pc) {
     case 0x80000080u: goto l_vec;
     case EXC_PC(1): goto l_pl;
