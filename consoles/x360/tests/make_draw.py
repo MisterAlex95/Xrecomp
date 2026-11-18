@@ -32,7 +32,11 @@ def shaders():
     # ps_pos: oC0 = r1 * c0, r1 being the pixel parameters (SQ_CONTEXT_MISC's param_gen_pos = 1)
     ps_pos = program([(2, [("alu", alu_words(vop=1, vdest=0, vmask=0xF, export=1,
                                              srcs=((1, 1, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))))], {})])
-    packed = {"ps_pos": ps_pos}
+    # ps_mrt: oC0 = interpolator 0, oC1 = c1
+    ps_mrt = program([(2, [("alu", alu_words(**export(0, 0))),
+                           ("alu", alu_words(vop=2, vdest=1, vmask=0xF, export=1,
+                                             srcs=((1, 0, 0, 0), (1, 0, 0, 0), (0, 0, 0, 0))))], {})])
+    packed = {"ps_pos": ps_pos, "ps_mrt": ps_mrt}
     for name, fmt in (("vs_u16", 26), ("vs_h16", 32)):
         packed[name] = program([(2, [("fetch", fetch_words(0, 0, 1, XYZW, 0, sel=0, format=38, stride=6, offset=0)),
                                      ("fetch", fetch_words(0, 0, 2, XYZW, 0, sel=0, format=fmt, stride=6, offset=4)),

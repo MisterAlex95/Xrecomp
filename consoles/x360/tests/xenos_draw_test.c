@@ -28,7 +28,9 @@
  *   frame 18: the pixel parameters (SQ_PROGRAM_CNTL param_gen, SQ_CONTEXT_MISC register 1): ps_pos writes
  *            r1 * (1/64, 1/64, 0, 1), so a pixel's red / green are its x / y from the top-left, times 4;
  *   frame 19: VGT_INDX_OFFSET 4 shifts the indices 0..3 of a strip onto the red quad's vertices 4..7 of the
- *            depth frame's buffer, and a strip cut by the reset index (two triangles of a quad, then a restart).
+ *            depth frame's buffer, and a strip cut by the reset index (two triangles of a quad, then a restart);
+ *   frame 20: two render targets: ps_mrt writes the green quad's colour to oC0 and c1 (blue) to oC1; a resolve of
+ *            render target 1 copies blue into memory while the frame (target 0) is green.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -565,9 +567,40 @@ int main(int argc, char **argv)
     CHECK(s0[0] == 255 && s0[1] == 0 && s1[0] == 255, "frame 19 (index offset, restart): %u,%u,%u %u,%u,%u", s0[0],
           s0[1], s0[2], s1[0], s1[1], s1[2]);
 
+    /* frame 20: two render targets */
+    {
+        uint32_t nm;
+        uint32_t *pm = load(argv[1], "ps_mrt.bin", &nm);
+        CHECK(pm != NULL, "no ps_mrt.bin");
+        if (pm) {
+            im[0] = 1, im[1] = nm;
+            memcpy(im + 2, pm, 4 * nm);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nm);
+            free(pm);
+            reg(0x4404, 0), reg(0x4405, 0), reg(0x4406, fbits(1.0f)), reg(0x4407, fbits(1.0f)); /* c1: blue */
+            reg(0x4800, 0x4000u | 3u);
+            reg(0x4801, 2u | (64u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            reg(0x4800, 0x7000u | 3u);
+            reg(0x4801, 2u | (6u << 2));
+            reg(0x2208, 6);
+            reg(0x2318, 1u);                         /* render target 1, no clear, raw */
+            reg(0x2319, 0x20000);
+            type3(PM4_DRAW_INDX_2, &rect, 1);
+            reg(0x2208, 4);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            c = px(g, W / 2, H / 2);
+            uint32_t t1 = rd32(NULL, 0x20000);
+            CHECK(c[1] == 255 && c[2] == 0 && t1 == 0xFFFF0000u,
+                  "frame 20 (render targets): target 0 %u,%u,%u, target 1 resolved %08X (want FFFF0000)", c[0], c[1],
+                  c[2], t1);
+        }
+    }
+
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 23 && st.frames == 20 && st.resolves == 1 && st.no_shader == 0 && st.unsupported == 0 &&
+    CHECK(st.drawn == 24 && st.frames == 21 && st.resolves == 2 && st.no_shader == 0 && st.unsupported == 0 &&
               st.unsupported_textures == 0,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
           (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
@@ -579,6 +612,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: twenty frames drawn and read back as expected, one resolve\n");
+    printf("xenos_gl: 21 frames drawn and read back as expected, two resolves\n");
     return 0;
 }

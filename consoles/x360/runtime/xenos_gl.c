@@ -164,7 +164,10 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glBeginTransformFeedback, (GLenum))                                                                        \
     X(void, glEndTransformFeedback, (void))                                                                            \
     X(void *, glMapBufferRange, (GLenum, GLintptr, GLsizeiptr, GLbitfield))                                           \
-    X(GLboolean, glUnmapBuffer, (GLenum))
+    X(GLboolean, glUnmapBuffer, (GLenum))                                                                              \
+    X(void, glDrawBuffers, (GLsizei, const GLenum *))                                                                  \
+    X(void, glReadBuffer, (GLenum))                                                                                    \
+    X(void, glClearBufferfv, (GLenum, GLint, const GLfloat *))
 
 #define MAX_PROGRAMS 256
 #define MAX_ATTRS 16
@@ -212,7 +215,7 @@ struct xenos_gl {
     void *egl_lib, *gles_lib;
     EGLDisplay dpy;
     EGLContext ctx;
-    GLuint fbo, rb, ds, vao, vbo, ibo, ubo[2], tfbo;
+    GLuint fbo, rb, rbx[3], ds, vao, vbo, ibo, ubo[2], tfbo; /* colour 0, colours 1-3, depth / stencil */
     int width, height;
     uint8_t *frame;
     char cache[512], frames[512];
@@ -320,6 +323,16 @@ xenos_gl *xenos_gl_create(const char *cache_dir, int width, int height, char *wh
     g->glBindRenderbuffer(GL_RENDERBUFFER, g->rb);
     g->glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, width, height);
     g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, g->rb);
+    /* render targets 1-3 (the pixel shader's oC1-oC3) */
+    g->glGenRenderbuffers(3, g->rbx);
+    for (int i = 0; i < 3; i++) {
+        g->glBindRenderbuffer(GL_RENDERBUFFER, g->rbx[i]);
+        g->glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, width, height);
+        g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + 1 + (GLenum)i, GL_RENDERBUFFER, g->rbx[i]);
+    }
+    static const GLenum bufs[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT0 + 1, GL_COLOR_ATTACHMENT0 + 2,
+                                   GL_COLOR_ATTACHMENT0 + 3};
+    g->glDrawBuffers(4, bufs);
     g->glGenRenderbuffers(1, &g->ds);
     g->glBindRenderbuffer(GL_RENDERBUFFER, g->ds);
     g->glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
@@ -344,7 +357,7 @@ xenos_gl *xenos_gl_create(const char *cache_dir, int width, int height, char *wh
     g->glClearColor(0, 0, 0, 1);
     g->glClearDepthf(1.0f);
     g->glClearStencil(0);
-    g->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    g->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT); /* every colour target */
     return g;
 }
 
@@ -365,6 +378,7 @@ void xenos_gl_destroy(xenos_gl *g)
                 g->glDeleteTextures(1, &g->textures[i].tex);
         g->glDeleteVertexArrays(1, &g->vao);
         g->glDeleteRenderbuffers(1, &g->rb);
+        g->glDeleteRenderbuffers(3, g->rbx);
         g->glDeleteRenderbuffers(1, &g->ds);
         g->glDeleteFramebuffers(1, &g->fbo);
         g->eglMakeCurrent(g->dpy, NULL, NULL, NULL);
@@ -1141,7 +1155,9 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
         unsigned bpp_log2 = fmt == 6 ? 2 : fmt == 4 ? 1 : 0;
         uint8_t *px = malloc((size_t)(x1 - x0) * (y1 - y0) * 4);
         if ((fmt == 6 || fmt == 4) && endian < 4 && px && cp->write32 && cp->read32) {
+            g->glReadBuffer(GL_COLOR_ATTACHMENT0 + src); /* copy_src_select: render target 0-3 */
             g->glReadPixels(x0, g->height - y1, x1 - x0, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            g->glReadBuffer(GL_COLOR_ATTACHMENT0);
             for (int y = y0; y < y1; y++)
                 for (int x = x0; x < x1; x++) {
                     const uint8_t *p = px + ((size_t)(y1 - 1 - y) * (x1 - x0) + (x - x0)) * 4; /* GL rows bottom up */
@@ -1168,11 +1184,12 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
         free(px);
     }
     uint32_t clear = 0;
-    if ((ctl >> 8) & 1) {
+    int clear_colour = (ctl >> 8) & 1;
+    GLfloat colour[4];
+    if (clear_colour) { /* the resolved render target (0 when the source is depth) */
         uint32_t cc = cp->regs[0x231E];
-        g->glClearColor(((cc >> 16) & 0xFF) / 255.0f, ((cc >> 8) & 0xFF) / 255.0f, (cc & 0xFF) / 255.0f,
-                        (cc >> 24) / 255.0f);
-        clear |= GL_COLOR_BUFFER_BIT;
+        colour[0] = ((cc >> 16) & 0xFF) / 255.0f, colour[1] = ((cc >> 8) & 0xFF) / 255.0f;
+        colour[2] = (cc & 0xFF) / 255.0f, colour[3] = (cc >> 24) / 255.0f;
     }
     if ((ctl >> 9) & 1) {
         uint32_t dc = cp->regs[0x231D];
@@ -1180,13 +1197,16 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
         g->glClearStencil((GLint)(dc & 0xFF));
         clear |= GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     }
-    if (clear) {
+    if (clear || clear_colour) {
         g->glEnable(GL_SCISSOR_TEST);
         g->glScissor(x0, g->height - y1, x1 - x0, y1 - y0);
         g->glColorMask(1, 1, 1, 1);
         g->glDepthMask(1);
         g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
-        g->glClear(clear);
+        if (clear)
+            g->glClear(clear);
+        if (clear_colour)
+            g->glClearBufferfv(0x1800 /* GL_COLOR */, src < 4 ? (GLint)src : 0, colour);
         g->glDisable(GL_SCISSOR_TEST);
         g->title_clears = 1; /* the title clears through resolves: swaps stop clearing */
     }

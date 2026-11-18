@@ -23,9 +23,11 @@
  *
  * Resolves (eDRAM mode "copy"): the colour copied to guest memory as a tiled 8_8_8_8 or 5_6_5 texture at the
  * resolve rectangle, colour / depth / stencil cleared there; once a title clears through resolves, swaps stop
- * clearing. The render target is the single host target (no eDRAM model: surface pitch, base, MSAA ignored).
+ * clearing. Four host colour targets (oC0-oC3; frames come from target 0, resolves from copy_src_select's) and one
+ * depth / stencil target stand for the eDRAM (no eDRAM model: surface pitch, base, formats, MSAA ignored;
+ * RB_COLOR_MASK's target 0 bits apply to all four: GLES 3.0 has no per-target mask).
  *
- * Not there yet: the eDRAM model (several render targets, formats, MSAA), the other resolve formats, mips, 3D / cube
+ * Not there yet: the eDRAM model (render target bases, formats, MSAA), the other resolve formats, mips, 3D / cube
  * and the other texture formats, alpha test, more vertex formats, multiple render targets, the
  * viewport's exact conventions (the scale / offset registers map to glViewport when enabled). A Vulkan back end (the
  * epic's plan) would take the same state; the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
