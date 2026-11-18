@@ -1,0 +1,12 @@
+C title: hello from main()
+fib(20) = 6765
+switch: 12 162 0 -10 208 5 70 2 0
+ops: 12 2 35 1
+sqrt(2) ~ 1414213 / 1000000
+vec_madd: 1050 1050 1600 600
+virtual: status 0, 64 KB pages, checksum 47840
+physical: 64 KB view, mirror agrees
+workers: wait 0, counter 300, sums 4950 19900
+tls: C0FFEE
+sprintf: abc--5-ff
+main returns 0

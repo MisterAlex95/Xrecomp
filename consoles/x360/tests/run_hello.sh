@@ -1,5 +1,5 @@
 #!/bin/sh
-# ctest helper (XBA-270): run_hello.sh X360_RUN WORKDIR MODE EXPECTED_TXT
+# ctest helper (XBA-270): run_hello.sh X360_RUN WORKDIR MODE EXPECTED_TXT [ELF]
 #
 # Builds the synthetic test title (make_hello.py: our own PowerPC assembly in a synthetic XEX2), recompiles it
 # (python3 -m x360_tools.recomp), builds the C into a pack (the host cc, -DXE_RUNTIME -shared -ffp-contract=off) and
@@ -9,11 +9,14 @@
 #   basic   the XEX as the loader takes it (unencrypted, basic compression)
 #   lzx     encrypted (a key made up here) and LZX-compressed, then rewritten plain by python3 -m tools.xex --plain,
 #           the path a retail title takes with the user's own key
+#   c       ELF: a C test title built with devkitPPC (tests/homebrew, tools/consoles/build_homebrew.sh x360) packed by
+#           homebrew/elf2xex.py; skipped (77) when the ELF is not built
 # Exits 77 (skipped) when python3 or cc is missing.
 run=$1
 work=$2
 mode=$3
 expected=$4
+elf=$5
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
 py=${PYTHON:-python3}
@@ -23,7 +26,13 @@ command -v "$cc" >/dev/null 2>&1 || { echo "skipped: no C compiler"; exit 77; }
 rm -rf "$work"
 mkdir -p "$work"
 export PYTHONPATH="$repo:$repo/consoles/x360/tools"
-if [ "$mode" = lzx ]; then
+if [ "$mode" = c ] && [ ! -f "$elf" ]; then
+    echo "skipped: $elf not built (tools/consoles/build_homebrew.sh x360)"
+    exit 77
+fi
+if [ "$mode" = c ]; then
+    "$py" "$here/homebrew/elf2xex.py" "$elf" "$work/hello.xex" || exit 1
+elif [ "$mode" = lzx ]; then
     printf 'xba-270-made-up!' >"$work/test.key"
     "$py" "$here/make_hello.py" "$work/enc.xex" --compression normal --key-file "$work/test.key" || exit 1
     "$py" -m tools.xex "$work/enc.xex" --key-file "$work/test.key" --plain "$work/hello.xex" >"$work/xex.txt" || exit 1
