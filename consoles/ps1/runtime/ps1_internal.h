@@ -311,6 +311,10 @@ static inline bool ps1_rc_liftable_pc(uint32_t pc)
  * no interrupt is pending, no hook is due and the time slice is not up, as that loop would call ps1_cpu_step for each
  * (the BIOS, its exception handler), without a call per instruction. */
 void ps1_cpu_step_unliftable(ps1_machine *m);
+/* Steps the HLE kernel's RAM code (the exception vector, the handler chain walk, the trap stubs) exactly as
+ * ps1_cpu_step would, with the run loop's checks between two instructions; returns how many ran (0: ps1_cpu_step must
+ * run the one at pc). ps1_cpu.c « The HLE kernel's RAM code ». */
+int ps1_cpu_run_kernel(ps1_machine *m);
 void ps1_cpu_hook_check(ps1_machine *m);   /* the run loop's BIOS / fast-boot hook test before an instruction */
 void ps1_cpu_take_interrupt(ps1_machine *m);
 

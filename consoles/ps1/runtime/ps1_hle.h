@@ -43,6 +43,11 @@ void ps1_hle_destroy(ps1_machine *m);
 void ps1_hle_boot(ps1_machine *m);
 /* The interpreter ran trap word `code` (the low 16 bits) from kernel RAM: the call runs. */
 void ps1_hle_trap(ps1_machine *m, uint32_t code);
+/* The kernel's exception handler: PS1_HLE_EXC_WORDS words at PS1_HLE_EXC (kernel RAM), as kernel set-up writes them
+ * (ps1_cpu.c runs them natively while they are these). */
+#define PS1_HLE_EXC 0x0C80u
+#define PS1_HLE_EXC_WORDS 25
+const uint32_t *ps1_hle_exc_code(void);
 
 /* The call list (tests, docs): 1 when (table 0..2, function) is implemented, its name in *name (may be NULL). */
 int ps1_hle_implemented(int table, int fn, const char **name);

@@ -284,6 +284,11 @@ static uint32_t io_rd(ps1_machine *m, uint32_t phys)
     return ps1_io_read(m, phys, 4);
 }
 
+/* The interrupt controller's registers as ps1_io_read returns them (no side effect there): the verifiers read them for
+ * every interrupt, once per IRQ line (XBA-279). */
+#define I_STAT_RD(m) ((m)->i_stat)
+#define I_MASK_RD(m) ((m)->i_mask)
+
 static void io_wr(ps1_machine *m, uint32_t phys, uint32_t v)
 {
     ps1_io_write(m, phys, v, 4);
@@ -636,7 +641,7 @@ static void irq_verifier(ps1_machine *m)
     static const int order[11] = {2, 9, 1, 10, 8, 0, 4, 5, 6, 7, 3};
     for (int k = 0; k < 11; k++) {
         int irq = order[k];
-        if (io_rd(m, I_MASK) & io_rd(m, I_STAT) & (1u << irq)) {
+        if (I_MASK_RD(m) & I_STAT_RD(m) & (1u << irq)) {
             if (!deliver_event(m, s_irq_event[irq], 0x1000u))
                 return;
             if (m->hle->irq_autoack[irq])
@@ -649,7 +654,7 @@ static void irq_verifier(ps1_machine *m)
 static void timer_verifier(ps1_machine *m, int t)
 {
     uint32_t bit = t == 3 ? 1u : 1u << (4 + t);
-    if (!(io_rd(m, I_MASK) & bit) || !(io_rd(m, I_STAT) & bit)) {
+    if (!(I_MASK_RD(m) & bit) || !(I_STAT_RD(m) & bit)) {
         ret(m, 0);
         return;
     }
@@ -691,7 +696,7 @@ static void pad_read(ps1_machine *m, int port)
 
 static void sio0_verifier(ps1_machine *m)
 {
-    ret(m, (io_rd(m, I_MASK) & 1u) && (io_rd(m, I_STAT) & 1u));
+    ret(m, (I_MASK_RD(m) & 1u) && (I_STAT_RD(m) & 1u));
 }
 
 static void sio0_handler(ps1_machine *m)
@@ -719,7 +724,7 @@ static void sio0_install(ps1_machine *m)
 {
     deq_int(m, 2, hinfo(HI_SIO0));
     enq_int(m, 2, hinfo(HI_SIO0));
-    io_wr(m, I_MASK, io_rd(m, I_MASK) | 1u);
+    io_wr(m, I_MASK, I_MASK_RD(m) | 1u);
     m->hle->sio0_autoack = true;
     m->hle->timer_autoack[3] = false;
 }
@@ -2215,8 +2220,8 @@ FN(b_init_timer)
 }
 FN(b_get_timer) { uint32_t t = A0 & 0xFFFF; ret(m, t > 2 ? 0 : io_rd(m, 0x1F801100u + 0x10u * t) & 0xFFFF); }
 static const uint32_t s_timer_mask[4] = {0x10, 0x20, 0x40, 0x01};
-FN(b_enable_timer_irq) { uint32_t t = A0 & 3; io_wr(m, I_MASK, io_rd(m, I_MASK) | s_timer_mask[t]); ret(m, (A0 & 0xFFFF) <= 2); }
-FN(b_disable_timer_irq) { io_wr(m, I_MASK, io_rd(m, I_MASK) & ~s_timer_mask[A0 & 3]); ret(m, 1); }
+FN(b_enable_timer_irq) { uint32_t t = A0 & 3; io_wr(m, I_MASK, I_MASK_RD(m) | s_timer_mask[t]); ret(m, (A0 & 0xFFFF) <= 2); }
+FN(b_disable_timer_irq) { io_wr(m, I_MASK, I_MASK_RD(m) & ~s_timer_mask[A0 & 3]); ret(m, 1); }
 FN(b_restart_timer)
 {
     uint32_t t = A0 & 0xFFFF;
@@ -2449,7 +2454,7 @@ FN(b_card_wait) { ret(m, 1); }
 /* C(00h)..: kernel set-up */
 FN(c_enq_rcnt)
 {
-    io_wr(m, I_MASK, io_rd(m, I_MASK) & ~0x71u);
+    io_wr(m, I_MASK, I_MASK_RD(m) & ~0x71u);
     for (int i = 0; i < 4; i++) {
         m->hle->timer_autoack[i] = true;
         enq_int(m, A0, hinfo(HI_T0 + i));
@@ -2691,44 +2696,52 @@ void ps1_hle_trap(ps1_machine *m, uint32_t code)
 
 /* ---- Set-up and boot ---- */
 
-static uint32_t enc_i(uint32_t op, uint32_t rs, uint32_t rt, uint32_t imm)
+/* The kernel's exception handler (OpenBIOS's chain walk, K_EXC): ENTER saves the registers into the TCB and sets
+ * s3 / s4 to the handlers array; each of the 4 priorities' chains is walked, a node's verifier (its +8) called, and when
+ * it returns non-zero its handler (+4) with the verifier's value; LEAVE longjmps to the exception jmp_buf (by default
+ * ReturnFromException, or a program's SetCustomExitFromException). ps1_cpu.c « The HLE kernel's RAM code » runs
+ * these words natively while they are intact: its walk follows this listing. */
+#define ENC_I(op, rs, rt, imm) ((uint32_t)(op) << 26 | (uint32_t)(rs) << 21 | (uint32_t)(rt) << 16 | ((uint32_t)(imm) & 0xFFFFu))
+enum { HZERO = 0, HV0 = 2, HA0 = 4, HS0 = 16, HS1 = 17, HS3 = 19, HS4 = 20, HS6 = 22, HRA = 31 };
+enum { HLW = 0x23, HBEQ = 0x04, HBNE = 0x05, HADDIU = 0x09 };
+static const uint32_t s_exc_code[PS1_HLE_EXC_WORDS] = {
+    /* 0 */ PS1_HLE_TRAP | 0x300 | K_EXC_ENTER,
+    /* 1 PL */ ENC_I(HLW, HS3, HS6, 0),
+    /* 2 */ 0,
+    /* 3 */ ENC_I(HBEQ, HS6, HZERO, 21 - 4),
+    /* 4 */ 0,
+    /* 5 HL */ ENC_I(HLW, HS6, HS1, 8),
+    /* 6 */ ENC_I(HLW, HS6, HS0, 4),
+    /* 7 */ ENC_I(HBEQ, HS1, HZERO, 17 - 8),
+    /* 8 */ 0,
+    /* 9 */ HS1 << 21 | HRA << 11 | 0x09, /* jalr s1 */
+    /* 10 */ 0,
+    /* 11 */ ENC_I(HBEQ, HV0, HZERO, 17 - 12),
+    /* 12 */ 0,
+    /* 13 */ ENC_I(HBEQ, HS0, HZERO, 17 - 14),
+    /* 14 */ HV0 << 21 | HZERO << 16 | HA0 << 11 | 0x21, /* move a0, v0 */
+    /* 15 */ HS0 << 21 | HRA << 11 | 0x09, /* jalr s0 */
+    /* 16 */ 0,
+    /* 17 NH */ ENC_I(HLW, HS6, HS6, 0),
+    /* 18 */ 0,
+    /* 19 */ ENC_I(HBNE, HS6, HZERO, 5 - 20),
+    /* 20 */ 0,
+    /* 21 NP */ ENC_I(HADDIU, HS3, HS3, 8),
+    /* 22 */ ENC_I(HBNE, HS4, HS3, 1 - 23),
+    /* 23 */ 0,
+    /* 24 */ PS1_HLE_TRAP | 0x300 | K_EXC_LEAVE,
+};
+_Static_assert(K_EXC == PS1_HLE_EXC, "ps1_hle.h PS1_HLE_EXC");
+
+const uint32_t *ps1_hle_exc_code(void)
 {
-    return op << 26 | rs << 21 | rt << 16 | (imm & 0xFFFFu);
+    return s_exc_code;
 }
 
 static void write_exception_handler(ps1_machine *m)
 {
-    enum { ZERO = 0, V0 = 2, A0R = 4, S0 = 16, S1 = 17, S3 = 19, S4 = 20, S6 = 22, RAR = 31 };
-    const uint32_t LW = 0x23, BEQ = 0x04, BNE = 0x05, ADDIU = 0x09;
-    uint32_t code[] = {
-        /* 0 */ PS1_HLE_TRAP | 0x300 | K_EXC_ENTER,
-        /* 1 PL */ enc_i(LW, S3, S6, 0),
-        /* 2 */ 0,
-        /* 3 */ enc_i(BEQ, S6, ZERO, 21 - 4),
-        /* 4 */ 0,
-        /* 5 HL */ enc_i(LW, S6, S1, 8),
-        /* 6 */ enc_i(LW, S6, S0, 4),
-        /* 7 */ enc_i(BEQ, S1, ZERO, 17 - 8),
-        /* 8 */ 0,
-        /* 9 */ S1 << 21 | RAR << 11 | 0x09, /* jalr s1 */
-        /* 10 */ 0,
-        /* 11 */ enc_i(BEQ, V0, ZERO, 17 - 12),
-        /* 12 */ 0,
-        /* 13 */ enc_i(BEQ, S0, ZERO, 17 - 14),
-        /* 14 */ V0 << 21 | ZERO << 16 | A0R << 11 | 0x21, /* move a0, v0 */
-        /* 15 */ S0 << 21 | RAR << 11 | 0x09, /* jalr s0 */
-        /* 16 */ 0,
-        /* 17 NH */ enc_i(LW, S6, S6, 0),
-        /* 18 */ 0,
-        /* 19 */ enc_i(BNE, S6, ZERO, (uint32_t)(5 - 20)),
-        /* 20 */ 0,
-        /* 21 NP */ enc_i(ADDIU, S3, S3, 8),
-        /* 22 */ enc_i(BNE, S4, S3, (uint32_t)(1 - 23)),
-        /* 23 */ 0,
-        /* 24 */ PS1_HLE_TRAP | 0x300 | K_EXC_LEAVE,
-    };
-    for (size_t i = 0; i < sizeof code / sizeof code[0]; i++)
-        wr32(m, K_EXC + 4u * (uint32_t)i, code[i]);
+    for (uint32_t i = 0; i < PS1_HLE_EXC_WORDS; i++)
+        wr32(m, K_EXC + 4u * i, s_exc_code[i]);
 }
 
 static void kernel_setup(ps1_machine *m, uint32_t tcbs, uint32_t events)

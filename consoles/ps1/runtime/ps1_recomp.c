@@ -598,8 +598,10 @@ void ps1_recomp_run(ps1_machine *m)
         ps1_cpu_hook_check(m);
         uint32_t pc = m->pc;
         if (!s->table || !liftable_pc(pc) || (!s->booted && !(s->booted = pc == s->table->boot_pc))) {
-            if (s->table && !liftable_pc(pc))
-                ps1_cpu_step_unliftable(m); /* the BIOS, its handlers: as long as that lasts */
+            if (s->table && !liftable_pc(pc)) {
+                if (!ps1_cpu_run_kernel(m))
+                    ps1_cpu_step_unliftable(m); /* the BIOS, its handlers: as long as that lasts */
+            }
             else
                 ps1_cpu_step(m);
             continue;
