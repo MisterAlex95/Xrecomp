@@ -389,6 +389,8 @@ class Run(gc.Run):
         self.stamp = {} if a.force else self.m.read_stamp(self.stamp_path)
         if self.stamp.get("source") != self.rom_sha or self.stamp.get("toolkit_sha256") != self.toolkit_sha:
             self.stamp = {}
+            # another toolkit may translate differently (GLSL_VERSION): the shaders are translated again
+            shutil.rmtree(os.path.join(self.work, "glsl"), ignore_errors=True)
             self.save_stamp(console=CONSOLE, source=self.rom_sha, toolkit=self.toolkit,
                             toolkit_sha256=self.toolkit_sha)
         self.steps.skipped = [k for k in ("lift", "link") if self.stamp.get(k)]

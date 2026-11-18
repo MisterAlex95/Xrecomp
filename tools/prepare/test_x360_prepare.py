@@ -167,6 +167,15 @@ def test_desktop_pack(tmp_path):
     assert rc == 0 and "pack up to date" in progress(lines), progress(lines)
     assert json.loads((final / "pack.json").read_text())["discovered"] == 1
 
+    # Another toolkit: the translations are made again (a stale stamp clears work/glsl).
+    (work / "glsl" / "vs_0000000A.vert").write_text("stale")
+    st = json.loads((work / "stamp.json").read_text())
+    st["toolkit_sha256"] = "0" * 64
+    (work / "stamp.json").write_text(json.dumps(st))
+    rc, lines = prepare(args, env)
+    assert rc == 0, lines[-1]
+    assert (work / "glsl" / "vs_0000000A.vert").read_text() != "stale"
+
     # A new shader alone: the link stays, the shader goes into the published pack.
     (work / "shaders" / "vs_0000000C.bin").write_bytes(struct.pack(">%dI" % len(good), *good))
     rc, lines = prepare(args, env)
