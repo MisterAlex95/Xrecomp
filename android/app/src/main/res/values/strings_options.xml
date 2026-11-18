@@ -22,10 +22,10 @@
     <string name="VAL_UPSCALE_4X">4x</string>
     <string name="VAL_UPSCALE_8X">8x</string>
     <string name="OPT_REWIND">Rewind</string>
-    <string name="OPT_REWIND_DETAIL">Hold the rewind hotkey (Select + L2 by default, R on a keyboard) to go back in time, without sound; let go and the game goes on from there. Every console: an Xbox game too, when its save states work (no keyboard key there). On (not N64 / GameCube): on for the Game Boy Advance, the PlayStation and the Xbox, off for the Nintendo 64 and the GameCube, where keeping the history asks more of the device. A game can have its own (an N64 or GameCube game can turn it on). Applies the next time a game starts. (RECOMP_REWIND)</string>
+    <string name="OPT_REWIND_DETAIL">Hold the rewind hotkey (Select + L2 by default, R on a keyboard) to go back in time, without sound; let go and the game goes on from there. Every console: an Xbox game too, when its save states work and one of its states fits in half the rewind memory (else it turns itself off: raise Rewind memory). On (not N64 / GameCube): on for the Game Boy Advance, the PlayStation and the Xbox, off for the Nintendo 64 and the GameCube, where keeping the history asks more of the device. A game can have its own (an N64 or GameCube game can turn it on). Applies the next time a game starts. (RECOMP_REWIND)</string>
     <string name="VAL_REWIND_AUTO">On (not N64 / GameCube)</string>
     <string name="OPT_REWIND_MB">Rewind memory</string>
-    <string name="OPT_REWIND_MB_DETAIL">How much memory the rewind history may use: more goes further back. With 64 MB a Game Boy Advance game usually goes back a minute or more, a PlayStation game some tens of seconds; the oldest moments go first. A game can have its own. Applies the next time a game starts. (RECOMP_REWIND_MB)</string>
+    <string name="OPT_REWIND_MB_DETAIL">How much memory the rewind history may use: more goes further back. With 64 MB a Game Boy Advance game usually goes back a minute or more, a PlayStation game some tens of seconds; an Xbox game needs room for two of its states (a game that fills its 64 MB of RAM: 128 or 256 MB). The oldest moments go first. A game can have its own. Applies the next time a game starts. (RECOMP_REWIND_MB)</string>
     <string name="VAL_MB_32">32 MB</string>
     <string name="VAL_MB_64">64 MB</string>
     <string name="VAL_MB_128">128 MB</string>
