@@ -42,8 +42,31 @@ static void fake_callback(void)
     g_cb_arg = *(uint32_t *)((uintptr_t)g_esp + 4 + xbox_GetMemoryOffset());
     g_cb_calls++;
 }
+/* XB-004: every call, in order, for the race below. */
+#define GUEST_CALL_LOG 8
+static uint32_t g_call_log[GUEST_CALL_LOG], g_call_logged;
+static void logging_callback(void)
+{
+    if (g_call_logged < GUEST_CALL_LOG)
+        g_call_log[g_call_logged] = *(uint32_t *)((uintptr_t)g_esp + 4 + xbox_GetMemoryOffset());
+    g_call_logged++;
+}
+/* XB-004: how many times each context of the two-thread run was seen. */
+#define STRESS_CALLS 20000u
+static unsigned char g_stress_seen[STRESS_CALLS];
+static void stress_callback(void)
+{
+    uint32_t ctx = *(uint32_t *)((uintptr_t)g_esp + 4 + xbox_GetMemoryOffset());
+    if (ctx < STRESS_CALLS && g_stress_seen[ctx] < 255)
+        g_stress_seen[ctx]++;
+}
 recomp_func_t recomp_lookup(uint32_t xbox_va);
-recomp_func_t recomp_lookup(uint32_t xbox_va) { return xbox_va == 0x00123450u ? fake_callback : NULL; }
+recomp_func_t recomp_lookup(uint32_t xbox_va)
+{
+    if (xbox_va == 0x00123460u) return logging_callback;
+    if (xbox_va == 0x00123470u) return stress_callback;
+    return xbox_va == 0x00123450u ? fake_callback : NULL;
+}
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
 
@@ -146,6 +169,70 @@ static uint32_t ke_multi(uint32_t a, uint32_t b, int wait_all)
     G(ARRAY_VA)[0] = a;
     G(ARRAY_VA)[1] = b;
     return call(S_MULTI, 8, args);
+}
+
+/* XB-004: the window between a DPC leaving the queue and its routine being
+ * read. The hook runs in it, on this thread, and queues a second guest call,
+ * as the thread executing the pushbuffer can at that moment. */
+extern void (*xbox_DpcPoppedHookForTest)(void);
+
+static void queue_second_call(void)
+{
+    xbox_DpcPoppedHookForTest = NULL;   /* once */
+    check(xbox_DpcQueueGuestCall(0x00123460u, 0xB0B0B0B0u) == 1,
+          "a guest call queued between the pop and the run", NULL);
+}
+
+static void guest_call_race(void)
+{
+    char d[120];
+    int ran = 0;
+
+    g_call_logged = 0;
+    g_esp = STACK_VA + 0x800;
+    check(xbox_DpcQueueGuestCall(0x00123460u, 0xA0A0A0A0u) == 1, "a first guest call is queued", NULL);
+    xbox_DpcPoppedHookForTest = queue_second_call;
+    xbox_DpcDrainTimer(&ran);
+    xbox_DpcPoppedHookForTest = NULL;
+    snprintf(d, sizeof d, "%u calls: 0x%08X, 0x%08X", g_call_logged, g_call_log[0], g_call_log[1]);
+    check(g_call_logged == 2 && g_call_log[0] == 0xA0A0A0A0u && g_call_log[1] == 0xB0B0B0B0u,
+          "each queued guest call runs once, with its own context", d);
+}
+
+static volatile LONG g_stress_done;
+
+static DWORD WINAPI stress_producer(LPVOID unused)
+{
+    uint32_t i;
+
+    (void)unused;
+    for (i = 0; i < STRESS_CALLS; i++)
+        while (!xbox_DpcQueueGuestCall(0x00123470u, i))
+            Sleep(0);                   /* the pool is busy: the drain catches up */
+    InterlockedExchange(&g_stress_done, 1);
+    return 0;
+}
+
+/* One thread queues distinct contexts while this one drains. */
+static void guest_call_stress(void)
+{
+    HANDLE t;
+    char d[120];
+    uint32_t i, lost = 0, repeated = 0;
+    int ran;
+
+    g_esp = STACK_VA + 0x800;
+    t = CreateThread(NULL, 0, stress_producer, NULL, 0, NULL);
+    while (!InterlockedCompareExchange(&g_stress_done, 0, 0) || xbox_DpcPending())
+        xbox_DpcDrainTimer(&ran);
+    WaitForSingleObject(t, 30000);
+    CloseHandle(t);
+    for (i = 0; i < STRESS_CALLS; i++) {
+        lost += g_stress_seen[i] == 0;
+        repeated += g_stress_seen[i] > 1;
+    }
+    snprintf(d, sizeof d, "%u lost, %u repeated of %u", lost, repeated, STRESS_CALLS);
+    check(lost == 0 && repeated == 0, "two threads: every guest call runs exactly once", d);
 }
 
 static void ke_init(uint32_t va)
@@ -486,6 +573,9 @@ int main(int argc, char **argv)
         check(g_cb_calls == 1 && g_cb_arg == 0xC0FFEEu && g_esp == esp_before,
               "the DPC path calls routine(context) once, esp kept", d);
     }
+
+    guest_call_race();
+    guest_call_stress();
 
     xbox_MemoryLayoutShutdown();
     free(xbe);

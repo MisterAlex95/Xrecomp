@@ -3393,17 +3393,14 @@ long xbox_DpcOverlapCount(void)
  * KDPC is type 19). */
 #define GUEST_CALL_DPC_TYPE 0xC0u
 
-static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
+/* Run a DPC whose routine and context the caller has read. */
+static int kernel_run_dpc_call(uint32_t dpc_va, uint32_t routine, uint32_t context,
+                               int guest_call, uint32_t arg1, uint32_t arg2)
 {
-    uint32_t routine, context;
     recomp_func_t fn;
     uint32_t prev_routine;
     LONG prev_since, prev_tid, tid;
 
-    if (!dpc_va)
-        return 0;
-    routine = BRIDGE_MEM32(dpc_va + 12);
-    context = BRIDGE_MEM32(dpc_va + 16);
     if (!routine)
         return 0;
 
@@ -3422,7 +3419,7 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
     {
         CallbackRegs saved;
         callback_regs_save(&saved);
-        if (BRIDGE_MEM8(dpc_va) == GUEST_CALL_DPC_TYPE) {
+        if (guest_call) {
             /* xbox_DpcQueueGuestCall: routine(context), cdecl, as D3D's
              * interrupt handler calls an InsertCallback routine. The
              * registers (esp too) are put back after, whatever it pops. */
@@ -3454,6 +3451,14 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
         callback_regs_restore(&saved, 0);
     }
     return 1;
+}
+
+static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
+{
+    if (!dpc_va)
+        return 0;
+    return kernel_run_dpc_call(dpc_va, BRIDGE_MEM32(dpc_va + 12), BRIDGE_MEM32(dpc_va + 16),
+                               BRIDGE_MEM8(dpc_va) == GUEST_CALL_DPC_TYPE, arg1, arg2);
 }
 
 /* -- KeSynchronizeExecution (ordinal 153) ------------------
@@ -3540,7 +3545,13 @@ static void bridge_KeRemoveQueueDpc(void);   /* defined with the queue */
  * DPC ordering beyond "after the ISR".
  */
 #define XBOX_MAX_PENDING_DPC 64
-typedef struct { uint32_t dpc, arg1, arg2; } PendingDpc;
+/* routine, context and guest_call are filled when the entry is popped, for a
+ * guest call only (dpc_pop); a save state keeps the first three. */
+typedef struct {
+    uint32_t dpc, arg1, arg2;
+    uint32_t routine, context;
+    int guest_call;
+} PendingDpc;
 static PendingDpc g_dpc_queue[XBOX_MAX_PENDING_DPC];
 static volatile LONG g_dpc_head, g_dpc_tail;
 
@@ -3571,32 +3582,35 @@ static void dpc_lock(void)
     EnterCriticalSection(&g_dpc_lock);
 }
 
-int xbox_DpcQueue(uint32_t dpc, uint32_t arg1, uint32_t arg2)
+/* With the lock held: 1 queued, 0 already queued, -1 the queue is full. */
+static int dpc_enqueue_locked(uint32_t dpc, uint32_t arg1, uint32_t arg2)
 {
     LONG tail, next;
 
-    if (!dpc)
+    if (BRIDGE_MEM8(dpc + 2))                   /* already queued */
         return 0;
-
-    dpc_lock();
-    if (BRIDGE_MEM8(dpc + 2)) {                 /* already queued */
-        LeaveCriticalSection(&g_dpc_lock);
-        return 0;
-    }
     tail = g_dpc_tail;
     next = (tail + 1) % XBOX_MAX_PENDING_DPC;
-    if (next == g_dpc_head) {
-        LeaveCriticalSection(&g_dpc_lock);
-        fprintf(stderr, "  [KERNEL] DPC queue full, dropping 0x%08X\n", dpc);
-        fflush(stderr);
-        return 0;
-    }
+    if (next == g_dpc_head)
+        return -1;
     g_dpc_queue[tail].dpc  = dpc;
     g_dpc_queue[tail].arg1 = arg1;
     g_dpc_queue[tail].arg2 = arg2;
     BRIDGE_MEM8(dpc + 2) = 1;
     g_dpc_tail = next;
-    LeaveCriticalSection(&g_dpc_lock);
+    return 1;
+}
+
+/* After the lock is released: say a full queue, wake the drain for a DPC
+ * queued. Returns whether it was. */
+static int dpc_enqueued(int result, uint32_t dpc)
+{
+    if (result < 0) {
+        fprintf(stderr, "  [KERNEL] DPC queue full, dropping 0x%08X\n", dpc);
+        fflush(stderr);
+    }
+    if (result <= 0)
+        return 0;
     /* The timer thread may be asleep to its next vblank edge, 10 ms away:
      * a DPC that no guest thread picks up at a raise would wait it out. */
     if (xbox_DpcOnRaise())
@@ -3604,17 +3618,37 @@ int xbox_DpcQueue(uint32_t dpc, uint32_t arg1, uint32_t arg2)
     return 1;
 }
 
+int xbox_DpcQueue(uint32_t dpc, uint32_t arg1, uint32_t arg2)
+{
+    int result;
+
+    if (!dpc)
+        return 0;
+
+    dpc_lock();
+    result = dpc_enqueue_locked(dpc, arg1, arg2);
+    LeaveCriticalSection(&g_dpc_lock);
+    return dpc_enqueued(result, dpc);
+}
+
 /* Run routine(context) on the DPC path, at DISPATCH_LEVEL, as an interrupt's
  * DPC would (XBA-94: D3D's InsertCallback, software methods 6 and 7, whose
  * handler calls a guest routine). Takes a free KDPC from a small pool in
  * guest memory, typed GUEST_CALL_DPC_TYPE so kernel_run_dpc calls the
  * routine with the one argument. Returns 0 when the routine is not code or
- * the pool is busy. Any thread. */
+ * the pool is busy. Any thread.
+ *
+ * A pool KDPC is free again as soon as it is popped, before its routine runs,
+ * so the next call can refill it at that moment: finding a free one, filling
+ * it and queueing it are one step under the lock, and dpc_pop takes the routine
+ * and context out under the same lock. Read at the run, a refilled KDPC ran the
+ * new call twice and lost the one popped: a title waiting on it, for ever. */
 #define GUEST_CALL_POOL 16
 int xbox_DpcQueueGuestCall(uint32_t routine, uint32_t context)
 {
     static uint32_t pool;
-    int i;
+    int i, result = 0;
+    uint32_t d = 0;
 
     if (!routine || (!recomp_lookup(routine) && !recomp_lookup_manual(routine)))
         return 0;
@@ -3626,17 +3660,19 @@ int xbox_DpcQueueGuestCall(uint32_t routine, uint32_t context)
         if (InterlockedCompareExchange((volatile LONG *)&pool, (LONG)p, 0) != 0)
             ;                           /* another thread made one first; this one stays unused */
     }
+    dpc_lock();
     for (i = 0; i < GUEST_CALL_POOL; i++) {
-        uint32_t d = pool + (uint32_t)i * 32u;
+        d = pool + (uint32_t)i * 32u;
         if (BRIDGE_MEM8(d + 2))
-            continue;                   /* queued, not run yet */
+            continue;                   /* queued, not popped yet */
         BRIDGE_MEM8(d) = (uint8_t)GUEST_CALL_DPC_TYPE;
         BRIDGE_MEM32(d + 12) = routine;
         BRIDGE_MEM32(d + 16) = context;
-        if (xbox_DpcQueue(d, 0, 0))
-            return 1;
+        result = dpc_enqueue_locked(d, 0, 0);
+        break;
     }
-    return 0;
+    LeaveCriticalSection(&g_dpc_lock);
+    return dpc_enqueued(result, d);
 }
 
 int xbox_DpcPending(void)
@@ -4255,7 +4291,11 @@ static void kernel_vblank_tick(void)
 
 /* Take the next DPC off the queue, 0 when it is empty. The Inserted byte is
  * cleared before the routine runs, as the kernel does: the routine may queue
- * itself again. */
+ * itself again. A guest call's routine and context are taken here, under the
+ * lock: from this moment its pool KDPC can be refilled (xbox_DpcQueueGuestCall).
+ * A title's own KDPC is read when it runs, as ever. */
+void (*xbox_DpcPoppedHookForTest)(void);   /* tests/kernel_events: NULL in a title */
+
 static int dpc_pop(PendingDpc *d)
 {
     dpc_lock();
@@ -4265,10 +4305,28 @@ static int dpc_pop(PendingDpc *d)
     }
     *d = g_dpc_queue[g_dpc_head];
     g_dpc_head = (g_dpc_head + 1) % XBOX_MAX_PENDING_DPC;
-    if (d->dpc)
+    d->guest_call = 0;
+    if (d->dpc) {
+        if (BRIDGE_MEM8(d->dpc) == GUEST_CALL_DPC_TYPE) {
+            d->guest_call = 1;
+            d->routine = BRIDGE_MEM32(d->dpc + 12);
+            d->context = BRIDGE_MEM32(d->dpc + 16);
+        }
         BRIDGE_MEM8(d->dpc + 2) = 0;
+    }
     LeaveCriticalSection(&g_dpc_lock);
+    if (xbox_DpcPoppedHookForTest)
+        xbox_DpcPoppedHookForTest();
     return 1;
+}
+
+static int kernel_run_popped(const PendingDpc *d)
+{
+    if (!d->dpc)
+        return 0;                       /* cancelled while queued */
+    if (d->guest_call)
+        return kernel_run_dpc_call(d->dpc, d->routine, d->context, 1, d->arg1, d->arg2);
+    return kernel_run_dpc(d->dpc, d->arg1, d->arg2);
 }
 
 /* Run whatever is queued. Called from the timer thread, which has the guest
@@ -4294,7 +4352,7 @@ static int kernel_drain_dpcs(int *ran)
             xbox_DispatchGateLeave();
             return 0;
         }
-        if (d.dpc && kernel_run_dpc(d.dpc, d.arg1, d.arg2))
+        if (kernel_run_popped(&d))
             (*ran)++;
         xbox_DispatchGateLeave();
     }
@@ -4319,7 +4377,7 @@ int xbox_DpcDrainHere(void)
     PendingDpc d;
 
     while (dpc_pop(&d))
-        if (d.dpc && kernel_run_dpc(d.dpc, d.arg1, d.arg2))
+        if (kernel_run_popped(&d))
             ran++;
     return ran;
 }
