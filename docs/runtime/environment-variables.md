@@ -522,6 +522,12 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_GC_CARD_B=1` | off | GameCube: a memory card in slot B too, `<save dir>/gc-<KEY>/cardB.raw` (XBA-264). | `gc_runtime.c` |
 | `RECOMP_GC_LANGUAGE=0..5` | 0 | GameCube: the console's language in SRAM (English, German, French, Spanish, Italian, Dutch; XBA-264). | `gc_runtime.c` |
 | `RECOMP_GC_FRAMES=N` | unbounded | The Android entry (`gc_runtime_start`): stop after N fields (checks). | `gc_runtime.c` |
+| `RECOMP_X360_UPSCALE=N` | `RECOMP_UPSCALE`, else 1 | Xbox 360 internal resolution, 1..8 times every eDRAM surface; resolves are read back at the guest size, their host pictures (the front buffer, render to texture) stay at the internal size (XBA-280). | `consoles/x360/runtime/x360_runtime.c`, `xenos_gl.c` |
+| `RECOMP_X360_SCALE` / `_FILTER` / `_SHADER` | the shared `RECOMP_SCALE` / `RECOMP_FILTER` / shader | Xbox 360 window scaling, filter and picture shader (16:9). | `x360_runtime.c` |
+| `RECOMP_X360_PAD_MAP=TEXT` | the host pad's layout | Xbox 360 controller mapping (`console_pad`, targets a b x y lb rb lt rt ls rs back start dpad_*, sticks left_stick / right_stick). | `src/input/console_pad.c` |
+| `RECOMP_X360_DISC=PATH` | the imported image | The Android entry (`x360_runtime_start`): the title's disc (`pack_loader.c` sets it to the image the player imported). | `x360_runtime.c` |
+| `RECOMP_X360_SHADERS=DIR` | the pack's `shaders/` | The Android entry: the GLSL ES shader cache. | `x360_runtime.c` |
+| `RECOMP_X360_FRAMES=N` | unbounded | The Android entry: stop after N frames (checks). | `x360_runtime.c` |
 
 ## Network
 
