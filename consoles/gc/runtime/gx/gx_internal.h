@@ -114,6 +114,7 @@ struct gx_state {
     uint32_t tex_epoch;        /* bumped by TX_INVALIDATE and each field: texture contents are hashed again */
     uint64_t field_count;
     uint64_t tex_hash_mark;    /* stats.tex_hash_bytes at the last field's end */
+    uint64_t tex_hash_log_mark;/* the same at the last verbose line */
 
     gx_gl *gl;
     gx_stats stats;
