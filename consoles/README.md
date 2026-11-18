@@ -2185,12 +2185,29 @@ XBA-282 (X360-3):
   - Tests: `test_memexport_against_mesa`, and the `xenos_draw` memory export draw (written on llvmpipe; the fallback
     with `RECOMP_X360_MEMEXPORT=0`).
 
+Kernel surface and renderer round (XBA-296):
+- `hle_coverage` now reads the real dispatch tables (ctest `x360_hle_table`): xboxkrnl 820 of 887 functions and all 35
+  variables, xam 195 of 1733 functions. 333 of the xboxkrnl functions only refuse: hardware a run does not have (USB,
+  Kinect, network adapters, Wi-Fi, cameras: `STATUS_DEVICE_NOT_CONNECTED`), console keys, IPTV, debug and IRP-level calls
+  (`STATUS_NOT_SUPPORTED`). A refusal is logged once, counted as unimplemented, and stops a run under strict imports.
+- DPCs, APCs, timers, queues, completion ports, SLists and read-write locks run on the scheduler (`x360_kdpc.c`) and
+  are in save states (section `KOBJ`; an older state loads without them). `NtProtectVirtualMemory` records protections
+  and does not enforce them; APC rundown routines are not called.
+- Behaviour every title sees: `XamContentCreateEx` honours its disposition, `XamContentDelete` and `CREATE_ALWAYS`
+  really delete, and the first system notification listener receives a start-up burst.
+- Renderer: texture queries, line loops, quad strips, polygons, immediate indices, packed mip tails, 1- and 2-byte and
+  pixel-shader memory export, stencil in depth resolves, eDRAM aliasing, MSAA (`RECOMP_X360_MSAA=0` turns it off).
+  Resolves always average the samples (`copy_sample_select` is ignored).
+- Chosen without a hardware reference, to check on a real title: getBCF and getWeights' W, the packing and swap of
+  immediate indices, the byte placement of 1- and 2-byte memory exports.
+
 Not there yet (XBA-229):
 - run-time shader translation (a shader first met in a run skips its draws until the next Prepare);
 - XMA decoding itself (a backend to decide) and XMA loops;
 - several conventions (winding, channel orders, cube faces, RB_COLOR_CLEAR) that follow Xenia's descriptions and wait
   for a real title;
 - real parallel hardware threads and the network;
+- 67 xboxkrnl exports whose signature is not public (AES-GCM, ECC, `LDI*`, device queues) and about 22 known xam ones;
 - whatever `hle_coverage` lists as missing on Alex's titles.
 
 **Nintendo 3DS spike (XBA-228, epic XBA-222).** Does the ARM work extend to the 3DS's ARM11 (ARMv6K + VFPv2), and
