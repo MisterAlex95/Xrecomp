@@ -1,10 +1,12 @@
 /* x360_run -- runs an Xbox 360 title, recompiled, headless (XBA-270): what it prints through DbgPrint goes to stdout.
  *
- *   x360_run TITLE.xex --pack LIB.so [--insns N] [--log FILE] [--dbg FILE] [--missed FILE] [--stats] [-v]
+ *   x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--insns N] [--log FILE] [--dbg FILE]
+ *            [--missed FILE] [--stats] [-v]
  *
  * TITLE.xex: an unencrypted XEX2, compression none or basic (python3 -m tools.xex FILE --plain OUT makes one).
  * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
- * Runs until the title ends or N instructions (default 2 billion). --missed: addresses reached without lifted code,
+ * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
+ * cache: / hdd:. Runs until the title ends or N instructions (default 2 billion). --missed: addresses reached without lifted code,
  * for x360_tools.recomp --discovered. Exit status: the title's exit code when it ended (0..255), 1 on an error, a
  * missed address or the budget running out, 2 on bad arguments or input. */
 #include <dlfcn.h>
@@ -34,7 +36,7 @@ static uint8_t *read_file(const char *path, size_t *size)
 
 int main(int argc, char **argv)
 {
-    const char *path = NULL, *pack = NULL, *logp = NULL, *dbgp = NULL, *missedp = NULL;
+    const char *path = NULL, *pack = NULL, *logp = NULL, *dbgp = NULL, *missedp = NULL, *disc = NULL, *data_dir = NULL;
     unsigned long long insns = 2000000000ull;
     int stats = 0, verbose = 0;
     for (int i = 1; i < argc; i++) {
@@ -42,6 +44,10 @@ int main(int argc, char **argv)
             insns = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--pack") && i + 1 < argc)
             pack = argv[++i];
+        else if (!strcmp(argv[i], "--disc") && i + 1 < argc)
+            disc = argv[++i];
+        else if (!strcmp(argv[i], "--data") && i + 1 < argc)
+            data_dir = argv[++i];
         else if (!strcmp(argv[i], "--log") && i + 1 < argc)
             logp = argv[++i];
         else if (!strcmp(argv[i], "--dbg") && i + 1 < argc)
@@ -55,8 +61,8 @@ int main(int argc, char **argv)
         else if (argv[i][0] != '-' && !path)
             path = argv[i];
         else {
-            fprintf(stderr, "usage: x360_run TITLE.xex --pack LIB.so [--insns N] [--log FILE] [--dbg FILE] "
-                            "[--missed FILE] [--stats] [-v]\n");
+            fprintf(stderr, "usage: x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--insns N] "
+                            "[--log FILE] [--dbg FILE] [--missed FILE] [--stats] [-v]\n");
             return 2;
         }
     }
@@ -84,6 +90,12 @@ int main(int argc, char **argv)
         return 2;
     }
     x360_set_output(x, dbg, log, verbose);
+    if (disc && x360_set_disc(x, disc, why, sizeof why)) {
+        fprintf(stderr, "x360_run: %s\n", why);
+        return 2;
+    }
+    if (data_dir)
+        x360_set_data_dir(x, data_dir);
     void *lib = dlopen(pack, RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
         fprintf(stderr, "x360_run: %s\n", dlerror());

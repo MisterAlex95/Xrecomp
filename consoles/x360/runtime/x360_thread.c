@@ -472,6 +472,7 @@ void x360_destroy(x360_machine *x)
 {
     if (!x)
         return;
+    x360_fs_free(x);
     x360_mem_free(x);
     free(x->thunks);
     free(x->fn_tab);

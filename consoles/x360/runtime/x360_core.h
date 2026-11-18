@@ -40,6 +40,10 @@ x360_machine *x360_create(const uint8_t *xex, size_t size, char *why, size_t why
 void x360_destroy(x360_machine *x);
 /* Bind the lifted code; 0 on success, -1 when the pack was made from another image (stale). */
 int x360_bind(x360_machine *x, const x360_pack *pack);
+/* The disc: a disc image (XDVDFS / GDFX, also split or CSO / ZSO / CCI, read in place by src/xiso) or a directory of
+ * its files; the data directory (cache:, hdd:...: writable), optional. 0 on success. */
+int x360_set_disc(x360_machine *x, const char *path, char *why, size_t why_len);
+int x360_set_data_dir(x360_machine *x, const char *path);
 /* Where DbgPrint and the runtime's own messages go (default stdout / stderr), verbosity (0 quiet, 1 HLE calls). */
 void x360_set_output(x360_machine *x, FILE *dbg, FILE *log, int verbose);
 /* Run until the title exits, an error, a missed address or `insns` more instructions. Returns X360_*. */

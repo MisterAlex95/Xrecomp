@@ -5,7 +5,8 @@
 # (python3 -m x360_tools.recomp), builds the C into a pack (the host cc, -DXE_RUNTIME -shared -ffp-contract=off) and
 # runs it under x360_run; what the title prints through DbgPrint must equal EXPECTED_TXT and the title must end with
 # exit code 0, every instruction run natively or by the small interpreter, no import without an HLE but the one the
-# title never calls. MODE:
+# title never calls. The title reads a file and lists the root of its disc: a directory made here (modes basic and c)
+# or an XDVDFS image of it (mode lzx, tools/xiso/mkxiso.py). MODE:
 #   basic   the XEX as the loader takes it (unencrypted, basic compression)
 #   lzx     encrypted (a key made up here) and LZX-compressed, then rewritten plain by python3 -m tools.xex --plain,
 #           the path a retail title takes with the user's own key
@@ -40,12 +41,21 @@ elif [ "$mode" = lzx ]; then
 else
     "$py" "$here/make_hello.py" "$work/hello.xex" --compression basic || exit 1
 fi
+mkdir -p "$work/disc/data"
+printf 'Hello from the disc!' >"$work/disc/data/hello.txt"
+printf 'binary data' >"$work/disc/data/b.bin"
+printf 'readme\n' >"$work/disc/readme.txt"
+disc=$work/disc
+if [ "$mode" = lzx ]; then
+    "$py" "$repo/tools/xiso/mkxiso.py" "$work/disc" "$work/disc.iso" >/dev/null || exit 1
+    disc=$work/disc.iso
+fi
 timeout 300 "$py" -m x360_tools.recomp "$work/hello.xex" "$work/src" --no-comments >"$work/recomp.txt" || {
     cat "$work/recomp.txt"; exit 1; }
 cat "$work/recomp.txt"
 "$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 -I "$repo/consoles/x360/runtime" \
     -I "$repo/consoles/gc/runtime" -o "$work/libtitle.so" "$work"/src/*.c -lm || exit 1
-timeout 120 "$run" "$work/hello.xex" --pack "$work/libtitle.so" --dbg "$work/dbg.txt" --log "$work/log.txt" \
+timeout 120 "$run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$disc" --dbg "$work/dbg.txt" --log "$work/log.txt" \
     --stats --missed "$work/missed.txt"
 rc=$?
 cat "$work/log.txt"

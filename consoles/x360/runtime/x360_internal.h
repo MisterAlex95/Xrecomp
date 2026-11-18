@@ -124,6 +124,7 @@ struct x360_machine {
     unsigned nmissed;
     uint8_t unimpl_seen[2][4096];
 
+    struct x360_fs *fs;       /* x360_file.c: the disc, the data directory, open files, symbolic links */
     FILE *dbg, *log;
     int verbose;
     x360_stats st;
@@ -177,6 +178,17 @@ void x360_timer_cancel(x360_machine *x, uint32_t obj);
 void x360_hle_call(x360_machine *x, const x360_thunk *t);
 int x360_kernel_init(x360_machine *x);
 const char *x360_export_name(int lib, unsigned ordinal);
+uint64_t x360_stack_arg(x360_machine *x, xe_cpu *c, int n);
+
+/* x360_file.c: the file calls (x360_kernel.c's table points at them) */
+void x360_file_close(x360_machine *x, uint32_t handle);
+void x360_fs_free(x360_machine *x);
+#define X360_FILE_CALLS(X)                                                                                             \
+    X(NtCreateFile) X(NtOpenFile) X(NtReadFile) X(NtWriteFile) X(NtQueryInformationFile) X(NtSetInformationFile)      \
+    X(NtQueryFullAttributesFile) X(NtQueryDirectoryFile) X(NtQueryVolumeInformationFile) X(ObCreateSymbolicLink)      \
+    X(ObDeleteSymbolicLink)
+#define X360_DECLARE_FILE_CALL(name) void x360_k_##name(x360_machine *x, x360_thread *t, xe_cpu *c);
+X360_FILE_CALLS(X360_DECLARE_FILE_CALL)
 
 /* x360_interp.c: run the instruction at the current PC; 0 on success, -1 (x->status set) otherwise */
 int x360_interp_one(x360_machine *x);

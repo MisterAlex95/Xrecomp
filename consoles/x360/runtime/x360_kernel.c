@@ -18,6 +18,14 @@
 #include "x360_internal.h"
 
 #define A(n) ((uint32_t)c->gpr[3 + (n)])
+#define A9(n) ((uint32_t)x360_stack_arg(x, c, (n))) /* arguments 9 and up (n from 8) */
+
+/* Argument n (0-based) of the caller when n >= 8: the caller's parameter area, 8 bytes per argument, the ninth's at
+ * r1 + 0x50 (Xenia's reading of the console's convention). */
+uint64_t x360_stack_arg(x360_machine *x, xe_cpu *c, int n)
+{
+    return x360_r64(x, (uint32_t)c->gpr[1] + 0x50 + 8 * (uint32_t)(n - 8));
+}
 #define RET(v) (c->gpr[3] = (uint64_t)(uint32_t)(v))
 
 typedef void (*hle_fn)(x360_machine *x, x360_thread *t, xe_cpu *c);
@@ -86,9 +94,8 @@ static size_t gwstr(x360_machine *x, uint32_t a, char *out, size_t n)
     return k;
 }
 
-/* printf over guest arguments: the integer ones come from consecutive GPRs from r[first] (then the stack, as the
- * calling convention spills them: 8 bytes each from r1 + 0x50 + 8 * 8... only registers are read here), doubles
- * from consecutive FPRs from f1 (the console's variadic doubles also come in GPRs: both are tried in order). */
+/* printf over guest arguments: from consecutive GPRs from r[first], then the stack (the ninth argument's 8-byte
+ * slot at r1 + 0x50, the next ones after it: x360_stack_arg); variadic doubles come in GPRs too on the console. */
 typedef struct {
     x360_machine *x;
     xe_cpu *c;
@@ -105,10 +112,7 @@ static uint64_t next_int(gargs *g)
     }
     if (g->gpr <= 10)
         return g->c->gpr[g->gpr++];
-    uint32_t sp = (uint32_t)g->c->gpr[1];
-    uint64_t v = x360_r64(g->x, sp + 0x50 + 8 * (uint32_t)(g->gpr - 3));
-    g->gpr++;
-    return v;
+    return x360_stack_arg(g->x, g->c, g->gpr++ - 3);
 }
 
 static double next_double(gargs *g)
@@ -962,6 +966,7 @@ static void k_KeWaitForMultipleObjects(x360_machine *x, x360_thread *t, xe_cpu *
 static void k_NtClose(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
+    x360_file_close(x, A(0));
     RET(x360_handle_close(x, A(0)) ? X_STATUS_INVALID_HANDLE : X_STATUS_SUCCESS);
 }
 
@@ -1243,6 +1248,8 @@ static const hle_entry HLE[] = {
     K(XexCheckExecutablePrivilege), K(RtlInitAnsiString), K(RtlInitUnicodeString), K(RtlNtStatusToDosError),
     K(RtlFillMemoryUlong), K(RtlCompareMemoryUlong),
     XM(XamLoaderTerminateTitle, x_XamLoaderTerminateTitle),
+#define X360_FILE_ENTRY(name) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, x360_k_##name},
+    X360_FILE_CALLS(X360_FILE_ENTRY)
 };
 
 void x360_hle_call(x360_machine *x, const x360_thunk *th)

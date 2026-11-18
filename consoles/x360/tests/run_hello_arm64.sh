@@ -22,8 +22,14 @@ python3 -m x360_tools.recomp "$work/hello.xex" "$work/src" --no-comments
     -o "$work/libtitle.so" "$work"/src/*.c -lm
 "$cc" -O2 -ffp-contract=off -DXE_RUNTIME=1 -D_GNU_SOURCE -I "$rt" -I "$repo/consoles/gc/runtime" \
     -o "$work/x360_run" "$rt"/x360_mem.c "$rt"/x360_load.c "$rt"/x360_thread.c "$rt"/x360_kernel.c \
-    "$rt"/x360_interp.c "$rt"/tools/x360_run.c -ldl -lm
+    "$rt"/x360_interp.c "$rt"/x360_file.c "$rt"/tools/x360_run.c -I "$repo/src/xiso" "$repo"/src/xiso/xiso.c \
+    "$repo"/src/xiso/xiso_source.c -ldl -lm -lpthread
+mkdir -p "$work/disc/data"
+printf 'Hello from the disc!' >"$work/disc/data/hello.txt"
+printf 'binary data' >"$work/disc/data/b.bin"
+printf 'readme\n' >"$work/disc/readme.txt"
+python3 "$repo/tools/xiso/mkxiso.py" "$work/disc" "$work/disc.iso" >/dev/null
 sysroot=$(dirname "$(dirname "$("$cc" -print-file-name=libc.so.6)")")
-qemu-aarch64 -L "$sysroot" "$work/x360_run" "$work/hello.xex" --pack "$work/libtitle.so" --dbg "$work/dbg.txt" --stats
+qemu-aarch64 -L "$sysroot" "$work/x360_run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$work/disc.iso" --dbg "$work/dbg.txt" --stats
 cmp "$work/dbg.txt" "$here/hello.txt"
 echo "arm64 (qemu): DbgPrint output matches hello.txt"
