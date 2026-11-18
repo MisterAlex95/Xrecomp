@@ -197,7 +197,17 @@ def _lift_unit(image, decoder, discovered, prefix, comments):
     for f in funcs:
         for a in sorted(leaders[f.entry]):
             owner.setdefault(a, f)
-    return bodies, {a: name(f) for a, f in owner.items()}, disc, fallbacks
+    return bodies, owner, name, disc, fallbacks
+
+
+def _function_span(img, f):
+    """The bytes function f's lifted code was made from: its lowest to its highest instruction, gaps included. A
+    function whose instructions leave its entry's text section is checked with that whole section, as before."""
+    sec = next(s for s in img.text if s.addr <= f.entry < s.end)
+    lo, hi = min(f.addrs, default=f.entry), max(f.addrs, default=f.entry) + 4
+    if lo < sec.addr or hi > sec.end:
+        return sec.addr, sec.end
+    return lo, hi
 
 
 def recompile(image, outdir, discovered=(), comments=True, rels=()):
@@ -211,15 +221,19 @@ def recompile(image, outdir, discovered=(), comments=True, rels=()):
     files, bodies, entries, spans, stats = [], [], [], [], []
     fallbacks = 0
     for img, prefix in units:
-        b, owner, disc, fb = _lift_unit(img, decoder, discovered, prefix, comments)
+        b, owner, name, disc, fb = _lift_unit(img, decoder, discovered, prefix, comments)
         fallbacks += fb
         bodies += b
-        first = len(spans)
-        uspans = [(s.addr, s.end, img.span_hash(s.addr, s.end)) for s in img.text]
-        spans += uspans
-        for a, fn in owner.items():
-            k = next(k for k, (lo, hi, _h) in enumerate(uspans) if lo <= a < hi)
-            entries.append((a, first + k, fn))
+        # one span per lifted function (XBA-264 follow-up): a game that patches a few words of its text (Prince of
+        # Persia: The Two Thrones rewrites nops at boot) only sends the functions holding them to the interpreter
+        index = {}
+        for f in sorted(set(owner.values()), key=lambda f: f.entry):
+            lo, hi = _function_span(img, f)
+            if (lo, hi) not in index:
+                index[(lo, hi)] = len(spans)
+                spans.append((lo, hi, img.span_hash(lo, hi)))
+        for a, f in owner.items():
+            entries.append((a, index[_function_span(img, f)], name(f)))
         st = disc.stats()
         st["seeds"] = len(disc.seeds)
         if img is not image:
