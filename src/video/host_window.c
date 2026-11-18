@@ -764,8 +764,9 @@ int host_window_present_texture(unsigned tex, int w, int h, int top_down)
     live_take();
 #if defined(XBOXRECOMP_LSFG)
     /* XBA-274: frame generation for a picture the runtime drew on the GPU (the GameCube's GX and GPU-YUV paths):
-     * read back while frame generation runs (not under fast-forward, which draws directly), then as present_rgba. */
-    if (s_fg && !recomp_ff_active()) {
+     * read back while frame generation runs (not under fast-forward, which draws directly, nor once the pacer fell
+     * back: nothing would take the copy), then as present_rgba. */
+    if (s_fg && framegen_pacer_active() && !recomp_ff_active()) {
         const uint8_t *px = texture_pixels(tex, w, h, top_down);
         if (px && fg_present(px, w, h, w * 4))
             return 1;
