@@ -460,6 +460,42 @@ static void test_more(const char *dir)
     CHECK(XM(X360_xam_NetDll_socket, 4, 0, 2, 1, 6) == 0xFFFFFFFFu, "no network: sockets fail");
 }
 
+static void test_audio_out(void)
+{
+    /* a client, one submitted frame: channel c, sample s = c + s / 1000 */
+    char path[] = "/tmp/x360_audio_XXXXXX";
+    int fd = mkstemp(path);
+    FILE *f = fd >= 0 ? fdopen(fd, "w+b") : NULL;
+    CHECK(f != NULL, "temporary WAV");
+    if (!f)
+        return;
+    x360_set_audio_out(X, f);
+    uint32_t cb = x360_kalloc(X, 8), drv = x360_kalloc(X, 4), buf = x360_kalloc(X, 4 * 6 * 256);
+    x360_w32(X, cb, 0x82000000u), x360_w32(X, cb + 4, 0);
+    K(X360_xboxkrnl_XAudioRegisterRenderDriverClient, 2, cb, drv);
+    for (int ch = 0; ch < 6; ch++)
+        for (int s = 0; s < 256; s++) {
+            float v = (float)ch + (float)s / 1000.0f;
+            uint32_t bits;
+            memcpy(&bits, &v, 4);
+            x360_w32(X, buf + 4 * (uint32_t)(ch * 256 + s), bits);
+        }
+    K(X360_xboxkrnl_XAudioSubmitRenderDriverFrame, 2, x360_r32(X, drv), buf);
+    K(X360_xboxkrnl_XAudioUnregisterRenderDriverClient, 1, x360_r32(X, drv));
+    x360_audio_close(X);
+    uint8_t h[44];
+    float samp[12];
+    fseek(f, 0, SEEK_SET);
+    CHECK(fread(h, 1, 44, f) == 44 && fread(samp, 4, 12, f) == 12, "WAV read back");
+    uint32_t data = h[40] | h[41] << 8 | h[42] << 16 | (uint32_t)h[43] << 24;
+    CHECK(!memcmp(h, "RIFF", 4) && !memcmp(h + 8, "WAVEfmt ", 8) && h[20] == 3 && h[22] == 6 && data == 6144,
+          "WAV header (format %u, channels %u, data %u)", h[20], h[22], data);
+    CHECK(samp[0] == 0.0f && samp[5] == 5.0f && samp[6] == 0.001f && samp[11] == 5.001f,
+          "interleaved samples %g %g %g %g", samp[0], samp[5], samp[6], samp[11]);
+    fclose(f);
+    unlink(path);
+}
+
 static void test_input_and_cheats(void)
 {
     uint32_t st = x360_kalloc(X, 32);
@@ -522,7 +558,8 @@ static void test_files(const char *dir)
 {
     x360_set_data_dir(X, dir);
     uint32_t hp = x360_kalloc(X, 8), iosb = x360_kalloc(X, 8), info = x360_kalloc(X, 64), buf = x360_kalloc(X, 64);
-    uint32_t link = x360_r32(X, attrs("\\??\\save:") + 4), target = x360_r32(X, attrs("\\Device\\Harddisk0\\Partition1") + 4);
+    uint32_t link = x360_r32(X, attrs("\\??\\save:") + 4);
+    uint32_t target = x360_r32(X, attrs("\\Device\\Harddisk0\\Partition1") + 4);
     CHECK(K(X360_xboxkrnl_ObCreateSymbolicLink, 2, link, target) == 0, "ObCreateSymbolicLink");
     /* NtCreateFile: create options are the ninth argument (stack) */
     uint32_t st = K(X360_xboxkrnl_NtCreateFile, 9, hp, 0xC0000000u, attrs("save:\\dir\\..\\x"), iosb, 0, 0, 0, 5,
@@ -578,6 +615,7 @@ int main(void)
     test_gpu();
     test_strict_imports();
     test_input_and_cheats();
+    test_audio_out();
     test_crypt();
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {

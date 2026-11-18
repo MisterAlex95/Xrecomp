@@ -59,6 +59,9 @@ void x360_gpu_opcode_histogram(x360_machine *x, FILE *out);
 int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, int width, int height,
                       char *why, size_t why_n);
 void x360_render_stats(x360_machine *x, FILE *out);
+/* The audio the title submits to the render driver (256-sample frames of 6 channels at 48 kHz), written to F as a
+ * 32-bit float WAV, sizes filled in when the machine is freed. XMA is not decoded: XMA voices stay silent. */
+void x360_set_audio_out(x360_machine *x, FILE *f);
 /* A trace of the GPU command stream (PM4 packets, register blocks, draws, swaps), or NULL. */
 void x360_set_gpu_trace(x360_machine *x, FILE *f);
 /* Where DbgPrint and the runtime's own messages go (default stdout / stderr), verbosity (0 quiet, 1 HLE calls). */

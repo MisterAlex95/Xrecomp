@@ -9,7 +9,8 @@
  * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
  * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
  * cache: / hdd:. --render: draw with the GLES 3.0 renderer, shaders from SHADER_CACHE (bringup's WORKDIR/shaders),
- * each swap written to --frames DIR as PPM, a WxH target (default 1280x720). --save-state: write a save state when
+ * each swap written to --frames DIR as PPM, a WxH target (default 1280x720). --audio FILE.wav: the audio the title
+ * submits (render driver frames, 6 channels, 48 kHz, float; XMA voices silent). --save-state: write a save state when
  * the run stops (budget or end); --load-state: start from one. --pad-script FILE: timed controller states (see
  * load_pad_script). --seconds N: stop after N seconds of the title's virtual time (default 3600; 0: no limit).
  * --strict-imports: stop at the first import without an HLE (by name). Runs until the title ends or N instructions
@@ -80,7 +81,7 @@ int main(int argc, char **argv)
 {
     const char *path = NULL, *pack = NULL, *logp = NULL, *dbgp = NULL, *missedp = NULL, *disc = NULL, *data_dir = NULL,
                *gpu_trace = NULL, *shaders = NULL, *save_state = NULL, *load_state = NULL, *pad_script = NULL,
-               *render = NULL, *frames = NULL;
+               *render = NULL, *frames = NULL, *audio = NULL;
     int rw = 1280, rh = 720;
     unsigned long long insns = 2000000000ull;
     int stats = 0, verbose = 0, strict = 0;
@@ -94,6 +95,8 @@ int main(int argc, char **argv)
             save_state = argv[++i];
         else if (!strcmp(argv[i], "--load-state") && i + 1 < argc)
             load_state = argv[++i];
+        else if (!strcmp(argv[i], "--audio") && i + 1 < argc)
+            audio = argv[++i];
         else if (!strcmp(argv[i], "--render") && i + 1 < argc)
             render = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
@@ -176,6 +179,13 @@ int main(int argc, char **argv)
         x360_set_gpu_trace(x, gtrace);
     if (shaders)
         x360_set_shader_dump(x, shaders);
+    FILE *audio_f = audio ? fopen(audio, "w+b") : NULL;
+    if (audio && !audio_f) {
+        fprintf(stderr, "x360_run: %s: cannot write\n", audio);
+        return 2;
+    }
+    if (audio_f)
+        x360_set_audio_out(x, audio_f);
     if (render && x360_set_renderer(x, render, frames, rw, rh, why, sizeof why))
         fprintf(log, "x360_run: no renderer (%s): running without drawing\n", why);
     void *lib = dlopen(pack, RTLD_NOW | RTLD_LOCAL);

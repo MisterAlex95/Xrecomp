@@ -341,12 +341,58 @@ static void k_XAudioUnregisterRenderDriverClient(x360_machine *x, x360_thread *t
     RET(0);
 }
 
+/* --audio FILE.wav: the frames clients submit, as the render driver would play them (Xenia's audio system: 256
+ * samples of 6 channels, channel after channel, big-endian floats, 48 kHz), written interleaved to a 32-bit float
+ * WAV whose sizes x360_audio_close fills in. Several clients' frames are written one after the other (no mixing). */
+static void wav_header(FILE *f, uint32_t data_bytes)
+{
+    uint8_t h[44] = "RIFF....WAVEfmt ";
+    uint32_t v[9] = {36 + data_bytes, 16, 3 | 6u << 16 /* IEEE float, 6 channels */, 48000, 48000 * 24, 24 | 32u << 16,
+                     0x61746164u /* "data" */, data_bytes, 0};
+    for (int i = 0; i < 4; i++)
+        h[4 + i] = (uint8_t)(v[0] >> (8 * i));
+    for (int k = 1; k < 8; k++)
+        for (int i = 0; i < 4; i++)
+            h[12 + 4 * k + i] = (uint8_t)(v[k] >> (8 * i));
+    memcpy(h + 36, "data", 4);
+    fseek(f, 0, SEEK_SET);
+    fwrite(h, 1, sizeof h, f);
+    fseek(f, 0, SEEK_END);
+}
+
+void x360_set_audio_out(x360_machine *x, FILE *f)
+{
+    x->audio_out = f;
+    x->audio_bytes = 0;
+    if (f)
+        wav_header(f, 0);
+}
+
+void x360_audio_close(x360_machine *x)
+{
+    if (x->audio_out) {
+        wav_header(x->audio_out, x->audio_bytes);
+        fflush(x->audio_out);
+        x->audio_out = NULL;
+    }
+}
+
 static void k_XAudioSubmitRenderDriverFrame(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     uint32_t k = A(0) & 0xFFFF;
     if (k < 8)
         x->audio[k].frames_submitted++;
+    if (x->audio_out && A(1)) {
+        float out[256 * 6];
+        for (int s = 0; s < 256; s++)
+            for (int ch = 0; ch < 6; ch++) {
+                uint32_t bits = x360_r32(x, A(1) + 4 * (uint32_t)(ch * 256 + s));
+                memcpy(&out[s * 6 + ch], &bits, 4);
+            }
+        fwrite(out, 4, 256 * 6, x->audio_out);
+        x->audio_bytes += 4 * 256 * 6;
+    }
     RET(0);
 }
 

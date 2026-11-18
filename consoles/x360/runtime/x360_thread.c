@@ -603,6 +603,7 @@ void x360_destroy(x360_machine *x)
 {
     if (!x)
         return;
+    x360_audio_close(x);
     x360_fs_free(x);
     x360_gpu_free(x);
     free(x->pad_script);
