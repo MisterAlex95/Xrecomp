@@ -114,7 +114,7 @@ def main(argv=None):
         with open(opts["--load"]) as f:
             d = json.load(f)
         pcs = collections.Counter({int(k): v for k, v in d["pcs"].items()})
-        total, rc, mods, cmd, arch = d["total"], d["rc"], [tuple(m) for m in d["mods"]], d["cmd"], d["arch"]
+        total, rc, mods, cmd, arch = d["total"], d["rc"], [tuple(m) for m in d["mods"]], d["cmd"], d.get("arch", arch)
     elif cmd:
         pcs, total, rc, mods = run(cmd, arch, opts["-L"])
     else:
