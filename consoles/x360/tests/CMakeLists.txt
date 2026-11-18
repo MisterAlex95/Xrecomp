@@ -13,6 +13,8 @@ project(console_x360_tests C)
 #                    a jump table) and it must end with exit code 0
 #   x360_hello_lzx   the same title encrypted (a made-up key) and LZX-compressed, rewritten plain by
 #                    python3 -m tools.xex --plain first
+#   x360_missed      the discovery loop: a function only a pointer reaches stops the first run (--missed), the
+#                    second, recompiled with it (--discovered), ends with exit code 42 (run_missed.sh)
 #   x360_hello_c     a C test title (tests/homebrew/hello_c: devkitPPC, -mpowerpc64 -maltivec; recursion, a GCC jump
 #                    table, function pointers, doubles, AltiVec, two threads with a critical section and events,
 #                    virtual / physical memory) packed by homebrew/elf2xex.py: hello_c.txt. Skipped (77) when not
@@ -59,6 +61,10 @@ if(TARGET x360_run)
                     ${CMAKE_CURRENT_BINARY_DIR}/${_name} ${_mode} ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt)
         set_tests_properties(${_name} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
     endforeach()
+    add_test(NAME x360_missed
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_missed.sh $<TARGET_FILE:x360_run>
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_missed)
+    set_tests_properties(x360_missed PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     get_filename_component(X360_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../.. ABSOLUTE)
     set(X360_HOMEBREW_DIR ${X360_REPO_ROOT}/build/homebrew/x360 CACHE PATH
         "Built Xbox 360 test titles (build_homebrew.sh x360)")
