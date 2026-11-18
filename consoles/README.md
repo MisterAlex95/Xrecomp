@@ -2,8 +2,9 @@
 
 XRecomp plays **Game Boy Advance**, **PlayStation** and **Nintendo 64** games, statically recompiled the same way as
 Xbox discs, on the shared host layer and in the Android app. **GameCube** has its runtime in the app too (homebrew
-DOLs and disc images, « GameCube runtime » below). **Xbox 360** plays in a window on Linux (`x360_play`) and in the
-app with a pack made on a desktop (XBA-280, « Xbox 360 » below). **Nintendo DS**, **PSP**, **Dreamcast**,
+DOLs and disc images, « GameCube runtime » below). **Xbox 360** runs in a window on Linux (`x360_play`) and in the
+app, prepared on the device with the player's own key (XBA-280, XBA-282, « Xbox 360 » below); no retail title has
+been run on it yet. **Nintendo DS**, **PSP**, **Dreamcast**,
 **Nintendo 3DS** and **PlayStation 2** are spikes: tools, headers or a headless Linux runtime, nothing a player can
 use yet. Goal, order, rules (legal), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
@@ -18,7 +19,7 @@ use yet. Goal, order, rules (legal), layout, pipeline and milestones are in the 
 | `gc/` | GameCube (DOLs and disc images in the app, XBA-259, XBA-261) | Gekko (PowerPC 750 + paired singles, big-endian) |
 | `dc/` | Dreamcast (spike, Linux headless only) | Hitachi SH-4 (SH7091, little-endian, FPU) |
 | `ps2/` | PlayStation 2 (spike, Linux headless only) | Emotion Engine: R5900 (MIPS III + 128-bit MMI, non-IEEE FPU) |
-| `x360/` | Xbox 360 (`x360_play` on Linux, the app with a desktop-made pack: XBA-280) | Xenon (64-bit PowerPC + VMX128, big-endian) |
+| `x360/` | Xbox 360 (`x360_play` on Linux, the app with Prepare on the device: XBA-280, XBA-282; no retail title run yet) | Xenon (64-bit PowerPC + VMX128, big-endian) |
 | `3ds/` | Nintendo 3DS (spike, Linux headless only) | ARM11 MPCore (ARMv6K + VFPv2), one Horizon user process |
 
 Each one has:
