@@ -102,6 +102,11 @@ target_link_libraries(x360_hle_test PRIVATE x360_core)
 target_compile_options(x360_hle_test PRIVATE -Wall -Wextra)
 add_test(NAME x360_hle COMMAND x360_hle_test)
 set_tests_properties(x360_hle PROPERTIES TIMEOUT 120)
+# XBA-296: hle_coverage's reading of the sources is exactly the runtime's dispatch table
+add_test(NAME x360_hle_table
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_hle_table.sh $<TARGET_FILE:x360_hle_test>
+            ${CMAKE_CURRENT_BINARY_DIR}/x360_hle_table)
+set_tests_properties(x360_hle_table PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 
 if(TARGET x360_run)
     foreach(_mode basic lzx split)

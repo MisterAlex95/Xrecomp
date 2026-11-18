@@ -662,13 +662,7 @@ static void x_XMsgStartIORequest(x360_machine *x, x360_thread *t, xe_cpu *c)
 #define KM(name, fn) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, fn}
 #define XM2(name, fn) {X360_LIB_XAM, X360_xam_##name, fn}
 
-typedef struct {
-    uint8_t lib;
-    uint16_t ordinal;
-    void (*fn)(x360_machine *, x360_thread *, xe_cpu *);
-} more_entry;
-
-static const more_entry MORE[] = {
+static const x360_hle_row MORE[] = {
     KM(RtlUpcaseUnicodeChar, k_RtlUpcaseUnicodeChar), KM(RtlCompareStringN, k_RtlCompareStringN),
     KM(RtlFreeAnsiString, k_RtlFreeAnsiString), KM(RtlMultiByteToUnicodeN, k_RtlMultiByteToUnicodeN),
     KM(RtlUnicodeToMultiByteN, k_RtlUnicodeToMultiByteN),
@@ -709,14 +703,7 @@ static const more_entry MORE[] = {
     XM2(XMsgStartIORequestEx, x_XMsgStartIORequest),
 };
 
-int x360_more_call(x360_machine *x, const x360_thunk *th, x360_thread *t)
+void x360_more_register(x360_machine *x)
 {
-    if (x360_xma_call(x, th, t)) /* x360_xma.c */
-        return 1;
-    for (size_t k = 0; k < sizeof MORE / sizeof MORE[0]; k++)
-        if (MORE[k].lib == th->lib && MORE[k].ordinal == th->ordinal) {
-            MORE[k].fn(x, t, &t->cpu);
-            return 1;
-        }
-    return 0;
+    x360_hle_add(x, MORE, sizeof MORE / sizeof MORE[0]);
 }

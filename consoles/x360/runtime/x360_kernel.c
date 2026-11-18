@@ -28,14 +28,6 @@ uint64_t x360_stack_arg(x360_machine *x, xe_cpu *c, int n)
 }
 #define RET(v) (c->gpr[3] = (uint64_t)(uint32_t)(v))
 
-typedef void (*hle_fn)(x360_machine *x, x360_thread *t, xe_cpu *c);
-
-typedef struct {
-    uint8_t lib;
-    uint16_t ordinal;
-    hle_fn fn;
-} hle_entry;
-
 typedef struct {
     uint8_t lib;
     uint16_t ordinal;
@@ -1419,7 +1411,7 @@ static void k_RtlTimeFieldsToTime(x360_machine *x, x360_thread *t, xe_cpu *c)
 #define KA(name, fn) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, fn}
 #define XM(name, fn) {X360_LIB_XAM, X360_xam_##name, fn}
 
-static const hle_entry HLE[] = {
+static const x360_hle_row HLE[] = {
     K(DbgPrint), K(DbgBreakPoint), KA(DbgBreakPointWithStatus, k_DbgBreakPoint), K(sprintf), K(_snprintf),
     K(vsprintf), K(_vsnprintf), KA(KeBugCheck, k_KeBugCheckEx), K(KeBugCheckEx), K(RtlRaiseException),
     K(HalReturnToFirmware),
@@ -1464,20 +1456,39 @@ static const hle_entry HLE[] = {
     K(RtlTimeFieldsToTime), K(NtQueryEvent), KA(KeSetDisableBoostThread, k_nop0), K(RtlUnwind),
 };
 
+void x360_hle_add(x360_machine *x, const x360_hle_row *rows, size_t n)
+{
+    for (size_t k = 0; k < n; k++)
+        x->hle[rows[k].lib][rows[k].ordinal & 4095] = rows[k].fn;
+}
+
+x360_hle_fn x360_hle_lookup(const x360_machine *x, int lib, unsigned ordinal)
+{
+    return lib >= 0 && lib < 2 && ordinal < 4096 ? x->hle[lib][ordinal] : NULL;
+}
+
+/* every table, the most specific last: a later row replaces an earlier one */
+static void hle_register(x360_machine *x)
+{
+#define X360_ADD_TABLE(group) x360_hle_add(x, x360_tab_##group, x360_tab_##group##_n);
+    X360_HLE_TABLES(X360_ADD_TABLE)
+    x360_more_register(x);
+    x360_xma_register(x);
+    x360_hle_add(x, HLE, sizeof HLE / sizeof HLE[0]);
+}
+
 void x360_hle_call(x360_machine *x, const x360_thunk *th)
 {
     x360_thread *t = x360_cur(x);
     xe_cpu *c = &t->cpu;
-    for (size_t k = 0; k < sizeof HLE / sizeof HLE[0]; k++)
-        if (HLE[k].lib == th->lib && HLE[k].ordinal == th->ordinal) {
-            if (x->verbose)
-                x360_logf(x, "x360: [t%u] %s(%08X, %08X, %08X, %08X)\n", t->id,
-                          x360_export_name(th->lib, th->ordinal) ?: "?", A(0), A(1), A(2), A(3));
-            HLE[k].fn(x, t, c);
-            return;
-        }
-    if (x360_more_call(x, th, t))
+    x360_hle_fn fn = x360_hle_lookup(x, th->lib, th->ordinal);
+    if (fn) {
+        if (x->verbose)
+            x360_logf(x, "x360: [t%u] %s(%08X, %08X, %08X, %08X)\n", t->id,
+                      x360_export_name(th->lib, th->ordinal) ?: "?", A(0), A(1), A(2), A(3));
+        fn(x, t, c);
         return;
+    }
     if (x->strict_imports) {
         x360_fail(x, "%s!%s (ordinal %u) has no HLE (stopping: strict imports)", th->lib ? "xam" : "xboxkrnl",
                   x360_export_name(th->lib, th->ordinal) ?: "?", th->ordinal);
@@ -1502,6 +1513,7 @@ static uint32_t var(x360_machine *x, int lib, unsigned ordinal, uint32_t size)
 
 int x360_kernel_init(x360_machine *x)
 {
+    hle_register(x);
     uint32_t a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxHardwareInfo, 16);
     x360_w32(x, a, 0x00000020u); /* flags (Xenia: 0x20, storage initialised) */
     x360_w8(x, a + 4, 6);        /* hardware threads */

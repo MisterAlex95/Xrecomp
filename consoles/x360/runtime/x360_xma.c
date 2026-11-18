@@ -440,12 +440,8 @@ static void k_XMABlockWhileInUse(x360_machine *x, x360_thread *t, xe_cpu *c)
     RET(0); /* decoding happens between slices, never under the title's feet */
 }
 
-typedef void (*xma_fn)(x360_machine *, x360_thread *, xe_cpu *);
-static const struct {
-    uint16_t ordinal;
-    xma_fn fn;
-} XMA[] = {
-#define E(name) {X360_xboxkrnl_##name, k_##name}
+static const x360_hle_row XMA[] = {
+#define E(name) X360_HK(name, k_##name)
     E(XMACreateContext), E(XMAReleaseContext), E(XMAInitializeContext), E(XMAEnableContext), E(XMADisableContext),
     E(XMAGetOutputBufferWriteOffset), E(XMAGetOutputBufferReadOffset), E(XMASetOutputBufferReadOffset),
     E(XMASetOutputBufferValid), E(XMAIsOutputBufferValid), E(XMASetInputBuffer0Valid), E(XMAIsInputBuffer0Valid),
@@ -455,16 +451,9 @@ static const struct {
 #undef E
 };
 
-int x360_xma_call(x360_machine *x, const x360_thunk *th, x360_thread *t)
+void x360_xma_register(x360_machine *x)
 {
-    if (th->lib != X360_LIB_XBOXKRNL)
-        return 0;
-    for (size_t k = 0; k < sizeof XMA / sizeof XMA[0]; k++)
-        if (XMA[k].ordinal == th->ordinal) {
-            XMA[k].fn(x, t, &t->cpu);
-            return 1;
-        }
-    return 0;
+    x360_hle_add(x, XMA, sizeof XMA / sizeof XMA[0]);
 }
 
 void x360_xma_get_stats(x360_machine *x, uint64_t *packets, uint64_t *frames, uint64_t *blocks, unsigned *contexts)

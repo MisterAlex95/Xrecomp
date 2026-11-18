@@ -838,6 +838,28 @@ int main(int argc, char **argv)
     x360_install_fault_handler(X); /* a guest fault prints its address instead of a bare SIGSEGV */
     scratch = x360_heap_alloc(X, &X->heap_v4k, 0x10000, 0);
     stack_top = scratch + 0x8000;
+    if (argc == 2 && !strcmp(argv[1], "--list-hle")) {
+        /* the real dispatch: compared with python3 -m x360_tools.hle_coverage --implemented (x360_hle_table) */
+        static const struct {
+            int lib;
+            unsigned ordinal;
+            const char *lib_name, *name, *kind;
+        } exports[] = {
+#define X360_LIB_NAME_xboxkrnl X360_LIB_XBOXKRNL
+#define X360_LIB_NAME_xam X360_LIB_XAM
+#define X360_EXPORT(lib, ord, name, kind) {X360_LIB_NAME_##lib, ord, #lib, #name, #kind},
+#include "x360_exports.inc"
+#undef X360_EXPORT
+        };
+        for (size_t k = 0; k < sizeof exports / sizeof exports[0]; k++) {
+            int fn = !strcmp(exports[k].kind, "FN");
+            if (fn ? x360_hle_lookup(X, exports[k].lib, exports[k].ordinal) != NULL
+                   : X->vars[exports[k].lib][exports[k].ordinal] != 0)
+                printf("%s %s %s\n", exports[k].lib_name, exports[k].name, fn ? "function" : "variable");
+        }
+        x360_destroy(X);
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "--render")) {
         int rc = render_test(argv[2]);
         x360_destroy(X);

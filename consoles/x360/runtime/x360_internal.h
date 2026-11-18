@@ -127,6 +127,20 @@ typedef struct x360_pad_slot {
     x360_pad state;
 } x360_pad_slot;
 
+/* one export's HLE: the dispatch tables of x360_kernel.c, x360_more.c, x360_xma.c and the files of X360_HLE_TABLES */
+typedef void (*x360_hle_fn)(x360_machine *x, struct x360_thread *t, xe_cpu *c);
+typedef struct x360_hle_row {
+    uint8_t lib;
+    uint16_t ordinal;
+    x360_hle_fn fn;
+} x360_hle_row;
+#define X360_HK(name, fn) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, fn}
+#define X360_HX(name, fn) {X360_LIB_XAM, X360_xam_##name, fn}
+/* the runtime files with a table of their own: const x360_hle_row x360_tab_<group>[], unsigned x360_tab_<group>_n */
+#define X360_HLE_TABLES(T)
+#define X360_DECLARE_TABLE(group) extern const x360_hle_row x360_tab_##group[]; extern const unsigned x360_tab_##group##_n;
+X360_HLE_TABLES(X360_DECLARE_TABLE)
+
 typedef struct x360_thunk {
     uint32_t addr;
     uint16_t ordinal;
@@ -199,6 +213,7 @@ struct x360_machine {
     FILE *dbg, *log;
     int verbose;
     x360_stats st;
+    x360_hle_fn hle[2][4096]; /* every export with an HLE, by library and ordinal (x360_kernel_init; not state) */
 };
 
 /* guest memory (big-endian) */
@@ -267,8 +282,11 @@ void x360_hle_call(x360_machine *x, const x360_thunk *t);
 int x360_kernel_init(x360_machine *x);
 const char *x360_export_name(int lib, unsigned ordinal);
 uint64_t x360_stack_arg(x360_machine *x, xe_cpu *c, int n);
-/* x360_more.c: the rest of the surface a shipped title imports (1 when it handled the call) */
-int x360_more_call(x360_machine *x, const x360_thunk *th, x360_thread *t);
+/* the dispatch table as the runtime answers imports: the function behind an export, NULL without an HLE */
+x360_hle_fn x360_hle_lookup(const x360_machine *x, int lib, unsigned ordinal);
+void x360_hle_add(x360_machine *x, const x360_hle_row *rows, size_t n);
+/* x360_more.c: the rest of the surface a shipped title imports */
+void x360_more_register(x360_machine *x);
 void x360_audio_poll(x360_machine *x);
 void x360_audio_close(x360_machine *x);
 uint64_t x360_audio_next_event(x360_machine *x);
@@ -328,7 +346,7 @@ uint64_t x360_input_next_event(x360_machine *x);
 int x360_xma_init(x360_machine *x);
 void x360_xma_free(x360_machine *x);
 void x360_xma_poll(x360_machine *x);
-int x360_xma_call(x360_machine *x, const x360_thunk *th, x360_thread *t);
+void x360_xma_register(x360_machine *x);
 void x360_xma_state(x360_machine *x, uint32_t *array, uint8_t *used, uint8_t *enabled, int load);
 void x360_audio_mix_frame(x360_machine *x, int client, const float *planar6);
 void x360_audio_tick(x360_machine *x);
