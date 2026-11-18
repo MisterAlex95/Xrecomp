@@ -4,8 +4,8 @@
  *   xenos_glsl_run DIR
  *
  * For N = 0, 1, ...: DIR/N.vert with DIR/N.in (256 vec4 float constants, then 8 uint32 boolean words, then 16 vec4
- * vertex attributes, little-endian) is linked with transform feedback on its xe_o0 .. xe_o<k-1> outputs (k from
- * DIR/N.nout, a decimal number), drawn as one point with rasterisation off, and its outputs are printed as
+ * vertex attributes, then optionally 32 uint32 loop constants, little-endian) is linked with transform feedback
+ * on its xe_o0 .. xe_o<k-1> outputs (k from DIR/N.nout, a decimal number), drawn as one point with rasterisation off, and its outputs are printed as
  * "N vert" followed by 4k 32-bit hex words. DIR/N.frag is compiled (with a pass-through vertex shader, linked) and
  * printed as "N frag ok". A shader that fails prints "N error" and the log. Stops at the first N with neither. */
 #define _GNU_SOURCE
@@ -68,8 +68,11 @@ static int link(GLuint p, int n)
     return ok;
 }
 
-static void set_uniforms(GLuint p, const uint8_t *in)
+static void set_uniforms(GLuint p, const uint8_t *in, size_t len)
 {
+    GLint l = glGetUniformLocation(p, "xe_l");
+    if (l >= 0 && len >= 4096 + 32 + 256 + 128)
+        glUniform1uiv(l, 32, (const GLuint *)(in + 4096 + 32 + 256));
     GLint c = glGetUniformLocation(p, "xe_c");
     if (c >= 0)
         glUniform4fv(c, 256, (const GLfloat *)in);
@@ -115,7 +118,7 @@ static void run_vertex(const char *dir, int n, const char *src)
         return;
     }
     glUseProgram(p);
-    set_uniforms(p, in);
+    set_uniforms(p, in, len);
     for (int i = 0; i < 16; i++) {
         char an[16];
         snprintf(an, sizeof an, "xe_v%d", i);

@@ -67,12 +67,15 @@ def trunc(a):
 # ---- encoding ----
 
 def alu_words(vop=0, sop=50, vdest=0, sdest=0, vmask=0, smask=0, srcs=((0, 0, 0, 0),) * 3, abs_c=0, export=0,
-              vclamp=0, sclamp=0, pred=0, pcond=0, sdest_rel=0):
+              vclamp=0, sclamp=0, pred=0, pcond=0, sdest_rel=0, vdest_rel=0, const_0_rel_abs=0, const_1_rel_abs=0,
+              relative=0):
     """srcs: three (reg, is_temp, swizzle, negate)."""
-    d0 = vdest | abs_c << 7 | sdest << 8 | sdest_rel << 14 | export << 15 | vmask << 16 | smask << 20 | \
+    d0 = vdest | vdest_rel << 6 | abs_c << 7 | sdest << 8 | sdest_rel << 14 | export << 15 | vmask << 16 | \
+        smask << 20 | \
         vclamp << 24 | sclamp << 25 | sop << 26
     (r1, t1, w1, n1), (r2, t2, w2, n2), (r3, t3, w3, n3) = srcs
-    d1 = w3 | w2 << 8 | w1 << 16 | n3 << 24 | n2 << 25 | n1 << 26 | pcond << 27 | pred << 28
+    d1 = w3 | w2 << 8 | w1 << 16 | n3 << 24 | n2 << 25 | n1 << 26 | pcond << 27 | pred << 28 | relative << 29 | \
+        const_1_rel_abs << 30 | const_0_rel_abs << 31
     d2 = r3 | r2 << 8 | r1 << 16 | vop << 24 | t3 << 29 | t2 << 30 | t1 << 31
     return [d0, d1, d2]
 
@@ -316,11 +319,118 @@ def to_words(seq):
     return program([tuple(c) for c in clauses])
 
 
-def consts_blob(consts, bools=0, attrs=()):
+def consts_blob(consts, bools=0, attrs=(), loops=()):
     b = b"".join(struct.pack("<4f", *c) for c in consts) + struct.pack("<8I", *[(bools >> (32 * i)) & 0xFFFFFFFF
                                                                                for i in range(8)])
     att = list(attrs) + [[0.0] * 4] * (16 - len(attrs))
-    return b + b"".join(struct.pack("<4f", *a) for a in att)
+    lp = list(loops) + [0] * (32 - len(loops))
+    return b + b"".join(struct.pack("<4f", *a) for a in att) + struct.pack("<32I", *lp)
+
+
+def loop_const(count, start, step):
+    return count | start << 8 | (step & 0xFF) << 16
+
+
+def cf_loop_start(address, loop_id, repeat=0):
+    return (address | repeat << 13 | loop_id << 16) | (7 << 12) << 32
+
+
+def cf_loop_end(address, loop_id, predicated_break=0, condition=0):
+    return (address | loop_id << 16 | predicated_break << 21) | (condition << 10 | 8 << 12) << 32
+
+
+def cf_branch(op, address, unconditional=0, predicated=0, bool_address=0, condition=0):
+    return (address | unconditional << 13 | predicated << 14) | (bool_address << 2 | condition << 10 | op << 12) << 32
+
+
+def flow_program(entries):
+    """entries: ("exec", cf op, [instrs], extra) or ("cf", 48-bit word) -> dwords."""
+    units = (len(entries) + 1) // 2
+    cfs, body, at = [], [], units
+    for e in entries:
+        if e[0] == "cf":
+            cfs.append(e[1])
+            continue
+        _, op, instrs, extra = e
+        seq = sum(1 << (2 * i) for i, (kind, _) in enumerate(instrs) if kind == "fetch")
+        cfs.append(cf_exec(op, at, len(instrs), seq, **extra))
+        for _, w in instrs:
+            body += w
+        at += len(instrs)
+    if len(cfs) % 2:
+        cfs.append(0)
+    words = []
+    for k in range(0, len(cfs), 2):
+        v = cfs[k] | cfs[k + 1] << 48
+        words += [v & 0xFFFFFFFF, (v >> 32) & 0xFFFFFFFF, (v >> 64) & 0xFFFFFFFF]
+    return words + body
+
+
+def A(**kw):
+    return ("alu", alu_words(**kw))
+
+
+def MOV(dst, c, **kw):
+    """r[dst] = c[c] (max c, c), extra fields through kw"""
+    return A(vop=2, vdest=dst, vmask=0xF, srcs=((c, 0, 0, 0), (c, 0, 0, 0), (0, 0, 0, 0)), **kw)
+
+
+def ADD_RC(dst, r, c, **kw):
+    return A(vop=0, vdest=dst, vmask=0xF, srcs=((r, 1, 0, 0), (c, 0, 0, 0), (0, 0, 0, 0)), **kw)
+
+
+def flow_cases():
+    """(name, words, loops, bools, expected o0.., consts) for loops, aL / a0 addressing, calls, jumps"""
+    cs = [[float(10 * k + 1), float(10 * k + 2), float(10 * k + 3), float(k)] for k in range(16)] + \
+        [[0.0] * 4] * 240
+    out = []
+    E = [A(**export(0, 1)), A(**export(1, 2))]
+    # sum of c[aL] over a loop: count 3, start 2, step 1 -> c2 + c3 + c4 (const_0_rel_abs, aL-relative)
+    loop_sum = flow_program([("exec", 1, [MOV(1, 20)], {}), ("cf", cf_loop_start(5, 0)),
+                             ("exec", 1, [ADD_RC(1, 1, 0, const_0_rel_abs=1)], {}), ("cf", cf_loop_end(2, 0)),
+                             ("exec", 2, E, {})])
+    s = [sum(cs[k][i] for k in (2, 3, 4)) for i in range(4)]
+    out.append(("loop sum", loop_sum, [loop_const(3, 2, 1)], 0, [s, [0.0] * 4]))
+    s = [sum(cs[k][i] for k in (9, 7, 5, 3)) for i in range(4)]
+    out.append(("loop step -2", loop_sum, [loop_const(4, 9, -2)], 0, [s, [0.0] * 4]))
+    out.append(("loop count 0", loop_sum, [loop_const(0, 2, 1)], 0, [[0.0] * 4, [0.0] * 4]))
+    # predicated break: r7 = c[aL] - c5, setp_ge r7.w (c[k].w = k): the loop breaks once aL reaches 5, so the body
+    # runs for aL 3, 4, 5
+    brk = flow_program([("exec", 1, [MOV(1, 20)], {}), ("cf", cf_loop_start(5, 1)),
+                        ("exec", 1, [ADD_RC(1, 1, 0, const_0_rel_abs=1),
+                                     A(vop=0, vdest=7, vmask=0xF, const_0_rel_abs=1,
+                                       srcs=((0, 0, 0, 0), (5, 0, 0, 1), (0, 0, 0, 0))),
+                                     A(sop=30, sdest=7, smask=0, srcs=((0, 0, 0, 0), (0, 0, 0, 0), (7, 1, 0, 0)))],
+                         {}),
+                        ("cf", cf_loop_end(2, 1, predicated_break=1, condition=1)), ("exec", 2, E, {})])
+    s = [sum(cs[k][i] for k in (3, 4, 5)) for i in range(4)]
+    out.append(("predicated break", brk, [0, loop_const(10, 3, 1)], 0, [s, [0.0] * 4]))
+    # r[aL] destinations: loop start 1, count 2 writes r1 = c1 and r2 = c2 (vector_dest_rel, aL-relative constant)
+    reld = flow_program([("cf", cf_loop_start(3, 2)),
+                         ("exec", 1, [A(vop=2, vdest=0, vdest_rel=1, vmask=0xF, const_0_rel_abs=1,
+                                        const_1_rel_abs=1, srcs=((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)))], {}),
+                         ("cf", cf_loop_end(1, 2)), ("exec", 2, E, {})])
+    out.append(("relative destination", reld, [0, 0, loop_const(2, 1, 1)], 0, [cs[1], cs[2]]))
+    # a0: maxa sets a0 = floor(c6.w + 0.5) = 6, then r1 = c[a0 + 2] = c8 (relative bit: a0)
+    a0 = flow_program([("exec", 2, [A(vop=29, vdest=7, vmask=0, srcs=((6, 0, 0, 0), (6, 0, 0, 0), (0, 0, 0, 0))),
+                                    A(vop=2, vdest=1, vmask=0xF, const_0_rel_abs=1, const_1_rel_abs=1,
+                                      relative=1, srcs=((2, 0, 0, 0), (2, 0, 0, 0), (0, 0, 0, 0)))] + E, {})])
+    out.append(("a0 addressing", a0, [], 0, [cs[8], [0.0] * 4]))
+    # call / return: call cf 3 (r1 = c5), back to cf 1 (export), cf 2 never runs; a call on a false boolean skips
+    for taken in (1, 0):
+        call = flow_program([("cf", cf_branch(9, 3, bool_address=4, condition=1)), ("exec", 2, E, {}),
+                             ("exec", 1, [MOV(2, 9)], {}), ("exec", 1, [MOV(1, 5)], {}), ("cf", cf_branch(10, 0))])
+        out.append(("call taken %d" % taken, call, [], taken << 4, [cs[5] if taken else [0.0] * 4, [0.0] * 4]))
+    # jump over an exec on a boolean; an unconditional jump backwards is bounded by a boolean-guarded exece
+    for taken in (1, 0):
+        jmp = flow_program([("exec", 1, [MOV(1, 3)], {}), ("cf", cf_branch(11, 3, bool_address=200, condition=1)),
+                            ("exec", 1, [MOV(1, 4)], {}), ("exec", 2, E, {})])
+        out.append(("jump taken %d" % taken, jmp, [], taken << 200, [cs[3] if taken else cs[4], [0.0] * 4]))
+    # cexece ends only when its condition holds
+    for b in (1, 0):
+        ce = program([(4, [MOV(1, 3)] + E, dict(bool_address=9, condition=1)), (2, [MOV(1, 4)] + E, {})])
+        out.append(("cexece %d" % b, ce, [], b << 9, [cs[3] if b else cs[4], [0.0] * 4]))
+    return cs, out
 
 
 def close(got, want, loose):
@@ -341,7 +451,7 @@ def test_translation_shape():
     with pytest.raises(Unsupported):
         translate(to_words([dict(vop=18, vdest=1, vmask=0xF)]), "vertex")        # cube
     with pytest.raises(Unsupported):
-        translate(program([(7, [], {})]), "vertex")                              # a loop
+        translate(to_words([dict(vop=2, vdest=32, vmask=0xF, export=1)]), "vertex")  # memory export
 
 
 @pytest.mark.skipif(not os.path.isfile(RUN), reason="$XENOS_GLSL_RUN not set (tests/run_glsl_mesa.sh sets it)")
@@ -379,6 +489,15 @@ def test_against_mesa(tmp_path):
         (tmp_path / ("%d.nout" % n)).write_text("2")
         taken = bool(bools >> 37 & 1) == bool(cond)
         cases.append((n, "cexec", [[4.0] * 4 if taken else [0.0] * 4, [5.0] * 4]))
+        n += 1
+    # loops, relative addressing, calls, jumps, conditional ends
+    cs, flows = flow_cases()
+    for name, words, loops, bools, want in flows:
+        src_, _ = translate(words, "vertex")
+        (tmp_path / ("%d.vert" % n)).write_text(src_)
+        (tmp_path / ("%d.in" % n)).write_bytes(consts_blob(cs, bools, (), loops))
+        (tmp_path / ("%d.nout" % n)).write_text("2")
+        cases.append((n, name, want))
         n += 1
     # vertex fetch: dst swizzle w, 1, 0, x (sel 3, 5, 4, 0) from attribute (1, 2, 3, 4)
     words = program([(1, [("fetch", fetch_words(0, 0, 1, 3 | 5 << 3 | 4 << 6 | 0 << 9, 2, sel=1))], {}),

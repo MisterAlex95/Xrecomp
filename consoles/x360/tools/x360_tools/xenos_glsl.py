@@ -18,8 +18,13 @@ xe_t<n>` per texture fetch constant used (info's `textures`), the pixel shader's
 the vertex shader's outputs `out vec4 xe_o<n>`, gl_Position (Xenos's, before the host's viewport / clip-space
 conversion) and gl_PointSize; the pixel shader's `layout(location = n) out vec4 xe_color<n>` and gl_FragDepth.
 
-Not translated yet (Unsupported is raised, naming the instruction): loops, calls, jumps, relative addressing (aL, a0),
-cube, memory export, the texture queries, texture fetches with offsets, register LOD / gradients; multiply-add is
+Control flow: exec clauses (conditional on a boolean or p0, ends only when the condition holds), and when a shader
+has loops, calls or jumps, a state machine on the control-flow index with the sequencer's four-deep loop (counter, aL)
+and return stacks (`uniform uint xe_l[32]`: the loop constants, count / start / signed step bytes). Relative
+addressing: r[aL + n], c[aL + n], c[a0 + n] (clamped to the register files).
+
+Not translated yet (Unsupported is raised, naming the instruction): cube, memory export, the texture queries, texture
+fetches with offsets, register LOD / gradients; multiply-add is
 written unfused (Xenos rounds once: small differences); log / rsq / sqrt of negative numbers are left to the host
 (GLSL ES leaves them undefined: llvmpipe gives 0). Integer and signed-normalised vertex formats are the host's
 conversion, exp_adjust too.
@@ -103,6 +108,7 @@ class _Shader:
         self.body = []
         self.depth = 1
         self.uses_a0 = False
+        self.uses_al = False
 
     def emit(self, line):
         self.body.append("    " * self.depth + line)
@@ -115,17 +121,30 @@ class _Shader:
             return a["const_0_rel_abs"] if a["src1"]["temp"] else a["const_1_rel_abs"]
         return a["const_0_rel_abs"] if (a["src1"]["temp"] and a["src2"]["temp"]) else a["const_1_rel_abs"]
 
+    def temp(self, n, rel):
+        """r[n], or r[aL + n] for loop-relative addressing (clamped: GLSL leaves out-of-range indexing undefined)"""
+        if not rel:
+            return "r[%d]" % n
+        self.uses_al = True
+        return "r[clamp(aL + %d, 0, 63)]" % n
+
+    def const(self, a, n, index):
+        """c[index], c[a0 + index] or c[aL + index] (the instruction's relative bit picks a0)"""
+        if not self._const_addressed(a, n):
+            return "xe_c[%d]" % index
+        if a["relative"]:
+            self.uses_a0 = True
+            return "xe_c[clamp(a0 + %d, 0, 255)]" % index
+        self.uses_al = True
+        return "xe_c[clamp(aL + %d, 0, 255)]" % index
+
     def operand(self, a, n, where):
         """src n (1..3) as a GLSL vec4 with its swizzle, absolute value and negation."""
         s = a["src%d" % n]
         if s["temp"]:
-            if s["reg"] & 0x40:
-                raise Unsupported("%s: loop-relative temporary" % where)
-            base, absolute = "r[%d]" % (s["reg"] & 0x3F), s["reg"] >> 7
+            base, absolute = self.temp(s["reg"] & 0x3F, s["reg"] & 0x40), s["reg"] >> 7
         else:
-            if self._const_addressed(a, n):
-                raise Unsupported("%s: relative constant" % where)
-            base, absolute = "xe_c[%d]" % s["reg"], a["abs_constants"]
+            base, absolute = self.const(a, n, s["reg"]), a["abs_constants"]
         e = base + "." + "".join(_comp(s["swizzle"], j) for j in range(4))
         if absolute:
             e = "abs(%s)" % e
@@ -134,10 +153,8 @@ class _Shader:
     def scalar_operands(self, a, op, where):
         s = a["src3"]
         if op in SCALAR_CONST_TEMP:
-            if self._const_addressed(a, 3):
-                raise Unsupported("%s: relative constant" % where)
             temp = (op & 1) | (s["temp"] << 1) | (s["swizzle"] & 0x3C)
-            ca = "xe_c[%d].%s" % (s["reg"], _comp(s["swizzle"], 3))
+            ca = "%s.%s" % (self.const(a, 3, s["reg"]), _comp(s["swizzle"], 3))
             tb = "r[%d].%s" % (temp, _comp(s["swizzle"], 0))
             if a["abs_constants"]:
                 ca, tb = "abs(%s)" % ca, "abs(%s)" % tb
@@ -177,8 +194,6 @@ class _Shader:
     def alu(self, words, at):
         a = decode_alu(*words)
         where = "alu %d" % at
-        if a["vector_dest_rel"] or (a["scalar_dest_rel"] and not a["export"]):
-            raise Unsupported("%s: relative destination" % where)
         vop, sop = a["vector_op"], a["scalar_op"]
         export = a["export"]
         vmask, smask = a["vector_mask"], a["scalar_mask"]
@@ -190,7 +205,8 @@ class _Shader:
             v_target = s_target = target
         else:
             v_write, s_write, one_mask, zero_mask = vmask, smask, 0, 0
-            v_target, s_target = "r[%d]" % a["vector_dest"], "r[%d]" % a["scalar_dest"]
+            v_target = self.temp(a["vector_dest"], a["vector_dest_rel"])
+            s_target = self.temp(a["scalar_dest"], a["scalar_dest_rel"])
         pre, post = [], []
         # vector
         vname = VECTOR[vop] if vop < len(VECTOR) else None
@@ -309,8 +325,6 @@ class _Shader:
     def fetch(self, words, at):
         f = decode_fetch(*words)
         where = "fetch %d" % at
-        if f["src_rel"] or f["dst_rel"]:
-            raise Unsupported("%s: relative register" % where)
         if f["op"] == 0:
             key = (f["const_index"] * 3 + f["const_index_sel"], f["offset"])
             names = [k for k, _ in self.attributes]
@@ -330,7 +344,8 @@ class _Shader:
             if self.textures.setdefault(k, dim) != dim:
                 raise Unsupported("%s: texture %d fetched with two dimensions" % (where, k))
             sw = f["src_swizzle"]
-            c = "r[%d].%s" % (f["src_reg"], "".join("xyzw"[(sw >> (2 * i)) & 3] for i in range(3)))
+            sel = "".join("xyzw"[(sw >> (2 * i)) & 3] for i in range(3))
+            c = "%s.%s" % (self.temp(f["src_reg"], f["src_rel"]), sel)
             coord = {0: "vec2((%s).x, 0.5)" % c, 1: "(%s).xy" % c, 2: "(%s).xyz" % c}[dim]
             if f["unnormalized"]:
                 coord = "%s / vec%d(textureSize(xe_t%d, 0))" % (coord, 2 if dim < 2 else 3, k)
@@ -357,10 +372,125 @@ class _Shader:
             self.depth += 1
         comps = "".join("xyzw"[i] for i in range(4) if mask >> i & 1)
         value = "vec%d(%s)" % (len(parts), ", ".join(parts)) if len(parts) > 1 else parts[0]
-        self.emit("{ vec4 f_ = %s; r[%d].%s = %s; }" % (src, f["dst_reg"], comps, value))
+        self.emit("{ vec4 f_ = %s; %s.%s = %s; }" % (src, self.temp(f["dst_reg"], f["dst_rel"]), comps, value))
         if pred:
             self.depth -= 1
             self.emit("}")
+
+
+def _exec_cond(cf):
+    op = cf["op"]
+    if op in (3, 4, 13, 14):
+        return "%sxe_bool(%d)" % ("" if cf["condition"] else "!", cf["bool_address"])
+    if op in (5, 6):
+        return "%sp0" % ("" if cf["condition"] else "!")
+    return None
+
+
+def _clause(sh, cf, words):
+    for i in range(cf["count"]):
+        at = cf["address"] + i
+        d = words[3 * at:3 * at + 3]
+        if len(d) < 3:
+            raise Unsupported("clause past the end of the shader")
+        if cf["sequence"] >> (2 * i) & 1:
+            sh.fetch(d, at)
+        else:
+            sh.alu(d, at)
+
+
+def _straight_body(sh, cfs, words):
+    """No loops, calls or jumps: the clauses in order, inside do { } while (false) so that a conditional end
+    (cexece: the shader ends only when its condition holds) can break out; return is a no-op outside a call."""
+    sh.emit("do {")
+    sh.depth += 1
+    for cf in cfs:
+        op = cf["op"]
+        if op not in EXEC_OPS:
+            if op in (0, 10, 12, 15):
+                continue
+            raise Unsupported("control flow: %s" % cf["name"])
+        cond = _exec_cond(cf)
+        end = op in (2, 4, 6, 14)
+        if cond:
+            sh.emit("if (%s) {" % cond)
+            sh.depth += 1
+        _clause(sh, cf, words)
+        if cond:
+            if end:
+                sh.emit("break;")
+            sh.depth -= 1
+            sh.emit("}")
+        elif end:
+            break
+    sh.depth -= 1
+    sh.emit("} while (false);")
+
+
+def _flow_body(sh, cfs, words):
+    """Loops, calls and jumps: a state machine on the control-flow index (pc), with the loop counter / aL stacks and
+    the return stack four deep, as the sequencer has them, and an iteration bound against a runaway shader."""
+    sh.uses_al = True
+    sh.uses_loops = True
+    sh.emit("int pc = 0, lsp = 0, rsp = 0;")
+    sh.emit("int lc[4], la[4], rs[4];")
+    sh.emit("for (int g_ = 0; g_ < 65536 && pc >= 0; g_++) {")
+    sh.depth += 1
+    sh.emit("switch (pc) {")
+    n = len(cfs)
+    for k, cf in enumerate(cfs):
+        op = cf["op"]
+        nxt = k + 1 if k + 1 < n else -1
+        sh.emit("case %d: {" % k)
+        sh.depth += 1
+        if op in EXEC_OPS:
+            cond = _exec_cond(cf)
+            end = op in (2, 4, 6, 14)
+            if cond:
+                sh.emit("if (%s) {" % cond)
+                sh.depth += 1
+            _clause(sh, cf, words)
+            if end:
+                sh.emit("pc = -1;")
+                sh.emit("break;")
+            if cond:
+                sh.depth -= 1
+                sh.emit("}")
+        elif op == 7:
+            sh.emit("uint L_ = xe_l[%d];" % cf["loop_id"])
+            sh.emit("if ((L_ & 255u) == 0u) { pc = %d; break; }" % cf["address"])
+            sh.emit("if (lsp < 4) { lc[lsp] = int(L_ & 255u); la[lsp] = aL; lsp++; }")
+            if not cf["repeat"]:
+                sh.emit("aL = int((L_ >> 8) & 255u);")
+        elif op == 8:
+            sh.emit("uint L_ = xe_l[%d];" % cf["loop_id"])
+            sh.emit("int t_ = max(lsp - 1, 0);")
+            sh.emit("lc[t_] -= 1;")
+            brk = " || %sp0" % ("" if cf["condition"] else "!") if cf["predicated_break"] else ""
+            sh.emit("if (lc[t_] <= 0%s) { lsp = t_; aL = la[t_]; }" % brk)
+            sh.emit("else { aL += int(L_ << 8) >> 24; pc = %d; break; }" % cf["address"])
+        elif op in (9, 11):
+            if cf["unconditional"]:
+                cond = "true"
+            elif cf["predicated"]:
+                cond = "%sp0" % ("" if cf["condition"] else "!")
+            else:
+                cond = "%sxe_bool(%d)" % ("" if cf["condition"] else "!", cf["bool_address"])
+            if op == 9:
+                sh.emit("if (%s) { if (rsp < 4) { rs[rsp] = %d; rsp++; } pc = %d; break; }" % (cond, nxt,
+                                                                                               cf["address"]))
+            else:
+                sh.emit("if (%s) { pc = %d; break; }" % (cond, cf["address"]))
+        elif op == 10:
+            sh.emit("if (rsp > 0) { rsp--; pc = rs[rsp]; break; }")
+        sh.emit("pc = %d;" % nxt)
+        sh.emit("break;")
+        sh.depth -= 1
+        sh.emit("}")
+    sh.emit("default: pc = -1; break;")
+    sh.emit("}")
+    sh.depth -= 1
+    sh.emit("}")
 
 
 def translate(words, stage="vertex", interpolators=0):
@@ -378,39 +508,15 @@ def translate(words, stage="vertex", interpolators=0):
             if cf["op"] in EXEC_OPS and cf["count"]:
                 limit = min(limit, cf["address"])
         k += 1
-    for cf in cfs:
-        op = cf["op"]
-        if op in EXEC_OPS:
-            cond = None
-            if op in (3, 4):
-                cond = "%sxe_bool(%d)" % ("" if cf["condition"] else "!", cf["bool_address"])
-            elif op in (5, 6, 13, 14):
-                cond = "%sp0" % ("" if cf["condition"] else "!")
-            if cond:
-                sh.emit("if (%s) {" % cond)
-                sh.depth += 1
-            for i in range(cf["count"]):
-                at = cf["address"] + i
-                d = words[3 * at:3 * at + 3]
-                if len(d) < 3:
-                    raise Unsupported("clause past the end of the shader")
-                if cf["sequence"] >> (2 * i) & 1:
-                    sh.fetch(d, at)
-                else:
-                    sh.alu(d, at)
-            if cond:
-                sh.depth -= 1
-                sh.emit("}")
-            if op in (2, 4, 6, 14):
-                break
-        elif op in (0, 12, 15):
-            continue
-        elif op == 10:
-            break
-        else:
-            raise Unsupported("control flow: %s" % cf["name"])
+    flow = any(cf["op"] in (7, 8, 9, 11) for cf in cfs)
+    if flow:
+        _flow_body(sh, cfs, words)
+    else:
+        _straight_body(sh, cfs, words)
     out = ["#version 300 es", "precision highp float;", "precision highp int;", "precision highp sampler3D;",
            "uniform vec4 xe_c[256];", "uniform uint xe_b[8];"]
+    if getattr(sh, "uses_loops", False):
+        out.append("uniform uint xe_l[32];")
     for i, (_, a) in enumerate(sh.attributes):
         out.append("in vec4 xe_v%d;  // fetch constant %d, offset %d, format %d" % (i, a["fetch_constant"],
                                                                                     a["offset"], a["format"]))
@@ -427,7 +533,7 @@ def translate(words, stage="vertex", interpolators=0):
     out.append("    for (int i = 0; i < 64; i++) r[i] = vec4(0.0);")
     out.append("    float ps = 0.0;")
     out.append("    bool p0 = false;")
-    out.append("    int a0 = 0;")
+    out.append("    int a0 = 0, aL = 0;")
     if stage == "vertex":
         out.append("    r[0].x = float(gl_VertexID);")
         out.append("    vec4 xe_pos = vec4(0.0), xe_psize = vec4(0.0);")

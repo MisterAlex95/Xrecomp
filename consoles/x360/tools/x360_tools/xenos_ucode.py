@@ -65,9 +65,9 @@ def decode_cf(w0, w1):
     if op in EXEC_OPS:
         cf.update(address=bits(w0, 0, 12), count=bits(w0, 12, 3), yield_=bits(w0, 15, 1), sequence=bits(w0, 16, 12),
                   vc=bits(w0, 28, 4) | bits(w1, 0, 2) << 4)
-        if op in (3, 4):
+        if op in (3, 4, 13, 14):  # 13 / 14: cexec on a boolean with a clean predicate (Xenia's ucode.h)
             cf.update(bool_address=bits(w1, 2, 8), condition=bits(w1, 10, 1))
-        elif op in (5, 6, 13, 14):
+        elif op in (5, 6):
             cf.update(predicate_clean=bits(w1, 9, 1), condition=bits(w1, 10, 1))
         else:
             cf.update(predicate_clean=bits(w1, 9, 1))
@@ -206,7 +206,7 @@ def disassemble(words, stage="vertex"):
             cond = ""
             if "bool_address" in cf:
                 cond = " %sb%d" % ("" if cf["condition"] else "!", cf["bool_address"])
-            elif cf["op"] in (5, 6, 13, 14):
+            elif cf["op"] in (5, 6):
                 cond = " %sp0" % ("" if cf["condition"] else "!")
             lines.append("%s%s addr %d, count %d" % (name, cond, cf["address"], cf["count"]))
             seq = cf["sequence"]
