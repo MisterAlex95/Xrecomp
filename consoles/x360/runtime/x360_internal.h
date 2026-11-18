@@ -102,6 +102,7 @@ struct x360_machine {
     uint32_t xex_header;      /* the XEX header copied to guest memory (RtlImageXexHeaderField) */
     uint32_t module;          /* LDR_DATA_TABLE_ENTRY-like block for XexExecutableModuleHandle */
     uint32_t tls_raw, tls_raw_size, tls_data_size;
+    uint32_t title_id, execution_info; /* the execution info header (guest copy), its title id */
 
     x360_thunk *thunks;
     unsigned nthunks;
@@ -196,6 +197,21 @@ void x360_fs_free(x360_machine *x);
     X(ObDeleteSymbolicLink)
 #define X360_DECLARE_FILE_CALL(name) void x360_k_##name(x360_machine *x, x360_thread *t, xe_cpu *c);
 X360_FILE_CALLS(X360_DECLARE_FILE_CALL)
+
+/* x360_xam.c: xam.xex, its own names; X360_XAM_ALIASES maps more exports onto them */
+#define X360_XAM_CALLS(X)                                                                                              \
+    X(XamGetSystemVersion) X(XGetAVPack) X(XGetGameRegion) X(XGetLanguage) X(XamGetCurrentTitleId)                   \
+    X(XamGetExecutionId) X(XamLoaderGetLaunchDataSize) X(XamLoaderGetLaunchData) X(XamLoaderSetLaunchData)           \
+    X(XamLoaderLaunchTitle) X(XamAlloc) X(XamFree) X(XamUserGetSigninState) X(XamUserGetXUID) X(XamUserGetName)       \
+    X(XamUserGetSigninInfo) X(XamUserCheckPrivilege) X(XamUserIsOnlineEnabled) X(XamInputGetCapabilities)            \
+    X(XamEnableInactivityProcessing) X(XamNotifyCreateListener) X(XNotifyGetNext) X(XamShowSigninUI)                 \
+    X(XamFeatureEnabled) X(XamResetInactivity)
+#define X360_XAM_ALIASES(Y)                                                                                            \
+    Y(XamInputGetCapabilitiesEx, XamInputGetCapabilities) Y(XamInputGetState, XamInputGetCapabilities)               \
+    Y(XamInputSetState, XamInputGetCapabilities) Y(XamInputGetKeystroke, XamInputGetCapabilities)                    \
+    Y(XamInputGetKeystrokeEx, XamInputGetCapabilities) Y(XamUserGetGamerTag, XamUserGetName)
+#define X360_DECLARE_XAM_CALL(name) void x360_x_##name(x360_machine *x, x360_thread *t, xe_cpu *c);
+X360_XAM_CALLS(X360_DECLARE_XAM_CALL)
 
 /* x360_interp.c: run the instruction at the current PC; 0 on success, -1 (x->status set) otherwise */
 int x360_interp_one(x360_machine *x);

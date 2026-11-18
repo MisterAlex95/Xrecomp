@@ -19,6 +19,7 @@
 #define H_IMPORT_LIBRARIES 0x000103FFu
 #define H_TLS_INFO 0x00020104u
 #define H_DEFAULT_STACK_SIZE 0x00020200u
+#define H_EXECUTION_INFO 0x00040006u
 
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 static uint16_t be16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
@@ -66,6 +67,7 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
         return -1;
     }
     const uint8_t *ff = NULL, *imports = NULL, *tls = NULL;
+    uint32_t exec_off = 0;
     uint32_t base = 0;
     x->stack_size = 0x40000;
     for (uint32_t k = 0; k < count; k++) {
@@ -78,6 +80,7 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
         case H_IMPORT_LIBRARIES: imports = blk; break;
         case H_TLS_INFO: tls = blk; break;
         case H_DEFAULT_STACK_SIZE: x->stack_size = val; break;
+        case H_EXECUTION_INFO: exec_off = val + 24 <= sec_off ? val : 0; break;
         }
     }
     x->image_size = be32(d + sec_off + 4);
@@ -124,6 +127,10 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
     /* the XEX header in guest memory, for RtlImageXexHeaderField */
     x->xex_header = x360_kalloc(x, sec_off);
     memcpy(x->base + x->xex_header, d, sec_off);
+    if (exec_off) {
+        x->execution_info = x->xex_header + exec_off;
+        x->title_id = be32(d + exec_off + 12);
+    }
 
     if (tls) {
         x->tls_raw = be32(tls + 4);

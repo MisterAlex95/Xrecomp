@@ -40,6 +40,10 @@ def implemented():
     calls = calls[:calls.index("\n#define X360_DECLARE")]
     for m in re.finditer(r"X\((\w+)\)", calls):
         out.add(("xboxkrnl", m.group(1)))
+    xam = hdr[hdr.index("#define X360_XAM_CALLS(X)"):]
+    xam = xam[:xam.index("\n#define X360_DECLARE_XAM")]
+    for m in re.finditer(r"X\((\w+)\)|Y\((\w+),", xam):
+        out.add(("xam", m.group(1) or m.group(2)))
     return out
 
 

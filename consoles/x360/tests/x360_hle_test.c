@@ -225,6 +225,44 @@ static void test_threads_and_time(void)
     CHECK(K(X360_xboxkrnl_KeTlsGetValue, 1, slot) == 0xABCD, "TLS");
 }
 
+static uint32_t XM(unsigned ord, int n, ...)
+{
+    va_list ap;
+    va_start(ap, n);
+    uint32_t r = callv(X360_LIB_XAM, ord, n, ap);
+    va_end(ap);
+    return r;
+}
+
+static void test_system(void)
+{
+    uint32_t p = x360_kalloc(X, 64);
+    /* 2000-01-01 00:00:00.000, a Saturday: FILETIME 125911584000000000 */
+    x360_w64(X, p, 125911584000000000ull);
+    K(X360_xboxkrnl_RtlTimeToTimeFields, 2, p, p + 16);
+    CHECK(x360_r16(X, p + 16) == 2000 && x360_r16(X, p + 18) == 1 && x360_r16(X, p + 20) == 1 &&
+              x360_r16(X, p + 22) == 0 && x360_r16(X, p + 30) == 6, "time fields %u-%u-%u weekday %u",
+          x360_r16(X, p + 16), x360_r16(X, p + 18), x360_r16(X, p + 20), x360_r16(X, p + 30));
+    x360_w16(X, p + 16, 2026);
+    x360_w16(X, p + 18, 11);
+    x360_w16(X, p + 20, 18);
+    x360_w16(X, p + 22, 7);
+    x360_w16(X, p + 24, 30);
+    x360_w16(X, p + 26, 15);
+    x360_w16(X, p + 28, 250);
+    CHECK(K(X360_xboxkrnl_RtlTimeFieldsToTime, 2, p + 16, p + 32) == 1, "time fields to time");
+    K(X360_xboxkrnl_RtlTimeToTimeFields, 2, p + 32, p + 48);
+    CHECK(!memcmp(X->base + p + 16, X->base + p + 48, 14), "round trip");
+    K(X360_xboxkrnl_VdQueryVideoMode, 1, p);
+    CHECK(x360_r32(X, p) == 1280 && x360_r32(X, p + 4) == 720 && x360_r32(X, p + 20) == 0x42700000u, "video mode");
+    CHECK(XM(X360_xam_XamUserGetSigninState, 1, 0) == 1 && XM(X360_xam_XamUserGetSigninState, 1, 1) == 0, "sign-in");
+    CHECK(XM(X360_xam_XamUserGetXUID, 3, 0, 1, p) == 0 && x360_r64(X, p) == 0xB13EBABEBABEBABEull, "xuid");
+    CHECK(XM(X360_xam_XamUserGetName, 3, 0, p, 16) == 0 && !strcmp((char *)X->base + p, "Player"), "user name");
+    CHECK(XM(X360_xam_XamInputGetState, 3, 0, 0, p) == 0x48F, "no controller yet");
+    CHECK(XM(X360_xam_XamAlloc, 3, 0, 100, p) == 0 && x360_r32(X, p) >= 0x10000, "XamAlloc");
+    CHECK(XM(X360_xam_XamFree, 1, x360_r32(X, p)) == 0, "XamFree");
+}
+
 static void test_files(const char *dir)
 {
     x360_set_data_dir(X, dir);
@@ -280,6 +318,7 @@ int main(void)
     test_memory();
     test_objects();
     test_threads_and_time();
+    test_system();
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {
         test_files(dir);

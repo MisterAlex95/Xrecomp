@@ -1214,6 +1214,201 @@ static void k_XexCheckExecutablePrivilege(x360_machine *x, x360_thread *t, xe_cp
     RET(0);
 }
 
+/* ---- video mode, sections, misc ---- */
+
+static void k_VdQueryVideoMode(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* X_VIDEO_MODE (Xenia's xbox.h): 1280 x 720 progressive, wide, HD, 60 Hz, NTSC */
+    uint32_t m = A(0);
+    float hz = 60.0f;
+    uint32_t hzbits;
+    memcpy(&hzbits, &hz, 4);
+    memset(x->base + m, 0, 48);
+    x360_w32(x, m, 1280);
+    x360_w32(x, m + 4, 720);
+    x360_w32(x, m + 12, 1);
+    x360_w32(x, m + 16, 1);
+    x360_w32(x, m + 20, hzbits);
+    x360_w32(x, m + 24, 1);
+    x360_w32(x, m + 28, 0x4A);
+    x360_w32(x, m + 32, 0x01);
+}
+
+static void k_VdQueryVideoFlags(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)x, (void)t;
+    RET(1 | 2); /* widescreen, at least 1024 wide */
+}
+
+static void k_XexGetModuleSection(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* the PE section table of the image (little-endian, as in any PE) */
+    char want[9] = "";
+    for (int k = 0; k < 8; k++)
+        if (!(want[k] = (char)x360_r8(x, A(1) + (uint32_t)k)))
+            break;
+    const uint8_t *pe = x->base + x->image_base;
+    uint32_t lfanew = pe[0x3C] | pe[0x3D] << 8 | pe[0x3E] << 16 | (uint32_t)pe[0x3F] << 24;
+    if (pe[0] != 'M' || lfanew > 0x800) {
+        RET(X_STATUS_NOT_FOUND);
+        return;
+    }
+    const uint8_t *nt = pe + lfanew;
+    unsigned nsec = nt[6] | nt[7] << 8, opt = nt[20] | nt[21] << 8;
+    const uint8_t *s = nt + 24 + opt;
+    for (unsigned k = 0; k < nsec && k < 96; k++, s += 40) {
+        if (strncmp((const char *)s, want, 8))
+            continue;
+        uint32_t vsize = s[8] | s[9] << 8 | s[10] << 16 | (uint32_t)s[11] << 24;
+        uint32_t va = s[12] | s[13] << 8 | s[14] << 16 | (uint32_t)s[15] << 24;
+        if (A(2))
+            x360_w32(x, A(2), x->image_base + va);
+        if (A(3))
+            x360_w32(x, A(3), vsize);
+        RET(X_STATUS_SUCCESS);
+        return;
+    }
+    RET(X_STATUS_NOT_FOUND);
+}
+
+static void k_XAudioGetSpeakerConfig(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    if (A(0))
+        x360_w32(x, A(0), 0x00010001u);
+    RET(0);
+}
+
+static void k_KeTryToAcquireSpinLockAtRaisedIrql(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    if (x360_r32(x, A(0))) {
+        RET(0);
+        return;
+    }
+    x360_w32(x, A(0), t->kthread);
+    RET(1);
+}
+
+static void k_NtSignalAndWaitForSingleObjectEx(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    /* (signal handle, wait handle, alertable, unused, timeout*) */
+    uint32_t so = x360_handle_obj(x, A(0)), wo = x360_handle_obj(x, A(1));
+    if (!so || !wo) {
+        RET(X_STATUS_INVALID_HANDLE);
+        return;
+    }
+    uint8_t type = x360_r8(x, so);
+    if (type == X_OBJ_SEMAPHORE)
+        x360_w32(x, so + 4, x360_r32(x, so + 4) + 1);
+    else if (type == X_OBJ_MUTANT && x360_r32(x, so + 0x18) == t->kthread) {
+        int32_t v = (int32_t)x360_r32(x, so + 4) + 1;
+        x360_w32(x, so + 4, (uint32_t)v);
+        if (v > 0)
+            x360_w32(x, so + 0x18, 0);
+    } else
+        x360_w32(x, so + 4, 1);
+    x360_wait(x, t, WAIT_OBJECTS, &wo, 1, 0, A(4));
+}
+
+static void k_ObLookupThreadByThreadId(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    for (int k = 0; k < x->nthreads; k++)
+        if (x->threads[k].state != TH_FREE && x->threads[k].id == A(0)) {
+            if (A(1))
+                x360_w32(x, A(1), x->threads[k].kthread);
+            RET(X_STATUS_SUCCESS);
+            return;
+        }
+    RET(X_STATUS_INVALID_PARAMETER);
+}
+
+static void k_NtQueryEvent(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t o = x360_handle_obj(x, A(0));
+    if (!o) {
+        RET(X_STATUS_INVALID_HANDLE);
+        return;
+    }
+    if (A(1)) { /* EVENT_BASIC_INFORMATION: type, state */
+        x360_w32(x, A(1), x360_r8(x, o));
+        x360_w32(x, A(1) + 4, x360_r32(x, o + 4));
+    }
+    RET(X_STATUS_SUCCESS);
+}
+
+static void k_RtlUnwind(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    x360_fail(x, "RtlUnwind(%08X, %08X): structured exception unwinding is not emulated yet", A(0), A(1));
+}
+
+/* FILETIME (100 ns since 1601-01-01) <-> TIME_FIELDS (year, month, day, hour, minute, second, ms, weekday) */
+static int64_t days_from_civil(int64_t y, unsigned m, unsigned d)
+{
+    y -= m <= 2;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? (unsigned)-3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (int64_t)doe - 719468; /* days since 1970-01-01 */
+}
+
+static void civil_from_days(int64_t z, int64_t *y, unsigned *m, unsigned *d)
+{
+    z += 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = (unsigned)(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    *d = doy - (153 * mp + 2) / 5 + 1;
+    *m = mp < 10 ? mp + 3 : mp - 9;
+    *y = (int64_t)yoe + era * 400 + (*m <= 2);
+}
+
+#define DAYS_1601_1970 134774
+
+static void k_RtlTimeToTimeFields(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint64_t ft = x360_r64(x, A(0));
+    uint64_t ms = ft / 10000;
+    int64_t days = (int64_t)(ms / 86400000) - DAYS_1601_1970;
+    uint32_t rem = (uint32_t)(ms % 86400000);
+    int64_t y;
+    unsigned m, d;
+    civil_from_days(days, &y, &m, &d);
+    uint32_t f = A(1);
+    x360_w16(x, f, (uint32_t)y);
+    x360_w16(x, f + 2, m);
+    x360_w16(x, f + 4, d);
+    x360_w16(x, f + 6, rem / 3600000);
+    x360_w16(x, f + 8, rem / 60000 % 60);
+    x360_w16(x, f + 10, rem / 1000 % 60);
+    x360_w16(x, f + 12, rem % 1000);
+    x360_w16(x, f + 14, (uint32_t)((days % 7 + 11) % 7)); /* 1970-01-01 was a Thursday (4) */
+}
+
+static void k_RtlTimeFieldsToTime(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t f = A(0);
+    unsigned m = x360_r16(x, f + 2), d = x360_r16(x, f + 4);
+    if (m < 1 || m > 12 || d < 1 || d > 31) {
+        RET(0);
+        return;
+    }
+    int64_t days = days_from_civil(x360_r16(x, f), m, d) + DAYS_1601_1970;
+    uint64_t ms = (uint64_t)days * 86400000 + x360_r16(x, f + 6) * 3600000ull + x360_r16(x, f + 8) * 60000ull +
+                  x360_r16(x, f + 10) * 1000ull + x360_r16(x, f + 12);
+    x360_w64(x, A(1), ms * 10000);
+    RET(1);
+}
+
 /* ---- the table ---- */
 
 #define K(name) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, k_##name}
@@ -1250,6 +1445,14 @@ static const hle_entry HLE[] = {
     XM(XamLoaderTerminateTitle, x_XamLoaderTerminateTitle),
 #define X360_FILE_ENTRY(name) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, x360_k_##name},
     X360_FILE_CALLS(X360_FILE_ENTRY)
+#define X360_XAM_ENTRY(name) {X360_LIB_XAM, X360_xam_##name, x360_x_##name},
+    X360_XAM_CALLS(X360_XAM_ENTRY)
+#define X360_XAM_ALIAS(name, fn) {X360_LIB_XAM, X360_xam_##name, x360_x_##fn},
+    X360_XAM_ALIASES(X360_XAM_ALIAS)
+    K(VdQueryVideoMode), K(VdQueryVideoFlags), K(XexGetModuleSection), KA(KeLockL2, k_nop0),
+    KA(KeUnlockL2, k_nop0), K(XAudioGetSpeakerConfig), K(KeTryToAcquireSpinLockAtRaisedIrql),
+    K(NtSignalAndWaitForSingleObjectEx), K(ObLookupThreadByThreadId), K(RtlTimeToTimeFields),
+    K(RtlTimeFieldsToTime), K(NtQueryEvent), KA(KeSetDisableBoostThread, k_nop0), K(RtlUnwind),
 };
 
 void x360_hle_call(x360_machine *x, const x360_thunk *th)
