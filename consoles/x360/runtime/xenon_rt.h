@@ -52,6 +52,11 @@ typedef struct xe_machine {
     uint64_t tb_base;    /* time base offset (virtual time skipped while every thread waited) */
     void *rt;            /* the runtime (x360_machine) */
 #endif
+    /* XBA-283, after every older field (packs made before read none of these): the reservation of lwarx / ldarx
+     * (xe_lwarx), per machine: the scheduler clears it at each switch (cooperative threads), each host thread has its
+     * own machine (parallel threads) */
+    uint32_t resv_addr;
+    uint64_t resv_val;
 } xe_machine;
 
 enum {
@@ -158,6 +163,55 @@ static inline void xe_zero(xe_machine *m, uint32_t ea, uint32_t line)
     uint8_t *p = xe_ptr(m, ea & ~(line - 1), line);
     if (p)
         memset(p, 0, line);
+}
+
+/* ---- reservations (XBA-283) ----
+ * lwarx / ldarx note the address and the value read; stwcx. / stdcx. store only when the reservation is still held
+ * (c->reserve: cleared at a thread switch and by a successful store) and the memory still holds that value, as one
+ * atomic compare-and-swap: with guest threads on host threads (x360_run --host-threads) a store by another thread in
+ * between makes it fail, as the hardware's reservation does (an ABA change back to the same value is not seen: what
+ * Xenia does too). CR0 = EQ on success, then SO. */
+
+static inline uint32_t xe_lwarx(xe_machine *m, xe_cpu *c, uint32_t ea)
+{
+    uint8_t *p = xe_ptr(m, ea & ~3u, 4);
+    uint32_t v = 0;
+    if (p)
+        v = __builtin_bswap32(__atomic_load_n((uint32_t *)p, __ATOMIC_ACQUIRE));
+    m->resv_addr = ea & ~3u;
+    m->resv_val = v;
+    c->reserve = 1;
+    return v;
+}
+
+static inline uint64_t xe_ldarx(xe_machine *m, xe_cpu *c, uint32_t ea)
+{
+    uint8_t *p = xe_ptr(m, ea & ~7u, 8);
+    uint64_t v = 0;
+    if (p)
+        v = __builtin_bswap64(__atomic_load_n((uint64_t *)p, __ATOMIC_ACQUIRE));
+    m->resv_addr = ea & ~7u;
+    m->resv_val = v;
+    c->reserve = 1;
+    return v;
+}
+
+static inline void xe_stcx(xe_machine *m, xe_cpu *c, uint32_t ea, uint64_t v, unsigned n)
+{
+    int ok = 0;
+    uint32_t a = ea & ~(n - 1);
+    if (c->reserve && m->resv_addr == a) {
+        uint8_t *p = xe_ptr(m, a, n);
+        if (p && n == 4) {
+            uint32_t e = __builtin_bswap32((uint32_t)m->resv_val), w = __builtin_bswap32((uint32_t)v);
+            ok = __atomic_compare_exchange_n((uint32_t *)p, &e, w, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        } else if (p) {
+            uint64_t e = __builtin_bswap64(m->resv_val), w = __builtin_bswap64(v);
+            ok = __atomic_compare_exchange_n((uint64_t *)p, &e, w, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        }
+    }
+    c->reserve = 0;
+    c->cr = ppc_cr_set(c->cr, 0, (ok ? PPC_CR_EQ : 0) | c->xer_so);
 }
 
 /* ---- vector loads / stores (16-byte blocks, big-endian) ---- */
@@ -301,6 +355,10 @@ static inline void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
 #define RC_STH(ea, v) xe_sth(m_, (ea), (v))
 #define RC_STW(ea, v) xe_stw(m_, (ea), (v))
 #define RC_ST64(ea, v) xe_std(m_, (ea), (v))
+#define RC_LWARX(ea) xe_lwarx(m_, c, (ea))
+#define RC_LDARX(ea) xe_ldarx(m_, c, (ea))
+#define RC_STWCX(ea, v) xe_stcx(m_, c, (ea), (v), 4)
+#define RC_STDCX(ea, v) xe_stcx(m_, c, (ea), (v), 8)
 #define RC_DCBZ(ea) xe_zero(m_, (ea), 32)
 #define RC_DCBZ128(ea) xe_zero(m_, (ea), 128)
 #define RC_ICBI(ea) ((void)(ea))

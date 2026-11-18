@@ -152,6 +152,8 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     # runtime must not report them as missed functions
     table.append("\nconst uint32_t xe_rc_helpers[] = {\n%s};\nconst unsigned xe_rc_helper_count = %du;\n" % (
         "".join("    0x%08Xu,\n" % a for a in sorted(helpers)) or "    0u,\n", len(helpers)))
+    # XBA-283: bit 0, lwarx / stwcx. through RC_LWARX / RC_STWCX (atomic: x360_run --host-threads needs it)
+    table.append("const unsigned xe_rc_features = 1u;\n")
     table.append("const uint32_t xe_rc_image_crc = 0x%08Xu;\nconst uint32_t xe_rc_image_base = 0x%08Xu;\n"
                  % (image_crc(img), img.base))
     path = os.path.join(outdir, "x360_rc_table.c")

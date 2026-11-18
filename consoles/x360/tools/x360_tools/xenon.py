@@ -563,13 +563,19 @@ class XenonLifter(FnLifter):
     def op_sthbrx(self, i):
         return "RC_STH((uint32_t)(%s), __builtin_bswap16((uint16_t)%s));" % (self._eax(i), R(i.rd))
 
+    # reservations (XBA-283): the runtime's xenon_rt.h implements them; stwcx. / stdcx. store only when the word
+    # still holds what lwarx / ldarx read (a compare-and-swap), so guest threads on host threads stay atomic
+    def op_lwarx(self, i):
+        return "%s = (uint64_t)RC_LWARX((uint32_t)(%s));" % (R(i.rd), self._eax(i))
+
+    def op_stwcx_rec(self, i):
+        return "RC_STWCX((uint32_t)(%s), (uint32_t)%s);" % (self._eax(i), R(i.rd))
+
     def op_ldarx(self, i):
-        return "%s = RC_LD64((uint32_t)(%s)); c->reserve = 1;" % (R(i.rd), self._eax(i))
+        return "%s = RC_LDARX((uint32_t)(%s));" % (R(i.rd), self._eax(i))
 
     def op_stdcx_rec(self, i):
-        return ("if (c->reserve) { RC_ST64((uint32_t)(%s), %s); c->reserve = 0; "
-                "c->cr = ppc_cr_set(c->cr, 0, PPC_CR_EQ | c->xer_so); } "
-                "else c->cr = ppc_cr_set(c->cr, 0, c->xer_so);" % (self._eax(i), R(i.rd)))
+        return "RC_STDCX((uint32_t)(%s), %s);" % (self._eax(i), R(i.rd))
 
     def op_dcbz128(self, i): return "RC_DCBZ128((uint32_t)(%s));" % self._eax(i)
 

@@ -360,21 +360,10 @@ static int exec(x360_machine *x, xe_cpu *c, uint32_t pc, uint32_t w)
         case 662: xe_stw(M_, ea, __builtin_bswap32((uint32_t)R(rd))); break;
         case 918: xe_sth(M_, ea, __builtin_bswap16((uint16_t)R(rd))); break;
         case 660: xe_std(M_, ea, __builtin_bswap64(R(rd))); break;
-        case 20: R(rd) = xe_lwz(M_, ea); c->reserve = 1; break;  /* lwarx */
-        case 84: R(rd) = xe_ld(M_, ea); c->reserve = 1; break;   /* ldarx */
-        case 150:                                                 /* stwcx. */
-        case 214:                                                 /* stdcx. */
-            if (c->reserve) {
-                if (xo == 150)
-                    xe_stw(M_, ea, (uint32_t)R(rd));
-                else
-                    xe_std(M_, ea, R(rd));
-                c->reserve = 0;
-                c->cr = ppc_cr_set(c->cr, 0, PPC_CR_EQ | c->xer_so);
-            } else {
-                c->cr = ppc_cr_set(c->cr, 0, c->xer_so);
-            }
-            break;
+        case 20: R(rd) = xe_lwarx(M_, c, ea); break;              /* lwarx (xenon_rt.h) */
+        case 84: R(rd) = xe_ldarx(M_, c, ea); break;              /* ldarx */
+        case 150: xe_stcx(M_, c, ea, (uint32_t)R(rd), 4); break;  /* stwcx. */
+        case 214: xe_stcx(M_, c, ea, R(rd), 8); break;            /* stdcx. */
         case 535: FSET_S(rd, ppc_lfs_bits(xe_lwz(M_, ea))); break;
         case 567: FSET_S(rd, ppc_lfs_bits(xe_lwz(M_, eau))); R(ra) = eau; break;
         case 599: c->fpr[rd] = ppc_u2f(xe_ld(M_, ea)); break;
