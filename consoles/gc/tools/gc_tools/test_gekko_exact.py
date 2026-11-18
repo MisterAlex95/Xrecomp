@@ -634,3 +634,32 @@ def test_quantisation_edges(gc_run, tmp_path):
     f = lambda x: struct.unpack(">I", struct.pack(">f", x))[0]  # noqa: E731
     assert res == [0xFF000000, 0x80640000, 0x01F4FFFF, f(-65536.0), f(65534.0), f(300.0), f(1.0), 0x3F800000,
                    0x3F800000, 0x7FA00001, 0x7FA00001, 0x00012345]
+
+
+def test_paired_single_multiply_adds_pick_the_architected_nan(gc_run, tmp_path):
+    """ps_madd and its family (XBA-292): with NaN operands each slot is frA's NaN, else frB's, else frC's, its sign
+    kept, whatever the host's fma() would pick; ps_madds0 / 1 take both slots' frC from one slot."""
+    A, B, C = (0x7FC00A00, 0xFFC00A01), (0x7FC00B00, 0xFFC00B01), (0xFFC00C00, 0x7FC00C01)
+    ONE = (0x3F800000, 0x3F800000)
+    ops = {"ps_madds0": 14, "ps_madds1": 15, "ps_msub": 28, "ps_madd": 29, "ps_nmsub": 30, "ps_nmadd": 31}
+    regs = {"A": (1, A), "B": (2, B), "C": (3, C), "1": (4, ONE)}
+    cases = ("ABC", "1BC", "11C")      # frA, frB, frC: the first NaN of the three in the architecture's order
+    p = Asm(TEXT)
+    p.li32(3, DATA)
+    p.li32(4, OUT)
+    for k, (_, v) in enumerate(regs.values()):
+        p(asm.psq_l(k + 1, 8 * k, 3, 0, 0))
+    expected, at = [], 0
+    for name, xo in ops.items():
+        for case in cases:
+            ra, rb, rc = (regs[ch][0] for ch in case)
+            p(asm.fa(4, xo, 5, ra, rb, rc), asm.psq_st(5, at, 4, 0, 0))
+            at += 8
+            for slot in (0, 1):
+                c_slot = {"ps_madds0": 0, "ps_madds1": 1}.get(name, slot)
+                expected.append(A[slot] if case[0] == "A" else B[slot] if case[1] == "B" else C[c_slot])
+    p.idle()
+    data = b"".join(struct.pack(">2I", *v) for _, v in regs.values())
+    dol, _ = make_dol(p, [(DATA, data)])
+    (res,) = run_both(gc_run, tmp_path, dol, [(OUT, len(expected))])
+    assert res == expected
