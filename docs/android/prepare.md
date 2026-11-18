@@ -622,6 +622,23 @@ The call-heavy workloads now run fewer instructions in the pack layout than the 
 and 8.40M. The generated C is unchanged, but `recomp_types.h` changed, so every pack is stale and has to be prepared
 again.
 
+**Indirect calls and locked instructions (XBA-277).** `recomp_dispatch_init` publishes the flat dispatch table only
+over the title's code range, so a target the table holds there is called at once: the trace switch, the code-range
+check and the lookups are the miss path's (`docs/technical/indirect-calls.md`). About 20 arm64 instructions of checks
+per indirect call become 8. Prepare's flags add `-mno-outline-atomics`: lock-prefixed instructions compile to inline
+exclusive load/store loops, which every ARMv8.0 core runs, instead of a call per atomic into the outline helpers.
+Inline ARMv8.1 atomics would cut the new `w_lock` workload by 31 % instead of 17 %, but a pack would need the device's
+features at Prepare time and would have to refuse another device. Same method as above, main -> XBA-277, checksums
+identical:
+
+| Workload | arm64 pack layout | x86-64 |
+|---|---|---|
+| w_icall | 11.10M -> 9.10M (-18 %) | 12.45M -> 9.25M (-26 %) |
+| w_vcall | 22.90M -> 19.70M (-14 %) | 23.25M -> 19.45M (-16 %) |
+| w_lock (lock inc / xadd / dec / cmpxchg / or / add, xchg) | 8.15M -> 6.75M (-17 %) | unchanged |
+
+The generated `recomp_dispatch.c`, `recomp_types.h` and the flags change: every pack is stale.
+
 **Where a Prepare spends its time (XBA-209).** A title-size synthetic title of our own: `tools.bench lift --copies
 3000` (the bench corpus 3000 times: 39,013 functions, 2.3 MB of code, 96 MB of C), `tools.prepare --android` with
 NDK r28c clang 19 as the stand-in for the embedded clang, `--jobs 5` in a container limited to 5 CPUs of the x86-64
