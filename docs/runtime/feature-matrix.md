@@ -23,7 +23,7 @@ app and not in this matrix.
 | Across runs (« Resume where I left off ») | partial: `xbox_state_service.c` `xbox_StateResumeAtBoot`, only with resume entries in the generated code (`app/Pack.resume`: PREPARE_AGAIN otherwise) | yes: `recomp_states_resume` (`src/platform/recomp_states.c`), `gba_runtime.c` | yes: `ps1_runtime.c` | yes: `n64_runtime.c` | yes: `gc_runtime.c` |
 | Rewind | yes: on by default, time-based (`xbox_state_service.c`, `recomp_rewind_config("xbox")`), when the title's states work; hotkey with states (`app/Hotkeys`); a game's own Rewind / Rewind memory rows (`app/GameSettings.appliesTo`, XBA-274: were hidden for Xbox titles) | yes: on by default (`src/platform/recomp_rewind.c`) | yes: on by default | yes: off by default (4-8 MB a capture), a game can turn it on | yes: off by default (up to ~42 MB a capture: MEM1 + ARAM), a game can turn it on |
 | Cheats | yes: `src/kernel/xbox_cheats.c` (per vblank); UI `app/Cheats.checkXbox` | yes: `gba_cheats.h` | yes: `ps1_runtime.c` | yes: `n64_runtime.c` | yes: `gc_runtime.c`; UI `app/Cheats.checkGc` |
-| Frame generation | yes: `src/video/fb_present_sdl.c` (framegen pacer) | yes: `src/video/host_window.c` `host_window_present_rgba` -> `fg_present` | yes: same path | yes: `host_window_present_rgba_shared` | partial: only the CPU-RGB fallback; the GX and GPU-YUV pictures go through `host_window_present_texture`, which never reaches `fg_present` |
+| Frame generation | yes: `src/video/fb_present_sdl.c` (framegen pacer) | yes: `src/video/host_window.c` `host_window_present_rgba` -> `fg_present` | yes: same path | yes: `host_window_present_rgba_shared` | yes: the GX and GPU-YUV pictures (`host_window_present_texture`) are read back for the pacer while frame generation runs (XBA-274, `host_window.c` `texture_pixels`; ctest `gc_framegen`) |
 | Perf line | yes: `fb_present_sdl.c` `perf_overlay_tick`; menu `app/GameMenu` (Item.PERF, every console) | yes: `host_window.c` overlay + `host_perf` | yes | yes | yes |
 | Pad remapping | yes: `RECOMP_PAD_MAP` (`src/input/xinput_device.c`), UI `app/PadMapping` | yes: `console_pad` (`RECOMP_GBA_PAD_MAP`), UI `app/ConsoleControls` | yes | yes (+ stick range / dead zone) | yes: runtime `gc_runtime.c` `console_pad_load` + `gc_pad_map.c`; UI `app/ConsoleControls` (XBA-274: the Controls screen used to show the N64's 14 targets over the GameCube's 12, `targetLabel` / `groups` default branch) |
 | Rumble | yes: `src/usb/ohci.c` -> `xbox_InputSetState`; `RECOMP_RUMBLE` (`app/RecompConfig`, shared) | n/a: no motor on a GBA pad (rumble carts are cartridge hardware, not emulated) | yes: DualShock, `ps1_runtime.c` | yes: Rumble Pak, `n64_runtime.c`, UI `app/N64Pak` | yes: SI motor, `gc_runtime.c` `rumble()` |
@@ -57,7 +57,7 @@ or rewind UI on any desktop (hotkeys and files only), and no screenshot or fulls
 2. GameCube internal resolution in the app (`app/ConsoleVideo.applies`, `app/GameSettings.appliesTo`). Done.
 3. Xbox rewind in a game's settings (`app/GameSettings.appliesTo`). Done.
 4. GameCube in the desktop `xrecomp` CLI (`tools/xrecomp`, `gc_play --missed`, `RECOMP_SAVE_DIR`). Done.
-5. GameCube frame generation on the texture present path (`src/video/host_window.c`).
+5. GameCube frame generation on the texture present path (`src/video/host_window.c`). Done.
 
 Left, with the reason:
 

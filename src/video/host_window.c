@@ -54,6 +54,8 @@
 #define XGL_UNPACK_ROW_LENGTH   0x0CF2
 #define XGL_UNPACK_ALIGNMENT    0x0CF5
 #define XGL_FRAMEBUFFER         0x8D40
+#define XGL_COLOR_ATTACHMENT0   0x8CE0
+#define XGL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define XGL_SCISSOR_TEST        0x0C11
 #define XGL_BLEND               0x0BE2
 #define XGL_DEPTH_TEST          0x0B71
@@ -751,9 +753,24 @@ static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
     return 1;
 }
 
+#if defined(XBOXRECOMP_LSFG)
+static int s_fg;   /* below: framegen_console running for this window (a tentative definition) */
+static int fg_present(const void *px, int w, int h, int pitch);
+static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down);
+#endif
+
 int host_window_present_texture(unsigned tex, int w, int h, int top_down)
 {
     live_take();
+#if defined(XBOXRECOMP_LSFG)
+    /* XBA-274: frame generation for a picture the runtime drew on the GPU (the GameCube's GX and GPU-YUV paths):
+     * read back while frame generation runs (not under fast-forward, which draws directly), then as present_rgba. */
+    if (s_fg && !recomp_ff_active()) {
+        const uint8_t *px = texture_pixels(tex, w, h, top_down);
+        if (px && fg_present(px, w, h, w * 4))
+            return 1;
+    }
+#endif
     return draw(tex, 0, w, h, top_down);
 }
 
@@ -904,6 +921,73 @@ static void fg_service(uint64_t now)
     s_drawing_generated = 0;
     s_fg_drawn++;
     s_fg_drawn_gen += (uint64_t)e.generated;
+}
+
+/* The pixels of a texture of the window's context (RGBA, packed, row 0 at the top) through a framebuffer of our
+ * own, for frame generation; NULL when it cannot be read (no framebuffer objects, an incomplete attachment). The
+ * buffer stays valid until the next call. */
+static void (APIENTRY *s_gen_fbs)(int, unsigned *);
+static void (APIENTRY *s_fb_tex2d)(unsigned, unsigned, unsigned, unsigned, int);
+static unsigned (APIENTRY *s_fb_status)(unsigned);
+static unsigned s_read_fb;
+static uint8_t *s_read_px;
+static size_t s_read_cap;
+static int s_read_failed;
+
+static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
+{
+    if (s_read_failed || !tex || w <= 0 || h <= 0)
+        return NULL;
+    if (!s_read_fb) {
+        s_gen_fbs = (void (APIENTRY *)(int, unsigned *))SDL_GL_GetProcAddress("glGenFramebuffers");
+        s_fb_tex2d = (void (APIENTRY *)(unsigned, unsigned, unsigned, unsigned, int))
+            SDL_GL_GetProcAddress("glFramebufferTexture2D");
+        s_fb_status = (unsigned (APIENTRY *)(unsigned))SDL_GL_GetProcAddress("glCheckFramebufferStatus");
+        if (s_gen_fbs && s_fb_tex2d && s_fb_status)
+            s_gen_fbs(1, &s_read_fb);
+        if (!s_read_fb) {
+            s_read_failed = 1;
+            fprintf(stderr, "  [HOST] window: no framebuffer objects: frame generation skips GPU pictures\n");
+            return NULL;
+        }
+    }
+    size_t need = (size_t)w * (size_t)h * 4;
+    if (need > s_read_cap) {
+        uint8_t *n = realloc(s_read_px, need);
+        if (!n)
+            return NULL;
+        s_read_px = n;
+        s_read_cap = need;
+    }
+    s_gl.BindFramebuffer(XGL_FRAMEBUFFER, s_read_fb);
+    s_fb_tex2d(XGL_FRAMEBUFFER, XGL_COLOR_ATTACHMENT0, XGL_TEXTURE_2D, tex, 0);
+    int ok = s_fb_status(XGL_FRAMEBUFFER) == XGL_FRAMEBUFFER_COMPLETE;
+    if (ok) {
+        s_gl.PixelStorei(XGL_PACK_ALIGNMENT, 4);
+        s_gl.ReadPixels(0, 0, w, h, XGL_RGBA, XGL_UNSIGNED_BYTE, s_read_px);
+    }
+    s_fb_tex2d(XGL_FRAMEBUFFER, XGL_COLOR_ATTACHMENT0, XGL_TEXTURE_2D, 0, 0);
+    s_gl.BindFramebuffer(XGL_FRAMEBUFFER, 0);
+    if (!ok) {
+        s_read_failed = 1;
+        fprintf(stderr, "  [HOST] window: a GPU picture cannot be read back: frame generation skips them\n");
+        return NULL;
+    }
+    /* The texture's row 0 comes first: the top when top_down, else the bottom (flipped here). */
+    if (!top_down) {
+        size_t row = (size_t)w * 4;
+        uint8_t tmp[4096];
+        for (int y = 0; y < h / 2; y++) {
+            uint8_t *a = s_read_px + (size_t)y * row, *b = s_read_px + (size_t)(h - 1 - y) * row;
+            for (size_t off = 0; off < row; off += sizeof tmp) {
+                size_t n = row - off < sizeof tmp ? row - off : sizeof tmp;
+                memcpy(tmp, a + off, n);
+                memcpy(a + off, b + off, n);
+                memcpy(b + off, tmp, n);
+            }
+        }
+    }
+    return s_read_px;
 }
 
 /* 1 when the picture was taken by frame generation (nothing to draw now), 0 to draw it as usual. */

@@ -199,6 +199,11 @@ if(TARGET gc_play)
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_card.sh $<TARGET_FILE:gc_play> ${GC_HOMEBREW_DIR}/cardtest.dol
                 ${CMAKE_CURRENT_BINARY_DIR}/play_card)
     set_tests_properties(gc_play_card PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    # XBA-274: frame generation of GX's GPU picture (read back for the pacer), the same as drawn; needs a display
+    add_test(NAME gc_framegen
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_framegen.sh $<TARGET_FILE:gc_play> ${GC_HOMEBREW_DIR}/gxtri.dol
+                ${CMAKE_CURRENT_BINARY_DIR}/framegen)
+    set_tests_properties(gc_framegen PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 endif()
 
 # Disc images (XBA-261): gc_disc generates a GCM of our DVD-interface test program and its ISO / CISO / GCZ / RVZ /
