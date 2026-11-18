@@ -822,8 +822,10 @@ void     xbox_WriteDtr(int which, uint64_t value);
  * and other faults the CPU would raise. */
 #if defined(__GNUC__) || defined(__clang__)
 #define RECOMP_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define RECOMP_LIKELY(x) __builtin_expect(!!(x), 1)
 #else
 #define RECOMP_UNLIKELY(x) (x)
+#define RECOMP_LIKELY(x) (x)
 #endif
 
 /* #DE: a div/idiv at guest address `va` whose divisor is zero, or whose
@@ -2235,11 +2237,24 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
  * empty. recomp_lookup_manual must therefore answer the same for a VA for the
  * whole run, which every override table does (a fixed list of addresses).
  *
+ * The window (XBA-277): base/span/table publish only the part of the table
+ * that lies inside the title's code range [g_xbox_code_lo, g_xbox_code_hi)
+ * as recomp_dispatch_init found it, so a hit is a target
+ * RECOMP_ICALL_IS_CODE lets through and the macros call it without asking:
+ * the check, the trace switch and the lookups are the miss path's. With the
+ * range not set yet (code_hi 0) or the trace on, the window is empty (span
+ * 0) and every call takes the miss path, as before. The window is that of
+ * the range at init: the title's main calls recomp_dispatch_init after
+ * xbox_MemoryLayoutInit (templates/new-game, win32_runtime.c), and the range
+ * is the title image's for the whole run; recomp_dispatch_init computes the
+ * window again on every call.
+ *
  * trace: the indirect-call ring buffer and counter below (g_icall_trace,
  * g_icall_count) are crash and hang forensics. Written on every call they
  * were a shared cache line bounced between guest threads, so they are kept
  * only when RECOMP_ICALL_TRACE=1 is in the environment when
- * recomp_dispatch_init runs; otherwise one predictable branch. */
+ * recomp_dispatch_init runs; otherwise nothing on a hit and one predictable
+ * branch on a miss. */
 #ifndef RECOMP_FLAT_DISPATCH_DEFINED   /* the generated recomp_dispatch.c has it too */
 #define RECOMP_FLAT_DISPATCH_DEFINED
 typedef struct recomp_flat_dispatch {
@@ -2369,6 +2384,48 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
 #define RECOMP_POLL_WAIT(addr, mask, while_set, va) \
     (void)xbox_GuestPollWait((volatile uint32_t *)&MEM32(addr), (mask), (while_set), (va))
 
+/* The indirect-call dispatch every macro below shares (XBA-277).
+ *
+ * The hit: a target in g_recomp_flat's window (above: inside the code range,
+ * the trace off) is called at once, a bounds check and a load. Everything
+ * else goes the way it always went: the trace note, RECOMP_ICALL_IS_CODE,
+ * the call site's record, then the manual, generated and kernel lookups
+ * (recomp_lookup indexes the full flat table itself, so an override folded
+ * into it is found by recomp_lookup_manual first, as before). A target the
+ * window misses cannot be one the inline lookup of the full table would
+ * have found inside the code range, so the miss path no longer indexes it.
+ * Under RECOMP_ICALL_FEEDBACK there is no hit path: every call is recorded
+ * (RECOMP_ICALL_OBSERVE) as before.
+ *
+ * trace_stmt, site_stmt and fail_stmt: what a macro adds (the trace note,
+ * the site record, the guest stack a failed call leaves). */
+#ifndef RECOMP_ICALL_FEEDBACK
+#define RECOMP_ICALL_HIT_(_va) { \
+    recomp_func_t _hit = RECOMP_FLAT_LOOKUP(_va); \
+    if (RECOMP_LIKELY(_hit != 0)) { RECOMP_ABI_CALL(_va, _hit); break; } \
+}
+#else
+#define RECOMP_ICALL_HIT_(_va) /* every call is recorded */
+#endif
+
+#define RECOMP_ICALL_DISPATCH_(xbox_va, trace_stmt, site_stmt, fail_stmt) \
+    uint32_t _va = (uint32_t)(xbox_va); \
+    RECOMP_ICALL_HIT_(_va) \
+    trace_stmt; \
+    /* Skip garbage VAs outside code section + kernel thunk range */ \
+    if (!RECOMP_ICALL_IS_CODE(_va)) { \
+        recomp_icall_not_code_log(_va); \
+        fail_stmt; break; \
+    } \
+    site_stmt; \
+    recomp_func_t _fn = recomp_lookup_manual(_va); \
+    if (!_fn) _fn = recomp_lookup(_va); \
+    if (!_fn) _fn = recomp_lookup_kernel(_va); \
+    if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
+               RECOMP_ABI_CALL(_va, _fn); } \
+    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
+           recomp_icall_fail_log(_va); fail_stmt; }
+
 /**
  * RECOMP_ICALL - Indirect call through the dispatch table.
  *
@@ -2387,21 +2444,8 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
  * one title. Editing this header per project is no longer a thing.
  */
 #define RECOMP_ICALL(xbox_va) do { \
-    uint32_t _va = (uint32_t)(xbox_va); \
-    RECOMP_ICALL_TRACE_NOTE(_va); \
-    /* Skip garbage VAs outside code section + kernel thunk range */ \
-    if (!RECOMP_ICALL_IS_CODE(_va)) { \
-        recomp_icall_not_code_log(_va); \
-        g_esp += 4; eax = 0; break; \
-    } \
-    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
-    if (!_fn) _fn = recomp_lookup_manual(_va); \
-    if (!_fn) _fn = recomp_lookup(_va); \
-    if (!_fn) _fn = recomp_lookup_kernel(_va); \
-    if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
-               RECOMP_ABI_CALL(_va, _fn); } \
-    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp += 4; eax = 0; } \
+    RECOMP_ICALL_DISPATCH_(xbox_va, RECOMP_ICALL_TRACE_NOTE(_va), (void)0, \
+                           g_esp += 4; eax = 0) \
 } while(0)
 
 /**
@@ -2413,39 +2457,15 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
  * normally clean up (stdcall convention).
  */
 #define RECOMP_ICALL_SAFE(xbox_va, saved_esp) do { \
-    uint32_t _va = (uint32_t)(xbox_va); \
-    RECOMP_ICALL_TRACE_NOTE(_va); \
-    if (!RECOMP_ICALL_IS_CODE(_va)) { \
-        recomp_icall_not_code_log(_va); \
-        g_esp = (saved_esp); eax = 0; break; \
-    } \
-    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
-    if (!_fn) _fn = recomp_lookup_manual(_va); \
-    if (!_fn) _fn = recomp_lookup(_va); \
-    if (!_fn) _fn = recomp_lookup_kernel(_va); \
-    if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
-               RECOMP_ABI_CALL(_va, _fn); } \
-    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp = (saved_esp); eax = 0; } \
+    RECOMP_ICALL_DISPATCH_(xbox_va, RECOMP_ICALL_TRACE_NOTE(_va), (void)0, \
+                           g_esp = (saved_esp); eax = 0) \
 } while(0)
 
 /* Caller cleanup: a failed call pops only its return address. */
 #define RECOMP_ICALL_SAFE_CC(xbox_va, saved_esp) do { \
     (void)(saved_esp); \
-    uint32_t _va = (uint32_t)(xbox_va); \
-    RECOMP_ICALL_TRACE_NOTE(_va); \
-    if (!RECOMP_ICALL_IS_CODE(_va)) { \
-        recomp_icall_not_code_log(_va); \
-        g_esp += 4; eax = 0; break; \
-    } \
-    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
-    if (!_fn) _fn = recomp_lookup_manual(_va); \
-    if (!_fn) _fn = recomp_lookup(_va); \
-    if (!_fn) _fn = recomp_lookup_kernel(_va); \
-    if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
-               RECOMP_ABI_CALL(_va, _fn); } \
-    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp += 4; eax = 0; } \
+    RECOMP_ICALL_DISPATCH_(xbox_va, RECOMP_ICALL_TRACE_NOTE(_va), (void)0, \
+                           g_esp += 4; eax = 0) \
 } while(0)
 
 /**
@@ -2457,41 +2477,17 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
  * calls on the next generation. Everything else is RECOMP_ICALL_SAFE.
  */
 #define RECOMP_ICALL_SAFE_AT(xbox_va, saved_esp, site) do { \
-    uint32_t _va = (uint32_t)(xbox_va); \
-    RECOMP_ICALL_TRACE_NOTE(_va); \
-    if (!RECOMP_ICALL_IS_CODE(_va)) { \
-        recomp_icall_not_code_log(_va); \
-        g_esp = (saved_esp); eax = 0; break; \
-    } \
-    RECOMP_ICALL_OBSERVE_SITE((site), _va); \
-    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
-    if (!_fn) _fn = recomp_lookup_manual(_va); \
-    if (!_fn) _fn = recomp_lookup(_va); \
-    if (!_fn) _fn = recomp_lookup_kernel(_va); \
-    if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
-               RECOMP_ABI_CALL(_va, _fn); } \
-    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp = (saved_esp); eax = 0; } \
+    RECOMP_ICALL_DISPATCH_(xbox_va, RECOMP_ICALL_TRACE_NOTE(_va), \
+                           RECOMP_ICALL_OBSERVE_SITE((site), _va), \
+                           g_esp = (saved_esp); eax = 0) \
 } while(0)
 
 /* Caller cleanup: a failed call pops only its return address. */
 #define RECOMP_ICALL_SAFE_AT_CC(xbox_va, saved_esp, site) do { \
     (void)(saved_esp); \
-    uint32_t _va = (uint32_t)(xbox_va); \
-    RECOMP_ICALL_TRACE_NOTE(_va); \
-    if (!RECOMP_ICALL_IS_CODE(_va)) { \
-        recomp_icall_not_code_log(_va); \
-        g_esp += 4; eax = 0; break; \
-    } \
-    RECOMP_ICALL_OBSERVE_SITE((site), _va); \
-    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
-    if (!_fn) _fn = recomp_lookup_manual(_va); \
-    if (!_fn) _fn = recomp_lookup(_va); \
-    if (!_fn) _fn = recomp_lookup_kernel(_va); \
-    if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
-               RECOMP_ABI_CALL(_va, _fn); } \
-    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp += 4; eax = 0; } \
+    RECOMP_ICALL_DISPATCH_(xbox_va, RECOMP_ICALL_TRACE_NOTE(_va), \
+                           RECOMP_ICALL_OBSERVE_SITE((site), _va), \
+                           g_esp += 4; eax = 0) \
 } while(0)
 
 /**
@@ -2514,20 +2510,8 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
  * RECOMP_ICALL: a null or wild pointer, not a function to discover.
  */
 #define RECOMP_ITAIL_RET(xbox_va, ret_imm) do { \
-    uint32_t _va = (uint32_t)(xbox_va); \
-    if (!RECOMP_ICALL_IS_CODE(_va)) { \
-        recomp_icall_not_code_log(_va); \
-        g_esp += 4u + (uint32_t)(ret_imm); g_eax = 0; break; \
-    } \
-    recomp_func_t _fn = RECOMP_FLAT_LOOKUP(_va); \
-    if (!_fn) _fn = recomp_lookup_manual(_va); \
-    if (!_fn) _fn = recomp_lookup(_va); \
-    if (!_fn) _fn = recomp_lookup_kernel(_va); \
-    if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
-               RECOMP_ABI_CALL(_va, _fn); } \
-    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); \
-           g_esp += 4u + (uint32_t)(ret_imm); g_eax = 0; } \
+    RECOMP_ICALL_DISPATCH_(xbox_va, (void)0, (void)0, \
+                           g_esp += 4u + (uint32_t)(ret_imm); g_eax = 0) \
 } while(0)
 #define RECOMP_ITAIL(xbox_va) RECOMP_ITAIL_RET(xbox_va, 0u)
 

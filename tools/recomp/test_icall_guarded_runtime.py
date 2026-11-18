@@ -130,13 +130,17 @@ int main(void) {
     int bad = 0;
 #ifdef FLAT_ON
     /* The inline flat lookup (XBA-38): a hit calls without asking
-     * recomp_lookup_manual (its overrides are in the table already). */
+     * recomp_lookup_manual (its overrides are in the table already). Its
+     * window is empty with the trace on (XBA-277): the miss path writes it. */
     static void (*table[0x300])(void);
     table[0x000] = sub_A; table[0x100] = sub_B; table[0x200] = sub_C;
     g_recomp_flat.table = table; g_recomp_flat.base = 0x00011000u; g_recomp_flat.span = 0x300;
-    g_recomp_flat.trace = 1;
     bad |= check("unseen C, flat", 0x00011200u, 0, 0, 1, 0, 1, 0, 0);
+    if (g_icall_count != 0) { printf("FAIL trace count %u\n", (unsigned)g_icall_count); bad = 1; }
+    g_recomp_flat.span = 0; g_recomp_flat.trace = 1;
+    bad |= check("unseen C, trace", 0x00011200u, 0, 0, 1, 0, 1, 1, 0);
     if (g_icall_count != 1) { printf("FAIL trace count %u\n", (unsigned)g_icall_count); bad = 1; }
+    g_recomp_flat.trace = 0; g_recomp_flat.span = 0x300;
 #endif
     bad |= check("recorded A", 0x00011000u, 1, 0, 0, 1, 0, 0, 0);
     bad |= check("recorded B", 0x00011100u, 0, 1, 0, 1, 0, 0, 0);
@@ -159,6 +163,7 @@ def _flat_dispatch():
         " uint32_t base, span, trace; } recomp_flat_dispatch_t;",
         "recomp_flat_dispatch_t g_recomp_flat;",
         "#define RECOMP_UNLIKELY(x) (x)",
+        "#define RECOMP_LIKELY(x) (x)",
         _macro("RECOMP_FLAT_LOOKUP"),
         _macro("RECOMP_ICALL_TRACE_NOTE"),
     ])
@@ -181,7 +186,9 @@ def test_guarded_site_matches_generic_dispatch_for_every_target():
     if not _cc():
         pytest.skip("no C compiler on PATH")
     src = (HARNESS.replace("IS_CODE", _macro("RECOMP_ICALL_IS_CODE"))
-                  .replace("SAFE_AT", _macro("RECOMP_ICALL_SAFE_AT"))
+                  # the dispatch the macros share (XBA-277), after IS_CODE: it names it
+                  .replace("SAFE_AT", _macro("RECOMP_ICALL_HIT_") + "\n" + _macro("RECOMP_ICALL_DISPATCH_") +
+                           "\n" + _macro("RECOMP_ICALL_SAFE_AT"))
                   .replace("LIFTED", _lifted_site()))
     with tempfile.TemporaryDirectory() as tmp:
         p = os.path.join(tmp, "h.c")
