@@ -1852,8 +1852,8 @@ Dreamcast map unchanged, JVS replies) and `dc_naomi_hello` (our KOS hello world 
 lines and framebuffer). No BIOS, no game, no decryption: [docs/technical/naomi.md](../docs/technical/naomi.md).
 
 **Xbox 360 (XBA-230 spike, XBA-270, epic XBA-229).** An XEX2 title, statically recompiled, runs headless on Linux to
-its `main()` and past it: threads, synchronisation, memory, files on its disc, save data, save states, and its GPU
-command stream decoded (no rendering yet). Linux only (`XBR_CONSOLE_X360`, ON on Linux, off on macOS, Android and
+its `main()` and past it: threads, synchronisation, memory, files on its disc, save data, save states, controllers,
+and its GPU command stream decoded, its shaders translated to GLSL ES and its draws rendered off-screen (first cut). Linux only (`XBR_CONSOLE_X360`, ON on Linux, off on macOS, Android and
 Windows: `memfd_create` for the physical memory views), nothing in the app. Tested on titles of our own (assembly and
 devkitPPC C), never on title data; Alex's own dumps go through `python3 -m x360_tools.bringup` (XBA-270's check list).
 What is there:
@@ -1890,9 +1890,16 @@ What is there:
   unlifted mnemonics, helpers and `bctr` resolved or not. `hle_coverage.py` lists a title's imports by name and
   whether the runtime implements them. `bringup.py` (`python3 -m x360_tools.bringup DEFAULT.XEX WORKDIR --key-file
   KEY [--disc IMAGE|DIR]`) is the one command from a dump to a recompiled run: plain XEX, import coverage, sweep,
-  recompile, pack, run, the `--missed` / `--discovered` loop, and a summary without title data. `xenos_ucode.py`
-  decodes and disassembles Xenos shader microcode (control flow, ALU vector + scalar co-issue, fetches; Xenia's
-  layouts, checked against Mesa freedreno's a2xx field order: the start of the shader translator).
+  recompile, pack, run, the `--missed` / `--discovered` loop, the title's shaders dumped and translated, and a
+  summary without title data. `xenos_ucode.py` decodes and disassembles Xenos shader microcode (control flow, ALU
+  vector + scalar co-issue, fetches; Xenia's layouts, checked against Mesa freedreno's a2xx field order).
+  `xenos_glsl.py` (`python3 -m x360_tools.xenos_glsl FILE.bin [--pixel]`) **translates shaders to GLSL ES 3.00**:
+  every vector and scalar ALU op with Xenos's rules as Xenia's ucode.h describes them (scalar `a` / `b` operands,
+  Direct3D 9 multiplication, max / min, predicates, kills, ps, exports with their 0 / 1 components, cube), exec
+  clauses on booleans / p0, loops / calls / jumps as a state machine with the sequencer's stacks and loop constants,
+  aL / a0 relative addressing, vertex fetches as attributes, 1D / 2D / 3D / cube texture fetches with offsets, LOD
+  bias, register LOD and gradients; constants in std140 blocks. Left: memory export and the texture queries.
+  Translation is ahead of time (a shader cache by microcode CRC), like the code.
 - `runtime/` (CMake `x360_core` + `x360_run`): `x360_mem.c` reserves 4 GB of host address space (guest address a is
   host base + a: no translation, no bounds check in lifted code) with the console's map: virtual 4 KB and 64 KB
   ranges, stacks, this runtime's kernel objects, the image, the GPU register page, and the 512 MB of physical memory
@@ -1927,16 +1934,27 @@ What is there:
   states** in the other consoles' format (`gc_state.c`: threads, kernel objects, heaps, guest memory without its zero
   pages, the GPU, open files and links, the pads), taken between time slices. `x360_cheat_read32` / `write32`: the
   host layer's data cheats, on allocated guest memory only. Disc images: `src/xiso` also probes XGD3's game
-  partition base (0x02080000; XGD2's 0x0FD90000 was there).
+  partition base (0x02080000; XGD2's 0x0FD90000 was there) and Xenia's two other offsets. `xenos_gl.c`: **the first
+  renderer**, OpenGL ES 3.0 (the GameCube's choice for the Thor; the epic planned Vulkan: to settle), EGL / GLES
+  loaded at run time (no build dependency): at each draw the shaders come from the cache, the vertex fetch constants
+  give the buffers (32-bit float, 8_8_8_8 and 16_16 normalised formats converted on the CPU with the GPU's endian
+  swaps), DMA or auto indices, constants into the uniform blocks, the viewport registers; points / lines / triangle
+  lists, fans and strips into an off-screen target read back at each swap (PPM frames). Not yet: render state
+  (blending, depth, culling, masks), eDRAM and resolves (the guest's front buffer is not written), textures,
+  rectangle / quad lists, more formats.
 - `x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--gpu-trace FILE] [--dump-shaders DIR]
-  [--save-state FILE] [--load-state FILE] [--pad-script FILE] [--seconds N] [--strict-imports] [--missed FILE]
-  [--stats]`: LIB.so is
+  [--save-state FILE] [--load-state FILE] [--pad-script FILE] [--render SHADER_CACHE [--frames DIR] [--render-size
+  WxH]] [--seconds N] [--strict-imports] [--missed FILE] [--stats]`: LIB.so is
   `x360_tools.recomp`'s C built with `-DXE_RUNTIME -shared` (stale packs are refused by CRC). A synthetic tight loop
   runs about 380 million guest instructions a second (x86-64, the pack at -O1); a recompile of 20,000 functions takes
   about 9 s and their pack about 100 s on three cores.
 - Tests: the Python suite (parser, LZX vectors, decoder, the lifter's integer / FP / memory / CR / CTR instructions
   against references written from the architecture (~19,000 cases), every vector op, helpers and jump tables run,
-  microcode decoding, HLE coverage), ctest `xenos_cp` (hand-built PM4 packets), `x360_hle` (the exports called
+  microcode decoding, HLE coverage), the shader translator on a real GLES implementation (`tests/run_glsl_mesa.sh`,
+  Mesa llvmpipe in a container, homebrew CI job: ~570 random vertex and pixel shaders, control flow, fetches, kills,
+  against a reference interpreter, then `xenos_draw_test`), ctest `xenos_cp` (hand-built PM4 packets), `xenos_draw`
+  (the renderer draws a hand-built PM4 stream: triangle, indexed quad, viewport; skipped without EGL / GLES),
+  `x360_hle` (the exports called
   directly, incl. FIPS / RFC crypto vectors), `x360_hello` / `x360_hello_lzx` (our assembly title: MSVC-shaped
   prologues, a jump table, imports by real ordinal; plain, then encrypted with a made-up key and LZX-compressed and
   rewritten by `--plain`; its disc a directory, then an XDVDFS image: its DbgPrint text must equal `tests/hello.txt`),
@@ -1946,7 +1964,8 @@ What is there:
   by the homebrew job through `tools/consoles/run_x360_homebrew.sh`). `tests/run_hello_arm64.sh` runs the hello test
   on arm64 under qemu (same text).
 
-Not there yet (XBA-229): rendering (shader translation, eDRAM and resolves, textures, a Vulkan back end), audio output
+Not there yet (XBA-229): the rest of rendering (render state, eDRAM and resolves, textures and their tiling, memory
+export, run-time translation of shaders the cache lacks, the GLES / Vulkan choice), audio output
 (XMA decoding, the render driver's frames), vibration, real parallel hardware threads, structured exception
 handling (`__C_specific_handler` continues the search, `RtlUnwind` stops the title), the network, and whatever
 `hle_coverage` lists as missing on Alex's titles.
