@@ -15,6 +15,7 @@ stuck in.
 - [Desktop command line](desktop/cli.md) — `xrecomp prepare / play / list / settings`: the Linux (and any desktop) front end, its storage and states
 - [Windows (experimental)](desktop/windows.md) — the Windows x86-64 zip: `xrecomp.cmd`, MSVC-built runtime, Xbox games only; what CI checks; the MinGW check from Linux
 - [Environment Variables](runtime/environment-variables.md) — Every `RECOMP_*` switch: default, effect, and the source file that reads it
+- [Feature matrix](runtime/feature-matrix.md) — Which feature each console has (states, rewind, cheats, upscaling, frame generation...) on each host, from the code (XBA-274)
 - [XMV movies](runtime/xmv.md) — The runtime's portable XMV decoder (WMV2 + Xbox ADPCM) and the hook a title layer binds in place of the XDK's movie player
 - [Contributing](../CONTRIBUTING.md) — Setup, where to focus, code style, how to submit
 - [Upstream README](upstream/README.md) — xboxrecomp's own README: background, library table, FAQ, community ports, test notes
