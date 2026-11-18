@@ -256,6 +256,23 @@ PlayStation devices — references (no code taken)
   No code was taken from DuckStation, Mednafen / Beetle PSX or PCSX-Redux.
 
 
+Xbox 360 — references (no code taken)
+-------------------------------------
+
+  consoles/x360 and tools/xex follow Xenia (https://github.com/xenia-project/
+  xenia, BSD 3-Clause, Copyright Ben Vanik and contributors) for the XEX2
+  layout, kernel / XAM signatures and structure layouts, the VMX128
+  encodings and pack formats, and the Xenos PM4 packet formats.
+  consoles/x360/runtime/x360_exports.inc is a list of (library, ordinal,
+  name, kind) made by x360_tools/gen_exports.py from Xenia's
+  xboxkrnl_table.inc and xam_table.inc: the console's ABI, with Xenia
+  credited. The MSVC helper patterns checked by the tests are the ones
+  XenonRecomp (hedge-dev, MIT) publishes. tools/xex/lzx.py is written from
+  Microsoft's [MS-PATCH] LZX specification; libmspack and wimlib (LGPL) and
+  Free Pascal's chmcmd were used only as tools to make and check test
+  vectors (tools/xex/lzx_vectors/gen.sh), none of their code is here.
+
+
 Derived algorithms — credited, independently implemented
 --------------------------------------------------------
 
