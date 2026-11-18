@@ -625,23 +625,28 @@ extern RECOMP_TLS RecompCpu g_cpu;
 /* The binding is inside the asm, so the compiler sees one value that is never null and has no slow path to lay out
  * (in C, the null arm was threaded through the whole function: a bind before each register access, a cloned body,
  * callee-saved registers spilled and the test repeated in loops). It is the standard TLS descriptor sequence for
- * g_cpu, whose call preserves every register but x0 and x30 (the AArch64 TLSDESC convention), then the store. */
+ * g_cpu, whose call preserves every register but x0 and x30 (the AArch64 TLSDESC convention), then the store. x30
+ * is kept on the stack around that call rather than declared clobbered: a clobber would make every leaf function
+ * save and restore it on the fast path (2 instructions per call); below sp is free on AArch64 (no red zone), and sp
+ * stays 16-byte aligned. */
 static inline __attribute__((always_inline)) RecompCpu *recomp_cpu(void)
 {
     RecompCpu *p;
     __asm__("mrs %0, tpidr_el0\n\t"
             "ldr %0, [%0, #" RECOMP_CPU_SLOT_STR(RECOMP_CPU_SLOT_INDEX) " * 8]\n\t"
             "cbnz %0, 1f\n\t"
+            "str x30, [sp, #-16]!\n\t"
             "adrp x0, :tlsdesc:g_cpu\n\t"
             "ldr x1, [x0, :tlsdesc_lo12:g_cpu]\n\t"
             "add x0, x0, :tlsdesc_lo12:g_cpu\n\t"
             ".tlsdesccall g_cpu\n\t"
             "blr x1\n\t"
+            "ldr x30, [sp], #16\n\t"
             "mrs x1, tpidr_el0\n\t"
             "add %0, x1, x0\n\t"
             "str %0, [x1, #" RECOMP_CPU_SLOT_STR(RECOMP_CPU_SLOT_INDEX) " * 8]\n"
             "1:"
-            : "=r"(p) : : "x0", "x1", "x30", "cc");
+            : "=r"(p) : : "x0", "x1", "cc");
     return p;
 }
 #  define RECOMP_CPU_REF (*recomp_cpu())
