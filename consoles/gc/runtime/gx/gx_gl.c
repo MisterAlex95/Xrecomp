@@ -82,6 +82,16 @@ typedef struct sampler_params {
     uint32_t set;
 } sampler_params;
 
+/* The pixel state apply_state last gave GL, to leave out what a batch does not change. It only holds while nothing
+ * else touches that state: whatever does (copies, peeks, pokes, clears, and the window's presenter, which shares this
+ * context between two fields) calls shadow_invalidate, and the next batch sends everything again. */
+typedef struct gl_shadow {
+    GLboolean efb_ready;     /* the EFB bound with its viewport, the scissor test on, GL_CCW */
+    GLboolean depth_on, depth_mask, cmask, amask, blend_on, cull_on;
+    GLenum depth_func, blend_eq, blend_s, blend_d, cull_mode;
+    GLint scissor[4];
+} gl_shadow;
+
 typedef struct ubo_t {
     int32_t creg[4][4], kreg[4][4], swap[4][4];
     float tcscale[8][4], texdim[8][4], indm[6][4], indscale[4][4];
@@ -133,6 +143,7 @@ struct gx_gl {
     unsigned batch_ntex;     /* texture coordinates the batch's draws generated (the most of them) */
     uint8_t *packed;         /* the batch's vertices with only those coordinates, for the upload */
     ubo_t ubo_data;
+    gl_shadow sh;
 
     struct {
         uint32_t addr, stride, lines;
@@ -199,6 +210,12 @@ static int gl_flavour_ok(const char *ver)
     desktop_gl = ver && !strstr(ver, "OpenGL ES") && sscanf(ver, "%d.%d", &major, &minor) == 2 &&
                  (major > 3 || (major == 3 && minor >= 3));
     return ver && (strstr(ver, "OpenGL ES 3") || desktop_gl);
+}
+
+/* Every value becomes one GL can never hold (no enum or boolean is all ones, no scissor box negative). */
+static void shadow_invalidate(gx_gl *g)
+{
+    memset(&g->sh, 0xFF, sizeof g->sh);
 }
 
 static void clear_depth(gx_glfn *f, float z)
@@ -894,8 +911,8 @@ static void efb_bind(gx_gl *g)
     F.glViewport(0, 0, GX_EFB_W * g->scale, GX_EFB_H * g->scale);
 }
 
-/* The EFB rectangle x0..x1, y0..y1 (top-down) as a GL scissor. */
-static void scissor_rect(gx_gl *g, int x0, int y0, int x1, int y1)
+/* The EFB rectangle x0..x1, y0..y1 (top-down) as a GL scissor box. */
+static void scissor_box(const gx_gl *g, int x0, int y0, int x1, int y1, GLint box[4])
 {
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
@@ -904,29 +921,57 @@ static void scissor_rect(gx_gl *g, int x0, int y0, int x1, int y1)
     if (x1 < x0) x1 = x0;
     if (y1 < y0) y1 = y0;
     int s = g->scale;
-    F.glEnable(GL_SCISSOR_TEST);
-    F.glScissor(x0 * s, (GX_EFB_H - y1) * s, (x1 - x0) * s, (y1 - y0) * s);
+    box[0] = x0 * s, box[1] = (GX_EFB_H - y1) * s, box[2] = (x1 - x0) * s, box[3] = (y1 - y0) * s;
 }
+
+/* Outside apply_state: the caller invalidates the shadow. */
+static void scissor_rect(gx_gl *g, int x0, int y0, int x1, int y1)
+{
+    GLint box[4];
+    scissor_box(g, x0, y0, x1, y1, box);
+    F.glEnable(GL_SCISSOR_TEST);
+    F.glScissor(box[0], box[1], box[2], box[3]);
+}
+
+/* True when a shadowed value differs from what GL was last told: it is recorded, and the caller sends it. */
+#define SH_CHANGED(field, value)                                                                                      \
+    (g->sh.field != (value) ? (g->sh.field = (value), gx->stats.gl_state_sent++, true)                                \
+                            : (gx->stats.gl_state_skipped++, false))
 
 static void apply_state(gx_state *gx, bool tri)
 {
     gx_gl *g = gx->gl;
     const uint32_t *bp = gx->bp;
-    efb_bind(g);
+    if (SH_CHANGED(efb_ready, GL_TRUE)) {
+        efb_bind(g);
+        F.glEnable(GL_SCISSOR_TEST);
+        F.glFrontFace(GL_CCW);
+    }
     int offx = (int)BITS(bp[BP_SCISSOR_OFFSET], 0, 10) * 2, offy = (int)BITS(bp[BP_SCISSOR_OFFSET], 10, 10) * 2;
     int top = (int)BITS(bp[BP_SCISSOR_TL], 0, 11), left = (int)BITS(bp[BP_SCISSOR_TL], 12, 11);
     int bottom = (int)BITS(bp[BP_SCISSOR_BR], 0, 11), right = (int)BITS(bp[BP_SCISSOR_BR], 12, 11);
-    scissor_rect(g, left - offx, top - offy, right - offx + 1, bottom - offy + 1);
+    GLint box[4];
+    scissor_box(g, left - offx, top - offy, right - offx + 1, bottom - offy + 1, box);
+    if (memcmp(g->sh.scissor, box, sizeof box)) {
+        memcpy(g->sh.scissor, box, sizeof box);
+        F.glScissor(box[0], box[1], box[2], box[3]);
+        gx->stats.gl_state_sent++;
+    } else {
+        gx->stats.gl_state_skipped++;
+    }
 
     uint32_t zm = bp[BP_ZMODE];
-    if (zm & 1) {
-        F.glEnable(GL_DEPTH_TEST);
-        F.glDepthFunc(GL_NEVER + BITS(zm, 1, 3));
-        F.glDepthMask((zm & 0x10) ? GL_TRUE : GL_FALSE);
-    } else {
-        F.glDisable(GL_DEPTH_TEST);
-        F.glDepthMask(GL_FALSE);
+    GLboolean depth_on = (zm & 1) ? GL_TRUE : GL_FALSE, depth_mask = (zm & 1) && (zm & 0x10) ? GL_TRUE : GL_FALSE;
+    if (SH_CHANGED(depth_on, depth_on)) {
+        if (depth_on)
+            F.glEnable(GL_DEPTH_TEST);
+        else
+            F.glDisable(GL_DEPTH_TEST);
     }
+    if (depth_on && SH_CHANGED(depth_func, GL_NEVER + BITS(zm, 1, 3)))
+        F.glDepthFunc(g->sh.depth_func);
+    if (SH_CHANGED(depth_mask, depth_mask))
+        F.glDepthMask(depth_mask);
     uint32_t cm0 = bp[BP_CMODE0];
     unsigned fmt = BITS(bp[BP_PE_CONTROL], 0, 3);
     bool has_alpha = fmt == 1;
@@ -934,32 +979,42 @@ static void apply_state(gx_state *gx, bool tri)
     GLboolean cmask = (cm0 & 8) ? GL_TRUE : GL_FALSE, amask = ((cm0 & 0x10) && has_alpha) ? GL_TRUE : GL_FALSE;
     if (logic && BITS(cm0, 12, 4) == 5) /* NOOP */
         cmask = amask = GL_FALSE;
-    F.glColorMask(cmask, cmask, cmask, amask);
+    bool cmask_new = SH_CHANGED(cmask, cmask), amask_new = SH_CHANGED(amask, amask);
+    if (cmask_new || amask_new)
+        F.glColorMask(cmask, cmask, cmask, amask);
+    if (SH_CHANGED(blend_on, blend ? GL_TRUE : GL_FALSE)) {
+        if (blend)
+            F.glEnable(GL_BLEND);
+        else
+            F.glDisable(GL_BLEND);
+    }
     if (blend) {
-        F.glEnable(GL_BLEND);
+        GLenum eq = GL_FUNC_ADD, s = GL_ONE, d = GL_ONE;
         if (cm0 & 0x800) {
-            F.glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT);
-            F.glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
+            eq = GL_FUNC_REVERSE_SUBTRACT;
         } else {
-            GLenum s = blend_src(BITS(cm0, 8, 3)), d = blend_dst(BITS(cm0, 5, 3));
+            s = blend_src(BITS(cm0, 8, 3)), d = blend_dst(BITS(cm0, 5, 3));
             if (!has_alpha)
                 s = no_dst_alpha(s), d = no_dst_alpha(d);
-            F.glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
-            F.glBlendFuncSeparate(s, d, s, d);
         }
-    } else {
-        F.glDisable(GL_BLEND);
+        if (SH_CHANGED(blend_eq, eq))
+            F.glBlendEquationSeparate(eq, eq);
+        bool s_new = SH_CHANGED(blend_s, s), d_new = SH_CHANGED(blend_d, d);
+        if (s_new || d_new)
+            F.glBlendFuncSeparate(s, d, s, d);
     }
     /* A GX front face is clockwise on screen and the EFB is upright in GL, so with GL's front = counter-clockwise a
      * GX back face is a GL front face: genmode 1 (cull back) removes GL_FRONT, 2 (cull front) GL_BACK. */
     unsigned cull = BITS(bp[BP_GENMODE], 14, 2);
-    F.glFrontFace(GL_CCW);
-    if (tri && cull) {
-        F.glEnable(GL_CULL_FACE);
-        F.glCullFace(cull == 1 ? GL_FRONT : cull == 2 ? GL_BACK : GL_FRONT_AND_BACK);
-    } else {
-        F.glDisable(GL_CULL_FACE);
+    bool cull_on = tri && cull;
+    if (SH_CHANGED(cull_on, cull_on ? GL_TRUE : GL_FALSE)) {
+        if (cull_on)
+            F.glEnable(GL_CULL_FACE);
+        else
+            F.glDisable(GL_CULL_FACE);
     }
+    if (cull_on && SH_CHANGED(cull_mode, cull == 1 ? GL_FRONT : cull == 2 ? GL_BACK : GL_FRONT_AND_BACK))
+        F.glCullFace(g->sh.cull_mode);
 }
 
 static int sext11(uint32_t v)
@@ -1143,6 +1198,7 @@ static size_t ring_put(gx_gl *g, unsigned r, GLuint buf, GLenum target, const vo
     if (g->stream == STREAM_STORAGE && g->egl.eglGetCurrentContext() != g->sr_ctx) {
         /* The mappings died with their context: never write through them. Plain buffers from here on. */
         fprintf(stderr, "gx: buffer streaming: the GL context changed, storage rings dropped, now map\n");
+        shadow_invalidate(g);
         const GLuint bufs[3] = {g->vbo, g->ebo, g->ubo};
         stream_storage_destroy(g, bufs);
         g->stream = STREAM_MAP;
@@ -1571,6 +1627,7 @@ static void copy_pass(gx_state *gx, GLuint dst, int ow, int oh, const float src[
 {
     gx_gl *g = gx->gl;
     const uint32_t *bp = gx->bp;
+    shadow_invalidate(g);
     F.glBindFramebuffer(GL_FRAMEBUFFER, g->copy_fbo);
     F.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst, 0);
     g->copy_att = dst;
@@ -1614,6 +1671,7 @@ static void efb_clear_rect(gx_state *gx, int x, int y, int w, int h)
 {
     gx_gl *g = gx->gl;
     const uint32_t *bp = gx->bp;
+    shadow_invalidate(g);
     efb_bind(g);
     scissor_rect(g, x, y, x + w, y + h);
     uint32_t cm0 = bp[BP_CMODE0];
@@ -1786,6 +1844,7 @@ static void xfb_keep(gx_state *gx, uint32_t addr, uint32_t stride, int lines, in
 {
     gx_gl *g = gx->gl;
     unsigned slot = 4;
+    shadow_invalidate(g);
     for (unsigned i = 0; i < 4; i++)
         if (g->xfb[i].tex && g->xfb[i].addr == addr)
             slot = i;
@@ -1958,6 +2017,7 @@ void gx_gl_copy(gx_state *gx, uint32_t exec)
     }
     if (exec & 0x800)
         efb_clear_rect(gx, x, y, w, h);
+    shadow_invalidate(g);
     efb_bind(g);
 }
 
@@ -1974,6 +2034,7 @@ static void peek_fill(gx_state *gx, bool z)
         g->peek_z_ok = true;
     else
         g->peek_color_ok = true;
+    shadow_invalidate(g);
     efb_bind(g);
 }
 
@@ -2012,6 +2073,7 @@ void gx_efb_poke(gx_state *gx, uint32_t pa, uint32_t v, unsigned size)
         return;
     gx_gl_flush(gx);
     int x = (int)BITS(pa, 2, 10), y = (int)BITS(pa, 12, 10);
+    shadow_invalidate(g);
     efb_bind(g);
     scissor_rect(g, x, y, x + 1, y + 1);
     if (pa & 0x400000) {
@@ -2036,6 +2098,7 @@ void gx_gl_frame(gx_state *gx)
     if (!g)
         return;
     gx_gl_flush(gx);
+    shadow_invalidate(g); /* the window presents between two fields, on this context */
     if (g->stream == STREAM_STORAGE && gx->field_count % STREAM_LOG_FIELDS == 0)
         stream_storage_log(g);
     if (gx->field_count % 60 == 0) { /* drop textures unused for a while */
@@ -2081,6 +2144,7 @@ void gx_gl_state_loaded(gx_state *gx)
     for (unsigned i = 0; i < 4; i++)
         g->xfb[i].addr = 0;
     g->peek_color_ok = g->peek_z_ok = false;
+    shadow_invalidate(g);
 }
 
 /* The slot holding the picture the VI scans at addr, or -1. *offset: found by the VI-offset rule, not at its address. */
@@ -2108,6 +2172,7 @@ unsigned gx_xfb_texture(gx_state *gx, uint32_t addr, int *w, int *h)
     gx_gl *g = gx->gl;
     if (!g)
         return 0;
+    shadow_invalidate(g);
     /* the window presents next: it must not sample through the last draw's samplers (bind_map sets them per draw) */
     F.glBindSampler(0, 0);
     F.glBindSampler(1, 0);
@@ -2292,6 +2357,7 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
         return -1;
     }
     gx->gl = g;
+    shadow_invalidate(g);
     /* EFB */
     int W = GX_EFB_W * scale, H = GX_EFB_H * scale;
     g->efb_color = new_tex(g);
@@ -2499,6 +2565,7 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
                     n, ready);
         }
     }
+    shadow_invalidate(g);
     efb_bind(g);
     return 0;
 }

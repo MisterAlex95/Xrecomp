@@ -80,6 +80,13 @@ target_link_libraries(gc_gx_batch_test PRIVATE gc_core)
 target_compile_options(gc_gx_batch_test PRIVATE -Wall -Wextra)
 add_test(NAME gc_gx_batch COMMAND gc_gx_batch_test)
 set_tests_properties(gc_gx_batch PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 ENVIRONMENT LIBGL_ALWAYS_SOFTWARE=1)
+# gx_shadow: GL state the renderer leaves out because it did not change must be sent again after anything else touched
+# it (the window presenting between fields, copies, clears, pokes, peeks); 77 without a context
+add_executable(gc_gx_shadow_test gx_shadow_test.c)
+target_link_libraries(gc_gx_shadow_test PRIVATE gc_core)
+target_compile_options(gc_gx_shadow_test PRIVATE -Wall -Wextra)
+add_test(NAME gc_gx_shadow COMMAND gc_gx_shadow_test)
+set_tests_properties(gc_gx_shadow PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 ENVIRONMENT LIBGL_ALWAYS_SOFTWARE=1)
 
 if(TARGET gc_run)
     add_test(NAME gc_hello
