@@ -335,6 +335,7 @@ struct xenos_gl {
     float tex_aniso;          /* RECOMP_TEX_ANISO 8 / 16 when EXT_texture_filter_anisotropic is there, else 0 */
     int gl_major, gl_minor;   /* the context's GLES version (3.1 and up: memory export through SSBOs) */
     int memexport;            /* XBA-282: memory export shaders run (GLES 3.1, vertex storage blocks) */
+    int memexport_ps;         /* XBA-296: in pixel shaders too (fragment storage blocks) */
     void (*glMemoryBarrier)(GLbitfield);
     GLuint mxbuf;             /* their log: count, capacity, then (byte address, dword) pairs */
     int mx_warned;
@@ -463,18 +464,21 @@ static void texture_options(xenos_gl *g)
 static void memexport_caps(xenos_gl *g)
 {
     const char *env = getenv("RECOMP_X360_MEMEXPORT");
-    GLint blocks = 0;
-    g->memexport = 0;
+    GLint blocks = 0, fblocks = 0;
+    g->memexport = g->memexport_ps = 0;
     if (g->gl_major > 3 || (g->gl_major == 3 && g->gl_minor >= 1)) {
         g->glGetIntegerv(0x90D6 /* GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS */, &blocks);
+        g->glGetIntegerv(0x90DA /* GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS */, &fblocks);
         *(void **)&g->glMemoryBarrier = g->eglGetProcAddress ? g->eglGetProcAddress("glMemoryBarrier") : NULL;
         if (!g->glMemoryBarrier && g->gles_lib)
             *(void **)&g->glMemoryBarrier = dlsym(g->gles_lib, "glMemoryBarrier");
-        g->memexport = blocks > 0 && g->glMemoryBarrier && !(env && !strcmp(env, "0"));
+        int allowed = g->glMemoryBarrier && !(env && !strcmp(env, "0"));
+        g->memexport = blocks > 0 && allowed;
+        g->memexport_ps = fblocks > 0 && allowed;
     }
-    fprintf(g->log, "xenos: memory export %s (GLES %d.%d, %d vertex storage block(s))\n",
-            g->memexport ? "on" : env && !strcmp(env, "0") ? "off (RECOMP_X360_MEMEXPORT=0)" : "off",
-            g->gl_major, g->gl_minor, (int)blocks);
+    fprintf(g->log, "xenos: memory export %s (GLES %d.%d, %d vertex, %d fragment storage block(s))\n",
+            g->memexport || g->memexport_ps ? "on" : env && !strcmp(env, "0") ? "off (RECOMP_X360_MEMEXPORT=0)" : "off",
+            g->gl_major, g->gl_minor, (int)blocks, (int)fblocks);
 }
 
 static int setup(xenos_gl *g, char *why, size_t why_n)
@@ -756,7 +760,7 @@ static char *slurp(const char *path)
 }
 
 /* the translator version the cache must have been made with (x360_tools.xenos_glsl GLSL_VERSION) */
-#define XENOS_GLSL_STAMP "// xenos_glsl 3\n"
+#define XENOS_GLSL_STAMP "// xenos_glsl 4\n"
 
 static void report_missing(xenos_gl *g, int pixel, uint32_t crc)
 {
@@ -901,23 +905,30 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
         if (!psrc)
             report_missing(g, 1, pc);
     }
-    /* XBA-282: a vertex shader that exports to memory is GLSL ES 3.10: it needs the capability, and its pixel shader
-     * is linked as 3.10 too (GLES links one version only; 3.00 source is 3.10 source) */
-    if (vsrc && !strncmp(vsrc, "#version 310 es", 15)) {
-        if (!g->memexport) {
+    /* XBA-282, XBA-296: a shader that exports to memory is GLSL ES 3.10: it needs the capability of its stage, and the
+     * other stage is linked as 3.10 too (GLES links one version only; 3.00 source is 3.10 source) */
+    int vs310 = vsrc && !strncmp(vsrc, "#version 310 es", 15), ps310 = psrc && !strncmp(psrc, "#version 310 es", 15);
+    char rect_vs[sizeof RECT_VS], capture_fs[sizeof CAPTURE_FS];
+    memcpy(rect_vs, RECT_VS, sizeof RECT_VS);
+    memcpy(capture_fs, CAPTURE_FS, sizeof CAPTURE_FS);
+    if (vs310 || ps310) {
+        if ((vs310 && !g->memexport) || (ps310 && !g->memexport_ps)) {
             if (!g->mx_warned++)
-                fprintf(g->log, "xenos_gl: vs_%08X exports to memory: its draws are skipped (no GLES 3.1 storage "
-                                "blocks in vertex shaders here)\n", vc);
+                fprintf(g->log, "xenos_gl: %s_%08X exports to memory: its draws are skipped (no GLES 3.1 storage "
+                                "blocks in that stage here)\n", vs310 ? "vs" : "ps", vs310 ? vc : pc);
             g->st.memexport_skipped++;
             free(vsrc);
             free(psrc);
             return NULL;
         }
         p->memexport = 1;
-        if (psrc && !strncmp(psrc, "#version 300 es", 15))
+        if (vsrc)
+            vsrc[10] = '1';
+        if (psrc)
             psrc[10] = '1';
+        rect_vs[10] = capture_fs[10] = '1';
     }
-    const char *vtext = kind == 2 ? RECT_VS : vsrc, *ftext = kind == 1 ? CAPTURE_FS : psrc;
+    const char *vtext = kind == 2 ? rect_vs : vsrc, *ftext = kind == 1 ? capture_fs : psrc;
     if (vtext && ftext) {
         snprintf(name, sizeof name, kind == 2 ? "rect pass-through" : "vs_%08X", vc);
         GLuint v = compile(g, GL_VERTEX_SHADER, vtext, name);
@@ -2934,8 +2945,18 @@ static void memexport_end(xenos_gl *g, const xenos_cp *cp)
     if (n && cp->write32) {
         const uint32_t *log = g->glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 8, 8 * (GLsizeiptr)n, GL_MAP_READ_BIT);
         if (log) {
-            for (uint32_t i = 0; i < n; i++) /* the dword's bytes in memory order: big-endian word = its bswap */
-                cp->write32(cp->ctx, log[2 * i] & 0x1FFFFFFCu, __builtin_bswap32(log[2 * i + 1]));
+            for (uint32_t i = 0; i < n; i++) { /* the dword's bytes in memory order: big-endian word = its bswap */
+                uint32_t a = log[2 * i], pa = a & 0x1FFFFFFCu, v = __builtin_bswap32(log[2 * i + 1]);
+                uint32_t keep = (a & 3) | (a >> 30) << 2; /* bytes of the dword left as they are (XBA-296) */
+                if (keep && cp->read32) {
+                    uint32_t mask = 0;
+                    for (int k = 0; k < 4; k++)
+                        if ((keep >> k) & 1)
+                            mask |= 0xFF000000u >> (8 * k);
+                    v = (cp->read32(cp->ctx, pa) & mask) | (v & ~mask);
+                }
+                cp->write32(cp->ctx, pa, v);
+            }
             g->glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
         }
         g->st.memexport_dwords += n;
@@ -3075,7 +3096,8 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
             g->glVertexAttribPointer((GLuint)p->loc[a], 4, GL_FLOAT, 0, (GLsizei)(na * 16),
                                      (void *)(uintptr_t)(a * 16));
         }
-    if (p->memexport)
+    int exports = p->memexport || (rp && rp->memexport);
+    if (exports)
         memexport_begin(g);
     if (d->prim_type == 8) {
         draw_rects(g, cp, rp, idx, n);
@@ -3090,7 +3112,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     } else {
         g->glDrawArrays((GLenum)prim, 0, (GLsizei)n);
     }
-    if (p->memexport)
+    if (exports)
         memexport_end(g, cp);
     for (uint32_t a = 0; a < na; a++)
         if (p->loc[a] >= 0)

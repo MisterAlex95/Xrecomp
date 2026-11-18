@@ -40,8 +40,11 @@ dword) pairs the renderer applies to guest memory after the draw (xenos_gl.c, GL
 else the draw is skipped). eA as Xenia reads it: X the base in dwords (top bits 01), Y the element index, W the
 index bound (both floats in [2^23, 2^24): the integer is the mantissa), Z the format (bits 8-13), endianness (0-2),
 signedness (16), integer (17), red / blue swap (19); element k lands at base + (index + k) * element size. Formats
-8_8_8_8, 2_10_10_10, 16_16, 16_16_16_16, their _FLOAT forms, 32_FLOAT, 32_32_FLOAT, 32_32_32_32_FLOAT; other formats
-write nothing. Such a shader is GLSL ES 3.10; without memexport=True it is Unsupported, as before.
+8, 8_A, 8_B, 8_8, 1_5_5_5, 5_6_5, 6_5_5, 4_4_4_4, 16, 16_FLOAT, 8_8_8_8, 2_10_10_10, 10_11_11, 11_11_10, 16_16,
+16_16_16_16, their _FLOAT forms, 32_FLOAT, 32_32_FLOAT, 32_32_32_32_FLOAT; other formats write nothing. An element
+smaller than a dword is logged with the bytes to keep: the address's bits 0-1 and 30-31 are bytes 0-1 and 2-3 of the
+dword, in memory order (0: write the whole dword). Vertex and pixel shaders both export. Such a shader is GLSL ES 3.10;
+without memexport=True it is Unsupported, as before.
 
 Texture queries (XBA-296): getGradients gives (ddx(s.x), ddy(s.x), ddx(s.y), ddy(s.y)) per guest pixel (the host's
 derivatives over xe_k.pg.z, the inverse internal resolution scale); getCompTexLOD gives X = log2 of the larger gradient
@@ -75,7 +78,8 @@ FLT_MAX = "3.402823466e+38"
 # cache made before a change of the host contract is translated again (bringup does it) rather than drawn wrong.
 # 2: XBA-280 (PsParamGen from pg.zw, xe_vb<n> buffers for computed-index fetches).
 # 3: XBA-296 (texture queries read the xe_tq<k> uniforms).
-GLSL_VERSION = 3
+# 4: XBA-296 (the memory export log says which bytes of a dword to keep; pixel shaders export too).
+GLSL_VERSION = 4
 
 
 class Unsupported(Exception):
@@ -706,16 +710,35 @@ void xe_mx_flush() {
     uint base = (a.x & 0x3FFFFFFFu) << 2, index = a.y & 0x7FFFFFu, bound = a.w & 0x7FFFFFu, info = a.z;
     uint fmt = (info >> 8) & 63u, e = info & 7u;
     bool sgn = (info & 0x10000u) != 0u, integer = (info & 0x20000u) != 0u;
-    uint n = fmt == 6u || fmt == 7u || fmt == 25u || fmt == 31u || fmt == 36u ? 1u
-           : fmt == 26u || fmt == 32u || fmt == 37u ? 2u : fmt == 38u ? 4u : 0u;
-    if (n == 0u) return;
+    uint bytes = fmt == 2u || fmt == 8u || fmt == 9u ? 1u
+               : fmt == 3u || fmt == 4u || fmt == 5u || fmt == 10u || fmt == 15u || fmt == 24u || fmt == 30u ? 2u
+               : fmt == 6u || fmt == 7u || fmt == 16u || fmt == 17u || fmt == 25u || fmt == 31u || fmt == 36u ? 4u
+               : fmt == 26u || fmt == 32u || fmt == 37u ? 8u : fmt == 38u ? 16u : 0u;
+    if (bytes == 0u) return;
+    uint n = bytes < 4u ? 1u : bytes / 4u;
     for (uint k = 0u; k < 5u; k++) {
         if ((w >> k & 1u) == 0u || index + k >= bound) continue;
         vec4 v = xe_eM[k];
         if ((info & 0x80000u) != 0u) v = v.zyxw;
         uint d[4];
         d[0] = 0u; d[1] = 0u; d[2] = 0u; d[3] = 0u;
-        if (fmt == 6u) d[0] = xe_mx_norm(v.x, 8u, sgn, integer) | xe_mx_norm(v.y, 8u, sgn, integer) << 8
+        if (fmt == 2u || fmt == 8u || fmt == 9u) d[0] = xe_mx_norm(v.x, 8u, sgn, integer);
+        else if (fmt == 10u) d[0] = xe_mx_norm(v.x, 8u, sgn, integer) | xe_mx_norm(v.y, 8u, sgn, integer) << 8;
+        else if (fmt == 3u) d[0] = xe_mx_norm(v.x, 5u, sgn, integer) | xe_mx_norm(v.y, 5u, sgn, integer) << 5
+                                 | xe_mx_norm(v.z, 5u, sgn, integer) << 10 | xe_mx_norm(v.w, 1u, sgn, integer) << 15;
+        else if (fmt == 4u) d[0] = xe_mx_norm(v.x, 5u, sgn, integer) | xe_mx_norm(v.y, 6u, sgn, integer) << 5
+                                 | xe_mx_norm(v.z, 5u, sgn, integer) << 11;
+        else if (fmt == 5u) d[0] = xe_mx_norm(v.x, 5u, sgn, integer) | xe_mx_norm(v.y, 5u, sgn, integer) << 5
+                                 | xe_mx_norm(v.z, 6u, sgn, integer) << 10;
+        else if (fmt == 15u) d[0] = xe_mx_norm(v.x, 4u, sgn, integer) | xe_mx_norm(v.y, 4u, sgn, integer) << 4
+                                  | xe_mx_norm(v.z, 4u, sgn, integer) << 8 | xe_mx_norm(v.w, 4u, sgn, integer) << 12;
+        else if (fmt == 24u) d[0] = xe_mx_norm(v.x, 16u, sgn, integer);
+        else if (fmt == 30u) d[0] = packHalf2x16(v.xy) & 0xFFFFu;
+        else if (fmt == 16u) d[0] = xe_mx_norm(v.x, 11u, sgn, integer) | xe_mx_norm(v.y, 11u, sgn, integer) << 11
+                                  | xe_mx_norm(v.z, 10u, sgn, integer) << 22;
+        else if (fmt == 17u) d[0] = xe_mx_norm(v.x, 10u, sgn, integer) | xe_mx_norm(v.y, 11u, sgn, integer) << 10
+                                  | xe_mx_norm(v.z, 11u, sgn, integer) << 21;
+        else if (fmt == 6u) d[0] = xe_mx_norm(v.x, 8u, sgn, integer) | xe_mx_norm(v.y, 8u, sgn, integer) << 8
                             | xe_mx_norm(v.z, 8u, sgn, integer) << 16 | xe_mx_norm(v.w, 8u, sgn, integer) << 24;
         else if (fmt == 7u) d[0] = xe_mx_norm(v.x, 10u, sgn, integer) | xe_mx_norm(v.y, 10u, sgn, integer) << 10
                                  | xe_mx_norm(v.z, 10u, sgn, integer) << 20 | xe_mx_norm(v.w, 2u, sgn, integer) << 30;
@@ -729,14 +752,22 @@ void xe_mx_flush() {
             uvec4 b = floatBitsToUint(v);
             d[0] = b.x; d[1] = b.y; d[2] = b.z; d[3] = b.w;
         }
-        for (uint j = 0u; j < n; j++) d[j] = xe_mx_swap(d[j], e);
-        if (e == 4u && n >= 2u) { uint t = d[0]; d[0] = d[1]; d[1] = t; t = d[2]; d[2] = d[3]; d[3] = t; }
-        if (e == 5u && n == 4u) { uint t = d[0]; d[0] = d[3]; d[3] = t; t = d[1]; d[1] = d[2]; d[2] = t; }
-        uint at = base + (index + k) * 4u * n;
+        uint at = (base + (index + k) * bytes) & 0x1FFFFFFFu, keep = 0u;
+        if (bytes < 4u) {   // part of a dword: the element's bytes swapped among themselves, the other bytes kept
+            if (bytes == 2u && (e == 1u || e == 2u)) d[0] = ((d[0] & 255u) << 8) | (d[0] >> 8);
+            uint sh = at & 3u;
+            d[0] <<= 8u * sh;
+            keep = ~(((1u << bytes) - 1u) << sh) & 15u;
+            at &= ~3u;
+        } else {
+            for (uint j = 0u; j < n; j++) d[j] = xe_mx_swap(d[j], e);
+            if (e == 4u && n >= 2u) { uint t = d[0]; d[0] = d[1]; d[1] = t; t = d[2]; d[2] = d[3]; d[3] = t; }
+            if (e == 5u && n == 4u) { uint t = d[0]; d[0] = d[3]; d[3] = t; t = d[1]; d[1] = d[2]; d[2] = t; }
+        }
         uint slot = atomicAdd(xe_mx_n, n);
         if (slot + n > xe_mx_cap) continue;
         for (uint j = 0u; j < n; j++) {
-            xe_mx_log[2u * (slot + j)] = at + 4u * j;
+            xe_mx_log[2u * (slot + j)] = (at + 4u * j) | (keep & 3u) | (keep >> 2) << 30;
             xe_mx_log[2u * (slot + j) + 1u] = d[j];
         }
     }
@@ -857,14 +888,12 @@ def translate(words, stage="vertex", interpolators=0, memexport=False):
 
 def translate_cached(words, stage="vertex", interpolators=0):
     """What the shader cache holds (bringup, tools/prepare/x360.py; XBA-282): GLSL ES 3.00 when the shader can be,
-    else, for a vertex shader that memory export stops, the GLSL ES 3.10 memory export translation (the renderer runs
-    it where GLES 3.1 allows, and skips its draws elsewhere)."""
+    else, for a shader that memory export stops, the GLSL ES 3.10 memory export translation (the renderer runs it where
+    GLES 3.1 allows, raising the other stage to 3.10, and skips its draws elsewhere)."""
     try:
         return translate(words, stage, interpolators)
     except Unsupported as ex:
-        # vertex shaders only: the renderer links a 3.10 vertex shader with its pixel shader raised to 3.10, not the
-        # other way round
-        if stage != "vertex" or not re.search(r"export to register 3[2-7]$", str(ex)):
+        if not re.search(r"export to register 3[2-7]$", str(ex)):
             raise
     return translate(words, stage, interpolators, memexport=True)
 

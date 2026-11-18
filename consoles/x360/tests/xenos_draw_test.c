@@ -1190,6 +1190,44 @@ int main(int argc, char **argv)
         run(&cp);
     }
 
+    /* a pixel shader exports one byte (format 8, index 1 of the dword at 0x41800): the dword's other bytes stay; without
+     * GLES 3.1 fragment storage blocks the draw is skipped and counted, memory untouched */
+    {
+        uint32_t nm;
+        uint32_t *pm = load(argv[1], "ps_mx.bin", &nm);
+        CHECK(pm != NULL, "no ps_mx.bin");
+        if (pm) {
+            w32(0x41800, 0xAABBCCDDu);
+            im[0] = 1, im[1] = nm;
+            memcpy(im + 2, pm, 4 * nm);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nm);
+            free(pm);
+            reg(0x4410, 0x40000000u | (0x41800u >> 2)); /* c4.x: the base in dwords */
+            reg(0x4411, 0x4B000000u | 1u);              /* c4.y: index 1 */
+            reg(0x4412, 0x4B000000u | 2u << 8);         /* c4.z: format 8 */
+            reg(0x4413, 0x4B000000u | 2u);              /* c4.w: bound 2 */
+            reg(0x4414, fbits(1.0f));                   /* c5.x */
+            reg(0x4800, 0x2000u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            xenos_gl_stats s0, s1;
+            xenos_gl_get_stats(g, &s0);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            xenos_gl_get_stats(g, &s1);
+            uint32_t got = rd32(NULL, 0x41800);
+            if (s1.memexport_skipped > s0.memexport_skipped)
+                CHECK(got == 0xAABBCCDDu, "pixel memory export skipped, yet memory is %08X", got);
+            else
+                CHECK(got == 0xAAFFCCDDu && s1.memexport_draws == s0.memexport_draws + 1,
+                      "pixel memory export of one byte: %08X, want AAFFCCDD", got);
+            im[0] = 1, im[1] = nps;
+            memcpy(im + 2, ps, 4 * nps);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+            run(&cp);
+        }
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;

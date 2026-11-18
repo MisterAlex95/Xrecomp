@@ -68,6 +68,11 @@ def shaders():
         ("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1, srcs=((4, 0, 0, 0), (4, 0, 0, 0), (0, 0, 0, 0)))),
         ("alu", alu_words(vop=2, vdest=33, vmask=0xF, export=1, srcs=((5, 0, 0, 0), (5, 0, 0, 0), (0, 0, 0, 0))))],
         {})])
+    # ps_mx (XBA-296): a pixel shader's memory export: eA = c4, eM0 = c5, oC0 = interpolator 0
+    packed["ps_mx"] = program([(2, [
+        ("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1, srcs=((4, 0, 0, 0), (4, 0, 0, 0), (0, 0, 0, 0)))),
+        ("alu", alu_words(vop=2, vdest=33, vmask=0xF, export=1, srcs=((5, 0, 0, 0), (5, 0, 0, 0), (0, 0, 0, 0)))),
+        ("alu", alu_words(**export(0, 0)))], {})])
     return vs, ps, ps_tex, packed
 
 

@@ -16,7 +16,7 @@ import pytest
 from . import CONSOLE  # noqa: F401
 from .xenos_asm import (alu_words, cf_branch, cf_exec, cf_loop_end, cf_loop_start, export, fetch_words,
                         flow_program, loop_const, program)
-from .xenos_glsl import Unsupported, translate
+from .xenos_glsl import Unsupported, translate, translate_cached
 
 RUN = os.environ.get("XENOS_GLSL_RUN", "")
 TINY = 1.17549435e-38
@@ -565,6 +565,17 @@ MEMEXPORT_CASES = [
     # 32_FLOAT, 16in32
     ("f32", _ea(0x30000, 0, 1, 36, endian=3), [[2.0, 9.0, 9.0, 9.0]],
      [(0x30000, ((_fbits(2.0) << 16) | (_fbits(2.0) >> 16)) & 0xFFFFFFFF)]),
+    # XBA-296, elements smaller than a dword: the address's bits 0-1 and 30-31 name the bytes to keep
+    # 8 at byte 3 of the dword: bytes 0-2 kept
+    ("r8", _ea(0x40000, 3, 4, 2), [[1.0, 0.0, 0.0, 0.0]], [(0x40000 | 3 | 1 << 30, 0xFF000000)]),
+    # 16 unorm at byte 2, 8-in-16: 0x8000 swapped, bytes 0-1 kept
+    ("r16", _ea(0x50000, 1, 2, 24, endian=1), [[0.5, 0.0, 0.0, 0.0]], [(0x50000 | 3, 0x00800000)]),
+    # 8_8 at byte 0: bytes 2-3 kept
+    ("rg8", _ea(0x60000, 0, 1, 10), [[1.0, 0.0, 0.0, 0.0]], [(0x60000 | 3 << 30, 0x000000FF)]),
+    # 16_FLOAT at byte 2, no swap: half 1.0
+    ("r16f", _ea(0x70000, 1, 2, 30), [[1.0, 0.0, 0.0, 0.0]], [(0x70000 | 3, 0x3C000000)]),
+    # 5_6_5 at byte 0, 16-in-32 leaves a 16-bit element alone: all ones in green
+    ("r565", _ea(0x80000, 0, 1, 4, endian=3), [[0.0, 1.0, 0.0, 0.0]], [(0x80000 | 3 << 30, 0x000007E0)]),
 ]
 
 
@@ -577,6 +588,11 @@ def test_memexport_translation():
     assert "buffer XeMemExport" in src_ and "xe_eMw |= 2u;" in src_ and "if (xe_eMw != 0u) xe_mx_flush();" in src_
     plain, info = translate(to_words([dict(vop=2, vdest=1, vmask=0xF)]), "vertex", memexport=True)
     assert plain.startswith("#version 300 es") and not info["memexport"]   # no export: GLSL ES 3.00 as before
+    ps_words = program([(2, [A(vop=2, vdest=32, vmask=0xF, export=1, srcs=((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))),
+                             A(vop=2, vdest=33, vmask=0xF, export=1, srcs=((1, 0, 0, 0), (1, 0, 0, 0), (0, 0, 0, 0))),
+                             A(**export(0, 0))], {})])
+    ps_src, ps_info = translate_cached(ps_words, "pixel", interpolators=1)  # XBA-296: pixel shaders export too
+    assert ps_info["memexport"] and ps_src.startswith("#version 310 es")
 
 
 @pytest.mark.skipif(not os.path.isfile(RUN), reason="$XENOS_GLSL_RUN not set (tests/run_glsl_mesa.sh sets it)")
