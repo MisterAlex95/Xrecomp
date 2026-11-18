@@ -9,7 +9,8 @@
 3. the decoder / lifter coverage of the code (unknown words, not-lifted mnemonics, helpers, jump tables);
 4. recompile, build the pack (WORKDIR/libtitle.so, -DXE_RUNTIME), run it under x360_run, and when execution reaches
    code the pack lacks, recompile with those addresses and run again (up to --rounds);
-   the shaders it loads are dumped (WORKDIR/shaders) and translated to GLSL ES (xenos_glsl), counted;
+   the shaders it loads are dumped (WORKDIR/shaders) and translated to GLSL ES (xenos_glsl), counted, and a
+   last run draws with them (x360_run --render; --frames N keeps the first N frames as PPM in WORKDIR/frames);
 5. a summary with no title data in it (counts, export names, the runtime's last message), also written to
    WORKDIR/summary.txt: what to paste in the ticket.
 
@@ -67,6 +68,32 @@ def build_pack(src, out, cc, jobs):
     subprocess.run([cc, "-shared", "-o", out] + objs + ["-lm"], check=True)
 
 
+def render_run(a, run, plain, pack, shader_dir, say):
+    """One more run of the title with the renderer on its translated shaders (x360_run --render): the render stats
+    line goes in the summary, the first --frames frames stay in WORKDIR/frames."""
+    frames = os.path.join(a.work, "frames")
+    shutil.rmtree(frames, ignore_errors=True)
+    os.makedirs(frames)
+    log = os.path.join(a.work, "render_log.txt")
+    cmd = [run, plain, "--pack", pack, "--insns", str(a.insns), "--render", shader_dir, "--frames", frames,
+           "--dbg", os.devnull, "--log", log]
+    if a.disc:
+        cmd += ["--disc", a.disc]
+    try:
+        subprocess.run(cmd, timeout=3600)
+    except subprocess.TimeoutExpired:
+        pass
+    lines = open(log, errors="replace").read().splitlines() if os.path.exists(log) else []
+    for line in lines:
+        if line.startswith("render:") or "no renderer" in line:
+            say("  %s" % line)
+    names = sorted(os.listdir(frames))
+    for name in names[a.frames:]:
+        os.remove(os.path.join(frames, name))
+    if names:
+        say("  frames kept: %d (in %s)" % (min(len(names), a.frames), frames))
+
+
 def shader_report(shader_dir):
     """The shaders x360_run dumped (vs_*.bin / ps_*.bin), each translated by xenos_glsl: counts and what stops the
     others (the instruction kinds only, no title data). The GLSL lands next to each .bin."""
@@ -101,6 +128,10 @@ def main(argv=None):
     ap.add_argument("--insns", type=int, default=2000000000)
     ap.add_argument("--cc", default=os.environ.get("CC", "cc"))
     ap.add_argument("-j", type=int, default=3)
+    ap.add_argument("--no-render", action="store_true",
+                    help="skip the last run that draws with the translated shaders (EGL / GLES 3.0)")
+    ap.add_argument("--frames", type=int, default=0,
+                    help="that run's frames: keep the first N as PPM in WORKDIR/frames (default 0: count only)")
     a = ap.parse_args(argv)
     os.makedirs(a.work, exist_ok=True)
     lines = []
@@ -206,6 +237,8 @@ def main(argv=None):
     say("shaders: %d loaded, %d translated to GLSL ES%s" % (
         shaders["total"], shaders["translated"],
         "; not yet: " + ", ".join("%s (%d)" % kv for kv in todo) if todo else ""))
+    if shaders["translated"] and not a.no_render:
+        render_run(a, run, plain, pack, shader_dir, say)
     dbg = os.path.join(a.work, "dbg.txt")
     say("DbgPrint: %d lines (in %s, not copied here)" % (
         sum(1 for _ in open(dbg, errors="replace")) if os.path.exists(dbg) else 0, dbg))
