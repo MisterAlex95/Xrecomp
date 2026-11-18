@@ -15,7 +15,8 @@ What the GLSL expects of the host (the renderer, xenos_gl.c): one std140 uniform
 constants); uvec4 l[8] (the 32 loop constants); vec4 at (the alpha test: enable, function, reference, as
 RB_COLORCONTROL / RB_ALPHA_REF say; the pixel shader discards a failing colour 0); vec4 pg (the pixel parameter
 register SQ_CONTEXT_MISC names, or -1, and the target height: r[pg.x] gets the pixel's top-left-origin position, X
-negative for a back face, as Xenia's registers.h describes PsParamGen) } xe_k -- 4288 bytes, the host
+negative for a back face, as Xenia's registers.h describes PsParamGen); vec4 vp (the guest viewport as a transform
+of clip-space xy: host xy = xy * vp.xy + w * vp.zw) } xe_k -- 4304 bytes, the host
 picks the binding points (GLES 3.0
 guarantees 16 KB blocks, while 256 loose vec4 would take all of a pixel shader's guaranteed uniforms); `in vec4
 xe_v<n>` per vertex fetch, its comment giving the fetch constant, offset, format, stride and signedness (the renderer
@@ -577,7 +578,7 @@ def translate(words, stage="vertex", interpolators=0):
     out = ["#version 300 es", "precision highp float;", "precision highp int;", "precision highp sampler2D;",
            "precision highp sampler3D;", "precision highp samplerCube;",
            # an instance name: block members are global to a program, and both stages have xe_c / xe_b / xe_l
-           "layout(std140) uniform %s { vec4 c[256]; uvec4 b[2]; uvec4 l[8]; vec4 at; vec4 pg; } xe_k;" % (
+           "layout(std140) uniform %s { vec4 c[256]; uvec4 b[2]; uvec4 l[8]; vec4 at; vec4 pg; vec4 vp; } xe_k;" % (
                "XeVertexConstants" if stage == "vertex" else "XePixelConstants"),
            "#define xe_c xe_k.c", "#define xe_b xe_k.b", "#define xe_l xe_k.l"]
     for i, (_, a) in enumerate(sh.attributes):
@@ -617,8 +618,10 @@ def translate(words, stage="vertex", interpolators=0):
         out += ["    xe_color%d = vec4(0.0);" % o for o in sorted(sh.outputs)]
     out += sh.body
     if stage == "vertex":
-        # Direct3D's clip-space depth (0..w) to GL's (-w..w)
-        out.append("    gl_Position = vec4(xe_pos.xy, xe_pos.z * 2.0 - xe_pos.w, xe_pos.w);")
+        # the guest viewport (screen-space positions included) to the host's full-target clip space, Direct3D's
+        # clip-space depth (0..w) to GL's (-w..w)
+        out.append("    gl_Position = vec4(xe_pos.xy * xe_k.vp.xy + xe_pos.w * xe_k.vp.zw, xe_pos.z * 2.0 - xe_pos.w, "
+                   "xe_pos.w);")
         if sh.exports_psize:
             out.append("    gl_PointSize = xe_psize.x;")
     else:

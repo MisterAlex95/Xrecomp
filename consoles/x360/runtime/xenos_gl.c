@@ -787,9 +787,30 @@ static int gl_prim(uint32_t t)
     }
 }
 
+/* The guest viewport as the vertex shader applies it (xe_k.vp; Xenia's draw_util.cc GetHostViewportInfo): window
+ * position = NDC * scale + offset, scale 1 / offset 0 on an axis whose PA_CL_VTE_CNTL bits are off (screen-space
+ * draws give pixels), plus PA_SC_WINDOW_OFFSET when PA_SU_SC_MODE_CNTL enables it and half a pixel for Direct3D's
+ * pixel centre (PA_SU_VTX_CNTL); then to the host's full-target clip space, y downwards on the guest. */
+static void viewport_transform(const xenos_gl *g, const xenos_cp *cp, float vp[4])
+{
+    uint32_t vte = cp->regs[0x2206];
+    float sx = vte & 1 ? as_float(cp->regs[0x210F]) : 1.0f, ox = vte & 2 ? as_float(cp->regs[0x2110]) : 0.0f;
+    float sy = vte & 4 ? as_float(cp->regs[0x2111]) : 1.0f, oy = vte & 8 ? as_float(cp->regs[0x2112]) : 0.0f;
+    if ((cp->regs[0x2205] >> 16) & 1) {
+        uint32_t wo = cp->regs[0x2080];
+        ox += (float)((int32_t)(wo << 17) >> 17), oy += (float)((int32_t)(wo << 1) >> 17);
+    }
+    if (!(cp->regs[0x2302] & 1)) /* kD3DZero: pixel centres at .0 */
+        ox += 0.5f, oy += 0.5f;
+    float w = (float)g->width, h = (float)g->height;
+    vp[0] = 2.0f * sx / w, vp[1] = -2.0f * sy / h, vp[2] = 2.0f * ox / w - 1.0f, vp[3] = 1.0f - 2.0f * oy / h;
+}
+
 static void upload_constants(xenos_gl *g, const xenos_cp *cp)
 {
-    uint8_t block[4096 + 32 + 128 + 32];
+    uint8_t block[4096 + 32 + 128 + 48];
+    float vp[4];
+    viewport_transform(g, cp, vp);
     uint32_t cc = cp->regs[0x2202];
     float at[4] = {(cc >> 3) & 1 ? 1.0f : 0.0f, (float)(cc & 7), as_float(cp->regs[0x210E]), 0.0f};
     /* SQ_PROGRAM_CNTL's param_gen, SQ_CONTEXT_MISC's register for it */
@@ -801,6 +822,7 @@ static void upload_constants(xenos_gl *g, const xenos_cp *cp)
         memcpy(block + 4096 + 32, &cp->regs[0x4908], 128);
         memcpy(block + 4096 + 32 + 128, at, 16); /* RB_COLORCONTROL's alpha test, RB_ALPHA_REF */
         memcpy(block + 4096 + 32 + 128 + 16, pg, 16);
+        memcpy(block + 4096 + 32 + 128 + 32, vp, 16);
         g->glBindBuffer(GL_UNIFORM_BUFFER, g->ubo[stage]);
         g->glBufferData(GL_UNIFORM_BUFFER, sizeof block, block, GL_STREAM_DRAW);
         g->glBindBufferBase(GL_UNIFORM_BUFFER, (GLuint)stage, g->ubo[stage]);
@@ -1210,19 +1232,6 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
     g->glActiveTexture(GL_TEXTURE0);
 }
 
-static void set_viewport(xenos_gl *g, const xenos_cp *cp)
-{
-    uint32_t vte = cp->regs[0x2206];
-    if ((vte & 0xF) != 0xF) { /* scale / offset not both enabled for x and y: clip space covers the target */
-        g->glViewport(0, 0, g->width, g->height);
-        return;
-    }
-    float xs = as_float(cp->regs[0x210F]), xo = as_float(cp->regs[0x2110]);
-    float ys = as_float(cp->regs[0x2111]), yo = as_float(cp->regs[0x2112]);
-    float ax = xs < 0 ? -xs : xs, ay = ys < 0 ? -ys : ys;
-    /* Xenos window y grows downwards; the target is read back top row first, so GL's y is flipped */
-    g->glViewport((GLint)(xo - ax), (GLint)(g->height - (yo + ay)), (GLsizei)(2 * ax), (GLsizei)(2 * ay));
-}
 
 /* ---- resolves ----
  * A draw with RB_MODECONTROL's eDRAM mode "copy" is a resolve (Xenia's draw_util.cc GetResolveInfo): the rectangle
@@ -1496,7 +1505,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     upload_constants(g, cp);
     apply_state(g, cp);
     bind_textures(g, cp, p);
-    set_viewport(g, cp);
+    g->glViewport(0, 0, g->width, g->height); /* the guest viewport is applied in the vertex shader (xe_k.vp) */
     g->glBindVertexArray(g->vao);
     g->glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
     g->glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nv * na * 16, vb, GL_STREAM_DRAW);

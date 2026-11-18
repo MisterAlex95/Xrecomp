@@ -672,6 +672,8 @@ static int render_test(const char *dir)
     for (uint32_t i = 0; i < nps; i++)
         rput(ps[i]);
     rreg(0x2104, 0xF), rreg(0x2201, 0x00010001u), rreg(0x2208, 4);
+    rreg(0x2206, 0x3F), rreg(0x210F, fbits32(32.0f)), rreg(0x2110, fbits32(32.0f)), rreg(0x2111, fbits32(-32.0f)),
+        rreg(0x2112, fbits32(32.0f)); /* Direct3D's full-target viewport */
     for (int i = 0; i < 4; i++)
         rreg(0x4400 + (uint32_t)i, fbits32(1.0f));
     rreg(0x4800, data_phys | 3u), rreg(0x4801, 2u | 32u << 2);

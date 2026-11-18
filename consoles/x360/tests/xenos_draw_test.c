@@ -6,12 +6,15 @@
  *   frame 0: a red triangle (auto indices, triangle list), c0 = 1: the centre is red, a corner stays clear;
  *   frame 1: a full-target quad from four green vertices and six 16-bit indices (DMA, 8-in-16 swap mode, the way a
  *            big-endian CPU writes them), c0 = (1, 0.5, 1, 1): every pixel is half green;
- *   frame 2: the same quad with the viewport scale / offset enabled for the target's top-left quarter only;
+ *   frame 2: the same quad with the viewport scale / offset enabled for the target's top-left quarter only (the
+ *            VTE register's z bits on too: all six, as Direct3D sets them);
  *   frame 3: depth: a green quad at z 0.25, then a red one at z 0.75 with the test "less": green stays;
  *   frame 4: blending: red, then green at alpha 0.5 with src alpha / one minus src alpha: (0.5, 0.5, 0);
  *   frame 5: culling of back faces: the red triangle (counter-clockwise on screen) is drawn with "front is CCW" and
  *            culled with "front is CW";
  *   frame 6: a quad list (one quad of four vertices) covers the target;
+ *   (every frame uses Direct3D's full-target viewport but frame 2 and frame 24: with the viewport off, positions
+ *   are pixels -- a screen-space quad from (16, 16) to (48, 48));
  *   frames 7-10, textures (ps_tex.bin: a 2D fetch from texture fetch constant 2 at the interpolated colour's xy, a
  *            full-target quad with D3D texture coordinates, point sampling): a linear 2x2 8_8_8_8 texture (each
  *            quarter of the target one texel), the same with a red / blue swizzle, a tiled 32x32 8_8_8_8 texture
@@ -122,6 +125,26 @@ static void reg(uint32_t index, uint32_t v)
     pk[npk++] = v;
 }
 
+/* the viewport Direct3D sets for the whole target: VTE scale / offset on, (W/2, -H/2) around the centre */
+static void full_viewport(void)
+{
+    reg(0x2206, 0x3Fu);
+    reg(0x210F, fbits(W / 2.0f));
+    reg(0x2110, fbits(W / 2.0f));
+    reg(0x2111, fbits(-H / 2.0f));
+    reg(0x2112, fbits(H / 2.0f));
+}
+
+/* the byte offset of texel (x, y) of a tiled 32-bit texture with a 64-texel pitch (the renderer's formula) */
+static uint32_t tiled_off(int x, int y)
+{
+    int32_t outer = ((y >> 5) * (W >> 5) + (x >> 5)) << 6, inner = (((y >> 1) & 7) << 3) | (x & 7);
+    int32_t oi = (outer | inner) << 2;
+    uint32_t bank = (y >> 4) & 1, pipe = ((x >> 3) & 3) ^ (((y >> 3) & 1) << 1);
+    return (uint32_t)((int32_t)((uint32_t)(y & 1) << 4 | pipe << 6 | bank << 11) | (oi & 15) | ((oi >> 4) & 1) << 5 |
+                      ((oi >> 5) & 7) << 8 | (oi >> 8) << 12);
+}
+
 static void run(xenos_cp *cp)
 {
     for (uint32_t i = 0; i < npk; i++)
@@ -190,6 +213,7 @@ int main(int argc, char **argv)
     /* the render state a title sets first: all colour channels written, no blending (src * 1 + dst * 0) */
     reg(0x2104, 0xFu);
     reg(0x2201, 0x00010001u);
+    full_viewport();
 
     /* frame 0: a red triangle */
     vertex(0x1000, -0.5f, -0.5f, 1, 0, 0);
@@ -227,14 +251,15 @@ int main(int argc, char **argv)
     type3(PM4_XE_SWAP, swap, 4);
     run(&cp);
     int all = 1;
-    for (int y = 0; y < H; y += 7)
-        for (int x = 0; x < W; x += 7) {
+    /* the edges of a full-target quad run through pixel centres (Direct3D's half-pixel offset): inner pixels */
+    for (int y = 1; y < H - 1; y += 7)
+        for (int x = 1; x < W - 1; x += 7) {
             const uint8_t *p = px(g, x, y);
             if (p[0] != 0 || p[1] < 126 || p[1] > 129 || p[2] != 0)
                 all = 0;
         }
-    CHECK(all, "frame 1: not every pixel half green (corner %u %u %u)", px(g, 0, 0)[0], px(g, 0, 0)[1],
-          px(g, 0, 0)[2]);
+    CHECK(all, "frame 1: not every pixel half green (corner %u %u %u)", px(g, 1, 1)[0], px(g, 1, 1)[1],
+          px(g, 1, 1)[2]);
 
     /* frame 2: the viewport: scale W/4, H/4 (y negative: Xenos's downward y), offset W/4, H/4 -> the top-left
      * quarter */
@@ -251,7 +276,7 @@ int main(int argc, char **argv)
           out[1], out2[1]);
 
     /* frame 3: depth (back to the full-target viewport) */
-    reg(0x2206, 0);
+    full_viewport();
     reg(0x4401, fbits(1.0f));
     vertex_z(0x4000, -1, -1, 0.25f, 0, 1, 0);
     vertex_z(0x4020, 1, -1, 0.25f, 0, 1, 0);
@@ -422,16 +447,7 @@ int main(int argc, char **argv)
     c = px(g, W / 2, H / 2);
     CHECK(c[0] == 0 && c[1] == 255, "frame 12 (resolve clear): %u,%u,%u, want green", c[0], c[1], c[2]);
     /* the copy: texel (x, y) of the tiled destination holds red (X = R in the low byte, 8-in-32: big-endian) */
-    uint32_t t10 = rd32(NULL, 0x18000 + 0), tmid = 0;
-    {
-        int x = 37, y = 21;
-        int32_t outer = ((y >> 5) * (W >> 5) + (x >> 5)) << 6, inner = (((y >> 1) & 7) << 3) | (x & 7);
-        int32_t oi = (outer | inner) << 2;
-        uint32_t bank = (y >> 4) & 1, pipe = ((x >> 3) & 3) ^ (((y >> 3) & 1) << 1);
-        int32_t off = (int32_t)((uint32_t)(y & 1) << 4 | pipe << 6 | bank << 11) | (oi & 15) | ((oi >> 4) & 1) << 5 |
-                      ((oi >> 5) & 7) << 8 | (oi >> 8) << 12;
-        tmid = rd32(NULL, 0x18000 + (uint32_t)off);
-    }
+    uint32_t t10 = rd32(NULL, 0x18000 + tiled_off(1, 1)), tmid = rd32(NULL, 0x18000 + tiled_off(37, 21));
     CHECK(t10 == 0xFF0000FFu && tmid == 0xFF0000FFu, "resolved texels %08X %08X, want FF0000FF", t10, tmid);
     /* frame 13: sample the resolved texture */
     if (pst2) {
@@ -463,7 +479,7 @@ int main(int argc, char **argv)
     type3(PM4_DRAW_INDX_2, &rect, 1);
     type3(PM4_XE_SWAP, swap, 4);
     run(&cp);
-    const uint8_t *rtl = px(g, 0, 0), *rtr = px(g, W - 1, 0), *rbl = px(g, 0, H - 1), *rbr = px(g, W - 1, H - 1);
+    const uint8_t *rtl = px(g, 1, 1), *rtr = px(g, W - 2, 1), *rbl = px(g, 1, H - 2), *rbr = px(g, W - 2, H - 2);
     CHECK(rtl[0] > 240 && rtr[1] > 240 && rbl[2] > 240 && rbr[0] < 15 && rbr[1] > 240 && rbr[2] > 240,
           "frame 14 (rectangle list): corners %u,%u,%u %u,%u,%u %u,%u,%u %u,%u,%u", rtl[0], rtl[1], rtl[2], rtr[0],
           rtr[1], rtr[2], rbl[0], rbl[1], rbl[2], rbr[0], rbr[1], rbr[2]);
@@ -594,7 +610,7 @@ int main(int argc, char **argv)
             type3(PM4_XE_SWAP, swap, 4);
             run(&cp);
             c = px(g, W / 2, H / 2);
-            uint32_t t1 = rd32(NULL, 0x20000);
+            uint32_t t1 = rd32(NULL, 0x20000 + tiled_off(5, 5));
             CHECK(c[1] == 255 && c[2] == 0 && t1 == 0xFFFF0000u,
                   "frame 20 (render targets): target 0 %u,%u,%u, target 1 resolved %08X (want FFFF0000)", c[0], c[1],
                   c[2], t1);
@@ -655,9 +671,30 @@ int main(int argc, char **argv)
         }
     }
 
+    /* frame 24: the viewport off, positions in pixels: a red quad over (16, 16) .. (48, 48) */
+    im[0] = 1, im[1] = nps;
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    for (int i = 0; i < 4; i++)
+        reg(0x4400 + (uint32_t)i, fbits(1.0f));
+    vertex(0x7800, 16, 16, 1, 0, 0);
+    vertex(0x7820, 48, 16, 1, 0, 0);
+    vertex(0x7840, 16, 48, 1, 0, 0);
+    vertex(0x7860, 48, 48, 1, 0, 0);
+    reg(0x4800, 0x7800u | 3u);
+    reg(0x4801, 2u | (32u << 2));
+    reg(0x2206, 0);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);
+    full_viewport();
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    const uint8_t *in2 = px(g, 20, 20), *in3 = px(g, 44, 44), *out3 = px(g, 10, 10), *out4 = px(g, 52, 30);
+    CHECK(in2[0] == 255 && in3[0] == 255 && out3[0] == 0 && out4[0] == 0,
+          "frame 24 (screen space): (20,20) %u (44,44) %u (10,10) %u (52,30) %u", in2[0], in3[0], out3[0], out4[0]);
+
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 27 && st.frames == 24 && st.resolves == 2 && st.no_shader == 0 && st.unsupported == 0 &&
+    CHECK(st.drawn == 28 && st.frames == 25 && st.resolves == 2 && st.no_shader == 0 && st.unsupported == 0 &&
               st.unsupported_textures == 0,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
           (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
@@ -669,6 +706,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: 24 frames drawn and read back as expected, two resolves\n");
+    printf("xenos_gl: 25 frames drawn and read back as expected, two resolves\n");
     return 0;
 }
