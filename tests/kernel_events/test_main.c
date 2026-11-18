@@ -32,6 +32,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 /* Provided by the generated title; this harness has none. */
 typedef void (*recomp_func_t)(void);
 /* A guest routine for xbox_DpcQueueGuestCall (XBA-94): records its one
@@ -241,6 +247,116 @@ static void ke_init(uint32_t va)
     call(S_INIT, 3, args);
 }
 
+/* XB-005: RtlDowncaseUnicodeString / RtlUpcaseUnicodeString. The console's
+ * functions write no terminator, so one goes in only where the caller's buffer
+ * has room for it. */
+#define RTL_VA      (scratch + 0x4000)
+#define RTL_SRC     (RTL_VA + 0x00)      /* UNICODE_STRING */
+#define RTL_DST     (RTL_VA + 0x10)      /* UNICODE_STRING */
+#define RTL_SRC_BUF (RTL_VA + 0x100)
+#define RTL_DST_BUF (RTL_VA + 0x200)
+#define RTL_CANARY  0xCAFEu
+
+static uint16_t *G16(uint32_t va)
+{
+    return (uint16_t *)((uintptr_t)va + xbox_GetMemoryOffset());
+}
+
+static void rtl_string(uint32_t va, uint16_t len, uint16_t max, uint32_t buf)
+{
+    *G16(va) = len;
+    *G16(va + 2) = max;
+    G(va)[1] = buf;
+}
+
+/* "aBcD" at va, four characters, the canary just after them. */
+static void rtl_text(uint32_t va)
+{
+    static const uint16_t text[4] = { 'a', 'B', 'c', 'D' };
+    memcpy(G16(va), text, sizeof text);
+    *G16(va + 8) = RTL_CANARY;
+}
+
+static uint32_t rtl_call(int slot, uint32_t dst, uint32_t src, uint32_t alloc)
+{
+    uint32_t args[3] = { dst, src, alloc };
+    return call(slot, 3, args);
+}
+
+static int rtl_is(uint32_t va, int upper)
+{
+    const uint16_t *t = G16(va);
+    return upper ? t[0] == 'A' && t[1] == 'B' && t[2] == 'C' && t[3] == 'D'
+                 : t[0] == 'a' && t[1] == 'b' && t[2] == 'c' && t[3] == 'd';
+}
+
+static void rtl_strings(int slot, int upper)
+{
+    char d[120];
+    uint32_t st, buf;
+
+    /* A destination of exactly Length bytes. */
+    rtl_text(RTL_SRC_BUF);
+    rtl_text(RTL_DST_BUF);
+    rtl_string(RTL_SRC, 8, 8, RTL_SRC_BUF);
+    rtl_string(RTL_DST, 0, 8, RTL_DST_BUF);
+    st = rtl_call(slot, RTL_DST, RTL_SRC, 0);
+    snprintf(d, sizeof d, "status 0x%08X, word after the buffer 0x%04X", st, *G16(RTL_DST_BUF + 8));
+    check(st == 0 && rtl_is(RTL_DST_BUF, upper) && *G16(RTL_DST_BUF + 8) == RTL_CANARY,
+          "a buffer of exactly Length: converted, the next word untouched", d);
+
+    /* In place: Dest and Src are the same string. */
+    rtl_text(RTL_SRC_BUF);
+    rtl_string(RTL_SRC, 8, 8, RTL_SRC_BUF);
+    st = rtl_call(slot, RTL_SRC, RTL_SRC, 0);
+    snprintf(d, sizeof d, "status 0x%08X, word after the buffer 0x%04X", st, *G16(RTL_SRC_BUF + 8));
+    check(st == 0 && rtl_is(RTL_SRC_BUF, upper) && *G16(RTL_SRC_BUF + 8) == RTL_CANARY,
+          "in place: converted, the next word untouched", d);
+
+    /* Room for the terminator: it is still written. */
+    rtl_text(RTL_SRC_BUF);
+    rtl_text(RTL_DST_BUF);
+    rtl_string(RTL_SRC, 8, 8, RTL_SRC_BUF);
+    rtl_string(RTL_DST, 0, 10, RTL_DST_BUF);
+    st = rtl_call(slot, RTL_DST, RTL_SRC, 0);
+    check(st == 0 && rtl_is(RTL_DST_BUF, upper) && *G16(RTL_DST_BUF + 8) == 0,
+          "a buffer with room: terminated", NULL);
+
+    /* AllocateDestinationString: the new buffer is terminated. */
+    rtl_text(RTL_SRC_BUF);
+    rtl_string(RTL_SRC, 8, 8, RTL_SRC_BUF);
+    rtl_string(RTL_DST, 0, 0, 0);
+    st = rtl_call(slot, RTL_DST, RTL_SRC, 1);
+    buf = G(RTL_DST)[1];
+    snprintf(d, sizeof d, "status 0x%08X, buffer 0x%08X", st, buf);
+    check(st == 0 && buf && *G16(RTL_DST) == 8 && *G16(RTL_DST + 2) == 10
+          && rtl_is(buf, upper) && *G16(buf + 8) == 0,
+          "allocated: converted and terminated", d);
+
+#ifndef _WIN32
+    /* Length 0 and no buffer: nothing to write, and guest 0 is not memory. */
+    {
+        pid_t pid = fork();
+        int status = -1;
+
+        if (pid == 0) {
+            /* If this regresses it faults, with the whole guest address space
+             * mapped: no core file of several GB on the test host. */
+            struct rlimit no_core = { 0, 0 };
+            setrlimit(RLIMIT_CORE, &no_core);
+            alarm(10);
+            rtl_string(RTL_SRC, 0, 0, 0);
+            rtl_string(RTL_DST, 0, 0, 0);
+            _exit(rtl_call(slot, RTL_DST, RTL_SRC, 0) == 0 ? 0 : 1);
+        }
+        waitpid(pid, &status, 0);
+        snprintf(d, sizeof d, "child status 0x%X", (unsigned)status);
+        check(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+              "an empty string with no buffer writes nothing", d);
+    }
+#endif
+}
+
 /* Arm TIMER_VA; a negative due time is relative, in 100 ns units. */
 static void ke_set_timer_ex(long long due_100ns, uint32_t period_ms)
 {
@@ -416,6 +532,9 @@ int main(int argc, char **argv)
         printf("\n%d failure(s)\n", failures);
         return failures ? 1 : 0;
     }
+
+    rtl_strings(S_DOWNCASE, 0);
+    rtl_strings(S_UPCASE, 1);
 
     ke_init(EXPLICIT_VA);
     ke_init(EXPLICIT_B);

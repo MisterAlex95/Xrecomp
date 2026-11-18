@@ -9003,7 +9003,10 @@ static void bridge_RtlDowncaseUnicodeString(void)
     dp = (uint16_t *)XBOX_TO_NATIVE(d_buf);
     for (i = 0; i < (uint32_t)(s_len / 2); i++)
         dp[i] = (uint16_t)towlower((wint_t)sp[i]);
-    dp[(uint32_t)(s_len / 2)] = 0;
+    /* Only where the buffer has room: Length == MaximumLength is the usual
+     * in-place call, and the word after it is the caller's. */
+    if (d_buf && (do_alloc || (uint32_t)s_len + sizeof(uint16_t) <= d_max))
+        dp[(uint32_t)(s_len / 2)] = 0;
     BRIDGE_MEM16(dst_va + 0) = s_len;
     g_eax = 0;   /* STATUS_SUCCESS */
 }
@@ -9040,7 +9043,9 @@ static void bridge_RtlUpcaseUnicodeString(void)
     dp = (uint16_t *)XBOX_TO_NATIVE(d_buf);
     for (i = 0; i < (uint32_t)(s_len / 2); i++)
         dp[i] = (uint16_t)towupper((wint_t)sp[i]);
-    dp[(uint32_t)(s_len / 2)] = 0;
+    /* As in RtlDowncaseUnicodeString: only where the buffer has room. */
+    if (d_buf && (do_alloc || (uint32_t)s_len + sizeof(uint16_t) <= d_max))
+        dp[(uint32_t)(s_len / 2)] = 0;
     BRIDGE_MEM16(dst_va + 0) = s_len;
     g_eax = 0;   /* STATUS_SUCCESS */
 }
