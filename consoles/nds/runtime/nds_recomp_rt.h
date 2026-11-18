@@ -59,13 +59,13 @@ enum {
     NDS_RC_EXIT_NOT_COVERED = 2, /* this function does not hold PC: nothing ran */
 };
 
-/* The core's bus (nds_bus.c). */
-uint8_t nds_read8(nds_machine *m, uint32_t addr);
-uint16_t nds_read16(nds_machine *m, uint32_t addr);
-uint32_t nds_read32(nds_machine *m, uint32_t addr);
-void nds_write8(nds_machine *m, uint32_t addr, uint8_t v);
-void nds_write16(nds_machine *m, uint32_t addr, uint16_t v);
-void nds_write32(nds_machine *m, uint32_t addr, uint32_t v);
+/* The core's bus (nds_bus.c): the CPU c's view (ARM9 or ARM7). */
+uint8_t nds_read8(nds_arm *c, uint32_t addr);
+uint16_t nds_read16(nds_arm *c, uint32_t addr);
+uint32_t nds_read32(nds_arm *c, uint32_t addr);
+void nds_write8(nds_arm *c, uint32_t addr, uint8_t v);
+void nds_write16(nds_arm *c, uint32_t addr, uint16_t v);
+void nds_write32(nds_arm *c, uint32_t addr, uint32_t v);
 
 /* ---- helpers for lifted code (the interpreter's semantics, nds_cpu.c) ---- */
 
@@ -182,7 +182,7 @@ static inline int32_t rc_qadd_flag(int32_t a, int32_t b, uint32_t *q)
     (void)(REGION)
 
 #define RC_PC() (h->cpu.r[15] - RC_PIPE)
-#define RC_M ((nds_machine *)(void *)h)
+#define RC_M ((nds_arm *)(void *)h)
 
 #ifdef NDS_RC_COUNT
 #define RC_COUNT() (h->rc_native++)

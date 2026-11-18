@@ -16,10 +16,11 @@ extern "C" {
 #endif
 
 typedef struct nds_machine nds_machine;
+typedef struct nds_arm nds_arm; /* one CPU of the machine (lifted code gets it) */
 
-#define NDS_RECOMP_ABI 1
+#define NDS_RECOMP_ABI 2
 
-typedef void (*nds_recomp_fn)(nds_machine *m);
+typedef void (*nds_recomp_fn)(nds_arm *c);
 
 enum { NDS_RECOMP_THUMB = 1u << 0 };
 
@@ -48,12 +49,15 @@ typedef struct nds_recomp_table {
 typedef const nds_recomp_table *(*nds_recomp_title_table_fn)(void);
 #define NDS_RECOMP_ENTRY_SYMBOL "nds_recomp_title_table"
 
-/* Attaches a table (NULL: interpreter only). Returns 0, or -1 when its ABI differs. */
-int nds_attach_recomp(nds_machine *m, const nds_recomp_table *t);
+/* Attaches a table to the ARM9 (cpu 0) or the ARM7 (cpu 1); NULL: interpreter only. Returns 0, or -1 when its ABI
+ * differs. A pack exports nds_recomp_title_table (ARM9) and, when it lifted the ARM7 too, nds_recomp_title_table7. */
+int nds_attach_recomp_cpu(nds_machine *m, int cpu, const nds_recomp_table *t);
+int nds_attach_recomp(nds_machine *m, const nds_recomp_table *t); /* cpu 0 */
+#define NDS_RECOMP_ENTRY_SYMBOL7 "nds_recomp_title_table7"
 
 /* Addresses (bit 0 = Thumb) inside a valid span where the interpreter had to start: copies at most max, returns
  * the total. */
-size_t nds_recomp_missed(nds_machine *m, uint32_t *out, size_t max);
+size_t nds_recomp_missed(nds_machine *m, int cpu, uint32_t *out, size_t max);
 
 typedef struct nds_recomp_stats {
     uint64_t native;       /* instructions lifted code ran (packs built with -DNDS_RC_COUNT) */
@@ -61,7 +65,7 @@ typedef struct nds_recomp_stats {
     uint64_t calls;        /* calls into lifted code */
     uint64_t span_checks;  /* span hashes computed */
 } nds_recomp_stats;
-void nds_recomp_get_stats(nds_machine *m, nds_recomp_stats *out);
+void nds_recomp_get_stats(nds_machine *m, int cpu, nds_recomp_stats *out);
 
 #ifdef __cplusplus
 }

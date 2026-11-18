@@ -14,8 +14,24 @@
 
 #define NDS_SPAN_RECHECK 4096u
 
-int nds_attach_recomp(nds_machine *m, const nds_recomp_table *t)
+void nds_recomp_free(nds_arm *m)
 {
+    free(m->span_state);
+    free(m->span_checked);
+    free(m->missed);
+    m->span_state = NULL;
+    m->span_checked = NULL;
+    m->missed = NULL;
+}
+
+int nds_attach_recomp(nds_machine *mm, const nds_recomp_table *t)
+{
+    return nds_attach_recomp_cpu(mm, 0, t);
+}
+
+int nds_attach_recomp_cpu(nds_machine *mm, int cpu, const nds_recomp_table *t)
+{
+    nds_arm *m = cpu ? &mm->a7 : &mm->a9;
     free(m->span_state);
     free(m->span_checked);
     m->span_state = NULL;
@@ -37,7 +53,7 @@ int nds_attach_recomp(nds_machine *m, const nds_recomp_table *t)
     return 0;
 }
 
-static int span_of(nds_machine *m, uint32_t pc)
+static int span_of(nds_arm *m, uint32_t pc)
 {
     for (uint32_t i = 0; i < m->rc->nspans; i++)
         if (pc >= m->rc->spans[i].lo && pc < m->rc->spans[i].hi)
@@ -45,7 +61,7 @@ static int span_of(nds_machine *m, uint32_t pc)
     return -1;
 }
 
-static bool span_valid(nds_machine *m, int s)
+static bool span_valid(nds_arm *m, int s)
 {
     if (m->span_state[s])
         return true;
@@ -55,7 +71,7 @@ static bool span_valid(nds_machine *m, int s)
     const nds_recomp_span *sp = &m->rc->spans[s];
     uint32_t h = 0x811C9DC5u;
     for (uint32_t a = sp->lo; a < sp->hi; a++)
-        h = (h ^ nds_debug_read8(m, a)) * 0x01000193u;
+        h = (h ^ (m->id ? nds7_debug_read8(m->m, a) : nds9_debug_read8(m->m, a))) * 0x01000193u;
     m->stats.span_checks++;
     if (h == sp->fnv1a) {
         m->span_state[s] = 1;
@@ -66,7 +82,7 @@ static bool span_valid(nds_machine *m, int s)
 }
 
 /* The entry whose run can hold pc (the last one at or before it, same state), or -1. */
-static int lookup(nds_machine *m, uint32_t pc, uint32_t thumb)
+static int lookup(nds_arm *m, uint32_t pc, uint32_t thumb)
 {
     unsigned slot = ((pc >> 1) ^ (pc >> 11) ^ thumb) & 1023;
     if (m->rc_cache_pc[slot] == (pc | thumb))
@@ -89,7 +105,7 @@ static int lookup(nds_machine *m, uint32_t pc, uint32_t thumb)
     return best;
 }
 
-static void record_miss(nds_machine *m, uint32_t key)
+static void record_miss(nds_arm *m, uint32_t key)
 {
     for (size_t i = 0; i < m->nmissed; i++)
         if (m->missed[i] == key)
@@ -105,7 +121,7 @@ static void record_miss(nds_machine *m, uint32_t key)
     m->missed[m->nmissed++] = key;
 }
 
-bool nds_recomp_dispatch(nds_machine *m)
+bool nds_recomp_dispatch(nds_arm *m)
 {
     if (!m->rc)
         return false;
@@ -125,7 +141,7 @@ bool nds_recomp_dispatch(nds_machine *m)
             m->stats.calls++;
             if (m->h.rc_exit == NDS_RC_EXIT_INTERP) {
                 unsigned n = m->h.rc_hint ? m->h.rc_hint : 1;
-                for (unsigned i = 0; i < n && !m->error[0]; i++) {
+                for (unsigned i = 0; i < n && !m->m->error[0]; i++) {
                     nds_cpu_step(m);
                     m->stats.interp++;
                     if (m->branched || m->h.now >= m->h.next_event || m->h.cpu.halted)
@@ -142,20 +158,22 @@ bool nds_recomp_dispatch(nds_machine *m)
     return false;
 }
 
-void nds_recomp_note_interp(nds_machine *m)
+void nds_recomp_note_interp(nds_arm *m)
 {
     m->stats.interp++;
 }
 
-size_t nds_recomp_missed(nds_machine *m, uint32_t *out, size_t max)
+size_t nds_recomp_missed(nds_machine *mm, int cpu, uint32_t *out, size_t max)
 {
+    nds_arm *m = cpu ? &mm->a7 : &mm->a9;
     for (size_t i = 0; i < m->nmissed && i < max; i++)
         out[i] = m->missed[i];
     return m->nmissed;
 }
 
-void nds_recomp_get_stats(nds_machine *m, nds_recomp_stats *out)
+void nds_recomp_get_stats(nds_machine *mm, int cpu, nds_recomp_stats *out)
 {
+    nds_arm *m = cpu ? &mm->a7 : &mm->a9;
     *out = m->stats;
     out->native = m->h.rc_native;
 }
