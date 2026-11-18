@@ -402,14 +402,31 @@ const x360_thunk *x360_thunk_at(x360_machine *x, uint32_t pc)
     return lo < x->nthunks && x->thunks[lo].addr == pc ? &x->thunks[lo] : NULL;
 }
 
-static void missed(x360_machine *x, uint32_t pc)
+void x360_note_missed(x360_machine *x, uint32_t pc)
 {
+    unsigned lo = 0, hi = x->nhelpers;
+    while (lo < hi) { /* a save / restore helper the lifter inlines: not a function */
+        unsigned mid = (lo + hi) / 2;
+        if (x->helpers[mid] < pc)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < x->nhelpers && x->helpers[lo] == pc)
+        return;
     for (unsigned k = 0; k < x->nmissed; k++)
         if (x->missed[k] == pc)
-            goto out;
-    if (x->nmissed < sizeof x->missed / sizeof x->missed[0])
+            return;
+    if (x->nmissed < X360_MAX_MISSED)
         x->missed[x->nmissed++] = pc;
-out:
+    if (x->nmissed <= 64 || x->verbose)
+        x360_logf(x, "x360: no lifted code at %08X%s (discovered.txt for the next Prepare)\n", pc,
+                  x->stop_at_miss ? "" : ", interpreted");
+}
+
+static void missed(x360_machine *x, uint32_t pc)
+{
+    x360_note_missed(x, pc);
     x->status = X360_MISSED;
     snprintf(x->error, sizeof x->error, "no lifted code at %08X (add it with x360_tools.recomp --discovered)", pc);
 }
@@ -422,6 +439,8 @@ static void run_thread(x360_machine *x, x360_thread *t)
     while (t->state == TH_READY && x->status == X360_RUNNING &&
            (x->m.slice >= 0 || (!(c->msr & 0x8000u) && x->m.slice >= -XE_EE_GRACE))) {
         uint32_t pc = c->pc;
+        int resumed = t->interp;
+        t->interp = 0;
         if (pc == X360_THREAD_EXIT) {
             x360_thread_exit(x, t, (uint32_t)c->gpr[3]);
             break;
@@ -443,8 +462,19 @@ static void run_thread(x360_machine *x, x360_thread *t)
             break; /* the caller's instruction budget: stop between two lifted functions */
         xe_rc_fn fn = pc >= x->code_lo && pc < x->code_hi && !(pc & 3) ? x->fn_tab[(pc - x->code_lo) >> 2] : NULL;
         if (!fn) {
-            missed(x, pc);
-            break;
+            if (x->stop_at_miss) {
+                missed(x, pc);
+                break;
+            }
+            /* XBA-283: interpret the code the pack does not hold, record its entry, go on */
+            int r = x360_interp_run(x, t, !resumed);
+            if (r < 0)
+                break;
+            if (r > 0) {
+                t->interp = 1;
+                break;
+            }
+            continue;
         }
         x->m.rc_exit = 0;
         fault_pc = pc;
@@ -453,8 +483,18 @@ static void run_thread(x360_machine *x, x360_thread *t)
             if (x360_interp_one(x))
                 break;
         } else if (x->m.rc_exit == XE_RC_EXIT_NOT_COVERED) {
-            missed(x, pc);
-            break;
+            /* a lifted function entered where it has no resume point: with the interpreter, run from there */
+            if (x->stop_at_miss) {
+                missed(x, pc);
+                break;
+            }
+            int r = x360_interp_run(x, t, 1);
+            if (r < 0)
+                break;
+            if (r > 0) {
+                t->interp = 1;
+                break;
+            }
         }
     }
 }
@@ -663,6 +703,8 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
         return -1;
     for (unsigned k = 0; k < pack->count; k++)
         x->fn_tab[(r[k].entry - x->code_lo) / 4] = r[k].fn;
+    x->helpers = pack->helpers;
+    x->nhelpers = pack->helpers ? pack->nhelpers : 0;
     return 0;
 }
 
@@ -685,6 +727,11 @@ void x360_set_output(x360_machine *x, FILE *dbg, FILE *log, int verbose)
 
 const char *x360_error(const x360_machine *x) { return x->error; }
 uint32_t x360_exit_code(const x360_machine *x) { return x->exit_code; }
+
+void x360_set_interp(x360_machine *x, int on)
+{
+    x->stop_at_miss = !on;
+}
 
 unsigned x360_missed(const x360_machine *x, const uint32_t **addrs)
 {

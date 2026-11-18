@@ -1,7 +1,7 @@
 /* x360_run -- runs an Xbox 360 title, recompiled, headless (XBA-270): what it prints through DbgPrint goes to stdout.
  *
  *   x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--insns N] [--log FILE] [--dbg FILE]
- *            [--missed FILE] [--gpu-trace FILE] [--dump-shaders DIR] [--strict-imports]
+ *            [--missed FILE] [--stop-at-miss] [--gpu-trace FILE] [--dump-shaders DIR] [--strict-imports]
  *            [--save-state FILE] [--load-state FILE] [--render SHADER_CACHE [--frames DIR] [--frame-limit N] [--render-size WxH]]
  *            [--stats] [-v]
  *
@@ -16,7 +16,8 @@
  * load_pad_script). --seconds N: stop after N seconds of the title's virtual time (default 3600; 0: no limit).
  * --strict-imports: stop at the first import without an HLE (by name). Runs until the title ends or N instructions
  * (default 2 billion). --missed: addresses reached without lifted code,
- * for x360_tools.recomp --discovered. Exit status: the title's exit code when it ended (0..255), 1 on an error, a
+ * for x360_tools.recomp --discovered: the run interprets that code and goes on (XBA-283), so one run finds them all;
+ * --stop-at-miss stops at the first instead. Exit status: the title's exit code when it ended (0..255), 1 on an error, a
  * missed address or the budget running out, 2 on bad arguments or input. */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -86,7 +87,7 @@ int main(int argc, char **argv)
     int rw = 1280, rh = 720;
     unsigned frame_limit = 30;
     unsigned long long insns = 2000000000ull;
-    int stats = 0, verbose = 0, strict = 0;
+    int stats = 0, verbose = 0, strict = 0, stop_at_miss = 0;
     uint32_t seconds = 3600;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--insns") && i + 1 < argc)
@@ -132,13 +133,15 @@ int main(int argc, char **argv)
             missedp = argv[++i];
         else if (!strcmp(argv[i], "--stats"))
             stats = 1;
+        else if (!strcmp(argv[i], "--stop-at-miss"))
+            stop_at_miss = 1;
         else if (!strcmp(argv[i], "-v"))
             verbose++;
         else if (argv[i][0] != '-' && !path)
             path = argv[i];
         else {
             fprintf(stderr, "usage: x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--insns N] "
-                            "[--log FILE] [--dbg FILE] [--missed FILE] [--stats] [-v]\n");
+                            "[--log FILE] [--dbg FILE] [--missed FILE] [--stop-at-miss] [--stats] [-v]\n");
             return 2;
         }
     }
@@ -167,6 +170,7 @@ int main(int argc, char **argv)
     }
     x360_set_output(x, dbg, log, verbose);
     x360_set_strict_imports(x, strict);
+    x360_set_interp(x, !stop_at_miss);
     x360_set_time_limit(x, seconds);
     if (pad_script && load_pad_script(x, pad_script)) {
         fprintf(stderr, "x360_run: %s: cannot read the pad script\n", pad_script);
@@ -204,7 +208,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "x360_run: %s is not an x360_tools.recomp pack\n", pack);
         return 2;
     }
-    x360_pack p = {resume, *count, *crc};
+    x360_pack p = {resume, *count, *crc, NULL, 0};
+    const unsigned *nh = dlsym(lib, "xe_rc_helper_count");
+    if (nh) {
+        p.helpers = dlsym(lib, "xe_rc_helpers");
+        p.nhelpers = p.helpers ? *nh : 0;
+    }
     if (x360_bind(x, &p)) {
         fprintf(stderr, "x360_run: %s\n", x360_error(x));
         return 2;

@@ -72,7 +72,7 @@ def image_crc(img):
     return zlib.crc32(img.image) & 0xFFFFFFFF
 
 
-def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comments=True):
+def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comments=True, omit=()):
     if img.image is None:
         raise XexError("no image to recompile: %s" % img.image_note)
     view = CodeView(img)
@@ -86,6 +86,8 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     seeds = {a for a in seeds if a not in view.hidden}
     disc = XenonDiscovery(view, dec, sorted(seeds))
     funcs = disc.run()
+    if omit:  # XBA-283 tests: functions left out of the pack on purpose (the runtime interprets them)
+        funcs = [f for f in funcs if f.entry not in omit]
     resume = {}
     os.makedirs(outdir, exist_ok=True)
     unlifted = collections.Counter()
@@ -130,6 +132,10 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     for a in sorted(resume):
         table.append("    {0x%08Xu, %s},\n" % (a, fn_name(resume[a])))
     table.append("};\nconst unsigned xe_rc_resume_count = %du;\n" % len(resume))
+    # XBA-283: the save / restore helpers' entries (inlined, not functions): interpreted code calls them, the
+    # runtime must not report them as missed functions
+    table.append("\nconst uint32_t xe_rc_helpers[] = {\n%s};\nconst unsigned xe_rc_helper_count = %du;\n" % (
+        "".join("    0x%08Xu,\n" % a for a in sorted(helpers)) or "    0u,\n", len(helpers)))
     table.append("const uint32_t xe_rc_image_crc = 0x%08Xu;\nconst uint32_t xe_rc_image_base = 0x%08Xu;\n"
                  % (image_crc(img), img.base))
     path = os.path.join(outdir, "x360_rc_table.c")
@@ -211,6 +217,18 @@ def compile_check(files, cc="cc"):
         subprocess.run([cc, "-fsyntax-only", "-std=gnu11", "-Wall", "-Wno-unused-label"] + inc + [p], check=True)
 
 
+def read_addrs(path):
+    """Hex addresses, one per line, # comments (x360_run --missed, discovered.txt); a missing file is empty."""
+    out = set()
+    if os.path.exists(path):
+        with open(path) as fh:
+            for line in fh:
+                line = line.split("#")[0].strip()
+                if line:
+                    out.add(int(line, 16))
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python3 -m x360_tools.recomp")
     ap.add_argument("xex")
@@ -222,6 +240,8 @@ def main(argv=None):
     ap.add_argument("--no-comments", action="store_true")
     ap.add_argument("--discovered", action="append", default=[],
                     help="more seeds: a file of hex addresses (x360_run --missed), one per line")
+    ap.add_argument("--omit", action="append", default=[],
+                    help="tests: a file of hex function entries to leave out of the pack (or one hex address)")
     a = ap.parse_args(argv)
     try:
         with open(a.xex, "rb") as f:
@@ -245,13 +265,12 @@ def main(argv=None):
     if a.outdir:
         seeds = set()
         for path in a.discovered:
-            if os.path.exists(path):
-                with open(path) as fh:
-                    for line in fh:
-                        line = line.split("#")[0].strip()
-                        if line:
-                            seeds.add(int(line, 16))
-        s = recompile(img, a.outdir, extra_seeds=seeds, use_pdata=not a.no_pdata, comments=not a.no_comments)
+            seeds |= read_addrs(path)
+        omit = set()
+        for o in a.omit:
+            omit |= read_addrs(o) if os.path.exists(o) else {int(o, 16)}
+        s = recompile(img, a.outdir, extra_seeds=seeds, use_pdata=not a.no_pdata, comments=not a.no_comments,
+                      omit=omit)
         print("recomp: %(functions)d functions, %(instructions)d instructions, %(interp_fallback_insns)d handed to "
               "RC_INTERP, %(invalid_words)d invalid words" % s)
         print("  not lifted: %s" % ", ".join("%s %d" % kv for kv in list(s["unlifted"].items())[:30]))
