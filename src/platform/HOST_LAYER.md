@@ -10,7 +10,7 @@ hosts only (Linux, macOS, Android).
 
 | Target | Sources | Defined in |
 |---|---|---|
-| `xbr_host_core` | `android_log.c`, `recomp_lifecycle.c`, `recomp_quit.c` (+ `host_time`, `host_cpus`, `host_perf_hint`, `host_perf_line`, `recomp_cfg`, `recomp_exit_hook`) | `src/platform/host_core.cmake` |
+| `xbr_host_core` | `android_log.c`, `recomp_lifecycle.c`, `recomp_quit.c`, the consoles' states / hotkeys / rewind / cheats / frame-loop controls (`recomp_states.c`, `recomp_hotkeys.c`, `recomp_rewind.c`, `recomp_cheats.c`, `recomp_play.c`) (+ `host_time`, `host_cpus`, `host_perf_hint`, `host_perf_line`, `recomp_cfg`, `recomp_exit_hook`) | `src/platform/host_core.cmake` |
 | `recomp_storage` | `recomp_storage.c` | `src/platform/host_core.cmake` |
 | `input_ports` | `src/input/input_ports.c` | `src/input/mapping/input_ports.cmake` |
 | `host_framegen` | `src/framegen/framegen_pacer.c`, `framegen_fake.c`, `framegen_console.c` (the console window's front end, XBA-186) | `src/framegen/host_framegen.cmake` |
@@ -32,6 +32,7 @@ interface target when there is no Vulkan bridge). The `*.cmake` files have inclu
 | `recomp_lifecycle.[ch]` | G | moved from `platform` to `xbr_host_core` |
 | `recomp_quit.[ch]` | G | moved from `platform` to `xbr_host_core` |
 | `host_time.[ch]`, `host_cpus.[ch]`, `recomp_cfg.[ch]`, `recomp_exit_hook.[ch]` | G | already their own targets, now defined in `host_core.cmake` |
+| `recomp_play.[ch]` | G (new) | the frame loop's controls every console runtime calls once per shown frame (XBA-274): the desktop keys' hotkeys next to the pads' chords, the pressed actions, the fast-forward and rewind holds, console frames per shown frame (`recomp_play_begin`); on top of `recomp_states` (slots, fast-forward), `recomp_hotkeys`, `recomp_rewind`, also in `xbr_host_core`. A new console runtime gets the same hotkeys, fast-forward and rewind by calling it |
 | `host_perf_line.[ch]` | G (new) | the performance line every runtime logs every 10 s and over the run, and the overlay's live figures (XBA-243, [below](#performance-line-xba-243)) |
 | `recomp_storage.[ch]` | M → split | new `recomp_storage_resolve_entry(ext, int, entry, out)` is the generic call (any entry file, or none). `recomp_storage_resolve` = that call with `"default.xbe"`, unchanged |
 | `recomp_app.[ch]` | M, kept X | the Android start-up: host parts plus `xbox_path_init` and the kernel fault handler; it stays a thin Xbox wrapper |
