@@ -202,6 +202,7 @@ typedef struct texture {
     uint64_t hash;
     GLuint tex;
     int used;
+    uint32_t checked; /* the epoch its memory was last compared in */
 } texture;
 
 struct xenos_gl {
@@ -232,6 +233,9 @@ struct xenos_gl {
     xenos_gl_stats st;
     texture textures[MAX_TEXTURES];
     unsigned tex_clock;
+    uint32_t epoch;           /* moves at each swap and each resolve: cached textures are checked again */
+    uint32_t resolved[16];    /* destination bases resolved to since the last swap (the front buffer's source) */
+    int nresolved;
     int title_clears;
     FILE *log;
 };
@@ -1010,18 +1014,33 @@ static int64_t tiled3d(int32_t x, int32_t y, int32_t z, uint32_t pitch_blocks, u
            ((oi >> 5) & 7) << 8 | (oi >> 8) << 12;
 }
 
-/* the texture behind fetch constant k as a GL texture of the dimension the shader samples (1: 2D, 2: 3D, 3: cube),
- * decoded again when its memory changed; 0 if unsupported. Base level layout (Xenia's texture_util.cc
- * GetGuestTextureLayout): rows of the pitch aligned to 32 blocks (linear too: Direct3D gives 256-byte-aligned
- * pitches), slices of the height aligned to 32 blocks; cube faces (+X, -X, +Y, -Y, +Z, -Z, as GL orders them) 4 KB
- * apart; 3D slices packed (tiled: the 3D tiling, 32x16x4-block macro tiles). */
-static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, uint32_t k, uint32_t want_dim)
+/* `n` bytes at a guest physical address as the GPU reads them (after its swap), a dword at a time */
+static void read_bytes(const xenos_cp *cp, uint32_t addr, uint32_t n, uint32_t endian, uint8_t *out)
 {
-    const uint32_t *fc = &cp->regs[0x4800 + 6 * k];
+    uint32_t i = 0;
+    while (i < n) {
+        uint32_t a = addr + i, word = gpu_read(cp, a & ~3u, endian);
+        for (uint32_t b = a & 3; b < 4 && i < n; b++, i++)
+            out[i] = (uint8_t)(word >> (8 * b));
+    }
+}
+
+typedef struct decoded {
+    uint32_t w, h, slices, dim; /* dim as the fetch constant has it: 0 1D, 1 2D, 2 3D, 3 cube */
+    uint8_t *rgba;              /* slices of w x h RGBA, top row first */
+    uint64_t hash;              /* of the source bytes and the swizzle */
+} decoded;
+
+/* decode the texture a 6-dword fetch constant describes (base level layout of Xenia's texture_util.cc
+ * GetGuestTextureLayout: rows of the pitch aligned to 32 blocks, linear ones too, as Direct3D's pitches already
+ * are; slices of the height aligned to 32 blocks; cube faces (+X, -X, +Y, -Y, +Z, -Z, GL's order) 4 KB apart; 3D
+ * slices packed, tiled ones in the 3D tiling). With `hash_only`, only the hash is made. 0 when unsupported. */
+static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only, decoded *out)
+{
+    memset(out, 0, sizeof *out);
     const texfmt *tf = tex_format(fc[1] & 63);
-    uint32_t dim = (fc[5] >> 9) & 3; /* 0 1D, 1 2D, 2 3D, 3 cube */
-    uint32_t gl_dim = dim == 0 ? 1 : dim;
-    if ((fc[0] & 3) != 2 || !tf || gl_dim != want_dim)
+    uint32_t dim = (fc[5] >> 9) & 3;
+    if ((fc[0] & 3) != 2 || !tf)
         return 0;
     uint32_t w, h, depth = 1;
     if (dim == 0) {
@@ -1032,7 +1051,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, uint32_t k, uint32_t w
         w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
     }
     uint32_t slices = dim == 3 ? 6 : depth;
-    if (w > 8192 || h > 8192 || (dim == 3 && w != h) || (dim == 2 && (uint64_t)w * h * depth > (1u << 24)))
+    if (w > 8192 || h > 8192 || (dim == 3 && w != h) || (uint64_t)w * h * slices > (1u << 25))
         return 0;
     uint32_t endian = (fc[1] >> 6) & 3, base = fc[1] & 0xFFFFF000u, tiled = fc[0] >> 31;
     uint32_t pitch = ((fc[0] >> 22) & 0x1FF) << 5; /* texels */
@@ -1045,34 +1064,66 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, uint32_t k, uint32_t w
     uint32_t row_bytes = pitch_blocks * tf->bytes;
     uint32_t z_stride = row_bytes * (dim == 0 ? 1 : height_blocks);
     uint32_t face_stride = (z_stride + 4095) & ~4095u;
-    /* the source bytes, block by block and slice by slice, after the endian swap */
     size_t slice_n = (size_t)bw * bh * tf->bytes, src_n = slice_n * slices;
-    uint32_t tw = bw * tf->block, th = bh * tf->block;
     uint8_t *src = malloc(src_n);
-    uint8_t *rgba = malloc((size_t)tw * th * 4 * slices);
-    if (!src || !rgba) {
+    if (!src)
+        return 0;
+    for (uint32_t z = 0; z < slices; z++)
+        for (uint32_t by = 0; by < bh; by++) {
+            uint8_t *row = src + z * slice_n + (size_t)by * bw * tf->bytes;
+            if (!tiled) { /* a whole row at once */
+                uint32_t off = z * (dim == 3 ? face_stride : z_stride) + by * row_bytes;
+                read_bytes(cp, base + off, bw * tf->bytes, endian, row);
+                continue;
+            }
+            for (uint32_t bx = 0; bx < bw; bx++) {
+                uint32_t off = dim == 2 ? (uint32_t)tiled3d((int32_t)bx, (int32_t)by, (int32_t)z, pitch_blocks,
+                                                            height_blocks, bpb_log2)
+                                        : z * face_stride + (uint32_t)tiled2d((int32_t)bx, (int32_t)by, pitch_blocks,
+                                                                              bpb_log2);
+                read_bytes(cp, base + off, tf->bytes, endian, row + (size_t)bx * tf->bytes);
+            }
+        }
+    out->hash = fnv(src, src_n) ^ ((uint64_t)fc[3] << 32);
+    uint32_t tw = bw * tf->block, th = bh * tf->block;
+    out->w = tw, out->h = th, out->slices = slices, out->dim = dim;
+    if (hash_only) {
         free(src);
-        free(rgba);
+        return 1;
+    }
+    out->rgba = malloc((size_t)tw * th * 4 * slices);
+    if (!out->rgba) {
+        free(src);
         return 0;
     }
-    for (uint32_t z = 0; z < slices; z++)
+    for (uint32_t z = 0; z < slices; z++) {
+        uint8_t *o = out->rgba + (size_t)z * tw * th * 4;
         for (uint32_t by = 0; by < bh; by++)
             for (uint32_t bx = 0; bx < bw; bx++) {
-                uint32_t off;
-                if (tiled && dim == 2)
-                    off = (uint32_t)tiled3d((int32_t)bx, (int32_t)by, (int32_t)z, pitch_blocks, height_blocks,
-                                            bpb_log2);
-                else if (tiled)
-                    off = z * face_stride + (uint32_t)tiled2d((int32_t)bx, (int32_t)by, pitch_blocks, bpb_log2);
-                else
-                    off = z * (dim == 3 ? face_stride : z_stride) + by * row_bytes + bx * tf->bytes;
-                uint8_t *d = src + z * slice_n + ((size_t)by * bw + bx) * tf->bytes;
-                for (uint32_t i = 0; i < tf->bytes; i++) {
-                    uint32_t a = base + off + i, word = gpu_read(cp, a & ~3u, endian);
-                    d[i] = (uint8_t)(word >> (8 * (a & 3)));
+                const uint8_t *s = src + z * slice_n + ((size_t)by * bw + bx) * tf->bytes;
+                if (tf->block == 4) {
+                    uint8_t px[16][4];
+                    dxt_block(s, tf->format, px);
+                    for (int i = 0; i < 16; i++)
+                        memcpy(o + (((size_t)by * 4 + i / 4) * tw + bx * 4 + i % 4) * 4, px[i], 4);
+                } else {
+                    texel(tf->format, s, o + ((size_t)by * tw + bx) * 4);
                 }
             }
-    uint64_t hash = fnv(src, src_n) ^ ((uint64_t)fc[3] << 32);
+    }
+    free(src);
+    return 1;
+}
+
+/* the texture behind fetch constant k as a GL texture of the dimension the shader samples (1: 2D, 2: 3D, 3: cube).
+ * A cached texture is checked against its memory once per frame (and after each resolve, which may have written
+ * it), decoded again when that changed. 0 if unsupported. */
+static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, uint32_t k, uint32_t want_dim)
+{
+    const uint32_t *fc = &cp->regs[0x4800 + 6 * k];
+    uint32_t dim = (fc[5] >> 9) & 3, gl_dim = dim == 0 ? 1 : dim;
+    if ((fc[0] & 3) != 2 || gl_dim != want_dim || !tex_format(fc[1] & 63))
+        return 0;
     texture *t = NULL, *victim = &g->textures[0];
     for (int i = 0; i < MAX_TEXTURES; i++) {
         texture *c = &g->textures[i];
@@ -1083,12 +1134,22 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, uint32_t k, uint32_t w
         if (!c->tex || (victim->tex && c->used < victim->used))
             victim = c;
     }
-    if (t && t->hash == hash) {
+    if (t && t->checked == g->epoch) { /* already checked this frame, no resolve since */
         t->used = (int)++g->tex_clock;
-        free(src);
-        free(rgba);
         return t->tex;
     }
+    decoded d;
+    if (t) {
+        if (!decode_texture(cp, fc, 1, &d))
+            return 0;
+        if (d.hash == t->hash) {
+            t->checked = g->epoch;
+            t->used = (int)++g->tex_clock;
+            return t->tex;
+        }
+    }
+    if (!decode_texture(cp, fc, 0, &d))
+        return 0;
     if (!t) {
         t = victim;
         if (t->tex) /* a texture object keeps its first target: a new one for a new key */
@@ -1096,39 +1157,24 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, uint32_t k, uint32_t w
         g->glGenTextures(1, &t->tex);
         memcpy(t->key, fc, sizeof t->key);
     }
-    t->hash = hash;
+    t->hash = d.hash;
+    t->checked = g->epoch;
     t->used = (int)++g->tex_clock;
-    for (uint32_t z = 0; z < slices; z++) {
-        uint8_t *out = rgba + (size_t)z * tw * th * 4;
-        for (uint32_t by = 0; by < bh; by++)
-            for (uint32_t bx = 0; bx < bw; bx++) {
-                const uint8_t *s = src + z * slice_n + ((size_t)by * bw + bx) * tf->bytes;
-                if (tf->block == 4) {
-                    uint8_t px[16][4];
-                    dxt_block(s, tf->format, px);
-                    for (int i = 0; i < 16; i++)
-                        memcpy(out + (((size_t)by * 4 + i / 4) * tw + bx * 4 + i % 4) * 4, px[i], 4);
-                } else {
-                    texel(tf->format, s, out + ((size_t)by * tw + bx) * 4);
-                }
-            }
-    }
     if (gl_dim == 1) {
         g->glBindTexture(GL_TEXTURE_2D, t->tex);
-        g->glTexImage2D(GL_TEXTURE_2D, 0, (GLint)GL_RGBA8, (GLsizei)tw, (GLsizei)th, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                        rgba);
+        g->glTexImage2D(GL_TEXTURE_2D, 0, (GLint)GL_RGBA8, (GLsizei)d.w, (GLsizei)d.h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                        d.rgba);
     } else if (gl_dim == 3) {
         g->glBindTexture(GL_TEXTURE_CUBE_MAP, t->tex);
         for (uint32_t f = 0; f < 6; f++)
-            g->glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, (GLint)GL_RGBA8, (GLsizei)tw, (GLsizei)th, 0,
-                            GL_RGBA, GL_UNSIGNED_BYTE, rgba + (size_t)f * tw * th * 4);
+            g->glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, (GLint)GL_RGBA8, (GLsizei)d.w, (GLsizei)d.h, 0,
+                            GL_RGBA, GL_UNSIGNED_BYTE, d.rgba + (size_t)f * d.w * d.h * 4);
     } else {
         g->glBindTexture(GL_TEXTURE_3D, t->tex);
-        g->glTexImage3D(GL_TEXTURE_3D, 0, (GLint)GL_RGBA8, (GLsizei)tw, (GLsizei)th, (GLsizei)depth, 0, GL_RGBA,
-                        GL_UNSIGNED_BYTE, rgba);
+        g->glTexImage3D(GL_TEXTURE_3D, 0, (GLint)GL_RGBA8, (GLsizei)d.w, (GLsizei)d.h, (GLsizei)d.slices, 0, GL_RGBA,
+                        GL_UNSIGNED_BYTE, d.rgba);
     }
-    free(src);
-    free(rgba);
+    free(d.rgba);
     return t->tex;
 }
 
@@ -1236,6 +1282,9 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                     cp->write32(cp->ctx, word_addr & 0x1FFFFFFFu, __builtin_bswap32(gpu_swap(word, endian)));
                 }
             g->st.resolves++;
+            g->epoch++;
+            if (g->nresolved < 16)
+                g->resolved[g->nresolved++] = base & 0x1FFFF000u;
         } else {
             g->st.unsupported++;
         }
@@ -1478,19 +1527,50 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     free(idx);
 }
 
+/* the front buffer VdSwap names (its fetch constant, in fetch constant 0) when a resolve wrote it this frame:
+ * decoded from guest memory with the fetch constant's swizzle; 1 when the frame came from there */
+static int front_buffer_frame(xenos_gl *g, const xenos_cp *cp)
+{
+    const uint32_t *fc = &cp->regs[0x4800];
+    uint32_t base = fc[1] & 0x1FFFF000u;
+    int hit = 0;
+    for (int i = 0; i < g->nresolved; i++)
+        hit |= g->resolved[i] == base;
+    decoded d;
+    if (!hit || ((fc[5] >> 9) & 3) != 1 || !decode_texture(cp, fc, 0, &d))
+        return 0;
+    memset(g->frame, 0, (size_t)g->width * g->height * 4);
+    for (uint32_t y = 0; y < d.h && y < (uint32_t)g->height; y++)
+        for (uint32_t x = 0; x < d.w && x < (uint32_t)g->width; x++) {
+            const uint8_t *s = d.rgba + ((size_t)y * d.w + x) * 4;
+            uint8_t *o = g->frame + ((size_t)y * g->width + x) * 4;
+            for (int c = 0; c < 4; c++) {
+                uint32_t sel = (fc[3] >> (1 + 3 * c)) & 7;
+                o[c] = sel < 4 ? s[sel] : sel == 5 ? 255 : 0;
+            }
+        }
+    free(d.rgba);
+    return 1;
+}
+
 void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
 {
-    (void)cp;
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
     g->glFinish();
     size_t row = (size_t)g->width * 4;
-    uint8_t *tmp = malloc(row * g->height);
-    if (tmp) {
-        g->glReadPixels(0, 0, g->width, g->height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
-        for (int y = 0; y < g->height; y++) /* GL's bottom row first -> top row first */
-            memcpy(g->frame + row * y, tmp + row * (g->height - 1 - y), row);
-        free(tmp);
+    if (front_buffer_frame(g, cp)) {
+        g->st.front_buffer_frames++;
+    } else { /* no resolve to the front buffer: render target 0 as it stands */
+        uint8_t *tmp = malloc(row * g->height);
+        if (tmp) {
+            g->glReadPixels(0, 0, g->width, g->height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+            for (int y = 0; y < g->height; y++) /* GL's bottom row first -> top row first */
+                memcpy(g->frame + row * y, tmp + row * (g->height - 1 - y), row);
+            free(tmp);
+        }
     }
+    g->nresolved = 0;
+    g->epoch++;
     if (g->frames[0] && g->st.frames < g->max_frames) {
         char path[600];
         snprintf(path, sizeof path, "%s/frame_%05llu.ppm", g->frames, (unsigned long long)g->st.frames);

@@ -60,6 +60,9 @@ void x360_gpu_opcode_histogram(x360_machine *x, FILE *out);
 int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, unsigned max_frames,
                       int width, int height, char *why, size_t why_n);
 void x360_render_stats(x360_machine *x, FILE *out);
+/* The renderer's last frame (RGBA, top row first) and its counters, or NULL / zeros when it is off. */
+const uint8_t *x360_render_frame(x360_machine *x, int *width, int *height);
+void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint64_t *front_buffer_frames);
 /* The audio the title submits to the render driver (256-sample frames of 6 channels at 48 kHz), written to F as a
  * 32-bit float WAV, sizes filled in when the machine is freed. XMA is not decoded: XMA voices stay silent. */
 void x360_set_audio_out(x360_machine *x, FILE *f);

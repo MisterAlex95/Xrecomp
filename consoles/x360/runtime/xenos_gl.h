@@ -5,8 +5,9 @@
  * (vs_XXXXXXXX.vert / ps_XXXXXXXX.frag, as bringup leaves them next to the dumped microcode: static translation,
  * like the code), the vertex fetch constants give the vertex buffers (converted to float on the CPU, the GPU's endian
  * swaps applied), the float / boolean / loop constants go to the shaders' uniform blocks, and the primitive is drawn
- * into an off-screen RGBA8 target. At each swap the target is read back (top row first), optionally written to a
- * frames directory as PPM, and cleared.
+ * into an off-screen RGBA8 target. At each swap the frame is the front buffer VdSwap names when a resolve wrote it
+ * since the last swap (decoded from guest memory), else render target 0 as it stands (top row first); it can be
+ * written to a frames directory as PPM.
  *
  * EGL and GLES are loaded at run time (dlopen, as the GameCube's renderer does): no build dependency; without them
  * (or without a surfaceless EGL display) xenos_gl_create fails with a reason and the runtime runs without drawing.
@@ -18,8 +19,8 @@
  * Direct3D's 0..w depth range to GL's (xenos_glsl).
  *
  * Textures: 1D, 2D, 3D and cube from the texture fetch constants, linear or tiled, 8 / 8_8 / 8_8_8_8 / 1_5_5_5 /
- * 5_6_5 / 4_4_4_4 / DXT1 / DXT2_3 / DXT4_5 decoded to RGBA8 (decoded again when their memory changes), clamp, filter and
- * swizzle from the fetch constant; base level only.
+ * 5_6_5 / 4_4_4_4 / DXT1 / DXT2_3 / DXT4_5 decoded to RGBA8 (their memory compared once per frame and after each
+ * resolve, decoded again when it changed), clamp, filter and swizzle from the fetch constant; base level only.
  *
  * Resolves (eDRAM mode "copy"): the colour copied to guest memory as a tiled 8_8_8_8 or 5_6_5 texture at the
  * resolve rectangle, colour / depth / stencil cleared there; once a title clears through resolves, swaps stop
@@ -53,6 +54,7 @@ typedef struct xenos_gl_stats {
     uint32_t missing_shaders; /* distinct shaders missing from the cache */
     uint64_t unsupported_textures; /* texture bindings left empty: format / dimension not handled yet */
     uint64_t resolves;             /* render target copies written to guest memory */
+    uint64_t front_buffer_frames;  /* frames taken from the front buffer VdSwap named (a resolve wrote it) */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

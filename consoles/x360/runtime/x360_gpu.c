@@ -98,11 +98,28 @@ void x360_render_stats(x360_machine *x, FILE *out)
     xenos_gl_stats s;
     xenos_gl_get_stats(x->gpu->gl, &s);
     fprintf(out,
-            "render: drawn %llu, resolves %llu, frames %llu; skipped: no shader %llu, unsupported %llu; textures not "
-            "handled %llu; shaders missing from the cache %u\n",
+            "render: drawn %llu, resolves %llu, frames %llu (%llu from the front buffer); skipped: no shader %llu, "
+            "unsupported %llu; textures not handled %llu; shaders missing from the cache %u\n",
             (unsigned long long)s.drawn, (unsigned long long)s.resolves, (unsigned long long)s.frames,
+            (unsigned long long)s.front_buffer_frames,
             (unsigned long long)s.no_shader, (unsigned long long)s.unsupported,
             (unsigned long long)s.unsupported_textures, s.missing_shaders);
+}
+
+const uint8_t *x360_render_frame(x360_machine *x, int *width, int *height)
+{
+    if (!x->gpu || !x->gpu->gl)
+        return NULL;
+    return xenos_gl_frame(x->gpu->gl, width, height);
+}
+
+void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint64_t *front_buffer_frames)
+{
+    xenos_gl_stats s;
+    memset(&s, 0, sizeof s);
+    if (x->gpu && x->gpu->gl)
+        xenos_gl_get_stats(x->gpu->gl, &s);
+    *drawn = s.drawn, *frames = s.frames, *front_buffer_frames = s.front_buffer_frames;
 }
 
 void x360_set_shader_dump(x360_machine *x, const char *dir)
@@ -331,12 +348,26 @@ void x360_k_VdSwap(x360_machine *x, x360_thread *t, xe_cpu *c)
              h_ptr = (uint32_t)x360_stack_arg(x, c, 9);
     uint32_t fb = fb_ptr ? x360_r32(x, fb_ptr) : 0;
     memset(x->base + buf, 0, 64 * 4);
-    x360_w32(x, buf, 3u << 30 | (4u - 1) << 16 | (uint32_t)PM4_XE_SWAP << 8);
-    x360_w32(x, buf + 4, 0x53574150u); /* 'SWAP' */
-    x360_w32(x, buf + 8, fb & 0x1FFFFFFFu);
-    x360_w32(x, buf + 12, w_ptr ? x360_r32(x, w_ptr) : 0);
-    x360_w32(x, buf + 16, h_ptr ? x360_r32(x, h_ptr) : 0);
-    x360_w32(x, buf + 20, 3u << 30 | (64u - 5 - 1 - 1) << 16 | (uint32_t)PM4_NOP << 8);
+    /* as Xenia's VdSwap: the front buffer's texture fetch constant (from the Direct3D texture header, its base made
+     * physical) into fetch constant 0, then the token */
+    uint32_t fetch = A(1), at = buf;
+    if (fetch) {
+        x360_w32(x, at, 0u << 30 | (6u - 1) << 16 | 0x4800u);
+        for (uint32_t k = 0; k < 6; k++) {
+            uint32_t v = x360_r32(x, fetch + 4 * k);
+            if (k == 1)
+                v = (v & 0xFFFu) | ((v & 0xFFFFF000u) & 0x1FFFFFFFu); /* the physical views' addresses */
+            x360_w32(x, at + 4 + 4 * k, v);
+        }
+        at += 28;
+    }
+    x360_w32(x, at, 3u << 30 | (4u - 1) << 16 | (uint32_t)PM4_XE_SWAP << 8);
+    x360_w32(x, at + 4, 0x53574150u); /* 'SWAP' */
+    x360_w32(x, at + 8, fb & 0x1FFFFFFFu);
+    x360_w32(x, at + 12, w_ptr ? x360_r32(x, w_ptr) : 0);
+    x360_w32(x, at + 16, h_ptr ? x360_r32(x, h_ptr) : 0);
+    uint32_t used = (at + 20 - buf) / 4; /* the rest of the 64 words: one NOP packet */
+    x360_w32(x, at + 20, 3u << 30 | (64u - used - 1 - 1) << 16 | (uint32_t)PM4_NOP << 8);
     RET(0);
 }
 

@@ -6,6 +6,7 @@ project(console_x360_tests C)
 #
 #   xenos_cp         the PM4 command processor on hand-built packets (xenos_cp_test.c)
 #   xenos_draw       the GLES renderer draws a hand-built PM4 stream, read back (skipped without EGL / GLES 3.0)
+#   x360_render      the renderer through the machine: a ring, VdSwap, a front buffer frame, a save state loaded
 #   x360_hle         the kernel HLE called directly (x360_hle_test.c): formatters, memory, objects, waits, timers,
 #                    threads, files and symbolic links
 #   x360_hello       the synthetic test title (make_hello.py: our own PowerPC assembly in a synthetic XEX2, imports
@@ -55,6 +56,9 @@ target_compile_options(xenos_draw_test PRIVATE -Wall -Wextra)
 add_test(NAME xenos_draw COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:xenos_draw_test>
                                     ${CMAKE_CURRENT_BINARY_DIR}/xenos_draw)
 set_tests_properties(xenos_draw PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+add_test(NAME x360_render COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:x360_hle_test>
+                                     ${CMAKE_CURRENT_BINARY_DIR}/x360_render --render)
+set_tests_properties(x360_render PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 
 add_executable(x360_hle_test x360_hle_test.c)
 target_link_libraries(x360_hle_test PRIVATE x360_core)

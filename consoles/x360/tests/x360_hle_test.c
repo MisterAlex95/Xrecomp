@@ -594,7 +594,138 @@ static void test_files(const char *dir)
     unlink(host);
 }
 
-int main(void)
+/* x360_hle_test --render DIR (ctest x360_render, after make_draw.py): the renderer through the machine, the way
+ * x360_run --render drives it -- x360_set_renderer, a ring the title fills, VdSwap with the front buffer's fetch
+ * constant, x360_gpu_poll between slices: a red quad resolved (with a green clear) to the front buffer, which the
+ * frame comes from; then a save state is loaded and the renderer still draws. 77 without EGL / GLES 3.0. */
+static uint32_t *load_words(const char *dir, const char *name, uint32_t *n)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    uint8_t b[4096];
+    size_t len = fread(b, 1, sizeof b, f);
+    fclose(f);
+    uint32_t *w = malloc(len + 4);
+    for (size_t i = 0; i + 4 <= len; i += 4)
+        w[i / 4] = (uint32_t)b[i] << 24 | (uint32_t)b[i + 1] << 16 | (uint32_t)b[i + 2] << 8 | b[i + 3];
+    *n = (uint32_t)(len / 4);
+    return w;
+}
+
+static uint32_t ring_va, ring_at; /* the ring's guest address, the next dword */
+
+static void rput(uint32_t v)
+{
+    x360_w32(X, ring_va + 4 * ring_at++, v);
+}
+
+static void rreg(uint32_t index, uint32_t v)
+{
+    rput(index);
+    rput(v);
+}
+
+static uint32_t fbits32(float f)
+{
+    uint32_t v;
+    memcpy(&v, &f, 4);
+    return v;
+}
+
+static int render_test(const char *dir)
+{
+    char why[256] = "", cache[1024];
+    snprintf(cache, sizeof cache, "%s/cache", dir);
+    if (x360_set_renderer(X, cache, NULL, 0, 64, 64, why, sizeof why)) {
+        printf("skipped: %s\n", why);
+        return 77;
+    }
+    uint32_t nvs, nps;
+    uint32_t *vs = load_words(dir, "vs.bin", &nvs), *ps = load_words(dir, "ps.bin", &nps);
+    CHECK(vs && ps, "make_draw.py's shaders in %s", dir);
+    if (!vs || !ps)
+        return 1;
+    uint32_t ring = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x4000, 4, 0, 0xFFFFFFFFu, 0);
+    uint32_t data = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x20000, 4, 0, 0xFFFFFFFFu, 0x1000);
+    uint32_t ring_phys = ring & 0x1FFFFFFFu, data_phys = data & 0x1FFFFFFFu;
+    uint32_t fb = data + 0x10000, fb_phys = fb & 0x1FFFFFFFu; /* the front buffer: 64x64 8_8_8_8, tiled */
+    K(X360_xboxkrnl_VdInitializeRingBuffer, 2, ring_phys, 12);
+    ring_va = ring, ring_at = 0;
+    /* a red full-target quad (strip), then the resolve rectangle's vertices */
+    static const float quad[4][8] = {{-1, -1, 0.5f, 1, 1, 0, 0, 1}, {1, -1, 0.5f, 1, 1, 0, 0, 1},
+                                     {-1, 1, 0.5f, 1, 1, 0, 0, 1}, {1, 1, 0.5f, 1, 1, 0, 0, 1}};
+    for (int v = 0; v < 4; v++)
+        for (int i = 0; i < 8; i++)
+            x360_w32(X, data + 32 * (uint32_t)v + 4 * (uint32_t)i, fbits32(quad[v][i]));
+    static const float rect[6] = {0, 0, 64, 0, 64, 64};
+    for (int i = 0; i < 6; i++)
+        x360_w32(X, data + 0x200 + 4 * (uint32_t)i, fbits32(rect[i]));
+    rput(3u << 30 | (2 + nvs - 1) << 16 | (uint32_t)PM4_IM_LOAD_IMMEDIATE << 8);
+    rput(0), rput(nvs);
+    for (uint32_t i = 0; i < nvs; i++)
+        rput(vs[i]);
+    rput(3u << 30 | (2 + nps - 1) << 16 | (uint32_t)PM4_IM_LOAD_IMMEDIATE << 8);
+    rput(1), rput(nps);
+    for (uint32_t i = 0; i < nps; i++)
+        rput(ps[i]);
+    rreg(0x2104, 0xF), rreg(0x2201, 0x00010001u), rreg(0x2208, 4);
+    for (int i = 0; i < 4; i++)
+        rreg(0x4400 + (uint32_t)i, fbits32(1.0f));
+    rreg(0x4800, data_phys | 3u), rreg(0x4801, 2u | 32u << 2);
+    rput(3u << 30 | 0u << 16 | (uint32_t)PM4_DRAW_INDX_2 << 8);
+    rput(6u | 2u << 6 | 4u << 16);
+    /* the resolve to the front buffer, clearing the target to green */
+    rreg(0x4800, (data_phys + 0x200) | 3u), rreg(0x4801, 2u | 6u << 2);
+    rreg(0x2208, 6), rreg(0x2318, 1u << 8), rreg(0x2319, fb_phys), rreg(0x231A, 64u | 64u << 16),
+        rreg(0x231B, 2u | 6u << 7), rreg(0x231E, 0xFF00FF00u);
+    rput(3u << 30 | 0u << 16 | (uint32_t)PM4_DRAW_INDX_2 << 8);
+    rput(8u | 2u << 6 | 3u << 16);
+    rreg(0x2208, 4);
+    /* VdSwap: the front buffer's Direct3D texture header fetch constant (virtual base address) */
+    uint32_t args = x360_kalloc(X, 64), fetch = args + 32;
+    uint32_t fcw[6] = {2u | 2u << 22 | 1u << 31, 6u | 2u << 6 | (fb & 0xFFFFF000u), 63u | 63u << 13,
+                       (0u | 1u << 3 | 2u << 6 | 3u << 9) << 1, 0, 1u << 9};
+    for (int i = 0; i < 6; i++)
+        x360_w32(X, fetch + 4 * (uint32_t)i, fcw[i]);
+    x360_w32(X, args, fb), x360_w32(X, args + 4, 64), x360_w32(X, args + 8, 64), x360_w32(X, args + 12, 6);
+    x360_w32(X, args + 16, 0);
+    uint32_t swap_at = ring + 4 * ring_at;
+    ring_at += 64;
+    K(X360_xboxkrnl_VdSwap, 10, swap_at, fetch, 0, 0, 0, args, args + 12, args + 16, args + 4, args + 8);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, ring_at);
+    x360_gpu_poll(X);
+    int w = 0, h = 0;
+    const uint8_t *f = x360_render_frame(X, &w, &h);
+    uint64_t drawn, frames, fbf;
+    x360_render_counts(X, &drawn, &frames, &fbf);
+    CHECK(f && w == 64 && f[4 * (32 * 64 + 32)] == 255 && f[4 * (32 * 64 + 32) + 1] == 0 && drawn == 1 &&
+              frames == 1 && fbf == 1,
+          "frame from the front buffer: %u,%u,%u, drawn %llu, frames %llu, from the front buffer %llu",
+          f ? f[4 * (32 * 64 + 32)] : 0, f ? f[4 * (32 * 64 + 32) + 1] : 0, f ? f[4 * (32 * 64 + 32) + 2] : 0,
+          (unsigned long long)drawn, (unsigned long long)frames, (unsigned long long)fbf);
+    /* a save state, loaded back: the renderer is host state and keeps drawing (the hooks survive) */
+    size_t cap = x360_state_size(X), n = 0;
+    uint8_t *blob = malloc(cap);
+    CHECK(blob && (n = x360_state_save(X, NULL, blob, cap)) > 0, "state saved");
+    CHECK(blob && x360_state_load(X, NULL, blob, n, why, sizeof why) == 0, "state loaded: %s", why);
+    free(blob);
+    uint32_t start = ring_at;
+    rreg(0x4800, data_phys | 3u), rreg(0x4801, 2u | 32u << 2);
+    rput(3u << 30 | 0u << 16 | (uint32_t)PM4_DRAW_INDX_2 << 8);
+    rput(6u | 2u << 6 | 4u << 16);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, ring_at);
+    x360_gpu_poll(X);
+    x360_render_counts(X, &drawn, &frames, &fbf);
+    CHECK(drawn == 2 && ring_at > start, "drawn after the state was loaded: %llu", (unsigned long long)drawn);
+    free(vs);
+    free(ps);
+    return 0;
+}
+
+int main(int argc, char **argv)
 {
     char why[256] = "";
     X = x360_create_bare(why, sizeof why);
@@ -607,6 +738,15 @@ int main(void)
     x360_install_fault_handler(X); /* a guest fault prints its address instead of a bare SIGSEGV */
     scratch = x360_heap_alloc(X, &X->heap_v4k, 0x10000, 0);
     stack_top = scratch + 0x8000;
+    if (argc == 3 && !strcmp(argv[1], "--render")) {
+        int rc = render_test(argv[2]);
+        x360_destroy(X);
+        if (rc == 77)
+            return 77;
+        printf("%s (%d failure%s)\n", failures ? "FAILED" : "renderer through the machine: all checks passed",
+               failures, failures == 1 ? "" : "s");
+        return failures || rc ? 1 : 0;
+    }
     test_formatters();
     test_memory();
     test_objects();
