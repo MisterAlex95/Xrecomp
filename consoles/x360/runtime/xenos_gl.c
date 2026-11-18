@@ -245,6 +245,7 @@ typedef struct texture {
     int used;
     uint32_t checked; /* the epoch its memory was last compared in */
     int copy;         /* 1 + the resolve copy it was made from (its host picture, at the internal resolution) */
+    int levels;       /* mip levels uploaded */
 } texture;
 
 /* ---- the eDRAM model ----
@@ -1585,10 +1586,9 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp)
  * 16_16, 16_16_16_16 (unsigned or signed normalised), their _FLOAT forms, 32_FLOAT, 32_32_FLOAT, 32_32_32_FLOAT
  * (linear), 32_32_32_32_FLOAT, 24_8 / 24_8_FLOAT (depth in X), DXT1, DXT2_3, DXT4_5 (and _AS_16), DXN, DXT3A,
  * DXT5A, CTX1; unsigned-normalised ones decoded to RGBA8, the others to floats (RGBA16F), X in red; the fetch
- * constant's swizzle goes to GL's texture swizzle. Mip levels from the mip address: each level max(1, pow2(size) >>
- * level) with its own 32-block-aligned pitch and height, levels 4 KB aligned one after the other; a packed mip tail
- * (levels whose smaller side is 16 texels or less, packed_mips set) is not decoded yet: sampling stops at the last
- * level before it. 1D, 2D, 3D and cube. */
+ * constant's swizzle goes to GL's texture swizzle. Mip levels from the mip address: each stored in max(1, pow2(size) >>
+ * level) with its own 32-block-aligned pitch and height, levels 4 KB aligned one after the other; with packed_mips set
+ * the levels whose smaller side is 16 texels or less share one tile (packed_offset). 1D, 2D, 3D and cube. */
 
 typedef struct texfmt {
     uint32_t format, block, bytes; /* block size in texels (1 or 4), bytes per block */
@@ -1886,6 +1886,70 @@ static uint32_t pow2_ceil(uint32_t v)
     return p;
 }
 
+static uint32_t log2_ceil(uint32_t v)
+{
+    uint32_t n = 0;
+    while ((1u << n) < v)
+        n++;
+    return n;
+}
+
+/* Packed mip tails (the layout Xenia's texture_util describes): once a level's smaller side is 16 texels or less, it and
+ * the levels after it share one 32 x 32 block tile, each at its own offset. The level whose storage holds the tail: */
+static uint32_t packed_level(uint32_t w, uint32_t h)
+{
+    uint32_t a = log2_ceil(w), b = log2_ceil(h), s = a < b ? a : b;
+    return s > 4 ? s - 4 : 0;
+}
+
+/* where level `mip` lies inside that tile, in blocks */
+static void packed_offset(uint32_t w, uint32_t h, uint32_t depth, uint32_t dim, uint32_t block, uint32_t mip,
+                          uint32_t *x, uint32_t *y, uint32_t *z)
+{
+    uint32_t lw = log2_ceil(w), lh = log2_ceil(h), base = packed_level(w, h), k = mip - base;
+    *x = *y = *z = 0;
+    if (k < 3) { /* 16, 8, 4 blocks along the short side's axis */
+        if (lw > lh)
+            *y = 16 >> k;
+        else
+            *x = 16 >> k;
+    } else { /* the smallest ones, along the long side */
+        uint32_t off = (1u << ((lw > lh ? lw : lh) - base)) >> (k - 2);
+        if (lw > lh)
+            *x = off;
+        else
+            *y = off;
+        if (off < 4 && dim == 2) { /* 3D: the last ones go along Z */
+            uint32_t ld = log2_ceil(depth);
+            *z = ld > 1 + k ? (ld - k) * 4 : 4;
+        }
+    }
+    *x /= block, *y /= block;
+}
+
+/* a level's storage: level 0 at the base address with the fetch constant's pitch; levels from 1 one after the other
+ * at the mip address, sized from the base's next powers of two */
+typedef struct tex_storage {
+    uint32_t pitch_blocks, height_blocks, row_bytes, z_stride; /* a row; a 3D slice */
+    uint32_t stride;                                           /* a face, or the whole of a 3D level */
+} tex_storage;
+
+static tex_storage storage_of(const texfmt *tf, uint32_t dim, uint32_t w, uint32_t h, uint32_t depth, uint32_t pitch,
+                              uint32_t tiled, uint32_t level)
+{
+    tex_storage s;
+    uint32_t pw = level ? pow2_ceil(w) >> level : pitch, ph = level ? pow2_ceil(h) >> level : h;
+    pw = pw ? pw : 1, ph = ph ? ph : 1;
+    s.pitch_blocks = (((pw + tf->block - 1) / tf->block) + 31) & ~31u;
+    s.height_blocks = (((ph + tf->block - 1) / tf->block) + 31) & ~31u;
+    s.row_bytes = s.pitch_blocks * tf->bytes;
+    if (level && !tiled)
+        s.row_bytes = (s.row_bytes + 255) & ~255u; /* linear mip rows are 256-byte aligned */
+    s.z_stride = s.row_bytes * (dim == 0 ? 1 : s.height_blocks);
+    s.stride = (s.z_stride * (dim == 2 ? (depth + 3) & ~3u : 1) + 4095) & ~4095u;
+    return s;
+}
+
 /* decode the texture a 6-dword fetch constant describes (the layout of Xenia's texture_util.cc
  * GetGuestTextureLayout: rows of the pitch aligned to 32 blocks, linear ones too, as Direct3D's pitches already
  * are; slices of the height aligned to 32 blocks; cube faces (+X, -X, +Y, -Y, +Z, -Z, GL's order) 4 KB apart; 3D
@@ -1916,74 +1980,73 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
     if (!pitch)
         pitch = w;
     unsigned bpb_log2 = tf->bytes == 1 ? 0 : tf->bytes == 2 ? 1 : tf->bytes == 4 ? 2 : tf->bytes == 8 ? 3 : 4;
-    /* mip levels: from the mip address, up to the fetch constant's last level, stopping before a packed tail */
+    /* mip levels: from the mip address, up to the fetch constant's last level */
     uint32_t mip_addr = fc[5] & 0xFFFFF000u, max_level = (fc[4] >> 6) & 15, packed = (fc[5] >> 11) & 1;
-    uint32_t mip_filter = (fc[3] >> 23) & 3;
+    uint32_t mip_filter = (fc[3] >> 23) & 3, h1 = dim == 0 ? 1 : h, d3 = dim == 2 ? depth : 1;
     int levels = 1;
-    if (mip_addr && max_level && mip_filter != 2 && dim != 2) {
-        uint32_t p2w = pow2_ceil(w), p2h = pow2_ceil(dim == 0 ? 1 : h);
+    if (mip_addr && max_level && mip_filter != 2) {
         for (uint32_t l = 1; l <= max_level && l < 14; l++) {
-            uint32_t lw = p2w >> l ? p2w >> l : 1, lh = p2h >> l ? p2h >> l : 1;
-            if (packed && (lw < lh ? lw : lh) <= 16)
-                break; /* the packed tail: not decoded (left) */
+            if (!(w >> (l - 1) > 1 || h1 >> (l - 1) > 1 || d3 >> (l - 1) > 1))
+                break; /* the level before was 1 x 1 x 1 */
             levels++;
-            if (lw == 1 && lh == 1)
-                break;
         }
     }
+    uint32_t tail = packed ? packed_level(w, h1) : 0xFFFFFFFFu; /* the level whose storage holds the tail */
     out->levels = levels;
     out->is_float = tf->is_float;
-    out->w = w, out->h = h, out->slices = slices, out->dim = dim;
+    out->w = w, out->h = h1, out->slices = slices, out->dim = dim;
     uint64_t hash = (uint64_t)fc[3] << 32 ^ (uint64_t)levels;
-    uint32_t level_addr = fc[1] & 0xFFFFF000u, chain = mip_addr;
     for (int l = 0; l < levels; l++) {
-        uint32_t lw = l ? (pow2_ceil(w) >> l ? pow2_ceil(w) >> l : 1) : w;
-        uint32_t lh = l ? (pow2_ceil(h) >> l ? pow2_ceil(h) >> l : 1) : h;
-        if (dim == 0)
-            lh = 1;
-        uint32_t lpitch = l ? lw : pitch;
-        uint32_t bw = (lw + tf->block - 1) / tf->block, bh = (lh + tf->block - 1) / tf->block;
-        uint32_t pitch_blocks = (((lpitch + tf->block - 1) / tf->block) + 31) & ~31u;
-        uint32_t height_blocks = (bh + 31) & ~31u;
-        uint32_t row_bytes = pitch_blocks * tf->bytes;
-        uint32_t z_stride = row_bytes * (dim == 0 ? 1 : height_blocks);
-        uint32_t face_stride = (z_stride + 4095) & ~4095u;
-        if (l) {
-            level_addr = chain;
-            chain += (dim == 3 ? face_stride * 6 : (z_stride * slices + 4095) & ~4095u);
+        /* what is drawn: the guest's size at this level (a compressed level is read in whole blocks, then cropped) */
+        uint32_t lw = w >> l ? w >> l : 1, lh = h1 >> l ? h1 >> l : 1, ld = dim == 2 ? (depth >> l ? depth >> l : 1) : slices;
+        /* where it is stored: the base, its own mip storage, or inside the tail's (the base of a texture that is
+         * all tail keeps its level 0 in the base storage, the mips in the first mip storage) */
+        uint32_t stored = (uint32_t)l;
+        if (packed && stored > (tail ? tail : 1))
+            stored = tail ? tail : 1;
+        tex_storage st = storage_of(tf, dim, w, h1, depth, pitch, tiled, stored);
+        uint32_t level_addr = fc[1] & 0xFFFFF000u;
+        if (stored) {
+            level_addr = mip_addr;
+            for (uint32_t k = 1; k < stored; k++) {
+                tex_storage before = storage_of(tf, dim, w, h1, depth, pitch, tiled, k);
+                level_addr += before.stride * (dim == 3 ? 6 : 1);
+            }
         }
-        size_t slice_n = (size_t)bw * bh * tf->bytes, src_n = slice_n * slices;
+        uint32_t ox = 0, oy = 0, oz = 0;
+        if (packed && (uint32_t)l >= tail)
+            packed_offset(w, h1, depth, dim, tf->block, (uint32_t)l, &ox, &oy, &oz);
+        uint32_t bw = (lw + tf->block - 1) / tf->block, bh = (lh + tf->block - 1) / tf->block;
+        size_t slice_n = (size_t)bw * bh * tf->bytes, src_n = slice_n * ld;
         uint8_t *src = malloc(src_n);
         if (!src) {
             free_decoded(out);
             return 0;
         }
-        for (uint32_t z = 0; z < slices; z++)
+        for (uint32_t z = 0; z < ld; z++)
             for (uint32_t by = 0; by < bh; by++) {
                 uint8_t *row = src + z * slice_n + (size_t)by * bw * tf->bytes;
                 if (!tiled) { /* a whole row at once */
-                    uint32_t off = z * (dim == 3 ? face_stride : z_stride) + by * row_bytes;
+                    uint32_t off = (dim == 2 ? (z + oz) * st.z_stride : z * st.stride) + (by + oy) * st.row_bytes +
+                                   ox * tf->bytes;
                     read_bytes(cp, level_addr + off, bw * tf->bytes, endian, row);
                     continue;
                 }
                 for (uint32_t bx = 0; bx < bw; bx++) {
-                    uint32_t off = dim == 2 ? (uint32_t)tiled3d((int32_t)bx, (int32_t)by, (int32_t)z, pitch_blocks,
-                                                                height_blocks, bpb_log2)
-                                            : z * face_stride + (uint32_t)tiled2d((int32_t)bx, (int32_t)by,
-                                                                                  pitch_blocks, bpb_log2);
+                    uint32_t off = dim == 2 ? (uint32_t)tiled3d((int32_t)(bx + ox), (int32_t)(by + oy), (int32_t)(z + oz),
+                                                                st.pitch_blocks, st.height_blocks, bpb_log2)
+                                            : z * st.stride + (uint32_t)tiled2d((int32_t)(bx + ox), (int32_t)(by + oy),
+                                                                                st.pitch_blocks, bpb_log2);
                     read_bytes(cp, level_addr + off, tf->bytes, endian, row + (size_t)bx * tf->bytes);
                 }
             }
         hash = (hash * 1099511628211ull) ^ fnv(src, src_n);
-        uint32_t tw = bw * tf->block, th = bh * tf->block;
-        out->lw[l] = tw, out->lh[l] = th, out->ld[l] = slices;
-        if (l == 0)
-            out->w = tw, out->h = th;
+        out->lw[l] = lw, out->lh[l] = lh, out->ld[l] = ld;
         if (hash_only) {
             free(src);
             continue;
         }
-        size_t px = (size_t)tw * th * slices;
+        size_t px = (size_t)lw * lh * ld;
         out->level[l] = malloc(px * (tf->is_float ? 16 : 4));
         if (!out->level[l]) {
             free(src);
@@ -1991,21 +2054,24 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
             return 0;
         }
         uint32_t sign = (fc[0] >> 2) & 3;
-        for (uint32_t z = 0; z < slices; z++) {
+        for (uint32_t z = 0; z < ld; z++) {
+            size_t at = (size_t)z * lw * lh;
             for (uint32_t by = 0; by < bh; by++)
                 for (uint32_t bx = 0; bx < bw; bx++) {
                     const uint8_t *s = src + z * slice_n + ((size_t)by * bw + bx) * tf->bytes;
-                    size_t at = (size_t)z * tw * th;
                     if (tf->block == 4) {
                         uint8_t q[16][4];
                         dxt_block(s, tf->format, q);
                         uint8_t *o = out->level[l];
-                        for (int i = 0; i < 16; i++)
-                            memcpy(o + (at + ((size_t)by * 4 + i / 4) * tw + bx * 4 + i % 4) * 4, q[i], 4);
+                        for (uint32_t i = 0; i < 16; i++) {
+                            uint32_t tx = bx * 4 + i % 4, ty = by * 4 + i / 4;
+                            if (tx < lw && ty < lh)
+                                memcpy(o + (at + (size_t)ty * lw + tx) * 4, q[i], 4);
+                        }
                     } else if (tf->is_float) {
-                        texel_f(tf->format, s, sign, (float *)out->level[l] + (at + (size_t)by * tw + bx) * 4);
+                        texel_f(tf->format, s, sign, (float *)out->level[l] + (at + (size_t)by * lw + bx) * 4);
                     } else {
-                        texel(tf->format, s, (uint8_t *)out->level[l] + (at + (size_t)by * tw + bx) * 4);
+                        texel(tf->format, s, (uint8_t *)out->level[l] + (at + (size_t)by * lw + bx) * 4);
                     }
                 }
         }
@@ -2166,6 +2232,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     }
     g->glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
     g->glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, d.levels - 1);
+    t->levels = d.levels;
     if (d.levels > 1)
         g->st.mipmapped++;
     free_decoded(&d);
@@ -2237,8 +2304,7 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
         int mipped = 0;
         for (int t = 0; t < MAX_TEXTURES; t++)
             if (g->textures[t].tex == tex) {
-                mipped = !g->textures[t].copy && ((fc[4] >> 6) & 15) && (fc[5] & 0xFFFFF000u) &&
-                         ((fc[3] >> 23) & 3) != 2 && dim != 2;
+                mipped = !g->textures[t].copy && g->textures[t].levels > 1;
                 break;
             }
         sampler_state(g, target, fc, mipped);

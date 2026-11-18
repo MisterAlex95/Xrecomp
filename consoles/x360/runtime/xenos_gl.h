@@ -20,7 +20,7 @@
  *
  * Textures: 1D, 2D, 3D and cube from the texture fetch constants, linear or tiled, 8 / 8_8 / 8_8_8_8 / 1_5_5_5 /
  * 5_6_5 / 4_4_4_4 / DXT1 / DXT2_3 / DXT4_5 decoded to RGBA8 (their memory compared once per frame and after each
- * resolve, decoded again when it changed), clamp, filter and swizzle from the fetch constant; base level only.
+ * resolve, decoded again when it changed), clamp, filter and swizzle from the fetch constant; mip levels, packed mip tails included.
  *
  * Resolves (eDRAM mode "copy"): the colour copied to guest memory as a tiled 8_8_8_8 or 5_6_5 texture at the
  * resolve rectangle, colour / depth / stencil cleared there; once a title clears through resolves, swaps stop

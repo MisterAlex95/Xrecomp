@@ -157,6 +157,16 @@ static uint32_t tiled_off_log2(int x, int y, unsigned log2)
                       ((oi >> 5) & 7) << 8 | (oi >> 8) << 12);
 }
 
+/* the same for any pitch (texels, a multiple of 32) */
+static uint32_t tiled_off_pitch(int x, int y, int pitch, unsigned log2)
+{
+    int32_t outer = ((y >> 5) * (pitch >> 5) + (x >> 5)) << 6, inner = (((y >> 1) & 7) << 3) | (x & 7);
+    int32_t oi = (outer | inner) << log2;
+    uint32_t bank = (y >> 4) & 1, pipe = ((x >> 3) & 3) ^ (((y >> 3) & 1) << 1);
+    return (uint32_t)((int32_t)((uint32_t)(y & 1) << 4 | pipe << 6 | bank << 11) | (oi & 15) | ((oi >> 4) & 1) << 5 |
+                      ((oi >> 5) & 7) << 8 | (oi >> 8) << 12);
+}
+
 static void run(xenos_cp *cp)
 {
     for (uint32_t i = 0; i < npk; i++)
@@ -778,15 +788,15 @@ int main(int argc, char **argv)
         reg(0x2001, 0), reg(0x2000, 0), reg(0x4400, fbits(1.0f));
 
         /* frame 27: mips: a linear 32x32 8_8_8_8 texture (red), its level 1 (16x16, green) and level 2 (8x8,
-         * blue) from the mip address, 4 KB apart (rows of 32 texels); a full-target quad with texture coordinates
-         * 0..8 (repeat) minifies 4x: level 2, blue */
+         * blue) from the mip address (linear mip rows are 256 bytes, a level 32 rows: 8 KB apart); a full-target quad
+         * with texture coordinates 0..8 (repeat) minifies 4x: level 2, blue */
         for (uint32_t y = 0; y < 32; y++)
             for (uint32_t x = 0; x < 32; x++) {
                 w32(0x3C000 + y * 128 + x * 4, 0xFF0000FFu);
                 if (x < 16 && y < 16)
-                    w32(0x3D000 + y * 128 + x * 4, 0xFF00FF00u);
+                    w32(0x3D000 + y * 256 + x * 4, 0xFF00FF00u);
                 if (x < 8 && y < 8)
-                    w32(0x3E000 + y * 128 + x * 4, 0xFFFF0000u);
+                    w32(0x3F000 + y * 256 + x * 4, 0xFFFF0000u);
             }
         uint32_t nt;
         uint32_t *pt = load(argv[1], "ps_tex.bin", &nt);
@@ -1059,6 +1069,127 @@ int main(int argc, char **argv)
         CHECK(px(g, 4, 4)[1] >= 126 && px(g, 4, 4)[1] <= 129 && px(g, 59, 59)[1] >= 126 && px(g, 59, 59)[1] <= 129,
               "immediate 32-bit indices: corners %u %u", px(g, 4, 4)[1], px(g, 59, 59)[1]);
     }
+    /* packed mip tails: every level a colour of its own, written where the layout puts it (offsets worked out by hand
+     * from the rule, not with the renderer's code); each frame samples one level through setTexLOD */
+    {
+        static const uint32_t lc[7] = {0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u, 0xFF00FFFFu,
+                                       0xFFFFFF00u, 0xFFFF00FFu, 0xFFFFFFFFu};
+        static const uint8_t lrgb[7][3] = {{255, 0, 0},   {0, 255, 0},   {0, 0, 255},    {255, 255, 0},
+                                           {0, 255, 255}, {255, 0, 255}, {255, 255, 255}};
+        uint32_t nl;
+        uint32_t *pl[3];
+        static const char *const lname[3] = {"ps_lod1.bin", "ps_lod2.bin", "ps_lod3.bin"};
+        for (int i = 0; i < 3; i++) {
+            pl[i] = load(argv[1], lname[i], &nl);
+            CHECK(pl[i] != NULL, "no %s", lname[i]);
+        }
+        /* draw with shader s, coordinates (u, v, w), level `lod`, fetch constant f: the centre pixel's colour */
+#define LOD_FRAME(s, u, v, w, lod, f)                                                                                  \
+    do {                                                                                                               \
+        im[0] = 1, im[1] = nl;                                                                                         \
+        memcpy(im + 2, pl[s], 4 * nl);                                                                                 \
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nl);                                                                      \
+        vertex(0x41000, -1, -1, u, v, w), vertex(0x41020, 1, -1, u, v, w);                                             \
+        vertex(0x41040, -1, 1, u, v, w), vertex(0x41060, 1, 1, u, v, w);                                               \
+        reg(0x4800, 0x41000u | 3u);                                                                                    \
+        reg(0x4801, 2u | (32u << 2));                                                                                  \
+        reg(0x4404, fbits((float)(lod)));                                                                              \
+        for (int r_ = 0; r_ < 6; r_++)                                                                                 \
+            reg(0x480C + (uint32_t)r_, (f)[r_]);                                                                       \
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);                                                                           \
+        type3(PM4_XE_SWAP, swap, 4);                                                                                   \
+        run(&cp);                                                                                                      \
+    } while (0)
+        /* 64x64 linear, levels 0-6: the tail starts at level 2 (16x16). Level 1: 0x60000, rows of 256 bytes, 8 KB. The
+         * tail's storage at 0x62000: level 2 at x 16, level 3 at x 8, level 4 at x 4, level 5 at y 8, level 6 at y 4 */
+        for (uint32_t y = 0; y < 64; y++)
+            for (uint32_t x = 0; x < 64; x++)
+                w32(0x50000 + y * 256 + x * 4, lc[0]);
+        for (uint32_t y = 0; y < 32; y++)
+            for (uint32_t x = 0; x < 32; x++)
+                w32(0x60000 + y * 256 + x * 4, lc[1]);
+        static const uint32_t t2d[5][3] = {{16, 0, 16}, {8, 0, 8}, {4, 0, 4}, {0, 8, 2}, {0, 4, 1}};
+        for (uint32_t l = 0; l < 5; l++)
+            for (uint32_t y = 0; y < t2d[l][2]; y++)
+                for (uint32_t x = 0; x < t2d[l][2]; x++)
+                    w32(0x62000 + (y + t2d[l][1]) * 256 + (x + t2d[l][0]) * 4, lc[2 + l]);
+        uint32_t f2d[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22, 6u | 2u << 6 | 0x50000u, 63u | 63u << 13, sw_id << 1,
+                           6u << 6, 1u << 9 | 1u << 11 | 0x60000u};
+        for (int l = 0; l < 7; l++) {
+            LOD_FRAME(0, 0.5f, 0.5f, 0.0f, l, f2d);
+            c = px(g, W / 2, H / 2);
+            CHECK(c[0] == lrgb[l][0] && c[1] == lrgb[l][1] && c[2] == lrgb[l][2], "packed 2D level %d: %u,%u,%u", l, c[0],
+                  c[1], c[2]);
+        }
+        /* 16x16 tiled, all tail: level 0 at x 16 of the base's tile, levels 1 and 2 at x 8 and x 4 of the mips' */
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++)
+                w32(0x68000 + tiled_off_pitch(x + 16, y, 32, 2), lc[3]);
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+                w32(0x69000 + tiled_off_pitch(x + 8, y, 32, 2), lc[4]);
+        for (int y = 0; y < 4; y++)
+            for (int x = 0; x < 4; x++)
+                w32(0x69000 + tiled_off_pitch(x + 4, y, 32, 2), lc[5]);
+        uint32_t f16[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22 | 1u << 31, 6u | 2u << 6 | 0x68000u, 15u | 15u << 13,
+                           sw_id << 1, 2u << 6, 1u << 9 | 1u << 11 | 0x69000u};
+        for (int l = 0; l < 3; l++) {
+            LOD_FRAME(0, 0.5f, 0.5f, 0.0f, l, f16);
+            c = px(g, W / 2, H / 2);
+            CHECK(c[0] == lrgb[3 + l][0] && c[1] == lrgb[3 + l][1] && c[2] == lrgb[3 + l][2],
+                  "packed 16x16 level %d: %u,%u,%u", l, c[0], c[1], c[2]);
+        }
+        /* a 32x32 cube: level 1 (16x16) and 2 (8x8) in the tail at 0x70000, faces 8 KB apart: +Z is face 4 */
+        for (uint32_t f = 0; f < 6; f++) {
+            for (uint32_t y = 0; y < 32; y++)
+                for (uint32_t x = 0; x < 32; x++)
+                    w32(0x6A000 + f * 4096 + y * 128 + x * 4, lc[0]);
+            for (uint32_t y = 0; y < 16; y++)
+                for (uint32_t x = 0; x < 16; x++)
+                    w32(0x70000 + f * 8192 + y * 256 + (x + 16) * 4, f == 4 ? lc[1] : lc[6]);
+            for (uint32_t y = 0; y < 8; y++)
+                for (uint32_t x = 0; x < 8; x++)
+                    w32(0x70000 + f * 8192 + y * 256 + (x + 8) * 4, f == 4 ? lc[2] : lc[6]);
+        }
+        uint32_t fcu[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | 0x6A000u, 31u | 31u << 13, sw_id << 1,
+                           2u << 6, 3u << 9 | 1u << 11 | 0x70000u};
+        for (int l = 1; l < 3; l++) {
+            LOD_FRAME(2, 1.5f, 1.5f, 4.0f, l, fcu);
+            c = px(g, W / 2, H / 2);
+            CHECK(c[0] == lrgb[l][0] && c[1] == lrgb[l][1] && c[2] == lrgb[l][2], "packed cube level %d: %u,%u,%u", l, c[0],
+                  c[1], c[2]);
+        }
+        /* 32x32x4 3D: level 1 (16x16x2) at x 16 of the tail at 0x80000, its slices 8 KB apart; level 2 (8x8x1) at x 8 */
+        for (uint32_t z = 0; z < 4; z++)
+            for (uint32_t y = 0; y < 32; y++)
+                for (uint32_t x = 0; x < 32; x++)
+                    w32(0x7C000 + z * 4096 + y * 128 + x * 4, lc[0]);
+        for (uint32_t z = 0; z < 2; z++)
+            for (uint32_t y = 0; y < 16; y++)
+                for (uint32_t x = 0; x < 16; x++)
+                    w32(0x80000 + z * 8192 + y * 256 + (x + 16) * 4, z ? lc[3] : lc[6]);
+        for (uint32_t y = 0; y < 8; y++)
+            for (uint32_t x = 0; x < 8; x++)
+                w32(0x80000 + y * 256 + (x + 8) * 4, lc[5]);
+        uint32_t f3d[6] = {2u | 2u << 10 | 2u << 13 | 2u << 16 | 1u << 22, 6u | 2u << 6 | 0x7C000u,
+                           31u | 31u << 11 | 3u << 22, sw_id << 1, 2u << 6, 2u << 9 | 1u << 11 | 0x80000u};
+        LOD_FRAME(1, 0.5f, 0.5f, 0.75f, 1, f3d);
+        c = px(g, W / 2, H / 2);
+        CHECK(c[0] == lrgb[3][0] && c[1] == lrgb[3][1] && c[2] == lrgb[3][2], "packed 3D level 1, slice 1: %u,%u,%u", c[0],
+              c[1], c[2]);
+        LOD_FRAME(1, 0.5f, 0.5f, 0.5f, 2, f3d);
+        c = px(g, W / 2, H / 2);
+        CHECK(c[0] == lrgb[5][0] && c[1] == lrgb[5][1] && c[2] == lrgb[5][2], "packed 3D level 2: %u,%u,%u", c[0], c[1],
+              c[2]);
+#undef LOD_FRAME
+        for (int i = 0; i < 3; i++)
+            free(pl[i]);
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;

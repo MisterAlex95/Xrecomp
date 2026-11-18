@@ -43,6 +43,13 @@ def shaders():
     ps_vol = program([(2, [("fetch", fetch_words(1, 0, 1, XYZW, 2, dimension=2)),
                            ("alu", alu_words(**export(0, 1)))], {})])
     packed = {"ps_pos": ps_pos, "ps_mrt": ps_mrt, "ps_cube": ps_cube, "ps_vol": ps_vol}
+    # ps_lod1 / 2 / 3 (XBA-296): a 2D / 3D / cube fetch at interpolator 0's xyz, at the mip level c1.x (setTexLOD)
+    for name, dim in (("ps_lod1", 1), ("ps_lod2", 2), ("ps_lod3", 3)):
+        packed[name] = program([(2, [("alu", alu_words(vop=2, vdest=2, vmask=0xF,
+                                                       srcs=((1, 0, 0, 0), (1, 0, 0, 0), (0, 0, 0, 0)))),
+                                     ("fetch", fetch_words(24, 2, 0, 0o7777, 0, src_swz=0)),
+                                     ("fetch", fetch_words(1, 0, 1, XYZW, 2, dimension=dim, use_reg_lod=1)),
+                                     ("alu", alu_words(**export(0, 1)))], {})])
     for name, fmt in (("vs_u16", 26), ("vs_h16", 32)):
         packed[name] = program([(2, [("fetch", fetch_words(0, 0, 1, XYZW, 0, sel=0, format=38, stride=6, offset=0)),
                                      ("fetch", fetch_words(0, 0, 2, XYZW, 0, sel=0, format=fmt, stride=6, offset=4)),
