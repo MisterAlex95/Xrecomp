@@ -431,8 +431,9 @@ def test_synthetic_title_parses_and_lifts(tmp_path):
     assert s["functions"] == len(funcs)
     assert s["interp_fallback_insns"] == 0, s["unlifted"]
     text = (tmp_path / "x360_rc_000.c").read_text()
-    assert "xv_msum4fp(V(100), V(64))" in text
-    assert "V(73) = xv_maddfp(V(72), V(80), V(73));" in text  # vmaddfp128: vD = vA * vB + vD
+    assert "xv_msum4fp(xv_daz(c->vscr, V(100)), xv_daz(c->vscr, V(64)))" in text
+    assert ("V(73) = xv_daz(c->vscr, xv_maddfp(xv_daz(c->vscr, V(72)), xv_daz(c->vscr, V(80)), "
+            "xv_daz(c->vscr, V(73))));") in text  # vmaddfp128: vD = vA * vB + vD
 
 
 @pytest.mark.skipif(not shutil.which("cc") or not sys.platform.startswith("linux"), reason="no C compiler / not Linux")
