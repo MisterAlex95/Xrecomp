@@ -203,6 +203,8 @@ void gc_destroy(gc_machine *m)
     free(m->h.ram);
     free(m->aram);
     free(m->span_state);
+    free(m->span_order);
+    free(m->span_maxhi);
     free(m->rc_hash_keys);
     free(m->rc_hash_idx);
     free(m->missed);
