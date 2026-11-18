@@ -72,6 +72,13 @@ typedef struct xe_rc_entry {
     xe_rc_fn fn;
 } xe_rc_entry;
 
+/* XBA-284: a big pack's resume table in parts (xe_rc_resume_parts, xe_rc_resume_part_count instead of xe_rc_resume),
+ * each sorted, the parts in address order of their functions (a point may sort before the previous part's last) */
+typedef struct xe_rc_part {
+    const xe_rc_entry *entries;
+    unsigned count;
+} xe_rc_part;
+
 /* ---- memory ---- */
 
 #ifdef XE_RUNTIME
@@ -377,6 +384,12 @@ static inline void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
 /* Record forms: titles run in 32-bit mode (MSR[SF] = 0), CR0 compares the low word of the result with 0 (xenon_ops.h
  * xe_carry says more). */
 #define RC_CR0(v) (c->cr = ppc_cr_set(c->cr, 0, ppc_cmps((int32_t)(uint32_t)(v), 0, c->xer_so)))
+/* OE forms (XBA-284): OV is the overflow, SO sticks */
+#define RC_OE(ov)                                                                                                      \
+    do {                                                                                                               \
+        c->xer_ov = (ov);                                                                                              \
+        c->xer_so |= c->xer_ov;                                                                                        \
+    } while (0)
 #define RC_FSET_S(d, v) (c->fpr[d] = ppc_single(v))
 #define RC_FSET_D(d, v) (c->fpr[d] = (v))
 

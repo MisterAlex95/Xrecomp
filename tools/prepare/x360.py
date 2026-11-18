@@ -42,7 +42,7 @@ from tools.prepare import pack
 from tools.prepare import ps1
 
 CONSOLE = "x360"
-ENTRY = "xe_rc_resume"                     # what x360_runtime.c dlsyms (with xe_rc_resume_count, xe_rc_image_crc)
+ENTRY = "xe_rc_resume"                     # what x360_runtime.c dlsyms (or xe_rc_resume_parts, XBA-284), metadata
 XEX_COPY = "plain.xex"
 PACK_XEX = "default.xex"                   # x360_start (pack_loader.c): <pack dir>/default.xex
 SHADERS = "shaders"                        # the runtime's dump (<work>/shaders) and the pack's cache (<pack>/shaders)

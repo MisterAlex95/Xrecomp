@@ -369,3 +369,31 @@ def test_helper_words_match_xenonrecomp():
         k = (labels[name] - TEXT) // 4
         got = "".join("%08x" % w for w in words[k:k + len(hexa) // 8])
         assert got == hexa, (name, got, hexa)
+
+
+def test_resume_table_in_parts(tmp_path):
+    """XBA-284: past resume_split points the table is cut into parts by function address; together they hold the
+    same entries as the one array, each address once, every part sorted, and the files link into one library."""
+    import re
+    img, _, _ = build()
+    one, split = tmp_path / "one", tmp_path / "split"
+    recompile(img, str(one))
+    s = recompile(img, str(split), resume_split=1, resume_part_bytes=0x40)
+    row = re.compile(r"\{0x([0-9A-F]{8})u, (\w+)\}")
+    whole = row.findall((one / "x360_rc_table.c").read_text().split("xe_rc_resume[]")[1].split("};")[0])
+    table = (split / "x360_rc_table.c").read_text()
+    assert "xe_rc_resume[]" not in table and "xe_rc_resume_parts[]" in table
+    parts, got = sorted(split.glob("x360_rc_resume_*.c")), []
+    assert len(parts) > 1 and "xe_rc_resume_part_count = %du;" % len(parts) in table
+    assert {p.name for p in parts} <= set(s["files"])
+    for p in parts:
+        rows = row.findall(p.read_text())
+        assert rows == sorted(rows) and "{xe_rc_resume_%s, %du}" % (p.stem[-5:], len(rows)) in table
+        got += rows
+    assert sorted(got) == sorted(whole) and len({a for a, _ in got}) == len(got)
+    assert "xe_rc_resume_count = %du;" % len(whole) in table
+    if shutil.which("cc") and sys.platform.startswith("linux"):
+        inc = sum((["-I", d] for d in RUNTIME_DIRS), [])
+        subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-DXE_RUNTIME=1", "-Wl,--no-undefined"] + inc +
+                       ["-o", str(tmp_path / "p.so")] + sorted(str(p) for p in split.glob("*.c")) + ["-lm"],
+                       check=True)

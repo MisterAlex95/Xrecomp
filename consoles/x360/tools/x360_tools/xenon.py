@@ -320,7 +320,20 @@ def V(n):
 
 
 XENON_INTERP = {"td", "tdi"}
-OE_64 = {"mulld", "mulhd", "mulhdu", "divd", "divdu"}
+
+# OE forms (XBA-284): XER[OV] = the overflow, XER[SO] |= OV, before the record form's CR0 reads SO. 32-bit mode: the add
+# / subtract family overflows on the low word (the sign of the two addends against the result's, carry in included);
+# mullwo when the 64-bit product of the low words does not fit 32 bits; divwo / divwuo on a zero divisor (and
+# INT_MIN / -1); the doubleword forms on 64 bits. mulhw / mulhwu / mulhd / mulhdu have no OE form: the bit is ignored.
+OE_FORMS = {
+    "add": ("a_", "b_"), "addc": ("a_", "b_"), "adde": ("a_", "b_"), "addze": ("a_", "0"), "addme": ("a_", "~0ULL"),
+    "subf": ("~a_", "b_"), "subfc": ("~a_", "b_"), "subfe": ("~a_", "b_"), "subfze": ("~a_", "0"),
+    "subfme": ("~a_", "~0ULL"), "neg": ("~a_", "0"),
+}
+OE_OTHER = {
+    "mullw": "xe_ov_mullw(a_, b_)", "divw": "xe_ov_divw(a_, b_)", "divwu": "((uint32_t)b_ == 0)",
+    "mulld": "xe_ov_mulld(a_, b_)", "divd": "xe_ov_divd(a_, b_)", "divdu": "(b_ == 0)",
+}
 
 
 class XenonLifter(FnLifter):
@@ -343,8 +356,8 @@ class XenonLifter(FnLifter):
         n = i.name
         if n in XENON_INTERP:
             return True
-        if n in OE_64 and i.oe:
-            return True
+        if i.op == 31 and i.oe and (n in OE_FORMS or n in OE_OTHER):
+            return False  # lifted with OV / SO (_xo)
         return super().needs_interp(i)
 
     def is_fp(self, i):
@@ -423,6 +436,11 @@ class XenonLifter(FnLifter):
                                                      self.rec(i, i.ra)))
 
     def _xo(self, i, body):
+        if i.oe and i.name in OE_FORMS:
+            x, y = OE_FORMS[i.name]
+            body += " RC_OE(xe_ov_add(%s, %s, %s));" % (x, y, R(i.rd))
+        elif i.oe and i.name in OE_OTHER:
+            body += " RC_OE(%s);" % OE_OTHER[i.name]
         return "{ uint64_t a_ = %s, b_ = %s; (void)b_; %s }%s" % (R(i.ra), R(i.rb), body, self.rec(i, i.rd))
 
     def op_addc(self, i): return self._xo(i, "%s = a_ + b_; c->xer_ca = xe_carry(a_, b_, 0);" % R(i.rd))

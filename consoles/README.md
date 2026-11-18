@@ -1997,13 +1997,15 @@ What is there:
   so per-host-thread machines need no re-lift. `x360_interp.c` (XBA-283) is a Xenon interpreter with the lifter's semantics
   (integer and 64-bit forms, branches, loads / stores, FPU, system registers; VMX / VMX128 in `x360_interp_vmx.inc`,
   generated from `xenon.py` by `python3 -m x360_tools.gen_interp_vmx`, kept current by `test_gen_interp_vmx`, checked
-  bit for bit against lifted code on random words of every vector mnemonic by `test_interp_vmx`): code
+  bit for bit against lifted code on random words of every vector mnemonic by `test_interp_vmx`, the integer, branch,
+  CR, load / store and FPU half the same way by `test_interp_int`, XBA-284): code
   the pack does not hold is interpreted until it reaches lifted code again, its entry is recorded once (the
   dispatcher's address unless an interpreted call returns there, and the targets of calls and tail calls the
   interpreted code makes; not the inlined save / restore helpers, which the pack lists in `xe_rc_helpers`) and the run
   goes on, so one run names every function a pack lacks (`--missed`, `discovered.txt`); `--stop-at-miss` /
-  `RECOMP_X360_INTERP=0` stop at the first, as before. Not modelled there: OV / SO of the OE forms (no title seen
-  uses them). Reservations (XBA-283): `lwarx` / `ldarx` note the address and the value read, `stwcx.` / `stdcx.` are
+  `RECOMP_X360_INTERP=0` stop at the first, as before. OE forms (`addo`, `subfo`, `mullwo`, `divwo`, `mulldo`,
+  `divdo`...) are lifted with OV / SO since XBA-284 (32-bit mode: the add / subtract family overflows on the low
+  word; hand-worked vectors in `test_interp_int`). Reservations (XBA-283): `lwarx` / `ldarx` note the address and the value read, `stwcx.` / `stdcx.` are
   a compare-and-swap against it (`RC_LWARX` / `RC_STWCX` in `xenon_rt.h`; packs say so with `xe_rc_features`).
   `x360_run --host-threads` (experimental, `x360_set_host_threads`): each guest thread's lifted code on a host
   thread of its own, in parallel, the HLE, the interpreter and the waits serial under one lock; virtual time follows

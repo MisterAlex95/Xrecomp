@@ -36,7 +36,8 @@ echo "generated: $nfiles files, $((csize / 1048576)) MB of C, table $(($(wc -c <
 mkdir -p "$work/obj"
 total=0
 done_bytes=0
-for f in $(ls "$work"/gen/x360_rc_[0-9]*.c | head -n "$samples") "$work/gen/x360_rc_table.c"; do
+for f in $(ls "$work"/gen/x360_rc_[0-9]*.c | head -n "$samples") "$work/gen/x360_rc_table.c" \
+        $(ls -S "$work"/gen/x360_rc_resume_*.c 2>/dev/null | head -n 1); do  # XBA-284: the largest resume part
     b=$(basename "$f" .c)
     # tools/prepare/x360.py compile_flags at the default -O1
     /usr/bin/time -o "$work/obj/$b.time" -f "%e %M" $cc -O1 -fno-tree-slp-vectorize -ffp-contract=off -DXE_RUNTIME=1 \
@@ -44,7 +45,7 @@ for f in $(ls "$work"/gen/x360_rc_[0-9]*.c | head -n "$samples") "$work/gen/x360
         -I "$repo/consoles/gc/runtime" -c "$f" -o "$work/obj/$b.o"
     read -r secs kb <"$work/obj/$b.time"
     echo "  $b: $(($(wc -c <"$f") / 1024)) KB of C, $secs s, peak $((kb / 1024)) MB"
-    if [ "$b" != x360_rc_table ]; then
+    if [ "$b" = "${b#x360_rc_t}" ] && [ "$b" = "${b#x360_rc_resume}" ]; then
         total=$(awk "BEGIN { print $total + $secs }")
         done_bytes=$((done_bytes + $(wc -c <"$f")))
     fi

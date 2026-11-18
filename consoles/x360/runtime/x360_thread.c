@@ -13,6 +13,7 @@
  * dispatcher headers (events, semaphores, mutants, timers, threads; X_DISPATCH_HEADER: type at +0, signal state at
  * +4), so the Ke* calls on guest structures and the Nt* calls on handles meet. Time is virtual: instructions run
  * (one 100 ns tick per 320) plus what was skipped when every thread was waiting for a timeout. */
+#include <dlfcn.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -1001,25 +1002,63 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
                   x->image_crc);
         return -1;
     }
-    const xe_rc_entry *r = pack->resume;
+    /* the resume table: one array, or parts (XBA-284, big packs) */
+    xe_rc_part one = {pack->resume, pack->count};
+    const xe_rc_part *parts = pack->parts ? pack->parts : &one;
+    unsigned nparts = pack->parts ? pack->nparts : 1, total = 0;
+    uint32_t lo = 0xFFFFFFFFu, hi = 0;
+    for (unsigned p = 0; p < nparts; p++)
+        if (parts[p].count) {
+            total += parts[p].count;
+            if ((parts[p].entries[0].entry & ~3u) < lo)
+                lo = parts[p].entries[0].entry & ~3u;
+            if ((parts[p].entries[parts[p].count - 1].entry & ~3u) + 4 > hi)
+                hi = (parts[p].entries[parts[p].count - 1].entry & ~3u) + 4;
+        }
     x->helpers = pack->helpers;
     x->nhelpers = pack->helpers ? pack->nhelpers : 0;
     x->pack_features = pack->features;
-    if (!pack->count) { /* XBA-283: nothing lifted, the interpreter runs it all (tests) */
+    if (!total) { /* XBA-283: nothing lifted, the interpreter runs it all (tests) */
         x->code_lo = x->code_hi = 0;
         x->pack_bound = 1;
         return 0;
     }
-    x->code_lo = r[0].entry & ~3u;
-    x->code_hi = (r[pack->count - 1].entry & ~3u) + 4;
+    x->code_lo = lo;
+    x->code_hi = hi;
     free(x->fn_tab);
     x->fn_tab = calloc((x->code_hi - x->code_lo) / 4, sizeof *x->fn_tab);
     if (!x->fn_tab)
         return -1;
-    for (unsigned k = 0; k < pack->count; k++)
-        x->fn_tab[(r[k].entry - x->code_lo) / 4] = r[k].fn;
+    for (unsigned p = 0; p < nparts; p++)
+        for (unsigned k = 0; k < parts[p].count; k++)
+            x->fn_tab[(parts[p].entries[k].entry - x->code_lo) / 4] = parts[p].entries[k].fn;
     x->helpers = pack->helpers;
     x->nhelpers = pack->helpers ? pack->nhelpers : 0;
+    return 0;
+}
+
+int x360_pack_from_lib(void *lib, x360_pack *pk)
+{
+    memset(pk, 0, sizeof *pk);
+    const unsigned *count = dlsym(lib, "xe_rc_resume_count");
+    const uint32_t *crc = dlsym(lib, "xe_rc_image_crc");
+    pk->resume = dlsym(lib, "xe_rc_resume");
+    if (!pk->resume) { /* XBA-284: a big pack's table in parts */
+        const unsigned *np = dlsym(lib, "xe_rc_resume_part_count");
+        pk->parts = dlsym(lib, "xe_rc_resume_parts");
+        pk->nparts = pk->parts && np ? *np : 0;
+    }
+    if ((!pk->resume && !pk->parts) || !count || !crc)
+        return -1;
+    pk->count = *count;
+    pk->image_crc = *crc;
+    const unsigned *nh = dlsym(lib, "xe_rc_helper_count");
+    if (nh) {
+        pk->helpers = dlsym(lib, "xe_rc_helpers");
+        pk->nhelpers = pk->helpers ? *nh : 0;
+    }
+    const unsigned *feat = dlsym(lib, "xe_rc_features");
+    pk->features = feat ? *feat : 0;
     return 0;
 }
 
