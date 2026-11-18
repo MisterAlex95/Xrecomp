@@ -31,6 +31,7 @@ _start:
     call w_icall
     call w_fib
     call w_vcall
+    call w_lock
     call w_leaf0
     call w_leaf1
     call w_leaf2
@@ -388,6 +389,44 @@ w_vthunk:
     push dword ptr [esp+8]
     call dword ptr [fn_table+edx*4]
     add esp, 4
+    ret
+
+# ── lock-prefixed read-modify-writes on shared words (XBA-277): what
+#    InterlockedIncrement / Decrement / ExchangeAdd / CompareExchange and a
+#    spin lock's xchg compile to: reference counts and lock-free lists ──
+    .globl w_lock
+w_lock:
+    push ebx
+    push esi
+    mov ecx, [esp+12]
+    xor esi, esi
+1:
+    mov edx, ecx
+    and edx, 63
+    lea edx, [src_buf+edx*4]
+    lock inc dword ptr [edx]
+    mov eax, ecx
+    lock xadd [edx+256], eax
+    add esi, eax
+    lock dec dword ptr [edx+512]
+    adc esi, 0
+    mov eax, [edx+768]
+    lea ebx, [eax+ecx]
+    lock cmpxchg [edx+768], ebx
+    add esi, eax
+    mov eax, ecx
+    xchg [edx+1024], eax
+    xor esi, eax
+    lock or dword ptr [edx+1280], ecx
+    lock add dword ptr [edx+1536], 3
+    dec ecx
+    jnz 1b
+    mov eax, esi
+    add eax, [src_buf]
+    add eax, [src_buf+1280]
+    add eax, [src_buf+1536]
+    pop esi
+    pop ebx
     ret
 
 # @data

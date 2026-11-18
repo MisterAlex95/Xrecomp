@@ -73,6 +73,7 @@ WORKLOADS = (
     ("w_icall", 2000000),
     ("w_fib", 25),
     ("w_vcall", 2000000),
+    ("w_lock", 500000),
 )
 DATA_SYMS = ("matrix", "src_buf", "byte_buf", "vec_in")
 
