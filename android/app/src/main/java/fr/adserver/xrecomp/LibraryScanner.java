@@ -369,6 +369,9 @@ final class LibraryScanner {
                 break;
             case XisoNative.ENOENT:
                 i.status = LibraryIndex.NO_XBE;
+                // XBA-280: an image the Xbox reader opens without a default.xbe may be an Xbox 360 disc
+                if (parts.size() == 1)
+                    identify(i, n, Console.X360);
                 break;
             case XisoNative.EINVAL:
                 i.status = LibraryIndex.BAD_XBE;   // larger than any real default.xbe

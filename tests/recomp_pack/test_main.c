@@ -372,6 +372,101 @@ static void make_dol(unsigned char *d, size_t n)
         d[i] = (unsigned char)(i * 7);
 }
 
+/* ---- Xbox 360 (XBA-280) ---- */
+
+static void be32_put(unsigned char *p, uint32_t v)
+{
+    p[0] = (unsigned char)(v >> 24), p[1] = (unsigned char)(v >> 16), p[2] = (unsigned char)(v >> 8);
+    p[3] = (unsigned char)v;
+}
+
+static void le32_put(unsigned char *p, uint32_t v)
+{
+    p[0] = (unsigned char)v, p[1] = (unsigned char)(v >> 8), p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
+
+/* an XEX2 header whose execution info (at 0x20) has title id tid */
+static void make_xex(unsigned char *x, size_t n, uint32_t tid)
+{
+    memset(x, 0, n);
+    memcpy(x, "XEX2", 4);
+    be32_put(x + 20, 1);
+    be32_put(x + 24, 0x00040006u);
+    be32_put(x + 28, 0x20);
+    be32_put(x + 0x20, 0x11223344u);
+    be32_put(x + 0x20 + 12, tid);
+}
+
+/* an XDVDFS volume at base in the file at path: the volume descriptor at sector 32, a root directory (sector 40)
+ * with "readme.txt" (left) and `name` (the root node), the file's bytes at sector 48 */
+static void make_xdvdfs(const char *path, long long base, const char *name, const unsigned char *data, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return;
+    unsigned char vd[0x800], dir[0x800];
+    memset(vd, 0, sizeof vd);
+    memcpy(vd, "MICROSOFT*XBOX*MEDIA", 20);
+    le32_put(vd + 20, 40);
+    le32_put(vd + 24, 0x800);
+    memcpy(vd + 0x7EC, "MICROSOFT*XBOX*MEDIA", 20);
+    memset(dir, 0xFF, sizeof dir);
+    size_t len = strlen(name);
+    /* node 0: name, left = the entry at dword 8 */
+    dir[0] = 8, dir[1] = 0, dir[2] = 0, dir[3] = 0;
+    le32_put(dir + 4, 48);
+    le32_put(dir + 8, (uint32_t)n);
+    dir[12] = 0x20, dir[13] = (unsigned char)len;
+    memcpy(dir + 14, name, len);
+    /* node at 32: readme.txt, no children */
+    memset(dir + 32, 0, 14);
+    le32_put(dir + 32 + 4, 49);
+    le32_put(dir + 32 + 8, 7);
+    dir[32 + 12] = 0x20, dir[32 + 13] = 10;
+    memcpy(dir + 32 + 14, "readme.txt", 10);
+    fseeko(f, (off_t)(base + 0x10000), SEEK_SET);
+    fwrite(vd, 1, sizeof vd, f);
+    fseeko(f, (off_t)(base + 40 * 2048), SEEK_SET);
+    fwrite(dir, 1, sizeof dir, f);
+    fseeko(f, (off_t)(base + 48 * 2048), SEEK_SET);
+    fwrite(data, 1, n, f);
+    fclose(f);
+}
+
+static void test_x360(void)
+{
+    char path[1024], key[64], want[64];
+    unsigned char x[0x200];
+    int c;
+    CHECK(recomp_pack_console_id("x360") == RECOMP_CONSOLE_X360 &&
+          !strcmp(recomp_pack_console_name(RECOMP_CONSOLE_X360), "x360"));
+    make_xex(x, sizeof x, 0x4D5307E6u);
+    snprintf(want, sizeof want, "X360-4D5307E6-%08X", (unsigned)crc32_ref(x + 0x20, 24));
+    snprintf(path, sizeof path, "%s/default.xex", root);
+    write_file(path, x, sizeof x);
+    CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_X360 && !strcmp(key, want));
+    CHECK(recomp_pack_dir_name(RECOMP_CONSOLE_X360, key, want + 32, 32) == 0 && !strncmp(want + 32, "x360-X360-", 10));
+    /* an XGD3 image (the game partition at 0x02080000, sparse here) and an extracted one: default.xex's key */
+    snprintf(path, sizeof path, "%s/xgd3.iso", root);
+    make_xdvdfs(path, 0x02080000LL, "default.xex", x, sizeof x);
+    c = -1;
+    CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_X360 &&
+          !strncmp(key, "X360-4D5307E6-", 14));
+    snprintf(path, sizeof path, "%s/x360.xiso", root);
+    make_xdvdfs(path, 0, "DEFAULT.XEX", x, sizeof x);
+    c = -1;
+    CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_X360);
+    /* an Xbox image (default.xbe at 0) stays the Xbox path's: not identified here */
+    snprintf(path, sizeof path, "%s/xbox.iso", root);
+    make_xdvdfs(path, 0, "default.xbe", (const unsigned char *)"XBEH", 4);
+    CHECK(recomp_pack_rom_identify(path, &c, key, sizeof key) == -1);
+    x[0x20 + 4] = 1; /* another version: another key */
+    snprintf(path, sizeof path, "%s/default.xex", root);
+    write_file(path, x, sizeof x);
+    CHECK(recomp_pack_rom_identify(path, &c, want, sizeof want) == 0 && strcmp(key, want) != 0);
+}
+
 static void test_consoles(void)
 {
     char path[1024], path2[1024], key[64], name[64];
@@ -993,6 +1088,52 @@ static void test_routing(const char *shell_path, const char *title_path, const c
         CHECK(strstr(log, "gc runtime ready") != NULL && strstr(log, so) != NULL);
     }
 
+    /* XBA-280: an Xbox 360 disc image needs its pack: none is PACK_MISSING; a pack is handed to x360_runtime_start
+     * (a stand-in, fake_x360_runtime.c) with the pack's default.xex, the image as the disc, the pack's shaders. */
+    {
+        int (*load_rom)(const char *, const char *, int *, char *, size_t) =
+            (int (*)(const char *, const char *, int *, char *, size_t))dlsym(shell, "xba_pack_load_rom");
+        char img[1100], key[64], dir[1200], so[1300], text[1024], out[1300], log[4096];
+        unsigned char x[0x200], bytes[64] = { 0 };
+        int c = -1, runtime_rc = -1, rc;
+
+        CHECK(load_rom != NULL);
+        if (!load_rom)
+            return;
+        make_xex(x, sizeof x, 0x4D5307E6u);
+        snprintf(img, sizeof img, "%s/x360", root);
+        mkdirs(img);
+        snprintf(img, sizeof img, "%s/x360/game.iso", root);
+        make_xdvdfs(img, 0, "default.xex", x, sizeof x);
+        CHECK(recomp_pack_rom_identify(img, &c, key, sizeof key) == 0 && c == RECOMP_CONSOLE_X360);
+        unsetenv("RECOMP_X360_DISC");
+        unsetenv("RECOMP_X360_SHADERS");
+        snprintf(out, sizeof out, "%s/x360/stdout-none.txt", root);
+        rc = load_rom_logged(load_rom, files, img, &runtime_rc, reason, sizeof reason, out, log, sizeof log);
+        CHECK(rc == RECOMP_PACK_MISSING && strstr(log, "PACK_MISSING x360 X360-4D5307E6-") != NULL);
+        CHECK(strstr(log, "x360 runtime ready") == NULL);
+
+        snprintf(dir, sizeof dir, "%s/packs/x360-%s", files, key);
+        mkdirs(dir);
+        snprintf(so, sizeof so, "%s/libtitle.so", dir);
+        write_file(so, bytes, sizeof bytes);
+        snprintf(out, sizeof out, "%s/default.xex", dir);
+        write_file(out, x, sizeof x);
+        snprintf(text, sizeof text, "{\"format\":1,\"console\":\"x360\",\"title_key\":\"%s\",\"title\":\"T\","
+                 "\"abi\":\"%s\",\"shell_abi\":1,\"lib\":\"libtitle.so\",\"lib_size\":64}", key,
+                 recomp_pack_host_abi());
+        snprintf(out, sizeof out, "%s/pack.json", dir);
+        write_file(out, text, strlen(text));
+        snprintf(out, sizeof out, "%s/x360/stdout.txt", root);
+        rc = load_rom_logged(load_rom, files, img, &runtime_rc, reason, sizeof reason, out, log, sizeof log);
+        CHECK(rc == RECOMP_PACK_OK && runtime_rc == 0);
+        CHECK(strstr(log, "PACK_LOADED x360 X360-4D5307E6-") != NULL && strstr(log, "x360 runtime ready") != NULL);
+        CHECK(strstr(log, "/default.xex, disc ") != NULL && strstr(log, "x360/game.iso") != NULL);
+        CHECK(strstr(log, "/shaders)") != NULL && strstr(log, "x360 work dir ") != NULL);
+        unsetenv("RECOMP_X360_DISC");
+        unsetenv("RECOMP_X360_SHADERS");
+    }
+
     /* A title linked into the shell: its strong symbols, not the forwarders. */
     void *st = dlopen(static_path, RTLD_NOW | RTLD_LOCAL);
     if (!st) { fprintf(stderr, "FAIL dlopen static shell: %s\n", dlerror()); failures++; return; }
@@ -1019,6 +1160,7 @@ int main(int argc, char **argv)
     test_images();
     test_validate_and_find();
     test_consoles();
+    test_x360();
     if (argc >= 5)
         test_routing(argv[1], argv[2], argv[3], argv[4]);
     else

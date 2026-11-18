@@ -5,6 +5,7 @@
 #include "gba_runtime.h"
 #include "n64_runtime.h"
 #include "gc_runtime.h"
+#include "x360_runtime.h"
 #include "ps1_runtime.h"
 
 #include <stdint.h>
@@ -244,6 +245,35 @@ int xba_pack_rom_console(const char *path)
 
 typedef int (*console_start_fn)(const char *rom, const char *pack_lib, const char *title_key);
 
+/* The Xbox 360 (XBA-280): a pack is always needed (its code is the title's, recompiled ahead: bringup --app-pack on a
+ * desktop for now). The pack holds the plain title (default.xex) and the shader cache (shaders/); the game file the
+ * player imported is the disc (an image) or, an XEX, the title itself when the pack has no default.xex. */
+static int x360_start(const char *rom, const char *pack_lib, const char *title_key)
+{
+    char xex[RECOMP_PACK_PATH_MAX + 16], shaders[RECOMP_PACK_PATH_MAX + 16];
+    const char *slash = pack_lib ? strrchr(pack_lib, '/') : NULL;
+    int dir = slash ? (int)(slash - pack_lib) : 0;
+    snprintf(xex, sizeof xex, "%.*s/default.xex", dir, pack_lib ? pack_lib : ".");
+    snprintf(shaders, sizeof shaders, "%.*s/shaders", dir, pack_lib ? pack_lib : ".");
+    unsigned char magic[4] = {0};
+    FILE *f = fopen(xex, "rb");
+    int have_xex = f && fread(magic, 1, 4, f) == 4 && !memcmp(magic, "XEX2", 4);
+    if (f)
+        fclose(f);
+    int rom_is_xex = 0;
+    if (rom && strncmp(rom, "fd:", 3)) {
+        f = fopen(rom, "rb");
+        rom_is_xex = f && fread(magic, 1, 4, f) == 4 && !memcmp(magic, "XEX2", 4);
+        if (f)
+            fclose(f);
+    }
+    if (!getenv("RECOMP_X360_SHADERS"))
+        setenv("RECOMP_X360_SHADERS", shaders, 1);
+    if (!rom_is_xex && rom && !getenv("RECOMP_X360_DISC"))
+        setenv("RECOMP_X360_DISC", rom, 1); /* the image the player imported is the disc */
+    return x360_runtime_start(have_xex ? xex : rom, pack_lib, title_key);
+}
+
 int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_rc,
                       char *reason, size_t reason_n)
 {
@@ -268,6 +298,7 @@ int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_
     case RECOMP_CONSOLE_PS1: start = ps1_runtime_start; break;
     case RECOMP_CONSOLE_N64: start = n64_runtime_start; break;
     case RECOMP_CONSOLE_GC: start = gc_runtime_start; break;
+    case RECOMP_CONSOLE_X360: start = x360_start; break;
     default: break;
     }
     rc = recomp_pack_find_key(files_dir, console, key, xba_shell_abi, &m, lib, sizeof lib, why, sizeof why);
@@ -353,6 +384,12 @@ int xba_pack_load_rom(const char *files_dir, const char *rom_path, int *runtime_
             *runtime_rc = rc;
         rc = RECOMP_PACK_OK;
         goto out;
+    }
+    if (console == RECOMP_CONSOLE_X360) {
+        /* XBA-280: the missed addresses and the shaders met go to <files>/work/x360-<KEY>/ (for the next pack) */
+        char work[RECOMP_PACK_PATH_MAX + 8];
+        snprintf(work, sizeof work, "%s/work", files_dir ? files_dir : ".");
+        x360_runtime_set_work_dir(files_dir ? work : NULL);
     }
     if (rc == RECOMP_PACK_MISSING) {
         snprintf(why, sizeof why, "%s-%s", recomp_pack_console_name(console), key);

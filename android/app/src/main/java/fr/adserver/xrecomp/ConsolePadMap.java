@@ -55,6 +55,9 @@ final class ConsolePadMap {
         case GC:
             return new String[] { "a", "b", "x", "y", "z", "l", "r", "start", "dpad_up", "dpad_down", "dpad_left",
                                   "dpad_right" };
+        case X360:   // XBA-280: X360_T_*
+            return new String[] { "a", "b", "x", "y", "lb", "rb", "lt", "rt", "ls", "rs", "back", "start", "dpad_up",
+                                  "dpad_down", "dpad_left", "dpad_right" };
         default:
             return new String[0];
         }
@@ -69,6 +72,8 @@ final class ConsolePadMap {
             return new String[] { "stick" };
         case GC:
             return new String[] { "stick", "c_stick" };
+        case X360:
+            return new String[] { "left_stick", "right_stick" };
         default:
             return new String[0];
         }
@@ -101,6 +106,9 @@ final class ConsolePadMap {
                                bit(PadMapping.Source.RSTICK_LEFT), bit(PadMapping.Source.RSTICK_RIGHT) };
         case GC:   // XBA-259: the face buttons by name, Z on the right shoulder, L / R the triggers
             return new int[] { bit(S), bit(E), bit(W), bit(N), r1, l2, r2, start, up, down, left, right };
+        case X360:   // XBA-280: the host pad's own layout
+            return new int[] { bit(S), bit(E), bit(W), bit(N), l1, r1, l2, r2, bit(PadMapping.Source.LEFT_STICK_CLICK),
+                               bit(PadMapping.Source.RIGHT_STICK_CLICK), back, start, up, down, left, right };
         default:
             return new int[0];
         }
@@ -113,6 +121,7 @@ final class ConsolePadMap {
         case N64:
             return new PadMapping.Stick[] { PadMapping.Stick.LEFT };
         case GC:
+        case X360:
             return new PadMapping.Stick[] { PadMapping.Stick.LEFT, PadMapping.Stick.RIGHT };
         default:
             return new PadMapping.Stick[0];

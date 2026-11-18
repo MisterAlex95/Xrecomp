@@ -24,7 +24,7 @@ import java.util.zip.CRC32;
  * (packs/&lt;console&gt;-&lt;key&gt;; an Xbox pack stays packs/&lt;TITLEID&gt;).
  */
 enum Console {
-    XBOX("xbox"), GBA("gba"), PS1("ps1"), N64("n64"), GC("gc");
+    XBOX("xbox"), GBA("gba"), PS1("ps1"), N64("n64"), GC("gc"), X360("x360");
 
     /** pack.json's spelling. */
     final String id;
@@ -49,7 +49,7 @@ enum Console {
      * (XBA-249: the runtime says whether states are available).
      */
     boolean hasSaveStates() {
-        return this == GBA || this == PS1 || this == N64 || this == GC;
+        return this == GBA || this == PS1 || this == N64 || this == GC || this == X360;
     }
 
     /**
@@ -72,6 +72,8 @@ enum Console {
             return "N64";
         case GC:
             return "GC";
+        case X360:
+            return "360";
         default:
             return "Xbox";
         }
@@ -84,12 +86,16 @@ enum Console {
      * lists plays now; « Not playable yet » stays for the next one.
      */
     boolean playable() {
-        return this == XBOX || this == GBA || this == PS1 || this == N64 || this == GC;
+        return this == XBOX || this == GBA || this == PS1 || this == N64 || this == GC || this == X360;
     }
 
-    /** A game of this console starts from its file as it is, no Prepare or import (GBA, PS1, N64, GameCube DOL). */
+    /**
+     * A game of this console starts from its file as it is, no Prepare or import (GBA, PS1, N64, GameCube DOL). The
+     * Xbox 360 (XBA-280) too: the game process looks for its pack (packs/x360-&lt;KEY&gt;/, made on a desktop by
+     * x360_tools.bringup --app-pack for now) and says PACK_MISSING without one.
+     */
     boolean directLaunch() {
-        return this == GBA || this == PS1 || this == N64 || this == GC;
+        return this == GBA || this == PS1 || this == N64 || this == GC || this == X360;
     }
 
     /**
@@ -137,6 +143,8 @@ enum Console {
             return N64;
         case "dol": case "gcm": case "rvz": case "gcz": case "wia":
             return GC;
+        case "xex":
+            return X360;   // XBA-280: an Xbox 360 executable
         case "iso":
             return null;
         default:
@@ -168,11 +176,19 @@ enum Console {
             return sniffIso(f);
         if (f.getName().toLowerCase(Locale.ROOT).endsWith(".ciso") && sniffIso(f) == GC)
             return GC;   // a GameCube CISO; an Xbox one stays XBOX (by name)
-        return byName(f.getName());
+        Console c = byName(f.getName());
+        if (c == XBOX && sniffIso(f) == X360)
+            return X360;   // XBA-280: an Xbox 360 image under an Xbox image's name (.xiso)
+        return c;
     }
 
-    /** Where an Xbox image has its XDVDFS volume: XISO (0), redump full images (video partition first). */
-    private static final long[] XISO_OFFSETS = { 0L, 0x18300000L, 0xFD90000L, 0x2080000L };
+    /**
+     * Where an Xbox image has its XDVDFS volume: XISO (0), redump full images (video partition first). An Xbox 360
+     * image (XBA-280) has it at its game partition (XGD2 0xFD90000, XGD3 0x2080000), or at 0 extracted, with
+     * default.xex in its root ({@link #x360DiscKey}).
+     */
+    private static final long[] XISO_OFFSETS = { 0L, 0x18300000L };
+    private static final long[] X360_OFFSETS = { 0xFD90000L, 0x2080000L, 0L };
     private static final byte[] XISO_MAGIC = "MICROSOFT*XBOX*MEDIA".getBytes(StandardCharsets.US_ASCII);
 
     /**
@@ -193,6 +209,9 @@ enum Console {
     static Console sniffIso(Source src) {
         try {
             Rd r = new Rd(src);
+            for (long base : X360_OFFSETS)
+                if (x360DiscKey(r, base) != null)
+                    return X360;
             byte[] m = new byte[XISO_MAGIC.length];
             for (long base : XISO_OFFSETS) {
                 long at = base + 0x10000L;
@@ -312,6 +331,8 @@ enum Console {
             String k;
             if (isChd(h, hn))
                 return chdIdentity(src);
+            if ((k = x360Key(r, h, hn)) != null)   // first: a 360 disc's video partition is an ISO 9660 volume
+                return new Identity(X360, k);
             if ((k = n64Key(h, hn)) != null)
                 return new Identity(N64, k);
             if ((k = gbaKey(r, h, hn)) != null)
@@ -328,6 +349,94 @@ enum Console {
         } catch (IOException e) {
             return null;
         }
+    }
+
+    // ---- Xbox 360 (XBA-280): recomp_pack.c's x360_key ---------------------------------------------------------
+
+    /**
+     * An XEX's key from its header's execution info (optional header 0x00040006, which a plain rewrite keeps):
+     * « X360-&lt;title id&gt;-&lt;CRC32 of the execution info's 24 bytes&gt; »; null without one.
+     */
+    static String xexKey(byte[] x, int n) {
+        if (n < 24 || x[0] != 'X' || x[1] != 'E' || x[2] != 'X' || x[3] != '2')
+            return null;
+        long count = be32(x, 20);
+        if (count > 64 || 24 + count * 8 > n)
+            return null;
+        for (int i = 0; i < count; i++) {
+            int h = 24 + 8 * i;
+            if (be32(x, h) != 0x00040006L)
+                continue;
+            long at = be32(x, h + 4);
+            if (at + 24 > n)
+                return null;
+            java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+            crc.update(x, (int) at, 24);
+            return String.format(Locale.ROOT, "X360-%08X-%08X", be32(x, (int) at + 12), crc.getValue());
+        }
+        return null;
+    }
+
+    private static String xexKeyAt(Rd r, long at) throws IOException {
+        if (at < 0 || at >= r.length())
+            return null;
+        byte[] b = new byte[(int) Math.min(65536L, r.length() - at)];
+        r.seek(at);
+        r.readFully(b);
+        return xexKey(b, b.length);
+    }
+
+    private static long le32x(byte[] b, int o) {
+        return (b[o] & 0xFFL) | (b[o + 1] & 0xFFL) << 8 | (b[o + 2] & 0xFFL) << 16 | (b[o + 3] & 0xFFL) << 24;
+    }
+
+    /** default.xex in the root of the XDVDFS volume at base: its key; null without a volume or such a file. */
+    static String x360DiscKey(Rd r, long base) throws IOException {
+        byte[] vd = new byte[0x800];
+        if (base + 0x10000L + vd.length > r.length())
+            return null;
+        r.seek(base + 0x10000L);
+        r.readFully(vd);
+        for (int i = 0; i < XISO_MAGIC.length; i++)
+            if (vd[i] != XISO_MAGIC[i])
+                return null;
+        long root = le32x(vd, 20), size = le32x(vd, 24);
+        if (size == 0 || size > (1 << 20) || base + root * 2048 + size > r.length())
+            return null;
+        byte[] dir = new byte[(int) size];
+        r.seek(base + root * 2048);
+        r.readFully(dir);
+        java.util.ArrayDeque<Integer> todo = new java.util.ArrayDeque<>();
+        todo.push(0);
+        for (int visits = 0; !todo.isEmpty() && visits < 4096; visits++) {
+            int o = todo.pop();
+            if (o + 14 > size)
+                continue;
+            int left = (dir[o] & 0xFF) | (dir[o + 1] & 0xFF) << 8, right = (dir[o + 2] & 0xFF) | (dir[o + 3] & 0xFF) << 8;
+            int len = dir[o + 13] & 0xFF;
+            if (left == 0xFFFF && right == 0xFFFF)
+                continue;
+            if (len == 11 && o + 14 + len <= size
+                && new String(dir, o + 14, len, StandardCharsets.ISO_8859_1).equalsIgnoreCase("default.xex"))
+                return xexKeyAt(r, base + le32x(dir, o + 4) * 2048);
+            if (left != 0 && left != 0xFFFF && todo.size() < 256)
+                todo.push(left * 4);
+            if (right != 0 && right != 0xFFFF && todo.size() < 256)
+                todo.push(right * 4);
+        }
+        return null;
+    }
+
+    /** An XEX's or an Xbox 360 disc image's key (recomp_pack.c x360_key), else null. */
+    static String x360Key(Rd r, byte[] h, int hn) throws IOException {
+        if (hn >= 4 && h[0] == 'X' && h[1] == 'E' && h[2] == 'X' && h[3] == '2')
+            return xexKeyAt(r, 0);
+        for (long base : X360_OFFSETS) {
+            String k = x360DiscKey(r, base);
+            if (k != null)
+                return k;
+        }
+        return null;
     }
 
     /** The pack folder's name: the normalised title ID for XBOX, « &lt;console&gt;-&lt;key&gt; » otherwise. */

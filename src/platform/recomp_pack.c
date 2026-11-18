@@ -115,7 +115,7 @@ int recomp_pack_norm_title_id(const char *s, char out[9])
 
 /* ---- Other consoles (XBA-147) ---------------------------------------------- */
 
-static const char *const CONSOLE_NAMES[] = { "xbox", "gba", "ps1", "n64", "gc" };
+static const char *const CONSOLE_NAMES[] = { "xbox", "gba", "ps1", "n64", "gc", "x360" };
 
 int recomp_pack_console_id(const char *name)
 {
@@ -493,6 +493,104 @@ static int dol_key(FILE *f, char *key, size_t key_n)
     return 0;
 }
 
+/* ---- Xbox 360 (XBA-280) ----------------------------------------------------------------------------------------
+ * An XEX2 (magic "XEX2") or a disc image whose XDVDFS volume ("MICROSOFT*XBOX*MEDIA" at sector 32 of the partition)
+ * sits at an Xbox 360 game partition (XGD2 0x0FD90000, XGD3 0x02080000), or at 0 (an extracted image) with
+ * default.xex in its root -- an Xbox image there has default.xbe and stays the Xbox path's. The key comes from the
+ * XEX header's execution info (optional header 0x00040006), which a plain rewrite keeps:
+ * "X360-<title id>-<CRC32 of the execution info's 24 bytes>" (consoles/x360/runtime/x360_pad_map.c x360_runtime_key). */
+static int xex_key(const unsigned char *x, size_t n, char *key, size_t key_n)
+{
+    if (n < 24 || memcmp(x, "XEX2", 4))
+        return -1;
+    uint32_t count = be32(x + 20);
+    if (count > 64 || 24 + (size_t)count * 8 > n)
+        return -1;
+    for (uint32_t i = 0; i < count; i++) {
+        const unsigned char *h = x + 24 + 8 * i;
+        if (be32(h) != 0x00040006u)
+            continue;
+        uint32_t at = be32(h + 4);
+        if (at > n || n - at < 24)
+            return -1;
+        snprintf(key, key_n, "X360-%08X-%08X", be32(x + at + 12), crc32_update(0, x + at, 24));
+        return 0;
+    }
+    return -1;
+}
+
+static int read_at(FILE *f, long long at, unsigned char *out, size_t n)
+{
+    return fseeko(f, (off_t)at, SEEK_SET) == 0 && fread(out, 1, n, f) == n ? 0 : -1;
+}
+
+/* the first 64 KB of an XEX at `at` (its headers) and its key */
+static int xex_key_at(FILE *f, long long at, char *key, size_t key_n)
+{
+    unsigned char *b = malloc(65536);
+    size_t got = 0;
+    if (b && fseeko(f, (off_t)at, SEEK_SET) == 0)
+        got = fread(b, 1, 65536, f);
+    int r = b ? xex_key(b, got, key, key_n) : -1;
+    free(b);
+    return r;
+}
+
+static uint32_t le32_at(const unsigned char *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* default.xex in the root of the XDVDFS volume at `base`: its key; -1 when there is no volume or no such file */
+static int x360_disc_key(FILE *f, long long base, char *key, size_t key_n)
+{
+    unsigned char vd[0x800];
+    if (read_at(f, base + 0x10000, vd, sizeof vd) || memcmp(vd, "MICROSOFT*XBOX*MEDIA", 20))
+        return -1;
+    uint32_t root = le32_at(vd + 20), size = le32_at(vd + 24);
+    if (!size || size > (1u << 20))
+        return -1;
+    unsigned char *dir = malloc(size);
+    if (!dir || read_at(f, base + (long long)root * 2048, dir, size)) {
+        free(dir);
+        return -1;
+    }
+    /* the directory is a binary tree of entries (left / right offsets in dwords): visit every node */
+    uint32_t stack[256], n = 0;
+    int r = -1;
+    stack[n++] = 0;
+    for (int visits = 0; n && visits < 4096; visits++) {
+        uint32_t o = stack[--n];
+        if (o + 14 > size)
+            continue;
+        const unsigned char *e = dir + o;
+        uint32_t left = (uint32_t)(e[0] | e[1] << 8), right = (uint32_t)(e[2] | e[3] << 8), len = e[13];
+        if (left == 0xFFFF && right == 0xFFFF)
+            continue; /* padding */
+        if (o + 14 + len <= size && len == 11 && !strncasecmp((const char *)e + 14, "default.xex", 11)) {
+            r = xex_key_at(f, base + (long long)le32_at(e + 4) * 2048, key, key_n);
+            break;
+        }
+        if (left && left != 0xFFFF && n < 256)
+            stack[n++] = left * 4;
+        if (right && right != 0xFFFF && n < 256)
+            stack[n++] = right * 4;
+    }
+    free(dir);
+    return r;
+}
+
+static int x360_key(FILE *f, const unsigned char *h, size_t hn, char *key, size_t key_n)
+{
+    static const long long bases[] = {0x0FD90000LL, 0x02080000LL, 0};
+    if (hn >= 4 && !memcmp(h, "XEX2", 4))
+        return xex_key_at(f, 0, key, key_n);
+    for (size_t i = 0; i < sizeof bases / sizeof bases[0]; i++)
+        if (x360_disc_key(f, bases[i], key, key_n) == 0)
+            return 0;
+    return -1;
+}
+
 int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t key_n)
 {
     unsigned char h[0xC0];
@@ -541,7 +639,9 @@ int recomp_pack_rom_identify(const char *path, int *console, char *key, size_t k
             *console = RECOMP_CONSOLE_PS1;
         return 0;
     }
-    if (n64_key(h, hn, key, key_n) == 0)
+    if (x360_key(f, h, hn, key, key_n) == 0) /* first: a 360 disc's video partition is an ISO 9660 volume */
+        c = RECOMP_CONSOLE_X360;
+    else if (n64_key(h, hn, key, key_n) == 0)
         c = RECOMP_CONSOLE_N64;
     else if (gba_key(f, h, hn, key, key_n) == 0)
         c = RECOMP_CONSOLE_GBA;

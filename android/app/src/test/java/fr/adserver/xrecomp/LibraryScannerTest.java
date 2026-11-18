@@ -582,7 +582,8 @@ public class LibraryScannerTest {
                 .file("Mario.z64", ConsoleTest.n64(0), 60)
                 .file("roms/Mario swapped.v64", ConsoleTest.n64(1), 61)
                 .file("gc/padtest.dol", ConsoleTest.dol(), 62)   // XBA-259: a GameCube homebrew
-                .file("Cube.iso", ConsoleTest.gcDisc("GALE01", 0, 0, 0x10000), 63);   // XBA-261: by content
+                .file("Cube.iso", ConsoleTest.gcDisc("GALE01", 0, 0, 0x10000), 63)   // XBA-261: by content
+                .file("x360/default.xex", ConsoleTest.xex(0x4D5307E6L), 64);   // XBA-280: an Xbox 360 title
         return Arrays.asList(root("t:xbox", xbox), root("t:gba", gba), root("t:ps1", ps1), root("t:n64", n64));
     }
 
@@ -632,7 +633,9 @@ public class LibraryScannerTest {
                      r.index.find("n64:/roms/Mario swapped.v64").tid);
 
         java.util.Map<String, List<LibraryIndex.Item>> games = r.index.games();
-        assertEquals(9, games.size());   // Fable, Halo, Sample Quest, Disc, Lone, Plain, Mario (two), padtest, Cube
+        assertEquals(10, games.size());   // Fable, Halo, Sample Quest, Disc, Lone, Plain, Mario (two), padtest, Cube,
+                                          // the 360 title (XBA-280)
+        assertEquals(Console.X360, r.index.find("n64:/x360/default.xex").console);
         assertEquals(Console.GC, r.index.find("n64:/gc/padtest.dol").console);
         LibraryIndex.Item cube = r.index.find("n64:/Cube.iso");
         assertTrue("a GameCube .iso: not an Xbox image, read for its disc header", cube.ok());

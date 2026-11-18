@@ -80,6 +80,19 @@ public class ConsolePadMapTest {
         assertEquals("RECOMP_GC_PAD_MAP", ConsoleControls.env(Console.GC));
         ConsolePadMap r = ConsolePadMap.parse(Console.GC, "a=east,b=south,c_stick=none");
         assertEquals("a=east,b=south,c_stick=none", r.format());
+        // XBA-280: the Xbox 360 controller, console_pad.c's X360_T_* order, the host pad's own layout
+        assertArrayEquals(new String[] { "a", "b", "x", "y", "lb", "rb", "lt", "rt", "ls", "rs", "back", "start",
+                                         "dpad_up", "dpad_down", "dpad_left", "dpad_right" },
+                          ConsolePadMap.targets(Console.X360));
+        ConsolePadMap x = new ConsolePadMap(Console.X360);
+        assertEquals(16, x.targetCount());
+        assertEquals(bit(PadMapping.Source.LEFT_SHOULDER), x.source[4]);
+        assertEquals(bit(PadMapping.Source.RIGHT_TRIGGER), x.source[7]);
+        assertEquals(bit(PadMapping.Source.BACK), x.source[10]);
+        assertEquals(PadMapping.Stick.RIGHT, x.stick[1]);
+        assertEquals("", x.format());
+        assertEquals("RECOMP_X360_PAD_MAP", ConsoleControls.env(Console.X360));
+        assertEquals("a=east,right_stick=none", ConsolePadMap.parse(Console.X360, "a=east,right_stick=none").format());
     }
 
     /** The same texts as tests/console_pad/test_main.c. */
@@ -163,6 +176,7 @@ public class ConsolePadMapTest {
         assertArrayEquals(new String[] { "RECOMP_PS1_PAD_MAP", null }, env[1]);
         assertArrayEquals(new String[] { "RECOMP_N64_PAD_MAP", null }, env[2]);
         assertArrayEquals(new String[] { "RECOMP_GC_PAD_MAP", null }, env[3]);   // XBA-274
+        assertArrayEquals(new String[] { "RECOMP_X360_PAD_MAP", null }, env[4]);   // XBA-280
         ConsoleControls.storeGame(app, key, new ConsolePadMap(Console.GBA));
         assertEquals("", ConsoleControls.gameText(app, key));
         assertEquals("", ConsoleControls.runEnv(app, key)[0][1]);

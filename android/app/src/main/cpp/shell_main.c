@@ -77,6 +77,7 @@
 #include "n64_runtime.h"
 #include "gc_disc.h"
 #include "gc_runtime.h"
+#include "x360_runtime.h"
 #include "ps1_runtime.h"
 #include "ps1_identify.h"
 
@@ -342,7 +343,9 @@ int main(int argc, char *argv[])
      * <internal>/save/ps1-<KEY>/). The N64 runtime the same (XBA-174: the
      * cartridge as it is, no BIOS, saves under <internal>/save/n64-<KEY>/).
      * The GameCube runtime the same (XBA-259: a DOL or a disc, no IPL,
-     * memory cards under <internal>/save/gc-<KEY>/, XBA-264). */
+     * memory cards under <internal>/save/gc-<KEY>/, XBA-264). The Xbox 360
+     * runtime (XBA-280) needs its pack (bringup --app-pack): without one
+     * the shell says PACK_MISSING and goes back to the launcher. */
     int console = !s_title_main && have_game <= 0 && store.game_dir[0] ? xba_pack_rom_console(store.game_dir)
                                                                         : RECOMP_CONSOLE_UNKNOWN;
     int console_game = console != RECOMP_CONSOLE_UNKNOWN;
@@ -356,6 +359,8 @@ int main(int argc, char *argv[])
             n64_runtime_set_save_dir(store.save_dir);   /* <internal>/save/n64-<KEY>/game.eep, pak1.mpk... */
         if (console == RECOMP_CONSOLE_GC)
             gc_runtime_set_save_dir(store.save_dir);    /* memory cards: <internal>/save/gc-<KEY>/cardA.raw */
+        if (console == RECOMP_CONSOLE_X360)
+            x360_runtime_set_save_dir(store.save_dir);  /* XBA-280: states in <internal>/save/x360-<KEY>/ */
         pack_rc = xba_pack_load_rom(SDL_AndroidGetInternalStoragePath(), store.game_dir, &console_rc,
                                     pack_reason, sizeof pack_reason);
         if (pack_rc == RECOMP_PACK_OK)
@@ -363,7 +368,7 @@ int main(int argc, char *argv[])
         else
             printf("xboxrecomp: no usable pack for %s (%s)\n", store.game_dir, pack_reason);
         if ((console == RECOMP_CONSOLE_GBA || console == RECOMP_CONSOLE_PS1 || console == RECOMP_CONSOLE_N64
-             || console == RECOMP_CONSOLE_GC)
+             || console == RECOMP_CONSOLE_GC || console == RECOMP_CONSOLE_X360)
             && pack_rc == RECOMP_PACK_OK) {
             if (console_rc != 0)
                 exit_via_launcher(console == RECOMP_CONSOLE_PS1
