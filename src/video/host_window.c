@@ -1111,6 +1111,7 @@ int host_window_present_rgba_shared(const void *px, int w, int h, int pitch, hos
         keep_last(px, w, h, pitch);
     if (__atomic_load_n(&s_shot_req, __ATOMIC_RELAXED))
         shot_write();
+    live_take();
 #if defined(XBOXRECOMP_LSFG)
     if (fg_present(px, w, h, pitch))
         return 1;

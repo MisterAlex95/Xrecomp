@@ -408,6 +408,33 @@ void ps1_runtime_set_bios(const char *path)
 /* The run's machine and its cards, shared with the exit hook (the in-game menu's Quit ends the process from the UI
  * thread) and the lifecycle listener: s_mu is held while a frame runs and while a card is written. */
 static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* The picture presented last, in the run's own buffer (host_window_present_rgba_shared): host_window_screenshot_bmp
+ * copies it on demand (any thread) instead of the window copying every picture. Its pixels and size change together
+ * under s_mu; px is NULL outside a windowed run, before the buffer goes. */
+static struct {
+    const uint8_t *px;
+    int w, h;
+} s_shared;
+
+static int shared_last(void *user, uint8_t **px, int *w, int *h)
+{
+    (void)user;
+    int rc = -1;
+    pthread_mutex_lock(&s_mu);
+    if (s_shared.px && s_shared.w > 0 && s_shared.h > 0) {
+        size_t n = (size_t)s_shared.w * (size_t)s_shared.h * 4;
+        if ((*px = malloc(n)) != NULL) {
+            memcpy(*px, s_shared.px, n);
+            *w = s_shared.w;
+            *h = s_shared.h;
+            rc = 0;
+        }
+    }
+    pthread_mutex_unlock(&s_mu);
+    return rc;
+}
+
 static ps1_machine *s_m;
 static char s_card_path[2][1100];
 static uint8_t s_saved[2][PS1_CARD_SIZE]; /* each card as last read or written */
@@ -1303,8 +1330,14 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             uint64_t tp = now_ns();
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
+            pthread_mutex_lock(&s_mu);
             ps1_runtime_xrgb_to_rgba(xrgb, rgba, (size_t)dw * (size_t)dh);
-            host_window_present_rgba(rgba, dw, dh, dw * 4);
+            s_shared.px = rgba;
+            s_shared.w = dw;
+            s_shared.h = dh;
+            pthread_mutex_unlock(&s_mu);
+            /* Without s_mu: an F12 screenshot asks shared_last from inside the present. */
+            host_window_present_rgba_shared(rgba, dw, dh, dw * 4, shared_last, NULL);
             host_perf_stage(&hp, ST_PRESENT, now_ns() - tp);
             host_perf_shown(&hp, 1);
         }
@@ -1335,6 +1368,12 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     }
 
     recomp_perf_hint_end();
+    if (window) { /* rgba goes with the run: the window keeps its own copy of the last picture */
+        host_window_keep_shared();
+        pthread_mutex_lock(&s_mu);
+        s_shared.px = NULL; /* a screenshot already on its way finds no picture */
+        pthread_mutex_unlock(&s_mu);
+    }
     host_perf_log_run(&hp, now_ns(), NULL);
     host_perf_live_clear();
     double secs = (double)(now_ns() - t0) / 1e9;

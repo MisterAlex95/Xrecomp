@@ -267,6 +267,27 @@ static int write_ppm(const char *path, const uint16_t *fb)
 /* The run's machine and its save, shared with the exit hook (the in-game menu's Quit ends the process from the UI
  * thread): s_mu is held while a frame runs and while the save is written. */
 static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* The picture presented last (host_window_present_rgba_shared): host_window_screenshot_bmp copies it on demand (any
+ * thread) instead of the window copying every picture. Written under s_mu; s_rgba_shown is 0 outside a windowed run. */
+static uint8_t s_rgba[GBA_SCREEN_W * GBA_SCREEN_H * 4];
+static int s_rgba_shown;
+
+static int shared_last(void *user, uint8_t **px, int *w, int *h)
+{
+    (void)user;
+    int rc = -1;
+    pthread_mutex_lock(&s_mu);
+    if (s_rgba_shown && (*px = malloc(sizeof s_rgba)) != NULL) {
+        memcpy(*px, s_rgba, sizeof s_rgba);
+        *w = GBA_SCREEN_W;
+        *h = GBA_SCREEN_H;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&s_mu);
+    return rc;
+}
+
 static gba_machine *s_m;
 static char s_save_path[1100];
 static uint8_t *s_saved;   /* the image as last read or written */
@@ -664,7 +685,6 @@ int gba_runtime_run(const gba_runtime_opts *o)
     fflush(stdout);
 
     uint16_t *fb = s_fb;
-    static uint8_t rgba[GBA_SCREEN_W * GBA_SCREEN_H * 4];
     static int16_t pcm[GBA_AUDIO_RATE / 10 * 2];
     uint64_t frames = 0, next = now_ns(), dirty_at = 0, t0 = next, late_resets = 0;
     int was_paused = 0, heard = 0, rc = 0;
@@ -789,8 +809,12 @@ int gba_runtime_run(const gba_runtime_opts *o)
             uint64_t tp = now_ns();
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
-            gba_runtime_rgb555_to_rgba(fb, rgba, GBA_SCREEN_W * GBA_SCREEN_H);
-            host_window_present_rgba(rgba, GBA_SCREEN_W, GBA_SCREEN_H, GBA_SCREEN_W * 4);
+            pthread_mutex_lock(&s_mu);
+            gba_runtime_rgb555_to_rgba(fb, s_rgba, GBA_SCREEN_W * GBA_SCREEN_H);
+            s_rgba_shown = 1;
+            pthread_mutex_unlock(&s_mu);
+            /* Without s_mu: an F12 screenshot asks shared_last from inside the present. */
+            host_window_present_rgba_shared(s_rgba, GBA_SCREEN_W, GBA_SCREEN_H, GBA_SCREEN_W * 4, shared_last, NULL);
             host_perf_stage(&hp, ST_PRESENT, now_ns() - tp);
             host_perf_shown(&hp, 1);
         }
@@ -821,6 +845,12 @@ int gba_runtime_run(const gba_runtime_opts *o)
     }
 
     recomp_perf_hint_end();
+    if (window) { /* the run is over: the window keeps its own copy of the last picture */
+        host_window_keep_shared();
+        pthread_mutex_lock(&s_mu);
+        s_rgba_shown = 0; /* a screenshot already on its way finds no picture */
+        pthread_mutex_unlock(&s_mu);
+    }
     host_perf_log_run(&hp, now_ns(), NULL);
     host_perf_live_clear();
     double secs = (double)(now_ns() - t0) / 1e9;

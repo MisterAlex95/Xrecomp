@@ -46,6 +46,12 @@ if(TARGET gba_runtime)
     target_link_libraries(gba_runtime_test PRIVATE gba_runtime)
     add_test(NAME gba_runtime COMMAND gba_runtime_test)
     set_tests_properties(gba_runtime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+    # The screenshot of a run in a real window (HOST-001); skipped (77) without a display.
+    add_executable(gba_present_test test_present.c)
+    target_link_libraries(gba_present_test PRIVATE gba_runtime)
+    target_compile_options(gba_present_test PRIVATE -Wall -Wextra)
+    add_test(NAME gba_present COMMAND gba_present_test)
+    set_tests_properties(gba_present PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 endif()
 
 add_executable(gba_cpu_test test_cpu.c)
