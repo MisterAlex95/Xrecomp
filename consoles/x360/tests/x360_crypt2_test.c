@@ -126,6 +126,30 @@ static void hash_vector(const hash_api *h, const char *msg, uint32_t len, const 
     OK(guard_ok(sh, 4), "%s: wrote past a short output", h->name);
 }
 
+/* a million 'a' from one small buffer, at awkward lengths, the state moving to another address after every call */
+static void hash_million(const hash_api *h, const char *want)
+{
+    static const uint32_t cuts[] = {1, 3, 55, 56, 57, 63, 64, 65, 111, 112, 119, 127, 128, 129, 1000};
+    uint32_t in = galloc(1000), out = gstate(h->digest), st = gstate(h->state), st2 = gstate(h->state);
+    memset(X->base + in, 'a', 1000);
+    K(h->init, 1, st);
+    uint32_t left = 1000000;
+    for (unsigned k = 0; left; k++) {
+        uint32_t take = cuts[k % (sizeof cuts / sizeof cuts[0])];
+        if (take > left)
+            take = left;
+        K(h->update, 3, st, in, take);
+        left -= take;
+        memcpy(X->base + st2, X->base + st, h->state);
+        memset(X->base + st, 0xEE, h->state);
+        uint32_t tmp = st;
+        st = st2, st2 = tmp;
+    }
+    K(h->final, 3, st, out, h->digest);
+    expect_hex(h->name, out, want);
+    OK(guard_ok(st, h->state) && guard_ok(st2, h->state), "%s: wrote past the state", h->name);
+}
+
 static void test_md5(void)
 {
     /* RFC 1321 appendix A.5 */
@@ -174,8 +198,16 @@ static void test_sha2(void)
         OK(guard_ok(out, 28) && guard_ok(st, 0x64), "SHA-224: wrote past a buffer");
     }
 
-    /* the incremental SHA-256 of x360_crypt.c and the one-shot here are one hash */
+    /* the incremental SHA-256 of x360_crypt.c and the one-shot here are one hash (this digest: Python's hashlib) */
     hash_vector(&SHA256, ABC896, 112, "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1");
+
+    /* one million 'a' (the FIPS 180 long message; digests confirmed with Python's hashlib): many blocks compressed,
+     * every chaining value going through guest memory */
+    hash_million(&SHA256, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    hash_million(&SHA384, "9d0e1809716474cb086e834e310a4a1ced149e9c00f248527972cec5704c2a5b"
+                          "07b8b3dc38ecc4ebae97ddd87f3d8985");
+    hash_million(&SHA512, "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973eb"
+                          "de0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b");
 }
 
 /* ---- HMAC ---- */
@@ -624,6 +656,19 @@ static void test_parve(void)
     call64(X360_xboxkrnl_XeCryptParveCbcMac, a, 6);
     expect_hex("ParveCbcMac, one block and a tail", mac, "1123456789abcded");
     OK(guard_ok(mac, 8), "ParveCbcMac wrote past the MAC");
+
+    /* key, round counter and table all at work: values from a separate Python transcription of the definition, which
+     * shows the code follows the description, not that the description matches a console */
+    uint8_t table[256];
+    for (int i = 0; i < 256; i++)
+        table[i] = (uint8_t)(i * 7 + 3);
+    uint32_t tb = gbytes(table, 256), k2 = ghex("0f1e2d3c4b5a6978", &n), p2 = ghex("0123456789abcdef", &n);
+    KX(XeCryptParveEcb, 4, k2, tb, p2, out);
+    expect_hex("ParveEcb, full table", out, "f45c448fd863d451");
+    uint32_t iv2 = ghex("a0a1a2a3a4a5a6a7", &n), m2 = ghex("00112233445566778899aabbccddeeff5a5a", &n);
+    uint64_t b[6] = {k2, tb, iv2, m2, n, mac};
+    call64(X360_xboxkrnl_XeCryptParveCbcMac, b, 6);
+    expect_hex("ParveCbcMac, two blocks and a tail", mac, "f854856882f13301");
 }
 
 static void test_chain_and_sum(void)
@@ -643,13 +688,23 @@ static void test_chain_and_sum(void)
     x360_w32(X, ab + 4, 0x80000005), x360_w32(X, cd + 4, 7);
     KX(XeCryptChainAndSumMac, 5, cd, ab, in, 0u, out);
     OK(x360_r32(X, out) == 6 && x360_r32(X, out + 4) == 7, "ChainAndSumMac, no input");
+
+    /* real multipliers over three pairs: from a separate Python transcription of the definition */
+    static const uint32_t words[6] = {0x00000001, 0xFFFFFFFF, 0x12345678, 0x9ABCDEF0, 0xDEADBEEF, 0x0BADF00D};
+    uint32_t in3 = gstate(24);
+    for (uint32_t i = 0; i < 6; i++)
+        x360_w32(X, in3 + 4 * i, words[i]);
+    x360_w32(X, cd, 0x89ABCDEF), x360_w32(X, cd + 4, 0x01234567);
+    x360_w32(X, ab, 0xFEDCBA98), x360_w32(X, ab + 4, 0x76543210);
+    KX(XeCryptChainAndSumMac, 5, cd, ab, in3, 6u, out);
+    OK(x360_r32(X, out) == 0x4E7476CE && x360_r32(X, out + 4) == 0x17289DCA, "ChainAndSumMac, three pairs");
 }
 
 /* private-key operations and formats answer an error, and leave the caller's buffers alone */
 static void test_refused(void)
 {
-    static const unsigned refused[] = {X360_xboxkrnl_XeCryptBnQwBeSigCreate, X360_xboxkrnl_XeCryptBnQwBeSigFormat,
-                                       X360_xboxkrnl_XeCryptBnQwNeRsaPrvCrypt, X360_xboxkrnl_XeCryptBnQwNeRsaKeyGen};
+    static const unsigned refused[] = {X360_xboxkrnl_XeCryptBnQwBeSigCreate, X360_xboxkrnl_XeCryptBnQwNeRsaPrvCrypt,
+                                       X360_xboxkrnl_XeCryptBnQwNeRsaKeyGen};
     uint32_t buf = gstate(0x100);
     for (unsigned k = 0; k < sizeof refused / sizeof refused[0]; k++) {
         memset(X->base + buf, 0x77, 0x100);

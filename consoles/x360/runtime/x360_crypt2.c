@@ -1245,7 +1245,9 @@ static void k_XeCryptChainAndSumMac(x360_machine *x, x360_thread *t, xe_cpu *c)
     x360_w32(x, A(4) + 4, (uint32_t)((out1 + cd1) % M));
 }
 
-/* ---- what needs a private key: refused, never a pretended success ---- */
+/* ---- what needs a private key: refused, never a pretended success. These three answer a BOOL, FALSE here.
+ * XeCryptBnQwBeSigFormat has no row: it returns nothing, so a row could only do nothing silently, while an export
+ * without an HLE is logged (and stops a run with strict imports). ---- */
 
 static void k_crypt_refused(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
@@ -1311,7 +1313,6 @@ const x360_hle_row x360_tab_crypt2[] = {
     X360_HK(XeCryptParveCbcMac, k_XeCryptParveCbcMac),
     X360_HK(XeCryptChainAndSumMac, k_XeCryptChainAndSumMac),
     X360_HK(XeCryptBnQwBeSigCreate, k_crypt_refused),
-    X360_HK(XeCryptBnQwBeSigFormat, k_crypt_refused),
     X360_HK(XeCryptBnQwNeRsaPrvCrypt, k_crypt_refused),
     X360_HK(XeCryptBnQwNeRsaKeyGen, k_crypt_refused),
 };
