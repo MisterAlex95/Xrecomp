@@ -19,7 +19,7 @@ enum {
     XGL_TEXTURE0 = 0x84C0, XGL_FRAMEBUFFER = 0x8D40, XGL_COLOR_ATTACHMENT0 = 0x8CE0,
     XGL_FRAMEBUFFER_COMPLETE = 0x8CD5, XGL_FRAGMENT_SHADER = 0x8B30, XGL_VERTEX_SHADER = 0x8B31,
     XGL_COMPILE_STATUS = 0x8B81, XGL_LINK_STATUS = 0x8B82, XGL_SCISSOR_TEST = 0x0C11, XGL_BLEND = 0x0BE2,
-    XGL_DEPTH_TEST = 0x0B71,
+    XGL_DEPTH_TEST = 0x0B71, XGL_CULL_FACE = 0x0B44, XGL_STENCIL_TEST = 0x0B90,
 };
 
 typedef struct gl_fns {
@@ -57,6 +57,7 @@ typedef struct gl_fns {
     void (APIENTRY *DrawArrays)(unsigned, int, int);
     void (APIENTRY *Viewport)(int, int, int, int);
     void (APIENTRY *Disable)(unsigned);
+    void (APIENTRY *ColorMask)(unsigned char, unsigned char, unsigned char, unsigned char);
     unsigned (APIENTRY *GetError)(void);
 } gl_fns;
 
@@ -102,7 +103,7 @@ static int load(gl_fns *gl)
     F(FramebufferTexture2D); F(CheckFramebufferStatus); F(CreateShader); F(ShaderSource); F(CompileShader);
     F(GetShaderiv); F(GetShaderInfoLog); F(DeleteShader); F(CreateProgram); F(AttachShader); F(LinkProgram);
     F(GetProgramiv); F(GetProgramInfoLog); F(DeleteProgram); F(UseProgram); F(GetUniformLocation); F(Uniform1i);
-    F(GenVertexArrays); F(DeleteVertexArrays); F(BindVertexArray); F(DrawArrays); F(Viewport); F(Disable);
+    F(GenVertexArrays); F(DeleteVertexArrays); F(BindVertexArray); F(DrawArrays); F(Viewport); F(Disable); F(ColorMask);
     F(GetError);
 #undef F
     return 1;
@@ -211,9 +212,14 @@ int gc_yuv_gl_present(gc_yuv_gl *g, const uint8_t *yuv, int w, int h)
         gl->BindFramebuffer(XGL_FRAMEBUFFER, g->fbo);
     }
     /* line 0 of the XFB into row 0 of the picture: host_window_present_texture's top_down */
+    /* GX draws on this context (XBA-262) and leaves its own state: culling, stencil, a color mask from its last
+     * clear; any of them would keep this triangle from being drawn */
     gl->Disable(XGL_SCISSOR_TEST);
     gl->Disable(XGL_BLEND);
     gl->Disable(XGL_DEPTH_TEST);
+    gl->Disable(XGL_CULL_FACE);
+    gl->Disable(XGL_STENCIL_TEST);
+    gl->ColorMask(1, 1, 1, 1);
     gl->Viewport(0, 0, w, h);
     gl->UseProgram(g->prog);
     gl->Uniform1i(g->u_tex, 0);
