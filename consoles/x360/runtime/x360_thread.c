@@ -397,7 +397,8 @@ static void run_thread(x360_machine *x, x360_thread *t)
     xe_cpu *c = &t->cpu;
     x->m.cur = c;
     x->m.slice = X360_SLICE;
-    while (t->state == TH_READY && x->status == X360_RUNNING && x->m.slice >= 0) {
+    while (t->state == TH_READY && x->status == X360_RUNNING &&
+           (x->m.slice >= 0 || (!(c->msr & 0x8000u) && x->m.slice >= -XE_EE_GRACE))) {
         uint32_t pc = c->pc;
         if (pc == X360_THREAD_EXIT) {
             x360_thread_exit(x, t, (uint32_t)c->gpr[3]);

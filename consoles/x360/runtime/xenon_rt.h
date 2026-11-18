@@ -249,14 +249,17 @@ static inline void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
 #define RC_MACHINE xe_machine
 #ifdef XE_RUNTIME
 /* Runtime: the context is the running guest thread's; every block counts against the thread's time slice and
- * hands the host thread back to the scheduler at a resume point when it runs out (cooperative threads). */
+ * hands the host thread back to the scheduler at a resume point when it runs out (cooperative threads). While the
+ * thread has MSR[EE] clear (mtmsrd: a short section with interrupts off, which the kernel never reschedules) it keeps
+ * running, up to XE_EE_GRACE blocks past its slice. */
 #define RC_PROLOGUE                                                                                                    \
     xe_cpu *c = m_->cur;                                                                                               \
     (void)c
+#define XE_EE_GRACE 65536 /* blocks a thread with MSR[EE] clear may run past its slice before it is preempted anyway */
 #define RC_BLOCK(pc_, n)                                                                                               \
     do {                                                                                                               \
         m_->rc_native += (n);                                                                                          \
-        if (--m_->slice < 0) {                                                                                         \
+        if (--m_->slice < 0 && ((c->msr & 0x8000u) || m_->slice < -XE_EE_GRACE)) {                                     \
             c->pc = (pc_);                                                                                             \
             return;                                                                                                    \
         }                                                                                                              \

@@ -15,6 +15,8 @@ project(console_x360_tests C)
 #                    python3 -m tools.xex --plain first
 #   x360_state       save states: the test title stopped by an instruction budget, a state saved, a fresh run
 #                    resumed from it: the two halves of the DbgPrint text make hello.txt (run_state.sh)
+#   x360_msr         two threads' shared counter inside mtmsrd (MSR[EE] clear) sections: no update lost; the same
+#                    without mtmsrd loses updates (run_msr.sh, make_msr.py)
 #   x360_missed      the discovery loop: a function only a pointer reaches stops the first run (--missed), the
 #                    second, recompiled with it (--discovered), ends with exit code 42 (run_missed.sh)
 #   x360_hello_c     a C test title (tests/homebrew/hello_c: devkitPPC, -mpowerpc64 -maltivec; recursion, a GCC jump
@@ -67,6 +69,9 @@ if(TARGET x360_run)
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_state.sh $<TARGET_FILE:x360_run>
                 ${CMAKE_CURRENT_BINARY_DIR}/x360_state ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt)
     set_tests_properties(x360_state PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    add_test(NAME x360_msr
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_msr.sh $<TARGET_FILE:x360_run> ${CMAKE_CURRENT_BINARY_DIR}/x360_msr)
+    set_tests_properties(x360_msr PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     add_test(NAME x360_missed
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_missed.sh $<TARGET_FILE:x360_run>
                 ${CMAKE_CURRENT_BINARY_DIR}/x360_missed)

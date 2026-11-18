@@ -319,7 +319,7 @@ def V(n):
     return "V(%d)" % n
 
 
-XENON_INTERP = {"td", "tdi", "mtmsrd"}
+XENON_INTERP = {"td", "tdi"}
 OE_64 = {"mulld", "mulhd", "mulhdu", "divd", "divdu"}
 
 
@@ -329,6 +329,15 @@ class XenonLifter(FnLifter):
         """32-bit mode: bdnz and the other CTR-decrementing branches test the low word of CTR."""
         pre, c = FnLifter.cond(i)
         return pre, c.replace("c->ctr == 0", "(uint32_t)c->ctr == 0").replace("c->ctr != 0", "(uint32_t)c->ctr != 0")
+
+    def op_mtmsrd(self, i):
+        # titles use mtmsrd rS, 1 around short critical sections (MSR[EE], external interrupts): the L = 1 form
+        # changes only EE and RI (the architecture's definition); xenon_rt.h does not preempt a thread while EE is
+        # clear
+        return "c->msr = ((uint32_t)%s & 0x8002u) | (c->msr & ~0x8002u);" % R(i.rd)
+
+    def op_mtmsr(self, i):
+        return self.op_mtmsrd(i)
 
     def needs_interp(self, i):
         n = i.name
