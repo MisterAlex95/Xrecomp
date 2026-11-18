@@ -82,6 +82,8 @@ struct gx_gl {
 
     GLuint efb_fbo, efb_color, efb_depth;
     GLuint vao, vbo, ebo, ubo, empty_vao;
+    size_t ring_size[3], ring_off[3]; /* vbo, ebo, ubo as streaming rings (ring_put) */
+    GLint ubo_align;
     GLuint samplers[8];
     GLuint white_tex;
     GLuint uber;
@@ -901,6 +903,34 @@ static int sext11(uint32_t v)
     return v >= 0x400 ? (int)v - 0x800 : (int)v;
 }
 
+/* Streaming buffers (vbo, ebo, ubo): each upload goes after the previous one in a buffer that keeps its storage, and
+ * only a wrap orphans it (glBufferData once). A glBufferData of a new size at every draw made Adreno drivers allocate
+ * GPU memory per draw (an ioctl each): Prince of Persia: The Two Thrones fell to 13 % in 3D scenes on the Fold8. The
+ * ranges written after an orphan were never handed to the GPU, so they are mapped unsynchronised. Returns the offset. */
+static size_t ring_put(gx_gl *g, unsigned r, GLuint buf, GLenum target, const void *data, size_t n, size_t align)
+{
+    size_t off = (g->ring_off[r] + align - 1) / align * align;
+    F.glBindBuffer(target, buf);
+    if (n > g->ring_size[r] || off + n > g->ring_size[r]) {
+        size_t size = g->ring_size[r] ? g->ring_size[r] : (r == 2 ? 256u << 10 : 4u << 20);
+        while (size < 4 * n)
+            size *= 2;
+        g->ring_size[r] = size;
+        F.glBufferData(target, (GLsizeiptr)size, NULL, GL_STREAM_DRAW);
+        off = 0;
+    }
+    void *p = F.glMapBufferRange(target, (GLintptr)off, (GLsizeiptr)n,
+                                 GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+    if (p) {
+        memcpy(p, data, n);
+        F.glUnmapBuffer(target);
+    } else {
+        F.glBufferSubData(target, (GLintptr)off, (GLsizeiptr)n, data);
+    }
+    g->ring_off[r] = off + n;
+    return off;
+}
+
 static void fill_ubo(gx_state *gx, const gx_shader_key *k)
 {
     gx_gl *g = gx->gl;
@@ -975,9 +1005,8 @@ static void fill_ubo(gx_state *gx, const gx_shader_key *k)
     u->misc2[0] = (int32_t)k->fog;
     u->misc2[1] = (int32_t)k->ztex;
     u->misc2[2] = (int32_t)k->pe;
-    F.glBindBuffer(GL_UNIFORM_BUFFER, g->ubo);
-    F.glBufferData(GL_UNIFORM_BUFFER, sizeof *u, u, GL_STREAM_DRAW);
-    F.glBindBufferBase(GL_UNIFORM_BUFFER, 0, g->ubo);
+    size_t off = ring_put(g, 2, g->ubo, GL_UNIFORM_BUFFER, u, sizeof *u, (size_t)g->ubo_align);
+    F.glBindBufferRange(GL_UNIFORM_BUFFER, 0, g->ubo, (GLintptr)off, (GLsizeiptr)sizeof *u);
 }
 
 void gx_gl_flush(gx_state *gx)
@@ -1011,28 +1040,27 @@ void gx_gl_flush(gx_state *gx)
     F.glUseProgram(prog);
     /* upload position, colours and only the texture coordinates generated: 24 + 12 x ntex bytes a vertex */
     F.glBindVertexArray(g->vao);
-    F.glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
     unsigned nt = g->batch_ntex;
     size_t stride = offsetof(gx_vout, tex) + 12 * (size_t)nt;
     for (uint32_t i = 0; i < g->nv; i++)
         memcpy(g->packed + i * stride, &g->bv[i], stride);
-    F.glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g->nv * stride), g->packed, GL_STREAM_DRAW);
+    size_t vo = ring_put(g, 0, g->vbo, GL_ARRAY_BUFFER, g->packed, g->nv * stride, 16);
     GLsizei st = (GLsizei)stride;
-    F.glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, st, (const void *)offsetof(gx_vout, pos));
-    F.glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)offsetof(gx_vout, c0));
-    F.glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)offsetof(gx_vout, c1));
+    F.glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, st, (const void *)(vo + offsetof(gx_vout, pos)));
+    F.glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)(vo + offsetof(gx_vout, c0)));
+    F.glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)(vo + offsetof(gx_vout, c1)));
     for (unsigned i = 0; i < 8; i++) {
         if (i < nt) {
             F.glEnableVertexAttribArray(3 + i);
-            F.glVertexAttribPointer(3 + i, 3, GL_FLOAT, GL_FALSE, st, (const void *)(offsetof(gx_vout, tex) + 12 * i));
+            F.glVertexAttribPointer(3 + i, 3, GL_FLOAT, GL_FALSE, st,
+                                    (const void *)(vo + offsetof(gx_vout, tex) + 12 * i));
         } else {
             F.glDisableVertexAttribArray(3 + i);
             F.glVertexAttrib4f(3 + i, 0, 0, 1, 1);
         }
     }
-    F.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g->ebo);
-    F.glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(g->ni * 4), g->bi, GL_STREAM_DRAW);
-    F.glDrawElements(GL_TRIANGLES, (GLsizei)g->ni, GL_UNSIGNED_INT, NULL);
+    size_t io = ring_put(g, 1, g->ebo, GL_ELEMENT_ARRAY_BUFFER, g->bi, (size_t)g->ni * 4, 4);
+    F.glDrawElements(GL_TRIANGLES, (GLsizei)g->ni, GL_UNSIGNED_INT, (const void *)io);
     gx->stats.batches++;
     if (uber)
         gx->stats.uber_draws++;
@@ -1769,6 +1797,10 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     F.glGenBuffers(1, &g->vbo);
     F.glGenBuffers(1, &g->ebo);
     F.glGenBuffers(1, &g->ubo);
+    g->ubo_align = 256;
+    F.glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &g->ubo_align);
+    if (g->ubo_align < 16)
+        g->ubo_align = 256;
     F.glBindVertexArray(g->vao);
     F.glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
     GLsizei st = (GLsizei)sizeof(gx_vout);
