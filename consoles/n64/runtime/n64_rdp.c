@@ -698,6 +698,13 @@ static void tiles_prep(rdp_render *r)
 
 static inline int32_t sat16(int64_t v) { return v > 0x7FFF ? 0x7FFF : v < -0x8000 ? -0x8000 : (int32_t)v; }
 
+/* The span attributes are fixed-point accumulators that wrap like the RDP's own registers: added as unsigned, since
+ * a signed overflow is undefined behaviour the optimiser may act on. */
+ALWAYS_INLINE int32_t wrap_add(int32_t a, int32_t b)
+{
+    return (int32_t)((uint32_t)a + (uint32_t)b);
+}
+
 /* Texture coordinates (s10.5) from the S / T / W attributes. */
 ALWAYS_INLINE void tex_st(int persp, int32_t as, int32_t at, int32_t aw, int32_t *s, int32_t *t)
 {
@@ -707,8 +714,8 @@ ALWAYS_INLINE void tex_st(int persp, int32_t as, int32_t at, int32_t aw, int32_t
             *t = at < 0 ? -0x8000 : 0x7FFF;
             return;
         }
-        *s = sat16(((int64_t)as << 15) / aw);
-        *t = sat16(((int64_t)at << 15) / aw);
+        *s = sat16((int64_t)as * 32768 / aw);
+        *t = sat16((int64_t)at * 32768 / aw);
     } else {
         *s = sat16(as >> 16);
         *t = sat16(at >> 16);
@@ -725,8 +732,10 @@ ALWAYS_INLINE void tex_stage(rdp_render *r, const rdp_prim *p, int32_t as, int32
     int t0 = p->tile, t1 = p->tile + 1;
     if (r->use_lod) {
         int32_t s1, tt1, s2, tt2;
-        tex_st(persp, as + p->dadx[A_S], at + p->dadx[A_T], aw + p->dadx[A_W], &s1, &tt1);
-        tex_st(persp, as + p->dady[A_S], at + p->dady[A_T], aw + p->dady[A_W], &s2, &tt2);
+        tex_st(persp, wrap_add(as, p->dadx[A_S]), wrap_add(at, p->dadx[A_T]), wrap_add(aw, p->dadx[A_W]),
+               &s1, &tt1);
+        tex_st(persp, wrap_add(as, p->dady[A_S]), wrap_add(at, p->dady[A_T]), wrap_add(aw, p->dady[A_W]),
+               &s2, &tt2);
         int lod = imax(imax(abs(s1 - s), abs(tt1 - t)), imax(abs(s2 - s), abs(tt2 - t)));
         if (lod > 0x7FFF)
             lod = 0x7FFF;
@@ -1190,9 +1199,9 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
         int32_t ls = a[A_S], lt = a[A_T], lw = a[A_W];
         for (int k = 0; k < n; k++) {
             tex_st(persp, ls, lt, lw, &bs[k], &bt[k]);
-            ls += dadx[A_S];
-            lt += dadx[A_T];
-            lw += dadx[A_W];
+            ls = wrap_add(ls, dadx[A_S]);
+            lt = wrap_add(lt, dadx[A_T]);
+            lw = wrap_add(lw, dadx[A_W]);
         }
         samp0(r, &r->td[tn0], bs, bt, n, bx0);
         if (tex1_mode == 3)
@@ -1367,18 +1376,18 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
         }
     next:
         if (F & F_SHADE) {
-            a[A_R] += dadx[A_R];
-            a[A_G] += dadx[A_G];
-            a[A_B] += dadx[A_B];
-            a[A_A] += dadx[A_A];
+            a[A_R] = wrap_add(a[A_R], dadx[A_R]);
+            a[A_G] = wrap_add(a[A_G], dadx[A_G]);
+            a[A_B] = wrap_add(a[A_B], dadx[A_B]);
+            a[A_A] = wrap_add(a[A_A], dadx[A_A]);
         }
         if (F & F_TEX) {
-            a[A_S] += dadx[A_S];
-            a[A_T] += dadx[A_T];
-            a[A_W] += dadx[A_W];
+            a[A_S] = wrap_add(a[A_S], dadx[A_S]);
+            a[A_T] = wrap_add(a[A_T], dadx[A_T]);
+            a[A_W] = wrap_add(a[A_W], dadx[A_W]);
         }
         if (F & F_Z)
-            a[A_Z] += dadx[A_Z];
+            a[A_Z] = wrap_add(a[A_Z], dadx[A_Z]);
     }
     }
 }
@@ -1533,9 +1542,9 @@ ALWAYS_INLINE void span_fast(rdp_render *r, const rdp_prim *p, const rdp_row *ro
             const int n = xe - xc + 1;
             for (int k = 0; k < n; k++) {
                 tex_st(persp, as, at, aw, &bs[k], &bt[k]);
-                as += ds;
-                at += dt;
-                aw += dw;
+                as = wrap_add(as, ds);
+                at = wrap_add(at, dt);
+                aw = wrap_add(aw, dw);
             }
             samp0(r, &r->td[tn0], bs, bt, n, bx0);
             if (tex1_mode == 3)
@@ -1545,13 +1554,13 @@ ALWAYS_INLINE void span_fast(rdp_render *r, const rdp_prim *p, const rdp_row *ro
             const int k = x - xc;
             const int32_t sr = ar, sg = ag, sb = ab, sa = aa, cz = az;
             if (F & F_SHADE) {
-                ar += dr;
-                ag += dg;
-                ab += db;
-                aa += da;
+                ar = wrap_add(ar, dr);
+                ag = wrap_add(ag, dg);
+                ab = wrap_add(ab, db);
+                aa = wrap_add(aa, da);
             }
             if (F & F_Z)
-                az += dz;
+                az = wrap_add(az, dz);
             const int cvg = (x >= fx0 && x < fx1) ? 8 : row_cvg(row, x);
             if (!cvg || (!aa_en && cvg < 8 && !row_first_sample(row, x)))
                 continue;
