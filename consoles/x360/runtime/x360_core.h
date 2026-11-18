@@ -27,6 +27,7 @@ typedef struct x360_pack {
     const uint32_t *helpers; /* XBA-283: the register save / restore helpers' entries (xe_rc_helpers), sorted, or NULL:
                               * interpreted code calls them, they are not functions to lift */
     unsigned nhelpers;
+    unsigned features;       /* xe_rc_features (XBA-283; bit 0: lwarx / stwcx. atomic), 0 for older packs */
 } x360_pack;
 
 enum {
@@ -121,6 +122,12 @@ unsigned x360_missed(const x360_machine *x, const uint32_t **addrs);
 /* XBA-283: on (the default), code the pack does not hold is interpreted and recorded (x360_missed), and the run goes
  * on; off, the machine stops at the first missed address (X360_MISSED). */
 void x360_set_interp(x360_machine *x, int on);
+/* XBA-283, experimental (x360_run --host-threads): each guest thread runs its lifted code on a host thread of its
+ * own, in parallel; the kernel, the interpreter and the scheduler stay serial under one lock. Not deterministic
+ * (virtual time follows the host clock), no save states. Needs a bound pack made with atomic reservations
+ * (xe_rc_features bit 0). 0 on success, -1 (x360_error says why) otherwise. Off: the default, cooperative and
+ * deterministic. */
+int x360_set_host_threads(x360_machine *x, int on);
 /* image base, entry point, image size */
 void x360_image_info(const x360_machine *x, uint32_t *base, uint32_t *entry, uint32_t *size);
 

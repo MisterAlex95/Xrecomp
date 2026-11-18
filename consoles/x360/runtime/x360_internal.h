@@ -161,6 +161,9 @@ struct x360_machine {
     const uint32_t *helpers;  /* the pack's save / restore helper entries (x360_pack), sorted */
     unsigned nhelpers;
     int pack_bound;           /* x360_bind succeeded (an empty pack has no fn_tab) */
+    unsigned pack_features;   /* the pack's xe_rc_features (bit 0: atomic reservations) */
+    struct x360_host *host;   /* XBA-283: guest threads on host threads (x360_set_host_threads), NULL: cooperative */
+    uint64_t host_t0;         /* host mode: the host clock (100 ns) at virtual time 0 */
     uint32_t code_lo, code_hi;
     uint32_t pdata_va, pdata_n; /* x360_seh.c: the image's .pdata (found at the first exception) */
     int pdata_scanned;

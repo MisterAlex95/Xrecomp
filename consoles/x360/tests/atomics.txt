@@ -1,0 +1,1 @@
+atomics: wait 0, counter 800000, counter64 2400000, guarded 800000

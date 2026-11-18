@@ -431,7 +431,7 @@ int x360_runtime_run(const x360_runtime_opts *o)
     const void *resume = lib ? dlsym(lib, "xe_rc_resume") : NULL;
     const unsigned *count = lib ? dlsym(lib, "xe_rc_resume_count") : NULL;
     const uint32_t *crc = lib ? dlsym(lib, "xe_rc_image_crc") : NULL;
-    x360_pack pk = {resume, count ? *count : 0, crc ? *crc : 0, NULL, 0};
+    x360_pack pk = {resume, count ? *count : 0, crc ? *crc : 0, NULL, 0, 0};
     const unsigned *nh = lib ? dlsym(lib, "xe_rc_helper_count") : NULL;
     if (nh) {
         pk.helpers = dlsym(lib, "xe_rc_helpers");

@@ -24,7 +24,8 @@ if(NOT TARGET x360_core)
     if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(x360_core PRIVATE -O2)
     endif()
-    target_link_libraries(x360_core PUBLIC xiso m ${CMAKE_DL_LIBS})
+    find_package(Threads REQUIRED) # XBA-283: x360_set_host_threads
+    target_link_libraries(x360_core PUBLIC xiso m ${CMAKE_DL_LIBS} Threads::Threads)
     set_target_properties(x360_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 

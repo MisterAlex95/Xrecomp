@@ -4,7 +4,8 @@
  * the 128 VMX registers...), its stack in the stack heap, a KTHREAD and a PCR (r13) in kernel memory. The scheduler
  * runs the ready threads round robin, a time slice each (X360_SLICE blocks: RC_BLOCK hands the host thread back at a
  * resume point), and switches at every blocking wait. The order is deterministic, which keeps runs reproducible and
- * the state serialisable (save states, rewind); real parallel hardware threads are a later step (XBA-229). A thread
+ * the state serialisable (save states, rewind); guest threads on host threads are an experimental switch (XBA-283,
+ * x360_set_host_threads, « guest threads on host threads » below). A thread
  * switch clears the reservation of lwarx / ldarx, so a stwcx. / stdcx. after another thread ran fails and the guest
  * loop retries, as on hardware.
  *
@@ -12,6 +13,7 @@
  * dispatcher headers (events, semaphores, mutants, timers, threads; X_DISPATCH_HEADER: type at +0, signal state at
  * +4), so the Ke* calls on guest structures and the Nt* calls on handles meet. Time is virtual: instructions run
  * (one 100 ns tick per 320) plus what was skipped when every thread was waiting for a timeout. */
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -37,8 +39,12 @@ void x360_fail(x360_machine *x, const char *fmt, ...)
     x->status = X360_ERROR;
 }
 
+static uint64_t host_now_100ns(void);
+
 uint64_t x360_now(x360_machine *x)
 {
+    if (x->host) /* XBA-283: threads run in parallel, the sum of their instructions is no clock */
+        return host_now_100ns() - x->host_t0 + x->time_skip;
     /* interpreted instructions are in rc_native too (RC_BLOCK counts an RC_INTERP one, x360_interp_run the rest) */
     return x->m.rc_native / 320 + x->st.hle_calls * 2 + x->time_skip;
 }
@@ -537,6 +543,8 @@ void x360_install_fault_handler(x360_machine *x)
     sigaction(SIGBUS, &sa, NULL);
 }
 
+static int run_host(x360_machine *x, uint64_t insns);
+
 int x360_run(x360_machine *x, uint64_t insns)
 {
     if (!x->fn_tab && !x->pack_bound) {
@@ -544,6 +552,8 @@ int x360_run(x360_machine *x, uint64_t insns)
         return x->status;
     }
     x360_install_fault_handler(x);
+    if (x->host)
+        return run_host(x, insns);
     uint64_t stop = x->m.rc_native + insns;
     x->stop_at = stop;
     while (x->status == X360_RUNNING) {
@@ -621,6 +631,287 @@ int x360_run_until(x360_machine *x, uint64_t t)
     return r;
 }
 
+/* ---- guest threads on host threads (XBA-283, experimental: x360_run --host-threads) ----
+ *
+ * Each guest thread gets a host thread (a worker) that runs its lifted code in parallel with the others, on a private
+ * xe_machine (its slice, instruction count, time base and reservation; guest memory is shared). Everything else is
+ * serial under one lock, as in the cooperative mode and with the same code: the HLE calls, the interpreter, the
+ * special return addresses, the waits. The scheduler (the caller's thread, in x360_run) polls the devices, timers
+ * and waits, hands every ready thread to its worker, and sleeps on a condition while they run. Reservations are a
+ * compare-and-swap (xenon_rt.h), so packs made before XBA-283 are refused. Virtual time follows the host clock (plus
+ * what is skipped when every thread waits): runs do not repeat, and save states, rewind and the player stay on the
+ * cooperative mode. */
+
+#include <time.h>
+
+typedef struct x360_worker {
+    pthread_t th;
+    pthread_cond_t cv;
+    int created, run;
+    x360_machine *x;
+    int k;
+} x360_worker;
+
+struct x360_host {
+    pthread_mutex_t mu;
+    pthread_cond_t main;
+    int stop, drain;
+    x360_worker w[X360_MAX_THREADS];
+};
+
+static uint64_t host_now_100ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 10000000u + (uint64_t)ts.tv_nsec / 100;
+}
+
+/* One guest thread on its worker, the lock held on entry and on return: until it blocks, ends, or the scheduler
+ * drains the workers. */
+static void host_run_thread(x360_machine *x, int k)
+{
+    struct x360_host *h = x->host;
+    x360_thread *t = &x->threads[k];
+    xe_cpu *c = &t->cpu;
+    xe_machine lm;
+    memset(&lm, 0, sizeof lm);
+    lm.mem = x->m.mem;
+    lm.mem_base = x->m.mem_base;
+    lm.mem_size = x->m.mem_size;
+    lm.rt = x;
+    lm.cur = c;
+    while (t->state == TH_READY && x->status == X360_RUNNING && !h->drain) {
+        x->cur = k; /* the HLE, the interpreter and the SEH find the running thread here */
+        x->m.cur = c;
+        x->m.slice = X360_SLICE;
+        uint32_t pc = c->pc;
+        int resumed = t->interp;
+        t->interp = 0;
+        if (pc == X360_THREAD_EXIT) {
+            x360_thread_exit(x, t, (uint32_t)c->gpr[3]);
+            break;
+        }
+        if (pc == X360_SEH_RETURN) {
+            x360_seh_return(x, t);
+            continue;
+        }
+        const x360_thunk *th = x360_thunk_at(x, pc);
+        if (th) {
+            c->pc = (uint32_t)c->lr & ~3u;
+            x->st.hle_calls++;
+            sync_tb(x);
+            x360_hle_call(x, th);
+            pthread_cond_signal(&h->main); /* it may have signalled an object a waiting thread polls */
+            continue;
+        }
+        if (x->m.rc_native >= x->stop_at)
+            break;
+        xe_rc_fn fn = pc >= x->code_lo && pc < x->code_hi && !(pc & 3) ? x->fn_tab[(pc - x->code_lo) >> 2] : NULL;
+        if (!fn) {
+            if (x->stop_at_miss) {
+                missed(x, pc);
+                break;
+            }
+            int r = x360_interp_run(x, t, !resumed);
+            if (r < 0)
+                break;
+            if (r > 0)
+                t->interp = 1;
+            continue;
+        }
+        /* lifted code, in parallel: until it needs the runtime or its slice ends */
+        lm.slice = X360_SLICE;
+        lm.rc_native = 0;
+        lm.tb_base = x360_now(x) * 5;
+        pthread_mutex_unlock(&h->mu);
+        for (;;) {
+            lm.rc_exit = 0;
+            fn(&lm);
+            if (lm.rc_exit || lm.slice < 0)
+                break;
+            pc = c->pc;
+            fn = pc >= x->code_lo && pc < x->code_hi && !(pc & 3) ? x->fn_tab[(pc - x->code_lo) >> 2] : NULL;
+            if (!fn)
+                break;
+        }
+        pthread_mutex_lock(&h->mu);
+        x->cur = k;
+        x->m.cur = c;
+        x->m.rc_native += lm.rc_native;
+        if (lm.rc_exit == XE_RC_EXIT_INTERP) {
+            if (x360_interp_one(x))
+                break;
+        } else if (lm.rc_exit == XE_RC_EXIT_NOT_COVERED) {
+            if (x->stop_at_miss) {
+                missed(x, c->pc);
+                break;
+            }
+            int r = x360_interp_run(x, t, 1);
+            if (r < 0)
+                break;
+            if (r > 0)
+                t->interp = 1;
+        }
+    }
+}
+
+static void *host_worker(void *arg)
+{
+    x360_worker *w = arg;
+    x360_machine *x = w->x;
+    struct x360_host *h = x->host;
+    pthread_mutex_lock(&h->mu);
+    for (;;) {
+        while (!w->run && !h->stop)
+            pthread_cond_wait(&w->cv, &h->mu);
+        if (h->stop)
+            break;
+        host_run_thread(x, w->k);
+        w->run = 0;
+        pthread_cond_signal(&h->main);
+    }
+    pthread_mutex_unlock(&h->mu);
+    return NULL;
+}
+
+static int run_host(x360_machine *x, uint64_t insns)
+{
+    struct x360_host *h = x->host;
+    pthread_mutex_lock(&h->mu);
+    uint64_t stop = x->m.rc_native + insns;
+    x->stop_at = stop;
+    while (x->status == X360_RUNNING) {
+        if (x->m.rc_native >= stop || (x->time_limit && x360_now(x) >= x->time_limit)) {
+            x->status = X360_BUDGET;
+            break;
+        }
+        if (x->run_until && x360_now(x) >= x->run_until) {
+            x->status = X360_FRAME;
+            break;
+        }
+        x360_timers_fire(x);
+        x360_gpu_poll(x);
+        x360_audio_poll(x);
+        x360_xma_poll(x);
+        x360_input_poll(x);
+        if (x->timestamp_bundle) {
+            uint64_t now = x360_now(x);
+            x360_w64(x, x->timestamp_bundle, now);
+            x360_w64(x, x->timestamp_bundle + 8, X360_EPOCH + now);
+            x360_w32(x, x->timestamp_bundle + 16, (uint32_t)(now / 10000));
+        }
+        int running = 0;
+        for (int k = 0; k < x->nthreads; k++) {
+            x360_thread *t = &x->threads[k];
+            x360_worker *w = &h->w[k];
+            if (w->run) {
+                running++;
+                continue;
+            }
+            if (t->state == TH_WAIT)
+                x360_wait_check(x, t);
+            if (t->state != TH_READY)
+                continue;
+            if (!w->created) {
+                w->x = x;
+                w->k = k;
+                pthread_cond_init(&w->cv, NULL);
+                if (pthread_create(&w->th, NULL, host_worker, w)) {
+                    x360_fail(x, "cannot create a host thread for guest thread %d", k);
+                    break;
+                }
+                w->created = 1;
+            }
+            t->cpu.reserve = 0;
+            w->run = 1;
+            x->st.switches++;
+            pthread_cond_signal(&w->cv);
+            running++;
+        }
+        if (x->status != X360_RUNNING)
+            break;
+        if (!running) {
+            uint64_t d = next_deadline(x);
+            if (!d) {
+                x360_fail(x, "every thread is blocked with no timeout (deadlock)");
+                break;
+            }
+            uint64_t now = x360_now(x);
+            if (x->run_until && d > x->run_until)
+                d = x->run_until;
+            if (d > now)
+                x->time_skip += d - now;
+            continue;
+        }
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 500000; /* 0.5 ms: waits and timers are polled at least this often */
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&h->main, &h->mu, &ts);
+    }
+    /* every worker back to the lock before the caller looks at (or frees) the machine */
+    h->drain = 1;
+    for (;;) {
+        int busy = 0;
+        for (int k = 0; k < x->nthreads; k++)
+            busy |= h->w[k].run;
+        if (!busy)
+            break;
+        pthread_cond_wait(&h->main, &h->mu);
+    }
+    h->drain = 0;
+    pthread_mutex_unlock(&h->mu);
+    return x->status;
+}
+
+static void host_free(x360_machine *x)
+{
+    struct x360_host *h = x->host;
+    if (!h)
+        return;
+    pthread_mutex_lock(&h->mu);
+    h->stop = 1;
+    for (int k = 0; k < X360_MAX_THREADS; k++)
+        if (h->w[k].created)
+            pthread_cond_signal(&h->w[k].cv);
+    pthread_mutex_unlock(&h->mu);
+    for (int k = 0; k < X360_MAX_THREADS; k++)
+        if (h->w[k].created) {
+            pthread_join(h->w[k].th, NULL);
+            pthread_cond_destroy(&h->w[k].cv);
+        }
+    pthread_cond_destroy(&h->main);
+    pthread_mutex_destroy(&h->mu);
+    free(h);
+    x->host = NULL;
+}
+
+int x360_set_host_threads(x360_machine *x, int on)
+{
+    if (!on) {
+        host_free(x);
+        return 0;
+    }
+    if (x->host)
+        return 0;
+    if (!(x->pack_features & 1)) {
+        x360_fail(x, "host threads need a pack made with atomic reservations (x360_tools.recomp of XBA-283 or later)");
+        return -1;
+    }
+    struct x360_host *h = calloc(1, sizeof *h);
+    if (!h)
+        return -1;
+    pthread_mutex_init(&h->mu, NULL);
+    pthread_cond_init(&h->main, NULL);
+    uint64_t now = x360_now(x);
+    x->host = h;
+    x->host_t0 = host_now_100ns() - now + x->time_skip; /* the clock goes on from where it was */
+    return 0;
+}
+
 /* ---- the machine ---- */
 
 x360_machine *x360_create(const uint8_t *xex, size_t size, char *why, size_t why_len)
@@ -677,6 +968,7 @@ void x360_destroy(x360_machine *x)
 {
     if (!x)
         return;
+    host_free(x);
     x360_audio_close(x);
     x360_fs_free(x);
     x360_gpu_free(x);
@@ -698,6 +990,7 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
     const xe_rc_entry *r = pack->resume;
     x->helpers = pack->helpers;
     x->nhelpers = pack->helpers ? pack->nhelpers : 0;
+    x->pack_features = pack->features;
     if (!pack->count) { /* XBA-283: nothing lifted, the interpreter runs it all (tests) */
         x->code_lo = x->code_hi = 0;
         x->pack_bound = 1;

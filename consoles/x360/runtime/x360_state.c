@@ -446,7 +446,7 @@ size_t x360_state_size(x360_machine *x)
 
 size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t cap)
 {
-    if (!x || !out || x->status == X360_ERROR || x->status == X360_MISSED)
+    if (!x || !out || x->status == X360_ERROR || x->status == X360_MISSED || x->host)
         return 0;
     size_t need = x360_state_size(x);
     if (cap < need)
