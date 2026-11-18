@@ -499,8 +499,69 @@ static void test_audio_out(void)
 /* XMA contexts (XBA-280): synthetic XMA2 packets (headers only: the default backend gives each frame 512 samples
  * of silence), the input buffers' flow, the output ring and its read offset, the APU kick register; the render
  * driver's mix; the motors */
+/* XMA loops (XBA-299): a backend that notes which packets it is given and when it is opened */
+static uint8_t loop_seen[32];
+static int loop_n, loop_opens;
+static void *loop_open(int ch, int rate) { (void)ch, (void)rate; loop_opens++; return &loop_seen; }
+static int loop_decode(void *d, const uint8_t *p, int16_t *out, int max)
+{
+    (void)d, (void)out, (void)max;
+    if (loop_n < 32)
+        loop_seen[loop_n++] = p[4];
+    return 0;
+}
+static void loop_close(void *d) { (void)d; }
+static int loop_drains;
+static int loop_drain(void *d, int16_t *out, int max)
+{
+    (void)d, (void)max;
+    loop_drains++;
+    memset(out, 0, 128 * 2);
+    return 128; /* one output block */
+}
+
+static void test_xma_loop(void)
+{
+    static const x360_xma_backend rec = {"loop test", loop_open, loop_decode, loop_close, loop_drain};
+    x360_xma_set_backend(&rec);
+    uint32_t pctx = x360_kalloc(X, 4);
+    K(X360_xboxkrnl_XMACreateContext, 1, pctx);
+    uint32_t ctx = x360_r32(X, pctx);
+    uint32_t in = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0x1000);
+    uint32_t out = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0x1000);
+    for (uint32_t p = 0; p < 4; p++)
+        x360_w8(X, in + 2048 * p + 4, (uint8_t)(0x10 + p)); /* each packet says which it is */
+    uint32_t init = x360_kalloc(X, 64);
+    /* four packets, loop from the middle of packet 1 to the end of packet 2, twice */
+    uint32_t iv[13] = {in & 0x1FFFFFFFu, 4, 0, 0, 0, out & 0x1FFFFFFFu, 31, 0, 0, 1, 3, 2048 * 8 + 40, 3 * 2048 * 8};
+    for (int k = 0; k < 13; k++)
+        x360_w32(X, init + 4 * (uint32_t)k, iv[k]);
+    x360_w8(X, init + 52, 2);
+    K(X360_xboxkrnl_XMAInitializeContext, 2, ctx, init);
+    K(X360_xboxkrnl_XMASetInputBuffer0Valid, 1, ctx);
+    K(X360_xboxkrnl_XMASetOutputBufferValid, 1, ctx);
+    K(X360_xboxkrnl_XMAEnableContext, 1, ctx);
+    static const uint8_t want[] = {0x10, 0x11, 0x12, 0x11, 0x12, 0x11, 0x12, 0x13};
+    CHECK(loop_n == (int)sizeof want && !memcmp(loop_seen, want, sizeof want), "XMA loop: %d packets, the 4th is %02X",
+          loop_n, loop_seen[3]);
+    CHECK(loop_opens == 3 && loop_drains == 2, "XMA loop: a fresh decoder after each jump (%d opens, %d drains)",
+          loop_opens, loop_drains);
+    /* the input has ended: not at the first poll (a title may be refilling), then the decoder's last samples go out */
+    uint32_t wo = K(X360_xboxkrnl_XMAGetOutputBufferWriteOffset, 1, ctx);
+    x360_xma_poll(X);
+    CHECK(loop_drains == 2, "XMA end of input: the decoder is left alone at first");
+    for (int k = 0; k < 16; k++)
+        x360_xma_poll(X);
+    CHECK(loop_drains == 3 && K(X360_xboxkrnl_XMAGetOutputBufferWriteOffset, 1, ctx) == wo + 1,
+          "XMA end of input: %d drains, write offset %u after %u", loop_drains,
+          K(X360_xboxkrnl_XMAGetOutputBufferWriteOffset, 1, ctx), wo);
+    K(X360_xboxkrnl_XMAReleaseContext, 1, ctx);
+    x360_xma_set_backend(NULL);
+}
+
 static void test_xma(void)
 {
+    x360_xma_set_backend(NULL); /* these packets are headers only: the silent backend */
     uint32_t pctx = x360_kalloc(X, 4);
     CHECK(K(X360_xboxkrnl_XMACreateContext, 1, pctx) == 0 && x360_r32(X, pctx) >= 0xA0000000u, "XMA context");
     uint32_t ctx = x360_r32(X, pctx);
@@ -879,6 +940,7 @@ int main(int argc, char **argv)
     test_input_and_cheats();
     test_audio_out();
     test_xma();
+    test_xma_loop();
     test_crypt();
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {

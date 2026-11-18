@@ -19,6 +19,7 @@ in NOTICE. Their binary distribution requires the licence text to travel with th
 
 | File | Applies to |
 |---|---|
+| `LGPL-2.1.txt` | FFmpeg 7.0.2 (`libavcodec.so`, `libavutil.so`: the Xbox 360's XMA audio, built by `tools/android/build_ffmpeg.sh`; source on each release page) |
 | `Apache-2.0-WITH-LLVM-exception.txt` | LLVM: clang, lld, compiler-rt builtins and libunwind of the on-device toolchain (`libxbacc.so`, the sysroot's `lib/clang/`), verbatim from the LLVM project's `LICENSE.TXT` (its third-party and legacy parts left out: none of that code is built in) |
 | `PSF-2.0.txt` | CPython (`libpython3.13.so`, `libxbapython.so`, the standard library zip), verbatim `LICENSE` of the CPython sources |
 | `Apache-2.0-apksig.txt` | apksig (in `classes.dex`: signs the game apps of Manage › Create an app), verbatim `LICENSE` of the `com.android.tools.build:apksig` jar (its copyright line, then the Apache License 2.0) |

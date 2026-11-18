@@ -101,6 +101,13 @@ if(TARGET x360_play)
     set_tests_properties(x360_play PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
 endif()
 
+# XMA through libavcodec (XBA-299): only where the runtime found it
+if(X360_AV_FOUND)
+    add_executable(x360_xma_av_test x360_xma_av_test.c)
+    target_link_libraries(x360_xma_av_test PRIVATE x360_core)
+    add_test(NAME x360_xma_av COMMAND x360_xma_av_test)
+    set_tests_properties(x360_xma_av PROPERTIES TIMEOUT 120)
+endif()
 add_executable(x360_hle_test x360_hle_test.c)
 target_link_libraries(x360_hle_test PRIVATE x360_core)
 target_compile_options(x360_hle_test PRIVATE -Wall -Wextra)
