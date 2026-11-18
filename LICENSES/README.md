@@ -11,6 +11,10 @@ and remaining the copyright of espes, Jannik Vogel and Matt Borgerson.
 Shipping the verbatim text alongside those files is an LGPL requirement, not
 a courtesy.
 
+`BSD-3-Clause-xenia.txt` is Xenia's licence, verbatim from its repository (Copyright Ben Vanik): the Xbox 360
+renderer's tiled texture addressing (`consoles/x360/runtime/xenos_gl.c`, `tiled2d` / `tiled3d`) follows
+`src/xenia/gpu/texture_address.h` closely enough to count as derived code (Linux only, not in the app; see NOTICE).
+
 ## Shipped by the Android app
 
 The Android APK (XRecomp) also carries the components below, listed with their versions under « The Android app »

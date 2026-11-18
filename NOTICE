@@ -295,6 +295,16 @@ Derived algorithms — credited, independently implemented
     NV2A register-combiner translation. Cites xemu's pgraph combiner
     implementation as a reference for the hardware's behaviour.
 
+  consoles/x360/runtime/xenos_gl.c
+    tiled2d / tiled3d, the Xenos 2D / 3D tiled texture addressing, follow
+    Xenia's src/xenia/gpu/texture_address.h (Tiled2D, Tiled3D, TiledCombine;
+    BSD 3-Clause, Copyright Ben Vanik, LICENSES/BSD-3-Clause-xenia.txt)
+    closely enough to be treated as derived code. The same file's base level
+    texture layout, resolve rectangle and vertex fetch packings, and
+    consoles/x360/tools/x360_tools/xenos_glsl.py's instruction semantics, are
+    written from Xenia's descriptions (texture_util.cc, draw_util.cc,
+    spirv_shader_translator_fetch.cc, ucode.h).
+
   Algorithms and hardware behaviour are not themselves copyrightable, and
   these are our own implementations. They are listed here because the debt is
   real and should be visible even where no licence obligation attaches. If
