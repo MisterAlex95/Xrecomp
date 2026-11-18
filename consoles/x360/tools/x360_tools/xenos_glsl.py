@@ -599,7 +599,8 @@ def translate(words, stage="vertex", interpolators=0):
         out += ["    xe_color%d = vec4(0.0);" % o for o in sorted(sh.outputs)]
     out += sh.body
     if stage == "vertex":
-        out.append("    gl_Position = xe_pos;")
+        # Direct3D's clip-space depth (0..w) to GL's (-w..w)
+        out.append("    gl_Position = vec4(xe_pos.xy, xe_pos.z * 2.0 - xe_pos.w, xe_pos.w);")
         if sh.exports_psize:
             out.append("    gl_PointSize = xe_psize.x;")
     else:

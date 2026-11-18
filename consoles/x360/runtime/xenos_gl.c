@@ -47,6 +47,18 @@ typedef unsigned int EGLBoolean, EGLenum;
 #define GL_BLEND 0x0BE2
 #define GL_CULL_FACE 0x0B44
 #define GL_SCISSOR_TEST 0x0C11
+#define GL_STENCIL_TEST 0x0B90
+#define GL_DEPTH24_STENCIL8 0x88F0
+#define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
+#define GL_DEPTH_BUFFER_BIT 0x0100
+#define GL_STENCIL_BUFFER_BIT 0x0400
+#define GL_NEVER 0x0200
+#define GL_FRONT 0x0404
+#define GL_BACK 0x0405
+#define GL_FRONT_AND_BACK 0x0408
+#define GL_CW 0x0900
+#define GL_CCW 0x0901
+#define GL_FUNC_ADD 0x8006
 
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
 #define EGL_RENDERABLE_TYPE 0x3040
@@ -101,7 +113,22 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glClear, (GLbitfield))                                                                                     \
     X(void, glReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *))                                   \
     X(void, glDisable, (GLenum))                                                                                       \
-    X(void, glFinish, (void))
+    X(void, glFinish, (void))                                                                                          \
+    X(void, glEnable, (GLenum))                                                                                        \
+    X(void, glBlendFuncSeparate, (GLenum, GLenum, GLenum, GLenum))                                                     \
+    X(void, glBlendEquationSeparate, (GLenum, GLenum))                                                                 \
+    X(void, glBlendColor, (GLfloat, GLfloat, GLfloat, GLfloat))                                                        \
+    X(void, glColorMask, (GLboolean, GLboolean, GLboolean, GLboolean))                                                 \
+    X(void, glDepthFunc, (GLenum))                                                                                     \
+    X(void, glDepthMask, (GLboolean))                                                                                  \
+    X(void, glStencilFuncSeparate, (GLenum, GLenum, GLint, GLuint))                                                    \
+    X(void, glStencilOpSeparate, (GLenum, GLenum, GLenum, GLenum))                                                     \
+    X(void, glStencilMaskSeparate, (GLenum, GLuint))                                                                   \
+    X(void, glCullFace, (GLenum))                                                                                      \
+    X(void, glFrontFace, (GLenum))                                                                                     \
+    X(void, glScissor, (GLint, GLint, GLsizei, GLsizei))                                                               \
+    X(void, glClearDepthf, (GLfloat))                                                                                  \
+    X(void, glClearStencil, (GLint))
 
 #define MAX_PROGRAMS 256
 #define MAX_ATTRS 16
@@ -135,7 +162,7 @@ struct xenos_gl {
     void *egl_lib, *gles_lib;
     EGLDisplay dpy;
     EGLContext ctx;
-    GLuint fbo, rb, vao, vbo, ibo, ubo[2];
+    GLuint fbo, rb, ds, vao, vbo, ibo, ubo[2];
     int width, height;
     uint8_t *frame;
     char cache[512], frames[512];
@@ -240,6 +267,10 @@ xenos_gl *xenos_gl_create(const char *cache_dir, int width, int height, char *wh
     g->glBindRenderbuffer(GL_RENDERBUFFER, g->rb);
     g->glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, width, height);
     g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, g->rb);
+    g->glGenRenderbuffers(1, &g->ds);
+    g->glBindRenderbuffer(GL_RENDERBUFFER, g->ds);
+    g->glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, g->ds);
     if (g->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         fail(why, why_n, "incomplete render target");
         xenos_gl_destroy(g);
@@ -257,7 +288,9 @@ xenos_gl *xenos_gl_create(const char *cache_dir, int width, int height, char *wh
     g->glDisable(GL_SCISSOR_TEST);
     g->glViewport(0, 0, width, height);
     g->glClearColor(0, 0, 0, 1);
-    g->glClear(GL_COLOR_BUFFER_BIT);
+    g->glClearDepthf(1.0f);
+    g->glClearStencil(0);
+    g->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     return g;
 }
 
@@ -274,6 +307,7 @@ void xenos_gl_destroy(xenos_gl *g)
         g->glDeleteBuffers(2, g->ubo);
         g->glDeleteVertexArrays(1, &g->vao);
         g->glDeleteRenderbuffers(1, &g->rb);
+        g->glDeleteRenderbuffers(1, &g->ds);
         g->glDeleteFramebuffers(1, &g->fbo);
         g->eglMakeCurrent(g->dpy, NULL, NULL, NULL);
         g->eglDestroyContext(g->dpy, g->ctx);
@@ -538,7 +572,8 @@ static int gl_prim(uint32_t t)
     case 4: return 4; /* triangle list */
     case 5: return 6; /* triangle fan */
     case 6: return 5; /* triangle strip */
-    default: return -1; /* rectangle / quad lists and the rest: not yet */
+    case 13: return 4; /* quad list: drawn as two triangles per quad */
+    default: return -1; /* rectangle lists and the rest: not yet */
     }
 }
 
@@ -552,6 +587,88 @@ static void upload_constants(xenos_gl *g, const xenos_cp *cp)
         g->glBindBuffer(GL_UNIFORM_BUFFER, g->ubo[stage]);
         g->glBufferData(GL_UNIFORM_BUFFER, sizeof block, block, GL_STREAM_DRAW);
         g->glBindBufferBase(GL_UNIFORM_BUFFER, (GLuint)stage, g->ubo[stage]);
+    }
+}
+
+/* ---- render state (Xenia's registers.h layouts, GL's enums) ---- */
+
+static GLenum blend_factor(uint32_t f)
+{
+    static const GLenum map[17] = {0, 1, 1, 1, 0x0300, 0x0301, 0x0302, 0x0303, 0x0306, 0x0307, 0x0304, 0x0305,
+                                   0x8001, 0x8002, 0x8003, 0x8004, 0x0308};
+    return f < 17 ? map[f] : 1;
+}
+
+static GLenum blend_op(uint32_t o)
+{
+    static const GLenum map[5] = {0x8006, 0x800A, 0x8007, 0x8008, 0x800B};
+    return o < 5 ? map[o] : 0x8006;
+}
+
+static GLenum stencil_op(uint32_t o)
+{
+    static const GLenum map[8] = {0x1E00, 0, 0x1E01, 0x1E02, 0x1E03, 0x150A, 0x8507, 0x8508};
+    return map[o & 7];
+}
+
+static void apply_state(xenos_gl *g, const xenos_cp *cp)
+{
+    /* blending: off when it is src * 1 + dst * 0 for colour and alpha */
+    uint32_t bc = cp->regs[0x2201];
+    if ((bc & 0x1FFF1FFFu) == 0x00010001u) {
+        g->glDisable(GL_BLEND);
+    } else {
+        g->glEnable(GL_BLEND);
+        g->glBlendFuncSeparate(blend_factor(bc & 31), blend_factor((bc >> 8) & 31), blend_factor((bc >> 16) & 31),
+                               blend_factor((bc >> 24) & 31));
+        g->glBlendEquationSeparate(blend_op((bc >> 5) & 7), blend_op((bc >> 21) & 7));
+        g->glBlendColor(as_float(cp->regs[0x2105]), as_float(cp->regs[0x2106]), as_float(cp->regs[0x2107]),
+                        as_float(cp->regs[0x2108]));
+    }
+    uint32_t cm = cp->regs[0x2104];
+    g->glColorMask(cm & 1, (cm >> 1) & 1, (cm >> 2) & 1, (cm >> 3) & 1);
+    /* depth and stencil */
+    uint32_t dc = cp->regs[0x2200];
+    if (dc & 2) {
+        g->glEnable(GL_DEPTH_TEST);
+        g->glDepthFunc(GL_NEVER + ((dc >> 4) & 7));
+    } else {
+        g->glDisable(GL_DEPTH_TEST);
+    }
+    g->glDepthMask((dc >> 2) & 1);
+    if (dc & 1) {
+        uint32_t rm = cp->regs[0x210D], rb = (dc >> 7) & 1 ? cp->regs[0x210C] : rm;
+        uint32_t fb = (dc >> 7) & 1 ? dc >> 20 : dc >> 8, fail_b = (dc >> 7) & 1 ? dc >> 23 : dc >> 11;
+        uint32_t zpass_b = (dc >> 7) & 1 ? dc >> 26 : dc >> 14, zfail_b = (dc >> 7) & 1 ? dc >> 29 : dc >> 17;
+        g->glEnable(GL_STENCIL_TEST);
+        g->glStencilFuncSeparate(GL_FRONT, GL_NEVER + ((dc >> 8) & 7), (GLint)(rm & 0xFF), (rm >> 8) & 0xFF);
+        g->glStencilOpSeparate(GL_FRONT, stencil_op(dc >> 11), stencil_op(dc >> 17), stencil_op(dc >> 14));
+        g->glStencilMaskSeparate(GL_FRONT, (rm >> 16) & 0xFF);
+        g->glStencilFuncSeparate(GL_BACK, GL_NEVER + (fb & 7), (GLint)(rb & 0xFF), (rb >> 8) & 0xFF);
+        g->glStencilOpSeparate(GL_BACK, stencil_op(fail_b), stencil_op(zfail_b), stencil_op(zpass_b));
+        g->glStencilMaskSeparate(GL_BACK, (rb >> 16) & 0xFF);
+    } else {
+        g->glDisable(GL_STENCIL_TEST);
+    }
+    /* culling: Xenos's winding is as seen on the render target (Xenia: 0 = front is CCW), and the target here is
+     * the same picture GL's window holds (NDC +y up in both) */
+    uint32_t sc = cp->regs[0x2205];
+    if (sc & 3) {
+        g->glEnable(GL_CULL_FACE);
+        g->glCullFace((sc & 3) == 3 ? GL_FRONT_AND_BACK : (sc & 1) ? GL_FRONT : GL_BACK);
+    } else {
+        g->glDisable(GL_CULL_FACE);
+    }
+    g->glFrontFace((sc >> 2) & 1 ? GL_CW : GL_CCW);
+    /* the window scissor (top-left / bottom-right, y downwards), when it is set and smaller than the target */
+    uint32_t tl = cp->regs[0x2081], br = cp->regs[0x2082];
+    int x0 = (int)(tl & 0x7FFF), y0 = (int)((tl >> 16) & 0x7FFF);
+    int x1 = (int)(br & 0x7FFF), y1 = (int)((br >> 16) & 0x7FFF);
+    if (br && (x0 > 0 || y0 > 0 || x1 < g->width || y1 < g->height) && x1 > x0 && y1 > y0) {
+        g->glEnable(GL_SCISSOR_TEST);
+        g->glScissor(x0, g->height - y1, x1 - x0, y1 - y0);
+    } else {
+        g->glDisable(GL_SCISSOR_TEST);
     }
 }
 
@@ -583,6 +700,12 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     }
     /* indices: from the DMA buffer (16 or 32 bits, VGT_DMA_SIZE's swap mode) or 0..n-1 */
     uint32_t n = d->num_indices, *idx = NULL, max_index = n - 1;
+    if (d->prim_type == 13 && (n /= 4) * 4 == 0) {
+        g->st.unsupported++;
+        return;
+    } else if (d->prim_type == 13) {
+        n *= 4; /* whole quads */
+    }
     if (d->source_select == 0) {
         idx = malloc(4 * (size_t)n);
         if (!idx)
@@ -607,6 +730,23 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
             return;
         }
     }
+    if (d->prim_type == 13) { /* quads (a, b, c, d) -> triangles (a, b, c), (a, c, d) */
+        uint32_t *t = malloc(6 * (size_t)(n / 4) * 4);
+        if (!t) {
+            free(idx);
+            return;
+        }
+        for (uint32_t q = 0; q < n / 4; q++) {
+            uint32_t v[4];
+            for (int k = 0; k < 4; k++)
+                v[k] = idx ? idx[4 * q + k] : 4 * q + k;
+            uint32_t *o = &t[6 * q];
+            o[0] = v[0], o[1] = v[1], o[2] = v[2], o[3] = v[0], o[4] = v[2], o[5] = v[3];
+        }
+        free(idx);
+        idx = t;
+        n = n / 4 * 6;
+    }
     /* vertices: every attribute converted to vec4, interleaved */
     uint32_t nv = max_index + 1, na = (uint32_t)p->nattr;
     float *vb = na ? malloc((size_t)nv * na * 16) : NULL;
@@ -628,6 +768,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
     g->glUseProgram(p->prog);
     upload_constants(g, cp);
+    apply_state(g, cp);
     set_viewport(g, cp);
     g->glBindVertexArray(g->vao);
     g->glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
@@ -678,7 +819,12 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
         }
     }
     g->st.frames++;
+    /* the next frame starts clear (eDRAM clears through resolves are not modelled yet) */
     g->glViewport(0, 0, g->width, g->height);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glColorMask(1, 1, 1, 1);
+    g->glDepthMask(1);
+    g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
     g->glClearColor(0, 0, 0, 1);
-    g->glClear(GL_COLOR_BUFFER_BIT);
+    g->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 }

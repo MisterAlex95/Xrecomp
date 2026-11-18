@@ -11,10 +11,14 @@
  * EGL and GLES are loaded at run time (dlopen, as the GameCube's renderer does): no build dependency; without them
  * (or without a surfaceless EGL display) xenos_gl_create fails with a reason and the runtime runs without drawing.
  *
- * Not there yet: render state (blending, depth / stencil, culling, scissor, colour masks), eDRAM and resolves (the
- * guest's front buffer is not written), textures, rectangle and quad lists, more vertex formats, the viewport's
- * exact conventions (the scale / offset registers map to glViewport when enabled). A Vulkan back end (the epic's
- * plan) would take the same state; the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
+ * Render state: blending (factors, equations, constant colour), colour mask, depth test / write with a D24S8
+ * buffer, stencil (front and back), culling and winding, the window scissor; quad lists become triangles. The vertex
+ * shaders convert Direct3D's 0..w depth range to GL's (xenos_glsl).
+ *
+ * Not there yet: eDRAM and resolves (the guest's front buffer is not written; each swap clears), textures, rectangle
+ * lists, alpha test, more vertex formats, multiple render targets, the viewport's exact conventions (the scale /
+ * offset registers map to glViewport when enabled). A Vulkan back end (the epic's plan) would take the same state;
+ * the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
 #ifndef XENOS_GL_H
 #define XENOS_GL_H
 

@@ -6,7 +6,12 @@
  *   frame 0: a red triangle (auto indices, triangle list), c0 = 1: the centre is red, a corner stays clear;
  *   frame 1: a full-target quad from four green vertices and six 16-bit indices (DMA, 8-in-16 swap mode, the way a
  *            big-endian CPU writes them), c0 = (1, 0.5, 1, 1): every pixel is half green;
- *   frame 2: the same quad with the viewport scale / offset enabled for the target's top-left quarter only.
+ *   frame 2: the same quad with the viewport scale / offset enabled for the target's top-left quarter only;
+ *   frame 3: depth: a green quad at z 0.25, then a red one at z 0.75 with the test "less": green stays;
+ *   frame 4: blending: red, then green at alpha 0.5 with src alpha / one minus src alpha: (0.5, 0.5, 0);
+ *   frame 5: culling of back faces: the red triangle (counter-clockwise on screen) is drawn with "front is CCW" and
+ *            culled with "front is CW";
+ *   frame 6: a quad list (one quad of four vertices) covers the target.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -95,9 +100,16 @@ static void run(xenos_cp *cp)
     npk = 0;
 }
 
+static void vertex_z(uint32_t at, float x, float y, float z, float r, float g, float b)
+{
+    const float v[8] = {x, y, z, 1.0f, r, g, b, 1.0f};
+    for (int i = 0; i < 8; i++)
+        w32(at + 4 * i, fbits(v[i]));
+}
+
 static void vertex(uint32_t at, float x, float y, float r, float g, float b)
 {
-    const float v[8] = {x, y, 0.0f, 1.0f, r, g, b, 1.0f};
+    const float v[8] = {x, y, 0.5f, 1.0f, r, g, b, 1.0f};
     for (int i = 0; i < 8; i++)
         w32(at + 4 * i, fbits(v[i]));
 }
@@ -143,6 +155,10 @@ int main(int argc, char **argv)
     memcpy(im + 2, ps, 4 * nps);
     type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
     static const uint32_t swap[4] = {0x53574150u, 0, W, H};
+
+    /* the render state a title sets first: all colour channels written, no blending (src * 1 + dst * 0) */
+    reg(0x2104, 0xFu);
+    reg(0x2201, 0x00010001u);
 
     /* frame 0: a red triangle */
     vertex(0x1000, -0.5f, -0.5f, 1, 0, 0);
@@ -203,9 +219,78 @@ int main(int argc, char **argv)
     CHECK(in[1] > 100 && out[1] == 0 && out2[1] == 0, "frame 2: top-left %u, bottom-right %u, top-right %u", in[1],
           out[1], out2[1]);
 
+    /* frame 3: depth (back to the full-target viewport) */
+    reg(0x2206, 0);
+    reg(0x4401, fbits(1.0f));
+    vertex_z(0x4000, -1, -1, 0.25f, 0, 1, 0);
+    vertex_z(0x4020, 1, -1, 0.25f, 0, 1, 0);
+    vertex_z(0x4040, -1, 1, 0.25f, 0, 1, 0);
+    vertex_z(0x4060, 1, 1, 0.25f, 0, 1, 0);
+    vertex_z(0x4080, -1, -1, 0.75f, 1, 0, 0);
+    vertex_z(0x40A0, 1, -1, 0.75f, 1, 0, 0);
+    vertex_z(0x40C0, -1, 1, 0.75f, 1, 0, 0);
+    vertex_z(0x40E0, 1, 1, 0.75f, 1, 0, 0);
+    reg(0x2200, 2u | 4u | 1u << 4); /* z test, z write, less */
+    reg(0x4800, 0x4000u | 3u);
+    reg(0x4801, 2u | (64u << 2));
+    uint32_t strip_a = 6u | 2u << 6 | 4u << 16; /* triangle strip of vertices 0..3 */
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);
+    reg(0x4800, 0x4080u | 3u);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    c = px(g, W / 2, H / 2);
+    CHECK(c[0] == 0 && c[1] == 255, "frame 3 (depth): %u %u %u, want green", c[0], c[1], c[2]);
+
+    /* frame 4: blending */
+    reg(0x2200, 0);
+    reg(0x4800, 0x4080u | 3u);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);                /* red, opaque */
+    reg(0x2201, 6u | 7u << 8 | 1u << 16 | 0u << 24);   /* src alpha, one minus src alpha; alpha: one, zero */
+    reg(0x4403, fbits(0.5f));                          /* c0.w: the pixel's alpha 0.5 */
+    reg(0x4800, 0x4000u | 3u);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);                /* green, half */
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    c = px(g, W / 2, H / 2);
+    CHECK(c[0] >= 126 && c[0] <= 129 && c[1] >= 126 && c[1] <= 129 && c[2] == 0,
+          "frame 4 (blend): %u %u %u, want 128 128 0", c[0], c[1], c[2]);
+
+    /* frame 5: culling back faces: drawn with front = CCW, culled with front = CW */
+    reg(0x2201, 0x00010001u);
+    reg(0x4403, fbits(1.0f));
+    reg(0x4800, 0x1000u | 3u);
+    reg(0x2205, 2u);                                   /* cull back, front is CCW */
+    type3(PM4_DRAW_INDX_2, &init, 1);
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    c = px(g, W / 2, H / 2);
+    CHECK(c[0] == 255, "frame 5 (front CCW, cull back): centre %u, want the triangle", c[0]);
+    reg(0x2205, 2u | 4u);                              /* cull back, front is CW */
+    type3(PM4_DRAW_INDX_2, &init, 1);
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    c = px(g, W / 2, H / 2);
+    CHECK(c[0] == 0, "frame 6 (front CW, cull back): centre %u, want culled", c[0]);
+
+    /* frame 7: a quad list: vertices 0, 1, 3, 2 of the green quad (a quad goes round its corners) */
+    reg(0x2205, 0);
+    vertex(0x5000, -1, -1, 0, 0, 1);
+    vertex(0x5020, 1, -1, 0, 0, 1);
+    vertex(0x5040, 1, 1, 0, 0, 1);
+    vertex(0x5060, -1, 1, 0, 0, 1);
+    reg(0x4800, 0x5000u | 3u);
+    uint32_t quad = 13u | 2u << 6 | 4u << 16;
+    type3(PM4_DRAW_INDX_2, &quad, 1);
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    const uint8_t *q0 = px(g, 1, 1), *q1 = px(g, W - 2, H - 2), *q2 = px(g, W - 2, 1), *q3 = px(g, 1, H - 2);
+    CHECK(q0[2] == 255 && q1[2] == 255 && q2[2] == 255 && q3[2] == 255, "frame 7 (quad list): corners %u %u %u %u",
+          q0[2], q1[2], q2[2], q3[2]);
+
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 3 && st.frames == 3 && st.no_shader == 0 && st.unsupported == 0,
+    CHECK(st.drawn == 10 && st.frames == 8 && st.no_shader == 0 && st.unsupported == 0,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
           (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
     xenos_gl_destroy(g);
@@ -215,6 +300,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: three frames drawn and read back as expected\n");
+    printf("xenos_gl: eight frames drawn and read back as expected\n");
     return 0;
 }
