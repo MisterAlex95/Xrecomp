@@ -5,7 +5,10 @@ project(console_x360_tests C)
 # tools/run_c_tests.sh (as console_x360) and by the root build's ctest when XBR_CONSOLE_X360 is ON. Linux only.
 #
 #   xenos_cp         the PM4 command processor on hand-built packets (xenos_cp_test.c)
-#   xenos_draw       the GLES renderer draws a hand-built PM4 stream, read back (skipped without EGL / GLES 3.0)
+#   xenos_draw       the GLES renderer draws a hand-built PM4 stream, read back (skipped without EGL / GLES 3.0):
+#                    29 frames, among them (XBA-280) eDRAM surfaces at tile bases, a 2_10_10_10 and a float target
+#                    resolved to their formats, mip levels, a vertex fetch at a computed index; xenos_draw_x2 the
+#                    same at an internal resolution of 2
 #   x360_render      the renderer through the machine: a ring, VdSwap, a front buffer frame, a save state loaded
 #   x360_hle         the kernel HLE called directly (x360_hle_test.c): formatters, memory, objects, waits, timers,
 #                    threads, files and symbolic links
@@ -56,6 +59,10 @@ target_compile_options(xenos_draw_test PRIVATE -Wall -Wextra)
 add_test(NAME xenos_draw COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:xenos_draw_test>
                                     ${CMAKE_CURRENT_BINARY_DIR}/xenos_draw)
 set_tests_properties(xenos_draw PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+# the same frames at an internal resolution of 2 (XBA-280): surfaces, resolves and frames read back at the guest size
+add_test(NAME xenos_draw_x2 COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:xenos_draw_test>
+                                       ${CMAKE_CURRENT_BINARY_DIR}/xenos_draw_x2)
+set_tests_properties(xenos_draw_x2 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 ENVIRONMENT XENOS_DRAW_SCALE=2)
 add_test(NAME x360_render COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:x360_hle_test>
                                      ${CMAKE_CURRENT_BINARY_DIR}/x360_render --render)
 set_tests_properties(x360_render PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)

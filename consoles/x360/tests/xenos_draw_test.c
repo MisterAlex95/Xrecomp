@@ -147,6 +147,16 @@ static uint32_t tiled_off(int x, int y)
                       ((oi >> 5) & 7) << 8 | (oi >> 8) << 12);
 }
 
+/* the same for a texture of 2^log2 bytes a texel */
+static uint32_t tiled_off_log2(int x, int y, unsigned log2)
+{
+    int32_t outer = ((y >> 5) * (W >> 5) + (x >> 5)) << 6, inner = (((y >> 1) & 7) << 3) | (x & 7);
+    int32_t oi = (outer | inner) << log2;
+    uint32_t bank = (y >> 4) & 1, pipe = ((x >> 3) & 3) ^ (((y >> 3) & 1) << 1);
+    return (uint32_t)((int32_t)((uint32_t)(y & 1) << 4 | pipe << 6 | bank << 11) | (oi & 15) | ((oi >> 4) & 1) << 5 |
+                      ((oi >> 5) & 7) << 8 | (oi >> 8) << 12);
+}
+
 static void run(xenos_cp *cp)
 {
     for (uint32_t i = 0; i < npk; i++)
@@ -184,7 +194,10 @@ int main(int argc, char **argv)
     }
     char cache[1024], why[256];
     snprintf(cache, sizeof cache, "%s/cache", argv[1]);
-    xenos_gl *g = xenos_gl_create(cache, W, H, why, sizeof why);
+    /* XENOS_DRAW_SCALE=N: the same frames at an internal resolution of N x (read back at the guest size) */
+    const char *scale_env = getenv("XENOS_DRAW_SCALE");
+    int scale = scale_env && *scale_env ? atoi(scale_env) : 1;
+    xenos_gl *g = xenos_gl_create_scaled(cache, W, H, scale, why, sizeof why);
     if (!g) {
         printf("skipped: %s\n", why);
         return 77;
@@ -699,6 +712,139 @@ int main(int argc, char **argv)
     CHECK(in2[0] == 255 && in3[0] == 255 && out3[0] == 0 && out4[0] == 0,
           "frame 24 (screen space): (20,20) %u (44,44) %u (10,10) %u (52,30) %u", in2[0], in3[0], out3[0], out4[0]);
 
+    /* frames 25-28 (XBA-280): the eDRAM model, float targets, mips, a computed-index vertex fetch */
+    {
+        /* frame 25: a 2_10_10_10 target at eDRAM tile 0x100 (pitch 64), a green quad, resolved to a tiled
+         * 2_10_10_10 texture; the frame is that target (no front buffer resolve) */
+        for (int i = 0; i < 4; i++)
+            reg(0x4400 + (uint32_t)i, fbits(1.0f));
+        reg(0x2000, 64u);                 /* RB_SURFACE_INFO: pitch 64, no MSAA */
+        reg(0x2001, 0x100u | 2u << 16);   /* RB_COLOR_INFO: base 0x100, 2_10_10_10 */
+        reg(0x4800, 0x4000u | 3u);
+        reg(0x4801, 2u | (64u << 2));
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        reg(0x4800, 0x7000u | 3u);
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);
+        reg(0x2318, 0u);                  /* colour 0, no clear, raw */
+        reg(0x2319, 0x30000);
+        reg(0x231A, W | (uint32_t)H << 16);
+        reg(0x231B, 2u | 7u << 7);        /* 8-in-32, 2_10_10_10 */
+        type3(PM4_DRAW_INDX_2, &rect, 1);
+        reg(0x2208, 4);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        c = px(g, W / 2, H / 2);
+        uint32_t t25 = rd32(NULL, 0x30000 + tiled_off(3, 3));
+        CHECK(c[0] == 0 && c[1] == 255 && c[2] == 0 && t25 == 0xC00FFC00u,
+              "frame 25 (2_10_10_10 target at tile 0x100): %u,%u,%u, resolved %08X (want C00FFC00)", c[0], c[1], c[2],
+              t25);
+
+        /* frame 26: a 16_16_16_16_FLOAT target at tile 0x200: red * (2, 1, 1, 1) keeps 2.0, resolved to a tiled
+         * 16_16_16_16_FLOAT texture (8 bytes a texel) */
+        reg(0x2001, 0x200u | 7u << 16);
+        reg(0x4400, fbits(2.0f));
+        reg(0x4800, 0x4080u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        reg(0x4800, 0x7000u | 3u);
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);
+        reg(0x2319, 0x34000);
+        reg(0x231B, 2u | 32u << 7);       /* 8-in-32, 16_16_16_16_FLOAT */
+        type3(PM4_DRAW_INDX_2, &rect, 1);
+        reg(0x2208, 4);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        c = px(g, W / 2, H / 2);
+        uint32_t o26 = tiled_off_log2(9, 4, 3), lo = rd32(NULL, 0x34000 + o26), hi = rd32(NULL, 0x34000 + o26 + 4);
+        CHECK(c[0] == 255 && c[1] == 0 && lo == 0x00004000u && hi == 0x3C000000u,
+              "frame 26 (float target): %u,%u,%u, resolved %08X %08X (want 00004000 3C000000)", c[0], c[1], c[2], lo,
+              hi);
+        reg(0x2001, 0), reg(0x2000, 0), reg(0x4400, fbits(1.0f));
+
+        /* frame 27: mips: a linear 32x32 8_8_8_8 texture (red), its level 1 (16x16, green) and level 2 (8x8,
+         * blue) from the mip address, 4 KB apart (rows of 32 texels); a full-target quad with texture coordinates
+         * 0..8 (repeat) minifies 4x: level 2, blue */
+        for (uint32_t y = 0; y < 32; y++)
+            for (uint32_t x = 0; x < 32; x++) {
+                w32(0x3C000 + y * 128 + x * 4, 0xFF0000FFu);
+                if (x < 16 && y < 16)
+                    w32(0x3D000 + y * 128 + x * 4, 0xFF00FF00u);
+                if (x < 8 && y < 8)
+                    w32(0x3E000 + y * 128 + x * 4, 0xFFFF0000u);
+            }
+        uint32_t nt;
+        uint32_t *pt = load(argv[1], "ps_tex.bin", &nt);
+        CHECK(pt != NULL, "no ps_tex.bin");
+        if (pt) {
+            im[0] = 1, im[1] = nt;
+            memcpy(im + 2, pt, 4 * nt);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nt);
+            free(pt);
+        }
+        vertex(0x7A00, -1, -1, 0, 0, 0);
+        vertex(0x7A20, 1, -1, 8, 0, 0);
+        vertex(0x7A40, -1, 1, 0, 8, 0);
+        vertex(0x7A60, 1, 1, 8, 8, 0);
+        reg(0x4800, 0x7A00u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        uint32_t mfc[6] = {2u | 1u << 22, 6u | 2u << 6 | 0x3C000u, 31u | 31u << 13, sw_id << 1, 2u << 6,
+                           1u << 9 | 0x3D000u};
+        for (int i = 0; i < 6; i++)
+            reg(0x480C + (uint32_t)i, mfc[i]);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        c = px(g, W / 2, H / 2);
+        /* at an internal resolution of 2 (XENOS_DRAW_SCALE) a host pixel covers half as many texels: level 1, at 3
+         * or more level 0 -- the finer mips upscaling is for */
+        int want_level = scale == 1 ? 2 : scale == 2 ? 1 : 0;
+        CHECK(c[0] == (want_level == 0 ? 255 : 0) && c[1] == (want_level == 1 ? 255 : 0) &&
+                  c[2] == (want_level == 2 ? 255 : 0),
+              "frame 27 (mip level %d): %u,%u,%u", want_level, c[0], c[1], c[2]);
+
+        /* frame 28: vs_inst: positions at the vertex index, colours from fetch constant 1 at r0.x * 0.5 (vertices
+         * 0, 1 -> green, 2, 3 -> red): the bottom edge green, the top red */
+        uint32_t ni;
+        uint32_t *pi = load(argv[1], "vs_inst.bin", &ni);
+        CHECK(pi != NULL, "no vs_inst.bin");
+        if (pi) {
+            im[0] = 0, im[1] = ni;
+            memcpy(im + 2, pi, 4 * ni);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ni);
+            free(pi);
+        }
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        static const float pos[4][4] = {{-1, -1, 0.5f, 1}, {1, -1, 0.5f, 1}, {-1, 1, 0.5f, 1}, {1, 1, 0.5f, 1}};
+        static const float col[2][4] = {{0, 1, 0, 1}, {1, 0, 0, 1}};
+        for (int v = 0; v < 4; v++)
+            for (int i = 0; i < 4; i++)
+                w32(0x7A80 + 16 * (uint32_t)v + 4 * (uint32_t)i, fbits(pos[v][i]));
+        for (int v = 0; v < 2; v++)
+            for (int i = 0; i < 4; i++)
+                w32(0x7B00 + 16 * (uint32_t)v + 4 * (uint32_t)i, fbits(col[v][i]));
+        reg(0x4800, 0x7A80u | 3u);
+        reg(0x4801, 2u | (16u << 2));
+        reg(0x4802, 0x7B00u | 3u);
+        reg(0x4803, 2u | (8u << 2));
+        for (int i = 0; i < 4; i++)
+            reg(0x4000 + (uint32_t)i, fbits(0.5f)); /* vertex c0 */
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        const uint8_t *top28 = px(g, W / 2, 1), *bot28 = px(g, W / 2, H - 2);
+        CHECK(top28[0] > 200 && top28[1] < 50 && bot28[1] > 200 && bot28[0] < 50,
+              "frame 28 (computed index): top %u,%u,%u bottom %u,%u,%u", top28[0], top28[1], top28[2], bot28[0],
+              bot28[1], bot28[2]);
+        im[0] = 0, im[1] = nvs;
+        memcpy(im + 2, vs, 4 * nvs);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nvs);
+        run(&cp);
+    }
+
     /* two PPM frames of 64x64 (header + RGB), not a third */
     char fp[1200];
     struct stat sb;
@@ -716,10 +862,14 @@ int main(int argc, char **argv)
 
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 28 && st.frames == 25 && st.resolves == 2 && st.no_shader == 0 && st.unsupported == 0 &&
-              st.unsupported_textures == 0,
-          "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
-          (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
+    CHECK(st.drawn == 32 && st.frames == 29 && st.resolves == 4 && st.no_shader == 0 && st.unsupported == 0 &&
+              st.unsupported_textures == 0 && st.computed_fetches >= 1 && st.mipmapped >= 1 && st.surfaces >= 4 &&
+              st.copy_textures >= 1,
+          "stats: drawn %llu frames %llu no shader %llu unsupported %llu computed %llu mipmapped %llu surfaces %llu "
+          "copies %llu", (unsigned long long)st.drawn, (unsigned long long)st.frames,
+          (unsigned long long)st.no_shader, (unsigned long long)st.unsupported,
+          (unsigned long long)st.computed_fetches, (unsigned long long)st.mipmapped,
+          (unsigned long long)st.surfaces, (unsigned long long)st.copy_textures);
     xenos_gl_destroy(g);
     free(pst);
     free(vs);
@@ -728,6 +878,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: 25 frames drawn and read back as expected, two resolves\n");
+    printf("xenos_gl: 29 frames drawn and read back as expected, four resolves\n");
     return 0;
 }

@@ -55,10 +55,30 @@ typedef struct xenos_gl_stats {
     uint64_t unsupported_textures; /* texture bindings left empty: format / dimension not handled yet */
     uint64_t resolves;             /* render target copies written to guest memory */
     uint64_t front_buffer_frames;  /* frames taken from the front buffer VdSwap named (a resolve wrote it) */
+    uint64_t surfaces;             /* eDRAM surfaces made (host render targets) */
+    uint64_t copy_textures;        /* textures sampled from a resolve's host picture (no trip through memory) */
+    uint64_t mipmapped;            /* textures uploaded with mip levels */
+    uint64_t computed_fetches;     /* vertex buffers fetched at a computed index (instancing) */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */
 xenos_gl *xenos_gl_create(const char *cache_dir, int width, int height, char *why, size_t why_n);
+/* the same at an internal resolution: every eDRAM surface scale (1-8) x its guest size, resolves and frames read
+ * back at the guest size */
+xenos_gl *xenos_gl_create_scaled(const char *cache_dir, int width, int height, int scale, char *why, size_t why_n);
+/* on the caller's current GLES 3 context (a window's: host_window), no EGL of our own; readback off (the frame is
+ * xenos_gl_frame_texture's). The caller keeps the context current on the thread that runs the machine and restores
+ * what its own drawing needs after the guest's frames (framebuffer 0, viewport, blend / depth / scissor off). */
+xenos_gl *xenos_gl_attach(const char *cache_dir, int width, int height, int scale, char *why, size_t why_n);
+/* the last swap's picture as a GL texture of *width x *height host pixels, top row first, with the front buffer's
+ * swizzle as its texture swizzle (0 before the first frame) */
+unsigned xenos_gl_frame_texture(const xenos_gl *g, int *width, int *height);
+/* read each swap's frame back into memory (xenos_gl_frame, PPM frames): on by default with xenos_gl_create */
+void xenos_gl_set_readback(xenos_gl *g, int on);
+int xenos_gl_scale(const xenos_gl *g);
+/* after a save state loads: the eDRAM is not in states (as the GameCube's EFB), surfaces start clear and the resolve
+ * copies go (frames come from memory again until the title resolves) */
+void xenos_gl_reset(xenos_gl *g);
 void xenos_gl_destroy(xenos_gl *g);
 /* hooks for xenos_cp (draw / swap) */
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d);
