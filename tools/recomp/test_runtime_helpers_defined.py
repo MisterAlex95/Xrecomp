@@ -60,7 +60,7 @@ class RuntimeHelpersDefinedTest(unittest.TestCase):
         self.assertIn("typedef union RecompXmm", runtime)
         # The storage is a member of the per-thread g_cpu block.
         self.assertIn("RecompXmm r_xmm0,", runtime)
-        self.assertIn("#define g_xmm0            g_cpu.r_xmm0", runtime)
+        self.assertIn("#define g_xmm0            RECOMP_CPU_REF.r_xmm0", runtime)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,12 @@
  * is run `reps` times; the best wall time of the runs is reported, with the
  * checksum (eax) the build must agree on with every other build.
  *
- * Output, one line per workload: `name va n checksum best_ns`. */
+ * Output, one line per workload: `name va n checksum best_ns`.
+ *
+ * XBA_BENCH_FCW=0x007F (environment) runs the x87 workloads with that control
+ * word: precision control 24 (bits 8-9 clear), what Xbox titles run with,
+ * every x87 result rounded to float (recomp_fp_round24); the default 0x037F
+ * leaves them in double. */
 
 #define _GNU_SOURCE
 #include <stdint.h>
@@ -98,6 +103,8 @@ int bench_run(recomp_func_t (*lookup)(uint32_t), int (*dispatch_init)(void),
     g_xbox_code_hi = BENCH_IMAGE_VA + (uint32_t)image_len;
     if (dispatch_init)
         dispatch_init();
+    if (getenv("XBA_BENCH_FCW"))
+        g_fp_control_word = (uint16_t)strtoul(getenv("XBA_BENCH_FCW"), NULL, 0);
     for (i = 0; i < sizeof wl / sizeof wl[0]; i++) {
         recomp_func_t fn = lookup(wl[i].va);
         uint32_t n = (uint32_t)(wl[i].n * scale), sum = 0;

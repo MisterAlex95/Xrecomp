@@ -970,6 +970,7 @@ static DWORD WINAPI bridge_resume_main(LPVOID param)
     else
         xbox_SehSetGuestStack(r.stack_base - XBOX_THREAD_STACK_SIZE, r.stack_base);
     g_fs_base = r.tib;
+    recomp_cpu_slot_check();
     g_thread_obj_va = r.kthread;
     xbox_DpcMarkGuestThread();
     xbox_GuestThreadPin(r.is_main ? "guest-main" : "guest-worker");

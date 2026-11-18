@@ -597,6 +597,31 @@ the NDK's clang. The embedded clang is a plain build of LLVM 19 (the NDK's is PG
 count **8–10 min**. With 2 jobs (the 1.5 GB formula on a 12 GB device) it would be 15–20 min. The largest file alone
 takes ~1 min on a middle core; it starts first. To be measured on the device (« Device » check list).
 
+**The lifted code's speed in a pack (XBA-273).** A pack is a dlopened library and `g_cpu` belongs to libmain.so, so
+bionic gives the lifted code no static TLS. Every lifted function used to begin with a TLS descriptor call into the
+dynamic resolver. Now the generated code reads `g_cpu`'s address from bionic's `TLS_SLOT_APP` (`RECOMP_CPU_SLOT` in
+`recomp_types.h`, which says why this is safe for packs). x87 at precision control 24 tests the float range on the
+bits, and fist/frndint round with one `frintn`. Executed instructions (`python -m tools.bench icount`, scale 0.1, w_fib
+at 0.99), main -> XBA-273, with identical checksums:
+- arm64 is NDK clang 19 against an aarch64 glibc sysroot under qemu, in the shared layout, with
+  `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=0`. That puts the runtime's TLS in glibc's dynamic path, as a proxy
+  for bionic's.
+- x86-64 is the executable layout, under qemu.
+- PC=24 means `XBA_BENCH_FCW=0x007F`.
+
+| Workload | arm64 pack layout | x86-64 |
+|---|---|---|
+| w_icall (indirect calls to leaves) | 16.30M -> 11.10M (-32 %) | unchanged |
+| w_vcall (calls into a function that makes an indirect call) | 32.70M -> 22.90M (-30 %) | unchanged |
+| w_fib (recursive calls) | 11.40M -> 7.80M (-32 %) | unchanged |
+| w_bytes | 3.52M -> 3.36M (-5 %) | unchanged |
+| w_x87 at PC=24 | 11.89M -> 8.57M (-28 %) | 13.65M -> 8.52M (-38 %) |
+| w_x87 (PC=64), w_int, w_mem, w_rep, w_sse | unchanged | unchanged (w_x87 -1 %) |
+
+The call-heavy workloads now run fewer instructions in the pack layout than the arm64 executable did: 12.30M, 24.70M
+and 8.40M. The generated C is unchanged, but `recomp_types.h` changed, so every pack is stale and has to be prepared
+again.
+
 **Where a Prepare spends its time (XBA-209).** A title-size synthetic title of our own: `tools.bench lift --copies
 3000` (the bench corpus 3000 times: 39,013 functions, 2.3 MB of code, 96 MB of C), `tools.prepare --android` with
 NDK r28c clang 19 as the stand-in for the embedded clang, `--jobs 5` in a container limited to 5 CPUs of the x86-64

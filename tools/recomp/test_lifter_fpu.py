@@ -113,9 +113,9 @@ class FpuLifterTest(unittest.TestCase):
         # names from the runtime header and must not declare them itself.
         self.assertIn("extern RECOMP_TLS RecompCpu g_cpu;", runtime_types)
         self.assertIn("    double r_fp_stack[8];", runtime_types)
-        self.assertIn("#define g_fp_stack        g_cpu.r_fp_stack", runtime_types)
-        self.assertIn("#define g_fp_top          g_cpu.r_fp_top", runtime_types)
-        self.assertIn("#define g_fp_control_word g_cpu.r_fp_control_word",
+        self.assertIn("#define g_fp_stack        RECOMP_CPU_REF.r_fp_stack", runtime_types)
+        self.assertIn("#define g_fp_top          RECOMP_CPU_REF.r_fp_top", runtime_types)
+        self.assertIn("#define g_fp_control_word RECOMP_CPU_REF.r_fp_control_word",
                       runtime_types)
         self.assertIn("#define SMEM64(addr)", runtime_types)
         self.assertIn("#define RECOMP_PARITY8(x)", runtime_types)
