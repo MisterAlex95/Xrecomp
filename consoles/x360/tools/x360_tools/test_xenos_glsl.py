@@ -379,7 +379,7 @@ def test_translation_shape():
     src_, info = translate(to_words(make_case(rng)), "vertex")
     assert src_.startswith("#version 300 es") and "xe_i3 = vec4(0.0);" in src_ and info["outputs"] == [0, 1, 2, 3]
     with pytest.raises(Unsupported):
-        translate(program([(2, [("fetch", fetch_words(17, 0, 1, 0o3210, 0))], {})]), "pixel")  # getCompTexLOD
+        translate(program([(2, [("fetch", fetch_words(2, 0, 1, 0o3210, 0))], {})]), "pixel")  # no such fetch opcode
     with pytest.raises(Unsupported):
         translate(to_words([dict(vop=2, vdest=32, vmask=0xF, export=1)]), "vertex")  # memory export
 
@@ -597,3 +597,97 @@ def test_memexport_against_mesa(tmp_path):
     assert "error" not in r.stdout, r.stdout + r.stderr
     for n, (name, _, _, want) in enumerate(MEMEXPORT_CASES):
         assert got.get(n) == sorted(want), (name, got.get(n), sorted(want))
+
+
+# ---- texture queries (XBA-296) ----
+
+def _query_ref(op, dim, size, modes, base, dx, dy, x, y, ins, scale):
+    """the reference for one pixel: the instruction's description, written apart from the translator"""
+    c = [base[i] + dx[i] * x + dy[i] * y for i in range(4)]
+    if op == 18:
+        return [dx[0] * scale, dy[0] * scale, dx[1] * scale, dy[1] * scale]
+    n = {0: 1, 1: 2, 2: 3, 3: 2}[dim]
+    norm = not ins["unnormalized"] or dim == 3
+    k = [size[i] if norm else 1.0 for i in range(3)]
+    u = [c[i] * k[i] if i < n else 0.0 for i in range(3)]
+    gx = [dx[i] * k[i] * scale if i < n else 0.0 for i in range(3)]
+    gy = [dy[i] * k[i] * scale if i < n else 0.0 for i in range(3)]
+    r = max(sum(v * v for v in gx), sum(v * v for v in gy))
+    lod = 0.5 * math.log2(r) if r > 0 else -FLT_MAX
+    if op == 17:
+        return [lod, 0.0, 0.0, 0.0]
+    offs = [ins["ox"] * 0.5, ins["oy"] * 0.5, ins["oz"] * 0.5] if dim != 3 else [0.0] * 3
+    offs = [offs[i] if i < n else 0.0 for i in range(3)]
+    if op == 16:
+        if dim == 3:
+            return [0.0] * 4
+        inside = 1.0
+        for i in range(n):
+            m = (modes >> (2 * i)) & 3
+            if not m:
+                continue
+            v = abs(u[i] + offs[i]) if m == 2 else u[i] + offs[i]
+            t = v - 0.5
+            j = math.floor(t)
+            f = t - j
+            inside *= (1.0 - f if 0 <= j < size[i] else 0.0) + (f if 0 <= j + 1 < size[i] else 0.0)
+        return [1.0 - inside, 0.0, 0.0, 0.0]
+    w = [(u[i] + offs[i] - 0.5 + 1.5 / 1024) % 1.0 if i < n else 0.0 for i in range(3)]
+    level = max(lod + ins["lod_bias"] / 16.0, 0.0)
+    return w + [level - math.floor(level)]
+
+
+def _query_close(got, want):
+    """fract wraps at 1: 0.9999 and 0.0001 are neighbours"""
+    return abs(got - want) <= 5e-4 or abs(abs(got - want) - 1.0) <= 5e-4
+
+
+def test_query_translation():
+    for op in (16, 17, 18, 19):
+        words = program([(2, [("fetch", fetch_words(op, 0, 1, 0o3210, 3, dimension=1)), A(**export(0, 1))], {})])
+        for stage in ("pixel", "vertex"):
+            src_, info = translate(words, stage, interpolators=1)
+            assert ("dFdx" in src_.split("void main")[1]) == (stage == "pixel" and op in (17, 18, 19))
+            assert info["tqueries"] == ([] if op == 18 else [3])
+
+
+@pytest.mark.skipif(not os.path.isfile(RUN), reason="$XENOS_GLSL_RUN not set (tests/run_glsl_mesa.sh sets it)")
+def test_queries_against_mesa(tmp_path):
+    rng = random.Random(2960)
+    cases = []
+    for n in range(240):
+        op, dim = rng.choice((16, 17, 18, 19)), rng.randrange(4)
+        ins = dict(unnormalized=rng.getrandbits(1), ox=rng.randrange(-8, 8), oy=rng.randrange(-8, 8),
+                   oz=rng.randrange(-8, 8), lod_bias=rng.randrange(-32, 32))
+        scale = rng.choice((1.0, 2.0, 4.0))
+        size = [float(rng.choice((4, 8, 16, 64))) for _ in range(3)]
+        modes = rng.randrange(64)
+        base = [rng.uniform(-2.0, 2.0) for _ in range(4)]
+        dx = [rng.choice((0.0, 0.125, -0.25, 0.0625, 1.5)) for _ in range(4)]
+        dy = [rng.choice((0.0, 0.25, -0.125, 0.03125, 2.0)) for _ in range(4)]
+        words = program([(2, [("fetch", fetch_words(op, 0, 1, 0o3210, 5, dimension=dim, **ins)),
+                              A(**export(0, 1))], {})])
+        src_, _ = translate(words, "pixel", interpolators=1)
+        (tmp_path / ("%d.frag" % n)).write_text(src_)
+        (tmp_path / ("%d.in" % n)).write_bytes(consts_blob([[0.0] * 4] * 256, 0, [base, dx, dy]))
+        tq = [[0.0] * 4 for _ in range(32)]
+        tq[5] = size + [float(modes)]
+        pg = [-1.0, 0.0, 1.0 / scale, 1.0 / scale]
+        (tmp_path / ("%d.grid" % n)).write_bytes(b"".join(struct.pack("<4f", *v) for v in tq + [pg]))
+        cases.append((n, op, dim, size, modes, base, dx, dy, ins, scale))
+    r = subprocess.run([RUN, str(tmp_path)], capture_output=True, text=True, timeout=600)
+    if r.returncode == 77:
+        pytest.skip(r.stderr.strip())
+    assert r.returncode == 0, r.stderr
+    got = {int(p[0]): p[2:] for p in (ln.split() for ln in r.stdout.splitlines()) if len(p) > 2 and p[1] == "grid"}
+    bad = []
+    for n, op, dim, size, modes, base, dx, dy, ins, scale in cases:
+        assert n in got, r.stdout[:800]
+        vals = [struct.unpack("<f", struct.pack("<I", int(h, 16)))[0] for h in got[n]]
+        for y in range(4):
+            for x in range(4):
+                want = _query_ref(op, dim, size, modes, base, dx, dy, x, y, ins, scale)
+                have = vals[4 * (4 * y + x):4 * (4 * y + x) + 4]
+                if not all(_query_close(h, w) for h, w in zip(have, want)):
+                    bad.append((n, op, dim, (x, y), have, want))
+    assert not bad, "%d pixels differ: %s" % (len(bad), bad[:6])

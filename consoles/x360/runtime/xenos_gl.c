@@ -231,6 +231,9 @@ typedef struct program {
     int nsamplers;
     uint32_t sampler_fetch[MAX_SAMPLERS], sampler_dim[MAX_SAMPLERS]; /* texture fetch constant, dimension */
     int memexport;    /* XBA-282: the vertex shader exports to memory (GLSL ES 3.10, the log buffer at binding 0) */
+    int ntq;          /* XBA-296: texture queries: the fetch constants whose size / border modes xe_tq<k> carries */
+    uint32_t tq_fetch[MAX_SAMPLERS];
+    GLint tq_loc[MAX_SAMPLERS];
 } program;
 
 /* a texture as last uploaded: its fetch constant's words (address, format, size, layout) and the source's hash */
@@ -723,7 +726,7 @@ static char *slurp(const char *path)
 }
 
 /* the translator version the cache must have been made with (x360_tools.xenos_glsl GLSL_VERSION) */
-#define XENOS_GLSL_STAMP "// xenos_glsl 2\n"
+#define XENOS_GLSL_STAMP "// xenos_glsl 3\n"
 
 static void report_missing(xenos_gl *g, int pixel, uint32_t crc)
 {
@@ -771,6 +774,20 @@ static void parse_samplers(const char *src, program *p)
                 p->sampler_dim[p->nsamplers++] = kind == 0 ? 1 : kind == 1 ? 2 : 3;
             }
         }
+    }
+}
+
+/* "uniform highp vec4 xe_tqK;" lines of both stages: the fetch constants the texture queries read (XBA-296) */
+static void parse_tqueries(const char *src, program *p)
+{
+    static const char pat[] = "uniform highp vec4 xe_tq";
+    for (const char *s = strstr(src, pat); s && p->ntq < MAX_SAMPLERS; s = strstr(s + 1, pat)) {
+        uint32_t k = (uint32_t)atoi(s + sizeof pat - 1);
+        int seen = 0;
+        for (int i = 0; i < p->ntq; i++)
+            seen |= p->tq_fetch[i] == k;
+        if (!seen)
+            p->tq_fetch[p->ntq++] = k;
     }
 }
 
@@ -909,11 +926,19 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
                         p->loc[i] = g->glGetAttribLocation(p->prog, an);
                     }
                 }
-                if (vsrc)
+                if (vsrc) {
                     parse_samplers(vsrc, p);
+                    parse_tqueries(vsrc, p);
+                }
                 if (psrc) {
                     parse_samplers(psrc, p);
+                    parse_tqueries(psrc, p);
                     p->outputs = parse_outputs(psrc);
+                }
+                for (int i = 0; i < p->ntq; i++) {
+                    char un[16];
+                    snprintf(un, sizeof un, "xe_tq%u", p->tq_fetch[i]);
+                    p->tq_loc[i] = g->glGetUniformLocation(p->prog, un);
                 }
                 g->glUseProgram(p->prog);
                 for (int i = 0; i < p->nvb; i++) {
@@ -2097,8 +2122,29 @@ static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mi
     }
 }
 
+/* what the texture queries read of a fetch constant (XBA-296): the guest size, and two bits an axis for its border
+ * mode: 1 clamp to border (clamp mode 6), 2 mirror then clamp to border (7), 0 for the others */
+static void set_tquery(xenos_gl *g, GLint loc, const uint32_t *fc)
+{
+    uint32_t dim = (fc[5] >> 9) & 3, w, h = 1, d = 1, modes = 0;
+    if (dim == 0)
+        w = (fc[2] & 0xFFFFFF) + 1;
+    else if (dim == 2)
+        w = (fc[2] & 0x7FF) + 1, h = ((fc[2] >> 11) & 0x7FF) + 1, d = ((fc[2] >> 22) & 0x3FF) + 1;
+    else
+        w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
+    for (int axis = 0; axis < 3; axis++) {
+        uint32_t c = (fc[0] >> (10 + 3 * axis)) & 7;
+        modes |= (c == 6 ? 1u : c == 7 ? 2u : 0u) << (2 * axis);
+    }
+    g->glUniform4f(loc, (GLfloat)w, (GLfloat)h, (GLfloat)d, (GLfloat)modes);
+}
+
 static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
 {
+    for (int i = 0; i < p->ntq; i++)
+        if (p->tq_loc[i] >= 0)
+            set_tquery(g, p->tq_loc[i], &cp->regs[0x4800 + 6 * (p->tq_fetch[i] & 31)]);
     for (int i = 0; i < p->nsamplers; i++) {
         uint32_t k = p->sampler_fetch[i], dim = p->sampler_dim[i];
         GLenum target = dim == 2 ? GL_TEXTURE_3D : dim == 3 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;

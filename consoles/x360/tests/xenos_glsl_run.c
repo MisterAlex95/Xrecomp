@@ -13,6 +13,10 @@
  * - DIR/N.frag runs behind a vertex shader that passes the 16 vec4 as interpolators xe_i0..15 on one point covering
  *   a 1x1 RGBA32F target cleared to a sentinel; prints "N frag" and the 4 hex words of xe_color0, or "N frag killed"
  *   when the target kept the sentinel (discard).
+ * - DIR/N.grid (XBA-296; with N.frag) runs the pixel shader over a 4x4 RGBA32F target instead: interpolator 0 is
+ *   attribute 0 + attribute 1 * x + attribute 2 * y at pixel (x, y) counted from 0 at the centre of the first pixel, the
+ *   others are constant. N.grid holds 33 vec4: xe_tq0..31, then the block's pg (its z: the inverse resolution scale).
+ *   Prints "N grid" and 16 x 4 hex words, row by row (the texture queries need derivatives that vary).
  * A shader that fails prints "N error" and the log. Stops at the first N with neither file. */
 #define _GNU_SOURCE
 #include <EGL/egl.h>
@@ -115,6 +119,77 @@ static GLuint bind_constants(GLuint p, const uint8_t *in)
         }
     }
     return ubo;
+}
+
+/* a pixel shader over a 4x4 float target, its interpolator 0 varying linearly (see the header) */
+static void run_grid(const char *dir, int n, const char *src, const float *grid)
+{
+    uint8_t *in = read_in(dir, n);
+    if (!in)
+        return;
+    static const char vs_src[] =
+        "#version 300 es\n"
+        "uniform highp vec4 g0, gx, gy;\n"
+        "out vec4 xe_i0, xe_i1, xe_i2, xe_i3, xe_i4, xe_i5, xe_i6, xe_i7, xe_i8, xe_i9, xe_i10, xe_i11, xe_i12, "
+        "xe_i13, xe_i14, xe_i15;\n"
+        "void main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0;\n"
+        " vec2 t = (p + 1.0) * 2.0 - 0.5; xe_i0 = g0 + gx * t.x + gy * t.y;\n"
+        " xe_i1 = xe_i2 = xe_i3 = xe_i4 = xe_i5 = xe_i6 = xe_i7 = xe_i8 = xe_i9 = xe_i10 = xe_i11 = xe_i12 = xe_i13 = "
+        "xe_i14 = xe_i15 = vec4(0.0);\n gl_Position = vec4(p, 0.0, 1.0); }\n";
+    GLuint vs = shader(GL_VERTEX_SHADER, vs_src, n), fs = shader(GL_FRAGMENT_SHADER, src, n);
+    if (!vs || !fs) {
+        free(in);
+        return;
+    }
+    GLuint p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    if (!link(p, n)) {
+        free(in);
+        return;
+    }
+    glUseProgram(p);
+    GLuint ubo = bind_constants(p, in);
+    /* the block's pg, as the renderer sets it for this internal resolution */
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+    glBufferSubData(GL_UNIFORM_BUFFER, 4096 + 32 + 128 + 16, 16, grid + 4 * 32);
+    const GLfloat *attr = (const GLfloat *)(in + 4096 + 32);
+    glUniform4fv(glGetUniformLocation(p, "g0"), 1, attr);
+    glUniform4fv(glGetUniformLocation(p, "gx"), 1, attr + 4);
+    glUniform4fv(glGetUniformLocation(p, "gy"), 1, attr + 8);
+    for (int k = 0; k < 32; k++) {
+        char un[16];
+        snprintf(un, sizeof un, "xe_tq%d", k);
+        GLint l = glGetUniformLocation(p, un);
+        if (l >= 0)
+            glUniform4fv(l, 1, grid + 4 * k);
+    }
+    GLuint tex, fbo, vao;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, 4, 4);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glViewport(0, 0, 4, 4);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    uint32_t px[16 * 4];
+    glReadPixels(0, 0, 4, 4, GL_RGBA, GL_FLOAT, px);
+    printf("%d grid", n);
+    for (int i = 0; i < 16 * 4; i++)
+        printf(" %08x", px[i]);
+    printf("\n");
+    glBindVertexArray(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    glDeleteBuffers(1, &ubo);
+    glDeleteProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    free(in);
 }
 
 static void run_vertex(const char *dir, int n, const char *src)
@@ -343,8 +418,14 @@ int main(int argc, char **argv)
             break;
         if (v)
             run_vertex(argv[1], n, v);
-        if (f)
+        snprintf(path, sizeof path, "%s/%d.grid", argv[1], n);
+        size_t grid_len = 0;
+        char *grid = slurp(path, &grid_len);
+        if (f && grid && grid_len >= 33 * 16 && ffbo)
+            run_grid(argv[1], n, f, (const float *)grid);
+        else if (f)
             run_fragment(argv[1], n, f, ffbo);
+        free(grid);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         free(v);
         free(f);
