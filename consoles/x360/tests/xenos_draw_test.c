@@ -26,7 +26,9 @@
  *   frames 16-17: packed vertex colours: 16_16_16_16 normalised (65535, 0, 32768, 65535) and 16_16_16_16_FLOAT
  *            (0, 1, 0.5, 1), X in each dword's low half;
  *   frame 18: the pixel parameters (SQ_PROGRAM_CNTL param_gen, SQ_CONTEXT_MISC register 1): ps_pos writes
- *            r1 * (1/64, 1/64, 0, 1), so a pixel's red / green are its x / y from the top-left, times 4.
+ *            r1 * (1/64, 1/64, 0, 1), so a pixel's red / green are its x / y from the top-left, times 4;
+ *   frame 19: VGT_INDX_OFFSET 4 shifts the indices 0..3 of a strip onto the red quad's vertices 4..7 of the
+ *            depth frame's buffer, and a strip cut by the reset index (two triangles of a quad, then a restart).
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -539,9 +541,33 @@ int main(int argc, char **argv)
         }
     }
 
+    /* frame 19: the index offset and the primitive reset index */
+    im[0] = 1, im[1] = nps;
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    reg(0x4800, 0x4000u | 3u);
+    reg(0x4801, 2u | (64u << 2));
+    for (int i = 0; i < 4; i++)
+        reg(0x4400 + i, fbits(1.0f));                  /* pixel c0 back to 1 */
+    reg(0x2102, 4);                                    /* VGT_INDX_OFFSET: vertices 4..7 (the red quad) */
+    static const uint16_t sidx[6] = {0, 1, 2, 3, 0xFFFF, 0};
+    for (int i = 0; i < 6; i++)
+        mem[0x7400 + 2 * i] = (uint8_t)(sidx[i] >> 8), mem[0x7400 + 2 * i + 1] = (uint8_t)sidx[i];
+    reg(0x2103, 0xFFFF);                               /* the reset index */
+    reg(0x2205, 1u << 21);                             /* multi_prim_ib_ena */
+    uint32_t sdr[3] = {6u | 0u << 6 | 6u << 16, 0x7400, 3u | 1u << 30}; /* strip, DMA, 16-bit, 8-in-16 */
+    type3(PM4_DRAW_INDX_2, sdr, 3);
+    reg(0x2102, 0);
+    reg(0x2205, 0);
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    const uint8_t *s0 = px(g, 1, 1), *s1 = px(g, W - 2, H - 2);
+    CHECK(s0[0] == 255 && s0[1] == 0 && s1[0] == 255, "frame 19 (index offset, restart): %u,%u,%u %u,%u,%u", s0[0],
+          s0[1], s0[2], s1[0], s1[1], s1[2]);
+
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 22 && st.frames == 19 && st.resolves == 1 && st.no_shader == 0 && st.unsupported == 0 &&
+    CHECK(st.drawn == 23 && st.frames == 20 && st.resolves == 1 && st.no_shader == 0 && st.unsupported == 0 &&
               st.unsupported_textures == 0,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
           (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
@@ -553,6 +579,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: nineteen frames drawn and read back as expected, one resolve\n");
+    printf("xenos_gl: twenty frames drawn and read back as expected, one resolve\n");
     return 0;
 }

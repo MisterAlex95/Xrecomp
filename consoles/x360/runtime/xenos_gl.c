@@ -81,6 +81,7 @@ typedef unsigned int EGLBoolean, EGLenum;
 #define GL_INTERLEAVED_ATTRIBS 0x8C8C
 #define GL_RASTERIZER_DISCARD 0x8C89
 #define GL_MAP_READ_BIT 0x0001
+#define GL_PRIMITIVE_RESTART_FIXED_INDEX 0x8D69
 
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
 #define EGL_RENDERABLE_TYPE 0x3040
@@ -1290,7 +1291,13 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     } else if (d->prim_type == 13) {
         n *= 4; /* whole quads */
     }
-    if (d->source_select == 0) {
+    /* VGT_INDX_OFFSET is added to every index (Direct3D's base vertex); with PA_SU_SC_MODE_CNTL's
+     * multi_prim_ib_ena, VGT_MULTI_PRIM_IB_RESET_INDX restarts a strip / fan (GL's fixed restart index) */
+    uint32_t index_offset = cp->regs[0x2102];
+    int restart = d->source_select == 0 && (cp->regs[0x2205] >> 21) & 1;
+    uint32_t reset_index = cp->regs[0x2103] & (d->index_size ? 0xFFFFFFFFu : 0xFFFFu);
+    int restarted = 0;
+    if (d->source_select == 0 || index_offset) {
         idx = malloc(4 * (size_t)n);
         if (!idx)
             return;
@@ -1298,12 +1305,20 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         max_index = 0;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t v;
-            if (d->index_size) {
+            if (d->source_select != 0) {
+                v = i;
+            } else if (d->index_size) {
                 v = gpu_read(cp, d->dma_base + 4 * i, endian);
             } else {
                 uint32_t w = gpu_read(cp, d->dma_base + 4 * (i / 2), endian);
                 v = (w >> (16 * (i & 1))) & 0xFFFF;
             }
+            if (restart && v == reset_index) {
+                idx[i] = 0xFFFFFFFFu;
+                restarted = 1;
+                continue;
+            }
+            v = (v + index_offset) & 0xFFFFFF; /* 24-bit vertex indices */
             idx[i] = v;
             if (v > max_index)
                 max_index = v;
@@ -1369,7 +1384,11 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     } else if (idx) {
         g->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g->ibo);
         g->glBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * (GLsizeiptr)n, idx, GL_STREAM_DRAW);
+        if (restarted)
+            g->glEnable(GL_PRIMITIVE_RESTART_FIXED_INDEX);
         g->glDrawElements((GLenum)prim, (GLsizei)n, GL_UNSIGNED_INT, NULL);
+        if (restarted)
+            g->glDisable(GL_PRIMITIVE_RESTART_FIXED_INDEX);
     } else {
         g->glDrawArrays((GLenum)prim, 0, (GLsizei)n);
     }
