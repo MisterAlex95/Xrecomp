@@ -225,6 +225,12 @@ X360_FILE_CALLS(X360_DECLARE_FILE_CALL)
     Y(VdShutdownEngines, VdNop0) Y(VdRetrainEDRAM, VdNop0) Y(VdRetrainEDRAMWorker, VdNop0)                           \
     Y(VdEnableDisableClockGating, VdNop0) Y(VdSetDisplayMode, VdNop0) Y(VdCallGraphicsNotificationRoutines, VdNop0)
 X360_GPU_CALLS(X360_DECLARE_FILE_CALL)
+/* x360_crypt.c: the general-purpose crypto exports */
+#define X360_CRYPT_CALLS(X)                                                                                            \
+    X(XeCryptShaInit) X(XeCryptShaUpdate) X(XeCryptShaFinal) X(XeCryptSha) X(XeCryptSha256Init)                       \
+    X(XeCryptSha256Update) X(XeCryptSha256Final) X(XeCryptHmacSha) X(XeCryptRc4Key) X(XeCryptRc4Ecb) X(XeCryptRc4)    \
+    X(XeCryptRandom)
+X360_CRYPT_CALLS(X360_DECLARE_FILE_CALL)
 void x360_k_VdNop0(x360_machine *x, x360_thread *t, xe_cpu *c);
 int x360_gpu_init(x360_machine *x);
 void x360_gpu_free(x360_machine *x);

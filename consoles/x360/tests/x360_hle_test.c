@@ -186,6 +186,8 @@ static void test_threads_and_time(void)
         return;
     CHECK(t1->cpu.gpr[13] == t1->pcr && x360_r32(X, t1->pcr + 0x100) == t1->kthread, "r13 is its PCR");
     uint32_t th = x360_r32(X, hp), prev = x360_kalloc(X, 4);
+    K(X360_xboxkrnl_KeSetAffinityThread, 3, t1->kthread, 0x10, prev);
+    CHECK(x360_r8(X, t1->pcr + 0x10C) == 4 && x360_r8(X, t1->kthread + 0xBF) == 4, "affinity: hardware thread 4");
     CHECK(K(X360_xboxkrnl_NtSuspendThread, 2, th, prev) == 0 && t1->state == TH_SUSPENDED, "suspend");
     CHECK(K(X360_xboxkrnl_NtResumeThread, 2, th, prev) == 0 && x360_r32(X, prev) == 1 && t1->state == TH_READY,
           "resume");
@@ -342,6 +344,48 @@ static void test_gpu(void)
           "vblanks: %d callbacks, threads %d -> %d", fired, nthreads, X->nthreads);
 }
 
+static void hex(const uint8_t *p, int n, char *out)
+{
+    for (int i = 0; i < n; i++)
+        sprintf(out + 2 * i, "%02x", p[i]);
+}
+
+static void test_crypt(void)
+{
+    char h[80];
+    uint32_t buf = x360_kalloc(X, 0x400), st = buf + 0x100, out = buf + 0x200;
+    memcpy(X->base + buf, "abc", 3);
+    K(X360_xboxkrnl_XeCryptSha, 8, buf, 3, 0, 0, 0, 0, out, 20);
+    hex(X->base + out, 20, h);
+    CHECK(!strcmp(h, "a9993e364706816aba3e25717850c26c9cd0d89d"), "SHA-1(abc) %s", h); /* FIPS 180-4 example */
+    /* incremental, across blocks: 'a' * 1000 split oddly */
+    memset(X->base + buf, 'a', 1000 > 0x100 ? 0x100 : 1000);
+    K(X360_xboxkrnl_XeCryptShaInit, 1, st);
+    for (int k = 0; k < 10; k++)
+        K(X360_xboxkrnl_XeCryptShaUpdate, 3, st, buf, 100);
+    K(X360_xboxkrnl_XeCryptShaFinal, 3, st, out, 20);
+    hex(X->base + out, 20, h);
+    CHECK(!strcmp(h, "291e9a6c66994949b57ba5e650361e98fc36b1ba"), "SHA-1('a' x 1000) %s", h);
+    memcpy(X->base + buf, "abc", 3);
+    K(X360_xboxkrnl_XeCryptSha256Init, 1, st);
+    K(X360_xboxkrnl_XeCryptSha256Update, 3, st, buf, 3);
+    K(X360_xboxkrnl_XeCryptSha256Final, 3, st, out, 32);
+    hex(X->base + out, 32, h);
+    CHECK(!strcmp(h, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "SHA-256(abc) %s", h);
+    /* RFC 2202 test case 2: key "Jefe", data "what do ya want for nothing?" */
+    memcpy(X->base + buf, "Jefe", 4);
+    memcpy(X->base + buf + 16, "what do ya want for nothing?", 28);
+    K(X360_xboxkrnl_XeCryptHmacSha, 10, buf, 4, buf + 16, 28, 0, 0, 0, 0, out, 20);
+    hex(X->base + out, 20, h);
+    CHECK(!strcmp(h, "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"), "HMAC-SHA1 %s", h);
+    /* RC4: key "Key", plaintext "Plaintext" -> BBF316E8D940AF0AD3 */
+    memcpy(X->base + buf, "Key", 3);
+    memcpy(X->base + buf + 16, "Plaintext", 9);
+    K(X360_xboxkrnl_XeCryptRc4, 4, buf, 3, buf + 16, 9);
+    hex(X->base + buf + 16, 9, h);
+    CHECK(!strcmp(h, "bbf316e8d940af0ad3"), "RC4 %s", h);
+}
+
 static void test_strict_imports(void)
 {
     X->strict_imports = 1;
@@ -410,6 +454,7 @@ int main(void)
     test_system();
     test_gpu();
     test_strict_imports();
+    test_crypt();
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {
         test_files(dir);

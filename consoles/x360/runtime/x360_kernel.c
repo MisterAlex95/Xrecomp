@@ -600,9 +600,17 @@ static void k_NtSuspendThread(x360_machine *x, x360_thread *t, xe_cpu *c)
 static void k_KeSetAffinityThread(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    uint32_t prev_ptr = A(2);
+    /* (KTHREAD, affinity mask, previous*): threads are cooperative on one host thread here, but the hardware thread
+     * a title asked for shows where it looks (the PCR's and KTHREAD's CPU byte: the lowest bit of the mask) */
+    uint32_t prev_ptr = A(2), mask = A(1) & 0x3F;
+    x360_thread *n = x360_thread_by_kthread(x, A(0));
     if (prev_ptr) /* the console stores the previous affinity there and returns a status (unlike NT) */
-        x360_w32(x, prev_ptr, 0x3F);
+        x360_w32(x, prev_ptr, n ? 1u << x360_r8(x, n->kthread + 0xBF) : 0x3F);
+    if (n && mask) {
+        uint32_t cpu = (uint32_t)__builtin_ctz(mask);
+        x360_w8(x, n->kthread + 0xBF, cpu);
+        x360_w8(x, n->pcr + 0x10C, cpu);
+    }
     RET(X_STATUS_SUCCESS);
 }
 
@@ -1447,6 +1455,7 @@ static const hle_entry HLE[] = {
     X360_FILE_CALLS(X360_FILE_ENTRY)
 #define X360_GPU_ALIAS(name, fn) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, x360_k_##fn},
     X360_GPU_CALLS(X360_FILE_ENTRY)
+    X360_CRYPT_CALLS(X360_FILE_ENTRY)
     X360_GPU_ALIASES(X360_GPU_ALIAS)
 #define X360_XAM_ENTRY(name) {X360_LIB_XAM, X360_xam_##name, x360_x_##name},
     X360_XAM_CALLS(X360_XAM_ENTRY)
