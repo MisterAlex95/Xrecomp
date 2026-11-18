@@ -221,7 +221,7 @@ def program(addr):
           A.li(0, length), sth(0, 0x90, 1), sth(0, 0x92, 1), A.stw(9, 0x94, 1))
 
     attrs("s_path", 20)
-    p(A.addi(3, 1, 0x78), A.li(4, 1), A.addi(5, 1, 0x80), A.addi(6, 1, 0x98), A.li(7, 1), A.li(8, 0x40))
+    p(A.addi(3, 1, 0x78), A.li(4, 1), A.addi(5, 1, 0x80), A.addi(6, 1, 0x98), A.li(7, 0x40))
     call("NtOpenFile")
     p(A.mr(23, 3), A.lwz(3, 0x78, 1), A.li(4, 0), A.li(5, 0), A.li(6, 0), A.addi(7, 1, 0x98))
     la(8, "filebuf")
@@ -240,7 +240,7 @@ def program(addr):
     call("NtClose")
     # the disc's root directory, one entry per call (the ninth argument, restart scan, in its stack slot)
     attrs("s_root", 15)
-    p(A.addi(3, 1, 0x78), A.li(4, 1), A.addi(5, 1, 0x80), A.addi(6, 1, 0x98), A.li(7, 1), A.li(8, 1))
+    p(A.addi(3, 1, 0x78), A.li(4, 1), A.addi(5, 1, 0x80), A.addi(6, 1, 0x98), A.li(7, 1))
     call("NtOpenFile")
     p.label("dirloop")
     p(A.li(0, 0), A.stw(0, 0x54, 1), A.lwz(3, 0x78, 1), A.li(4, 0), A.li(5, 0), A.li(6, 0), A.addi(7, 1, 0x98))

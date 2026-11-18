@@ -28,6 +28,7 @@ enum { X360_LIB_XBOXKRNL = 0, X360_LIB_XAM = 1, X360_LIB_OTHER = 2 };
 #define X360_TLS_SLOTS 64
 #define X360_THREAD_EXIT 0xBCBCBCBCu /* a thread's first LR: returning there ends the thread */
 #define X360_SLICE 4096              /* blocks per time slice */
+#define X360_EPOCH 0x01D7000000000000ull /* system time at boot (100 ns since 1601): fixed, runs are reproducible */
 
 /* NTSTATUS */
 #define X_STATUS_SUCCESS 0x00000000u
@@ -68,7 +69,8 @@ typedef struct x360_thread {
     uint32_t stack_base, stack_limit;
     int wait_kind, wait_all, wait_count;
     uint32_t wait_obj[X360_MAX_WAIT];
-    uint64_t wait_deadline; /* virtual time, 100 ns; 0: none */
+    uint64_t wait_deadline; /* virtual time, 100 ns, when wait_timed */
+    int wait_timed;
     uint32_t exit_code;
 } x360_thread;
 
@@ -148,6 +150,7 @@ uint32_t x360_heap_alloc(x360_machine *x, x360_heap *h, uint32_t size, uint32_t 
 int x360_heap_alloc_at(x360_machine *x, x360_heap *h, uint32_t addr, uint32_t size);
 uint32_t x360_heap_free(x360_machine *x, x360_heap *h, uint32_t addr);
 uint32_t x360_heap_size_of(x360_heap *h, uint32_t addr);
+int x360_heap_all_used(x360_heap *h, uint32_t addr, uint32_t size);
 x360_heap *x360_heap_of(x360_machine *x, uint32_t addr);
 int x360_commit(x360_machine *x, uint32_t addr, uint32_t size);
 uint32_t x360_kalloc(x360_machine *x, uint32_t size); /* zeroed kernel memory, 16-byte aligned */
@@ -173,6 +176,10 @@ void x360_fail(x360_machine *x, const char *fmt, ...);
 void x360_logf(x360_machine *x, const char *fmt, ...);
 void x360_timer_set(x360_machine *x, uint32_t obj, uint64_t due, uint32_t period);
 void x360_timer_cancel(x360_machine *x, uint32_t obj);
+int x360_wait_check(x360_machine *x, x360_thread *t);
+void x360_timers_fire(x360_machine *x);
+void x360_install_fault_handler(x360_machine *x);
+x360_machine *x360_create_bare(char *why, size_t n); /* tests: memory, kernel and a main thread, no XEX */
 
 /* x360_kernel.c */
 void x360_hle_call(x360_machine *x, const x360_thunk *t);

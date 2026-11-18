@@ -12,9 +12,11 @@
  * dispatcher headers (events, semaphores, mutants, timers, threads; X_DISPATCH_HEADER: type at +0, signal state at
  * +4), so the Ke* calls on guest structures and the Nt* calls on handles meet. Time is virtual: instructions run
  * (one 100 ns tick per 320) plus what was skipped when every thread was waiting for a timeout. */
+#include <signal.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "x360_internal.h"
 
@@ -97,8 +99,8 @@ x360_thread *x360_thread_by_kthread(x360_machine *x, uint32_t kthread)
 x360_thread *x360_thread_create(x360_machine *x, uint32_t stack_size, uint32_t entry, uint32_t r3, uint32_t r4,
                                 int suspended)
 {
-    int k = 0;
-    while (k < X360_MAX_THREADS && x->threads[k].state != TH_FREE)
+    int k = 0; /* a free slot, or one whose thread ended (its KTHREAD stays, signalled, for waits on it) */
+    while (k < X360_MAX_THREADS && x->threads[k].state != TH_FREE && (k == 0 || x->threads[k].state != TH_DONE))
         k++;
     if (k == X360_MAX_THREADS)
         return NULL;
@@ -191,15 +193,16 @@ void x360_wait(x360_machine *x, x360_thread *t, int kind, const uint32_t *objs, 
     for (int k = 0; k < t->wait_count; k++)
         t->wait_obj[k] = objs[k];
     t->wait_deadline = 0;
+    t->wait_timed = timeout_ptr != 0;
     if (timeout_ptr) {
         int64_t v = sx64(x360_r64(x, timeout_ptr));
         uint64_t now = x360_now(x);
         if (v < 0)
             t->wait_deadline = now + (uint64_t)(-v);
-        else
-            t->wait_deadline = (uint64_t)v > now ? (uint64_t)v : now; /* absolute (our epoch: boot) */
-        if (!t->wait_deadline)
-            t->wait_deadline = 1;
+        else { /* absolute: a system time (KeQuerySystemTime's clock) */
+            uint64_t at = (uint64_t)v > X360_EPOCH ? (uint64_t)v - X360_EPOCH : 0;
+            t->wait_deadline = at > now ? at : now;
+        }
     }
     t->state = TH_WAIT;
     x->m.slice = -1; /* give the host thread back */
@@ -235,7 +238,7 @@ static void obj_take(x360_machine *x, x360_thread *t, uint32_t o)
 }
 
 /* 1 when the wait of t is over (r3 then holds the status) */
-static int wait_check(x360_machine *x, x360_thread *t)
+int x360_wait_check(x360_machine *x, x360_thread *t)
 {
     uint32_t status = 0xFFFFFFFFu;
     if (t->wait_kind == WAIT_CRITSEC) {
@@ -264,7 +267,7 @@ static int wait_check(x360_machine *x, x360_thread *t)
                 }
         }
     }
-    if (status == 0xFFFFFFFFu && t->wait_deadline && x360_now(x) >= t->wait_deadline)
+    if (status == 0xFFFFFFFFu && t->wait_timed && x360_now(x) >= t->wait_deadline)
         status = t->wait_kind == WAIT_DELAY ? X_STATUS_SUCCESS : X_STATUS_TIMEOUT;
     if (status == 0xFFFFFFFFu)
         return 0;
@@ -299,7 +302,7 @@ void x360_timer_cancel(x360_machine *x, uint32_t obj)
             x->timers[k].due = 0;
 }
 
-static void timers_fire(x360_machine *x)
+void x360_timers_fire(x360_machine *x)
 {
     uint64_t now = x360_now(x);
     for (int k = 0; k < X360_MAX_TIMERS; k++) {
@@ -317,8 +320,8 @@ static uint64_t next_deadline(x360_machine *x)
     uint64_t d = 0;
     for (int k = 0; k < x->nthreads; k++) {
         x360_thread *t = &x->threads[k];
-        if (t->state == TH_WAIT && t->wait_deadline && (!d || t->wait_deadline < d))
-            d = t->wait_deadline;
+        if (t->state == TH_WAIT && t->wait_timed && (!d || t->wait_deadline < d))
+            d = t->wait_deadline ? t->wait_deadline : 1;
     }
     for (int k = 0; k < X360_MAX_TIMERS; k++)
         if (x->timers[k].obj && x->timers[k].due && (!d || x->timers[k].due < d))
@@ -327,6 +330,8 @@ static uint64_t next_deadline(x360_machine *x)
 }
 
 /* ---- dispatch ---- */
+
+static uint32_t fault_pc; /* where the running lifted function was entered (for the fault report) */
 
 static const x360_thunk *thunk_at(x360_machine *x, uint32_t pc)
 {
@@ -381,6 +386,7 @@ static void run_thread(x360_machine *x, x360_thread *t)
             break;
         }
         x->m.rc_exit = 0;
+        fault_pc = pc;
         fn(&x->m);
         if (x->m.rc_exit == XE_RC_EXIT_INTERP) {
             if (x360_interp_one(x))
@@ -392,25 +398,61 @@ static void run_thread(x360_machine *x, x360_thread *t)
     }
 }
 
+/* ---- guest faults ---- */
+
+static x360_machine *fault_machine;
+
+static void on_fault(int sig, siginfo_t *si, void *ctx)
+{
+    (void)ctx;
+    x360_machine *x = fault_machine;
+    uint8_t *a = si->si_addr;
+    char msg[200];
+    int n;
+    if (x && a >= x->base && a < x->base + (1ull << 32)) {
+        x360_thread *t = x360_cur(x);
+        n = snprintf(msg, sizeof msg, "x360: guest access fault at %08X (thread %u, in lifted code entered at %08X)\n",
+                     (uint32_t)(a - x->base), t ? t->id : 0, fault_pc);
+    } else {
+        n = snprintf(msg, sizeof msg, "x360: host signal %d at %p (not a guest address)\n", sig, (void *)a);
+    }
+    if (n > 0 && write(2, msg, (size_t)n) < 0)
+        n = 0;
+    _exit(1);
+}
+
+void x360_install_fault_handler(x360_machine *x)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_fault;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    fault_machine = x;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+}
+
 int x360_run(x360_machine *x, uint64_t insns)
 {
     if (!x->fn_tab) {
         x360_fail(x, "no pack bound");
         return x->status;
     }
+    x360_install_fault_handler(x);
     uint64_t stop = x->m.rc_native + insns;
     while (x->status == X360_RUNNING) {
         if (x->m.rc_native >= stop) {
             x->status = X360_BUDGET;
             break;
         }
-        timers_fire(x);
+        x360_timers_fire(x);
         int picked = -1;
         for (int n = 1; n <= x->nthreads; n++) {
             int k = (x->cur + n + x->nthreads) % x->nthreads;
             x360_thread *t = &x->threads[k];
             if (t->state == TH_WAIT)
-                wait_check(x, t);
+                x360_wait_check(x, t);
             if (t->state == TH_READY) {
                 picked = k;
                 break;
@@ -457,14 +499,35 @@ x360_machine *x360_create(const uint8_t *xex, size_t size, char *why, size_t why
         x360_destroy(x);
         return NULL;
     }
-    x360_w32(x, x->module + 0x18, x->image_base);
+    /* X_LDR_DATA_TABLE_ENTRY (Xenia's xmodule.h): dll base 0, image base, sizes, entry point, XEX header */
+    x360_w32(x, x->module + 0x1C, x->image_base);
     x360_w32(x, x->module + 0x20, x->image_size);
+    x360_w32(x, x->module + 0x38, x->image_size);
+    x360_w32(x, x->module + 0x3C, x->entry);
     x360_w32(x, x->module + 0x58, x->xex_header);
     if (!x360_thread_create(x, x->stack_size, x->entry, 0, 0, 0)) {
         snprintf(why, why_len, "cannot create the main thread");
         x360_destroy(x);
         return NULL;
     }
+    return x;
+}
+
+x360_machine *x360_create_bare(char *why, size_t n)
+{
+    x360_machine *x = calloc(1, sizeof *x);
+    if (!x)
+        return NULL;
+    x->memfd = -1;
+    x->cur = -1;
+    x->m.rt = x;
+    x->stack_size = 0x10000;
+    if (x360_mem_init(x, why, n) || x360_kernel_init(x) || !x360_thread_create(x, 0x10000, 0x82000000u, 0, 0, 0)) {
+        x360_destroy(x);
+        return NULL;
+    }
+    x->cur = 0;
+    x->m.cur = &x->threads[0].cpu;
     return x;
 }
 

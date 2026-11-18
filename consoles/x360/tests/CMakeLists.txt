@@ -4,6 +4,8 @@ project(console_x360_tests C)
 # The Xbox 360 runtime's tests (XBA-270): a self-contained project like those under tests/, run by
 # tools/run_c_tests.sh (as console_x360) and by the root build's ctest when XBR_CONSOLE_X360 is ON. Linux only.
 #
+#   x360_hle         the kernel HLE called directly (x360_hle_test.c): formatters, memory, objects, waits, timers,
+#                    threads, files and symbolic links
 #   x360_hello       the synthetic test title (make_hello.py: our own PowerPC assembly in a synthetic XEX2, imports
 #                    by their real ordinals) recompiled and run under x360_run: its DbgPrint text must equal
 #                    hello.txt (memory, critical section, TLS, a second thread and an event, a delay, a semaphore,
@@ -24,6 +26,12 @@ if(NOT TARGET x360_core)
     add_subdirectory(../runtime x360_runtime)
 endif()
 enable_testing()
+
+add_executable(x360_hle_test x360_hle_test.c)
+target_link_libraries(x360_hle_test PRIVATE x360_core)
+target_compile_options(x360_hle_test PRIVATE -Wall -Wextra)
+add_test(NAME x360_hle COMMAND x360_hle_test)
+set_tests_properties(x360_hle PROPERTIES TIMEOUT 120)
 
 if(TARGET x360_run)
     foreach(_mode basic lzx)

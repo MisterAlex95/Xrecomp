@@ -421,8 +421,8 @@ void x360_k_NtCreateFile(x360_machine *x, x360_thread *t, xe_cpu *c)
 void x360_k_NtOpenFile(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    /* (handle*, access, attributes, iosb, share, options) */
-    RET(open_file(x, A(0), A(2), A(3), FILE_OPEN, A(5), A(1)));
+    /* (handle*, access, attributes, iosb, options): no share access argument, unlike Windows' NtOpenFile */
+    RET(open_file(x, A(0), A(2), A(3), FILE_OPEN, A(4), A(1)));
 }
 
 static uint64_t file_offset(x360_machine *x, x360_file *f, uint32_t off_ptr)

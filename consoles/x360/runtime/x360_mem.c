@@ -152,6 +152,18 @@ uint32_t x360_heap_size_of(x360_heap *h, uint32_t addr)
     return h->len[p] * h->page;
 }
 
+int x360_heap_all_used(x360_heap *h, uint32_t addr, uint32_t size)
+{
+    if (addr < h->base || (uint64_t)addr + size > (uint64_t)h->base + h->size || !size)
+        return 0;
+    uint32_t first = (addr - h->base) / h->page;
+    uint32_t last = (uint32_t)(((uint64_t)addr + size - h->base + h->page - 1) / h->page);
+    for (uint32_t p = first; p < last; p++)
+        if (!h->used[p])
+            return 0;
+    return 1;
+}
+
 uint32_t x360_heap_free(x360_machine *x, x360_heap *h, uint32_t addr)
 {
     (void)x;

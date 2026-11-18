@@ -381,8 +381,8 @@ static void k_NtAllocateVirtualMemory(x360_machine *x, x360_thread *t, xe_cpu *c
     if (want) {
         x360_heap *hh = x360_heap_of(x, want);
         uint32_t aligned = want & ~(hh ? hh->page - 1 : 0xFFFu);
-        if (hh && hh != &x->heap_phys && x360_heap_size_of(hh, aligned)) {
-            a = aligned; /* committing what was reserved before */
+        if (hh && hh != &x->heap_phys && x360_heap_all_used(hh, aligned, size + (want - aligned))) {
+            a = aligned; /* committing pages of an earlier reservation */
         } else if (hh && hh != &x->heap_phys && x360_heap_alloc_at(x, hh, aligned, size + (want - aligned)) == 0) {
             a = aligned;
         } else {
@@ -601,9 +601,9 @@ static void k_KeSetAffinityThread(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     uint32_t prev_ptr = A(2);
-    if (prev_ptr)
+    if (prev_ptr) /* the console stores the previous affinity there and returns a status (unlike NT) */
         x360_w32(x, prev_ptr, 0x3F);
-    RET(0x3F);
+    RET(X_STATUS_SUCCESS);
 }
 
 static void k_KeSetBasePriorityThread(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -875,9 +875,7 @@ static void k_NtReleaseMutant(x360_machine *x, x360_thread *t, xe_cpu *c)
     x360_w32(x, o + 4, (uint32_t)(prev + 1));
     if (prev + 1 > 0)
         x360_w32(x, o + 0x18, 0);
-    if (A(1))
-        x360_w32(x, A(1), (uint32_t)prev);
-    RET(X_STATUS_SUCCESS);
+    RET(X_STATUS_SUCCESS); /* the second argument is not a previous-count pointer (Xenia: 0 in every title) */
 }
 
 static void k_NtCreateTimer(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -900,8 +898,6 @@ static void k_NtSetTimerEx(x360_machine *x, x360_thread *t, xe_cpu *c)
     int64_t due = (int64_t)x360_r64(x, A(1));
     uint64_t now = x360_now(x);
     uint64_t at = due < 0 ? now + (uint64_t)(-due) : (uint64_t)due;
-    if (A(7))
-        x360_w32(x, A(7), x360_r32(x, o + 4));
     x360_timer_set(x, o, at, A(6));
     RET(X_STATUS_SUCCESS);
 }
@@ -973,14 +969,19 @@ static void k_NtClose(x360_machine *x, x360_thread *t, xe_cpu *c)
 static void k_NtDuplicateObject(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    uint32_t o = x360_handle_obj(x, A(0));
+    uint32_t src = A(0), out = A(1), options = A(2), o = x360_handle_obj(x, src);
     if (!o) {
         RET(X_STATUS_INVALID_HANDLE);
         return;
     }
-    create_handle(x, c, A(1), o);
-    if (A(2) & 1) /* DUPLICATE_CLOSE_SOURCE */
-        x360_handle_close(x, A(0));
+    if (!out) { /* no new handle: only closes the source (Xenia: titles do that) */
+        if (options & 1)
+            x360_handle_close(x, src);
+        RET(X_STATUS_SUCCESS);
+        return;
+    }
+    if (create_handle(x, c, out, o) && (options & 1)) /* DUPLICATE_CLOSE_SOURCE */
+        x360_handle_close(x, src);
 }
 
 static void k_ObReferenceObjectByHandle(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -1083,7 +1084,6 @@ static void k_nop0(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 /* ---- time ---- */
 
-#define EPOCH 0x01D7000000000000ull /* a fixed system time origin (100 ns since 1601): runs are reproducible */
 
 static void k_KeQueryPerformanceFrequency(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
@@ -1095,7 +1095,7 @@ static void k_KeQuerySystemTime(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     if (A(0))
-        x360_w64(x, A(0), EPOCH + x360_now(x));
+        x360_w64(x, A(0), X360_EPOCH + x360_now(x));
     RET(0);
 }
 
