@@ -18,12 +18,12 @@ original base, import libraries (name, version, the import records of each libra
 variable / thunk and ordinal, read from the image), TLS info, default stack / heap size, execution info (title id,
 media id, version, disc), original PE name, static libraries, system flags, resource info, the file format (encryption
 and compression), and the security info (image size, flags, load address, page descriptors). The image is then
-decrypted when a key is given (each key is tried; the right one gives "MZ" at the start), expanded (none / basic),
+decrypted when a key is given (each key is tried; the right one gives "MZ" at the start), expanded (none / basic / normal: LZX),
 and its PE headers read: sections and `.pdata` (exact function starts and lengths, what discovery seeds from).
 
-Not done (documented gaps): LZX ("normal") compression: the block chain is walked and checked but the LZX stream is not
-decoded (`XexError` says so; decompress with a tool of your own first). Delta patches (XEXP), RSA / digest checks,
-resource extraction, exports by name.
+LZX ("normal") compression (XBA-270): the block chain is walked (each block's SHA-1 checked) and the LZX stream decoded
+by lzx.py. Not done (documented gaps): delta patches (XEXP), RSA / page digest checks, resource extraction, exports by
+name.
 
 No key or console data lives in this repository: keys come from the caller (CLI: --key-file, or $XEX_KEY_FILE).
 """
@@ -33,7 +33,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import aes
+from . import aes, lzx
 
 MAGIC = b"XEX2"
 
@@ -156,6 +156,7 @@ class XexImage:
     compression: int = COMP_NONE
     basic_blocks: List[tuple] = field(default_factory=list)
     lzx_window: int = 0
+    lzx_block: tuple = (0, b"")     # the first compressed block: size, SHA-1
     session_key_enc: bytes = b""
     pages: List[PageDescriptor] = field(default_factory=list)
     libraries: List[ImportLibrary] = field(default_factory=list)
@@ -167,7 +168,7 @@ class XexImage:
     original_name: str = ""
     static_libraries: List[tuple] = field(default_factory=list)
     resources: List[tuple] = field(default_factory=list)
-    image: Optional[bytes] = None   # the mapped PE image (None: encrypted with no key, or LZX)
+    image: Optional[bytes] = None   # the mapped PE image (None: encrypted with no key, or not decodable)
     image_note: str = ""
     key_used: Optional[int] = None  # index in the keys given
     sections: List[Section] = field(default_factory=list)
@@ -282,7 +283,9 @@ def _file_format(img, blob):
     if comp == COMP_BASIC:
         img.basic_blocks = [struct.unpack_from(">II", blob, o) for o in range(8, min(size, len(blob)) - 7, 8)]
     elif comp == COMP_NORMAL:
-        img.lzx_window = _u32(blob, 8) if len(blob) >= 12 else 0
+        if len(blob) >= 36:  # (shorter: no block chain, the image is reported as not decodable)
+            img.lzx_window = _u32(blob, 8)
+            img.lzx_block = (_u32(blob, 12), bytes(blob[16:36]))
 
 
 def _decrypt(img, payload, keys):
@@ -313,8 +316,13 @@ def _expand(img, payload):
             o += data_size
         return bytes(out)
     if img.compression == COMP_NORMAL:
-        raise XexError("LZX (normal) compression is not decoded by this spike: decompress the XEX with a tool of "
-                       "your own (to basic or none) and parse that")
+        try:
+            if not img.lzx_block[0]:
+                raise lzx.LzxError("no compressed block in the file format header")
+            stream = lzx.xex_deblock(payload, img.lzx_block[0], img.lzx_block[1])
+            return lzx.decompress(stream, lzx.window_bits_of(img.lzx_window), img.image_size)
+        except lzx.LzxError as ex:
+            raise XexError("normal (LZX) compression: %s" % ex)
     raise XexError("compression type %d (%s) not supported" % (img.compression,
                                                                COMPRESSION_NAMES.get(img.compression, "?")))
 
@@ -419,9 +427,7 @@ def _parse(data, keys):
 
     payload = data[pe_off:]
     try:
-        if img.compression == COMP_NORMAL:
-            _expand(img, b"")  # raises the LZX gap
-        elif img.encryption == ENC_NONE:
+        if img.encryption == ENC_NONE:
             img.image = _expand(img, payload)
         elif not keys:
             img.image_note = "encrypted: pass the console key (--key-file) to decrypt the image"

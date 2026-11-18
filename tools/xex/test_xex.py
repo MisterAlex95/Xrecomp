@@ -10,7 +10,7 @@ import pytest
 
 from tools.xex import aes
 from tools.xex.synth import BASE, TEST_KEY, build_xex
-from tools.xex.xex import (COMP_BASIC, COMP_NONE, H_FILE_FORMAT_INFO, IMPORT_THUNK, IMPORT_VARIABLE, XexError,
+from tools.xex.xex import (COMP_BASIC, COMP_NONE, COMP_NORMAL, H_FILE_FORMAT_INFO, IMPORT_THUNK, IMPORT_VARIABLE, XexError,
                            load_keys, parse_xex, summary)
 
 REPO = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -36,14 +36,14 @@ def test_aes_known_answer_and_round_trip():
     assert aes.ecb_decrypt(TEST_KEY, aes.ecb_encrypt(TEST_KEY, data)) == data
 
 
-@pytest.mark.parametrize("compression", ["none", "basic"])
+@pytest.mark.parametrize("compression", ["none", "basic", "normal"])
 @pytest.mark.parametrize("encrypted", [False, True])
 def test_round_trip(compression, encrypted):
     data, lay = make(compression=compression, key=TEST_KEY if encrypted else None)
     img = parse_xex(data, [bytes(16), TEST_KEY] if encrypted else [])
     assert img.image == lay.image
     assert img.key_used == (1 if encrypted else None)
-    assert img.compression == (COMP_BASIC if compression == "basic" else COMP_NONE)
+    assert img.compression == {"basic": COMP_BASIC, "none": COMP_NONE, "normal": COMP_NORMAL}[compression]
     assert img.encryption == (1 if encrypted else 0)
     assert img.entry == lay.text + 8 and img.base == BASE and img.image_size == lay.image_size
     assert img.page_size == 0x1000 and len(img.pages) == lay.image_size // 0x1000
@@ -100,11 +100,22 @@ def _patch_compression(data, comp):
     raise AssertionError("no file format header")
 
 
-def test_lzx_is_a_documented_gap():
+def test_lzx_errors_are_reported():
+    data, lay = make(compression="normal")
+    # a damaged compressed block: its SHA-1 no longer matches
+    bad = bytearray(data)
+    bad[-100] ^= 0xFF
+    img = parse_xex(bytes(bad))
+    assert img.image is None and "SHA-1" in img.image_note
+    assert img.libraries and img.entry  # the headers are still there
+    # "normal" announced over a basic image: no block chain to walk
     data, _ = make()
     img = parse_xex(_patch_compression(data, 2))
-    assert img.image is None and "LZX" in img.image_note
-    assert img.libraries and img.entry  # the headers are still there
+    assert img.image is None and "normal (LZX)" in img.image_note
+    # a wrong key on an encrypted LZX image fails fast and cleanly
+    data, _ = make(compression="normal", key=TEST_KEY)
+    img = parse_xex(data, [bytes(16)])
+    assert img.image is None and "none of the keys" in img.image_note
 
 
 def test_bad_files():

@@ -14,15 +14,16 @@ info), so tests can name every address:
 
 `layout` gives the addresses: text, rdata, data, pdata, thunks {(lib, ordinal): addr}, records {(lib, ordinal):
 addr}, image_size. Encryption uses `key` (a 16-byte key the test makes up: TEST_KEY is not a console key) and a
-session key derived from `seed`. Compression: "none" or "basic" (pages split into data then zero runs).
+session key derived from `seed`. Compression: "none", "basic" (pages split into data then zero runs) or "normal"
+(LZX, XBA-270: the image in uncompressed LZX blocks, or `lzx_stream`, in the XEX block chain with SHA-1s).
 """
 
 import hashlib
 import struct
 from types import SimpleNamespace
 
-from . import aes
-from .xex import (COMP_BASIC, COMP_NONE, ENC_NONE, ENC_NORMAL, H_DEFAULT_STACK_SIZE, H_ENTRY_POINT, H_EXECUTION_INFO,
+from . import aes, lzx
+from .xex import (COMP_BASIC, COMP_NONE, COMP_NORMAL, ENC_NONE, ENC_NORMAL, H_DEFAULT_STACK_SIZE, H_ENTRY_POINT, H_EXECUTION_INFO,
                   H_FILE_FORMAT_INFO, H_IMAGE_BASE_ADDRESS, H_IMPORT_LIBRARIES, H_ORIGINAL_PE_NAME, H_SYSTEM_FLAGS,
                   H_TLS_INFO, IMAGE_PAGE_SIZE_4KB, PE_MACHINE_POWERPCBE)
 
@@ -93,7 +94,8 @@ def _basic_blocks(image):
 
 
 def build_xex(text, rdata=b"", data=b"", imports=None, entry=0, functions=(), compression="none", key=None,
-              seed=b"xba-230", tls=None, title_id=0x58425A30, stack_size=0x40000, name="synth.exe"):
+              seed=b"xba-230", tls=None, title_id=0x58425A30, stack_size=0x40000, name="synth.exe",
+              lzx_window=0x8000, lzx_stream=None):
     """text: bytes or a list of big-endian words. entry: offset in .text. functions: [(offset in .text, length in
     bytes)]. imports: {library: [(ordinal, "thunk" | "variable")]}. tls: (slots, data bytes) or None."""
     if isinstance(text, (list, tuple)):
@@ -148,11 +150,19 @@ def build_xex(text, rdata=b"", data=b"", imports=None, entry=0, functions=(), co
         blocks, stored = _basic_blocks(image)
         ff = struct.pack(">IHH", 8 + 8 * len(blocks), ENC_NORMAL if key else ENC_NONE, COMP_BASIC)
         ff += b"".join(struct.pack(">II", a, b) for a, b in blocks)
+    elif compression == "normal":
+        # LZX in uncompressed blocks (lzx.store, checked with cabextract by lzx_vectors/gen.sh), or a stream given
+        stream = lzx.store(image) if lzx_stream is None else lzx_stream
+        payload_, first_size, first_hash = lzx.xex_reblock([stream[o:o + 0x7FF0]
+                                                            for o in range(0, len(stream), 0x7FF0)])
+        stored = payload_
+        ff = struct.pack(">IHHII", 36, ENC_NORMAL if key else ENC_NONE, COMP_NORMAL, lzx_window, first_size)
+        ff += first_hash
     elif compression == "none":
         stored = image
         ff = struct.pack(">IHH", 8, ENC_NORMAL if key else ENC_NONE, COMP_NONE)
     else:
-        raise ValueError("compression: none or basic")
+        raise ValueError("compression: none, basic or normal")
     session = hashlib.sha256(seed).digest()[:16]
     session_enc = bytes(16)
     if key:
