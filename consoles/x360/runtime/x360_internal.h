@@ -153,6 +153,7 @@ struct x360_machine {
     uint8_t unimpl_seen[2][4096];
 
     struct x360_gpu *gpu;     /* x360_gpu.c: the command processor, interrupts */
+    struct x360_xma *xma;     /* x360_xma.c: XMA contexts, the audio mix, the motors */
     struct x360_fs *fs;       /* x360_file.c: the disc, the data directory, open files, symbolic links */
     FILE *dbg, *log;
     int verbose;
@@ -272,6 +273,16 @@ X360_XAM_CALLS(X360_DECLARE_XAM_CALL)
 X360_INPUT_CALLS(X360_DECLARE_XAM_CALL)
 void x360_input_poll(x360_machine *x);
 uint64_t x360_input_next_event(x360_machine *x);
+
+/* x360_xma.c: XMA contexts and the APU registers, the render driver's mix, the motors */
+int x360_xma_init(x360_machine *x);
+void x360_xma_free(x360_machine *x);
+void x360_xma_poll(x360_machine *x);
+int x360_xma_call(x360_machine *x, const x360_thunk *th, x360_thread *t);
+void x360_xma_state(x360_machine *x, uint32_t *array, uint8_t *used, uint8_t *enabled, int load);
+void x360_audio_mix_frame(x360_machine *x, int client, const float *planar6);
+void x360_audio_tick(x360_machine *x);
+void x360_pad_set_motors(x360_machine *x, int user, unsigned left, unsigned right);
 
 /* x360_interp.c: run the instruction at the current PC; 0 on success, -1 (x->status set) otherwise */
 int x360_interp_one(x360_machine *x);

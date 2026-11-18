@@ -13,6 +13,7 @@
  *                   its view), the GPU register page; pages that are all zero are left out
  *   GPU   optional  the command processor (register file, ring, write-back, the shaders last loaded, counters) and
  *                   the interrupt state (callback, next vertical blank, pending interrupts)
+ *   XMA   optional  the XMA context array's place, which contexts are in use and enabled (XBA-280)
  *   FILE  optional  the open files (device, path, position: they are opened again at load) and symbolic links
  *
  * A state is taken between time slices (x360_run returned), when every thread's context is in its slot. Not state:
@@ -230,6 +231,8 @@ static void each_page(x360_machine *x, void (*fn)(x360_machine *, uint32_t, void
         fn(x, a, ctx);
     for (uint32_t a = 0x7FC80000u; a < 0x7FC90000u; a += PAGE)
         fn(x, a, ctx);
+    for (uint32_t a = 0x7FEA0000u; a < 0x7FEB0000u; a += PAGE) /* the APU registers (XMA kicks) */
+        fn(x, a, ctx);
     for (int k = 0; k < 5; k++) {
         x360_heap *h = heap_k(x, k);
         for (uint32_t p = 0; p < h->pages; p++)
@@ -339,6 +342,20 @@ static void sec_pads(x360_machine *x, io *s)
         x->pad_script_at = at <= x->pad_script_n ? at : x->pad_script_n;
 }
 
+/* XMA: the context array's place, the contexts in use / enabled (their bytes are guest memory: MEM) */
+static void sec_xma(x360_machine *x, io *s)
+{
+    uint32_t array = 0;
+    uint8_t used[320], enabled[320];
+    if (!s->load)
+        x360_xma_state(x, &array, used, enabled, 0);
+    io_u32(s, &array);
+    io_bytes(s, used, sizeof used);
+    io_bytes(s, enabled, sizeof enabled);
+    if (s->load && !s->bad)
+        x360_xma_state(x, &array, used, enabled, 1);
+}
+
 typedef struct {
     char tag[5];
     uint32_t version;
@@ -349,7 +366,7 @@ typedef struct {
 static const section k_sections[] = {
     {"THRD", 1, 1, sec_threads}, {"KERN", 1, 1, sec_kernel}, {"HEAP", 1, 1, sec_heaps},
     {"MEM ", 1, 1, sec_memory},  {"GPU ", 1, 0, sec_gpu},    {"FILE", 1, 0, sec_files},
-    {"PADS", 1, 0, sec_pads},
+    {"PADS", 1, 0, sec_pads},    {"XMA ", 1, 0, sec_xma},
 };
 #define NSEC (sizeof k_sections / sizeof k_sections[0])
 

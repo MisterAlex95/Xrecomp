@@ -66,6 +66,25 @@ void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint
 /* The audio the title submits to the render driver (256-sample frames of 6 channels at 48 kHz), written to F as a
  * 32-bit float WAV, sizes filled in when the machine is freed. XMA is not decoded: XMA voices stay silent. */
 void x360_set_audio_out(x360_machine *x, FILE *f);
+/* The audio the title plays (XBA-280): the render driver clients' frames mixed and folded down to 48 kHz 16-bit
+ * stereo (front + 0.707 x (centre + surround) per side), up to `frames` taken from the ring (interleaved L, R);
+ * returns the frames given. About a third of a second is kept; older frames are dropped when nothing pulls. */
+size_t x360_audio_pull(x360_machine *x, int16_t *out, size_t frames);
+/* XMA (x360_xma.c): the decoder of XMA2 packets behind the contexts. The default backend gives each frame 512
+ * samples of silence (XMA2 frames are WMA Pro: no decoder here); a host may register another for every machine.
+ * decode: one 2048-byte packet (header included) to at most max_samples 16-bit samples (interleaved when the stream
+ * is stereo); returns the samples written. */
+typedef struct x360_xma_backend {
+    const char *name;
+    void *(*open)(int channels, int sample_rate);
+    int (*decode)(void *dec, const uint8_t *packet, int16_t *out, int max_samples);
+    void (*close)(void *dec);
+} x360_xma_backend;
+void x360_xma_set_backend(const x360_xma_backend *b); /* NULL: the silent one */
+const char *x360_xma_backend_name(void);
+void x360_xma_get_stats(x360_machine *x, uint64_t *packets, uint64_t *frames, uint64_t *blocks, unsigned *contexts);
+/* The pad motors XamInputSetState last asked for (0-255: left low frequency, right high frequency), user 0..3. */
+void x360_pad_motors(x360_machine *x, int user, unsigned *left, unsigned *right);
 /* A trace of the GPU command stream (PM4 packets, register blocks, draws, swaps), or NULL. */
 void x360_set_gpu_trace(x360_machine *x, FILE *f);
 /* Where DbgPrint and the runtime's own messages go (default stdout / stderr), verbosity (0 quiet, 1 HLE calls). */

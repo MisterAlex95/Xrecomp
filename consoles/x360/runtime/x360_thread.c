@@ -506,6 +506,7 @@ int x360_run(x360_machine *x, uint64_t insns)
         x360_timers_fire(x);
         x360_gpu_poll(x);
         x360_audio_poll(x);
+        x360_xma_poll(x);
         x360_input_poll(x);
         if (x->timestamp_bundle) { /* KeTimeStampBundle: interrupt time, system time, tick count (ms) */
             uint64_t now = x360_now(x);
@@ -559,7 +560,7 @@ x360_machine *x360_create(const uint8_t *xex, size_t size, char *why, size_t why
     x->memfd = -1;
     x->cur = -1;
     x->m.rt = x;
-    if (x360_mem_init(x, why, why_len) || x360_gpu_init(x) || x360_kernel_init(x) ||
+    if (x360_mem_init(x, why, why_len) || x360_gpu_init(x) || x360_xma_init(x) || x360_kernel_init(x) ||
         x360_load(x, xex, size, why, why_len)) {
         if (!why[0])
             snprintf(why, why_len, "kernel initialisation failed");
@@ -589,7 +590,7 @@ x360_machine *x360_create_bare(char *why, size_t n)
     x->cur = -1;
     x->m.rt = x;
     x->stack_size = 0x10000;
-    if (x360_mem_init(x, why, n) || x360_gpu_init(x) || x360_kernel_init(x) ||
+    if (x360_mem_init(x, why, n) || x360_gpu_init(x) || x360_xma_init(x) || x360_kernel_init(x) ||
         !x360_thread_create(x, 0x10000, 0x82000000u, 0, 0, 0)) {
         x360_destroy(x);
         return NULL;
@@ -606,6 +607,7 @@ void x360_destroy(x360_machine *x)
     x360_audio_close(x);
     x360_fs_free(x);
     x360_gpu_free(x);
+    x360_xma_free(x);
     free(x->pad_script);
     x360_mem_free(x);
     free(x->thunks);
