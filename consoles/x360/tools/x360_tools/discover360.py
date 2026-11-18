@@ -1,0 +1,401 @@
+"""Xbox 360 function discovery (XBA-270): what MSVC's PowerPC code generator adds to tools/ppc/discover.py.
+
+- Register save / restore helpers. MSVC calls shared routines in prologues and epilogues instead of storing the
+  non-volatile registers inline: `mflr r12; bl __savegprlr_N` ... `b __restgprlr_N`, and the FPR (__savefpr_N /
+  __restfpr_N, base r12) and VMX (__savevmx_N / __restvmx_N, `li r11, off; stvx vN, r11, r12`, and the VMX128 ones
+  for v64..v127) counterparts. Each is one straight run of stores (or loads) of consecutive registers, one entry
+  point per register, ending in `blr`. They are recognised from their code (`find_helpers`, a conservative shape
+  check: at least 8 consecutive registers ending at r31 / f31 / v31 / v127, one base register, regular
+  displacements), hidden from discovery (they are not functions: no entry per register), and the lifter inlines
+  them at each call (`XenonLifter`): a `bl` becomes the stores, a `b` (the epilogue's tail call) the loads and the
+  return.
+- Jump tables. A `bctr` whose CTR comes from a table indexed by a bounded register (`cmplwi rI, N` + a branch on GT
+  before it) is resolved by evaluating the code before it backwards (`JumpTables`): absolute tables (`lwzx` of
+  addresses: MSVC), tables of offsets added to a base (`lbzx` / `lhzx` / `lwzx`, optionally shifted, plus a constant:
+  MSVC's compact forms, and GCC's relative tables). The targets become branch targets inside the function and the
+  lifter turns the `bctr` into a switch. Anything else stays an indirect jump through the dispatcher, counted as
+  unresolved.
+
+Nothing here can be checked against MSVC output in this repository (no title code): the shapes are what XenonRecomp
+and Xenia describe; recognition is deliberately strict, and `stats()` reports what was found so a title's sweep shows
+what slipped through.
+"""
+
+from tools.ppc.discover import Discovery
+from tools.ppc.isa import BCCTR, BCLR, BCOND, BRANCH
+
+STORE_GPR = ("std", "ld")
+MIN_REGS = 8
+
+
+class Helper:
+    """One recognised helper sequence. entries: {addr: first register saved / restored from there}."""
+    __slots__ = ("kind", "start", "end", "entries", "tail")
+
+    def __init__(self, kind, start, end, entries, tail):
+        self.kind = kind          # savegpr, restgpr, savefpr, restfpr, savevmx, restvmx
+        self.start = start
+        self.end = end            # address of the final blr
+        self.entries = entries
+        self.tail = tail          # addresses of the instructions after the register run, blr included
+
+    def __repr__(self):
+        return "<%s %08X-%08X %d entries>" % (self.kind, self.start, self.end, len(self.entries))
+
+
+def _run(view, dec, a, limit):
+    """Decode straight-line from a while in code."""
+    out = []
+    while len(out) < limit and view.in_code(a):
+        out.append(dec.decode(view.u32(a), a))
+        a += 4
+    return out
+
+
+def find_helpers(view, dec, ranges):
+    """{entry addr: (Helper, first register)} for every save / restore helper in the code ranges."""
+    found = {}
+    for lo, hi in ranges:
+        a = lo
+        while a < hi:
+            h = _match(view, dec, a)
+            if h is None:
+                a += 4
+                continue
+            for e, reg in h.entries.items():
+                found[e] = (h, reg)
+            a = h.end + 4
+    return found
+
+
+def _match(view, dec, a):
+    i = dec.decode(view.u32(a), a)
+    n = i.name
+    if n in ("std", "ld") and i.ra == 1:
+        return _match_gpr(view, dec, a, n)
+    if n in ("stfd", "lfd") and i.ra == 12:
+        return _match_fpr(view, dec, a, n)
+    if n == "addi" and i.ra == 0 and i.rd == 11:  # li r11, off
+        return _match_vmx(view, dec, a)
+    return None
+
+
+def _regular(regs, disps, last):
+    if len(regs) < MIN_REGS or regs[-1] != last:
+        return False
+    return all(regs[k + 1] == regs[k] + 1 for k in range(len(regs) - 1)) and \
+        all(disps[k + 1] - disps[k] == disps[1] - disps[0] for k in range(len(disps) - 1)) and disps[1] > disps[0]
+
+
+def _match_gpr(view, dec, a, n):
+    run = _run(view, dec, a, 24)
+    regs, disps = [], []
+    k = 0
+    while k < len(run) and run[k].name == n and run[k].ra == 1:
+        regs.append(run[k].rd)
+        disps.append(run[k].ext.ds)
+        k += 1
+    if not _regular(regs, disps, 31) or len(run) < k + 2:
+        return None
+    t = run[k:]
+    if n == "std":  # stw r12, d(r1); blr
+        if not (t[0].name == "stw" and t[0].rd == 12 and t[0].ra == 1 and t[1].name == "bclr"
+                and (t[1].rd & 0x14) == 0x14 and not t[1].lk):
+            return None
+        tail = t[:2]
+        kind = "savegpr"
+    else:           # lwz r12, d(r1); mtlr r12; blr
+        if len(t) < 3 or not (t[0].name == "lwz" and t[0].rd == 12 and t[0].ra == 1 and t[1].name == "mtspr"
+                              and t[1].spr == 8 and t[1].rd == 12 and t[2].name == "bclr"
+                              and (t[2].rd & 0x14) == 0x14 and not t[2].lk):
+            return None
+        tail = t[:3]
+        kind = "restgpr"
+    entries = {run[j].addr: regs[j] for j in range(len(regs))}
+    return Helper(kind, a, tail[-1].addr, entries, [x.addr for x in tail])
+
+
+def _match_fpr(view, dec, a, n):
+    run = _run(view, dec, a, 20)
+    regs, disps = [], []
+    k = 0
+    while k < len(run) and run[k].name == n and run[k].ra == 12:
+        regs.append(run[k].rd)
+        disps.append(run[k].simm)
+        k += 1
+    if not _regular(regs, disps, 31) or k >= len(run):
+        return None
+    b = run[k]
+    if not (b.name == "bclr" and (b.rd & 0x14) == 0x14 and not b.lk):
+        return None
+    entries = {run[j].addr: regs[j] for j in range(len(regs))}
+    return Helper("savefpr" if n == "stfd" else "restfpr", a, b.addr, entries, [b.addr])
+
+
+VMX_ST = ("stvx", "stvx128")
+VMX_LD = ("lvx", "lvx128")
+
+
+def _match_vmx(view, dec, a):
+    run = _run(view, dec, a, 2 * 64 + 2)
+    regs, disps, entries = [], [], {}
+    k = 0
+    kind = None
+    while k + 1 < len(run):
+        li, m = run[k], run[k + 1]
+        if not (li.name == "addi" and li.ra == 0 and li.rd == 11):
+            break
+        if m.name in VMX_ST:
+            mk = "savevmx"
+        elif m.name in VMX_LD:
+            mk = "restvmx"
+        else:
+            break
+        if kind is None:
+            kind = mk
+        if mk != kind or m.ra != 11 or m.rb != 12:
+            break
+        regs.append(m.ext.vd)
+        disps.append(li.simm)
+        entries[li.addr] = m.ext.vd
+        k += 2
+    if kind is None or k >= len(run):
+        return None
+    last = 127 if regs and regs[-1] > 31 else 31
+    if not _regular(regs, disps, last):
+        return None
+    b = run[k]
+    if not (b.name == "bclr" and (b.rd & 0x14) == 0x14 and not b.lk):
+        return None
+    return Helper(kind, a, b.addr, entries, [b.addr])
+
+
+# ---------------------------------------------------------------- jump tables
+
+class _Expr:
+    """A value computed before a bctr: const, the index register, a table load, a shift or a sum."""
+    __slots__ = ("k", "a", "b", "c")
+
+    def __init__(self, k, a=None, b=None, c=None):
+        self.k, self.a, self.b, self.c = k, a, b, c
+
+
+class JumpTables:
+    """Resolve bctr jump tables by evaluating the straight-line code before them backwards."""
+
+    BACK = 24
+
+    def __init__(self, view, decode):
+        self.view = view
+        self.decode = decode
+        self.tables = {}      # bctr addr -> [targets]
+        self.unresolved = set()
+
+    def resolve(self, a):
+        if a in self.tables:
+            return self.tables[a]
+        t = self._resolve(a)
+        if t is None:
+            self.unresolved.add(a)
+            return ()
+        self.unresolved.discard(a)
+        self.tables[a] = t
+        return t
+
+    def _back(self, a):
+        """The instructions before a, nearest first, until a non-conditional control transfer."""
+        out = []
+        p = a - 4
+        while len(out) < self.BACK and self.view.in_code(p):
+            i = self.decode(p)
+            if i.kind in (BRANCH, BCLR, BCCTR) or (i.kind == BCOND and (i.rd & 0x14) == 0x14):
+                break
+            out.append(i)
+            p -= 4
+        return out
+
+    def _def(self, insns, start, reg):
+        """Index in insns (nearest first) of the instruction that last wrote reg, at or after start."""
+        for k in range(start, len(insns)):
+            i = insns[k]
+            n = i.name
+            if n is None:
+                return None
+            if n in ("addi", "addis", "lwzx", "lhzx", "lbzx", "lwz", "lhz", "lbz", "add", "mfspr", "lis",
+                     "subf", "mulli", "lwax", "ld", "ldx") and i.rd == reg:
+                return k
+            if n in ("ori", "oris", "rlwinm", "or", "rldicr", "rldicl", "extsw", "and", "andi.", "xor",
+                     "clrlwi", "slw", "srw", "sraw", "srawi", "extsh", "extsb") and i.ra == reg:
+                return k
+            if n in ("lwzu", "lbzu", "lhzu", "ldu") and (i.rd == reg or i.ra == reg):
+                return k
+        return -1  # not written in the window: a leaf
+
+    def _ev(self, insns, start, reg, depth=0):
+        if depth > 12:
+            return None
+        k = self._def(insns, start, reg)
+        if k is None:
+            return None
+        if k < 0:
+            return _Expr("reg", reg)
+        i = insns[k]
+        n = i.name
+        nxt = k + 1
+        if n == "addi":
+            if i.ra == 0:
+                return _Expr("const", i.simm & 0xFFFFFFFF)
+            return self._add(self._ev(insns, nxt, i.ra, depth + 1), _Expr("const", i.simm & 0xFFFFFFFF))
+        if n == "addis":
+            if i.ra == 0:
+                return _Expr("const", (i.uimm << 16) & 0xFFFFFFFF)
+            return self._add(self._ev(insns, nxt, i.ra, depth + 1), _Expr("const", (i.uimm << 16) & 0xFFFFFFFF))
+        if n == "ori":
+            x = self._ev(insns, nxt, i.rd, depth + 1)
+            if x is not None and x.k == "const":
+                return _Expr("const", x.a | i.uimm)
+            return None
+        if n == "or" and i.rd == i.rb:  # mr
+            return self._ev(insns, nxt, i.rd, depth + 1)
+        if n == "add":
+            return self._add(self._ev(insns, nxt, i.ra, depth + 1), self._ev(insns, nxt, i.rb, depth + 1))
+        if n == "rlwinm":
+            sh, mb, me = i.rb, i.mb, i.me
+            x = self._ev(insns, nxt, i.rd, depth + 1)
+            if x is None:
+                return None
+            if mb == 0 and me == 31 - sh:            # slwi
+                return _Expr("shl", x, sh)
+            if sh == 0 and mb > 0 and me == 31:      # clrlwi: an index already bounded
+                return x
+            return None
+        if n in ("lwzx", "lhzx", "lbzx"):
+            a, b = self._ev(insns, nxt, i.ra, depth + 1) if i.ra else _Expr("const", 0), \
+                self._ev(insns, nxt, i.rb, depth + 1)
+            if a is None or b is None:
+                return None
+            if b.k == "const" and a.k != "const":
+                a, b = b, a
+            if a.k != "const":
+                return None
+            return _Expr("load", {"lwzx": 4, "lhzx": 2, "lbzx": 1}[n], a.a, b)
+        return None
+
+    @staticmethod
+    def _add(x, y):
+        if x is None or y is None:
+            return None
+        if x.k == "const" and y.k == "const":
+            return _Expr("const", (x.a + y.a) & 0xFFFFFFFF)
+        return _Expr("add", x, y)
+
+    def _calc(self, e, idx_reg, i):
+        k = e.k
+        if k == "const":
+            return e.a
+        if k == "reg":
+            if e.a != idx_reg:
+                raise ValueError("depends on another register")
+            return i
+        if k == "shl":
+            return (self._calc(e.a, idx_reg, i) << e.b) & 0xFFFFFFFF
+        if k == "add":
+            return (self._calc(e.a, idx_reg, i) + self._calc(e.b, idx_reg, i)) & 0xFFFFFFFF
+        if k == "load":
+            ea = (e.b + self._calc(e.c, idx_reg, i)) & 0xFFFFFFFF
+            raw = self._read(ea, e.a)
+            if raw is None:
+                raise ValueError("table outside the image")
+            return raw
+        raise ValueError(k)
+
+    def _read(self, ea, size):
+        img = getattr(self.view, "img", None)
+        if img is None:
+            return None
+        b = img.read(ea, size)
+        if b is None:
+            return None
+        return int.from_bytes(b, "big")
+
+    def _resolve(self, a):
+        insns = self._back(a)
+        k = next((j for j, i in enumerate(insns) if i.name == "mtspr" and i.spr == 9), None)
+        if k is None:
+            return None
+        e = self._ev(insns, k + 1, insns[k].rd)
+        if e is None or e.k == "const":
+            return None
+        # the bound: cmplwi crF, rI, N then a conditional branch on crF's GT bit, before the table code
+        bound = None
+        for j in range(k + 1, len(insns)):
+            i = insns[j]
+            if i.name == "cmpli" and not (i.rd & 1):
+                crf = i.rd >> 2
+                if any(b.kind == BCOND and b.ra == 4 * crf + 1 for b in insns[k + 1:j]):
+                    bound = (i.ra, i.uimm)
+                    break
+        if bound is None:
+            bc = self._bound_before(insns)
+            if bc is None:
+                return None
+            bound = bc
+        reg, n = bound
+        if n > 4096:
+            return None
+        targets = []
+        try:
+            for x in range(n + 1):
+                t = self._calc(e, reg, x)
+                if t is None:
+                    return None
+                # GCC's relative tables hold signed offsets: the sum wraps the same way
+                targets.append(t & 0xFFFFFFFF)
+        except ValueError:
+            return None
+        if not all(self.view.in_code(t) and t % 4 == 0 for t in targets):
+            return None
+        return targets
+
+    def _bound_before(self, insns):
+        """The bound check may sit just before the straight run (the conditional branch ends it): look one block
+        further back, through the branch."""
+        if not insns:
+            return None
+        p = insns[-1].addr - 4
+        if not self.view.in_code(p):
+            return None
+        b = self.decode(p)
+        if b.kind != BCOND or (b.rd & 0x14) == 0x14:
+            return None
+        q = p - 4
+        for _ in range(6):
+            if not self.view.in_code(q):
+                return None
+            i = self.decode(q)
+            if i.name == "cmpli" and not (i.rd & 1) and b.ra == 4 * (i.rd >> 2) + 1:
+                return (i.ra, i.uimm)
+            if i.kind != "normal":
+                return None
+            q -= 4
+        return None
+
+
+class XenonDiscovery(Discovery):
+    """Discovery with jump tables resolved (the image's helpers are hidden by the view, see recomp.CodeView)."""
+
+    def __init__(self, image, decoder, seeds=()):
+        super().__init__(image, decoder, seeds)
+        self.jt = JumpTables(image, self.insn)
+
+    def indirect_targets(self, f, a, i):
+        if (i.rd & 0x14) != 0x14:
+            return ()
+        return self.jt.resolve(a)
+
+    def stats(self):
+        s = super().stats()
+        s["jump_tables"] = len(self.jt.tables)
+        s["jump_table_targets"] = sum(len(t) for t in self.jt.tables.values())
+        s["unresolved_bctr"] = len(self.jt.unresolved)
+        return s

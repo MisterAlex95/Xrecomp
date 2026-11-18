@@ -40,6 +40,11 @@ class Discovery:
             self._cache[a] = i
         return i
 
+    def indirect_targets(self, f, a, i):
+        """Targets of the bcctr i at a known statically (a console layer's jump tables, XBA-270): explored as
+        branches inside f. None here."""
+        return ()
+
     def explore(self, entry, entries):
         f = Function(entry)
         stack = [entry]
@@ -75,6 +80,10 @@ class Discovery:
                     a += 4
                     continue
                 if k in (BCLR, BCCTR):
+                    if k == BCCTR and not i.lk:
+                        for t in self.indirect_targets(f, a, i):
+                            if self.image.in_code(t):
+                                stack.append(t)
                     if (i.rd & 0x14) == 0x14 and not i.lk:
                         break
                     a += 4

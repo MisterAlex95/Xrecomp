@@ -24,9 +24,12 @@ import subprocess
 import sys
 
 from . import CONSOLE  # noqa: F401  (puts the repository root on sys.path)
-from tools.ppc.discover import Discovery
+import zlib
+
 from tools.xex.xex import IMPORT_THUNK, XexError, load_keys, parse_xex
 
+from .discover360 import XenonDiscovery, find_helpers
+from .lift360 import TitleLifter
 from .xenon import XenonDecoder, XenonLifter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -35,16 +38,25 @@ RUNTIME_DIRS = [os.path.join(REPO, "consoles", "x360", "runtime"), os.path.join(
 
 
 class CodeView:
-    """The XEX image as discovery sees it: code sections minus the import thunks (16 bytes each)."""
+    """The XEX image as discovery sees it: code sections minus the import thunks (16 bytes each) and minus the
+    register save / restore helpers once they are known (`hide`): they are inlined, not functions."""
 
     def __init__(self, img):
         self.img = img
         self.thunks = {r.addr for r in img.imports if r.kind == IMPORT_THUNK}
+        self.thunk_words = set()
+        for t in self.thunks:
+            self.thunk_words.update(range(t, t + 16, 4))
+        self.hidden = set()
+
+    def hide(self, helpers):
+        for h, _ in helpers.values():
+            self.hidden.update(range(h.start, h.end + 4, 4))
 
     def in_code(self, a):
         if not self.img.in_code(a):
             return False
-        return not any(t <= a < t + 16 for t in self.thunks)
+        return (a & ~3) not in self.thunk_words and (a & ~3) not in self.hidden
 
     def u32(self, a):
         return self.img.u32(a)
@@ -54,29 +66,43 @@ def fn_name(entry):
     return "xe_fn_%08X" % entry
 
 
+def image_crc(img):
+    """CRC-32 of the mapped image: the pack and the runtime's loaded XEX must agree (stale packs are refused)."""
+    return zlib.crc32(img.image) & 0xFFFFFFFF
+
+
 def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comments=True):
     if img.image is None:
         raise XexError("no image to recompile: %s" % img.image_note)
     view = CodeView(img)
+    dec = XenonDecoder()
+    helpers = find_helpers(view, dec, img.code_ranges())
+    view.hide(helpers)
     seeds = {img.entry} | set(extra_seeds)
     if use_pdata:
         seeds |= {start for start, _ in img.pdata}
-    dec = XenonDecoder()
-    disc = Discovery(view, dec, sorted(seeds))
+    seeds = {a for a in seeds if a not in view.hidden}
+    disc = XenonDiscovery(view, dec, sorted(seeds))
     funcs = disc.run()
+    resume = {}
     os.makedirs(outdir, exist_ok=True)
     unlifted = collections.Counter()
     fallbacks = 0
+    inlined = 0
     invalid = 0
     files = []
     for k in range(0, len(funcs), per_file):
         chunk = funcs[k:k + per_file]
         out = ['/* Lifted from an XEX2 by x360_tools.recomp (XBA-230). */\n#include "xenon_rt.h"\n\n']
         for f in chunk:
-            lifter = XenonLifter(view, disc.insn, f, fn_name(f.entry), comments=comments)
+            lifter = TitleLifter(view, disc.insn, f, fn_name(f.entry), comments=comments, helpers=helpers,
+                                 tables=disc.jt.tables)
             out.append(lifter.function())
             out.append("\n")
             fallbacks += lifter.fallbacks
+            inlined += lifter.inlined
+            for a in lifter.leaders:
+                resume.setdefault(a, f.entry)
             for a in f.addrs:
                 i = disc.insn(a)
                 if lifter.needs_interp(i):
@@ -94,6 +120,16 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     for f in funcs:
         table.append("    {0x%08Xu, %s},\n" % (f.entry, fn_name(f.entry)))
     table.append("};\nconst unsigned xe_rc_count = %du;\n" % len(funcs))
+    # every resume point (block leader: entries, returns from calls, jump table targets) -> its function, sorted:
+    # the runtime's dispatcher looks a PC up here (XBA-270); an entry always maps to its own function
+    for f in funcs:
+        resume[f.entry] = f.entry
+    table.append("\nconst xe_rc_entry xe_rc_resume[] = {\n")
+    for a in sorted(resume):
+        table.append("    {0x%08Xu, %s},\n" % (a, fn_name(resume[a])))
+    table.append("};\nconst unsigned xe_rc_resume_count = %du;\n" % len(resume))
+    table.append("const uint32_t xe_rc_image_crc = 0x%08Xu;\nconst uint32_t xe_rc_image_base = 0x%08Xu;\n"
+                 % (image_crc(img), img.base))
     path = os.path.join(outdir, "x360_rc_table.c")
     with open(path, "w") as fh:
         fh.write("".join(table))
@@ -102,7 +138,11 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     stats = {"functions": st["functions"], "instructions": st["instructions"],
              "lifted_instructions": st["lifted_instructions"], "interp_fallback_insns": fallbacks,
              "invalid_words": invalid, "unlifted": dict(unlifted.most_common()), "seeds": len(seeds),
-             "pdata_functions": len(img.pdata), "files": [os.path.basename(p) for p in files]}
+             "pdata_functions": len(img.pdata), "files": [os.path.basename(p) for p in files],
+             "helpers": sorted({"%s@%08X" % (h.kind, h.start) for h, _ in helpers.values()}),
+             "helper_calls_inlined": inlined, "jump_tables": st["jump_tables"],
+             "jump_table_targets": st["jump_table_targets"], "unresolved_bctr": st["unresolved_bctr"],
+             "resume_points": len(resume)}
     with open(os.path.join(outdir, "stats.json"), "w") as fh:
         json.dump(stats, fh, indent=1)
     return stats
@@ -137,6 +177,28 @@ def sweep(img):
     return total, unknown, unlifted
 
 
+def sweep_shapes(img):
+    """What --sweep says about MSVC's shapes: helpers found by kind, bctr resolved / not (linear, every bctr)."""
+    from .discover360 import JumpTables
+    from tools.ppc.isa import BCCTR
+    dec = XenonDecoder()
+    view = CodeView(img)
+    helpers = find_helpers(view, dec, img.code_ranges())
+    kinds = collections.Counter(h.kind for h in {id(h): h for h, _ in helpers.values()}.values())
+    jt = JumpTables(view, lambda a: dec.decode(view.u32(a), a))
+    ok = bad = 0
+    for lo, hi in img.code_ranges():
+        for a in range(lo, hi, 4):
+            if view.in_code(a):
+                i = dec.decode(view.u32(a), a)
+                if i.kind == BCCTR and (i.rd & 0x14) == 0x14 and not i.lk:
+                    if jt.resolve(a):
+                        ok += 1
+                    else:
+                        bad += 1
+    return kinds, ok, bad
+
+
 def compile_check(files, cc="cc"):
     if not shutil.which(cc):
         raise RuntimeError("no C compiler (%s)" % cc)
@@ -156,6 +218,8 @@ def main(argv=None):
     ap.add_argument("--compile", action="store_true", help="check every C file with the host cc")
     ap.add_argument("--sweep", action="store_true", help="decoder / lifter coverage over the code sections")
     ap.add_argument("--no-comments", action="store_true")
+    ap.add_argument("--discovered", action="append", default=[],
+                    help="more seeds: a file of hex addresses (x360_run --missed), one per line")
     a = ap.parse_args(argv)
     try:
         with open(a.xex, "rb") as f:
@@ -173,11 +237,25 @@ def main(argv=None):
             total, nu, 100.0 * nu / max(total, 1), nl, 100.0 * nl / max(total, 1)))
         print("  unknown by primary opcode: %s" % ", ".join("%s %d" % kv for kv in unknown.most_common(20)))
         print("  not lifted: %s" % ", ".join("%s %d" % kv for kv in unlifted.most_common(30)))
+        kinds, ok, bad = sweep_shapes(img)
+        print("  helpers: %s; bctr: %d jump tables resolved, %d not (indirect calls / tables of other shapes)" % (
+            ", ".join("%s %d" % kv for kv in sorted(kinds.items())) or "none", ok, bad))
     if a.outdir:
-        s = recompile(img, a.outdir, use_pdata=not a.no_pdata, comments=not a.no_comments)
+        seeds = set()
+        for path in a.discovered:
+            if os.path.exists(path):
+                with open(path) as fh:
+                    for line in fh:
+                        line = line.split("#")[0].strip()
+                        if line:
+                            seeds.add(int(line, 16))
+        s = recompile(img, a.outdir, extra_seeds=seeds, use_pdata=not a.no_pdata, comments=not a.no_comments)
         print("recomp: %(functions)d functions, %(instructions)d instructions, %(interp_fallback_insns)d handed to "
               "RC_INTERP, %(invalid_words)d invalid words" % s)
         print("  not lifted: %s" % ", ".join("%s %d" % kv for kv in list(s["unlifted"].items())[:30]))
+        print("  save / restore helpers: %d found, %d calls inlined; jump tables: %d (%d targets), %d bctr "
+              "unresolved; %d resume points" % (len(s["helpers"]), s["helper_calls_inlined"], s["jump_tables"],
+                                                s["jump_table_targets"], s["unresolved_bctr"], s["resume_points"]))
         if a.compile:
             compile_check([os.path.join(a.outdir, p) for p in s["files"]])
             print("  every file compiles (cc -fsyntax-only)")
