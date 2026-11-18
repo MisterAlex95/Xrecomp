@@ -46,6 +46,13 @@ def shaders():
         packed[name] = program([(2, [("fetch", fetch_words(0, 0, 1, XYZW, 0, sel=0, format=38, stride=6, offset=0)),
                                      ("fetch", fetch_words(0, 0, 2, XYZW, 0, sel=0, format=fmt, stride=6, offset=4)),
                                      ("alu", alu_words(**export(62, 1))), ("alu", alu_words(**export(0, 2)))], {})])
+    # vs_inst (XBA-280): the position at the vertex index (an attribute), the colour from fetch constant 1 at a
+    # computed index r2.x = r0.x * c0.x (instancing's index / count: a buffer texture)
+    packed["vs_inst"] = program([(2, [
+        ("fetch", fetch_words(0, 0, 1, XYZW, 0, sel=0, format=38, stride=4, offset=0)),
+        ("alu", alu_words(vop=1, vdest=2, vmask=0xF, srcs=((0, 1, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)))),
+        ("fetch", fetch_words(0, 2, 3, XYZW, 0, sel=1, format=38, stride=4, offset=0)),
+        ("alu", alu_words(**export(62, 1))), ("alu", alu_words(**export(0, 3)))], {})])
     return vs, ps, ps_tex, packed
 
 

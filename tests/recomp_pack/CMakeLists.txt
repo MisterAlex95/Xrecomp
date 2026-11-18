@@ -22,8 +22,10 @@ target_link_libraries(recomp_pack_test PRIVATE ${CMAKE_DL_LIBS})
 # XBA-157, PS1 XBA-168, N64 XBA-174, GameCube XBA-259), which this test does not link: stand-ins that log.
 set(CONSOLES ${CMAKE_CURRENT_SOURCE_DIR}/../../consoles)
 set(CONSOLE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/fake_gba_runtime.c ${CMAKE_CURRENT_SOURCE_DIR}/fake_ps1_runtime.c
-                ${CMAKE_CURRENT_SOURCE_DIR}/fake_n64_runtime.c ${CMAKE_CURRENT_SOURCE_DIR}/fake_gc_runtime.c)
+                ${CMAKE_CURRENT_SOURCE_DIR}/fake_n64_runtime.c ${CMAKE_CURRENT_SOURCE_DIR}/fake_gc_runtime.c
+                ${CMAKE_CURRENT_SOURCE_DIR}/fake_x360_runtime.c)
 set(CONSOLE_INC ${CONSOLES}/gba/runtime ${CONSOLES}/ps1/runtime ${CONSOLES}/n64/runtime ${CONSOLES}/gc/runtime
+                ${CONSOLES}/x360/runtime
                 ${CMAKE_CURRENT_SOURCE_DIR}/../../src/input)
 
 foreach(t fake_shell fake_shell_static)

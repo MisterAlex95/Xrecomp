@@ -2,9 +2,10 @@
 
 XRecomp plays **Game Boy Advance**, **PlayStation** and **Nintendo 64** games, statically recompiled the same way as
 Xbox discs, on the shared host layer and in the Android app. **GameCube** has its runtime in the app too (homebrew
-DOLs and disc images, « GameCube runtime » below). **Nintendo DS**, **PSP**, **Dreamcast**, **Xbox 360**,
+DOLs and disc images, « GameCube runtime » below). **Xbox 360** plays in a window on Linux (`x360_play`) and in the
+app with a pack made on a desktop (XBA-280, « Xbox 360 » below). **Nintendo DS**, **PSP**, **Dreamcast**,
 **Nintendo 3DS** and **PlayStation 2** are spikes: tools, headers or a headless Linux runtime, nothing a player can
-use yet (the Xbox 360's runs a title past its `main()`, without rendering). Goal, order, rules (legal), layout, pipeline and milestones are in the Plane spec:
+use yet. Goal, order, rules (legal), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
 
 | Directory | Console | CPU |
@@ -17,7 +18,7 @@ use yet (the Xbox 360's runs a title past its `main()`, without rendering). Goal
 | `gc/` | GameCube (DOLs and disc images in the app, XBA-259, XBA-261) | Gekko (PowerPC 750 + paired singles, big-endian) |
 | `dc/` | Dreamcast (spike, Linux headless only) | Hitachi SH-4 (SH7091, little-endian, FPU) |
 | `ps2/` | PlayStation 2 (spike, Linux headless only) | Emotion Engine: R5900 (MIPS III + 128-bit MMI, non-IEEE FPU) |
-| `x360/` | Xbox 360 (Linux headless runtime, no rendering yet) | Xenon (64-bit PowerPC + VMX128, big-endian) |
+| `x360/` | Xbox 360 (`x360_play` on Linux, the app with a desktop-made pack: XBA-280) | Xenon (64-bit PowerPC + VMX128, big-endian) |
 | `3ds/` | Nintendo 3DS (spike, Linux headless only) | ARM11 MPCore (ARMv6K + VFPv2), one Horizon user process |
 
 Each one has:
@@ -69,7 +70,8 @@ they are in the session, at nice -8 and put back on the fast cores after a resum
 
 CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1`, `XBR_CONSOLE_N64` and `XBR_CONSOLE_GC` are ON by default on Linux,
 macOS and Android, OFF on Windows. A console is turned on for Android once it is ready: the GBA (XBA-157), the PS1
-(XBA-168), the N64 (XBA-174) and the GameCube (XBA-259, homebrew DOLs) are.
+(XBA-168), the N64 (XBA-174) and the GameCube (XBA-259, homebrew DOLs) are. `XBR_CONSOLE_X360` is ON on Linux and
+Android (XBA-280: a title plays with a pack made on a desktop), off on macOS and Windows.
 
 **GBA core (XBA-152, XBA-153).** Interpreter first (decision of 2026-11-14, XBA-142); the static lifter (below) is an
 acceleration layer. `consoles/gba/runtime/gba_core.h`: an ARM7TDMI interpreter (ARM + Thumb), the memory map, LCD
@@ -1933,8 +1935,9 @@ lines and framebuffer). No BIOS, no game, no decryption: [docs/technical/naomi.m
 **Xbox 360 (XBA-230 spike, XBA-270, epic XBA-229).** An XEX2 title, statically recompiled, runs headless on Linux to
 its `main()` and past it: threads, synchronisation, memory, files on its disc, save data, save states, controllers,
 and its GPU command stream decoded, its shaders translated to GLSL ES and its draws rendered off-screen (first cut).
-Linux only (`XBR_CONSOLE_X360`, ON on Linux, off on macOS, Android and Windows: `memfd_create` for the physical
-memory views), nothing in the app. Tested on titles of our own (assembly and
+`XBR_CONSOLE_X360` is ON on Linux and Android (XBA-280), off on macOS and Windows (`memfd_create` for the physical
+memory views). The player, the eDRAM model, XMA and the app came with XBA-280 (« Xbox 360 player and app »
+below). Tested on titles of our own (assembly and
 devkitPPC C), never on title data; Alex's own dumps go through `python3 -m x360_tools.bringup` (XBA-270's check list).
 What is there:
 
@@ -2055,13 +2058,78 @@ What is there:
   by the homebrew job through `tools/consoles/run_x360_homebrew.sh`). `tests/run_hello_arm64.sh` runs the hello test
   on arm64 under qemu (same text).
 
-Not there yet (XBA-229): the rest of rendering (an eDRAM model with render target bases, formats and MSAA, mips,
-the other texture and resolve formats, vertex fetches at a computed index (instancing), memory export, run-time
-translation of shaders the cache lacks, the GLES / Vulkan choice; several conventions -- winding, channel orders,
-cube faces -- follow Xenia's descriptions and wait for a real title), XMA decoding (XMA voices are silent), audio
-output to a device, vibration, real parallel hardware threads, structured exception
-handling (`__C_specific_handler` continues the search, `RtlUnwind` stops the title), the network, and whatever
-`hle_coverage` lists as missing on Alex's titles.
+**Xbox 360 player and app (XBA-280).** What a title needs to be played, uniform with the other consoles:
+
+- **eDRAM model** (`xenos_gl.c`): the render targets live in the eDRAM at the tile bases `RB_COLOR_INFO`,
+  `RB_COLOR1..3_INFO` and `RB_DEPTH_INFO` name, with `RB_SURFACE_INFO`'s pitch and MSAA mode; each (base, pitch,
+  format, MSAA) is a host texture (least recently used kept, grown to the scissor's height, top row first: guest y = 0
+  at GL's y = 0, the winding and the scissor follow). Formats: 8_8_8_8 (and _GAMMA as sRGB), 2_10_10_10 (RGB10_A2,
+  core GLES 3.0), 2_10_10_10_FLOAT, 16_16, 16_16_16_16 and their _FLOAT forms (RGBA16F / RG16F), 32_FLOAT,
+  32_32_FLOAT -- float targets need `EXT_color_buffer_float`; without it they fall back to 8_8_8_8 once, logged (no
+  GLES 3.1 needed: the GLES 3.0 decision of XBA-270 stands). MSAA targets render single-sampled at the pixel grid. Two
+  keys at one base are two surfaces (a title reinterpreting eDRAM in another format starts from a clear one).
+- **Resolves**: the source surface (render target 0-3 as last bound, else as the registers say) read back at the
+  guest resolution (scaled surfaces filtered down) and written as a tiled texture in 18 destination formats (8, 8_8,
+  8_8_8_8, 1_5_5_5, 5_6_5, 6_5_5, 4_4_4_4, 2_10_10_10, 10_11_11, 11_11_10, 16, 16_16, 16_16_16_16 and their _FLOAT
+  forms, 32_FLOAT, 32_32_FLOAT, 32_32_32_32_FLOAT) with the endian swap, red / blue swap and exponent bias; clears use
+  the source format's raw eDRAM value (`RB_COLOR_CLEAR` / `_LO`). The destination keeps its host picture at the
+  internal resolution while its memory is unchanged (hash checked once per frame): render to texture and the front
+  buffer stay upscaled (`xenos_gl_frame_texture`). Depth resolves write 24_8 (a pass packs the depth texture into
+  RGBA8: GLES 3.0 reads no depth back; the stencil byte is 0, GLES 3.0 cannot read it either).
+- **Textures**: 38 formats (DXN, DXT3A / DXT5A, CTX1, 10_11_11 / 11_11_10, 16-bit normalised (signed per the fetch
+  constant), half and full floats to RGBA16F, 24_8 / 24_8_FLOAT depth, the _AS_16_16_16_16 variants) and **mip
+  levels** from the mip address (each level max(1, pow2(size) >> level), 32-block-aligned pitch and height, 4 KB
+  aligned); a packed mip tail (levels of 16 texels or less with packed_mips) is not decoded yet: sampling stops at the
+  level before it.
+- **Vertex fetch at a computed index** (instancing): `xenos_glsl` keeps a fetch at the untouched r0.x an attribute;
+  any other index (another register or component, r0 once written) reads `xe_vb<n>`, the whole buffer converted to
+  vec4s in an RGBA32F texture (texelFetch: GLES 3.0 has no buffer textures). PsParamGen takes the target's orientation
+  and scale from `pg.zw`, so translated shaders were remade (bringup does it).
+- **Internal resolution** (`xenos_gl_create_scaled` / `xenos_gl_attach`, `RECOMP_X360_UPSCALE` / `RECOMP_UPSCALE`).
+- **XMA** (`x360_xma.c`): 320 contexts in one physical array, the kernel's `XMA*` exports and the APU registers'
+  kick / clear bits (0x7FEA0000, read between slices), packets of the current input buffer decoded into the output
+  ring's free blocks, buffers flipping when read to their end (layouts after Xenia's descriptions, no code taken).
+  XMA2 frames are WMA Pro, whose codebooks this repository does not have (they exist only in LGPL code; nothing
+  copied): the default backend gives each frame 512 samples of silence so titles' buffers keep flowing;
+  `x360_xma_set_backend` takes a real decoder (whether to load libavcodec's at run time or ship it in the APK is a
+  decision for Alex on XBA-280). Loops are not followed.
+- **Audio out and vibration**: the render driver clients' frames mixed and folded to 48 kHz stereo
+  (`x360_audio_pull`); `XamInputSetState`'s motors (`x360_pad_motors`).
+- **`x360_runtime` / `x360_play`** (`x360_runtime.h`, like `gc_runtime`): the title in a window, the renderer on the
+  window's context, each swap's picture presented as a texture at 16:9; one 60 Hz frame of the title's virtual clock
+  per shown frame (`x360_run_until`, `X360_FRAME`: waiting threads never take the clock past the frame), paced and
+  nudged by the audio queue; pads through `console_pad` (`CONSOLE_PAD_X360`, `RECOMP_X360_PAD_MAP`: the host pad's own
+  layout, analog triggers), the keyboard on user 0, the motors to `host_pad_rumble`; save states in
+  `<save dir>/x360-<KEY>/` (the eDRAM is not saved: a load clears the renderer's surfaces), rewind, fast-forward and
+  the hotkeys through `recomp_play`, cheats (`RECOMP_CHEAT_X360`: raw big-endian codes on allocated memory), the perf
+  line, lifecycle pause; the addresses the pack missed and the shaders met go to the work directory for the next pack.
+
+  ```sh
+  python3 -m x360_tools.bringup DEFAULT.XEX /tmp/work --key-file KEY --disc DISC.iso  # plain.xex, libtitle.so, shaders/
+  build/x360/x360_runtime/x360_play /tmp/work/plain.xex --pack /tmp/work/libtitle.so --disc DISC.iso \
+      --shaders /tmp/work/shaders --work /tmp/work/play --upscale 2      # arrows, X Z C V, A S, Q W, Enter, Backspace
+  ```
+- **The app** (Android, `XBR_CONSOLE_X360` ON): `recomp_pack_rom_identify` knows an XEX (« XEX2 ») and an Xbox 360
+  disc image (the XDVDFS volume at XGD2 0x0FD90000, XGD3 0x02080000, or at 0 with default.xex in its root -- an Xbox
+  image there has default.xbe and stays the Xbox's): key `X360-<title id>-<CRC32 of the execution info>`, which a
+  plain rewrite keeps. `Console.X360` (badge « 360 », `.xex` in the import filter, `Console.identify` mirrors it, the
+  library scan tries it on an image the Xbox reader finds no default.xbe in), `ConsolePadMap` / `ConsoleControls` with
+  the 360 pad. A pack is always needed: `x360_tools.bringup ... --app-pack DIR --app-cc <NDK clang>` writes
+  `DIR/x360-<KEY>/` (pack.json console x360, the library built for the device, default.xex, shaders/) to copy into the
+  app's `files/packs/`; `pack_loader.c` hands it to `x360_runtime_start` with the imported image as the disc.
+- Tests: `xenos_draw` (30 frames: eDRAM bases, 2_10_10_10 and float targets resolved to their formats, a depth
+  resolve, mips, a computed-index fetch) and `xenos_draw_x2` (the same at scale 2), `x360_hle` (XMA flow on synthetic packets, the mix,
+  the motors), `x360_window` (the renderer on a window's context, presented and captured: `xvfb-run -a ctest -R
+  x360_window`), `x360_pad_map`, `x360_play` (the test title, sleeping 2 s with `make_hello.py --linger`, played headless
+  frame by frame to frame 120, rewind capturing), `x360_bringup` (the app pack), `tests/recomp_pack` (`test_x360`), the
+  app's `ConsoleTest` / `ConsolePadMapTest` / `LibraryScannerTest`.
+
+Not there yet (XBA-229): memory export, the stencil in depth resolves, the packed mip tail, run-time translation of shaders the cache
+lacks (on the device: a pack made on a desktop), real MSAA, eDRAM aliasing between formats, XMA decoding itself (a
+backend to decide), XMA loops, several conventions (winding, channel orders, cube faces, RB_COLOR_CLEAR) that follow
+Xenia's descriptions and wait for a real title, real parallel hardware threads, structured exception handling
+(`__C_specific_handler` continues the search, `RtlUnwind` stops the title), the network, Prepare on the device, and
+whatever `hle_coverage` lists as missing on Alex's titles.
 
 **Nintendo 3DS spike (XBA-228, epic XBA-222).** Does the ARM work extend to the 3DS's ARM11 (ARMv6K + VFPv2), and
 how much of Horizon (the 3DS operating system) must be emulated high-level for a libctru program? A libctru hello

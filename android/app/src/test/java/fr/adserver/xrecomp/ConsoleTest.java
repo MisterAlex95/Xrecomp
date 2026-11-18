@@ -38,6 +38,7 @@ public class ConsoleTest {
         assertTrue(Console.PS1.hasSaveStates());
         assertTrue(Console.N64.hasSaveStates());
         assertTrue(Console.GC.hasSaveStates());   // XBA-264
+        assertTrue(Console.X360.hasSaveStates());   // XBA-280
         assertFalse(Console.XBOX.hasSaveStates());
         // XBA-240: every console fast-forwards, the Xbox too.
         for (Console c : Console.values())
@@ -477,6 +478,87 @@ public class ConsoleTest {
         bad[0x1F] = 0;
         assertNull(Console.identify(file("Bad.gcm", bad)));
         assertNull(Console.detect(file("Bad.iso", bad)));
+    }
+
+    // ---- Xbox 360 (XBA-280): tests/recomp_pack's test_x360 ----------------------------------------------------
+
+    private static void le32(byte[] b, int o, long v) {
+        b[o] = (byte) v;
+        b[o + 1] = (byte) (v >> 8);
+        b[o + 2] = (byte) (v >> 16);
+        b[o + 3] = (byte) (v >> 24);
+    }
+
+    /** An XEX2 header whose execution info (at 0x20) has the title id. */
+    static byte[] xex(long tid) {
+        byte[] x = new byte[0x200];
+        x[0] = 'X';
+        x[1] = 'E';
+        x[2] = 'X';
+        x[3] = '2';
+        be32(x, 20, 1);
+        be32(x, 24, 0x00040006L);
+        be32(x, 28, 0x20);
+        be32(x, 0x20, 0x11223344L);
+        be32(x, 0x20 + 12, tid);
+        return x;
+    }
+
+    /** An XDVDFS volume at base: sector 32 its descriptor, root directory at sector 40 with `name` (file at 48). */
+    private File xdvdfs(String fileName, long base, String name, byte[] data) throws Exception {
+        File f = new File(tmp.getRoot(), fileName);
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "rw")) {
+            byte[] vd = new byte[0x800];
+            byte[] magic = "MICROSOFT*XBOX*MEDIA".getBytes(StandardCharsets.US_ASCII);
+            System.arraycopy(magic, 0, vd, 0, 20);
+            le32(vd, 20, 40);
+            le32(vd, 24, 0x800);
+            System.arraycopy(magic, 0, vd, 0x7EC, 20);
+            byte[] dir = new byte[0x800];
+            java.util.Arrays.fill(dir, (byte) 0xFF);
+            for (int i = 0; i < 14; i++)
+                dir[i] = 0;
+            le32(dir, 4, 48);
+            le32(dir, 8, data.length);
+            dir[12] = 0x20;
+            dir[13] = (byte) name.length();
+            System.arraycopy(name.getBytes(StandardCharsets.US_ASCII), 0, dir, 14, name.length());
+            raf.seek(base + 0x10000L);
+            raf.write(vd);
+            raf.seek(base + 40 * 2048L);
+            raf.write(dir);
+            raf.seek(base + 48 * 2048L);
+            raf.write(data);
+        }
+        return f;
+    }
+
+    @Test
+    public void xbox360ImportFilterAndKeys() throws Exception {
+        assertEquals(Console.X360, Console.byName("default.xex"));
+        assertTrue(Console.importable("Game.XEX"));
+        assertEquals("360", Console.X360.badge());
+        assertTrue(Console.X360.playable() && Console.X360.directLaunch());
+        assertEquals(Console.X360, Console.fromPack("x360"));
+        assertEquals(Console.X360, Console.ofKey("x360-X360-4D5307E6-00000000"));
+        byte[] x = xex(0x4D5307E6L);
+        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+        crc.update(x, 0x20, 24);
+        String want = String.format(java.util.Locale.ROOT, "X360-4D5307E6-%08X", crc.getValue());
+        Console.Identity id = Console.identify(file("default.xex", x));
+        assertEquals(Console.X360, id.console);
+        assertEquals(want, id.key);
+        assertEquals("x360-" + want, id.packName());
+        // an XGD3 image (game partition at 0x2080000, sparse) and an extracted one: default.xex's key
+        File xgd3 = xdvdfs("Game.iso", 0x2080000L, "default.xex", x);
+        assertEquals(Console.X360, Console.detect(xgd3));
+        assertEquals(want, Console.identify(xgd3).key);
+        File extracted = xdvdfs("Game360.xiso", 0, "DEFAULT.XEX", x);
+        assertEquals(Console.X360, Console.detect(extracted));
+        // an Xbox image (default.xbe) stays the Xbox's
+        File xbox = xdvdfs("Xbox.iso", 0, "default.xbe", new byte[] { 'X', 'B', 'E', 'H' });
+        assertEquals(Console.XBOX, Console.detect(xbox));
+        assertNull(Console.identify(xbox));
     }
 
     @Test

@@ -34,6 +34,8 @@ final class ConsoleControls {
             return "RECOMP_N64_PAD_MAP";
         case GC:
             return "RECOMP_GC_PAD_MAP";
+        case X360:
+            return "RECOMP_X360_PAD_MAP";
         default:
             return null;
         }
@@ -89,7 +91,7 @@ final class ConsoleControls {
      * never stays in this process.
      */
     static String[][] runEnv(Context c, String key) {
-        Console[] all = { Console.GBA, Console.PS1, Console.N64, Console.GC };   // XBA-274: the GameCube's too
+        Console[] all = { Console.GBA, Console.PS1, Console.N64, Console.GC, Console.X360 };   // XBA-280: 360
         String[][] out = new String[all.length][];
         Console mine = key == null ? Console.XBOX : Console.ofKey(key);
         for (int i = 0; i < all.length; i++)
@@ -121,6 +123,13 @@ final class ConsoleControls {
                           R.string.XB_DPAD_LEFT, R.string.XB_DPAD_RIGHT };
             return ids[t];
         }
+        case X360: {   // XBA-280: X360_T_*'s order
+            int[] ids = { R.string.XB_A, R.string.XB_B, R.string.XB_X, R.string.XB_Y, R.string.CC_LB, R.string.CC_RB,
+                          R.string.XB_LT, R.string.XB_RT, R.string.XB_LTHUMB, R.string.XB_RTHUMB, R.string.XB_BACK,
+                          R.string.XB_START, R.string.XB_DPAD_UP, R.string.XB_DPAD_DOWN, R.string.XB_DPAD_LEFT,
+                          R.string.XB_DPAD_RIGHT };
+            return ids[t];
+        }
         default: {
             int[] ids = { R.string.CC_A, R.string.CC_B, R.string.CC_Z, R.string.CC_L, R.string.CC_R, R.string.CC_START,
                           R.string.XB_DPAD_UP, R.string.XB_DPAD_DOWN, R.string.XB_DPAD_LEFT, R.string.XB_DPAD_RIGHT,
@@ -145,6 +154,8 @@ final class ConsoleControls {
             return new int[][] { { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, { 12, 13, 14, 15 } };
         case GC:
             return new int[][] { { 0, 1, 2, 3, 4, 5, 6, 7 }, { 8, 9, 10, 11 } };
+        case X360:
+            return new int[][] { { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, { 12, 13, 14, 15 } };
         default:
             return new int[][] { { 0, 1, 2, 3, 4, 5 }, { 6, 7, 8, 9 }, { 10, 11, 12, 13 } };
         }
@@ -180,6 +191,8 @@ final class ConsoleControls {
             return c.getString(R.string.CC_CONSOLE_PS1);
         case GC:
             return c.getString(R.string.CC_CONSOLE_GC);
+        case X360:
+            return c.getString(R.string.CC_CONSOLE_X360);
         default:
             return c.getString(R.string.CC_CONSOLE_N64);
         }

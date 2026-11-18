@@ -77,10 +77,17 @@ static void shader_loaded(void *ctx, int pixel, const uint32_t *code, uint32_t w
 int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, unsigned max_frames,
                       int width, int height, char *why, size_t why_n)
 {
+    return x360_set_renderer_ex(x, shader_cache, frames_dir, max_frames, width, height, 1, 0, why, why_n);
+}
+
+int x360_set_renderer_ex(x360_machine *x, const char *shader_cache, const char *frames_dir, unsigned max_frames,
+                         int width, int height, int scale, int attach, char *why, size_t why_n)
+{
     struct x360_gpu *g = gpu_of(x);
     if (!g)
         return -1;
-    xenos_gl *gl = xenos_gl_create(shader_cache, width, height, why, why_n);
+    xenos_gl *gl = attach ? xenos_gl_attach(shader_cache, width, height, scale, why, why_n)
+                          : xenos_gl_create_scaled(shader_cache, width, height, scale, why, why_n);
     if (!gl)
         return -1;
     xenos_gl_set_frames_dir(gl, frames_dir, max_frames);
@@ -101,11 +108,44 @@ void x360_render_stats(x360_machine *x, FILE *out)
     xenos_gl_get_stats(x->gpu->gl, &s);
     fprintf(out,
             "render: drawn %llu, resolves %llu, frames %llu (%llu from the front buffer); skipped: no shader %llu, "
-            "unsupported %llu; textures not handled %llu; shaders missing from the cache %u\n",
+            "unsupported %llu; textures not handled %llu; shaders missing from the cache %u; eDRAM surfaces %llu, "
+            "resolve pictures sampled %llu, mipmapped %llu, computed-index fetches %llu\n",
             (unsigned long long)s.drawn, (unsigned long long)s.resolves, (unsigned long long)s.frames,
             (unsigned long long)s.front_buffer_frames,
             (unsigned long long)s.no_shader, (unsigned long long)s.unsupported,
-            (unsigned long long)s.unsupported_textures, s.missing_shaders);
+            (unsigned long long)s.unsupported_textures, s.missing_shaders, (unsigned long long)s.surfaces,
+            (unsigned long long)s.copy_textures, (unsigned long long)s.mipmapped,
+            (unsigned long long)s.computed_fetches);
+}
+
+unsigned x360_render_texture(x360_machine *x, int *width, int *height)
+{
+    if (!x->gpu || !x->gpu->gl)
+        return 0;
+    return xenos_gl_frame_texture(x->gpu->gl, width, height);
+}
+
+void x360_render_reset(x360_machine *x)
+{
+    if (x->gpu && x->gpu->gl)
+        xenos_gl_reset(x->gpu->gl);
+}
+
+void x360_render_set_readback(x360_machine *x, int on)
+{
+    if (x->gpu && x->gpu->gl)
+        xenos_gl_set_readback(x->gpu->gl, on);
+}
+
+void x360_render_end_frame(x360_machine *x)
+{
+    if (x->gpu && x->gpu->gl)
+        xenos_gl_end_frame(x->gpu->gl);
+}
+
+int x360_render_scale(x360_machine *x)
+{
+    return x->gpu && x->gpu->gl ? xenos_gl_scale(x->gpu->gl) : 0;
 }
 
 const uint8_t *x360_render_frame(x360_machine *x, int *width, int *height)

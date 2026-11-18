@@ -6,6 +6,9 @@
     <string name="CC_CONSOLE_PS1">PlayStation</string>
     <string name="CC_CONSOLE_N64">Nintendo 64</string>
     <string name="CC_CONSOLE_GC">GameCube</string>
+    <string name="CC_CONSOLE_X360">Xbox 360</string>
+    <string name="CC_LB">LB</string>
+    <string name="CC_RB">RB</string>
 
     <!-- The consoles' buttons (what the game gets). -->
     <string name="CC_A">A</string>

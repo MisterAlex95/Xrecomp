@@ -77,6 +77,11 @@ int x360_set_disc(x360_machine *x, const char *path, char *why, size_t n)
 {
     struct x360_fs *fs = fs_of(x);
     struct stat sb;
+    char fdpath[64];
+    if (path && !strncmp(path, "fd:", 3)) { /* a document the app shell opened (XBA-280): its descriptor's file */
+        snprintf(fdpath, sizeof fdpath, "/proc/self/fd/%d", atoi(path + 3));
+        path = fdpath;
+    }
     if (stat(path, &sb) != 0) {
         snprintf(why, n, "%s: %s", path, strerror(errno));
         return -1;

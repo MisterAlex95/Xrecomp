@@ -373,7 +373,8 @@ final class GameSettings {
                     out.add(k);
             }
         }
-        for (Console c : new Console[] { Console.XBOX, Console.GBA, Console.PS1, Console.N64, Console.GC }) {
+        for (Console c : new Console[] { Console.XBOX, Console.GBA, Console.PS1, Console.N64, Console.GC,
+                                         Console.X360 }) {
             for (String k : extraKeys(c)) {
                 if (!out.contains(k))
                     out.add(k);

@@ -503,9 +503,14 @@ int x360_run(x360_machine *x, uint64_t insns)
             x->status = X360_BUDGET;
             break;
         }
+        if (x->run_until && x360_now(x) >= x->run_until) {
+            x->status = X360_FRAME;
+            break;
+        }
         x360_timers_fire(x);
         x360_gpu_poll(x);
         x360_audio_poll(x);
+        x360_xma_poll(x);
         x360_input_poll(x);
         if (x->timestamp_bundle) { /* KeTimeStampBundle: interrupt time, system time, tick count (ms) */
             uint64_t now = x360_now(x);
@@ -531,6 +536,8 @@ int x360_run(x360_machine *x, uint64_t insns)
                 break;
             }
             uint64_t now = x360_now(x);
+            if (x->run_until && d > x->run_until)
+                d = x->run_until; /* a player's frame: the clock stops at its end */
             if (d > now)
                 x->time_skip += d - now;
             continue;
@@ -547,6 +554,25 @@ int x360_run(x360_machine *x, uint64_t insns)
     return x->status;
 }
 
+uint64_t x360_time(x360_machine *x)
+{
+    return x360_now(x);
+}
+
+int x360_run_until(x360_machine *x, uint64_t t)
+{
+    if (x->status != X360_RUNNING)
+        return x->status;
+    x->run_until = t ? t : 1;
+    int r = x360_run(x, ~0ull >> 2);
+    x->run_until = 0;
+    if (r == X360_FRAME) {
+        x->status = X360_RUNNING;
+        return X360_FRAME;
+    }
+    return r;
+}
+
 /* ---- the machine ---- */
 
 x360_machine *x360_create(const uint8_t *xex, size_t size, char *why, size_t why_len)
@@ -559,7 +585,7 @@ x360_machine *x360_create(const uint8_t *xex, size_t size, char *why, size_t why
     x->memfd = -1;
     x->cur = -1;
     x->m.rt = x;
-    if (x360_mem_init(x, why, why_len) || x360_gpu_init(x) || x360_kernel_init(x) ||
+    if (x360_mem_init(x, why, why_len) || x360_gpu_init(x) || x360_xma_init(x) || x360_kernel_init(x) ||
         x360_load(x, xex, size, why, why_len)) {
         if (!why[0])
             snprintf(why, why_len, "kernel initialisation failed");
@@ -589,7 +615,7 @@ x360_machine *x360_create_bare(char *why, size_t n)
     x->cur = -1;
     x->m.rt = x;
     x->stack_size = 0x10000;
-    if (x360_mem_init(x, why, n) || x360_gpu_init(x) || x360_kernel_init(x) ||
+    if (x360_mem_init(x, why, n) || x360_gpu_init(x) || x360_xma_init(x) || x360_kernel_init(x) ||
         !x360_thread_create(x, 0x10000, 0x82000000u, 0, 0, 0)) {
         x360_destroy(x);
         return NULL;
@@ -606,6 +632,7 @@ void x360_destroy(x360_machine *x)
     x360_audio_close(x);
     x360_fs_free(x);
     x360_gpu_free(x);
+    x360_xma_free(x);
     free(x->pad_script);
     x360_mem_free(x);
     free(x->thunks);

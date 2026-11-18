@@ -120,7 +120,10 @@ void x360_x_XamInputSetState(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     int u = user_of(A(0) & 0xFF);
-    RET(u >= 0 && x->pads[u].connected ? 0 : X_ERROR_DEVICE_NOT_CONNECTED); /* vibration: no host motor yet */
+    /* XINPUT_VIBRATION: left (low frequency) and right (high frequency) motor speeds, 16 bits each */
+    if (u >= 0 && x->pads[u].connected && A(2))
+        x360_pad_set_motors(x, u, x360_r16(x, A(2)) >> 8, x360_r16(x, A(2) + 2) >> 8);
+    RET(u >= 0 && x->pads[u].connected ? 0 : X_ERROR_DEVICE_NOT_CONNECTED);
 }
 
 void x360_x_XamInputGetCapabilitiesEx(x360_machine *x, x360_thread *t, xe_cpu *c)

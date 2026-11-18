@@ -496,6 +496,104 @@ static void test_audio_out(void)
     unlink(path);
 }
 
+/* XMA contexts (XBA-280): synthetic XMA2 packets (headers only: the default backend gives each frame 512 samples
+ * of silence), the input buffers' flow, the output ring and its read offset, the APU kick register; the render
+ * driver's mix; the motors */
+static void test_xma(void)
+{
+    uint32_t pctx = x360_kalloc(X, 4);
+    CHECK(K(X360_xboxkrnl_XMACreateContext, 1, pctx) == 0 && x360_r32(X, pctx) >= 0xA0000000u, "XMA context");
+    uint32_t ctx = x360_r32(X, pctx);
+    uint32_t in = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0x1000);
+    uint32_t out = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0x1000);
+    for (int p = 0; p < 2; p++) { /* two packets of 3 frames: header frame count 3, metadata 1, no skip */
+        x360_w8(X, in + 2048 * (uint32_t)p, 3u << 2);
+        x360_w8(X, in + 2048 * (uint32_t)p + 2, 1);
+        x360_w8(X, in + 2048 * (uint32_t)p + 3, 0);
+    }
+    for (uint32_t k = 0; k < 0x2000; k += 4)
+        x360_w32(X, out + k, 0x55555555u);
+    uint32_t init = x360_kalloc(X, 64);
+    uint32_t iv[11] = {in & 0x1FFFFFFFu, 2, 0, 0, 0, out & 0x1FFFFFFFu, 31, 0, 0, 1, 0}; /* 31 blocks: a 5-bit count */
+    for (int k = 0; k < 11; k++)
+        x360_w32(X, init + 4 * (uint32_t)k, iv[k]);
+    K(X360_xboxkrnl_XMAInitializeContext, 2, ctx, init);
+    K(X360_xboxkrnl_XMASetInputBuffer0Valid, 1, ctx);
+    K(X360_xboxkrnl_XMASetOutputBufferValid, 1, ctx);
+    CHECK(K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 1 && K(X360_xboxkrnl_XMAIsOutputBufferValid, 1, ctx) == 1,
+          "XMA valid bits");
+    K(X360_xboxkrnl_XMAEnableContext, 1, ctx);
+    /* 2 packets x 3 frames x 512 samples x 2 bytes = 24 blocks of 256 bytes; buffer 0 read to its end */
+    uint64_t packets, frames, blocks;
+    unsigned nctx;
+    x360_xma_get_stats(X, &packets, &frames, &blocks, &nctx);
+    CHECK(K(X360_xboxkrnl_XMAGetOutputBufferWriteOffset, 1, ctx) == 24 && packets == 2 && frames == 6 &&
+              K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 0 && nctx == 1 &&
+              K(X360_xboxkrnl_XMAGetPacketMetadata, 1, ctx) == 1,
+          "XMA decode: write offset %u, packets %llu, frames %llu, buffer 0 valid %u",
+          K(X360_xboxkrnl_XMAGetOutputBufferWriteOffset, 1, ctx), (unsigned long long)packets,
+          (unsigned long long)frames, K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx));
+    CHECK(x360_r32(X, out) == 0 && x360_r32(X, out + 24 * 256 - 4) == 0 && x360_r32(X, out + 24 * 256) == 0x55555555u,
+          "XMA output: 24 blocks of silence, the rest untouched");
+    /* again: the ring fills up to the block before the read offset (0): 6 more blocks, the rest waits */
+    K(X360_xboxkrnl_XMASetInputBuffer0Valid, 1, ctx);
+    x360_xma_poll(X);
+    CHECK(K(X360_xboxkrnl_XMAGetOutputBufferWriteOffset, 1, ctx) == 30, "XMA ring full at 30 (got %u)",
+          K(X360_xboxkrnl_XMAGetOutputBufferWriteOffset, 1, ctx));
+    K(X360_xboxkrnl_XMASetOutputBufferReadOffset, 2, ctx, 20);
+    x360_xma_poll(X);
+    CHECK(K(X360_xboxkrnl_XMAGetOutputBufferWriteOffset, 1, ctx) == 17 &&
+              K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 0,
+          "XMA ring drained to the read offset: write offset %u", K(X360_xboxkrnl_XMAGetOutputBufferWriteOffset, 1, ctx));
+    /* the APU's kick register enables a context, as titles' XAudio2 does without the export */
+    K(X360_xboxkrnl_XMADisableContext, 1, ctx);
+    K(X360_xboxkrnl_XMASetInputBuffer0Valid, 1, ctx);
+    K(X360_xboxkrnl_XMASetOutputBufferReadOffset, 2, ctx, 17);
+    x360_xma_poll(X);
+    CHECK(K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 1, "XMA disabled: nothing decoded");
+    x360_w32(X, 0x7FEA0000u + 4 * 0x650, 1u); /* context 0 */
+    x360_xma_poll(X);
+    CHECK(K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 0 && x360_r32(X, 0x7FEA0000u + 4 * 0x650) == 0,
+          "XMA kick register");
+    K(X360_xboxkrnl_XMAReleaseContext, 1, ctx);
+    x360_xma_get_stats(X, &packets, &frames, &blocks, &nctx);
+    CHECK(nctx == 0, "XMA context released");
+
+    /* the render driver's mix: front left 0.25, centre 0.1, surround right 0.5 -> L 0.3207, R 0.4243 */
+    int16_t pcm[600 * 2];
+    x360_audio_tick(X);
+    while (x360_audio_pull(X, pcm, 600))
+        ;
+    uint32_t cb = x360_kalloc(X, 8), drv = x360_kalloc(X, 4), buf = x360_kalloc(X, 4 * 6 * 256);
+    x360_w32(X, cb, 0x82000000u), x360_w32(X, cb + 4, 0);
+    K(X360_xboxkrnl_XAudioRegisterRenderDriverClient, 2, cb, drv);
+    static const float level[6] = {0.25f, 0, 0.1f, 0, 0, 0.5f};
+    for (int ch = 0; ch < 6; ch++)
+        for (int s = 0; s < 256; s++) {
+            uint32_t bits;
+            memcpy(&bits, &level[ch], 4);
+            x360_w32(X, buf + 4 * (uint32_t)(ch * 256 + s), bits);
+        }
+    K(X360_xboxkrnl_XAudioSubmitRenderDriverFrame, 2, x360_r32(X, drv), buf);
+    K(X360_xboxkrnl_XAudioSubmitRenderDriverFrame, 2, x360_r32(X, drv), buf);
+    x360_audio_tick(X);
+    size_t got = x360_audio_pull(X, pcm, 600);
+    CHECK(got == 512 && abs(pcm[0] - 10509) <= 2 && abs(pcm[1] - 13903) <= 2 && pcm[2 * 511] == pcm[0],
+          "audio mix: %zu frames, L %d R %d", got, pcm[0], pcm[1]);
+    K(X360_xboxkrnl_XAudioUnregisterRenderDriverClient, 1, x360_r32(X, drv));
+
+    /* vibration: XamInputSetState's motor speeds */
+    x360_pad pad = {0};
+    x360_set_pad(X, 0, &pad);
+    uint32_t vib = x360_kalloc(X, 4);
+    x360_w16(X, vib, 0x8000), x360_w16(X, vib + 2, 0xFF00);
+    unsigned ml, mr;
+    CHECK(XM(X360_xam_XamInputSetState, 3, 0, 0, vib) == 0, "XamInputSetState");
+    x360_pad_motors(X, 0, &ml, &mr);
+    CHECK(ml == 128 && mr == 255, "motors %u %u", ml, mr);
+    x360_set_pad(X, 0, NULL);
+}
+
 static void test_input_and_cheats(void)
 {
     uint32_t st = x360_kalloc(X, 32);
@@ -758,6 +856,7 @@ int main(int argc, char **argv)
     test_strict_imports();
     test_input_and_cheats();
     test_audio_out();
+    test_xma();
     test_crypt();
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {

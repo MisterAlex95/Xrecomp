@@ -32,6 +32,7 @@ enum {
     X360_ERROR = 2,    /* see x360_error() */
     X360_BUDGET = 3,   /* the instruction budget ran out */
     X360_MISSED = 4,   /* execution reached an address the pack does not cover (x360_missed()) */
+    X360_FRAME = 5,    /* x360_run_until: the virtual time asked for was reached (the machine goes on running) */
 };
 
 /* Load an XEX2 (unencrypted, compression none or basic: python3 -m tools.xex FILE --plain OUT makes one from an
@@ -60,12 +61,45 @@ void x360_gpu_opcode_histogram(x360_machine *x, FILE *out);
 int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, unsigned max_frames,
                       int width, int height, char *why, size_t why_n);
 void x360_render_stats(x360_machine *x, FILE *out);
+/* The same with an internal resolution (scale 1-8: every eDRAM surface scale x its guest size) and, attach = 1, on
+ * the caller's current GLES 3 context (a window: no EGL of its own, no frame read back unless frames_dir is set or
+ * x360_render_set_readback asks). XBA-280. */
+int x360_set_renderer_ex(x360_machine *x, const char *shader_cache, const char *frames_dir, unsigned max_frames,
+                         int width, int height, int scale, int attach, char *why, size_t why_n);
+/* The last frame as a GL texture (*width x *height host pixels, top row first, the front buffer's swizzle set on it),
+ * 0 when there is none. */
+unsigned x360_render_texture(x360_machine *x, int *width, int *height);
+void x360_render_set_readback(x360_machine *x, int on);
+int x360_render_scale(x360_machine *x);
+/* after the frames a window shows ran: its context's state back as the window's drawing expects (attach mode) */
+void x360_render_end_frame(x360_machine *x);
+/* After a state load (x360_state_load calls it): the eDRAM is not in states, surfaces start clear. */
+void x360_render_reset(x360_machine *x);
 /* The renderer's last frame (RGBA, top row first) and its counters, or NULL / zeros when it is off. */
 const uint8_t *x360_render_frame(x360_machine *x, int *width, int *height);
 void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint64_t *front_buffer_frames);
 /* The audio the title submits to the render driver (256-sample frames of 6 channels at 48 kHz), written to F as a
  * 32-bit float WAV, sizes filled in when the machine is freed. XMA is not decoded: XMA voices stay silent. */
 void x360_set_audio_out(x360_machine *x, FILE *f);
+/* The audio the title plays (XBA-280): the render driver clients' frames mixed and folded down to 48 kHz 16-bit
+ * stereo (front + 0.707 x (centre + surround) per side), up to `frames` taken from the ring (interleaved L, R);
+ * returns the frames given. About a third of a second is kept; older frames are dropped when nothing pulls. */
+size_t x360_audio_pull(x360_machine *x, int16_t *out, size_t frames);
+/* XMA (x360_xma.c): the decoder of XMA2 packets behind the contexts. The default backend gives each frame 512
+ * samples of silence (XMA2 frames are WMA Pro: no decoder here); a host may register another for every machine.
+ * decode: one 2048-byte packet (header included) to at most max_samples 16-bit samples (interleaved when the stream
+ * is stereo); returns the samples written. */
+typedef struct x360_xma_backend {
+    const char *name;
+    void *(*open)(int channels, int sample_rate);
+    int (*decode)(void *dec, const uint8_t *packet, int16_t *out, int max_samples);
+    void (*close)(void *dec);
+} x360_xma_backend;
+void x360_xma_set_backend(const x360_xma_backend *b); /* NULL: the silent one */
+const char *x360_xma_backend_name(void);
+void x360_xma_get_stats(x360_machine *x, uint64_t *packets, uint64_t *frames, uint64_t *blocks, unsigned *contexts);
+/* The pad motors XamInputSetState last asked for (0-255: left low frequency, right high frequency), user 0..3. */
+void x360_pad_motors(x360_machine *x, int user, unsigned *left, unsigned *right);
 /* A trace of the GPU command stream (PM4 packets, register blocks, draws, swaps), or NULL. */
 void x360_set_gpu_trace(x360_machine *x, FILE *f);
 /* Where DbgPrint and the runtime's own messages go (default stdout / stderr), verbosity (0 quiet, 1 HLE calls). */
@@ -73,6 +107,11 @@ void x360_set_output(x360_machine *x, FILE *dbg, FILE *log, int verbose);
 /* Run until the title exits, an error, a missed address or `insns` more instructions. Returns X360_*. */
 int x360_run(x360_machine *x, uint64_t insns);
 const char *x360_error(const x360_machine *x);
+/* Run until the virtual clock reaches `t` (100 ns units since the title started: x360_time + one frame for a
+ * player's frame) or the title stops; X360_FRAME when it was reached (the status stays running), else as x360_run.
+ * Waiting threads never take the clock past t. XBA-280. */
+int x360_run_until(x360_machine *x, uint64_t t);
+uint64_t x360_time(x360_machine *x);
 uint32_t x360_exit_code(const x360_machine *x);
 /* Addresses execution reached without lifted code (for x360_tools.recomp --discovered). */
 unsigned x360_missed(const x360_machine *x, const uint32_t **addrs);

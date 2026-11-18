@@ -11,7 +11,10 @@
    code the pack lacks, recompile with those addresses and run again (up to --rounds);
    the shaders it loads are dumped (WORKDIR/shaders) and translated to GLSL ES (xenos_glsl), counted, and a
    last run draws with them (x360_run --render; --frames N keeps the first N frames as PPM in WORKDIR/frames);
-5. a summary with no title data in it (counts, export names, the runtime's last message), also written to
+5. with --app-pack DIR (XBA-280), an app pack: DIR/x360-<KEY>/ with the pack built again by --app-cc (the NDK's
+   clang for the AYN Thor: aarch64-linux-android30-clang), default.xex (the plain title), the shader cache (shaders/)
+   and pack.json (console x360, title_key, abi, shell_abi 1, lib, lib_size), to copy into the app's files/packs/;
+6. a summary with no title data in it (counts, export names, the runtime's last message), also written to
    WORKDIR/summary.txt: what to paste in the ticket.
 
 What the title printed through DbgPrint stays in WORKDIR/dbg.txt (not in the summary: it is the title's text).
@@ -117,6 +120,40 @@ def shader_report(shader_dir):
     return rep
 
 
+def title_key(raw):
+    """The app's key of an XEX (recomp_pack_rom_identify, x360_runtime_key): X360-<title id>-<CRC32 of the execution
+    info's 24 bytes>, from optional header 0x00040006 (a plain rewrite keeps it); None without one."""
+    import zlib
+    if len(raw) < 24 or raw[:4] != b"XEX2":
+        return None
+    count = struct.unpack(">I", raw[20:24])[0]
+    for i in range(min(count, 64)):
+        k, v = struct.unpack(">II", raw[24 + 8 * i:32 + 8 * i])
+        if k == 0x00040006 and v + 24 <= len(raw):
+            return "X360-%08X-%08X" % (struct.unpack(">I", raw[v + 12:v + 16])[0], zlib.crc32(raw[v:v + 24]))
+    return None
+
+
+def app_pack(out_dir, raw, plain, src, shader_dir, cc, jobs, abi):
+    """DIR/x360-<KEY>/: the pack built by cc, default.xex, shaders/ (GLSL ES and microcode), pack.json."""
+    key = title_key(raw)
+    if not key:
+        raise RuntimeError("the XEX has no execution info: no title key")
+    d = os.path.join(out_dir, "x360-" + key)
+    os.makedirs(os.path.join(d, "shaders"), exist_ok=True)
+    lib = os.path.join(d, "libtitle.so")
+    build_pack(src, lib, cc, jobs)
+    shutil.copyfile(plain, os.path.join(d, "default.xex"))
+    for f in glob.glob(os.path.join(shader_dir, "*")):
+        if f.endswith((".vert", ".frag", ".bin")):
+            shutil.copyfile(f, os.path.join(d, "shaders", os.path.basename(f)))
+    meta = {"format": 1, "console": "x360", "title_key": key, "title": key, "abi": abi, "shell_abi": 1,
+            "lib": "libtitle.so", "lib_size": os.path.getsize(lib)}
+    with open(os.path.join(d, "pack.json"), "w") as f:
+        json.dump(meta, f, indent=1)
+    return d, key
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python3 -m x360_tools.bringup")
     ap.add_argument("xex")
@@ -132,6 +169,10 @@ def main(argv=None):
                     help="skip the last run that draws with the translated shaders (EGL / GLES 3.0)")
     ap.add_argument("--frames", type=int, default=0,
                     help="that run's frames: keep the first N as PPM in WORKDIR/frames (default 0: count only)")
+    ap.add_argument("--app-pack", help="also write an app pack into DIR/x360-<KEY>/ (pack.json, the pack, shaders)")
+    ap.add_argument("--app-cc", default=os.environ.get("APP_CC", ""),
+                    help="the app pack's compiler (default: --cc; the AYN Thor: aarch64-linux-android30-clang)")
+    ap.add_argument("--app-abi", default="arm64-v8a", help="the app pack's ABI in pack.json (default arm64-v8a)")
     a = ap.parse_args(argv)
     os.makedirs(a.work, exist_ok=True)
     lines = []
@@ -242,6 +283,13 @@ def main(argv=None):
     dbg = os.path.join(a.work, "dbg.txt")
     say("DbgPrint: %d lines (in %s, not copied here)" % (
         sum(1 for _ in open(dbg, errors="replace")) if os.path.exists(dbg) else 0, dbg))
+    if a.app_pack:
+        try:
+            d, key = app_pack(a.app_pack, raw, plain, os.path.join(a.work, "src"), shader_dir, a.app_cc or a.cc,
+                              a.j, a.app_abi)
+            say("app pack: x360-%s (copy %s into the app's files/packs/)" % (key, d))
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as ex:
+            say("app pack: not written: %s" % ex)
     say("total %.1f s" % (time.time() - t0))
     with open(os.path.join(a.work, "summary.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")

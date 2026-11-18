@@ -14,8 +14,9 @@ What the GLSL expects of the host (the renderer, xenos_gl.c): one std140 uniform
 `XeVertexConstants` / `XePixelConstants` { vec4 c[256] (the stage's float constants); uvec4 b[2] (the 256 boolean
 constants); uvec4 l[8] (the 32 loop constants); vec4 at (the alpha test: enable, function, reference, as
 RB_COLORCONTROL / RB_ALPHA_REF say; the pixel shader discards a failing colour 0); vec4 pg (the pixel parameter
-register SQ_CONTEXT_MISC names, or -1, and the target height: r[pg.x] gets the pixel's top-left-origin position, X
-negative for a back face, as Xenia's registers.h describes PsParamGen); vec4 vp (the guest viewport as a transform
+register SQ_CONTEXT_MISC names, or -1; r[pg.x] gets the pixel's top-left-origin position gl_FragCoord.xy * pg.zw +
+(0, pg.y) - 0.5 -- the host's target orientation and internal resolution scale --, X negative for a back face, as
+Xenia's registers.h describes PsParamGen); vec4 vp (the guest viewport as a transform
 of clip-space xy: host xy = xy * vp.xy + w * vp.zw) } xe_k -- 4304 bytes, the host
 picks the binding points (GLES 3.0
 guarantees 16 KB blocks, while 256 loose vec4 would take all of a pixel shader's guaranteed uniforms); `in vec4
@@ -38,6 +39,11 @@ getCompTexLOD, getGradients, getWeights); multiply-add is
 written unfused (Xenos rounds once: small differences); log / rsq / sqrt of negative numbers are left to the host
 (GLSL ES leaves them undefined: llvmpipe gives 0). Integer and signed-normalised vertex formats are the host's
 conversion, exp_adjust too.
+
+Vertex fetches: at the untouched r0.x (the vertex index) a fetch is an attribute `xe_v<n>`; at any other index
+(another register or component, or r0 once the shader wrote it: instancing's index / count) it reads `uniform highp
+sampler2D xe_vb<n>`, the whole buffer converted by the renderer to vec4s (texelFetch, 1024 elements a row: GLES 3.0
+has no buffer textures), at the index truncated.
 """
 
 import re
@@ -47,6 +53,11 @@ import sys
 from .xenos_ucode import EXEC_OPS, VECTOR, decode_alu, decode_cf, decode_fetch, unpack_cf
 
 FLT_MAX = "3.402823466e+38"
+
+# Stamped in every translation; the renderer (xenos_gl.c XENOS_GLSL_STAMP) refuses a cached shader without it, so a
+# cache made before a change of the host contract is translated again (bringup does it) rather than drawn wrong.
+# 2: XBA-280 (PsParamGen from pg.zw, xe_vb<n> buffers for computed-index fetches).
+GLSL_VERSION = 2
 
 
 class Unsupported(Exception):
@@ -140,6 +151,9 @@ class _Shader:
         self.uses_al = False
         self.exports_depth = self.exports_psize = False
         self.last_full = None  # (fetch constant, stride) of the last full vertex fetch, for mini fetches
+        self.vbuffers = []        # (key, dict): vertex fetches at a computed index, read from a buffer texture
+        self.r0_written = False   # r0 (the vertex index) overwritten so far
+        self.force_computed = False
 
     def emit(self, line):
         self.body.append("    " * self.depth + line)
@@ -220,6 +234,8 @@ class _Shader:
         if not mask:
             return
         comps = "".join("xyzw"[i] for i in range(4) if mask >> i & 1)
+        if target == "r[0]" or target.startswith("r[clamp("):
+            self.r0_written = True
         v = "clamp(%s, 0.0, 1.0)" % value if clamp else value
         self.emit("%s.%s = (%s).%s;" % (target, comps, v, comps))
 
@@ -367,13 +383,24 @@ class _Shader:
             else:
                 fc, stride = f["const_index"] * 3 + f["const_index_sel"], f["stride"]
             key = (fc, f["offset"])
-            names = [k for k, _ in self.attributes]
-            if key not in names:
-                self.attributes.append((key, {"fetch_constant": fc, "offset": f["offset"], "format": f["format"],
-                                              "stride": stride, "signed": f["signed"], "integer": f["integer"],
-                                              "exp_adjust": f["exp_adjust"]}))
-                names.append(key)
-            src = "xe_v%d" % names.index(key)
+            desc = {"fetch_constant": fc, "offset": f["offset"], "format": f["format"], "stride": stride,
+                    "signed": f["signed"], "integer": f["integer"], "exp_adjust": f["exp_adjust"]}
+            # the index: the untouched r0.x is the vertex index (an attribute); anything else -- another register or
+            # component, r0 after the shader wrote it (instancing: index / count) -- reads the buffer as a texture
+            # at the computed index (truncated, as Xenia's fetch does when the index is not rounded)
+            if f["src_reg"] or f["src_rel"] or f["src_swizzle"] or self.r0_written or self.force_computed:
+                names = [k for k, _ in self.vbuffers]
+                if key not in names:
+                    self.vbuffers.append((key, desc))
+                    names.append(key)
+                index = "int(floor((%s).%s))" % (self.temp(f["src_reg"], f["src_rel"]), "xyzw"[f["src_swizzle"]])
+                src = "xe_vfetch(xe_vb%d, %s)" % (names.index(key), index)
+            else:
+                names = [k for k, _ in self.attributes]
+                if key not in names:
+                    self.attributes.append((key, desc))
+                    names.append(key)
+                src = "xe_v%d" % names.index(key)
         elif f["op"] in (24, 25, 26):
             # setTexLOD / setGradientH / setGradientV: kept for the texture fetches that use them
             sw = f["src_swizzle"]
@@ -434,7 +461,10 @@ class _Shader:
             self.depth += 1
         comps = "".join("xyzw"[i] for i in range(4) if mask >> i & 1)
         value = "vec%d(%s)" % (len(parts), ", ".join(parts)) if len(parts) > 1 else parts[0]
-        self.emit("{ vec4 f_ = %s; %s.%s = %s; }" % (src, self.temp(f["dst_reg"], f["dst_rel"]), comps, value))
+        dst = self.temp(f["dst_reg"], f["dst_rel"])
+        if dst == "r[0]" or dst.startswith("r[clamp("):
+            self.r0_written = True
+        self.emit("{ vec4 f_ = %s; %s.%s = %s; }" % (src, dst, comps, value))
         if pred:
             self.depth -= 1
             self.emit("}")
@@ -573,9 +603,14 @@ def translate(words, stage="vertex", interpolators=0):
     flow = any(cf["op"] in (7, 8, 9, 11) for cf in cfs)
     if flow:
         _flow_body(sh, cfs, words)
+        if stage == "vertex" and sh.r0_written and sh.attributes:
+            # loops / jumps: program order is not run order, so once r0 is written anywhere every fetch is computed
+            sh = _Shader(stage, interpolators)
+            sh.force_computed = True
+            _flow_body(sh, cfs, words)
     else:
         _straight_body(sh, cfs, words)
-    out = ["#version 300 es", "precision highp float;", "precision highp int;", "precision highp sampler2D;",
+    out = ["#version 300 es", "// xenos_glsl %d" % GLSL_VERSION, "precision highp float;", "precision highp int;", "precision highp sampler2D;",
            "precision highp sampler3D;", "precision highp samplerCube;",
            # an instance name: block members are global to a program, and both stages have xe_c / xe_b / xe_l
            "layout(std140) uniform %s { vec4 c[256]; uvec4 b[2]; uvec4 l[8]; vec4 at; vec4 pg; vec4 vp; } xe_k;" % (
@@ -586,6 +621,12 @@ def translate(words, stage="vertex", interpolators=0):
         out.append("in vec4 xe_v%d;  // fetch constant %d, offset %d, format %d, stride %d, signed %d, integer %d, "
                    "exp %d" % (i, a["fetch_constant"], a["offset"], a["format"], a["stride"], a["signed"],
                                a["integer"], a["exp_adjust"]))
+    for i, (_, a) in enumerate(sh.vbuffers):
+        # a vertex buffer read at computed indices: the renderer converts the whole buffer (the fetch constant's size)
+        # to vec4s in an RGBA32F texture, 1024 elements per row (the same comment as the attributes')
+        out.append("uniform highp sampler2D xe_vb%d;  // fetch constant %d, offset %d, format %d, stride %d, signed %d, "
+                   "integer %d, exp %d" % (i, a["fetch_constant"], a["offset"], a["format"], a["stride"], a["signed"],
+                                           a["integer"], a["exp_adjust"]))
     for t, dim in sorted(sh.textures.items()):
         out.append("uniform %s xe_t%d;" % ({0: "sampler2D", 1: "sampler2D", 2: "sampler3D", 3: "samplerCube"}[dim],
                                             t))
@@ -596,6 +637,9 @@ def translate(words, stage="vertex", interpolators=0):
         out += ["in vec4 xe_i%d;" % i for i in range(interpolators)]
         out += ["layout(location = %d) out vec4 xe_color%d;" % (o, o) for o in sorted(sh.outputs)]
     out.append(PRELUDE.rstrip())
+    if sh.vbuffers:
+        out.append("vec4 xe_vfetch(highp sampler2D t, int i) { i = max(i, 0); return texelFetch(t, ivec2(i & 1023, "
+                   "i >> 10), 0); }")
     out.append("void main() {")
     out.append("    vec4 r[64];")
     out.append("    for (int i = 0; i < 64; i++) r[i] = vec4(0.0);")
@@ -612,7 +656,7 @@ def translate(words, stage="vertex", interpolators=0):
         out += ["    r[%d] = xe_i%d;" % (i, i) for i in range(interpolators)]
         out.append("    vec4 xe_depth = vec4(gl_FragCoord.z);")
         out += ["    if (xe_k.pg.x >= 0.0) {  // PsParamGen: the pixel position (y downwards), the face in X's sign",
-                "        vec2 p_ = vec2(gl_FragCoord.x - 0.5, xe_k.pg.y - gl_FragCoord.y - 0.5);",
+                "        vec2 p_ = gl_FragCoord.xy * xe_k.pg.zw + vec2(-0.5, xe_k.pg.y - 0.5);",
                 "        r[clamp(int(xe_k.pg.x), 0, 15)] = vec4(gl_FrontFacing ? p_.x : -p_.x, p_.y, 0.0, 0.0);",
                 "    }"]
         out += ["    xe_color%d = vec4(0.0);" % o for o in sorted(sh.outputs)]
@@ -636,7 +680,8 @@ def translate(words, stage="vertex", interpolators=0):
         if sh.exports_depth:  # only then: writing it turns early depth testing off
             out.append("    gl_FragDepth = xe_depth.x;")
     out.append("}")
-    info = {"attributes": [a for _, a in sh.attributes], "textures": dict(sh.textures),
+    info = {"attributes": [a for _, a in sh.attributes], "vbuffers": [a for _, a in sh.vbuffers],
+            "textures": dict(sh.textures),
             "outputs": sorted(sh.outputs), "uses_a0": sh.uses_a0}
     return "\n".join(out) + "\n", info
 

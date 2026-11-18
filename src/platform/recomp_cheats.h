@@ -93,6 +93,7 @@ typedef enum recomp_cheat_console {
     RECOMP_CHEAT_N64 = 3,
     RECOMP_CHEAT_XBOX = 4,
     RECOMP_CHEAT_GC = 5,
+    RECOMP_CHEAT_X360 = 6, /* XBA-280: raw big-endian codes on allocated guest memory (the bus checks) */
 } recomp_cheat_console;
 
 typedef enum recomp_cheat_format {

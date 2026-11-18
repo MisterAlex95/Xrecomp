@@ -36,7 +36,10 @@
 extern "C" {
 #endif
 
-enum { CONSOLE_PAD_NONE, CONSOLE_PAD_GBA, CONSOLE_PAD_PS1, CONSOLE_PAD_N64, CONSOLE_PAD_GC, CONSOLE_PAD_CONSOLES };
+enum {
+    CONSOLE_PAD_NONE, CONSOLE_PAD_GBA, CONSOLE_PAD_PS1, CONSOLE_PAD_N64, CONSOLE_PAD_GC, CONSOLE_PAD_X360,
+    CONSOLE_PAD_CONSOLES
+};
 
 /* Host sources, bit n of a source set. */
 enum {
@@ -70,6 +73,14 @@ enum {
     GC_T_COUNT
 };
 
+/* The Xbox 360 controller (XBA-280): the host pad's own layout by default; the triggers' analog values come from the
+ * host triggers (x360_runtime.c), lt / rt here are the triggers as buttons (a remap onto another source presses
+ * them fully). */
+enum {
+    X360_T_A, X360_T_B, X360_T_X, X360_T_Y, X360_T_LB, X360_T_RB, X360_T_LT, X360_T_RT, X360_T_LS, X360_T_RS,
+    X360_T_BACK, X360_T_START, X360_T_UP, X360_T_DOWN, X360_T_LEFT, X360_T_RIGHT, X360_T_COUNT
+};
+
 #define CONSOLE_PAD_MAX_TARGETS 16
 #define CONSOLE_PAD_MAX_STICKS 2
 
@@ -94,7 +105,7 @@ typedef struct ConsolePadOut {
     uint32_t overlay_buttons;                  /* the targets the touch overlay presses (console_pad_merge) */
 } ConsolePadOut;
 
-/* "gba", "ps1", "n64", "gc" -> CONSOLE_PAD_*, else CONSOLE_PAD_NONE. */
+/* "gba", "ps1", "n64", "gc", "x360" -> CONSOLE_PAD_*, else CONSOLE_PAD_NONE. */
 int console_pad_console(const char *name);
 const char *console_pad_console_name(int console);
 /* The environment variable a console's mapping is read from (RECOMP_GBA_PAD_MAP ...), or NULL. */

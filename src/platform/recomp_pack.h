@@ -95,10 +95,11 @@ enum {
     RECOMP_CONSOLE_GBA = 1,
     RECOMP_CONSOLE_PS1 = 2,
     RECOMP_CONSOLE_N64 = 3,
-    RECOMP_CONSOLE_GC = 4      /* GameCube: DOLs (XBA-259), discs (XBA-261) */
+    RECOMP_CONSOLE_GC = 4,     /* GameCube: DOLs (XBA-259), discs (XBA-261) */
+    RECOMP_CONSOLE_X360 = 5    /* Xbox 360: an XEX or a disc image (XBA-280); its pack is always needed */
 };
 
-/* "xbox", "gba", "ps1", "n64", "gc" <-> RECOMP_CONSOLE_*. NULL or "" is xbox (a
+/* "xbox", "gba", "ps1", "n64", "gc", "x360" <-> RECOMP_CONSOLE_*. NULL or "" is xbox (a
  * pack from before the field); anything else RECOMP_CONSOLE_UNKNOWN / "?". */
 int recomp_pack_console_id(const char *name);
 const char *recomp_pack_console_name(int console);
@@ -122,6 +123,9 @@ const char *recomp_pack_console_name(int console);
  *        (disc header magic 0xC2339F3D at 0x1C, checked after the PS1's
  *        ISO 9660: an ISO / GCM image, CISO, RVZ / WIA (the header's copy of
  *        the disc's first bytes), GCZ through the GameCube hook below)
+ *   x360 "X360-<title id>-<CRC32 of the XEX's execution info>"   X360-4D5307E6-1A2B3C4D
+ *        (XBA-280: an XEX2, or a disc image with default.xex in the root of the XDVDFS volume at an Xbox 360 game
+ *        partition -- XGD2 0x0FD90000, XGD3 0x02080000 -- or at 0; checked first)
  * A game code byte outside [A-Z0-9] becomes '_', so a key names a folder.
  * An Xbox image is none of these (the Xbox path reads it); that is how an
  * .iso is told apart: XISO magic vs ISO 9660 "PLAYSTATION". A CHD (MAME

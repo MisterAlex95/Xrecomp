@@ -299,6 +299,8 @@ void x360_audio_poll(x360_machine *x)
         if (!a->callback || now < a->next)
             continue;
         a->next = now + AUDIO_FRAME_100NS - (now - a->next) % AUDIO_FRAME_100NS;
+        if (k == 0 || !x->audio[0].callback)
+            x360_audio_tick(x); /* a new frame: the last one's mix is complete */
         if (x360_callback_run(x, &a->thread, a->callback, a->arg, 0) == 0)
             a->frames_requested++;
     }
@@ -383,6 +385,14 @@ static void k_XAudioSubmitRenderDriverFrame(x360_machine *x, x360_thread *t, xe_
     uint32_t k = A(0) & 0xFFFF;
     if (k < 8)
         x->audio[k].frames_submitted++;
+    if (A(1)) { /* to the mix the host plays (x360_audio_pull) */
+        float planar[256 * 6];
+        for (int i = 0; i < 256 * 6; i++) {
+            uint32_t bits = x360_r32(x, A(1) + 4 * (uint32_t)i);
+            memcpy(&planar[i], &bits, 4);
+        }
+        x360_audio_mix_frame(x, (int)k, planar);
+    }
     if (x->audio_out && A(1)) {
         float out[256 * 6];
         for (int s = 0; s < 256; s++)
@@ -415,22 +425,6 @@ static void k_XAudioGetVoiceCategoryVolumeChangeMask(x360_machine *x, x360_threa
     RET(0);
 }
 
-static void k_XMACreateContext(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    uint32_t a = x360_heap_alloc(x, &x->heap_phys, 0x1000, 0);
-    if (A(0))
-        x360_w32(x, A(0), a ? 0xA0000000u + a : 0);
-    RET(a ? 0 : X_STATUS_NO_MEMORY);
-}
-
-static void k_XMAReleaseContext(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    if (A(0) >= 0xA0000000u)
-        x360_heap_free(x, &x->heap_phys, A(0) & 0x1FFFFFFFu);
-    RET(0);
-}
 
 /* ---- XAM: video, content, enumerators, UI, profile, network, messages ---- */
 
@@ -694,8 +688,7 @@ static const more_entry MORE[] = {
     KM(XAudioSubmitRenderDriverFrame, k_XAudioSubmitRenderDriverFrame),
     KM(XAudioGetVoiceCategoryVolume, k_XAudioGetVoiceCategoryVolume),
     KM(XAudioGetVoiceCategoryVolumeChangeMask, k_XAudioGetVoiceCategoryVolumeChangeMask),
-    KM(XAudioEnableDucker, k_ok), KM(XMACreateContext, k_XMACreateContext),
-    KM(XMAReleaseContext, k_XMAReleaseContext), KM(XeCryptBnQwBeSigVerify, k_XeCryptBnQwBeSigVerify),
+    KM(XAudioEnableDucker, k_ok), KM(XeCryptBnQwBeSigVerify, k_XeCryptBnQwBeSigVerify),
     KM(XeCryptRotSumSha, k_XeCryptRotSumSha), KM(XeKeysGetKey, k_XeKeysGetKey),
     KM(__C_specific_handler, k_C_specific_handler),
     XM2(XGetVideoMode, x_XGetVideoMode), XM2(XamContentCreateEx, x_XamContentCreateEx),
@@ -718,6 +711,8 @@ static const more_entry MORE[] = {
 
 int x360_more_call(x360_machine *x, const x360_thunk *th, x360_thread *t)
 {
+    if (x360_xma_call(x, th, t)) /* x360_xma.c */
+        return 1;
     for (size_t k = 0; k < sizeof MORE / sizeof MORE[0]; k++)
         if (MORE[k].lib == th->lib && MORE[k].ordinal == th->ordinal) {
             MORE[k].fn(x, t, &t->cpu);
