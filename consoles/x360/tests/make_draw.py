@@ -36,7 +36,12 @@ def shaders():
     ps_mrt = program([(2, [("alu", alu_words(**export(0, 0))),
                            ("alu", alu_words(vop=2, vdest=1, vmask=0xF, export=1,
                                              srcs=((1, 0, 0, 0), (1, 0, 0, 0), (0, 0, 0, 0))))], {})])
-    packed = {"ps_pos": ps_pos, "ps_mrt": ps_mrt}
+    # ps_cube / ps_vol: a cube / 3D fetch from texture fetch constant 2 at interpolator 0's xyz
+    ps_cube = program([(2, [("fetch", fetch_words(1, 0, 1, XYZW, 2, dimension=3)),
+                            ("alu", alu_words(**export(0, 1)))], {})])
+    ps_vol = program([(2, [("fetch", fetch_words(1, 0, 1, XYZW, 2, dimension=2)),
+                           ("alu", alu_words(**export(0, 1)))], {})])
+    packed = {"ps_pos": ps_pos, "ps_mrt": ps_mrt, "ps_cube": ps_cube, "ps_vol": ps_vol}
     for name, fmt in (("vs_u16", 26), ("vs_h16", 32)):
         packed[name] = program([(2, [("fetch", fetch_words(0, 0, 1, XYZW, 0, sel=0, format=38, stride=6, offset=0)),
                                      ("fetch", fetch_words(0, 0, 2, XYZW, 0, sel=0, format=fmt, stride=6, offset=4)),

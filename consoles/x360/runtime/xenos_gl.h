@@ -17,8 +17,8 @@
  * triangles through a pass-through vertex shader (15 interpolators: the 16th is zero). The vertex shaders convert
  * Direct3D's 0..w depth range to GL's (xenos_glsl).
  *
- * Textures: 2D (and 1D) from the texture fetch constants, linear or tiled, 8 / 8_8 / 8_8_8_8 / 1_5_5_5 / 5_6_5 /
- * 4_4_4_4 / DXT1 / DXT2_3 / DXT4_5 decoded to RGBA8 (decoded again when their memory changes), clamp, filter and
+ * Textures: 1D, 2D, 3D and cube from the texture fetch constants, linear or tiled, 8 / 8_8 / 8_8_8_8 / 1_5_5_5 /
+ * 5_6_5 / 4_4_4_4 / DXT1 / DXT2_3 / DXT4_5 decoded to RGBA8 (decoded again when their memory changes), clamp, filter and
  * swizzle from the fetch constant; base level only.
  *
  * Resolves (eDRAM mode "copy"): the colour copied to guest memory as a tiled 8_8_8_8 or 5_6_5 texture at the
@@ -27,8 +27,8 @@
  * depth / stencil target stand for the eDRAM (no eDRAM model: surface pitch, base, formats, MSAA ignored;
  * RB_COLOR_MASK's target 0 bits apply to all four: GLES 3.0 has no per-target mask).
  *
- * Not there yet: the eDRAM model (render target bases, formats, MSAA), the other resolve formats, mips, 3D / cube
- * and the other texture formats, alpha test, more vertex formats, multiple render targets, the
+ * Not there yet: the eDRAM model (render target bases, formats, MSAA), the other resolve formats, mips, the other
+ * texture formats, vertex fetches at a computed index (instancing), memory export, the
  * viewport's exact conventions (the scale / offset registers map to glViewport when enabled). A Vulkan back end (the
  * epic's plan) would take the same state; the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
 #ifndef XENOS_GL_H

@@ -30,7 +30,10 @@
  *   frame 19: VGT_INDX_OFFSET 4 shifts the indices 0..3 of a strip onto the red quad's vertices 4..7 of the
  *            depth frame's buffer, and a strip cut by the reset index (two triangles of a quad, then a restart);
  *   frame 20: two render targets: ps_mrt writes the green quad's colour to oC0 and c1 (blue) to oC1; a resolve of
- *            render target 1 copies blue into memory while the frame (target 0) is green.
+ *            render target 1 copies blue into memory while the frame (target 0) is green;
+ *   frames 21-23: a linear 4x4 cube texture (one colour per face, faces 4 KB apart) sampled through tfetchCube's
+ *            (S, T, face) coordinates at the centres of faces 4 (+Z: cyan) and 1 (-X: green), and a linear 4x4x4
+ *            3D texture (one colour per slice) at depth 0.625 (slice 2: blue).
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -335,8 +338,8 @@ int main(int argc, char **argv)
     for (int i = 0; i < 4; i++)
         w32(0x10000 + 256 * (i / 2) + 4 * (i % 2), texels[i]); /* rows 256-byte aligned */
     uint32_t sw_id = 0u | 1u << 3 | 2u << 6 | 3u << 9, sw_rb = 2u | 1u << 3 | 0u << 6 | 3u << 9;
-    uint32_t fc[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | 0x10000u, 1u | 1u << 13, sw_id << 1, 0,
-                      1u << 9};
+    uint32_t fc[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22, 6u | 2u << 6 | 0x10000u, 1u | 1u << 13, sw_id << 1, 0,
+                      1u << 9}; /* pitch 64 texels: 256-byte rows, as Direct3D aligns them */
     for (int i = 0; i < 6; i++)
         reg(0x480C + i, fc[i]);
     type3(PM4_DRAW_INDX_2, &strip_a, 1);
@@ -598,9 +601,63 @@ int main(int argc, char **argv)
         }
     }
 
+    /* frames 21-23: cube and 3D textures */
+    {
+        static const uint32_t face[6] = {0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u, 0xFF00FFFFu, 0xFFFFFF00u, 0xFFFF00FFu};
+        for (uint32_t f = 0; f < 6; f++)
+            for (uint32_t y = 0; y < 4; y++)
+                for (uint32_t x = 0; x < 4; x++) {
+                    w32(0x24000 + f * 4096 + y * 128 + x * 4, face[f]);
+                    if (f < 4)
+                        w32(0x2C000 + f * 4096 + y * 128 + x * 4, face[f]); /* 3D: slice z = face[z] */
+                }
+        static const char *const names[3] = {"ps_cube.bin", "ps_cube.bin", "ps_vol.bin"};
+        static const float coord[3][3] = {{1.5f, 1.5f, 4.0f}, {1.5f, 1.5f, 1.0f}, {0.5f, 0.5f, 0.625f}};
+        static const uint8_t want_rgb[3][3] = {{0, 255, 255}, {0, 255, 0}, {0, 0, 255}};
+        for (int f = 0; f < 3; f++) {
+            uint32_t nn;
+            uint32_t *pp = load(argv[1], names[f], &nn);
+            CHECK(pp != NULL, "no %s", names[f]);
+            if (!pp)
+                continue;
+            im[0] = 1, im[1] = nn;
+            memcpy(im + 2, pp, 4 * nn);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nn);
+            free(pp);
+            if (f == 0) {
+                im[0] = 0, im[1] = nvs; /* the float vertex shader again (frame 16-17 loaded others) */
+                memcpy(im + 2, vs, 4 * nvs);
+                type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nvs);
+            }
+            vertex(0x7600, -1, -1, coord[f][0], coord[f][1], coord[f][2]);
+            vertex(0x7620, 1, -1, coord[f][0], coord[f][1], coord[f][2]);
+            vertex(0x7640, -1, 1, coord[f][0], coord[f][1], coord[f][2]);
+            vertex(0x7660, 1, 1, coord[f][0], coord[f][1], coord[f][2]);
+            reg(0x4800, 0x7600u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            uint32_t tfc[6];
+            if (f < 2) /* cube: 4x4 faces, pitch 32 texels */
+                tfc[0] = 2u | 2u << 10 | 2u << 13 | 1u << 22, tfc[1] = 6u | 2u << 6 | 0x24000u, tfc[2] = 3u | 3u << 13,
+                tfc[5] = 3u << 9;
+            else /* 3D: 4x4x4 */
+                tfc[0] = 2u | 2u << 10 | 2u << 13 | 2u << 16 | 1u << 22, tfc[1] = 6u | 2u << 6 | 0x2C000u,
+                tfc[2] = 3u | 3u << 11 | 3u << 22, tfc[5] = 2u << 9;
+            tfc[3] = sw_id << 1, tfc[4] = 0;
+            for (int i = 0; i < 6; i++)
+                reg(0x480C + i, tfc[i]);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            c = px(g, W / 2, H / 2);
+            CHECK(c[0] == want_rgb[f][0] && c[1] == want_rgb[f][1] && c[2] == want_rgb[f][2],
+                  "frame %d (%s): %u,%u,%u, want %u,%u,%u", 21 + f, names[f], c[0], c[1], c[2], want_rgb[f][0],
+                  want_rgb[f][1], want_rgb[f][2]);
+        }
+    }
+
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 24 && st.frames == 21 && st.resolves == 2 && st.no_shader == 0 && st.unsupported == 0 &&
+    CHECK(st.drawn == 27 && st.frames == 24 && st.resolves == 2 && st.no_shader == 0 && st.unsupported == 0 &&
               st.unsupported_textures == 0,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
           (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
@@ -612,6 +669,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: 21 frames drawn and read back as expected, two resolves\n");
+    printf("xenos_gl: 24 frames drawn and read back as expected, two resolves\n");
     return 0;
 }

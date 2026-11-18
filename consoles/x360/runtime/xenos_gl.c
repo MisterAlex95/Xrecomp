@@ -82,6 +82,10 @@ typedef unsigned int EGLBoolean, EGLenum;
 #define GL_RASTERIZER_DISCARD 0x8C89
 #define GL_MAP_READ_BIT 0x0001
 #define GL_PRIMITIVE_RESTART_FIXED_INDEX 0x8D69
+#define GL_TEXTURE_3D 0x806F
+#define GL_TEXTURE_CUBE_MAP 0x8513
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515
+#define GL_TEXTURE_WRAP_R 0x8072
 
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
 #define EGL_RENDERABLE_TYPE 0x3040
@@ -167,7 +171,8 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(GLboolean, glUnmapBuffer, (GLenum))                                                                              \
     X(void, glDrawBuffers, (GLsizei, const GLenum *))                                                                  \
     X(void, glReadBuffer, (GLenum))                                                                                    \
-    X(void, glClearBufferfv, (GLenum, GLint, const GLfloat *))
+    X(void, glClearBufferfv, (GLenum, GLint, const GLfloat *))                                                        \
+    X(void, glTexImage3D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *))
 
 #define MAX_PROGRAMS 256
 #define MAX_ATTRS 16
@@ -884,7 +889,7 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp)
  * dword 3 swizzle (3 bits per component: X, Y, Z, W, 0, 1), filters. Tiled textures use the Xenos 2D tiling:
  * 32x32-block macro tiles, banks and pipes (the address formula of Xenia's texture_address.h, Tiled2D). Formats
  * here: 8, 8_8, 8_8_8_8, 1_5_5_5, 5_6_5, 4_4_4_4, DXT1, DXT2/3, DXT4/5, decoded to RGBA8 on the CPU with X in red;
- * the fetch constant's swizzle goes to GL's texture swizzle. Base level only (no mips), 2D (and 1D) only. */
+ * the fetch constant's swizzle goes to GL's texture swizzle. Base level only (no mips); 1D, 2D, 3D and cube. */
 
 typedef struct texfmt {
     uint32_t format, block, bytes; /* block size in texels (1 or 4), bytes per block */
@@ -991,45 +996,80 @@ static uint64_t fnv(const uint8_t *p, size_t n)
     return h;
 }
 
-/* the texture behind fetch constant k as a GL texture (decoded again when its memory changed); 0 if unsupported */
-static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, uint32_t k)
+static int64_t tiled3d(int32_t x, int32_t y, int32_t z, uint32_t pitch_blocks, uint32_t height_blocks,
+                       unsigned bpb_log2)
+{
+    int32_t outer = ((((z >> 2) * (int32_t)(height_blocks >> 4) + (y >> 4)) * (int32_t)(pitch_blocks >> 5)) + (x >> 5))
+                    << 7;
+    int32_t inner = ((z & 3) << 5) | (((y >> 1) & 3) << 3) | (x & 7);
+    int64_t oi = (int64_t)(outer | inner) << bpb_log2;
+    uint32_t bank = ((y >> 3) ^ (z >> 2)) & 1, pipe = ((x >> 3) & 3) ^ (bank << 1);
+    return (int64_t)((uint32_t)(y & 1) << 4 | pipe << 6 | bank << 11) | (oi & 15) | ((oi >> 4) & 1) << 5 |
+           ((oi >> 5) & 7) << 8 | (oi >> 8) << 12;
+}
+
+/* the texture behind fetch constant k as a GL texture of the dimension the shader samples (1: 2D, 2: 3D, 3: cube),
+ * decoded again when its memory changed; 0 if unsupported. Base level layout (Xenia's texture_util.cc
+ * GetGuestTextureLayout): rows of the pitch aligned to 32 blocks (linear too: Direct3D gives 256-byte-aligned
+ * pitches), slices of the height aligned to 32 blocks; cube faces (+X, -X, +Y, -Y, +Z, -Z, as GL orders them) 4 KB
+ * apart; 3D slices packed (tiled: the 3D tiling, 32x16x4-block macro tiles). */
+static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, uint32_t k, uint32_t want_dim)
 {
     const uint32_t *fc = &cp->regs[0x4800 + 6 * k];
     const texfmt *tf = tex_format(fc[1] & 63);
     uint32_t dim = (fc[5] >> 9) & 3; /* 0 1D, 1 2D, 2 3D, 3 cube */
-    if ((fc[0] & 3) != 2 || !tf || dim > 1)
+    uint32_t gl_dim = dim == 0 ? 1 : dim;
+    if ((fc[0] & 3) != 2 || !tf || gl_dim != want_dim)
         return 0;
-    uint32_t w = (dim == 0 ? fc[2] & 0xFFFFFF : fc[2] & 0x1FFF) + 1, h = dim == 0 ? 1 : ((fc[2] >> 13) & 0x1FFF) + 1;
-    if (w > 8192 || h > 8192)
+    uint32_t w, h, depth = 1;
+    if (dim == 0) {
+        w = (fc[2] & 0xFFFFFF) + 1, h = 1;
+    } else if (dim == 2) {
+        w = (fc[2] & 0x7FF) + 1, h = ((fc[2] >> 11) & 0x7FF) + 1, depth = ((fc[2] >> 22) & 0x3FF) + 1;
+    } else {
+        w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
+    }
+    uint32_t slices = dim == 3 ? 6 : depth;
+    if (w > 8192 || h > 8192 || (dim == 3 && w != h) || (dim == 2 && (uint64_t)w * h * depth > (1u << 24)))
         return 0;
     uint32_t endian = (fc[1] >> 6) & 3, base = fc[1] & 0xFFFFF000u, tiled = fc[0] >> 31;
     uint32_t pitch = ((fc[0] >> 22) & 0x1FF) << 5; /* texels */
     if (!pitch)
         pitch = w;
     uint32_t bw = (w + tf->block - 1) / tf->block, bh = (h + tf->block - 1) / tf->block;
-    uint32_t pitch_blocks = (pitch + tf->block - 1) / tf->block;
+    uint32_t pitch_blocks = (((pitch + tf->block - 1) / tf->block) + 31) & ~31u;
+    uint32_t height_blocks = (bh + 31) & ~31u;
     unsigned bpb_log2 = tf->bytes == 1 ? 0 : tf->bytes == 2 ? 1 : tf->bytes == 4 ? 2 : tf->bytes == 8 ? 3 : 4;
-    uint32_t row_bytes = (pitch_blocks * tf->bytes + 255) & ~255u; /* linear rows: 256-byte aligned */
-    uint32_t pitch_tiled = (pitch_blocks + 31) & ~31u;
-    /* the source bytes, block by block, after the endian swap */
-    size_t src_n = (size_t)bw * bh * tf->bytes;
+    uint32_t row_bytes = pitch_blocks * tf->bytes;
+    uint32_t z_stride = row_bytes * (dim == 0 ? 1 : height_blocks);
+    uint32_t face_stride = (z_stride + 4095) & ~4095u;
+    /* the source bytes, block by block and slice by slice, after the endian swap */
+    size_t slice_n = (size_t)bw * bh * tf->bytes, src_n = slice_n * slices;
+    uint32_t tw = bw * tf->block, th = bh * tf->block;
     uint8_t *src = malloc(src_n);
-    uint8_t *rgba = malloc((size_t)bw * tf->block * bh * tf->block * 4);
+    uint8_t *rgba = malloc((size_t)tw * th * 4 * slices);
     if (!src || !rgba) {
         free(src);
         free(rgba);
         return 0;
     }
-    for (uint32_t by = 0; by < bh; by++)
-        for (uint32_t bx = 0; bx < bw; bx++) {
-            uint32_t off = tiled ? (uint32_t)tiled2d((int32_t)bx, (int32_t)by, pitch_tiled, bpb_log2)
-                                 : by * row_bytes + bx * tf->bytes;
-            uint8_t *d = src + ((size_t)by * bw + bx) * tf->bytes;
-            for (uint32_t i = 0; i < tf->bytes; i++) {
-                uint32_t a = base + off + i, word = gpu_read(cp, a & ~3u, endian);
-                d[i] = (uint8_t)(word >> (8 * (a & 3)));
+    for (uint32_t z = 0; z < slices; z++)
+        for (uint32_t by = 0; by < bh; by++)
+            for (uint32_t bx = 0; bx < bw; bx++) {
+                uint32_t off;
+                if (tiled && dim == 2)
+                    off = (uint32_t)tiled3d((int32_t)bx, (int32_t)by, (int32_t)z, pitch_blocks, height_blocks,
+                                            bpb_log2);
+                else if (tiled)
+                    off = z * face_stride + (uint32_t)tiled2d((int32_t)bx, (int32_t)by, pitch_blocks, bpb_log2);
+                else
+                    off = z * (dim == 3 ? face_stride : z_stride) + by * row_bytes + bx * tf->bytes;
+                uint8_t *d = src + z * slice_n + ((size_t)by * bw + bx) * tf->bytes;
+                for (uint32_t i = 0; i < tf->bytes; i++) {
+                    uint32_t a = base + off + i, word = gpu_read(cp, a & ~3u, endian);
+                    d[i] = (uint8_t)(word >> (8 * (a & 3)));
+                }
             }
-        }
     uint64_t hash = fnv(src, src_n) ^ ((uint64_t)fc[3] << 32);
     texture *t = NULL, *victim = &g->textures[0];
     for (int i = 0; i < MAX_TEXTURES; i++) {
@@ -1049,28 +1089,42 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, uint32_t k)
     }
     if (!t) {
         t = victim;
-        if (!t->tex)
-            g->glGenTextures(1, &t->tex);
+        if (t->tex) /* a texture object keeps its first target: a new one for a new key */
+            g->glDeleteTextures(1, &t->tex);
+        g->glGenTextures(1, &t->tex);
         memcpy(t->key, fc, sizeof t->key);
     }
     t->hash = hash;
     t->used = (int)++g->tex_clock;
-    uint32_t tw = bw * tf->block;
-    for (uint32_t by = 0; by < bh; by++)
-        for (uint32_t bx = 0; bx < bw; bx++) {
-            const uint8_t *s = src + ((size_t)by * bw + bx) * tf->bytes;
-            if (tf->block == 4) {
-                uint8_t px[16][4];
-                dxt_block(s, tf->format, px);
-                for (int i = 0; i < 16; i++)
-                    memcpy(rgba + (((size_t)by * 4 + i / 4) * tw + bx * 4 + i % 4) * 4, px[i], 4);
-            } else {
-                texel(tf->format, s, rgba + ((size_t)by * tw + bx) * 4);
+    for (uint32_t z = 0; z < slices; z++) {
+        uint8_t *out = rgba + (size_t)z * tw * th * 4;
+        for (uint32_t by = 0; by < bh; by++)
+            for (uint32_t bx = 0; bx < bw; bx++) {
+                const uint8_t *s = src + z * slice_n + ((size_t)by * bw + bx) * tf->bytes;
+                if (tf->block == 4) {
+                    uint8_t px[16][4];
+                    dxt_block(s, tf->format, px);
+                    for (int i = 0; i < 16; i++)
+                        memcpy(out + (((size_t)by * 4 + i / 4) * tw + bx * 4 + i % 4) * 4, px[i], 4);
+                } else {
+                    texel(tf->format, s, out + ((size_t)by * tw + bx) * 4);
+                }
             }
-        }
-    g->glBindTexture(GL_TEXTURE_2D, t->tex);
-    g->glTexImage2D(GL_TEXTURE_2D, 0, (GLint)GL_RGBA8, (GLsizei)tw, (GLsizei)(bh * tf->block), 0, GL_RGBA,
-                    GL_UNSIGNED_BYTE, rgba);
+    }
+    if (gl_dim == 1) {
+        g->glBindTexture(GL_TEXTURE_2D, t->tex);
+        g->glTexImage2D(GL_TEXTURE_2D, 0, (GLint)GL_RGBA8, (GLsizei)tw, (GLsizei)th, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                        rgba);
+    } else if (gl_dim == 3) {
+        g->glBindTexture(GL_TEXTURE_CUBE_MAP, t->tex);
+        for (uint32_t f = 0; f < 6; f++)
+            g->glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, (GLint)GL_RGBA8, (GLsizei)tw, (GLsizei)th, 0,
+                            GL_RGBA, GL_UNSIGNED_BYTE, rgba + (size_t)f * tw * th * 4);
+    } else {
+        g->glBindTexture(GL_TEXTURE_3D, t->tex);
+        g->glTexImage3D(GL_TEXTURE_3D, 0, (GLint)GL_RGBA8, (GLsizei)tw, (GLsizei)th, (GLsizei)depth, 0, GL_RGBA,
+                        GL_UNSIGNED_BYTE, rgba);
+    }
     free(src);
     free(rgba);
     return t->tex;
@@ -1085,22 +1139,24 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
 {
     static const GLint swz[6] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};
     for (int i = 0; i < p->nsamplers; i++) {
-        uint32_t k = p->sampler_fetch[i];
-        GLuint tex = p->sampler_dim[i] <= 1 && k < 32 ? texture_of(g, cp, k) : 0;
+        uint32_t k = p->sampler_fetch[i], dim = p->sampler_dim[i];
+        GLenum target = dim == 2 ? GL_TEXTURE_3D : dim == 3 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+        GLuint tex = k < 32 ? texture_of(g, cp, k, dim) : 0;
         g->glActiveTexture(GL_TEXTURE0 + (GLenum)i);
-        g->glBindTexture(GL_TEXTURE_2D, tex);
+        g->glBindTexture(target, tex);
         if (!tex) {
             g->st.unsupported_textures++;
             continue;
         }
         const uint32_t *fc = &cp->regs[0x4800 + 6 * k];
-        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode((fc[0] >> 10) & 7));
-        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode((fc[0] >> 13) & 7));
-        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, ((fc[3] >> 19) & 3) == 1 ? GL_LINEAR : GL_NEAREST);
-        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, ((fc[3] >> 21) & 3) == 1 ? GL_LINEAR : GL_NEAREST);
+        g->glTexParameteri(target, GL_TEXTURE_WRAP_S, wrap_mode((fc[0] >> 10) & 7));
+        g->glTexParameteri(target, GL_TEXTURE_WRAP_T, wrap_mode((fc[0] >> 13) & 7));
+        g->glTexParameteri(target, GL_TEXTURE_WRAP_R, wrap_mode((fc[0] >> 16) & 7));
+        g->glTexParameteri(target, GL_TEXTURE_MAG_FILTER, ((fc[3] >> 19) & 3) == 1 ? GL_LINEAR : GL_NEAREST);
+        g->glTexParameteri(target, GL_TEXTURE_MIN_FILTER, ((fc[3] >> 21) & 3) == 1 ? GL_LINEAR : GL_NEAREST);
         for (int c = 0; c < 4; c++) {
             uint32_t s = (fc[3] >> (1 + 3 * c)) & 7;
-            g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R + (GLenum)c, s < 6 ? swz[s] : GL_ZERO);
+            g->glTexParameteri(target, GL_TEXTURE_SWIZZLE_R + (GLenum)c, s < 6 ? swz[s] : GL_ZERO);
         }
     }
     g->glActiveTexture(GL_TEXTURE0);
