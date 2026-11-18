@@ -1243,8 +1243,10 @@ static void rb_release(void)
 static void rb_idle(void)
 {
     s_rb.pending = 0;
-    if (s_rb.pbo[0] && (!s_fg || !framegen_pacer_active()))
-        rb_release();
+    if (!s_rb.pbo[0] || (s_fg && framegen_pacer_active()))
+        return;
+    read_context_check();   /* names of a context SDL replaced are not deleted in the new one */
+    rb_release();
 }
 
 /* Starts reading tex into the buffer not in flight; s_rb then describes it. 0: nothing was started. */
@@ -1323,6 +1325,8 @@ static const uint8_t *rb_picture(unsigned tex, int w, int h, int top_down)
 {
     read_context_check();
     int discard = __atomic_exchange_n(&s_rb_discard, 0, __ATOMIC_ACQ_REL);
+    if (discard)
+        rb_release();   /* the app paused or resumed: made again below, whatever the driver did meanwhile */
     int have = s_rb.pending && !discard && s_rb.w == w && s_rb.h == h && s_rb.top_down == top_down &&
                s_rb.loads == recomp_states_loads();
     int slot = s_rb.slot;
@@ -1739,6 +1743,7 @@ void host_window_close(void)
         if (s_gl.DeleteTextures && s_tex_prev)
             s_gl.DeleteTextures(1, &s_tex_prev);
         shader_free();
+        read_context_check();   /* names of a context SDL replaced are not deleted in this one */
 #if defined(XBOXRECOMP_LSFG)
         rb_release();
         memset(&s_rb, 0, sizeof s_rb);   /* the entry points are looked up again with the next context */

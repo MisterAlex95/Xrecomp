@@ -315,6 +315,15 @@ static void after_event(int first)
     CHECK(r.seen >= 4 && r.last >= first);
 }
 
+/* The buffers deleted so far (s_del_buffers is pointed here). */
+static int s_deleted;
+static void (APIENTRY *s_real_del)(int, const unsigned *);
+static void APIENTRY count_del(int n, const unsigned *names)
+{
+    s_deleted += n;
+    s_real_del(n, names);
+}
+
 static void test_events(void)
 {
     Run r;
@@ -327,9 +336,15 @@ static void test_events(void)
     after_event(10);
 
     CHECK(s_rb.pending);
+    s_real_del = s_del_buffers;
+    s_del_buffers = count_del;
+    s_deleted = 0;
     recomp_lifecycle_pause();
     recomp_lifecycle_resume();
     after_event(30);
+    CHECK(s_deleted == 2);   /* made again after the pause */
+    CHECK(s_rb.pbo[0] != 0);
+    s_del_buffers = s_real_del;
 
     CHECK(s_rb.pending);
     s_test_ff = 1;
