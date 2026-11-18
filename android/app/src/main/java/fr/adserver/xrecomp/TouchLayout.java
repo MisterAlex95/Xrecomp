@@ -20,7 +20,7 @@ import java.util.TreeMap;
  * layout survives a change of resolution (a moved control keeps its share of the screen, an untouched one its default
  * anchoring to the edges).
  *
- * <p>Files: files/settings/touch_layout/&lt;LAYOUT&gt;.txt for a console's layout (TouchPad.Layout: XBOX, GBA, PS1,
+ * <p>Files: files/settings/touch_layout/&lt;LAYOUT&gt;.txt for a console's layout (TouchPad.Layout: XBOX, GBA, PS1, GC,
  * PS1_ANALOG, N64), files/settings/touch_layout/game/&lt;KEY&gt;.&lt;LAYOUT&gt;.txt for « This game only » (KEY: the game's
  * key as in GameSettings). A game's file wins over its console's, whatever it holds (an empty one: the defaults for
  * this game even when the console has a layout). One line per control: « A x=0.8750 y=0.4630 size=1.20 hidden ».

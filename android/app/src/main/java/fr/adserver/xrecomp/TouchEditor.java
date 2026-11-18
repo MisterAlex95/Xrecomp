@@ -242,6 +242,8 @@ final class TouchEditor extends FrameLayout {
             return c.getString(R.string.TE_LAYOUT_PS1_ANALOG);
         case N64:
             return c.getString(R.string.CC_CONSOLE_N64);
+        case GC:
+            return c.getString(R.string.CC_CONSOLE_GC);
         default:
             return c.getString(R.string.TE_LAYOUT_XBOX);
         }
@@ -251,8 +253,10 @@ final class TouchEditor extends FrameLayout {
     static int controlName(TouchPad.Layout l, int id) {
         boolean ps = l == TouchPad.Layout.PS1 || l == TouchPad.Layout.PS1_ANALOG;
         switch (id) {
-        case TouchPad.LSTICK: return l == TouchPad.Layout.N64 ? R.string.CC_STICK : R.string.XB_LSTICK;
-        case TouchPad.RSTICK: return R.string.XB_RSTICK;
+        case TouchPad.LSTICK:
+            return l == TouchPad.Layout.N64 ? R.string.CC_STICK
+                   : l == TouchPad.Layout.GC ? R.string.CC_MAIN_STICK : R.string.XB_LSTICK;
+        case TouchPad.RSTICK: return l == TouchPad.Layout.GC ? R.string.CC_C_STICK : R.string.XB_RSTICK;
         case TouchPad.DPAD: return R.string.CTL_GROUP_DPAD;
         case TouchPad.A: return ps ? R.string.CC_CROSS : R.string.XB_A;
         case TouchPad.B: return ps ? R.string.CC_CIRCLE : R.string.XB_B;

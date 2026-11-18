@@ -214,6 +214,7 @@ public class TouchPadTest {
         assertEquals(TouchPad.Layout.PS1, TouchPad.layoutFor(Console.PS1, false));
         assertEquals(TouchPad.Layout.PS1_ANALOG, TouchPad.layoutFor(Console.PS1, true));
         assertEquals(TouchPad.Layout.N64, TouchPad.layoutFor(Console.N64, false));
+        assertEquals(TouchPad.Layout.GC, TouchPad.layoutFor(Console.GC, false));   // XBA-274: no Xbox fallback
     }
 
     /** Each console button lands on the Xbox control the console's default mapping reads as it (console_pad.c). */
@@ -281,16 +282,38 @@ public class TouchPadTest {
         s = n.state();
         assertEquals(32767, s.ly);
         assertEquals(1 << TouchPad.AN_A, s.analogMask);
+
+        // XBA-274: the GameCube's: both sticks, the cross, A B X Y, Z on the right shoulder, L / R the triggers.
+        TouchPad gc = new TouchPad(TouchPad.Layout.GC);
+        gc.layout(W, H, 1f);
+        assertEquals(11, gc.controls.size());
+        assertEquals(1 << TouchPad.AN_A, press(gc, TouchPad.A).analogMask);
+        assertEquals(1 << TouchPad.AN_X, press(gc, TouchPad.X).analogMask);
+        assertEquals(1 << TouchPad.AN_WHITE, press(gc, TouchPad.Z).analogMask);
+        assertEquals(255, press(gc, TouchPad.SHOULDER_L).lt);
+        assertEquals(255, press(gc, TouchPad.SHOULDER_R).rt);
+        assertEquals(TouchPad.XB_START, press(gc, TouchPad.START).buttons);
+        TouchPad.Control cs = gc.control(TouchPad.RSTICK);
+        gc.down(0, cs.cx, cs.cy);
+        gc.move(0, cs.cx + cs.r, cs.cy);
+        assertEquals(32767, gc.state().rx);   // the C stick: the right stick
+        gc.cancel();
+        assertTrue(gc.playable());
     }
 
     /** Every console layout on screen, off the menu's edge, nothing overlapping (circles and pills), at every size. */
     @Test
     public void consoleLayoutsStayOnScreen() {
         for (TouchPad.Layout l : new TouchPad.Layout[] { TouchPad.Layout.GBA, TouchPad.Layout.PS1,
-                                                         TouchPad.Layout.PS1_ANALOG, TouchPad.Layout.N64 }) {
+                                                         TouchPad.Layout.PS1_ANALOG, TouchPad.Layout.N64,
+                                                         TouchPad.Layout.GC }) {
             TouchPad p = new TouchPad(l);
+            // XBA-274: the GameCube's also on a square screen (1:1 single-screen handhelds).
+            float[][] sizes = l == TouchPad.Layout.GC
+                              ? new float[][] { { 2400, 1080 }, { 1920, 1080 }, { 1600, 900 }, { 1280, 960 }, { 1080, 1080 } }
+                              : new float[][] { { 2400, 1080 }, { 1920, 1080 }, { 1600, 900 }, { 1280, 960 } };
             for (float scale : new float[] { 0.8f, 1f, 1.25f }) {
-                for (float[] wh : new float[][] { { 2400, 1080 }, { 1920, 1080 }, { 1600, 900 }, { 1280, 960 } }) {
+                for (float[] wh : sizes) {
                     p.layout(wh[0], wh[1], scale);
                     String at = " at " + scale + " on " + wh[0] + "x" + wh[1];
                     for (TouchPad.Control k : p.controls) {

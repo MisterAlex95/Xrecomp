@@ -31,8 +31,11 @@ import java.util.Map;
 final class TouchPad {
     enum Kind { STICK, DPAD, BUTTON }
 
-    /** Which console's controls: the Xbox's (the default), the GBA's, the PS1's (with sticks: analog), the N64's. */
-    enum Layout { XBOX, GBA, PS1, PS1_ANALOG, N64 }
+    /**
+     * Which console's controls: the Xbox's (the default), the GBA's, the PS1's (with sticks: analog), the N64's, the
+     * GameCube's (XBA-274).
+     */
+    enum Layout { XBOX, GBA, PS1, PS1_ANALOG, N64, GC }
 
     /** The layout for a game of console c; ps1Analog: RECOMP_PS1_PAD=analog (the DualShock's sticks shown). */
     static Layout layoutFor(Console c, boolean ps1Analog) {
@@ -43,6 +46,8 @@ final class TouchPad {
             return ps1Analog ? Layout.PS1_ANALOG : Layout.PS1;
         case N64:
             return Layout.N64;
+        case GC:
+            return Layout.GC;
         default:
             return Layout.XBOX;
         }
@@ -212,6 +217,19 @@ final class TouchPad {
             controls.add(new Control(C_DOWN, Kind.BUTTON, "", 0, -1).face(0xFFF0CC40, GLYPH_DOWN).push(0, -1));
             controls.add(new Control(C_LEFT, Kind.BUTTON, "", 0, -1).face(0xFFF0CC40, GLYPH_LEFT).push(-1, 0));
             controls.add(new Control(C_RIGHT, Kind.BUTTON, "", 0, -1).face(0xFFF0CC40, GLYPH_RIGHT).push(1, 0));
+            return;
+        case GC:   // XBA-274: on the Xbox controls the GameCube's default mapping reads (ConsolePadMap.defaultSources)
+            controls.add(new Control(LSTICK, Kind.STICK, "", 0, -1));
+            controls.add(new Control(RSTICK, Kind.STICK, "C", 0, -1).face(0xFFF0CC40, GLYPH_NONE));   // the C stick
+            controls.add(new Control(DPAD, Kind.DPAD, "", 0, -1));
+            controls.add(new Control(A, Kind.BUTTON, "A", 0, AN_A).face(0xFF4FC78F, GLYPH_NONE));
+            controls.add(new Control(B, Kind.BUTTON, "B", 0, AN_B).face(0xFFF07A7A, GLYPH_NONE));
+            controls.add(new Control(X, Kind.BUTTON, "X", 0, AN_X).face(0xFFC8C8D0, GLYPH_NONE));
+            controls.add(new Control(Y, Kind.BUTTON, "Y", 0, AN_Y).face(0xFFC8C8D0, GLYPH_NONE));
+            controls.add(new Control(Z, Kind.BUTTON, "Z", 0, AN_WHITE).face(0xFF9A7CF0, GLYPH_NONE));   // right shoulder
+            controls.add(new Control(SHOULDER_L, Kind.BUTTON, "L", 0, AN_LT));   // the triggers: L / R
+            controls.add(new Control(SHOULDER_R, Kind.BUTTON, "R", 0, AN_RT));
+            controls.add(new Control(START, Kind.BUTTON, "START", XB_START, -1));
             return;
         default:
             break;
@@ -399,7 +417,7 @@ final class TouchPad {
     }
 
     /**
-     * The GBA, PS1 and N64 layouts, on the Xbox's grid: shoulders in the top corners, Start (and Select) at the bottom
+     * The GBA, PS1, N64 and GameCube layouts, on the Xbox's grid: shoulders in the top corners, Start (and Select) at the bottom
      * centre, the D-pad or the stick on the left, the face buttons on the right.
      */
     private void layoutConsole(float w, float h, float o, float u, float minLeft) {
@@ -437,6 +455,19 @@ final class TouchPad {
             }
             pill(SELECT, w / 2 - 110 * u, h - 60 * o, 70 * u, 32 * u);
             pill(START, w / 2 + 110 * u, h - 60 * o, 70 * u, 32 * u);
+            break;
+        }
+        case GC: {   // XBA-274: the stick high on the left, the cross under it; A big, B, X, Y around it; the C stick low
+            circle(LSTICK, left(330 * o, 140 * STICK_SLOP * u, minLeft), 470 * o, 140 * u);
+            circle(DPAD, left(330 * o, 90 * 1.1f * u, minLeft), h - 200 * o, 90 * u);
+            float ax = w - 330 * o, ay = 560 * o;
+            circle(A, ax, ay, 80 * u);
+            circle(B, ax - 140 * u, ay + 90 * u, 52 * u);
+            circle(X, ax + 130 * u, ay - 60 * u, 52 * u);
+            circle(Y, ax - 50 * u, ay - 140 * u, 52 * u);
+            pill(Z, w - 165 * o, 95 * o + 130 * u, 90 * u, 45 * u);
+            circle(RSTICK, w - 330 * o, h - 200 * o, 90 * u);
+            pill(START, w / 2, h - 60 * o, 70 * u, 32 * u);
             break;
         }
         default: {   // N64
