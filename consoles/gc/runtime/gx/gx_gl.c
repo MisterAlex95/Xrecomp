@@ -104,7 +104,7 @@ struct gx_gl {
     uint8_t *packed;         /* the batch's vertices with only those coordinates, for the upload */
     ubo_t ubo_data;
 
-    struct { uint32_t addr; GLuint tex; int w, h; } xfb[4];
+    struct { uint32_t addr, stride, lines; GLuint tex; int w, h; } xfb[4];
     unsigned xfb_next;
 
     /* worker */
@@ -1356,7 +1356,7 @@ static void efb_clear_rect(gx_state *gx, int x, int y, int w, int h)
     g->peek_color_ok = g->peek_z_ok = false;
 }
 
-static void xfb_keep(gx_state *gx, uint32_t addr, int x, int y, int w, int h)
+static void xfb_keep(gx_state *gx, uint32_t addr, uint32_t stride, int lines, int x, int y, int w, int h)
 {
     gx_gl *g = gx->gl;
     unsigned slot = 4;
@@ -1377,6 +1377,8 @@ static void xfb_keep(gx_state *gx, uint32_t addr, int x, int y, int w, int h)
         F.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     }
     g->xfb[slot].addr = addr;
+    g->xfb[slot].stride = stride;
+    g->xfb[slot].lines = (uint32_t)lines;
     g->xfb[slot].w = w * s;
     g->xfb[slot].h = h * s;
     /* the picture top-down in the texture (row 0 = top), as the RAM XFB is */
@@ -1449,7 +1451,7 @@ void gx_gl_copy(gx_state *gx, uint32_t exec)
             }
             free(buf);
         }
-        xfb_keep(gx, dst, x, y, w, h);
+        xfb_keep(gx, dst, stride, lines, x, y, w, h);
         gx->stats.xfb_copies++;
     } else { /* to a texture */
         unsigned real = BITS(exec, 4, 3) | BITS(exec, 3, 1) << 3;
@@ -1649,6 +1651,16 @@ unsigned gx_xfb_texture(gx_state *gx, uint32_t addr, int *w, int *h)
             *h = g->xfb[i].h;
             return g->xfb[i].tex;
         }
+    /* the VI may start a few lines into the copy (Prince of Persia: The Two Thrones scans from the copy's second
+     * line): that copy's picture, a line or two off, rather than the XFB in RAM */
+    for (unsigned i = 0; i < 4; i++) {
+        uint32_t off = addr - g->xfb[i].addr, st = g->xfb[i].stride;
+        if (g->xfb[i].tex && st && addr > g->xfb[i].addr && off % st == 0 && off / st <= g->xfb[i].lines / 32) {
+            *w = g->xfb[i].w;
+            *h = g->xfb[i].h;
+            return g->xfb[i].tex;
+        }
+    }
     return 0;
 }
 
