@@ -14,7 +14,7 @@
  * when the next event falls inside a segment, the interpreter runs it). A bus write that raises the IRQ line or halts
  * the CPU stops it after that instruction. When it must stop (scheduler event, pending IRQ, an indirect jump or a
  * call: the dispatcher picks the next function), it writes the registers back, sets r15 (+ 8 / + 4, the interpreter's
- * convention) and returns. Rare or mode-changing instructions (SWI, MSR, exception returns, LDM/STM with the S bit,
+ * convention) and returns. Rare or mode-changing instructions (SWI, exception returns, LDM/STM with the S bit,
  * SWP, undefined encodings) are run by the interpreter: the lifted code returns with rc_exit = GBA_RC_EXIT_INTERP and
  * PC at that instruction.
  *
@@ -590,6 +590,73 @@ static inline uint8_t *rc_ram(gba_rc_head *h, uint32_t a, uint32_t align)
         fb = RC_FETCH_MAX();                                                                                         \
         pf_ = RC_PF_ON();                                                                                            \
         ne = ((h->irq_line & !(h->cpu.cpsr_ctl & 0x80u)) | h->cpu.halted | h->cpu.stopped) ? 0 : ne;                 \
+    } while (0)
+
+/* MRS / MSR (XBA-281; gba_cpu.c arm_psr): the bank of a mode's r13 / r14 / SPSR (gba_cpu.c bank_of: USR, FIQ, IRQ,
+ * SVC, ABT, UND; SYS and the invalid modes use USR's). */
+static inline uint32_t rc_bank(uint32_t mode)
+{
+    switch (mode & 0x1Fu) {
+    case 0x11: return 1;
+    case 0x12: return 2;
+    case 0x13: return 3;
+    case 0x17: return 4;
+    case 0x1B: return 5;
+    default: return 0;
+    }
+}
+/* The CPSR's control byte becomes CTL (gba_cpu.c gba_set_cpsr's mode switch), on the machine's registers. */
+static inline void rc_set_ctl(gba_rc_head *h, uint32_t ctl)
+{
+    gba_cpu *c = &h->cpu;
+    uint32_t ob = rc_bank(c->cpsr_ctl), nb = rc_bank(ctl);
+    if (ob != nb) {
+        c->bank_r13[ob] = c->r[13];
+        c->bank_r14[ob] = c->r[14];
+        c->r[13] = c->bank_r13[nb];
+        c->r[14] = c->bank_r14[nb];
+        if (ob == 1 || nb == 1) {
+            uint32_t *save = ob == 1 ? c->fiq_r8_12 : c->usr_r8_12;
+            const uint32_t *load = nb == 1 ? c->fiq_r8_12 : c->usr_r8_12;
+            for (int i = 0; i < 5; i++) {
+                save[i] = c->r[8 + i];
+                c->r[8 + i] = load[i];
+            }
+        }
+    }
+    c->cpsr_ctl = ctl & 0xFFu;
+}
+#define RC_CPSR() (fN << 31 | fZ << 30 | fC << 29 | fV << 28 | h->cpu.cpsr_ctl)
+/* MRS rd, SPSR: the CPSR in USR / SYS mode. */
+#define RC_SPSR() (rc_bank(h->cpu.cpsr_ctl) ? h->cpu.spsr[rc_bank(h->cpu.cpsr_ctl)] : RC_CPSR())
+/* MSR SPSR_<fields>, V (MASK: the fields' bytes): nothing in USR / SYS mode. */
+#define RC_MSR_SPSR(MASK, V)                                                                                         \
+    do {                                                                                                             \
+        uint32_t b__ = rc_bank(h->cpu.cpsr_ctl);                                                                     \
+        if (b__)                                                                                                     \
+            h->cpu.spsr[b__] = (h->cpu.spsr[b__] & ~(uint32_t)(MASK)) | ((V) & (uint32_t)(MASK));                    \
+    } while (0)
+/* MSR CPSR_<fields>, V: the flags in USR mode; the control byte too in the others (not T), with a mode switch on the
+ * registers r8-r14 (synced around it). The instruction then leaves (RC_EXIT after it): the dispatcher takes an IRQ
+ * it unmasked. */
+#define RC_MSR_CPSR(MASK, V)                                                                                         \
+    do {                                                                                                             \
+        uint32_t m__ = (MASK), v__ = (V);                                                                            \
+        if ((h->cpu.cpsr_ctl & 0x1Fu) == 0x10u)                                                                      \
+            m__ &= 0xFF000000u;                                                                                      \
+        uint32_t o__ = RC_CPSR(), n__ = (o__ & ~m__) | (v__ & m__);                                                  \
+        n__ = (n__ & ~0x20u) | (o__ & 0x20u);                                                                        \
+        fN = n__ >> 31;                                                                                              \
+        fZ = (n__ >> 30) & 1;                                                                                        \
+        fC = (n__ >> 29) & 1;                                                                                        \
+        fV = (n__ >> 28) & 1;                                                                                        \
+        if ((n__ ^ o__) & 0xFFu) {                                                                                   \
+            h->cpu.r[8] = r8; h->cpu.r[9] = r9; h->cpu.r[10] = r10; h->cpu.r[11] = r11; h->cpu.r[12] = r12;          \
+            h->cpu.r[13] = r13; h->cpu.r[14] = r14;                                                                  \
+            rc_set_ctl(h, n__);                                                                                      \
+            r8 = h->cpu.r[8]; r9 = h->cpu.r[9]; r10 = h->cpu.r[10]; r11 = h->cpu.r[11]; r12 = h->cpu.r[12];          \
+            r13 = h->cpu.r[13]; r14 = h->cpu.r[14];                                                                  \
+        }                                                                                                            \
     } while (0)
 
 /* After an instruction's data access (and no jump), the next opcode fetch is non-sequential: its cycles beyond the

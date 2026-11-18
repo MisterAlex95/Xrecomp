@@ -4,7 +4,7 @@ Every instruction is emitted from its opcode bits with the interpreter's semanti
 same results, same flags, same cycles in the same order (fetch, data accesses, internal cycles, refill). The function
 is cut into blocks, each reachable from its entry switch, with one event check per segment (« blocks and the event
 checks » below): lifted code stops where the interpreter would (scheduler event, IRQ) and the interpreter runs the
-rest of that block. Instructions the interpreter handles better (SWI, MSR, exception returns, LDM / STM with the S
+rest of that block. Instructions the interpreter handles better (SWI, exception returns, LDM / STM with the S
 bit, SWP, undefined encodings, odd PC write-backs) return to the dispatcher with GBA_RC_EXIT_INTERP.
 """
 
@@ -41,8 +41,10 @@ def label(addr: int) -> str:
 class FnLifter:
     """Lifts the instructions of one function (one state) into C statements."""
 
-    def __init__(self, rom, thumb: bool, addrs):
+    def __init__(self, rom, thumb: bool, addrs, seg_resume: bool = False):
         self.rom = rom
+        self.seg_resume = seg_resume  # every segment start is a resume point too (« blocks and the event checks »)
+        self.lift_psr = seg_resume  # MRS SPSR and MSR lifted (arm_msr); the GBA's packs, both from XBA-281
         self.thumb = thumb
         self.addrs = set(addrs)
         self.pipe = 4 if thumb else 8
@@ -235,9 +237,33 @@ class FnLifter:
 
     def arm_mrs(self, op, a):
         rd = (op >> 12) & 15
-        if (op >> 22) & 1 or rd == 15:
+        if rd == 15 or ((op >> 22) & 1 and not self.lift_psr):
             return None
+        if (op >> 22) & 1:
+            return ["r%d = RC_SPSR();" % rd]
         return ["r%d = fN << 31 | fZ << 30 | fC << 29 | fV << 28 | h->cpu.cpsr_ctl;" % rd]
+
+    def arm_msr(self, op, a):
+        """MSR (lift_psr): the SPSR inline; the CPSR inline, then a write to its control byte leaves (an IRQ it unmasked
+        is the dispatcher's). gba_cpu.c arm_psr."""
+        if not self.lift_psr:
+            return None
+        if op & (1 << 25):
+            v = hx(ror(op & 0xFF, (op >> 7) & 0x1E))
+        else:
+            if op & 15 == 15:
+                return None
+            v = "r%d" % (op & 15)
+        mask = 0
+        for bit, m in ((19, 0xFF000000), (18, 0x00FF0000), (17, 0x0000FF00), (16, 0x000000FF)):
+            if op >> bit & 1:
+                mask |= m
+        if (op >> 22) & 1:
+            return ["RC_MSR_SPSR(%s, %s);" % (hx(mask), v)]
+        out = ["RC_MSR_CPSR(%s, %s);" % (hx(mask), v)]
+        if mask & 0xFF:
+            out.append("RC_EXIT(%s);" % hx(a + 4))
+        return out
 
     def arm_mul(self, op, a):
         rd, rn, rs, rm = (op >> 16) & 15, (op >> 12) & 15, (op >> 8) & 15, op & 15
@@ -673,15 +699,19 @@ class FnLifter:
         leaders = block_leaders(addrs, size, bodies, self.targets)
         out = ["RC_FN %s(gba_machine *m_)" % name, "{", "    RC_ENTER(%d, %d);" % (int(self.thumb), region),
                "    switch (RC_PC()) {"]
-        left = block_left(addrs, size, leaders)
+        segs = set()
+        if self.seg_resume:
+            segs = {x + size for x in addrs if bodies[x] is not None and is_memory(bodies[x])
+                    and x + size in self.addrs and x + size not in leaders and bodies[x + size] is not None}
+        left = block_left(addrs, size, leaders | segs)
         for x in addrs:
-            if x in leaders:
+            if x in leaders or x in segs:
                 out.append("    case %s: goto %s;" % (hx(x), label(x)))
         # The other instructions (inside blocks): how many to the block's end, from a table.
         lo = addrs[0]
         tab = [0] * ((addrs[-1] - lo) // size + 1)
         for x in addrs:
-            if x not in leaders:
+            if x not in leaders and x not in segs:
                 tab[(x - lo) // size] = left[x]
         if any(tab):
             while not tab[-1]:
@@ -715,8 +745,8 @@ class FnLifter:
             if nxt not in self.addrs:
                 out.append("    RC_EXIT(%s);" % hx(nxt))
             elif is_memory(body) and nxt not in leaders and bodies[nxt] is not None:
-                out.append("    RC_CHECK(%s, %s, %d);" % (hx(nxt), segment_cost(addrs, i + 1, size, leaders, bodies),
-                                                       left[nxt]))
+                out.append("%s    RC_CHECK(%s, %s, %d);" % ("%s:" % label(nxt) if nxt in segs else "", hx(nxt),
+                                                         segment_cost(addrs, i + 1, size, leaders, bodies), left[nxt]))
         out += ["    RC_EPILOGUE();", "}"]
         return "\n".join(out) + "\n"
 
