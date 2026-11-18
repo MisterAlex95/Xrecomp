@@ -1187,9 +1187,11 @@ interpreter (XBA-283) only runs the code a pack does not hold.
   `x360_tools.gen_interp_vmx`), records its entry and goes on, so one run and one Prepare collect every miss the run
   reached (the runtime rewrites `discovered.txt` every 256 frames when it grew, and at pause and quit).
   `RECOMP_X360_INTERP=0` (or `x360_run --stop-at-miss`) keeps the old stop.
-- **A large title (XBA-283).** `x360_tools.recomp` writes files of about 1 MB of C (`--split-bytes`; the old split of
-  400 functions a file made 6 MB files, and one aarch64 clang job on one peaked at 0.93 GB, over the 512 MB per job
-  of `compile.py`). Measured with `consoles/x360/tests/bench_prepare.sh` on a synthetic title of our own generated
+- **A large title (XBA-283).** `x360_tools.recomp` writes one file per 64 KB of guest code (`--bucket-bytes`; about
+  1.15 MB of C, cut again past 2 MB). The old split of 400 functions a file made 6 MB files, and one aarch64 clang job
+  on one peaked at 0.93 GB, over the 512 MB per job of `compile.py`. Files by address also keep a second Prepare
+  cheap: a function added by the self-healing loop changes its own file and the table, every other object comes from
+  the cache (a size-cumulative split would have shifted every later file). Measured with `consoles/x360/tests/bench_prepare.sh` on a synthetic title of our own generated
   code (`make_big.py`: 12 MB of `.text`, 13,689 functions, 3.1 M instructions, every one in `.pdata`), NDK 28 clang
   for aarch64-linux-android30 at -O1, on the x86-64 build host:
 
@@ -1197,6 +1199,7 @@ interpreter (XBA-283) only runs the code a pack does not hold.
   |---|---|---|
   | lift (`x360_tools.recomp`, one Python process) | 53-80 s | 2.0 GB |
   | one generated file (~1 MB of C; 215 of them, 206 MB) | 6-11 s | ~200 MB |
+  | the same code in 6 MB files (the old split) | 39 s a file | 0.93 GB |
   | the resume table (`x360_rc_table.c`, 463,343 entries, 16 MB of C) | 2.6 s | 389 MB |
   | compile, the whole title, one core | ~1,300-1,900 s | |
 
