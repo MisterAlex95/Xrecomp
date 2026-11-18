@@ -189,6 +189,9 @@ jobs:
   # XBA-226: the PS2 corpus (consoles/ps2/tests/homebrew, ps2dev's official image pinned by digest, 281 MB compressed)
   # and the PS2 spike's ctest (tools/consoles/run_ps2_homebrew.sh, same deps image, about 40 s): ps2_hello /
   # ps2_rc_hello. Also on consoles/ps2/.
+  # XBA-270: the Xbox 360 test titles (consoles/x360/tests/homebrew, the GameCube's devkitPPC image) and the Xbox 360
+  # runtime's ctest (tools/consoles/run_x360_homebrew.sh, same deps image, a few seconds): x360_hello, x360_hello_lzx,
+  # x360_hello_c. Also on consoles/x360/ and tools/xex/.
   homebrew:
     # After the APK chain on main (XBA-269): the heavy-job lock is not FIFO, so without this order the corpus could take
     # it first and hold xrecomp-latest back. !cancelled(): on PRs android-apk is skipped and homebrew still runs.
@@ -221,7 +224,7 @@ jobs:
           base=${MERGE_BASE:-$BASE_SHA}
           if [ -n "$base" ] && git fetch -q --depth 1 "$url" "$base" 2>/dev/null \
              && files=$(git diff --name-only "$base" HEAD); then
-            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|consoles/n64/|consoles/ps1/|consoles/nds/|consoles/psp/|consoles/gc/|consoles/dc/|consoles/3ds/|consoles/ps2/|tools/ppc/|tools/prepare/|tools/docker/((gba|ps1|n64|nds|psp|gc|dc|3ds|ps2)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_nds_homebrew\.sh|run_dc_homebrew\.sh|run_psp_homebrew\.sh|run_gc_homebrew\.sh|run_3ds_homebrew\.sh|run_ps2_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh|build_gba_suite\.sh|run_n64_homebrew\.sh|build_n64_libdragon_tests\.sh|ps1_test_inputs\.sh|build_ps1_bios\.sh|fetch_ps1_tests\.sh|run_ps1_tests\.sh)$|\.gitea/workflows/ci\.yml$)'; then
+            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|consoles/n64/|consoles/ps1/|consoles/nds/|consoles/psp/|consoles/gc/|consoles/dc/|consoles/3ds/|consoles/ps2/|consoles/x360/|tools/xex/|tools/ppc/|tools/prepare/|tools/docker/((gba|ps1|n64|nds|psp|gc|dc|3ds|ps2|x360)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_nds_homebrew\.sh|run_dc_homebrew\.sh|run_psp_homebrew\.sh|run_gc_homebrew\.sh|run_3ds_homebrew\.sh|run_ps2_homebrew\.sh|run_x360_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh|build_gba_suite\.sh|run_n64_homebrew\.sh|build_n64_libdragon_tests\.sh|ps1_test_inputs\.sh|build_ps1_bios\.sh|fetch_ps1_tests\.sh|run_ps1_tests\.sh)$|\.gitea/workflows/ci\.yml$)'; then
               echo "build=true" >> "$GITHUB_OUTPUT"
             else
               echo "Nothing the homebrew corpus is built from: skipped."
@@ -236,12 +239,12 @@ jobs:
         if: steps.paths.outputs.build == 'true'
         run: sh tools/ci/heavy_lock.sh acquire
 
-      - name: Build the corpus (GBA, PS1, N64, NDS, PSP, GameCube, DC, 3DS, PS2)
+      - name: Build the corpus (GBA, PS1, N64, NDS, PSP, GameCube, DC, 3DS, PS2, Xbox 360)
         if: steps.paths.outputs.build == 'true'
         run: |
           apk add --no-cache bash coreutils tar >/dev/null
           JOBS=4 bash tools/consoles/build_homebrew.sh all out/homebrew
-          for c in gba ps1 n64 nds psp gc dc 3ds ps2; do echo "== $c"; cat "out/homebrew/$c/SHA256SUMS"; done
+          for c in gba ps1 n64 nds psp gc dc 3ds ps2 x360; do echo "== $c"; cat "out/homebrew/$c/SHA256SUMS"; done
 
       # A changed screenshot: look at the artefact's PNG; if the change is intended, rewrite the list with
       # tools/consoles/gba_corpus_packs.py CORPUS OUT --gba-run GBA_RUN --update (consoles/README.md).
@@ -301,6 +304,13 @@ jobs:
       - name: PS2 corpus through the spike's ctest (interpreter, recompiled)
         if: steps.paths.outputs.build == 'true'
         run: JOBS=4 bash tools/consoles/run_ps2_homebrew.sh out/homebrew out/ps2-homebrew
+
+      # XBA-270: the Xbox 360 runtime: the assembly test title (plain and encrypted + LZX, a directory and an XDVDFS
+      # image for its disc) and the C test title, recompiled and run under x360_run, their DbgPrint text against
+      # consoles/x360/tests/hello.txt / hello_c.txt (a few seconds, same deps image).
+      - name: Xbox 360 test titles through the runtime's ctest (recompiled)
+        if: steps.paths.outputs.build == 'true'
+        run: JOBS=4 bash tools/consoles/run_x360_homebrew.sh out/homebrew out/x360-homebrew
 
       - name: PS1 test inputs (OpenBIOS, JaCzekanski/ps1-tests; cached)
         if: steps.paths.outputs.build == 'true'
