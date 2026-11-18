@@ -68,6 +68,11 @@ add_executable(gc_gx_ring_test gx_ring_test.c)
 target_include_directories(gc_gx_ring_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/gx)
 target_compile_options(gc_gx_ring_test PRIVATE -Wall -Wextra)
 add_test(NAME gc_gx_ring COMMAND gc_gx_ring_test)
+# gx_hash: the content hash of the texture cache (no GL): every byte, its place, the length and the seed change it
+add_executable(gc_gx_hash_test gx_hash_test.c)
+target_link_libraries(gc_gx_hash_test PRIVATE gc_core)
+target_compile_options(gc_gx_hash_test PRIVATE -Wall -Wextra)
+add_test(NAME gc_gx_hash COMMAND gc_gx_hash_test)
 # gx_batch: the renderer's draw batch on a headless GLES 3 context (llvmpipe): points and line strips (4 vertices per
 # quad) flush the batch before they would overflow it (77 without a context)
 add_executable(gc_gx_batch_test gx_batch_test.c)
