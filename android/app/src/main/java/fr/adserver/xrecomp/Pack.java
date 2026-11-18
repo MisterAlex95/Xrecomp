@@ -93,7 +93,29 @@ final class Pack {
             return 0;
         }
         int n = countAddressesCached(discoveredFile(filesDir, libraryKey), mayRead);
-        return n < 0 ? -1 : Math.max(0, n - used);
+        if (n < 0)
+            return -1;
+        int found = Math.max(0, n - used);
+        if (Console.ofKey(libraryKey) == Console.X360)   // XBA-282: shaders met that the pack lacks heal the same way
+            found += newShaders(filesDir, libraryKey);
+        return found;
+    }
+
+    /**
+     * XBA-282: the Xbox 360 shaders the runs met (the runtime's dump, &lt;files&gt;/work/&lt;key&gt;/shaders/*.bin)
+     * that the pack does not have (packs/&lt;key&gt;/shaders/: the next Prepare translates them; one it cannot
+     * translate is kept there as its .bin, so it is not counted again). A directory listing each, no read.
+     */
+    static int newShaders(File filesDir, String libraryKey) {
+        String[] met = new File(new File(new File(filesDir, "work"), libraryKey), "shaders").list();
+        if (met == null)
+            return 0;
+        File have = new File(packDir(filesDir, libraryKey), "shaders");
+        int n = 0;
+        for (String s : met)
+            if ((s.startsWith("vs_") || s.startsWith("ps_")) && s.endsWith(".bin") && !new File(have, s).isFile())
+                n++;
+        return n;
     }
 
     /** A discovered file read at once on the UI thread: up to 256 KB (a GBA's, a short N64 history). */

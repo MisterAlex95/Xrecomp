@@ -4,7 +4,8 @@
     {
       "include": ["tools/**/*.py", "tools/recomp/data/**", "tools/xbe_ident/*.json", "tools/prepare/toolkit_tree.json",
                   "consoles/gba/tools/**/*.py", "consoles/ps1/tools/**/*.py",
-                  "consoles/n64/tools/**/*.py", "consoles/gc/tools/**/*.py"],
+                  "consoles/n64/tools/**/*.py", "consoles/gc/tools/**/*.py",
+                  "consoles/x360/tools/**/*.py"],
       "exclude": ["**/test_*.py", "**/tests/**", "**/conftest.py", "**/__pycache__/**", "tools/*/output/**",
                   "tools/android/**", "tools/docker/**", "tools/ci/**", "tools/conformance/msvc-wine/**",
                   "tools/xrecomp/**"]
@@ -12,7 +13,8 @@
     {
       "include": ["templates/new-game/**", "templates/runtime/**", "profiles/**", "include/**", "src/**/*.h",
                   "consoles/gba/runtime/*.h", "consoles/ps1/runtime/*.h",
-                  "consoles/n64/runtime/*.h", "consoles/gc/runtime/*.h"],
+                  "consoles/n64/runtime/*.h", "consoles/gc/runtime/*.h",
+                  "consoles/x360/runtime/*.h"],
       "exclude": ["**/build/**"]
     }
   ],

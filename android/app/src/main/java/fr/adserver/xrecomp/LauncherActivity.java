@@ -192,6 +192,7 @@ public class LauncherActivity extends Activity {
     private static final int REQ_VK_DRIVER = 8;
     static final int REQ_SAVES_EXPORT = 9;
     private static final int REQ_SAVES_IMPORT = 10;
+    private static final int REQ_X360_KEY = 11;   // XBA-282
     /** The titles the pending « Export saves » writes (set before the picker opens), and its key (null: all). */
     /**
      * The games of an export waiting on the file picker: kept in the saved state (STATE_EXPORT_KEYS), since the
@@ -2584,6 +2585,31 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    /** XBA-282: « Key file » on an Xbox 360 game's Home: the system picker, any file (a key has no type). */
+    private void openX360KeyPicker() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+        try {
+            startActivityForResult(i, REQ_X360_KEY);
+        } catch (ActivityNotFoundException e) {
+            setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
+        }
+    }
+
+    /** The picked key file checked and copied into the app's private, never backed up storage (X360Key). */
+    private void onX360KeyPicked(Uri uri) {
+        Log.i(TAG, "launcher: xbox 360 key file picked");   // never its name or content
+        try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null)
+                throw new IOException("cannot open it");
+            X360Key.install(getNoBackupFilesDir(), in);
+            setNote(getString(R.string.X360_KEY_SET), NOTE_INFO);
+        } catch (IOException | SecurityException ex) {
+            setNote(getString(R.string.X360_KEY_BAD, String.valueOf(ex.getMessage())), NOTE_ERROR);
+        }
+        if (screen == Screen.ROM_HOME)
+            refreshKeepingFocus();
+    }
+
     private void onLsfgDllPicked(Uri uri) {
         String name = displayName(uri);
         Log.i(TAG, "launcher: Lossless.dll picked (" + name + ")");
@@ -4759,6 +4785,8 @@ public class LauncherActivity extends Activity {
             String why = s.msg;
             if (PrepareRunner.KILLED.equals(s.code))
                 why = getString(R.string.PREPARE_HINT_KILLED);
+            else if ("NO_KEY".equals(s.code))   // XBA-282: an encrypted Xbox 360 title, no key file that opens it
+                why = getString(R.string.X360_NO_KEY_NOTE) + (why.isEmpty() ? "" : " " + why);
             else if ("NO_SPACE".equals(s.code))
                 why = getString(R.string.PREPARE_HINT_NO_SPACE, size(internalFree()))
                       + (why.isEmpty() ? "" : " " + why);
@@ -5055,6 +5083,10 @@ public class LauncherActivity extends Activity {
         // XBA-158 / XBA-168 / XBA-174: the console's buttons remapped, for all its games or this one (ROM_CONTROLS).
         pill(buttons, Icon.PAD, getString(R.string.CONTROLS), false, () -> go(Screen.ROM_CONTROLS));
         // XBA-181: this game's picture (scale, filter) and its stored files (saves, Prepare files): ROM_OPTIONS.
+        boolean x360 = e.console() == Console.X360;
+        if (x360)   // XBA-282: the player's key file, which Prepare opens an encrypted title with (X360Key)
+            pill(buttons, null, getString(X360Key.present(this) ? R.string.X360_KEY_CHANGE : R.string.X360_KEY_PICK),
+                 false, this::openX360KeyPicker);
         pill(buttons, null, getString(R.string.ROM_OPTIONS), false, () -> go(Screen.ROM_OPTIONS))
             .setMark(gameSettingsMark(e.tid, e.console()));
         homePrimary = play;
@@ -5075,13 +5107,17 @@ public class LauncherActivity extends Activity {
         else if (!prepares)
             setNote(getString(R.string.ROM_PS1_NOTE), NOTE_INFO);
         else if (p == Prep.FAILED)
-            setNote(getString(R.string.ROM_FAILED_NOTE, ps == null ? "" : ps.code), NOTE_WARN);
+            setNote(x360 && ps != null && "NO_KEY".equals(ps.code) ? getString(R.string.X360_NO_KEY_NOTE)
+                    : getString(x360 ? R.string.ROM_X360_FAILED_NOTE : R.string.ROM_FAILED_NOTE,
+                                ps == null ? "" : ps.code), NOTE_WARN);
         else if (p == Prep.PLAYABLE)
             setNote(older ? getString(R.string.ROM_OLDER_TOOLKIT_NOTE)
                     : found > 0 ? getString(R.string.ROM_NEW_CODE_NOTE, found) : getString(R.string.ROM_PREPARED_NOTE),
                     NOTE_INFO);
         else if (p == Prep.NEEDED || p == Prep.CANCELLED || p == Prep.INTERRUPTED)
-            setNote(getString(n64 ? R.string.ROM_N64_NOT_PREPARED_NOTE : R.string.ROM_NOT_PREPARED_NOTE), NOTE_INFO);
+            setNote(getString(x360 ? (X360Key.present(this) ? R.string.ROM_X360_NOT_PREPARED_NOTE
+                                                              : R.string.ROM_X360_NO_KEY_NOTE)
+                              : n64 ? R.string.ROM_N64_NOT_PREPARED_NOTE : R.string.ROM_NOT_PREPARED_NOTE), NOTE_INFO);
     }
 
     /** An N64 game plays with the rumble pak (N64Pak): its own choice, else recomp.cfg's RECOMP_N64_PAK line. */
@@ -9724,5 +9760,7 @@ public class LauncherActivity extends Activity {
             onSavesExportPicked(data.getData());
         else if (requestCode == REQ_SAVES_IMPORT && data.getData() != null)
             onSavesImportPicked(data.getData());
+        else if (requestCode == REQ_X360_KEY && data.getData() != null)
+            onX360KeyPicked(data.getData());
     }
 }

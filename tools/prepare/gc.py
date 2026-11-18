@@ -366,9 +366,13 @@ class Run(ps1.Run):
             args += ["--rel", r]
         return args
 
+    def lift_note(self):
+        return "lifting to C (main DOL, %d REL module(s) on the disc)" % len(self.rels)
+
     def lift(self):
         gen = os.path.join(self.work, "gen")
-        module = os.environ.get(RECOMP_MODULE_ENV, DEFAULT_MODULE)
+        cm = self.cm                        # this module, or a Run built on this one (tools/prepare/x360.py)
+        module = os.environ.get(cm.RECOMP_MODULE_ENV, cm.DEFAULT_MODULE)
         key = "%s|%s" % (self.disc_key, module)
         if self.stamp.get("lift") == key and os.path.isdir(gen) and any(f.endswith(".c") for f in os.listdir(gen)):
             self.rep.progress(3, 100, "lift up to date (%d C files)" % len([f for f in os.listdir(gen)
@@ -383,11 +387,11 @@ class Run(ps1.Run):
         os.makedirs(new)
         args = self.lift_args(module, new)
         env = dict(os.environ)
-        paths = [p for p in (os.environ.get(TOOLS_DIR_ENV), tools_dir(self.m.ROOT), self.m.ROOT) if p]
+        paths = [p for p in (os.environ.get(cm.TOOLS_DIR_ENV), cm.tools_dir(self.m.ROOT), self.m.ROOT) if p]
         if env.get("PYTHONPATH"):
             paths.append(env["PYTHONPATH"])
         env["PYTHONPATH"] = os.pathsep.join(paths)
-        self.rep.progress(3, 2, "lifting to C (main DOL, %d REL module(s) on the disc)" % len(self.rels))
+        self.rep.progress(3, 2, self.lift_note())
         with open(self.log, "a") as f:
             f.write("\n$ %s\n" % " ".join(args))
             f.flush()

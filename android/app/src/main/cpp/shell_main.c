@@ -379,9 +379,9 @@ int main(int argc, char *argv[])
         if (console == RECOMP_CONSOLE_X360 && pack_rc != RECOMP_PACK_OK) {
             /* XBA-280: an Xbox 360 title runs only from its pack (its code recompiled ahead) */
             exit_via_launcher(pack_rc == RECOMP_PACK_MISSING
-                                  ? "this Xbox 360 game has no pack yet: make one on a computer "
-                                    "(python3 -m x360_tools.bringup ... --app-pack) and copy it into files/packs/"
-                                  : "this Xbox 360 game's pack cannot be used (see the log)");
+                                  ? "this Xbox 360 game is not prepared yet: Prepare it on its page (with your "
+                                    "key file for a retail game), then Play"
+                                  : "this Xbox 360 game's pack cannot be used: Prepare it again (see the log)");
             recomp_quit(1);
         }
     }

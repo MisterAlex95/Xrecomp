@@ -149,7 +149,7 @@ def write_json_atomic(path, obj):
 
 
 # Another console's pack folder (XBA-147): "<console>-<title key>", kept as it is.
-CONSOLE_DIR = re.compile(r"(gba|ps1|n64|gc)-[A-Za-z0-9_-]{1,40}\Z")
+CONSOLE_DIR = re.compile(r"(gba|ps1|n64|gc|x360)-[A-Za-z0-9_-]{1,40}\Z")
 
 
 def dir_name(tid):

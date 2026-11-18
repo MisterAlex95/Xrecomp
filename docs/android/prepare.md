@@ -1157,6 +1157,36 @@ played. A driver update changes the file's key: the game ignores it and rebuilds
 programs rc 0, N states, C cached, K compiled, F failed, T ms` and the native `gx: warm-up …` line. Tests: ctest
 `gc_gx_programs` (`gc_run --gx-warmup` on llvmpipe), the app's `GcShaderWarmupTest`.
 
+## Xbox 360 packs (XBA-282)
+
+An Xbox 360 game (an XEX, or a disc image holding `default.xex`) is prepared on the device like a GameCube disc
+(`tools/prepare/x360.py`, the GameCube's Run with an XEX). Unlike the other consoles there is no interpreter: a 360
+game plays only once prepared.
+
+- **The key.** A retail XEX is encrypted. The player picks his console's key file on the game's Home (« Key file »):
+  `X360Key` checks it (16 raw bytes, or 32 hex digits) and keeps the 16 bytes in `<no backup files>/keys/x360.key`,
+  never backed up, exported or logged. PrepareService hands its path to tools.prepare in `XEX_KEY_FILE`
+  (tools/xex/xex.py `load_keys`). An encrypted title without a key that opens it fails with code `NO_KEY`, and the
+  Home says to pick the key file.
+- **The source.** A path goes as it is: tools.prepare reads `default.xex` out of an image (tools/xiso/xdvdfs.py, the
+  360 partition offsets). A document is copied into the work folder as `source.xex`: the XEX itself, or the
+  `default.xex` of a disc image (`Console.x360DiscXex`). That is a few MB, never the 7 GB image.
+- **Steps.** 1: the XEX is written plain to `<work>/plain.xex`; the key is `X360-<title id>-<CRC32>` and the identity
+  is the plain XEX's SHA-256. 2: `<work>/discovered.txt` (the runtime's misses; since XBA-282 the file only grows) is
+  merged with the earlier seeds. 3: `x360_tools.recomp`. 4: the shared compile driver at -O1, `-DXE_RUNTIME=1
+  -ffp-contract=off`. 5: `libtitle.so`, `pack.json` (`console` x360, `entry` xe_rc_resume), `default.xex` and
+  `shaders/`.
+- **Shaders.** They are known only once a run has met them. The runtime dumps the microcode of every shader it meets
+  to `<work>/shaders/*.bin`. Prepare translates the new ones to GLSL ES (xenos_glsl) into `<work>/glsl/` and copies
+  them into the pack's `shaders/`. A shader that does not translate stays there as its `.bin` and is not tried again.
+  A Prepare whose link is up to date still adds the new shaders.
+- **Self-healing.** `Pack.newlyDiscovered` counts, for a 360 game, both the new addresses and the shaders met that the
+  pack lacks (`Pack.newShaders`). Home then offers Prepare again, as for the other consoles. The first pack draws
+  nothing until its shaders have been met once.
+
+Tests: `tools/prepare/test_x360_prepare.py` (with `$X360_RUN`, the pack is also run by x360_run), the app's
+`X360KeyTest` and `ConsoleTest`.
+
 ## The loader
 
 The app shell's side (`android/app/src/main/cpp/pack_loader.{c,h}`, `src/platform/recomp_pack.{c,h}`; details and
