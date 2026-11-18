@@ -307,6 +307,8 @@ def run(out, variant, layout="so", reps=5, scale=1.0, runner=(), target=None, on
     out = os.path.abspath(out)
     bdir = os.path.join(out, "build", variant + ("" if not target else "-" + target))
     exe = os.path.join(bdir, layout, "bench")
+    if not os.path.exists(exe):
+        raise SystemExit("%s: not built (the cpuslot variant has only the so layout: --layout so)" % exe)
     args = list(runner) + [exe, os.path.join(out, "image.bin"), str(reps), str(scale)] + ([only] if only else [])
     r = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=1800)
     if r.returncode != 0:
@@ -376,6 +378,8 @@ def icount(out, variant, runner, layout="exe", scale=0.1, target=None, only=None
     out = os.path.abspath(out)
     bdir = os.path.join(out, "build", variant + ("" if not target else "-" + target))
     exe = os.path.join(bdir, layout, "bench")
+    if not os.path.exists(exe):
+        raise SystemExit("%s: not built (the cpuslot variant has only the so layout: --layout so)" % exe)
     trace = ["-one-insn-per-tb", "-d", "nochain,exec", "-D", "/dev/stdout"]
 
     def count(w, sc):
