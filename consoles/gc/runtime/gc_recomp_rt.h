@@ -464,6 +464,9 @@ static inline void gc_psq_store(gc_machine *m, unsigned s, uint32_t ea, unsigned
         return;                                                                                                        \
     } while (0)
 
+/* A polled flag's address is in MEM1 (gc_tools' idle polling loops: only RAM changes at events alone). */
+#define RC_IN_RAM(ea_) (rc_pa(m_, (ea_)) < GC_RAM_SIZE)
+
 #define RC_MACHINE gc_machine
 #define R(n) c->gpr[n]
 #define F0(n) c->ps0[n]
