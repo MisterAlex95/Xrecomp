@@ -244,7 +244,8 @@ def test_gamecube_list_and_play(home, tmp_path, monkeypatch):
     lines = out.splitlines()
     assert "export RECOMP_SAVE_DIR=" + home.console_saves in lines
     assert lines[-1] == "%s %s" % (player, disc)
-    assert cli.console_unsupported("gc", "win32") and "GameCube" in cli.console_unsupported("gc", "win32")
+    assert cli.console_unsupported("gc", "win32") is None   # XBA-278: plays in the interpreter on Windows
+    assert cli.console_unsupported("gc", "win32", "prepare").startswith("GC games are not prepared on Windows")
 
 
 def test_list_states_xbox(home, tmp_path):
@@ -457,17 +458,19 @@ def test_gba_prepare_list_play(home, tmp_path, monkeypatch):
     assert e["state"] == "missing" and e["label"] == "Source gone"
 
 
-def test_consoles_refused_on_windows(home, tmp_path, monkeypatch):
-    """XBA-89: Windows prepares and plays Xbox games only; the console runtimes are POSIX-only."""
-    assert cli.console_unsupported("xbox", "win32") is None
-    assert cli.console_unsupported("gba", "linux") is None
-    why = cli.console_unsupported("ps1", "win32")
-    assert why.startswith("PS1 games are not supported on Windows") and "POSIX-only" in why
+def test_consoles_on_windows_play_interpreted(home, tmp_path, monkeypatch):
+    """XBA-89, XBA-278: Windows plays console games in the interpreter (players built with MinGW-w64) and prepares
+    Xbox games; a console game's native pack is refused there, with the reason."""
+    assert cli.console_unsupported("xbox", "win32", "prepare") is None
+    assert cli.console_unsupported("gba", "linux", "prepare") is None
+    assert cli.console_unsupported("ps1", "win32") is None
+    why = cli.console_unsupported("ps1", "win32", "prepare")
+    assert why.startswith("PS1 games are not prepared on Windows") and "interpreter" in why
     rom = tmp_path / "m.z64"
     rom.write_bytes(n64_rom())
-    _fake_player(tmp_path, monkeypatch, "n64")
+    player = _fake_player(tmp_path, monkeypatch, "n64")
     monkeypatch.setattr(cli.sys, "platform", "win32")
     rc, out = run("play", str(rom), "--print")
-    assert rc == 1
+    assert rc == 0 and out.splitlines()[-1] == "%s %s" % (player, rom)
     rc, out = run("prepare", str(rom), "--print")
     assert rc == 1

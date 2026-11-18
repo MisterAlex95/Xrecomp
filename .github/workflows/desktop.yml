@@ -227,11 +227,11 @@ jobs:
           $list = & $x --home "$t\home" list
           $list
           if (-not ($list -match '^12345678 ')) { exit 1 }
-          # Console games are refused on Windows, with the reason.
+          # A console game's native pack is refused on Windows, with the reason (XBA-278: it plays in the interpreter).
           python -c "import sys; sys.path.insert(0, r'$t\XRecomp'); from tools.prepare.test_gba_prepare import make_rom; open(r'$t\t.gba', 'wb').write(make_rom())"
           $out = & $x --home "$t\home" prepare "$t\t.gba" 2>&1 | Out-String
           $out
-          if ($LASTEXITCODE -eq 0 -or -not ($out -match 'not supported on Windows')) { exit 1 }
+          if ($LASTEXITCODE -eq 0 -or -not ($out -match 'not prepared on Windows')) { exit 1 }
           exit 0
       - name: The same title with MSVC's cl (informative)
         continue-on-error: true

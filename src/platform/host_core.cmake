@@ -31,7 +31,19 @@ if(NOT TARGET host_time)
     add_library(host_cpus STATIC ${CMAKE_CURRENT_LIST_DIR}/host_cpus.c)
     target_include_directories(host_cpus PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 
-    if(NOT WIN32)
+    # XBA-278: the POSIX parts build on Windows too (the console runtimes there), with xbr_posix_win32: the few POSIX
+    # calls they use, force-included, and a dlfcn.h over LoadLibrary (src/platform/win32_posix), when a console
+    # runtime is asked for (-DXBR_CONSOLE_GBA=ON ...): the Xbox Windows build (MSVC too) defines none of them.
+    if(WIN32 AND NOT TARGET xbr_posix_win32 AND (XBR_CONSOLE_GBA OR XBR_CONSOLE_PS1 OR XBR_CONSOLE_N64 OR XBR_CONSOLE_GC))
+        add_library(xbr_posix_win32 INTERFACE)
+        target_include_directories(xbr_posix_win32 INTERFACE ${CMAKE_CURRENT_LIST_DIR}/win32_posix)
+        set(_xbr_posix_h ${CMAKE_CURRENT_LIST_DIR}/win32_posix/xbr_posix_win32.h)
+        # clock_gettime and the pthreads: MinGW-w64's winpthreads (MSVC has neither: build with MinGW-w64).
+        target_link_libraries(xbr_posix_win32 INTERFACE "$<$<NOT:$<C_COMPILER_ID:MSVC>>:pthread>")
+        target_compile_options(xbr_posix_win32 INTERFACE
+            "$<$<C_COMPILER_ID:MSVC>:/FI${_xbr_posix_h}>" "$<$<NOT:$<C_COMPILER_ID:MSVC>>:SHELL:-include ${_xbr_posix_h}>")
+    endif()
+    if(NOT WIN32 OR XBR_CONSOLE_GBA OR XBR_CONSOLE_PS1 OR XBR_CONSOLE_N64 OR XBR_CONSOLE_GC)
         find_package(Threads REQUIRED)
         add_library(host_perf_hint STATIC ${CMAKE_CURRENT_LIST_DIR}/host_perf_hint.c)
         target_include_directories(host_perf_hint PUBLIC ${CMAKE_CURRENT_LIST_DIR})
@@ -70,5 +82,10 @@ if(NOT TARGET host_time)
             target_link_libraries(xbr_host_core PUBLIC log)   # android_log.c: stdout / stderr -> logcat
         endif()
         target_compile_options(xbr_host_core PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
+        if(WIN32)
+            foreach(_t host_perf_hint host_perf_line recomp_storage xbr_host_core)
+                target_link_libraries(${_t} PUBLIC xbr_posix_win32)
+            endforeach()
+        endif()
     endif()
 endif()

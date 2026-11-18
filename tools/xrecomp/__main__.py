@@ -15,8 +15,9 @@ copied. GAME is a source path, a title ID (12345678, gba-AXVE-1A2B3C4D) or a uni
 
 Files go to the platform's user data folder ($XRECOMP_HOME moves it; `xrecomp where` prints it).
 
-Windows (XBA-89, experimental): Xbox games only. The GBA, PS1 and N64 runtimes are POSIX-only (src/host); prepare and
-play refuse them there and say so.
+Windows (XBA-89, experimental): Xbox games, and since XBA-278 GBA / PS1 / N64 / GameCube games in the interpreter
+(their players cross-built with MinGW-w64, docs/desktop/windows.md); a console game's native pack is not prepared
+there (prepare refuses it and says so).
 """
 
 import argparse
@@ -41,13 +42,14 @@ def err(msg):
     print("xrecomp: " + msg, file=sys.stderr, flush=True)
 
 
-def console_unsupported(console, platform=None):
-    """Why this host cannot prepare or play a console's games, or None. Windows: Xbox games only (XBA-89)."""
+def console_unsupported(console, platform=None, action="play"):
+    """Why this host cannot prepare (action "prepare") or play a console's games, or None. Windows (XBA-89, XBA-278):
+    a console game plays in the interpreter (its player built with MinGW-w64); its native pack is not prepared there
+    (the pack build and loader are the POSIX hosts')."""
     platform = platform or sys.platform
-    if console and console != "xbox" and platform.startswith("win"):
-        return ("%s games are not supported on Windows: the console runtimes (GBA, PS1, N64, GameCube) are POSIX-only. "
-                "Use Linux, macOS or WSL2 for them; Xbox games work here (docs/desktop/windows.md)"
-                % console.upper())
+    if console and console != "xbox" and platform.startswith("win") and action == "prepare":
+        return ("%s games are not prepared on Windows: their native pack is built and loaded on Linux and macOS only. "
+                "The game plays here in the interpreter: xrecomp play GAME (docs/desktop/windows.md)" % console.upper())
     return None
 
 
@@ -125,7 +127,7 @@ def cmd_prepare(home, a):
     if e.error:
         err("%s: %s" % (a.source, e.error))
         return 1
-    why = console_unsupported(e.console)
+    why = console_unsupported(e.console, action="prepare")
     if why:
         err(why)
         return 1
@@ -328,7 +330,7 @@ def identify_dict(home, src):
     d["key"] = e.key
     if e.console and e.console != "xbox" and not e.error:
         d["player"] = find_player(e.console)
-        d["unsupported"] = console_unsupported(e.console)
+        d["unsupported"] = console_unsupported(e.console, action="prepare")
         d["save_dir"] = home.title(e.id).save
         d["pack_dir"] = home.title(e.id).pack
     return d

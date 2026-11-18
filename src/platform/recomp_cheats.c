@@ -1361,6 +1361,8 @@ static int stat_of(const char *path, long long *mtime_ns, long long *size)
         return -1;
 #if defined(__APPLE__)
     *mtime_ns = (long long)st.st_mtimespec.tv_sec * 1000000000ll + st.st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+    *mtime_ns = (long long)st.st_mtime * 1000000000ll; /* whole seconds there */
 #else
     *mtime_ns = (long long)st.st_mtim.tv_sec * 1000000000ll + st.st_mtim.tv_nsec;
 #endif

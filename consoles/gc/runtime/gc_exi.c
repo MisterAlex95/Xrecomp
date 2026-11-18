@@ -197,8 +197,17 @@ static int64_t rtc_base(gc_machine *m)
     time_t t = time(NULL);
     struct tm lt;
     long off = 0;
+#ifdef _WIN32
+    if (gmtime_r(&t, &lt)) { /* no tm_gmtoff: UTC's fields read back as local time */
+        lt.tm_isdst = -1;
+        time_t back = mktime(&lt);
+        if (back != (time_t)-1)
+            off = (long)(t - back);
+    }
+#else
     if (localtime_r(&t, &lt))
         off = lt.tm_gmtoff;
+#endif
     return (int64_t)t + off - GC_EPOCH_UNIX;
 }
 

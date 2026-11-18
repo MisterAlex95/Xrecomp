@@ -21,9 +21,8 @@ project(xbr_host C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-if(WIN32)
-    message(FATAL_ERROR "xbr_host: POSIX hosts only (Linux, macOS, Android)")
-endif()
+# Windows (XBA-278): built for the console runtimes there (MinGW-w64; the POSIX calls through xbr_posix_win32,
+# src/platform/host_core.cmake), never for the Xbox Windows build.
 
 get_filename_component(XBR_HOST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
@@ -55,6 +54,12 @@ if(NOT TARGET xbr_host)
         ${XBR_HOST_SRC}/input
         ${XBR_HOST_SRC}/audio)
     target_link_libraries(xbr_host PUBLIC xbr_host_core recomp_storage input_ports console_pad host_framegen SDL2::SDL2)
+    if(WIN32)
+        # XBA-278: the players are console programs with their own main() (no SDL2main: SDL.h leaves main alone with
+        # SDL_MAIN_HANDLED, and SDL_Init needs no SDL_SetMainReady on Windows).
+        target_compile_definitions(xbr_host PUBLIC SDL_MAIN_HANDLED)
+        target_link_options(xbr_host INTERFACE "$<$<NOT:$<C_COMPILER_ID:MSVC>>:-mconsole>")
+    endif()
     set_target_properties(xbr_host PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_options(xbr_host PRIVATE -Wall -Wextra -O2)
 endif()

@@ -1,5 +1,12 @@
 /* stdout / stderr -> logcat on Android (android_log.h). The pump is built on
- * every POSIX host, so its drain can be tested on Linux. */
+ * every POSIX host, so its drain can be tested on Linux. Windows (the console
+ * runtimes there, XBA-278): no pump, stdout and stderr go where they go. */
+#ifdef _WIN32
+#include "android_log.h"
+int xbox_android_log_init(void) { return 0; }
+int xbox_log_pump_start(xbox_log_sink sink) { (void)sink; return -1; }
+int xbox_log_drain(int timeout_ms) { (void)timeout_ms; return -1; }
+#else
 #if !defined(_GNU_SOURCE)
 #define _GNU_SOURCE   /* gettid / syscall */
 #endif
@@ -216,3 +223,4 @@ int xbox_android_log_init(void)
 int xbox_android_log_init(void) { return 0; }
 
 #endif
+#endif /* _WIN32 */

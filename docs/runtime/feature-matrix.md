@@ -52,7 +52,7 @@ runtimes now call instead of four copies; the window, its shaders, frame generat
 |---|---|---|---|---|---|---|
 | Android app | yes | yes | yes | yes | yes | yes: Prepare on the device (XBA-282) or a desktop pack |
 | Desktop `xrecomp` CLI (Linux, macOS) | yes | yes (`gba_play`) | yes (`ps1_play`) | yes (`n64_play`) | yes (`gc_play`; XBA-274: `tools/xrecomp/library.py` `_identify_gc`, RVZ / WIA through a found `gc_run`, read once and kept; saves and states in RECOMP_SAVE_DIR, `--missed`) | partial: `x360_play` alone (Linux; not in `xrecomp` yet) |
-| Desktop `xrecomp` CLI (Windows) | yes, without save states / rewind | no (`__main__.py` `console_unsupported`) | no | no | no | no |
+| Desktop `xrecomp` CLI (Windows) | yes, without save states / rewind | partial (XBA-278): plays in the interpreter, players cross-built with MinGW-w64 (`src/platform/win32_posix`, docs/desktop/windows.md « Console games »); no native pack (prepare refuses it); not in the MSVC zip | partial: the same | partial: the same | partial: the same | no |
 | macOS launcher (`macos/`) | yes: settings, cover art, game apps, save import | yes (XBA-278: `macos/Sources/XRecompCore/ConsoleGames.swift`; listed, prepared and played through `xrecomp identify` / `play --print --json`; settings rows per console, Controls, Manage, game apps; box art: no download, the monogram) | yes (a cue's tracks once) | yes (+ controller pak row) | yes (a GameCube `.iso` after the Xbox identify) | no |
 
 The desktop has no settings UI on Linux / Windows (`recomp.cfg`, `xrecomp settings KEY=VALUE`), no save-state, cheat
@@ -88,6 +88,9 @@ Left, with the reason:
 - N64 internal resolution with the software RDP: it draws at the console's resolution by design; the Vulkan RDP
   upscales.
 - Xbox in-run loads with mismatched thread chains, and Xbox states on Windows: runtime work (XBA-249 follow-ups).
+- Console games on Windows: interpreter only (XBA-278). The native pack needs the prepare's compile on Windows (a
+  DLL from MinGW-w64 or MSVC, `tools/prepare` `*_pack` steps) and its loader tested there; the players are not in the
+  MSVC-built zip (the console runtimes need winpthreads: a MinGW-w64 build); never run on a Windows PC, only wine.
 - Xbox keyboard hotkeys on Windows (the GDI window, `src/video/fb_present.c`): Windows builds have no Xbox save
   states yet, so only fast-forward would apply.
 - macOS launcher for the other consoles: done (XBA-278); its console games have no box art download yet (the
