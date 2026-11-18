@@ -365,6 +365,15 @@ def close(got, want, loose):
     return abs(got - want) <= tol * max(1.0, abs(want))
 
 
+def test_mini_fetch_inherits_constant_and_stride():
+    words = program([(2, [("fetch", fetch_words(0, 0, 1, 0o3210, 5, sel=2, format=38, stride=9, offset=0)),
+                          ("fetch", fetch_words(0, 0, 2, 0o3210, 0, sel=0, format=6, stride=0, offset=4, mini=1)),
+                          ("alu", alu_words(**export(0, 2)))], {})])
+    _, info = translate(words, "vertex")
+    assert [(a["fetch_constant"], a["offset"], a["stride"], a["format"]) for a in info["attributes"]] == \
+        [(17, 0, 9, 38), (17, 4, 9, 6)]
+
+
 def test_translation_shape():
     rng = random.Random(1)
     src_, info = translate(to_words(make_case(rng)), "vertex")

@@ -138,6 +138,7 @@ class _Shader:
         self.uses_a0 = False
         self.uses_al = False
         self.exports_depth = self.exports_psize = False
+        self.last_full = None  # (fetch constant, stride) of the last full vertex fetch, for mini fetches
 
     def emit(self, line):
         self.body.append("    " * self.depth + line)
@@ -356,11 +357,19 @@ class _Shader:
         f = decode_fetch(*words)
         where = "fetch %d" % at
         if f["op"] == 0:
-            key = (f["const_index"] * 3 + f["const_index_sel"], f["offset"])
+            # a mini fetch takes the fetch constant and stride of the full fetch before it (Xenia's
+            # ParseVertexFetchInstruction); its format, offset and signedness are its own
+            if not f["mini"]:
+                self.last_full = (f["const_index"] * 3 + f["const_index_sel"], f["stride"])
+            if f["mini"] and self.last_full:
+                fc, stride = self.last_full
+            else:
+                fc, stride = f["const_index"] * 3 + f["const_index_sel"], f["stride"]
+            key = (fc, f["offset"])
             names = [k for k, _ in self.attributes]
             if key not in names:
-                self.attributes.append((key, {"fetch_constant": key[0], "offset": f["offset"], "format": f["format"],
-                                              "stride": f["stride"], "signed": f["signed"], "integer": f["integer"],
+                self.attributes.append((key, {"fetch_constant": fc, "offset": f["offset"], "format": f["format"],
+                                              "stride": stride, "signed": f["signed"], "integer": f["integer"],
                                               "exp_adjust": f["exp_adjust"]}))
                 names.append(key)
             src = "xe_v%d" % names.index(key)

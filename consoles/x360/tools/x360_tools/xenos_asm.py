@@ -24,7 +24,7 @@ def fetch_words(op, src_reg, dst_reg, dst_swz, const_index, **kw):
     d2 = 0
     if op == 0:
         d0 |= kw.get("sel", 0) << 25 | kw.get("src_swz", 0) << 30
-        d1 |= kw.get("format", 0x39) << 16
+        d1 |= kw.get("format", 0x39) << 16 | kw.get("mini", 0) << 30
         d2 = kw.get("stride", 4) | (kw.get("offset", 0) & 0x7FFFFF) << 8
     else:
         d0 |= kw.get("src_swz", 0b100100) << 26 | kw.get("unnormalized", 0) << 25
