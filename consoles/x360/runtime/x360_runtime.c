@@ -782,6 +782,28 @@ int x360_runtime_start(const char *xex, const char *pack_lib, const char *title_
         snprintf(data, sizeof data, "%s/data", work); /* cache: / hdd: and save data */
         o.data_dir = data;
     }
+    char saved[1300];
+    if (s_start_save[0] && title_key && *title_key) {
+        /* XBA-282: the title's own saves (hdd:, cache:) live with its states in <save>/x360-<KEY>/data, the folder
+         * the app exports, imports and syncs (SaveArchive, CloudSaves); a work/x360-<KEY>/data an earlier build
+         * wrote is moved there once (kept where it is when the move fails: another file system) */
+        snprintf(saved, sizeof saved, "%s/x360-%s/data", s_start_save, title_key);
+        struct stat st;
+        int have_new = stat(saved, &st) == 0;
+        if (!have_new && o.data_dir && stat(o.data_dir, &st) == 0) {
+            char parent[1300];
+            snprintf(parent, sizeof parent, "%s/x360-%s", s_start_save, title_key);
+            mkdirs(parent);
+            if (rename(o.data_dir, saved) == 0) {
+                printf("x360: save data moved to %s\n", saved);
+                o.data_dir = saved;
+            } else {
+                fprintf(stderr, "x360: save data stays in %s (cannot move it: %s)\n", o.data_dir, strerror(errno));
+            }
+        } else {
+            o.data_dir = saved;
+        }
+    }
     const char *frames = getenv("RECOMP_X360_FRAMES");
     if (frames && *frames)
         o.frames = strtoull(frames, NULL, 10);

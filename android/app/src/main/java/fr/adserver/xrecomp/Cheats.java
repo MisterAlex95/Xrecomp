@@ -194,6 +194,8 @@ final class Cheats {
             return checkXbox(lines);
         if (console == Console.GC)
             return checkGc(lines);
+        if (console == Console.X360)
+            return checkRaw(lines);
         boolean gba = console == Console.GBA;
         for (String l : lines) {
             String s = l.replace("0X", "");
@@ -206,6 +208,21 @@ final class Cheats {
             }
             boolean ok = s.matches("[0-9A-F]{8}[ \\-][0-9A-F]{4}") || (gba && s.matches("[0-9A-F]{8} [0-9A-F]{8}"));
             if (!ok)
+                return Problem.SHAPE;
+        }
+        return null;
+    }
+
+    /**
+     * XBA-282: an Xbox 360 title's lines, raw writes only (recomp_cheats.c RECOMP_CHEAT_X360: lifted code is ahead of
+     * time, so only data is patched): « ADDRESS:VALUE » or « ADDRESS VALUE », 1-8 hex digits each, big-endian.
+     */
+    private static Problem checkRaw(List<String> lines) {
+        for (String l : lines) {
+            String s = l.replace("0X", "");
+            if (!s.matches("[0-9A-F :\\-]+"))
+                return Problem.NOT_HEX;
+            if (!s.matches("[0-9A-F]{1,8} ?[: \\-] ?[0-9A-F]{1,8}"))
                 return Problem.SHAPE;
         }
         return null;

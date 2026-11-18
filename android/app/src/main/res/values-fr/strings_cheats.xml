@@ -28,4 +28,5 @@
     <string name="CHEATS_P_ENCRYPTED">Les codes Action Replay chiffrés (XXXX-XXXX-XXXXX) ne sont pas pris en charge : saisissez le code déchiffré (AAAAAAAA VVVVVVVV).</string>
     <string name="CHEATS_P_SHAPE_XBOX">Chaque ligne : TAAAAAAA VVVVVVVV (T : 0, 1, 2 écriture ; 4, 5, 6 test, puis une ligne) ou ADRESSE:VALEUR.</string>
     <string name="CHEATS_P_TOO_LONG">Ce code est trop long.</string>
+    <string name="CHEATS_P_SHAPE_X360">Chaque ligne : ADRESSE VALEUR ou ADRESSE:VALEUR (écriture brute de 32 bits, gros-boutiste ; données seulement).</string>
 </resources>

@@ -16,7 +16,8 @@ The same five steps and progress lines as a GameCube pack (tools/prepare/gc.py, 
               (consoles/x360/tools)
   4 compile   every generated C file with -I consoles/x360/runtime -I consoles/gc/runtime -ffp-contract=off
               -DXE_RUNTIME=1 (bringup's flags), by the shared compile driver (compile.py)
-  5 pack      libtitle.so, pack.json ("console": "x360"), default.xex (the plain title the runtime loads) and
+  5 pack      libtitle.so, pack.json ("console": "x360"), default.xex (the plain title the runtime loads), cover.png
+              (the title image of the XEX's XDBF resource, when it has one: the app's cover art) and
               shaders/: every shader microcode the runs met (<work>/shaders/*.bin, x360_runtime's dump) translated to
               GLSL ES by xenos_glsl, the .bin kept next to it (a shader that does not translate is not tried again)
 
@@ -167,6 +168,48 @@ def plain(raw):
             raise NoKey(img.image_note or "encrypted")
         raise ValueError("XEX: %s" % img.image_note)
     return plain_xex(raw, img), img
+
+
+# ── The title image (cover art) ─────────────────────────────────
+
+XDBF_IMAGE, XDBF_TITLE_ID = 2, 0x8000      # the XDBF image section and the title image's id (the dashboard's tile)
+COVER = "cover.png"                        # in the pack: CoverArt.load's title image of a game
+
+
+def xdbf_entry(blob, section, ident):
+    """The bytes of entry (section, id) of an XDBF blob (big-endian: magic, version, entry table size and count, free
+    table size and count; 18-byte entries: section u16, id u64, offset u32, length u32; data after both tables), else
+    None."""
+    if len(blob) < 24 or blob[:4] != b"XDBF":
+        return None
+    _ver, emax, ecount, fmax, _fcount = struct.unpack_from(">IIIII", blob, 4)
+    if emax > 65536 or ecount > emax or fmax > 65536:
+        return None
+    data = 24 + emax * 18 + fmax * 8
+    for i in range(ecount):
+        o = 24 + i * 18
+        if o + 18 > len(blob):
+            return None
+        sec, eid, off, ln = struct.unpack_from(">HQII", blob, o)
+        if sec == section and eid == ident and data + off + ln <= len(blob):
+            return blob[data + off:data + off + ln]
+    return None
+
+
+def title_image(img):
+    """The title's image (a PNG) from its XDBF resource (named by the title ID, else any XDBF one), else None."""
+    if img.image is None:
+        return None
+    tid = "%08X" % (img.execution or {}).get("title_id", 0)
+    res = sorted(img.resources, key=lambda r: r[0].upper() != tid)
+    for name, addr, size in res:
+        o = addr - img.base
+        if o < 0 or size <= 0 or o + size > len(img.image):
+            continue
+        png = xdbf_entry(img.image[o:o + size], XDBF_IMAGE, XDBF_TITLE_ID)
+        if png and png[:8] == b"\x89PNG\r\n\x1a\n":
+            return png
+    return None
 
 
 # ── Discovered code ─────────────────────────────────────────────
@@ -336,6 +379,9 @@ class Run(gc.Run):
         self.stamp_path = os.path.join(self.work, "stamp.json")
         self.rom = os.path.join(self.work, XEX_COPY)
         gc._write_if_changed(self.rom, data)
+        cover = title_image(img)          # the cover art the app shows (CoverArt.load: <pack>/cover.png)
+        if cover:
+            gc._write_if_changed(os.path.join(self.work, COVER), cover)
         self.rels, self.rels_sha = [], ""
         from tools.prepare import toolkit
         self.toolkit = self.m.toolkit_version()
@@ -399,6 +445,10 @@ class Run(gc.Run):
         if not os.path.isfile(dst) or pack.sha256_file(dst) != self.rom_sha:
             shutil.copyfile(self.rom, dst + ".tmp")
             os.replace(dst + ".tmp", dst)
+        src = os.path.join(self.work, COVER)
+        if os.path.isfile(src):
+            shutil.copyfile(src, os.path.join(d, COVER + ".tmp"))
+            os.replace(os.path.join(d, COVER + ".tmp"), os.path.join(d, COVER))
         cache = os.path.join(self.work, "glsl")      # the translations, kept across packs
         os.makedirs(cache, exist_ok=True)
         self.shaders_new, _ = translate_shaders(os.path.join(self.work, SHADERS), cache)

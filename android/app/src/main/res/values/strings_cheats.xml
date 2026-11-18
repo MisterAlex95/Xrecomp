@@ -30,4 +30,5 @@
     <string name="CHEATS_P_SHAPE_GC">Each line: AAAAAAAA VVVVVVVV (Action Replay or Gecko) or ADDRESS:VALUE.</string>
     <string name="CHEATS_P_ENCRYPTED">Encrypted Action Replay codes (XXXX-XXXX-XXXXX) are not supported: enter the decrypted code (AAAAAAAA VVVVVVVV).</string>
     <string name="CHEATS_P_TOO_LONG">This code is too long.</string>
+    <string name="CHEATS_P_SHAPE_X360">Each line: ADDRESS VALUE or ADDRESS:VALUE (a raw 32-bit write, big-endian; data only).</string>
 </resources>

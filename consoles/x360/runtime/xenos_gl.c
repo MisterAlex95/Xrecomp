@@ -121,6 +121,8 @@ typedef unsigned int EGLBoolean, EGLenum;
 
 #define GLFUNCS(X)                                                                                                     \
     X(const unsigned char *, glGetString, (GLenum))                                                                   \
+    X(const unsigned char *, glGetStringi, (GLenum, GLuint))                                                          \
+    X(void, glTexParameterf, (GLenum, GLenum, GLfloat))                                                               \
     X(GLuint, glCreateShader, (GLenum))                                                                                \
     X(void, glShaderSource, (GLuint, GLsizei, const GLchar *const *, const GLint *))                                  \
     X(void, glCompileShader, (GLuint))                                                                                 \
@@ -200,6 +202,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glFramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint))                                          \
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum))          \
     X(void, glGetIntegerv, (GLenum, GLint *))                                                                          \
+    X(void, glGetFloatv, (GLenum, GLfloat *))                                                                          \
     X(void, glUniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat))                                              \
     X(void, glUniform3i, (GLint, GLint, GLint, GLint))
 
@@ -321,6 +324,9 @@ struct xenos_gl {
     int nresolved;
     int title_clears;
     volatile int reset_pending; /* xenos_gl_reset asked (maybe from another thread): done at the next draw / swap */
+    int tex_linear;           /* XBA-282: RECOMP_TEX_BILINEAR (the app's texture filter, shared with the Xbox) */
+    float tex_aniso;          /* RECOMP_TEX_ANISO 8 / 16 when EXT_texture_filter_anisotropic is there, else 0 */
+    int gl_major, gl_minor;   /* the context's GLES version (3.1 and up: memory export through SSBOs) */
     FILE *log;
 };
 
@@ -382,10 +388,43 @@ static int load_gl(xenos_gl *g, char *why, size_t why_n)
 }
 
 /* the objects every draw uses; the default surfaces come with the first draw */
+static int has_ext(xenos_gl *g, const char *name)
+{
+    GLint n = 0;
+    g->glGetIntegerv(0x821D /* GL_NUM_EXTENSIONS */, &n);
+    for (GLint i = 0; i < n; i++) {
+        const char *e = (const char *)g->glGetStringi(0x1F03 /* GL_EXTENSIONS */, (GLuint)i);
+        if (e && !strcmp(e, name))
+            return 1;
+    }
+    return 0;
+}
+
+/* XBA-282: the texture filter options the app shares with the Xbox (Settings › Graphics › Texture filter, or a game's
+ * own): RECOMP_TEX_BILINEAR=1 samples every texture linearly; RECOMP_TEX_ANISO=8 / 16 too, with that much anisotropic
+ * filtering when the driver has EXT_texture_filter_anisotropic (clamped to its maximum). */
+static void texture_options(xenos_gl *g)
+{
+    const char *b = getenv("RECOMP_TEX_BILINEAR"), *a = getenv("RECOMP_TEX_ANISO");
+    int aniso = a ? atoi(a) : 0;
+    g->tex_linear = (b && *b && strcmp(b, "0")) || aniso > 1;
+    g->tex_aniso = 0;
+    if (aniso > 1 && has_ext(g, "GL_EXT_texture_filter_anisotropic")) {
+        GLfloat max = 1;
+        g->glGetFloatv(0x84FF /* GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT */, &max);
+        g->tex_aniso = (float)aniso < max ? (float)aniso : max;
+    }
+    if (g->tex_linear)
+        fprintf(g->log, "xenos: texture filter forced linear%s\n", g->tex_aniso > 1 ? ", anisotropic" : "");
+}
+
 static int setup(xenos_gl *g, char *why, size_t why_n)
 {
     g->max_tex = 4096;
     g->glGetIntegerv(GL_MAX_TEXTURE_SIZE, &g->max_tex);
+    g->glGetIntegerv(0x821B /* GL_MAJOR_VERSION */, &g->gl_major);
+    g->glGetIntegerv(0x821C /* GL_MINOR_VERSION */, &g->gl_minor);
+    texture_options(g);
     while (g->scale > 1 && (g->width * g->scale > g->max_tex || g->height * g->scale > g->max_tex))
         g->scale--;
     g->glGenFramebuffers(1, &g->fbo);
@@ -1998,6 +2037,10 @@ static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mi
     g->glTexParameteri(target, GL_TEXTURE_WRAP_T, wrap_mode((fc[0] >> 13) & 7));
     g->glTexParameteri(target, GL_TEXTURE_WRAP_R, wrap_mode((fc[0] >> 16) & 7));
     int mag = ((fc[3] >> 19) & 3) == 1, min = ((fc[3] >> 21) & 3) == 1, mip = ((fc[3] >> 23) & 3) == 1;
+    if (g->tex_linear) /* XBA-282: the app's texture filter */
+        mag = min = mip = 1;
+    if (g->tex_aniso > 1)
+        g->glTexParameterf(target, 0x84FE /* GL_TEXTURE_MAX_ANISOTROPY_EXT */, mipped ? g->tex_aniso : 1.0f);
     g->glTexParameteri(target, GL_TEXTURE_MAG_FILTER, mag ? GL_LINEAR : GL_NEAREST);
     g->glTexParameteri(target, GL_TEXTURE_MIN_FILTER,
                        !mipped ? (min ? GL_LINEAR : GL_NEAREST)

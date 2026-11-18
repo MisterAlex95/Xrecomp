@@ -181,3 +181,24 @@ def test_desktop_pack(tmp_path):
                             str(disc), "--dbg", str(tmp_path / "dbg.txt")], capture_output=True, text=True,
                            timeout=300)
         assert "exit code 0" in r.stdout + r.stderr, r.stdout + r.stderr
+
+
+def test_title_image():
+    png = b"\x89PNG\r\n\x1a\n" + b"pixels"
+    other = b"not an image"
+    # XDBF: 2 entries of a table of 4, a free table of 2; data: the other entry, then the PNG
+    blob = b"XDBF" + struct.pack(">IIIII", 0x10000, 4, 2, 2, 0)
+    blob += struct.pack(">HQII", 1, 0x8000, 0, len(other)) + struct.pack(">HQII", 2, 0x8000, len(other), len(png))
+    blob += b"\0" * (18 * 2 + 8 * 2) + other + png
+    assert x360.xdbf_entry(blob, 2, 0x8000) == png
+    assert x360.xdbf_entry(blob, 2, 0x8001) is None
+    assert x360.xdbf_entry(b"XDBF" + b"\0" * 4, 2, 0x8000) is None
+
+    class Img:
+        base = 0x82000000
+        image = b"\0" * 0x100 + blob
+        execution = {"title_id": 0x58425A30}
+        resources = [("FFFFFFFF", 0x82000000, 0x10), ("58425A30", 0x82000100, len(blob))]
+    assert x360.title_image(Img) == png
+    Img.resources = [("58425A30", 0x82000100, len(blob) + 0x1000)]     # out of the image: none
+    assert x360.title_image(Img) is None
