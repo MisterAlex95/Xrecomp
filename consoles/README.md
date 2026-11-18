@@ -4,7 +4,7 @@ XRecomp plays **Game Boy Advance**, **PlayStation** and **Nintendo 64** games, s
 Xbox discs, on the shared host layer and in the Android app. **GameCube** has its runtime in the app too (homebrew
 DOLs and disc images, « GameCube runtime » below). **Nintendo DS**, **PSP**, **Dreamcast**, **Xbox 360**,
 **Nintendo 3DS** and **PlayStation 2** are spikes: tools, headers or a headless Linux runtime, nothing a player can
-use yet. Goal, order, rules (legal), layout, pipeline and milestones are in the Plane spec:
+use yet (the Xbox 360's runs a title past its `main()`, without rendering). Goal, order, rules (legal), layout, pipeline and milestones are in the Plane spec:
 `plane page show -p XBA "Spec · Other consoles"` (epics C0, G, P, N).
 
 | Directory | Console | CPU |
@@ -17,7 +17,7 @@ use yet. Goal, order, rules (legal), layout, pipeline and milestones are in the 
 | `gc/` | GameCube (DOLs and disc images in the app, XBA-259, XBA-261) | Gekko (PowerPC 750 + paired singles, big-endian) |
 | `dc/` | Dreamcast (spike, Linux headless only) | Hitachi SH-4 (SH7091, little-endian, FPU) |
 | `ps2/` | PlayStation 2 (spike, Linux headless only) | Emotion Engine: R5900 (MIPS III + 128-bit MMI, non-IEEE FPU) |
-| `x360/` | Xbox 360 (spike, tools and headers only) | Xenon (64-bit PowerPC + VMX128, big-endian) |
+| `x360/` | Xbox 360 (Linux headless runtime, no rendering yet) | Xenon (64-bit PowerPC + VMX128, big-endian) |
 | `3ds/` | Nintendo 3DS (spike, Linux headless only) | ARM11 MPCore (ARMv6K + VFPv2), one Horizon user process |
 
 Each one has:
@@ -1851,51 +1851,83 @@ bridge itself is not modelled). Tests: `dc_naomi` (a synthetic cartridge built i
 Dreamcast map unchanged, JVS replies) and `dc_naomi_hello` (our KOS hello world in a synthetic cartridge: same serial
 lines and framebuffer). No BIOS, no game, no decryption: [docs/technical/naomi.md](../docs/technical/naomi.md).
 
-**Xbox 360 spike (XBA-230, epic XBA-229).** The XEX2 container parsed, and leaf functions (64-bit integer, FPU,
-VMX, VMX128) recompiled on the GameCube's PowerPC frontend and checked against values computed independently. No
-runtime yet (no kernel / XAM HLE, no threads, no Xenos), nothing in the app, nothing in CMake: Python and two
-headers. What is there:
+**Xbox 360 (XBA-230 spike, XBA-270, epic XBA-229).** An XEX2 title, statically recompiled, runs headless on Linux to
+its `main()` and past it: threads, synchronisation, memory, files on its disc, and its GPU command stream decoded
+(no rendering yet). Linux only (`XBR_CONSOLE_X360`, ON on Linux, off on macOS, Android and Windows: `memfd_create`
+for the physical memory views), nothing in the app. Tested on titles of our own (assembly and devkitPPC C), never
+on title data; Alex's own dumps go through the check list on XBA-270. What is there:
 
-- `tools/xex` (`python3 -m tools.xex FILE.xex [--key-file KEY]... [--json F] [--image OUT]`): the XEX2 header, every
-  optional header (kept raw, these decoded: entry point, image base, import libraries with their version and the
-  import records of each, read from the image: address, variable or thunk, ordinal; TLS, stack / heap size,
-  execution info, original PE name, static libraries, resources, file format), the security info (image size,
-  flags, load address, page descriptors), decryption (AES-128: the session key ECB-decrypted with a key the user
-  gives, then the image CBC-decrypted; pure Python, `cryptography` used when installed), basic decompression, and the
-  PE inside (sections, `.pdata`: exact function starts). **No key is in the repository**: `--key-file` or
-  `$XEX_KEY_FILE` point at a file of your own (16 raw bytes or 32 hex digits); each key given is tried, the right
-  one yields an MZ header. Not done: LZX ("normal") compression (the parser says so; most retail XEX use it, so
-  decompress with a tool of your own first), delta patches, signature / digest checks. `synth.py` writes synthetic
-  XEX2 files for the tests (our own PE, imports from `xboxkrnl.exe` / `xam.xex`, basic compression, encrypted with a
-  made-up test key).
-- `tools/x360_tools` (`python3 -m x360_tools.recomp FILE.xex [OUTDIR] [--key-file KEY] [--sweep] [--compile]`):
-  `xenon.py` is the Xenon layer on `tools/ppc`: the decoder adds the 64-bit forms (ld / std / lwa, rld*, mulld /
-  mulhd(u) / divd(u), sld / srd / srad(i), cntlzd, extsw, cmpd..., fctid(z) / fcfid, dcbz128), VMX (opcode 4 VX /
-  VC / VA forms, the opcode-31 loads and stores incl. Xenon's lvlx / lvrx / stvlx / stvrx) and all 75 VMX128
-  encodings (opcodes 4, 5, 6, registers up to v127 split over their fields; checked against Xenia's opcode
-  constants); the lifter makes R(n) 64-bit with 64-bit-mode rules (CR0 on the 64-bit result, rlw* replicate the low
-  word, word shifts / extends sign-extend), 32-bit effective addresses, and lifts the float VMX subset (add / sub /
-  mul / madd / nmsub in both encodings, msum3 / msum4, max / min, compares with CR6, converts, rounds), logic,
-  vsel, vperm, vsldoi, splats, merges, word shifts, vpermwi128, vrlimi128 and the loads / stores. Not lifted (they
-  go to `RC_INTERP`, and `--sweep` counts them on a title): saturating / pack / unpack integer VMX, vpkd3d128 /
-  vupkd3d128, vexptefp / vlogefp, traps. `recomp.py` seeds discovery with the entry point and every `.pdata` start
-  (import thunks are not code), lifts each function to `x360_rc_NNN.c` + `x360_rc_table.c`.
-- `runtime/`: `xenon_ops.h` (64-bit helpers next to the GameCube's `ppc_ops.h`, the VMX semantics on a 128-bit
-  union in PowerPC element order) and `xenon_rt.h` (the lifted-code ABI of the spike: one hardware thread, a flat
-  big-endian memory window, no events). Build lifted code with `-ffp-contract=off` so hosts agree.
-- Tests (`tools/xex/test_xex.py`, `consoles/x360/tools/x360_tools/test_x360_tools.py`, no toolchain): parser round
-  trips (none / basic, clear / encrypted, wrong or missing key, LZX gap), the decoder on known words and every VMX128
-  constant, register fields up to v127, and six leaf functions written in assembly in the test (FNV-1a 64, a
-  64-bit mix of mulld / mulhdu / sradi / divd / cntlzd / rld* / rlwinm's 64-bit mask / lwa / carries / cmpd vs cmpw,
-  a Horner polynomial with fmadd / fctidz / fcfid / fsel, a VMX128 4x4 transform with vmsum4fp128 / vrlimi128, a
-  VMX128 mix with unaligned lvlx / lvrx / stvlx / stvrx, vmaddfp128, vpermwi128, a record compare branching on CR6,
-  vsel128, converts and shifts, and a classic AltiVec one with vperm byte swaps and the lvsl unaligned load) packed
-  in a synthetic encrypted XEX2, recompiled, built with the host cc and run: every result matches values computed
-  in Python from the manual.
+- `tools/xex` (`python3 -m tools.xex FILE.xex [--key-file KEY]... [--json F] [--image OUT] [--plain OUT.xex]`): the
+  XEX2 header, every optional header (kept raw; decoded: entry point, image base, import libraries with their records
+  and ordinals, TLS, stack / heap size, execution info, original PE name, static libraries, resources, file format),
+  the security info and page descriptors, decryption (AES-128 with a key the user gives: **no key is in the
+  repository**, `--key-file` or `$XEX_KEY_FILE`; pure Python, `cryptography` used when installed), none / basic /
+  **normal (LZX)** decompression, the PE inside (sections, `.pdata`). `--plain` writes the XEX back decrypted and
+  expanded, which is what the runtime loads. `lzx.py` (XBA-270) decodes LZX in the CAB / CHM / XEX framing (E8 header
+  bit, 24-bit block sizes, 32 KB frames realigned to 16 bits, reset interval) and in WIM framing, written from the
+  format's description (MS-PATCH) and the XEX block chain (each block's SHA-1 checked; Xenia's description, BSD); no
+  libmspack / wimlib code. Its test vectors (`lzx_vectors/`, remade by `gen.sh` in a throwaway Debian container) are
+  our own data compressed by encoders that are not ours: wimlib (LGPL, levels 20 / 50 / 100, windows 2^15 .. 2^19,
+  verbatim and aligned blocks, E8) and Free Pascal's chmcmd (CHM framing, several frames, resets), the CHM streams
+  checked by Free Pascal's reader and, without a reset, by cabextract (libmspack) through a cabinet; our stored-block
+  writer (what `synth.py` uses for "normal" XEX) is checked by cabextract too. Gaps: no vector has three or more
+  compressed CAB-framed frames without a reset (what retail XEX use: Alex's `--plain` on a dump is the first such
+  test), delta patches (XEXP), RSA / page digest checks.
+- `tools/x360_tools` (`python3 -m x360_tools.recomp FILE.xex [OUTDIR] [--key-file KEY] [--sweep] [--compile]
+  [--discovered FILE]`): `xenon.py` is the Xenon layer on `tools/ppc` (64-bit forms with 64-bit-mode semantics,
+  AltiVec and all 75 VMX128 encodings). Every vector instruction the decoder knows is lifted (XBA-270: integer
+  element ops with saturation and VSCR[SAT], packs / unpacks incl. `vpkd3d128` / `vupkd3d128` after Xenia's
+  description, sums and multiply-adds, `vexptefp` / `vlogefp` exact, `vrefp` / `vrsqrtefp` exact: the hardware
+  estimate tables are not reproduced); float vector ops flush denormals while VSCR[NJ] is set (non-Java mode, what
+  the console runs). `discover360.py` recognises MSVC's register save / restore helpers (`__savegprlr_N` /
+  `__restgprlr_N`, `__savefpr_N` / `__restfpr_N`, `__savevmx_N` / `__restvmx_N` and the VMX128 ones; a strict
+  shape check whose first words match XenonRecomp's published patterns, MIT), hides them from discovery and
+  `lift360.py` inlines them at each call; `bctr` jump tables (MSVC absolute, byte / halfword offsets plus a base,
+  GCC's relative ones) are resolved by evaluating the code before them backwards and lifted as switches. The table
+  `xe_rc_resume` gives every block leader its function (returns from calls go through the dispatcher) with the image's
+  CRC. `--sweep` reports unknown words, unlifted mnemonics, helpers found and `bctr` resolved or not.
+  `python3 -m x360_tools.hle_coverage FILE.xex` lists every import by name and whether the runtime implements it.
+- `runtime/` (CMake `x360_core` + `x360_run`): `x360_mem.c` reserves 4 GB of host address space (guest address a is
+  host base + a: no translation, no bounds check in lifted code) with the console's map: virtual 4 KB and 64 KB
+  ranges, stacks, this runtime's kernel objects, the image, and the 512 MB of physical memory seen through its three
+  views (0xA0000000, 0xC0000000, 0xE0000000) on one memfd; a guest fault reports its guest address, thread and
+  function. `x360_load.c` loads a plain (or basic) XEX2, copies its header into guest memory and binds the imports:
+  variables get storage, function records their thunk, and the dispatcher calls the HLE when PC lands on a thunk.
+  `x360_thread.c`: cooperative guest threads (each with its context, stack, KTHREAD and PCR in r13, TLS), a time
+  slice through `RC_BLOCK`, polled waits on the guest's dispatcher objects, virtual time (deterministic, so runs
+  repeat and the state stays serialisable for save states), reservations cleared at each switch (`stwcx.` after
+  another thread ran fails, as on hardware). Real parallel hardware threads are a later step: lifted code only sees
+  `xe_machine *`, so per-host-thread machines need no re-lift. `x360_kernel.c` / `x360_xam.c` / `x360_file.c` /
+  `x360_gpu.c`: the HLE, ordinals from Xenia's export tables (`x360_exports.inc`, made by
+  `x360_tools/gen_exports.py`), signatures and layouts checked against Xenia's kernel: DbgPrint and the formatters,
+  virtual / physical memory and pools (reserve then commit), threads (create, suspend / resume, priorities, affinity,
+  TLS, delays), events / semaphores / mutants / timers by handle and by object, waits on one or several objects,
+  critical sections, spin locks, time and time fields, module and XEX header queries, the video mode; XAM: system,
+  user 0 signed in locally, no controller yet, launch data, notifications; files: a disc image (XDVDFS / GDFX through
+  `src/xiso`, split or compressed too) or a directory for `game:` / `d:` / `\Device\Cdrom0`, a writable data
+  directory for `cache:` / `hdd:`, symbolic links. Arguments past the eighth come from the caller's stack slots
+  (r1 + 0x50). `x360_interp.c` runs what the lifter hands to `RC_INTERP`: traps (a title's assert stops it with its
+  address), FPSCR moves, `mcrxr`. `xenos_cp.c`: the GPU command processor, PM4 packets decoded and traced (register
+  file, constants, memory writes with the GPU's endian modes, fences, conditional writes, waits that stall the ring,
+  indirect buffers, draws recorded, interrupts, the VdSwap token); the GPU register page at 0x7FC80000 is memory the
+  scheduler reads between slices, and the title's graphics interrupt callback runs at each vertical blank (60 Hz of
+  virtual time) on a short-lived guest thread.
+- `x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--gpu-trace FILE] [--missed FILE] [--stats]`:
+  LIB.so is `x360_tools.recomp`'s C built with `-DXE_RUNTIME -shared` (stale packs are refused by CRC).
+- Tests: the Python suite (parser, LZX vectors, decoder, every vector op against references from the manual, the
+  helpers and jump tables run, HLE coverage), ctest `xenos_cp` (hand-built PM4 packets), `x360_hle` (the exports
+  called directly), `x360_hello` / `x360_hello_lzx` (our assembly title: MSVC-shaped prologues, a jump table,
+  imports by real ordinal; plain, then encrypted with a made-up key and LZX-compressed and rewritten by `--plain`;
+  its disc a directory, then an XDVDFS image: its DbgPrint text must equal `tests/hello.txt`) and `x360_hello_c` (a
+  C title built with devkitPPC, `tests/homebrew`, `build_homebrew.sh x360`: recursion, a GCC jump table, function
+  pointers, doubles, AltiVec, two threads with a critical section and events, memory and the physical mirrors;
+  skipped where devkitPPC is absent, run by the homebrew job through `tools/consoles/run_x360_homebrew.sh`).
+  `tests/run_hello_arm64.sh` runs the hello test on arm64 under qemu (same text).
 
-Not there yet: everything of a runtime (XBA-229 steps 2 to 5): kernel / XAM HLE, threads and reservations across
-hardware threads, MSVC helpers (__savegprlr / __restgprlr) and bctr jump tables in discovery, Xenos, XMA, LZX. The
-estimate is on XBA-229.
+Not there yet (XBA-229): rendering (Xenos shader microcode, eDRAM and resolves, textures, a Vulkan back end), XMA
+audio, controllers, real parallel hardware threads, structured exception handling (`RtlUnwind` stops the title), the
+rest of the kernel / XAM surface (what `hle_coverage` lists as missing on a title), save states (the state is kept
+serialisable for them).
 
 **Nintendo 3DS spike (XBA-228, epic XBA-222).** Does the ARM work extend to the 3DS's ARM11 (ARMv6K + VFPv2), and
 how much of Horizon (the 3DS operating system) must be emulated high-level for a libctru program? A libctru hello
