@@ -131,8 +131,8 @@ FROM ps1-bios-out AS xba-ps1-bios
 # Its own application id, fr.adserver.xrecomp.dev, and label « XRecomp shell » (XBA-134): it installs next to
 # the XRecomp APK (fr.adserver.xrecomp.shell, xrecomp-latest) instead of over it (or failing on its other key).
 FROM android AS apk
-# 1 when the secret xba_x360_key is given: BuildKit does not count secrets in its cache key, so this keeps a layer built
-# with the key from serving a build without it, and the reverse (XBA-300).
+# Which of the secrets xba_x360_key (1) and xba_x360_devkit_key (2) are given, added up: BuildKit does not count secrets in
+# its cache key, so this keeps a layer built with a key from serving a build without it, and the reverse (XBA-300).
 ARG XBA_X360_KEY_SET=0
 COPY --from=ffmpeg-android /opt/xba-ffmpeg /opt/xba-ffmpeg
 ENV XBA_FFMPEG_DIR=/opt/xba-ffmpeg
@@ -142,8 +142,8 @@ COPY --from=lsfg-sources / /opt/xba-lsfg-sources/
 ENV XBOXRECOMP_DEPS_DIR=/opt/xba-lsfg-sources
 COPY . /src
 WORKDIR /src/android
-RUN --mount=type=secret,id=xba_x360_key printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
-    && { echo "Xbox 360 key in this build: $XBA_X360_KEY_SET"; if [ -s /run/secrets/xba_x360_key ]; then XBA_X360_KEY=$(cat /run/secrets/xba_x360_key); export XBA_X360_KEY; fi; } \
+RUN --mount=type=secret,id=xba_x360_key --mount=type=secret,id=xba_x360_devkit_key printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
+    && { echo "Xbox 360 key in this build: $XBA_X360_KEY_SET"; if [ -s /run/secrets/xba_x360_key ]; then XBA_X360_KEY=$(cat /run/secrets/xba_x360_key); export XBA_X360_KEY; fi; if [ -s /run/secrets/xba_x360_devkit_key ]; then XBA_X360_DEVKIT_KEY=$(cat /run/secrets/xba_x360_devkit_key); export XBA_X360_DEVKIT_KEY; fi; } \
     && gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaPs1Bios=/opt/xba-ps1-bios/openbios.bin \
          -PxbaApplicationId=fr.adserver.xrecomp.dev -PxbaLabel="XRecomp shell" assembleDebug \
     && mkdir -p /out \
@@ -341,8 +341,8 @@ COPY --from=prepare-apk /out/ /
 FROM toolchain-out AS xba-toolchain
 
 FROM android AS xrecomp-apk
-# 1 when the secret xba_x360_key is given: BuildKit does not count secrets in its cache key, so this keeps a layer built
-# with the key from serving a build without it, and the reverse (XBA-300).
+# Which of the secrets xba_x360_key (1) and xba_x360_devkit_key (2) are given, added up: BuildKit does not count secrets in
+# its cache key, so this keeps a layer built with a key from serving a build without it, and the reverse (XBA-300).
 ARG XBA_X360_KEY_SET=0
 COPY --from=ffmpeg-android /opt/xba-ffmpeg /opt/xba-ffmpeg
 ENV XBA_FFMPEG_DIR=/opt/xba-ffmpeg
@@ -360,7 +360,7 @@ ENV XBOXRECOMP_DEPS_DIR=/opt/xba-lsfg-sources
 COPY . /src
 WORKDIR /src/android
 RUN --mount=type=secret,id=xba_keystore --mount=type=secret,id=xba_keystore_password \
-    --mount=type=secret,id=xba_key_alias --mount=type=secret,id=xba_x360_key \
+    --mount=type=secret,id=xba_key_alias --mount=type=secret,id=xba_x360_key --mount=type=secret,id=xba_x360_devkit_key \
     --mount=type=secret,id=xba_google_client_id --mount=type=secret,id=xba_google_client_secret \
     set -e; \
     case "$XBA_SIGNING" in auto|release|debug) ;; *) echo "XBA_SIGNING=$XBA_SIGNING: auto, release or debug"; exit 1;; esac; \
@@ -378,6 +378,7 @@ RUN --mount=type=secret,id=xba_keystore --mount=type=secret,id=xba_keystore_pass
     echo "Xbox 360 key in this build: $XBA_X360_KEY_SET"; \
     if [ -s /run/secrets/xba_x360_key ]; then XBA_X360_KEY=$(cat /run/secrets/xba_x360_key); export XBA_X360_KEY; \
     else echo "no XBA_X360_KEY: in this APK the player picks an Xbox 360 key file"; fi; \
+    if [ -s /run/secrets/xba_x360_devkit_key ]; then XBA_X360_DEVKIT_KEY=$(cat /run/secrets/xba_x360_devkit_key); export XBA_X360_DEVKIT_KEY; fi; \
     require=0; [ "$XBA_SIGNING" != release ] || require=1; \
     printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties; \
     gradle --no-daemon --console=plain -PxbaVersion="$XBA_VERSION" -PxbaVersionCode="$XBA_VERSION_CODE" \

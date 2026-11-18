@@ -11,9 +11,9 @@ import java.nio.charset.StandardCharsets;
 /**
  * The player's Xbox 360 key file (XBA-282; docs/android/prepare.md « Xbox 360 packs »).
  *
- * <p>A retail title's XEX is encrypted; tools.prepare opens it with the key built into the APK, when the build was given
- * one (the secret XBA_X360_KEY, XBA-300: never in the repository), and with the key the player picked in the app (the
- * game's Home, « Key file »). The picked file is checked (16 raw bytes, or 32 hex digits on its first
+ * <p>A retail title's XEX is encrypted; tools.prepare opens it with the keys built into the APK, when the build was given
+ * them (the secrets XBA_X360_KEY and XBA_X360_DEVKIT_KEY, XBA-300: never in the repository), and with the key the player
+ * picked in the app (the game's Home, « Key file »). The picked file is checked (16 raw bytes, or 32 hex digits on its first
  * line: tools/xex/xex.py load_keys) and copied to {@code <no backup files>/keys/x360.key}: private to the app, never
  * in a backup, a save archive or the cloud, never logged. The Prepare process gets its path in {@code XEX_KEY_FILE}.
  */
@@ -24,9 +24,9 @@ final class X360Key {
     static final String ENV = "XEX_KEY_FILE";
     /** A key file is small: more than this is not one. */
     static final int MAX = 4096;
-    /** The build's key in the APK (android/app/build.gradle), and where Prepare's process finds a copy of it. */
-    static final String BUILTIN_ASSET = "x360/builtin.key";
-    static final String BUILTIN_NAME = "builtin.key";
+    /** The build's keys in the APK (android/app/build.gradle), retail first; Prepare's process gets copies of them. */
+    static final String[] BUILTIN = {"builtin.key", "builtin-devkit.key"};
+    static final String BUILTIN_DIR = "x360/";
 
     private X360Key() {}
 
@@ -42,19 +42,26 @@ final class X360Key {
         return file(c).isFile();
     }
 
-    /** This APK was built with a key: most retail games need no key file. */
+    /** This APK was built with the retail key: retail games need no key file. */
     static boolean builtin(Context c) {
-        try (InputStream in = c.getAssets().open(BUILTIN_ASSET)) {
+        try (InputStream in = c.getAssets().open(BUILTIN_DIR + BUILTIN[0])) {
             return in.read() >= 0;
         } catch (IOException e) {
             return false;
         }
     }
 
-    /** The built-in key as a private file for Prepare's process; null when this APK has none or it cannot be written. */
-    static File installBuiltin(Context c) {
-        File f = new File(new File(c.getNoBackupFilesDir(), DIR), BUILTIN_NAME);
-        try (InputStream in = c.getAssets().open(BUILTIN_ASSET)) {
+    /** The built-in keys as private files for Prepare's process, retail first; a key this APK lacks is null. */
+    static File[] installBuiltin(Context c) {
+        File[] out = new File[BUILTIN.length];
+        for (int k = 0; k < BUILTIN.length; k++)
+            out[k] = installBuiltin(c, BUILTIN[k]);
+        return out;
+    }
+
+    private static File installBuiltin(Context c, String name) {
+        File f = new File(new File(c.getNoBackupFilesDir(), DIR), name);
+        try (InputStream in = c.getAssets().open(BUILTIN_DIR + name)) {
             //noinspection ResultOfMethodCallIgnored
             f.getParentFile().mkdirs();
             try (FileOutputStream o = new FileOutputStream(f)) {
@@ -68,10 +75,12 @@ final class X360Key {
         }
     }
 
-    /** XEX_KEY_FILE's value: the player's key first, then the built-in one; null when neither file exists. */
-    static String keyFiles(File player, File builtin) {
+    /** XEX_KEY_FILE's value: the player's key first, then the built-in ones in order; null when no file exists. */
+    static String keyFiles(File player, File[] builtin) {
         StringBuilder s = new StringBuilder();
-        for (File f : new File[] {player, builtin})
+        if (player != null && player.isFile())
+            s.append(player.getAbsolutePath());
+        for (File f : builtin)
             if (f != null && f.isFile())
                 s.append(s.length() > 0 ? File.pathSeparator : "").append(f.getAbsolutePath());
         return s.length() > 0 ? s.toString() : null;

@@ -118,6 +118,14 @@ def test_lzx_errors_are_reported():
     assert img.image is None and "none of the keys" in img.image_note
 
 
+@pytest.mark.parametrize("compression", ["none", "basic", "normal"])
+def test_the_next_key_is_tried_after_a_wrong_one(compression):
+    """Prepare's order (XBA-300): the player's key, the retail key, the devkit key; only the right one opens the image."""
+    data, _ = make(compression=compression, key=TEST_KEY)
+    img = parse_xex(data, [bytes(16), b"\x11" * 16, TEST_KEY])
+    assert img.image is not None and img.image[:2] == b"MZ" and img.key_used == 2
+
+
 def test_bad_files():
     with pytest.raises(XexError):
         parse_xex(b"XEX1" + bytes(64))
