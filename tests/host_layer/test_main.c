@@ -999,6 +999,15 @@ static int run_shaders(void)
         CHECK(host_window_present_rgba(flat, SW, SH, SW * 4));
         CHECK(host_window_shader_active() == HOST_SHADER_SCANLINES);
         host_window_set_shader(NULL);
+
+        /* The same through a picture the caller keeps (host_window_present_rgba_shared). */
+        CHECK(host_window_present_rgba_shared(flat, SW, SH, SW * 4, NULL, NULL));
+        CHECK(pthread_create(&th, NULL, live_request, NULL) == 0);
+        pthread_join(th, NULL);
+        CHECK(host_window_shader_active() == HOST_SHADER_NONE);   /* not before the next present */
+        CHECK(host_window_present_rgba_shared(flat, SW, SH, SW * 4, NULL, NULL));
+        CHECK(host_window_shader_active() == HOST_SHADER_SCANLINES);
+        host_window_set_shader(NULL);
     }
 
     /* A shader that does not build: none, logged once, presents still work. */
