@@ -1107,7 +1107,7 @@ consoles' ctest):
 
 Not taken: inlining the whole prefetch model into every lifted instruction made the pack 2.5 times bigger and slower to
 build. A rotate-and-compare range check on N64 loads and stores did not pay on x86-64. The lifters' output did not
-change, but the GBA and N64 headers did: those packs are stale.
+change, but the toolkit digest covers every header and all of `tools/`: every pack, of every console, shows stale.
 
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
