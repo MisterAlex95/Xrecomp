@@ -229,7 +229,17 @@ static int interp(const tcase *t)
     }
     return 0;
 }
-static const char *diff(const xe_cpu *a, const xe_cpu *b, uint32_t ra, uint64_t va)
+/* fmadd / fmsub / fnmadd / fnmsub (and the s forms) with NaNs in both frA and frC: which NaN comes out depends on the
+ * order the host compiler gives fma() its two (commutative) factors, which differs between lifted code (constant
+ * register numbers) and the interpreter (tools/ppc lift.py emits fma(); the Xenon returns frA's). Any NaN result is
+ * accepted there, and only there. */
+static int fma_nan(uint32_t w, const double *x, const double *y)
+{
+    unsigned op = w >> 26, x5 = (w >> 1) & 31, ra = (w >> 16) & 31, rc = (w >> 6) & 31;
+    double a = init_c.fpr[ra], c = init_c.fpr[rc];
+    return (op == 59 || op == 63) && x5 >= 28 && a != a && c != c && *x != *x && *y != *y;
+}
+static const char *diff(const xe_cpu *a, const xe_cpu *b, uint32_t ra, uint64_t va, uint32_t w)
 {
     static char why[96];
     for (int k = 0; k < 32; k++)
@@ -237,7 +247,7 @@ static const char *diff(const xe_cpu *a, const xe_cpu *b, uint32_t ra, uint64_t 
             return snprintf(why, sizeof why, "r%%d %%016llx/%%016llx", k, (unsigned long long)a->gpr[k],
                             (unsigned long long)b->gpr[k]), why;
     for (int k = 0; k < 32; k++)
-        if (memcmp(&a->fpr[k], &b->fpr[k], 8)) {
+        if (memcmp(&a->fpr[k], &b->fpr[k], 8) && !fma_nan(w, &a->fpr[k], &b->fpr[k])) {
             uint64_t x, y;
             memcpy(&x, &a->fpr[k], 8);
             memcpy(&y, &b->fpr[k], 8);
@@ -320,7 +330,7 @@ int main(int argc, char **argv)
                 bad = 1;
                 break;
             }
-            const char *why = diff(&ca, &X.m.cpu, resa, resv);
+            const char *why = diff(&ca, &X.m.cpu, resa, resv, t->word);
             if (why) {
                 printf("%%u state %%u %%s\n", k, s, why);
                 bad = 1;
