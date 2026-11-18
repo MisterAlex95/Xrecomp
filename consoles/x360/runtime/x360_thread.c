@@ -326,6 +326,9 @@ static uint64_t next_deadline(x360_machine *x)
     for (int k = 0; k < X360_MAX_TIMERS; k++)
         if (x->timers[k].obj && x->timers[k].due && (!d || x->timers[k].due < d))
             d = x->timers[k].due;
+    uint64_t g = x360_gpu_next_event(x);
+    if (g && (!d || g < d))
+        d = g;
     return d;
 }
 
@@ -447,6 +450,7 @@ int x360_run(x360_machine *x, uint64_t insns)
             break;
         }
         x360_timers_fire(x);
+        x360_gpu_poll(x);
         int picked = -1;
         for (int n = 1; n <= x->nthreads; n++) {
             int k = (x->cur + n + x->nthreads) % x->nthreads;
@@ -493,7 +497,8 @@ x360_machine *x360_create(const uint8_t *xex, size_t size, char *why, size_t why
     x->memfd = -1;
     x->cur = -1;
     x->m.rt = x;
-    if (x360_mem_init(x, why, why_len) || x360_kernel_init(x) || x360_load(x, xex, size, why, why_len)) {
+    if (x360_mem_init(x, why, why_len) || x360_gpu_init(x) || x360_kernel_init(x) ||
+        x360_load(x, xex, size, why, why_len)) {
         if (!why[0])
             snprintf(why, why_len, "kernel initialisation failed");
         x360_destroy(x);
@@ -522,7 +527,8 @@ x360_machine *x360_create_bare(char *why, size_t n)
     x->cur = -1;
     x->m.rt = x;
     x->stack_size = 0x10000;
-    if (x360_mem_init(x, why, n) || x360_kernel_init(x) || !x360_thread_create(x, 0x10000, 0x82000000u, 0, 0, 0)) {
+    if (x360_mem_init(x, why, n) || x360_gpu_init(x) || x360_kernel_init(x) ||
+        !x360_thread_create(x, 0x10000, 0x82000000u, 0, 0, 0)) {
         x360_destroy(x);
         return NULL;
     }
@@ -536,6 +542,7 @@ void x360_destroy(x360_machine *x)
     if (!x)
         return;
     x360_fs_free(x);
+    x360_gpu_free(x);
     x360_mem_free(x);
     free(x->thunks);
     free(x->fn_tab);
@@ -590,4 +597,5 @@ void x360_get_stats(const x360_machine *x, x360_stats *s)
 {
     *s = x->st;
     s->native = x->m.rc_native;
+    x360_gpu_stats((x360_machine *)x, &s->gpu_packets, &s->gpu_draws, &s->gpu_swaps, &s->vblanks);
 }

@@ -44,6 +44,8 @@ int x360_bind(x360_machine *x, const x360_pack *pack);
  * its files; the data directory (cache:, hdd:...: writable), optional. 0 on success. */
 int x360_set_disc(x360_machine *x, const char *path, char *why, size_t why_len);
 int x360_set_data_dir(x360_machine *x, const char *path);
+/* A trace of the GPU command stream (PM4 packets, register blocks, draws, swaps), or NULL. */
+void x360_set_gpu_trace(x360_machine *x, FILE *f);
 /* Where DbgPrint and the runtime's own messages go (default stdout / stderr), verbosity (0 quiet, 1 HLE calls). */
 void x360_set_output(x360_machine *x, FILE *dbg, FILE *log, int verbose);
 /* Run until the title exits, an error, a missed address or `insns` more instructions. Returns X360_*. */
@@ -62,6 +64,8 @@ typedef struct x360_stats {
     uint64_t switches;     /* thread switches */
     uint32_t threads;      /* created so far */
     uint32_t unimplemented; /* distinct imports called without an HLE */
+    uint64_t gpu_packets, gpu_draws, gpu_swaps;
+    uint32_t vblanks;
 } x360_stats;
 void x360_get_stats(const x360_machine *x, x360_stats *s);
 

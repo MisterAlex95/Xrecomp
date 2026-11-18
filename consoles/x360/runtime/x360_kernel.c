@@ -1445,6 +1445,9 @@ static const hle_entry HLE[] = {
     XM(XamLoaderTerminateTitle, x_XamLoaderTerminateTitle),
 #define X360_FILE_ENTRY(name) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, x360_k_##name},
     X360_FILE_CALLS(X360_FILE_ENTRY)
+#define X360_GPU_ALIAS(name, fn) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, x360_k_##fn},
+    X360_GPU_CALLS(X360_FILE_ENTRY)
+    X360_GPU_ALIASES(X360_GPU_ALIAS)
 #define X360_XAM_ENTRY(name) {X360_LIB_XAM, X360_xam_##name, x360_x_##name},
     X360_XAM_CALLS(X360_XAM_ENTRY)
 #define X360_XAM_ALIAS(name, fn) {X360_LIB_XAM, X360_xam_##name, x360_x_##fn},

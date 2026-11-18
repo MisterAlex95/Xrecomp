@@ -36,14 +36,11 @@ def implemented():
         out.add(("xam", m.group(1)))
     with open(os.path.join(RUNTIME, "x360_internal.h")) as f:
         hdr = f.read()
-    calls = hdr[hdr.index("#define X360_FILE_CALLS(X)"):]
-    calls = calls[:calls.index("\n#define X360_DECLARE")]
-    for m in re.finditer(r"X\((\w+)\)", calls):
-        out.add(("xboxkrnl", m.group(1)))
-    xam = hdr[hdr.index("#define X360_XAM_CALLS(X)"):]
-    xam = xam[:xam.index("\n#define X360_DECLARE_XAM")]
-    for m in re.finditer(r"X\((\w+)\)|Y\((\w+),", xam):
-        out.add(("xam", m.group(1) or m.group(2)))
+    # the macro tables: X360_<GROUP>_CALLS(X) / X360_<GROUP>_ALIASES(Y), each a run of continued lines
+    for m in re.finditer(r"#define X360_(\w+)_(CALLS|ALIASES)\((X|Y)\)((?:[^\n]*\\\n)*[^\n]*)", hdr):
+        lib = "xam" if m.group(1) == "XAM" else "xboxkrnl"
+        for n in re.finditer(r"\b[XY]\((\w+)", m.group(4)):
+            out.add((lib, n.group(1)))
     return out
 
 

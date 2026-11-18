@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "x360_internal.h"
+#include "xenos_cp.h"
 
 static int failures;
 
@@ -263,6 +264,45 @@ static void test_system(void)
     CHECK(XM(X360_xam_XamFree, 1, x360_r32(X, p)) == 0, "XamFree");
 }
 
+static void test_gpu(void)
+{
+    uint32_t ring = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0);
+    uint32_t misc = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x1000, 4, 0, 0xFFFFFFFFu, 0);
+    uint32_t ring_phys = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, ring);
+    uint32_t misc_phys = misc & 0x1FFFFFFFu, fence = misc + 0x100, wb = misc + 0x104;
+    K(X360_xboxkrnl_VdInitializeRingBuffer, 2, ring_phys, 10);
+    K(X360_xboxkrnl_VdEnableRingBufferRPtrWriteBack, 2, misc_phys + 0x104, 6);
+    /* a fence through EVENT_WRITE_SHD (8in32 endian mode), then the 64 words VdSwap fills */
+    x360_w32(X, ring, 3u << 30 | 2u << 16 | (uint32_t)PM4_EVENT_WRITE_SHD << 8);
+    x360_w32(X, ring + 4, 5);
+    x360_w32(X, ring + 8, (misc_phys + 0x100) | 2);
+    x360_w32(X, ring + 12, 0x1234);
+    uint32_t args = x360_kalloc(X, 32);
+    x360_w32(X, args, 0xA1000000u); /* front buffer */
+    x360_w32(X, args + 4, 1280);
+    x360_w32(X, args + 8, 720);
+    K(X360_xboxkrnl_VdSwap, 10, ring + 16, args + 16, 0, 0, 0, args, args + 20, args + 24, args + 4, args + 8);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, 4 + 64);
+    x360_gpu_poll(X);
+    x360_stats st;
+    x360_get_stats(X, &st);
+    CHECK(x360_r32(X, fence) == 0x1234, "fence %08X", x360_r32(X, fence));
+    CHECK(x360_r32(X, wb) == 68, "read pointer written back: %u", x360_r32(X, wb));
+    CHECK(st.gpu_swaps == 1 && st.gpu_packets >= 3, "swap seen: %llu swaps, %llu packets",
+          (unsigned long long)st.gpu_swaps, (unsigned long long)st.gpu_packets);
+    /* the vertical blank interrupt runs the callback on its own thread */
+    K(X360_xboxkrnl_VdSetGraphicsInterruptCallback, 2, 0x82001000u, 0x55);
+    int before = X->nthreads;
+    X->time_skip += 200000;
+    x360_gpu_poll(X);
+    x360_thread *irq = NULL;
+    for (int k = 0; k < X->nthreads; k++)
+        if (X->threads[k].interrupt && X->threads[k].state == TH_READY)
+            irq = &X->threads[k];
+    CHECK(irq && irq->cpu.pc == 0x82001000u && irq->cpu.gpr[3] == 0 && irq->cpu.gpr[4] == 0x55,
+          "vblank interrupt thread (threads %d -> %d)", before, X->nthreads);
+}
+
 static void test_files(const char *dir)
 {
     x360_set_data_dir(X, dir);
@@ -319,6 +359,7 @@ int main(void)
     test_objects();
     test_threads_and_time();
     test_system();
+    test_gpu();
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {
         test_files(dir);

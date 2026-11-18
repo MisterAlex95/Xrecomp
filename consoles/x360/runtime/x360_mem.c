@@ -5,7 +5,8 @@
  *   0x00000000-0x3FFFFFFF  virtual, 4 KB pages   (NtAllocateVirtualMemory)
  *   0x40000000-0x6FFFFFFF  virtual, 64 KB pages  (NtAllocateVirtualMemory with MEM_LARGE_PAGES)
  *   0x70000000-0x7EFFFFFF  thread stacks
- *   0x7F000000-0x7FFFFFFF  kernel objects of this runtime (KTHREAD, PCR, TLS, events, export variables)
+ *   0x7F000000-0x7FBFFFFF  kernel objects of this runtime (KTHREAD, PCR, TLS, events, export variables)
+ *   0x7FC80000-0x7FC8FFFF  the GPU's registers (x360_gpu.c: plain memory the scheduler reads)
  *   0x80000000-0x9FFFFFFF  the XEX image
  *   0xA0000000-0xBFFFFFFF  physical memory (512 MB), 64 KB pages view
  *   0xC0000000-0xDFFFFFFF  the same physical memory, 16 MB pages view
@@ -61,7 +62,7 @@ int x360_mem_init(x360_machine *x, char *why, size_t n)
     if (heap_init(&x->heap_v4k, "virtual 4K", 0x00010000u, 0x40000000u - 0x00010000u, 0x1000, 0) ||
         heap_init(&x->heap_v64k, "virtual 64K", 0x40000000u, 0x30000000u, 0x10000, 0) ||
         heap_init(&x->heap_stack, "stacks", 0x70000000u, 0x0F000000u, 0x1000, 0) ||
-        heap_init(&x->heap_kernel, "kernel", 0x7F000000u, 0x01000000u, 0x1000, 0) ||
+        heap_init(&x->heap_kernel, "kernel", 0x7F000000u, 0x00C00000u, 0x1000, 0) || /* below the GPU page */
         heap_init(&x->heap_phys, "physical", 0x00000000u, PHYS_SIZE, 0x1000, 1)) {
         snprintf(why, n, "out of host memory");
         return -1;

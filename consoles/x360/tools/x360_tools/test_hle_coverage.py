@@ -27,11 +27,11 @@ def test_title_coverage(capsys, tmp_path):
     img = parse_xex(make_hello.build())
     rows = coverage(img)
     assert rows and all(r[4] for r in rows), [r for r in rows if not r[4]]
-    data, _ = build_xex([0x4E800020], imports={"xboxkrnl.exe": [(ordinal("xboxkrnl", "VdSwap"), "thunk")],
+    data, _ = build_xex([0x4E800020], imports={"xboxkrnl.exe": [(ordinal("xboxkrnl", "VdGetCurrentDisplayInformation"), "thunk")],
                                                "xam.xex": [(ordinal("xam", "XamShowMessageBoxUI"), "thunk")]},
                         functions=[(0, 4)])
     rows = coverage(parse_xex(data))
-    assert [(r[2], r[4]) for r in rows] == [("VdSwap", False), ("XamShowMessageBoxUI", False)]
+    assert [(r[2], r[4]) for r in rows] == [("VdGetCurrentDisplayInformation", False), ("XamShowMessageBoxUI", False)]
     path = tmp_path / "t.xex"
     path.write_bytes(data)
     assert main([str(path)]) == 0

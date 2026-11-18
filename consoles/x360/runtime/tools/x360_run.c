@@ -1,7 +1,7 @@
 /* x360_run -- runs an Xbox 360 title, recompiled, headless (XBA-270): what it prints through DbgPrint goes to stdout.
  *
  *   x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--insns N] [--log FILE] [--dbg FILE]
- *            [--missed FILE] [--stats] [-v]
+ *            [--missed FILE] [--gpu-trace FILE] [--stats] [-v]
  *
  * TITLE.xex: an unencrypted XEX2, compression none or basic (python3 -m tools.xex FILE --plain OUT makes one).
  * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
@@ -36,7 +36,8 @@ static uint8_t *read_file(const char *path, size_t *size)
 
 int main(int argc, char **argv)
 {
-    const char *path = NULL, *pack = NULL, *logp = NULL, *dbgp = NULL, *missedp = NULL, *disc = NULL, *data_dir = NULL;
+    const char *path = NULL, *pack = NULL, *logp = NULL, *dbgp = NULL, *missedp = NULL, *disc = NULL, *data_dir = NULL,
+               *gpu_trace = NULL;
     unsigned long long insns = 2000000000ull;
     int stats = 0, verbose = 0;
     for (int i = 1; i < argc; i++) {
@@ -44,6 +45,8 @@ int main(int argc, char **argv)
             insns = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--pack") && i + 1 < argc)
             pack = argv[++i];
+        else if (!strcmp(argv[i], "--gpu-trace") && i + 1 < argc)
+            gpu_trace = argv[++i];
         else if (!strcmp(argv[i], "--disc") && i + 1 < argc)
             disc = argv[++i];
         else if (!strcmp(argv[i], "--data") && i + 1 < argc)
@@ -96,6 +99,9 @@ int main(int argc, char **argv)
     }
     if (data_dir)
         x360_set_data_dir(x, data_dir);
+    FILE *gtrace = gpu_trace ? fopen(gpu_trace, "w") : NULL;
+    if (gtrace)
+        x360_set_gpu_trace(x, gtrace);
     void *lib = dlopen(pack, RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
         fprintf(stderr, "x360_run: %s\n", dlerror());
@@ -117,9 +123,11 @@ int main(int argc, char **argv)
     x360_stats s;
     x360_get_stats(x, &s);
     if (stats)
-        fprintf(log, "stats: native %llu interpreted %llu hle %llu switches %llu threads %u unimplemented %u\n",
+        fprintf(log, "stats: native %llu interpreted %llu hle %llu switches %llu threads %u unimplemented %u "
+                     "gpu packets %llu draws %llu swaps %llu vblanks %u\n",
                 (unsigned long long)s.native, (unsigned long long)s.interpreted, (unsigned long long)s.hle_calls,
-                (unsigned long long)s.switches, s.threads, s.unimplemented);
+                (unsigned long long)s.switches, s.threads, s.unimplemented, (unsigned long long)s.gpu_packets,
+                (unsigned long long)s.gpu_draws, (unsigned long long)s.gpu_swaps, s.vblanks);
     if (missedp) {
         FILE *f = fopen(missedp, "w");
         if (f) {

@@ -72,6 +72,7 @@ typedef struct x360_thread {
     uint64_t wait_deadline; /* virtual time, 100 ns, when wait_timed */
     int wait_timed;
     uint32_t exit_code;
+    int interrupt; /* runs a graphics interrupt callback (x360_gpu.c) */
 } x360_thread;
 
 typedef struct x360_handle {
@@ -127,6 +128,7 @@ struct x360_machine {
     unsigned nmissed;
     uint8_t unimpl_seen[2][4096];
 
+    struct x360_gpu *gpu;     /* x360_gpu.c: the command processor, interrupts */
     struct x360_fs *fs;       /* x360_file.c: the disc, the data directory, open files, symbolic links */
     FILE *dbg, *log;
     int verbose;
@@ -210,6 +212,21 @@ X360_FILE_CALLS(X360_DECLARE_FILE_CALL)
     Y(XamInputGetCapabilitiesEx, XamInputGetCapabilities) Y(XamInputGetState, XamInputGetCapabilities)               \
     Y(XamInputSetState, XamInputGetCapabilities) Y(XamInputGetKeystroke, XamInputGetCapabilities)                    \
     Y(XamInputGetKeystrokeEx, XamInputGetCapabilities) Y(XamUserGetGamerTag, XamUserGetName)
+/* x360_gpu.c: the Vd* calls */
+#define X360_GPU_CALLS(X)                                                                                              \
+    X(VdInitializeRingBuffer) X(VdEnableRingBufferRPtrWriteBack) X(VdSetGraphicsInterruptCallback) X(VdSwap)         \
+    X(VdGetSystemCommandBuffer) X(VdInitializeEngines) X(VdIsHSIOTrainingSucceeded) X(VdGetCurrentDisplayGamma)       \
+    X(VdPersistDisplay)
+#define X360_GPU_ALIASES(Y)                                                                                            \
+    Y(VdShutdownEngines, VdNop0) Y(VdRetrainEDRAM, VdNop0) Y(VdRetrainEDRAMWorker, VdNop0)                           \
+    Y(VdEnableDisableClockGating, VdNop0) Y(VdSetDisplayMode, VdNop0) Y(VdCallGraphicsNotificationRoutines, VdNop0)
+X360_GPU_CALLS(X360_DECLARE_FILE_CALL)
+void x360_k_VdNop0(x360_machine *x, x360_thread *t, xe_cpu *c);
+int x360_gpu_init(x360_machine *x);
+void x360_gpu_free(x360_machine *x);
+void x360_gpu_poll(x360_machine *x);
+uint64_t x360_gpu_next_event(x360_machine *x);
+void x360_gpu_stats(x360_machine *x, uint64_t *packets, uint64_t *draws, uint64_t *swaps, uint32_t *vblanks);
 #define X360_DECLARE_XAM_CALL(name) void x360_x_##name(x360_machine *x, x360_thread *t, xe_cpu *c);
 X360_XAM_CALLS(X360_DECLARE_XAM_CALL)
 
