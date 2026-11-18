@@ -330,6 +330,47 @@ def test_console_not_prepared_plays_interpreted(home, tmp_path, monkeypatch):
     assert lines[-1] == "%s %s" % (player, rom)            # no pack: no --pack, no --missed
 
 
+def test_identify_json_for_the_mac_launcher(home, tmp_path, monkeypatch):
+    """XBA-278: `xrecomp identify --json`, what the macOS launcher asks about a console source: console, ID, key,
+    state, the player (null when not built) and the save / pack folders; an Xbox source and a broken one too."""
+    rom = tmp_path / "m.z64"
+    rom.write_bytes(n64_rom())
+    (tmp_path / "junk.iso").write_bytes(b"\0" * 4096)
+    player = _fake_player(tmp_path, monkeypatch, "n64")
+    rc, out = run("identify", str(rom), TEST_XBE, str(tmp_path / "junk.iso"), "--json")
+    n64, xbox, junk = json.loads(out)
+    assert (n64["id"], n64["console"], n64["key"], n64["state"]) == ("n64-NSME-635A2BFF", "n64", "NSME-635A2BFF",
+                                                                     "absent")
+    assert n64["player"] == player and n64["unsupported"] is None
+    assert n64["save_dir"] == home.console_saves
+    assert n64["pack_dir"] == os.path.join(home.packs, "n64-NSME-635A2BFF")
+    assert (xbox["id"], xbox["console"], xbox["key"]) == ("12345678", "xbox", "12345678")
+    assert "player" not in xbox
+    assert junk["error"] and junk["state"] == "unreadable"
+    monkeypatch.delenv("XRECOMP_N64_PLAY")
+    monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
+    monkeypatch.setattr(library, "ROOT", str(tmp_path))
+    monkeypatch.setattr(cli, "find_player", lambda console, env=None, root=None: None)
+    rc, out = run("identify", str(rom), "--json")
+    assert json.loads(out)[0]["player"] is None
+
+
+def test_play_print_json(home, tmp_path, monkeypatch):
+    """XBA-278: `play --print --json`, the command line the macOS launcher starts itself (stop by PID, its own run
+    log): argv, cwd (the toolkit, for the PS1 BIOS path), the whole environment with the game's settings and saves."""
+    rom = tmp_path / "m.z64"
+    rom.write_bytes(n64_rom())
+    player = _fake_player(tmp_path, monkeypatch, "n64")
+    run("settings", "RECOMP_N64_PAK=rumble")
+    rc, out = run("play", str(rom), "--print", "--json")
+    assert rc == 0
+    d = json.loads(out)
+    assert d["argv"] == [player, str(rom)] and d["cwd"] == ROOT and d["console"] == "n64"
+    assert d["env"]["RECOMP_N64_PAK"] == "rumble" and d["env"]["RECOMP_SAVE_DIR"] == home.console_saves
+    assert d["env"]["PATH"] == os.environ["PATH"]
+    assert d["changes"]["RECOMP_N64_PAK"] == "rumble"
+
+
 def test_find_player_in_a_build_folder(tmp_path):
     exe = tmp_path / "build-x" / "consoles" / "ps1" / "runtime" / "ps1_play"
     exe.parent.mkdir(parents=True)

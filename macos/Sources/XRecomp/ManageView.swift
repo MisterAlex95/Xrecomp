@@ -17,6 +17,8 @@ struct ManageView: View {
     @Local private var working = false
 
     private var game: GameItem? { model.game(gameId) }
+    /// A GBA / PS1 / N64 / GameCube game (XBA-278): its pack, its own save folder, no Xbox save import.
+    private var isConsole: Bool { game?.entry.isConsole == true }
 
     /// The rows shown: the extracted disc only when there is one (a work folder made before XBA-126; an image is read
     /// in place now).
@@ -74,6 +76,7 @@ struct ManageView: View {
                             Button("Re-prepare…") { confirmForce = true }.buttonStyle(PillButtonStyle())
                                 .disabled(game?.runningSince != nil || game?.prepare != nil || working)
                         }
+                        if !isConsole {
                         Divider().overlay(Theme.lineSoft)
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -92,6 +95,7 @@ struct ManageView: View {
                             }
                             .buttonStyle(PillButtonStyle())
                             .disabled(working || game?.runningSince != nil)
+                        }
                         }
                         if model.singleTitle == nil && game?.titleId != nil {
                             Divider().overlay(Theme.lineSoft)
@@ -225,6 +229,7 @@ struct ManageView: View {
         case .utilityCache: return "tray"
         case .logs: return "doc.text"
         case .art: return "photo"
+        case .pack: return "shippingbox"
         }
     }
 
@@ -232,16 +237,21 @@ struct ManageView: View {
         switch i {
         case .work: return "Analysis, generated C and the build. A disc image is read where it is, not copied."
         case .extractedDisc: return "A disc copied out of its image by an older prepare; part of the work folder."
-        case .saves: return "Saved games and title data (RECOMP_SAVE_DIR)."
+        case .saves: return isConsole ? "Battery saves, memory cards and save states."
+            : "Saved games and title data (RECOMP_SAVE_DIR)."
         case .utilityCache: return "The game's scratch drive, part of the saves."
         case .logs: return "The last 10 runs."
-        case .art: return "Decoded from the game's default.xbe."
+        case .art: return isConsole ? "The box art downloaded for this game." : "Decoded from the game's default.xbe."
+        case .pack: return "The game prepared as native code. Without it the game plays in the interpreter."
         }
     }
 
     private func consequence(_ i: Storage.Item) -> String {
         switch i {
-        case .work, .extractedDisc: return "The game must be prepared again before you can play. Your disc image or folder stays."
+        case .work, .extractedDisc:
+            return isConsole ? "The next prepare starts from scratch. Your game file stays."
+                : "The game must be prepared again before you can play. Your disc image or folder stays."
+        case .pack: return "The game plays in the interpreter until it is prepared again. Your game file stays."
         case .saves, .utilityCache: return "Saved games of this title are lost for good."
         case .logs, .art: return "It is made again when needed."
         }

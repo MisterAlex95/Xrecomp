@@ -26,6 +26,9 @@ public final class PrepareRunner: @unchecked Sendable {
         public var noBuild = false
         /// --no-title-layer: the title's optional enhancements left out (profile-free WP6).
         public var noTitleLayer = false
+        /// A console game's packs folder (--pack-dir: the pack goes to <packDir>/<ID>/, XBA-278); nil for an Xbox
+        /// title.
+        public var packDir: URL?
         /// Extra arguments after the fixed ones (the checks use it).
         public var extra: [String] = []
         public var environment: [String: String] = ChildEnvironment.base()
@@ -42,6 +45,7 @@ public final class PrepareRunner: @unchecked Sendable {
             if force { a.append("--force") }
             if noBuild { a.append("--no-build") }
             if noTitleLayer { a.append("--no-title-layer") }
+            if let packDir { a += ["--pack-dir", packDir.path] }
             return a + extra
         }
     }

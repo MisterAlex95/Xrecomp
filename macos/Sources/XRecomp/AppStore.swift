@@ -21,6 +21,9 @@ final class AppStore: LauncherActions {
     private var queue = PrepareQueue()
     private var preparing: (id: String, runner: PrepareRunner)?
     private var game: (id: String, runner: GameRunner)?
+    /// A console game whose command line is being asked for (XBA-278: `xrecomp play --print --json`, a Python start):
+    /// no other game starts meanwhile.
+    private var launching: String?
     private var ticker: Timer?
     /// A rescan asked for while one ran (a folder dropped, Setup found Python): run again once it ends.
     private var rescanPending = false
@@ -187,6 +190,9 @@ final class AppStore: LauncherActions {
             var scanner = LibraryScanner { _ in .failure(.init("Needs the Python environment (Setup)")) }
             if let tk, let py {
                 scanner.identifyImage = LibraryScanner.pythonIdentify(python: py.path, toolkit: tk.root, scanDir: p.scanDir)
+                // XBA-278: GBA, PS1, N64 and GameCube games, identified by the toolkit's xrecomp command line.
+                let cli = ConsoleCLI(python: py.path, toolkit: tk.root, home: p.root)
+                scanner.identifyConsoles = { cli.identify($0) }
             }
             var index = LibraryIndex.load(from: p.libraryFile)
             let entries = scanner.scan(folders, index: &index)
@@ -260,22 +266,75 @@ final class AppStore: LauncherActions {
             addLibraryFolder(url.deletingLastPathComponent().path)
         } else if url.lastPathComponent.lowercased() == "default.xbe" {
             addLibraryFolder(url.deletingLastPathComponent().path)
+        } else if ConsoleSources.claim(url.lastPathComponent) != .none {
+            addLibraryFolder(url.deletingLastPathComponent().path)
         } else {
-            model.notice = "\(url.lastPathComponent) is not a disc image (.iso, .xiso, .cso, .zso, .cci) or a folder "
-                + "holding default.xbe."
+            model.notice = "\(url.lastPathComponent) is not a game XRecomp reads: an Xbox disc image (.iso, .xiso, .cso, "
+                + ".zso, .cci) or a folder holding default.xbe, a GBA (.gba), N64 (.z64, .v64, .n64) or GameCube "
+                + "(.iso, .gcm, .rvz, .wia, .gcz, .ciso, .dol) game, or a PlayStation disc (.cue, .chd, .bin)."
         }
     }
 
     // ---- title state ---------------------------------------------------------------------------------------------
 
     private func refreshStates() {
-        for g in model.games where g.titleId != nil { refreshState(g.id) }
+        for g in model.games where g.titleId != nil && !g.entry.isConsole { refreshState(g.id) }
+        refreshConsoleStates(model.games.filter { $0.titleId != nil && $0.entry.isConsole }.map(\.id))
+    }
+
+    /// The console games' states (XBA-278): one `xrecomp identify --json` for them all, off the main thread. Shares
+    /// the per-title « checking » bookkeeping with the Xbox checks.
+    private func refreshConsoleStates(_ ids: [String]) {
+        guard let tk = toolkit, let py = python else { return }
+        var ask: [String] = []
+        for id in ids {
+            guard let g = model.game(id) else { continue }
+            if case .unreadable = g.status { continue }
+            if checking.contains(id) { checkAgain.insert(id) } else { ask.append(id) }
+        }
+        guard !ask.isEmpty else { return }
+        let asked = ask
+        asked.forEach { checking.insert($0) }
+        let sources = asked.compactMap { model.game($0).map { URL(fileURLWithPath: $0.entry.path) } }
+        let cli = ConsoleCLI(python: py.path, toolkit: tk.root, home: paths.root)
+        checkWork.addOperation {
+            let answers = cli.identify(sources)
+            DispatchQueue.main.async { [self] in
+                var again: [String] = []
+                for id in asked {
+                    checking.remove(id)
+                    if checkAgain.remove(id) != nil { again.append(id) }
+                    guard let g = model.game(id) else { continue }
+                    let a = answers[g.entry.path]
+                    model.update(id) { item in
+                        guard let a else {
+                            item.status = .error(code: "CHECK_FAILED", message: "xrecomp identify did not answer")
+                            return
+                        }
+                        if let t = a.title, !t.isEmpty { item.name = t }
+                        item.exe = a.player
+                        switch a.prepared {
+                        case .native: item.status = .ready
+                        case .stale(let r): item.status = .stale(reasons: r)
+                        case .interpreted: item.status = .absent
+                        case .problem(let why): item.status = .error(code: "UNREADABLE", message: why)
+                        }
+                        if a.player == nil, a.consoleGame != nil {
+                            let name = item.console.player ?? "the player"
+                            item.status = .error(code: "NOT_BUILT", message: "\(name) is not built (Setup)")
+                        }
+                    }
+                }
+                if !again.isEmpty { refreshConsoleStates(again) }
+            }
+        }
     }
 
     /// `prepare --check --json` for one title, off the main thread. One check per title at a time: a request while
     /// it is queued or running runs it once more when it ends, rather than stacking up.
     private func refreshState(_ id: String) {
         guard let g = model.game(id), let tid = g.titleId, let tk = toolkit, let py = python else { return }
+        if g.entry.isConsole { return refreshConsoleStates([id]) }
         if case .unreadable = g.status { return }
         guard !checking.contains(id) else {
             checkAgain.insert(id)
@@ -332,8 +391,9 @@ final class AppStore: LauncherActions {
             return model.notice = "\(g.name): wait for the delete or the save import to finish."
         }
         let t = paths.title(tid)
-        // A first prepare writes about 2 GB (an image is read in place, not extracted): check the room for it.
-        if g.status == .absent, let free = Storage.freeSpace(at: t.work) {
+        // A first prepare writes about 2 GB (an image is read in place, not extracted): check the room for it. A
+        // console game's pack is far smaller.
+        if g.status == .absent, !g.entry.isConsole, let free = Storage.freeSpace(at: t.work) {
             let need = Storage.prepareEstimate
             if free < need {
                 model.notice = "Not enough free space: preparing \(g.name) needs about \(Storage.format(need)), "
@@ -353,12 +413,17 @@ final class AppStore: LauncherActions {
     private func startPrepare(_ id: String, force: Bool) {
         guard let g = model.game(id), let tid = g.titleId, let tk = toolkit, let py = python else { return }
         let t = paths.title(tid)
-        var req = PrepareRunner.Request(python: py.path, toolkit: tk.root, source: URL(fileURLWithPath: g.entry.path),
-                                        work: t.work)
+        let source = URL(fileURLWithPath: g.entry.path)
+        var req = g.entry.isConsole
+            ? PrepareRunner.Request.console(python: py.path, toolkit: tk.root, source: source, work: t.work,
+                                            packs: paths.packs)
+            : PrepareRunner.Request(python: py.path, toolkit: tk.root, source: source, work: t.work)
         req.force = force
         var record = TitleRecord.load(from: t.state)
-        req.noTitleLayer = !record.enhancementsOn
-        req.environment = ChildEnvironment.prepare(req.environment, enhancements: record.enhancementsOn)
+        if !g.entry.isConsole {
+            req.noTitleLayer = !record.enhancementsOn
+            req.environment = ChildEnvironment.prepare(req.environment, enhancements: record.enhancementsOn)
+        }
         record.sourcePath = g.entry.path
         try? record.save(to: t.state)
         let runner = PrepareRunner(req) { [weak self] e in
@@ -447,22 +512,53 @@ final class AppStore: LauncherActions {
     // ---- play ----------------------------------------------------------------------------------------------------
 
     func play(_ id: String) {
-        guard game == nil else { return model.notice = "Another game is running: stop it first." }
+        guard game == nil, launching == nil else { return model.notice = "Another game is running: stop it first." }
         guard let g = model.game(id), let tid = g.titleId, let exe = g.exe else { return }
         guard !storageBusy.contains(id) else {
             return model.notice = "\(g.name): wait for the delete or the save import to finish."
         }
         let t = paths.title(tid)
+        try? FileManager.default.ensureDirectory(t.save)
+        if g.entry.isConsole { return playConsole(id, tid: tid, name: g.name) }
         let cfg = RecompConfig.load(dir: t.recompCfgDir)
         let defaults = loadConfig(nil).activePairs.reduce(into: [String: String]()) { $0[$1.key] = $1.value }
         let req = GameRunner.Request.forTitle(exe: URL(fileURLWithPath: exe), title: t, config: cfg,
                                               globalDefaults: defaults, logs: RunLog(dir: t.logs))
-        try? FileManager.default.ensureDirectory(t.save)
+        startGame(id, name: g.name, req)
+    }
+
+    /// XBA-278: a console game's player, from the command line the toolkit gives (`xrecomp play --print --json`: the
+    /// player found, the source, the pack and what it misses, the settings and the save folder), then started here
+    /// like an Xbox title (its run log, stop by PID).
+    private func playConsole(_ id: String, tid: String, name: String) {
+        guard let tk = toolkit, let py = python else {
+            model.notice = "Finish Setup first: XRecomp needs the toolkit and its Python environment."
+            return
+        }
+        let cli = ConsoleCLI(python: py.path, toolkit: tk.root, home: paths.root)
+        let logs = RunLog(dir: paths.title(tid).logs)
+        launching = id
+        work.async {
+            let r = cli.play(tid)
+            DispatchQueue.main.async { [self] in
+                launching = nil
+                switch r {
+                case .success(let p):
+                    guard game == nil else { return model.notice = "Another game is running: stop it first." }
+                    startGame(id, name: name, p.request(log: logs.newLog()))
+                case .failure(let e):
+                    model.notice = "Cannot start \(name): \(e)"
+                }
+            }
+        }
+    }
+
+    private func startGame(_ id: String, name: String, _ req: GameRunner.Request) {
         let runner = GameRunner(req) { [weak self] e in
             DispatchQueue.main.async { self?.gameEvent(id, e) }
         }
         model.liveLog = []
-        model.liveLogTitle = "\(g.name) · run started \(Date().formatted(date: .omitted, time: .shortened))"
+        model.liveLogTitle = "\(name) · run started \(Date().formatted(date: .omitted, time: .shortened))"
         do {
             try runner.start()
             game = (id, runner)
@@ -472,7 +568,7 @@ final class AppStore: LauncherActions {
                 $0.lastExitTail = []
             }
         } catch {
-            model.notice = "Cannot start \(g.name): \(error)"
+            model.notice = "Cannot start \(name): \(error)"
         }
     }
 
@@ -609,7 +705,7 @@ final class AppStore: LauncherActions {
             DispatchQueue.main.async { [self] in
                 storageBusy.remove(id)
                 if let problem { model.notice = "Cannot delete: \(problem)" }
-                if item == .work || item == .extractedDisc { refreshState(id) }
+                if item == .work || item == .extractedDisc || item == .pack { refreshState(id) }
                 done()
             }
         }

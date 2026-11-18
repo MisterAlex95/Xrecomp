@@ -5,6 +5,9 @@ public struct LibraryEntry: Codable, Equatable, Sendable, Identifiable {
     public enum Kind: String, Codable, Sendable {
         case folder   // a folder holding default.xbe (an extracted disc)
         case image    // a disc image (.iso, .xiso, .cso, .ciso, .zso, .cci, or a split part)
+        /// A GBA / PS1 / N64 / GameCube game's file (a ROM, a disc or a DOL), identified by the xrecomp command line
+        /// (ConsoleGames.swift, XBA-278).
+        case console
     }
 
     /// The source path, which prepare takes.
@@ -20,22 +23,29 @@ public struct LibraryEntry: Codable, Equatable, Sendable, Identifiable {
     public var problem: String?
     /// Other sources of the same title ID (the first one found is the entry).
     public var duplicates: [String] = []
+    /// A console game's console (« gba », « ps1 », « n64 », « gc »); nil for an Xbox title. Its titleId is then the
+    /// game ID (« gba-AXVE-1A2B3C4D »).
+    public var console: String?
 
     public var id: String { titleId ?? path }
+    /// The game's console (Xbox when none is recorded).
+    public var consoleKind: Console { console.flatMap(Console.init(rawValue:)) ?? .xbox }
+    public var isConsole: Bool { consoleKind != .xbox }
 
     /// The name to show: the XBE's, else the file or folder name.
     public var displayName: String {
         if let t = title, !t.isEmpty { return t }
         let u = URL(fileURLWithPath: path)
-        return kind == .image ? u.deletingPathExtension().lastPathComponent : u.lastPathComponent
+        return kind == .folder ? u.lastPathComponent : u.deletingPathExtension().lastPathComponent
     }
 
     enum CodingKeys: String, CodingKey {
-        case path, kind, size, mtime, titleId = "title_id", title, xbe, problem, duplicates
+        case path, kind, size, mtime, titleId = "title_id", title, xbe, problem, duplicates, console
     }
 
     public init(path: String, kind: Kind, size: Int64, mtime: Double, titleId: String? = nil, title: String? = nil,
-                xbe: String? = nil, problem: String? = nil) {
+                xbe: String? = nil, problem: String? = nil, console: String? = nil) {
+        self.console = console
         self.path = path
         self.kind = kind
         self.size = size
@@ -57,6 +67,7 @@ public struct LibraryEntry: Codable, Equatable, Sendable, Identifiable {
         xbe = try c.decodeIfPresent(String.self, forKey: .xbe)
         problem = try c.decodeIfPresent(String.self, forKey: .problem)
         duplicates = try c.decodeIfPresent([String].self, forKey: .duplicates) ?? []
+        console = try c.decodeIfPresent(String.self, forKey: .console)
     }
 }
 
@@ -125,6 +136,9 @@ public struct LibraryScanner {
     public var identifyImage: Identify
     /// Also asks identify about folders (for the title profile's name); the XBE read here is the fallback.
     public var identifyFolders = false
+    /// Identifies console games, a batch of sources at once (ConsoleCLI.identify, XBA-278). nil: the scan lists
+    /// Xbox titles only (ROMs and console discs are not even looked at).
+    public var identifyConsoles: (([URL]) -> [String: ConsoleIdentity])?
     public private(set) var truncated = false
     private var visited = 0
 
@@ -169,6 +183,8 @@ public struct LibraryScanner {
             out.append((dir, .folder))
             return
         }
+        let consoles = identifyConsoles != nil
+        let hasCue = consoles && names.contains { ($0.lowercased() as NSString).pathExtension == "cue" }
         for name in names.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
             visited += 1
             if visited > maxEntries { truncated = true; return }
@@ -183,6 +199,12 @@ public struct LibraryScanner {
                 }
             } else if LibraryScanner.isImageName(name) {
                 out.append((u, .image))
+            } else if consoles {
+                switch ConsoleSources.claim(name) {
+                case .console: out.append((u, .console))
+                case .track where !hasCue: out.append((u, .console))
+                default: break
+                }
             }
         }
     }
@@ -212,12 +234,15 @@ public struct LibraryScanner {
     /// kept with their problem and never cached.
     public mutating func scan(_ folders: [URL], index: inout LibraryIndex) -> [LibraryEntry] {
         var entries: [LibraryEntry] = []
+        var fresh: [Int] = []          // entries identified now (cached once every answer is in)
+        var askConsole: [Int] = []     // entries the console identify answers
         for (url, kind) in findSources(in: folders) {
             let (size, mtime) = LibraryScanner.stamp(url, kind)
             if let cached = index.lookup(path: url.path, size: size, mtime: mtime) {
                 entries.append(cached)
                 continue
             }
+            fresh.append(entries.count)
             var e = LibraryEntry(path: url.path, kind: kind, size: size, mtime: mtime)
             switch kind {
             case .folder:
@@ -240,11 +265,34 @@ public struct LibraryScanner {
                     e.xbe = id.xbe
                 case .failure(let err):
                     e.problem = err.message
+                    // A GameCube or PlayStation .iso is no Xbox image: the console identify may know it.
+                    if identifyConsoles != nil && ConsoleSources.claim(url.lastPathComponent) == .shared {
+                        askConsole.append(entries.count)
+                    }
                 }
+            case .console:
+                e.problem = "Not identified"
+                askConsole.append(entries.count)
             }
-            if e.problem == nil { index.store(e) }
             entries.append(e)
         }
+        if let identifyConsoles, !askConsole.isEmpty {
+            let answers = identifyConsoles(askConsole.map { URL(fileURLWithPath: entries[$0].path) })
+            for i in askConsole {
+                let answer = answers[entries[i].path]
+                if let a = answer, let c = a.consoleGame {
+                    entries[i].kind = .console
+                    entries[i].console = c.rawValue
+                    entries[i].titleId = a.id
+                    entries[i].title = a.title
+                    entries[i].xbe = nil
+                    entries[i].problem = nil
+                } else if entries[i].kind == .console {
+                    entries[i].problem = answer?.error ?? "Needs the Python environment (Setup)"
+                }
+            }
+        }
+        for i in fresh where entries[i].problem == nil { index.store(entries[i]) }
         index.prune(keeping: Set(entries.map(\.path)))
         return LibraryScanner.dedupe(entries)
     }

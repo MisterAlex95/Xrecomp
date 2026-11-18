@@ -209,7 +209,8 @@ struct Sidebar: View {
         p.canChooseDirectories = true
         p.canChooseFiles = true
         p.allowsMultipleSelection = false
-        p.message = "Choose a disc image (.iso, .xiso, .cso, .zso, .cci) or a folder holding default.xbe"
+        p.message = "Choose a game: an Xbox disc image or folder holding default.xbe, a GBA, N64 or GameCube file, "
+            + "a PlayStation disc (.cue, .chd), or a folder of games"
         if p.runModal() == .OK, let u = p.url { model.actions?.addGame(u) }
     }
 }
@@ -247,7 +248,7 @@ struct LibraryView: View {
 
     private var subtitle: String {
         let n = model.games.count
-        let ready = model.games.filter { $0.status == .ready }.count
+        let ready = model.games.filter { $0.playable }.count
         if model.scanning { return "Scanning…" }
         return n == 0 ? "No games yet" : "\(n) game\(n == 1 ? "" : "s") · \(ready) ready to play"
     }
@@ -261,7 +262,8 @@ struct EmptyLibrary: View {
             VStack(alignment: .leading, spacing: Theme.s2) {
                 Image(systemName: "opticaldisc").font(.system(size: 34)).foregroundStyle(Theme.accent)
                 Text("No games found").font(.title3.weight(.semibold)).foregroundStyle(Theme.text)
-                Text("XRecomp looks for disc images (.iso, .cso…) and folders holding default.xbe in "
+                Text("XRecomp looks for Xbox disc images (.iso, .cso…) and folders holding default.xbe, and for "
+                     + "Game Boy Advance, PlayStation, Nintendo 64 and GameCube games (.gba, .cue, .chd, .z64, .rvz…) in "
                      + (model.setup.libraryFolders.first ?? Settings.defaultLibrary)
                      + ". Add a folder in Setup, drop a game on this window, or use Add game….")
                     .foregroundStyle(Theme.textDim)
@@ -313,6 +315,17 @@ struct GameCard: View {
                     ProgressView(value: p.overall)
                         .progressViewStyle(ThinBar(color: game.accentColor))
                         .padding(10)
+                }
+                if game.entry.isConsole {
+                    // XBA-278: which console a game is for, as the Android library's card says it.
+                    Text(game.console.short)
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(Theme.textBright)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.black.opacity(0.55)))
+                        .padding(8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                 }
             }
             VStack(alignment: .leading, spacing: 4) {

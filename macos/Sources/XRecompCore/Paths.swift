@@ -36,11 +36,19 @@ public struct AppPaths: Sendable {
     /// Scratch for the library scan (the default.xbe identify pulls out of an ISO, for its art).
     public var scanDir: URL { root.appendingPathComponent("scan", isDirectory: true) }
 
+    /// GBA / PS1 / N64 / GameCube packs (`prepare --pack-dir`): `packs/<ID>/` (XBA-278, the xrecomp CLI's tree).
+    public var packs: URL { root.appendingPathComponent("packs", isDirectory: true) }
+    /// The console runtimes' RECOMP_SAVE_DIR: they add `<console>-<KEY>/` (= the game ID) themselves.
+    public var consoleSaves: URL { root.appendingPathComponent("save", isDirectory: true) }
+
+    /// A title's folders. An Xbox title ID is upper case (`4D530004`); a console game ID is kept as it is
+    /// (`gba-AXVE-1A2B3C4D`), as the xrecomp command line names it (tools/xrecomp/home.py TitlePaths).
     public func title(_ tid: String) -> TitlePaths {
-        let dir = titles.appendingPathComponent(tid.uppercased(), isDirectory: true)
-        let work = workRoot.map { $0.appendingPathComponent(tid.uppercased(), isDirectory: true) }
+        let id = Console.of(gameId: tid) == .xbox ? tid.uppercased() : tid
+        let dir = titles.appendingPathComponent(id, isDirectory: true)
+        let work = workRoot.map { $0.appendingPathComponent(id, isDirectory: true) }
             ?? dir.appendingPathComponent("work", isDirectory: true)
-        return TitlePaths(titleId: tid.uppercased(), dir: dir, work: work)
+        return TitlePaths(titleId: id, dir: dir, work: work, root: root)
     }
 }
 
@@ -50,12 +58,32 @@ public struct TitlePaths: Sendable {
     public let dir: URL
     /// `prepare --work`: analysis, project, build, stamp.json, discovered.jsonl, prepare.log.
     public let work: URL
+    /// The data folder (AppPaths.root).
+    public let root: URL
 
+    public init(titleId: String, dir: URL, work: URL, root: URL? = nil) {
+        self.titleId = titleId
+        self.dir = dir
+        self.work = work
+        self.root = root ?? dir.deletingLastPathComponent().deletingLastPathComponent()
+    }
+
+    public var console: Console { Console.of(gameId: titleId) }
     public var recompCfgDir: URL { dir }
     public var recompCfg: URL { dir.appendingPathComponent(RecompConfig.fileName) }
     /// RECOMP_SAVE_DIR: UDATA/<tid>, TDATA/<tid>, Cache/<tid> (Z:), the title ID in lower case as the runtime names
-    /// them (docs/technical/saves.md).
-    public var save: URL { dir.appendingPathComponent("save", isDirectory: true) }
+    /// them (docs/technical/saves.md). A console game's: the shared `save/` (its runtime adds `<ID>/`).
+    public var save: URL {
+        console == .xbox ? dir.appendingPathComponent("save", isDirectory: true)
+            : root.appendingPathComponent("save", isDirectory: true)
+    }
+    /// A console game's own saves, memory cards and states: `save/<ID>/`; nil for an Xbox title.
+    public var consoleSave: URL? { console == .xbox ? nil : save.appendingPathComponent(titleId, isDirectory: true) }
+    /// A console game's pack (`packs/<ID>/`); nil for an Xbox title.
+    public var pack: URL? {
+        console == .xbox ? nil : root.appendingPathComponent("packs", isDirectory: true)
+            .appendingPathComponent(titleId, isDirectory: true)
+    }
     public var art: URL { dir.appendingPathComponent("art.png") }
     public var theme: URL { dir.appendingPathComponent("theme.json") }
     public var logs: URL { dir.appendingPathComponent("logs", isDirectory: true) }

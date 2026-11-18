@@ -60,7 +60,7 @@ struct SettingsView: View {
 
                 Panel(padding: 0) {
                     VStack(spacing: 0) {
-                        let opts = OptionTable.options(in: tab)
+                        let opts = OptionTable.options(in: tab, for: game?.console)
                         ForEach(Array(opts.enumerated()), id: \.element.id) { i, o in
                             OptionRow(option: o, config: $config, defaults: gameId == nil ? nil : defaults,
                                       forced: forcedValue(o), onChange: save)

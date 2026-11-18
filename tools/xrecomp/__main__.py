@@ -2,8 +2,9 @@
 xrecomp: prepare and play your own games from a terminal (Linux, macOS, Windows). docs/desktop/cli.md.
 
     xrecomp prepare SOURCE [--force] [--no-title-layer | --title-layer] [--no-build] [-- PREPARE ARGS]
-    xrecomp play GAME [--print] [-- PLAYER ARGS]
+    xrecomp play GAME [--print [--json]] [-- PLAYER ARGS]
     xrecomp list [FOLDER...] [--json]
+    xrecomp identify SOURCE... [--json]
     xrecomp settings [GAME] [KEY=VALUE | KEY= ...] [--unset KEY] [--reset]
     xrecomp folders [add FOLDER | remove FOLDER]
     xrecomp where [GAME]
@@ -246,6 +247,10 @@ def cmd_play(home, a):
         err(str(x))
         return 2
     changes = env_changes(os.environ, env)
+    if a.json:              # the macOS launcher's way in (XBA-278): it starts the player itself
+        print(json.dumps({"id": e.id, "console": e.console, "title": e.title, "argv": argv, "cwd": cwd,
+                          "env": env, "changes": dict(changes)}, indent=2))
+        return 0
     if a.print:
         print("cd %s" % shlex.quote(cwd))
         for k, v in changes:
@@ -310,6 +315,36 @@ def cmd_list(home, a):
     for r in rows:
         print("%-*s  %-*s  %-*s  %-*s  %s" % (w[0], r[0], w[1], r[1], w[2], r[2], w[3], r[3], r[4]))
     return 0
+
+
+# ── identify ────────────────────────────────────────────────────
+
+def identify_dict(home, src):
+    """What a source is and how prepared (Entry.as_dict, after state()), with its key and, for a console game, the
+    player that runs it (null: not built) and the folder its saves go to."""
+    e = library.identify(src)
+    library.state(e, home)
+    d = e.as_dict()
+    d["key"] = e.key
+    if e.console and e.console != "xbox" and not e.error:
+        d["player"] = find_player(e.console)
+        d["unsupported"] = console_unsupported(e.console)
+        d["save_dir"] = home.title(e.id).save
+        d["pack_dir"] = home.title(e.id).pack
+    return d
+
+
+def cmd_identify(home, a):
+    """Each SOURCE (the macOS launcher's console games, XBA-278: it asks here rather than reading ROM headers and
+    pack.json itself, so the two never disagree)."""
+    out = [identify_dict(home, src) for src in a.sources]
+    if a.json:
+        print(json.dumps(out, indent=2))
+        return 0
+    for d in out:
+        print("%-24s %-5s %-24s %s" % (d["id"] or "?", d["console"] or "?", d["label"] or d["error"] or "",
+                                       d["title"] or d["source"]))
+    return 0 if all(not d["error"] for d in out) else 1
 
 
 # ── settings ────────────────────────────────────────────────────
@@ -439,10 +474,15 @@ def parser():
     p = sub.add_parser("play", help="play a game")
     p.add_argument("game")
     p.add_argument("--print", action="store_true", help="print the command line and environment, do not run it")
+    p.add_argument("--json", action="store_true", help="with --print: as JSON (argv, cwd, the whole environment)")
     p.add_argument("extra", nargs="*", help="after --: arguments for the game or the console player")
 
     p = sub.add_parser("list", help="the library and how prepared each game is")
     p.add_argument("folders", nargs="*", help="also scan these folders")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("identify", help="what sources are (console, ID, title) and how prepared")
+    p.add_argument("sources", nargs="+")
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("settings", help="Default settings, or a game's")
@@ -463,7 +503,8 @@ def parser():
 def main(argv=None):
     a = parser().parse_args(argv)
     home = Home(a.home)
-    return {"prepare": cmd_prepare, "play": cmd_play, "list": cmd_list, "settings": cmd_settings,
+    return {"prepare": cmd_prepare, "play": cmd_play, "list": cmd_list, "identify": cmd_identify,
+            "settings": cmd_settings,
             "folders": cmd_folders, "where": cmd_where}[a.cmd](home, a)
 
 
