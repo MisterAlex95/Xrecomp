@@ -217,6 +217,11 @@ int main(int argc, char **argv)
     setenv("FAKE_PACK_ABI", "99", 1);
     CHECK(gba_pack_load(m, json, key, hex, &p) == GBA_PACK_STALE && p.handle == NULL);
     CHECK(gba_pack_open(json, hex, &p, why, sizeof why) == -1 && strstr(why, "abi 99"));
+    setenv("FAKE_PACK_ABI", "3", 1); /* before the oldest this core takes */
+    CHECK(gba_pack_open(json, hex, &p, why, sizeof why) == -1 && strstr(why, "abi 3"));
+    setenv("FAKE_PACK_ABI", "4", 1); /* a table without IWRAM spans (XBA-279: ABI 5 cores take them) */
+    CHECK(gba_pack_load(m, json, key, hex, &p) == GBA_PACK_LOADED);
+    gba_pack_close(&p);
     unsetenv("FAKE_PACK_ABI");
 
     /* A bare library (no pack.json): the table's own checks only. */

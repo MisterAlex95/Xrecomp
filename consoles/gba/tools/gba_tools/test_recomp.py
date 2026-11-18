@@ -343,3 +343,92 @@ def test_files_stay_the_same_when_functions_are_added():
         extra = F(funcs[k].entry + 2 * len(funcs[k].addrs), 1)   # in the gap after function k
         changed.append(len(key(recomp.chunks_of(funcs + [extra])) - key(before)))
     assert max(changed) <= 4 and sum(changed) / len(changed) < 1.2
+
+
+def iwram_img():
+    """A ROM whose entry copies nothing (the test names the copy), and at 0x08000200 the bytes crt0 would copy to
+    IWRAM 0x03000000: a Thumb function (mov r0, #7; str r0, [r1]; bx lr) with a call to an ARM one at 0x03000010
+    (ldr r0, [pc]; bx lr; .word 0x12345678)."""
+    im = header_img()
+    a = BASE + 0xC0
+    im.w32(a, 0xE3A00005)        # mov r0, #5
+    im.w32(a + 4, 0xEAFFFFFE)    # b .
+    src = BASE + 0x200
+    im.w16(src, 0x2007)          # 0x03000000: mov r0, #7
+    im.w16(src + 2, 0x6008)      # str r0, [r1]
+    im.w16(src + 4, 0x4B01)      # ldr r3, [pc, #4]  -> 0x0300000C
+    im.w16(src + 6, 0x4718)      # bx r3 (ARM: bit 0 clear)
+    im.w16(src + 8, 0x4770)      # bx lr
+    im.w16(src + 10, 0x46C0)     # nop
+    im.w32(src + 12, 0x03000010)  # the literal
+    im.w32(src + 16, 0xE59F0000)  # 0x03000010: ldr r0, [pc]
+    im.w32(src + 20, 0xE12FFF1E)  # bx lr
+    im.w32(src + 24, 0x12345678)
+    return im
+
+
+def test_iwram_delta_records():
+    from gba_tools import iwram
+    d = (BASE + 0x200) - 0x03000000
+    v = iwram.encode_delta(d)
+    assert v >> 24 == 0xE0 and iwram.decode_delta(v) == d
+    assert iwram.decode_delta(0x03000001) is None and iwram.decode_delta(0x08000101) is None
+    # the extremes: ROM 0x08000000 for IWRAM's end, ROM's 32 MB end for IWRAM 0x03000000
+    assert iwram.decode_delta(iwram.encode_delta(0x08000000 - 0x03007FFC)) == 0x08000000 - 0x03007FFC
+    assert iwram.decode_delta(iwram.encode_delta(0x09FFFFFC - 0x03000000)) == 0x09FFFFFC - 0x03000000
+    keys, deltas = iwram.split_discovered([0x08000101, 0x03000001, v, 0x03000010, 0x02000000])
+    assert keys == [0x03000001, 0x03000010] and deltas == [d]
+    # what the core encodes (gba_recomp.h GBA_RC_IW_DELTA_ENCODE)
+    hdr = open(os.path.join(os.path.dirname(__file__), "..", "..", "runtime", "gba_recomp.h")).read()
+    assert "GBA_RC_IW_DELTA_TAG 0xE0000000u" in hdr and "GBA_RC_IW_DELTA_MIN 0x04FF8000u" in hdr
+
+
+def test_iwram_code_lifted_with_its_span(tmp_path):
+    from gba_tools import iwram
+    im = iwram_img()
+    rom = tmp_path / "t.gba"
+    rom.write_bytes(bytes(im.b))
+    plain, with_iw = tmp_path / "plain", tmp_path / "iw"
+    assert recomp_main([str(rom), str(plain)]) == 0
+    disc = tmp_path / "disc.txt"
+    delta = (BASE + 0x200) - 0x03000000
+    disc.write_text("0x03000001\n0x%08X\n" % iwram.encode_delta(delta))
+    assert recomp_main([str(rom), str(with_iw), "--discovered", str(disc)]) == 0
+    files = sorted(os.listdir(with_iw))
+    assert "gba_rc_iw_03000000t.c" in files
+    # the cartridge's functions are untouched: same files, same contents
+    for f in os.listdir(plain):
+        if f != "gba_rc_table.c":
+            assert (plain / f).read_text() == (with_iw / f).read_text()
+    c = (with_iw / "gba_rc_iw_03000000t.c").read_text()
+    assert "RC_ENTER_IW(1, 0x03000000u, 0x03000008u);" in c       # the Thumb function (to its bx r3), its bytes
+    assert "RC_ENTER_IW(0, 0x03000010u, 0x03000018u);" in c       # the ARM one it jumps to
+    assert "RC_IW_TOB(0x03000002u)" in c and "0x12345678" not in c  # open bus and literals from IWRAM at run time
+    table = (with_iw / "gba_rc_table.c").read_text()
+    assert "{0x03000000u, 0x03000008u, iw_bytes_0, gba_rc_f_03000000_t}" in table
+    assert "{0x03000010u, 0x03000018u, iw_bytes_1, gba_rc_f_03000010_a}" in table
+    assert "0x07, 0x20, 0x08, 0x60" in table and ", 2u, spans};" in table
+    assert "spans" not in (plain / "gba_rc_table.c").read_text()
+    # no distance recorded, or one under which the code is not code: nothing lifted in IWRAM
+    disc.write_text("0x03000001\n")
+    out = tmp_path / "nodelta"
+    assert recomp_main([str(rom), str(out), "--discovered", str(disc)]) == 0
+    assert not [f for f in os.listdir(out) if "_iw_" in f]
+
+
+@pytest.mark.skipif(not shutil.which("cc"), reason="no C compiler")
+def test_iwram_c_compiles(tmp_path):
+    from gba_tools import iwram
+    im = iwram_img()
+    rom = tmp_path / "t.gba"
+    rom.write_bytes(bytes(im.b))
+    disc = tmp_path / "disc.txt"
+    disc.write_text("0x03000001\n0x%08X\n" % iwram.encode_delta((BASE + 0x200) - 0x03000000))
+    out = tmp_path / "out"
+    assert recomp_main([str(rom), str(out), "--no-comments", "--discovered", str(disc)]) == 0
+    runtime = os.path.join(os.path.dirname(__file__), "..", "..", "runtime")
+    for f in os.listdir(out):
+        r = subprocess.run(["cc", "-O1", "-fPIC", "-Wall", "-Werror", "-Wno-unused-variable",
+                            "-Wno-unused-but-set-variable", "-I", runtime, "-c", str(out / f), "-o", str(tmp_path / (f + ".o"))],
+                           capture_output=True, text=True, check=False)
+        assert r.returncode == 0, r.stderr
