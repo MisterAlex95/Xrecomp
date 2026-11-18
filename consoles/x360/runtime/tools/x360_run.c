@@ -1,0 +1,134 @@
+/* x360_run -- runs an Xbox 360 title, recompiled, headless (XBA-270): what it prints through DbgPrint goes to stdout.
+ *
+ *   x360_run TITLE.xex --pack LIB.so [--insns N] [--log FILE] [--dbg FILE] [--missed FILE] [--stats] [-v]
+ *
+ * TITLE.xex: an unencrypted XEX2, compression none or basic (python3 -m tools.xex FILE --plain OUT makes one).
+ * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
+ * Runs until the title ends or N instructions (default 2 billion). --missed: addresses reached without lifted code,
+ * for x360_tools.recomp --discovered. Exit status: the title's exit code when it ended (0..255), 1 on an error, a
+ * missed address or the budget running out, 2 on bad arguments or input. */
+#include <dlfcn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "x360_core.h"
+
+static uint8_t *read_file(const char *path, size_t *size)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *p = n > 0 ? malloc((size_t)n) : NULL;
+    if (p && fread(p, 1, (size_t)n, f) != (size_t)n) {
+        free(p);
+        p = NULL;
+    }
+    fclose(f);
+    *size = p ? (size_t)n : 0;
+    return p;
+}
+
+int main(int argc, char **argv)
+{
+    const char *path = NULL, *pack = NULL, *logp = NULL, *dbgp = NULL, *missedp = NULL;
+    unsigned long long insns = 2000000000ull;
+    int stats = 0, verbose = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--insns") && i + 1 < argc)
+            insns = strtoull(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--pack") && i + 1 < argc)
+            pack = argv[++i];
+        else if (!strcmp(argv[i], "--log") && i + 1 < argc)
+            logp = argv[++i];
+        else if (!strcmp(argv[i], "--dbg") && i + 1 < argc)
+            dbgp = argv[++i];
+        else if (!strcmp(argv[i], "--missed") && i + 1 < argc)
+            missedp = argv[++i];
+        else if (!strcmp(argv[i], "--stats"))
+            stats = 1;
+        else if (!strcmp(argv[i], "-v"))
+            verbose++;
+        else if (argv[i][0] != '-' && !path)
+            path = argv[i];
+        else {
+            fprintf(stderr, "usage: x360_run TITLE.xex --pack LIB.so [--insns N] [--log FILE] [--dbg FILE] "
+                            "[--missed FILE] [--stats] [-v]\n");
+            return 2;
+        }
+    }
+    if (!path || !pack) {
+        fprintf(stderr, "x360_run: a title and its pack (--pack) are needed\n");
+        return 2;
+    }
+    size_t size;
+    uint8_t *data = read_file(path, &size);
+    if (!data) {
+        fprintf(stderr, "x360_run: cannot read %s\n", path);
+        return 2;
+    }
+    char why[256] = "";
+    x360_machine *x = x360_create(data, size, why, sizeof why);
+    free(data);
+    if (!x) {
+        fprintf(stderr, "x360_run: %s: %s\n", path, why);
+        return 2;
+    }
+    FILE *log = logp ? fopen(logp, "w") : stderr;
+    FILE *dbg = dbgp ? fopen(dbgp, "w") : stdout;
+    if (!log || !dbg) {
+        fprintf(stderr, "x360_run: cannot open the output files\n");
+        return 2;
+    }
+    x360_set_output(x, dbg, log, verbose);
+    void *lib = dlopen(pack, RTLD_NOW | RTLD_LOCAL);
+    if (!lib) {
+        fprintf(stderr, "x360_run: %s\n", dlerror());
+        return 2;
+    }
+    const void *resume = dlsym(lib, "xe_rc_resume");
+    const unsigned *count = dlsym(lib, "xe_rc_resume_count");
+    const uint32_t *crc = dlsym(lib, "xe_rc_image_crc");
+    if (!resume || !count || !crc) {
+        fprintf(stderr, "x360_run: %s is not an x360_tools.recomp pack\n", pack);
+        return 2;
+    }
+    x360_pack p = {resume, *count, *crc};
+    if (x360_bind(x, &p)) {
+        fprintf(stderr, "x360_run: %s\n", x360_error(x));
+        return 2;
+    }
+    int st = x360_run(x, insns);
+    x360_stats s;
+    x360_get_stats(x, &s);
+    if (stats)
+        fprintf(log, "stats: native %llu interpreted %llu hle %llu switches %llu threads %u unimplemented %u\n",
+                (unsigned long long)s.native, (unsigned long long)s.interpreted, (unsigned long long)s.hle_calls,
+                (unsigned long long)s.switches, s.threads, s.unimplemented);
+    if (missedp) {
+        FILE *f = fopen(missedp, "w");
+        if (f) {
+            const uint32_t *m;
+            unsigned n = x360_missed(x, &m);
+            fprintf(f, "# x360_run: addresses reached without lifted code\n");
+            for (unsigned k = 0; k < n; k++)
+                fprintf(f, "%08X\n", m[k]);
+            fclose(f);
+        }
+    }
+    int rc;
+    if (st == X360_EXITED) {
+        fprintf(log, "x360_run: the title ended (exit code %u)\n", x360_exit_code(x));
+        rc = (int)(x360_exit_code(x) & 0xFF);
+    } else {
+        fprintf(log, "x360_run: %s\n", st == X360_BUDGET ? "instruction budget ran out" : x360_error(x));
+        rc = 1;
+    }
+    fflush(dbg);
+    x360_destroy(x);
+    dlclose(lib);
+    return rc;
+}

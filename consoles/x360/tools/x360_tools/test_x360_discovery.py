@@ -17,7 +17,8 @@ from tools.xex.xex import parse_xex
 from . import asm as A
 from .discover360 import find_helpers
 from .recomp import RUNTIME_DIRS, CodeView, recompile
-from .test_x360_tools import M64, Prog, c_case, parse_out
+from .prog import Prog
+from .test_x360_tools import M64, c_case, parse_out
 from .xenon import XenonDecoder
 
 TEXT = 0x82001000

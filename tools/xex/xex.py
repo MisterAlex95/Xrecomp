@@ -483,3 +483,20 @@ def summary(img):
         "pdata_functions": len(img.pdata), "image": img.image is not None, "note": img.image_note,
         "headers": sorted(HEADER_NAMES.get(k, "%08X" % k) for k in img.headers),
     }
+
+
+def plain_xex(data, img):
+    """The same XEX2 with its image stored plain (no encryption, no compression): what the runtime's loader
+    (consoles/x360/runtime/x360_load.c) reads. img: parse_xex(data, keys) with the image decoded."""
+    if img.image is None:
+        raise XexError("no image to write: %s" % img.image_note)
+    out = bytearray(data[:img.pe_offset])
+    count = _u32(out, 0x14)
+    for k in range(count):
+        key, value = struct.unpack_from(">II", out, 0x18 + 8 * k)
+        if key == H_FILE_FORMAT_INFO:
+            struct.pack_into(">HH", out, value + 4, ENC_NONE, COMP_NONE)
+            break
+    else:
+        raise XexError("no file format header")
+    return bytes(out) + img.image
