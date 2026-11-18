@@ -9,8 +9,9 @@ The Xbox 360 arrives in the app, GameCube catches up with the other consoles, an
 - **GameCube.** Its own Controls screen and on-screen pad, internal resolution, rewind, frame generation and cover
   art. It is also playable on the desktop, RVZ and WIA images included. Later SDKs' games take the fast memory path,
   and the picture no longer flickers when the video output starts inside the XFB copy.
-- **Every console on the desktop.** The macOS launcher lists, prepares and plays GBA, PS1, N64 and GameCube games, and
-  Windows gets the same players. Game windows have F11 / Alt+Enter fullscreen and F12 screenshots.
+- **More consoles on the desktop.** The macOS launcher lists, prepares and plays GBA, PS1, N64 and GameCube games. On
+  Windows those players build from source with MinGW-w64; the Windows download stays Xbox only. Game windows have
+  F11 / Alt+Enter fullscreen and F12 screenshots.
 - **Speed.** Lifted code is faster on GBA, PS1, N64 and GameCube, and rewind is on for the N64 and the GameCube.
 - **Xbox guest heap.** A small request no longer takes a whole freed block, so a title that frees and reloads a scene
   keeps its memory. This targets the freeze reported when Sonic Heroes loads its first stage
