@@ -107,10 +107,19 @@ int gx_warmup_headless(const char *const *lists, size_t nlists, const char *cach
  * internal resolution, for a presenter that shows it without going through RAM. 0 when there is none. */
 unsigned gx_xfb_texture(gx_state *gx, uint32_t addr, int *w, int *h);
 
+/* RECOMP_GC_GX_XFB_DIAG (docs/runtime/environment-variables.md): true when the presenter should report each field. */
+bool gx_xfb_diag_enabled(const gx_state *gx);
+/* One diagnostic line for the field just presented. vi_addr: the address the video interface scans; path: how the
+ * field reached the window; presents: the swaps it took; busy_ns: the field's work, without the pacing sleep. */
+void gx_xfb_diag_field(gx_state *gx, uint32_t vi_addr, const char *path, unsigned presents, uint64_t busy_ns);
+
 typedef struct gx_stats {
     uint64_t fifo_bytes, draws, vertices, batches, efb_copies, xfb_copies, peeks, pokes;
     uint64_t tex_decodes, tex_hits, shaders_ready, shaders_pending, uber_draws, special_draws;
     uint64_t unknown_cmds;
+    /* RECOMP_GC_GX_STREAM=storage: whether it is in use, the waits for a fence the GPU had not signalled yet and their
+     * total time, the wraps of each ring (vertices, indices, uniforms), the uploads too large for a ring */
+    uint64_t stream_storage, stream_waits, stream_wait_us, stream_wraps[3], stream_oversize;
 } gx_stats;
 void gx_get_stats(const gx_state *gx, gx_stats *s);
 

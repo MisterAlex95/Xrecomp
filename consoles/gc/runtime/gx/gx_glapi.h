@@ -105,22 +105,41 @@ typedef struct __GLsync *GLsync;
 #define GL_MAX_TEXTURE_SIZE 0x0D33
 #define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
 #define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
+#define GL_ALREADY_SIGNALED 0x911A
+#define GL_TIMEOUT_EXPIRED 0x911B
+#define GL_CONDITION_SATISFIED 0x911C
+#define GL_WAIT_FAILED 0x911D
+#define GL_COPY_WRITE_BUFFER 0x8F37
 #define GL_MAP_WRITE_BIT 0x0002
 #define GL_MAP_INVALIDATE_RANGE_BIT 0x0004
 #define GL_MAP_INVALIDATE_BUFFER_BIT 0x0008
 #define GL_MAP_UNSYNCHRONIZED_BIT 0x0020
+#define GL_MAP_PERSISTENT_BIT_EXT 0x0040
+#define GL_MAP_COHERENT_BIT_EXT 0x0080
 #define GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT 0x8A34
 #define GL_PROGRAM_BINARY_RETRIEVABLE_HINT 0x8257
 #define GL_COMPLETION_STATUS_KHR 0x91B1
 #define GL_PROGRAM_BINARY_LENGTH 0x8741
 #define GL_NUM_PROGRAM_BINARY_FORMATS 0x87FE
 #define GL_INVALID_INDEX 0xFFFFFFFFu
+#define GL_DRAW_FRAMEBUFFER_BINDING 0x8CA6
+#define GL_READ_FRAMEBUFFER_BINDING 0x8CAA
+#define GL_CURRENT_PROGRAM 0x8B8D
+#define GL_VERTEX_ARRAY_BINDING 0x85B5
+#define GL_VIEWPORT 0x0BA2
+#define GL_SCISSOR_BOX 0x0C10
+#define GL_COLOR_WRITEMASK 0x0C23
+#define GL_ACTIVE_TEXTURE 0x84E0
+#define GL_TEXTURE_BINDING_2D 0x8069
+#define GL_SAMPLER_BINDING 0x8919
 
 /* X(return type, name, parameters) */
 #define GX_GL_FUNCS(X) \
     X(const GLubyte *, glGetString, (GLenum)) \
     X(const GLubyte *, glGetStringi, (GLenum, GLuint)) \
     X(void, glGetIntegerv, (GLenum, GLint *)) \
+    X(void, glGetBooleanv, (GLenum, GLboolean *)) \
+    X(GLboolean, glIsEnabled, (GLenum)) \
     X(GLenum, glGetError, (void)) \
     X(void, glEnable, (GLenum)) \
     X(void, glDisable, (GLenum)) \
@@ -210,6 +229,8 @@ typedef struct gx_glfn {
     /* program binaries (XBA-264; GLES 3.0, desktop GL 4.1 / ARB_get_program_binary): NULL when missing */
     void (*glGetProgramBinary)(GLuint, GLsizei, GLsizei *, GLenum *, void *);
     void (*glProgramBinary)(GLuint, GLenum, const void *, GLsizei);
+    /* GL_EXT_buffer_storage: NULL when missing */
+    void (*glBufferStorageEXT)(GLenum, GLsizeiptr, const void *, GLbitfield);
 } gx_glfn;
 
 /* EGL, the part the renderer and the headless context use. */

@@ -29,6 +29,7 @@
 #include "gx_glapi.h"
 #include "gx_internal.h"
 #include "gx_progcache.h"
+#include "gx_ring.h"
 #include "gx_shader.h"
 
 #define BATCH_V (1u << 18)
@@ -36,8 +37,18 @@
 #define PROG_BUCKETS 1024u
 #define TEX_BUCKETS 4096u
 #define TEX_KEEP_FIELDS 1200u
+#define XFB_DIAG_LINES 128u  /* lines waiting for the log thread */
+#define XFB_DIAG_LINE 400u   /* well under the Android log pump's 1024-byte line */
 
 enum { P_PENDING = 0, P_READY = 1, P_FAILED = 2, P_COMPILING = 3 };
+
+/* RECOMP_GC_GX_XFB_COPY: how the EFB reaches an XFB slot's texture. */
+enum { XFB_COPY_BLIT = 0, XFB_COPY_FLUSH = 1, XFB_COPY_FBO = 2, XFB_COPY_DRAW = 3 };
+
+/* RECOMP_GC_GX_STREAM: how draws reach the vertex, index and uniform buffers (ring_put). */
+enum { STREAM_MAP = 0, STREAM_MAPINV = 1, STREAM_SUB = 2, STREAM_STORAGE = 3 };
+static const char *const stream_names[] = {"map", "mapinv", "sub", "storage"};
+#define STREAM_LOG_FIELDS 3000u /* a line of storage statistics this often */
 
 typedef struct prog_entry {
     gx_shader_key key;
@@ -84,7 +95,14 @@ struct gx_gl {
     GLuint vao, vbo, ebo, ubo, empty_vao;
     size_t ring_size[3], ring_off[3]; /* vbo, ebo, ubo as streaming rings (ring_put) */
     GLint ubo_align;
-    int stream; /* RECOMP_GC_GX_STREAM: 0 map (unsynchronised), 1 map + invalidate range, 2 glBufferSubData */
+    int stream; /* STREAM_* */
+    /* STREAM_STORAGE: the three rings, mapped for their whole life */
+    gx_ring sr[3];
+    uint8_t *sr_map[3];
+    GLuint sr_big[3];     /* an upload too large for its ring: a buffer of its own until the draw is issued */
+    EGLContext sr_ctx;    /* the context the rings live in */
+    uint64_t sr_waits, sr_wait_ns, sr_wait_max_ns, sr_oversize;
+    bool sr_wait_warned;
     GLuint samplers[8];
     GLuint white_tex;
     GLuint uber;
@@ -107,8 +125,33 @@ struct gx_gl {
     uint8_t *packed;         /* the batch's vertices with only those coordinates, for the upload */
     ubo_t ubo_data;
 
-    struct { uint32_t addr, stride, lines; GLuint tex; int w, h; } xfb[4];
+    struct {
+        uint32_t addr, stride, lines;
+        GLuint tex;
+        int w, h;
+        GLuint fbo;        /* RECOMP_GC_GX_XFB_COPY=fbo: this slot's own framebuffer, its texture attached once */
+        GLuint diag_fbo;   /* RECOMP_GC_GX_XFB_DIAG=2: read through this one, so that copy_fbo is left alone */
+        uint32_t copies;   /* copies made into the slot */
+        uint32_t copy_sum; /* RECOMP_GC_GX_XFB_DIAG=2: the texture's checksum right after the last copy */
+    } xfb[4];
     unsigned xfb_next;
+    int xfb_copy;          /* XFB_COPY_* */
+    GLuint copy_att;       /* the texture attached to copy_fbo now */
+    GLuint xfb_draw_prog;  /* XFB_COPY_DRAW */
+    GLint xd_color, xd_off;
+
+    /* RECOMP_GC_GX_XFB_DIAG: 0 off, 1 a line per field, 2 also the slots' checksums. The lines are written by a
+     * thread of their own: the render thread never waits for the log pipe. */
+    int xfb_diag;
+    uint8_t *diag_px;
+    size_t diag_cap;
+    uint64_t diag_last_ns;
+    bool diag_thread_ok, diag_quit;
+    pthread_t diag_thread;
+    pthread_mutex_t diag_mu;
+    pthread_cond_t diag_cv;
+    char (*diag_lines)[XFB_DIAG_LINE];
+    unsigned diag_head, diag_count, diag_dropped;
 
     /* worker */
     bool worker_ok, khr_parallel;
@@ -645,6 +688,8 @@ static GLuint new_tex(gx_gl *g)
     F.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     F.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     F.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    /* one level until an upload says otherwise: Adreno crashes in a draw walking the mip chain GL's default of 1000 announces */
+    F.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
     return t;
 }
 
@@ -888,11 +933,13 @@ static void apply_state(gx_state *gx, bool tri)
     } else {
         F.glDisable(GL_BLEND);
     }
+    /* A GX front face is clockwise on screen and the EFB is upright in GL, so with GL's front = counter-clockwise a
+     * GX back face is a GL front face: genmode 1 (cull back) removes GL_FRONT, 2 (cull front) GL_BACK. */
     unsigned cull = BITS(bp[BP_GENMODE], 14, 2);
     F.glFrontFace(GL_CCW);
     if (tri && cull) {
         F.glEnable(GL_CULL_FACE);
-        F.glCullFace(cull == 1 ? GL_BACK : cull == 2 ? GL_FRONT : GL_FRONT_AND_BACK);
+        F.glCullFace(cull == 1 ? GL_FRONT : cull == 2 ? GL_BACK : GL_FRONT_AND_BACK);
     } else {
         F.glDisable(GL_CULL_FACE);
     }
@@ -904,14 +951,200 @@ static int sext11(uint32_t v)
     return v >= 0x400 ? (int)v - 0x800 : (int)v;
 }
 
-/* Streaming buffers (vbo, ebo, ubo): each upload goes after the previous one in a buffer that keeps its storage, and
- * only a wrap orphans it (glBufferData once). A glBufferData of a new size at every draw made Adreno drivers allocate
- * GPU memory per draw (an ioctl each): Prince of Persia: The Two Thrones fell to 13 % in 3D scenes on the Fold8. The
- * ranges written after an orphan were never handed to the GPU, so they are mapped unsynchronised, without
+/* ---- RECOMP_GC_GX_STREAM=storage: persistently mapped rings (bookkeeping: gx_ring.h) ---- */
+
+static uint64_t stream_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static void *sr_fence(void *user)
+{
+    gx_gl *g = user;
+    GLsync s = F.glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!s)
+        F.glFinish(); /* no fence to wait for later: the region is complete when this returns */
+    return s;
+}
+
+/* Returns once the GPU has passed the fence. A wait that fails, or that lasts absurdly long (a lost context need not
+ * ever signal), ends in glFinish, which also means every earlier command is complete. */
+static void sr_retire(void *user, void *sync)
+{
+    gx_gl *g = user;
+    GLsync s = sync;
+    if (!s)
+        return;
+    GLenum r = F.glClientWaitSync(s, 0, 0);
+    if (r == GL_TIMEOUT_EXPIRED) {
+        uint64_t t0 = stream_now_ns(), dt = 0;
+        do {
+            r = F.glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000u);
+            dt = stream_now_ns() - t0;
+        } while (r == GL_TIMEOUT_EXPIRED && dt < 10000000000u);
+        g->sr_waits++;
+        g->sr_wait_ns += dt;
+        if (dt > g->sr_wait_max_ns)
+            g->sr_wait_max_ns = dt;
+    }
+    if (r != GL_ALREADY_SIGNALED && r != GL_CONDITION_SATISFIED) {
+        if (!g->sr_wait_warned)
+            fprintf(stderr, "gx: buffer streaming: fence wait ended with 0x%X, finishing the GPU's work instead\n", r);
+        g->sr_wait_warned = true;
+        F.glFinish();
+    }
+    F.glDeleteSync(s);
+}
+
+static void sr_discard(void *user, void *sync)
+{
+    gx_gl *g = user;
+    if (sync)
+        F.glDeleteSync((GLsync)sync);
+}
+
+static const gx_ring_ops sr_ops = {sr_fence, sr_retire, sr_discard};
+
+static bool has_extension(gx_glfn *f, const char *name)
+{
+    GLint n = 0;
+    f->glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+    for (GLint i = 0; i < n; i++) {
+        const char *e = (const char *)f->glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        if (e && !strcmp(e, name))
+            return true;
+    }
+    return false;
+}
+
+/* Unmaps and deletes the rings (their buffers stay to the caller). Nothing is waited for: GL keeps a deleted buffer
+ * until the GPU is done with it. In another context than the rings' none of these names mean anything, so only the
+ * pointers are dropped. */
+static void stream_storage_destroy(gx_gl *g, const GLuint *bufs)
+{
+    bool same_ctx = g->egl.eglGetCurrentContext() == g->sr_ctx;
+    for (unsigned r = 0; r < 3; r++) {
+        if (same_ctx) {
+            gx_ring_release(&g->sr[r], &sr_ops, g);
+            if (g->sr_big[r])
+                F.glDeleteBuffers(1, &g->sr_big[r]);
+            if (g->sr_map[r]) {
+                F.glBindBuffer(GL_COPY_WRITE_BUFFER, bufs[r]);
+                F.glUnmapBuffer(GL_COPY_WRITE_BUFFER);
+            }
+        }
+        g->sr_big[r] = 0;
+        g->sr_map[r] = NULL;
+        gx_ring_init(&g->sr[r], 0);
+    }
+    if (same_ctx)
+        F.glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+}
+
+/* Allocates and maps the three rings once. NULL, or why they cannot be used (nothing is left allocated, but the
+ * buffer names must be replaced: storage may have been made immutable). */
+static const char *stream_storage_create(gx_gl *g)
+{
+    if (!has_extension(&g->f, "GL_EXT_buffer_storage"))
+        return "no GL_EXT_buffer_storage";
+    if (!F.glBufferStorageEXT)
+        return "no glBufferStorageEXT entry point";
+    static const size_t sizes[3] = {32u << 20, 16u << 20, 8u << 20};
+    int kb = 0; /* GC_GX_STREAM_RING_KB: tests, small rings wrap all the time */
+    const char *kbs = getenv("GC_GX_STREAM_RING_KB");
+    if (kbs && *kbs)
+        kb = atoi(kbs);
+    const GLuint bufs[3] = {g->vbo, g->ebo, g->ubo};
+    const GLbitfield flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT_EXT | GL_MAP_COHERENT_BIT_EXT;
+    const char *why = NULL;
+    g->sr_ctx = g->egl.eglGetCurrentContext();
+    gl_clear_errors(&g->f);
+    for (unsigned r = 0; r < 3 && !why; r++) {
+        size_t size = kb > 0 ? (size_t)(kb < 64 ? 64 : kb) << 10 : sizes[r];
+        F.glBindBuffer(GL_COPY_WRITE_BUFFER, bufs[r]);
+        F.glBufferStorageEXT(GL_COPY_WRITE_BUFFER, (GLsizeiptr)size, NULL, flags);
+        if (F.glGetError() != GL_NO_ERROR) {
+            why = "glBufferStorageEXT failed";
+            break;
+        }
+        g->sr_map[r] = F.glMapBufferRange(GL_COPY_WRITE_BUFFER, 0, (GLsizeiptr)size, flags);
+        if (!g->sr_map[r]) {
+            why = "the persistent map failed";
+            break;
+        }
+        gx_ring_init(&g->sr[r], size);
+    }
+    if (why) {
+        stream_storage_destroy(g, bufs);
+        gl_clear_errors(&g->f);
+    }
+    F.glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    return why;
+}
+
+static void stream_storage_log(const gx_gl *g)
+{
+    fprintf(stderr, "gx: stream storage: %llu fence waits (%.1f ms in all, longest %.1f ms), wraps vbo %llu ebo %llu "
+                    "ubo %llu, %llu uploads too large for a ring\n",
+            (unsigned long long)g->sr_waits, (double)g->sr_wait_ns / 1e6, (double)g->sr_wait_max_ns / 1e6,
+            (unsigned long long)g->sr[0].wraps, (unsigned long long)g->sr[1].wraps,
+            (unsigned long long)g->sr[2].wraps, (unsigned long long)g->sr_oversize);
+}
+
+/* The draw reading this flush's uploads is issued: fences for the rings that advanced far enough, and the buffers of
+ * oversized uploads go (GL keeps their storage until the GPU has read it). */
+static void stream_after_draw(gx_state *gx)
+{
+    gx_gl *g = gx->gl;
+    gx->stats.stream_storage = g->stream == STREAM_STORAGE;
+    if (g->stream != STREAM_STORAGE)
+        return;
+    for (unsigned r = 0; r < 3; r++) {
+        gx->stats.stream_wraps[r] = g->sr[r].wraps;
+        gx_ring_after_draw(&g->sr[r], &sr_ops, g);
+        if (g->sr_big[r]) {
+            F.glDeleteBuffers(1, &g->sr_big[r]);
+            g->sr_big[r] = 0;
+        }
+    }
+    gx->stats.stream_waits = g->sr_waits;
+    gx->stats.stream_wait_us = g->sr_wait_ns / 1000u;
+    gx->stats.stream_oversize = g->sr_oversize;
+}
+
+/* Streaming buffers (vbo, ebo, ubo). STREAM_STORAGE: a copy into the ring's persistent mapping, no GL call for the data
+ * at all, behind fences (gx_ring.h). The other modes: each upload goes after the previous one in a buffer that keeps
+ * its storage, and only a wrap orphans it (glBufferData once). A glBufferData of a new size at every draw made Adreno
+ * drivers allocate GPU memory per draw (an ioctl each): Prince of Persia: The Two Thrones fell to 13 % in 3D scenes on
+ * the Fold8. The ranges written after an orphan were never handed to the GPU, so they are mapped unsynchronised, without
  * GL_MAP_INVALIDATE_RANGE_BIT: with it, the Fold8's Adreno driver still allocated and copied on every map (2 % in the
  * same scene, 83 % without). RECOMP_GC_GX_STREAM=mapinv / sub keep the other ways for comparison. Returns the offset. */
 static size_t ring_put(gx_gl *g, unsigned r, GLuint buf, GLenum target, const void *data, size_t n, size_t align)
 {
+    if (g->stream == STREAM_STORAGE && g->egl.eglGetCurrentContext() != g->sr_ctx) {
+        /* The mappings died with their context: never write through them. Plain buffers from here on. */
+        fprintf(stderr, "gx: buffer streaming: the GL context changed, storage rings dropped, now map\n");
+        const GLuint bufs[3] = {g->vbo, g->ebo, g->ubo};
+        stream_storage_destroy(g, bufs);
+        g->stream = STREAM_MAP;
+    }
+    if (g->stream == STREAM_STORAGE) {
+        gx_ring *ring = &g->sr[r];
+        if (!gx_ring_fits(ring, n)) {
+            F.glGenBuffers(1, &g->sr_big[r]);
+            F.glBindBuffer(target, g->sr_big[r]);
+            F.glBufferData(target, (GLsizeiptr)n, data, GL_STREAM_DRAW);
+            g->sr_oversize++;
+            return 0;
+        }
+        size_t off = (size_t)gx_ring_reserve(ring, &sr_ops, g, n, align);
+        F.glBindBuffer(target, buf);
+        memcpy(g->sr_map[r] + off, data, n);
+        __atomic_thread_fence(__ATOMIC_RELEASE); /* the bytes are out before the draw that reads them is issued */
+        return off;
+    }
     size_t off = (g->ring_off[r] + align - 1) / align * align;
     F.glBindBuffer(target, buf);
     if (n > g->ring_size[r] || off + n > g->ring_size[r]) {
@@ -923,10 +1156,10 @@ static size_t ring_put(gx_gl *g, unsigned r, GLuint buf, GLenum target, const vo
         off = 0;
     }
     void *p = NULL;
-    if (g->stream < 2)
+    if (g->stream != STREAM_SUB)
         p = F.glMapBufferRange(target, (GLintptr)off, (GLsizeiptr)n,
                                GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT |
-                                   (g->stream == 1 ? GL_MAP_INVALIDATE_RANGE_BIT : 0));
+                                   (g->stream == STREAM_MAPINV ? GL_MAP_INVALIDATE_RANGE_BIT : 0));
     if (p) {
         memcpy(p, data, n);
         F.glUnmapBuffer(target);
@@ -1067,6 +1300,7 @@ void gx_gl_flush(gx_state *gx)
     }
     size_t io = ring_put(g, 1, g->ebo, GL_ELEMENT_ARRAY_BUFFER, g->bi, (size_t)g->ni * 4, 4);
     F.glDrawElements(GL_TRIANGLES, (GLsizei)g->ni, GL_UNSIGNED_INT, (const void *)io);
+    stream_after_draw(gx);
     gx->stats.batches++;
     if (uber)
         gx->stats.uber_draws++;
@@ -1322,6 +1556,7 @@ static void copy_pass(gx_state *gx, GLuint dst, int ow, int oh, const float src[
     const uint32_t *bp = gx->bp;
     F.glBindFramebuffer(GL_FRAMEBUFFER, g->copy_fbo);
     F.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst, 0);
+    g->copy_att = dst;
     F.glViewport(0, 0, ow, oh);
     F.glDisable(GL_SCISSOR_TEST);
     F.glDisable(GL_DEPTH_TEST);
@@ -1390,6 +1625,146 @@ static void efb_clear_rect(gx_state *gx, int x, int y, int w, int h)
     g->peek_color_ok = g->peek_z_ok = false;
 }
 
+/* The GL state the XFB_COPY_DRAW pass changes, put back after it. */
+typedef struct gl_saved {
+    GLint draw_fb, read_fb, prog, vao, viewport[4], scissor[4], active, tex0, sampler0;
+    GLboolean scissor_on, depth_on, blend_on, cull_on, dither_on, mask[4];
+} gl_saved;
+
+static void gl_save(gx_gl *g, gl_saved *s)
+{
+    F.glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &s->draw_fb);
+    F.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &s->read_fb);
+    F.glGetIntegerv(GL_CURRENT_PROGRAM, &s->prog);
+    F.glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &s->vao);
+    F.glGetIntegerv(GL_VIEWPORT, s->viewport);
+    F.glGetIntegerv(GL_SCISSOR_BOX, s->scissor);
+    F.glGetIntegerv(GL_ACTIVE_TEXTURE, &s->active);
+    F.glActiveTexture(GL_TEXTURE0);
+    F.glGetIntegerv(GL_TEXTURE_BINDING_2D, &s->tex0);
+    F.glGetIntegerv(GL_SAMPLER_BINDING, &s->sampler0);
+    F.glGetBooleanv(GL_COLOR_WRITEMASK, s->mask);
+    s->scissor_on = F.glIsEnabled(GL_SCISSOR_TEST);
+    s->depth_on = F.glIsEnabled(GL_DEPTH_TEST);
+    s->blend_on = F.glIsEnabled(GL_BLEND);
+    s->cull_on = F.glIsEnabled(GL_CULL_FACE);
+    s->dither_on = F.glIsEnabled(GL_DITHER);
+}
+
+static void gl_set(gx_gl *g, GLenum cap, GLboolean on)
+{
+    if (on)
+        F.glEnable(cap);
+    else
+        F.glDisable(cap);
+}
+
+static void gl_restore(gx_gl *g, const gl_saved *s)
+{
+    F.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)s->draw_fb);
+    F.glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)s->read_fb);
+    F.glUseProgram((GLuint)s->prog);
+    F.glBindVertexArray((GLuint)s->vao);
+    F.glViewport(s->viewport[0], s->viewport[1], s->viewport[2], s->viewport[3]);
+    F.glScissor(s->scissor[0], s->scissor[1], s->scissor[2], s->scissor[3]);
+    gl_set(g, GL_SCISSOR_TEST, s->scissor_on);
+    gl_set(g, GL_DEPTH_TEST, s->depth_on);
+    gl_set(g, GL_BLEND, s->blend_on);
+    gl_set(g, GL_CULL_FACE, s->cull_on);
+    gl_set(g, GL_DITHER, s->dither_on);
+    F.glColorMask(s->mask[0], s->mask[1], s->mask[2], s->mask[3]);
+    F.glActiveTexture(GL_TEXTURE0);
+    F.glBindTexture(GL_TEXTURE_2D, (GLuint)s->tex0);
+    F.glBindSampler(0, (GLuint)s->sampler0);
+    F.glActiveTexture((GLenum)s->active);
+}
+
+/* RECOMP_GC_GX_XFB_COPY=fbo: the slot's own framebuffer, made once; 0 when the driver refuses it. */
+static GLuint xfb_slot_fbo(gx_gl *g, unsigned slot)
+{
+    if (!g->xfb[slot].fbo) {
+        F.glGenFramebuffers(1, &g->xfb[slot].fbo);
+        F.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g->xfb[slot].fbo);
+        F.glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g->xfb[slot].tex, 0);
+        if (F.glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            fprintf(stderr, "gx: XFB slot %u: its framebuffer is incomplete, copying through the shared one\n", slot);
+            F.glDeleteFramebuffers(1, &g->xfb[slot].fbo);
+            g->xfb[slot].fbo = 0;
+        }
+    }
+    return g->xfb[slot].fbo;
+}
+
+/* RECOMP_GC_GX_XFB_COPY=draw: what the blit does, as a draw through copy_fbo: texel for texel, the picture top-down,
+ * and the slot's texels whose source lies outside the EFB left as they are. */
+static void xfb_draw(gx_gl *g, unsigned slot, int x, int y, int w, int h)
+{
+    int s = g->scale, ox = x * s, oy = (GX_EFB_H - y) * s - 1;
+    int x0 = ox < 0 ? -ox : 0, x1 = w * s < GX_EFB_W * s - ox ? w * s : GX_EFB_W * s - ox;
+    int y0 = oy >= GX_EFB_H * s ? oy - GX_EFB_H * s + 1 : 0, y1 = h * s < oy + 1 ? h * s : oy + 1;
+    gl_saved sv;
+    gl_save(g, &sv);
+    F.glBindFramebuffer(GL_FRAMEBUFFER, g->copy_fbo);
+    F.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g->xfb[slot].tex, 0);
+    g->copy_att = g->xfb[slot].tex;
+    if (x1 > x0 && y1 > y0) {
+        F.glViewport(0, 0, w * s, h * s);
+        F.glEnable(GL_SCISSOR_TEST);
+        F.glScissor(x0, y0, x1 - x0, y1 - y0);
+        F.glDisable(GL_DEPTH_TEST);
+        F.glDisable(GL_BLEND);
+        F.glDisable(GL_CULL_FACE);
+        F.glDisable(GL_DITHER);
+        F.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        F.glUseProgram(g->xfb_draw_prog);
+        F.glActiveTexture(GL_TEXTURE0);
+        F.glBindTexture(GL_TEXTURE_2D, g->efb_color);
+        F.glBindSampler(0, 0);
+        GLint off[4] = {ox, oy, 0, 0};
+        F.glUniform1i(g->xd_color, 0);
+        F.glUniform4iv(g->xd_off, 1, off);
+        F.glBindVertexArray(g->empty_vao);
+        F.glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    gl_restore(g, &sv);
+}
+
+/* RECOMP_GC_GX_XFB_DIAG=2: a checksum of all of a slot's texels, read through a framebuffer that only this uses. */
+static uint32_t xfb_slot_sum(gx_gl *g, unsigned slot)
+{
+    size_t n = (size_t)g->xfb[slot].w * (size_t)g->xfb[slot].h;
+    if (!g->xfb[slot].tex || !n)
+        return 0;
+    if (n * 4 > g->diag_cap) {
+        uint8_t *p = realloc(g->diag_px, n * 4);
+        if (!p)
+            return 0;
+        g->diag_px = p;
+        g->diag_cap = n * 4;
+    }
+    GLint read_fb = 0, pack = 4;
+    F.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fb);
+    F.glGetIntegerv(GL_PACK_ALIGNMENT, &pack);
+    if (!g->xfb[slot].diag_fbo) {
+        F.glGenFramebuffers(1, &g->xfb[slot].diag_fbo);
+        F.glBindFramebuffer(GL_READ_FRAMEBUFFER, g->xfb[slot].diag_fbo);
+        F.glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g->xfb[slot].tex, 0);
+    } else {
+        F.glBindFramebuffer(GL_READ_FRAMEBUFFER, g->xfb[slot].diag_fbo);
+    }
+    F.glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    F.glReadPixels(0, 0, g->xfb[slot].w, g->xfb[slot].h, GL_RGBA, GL_UNSIGNED_BYTE, g->diag_px);
+    F.glPixelStorei(GL_PACK_ALIGNMENT, pack);
+    F.glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read_fb);
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n * 4; i += 4) {
+        uint32_t v;
+        memcpy(&v, g->diag_px + i, 4);
+        h = (h ^ v) * 16777619u;
+    }
+    return h;
+}
+
 static void xfb_keep(gx_state *gx, uint32_t addr, uint32_t stride, int lines, int x, int y, int w, int h)
 {
     gx_gl *g = gx->gl;
@@ -1415,14 +1790,30 @@ static void xfb_keep(gx_state *gx, uint32_t addr, uint32_t stride, int lines, in
     g->xfb[slot].lines = (uint32_t)lines;
     g->xfb[slot].w = w * s;
     g->xfb[slot].h = h * s;
+    g->xfb[slot].copies++;
     /* the picture top-down in the texture (row 0 = top), as the RAM XFB is */
-    F.glBindFramebuffer(GL_READ_FRAMEBUFFER, g->efb_fbo);
-    F.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g->copy_fbo);
-    F.glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g->xfb[slot].tex, 0);
-    F.glDisable(GL_SCISSOR_TEST);
-    int gy0 = (GX_EFB_H - y - h) * s, gy1 = (GX_EFB_H - y) * s;
-    F.glBlitFramebuffer(x * s, gy0, (x + w) * s, gy1, 0, h * s, w * s, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    if (g->xfb_copy == XFB_COPY_DRAW) {
+        xfb_draw(g, slot, x, y, w, h);
+        F.glDisable(GL_SCISSOR_TEST); /* as the blit leaves it */
+    } else {
+        GLuint own = g->xfb_copy == XFB_COPY_FBO ? xfb_slot_fbo(g, slot) : 0;
+        F.glBindFramebuffer(GL_READ_FRAMEBUFFER, g->efb_fbo);
+        if (own) {
+            F.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, own);
+        } else {
+            F.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g->copy_fbo);
+            F.glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g->xfb[slot].tex, 0);
+            g->copy_att = g->xfb[slot].tex;
+        }
+        F.glDisable(GL_SCISSOR_TEST);
+        int gy0 = (GX_EFB_H - y - h) * s, gy1 = (GX_EFB_H - y) * s;
+        F.glBlitFramebuffer(x * s, gy0, (x + w) * s, gy1, 0, h * s, w * s, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        if (g->xfb_copy == XFB_COPY_FLUSH)
+            F.glFlush();
+    }
     F.glBindFramebuffer(GL_FRAMEBUFFER, g->efb_fbo);
+    if (g->xfb_diag >= 2)
+        g->xfb[slot].copy_sum = xfb_slot_sum(g, slot);
 }
 
 static GLuint scratch_tex(gx_gl *g, int w, int h)
@@ -1628,6 +2019,8 @@ void gx_gl_frame(gx_state *gx)
     if (!g)
         return;
     gx_gl_flush(gx);
+    if (g->stream == STREAM_STORAGE && gx->field_count % STREAM_LOG_FIELDS == 0)
+        stream_storage_log(g);
     if (gx->field_count % 60 == 0) { /* drop textures unused for a while */
         for (unsigned i = 0; i < TEX_BUCKETS; i++) {
             tex_entry **pp = &g->texs[i];
@@ -1673,29 +2066,147 @@ void gx_gl_state_loaded(gx_state *gx)
     g->peek_color_ok = g->peek_z_ok = false;
 }
 
-unsigned gx_xfb_texture(gx_state *gx, uint32_t addr, int *w, int *h)
+/* The slot holding the picture the VI scans at addr, or -1. *offset: found by the VI-offset rule, not at its address. */
+static int xfb_lookup(const gx_gl *g, uint32_t addr, bool *offset)
 {
-    gx_gl *g = gx->gl;
-    if (!g)
-        return 0;
     addr &= 0x3FFFFFFFu;
+    *offset = false;
     for (unsigned i = 0; i < 4; i++)
-        if (g->xfb[i].tex && g->xfb[i].addr == addr) {
-            *w = g->xfb[i].w;
-            *h = g->xfb[i].h;
-            return g->xfb[i].tex;
-        }
+        if (g->xfb[i].tex && g->xfb[i].addr == addr)
+            return (int)i;
     /* the VI may start a few lines into the copy (Prince of Persia: The Two Thrones scans from the copy's second
      * line): that copy's picture, a line or two off, rather than the XFB in RAM */
     for (unsigned i = 0; i < 4; i++) {
         uint32_t off = addr - g->xfb[i].addr, st = g->xfb[i].stride;
         if (g->xfb[i].tex && st && addr > g->xfb[i].addr && off % st == 0 && off / st <= g->xfb[i].lines / 32) {
-            *w = g->xfb[i].w;
-            *h = g->xfb[i].h;
-            return g->xfb[i].tex;
+            *offset = true;
+            return (int)i;
         }
     }
-    return 0;
+    return -1;
+}
+
+unsigned gx_xfb_texture(gx_state *gx, uint32_t addr, int *w, int *h)
+{
+    gx_gl *g = gx->gl;
+    if (!g)
+        return 0;
+    /* the window presents next: it must not sample through the last draw's samplers (bind_map sets them per draw) */
+    F.glBindSampler(0, 0);
+    F.glBindSampler(1, 0);
+    bool offset;
+    int i = xfb_lookup(g, addr, &offset);
+    if (i < 0)
+        return 0;
+    *w = g->xfb[i].w;
+    *h = g->xfb[i].h;
+    return g->xfb[i].tex;
+}
+
+/* ---- XFB diagnostics (RECOMP_GC_GX_XFB_DIAG) ---- */
+
+static void *diag_thread_main(void *arg)
+{
+    gx_gl *g = arg;
+    char line[XFB_DIAG_LINE];
+    pthread_mutex_lock(&g->diag_mu);
+    for (;;) {
+        while (!g->diag_count && !g->diag_quit)
+            pthread_cond_wait(&g->diag_cv, &g->diag_mu);
+        if (!g->diag_count)
+            break;
+        memcpy(line, g->diag_lines[g->diag_head], sizeof line);
+        g->diag_head = (g->diag_head + 1) % XFB_DIAG_LINES;
+        g->diag_count--;
+        pthread_mutex_unlock(&g->diag_mu);
+        fwrite(line, 1, strlen(line), stderr); /* one write: the line stays whole in the log pipe */
+        pthread_mutex_lock(&g->diag_mu);
+    }
+    pthread_mutex_unlock(&g->diag_mu);
+    return NULL;
+}
+
+static void diag_start(gx_gl *g)
+{
+    g->diag_lines = malloc(XFB_DIAG_LINES * XFB_DIAG_LINE);
+    pthread_mutex_init(&g->diag_mu, NULL);
+    pthread_cond_init(&g->diag_cv, NULL);
+    g->diag_thread_ok = g->diag_lines && pthread_create(&g->diag_thread, NULL, diag_thread_main, g) == 0;
+    if (!g->diag_thread_ok) {
+        fprintf(stderr, "gx: XFB diagnostics: no log thread, off\n");
+        g->xfb_diag = 0;
+    }
+}
+
+static void diag_stop(gx_gl *g)
+{
+    if (g->diag_thread_ok) {
+        pthread_mutex_lock(&g->diag_mu);
+        g->diag_quit = true;
+        pthread_cond_signal(&g->diag_cv);
+        pthread_mutex_unlock(&g->diag_mu);
+        pthread_join(g->diag_thread, NULL);
+        g->diag_thread_ok = false;
+    }
+    free(g->diag_lines);
+    g->diag_lines = NULL;
+    free(g->diag_px);
+    g->diag_px = NULL;
+}
+
+bool gx_xfb_diag_enabled(const gx_state *gx)
+{
+    return gx->gl && gx->gl->xfb_diag > 0;
+}
+
+void gx_xfb_diag_field(gx_state *gx, uint32_t vi_addr, const char *path, unsigned presents, uint64_t busy_ns)
+{
+    gx_gl *g = gx->gl;
+    if (!g || !g->xfb_diag)
+        return;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+    uint64_t dur = g->diag_last_ns ? now - g->diag_last_ns : 0;
+    g->diag_last_ns = now;
+    bool offset;
+    int slot = xfb_lookup(g, vi_addr, &offset), att = -1;
+    for (int i = 0; i < 4; i++)
+        if (g->xfb[i].tex && g->xfb[i].tex == g->copy_att)
+            att = i;
+    char line[XFB_DIAG_LINE], sl[4] = "-", at[4] = "-";
+    if (slot >= 0)
+        snprintf(sl, sizeof sl, "%d", slot);
+    if (att >= 0)
+        snprintf(at, sizeof at, "%d", att);
+    int n = snprintf(line, sizeof line,
+                     "gx: xfb-diag field=%llu vi=%08X slot=%s match=%s path=%s presents=%u dur_us=%llu busy_us=%llu "
+                     "copies=%u att=%s",
+                     (unsigned long long)gx->field_count, vi_addr, sl, slot < 0 ? "miss" : offset ? "offset" : "exact",
+                     path, presents, (unsigned long long)(dur / 1000), (unsigned long long)(busy_ns / 1000),
+                     slot >= 0 ? g->xfb[slot].copies : 0, at);
+    /* now / right after the slot's last copy */
+    for (unsigned i = 0; g->xfb_diag >= 2 && i < 4 && n > 0 && (size_t)n < sizeof line; i++)
+        if (g->xfb[i].tex)
+            n += snprintf(line + n, sizeof line - (size_t)n, " sum%u=%08X/%08X", i, xfb_slot_sum(g, i),
+                          g->xfb[i].copy_sum);
+    pthread_mutex_lock(&g->diag_mu);
+    if (g->diag_count == XFB_DIAG_LINES) {
+        g->diag_dropped++;
+    } else {
+        if (g->diag_dropped && n > 0 && (size_t)n < sizeof line) {
+            n += snprintf(line + n, sizeof line - (size_t)n, " dropped=%u", g->diag_dropped);
+            g->diag_dropped = 0;
+        }
+        if (n < 0 || (size_t)n > sizeof line - 2)
+            n = (int)sizeof line - 2;
+        line[n] = '\n';
+        line[n + 1] = 0;
+        memcpy(g->diag_lines[(g->diag_head + g->diag_count) % XFB_DIAG_LINES], line, (size_t)n + 2);
+        g->diag_count++;
+        pthread_cond_signal(&g->diag_cv);
+    }
+    pthread_mutex_unlock(&g->diag_mu);
 }
 
 /* ---- attach / detach ---- */
@@ -1804,9 +2315,36 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     F.glGenBuffers(1, &g->ebo);
     F.glGenBuffers(1, &g->ubo);
     {
+        /* Unset: persistent rings where the driver has them, else unsynchronised maps. */
         const char *sm = getenv("RECOMP_GC_GX_STREAM");
-        g->stream = sm && !strcmp(sm, "mapinv") ? 1 : sm && !strcmp(sm, "sub") ? 2 : 0;
-        fprintf(stderr, "gx: buffer streaming: %s\n", g->stream == 1 ? "mapinv" : g->stream == 2 ? "sub" : "map");
+        int want = -1;
+        if (sm && *sm) {
+            for (int m = 0; m < 4; m++)
+                if (!strcmp(sm, stream_names[m]))
+                    want = m;
+            if (want < 0)
+                fprintf(stderr, "gx: RECOMP_GC_GX_STREAM=%s is not a mode (storage, map, mapinv, sub)\n", sm);
+        }
+        g->stream = want < 0 ? STREAM_MAP : want;
+        if (want < 0 || want == STREAM_STORAGE) {
+            const char *why = stream_storage_create(g);
+            if (!why) {
+                g->stream = STREAM_STORAGE;
+            } else {
+                g->stream = STREAM_MAP;
+                if (want == STREAM_STORAGE)
+                    fprintf(stderr, "gx: buffer streaming: storage requested but unavailable (%s), falling back to map\n",
+                            why);
+                /* a failed attempt may have made storage immutable: the other modes need fresh buffers */
+                F.glDeleteBuffers(1, &g->vbo);
+                F.glDeleteBuffers(1, &g->ebo);
+                F.glDeleteBuffers(1, &g->ubo);
+                F.glGenBuffers(1, &g->vbo);
+                F.glGenBuffers(1, &g->ebo);
+                F.glGenBuffers(1, &g->ubo);
+            }
+        }
+        fprintf(stderr, "gx: buffer streaming: %s\n", stream_names[g->stream]);
     }
     g->ubo_align = 256;
     F.glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &g->ubo_align);
@@ -1851,6 +2389,50 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     g->cu_filt = F.glGetUniformLocation(g->copy_prog, "u_filt");
     g->cu_color = F.glGetUniformLocation(g->copy_prog, "u_color");
     g->cu_depth = F.glGetUniformLocation(g->copy_prog, "u_depth");
+    /* how copies reach the XFB slots, and the per-field diagnostics (the flicker on Adreno 840) */
+    {
+        const char *cm = getenv("RECOMP_GC_GX_XFB_COPY");
+        g->xfb_copy = cm && !strcmp(cm, "blit") ? XFB_COPY_BLIT : cm && !strcmp(cm, "fbo") ? XFB_COPY_FBO
+                      : cm && !strcmp(cm, "draw") ? XFB_COPY_DRAW : XFB_COPY_FLUSH;
+        if (cm && *cm && g->xfb_copy == XFB_COPY_FLUSH && strcmp(cm, "flush"))
+            fprintf(stderr, "gx: RECOMP_GC_GX_XFB_COPY=%s is not a mode (blit, flush, fbo, draw)\n", cm);
+        if (g->xfb_copy == XFB_COPY_DRAW) {
+            static const char xd_fs[] =
+                "#version 300 es\n"
+                "precision highp float;\n"
+                "precision highp int;\n"
+                "uniform highp sampler2D u_color;\n"
+                "uniform ivec4 u_off;\n"
+                "out vec4 o_color;\n"
+                "void main() {\n"
+                "  ivec2 o = ivec2(floor(gl_FragCoord.xy));\n"
+                "  o_color = texelFetch(u_color, ivec2(u_off.x + o.x, u_off.y - o.y), 0);\n"
+                "}\n";
+            GLuint xv = compile_shader(&g->f, GL_VERTEX_SHADER, copy_vs, log, sizeof log);
+            GLuint xf = xv ? compile_shader(&g->f, GL_FRAGMENT_SHADER, xd_fs, log, sizeof log) : 0;
+            g->xfb_draw_prog = xf ? link_program(&g->f, xv, xf, log, sizeof log) : 0;
+            if (xv)
+                F.glDeleteShader(xv);
+            if (xf)
+                F.glDeleteShader(xf);
+            if (g->xfb_draw_prog) {
+                g->xd_color = F.glGetUniformLocation(g->xfb_draw_prog, "u_color");
+                g->xd_off = F.glGetUniformLocation(g->xfb_draw_prog, "u_off");
+            } else {
+                fprintf(stderr, "gx: XFB copy shader failed, blitting: %s\n", log);
+                g->xfb_copy = XFB_COPY_BLIT;
+            }
+        }
+        static const char *const copy_names[] = {"blit", "flush", "fbo", "draw"};
+        fprintf(stderr, "gx: XFB copy: %s\n", copy_names[g->xfb_copy]);
+        int diag = env_int("RECOMP_GC_GX_XFB_DIAG", 0);
+        if (diag > 0) {
+            g->xfb_diag = diag;
+            diag_start(g);
+            if (g->xfb_diag)
+                fprintf(stderr, "gx: XFB diagnostics: level %d\n", g->xfb_diag);
+        }
+    }
     /* async compilation */
     if (g->async == 1) {
         worker_start(g);
@@ -1923,6 +2505,7 @@ void gx_gl_detach(gx_state *gx)
     if (!g)
         return;
     gx_gl_flush(gx);
+    diag_stop(g);
     worker_stop(g);
     gx_save_shader_list(gx);
     gx_save_program_cache(gx);
@@ -1940,9 +2523,16 @@ void gx_gl_detach(gx_state *gx)
             g->texs[i] = e->next;
             tex_free(g, e);
         }
-    for (unsigned i = 0; i < 4; i++)
+    for (unsigned i = 0; i < 4; i++) {
+        if (g->xfb[i].fbo)
+            F.glDeleteFramebuffers(1, &g->xfb[i].fbo);
+        if (g->xfb[i].diag_fbo)
+            F.glDeleteFramebuffers(1, &g->xfb[i].diag_fbo);
         if (g->xfb[i].tex)
             F.glDeleteTextures(1, &g->xfb[i].tex);
+    }
+    if (g->xfb_draw_prog)
+        F.glDeleteProgram(g->xfb_draw_prog);
     if (g->uber)
         F.glDeleteProgram(g->uber);
     if (g->copy_prog)
@@ -1954,6 +2544,11 @@ void gx_gl_detach(gx_state *gx)
     F.glDeleteTextures(1, &g->peek_tex);
     F.glDeleteTextures(1, &g->white_tex);
     F.glDeleteSamplers(8, g->samplers);
+    if (g->stream == STREAM_STORAGE) {
+        const GLuint bufs[3] = {g->vbo, g->ebo, g->ubo};
+        stream_storage_log(g);
+        stream_storage_destroy(g, bufs);
+    }
     F.glDeleteBuffers(1, &g->vbo);
     F.glDeleteBuffers(1, &g->ebo);
     F.glDeleteBuffers(1, &g->ubo);

@@ -910,16 +910,25 @@ started:;
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
             uint32_t xfb_at = gx_on ? gc_xfb_addr(m) : 0;
+            /* RECOMP_GC_GX_XFB_DIAG: how this field reached the window, and in how many swaps */
+            int xfb_diag = gx_on && gx_xfb_diag_enabled(gc_gx(m));
+            uint64_t swaps0 = 0, swaps1 = 0;
+            const char *shown;
+            if (xfb_diag)
+                host_window_stats(NULL, &swaps0);
             unsigned gx_tex = xfb_at ? gx_xfb_texture(gc_gx(m), xfb_at, &w, &h) : 0;
             if (gx_tex && host_window_present_texture(gx_tex, w, h, 1)) {
                 /* GX's picture of the XFB */
+                shown = "tex";
             } else if (gpu && gc_xfb_yuv(m, yuv, &w, &h) == 0) {
+                shown = gx_tex ? "tex>ram-gpu" : "ram-gpu";
                 if (!gc_yuv_gl_present(gpu, yuv, w, h)) {
                     fprintf(stderr, "gc: GPU YUV present failed, converting on the CPU from now on\n");
                     gc_yuv_gl_destroy(gpu);
                     gpu = NULL;
                 }
             } else if (!gpu && gc_xfb_rgb(m, rgb, &w, &h) == 0) {
+                shown = gx_tex ? "tex>ram-cpu" : "ram-cpu";
                 for (int i = 0; i < w * h; i++) {
                     rgba[4 * i] = rgb[3 * i];
                     rgba[4 * i + 1] = rgb[3 * i + 1];
@@ -929,7 +938,12 @@ started:;
                 host_window_present_rgba(rgba, w, h, w * 4);
             } else {
                 static const uint8_t black[4 * 4 * 4] = {0};
+                shown = gx_tex ? "tex>black" : "black";
                 host_window_present_rgba(black, 4, 3, 16); /* the VI shows nothing yet */
+            }
+            if (xfb_diag) {
+                host_window_stats(NULL, &swaps1);
+                gx_xfb_diag_field(gc_gx(m), xfb_at, shown, (unsigned)(swaps1 - swaps0), now_ns() - work_t0);
             }
             host_perf_stage(&hp, ST_PRESENT, now_ns() - tp);
             host_perf_shown(&hp, 1);

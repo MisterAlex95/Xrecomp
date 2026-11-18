@@ -1,7 +1,9 @@
 /* gx_batch_test -- the GLES renderer's draw batch (gx_gl.c) on a headless context: points and line strips become
  * quads (4 vertices, 6 indices each), and a draw that would not fit the batch's vertex buffer flushes it first.
  * gx_gl_draw used to plan 2 vertices per input vertex, so points drawn after a half-full batch of points wrote past
- * the end of the buffer (BATCH_V vertices). Exit 0, 1 on a failure, 77 without a GLES 3 context. */
+ * the end of the buffer (BATCH_V vertices). With RECOMP_GC_GX_STREAM=storage available, small rings must also wrap
+ * several times and take uploads larger than a ring. Exit 0, 1 on a failure, 77 without a GLES 3 context. */
+#define _GNU_SOURCE /* setenv */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +55,7 @@ static void draw(gx_state *gx, unsigned prim, unsigned n)
 int main(void)
 {
     static uint8_t ram[1 << 20];
+    setenv("GC_GX_STREAM_RING_KB", "256", 0);
     gx_state *gx = gx_create(ram, sizeof ram, irq, NULL);
     if (!gx) {
         printf("FAIL gx_create\n");
@@ -67,7 +70,8 @@ int main(void)
     gx_gl_options o;
     memset(&o, 0, sizeof o);
     o.scale = 1;
-    o.async_shaders = -1; /* the ubershader: nothing to compile per state */
+    o.async_shaders = 0; /* compiled on first use: the storage rings wait for these draws, and a software GL can take
+                          * minutes to run its first ubershader draw */
     if (gx_gl_attach(gx, &o)) {
         printf("skipped: the renderer does not attach on this context\n");
         gx_destroy(gx);
@@ -105,6 +109,26 @@ int main(void)
     draw(gx, 5, 65534);
     CHECK(batches(gx) == b0, "line lists flushed early: %llu", (unsigned long long)(batches(gx) - b0));
     gx_gl_flush(gx);
+
+    /* Every ring wraps several times: 4000 draws of 300 vertices (7200 bytes), 450 indices (1800), one uniform block. */
+    for (unsigned i = 0; i < 4000; i++) {
+        draw(gx, 7, 75);
+        gx_gl_flush(gx);
+    }
+    gx_stats st;
+    gx_get_stats(gx, &st);
+    if (st.stream_storage) {
+        for (unsigned r = 0; r < 3; r++)
+            CHECK(st.stream_wraps[r] >= 3, "storage ring %u wrapped %llu times", r,
+                  (unsigned long long)st.stream_wraps[r]);
+        CHECK(st.stream_oversize > 0, "no upload was larger than the 256 KB rings");
+        printf("storage: wraps %llu / %llu / %llu, %llu fence waits (%llu us), %llu oversized uploads\n",
+               (unsigned long long)st.stream_wraps[0], (unsigned long long)st.stream_wraps[1],
+               (unsigned long long)st.stream_wraps[2], (unsigned long long)st.stream_waits,
+               (unsigned long long)st.stream_wait_us, (unsigned long long)st.stream_oversize);
+    } else {
+        printf("storage: not available on this context, the other streaming mode was used\n");
+    }
 
     gx_gl_detach(gx);
     gx_destroy(gx);
