@@ -1,9 +1,11 @@
 """recomp_fp_round24 (x87 precision control 24, recomp_types.h) tests the
-range on the bits since XBA-273. Same results as the float compares it
-replaced, bit for bit: edge patterns around 0, FLT_MIN, FLT_MAX, the float
-subnormals, inf and NaN (both signs, neighbours one ulp either side), then
-random bit patterns and random values near the float range, compiled at -O0
-and -O2 against the old function kept here as the reference.
+range on the bits since XBA-273, and recomp_frndint rounds to nearest with
+roundeven on arm64. Same results as the code they replaced, bit for bit:
+edge patterns around 0, FLT_MIN, FLT_MAX, the float subnormals, inf and NaN
+(both signs, neighbours one ulp either side), halves and integers up to
+2^64, then random bit patterns and random values near the float range,
+compiled at -O0 and -O2 against the old functions kept here as the reference
+(frndint with the four rounding controls, fist at 16, 32 and 64 bits).
 """
 import os
 import shutil
@@ -32,6 +34,31 @@ static double ref_round24(double x) {
     return ldexp((double)(float)x, e);
 }
 
+/* recomp_frndint and recomp_fist before XBA-273, verbatim. */
+static double ref_frndint(double value, uint16_t control) {
+    double rounded;
+    if (!isfinite(value)) return value;
+    switch((control>>10)&3) {
+    case 1: rounded=floor(value); break;
+    case 2: rounded=ceil(value); break;
+    case 3: rounded=trunc(value); break;
+    default: {
+        double lo=floor(value), fraction=value-lo;
+        rounded=lo;
+        if(fraction>0.5 || (fraction==0.5 && fmod(lo,2.0)!=0.0)) rounded=lo+1.0;
+        break;
+    }
+    }
+    return rounded == 0.0 ? copysign(0.0, value) : rounded;
+}
+static int64_t ref_fist(double value, uint16_t control, unsigned bits) {
+    double rounded = ref_frndint(value, control);
+    double limit=ldexp(1.0,(int)bits-1);
+    if(!isfinite(rounded) || rounded < -limit || rounded >= limit)
+        return bits==64?INT64_MIN:-(INT64_C(1)<<(bits-1));
+    return (int64_t)rounded;
+}
+
 static uint64_t bits(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
 static double dbl(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
 static unsigned long long s_n, s_bad;
@@ -46,6 +73,22 @@ static void check(uint64_t u)
         if (s_bad++ < 10)
             printf("differs at %016llx: %016llx vs %016llx\n", (unsigned long long)u,
                    (unsigned long long)bits(a), (unsigned long long)bits(b));
+    }
+    {
+        unsigned rc;
+        for (rc = 0; rc < 4; rc++) {
+            uint16_t cw = (uint16_t)(0x027F | (rc << 10));
+            double fa = recomp_frndint(x, cw), fb = ref_frndint(x, cw);
+            if (bits(fa) != bits(fb) && !(fa != fa && fb != fb)) {
+                if (s_bad++ < 10)
+                    printf("frndint rc %u differs at %016llx\n", rc, (unsigned long long)u);
+            }
+            if (recomp_fist(x, cw, 16) != ref_fist(x, cw, 16) || recomp_fist(x, cw, 32) != ref_fist(x, cw, 32) ||
+                recomp_fist(x, cw, 64) != ref_fist(x, cw, 64)) {
+                if (s_bad++ < 10)
+                    printf("fist rc %u differs at %016llx\n", rc, (unsigned long long)u);
+            }
+        }
     }
 }
 
@@ -69,6 +112,12 @@ int main(void)
                 check((edges[i] + (uint64_t)(int64_t)d) ^ (sign ? 0x8000000000000000ull : 0));
     for (i = 0; i < 4000000u; i++)
         check(rnd());
+    for (i = 0; i < 2000000u; i++) {            /* halves, quarters and integers, small and up to 2^64 */
+        uint64_t r = rnd();
+        double v = (double)(int64_t)(r >> (r & 63)) / (double)(1u << (r >> 60 & 3));
+        check(bits(v));
+        check(bits(-v));
+    }
     for (i = 0; i < 4000000u; i++) {            /* exponents around the float range */
         uint64_t u = rnd();
         uint64_t e = 0x360u + (u >> 54) % 0x130u;

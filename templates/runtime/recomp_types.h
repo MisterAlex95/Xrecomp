@@ -932,9 +932,15 @@ static inline double recomp_frndint(double value, uint16_t control) {
     case 2: rounded=ceil(value); break;
     case 3: rounded=trunc(value); break;
     default: {
+#if defined(__aarch64__) && (defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 10))
+        /* Ties to even whatever the host's rounding mode: one frintn (XBA-273; the floor, compares and fmod below
+         * cost every fistp of a title some ten instructions). tools/recomp/test_fp_round24.py compares the two. */
+        rounded=__builtin_roundeven(value);
+#else
         double lo=floor(value), fraction=value-lo;
         rounded=lo;
         if(fraction>0.5 || (fraction==0.5 && fmod(lo,2.0)!=0.0)) rounded=lo+1.0;
+#endif
         break;
     }
     }
