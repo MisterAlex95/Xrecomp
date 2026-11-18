@@ -21,3 +21,4 @@ endfunction()
 
 enable_testing()
 posix_shim_test(posix_shim_rename)
+posix_shim_test(posix_shim_open)

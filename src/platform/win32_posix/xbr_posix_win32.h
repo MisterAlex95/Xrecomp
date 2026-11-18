@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +84,22 @@ static inline int xbr_rename(const char *from, const char *to)
     return -1;
 }
 #define rename(from, to) xbr_rename((from), (to))
+
+/* open is always binary: in the C runtime's default text mode a read stops at the first 0x1A and turns CR LF into LF,
+ * which truncates ROMs and disc images. An object-like macro, so that a struct member called open (recomp_pack.h's
+ * disc hook) is renamed at its declaration and at its calls alike. */
+static inline int xbr_open(const char *path, int flags, ...)
+{
+    int mode = 0;
+    if (flags & _O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = va_arg(ap, int);
+        va_end(ap);
+    }
+    return _open(path, flags | _O_BINARY, mode);
+}
+#define open xbr_open
 #endif
 
 /* sysconf(_SC_NPROCESSORS_ONLN) only. */
