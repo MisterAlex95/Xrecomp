@@ -1994,7 +1994,15 @@ What is there:
   from a thread with MSR[EE] clear), polled waits on the guest's dispatcher objects, virtual time (deterministic: runs
   repeat), reservations cleared at each switch (`stwcx.` after another thread ran fails, as on hardware). Real
   parallel hardware threads are a later step and a deliberate deviation tonight: lifted code only sees `xe_machine *`,
-  so per-host-thread machines need no re-lift. The HLE (`x360_kernel.c`, `x360_xam.c`, `x360_file.c`, `x360_gpu.c`,
+  so per-host-thread machines need no re-lift. `x360_interp.c` (XBA-283) is a Xenon interpreter with the lifter's semantics
+  (integer and 64-bit forms, branches, loads / stores, FPU, system registers; VMX / VMX128 in `x360_interp_vmx.inc`,
+  generated from `xenon.py` by `python3 -m x360_tools.gen_interp_vmx`, kept current by `test_gen_interp_vmx`): code
+  the pack does not hold is interpreted until it reaches lifted code again, its entry is recorded once (the
+  dispatcher's address unless an interpreted call returns there, and the targets of calls and tail calls the
+  interpreted code makes; not the inlined save / restore helpers, which the pack lists in `xe_rc_helpers`) and the run
+  goes on, so one run names every function a pack lacks (`--missed`, `discovered.txt`); `--stop-at-miss` /
+  `RECOMP_X360_INTERP=0` stop at the first, as before. Not modelled there: OV / SO of the OE forms (no title seen
+  uses them). The HLE (`x360_kernel.c`, `x360_xam.c`, `x360_file.c`, `x360_gpu.c`,
   `x360_crypt.c`, `x360_more.c`; ordinals from Xenia's export tables in `x360_exports.inc`, made by
   `x360_tools/gen_exports.py`; signatures and layouts checked against Xenia's kernel) covers every import of a shipped
   title's list (196 names, compared by name only): DbgPrint and the formatters, virtual / physical memory, pools and
