@@ -94,6 +94,17 @@ static void test_files(void)
     CHECK(r.frames == 4242 && r.thumb_w == 3 && r.thumb_h == 1 && back[0] == 1 && back[2] == 3);
     CHECK(n == sizeof blob && got && !memcmp(got, blob, n));
     free(got);
+    /* Written again over the same slot: the second state replaces the first. */
+    uint8_t blob2[100];
+    for (int i = 0; i < 100; i++)
+        blob2[i] = (uint8_t)(i * 11 + 1);
+    m.frames = 4243;
+    CHECK(recomp_states_write(path, &m, thumb, blob2, sizeof blob2) == RECOMP_STATE_OK);
+    got = NULL;
+    n = 0;
+    CHECK(recomp_states_read(path, &r, back, &got, &n) == RECOMP_STATE_OK);
+    CHECK(r.frames == 4243 && n == sizeof blob2 && got && !memcmp(got, blob2, n));
+    free(got);
     /* Header only. */
     CHECK(recomp_states_read(path, &r, NULL, NULL, NULL) == RECOMP_STATE_OK);
     /* saved_ms 0: now. */
