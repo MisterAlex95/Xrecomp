@@ -1700,17 +1700,25 @@ static inline bool kernel_pc(uint32_t pc)
  * when the time is up, wherever that falls; the machine is then exactly as step()'s loop leaves it there. */
 #define EXC_PC(i) (PS1_HLE_EXC + 4u * (uint32_t)(i)) /* KUSEG: the vector jumps to k0 = 0x00000C80 */
 
-static bool exc_intact(const ps1_machine *m)
+static bool exc_intact(ps1_machine *m)
 {
+    /* the words are compared again only after a write into their RAM pages (ram_gen: every store, DMA and state load
+     * moves them) */
+    const uint32_t g0 = m->ram_gen[0x80 >> PS1_RAM_PAGE_SHIFT], g1 = m->ram_gen[PS1_HLE_EXC >> PS1_RAM_PAGE_SHIFT];
+    if (m->exc_checked && g0 == m->exc_gen[0] && g1 == m->exc_gen[1])
+        return m->exc_ok;
     static const uint32_t vec[4] = {0x3C1A0000u, 0x275A0000u | PS1_HLE_EXC, 0x03400008u, 0}; /* lui, addiu, jr k0, nop */
     const uint32_t *code = ps1_hle_exc_code();
-    for (int i = 0; i < 4; i++)
-        if (rd32le(m->ram + 0x80 + 4 * i) != vec[i])
-            return false;
-    for (int i = 0; i < PS1_HLE_EXC_WORDS; i++)
-        if (rd32le(m->ram + PS1_HLE_EXC + 4 * i) != code[i])
-            return false;
-    return true;
+    bool ok = true;
+    for (int i = 0; i < 4 && ok; i++)
+        ok = rd32le(m->ram + 0x80 + 4 * i) == vec[i];
+    for (int i = 0; i < PS1_HLE_EXC_WORDS && ok; i++)
+        ok = rd32le(m->ram + PS1_HLE_EXC + 4 * i) == code[i];
+    m->exc_checked = true;
+    m->exc_gen[0] = g0;
+    m->exc_gen[1] = g1;
+    m->exc_ok = ok;
+    return ok;
 }
 
 static int exc_walk(ps1_machine *m)

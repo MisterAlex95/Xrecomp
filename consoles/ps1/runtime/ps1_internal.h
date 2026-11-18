@@ -255,6 +255,10 @@ struct ps1_machine {
     /* Host side only, after everything a save state holds (ps1_state.c saves the machine up to PS1_MACHINE_SAVED). */
     struct ps1_blocks *blocks; /* the interpreter's predecoded blocks (ps1_cpu.c, XBA-204), made on first use */
     bool interp_ref;           /* the reference interpreter loop (ps1_cpu_set_reference) */
+    /* ps1_cpu.c exc_intact (XBA-279): the HLE exception vector and handler were their words (exc_ok) when the write
+     * counters of their RAM pages were exc_gen */
+    bool exc_checked, exc_ok;
+    uint32_t exc_gen[2];
 };
 #define PS1_MACHINE_SAVED offsetof(ps1_machine, blocks)
 
