@@ -276,12 +276,12 @@ static uint64_t rw_audio(void *m)
 
 static size_t rw_size(void *m)
 {
-    return n64_state_size(m);
+    return n64_state_size_rewind(m);
 }
 
 static size_t rw_save(uint8_t *out, size_t cap, void *m)
 {
-    return n64_state_save(m, out, cap);
+    return n64_state_save_rewind(m, out, cap);
 }
 
 static int rw_load(const uint8_t *in, size_t n, void *m)

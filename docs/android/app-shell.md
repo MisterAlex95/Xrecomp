@@ -727,7 +727,7 @@ exist in the runtime and mean something to a player are offered. Graphics and Au
 | General › Enhancements (only for a game whose pack has `title_layer`: the toolkit has optional enhancements for it) | On (default), Off | none: `files/settings/enhancements_<TID>`; off, the game's next Prepare runs with `XBA_NO_TITLE_LAYER=1`, and Home offers Prepare again while the pack differs ([profiles.md](../technical/profiles.md#optional-by-construction), [prepare.md](prepare.md#packjson) `title_layer`) |
 | General › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
 | General › Controller rumble (all consoles) | On (default), Off | `RECOMP_RUMBLE=0` when off: no motor for the Xbox's emulated USB pad, the PS1 DualShock or the N64 Rumble Pak |
-| General › Rewind (all consoles; GBA, PS1, N64, GameCube only) | On (not N64 / GameCube) (default), On, Off | XBA-194: `RECOMP_REWIND=1` / `0`; the default writes nothing (on for the GBA and the PS1, off for the N64 and the GameCube (XBA-264), whose captures cost more: [consoles/README.md « Rewind »](../../consoles/README.md)). Hold the rewind hotkey (Select + L2) to go back; a game can have its own (an N64 game can turn it on) |
+| General › Rewind (all consoles; GBA, PS1, N64, GameCube only) | On (default), On, Off | XBA-194: `RECOMP_REWIND=1` / `0`; the default writes nothing (on for every console; the N64 and the GameCube since XBA-278, their costly captures spaced out: [consoles/README.md « Rewind »](../../consoles/README.md)). Hold the rewind hotkey (Select + L2) to go back; a game can have its own |
 | General › Rewind memory (all consoles; GBA, PS1, N64, GameCube only) | 32 MB, 64 MB (default), 128 MB, 256 MB | `RECOMP_REWIND_MB`: the history's cap, the oldest moments go first |
 | Graphics › Vertical sync (all consoles) | On (default), Off | `RECOMP_PRESENT_VSYNC=0` when off |
 | Graphics › Scale (all consoles; GBA, PS1, N64 only) | Keep shape (default), Whole pixels, Stretch | `RECOMP_SCALE=integer` / `stretch`; Keep shape writes nothing (the runtimes' `aspect`). A game can have its own ([Settings per console](#settings-per-console)) |
@@ -1241,9 +1241,9 @@ a [hotkey](#hotkeys) like the others: Controls › Hotkeys changes it, the in-ga
 frame shows one capture further back, without sound; letting go plays on from that moment (what came after is
 forgotten). The runtime keeps the history ([consoles/README.md « Rewind »](../../consoles/README.md)): a capture every
 2 frames on the GBA, 3 on the PS1, 4 on the N64, in at most **Settings › General › Rewind memory** (64 MB by default:
-a minute or more of a GBA game, tens of seconds of a busy PS1 game). **Settings › General › Rewind**: « On (not N64) »
-(default: the N64's captures cost more, 2 ms and up every 4 frames), On, Off; both rows are « All consoles » ones and
-a game can have its own in its Game settings (an N64 game can turn rewind on there). Frame generation starts a fresh
+a minute or more of a GBA game, tens of seconds of a busy PS1 game, a few seconds of a GameCube game). **Settings ›
+General › Rewind**: « On » (default, every console since XBA-278), On, Off; both rows are « All consoles » ones and
+a game can have its own in its Game settings. Frame generation starts a fresh
 history at each step. The quick save / load and the slots are unaffected: a slot loaded is a point the rewind can go
 back past, to before the load.
 

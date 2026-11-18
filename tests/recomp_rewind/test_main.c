@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int failures;
 #define CHECK(c)                                                                                                       \
@@ -204,7 +205,12 @@ static void test_config(void)
     recomp_rewind_config("ps1", &c);
     CHECK(c.on == 1 && c.interval == 3);
     recomp_rewind_config("n64", &c);
-    CHECK(c.on == 0 && c.interval == 4);
+    CHECK(c.on == 1 && c.interval == 4); /* XBA-278: on by default */
+    recomp_rewind_config("gc", &c);
+    CHECK(c.on == 1 && c.interval == 4 && c.budget == (size_t)64 << 20);
+    setenv("RECOMP_REWIND", "0", 1);
+    recomp_rewind_config("gc", &c);
+    CHECK(c.on == 0);
     setenv("RECOMP_REWIND", "1", 1);
     setenv("RECOMP_REWIND_MB", "128", 1);
     setenv("RECOMP_REWIND_FRAMES", "6", 1);
@@ -358,6 +364,215 @@ static void test_check(void)
     CHECK(recomp_rewind_check("fake", NULL, 200, 2, 10, (size_t)8 << 20) == 2);
 }
 
+/* ---- A GameCube-sized machine (XBA-278): what a capture costs at the size that kept N64 / GC rewind off ---------- */
+
+/* 24 MB of MEM1 and 16 MB of ARAM, most pages in use; a capture is saved as gc_state_save_rewind does it: the bitmap
+ * then every page, zero or not (a fixed layout: a page turning zero or non-zero shifts nothing). Each field rewrites
+ * the 600 KB picture (the XFB in MEM1, 640 x 480 x 2) and pokes a few hundred bytes elsewhere, now and then into a
+ * page that was all zero: what a game does between two captures. (A plain state leaves the zero pages out: such a
+ * page shifts the rest of the capture, and the delta covers it all.) */
+enum { BIG_PAGE = 4096, BIG_MEM1 = 24 << 20, BIG_ARAM = 16 << 20, BIG_XFB = 640 * 480 * 2, BIG_XFB_AT = 8 << 20 };
+typedef struct bigm {
+    uint8_t *mem; /* MEM1 then ARAM */
+    uint32_t field, keys, rng;
+} bigm;
+
+static size_t big_total(void)
+{
+    return (size_t)BIG_MEM1 + BIG_ARAM;
+}
+
+static size_t big_size(void *user)
+{
+    (void)user;
+    size_t pages = big_total() / BIG_PAGE;
+    return 16 + (pages + 7) / 8 + pages * BIG_PAGE;
+}
+
+static size_t big_save(uint8_t *out, size_t cap, void *user)
+{
+    bigm *b = user;
+    size_t need = big_size(user), pages = big_total() / BIG_PAGE, head = (pages + 7) / 8;
+    if (cap < need)
+        return 0;
+    memcpy(out, &b->field, 4);
+    memcpy(out + 4, &b->keys, 4);
+    memcpy(out + 8, &b->rng, 4);
+    memset(out + 12, 0, 4);
+    uint8_t *bits = out + 16, *p = bits + head;
+    memset(bits, 0xFF, head);
+    memcpy(p, b->mem, pages * BIG_PAGE);
+    p += pages * BIG_PAGE;
+    return (size_t)(p - out);
+}
+
+static int big_load(const uint8_t *in, size_t n, void *user)
+{
+    bigm *b = user;
+    size_t pages = big_total() / BIG_PAGE, head = (pages + 7) / 8;
+    if (n < 16 + head)
+        return -1;
+    memcpy(&b->field, in, 4);
+    memcpy(&b->keys, in + 4, 4);
+    memcpy(&b->rng, in + 8, 4);
+    const uint8_t *bits = in + 16, *p = bits + head;
+    for (size_t i = 0; i < pages; i++) {
+        uint8_t *dst = b->mem + i * BIG_PAGE;
+        if ((bits[i >> 3] >> (i & 7)) & 1) {
+            if ((size_t)(p + BIG_PAGE - in) > n)
+                return -1;
+            memcpy(dst, p, BIG_PAGE);
+            p += BIG_PAGE;
+        } else {
+            memset(dst, 0, BIG_PAGE);
+        }
+    }
+    return (size_t)(p - in) == n ? 0 : -1;
+}
+
+static void big_input(void *m, long f)
+{
+    ((bigm *)m)->keys = (uint32_t)(f / 7 * 2654435761u) >> 24;
+}
+
+static void big_run(void *m)
+{
+    bigm *b = m;
+    b->field++;
+    uint8_t *xfb = b->mem + BIG_XFB_AT;
+    for (size_t k = 0; k < BIG_XFB; k += 2) { /* a moving gradient: every pixel of the picture is new */
+        uint16_t v = (uint16_t)((k >> 1) + b->field * 3 + b->keys);
+        memcpy(xfb + k, &v, 2);
+    }
+    for (int k = 0; k < 256; k++) { /* game state: a few hundred scattered bytes in the pages in use */
+        b->rng = b->rng * 1664525u + 1013904223u + b->keys;
+        size_t at = (b->rng >> 4) % big_total();
+        if ((at / BIG_PAGE) % 8 == 7)
+            at -= BIG_PAGE;
+        b->mem[at] += (uint8_t)(k | 1);
+    }
+    if (b->field % 50 == 0) /* now and then a page that was all zero comes into use */
+        b->mem[((size_t)(b->field / 50 % 1000) * 8 + 7) * BIG_PAGE] = 1;
+}
+
+static uint64_t big_picture(void *m)
+{
+    bigm *b = m;
+    uint64_t h = 0xCBF29CE484222325ull;
+    const uint8_t *xfb = b->mem + BIG_XFB_AT;
+    for (size_t k = 0; k < BIG_XFB; k += 64)
+        h = (h ^ xfb[k] ^ ((uint64_t)xfb[k + 1] << 8)) * 0x100000001B3ull;
+    return h ^ b->rng;
+}
+
+static uint64_t big_audio(void *m)
+{
+    return ((bigm *)m)->rng;
+}
+
+static double now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
+/* The round trip at that size with the default 64 MB, and the history it keeps: before XBA-278 the coding buffer (a
+ * worst-case delta, 1.125 times the state) and the newest capture took the whole cap, so every push dropped all the
+ * history (1 capture held) and N64 / GameCube rewind stayed off by default. */
+static void test_big(void)
+{
+    static bigm b;
+    memset(&b, 0, sizeof b);
+    b.mem = malloc(big_total());
+    if (!b.mem) {
+        printf("recomp_rewind big: no memory, skipped\n");
+        return;
+    }
+    for (size_t i = 0; i < big_total(); i++) /* 7 pages in 8 in use */
+        b.mem[i] = (i / BIG_PAGE) % 8 == 7 ? 0 : (uint8_t)(i * 2654435761u >> 13);
+    b.rng = 99;
+    recomp_rewind_machine mc = {&b, big_input, big_run, big_picture, big_audio, big_size, big_save, big_load};
+    double t0 = now_ms();
+    CHECK(recomp_rewind_check("big", &mc, 240, 4, 30, (size_t)RECOMP_REWIND_MB_DEFAULT << 20) == 0);
+    printf("recomp_rewind big: %.0f ms for 240 fields and the round trip\n", now_ms() - t0);
+    /* The history it keeps in 64 MB: about 40 MB for the newest, the rest for deltas of ~600 KB (the picture). */
+    recomp_rewinder w;
+    recomp_rewind_cfg cfg = {1, 4, (size_t)RECOMP_REWIND_MB_DEFAULT << 20};
+    CHECK(recomp_rewinder_init(&w, "big", &cfg) == 1);
+    double cap_ms = 0, cap_max = 0;
+    for (int f = 0; f < 200; f++) {
+        recomp_rewinder_begin(&w, 0);
+        big_run(&b);
+        double a = now_ms();
+        if (recomp_rewinder_frame(&w, big_size, big_save, &b)) {
+            double d = now_ms() - a;
+            cap_ms += d;
+            cap_max = d > cap_max ? d : cap_max;
+        }
+    }
+    size_t held = recomp_rewind_count(w.ring), bytes = recomp_rewind_bytes(w.ring);
+    double per_frame = cap_ms / 200.0;
+    printf("recomp_rewind big: %llu captures of %.1f MB, %.2f ms each (max %.2f), one every %d fields at the end "
+           "(%.2f ms per field on average), %zu held in %.1f MB of 64 MB\n",
+           (unsigned long long)w.captures, (double)(w.cap_raw / (w.captures ? w.captures : 1)) / 1048576.0,
+           cap_ms / (double)(w.captures ? w.captures : 1), cap_max, w.interval, per_frame, held,
+           (double)bytes / 1048576.0);
+    CHECK(w.captures >= 200 / 60 && w.captures <= 50 && !w.failed);
+    CHECK(held >= 4 && held == w.captures - recomp_rewind_dropped(w.ring)); /* history, not one capture */
+    CHECK(bytes <= (size_t)RECOMP_REWIND_MB_DEFAULT << 20);
+    /* The spacing follows the cost: 1 ms per field on average, whatever this machine's speed (a capture costing more
+     * than 1 ms gets captures further apart than the setting's 4). */
+    CHECK(w.interval >= 4 && w.interval <= 60);
+    CHECK(w.cost_avg_ns < 4000000ull || w.interval > 4);
+    recomp_rewinder_free(&w);
+    free(b.mem);
+}
+
+/* XBA-278: the spacing follows a capture's cost, up when dear, down when cheap again, never under the setting. */
+static int s_cost_us;
+static size_t cost_size(void *m)
+{
+    (void)m;
+    return 64;
+}
+static size_t cost_save(uint8_t *out, size_t cap, void *m)
+{
+    (void)m;
+    if (cap < 64)
+        return 0;
+    struct timespec ts = {0, (long)s_cost_us * 1000};
+    nanosleep(&ts, NULL);
+    memset(out, s_cost_us & 0xFF, 64);
+    return 64;
+}
+
+static void test_spacing(void)
+{
+    recomp_rewinder w;
+    recomp_rewind_cfg cfg = {1, 3, (size_t)8 << 20};
+    CHECK(recomp_rewinder_init(&w, "cost", &cfg) == 1);
+    s_cost_us = 10;
+    for (int f = 0; f < 60; f++) {
+        recomp_rewinder_begin(&w, 0);
+        recomp_rewinder_frame(&w, cost_size, cost_save, NULL);
+    }
+    CHECK(w.interval == 3 && w.captures == 20); /* cheap: the setting's */
+    s_cost_us = 6000;                         /* 6 ms a capture: one every 6 frames or more */
+    for (int f = 0; f < 120; f++) {
+        recomp_rewinder_begin(&w, 0);
+        recomp_rewinder_frame(&w, cost_size, cost_save, NULL);
+    }
+    CHECK(w.interval >= 6 && w.interval <= 60);
+    s_cost_us = 10;                           /* cheap again: back to the setting */
+    for (int f = 0; f < 600; f++) {
+        recomp_rewinder_begin(&w, 0);
+        recomp_rewinder_frame(&w, cost_size, cost_save, NULL);
+    }
+    CHECK(w.interval == 3);
+    recomp_rewinder_free(&w);
+}
+
 int main(void)
 {
     test_codec();
@@ -366,6 +581,8 @@ int main(void)
     test_config();
     test_rewinder();
     test_check();
+    test_spacing();
+    test_big();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

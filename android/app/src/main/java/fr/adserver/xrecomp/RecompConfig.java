@@ -91,7 +91,7 @@ final class RecompConfig {
     static final String ENV_480P = "RECOMP_480P";
     /** « 0 » stops every pad motor (XBA-181: the Xbox's emulated USB pad, the PS1 DualShock, the N64 Rumble Pak). */
     static final String ENV_RUMBLE = "RECOMP_RUMBLE";
-    /** Rewind of the GBA, PS1 and N64 runtimes (XBA-194): « 1 » / « 0 », unset = on but for the N64; its memory in MB. */
+    /** Rewind of every console (XBA-194): « 1 » / « 0 », unset = on (XBA-278: the N64 and the GameCube too); its memory in MB. */
     static final String ENV_REWIND = "RECOMP_REWIND";
     static final String ENV_REWIND_MB = "RECOMP_REWIND_MB";
 
@@ -116,8 +116,8 @@ final class RecompConfig {
         new Option(Section.GAME, R.string.OPT_RUMBLE, R.string.OPT_RUMBLE_DETAIL, keys(ENV_RUMBLE),
                    new Choice(R.string.VAL_ON, (String)null), new Choice(R.string.VAL_OFF, "0")).shared(),
         // XBA-194: rewind for every console (src/platform/recomp_rewind.h; the Xbox's, xbox_state_service.c): on by
-        // default but for the N64 and the GameCube, whose captures cost more; the history's memory cap. A game can have
-        // its own (GameSettings).
+        // default (XBA-278: the N64 and the GameCube too, their captures spaced out when they cost more); the history's
+        // memory cap. A game can have its own (GameSettings).
         new Option(Section.GAME, R.string.OPT_REWIND, R.string.OPT_REWIND_DETAIL, keys(ENV_REWIND),
                    new Choice(R.string.VAL_REWIND_AUTO, (String)null), new Choice(R.string.VAL_ON, "1"),
                    new Choice(R.string.VAL_OFF, "0")).shared(),

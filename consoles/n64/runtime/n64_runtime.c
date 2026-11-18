@@ -22,8 +22,8 @@
  * the save files: after a load the cartridge and paks the game sees are the state's, written once the game writes
  * them.
  *
- * Rewind (XBA-194, recomp_rewind.h), the same way too, but off unless RECOMP_REWIND=1 (a capture is a 4 / 8 MB state,
- * and the Vulkan RDP drains its work for each): a capture every RECOMP_REWIND_FRAMES frames (4 by default), one step
+ * Rewind (XBA-194, recomp_rewind.h), the same way too, on unless RECOMP_REWIND=0 (XBA-278; a capture is a 4 / 8 MB
+ * state with every RDRAM page, and the Vulkan RDP drains its work for each): a capture every RECOMP_REWIND_FRAMES frames (4 by default), one step
  * back per shown frame while the hotkey is held (Back + left trigger, R), silent.
  *
  * Cheats (XBA-197, recomp_cheats.h): RECOMP_CHEATS_FILE's enabled GameShark codes run after every N64 frame under
@@ -782,12 +782,12 @@ static void state_loaded_locked(n64_machine *m)
 /* Rewind (XBA-194): a capture is the state alone (the picture is in RDRAM, n64_display). Under s_mu. */
 static size_t rewind_size(void *user)
 {
-    return n64_state_size((n64_machine *)user); /* only when a capture is due: it draws the RDP's work out */
+    return n64_state_size_rewind((n64_machine *)user); /* only when a capture is due: it draws the RDP's work out */
 }
 
 static size_t rewind_save(uint8_t *out, size_t cap, void *user)
 {
-    return n64_state_save((n64_machine *)user, out, cap);
+    return n64_state_save_rewind((n64_machine *)user, out, cap); /* XBA-278: a fixed layout */
 }
 
 static int rewind_load(const uint8_t *in, size_t n, void *user)
@@ -1316,7 +1316,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
     memset(s_hk_pad, 0, sizeof s_hk_pad);
     recomp_hotkeys_get(); /* RECOMP_HOTKEYS / _KEYS, logged once (XBA-190) */
     recomp_rewinder rw;
-    recomp_rewinder_init(&rw, "n64", NULL); /* RECOMP_REWIND (off by default), _MB, _FRAMES (XBA-194) */
+    recomp_rewinder_init(&rw, "n64", NULL); /* RECOMP_REWIND (on by default, XBA-278), _MB, _FRAMES (XBA-194) */
     recomp_cheats cheats;
     recomp_cheats_init(&cheats, RECOMP_CHEAT_N64);
     recomp_cheats_load_env(&cheats, "n64"); /* RECOMP_CHEATS_FILE (XBA-197) */

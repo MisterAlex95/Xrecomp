@@ -212,6 +212,11 @@ enum {
 };
 size_t n64_state_size(n64_machine *m);
 size_t n64_state_save(n64_machine *m, uint8_t *out, size_t cap);
+/* The same for rewind (XBA-278), loaded by n64_state_load as any state: every RDRAM page stored, zero or not, so two
+ * captures in a row keep one layout (a page turning zero or non-zero would shift the rest, and the ring's XOR delta
+ * would cover it all) and no page is tested. */
+size_t n64_state_size_rewind(n64_machine *m);
+size_t n64_state_save_rewind(n64_machine *m, uint8_t *out, size_t cap);
 int n64_state_check(n64_machine *m, const uint8_t *data, size_t size);
 int n64_state_load(n64_machine *m, const uint8_t *data, size_t size);
 
