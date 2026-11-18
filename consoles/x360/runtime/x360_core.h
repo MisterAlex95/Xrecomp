@@ -54,10 +54,11 @@ void x360_set_strict_imports(x360_machine *x, int on);
 void x360_set_shader_dump(x360_machine *x, const char *dir);
 void x360_gpu_opcode_histogram(x360_machine *x, FILE *out);
 /* Draw with the GLES 3.0 renderer (xenos_gl.c): shaders from SHADER_CACHE (GLSL ES by x360_tools.xenos_glsl, named
- * by microcode CRC), a width x height target, each swap written to FRAMES_DIR as PPM (NULL: none). -1 with a reason
- * when EGL / GLES cannot be had (the run goes on without drawing). x360_render_stats: one line, nothing when off. */
-int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, int width, int height,
-                      char *why, size_t why_n);
+ * by microcode CRC), a width x height target, the first max_frames swaps written to FRAMES_DIR as PPM (NULL: none).
+ * -1 with a reason when EGL / GLES cannot be had (the run goes on without drawing). x360_render_stats: one line,
+ * nothing when off. */
+int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, unsigned max_frames,
+                      int width, int height, char *why, size_t why_n);
 void x360_render_stats(x360_machine *x, FILE *out);
 /* The audio the title submits to the render driver (256-sample frames of 6 channels at 48 kHz), written to F as a
  * 32-bit float WAV, sizes filled in when the machine is freed. XMA is not decoded: XMA voices stay silent. */

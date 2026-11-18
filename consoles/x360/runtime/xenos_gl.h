@@ -61,8 +61,8 @@ void xenos_gl_destroy(xenos_gl *g);
 /* hooks for xenos_cp (draw / swap) */
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d);
 void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp);
-/* frames: each swap written as DIR/frame_NNNNN.ppm (NULL: none) */
-void xenos_gl_set_frames_dir(xenos_gl *g, const char *dir);
+/* frames: the first max_frames swaps written as DIR/frame_NNNNN.ppm (NULL: none); later ones are only counted */
+void xenos_gl_set_frames_dir(xenos_gl *g, const char *dir, unsigned max_frames);
 /* the last frame read back: RGBA, top row first */
 const uint8_t *xenos_gl_frame(const xenos_gl *g, int *width, int *height);
 void xenos_gl_get_stats(const xenos_gl *g, xenos_gl_stats *s);

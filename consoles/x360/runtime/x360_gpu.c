@@ -72,8 +72,8 @@ static void shader_loaded(void *ctx, int pixel, const uint32_t *code, uint32_t w
     }
 }
 
-int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, int width, int height,
-                      char *why, size_t why_n)
+int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, unsigned max_frames,
+                      int width, int height, char *why, size_t why_n)
 {
     struct x360_gpu *g = gpu_of(x);
     if (!g)
@@ -81,7 +81,7 @@ int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *fra
     xenos_gl *gl = xenos_gl_create(shader_cache, width, height, why, why_n);
     if (!gl)
         return -1;
-    xenos_gl_set_frames_dir(gl, frames_dir);
+    xenos_gl_set_frames_dir(gl, frames_dir, max_frames);
     if (x->log)
         xenos_gl_set_log(gl, x->log);
     g->gl = gl;

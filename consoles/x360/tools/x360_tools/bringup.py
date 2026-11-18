@@ -75,8 +75,10 @@ def render_run(a, run, plain, pack, shader_dir, say):
     shutil.rmtree(frames, ignore_errors=True)
     os.makedirs(frames)
     log = os.path.join(a.work, "render_log.txt")
-    cmd = [run, plain, "--pack", pack, "--insns", str(a.insns), "--render", shader_dir, "--frames", frames,
+    cmd = [run, plain, "--pack", pack, "--insns", str(a.insns), "--render", shader_dir,
            "--dbg", os.devnull, "--log", log]
+    if a.frames > 0:  # frames are written only when asked for, at most N (the disk is shared)
+        cmd += ["--frames", frames, "--frame-limit", str(a.frames)]
     if a.disc:
         cmd += ["--disc", a.disc]
     try:
@@ -88,10 +90,8 @@ def render_run(a, run, plain, pack, shader_dir, say):
         if line.startswith("render:") or "no renderer" in line:
             say("  %s" % line)
     names = sorted(os.listdir(frames))
-    for name in names[a.frames:]:
-        os.remove(os.path.join(frames, name))
     if names:
-        say("  frames kept: %d (in %s)" % (min(len(names), a.frames), frames))
+        say("  frames kept: %d (in %s)" % (len(names), frames))
 
 
 def shader_report(shader_dir):

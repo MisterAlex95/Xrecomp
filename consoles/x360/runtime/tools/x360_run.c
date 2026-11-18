@@ -2,15 +2,16 @@
  *
  *   x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--insns N] [--log FILE] [--dbg FILE]
  *            [--missed FILE] [--gpu-trace FILE] [--dump-shaders DIR] [--strict-imports]
- *            [--save-state FILE] [--load-state FILE] [--render SHADER_CACHE [--frames DIR] [--render-size WxH]]
+ *            [--save-state FILE] [--load-state FILE] [--render SHADER_CACHE [--frames DIR] [--frame-limit N] [--render-size WxH]]
  *            [--stats] [-v]
  *
  * TITLE.xex: an unencrypted XEX2, compression none or basic (python3 -m tools.xex FILE --plain OUT makes one).
  * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
  * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
  * cache: / hdd:. --render: draw with the GLES 3.0 renderer, shaders from SHADER_CACHE (bringup's WORKDIR/shaders),
- * each swap written to --frames DIR as PPM, a WxH target (default 1280x720). --audio FILE.wav: the audio the title
- * submits (render driver frames, 6 channels, 48 kHz, float; XMA voices silent). --save-state: write a save state when
+ * the first --frame-limit N (default 30) swaps written to --frames DIR as PPM, a WxH target (default 1280x720).
+ * --audio FILE.wav: the audio the title submits (render driver frames, 6 channels, 48 kHz, float; XMA voices
+ * silent). --save-state: write a save state when
  * the run stops (budget or end); --load-state: start from one. --pad-script FILE: timed controller states (see
  * load_pad_script). --seconds N: stop after N seconds of the title's virtual time (default 3600; 0: no limit).
  * --strict-imports: stop at the first import without an HLE (by name). Runs until the title ends or N instructions
@@ -83,6 +84,7 @@ int main(int argc, char **argv)
                *gpu_trace = NULL, *shaders = NULL, *save_state = NULL, *load_state = NULL, *pad_script = NULL,
                *render = NULL, *frames = NULL, *audio = NULL;
     int rw = 1280, rh = 720;
+    unsigned frame_limit = 30;
     unsigned long long insns = 2000000000ull;
     int stats = 0, verbose = 0, strict = 0;
     uint32_t seconds = 3600;
@@ -101,6 +103,8 @@ int main(int argc, char **argv)
             render = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             frames = argv[++i];
+        else if (!strcmp(argv[i], "--frame-limit") && i + 1 < argc)
+            frame_limit = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--render-size") && i + 1 < argc) {
             if (sscanf(argv[++i], "%dx%d", &rw, &rh) != 2) {
                 fprintf(stderr, "x360_run: --render-size WxH\n");
@@ -186,7 +190,7 @@ int main(int argc, char **argv)
     }
     if (audio_f)
         x360_set_audio_out(x, audio_f);
-    if (render && x360_set_renderer(x, render, frames, rw, rh, why, sizeof why))
+    if (render && x360_set_renderer(x, render, frames, frame_limit, rw, rh, why, sizeof why))
         fprintf(log, "x360_run: no renderer (%s): running without drawing\n", why);
     void *lib = dlopen(pack, RTLD_NOW | RTLD_LOCAL);
     if (!lib) {

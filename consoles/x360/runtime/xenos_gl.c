@@ -224,6 +224,7 @@ struct xenos_gl {
     int width, height;
     uint8_t *frame;
     char cache[512], frames[512];
+    unsigned max_frames;
     program progs[MAX_PROGRAMS];
     int nprogs;
     uint32_t missing[64];
@@ -396,9 +397,10 @@ void xenos_gl_destroy(xenos_gl *g)
     free(g);
 }
 
-void xenos_gl_set_frames_dir(xenos_gl *g, const char *dir)
+void xenos_gl_set_frames_dir(xenos_gl *g, const char *dir, unsigned max_frames)
 {
     snprintf(g->frames, sizeof g->frames, "%s", dir ? dir : "");
+    g->max_frames = max_frames;
 }
 
 void xenos_gl_set_log(xenos_gl *g, void *file)
@@ -1489,7 +1491,7 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
             memcpy(g->frame + row * y, tmp + row * (g->height - 1 - y), row);
         free(tmp);
     }
-    if (g->frames[0]) {
+    if (g->frames[0] && g->st.frames < g->max_frames) {
         char path[600];
         snprintf(path, sizeof path, "%s/frame_%05llu.ppm", g->frames, (unsigned long long)g->st.frames);
         FILE *f = fopen(path, "wb");
