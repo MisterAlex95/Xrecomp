@@ -13,3 +13,5 @@ set(XBE ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/conformance/test.xbe)
 # flipped inside a run.
 add_test(NAME kernel_events_off COMMAND kernel_events_test off ${XBE})
 add_test(NAME kernel_events_title_kevents COMMAND kernel_events_test title-kevents ${XBE})
+# Its own process: the first KeSetTimer starts the kernel's timer thread.
+add_test(NAME kernel_events_timers COMMAND kernel_events_test timers ${XBE})

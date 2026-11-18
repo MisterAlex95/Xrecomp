@@ -20,6 +20,10 @@
  *   3. SignalState written to 1 by the title counts: XDK code sets and clears
  *      events by writing the header, not only through the kernel.
  *   4. A notification event stays set across two waits; KeResetEvent clears it.
+ *
+ *   timers         KeSetTimer / KeSetTimerEx, read back through the timer
+ *                  thread's firing pass on a clock the test gives. Timers are
+ *                  armed an hour ahead, so the real thread never fires them.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -27,6 +31,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef _WIN32
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* Provided by the generated title; this harness has none. */
 typedef void (*recomp_func_t)(void);
@@ -38,20 +48,48 @@ static void fake_callback(void)
     g_cb_arg = *(uint32_t *)((uintptr_t)g_esp + 4 + xbox_GetMemoryOffset());
     g_cb_calls++;
 }
+/* XB-004: every call, in order, for the race below. */
+#define GUEST_CALL_LOG 8
+static uint32_t g_call_log[GUEST_CALL_LOG], g_call_logged;
+static void logging_callback(void)
+{
+    if (g_call_logged < GUEST_CALL_LOG)
+        g_call_log[g_call_logged] = *(uint32_t *)((uintptr_t)g_esp + 4 + xbox_GetMemoryOffset());
+    g_call_logged++;
+}
+/* XB-004: how many times each context of the two-thread run was seen. */
+#define STRESS_CALLS 20000u
+static unsigned char g_stress_seen[STRESS_CALLS];
+static void stress_callback(void)
+{
+    uint32_t ctx = *(uint32_t *)((uintptr_t)g_esp + 4 + xbox_GetMemoryOffset());
+    if (ctx < STRESS_CALLS && g_stress_seen[ctx] < 255)
+        g_stress_seen[ctx]++;
+}
 recomp_func_t recomp_lookup(uint32_t xbox_va);
-recomp_func_t recomp_lookup(uint32_t xbox_va) { return xbox_va == 0x00123450u ? fake_callback : NULL; }
+recomp_func_t recomp_lookup(uint32_t xbox_va)
+{
+    if (xbox_va == 0x00123460u) return logging_callback;
+    if (xbox_va == 0x00123470u) return stress_callback;
+    return xbox_va == 0x00123450u ? fake_callback : NULL;
+}
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
 
 extern recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
 
-enum { S_SET, S_WAIT, S_RESET, S_MULTI, S_INIT, N_SLOTS };
+enum { S_SET, S_WAIT, S_RESET, S_MULTI, S_INIT, S_SET_TIMER, S_SET_TIMER_EX,
+       S_DOWNCASE, S_UPCASE, N_SLOTS };
 static const uint32_t ORD[N_SLOTS] = {
     145,   /* KeSetEvent */
     159,   /* KeWaitForSingleObject */
     138,   /* KeResetEvent */
     158,   /* KeWaitForMultipleObjects */
     108,   /* KeInitializeEvent */
+    149,   /* KeSetTimer */
+    150,   /* KeSetTimerEx */
+    276,   /* RtlDowncaseUnicodeString */
+    314,   /* RtlUpcaseUnicodeString */
 };
 
 #define STATUS_TIMEOUT 0x00000102u
@@ -68,6 +106,9 @@ static uint32_t scratch;                 /* guest VA of a 64 KB block */
 #define FRESH_A (scratch + 0x3500)
 #define FRESH_B (scratch + 0x3600)
 #define EXPLICIT_B (scratch + 0x3700)
+#define TIMER_VA (scratch + 0x3B00)
+
+#define ONE_HOUR_100NS 36000000000LL
 
 static uint32_t slot_va[N_SLOTS];
 static int failures;
@@ -136,10 +177,282 @@ static uint32_t ke_multi(uint32_t a, uint32_t b, int wait_all)
     return call(S_MULTI, 8, args);
 }
 
+/* XB-004: the window between a DPC leaving the queue and its routine being
+ * read. The hook runs in it, on this thread, and queues a second guest call,
+ * as the thread executing the pushbuffer can at that moment. */
+extern void (*xbox_DpcPoppedHookForTest)(void);
+
+static void queue_second_call(void)
+{
+    xbox_DpcPoppedHookForTest = NULL;   /* once */
+    check(xbox_DpcQueueGuestCall(0x00123460u, 0xB0B0B0B0u) == 1,
+          "a guest call queued between the pop and the run", NULL);
+}
+
+static void guest_call_race(void)
+{
+    char d[120];
+    int ran = 0;
+
+    g_call_logged = 0;
+    g_esp = STACK_VA + 0x800;
+    check(xbox_DpcQueueGuestCall(0x00123460u, 0xA0A0A0A0u) == 1, "a first guest call is queued", NULL);
+    xbox_DpcPoppedHookForTest = queue_second_call;
+    xbox_DpcDrainTimer(&ran);
+    xbox_DpcPoppedHookForTest = NULL;
+    snprintf(d, sizeof d, "%u calls: 0x%08X, 0x%08X", g_call_logged, g_call_log[0], g_call_log[1]);
+    check(g_call_logged == 2 && g_call_log[0] == 0xA0A0A0A0u && g_call_log[1] == 0xB0B0B0B0u,
+          "each queued guest call runs once, with its own context", d);
+}
+
+static volatile LONG g_stress_done;
+
+static DWORD WINAPI stress_producer(LPVOID unused)
+{
+    uint32_t i;
+
+    (void)unused;
+    for (i = 0; i < STRESS_CALLS; i++)
+        while (!xbox_DpcQueueGuestCall(0x00123470u, i))
+            Sleep(0);                   /* the pool is busy: the drain catches up */
+    InterlockedExchange(&g_stress_done, 1);
+    return 0;
+}
+
+/* One thread queues distinct contexts while this one drains. */
+static void guest_call_stress(void)
+{
+    HANDLE t;
+    char d[120];
+    uint32_t i, lost = 0, repeated = 0;
+    int ran;
+
+    g_esp = STACK_VA + 0x800;
+    t = CreateThread(NULL, 0, stress_producer, NULL, 0, NULL);
+    while (!InterlockedCompareExchange(&g_stress_done, 0, 0) || xbox_DpcPending())
+        xbox_DpcDrainTimer(&ran);
+    WaitForSingleObject(t, 30000);
+    CloseHandle(t);
+    for (i = 0; i < STRESS_CALLS; i++) {
+        lost += g_stress_seen[i] == 0;
+        repeated += g_stress_seen[i] > 1;
+    }
+    snprintf(d, sizeof d, "%u lost, %u repeated of %u", lost, repeated, STRESS_CALLS);
+    check(lost == 0 && repeated == 0, "two threads: every guest call runs exactly once", d);
+}
+
 static void ke_init(uint32_t va)
 {
     uint32_t args[3] = {va, 0, 1}; /* notification, initially signalled */
     call(S_INIT, 3, args);
+}
+
+/* XB-005: RtlDowncaseUnicodeString / RtlUpcaseUnicodeString. The console's
+ * functions write no terminator, so one goes in only where the caller's buffer
+ * has room for it. */
+#define RTL_VA      (scratch + 0x4000)
+#define RTL_SRC     (RTL_VA + 0x00)      /* UNICODE_STRING */
+#define RTL_DST     (RTL_VA + 0x10)      /* UNICODE_STRING */
+#define RTL_SRC_BUF (RTL_VA + 0x100)
+#define RTL_DST_BUF (RTL_VA + 0x200)
+#define RTL_CANARY  0xCAFEu
+
+static uint16_t *G16(uint32_t va)
+{
+    return (uint16_t *)((uintptr_t)va + xbox_GetMemoryOffset());
+}
+
+static void rtl_string(uint32_t va, uint16_t len, uint16_t max, uint32_t buf)
+{
+    *G16(va) = len;
+    *G16(va + 2) = max;
+    G(va)[1] = buf;
+}
+
+/* "aBcD" at va, four characters, the canary just after them. */
+static void rtl_text(uint32_t va)
+{
+    static const uint16_t text[4] = { 'a', 'B', 'c', 'D' };
+    memcpy(G16(va), text, sizeof text);
+    *G16(va + 8) = RTL_CANARY;
+}
+
+static uint32_t rtl_call(int slot, uint32_t dst, uint32_t src, uint32_t alloc)
+{
+    uint32_t args[3] = { dst, src, alloc };
+    return call(slot, 3, args);
+}
+
+static int rtl_is(uint32_t va, int upper)
+{
+    const uint16_t *t = G16(va);
+    return upper ? t[0] == 'A' && t[1] == 'B' && t[2] == 'C' && t[3] == 'D'
+                 : t[0] == 'a' && t[1] == 'b' && t[2] == 'c' && t[3] == 'd';
+}
+
+static void rtl_strings(int slot, int upper)
+{
+    char d[120];
+    uint32_t st, buf;
+
+    /* A destination of exactly Length bytes. */
+    rtl_text(RTL_SRC_BUF);
+    rtl_text(RTL_DST_BUF);
+    rtl_string(RTL_SRC, 8, 8, RTL_SRC_BUF);
+    rtl_string(RTL_DST, 0, 8, RTL_DST_BUF);
+    st = rtl_call(slot, RTL_DST, RTL_SRC, 0);
+    snprintf(d, sizeof d, "status 0x%08X, word after the buffer 0x%04X", st, *G16(RTL_DST_BUF + 8));
+    check(st == 0 && rtl_is(RTL_DST_BUF, upper) && *G16(RTL_DST_BUF + 8) == RTL_CANARY,
+          "a buffer of exactly Length: converted, the next word untouched", d);
+
+    /* In place: Dest and Src are the same string. */
+    rtl_text(RTL_SRC_BUF);
+    rtl_string(RTL_SRC, 8, 8, RTL_SRC_BUF);
+    st = rtl_call(slot, RTL_SRC, RTL_SRC, 0);
+    snprintf(d, sizeof d, "status 0x%08X, word after the buffer 0x%04X", st, *G16(RTL_SRC_BUF + 8));
+    check(st == 0 && rtl_is(RTL_SRC_BUF, upper) && *G16(RTL_SRC_BUF + 8) == RTL_CANARY,
+          "in place: converted, the next word untouched", d);
+
+    /* Room for the terminator: it is still written. */
+    rtl_text(RTL_SRC_BUF);
+    rtl_text(RTL_DST_BUF);
+    rtl_string(RTL_SRC, 8, 8, RTL_SRC_BUF);
+    rtl_string(RTL_DST, 0, 10, RTL_DST_BUF);
+    st = rtl_call(slot, RTL_DST, RTL_SRC, 0);
+    check(st == 0 && rtl_is(RTL_DST_BUF, upper) && *G16(RTL_DST_BUF + 8) == 0,
+          "a buffer with room: terminated", NULL);
+
+    /* AllocateDestinationString: the new buffer is terminated. */
+    rtl_text(RTL_SRC_BUF);
+    rtl_string(RTL_SRC, 8, 8, RTL_SRC_BUF);
+    rtl_string(RTL_DST, 0, 0, 0);
+    st = rtl_call(slot, RTL_DST, RTL_SRC, 1);
+    buf = G(RTL_DST)[1];
+    snprintf(d, sizeof d, "status 0x%08X, buffer 0x%08X", st, buf);
+    check(st == 0 && buf && *G16(RTL_DST) == 8 && *G16(RTL_DST + 2) == 10
+          && rtl_is(buf, upper) && *G16(buf + 8) == 0,
+          "allocated: converted and terminated", d);
+
+#ifndef _WIN32
+    /* Length 0 and no buffer: nothing to write, and guest 0 is not memory. */
+    {
+        pid_t pid = fork();
+        int status = -1;
+
+        if (pid == 0) {
+            /* If this regresses it faults, with the whole guest address space
+             * mapped: no core file of several GB on the test host. */
+            struct rlimit no_core = { 0, 0 };
+            setrlimit(RLIMIT_CORE, &no_core);
+            alarm(10);
+            rtl_string(RTL_SRC, 0, 0, 0);
+            rtl_string(RTL_DST, 0, 0, 0);
+            _exit(rtl_call(slot, RTL_DST, RTL_SRC, 0) == 0 ? 0 : 1);
+        }
+        waitpid(pid, &status, 0);
+        snprintf(d, sizeof d, "child status 0x%X", (unsigned)status);
+        check(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+              "an empty string with no buffer writes nothing", d);
+    }
+#endif
+}
+
+/* Arm TIMER_VA; a negative due time is relative, in 100 ns units. */
+static void ke_set_timer_ex(long long due_100ns, uint32_t period_ms)
+{
+    uint32_t args[5] = { TIMER_VA, (uint32_t)due_100ns,
+                         (uint32_t)((uint64_t)due_100ns >> 32), period_ms, 0 };
+    call(S_SET_TIMER_EX, 5, args);
+}
+
+/* When the armed timer is due, on the kernel's timer clock. */
+static long long timer_due(void)
+{
+    long long next = -1;
+    xbox_TimerFireForTest(0, &next);
+    return next;
+}
+
+/* XB-001: a periodic timer keeps its own schedule, however late the pass that
+ * fires it, and a stall restarts it instead of firing a burst. */
+static void timers_periodic(void)
+{
+    long long due, next = -1, t;
+    char d[120];
+    int fired, n = 0;
+
+    ke_set_timer_ex(-ONE_HOUR_100NS, 16);
+    due = timer_due();
+    fired = xbox_TimerFireForTest(due + 3, &next);
+    snprintf(d, sizeof d, "fired %d, next due +%lld", fired, next - due);
+    check(fired == 1 && next == due + 16, "fired 3 ms late: the next is one period after the due time", d);
+    fired = xbox_TimerFireForTest(due + 19, &next);
+    snprintf(d, sizeof d, "fired %d, next due +%lld", fired, next - due);
+    check(fired == 1 && next == due + 32, "late again: still on the 16 ms schedule", d);
+    fired = xbox_TimerFireForTest(due + 500, &next);
+    snprintf(d, sizeof d, "fired %d, next due +%lld", fired, next - due);
+    check(fired == 1 && next > due + 500 && next <= due + 516,
+          "a stall fires once and restarts one period on", d);
+    check(xbox_TimerFireForTest(due + 500, &next) == 0, "no burst after the stall", NULL);
+
+    /* The legacy loop's 10 ms tick, for 1.6 s: 16 ms is 62.5 Hz, not 50. */
+    ke_set_timer_ex(-ONE_HOUR_100NS, 16);
+    due = timer_due();
+    for (t = 0; t < 1600; t += 10)
+        n += xbox_TimerFireForTest(due + t, &next);
+    snprintf(d, sizeof d, "%d fires", n);
+    check(n == 100, "a 16 ms timer on the 10 ms tick fires 100 times in 1.6 s", d);
+}
+
+static void timers_seam(void)
+{
+    long long due, next = -1;
+
+    ke_set_timer_ex(-ONE_HOUR_100NS, 0);
+    due = timer_due();
+    check(due > 0, "an armed timer is reported by the firing pass", NULL);
+    check(xbox_TimerFireForTest(due - 1, &next) == 0 && next == due,
+          "it does not fire before its due time", NULL);
+}
+
+/* XB-002: a positive due time is an absolute system time, and a relative one
+ * is never cut short by its fraction of a millisecond. */
+static void timers_due_time(void)
+{
+    LARGE_INTEGER now;
+    long long rel, abs_due, past, next = -1, gap;
+    char d[120];
+    int i, later = 0;
+    enum { ROUNDS = 20 };
+
+    ke_set_timer_ex(-ONE_HOUR_100NS, 0);
+    rel = timer_due();
+    xbox_KeQuerySystemTime(&now);
+    ke_set_timer_ex(now.QuadPart + ONE_HOUR_100NS, 0);
+    abs_due = timer_due();
+    gap = abs_due > rel ? abs_due - rel : rel - abs_due;
+    snprintf(d, sizeof d, "%lld ms from the relative timer", gap);
+    check(gap <= 2000, "an absolute due time an hour ahead is due in an hour", d);
+    check(xbox_TimerFireForTest(abs_due - 1, &next) == 0, "not due 1 ms before it", NULL);
+    check(xbox_TimerFireForTest(abs_due, &next) == 1 && next == -1,
+          "due at it, once (a one-shot)", NULL);
+
+    /* Long past: at once. The real timer thread may take it first. */
+    ke_set_timer_ex(1, 0);
+    past = timer_due();
+    check(past == -1 || past < rel - 3000000, "an absolute time in the past is due now", NULL);
+
+    /* Same millisecond or not, the longer delay must end later. */
+    for (i = 0; i < ROUNDS; i++) {
+        long long whole, frac;
+        ke_set_timer_ex(-ONE_HOUR_100NS, 0);
+        whole = timer_due();
+        ke_set_timer_ex(-(ONE_HOUR_100NS + 5000), 0);
+        frac = timer_due();
+        later += frac > whole;
+    }
+    snprintf(d, sizeof d, "%d of %d rounds", later, ROUNDS);
+    check(later == ROUNDS, "half a millisecond more is rounded up, not dropped", d);
 }
 
 static unsigned char *load_file(const char *path, size_t *len)
@@ -167,6 +480,7 @@ int main(int argc, char **argv)
     const char *mode = argc > 1 ? argv[1] : "off";
     const char *path = argc > 2 ? argv[2] : "tools/conformance/test.xbe";
     int on = !strcmp(mode, "title-kevents");
+    int timers = !strcmp(mode, "timers");
     size_t xbe_len = 0;
     unsigned char *xbe;
     char d[160];
@@ -174,7 +488,7 @@ int main(int argc, char **argv)
     int i;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (!on && strcmp(mode, "off")) {
+    if (!on && !timers && strcmp(mode, "off")) {
         printf("unknown mode '%s'\n", mode);
         return 2;
     }
@@ -209,6 +523,18 @@ int main(int argc, char **argv)
     }
     G(ZERO_VA)[0] = G(ZERO_VA)[1] = 0;
     printf("mode: %s\n", mode);
+
+    if (timers) {
+        timers_periodic();
+        timers_seam();
+        timers_due_time();
+        /* The timer thread is still running: no layout shutdown under it. */
+        printf("\n%d failure(s)\n", failures);
+        return failures ? 1 : 0;
+    }
+
+    rtl_strings(S_DOWNCASE, 0);
+    rtl_strings(S_UPCASE, 1);
 
     ke_init(EXPLICIT_VA);
     ke_init(EXPLICIT_B);
@@ -366,6 +692,9 @@ int main(int argc, char **argv)
         check(g_cb_calls == 1 && g_cb_arg == 0xC0FFEEu && g_esp == esp_before,
               "the DPC path calls routine(context) once, esp kept", d);
     }
+
+    guest_call_race();
+    guest_call_stress();
 
     xbox_MemoryLayoutShutdown();
     free(xbe);

@@ -1044,6 +1044,9 @@ int     xbox_DpcDrainHere(void);        /* the caller holds the gate; DPCs run *
 /* The timer thread's drain: takes the gate only when it is free, never
  * waits; 1 when DPCs stayed queued on a busy gate. *ran counts what ran. */
 int     xbox_DpcDrainTimer(int *ran);
+/* The timer thread's firing pass at now_ms, for tests: how many fired;
+ * *next_due_ms is the earliest still armed, -1 when none. */
+int     xbox_TimerFireForTest(long long now_ms, long long *next_due_ms);
 void    xbox_DpcMarkGuestThread(void);  /* this thread runs guest code */
 int     xbox_DpcOnRaise(void);  /* gate on and RECOMP_DPC_ON_RAISE not 0 */
 /* The deferred routine running now (1) and for how many ms, for stall
