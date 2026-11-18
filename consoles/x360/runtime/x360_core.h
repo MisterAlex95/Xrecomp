@@ -28,6 +28,8 @@ typedef struct x360_pack {
                               * interpreted code calls them, they are not functions to lift */
     unsigned nhelpers;
     unsigned features;       /* xe_rc_features (XBA-283; bit 0: lwarx / stwcx. atomic), 0 for older packs */
+    const void *parts;       /* XBA-284: const xe_rc_part[] (xe_rc_resume_parts) in place of resume, or NULL */
+    unsigned nparts;
 } x360_pack;
 
 enum {
@@ -45,6 +47,9 @@ x360_machine *x360_create(const uint8_t *xex, size_t size, char *why, size_t why
 void x360_destroy(x360_machine *x);
 /* Bind the lifted code; 0 on success, -1 when the pack was made from another image (stale). */
 int x360_bind(x360_machine *x, const x360_pack *pack);
+/* The pack's tables from a dlopen'ed library: xe_rc_resume or its parts, the CRC, the helpers, the features. 0 when
+ * the library is an x360_tools.recomp pack. */
+int x360_pack_from_lib(void *lib, x360_pack *pack);
 /* The disc: a disc image (XDVDFS / GDFX, also split or CSO / ZSO / CCI, read in place by src/xiso) or a directory of
  * its files; the data directory (cache:, hdd:...: writable), optional. 0 on success. */
 int x360_set_disc(x360_machine *x, const char *path, char *why, size_t why_len);

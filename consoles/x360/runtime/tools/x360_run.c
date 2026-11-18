@@ -204,21 +204,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "x360_run: %s\n", dlerror());
         return 2;
     }
-    const void *resume = dlsym(lib, "xe_rc_resume");
-    const unsigned *count = dlsym(lib, "xe_rc_resume_count");
-    const uint32_t *crc = dlsym(lib, "xe_rc_image_crc");
-    if (!resume || !count || !crc) {
+    x360_pack p;
+    if (x360_pack_from_lib(lib, &p)) {
         fprintf(stderr, "x360_run: %s is not an x360_tools.recomp pack\n", pack);
         return 2;
     }
-    x360_pack p = {resume, *count, *crc, NULL, 0, 0};
-    const unsigned *nh = dlsym(lib, "xe_rc_helper_count");
-    if (nh) {
-        p.helpers = dlsym(lib, "xe_rc_helpers");
-        p.nhelpers = p.helpers ? *nh : 0;
-    }
-    const unsigned *feat = dlsym(lib, "xe_rc_features");
-    p.features = feat ? *feat : 0;
     if (x360_bind(x, &p)) {
         fprintf(stderr, "x360_run: %s\n", x360_error(x));
         return 2;

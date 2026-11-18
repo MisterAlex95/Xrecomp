@@ -1205,8 +1205,23 @@ interpreter (XBA-283) only runs the code a pack does not hold.
 
   On the Thor (8 cores; `compile.py` runs min(5, (MemAvailable - 3 GB) / 512 MB) jobs), with a Cortex-A715 core at
   about 0.5-0.7 of the build host's, that is about 7-12 minutes of compile and 2-3 minutes of lift for a title with
-  12 MB of code, before throttling: not measured on the device yet (a Device check). The table grows with the resume
-  points (about 33 bytes of object per entry): past ~20 MB of code it would pass 512 MB, the next thing to split.
+  12 MB of code, before throttling: not measured on the device yet (a Device check).
+
+  The resume table in parts (XBA-284): past 32,768 resume points `x360_tools.recomp` cuts it into
+  `x360_rc_resume_NNNNN.c` files, one per MB of guest code (by the address of the function a point belongs to), and
+  `x360_rc_table.c` keeps the list (`xe_rc_resume_parts`, which `x360_bind` reads in place of `xe_rc_resume`; packs
+  with one array still load). A function the self-healing loop adds changes its own part and the small list. Measured
+  on a 24 MB synthetic title (`make_big.py --mb 24`: 27,385 functions, 6.2 M instructions, 926,088 resume points),
+  same compiler and flags:
+
+  | Step | Time | Peak memory |
+  |---|---|---|
+  | lift | 104 s | 3.9 GB |
+  | the resume table as one array (33 MB of C) | 5.6 s | 736 MB |
+  | `x360_rc_table.c` with the list of parts (functions table, 1.9 MB of C) | 0.4 s | 107 MB |
+  | one resume part (~39,000 entries, 1.4 MB of C; 25 of them) | 0.15 s | 70 MB |
+
+  A part's cost does not grow with the title. The lift's peak (3.9 GB at 24 MB of code) is now Prepare's largest.
 
 Tests: `tools/prepare/test_x360_prepare.py` (with `$X360_RUN`, the pack is also run by x360_run), the app's
 `X360KeyTest` and `ConsoleTest`; ctest `x360_interp` / `x360_interp_c` (XBA-283: the interpreter and the one-round

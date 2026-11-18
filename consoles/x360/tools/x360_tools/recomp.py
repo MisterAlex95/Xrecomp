@@ -76,8 +76,48 @@ def image_crc(img):
     return zlib.crc32(img.image) & 0xFFFFFFFF
 
 
+# XBA-284: past this many resume points the table is cut into parts, one file each (x360_rc_resume_NNNNN.c), by the
+# guest address of the function a point belongs to (resume_part_bytes of code per part): one 463k-entry table took
+# 389 MB in one clang job for a 12 MB title, over Prepare's 512 MB per job past ~20 MB of code; a part stays near
+# 40k entries whatever the title's size, and adding a function changes its own part (and the small list of parts).
+RESUME_SPLIT = 32768
+RESUME_PART_BYTES = 0x100000
+
+
+def write_resume_parts(outdir, resume, base, part_bytes, table):
+    """Writes the resume parts and appends xe_rc_resume_parts (the runtime reads them instead of xe_rc_resume:
+    x360_bind) to table. Each address is in exactly one part; parts are sorted inside, and by address window."""
+    parts = collections.OrderedDict()
+    for a in sorted(resume):
+        parts.setdefault((resume[a] - base) // part_bytes, []).append(a)
+    files = []
+    for k in sorted(parts):
+        addrs = parts[k]
+        out = ['/* Resume points of the functions at image offset %d MB (XBA-284). */\n#include "xenon_rt.h"\n\n'
+               % (k * part_bytes >> 20)]
+        for e in sorted({resume[a] for a in addrs}):
+            out.append("void %s(xe_machine *m_);\n" % fn_name(e))
+        out.append("\nconst xe_rc_entry xe_rc_resume_%05d[] = {\n" % k)
+        for a in addrs:
+            out.append("    {0x%08Xu, %s},\n" % (a, fn_name(resume[a])))
+        out.append("};\n")
+        path = os.path.join(outdir, "x360_rc_resume_%05d.c" % k)
+        with open(path, "w") as fh:
+            fh.write("".join(out))
+        files.append(path)
+    table.append("\n")
+    for k in sorted(parts):
+        table.append("extern const xe_rc_entry xe_rc_resume_%05d[];\n" % k)
+    table.append("const xe_rc_part xe_rc_resume_parts[] = {\n")
+    for k in sorted(parts):
+        table.append("    {xe_rc_resume_%05d, %du},\n" % (k, len(parts[k])))
+    table.append("};\nconst unsigned xe_rc_resume_part_count = %du;\n" % len(parts))
+    return files
+
+
 def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comments=True, omit=(),
-              split_bytes=SPLIT_BYTES, bucket_bytes=BUCKET_BYTES):
+              split_bytes=SPLIT_BYTES, bucket_bytes=BUCKET_BYTES, resume_split=RESUME_SPLIT,
+              resume_part_bytes=RESUME_PART_BYTES):
     if img.image is None:
         raise XexError("no image to recompile: %s" % img.image_note)
     view = CodeView(img)
@@ -147,10 +187,14 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     # the runtime's dispatcher looks a PC up here (XBA-270); an entry always maps to its own function
     for f in funcs:
         resume[f.entry] = f.entry
-    table.append("\nconst xe_rc_entry xe_rc_resume[] = {\n")
-    for a in sorted(resume):
-        table.append("    {0x%08Xu, %s},\n" % (a, fn_name(resume[a])))
-    table.append("};\nconst unsigned xe_rc_resume_count = %du;\n" % len(resume))
+    if len(resume) <= resume_split:
+        table.append("\nconst xe_rc_entry xe_rc_resume[] = {\n")
+        for a in sorted(resume):
+            table.append("    {0x%08Xu, %s},\n" % (a, fn_name(resume[a])))
+        table.append("};\n")
+    else:
+        files += write_resume_parts(outdir, resume, img.base, resume_part_bytes, table)
+    table.append("const unsigned xe_rc_resume_count = %du;\n" % len(resume))
     # XBA-283: the save / restore helpers' entries (inlined, not functions): interpreted code calls them, the
     # runtime must not report them as missed functions
     table.append("\nconst uint32_t xe_rc_helpers[] = {\n%s};\nconst unsigned xe_rc_helper_count = %du;\n" % (
@@ -264,6 +308,10 @@ def main(argv=None):
     ap.add_argument("--bucket-bytes", type=lambda v: int(v, 0), default=BUCKET_BYTES,
                     help="guest code per generated file (default %(default)s)")
     ap.add_argument("--split-bytes", type=int, default=SPLIT_BYTES, help="C past which a file is cut again")
+    ap.add_argument("--resume-split", type=int, default=RESUME_SPLIT,
+                    help="resume points past which the table is cut into parts (default %(default)s)")
+    ap.add_argument("--resume-part-bytes", type=lambda v: int(v, 0), default=RESUME_PART_BYTES,
+                    help="guest code per resume table part (default %(default)s)")
     ap.add_argument("--omit", action="append", default=[],
                     help="tests: a file of hex function entries to leave out of the pack (or one hex address)")
     a = ap.parse_args(argv)
@@ -294,8 +342,8 @@ def main(argv=None):
         for o in a.omit:
             omit |= read_addrs(o) if os.path.exists(o) else {int(o, 16)}
         s = recompile(img, a.outdir, extra_seeds=seeds, use_pdata=not a.no_pdata, comments=not a.no_comments,
-                      omit=omit, split_bytes=a.split_bytes,
-                      bucket_bytes=a.bucket_bytes)
+                      omit=omit, split_bytes=a.split_bytes, bucket_bytes=a.bucket_bytes,
+                      resume_split=a.resume_split, resume_part_bytes=a.resume_part_bytes)
         print("recomp: %(functions)d functions, %(instructions)d instructions, %(interp_fallback_insns)d handed to "
               "RC_INTERP, %(invalid_words)d invalid words" % s)
         print("  not lifted: %s" % ", ".join("%s %d" % kv for kv in list(s["unlifted"].items())[:30]))

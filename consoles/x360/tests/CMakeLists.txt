@@ -98,7 +98,7 @@ add_test(NAME x360_hle COMMAND x360_hle_test)
 set_tests_properties(x360_hle PROPERTIES TIMEOUT 120)
 
 if(TARGET x360_run)
-    foreach(_mode basic lzx)
+    foreach(_mode basic lzx split)
         if(_mode STREQUAL basic)
             set(_name x360_hello)
         else()

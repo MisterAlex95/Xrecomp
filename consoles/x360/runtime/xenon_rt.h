@@ -72,6 +72,13 @@ typedef struct xe_rc_entry {
     xe_rc_fn fn;
 } xe_rc_entry;
 
+/* XBA-284: a big pack's resume table in parts (xe_rc_resume_parts, xe_rc_resume_part_count instead of xe_rc_resume),
+ * each sorted, the parts in address order of their functions (a point may sort before the previous part's last) */
+typedef struct xe_rc_part {
+    const xe_rc_entry *entries;
+    unsigned count;
+} xe_rc_part;
+
 /* ---- memory ---- */
 
 #ifdef XE_RUNTIME

@@ -10,6 +10,8 @@
 #   basic   the XEX as the loader takes it (unencrypted, basic compression)
 #   lzx     encrypted (a key made up here) and LZX-compressed, then rewritten plain by python3 -m tools.xex --plain,
 #           the path a retail title takes with the user's own key
+#   split   as basic, the resume table cut into parts of 256 bytes of code each (XBA-284: x360_bind reads
+#           xe_rc_resume_parts, as for a big title's pack)
 #   c       ELF: a C test title built with devkitPPC (tests/homebrew, tools/consoles/build_homebrew.sh x360) packed by
 #           homebrew/elf2xex.py; skipped (77) when the ELF is not built
 # Exits 77 (skipped) when python3 or cc is missing.
@@ -50,8 +52,14 @@ if [ "$mode" = lzx ]; then
     "$py" "$repo/tools/xiso/mkxiso.py" "$work/disc" "$work/disc.iso" >/dev/null || exit 1
     disc=$work/disc.iso
 fi
-timeout 300 "$py" -m x360_tools.recomp "$work/hello.xex" "$work/src" --no-comments >"$work/recomp.txt" || {
+split=
+[ "$mode" = split ] && split="--resume-split 1 --resume-part-bytes 0x100"
+timeout 300 "$py" -m x360_tools.recomp "$work/hello.xex" "$work/src" --no-comments $split >"$work/recomp.txt" || {
     cat "$work/recomp.txt"; exit 1; }
+if [ "$mode" = split ] && ! grep -q xe_rc_resume_parts "$work/src/x360_rc_table.c"; then
+    echo "the resume table is not in parts"
+    exit 1
+fi
 cat "$work/recomp.txt"
 "$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 -I "$repo/consoles/x360/runtime" \
     -I "$repo/consoles/gc/runtime" -o "$work/libtitle.so" "$work"/src/*.c -lm || exit 1

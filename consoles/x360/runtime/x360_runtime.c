@@ -428,18 +428,11 @@ int x360_runtime_run(const x360_runtime_opts *o)
     char libpath[1100];
     snprintf(libpath, sizeof libpath, "%s%s", strchr(o->pack_lib, '/') ? "" : "./", o->pack_lib); /* not a search */
     void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
-    const void *resume = lib ? dlsym(lib, "xe_rc_resume") : NULL;
-    const unsigned *count = lib ? dlsym(lib, "xe_rc_resume_count") : NULL;
-    const uint32_t *crc = lib ? dlsym(lib, "xe_rc_image_crc") : NULL;
-    x360_pack pk = {resume, count ? *count : 0, crc ? *crc : 0, NULL, 0, 0};
-    const unsigned *nh = lib ? dlsym(lib, "xe_rc_helper_count") : NULL;
-    if (nh) {
-        pk.helpers = dlsym(lib, "xe_rc_helpers");
-        pk.nhelpers = pk.helpers ? *nh : 0;
-    }
-    if (!resume || !count || !crc || x360_bind(x, &pk)) {
+    x360_pack pk;
+    int not_pack = !lib || x360_pack_from_lib(lib, &pk);
+    if (not_pack || x360_bind(x, &pk)) {
         fprintf(stderr, "x360: the pack %s %s\n", o->pack_lib,
-                !lib ? dlerror() : !resume ? "is not an x360_tools.recomp pack" : "was made from another image");
+                !lib ? dlerror() : not_pack ? "is not an x360_tools.recomp pack" : "was made from another image");
         x360_destroy(x);
         if (lib)
             dlclose(lib);
