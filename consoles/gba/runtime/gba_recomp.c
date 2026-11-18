@@ -55,6 +55,7 @@ struct gba_rc_state {
     gba_machine *verify;           /* GBA_RC_VERIFY=1: an interpreter twin replays every lifted call (debugging) */
     uint32_t iw_lo, iw_hi;         /* the IWRAM addresses the table's spans cover, [lo, hi); 0, 0: none */
     bool in_iw;                    /* the loop's last stop was in IWRAM */
+    uint32_t iw_expect;            /* expect, for IWRAM code the interpreter runs inside the pack's IWRAM range */
     rc_cache_line cache[CACHE_SIZE];
 };
 
@@ -82,7 +83,7 @@ static void flush_cache(struct gba_rc_state *s)
 {
     for (uint32_t i = 0; i < CACHE_SIZE; i++)
         s->cache[i].key = KEY_NONE;
-    s->expect = KEY_NONE;
+    s->expect = s->iw_expect = KEY_NONE;
     s->interp_key = KEY_NONE;
 }
 
@@ -91,7 +92,7 @@ void gba_recomp_state_loaded(gba_machine *m)
     struct gba_rc_state *s = m->rc;
     if (!s)
         return;
-    s->expect = KEY_NONE;
+    s->expect = s->iw_expect = KEY_NONE;
     s->interp_key = KEY_NONE;
     s->interp_left = 0;
 }
@@ -321,7 +322,6 @@ void gba_recomp_run(gba_machine *m)
             if (!irq && entered)
                 record_missed_iwram(m, s, key); /* entered IWRAM code the pack does not hold */
             gba_cpu_step_outside_rom(m, s->iw_lo, s->iw_hi); /* BIOS, RAM, or the IRQ to take: as long as that lasts */
-            s->expect = KEY_NONE;
             continue;
         }
         if (irq) {
@@ -336,7 +336,10 @@ void gba_recomp_run(gba_machine *m)
             s->stats.fallbacks++;
             s->stats.interp_rom++;
             gba_cpu_step(m);
-            s->expect = KEY_NONE;
+            if (in_iwram(pc))
+                s->iw_expect = KEY_NONE;
+            else
+                s->expect = KEY_NONE;
             if (s->interp_left > 1) {
                 uint32_t next = key + (thumb ? 2 : 4);
                 uint32_t now_key = gba_cpu_pc(m) | ((m->cpu.cpsr_ctl & CPSR_T) ? 1u : 0u);
@@ -362,7 +365,7 @@ void gba_recomp_run(gba_machine *m)
             /* IWRAM does not hold the bytes this function was lifted from (not yet, or not any more) */
             s->stats.interp_rom++;
             gba_cpu_step_outside_rom(m, s->iw_lo, s->iw_hi);
-            s->expect = KEY_NONE;
+            s->iw_expect = KEY_NONE;
             continue;
         }
         if (ln->fn) {
@@ -392,12 +395,12 @@ void gba_recomp_run(gba_machine *m)
             ln->fn = NULL; /* not covered after all */
         }
         /* ROM code no lifted function holds: the interpreter runs it; the start of each such run is missed. */
-        if (in_iwram(pc)) {
-            if (key != s->expect)
+        if (in_iwram(pc)) { /* its own run tracking: the cartridge's (expect) stays as without IWRAM code */
+            if (key != s->iw_expect)
                 record_missed_iwram(m, s, key);
             s->stats.interp_rom++;
             gba_cpu_step(m);
-            s->expect = key + (thumb ? 2 : 4);
+            s->iw_expect = key + (thumb ? 2 : 4);
             continue;
         }
         if (key != s->expect)

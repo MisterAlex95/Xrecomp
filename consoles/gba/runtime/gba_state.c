@@ -9,7 +9,8 @@
  * state carried across).
  *
  * What is not state: the ROM and the BIOS image (identified by hash: another game or BIOS is refused), the attached
- * recompiled code (its dispatch is a function of the ROM, which never changes; the hand-offs in flight are reset
+ * recompiled code (its dispatch is a function of the ROM, which never changes, IWRAM code being checked against its
+ * bytes at every call; the hand-offs in flight are reset
  * by gba_recomp_state_loaded), the framebuffer pointer of a running frame (states are taken between frames). */
 #include "gba_internal.h"
 

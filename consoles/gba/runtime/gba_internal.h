@@ -397,7 +397,8 @@ void gba_cpu_jump(gba_machine *m, uint32_t addr, bool thumb);
 void gba_recomp_run(gba_machine *m);
 void gba_recomp_free(gba_machine *m);
 /* A save state was loaded (gba_state.c): the hand-offs between lifted code and the interpreter in flight are
- * forgotten (the dispatch cache stays: it is a function of the ROM). */
+ * forgotten (the dispatch cache stays: it is a function of the ROM, and IWRAM code is checked against its bytes at
+ * every call). */
 void gba_recomp_state_loaded(gba_machine *m);
 
 /* gba_bios.c */

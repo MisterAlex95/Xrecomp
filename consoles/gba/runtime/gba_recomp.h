@@ -3,8 +3,9 @@
  * A GBA title pack (libtitle.so, pack.json with "console": "gba") holds the game's ARM / Thumb code lifted to C by
  * consoles/gba/tools (gba_tools) and compiled for the host. The runtime attaches its table to the machine: when the
  * CPU reaches an address the table covers, the recompiled function runs natively; anything else (code the discovery
- * did not find, code copied to IWRAM / EWRAM, computed jumps out of known code) runs in the interpreter, which also
- * records the ROM addresses it had to run so the next Prepare can lift them (the discovery loop). Graphics, sound,
+ * did not find, code copied to EWRAM or made at run time, computed jumps out of known code) runs in the interpreter,
+ * which also records the ROM addresses it had to run so the next Prepare can lift them (the discovery loop; code copied
+ * from the ROM to IWRAM is recorded with where the ROM holds it, and lifted: ABI 5). Graphics, sound,
  * timers, DMA, interrupts and saves are the same code either way.
  *
  * Contract (frozen between gba_tools, Prepare, the loader and the core; change together and bump GBA_RECOMP_ABI):
