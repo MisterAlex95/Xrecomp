@@ -7,13 +7,11 @@
  * Everything a title can observe lives in guest memory, reached through the handle table (both are in a save state):
  * listeners, enumerators and one root block are tagged kernel objects found by walking x->handles.
  *
- * XAM_OVERLAPPED: a call completes at once, its event is signalled and it returns X_ERROR_IO_PENDING. The completion
- * routine is not called: it needs an APC on the calling thread with three arguments, which this runtime cannot queue
- * from an HLE call.
+ * XAM_OVERLAPPED: a call completes at once, its event is signalled and it returns X_ERROR_IO_PENDING. A completion
+ * routine runs as a user APC on the calling thread, at its next alertable wait: routine(result, length, overlapped).
  *
  * Content: content/<name> of the data directory is the package; content/.meta/<name>.dat keeps its XCONTENT_DATA,
- * content/.meta/<name>.png its thumbnail. The file layer cannot remove a directory, so XamContentDelete answers
- * X_ERROR_FUNCTION_FAILED for content that exists. */
+ * content/.meta/<name>.png its thumbnail. */
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
@@ -77,6 +75,9 @@ static uint32_t finish_ex(x360_machine *x, x360_thread *t, uint32_t ov, uint32_t
     uint32_t o = ev ? x360_handle_obj(x, ev) : 0;
     if (o)
         x360_w32(x, o + 4, 1);
+    uint32_t routine = x360_r32(x, ov + 0x10);
+    if (routine)
+        x360_apc_queue_user(x, t->kthread, routine, result, length, ov);
     return X_ERROR_IO_PENDING;
 }
 
@@ -506,9 +507,10 @@ static uint32_t content_create(x360_machine *x, x360_thread *t, xe_cpu *c, uint3
     else if (x360_set_content_root(x, root, name) < 0)
         result = X_ERROR_FUNCTION_FAILED;
     else {
-        /* CREATE_ALWAYS / TRUNCATE_EXISTING over existing content keep its files: the file layer cannot remove them */
         created = !exists || mode == 2 || mode == 5;
-        if (!exists)
+        if (exists && created && (x360_content_remove(x, name) || x360_set_content_root(x, root, name) < 0))
+            result = X_ERROR_FUNCTION_FAILED; /* CREATE_ALWAYS / TRUNCATE_EXISTING start empty */
+        if (!exists || created)
             meta_write(x, t, c, tmp, name, "dat", cd, XCONTENT_SIZE);
         if (disp)
             x360_w32(x, disp, created ? 1 : 2);
@@ -523,6 +525,13 @@ static void x_XamContentCreate(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     /* (user, root name, XCONTENT_DATA*, flags, disposition*, license mask*, overlapped) */
     uint32_t ov = A(6);
+    RET(finish(x, t, ov, content_create(x, t, c, A(1), A(2), A(3), A(4), A(5)), 0));
+}
+
+static void x_XamContentCreateEx(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    /* (user, root name, XCONTENT_DATA*, flags, disposition*, license mask*, cache size, content size, overlapped) */
+    uint32_t ov = A9(8);
     RET(finish(x, t, ov, content_create(x, t, c, A(1), A(2), A(3), A(4), A(5)), 0));
 }
 
@@ -575,8 +584,7 @@ static uint32_t content_delete(x360_machine *x, x360_thread *t, xe_cpu *c, uint3
     tmp_free(x, tmp);
     if (!exists)
         return X_ERROR_FILE_NOT_FOUND;
-    x360_logf(x, "x360: XamContentDelete(\"%s\"): content cannot be removed here\n", name);
-    return X_ERROR_FUNCTION_FAILED;
+    return x360_content_remove(x, name) ? X_ERROR_FUNCTION_FAILED : X_ERROR_SUCCESS;
 }
 
 static void x_XamContentDelete(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -1724,7 +1732,7 @@ const x360_hle_row x360_tab_xam2[] = {
     X360_HX(XNotifyPositionUI, x_ret0),
     X360_HX(XNotifyQueueUI, x_ret0),
     /* content */
-    X360_HX(XamContentCreate, x_XamContentCreate),
+    X360_HX(XamContentCreate, x_XamContentCreate), X360_HX(XamContentCreateEx, x_XamContentCreateEx),
     X360_HX(XamContentCreateInternal, x_XamContentCreateInternal),
     X360_HX(XamContentFlush, x_XamContentFlush),
     X360_HX(XamContentClose, x_XamContentClose),

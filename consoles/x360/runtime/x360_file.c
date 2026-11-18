@@ -1022,3 +1022,37 @@ void x360_k_ObTranslateSymbolicLink(x360_machine *x, x360_thread *t, xe_cpu *c)
     uint32_t len = 0;
     RET(A(0) ? link_target(x, A(0), A(1), &len) : X_STATUS_INVALID_HANDLE);
 }
+
+/* ---- removing content (XamContentDelete, XCONTENT_CREATE_ALWAYS) ---- */
+
+static int remove_tree(const char *path)
+{
+    DIR *d = opendir(path);
+    if (!d)
+        return unlink(path);
+    int rc = 0;
+    for (struct dirent *e; (e = readdir(d)) != NULL;) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        char sub[1600];
+        snprintf(sub, sizeof sub, "%s/%s", path, e->d_name);
+        rc |= remove_tree(sub);
+    }
+    closedir(d);
+    return rmdir(path) | rc;
+}
+
+int x360_content_remove(x360_machine *x, const char *name)
+{
+    struct x360_fs *fs = fs_of(x);
+    if (!fs->data_dir[0] || !name[0] || name[0] == '.' || strchr(name, '/'))
+        return -1; /* one package's directory, never a path out of content/ */
+    char path[1200];
+    snprintf(path, sizeof path, "%s/content/%s", fs->data_dir, name);
+    int rc = remove_tree(path);
+    snprintf(path, sizeof path, "%s/content/.meta/%s.dat", fs->data_dir, name);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/content/.meta/%s.png", fs->data_dir, name);
+    unlink(path);
+    return rc ? -1 : 0;
+}

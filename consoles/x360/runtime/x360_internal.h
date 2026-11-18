@@ -326,6 +326,8 @@ uint64_t x360_due_time(x360_machine *x, int64_t v); /* a guest timeout (negative
 /* x360_kdpc.c: the scheduler's side of DPCs, APCs and queues */
 void x360_kdpc_poll(x360_machine *x);
 int x360_kdpc_ready(x360_machine *x);
+/* a user APC on a thread: routine(context, arg1, arg2) at its next alertable wait; 0 when the thread is gone */
+int x360_apc_queue_user(x360_machine *x, uint32_t kthread, uint32_t routine, uint32_t ctx, uint32_t a1, uint32_t a2);
 void x360_apc_return(x360_machine *x, x360_thread *t);
 void x360_apc_after_hle(x360_machine *x, x360_thread *t);
 int x360_apc_wait_check(x360_machine *x, x360_thread *t, uint32_t *status);
@@ -359,6 +361,7 @@ void x360_audio_poll(x360_machine *x);
 void x360_audio_close(x360_machine *x);
 uint64_t x360_audio_next_event(x360_machine *x);
 int x360_set_content_root(x360_machine *x, const char *root, const char *name);
+int x360_content_remove(x360_machine *x, const char *name); /* content/<name> and what it holds: 0, or -1 */
 
 /* x360_file.c: the file calls (x360_kernel.c's table points at them) */
 void x360_file_close(x360_machine *x, uint32_t handle);

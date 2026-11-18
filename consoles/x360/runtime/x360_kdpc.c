@@ -235,7 +235,7 @@ static int apc_insert(x360_machine *x, uint32_t apc, uint32_t arg1, uint32_t arg
 }
 
 /* a user APC of the runtime's own: routine(context, arg1, arg2) on the thread */
-static int apc_queue_user(x360_machine *x, uint32_t kthread, uint32_t routine, uint32_t ctx, uint32_t a1, uint32_t a2)
+int x360_apc_queue_user(x360_machine *x, uint32_t kthread, uint32_t routine, uint32_t ctx, uint32_t a1, uint32_t a2)
 {
     uint32_t apc = x->kobj.apc_free;
     if (apc)
@@ -444,7 +444,7 @@ static void k_NtQueueApcThread(x360_machine *x, x360_thread *t, xe_cpu *c)
         RET(X_STATUS_INVALID_HANDLE);
         return;
     }
-    RET(apc_queue_user(x, kth, A(1), A(2), A(3), A(4)) ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL);
+    RET(x360_apc_queue_user(x, kth, A(1), A(2), A(3), A(4)) ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL);
 }
 
 /* ---- alerts, suspension, IRQL ---- */
@@ -607,7 +607,7 @@ void x360_timers_fire(x360_machine *x)
         if (dpc)
             dpc_insert(x, dpc, (uint32_t)at, (uint32_t)(at >> 32));
         if (tm->apc_routine)
-            apc_queue_user(x, tm->apc_thread, tm->apc_routine, tm->apc_ctx, (uint32_t)at, (uint32_t)(at >> 32));
+            x360_apc_queue_user(x, tm->apc_thread, tm->apc_routine, tm->apc_ctx, (uint32_t)at, (uint32_t)(at >> 32));
         if (tm->period) { /* a late timer does not fire in a burst to catch up */
             uint64_t step = (uint64_t)tm->period * 10000;
             tm->due += step * ((now - tm->due) / step + 1);

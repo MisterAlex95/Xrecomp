@@ -412,7 +412,7 @@ static void test_more(const char *dir)
     memcpy(X->base + cd + 0x108, "slot0", 6);
     uint32_t root = x360_kalloc(X, 8);
     memcpy(X->base + root, "save", 5);
-    uint32_t r = XM(X360_xam_XamContentCreateEx, 9, 0, root, cd, 3, disp, 0, 0, 0, 0);
+    uint32_t r = XM(X360_xam_XamContentCreateEx, 9, 0, root, cd, 4, disp, 0, 0, 0, 0); /* OPEN_ALWAYS */
     CHECK(r == 0 && x360_r32(X, disp) == 1, "content created: %X, disposition %u", r, x360_r32(X, disp));
     uint32_t hp = x360_kalloc(X, 8), iosb = x360_kalloc(X, 8);
     CHECK(K(X360_xboxkrnl_NtCreateFile, 9, hp, 0xC0000000u, attrs("save:\\data.bin"), iosb, 0, 0, 0, 5, 0x40) == 0,
@@ -645,8 +645,8 @@ static void test_input_and_cheats(void)
 static void test_strict_imports(void)
 {
     X->strict_imports = 1;
-    K(X360_xboxkrnl_XexLoadImage, 1, 0);
-    CHECK(X->status == X360_ERROR && strstr(X->error, "XexLoadImage"), "strict imports: %s",
+    XM(X360_xam_XamSwapDisc, 0);
+    CHECK(X->status == X360_ERROR && strstr(X->error, "XamSwapDisc"), "strict imports: %s",
           X->error);
     X->status = X360_RUNNING;
     X->strict_imports = 0;

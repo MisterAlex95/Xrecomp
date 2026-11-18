@@ -206,15 +206,17 @@ static void k_NtReadFileScatter(x360_machine *x, x360_thread *t, xe_cpu *c)
 static void k_RtlCaptureContext(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    /* the context record's integer registers (CONTEXT: the GPRs from +0x80 in Xenia's X_CONTEXT): enough for
-     * code that walks its own stack; floats and vectors are left zero */
+    /* the CONTEXT x360_seh.c hands to handlers and RtlVirtualUnwind reads: as the caller will be when this returns */
     uint32_t p = A(0);
     if (p) {
-        memset(x->base + p, 0, 0x200);
-        for (int r = 0; r < 32; r++)
-            x360_w64(x, p + 0x80 + 8 * (uint32_t)r, c->gpr[r]);
-        x360_w64(x, p + 0x180, c->lr);
-        x360_w64(x, p + 0x188, c->ctr);
+        x360_seh_ctx k;
+        memset(&k, 0, sizeof k);
+        memcpy(k.gpr, c->gpr, sizeof k.gpr);
+        memcpy(k.fpr, c->fpr, sizeof k.fpr);
+        k.lr = c->lr, k.ctr = c->ctr, k.pc = c->pc, k.cr = c->cr;
+        k.xer = c->xer_so << 31 | c->xer_ov << 30 | c->xer_ca << 29;
+        memset(x->base + p, 0, 0x230);
+        x360_seh_write_context(x, p, &k);
     }
     RET(0);
 }
@@ -429,36 +431,6 @@ static void x_XGetVideoMode(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)c;
 }
 
-int x360_set_content_root(x360_machine *x, const char *root, const char *dir);
-
-static void x_XamContentCreateEx(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    /* (user, root name, XCONTENT_DATA*, flags, disposition*, license mask*, cache size, content size, overlapped):
-     * the content is the directory content/<file name> of the data directory, mounted on <root name>: */
-    char root[64] = "", name[48] = "";
-    for (int k = 0; k < 63 && A(1); k++)
-        if (!(root[k] = (char)x360_r8(x, A(1) + (uint32_t)k)))
-            break;
-    for (int k = 0; k < 42 && A(2); k++) {
-        char ch = (char)x360_r8(x, A(2) + 0x108 + (uint32_t)k);
-        if (!ch)
-            break;
-        name[k] = isalnum((unsigned char)ch) || ch == '_' || ch == '-' || ch == '.' ? ch : '_';
-    }
-    uint32_t flags = A(3), ov = A9(8);
-    int created = x360_set_content_root(x, root, name);
-    if (created < 0) {
-        RET(finish(x, ov, (flags & 3) == 3 ? X_ERROR_FILE_NOT_FOUND : X_ERROR_FUNCTION_FAILED, 0));
-        return;
-    }
-    if (A(4))
-        x360_w32(x, A(4), created ? 1 : 2); /* created / opened */
-    if (A(5))
-        x360_w32(x, A(5), 0xFFFFFFFFu);
-    RET(finish(x, ov, X_ERROR_SUCCESS, 0));
-}
-
 static void x_XamShowDeviceSelectorUI(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
@@ -578,7 +550,7 @@ static const x360_hle_row MORE[] = {
     KM(XeCryptBnQwBeSigVerify, k_XeCryptBnQwBeSigVerify),
     KM(XeCryptRotSumSha, k_XeCryptRotSumSha), KM(XeKeysGetKey, k_XeKeysGetKey),
     KM(__C_specific_handler, k_C_specific_handler),
-    XM2(XGetVideoMode, x_XGetVideoMode), XM2(XamContentCreateEx, x_XamContentCreateEx),
+    XM2(XGetVideoMode, x_XGetVideoMode),
     XM2(XamShowDeviceSelectorUI, x_XamShowDeviceSelectorUI), XM2(XamShowMessageBoxUI, x_XamShowMessageBoxUI),
     XM2(XamShowMessageBoxUIEx, x_XamShowMessageBoxUI), XM2(XamShowDirtyDiscErrorUI, x_XamShowDirtyDiscErrorUI),
     XM2(NetDll_WSAStartup, x_NetDll_WSAStartup), XM2(NetDll_WSACleanup, x_net_ok), XM2(NetDll_XNetStartup, x_net_ok),

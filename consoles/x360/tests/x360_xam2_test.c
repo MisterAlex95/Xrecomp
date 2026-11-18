@@ -345,15 +345,21 @@ static void test_content(void)
     CHECK(XAM(X360_xam_XamEnumerate, 6, x360_r32(X, hp), 0, buf, 0x148, countp, 0) == 0 &&
               x360_r32(X, buf + 0x140) == 0x41560817, "aggregate: the title");
 
-    /* content cannot be removed by this file layer: said, not faked */
-    uint32_t ev3, ov3 = ov_new(&ev3);
-    CHECK(XAM(X360_xam_XamContentDelete, 3, 0, a, ov3) == IO_PENDING && x360_r32(X, ov3) == FUNCTION_FAILED &&
-              event_state(ev3) == 1, "delete fails");
-    CHECK(XAM(X360_xam_XamContentDeleteInternal, 2, missing, 0) == 2, "delete: missing");
-
     CHECK(XAM(X360_xam_XamContentClose, 2, root, 0) == 0, "closed");
     CHECK(XAM(X360_xam_XamContentClose, 2, root, 0) == 2, "closed twice");
     CHECK(XAM(X360_xam_XamContentFlush, 2, root, 0) == 0x57, "flush after close");
+
+    /* deleted for real; a completion routine is queued to the caller as a user APC: routine(result, length, overlapped) */
+    uint32_t ev3, ov3 = ov_new(&ev3);
+    x360_w32(X, ov3 + 0x10, 0x82000100u);
+    CHECK(XAM(X360_xam_XamContentDelete, 3, 0, a, ov3) == IO_PENDING && x360_r32(X, ov3) == 0 && event_state(ev3) == 1,
+          "deleted");
+    uint32_t apc = x360_cur(X)->apc_head;
+    CHECK(apc && x360_r32(X, apc + 0x18) == 0x82000100u && x360_r32(X, apc + 0x1C) == 0 &&
+              x360_r32(X, apc + 0x24) == ov3, "the completion routine is queued with its arguments");
+    CHECK(K(X360_xboxkrnl_KeRemoveQueueApc, 1, apc) == 1, "not delivered in this test");
+    CHECK(XAM(X360_xam_XamContentDelete, 3, 0, a, 0) == 2, "deleted: it is gone");
+    CHECK(XAM(X360_xam_XamContentDeleteInternal, 2, missing, 0) == 2, "delete: missing");
 
     uint32_t mask = galloc(4);
     CHECK(XAM(X360_xam_XamContentGetLicenseMask, 2, mask, 0) == 0 && x360_r32(X, mask) == 0xFFFFFFFFu, "license mask");

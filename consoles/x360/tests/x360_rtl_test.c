@@ -851,6 +851,19 @@ static void test_raise(void)
     X->status = 0;
 }
 
+/* RtlCaptureContext writes the CONTEXT RtlVirtualUnwind and the exception dispatcher read */
+static void test_capture_context(void)
+{
+    uint32_t p = galloc(0x240);
+    xe_cpu *c = cpu();
+    c->gpr[14] = 0x1122334455667788ull;
+    c->lr = 0x82001234u;
+    c->pc = 0x82001230u;
+    K(X360_xboxkrnl_RtlCaptureContext, 1, p);
+    CHECK(x360_r64(X, p + 0x18 + 8 * 14) == 0x1122334455667788ull, "r14 at the GPRs of the CONTEXT");
+    CHECK(x360_r32(X, p + 8) == 0x82001230u && x360_r32(X, p + 0xC) == 0x82001234u, "pc and lr");
+}
+
 int main(void)
 {
     if (hle_util_start())
@@ -870,5 +883,6 @@ int main(void)
     test_utf8();
     test_raise();
     printf("x360_rtl: %d checks\n", checks);
+    test_capture_context();
     return hle_util_end("x360_rtl");
 }
