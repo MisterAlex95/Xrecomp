@@ -192,12 +192,6 @@ void x360_x_XamUserIsOnlineEnabled(x360_machine *x, x360_thread *t, xe_cpu *c)
     RET(0);
 }
 
-void x360_x_XamInputGetCapabilities(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)x, (void)t;
-    RET(X_ERROR_DEVICE_NOT_CONNECTED);
-}
-
 void x360_x_XamEnableInactivityProcessing(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)x, (void)t;

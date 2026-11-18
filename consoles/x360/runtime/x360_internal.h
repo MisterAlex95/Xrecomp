@@ -93,6 +93,12 @@ typedef struct x360_audio_client {
     uint32_t frames_requested, frames_submitted;
 } x360_audio_client;
 
+typedef struct x360_pad_slot {
+    int connected;
+    uint32_t packet; /* X_INPUT_STATE's packet number: changes with the state */
+    x360_pad state;
+} x360_pad_slot;
+
 typedef struct x360_thunk {
     uint32_t addr;
     uint16_t ordinal;
@@ -131,6 +137,9 @@ struct x360_machine {
     x360_handle handles[X360_MAX_HANDLES];
     x360_timer timers[X360_MAX_TIMERS];
     x360_audio_client audio[8];
+    x360_pad_slot pads[4];
+    x360_pad_event *pad_script; /* a host's timed pad states (not state: the host gives it again) */
+    unsigned pad_script_n, pad_script_at;
     uint64_t tls_used;        /* KeTlsAlloc slots */
     uint64_t time_skip;       /* virtual 100 ns skipped while every thread waited */
 
@@ -229,10 +238,11 @@ X360_FILE_CALLS(X360_DECLARE_FILE_CALL)
     X(XamUserGetSigninInfo) X(XamUserCheckPrivilege) X(XamUserIsOnlineEnabled) X(XamInputGetCapabilities)            \
     X(XamEnableInactivityProcessing) X(XamNotifyCreateListener) X(XNotifyGetNext) X(XamShowSigninUI)                 \
     X(XamFeatureEnabled) X(XamResetInactivity)
-#define X360_XAM_ALIASES(Y)                                                                                            \
-    Y(XamInputGetCapabilitiesEx, XamInputGetCapabilities) Y(XamInputGetState, XamInputGetCapabilities)               \
-    Y(XamInputSetState, XamInputGetCapabilities) Y(XamInputGetKeystroke, XamInputGetCapabilities)                    \
-    Y(XamInputGetKeystrokeEx, XamInputGetCapabilities) Y(XamUserGetGamerTag, XamUserGetName)
+#define X360_XAM_ALIASES(Y) Y(XamUserGetGamerTag, XamUserGetName)
+/* x360_input.c: the controllers */
+#define X360_INPUT_CALLS(X)                                                                                            \
+    X(XamInputGetState) X(XamInputSetState) X(XamInputGetCapabilitiesEx) X(XamInputGetKeystroke)                     \
+    X(XamInputGetKeystrokeEx)
 /* x360_gpu.c: the Vd* calls */
 #define X360_GPU_CALLS(X)                                                                                              \
     X(VdInitializeRingBuffer) X(VdEnableRingBufferRPtrWriteBack) X(VdSetGraphicsInterruptCallback) X(VdSwap)         \
@@ -256,6 +266,9 @@ uint64_t x360_gpu_next_event(x360_machine *x);
 void x360_gpu_stats(x360_machine *x, uint64_t *packets, uint64_t *draws, uint64_t *swaps, uint32_t *vblanks);
 #define X360_DECLARE_XAM_CALL(name) void x360_x_##name(x360_machine *x, x360_thread *t, xe_cpu *c);
 X360_XAM_CALLS(X360_DECLARE_XAM_CALL)
+X360_INPUT_CALLS(X360_DECLARE_XAM_CALL)
+void x360_input_poll(x360_machine *x);
+uint64_t x360_input_next_event(x360_machine *x);
 
 /* x360_interp.c: run the instruction at the current PC; 0 on success, -1 (x->status set) otherwise */
 int x360_interp_one(x360_machine *x);

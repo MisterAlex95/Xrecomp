@@ -460,6 +460,38 @@ static void test_more(const char *dir)
     CHECK(XM(X360_xam_NetDll_socket, 4, 0, 2, 1, 6) == 0xFFFFFFFFu, "no network: sockets fail");
 }
 
+static void test_input_and_cheats(void)
+{
+    uint32_t st = x360_kalloc(X, 32);
+    x360_pad p = {0x1010, 200, 5, -32768, 1234, 32767, -1};
+    x360_set_pad(X, 1, &p);
+    CHECK(XM(X360_xam_XamInputGetState, 3, 1, 0, st) == 0 && x360_r16(X, st + 4) == 0x1010 &&
+              x360_r8(X, st + 6) == 200 && x360_r8(X, st + 7) == 5 && x360_r16(X, st + 8) == 0x8000 &&
+              x360_r16(X, st + 10) == 1234 && x360_r16(X, st + 12) == 0x7FFF && x360_r16(X, st + 14) == 0xFFFF,
+          "pad state");
+    uint32_t packet = x360_r32(X, st);
+    CHECK(XM(X360_xam_XamInputGetState, 3, 2, 0, st) == 0x48F, "user 2 not connected");
+    CHECK(XM(X360_xam_XamInputGetCapabilities, 3, 1, 0, st) == 0 && x360_r8(X, st) == 1, "capabilities");
+    /* a script: A pressed at 5 ms, the pad unplugged at 10 ms */
+    uint64_t now_ms = x360_now(X) / 10000;
+    x360_pad_event ev[2] = {{(uint32_t)now_ms + 5, 1, 1, {0x1000, 0, 0, 0, 0, 0, 0}},
+                            {(uint32_t)now_ms + 10, 1, 0, {0}}};
+    x360_set_pad_script(X, ev, 2);
+    X->time_skip += 60000;
+    x360_input_poll(X);
+    CHECK(XM(X360_xam_XamInputGetState, 3, 1, 0, st) == 0 && x360_r16(X, st + 4) == 0x1000 &&
+              x360_r32(X, st) != packet, "scripted state, a new packet number");
+    X->time_skip += 60000;
+    x360_input_poll(X);
+    CHECK(XM(X360_xam_XamInputGetState, 3, 1, 0, st) == 0x48F, "scripted unplug");
+    x360_set_pad_script(X, NULL, 0);
+    /* cheats: allocated memory only */
+    x360_cheat_write32(X, st, 0xCAFEF00Du);
+    CHECK(x360_cheat_read32(X, st) == 0xCAFEF00Du, "cheat word");
+    CHECK(x360_cheat_read32(X, 0x00001000u) == 0, "unallocated: 0");
+    x360_cheat_write32(X, 0x00001000u, 1); /* dropped, no fault */
+}
+
 static void test_strict_imports(void)
 {
     X->strict_imports = 1;
@@ -529,6 +561,7 @@ int main(void)
     test_system();
     test_gpu();
     test_strict_imports();
+    test_input_and_cheats();
     test_crypt();
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {

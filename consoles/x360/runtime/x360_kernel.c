@@ -1460,6 +1460,7 @@ static const hle_entry HLE[] = {
 #define X360_XAM_ENTRY(name) {X360_LIB_XAM, X360_xam_##name, x360_x_##name},
     X360_XAM_CALLS(X360_XAM_ENTRY)
 #define X360_XAM_ALIAS(name, fn) {X360_LIB_XAM, X360_xam_##name, x360_x_##fn},
+    X360_INPUT_CALLS(X360_XAM_ENTRY)
     X360_XAM_ALIASES(X360_XAM_ALIAS)
     K(VdQueryVideoMode), K(VdQueryVideoFlags), K(XexGetModuleSection), KA(KeLockL2, k_nop0),
     KA(KeUnlockL2, k_nop0), K(XAudioGetSpeakerConfig), K(KeTryToAcquireSpinLockAtRaisedIrql),

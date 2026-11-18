@@ -75,6 +75,25 @@ size_t x360_state_size(x360_machine *x);
 size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t cap);
 int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n);
 
+/* Controllers (x360_input.c): an XInput-style gamepad, set now or from a script of timed states (virtual ms). NULL
+ * disconnects. user 0..3. */
+typedef struct x360_pad {
+    uint16_t buttons; /* XINPUT_GAMEPAD_*: up 0x1, down 0x2, left 0x4, right 0x8, start 0x10, back 0x20, LS 0x40,
+                       * RS 0x80, LB 0x100, RB 0x200, A 0x1000, B 0x2000, X 0x4000, Y 0x8000 */
+    uint8_t left_trigger, right_trigger;
+    int16_t thumb_lx, thumb_ly, thumb_rx, thumb_ry;
+} x360_pad;
+typedef struct x360_pad_event {
+    uint32_t ms;
+    int user, connected;
+    x360_pad pad;
+} x360_pad_event;
+void x360_set_pad(x360_machine *x, int user, const x360_pad *p);
+int x360_set_pad_script(x360_machine *x, const x360_pad_event *events, unsigned n);
+/* Cheats: big-endian words at guest addresses, allocated memory only (reads 0 / drops the write elsewhere). */
+uint32_t x360_cheat_read32(x360_machine *x, uint32_t addr);
+void x360_cheat_write32(x360_machine *x, uint32_t addr, uint32_t v);
+
 typedef struct x360_stats {
     uint64_t native;       /* instructions run in lifted code */
     uint64_t interpreted;  /* instructions the interpreter ran */

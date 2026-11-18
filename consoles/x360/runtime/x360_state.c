@@ -160,6 +160,28 @@ static void sec_kernel(x360_machine *x, io *s)
     io_u32(s, &x->kalloc_cur);
     io_u32(s, &x->kalloc_end);
     io_u64(s, &x->rng);
+    for (int k = 0; k < 4; k++) {
+        x360_pad_slot *p = &x->pads[k];
+        uint32_t b = p->state.buttons, tr = (uint32_t)p->state.left_trigger << 8 | p->state.right_trigger;
+        uint32_t l = (uint16_t)p->state.thumb_lx | (uint32_t)(uint16_t)p->state.thumb_ly << 16;
+        uint32_t r = (uint16_t)p->state.thumb_rx | (uint32_t)(uint16_t)p->state.thumb_ry << 16;
+        io_i32(s, &p->connected);
+        io_u32(s, &p->packet);
+        io_u32(s, &b);
+        io_u32(s, &tr);
+        io_u32(s, &l);
+        io_u32(s, &r);
+        if (s->load) {
+            p->state.buttons = (uint16_t)b, p->state.left_trigger = (uint8_t)(tr >> 8);
+            p->state.right_trigger = (uint8_t)tr;
+            p->state.thumb_lx = (int16_t)l, p->state.thumb_ly = (int16_t)(l >> 16);
+            p->state.thumb_rx = (int16_t)r, p->state.thumb_ry = (int16_t)(r >> 16);
+        }
+    }
+    uint32_t at = x->pad_script_at;
+    io_u32(s, &at);
+    if (s->load)
+        x->pad_script_at = at <= x->pad_script_n ? at : x->pad_script_n;
     for (int k = 0; k < 8; k++) {
         x360_audio_client *a = &x->audio[k];
         io_u32(s, &a->callback);

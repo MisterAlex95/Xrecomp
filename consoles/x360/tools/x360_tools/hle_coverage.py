@@ -38,7 +38,7 @@ def implemented():
         hdr = f.read()
     # the macro tables: X360_<GROUP>_CALLS(X) / X360_<GROUP>_ALIASES(Y), each a run of continued lines
     for m in re.finditer(r"#define X360_(\w+)_(CALLS|ALIASES)\((X|Y)\)((?:[^\n]*\\\n)*[^\n]*)", hdr):
-        lib = "xam" if m.group(1) == "XAM" else "xboxkrnl"
+        lib = "xam" if m.group(1) in ("XAM", "INPUT") else "xboxkrnl"
         for n in re.finditer(r"\b[XY]\((\w+)", m.group(4)):
             out.add((lib, n.group(1)))
     with open(os.path.join(RUNTIME, "x360_more.c")) as f:

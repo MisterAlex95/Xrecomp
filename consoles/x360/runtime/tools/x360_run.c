@@ -8,7 +8,7 @@
  * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
  * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
  * cache: / hdd:. --save-state: write a save state when the run stops (budget or end); --load-state: start from one.
- * --seconds N: stop after N seconds of the title's virtual time (default 3600; 0: no limit). --strict-imports: stop at the first import without an HLE (by name). Runs until the title ends or N instructions (default 2 billion). --missed: addresses reached without lifted code,
+ * --pad-script FILE: timed controller states (see load_pad_script). --seconds N: stop after N seconds of the title's virtual time (default 3600; 0: no limit). --strict-imports: stop at the first import without an HLE (by name). Runs until the title ends or N instructions (default 2 billion). --missed: addresses reached without lifted code,
  * for x360_tools.recomp --discovered. Exit status: the title's exit code when it ended (0..255), 1 on an error, a
  * missed address or the budget running out, 2 on bad arguments or input. */
 #include <dlfcn.h>
@@ -36,10 +36,45 @@ static uint8_t *read_file(const char *path, size_t *size)
     return p;
 }
 
+/* --pad-script FILE: one line per change, "MS USER BUTTONS [LT RT LX LY RX RY]" (BUTTONS in hex, XINPUT bits;
+ * the rest decimal) or "MS USER -" to unplug; # starts a comment. Times are virtual milliseconds, in order. */
+static int load_pad_script(x360_machine *x, const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    x360_pad_event ev[1024];
+    unsigned n = 0;
+    char line[256];
+    while (n < 1024 && fgets(line, sizeof line, f)) {
+        char *h = strchr(line, '#');
+        if (h)
+            *h = 0;
+        unsigned ms, user;
+        char b[32];
+        int lt = 0, rt = 0, lx = 0, ly = 0, rx = 0, ry = 0;
+        int got = sscanf(line, "%u %u %31s %d %d %d %d %d %d", &ms, &user, b, &lt, &rt, &lx, &ly, &rx, &ry);
+        if (got < 3)
+            continue;
+        x360_pad_event *e = &ev[n++];
+        memset(e, 0, sizeof *e);
+        e->ms = ms, e->user = (int)user;
+        e->connected = strcmp(b, "-") != 0;
+        if (e->connected) {
+            e->pad.buttons = (uint16_t)strtoul(b, NULL, 16);
+            e->pad.left_trigger = (uint8_t)lt, e->pad.right_trigger = (uint8_t)rt;
+            e->pad.thumb_lx = (int16_t)lx, e->pad.thumb_ly = (int16_t)ly;
+            e->pad.thumb_rx = (int16_t)rx, e->pad.thumb_ry = (int16_t)ry;
+        }
+    }
+    fclose(f);
+    return x360_set_pad_script(x, ev, n);
+}
+
 int main(int argc, char **argv)
 {
     const char *path = NULL, *pack = NULL, *logp = NULL, *dbgp = NULL, *missedp = NULL, *disc = NULL, *data_dir = NULL,
-               *gpu_trace = NULL, *shaders = NULL, *save_state = NULL, *load_state = NULL;
+               *gpu_trace = NULL, *shaders = NULL, *save_state = NULL, *load_state = NULL, *pad_script = NULL;
     unsigned long long insns = 2000000000ull;
     int stats = 0, verbose = 0, strict = 0;
     uint32_t seconds = 3600;
@@ -54,6 +89,8 @@ int main(int argc, char **argv)
             load_state = argv[++i];
         else if (!strcmp(argv[i], "--dump-shaders") && i + 1 < argc)
             shaders = argv[++i];
+        else if (!strcmp(argv[i], "--pad-script") && i + 1 < argc)
+            pad_script = argv[++i];
         else if (!strcmp(argv[i], "--seconds") && i + 1 < argc)
             seconds = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--strict-imports"))
@@ -108,6 +145,10 @@ int main(int argc, char **argv)
     x360_set_output(x, dbg, log, verbose);
     x360_set_strict_imports(x, strict);
     x360_set_time_limit(x, seconds);
+    if (pad_script && load_pad_script(x, pad_script)) {
+        fprintf(stderr, "x360_run: %s: cannot read the pad script\n", pad_script);
+        return 2;
+    }
     if (disc && x360_set_disc(x, disc, why, sizeof why)) {
         fprintf(stderr, "x360_run: %s\n", why);
         return 2;

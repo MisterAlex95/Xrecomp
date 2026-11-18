@@ -376,6 +376,9 @@ static uint64_t next_deadline(x360_machine *x)
     g = x360_audio_next_event(x);
     if (g && (!d || g < d))
         d = g;
+    g = x360_input_next_event(x);
+    if (g && (!d || g < d))
+        d = g;
     return d;
 }
 
@@ -503,6 +506,7 @@ int x360_run(x360_machine *x, uint64_t insns)
         x360_timers_fire(x);
         x360_gpu_poll(x);
         x360_audio_poll(x);
+        x360_input_poll(x);
         if (x->timestamp_bundle) { /* KeTimeStampBundle: interrupt time, system time, tick count (ms) */
             uint64_t now = x360_now(x);
             x360_w64(x, x->timestamp_bundle, now);
@@ -601,6 +605,7 @@ void x360_destroy(x360_machine *x)
         return;
     x360_fs_free(x);
     x360_gpu_free(x);
+    free(x->pad_script);
     x360_mem_free(x);
     free(x->thunks);
     free(x->fn_tab);
