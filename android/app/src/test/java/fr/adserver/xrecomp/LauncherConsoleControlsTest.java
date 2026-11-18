@@ -1,5 +1,6 @@
 package fr.adserver.xrecomp;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -525,6 +526,33 @@ public class LauncherConsoleControlsTest {
         assertEquals("cross=east", cfgLine("RECOMP_PS1_PAD_MAP"));
         assertFalse(a.romMapForTest().isDefault());
         shot(a, "console-controls-5-ps1");
+    }
+
+    /**
+     * XBA-274: a GameCube DOL's Controls: its own buttons (A, B, X, Y, Z, L, R, Start, the cross) and its two sticks,
+     * not the N64's (the screen used to show the N64's 14 targets over the GameCube's 12); a change goes to
+     * RECOMP_GC_PAD_MAP, and a game's own mapping reaches the runtime (ConsoleControls.runEnv).
+     */
+    @Test
+    public void gcButtons() throws Exception {
+        File rom = rom("gc", "Pad Test.dol", ConsoleTest.dol());
+        LauncherActivity a = launch();
+        String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(rom)).tid;
+        assertEquals(Console.GC, Console.ofKey(key));
+        openControls(a, "Pad Test");
+        for (int t = 0; t < ConsolePadMap.targets(Console.GC).length; t++)
+            assertNotNull("row " + t, row(a, app.getString(ConsoleControls.targetLabel(Console.GC, t))));
+        assertNull("no C buttons", row(a, app.getString(R.string.CC_C_UP)));
+        assertEquals(app.getString(R.string.SRC_WEST), row(a, app.getString(R.string.CC_X)).value);
+        assertEquals(app.getString(R.string.STICK_RIGHT), row(a, app.getString(R.string.CC_C_STICK)).value);
+        focusRow(a, app.getString(R.string.CC_X));
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertTrue(cfgLine("RECOMP_GC_PAD_MAP"), cfgLine("RECOMP_GC_PAD_MAP").startsWith("x="));
+        shot(a, "console-controls-6-gc");
+        assertTrue(ConsoleControls.storeGame(app, key, ConsolePadMap.parse(Console.GC, "z=north")));
+        String[][] env = ConsoleControls.runEnv(app, key);
+        assertArrayEquals(new String[] { "RECOMP_GC_PAD_MAP", "z=north" }, env[3]);
+        assertNull(env[2][1]);
     }
 
     private static void pad(LauncherActivity a, int code, boolean down) {

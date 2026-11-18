@@ -162,6 +162,7 @@ public class ConsolePadMapTest {
         assertArrayEquals(new String[] { "RECOMP_GBA_PAD_MAP", "b=north" }, env[0]);
         assertArrayEquals(new String[] { "RECOMP_PS1_PAD_MAP", null }, env[1]);
         assertArrayEquals(new String[] { "RECOMP_N64_PAD_MAP", null }, env[2]);
+        assertArrayEquals(new String[] { "RECOMP_GC_PAD_MAP", null }, env[3]);   // XBA-274
         ConsoleControls.storeGame(app, key, new ConsolePadMap(Console.GBA));
         assertEquals("", ConsoleControls.gameText(app, key));
         assertEquals("", ConsoleControls.runEnv(app, key)[0][1]);

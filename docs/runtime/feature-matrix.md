@@ -25,7 +25,7 @@ app and not in this matrix.
 | Cheats | yes: `src/kernel/xbox_cheats.c` (per vblank); UI `app/Cheats.checkXbox` | yes: `gba_cheats.h` | yes: `ps1_runtime.c` | yes: `n64_runtime.c` | yes: `gc_runtime.c`; UI `app/Cheats.checkGc` |
 | Frame generation | yes: `src/video/fb_present_sdl.c` (framegen pacer) | yes: `src/video/host_window.c` `host_window_present_rgba` -> `fg_present` | yes: same path | yes: `host_window_present_rgba_shared` | partial: only the CPU-RGB fallback; the GX and GPU-YUV pictures go through `host_window_present_texture`, which never reaches `fg_present` |
 | Perf line | yes: `fb_present_sdl.c` `perf_overlay_tick`; menu `app/GameMenu` (Item.PERF, every console) | yes: `host_window.c` overlay + `host_perf` | yes | yes | yes |
-| Pad remapping | yes: `RECOMP_PAD_MAP` (`src/input/xinput_device.c`), UI `app/PadMapping` | yes: `console_pad` (`RECOMP_GBA_PAD_MAP`), UI `app/ConsoleControls` | yes | yes (+ stick range / dead zone) | partial: runtime yes (`gc_runtime.c` `console_pad_load`, `gc_pad_map.c`), but the Controls screen showed the N64's targets (`app/ConsoleControls.targetLabel` / `groups` default branch: 14 targets over the GameCube's 12) and a game's own mapping was never exported (`ConsoleControls.runEnv` listed GBA, PS1, N64) |
+| Pad remapping | yes: `RECOMP_PAD_MAP` (`src/input/xinput_device.c`), UI `app/PadMapping` | yes: `console_pad` (`RECOMP_GBA_PAD_MAP`), UI `app/ConsoleControls` | yes | yes (+ stick range / dead zone) | yes: runtime `gc_runtime.c` `console_pad_load` + `gc_pad_map.c`; UI `app/ConsoleControls` (XBA-274: the Controls screen used to show the N64's 14 targets over the GameCube's 12, `targetLabel` / `groups` default branch) |
 | Rumble | yes: `src/usb/ohci.c` -> `xbox_InputSetState`; `RECOMP_RUMBLE` (`app/RecompConfig`, shared) | n/a: no motor on a GBA pad (rumble carts are cartridge hardware, not emulated) | yes: DualShock, `ps1_runtime.c` | yes: Rumble Pak, `n64_runtime.c`, UI `app/N64Pak` | yes: SI motor, `gc_runtime.c` `rumble()` |
 | On-screen (touch) pad | yes: `app/TouchPad` Layout.XBOX | yes: Layout.GBA | yes: Layout.PS1 / PS1_ANALOG | yes: Layout.N64 | partial: no layout of its own, `app/TouchPad.layoutFor` falls back to the Xbox's (mapped through the GameCube defaults) |
 | Hotkeys (states, slots, fast-forward, rewind) | partial: pad chords only (`src/usb/usb_gamepad.c` `pad_hotkeys`); no keyboard hotkeys (`recomp_hotkeys_keys_update` never called under `src/`) | yes: pad + keyboard (`src/platform/recomp_hotkeys.c`, `gba_runtime.c`) | yes (+ F6 next disc) | yes | yes |
@@ -53,7 +53,7 @@ or rewind UI on any desktop (hotkeys and files only), and no screenshot or fulls
 
 ## Gaps, in the order they are filled (XBA-274)
 
-1. GameCube controls in the app: the Controls screen and the per-game mapping (`app/ConsoleControls`).
+1. GameCube controls in the app: the Controls screen (`app/ConsoleControls`). Done.
 2. GameCube internal resolution in the app (`app/ConsoleVideo.applies`, `app/GameSettings.appliesTo`).
 3. Xbox rewind in a game's settings (`app/GameSettings.appliesTo`).
 4. GameCube in the desktop `xrecomp` CLI (`tools/xrecomp`).

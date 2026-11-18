@@ -5,6 +5,7 @@
     <string name="CC_CONSOLE_GBA">Game Boy Advance</string>
     <string name="CC_CONSOLE_PS1">PlayStation</string>
     <string name="CC_CONSOLE_N64">Nintendo 64</string>
+    <string name="CC_CONSOLE_GC">GameCube</string>
 
     <!-- The consoles' buttons (what the game gets). -->
     <string name="CC_A">A</string>
@@ -12,6 +13,8 @@
     <string name="CC_L">L</string>
     <string name="CC_R">R</string>
     <string name="CC_Z">Z</string>
+    <string name="CC_X">X</string>
+    <string name="CC_Y">Y</string>
     <string name="CC_START">Start</string>
     <string name="CC_SELECT">Select</string>
     <string name="CC_CROSS">Cross</string>
@@ -30,6 +33,8 @@
     <string name="CC_C_RIGHT">C right</string>
     <string name="CC_GROUP_C">C buttons</string>
     <string name="CC_STICK">Analog stick</string>
+    <string name="CC_MAIN_STICK">Control stick</string>
+    <string name="CC_C_STICK">C stick</string>
     <string name="CC_GROUP_STICK">Analog stick</string>
 
     <string name="CC_SCOPE">Mapping for</string>
