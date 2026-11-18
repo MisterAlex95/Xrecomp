@@ -95,6 +95,9 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
         funcs = [f for f in funcs if f.entry not in omit]
     resume = {}
     os.makedirs(outdir, exist_ok=True)
+    for fn in os.listdir(outdir):  # an earlier lift's files (XBA-283 renamed them: no duplicate functions at link)
+        if fn.startswith("x360_rc_") and fn.endswith(".c"):
+            os.remove(os.path.join(outdir, fn))
     unlifted = collections.Counter()
     fallbacks = 0
     inlined = 0

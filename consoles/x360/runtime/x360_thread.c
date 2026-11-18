@@ -14,6 +14,7 @@
  * +4), so the Ke* calls on guest structures and the Nt* calls on handles meet. Time is virtual: instructions run
  * (one 100 ns tick per 320) plus what was skipped when every thread was waiting for a timeout. */
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -668,6 +669,15 @@ static uint64_t host_now_100ns(void)
 
 /* One guest thread on its worker, the lock held on entry and on return: until it blocks, ends, or the scheduler
  * drains the workers. */
+/* the lock to the others for a moment (the interpreter's reservation lives in the shared machine: dropped) */
+static void host_yield(x360_machine *x, xe_cpu *c)
+{
+    c->reserve = 0;
+    pthread_mutex_unlock(&x->host->mu);
+    sched_yield();
+    pthread_mutex_lock(&x->host->mu);
+}
+
 static void host_run_thread(x360_machine *x, int k)
 {
     struct x360_host *h = x->host;
@@ -715,8 +725,10 @@ static void host_run_thread(x360_machine *x, int k)
             int r = x360_interp_run(x, t, !resumed);
             if (r < 0)
                 break;
-            if (r > 0)
+            if (r > 0) { /* its slice ended in interpreted code: let the others have the lock */
                 t->interp = 1;
+                host_yield(x, c);
+            }
             continue;
         }
         /* lifted code, in parallel: until it needs the runtime or its slice ends */
@@ -749,8 +761,10 @@ static void host_run_thread(x360_machine *x, int k)
             int r = x360_interp_run(x, t, 1);
             if (r < 0)
                 break;
-            if (r > 0)
+            if (r > 0) {
                 t->interp = 1;
+                host_yield(x, c);
+            }
         }
     }
 }

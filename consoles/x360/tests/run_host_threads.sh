@@ -3,7 +3,8 @@
 # (x360_run --host-threads, experimental). The devkitPPC titles (tools/consoles/build_homebrew.sh x360; skipped (77)
 # when not built): atomics (four threads on shared counters with lwarx / stwcx. and ldarx / stdcx. loops and a spin
 # lock) must print atomics.txt cooperatively and, three times, in parallel; hello_c (two workers, a critical section,
-# events) must print hello_c.txt in parallel. A pack without atomic reservations (no xe_rc_features) is refused
+# events) must print hello_c.txt in parallel; both again lifted from the entry point only (--no-pdata: the threads'
+# code interpreted, under the lock). A pack without atomic reservations (no xe_rc_features) is refused
 # (exit 2). Exits 77 when python3 or cc is missing.
 run=$1
 work=$2
@@ -23,11 +24,13 @@ printf 'Hello from the disc!' >"$work/disc/data/hello.txt"
 printf 'binary data' >"$work/disc/data/b.bin"
 printf 'readme\n' >"$work/disc/readme.txt"
 export PYTHONPATH="$repo:$repo/consoles/x360/tools"
-pack() { # pack NAME
-    "$py" "$here/homebrew/elf2xex.py" "$hb/$1.elf" "$work/$1.xex" || exit 1
-    "$py" -m x360_tools.recomp "$work/$1.xex" "$work/$1.src" --no-comments >/dev/null || exit 1
+pack() { # pack NAME [RECOMP_ARGS]: NAME.xex, NAME.so
+    name=$1
+    shift
+    "$py" "$here/homebrew/elf2xex.py" "$hb/$name.elf" "$work/$name.xex" || exit 1
+    "$py" -m x360_tools.recomp "$work/$name.xex" "$work/$name.src" --no-comments "$@" >/dev/null || exit 1
     "$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 -I "$repo/consoles/x360/runtime" \
-        -I "$repo/consoles/gc/runtime" -o "$work/$1.so" "$work/$1.src"/*.c -lm || exit 1
+        -I "$repo/consoles/gc/runtime" -o "$work/$name.so" "$work/$name.src"/*.c -lm || exit 1
 }
 check() { # check NAME EXPECTED LABEL [x360_run options]
     name=$1 expected=$2 label=$3
@@ -47,6 +50,12 @@ for i in 1 2 3; do
     check atomics "$here/atomics.txt" "atomics-host-$i" --host-threads
 done
 check hello_c "$here/hello_c.txt" hello_c-host --host-threads
+# with the interpreter: lifted from the entry point only, the threads' code is interpreted (under the lock)
+pack atomics --no-pdata
+check atomics "$here/atomics.txt" atomics-host-interp --host-threads
+pack hello_c --no-pdata
+check hello_c "$here/hello_c.txt" hello_c-host-interp --host-threads
+pack atomics
 # a pack made before XBA-283 (no xe_rc_features): refused
 grep -v xe_rc_features "$work/atomics.src/x360_rc_table.c" >"$work/old_table.c"
 "$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 -I "$repo/consoles/x360/runtime" \
