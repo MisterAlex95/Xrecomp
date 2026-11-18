@@ -125,45 +125,7 @@ def test_vmx128_register_fields_round_trip():
 
 # ---------------------------------------------------------------- assembler with labels
 
-class Prog:
-    """Leaf functions back to back in .text; branch targets by label."""
-
-    def __init__(self, base):
-        self.base = base
-        self.words = []
-        self.labels = {}
-        self.fixups = []
-        self.funcs = []
-
-    @property
-    def here(self):
-        return self.base + 4 * len(self.words)
-
-    def func(self, name):
-        self.funcs.append([name, len(self.words), None])
-        self.label(name)
-
-    def end(self):
-        self.funcs[-1][2] = len(self.words)
-
-    def label(self, name):
-        self.labels[name] = self.here
-
-    def __call__(self, *ws):
-        for w in ws:
-            if isinstance(w, list):
-                self.words.extend(w)
-            else:
-                self.words.append(w)
-
-    def branch(self, enc, label):
-        self.fixups.append((len(self.words), enc, label))
-        self.words.append(0)
-
-    def link(self):
-        for k, enc, label in self.fixups:
-            self.words[k] = enc(self.base + 4 * k, self.labels[label])
-        return self.words
+from .prog import Prog  # noqa: E402,F401  (kept importable from here)
 
 
 def program(text_base):
@@ -301,7 +263,7 @@ def ref_mix(a, b, n):
     r32 = (((b & 0xFFFFFFFF) << 4) | ((b & 0xFFFFFFFF) >> 28)) & 0xFFFFFFFF
     m32 = 0xF000000F                                             # MASK(28, 3), wrapping
     rlw = (r32 << 32) | (r32 & m32)                              # 64-bit mode: high word replicated
-    carry = 1 if x + b > M64 else 0
+    carry = 1 if (x & 0xFFFFFFFF) + (b & 0xFFFFFFFF) > 0xFFFFFFFF else 0  # 32-bit mode: the low words' carry
     m = ((M64 >> 8) & ~(M64 >> 48)) & M64                        # MASK(8, 47)
     ins = (rotl64(b, 16) & m) | (x & ~m & M64)
     out = [x, hi, q & M64, rlw, s32(s) & M64, s32(x) & M64, x >> clz if clz < 64 else 0,
@@ -431,8 +393,9 @@ def test_synthetic_title_parses_and_lifts(tmp_path):
     assert s["functions"] == len(funcs)
     assert s["interp_fallback_insns"] == 0, s["unlifted"]
     text = (tmp_path / "x360_rc_000.c").read_text()
-    assert "xv_msum4fp(V(100), V(64))" in text
-    assert "V(73) = xv_maddfp(V(72), V(80), V(73));" in text  # vmaddfp128: vD = vA * vB + vD
+    assert "xv_msum4fp(xv_daz(c->vscr, V(100)), xv_daz(c->vscr, V(64)))" in text
+    assert ("V(73) = xv_daz(c->vscr, xv_maddfp(xv_daz(c->vscr, V(72)), xv_daz(c->vscr, V(80)), "
+            "xv_daz(c->vscr, V(73))));") in text  # vmaddfp128: vD = vA * vB + vD
 
 
 @pytest.mark.skipif(not shutil.which("cc") or not sys.platform.startswith("linux"), reason="no C compiler / not Linux")

@@ -1,13 +1,14 @@
-"""python3 -m tools.xex FILE.xex [--key-file KEY]... [--json FILE] [--image OUT]
+"""python3 -m tools.xex FILE.xex [--key-file KEY]... [--json FILE] [--image OUT] [--plain OUT.xex]
 
 Prints what the XEX2 holds (headers, imports by library and ordinal, sections, .pdata). Keys are never stored in the
-repository: --key-file takes a file of your own (16 raw bytes or 32 hex digits), as does $XEX_KEY_FILE.
+repository: --key-file takes a file of your own (16 raw bytes or 32 hex digits), as does $XEX_KEY_FILE. --plain
+writes the XEX back with its image decrypted and expanded (what consoles/x360's x360_run loads).
 """
 import argparse
 import json
 import sys
 
-from .xex import IMPORT_THUNK, XexError, load_keys, parse_xex, summary, version_str
+from .xex import IMPORT_THUNK, XexError, load_keys, parse_xex, plain_xex, summary, version_str
 
 
 def main(argv=None):
@@ -16,11 +17,13 @@ def main(argv=None):
     ap.add_argument("--key-file", action="append", default=[], help="AES key file (repeatable)")
     ap.add_argument("--json", help="write the summary as JSON")
     ap.add_argument("--image", help="write the decrypted, expanded PE image")
+    ap.add_argument("--plain", help="write the XEX2 with its image decrypted and expanded (for x360_run)")
     a = ap.parse_args(argv)
     try:
         keys = load_keys(a.key_file)
         with open(a.xex, "rb") as f:
-            img = parse_xex(f.read(), keys)
+            raw = f.read()
+        img = parse_xex(raw, keys)
     except (OSError, XexError) as ex:
         print("error: %s" % ex, file=sys.stderr)
         return 1
@@ -58,6 +61,12 @@ def main(argv=None):
     if a.image and img.image is not None:
         with open(a.image, "wb") as f:
             f.write(img.image)
+    if a.plain:
+        if img.image is None:
+            print("error: --plain: %s" % img.image_note, file=sys.stderr)
+            return 1
+        with open(a.plain, "wb") as f:
+            f.write(plain_xex(raw, img))
     return 0
 
 

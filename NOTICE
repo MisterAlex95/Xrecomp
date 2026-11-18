@@ -256,6 +256,32 @@ PlayStation devices — references (no code taken)
   No code was taken from DuckStation, Mednafen / Beetle PSX or PCSX-Redux.
 
 
+Xbox 360 — references (no code taken)
+-------------------------------------
+
+  consoles/x360 and tools/xex follow Xenia (https://github.com/xenia-project/
+  xenia, BSD 3-Clause, Copyright Ben Vanik and contributors) for the XEX2
+  layout, kernel / XAM signatures and structure layouts, the VMX128
+  encodings and pack formats, the Xenos PM4 packet formats and registers,
+  the shader microcode instruction semantics that xenos_glsl.py translates
+  (ucode.h's descriptions: scalar operands, Direct3D 9 multiplication,
+  predicates, control flow, loop constants, cube) and the disc partition
+  offsets src/xiso probes (disc_image_device.cc). The renderer's tests run on
+  Mesa llvmpipe (MIT) in a container, as a tool: none of its code is here.
+  consoles/x360/runtime/x360_exports.inc is a list of (library, ordinal,
+  name, kind) made by x360_tools/gen_exports.py from Xenia's
+  xboxkrnl_table.inc and xam_table.inc: the console's ABI, with Xenia
+  credited. The MSVC helper patterns checked by the tests are the ones
+  XenonRecomp (hedge-dev, MIT) publishes; its instruction list was compared
+  with the lifter's. The Xenos shader microcode decoder's tests pack
+  instructions from the field order of Mesa freedreno's a2xx definitions
+  (src/freedreno/ir2/instr-a2xx.h, MIT, Copyright Rob Clark): field widths
+  only, no code. tools/xex/lzx.py is written from
+  Microsoft's [MS-PATCH] LZX specification; libmspack and wimlib (LGPL) and
+  Free Pascal's chmcmd were used only as tools to make and check test
+  vectors (tools/xex/lzx_vectors/gen.sh), none of their code is here.
+
+
 Derived algorithms — credited, independently implemented
 --------------------------------------------------------
 
@@ -268,6 +294,17 @@ Derived algorithms — credited, independently implemented
   src/d3d/d3d8_combiners.h
     NV2A register-combiner translation. Cites xemu's pgraph combiner
     implementation as a reference for the hardware's behaviour.
+
+  consoles/x360/runtime/xenos_gl.c
+    tiled2d / tiled3d, the Xenos 2D / 3D tiled texture addressing, follow
+    Xenia's src/xenia/gpu/texture_address.h (Tiled2D, Tiled3D, TiledCombine;
+    BSD 3-Clause, Copyright Ben Vanik, its text verbatim in
+    consoles/x360/runtime/LICENSE-xenia.txt: next to the code, which is not in the app)
+    closely enough to be treated as derived code. The same file's base level
+    texture layout, resolve rectangle and vertex fetch packings, and
+    consoles/x360/tools/x360_tools/xenos_glsl.py's instruction semantics, are
+    written from Xenia's descriptions (texture_util.cc, draw_util.cc,
+    spirv_shader_translator_fetch.cc, ucode.h).
 
   Algorithms and hardware behaviour are not themselves copyrightable, and
   these are our own implementations. They are listed here because the debt is

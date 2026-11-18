@@ -1,0 +1,117 @@
+{
+ "long-100.wim": {
+  "data": "long",
+  "encoder": "wimlib 1.14.4-1.1+b3 level 100",
+  "flavour": "wim",
+  "window_bits": 19
+ },
+ "long.chm": {
+  "chm": {
+   "compressed_size": 75116,
+   "file_length": 211999,
+   "file_offset": 2782,
+   "out_size": 218878,
+   "reset_interval": 2,
+   "window_bits": 16
+  },
+  "data": "long",
+  "encoder": "chmcmd 3.2.2+dfsg-46",
+  "flavour": "cab"
+ },
+ "mid.chm": {
+  "chm": {
+   "compressed_size": 24654,
+   "file_length": 49500,
+   "file_offset": 2781,
+   "out_size": 56378,
+   "reset_interval": 2,
+   "window_bits": 16
+  },
+  "data": "mid",
+  "encoder": "chmcmd 3.2.2+dfsg-46",
+  "flavour": "cab"
+ },
+ "mixed-100.wim": {
+  "data": "mixed",
+  "encoder": "wimlib 1.14.4-1.1+b3 level 100",
+  "flavour": "wim",
+  "window_bits": 18
+ },
+ "mixed.chm": {
+  "chm": {
+   "compressed_size": 87906,
+   "file_length": 175001,
+   "file_offset": 2783,
+   "out_size": 181881,
+   "reset_interval": 2,
+   "window_bits": 16
+  },
+  "data": "mixed",
+  "encoder": "chmcmd 3.2.2+dfsg-46",
+  "flavour": "cab"
+ },
+ "mixed.stored": {
+  "data": "mixed",
+  "encoder": "tools/xex/lzx.py store()",
+  "flavour": "cab",
+  "sha256": "a29bfcab7add9492d6b1a52ace8afeeae7cfe23976d0ade75b503930dec1a69b",
+  "window_bits": 15
+ },
+ "small-100.wim": {
+  "data": "small",
+  "encoder": "wimlib 1.14.4-1.1+b3 level 100",
+  "flavour": "wim",
+  "window_bits": 15
+ },
+ "small-20.wim": {
+  "data": "small",
+  "encoder": "wimlib 1.14.4-1.1+b3 level 20",
+  "flavour": "wim",
+  "window_bits": 15
+ },
+ "small-50.wim": {
+  "data": "small",
+  "encoder": "wimlib 1.14.4-1.1+b3 level 50",
+  "flavour": "wim",
+  "window_bits": 15
+ },
+ "small.chm": {
+  "chm": {
+   "compressed_size": 8588,
+   "file_length": 14999,
+   "file_offset": 2783,
+   "out_size": 21879,
+   "reset_interval": 2,
+   "window_bits": 16
+  },
+  "data": "small",
+  "encoder": "chmcmd 3.2.2+dfsg-46",
+  "flavour": "cab"
+ },
+ "small.stored": {
+  "data": "small",
+  "encoder": "tools/xex/lzx.py store()",
+  "flavour": "cab",
+  "sha256": "6fd0f76d1db6d32a0485b1c81c6ffc14bf7ebb0121cd35206a72cd6ca4939b49",
+  "window_bits": 15
+ },
+ "x86-100.wim": {
+  "data": "x86",
+  "encoder": "wimlib 1.14.4-1.1+b3 level 100",
+  "flavour": "wim",
+  "window_bits": 15
+ },
+ "x86.chm": {
+  "chm": {
+   "compressed_size": 17412,
+   "file_length": 30000,
+   "file_offset": 2781,
+   "out_size": 36878,
+   "reset_interval": 2,
+   "window_bits": 16
+  },
+  "data": "x86",
+  "encoder": "chmcmd 3.2.2+dfsg-46",
+  "flavour": "cab"
+ }
+}

@@ -14,15 +14,18 @@ adds, on opcodes the base leaves open or does not know:
   vrlimi128, vpkd3d128 / vupkd3d128).
 
 Encodings and field layouts follow Xenia's PowerPC tables (ppc_opcode_lookup_gen.cc / ppc_decode_data.h, BSD), checked
-against the opcode constants in the tests. 64-bit semantics: R(n) is 64-bit; word instructions follow 64-bit mode
-rules (CR0 compares the 64-bit result, rlw* replicate the low word, sraw / extsh sign-extend to 64 bits); effective
-addresses are 32-bit (titles run with 32-bit pointers in 64-bit registers: the memory macros take uint32_t).
+against the opcode constants in the tests. Semantics: R(n) is 64-bit and 64-bit instructions compute 64 bits, but
+titles run in 32-bit mode (MSR[SF] = 0, XBA-270; as Xenia's and XenonRecomp's code generators assume): record forms
+set CR0 from the low word, XER[CA] is the carry out of the low word, CTR-decrementing branches test the low word of
+CTR, effective addresses are 32-bit (the memory macros take uint32_t); rlw* replicate the low word, sraw / extsh
+sign-extend to 64 bits.
 
 The lifter emits the C vocabulary of tools/ppc/lift.py plus V(n) (a 128-bit vector register, union xe_v128 with
 PPC element order: element 0 is the first in memory) and the xv_* helpers of consoles/x360/runtime/xenon_ops.h.
-Instructions with no op_ method here (most saturating / pack / unpack integer VMX ops, the D3D pack ops vpkd3d128 /
-vupkd3d128, vexptefp / vlogefp, traps, mtmsrd) are handed to the runtime with RC_INTERP: the spike has no
-interpreter, so the recompiler's stats count them (`unlifted`).
+Every VMX / VMX128 instruction the decoder knows is lifted (XBA-270: the integer element ops, saturating packs and
+sums, the D3D pack ops vpkd3d128 / vupkd3d128, the estimates; float ops honour VSCR[NJ], non-Java mode). Instructions
+with no op_ method (traps, mtmsrd, the base's rare system ones) are handed to the runtime with RC_INTERP, and the
+recompiler's stats count them (`unlifted`).
 """
 
 from tools.ppc.isa import TRAP, Decoder, sext
@@ -316,11 +319,26 @@ def V(n):
     return "V(%d)" % n
 
 
-XENON_INTERP = {"td", "tdi", "mtmsrd"}
+XENON_INTERP = {"td", "tdi"}
 OE_64 = {"mulld", "mulhd", "mulhdu", "divd", "divdu"}
 
 
 class XenonLifter(FnLifter):
+    @staticmethod
+    def cond(i):
+        """32-bit mode: bdnz and the other CTR-decrementing branches test the low word of CTR."""
+        pre, c = FnLifter.cond(i)
+        return pre, c.replace("c->ctr == 0", "(uint32_t)c->ctr == 0").replace("c->ctr != 0", "(uint32_t)c->ctr != 0")
+
+    def op_mtmsrd(self, i):
+        # titles use mtmsrd rS, 1 around short critical sections (MSR[EE], external interrupts): the L = 1 form
+        # changes only EE and RI (the architecture's definition); xenon_rt.h does not preempt a thread while EE is
+        # clear
+        return "c->msr = ((uint32_t)%s & 0x8002u) | (c->msr & ~0x8002u);" % R(i.rd)
+
+    def op_mtmsr(self, i):
+        return self.op_mtmsrd(i)
+
     def needs_interp(self, i):
         n = i.name
         if n in XENON_INTERP:
@@ -342,14 +360,14 @@ class XenonLifter(FnLifter):
         return "%s = %s + %s;" % (R(i.rd), RA0(i.ra), k64(i.simm << 16))
 
     def op_addic(self, i):
-        return "{ uint64_t a_ = %s; %s = a_ + %s; c->xer_ca = ppc_carry64(a_, %s, 0); }" % (
+        return "{ uint64_t a_ = %s; %s = a_ + %s; c->xer_ca = xe_carry(a_, %s, 0); }" % (
             R(i.ra), R(i.rd), k64(i.simm), k64(i.simm))
 
     def op_addic_rec(self, i):
         return self.op_addic(i) + " RC_CR0(%s);" % R(i.rd)
 
     def op_subfic(self, i):
-        return "{ uint64_t a_ = %s; %s = ~a_ + %s + 1u; c->xer_ca = ppc_carry64(~a_, %s, 1); }" % (
+        return "{ uint64_t a_ = %s; %s = ~a_ + %s + 1u; c->xer_ca = xe_carry(~a_, %s, 1); }" % (
             R(i.ra), R(i.rd), k64(i.simm), k64(i.simm))
 
     def op_mulli(self, i):
@@ -407,33 +425,33 @@ class XenonLifter(FnLifter):
     def _xo(self, i, body):
         return "{ uint64_t a_ = %s, b_ = %s; (void)b_; %s }%s" % (R(i.ra), R(i.rb), body, self.rec(i, i.rd))
 
-    def op_addc(self, i): return self._xo(i, "%s = a_ + b_; c->xer_ca = ppc_carry64(a_, b_, 0);" % R(i.rd))
+    def op_addc(self, i): return self._xo(i, "%s = a_ + b_; c->xer_ca = xe_carry(a_, b_, 0);" % R(i.rd))
 
     def op_subfc(self, i):
-        return self._xo(i, "%s = ~a_ + b_ + 1u; c->xer_ca = ppc_carry64(~a_, b_, 1);" % R(i.rd))
+        return self._xo(i, "%s = ~a_ + b_ + 1u; c->xer_ca = xe_carry(~a_, b_, 1);" % R(i.rd))
 
     def op_adde(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ + b_ + ci_; c->xer_ca = ppc_carry64(a_, b_, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ + b_ + ci_; c->xer_ca = xe_carry(a_, b_, ci_);"
                         % R(i.rd))
 
     def op_subfe(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ + b_ + ci_; c->xer_ca = ppc_carry64(~a_, b_, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ + b_ + ci_; c->xer_ca = xe_carry(~a_, b_, ci_);"
                         % R(i.rd))
 
     def op_addze(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ + ci_; c->xer_ca = ppc_carry64(a_, 0, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ + ci_; c->xer_ca = xe_carry(a_, 0, ci_);"
                         % R(i.rd))
 
     def op_subfze(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ + ci_; c->xer_ca = ppc_carry64(~a_, 0, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ + ci_; c->xer_ca = xe_carry(~a_, 0, ci_);"
                         % R(i.rd))
 
     def op_addme(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ - 1u + ci_; c->xer_ca = ppc_carry64(a_, ~0ULL, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = a_ - 1u + ci_; c->xer_ca = xe_carry(a_, ~0ULL, ci_);"
                         % R(i.rd))
 
     def op_subfme(self, i):
-        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ - 1u + ci_; c->xer_ca = ppc_carry64(~a_, ~0ULL, ci_);"
+        return self._xo(i, "uint32_t ci_ = c->xer_ca; %s = ~a_ - 1u + ci_; c->xer_ca = xe_carry(~a_, ~0ULL, ci_);"
                         % R(i.rd))
 
     def op_mullw(self, i):
@@ -606,33 +624,48 @@ class XenonLifter(FnLifter):
             return "%s = %s(%s);" % (V(e.vd), fn, V(e.vb))
         return "%s = %s(%s, %s);" % (V(e.vd), fn, V(e.vb), extra)
 
-    # float arithmetic
-    def op_vaddfp(self, i): return self._v2("xv_addfp", i)
-    def op_vsubfp(self, i): return self._v2("xv_subfp", i)
-    def op_vmaxfp(self, i): return self._v2("xv_maxfp", i)
-    def op_vminfp(self, i): return self._v2("xv_minfp", i)
+    # float arithmetic. Non-Java mode (XBA-270): every input and the result go through xv_daz, which flushes
+    # denormals to zero while VSCR[NJ] is set (xenon_vmx.h).
+    @staticmethod
+    def _daz(n):
+        return "xv_daz(c->vscr, %s)" % V(n)
+
+    def _fv(self, fn, i, regs, extra=""):
+        args = ", ".join(self._daz(n) for n in regs)
+        return "%s = xv_daz(c->vscr, %s(%s%s));" % (V(i.ext.vd), fn, args, extra)
+
+    def _f2(self, fn, i): return self._fv(fn, i, (i.ext.va, i.ext.vb))
+    def _f1(self, fn, i, extra=""): return self._fv(fn, i, (i.ext.vb,), extra)
+
+    def op_vaddfp(self, i): return self._f2("xv_addfp", i)
+    def op_vsubfp(self, i): return self._f2("xv_subfp", i)
+    def op_vmaxfp(self, i): return self._f2("xv_maxfp", i)
+    def op_vminfp(self, i): return self._f2("xv_minfp", i)
     op_vaddfp128, op_vsubfp128, op_vmaxfp128, op_vminfp128 = op_vaddfp, op_vsubfp, op_vmaxfp, op_vminfp
-    def op_vmulfp128(self, i): return self._v2("xv_mulfp", i)
-    def op_vmsum3fp128(self, i): return self._v2("xv_msum3fp", i)
-    def op_vmsum4fp128(self, i): return self._v2("xv_msum4fp", i)
+    def op_vmulfp128(self, i): return self._f2("xv_mulfp", i)
+    def op_vmsum3fp128(self, i): return self._f2("xv_msum3fp", i)
+    def op_vmsum4fp128(self, i): return self._f2("xv_msum4fp", i)
 
     def _v3(self, fn, i, a, c, b):
         return "%s = %s(%s, %s, %s);" % (V(i.ext.vd), fn, V(a), V(c), V(b))
 
-    def op_vmaddfp(self, i): return self._v3("xv_maddfp", i, i.ext.va, i.ext.vc, i.ext.vb)       # a*c + b
-    def op_vnmsubfp(self, i): return self._v3("xv_nmsubfp", i, i.ext.va, i.ext.vc, i.ext.vb)     # -(a*c - b)
-    def op_vmaddfp128(self, i): return self._v3("xv_maddfp", i, i.ext.va, i.ext.vb, i.ext.vd)    # a*b + d
-    def op_vmaddcfp128(self, i): return self._v3("xv_maddfp", i, i.ext.va, i.ext.vd, i.ext.vb)   # a*d + b
-    def op_vnmsubfp128(self, i): return self._v3("xv_nmsubfp", i, i.ext.va, i.ext.vb, i.ext.vd)  # -(a*b - d)
+    def op_vmaddfp(self, i): return self._fv("xv_maddfp", i, (i.ext.va, i.ext.vc, i.ext.vb))      # a*c + b
+    def op_vnmsubfp(self, i): return self._fv("xv_nmsubfp", i, (i.ext.va, i.ext.vc, i.ext.vb))    # -(a*c - b)
+    def op_vmaddfp128(self, i): return self._fv("xv_maddfp", i, (i.ext.va, i.ext.vb, i.ext.vd))   # a*b + d
+    def op_vmaddcfp128(self, i): return self._fv("xv_maddfp", i, (i.ext.va, i.ext.vd, i.ext.vb))  # a*d + b
+    def op_vnmsubfp128(self, i): return self._fv("xv_nmsubfp", i, (i.ext.va, i.ext.vb, i.ext.vd))  # -(a*b - d)
 
-    def op_vrefp(self, i): return self._v1("xv_refp", i)
-    def op_vrsqrtefp(self, i): return self._v1("xv_rsqrtefp", i)
-    op_vrefp128, op_vrsqrtefp128 = op_vrefp, op_vrsqrtefp
+    # estimates: exact here (the hardware's tables are not reproduced, xenon_vmx.h)
+    def op_vrefp(self, i): return self._f1("xv_refp", i)
+    def op_vrsqrtefp(self, i): return self._f1("xv_rsqrtefp", i)
+    def op_vexptefp(self, i): return self._f1("xv_exptefp", i)
+    def op_vlogefp(self, i): return self._f1("xv_logefp", i)
+    op_vrefp128, op_vrsqrtefp128, op_vexptefp128, op_vlogefp128 = op_vrefp, op_vrsqrtefp, op_vexptefp, op_vlogefp
 
-    def op_vrfin(self, i): return self._v1("xv_rfi", i, "0")
-    def op_vrfiz(self, i): return self._v1("xv_rfi", i, "1")
-    def op_vrfip(self, i): return self._v1("xv_rfi", i, "2")
-    def op_vrfim(self, i): return self._v1("xv_rfi", i, "3")
+    def op_vrfin(self, i): return self._f1("xv_rfi", i, ", 0")
+    def op_vrfiz(self, i): return self._f1("xv_rfi", i, ", 1")
+    def op_vrfip(self, i): return self._f1("xv_rfi", i, ", 2")
+    def op_vrfim(self, i): return self._f1("xv_rfi", i, ", 3")
     op_vrfin128, op_vrfiz128, op_vrfip128, op_vrfim128 = op_vrfin, op_vrfiz, op_vrfip, op_vrfim
 
     # conversions: AltiVec puts the immediate in vA, VMX128 in its IMM field
@@ -649,7 +682,10 @@ class XenonLifter(FnLifter):
     # compares (record forms set CR6: all true -> 0b1000, none true -> 0b0010)
     def _vcmp(self, fn, i):
         e = i.ext
-        s = "%s = %s(%s, %s);" % (V(e.vd), fn, V(e.va), V(e.vb))
+        if fn.endswith("fp"):  # non-Java mode: denormal operands compare as zero
+            s = "%s = %s(%s, %s);" % (V(e.vd), fn, self._daz(e.va), self._daz(e.vb))
+        else:
+            s = "%s = %s(%s, %s);" % (V(e.vd), fn, V(e.va), V(e.vb))
         if e.rc:
             s += " c->cr = ppc_cr_set(c->cr, 6, xv_cr6(%s));" % V(e.vd)
         return s
@@ -732,6 +768,140 @@ class XenonLifter(FnLifter):
     def op_vrlimi128(self, i):
         e = i.ext
         return "%s = xv_rlimi(%s, %s, %d, %d);" % (V(e.vd), V(e.vd), V(e.vb), e.imm, e.z)
+
+    # ---- integer element ops, packs, unpacks, sums (XBA-270; helpers in xenon_vmx.h) ----
+    def _vs(self, fn, i):
+        """A saturating two-operand op (sets VSCR[SAT])."""
+        e = i.ext
+        return "%s = %s(%s, %s, &c->vscr);" % (V(e.vd), fn, V(e.va), V(e.vb))
+
+    def op_vcmpequb(self, i): return self._vcmp("xv_cmpequb", i)
+    def op_vcmpequh(self, i): return self._vcmp("xv_cmpequh", i)
+    def op_vcmpgtub(self, i): return self._vcmp("xv_cmpgtub", i)
+    def op_vcmpgtuh(self, i): return self._vcmp("xv_cmpgtuh", i)
+    def op_vcmpgtsb(self, i): return self._vcmp("xv_cmpgtsb", i)
+    def op_vcmpgtsh(self, i): return self._vcmp("xv_cmpgtsh", i)
+
+    def op_vsl(self, i): return self._v2("xv_sl", i)
+    def op_vsr(self, i): return self._v2("xv_sr", i)
+
+    def op_vmrghb(self, i): return "%s = xv_mrgb(%s, %s, 0);" % (V(i.ext.vd), V(i.ext.va), V(i.ext.vb))
+    def op_vmrglb(self, i): return "%s = xv_mrgb(%s, %s, 1);" % (V(i.ext.vd), V(i.ext.va), V(i.ext.vb))
+    def op_vmrghh(self, i): return "%s = xv_mrgh(%s, %s, 0);" % (V(i.ext.vd), V(i.ext.va), V(i.ext.vb))
+    def op_vmrglh(self, i): return "%s = xv_mrgh(%s, %s, 1);" % (V(i.ext.vd), V(i.ext.va), V(i.ext.vb))
+
+    def _mul(self, fn, i, odd, sgn):
+        return "%s = %s(%s, %s, %d, %d);" % (V(i.ext.vd), fn, V(i.ext.va), V(i.ext.vb), odd, sgn)
+
+    def op_vmuleub(self, i): return self._mul("xv_mulb", i, 0, 0)
+    def op_vmuloub(self, i): return self._mul("xv_mulb", i, 1, 0)
+    def op_vmulesb(self, i): return self._mul("xv_mulb", i, 0, 1)
+    def op_vmulosb(self, i): return self._mul("xv_mulb", i, 1, 1)
+    def op_vmuleuh(self, i): return self._mul("xv_mulh", i, 0, 0)
+    def op_vmulouh(self, i): return self._mul("xv_mulh", i, 1, 0)
+    def op_vmulesh(self, i): return self._mul("xv_mulh", i, 0, 1)
+    def op_vmulosh(self, i): return self._mul("xv_mulh", i, 1, 1)
+
+    def _pk(self, fn, i, mode):
+        return "%s = %s(%s, %s, %d, &c->vscr);" % (V(i.ext.vd), fn, V(i.ext.va), V(i.ext.vb), mode)
+
+    def op_vpkuhum(self, i): return self._pk("xv_pkh", i, 0)
+    def op_vpkuhus(self, i): return self._pk("xv_pkh", i, 1)
+    def op_vpkshus(self, i): return self._pk("xv_pkh", i, 2)
+    def op_vpkshss(self, i): return self._pk("xv_pkh", i, 3)
+    def op_vpkuwum(self, i): return self._pk("xv_pkw", i, 0)
+    def op_vpkuwus(self, i): return self._pk("xv_pkw", i, 1)
+    def op_vpkswus(self, i): return self._pk("xv_pkw", i, 2)
+    def op_vpkswss(self, i): return self._pk("xv_pkw", i, 3)
+    op_vpkuhum128, op_vpkuhus128, op_vpkshus128, op_vpkshss128 = op_vpkuhum, op_vpkuhus, op_vpkshus, op_vpkshss
+    op_vpkuwum128, op_vpkuwus128, op_vpkswus128, op_vpkswss128 = op_vpkuwum, op_vpkuwus, op_vpkswus, op_vpkswss
+    def op_vpkpx(self, i): return self._v2("xv_pkpx", i)
+
+    def _upk(self, fn, i, lo):
+        return "%s = %s(%s, %d);" % (V(i.ext.vd), fn, V(i.ext.vb), lo)
+
+    def op_vupkhsb(self, i): return self._upk("xv_upkb", i, 0)
+    def op_vupklsb(self, i): return self._upk("xv_upkb", i, 1)
+    def op_vupkhsh(self, i): return self._upk("xv_upkh", i, 0)
+    def op_vupklsh(self, i): return self._upk("xv_upkh", i, 1)
+    def op_vupkhpx(self, i): return self._upk("xv_upkpx", i, 0)
+    def op_vupklpx(self, i): return self._upk("xv_upkpx", i, 1)
+    # vupkhsb128 / vupklsb128 with VA = 0x60 are the halfword unpacks (vupkhsh128 / vupklsh128: Xenia and
+    # XenonRecomp both decode them that way)
+    def op_vupkhsb128(self, i): return self._upk("xv_upkh" if i.ext.va == 0x60 else "xv_upkb", i, 0)
+    def op_vupklsb128(self, i): return self._upk("xv_upkh" if i.ext.va == 0x60 else "xv_upkb", i, 1)
+
+    def op_vsum4ubs(self, i): return self._vs("xv_sum4ubs", i)
+    def op_vsum4sbs(self, i): return self._vs("xv_sum4sbs", i)
+    def op_vsum4shs(self, i): return self._vs("xv_sum4shs", i)
+    def op_vsum2sws(self, i): return self._vs("xv_sum2sws", i)
+    def op_vsumsws(self, i): return self._vs("xv_sumsws", i)
+
+    def _va3(self, i, call):
+        e = i.ext
+        return "%s = %s;" % (V(e.vd), call % (V(e.va), V(e.vb), V(e.vc)))
+
+    def op_vmhaddshs(self, i): return self._va3(i, "xv_mhaddshs(%s, %s, %s, 0, &c->vscr)")
+    def op_vmhraddshs(self, i): return self._va3(i, "xv_mhaddshs(%s, %s, %s, 1, &c->vscr)")
+    def op_vmladduhm(self, i): return self._va3(i, "xv_mladduhm(%s, %s, %s)")
+    def op_vmsumubm(self, i): return self._va3(i, "xv_msumb(%s, %s, %s, 0)")
+    def op_vmsummbm(self, i): return self._va3(i, "xv_msumb(%s, %s, %s, 1)")
+    def op_vmsumuhm(self, i): return self._va3(i, "xv_msumh(%s, %s, %s, 0, 0, &c->vscr)")
+    def op_vmsumuhs(self, i): return self._va3(i, "xv_msumh(%s, %s, %s, 0, 1, &c->vscr)")
+    def op_vmsumshm(self, i): return self._va3(i, "xv_msumh(%s, %s, %s, 1, 0, &c->vscr)")
+    def op_vmsumshs(self, i): return self._va3(i, "xv_msumh(%s, %s, %s, 1, 1, &c->vscr)")
+
+    # D3D pack / unpack (VMX128): IMM = type << 2 | pack, z = shift (Xenia's description, xenon_vmx.h)
+    def op_vpkd3d128(self, i):
+        e = i.ext
+        return "%s = xv_pkd3d(%s, %s, %d, %d, %d);" % (V(e.vd), V(e.vd), V(e.vb), e.imm >> 2, e.imm & 3, e.z)
+
+    def op_vupkd3d128(self, i):
+        e = i.ext
+        return "%s = xv_upkd3d(%s, %d);" % (V(e.vd), V(e.vb), e.imm >> 2)
+
+    def op_vaddubm(self, i): return self._v2("xv_addubm", i)
+    def op_vadduhm(self, i): return self._v2("xv_adduhm", i)
+    def op_vsububm(self, i): return self._v2("xv_sububm", i)
+    def op_vsubuhm(self, i): return self._v2("xv_subuhm", i)
+    def op_vaddcuw(self, i): return self._v2("xv_addcuw", i)
+    def op_vsubcuw(self, i): return self._v2("xv_subcuw", i)
+    def op_vmaxub(self, i): return self._v2("xv_maxub", i)
+    def op_vmaxuh(self, i): return self._v2("xv_maxuh", i)
+    def op_vmaxuw(self, i): return self._v2("xv_maxuw", i)
+    def op_vmaxsb(self, i): return self._v2("xv_maxsb", i)
+    def op_vmaxsh(self, i): return self._v2("xv_maxsh", i)
+    def op_vminub(self, i): return self._v2("xv_minub", i)
+    def op_vminuh(self, i): return self._v2("xv_minuh", i)
+    def op_vminuw(self, i): return self._v2("xv_minuw", i)
+    def op_vminsb(self, i): return self._v2("xv_minsb", i)
+    def op_vminsh(self, i): return self._v2("xv_minsh", i)
+    def op_vavgub(self, i): return self._v2("xv_avgub", i)
+    def op_vavguh(self, i): return self._v2("xv_avguh", i)
+    def op_vavguw(self, i): return self._v2("xv_avguw", i)
+    def op_vavgsb(self, i): return self._v2("xv_avgsb", i)
+    def op_vavgsh(self, i): return self._v2("xv_avgsh", i)
+    def op_vavgsw(self, i): return self._v2("xv_avgsw", i)
+    def op_vrlb(self, i): return self._v2("xv_rlb", i)
+    def op_vrlh(self, i): return self._v2("xv_rlh", i)
+    def op_vslb(self, i): return self._v2("xv_slb", i)
+    def op_vslh(self, i): return self._v2("xv_slh", i)
+    def op_vsrb(self, i): return self._v2("xv_srb", i)
+    def op_vsrh(self, i): return self._v2("xv_srh", i)
+    def op_vsrab(self, i): return self._v2("xv_srab", i)
+    def op_vsrah(self, i): return self._v2("xv_srah", i)
+    def op_vaddubs(self, i): return self._vs("xv_addubs", i)
+    def op_vadduhs(self, i): return self._vs("xv_adduhs", i)
+    def op_vadduws(self, i): return self._vs("xv_adduws", i)
+    def op_vaddsbs(self, i): return self._vs("xv_addsbs", i)
+    def op_vaddshs(self, i): return self._vs("xv_addshs", i)
+    def op_vaddsws(self, i): return self._vs("xv_addsws", i)
+    def op_vsububs(self, i): return self._vs("xv_sububs", i)
+    def op_vsubuhs(self, i): return self._vs("xv_subuhs", i)
+    def op_vsubuws(self, i): return self._vs("xv_subuws", i)
+    def op_vsubsbs(self, i): return self._vs("xv_subsbs", i)
+    def op_vsubshs(self, i): return self._vs("xv_subshs", i)
+    def op_vsubsws(self, i): return self._vs("xv_subsws", i)
 
     def op_mfvscr(self, i): return "%s = xv_words(0, 0, 0, c->vscr);" % V(i.ext.vd)
     def op_mtvscr(self, i): return "c->vscr = %s.u32[3];" % V(i.ext.vb)

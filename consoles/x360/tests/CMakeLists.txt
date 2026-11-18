@@ -1,0 +1,104 @@
+cmake_minimum_required(VERSION 3.20)
+project(console_x360_tests C)
+
+# The Xbox 360 runtime's tests (XBA-270): a self-contained project like those under tests/, run by
+# tools/run_c_tests.sh (as console_x360) and by the root build's ctest when XBR_CONSOLE_X360 is ON. Linux only.
+#
+#   xenos_cp         the PM4 command processor on hand-built packets (xenos_cp_test.c)
+#   xenos_draw       the GLES renderer draws a hand-built PM4 stream, read back (skipped without EGL / GLES 3.0)
+#   x360_render      the renderer through the machine: a ring, VdSwap, a front buffer frame, a save state loaded
+#   x360_hle         the kernel HLE called directly (x360_hle_test.c): formatters, memory, objects, waits, timers,
+#                    threads, files and symbolic links
+#   x360_hello       the synthetic test title (make_hello.py: our own PowerPC assembly in a synthetic XEX2, imports
+#                    by their real ordinals) recompiled and run under x360_run: its DbgPrint text must equal
+#                    hello.txt (memory, critical section, TLS, a second thread and an event, a delay, a semaphore,
+#                    a jump table) and it must end with exit code 0
+#   x360_hello_lzx   the same title encrypted (a made-up key) and LZX-compressed, rewritten plain by
+#                    python3 -m tools.xex --plain first
+#   x360_state       save states: the test title stopped by an instruction budget, a state saved, a fresh run
+#                    resumed from it: the two halves of the DbgPrint text make hello.txt (run_state.sh)
+#   x360_msr         two threads' shared counter inside mtmsrd (MSR[EE] clear) sections: no update lost; the same
+#                    without mtmsrd loses updates (run_msr.sh, make_msr.py)
+#   x360_bringup     python3 -m x360_tools.bringup on the encrypted LZX test title (run_bringup.sh)
+#   x360_missed      the discovery loop: a function only a pointer reaches stops the first run (--missed), the
+#                    second, recompiled with it (--discovered), ends with exit code 42 (run_missed.sh)
+#   x360_hello_c     a C test title (tests/homebrew/hello_c: devkitPPC, -mpowerpc64 -maltivec; recursion, a GCC jump
+#                    table, function pointers, doubles, AltiVec, two threads with a critical section and events,
+#                    virtual / physical memory) packed by homebrew/elf2xex.py: hello_c.txt. Skipped (77) when not
+#                    built (the linux CI job has no devkitPPC): tools/consoles/build_homebrew.sh x360 build/homebrew
+# The recompiler's own tests (synthetic code) run with the Python suite: python3 -m pytest consoles/.
+if(WIN32)
+    message(FATAL_ERROR "The console runtimes are POSIX-only")
+endif()
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # macOS (tools/run_c_tests.sh configures every consoles/*/tests there too): one test that skips, nothing built
+    enable_testing()
+    add_test(NAME x360_linux_only COMMAND sh -c "echo 'skipped: the Xbox 360 runtime is Linux-only (memfd_create)'; exit 77")
+    set_tests_properties(x360_linux_only PROPERTIES SKIP_RETURN_CODE 77)
+    return()
+endif()
+set(CMAKE_C_STANDARD 11)
+
+if(NOT TARGET x360_core)
+    add_subdirectory(../runtime x360_runtime)
+endif()
+enable_testing()
+
+add_executable(xenos_cp_test xenos_cp_test.c)
+target_link_libraries(xenos_cp_test PRIVATE x360_core)
+target_compile_options(xenos_cp_test PRIVATE -Wall -Wextra)
+add_test(NAME xenos_cp COMMAND xenos_cp_test)
+set_tests_properties(xenos_cp PROPERTIES TIMEOUT 60)
+
+add_executable(xenos_draw_test xenos_draw_test.c)
+target_link_libraries(xenos_draw_test PRIVATE x360_core)
+target_compile_options(xenos_draw_test PRIVATE -Wall -Wextra)
+add_test(NAME xenos_draw COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:xenos_draw_test>
+                                    ${CMAKE_CURRENT_BINARY_DIR}/xenos_draw)
+set_tests_properties(xenos_draw PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+add_test(NAME x360_render COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:x360_hle_test>
+                                     ${CMAKE_CURRENT_BINARY_DIR}/x360_render --render)
+set_tests_properties(x360_render PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+add_executable(x360_hle_test x360_hle_test.c)
+target_link_libraries(x360_hle_test PRIVATE x360_core)
+target_compile_options(x360_hle_test PRIVATE -Wall -Wextra)
+add_test(NAME x360_hle COMMAND x360_hle_test)
+set_tests_properties(x360_hle PROPERTIES TIMEOUT 120)
+
+if(TARGET x360_run)
+    foreach(_mode basic lzx)
+        if(_mode STREQUAL basic)
+            set(_name x360_hello)
+        else()
+            set(_name x360_hello_${_mode})
+        endif()
+        add_test(NAME ${_name}
+            COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh $<TARGET_FILE:x360_run>
+                    ${CMAKE_CURRENT_BINARY_DIR}/${_name} ${_mode} ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt)
+        set_tests_properties(${_name} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    endforeach()
+    add_test(NAME x360_state
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_state.sh $<TARGET_FILE:x360_run>
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_state ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt)
+    set_tests_properties(x360_state PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    add_test(NAME x360_msr
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_msr.sh $<TARGET_FILE:x360_run> ${CMAKE_CURRENT_BINARY_DIR}/x360_msr)
+    set_tests_properties(x360_msr PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    add_test(NAME x360_bringup
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_bringup.sh $<TARGET_FILE:x360_run>
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_bringup)
+    set_tests_properties(x360_bringup PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    add_test(NAME x360_missed
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_missed.sh $<TARGET_FILE:x360_run>
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_missed)
+    set_tests_properties(x360_missed PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    get_filename_component(X360_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../.. ABSOLUTE)
+    set(X360_HOMEBREW_DIR ${X360_REPO_ROOT}/build/homebrew/x360 CACHE PATH
+        "Built Xbox 360 test titles (build_homebrew.sh x360)")
+    add_test(NAME x360_hello_c
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh $<TARGET_FILE:x360_run>
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_hello_c c ${CMAKE_CURRENT_SOURCE_DIR}/hello_c.txt
+                ${X360_HOMEBREW_DIR}/hello_c.elf)
+    set_tests_properties(x360_hello_c PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+endif()

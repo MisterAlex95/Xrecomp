@@ -46,6 +46,12 @@ typedef struct xe_machine {
     uint32_t faults;     /* accesses outside the window */
     uint8_t rc_exit;     /* XE_RC_EXIT_* */
     uint64_t rc_native;  /* instructions run natively */
+#ifdef XE_RUNTIME
+    xe_cpu *cur;         /* the running guest thread's context (runtime/x360_thread.c) */
+    int64_t slice;       /* blocks left before the scheduler gets the host thread back */
+    uint64_t tb_base;    /* time base offset (virtual time skipped while every thread waited) */
+    void *rt;            /* the runtime (x360_machine) */
+#endif
 } xe_machine;
 
 enum {
@@ -63,6 +69,15 @@ typedef struct xe_rc_entry {
 
 /* ---- memory ---- */
 
+#ifdef XE_RUNTIME
+/* The runtime (consoles/x360/runtime, XBA-270): mem is the base of a 4 GB host reservation, every 32-bit guest
+ * address maps to mem + ea (pages the guest has not allocated fault in the host: x360_mem.c reports them). */
+static inline uint8_t *xe_ptr(xe_machine *m, uint32_t ea, uint32_t n)
+{
+    (void)n;
+    return m->mem + ea;
+}
+#else
 static inline uint8_t *xe_ptr(xe_machine *m, uint32_t ea, uint32_t n)
 {
     uint32_t o = ea - m->mem_base;
@@ -72,6 +87,7 @@ static inline uint8_t *xe_ptr(xe_machine *m, uint32_t ea, uint32_t n)
     }
     return m->mem + o;
 }
+#endif
 
 static inline uint32_t xe_lbz(xe_machine *m, uint32_t ea)
 {
@@ -231,10 +247,29 @@ static inline void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
 
 #define RC_FN void
 #define RC_MACHINE xe_machine
+#ifdef XE_RUNTIME
+/* Runtime: the context is the running guest thread's; every block counts against the thread's time slice and
+ * hands the host thread back to the scheduler at a resume point when it runs out (cooperative threads). While the
+ * thread has MSR[EE] clear (mtmsrd: a short section with interrupts off, which the kernel never reschedules) it keeps
+ * running, up to XE_EE_GRACE blocks past its slice. */
+#define RC_PROLOGUE                                                                                                    \
+    xe_cpu *c = m_->cur;                                                                                               \
+    (void)c
+#define XE_EE_GRACE 65536 /* blocks a thread with MSR[EE] clear may run past its slice before it is preempted anyway */
+#define RC_BLOCK(pc_, n)                                                                                               \
+    do {                                                                                                               \
+        m_->rc_native += (n);                                                                                          \
+        if (--m_->slice < 0 && ((c->msr & 0x8000u) || m_->slice < -XE_EE_GRACE)) {                                     \
+            c->pc = (pc_);                                                                                             \
+            return;                                                                                                    \
+        }                                                                                                              \
+    } while (0)
+#else
 #define RC_PROLOGUE                                                                                                    \
     xe_cpu *c = &m_->cpu;                                                                                              \
     (void)c
 #define RC_BLOCK(pc_, n) (m_->rc_native += (n))
+#endif
 #define RC_EXIT(pc_)                                                                                                   \
     do {                                                                                                               \
         c->pc = (pc_);                                                                                                 \
@@ -280,14 +315,19 @@ static inline void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
         c->xer_ov = (x_ >> 30) & 1;                                                                                    \
         c->xer_ca = (x_ >> 29) & 1;                                                                                    \
     } while (0)
-/* Record forms in 64-bit mode: CR0 compares the whole 64-bit result. */
-#define RC_CR0(v) (c->cr = ppc_cr_set(c->cr, 0, ppc_cmps64((int64_t)(v), 0, c->xer_so)))
+/* Record forms: titles run in 32-bit mode (MSR[SF] = 0), CR0 compares the low word of the result with 0 (xenon_ops.h
+ * xe_carry says more). */
+#define RC_CR0(v) (c->cr = ppc_cr_set(c->cr, 0, ppc_cmps((int32_t)(uint32_t)(v), 0, c->xer_so)))
 #define RC_FSET_S(d, v) (c->fpr[d] = ppc_single(v))
 #define RC_FSET_D(d, v) (c->fpr[d] = (v))
 
 /* SPRs other than LR / CTR / XER: the time base reads a counter, the rest is kept in a small table. */
 static inline uint64_t xe_mfspr(xe_machine *m, unsigned spr)
 {
+#ifdef XE_RUNTIME
+    if (spr == 268 || spr == 269 || spr == 284 || spr == 285)
+        return m->rc_native / 64 + m->tb_base; /* the time base: 50 MHz against a ~3.2 GHz guest */
+#endif
     if (spr == 268 || spr == 269)
         return m->rc_native;
     return 0;

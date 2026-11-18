@@ -135,8 +135,16 @@ option(XBR_CONSOLE_DC "Build the Dreamcast spike (consoles/dc)" ${_xbr_console_d
 option(XBR_CONSOLE_3DS "Build the Nintendo 3DS spike (consoles/3ds)" ${_xbr_console_default})
 # The PS2 (XBA-226) is a spike too: Linux / macOS headless only (ps2_run), not in the app yet.
 option(XBR_CONSOLE_PS2 "Build the PlayStation 2 spike (consoles/ps2)" ${_xbr_console_default})
+# The Xbox 360 (XBA-229 / XBA-270) runtime is Linux headless only (x360_run; memfd_create for the physical memory
+# mirrors): off on macOS, Android and Windows, not in the app yet.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    set(_xbr_x360_default ON)
+else()
+    set(_xbr_x360_default OFF)
+endif()
+option(XBR_CONSOLE_X360 "Build the Xbox 360 runtime (consoles/x360)" ${_xbr_x360_default})
 set(XBR_CONSOLES "")
-foreach(_c gba ps1 n64 nds psp gc dc 3ds ps2)
+foreach(_c gba ps1 n64 nds psp gc dc 3ds ps2 x360)
     string(TOUPPER ${_c} _C)
     if(XBR_CONSOLE_${_C})
         if(WIN32)

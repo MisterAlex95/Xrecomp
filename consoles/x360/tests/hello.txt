@@ -1,0 +1,17 @@
+Xbox 360 title recompiled: hello from main()
+hardware threads: 6
+alloc status 00000000, sum 97920, free status 00000000
+critical section entered 2 times, left
+tls slot 0 = 1234
+hello from a second thread (context ok)
+worker said 4321
+worker exited (wait status 0)
+slept, delay status 0
+semaphore: 3 signals counted
+file: open 0, read 0, 20 bytes: Hello from the disc!
+file size 20, info status 0
+entry: data (directory)
+entry: readme.txt
+listing ends with 80000006
+switch: 10 30 -1
+main returns 0

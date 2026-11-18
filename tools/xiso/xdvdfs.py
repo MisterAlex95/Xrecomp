@@ -38,7 +38,10 @@ MAGIC = b"MICROSOFT*XBOX*MEDIA"
 #   0x18300000  redump full-disc dump: the game partition follows the ~387 MB
 #               DVD-video partition (magic lands at 0x18310000). Confirmed on the
 #               Blinx / Conker / Fuzion Frenzy redump images.
-BASE_CANDIDATES = (0x00000000, 0x0000FD90, 0x00030600, 0x0FD90000, 0x18300000)
+#   0x02080000  Xbox 360 XGD3 discs (XBA-270; XGD2 uses 0x0FD90000 above), the game
+#   0x0000FB20  partition's offset in a full dump, and two offsets of rebuilt Xbox 360
+#   0x00020600  images: the list Xenia's disc image device probes (disc_image_device.cc)
+BASE_CANDIDATES = (0x00000000, 0x0000FD90, 0x00030600, 0x0FD90000, 0x18300000, 0x02080000, 0x0000FB20, 0x00020600)
 
 ATTR_DIRECTORY = 0x10
 
