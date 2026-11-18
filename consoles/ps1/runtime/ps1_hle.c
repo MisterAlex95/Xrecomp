@@ -155,24 +155,56 @@ static void wr8(ps1_machine *m, uint32_t a, uint8_t v)
         PS1_RAM_TOUCH(m, (uint32_t)(p - m->ram));
 }
 
-static uint16_t rd16(ps1_machine *m, uint32_t a)
+/* Words: ps1_peek32 reads the bytes rd8 would. An aligned write's bytes lie in one region and one RAM page: one
+ * lookup, the page's generation moved once per byte as wr8 does (XBA-277); an unaligned one byte by byte. */
+static inline uint32_t rd32(ps1_machine *m, uint32_t a)
 {
-    return (uint16_t)(rd8(m, a) | rd8(m, a + 1) << 8);
+    uint32_t seg = a >> 29, p = a & 0x1FFFFFFFu;
+    if (!(a & 3u) && p < 0x00800000u && (seg == 0 || seg == 4 || seg == 5)) { /* RAM, as ps1_peek32 reads it */
+        const uint8_t *q = m->ram + (p & 0x1FFFFFu);
+        return (uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24;
+    }
+    return ps1_peek32(m, a);
 }
 
-static uint32_t rd32(ps1_machine *m, uint32_t a)
+static void wr_aligned(ps1_machine *m, uint32_t a, uint32_t v, unsigned n)
 {
-    return (uint32_t)rd16(m, a) | (uint32_t)rd16(m, a + 2) << 16;
+    uint8_t *p = gptr(m, a);
+    if (!p)
+        return;
+    for (unsigned i = 0; i < n; i++)
+        p[i] = (uint8_t)(v >> (8 * i));
+    if (p >= m->ram && p < m->ram + PS1_RAM_SIZE)
+        m->ram_gen[((uint32_t)(p - m->ram) & (PS1_RAM_SIZE - 1)) >> PS1_RAM_PAGE_SHIFT] += n;
 }
 
 static void wr16(ps1_machine *m, uint32_t a, uint32_t v)
 {
+    if (!(a & 1u)) {
+        wr_aligned(m, a, v, 2);
+        return;
+    }
     wr8(m, a, (uint8_t)v);
     wr8(m, a + 1, (uint8_t)(v >> 8));
 }
 
-static void wr32(ps1_machine *m, uint32_t a, uint32_t v)
+static inline void wr32(ps1_machine *m, uint32_t a, uint32_t v)
 {
+    uint32_t p = a & 0x1FFFFFFFu;
+    if (!(a & 3u) && p < 0x00800000u) { /* RAM, as gptr maps it */
+        uint32_t o = p & (PS1_RAM_SIZE - 1);
+        uint8_t *q = m->ram + o;
+        q[0] = (uint8_t)v;
+        q[1] = (uint8_t)(v >> 8);
+        q[2] = (uint8_t)(v >> 16);
+        q[3] = (uint8_t)(v >> 24);
+        m->ram_gen[o >> PS1_RAM_PAGE_SHIFT] += 4;
+        return;
+    }
+    if (!(a & 3u)) {
+        wr_aligned(m, a, v, 4);
+        return;
+    }
     wr16(m, a, v);
     wr16(m, a + 2, v >> 16);
 }
