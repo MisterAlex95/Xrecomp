@@ -1109,6 +1109,48 @@ Not taken: inlining the whole prefetch model into every lifted instruction made 
 build. A rotate-and-compare range check on N64 loads and stores did not pay on x86-64. The lifters' output did not
 change, but the toolkit digest covers every header and all of `tools/`: every pack, of every console, shows stale.
 
+**GBA / PS1 / N64 / GameCube: speed 3 (XBA-279).** The same benches (instructions per frame, the 30-frame run less
+the 10-frame one, `python -m tools.bench.qprof`), and for the GameCube our homebrew with its pack (`gxtev`: GX through
+the write-gather pipe; `aesnd`: the DSP's sound), per field. Every result is identical (hashes after 300 to 600
+frames, lockstep with the interpreter, the consoles' ctest).
+- GBA: code the game copies to IWRAM is lifted (the libtonc IRQ handler of the bench went through the block
+  interpreter). The core records where execution enters IWRAM code the pack misses, with where the ROM holds the same
+  bytes; gba_tools lifts it from there and the table carries each function's bytes (GBA_RECOMP_ABI 5; this core still
+  takes 4). IWRAM is data and stack too, so the dispatcher compares the bytes at every call into such a function, and
+  a store of the function's own into them stops it. Details: [gba/tools/README.md « IWRAM code »](gba/tools/README.md).
+- PS1: the HLE kernel's exception path runs natively (`ps1_cpu.c` « The HLE kernel's RAM code »): the vector, the
+  handler chain walk and its trap stubs, while they hold the words kernel set-up wrote, run as C, one macro per
+  instruction doing what `step()` does (pc, the delay and load slots, the clock), the time check in front of each, so
+  it stops wherever the interpreter would. The verifiers read I_STAT / I_MASK directly.
+- N64: lifted code compiles at -O2. At -O1 the big lifted functions' loops kept the runtime's values (RDRAM base, the
+  write counters, the code's range) in stack slots, reloaded at every store; -O2 keeps them in registers. Compile
+  time is the same over a whole title (n64-systemtest's 236 files for android30, 3 jobs: 170 s at -O1, 166 s at -O2;
+  its two biggest files take 30-60 % longer, at 221 MB peak against 213 MB, within Prepare's 256 MB per job). (GBA and PS1 code also run faster at -O2, 4.7 % and 5.6 % on arm64, but compile 10 % and 31 % longer:
+  they stay at -O1.)
+- GameCube: silence is resampled for free (the DMA's and the drive's stream resamplers ran their interpolation for
+  every 48 kHz frame); instruction fetches take the fast path with libogc's IBATs (code at 0x80000000 only: every
+  dispatch walked the IBATs); write-gather pipe stores go straight to the FIFO; the last BAT translation of each kind
+  is remembered for its 128 KB block.
+
+| instructions per frame (GC: per field) | arm64 main | arm64 XBA-279 | x86-64 main | x86-64 XBA-279 |
+|---|---|---|---|---|
+| GBA bench | 10.21M | 9.81M (-4 %) | 10.30M | 9.86M (-4 %) |
+| PS1 bench | 9.15M | 7.45M (-19 %) | 9.23M | 7.70M (-17 %) |
+| N64 bench | 7.01M | 5.60M (-20 %) | 6.71M | 6.35M (-5 %) |
+| GC gxtev | 1.156M | 0.873M (-24 %) | 1.142M | 0.851M (-25 %) |
+| GC aesnd | 0.561M | 0.405M (-28 %) | 0.576M | 0.428M (-26 %) |
+
+Where a frame still goes (arm64): GBA, the cartridge's prefetch buffer (rc_pf_fetch*) about 30 %, the dispatcher and the
+interpreter for handed instructions (an event inside a segment, the IRQ handler's MRS / MSR) 24 %; PS1, the SPU
+15 %, the dispatcher 11 %, the native kernel walk 11 % (exact per instruction); N64, one lifted function 73 %, the
+dispatcher 10 %; GameCube gxtev, the GX FIFO and the stores into it 25 %, the dispatcher 11 %.
+
+Not taken: handing the instructions lifted code leaves to the interpreter (the rest of a block after an event) to its
+predecoded blocks instead of one step each: +2 % on the GBA bench (a block decoded at every new handed address, and
+blocks run past the handed ones). N64 without the frame pointer (one more register): +7 % on arm64. Packs: every pack
+of every console is stale (the toolkit digest); GBA packs built now carry ABI 5 (refused by older cores), and N64 packs
+change compile flags.
+
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
 presents each one twice at 60 Hz), the generated frames take the repeats' slots, and the runtimes' frame sleep goes
@@ -1134,7 +1176,8 @@ guest memory and GPU). Three layers:
   another BIOS, another format version or another build (a section whose size is not this build's) is refused and
   the machine is left as it was. Host pointers are never in a state, and neither is anything a pack adds: a state is
   the machine only, so it loads the same whether the game runs interpreted or recompiled, either way round. On load
-  the GBA's lifted-code hand-offs in flight are reset (its dispatch is a function of the ROM, which never changes);
+  the GBA's lifted-code hand-offs in flight are reset (its dispatch is a function of the ROM, which never changes, and
+  lifted IWRAM code is checked against its bytes at every call, XBA-279);
   the PS1 bumps every RAM page's write counter and flushes its dispatch cache, so each lifted function is hashed
   against RAM again before it runs. Take and load states between frames. Loading clears the save chip's / cards'
   dirty flags: what the state brought back reaches `game.sav` / `card1.mcr` only once the game writes its save again.
