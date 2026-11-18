@@ -165,6 +165,11 @@ gc_machine *gc_create_disc(gc_disc *disc, char *why, size_t why_len)
     rc_put32(lo + 0xCC, hdr[3] == 'P' ? 1 : 0);            /* TV mode: PAL for European discs, else NTSC */
     st32(m, BOOT_RETURN, 0x48000000u);                     /* b . : nothing should run there */
     st32(m, BOOT_REPORT, 0x4E800020u);                     /* blr */
+    /* The IPL's default DSI / FPU-unavailable / system call handlers: rfi. Some apploaders (Prince of Persia: The
+     * Two Thrones, 2004/11/10) run sc to sync the caches; the main DOL's OSInit installs its own handlers later. */
+    st32(m, 0x80000300u, 0x4C000064u);
+    st32(m, 0x80000800u, 0x4C000064u);
+    st32(m, 0x80000C00u, 0x4C000064u);
 
     gc_cpu *c = &m->h.cpu;
     c->msr &= ~PPC_MSR_EE;
