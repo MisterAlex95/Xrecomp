@@ -1255,6 +1255,82 @@ int main(int argc, char **argv)
               "depth resolve with stencil: inside %08X (want 800000 << 8 | 5A), outside %08X", in_s, out_s);
     }
 
+    /* eDRAM aliasing: draw into one format, resolve the same tiles as another: the raw bits must come through */
+    {
+        /* resolve render target 0 (64 x 64) to `dest` in texture format `tf` */
+#define RESOLVE_TO(dest, tf)                                                                                           \
+    do {                                                                                                               \
+        reg(0x4800, 0x7000u | 3u);                                                                                     \
+        reg(0x4801, 2u | (6u << 2));                                                                                   \
+        reg(0x2208, 6);                                                                                                \
+        reg(0x2318, 0u);                                                                                               \
+        reg(0x2319, dest);                                                                                             \
+        reg(0x231A, W | (uint32_t)H << 16);                                                                            \
+        reg(0x231B, 2u | (uint32_t)(tf) << 7);                                                                         \
+        type3(PM4_DRAW_INDX_2, &rect, 1);                                                                              \
+        reg(0x2208, 4);                                                                                                \
+    } while (0)
+#define FILL(r_, g_, b_, a_)                                                                                           \
+    do {                                                                                                               \
+        reg(0x4400, fbits(r_)), reg(0x4401, fbits(g_)), reg(0x4402, fbits(b_)), reg(0x4403, fbits(a_));                \
+        vertex(0x41100, -1, -1, 1, 1, 1), vertex(0x41120, 1, -1, 1, 1, 1);                                             \
+        vertex(0x41140, -1, 1, 1, 1, 1), vertex(0x41160, 1, 1, 1, 1, 1);                                               \
+        reg(0x4800, 0x41100u | 3u);                                                                                    \
+        reg(0x4801, 2u | (32u << 2));                                                                                  \
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);                                                                           \
+    } while (0)
+        xenos_gl_stats a0, a1;
+        reg(0x2002, 0x700u); /* a depth buffer out of the way */
+        reg(0x2000, 64u);
+        /* 8_8_8_8 (FF, 00, 00, FF) read as 2_10_10_10: the same dword */
+        reg(0x2001, 0x400u | 0u << 16);
+        FILL(1.0f, 0.0f, 0.0f, 1.0f);
+        reg(0x2001, 0x400u | 2u << 16);
+        RESOLVE_TO(0x46000u, 7);
+        run(&cp);
+        uint32_t v = rd32(NULL, 0x46000 + tiled_off(9, 9));
+        CHECK(v == 0xFF0000FFu, "8_8_8_8 read as 2_10_10_10: %08X, want FF0000FF", v);
+        /* 8_8_8_8 (00, 3C, 00, 3C) read as 16_16_FLOAT: two halves of 1.0 */
+        reg(0x2001, 0x420u | 0u << 16);
+        FILL(0.0f, 60.0f / 255.0f, 0.0f, 60.0f / 255.0f);
+        reg(0x2001, 0x420u | 6u << 16);
+        RESOLVE_TO(0x48000u, 31);
+        run(&cp);
+        v = rd32(NULL, 0x48000 + tiled_off(9, 9));
+        CHECK(v == 0x3C003C00u, "8_8_8_8 read as 16_16_FLOAT: %08X, want 3C003C00", v);
+        /* the same format one tile row further on: rows 0-47 of the later surface are rows 16-63 of the earlier */
+        reg(0x2001, 0x441u);
+        FILL(0.0f, 1.0f, 0.0f, 1.0f);
+        reg(0x2001, 0x440u);
+        FILL(1.0f, 0.0f, 0.0f, 1.0f);
+        reg(0x2001, 0x441u);
+        RESOLVE_TO(0x4A000u, 6);
+        run(&cp);
+        uint32_t top = rd32(NULL, 0x4A000 + tiled_off(3, 3)), low = rd32(NULL, 0x4A000 + tiled_off(3, 60));
+        CHECK(top == 0xFF0000FFu && low == 0xFF00FF00u, "a surface one tile row on: top %08X (want FF0000FF), bottom %08X "
+              "(want FF00FF00)", top, low);
+        /* another pitch over the same tiles cannot be carried over: green must not survive, and it is counted */
+        xenos_gl_get_stats(g, &a0);
+        reg(0x2000, 128u), reg(0x2001, 0x480u);
+        FILL(0.0f, 1.0f, 0.0f, 1.0f);
+        reg(0x2000, 64u);
+        FILL(1.0f, 1.0f, 1.0f, 1.0f);
+        reg(0x2000, 128u);
+        RESOLVE_TO(0x4C000u, 6);
+        reg(0x2000, 64u), reg(0x2001, 0), reg(0x2002, 0), reg(0x2000, 0);
+        for (int i = 0; i < 4; i++)
+            reg(0x4400 + (uint32_t)i, fbits(1.0f));
+        run(&cp);
+        xenos_gl_get_stats(g, &a1);
+        v = rd32(NULL, 0x4C000 + tiled_off(5, 5));
+        CHECK((v & 0x0000FF00u) == 0 && a1.edram_stale > a0.edram_stale,
+              "another pitch: %08X must not be the stale green, %llu overlaps counted", v,
+              (unsigned long long)(a1.edram_stale - a0.edram_stale));
+        CHECK(a1.edram_reinterpreted >= 3, "reinterpreted surfaces: %llu", (unsigned long long)a1.edram_reinterpreted);
+#undef RESOLVE_TO
+#undef FILL
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;

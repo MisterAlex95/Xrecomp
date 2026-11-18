@@ -64,6 +64,8 @@ typedef struct xenos_gl_stats {
     uint64_t memexport_dwords;     /* dwords they wrote to guest memory */
     uint64_t memexport_dropped;    /* dwords past the log's capacity */
     uint64_t memexport_skipped;    /* shaders not run: memory export without GLES 3.1 vertex storage blocks */
+    uint64_t edram_reinterpreted;  /* XBA-296: surfaces given what another format / position left in their eDRAM */
+    uint64_t edram_stale;          /* overlaps that could not be carried over: the rows cleared (colour / depth: kept) */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

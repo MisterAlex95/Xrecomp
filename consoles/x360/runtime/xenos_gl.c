@@ -252,9 +252,10 @@ typedef struct texture {
  * The 10 MB of eDRAM hold the render targets at tile bases (80 x 16 samples of 32 bits per tile) that RB_COLOR_INFO,
  * RB_COLOR1..3_INFO and RB_DEPTH_INFO name, with RB_SURFACE_INFO's pitch and MSAA mode. Each (base, pitch, format,
  * MSAA) a draw or resolve meets is a host texture of guest width x height at the internal resolution (scale): its
- * height grows to what the window scissor asks for. Surfaces are kept least recently used first; two keys at the same
- * base are two surfaces (a title reinterpreting a target's eDRAM in another format starts from a clear one). MSAA
- * targets are rendered single-sampled at the pixel grid (a resolve of any sample gives the pixel). */
+ * height grows to what the window scissor asks for. Surfaces are kept least recently used first; two keys over the
+ * same tiles are two surfaces, and the one bound or resolved takes what the other wrote since (sync_surface): the raw
+ * bits at the same pitch for formats of one bit width, else the rows are cleared and counted. MSAA targets are rendered
+ * single-sampled at the pixel grid (a resolve of any sample gives the pixel). */
 #define MAX_SURFACES 32
 #define MAX_COPIES 16
 
@@ -265,6 +266,8 @@ typedef struct surface {
     GLenum ifmt, rfmt, rtype;              /* host internal format, format / type of glReadPixels */
     int kind;                              /* 0 unorm, 1 float, 2 depth */
     unsigned used;
+    unsigned written;                      /* the write clock of its last contents (XBA-296) */
+    int dirty_h;                           /* guest rows written so far */
 } surface;
 
 /* what a resolve wrote to guest memory, kept as a host picture too (the front buffer at the internal resolution,
@@ -311,7 +314,10 @@ struct xenos_gl {
     int no_float;             /* float targets are not renderable here (no EXT_color_buffer_*): 8_8_8_8 instead */
     int readback;             /* read each swap's frame back to memory (xenos_gl_frame, PPM frames) */
     surface surf[MAX_SURFACES];
-    unsigned surf_clock;
+    unsigned surf_clock, write_clock;
+    GLuint aprog;             /* eDRAM aliasing: the pass that reinterprets a surface's bits in another format */
+    GLint aprog_off, aprog_sc, aprog_dc;
+    int aprog_failed;
     int cur[4], cur_ds;       /* the surfaces bound (index into surf, -1 none) */
     int tw, th;               /* the guest size of the bound colour target 0 (the viewport's frame of reference) */
     rt_copy copies[MAX_COPIES];
@@ -636,6 +642,8 @@ void xenos_gl_destroy(xenos_gl *g)
             g->glDeleteTextures(1, &g->stex);
         if (g->sprog)
             g->glDeleteProgram(g->sprog);
+        if (g->aprog)
+            g->glDeleteProgram(g->aprog);
         if (g->frame_tex)
             g->glDeleteTextures(1, &g->frame_tex);
         g->glDeleteVertexArrays(1, &g->vao);
@@ -1285,6 +1293,14 @@ static void clear_texture(xenos_gl *g, const surface *s, GLuint tex)
                               GL_TEXTURE_2D, 0, 0);
 }
 
+/* the 64-bit colour formats: 16_16_16_16, its _FLOAT form, 32_32_FLOAT */
+static int fmt_wide(uint32_t fmt)
+{
+    return fmt == 5 || fmt == 7 || fmt == 15;
+}
+
+static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound);
+
 /* the surface for an eDRAM key, made (or grown to need_h rows) when needed; its index */
 static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt, int depth, uint32_t msaa,
                        uint32_t alias, int need_h)
@@ -1296,7 +1312,7 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
     /* the eDRAM's 2048 tiles of 80 x 16 samples (32-bit; 40 x 16 for the 64-bit formats); 2x MSAA doubles the
      * samples vertically, 4x both ways: a title's scissor left at its maximum does not make an 8192-row surface */
     {
-        int wide = !depth && (fmt == 4 || fmt == 5 || fmt == 7 || fmt == 15);
+        int wide = !depth && fmt_wide(fmt);
         uint32_t sx = msaa == 2 ? 2 : 1, sy = msaa ? 2 : 1, tw = wide ? 40 : 80;
         uint32_t per_row = (pitch * sx + tw - 1) / tw, left = base < 2048 ? 2048 - base : 1;
         int max_h = per_row ? (int)(left / per_row * 16 / sy) : need_h;
@@ -1426,6 +1442,11 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         for (int i = 0; i < 4; i++) /* a later get_surface may have reused an earlier one's slot */
             if (want[i] >= 0 && !g->surf[want[i]].tex)
                 want[i] = -1;
+        /* what another format or position left in these tiles since (not what is bound together with them) */
+        int together[5] = {want[0], want[1], want[2], want[3], ds};
+        for (int i = 0; i < 5; i++)
+            if (together[i] >= 0)
+                sync_surface(g, together[i], together, 5);
         g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
         GLenum bufs[4];
         for (int i = 0; i < 4; i++) {
@@ -1441,6 +1462,14 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         g->glDrawBuffers(4, bufs);
         if (g->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
             const surface *ref = want[0] >= 0 ? &g->surf[want[0]] : &g->surf[ds];
+            unsigned stamp = ++g->write_clock;
+            for (int i = 0; i < 5; i++)
+                if (together[i] >= 0) {
+                    surface *w = &g->surf[together[i]];
+                    int rows = need_h > 0 && need_h < w->h ? need_h : w->h;
+                    w->written = stamp;
+                    w->dirty_h = rows > w->dirty_h ? rows : w->dirty_h;
+                }
             g->tw = ref->w, g->th = ref->h;
             g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
             return 1;
@@ -2530,15 +2559,20 @@ static int resolve_source(xenos_gl *g, const xenos_cp *cp, uint32_t src)
     if (src < 4) {
         uint32_t info = cp->regs[info_reg[src]];
         int c = g->cur[src];
-        if (c >= 0 && g->surf[c].tex && g->surf[c].base == (info & 0xFFF))
+        if (c >= 0 && g->surf[c].tex && g->surf[c].base == (info & 0xFFF) &&
+            (g->surf[c].fmt & 255) == ((info >> 16) & 15) && (!pitch || g->surf[c].pitch == pitch))
             return c;
-        return get_surface(g, info & 0xFFF, pitch, (info >> 16) & 15, 0, msaa, 0, 0);
+        c = get_surface(g, info & 0xFFF, pitch, (info >> 16) & 15, 0, msaa, 0, 0);
+        sync_surface(g, c, NULL, 0);
+        return c;
     }
     uint32_t dinfo = cp->regs[0x2002];
     int c = g->cur_ds;
     if (c >= 0 && g->surf[c].tex && g->surf[c].base == (dinfo & 0xFFF))
         return c;
-    return get_surface(g, dinfo & 0xFFF, pitch, (dinfo >> 16) & 1, 1, msaa, 0, 0);
+    c = get_surface(g, dinfo & 0xFFF, pitch, (dinfo >> 16) & 1, 1, msaa, 0, 0);
+    sync_surface(g, c, NULL, 0);
+    return c;
 }
 
 /* the raw eDRAM clear value of a colour format as floats (RB_COLOR_CLEAR, RB_COLOR_CLEAR_LO for 64-bit formats) */
@@ -2648,6 +2682,229 @@ static uint32_t *read_depth(xenos_gl *g, const surface *s, int x0, int y0, int w
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
     g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
     return out;
+}
+
+/* ---- eDRAM aliasing (XBA-296) ----
+ * Each surface knows when it was last written. A surface about to be drawn to or resolved takes, oldest first, what
+ * overlapping surfaces wrote after it: at the same pitch and MSAA mode, whole tile rows apart, the raw bits go through
+ * a pass that encodes them from the source's format and decodes them in its own (32-bit formats among themselves, 64-bit
+ * ones too), depth by a blit. Anything else (another pitch, another bit width, 7e3 formats, float targets
+ * stood in for by 8_8_8_8) cannot be carried over: the overlapping rows are cleared rather than left stale, and counted.
+ * Colour over depth or depth over colour is counted and left as it is. */
+static const char ALIAS_FS[] =
+    "#version 300 es\nprecision highp float;\nprecision highp int;\nuniform highp sampler2D t;\nuniform ivec3 off;\n"
+    "uniform int sc, dc;\nout vec4 c;\n"
+    "float gam(float v) { return v <= 0.0031308 ? 12.92 * v : 1.055 * pow(v, 1.0 / 2.4) - 0.055; }\n"
+    "float lin(float v) { return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4); }\n"
+    "uint fx(float v) { return uint(int(round(clamp(v, -32.0, 32.0) * 32767.0 / 32.0))) & 0xFFFFu; }\n"
+    "float xf(uint v) { return float(int(v << 16) >> 16) * 32.0 / 32767.0; }\n"
+    "uvec2 enc(vec4 v, int k) {\n"
+    " if (k == 1) { v.r = gam(v.r); v.g = gam(v.g); v.b = gam(v.b); k = 0; }\n"
+    " if (k == 0) { uvec4 b = uvec4(round(clamp(v, 0.0, 1.0) * 255.0));\n"
+    "  return uvec2(b.r | b.g << 8 | b.b << 16 | b.a << 24, 0u); }\n"
+    " if (k == 2) { uvec4 b = uvec4(round(clamp(v, 0.0, 1.0) * vec4(1023.0, 1023.0, 1023.0, 3.0)));\n"
+    "  return uvec2(b.r | b.g << 10 | b.b << 20 | b.a << 30, 0u); }\n"
+    " if (k == 3) return uvec2(fx(v.r) | fx(v.g) << 16, 0u);\n"
+    " if (k == 4) return uvec2(packHalf2x16(v.rg), 0u);\n"
+    " if (k == 5) return uvec2(floatBitsToUint(v.r), 0u);\n"
+    " if (k == 6) return uvec2(fx(v.r) | fx(v.g) << 16, fx(v.b) | fx(v.a) << 16);\n"
+    " if (k == 7) return uvec2(packHalf2x16(v.rg), packHalf2x16(v.ba));\n"
+    " return uvec2(floatBitsToUint(v.r), floatBitsToUint(v.g)); }\n"
+    "vec4 dec(uvec2 r, int k) {\n"
+    " uint a = r.x, b = r.y;\n"
+    " if (k <= 1) { vec4 v = vec4(a & 255u, (a >> 8) & 255u, (a >> 16) & 255u, a >> 24) / 255.0;\n"
+    "  return k == 1 ? vec4(lin(v.r), lin(v.g), lin(v.b), v.a) : v; }\n"
+    " if (k == 2) return vec4(a & 1023u, (a >> 10) & 1023u, (a >> 20) & 1023u, a >> 30) / vec4(1023.0, 1023.0, 1023.0, 3.0);\n"
+    " if (k == 3) return vec4(xf(a & 0xFFFFu), xf(a >> 16), 0.0, 1.0);\n"
+    " if (k == 4) return vec4(unpackHalf2x16(a), 0.0, 1.0);\n"
+    " if (k == 5) return vec4(uintBitsToFloat(a), 0.0, 0.0, 1.0);\n"
+    " if (k == 6) return vec4(xf(a & 0xFFFFu), xf(a >> 16), xf(b & 0xFFFFu), xf(b >> 16));\n"
+    " if (k == 7) return vec4(unpackHalf2x16(a), unpackHalf2x16(b));\n"
+    " return vec4(uintBitsToFloat(a), uintBitsToFloat(b), 0.0, 1.0); }\n"
+    "void main() { c = dec(enc(texelFetch(t, ivec2(gl_FragCoord.xy) + off.xy, 0), sc), dc); }\n";
+
+/* the pass's name for a surface's format, -1 when its bits cannot be recovered */
+static int alias_class(const xenos_gl *g, const surface *s)
+{
+    static const signed char map[16] = {0, 1, 2, -1, 3, 6, 4, 7, 0, 0, 2, 0, -1, 0, 5, 8};
+    int k = map[s->fmt & 15];
+    return k >= 3 && g->no_float ? -1 : k;
+}
+
+static uint32_t surface_row_tiles(const surface *s)
+{
+    uint32_t sx = s->msaa == 2 ? 2 : 1, tw = !s->depth && fmt_wide(s->fmt & 255) ? 40 : 80;
+    return (s->pitch * sx + tw - 1) / tw;
+}
+
+static int alias_program(xenos_gl *g)
+{
+    if (g->aprog || g->aprog_failed)
+        return g->aprog != 0;
+    GLuint v = compile(g, GL_VERTEX_SHADER, DEPTH_VS, "eDRAM alias vs");
+    GLuint f = compile(g, GL_FRAGMENT_SHADER, ALIAS_FS, "eDRAM alias fs");
+    GLint ok = 0;
+    if (v && f) {
+        g->aprog = g->glCreateProgram();
+        g->glAttachShader(g->aprog, v);
+        g->glAttachShader(g->aprog, f);
+        g->glLinkProgram(g->aprog);
+        g->glGetProgramiv(g->aprog, GL_LINK_STATUS, &ok);
+    }
+    if (v)
+        g->glDeleteShader(v);
+    if (f)
+        g->glDeleteShader(f);
+    if (!ok) {
+        if (g->aprog)
+            g->glDeleteProgram(g->aprog);
+        g->aprog = 0;
+        g->aprog_failed = 1;
+        return 0;
+    }
+    g->aprog_off = g->glGetUniformLocation(g->aprog, "off");
+    g->aprog_sc = g->glGetUniformLocation(g->aprog, "sc");
+    g->aprog_dc = g->glGetUniformLocation(g->aprog, "dc");
+    return 1;
+}
+
+/* rows y0..y1 of colour surface d from surface s, whose row y - dy they are */
+static int alias_copy(xenos_gl *g, const surface *d, const surface *s, int dy, int y0, int y1)
+{
+    int dc = alias_class(g, d), sc = alias_class(g, s);
+    if (dc < 0 || sc < 0 || fmt_wide(d->fmt & 255) != fmt_wide(s->fmt & 255) || !alias_program(g))
+        return 0;
+    static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+    int k = g->scale;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d->tex, 0);
+    g->glDrawBuffers(1, &b0);
+    g->glDisable(GL_BLEND);
+    g->glDisable(GL_DEPTH_TEST);
+    g->glDisable(GL_STENCIL_TEST);
+    g->glDisable(GL_CULL_FACE);
+    g->glColorMask(1, 1, 1, 1);
+    g->glEnable(GL_SCISSOR_TEST);
+    g->glScissor(0, y0 * k, d->w * k, (y1 - y0) * k);
+    g->glViewport(0, 0, d->w * k, d->h * k);
+    g->glUseProgram(g->aprog);
+    g->glActiveTexture(GL_TEXTURE0);
+    g->glBindTexture(GL_TEXTURE_2D, s->tex);
+    g->glUniform1i(g->glGetUniformLocation(g->aprog, "t"), 0);
+    g->glUniform3i(g->aprog_off, 0, -dy * k, 0);
+    g->glUniform1i(g->aprog_sc, sc);
+    g->glUniform1i(g->aprog_dc, dc);
+    g->glBindVertexArray(g->vao);
+    g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    return 1;
+}
+
+/* rows y0..y1 of depth surface d from depth surface s */
+static void alias_depth(xenos_gl *g, const surface *d, const surface *s, int dy, int y0, int y1)
+{
+    int k = g->scale, hw = d->w * k;
+    g->glBindFramebuffer(GL_READ_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, s->tex, 0);
+    g->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g->tfbo_draw);
+    g->glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, d->tex, 0);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glBlitFramebuffer(0, (y0 - dy) * k, hw, (y1 - dy) * k, 0, y0 * k, hw, y1 * k,
+                         GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+    g->glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    g->glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+}
+
+/* rows y0..y1 of a surface whose eDRAM was overwritten in a way that cannot be carried over */
+static void alias_clear(xenos_gl *g, const surface *d, int y0, int y1)
+{
+    int k = g->scale;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0,
+                              GL_TEXTURE_2D, d->tex, 0);
+    g->glEnable(GL_SCISSOR_TEST);
+    g->glScissor(0, y0 * k, d->w * k, (y1 - y0) * k);
+    if (d->kind == 2) {
+        g->glDepthMask(1);
+        g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+        g->glClearDepthf(1.0f);
+        g->glClearStencil(0);
+        g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    } else {
+        static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+        g->glDrawBuffers(1, &b0);
+        g->glColorMask(1, 1, 1, 1);
+        g->glClearColor(0, 0, 0, 0);
+        g->glClear(GL_COLOR_BUFFER_BIT);
+    }
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0,
+                              GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+}
+
+static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
+{
+    surface *d = &g->surf[si];
+    uint32_t dsy = d->msaa ? 2 : 1, dper = surface_row_tiles(d);
+    uint32_t dend = d->base + dper * (((uint32_t)d->h * dsy + 15) / 16);
+    unsigned since = d->written;
+    int touched = 0;
+    for (;;) {
+        const surface *s = NULL;
+        for (int i = 0; i < MAX_SURFACES; i++) {
+            const surface *o = &g->surf[i];
+            int together = i == si;
+            for (int k = 0; k < nbound; k++)
+                together |= bound[k] == i;
+            if (together || !o->tex || o->written <= since || !o->dirty_h || (o->fmt >> 8) || (d->fmt >> 8))
+                continue;
+            uint32_t osy = o->msaa ? 2 : 1;
+            uint32_t oend = o->base + surface_row_tiles(o) * (((uint32_t)o->dirty_h * osy + 15) / 16);
+            if (o->base < dend && d->base < oend && (!s || o->written < s->written))
+                s = o;
+        }
+        if (!s)
+            break;
+        since = s->written;
+        touched = 1;
+        if ((s->kind == 2) != (d->kind == 2)) { /* colour and depth over one another: not reinterpreted */
+            g->st.edram_stale++;
+            continue;
+        }
+        uint32_t sper = surface_row_tiles(s);
+        int64_t tiles = (int64_t)s->base - (int64_t)d->base;
+        int same_grid = s->pitch == d->pitch && s->msaa == d->msaa && sper == dper && tiles % (int64_t)dper == 0;
+        int dy = same_grid ? (int)(tiles / (int64_t)dper) * 16 / (int)dsy : 0;
+        int y0 = dy > 0 ? dy : 0, y1 = dy + s->dirty_h < d->h ? dy + s->dirty_h : d->h;
+        if (same_grid && y1 > y0) {
+            if (d->kind == 2) {
+                alias_depth(g, d, s, dy, y0, y1);
+                g->st.edram_reinterpreted++;
+                continue;
+            }
+            if (alias_copy(g, d, s, dy, y0, y1)) {
+                g->st.edram_reinterpreted++;
+                continue;
+            }
+        }
+        /* the rows of this surface the other one's tiles reach */
+        uint32_t from = s->base > d->base ? s->base - d->base : 0;
+        uint32_t send = s->base + sper * (((uint32_t)s->dirty_h * (s->msaa ? 2 : 1) + 15) / 16);
+        uint32_t to = (send < dend ? send : dend) - d->base;
+        int r0 = (int)(from / dper * 16 / dsy), r1 = (int)((to + dper - 1) / dper * 16 / dsy);
+        r1 = r1 < d->h ? r1 : d->h;
+        if (r1 > r0)
+            alias_clear(g, d, r0, r1);
+        g->st.edram_stale++;
+    }
+    if (touched) {
+        d->written = since;
+        g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
+    }
 }
 
 /* The stencil of a depth resolve (XBA-296). GLES 3.0 cannot sample stencil, so it is read a bit at a time: for each of
@@ -2877,6 +3134,8 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
             g->glColorMask(1, 1, 1, 1);
             g->glClearBufferfv(0x1800 /* GL_COLOR */, 0, colour);
             g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            s->written = ++g->write_clock;
+            s->dirty_h = y1 > s->dirty_h ? y1 : s->dirty_h;
         }
         if (clear_d) {
             int di = resolve_source(g, cp, 4);
@@ -2888,6 +3147,8 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
             g->glClearStencil((GLint)(dc & 0xFF));
             g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+            g->surf[di].written = ++g->write_clock;
+            g->surf[di].dirty_h = y1 > g->surf[di].dirty_h ? y1 : g->surf[di].dirty_h;
         }
         g->glDisable(GL_SCISSOR_TEST);
         g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
