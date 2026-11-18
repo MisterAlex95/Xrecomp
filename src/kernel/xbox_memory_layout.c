@@ -5229,19 +5229,32 @@ static int g_heap_block_count = 0;
  * the main one), and the table above is shared state. */
 static SRWLOCK g_heap_lock = SRWLOCK_INIT;
 
-/* RECOMP_HEAP_RECLAIM: give memory back properly.
- *
- * Reuse below hands a whole freed block to whatever asks next, however small,
- * and freeing skips over the empty slots that merging leaves behind, so a
- * title that allocates and frees a lot drains the heap far faster than it
- * uses it. Fixing that changes which address every later allocation gets, in
- * every title that ever frees, so it is off unless asked for. Read once: the
- * heap is hit constantly and the answer does not change. */
+/* RECOMP_HEAP_RECLAIM: NtFreeVirtualMemory through upstream's path. Off unless
+ * set to something other than 0. Read once, like the switch below. */
 int xbox_HeapReclaimEnabled(void)
 {
     static int on = -1;
-    if (on < 0)
-        on = getenv("RECOMP_HEAP_RECLAIM") != NULL;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_HEAP_RECLAIM");
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
+/* RECOMP_HEAP_SPLIT: a request takes only what it needs of a freed block. On
+ * unless set to 0, which hands the whole block to whatever asks next, however
+ * small, and stops merging at the empty slots earlier merges leave behind. A
+ * title that frees and reloads a scene then drains the heap far faster than it
+ * uses it, and the large buffers of the next load no longer fit (GitHub issue
+ * 2, Sonic Heroes' first stage). RECOMP_HEAP_RECLAIM implies it. Read once: the
+ * heap is hit constantly and the answer does not change. */
+static int heap_split_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_HEAP_SPLIT");
+        on = xbox_HeapReclaimEnabled() || !e || !*e || atoi(e) != 0;
+    }
     return on;
 }
 
@@ -6076,8 +6089,8 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
      * 48 MB in 4,726 allocations, and its second D3D CreateDevice then failed
      * with E_OUTOFMEMORY -- which the title reports by clearing
      * global_d3d_device, so the rasterizer asserts and startup stops. */
-    if (xbox_HeapReclaimEnabled()) {
-        /* Take only what the request needs; see xbox_HeapReclaimEnabled(). */
+    if (heap_split_enabled()) {
+        /* Take only what the request needs; see heap_split_enabled(). */
         size = (size + 15) & ~15u;
         result = heap_carve_free(size, alignment);
         if (result)
@@ -6224,12 +6237,13 @@ void xbox_HeapFree(uint32_t xbox_va)
         /* Coalesce with neighbours. Blocks are recorded in bump order, so
          * index order is address order and adjacency is a simple end==start
          * test. Keeps large contiguous requests satisfiable after a lot of
-         * small churn. Under RECOMP_HEAP_RECLAIM the neighbour search steps
-         * over the empty slots (size 0) earlier merges leave behind; without
-         * that, one merge stops every later one dead. */
+         * small churn. The neighbour search steps over the empty slots (size
+         * 0) earlier merges leave behind; without that, one merge stops every
+         * later one dead. They keep their address: heap_block_at searches the
+         * table by it. */
         {
             int n = i + 1, p = i - 1, m = i;
-            if (xbox_HeapReclaimEnabled()) {
+            if (heap_split_enabled()) {
                 while (n < g_heap_block_count && g_heap_blocks[n].size == 0) n++;
                 while (p >= 0 && g_heap_blocks[p].size == 0) p--;
             }
@@ -6237,13 +6251,11 @@ void xbox_HeapFree(uint32_t xbox_va)
                 g_heap_blocks[i].addr + g_heap_blocks[i].size == g_heap_blocks[n].addr) {
                 g_heap_blocks[i].size += g_heap_blocks[n].size;
                 g_heap_blocks[n].size = 0;
-                g_heap_blocks[n].addr = 0;
             }
             if (p >= 0 && g_heap_blocks[p].free &&
                 g_heap_blocks[p].addr + g_heap_blocks[p].size == g_heap_blocks[i].addr) {
                 g_heap_blocks[p].size += g_heap_blocks[i].size;
                 g_heap_blocks[i].size = 0;
-                g_heap_blocks[i].addr = 0;
                 m = p;
             }
             /* After the merge, so a page this block shared with a neighbour

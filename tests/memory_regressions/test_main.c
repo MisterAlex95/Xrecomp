@@ -10,13 +10,16 @@
  *
  *   default       No switch set. Pins what every title gets today, so a change
  *                 that alters the default shows up here.
+ *   heap-keep     RECOMP_HEAP_SPLIT=0: the old behaviour, reuse hands a freed
+ *                 block over whole.
  *   heap-reclaim  RECOMP_HEAP_RECLAIM=1. Each check fails without the fix:
  *
- *   1. A small request after a large free takes only what it needs. Reuse used
- *      to hand over the whole block, so a 16-byte request could take 2 MB.
- *   2. Freeing three neighbours in an awkward order merges all three. Merging
- *      left an empty slot behind that later frees did not step over, so the
- *      third block never joined the other two.
+ *   1. (default too) A small request after a large free takes only what it
+ *      needs. Reuse used to hand over the whole block, so a 16-byte request
+ *      could take 2 MB.
+ *   2. (default too) Freeing three neighbours in an awkward order merges all
+ *      three. Merging left an empty slot behind that later frees did not step
+ *      over, so the third block never joined the other two.
  *   3. NtFreeVirtualMemory(MEM_RELEASE) on memory NtAllocateVirtualMemory took
  *      from the heap gives it back. It handed the 32-bit guest slot to the host
  *      VirtualFree as a pointer, which failed, so none of it ever returned.
@@ -248,6 +251,7 @@ int main(int argc, char **argv)
     int avoid = !strcmp(mode, "contig-avoid-image");
     int overlap = !strcmp(mode, "contig-overlap");
     int keep = !strcmp(mode, "contig-keep");
+    int heap_keep = !strcmp(mode, "heap-keep");
     int lazy_off = !strcmp(mode, "lazy-off");
     size_t xbe_len = 0;
     unsigned char *xbe;
@@ -271,7 +275,8 @@ int main(int argc, char **argv)
         return rc;
 #endif
     }
-    if (!reclaim && !ext && !avoid && !overlap && !keep && !lazy_off && strcmp(mode, "default")) {
+    if (!reclaim && !ext && !avoid && !overlap && !keep && !heap_keep && !lazy_off
+            && strcmp(mode, "default")) {
         printf("unknown mode '%s'\n", mode);
         return 2;
     }
@@ -285,6 +290,8 @@ int main(int argc, char **argv)
         set_env("RECOMP_CONTIG_AVOID_IMAGE", "0");
     if (keep)
         set_env("RECOMP_CONTIG_RECLAIM", "0");
+    if (heap_keep)
+        set_env("RECOMP_HEAP_SPLIT", "0");
     if (lazy_off)
         set_env("RECOMP_LAZY_RESERVE", "0");
     if (ext128)
@@ -342,7 +349,7 @@ int main(int argc, char **argv)
         s1 = xbox_HeapAlloc(16, 16);
         s2 = xbox_HeapAlloc(16, 16);
 
-        if (reclaim) {
+        if (!heap_keep) {
             snprintf(d, sizeof d, "block is %u bytes, expected 16", xbox_HeapBlockSize(s1));
             check(xbox_HeapBlockSize(s1) == 16, "16-byte request takes 16 bytes of a freed 2 MB", d);
             snprintf(d, sizeof d, "second request at 0x%08X, outside 0x%08X", s2, a);
@@ -350,14 +357,14 @@ int main(int argc, char **argv)
         } else {
             snprintf(d, sizeof d, "block is %u bytes", xbox_HeapBlockSize(s1));
             check(s1 == a && xbox_HeapBlockSize(s1) == big,
-                  "default: reuse hands over the whole freed block", d);
+                  "heap-keep: reuse hands over the whole freed block", d);
             check(s2 < a || s2 >= a + big,
-                  "default: the second request cannot share it", NULL);
+                  "heap-keep: the second request cannot share it", NULL);
         }
     }
 
     /* 2. Three neighbours freed so that the third meets an empty slot. */
-    if (reclaim) {
+    if (!ext && !heap_keep) {
         uint32_t x = xbox_HeapAlloc(64, 16), y = xbox_HeapAlloc(64, 16);
         uint32_t z = xbox_HeapAlloc(64, 16), w = xbox_HeapAlloc(64, 16);
         uint32_t m;
@@ -778,6 +785,32 @@ int main(int argc, char **argv)
         }
     }
 #endif
+
+    /* 9. A nearly full heap, as a title reloading a scene leaves it: a large
+     *    buffer goes, something small is allocated, and the large buffer's
+     *    successor must still fit where the old one was. Last, because it runs
+     *    the heap out. */
+    if (!strcmp(mode, "default") || heap_keep) {
+        const uint32_t big = 8u * 1024 * 1024, chunk = 1024u * 1024;
+        uint32_t fill[128], a = xbox_HeapAlloc(big, 4096), small, again;
+        int n = 0;
+
+        (void)xbox_HeapAlloc(4096, 16);      /* keeps `a` off the bump pointer */
+        while (n < 128 && (fill[n] = xbox_HeapAlloc(chunk, 4096)) != 0)
+            n++;
+        xbox_HeapFree(a);
+        small = xbox_HeapAlloc(16, 16);
+        again = xbox_HeapAlloc(big - 4096, 4096);
+        snprintf(d, sizeof d, "small 0x%08X, large 0x%08X, freed 0x%08X", small, again, a);
+        if (heap_keep)
+            check(small == a && again == 0,
+                  "heap-keep: the small request costs the large one its place", d);
+        else
+            check(again >= a && again + (big - 4096) <= a + big,
+                  "a large buffer still fits after a small request on a full heap", d);
+        while (n > 0)
+            xbox_HeapFree(fill[--n]);
+    }
 
     xbox_MemoryLayoutShutdown();
     free(xbe);

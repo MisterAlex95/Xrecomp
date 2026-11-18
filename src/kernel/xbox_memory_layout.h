@@ -985,9 +985,9 @@ const uint8_t *xbox_XbeHeaderSha1(void);
 uint32_t xbox_HeapBlockSize(uint32_t xbox_va);
 
 /**
- * True when RECOMP_HEAP_RECLAIM is set: freed heap blocks are split rather than
- * handed over whole, and NtFreeVirtualMemory returns heap memory to the heap.
- * Off by default; it changes which address later allocations get.
+ * True when RECOMP_HEAP_RECLAIM is set to something other than 0:
+ * NtFreeVirtualMemory takes upstream's path for heap memory. Off by default.
+ * Freed blocks are split either way, unless RECOMP_HEAP_SPLIT=0.
  */
 int xbox_HeapReclaimEnabled(void);
 
