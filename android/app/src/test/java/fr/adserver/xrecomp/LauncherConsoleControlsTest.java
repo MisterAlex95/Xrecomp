@@ -737,4 +737,46 @@ public class LauncherConsoleControlsTest {
         assertNotNull(started);
         assertEquals(ShellActivity.class.getName(), started.getComponent().getClassName());
     }
+
+    /**
+     * XBA-282: an Xbox 360 game's Home prepares (the toolchain is there) and has the Key file pill; without a key the
+     * note says to pick one. On 4:3 and 1:1 single screens every pill stays inside the window. Screenshots
+     * x360-home-4x3, x360-home-1x1.
+     */
+    @Test
+    public void x360HomeKeyFileOnSquareScreens() throws Exception {
+        for (String[] size : new String[][] { { "4x3", "en-w1440dp-h1080dp-land-mdpi" },
+                                               { "1x1", "en-w1080dp-h1080dp-land-mdpi" } }) {
+            RuntimeEnvironment.setQualifiers(size[1]);
+            File xex = rom("x360-" + size[0], "Game.xex", ConsoleTest.xex(0x4D5307E6L));
+            LauncherActivity a = launch();
+            String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(xex)).tid;
+            assertEquals(Console.X360, Console.ofKey(key));
+            a.forceFocusForTest();
+            idle(300);
+            for (GameCard c : a.libraryCardsForTest())
+                if ("Game".equals(c.titleForTest()))
+                    c.requestFocusFromTouch();
+            idle(300);
+            key(a, KeyEvent.KEYCODE_BUTTON_A);
+            assertEquals(LauncherActivity.Screen.ROM_HOME, a.screenForTest());
+            idle(400);
+            View decor = a.getWindow().getDecorView();
+            boolean keyPill = false, prepare = false;
+            for (Widgets.PillButton b : views(decor, Widgets.PillButton.class, new ArrayList<>())) {
+                keyPill |= app.getString(R.string.X360_KEY_PICK).equals(b.title);
+                prepare |= app.getString(R.string.PREPARE).equals(b.title);
+                int[] at = new int[2];
+                b.getLocationInWindow(at);
+                assertTrue(size[0] + ": the " + b.title + " pill inside the window (" + at[0] + " + " + b.getWidth()
+                           + " <= " + decor.getWidth() + ")", at[0] >= 0 && at[0] + b.getWidth() <= decor.getWidth());
+            }
+            assertTrue(size[0] + ": a Key file pill", keyPill);
+            assertTrue(size[0] + ": a Prepare pill", prepare);
+            assertEquals(app.getString(R.string.ROM_X360_NO_KEY_NOTE), a.noteForTest());
+            shot(a, "x360-home-" + size[0]);
+            a.finish();
+            idle(100);
+        }
+    }
 }

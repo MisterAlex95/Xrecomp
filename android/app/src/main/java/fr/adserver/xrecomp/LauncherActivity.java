@@ -5085,7 +5085,7 @@ public class LauncherActivity extends Activity {
         // XBA-181: this game's picture (scale, filter) and its stored files (saves, Prepare files): ROM_OPTIONS.
         boolean x360 = e.console() == Console.X360;
         if (x360)   // XBA-282: the player's key file, which Prepare opens an encrypted title with (X360Key)
-            pill(buttons, null, getString(X360Key.present(this) ? R.string.X360_KEY_CHANGE : R.string.X360_KEY_PICK),
+            pill(buttons, Icon.KEY, getString(X360Key.present(this) ? R.string.X360_KEY_CHANGE : R.string.X360_KEY_PICK),
                  false, this::openX360KeyPicker);
         pill(buttons, null, getString(R.string.ROM_OPTIONS), false, () -> go(Screen.ROM_OPTIONS))
             .setMark(gameSettingsMark(e.tid, e.console()));
