@@ -291,7 +291,8 @@ CMP_OPS = {
 # VMX128 forms of the packs / unpacks (the same references)
 WIDE_OPS = {"vpkshss128": "vpkshss", "vpkshus128": "vpkshus", "vpkswss128": "vpkswss", "vpkswus128": "vpkswus",
             "vpkuhum128": "vpkuhum", "vpkuhus128": "vpkuhus", "vpkuwum128": "vpkuwum", "vpkuwus128": "vpkuwus",
-            "vupkhsb128": "vupkhsb", "vupklsb128": "vupklsb"}
+            "vupkhsb128": "vupkhsb", "vupklsb128": "vupklsb",
+            "vupkhsh128": "vupkhsh", "vupklsh128": "vupklsh"}  # the byte opcodes with VA = 0x60
 
 VX_XO = {v: k for k, v in VX4.items()}
 VC_XO = {v: k for k, v in VC4.items()}
@@ -311,6 +312,8 @@ def encode(name, r, rc=0):
         return A._vx(VX_XO[name], r["d"], r["a"], r["b"])
     if name in OP5_XO:
         return A._op5(OP5_XO[name], r["d"], r["a"], r["b"])
+    if name in ("vupkhsh128", "vupklsh128"):
+        return A._op6(OP6_XO[name.replace("sh128", "sb128")], r["d"], 0x60, r["b"])
     if name in OP6_XO:
         return A._op6(OP6_XO[name], r["d"], 0, r["b"])
     raise KeyError(name)

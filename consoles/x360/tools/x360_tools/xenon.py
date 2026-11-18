@@ -826,7 +826,10 @@ class XenonLifter(FnLifter):
     def op_vupklsh(self, i): return self._upk("xv_upkh", i, 1)
     def op_vupkhpx(self, i): return self._upk("xv_upkpx", i, 0)
     def op_vupklpx(self, i): return self._upk("xv_upkpx", i, 1)
-    op_vupkhsb128, op_vupklsb128 = op_vupkhsb, op_vupklsb
+    # vupkhsb128 / vupklsb128 with VA = 0x60 are the halfword unpacks (vupkhsh128 / vupklsh128: Xenia and
+    # XenonRecomp both decode them that way)
+    def op_vupkhsb128(self, i): return self._upk("xv_upkh" if i.ext.va == 0x60 else "xv_upkb", i, 0)
+    def op_vupklsb128(self, i): return self._upk("xv_upkh" if i.ext.va == 0x60 else "xv_upkb", i, 1)
 
     def op_vsum4ubs(self, i): return self._vs("xv_sum4ubs", i)
     def op_vsum4sbs(self, i): return self._vs("xv_sum4sbs", i)
