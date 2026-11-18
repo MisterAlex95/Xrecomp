@@ -18,6 +18,11 @@ add_executable(recomp_pack_test test_main.c ${SRC}/recomp_pack.c ${SRC}/recomp_c
 target_include_directories(recomp_pack_test PRIVATE ${SRC})
 target_link_libraries(recomp_pack_test PRIVATE ${CMAKE_DL_LIBS})
 
+# The consoles' pack hash (src/platform/recomp_sha256.h) against the published vectors, plain C and ARMv8 instructions.
+add_executable(recomp_sha256_test test_sha256.c ${SRC}/recomp_sha256.c)
+target_include_directories(recomp_sha256_test PRIVATE ${SRC})
+target_compile_options(recomp_sha256_test PRIVATE -Wall -Wextra)
+
 # The other consoles' runtimes pack_loader.c routes to (XBA-147). They all play games now (core + SDL host layer, GBA
 # XBA-157, PS1 XBA-168, N64 XBA-174, GameCube XBA-259), which this test does not link: stand-ins that log.
 set(CONSOLES ${CMAKE_CURRENT_SOURCE_DIR}/../../consoles)
@@ -53,3 +58,4 @@ add_test(NAME recomp_pack COMMAND recomp_pack_test
          $<TARGET_FILE:fake_shell> $<TARGET_FILE:fake_title> $<TARGET_FILE:fake_title_min>
          $<TARGET_FILE:fake_shell_static>)
 set_tests_properties(recomp_pack PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME recomp_sha256 COMMAND recomp_sha256_test ${CMAKE_CURRENT_BINARY_DIR}/recomp_sha256_test.tmp)

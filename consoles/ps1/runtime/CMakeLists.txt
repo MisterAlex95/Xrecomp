@@ -101,9 +101,11 @@ endif()
 # ps1_pack: a PS1 title pack, the runtime's side (pack.json checks, the boot EXE's identity, dlopen of the table,
 # the discovered code written at exit; ps1_pack.h, XBA-168). No SDL: the tests link it alone.
 if(NOT TARGET ps1_pack)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/console_pack.cmake)
     add_library(ps1_pack STATIC ps1_pack.c)
     target_include_directories(ps1_pack PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(ps1_pack PUBLIC ps1_core ${CMAKE_DL_LIBS})
+    target_link_libraries(ps1_pack PRIVATE console_pack)
     target_compile_options(ps1_pack PRIVATE -Wall -Wextra)
     set_target_properties(ps1_pack PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()

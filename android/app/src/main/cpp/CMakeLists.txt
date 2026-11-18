@@ -59,7 +59,7 @@ target_link_libraries(main PRIVATE -Wl,--whole-archive gc_core -Wl,--no-whole-ar
 # A .chd PlayStation disc's title key (XBA-159): the PS1 disc reader as recomp_pack_rom_identify's disc hook; a .gcz
 # GameCube disc's (XBA-261): the GameCube disc readers as its GameCube hook.
 target_link_libraries(main PRIVATE ps1_identify gc_identify)
-set(XBA_CONSOLE_FAST_LIBS gba_core gba_runtime gba_pack   # the interpreters: release flags below too
+set(XBA_CONSOLE_FAST_LIBS console_pack gba_core gba_runtime gba_pack   # the interpreters: release flags below too
                           ps1_core ps1_gpu ps1_cd ps1_spu ps1_mdec ps1_runtime
                           n64_core n64_rsp n64_rdp n64_rdp_sw n64_runtime
                           gc_core gc_pad_map gc_runtime

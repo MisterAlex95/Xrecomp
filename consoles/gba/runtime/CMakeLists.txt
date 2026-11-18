@@ -29,9 +29,11 @@ endif()
 # gba_pack: a GBA title pack, the runtime's side (pack.json checks, dlopen of the table, the discovered addresses
 # written at exit; gba_pack.h, XBA-157 / XBA-158). No SDL: the tests link it alone.
 if(NOT TARGET gba_pack)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/console_pack.cmake)
     add_library(gba_pack STATIC gba_pack.c)
     target_include_directories(gba_pack PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(gba_pack PUBLIC gba_core ${CMAKE_DL_LIBS})
+    target_link_libraries(gba_pack PRIVATE console_pack)
     target_compile_options(gba_pack PRIVATE -Wall -Wextra)
     set_target_properties(gba_pack PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
