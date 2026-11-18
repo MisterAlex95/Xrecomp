@@ -261,6 +261,182 @@ static void test_hmac(void)
     hmac_sha_case(AA80, LONG2, "e8e99d0f45237d786d6bbaa7965c7808bbff1a91");
 }
 
+/* ---- ciphers ---- */
+
+/* a mode taking (state, in, size, out, feed, encrypt): both ways, and chained in place through the feed */
+static void cbc_both(const char *what, unsigned ord, uint32_t st, const char *iv, const char *pt, const char *ct)
+{
+    uint32_t ivn, n, m, feed = ghex(iv, &ivn), in = ghex(pt, &n), want = ghex(ct, &m), out = gstate(n);
+    OK(n == m, "%s: vector sizes", what);
+    K(ord, 6, st, in, n, out, feed, 1u);
+    OK(!memcmp(X->base + out, X->base + want, n), "%s: encryption differs", what);
+    OK(!memcmp(X->base + feed, X->base + want + n - ivn, ivn), "%s: the feed is not the last ciphertext block", what);
+    OK(guard_ok(out, n), "%s: wrote past the output", what);
+
+    feed = ghex(iv, &ivn);
+    K(ord, 6, st, want, n, out, feed, 0u);
+    OK(!memcmp(X->base + out, X->base + in, n), "%s: decryption differs", what);
+    OK(!memcmp(X->base + feed, X->base + want + n - ivn, ivn), "%s: decrypt feed", what);
+
+    feed = ghex(iv, &ivn);
+    memcpy(X->base + out, X->base + in, n);
+    K(ord, 6, st, out, ivn, out, feed, 1u);
+    K(ord, 6, st, out + ivn, n - ivn, out + ivn, feed, 1u);
+    OK(!memcmp(X->base + out, X->base + want, n), "%s: chained in-place encryption differs", what);
+    feed = ghex(iv, &ivn);
+    K(ord, 6, st, out, n, out, feed, 0u);
+    OK(!memcmp(X->base + out, X->base + in, n), "%s: in-place decryption differs", what);
+}
+
+static void ecb_both(const char *what, unsigned ord, uint32_t st, const char *pt, const char *ct)
+{
+    uint32_t n, m, in = ghex(pt, &n), want = ghex(ct, &m), out = gstate(n);
+    K(ord, 4, st, in, out, 1u);
+    OK(!memcmp(X->base + out, X->base + want, n), "%s: encryption differs", what);
+    OK(guard_ok(out, n), "%s: wrote past the block", what);
+    K(ord, 4, st, want, out, 0u);
+    OK(!memcmp(X->base + out, X->base + in, n), "%s: decryption differs", what);
+}
+
+#define NIST_KEY128 "2b7e151628aed2a6abf7158809cf4f3c"
+#define NIST_IV "000102030405060708090a0b0c0d0e0f"
+#define NIST_P1 "6bc1bee22e409f96e93d7e117393172a"
+#define NIST_P2 "ae2d8a571e03ac9c9eb76fac45af8e51"
+#define NIST_P3 "30c81c46a35ce411e5fbc1191a0a52ef"
+#define NIST_P4 "f69f2445df4f9b17ad2b417be66c3710"
+#define NIST_PT NIST_P1 NIST_P2 NIST_P3 NIST_P4
+
+static void test_aes(void)
+{
+    uint32_t n, st = gstate(0x160);
+
+    /* FIPS 197 appendix C.1 */
+    KX(XeCryptAesKey, 2, st, ghex("000102030405060708090a0b0c0d0e0f", &n));
+    OK(guard_ok(st, 0x160), "AesKey wrote past the state");
+    ecb_both("AES-128 C.1", X360_xboxkrnl_XeCryptAesEcb, st, "00112233445566778899aabbccddeeff",
+             "69c4e0d86a7b0430d8cdb78070b4c55a");
+
+    /* FIPS 197 appendix A.1: the expansion of 2b7e..., its last round key w[40..43] */
+    KX(XeCryptAesKey, 2, st, ghex(NIST_KEY128, &n));
+    expect_hex("AES-128 last round key", st + 10 * 16, "d014f9a8c9ee2589e13f0cc8b6630ca6");
+
+    /* SP 800-38A F.1.1 / F.1.2 ECB-AES128 */
+    static const char *const ecb[4][2] = {{NIST_P1, "3ad77bb40d7a3660a89ecaf32466ef97"},
+                                          {NIST_P2, "f5d3d58503b9699de785895a96fdbaaf"},
+                                          {NIST_P3, "43b1cd7f598ece23881b00e3ed030688"},
+                                          {NIST_P4, "7b0c785e27e8ad3f8223207104725dd4"}};
+    for (int k = 0; k < 4; k++)
+        ecb_both("ECB-AES128 F.1", X360_xboxkrnl_XeCryptAesEcb, st, ecb[k][0], ecb[k][1]);
+
+    /* SP 800-38A F.2.1 / F.2.2 CBC-AES128 */
+    cbc_both("CBC-AES128 F.2", X360_xboxkrnl_XeCryptAesCbc, st, NIST_IV, NIST_PT,
+             "7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2"
+             "73bed6b8e3c1743b7116e69e222295163ff1caa1681fac09120eca307586e1a7");
+
+    /* SP 800-38A F.5.1 / F.5.2 CTR-AES128: one call, then block by block with the counter carried */
+    static const char CTR_CT[] = "874d6191b620e3261bef6864990db6ce9806f66b7970fdff8617187bb9fffdff"
+                                 "5ae4df3edbd5d35e5b4f09020db03eab1e031dda2fbe03d1792170a0f3009cee";
+    uint32_t len, m, pt = ghex(NIST_PT, &len), ct = ghex(CTR_CT, &m), out = gstate(len);
+    uint32_t ctr = ghex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", &n);
+    KX(XeCryptAesCtr, 5, st, pt, len, out, ctr);
+    OK(!memcmp(X->base + out, X->base + ct, len), "CTR-AES128 F.5.1 differs");
+    OK(guard_ok(out, len), "CTR wrote past the output");
+    expect_hex("CTR counter after four blocks", ctr, "f0f1f2f3f4f5f6f7f8f9fafbfcfdff03");
+    ctr = ghex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", &n);
+    for (uint32_t k = 0; k < 4; k++)
+        KX(XeCryptAesCtr, 5, st, ct + 16 * k, 16u, out + 16 * k, ctr);
+    OK(!memcmp(X->base + out, X->base + pt, len), "CTR-AES128 F.5.2 (block by block) differs");
+    ctr = ghex("ffffffffffffffffffffffffffffffff", &n); /* the carry runs through all 128 bits */
+    KX(XeCryptAesCtr, 5, st, pt, 16u, out, ctr);
+    expect_hex("CTR counter wrap", ctr, "00000000000000000000000000000000");
+
+    /* CBC-MAC from a zero IV. One block: F.1.1's answer. Four blocks: F.2.1's last ciphertext block, the first
+     * plaintext block xored with F.2.1's IV so that a zero IV takes the same path. */
+    uint32_t key = ghex(NIST_KEY128, &n), mac = gstate(16);
+    KX(XeCryptAesCbcMac, 4, key, ghex(NIST_P1, &n), 16u, mac);
+    expect_hex("AES CBC-MAC, one block", mac, "3ad77bb40d7a3660a89ecaf32466ef97");
+    uint32_t iv = ghex(NIST_IV, &n), msg = ghex(NIST_PT, &len);
+    for (uint32_t i = 0; i < 16; i++)
+        X->base[msg + i] ^= X->base[iv + i];
+    KX(XeCryptAesCbcMac, 4, key, msg, len, mac);
+    expect_hex("AES CBC-MAC, four blocks", mac, "3ff1caa1681fac09120eca307586e1a7");
+    OK(guard_ok(mac, 16), "CBC-MAC wrote past the MAC");
+
+    /* the key schedule of any size: FIPS 197 appendix C.1, C.2, C.3 */
+    static const struct {
+        const char *key, *ct;
+    } fips[] = {{"000102030405060708090a0b0c0d0e0f", "69c4e0d86a7b0430d8cdb78070b4c55a"},
+                {"000102030405060708090a0b0c0d0e0f1011121314151617", "dda97ca4864cdfe06eaf70a0ec0d7191"},
+                {"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                 "8ea2b7ca516745bfeafc49904b496089"}};
+    uint32_t sch = gstate(0x1D4), one = gstate(16);
+    for (unsigned k = 0; k < 3; k++) {
+        uint32_t ks, cs, kk = ghex(fips[k].key, &ks), p = ghex("00112233445566778899aabbccddeeff", &n);
+        uint32_t cc = ghex(fips[k].ct, &cs);
+        KX(XeCryptAesCreateKeySchedule, 3, kk, ks, sch);
+        OK(guard_ok(sch, 0x1D4), "the schedule wrote past its end");
+        KX(XeCryptAesEncryptOne, 3, sch, p, one);
+        expect_hex("AES EncryptOne", one, fips[k].ct);
+        KX(XeCryptAesDecryptOne, 3, sch, cc, one);
+        expect_hex("AES DecryptOne", one, "00112233445566778899aabbccddeeff");
+    }
+
+    /* SP 800-38A F.2.5 / F.2.6 CBC-AES256 through the schedule */
+    static const char CT256[] = "f58c4c04d6e5f1ba779eabfb5f7bfbd69cfc4e967edb808d679f777bc6702c7d"
+                                "39f23369a9d9bacfa530e26304231461b2eb05e2c39be9fcda6c19078c6a9d1b";
+    uint32_t ks, k256 = ghex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4", &ks);
+    KX(XeCryptAesCreateKeySchedule, 3, k256, ks, sch);
+    uint32_t feed = ghex(NIST_IV, &n), c256 = ghex(CT256, &m);
+    KX(XeCryptAesCbcEncrypt, 5, sch, pt, len, out, feed);
+    OK(!memcmp(X->base + out, X->base + c256, len), "CBC-AES256 F.2.5 differs");
+    feed = ghex(NIST_IV, &n);
+    KX(XeCryptAesCbcDecrypt, 5, sch, c256, len, out, feed);
+    OK(!memcmp(X->base + out, X->base + pt, len), "CBC-AES256 F.2.6 differs");
+
+    /* a size that is no AES key: the schedule stays unusable and the cipher does nothing */
+    KX(XeCryptAesCreateKeySchedule, 3, k256, 17u, sch);
+    memset(X->base + one, 0x5A, 16);
+    KX(XeCryptAesEncryptOne, 3, sch, pt, one);
+    OK(X->base[one] == 0x5A && X->base[one + 15] == 0x5A, "a refused schedule still encrypted");
+}
+
+static void test_des(void)
+{
+    uint32_t n, st = gstate(0x80), st3 = gstate(0x180);
+
+    /* FIPS 81 appendix B: "Now is the time for all ", ECB and CBC */
+    KX(XeCryptDesKey, 2, st, ghex("0123456789abcdef", &n));
+    OK(guard_ok(st, 0x80), "DesKey wrote past the state");
+    ecb_both("DES ECB FIPS 81", X360_xboxkrnl_XeCryptDesEcb, st, "4e6f772069732074", "3fa40e8a984d4815");
+    ecb_both("DES ECB FIPS 81", X360_xboxkrnl_XeCryptDesEcb, st, "68652074696d6520", "6a271787ab8883f9");
+    ecb_both("DES ECB FIPS 81", X360_xboxkrnl_XeCryptDesEcb, st, "666f7220616c6c20", "893d51ec4b563b53");
+    cbc_both("DES CBC FIPS 81", X360_xboxkrnl_XeCryptDesCbc, st, "1234567890abcdef",
+             "4e6f77206973207468652074696d6520666f7220616c6c20", "e5c7cdde872bf27c43e934008c389c0f683788499a7c05f6");
+
+    /* SP 800-67 three-key TDEA example, ECB */
+    KX(XeCryptDes3Key, 2, st3, ghex("0123456789abcdef23456789abcdef01456789abcdef0123", &n));
+    OK(guard_ok(st3, 0x180), "Des3Key wrote past the state");
+    static const char *const tdea[3][2] = {{"5468652071756663", "a826fd8ce53b855f"},
+                                           {"6b2062726f776e20", "cce21c8112256fe6"},
+                                           {"666f78206a756d70", "68d5c05dd9b6b900"}};
+    for (int k = 0; k < 3; k++)
+        ecb_both("TDEA ECB SP 800-67", X360_xboxkrnl_XeCryptDes3Ecb, st3, tdea[k][0], tdea[k][1]);
+
+    /* TDEA CBC from those ECB answers: a zero IV, each plaintext block xored with the previous ciphertext block */
+    cbc_both("TDEA CBC", X360_xboxkrnl_XeCryptDes3Cbc, st3, "0000000000000000",
+             "5468652071756663c3069ffe8a4ceb7faa8d64a178500296", "a826fd8ce53b855fcce21c8112256fe668d5c05dd9b6b900");
+
+    /* three equal keys: TDEA is single DES (FIPS 81's first block) */
+    KX(XeCryptDes3Key, 2, st3, ghex("0123456789abcdef0123456789abcdef0123456789abcdef", &n));
+    ecb_both("TDEA with one key", X360_xboxkrnl_XeCryptDes3Ecb, st3, "4e6f772069732074", "3fa40e8a984d4815");
+
+    /* FIPS 46-3: every key byte has odd parity, its low bit adjusting it */
+    uint32_t in = ghex("0001020 3feff807f", &n), out = gstate(8);
+    KX(XeCryptDesParity, 3, in, 8u, out);
+    expect_hex("DES parity", out, "01010202fefe807f");
+    OK(guard_ok(out, 8), "DesParity wrote past the output");
+}
+
 int main(void)
 {
     if (hle_util_start())
@@ -268,6 +444,8 @@ int main(void)
     test_md5();
     test_sha2();
     test_hmac();
+    test_aes();
+    test_des();
     printf("x360_crypt2: %d checks\n", checks);
     return hle_util_end("x360_crypt2");
 }
