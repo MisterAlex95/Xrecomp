@@ -9,6 +9,7 @@
 3. the decoder / lifter coverage of the code (unknown words, not-lifted mnemonics, helpers, jump tables);
 4. recompile, build the pack (WORKDIR/libtitle.so, -DXE_RUNTIME), run it under x360_run, and when execution reaches
    code the pack lacks, recompile with those addresses and run again (up to --rounds);
+   the shaders it loads are dumped (WORKDIR/shaders) and translated to GLSL ES (xenos_glsl), counted;
 5. a summary with no title data in it (counts, export names, the runtime's last message), also written to
    WORKDIR/summary.txt: what to paste in the ticket.
 
@@ -20,7 +21,9 @@ import collections
 import glob
 import json
 import os
+import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -30,6 +33,7 @@ from tools.xex.xex import COMPRESSION_NAMES, XexError, load_keys, parse_xex, pla
 
 from .hle_coverage import coverage
 from .recomp import REPO, RUNTIME_DIRS, recompile, sweep, sweep_shapes
+from .xenos_glsl import Unsupported, translate
 
 
 def find_x360_run(explicit):
@@ -61,6 +65,29 @@ def build_pack(src, out, cc, jobs):
         if p.wait():
             raise RuntimeError("compiling the pack failed")
     subprocess.run([cc, "-shared", "-o", out] + objs + ["-lm"], check=True)
+
+
+def shader_report(shader_dir):
+    """The shaders x360_run dumped (vs_*.bin / ps_*.bin), each translated by xenos_glsl: counts and what stops the
+    others (the instruction kinds only, no title data). The GLSL lands next to each .bin."""
+    rep = {"total": 0, "translated": 0, "unsupported": {}}
+    for name in sorted(os.listdir(shader_dir)) if os.path.isdir(shader_dir) else []:
+        if not name.endswith(".bin"):
+            continue
+        rep["total"] += 1
+        raw = open(os.path.join(shader_dir, name), "rb").read()
+        words = list(struct.unpack(">%dI" % (len(raw) // 4), raw[:len(raw) // 4 * 4]))
+        try:
+            glsl, _ = translate(words, "pixel" if name.startswith("ps") else "vertex",
+                                interpolators=16 if name.startswith("ps") else 0)
+        except Unsupported as ex:
+            why = re.sub(r"^(alu|fetch) \d+: ", "", str(ex))
+            rep["unsupported"][why] = rep["unsupported"].get(why, 0) + 1
+            continue
+        rep["translated"] += 1
+        with open(os.path.join(shader_dir, name[:-4] + (".frag" if name.startswith("ps") else ".vert")), "w") as f:
+            f.write(glsl)
+    return rep
 
 
 def main(argv=None):
@@ -124,6 +151,8 @@ def main(argv=None):
     discovered = set()
     disc_file = os.path.join(a.work, "discovered.txt")
     outcome = "not run"
+    shader_dir = os.path.join(a.work, "shaders")
+    os.makedirs(shader_dir, exist_ok=True)
     for rnd in range(1, a.rounds + 1):
         src = os.path.join(a.work, "src")
         shutil.rmtree(src, ignore_errors=True)
@@ -140,7 +169,8 @@ def main(argv=None):
                                                            s["unresolved_bctr"], rt, bt))
         missed = os.path.join(a.work, "missed.txt")
         cmd = [run, plain, "--pack", pack, "--insns", str(a.insns), "--stats", "--missed", missed,
-               "--dbg", os.path.join(a.work, "dbg.txt"), "--log", os.path.join(a.work, "log.txt")]
+               "--dbg", os.path.join(a.work, "dbg.txt"), "--log", os.path.join(a.work, "log.txt"),
+               "--dump-shaders", shader_dir]
         if a.disc:
             cmd += ["--disc", a.disc]
         try:
@@ -171,6 +201,11 @@ def main(argv=None):
         with open(disc_file, "w") as f:
             f.write("".join("%08X\n" % v for v in sorted(discovered)))
         say("  %d address(es) reached without lifted code: recompiling with them" % len(new))
+    shaders = shader_report(shader_dir)
+    say("shaders: %d loaded, %d translated to GLSL ES%s" % (
+        shaders["total"], shaders["translated"],
+        "; not yet: " + ", ".join("%s (%d)" % kv for kv in sorted(shaders["unsupported"].items(),
+                                                              key=lambda kv: -kv[1])) if shaders["unsupported"] else ""))
     dbg = os.path.join(a.work, "dbg.txt")
     say("DbgPrint: %d lines (in %s, not copied here)" % (
         sum(1 for _ in open(dbg, errors="replace")) if os.path.exists(dbg) else 0, dbg))
@@ -179,7 +214,7 @@ def main(argv=None):
         f.write("\n".join(lines) + "\n")
     with open(os.path.join(a.work, "summary.json"), "w") as f:
         json.dump({"missing_imports": [list(r[:4]) for r in missing], "outcome": outcome,
-                   "discovered": len(discovered)}, f, indent=1)
+                   "discovered": len(discovered), "shaders": shaders}, f, indent=1)
     return 0
 
 

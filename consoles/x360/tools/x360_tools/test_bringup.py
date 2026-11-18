@@ -36,3 +36,17 @@ def test_bringup_on_the_test_title(tmp_path, capsys):
     summary = (work / "summary.txt").read_text()
     assert "Hello from the disc" not in summary  # the title's own text stays out of the summary
     assert (work / "dbg.txt").read_text().startswith("Xbox 360 title recompiled")
+
+
+def test_shader_report(tmp_path):
+    import struct
+
+    from .bringup import shader_report
+    from .test_xenos_glsl import alu_words, export, program
+    good = program([(2, [("alu", alu_words(**export(0, 1)))], {})])
+    loop = program([(7, [], {})])
+    for name, words in (("vs_00000001.bin", good), ("ps_00000002.bin", good), ("vs_00000003.bin", loop)):
+        (tmp_path / name).write_bytes(struct.pack(">%dI" % len(words), *words))
+    rep = shader_report(str(tmp_path))
+    assert rep == {"total": 3, "translated": 2, "unsupported": {"control flow: loop": 1}}
+    assert (tmp_path / "vs_00000001.vert").exists() and (tmp_path / "ps_00000002.frag").exists()
