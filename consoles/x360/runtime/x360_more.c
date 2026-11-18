@@ -45,13 +45,6 @@ static uint32_t finish(x360_machine *x, uint32_t ov, uint32_t result, uint32_t l
 
 /* ---- strings ---- */
 
-static void k_RtlUpcaseUnicodeChar(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)x, (void)t;
-    uint32_t ch = A(0) & 0xFFFF;
-    RET(ch < 128 ? (uint32_t)toupper((int)ch) : ch);
-}
-
 static void k_RtlCompareStringN(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
@@ -563,7 +556,7 @@ static void x_XMsgStartIORequest(x360_machine *x, x360_thread *t, xe_cpu *c)
 #define XM2(name, fn) {X360_LIB_XAM, X360_xam_##name, fn}
 
 static const x360_hle_row MORE[] = {
-    KM(RtlUpcaseUnicodeChar, k_RtlUpcaseUnicodeChar), KM(RtlCompareStringN, k_RtlCompareStringN),
+    KM(RtlCompareStringN, k_RtlCompareStringN),
     KM(RtlFreeAnsiString, k_RtlFreeAnsiString), KM(RtlMultiByteToUnicodeN, k_RtlMultiByteToUnicodeN),
     KM(RtlUnicodeToMultiByteN, k_RtlUnicodeToMultiByteN),
     KM(RtlUnicodeStringToAnsiString, k_RtlUnicodeStringToAnsiString),

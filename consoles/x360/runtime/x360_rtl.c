@@ -428,7 +428,440 @@ PRINT_FN(_scwprintf, print_count(x, c, A(0), 1, regs_from(x, c, 4)))
 PRINT_FN(_vscprintf, print_count(x, c, A(0), 0, va_from(x, c, A(1))))
 PRINT_FN(_vscwprintf, print_count(x, c, A(0), 1, va_from(x, c, A(1))))
 
+/* ---- case: fixed rules, never the host's locale ---- */
+
+/* the kernel's single-byte tables: ASCII and Latin-1 letters; y with diaeresis has no Latin-1 capital and gives '?' */
+static uint32_t upper8(uint32_t ch)
+{
+    ch &= 0xFF;
+    if ((ch >= 'a' && ch <= 'z') || (ch >= 0xE0 && ch <= 0xFE && ch != 0xF7))
+        return ch - 0x20;
+    return ch == 0xFF ? '?' : ch;
+}
+
+static uint32_t lower8(uint32_t ch)
+{
+    ch &= 0xFF;
+    return (ch >= 'A' && ch <= 'Z') || (ch >= 0xC0 && ch <= 0xDE && ch != 0xD7) ? ch + 0x20 : ch;
+}
+
+/* Latin Extended-A pairs: capital even in these ranges, odd in the two others */
+static int ext_a_even(uint32_t ch)
+{
+    return (ch >= 0x100 && ch <= 0x137 && ch != 0x130 && ch != 0x131) || (ch >= 0x14A && ch <= 0x177);
+}
+
+static int ext_a_odd(uint32_t ch)
+{
+    return (ch >= 0x139 && ch <= 0x148) || (ch >= 0x179 && ch <= 0x17E);
+}
+
+/* One-to-one pairs of Latin-1, Latin Extended-A, Greek, Cyrillic and the fullwidth forms; the rest is unchanged. */
+static uint32_t upper16(uint32_t ch)
+{
+    if (ch >= 'a' && ch <= 'z')
+        return ch - 0x20;
+    if (ch < 0x80)
+        return ch;
+    if (ch >= 0xE0 && ch <= 0xFE && ch != 0xF7)
+        return ch - 0x20;
+    if (ch == 0xFF)
+        return 0x178;
+    if (ext_a_even(ch))
+        return ch & 1 ? ch - 1 : ch;
+    if (ext_a_odd(ch))
+        return ch & 1 ? ch : ch - 1;
+    if (ch == 0x3AC)
+        return 0x386;
+    if (ch >= 0x3AD && ch <= 0x3AF)
+        return ch - 0x25;
+    if (ch == 0x3CC)
+        return 0x38C;
+    if (ch == 0x3CD || ch == 0x3CE)
+        return ch - 0x3F;
+    if ((ch >= 0x3B1 && ch <= 0x3C9 && ch != 0x3C2) || (ch >= 0x430 && ch <= 0x44F) || (ch >= 0xFF41 && ch <= 0xFF5A))
+        return ch - 0x20;
+    if (ch >= 0x450 && ch <= 0x45F)
+        return ch - 0x50;
+    return ch;
+}
+
+static uint32_t lower16(uint32_t ch)
+{
+    if (ch >= 'A' && ch <= 'Z')
+        return ch + 0x20;
+    if (ch < 0x80)
+        return ch;
+    if (ch >= 0xC0 && ch <= 0xDE && ch != 0xD7)
+        return ch + 0x20;
+    if (ch == 0x178)
+        return 0xFF;
+    if (ext_a_even(ch))
+        return ch & 1 ? ch : ch + 1;
+    if (ext_a_odd(ch))
+        return ch & 1 ? ch + 1 : ch;
+    if (ch == 0x386)
+        return 0x3AC;
+    if (ch >= 0x388 && ch <= 0x38A)
+        return ch + 0x25;
+    if (ch == 0x38C)
+        return 0x3CC;
+    if (ch == 0x38E || ch == 0x38F)
+        return ch + 0x3F;
+    if ((ch >= 0x391 && ch <= 0x3A9 && ch != 0x3A2) || (ch >= 0x410 && ch <= 0x42F) || (ch >= 0xFF21 && ch <= 0xFF3A))
+        return ch + 0x20;
+    if (ch >= 0x400 && ch <= 0x40F)
+        return ch + 0x50;
+    return ch;
+}
+
+/* ---- counted strings: STRING and UNICODE_STRING {Length, MaximumLength, Buffer}, lengths in bytes ---- */
+
+#define X_STATUS_SOME_NOT_MAPPED 0x00000107u
+#define X_STATUS_BUFFER_OVERFLOW 0x80000005u
+#define X_STATUS_BUFFER_TOO_SMALL 0xC0000023u
+#define X_STATUS_INVALID_PARAMETER_2 0xC00000F0u
+#define X_STATUS_INVALID_PARAMETER_4 0xC00000F2u
+#define X_STATUS_INVALID_PARAMETER_5 0xC00000F3u
+
+typedef struct gs {
+    uint32_t len, max, buf;
+} gs;
+
+static gs gs_read(x360_machine *x, uint32_t a)
+{
+    gs s = {x360_r16(x, a), x360_r16(x, a + 2), x360_r32(x, a + 4)};
+    return s;
+}
+
+/* overlapping ranges are fine, as with RtlMoveMemory */
+static void gmove(x360_machine *x, uint32_t dst, uint32_t src, uint32_t n)
+{
+    if (dst <= src)
+        for (uint32_t k = 0; k < n; k++)
+            x360_w8(x, dst + k, x360_r8(x, src + k));
+    else
+        for (uint32_t k = n; k--;)
+            x360_w8(x, dst + k, x360_r8(x, src + k));
+}
+
+/* characters before the terminator, stopping once past what a UNICODE_STRING can hold */
+static uint32_t wcs_len(x360_machine *x, uint32_t a)
+{
+    uint32_t n = 0;
+    while (n < 0x8000 && x360_r16(x, a + 2 * n))
+        n++;
+    return n;
+}
+
+static void k_RtlCompareMemory(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* NT's result: the length of the matching prefix, not the number of equal bytes */
+    uint32_t a = A(0), b = A(1), n = A(2), k = 0;
+    while (k < n && x360_r8(x, a + k) == x360_r8(x, b + k))
+        k++;
+    RET(k);
+}
+
+static void k_RtlUpperChar(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)x, (void)t;
+    RET(upper8(A(0)));
+}
+
+static void k_RtlLowerChar(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)x, (void)t;
+    RET(lower8(A(0)));
+}
+
+static void k_RtlUpcaseUnicodeChar(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)x, (void)t;
+    RET(upper16(A(0) & 0xFFFF));
+}
+
+static void k_RtlDowncaseUnicodeChar(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)x, (void)t;
+    RET(lower16(A(0) & 0xFFFF));
+}
+
+static void k_RtlCompareString(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    gs a = gs_read(x, A(0)), b = gs_read(x, A(1));
+    int ci = (A(2) & 0xFF) != 0;
+    uint32_t n = a.len < b.len ? a.len : b.len;
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t ca = x360_r8(x, a.buf + k), cb = x360_r8(x, b.buf + k);
+        if (ci)
+            ca = upper8(ca), cb = upper8(cb);
+        if (ca != cb) {
+            RET((int32_t)ca - (int32_t)cb);
+            return;
+        }
+    }
+    RET((int32_t)a.len - (int32_t)b.len);
+}
+
+static void k_RtlCompareUnicodeString(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    gs a = gs_read(x, A(0)), b = gs_read(x, A(1));
+    int ci = (A(2) & 0xFF) != 0;
+    uint32_t n = (a.len < b.len ? a.len : b.len) / 2;
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t ca = x360_r16(x, a.buf + 2 * k), cb = x360_r16(x, b.buf + 2 * k);
+        if (ci)
+            ca = upper16(ca), cb = upper16(cb);
+        if (ca != cb) {
+            RET((int32_t)ca - (int32_t)cb);
+            return;
+        }
+    }
+    RET((int32_t)a.len - (int32_t)b.len);
+}
+
+static void k_RtlCopyString(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t dst = A(0), src = A(1);
+    if (!src) {
+        x360_w16(x, dst, 0);
+        return;
+    }
+    gs d = gs_read(x, dst), s = gs_read(x, src);
+    uint32_t n = s.len < d.max ? s.len : d.max;
+    gmove(x, d.buf, s.buf, n);
+    x360_w16(x, dst, n);
+}
+
+static void k_RtlCopyUnicodeString(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t dst = A(0), src = A(1);
+    if (!src) {
+        x360_w16(x, dst, 0);
+        return;
+    }
+    gs d = gs_read(x, dst), s = gs_read(x, src);
+    uint32_t n = s.len < d.max ? s.len : d.max;
+    gmove(x, d.buf, s.buf, n);
+    x360_w16(x, dst, n);
+    if (!(n & 1) && n + 2 <= d.max)
+        x360_w16(x, d.buf + n, 0);
+}
+
+enum { TERM_NONE, TERM_IF_COPIED, TERM_ALWAYS };
+
+static uint32_t append(x360_machine *x, uint32_t dst, uint32_t src, uint32_t n, int term)
+{
+    gs d = gs_read(x, dst);
+    if (d.len + n > d.max)
+        return X_STATUS_BUFFER_TOO_SMALL;
+    gmove(x, d.buf + d.len, src, n);
+    d.len += n;
+    x360_w16(x, dst, d.len);
+    if ((term == TERM_ALWAYS || (term == TERM_IF_COPIED && n)) && d.len + 2 <= d.max)
+        x360_w16(x, d.buf + d.len, 0);
+    return X_STATUS_SUCCESS;
+}
+
+static void k_RtlAppendStringToString(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    gs s = gs_read(x, A(1));
+    RET(append(x, A(0), s.buf, s.len, TERM_NONE));
+}
+
+static void k_RtlAppendUnicodeStringToString(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    gs s = gs_read(x, A(1));
+    RET(append(x, A(0), s.buf, s.len, TERM_IF_COPIED));
+}
+
+static void k_RtlAppendUnicodeToString(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t src = A(1);
+    RET(src ? append(x, A(0), src, 2 * wcs_len(x, src), TERM_ALWAYS) : X_STATUS_SUCCESS);
+}
+
+/* The runtime's ANSI is one byte per character (RtlMultiByteToUnicodeN), so the two sizes are a factor of 2. */
+static void k_RtlAnsiStringToUnicodeString(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t dst = A(0), alloc = A(2) & 0xFF;
+    gs s = gs_read(x, A(1));
+    uint32_t size = 2 * (s.len + 1), len = size - 2, buf;
+    if (size > 0xFFFF) {
+        RET(X_STATUS_INVALID_PARAMETER_2);
+        return;
+    }
+    x360_w16(x, dst, len);
+    if (alloc) {
+        buf = x360_heap_alloc(x, &x->heap_v4k, size, 0);
+        if (!buf) {
+            x360_w16(x, dst, 0);
+            RET(X_STATUS_NO_MEMORY);
+            return;
+        }
+        x360_w16(x, dst + 2, size);
+        x360_w32(x, dst + 4, buf);
+    } else {
+        if (size > x360_r16(x, dst + 2)) { /* the terminator is part of what must fit */
+            RET(X_STATUS_BUFFER_OVERFLOW);
+            return;
+        }
+        buf = x360_r32(x, dst + 4);
+    }
+    for (uint32_t k = s.len; k--;) /* from the end: the source may be the start of the destination */
+        x360_w16(x, buf + 2 * k, x360_r8(x, s.buf + k));
+    x360_w16(x, buf + len, 0);
+    RET(X_STATUS_SUCCESS);
+}
+
+static void k_RtlCreateUnicodeString(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t dst = A(0), src = A(1);
+    uint32_t size = src ? 2 * (wcs_len(x, src) + 1) : 0;
+    uint32_t buf = size && size <= 0xFFFE ? x360_heap_alloc(x, &x->heap_v4k, size, 0) : 0;
+    if (!buf) {
+        RET(0); /* a BOOLEAN */
+        return;
+    }
+    gmove(x, buf, src, size);
+    x360_w16(x, dst, size - 2);
+    x360_w16(x, dst + 2, size);
+    x360_w32(x, dst + 4, buf);
+    RET(1);
+}
+
+static void k_RtlFreeUnicodeString(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    uint32_t s = A(0), buf = s ? x360_r32(x, s + 4) : 0;
+    if (buf) {
+        x360_heap_free(x, &x->heap_v4k, buf);
+        x360_w32(x, s, 0);
+        x360_w32(x, s + 4, 0);
+    }
+    RET(0);
+}
+
+static void k_RtlMultiByteToUnicodeSize(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    if (A(0))
+        x360_w32(x, A(0), 2 * A(2));
+    RET(X_STATUS_SUCCESS);
+}
+
+static void k_RtlUnicodeToMultiByteSize(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    if (A(0))
+        x360_w32(x, A(0), A(2) / 2);
+    RET(X_STATUS_SUCCESS);
+}
+
+/* The code point at unit *k of n; an unpaired surrogate is U+FFFD and sets *bad. */
+static uint32_t utf16_next(x360_machine *x, uint32_t src, uint32_t *k, uint32_t n, int *bad)
+{
+    uint32_t ch = x360_r16(x, src + 2 * (*k)++);
+    if (ch < 0xD800 || ch > 0xDFFF)
+        return ch;
+    if (ch < 0xDC00 && *k < n) {
+        uint32_t lo = x360_r16(x, src + 2 * *k);
+        if (lo >= 0xDC00 && lo <= 0xDFFF) {
+            ++*k;
+            return 0x10000 + ((ch - 0xD800) << 10) + (lo - 0xDC00);
+        }
+    }
+    *bad = 1;
+    return 0xFFFD;
+}
+
+static uint32_t utf8_size(uint32_t cp)
+{
+    return cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+}
+
+static void k_RtlUnicodeToUtf8(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* as RtlUnicodeToUTF8N: (dst, dst bytes, written bytes*, src, src bytes); no dst asks for the size */
+    uint32_t dst = A(0), cap = A(1), outp = A(2), src = A(3), bytes = A(4);
+    if (!src) {
+        RET(X_STATUS_INVALID_PARAMETER_4);
+        return;
+    }
+    if (!outp) {
+        RET(X_STATUS_INVALID_PARAMETER);
+        return;
+    }
+    if (dst && (bytes & 1)) {
+        RET(X_STATUS_INVALID_PARAMETER_5);
+        return;
+    }
+    uint32_t n = bytes / 2, o = 0;
+    int bad = 0;
+    for (uint32_t k = 0; k < n;) {
+        uint32_t cp = utf16_next(x, src, &k, n, &bad), size = utf8_size(cp);
+        if (dst) {
+            if (size > cap - o) { /* only whole characters are written */
+                x360_w32(x, outp, o);
+                RET(X_STATUS_BUFFER_TOO_SMALL);
+                return;
+            }
+            static const uint8_t lead[5] = {0, 0, 0xC0, 0xE0, 0xF0};
+            for (uint32_t i = size; i-- > 1; cp >>= 6)
+                x360_w8(x, dst + o + i, 0x80 | (cp & 0x3F));
+            x360_w8(x, dst + o, size == 1 ? cp : lead[size] | cp);
+        }
+        o += size;
+    }
+    x360_w32(x, outp, o);
+    RET(bad ? X_STATUS_SOME_NOT_MAPPED : X_STATUS_SUCCESS);
+}
+
+static void k_RtlUnicodeToUtf8Size(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* (size*, src, src bytes), the shape of RtlUnicodeToMultiByteSize */
+    uint32_t src = A(1), n = A(2) / 2, o = 0;
+    int bad = 0;
+    for (uint32_t k = 0; k < n;)
+        o += utf8_size(utf16_next(x, src, &k, n, &bad));
+    if (A(0))
+        x360_w32(x, A(0), o);
+    RET(X_STATUS_SUCCESS);
+}
+
 const x360_hle_row x360_tab_rtl[] = {
+    X360_HK(RtlCompareMemory, k_RtlCompareMemory),
+    X360_HK(RtlUpperChar, k_RtlUpperChar),
+    X360_HK(RtlLowerChar, k_RtlLowerChar),
+    X360_HK(RtlUpcaseUnicodeChar, k_RtlUpcaseUnicodeChar),
+    X360_HK(RtlDowncaseUnicodeChar, k_RtlDowncaseUnicodeChar),
+    X360_HK(RtlCompareString, k_RtlCompareString),
+    X360_HK(RtlCompareUnicodeString, k_RtlCompareUnicodeString),
+    X360_HK(RtlCopyString, k_RtlCopyString),
+    X360_HK(RtlCopyUnicodeString, k_RtlCopyUnicodeString),
+    X360_HK(RtlAppendStringToString, k_RtlAppendStringToString),
+    X360_HK(RtlAppendUnicodeStringToString, k_RtlAppendUnicodeStringToString),
+    X360_HK(RtlAppendUnicodeToString, k_RtlAppendUnicodeToString),
+    X360_HK(RtlAnsiStringToUnicodeString, k_RtlAnsiStringToUnicodeString),
+    X360_HK(RtlCreateUnicodeString, k_RtlCreateUnicodeString),
+    X360_HK(RtlFreeUnicodeString, k_RtlFreeUnicodeString),
+    X360_HK(RtlMultiByteToUnicodeSize, k_RtlMultiByteToUnicodeSize),
+    X360_HK(RtlUnicodeToMultiByteSize, k_RtlUnicodeToMultiByteSize),
+    X360_HK(RtlUnicodeToUtf8, k_RtlUnicodeToUtf8),
+    X360_HK(RtlUnicodeToUtf8Size, k_RtlUnicodeToUtf8Size),
     X360_HK(sprintf, k_sprintf),
     X360_HK(swprintf, k_swprintf),
     X360_HK(vsprintf, k_vsprintf),

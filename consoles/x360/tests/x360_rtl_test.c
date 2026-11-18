@@ -288,6 +288,317 @@ static void test_long_output(void)
     x360_heap_free(X, &X->heap_v4k, w);
 }
 
+/* ---- strings ---- */
+
+#define ST_OVERFLOW 0x80000005u
+#define ST_TOO_SMALL 0xC0000023u
+
+/* a STRING / UNICODE_STRING in guest memory */
+static uint32_t gs_make(uint32_t len, uint32_t max, uint32_t buf)
+{
+    uint32_t a = galloc(8);
+    x360_w16(X, a, len);
+    x360_w16(X, a + 2, max);
+    x360_w32(X, a + 4, buf);
+    return a;
+}
+
+static uint32_t gs_len(uint32_t a) { return x360_r16(X, a); }
+static uint32_t gs_max(uint32_t a) { return x360_r16(X, a + 2); }
+static uint32_t gs_buf(uint32_t a) { return x360_r32(X, a + 4); }
+
+/* counted strings over text that goes on past their length: nothing may read it */
+static uint32_t ns(const char *s) { return gs_make((uint32_t)strlen(s), (uint32_t)strlen(s), gstr(s)); }
+static uint32_t us(const char *s) { return gs_make(2 * (uint32_t)strlen(s), 2 * (uint32_t)strlen(s), gwstr(s)); }
+
+static uint32_t gu16(const uint16_t *s, uint32_t n)
+{
+    uint32_t a = galloc(2 * n + 2);
+    for (uint32_t k = 0; k < n; k++)
+        x360_w16(X, a + 2 * k, s[k]);
+    return a;
+}
+
+static int sign(uint32_t r) { return (int32_t)r < 0 ? -1 : (int32_t)r > 0; }
+
+static void test_memory_and_case(void)
+{
+    uint32_t a = gstr("abcdef"), b = gstr("abcXef");
+    T(K(X360_xboxkrnl_RtlCompareMemory, 3, a, b, 6) == 3, "stops at the first difference");
+    T(K(X360_xboxkrnl_RtlCompareMemory, 3, a, a, 6) == 6, "all equal");
+    T(K(X360_xboxkrnl_RtlCompareMemory, 3, a, b, 0) == 0, "no bytes");
+    T(K(X360_xboxkrnl_RtlCompareMemory, 3, a, b, 3) == 3, "equal up to the length");
+
+    T(K(X360_xboxkrnl_RtlUpperChar, 1, 'q') == 'Q' && K(X360_xboxkrnl_RtlUpperChar, 1, 'Q') == 'Q', "upper ASCII");
+    T(K(X360_xboxkrnl_RtlUpperChar, 1, 0xE9) == 0xC9, "upper Latin-1");
+    T(K(X360_xboxkrnl_RtlUpperChar, 1, 0xF7) == 0xF7, "the division sign has no case");
+    T(K(X360_xboxkrnl_RtlUpperChar, 1, '{') == '{' && K(X360_xboxkrnl_RtlUpperChar, 1, '1') == '1', "upper others");
+    T(K(X360_xboxkrnl_RtlLowerChar, 1, 'Q') == 'q' && K(X360_xboxkrnl_RtlLowerChar, 1, 'q') == 'q', "lower ASCII");
+    T(K(X360_xboxkrnl_RtlLowerChar, 1, 0xC9) == 0xE9, "lower Latin-1");
+    T(K(X360_xboxkrnl_RtlLowerChar, 1, 0xD7) == 0xD7, "the multiplication sign has no case");
+
+    static const uint16_t pairs[][2] = {{'A', 'a'},       {0xC9, 0xE9},     {0x178, 0xFF},    {0x100, 0x101},
+                                        {0x139, 0x13A},   {0x14A, 0x14B},   {0x179, 0x17A},   {0x391, 0x3B1},
+                                        {0x386, 0x3AC},   {0x389, 0x3AE},   {0x38C, 0x3CC},   {0x38F, 0x3CE},
+                                        {0x410, 0x430},   {0x401, 0x451},   {0xFF21, 0xFF41}};
+    for (unsigned k = 0; k < sizeof pairs / sizeof pairs[0]; k++) {
+        T(K(X360_xboxkrnl_RtlDowncaseUnicodeChar, 1, pairs[k][0]) == pairs[k][1], "downcase %04X", pairs[k][0]);
+        T(K(X360_xboxkrnl_RtlDowncaseUnicodeChar, 1, pairs[k][1]) == pairs[k][1], "downcase keeps %04X", pairs[k][1]);
+        T(K(X360_xboxkrnl_RtlUpcaseUnicodeChar, 1, pairs[k][1]) == pairs[k][0], "upcase %04X", pairs[k][1]);
+        T(K(X360_xboxkrnl_RtlUpcaseUnicodeChar, 1, pairs[k][0]) == pairs[k][0], "upcase keeps %04X", pairs[k][0]);
+    }
+    static const uint16_t caseless[] = {'1', 0xD7, 0xF7, 0xDF, 0x130, 0x131, 0x3C2, 0x3042, 0xD834};
+    for (unsigned k = 0; k < sizeof caseless / sizeof caseless[0]; k++) {
+        T(K(X360_xboxkrnl_RtlDowncaseUnicodeChar, 1, caseless[k]) == caseless[k], "no lower case: %04X", caseless[k]);
+        T(K(X360_xboxkrnl_RtlUpcaseUnicodeChar, 1, caseless[k]) == caseless[k], "no upper case: %04X", caseless[k]);
+    }
+}
+
+static void test_compare(void)
+{
+#define CMP8(x, y, ci) sign(K(X360_xboxkrnl_RtlCompareString, 3, ns(x), ns(y), ci))
+#define CMP16(x, y, ci) sign(K(X360_xboxkrnl_RtlCompareUnicodeString, 3, us(x), us(y), ci))
+    T(CMP8("", "", 0) == 0 && CMP16("", "", 0) == 0, "empty strings are equal");
+    T(CMP8("", "a", 0) < 0 && CMP8("a", "", 0) > 0, "empty sorts first");
+    T(CMP16("", "a", 0) < 0 && CMP16("a", "", 0) > 0, "empty sorts first (wide)");
+    T(CMP8("abc", "abc", 0) == 0 && CMP16("abc", "abc", 0) == 0, "equal");
+    T(CMP8("abc", "abd", 0) < 0 && CMP8("abd", "abc", 0) > 0, "order");
+    T(CMP16("abc", "abd", 0) < 0 && CMP16("abd", "abc", 0) > 0, "order (wide)");
+    T(CMP8("abc", "ab", 0) > 0 && CMP8("ab", "abc", 0) < 0, "a prefix sorts first");
+    T(CMP16("abc", "ab", 0) > 0 && CMP16("ab", "abc", 0) < 0, "a prefix sorts first (wide)");
+    T(CMP8("ABC", "abc", 0) < 0 && CMP8("ABC", "abc", 1) == 0, "case");
+    T(CMP16("ABC", "abc", 0) < 0 && CMP16("ABC", "abc", 1) == 0, "case (wide)");
+    /* 'a' folds to 'A', below '_': folding down would put it above */
+    T(CMP8("a", "_", 0) > 0 && CMP8("a", "_", 1) < 0, "folds by upcasing");
+    T(CMP16("a", "_", 0) > 0 && CMP16("a", "_", 1) < 0, "folds by upcasing (wide)");
+    /* only the low byte of the flag counts: it is a BOOLEAN */
+    T(CMP8("ABC", "abc", 0x100) < 0, "the flag is a BOOLEAN");
+    T(sign(K(X360_xboxkrnl_RtlCompareUnicodeString, 3, us("ABC"), us("abc"), 0x100)) < 0, "the flag is a BOOLEAN (wide)");
+    /* bytes above 0x7F sort above ASCII */
+    T(sign(K(X360_xboxkrnl_RtlCompareString, 3, ns("\xE9"), ns("z"), 0)) > 0, "unsigned bytes");
+    T(sign(K(X360_xboxkrnl_RtlCompareString, 3, ns("\xE9"), ns("\xC9"), 1)) == 0, "Latin-1 folds");
+
+    /* lengths, not terminators */
+    uint32_t p = gstr("abcX"), q = gstr("abcY");
+    T(K(X360_xboxkrnl_RtlCompareString, 3, gs_make(3, 4, p), gs_make(3, 4, q), 0) == 0, "the length bounds the compare");
+    uint32_t wp = gwstr("abcX"), wq = gwstr("abcY");
+    T(K(X360_xboxkrnl_RtlCompareUnicodeString, 3, gs_make(6, 8, wp), gs_make(6, 8, wq), 0) == 0, "the same (wide)");
+
+    /* characters compare as numbers, read big-endian: U+0100 is above U+00FF */
+    uint16_t hi[] = {0x0100}, lo[] = {0x00FF}, ec[] = {0xC9}, es[] = {0xE9};
+    T(sign(K(X360_xboxkrnl_RtlCompareUnicodeString, 3, gs_make(2, 2, gu16(hi, 1)), gs_make(2, 2, gu16(lo, 1)), 0)) > 0,
+      "big-endian characters");
+    T(K(X360_xboxkrnl_RtlCompareUnicodeString, 3, gs_make(2, 2, gu16(ec, 1)), gs_make(2, 2, gu16(es, 1)), 1) == 0,
+      "non-ASCII folds");
+    /* an odd byte length: the whole characters compare, then the lengths */
+    T(sign(K(X360_xboxkrnl_RtlCompareUnicodeString, 3, gs_make(3, 4, wp), gs_make(2, 4, wp), 0)) > 0, "odd length");
+    T(K(X360_xboxkrnl_RtlCompareUnicodeString, 3, gs_make(3, 4, wp), gs_make(3, 4, wp), 0) == 0, "odd lengths equal");
+}
+
+static void test_copy(void)
+{
+    uint32_t buf = gbuf(32);
+    /* room to spare: STRING gets no terminator */
+    uint32_t d = gs_make(9, 16, buf);
+    K(X360_xboxkrnl_RtlCopyString, 2, d, ns("abc"));
+    T(gs_len(d) == 3 && !memcmp(X->base + buf, "abc~", 4), "RtlCopyString");
+    /* truncated to the destination's maximum */
+    memset(X->base + buf, 0x7E, 32);
+    d = gs_make(0, 2, buf);
+    K(X360_xboxkrnl_RtlCopyString, 2, d, ns("abc"));
+    T(gs_len(d) == 2 && !memcmp(X->base + buf, "ab~", 3), "RtlCopyString truncates");
+    /* exact fit, empty, no source */
+    d = gs_make(0, 3, buf);
+    K(X360_xboxkrnl_RtlCopyString, 2, d, ns("xyz"));
+    T(gs_len(d) == 3 && !memcmp(X->base + buf, "xyz", 3), "RtlCopyString exact fit");
+    K(X360_xboxkrnl_RtlCopyString, 2, d, ns(""));
+    T(gs_len(d) == 0, "RtlCopyString empty");
+    d = gs_make(5, 16, buf);
+    K(X360_xboxkrnl_RtlCopyString, 2, d, 0);
+    T(gs_len(d) == 0, "RtlCopyString without a source");
+
+    /* room for the terminator */
+    memset(X->base + buf, 0x7E, 32);
+    d = gs_make(0, 16, buf);
+    K(X360_xboxkrnl_RtlCopyUnicodeString, 2, d, us("abc"));
+    T(gs_len(d) == 6 && weq(buf, "abc"), "RtlCopyUnicodeString");
+    /* exact fit: no terminator past the maximum */
+    memset(X->base + buf, 0x7E, 32);
+    d = gs_make(0, 6, buf);
+    K(X360_xboxkrnl_RtlCopyUnicodeString, 2, d, us("abc"));
+    T(gs_len(d) == 6 && wneq(buf, "abc", 3) && x360_r16(X, buf + 6) == 0x7E7E, "exact fit has no terminator");
+    /* one byte of room is not room for a terminator */
+    memset(X->base + buf, 0x7E, 32);
+    d = gs_make(0, 7, buf);
+    K(X360_xboxkrnl_RtlCopyUnicodeString, 2, d, us("abc"));
+    T(gs_len(d) == 6 && x360_r8(X, buf + 6) == 0x7E, "a spare byte stays untouched");
+    /* truncated, in bytes: the odd maximum is the length */
+    memset(X->base + buf, 0x7E, 32);
+    d = gs_make(0, 3, buf);
+    K(X360_xboxkrnl_RtlCopyUnicodeString, 2, d, us("abc"));
+    T(gs_len(d) == 3 && x360_r8(X, buf + 3) == 0x7E, "truncated to an odd maximum");
+    d = gs_make(5, 16, buf);
+    K(X360_xboxkrnl_RtlCopyUnicodeString, 2, d, 0);
+    T(gs_len(d) == 0, "RtlCopyUnicodeString without a source");
+    /* overlapping: the string moves up inside its own buffer */
+    memcpy(X->base + buf, "abcdef", 6);
+    K(X360_xboxkrnl_RtlCopyString, 2, gs_make(0, 6, buf + 2), gs_make(4, 4, buf));
+    T(!memcmp(X->base + buf, "ababcd", 6), "overlap");
+    x360_heap_free(X, &X->heap_v4k, buf);
+}
+
+static void test_append(void)
+{
+    uint32_t buf = gbuf(32);
+    memcpy(X->base + buf, "ab", 2);
+    uint32_t d = gs_make(2, 5, buf);
+    T(K(X360_xboxkrnl_RtlAppendStringToString, 2, d, ns("cd")) == 0 && gs_len(d) == 4, "append");
+    T(!memcmp(X->base + buf, "abcd~", 5), "append has no terminator");
+    /* one byte short changes nothing */
+    T(K(X360_xboxkrnl_RtlAppendStringToString, 2, d, ns("ef")) == ST_TOO_SMALL && gs_len(d) == 4, "one byte short");
+    T(x360_r8(X, buf + 4) == 0x7E, "nothing written");
+    /* exact fit */
+    T(K(X360_xboxkrnl_RtlAppendStringToString, 2, d, ns("e")) == 0 && gs_len(d) == 5, "exact fit");
+    T(K(X360_xboxkrnl_RtlAppendStringToString, 2, d, ns("")) == 0 && gs_len(d) == 5, "empty on a full string");
+
+    /* UNICODE_STRING: terminated when there is room */
+    memset(X->base + buf, 0x7E, 32);
+    d = gs_make(0, 8, buf);
+    T(K(X360_xboxkrnl_RtlAppendUnicodeStringToString, 2, d, us("ab")) == 0 && gs_len(d) == 4 && weq(buf, "ab"),
+      "wide append");
+    T(K(X360_xboxkrnl_RtlAppendUnicodeStringToString, 2, d, us("cd")) == 0 && gs_len(d) == 8, "wide exact fit");
+    T(wneq(buf, "abcd", 4) && x360_r16(X, buf + 8) == 0x7E7E, "no terminator past the maximum");
+    T(K(X360_xboxkrnl_RtlAppendUnicodeStringToString, 2, d, us("e")) == ST_TOO_SMALL && gs_len(d) == 8, "wide too small");
+    /* an empty source writes nothing, not even a terminator */
+    memset(X->base + buf, 0x7E, 32);
+    d = gs_make(0, 8, buf);
+    T(K(X360_xboxkrnl_RtlAppendUnicodeStringToString, 2, d, us("")) == 0 && x360_r16(X, buf) == 0x7E7E, "empty source");
+
+    /* from a C string: an empty one still terminates, a null one does nothing */
+    T(K(X360_xboxkrnl_RtlAppendUnicodeToString, 2, d, gwstr("")) == 0 && x360_r16(X, buf) == 0, "empty C string");
+    memset(X->base + buf, 0x7E, 32);
+    T(K(X360_xboxkrnl_RtlAppendUnicodeToString, 2, d, 0) == 0 && x360_r16(X, buf) == 0x7E7E, "null C string");
+    T(K(X360_xboxkrnl_RtlAppendUnicodeToString, 2, d, gwstr("abc")) == 0 && gs_len(d) == 6 && weq(buf, "abc"),
+      "C string");
+    T(K(X360_xboxkrnl_RtlAppendUnicodeToString, 2, d, gwstr("d")) == 0 && gs_len(d) == 8, "C string exact fit");
+    T(K(X360_xboxkrnl_RtlAppendUnicodeToString, 2, d, gwstr("e")) == ST_TOO_SMALL && gs_len(d) == 8, "C string too small");
+    /* appended at the byte length, even an odd one */
+    memset(X->base + buf, 0x7E, 32);
+    d = gs_make(3, 16, buf);
+    T(K(X360_xboxkrnl_RtlAppendUnicodeStringToString, 2, d, us("a")) == 0 && gs_len(d) == 5, "odd destination length");
+    T(x360_r16(X, buf + 3) == 'a', "written at byte 3");
+    x360_heap_free(X, &X->heap_v4k, buf);
+}
+
+static void test_convert(void)
+{
+    /* allocated, terminated, freed through the pool RtlFreeAnsiString uses */
+    uint32_t d = gs_make(0, 0, 0);
+    T(K(X360_xboxkrnl_RtlAnsiStringToUnicodeString, 3, d, ns("h\xE9llo"), 1) == 0, "allocate");
+    T(gs_len(d) == 10 && gs_max(d) == 12 && x360_r16(X, gs_buf(d) + 2) == 0xE9 && x360_r16(X, gs_buf(d) + 10) == 0,
+      "converted %u/%u", gs_len(d), gs_max(d));
+    uint32_t b = gs_buf(d);
+    T(x360_heap_size_of(&X->heap_v4k, b) != 0, "from the pool");
+    K(X360_xboxkrnl_RtlFreeUnicodeString, 1, d);
+    T(x360_heap_size_of(&X->heap_v4k, b) == 0 && !gs_len(d) && !gs_max(d) && !gs_buf(d), "freed and cleared");
+    K(X360_xboxkrnl_RtlFreeUnicodeString, 1, d); /* no buffer: nothing happens */
+    T(!gs_buf(d), "freeing twice");
+
+    /* into the caller's buffer: the terminator must fit */
+    uint32_t buf = gbuf(32);
+    d = gs_make(0, 8, buf);
+    T(K(X360_xboxkrnl_RtlAnsiStringToUnicodeString, 3, d, ns("abc"), 0) == 0 && gs_len(d) == 6 && weq(buf, "abc"),
+      "exact fit with the terminator");
+    memset(X->base + buf, 0x7E, 32);
+    d = gs_make(0, 6, buf);
+    T(K(X360_xboxkrnl_RtlAnsiStringToUnicodeString, 3, d, ns("abc"), 0) == ST_OVERFLOW, "no room for the terminator");
+    T(x360_r16(X, buf) == 0x7E7E, "nothing written on overflow");
+    d = gs_make(0, 7, buf);
+    T(K(X360_xboxkrnl_RtlAnsiStringToUnicodeString, 3, d, ns("abc"), 0) == ST_OVERFLOW, "half a terminator");
+    d = gs_make(0, 2, buf);
+    T(K(X360_xboxkrnl_RtlAnsiStringToUnicodeString, 3, d, ns(""), 0) == 0 && !gs_len(d) && !x360_r16(X, buf), "empty");
+    d = gs_make(0, 0, buf);
+    T(K(X360_xboxkrnl_RtlAnsiStringToUnicodeString, 3, d, ns(""), 0) == ST_OVERFLOW, "empty with no room");
+    /* too long for a UNICODE_STRING */
+    T(K(X360_xboxkrnl_RtlAnsiStringToUnicodeString, 3, d, gs_make(0x8000, 0x8000, buf), 1) == 0xC00000F0u, "too long");
+    x360_heap_free(X, &X->heap_v4k, buf);
+
+    /* RtlCreateUnicodeString: a BOOLEAN */
+    d = gs_make(0, 0, 0);
+    T(K(X360_xboxkrnl_RtlCreateUnicodeString, 2, d, gwstr("abc")) == 1, "create");
+    T(gs_len(d) == 6 && gs_max(d) == 8 && weq(gs_buf(d), "abc"), "created");
+    b = gs_buf(d);
+    K(X360_xboxkrnl_RtlFreeUnicodeString, 1, d);
+    T(x360_heap_size_of(&X->heap_v4k, b) == 0, "created from the pool");
+    T(K(X360_xboxkrnl_RtlCreateUnicodeString, 2, d, gwstr("")) == 1 && gs_len(d) == 0 && gs_max(d) == 2, "create empty");
+    K(X360_xboxkrnl_RtlFreeUnicodeString, 1, d);
+    T(K(X360_xboxkrnl_RtlCreateUnicodeString, 2, d, 0) == 0, "create from nothing");
+    uint32_t huge = x360_heap_alloc(X, &X->heap_v4k, 0x10002, 0);
+    for (uint32_t k = 0; k < 0x8000; k++)
+        x360_w16(X, huge + 2 * k, 'x');
+    T(K(X360_xboxkrnl_RtlCreateUnicodeString, 2, d, huge) == 0, "too long to create");
+    x360_heap_free(X, &X->heap_v4k, huge);
+
+    /* the sizes, one byte per ANSI character */
+    uint32_t out = galloc(4);
+    T(K(X360_xboxkrnl_RtlMultiByteToUnicodeSize, 3, out, gstr("abc"), 3) == 0 && x360_r32(X, out) == 6, "to Unicode");
+    T(K(X360_xboxkrnl_RtlMultiByteToUnicodeSize, 3, out, gstr(""), 0) == 0 && x360_r32(X, out) == 0, "to Unicode, none");
+    T(K(X360_xboxkrnl_RtlUnicodeToMultiByteSize, 3, out, gwstr("abc"), 6) == 0 && x360_r32(X, out) == 3, "to ANSI");
+    T(K(X360_xboxkrnl_RtlUnicodeToMultiByteSize, 3, out, gwstr("abc"), 5) == 0 && x360_r32(X, out) == 2, "odd bytes");
+}
+
+static void test_utf8(void)
+{
+    /* 1, 2, 3 bytes and a surrogate pair (4 bytes) */
+    static const uint16_t mix[] = {'A', 0xE9, 0x3042, 0xD834, 0xDD1E};
+    static const uint8_t want[] = {'A', 0xC3, 0xA9, 0xE3, 0x81, 0x82, 0xF0, 0x9D, 0x84, 0x9E};
+    uint32_t src = gu16(mix, 5), out = galloc(4), buf = gbuf(32);
+
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8Size, 3, out, src, 10) == 0 && x360_r32(X, out) == 10, "size");
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8Size, 3, out, src, 0) == 0 && x360_r32(X, out) == 0, "size of nothing");
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8Size, 3, out, src, 11) == 0 && x360_r32(X, out) == 10, "an odd byte is not counted");
+
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, src, 10) == 0 && x360_r32(X, out) == 10, "convert");
+    T(!memcmp(X->base + buf, want, 10) && x360_r8(X, buf + 10) == 0x7E, "the bytes, no terminator");
+    /* exact fit */
+    memset(X->base + buf, 0x7E, 32);
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 10, out, src, 10) == 0 && x360_r32(X, out) == 10, "exact fit");
+    /* one byte short: the pair is not split */
+    memset(X->base + buf, 0x7E, 32);
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 9, out, src, 10) == ST_TOO_SMALL && x360_r32(X, out) == 6, "one short");
+    T(!memcmp(X->base + buf, want, 6) && x360_r8(X, buf + 6) == 0x7E, "whole characters only");
+    /* two bytes of a 3-byte sequence do not fit */
+    memset(X->base + buf, 0x7E, 32);
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 5, out, src, 10) == ST_TOO_SMALL && x360_r32(X, out) == 3, "3-byte cut");
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 0, out, src, 10) == ST_TOO_SMALL && x360_r32(X, out) == 0, "no room");
+    /* no destination asks for the size */
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, 0, 0, out, src, 10) == 0 && x360_r32(X, out) == 10, "size query");
+    /* empty */
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, src, 0) == 0 && x360_r32(X, out) == 0, "empty");
+    /* bad arguments */
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, 0, 10) == 0xC00000F2u, "no source");
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, 0, src, 10) == 0xC000000Du, "no count");
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, src, 9) == 0xC00000F3u, "odd source");
+
+    /* unpaired surrogates become U+FFFD and say so */
+    static const uint16_t lone_hi[] = {0xD834, 'A'}, lone_lo[] = {0xDD1E}, end_hi[] = {'A', 0xD834};
+    memset(X->base + buf, 0x7E, 32);
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, gu16(lone_hi, 2), 4) == 0x107 && x360_r32(X, out) == 4, "lone high");
+    T(!memcmp(X->base + buf, "\xEF\xBF\xBD" "A", 4), "replaced");
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, gu16(lone_lo, 1), 2) == 0x107 && x360_r32(X, out) == 3, "lone low");
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, gu16(end_hi, 2), 4) == 0x107 && x360_r32(X, out) == 4, "high at the end");
+    /* a pair cut by the byte count is unpaired */
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, gu16(mix + 3, 2), 2) == 0x107 && x360_r32(X, out) == 3, "cut pair");
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8Size, 3, out, gu16(lone_lo, 1), 2) == 0 && x360_r32(X, out) == 3, "lone size");
+    /* the last code point of each length */
+    static const uint16_t edges[] = {0x7F, 0x80, 0x7FF, 0x800, 0xFFFF, 0xDBFF, 0xDFFF};
+    static const uint8_t edge_bytes[] = {0x7F, 0xC2, 0x80, 0xDF, 0xBF, 0xE0, 0xA0, 0x80,
+                                         0xEF, 0xBF, 0xBF, 0xF4, 0x8F, 0xBF, 0xBF};
+    T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, gu16(edges, 7), 14) == 0 && x360_r32(X, out) == 15, "edges");
+    T(!memcmp(X->base + buf, edge_bytes, 15), "edge bytes");
+    x360_heap_free(X, &X->heap_v4k, buf);
+}
+
 int main(void)
 {
     if (hle_util_start())
@@ -295,6 +606,12 @@ int main(void)
     test_conversions();
     test_truncation();
     test_long_output();
+    test_memory_and_case();
+    test_compare();
+    test_copy();
+    test_append();
+    test_convert();
+    test_utf8();
     printf("x360_rtl: %d checks\n", checks);
     return hle_util_end("x360_rtl");
 }
