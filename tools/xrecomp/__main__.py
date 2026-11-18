@@ -32,7 +32,7 @@ if __package__ in (None, ""):        # run as a file: the toolkit root on the pa
 from tools.xrecomp import config, library                    # noqa: E402
 from tools.xrecomp.home import ROOT, Home, iso_now           # noqa: E402
 
-PLAYERS = {"gba": "gba_play", "ps1": "ps1_play", "n64": "n64_play"}
+PLAYERS = {"gba": "gba_play", "ps1": "ps1_play", "n64": "n64_play", "gc": "gc_play"}
 RUN_LOGS_KEPT = 10
 
 
@@ -44,7 +44,7 @@ def console_unsupported(console, platform=None):
     """Why this host cannot prepare or play a console's games, or None. Windows: Xbox games only (XBA-89)."""
     platform = platform or sys.platform
     if console and console != "xbox" and platform.startswith("win"):
-        return ("%s games are not supported on Windows: the console runtimes (GBA, PS1, N64) are POSIX-only. "
+        return ("%s games are not supported on Windows: the console runtimes (GBA, PS1, N64, GameCube) are POSIX-only. "
                 "Use Linux, macOS or WSL2 for them; Xbox games work here (docs/desktop/windows.md)"
                 % console.upper())
     return None
@@ -68,30 +68,9 @@ def python_for(home, env=None):
 
 
 def find_player(console, env=None, root=ROOT):
-    """gba_play / ps1_play / n64_play: $XRECOMP_<CONSOLE>_PLAY, the PATH, a build folder of the toolkit (the
-    root build: build*/consoles/<c>/runtime/; a console's own: build*/<c>/<c>_runtime/), else the one a release
-    archive carries with its prebuilt runtime (runtime/<host>/bin/, XBA-87). None when not built."""
-    import glob
-    import shutil
-    env = os.environ if env is None else env
-    name = PLAYERS[console]
-    v = env.get("XRECOMP_%s_PLAY" % console.upper())
-    if v:
-        return v
-    exe = name + (".exe" if sys.platform.startswith("win") else "")
-    found = shutil.which(exe, path=env.get("PATH"))
-    if found:
-        return found
-    pats = ["build*/consoles/%s/runtime/%s" % (console, exe), "build*/%s/%s_runtime/%s" % (console, console, exe),
-            "build*/%s_runtime/%s" % (console, exe)]
-    hits = []
-    for p in pats:
-        hits += [h for h in glob.glob(os.path.join(root, p)) if os.access(h, os.X_OK)]
-    if hits:
-        return max(hits, key=os.path.getmtime)      # the newest build
-    from tools.prepare import runtime
-    packaged = os.path.join(runtime.runtime_dir(root), "bin", exe)
-    return packaged if os.access(packaged, os.X_OK) else None
+    """gba_play / ps1_play / n64_play / gc_play: $XRECOMP_<CONSOLE>_PLAY, the PATH, a build folder of the toolkit,
+    else a release archive's (library.find_exe). None when not built."""
+    return library.find_exe(PLAYERS[console], console, env, root)
 
 
 # ── prepare ─────────────────────────────────────────────────────

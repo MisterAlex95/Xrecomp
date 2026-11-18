@@ -3,12 +3,15 @@
     <string name="CC_CONSOLE_GBA">Game Boy Advance</string>
     <string name="CC_CONSOLE_PS1">PlayStation</string>
     <string name="CC_CONSOLE_N64">Nintendo 64</string>
+    <string name="CC_CONSOLE_GC">GameCube</string>
 
     <string name="CC_A">A</string>
     <string name="CC_B">B</string>
     <string name="CC_L">L</string>
     <string name="CC_R">R</string>
     <string name="CC_Z">Z</string>
+    <string name="CC_X">X</string>
+    <string name="CC_Y">Y</string>
     <string name="CC_START">Start</string>
     <string name="CC_SELECT">Select</string>
     <string name="CC_CROSS">Croix</string>
@@ -27,6 +30,8 @@
     <string name="CC_C_RIGHT">C droite</string>
     <string name="CC_GROUP_C">Boutons C</string>
     <string name="CC_STICK">Stick analogique</string>
+    <string name="CC_MAIN_STICK">Stick principal</string>
+    <string name="CC_C_STICK">Stick C</string>
     <string name="CC_GROUP_STICK">Stick analogique</string>
 
     <string name="CC_SCOPE">Commandes pour</string>

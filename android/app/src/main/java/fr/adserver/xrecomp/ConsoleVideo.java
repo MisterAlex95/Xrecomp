@@ -95,13 +95,13 @@ final class ConsoleVideo {
     private ConsoleVideo() {}
 
     /** Whether a game of console con has setting s: scale and filter every console game, the internal resolution the
-     *  PS1, the N64 and, since XBA-237, the Xbox (its GPU renderer, src/gpu/nv2a_gl.c; 8 draws at 4 there; the GBA
-     *  draws its own 240 x 160, nothing to upscale). */
+     *  PS1, the N64, the GameCube (XBA-274: its GX renderer, gx_gl.c) and, since XBA-237, the Xbox (its GPU renderer,
+     *  src/gpu/nv2a_gl.c; 8 draws at 4 there; the GBA draws its own 240 x 160, nothing to upscale). */
     static boolean applies(Setting s, Console con) {
         if (con == null)
             return false;
         if (s == Setting.UPSCALE)
-            return con == Console.PS1 || con == Console.N64 || con == Console.XBOX;
+            return con == Console.PS1 || con == Console.N64 || con == Console.GC || con == Console.XBOX;
         return con != Console.XBOX;
     }
 

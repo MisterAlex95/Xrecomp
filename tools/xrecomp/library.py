@@ -7,9 +7,10 @@ disc or EXE, else an Xbox disc, folder or default.xbe), with the same modules, s
 """
 
 import hashlib
+import json
 import os
 
-from tools.xrecomp.home import console_of
+from tools.xrecomp.home import ROOT, console_of, default_root, write_atomic
 
 PREPARED, STALE, ABSENT = "prepared", "stale", "absent"
 MISSING, UNREADABLE = "missing", "unreadable"
@@ -20,6 +21,7 @@ SCAN_DEPTH = 3
 XBOX_IMAGE_EXT = (".iso", ".xiso", ".cso", ".zso", ".cci")
 ROM_EXT = (".gba", ".z64", ".v64", ".n64")
 PS1_EXT = (".cue", ".chd", ".bin", ".img", ".exe")
+GC_EXT = (".gcm", ".ciso", ".gcz", ".rvz", ".wia", ".dol")      # and .iso, read by content (XBA-274)
 
 
 class Entry:
@@ -46,12 +48,14 @@ class Entry:
 # ── identify ────────────────────────────────────────────────────
 
 def console_of_source(path):
-    """"n64" | "gba" | "ps1" | "xbox", in tools.prepare's order."""
-    from tools.prepare import gba, n64, ps1
+    """"n64" | "gba" | "gc" | "ps1" | "xbox", in tools.prepare's order (a GameCube disc before the PS1's .iso)."""
+    from tools.prepare import gba, gc, n64, ps1
     if n64.is_n64(path):
         return "n64"
     if gba.is_gba(path):
         return "gba"
+    if gc.is_gc(path):
+        return "gc"
     if ps1.is_ps1(path):
         return "ps1"
     return "xbox"
@@ -86,6 +90,8 @@ def identify(path):
             from tools.prepare import n64
             key, title, _order, sha, _size = n64.read_source(src)
             return Entry(src, "n64", "n64-" + key, title, key, sha)
+        if console == "gc":
+            return _identify_gc(src)
         from tools.prepare import identify as xid
         info = xid.identify(src)
         tid = info["title_id"]
@@ -94,6 +100,80 @@ def identify(path):
         code = getattr(e, "code", None)
         msg = getattr(e, "msg", None) or str(e) or type(e).__name__
         return Entry(src, console, error=("%s: %s" % (code, msg)) if code else msg)
+
+
+def find_exe(name, console, env=None, root=ROOT):
+    """A console tool (gba_play, gc_play, gc_run...): $XRECOMP_<NAME>, the PATH, a build folder of the toolkit (the
+    root build: build*/consoles/<c>/runtime/; a console's own: build*/<c>/<c>_runtime/), else the one a release
+    archive carries with its prebuilt runtime (runtime/<host>/bin/, XBA-87). None when not built."""
+    import glob
+    import shutil
+    import sys
+    env = os.environ if env is None else env
+    v = env.get("XRECOMP_%s" % name.upper())
+    if v:
+        return v
+    exe = name + (".exe" if sys.platform.startswith("win") else "")
+    found = shutil.which(exe, path=env.get("PATH"))
+    if found:
+        return found
+    pats = ["build*/consoles/%s/runtime/%s" % (console, exe), "build*/%s/%s_runtime/%s" % (console, console, exe),
+            "build*/%s_runtime/%s" % (console, exe)]
+    hits = []
+    for p in pats:
+        hits += [h for h in glob.glob(os.path.join(root, p)) if os.access(h, os.X_OK)]
+    if hits:
+        return max(hits, key=os.path.getmtime)      # the newest build
+    from tools.prepare import runtime
+    packaged = os.path.join(runtime.runtime_dir(root), "bin", exe)
+    return packaged if os.access(packaged, os.X_OK) else None
+
+
+GC_IDENTITIES = "gc_identities.json"      # <xrecomp home>/cache/: RVZ / WIA identities, by path, size and time
+
+
+def _gc_cache_file():
+    return os.path.join(default_root(), "cache", GC_IDENTITIES)
+
+
+def _identify_gc(src):
+    """A GameCube disc or DOL (XBA-274): its key (« GALE01-0 », « DOL-<CRC32> ») and the main DOL's SHA-256, the
+    identity its pack.json records (tools/prepare/gc.py). An RVZ / WIA image is read through the runtime's extractor
+    (gc_run --extract, found as the players are: $XBA_GC_RUN, else find_exe; Prepare then finds the same one) into a
+    temporary folder, once: its identity is kept by path, size and modification time."""
+    import tempfile
+    from tools.prepare import gc
+    if not gc._gc_tools().gcm.needs_native(src):
+        key, title, dol, _rels = gc.read_source(src)
+        return Entry(src, "gc", "gc-" + key, title, key, hashlib.sha256(dol).hexdigest())
+    st = os.stat(src)
+    stamp = "%s|%d|%d" % (os.path.abspath(src), st.st_size, st.st_mtime_ns)
+    cache_file = _gc_cache_file()
+    try:
+        with open(cache_file) as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+    hit = cache.get(stamp) if isinstance(cache, dict) else None
+    if isinstance(hit, list) and len(hit) == 3:
+        key, title, sha = hit
+        return Entry(src, "gc", "gc-" + key, title, key, sha)
+    if not os.environ.get(gc.GC_RUN_ENV):
+        run = find_exe("gc_run", "gc")
+        if run:
+            os.environ[gc.GC_RUN_ENV] = run       # tools.prepare (a child of this process) takes the same
+    with tempfile.TemporaryDirectory(prefix="xrecomp-gc-") as work:
+        key, title, dol, _rels = gc.read_source(src, work)
+    sha = hashlib.sha256(dol).hexdigest()
+    if not isinstance(cache, dict):
+        cache = {}
+    cache = {k: v for k, v in cache.items() if not k.startswith(os.path.abspath(src) + "|")}
+    cache[stamp] = [key, title, sha]
+    try:
+        write_atomic(cache_file, json.dumps(cache, indent=1).encode())
+    except OSError:
+        pass                                      # asked again next time
+    return Entry(src, "gc", "gc-" + key, title, key, sha)
 
 
 def candidates(folder, depth=SCAN_DEPTH):
@@ -123,7 +203,7 @@ def candidates(folder, depth=SCAN_DEPTH):
                 continue
             if ext == ".exe" or (ln == "default.xbe" and level == 0):
                 continue        # a bare EXE / XBE is given by hand, not scanned
-            if ext in XBOX_IMAGE_EXT or ext in ROM_EXT or ext in PS1_EXT:
+            if ext in XBOX_IMAGE_EXT or ext in ROM_EXT or ext in PS1_EXT or ext in GC_EXT:
                 out.append(p)
     walk(os.path.abspath(os.path.expanduser(folder)), 0)
     return out
@@ -226,8 +306,8 @@ def state(entry, home):
 
 
 def _console_module(console):
-    from tools.prepare import gba, n64, ps1
-    return {"gba": gba, "ps1": ps1, "n64": n64}[console]
+    from tools.prepare import gba, gc, n64, ps1
+    return {"gba": gba, "ps1": ps1, "n64": n64, "gc": gc}[console]
 
 
 # ── the library ─────────────────────────────────────────────────

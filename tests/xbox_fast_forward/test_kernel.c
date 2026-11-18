@@ -22,6 +22,8 @@
 
 #ifndef _WIN32
 #include "platform/recomp_states.h"
+#include "input/keyboard.h"
+#include "usb/usb_gamepad.h"
 #endif
 
 uint64_t xbox_ReadTimeStampCounter(void);
@@ -174,6 +176,27 @@ int main(void)
     recomp_ff_set(0);
     xbox_FastForwardPoll();
     CHECK(xbox_GuestClockSpeed() == 1);
+
+    /* XBA-274: the desktop keys reach an Xbox title as they reach the console runtimes: Tab held (HID 43, the
+     * default fast-forward hold) through the pad's report (usb_gamepad_report, port 0) fast-forwards, let go it
+     * stops; F1 (save slot 1) is ignored without save states (none attached here). */
+    {
+        uint8_t rep[20];
+        setenv("RECOMP_FF_SPEED", "4", 1);
+        recomp_ff_reset();
+        xbox_InputHidKeySet(43, 1);
+        usb_gamepad_report(0, rep, sizeof rep);
+        CHECK(recomp_ff_active());
+        CHECK(xbox_GuestClockSpeed() == 4);
+        xbox_InputHidKeySet(43, 0);
+        usb_gamepad_report(0, rep, sizeof rep);
+        CHECK(!recomp_ff_active());
+        CHECK(xbox_GuestClockSpeed() == 1);
+        xbox_InputHidKeySet(43, 1);
+        xbox_InputKeysClear();   /* focus lost: every key lets go */
+        usb_gamepad_report(0, rep, sizeof rep);
+        CHECK(!recomp_ff_active());
+    }
 
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);

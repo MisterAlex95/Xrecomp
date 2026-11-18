@@ -1,7 +1,7 @@
 # xrecomp: the desktop command line
 
 One entry point for a desktop toolkit (XBA-90; the decision in XBA-85: on Linux the command line first, the Mac keeps
-its app). `xrecomp` prepares and plays your own games, Xbox and GBA / PS1 / N64, with the files in your user folder:
+its app). `xrecomp` prepares and plays your own games, Xbox and GBA / PS1 / N64 / GameCube, with the files in your user folder:
 
 ```bash
 ./xrecomp prepare ~/games/Fable.iso          # or a disc folder, a default.xbe, a .gba, a .cue / .chd, a .z64
@@ -32,14 +32,14 @@ game only. `--home DIR` (before the command) or `$XRECOMP_HOME` moves the data f
 
 The same words as the Android app's chips (app-shell.md):
 
-| State | Xbox | GBA / PS1 / N64 |
+| State | Xbox | GBA / PS1 / N64 / GameCube |
 |---|---|---|
 | **Prepared** | `tools.prepare --check`: ready | a valid pack of this toolkit: runs natively |
 | **Prepared · out of date** | `--check`: stale (toolkit, runtime, profile, enhancements, the game's files, code found while playing, a build made outside xrecomp); the old executable still plays | the pack was lifted by another toolkit (`toolkit_sha256`); it still loads |
 | **Not prepared** | no executable: prepare it to play | no valid pack: plays in the interpreter |
 | **Source gone** / **Not readable** | the recorded source moved, or cannot be read (an ISO still being copied) | the same |
 
-A GBA / PS1 / N64 game whose runs found code its pack did not cover keeps « Prepared » and gets the Android Home's
+A GBA / PS1 / N64 / GameCube game whose runs found code its pack did not cover keeps « Prepared » and gets the Android Home's
 note, « N new addresses found · prepare again ». The console is told the way `tools.prepare` tells it (an N64 ROM's
 first word, a GBA header, a PS1 disc or EXE, else Xbox), by the same modules. One entry per game: a disc found twice
 is listed once, a known title's recorded source first.
@@ -63,8 +63,8 @@ titles/<ID>/
   save/                 an Xbox title's RECOMP_SAVE_DIR (UDATA, TDATA, Z: cache)
   logs/run-*.log        the last 10 runs (the command line, the environment changes, the output)
   state.json            source path, title, console, play time, runs, last played, last prepare, enhancements
-packs/<console>-<KEY>/  GBA / PS1 / N64 title packs
-save/<console>-<KEY>/   GBA / PS1 / N64 saves, memory cards and save states
+packs/<console>-<KEY>/  GBA / PS1 / N64 / GameCube title packs
+save/<console>-<KEY>/   GBA / PS1 / N64 / GameCube saves, memory cards and save states
 ```
 
 `<ID>` is the Xbox title ID or `<console>-<KEY>`, the Android app's library key. **Your games are read where they
@@ -78,13 +78,13 @@ ever uploaded.
   desktop `main.c` does not read `recomp.cfg`: as the Mac app does, xrecomp passes the settings as environment
   variables. Code a run finds that the analysis missed goes to `work/discovered.jsonl` (the prepare bakes that path
   into the build); the title then turns « out of date » and the next prepare lifts it (self-healing, XBA-74).
-- **GBA / PS1 / N64**: `<console>_play SOURCE`, with `--pack <root>/packs/<console>-<KEY>/libtitle.so --missed
+- **GBA / PS1 / N64 / GameCube**: `<console>_play SOURCE`, with `--pack <root>/packs/<console>-<KEY>/libtitle.so --missed
   <work>/discovered.txt` when the game has a valid pack (the next prepare lifts what the run missed), else in the
   interpreter. Working directory: the toolkit (where `ps1_play` looks for `build/ps1-bios/openbios.bin`). The player
   is `$XRECOMP_<CONSOLE>_PLAY`, else the one on the PATH, else the newest in a build folder of the toolkit
   (`build*/consoles/<c>/runtime/`, the root build; `build*/<c>/<c>_runtime/`, a console's own), else the one a
   release archive carries with its prebuilt runtime (`runtime/<host>/bin/`, XBA-87). In a checkout without a build:
-  `cmake -S . -B build && cmake --build build --target gba_play` (or `ps1_play`, `n64_play`).
+  `cmake -S . -B build && cmake --build build --target gba_play` (or `ps1_play`, `n64_play`, `gc_play`).
 
 The environment: xrecomp's own, then Default settings, then the game's lines (the first line for a key wins), then
 `RECOMP_SAVE_DIR`. `KEY=` (empty) unsets the variable. PATH and RECOMP_SAVE_DIR are never taken from a settings file.
@@ -121,6 +121,6 @@ compiled in, they win): `settings GAME` shows them as « set by the title ».
   never makes a pack stale.
 - **Windows** (experimental, [windows.md](windows.md)): `xrecomp.cmd` in the Windows zip, Xbox titles only, built
   by the compile driver against the MSVC-built runtime. The console runtimes are POSIX-only: `prepare` and `play`
-  refuse GBA, PS1 and N64 games there and say so.
+  refuse GBA, PS1, N64 and GameCube games there and say so.
 - Tests: `python3 -m pytest tools/xrecomp` (a temporary home; the synthetic conformance XBE, homebrew-shaped
   synthetic ROMs, a GBA pack built with the fake lifter and the host's `cc`).

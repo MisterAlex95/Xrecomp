@@ -291,6 +291,16 @@ public class TouchControlsTest {
         fingers.cancel();
         assertEquals(0, overlay.rx);
 
+        touch.layout(TouchPad.Layout.GC);   // XBA-274: the GameCube's own
+        layout();
+        fingers = new PanelTesting(touch.view);
+        fingers.press(0, at(TouchPad.A));
+        fingers.press(1, at(TouchPad.SHOULDER_R));
+        assertEquals(1 << TouchPad.AN_A, overlay.analog);
+        assertEquals(255, overlay.rt);
+        shot("9-gc");
+        fingers.cancel();
+
         // The in-game menu's toggle: hidden for the session whatever the mode, then shown again.
         touch.force(false);
         assertFalse(touch.shown());

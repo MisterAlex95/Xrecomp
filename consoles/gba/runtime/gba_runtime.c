@@ -34,6 +34,7 @@
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
+#include "recomp_play.h"
 #include "recomp_rewind.h"
 #include "recomp_states.h"
 
@@ -666,8 +667,9 @@ int gba_runtime_run(const gba_runtime_opts *o)
     static uint8_t rgba[GBA_SCREEN_W * GBA_SCREEN_H * 4];
     static int16_t pcm[GBA_AUDIO_RATE / 10 * 2];
     uint64_t frames = 0, next = now_ns(), dirty_at = 0, t0 = next, late_resets = 0;
-    int was_paused = 0, heard = 0, rc = 0, was_ff = 0;
-    recomp_hotkeys_state hk_keys = {0};
+    int was_paused = 0, heard = 0, rc = 0;
+    recomp_play play; /* the hotkeys, fast-forward and rewind holds, frames per shown frame (XBA-274) */
+    recomp_play_init(&play, "gba", "frame", &rw);
     recomp_ff_carry carry = {{0, 0}, 0};
     recomp_perf_hint_begin(GBA_FRAME_NS); /* the frame loop, one session (no worker threads) */
     /* The performance line every console logs every 10 s and at the end (host_perf_line.h, XBA-243). */
@@ -718,34 +720,27 @@ int gba_runtime_run(const gba_runtime_opts *o)
         uint64_t work_t0 = now_ns(); /* the frame's work, for the performance hint (the sleep after it is not) */
         host_perf_frame(&hp, work_t0, NULL);
 
-        uint32_t hk_held = 0, hk_pressed = 0, key_pressed = 0;
+        uint32_t hk_held = 0, hk_pressed = 0;
         uint16_t keys = (uint16_t)(o->keys | pads_keys(&hk_held, &hk_pressed) | (window ? keyboard_keys() : 0));
-        if (window) { /* the desktop keys (RECOMP_HOTKEYS_KEYS: Tab, F1-F4, Shift+F1-F4 by default) */
-            int nks = 0;
-            const Uint8 *ks = SDL_GetKeyboardState(&nks);
-            hk_held |= recomp_hotkeys_keys_update(recomp_hotkeys_get(), &hk_keys, ks, nks, &key_pressed);
-        }
-        recomp_hotkeys_run(hk_pressed | key_pressed);
-        recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
+        int nks = 0;
+        const Uint8 *ks = window ? SDL_GetKeyboardState(&nks) : NULL;
+        recomp_play_frame pf;
+        recomp_play_begin(&play, hk_held, hk_pressed, ks, nks, frames, &pf);
         /* Rewind held: one capture back per shown frame, no GBA frame runs, nothing heard (XBA-194). */
-        int rewinding = recomp_rewinder_begin(&rw, !!(hk_held & RECOMP_HK_BIT(RECOMP_HK_REWIND)));
+        int rewinding = pf.rewinding;
         if (rewinding) {
             pthread_mutex_lock(&s_mu);
             if (recomp_rewinder_step(&rw, rewind_load, m) == 0)
                 recomp_states_note_load(); /* a fresh frame generation history */
             pthread_mutex_unlock(&s_mu);
         }
-        int ff = recomp_ff_active(), speed = recomp_ff_speed();
-        if (ff != was_ff) {
-            printf("gba: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",
-                   (unsigned long long)frames);
-            fflush(stdout);
+        int ff = pf.ff, speed = pf.speed;
+        if (pf.ff_changed) {
             carry = (recomp_ff_carry){{0, 0}, 0};
-            was_ff = ff;
             next = now_ns();
         }
         /* Fast-forward: `speed` GBA frames per shown frame (max: as many as fit in one display frame). */
-        int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1, dirty = 0;
+        int steps = pf.steps, dirty = 0;
         uint64_t burst_end = now_ns() + GBA_FRAME_NS * 9 / 10;
         gba_cheats_poll(&cheats); /* the app changed the list: read it again */
         for (int step = 0; step < steps; step++) {

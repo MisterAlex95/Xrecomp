@@ -216,8 +216,8 @@ final class GameSettings {
     // ---- Options --------------------------------------------------------------------------------------------------
 
     /**
-     * Whether option o means anything to a game of console c: the GBA / PS1 / N64 picture options (scale, filter)
-     * to those consoles, the internal resolution to the PS1, the N64 and the Xbox (XBA-237), the picture shader (XBA-195) to every game
+     * Whether option o means anything to a game of console c: the console window's picture options (scale, filter)
+     * to the console games, rewind and its memory to every game (XBA-274: the Xbox's state service rewinds too), the internal resolution to the PS1, the N64 and the Xbox (XBA-237), the picture shader (XBA-195) to every game
      * but its LCD ghosting to the console games (the Xbox presenter draws no LCD grid, XBA-203), the others every
      * console reads (« All consoles ») to every game, the Xbox's own to Xbox titles; the shell's self-test (a
      * developer switch) to none.
@@ -227,15 +227,16 @@ final class GameSettings {
             c = Console.XBOX;
         if (o.title == R.string.OPT_SELFTEST)
             return false;
-        if (o.title == R.string.OPT_CSCALE || o.title == R.string.OPT_CFILTER || o.title == R.string.OPT_REWIND
-            || o.title == R.string.OPT_REWIND_MB)
-            return c != Console.XBOX;   // XBA-194: rewind is the GBA / PS1 / N64 runtimes' (no Xbox save states)
+        if (o.title == R.string.OPT_CSCALE || o.title == R.string.OPT_CFILTER)
+            return c != Console.XBOX;   // the console window's picture (the Xbox presenter has neither)
+        if (o.title == R.string.OPT_REWIND || o.title == R.string.OPT_REWIND_MB)
+            return true;   // XBA-194, XBA-274: every console; an Xbox title's through its state service (XBA-249)
         if (o.title == R.string.OPT_CSHADER_GHOST)
             return c != Console.XBOX;   // XBA-203: the LCD grid's ghosting; an Xbox game draws no LCD grid
         if (isShader(o))
             return true;                // XBA-195 / XBA-203: the console window's and the Xbox presenter's
         if (o.title == R.string.OPT_UPSCALE)   // XBA-237: the Xbox's GPU renderer too (RECOMP_GPU_SCALE wins)
-            return c == Console.PS1 || c == Console.N64 || c == Console.XBOX;
+            return c == Console.PS1 || c == Console.N64 || c == Console.GC || c == Console.XBOX;   // XBA-274: GX
         return o.shared || c == Console.XBOX;
     }
 

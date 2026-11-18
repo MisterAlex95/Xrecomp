@@ -448,7 +448,7 @@ Mac display gave a cap of 60: shown 44-48 fps, half the pairs skipped.
 
 ## Console window
 
-XBA-186. The GBA, PS1 and N64 runtimes present through the host layer's window (`src/video/host_window.c`), not
+XBA-186. The GBA, PS1, N64 and GameCube runtimes present through the host layer's window (`src/video/host_window.c`), not
 the Xbox presenter. In a build with `XBOXRECOMP_LSFG` (the root CMakeLists defines it on `xbr_host` and links
 `xbox_framegen`; without it the path is compiled out), under `RECOMP_LSFG=1`, the window feeds the same pacer and
 generator. The front end is `src/framegen/framegen_console.c` (C, no SDL or GL, part of `host_framegen`), the GL
@@ -501,8 +501,14 @@ generation cost: 16.7 ms + c for a 30 fps game at 2x (one field), 25 ms + c for 
 3x. Interpolation cannot do less: G(N-1, N) needs N. The window draws nothing late on its own (no extra queue): with
 vsync each swap waits for the display as before.
 
-**Not covered**: `host_window_present_texture` (a renderer's own GL texture: none of the three runtimes uses it
-today); no performance overlay line in the console window (the counters are in the log); 20 fps games at 2x show
+`host_window_present_texture` (a renderer's own GL texture: the GameCube's GX picture and its GPU-YUV XFB) takes
+part since XBA-274: while frame generation runs (not under fast-forward), the texture is read back through a
+framebuffer of the window's own (row 0 at the top) and handed to the pacer as a present_rgba picture would be; the
+read-back costs a copy of the picture per field (box-filtered to `RECOMP_LSFG_MAX_WIDTH` after it). ctest
+`gc_framegen` (needs a display: `xvfb-run -a ctest -R gc_framegen`) checks that the picture drawn from the FIFO is the
+one GX drew, byte for byte.
+
+**Not covered**: no performance overlay line in the console window (the counters are in the log); 20 fps games at 2x show
 40, unevenly spaced on a 60 Hz display (25 ms against a 16.7 ms grid): `RECOMP_LSFG_MULT=3` for them; the
 multiplier is fixed for the run.
 

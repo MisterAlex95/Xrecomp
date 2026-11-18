@@ -81,6 +81,7 @@ public class CoverArtTest {
                      CoverArt.url(Console.PS1, "Crash Bandicoot (Europe)"));
         assertTrue(CoverArt.url(Console.N64, "x").contains("/Nintendo_-_Nintendo_64/"));
         assertTrue(CoverArt.url(Console.GBA, "x").contains("/Nintendo_-_Game_Boy_Advance/"));
+        assertTrue("XBA-274", CoverArt.url(Console.GC, "x").contains("/Nintendo_-_GameCube/"));
         assertNull(CoverArt.system(Console.XBOX));
     }
 

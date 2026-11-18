@@ -45,6 +45,7 @@
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
+#include "recomp_play.h"
 #include "recomp_rewind.h"
 #include "recomp_states.h"
 
@@ -1394,8 +1395,8 @@ int n64_runtime_run(const n64_runtime_opts *o)
     n64_runtime_stuck stuck;
     n64_runtime_stuck_init(&stuck);
     uint64_t fault_logged = 0;
-    int was_ff = 0;
-    recomp_hotkeys_state hk_keys = {0};
+    recomp_play play; /* the hotkeys, fast-forward and rewind holds, frames per shown frame (XBA-274) */
+    recomp_play_init(&play, "n64", "frame", &rw);
     recomp_ff_carry carry = {{0, 0}, 0};
     /* The performance line (n64_runtime_perf): the core times one frame in 8 stage by stage. */
     rt_perf_acc pacc;
@@ -1514,29 +1515,19 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 n64_runtime_stick(kx, ky, range, 0, &pads[0].x, &pads[0].y);
         }
 #endif
-        if (window) { /* the desktop keys (RECOMP_HOTKEYS_KEYS: Tab, F1-F4, Shift+F1-F4 by default) */
-            int nks = 0;
-            uint32_t key_pressed = 0;
-            const Uint8 *ks = SDL_GetKeyboardState(&nks);
-            hk_held |= recomp_hotkeys_keys_update(recomp_hotkeys_get(), &hk_keys, ks, nks, &key_pressed);
-            hk_pressed |= key_pressed;
-        }
-        recomp_hotkeys_run(hk_pressed);
-        recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
-        int rewinding = recomp_rewinder_begin(&rw, !!(hk_held & RECOMP_HK_BIT(RECOMP_HK_REWIND)));
-        int ff = recomp_ff_active(), speed = recomp_ff_speed();
-        if (ff != was_ff) {
-            printf("n64: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",
-                   (unsigned long long)frames);
-            fflush(stdout);
+        int nks = 0;
+        const Uint8 *ks = window ? SDL_GetKeyboardState(&nks) : NULL;
+        recomp_play_frame pf;
+        recomp_play_begin(&play, hk_held, hk_pressed, ks, nks, frames, &pf);
+        int rewinding = pf.rewinding, ff = pf.ff, speed = pf.speed;
+        if (pf.ff_changed) {
             carry = (recomp_ff_carry){{0, 0}, 0};
-            was_ff = ff;
             next = now_ns();
             behind = 0;
         }
         /* Fast-forward: `speed` N64 frames per shown frame (max: as many as fit in one display frame), no frame skip
          * (only the last frame's picture is made anyway). */
-        int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1, dirty = 0, skip = 0, on = display_on > 0;
+        int steps = pf.steps, dirty = 0, skip = 0, on = display_on > 0;
         int fresh = 1; /* a new picture made this host frame (0: the VI's picture had not changed, nothing made) */
         const uint8_t *prgba = NULL; /* the picture straight from the Vulkan RDP's scanout (n64_display_rgba) */
         int ppitch = 0;

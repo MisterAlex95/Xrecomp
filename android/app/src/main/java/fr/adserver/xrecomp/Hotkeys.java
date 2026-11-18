@@ -43,14 +43,16 @@ final class Hotkeys {
 
         /**
          * Whether it means anything to a game of console c: the menu everywhere, fast-forward (held, on / off) on every
-         * console that fast-forwards (XBA-240: the Xbox too), the rest with save states.
+         * console that fast-forwards (XBA-240: the Xbox too), the rest with save states: every console, an Xbox title's
+         * through its state service (XBA-249: usb_gamepad.c pad_hotkeys runs them when the title's states work;
+         * XBA-274: the launcher's Xbox Controls shows them so they can be changed).
          */
         boolean appliesTo(Console c) {
             if (this == MENU)
                 return true;
             if (this == FF_HOLD || this == FF_TOGGLE)
                 return c != null && c.hasFastForward();
-            return c != null && c.hasSaveStates();
+            return c != null && (c.hasSaveStates() || c == Console.XBOX);
         }
     }
 
@@ -294,19 +296,27 @@ final class Hotkeys {
         return s;
     }
 
-    /** The actions a game of console c shows: all of them with save states, else the menu and fast-forward. */
+    /** The actions a game of console c can have (the launcher's Controls): all of them with save states (an Xbox title's
+     *  too, XBA-274), else the menu and fast-forward. */
     static List<Action> actions(Console c) {
-        return actions(c, false);
+        List<Action> out = new ArrayList<>();
+        for (Action a : Action.values()) {
+            if (a.appliesTo(c))
+                out.add(a);
+        }
+        return out;
     }
 
     /**
-     * XBA-249: with states (an Xbox title whose runtime offers them, the in-game menu's Controls page), every action
-     * applies; otherwise those of {@link #actions(Console)}.
+     * XBA-249: what the running game obeys (the in-game menu's Controls page): with states every action; without, an
+     * Xbox title (whose runtime has no states for it) the menu and fast-forward only, another console's game those of
+     * {@link #actions(Console)}.
      */
     static List<Action> actions(Console c, boolean states) {
         List<Action> out = new ArrayList<>();
         for (Action a : Action.values()) {
-            if (states || a.appliesTo(c))
+            boolean xboxPlain = a == Action.MENU || a == Action.FF_HOLD || a == Action.FF_TOGGLE;
+            if (states || (c == Console.XBOX ? xboxPlain : a.appliesTo(c)))
                 out.add(a);
         }
         return out;

@@ -89,7 +89,7 @@ final class ConsoleControls {
      * never stays in this process.
      */
     static String[][] runEnv(Context c, String key) {
-        Console[] all = { Console.GBA, Console.PS1, Console.N64 };
+        Console[] all = { Console.GBA, Console.PS1, Console.N64, Console.GC };   // XBA-274: the GameCube's too
         String[][] out = new String[all.length][];
         Console mine = key == null ? Console.XBOX : Console.ofKey(key);
         for (int i = 0; i < all.length; i++)
@@ -115,6 +115,12 @@ final class ConsoleControls {
                           R.string.XB_DPAD_LEFT, R.string.XB_DPAD_RIGHT };
             return ids[t];
         }
+        case GC: {   // XBA-274: GC_T_*'s order (ConsolePadMap.targets)
+            int[] ids = { R.string.CC_A, R.string.CC_B, R.string.CC_X, R.string.CC_Y, R.string.CC_Z, R.string.CC_L,
+                          R.string.CC_R, R.string.CC_START, R.string.XB_DPAD_UP, R.string.XB_DPAD_DOWN,
+                          R.string.XB_DPAD_LEFT, R.string.XB_DPAD_RIGHT };
+            return ids[t];
+        }
         default: {
             int[] ids = { R.string.CC_A, R.string.CC_B, R.string.CC_Z, R.string.CC_L, R.string.CC_R, R.string.CC_START,
                           R.string.XB_DPAD_UP, R.string.XB_DPAD_DOWN, R.string.XB_DPAD_LEFT, R.string.XB_DPAD_RIGHT,
@@ -137,6 +143,8 @@ final class ConsoleControls {
             return new int[][] { { 0, 1, 2, 3, 4, 5 }, { 6, 7, 8, 9 } };
         case PS1:
             return new int[][] { { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, { 12, 13, 14, 15 } };
+        case GC:
+            return new int[][] { { 0, 1, 2, 3, 4, 5, 6, 7 }, { 8, 9, 10, 11 } };
         default:
             return new int[][] { { 0, 1, 2, 3, 4, 5 }, { 6, 7, 8, 9 }, { 10, 11, 12, 13 } };
         }
@@ -146,6 +154,8 @@ final class ConsoleControls {
     static int stickLabel(Console c, int i) {
         if (c == Console.N64)
             return R.string.CC_STICK;
+        if (c == Console.GC)
+            return i == 0 ? R.string.CC_MAIN_STICK : R.string.CC_C_STICK;
         return i == 0 ? R.string.XB_LSTICK : R.string.XB_RSTICK;
     }
 
@@ -168,6 +178,8 @@ final class ConsoleControls {
             return c.getString(R.string.CC_CONSOLE_GBA);
         case PS1:
             return c.getString(R.string.CC_CONSOLE_PS1);
+        case GC:
+            return c.getString(R.string.CC_CONSOLE_GC);
         default:
             return c.getString(R.string.CC_CONSOLE_N64);
         }

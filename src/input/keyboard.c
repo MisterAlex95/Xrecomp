@@ -32,9 +32,26 @@ void xbox_InputKeySet(int vk, int down)
         s_key_down[vk] = down ? 1 : 0;
 }
 
+/* The same keys by HID usage, for the hotkeys (keyboard.h); one byte each, as s_key_down. */
+static uint8_t s_hid_down[XBOX_HID_KEYS];
+
+void xbox_InputHidKeySet(int usage, int down)
+{
+    if (usage > 0 && usage < XBOX_HID_KEYS)
+        ((volatile uint8_t *)s_hid_down)[usage] = down ? 1 : 0;
+}
+
+const uint8_t *xbox_InputHidKeys(int *n)
+{
+    if (n)
+        *n = XBOX_HID_KEYS;
+    return s_hid_down;
+}
+
 void xbox_InputKeysClear(void)
 {
     memset((void *)s_key_down, 0, sizeof s_key_down);
+    memset(s_hid_down, 0, sizeof s_hid_down);
 }
 
 int xbox_InputWin32SideVk(int vk, uint32_t lparam)

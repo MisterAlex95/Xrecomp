@@ -29,7 +29,7 @@ import os
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-CONSOLES = ("xbox", "gba", "ps1", "n64")
+CONSOLES = ("xbox", "gba", "ps1", "n64", "gc")
 CONFIG = "recomp.cfg"
 
 

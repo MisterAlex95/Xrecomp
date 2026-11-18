@@ -62,11 +62,10 @@ public class HotkeysTest {
         assertEquals("qload:none,rewind:back+left_shoulder", h.format());
         // Its chord does not clash with the others by default; it shows for every console with save states.
         Hotkeys d = new Hotkeys();
-        for (Console c : new Console[] { Console.GBA, Console.PS1, Console.N64 }) {
+        for (Console c : Console.values()) {   // XBA-274: the Xbox's state service rewinds too
             assertTrue(Hotkeys.actions(c).contains(Hotkeys.Action.REWIND));
             assertTrue(d.sharing(Hotkeys.Action.REWIND, c).isEmpty());
         }
-        assertFalse(Hotkeys.actions(Console.XBOX).contains(Hotkeys.Action.REWIND));
         assertEquals(R.string.HK_REWIND, Hotkeys.label(Hotkeys.Action.REWIND));
     }
 
@@ -121,9 +120,9 @@ public class HotkeysTest {
         assertSame(PadMapping.Source.LEFT_STICK_CLICK, h.gameNeeds(Hotkeys.Action.SLOT_NEXT, xbox));
         // The actions a console shows.
         assertEquals(Arrays.asList(Hotkeys.Action.values()), Hotkeys.actions(Console.N64));
-        assertEquals(Arrays.asList(Hotkeys.Action.FF_HOLD, Hotkeys.Action.FF_TOGGLE, Hotkeys.Action.MENU),
+        assertEquals("XBA-274: every action, the Xbox state service's", Arrays.asList(Hotkeys.Action.values()),
                      Hotkeys.actions(Console.XBOX));
-        assertFalse(Hotkeys.Action.QSAVE.appliesTo(Console.XBOX));
+        assertTrue(Hotkeys.Action.QSAVE.appliesTo(Console.XBOX));
         assertTrue(Hotkeys.Action.FF_TOGGLE.appliesTo(Console.XBOX));
         assertFalse(Hotkeys.Action.FF_HOLD.appliesTo(null));
     }
