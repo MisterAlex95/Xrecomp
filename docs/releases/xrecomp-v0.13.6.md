@@ -2,6 +2,24 @@
 
 <!-- Highlights: what changed, what works, known problems. Written by hand, kept across updates. -->
 
+The Xbox 360 arrives in the app, GameCube catches up with the other consoles, and most consoles run faster.
+
+- **Xbox 360, first version in the app.** Prepare runs on the device from a XEX or a disc image and your own key file.
+  No retail title has been run from start to finish yet, so treat it as a preview.
+- **GameCube.** Its own Controls screen and on-screen pad, internal resolution, rewind, frame generation and cover
+  art. It is also playable on the desktop, RVZ and WIA images included. Later SDKs' games take the fast memory path,
+  and the picture no longer flickers when the video output starts inside the XFB copy.
+- **Every console on the desktop.** The macOS launcher lists, prepares and plays GBA, PS1, N64 and GameCube games, and
+  Windows gets the same players. Game windows have F11 / Alt+Enter fullscreen and F12 screenshots.
+- **Speed.** Lifted code is faster on GBA, PS1, N64 and GameCube, and rewind is on for the N64 and the GameCube.
+- **Xbox guest heap.** A small request no longer takes a whole freed block, so a title that frees and reloads a scene
+  keeps its memory. This targets the freeze reported when Sonic Heroes loads its first stage
+  ([issue 2](https://github.com/MisterAlex95/Xrecomp/issues/2)); the fix has not been confirmed on that title yet.
+
+**Known problems**
+
+- Console games prepared with an earlier version show as out of date: prepare them again to get the speed-ups.
+
 ## Changes
 
 <!-- release:changes start (generated from the commits; rewritten on every push to main) -->
