@@ -922,7 +922,7 @@ static uint32_t walk_next(x360_machine *x, const x360_thread *t, walker *w)
     }
     x360_seh_virtual_unwind(x, &w->cur, &f, &next);
     uint32_t up = (uint32_t)next.gpr[1];
-    if (up < sp || !on_stack(t, up) || (up == sp && next.pc == pc))
+    if (up < sp || (up == sp && next.pc == pc))
         w->done = 1;
     w->cur = next;
     return pc;
