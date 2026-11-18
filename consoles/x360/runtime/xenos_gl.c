@@ -211,6 +211,7 @@ typedef unsigned int EGLBoolean, EGLenum;
 #define MAX_ATTRS 16
 #define MAX_SAMPLERS 16
 #define MAX_TEXTURES 128
+#define MAX_REASONS 32
 
 typedef struct attr {
     uint32_t fetch_constant, offset, format, stride, is_signed, is_integer;
@@ -337,9 +338,37 @@ struct xenos_gl {
     GLuint mxbuf;             /* their log: count, capacity, then (byte address, dword) pairs */
     int mx_warned;
     FILE *log;
+    const char *why[MAX_REASONS]; /* the distinct reasons behind st.unsupported, each logged once */
+    uint64_t why_n[MAX_REASONS];
+    int nwhy;
 };
 
 static unsigned parse_outputs(const char *src);
+
+/* a draw or resolve that cannot be handled: counted, with its reason (a string literal) */
+static void unsupported(xenos_gl *g, const char *reason)
+{
+    g->st.unsupported++;
+    for (int i = 0; i < g->nwhy; i++)
+        if (!strcmp(g->why[i], reason)) {
+            g->why_n[i]++;
+            return;
+        }
+    fprintf(g->log, "xenos_gl: unsupported: %s\n", reason);
+    if (g->nwhy < MAX_REASONS) {
+        g->why[g->nwhy] = reason;
+        g->why_n[g->nwhy++] = 1;
+    }
+}
+
+const char *xenos_gl_unsupported_reason(const xenos_gl *g, int i, uint64_t *count)
+{
+    if (i < 0 || i >= g->nwhy)
+        return NULL;
+    if (count)
+        *count = g->why_n[i];
+    return g->why[i];
+}
 
 static void *open_first(const char *const *names)
 {
@@ -1111,8 +1140,57 @@ static int gl_prim(uint32_t t)
     case 6: return 5; /* triangle strip */
     case 13: return 4; /* quad list: drawn as two triangles per quad */
     case 8: return 4;  /* rectangle list: the fourth corners made after the vertex shader, then triangles */
-    default: return -1; /* line loops, quad strips, polygons: not yet */
+    case 12: return 1; /* line loop: drawn as a line list (convert_indices) */
+    case 14: return 4; /* quad strip: two triangles per quad */
+    case 15: return 4; /* polygon: a fan from its first vertex, as triangles */
+    default: return -1;
     }
+}
+
+/* the primitive types VGT_MULTI_PRIM_IB_RESET_INDX cuts (Xenia's primitive_processor.cc): not the lists */
+static int prim_resets(uint32_t t)
+{
+    return t == 3 || t == 5 || t == 6 || t == 12 || t == 14 || t == 15;
+}
+
+#define INDEX_RESTART 0xFFFFFFFFu
+
+/* Line loops, quad lists, quad strips and polygons as what GLES draws, each run between reset indices on its own. The
+ * first vertex of each output primitive is the first of the guest's (Direct3D's provoking vertex); the interpolators
+ * are not flat, so it only shows in the order. Returns the list and its length (0 entries: nothing to draw), NULL when
+ * out of memory. */
+static uint32_t *convert_indices(uint32_t type, const uint32_t *in, uint32_t n, uint32_t *out_n)
+{
+    uint32_t *o = malloc(((size_t)n + 1) * 6 * sizeof *o), m = 0;
+    if (!o)
+        return NULL;
+    for (uint32_t s = 0; s < n;) {
+        uint32_t e = s;
+        while (e < n && in[e] != INDEX_RESTART)
+            e++;
+        const uint32_t *r = in + s;
+        uint32_t len = e - s;
+        if (type == 12 && len >= 2) {
+            for (uint32_t k = 0; k < len; k++)
+                o[m++] = r[k], o[m++] = r[(k + 1) % len];
+        } else if (type == 13) { /* (a, b, c, d) -> (a, b, c), (a, c, d) */
+            for (uint32_t k = 0; k + 4 <= len; k += 4) {
+                o[m++] = r[k], o[m++] = r[k + 1], o[m++] = r[k + 2];
+                o[m++] = r[k], o[m++] = r[k + 2], o[m++] = r[k + 3];
+            }
+        } else if (type == 14) { /* (a, b, c, d) goes round as a, b, d, c -> (a, b, d), (a, d, c) */
+            for (uint32_t k = 0; k + 4 <= len; k += 2) {
+                o[m++] = r[k], o[m++] = r[k + 1], o[m++] = r[k + 3];
+                o[m++] = r[k], o[m++] = r[k + 3], o[m++] = r[k + 2];
+            }
+        } else if (type == 15) {
+            for (uint32_t k = 1; k + 1 < len; k++)
+                o[m++] = r[0], o[m++] = r[k], o[m++] = r[k + 1];
+        }
+        s = e + 1;
+    }
+    *out_n = m;
+    return o;
 }
 
 /* ---- eDRAM surfaces (see the model above) ----
@@ -2503,15 +2581,17 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
     int x0 = (int)(fx0 + 0.5f), y0 = (int)(fy0 + 0.5f), x1 = (int)(fx1 + 0.5f), y1 = (int)(fy1 + 0.5f);
     uint32_t ctl = cp->regs[0x2318], cmd = (ctl >> 20) & 3, src = ctl & 7;
     if (src > 4) {
-        g->st.unsupported++;
+        unsupported(g, "resolve source");
         return;
     }
+    if (cmd == 2)
+        unsupported(g, "resolve of constant one"); /* the clears below still happen; 3 is no copy at all */
     int si = resolve_source(g, cp, src);
     surface *s = &g->surf[si];
     x0 = x0 < 0 ? 0 : x0, y0 = y0 < 0 ? 0 : y0;
     x1 = x1 > s->w ? s->w : x1, y1 = y1 > s->h ? s->h : y1;
     if (x1 <= x0 || y1 <= y0) {
-        g->st.unsupported++;
+        unsupported(g, "empty resolve rectangle");
         return;
     }
     int sc = g->scale;
@@ -2586,7 +2666,7 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                 rc->used = ++g->copy_clock;
             }
         } else {
-            g->st.unsupported++;
+            unsupported(g, "resolve destination format");
         }
     } else if (cmd <= 1) { /* depth out: 24_8 (depth in the high 24 bits, stencil 0), tiled 32-bit */
         uint32_t info = cp->regs[0x231B], fmt = (info >> 7) & 63, endian = info & 7;
@@ -2607,7 +2687,7 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
             g->st.depth_resolves++;
             g->epoch++;
         } else {
-            g->st.unsupported++;
+            unsupported(g, "depth resolve destination format");
         }
     }
     int clear_c = (ctl >> 8) & 1, clear_d = (ctl >> 9) & 1;
@@ -2706,7 +2786,7 @@ static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const
     if (!tri) {
         if (cap)
             g->glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
-        g->st.unsupported++;
+        unsupported(g, "rectangle list capture");
         return;
     }
     for (uint32_t r = 0; r < nr; r++) {
@@ -2807,8 +2887,21 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         return;
     }
     int prim = gl_prim(d->prim_type);
-    if (prim < 0 || d->source_select == 1 || !d->num_indices) {
-        g->st.unsupported++;
+    if (prim < 0) {
+        unsupported(g, "primitive type");
+        return;
+    }
+    if (!d->num_indices) {
+        unsupported(g, "draw of no indices");
+        return;
+    }
+    if (d->source_select > 2) {
+        unsupported(g, "index source");
+        return;
+    }
+    if (d->source_select == 1 &&
+        (!d->imm || d->imm_words < (d->index_size ? d->num_indices : (d->num_indices + 1) / 2))) {
+        unsupported(g, "immediate indices shorter than the draw");
         return;
     }
     program *p = get_program(g, cp, d->prim_type == 8 ? 1 : 0);
@@ -2817,38 +2910,35 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         g->st.no_shader++;
         return;
     }
-    /* indices: from the DMA buffer (16 or 32 bits, VGT_DMA_SIZE's swap mode) or 0..n-1 */
+    /* indices: from the DMA buffer or the packet (16 or 32 bits, VGT_DMA_SIZE's swap mode) or 0..n-1 */
     uint32_t n = d->num_indices, *idx = NULL, max_index = n - 1;
-    if (d->prim_type == 13 && (n /= 4) * 4 == 0) {
-        g->st.unsupported++;
-        return;
-    } else if (d->prim_type == 13) {
-        n *= 4; /* whole quads */
-    }
+    int convert = d->prim_type >= 12 && d->prim_type <= 15;
     /* VGT_INDX_OFFSET is added to every index (Direct3D's base vertex); with PA_SU_SC_MODE_CNTL's
-     * multi_prim_ib_ena, VGT_MULTI_PRIM_IB_RESET_INDX restarts a strip / fan (GL's fixed restart index) */
+     * multi_prim_ib_ena, VGT_MULTI_PRIM_IB_RESET_INDX cuts the strips, fans, loops and polygons */
     uint32_t index_offset = cp->regs[0x2102];
-    int restart = d->source_select == 0 && (cp->regs[0x2205] >> 21) & 1;
+    int restart = d->source_select != 2 && (cp->regs[0x2205] >> 21) & 1 && prim_resets(d->prim_type);
     uint32_t reset_index = cp->regs[0x2103] & (d->index_size ? 0xFFFFFFFFu : 0xFFFFu);
     int restarted = 0;
-    if (d->source_select == 0 || index_offset) {
+    if (d->source_select != 2 || index_offset || convert) {
         idx = malloc(4 * (size_t)n);
-        if (!idx)
+        if (!idx) {
+            unsupported(g, "out of memory");
             return;
+        }
         uint32_t endian = cp->regs[XENOS_REG_VGT_DMA_SIZE] >> 30;
         max_index = 0;
         for (uint32_t i = 0; i < n; i++) {
-            uint32_t v;
-            if (d->source_select != 0) {
+            uint32_t v, at = d->index_size ? i : i / 2, w = 0;
+            if (d->source_select == 0)
+                w = gpu_read(cp, d->dma_base + 4 * at, endian);
+            else if (d->source_select == 1) /* the packet's dword, as the same dword in an index buffer would read */
+                w = gpu_swap(__builtin_bswap32(d->imm[at]), endian);
+            if (d->source_select == 2)
                 v = i;
-            } else if (d->index_size) {
-                v = gpu_read(cp, d->dma_base + 4 * i, endian);
-            } else {
-                uint32_t w = gpu_read(cp, d->dma_base + 4 * (i / 2), endian);
-                v = (w >> (16 * (i & 1))) & 0xFFFF;
-            }
+            else
+                v = d->index_size ? w : (w >> (16 * (i & 1))) & 0xFFFF;
             if (restart && v == reset_index) {
-                idx[i] = 0xFFFFFFFFu;
+                idx[i] = INDEX_RESTART;
                 restarted = 1;
                 continue;
             }
@@ -2859,32 +2949,28 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         }
         if (max_index > 0xFFFFF) {
             free(idx);
-            g->st.unsupported++;
+            unsupported(g, "vertex index past 2^20");
             return;
         }
     }
-    if (d->prim_type == 13) { /* quads (a, b, c, d) -> triangles (a, b, c), (a, c, d) */
-        uint32_t *t = malloc(6 * (size_t)(n / 4) * 4);
-        if (!t) {
-            free(idx);
-            return;
-        }
-        for (uint32_t q = 0; q < n / 4; q++) {
-            uint32_t v[4];
-            for (int k = 0; k < 4; k++)
-                v[k] = idx ? idx[4 * q + k] : 4 * q + k;
-            uint32_t *o = &t[6 * q];
-            o[0] = v[0], o[1] = v[1], o[2] = v[2], o[3] = v[0], o[4] = v[2], o[5] = v[3];
-        }
+    if (convert) {
+        uint32_t m = 0, *t = convert_indices(d->prim_type, idx, n, &m);
         free(idx);
         idx = t;
-        n = n / 4 * 6;
+        if (!t || !m) {
+            free(idx);
+            unsupported(g, t ? "primitive with too few vertices" : "out of memory");
+            return;
+        }
+        n = m;
+        restarted = 0; /* every run is its own primitives now */
     }
     /* vertices: every attribute converted to vec4, interleaved */
     uint32_t nv = max_index + 1, na = (uint32_t)p->nattr;
     float *vb = na ? malloc((size_t)nv * na * 16) : NULL;
     if (na && !vb) {
         free(idx);
+        unsupported(g, "out of memory");
         return;
     }
     for (uint32_t a = 0; a < na; a++) {
@@ -2894,14 +2980,14 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
             if (!fetch_vertex(cp, c0 & ~3u, c1 & 3, at, v, &vb[(v * na + a) * 4])) {
                 free(vb);
                 free(idx);
-                g->st.unsupported++;
+                unsupported(g, "vertex format");
                 return;
             }
     }
     if (!bind_targets(g, cp, (rp ? rp : p)->outputs)) { /* the eDRAM surfaces; the host viewport over them */
         free(vb);
         free(idx);
-        g->st.unsupported++;
+        unsupported(g, "no complete framebuffer for the render targets");
         return;
     }
     g->glUseProgram(p->prog);
@@ -2911,7 +2997,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     if (p->nvb && !bind_vertex_buffers(g, cp, p)) {
         free(vb);
         free(idx);
-        g->st.unsupported++;
+        unsupported(g, "vertex format of a computed-index fetch");
         return;
     }
     g->glBindVertexArray(g->vao);

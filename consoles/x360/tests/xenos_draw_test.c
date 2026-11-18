@@ -47,7 +47,7 @@
 #include "xenos_cp.h"
 #include "xenos_gl.h"
 
-#define MEM_SIZE 0x40000u
+#define MEM_SIZE 0x100000u
 #define W 64
 #define H 64
 
@@ -163,6 +163,20 @@ static void run(xenos_cp *cp)
         w32(0x8000 + 4 * i, pk[i]);
     xenos_cp_execute(cp, 0x8000, npk);
     npk = 0;
+}
+
+/* XBA-296's frames: the target black again (a title that clears through resolves gets no clear at the swap): frame 1's
+ * quad at 0x2000 with the pixel shader's c0 at 0, then c0 back to 1 */
+static void black(void)
+{
+    uint32_t strip = 6u | 2u << 6 | 4u << 16;
+    for (uint32_t i = 0; i < 4; i++)
+        reg(0x4400 + i, 0);
+    reg(0x4800, 0x2000u | 3u);
+    reg(0x4801, 2u | (32u << 2));
+    type3(PM4_DRAW_INDX_2, &strip, 1);
+    for (uint32_t i = 0; i < 4; i++)
+        reg(0x4400 + i, fbits(1.0f));
 }
 
 static void vertex_z(uint32_t at, float x, float y, float z, float r, float g, float b)
@@ -934,6 +948,132 @@ int main(int argc, char **argv)
           (unsigned long long)st.no_shader, (unsigned long long)st.unsupported,
           (unsigned long long)st.computed_fetches, (unsigned long long)st.mipmapped,
           (unsigned long long)st.surfaces, (unsigned long long)st.copy_textures);
+
+    /* ---- XBA-296: each block below checks its own frames; the totals above stay those of frames 0-30 ---- */
+    reg(0x2200, 0), reg(0x2205, 0), reg(0x2208, 4), reg(0x2000, 0), reg(0x2001, 0), reg(0x2102, 0);
+    full_viewport();
+    for (int i = 0; i < 4; i++)
+        reg(0x4400 + (uint32_t)i, fbits(1.0f));
+    im[0] = 1, im[1] = nps;
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    run(&cp);
+
+    /* line loops: only the closing edge (last to first vertex) draws the left side of the square */
+    {
+        vertex(0x40000, -0.5f, -0.5f, 1, 0, 0);
+        vertex(0x40020, 0.5f, -0.5f, 1, 0, 0);
+        vertex(0x40040, 0.5f, 0.5f, 1, 0, 0);
+        vertex(0x40060, -0.5f, 0.5f, 1, 0, 0);
+        black();
+        reg(0x4800, 0x40000u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        uint32_t loop = 12u | 2u << 6 | 4u << 16;
+        type3(PM4_DRAW_INDX_2, &loop, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        CHECK(px(g, 16, 32)[0] > 40 && px(g, 48, 32)[0] > 40 && px(g, 32, 16)[0] > 40 && px(g, 32, 48)[0] > 40 &&
+                  px(g, 32, 32)[0] == 0,
+              "line loop: left %u right %u top %u bottom %u inside %u", px(g, 16, 32)[0], px(g, 48, 32)[0],
+              px(g, 32, 16)[0], px(g, 32, 48)[0], px(g, 32, 32)[0]);
+        /* two loops cut by the reset index, 16-bit DMA: each closes on its own first vertex, none joins the two */
+        vertex(0x40080, -0.75f, -0.5f, 1, 0, 0);
+        vertex(0x400A0, -0.25f, -0.5f, 1, 0, 0);
+        vertex(0x400C0, -0.25f, 0.5f, 1, 0, 0);
+        vertex(0x400E0, -0.75f, 0.5f, 1, 0, 0);
+        vertex(0x40100, 0.25f, -0.5f, 1, 0, 0);
+        vertex(0x40120, 0.75f, -0.5f, 1, 0, 0);
+        vertex(0x40140, 0.75f, 0.5f, 1, 0, 0);
+        vertex(0x40160, 0.25f, 0.5f, 1, 0, 0);
+        static const uint16_t cut[9] = {0, 1, 2, 3, 0xFFFF, 4, 5, 6, 7};
+        for (int i = 0; i < 9; i++)
+            mem[0x40200 + 2 * i] = (uint8_t)(cut[i] >> 8), mem[0x40200 + 2 * i + 1] = (uint8_t)cut[i];
+        black();
+        reg(0x4800, 0x40080u | 3u);
+        reg(0x4801, 2u | (64u << 2));
+        reg(0x2103, 0xFFFF), reg(0x2205, 1u << 21);
+        uint32_t loops[3] = {12u | 0u << 6 | 9u << 16, 0x40200, 5u | 1u << 30};
+        type3(PM4_DRAW_INDX_2, loops, 3);
+        reg(0x2205, 0);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        CHECK(px(g, 8, 32)[0] > 40 && px(g, 40, 32)[0] > 40 && px(g, 32, 16)[0] == 0 && px(g, 32, 48)[0] == 0,
+              "two line loops: closing edges %u %u, between them %u %u", px(g, 8, 32)[0], px(g, 40, 32)[0],
+              px(g, 32, 16)[0], px(g, 32, 48)[0]);
+    }
+
+    /* a quad strip of two quads covers the target (taken as a quad list its quads would be bow ties); a polygon */
+    {
+        static const float qs[7][2] = {{-1, -1}, {-1, 1}, {0, -1}, {0, 1}, {1, -1}, {1, 1}, {1, 1}};
+        for (uint32_t i = 0; i < 7; i++)
+            vertex(0x40400 + 32 * i, qs[i][0], qs[i][1], 0, 1, 0);
+        black();
+        reg(0x4800, 0x40400u | 3u);
+        reg(0x4801, 2u | (56u << 2));
+        uint32_t strip = 14u | 2u << 6 | 7u << 16; /* the seventh vertex completes no quad */
+        type3(PM4_DRAW_INDX_2, &strip, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        static const int at[6][2] = {{4, 4}, {4, 59}, {28, 8}, {36, 56}, {59, 4}, {59, 59}};
+        for (int i = 0; i < 6; i++)
+            CHECK(px(g, at[i][0], at[i][1])[1] == 255, "quad strip: (%d, %d) green %u", at[i][0], at[i][1],
+                  px(g, at[i][0], at[i][1])[1]);
+        static const float pg[5][2] = {{0, 0.75f}, {0.75f, 0.25f}, {0.5f, -0.75f}, {-0.5f, -0.75f}, {-0.75f, 0.25f}};
+        for (uint32_t i = 0; i < 5; i++)
+            vertex(0x40500 + 32 * i, pg[i][0], pg[i][1], 0, 0, 1);
+        black();
+        reg(0x4800, 0x40500u | 3u);
+        reg(0x4801, 2u | (40u << 2));
+        uint32_t poly = 15u | 2u << 6 | 5u << 16;
+        type3(PM4_DRAW_INDX_2, &poly, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        CHECK(px(g, 32, 32)[2] == 255 && px(g, 32, 12)[2] == 255 && px(g, 12, 26)[2] == 255 && px(g, 50, 26)[2] == 255 &&
+                  px(g, 20, 54)[2] == 255 && px(g, 2, 2)[2] == 0 && px(g, 61, 61)[2] == 0,
+              "polygon: centre %u top %u left %u right %u bottom %u, outside %u %u", px(g, 32, 32)[2], px(g, 32, 12)[2],
+              px(g, 12, 26)[2], px(g, 50, 26)[2], px(g, 20, 54)[2], px(g, 2, 2)[2], px(g, 61, 61)[2]);
+    }
+
+    /* immediate indices: the quad of frame 1 (vertices at 0x2000), 16-bit in 8-in-16 and 32-bit in 8-in-32 */
+    {
+        black();
+        reg(0x4800, 0x2000u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        reg(XENOS_REG_VGT_DMA_SIZE, 1u << 30);
+        uint32_t i16[4] = {4u | 1u << 6 | 6u << 16, 0u << 16 | 1u, 2u << 16 | 2u, 1u << 16 | 3u};
+        type3(PM4_DRAW_INDX_2, i16, 4);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        CHECK(px(g, 4, 4)[1] == 255 && px(g, 59, 59)[1] == 255 && px(g, 4, 59)[1] == 255 && px(g, 59, 4)[1] == 255,
+              "immediate 16-bit indices: corners %u %u %u %u", px(g, 4, 4)[1], px(g, 59, 59)[1], px(g, 4, 59)[1],
+              px(g, 59, 4)[1]);
+        black();
+        reg(0x4400, 0), reg(0x4401, fbits(0.5f));
+        reg(XENOS_REG_VGT_DMA_SIZE, 2u << 30);
+        uint32_t i32[7] = {4u | 1u << 6 | 1u << 11 | 6u << 16, 0, 1, 2, 2, 1, 3};
+        type3(PM4_DRAW_INDX_2, i32, 7);
+        reg(0x4401, fbits(1.0f)), reg(0x4400, fbits(1.0f));
+        reg(XENOS_REG_VGT_DMA_SIZE, 0);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        CHECK(px(g, 4, 4)[1] >= 126 && px(g, 4, 4)[1] <= 129 && px(g, 59, 59)[1] >= 126 && px(g, 59, 59)[1] <= 129,
+              "immediate 32-bit indices: corners %u %u", px(g, 4, 4)[1], px(g, 59, 59)[1]);
+    }
+    /* a draw whose packet holds fewer indices than it says is counted, with its reason */
+    {
+        xenos_gl_stats s0, s1;
+        xenos_gl_get_stats(g, &s0);
+        uint32_t cutshort[2] = {4u | 1u << 6 | 6u << 16, 0};
+        type3(PM4_DRAW_INDX_2, cutshort, 2);
+        run(&cp);
+        xenos_gl_get_stats(g, &s1);
+        uint64_t count = 0;
+        const char *why = xenos_gl_unsupported_reason(g, 0, &count);
+        CHECK(s1.unsupported == s0.unsupported + 1 && s1.drawn == s0.drawn && why && count == 1 &&
+                  strstr(why, "immediate"),
+              "short immediate draw: unsupported +%llu, reason %s", (unsigned long long)(s1.unsupported - s0.unsupported),
+              why ? why : "(none)");
+    }
     xenos_gl_destroy(g);
     free(pst);
     free(vs);

@@ -95,6 +95,8 @@ void xenos_gl_set_frames_dir(xenos_gl *g, const char *dir, unsigned max_frames);
 /* the last frame read back: RGBA, top row first */
 const uint8_t *xenos_gl_frame(const xenos_gl *g, int *width, int *height);
 void xenos_gl_get_stats(const xenos_gl *g, xenos_gl_stats *s);
+/* why draws were counted in `unsupported`: the i-th distinct reason and its count, NULL past the last one */
+const char *xenos_gl_unsupported_reason(const xenos_gl *g, int i, uint64_t *count);
 /* where a missing shader is reported (one line per distinct shader: "vs_XXXXXXXX" / "ps_XXXXXXXX"); NULL: stderr */
 void xenos_gl_set_log(xenos_gl *g, void *file);
 
