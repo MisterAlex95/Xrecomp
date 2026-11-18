@@ -18,7 +18,7 @@
 #   dc:  <prog>.elf + <prog>.bin (raw, unscrambled)        (hello; spike XBA-227)
 #   3ds: <prog>.3dsx + <prog>.elf                          (hello; spike XBA-228)
 #   ps2: <prog>.elf (the EE executable)                    (hello; spike XBA-226)
-#   x360: <prog>.elf (linked by x360.ld; elf2xex.py makes   (hello_c; XBA-270)
+#   x360: <prog>.elf (linked by x360.ld; elf2xex.py makes   (hello_c, atomics; XBA-270, XBA-283)
 #         the synthetic XEX at test time)
 # plus SHA256SUMS. Outputs are never committed (build/ is ignored).
 #

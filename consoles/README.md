@@ -1994,7 +1994,22 @@ What is there:
   from a thread with MSR[EE] clear), polled waits on the guest's dispatcher objects, virtual time (deterministic: runs
   repeat), reservations cleared at each switch (`stwcx.` after another thread ran fails, as on hardware). Real
   parallel hardware threads are a later step and a deliberate deviation tonight: lifted code only sees `xe_machine *`,
-  so per-host-thread machines need no re-lift. The HLE (`x360_kernel.c`, `x360_xam.c`, `x360_file.c`, `x360_gpu.c`,
+  so per-host-thread machines need no re-lift. `x360_interp.c` (XBA-283) is a Xenon interpreter with the lifter's semantics
+  (integer and 64-bit forms, branches, loads / stores, FPU, system registers; VMX / VMX128 in `x360_interp_vmx.inc`,
+  generated from `xenon.py` by `python3 -m x360_tools.gen_interp_vmx`, kept current by `test_gen_interp_vmx`, checked
+  bit for bit against lifted code on random words of every vector mnemonic by `test_interp_vmx`): code
+  the pack does not hold is interpreted until it reaches lifted code again, its entry is recorded once (the
+  dispatcher's address unless an interpreted call returns there, and the targets of calls and tail calls the
+  interpreted code makes; not the inlined save / restore helpers, which the pack lists in `xe_rc_helpers`) and the run
+  goes on, so one run names every function a pack lacks (`--missed`, `discovered.txt`); `--stop-at-miss` /
+  `RECOMP_X360_INTERP=0` stop at the first, as before. Not modelled there: OV / SO of the OE forms (no title seen
+  uses them). Reservations (XBA-283): `lwarx` / `ldarx` note the address and the value read, `stwcx.` / `stdcx.` are
+  a compare-and-swap against it (`RC_LWARX` / `RC_STWCX` in `xenon_rt.h`; packs say so with `xe_rc_features`).
+  `x360_run --host-threads` (experimental, `x360_set_host_threads`): each guest thread's lifted code on a host
+  thread of its own, in parallel, the HLE, the interpreter and the waits serial under one lock; virtual time follows
+  the host clock, no save states, packs without atomic reservations refused; the player and the app stay
+  cooperative and deterministic. Tested by `run_host_threads.sh` (the devkitPPC `atomics` title: exact totals of four
+  threads on lwarx / stwcx. counters and a spin lock). The HLE (`x360_kernel.c`, `x360_xam.c`, `x360_file.c`, `x360_gpu.c`,
   `x360_crypt.c`, `x360_more.c`; ordinals from Xenia's export tables in `x360_exports.inc`, made by
   `x360_tools/gen_exports.py`; signatures and layouts checked against Xenia's kernel) covers every import of a shipped
   title's list (196 names, compared by name only): DbgPrint and the formatters, virtual / physical memory, pools and

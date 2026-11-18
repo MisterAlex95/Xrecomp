@@ -3,7 +3,7 @@
 # into a synthetic XEX2. No C library, no SDK: kernel.h declares the xboxkrnl exports the programs call.
 OUT ?= out
 BUILD ?= build
-PROGRAMS := hello_c
+PROGRAMS := hello_c atomics
 CC := powerpc-eabi-gcc
 CFLAGS := -O2 -mcpu=970 -mpowerpc64 -maltivec -mabi=altivec -msdata=none -G 0 -ffreestanding -fno-builtin \
           -fno-stack-protector -fno-common -fno-asynchronous-unwind-tables -mno-eabi -Wall -Wextra

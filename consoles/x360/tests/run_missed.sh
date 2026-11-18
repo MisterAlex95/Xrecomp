@@ -1,7 +1,8 @@
 #!/bin/sh
 # ctest helper (XBA-270): run_missed.sh X360_RUN WORKDIR -- the discovery loop on a title with a function only a
-# pointer reaches (make_missed.py): the first recompiled run stops there and names it (--missed), recompiling with
-# that address (--discovered) makes the title end with exit code 42. Exits 77 when python3 or cc is missing.
+# pointer reaches (make_missed.py): the first recompiled run interprets it (XBA-283), ends with exit code 42 and
+# names it (--missed); with --stop-at-miss it stops there (exit 1). Recompiled with that address (--discovered), the
+# title ends with exit code 42 and misses nothing. Exits 77 when python3 or cc is missing.
 run=$1
 work=$2
 here=$(cd "$(dirname "$0")" && pwd)
@@ -24,12 +25,15 @@ for round in 1 2; do
     timeout 60 "$run" "$work/t.xex" --pack "$work/libtitle.so" --missed "$work/missed.txt" --log "$work/log$round.txt"
     rc=$?
     echo "round $round: exit $rc, $(grep -v '^#' "$work/missed.txt" | tr '\n' ' ')"
+    [ "$rc" = 42 ] || { echo "round $round should end with exit code 42"; cat "$work/log$round.txt"; exit 1; }
     if [ "$round" = 1 ]; then
-        [ "$rc" = 1 ] || { echo "the first run should stop on the hidden function"; cat "$work/log1.txt"; exit 1; }
         grep -qx "$hidden" "$work/missed.txt" || { echo "the hidden function $hidden is not in --missed"; exit 1; }
         grep -v '^#' "$work/missed.txt" >"$work/discovered.txt"
+        timeout 60 "$run" "$work/t.xex" --pack "$work/libtitle.so" --stop-at-miss --log "$work/log1s.txt"
+        rc=$?
+        [ "$rc" = 1 ] || { echo "--stop-at-miss should stop on the hidden function (exit $rc)"; exit 1; }
     else
-        [ "$rc" = 42 ] || { echo "the second run should end with exit code 42"; cat "$work/log2.txt"; exit 1; }
+        [ -z "$(grep -v '^#' "$work/missed.txt")" ] || { echo "round 2 still misses"; exit 1; }
     fi
 done
 echo "discovery loop converged in 2 rounds (hidden function $hidden)"

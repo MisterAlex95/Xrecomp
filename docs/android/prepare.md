@@ -1160,8 +1160,8 @@ programs rc 0, N states, C cached, K compiled, F failed, T ms` and the native `g
 ## Xbox 360 packs (XBA-282)
 
 An Xbox 360 game (an XEX, or a disc image holding `default.xex`) is prepared on the device like a GameCube disc
-(`tools/prepare/x360.py`, the GameCube's Run with an XEX). Unlike the other consoles there is no interpreter: a 360
-game plays only once prepared.
+(`tools/prepare/x360.py`, the GameCube's Run with an XEX). A 360 game plays only once prepared; the runtime's
+interpreter (XBA-283) only runs the code a pack does not hold.
 
 - **The key.** A retail XEX is encrypted. The player picks his console's key file on the game's Home (« Key file »):
   `X360Key` checks it (16 raw bytes, or 32 hex digits) and keeps the 16 bytes in `<no backup files>/keys/x360.key`,
@@ -1182,10 +1182,35 @@ game plays only once prepared.
   A Prepare whose link is up to date still adds the new shaders.
 - **Self-healing.** `Pack.newlyDiscovered` counts, for a 360 game, both the new addresses and the shaders met that the
   pack lacks (`Pack.newShaders`). Home then offers Prepare again, as for the other consoles. The first pack draws
-  nothing until its shaders have been met once.
+  nothing until its shaders have been met once. Since XBA-283 a run no longer stops at the first address the pack
+  does not hold: the runtime interprets that code (`x360_interp.c`, vector instructions generated from the lifter by
+  `x360_tools.gen_interp_vmx`), records its entry and goes on, so one run and one Prepare collect every miss the run
+  reached (the runtime rewrites `discovered.txt` every 256 frames when it grew, and at pause and quit).
+  `RECOMP_X360_INTERP=0` (or `x360_run --stop-at-miss`) keeps the old stop.
+- **A large title (XBA-283).** `x360_tools.recomp` writes one file per 64 KB of guest code (`--bucket-bytes`; about
+  1.15 MB of C, cut again past 2 MB). The old split of 400 functions a file made 6 MB files, and one aarch64 clang job
+  on one peaked at 0.93 GB, over the 512 MB per job of `compile.py`. Files by address also keep a second Prepare
+  cheap: a function added by the self-healing loop changes its own file and the table, every other object comes from
+  the cache (a size-cumulative split would have shifted every later file). Measured with `consoles/x360/tests/bench_prepare.sh` on a synthetic title of our own generated
+  code (`make_big.py`: 12 MB of `.text`, 13,689 functions, 3.1 M instructions, every one in `.pdata`), NDK 28 clang
+  for aarch64-linux-android30 at -O1, on the x86-64 build host:
+
+  | Step | Time | Peak memory |
+  |---|---|---|
+  | lift (`x360_tools.recomp`, one Python process) | 53-80 s | 2.0 GB |
+  | one generated file (~1 MB of C; 215 of them, 206 MB) | 6-11 s | ~200 MB |
+  | the same code in 6 MB files (the old split) | 39 s a file | 0.93 GB |
+  | the resume table (`x360_rc_table.c`, 463,343 entries, 16 MB of C) | 2.6 s | 389 MB |
+  | compile, the whole title, one core | ~1,300-1,900 s | |
+
+  On the Thor (8 cores; `compile.py` runs min(5, (MemAvailable - 3 GB) / 512 MB) jobs), with a Cortex-A715 core at
+  about 0.5-0.7 of the build host's, that is about 7-12 minutes of compile and 2-3 minutes of lift for a title with
+  12 MB of code, before throttling: not measured on the device yet (a Device check). The table grows with the resume
+  points (about 33 bytes of object per entry): past ~20 MB of code it would pass 512 MB, the next thing to split.
 
 Tests: `tools/prepare/test_x360_prepare.py` (with `$X360_RUN`, the pack is also run by x360_run), the app's
-`X360KeyTest` and `ConsoleTest`.
+`X360KeyTest` and `ConsoleTest`; ctest `x360_interp` / `x360_interp_c` (XBA-283: the interpreter and the one-round
+loop on the test titles) and `x360_missed`.
 
 ## The loader
 

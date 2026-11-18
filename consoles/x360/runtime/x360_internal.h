@@ -22,6 +22,8 @@ enum {
 enum { X360_LIB_XBOXKRNL = 0, X360_LIB_XAM = 1, X360_LIB_OTHER = 2 };
 
 #define X360_MAX_THREADS 64
+#define X360_MAX_MISSED 4096   /* addresses one run records (x360_missed) */
+#define X360_INTERP_RET_BITS 12 /* x360_interp.c: the return-address set holds up to 2048 */
 #define X360_MAX_HANDLES 4096
 #define X360_MAX_WAIT 64
 #define X360_MAX_TIMERS 64
@@ -97,6 +99,7 @@ typedef struct x360_thread {
     int wait_timed;
     uint32_t exit_code;
     int interrupt; /* runs a graphics interrupt callback (x360_gpu.c) */
+    int interp;    /* XBA-283: its time slice ran out inside interpreted code (not state: re-entry is not a miss) */
     x360_seh seh;  /* XBA-282: the exception being dispatched, if any */
 } x360_thread;
 
@@ -155,6 +158,12 @@ struct x360_machine {
     uint32_t vars[2][4096];   /* guest address of each variable export, by library and ordinal (0: none) */
 
     xe_rc_fn *fn_tab;         /* lifted code by (pc - code_lo) / 4 */
+    const uint32_t *helpers;  /* the pack's save / restore helper entries (x360_pack), sorted */
+    unsigned nhelpers;
+    int pack_bound;           /* x360_bind succeeded (an empty pack has no fn_tab) */
+    unsigned pack_features;   /* the pack's xe_rc_features (bit 0: atomic reservations) */
+    struct x360_host *host;   /* XBA-283: guest threads on host threads (x360_set_host_threads), NULL: cooperative */
+    uint64_t host_t0;         /* host mode: the host clock (100 ns) at virtual time 0 */
     uint32_t code_lo, code_hi;
     uint32_t pdata_va, pdata_n; /* x360_seh.c: the image's .pdata (found at the first exception) */
     int pdata_scanned;
@@ -177,8 +186,11 @@ struct x360_machine {
     int status;
     uint32_t exit_code;
     char error[256];
-    uint32_t missed[256];
+    uint32_t missed[X360_MAX_MISSED];
     unsigned nmissed;
+    int stop_at_miss;         /* x360_set_interp(x, 0): stop at the first missed address (before XBA-283) */
+    uint32_t interp_ret[1u << X360_INTERP_RET_BITS]; /* x360_interp.c: return addresses of interpreted calls */
+    unsigned interp_nret;
     uint8_t unimpl_seen[2][4096];
 
     struct x360_gpu *gpu;     /* x360_gpu.c: the command processor, interrupts */
@@ -324,5 +336,11 @@ void x360_pad_set_motors(x360_machine *x, int user, unsigned left, unsigned righ
 
 /* x360_interp.c: run the instruction at the current PC; 0 on success, -1 (x->status set) otherwise */
 int x360_interp_one(x360_machine *x);
+/* run missed code from t's PC until lifted code (0), the end of the slice or the budget (1) or an error (-1); fresh:
+ * the dispatcher came from lifted code (the PC is a new miss unless an interpreted call returns there) */
+int x360_interp_run(x360_machine *x, x360_thread *t, int fresh);
+int x360_interp_ret(const x360_machine *x, uint32_t a);
+/* x360_thread.c: record an address the pack does not hold (once) */
+void x360_note_missed(x360_machine *x, uint32_t pc);
 
 #endif

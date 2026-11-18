@@ -222,7 +222,7 @@ def test_discovery_and_lifting(tmp_path):
     assert s["functions"] == 6
     assert len(s["helpers"]) == 8 and s["helper_calls_inlined"] == 8
     assert s["jump_tables"] == 3 and s["jump_table_targets"] == 5 + 6 + 3 and s["unresolved_bctr"] == 0
-    text = (tmp_path / "x360_rc_000.c").read_text()
+    text = "".join(p.read_text() for p in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
     assert "savegpr" in text and "switch (t_)" in text
     table = (tmp_path / "x360_rc_table.c").read_text()
     assert "xe_rc_resume[]" in table and "xe_rc_image_crc" in table

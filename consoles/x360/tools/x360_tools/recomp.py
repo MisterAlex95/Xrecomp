@@ -63,6 +63,10 @@ class CodeView:
         return self.img.u32(a)
 
 
+BUCKET_BYTES = 0x10000  # guest code per generated file (XBA-283: ~1.2 MB of C; docs/android/prepare.md)
+SPLIT_BYTES = 2000000   # C past which a bucket's file is cut again (dense code)
+
+
 def fn_name(entry):
     return "xe_fn_%08X" % entry
 
@@ -72,7 +76,8 @@ def image_crc(img):
     return zlib.crc32(img.image) & 0xFFFFFFFF
 
 
-def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comments=True):
+def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comments=True, omit=(),
+              split_bytes=SPLIT_BYTES, bucket_bytes=BUCKET_BYTES):
     if img.image is None:
         raise XexError("no image to recompile: %s" % img.image_note)
     view = CodeView(img)
@@ -86,21 +91,35 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     seeds = {a for a in seeds if a not in view.hidden}
     disc = XenonDiscovery(view, dec, sorted(seeds))
     funcs = disc.run()
+    if omit:  # XBA-283 tests: functions left out of the pack on purpose (the runtime interprets them)
+        funcs = [f for f in funcs if f.entry not in omit]
     resume = {}
     os.makedirs(outdir, exist_ok=True)
+    for fn in os.listdir(outdir):  # an earlier lift's files (XBA-283 renamed them: no duplicate functions at link)
+        if fn.startswith("x360_rc_") and fn.endswith(".c"):
+            os.remove(os.path.join(outdir, fn))
     unlifted = collections.Counter()
     fallbacks = 0
     inlined = 0
     invalid = 0
     files = []
-    for k in range(0, len(funcs), per_file):
-        chunk = funcs[k:k + per_file]
-        out = ['/* Lifted from an XEX2 by x360_tools.recomp (XBA-230). */\n#include "xenon_rt.h"\n\n']
-        for f in chunk:
+    head = '/* Lifted from an XEX2 by x360_tools.recomp (XBA-230). */\n#include "xenon_rt.h"\n\n'
+    # XBA-283: one file per bucket_bytes of guest code (by function entry), cut again past split_bytes of C. One clang
+    # job on a 6 MB file of the old 400-function split peaked near 1 GB for aarch64, over Prepare's 512 MB per job;
+    # buckets by address keep every other file byte-identical when a Prepare adds functions, so its object cache
+    # recompiles only the files that changed (and the table).
+    buckets = collections.OrderedDict()
+    for f in funcs:
+        buckets.setdefault((f.entry - img.base) // bucket_bytes, []).append(f)
+    for b, group in buckets.items():
+        out, size, sub = [head], 0, 0
+        for n, f in enumerate(group):
             lifter = TitleLifter(view, disc.insn, f, fn_name(f.entry), comments=comments, helpers=helpers,
                                  tables=disc.jt.tables)
-            out.append(lifter.function())
+            text = lifter.function()
+            out.append(text)
             out.append("\n")
+            size += len(text) + 1
             fallbacks += lifter.fallbacks
             inlined += lifter.inlined
             for a in lifter.leaders:
@@ -111,10 +130,12 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
                     unlifted[i.name or ".invalid"] += 1
                     if i.name is None:
                         invalid += 1
-        path = os.path.join(outdir, "x360_rc_%03d.c" % (k // per_file))
-        with open(path, "w") as fh:
-            fh.write("".join(out))
-        files.append(path)
+            if n + 1 == len(group) or size >= split_bytes or len(out) // 2 >= per_file:
+                path = os.path.join(outdir, "x360_rc_%05d_%d.c" % (b, sub))
+                with open(path, "w") as fh:
+                    fh.write("".join(out))
+                files.append(path)
+                out, size, sub = [head], 0, sub + 1
     table = ['/* Entry -> lifted function (XBA-230). */\n#include "xenon_rt.h"\n\n']
     for f in funcs:
         table.append("void %s(xe_machine *m_);\n" % fn_name(f.entry))
@@ -130,6 +151,12 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     for a in sorted(resume):
         table.append("    {0x%08Xu, %s},\n" % (a, fn_name(resume[a])))
     table.append("};\nconst unsigned xe_rc_resume_count = %du;\n" % len(resume))
+    # XBA-283: the save / restore helpers' entries (inlined, not functions): interpreted code calls them, the
+    # runtime must not report them as missed functions
+    table.append("\nconst uint32_t xe_rc_helpers[] = {\n%s};\nconst unsigned xe_rc_helper_count = %du;\n" % (
+        "".join("    0x%08Xu,\n" % a for a in sorted(helpers)) or "    0u,\n", len(helpers)))
+    # XBA-283: bit 0, lwarx / stwcx. through RC_LWARX / RC_STWCX (atomic: x360_run --host-threads needs it)
+    table.append("const unsigned xe_rc_features = 1u;\n")
     table.append("const uint32_t xe_rc_image_crc = 0x%08Xu;\nconst uint32_t xe_rc_image_base = 0x%08Xu;\n"
                  % (image_crc(img), img.base))
     path = os.path.join(outdir, "x360_rc_table.c")
@@ -211,6 +238,18 @@ def compile_check(files, cc="cc"):
         subprocess.run([cc, "-fsyntax-only", "-std=gnu11", "-Wall", "-Wno-unused-label"] + inc + [p], check=True)
 
 
+def read_addrs(path):
+    """Hex addresses, one per line, # comments (x360_run --missed, discovered.txt); a missing file is empty."""
+    out = set()
+    if os.path.exists(path):
+        with open(path) as fh:
+            for line in fh:
+                line = line.split("#")[0].strip()
+                if line:
+                    out.add(int(line, 16))
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python3 -m x360_tools.recomp")
     ap.add_argument("xex")
@@ -222,6 +261,11 @@ def main(argv=None):
     ap.add_argument("--no-comments", action="store_true")
     ap.add_argument("--discovered", action="append", default=[],
                     help="more seeds: a file of hex addresses (x360_run --missed), one per line")
+    ap.add_argument("--bucket-bytes", type=lambda v: int(v, 0), default=BUCKET_BYTES,
+                    help="guest code per generated file (default %(default)s)")
+    ap.add_argument("--split-bytes", type=int, default=SPLIT_BYTES, help="C past which a file is cut again")
+    ap.add_argument("--omit", action="append", default=[],
+                    help="tests: a file of hex function entries to leave out of the pack (or one hex address)")
     a = ap.parse_args(argv)
     try:
         with open(a.xex, "rb") as f:
@@ -245,13 +289,13 @@ def main(argv=None):
     if a.outdir:
         seeds = set()
         for path in a.discovered:
-            if os.path.exists(path):
-                with open(path) as fh:
-                    for line in fh:
-                        line = line.split("#")[0].strip()
-                        if line:
-                            seeds.add(int(line, 16))
-        s = recompile(img, a.outdir, extra_seeds=seeds, use_pdata=not a.no_pdata, comments=not a.no_comments)
+            seeds |= read_addrs(path)
+        omit = set()
+        for o in a.omit:
+            omit |= read_addrs(o) if os.path.exists(o) else {int(o, 16)}
+        s = recompile(img, a.outdir, extra_seeds=seeds, use_pdata=not a.no_pdata, comments=not a.no_comments,
+                      omit=omit, split_bytes=a.split_bytes,
+                      bucket_bytes=a.bucket_bytes)
         print("recomp: %(functions)d functions, %(instructions)d instructions, %(interp_fallback_insns)d handed to "
               "RC_INTERP, %(invalid_words)d invalid words" % s)
         print("  not lifted: %s" % ", ".join("%s %d" % kv for kv in list(s["unlifted"].items())[:30]))

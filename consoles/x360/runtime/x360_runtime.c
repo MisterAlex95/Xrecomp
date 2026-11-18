@@ -142,6 +142,7 @@ static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
 static x360_machine *s_x;
 static char s_work[1100], s_key[48], s_state_dir[1200];
 static int s_state_loaded;
+static unsigned s_saved_missed;
 
 static int cmp_u32(const void *a, const void *b)
 {
@@ -430,7 +431,12 @@ int x360_runtime_run(const x360_runtime_opts *o)
     const void *resume = lib ? dlsym(lib, "xe_rc_resume") : NULL;
     const unsigned *count = lib ? dlsym(lib, "xe_rc_resume_count") : NULL;
     const uint32_t *crc = lib ? dlsym(lib, "xe_rc_image_crc") : NULL;
-    x360_pack pk = {resume, count ? *count : 0, crc ? *crc : 0};
+    x360_pack pk = {resume, count ? *count : 0, crc ? *crc : 0, NULL, 0, 0};
+    const unsigned *nh = lib ? dlsym(lib, "xe_rc_helper_count") : NULL;
+    if (nh) {
+        pk.helpers = dlsym(lib, "xe_rc_helpers");
+        pk.nhelpers = pk.helpers ? *nh : 0;
+    }
     if (!resume || !count || !crc || x360_bind(x, &pk)) {
         fprintf(stderr, "x360: the pack %s %s\n", o->pack_lib,
                 !lib ? dlerror() : !resume ? "is not an x360_tools.recomp pack" : "was made from another image");
@@ -439,6 +445,8 @@ int x360_runtime_run(const x360_runtime_opts *o)
             dlclose(lib);
         return -1;
     }
+    if (getenv("RECOMP_X360_INTERP") && !strcmp(getenv("RECOMP_X360_INTERP"), "0"))
+        x360_set_interp(x, 0); /* XBA-283: stop at the first missed address, as before */
     if (o->disc && *o->disc && x360_set_disc(x, o->disc, why, sizeof why))
         fprintf(stderr, "x360: disc %s: %s (running without it)\n", o->disc, why);
     if (o->data_dir && *o->data_dir) {
@@ -607,6 +615,14 @@ int x360_runtime_run(const x360_runtime_opts *o)
             uint64_t te = now_ns();
             pthread_mutex_lock(&s_mu);
             int r = x360_run_until(x, x360_time(x) + FRAME_100NS);
+            if ((frames & 255) == 0) { /* XBA-283: runs go on past missed code: keep discovered.txt current */
+                const uint32_t *mm;
+                unsigned nm = x360_missed(x, &mm);
+                if (nm != s_saved_missed) {
+                    s_saved_missed = nm;
+                    save_missed_locked();
+                }
+            }
             if (r == X360_FRAME) {
                 if (recomp_cheats_pending(&cheats))
                     recomp_cheats_apply(&cheats, &cheat_bus);
