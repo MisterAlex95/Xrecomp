@@ -36,7 +36,7 @@ struct ControlsView: View {
         ("Rewind (hold)", "View + left trigger", "R"),
         ("Quick save / quick load", "View + right / left shoulder", "F1 / Shift+F1"),
         ("Save / load slot 1 to 4", "", "F1-F4 / Shift+F1-F4"),
-        ("Fullscreen", "", "F11 or Alt+Enter"),
+        ("Fullscreen", "", "Option+Return or F11"),
         ("Screenshot", "", "F12"),
     ]
 

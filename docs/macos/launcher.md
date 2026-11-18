@@ -582,7 +582,8 @@ gba_play ps1_play n64_play gc_play` in the toolkit. Use homebrew or your own dum
     Widescreen / Language rows; an N64 game also has Controller pak and Console resolution. Set Picture filter
     Smooth, Play: the run log has `# RECOMP_FILTER=linear` and the picture is smooth.
 30. In game: Tab fast-forwards, F1 saves a state, Shift+F1 loads it, hold R to rewind (N64 / GameCube with Rewind
-    On); F11 toggles fullscreen, F12 writes a screenshot (the log says where).
+    On); Option+Return toggles fullscreen (F11 too, but macOS keeps plain F11 for Show Desktop: Fn+F11 or change that
+    shortcut), Fn+F12 writes a screenshot (the log says where).
 31. Manage of a console game: Work folder, Native pack, Saves, Logs, Title image; no « Import saves ». Delete Native
     pack: the game is « Ready · interpreted » again. Create an app for it: the app opens on that game and plays it.
 32. `xrecomp list` in Terminal shows the same games with the same states; a setting made with `xrecomp settings

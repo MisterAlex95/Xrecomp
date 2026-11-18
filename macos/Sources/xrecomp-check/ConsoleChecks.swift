@@ -43,6 +43,9 @@ func registerConsoleChecks() {
         expectEq(Console.of(gameId: "xbox-1"), .xbox, "no « xbox- » game IDs")
         expectEq(Console.of(gameId: "snes-ABC"), .xbox)
         expectEq(Console.of(gameId: nil), .xbox)
+        expectEq(Console.normalizedGameId(" gba-axve-1a2b3c4d\n"), "GBA-AXVE-1A2B3C4D", "a game app's single title")
+        expectNil(Console.normalizedGameId("4D530004"), "an Xbox title ID is not a console game's")
+        expectNil(Console.normalizedGameId(nil))
         expectEq(Console.ps1.player, "ps1_play")
         expectNil(Console.xbox.player)
         expectEq(Console.gc.thumbnailSystem, "Nintendo_-_GameCube")
@@ -235,6 +238,9 @@ func registerConsoleChecks() {
         case .failure(let e):
             H.fail("play: \(e)", #file, #line)
         }
+        // By its source path, as the launcher asks.
+        if case .success(let p) = cli.play(rom.path) { expectEq(p.argv, [player.path, rom.path]) }
+        else { H.fail("play by path", #file, #line) }
         if case .success = cli.play("n64-NOPE") { H.fail("an unknown game played", #file, #line) }
     }
 }

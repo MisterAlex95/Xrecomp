@@ -31,6 +31,7 @@ public enum TitleApp {
 
     /// « 4d530004 » -> « 4D530004 »; nil unless 8 hex digits.
     public static func normalizedTitleId(_ s: String?) -> String? {
+        if let game = Console.normalizedGameId(s) { return game } // a console game's app (XBA-278)
         guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(), t.utf8.count == 8 else {
             return nil
         }

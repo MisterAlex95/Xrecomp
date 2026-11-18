@@ -23,6 +23,14 @@ public enum Console: String, Codable, CaseIterable, Sendable {
         return Console(rawValue: head).flatMap { $0 == .xbox ? nil : $0 } ?? .xbox
     }
 
+    /// A console game's ID as a game app records it, upper case (LauncherModel.singleTitle compares upper case); nil
+    /// for anything else (an Xbox title ID is TitleApp.normalizedTitleId's).
+    public static func normalizedGameId(_ s: String?) -> String? {
+        guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(), !t.isEmpty,
+              of(gameId: t) != .xbox else { return nil }
+        return t
+    }
+
     public var name: String {
         switch self {
         case .xbox: return "Xbox"
@@ -247,9 +255,10 @@ public struct ConsoleCLI: Sendable {
         }
     }
 
-    /// The player's command line for a game, or why not (« n64_play is not built: ... »).
-    public func play(_ gameId: String) -> Result<ConsolePlay, PlayError> {
-        let r = Shell.run(python, playArguments(gameId), cwd: toolkit, environment: ChildEnvironment.base(),
+    /// The player's command line for a game, or why not (« n64_play is not built: ... »). game: its source path (only
+    /// that file is read) or its ID (the command line then walks the whole library to find it).
+    public func play(_ game: String) -> Result<ConsolePlay, PlayError> {
+        let r = Shell.run(python, playArguments(game), cwd: toolkit, environment: ChildEnvironment.base(),
                           timeout: 120)
         if r.ok, let p = ConsolePlay.parse(r.output) { return .success(p) }
         return .failure(.failed(ConsoleCLI.errorLine(r.output, status: r.status)))

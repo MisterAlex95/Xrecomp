@@ -519,7 +519,7 @@ final class AppStore: LauncherActions {
         }
         let t = paths.title(tid)
         try? FileManager.default.ensureDirectory(t.save)
-        if g.entry.isConsole { return playConsole(id, tid: tid, name: g.name) }
+        if g.entry.isConsole { return playConsole(id, tid: tid, source: g.entry.path, name: g.name) }
         let cfg = RecompConfig.load(dir: t.recompCfgDir)
         let defaults = loadConfig(nil).activePairs.reduce(into: [String: String]()) { $0[$1.key] = $1.value }
         let req = GameRunner.Request.forTitle(exe: URL(fileURLWithPath: exe), title: t, config: cfg,
@@ -530,7 +530,7 @@ final class AppStore: LauncherActions {
     /// XBA-278: a console game's player, from the command line the toolkit gives (`xrecomp play --print --json`: the
     /// player found, the source, the pack and what it misses, the settings and the save folder), then started here
     /// like an Xbox title (its run log, stop by PID).
-    private func playConsole(_ id: String, tid: String, name: String) {
+    private func playConsole(_ id: String, tid: String, source: String, name: String) {
         guard let tk = toolkit, let py = python else {
             model.notice = "Finish Setup first: XRecomp needs the toolkit and its Python environment."
             return
@@ -539,7 +539,7 @@ final class AppStore: LauncherActions {
         let logs = RunLog(dir: paths.title(tid).logs)
         launching = id
         work.async {
-            let r = cli.play(tid)
+            let r = cli.play(source) // by its path: an ID would have the command line walk the whole library
             DispatchQueue.main.async { [self] in
                 launching = nil
                 switch r {
