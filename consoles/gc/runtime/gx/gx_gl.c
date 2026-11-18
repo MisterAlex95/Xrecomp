@@ -84,6 +84,7 @@ struct gx_gl {
     GLuint vao, vbo, ebo, ubo, empty_vao;
     size_t ring_size[3], ring_off[3]; /* vbo, ebo, ubo as streaming rings (ring_put) */
     GLint ubo_align;
+    int stream; /* RECOMP_GC_GX_STREAM: 0 map (unsynchronised), 1 map + invalidate range, 2 glBufferSubData */
     GLuint samplers[8];
     GLuint white_tex;
     GLuint uber;
@@ -906,7 +907,9 @@ static int sext11(uint32_t v)
 /* Streaming buffers (vbo, ebo, ubo): each upload goes after the previous one in a buffer that keeps its storage, and
  * only a wrap orphans it (glBufferData once). A glBufferData of a new size at every draw made Adreno drivers allocate
  * GPU memory per draw (an ioctl each): Prince of Persia: The Two Thrones fell to 13 % in 3D scenes on the Fold8. The
- * ranges written after an orphan were never handed to the GPU, so they are mapped unsynchronised. Returns the offset. */
+ * ranges written after an orphan were never handed to the GPU, so they are mapped unsynchronised, without
+ * GL_MAP_INVALIDATE_RANGE_BIT: with it, the Fold8's Adreno driver still allocated and copied on every map (2 % in the
+ * same scene, 83 % without). RECOMP_GC_GX_STREAM=mapinv / sub keep the other ways for comparison. Returns the offset. */
 static size_t ring_put(gx_gl *g, unsigned r, GLuint buf, GLenum target, const void *data, size_t n, size_t align)
 {
     size_t off = (g->ring_off[r] + align - 1) / align * align;
@@ -919,8 +922,11 @@ static size_t ring_put(gx_gl *g, unsigned r, GLuint buf, GLenum target, const vo
         F.glBufferData(target, (GLsizeiptr)size, NULL, GL_STREAM_DRAW);
         off = 0;
     }
-    void *p = F.glMapBufferRange(target, (GLintptr)off, (GLsizeiptr)n,
-                                 GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+    void *p = NULL;
+    if (g->stream < 2)
+        p = F.glMapBufferRange(target, (GLintptr)off, (GLsizeiptr)n,
+                               GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT |
+                                   (g->stream == 1 ? GL_MAP_INVALIDATE_RANGE_BIT : 0));
     if (p) {
         memcpy(p, data, n);
         F.glUnmapBuffer(target);
@@ -1797,6 +1803,11 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     F.glGenBuffers(1, &g->vbo);
     F.glGenBuffers(1, &g->ebo);
     F.glGenBuffers(1, &g->ubo);
+    {
+        const char *sm = getenv("RECOMP_GC_GX_STREAM");
+        g->stream = sm && !strcmp(sm, "mapinv") ? 1 : sm && !strcmp(sm, "sub") ? 2 : 0;
+        fprintf(stderr, "gx: buffer streaming: %s\n", g->stream == 1 ? "mapinv" : g->stream == 2 ? "sub" : "map");
+    }
     g->ubo_align = 256;
     F.glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &g->ubo_align);
     if (g->ubo_align < 16)
