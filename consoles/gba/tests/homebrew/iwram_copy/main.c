@@ -63,6 +63,17 @@ int main(void)
     xba_check(i++, ((u32)ewram_buf >> 24) == 0x02, 1);
     xba_check(i++, g(0x100), 0x5A5A0333);
     xba_check(i++, f(0x100), 0x5A5A0344); /* the IWRAM copy is still the patched one */
+    /* XBA-281: the EWRAM copy (which no pack lifts: the interpreter decoded it into a block above) patched in place
+     * by cartridge code, then the IWRAM copy re-installed with the first immediate: both run their new bytes. */
+    ewram_buf[pic_patch_offset / 4] = (ewram_buf[pic_patch_offset / 4] & ~0xFFu) | 0x55;
+    xba_check(i++, g(0x100), 0x5A5A0355);
+    for (u32 k = 0; k < 4; k++) {
+        ewram_buf[pic_patch_offset / 4] = (ewram_buf[pic_patch_offset / 4] & ~0xFFu) | (0x60 + k);
+        xba_check(i, g(0x100 + k), 0x5A5A0300 + 3 * k + 0x60 + k);
+    }
+    i++;
+    f = install(iwram_buf, 0x11);
+    xba_check(i++, f(0x100), 0x5A5A0311);
 
     REG_DISPCNT = DCNT_MODE0; /* the verdict on screen (gba_corpus_packs.py screenshots it) */
     pal_bg_mem[0] = XBA_RESULT->detail ? RGB15(31, 0, 0) : RGB15(0, 31, 0);

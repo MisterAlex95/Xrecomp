@@ -375,6 +375,7 @@ void gba_recomp_run(gba_machine *m)
                 memcpy(s->verify, m, sizeof *m);
             uint64_t before = m->now;
             ln->fn(m);
+            m->rc_ran = true; /* its RAM stores did not go through the code map (gba_cpu.c « predecoded blocks ») */
             if (s->verify && m->rc_exit != GBA_RC_EXIT_NOT_COVERED)
                 verify_call(s->verify, m, pc | thumb);
             if (m->rc_exit == GBA_RC_EXIT_NORMAL && m->now == before && m->cpu.r[15] - (thumb ? 4 : 8) == pc &&

@@ -246,6 +246,8 @@ struct gba_machine {
     uint8_t *code_map;      /* = blocks->code: a bit per RAM halfword some block was decoded from (gba_code_write) */
     uint32_t blk_attn;      /* bumped by what a running block cannot see coming: IO register writes, DMA transfers,
                              * wait-state changes, writes to code (gba_cpu.c « predecoded blocks ») */
+    bool rc_ran;            /* lifted code ran since the interpreter's blocks last ran (gba_recomp.c): its inline RAM
+                             * stores skip the code map, so RAM blocks are checked against RAM before they run again */
     uint64_t cpu_cap;       /* gba_run_cycles: the CPU loop also stops at this cycle (UINT64_MAX: no cap) */
     bool interp_ref;        /* the reference interpreter loop (gba_cpu_set_reference) */
 };

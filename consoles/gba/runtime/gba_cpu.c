@@ -1109,8 +1109,10 @@ void gba_cpu_step(gba_machine *m)
  * Invalidation: RAM blocks belong to a 256-byte page with a generation; a write to a RAM halfword some block was
  * decoded from (the code map, a bit per halfword, checked by every bus write and cheat poke) bumps its page's
  * generation, clears the page's bits and stops a running block after that instruction (self-modifying code, routines
- * copied to IWRAM). Writes behind the bus (save state loads, the BIOS's RAM resets, cartridge patches) flush
- * everything. Between the run loop's stops the machine is byte-identical to step()'s loop, which stays as the
+ * copied to IWRAM). Lifted code's inline EWRAM / IWRAM stores skip the bus and the code map (XBA-281): after lifted
+ * code ran (m->rc_ran), the next run from blocks bumps the blocks' epoch, and a RAM block validated in an older epoch
+ * has its opcodes compared with RAM before it runs (decoded again when they differ). Writes behind the bus (save
+ * state loads, the BIOS's RAM resets, cartridge patches) flush everything. Between the run loop's stops the machine is byte-identical to step()'s loop, which stays as the
  * reference (gba_cpu_set_reference, gba_run --lockstep-ref). The blocks are host state, outside save states. */
 
 #define BLK_PAGE_SHIFT 8
@@ -1136,6 +1138,7 @@ typedef struct blk_op {
 typedef struct gba_block {
     uint32_t key;   /* pc | thumb */
     uint32_t gen;   /* the page's generation when decoded */
+    uint32_t vep;   /* RAM blocks: the epoch its opcodes were last known to match RAM in (gba_blocks.epoch) */
     uint16_t page;  /* RAM page, BLK_NOPAGE for ROM / BIOS */
     uint16_t n;
     uint8_t region;
@@ -1146,6 +1149,7 @@ struct gba_blocks {
     gba_block tab[BLK_HASH];
     uint32_t used;
     uint32_t gen[BLK_PAGES];
+    uint32_t epoch; /* bumped when lifted code may have stored into RAM since (m->rc_ran) */
     uint8_t code[BLK_RAM_SPACE / 16];   /* a bit per halfword (m->code_map) */
     blk_op pool[BLK_POOL];
 };
@@ -1614,7 +1618,23 @@ done:
     b->ops = ops;
     b->page = ram ? (uint16_t)(idx0 >> BLK_PAGE_SHIFT) : BLK_NOPAGE;
     b->gen = ram ? bs->gen[b->page] : 0;
+    b->vep = bs->epoch;
     return b;
+}
+
+/* A RAM block of a past epoch: RAM still holds the opcodes it was decoded from. */
+static bool blk_same(const gba_machine *m, const gba_block *b)
+{
+    bool thumb = (b->key & 1) != 0;
+    uint32_t pc = b->key & ~1u, w = thumb ? 2 : 4;
+    const uint8_t *base = b->region == RG_IWRAM ? m->iwram : m->ewram;
+    uint32_t mask = b->region == RG_IWRAM ? GBA_IWRAM_SIZE - 1 : GBA_EWRAM_SIZE - 1;
+    for (uint32_t i = 0; i < b->n; i++) {
+        uint32_t a = (pc + i * w) & mask;
+        if ((thumb ? rd16(&base[a]) : rd32(&base[a])) != b->ops[i].raw)
+            return false;
+    }
+    return true;
 }
 
 static __attribute__((noinline)) gba_block *blk_get_slow(gba_machine *m, uint32_t pc, bool thumb)
@@ -1625,13 +1645,20 @@ static __attribute__((noinline)) gba_block *blk_get_slow(gba_machine *m, uint32_
         if (!bs)
             return NULL;
         memset(bs->gen, 0, sizeof bs->gen);
+        bs->epoch = 0;
         m->code_map = bs->code;
         gba_cpu_flush_blocks(m);
     }
     uint32_t key = pc | (thumb ? 1u : 0u);
     gba_block *b = &bs->tab[((key >> 1) ^ (key >> 14)) & (BLK_HASH - 1)];
-    if (b->key == key && (b->page == BLK_NOPAGE || bs->gen[b->page] == b->gen))
-        return b;
+    if (b->key == key && (b->page == BLK_NOPAGE || bs->gen[b->page] == b->gen)) {
+        if (b->page == BLK_NOPAGE || b->vep == bs->epoch)
+            return b;
+        if (blk_same(m, b)) {
+            b->vep = bs->epoch;
+            return b;
+        }
+    }
     int region = blk_region(m, pc, thumb);
     if (region == RG_NONE)
         return NULL;
@@ -1645,7 +1672,7 @@ static inline __attribute__((always_inline)) const gba_block *blk_get(gba_machin
     uint32_t key = pc | (thumb ? 1u : 0u);
     if (__builtin_expect(bs != NULL, 1)) {
         const gba_block *b = &bs->tab[((key >> 1) ^ (key >> 14)) & (BLK_HASH - 1)];
-        if (b->key == key && (b->page == BLK_NOPAGE || bs->gen[b->page] == b->gen))
+        if (b->key == key && (b->page == BLK_NOPAGE || (bs->gen[b->page] == b->gen && b->vep == bs->epoch)))
             return b;
     }
     return blk_get_slow(m, pc, thumb);
@@ -2670,6 +2697,11 @@ void gba_cpu_step_outside_rom(gba_machine *m, uint32_t iw_lo, uint32_t iw_hi)
             step(m);
         } while (m->now < m->next_event && !m->cpu.halted && !m->cpu.stopped && outside_go_on(m, was, iw_lo, iw_hi));
         return;
+    }
+    if (m->rc_ran) {
+        m->rc_ran = false;
+        if (m->blocks)
+            m->blocks->epoch++;
     }
     do {
         uint32_t pc = was = R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u);

@@ -10,6 +10,10 @@ interpreter fallback (and its `discovered.jsonl`) must cover.
 3. The IWRAM copy re-installed with a new immediate, then patched in place (one word): each call must run the
    current bytes, never a stale translation.
 4. A second copy in EWRAM with its own immediate; the IWRAM copy must be unaffected.
+5. (XBA-281) The EWRAM copy, which only the interpreter runs, patched in place by cartridge code (lifted code's
+   inline stores, which skip the bus) five times, called after each patch; then the IWRAM copy re-installed with
+   the first immediate. Each call must run the current bytes, never the interpreter's predecoded block of the old
+   ones.
 
 ## Result protocol
 
@@ -26,6 +30,9 @@ Block at `0x0203FE00` (see [../README.md](../README.md)), `test_id` = `IWRM` (`0
 | 5 | 1 | EWRAM buffer address is in EWRAM (`0x02xxxxxx`) |
 | 6 | `0x5A5A0333` | EWRAM copy, IMM `0x33` |
 | 7 | `0x5A5A0344` | IWRAM copy called again: still the patched code |
+| 8 | `0x5A5A0355` | EWRAM copy patched in place to IMM `0x55`, x = `0x100` |
+| 9 | `0x5A5A036C` | EWRAM copy patched to IMM `0x60 + k`, x = `0x100 + k`, k = 0..3 (each checked; the last shown) |
+| 10 | `0x5A5A0311` | IWRAM copy re-installed with IMM `0x11` |
 
 Once done, the screen shows the verdict: backdrop green on pass, red on fail (the screenshot of
 `tools/consoles/gba_corpus_packs.py`).
