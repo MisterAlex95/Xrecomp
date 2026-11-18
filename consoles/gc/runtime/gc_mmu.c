@@ -102,6 +102,8 @@ void gc_mmu_update(gc_machine *m)
         m->ifast_mask = 0xC0000000u, m->ifast_val = 0x80000000u;
     else
         m->ifast_mask = 0, m->ifast_val = 0xFFFFFFFFu;
+    for (int a = 0; a < 3; a++)
+        m->xl_memo_blk[a] = 0; /* the BATs or MSR changed */
 }
 
 static int xlate(gc_machine *m, uint32_t ea, int acc, uint32_t *pa)
@@ -109,6 +111,12 @@ static int xlate(gc_machine *m, uint32_t ea, int acc, uint32_t *pa)
     gc_cpu *c = &m->h.cpu;
     if (!(c->msr & (acc == ACC_FETCH ? PPC_MSR_IR : PPC_MSR_DR))) {
         *pa = ea & 0x3FFFFFFFu;
+        return XL_OK;
+    }
+    /* XBA-279: the 128 KB block the last BAT translation of this kind fell in (BATs map whole 128 KB blocks, so the
+     * first match is the same BAT for every EA of a block); forgotten whenever the BATs or MSR change */
+    if (m->xl_memo_blk[acc] == (ea >> 17) + 1u) {
+        *pa = m->xl_memo_pa[acc] | (ea & 0x1FFFFu);
         return XL_OK;
     }
     unsigned pr = (c->msr & PPC_MSR_PR) ? 1 : 0;
@@ -124,6 +132,8 @@ static int xlate(gc_machine *m, uint32_t ea, int acc, uint32_t *pa)
         if (pp == 0 || (acc == ACC_WRITE && pp != 2))
             return XL_PROT;
         *pa = (l & 0xFFFE0000u & ~mask) | (ea & mask);
+        m->xl_memo_blk[acc] = (ea >> 17) + 1u;
+        m->xl_memo_pa[acc] = *pa & ~0x1FFFFu;
         return XL_OK;
     }
     uint32_t sr = c->sr[ea >> 28];
