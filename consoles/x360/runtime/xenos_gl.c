@@ -1238,9 +1238,10 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
  * A draw with RB_MODECONTROL's eDRAM mode "copy" is a resolve (Xenia's draw_util.cc GetResolveInfo): the rectangle
  * comes from the three window-space vertices Direct3D 9 leaves at vertex fetch constant 0; RB_COPY_CONTROL says
  * whether the colour is copied out (raw / convert) and whether colour and depth are cleared (RB_COLOR_CLEAR as the
- * raw 8_8_8_8 eDRAM value, X in the low byte; RB_DEPTH_CLEAR as depth 24 : stencil 8); the copy goes to RB_COPY_DEST_BASE as a tiled texture of
- * RB_COPY_DEST_PITCH (pitch, height) in RB_COPY_DEST_INFO's format and endian swap, at the same pixel coordinates as
- * the source (Direct3D adjusts the base for offsets). Formats copied here: 8_8_8_8 and 5_6_5. */
+ * raw 8_8_8_8 eDRAM value, X in the low byte; RB_DEPTH_CLEAR as depth 24 : stencil 8); the copy goes to
+ * RB_COPY_DEST_BASE as a tiled texture of RB_COPY_DEST_PITCH (pitch, height) in RB_COPY_DEST_INFO's format and endian
+ * swap, at the same pixel coordinates as the source (Direct3D adjusts the base for offsets). Formats copied here:
+ * 8_8_8_8 and 5_6_5. */
 
 static void resolve(xenos_gl *g, const xenos_cp *cp)
 {
