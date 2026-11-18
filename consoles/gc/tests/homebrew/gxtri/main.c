@@ -1,7 +1,8 @@
 /* gxtri: GX geometry (XBA-262). An orthographic Gouraud triangle (f32 positions, RGBA8 colours), a perspective cube
  * from indexed arrays (s16 positions with 8 fraction bits, 8-bit indices, RGB565 colours by 16-bit index) with back
  * faces culled and the Z buffer on, two quads crossing in depth, a fan and a strip from s8 positions with a matrix
- * index per vertex, wide lines and points. EFB peeks check a few pixels whose colour follows from the geometry. */
+ * index per vertex, wide lines and points. EFB peeks check a few pixels whose colour follows from the geometry, and
+ * which of two opposite triangles each cull mode keeps (check_cull). */
 #include "../common/gxdemo.h"
 
 /* the cube: 8 corners, s16 with 8 fraction bits (+-1.0 = +-256) */
@@ -11,7 +12,52 @@ static s16 cube_pos[8 * 3] __attribute__((aligned(32))) = {
 };
 /* one RGB565 colour per face */
 static u16 face_col[6] __attribute__((aligned(32))) = {0xF800, 0x07E0, 0x001F, 0xFFE0, 0xF81F, 0x07FF};
-static const u8 faces[6][4] = {{0, 1, 2, 3}, {5, 4, 7, 6}, {4, 0, 3, 7}, {1, 5, 6, 2}, {3, 2, 6, 7}, {4, 5, 1, 0}};
+/* a GX front face is clockwise on screen: each face's corners run clockwise seen from outside the cube */
+static const u8 faces[6][4] = {{0, 3, 2, 1}, {5, 6, 7, 4}, {4, 7, 3, 0}, {1, 2, 6, 5}, {3, 7, 6, 2}, {4, 0, 1, 5}};
+
+/* A right triangle with its corner at the top right, 40 pixels wide; y grows downwards in demo_ortho. */
+static void cull_tri(f32 x, f32 y, int clockwise, u8 r, u8 g, u8 b)
+{
+    GX_Begin(GX_TRIANGLES, GX_VTXFMT0, 3);
+    GX_Position3f32(x, y, -5);
+    GX_Color4u8(r, g, b, 255);
+    GX_TexCoord2f32(0, 0);
+    GX_Position3f32(x + 40, clockwise ? y : y + 40, -5);
+    GX_Color4u8(r, g, b, 255);
+    GX_TexCoord2f32(0, 0);
+    GX_Position3f32(x + 40, clockwise ? y + 40 : y, -5);
+    GX_Color4u8(r, g, b, 255);
+    GX_TexCoord2f32(0, 0);
+    GX_End();
+}
+
+/* Which faces each cull mode removes, from the hardware's rule (front = clockwise on screen): a clockwise red triangle
+ * and a counter-clockwise green one over it, no Z test. A closed cube cannot show this: culling the wrong side still
+ * draws a cube. Peek bits 7..10; the area is wiped afterwards, so the picture does not depend on this check. */
+static void check_cull(GXColor bg)
+{
+    static const struct {
+        u8 mode, r, g, b;
+    } cases[4] = {
+        {GX_CULL_NONE, 0, 255, 0},   /* both drawn, the second on top */
+        {GX_CULL_BACK, 255, 0, 0},   /* the clockwise one stays */
+        {GX_CULL_FRONT, 0, 255, 0},  /* the counter-clockwise one stays */
+        {GX_CULL_ALL, 16, 24, 64},   /* neither: the clear colour */
+    };
+    demo_flat_tev();
+    demo_vtx_pct();
+    demo_ortho();
+    for (int i = 0; i < 4; i++) {
+        GX_SetCullMode(cases[i].mode);
+        cull_tri(40 + 60 * i, 40, 1, 255, 0, 0);
+        cull_tri(40 + 60 * i, 40, 0, 0, 255, 0);
+    }
+    GX_SetCullMode(GX_CULL_NONE);
+    GX_DrawDone();
+    for (int i = 0; i < 4; i++)
+        demo_expect(7 + i, 70 + 60 * i, 50, cases[i].r, cases[i].g, cases[i].b, 4);
+    demo_quad(32, 32, 240, 56, -5, bg);
+}
 
 static void draw_ortho(void)
 {
@@ -172,6 +218,7 @@ int main(void)
     demo_init(bg);
     for (;;) {
         demo_fail = 0;
+        check_cull(bg);
         draw_ortho();
         draw_matidx();
         draw_cube();

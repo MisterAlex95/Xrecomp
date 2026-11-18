@@ -890,11 +890,13 @@ static void apply_state(gx_state *gx, bool tri)
     } else {
         F.glDisable(GL_BLEND);
     }
+    /* A GX front face is clockwise on screen and the EFB is upright in GL, so with GL's front = counter-clockwise a
+     * GX back face is a GL front face: genmode 1 (cull back) removes GL_FRONT, 2 (cull front) GL_BACK. */
     unsigned cull = BITS(bp[BP_GENMODE], 14, 2);
     F.glFrontFace(GL_CCW);
     if (tri && cull) {
         F.glEnable(GL_CULL_FACE);
-        F.glCullFace(cull == 1 ? GL_BACK : cull == 2 ? GL_FRONT : GL_FRONT_AND_BACK);
+        F.glCullFace(cull == 1 ? GL_FRONT : cull == 2 ? GL_BACK : GL_FRONT_AND_BACK);
     } else {
         F.glDisable(GL_CULL_FACE);
     }

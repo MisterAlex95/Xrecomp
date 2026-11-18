@@ -1667,7 +1667,8 @@ each field); `gx.h` is the API.
   the window's context; `RECOMP_GC_GX=0` leaves GX undrawn. A desktop GL 3.3 core context works too (gc_play: the
   same GLSL under `#version 330 core`).
 - Tests: our libogc programs `tests/homebrew/gxtri` (geometry: Gouraud, indexed s16 / RGB565 arrays, a perspective
-  cube culled and Z-buffered, fan / strip with matrix indices, wide lines and points), `gxtex` (every format, encoded
+  cube culled and Z-buffered, which of two opposite triangles each cull mode keeps, fan / strip with matrix indices,
+  wide lines and points), `gxtex` (every format, encoded
   by devkitPro's gxtexconv from our own pictures at build time, `gxtex/mktex.py`; CI14x2 with an RGB5A3 palette;
   mipmaps; repeat / mirror / clamp), `gxtev` (twelve TEV setups with values computed from the arithmetic), `gxind`
   (indirect offsets, a wave, two stages adding the previous coordinate), `gxcopy` (copies in ten formats drawn back,
