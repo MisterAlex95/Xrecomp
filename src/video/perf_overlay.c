@@ -10,8 +10,37 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <unistd.h>
+#ifdef _WIN32
+/* The console runtimes on Windows (XBA-278): the process's CPU time from GetProcessTimes, no peak RSS. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#ifndef _SC_PAGESIZE
+#define _SC_PAGESIZE 30
+#endif
+#define RUSAGE_SELF 0
+struct rusage {
+    struct { long tv_sec, tv_usec; } ru_utime, ru_stime;
+    long ru_maxrss;
+};
+static int getrusage(int who, struct rusage *ru)
+{
+    FILETIME c, e, k, u;
+    (void)who;
+    memset(ru, 0, sizeof *ru);
+    if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u))
+        return -1;
+    unsigned long long uu = ((unsigned long long)u.dwHighDateTime << 32 | u.dwLowDateTime) / 10; /* us */
+    unsigned long long kk = ((unsigned long long)k.dwHighDateTime << 32 | k.dwLowDateTime) / 10;
+    ru->ru_utime.tv_sec = (long)(uu / 1000000);
+    ru->ru_utime.tv_usec = (long)(uu % 1000000);
+    ru->ru_stime.tv_sec = (long)(kk / 1000000);
+    ru->ru_stime.tv_usec = (long)(kk % 1000000);
+    return 0;
+}
+#else
+#include <sys/resource.h>
+#endif
 
 /* 3x5 glyphs, one octal digit per row (top first), bit 2 = left column. */
 static unsigned glyph(int c)

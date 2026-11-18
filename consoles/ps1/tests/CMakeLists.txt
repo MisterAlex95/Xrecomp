@@ -474,7 +474,8 @@ if(TARGET ps1_run)
     # Rewind (XBA-194, ps1_run --rewind): 600 frames with pseudo-random pads, a capture every 3 frames as the runtime
     # takes them, 60 steps back: the picture there and the frames after it must be the first run's, on every homebrew
     # (HLE BIOS) and through a disc read (overlay); ps1_rewind_cap: a cap just over the newest capture and its coding
-    # buffer (8.45 MB) drops the oldest captures, the rest still come back exact.
+    # buffer (4.65 MB since XBA-278 made the coding buffer as large as the deltas; 8.45 before) drops the oldest
+    # captures, the rest still come back exact.
     set(rw)
     foreach(prog ${hb})
         add_test(NAME ps1_rewind_hb_${prog} COMMAND ${PS1_RUN_HLE} ${PS1_HOMEBREW_DIR}/${prog}.exe --frames 600
@@ -487,7 +488,7 @@ if(TARGET ps1_run)
         list(APPEND rw ps1_rewind_hb_overlay)
     endif()
     add_test(NAME ps1_rewind_cap COMMAND ${PS1_RUN_HLE} ${PS1_HOMEBREW_DIR}/timer_irq.exe --frames 900
-             --rewind 1:800 --rewind-mb 8.45 --quiet)
+             --rewind 1:800 --rewind-mb 4.65 --quiet)
     list(APPEND rw ps1_rewind_cap)
     set_tests_properties(${rw} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 

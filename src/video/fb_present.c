@@ -40,6 +40,9 @@
 #include "keyboard.h"   /* src/input */
 #include "gpu_present.h"
 #include "recomp_exit_hook.h"   /* src/platform */
+#include "recomp_window_keys.h" /* src/platform: F12 screenshot (XBA-278) */
+int xbox_FramebufferDumpBmp(const char *path); /* below (video_player.h) */
+#include <time.h>
 #include <stdbool.h>
 #include "pvideo_scanout.h"
 #include "../nv2a/nv2a_mmio_hook.h"
@@ -315,6 +318,24 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     if (m == WM_SYSKEYDOWN && w == VK_RETURN)
         return 0;                       /* auto-repeat of Alt+Enter */
+    /* F12, first press: a screenshot, as every game window has it (XBA-278, recomp_window_keys.h); the key table
+     * does not get it. */
+    if (m == WM_KEYDOWN && w == VK_F12) {
+        if (!(l & (1 << 30))) {
+            char title[48], shot[1200];
+            int i;
+            for (i = 0; i < 47 && s_title[i]; i++)
+                title[i] = s_title[i] < 128 ? (char)s_title[i] : '_';
+            title[i] = 0;
+            if (recomp_screenshot_path(shot, sizeof shot, title, time(NULL)) != 0)
+                fprintf(stderr, "  [FBWIN] screenshot: no folder to write it to (RECOMP_SCREENSHOT_DIR)\n");
+            else if (xbox_FramebufferDumpBmp(shot) != 0)
+                fprintf(stderr, "  [FBWIN] screenshot: no frame yet, or cannot write %s\n", shot);
+            else
+                fprintf(stderr, "  [FBWIN] screenshot: %s\n", shot);
+        }
+        return 0;
+    }
     switch (m) {
     case WM_CLOSE:
     case WM_DESTROY:

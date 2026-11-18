@@ -547,7 +547,11 @@ static void test_runs(const char *hb)
     o.unpaced = 1;
     snprintf(shot, sizeof shot, "%s/last.ppm", dir);
     o.screenshot = shot;
+    /* Rewind is on by default since XBA-278: its captures are « other » time (1.5 ms every 4 frames is a large part
+     * of an unpaced 0.8 ms frame); the stages' sum below is checked without them. */
+    setenv("RECOMP_REWIND", "0", 1);
     CHECK(n64_runtime_run(&o) == 0);
+    unsetenv("RECOMP_REWIND");
     CHECK(ppm_size(shot, &w, &h) == 0 && w == 320 && h >= 224 && h <= 240);
     CHECK(ppm_pixel(shot, 40, 30, rgb) == 0 && rgb[0] > 200 && rgb[1] < 40 && rgb[2] < 40);
     /* The whole run's performance figures: every frame counted, the core timed, the stages add up to the wall time

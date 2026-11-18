@@ -80,6 +80,7 @@
 
 #include "platform/recomp_lifecycle.h"
 #include "platform/recomp_quit.h"
+#include "platform/recomp_window_keys.h" /* F11 / Alt+Enter fullscreen, F12 screenshot (XBA-278) */
 #include "video_player.h"
 #include "perf_overlay.h"
 #include "host_perf_line.h"   /* the performance line (XBA-243) */
@@ -1770,6 +1771,25 @@ int xbox_HostWindowMain(int (*guest_main)(void))
 #ifdef __ANDROID__
                         SDL_AndroidShowToast(TEXT_QUIT_PROMPT, 0, -1, 0, 0);
 #endif
+                    }
+                } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
+                    /* The window's own keys, as every game window has them (XBA-278, recomp_window_keys.h). */
+                    int k = recomp_window_key((int)ev.key.keysym.scancode, (ev.key.keysym.mod & KMOD_ALT) != 0);
+#ifndef __ANDROID__
+                    if (k == RECOMP_WK_FULLSCREEN) {
+                        int on = !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN);
+                        if (SDL_SetWindowFullscreen(win, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0)
+                            fprintf(stderr, "  [FBWIN] fullscreen %s\n", on ? "on" : "off");
+                        dirty = 1;
+                    }
+#endif
+                    if (k == RECOMP_WK_SCREENSHOT) {
+                        char shot[1200];
+                        if (recomp_screenshot_path(shot, sizeof shot, s_title, time(NULL)) != 0)
+                            fprintf(stderr, "  [FBWIN] screenshot: no folder to write it to "
+                                            "(RECOMP_SCREENSHOT_DIR)\n");
+                        else if (xbox_FramebufferDumpBmp(shot) != 0)   /* logs « wrote <path> » */
+                            fprintf(stderr, "  [FBWIN] screenshot: no frame yet, or cannot write %s\n", shot);
                     }
                 }
             } while (SDL_PollEvent(&ev));

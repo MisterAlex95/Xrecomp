@@ -194,6 +194,13 @@ int host_window_stats(uint32_t *fps_centi, uint64_t *frames);
  * file cannot be written. */
 int host_window_screenshot_bmp(const char *path);
 
+/* The window's own keys (XBA-278, src/platform/recomp_window_keys.h), handled by host_window_pump before the hook:
+ * F11 or Alt+Enter toggles borderless fullscreen (RECOMP_FULLSCREEN=1 opens in it; not on Android), F12 asks for a
+ * screenshot, as this does: the next present (any of the present calls, a GPU picture read back) writes the picture
+ * it shows with host_window_screenshot_bmp to recomp_screenshot_path (RECOMP_SCREENSHOT_DIR, else
+ * RECOMP_SAVE_DIR/screenshots, else ./screenshots) and logs where. From any thread. */
+void host_window_request_screenshot(void);
+
 /* The shape the picture is shown at, num:den (4:3 for a PlayStation, whose
  * frame buffer is 256..640 pixels wide whatever the screen), instead of its
  * own w:h. HOST_SCALE_INTEGER then takes whole multiples of its height, the

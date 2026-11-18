@@ -132,6 +132,14 @@ struct HomeView: View {
                     Label("Prepare again", systemImage: "arrow.triangle.2.circlepath")
                 }
                 .buttonStyle(PillButtonStyle(tint: Theme.warn))
+            } else if game.entry.isConsole, case .absent = game.status {
+                // XBA-278: a console game plays interpreted at once; a prepare lifts it to native code.
+                Button { model.actions?.prepare(game.id, force: false) } label: {
+                    Label("Prepare", systemImage: "hammer.fill")
+                }
+                .buttonStyle(PillButtonStyle())
+                .disabled(!canPrepare)
+                .help("Lift the game to native code: it runs faster. It plays in the interpreter meanwhile.")
             }
         } else {
             Button { model.actions?.prepare(game.id, force: false) } label: { Label("Prepare", systemImage: "hammer.fill") }
@@ -152,9 +160,10 @@ struct HomeView: View {
             SectionTitle(text: "About this copy")
             Panel {
                 Grid(alignment: .leading, horizontalSpacing: Theme.s3, verticalSpacing: 10) {
-                    fact("Title ID", game.titleId ?? "—")
+                    if game.entry.isConsole { fact("Console", game.console.name) }
+                    fact(game.entry.isConsole ? "Game ID" : "Title ID", game.titleId ?? "—")
                     fact("Source", game.entry.path)
-                    fact("Kind", game.entry.kind == .image ? "Disc image · \(Storage.format(game.entry.size))" : "Folder")
+                    fact("Kind", kind)
                     fact("Played", game.record.playTimeText
                          + (game.record.lastPlayed.map { " · last " + $0.formatted(date: .abbreviated, time: .shortened) } ?? ""))
                     if !game.entry.duplicates.isEmpty {
@@ -166,6 +175,14 @@ struct HomeView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var kind: String {
+        switch game.entry.kind {
+        case .folder: return "Folder"
+        case .image: return "Disc image · \(Storage.format(game.entry.size))"
+        case .console: return "Game file · \(Storage.format(game.entry.size))"
         }
     }
 

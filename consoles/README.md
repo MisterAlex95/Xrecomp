@@ -1272,8 +1272,12 @@ let go and it plays on from there. `src/platform/recomp_rewind.h` (in `xbr_host_
   skipped and literal bytes kept (no dependency, a few dozen lines). Stepping back decodes one delta onto the newest,
   so a step costs the same at any depth, and the oldest capture goes for free when the memory cap
   (`RECOMP_REWIND_MB`, default 64; it counts the deltas, the newest capture and the coding buffer) is reached: these
-  backward deltas need no keyframe. Captures of different sizes (the N64 leaves zero RDRAM pages out) code the same
-  way.
+  backward deltas need no keyframe. Captures of different sizes code the same way. XBA-278: the coding buffer is
+  only as large as the deltas (a worst case of 1.125 captures used to fill 64 MB with a GameCube capture), a capture
+  is saved straight into the last capture's buffer (the size walk only when it does not fit) and swapped into the
+  ring, the N64 and GameCube captures store every page (`*_state_save_rewind`: a layout that does not shift when a
+  page turns zero), and captures that cost more than 1 ms per console frame on average come further apart. So the
+  N64 and the GameCube are on by default like the others.
 - The runtimes (`recomp_rewinder`): a capture after a console frame when one is due, at most one per shown frame (so
   fast-forward never captures more than once per display frame); while the hotkey is held, no console frame runs,
   the newest capture is loaded (the same post-load path as a slot: queued audio dropped, the save chip / cards / paks

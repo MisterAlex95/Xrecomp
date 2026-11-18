@@ -97,6 +97,12 @@ enum {
 size_t gc_state_size(gc_machine *m);
 /* Writes the state into out: its size, or 0 when cap is too small or the machine stopped. */
 size_t gc_state_save(gc_machine *m, const char *key, uint8_t *out, size_t cap);
+/* The same for rewind (XBA-278), loaded by gc_state_load as any state: every MEM1 / ARAM / TMEM page is stored, zero
+ * or not, so the layout of two captures never shifts when a page turns zero or non-zero (the ring's XOR deltas would
+ * then cover the whole state instead of what changed), its size is fixed (about 41 MB) and no page is tested: a copy
+ * of the memory, which a game filling MEM1 and ARAM pays anyway. */
+size_t gc_state_size_rewind(gc_machine *m);
+size_t gc_state_save_rewind(gc_machine *m, const char *key, uint8_t *out, size_t cap);
 /* Whether a state would load (nothing changes). */
 int gc_state_check(gc_machine *m, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n);
 /* Loads a state (checked whole first: a refused state changes nothing). Lifted code is checked against memory again

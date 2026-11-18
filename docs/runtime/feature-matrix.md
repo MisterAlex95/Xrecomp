@@ -21,7 +21,7 @@ device). The spikes (DS, PSP, PS2, Dreamcast, 3DS, Win32) are not in the app and
 | Fast-forward | yes: guest clock x2..16, `src/kernel/kernel_hal.c` `xbox_FastForwardPoll`; menu `app/GameMenu` (`fastForwardSupported`) | yes: frames per shown frame, `gba_runtime.c` (`recomp_ff_hold`) | yes: `ps1_runtime.c` | yes: `n64_runtime.c` | yes: `gc_runtime.c` | yes: `x360_runtime.c` (`recomp_play`) |
 | Save states in a run | partial: `src/kernel/xbox_state.c` + `xbox_state_service.c` (`recomp_states_attach "xbox"`); a load needs every guest thread parked at the same call (else ECHAIN); not built on Windows (`kernel_bridge.c` `#ifndef _WIN32`); UI asks the runtime (`app/ShellActivity.statesSupported`) | yes: `gba_state.c` | yes: `ps1_state.c` | yes: `n64_state.c` | yes: `gc_state.c` | yes: `x360_state.c`, `x360_runtime.c` (`recomp_states_attach "x360"`); the eDRAM is not saved (redrawn, as the GameCube's EFB) |
 | Across runs (« Resume where I left off ») | partial: `xbox_state_service.c` `xbox_StateResumeAtBoot`, only with resume entries in the generated code (`app/Pack.resume`: PREPARE_AGAIN otherwise) | yes: `recomp_states_resume` (`src/platform/recomp_states.c`), `gba_runtime.c` | yes: `ps1_runtime.c` | yes: `n64_runtime.c` | yes: `gc_runtime.c` | yes: `x360_runtime.c` (`recomp_states_resume`) |
-| partial: on by default, time-based (`xbox_state_service.c`, `recomp_rewind_config("xbox")`), when the title's states work, and it turns itself off when one state (its non-zero RAM pages and devices) does not fit half the ring (`RECOMP_REWIND_MB`, default 64: a title filling its 64 MB needs 128 or 256); hotkey with states (`app/Hotkeys`); a game's own Rewind / Rewind memory rows (`app/GameSettings.appliesTo`, XBA-274: were hidden for Xbox titles) | yes: on by default (`src/platform/recomp_rewind.c`) | yes: on by default | yes: off by default (4-8 MB a capture), a game can turn it on | yes: off by default (up to ~42 MB a capture: MEM1 + ARAM), a game can turn it on | yes: on by default (a capture is a whole state: the title's memory, XOR-delta coded) |
+| partial: on by default, time-based (`xbox_state_service.c`, `recomp_rewind_config("xbox")`), when the title's states work, and it turns itself off when one state (its non-zero RAM pages and devices) does not fit half the ring (`RECOMP_REWIND_MB`, default 64: a title filling its 64 MB needs 128 or 256); hotkey with states (`app/Hotkeys`); a game's own Rewind / Rewind memory rows (`app/GameSettings.appliesTo`, XBA-274: were hidden for Xbox titles) | yes: on by default (`src/platform/recomp_rewind.c`) | yes: on by default | yes: on by default since XBA-278 (a fixed-layout 8-9 MB capture, `n64_state_save_rewind`; ~1.5 ms each on the homebrew) | yes: on by default since XBA-278 (a fixed-layout 41 MB capture, `gc_state_save_rewind`; ~4.5 ms each, so one every 5-6 fields: `recomp_rewinder_frame` keeps captures at 1 ms per field on average; 64 MB keeps a few seconds) | yes: on by default (a capture is a whole state: the title's memory, XOR-delta coded) |
 | Cheats | yes: `src/kernel/xbox_cheats.c` (per vblank); UI `app/Cheats.checkXbox` | yes: `gba_cheats.h` | yes: `ps1_runtime.c` | yes: `n64_runtime.c` | yes: `gc_runtime.c`; UI `app/Cheats.checkGc` | partial: raw big-endian codes (`RECOMP_CHEAT_X360`, `x360_cheat_read32` / `write32` on allocated memory), data only (lifted code is ahead of time); UI `app/Cheats.checkRaw` (XBA-282: its own shape and hint) |
 | Frame generation | yes: `src/video/fb_present_sdl.c` (framegen pacer) | yes: `src/video/host_window.c` `host_window_present_rgba` -> `fg_present` | yes: same path | yes: `host_window_present_rgba_shared` | yes: the GX and GPU-YUV pictures (`host_window_present_texture`) are read back for the pacer while frame generation runs (XBA-274, `host_window.c` `texture_pixels`; ctest `gc_framegen`) | partial: the same `host_window_present_texture` path as the GameCube's; not checked on a device |
 | Perf line | yes: `fb_present_sdl.c` `perf_overlay_tick`; menu `app/GameMenu` (Item.PERF, every console) | yes: `host_window.c` overlay + `host_perf` | yes | yes | yes | yes: `x360_runtime.c` (`host_perf`, « x360: perf ») |
@@ -52,11 +52,14 @@ runtimes now call instead of four copies; the window, its shaders, frame generat
 |---|---|---|---|---|---|---|
 | Android app | yes | yes | yes | yes | yes | yes: Prepare on the device (XBA-282) or a desktop pack |
 | Desktop `xrecomp` CLI (Linux, macOS) | yes | yes (`gba_play`) | yes (`ps1_play`) | yes (`n64_play`) | yes (`gc_play`; XBA-274: `tools/xrecomp/library.py` `_identify_gc`, RVZ / WIA through a found `gc_run`, read once and kept; saves and states in RECOMP_SAVE_DIR, `--missed`) | partial: `x360_play` alone (Linux; not in `xrecomp` yet) |
-| Desktop `xrecomp` CLI (Windows) | yes, without save states / rewind | no (`__main__.py` `console_unsupported`) | no | no | no | no |
-| macOS launcher (`macos/`) | yes: settings, cover art, game apps, save import | no: `LibraryScanner.swift` lists Xbox folders and images only | no | no | no | no |
+| Desktop `xrecomp` CLI (Windows) | yes, without save states / rewind | partial (XBA-278): plays in the interpreter, players cross-built with MinGW-w64 (`src/platform/win32_posix`, docs/desktop/windows.md « Console games »); no native pack (prepare refuses it); not in the MSVC zip | partial: the same | partial: the same | partial: the same | no |
+| macOS launcher (`macos/`) | yes: settings, cover art, game apps, save import | yes (XBA-278: `macos/Sources/XRecompCore/ConsoleGames.swift`; listed, prepared and played through `xrecomp identify` / `play --print --json`; settings rows per console, Controls, Manage, game apps; box art: no download, the monogram) | yes (a cue's tracks once) | yes (+ controller pak row) | yes (a GameCube `.iso` after the Xbox identify) | no |
 
 The desktop has no settings UI on Linux / Windows (`recomp.cfg`, `xrecomp settings KEY=VALUE`), no save-state, cheat
-or rewind UI on any desktop (hotkeys and files only), and no screenshot or fullscreen hotkey.
+or rewind UI on any desktop (hotkeys and files only). Every desktop game window (the console runtimes' `host_window.c`,
+the Xbox SDL presenter, the Xbox Windows presenter) has F11 / Alt+Enter for fullscreen and F12 for a screenshot
+(XBA-278, `src/platform/recomp_window_keys.h`; `RECOMP_FULLSCREEN=1` starts fullscreen, `RECOMP_SCREENSHOT_DIR`
+moves the screenshots from `$RECOMP_SAVE_DIR/screenshots`); on Android the window is always fullscreen.
 
 ## Gaps, in the order they are filled (XBA-274)
 
@@ -74,12 +77,21 @@ or rewind UI on any desktop (hotkeys and files only), and no screenshot or fulls
 Left, with the reason:
 
 - GBA internal resolution and rumble: n/a (above).
-- N64 and GameCube rewind off by default: a capture is 4-8 MB (N64) and up to ~42 MB (GameCube: MEM1 + ARAM)
-  against 64 MB of history by default (`src/platform/recomp_rewind.c` `recomp_rewind_config`); on per game or in
-  Settings.
+- N64 and GameCube rewind: on by default since XBA-278. The ring's coding buffer was a worst case (1.125 times a
+  capture: with a 41 MB GameCube capture and the newest, 64 MB held no history), it is now as large as the deltas;
+  a capture goes in by a swap of buffers and is saved straight into the last one's buffer (no size walk); the N64 and
+  GameCube captures store every page (a page turning zero shifted the packed layout and the XOR delta covered the
+  whole state); costly captures are spaced out. Measured (`tests/recomp_rewind` « big », `gc_run` / `n64_run
+  --rewind` on the homebrew): GameCube 41 MB, 4.5-5 ms a capture, one every 5-6 fields, ~30 held in 64 MB with a
+  picture rewritten every field; N64 9 MB, 1.5 ms, every 4 frames. A desktop CPU; the Thor is to be measured
+  (device check).
 - N64 internal resolution with the software RDP: it draws at the console's resolution by design; the Vulkan RDP
   upscales.
 - Xbox in-run loads with mismatched thread chains, and Xbox states on Windows: runtime work (XBA-249 follow-ups).
+- Console games on Windows: interpreter only (XBA-278). The native pack needs the prepare's compile on Windows (a
+  DLL from MinGW-w64 or MSVC, `tools/prepare` `*_pack` steps) and its loader tested there; the players are not in the
+  MSVC-built zip (the console runtimes need winpthreads: a MinGW-w64 build); never run on a Windows PC, only wine.
 - Xbox keyboard hotkeys on Windows (the GDI window, `src/video/fb_present.c`): Windows builds have no Xbox save
   states yet, so only fast-forward would apply.
-- macOS launcher for the other consoles, desktop settings / states UI: front-end work, not started.
+- macOS launcher for the other consoles: done (XBA-278); its console games have no box art download yet (the
+  monogram). A desktop settings / states UI on Linux and Windows: front-end work, not started.

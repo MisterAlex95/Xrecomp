@@ -15,7 +15,10 @@
  * the first eight zero bytes.
  *
  * The memory cap (budget) counts everything the ring holds: the deltas, the newest capture's buffer and the coding
- * buffer. After a push the oldest deltas go until the ring fits; the newest capture always stays.
+ * buffer. After a push the oldest deltas go until the ring fits; the newest capture always stays. The coding buffer
+ * is only as large as the deltas need (XBA-278: it was a worst case, 1.125 times a capture, so a 40 MB GameCube
+ * state took the whole 64 MB with the newest and no history stayed), and a capture enters the ring by a swap of
+ * buffers (recomp_rewind_push_swap), not a copy.
  *
  * The runtimes' side (recomp_rewinder): the settings (RECOMP_REWIND, RECOMP_REWIND_MB, RECOMP_REWIND_FRAMES), the
  * capture schedule (every N console frames, at most one per shown frame, so fast-forward never captures more than
@@ -45,6 +48,10 @@ void recomp_rewind_clear(recomp_rewind *r);
 
 /* Pushes a capture (n > 0 bytes): it becomes the newest. Returns 0, or -1 (out of memory: the ring is as before). */
 int recomp_rewind_push(recomp_rewind *r, const uint8_t *state, size_t n);
+/* recomp_rewind_push without the copy (XBA-278): the capture in *buf (n bytes of *cap) becomes the ring's newest and
+ * *buf / *cap come back as the previous newest's buffer (NULL / 0 after the first push), its contents undefined: the
+ * next capture's buffer. Returns 0, or -1 (out of memory: the ring and *buf are as before). */
+int recomp_rewind_push_swap(recomp_rewind *r, uint8_t **buf, size_t *cap, size_t n);
 /* The newest capture (valid until the next push / pop / clear), NULL when the ring is empty. */
 const uint8_t *recomp_rewind_top(const recomp_rewind *r, size_t *n);
 /* Drops the newest capture: the one before it becomes the newest. Returns 0, or -1 when fewer than two are held (the
@@ -82,14 +89,21 @@ typedef struct recomp_rewind_cfg {
     size_t budget;   /* bytes */
 } recomp_rewind_cfg;
 
-/* A console's defaults (on, every N frames: gba on / 2, ps1 on / 3, n64 and gc off / 4), then RECOMP_REWIND (0 / 1),
+/* A console's defaults (every N frames: gba / 2, ps1 / 3, n64 and gc / 4; all on since XBA-278: the coding buffer no
+ * longer takes a GameCube capture's room and a costly capture spaces itself out), then RECOMP_REWIND (0 / 1),
  * RECOMP_REWIND_MB (8..1024, default 64) and RECOMP_REWIND_FRAMES (1..60) over them. */
 void recomp_rewind_config(const char *console, recomp_rewind_cfg *cfg);
+
+/* XBA-278: a capture may cost the frame thread this much per console frame on average (1 ms: 6 % of a 60 Hz frame);
+ * a console whose captures cost more (a GameCube game filling its 40 MB) gets them further apart. */
+#define RECOMP_REWIND_COST_NS 1000000ull
 
 typedef struct recomp_rewinder {
     recomp_rewind *ring;   /* NULL: rewind off */
     char console[8];
-    int interval;
+    int interval;          /* console frames between captures: the setting's, or more when captures cost more */
+    int interval_set;      /* the setting's */
+    uint64_t cost_avg_ns;  /* a capture's cost, averaged (1/8 per capture) */
     int since;             /* console frames since the last capture */
     int captured;          /* a capture was taken during this shown frame */
     int active;            /* the hotkey was held at the last shown frame */
@@ -118,8 +132,10 @@ typedef size_t (*recomp_rewind_size_fn)(void *user);
 /* Restores a capture into the machine; 0 when it did. The runtime's frame lock is held. */
 typedef int (*recomp_rewind_load_fn)(const uint8_t *in, size_t n, void *user);
 
-/* After each console frame (frame lock held): captures when one is due (size, then save; the time of both is the
- * capture's cost). Returns 1 when it captured. */
+/* After each console frame (frame lock held): captures when one is due (the save into the last capture's buffer; the
+ * size first only when it did not fit; the time of both is the capture's cost). Returns 1 when it captured. The
+ * captures stay RECOMP_REWIND_COST_NS per console frame on average: when they cost more, the interval grows (up to
+ * 60 frames) and comes back down when they get cheaper; logged when it changes. */
 int recomp_rewinder_frame(recomp_rewinder *w, recomp_rewind_size_fn size, recomp_rewind_save_fn save, void *user);
 /* One step back (frame lock held): restores the newest capture, then drops it unless it is the last. Returns 0, or
  * -1 when nothing is held or the load failed. */

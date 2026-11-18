@@ -2,7 +2,9 @@
 
 XRecomp for the Mac: a native SwiftUI app in [`macos/`](../../macos/) that lists the games in your library, prepares
 them with the desktop pipeline (`python -m tools.prepare`) and starts the built title, with per-title settings, saves
-and storage. It is a front end to the toolkit, not a copy of it: the app drives the checkout it sits in.
+and storage. It is a front end to the toolkit, not a copy of it: the app drives the checkout it sits in. Since XBA-278
+it lists and plays Game Boy Advance, PlayStation, Nintendo 64 and GameCube games too ([Console games](#console-games)).
+
 
 - **Build**: `bash macos/scripts/build-app.sh`, then open `macos/build/XRecomp.app` (Finder or `open`).
 - **Checks**: `bash macos/scripts/check.sh` (build, `xrecomp-check`, a smoke run). Command Line Tools are enough; no
@@ -18,6 +20,7 @@ and storage. It is a front end to the toolkit, not a copy of it: the app drives 
 - [Toolkit, Python and PATH](#toolkit-python-and-path)
 - [Storage](#storage)
 - [Prepare, play, stop](#prepare-play-stop)
+- [Console games](#console-games)
 - [Per-title settings](#per-title-settings)
 - [Look](#look)
 - [Game apps](#game-apps)
@@ -44,9 +47,9 @@ games, Setup, Default settings, About) and the detail pane.
 | About | Version, the toolkit's commit, "No game data included", the licence texts read from the toolkit (`LICENSE`, `NOTICE`, `LICENSES/*.txt`). |
 
 Not in v1: the in-game menu, dual screen and the companion (the game is a separate SDL window; the launcher has
-Stop), gamepad navigation of the launcher itself, live fps, the pad mapping editor (`RECOMP_PAD_MAP`: Advanced
-lines), GBA / PS1 / N64 games (so their hotkeys, internal resolution, rewind and picture options; the Xbox runtime
-has no hotkeys).
+Stop), gamepad navigation of the launcher itself, live fps, the pad mapping editor (`RECOMP_PAD_MAP`,
+`RECOMP_<C>_PAD_MAP`: Advanced lines), a save-state and cheat browser (the hotkeys and files do it), console cover
+art downloads (a console game shows its monogram, or an `art.png` you put in its title folder).
 
 ## Building and checking
 
@@ -194,6 +197,45 @@ titles/<TID>/
   Output goes to `logs/run-<time>.log` and the Log screen. One game at a time.
 - **Stop**: SIGTERM by PID, SIGKILL after 5 s, never by name. A non-zero exit or a signal shows "Stopped unexpectedly
   (signal N)" with the log's tail. Quitting the app stops a running game and prepare.
+
+## Console games
+
+XBA-278 (Alex: « toutes les plateformes uniformes en termes de features »). The launcher lists, prepares and plays
+GBA, PS1, N64 and GameCube games next to the Xbox titles, as the Android launcher does. It reads no ROM header, disc
+format or `pack.json` itself: it asks the toolkit's desktop command line ([cli.md](../desktop/cli.md)), which tells
+consoles apart the way `tools.prepare` does and shares this data folder, so the app and `xrecomp` never disagree
+(`macos/Sources/XRecompCore/ConsoleGames.swift`).
+
+- **Scan**: besides the Xbox images and folders, the files `.gba`, `.z64` / `.v64` / `.n64`, `.cue` / `.chd`,
+  `.gcm` / `.gcz` / `.rvz` / `.wia` / `.dol`, a `.bin` / `.img` with no `.cue` next to it (a cue names its own
+  tracks), and a `.iso` / `.ciso` that the Xbox identify does not read (a GameCube or PlayStation disc). They go in
+  one batch to `python -m tools.xrecomp --home <data folder> identify SOURCE... --json` (console, game ID such as
+  `gba-AXVE-1A2B3C4D`, title, how prepared, the player found); the answers are cached in `library.json` like the
+  Xbox ones. The card has a console badge (GBA, PS1, N64, GC).
+- **State**: the same `identify --json` after each scan, prepare and run. A console game plays before it is
+  prepared: « Ready · interpreted » (its runtime interprets it), with a **Prepare** pill next to Play; prepared it is
+  « Ready » (native), « Prepare again » when the toolkit changed or a run found code the lift missed. When its player
+  (`gba_play`, `ps1_play`, `n64_play`, `gc_play`) is not built the status says so (build the toolkit, Setup).
+- **Prepare**: `python -u -m tools.prepare SOURCE --work titles/<ID>/work --pack-dir <data folder>/packs
+  --progress`, as `xrecomp prepare` runs it: the same protocol lines and Preparing screen; no 2 GB space check (a
+  pack is a few MB) and no enhancements switch.
+- **Play**: `python -m tools.xrecomp --home <data folder> play <ID> --print --json` gives the player's command line
+  (the player found as `xrecomp` finds it, the source, `--pack` and `--missed` once prepared), its working folder
+  (the toolkit, for the PS1 BIOS path) and environment (Default settings, the game's `recomp.cfg`,
+  `RECOMP_SAVE_DIR=<data folder>/save`); the app starts it itself like an Xbox title (run log, Stop by PID) with the
+  fixed PATH and frame generation's Vulkan library path.
+- **Settings**: a game's Settings shows the rows its console reads (`ConfigOption.consoles`, the Android
+  `GameSettings.appliesTo`): Rewind and Rewind memory, Controller rumble, Picture size and filter, Console resolution
+  (PS1, N64, GameCube), the picture shader, VSync, frame generation, the audio buffer, the N64's controller pak.
+  Default settings lists every row.
+- **Controls**: the pad's buttons on the console's (`console_pad_defaults`), the hotkeys (fast-forward, rewind,
+  quick save / load, slots, fullscreen, screenshot) and the keyboard.
+- **Manage**: the work folder, the native pack (`packs/<ID>/`), the game's own saves, memory cards and states
+  (`save/<ID>/`, never the shared `save/`), logs, the title image. No Xbox save import.
+- **Game apps**: as for an Xbox title (the icon is the monogram unless the title folder has an `art.png`).
+
+Folders: `titles/<ID>/` keeps a console game ID as it is (`gba-AXVE-1A2B3C4D`), as `xrecomp` names it; an Xbox title
+ID stays upper case.
 
 ## Per-title settings
 
@@ -521,6 +563,31 @@ Settings parity (XBA-196), with `macos/build/XRecomp.app` opened from Finder:
     and `ls /opt/homebrew/lib | grep -i vulkan`.
 24. Widescreen On + Aspect ratio 16:9 on a game with a widescreen option (Burnout 3): the game offers or uses 16:9.
     480p On, Controller rumble Off: `# RECOMP_480P=1`, `# RECOMP_RUMBLE=0` in the run log, no rumble.
+
+Console games (XBA-278), with `macos/build/XRecomp.app` opened from Finder, after `cmake --build build --target
+gba_play ps1_play n64_play gc_play` in the toolkit. Use homebrew or your own dumps, kept outside the checkout:
+
+25. `bash macos/scripts/check.sh`: the `console:` checks pass, including « the real xrecomp identify and play
+    request on a synthetic N64 ROM » (not « skipped »). The SwiftUI views were never compiled before this check:
+    send the first compile error if there is one.
+26. Put a `.gba`, a `.z64`, a PS1 `.cue` + `.bin`, and a GameCube `.iso` or `.rvz` in `~/Documents/xbox` (or drop
+    them on the window): each gets a card with its badge (GBA, N64, PS1, GC) and its name, one card for the cue (not
+    one per track); the Xbox titles are as before.
+27. A console game's Home: « Ready · interpreted (Prepare runs it natively) », **Play** and a **Prepare** pill.
+    Play: the game window opens, Stop closes it within 5 s, Log has the output and the run log's first line is
+    `# .../gba_play <your ROM>`.
+28. Prepare it: the Preparing screen advances through its five steps; then « Ready », and Play runs natively (the
+    run log's first line has `--pack .../packs/<ID>/libtitle...`).
+29. Settings of a GBA game: Rewind, Rewind memory, Picture size, Picture filter, Picture shader..., no Renderer /
+    Widescreen / Language rows; an N64 game also has Controller pak and Console resolution. Set Picture filter
+    Smooth, Play: the run log has `# RECOMP_FILTER=linear` and the picture is smooth.
+30. In game: Tab fast-forwards, F1 saves a state, Shift+F1 loads it, hold R to rewind (N64 / GameCube with Rewind
+    On); Option+Return toggles fullscreen (F11 too, but macOS keeps plain F11 for Show Desktop: Fn+F11 or change that
+    shortcut), Fn+F12 writes a screenshot (the log says where).
+31. Manage of a console game: Work folder, Native pack, Saves, Logs, Title image; no « Import saves ». Delete Native
+    pack: the game is « Ready · interpreted » again. Create an app for it: the app opens on that game and plays it.
+32. `xrecomp list` in Terminal shows the same games with the same states; a setting made with `xrecomp settings
+    <ID> RECOMP_FILTER=nearest` shows in the app's Settings (« This game »).
 
 Game apps ([Game apps](#game-apps)), with `macos/build/XRecomp.app` opened from Finder:
 

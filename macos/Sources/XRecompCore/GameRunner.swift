@@ -6,12 +6,15 @@ import Foundation
 public final class GameRunner: @unchecked Sendable {
     public struct Request: Sendable {
         public var exe: URL
+        /// The arguments after the executable (a console player's: the source, --pack, --missed; XBA-278).
+        public var arguments: [String]
         public var cwd: URL
         public var environment: [String: String]
         public var log: URL?
 
-        public init(exe: URL, cwd: URL? = nil, environment: [String: String], log: URL?) {
+        public init(exe: URL, arguments: [String] = [], cwd: URL? = nil, environment: [String: String], log: URL?) {
             self.exe = exe
+            self.arguments = arguments
             self.cwd = cwd ?? exe.deletingLastPathComponent()
             self.environment = environment
             self.log = log
@@ -52,11 +55,11 @@ public final class GameRunner: @unchecked Sendable {
             FileManager.default.createFile(atPath: log.path, contents: nil)
             logHandle = try? FileHandle(forWritingTo: log)
             let keys = request.environment.keys.filter { $0.hasPrefix("RECOMP_") || $0.hasPrefix("SDL_") }.sorted()
-            write("# \(request.exe.path)")
+            write("# \(([request.exe.path] + request.arguments).joined(separator: " "))")
             for k in keys { write("# \(k)=\(request.environment[k]!)") }
         }
         startedAt = Date()
-        child = try ChildProcess(executable: request.exe.path, arguments: [], cwd: request.cwd,
+        child = try ChildProcess(executable: request.exe.path, arguments: request.arguments, cwd: request.cwd,
                                  environment: request.environment, newProcessGroup: false,
                                  onLine: { [weak self] l in
                                      self?.write(l)

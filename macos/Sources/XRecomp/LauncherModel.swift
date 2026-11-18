@@ -42,10 +42,15 @@ struct GameItem: Identifiable, Equatable {
     var record = TitleRecord()
 
     var accentColor: Color { Color(argb: accent) }
+    /// A console game's console (XBA-278); .xbox for an Xbox title.
+    var console: Console { entry.consoleKind }
+    /// exe: an Xbox title's built executable, a console game's player (gba_play...). A console game plays before it
+    /// is prepared: its runtime interprets it (status .absent), a prepare makes it native.
     var playable: Bool {
         guard exe != nil else { return false }
         switch status {
         case .ready, .stale: return true
+        case .absent: return entry.isConsole
         default: return false
         }
     }
@@ -71,9 +76,12 @@ struct GameItem: Identifiable, Equatable {
         if let e = lastExit { return (e, Theme.error) }
         switch status {
         case .checking: return ("Checking…", Theme.textFaint)
+        case .absent where entry.isConsole && exe != nil:
+            return ("Ready · interpreted (Prepare runs it natively) · " + record.playTimeText, Theme.ok)
         case .absent: return ("Needs preparing", Theme.warn)
         case .stale(let r): return (TitleState.describe(r), Theme.warn)
         case .ready: return ("Ready · " + record.playTimeText, Theme.ok)
+        case .error("NOT_BUILT", let message): return (message, Theme.error)
         case .error(let code, _): return ("Cannot prepare (\(code))", Theme.error)
         case .unreadable(let why): return (why, Theme.textFaint)
         }

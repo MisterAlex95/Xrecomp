@@ -4,6 +4,7 @@
 #include "host_time.h"
 #include "perf_overlay.h"
 #include "recomp_lifecycle.h"
+#include "recomp_window_keys.h" /* F11 / Alt+Enter fullscreen, F12 screenshot (XBA-278) */
 
 #include <SDL.h>
 
@@ -119,6 +120,7 @@ static void *s_hook_user;
 static int s_scale = HOST_SCALE_ASPECT, s_filter = HOST_FILTER_LINEAR, s_tex_filter = -1;
 static int s_aspect_num, s_aspect_den; /* host_window_set_aspect; 0: the picture's own */
 static char s_capture[1024];
+static int s_shot_req; /* F12 (XBA-278): a screenshot of the picture shown next (written at its present) */
 static int s_drawing_generated; /* the picture being drawn is a generated frame: no capture of it */
 /* The performance overlay (perf_overlay.h, RECOMP_OVERLAY=1): its text as a texture in the top left corner, drawn
  * over every picture (XBA-243: the same fields as the Xbox window's). */
@@ -418,6 +420,9 @@ int host_window_open(const char *title, int width, int height, int vsync)
     }
 #ifdef __ANDROID__
     flags |= SDL_WINDOW_FULLSCREEN;
+#else
+    if (recomp_window_fullscreen_env()) /* XBA-278: as the Xbox presenters */
+        flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 #endif
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "  [HOST] window: SDL video: %s\n", SDL_GetError());
@@ -471,6 +476,39 @@ void host_window_set_event_hook(host_window_event_fn fn, void *user)
     s_hook_user = user;
 }
 
+/* F11 / Alt+Enter (XBA-278): borderless fullscreen on the window's display, and back. Android's window is always
+ * fullscreen. */
+static void toggle_fullscreen(void)
+{
+#ifndef __ANDROID__
+    if (!s_win)
+        return;
+    int on = !(SDL_GetWindowFlags(s_win) & SDL_WINDOW_FULLSCREEN);
+    if (SDL_SetWindowFullscreen(s_win, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0)
+        fprintf(stderr, "  [HOST] window: fullscreen %s\n", on ? "on" : "off");
+    else
+        fprintf(stderr, "  [HOST] window: fullscreen: %s\n", SDL_GetError());
+#endif
+}
+
+/* The F12 screenshot, once the picture it shows is kept (recomp_window_keys.h: where and how it is named). */
+static void shot_write(void)
+{
+    char path[1200];
+    __atomic_store_n(&s_shot_req, 0, __ATOMIC_RELAXED);
+    if (recomp_screenshot_path(path, sizeof path, s_win ? SDL_GetWindowTitle(s_win) : NULL, time(NULL)) != 0) {
+        fprintf(stderr, "  [HOST] window: screenshot: no folder to write it to (RECOMP_SCREENSHOT_DIR)\n");
+        return;
+    }
+    if (host_window_screenshot_bmp(path) != 0)
+        fprintf(stderr, "  [HOST] window: screenshot: cannot write %s\n", path);
+}
+
+void host_window_request_screenshot(void)
+{
+    __atomic_store_n(&s_shot_req, 1, __ATOMIC_RELAXED);
+}
+
 int host_window_pump(void)
 {
     SDL_Event ev;
@@ -479,6 +517,15 @@ int host_window_pump(void)
         switch (ev.type) {
         case SDL_QUIT:
             s_quit = 1;
+            break;
+        case SDL_KEYDOWN:
+            if (!ev.key.repeat) {
+                int k = recomp_window_key((int)ev.key.keysym.scancode, (ev.key.keysym.mod & KMOD_ALT) != 0);
+                if (k == RECOMP_WK_FULLSCREEN)
+                    toggle_fullscreen();
+                else if (k == RECOMP_WK_SCREENSHOT)
+                    host_window_request_screenshot();
+            }
             break;
         case SDL_WINDOWEVENT:
             if (ev.window.event == SDL_WINDOWEVENT_CLOSE)
@@ -756,12 +803,19 @@ static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
 #if defined(XBOXRECOMP_LSFG)
 static int s_fg;   /* below: framegen_console running for this window (a tentative definition) */
 static int fg_present(const void *px, int w, int h, int pitch);
-static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down);
 #endif
+static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down);
 
 int host_window_present_texture(unsigned tex, int w, int h, int top_down)
 {
     live_take();
+    if (__atomic_load_n(&s_shot_req, __ATOMIC_RELAXED)) {
+        /* XBA-278: a GPU picture (the GameCube's GX, a PS1 GPU-YUV frame) is kept only for the F12 screenshot. */
+        const uint8_t *px = texture_pixels(tex, w, h, top_down);
+        if (px)
+            keep_last(px, w, h, w * 4);
+        shot_write();
+    }
 #if defined(XBOXRECOMP_LSFG)
     /* XBA-274: frame generation for a picture the runtime drew on the GPU (the GameCube's GX and GPU-YUV paths):
      * read back while frame generation runs (not under fast-forward, which draws directly, nor once the pacer fell
@@ -927,6 +981,9 @@ static void fg_service(uint64_t now)
 /* The pixels of a texture of the window's context (RGBA, packed, row 0 at the top) through a framebuffer of our
  * own, for frame generation; NULL when it cannot be read (no framebuffer objects, an incomplete attachment). The
  * buffer stays valid until the next call. */
+#endif /* XBOXRECOMP_LSFG */
+
+/* A GPU picture read back (frame generation's pacer, the F12 screenshot): RGBA, row 0 at the top. */
 static void (APIENTRY *s_gen_fbs)(int, unsigned *);
 static void (APIENTRY *s_fb_tex2d)(unsigned, unsigned, unsigned, unsigned, int);
 static unsigned (APIENTRY *s_fb_status)(unsigned);
@@ -948,7 +1005,8 @@ static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
             s_gen_fbs(1, &s_read_fb);
         if (!s_read_fb) {
             s_read_failed = 1;
-            fprintf(stderr, "  [HOST] window: no framebuffer objects: frame generation skips GPU pictures\n");
+            fprintf(stderr, "  [HOST] window: no framebuffer objects: frame generation and screenshots skip GPU "
+                            "pictures\n");
             return NULL;
         }
     }
@@ -971,7 +1029,8 @@ static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
     s_gl.BindFramebuffer(XGL_FRAMEBUFFER, 0);
     if (!ok) {
         s_read_failed = 1;
-        fprintf(stderr, "  [HOST] window: a GPU picture cannot be read back: frame generation skips them\n");
+        fprintf(stderr, "  [HOST] window: a GPU picture cannot be read back: frame generation and screenshots skip "
+                        "them\n");
         return NULL;
     }
     /* The texture's row 0 comes first: the top when top_down, else the bottom (flipped here). */
@@ -991,6 +1050,7 @@ static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
     return s_read_px;
 }
 
+#if defined(XBOXRECOMP_LSFG)
 /* 1 when the picture was taken by frame generation (nothing to draw now), 0 to draw it as usual. */
 static int fg_present(const void *px, int w, int h, int pitch)
 {
@@ -1023,6 +1083,8 @@ int host_window_present_rgba(const void *px, int w, int h, int pitch)
     if (!s_win || !px || w <= 0 || h <= 0 || pitch < w * 4)
         return 0;
     keep_last(px, w, h, pitch);   /* the real picture, for host_window_screenshot_bmp */
+    if (__atomic_load_n(&s_shot_req, __ATOMIC_RELAXED))
+        shot_write();
     live_take();
 #if defined(XBOXRECOMP_LSFG)
     if (fg_present(px, w, h, pitch))
@@ -1039,6 +1101,8 @@ int host_window_present_rgba_shared(const void *px, int w, int h, int pitch, hos
         keep_shared(last, user, w, h);
     else
         keep_last(px, w, h, pitch);
+    if (__atomic_load_n(&s_shot_req, __ATOMIC_RELAXED))
+        shot_write();
 #if defined(XBOXRECOMP_LSFG)
     if (fg_present(px, w, h, pitch))
         return 1;
@@ -1074,6 +1138,8 @@ int host_window_present_again(void)
 {
     if (!s_win || !s_again_tex)
         return 0;
+    if (__atomic_load_n(&s_shot_req, __ATOMIC_RELAXED))
+        shot_write(); /* the picture kept at its upload */
     live_take();
 #if defined(XBOXRECOMP_LSFG)
     if (s_fg && framegen_pacer_active() && !recomp_ff_active())

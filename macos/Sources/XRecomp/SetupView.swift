@@ -142,7 +142,7 @@ struct SetupView: View {
                         }
                         .buttonStyle(PillButtonStyle(compact: true))
                         Spacer()
-                        Text("Scanned 3 levels deep for disc images (.iso, .xiso, .cso, .zso, .cci) and folders with default.xbe.")
+                        Text("Scanned 3 levels deep for Xbox disc images and folders with default.xbe, and GBA, PS1, N64 and GameCube games.")
                             .font(.caption).foregroundStyle(Theme.textFaint)
                     }
                     .padding(Theme.s2)

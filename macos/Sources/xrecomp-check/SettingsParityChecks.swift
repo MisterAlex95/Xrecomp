@@ -116,9 +116,31 @@ func registerSettingsParityChecks() {
         expectEq(Set(OptionTable.all.map(\.id)).count, OptionTable.all.count, "ids unique")
         let keys = OptionTable.all.flatMap(\.keys)
         expectEq(Set(keys).count, keys.count, "each key in one row")
-        for k in ["RECOMP_BIG_CORES", "RECOMP_SHELL_SELFTEST", "RECOMP_UPSCALE", "RECOMP_LSFG_DIR"] {
+        for k in ["RECOMP_BIG_CORES", "RECOMP_SHELL_SELFTEST", "RECOMP_LSFG_DIR"] {
             expect(!keys.contains(k), k)
         }
+    }
+
+    check("options: the console games' rows (XBA-278), as the Android table and GameSettings.appliesTo") {
+        let byId = Dictionary(uniqueKeysWithValues: OptionTable.all.map { ($0.id, $0) })
+        expectEq(byId["rewind"]?.keys, ["RECOMP_REWIND"])
+        expectEq(byId["rewind"]?.choices.map(\.values), [[nil], ["1"], ["0"]])
+        expectEq(byId["rewind-mb"]?.choices.map(\.values), [["32"], [nil], ["128"], ["256"]])
+        expectEq(byId["upscale"]?.keys, ["RECOMP_UPSCALE"])
+        expectEq(byId["upscale"]?.consoles, [.ps1, .n64, .gc], "no internal resolution for the GBA's software PPU")
+        expectEq(byId["console-scale"]?.choices.compactMap { $0.values[0] }, ["integer", "stretch"])
+        expectEq(byId["console-filter"]?.choices.compactMap { $0.values[0] }, ["nearest", "linear"])
+        expectEq(byId["n64-pak"]?.choices.compactMap { $0.values[0] }, ["rumble", "controller"])
+        // Every console reads the shared rows; the Xbox-only ones stay off a console game's Settings.
+        for id in ["rumble", "rewind", "rewind-mb", "vsync", "shader", "framegen", "audio-buffer"] {
+            expect(Console.allCases.allSatisfy { byId[id]!.applies(to: $0) }, id)
+        }
+        for id in ["language", "gpu", "gpu-scale", "aspect", "widescreen", "480p", "filtering", "hrtf"] {
+            expect(!byId[id]!.applies(to: .gba) && byId[id]!.applies(to: .xbox), id)
+        }
+        let gbaGraphics = OptionTable.options(in: .graphics, for: .gba).map(\.id)
+        expect(gbaGraphics.contains("console-scale") && !gbaGraphics.contains("upscale") && !gbaGraphics.contains("gpu"))
+        expectEq(OptionTable.options(in: .graphics, for: nil).count, OptionTable.options(in: .graphics).count)
     }
 
     // ---- frame generation's shader cache ---------------------------------------------------------------------------

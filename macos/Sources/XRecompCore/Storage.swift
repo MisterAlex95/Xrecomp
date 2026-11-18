@@ -10,13 +10,23 @@ public enum Storage {
         case utilityCache = "Z: cache"
         case logs = "Logs"
         case art = "Title image"
+        /// A console game's native pack (`packs/<ID>/`, XBA-278).
+        case pack = "Native pack"
+    }
+
+    /// The items a title has: an Xbox title's work, extracted disc, saves and Z: cache; a console game's work, pack
+    /// and its own save folder (`save/<ID>/`, never the shared `save/` every console game's runtime writes under).
+    public static func items(_ t: TitlePaths) -> [Item] {
+        t.console == .xbox ? [.work, .extractedDisc, .saves, .utilityCache, .logs, .art]
+            : [.work, .pack, .saves, .logs, .art]
     }
 
     public static func url(_ item: Item, _ t: TitlePaths) -> URL {
         switch item {
         case .work: return t.work
         case .extractedDisc: return t.extractedGame
-        case .saves: return t.save
+        case .saves: return t.consoleSave ?? t.save
+        case .pack: return t.pack ?? t.dir.appendingPathComponent("pack", isDirectory: true)
         case .utilityCache: return utilityCache(t)
         case .logs: return t.logs
         case .art: return t.art
@@ -48,7 +58,7 @@ public enum Storage {
     }
 
     public static func sizes(_ t: TitlePaths) -> [(Item, Int64)] {
-        Item.allCases.map { ($0, size(url($0, t))) }
+        items(t).map { ($0, size(url($0, t))) }
     }
 
     /// Removes url and everything under it; a symbolic link inside (or url itself) is unlinked, never followed.

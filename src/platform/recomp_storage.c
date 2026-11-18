@@ -20,8 +20,13 @@
 static int image_spec(const char *game_dir)
 {
     struct stat st;
-    if (strncmp(game_dir, "fd:", 3) == 0)
+    if (strncmp(game_dir, "fd:", 3) == 0) {
+#ifdef _WIN32
+        return -1; /* the Android shell's descriptors: no shell hands one on Windows */
+#else
         return fcntl(atoi(game_dir + 3), F_GETFD) != -1 ? 1 : -1;
+#endif
+    }
     return stat(game_dir, &st) == 0 && S_ISREG(st.st_mode) ? 1 : 0;
 }
 

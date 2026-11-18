@@ -15,9 +15,9 @@
  * Save states, rewind, cheats (XBA-264; recomp_states.h, recomp_rewind.h, recomp_cheats.h), the N64 runtime's way:
  * states (gc_state.c) in <save dir>/gc-<KEY>/state<N>.st beside the memory cards, saved and loaded between fields
  * under s_mu by any thread (the in-game menu, the hotkeys), a thumbnail from the XFB in RAM, the clock reset after a
- * load; the automatic slot (Resume) when the player leaves. Rewind is off unless RECOMP_REWIND=1 (a capture is the
- * state, about 1 MB for homebrew and up to ~42 MB with MEM1 and ARAM full, XOR-delta coded in the ring under
- * RECOMP_REWIND_MB). Cheats: RECOMP_CHEATS_FILE's Action Replay / Gecko codes after every field, on MEM1 through
+ * load; the automatic slot (Resume) when the player leaves. Rewind is on unless RECOMP_REWIND=0 (XBA-278; a capture
+ * is gc_state_save_rewind's 41 MB, every page in a fixed layout, XOR-delta coded in the ring under RECOMP_REWIND_MB,
+ * spaced out by recomp_rewinder_frame when it costs more than 1 ms per field). Cheats: RECOMP_CHEATS_FILE's Action Replay / Gecko codes after every field, on MEM1 through
  * gc_cheat_read32 / _write32 (a code patch makes the lifted code there check its span again: the interpreter runs
  * it). The hotkeys (recomp_hotkeys.h: pad chords, desktop keys Tab, F1-F4, Shift+F1-F4) save / load / step the slot,
  * hold fast-forward and rewind. */
@@ -562,12 +562,12 @@ static int state_load_op(int slot, void *user)
 /* Rewind (XBA-194): a capture is the state (the picture is the XFB in MEM1). Under s_mu. */
 static size_t rewind_size(void *user)
 {
-    return gc_state_size((gc_machine *)user);
+    return gc_state_size_rewind((gc_machine *)user); /* XBA-278: a layout that does not shift between captures */
 }
 
 static size_t rewind_save(uint8_t *out, size_t cap, void *user)
 {
-    return gc_state_save((gc_machine *)user, s_state_key, out, cap);
+    return gc_state_save_rewind((gc_machine *)user, s_state_key, out, cap);
 }
 
 static int rewind_load(const uint8_t *in, size_t n, void *user)
@@ -676,7 +676,7 @@ started:;
     recomp_exit_hook_set(on_exit_hook);
 
     /* Save states (XBA-264): <save dir>/gc-<KEY>/state<N>.st, beside the memory cards (none without a save dir);
-     * rewind (off unless RECOMP_REWIND=1); cheats (RECOMP_CHEATS_FILE). */
+     * rewind (on unless RECOMP_REWIND=0, XBA-278); cheats (RECOMP_CHEATS_FILE). */
     snprintf(s_state_key, sizeof s_state_key, "%s", key);
     if (!o->save_dir || !*o->save_dir ||
         snprintf(s_state_dir, sizeof s_state_dir, "%s/gc-%s", o->save_dir, key) >= (int)sizeof s_state_dir)

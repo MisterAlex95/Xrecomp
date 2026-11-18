@@ -54,14 +54,20 @@ static uint64_t load64(const uint8_t *p)
     return v;
 }
 
-size_t recomp_rewind_delta_encode(const uint8_t *older, size_t older_n, const uint8_t *newer, size_t newer_n,
-                                  uint8_t *out)
+/* The encoder, into out[0..cap): its size, or 0 when the delta does not fit (out is then undefined). A token is
+ * written only when its two varints (10 bytes each at most) and its literal bytes fit. */
+static size_t delta_encode_cap(const uint8_t *older, size_t older_n, const uint8_t *newer, size_t newer_n,
+                               uint8_t *out, size_t cap)
 {
     size_t common = older_n < newer_n ? older_n : newer_n;
+    if (cap < 32)
+        return 0;
     size_t o = put_varint(out, older_n);
     size_t i = 0;
 #define XB(k) ((uint8_t)(older[(k)] ^ ((k) < newer_n ? newer[(k)] : 0)))
     while (i < older_n) {
+        if (cap - o < 20)
+            return 0;
         /* The zero run: whole words while both captures are there, then bytes. */
         size_t z = i;
         while (z + 8 <= common && load64(older + z) == load64(newer + z))
@@ -84,6 +90,8 @@ size_t recomp_rewind_delta_encode(const uint8_t *older, size_t older_n, const ui
             }
             e++;
         }
+        if (e - z > cap - o - 10)
+            return 0;
         o += put_varint(out + o, e - z);
         for (size_t k = z; k < e; k++)
             out[o++] = XB(k);
@@ -91,6 +99,12 @@ size_t recomp_rewind_delta_encode(const uint8_t *older, size_t older_n, const ui
     }
 #undef XB
     return o;
+}
+
+size_t recomp_rewind_delta_encode(const uint8_t *older, size_t older_n, const uint8_t *newer, size_t newer_n,
+                                  uint8_t *out)
+{
+    return delta_encode_cap(older, older_n, newer, newer_n, out, recomp_rewind_delta_bound(older_n));
 }
 
 size_t recomp_rewind_delta_size(const uint8_t *delta, size_t delta_n)
@@ -141,6 +155,8 @@ int recomp_rewind_delta_apply(uint8_t *buf, size_t *n, size_t cap, const uint8_t
 
 /* ---- The ring ------------------------------------------------------------------------------------------------- */
 
+#define SCRATCH_MIN ((size_t)64 << 10)
+
 typedef struct delta {
     uint8_t *p;
     size_t n;
@@ -150,7 +166,7 @@ struct recomp_rewind {
     size_t budget;
     uint8_t *top;          /* the newest capture, whole */
     size_t top_n, top_cap; /* top_n 0: empty */
-    uint8_t *scratch;      /* the coding buffer */
+    uint8_t *scratch;      /* the coding buffer: as large as the largest delta so far needed, not a worst case */
     size_t scratch_cap;
     delta *d;              /* the older captures, oldest first, a circular array */
     size_t d_head, d_len, d_cap;
@@ -231,17 +247,12 @@ static void drop_oldest(recomp_rewind *r)
     r->dropped++;
 }
 
-int recomp_rewind_push(recomp_rewind *r, const uint8_t *state, size_t n)
+/* The delta from the newest capture to state (n bytes) appended to the ring. The coding buffer starts small (a
+ * delta of two captures a few frames apart is a few KB to a few MB, whatever the state's size: XBA-278) and doubles
+ * when a delta does not fit, up to the worst case; once much larger than the deltas it codes it shrinks again, so the
+ * memory cap keeps room for history rather than for a worst case that rarely comes. */
+static int push_delta(recomp_rewind *r, const uint8_t *state, size_t n)
 {
-    if (!r || !state || !n)
-        return -1;
-    if (!r->top_n) {
-        if (grow(&r->top, &r->top_cap, n) != 0)
-            return -1;
-        memcpy(r->top, state, n);
-        r->top_n = n;
-        return 0;
-    }
     if (r->d_len == r->d_cap) {
         size_t nc = r->d_cap ? r->d_cap * 2 : 64;
         delta *nd = malloc(nc * sizeof *nd);
@@ -254,21 +265,80 @@ int recomp_rewind_push(recomp_rewind *r, const uint8_t *state, size_t n)
         r->d_cap = nc;
         r->d_head = 0;
     }
-    if (grow(&r->scratch, &r->scratch_cap, recomp_rewind_delta_bound(r->top_n)) != 0 ||
-        grow(&r->top, &r->top_cap, n) != 0)
+    size_t bound = recomp_rewind_delta_bound(r->top_n), want = r->scratch_cap;
+    if (want < SCRATCH_MIN)
+        want = SCRATCH_MIN;
+    size_t dn = 0;
+    for (;;) {
+        if (want > bound)
+            want = bound;
+        if (grow(&r->scratch, &r->scratch_cap, want) != 0)
+            return -1;
+        dn = delta_encode_cap(r->top, r->top_n, state, n, r->scratch, r->scratch_cap);
+        if (dn || r->scratch_cap >= bound)
+            break;
+        want = r->scratch_cap * 2;
+    }
+    if (!dn)
         return -1;
-    size_t dn = recomp_rewind_delta_encode(r->top, r->top_n, state, n, r->scratch);
     uint8_t *dp = malloc(dn);
     if (!dp)
         return -1;
     memcpy(dp, r->scratch, dn);
+    if (r->scratch_cap > SCRATCH_MIN && r->scratch_cap / 8 > dn) { /* far larger than what it codes now */
+        size_t small = dn * 2 > SCRATCH_MIN ? dn * 2 : SCRATCH_MIN;
+        uint8_t *s = realloc(r->scratch, small);
+        if (s) {
+            r->scratch = s;
+            r->scratch_cap = small;
+        }
+    }
     r->d[(r->d_head + r->d_len) % r->d_cap] = (delta){dp, dn};
     r->d_len++;
     r->d_bytes += dn;
-    memcpy(r->top, state, n);
-    r->top_n = n;
+    return 0;
+}
+
+static void fit_budget(recomp_rewind *r)
+{
     while (r->d_len && recomp_rewind_bytes(r) > r->budget)
         drop_oldest(r);
+}
+
+int recomp_rewind_push(recomp_rewind *r, const uint8_t *state, size_t n)
+{
+    if (!r || !state || !n)
+        return -1;
+    if (r->top_n && push_delta(r, state, n) != 0)
+        return -1;
+    if (grow(&r->top, &r->top_cap, n) != 0) {
+        if (r->top_n) { /* the delta just pushed has no newer capture to apply to: take it back */
+            r->d_len--;
+            r->d_bytes -= r->d[(r->d_head + r->d_len) % r->d_cap].n;
+            free(r->d[(r->d_head + r->d_len) % r->d_cap].p);
+        }
+        return -1;
+    }
+    memcpy(r->top, state, n);
+    r->top_n = n;
+    fit_budget(r);
+    return 0;
+}
+
+int recomp_rewind_push_swap(recomp_rewind *r, uint8_t **buf, size_t *cap, size_t n)
+{
+    if (!r || !buf || !*buf || !cap || !n || n > *cap)
+        return -1;
+    if (r->top_n && push_delta(r, *buf, n) != 0)
+        return -1;
+    uint8_t *old = r->top;
+    size_t old_cap = r->top_cap;
+    r->top = *buf;
+    r->top_cap = *cap;
+    r->top_n = n;
+    *buf = old;
+    *cap = old_cap;
+    fit_budget(r);
     return 0;
 }
 
@@ -321,9 +391,13 @@ void recomp_rewind_config(const char *console, recomp_rewind_cfg *cfg)
     int on = 1, interval = 2;
     if (console && !strcasecmp(console, "ps1")) {
         interval = 3;
-    } else if (console && (!strcasecmp(console, "n64") || !strcasecmp(console, "gc") || !strcasecmp(console, "x360"))) {
-        on = 0; /* N64: 4 / 8 MB a capture; GameCube (XBA-264): up to ~42 MB (MEM1, ARAM); Xbox 360 (XBA-280): the
-                 * title's memory in use, up to 512 MB */
+    } else if (console && !strcasecmp(console, "x360")) {
+        on = 0; /* Xbox 360 (XBA-280): the title's memory in use, up to 512 MB */
+        interval = 4;
+    } else if (console && (!strcasecmp(console, "n64") || !strcasecmp(console, "gc"))) {
+        /* N64: 4 / 8 MB a capture; GameCube (XBA-264): up to ~42 MB (MEM1, ARAM). Off until XBA-278, which made them
+         * fit the default 64 MB with history (the coding buffer as large as the deltas, a swap for the newest) and
+         * keeps their cost per frame bounded (recomp_rewinder_frame spaces costly captures). */
         interval = 4;
     }
     const char *v = getenv("RECOMP_REWIND");
@@ -355,7 +429,7 @@ int recomp_rewinder_init(recomp_rewinder *w, const char *console, const recomp_r
         c = *cfg;
     else
         recomp_rewind_config(console, &c);
-    w->interval = c.interval > 0 ? c.interval : 1;
+    w->interval = w->interval_set = c.interval > 0 ? c.interval : 1;
     if (c.on)
         w->ring = recomp_rewind_create(c.budget);
     if (w->ring)
@@ -373,11 +447,11 @@ void recomp_rewinder_free(recomp_rewinder *w)
         return;
     if (w->ring && w->captures) {
         printf("%s: rewind: %llu captures, %.3f ms each (max %.3f), %zu KB raw, %zu held in %.1f MB (cap %zu MB), "
-               "%llu dropped, %llu steps back%s\n",
+               "%llu dropped, %llu steps back, one every %d frames%s\n",
                w->console, (unsigned long long)w->captures, (double)w->cap_ns / 1e6 / (double)w->captures,
                (double)w->cap_ns_max / 1e6, (size_t)(w->cap_raw / w->captures) >> 10, recomp_rewind_count(w->ring),
                (double)recomp_rewind_bytes(w->ring) / (1 << 20), recomp_rewind_budget(w->ring) >> 20,
-               (unsigned long long)recomp_rewind_dropped(w->ring), (unsigned long long)w->steps,
+               (unsigned long long)recomp_rewind_dropped(w->ring), (unsigned long long)w->steps, w->interval,
                w->failed ? ", some captures failed" : "");
         fflush(stdout);
     }
@@ -414,12 +488,22 @@ int recomp_rewinder_frame(recomp_rewinder *w, recomp_rewind_size_fn size, recomp
     if (++w->since < w->interval || w->captured)
         return 0;
     uint64_t t0 = mono_ns();
-    if (grow(&w->buf, &w->buf_cap, size(user)) != 0) {
-        w->failed++;
-        return 0;
+    /* XBA-278: the buffer from the last capture is large enough nearly always: save into it at once, and ask the
+     * size (a walk of the machine's memory, as long as the save's own) only when it was not. */
+    size_t n = w->buf_cap ? save(w->buf, w->buf_cap, user) : 0;
+    int fresh = 0; /* a new buffer: its first writes fault its pages in, not what a capture costs */
+    if (!n) {
+        size_t need = size(user);
+        if (!need || grow(&w->buf, &w->buf_cap, need + need / 8) != 0) { /* room for it to grow a little */
+            w->failed++;
+            return 0;
+        }
+        fresh = 1;
+        n = save(w->buf, w->buf_cap, user);
     }
-    size_t n = save(w->buf, w->buf_cap, user);
-    if (!n || recomp_rewind_push(w->ring, w->buf, n) != 0) {
+    /* The capture becomes the ring's newest by a swap of buffers, not a copy: the old newest's buffer is the next
+     * capture's. */
+    if (!n || recomp_rewind_push_swap(w->ring, &w->buf, &w->buf_cap, n) != 0) {
         w->failed++;
         return 0;
     }
@@ -431,6 +515,22 @@ int recomp_rewinder_frame(recomp_rewinder *w, recomp_rewind_size_fn size, recomp
     if (dt > w->cap_ns_max)
         w->cap_ns_max = dt;
     w->cap_raw += n;
+    /* XBA-278: captures cost the frame thread at most RECOMP_REWIND_COST_NS per console frame on average. One into a
+     * fresh buffer (page faults) is not counted. */
+    if (!fresh) {
+        w->cost_avg_ns = w->cost_avg_ns ? (w->cost_avg_ns * 7 + dt) / 8 : dt;
+        uint64_t need = (w->cost_avg_ns + RECOMP_REWIND_COST_NS - 1) / RECOMP_REWIND_COST_NS;
+        int iv = need > 60 ? 60 : (int)need;
+        if (iv < w->interval_set)
+            iv = w->interval_set;
+        /* Up at once, down only when clearly cheaper (no flapping around a boundary). */
+        if (iv > w->interval || iv * 3 / 2 < w->interval) {
+            printf("%s: rewind captures cost %.2f ms: one every %d frames\n", w->console,
+                   (double)w->cost_avg_ns / 1e6, iv);
+            fflush(stdout);
+            w->interval = iv;
+        }
+    }
     return 1;
 }
 

@@ -2,8 +2,9 @@
 xrecomp: prepare and play your own games from a terminal (Linux, macOS, Windows). docs/desktop/cli.md.
 
     xrecomp prepare SOURCE [--force] [--no-title-layer | --title-layer] [--no-build] [-- PREPARE ARGS]
-    xrecomp play GAME [--print] [-- PLAYER ARGS]
+    xrecomp play GAME [--print [--json]] [-- PLAYER ARGS]
     xrecomp list [FOLDER...] [--json]
+    xrecomp identify SOURCE... [--json]
     xrecomp settings [GAME] [KEY=VALUE | KEY= ...] [--unset KEY] [--reset]
     xrecomp folders [add FOLDER | remove FOLDER]
     xrecomp where [GAME]
@@ -14,8 +15,9 @@ copied. GAME is a source path, a title ID (12345678, gba-AXVE-1A2B3C4D) or a uni
 
 Files go to the platform's user data folder ($XRECOMP_HOME moves it; `xrecomp where` prints it).
 
-Windows (XBA-89, experimental): Xbox games only. The GBA, PS1 and N64 runtimes are POSIX-only (src/host); prepare and
-play refuse them there and say so.
+Windows (XBA-89, experimental): Xbox games, and since XBA-278 GBA / PS1 / N64 / GameCube games in the interpreter
+(their players cross-built with MinGW-w64, docs/desktop/windows.md); a console game's native pack is not prepared
+there (prepare refuses it and says so).
 """
 
 import argparse
@@ -40,13 +42,14 @@ def err(msg):
     print("xrecomp: " + msg, file=sys.stderr, flush=True)
 
 
-def console_unsupported(console, platform=None):
-    """Why this host cannot prepare or play a console's games, or None. Windows: Xbox games only (XBA-89)."""
+def console_unsupported(console, platform=None, action="play"):
+    """Why this host cannot prepare (action "prepare") or play a console's games, or None. Windows (XBA-89, XBA-278):
+    a console game plays in the interpreter (its player built with MinGW-w64); its native pack is not prepared there
+    (the pack build and loader are the POSIX hosts')."""
     platform = platform or sys.platform
-    if console and console != "xbox" and platform.startswith("win"):
-        return ("%s games are not supported on Windows: the console runtimes (GBA, PS1, N64, GameCube) are POSIX-only. "
-                "Use Linux, macOS or WSL2 for them; Xbox games work here (docs/desktop/windows.md)"
-                % console.upper())
+    if console and console != "xbox" and platform.startswith("win") and action == "prepare":
+        return ("%s games are not prepared on Windows: their native pack is built and loaded on Linux and macOS only. "
+                "The game plays here in the interpreter: xrecomp play GAME (docs/desktop/windows.md)" % console.upper())
     return None
 
 
@@ -124,7 +127,7 @@ def cmd_prepare(home, a):
     if e.error:
         err("%s: %s" % (a.source, e.error))
         return 1
-    why = console_unsupported(e.console)
+    why = console_unsupported(e.console, action="prepare")
     if why:
         err(why)
         return 1
@@ -246,6 +249,10 @@ def cmd_play(home, a):
         err(str(x))
         return 2
     changes = env_changes(os.environ, env)
+    if a.json:              # the macOS launcher's way in (XBA-278): it starts the player itself
+        print(json.dumps({"id": e.id, "console": e.console, "title": e.title, "argv": argv, "cwd": cwd,
+                          "env": env, "changes": dict(changes)}, indent=2))
+        return 0
     if a.print:
         print("cd %s" % shlex.quote(cwd))
         for k, v in changes:
@@ -310,6 +317,36 @@ def cmd_list(home, a):
     for r in rows:
         print("%-*s  %-*s  %-*s  %-*s  %s" % (w[0], r[0], w[1], r[1], w[2], r[2], w[3], r[3], r[4]))
     return 0
+
+
+# ── identify ────────────────────────────────────────────────────
+
+def identify_dict(home, src):
+    """What a source is and how prepared (Entry.as_dict, after state()), with its key and, for a console game, the
+    player that runs it (null: not built) and the folder its saves go to."""
+    e = library.identify(src)
+    library.state(e, home)
+    d = e.as_dict()
+    d["key"] = e.key
+    if e.console and e.console != "xbox" and not e.error:
+        d["player"] = find_player(e.console)
+        d["unsupported"] = console_unsupported(e.console, action="prepare")
+        d["save_dir"] = home.title(e.id).save
+        d["pack_dir"] = home.title(e.id).pack
+    return d
+
+
+def cmd_identify(home, a):
+    """Each SOURCE (the macOS launcher's console games, XBA-278: it asks here rather than reading ROM headers and
+    pack.json itself, so the two never disagree)."""
+    out = [identify_dict(home, src) for src in a.sources]
+    if a.json:
+        print(json.dumps(out, indent=2))
+        return 0
+    for d in out:
+        print("%-24s %-5s %-24s %s" % (d["id"] or "?", d["console"] or "?", d["label"] or d["error"] or "",
+                                       d["title"] or d["source"]))
+    return 0 if all(not d["error"] for d in out) else 1
 
 
 # ── settings ────────────────────────────────────────────────────
@@ -439,10 +476,15 @@ def parser():
     p = sub.add_parser("play", help="play a game")
     p.add_argument("game")
     p.add_argument("--print", action="store_true", help="print the command line and environment, do not run it")
+    p.add_argument("--json", action="store_true", help="with --print: as JSON (argv, cwd, the whole environment)")
     p.add_argument("extra", nargs="*", help="after --: arguments for the game or the console player")
 
     p = sub.add_parser("list", help="the library and how prepared each game is")
     p.add_argument("folders", nargs="*", help="also scan these folders")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("identify", help="what sources are (console, ID, title) and how prepared")
+    p.add_argument("sources", nargs="+")
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("settings", help="Default settings, or a game's")
@@ -463,7 +505,8 @@ def parser():
 def main(argv=None):
     a = parser().parse_args(argv)
     home = Home(a.home)
-    return {"prepare": cmd_prepare, "play": cmd_play, "list": cmd_list, "settings": cmd_settings,
+    return {"prepare": cmd_prepare, "play": cmd_play, "list": cmd_list, "identify": cmd_identify,
+            "settings": cmd_settings,
             "folders": cmd_folders, "where": cmd_where}[a.cmd](home, a)
 
 

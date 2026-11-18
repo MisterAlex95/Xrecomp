@@ -65,25 +65,26 @@ static int page_zero(const uint8_t *p)
     return memcmp(p, zero, PAGE) == 0;
 }
 
-/* RDRAM: a bitmap of the pages stored (bit set: not all zero), then those pages. */
-static size_t rdram_bytes(n64_machine *m)
+/* RDRAM: a bitmap of the pages stored (bit set: not all zero), then those pages. all: every page, zero or not (rewind
+ * captures, XBA-278: a fixed layout, nothing tested). */
+static size_t rdram_bytes(n64_machine *m, int all)
 {
     uint32_t pages = m->rdram_size / PAGE;
     size_t n = (pages + 7) / 8;
     for (uint32_t i = 0; i < pages; i++)
-        if (!page_zero(m->rdram + (size_t)i * PAGE))
+        if (all || !page_zero(m->rdram + (size_t)i * PAGE))
             n += PAGE;
     return n;
 }
 
-static void rdram_save(n64_machine *m, uint8_t *out)
+static void rdram_save(n64_machine *m, uint8_t *out, int all)
 {
     uint32_t pages = m->rdram_size / PAGE;
     uint8_t *bits = out, *p = out + (pages + 7) / 8;
     memset(bits, 0, (pages + 7) / 8);
     for (uint32_t i = 0; i < pages; i++) {
         const uint8_t *src = m->rdram + (size_t)i * PAGE;
-        if (page_zero(src))
+        if (!all && page_zero(src))
             continue;
         bits[i >> 3] |= (uint8_t)(1u << (i & 7));
         memcpy(p, src, PAGE);
@@ -119,11 +120,11 @@ static void rdram_load(n64_machine *m, const uint8_t *in)
 }
 
 /* Section sizes as this build writes them now (RDRAM, the RDP, FlashRAM and the IS-Viewer vary). */
-static size_t sec_size(n64_machine *m, int id)
+static size_t sec_size(n64_machine *m, int id, int all)
 {
     switch (id) {
     case SEC_MACHINE: return N64_MACHINE_STATE_BYTES;
-    case SEC_RDRAM: return rdram_bytes(m);
+    case SEC_RDRAM: return rdram_bytes(m, all);
     case SEC_RSP: return n64_rsp_state_size(m->rsp);
     case SEC_RDP: return n64_rdp_state_size(m->rdp);
     case SEC_FLASH: return m->flash ? N64_FLASH_SIZE : 0;
@@ -133,15 +134,25 @@ static size_t sec_size(n64_machine *m, int id)
     }
 }
 
-size_t n64_state_size(n64_machine *m)
+static size_t state_size(n64_machine *m, int all)
 {
     if (!m)
         return 0;
     n64_rdp_flush(m->rdp); /* everything drawn is in RDRAM (its zero pages are counted) */
     size_t n = HEADER_BYTES;
     for (int id = 1; id <= SEC_COUNT; id++)
-        n += 8 + sec_size(m, id);
+        n += 8 + sec_size(m, id, all);
     return n;
+}
+
+size_t n64_state_size(n64_machine *m)
+{
+    return state_size(m, 0);
+}
+
+size_t n64_state_size_rewind(n64_machine *m)
+{
+    return state_size(m, 1);
 }
 
 static void save_machine(n64_machine *m, uint8_t *out)
@@ -166,13 +177,13 @@ static void save_machine(n64_machine *m, uint8_t *out)
 #undef CLEAR
 }
 
-size_t n64_state_save(n64_machine *m, uint8_t *out, size_t cap)
+static size_t state_save(n64_machine *m, uint8_t *out, size_t cap, int all)
 {
     if (!m || !out)
         return 0;
     n64_dp_complete_now(m); /* a deferred DP interrupt comes now: a state never holds one (n64_core.c) */
     n64_rdp_flush(m->rdp);  /* everything drawn is in RDRAM */
-    size_t need = n64_state_size(m);
+    size_t need = state_size(m, all);
     if (cap < need)
         return 0;
     memset(out, 0, HEADER_BYTES);
@@ -184,13 +195,13 @@ size_t n64_state_save(n64_machine *m, uint8_t *out, size_t cap)
     put32(out + 28, SEC_COUNT);
     uint8_t *p = out + HEADER_BYTES;
     for (int id = 1; id <= SEC_COUNT; id++) {
-        size_t n = sec_size(m, id);
+        size_t n = sec_size(m, id, all);
         put32(p, (uint32_t)id);
         put32(p + 4, (uint32_t)n);
         p += 8;
         switch (id) {
         case SEC_MACHINE: save_machine(m, p); break;
-        case SEC_RDRAM: rdram_save(m, p); break;
+        case SEC_RDRAM: rdram_save(m, p, all); break;
         case SEC_RSP: n64_rsp_state_save(m->rsp, p); break;
         case SEC_RDP: n64_rdp_state_save(m->rdp, p); break;
         case SEC_FLASH: if (n) memcpy(p, m->flash, n); break;
@@ -200,6 +211,16 @@ size_t n64_state_save(n64_machine *m, uint8_t *out, size_t cap)
         p += n;
     }
     return need;
+}
+
+size_t n64_state_save(n64_machine *m, uint8_t *out, size_t cap)
+{
+    return state_save(m, out, cap, 0);
+}
+
+size_t n64_state_save_rewind(n64_machine *m, uint8_t *out, size_t cap)
+{
+    return state_save(m, out, cap, 1);
 }
 
 /* The machine's saved fields that the core uses as indices, offsets, divisors or loop bounds without masking them: each

@@ -63,6 +63,7 @@ typedef struct io {
     int dry;            /* load: check only (what the section reads fits its length), nothing changes */
     int bad;            /* load: ran past the section, or a value out of range */
     uint32_t ver;       /* load: the section's version in the state (a walk may read older layouts) */
+    int all_pages;      /* save: every MEM1 / ARAM / TMEM page stored, zero or not (rewind captures, XBA-278) */
 } io;
 
 static void put32(uint8_t *p, uint32_t v)
@@ -181,6 +182,8 @@ static int page_zero(const uint8_t *p)
     return memcmp(p, zero, PAGE) == 0;
 }
 
+/* A save stores the pages that are not all zero, or every page with s->all_pages (gc_state_save_rewind: no zero test
+ * either, a copy). */
 static void io_pages(io *s, uint8_t *mem, uint32_t size)
 {
     uint32_t pages = size / PAGE, head = (pages + 7) / 8;
@@ -216,7 +219,7 @@ static void io_pages(io *s, uint8_t *mem, uint32_t size)
     size_t n = head;
     for (uint32_t i = 0; i < pages; i++) {
         const uint8_t *src = mem + (size_t)i * PAGE;
-        if (page_zero(src))
+        if (!s->all_pages && page_zero(src))
             continue;
         if (bits) {
             bits[i >> 3] |= (uint8_t)(1u << (i & 7));
@@ -707,29 +710,40 @@ static const section k_sections[] = {
 #define NSEC (sizeof k_sections / sizeof k_sections[0])
 #define SEC_HEAD 12u /* tag, version, length */
 
-static size_t sec_len(gc_machine *m, const section *k)
+static size_t sec_len(gc_machine *m, const section *k, int all_pages)
 {
     io s = {0};
+    s.all_pages = all_pages;
     k->walk(m, &s);
     return s.at;
 }
 
-size_t gc_state_size(gc_machine *m)
+static size_t state_size(gc_machine *m, int all_pages)
 {
     if (!m)
         return 0;
     size_t n = HEADER_BYTES;
     for (size_t i = 0; i < NSEC; i++)
-        n += SEC_HEAD + sec_len(m, &k_sections[i]);
+        n += SEC_HEAD + sec_len(m, &k_sections[i], all_pages);
     return n;
 }
 
-size_t gc_state_save(gc_machine *m, const char *key, uint8_t *out, size_t cap)
+size_t gc_state_size(gc_machine *m)
+{
+    return state_size(m, 0);
+}
+
+size_t gc_state_size_rewind(gc_machine *m)
+{
+    return state_size(m, 1);
+}
+
+static size_t state_save(gc_machine *m, const char *key, uint8_t *out, size_t cap, int all_pages)
 {
     if (!m || !out || m->error[0]) /* a stopped machine has nothing worth resuming */
         return 0;
     gx_gl_flush(m->gx); /* draws queued so far land in the EFB / XFB now */
-    size_t need = gc_state_size(m);
+    size_t need = state_size(m, all_pages);
     if (cap < need)
         return 0;
     memset(out, 0, HEADER_BYTES);
@@ -743,6 +757,7 @@ size_t gc_state_save(gc_machine *m, const char *key, uint8_t *out, size_t cap)
         const section *k = &k_sections[i];
         io s = {0};
         s.out = out + at + SEC_HEAD;
+        s.all_pages = all_pages;
         k->walk(m, &s);
         memcpy(out + at, k->tag, 4);
         put32(out + at + 4, k->version);
@@ -750,6 +765,16 @@ size_t gc_state_save(gc_machine *m, const char *key, uint8_t *out, size_t cap)
         at += SEC_HEAD + s.at;
     }
     return at;
+}
+
+size_t gc_state_save(gc_machine *m, const char *key, uint8_t *out, size_t cap)
+{
+    return state_save(m, key, out, cap, 0);
+}
+
+size_t gc_state_save_rewind(gc_machine *m, const char *key, uint8_t *out, size_t cap)
+{
+    return state_save(m, key, out, cap, 1);
 }
 
 static int why_set(char *why, size_t why_n, int rc, const char *fmt, const char *a, const char *b)
@@ -814,7 +839,7 @@ static int parse(gc_machine *m, const char *key, const uint8_t *data, size_t siz
             return why_set(why, why_n, GC_STATE_ECORRUPT, "section %.4s missing%s", k_sections[i].tag, "");
     /* Fixed-size sections: their length is this build's (a different one: another layout of the same version). */
     for (size_t i = 0; i < NSEC; i++)
-        if (at[i] && (k_sections[i].flags & FIXED) && len[i] != sec_len(m, &k_sections[i]))
+        if (at[i] && (k_sections[i].flags & FIXED) && len[i] != sec_len(m, &k_sections[i], 0))
             return why_set(why, why_n, GC_STATE_EVERSION, "section %.4s has another size%s", k_sections[i].tag, "");
     return GC_STATE_OK;
 }

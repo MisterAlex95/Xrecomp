@@ -103,7 +103,9 @@ add_subdirectory(src/input)
 # The host layer (XBA-145, src/platform/HOST_LAYER.md): xbr_host, the console-agnostic window + GL present, pads,
 # audio out, pacing, frame generation, storage, lifecycle and config every runtime links (the Xbox libraries and
 # consoles/*). POSIX hosts.
-if(NOT WIN32)
+if(NOT WIN32 OR XBR_CONSOLE_GBA OR XBR_CONSOLE_PS1 OR XBR_CONSOLE_N64 OR XBR_CONSOLE_GC)
+    # Windows (XBA-278): only when a console runtime is asked for (-DXBR_CONSOLE_GBA=ON ...): the Xbox build is as
+    # it was.
     add_subdirectory(src/host)
 endif()
 
@@ -144,11 +146,14 @@ else()
 endif()
 option(XBR_CONSOLE_X360 "Build the Xbox 360 runtime (consoles/x360)" ${_xbr_x360_default})
 set(XBR_CONSOLES "")
+if(WIN32 AND TARGET xbr_posix_win32)
+    link_libraries(xbr_posix_win32) # XBA-278: the console runtimes' POSIX calls on Windows (src/platform/win32_posix)
+endif()
 foreach(_c gba ps1 n64 nds psp gc dc 3ds ps2 x360)
     string(TOUPPER ${_c} _C)
     if(XBR_CONSOLE_${_C})
-        if(WIN32)
-            message(FATAL_ERROR "XBR_CONSOLE_${_C}: the console runtimes are POSIX-only (xbr_host)")
+        if(WIN32 AND NOT _c MATCHES "^(gba|ps1|n64|gc)$")
+            message(FATAL_ERROR "XBR_CONSOLE_${_C}: a spike, POSIX hosts only")
         endif()
         add_subdirectory(consoles/${_c}/runtime)
         list(APPEND XBR_CONSOLES ${_c})

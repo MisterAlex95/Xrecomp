@@ -147,6 +147,21 @@ final class PreviewStore: LauncherActions {
             item("58410006", "Tide Runner", 175, kind: .image, path: "~/Documents/xbox/Tide Runner/Tide Runner.iso",
                  status: .unreadable("Not readable yet (still being copied?)")),
         ]
+        // XBA-278: console games (homebrew names), one interpreted, one prepared.
+        func consoleItem(_ id: String, _ name: String, _ console: Console, _ hue: Double, path: String,
+                         status: TitleStatus) -> GameItem {
+            let e = LibraryEntry(path: path, kind: .console, size: 4_194_304, mtime: 0, titleId: id, title: name,
+                                 console: console.rawValue)
+            var g = GameItem(id: id, entry: e, name: name, titleId: id, art: art(hue: hue, seed: name.count),
+                             accent: Accent.color(hue: hue))
+            g.status = status
+            g.exe = "/demo/\(console.player ?? "")"
+            return g
+        }
+        games.append(consoleItem("gba-DEMO-1A2B3C4D", "Pocket Quest", .gba, 95, path: "~/Documents/xbox/gba/Pocket Quest.gba",
+                                 status: .absent))
+        games.append(consoleItem("n64-NDMO-635A2BFF", "Kart Demo 64", .n64, 330, path: "~/Documents/xbox/n64/Kart Demo.z64",
+                                 status: .ready))
         games[0].runningSince = Date().addingTimeInterval(-754)
         games[0].record.runs = 6
         games[0].record.playSeconds = 4 * 3600 + 12 * 60
@@ -204,6 +219,9 @@ final class PreviewStore: LauncherActions {
     func loadConfig(_ id: String?) -> RecompConfig { configs[id ?? "_"] ?? RecompConfig() }
     func saveConfig(_ config: RecompConfig, for id: String?) { configs[id ?? "_"] = config }
     func storage(_ id: String, done: @escaping ([(Storage.Item, Int64)]) -> Void) {
+        if model.game(id)?.entry.isConsole == true {
+            return done([(.work, 41_000_000), (.pack, 6_300_000), (.saves, 140_000), (.logs, 90_000), (.art, 61_000)])
+        }
         done([(.work, 9_812_000_000), (.extractedDisc, 3_100_000_000), (.saves, 1_420_000), (.utilityCache, 880_000),
               (.logs, 2_300_000), (.art, 21_000)])
     }
