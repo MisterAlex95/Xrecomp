@@ -376,6 +376,12 @@ static inline void gba_code_write(gba_machine *m, uint32_t idx, unsigned nhalf)
 }
 #define GBA_CODE_IWRAM(addr) ((addr) & (GBA_IWRAM_SIZE - 1))
 #define GBA_CODE_EWRAM(addr) (GBA_IWRAM_SIZE + ((addr) & (GBA_EWRAM_SIZE - 1)))
+/* The recompiler's loop for the instructions lifted code hands over (GBA_RC_EXIT_INTERP, gba_recomp_run): steps from
+ * PC while *left > 1 and execution stays in sequence, as that loop would one call at a time: while the time is not up,
+ * the CPU not halted, no IRQ due, and the next instruction in the cartridge or in [iw_lo, iw_hi). One step at least;
+ * returns how many ran. *chained: the last one went on in sequence (*left counted down for it): the next instruction
+ * is still handed over. */
+uint32_t gba_cpu_step_handed(gba_machine *m, uint32_t *left, bool *chained, uint32_t iw_lo, uint32_t iw_hi);
 /* Runs instructions until m->now >= m->next_event (or the CPU halts). */
 void gba_cpu_run(gba_machine *m);
 /* Executes exactly one instruction (or takes a pending IRQ). For tests. */

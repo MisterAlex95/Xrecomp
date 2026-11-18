@@ -1085,6 +1085,29 @@ void gba_cpu_step(gba_machine *m)
     step(m);
 }
 
+static inline bool irq_due(const gba_machine *m);
+
+uint32_t gba_cpu_step_handed(gba_machine *m, uint32_t *left, bool *chained, uint32_t iw_lo, uint32_t iw_hi)
+{
+    uint32_t n = 0;
+    for (;;) {
+        uint32_t t = m->cpu.cpsr_ctl & CPSR_T, pc = R[15] - (t ? 4u : 8u);
+        step(m);
+        n++;
+        uint32_t nt = m->cpu.cpsr_ctl & CPSR_T, npc = R[15] - (nt ? 4u : 8u);
+        if (*left <= 1 || nt != t || npc != pc + (t ? 2u : 4u)) {
+            *chained = false;
+            return n;
+        }
+        (*left)--;
+        *chained = true;
+        /* gba_recomp_run's checks before it hands the next instruction over, the simple case */
+        if (m->now >= m->next_event || m->cpu.halted || m->cpu.stopped || irq_due(m) ||
+            (npc - 0x08000000u >= 0x06000000u && npc - iw_lo >= iw_hi - iw_lo))
+            return n;
+    }
+}
+
 /* ---- predecoded blocks (XBA-208) ------------------------------------------------------------------------- *
  *
  * gba_cpu_run (and the recompiler's loop for code no pack holds) runs straight runs of code from the cartridge ROM,
