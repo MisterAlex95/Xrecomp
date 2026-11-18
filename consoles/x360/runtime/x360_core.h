@@ -155,6 +155,7 @@ typedef struct x360_stats {
     uint32_t unimplemented; /* distinct imports called without an HLE */
     uint64_t gpu_packets, gpu_draws, gpu_swaps;
     uint32_t vblanks;
+    uint32_t seh_raised, seh_handlers, seh_unwinds; /* XBA-282: exceptions raised, handlers called, unwinds done */
 } x360_stats;
 void x360_get_stats(const x360_machine *x, x360_stats *s);
 

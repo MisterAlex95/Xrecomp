@@ -791,7 +791,7 @@ int x360_runtime_start(const char *xex, const char *pack_lib, const char *title_
         struct stat st;
         int have_new = stat(saved, &st) == 0;
         if (!have_new && o.data_dir && stat(o.data_dir, &st) == 0) {
-            char parent[1300];
+            char parent[1100];
             snprintf(parent, sizeof parent, "%s/x360-%s", s_start_save, title_key);
             mkdirs(parent);
             if (rename(o.data_dir, saved) == 0) {

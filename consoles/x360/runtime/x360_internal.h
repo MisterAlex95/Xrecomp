@@ -27,6 +27,8 @@ enum { X360_LIB_XBOXKRNL = 0, X360_LIB_XAM = 1, X360_LIB_OTHER = 2 };
 #define X360_MAX_TIMERS 64
 #define X360_TLS_SLOTS 64
 #define X360_THREAD_EXIT 0xBCBCBCBCu /* a thread's first LR: returning there ends the thread */
+#define X360_SEH_RETURN 0xBCBCBCB8u  /* an exception handler's LR: returning there goes back to x360_seh.c */
+#define X360_SEH_DEPTH 3             /* exceptions raised inside handlers, nested */
 #define X360_SLICE 4096              /* blocks per time slice */
 #define X360_EPOCH 0x01D7000000000000ull /* system time at boot (100 ns since 1601): fixed, runs are reproducible */
 
@@ -60,6 +62,28 @@ typedef struct x360_heap {
 enum { TH_FREE = 0, TH_READY, TH_WAIT, TH_SUSPENDED, TH_DONE };
 enum { WAIT_OBJECTS = 0, WAIT_CRITSEC, WAIT_DELAY };
 
+/* x360_seh.c (XBA-282): one exception being dispatched on a thread; plain data (save states carry it) */
+typedef struct x360_seh_ctx {
+    uint64_t gpr[32];
+    double fpr[32];
+    uint64_t lr, ctr;
+    uint32_t pc, cr, xer;
+} x360_seh_ctx;
+
+typedef struct x360_seh_level {
+    int phase, wait;
+    uint32_t scope;                 /* __C_specific_handler: the scope record being looked at */
+    x360_seh_ctx exc, cur, next;    /* at the raise; the frame looked at; its caller */
+    uint32_t rec, area, establisher;
+    uint32_t fstart, flen, fprolog, handler, hdata;
+    uint32_t target_frame, target_ip, retval;
+} x360_seh_level;
+
+typedef struct x360_seh {
+    int depth;
+    x360_seh_level lv[X360_SEH_DEPTH];
+} x360_seh;
+
 typedef struct x360_thread {
     xe_cpu cpu;
     int state;
@@ -73,6 +97,7 @@ typedef struct x360_thread {
     int wait_timed;
     uint32_t exit_code;
     int interrupt; /* runs a graphics interrupt callback (x360_gpu.c) */
+    x360_seh seh;  /* XBA-282: the exception being dispatched, if any */
 } x360_thread;
 
 typedef struct x360_handle {
@@ -131,6 +156,9 @@ struct x360_machine {
 
     xe_rc_fn *fn_tab;         /* lifted code by (pc - code_lo) / 4 */
     uint32_t code_lo, code_hi;
+    uint32_t pdata_va, pdata_n; /* x360_seh.c: the image's .pdata (found at the first exception) */
+    int pdata_scanned;
+    uint32_t cspec_thunk;     /* the title's thunk of xboxkrnl's __C_specific_handler (done by x360_seh.c), or 0 */
 
     x360_thread threads[X360_MAX_THREADS];
     int nthreads, cur;
@@ -196,6 +224,15 @@ int x360_thread_restart(x360_machine *x, x360_thread *t, uint32_t entry, uint32_
 /* run entry(r3, r4) on a callback context kept in *slot (made once, reused): 0, or -1 while it still runs */
 int x360_callback_run(x360_machine *x, int *slot, uint32_t entry, uint32_t r3, uint32_t r4);
 x360_thread *x360_thread_by_kthread(x360_machine *x, uint32_t kthread);
+const x360_thunk *x360_thunk_at(x360_machine *x, uint32_t pc);
+
+/* x360_seh.c (XBA-282) */
+void x360_seh_raise(x360_machine *x, x360_thread *t, uint32_t rec);
+void x360_seh_unwind(x360_machine *x, x360_thread *t, uint32_t frame, uint32_t ip, uint32_t rec, uint32_t retval);
+void x360_seh_return(x360_machine *x, x360_thread *t);
+void x360_seh_bind(x360_machine *x);
+int x360_seh_code_pc(x360_machine *x, uint32_t pc);
+void x360_seh_write_context(x360_machine *x, uint32_t a, const x360_seh_ctx *k);
 void x360_thread_exit(x360_machine *x, x360_thread *t, uint32_t code);
 uint32_t x360_handle_new(x360_machine *x, uint32_t obj);
 uint32_t x360_handle_obj(x360_machine *x, uint32_t handle);

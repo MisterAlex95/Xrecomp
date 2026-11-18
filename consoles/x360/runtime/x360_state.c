@@ -14,6 +14,7 @@
  *   GPU   optional  the command processor (register file, ring, write-back, the shaders last loaded, counters) and
  *                   the interrupt state (callback, next vertical blank, pending interrupts)
  *   XMA   optional  the XMA context array's place, which contexts are in use and enabled (XBA-280)
+ *   SEH   optional  an exception being dispatched on each thread (x360_seh.c, XBA-282)
  *   FILE  optional  the open files (device, path, position: they are opened again at load) and symbolic links
  *
  * A state is taken between time slices (x360_run returned), when every thread's context is in its slot. Not state:
@@ -106,6 +107,8 @@ static void sec_threads(x360_machine *x, io *s)
     for (int k = 0; k < x->nthreads; k++) {
         x360_thread *t = &x->threads[k];
         xe_cpu *c = &t->cpu;
+        if (s->load)
+            memset(&t->seh, 0, sizeof t->seh); /* the SEH section, when the state has one, sets it again */
         for (int r = 0; r < 32; r++)
             io_u64(s, &c->gpr[r]);
         for (int r = 0; r < 32; r++)
@@ -342,6 +345,45 @@ static void sec_pads(x360_machine *x, io *s)
         x->pad_script_at = at <= x->pad_script_n ? at : x->pad_script_n;
 }
 
+/* XBA-282: an exception being dispatched (x360_seh.c): each thread's levels, field by field */
+static void io_seh_ctx(io *s, x360_seh_ctx *k)
+{
+    for (int r = 0; r < 32; r++)
+        io_u64(s, &k->gpr[r]);
+    for (int r = 0; r < 32; r++)
+        io_f64(s, &k->fpr[r]);
+    io_u64(s, &k->lr);
+    io_u64(s, &k->ctr);
+    io_u32(s, &k->pc);
+    io_u32(s, &k->cr);
+    io_u32(s, &k->xer);
+}
+
+static void sec_seh(x360_machine *x, io *s)
+{
+    for (int k = 0; k < x->nthreads && k < X360_MAX_THREADS; k++) {
+        x360_seh *e = &x->threads[k].seh;
+        io_i32(s, &e->depth);
+        if (s->load && (e->depth < 0 || e->depth > X360_SEH_DEPTH)) {
+            s->bad = 1;
+            return;
+        }
+        for (int d = 0; d < e->depth; d++) {
+            x360_seh_level *l = &e->lv[d];
+            io_i32(s, &l->phase);
+            io_i32(s, &l->wait);
+            io_u32(s, &l->scope);
+            io_seh_ctx(s, &l->exc);
+            io_seh_ctx(s, &l->cur);
+            io_seh_ctx(s, &l->next);
+            uint32_t *f[] = {&l->rec, &l->area, &l->establisher, &l->fstart, &l->flen, &l->fprolog, &l->handler,
+                             &l->hdata, &l->target_frame, &l->target_ip, &l->retval};
+            for (size_t i = 0; i < sizeof f / sizeof f[0]; i++)
+                io_u32(s, f[i]);
+        }
+    }
+}
+
 /* XMA: the context array's place, the contexts in use / enabled (their bytes are guest memory: MEM) */
 static void sec_xma(x360_machine *x, io *s)
 {
@@ -366,7 +408,7 @@ typedef struct {
 static const section k_sections[] = {
     {"THRD", 1, 1, sec_threads}, {"KERN", 1, 1, sec_kernel}, {"HEAP", 1, 1, sec_heaps},
     {"MEM ", 1, 1, sec_memory},  {"GPU ", 1, 0, sec_gpu},    {"FILE", 1, 0, sec_files},
-    {"PADS", 1, 0, sec_pads},    {"XMA ", 1, 0, sec_xma},
+    {"PADS", 1, 0, sec_pads},    {"XMA ", 1, 0, sec_xma},    {"SEH ", 1, 0, sec_seh},
 };
 #define NSEC (sizeof k_sections / sizeof k_sections[0])
 

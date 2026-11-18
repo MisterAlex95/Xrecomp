@@ -124,6 +124,11 @@ if(TARGET x360_run)
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_missed.sh $<TARGET_FILE:x360_run>
                 ${CMAKE_CURRENT_BINARY_DIR}/x360_missed)
     set_tests_properties(x360_missed PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    # XBA-282: structured exceptions (x360_seh.c): __except, __finally, a filter that continues (make_seh.py)
+    add_test(NAME x360_seh
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_seh.sh $<TARGET_FILE:x360_run> ${CMAKE_CURRENT_BINARY_DIR}/x360_seh
+                ${CMAKE_CURRENT_SOURCE_DIR}/seh.txt)
+    set_tests_properties(x360_seh PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     get_filename_component(X360_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../.. ABSOLUTE)
     set(X360_HOMEBREW_DIR ${X360_REPO_ROOT}/build/homebrew/x360 CACHE PATH
         "Built Xbox 360 test titles (build_homebrew.sh x360)")
