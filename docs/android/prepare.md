@@ -626,16 +626,18 @@ again.
 over the title's code range, so a target the table holds there is called at once: the trace switch, the code-range
 check and the lookups are the miss path's (`docs/technical/indirect-calls.md`). About 20 arm64 instructions of checks
 per indirect call become 8. Prepare's flags add `-mno-outline-atomics`: lock-prefixed instructions compile to inline
-exclusive load/store loops, which every ARMv8.0 core runs, instead of a call per atomic into the outline helpers.
-Inline ARMv8.1 atomics would cut the new `w_lock` workload by 31 % instead of 17 %, but a pack would need the device's
-features at Prepare time and would have to refuse another device. Same method as above, main -> XBA-277, checksums
+exclusive load/store loops, which every ARMv8.0 core runs, instead of a call per atomic into the outline helpers
+(`w_lock` -17 %; inline ARMv8.1 atomics would give -31 %, but a pack would need the device's features at Prepare time
+and would have to refuse another device). And the lifter turns a 32-bit locked add / sub / inc / dec / or / and / xor /
+not with a register or immediate operand into one atomic fetch-and-op instead of a compare-and-swap loop (same memory,
+same flags: the conformance cases run them against the CPU). Same method as above, main -> XBA-277, checksums
 identical:
 
 | Workload | arm64 pack layout | x86-64 |
 |---|---|---|
 | w_icall | 11.10M -> 9.10M (-18 %) | 12.45M -> 9.25M (-26 %) |
 | w_vcall | 22.90M -> 19.70M (-14 %) | 23.25M -> 19.45M (-16 %) |
-| w_lock (lock inc / xadd / dec / cmpxchg / or / add, xchg) | 8.15M -> 6.75M (-17 %) | unchanged |
+| w_lock (lock inc / xadd / dec / cmpxchg / or / add, xchg) | 8.15M -> 5.10M (-37 %) | 3.85M -> 2.75M (-29 %) |
 
 The generated `recomp_dispatch.c`, `recomp_types.h` and the flags change: every pack is stale.
 
