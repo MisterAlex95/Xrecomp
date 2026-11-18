@@ -43,8 +43,6 @@ OE_NAMES = set(XO31.values()) | set(XO31_64.values())
 # FP record forms: CR1 from the FPSCR, which only the interpreter keeps
 FP_REC = {n + "." for n in list(A59.values()) + list(A63.values()) + list(X63.values()) + list(X63_64.values())
           }
-# OE forms: OV / SO (XBA-284 lifts them)
-OE_DEFERRED = {n + "o" for n in OE_NAMES - {"mulhw", "mulhwu"}}
 
 LOADS_U = {"lwzu", "lbzu", "lhzu", "lhau", "lwzux", "lbzux", "lhzux", "lhaux", "ldu", "ldux", "lwaux"}
 STORES_U = {"stwu", "stbu", "sthu", "stwux", "stbux", "sthux", "stdu", "stdux", "lfsu", "lfdu", "stfsu", "stfdu",
@@ -258,6 +256,25 @@ static const char *diff(const xe_cpu *a, const xe_cpu *b, uint32_t ra, uint64_t 
         return "vr";
     return NULL;
 }
+/* given vectors (stdin: case rA rB CA SO, the word reading r4 / r5 into r3): both runs' r3 XER and CR0 */
+static void vectors(void)
+{
+    unsigned k, ca, so;
+    unsigned long long a, b;
+    while (scanf("%%u %%llx %%llx %%u %%u", &k, &a, &b, &ca, &so) == 5) {
+        const tcase *t = &cases[k];
+        init(t, 0);
+        init_c.gpr[4] = a, init_c.gpr[5] = b, init_c.xer_ca = ca, init_c.xer_so = so, init_c.xer_ov = !so;
+        init_c.cr = 0;
+        for (int side = 0; side < 2; side++) {
+            load();
+            int r = side ? interp(t) : lifted(t);
+            const xe_cpu *c = &X.m.cpu;
+            printf("%%d %%016llx %%u %%u %%u %%x%%s", r, (unsigned long long)c->gpr[3], c->xer_ov, c->xer_so, c->xer_ca,
+                   c->cr >> 28, side ? "\n" : " ");
+        }
+    }
+}
 int main(int argc, char **argv)
 {
     unsigned states = argc > 1 ? (unsigned)atoi(argv[1]) : 16;
@@ -267,6 +284,10 @@ int main(int argc, char **argv)
     X.base = X.m.mem;
     X.m.cur = &X.m.cpu;
     X.m.rt = &X;
+    if (states == 0) {
+        vectors();
+        return 0;
+    }
     unsigned n = sizeof cases / sizeof cases[0];
     for (unsigned k = 0; k < n; k++) {
         const tcase *t = &cases[k];
@@ -467,8 +488,92 @@ def test_integer_interpreter_matches_lifted_code(tmp_path):
     exe, _ = build(tmp_path, cases)
     deferred, bad = run(exe, cases)
     assert not bad, bad[:30]
-    want = DEFERRED | FP_REC | OE_DEFERRED
+    want = DEFERRED | FP_REC
     assert set(deferred) == want, sorted(set(deferred) ^ want)
     # the deferred words the interpreter must run (r = 0 ran, -1 trapped / failed on purpose, 1 unknown)
     unknown = sorted(n for n, rs in deferred.items() if "1" in rs and n not in NOT_INTERPRETED)
     assert not unknown, unknown
+
+
+# OE vectors worked out by hand (not by the formulas the lifter and the interpreter use): (mnemonic, rA, rB, CA in,
+# SO in) -> (low word of rD, OV, SO, CA out or None when the form leaves it). Words: mnemonico. r3, r4, r5.
+OE_XO = {"add": 266, "addc": 10, "adde": 138, "addze": 202, "addme": 234, "subf": 40, "subfc": 8, "subfe": 136,
+         "subfze": 200, "subfme": 232, "neg": 104, "mullw": 235, "divw": 491, "divwu": 459, "mulld": 233,
+         "divd": 489, "divdu": 457}
+OE_VECTORS = [
+    ("add", 0x7FFFFFFF, 1, 0, 0, 0x80000000, 1, 1, None),
+    ("add", 0x00000001, 1, 0, 0, 0x00000002, 0, 0, None),
+    ("add", 0x00000001, 1, 0, 1, 0x00000002, 0, 1, None),          # SO sticks
+    ("add", 0x80000000, 0x80000000, 0, 0, 0x00000000, 1, 1, None),
+    ("add", 0xFFFFFFFF7FFFFFFF, 0x0000000100000001, 0, 0, 0x80000000, 1, 1, None),  # the low word decides
+    ("add", 0x000000007FFFFFFF, 0xFFFFFFFF00000000, 0, 0, 0x7FFFFFFF, 0, 0, None),
+    ("addc", 0xFFFFFFFF, 1, 0, 0, 0x00000000, 0, 0, 1),
+    ("addc", 0x80000000, 0xFFFFFFFF, 0, 0, 0x7FFFFFFF, 1, 1, 1),
+    ("adde", 0x7FFFFFFF, 0, 1, 0, 0x80000000, 1, 1, 0),
+    ("adde", 0x7FFFFFFE, 0, 1, 0, 0x7FFFFFFF, 0, 0, 0),
+    ("addze", 0x7FFFFFFF, 0, 1, 0, 0x80000000, 1, 1, 0),
+    ("addze", 0xFFFFFFFF, 0, 1, 0, 0x00000000, 0, 0, 1),
+    ("addme", 0x80000000, 0, 0, 0, 0x7FFFFFFF, 1, 1, 1),
+    ("addme", 0x80000000, 0, 1, 0, 0x80000000, 0, 0, 1),
+    ("subf", 1, 0x80000000, 0, 0, 0x7FFFFFFF, 1, 1, None),           # rB - rA
+    ("subf", 0xFFFFFFFF, 0x7FFFFFFF, 0, 0, 0x80000000, 1, 1, None),
+    ("subf", 1, 2, 0, 0, 0x00000001, 0, 0, None),
+    ("subfc", 0x80000000, 0, 0, 0, 0x80000000, 1, 1, 0),
+    ("subfc", 0, 0, 0, 0, 0x00000000, 0, 0, 1),
+    ("subfe", 0, 0x80000000, 0, 0, 0x7FFFFFFF, 1, 1, 1),            # ~0 + 0x80000000 + 0
+    ("subfe", 0, 0x80000000, 1, 0, 0x80000000, 0, 0, 1),
+    ("subfze", 0x80000000, 0, 1, 0, 0x80000000, 1, 1, 0),           # ~0x80000000 + 1
+    ("subfze", 0x80000000, 0, 0, 0, 0x7FFFFFFF, 0, 0, 0),
+    ("subfme", 0x7FFFFFFF, 0, 0, 0, 0x7FFFFFFF, 1, 1, 1),           # 0x80000000 - 1
+    ("subfme", 0x7FFFFFFF, 0, 1, 0, 0x80000000, 0, 0, 1),
+    ("neg", 0x80000000, 0, 0, 0, 0x80000000, 1, 1, None),
+    ("neg", 0xFFFFFFFF00000001, 0, 0, 0, 0xFFFFFFFF, 0, 0, None),
+    ("neg", 0x0000000180000000, 0, 0, 0, 0x80000000, 1, 1, None),
+    ("mullw", 0x10000, 0x8000, 0, 0, 0x80000000, 1, 1, None),
+    ("mullw", 0x10000, 0x7FFF, 0, 0, 0x7FFF0000, 0, 0, None),
+    ("mullw", 0xFFFFFFFF, 0x80000000, 0, 0, 0x80000000, 1, 1, None),  # -1 * INT_MIN
+    ("mullw", 0xFFFFFFFF, 0x7FFFFFFF, 0, 0, 0x80000001, 0, 0, None),
+    ("mullw", 0x100000002, 0x300000003, 0, 0, 0x00000006, 0, 0, None),  # the low words only
+    ("divw", 7, 0, 0, 0, None, 1, 1, None),
+    ("divw", 0x80000000, 0xFFFFFFFF, 0, 0, None, 1, 1, None),
+    ("divw", 0x80000000, 0xFFFFFFFE, 0, 0, 0x40000000, 0, 0, None),
+    ("divw", 0xFFFFFFFF80000000, 0x00000000FFFFFFFF, 0, 0, None, 1, 1, None),
+    ("divwu", 7, 0, 0, 0, None, 1, 1, None),
+    ("divwu", 0x80000000, 0xFFFFFFFF, 0, 0, 0x00000000, 0, 0, None),
+    ("divwu", 7, 0x100000000, 0, 0, None, 1, 1, None),                # low word of rB is zero
+    ("mulld", 0x100000000, 0x100000000, 0, 0, 0x00000000, 1, 1, None),
+    ("mulld", 0x100000000, 0x7FFFFFFF, 0, 0, 0x00000000, 0, 0, None),
+    ("mulld", 0xFFFFFFFFFFFFFFFF, 0x8000000000000000, 0, 0, 0x00000000, 1, 1, None),
+    ("mulld", 0xFFFFFFFFFFFFFFFF, 0x7FFFFFFFFFFFFFFF, 0, 0, 0x00000001, 0, 0, None),
+    ("divd", 7, 0, 0, 0, None, 1, 1, None),
+    ("divd", 0x8000000000000000, 0xFFFFFFFFFFFFFFFF, 0, 0, None, 1, 1, None),
+    ("divd", 0x80000000, 0xFFFFFFFFFFFFFFFF, 0, 0, 0x80000000, 0, 0, None),  # only 64-bit INT_MIN overflows
+    ("divdu", 7, 0, 0, 0, None, 1, 1, None),
+    ("divdu", 7, 0x100000000, 0, 0, 0x00000000, 0, 0, None),
+]
+
+
+@pytest.mark.skipif(not shutil.which("cc") or not sys.platform.startswith("linux"), reason="no C compiler / not Linux")
+def test_oe_forms_set_ov_and_so(tmp_path):
+    names = sorted(OE_XO)
+    cases = [(n, (31 << 26) | (3 << 21) | (4 << 16) | (5 << 11) | (1 << 10) | (OE_XO[n] << 1) | 1) for n in names]
+    exe, s = build(tmp_path, cases)
+    assert s["interp_fallback_insns"] == 0, s["unlifted"]
+    rows = "".join("%d %x %x %d %d\n" % (names.index(v[0]), v[1], v[2], v[3], v[4]) for v in OE_VECTORS)
+    out = subprocess.run([exe, "0"], input=rows, check=True, capture_output=True, text=True).stdout.splitlines()
+    assert len(out) == len(OE_VECTORS)
+    bad = []
+    for v, line in zip(OE_VECTORS, out):
+        f = line.split()
+        lifted, interp = f[:6], f[6:]
+        name, a, b, ca, so, rd, ov, so2, ca2 = v
+        if lifted != interp:
+            bad.append("%s %x %x: lifted %s, interpreted %s" % (name, a, b, lifted, interp))
+            continue
+        r, got, gov, gso, gca, cr0 = int(f[0]), int(f[1], 16), int(f[2]), int(f[3]), int(f[4]), int(f[5], 16)
+        want_lo = got & 0xFFFFFFFF if rd is None else rd  # a divide by zero leaves rD undefined
+        want_cr0 = (8 if want_lo & 0x80000000 else 4 if want_lo and want_lo < 0x80000000 else 2) | so2
+        if r or (got & 0xFFFFFFFF) != want_lo or gov != ov or gso != so2 or (ca2 is not None and gca != ca2) or \
+                (rd is not None and cr0 != want_cr0):
+            bad.append("%s %x %x: got %s" % (name, a, b, " ".join(lifted)))
+    assert not bad, bad

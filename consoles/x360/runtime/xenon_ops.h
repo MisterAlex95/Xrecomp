@@ -52,6 +52,35 @@ static inline uint32_t xe_carry(uint64_t a, uint64_t b, uint32_t cin)
     return (s < x) | ((uint32_t)(s + cin) < s);
 }
 
+/* OE forms (XBA-284, x360_tools/xenon.py OE_FORMS): the overflow XER[OV] takes. The add / subtract family in 32-bit
+ * mode: x + y (+ carry in) overflows the low word when both addends have the same sign and the result the other. */
+static inline uint32_t xe_ov_add(uint64_t x, uint64_t y, uint64_t r)
+{
+    return (((uint32_t)x ^ (uint32_t)r) & ((uint32_t)y ^ (uint32_t)r)) >> 31;
+}
+
+static inline uint32_t xe_ov_mullw(uint64_t a, uint64_t b)
+{
+    int64_t p = (int64_t)(int32_t)a * (int32_t)b;
+    return p != (int64_t)(int32_t)p;
+}
+
+static inline uint32_t xe_ov_divw(uint64_t a, uint64_t b)
+{
+    return (uint32_t)b == 0 || ((uint32_t)a == 0x80000000u && (uint32_t)b == 0xFFFFFFFFu);
+}
+
+static inline uint32_t xe_ov_mulld(uint64_t a, uint64_t b)
+{
+    int64_t p;
+    return __builtin_mul_overflow((int64_t)a, (int64_t)b, &p);
+}
+
+static inline uint32_t xe_ov_divd(uint64_t a, uint64_t b)
+{
+    return b == 0 || (a == 0x8000000000000000ull && b == ~0ull);
+}
+
 static inline uint64_t ppc_rotl64(uint64_t v, unsigned n)
 {
     n &= 63;

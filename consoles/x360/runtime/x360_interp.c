@@ -2,7 +2,7 @@
  *
  * Two jobs:
  * - RC_INTERP: the lifter hands a few instructions to the runtime (traps, which MSVC emits for asserts, divide-by-zero
- *   checks and debug breaks; the FPSCR moves; mcrxr; OE forms; sc). x360_interp_one runs one, then execution goes
+ *   checks and debug breaks; the FPSCR moves; mcrxr; FP record forms; sc). x360_interp_one runs one, then execution goes
  *   back to lifted code at the next instruction.
  * - Missed code (XBA-283): when the dispatcher reaches an address no lifted function holds, x360_interp_run runs the
  *   code there until it reaches lifted code again (a call into the pack, a return to a lifted caller), so one run
@@ -84,6 +84,38 @@ static int bcond(xe_cpu *c, unsigned bo, unsigned bi, int ctr_ok)
 }
 
 #include "x360_interp_vmx.inc"
+
+/* OE forms (XBA-284): the overflow of an XO-form operation on its operands (ci: XER[CA] before it), -1 for those with
+ * no OE form (mulhw, mulhwu, mulhd, mulhdu: the bit is ignored). Worked out on the exact values, apart from the
+ * lifter's sign rule (xenon_ops.h xe_ov_add): 32-bit mode, the add / subtract family overflows on the low word. */
+static int oe_overflow(unsigned xo9, uint64_t a, uint64_t b, unsigned ci)
+{
+    int64_t x = (int32_t)(uint32_t)a, y = (int32_t)(uint32_t)b, s;
+    switch (xo9) {
+    case 266: s = x + y; break;          /* add */
+    case 10: s = x + y; break;           /* addc */
+    case 138: s = x + y + ci; break;     /* adde */
+    case 202: s = x + ci; break;         /* addze */
+    case 234: s = x - 1 + ci; break;     /* addme */
+    case 40: s = y - x; break;           /* subf */
+    case 8: s = y - x; break;            /* subfc */
+    case 136: s = y - x - 1 + ci; break; /* subfe */
+    case 200: s = -x - 1 + ci; break;    /* subfze */
+    case 232: s = -x - 2 + ci; break;    /* subfme */
+    case 104: s = -x; break;             /* neg */
+    case 235: s = x * y; break;          /* mullw */
+    case 491: return y == 0 || (x == INT32_MIN && y == -1); /* divw */
+    case 459: return (uint32_t)b == 0;   /* divwu */
+    case 233: {                          /* mulld */
+        __int128 p = (__int128)(int64_t)a * (int64_t)b;
+        return p != (__int128)(int64_t)p;
+    }
+    case 489: return b == 0 || ((int64_t)a == INT64_MIN && (int64_t)b == -1); /* divd */
+    case 457: return b == 0;             /* divdu */
+    default: return -1;
+    }
+    return s < INT32_MIN || s > INT32_MAX;
+}
 
 /* 1: the instruction is not one this interpreter knows (the caller reports it) */
 static int exec(x360_machine *x, xe_cpu *c, uint32_t pc, uint32_t w)
@@ -263,8 +295,8 @@ static int exec(x360_machine *x, xe_cpu *c, uint32_t pc, uint32_t w)
     case 31: {
         uint64_t a = R(ra), b = R(rb);
         uint32_t ea = (uint32_t)(RA0(ra) + b), eau = (uint32_t)(a + b);
-        unsigned oe = (w >> 10) & 1;
-        switch (xo & 0x1FF) { /* XO-form arithmetic (OE: the lifter hands these over; OV is not modelled) */
+        unsigned oe = (w >> 10) & 1, ci0 = c->xer_ca;
+        switch (xo & 0x1FF) { /* XO-form arithmetic (OE: OV / SO after xo_rec) */
         case 266: R(rd) = a + b; goto xo_rec;
         case 40: R(rd) = b - a; goto xo_rec;
         case 10: R(rd) = a + b; c->xer_ca = xe_carry(a, b, 0); goto xo_rec;
@@ -288,7 +320,6 @@ static int exec(x360_machine *x, xe_cpu *c, uint32_t pc, uint32_t w)
         case 457: R(rd) = ppc_divdu(a, b); goto xo_rec;
         default: break;
         }
-        (void)oe;
         switch (xo) {
         case 0: /* cmp */
             if (rd & 1)
@@ -426,6 +457,13 @@ static int exec(x360_machine *x, xe_cpu *c, uint32_t pc, uint32_t w)
         }
         break;
     xo_rec:
+        if (oe) {
+            int ov = oe_overflow(xo & 0x1FF, a, b, ci0);
+            if (ov >= 0) {
+                c->xer_ov = (uint32_t)ov;
+                c->xer_so |= c->xer_ov;
+            }
+        }
         if (rec)
             CR0(R(rd));
         break;
