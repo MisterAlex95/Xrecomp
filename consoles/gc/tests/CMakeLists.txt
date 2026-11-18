@@ -62,6 +62,12 @@ add_executable(gc_gx_progcache_test gx_progcache_test.c)
 target_link_libraries(gc_gx_progcache_test PRIVATE gc_core)
 target_compile_options(gc_gx_progcache_test PRIVATE -Wall -Wextra)
 add_test(NAME gc_gx_progcache COMMAND gc_gx_progcache_test ${CMAKE_CURRENT_BINARY_DIR})
+# gx_ring: the bookkeeping of RECOMP_GC_GX_STREAM=storage against a simulated GPU (no GL): no byte the GPU may still read
+# is ever written, across wraps, with any alignment
+add_executable(gc_gx_ring_test gx_ring_test.c)
+target_include_directories(gc_gx_ring_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/gx)
+target_compile_options(gc_gx_ring_test PRIVATE -Wall -Wextra)
+add_test(NAME gc_gx_ring COMMAND gc_gx_ring_test)
 # gx_batch: the renderer's draw batch on a headless GLES 3 context (llvmpipe): points and line strips (4 vertices per
 # quad) flush the batch before they would overflow it (77 without a context)
 add_executable(gc_gx_batch_test gx_batch_test.c)

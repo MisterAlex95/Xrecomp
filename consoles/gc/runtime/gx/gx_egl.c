@@ -80,6 +80,7 @@ int gx_gl_load(gx_glfn *gl, const gx_eglfn *egl)
     *(void **)&gl->glClearDepth = gl_sym(egl, "glClearDepth");
     *(void **)&gl->glGetProgramBinary = gl_sym(egl, "glGetProgramBinary");
     *(void **)&gl->glProgramBinary = gl_sym(egl, "glProgramBinary");
+    *(void **)&gl->glBufferStorageEXT = gl_sym(egl, "glBufferStorageEXT");
     return missing ? -1 : 0;
 }
 

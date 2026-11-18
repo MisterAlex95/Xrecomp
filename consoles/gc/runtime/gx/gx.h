@@ -117,6 +117,9 @@ typedef struct gx_stats {
     uint64_t fifo_bytes, draws, vertices, batches, efb_copies, xfb_copies, peeks, pokes;
     uint64_t tex_decodes, tex_hits, shaders_ready, shaders_pending, uber_draws, special_draws;
     uint64_t unknown_cmds;
+    /* RECOMP_GC_GX_STREAM=storage: whether it is in use, the waits for a fence the GPU had not signalled yet and their
+     * total time, the wraps of each ring (vertices, indices, uniforms), the uploads too large for a ring */
+    uint64_t stream_storage, stream_waits, stream_wait_us, stream_wraps[3], stream_oversize;
 } gx_stats;
 void gx_get_stats(const gx_state *gx, gx_stats *s);
 

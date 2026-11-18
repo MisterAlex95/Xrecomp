@@ -29,6 +29,7 @@
 #include "gx_glapi.h"
 #include "gx_internal.h"
 #include "gx_progcache.h"
+#include "gx_ring.h"
 #include "gx_shader.h"
 
 #define BATCH_V (1u << 18)
@@ -43,6 +44,11 @@ enum { P_PENDING = 0, P_READY = 1, P_FAILED = 2, P_COMPILING = 3 };
 
 /* RECOMP_GC_GX_XFB_COPY: how the EFB reaches an XFB slot's texture. */
 enum { XFB_COPY_BLIT = 0, XFB_COPY_FLUSH = 1, XFB_COPY_FBO = 2, XFB_COPY_DRAW = 3 };
+
+/* RECOMP_GC_GX_STREAM: how draws reach the vertex, index and uniform buffers (ring_put). */
+enum { STREAM_MAP = 0, STREAM_MAPINV = 1, STREAM_SUB = 2, STREAM_STORAGE = 3 };
+static const char *const stream_names[] = {"map", "mapinv", "sub", "storage"};
+#define STREAM_LOG_FIELDS 3000u /* a line of storage statistics this often */
 
 typedef struct prog_entry {
     gx_shader_key key;
@@ -89,7 +95,14 @@ struct gx_gl {
     GLuint vao, vbo, ebo, ubo, empty_vao;
     size_t ring_size[3], ring_off[3]; /* vbo, ebo, ubo as streaming rings (ring_put) */
     GLint ubo_align;
-    int stream; /* RECOMP_GC_GX_STREAM: 0 map (unsynchronised), 1 map + invalidate range, 2 glBufferSubData */
+    int stream; /* STREAM_* */
+    /* STREAM_STORAGE: the three rings, mapped for their whole life */
+    gx_ring sr[3];
+    uint8_t *sr_map[3];
+    GLuint sr_big[3];     /* an upload too large for its ring: a buffer of its own until the draw is issued */
+    EGLContext sr_ctx;    /* the context the rings live in */
+    uint64_t sr_waits, sr_wait_ns, sr_wait_max_ns, sr_oversize;
+    bool sr_wait_warned;
     GLuint samplers[8];
     GLuint white_tex;
     GLuint uber;
@@ -938,14 +951,200 @@ static int sext11(uint32_t v)
     return v >= 0x400 ? (int)v - 0x800 : (int)v;
 }
 
-/* Streaming buffers (vbo, ebo, ubo): each upload goes after the previous one in a buffer that keeps its storage, and
- * only a wrap orphans it (glBufferData once). A glBufferData of a new size at every draw made Adreno drivers allocate
- * GPU memory per draw (an ioctl each): Prince of Persia: The Two Thrones fell to 13 % in 3D scenes on the Fold8. The
- * ranges written after an orphan were never handed to the GPU, so they are mapped unsynchronised, without
+/* ---- RECOMP_GC_GX_STREAM=storage: persistently mapped rings (bookkeeping: gx_ring.h) ---- */
+
+static uint64_t stream_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static void *sr_fence(void *user)
+{
+    gx_gl *g = user;
+    GLsync s = F.glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!s)
+        F.glFinish(); /* no fence to wait for later: the region is complete when this returns */
+    return s;
+}
+
+/* Returns once the GPU has passed the fence. A wait that fails, or that lasts absurdly long (a lost context need not
+ * ever signal), ends in glFinish, which also means every earlier command is complete. */
+static void sr_retire(void *user, void *sync)
+{
+    gx_gl *g = user;
+    GLsync s = sync;
+    if (!s)
+        return;
+    GLenum r = F.glClientWaitSync(s, 0, 0);
+    if (r == GL_TIMEOUT_EXPIRED) {
+        uint64_t t0 = stream_now_ns(), dt = 0;
+        do {
+            r = F.glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000u);
+            dt = stream_now_ns() - t0;
+        } while (r == GL_TIMEOUT_EXPIRED && dt < 10000000000u);
+        g->sr_waits++;
+        g->sr_wait_ns += dt;
+        if (dt > g->sr_wait_max_ns)
+            g->sr_wait_max_ns = dt;
+    }
+    if (r != GL_ALREADY_SIGNALED && r != GL_CONDITION_SATISFIED) {
+        if (!g->sr_wait_warned)
+            fprintf(stderr, "gx: buffer streaming: fence wait ended with 0x%X, finishing the GPU's work instead\n", r);
+        g->sr_wait_warned = true;
+        F.glFinish();
+    }
+    F.glDeleteSync(s);
+}
+
+static void sr_discard(void *user, void *sync)
+{
+    gx_gl *g = user;
+    if (sync)
+        F.glDeleteSync((GLsync)sync);
+}
+
+static const gx_ring_ops sr_ops = {sr_fence, sr_retire, sr_discard};
+
+static bool has_extension(gx_glfn *f, const char *name)
+{
+    GLint n = 0;
+    f->glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+    for (GLint i = 0; i < n; i++) {
+        const char *e = (const char *)f->glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        if (e && !strcmp(e, name))
+            return true;
+    }
+    return false;
+}
+
+/* Unmaps and deletes the rings (their buffers stay to the caller). Nothing is waited for: GL keeps a deleted buffer
+ * until the GPU is done with it. In another context than the rings' none of these names mean anything, so only the
+ * pointers are dropped. */
+static void stream_storage_destroy(gx_gl *g, const GLuint *bufs)
+{
+    bool same_ctx = g->egl.eglGetCurrentContext() == g->sr_ctx;
+    for (unsigned r = 0; r < 3; r++) {
+        if (same_ctx) {
+            gx_ring_release(&g->sr[r], &sr_ops, g);
+            if (g->sr_big[r])
+                F.glDeleteBuffers(1, &g->sr_big[r]);
+            if (g->sr_map[r]) {
+                F.glBindBuffer(GL_COPY_WRITE_BUFFER, bufs[r]);
+                F.glUnmapBuffer(GL_COPY_WRITE_BUFFER);
+            }
+        }
+        g->sr_big[r] = 0;
+        g->sr_map[r] = NULL;
+        gx_ring_init(&g->sr[r], 0);
+    }
+    if (same_ctx)
+        F.glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+}
+
+/* Allocates and maps the three rings once. NULL, or why they cannot be used (nothing is left allocated, but the
+ * buffer names must be replaced: storage may have been made immutable). */
+static const char *stream_storage_create(gx_gl *g)
+{
+    if (!has_extension(&g->f, "GL_EXT_buffer_storage"))
+        return "no GL_EXT_buffer_storage";
+    if (!F.glBufferStorageEXT)
+        return "no glBufferStorageEXT entry point";
+    static const size_t sizes[3] = {32u << 20, 16u << 20, 8u << 20};
+    int kb = 0; /* GC_GX_STREAM_RING_KB: tests, small rings wrap all the time */
+    const char *kbs = getenv("GC_GX_STREAM_RING_KB");
+    if (kbs && *kbs)
+        kb = atoi(kbs);
+    const GLuint bufs[3] = {g->vbo, g->ebo, g->ubo};
+    const GLbitfield flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT_EXT | GL_MAP_COHERENT_BIT_EXT;
+    const char *why = NULL;
+    g->sr_ctx = g->egl.eglGetCurrentContext();
+    gl_clear_errors(&g->f);
+    for (unsigned r = 0; r < 3 && !why; r++) {
+        size_t size = kb > 0 ? (size_t)(kb < 64 ? 64 : kb) << 10 : sizes[r];
+        F.glBindBuffer(GL_COPY_WRITE_BUFFER, bufs[r]);
+        F.glBufferStorageEXT(GL_COPY_WRITE_BUFFER, (GLsizeiptr)size, NULL, flags);
+        if (F.glGetError() != GL_NO_ERROR) {
+            why = "glBufferStorageEXT failed";
+            break;
+        }
+        g->sr_map[r] = F.glMapBufferRange(GL_COPY_WRITE_BUFFER, 0, (GLsizeiptr)size, flags);
+        if (!g->sr_map[r]) {
+            why = "the persistent map failed";
+            break;
+        }
+        gx_ring_init(&g->sr[r], size);
+    }
+    if (why) {
+        stream_storage_destroy(g, bufs);
+        gl_clear_errors(&g->f);
+    }
+    F.glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    return why;
+}
+
+static void stream_storage_log(const gx_gl *g)
+{
+    fprintf(stderr, "gx: stream storage: %llu fence waits (%.1f ms in all, longest %.1f ms), wraps vbo %llu ebo %llu "
+                    "ubo %llu, %llu uploads too large for a ring\n",
+            (unsigned long long)g->sr_waits, (double)g->sr_wait_ns / 1e6, (double)g->sr_wait_max_ns / 1e6,
+            (unsigned long long)g->sr[0].wraps, (unsigned long long)g->sr[1].wraps,
+            (unsigned long long)g->sr[2].wraps, (unsigned long long)g->sr_oversize);
+}
+
+/* The draw reading this flush's uploads is issued: fences for the rings that advanced far enough, and the buffers of
+ * oversized uploads go (GL keeps their storage until the GPU has read it). */
+static void stream_after_draw(gx_state *gx)
+{
+    gx_gl *g = gx->gl;
+    gx->stats.stream_storage = g->stream == STREAM_STORAGE;
+    if (g->stream != STREAM_STORAGE)
+        return;
+    for (unsigned r = 0; r < 3; r++) {
+        gx->stats.stream_wraps[r] = g->sr[r].wraps;
+        gx_ring_after_draw(&g->sr[r], &sr_ops, g);
+        if (g->sr_big[r]) {
+            F.glDeleteBuffers(1, &g->sr_big[r]);
+            g->sr_big[r] = 0;
+        }
+    }
+    gx->stats.stream_waits = g->sr_waits;
+    gx->stats.stream_wait_us = g->sr_wait_ns / 1000u;
+    gx->stats.stream_oversize = g->sr_oversize;
+}
+
+/* Streaming buffers (vbo, ebo, ubo). STREAM_STORAGE: a copy into the ring's persistent mapping, no GL call for the data
+ * at all, behind fences (gx_ring.h). The other modes: each upload goes after the previous one in a buffer that keeps
+ * its storage, and only a wrap orphans it (glBufferData once). A glBufferData of a new size at every draw made Adreno
+ * drivers allocate GPU memory per draw (an ioctl each): Prince of Persia: The Two Thrones fell to 13 % in 3D scenes on
+ * the Fold8. The ranges written after an orphan were never handed to the GPU, so they are mapped unsynchronised, without
  * GL_MAP_INVALIDATE_RANGE_BIT: with it, the Fold8's Adreno driver still allocated and copied on every map (2 % in the
  * same scene, 83 % without). RECOMP_GC_GX_STREAM=mapinv / sub keep the other ways for comparison. Returns the offset. */
 static size_t ring_put(gx_gl *g, unsigned r, GLuint buf, GLenum target, const void *data, size_t n, size_t align)
 {
+    if (g->stream == STREAM_STORAGE && g->egl.eglGetCurrentContext() != g->sr_ctx) {
+        /* The mappings died with their context: never write through them. Plain buffers from here on. */
+        fprintf(stderr, "gx: buffer streaming: the GL context changed, storage rings dropped, now map\n");
+        const GLuint bufs[3] = {g->vbo, g->ebo, g->ubo};
+        stream_storage_destroy(g, bufs);
+        g->stream = STREAM_MAP;
+    }
+    if (g->stream == STREAM_STORAGE) {
+        gx_ring *ring = &g->sr[r];
+        if (!gx_ring_fits(ring, n)) {
+            F.glGenBuffers(1, &g->sr_big[r]);
+            F.glBindBuffer(target, g->sr_big[r]);
+            F.glBufferData(target, (GLsizeiptr)n, data, GL_STREAM_DRAW);
+            g->sr_oversize++;
+            return 0;
+        }
+        size_t off = (size_t)gx_ring_reserve(ring, &sr_ops, g, n, align);
+        F.glBindBuffer(target, buf);
+        memcpy(g->sr_map[r] + off, data, n);
+        __atomic_thread_fence(__ATOMIC_RELEASE); /* the bytes are out before the draw that reads them is issued */
+        return off;
+    }
     size_t off = (g->ring_off[r] + align - 1) / align * align;
     F.glBindBuffer(target, buf);
     if (n > g->ring_size[r] || off + n > g->ring_size[r]) {
@@ -957,10 +1156,10 @@ static size_t ring_put(gx_gl *g, unsigned r, GLuint buf, GLenum target, const vo
         off = 0;
     }
     void *p = NULL;
-    if (g->stream < 2)
+    if (g->stream != STREAM_SUB)
         p = F.glMapBufferRange(target, (GLintptr)off, (GLsizeiptr)n,
                                GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT |
-                                   (g->stream == 1 ? GL_MAP_INVALIDATE_RANGE_BIT : 0));
+                                   (g->stream == STREAM_MAPINV ? GL_MAP_INVALIDATE_RANGE_BIT : 0));
     if (p) {
         memcpy(p, data, n);
         F.glUnmapBuffer(target);
@@ -1101,6 +1300,7 @@ void gx_gl_flush(gx_state *gx)
     }
     size_t io = ring_put(g, 1, g->ebo, GL_ELEMENT_ARRAY_BUFFER, g->bi, (size_t)g->ni * 4, 4);
     F.glDrawElements(GL_TRIANGLES, (GLsizei)g->ni, GL_UNSIGNED_INT, (const void *)io);
+    stream_after_draw(gx);
     gx->stats.batches++;
     if (uber)
         gx->stats.uber_draws++;
@@ -1819,6 +2019,8 @@ void gx_gl_frame(gx_state *gx)
     if (!g)
         return;
     gx_gl_flush(gx);
+    if (g->stream == STREAM_STORAGE && gx->field_count % STREAM_LOG_FIELDS == 0)
+        stream_storage_log(g);
     if (gx->field_count % 60 == 0) { /* drop textures unused for a while */
         for (unsigned i = 0; i < TEX_BUCKETS; i++) {
             tex_entry **pp = &g->texs[i];
@@ -2113,9 +2315,36 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     F.glGenBuffers(1, &g->ebo);
     F.glGenBuffers(1, &g->ubo);
     {
+        /* Unset: persistent rings where the driver has them, else unsynchronised maps. */
         const char *sm = getenv("RECOMP_GC_GX_STREAM");
-        g->stream = sm && !strcmp(sm, "mapinv") ? 1 : sm && !strcmp(sm, "sub") ? 2 : 0;
-        fprintf(stderr, "gx: buffer streaming: %s\n", g->stream == 1 ? "mapinv" : g->stream == 2 ? "sub" : "map");
+        int want = -1;
+        if (sm && *sm) {
+            for (int m = 0; m < 4; m++)
+                if (!strcmp(sm, stream_names[m]))
+                    want = m;
+            if (want < 0)
+                fprintf(stderr, "gx: RECOMP_GC_GX_STREAM=%s is not a mode (storage, map, mapinv, sub)\n", sm);
+        }
+        g->stream = want < 0 ? STREAM_MAP : want;
+        if (want < 0 || want == STREAM_STORAGE) {
+            const char *why = stream_storage_create(g);
+            if (!why) {
+                g->stream = STREAM_STORAGE;
+            } else {
+                g->stream = STREAM_MAP;
+                if (want == STREAM_STORAGE)
+                    fprintf(stderr, "gx: buffer streaming: storage requested but unavailable (%s), falling back to map\n",
+                            why);
+                /* a failed attempt may have made storage immutable: the other modes need fresh buffers */
+                F.glDeleteBuffers(1, &g->vbo);
+                F.glDeleteBuffers(1, &g->ebo);
+                F.glDeleteBuffers(1, &g->ubo);
+                F.glGenBuffers(1, &g->vbo);
+                F.glGenBuffers(1, &g->ebo);
+                F.glGenBuffers(1, &g->ubo);
+            }
+        }
+        fprintf(stderr, "gx: buffer streaming: %s\n", stream_names[g->stream]);
     }
     g->ubo_align = 256;
     F.glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &g->ubo_align);
@@ -2163,9 +2392,9 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     /* how copies reach the XFB slots, and the per-field diagnostics (the flicker on Adreno 840) */
     {
         const char *cm = getenv("RECOMP_GC_GX_XFB_COPY");
-        g->xfb_copy = cm && !strcmp(cm, "flush") ? XFB_COPY_FLUSH : cm && !strcmp(cm, "fbo") ? XFB_COPY_FBO
-                      : cm && !strcmp(cm, "draw") ? XFB_COPY_DRAW : XFB_COPY_BLIT;
-        if (cm && *cm && g->xfb_copy == XFB_COPY_BLIT && strcmp(cm, "blit"))
+        g->xfb_copy = cm && !strcmp(cm, "blit") ? XFB_COPY_BLIT : cm && !strcmp(cm, "fbo") ? XFB_COPY_FBO
+                      : cm && !strcmp(cm, "draw") ? XFB_COPY_DRAW : XFB_COPY_FLUSH;
+        if (cm && *cm && g->xfb_copy == XFB_COPY_FLUSH && strcmp(cm, "flush"))
             fprintf(stderr, "gx: RECOMP_GC_GX_XFB_COPY=%s is not a mode (blit, flush, fbo, draw)\n", cm);
         if (g->xfb_copy == XFB_COPY_DRAW) {
             static const char xd_fs[] =
@@ -2315,6 +2544,11 @@ void gx_gl_detach(gx_state *gx)
     F.glDeleteTextures(1, &g->peek_tex);
     F.glDeleteTextures(1, &g->white_tex);
     F.glDeleteSamplers(8, g->samplers);
+    if (g->stream == STREAM_STORAGE) {
+        const GLuint bufs[3] = {g->vbo, g->ebo, g->ubo};
+        stream_storage_log(g);
+        stream_storage_destroy(g, bufs);
+    }
     F.glDeleteBuffers(1, &g->vbo);
     F.glDeleteBuffers(1, &g->ebo);
     F.glDeleteBuffers(1, &g->ubo);
