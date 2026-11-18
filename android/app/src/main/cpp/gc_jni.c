@@ -7,6 +7,7 @@
 
 #include "gc_disc.h"
 #include "gc_extract.h"
+#include "jni_text.h"
 
 /* GcNative.extractNative(path, out): path a file path or "fd:N" (left open). "OK <key> <rels> <dol bytes>" when out was
  * written, else "ERR <why>". */
@@ -15,7 +16,7 @@ Java_fr_adserver_xrecomp_GcNative_extractNative(JNIEnv *env, jclass cls, jstring
 {
     (void)cls;
     if (!jpath || !jout)
-        return (*env)->NewStringUTF(env, "ERR no path");
+        return jni_utf8_string(env, "ERR no path");
     const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
     const char *out = (*env)->GetStringUTFChars(env, jout, NULL);
     char res[400], why[300] = "", key[48] = "?";
@@ -39,5 +40,5 @@ Java_fr_adserver_xrecomp_GcNative_extractNative(JNIEnv *env, jclass cls, jstring
         (*env)->ReleaseStringUTFChars(env, jpath, path);
     if (out)
         (*env)->ReleaseStringUTFChars(env, jout, out);
-    return (*env)->NewStringUTF(env, res);
+    return jni_utf8_string(env, res); /* res holds a file name, maybe cut by snprintf */
 }
