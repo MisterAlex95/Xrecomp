@@ -719,6 +719,9 @@ jobs:
           id=$(curl -fsS -X POST -H "$auth" -H "Content-Type: application/json" -d "$body" "$api/releases" | jq -r .id)
           curl -fsS -X POST -H "$auth" -F "attachment=@out/apk/xrecomp.apk;type=application/vnd.android.package-archive" \
             "$api/releases/$id/assets?name=xrecomp-$sha8.apk" | jq -r .browser_download_url
+          ffmpeg=$(sh tools/ci/ffmpeg_source.sh out)   # the LGPL source of the APK's libavcodec (NOTICE « FFmpeg »)
+          curl -fsS -X POST -H "$auth" -F "attachment=@$ffmpeg;type=application/x-xz" \
+            "$api/releases/$id/assets?name=$(basename "$ffmpeg")" | jq -r .browser_download_url
           printf '%s' "$body" | jq -r .body > out/release-body.md
 
       # The same rolling prerelease on the public GitHub mirror (docs/releases/README.md): the push mirror copies
@@ -731,7 +734,7 @@ jobs:
           if [ -z "$GH_TOKEN" ]; then echo "GH_RELEASE_TOKEN not set: no GitHub release"; exit 0; fi
           sha8=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
           sh tools/ci/github_release.sh xrecomp-latest "$GITHUB_SHA" "XRecomp, latest main ($sha8)" true \
-            out/release-body.md "out/apk/xrecomp.apk=xrecomp-$sha8.apk"
+            out/release-body.md "out/apk/xrecomp.apk=xrecomp-$sha8.apk" "$(sh tools/ci/ffmpeg_source.sh out)"
 
       - name: Clean up
         if: always()

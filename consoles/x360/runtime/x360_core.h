@@ -94,8 +94,8 @@ void x360_set_audio_out(x360_machine *x, FILE *f);
  * stereo (front + 0.707 x (centre + surround) per side), up to `frames` taken from the ring (interleaved L, R);
  * returns the frames given. About a third of a second is kept; older frames are dropped when nothing pulls. */
 size_t x360_audio_pull(x360_machine *x, int16_t *out, size_t frames);
-/* XMA (x360_xma.c): the decoder of XMA2 packets behind the contexts. The default backend gives each frame 512
- * samples of silence (XMA2 frames are WMA Pro: no decoder here); a host may register another for every machine.
+/* XMA (x360_xma.c): the decoder of XMA2 packets behind the contexts. The default backend is libavcodec where the build
+ * found it (x360_xma_av.c), else each frame is 512 samples of silence; a host may register another for every machine.
  * decode: one 2048-byte packet (header included) to at most max_samples 16-bit samples (interleaved when the stream
  * is stereo); returns the samples written. */
 typedef struct x360_xma_backend {
@@ -103,6 +103,8 @@ typedef struct x360_xma_backend {
     void *(*open)(int channels, int sample_rate);
     int (*decode)(void *dec, const uint8_t *packet, int16_t *out, int max_samples);
     void (*close)(void *dec);
+    /* optional: the samples a decoder still holds once its input has ended (libavcodec keeps 4096 back); returns them */
+    int (*drain)(void *dec, int16_t *out, int max_samples);
 } x360_xma_backend;
 void x360_xma_set_backend(const x360_xma_backend *b); /* NULL: the silent one */
 const char *x360_xma_backend_name(void);

@@ -20,9 +20,11 @@
  * each): the input buffer the context's current-buffer bit names is read from its read offset, each packet goes to
  * the frame backend, the PCM it gives (16-bit, big-endian, interleaved when stereo) fills the output ring's free
  * blocks (between the write offset and the read offset the title moves), a buffer read to its end loses its valid
- * bit and the other one is current. The backend: XMA2 frames are WMA Pro, whose codebooks this repository does not
- * have (no LGPL code copied), so by default each frame is 512 samples of silence -- the buffers keep flowing as the
- * title expects --, and a host may register a real decoder (x360_xma_set_backend). Loops are not followed (left).
+ * bit and the other one is current. The backend: libavcodec where the build found it (x360_xma_av.c, XBA-299;
+ * RECOMP_X360_XMA=silence turns it off), else each frame is 512 samples of silence -- the buffers keep flowing as the
+ * title expects --; a host may register another decoder (x360_xma_set_backend). A loop (loop count in dword 0, start
+ * and end in bits) goes back at packet granularity: the packet holding the loop end is played whole, then the one
+ * holding the loop start, from a fresh decoder. The sub-packet start and end bits are not followed.
  *
  * The audio out: what render driver clients submit (256-sample frames, 6 channels of float: front left / right,
  * centre, LFE, surround left / right) is mixed (several clients summed) and folded down to 48 kHz 16-bit stereo in a
@@ -51,6 +53,7 @@ typedef struct x360_xma {
     void *dec[XMA_CONTEXTS];          /* the backend's decoder per context (not state) */
     int16_t *pending[XMA_CONTEXTS];   /* PCM decoded but not yet written to the output ring (not state) */
     uint32_t npending[XMA_CONTEXTS];  /* in samples (all channels) */
+    uint8_t starved[XMA_CONTEXTS];    /* polls since the input ran out with a decoder open (not state) */
     uint64_t packets, frames, blocks_out, kicks;
     /* the mix of the render driver clients' frames, then the ring the host pulls */
     float acc[256 * 2];
@@ -83,8 +86,13 @@ static void silence_close(void *h)
     (void)h;
 }
 
-static const x360_xma_backend k_silence = {"silence", silence_open, silence_decode, silence_close};
+static const x360_xma_backend k_silence = {"silence", silence_open, silence_decode, silence_close, NULL};
+#ifdef X360_HAVE_AVCODEC
+extern const x360_xma_backend x360_xma_av_backend;
+static const x360_xma_backend *s_backend = &x360_xma_av_backend;
+#else
 static const x360_xma_backend *s_backend = &k_silence;
+#endif
 
 void x360_xma_set_backend(const x360_xma_backend *b)
 {
@@ -107,6 +115,9 @@ static x360_xma *xma_of(x360_machine *x)
 
 int x360_xma_init(x360_machine *x)
 {
+    const char *env = getenv("RECOMP_X360_XMA");
+    if (env && !strcmp(env, "silence"))
+        s_backend = &k_silence;
     return xma_of(x) && !x360_commit(x, APU_MMIO, 0x10000) ? 0 : -1;
 }
 
@@ -167,6 +178,38 @@ static void drop_decoder(x360_xma *m, int i)
     m->npending[i] = 0;
 }
 
+static const int k_rates[4] = {24000, 32000, 44100, 48000}; /* the context's sample rate field */
+#define XMA_MAX_PCM (64 * XMA_FRAME_SAMPLES * 2)
+#define XMA_STARVED_POLLS 8 /* a title refilling its buffers in time is not an end of stream */
+
+/* n samples to the context's pending PCM, big-endian as the title reads them */
+static void pending_add(x360_xma *m, int i, const int16_t *pcm, int n)
+{
+    if (n <= 0)
+        return;
+    int16_t *p = realloc(m->pending[i], ((size_t)m->npending[i] + (size_t)n) * 2);
+    if (!p)
+        return;
+    for (int k = 0; k < n; k++)
+        p[m->npending[i] + (uint32_t)k] = (int16_t)(((uint16_t)pcm[k] >> 8) | ((uint16_t)pcm[k] << 8));
+    m->pending[i] = p;
+    m->npending[i] += (uint32_t)n;
+}
+
+/* the end of a run of packets: what the decoder still holds goes out, and the next packet starts a new decoder */
+static void decoder_finish(x360_xma *m, int i)
+{
+    if (!m->dec[i])
+        return;
+    int16_t *pcm = s_backend->drain ? malloc(XMA_MAX_PCM * 2) : NULL;
+    if (pcm)
+        pending_add(m, i, pcm, s_backend->drain(m->dec[i], pcm, XMA_MAX_PCM));
+    free(pcm);
+    s_backend->close(m->dec[i]);
+    m->dec[i] = NULL;
+    m->starved[i] = 0;
+}
+
 /* decode what context i can: packets of its current input buffer while the output ring has room */
 static void xma_work(x360_machine *x, int i)
 {
@@ -205,8 +248,13 @@ static void xma_work(x360_machine *x, int i)
                 wr(x, i, 2, with(rd(x, i, 2), 0, 26, 0));
                 continue;
             }
+            if (m->dec[i] && ++m->starved[i] >= XMA_STARVED_POLLS) {
+                decoder_finish(m, i);
+                continue; /* its last samples to the ring */
+            }
             return;
         }
+        m->starved[i] = 0;
         uint32_t base = rd(x, i, cur ? 6 : 5) & 0x1FFFFFFFu;
         uint32_t count = field(cur ? d1 : d0, 0, 12);
         uint32_t off = field(rd(x, i, 2), 0, 26), pkt = off / (XMA_PACKET * 8);
@@ -221,25 +269,24 @@ static void xma_work(x360_machine *x, int i)
         for (uint32_t k = 0; k < XMA_PACKET; k++)
             packet[k] = x360_r8(x, src + k);
         if (!m->dec[i])
-            m->dec[i] = s_backend->open(stereo ? 2 : 1, 48000);
-        int max = 64 * XMA_FRAME_SAMPLES * 2;
-        int16_t *pcm = malloc((size_t)max * 2);
-        int n = pcm ? s_backend->decode(m->dec[i], packet, pcm, max) : 0;
-        if (n > 0) {
-            int16_t *p = realloc(m->pending[i], ((size_t)m->npending[i] + (size_t)n) * 2);
-            if (p) {
-                for (int k = 0; k < n; k++) /* big-endian samples, as the title reads them */
-                    p[m->npending[i] + (uint32_t)k] = (int16_t)(((uint16_t)pcm[k] >> 8) | ((uint16_t)pcm[k] << 8));
-                m->pending[i] = p;
-                m->npending[i] += (uint32_t)n;
-            }
-        }
+            m->dec[i] = s_backend->open(stereo ? 2 : 1, k_rates[field(d1, 27, 2)]);
+        int16_t *pcm = malloc(XMA_MAX_PCM * 2);
+        if (pcm)
+            pending_add(m, i, pcm, s_backend->decode(m->dec[i], packet, pcm, XMA_MAX_PCM));
         free(pcm);
         m->packets++;
         m->frames += packet[0] >> 2;
         /* the next packet: after this one's skip count; metadata kept for XMAGetPacketMetadata */
         uint32_t skip = packet[3];
         uint32_t next = (pkt + 1 + (skip == 0xFF ? 0 : skip)) * XMA_PACKET * 8;
+        /* a loop: after the packet holding its last bit, back to the packet holding its first */
+        uint32_t loops = field(rd(x, i, 0), 12, 8), first = field(rd(x, i, 3), 0, 26), end = field(rd(x, i, 4), 0, 26);
+        if (loops && end > first && pkt >= (end - 1) / (XMA_PACKET * 8)) {
+            next = first / (XMA_PACKET * 8) * XMA_PACKET * 8;
+            if (loops != 255) /* 255: for ever */
+                wr(x, i, 0, with(rd(x, i, 0), 12, 8, loops - 1));
+            decoder_finish(m, i); /* the frames after the jump do not follow the ones before it */
+        }
         wr(x, i, 2, with(rd(x, i, 2), 0, 26, next));
         wr(x, i, 4, with(rd(x, i, 4), 26, 5, field((uint32_t)packet[2], 0, 3)));
     }

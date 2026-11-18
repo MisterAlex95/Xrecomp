@@ -81,6 +81,24 @@ LGPL-2.1-or-later — WMV2 code tables extracted from FFmpeg
   files above: LGPL-2.1-or-later, full text in LICENSES/LGPL-2.1.txt.
 
 
+LGPL-2.1-or-later — FFmpeg (libavcodec, libavutil), shared libraries in the app
+-------------------------------------------------------------------------------
+
+  https://ffmpeg.org/
+
+    lib/arm64-v8a/libavcodec.so, lib/arm64-v8a/libavutil.so
+                          FFmpeg 7.0.2, unmodified, decoding the Xbox 360's
+                          XMA audio. (c) the FFmpeg developers.
+
+  Built by tools/android/build_ffmpeg.sh, which holds the exact configuration
+  (LGPL only: no --enable-gpl, no --enable-nonfree; only the XMA decoders) and
+  the source's SHA-256. Each release page carries that source,
+  ffmpeg-7.0.2.tar.xz. They are separate shared libraries that this project's
+  code links dynamically, so they can be replaced by a modified build: rebuild
+  with that script, or set XBA_FFMPEG_DIR to your own build. On a desktop the
+  system's FFmpeg is used. Licence text: LICENSES/LGPL-2.1.txt.
+
+
 Frame generation (LSFG) — built from pinned sources, not vendored
 -----------------------------------------------------------------
 

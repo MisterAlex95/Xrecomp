@@ -109,6 +109,8 @@ if (xbaPs1Bios) {
 // repository, zipped at build time, never copied by hand), each with its .sha256. The app (Toolchain.java) extracts
 // them once per version. Without it the APK is the plain shell, as before.
 def xbaToolchainDir = (findProperty('xbaToolchainDir') ?: '') as String
+// tools/android/build_ffmpeg.sh's output (XBA-299): the Xbox 360's XMA decoder; without it XMA voices are silent.
+def xbaFfmpegDir = (findProperty('xbaFfmpegDir') ?: System.getenv('XBA_FFMPEG_DIR') ?: '') as String
 if (xbaToolchainDir) {
     def need = ['libxbapython.so', 'libpython3.13.so', 'libcapstone.so', 'libxbacc.so'].collect { "jniLibs/arm64-v8a/$it" } +
                ['python-stdlib.zip', 'sysroot.zip'].collect { "assets/prepare/$it" }
@@ -259,6 +261,7 @@ android {
                           // Release only: -mcpu for the runtime libraries (cpp/CMakeLists.txt); empty = arm64 baseline.
                           "-DXBA_NATIVE_CPU=${findProperty('xbaNativeCpu') ?: ''}",
                           "-DXBOXRECOMP_LSFG=${xbaLsfg ? 'ON' : 'OFF'}",
+                          "-DXBA_FFMPEG_DIR=${xbaFfmpegDir}",
                           "-DXBOXRECOMP_LSFG_VK_SRC=${lsfgVkSrc}", "-DXBOXRECOMP_LSFG_DXVK_SRC=${dxvkSrc}"
                 if (xbaJobs)
                     arguments "-DCMAKE_JOB_POOLS=xba_jobs=${xbaJobs}", '-DCMAKE_JOB_POOL_COMPILE=xba_jobs',
@@ -272,6 +275,10 @@ android {
         sourceSets.debug.res.srcDirs += xbaIconRes
         sourceSets.release.res.srcDirs += xbaIconRes
     }
+
+    // libavcodec.so and libavutil.so, the Xbox 360's XMA decoder (XBA-299, tools/android/build_ffmpeg.sh)
+    if (xbaFfmpegDir)
+        sourceSets.main.jniLibs.srcDirs += "${xbaFfmpegDir}/jniLibs"
 
     if (xbaToolchainDir) {
         sourceSets.main.jniLibs.srcDirs += "${xbaToolchainDir}/jniLibs"

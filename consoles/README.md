@@ -2120,10 +2120,12 @@ What is there:
 - **XMA** (`x360_xma.c`): 320 contexts in one physical array, the kernel's `XMA*` exports and the APU registers'
   kick / clear bits (0x7FEA0000, read between slices), packets of the current input buffer decoded into the output
   ring's free blocks, buffers flipping when read to their end (layouts after Xenia's descriptions, no code taken).
-  XMA2 frames are WMA Pro, whose codebooks this repository does not have (they exist only in LGPL code; nothing
-  copied): the default backend gives each frame 512 samples of silence so titles' buffers keep flowing;
-  `x360_xma_set_backend` takes a real decoder (whether to load libavcodec's at run time or ship it in the APK is a
-  decision for Alex on XBA-280). Loops are not followed.
+  Frames are decoded by libavcodec, always linked as a shared library (`x360_xma_av.c`, XBA-299, NOTICE « FFmpeg »):
+  the system's on a desktop, `tools/android/build_ffmpeg.sh`'s in the APK. Without it, or with
+  `RECOMP_X360_XMA=silence`, each frame is 512 samples of silence so titles' buffers keep flowing. libavcodec holds the
+  last 4096 samples back until a stream ends, so they are drained once the input has stayed empty for 8 polls. A loop
+  goes back at packet granularity (the sub-packet start and end bits are not followed). Tested on packets we write
+  ourselves, with no coefficients: no real XMA audio has been heard yet.
 - **Audio out and vibration**: the render driver clients' frames mixed and folded to 48 kHz stereo
   (`x360_audio_pull`); `XamInputSetState`'s motors (`x360_pad_motors`).
 - **`x360_runtime` / `x360_play`** (`x360_runtime.h`, like `gc_runtime`): the title in a window, the renderer on the
@@ -2203,7 +2205,7 @@ Kernel surface and renderer round (XBA-296):
 
 Not there yet (XBA-229):
 - run-time shader translation (a shader first met in a run skips its draws until the next Prepare);
-- XMA decoding itself (a backend to decide) and XMA loops;
+- XMA loops to the exact bit, and hearing real XMA audio from a title;
 - several conventions (winding, channel orders, cube faces, RB_COLOR_CLEAR) that follow Xenia's descriptions and wait
   for a real title;
 - real parallel hardware threads and the network;

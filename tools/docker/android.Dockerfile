@@ -74,8 +74,18 @@ ADD --checksum=sha256:a6eb05696a6e5369ac55767ddb8d4c1f6e682478afe6768db714e8ad4e
 ADD --checksum=sha256:cfeed5f9a97d12a9761a26e7f5bd10fedb1a8ce92033075151ae3bc7206fc229 \
     https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/8b246ff75c6615ba4532fe4fde20f1be090c3764 /spirv-headers-cfeed5f9a97d12a9.tar.gz
 
+# libavcodec.so and libavutil.so for the Xbox 360's XMA decoder (XBA-299): LGPL only, shared, from FFmpeg's pinned release
+# (tools/android/build_ffmpeg.sh, NOTICE « FFmpeg »). It copies only that script, so BuildKit keeps it until the pin moves.
+FROM android AS ffmpeg-android
+ARG JOBS=4
+COPY tools/android/build_ffmpeg.sh /tmp/build_ffmpeg.sh
+RUN apt-get update && apt-get install -y --no-install-recommends make xz-utils pkg-config gcc libc6-dev && rm -rf /var/lib/apt/lists/* \
+    && sh /tmp/build_ffmpeg.sh /opt/xba-ffmpeg "$JOBS"
+
 # The toolkit's static libraries for arm64-v8a, API 30 (XBA-17). Checks that no desktop dependency is linked.
 FROM android AS toolkit
+COPY --from=ffmpeg-android /opt/xba-ffmpeg /opt/xba-ffmpeg
+ENV XBA_FFMPEG_DIR=/opt/xba-ffmpeg
 ARG JOBS=4
 COPY --from=lsfg-sources / /opt/xba-lsfg-sources/
 ENV XBOXRECOMP_DEPS_DIR=/opt/xba-lsfg-sources
@@ -121,6 +131,8 @@ FROM ps1-bios-out AS xba-ps1-bios
 # Its own application id, fr.adserver.xrecomp.dev, and label « XRecomp shell » (XBA-134): it installs next to
 # the XRecomp APK (fr.adserver.xrecomp.shell, xrecomp-latest) instead of over it (or failing on its other key).
 FROM android AS apk
+COPY --from=ffmpeg-android /opt/xba-ffmpeg /opt/xba-ffmpeg
+ENV XBA_FFMPEG_DIR=/opt/xba-ffmpeg
 ARG XBA_VERSION=dev
 COPY --from=xba-ps1-bios /openbios.bin /opt/xba-ps1-bios/openbios.bin
 COPY --from=lsfg-sources / /opt/xba-lsfg-sources/
@@ -135,6 +147,8 @@ RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
     && unzip -l /out/xboxrecomp-shell.apk | grep -E 'lib/|classes|assets/' | tee /out/apk-contents.txt \
     && grep -q 'assets/selftest.xbe' /out/apk-contents.txt \
     && grep -q 'assets/ps1-bios/openbios.bin' /out/apk-contents.txt \
+    && grep -q 'lib/arm64-v8a/libavcodec.so' /out/apk-contents.txt \
+    && grep -q 'lib/arm64-v8a/libavutil.so' /out/apk-contents.txt \
     && unzip -p /out/xboxrecomp-shell.apk lib/arm64-v8a/libmain.so > /tmp/libmain.so \
     && "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D --defined-only /tmp/libmain.so \
          | grep -E ' (R xba_shell_abi|W recomp_lookup|W recomp_lookup_manual|W fe_menu_get_pb_state|V g_fe_cursor)$' \
@@ -191,6 +205,8 @@ COPY --from=app-unit-tests /out/ /
 # generated C for Android. Out of the image with:
 #   docker build -f tools/docker/android.Dockerfile --target stub-apk-out --output type=local,dest=out .
 FROM android AS stub-apk
+COPY --from=ffmpeg-android /opt/xba-ffmpeg /opt/xba-ffmpeg
+ENV XBA_FFMPEG_DIR=/opt/xba-ffmpeg
 ARG XBA_VERSION=dev
 RUN apt-get update && apt-get install -y --no-install-recommends python3-capstone && rm -rf /var/lib/apt/lists/*
 COPY --from=lsfg-sources / /opt/xba-lsfg-sources/
@@ -219,6 +235,8 @@ COPY --from=stub-apk /out/ /
 #   docker build -f tools/docker/android.Dockerfile --target device-tests-out --output type=local,dest=out .
 #   tools/android/run_tests.sh out/xba-device-tests.tar.gz
 FROM android AS device-tests
+COPY --from=ffmpeg-android /opt/xba-ffmpeg /opt/xba-ffmpeg
+ENV XBA_FFMPEG_DIR=/opt/xba-ffmpeg
 ARG JOBS=4
 COPY . /src
 RUN mkdir -p /out /work/tests \
@@ -286,6 +304,8 @@ COPY --from=toolchain /opt/xba-toolchain/ /
 # The shell APK with the toolchain inside (-PxbaToolchainDir), to see what it adds.
 #   docker build -f tools/docker/android.Dockerfile --target prepare-apk-out --output type=local,dest=out .
 FROM toolchain AS prepare-apk
+COPY --from=ffmpeg-android /opt/xba-ffmpeg /opt/xba-ffmpeg
+ENV XBA_FFMPEG_DIR=/opt/xba-ffmpeg
 ARG XBA_VERSION=dev
 WORKDIR /src/android
 RUN printf 'sdk.dir=%s\ncmake.dir=/usr\n' "$ANDROID_HOME" > local.properties \
@@ -317,6 +337,8 @@ COPY --from=prepare-apk /out/ /
 FROM toolchain-out AS xba-toolchain
 
 FROM android AS xrecomp-apk
+COPY --from=ffmpeg-android /opt/xba-ffmpeg /opt/xba-ffmpeg
+ENV XBA_FFMPEG_DIR=/opt/xba-ffmpeg
 ARG XBA_VERSION=dev
 ARG XBA_VERSION_CODE=1
 # auto: the release key when its secrets are there, else the debug key; release: the release key or an error; debug.
