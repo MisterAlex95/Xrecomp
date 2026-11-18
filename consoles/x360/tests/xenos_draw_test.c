@@ -845,6 +845,30 @@ int main(int argc, char **argv)
         run(&cp);
     }
 
+    /* frame 29: a depth resolve: a quad at z 0.25 (depth test always, written), the depth buffer resolved to a tiled
+     * 24_8 texture: depth 0.25 in the high 24 bits (0x400000), stencil 0 */
+    {
+        reg(0x2200, 2u | 4u | 7u << 4);
+        reg(0x4800, 0x4000u | 3u);
+        reg(0x4801, 2u | (64u << 2));
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        reg(0x2200, 0);
+        reg(0x4800, 0x7000u | 3u);
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);
+        reg(0x2318, 4u); /* source: depth, no clear, raw */
+        reg(0x2319, 0x30000);
+        reg(0x231A, W | (uint32_t)H << 16);
+        reg(0x231B, 2u | 22u << 7); /* 8-in-32, 24_8 */
+        type3(PM4_DRAW_INDX_2, &rect, 1);
+        reg(0x2208, 4);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        uint32_t dw = rd32(NULL, 0x30000 + tiled_off(20, 20)), dd = dw >> 8;
+        CHECK(dd >= 0x3FFFF0u && dd <= 0x400010u && (dw & 0xFF) == 0, "frame 29 (depth resolve): %08X, want 400000 << 8",
+              dw);
+    }
+
     /* two PPM frames of 64x64 (header + RGB), not a third */
     char fp[1200];
     struct stat sb;
@@ -862,7 +886,8 @@ int main(int argc, char **argv)
 
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 32 && st.frames == 29 && st.resolves == 4 && st.no_shader == 0 && st.unsupported == 0 &&
+    CHECK(st.drawn == 33 && st.frames == 30 && st.resolves == 5 && st.depth_resolves == 1 && st.no_shader == 0 &&
+              st.unsupported == 0 &&
               st.unsupported_textures == 0 && st.computed_fetches >= 1 && st.mipmapped >= 1 && st.surfaces >= 4 &&
               st.copy_textures >= 1,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu computed %llu mipmapped %llu surfaces %llu "
@@ -878,6 +903,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: 29 frames drawn and read back as expected, four resolves\n");
+    printf("xenos_gl: 30 frames drawn and read back as expected, five resolves (one of depth)\n");
     return 0;
 }

@@ -59,6 +59,7 @@ typedef struct xenos_gl_stats {
     uint64_t copy_textures;        /* textures sampled from a resolve's host picture (no trip through memory) */
     uint64_t mipmapped;            /* textures uploaded with mip levels */
     uint64_t computed_fetches;     /* vertex buffers fetched at a computed index (instancing) */
+    uint64_t depth_resolves;       /* resolves of the depth buffer to memory (24_8) */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

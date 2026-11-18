@@ -2031,7 +2031,8 @@ What is there:
   forms, 32_FLOAT, 32_32_FLOAT, 32_32_32_32_FLOAT) with the endian swap, red / blue swap and exponent bias; clears use
   the source format's raw eDRAM value (`RB_COLOR_CLEAR` / `_LO`). The destination keeps its host picture at the
   internal resolution while its memory is unchanged (hash checked once per frame): render to texture and the front
-  buffer stay upscaled (`xenos_gl_frame_texture`). Depth resolves (copying depth out) are not done yet.
+  buffer stay upscaled (`xenos_gl_frame_texture`). Depth resolves write 24_8 (a pass packs the depth texture into
+  RGBA8: GLES 3.0 reads no depth back; the stencil byte is 0, GLES 3.0 cannot read it either).
 - **Textures**: 38 formats (DXN, DXT3A / DXT5A, CTX1, 10_11_11 / 11_11_10, 16-bit normalised (signed per the fetch
   constant), half and full floats to RGBA16F, 24_8 / 24_8_FLOAT depth, the _AS_16_16_16_16 variants) and **mip
   levels** from the mip address (each level max(1, pow2(size) >> level), 32-block-aligned pitch and height, 4 KB
@@ -2073,13 +2074,14 @@ What is there:
   the 360 pad. A pack is always needed: `x360_tools.bringup ... --app-pack DIR --app-cc <NDK clang>` writes
   `DIR/x360-<KEY>/` (pack.json console x360, the library built for the device, default.xex, shaders/) to copy into the
   app's `files/packs/`; `pack_loader.c` hands it to `x360_runtime_start` with the imported image as the disc.
-- Tests: `xenos_draw` (29 frames: eDRAM bases, 2_10_10_10 and float targets resolved to their formats, mips, a
-  computed-index fetch) and `xenos_draw_x2` (the same at scale 2), `x360_hle` (XMA flow on synthetic packets, the mix,
-  the motors), `x360_pad_map`, `x360_play` (the test title, sleeping 2 s with `make_hello.py --linger`, played headless
+- Tests: `xenos_draw` (30 frames: eDRAM bases, 2_10_10_10 and float targets resolved to their formats, a depth
+  resolve, mips, a computed-index fetch) and `xenos_draw_x2` (the same at scale 2), `x360_hle` (XMA flow on synthetic packets, the mix,
+  the motors), `x360_window` (the renderer on a window's context, presented and captured: `xvfb-run -a ctest -R
+  x360_window`), `x360_pad_map`, `x360_play` (the test title, sleeping 2 s with `make_hello.py --linger`, played headless
   frame by frame to frame 120, rewind capturing), `x360_bringup` (the app pack), `tests/recomp_pack` (`test_x360`), the
   app's `ConsoleTest` / `ConsolePadMapTest` / `LibraryScannerTest`.
 
-Not there yet (XBA-229): memory export, depth resolves, the packed mip tail, run-time translation of shaders the cache
+Not there yet (XBA-229): memory export, the stencil in depth resolves, the packed mip tail, run-time translation of shaders the cache
 lacks (on the device: a pack made on a desktop), real MSAA, eDRAM aliasing between formats, XMA decoding itself (a
 backend to decide), XMA loops, several conventions (winding, channel orders, cube faces, RB_COLOR_CLEAR) that follow
 Xenia's descriptions and wait for a real title, real parallel hardware threads, structured exception handling
