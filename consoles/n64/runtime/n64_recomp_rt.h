@@ -315,6 +315,9 @@ static inline void rc_wbe8(uint8_t *p, uint64_t v)
  * unlike an uncached load: libdragon draws into uncached framebuffers), or a value >= rsz for any other address. */
 #define RC_STORE_OFF(A)                                                                                              \
     ((((A) - RC_KSEG0) & ~0x20000000ull) < rsz ? (((A) - RC_KSEG0) & 0x1FFFFFFFull) : ~0ull)
+/* RC_STORE_OFF for the aligned inline stores (XBA-277): below rsz it is the same offset, and at or above it neither
+ * form stores inline. One compare instead of two (no new live value: arm64's register allocation is tight here). */
+#define RC_STORE_OFF_W(A) (((A) - RC_KSEG0) & ~0x20000000ull)
 /* Does a store of SZ bytes at RDRAM offset O touch this function's own code? */
 #define RC_OWN(O, SZ) ((uint32_t)((O) - plo + (SZ) - 1) < plen + (SZ) - 1)
 
@@ -340,7 +343,7 @@ static inline void rc_wbe8(uint8_t *p, uint64_t v)
 /* Aligned stores (SB SH SW SD, the COP1 stores). */
 #define RC_STORE(A, SZ, V, FAULT, CONT)                                                                              \
     do {                                                                                                             \
-        uint64_t qa_ = (A), qo_ = RC_STORE_OFF(qa_);                                                                 \
+        uint64_t qa_ = (A), qo_ = RC_STORE_OFF_W(qa_);                                                               \
         if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)) && !mrep && !RC_OWN((uint32_t)qo_, SZ), 1)) {            \
             rc_wbe##SZ(ram + qo_, (V));                                                                              \
             gen[qo_ >> 12]++;                                                                                        \
@@ -410,7 +413,7 @@ static inline void rc_wbe8(uint8_t *p, uint64_t v)
     } while (0)
 #define RC_STORE_RAM(A, SZ, V, HAND)                                                                                 \
     do {                                                                                                             \
-        uint64_t qa_ = (A), qo_ = RC_STORE_OFF(qa_);                                                                 \
+        uint64_t qa_ = (A), qo_ = RC_STORE_OFF_W(qa_);                                                               \
         if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)) && !mrep && !RC_OWN((uint32_t)qo_, SZ), 1)) {            \
             rc_wbe##SZ(ram + qo_, (V));                                                                              \
             gen[qo_ >> 12]++;                                                                                        \
