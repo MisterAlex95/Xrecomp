@@ -60,6 +60,8 @@
 #define XGL_SCISSOR_TEST        0x0C11
 #define XGL_BLEND               0x0BE2
 #define XGL_DEPTH_TEST          0x0B71
+#define XGL_CULL_FACE           0x0B44
+#define XGL_STENCIL_TEST        0x0B90
 #define XGL_SRC_ALPHA           0x0302
 #define XGL_ONE_MINUS_SRC_ALPHA 0x0303
 
@@ -74,6 +76,7 @@ typedef struct {
     void (APIENTRY *Viewport)(int, int, int, int);
     void (APIENTRY *ClearColor)(float, float, float, float);
     void (APIENTRY *Clear)(unsigned);
+    void (APIENTRY *ColorMask)(unsigned char, unsigned char, unsigned char, unsigned char);
     void (APIENTRY *Disable)(unsigned);
     void (APIENTRY *Enable)(unsigned);
     void (APIENTRY *BlendFunc)(unsigned, unsigned);
@@ -172,7 +175,7 @@ static int load_gl(void)
     struct { void **slot; const char *name; } fns[] = {
 #define F(n) { (void **)&s_gl.n, "gl" #n }
         F(GenTextures), F(DeleteTextures), F(BindTexture), F(TexParameteri), F(TexImage2D), F(TexSubImage2D),
-        F(PixelStorei), F(ReadPixels), F(Viewport), F(ClearColor), F(Clear), F(Disable), F(Enable), F(BlendFunc),
+        F(PixelStorei), F(ReadPixels), F(Viewport), F(ClearColor), F(Clear), F(ColorMask), F(Disable), F(Enable), F(BlendFunc),
         F(CreateShader),
         F(ShaderSource),
         F(CompileShader), F(GetShaderiv), F(GetShaderInfoLog), F(DeleteShader), F(CreateProgram),
@@ -737,6 +740,11 @@ static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
         vh = (int)((int64_t)dw * ah / aw);
     }
     s_gl.BindFramebuffer(XGL_FRAMEBUFFER, 0);
+    /* A GPU renderer shares this context and leaves its last draw's state: with colour writes off (the GameCube's
+     * alpha-only passes) the clear and the picture below write nothing and the swap shows an old buffer again. */
+    s_gl.ColorMask(1, 1, 1, 1);
+    s_gl.Disable(XGL_CULL_FACE);
+    s_gl.Disable(XGL_STENCIL_TEST);
     s_gl.Disable(XGL_SCISSOR_TEST);
     s_gl.Disable(XGL_BLEND);
     s_gl.Disable(XGL_DEPTH_TEST);
