@@ -1073,6 +1073,42 @@ same run hash, `--missed` identical; blocks alone, then with the record skip): w
 `N64_RC_ENTRIES=0-2500` (94 % interpreted, the case of a game far from its last Prepare) 15.67 -> 5.14 -> 3.58 s (no
 pack: 3.17 s).
 
+**GBA / PS1 / N64 packs: where a frame goes (XBA-277).** Each console has a CPU-bound program of our own that never
+ends: `gba/tests/bench` and `ps1/tests/bench` (game-shaped generated C, 300 functions, a fast timer IRQ) and
+`n64/tests/bench` (entity updates through a function table, byte buffers, 64-bit and float maths). Each is lifted into
+a pack with the discovery loop and run for N frames under `python -m tools.bench.qprof`. qprof counts the instructions
+as `tools.bench icount` does and resolves them to the runtime's and the pack's symbols. The figures here are per frame,
+the 30-frame run less the 10-frame one. arm64 is NDK clang against an aarch64 glibc sysroot, under qemu. Where a
+30-frame run went before the changes below (arm64, start-up included):
+- GBA: the cartridge prefetch buffer's fetch, once per lifted instruction, 22 %. The block interpreter on the IWRAM ARM
+  interrupt handler, 13 %. Fallbacks to the interpreter (the rest of a block once an event falls inside it), 10 %. The
+  dispatcher, 8 %.
+- PS1: the HLE BIOS reading and writing guest words a byte at a time, 21 %. The kernel's exception code in the
+  interpreter's blocks, 14 %. The SPU, 13 %. The dispatcher, 7 %.
+- N64: the lifted code, about 70 %. The dispatcher, 7 %. The AI resampler, 4 %.
+
+What changed, with identical results (hashes after 300 to 600 frames against main, lockstep with the interpreter, the
+consoles' ctest):
+- GBA: `rc_pf_fetch_i` does the fetch at the buffer's head without the full model. A unit test compares it with
+  `rc_pf_fetch` over 4M random states. The arm64 pack is 29 % smaller (14.9 -> 10.6 MB).
+- PS1: aligned guest words in the HLE BIOS are read and written in one lookup. The page write generations are bumped
+  as before. An SPU voice that is off and silent, with pitch 0 and fixed volumes, is skipped instead of run through
+  the voice model, which would leave it as it is. A random register script gives the same audio and state as main's
+  SPU.
+- N64: the inline stores test the unclamped KSEG0 / KSEG1 offset against the RDRAM size, one compare instead of two.
+  A store limit that is 0 in MI repeat mode saved more on x86-64 but cost 3 % on arm64 (one more live value in the big
+  lifted functions): not kept.
+
+| arm64, instructions per frame | main | XBA-277 |
+|---|---|---|
+| GBA bench | 10.70M | 10.21M (-5 %) |
+| PS1 bench | 12.46M | 9.15M (-27 %) |
+| N64 bench | 7.27M | 7.01M (-4 %) |
+
+Not taken: inlining the whole prefetch model into every lifted instruction made the pack 2.5 times bigger and slower to
+build. A rotate-and-compare range check on N64 loads and stores did not pay on x86-64. The lifters' output did not
+change, but the GBA and N64 headers did: those packs are stale.
+
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
 presents each one twice at 60 Hz), the generated frames take the repeats' slots, and the runtimes' frame sleep goes
