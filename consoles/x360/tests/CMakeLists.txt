@@ -71,6 +71,12 @@ set_tests_properties(xenos_draw_x2 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 EN
 add_test(NAME x360_render COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:x360_hle_test>
                                      ${CMAKE_CURRENT_BINARY_DIR}/x360_render --render)
 set_tests_properties(x360_render PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+# run_draw.sh starts our binaries itself: ctest's CMAKE_CROSSCOMPILING_EMULATOR wraps only its sh, so a cross build
+# hands the emulator over as XBR_TEST_EMULATOR, comma separated (as consoles/gc/tests).
+if(CMAKE_CROSSCOMPILING_EMULATOR)
+    list(JOIN CMAKE_CROSSCOMPILING_EMULATOR "," _x360_emu)
+    set_property(TEST xenos_draw xenos_draw_x2 x360_render APPEND PROPERTY ENVIRONMENT "XBR_TEST_EMULATOR=${_x360_emu}")
+endif()
 
 if(TARGET x360_pad_map)
     add_executable(x360_pad_map_test x360_pad_map_test.c)
