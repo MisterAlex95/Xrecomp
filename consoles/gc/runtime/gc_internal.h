@@ -88,9 +88,12 @@ struct gc_machine {
     bool branched;        /* the last instruction the interpreter ran was a taken branch */
     const gc_recomp_table *rc;
     uint8_t *span_state;  /* per span: 0 unknown, 1 valid, 2 stale */
+    uint32_t *span_order; /* span indices by lo, for icbi */
+    uint32_t *span_maxhi; /* the highest hi of span_order[0..k] */
     uint32_t *rc_hash_keys;
     int32_t *rc_hash_idx;
     uint32_t rc_hash_mask;
+    uint32_t rc_hash_shift; /* 32 - log2(capacity): the slot is the product's top bits */
     uint32_t text_lo[8], text_hi[8];
     int ntext;
     uint32_t *missed;
