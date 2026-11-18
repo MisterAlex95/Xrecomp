@@ -21,7 +21,8 @@
  *            a green colour clear (the target is green afterwards, the texture red), and the next frame samples that
  *            texture back (red again: render to texture);
  *   frame 14: a rectangle list: three corners (top-left red, top-right green, bottom-left blue) of a full-target
- *            rectangle; the fourth (bottom-right) gets green + blue - red, i.e. cyan once clamped.
+ *            rectangle; the fourth (bottom-right) gets green + blue - red, i.e. cyan once clamped;
+ *   frame 15: the alpha test (less than 0.5): a green quad at alpha 0.25 passes, then a red one at 0.75 fails.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -456,9 +457,26 @@ int main(int argc, char **argv)
           "frame 14 (rectangle list): corners %u,%u,%u %u,%u,%u %u,%u,%u %u,%u,%u", rtl[0], rtl[1], rtl[2], rtr[0],
           rtr[1], rtr[2], rbl[0], rbl[1], rbl[2], rbr[0], rbr[1], rbr[2]);
 
+    /* frame 15: the alpha test, RB_COLORCONTROL less (1) + enable, RB_ALPHA_REF 0.5 */
+    reg(0x2202, 1u | 1u << 3);
+    reg(0x210E, fbits(0.5f));
+    reg(0x4801, 2u | (32u << 2));
+    reg(0x4403, fbits(0.25f));
+    reg(0x4800, 0x4000u | 3u);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1); /* green at alpha 0.25: passes */
+    reg(0x4403, fbits(0.75f));
+    reg(0x4800, 0x4080u | 3u);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1); /* red at alpha 0.75: discarded */
+    reg(0x2202, 0);
+    reg(0x4403, fbits(1.0f));
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    c = px(g, W / 2, H / 2);
+    CHECK(c[1] == 255 && c[0] == 0, "frame 15 (alpha test): %u,%u,%u, want green", c[0], c[1], c[2]);
+
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 17 && st.frames == 15 && st.resolves == 1 && st.no_shader == 0 && st.unsupported == 0 &&
+    CHECK(st.drawn == 19 && st.frames == 16 && st.resolves == 1 && st.no_shader == 0 && st.unsupported == 0 &&
               st.unsupported_textures == 0,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
           (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
@@ -470,6 +488,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: fifteen frames drawn and read back as expected, one resolve\n");
+    printf("xenos_gl: sixteen frames drawn and read back as expected, one resolve\n");
     return 0;
 }

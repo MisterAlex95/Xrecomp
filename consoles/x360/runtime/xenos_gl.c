@@ -709,11 +709,14 @@ static int gl_prim(uint32_t t)
 
 static void upload_constants(xenos_gl *g, const xenos_cp *cp)
 {
-    uint8_t block[4096 + 32 + 128];
+    uint8_t block[4096 + 32 + 128 + 16];
+    uint32_t cc = cp->regs[0x2202];
+    float at[4] = {(cc >> 3) & 1 ? 1.0f : 0.0f, (float)(cc & 7), as_float(cp->regs[0x210E]), 0.0f};
     for (int stage = 0; stage < 2; stage++) {
         memcpy(block, &cp->regs[0x4000 + 0x400 * stage], 4096); /* float constants: register values are the bits */
         memcpy(block + 4096, &cp->regs[0x4900], 32);
         memcpy(block + 4096 + 32, &cp->regs[0x4908], 128);
+        memcpy(block + 4096 + 32 + 128, at, 16); /* RB_COLORCONTROL's alpha test, RB_ALPHA_REF */
         g->glBindBuffer(GL_UNIFORM_BUFFER, g->ubo[stage]);
         g->glBufferData(GL_UNIFORM_BUFFER, sizeof block, block, GL_STREAM_DRAW);
         g->glBindBufferBase(GL_UNIFORM_BUFFER, (GLuint)stage, g->ubo[stage]);

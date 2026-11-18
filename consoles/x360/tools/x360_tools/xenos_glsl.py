@@ -12,7 +12,9 @@ kept when an instruction's predicate fails.
 
 What the GLSL expects of the host (the renderer, xenos_gl.c): one std140 uniform block per stage,
 `XeVertexConstants` / `XePixelConstants` { vec4 c[256] (the stage's float constants); uvec4 b[2] (the 256 boolean
-constants); uvec4 l[8] (the 32 loop constants) } xe_k -- 4256 bytes, the host picks the binding points (GLES 3.0
+constants); uvec4 l[8] (the 32 loop constants); vec4 at (the alpha test: enable, function, reference, as
+RB_COLORCONTROL / RB_ALPHA_REF say; the pixel shader discards a failing colour 0) } xe_k -- 4272 bytes, the host
+picks the binding points (GLES 3.0
 guarantees 16 KB blocks, while 256 loose vec4 would take all of a pixel shader's guaranteed uniforms); `in vec4
 xe_v<n>` per vertex fetch, its comment giving the fetch constant, offset, format, stride and signedness (the renderer
 reads it back and converts formats); `uniform sampler*D xe_t<n>` per texture fetch constant used (info's
@@ -564,7 +566,7 @@ def translate(words, stage="vertex", interpolators=0):
     out = ["#version 300 es", "precision highp float;", "precision highp int;", "precision highp sampler2D;",
            "precision highp sampler3D;", "precision highp samplerCube;",
            # an instance name: block members are global to a program, and both stages have xe_c / xe_b / xe_l
-           "layout(std140) uniform %s { vec4 c[256]; uvec4 b[2]; uvec4 l[8]; } xe_k;" % (
+           "layout(std140) uniform %s { vec4 c[256]; uvec4 b[2]; uvec4 l[8]; vec4 at; } xe_k;" % (
                "XeVertexConstants" if stage == "vertex" else "XePixelConstants"),
            "#define xe_c xe_k.c", "#define xe_b xe_k.b", "#define xe_l xe_k.l"]
     for i, (_, a) in enumerate(sh.attributes):
@@ -604,6 +606,14 @@ def translate(words, stage="vertex", interpolators=0):
         if sh.exports_psize:
             out.append("    gl_PointSize = xe_psize.x;")
     else:
+        if 0 in sh.outputs:  # the alpha test (GLES has none of its own): Direct3D's compare functions
+            out += ["    if (xe_k.at.x != 0.0) {",
+                    "        float a_ = xe_color0.a, ref_ = xe_k.at.z;",
+                    "        int f_ = int(xe_k.at.y);",
+                    "        bool pass_ = f_ == 1 ? a_ < ref_ : f_ == 2 ? a_ == ref_ : f_ == 3 ? a_ <= ref_ :",
+                    "                     f_ == 4 ? a_ > ref_ : f_ == 5 ? a_ != ref_ : f_ == 6 ? a_ >= ref_ : f_ == 7;",
+                    "        if (!pass_) discard;",
+                    "    }"]
         if sh.exports_depth:  # only then: writing it turns early depth testing off
             out.append("    gl_FragDepth = xe_depth.x;")
     out.append("}")
