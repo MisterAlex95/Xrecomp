@@ -33,6 +33,16 @@ static uint32_t t3(uint32_t op, uint32_t count) { return 3u << 30 | (count - 1) 
 static uint32_t at;
 static void put(uint32_t base, uint32_t v) { mem[base / 4 + at++] = v; }
 
+static uint32_t imm_got[4], imm_seen;
+static void imm_hook(void *ctx, const xenos_cp *c, const xenos_draw *d)
+{
+    (void)ctx;
+    (void)c;
+    imm_seen = d->imm_words;
+    for (uint32_t i = 0; d->imm && i < d->imm_words && i < 4; i++)
+        imm_got[i] = d->imm[i];
+}
+
 int main(void)
 {
     static xenos_cp cp;
@@ -134,6 +144,19 @@ int main(void)
     mem[R / 4 + 0] = 0x62;
     xenos_cp_set_wptr(&cp, 1);
     CHECK(cp.rptr == 1 && cp.regs[0x2600] == 0x61 && cp.regs[0x2601] == 0x62, "wrapped packet");
+
+    /* XBA-296: immediate indices reach the draw hook, also across the end of the ring, and do not outlive it */
+    cp.draw_hook = imm_hook;
+    cp.rptr = 2045;
+    mem[R / 4 + 2045] = t3(PM4_DRAW_INDX_2, 3);
+    mem[R / 4 + 2046] = 4 | 1u << 6 | 1u << 11 | 2u << 16;
+    mem[R / 4 + 2047] = 0x11;
+    mem[R / 4 + 0] = 0x22;
+    xenos_cp_set_wptr(&cp, 1);
+    CHECK(imm_seen == 2 && imm_got[0] == 0x11 && imm_got[1] == 0x22, "immediate indices: %u words, %X %X", imm_seen,
+          imm_got[0], imm_got[1]);
+    CHECK(cp.last_draw.source_select == 1 && cp.last_draw.imm == NULL && cp.rptr == 1, "the draw kept no pointer");
+    cp.draw_hook = NULL;
 
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "all command processor checks passed", failures,
            failures == 1 ? "" : "s");

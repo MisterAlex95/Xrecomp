@@ -217,6 +217,9 @@ void x360_thread_exit(x360_machine *x, x360_thread *t, uint32_t code)
     t->exit_code = code;
     x360_w32(x, t->kthread + 4, 1); /* signalled: waits on the thread end */
     x360_w32(x, t->kthread + 0x140, code);
+    x360_queue_thread_exit(x, t);
+    t->apc_head = t->apc_tail = 0; /* what is still queued is dropped (x360_kdpc.c) */
+    t->apc_stage = 0;
     if (t->interrupt)
         return; /* an interrupt callback returned: its context waits for the next one */
     if (t == &x->threads[0]) {
@@ -248,18 +251,19 @@ void x360_wait(x360_machine *x, x360_thread *t, int kind, const uint32_t *objs, 
         t->wait_obj[k] = objs[k];
     t->wait_deadline = 0;
     t->wait_timed = timeout_ptr != 0;
-    if (timeout_ptr) {
-        int64_t v = sx64(x360_r64(x, timeout_ptr));
-        uint64_t now = x360_now(x);
-        if (v < 0)
-            t->wait_deadline = now + (uint64_t)(-v);
-        else { /* absolute: a system time (KeQuerySystemTime's clock) */
-            uint64_t at = (uint64_t)v > X360_EPOCH ? (uint64_t)v - X360_EPOCH : 0;
-            t->wait_deadline = at > now ? at : now;
-        }
-    }
+    t->wait_alertable = 0; /* x360_wait_alertable sets it */
+    if (timeout_ptr)
+        t->wait_deadline = x360_due_time(x, sx64(x360_r64(x, timeout_ptr)));
+    x360_queue_parked(x, t, kind);
     t->state = TH_WAIT;
     x->m.slice = -1; /* give the host thread back */
+}
+
+void x360_wait_alertable(x360_machine *x, x360_thread *t, int kind, const uint32_t *objs, int count, int wait_all,
+                         uint32_t timeout_ptr, int alertable)
+{
+    x360_wait(x, t, kind, objs, count, wait_all, timeout_ptr);
+    t->wait_alertable = alertable != 0;
 }
 
 static int obj_ready(x360_machine *x, x360_thread *t, uint32_t o)
@@ -320,52 +324,24 @@ int x360_wait_check(x360_machine *x, x360_thread *t)
                     break;
                 }
         }
+    } else if (t->wait_kind == WAIT_QUEUE) {
+        x360_queue_wait_check(x, t, &status);
+    }
+    if (status == 0xFFFFFFFFu) { /* nothing satisfied it: an alert or an APC may end the wait, or break into it */
+        x360_apc_wait_check(x, t, &status);
+        if (t->state != TH_WAIT)
+            return 0;
     }
     if (status == 0xFFFFFFFFu && t->wait_timed && x360_now(x) >= t->wait_deadline)
         status = t->wait_kind == WAIT_DELAY ? X_STATUS_SUCCESS : X_STATUS_TIMEOUT;
     if (status == 0xFFFFFFFFu)
         return 0;
     t->cpu.gpr[3] = status;
+    t->wait_iocp = 0;
     t->state = t->suspend ? TH_SUSPENDED : TH_READY;
+    x360_queue_unparked(x, t);
+    x360_apc_wait_done(x, t, status);
     return 1;
-}
-
-/* ---- timers ---- */
-
-void x360_timer_set(x360_machine *x, uint32_t obj, uint64_t due, uint32_t period)
-{
-    int free_k = -1;
-    for (int k = 0; k < X360_MAX_TIMERS; k++) {
-        if (x->timers[k].obj == obj) {
-            free_k = k;
-            break;
-        }
-        if (!x->timers[k].obj && free_k < 0)
-            free_k = k;
-    }
-    if (free_k < 0)
-        return;
-    x->timers[free_k] = (x360_timer){obj, due ? due : 1, period};
-    x360_w32(x, obj + 4, 0);
-}
-
-void x360_timer_cancel(x360_machine *x, uint32_t obj)
-{
-    for (int k = 0; k < X360_MAX_TIMERS; k++)
-        if (x->timers[k].obj == obj)
-            x->timers[k].due = 0;
-}
-
-void x360_timers_fire(x360_machine *x)
-{
-    uint64_t now = x360_now(x);
-    for (int k = 0; k < X360_MAX_TIMERS; k++) {
-        x360_timer *tm = &x->timers[k];
-        if (tm->obj && tm->due && now >= tm->due) {
-            x360_w32(x, tm->obj + 4, 1);
-            tm->due = tm->period ? tm->due + (uint64_t)tm->period * 10000 : 0;
-        }
-    }
 }
 
 /* the earliest deadline among waiting threads and armed timers, 0 when none */
@@ -458,6 +434,10 @@ static void run_thread(x360_machine *x, x360_thread *t)
         }
         if (pc == X360_SEH_RETURN) { /* an exception handler returned (XBA-282) */
             x360_seh_return(x, t);
+            continue;
+        }
+        if (pc == X360_APC_RETURN) { /* an APC routine returned (XBA-296) */
+            x360_apc_return(x, t);
             continue;
         }
         const x360_thunk *th = x360_thunk_at(x, pc);
@@ -568,6 +548,7 @@ int x360_run(x360_machine *x, uint64_t insns)
             break;
         }
         x360_timers_fire(x);
+        x360_kdpc_poll(x);
         x360_gpu_poll(x);
         x360_audio_poll(x);
         x360_xma_poll(x);
@@ -578,8 +559,8 @@ int x360_run(x360_machine *x, uint64_t insns)
             x360_w64(x, x->timestamp_bundle + 8, X360_EPOCH + now);
             x360_w32(x, x->timestamp_bundle + 16, (uint32_t)(now / 10000));
         }
-        int picked = -1;
-        for (int n = 1; n <= x->nthreads; n++) {
+        int picked = x360_kdpc_ready(x); /* a DPC runs ahead of every thread */
+        for (int n = 1; picked < 0 && n <= x->nthreads; n++) {
             int k = (x->cur + n + x->nthreads) % x->nthreads;
             x360_thread *t = &x->threads[k];
             if (t->state == TH_WAIT)
@@ -706,6 +687,10 @@ static void host_run_thread(x360_machine *x, int k)
             x360_seh_return(x, t);
             continue;
         }
+        if (pc == X360_APC_RETURN) {
+            x360_apc_return(x, t);
+            continue;
+        }
         const x360_thunk *th = x360_thunk_at(x, pc);
         if (th) {
             c->pc = (uint32_t)c->lr & ~3u;
@@ -805,6 +790,7 @@ static int run_host(x360_machine *x, uint64_t insns)
             break;
         }
         x360_timers_fire(x);
+        x360_kdpc_poll(x);
         x360_gpu_poll(x);
         x360_audio_poll(x);
         x360_xma_poll(x);

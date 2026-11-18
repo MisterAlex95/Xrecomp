@@ -40,11 +40,22 @@ dword) pairs the renderer applies to guest memory after the draw (xenos_gl.c, GL
 else the draw is skipped). eA as Xenia reads it: X the base in dwords (top bits 01), Y the element index, W the
 index bound (both floats in [2^23, 2^24): the integer is the mantissa), Z the format (bits 8-13), endianness (0-2),
 signedness (16), integer (17), red / blue swap (19); element k lands at base + (index + k) * element size. Formats
-8_8_8_8, 2_10_10_10, 16_16, 16_16_16_16, their _FLOAT forms, 32_FLOAT, 32_32_FLOAT, 32_32_32_32_FLOAT; other formats
-write nothing. Such a shader is GLSL ES 3.10; without memexport=True it is Unsupported, as before.
+8, 8_A, 8_B, 8_8, 1_5_5_5, 5_6_5, 6_5_5, 4_4_4_4, 16, 16_FLOAT, 8_8_8_8, 2_10_10_10, 10_11_11, 11_11_10, 16_16,
+16_16_16_16, their _FLOAT forms, 32_FLOAT, 32_32_FLOAT, 32_32_32_32_FLOAT; other formats write nothing. An element
+smaller than a dword is logged with the bytes to keep: the address's bits 0-1 and 30-31 are bytes 0-1 and 2-3 of the
+dword, in memory order (0: write the whole dword). Vertex and pixel shaders both export. Such a shader is GLSL ES 3.10;
+without memexport=True it is Unsupported, as before.
 
-Not translated yet (Unsupported is raised, naming the instruction): the texture queries (getBCF,
-getCompTexLOD, getGradients, getWeights); multiply-add is
+Texture queries (XBA-296): getGradients gives (ddx(s.x), ddy(s.x), ddx(s.y), ddy(s.y)) per guest pixel (the host's
+derivatives over xe_k.pg.z, the inverse internal resolution scale); getCompTexLOD gives X = log2 of the larger gradient
+length in guest texels, unclamped and unbiased; getWeights gives XYZ = fract(texel coordinate + offset - 0.5 + 1.5/1024)
+for the texture's axes (Xenia's reading, filters ignored) and W = the fraction of the LOD; getBCF gives X = the share of
+a bilinear footprint outside the texture on the clamp-to-border axes (Xenia leaves it unimplemented: defined here from
+the instruction's description). In a vertex shader there are no derivatives: getGradients and getCompTexLOD give 0.
+They read `uniform highp vec4 xe_tq<k>` of texture fetch constant k: the guest size in XYZ, and in W each axis's border
+mode, two bits an axis from X up (0 none, 1 clamp to border, 2 mirror then clamp to border).
+
+Approximations: multiply-add is
 written unfused (Xenos rounds once: small differences); log / rsq / sqrt of negative numbers are left to the host
 (GLSL ES leaves them undefined: llvmpipe gives 0). Integer and signed-normalised vertex formats are the host's
 conversion, exp_adjust too.
@@ -66,7 +77,9 @@ FLT_MAX = "3.402823466e+38"
 # Stamped in every translation; the renderer (xenos_gl.c XENOS_GLSL_STAMP) refuses a cached shader without it, so a
 # cache made before a change of the host contract is translated again (bringup does it) rather than drawn wrong.
 # 2: XBA-280 (PsParamGen from pg.zw, xe_vb<n> buffers for computed-index fetches).
-GLSL_VERSION = 2
+# 3: XBA-296 (texture queries read the xe_tq<k> uniforms).
+# 4: XBA-296 (the memory export log says which bytes of a dword to keep; pixel shaders export too).
+GLSL_VERSION = 4
 
 
 class Unsupported(Exception):
@@ -111,6 +124,29 @@ vec3 xe_cubedir(vec3 c) {
     return vec3(-s, -t, -1.0);
 }
 """
+
+# the texture queries' helpers (XBA-296), only in shaders that use them
+TQUERY = """float xe_tq_s() { return xe_k.pg.z > 0.0 ? 1.0 / xe_k.pg.z : 1.0; }
+float xe_tq_lod(vec3 gx, vec3 gy) {
+    float r = max(dot(gx, gx), dot(gy, gy));
+    return r > 0.0 ? 0.5 * log2(r) : -XE_FLT_MAX;
+}
+vec4 xe_tq_weights(vec3 u, vec3 off, vec3 axes, float lod) {
+    return vec4(fract(u + off - 0.5 + 1.5 / 1024.0) * axes, fract(max(lod, 0.0)));
+}
+float xe_tq_inside(float u, float n, int mode) {
+    if (mode == 0) return 1.0;
+    if (mode == 2) u = abs(u);
+    float t = u - 0.5, i = floor(t), f = t - i;
+    return (i >= 0.0 && i < n ? 1.0 - f : 0.0) + (i + 1.0 >= 0.0 && i + 1.0 < n ? f : 0.0);
+}
+float xe_tq_bcf(vec3 u, vec4 q, int axes) {
+    int m = int(q.w);
+    float inside = xe_tq_inside(u.x, q.x, m & 3);
+    if (axes > 1) inside *= xe_tq_inside(u.y, q.y, (m >> 2) & 3);
+    if (axes > 2) inside *= xe_tq_inside(u.z, q.z, (m >> 4) & 3);
+    return 1.0 - inside;
+}"""
 
 # scalar ops: name -> GLSL of a (and b, ps); None = handled specially
 SCALAR_EXPR = {
@@ -165,6 +201,8 @@ class _Shader:
         self.vbuffers = []        # (key, dict): vertex fetches at a computed index, read from a buffer texture
         self.r0_written = False   # r0 (the vertex index) overwritten so far
         self.force_computed = False
+        self.tqueries = set()     # texture fetch constants whose xe_tq<k> a query reads
+        self.uses_tq = False
 
     def emit(self, line):
         self.body.append("    " * self.depth + line)
@@ -256,6 +294,47 @@ class _Shader:
         self.emit("%s.%s = (%s).%s;" % (target, comps, v, comps))
         if target.startswith("xe_eM["):
             self.emit("xe_eMw |= %du;" % (1 << int(target[6])))
+
+    # ---- texture queries (XBA-296) ----
+    def texture_query(self, f):
+        """the vec4 expression of getBCF / getCompTexLOD / getGradients / getWeights"""
+        self.uses_tq = True
+        sw = f["src_swizzle"]
+        c = "%s.%s" % (self.temp(f["src_reg"], f["src_rel"]), "".join("xyzw"[(sw >> (2 * i)) & 3] for i in range(3)))
+        pixel = self.stage == "pixel"
+        if f["op"] == 18:
+            if not pixel:
+                return "vec4(0.0)"
+            return "(vec4(dFdx((%s).x), dFdy((%s).x), dFdx((%s).y), dFdy((%s).y)) * xe_tq_s())" % (c, c, c, c)
+        dim, k = f["dimension"], f["const_index"]
+        self.tqueries.add(k)
+        q = "xe_tq%d" % k
+        scale = not f["unnormalized"] or dim == 3    # tfetchCube's coordinates are normalised whatever the bit says
+        if dim == 0:
+            u = "vec3((%s).x%s, 0.0, 0.0)" % (c, " * %s.x" % q if scale else "")
+        elif dim == 2:
+            u = "((%s).xyz%s)" % (c, " * %s.xyz" % q if scale else "")
+        else:
+            u = "vec3((%s).xy%s, 0.0)" % (c, " * %s.xy" % q if scale else "")
+        axes = {0: "vec3(1.0, 0.0, 0.0)", 1: "vec3(1.0, 1.0, 0.0)", 2: "vec3(1.0)", 3: "vec3(1.0, 1.0, 0.0)"}[dim]
+        n = {0: 1, 1: 2, 2: 3, 3: 0}[dim]
+        offs = [f["offset_x"] * 0.5, f["offset_y"] * 0.5, f["offset_z"] * 0.5][:n] + [0.0] * (3 - n)
+        off = "vec3(%r, %r, %r)" % tuple(offs)
+        computed = "xe_tq_lod(dFdx(%s) * xe_tq_s(), dFdy(%s) * xe_tq_s())" % (u, u)
+        if f["op"] == 17:
+            return "vec4(%s, 0.0, 0.0, 0.0)" % computed if pixel and not f["use_reg_gradients"] else "vec4(0.0)"
+        if f["op"] == 16:
+            return "vec4(xe_tq_bcf(%s + %s, %s, %d), 0.0, 0.0, 0.0)" % (u, off, q, n) if n else "vec4(0.0)"
+        bias = f["lod_bias"] / 16.0
+        if f["use_reg_gradients"]:
+            lod = "xe_tq_lod(xe_gh.xyz * %s.xyz * %s, xe_gv.xyz * %s.xyz * %s) + %r" % (q, axes, q, axes, bias)
+        elif f["use_reg_lod"]:
+            lod = "xe_lod + %r" % bias
+        elif pixel:
+            lod = "%s + %r" % (computed, bias)
+        else:
+            lod = repr(bias)
+        return "xe_tq_weights(%s, %s, %s, %s)" % (u, off, axes, lod)
 
     # ---- instructions ----
     def alu(self, words, at):
@@ -462,6 +541,8 @@ class _Shader:
                 src = "texture(xe_t%d, %s, %r)" % (k, coord, bias)
             else:
                 src = "texture(xe_t%d, %s)" % (k, coord)
+        elif f["op"] in (16, 17, 18, 19):
+            src = self.texture_query(f)
         else:
             raise Unsupported("%s: %s" % (where, f["name"]))
         parts, mask = [], 0
@@ -629,16 +710,35 @@ void xe_mx_flush() {
     uint base = (a.x & 0x3FFFFFFFu) << 2, index = a.y & 0x7FFFFFu, bound = a.w & 0x7FFFFFu, info = a.z;
     uint fmt = (info >> 8) & 63u, e = info & 7u;
     bool sgn = (info & 0x10000u) != 0u, integer = (info & 0x20000u) != 0u;
-    uint n = fmt == 6u || fmt == 7u || fmt == 25u || fmt == 31u || fmt == 36u ? 1u
-           : fmt == 26u || fmt == 32u || fmt == 37u ? 2u : fmt == 38u ? 4u : 0u;
-    if (n == 0u) return;
+    uint bytes = fmt == 2u || fmt == 8u || fmt == 9u ? 1u
+               : fmt == 3u || fmt == 4u || fmt == 5u || fmt == 10u || fmt == 15u || fmt == 24u || fmt == 30u ? 2u
+               : fmt == 6u || fmt == 7u || fmt == 16u || fmt == 17u || fmt == 25u || fmt == 31u || fmt == 36u ? 4u
+               : fmt == 26u || fmt == 32u || fmt == 37u ? 8u : fmt == 38u ? 16u : 0u;
+    if (bytes == 0u) return;
+    uint n = bytes < 4u ? 1u : bytes / 4u;
     for (uint k = 0u; k < 5u; k++) {
         if ((w >> k & 1u) == 0u || index + k >= bound) continue;
         vec4 v = xe_eM[k];
         if ((info & 0x80000u) != 0u) v = v.zyxw;
         uint d[4];
         d[0] = 0u; d[1] = 0u; d[2] = 0u; d[3] = 0u;
-        if (fmt == 6u) d[0] = xe_mx_norm(v.x, 8u, sgn, integer) | xe_mx_norm(v.y, 8u, sgn, integer) << 8
+        if (fmt == 2u || fmt == 8u || fmt == 9u) d[0] = xe_mx_norm(v.x, 8u, sgn, integer);
+        else if (fmt == 10u) d[0] = xe_mx_norm(v.x, 8u, sgn, integer) | xe_mx_norm(v.y, 8u, sgn, integer) << 8;
+        else if (fmt == 3u) d[0] = xe_mx_norm(v.x, 5u, sgn, integer) | xe_mx_norm(v.y, 5u, sgn, integer) << 5
+                                 | xe_mx_norm(v.z, 5u, sgn, integer) << 10 | xe_mx_norm(v.w, 1u, sgn, integer) << 15;
+        else if (fmt == 4u) d[0] = xe_mx_norm(v.x, 5u, sgn, integer) | xe_mx_norm(v.y, 6u, sgn, integer) << 5
+                                 | xe_mx_norm(v.z, 5u, sgn, integer) << 11;
+        else if (fmt == 5u) d[0] = xe_mx_norm(v.x, 5u, sgn, integer) | xe_mx_norm(v.y, 5u, sgn, integer) << 5
+                                 | xe_mx_norm(v.z, 6u, sgn, integer) << 10;
+        else if (fmt == 15u) d[0] = xe_mx_norm(v.x, 4u, sgn, integer) | xe_mx_norm(v.y, 4u, sgn, integer) << 4
+                                  | xe_mx_norm(v.z, 4u, sgn, integer) << 8 | xe_mx_norm(v.w, 4u, sgn, integer) << 12;
+        else if (fmt == 24u) d[0] = xe_mx_norm(v.x, 16u, sgn, integer);
+        else if (fmt == 30u) d[0] = packHalf2x16(v.xy) & 0xFFFFu;
+        else if (fmt == 16u) d[0] = xe_mx_norm(v.x, 11u, sgn, integer) | xe_mx_norm(v.y, 11u, sgn, integer) << 11
+                                  | xe_mx_norm(v.z, 10u, sgn, integer) << 22;
+        else if (fmt == 17u) d[0] = xe_mx_norm(v.x, 10u, sgn, integer) | xe_mx_norm(v.y, 11u, sgn, integer) << 10
+                                  | xe_mx_norm(v.z, 11u, sgn, integer) << 21;
+        else if (fmt == 6u) d[0] = xe_mx_norm(v.x, 8u, sgn, integer) | xe_mx_norm(v.y, 8u, sgn, integer) << 8
                             | xe_mx_norm(v.z, 8u, sgn, integer) << 16 | xe_mx_norm(v.w, 8u, sgn, integer) << 24;
         else if (fmt == 7u) d[0] = xe_mx_norm(v.x, 10u, sgn, integer) | xe_mx_norm(v.y, 10u, sgn, integer) << 10
                                  | xe_mx_norm(v.z, 10u, sgn, integer) << 20 | xe_mx_norm(v.w, 2u, sgn, integer) << 30;
@@ -652,14 +752,22 @@ void xe_mx_flush() {
             uvec4 b = floatBitsToUint(v);
             d[0] = b.x; d[1] = b.y; d[2] = b.z; d[3] = b.w;
         }
-        for (uint j = 0u; j < n; j++) d[j] = xe_mx_swap(d[j], e);
-        if (e == 4u && n >= 2u) { uint t = d[0]; d[0] = d[1]; d[1] = t; t = d[2]; d[2] = d[3]; d[3] = t; }
-        if (e == 5u && n == 4u) { uint t = d[0]; d[0] = d[3]; d[3] = t; t = d[1]; d[1] = d[2]; d[2] = t; }
-        uint at = base + (index + k) * 4u * n;
+        uint at = (base + (index + k) * bytes) & 0x1FFFFFFFu, keep = 0u;
+        if (bytes < 4u) {   // part of a dword: the element's bytes swapped among themselves, the other bytes kept
+            if (bytes == 2u && (e == 1u || e == 2u)) d[0] = ((d[0] & 255u) << 8) | (d[0] >> 8);
+            uint sh = at & 3u;
+            d[0] <<= 8u * sh;
+            keep = ~(((1u << bytes) - 1u) << sh) & 15u;
+            at &= ~3u;
+        } else {
+            for (uint j = 0u; j < n; j++) d[j] = xe_mx_swap(d[j], e);
+            if (e == 4u && n >= 2u) { uint t = d[0]; d[0] = d[1]; d[1] = t; t = d[2]; d[2] = d[3]; d[3] = t; }
+            if (e == 5u && n == 4u) { uint t = d[0]; d[0] = d[3]; d[3] = t; t = d[1]; d[1] = d[2]; d[2] = t; }
+        }
         uint slot = atomicAdd(xe_mx_n, n);
         if (slot + n > xe_mx_cap) continue;
         for (uint j = 0u; j < n; j++) {
-            xe_mx_log[2u * (slot + j)] = at + 4u * j;
+            xe_mx_log[2u * (slot + j)] = (at + 4u * j) | (keep & 3u) | (keep >> 2) << 30;
             xe_mx_log[2u * (slot + j) + 1u] = d[j];
         }
     }
@@ -712,6 +820,7 @@ def translate(words, stage="vertex", interpolators=0, memexport=False):
     for t, dim in sorted(sh.textures.items()):
         out.append("uniform %s xe_t%d;" % ({0: "sampler2D", 1: "sampler2D", 2: "sampler3D", 3: "samplerCube"}[dim],
                                             t))
+    out += ["uniform highp vec4 xe_tq%d;" % t for t in sorted(sh.tqueries)]
     if stage == "vertex":
         # all sixteen interpolators, written or not, so that any pixel shader links with any vertex shader
         out += ["out vec4 xe_i%d;" % o for o in range(16)]
@@ -719,6 +828,8 @@ def translate(words, stage="vertex", interpolators=0, memexport=False):
         out += ["in vec4 xe_i%d;" % i for i in range(interpolators)]
         out += ["layout(location = %d) out vec4 xe_color%d;" % (o, o) for o in sorted(sh.outputs)]
     out.append(PRELUDE.rstrip())
+    if sh.uses_tq:
+        out.append(TQUERY)
     if sh.uses_memexport:
         out.append(MEMEXPORT)
     if sh.vbuffers:
@@ -770,21 +881,19 @@ def translate(words, stage="vertex", interpolators=0, memexport=False):
             out.append("    gl_FragDepth = xe_depth.x;")
     out.append("}")
     info = {"attributes": [a for _, a in sh.attributes], "vbuffers": [a for _, a in sh.vbuffers],
-            "textures": dict(sh.textures),
+            "textures": dict(sh.textures), "tqueries": sorted(sh.tqueries),
             "outputs": sorted(sh.outputs), "uses_a0": sh.uses_a0, "memexport": sh.uses_memexport}
     return "\n".join(out) + "\n", info
 
 
 def translate_cached(words, stage="vertex", interpolators=0):
     """What the shader cache holds (bringup, tools/prepare/x360.py; XBA-282): GLSL ES 3.00 when the shader can be,
-    else, for a vertex shader that memory export stops, the GLSL ES 3.10 memory export translation (the renderer runs
-    it where GLES 3.1 allows, and skips its draws elsewhere)."""
+    else, for a shader that memory export stops, the GLSL ES 3.10 memory export translation (the renderer runs it where
+    GLES 3.1 allows, raising the other stage to 3.10, and skips its draws elsewhere)."""
     try:
         return translate(words, stage, interpolators)
     except Unsupported as ex:
-        # vertex shaders only: the renderer links a 3.10 vertex shader with its pixel shader raised to 3.10, not the
-        # other way round
-        if stage != "vertex" or not re.search(r"export to register 3[2-7]$", str(ex)):
+        if not re.search(r"export to register 3[2-7]$", str(ex)):
             raise
     return translate(words, stage, interpolators, memexport=True)
 

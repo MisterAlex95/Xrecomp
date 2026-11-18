@@ -28,14 +28,6 @@ uint64_t x360_stack_arg(x360_machine *x, xe_cpu *c, int n)
 }
 #define RET(v) (c->gpr[3] = (uint64_t)(uint32_t)(v))
 
-typedef void (*hle_fn)(x360_machine *x, x360_thread *t, xe_cpu *c);
-
-typedef struct {
-    uint8_t lib;
-    uint16_t ordinal;
-    hle_fn fn;
-} hle_entry;
-
 typedef struct {
     uint8_t lib;
     uint16_t ordinal;
@@ -276,54 +268,6 @@ static void k_DbgPrint(x360_machine *x, x360_thread *t, xe_cpu *c)
     RET(0);
 }
 
-static void k_sprintf(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    char buf[2048];
-    gargs g = {x, c, 5, 1, 0};
-    size_t n = gformat(x, &g, A(1), buf, sizeof buf);
-    memcpy(x->base + A(0), buf, n + 1);
-    RET(n);
-}
-
-static void k__snprintf(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    char buf[2048];
-    gargs g = {x, c, 6, 1, 0};
-    size_t n = gformat(x, &g, A(2), buf, sizeof buf);
-    uint32_t cap = A(1);
-    if (cap) {
-        size_t w = n < cap ? n + 1 : cap;
-        memcpy(x->base + A(0), buf, w);
-    }
-    RET(n < cap ? n : (uint32_t)-1);
-}
-
-static void k_vsprintf(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    char buf[2048];
-    gargs g = {x, c, 0, 1, A(2)};
-    size_t n = gformat(x, &g, A(1), buf, sizeof buf);
-    memcpy(x->base + A(0), buf, n + 1);
-    RET(n);
-}
-
-static void k__vsnprintf(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    char buf[2048];
-    gargs g = {x, c, 0, 1, A(3)};
-    size_t n = gformat(x, &g, A(2), buf, sizeof buf);
-    uint32_t cap = A(1);
-    if (cap) {
-        size_t w = n < cap ? n + 1 : cap;
-        memcpy(x->base + A(0), buf, w);
-    }
-    RET(n < cap ? n : (uint32_t)-1);
-}
-
 static void k_DbgBreakPoint(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t, (void)c;
@@ -481,12 +425,6 @@ static void k_MmQueryAllocationSize(x360_machine *x, x360_thread *t, xe_cpu *c)
     RET(h ? x360_heap_size_of(h, h == &x->heap_phys ? a & 0x1FFFFFFFu : a) : 0);
 }
 
-static void k_MmQueryAddressProtect(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)x, (void)t;
-    RET(4); /* PAGE_READWRITE */
-}
-
 static void k_ExAllocatePoolTypeWithTag(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
@@ -625,7 +563,7 @@ static void k_KeGetCurrentProcessType(x360_machine *x, x360_thread *t, xe_cpu *c
 
 static void k_KeDelayExecutionThread(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
-    x360_wait(x, t, WAIT_DELAY, NULL, 0, 0, A(2));
+    x360_wait_alertable(x, t, WAIT_DELAY, NULL, 0, 0, A(2), A(1) & 0xFF); /* (mode, alertable, interval*) */
     RET(X_STATUS_SUCCESS);
 }
 
@@ -891,20 +829,17 @@ static void k_NtCreateTimer(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 static void k_NtSetTimerEx(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
-    (void)t;
     /* (handle, due time*, apc routine, apc mode, apc context, resume, period ms, previous state*) */
     uint32_t o = x360_handle_obj(x, A(0));
     if (!o || !A(1)) {
         RET(X_STATUS_INVALID_HANDLE);
         return;
     }
-    if (A(2))
-        x360_logf(x, "x360: NtSetTimerEx with an APC routine (%08X): not called\n", A(2));
-    int64_t due = (int64_t)x360_r64(x, A(1));
-    uint64_t now = x360_now(x);
-    uint64_t at = due < 0 ? now + (uint64_t)(-due) : (uint64_t)due;
-    x360_timer_set(x, o, at, A(6));
-    RET(X_STATUS_SUCCESS);
+    uint64_t at = x360_due_time(x, (int64_t)x360_r64(x, A(1)));
+    int was = x360_timer_arm(x, o, at, A(6), 0, A(2), A(4), t->kthread);
+    if (A(7))
+        x360_w32(x, A(7), was > 0);
+    RET(was < 0 ? X_STATUS_NO_MEMORY : X_STATUS_SUCCESS);
 }
 
 static void k_NtCancelTimer(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -928,7 +863,7 @@ static void k_NtWaitForSingleObjectEx(x360_machine *x, x360_thread *t, xe_cpu *c
         RET(X_STATUS_INVALID_HANDLE);
         return;
     }
-    x360_wait(x, t, WAIT_OBJECTS, &o, 1, 0, A(3));
+    x360_wait_alertable(x, t, WAIT_OBJECTS, &o, 1, 0, A(3), A(2) & 0xFF); /* (handle, mode, alertable, timeout*) */
 }
 
 static void k_NtWaitForMultipleObjectsEx(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -943,13 +878,13 @@ static void k_NtWaitForMultipleObjectsEx(x360_machine *x, x360_thread *t, xe_cpu
             RET(X_STATUS_INVALID_HANDLE);
             return;
         }
-    x360_wait(x, t, WAIT_OBJECTS, objs, (int)n, A(2) == 0, A(5));
+    x360_wait_alertable(x, t, WAIT_OBJECTS, objs, (int)n, A(2) == 0, A(5), A(4) & 0xFF);
 }
 
 static void k_KeWaitForSingleObject(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
-    uint32_t o = A(0);
-    x360_wait(x, t, WAIT_OBJECTS, &o, 1, 0, A(4));
+    uint32_t o = A(0); /* (object, reason, mode, alertable, timeout*) */
+    x360_wait_alertable(x, t, WAIT_OBJECTS, &o, 1, 0, A(4), A(3) & 0xFF);
 }
 
 static void k_KeWaitForMultipleObjects(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -961,7 +896,7 @@ static void k_KeWaitForMultipleObjects(x360_machine *x, x360_thread *t, xe_cpu *
     }
     for (uint32_t k = 0; k < n; k++)
         objs[k] = x360_r32(x, arr + 4 * k);
-    x360_wait(x, t, WAIT_OBJECTS, objs, (int)n, A(2) == 0, A(6));
+    x360_wait_alertable(x, t, WAIT_OBJECTS, objs, (int)n, A(2) == 0, A(6), A(5) & 0xFF);
 }
 
 static void k_NtClose(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -1068,16 +1003,31 @@ static void k_RtlLeaveCriticalSection(x360_machine *x, x360_thread *t, xe_cpu *c
     RET(0);
 }
 
-static void k_KfAcquireSpinLock(x360_machine *x, x360_thread *t, xe_cpu *c)
+static void k_KeAcquireSpinLockAtRaisedIrql(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     x360_w32(x, A(0), t->kthread);
     RET(0);
 }
 
-static void k_KfReleaseSpinLock(x360_machine *x, x360_thread *t, xe_cpu *c)
+static void k_KeReleaseSpinLockFromRaisedIrql(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     x360_w32(x, A(0), 0);
+    RET(0);
+}
+
+static void k_KfAcquireSpinLock(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    uint32_t old = t->irql; /* the IRQL to give back to KfReleaseSpinLock */
+    x360_w32(x, A(0), t->kthread);
+    t->irql = 2;
+    RET(old);
+}
+
+static void k_KfReleaseSpinLock(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    x360_w32(x, A(0), 0);
+    t->irql = A(1) & 0xFF;
     RET(0);
 }
 
@@ -1314,7 +1264,7 @@ static void k_NtSignalAndWaitForSingleObjectEx(x360_machine *x, x360_thread *t, 
             x360_w32(x, so + 0x18, 0);
     } else
         x360_w32(x, so + 4, 1);
-    x360_wait(x, t, WAIT_OBJECTS, &wo, 1, 0, A(4));
+    x360_wait_alertable(x, t, WAIT_OBJECTS, &wo, 1, 0, A(4), A(2) & 0xFF);
 }
 
 static void k_ObLookupThreadByThreadId(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -1419,13 +1369,13 @@ static void k_RtlTimeFieldsToTime(x360_machine *x, x360_thread *t, xe_cpu *c)
 #define KA(name, fn) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, fn}
 #define XM(name, fn) {X360_LIB_XAM, X360_xam_##name, fn}
 
-static const hle_entry HLE[] = {
-    K(DbgPrint), K(DbgBreakPoint), KA(DbgBreakPointWithStatus, k_DbgBreakPoint), K(sprintf), K(_snprintf),
-    K(vsprintf), K(_vsnprintf), KA(KeBugCheck, k_KeBugCheckEx), K(KeBugCheckEx), K(RtlRaiseException),
+static const x360_hle_row HLE[] = {
+    K(DbgPrint), K(DbgBreakPoint), KA(DbgBreakPointWithStatus, k_DbgBreakPoint),
+    KA(KeBugCheck, k_KeBugCheckEx), K(KeBugCheckEx), K(RtlRaiseException),
     K(HalReturnToFirmware),
     K(NtAllocateVirtualMemory), K(NtFreeVirtualMemory), K(NtQueryVirtualMemory), K(MmAllocatePhysicalMemoryEx),
     K(MmAllocatePhysicalMemory), K(MmFreePhysicalMemory), K(MmGetPhysicalAddress), K(MmQueryAllocationSize),
-    K(MmQueryAddressProtect), K(ExAllocatePool), KA(ExAllocatePoolWithTag, k_ExAllocatePool),
+    K(ExAllocatePool), KA(ExAllocatePoolWithTag, k_ExAllocatePool),
     K(ExAllocatePoolTypeWithTag), K(ExFreePool),
     K(ExCreateThread), K(ExTerminateThread), K(NtResumeThread), K(KeResumeThread), K(NtSuspendThread),
     K(KeSetAffinityThread), K(KeSetBasePriorityThread), KA(KeSetPriorityThread, k_KeSetBasePriorityThread),
@@ -1439,9 +1389,8 @@ static const hle_entry HLE[] = {
     K(ObDereferenceObject),
     K(RtlInitializeCriticalSection), KA(RtlInitializeCriticalSectionAndSpinCount, k_RtlInitializeCriticalSection),
     K(RtlEnterCriticalSection), K(RtlTryEnterCriticalSection), K(RtlLeaveCriticalSection),
-    K(KfAcquireSpinLock), K(KfReleaseSpinLock), KA(KeAcquireSpinLockAtRaisedIrql, k_KfAcquireSpinLock),
-    KA(KeReleaseSpinLockFromRaisedIrql, k_KfReleaseSpinLock), KA(KeRaiseIrqlToDpcLevel, k_nop0),
-    KA(KfLowerIrql, k_nop0), KA(KeEnterCriticalRegion, k_nop0), KA(KeLeaveCriticalRegion, k_nop0),
+    K(KfAcquireSpinLock), K(KfReleaseSpinLock), K(KeAcquireSpinLockAtRaisedIrql),
+    K(KeReleaseSpinLockFromRaisedIrql),
     K(KeQueryPerformanceFrequency), K(KeQuerySystemTime), K(KeQueryInterruptTime),
     K(XexGetModuleHandle), K(XexGetProcedureAddress), K(RtlImageXexHeaderField), K(ExGetXConfigSetting),
     K(XexCheckExecutablePrivilege), K(RtlInitAnsiString), K(RtlInitUnicodeString), K(RtlNtStatusToDosError),
@@ -1464,20 +1413,63 @@ static const hle_entry HLE[] = {
     K(RtlTimeFieldsToTime), K(NtQueryEvent), KA(KeSetDisableBoostThread, k_nop0), K(RtlUnwind),
 };
 
+void x360_hle_add(x360_machine *x, const x360_hle_row *rows, size_t n)
+{
+    for (size_t k = 0; k < n; k++) {
+        x360_hle_fn *slot = &x->hle[rows[k].lib][rows[k].ordinal & 4095];
+        if (*slot && *slot != rows[k].fn) { /* two tables answer one export: one of them would silently never run */
+            snprintf(x->error, sizeof x->error, "two HLE functions for %s!%s", rows[k].lib ? "xam" : "xboxkrnl",
+                     x360_export_name(rows[k].lib, rows[k].ordinal) ?: "?");
+            x->hle_conflict = 1;
+        }
+        *slot = rows[k].fn;
+    }
+}
+
+x360_hle_fn x360_hle_lookup(const x360_machine *x, int lib, unsigned ordinal)
+{
+    return lib >= 0 && lib < 2 && ordinal < 4096 ? x->hle[lib][ordinal] : NULL;
+}
+
+/* every table; an export has one function (x360_hle_add) */
+static void hle_register(x360_machine *x)
+{
+#define X360_ADD_TABLE(group) x360_hle_add(x, x360_tab_##group, x360_tab_##group##_n);
+    X360_HLE_TABLES(X360_ADD_TABLE)
+    x360_more_register(x);
+    x360_xma_register(x);
+    x360_hle_add(x, HLE, sizeof HLE / sizeof HLE[0]);
+}
+
+void x360_hle_refused(x360_machine *x)
+{
+    const char *lib = x->hle_lib ? "xam" : "xboxkrnl", *name = x360_export_name(x->hle_lib, x->hle_ordinal) ?: "?";
+    if (x->strict_imports) {
+        x360_fail(x, "%s!%s (ordinal %u) is refused here (stopping: strict imports)", lib, name, x->hle_ordinal);
+        return;
+    }
+    if (!x->unimpl_seen[x->hle_lib][x->hle_ordinal & 4095]) {
+        x->unimpl_seen[x->hle_lib][x->hle_ordinal & 4095] = 1;
+        x->st.unimplemented++;
+        x360_logf(x, "x360: %s!%s (ordinal %u) is refused: this machine does not have it\n", lib, name, x->hle_ordinal);
+    }
+}
+
 void x360_hle_call(x360_machine *x, const x360_thunk *th)
 {
     x360_thread *t = x360_cur(x);
     xe_cpu *c = &t->cpu;
-    for (size_t k = 0; k < sizeof HLE / sizeof HLE[0]; k++)
-        if (HLE[k].lib == th->lib && HLE[k].ordinal == th->ordinal) {
-            if (x->verbose)
-                x360_logf(x, "x360: [t%u] %s(%08X, %08X, %08X, %08X)\n", t->id,
-                          x360_export_name(th->lib, th->ordinal) ?: "?", A(0), A(1), A(2), A(3));
-            HLE[k].fn(x, t, c);
-            return;
-        }
-    if (x360_more_call(x, th, t))
+    x360_hle_fn fn = x360_hle_lookup(x, th->lib, th->ordinal);
+    if (fn) {
+        if (x->verbose)
+            x360_logf(x, "x360: [t%u] %s(%08X, %08X, %08X, %08X)\n", t->id,
+                      x360_export_name(th->lib, th->ordinal) ?: "?", A(0), A(1), A(2), A(3));
+        x->hle_lib = th->lib;
+        x->hle_ordinal = th->ordinal;
+        fn(x, t, c);
+        x360_apc_after_hle(x, t);
         return;
+    }
     if (x->strict_imports) {
         x360_fail(x, "%s!%s (ordinal %u) has no HLE (stopping: strict imports)", th->lib ? "xam" : "xboxkrnl",
                   x360_export_name(th->lib, th->ordinal) ?: "?", th->ordinal);
@@ -1493,7 +1485,7 @@ void x360_hle_call(x360_machine *x, const x360_thunk *th)
 }
 
 /* the variable exports this runtime fills in, before the loader binds the imports */
-static uint32_t var(x360_machine *x, int lib, unsigned ordinal, uint32_t size)
+uint32_t x360_var(x360_machine *x, int lib, unsigned ordinal, uint32_t size)
 {
     uint32_t a = x360_kalloc(x, size);
     x->vars[lib][ordinal] = a;
@@ -1502,27 +1494,33 @@ static uint32_t var(x360_machine *x, int lib, unsigned ordinal, uint32_t size)
 
 int x360_kernel_init(x360_machine *x)
 {
-    uint32_t a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxHardwareInfo, 16);
+    hle_register(x);
+    if (x->hle_conflict) {
+        x360_logf(x, "x360: %s\n", x->error);
+        return -1;
+    }
+    uint32_t a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxHardwareInfo, 16);
     x360_w32(x, a, 0x00000020u); /* flags (Xenia: 0x20, storage initialised) */
     x360_w8(x, a + 4, 6);        /* hardware threads */
-    a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxKrnlVersion, 8);
+    a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxKrnlVersion, 8);
     x360_w16(x, a, 2);
     x360_w16(x, a + 2, 0);
     x360_w16(x, a + 4, 17559);
     x360_w16(x, a + 6, 0);
-    x->timestamp_bundle = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeTimeStampBundle, 24);
+    x->timestamp_bundle = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeTimeStampBundle, 24);
     /* the executable module: XexExecutableModuleHandle points at a pointer to an LDR_DATA_TABLE_ENTRY-like block
      * whose +0x58 is the XEX header (filled once the XEX is loaded, x360_create) */
     x->module = x360_kalloc(x, 0x100);
-    a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XexExecutableModuleHandle, 16);
+    a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XexExecutableModuleHandle, 16);
     x360_w32(x, a, x->module);
-    a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedImageName, 64);
+    a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedImageName, 64);
     memcpy(x->base + a, "\\Device\\Cdrom0\\default.xex", 27);
-    a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedCommandLine, 64);
+    a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedCommandLine, 64);
     memcpy(x->base + a, "\"default.xex\"", 14);
-    var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeDebugMonitorData, 64);
-    var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExThreadObjectType, 16);
-    var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExEventObjectType, 16);
-    var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExSemaphoreObjectType, 16);
+    x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeDebugMonitorData, 64);
+    x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExThreadObjectType, 16);
+    x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExEventObjectType, 16);
+    x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExSemaphoreObjectType, 16);
+    x360_vd_vars(x);
     return 0;
 }

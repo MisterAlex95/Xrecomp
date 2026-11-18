@@ -45,6 +45,10 @@ enum {
 
 typedef struct xenos_draw {
     uint32_t prim_type, source_select, index_size, num_indices, dma_base, dma_words;
+    /* source_select 1: the packet's index dwords as read from the ring, valid during the draw hook only (NULL in
+     * last_draw) */
+    const uint32_t *imm;
+    uint32_t imm_words;
 } xenos_draw;
 
 #define XENOS_SHADER_WORDS 0x4000 /* the sequencer's instruction memory: 4096 instructions of 3 dwords, rounded up */

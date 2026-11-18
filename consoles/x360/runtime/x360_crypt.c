@@ -77,6 +77,16 @@ static void sha256_block(uint32_t h[8], const uint8_t *p)
     h[0] += a, h[1] += b, h[2] += c, h[3] += d, h[4] += e, h[5] += f, h[6] += g, h[7] += hh;
 }
 
+/* one compression of SHA-1 (words 5) or SHA-256 (words 8): x360_crypt2.c's hashes share these */
+void x360_crypt_sha_block(int words, uint32_t *h, const uint8_t *p);
+void x360_crypt_sha_block(int words, uint32_t *h, const uint8_t *p)
+{
+    if (words == 5)
+        sha1_block(h, p);
+    else
+        sha256_block(h, p);
+}
+
 static void sha_init(sha *s, int words)
 {
     static const uint32_t i1[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};

@@ -397,3 +397,58 @@ def test_resume_table_in_parts(tmp_path):
         subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-DXE_RUNTIME=1", "-Wl,--no-undefined"] + inc +
                        ["-o", str(tmp_path / "p.so")] + sorted(str(p) for p in split.glob("*.c")) + ["-lm"],
                        check=True)
+
+
+def test_discovery_keeps_no_object_per_word(monkeypatch, tmp_path):
+    """XBA-293: the decoded-instruction cache stays bounded and a finished function is an array; the lift is the same
+    with a cache far smaller than the title."""
+    from . import discover360
+
+    img, _, _ = build()
+    full = tmp_path / "full"
+    small = tmp_path / "small"
+    recompile(img, str(full))
+    monkeypatch.setattr(discover360, "INSN_CACHE", 8)
+    seen = []
+    insn = discover360.XenonDiscovery.insn
+
+    def bounded(self, a):
+        seen.append(len(self._cache))
+        return insn(self, a)
+
+    monkeypatch.setattr(discover360.XenonDiscovery, "insn", bounded)
+    recompile(img, str(small))
+    assert seen and max(seen) <= 8
+    names = sorted(p.name for p in full.iterdir())
+    assert names == sorted(p.name for p in small.iterdir())
+    assert all((full / n).read_bytes() == (small / n).read_bytes() for n in names)
+
+
+def test_packed_function_is_the_explored_set():
+    from tools.ppc.discover import Function
+
+    from .discover360 import PackedFunction
+
+    f = Function(0x82000000)
+    f.addrs.update({0x82000000, 0x82000004, 0x82000010})
+    f.calls.add(0x82000100)
+    p = PackedFunction(f)
+    assert list(p.packed) == list(f.addrs) and p.addrs == f.addrs and p.calls == f.calls
+    p.release()
+    assert p.addrs == f.addrs
+
+
+def test_helper_prefilter_rejects_only_what_cannot_match():
+    """_match looks at the raw words first (XBA-293): a run with a gap in its registers, or shorter than MIN_REGS, is
+    no helper; the same run without the gap is."""
+    def found(words):
+        data, _ = build_xex(words + [A.blr()], functions=[(0, 4 * (len(words) + 1))], compression="none")
+        img = parse_xex(data)
+        return find_helpers(CodeView(img), XenonDecoder(text=False), img.code_ranges())
+
+    run = [A.std(r, -0x98 + 8 * (r - 14), 1) for r in range(14, 32)] + [A.stw(12, -8, 1), A.blr()]
+    assert len(found(run)) == 18
+    gap = list(run)
+    gap[1] = A.std(16, -0x90, 1)
+    assert 14 not in {reg for _, reg in found(gap).values()}
+    assert not found(run[-9:])  # r25..r31: one register short of MIN_REGS

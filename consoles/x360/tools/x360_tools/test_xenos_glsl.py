@@ -16,7 +16,7 @@ import pytest
 from . import CONSOLE  # noqa: F401
 from .xenos_asm import (alu_words, cf_branch, cf_exec, cf_loop_end, cf_loop_start, export, fetch_words,
                         flow_program, loop_const, program)
-from .xenos_glsl import Unsupported, translate
+from .xenos_glsl import Unsupported, translate, translate_cached
 
 RUN = os.environ.get("XENOS_GLSL_RUN", "")
 TINY = 1.17549435e-38
@@ -379,7 +379,7 @@ def test_translation_shape():
     src_, info = translate(to_words(make_case(rng)), "vertex")
     assert src_.startswith("#version 300 es") and "xe_i3 = vec4(0.0);" in src_ and info["outputs"] == [0, 1, 2, 3]
     with pytest.raises(Unsupported):
-        translate(program([(2, [("fetch", fetch_words(17, 0, 1, 0o3210, 0))], {})]), "pixel")  # getCompTexLOD
+        translate(program([(2, [("fetch", fetch_words(2, 0, 1, 0o3210, 0))], {})]), "pixel")  # no such fetch opcode
     with pytest.raises(Unsupported):
         translate(to_words([dict(vop=2, vdest=32, vmask=0xF, export=1)]), "vertex")  # memory export
 
@@ -565,6 +565,17 @@ MEMEXPORT_CASES = [
     # 32_FLOAT, 16in32
     ("f32", _ea(0x30000, 0, 1, 36, endian=3), [[2.0, 9.0, 9.0, 9.0]],
      [(0x30000, ((_fbits(2.0) << 16) | (_fbits(2.0) >> 16)) & 0xFFFFFFFF)]),
+    # XBA-296, elements smaller than a dword: the address's bits 0-1 and 30-31 name the bytes to keep
+    # 8 at byte 3 of the dword: bytes 0-2 kept
+    ("r8", _ea(0x40000, 3, 4, 2), [[1.0, 0.0, 0.0, 0.0]], [(0x40000 | 3 | 1 << 30, 0xFF000000)]),
+    # 16 unorm at byte 2, 8-in-16: 0x8000 swapped, bytes 0-1 kept
+    ("r16", _ea(0x50000, 1, 2, 24, endian=1), [[0.5, 0.0, 0.0, 0.0]], [(0x50000 | 3, 0x00800000)]),
+    # 8_8 at byte 0: bytes 2-3 kept
+    ("rg8", _ea(0x60000, 0, 1, 10), [[1.0, 0.0, 0.0, 0.0]], [(0x60000 | 3 << 30, 0x000000FF)]),
+    # 16_FLOAT at byte 2, no swap: half 1.0
+    ("r16f", _ea(0x70000, 1, 2, 30), [[1.0, 0.0, 0.0, 0.0]], [(0x70000 | 3, 0x3C000000)]),
+    # 5_6_5 at byte 0, 16-in-32 leaves a 16-bit element alone: all ones in green
+    ("r565", _ea(0x80000, 0, 1, 4, endian=3), [[0.0, 1.0, 0.0, 0.0]], [(0x80000 | 3 << 30, 0x000007E0)]),
 ]
 
 
@@ -577,6 +588,11 @@ def test_memexport_translation():
     assert "buffer XeMemExport" in src_ and "xe_eMw |= 2u;" in src_ and "if (xe_eMw != 0u) xe_mx_flush();" in src_
     plain, info = translate(to_words([dict(vop=2, vdest=1, vmask=0xF)]), "vertex", memexport=True)
     assert plain.startswith("#version 300 es") and not info["memexport"]   # no export: GLSL ES 3.00 as before
+    ps_words = program([(2, [A(vop=2, vdest=32, vmask=0xF, export=1, srcs=((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))),
+                             A(vop=2, vdest=33, vmask=0xF, export=1, srcs=((1, 0, 0, 0), (1, 0, 0, 0), (0, 0, 0, 0))),
+                             A(**export(0, 0))], {})])
+    ps_src, ps_info = translate_cached(ps_words, "pixel", interpolators=1)  # XBA-296: pixel shaders export too
+    assert ps_info["memexport"] and ps_src.startswith("#version 310 es")
 
 
 @pytest.mark.skipif(not os.path.isfile(RUN), reason="$XENOS_GLSL_RUN not set (tests/run_glsl_mesa.sh sets it)")
@@ -597,3 +613,97 @@ def test_memexport_against_mesa(tmp_path):
     assert "error" not in r.stdout, r.stdout + r.stderr
     for n, (name, _, _, want) in enumerate(MEMEXPORT_CASES):
         assert got.get(n) == sorted(want), (name, got.get(n), sorted(want))
+
+
+# ---- texture queries (XBA-296) ----
+
+def _query_ref(op, dim, size, modes, base, dx, dy, x, y, ins, scale):
+    """the reference for one pixel: the instruction's description, written apart from the translator"""
+    c = [base[i] + dx[i] * x + dy[i] * y for i in range(4)]
+    if op == 18:
+        return [dx[0] * scale, dy[0] * scale, dx[1] * scale, dy[1] * scale]
+    n = {0: 1, 1: 2, 2: 3, 3: 2}[dim]
+    norm = not ins["unnormalized"] or dim == 3
+    k = [size[i] if norm else 1.0 for i in range(3)]
+    u = [c[i] * k[i] if i < n else 0.0 for i in range(3)]
+    gx = [dx[i] * k[i] * scale if i < n else 0.0 for i in range(3)]
+    gy = [dy[i] * k[i] * scale if i < n else 0.0 for i in range(3)]
+    r = max(sum(v * v for v in gx), sum(v * v for v in gy))
+    lod = 0.5 * math.log2(r) if r > 0 else -FLT_MAX
+    if op == 17:
+        return [lod, 0.0, 0.0, 0.0]
+    offs = [ins["ox"] * 0.5, ins["oy"] * 0.5, ins["oz"] * 0.5] if dim != 3 else [0.0] * 3
+    offs = [offs[i] if i < n else 0.0 for i in range(3)]
+    if op == 16:
+        if dim == 3:
+            return [0.0] * 4
+        inside = 1.0
+        for i in range(n):
+            m = (modes >> (2 * i)) & 3
+            if not m:
+                continue
+            v = abs(u[i] + offs[i]) if m == 2 else u[i] + offs[i]
+            t = v - 0.5
+            j = math.floor(t)
+            f = t - j
+            inside *= (1.0 - f if 0 <= j < size[i] else 0.0) + (f if 0 <= j + 1 < size[i] else 0.0)
+        return [1.0 - inside, 0.0, 0.0, 0.0]
+    w = [(u[i] + offs[i] - 0.5 + 1.5 / 1024) % 1.0 if i < n else 0.0 for i in range(3)]
+    level = max(lod + ins["lod_bias"] / 16.0, 0.0)
+    return w + [level - math.floor(level)]
+
+
+def _query_close(got, want):
+    """fract wraps at 1: 0.9999 and 0.0001 are neighbours"""
+    return abs(got - want) <= 5e-4 or abs(abs(got - want) - 1.0) <= 5e-4
+
+
+def test_query_translation():
+    for op in (16, 17, 18, 19):
+        words = program([(2, [("fetch", fetch_words(op, 0, 1, 0o3210, 3, dimension=1)), A(**export(0, 1))], {})])
+        for stage in ("pixel", "vertex"):
+            src_, info = translate(words, stage, interpolators=1)
+            assert ("dFdx" in src_.split("void main")[1]) == (stage == "pixel" and op in (17, 18, 19))
+            assert info["tqueries"] == ([] if op == 18 else [3])
+
+
+@pytest.mark.skipif(not os.path.isfile(RUN), reason="$XENOS_GLSL_RUN not set (tests/run_glsl_mesa.sh sets it)")
+def test_queries_against_mesa(tmp_path):
+    rng = random.Random(2960)
+    cases = []
+    for n in range(240):
+        op, dim = rng.choice((16, 17, 18, 19)), rng.randrange(4)
+        ins = dict(unnormalized=rng.getrandbits(1), ox=rng.randrange(-8, 8), oy=rng.randrange(-8, 8),
+                   oz=rng.randrange(-8, 8), lod_bias=rng.randrange(-32, 32))
+        scale = rng.choice((1.0, 2.0, 4.0))
+        size = [float(rng.choice((4, 8, 16, 64))) for _ in range(3)]
+        modes = rng.randrange(64)
+        base = [rng.uniform(-2.0, 2.0) for _ in range(4)]
+        dx = [rng.choice((0.0, 0.125, -0.25, 0.0625, 1.5)) for _ in range(4)]
+        dy = [rng.choice((0.0, 0.25, -0.125, 0.03125, 2.0)) for _ in range(4)]
+        words = program([(2, [("fetch", fetch_words(op, 0, 1, 0o3210, 5, dimension=dim, **ins)),
+                              A(**export(0, 1))], {})])
+        src_, _ = translate(words, "pixel", interpolators=1)
+        (tmp_path / ("%d.frag" % n)).write_text(src_)
+        (tmp_path / ("%d.in" % n)).write_bytes(consts_blob([[0.0] * 4] * 256, 0, [base, dx, dy]))
+        tq = [[0.0] * 4 for _ in range(32)]
+        tq[5] = size + [float(modes)]
+        pg = [-1.0, 0.0, 1.0 / scale, 1.0 / scale]
+        (tmp_path / ("%d.grid" % n)).write_bytes(b"".join(struct.pack("<4f", *v) for v in tq + [pg]))
+        cases.append((n, op, dim, size, modes, base, dx, dy, ins, scale))
+    r = subprocess.run([RUN, str(tmp_path)], capture_output=True, text=True, timeout=600)
+    if r.returncode == 77:
+        pytest.skip(r.stderr.strip())
+    assert r.returncode == 0, r.stderr
+    got = {int(p[0]): p[2:] for p in (ln.split() for ln in r.stdout.splitlines()) if len(p) > 2 and p[1] == "grid"}
+    bad = []
+    for n, op, dim, size, modes, base, dx, dy, ins, scale in cases:
+        assert n in got, r.stdout[:800]
+        vals = [struct.unpack("<f", struct.pack("<I", int(h, 16)))[0] for h in got[n]]
+        for y in range(4):
+            for x in range(4):
+                want = _query_ref(op, dim, size, modes, base, dx, dy, x, y, ins, scale)
+                have = vals[4 * (4 * y + x):4 * (4 * y + x) + 4]
+                if not all(_query_close(h, w) for h, w in zip(have, want)):
+                    bad.append((n, op, dim, (x, y), have, want))
+    assert not bad, "%d pixels differ: %s" % (len(bad), bad[:6])

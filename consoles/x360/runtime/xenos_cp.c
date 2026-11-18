@@ -1,4 +1,5 @@
 /* xenos_cp.c -- the Xenos command processor: PM4 decode, register file, trace (XBA-270). See xenos_cp.h. */
+#include <stdlib.h>
 #include <string.h>
 
 #include "xenos_cp.h"
@@ -170,12 +171,21 @@ static void draw(xenos_cp *cp, reader *r, uint32_t words, const char *name)
         xenos_cp_write_reg(cp, XENOS_REG_VGT_DMA_SIZE, size); /* the swap mode (bits 30-31) kept */
         used = 3;
     }
-    for (; used < words; used++) /* immediate indices (DRAW_INDX_2) */
+    /* immediate indices: copied out of the packet (the ring may wrap inside it) for the renderer */
+    uint32_t *imm = NULL;
+    if (d.source_select == 1 && used < words && (imm = malloc(4 * (size_t)(words - used))) != NULL)
+        while (used < words) {
+            imm[d.imm_words++] = rd(cp, r);
+            used++;
+        }
+    for (; used < words; used++)
         rd(cp, r);
-    cp->last_draw = d;
+    cp->last_draw = d; /* no pointer into a buffer that goes away */
+    d.imm = imm;
     cp->draws++;
     if (cp->draw_hook)
         cp->draw_hook(cp->render_ctx, cp, &d);
+    free(imm);
     TRACE("draw %s prim %u source %s indices %u%s", name, d.prim_type,
           d.source_select == 0 ? "dma" : d.source_select == 1 ? "immediate" : "auto", d.num_indices,
           d.source_select == 0 ? "" : "\n");

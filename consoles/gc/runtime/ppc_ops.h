@@ -263,6 +263,35 @@ static inline double ppc_fnma(double r)
     return r != r ? r : ppc_fneg(r);
 }
 
+/* fmadd / fmsub / fnmadd / fnmsub (and the s forms), arguments in fma()'s order: frA * frC + frB. With a NaN operand the
+ * architecture names the result: frA's, else frB's, else frC's, quieted, with its own sign (the negation of fmsub's
+ * frB and of the fn forms' result do not apply to it). fma() leaves that choice to the host, and compilers swap its
+ * two commutative factors (XBA-292). */
+static inline double ppc_fma_nan(double a, double c, double b)
+{
+    return ppc_u2f(ppc_f2u(a != a ? a : b != b ? b : c) | 0x0008000000000000ull);
+}
+
+static inline double ppc_fmadd(double a, double c, double b)
+{
+    return a != a || b != b || c != c ? ppc_fma_nan(a, c, b) : fma(a, c, b);
+}
+
+static inline double ppc_fmsub(double a, double c, double b)
+{
+    return a != a || b != b || c != c ? ppc_fma_nan(a, c, b) : fma(a, c, ppc_fneg(b));
+}
+
+static inline double ppc_fnmadd(double a, double c, double b)
+{
+    return ppc_fnma(ppc_fmadd(a, c, b));
+}
+
+static inline double ppc_fnmsub(double a, double c, double b)
+{
+    return ppc_fnma(ppc_fmsub(a, c, b));
+}
+
 /* fres / frsqrte: estimates on hardware, exact here. A console layer with known estimate tables uses its own (the
  * Gekko's: gc_fres / gc_frsqrte in gc_recomp_rt.h). */
 static inline double ppc_fres(double d)

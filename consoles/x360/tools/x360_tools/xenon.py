@@ -113,6 +113,12 @@ def _vx128_regs(w, e):
 class XenonDecoder(Decoder):
     EXT_OPS = (2, 4, 5, 6, 30, 56, 57, 58, 60, 61, 62)
 
+    def __init__(self, text=True):
+        self.with_text = text  # False: no disassembly (Insn.text is None), for lifts without comments
+
+    def disasm(self, i):
+        return super().disasm(i) if self.with_text else None
+
     def decode(self, word, addr):
         w = word & 0xFFFFFFFF
         op = w >> 26
@@ -244,6 +250,8 @@ class XenonDecoder(Decoder):
 
     # ---- disassembly ----
     def _text(self, i):
+        if not self.with_text:
+            return None
         n, e = i.name, i.ext
         f = e.form
         if f == "ds":

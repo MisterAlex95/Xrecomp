@@ -25,6 +25,12 @@ def _load():
             _BY_ORD[(lib, o)] = n
 
 
+def all_exports():
+    """[(lib, name, "FN" | "VAR")] of both libraries."""
+    _load()
+    return [(lib, n, v[1]) for (lib, n), v in _BY_NAME.items()]
+
+
 def ordinal(lib, name):
     _load()
     return _BY_NAME[(_lib(lib), name)][0]

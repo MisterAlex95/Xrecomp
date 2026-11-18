@@ -19,10 +19,16 @@
 Nothing here can be checked against MSVC output in this repository (no title code): the shapes are what XenonRecomp
 and Xenia describe; recognition is deliberately strict, and `stats()` reports what was found so a title's sweep shows
 what slipped through.
+
+Memory (XBA-293): Prepare runs on a handheld, so nothing here grows by a Python object per guest word. Decoded
+instructions live in a small bounded cache, explore() remembers one byte per word (`_flow`), and a finished function
+keeps its addresses in an array (`PackedFunction`).
 """
 
+from array import array
+
 from tools.ppc.discover import Discovery
-from tools.ppc.isa import BCCTR, BCLR, BCOND, BRANCH
+from tools.ppc.isa import BCCTR, BCLR, BCOND, BRANCH, INVALID, NORMAL, RFI
 
 STORE_GPR = ("std", "ld")
 MIN_REGS = 8
@@ -68,14 +74,24 @@ def find_helpers(view, dec, ranges):
     return found
 
 
+def _continues(view, a, w):
+    """The word after the store / load w at a handles the next register the same way (a helper has MIN_REGS)."""
+    if not view.in_code(a + 4):
+        return False
+    n = view.u32(a + 4)
+    same = 0xFC1F0003 if (w >> 26) in (58, 62) else 0xFC1F0000  # opcode, base register, the DS form's sub-opcode
+    return (n & same) == (w & same) and ((n >> 21) & 31) == ((w >> 21) & 31) + 1
+
+
 def _match(view, dec, a):
-    i = dec.decode(view.u32(a), a)
-    n = i.name
-    if n in ("std", "ld") and i.ra == 1:
-        return _match_gpr(view, dec, a, n)
-    if n in ("stfd", "lfd") and i.ra == 12:
-        return _match_fpr(view, dec, a, n)
-    if n == "addi" and i.ra == 0 and i.rd == 11:  # li r11, off
+    # on the raw word first: this runs on every word of the code sections
+    w = view.u32(a)
+    op, rd, ra = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+    if op in (58, 62) and ra == 1 and not w & 3:  # ld, std
+        return _match_gpr(view, dec, a, "ld" if op == 58 else "std") if _continues(view, a, w) else None
+    if op in (50, 54) and ra == 12:               # lfd, stfd
+        return _match_fpr(view, dec, a, "lfd" if op == 50 else "stfd") if _continues(view, a, w) else None
+    if op == 14 and ra == 0 and rd == 11:         # li r11, off
         return _match_vmx(view, dec, a)
     return None
 
@@ -381,12 +397,79 @@ class JumpTables:
         return None
 
 
+class PackedFunction:
+    """A discovered function at 4 bytes per instruction. `packed` holds the addresses in the order the explored set
+    gave them; `addrs` is that set again while the function is being lifted (`release` drops it)."""
+    __slots__ = ("entry", "packed", "_calls", "_addrs")
+
+    def __init__(self, f):
+        self.entry = f.entry
+        self.packed = array("I", f.addrs)
+        self._calls = array("I", f.calls)
+        self._addrs = None
+
+    @property
+    def addrs(self):
+        if self._addrs is None:
+            self._addrs = set(self.packed)
+        return self._addrs
+
+    @property
+    def calls(self):
+        return set(self._calls)
+
+    def release(self):
+        self._addrs = None
+
+    def __repr__(self):
+        return "<fn %08X: %d insns>" % (self.entry, len(self.packed))
+
+
+class _Plain:
+    """What explore() needs of a word known not to change the control flow."""
+    kind = NORMAL
+
+
+_PLAIN = _Plain()
+_FLOW_KINDS = (INVALID, BRANCH, BCOND, BCLR, BCCTR, RFI)
+INSN_CACHE = 1 << 16   # decoded instructions kept: more than a function holds, far less than a title
+
+
 class XenonDiscovery(Discovery):
     """Discovery with jump tables resolved (the image's helpers are hidden by the view, see recomp.CodeView)."""
 
     def __init__(self, image, decoder, seeds=()):
         super().__init__(image, decoder, seeds)
         self.jt = JumpTables(image, self.insn)
+        self.flow = self._flow
+        self._pages = {}   # 64 KB of guest code -> one byte per word: 0 not decoded yet, 1 plain, 2 control flow
+
+    def insn(self, a):
+        i = self._cache.get(a)
+        if i is None:
+            if len(self._cache) >= INSN_CACHE:
+                self._cache.clear()
+            i = self.decoder.decode(self.image.u32(a), a)
+            self._cache[a] = i
+        return i
+
+    def _flow(self, a):
+        """explore() reads every word once per pass: a plain word is decoded in the first pass only."""
+        page = self._pages.get(a >> 16)
+        if page is None:
+            page = self._pages[a >> 16] = bytearray(0x4000)
+        k = (a & 0xFFFF) >> 2
+        known = page[k]
+        if known == 1:
+            return _PLAIN
+        if known == 2:
+            return self.insn(a)
+        i = self.decoder.decode(self.image.u32(a), a)
+        page[k] = 2 if i.kind in _FLOW_KINDS else 1
+        return i
+
+    def finished(self, f):
+        return PackedFunction(f)
 
     def indirect_targets(self, f, a, i):
         if (i.rd & 0x14) != 0x14:
@@ -394,7 +477,15 @@ class XenonDiscovery(Discovery):
         return self.jt.resolve(a)
 
     def stats(self):
-        s = super().stats()
+        fs = self.functions
+        lo = min((min(f.packed) for f in fs if f.packed), default=0)
+        hi = max((max(f.packed) for f in fs if f.packed), default=0)
+        covered = bytearray(((hi - lo) >> 2) + 1)   # one byte per word: a set of every address is hundreds of MB
+        for f in fs:
+            for a in f.packed:
+                covered[(a - lo) >> 2] = 1
+        s = {"functions": len(fs), "instructions": covered.count(1),
+             "lifted_instructions": sum(len(f.packed) for f in fs)}
         s["jump_tables"] = len(self.jt.tables)
         s["jump_table_targets"] = sum(len(t) for t in self.jt.tables.values())
         s["unresolved_bctr"] = len(self.jt.unresolved)

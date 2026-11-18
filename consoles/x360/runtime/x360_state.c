@@ -15,6 +15,8 @@
  *                   the interrupt state (callback, next vertical blank, pending interrupts)
  *   XMA   optional  the XMA context array's place, which contexts are in use and enabled (XBA-280)
  *   SEH   optional  an exception being dispatched on each thread (x360_seh.c, XBA-282)
+ *   KOBJ  optional  DPCs, queued APCs, alerts, IRQLs, queue service, timers past the first 64, recorded protections
+ *                   (x360_kdpc.c, XBA-296); a state without it loads with none of them
  *   FILE  optional  the open files (device, path, position: they are opened again at load) and symbolic links
  *
  * A state is taken between time slices (x360_run returned), when every thread's context is in its slot. Not state:
@@ -157,7 +159,7 @@ static void sec_kernel(x360_machine *x, io *s)
         io_u32(s, &x->handles[k].obj);
         io_i32(s, &x->handles[k].used);
     }
-    for (int k = 0; k < X360_MAX_TIMERS; k++) {
+    for (int k = 0; k < X360_KERN_TIMERS; k++) {
         io_u32(s, &x->timers[k].obj);
         io_u64(s, &x->timers[k].due);
         io_u32(s, &x->timers[k].period);
@@ -400,6 +402,12 @@ static void sec_xma(x360_machine *x, io *s)
         x360_xma_state(x, &array, used, enabled, 1);
 }
 
+/* XBA-296: everything x360_kdpc.c keeps outside guest memory */
+static void sec_kobj(x360_machine *x, io *s)
+{
+    x360_kobj_state(x, s, cb_u32, cb_u64, cb_i32);
+}
+
 typedef struct {
     char tag[5];
     uint32_t version;
@@ -411,6 +419,7 @@ static const section k_sections[] = {
     {"THRD", 1, 1, sec_threads}, {"KERN", 1, 1, sec_kernel}, {"HEAP", 1, 1, sec_heaps},
     {"MEM ", 1, 1, sec_memory},  {"GPU ", 1, 0, sec_gpu},    {"FILE", 1, 0, sec_files},
     {"PADS", 1, 0, sec_pads},    {"XMA ", 1, 0, sec_xma},    {"SEH ", 1, 0, sec_seh},
+    {"KOBJ", 1, 0, sec_kobj},
 };
 #define NSEC (sizeof k_sections / sizeof k_sections[0])
 
@@ -516,6 +525,7 @@ int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_
             snprintf(why, why_n, "section %.4s missing", k_sections[j].tag);
             return X360_STATE_ECORRUPT;
         }
+    x360_kobj_reset(x); /* a state from before XBA-296 has no KOBJ section: none of that state */
     for (size_t j = 0; j < NSEC; j++) {
         if (!at[j])
             continue;

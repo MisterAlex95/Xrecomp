@@ -45,13 +45,6 @@ static uint32_t finish(x360_machine *x, uint32_t ov, uint32_t result, uint32_t l
 
 /* ---- strings ---- */
 
-static void k_RtlUpcaseUnicodeChar(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)x, (void)t;
-    uint32_t ch = A(0) & 0xFFFF;
-    RET(ch < 128 ? (uint32_t)toupper((int)ch) : ch);
-}
-
 static void k_RtlCompareStringN(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
@@ -213,15 +206,17 @@ static void k_NtReadFileScatter(x360_machine *x, x360_thread *t, xe_cpu *c)
 static void k_RtlCaptureContext(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    /* the context record's integer registers (CONTEXT: the GPRs from +0x80 in Xenia's X_CONTEXT): enough for
-     * code that walks its own stack; floats and vectors are left zero */
+    /* the CONTEXT x360_seh.c hands to handlers and RtlVirtualUnwind reads: as the caller will be when this returns */
     uint32_t p = A(0);
     if (p) {
-        memset(x->base + p, 0, 0x200);
-        for (int r = 0; r < 32; r++)
-            x360_w64(x, p + 0x80 + 8 * (uint32_t)r, c->gpr[r]);
-        x360_w64(x, p + 0x180, c->lr);
-        x360_w64(x, p + 0x188, c->ctr);
+        x360_seh_ctx k;
+        memset(&k, 0, sizeof k);
+        memcpy(k.gpr, c->gpr, sizeof k.gpr);
+        memcpy(k.fpr, c->fpr, sizeof k.fpr);
+        k.lr = c->lr, k.ctr = c->ctr, k.pc = c->pc, k.cr = c->cr;
+        k.xer = c->xer_so << 31 | c->xer_ov << 30 | c->xer_ca << 29;
+        memset(x->base + p, 0, 0x230);
+        x360_seh_write_context(x, p, &k);
     }
     RET(0);
 }
@@ -436,107 +431,6 @@ static void x_XGetVideoMode(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)c;
 }
 
-int x360_set_content_root(x360_machine *x, const char *root, const char *dir);
-
-static void x_XamContentCreateEx(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    /* (user, root name, XCONTENT_DATA*, flags, disposition*, license mask*, cache size, content size, overlapped):
-     * the content is the directory content/<file name> of the data directory, mounted on <root name>: */
-    char root[64] = "", name[48] = "";
-    for (int k = 0; k < 63 && A(1); k++)
-        if (!(root[k] = (char)x360_r8(x, A(1) + (uint32_t)k)))
-            break;
-    for (int k = 0; k < 42 && A(2); k++) {
-        char ch = (char)x360_r8(x, A(2) + 0x108 + (uint32_t)k);
-        if (!ch)
-            break;
-        name[k] = isalnum((unsigned char)ch) || ch == '_' || ch == '-' || ch == '.' ? ch : '_';
-    }
-    uint32_t flags = A(3), ov = A9(8);
-    int created = x360_set_content_root(x, root, name);
-    if (created < 0) {
-        RET(finish(x, ov, (flags & 3) == 3 ? X_ERROR_FILE_NOT_FOUND : X_ERROR_FUNCTION_FAILED, 0));
-        return;
-    }
-    if (A(4))
-        x360_w32(x, A(4), created ? 1 : 2); /* created / opened */
-    if (A(5))
-        x360_w32(x, A(5), 0xFFFFFFFFu);
-    RET(finish(x, ov, X_ERROR_SUCCESS, 0));
-}
-
-static void x_XamContentClose(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    RET(finish(x, A(1), X_ERROR_SUCCESS, 0));
-}
-
-static void x_XamContentDelete(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    RET(finish(x, A(2), X_ERROR_SUCCESS, 0));
-}
-
-static void x_XamContentGetCreator(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    /* (user, XCONTENT_DATA*, is creator*, XUID*, overlapped) */
-    if (A(2))
-        x360_w32(x, A(2), 1);
-    if (A(3))
-        x360_w64(x, A(3), 0xB13EBABEBABEBABEull);
-    RET(finish(x, A(4), X_ERROR_SUCCESS, 0));
-}
-
-static void x_XamContentGetDeviceData(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    /* XDEVICE_DATA: device id, type (1: hard drive), total bytes, free bytes, a 27-character name */
-    uint32_t p = A(1);
-    if (A(0) != 1) {
-        RET(0x48Fu);
-        return;
-    }
-    static const char name[] = "Hard Drive";
-    memset(x->base + p, 0, 0x50);
-    x360_w32(x, p, 1);
-    x360_w32(x, p + 4, 1);
-    x360_w64(x, p + 8, 20ull << 30);
-    x360_w64(x, p + 16, 16ull << 30);
-    for (uint32_t k = 0; k < sizeof name - 1; k++)
-        x360_w16(x, p + 24 + 2 * k, (uint8_t)name[k]);
-    RET(0);
-}
-
-static void x_XamContentGetDeviceState(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    RET(finish(x, A(1), A(0) == 1 ? X_ERROR_SUCCESS : 0x48Fu, 0));
-}
-
-static void x_XamContentCreateEnumerator(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    /* (user, device, type, flags, items per call, buffer size*, handle*): an enumerator that has nothing */
-    if (A(5))
-        x360_w32(x, A(5), 0x134 * (A(4) ? A(4) : 1));
-    uint32_t o = x360_kalloc(x, 16);
-    x360_w8(x, o, X_OBJ_EVENT_NOTIFICATION);
-    if (A(6))
-        x360_w32(x, A(6), x360_handle_new(x, o));
-    RET(0);
-}
-
-static void x_XamEnumerate(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    /* (handle, flags, buffer, size, items returned*, overlapped) */
-    if (A(4))
-        x360_w32(x, A(4), 0);
-    RET(finish(x, A(5), X_ERROR_NO_MORE_FILES, 0));
-}
-
 static void x_XamShowDeviceSelectorUI(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
@@ -568,35 +462,6 @@ static void x_XamShowDirtyDiscErrorUI(x360_machine *x, x360_thread *t, xe_cpu *c
 {
     (void)t, (void)c;
     x360_fail(x, "the title reported a disc read error (XamShowDirtyDiscErrorUI)");
-}
-
-static void x_XamUserReadProfileSettings(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    /* (title id, user, xuid count, xuids, setting count, setting ids, buffer size*, buffer, overlapped): every
-     * setting present with a zero value of its type (the type is the setting id's top nibble) */
-    uint32_t n = A(4), ids = A(5), size_ptr = A(6), buf = A(7), ov = A9(8);
-    uint32_t need = 8 + 40 * n;
-    if (!size_ptr) {
-        RET(X_ERROR_INVALID_PARAMETER);
-        return;
-    }
-    if (!buf || x360_r32(x, size_ptr) < need) {
-        x360_w32(x, size_ptr, need);
-        RET(finish(x, ov, X_ERROR_INSUFFICIENT_BUFFER, 0));
-        return;
-    }
-    memset(x->base + buf, 0, need);
-    x360_w32(x, buf, n);
-    x360_w32(x, buf + 4, buf + 8);
-    for (uint32_t k = 0; k < n; k++) {
-        uint32_t s = buf + 8 + 40 * k, id = x360_r32(x, ids + 4 * k);
-        x360_w32(x, s, 1); /* from: the title's default */
-        x360_w32(x, s + 8, A(1));
-        x360_w32(x, s + 16, id);
-        x360_w8(x, s + 24, (id >> 28) & 0xF);
-    }
-    RET(finish(x, ov, X_ERROR_SUCCESS, need));
 }
 
 static void x_net_fail(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -662,14 +527,8 @@ static void x_XMsgStartIORequest(x360_machine *x, x360_thread *t, xe_cpu *c)
 #define KM(name, fn) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, fn}
 #define XM2(name, fn) {X360_LIB_XAM, X360_xam_##name, fn}
 
-typedef struct {
-    uint8_t lib;
-    uint16_t ordinal;
-    void (*fn)(x360_machine *, x360_thread *, xe_cpu *);
-} more_entry;
-
-static const more_entry MORE[] = {
-    KM(RtlUpcaseUnicodeChar, k_RtlUpcaseUnicodeChar), KM(RtlCompareStringN, k_RtlCompareStringN),
+static const x360_hle_row MORE[] = {
+    KM(RtlCompareStringN, k_RtlCompareStringN),
     KM(RtlFreeAnsiString, k_RtlFreeAnsiString), KM(RtlMultiByteToUnicodeN, k_RtlMultiByteToUnicodeN),
     KM(RtlUnicodeToMultiByteN, k_RtlUnicodeToMultiByteN),
     KM(RtlUnicodeStringToAnsiString, k_RtlUnicodeStringToAnsiString),
@@ -688,17 +547,12 @@ static const more_entry MORE[] = {
     KM(XAudioSubmitRenderDriverFrame, k_XAudioSubmitRenderDriverFrame),
     KM(XAudioGetVoiceCategoryVolume, k_XAudioGetVoiceCategoryVolume),
     KM(XAudioGetVoiceCategoryVolumeChangeMask, k_XAudioGetVoiceCategoryVolumeChangeMask),
-    KM(XAudioEnableDucker, k_ok), KM(XeCryptBnQwBeSigVerify, k_XeCryptBnQwBeSigVerify),
+    KM(XeCryptBnQwBeSigVerify, k_XeCryptBnQwBeSigVerify),
     KM(XeCryptRotSumSha, k_XeCryptRotSumSha), KM(XeKeysGetKey, k_XeKeysGetKey),
     KM(__C_specific_handler, k_C_specific_handler),
-    XM2(XGetVideoMode, x_XGetVideoMode), XM2(XamContentCreateEx, x_XamContentCreateEx),
-    XM2(XamContentClose, x_XamContentClose), XM2(XamContentDelete, x_XamContentDelete),
-    XM2(XamContentGetCreator, x_XamContentGetCreator), XM2(XamContentGetDeviceData, x_XamContentGetDeviceData),
-    XM2(XamContentGetDeviceState, x_XamContentGetDeviceState),
-    XM2(XamContentCreateEnumerator, x_XamContentCreateEnumerator), XM2(XamEnumerate, x_XamEnumerate),
+    XM2(XGetVideoMode, x_XGetVideoMode),
     XM2(XamShowDeviceSelectorUI, x_XamShowDeviceSelectorUI), XM2(XamShowMessageBoxUI, x_XamShowMessageBoxUI),
     XM2(XamShowMessageBoxUIEx, x_XamShowMessageBoxUI), XM2(XamShowDirtyDiscErrorUI, x_XamShowDirtyDiscErrorUI),
-    XM2(XamUserReadProfileSettings, x_XamUserReadProfileSettings),
     XM2(NetDll_WSAStartup, x_NetDll_WSAStartup), XM2(NetDll_WSACleanup, x_net_ok), XM2(NetDll_XNetStartup, x_net_ok),
     XM2(NetDll_XNetGetTitleXnAddr, x_NetDll_XNetGetTitleXnAddr), XM2(NetDll___WSAFDIsSet, x_net_ok),
     XM2(NetDll_inet_addr, x_NetDll_inet_addr), XM2(NetDll_socket, x_net_fail), XM2(NetDll_accept, x_net_fail),
@@ -709,14 +563,7 @@ static const more_entry MORE[] = {
     XM2(XMsgStartIORequestEx, x_XMsgStartIORequest),
 };
 
-int x360_more_call(x360_machine *x, const x360_thunk *th, x360_thread *t)
+void x360_more_register(x360_machine *x)
 {
-    if (x360_xma_call(x, th, t)) /* x360_xma.c */
-        return 1;
-    for (size_t k = 0; k < sizeof MORE / sizeof MORE[0]; k++)
-        if (MORE[k].lib == th->lib && MORE[k].ordinal == th->ordinal) {
-            MORE[k].fn(x, t, &t->cpu);
-            return 1;
-        }
-    return 0;
+    x360_hle_add(x, MORE, sizeof MORE / sizeof MORE[0]);
 }
