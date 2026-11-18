@@ -4841,8 +4841,11 @@ static uint32_t g_reserve_next;
  * over-large reserve is then clamped to what the heap can back, as before.
  *
  * Reservations are listed so a release can find its size and give the pages
- * back; the address is not handed out again (a bump allocator, like the old
- * path). */
+ * back. A released range is handed out again (lazy_reuse): the smallest one
+ * that fits, cut to the size asked for, the rest listed as released and joined
+ * to its neighbours when they are released too. The cursor never rises, so
+ * released ranges too small for a request and not touching stay unused until
+ * a request of their size comes. */
 
 static void lazy_reset(void)
 {
@@ -4897,6 +4900,107 @@ static int lazy_placed_overlap(uint32_t lo, uint32_t hi)
     return -1;
 }
 
+#if !defined(_WIN32)
+/* Writes a table entry and lists it if it is a new one. Caller holds
+ * g_lazy_lock. xbox_ReserveHolds reads placed entries without the lock: placed
+ * goes down first and up last, to keep it off an entry being rewritten. That
+ * reader takes no barrier, so this narrows the race and does not close it; its
+ * answer only says whether an address is mapped guest memory. */
+static void lazy_fill(int slot, uint32_t base, uint32_t size, int released, int placed)
+{
+    g_lazy[slot].placed = 0;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    g_lazy[slot].base = base;
+    g_lazy[slot].size = size;
+    g_lazy[slot].released = released;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    g_lazy[slot].placed = placed;
+    if (slot == g_lazy_count)
+        g_lazy_count++;
+}
+
+/* A table entry to write, or -1: an empty one (size 0, left by lazy_join), a
+ * new one, then a released placed one. With may_forget, last of all the
+ * smallest released range: its address space stays mapped but is not handed
+ * out again. Caller holds g_lazy_lock. */
+static int lazy_pick_slot(int may_forget)
+{
+    int i, pick = -1;
+
+    for (i = 0; i < g_lazy_count; i++)
+        if (g_lazy[i].released && !g_lazy[i].placed && !g_lazy[i].size)
+            return i;
+    if (g_lazy_count < LAZY_RESERVE_MAX)
+        return g_lazy_count;
+    for (i = 0; i < g_lazy_count; i++)
+        if (g_lazy[i].placed && g_lazy[i].released)
+            return i;
+    if (may_forget)
+        for (i = 0; i < g_lazy_count; i++)
+            if (g_lazy[i].released && (pick < 0 || g_lazy[i].size < g_lazy[pick].size))
+                pick = i;
+    return pick;
+}
+
+/* Joins the released range in entry i to the released ranges touching it, so a
+ * range cut by lazy_reuse is whole again once all of it is back. Placed entries
+ * stay as they are: their addresses are the title's. Caller holds g_lazy_lock. */
+static void lazy_join(int i)
+{
+    if (g_lazy[i].placed)
+        return;
+    for (int j = 0; j < g_lazy_count; j++) {
+        if (j == i || g_lazy[j].placed || !g_lazy[j].released || !g_lazy[j].size)
+            continue;
+        if ((uint64_t)g_lazy[j].base + g_lazy[j].size == g_lazy[i].base) {
+            g_lazy[i].base = g_lazy[j].base;
+            g_lazy[i].size += g_lazy[j].size;
+        } else if ((uint64_t)g_lazy[i].base + g_lazy[i].size == g_lazy[j].base) {
+            g_lazy[i].size += g_lazy[j].size;
+        } else {
+            continue;
+        }
+        lazy_fill(j, 0, 0, 1, 0);
+    }
+}
+
+/* The smallest released range that fits, handed out as a fresh reservation of
+ * exactly `rounded` bytes at its start; 0 when none does. xbox_ReserveAt only
+ * looks at live reservations, so a title may have placed one inside a released
+ * range: that part is not ours to map over. The pages are always replaced: a
+ * stale pointer or a loaded state may have written to them since the release.
+ * A range is cut only if the rest can be listed, or it would be lost. Caller
+ * holds g_lazy_lock. */
+static uint32_t lazy_reuse(uint64_t rounded, uint32_t align)
+{
+    int spare = lazy_pick_slot(0), best = -1;
+    uint32_t base;
+
+    for (int i = 0; i < g_lazy_count; i++) {
+        if (g_lazy[i].placed || !g_lazy[i].released || g_lazy[i].size < rounded
+                || (g_lazy[i].base & (align - 1)))
+            continue;
+        if (g_lazy[i].size > rounded && spare < 0)
+            continue;
+        if (lazy_placed_overlap(g_lazy[i].base, (uint32_t)(g_lazy[i].base + rounded)) >= 0)
+            continue;
+        if (best < 0 || g_lazy[i].size < g_lazy[best].size)
+            best = i;
+    }
+    if (best < 0)
+        return 0;
+    base = g_lazy[best].base;
+    if (!lazy_fresh_pages(base, (uint32_t)rounded))
+        return 0;
+    if (g_lazy[best].size > rounded)
+        lazy_fill(spare, (uint32_t)(base + rounded),
+                  (uint32_t)(g_lazy[best].size - rounded), 1, 0);
+    g_lazy[best].size = (uint32_t)rounded;
+    g_lazy[best].released = 0;
+    return base;
+}
+#endif
+
 static uint32_t lazy_reserve(uint32_t size, uint32_t align)
 {
 #if defined(_WIN32)
@@ -4905,6 +5009,7 @@ static uint32_t lazy_reserve(uint32_t size, uint32_t align)
 #else
     uint64_t rounded = ((uint64_t)size + 0xFFFFu) & ~(uint64_t)0xFFFFu;
     uint32_t base = 0;
+    int slot;
 
     if (!size || !g_span_base || !lazy_reserve_enabled() || guest_vmem_active())
         return 0;
@@ -4913,7 +5018,9 @@ static uint32_t lazy_reserve(uint32_t size, uint32_t align)
     if (align & (align - 1))
         return 0;
     AcquireSRWLockExclusive(&g_lazy_lock);
-    if (g_lazy_count < LAZY_RESERVE_MAX) {
+    base = lazy_reuse(rounded, align);
+    slot = base ? -1 : lazy_pick_slot(1);
+    if (slot >= 0) {
         uint32_t cursor = g_lazy_next;
         /* Down from the cursor, stepping below any reservation a title placed
          * at an address of its own choosing (xbox_ReserveAt): those pages are
@@ -4933,11 +5040,7 @@ static uint32_t lazy_reserve(uint32_t size, uint32_t align)
              * which are left as they are. */
             if (lazy_fresh_pages(want, cursor - want)) {
                 base = want;
-                g_lazy[g_lazy_count].base = base;
-                g_lazy[g_lazy_count].size = (uint32_t)rounded;
-                g_lazy[g_lazy_count].released = 0;
-                g_lazy[g_lazy_count].placed = 0;
-                g_lazy_count++;
+                lazy_fill(slot, base, (uint32_t)rounded, 0, 0);
                 g_lazy_next = base;
             }
             break;
@@ -4961,9 +5064,9 @@ int xbox_ReserveHolds(uint32_t va, uint32_t bytes)
 
     if (next < g_lazy_top && va >= next && end <= (uint64_t)g_lazy_top)
         return 1;
-    /* A placed reservation (xbox_ReserveAt) below the top-down run. Entries
-     * are filled before the count is raised, so a lock-free read sees whole
-     * ones; a released one is still mapped (zero pages), so it counts. */
+    /* A placed reservation (xbox_ReserveAt) below the top-down run, read
+     * without the lock (see lazy_fill); a released one is still mapped (zero
+     * pages), so it counts. */
     for (i = 0; i < n; i++)
         if (g_lazy[i].placed && va >= g_lazy[i].base
                 && end <= (uint64_t)g_lazy[i].base + g_lazy[i].size)
@@ -5036,6 +5139,8 @@ int xbox_ReserveFree(uint32_t va, uint32_t size, int release,
         memset((void *)((uintptr_t)page_base + (uintptr_t)g_memory_offset), 0, end - page_base);
         ok = 1;
     }
+    if (release)
+        lazy_join(i);
     ReleaseSRWLockExclusive(&g_lazy_lock);
     if (out_base) *out_base = page_base;
     if (out_size) *out_size = end - page_base;
@@ -5060,9 +5165,9 @@ int xbox_ReserveAt(uint32_t *base, uint32_t *size)
     (void)base; (void)size;
     return -1;
 #else
-    uint32_t start, page_end, end, slot;
+    uint32_t start, page_end, end;
     uint64_t end64;
-    int i, status = 0;
+    int i, slot, status = 0;
 
     if (!base || !size || !*base || !lazy_range_active()
             || *base < g_lazy_floor || *base >= GUEST_VMEM_TOP)
@@ -5084,26 +5189,13 @@ int xbox_ReserveAt(uint32_t *base, uint32_t *size)
                 && (uint64_t)g_lazy[i].base + g_lazy[i].size > start)
             status = (int)0xC0000018u;
     if (!status) {
-        /* A free slot, else the first placed one already released. */
-        slot = (uint32_t)g_lazy_count;
-        if (slot >= LAZY_RESERVE_MAX) {
-            for (i = 0; i < g_lazy_count; i++)
-                if (g_lazy[i].placed && g_lazy[i].released)
-                    break;
-            slot = (uint32_t)i;
-        }
-        if (slot >= LAZY_RESERVE_MAX)
+        slot = lazy_pick_slot(1);
+        if (slot < 0)
             status = (int)0xC0000017u;              /* STATUS_NO_MEMORY */
         else if (!lazy_fresh_pages(start, end - start))
             status = (int)0xC0000017u;
-        else {
-            g_lazy[slot].base = start;
-            g_lazy[slot].size = end - start;
-            g_lazy[slot].released = 0;
-            g_lazy[slot].placed = 1;
-            if (slot == (uint32_t)g_lazy_count)
-                g_lazy_count++;
-        }
+        else
+            lazy_fill(slot, start, end - start, 0, 1);
     }
     ReleaseSRWLockExclusive(&g_lazy_lock);
     if (status)

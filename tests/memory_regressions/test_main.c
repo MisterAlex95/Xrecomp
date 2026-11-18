@@ -60,6 +60,14 @@
  *      release work; the low mirrors and the contiguous window stay; and
  *      MmQueryStatistics still reports a 64 MB console.
  *   lazy-off      RECOMP_LAZY_RESERVE=0: the clamp again.
+ *   lazy-reuse    (POSIX) A released lazy reservation is handed out again. 64 MB
+ *                 reserved and released 300 times used to run the window out
+ *                 after about 30 rounds. The range comes back as fresh zero
+ *                 pages whatever was done to it after the release, a smaller
+ *                 request takes only what it asked for, and a reservation the
+ *                 title placed inside a released range is not mapped over.
+ *   lazy-slots    (POSIX) The 256 table entries: released ones are taken again,
+ *                 so a table full of them still grants a reservation.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -239,6 +247,177 @@ static int ext_vma_stress(const unsigned char *xbe, size_t len)
     printf("  layout up %d/40, tracker on %d/%d\n", up, active, up);
     return up == 40 && active == 40 ? 0 : 1;
 }
+
+/* Called directly, not through NtAllocateVirtualMemory: the bridge falls back
+ * to a clamped heap reserve and reports success when this path has no room. */
+static int lazy_reuse_checks(void)
+{
+    const uint32_t MB = 1024u * 1024u, want = 64u * MB, ram = 64u * MB;
+    uint32_t first = 0, base = 0, fb, fs, info[7];
+    char d[160];
+    int round, dirty = 0, moved = 0, bad = -1;
+
+    /* 1. Reserve and release, over and over. What is written after the release
+     *    (a stale pointer) must not be there when the range comes back. */
+    for (round = 0; round < 300; round++) {
+        base = xbox_ReserveAlloc(want, 0x10000);
+        if (base < ram || (uint64_t)base + want > GUEST_VMEM_TOP) {
+            bad = round;
+            break;
+        }
+        if (!round)
+            first = base;
+        moved += base != first;
+        dirty += *G(base) != 0 || *G(base + want / 2) != 0 || *G(base + want - 4) != 0;
+        *G(base) = *G(base + want / 2) = *G(base + want - 4) = 0x11111111u;
+        if (xbox_ReserveFree(base, 0, 1, &fb, &fs) != 1 || fb != base || fs != want) {
+            bad = round;
+            break;
+        }
+        *G(base) = *G(base + want / 2) = *G(base + want - 4) = 0x22222222u;
+    }
+    snprintf(d, sizeof d, "stopped at round %d, base 0x%08X", bad, base);
+    check(bad < 0, "64 MB reserved and released 300 times stays in the window", d);
+    if (bad >= 0)
+        return 1;                       /* the window is gone: nothing below can run */
+    snprintf(d, sizeof d, "%d of 300 rounds moved", moved);
+    check(!moved, "every round gets the released range back", d);
+    snprintf(d, sizeof d, "%d of 300 rounds read old data", dirty);
+    check(!dirty, "a reused range reads as zero, stale writes included", d);
+
+    /* 2. Nothing of the old mapping's protection survives. */
+    check(mprotect(G(first), 0x10000, PROT_READ) == 0, "the released range can be made read-only", NULL);
+    base = xbox_ReserveAlloc(want, 0x10000);
+    check(base == first, "the read-only range is handed out again", NULL);
+    *G(base) = 0x33333333u;             /* a fault here kills the test */
+    check(*G(base) == 0x33333333u, "and it is writable again", NULL);
+    xbox_ReserveFree(base, 0, 1, NULL, NULL);
+
+    /* 3. A smaller request takes what it asked for, the rest stays available,
+     *    and the two pieces join again once both are released. */
+    {
+        uint32_t s1 = xbox_ReserveAlloc(MB, 0x10000), s2 = xbox_ReserveAlloc(63u * MB, 0x10000);
+
+        snprintf(d, sizeof d, "1 MB at 0x%08X, 63 MB at 0x%08X, range 0x%08X", s1, s2, first);
+        check(s1 == first && s2 == first + MB, "two requests share the released range", d);
+        check(xbox_ReserveQuery(s1, info) && info[1] == s1 && info[3] == MB,
+              "the query reports the size asked for, not the old range's", NULL);
+        check(xbox_ReserveFree(s1, 0, 1, &fb, &fs) == 1 && fb == s1 && fs == MB,
+              "the release gives back the size asked for", NULL);
+        check(xbox_ReserveQuery(s1, info) && info[4] == 0x10000, "the released piece reads as free", NULL);
+        check(xbox_ReserveQuery(s2, info) && info[1] == s2 && info[4] == 0x1000,
+              "its neighbour is still live", NULL);
+        check(xbox_ReserveFree(s2, 0, 1, NULL, NULL) == 1, "the second piece is released", NULL);
+        base = xbox_ReserveAlloc(want, 0x10000);
+        snprintf(d, sizeof d, "base 0x%08X, range 0x%08X", base, first);
+        check(base == first, "the pieces join: 64 MB fits there again", d);
+        xbox_ReserveFree(base, 0, 1, NULL, NULL);
+    }
+
+    /* 4. xbox_ReserveAt only looks at live reservations, so a title can place
+     *    one inside a released range. Handing that range out would map over it. */
+    {
+        uint32_t at = first + 16u * MB, size = 0x10000, q;
+
+        check(xbox_ReserveAt(&at, &size) == 0 && at == first + 16u * MB,
+              "a reservation placed inside the released range", NULL);
+        *G(at) = 0x44444444u;
+        q = xbox_ReserveAlloc(want, 0x10000);
+        snprintf(d, sizeof d, "64 MB at 0x%08X, placed at 0x%08X", q, at);
+        check(q >= ram && ((uint64_t)q + want <= at || q >= at + 0x10000u),
+              "a new reservation keeps clear of the placed one", d);
+        check(*G(at) == 0x44444444u, "and the placed pages are intact", NULL);
+        xbox_ReserveFree(q, 0, 1, NULL, NULL);
+        xbox_ReserveFree(at, 0, 1, NULL, NULL);
+    }
+
+    /* 5. A state taken while the range is free: loading it frees the range
+     *    again, and its pages, which a load does not remap, are zero on reuse. */
+    {
+        uint32_t a = xbox_ReserveAlloc(want, 0x10000), again;
+        size_t n;
+        uint8_t *st;
+        char why[120] = "";
+
+        xbox_ReserveFree(a, 0, 1, NULL, NULL);
+        n = xbox_MemStateSave(NULL, 0);
+        st = malloc(n);
+        check(st && xbox_MemStateSave(st, n) == n && xbox_MemStateCheck(st, n, NULL) == 0,
+              "a state with reused entries is well formed", NULL);
+        again = xbox_ReserveAlloc(want, 0x10000);
+        check(again == a, "the range is reused after the save", NULL);
+        *G(again) = 0x55555555u;
+        check(st && xbox_MemStateLoad(st, n, why, sizeof why) == 0, "the state loads", why);
+        check(xbox_ReserveQuery(a, info) && info[4] == 0x10000, "the load frees the range again", NULL);
+        again = xbox_ReserveAlloc(want, 0x10000);
+        check(again == a && *G(again) == 0, "reused after the load, it reads as zero", NULL);
+        xbox_ReserveFree(again, 0, 1, NULL, NULL);
+        free(st);
+    }
+    return failures ? 1 : 0;
+}
+
+/* Every xbox_ReserveAt appends an entry, and a released one keeps its slot. */
+static int lazy_slots_checks(void)
+{
+    const uint32_t at = 0x70000000u;
+    uint32_t b, s, small;
+    int i, placed = 0;
+    char d[120];
+
+    for (i = 0; i < 256; i++) {
+        b = at; s = 0x10000;
+        if (xbox_ReserveAt(&b, &s) == 0 && xbox_ReserveFree(b, 0, 1, NULL, NULL) == 1)
+            placed++;
+    }
+    snprintf(d, sizeof d, "%d of 256", placed);
+    check(placed == 256, "256 placed reservations made and released", d);
+    small = xbox_ReserveAlloc(0x10000, 0x10000);
+    snprintf(d, sizeof d, "base 0x%08X", small);
+    check(small != 0, "a reservation still succeeds with the table full of released entries", d);
+    if (small) {
+        *G(small) = 0x66666666u;
+        check(*G(small) == 0x66666666u && xbox_ReserveHolds(small, 0x10000),
+              "and its memory is usable", NULL);
+    }
+
+    /* The table full of live entries, with no room to list anything new. */
+    {
+        static uint32_t r[256];
+        uint32_t big, q;
+        int live = small != 0;
+
+        r[0] = small;
+        for (i = 1; i < 256; i++) {
+            r[i] = xbox_ReserveAlloc(0x10000, 0x10000);
+            live += r[i] != 0;
+        }
+        snprintf(d, sizeof d, "%d of 256", live);
+        check(live == 256, "256 live reservations fill the table", d);
+        if (live != 256)
+            return 1;
+        check(xbox_ReserveAlloc(0x10000, 0x10000) == 0, "a 257th live one is refused", NULL);
+
+        /* Nothing released fits 128 KB, so the carve needs a slot: it takes the
+         * entry of a released range, and the other one is still reusable. */
+        xbox_ReserveFree(r[10], 0, 1, NULL, NULL);
+        xbox_ReserveFree(r[20], 0, 1, NULL, NULL);
+        big = xbox_ReserveAlloc(0x20000, 0x10000);
+        snprintf(d, sizeof d, "base 0x%08X", big);
+        check(big != 0, "a full table gives up a released entry for a new range", d);
+        q = xbox_ReserveAlloc(0x10000, 0x10000);
+        snprintf(d, sizeof d, "base 0x%08X, released 0x%08X", q, r[20]);
+        check(q == r[20], "the released range still listed is reused", d);
+
+        /* 128 KB released, 64 KB asked for, and no entry to list the rest in:
+         * the range is left whole, not cut with its rest lost. */
+        xbox_ReserveFree(big, 0, 1, NULL, NULL);
+        q = xbox_ReserveAlloc(0x10000, 0x10000);
+        snprintf(d, sizeof d, "base 0x%08X, released 0x%08X", q, big);
+        check(q != 0 && q + 0x10000u <= big, "a range that cannot be cut is not handed out", d);
+    }
+    return failures ? 1 : 0;
+}
 #endif
 
 int main(int argc, char **argv)
@@ -253,6 +432,8 @@ int main(int argc, char **argv)
     int keep = !strcmp(mode, "contig-keep");
     int heap_keep = !strcmp(mode, "heap-keep");
     int lazy_off = !strcmp(mode, "lazy-off");
+    int lazy_reuse = !strcmp(mode, "lazy-reuse");
+    int lazy_slots = !strcmp(mode, "lazy-slots");
     size_t xbe_len = 0;
     unsigned char *xbe;
     char d[160];
@@ -276,7 +457,7 @@ int main(int argc, char **argv)
 #endif
     }
     if (!reclaim && !ext && !avoid && !overlap && !keep && !heap_keep && !lazy_off
-            && strcmp(mode, "default")) {
+            && !lazy_reuse && !lazy_slots && strcmp(mode, "default")) {
         printf("unknown mode '%s'\n", mode);
         return 2;
     }
@@ -320,6 +501,15 @@ int main(int argc, char **argv)
         }
     }
     printf("mode: %s\n", mode);
+
+    if (lazy_reuse || lazy_slots) {
+#if defined(_WIN32)
+        puts("lazy reservations: POSIX only");
+        return 77;
+#else
+        return lazy_reuse ? lazy_reuse_checks() : lazy_slots_checks();
+#endif
+    }
 
     /* 0. A contiguous block keeps out of the loaded image's physical range
      * (the default, as the console's kernel does); RECOMP_CONTIG_AVOID_IMAGE=0

@@ -22,6 +22,8 @@ One test per mode, one process each, because the switches are read once and cach
 | `memory_regressions_contig_avoid_image` | `RECOMP_CONTIG_AVOID_IMAGE=1`: a contiguous block lands outside the loaded image. The default and heap-reclaim modes check that a block still fills from the bottom. |
 | `memory_regressions_ext_vma` | `RECOMP_EXT_VMA=1`. The second table. |
 | `memory_regressions_ext_vma_128` | `RECOMP_EXT_VMA=1` on a 128 MB map. The tracker stays off. |
+| `memory_regressions_lazy_reuse` | POSIX. A released lazy reservation is handed out again: 64 MB reserved and released 300 times stays in the window, the range reads as zero and is writable whatever happened to it after the release, a smaller request takes only its size and the pieces join again, a reservation placed inside a released range is not mapped over, and a save state restores the table. |
+| `memory_regressions_lazy_slots` | POSIX. A table full of released entries (256) still grants a reservation. |
 
 ## `RECOMP_HEAP_RECLAIM`
 
