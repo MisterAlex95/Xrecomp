@@ -78,6 +78,17 @@ def implemented():
     return out
 
 
+def refused():
+    """{(lib, name)} of the exports whose HLE only says no (x360_ob.c, x360_vd.c: x360_hle_refused)."""
+    out = set()
+    for path in sorted(glob.glob(os.path.join(RUNTIME, "*.c"))):
+        with open(path) as f:
+            src = _strip_comments(f.read())
+        for m in re.finditer(r"\bX360_H([KX])\((\w+), k_(?:refused|refused_zero|no_device|not_connected)\)", src):
+            out.add(("xboxkrnl" if m.group(1) == "K" else "xam", m.group(2)))
+    return out
+
+
 def summary():
     """{lib: {"function": [implemented, exports], "variable": [implemented, exports]}} over x360_exports.inc."""
     have = implemented()
@@ -119,6 +130,9 @@ def main(argv=None):
         for lib, kinds in sorted(summary().items()):
             for k, (n, total) in sorted(kinds.items()):
                 print("%-9s %-9s %4d / %4d" % (lib, k, n, total))
+        no = refused()
+        for lib in sorted(summary()):
+            print("%-9s refused   %4d of those functions only answer an error" % (lib, sum(1 for r in no if r[0] == lib)))
         return 0
     if a.implemented:
         have = implemented()
@@ -144,8 +158,10 @@ def main(argv=None):
         print("error: %s (the import records live in the image)" % img.image_note, file=sys.stderr)
         return 1
     rows = coverage(img)
+    no = refused()
     for lib, o, n, kind, ok in rows:
-        print("%-14s %4d  %-40s %-8s %s" % (lib, o, n, kind, "HLE" if ok else "missing"))
+        state = "missing" if not ok else "refused" if (lib.split(".")[0].lower(), n) in no else "HLE"
+        print("%-14s %4d  %-40s %-8s %s" % (lib, o, n, kind, state))
     have = sum(1 for r in rows if r[4])
     print("imports: %d, covered by the HLE: %d, missing: %d" % (len(rows), have, len(rows) - have))
     return 0

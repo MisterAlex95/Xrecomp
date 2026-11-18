@@ -250,6 +250,8 @@ struct x360_machine {
     x360_stats st;
     x360_hle_fn hle[2][4096]; /* every export with an HLE, by library and ordinal (x360_kernel_init; not state) */
     x360_kobj kobj;
+    uint8_t hle_lib;          /* the export being answered (x360_hle_refused) */
+    uint16_t hle_ordinal;
     int hle_conflict;         /* two tables gave one export different functions: the machine is not created */
 };
 
@@ -355,6 +357,8 @@ uint64_t x360_stack_arg(x360_machine *x, xe_cpu *c, int n);
 /* the dispatch table as the runtime answers imports: the function behind an export, NULL without an HLE */
 x360_hle_fn x360_hle_lookup(const x360_machine *x, int lib, unsigned ordinal);
 void x360_hle_add(x360_machine *x, const x360_hle_row *rows, size_t n);
+/* the running export refuses: logged once, counted as unimplemented, the end of a run with strict imports */
+void x360_hle_refused(x360_machine *x);
 /* x360_more.c: the rest of the surface a shipped title imports */
 void x360_more_register(x360_machine *x);
 void x360_audio_poll(x360_machine *x);

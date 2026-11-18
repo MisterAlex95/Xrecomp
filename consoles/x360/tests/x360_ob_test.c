@@ -77,20 +77,36 @@ static void test_delete(const char *dir)
 
 static void test_refusals(void)
 {
-    CHECK(K(X360_xboxkrnl_UsbdGetDeviceSpeed, 0) == 0xC000009Du, "USB: no device");
+    CHECK(K(X360_xboxkrnl_UsbdOpenEndpoint, 0) == 0xC000009Du, "USB: no device");
+    CHECK(K(X360_xboxkrnl_UsbdIsDeviceAuthenticated, 0) == 0, "a BOOL refuses with FALSE, not a status that reads TRUE");
+    CHECK(K(X360_xboxkrnl_MmMapIoSpace, 0) == 0, "a pointer refuses with NULL");
     CHECK(K(X360_xboxkrnl_NicAttach, 0) == 0xC000009Du, "no network adapter");
-    CHECK(K(X360_xboxkrnl_WifiGetAssociationIE, 0) == 0xC000009Du, "no Wi-Fi");
-    CHECK(K(X360_xboxkrnl_UsbdGetNatalHub, 0) == 0xC000009Du, "no Kinect");
+    CHECK(K(X360_xboxkrnl_WifiBeginAuthentication, 0) == 0xC000009Du, "no Wi-Fi");
+    CHECK(K(X360_xboxkrnl_UsbdGetNatalHub, 0) == 0, "no Kinect hub");
     CHECK(K(X360_xboxkrnl_XInputdReadState, 0) == 0x48Fu, "the controller driver: not connected");
     CHECK(K(X360_xboxkrnl_IptvSetSessionKey, 0) == 0xC00000BBu, "no IPTV");
     uint32_t buf = galloc(32);
     memset(X->base + buf, 0x5A, 32);
     CHECK(K(X360_xboxkrnl_XeKeysGetConsoleID, 2, buf, buf) == 0xC00000BBu, "no console id");
     CHECK(X->base[buf] == 0x5A && X->base[buf + 31] == 0x5A, "and nothing written");
-    CHECK(K(X360_xboxkrnl_XeKeysQwNeRsaPrvCrypt, 3, buf, buf, buf) == 0xC00000BBu, "no private key");
+    CHECK(K(X360_xboxkrnl_XeKeysQwNeRsaPrvCrypt, 3, buf, buf, buf) == 0, "no private key");
     CHECK(K(X360_xboxkrnl_NtDeviceIoControlFile, 0) == 0xC0000010u, "no device controls");
     CHECK(K(X360_xboxkrnl_NtSetSystemTime, 0) == 0xC0000061u, "the clock is not the title's");
     CHECK(K(X360_xboxkrnl_HalRegisterPowerDownNotification, 0) == 0, "a registration is accepted");
+
+    /* a refusal is not silent: counted once, and strict imports stop on it */
+    x360_stats st;
+    x360_get_stats(X, &st);
+    uint32_t before = st.unimplemented;
+    K(X360_xboxkrnl_NicDetach, 0);
+    K(X360_xboxkrnl_NicDetach, 0);
+    x360_get_stats(X, &st);
+    CHECK(st.unimplemented == before + 1, "counted once: %u after %u", st.unimplemented, before);
+    X->strict_imports = 1;
+    K(X360_xboxkrnl_NicShutdown, 0);
+    CHECK(X->status == X360_ERROR && strstr(X->error, "NicShutdown"), "strict imports stop on a refusal: %s", X->error);
+    X->status = X360_RUNNING;
+    X->strict_imports = 0;
 }
 
 int main(void)

@@ -8,7 +8,7 @@ from tools.xex.synth import build_xex
 from tools.xex.xex import parse_xex
 
 from .exports import all_exports, ordinal
-from .hle_coverage import coverage, implemented, main, summary
+from .hle_coverage import coverage, implemented, main, refused, summary
 
 TESTS = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests"))
 
@@ -47,3 +47,10 @@ def test_tables_outside_the_kernel_are_read():
     totals = summary()
     assert totals["xboxkrnl"]["function"][0] == len([1 for lib, n, k in all_exports()
                                                      if lib == "xboxkrnl" and k == "FN" and (lib, n) in have])
+
+
+def test_refusals_are_told_apart():
+    no = refused()
+    assert ("xboxkrnl", "UsbdOpenEndpoint") in no and ("xboxkrnl", "XeKeysGetConsoleID") in no
+    assert ("xboxkrnl", "KeInsertQueueDpc") not in no
+    assert no <= implemented()

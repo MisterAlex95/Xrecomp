@@ -2,7 +2,8 @@
  *
  * Vd: the display is one fixed 1280 x 720 mode (x360_kernel.c's VdQueryVideoMode), so a display option is accepted and
  * has no effect (copy protection flags, closed captions, colour adjustments, power saving). What only real display
- * hardware could answer (EDID, the video encoder's registers, the discovery data) is refused.
+ * hardware could answer (EDID, the video encoder's registers, the discovery data), and the queries whose output layout
+ * is not publicly documented (the video mode list, the 3D format, the mode override), are refused.
  *
  * Audio: one render driver (x360_more.c). The ducker's settings are kept and answered (section KOBJ of a save state);
  * nothing ducks the mix. There is no driver thread: XAudioGetRenderDriverThread gives no handle. Digital bypass and the
@@ -27,7 +28,8 @@ static void k_ok(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 static void k_refused(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
-    (void)x, (void)t;
+    (void)t;
+    x360_hle_refused(x);
     RET(X_STATUS_NOT_SUPPORTED);
 }
 
@@ -204,18 +206,18 @@ const x360_hle_row x360_tab_vd[] = {
     X360_HK(VdRegisterXamGraphicsNotification, k_ok), X360_HK(VdRegisterHDCPNotification, k_ok),
     X360_HK(VdQuerySystemCommandBuffer, x360_k_VdGetSystemCommandBuffer), X360_HK(VdSetSystemCommandBuffer, k_ok),
     X360_HK(VdGetGraphicsAsicID, k_VdGetGraphicsAsicID), X360_HK(VdQueryVideoCapabilities, k_VdQueryVideoCapabilities),
-    X360_HK(VdEnumerateVideoModes, k_ok), X360_HK(VdQueryRealVideoMode, k_VdQueryRealVideoMode),
+    X360_HK(VdEnumerateVideoModes, k_refused), X360_HK(VdQueryRealVideoMode, k_VdQueryRealVideoMode),
     X360_HK(VdGetOption, k_VdGetOption), X360_HK(VdSetOption, k_ok), X360_HK(VdSetCGMSOption, k_ok),
     X360_HK(VdSetCGMSState, k_ok), X360_HK(VdSetWSSOption, k_ok), X360_HK(VdSetWSSData, k_ok),
     X360_HK(VdSetWSS2Data, k_ok), X360_HK(VdSetSCMSState, k_ok), X360_HK(VdSetMacrovisionOption, k_ok),
     X360_HK(VdSetHDCPOption, k_ok), X360_HK(VdSetHDCPRevocationList, k_ok), X360_HK(VdEnableHDCP, k_ok),
     X360_HK(VdSetStudioRGBMode, k_ok), X360_HK(VdSetColorProfileAdjustment, k_ok),
-    X360_HK(VdSetCscMatricesOverride, k_ok), X360_HK(VdSet3dVideoFormat, k_ok), X360_HK(VdGet3dVideoFormat, k_ok),
+    X360_HK(VdSetCscMatricesOverride, k_ok), X360_HK(VdSet3dVideoFormat, k_ok), X360_HK(VdGet3dVideoFormat, k_refused),
     X360_HK(VdTurnDisplayOn, k_ok), X360_HK(VdTurnDisplayOff, k_ok), X360_HK(VdInitializeEDRAM, k_ok),
     X360_HK(VdEnableClosedCaption, k_ok), X360_HK(VdSendClosedCaptionData, k_ok),
     X360_HK(VdGetClosedCaptionReadyStatus, k_ok), X360_HK(VdEnableDisablePowerSavingMode, k_ok),
     X360_HK(VdEnableWMAProOverHDMI, k_ok), X360_HK(VdBlockUntilGUIIdle, k_ok),
-    X360_HK(VdSetDisplayModeOverride, k_ok), X360_HK(VdGetDisplayModeOverride, k_ok),
+    X360_HK(VdSetDisplayModeOverride, k_ok), X360_HK(VdGetDisplayModeOverride, k_refused),
     X360_HK(VdStartDisplayDiscovery, k_ok), X360_HK(VdReadWriteHSIOCalibrationFlag, k_ok),
     X360_HK(VdDisplayFatalError, k_VdDisplayFatalError), X360_HK(VdReadEEDIDBlock, k_refused),
     X360_HK(VdGetDisplayDiscoveryData, k_refused), X360_HK(VdGenerateGPUCSCCoefficients, k_refused),

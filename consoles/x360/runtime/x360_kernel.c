@@ -1441,6 +1441,20 @@ static void hle_register(x360_machine *x)
     x360_hle_add(x, HLE, sizeof HLE / sizeof HLE[0]);
 }
 
+void x360_hle_refused(x360_machine *x)
+{
+    const char *lib = x->hle_lib ? "xam" : "xboxkrnl", *name = x360_export_name(x->hle_lib, x->hle_ordinal) ?: "?";
+    if (x->strict_imports) {
+        x360_fail(x, "%s!%s (ordinal %u) is refused here (stopping: strict imports)", lib, name, x->hle_ordinal);
+        return;
+    }
+    if (!x->unimpl_seen[x->hle_lib][x->hle_ordinal & 4095]) {
+        x->unimpl_seen[x->hle_lib][x->hle_ordinal & 4095] = 1;
+        x->st.unimplemented++;
+        x360_logf(x, "x360: %s!%s (ordinal %u) is refused: this machine does not have it\n", lib, name, x->hle_ordinal);
+    }
+}
+
 void x360_hle_call(x360_machine *x, const x360_thunk *th)
 {
     x360_thread *t = x360_cur(x);
@@ -1450,6 +1464,8 @@ void x360_hle_call(x360_machine *x, const x360_thunk *th)
         if (x->verbose)
             x360_logf(x, "x360: [t%u] %s(%08X, %08X, %08X, %08X)\n", t->id,
                       x360_export_name(th->lib, th->ordinal) ?: "?", A(0), A(1), A(2), A(3));
+        x->hle_lib = th->lib;
+        x->hle_ordinal = th->ordinal;
         fn(x, t, c);
         x360_apc_after_hle(x, t);
         return;

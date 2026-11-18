@@ -7,8 +7,11 @@
  *   k_no_device      STATUS_DEVICE_NOT_CONNECTED: USB, network adapters, Wi-Fi, cameras, Kinect, memory units
  *   k_not_connected  ERROR_DEVICE_NOT_CONNECTED: the controller driver's own calls (XamInput* is the title's way in)
  *   k_refused        STATUS_NOT_SUPPORTED: console keys and fuses (XeKeys*: no key material exists here), IPTV, debug
- *                    and trace facilities, IRP-level I/O, kernel-mode threads and interrupts, code loading and patching,
- *                    power management, firmware. */
+ *                    and trace facilities, IRP-level I/O, code loading and patching, power management, firmware
+ *   k_refused_zero   the same refusal for an export that returns a BOOL, a pointer or a value: FALSE / NULL / 0, since
+ *                    an error status would read as TRUE or as a pointer
+ * A refusal is logged once and counted like a missing import, and strict imports stop on it (x360_hle_refused): the title
+ * asked for something it will not get. An export whose return type is not known has no row here: it stays missing. */
 #include <string.h>
 
 #include "x360_internal.h"
@@ -32,20 +35,30 @@ static void k_accept(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 static void k_no_device(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
-    (void)x, (void)t;
+    (void)t;
+    x360_hle_refused(x);
     RET(X_STATUS_DEVICE_NOT_CONNECTED);
 }
 
 static void k_not_connected(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
-    (void)x, (void)t;
+    (void)t;
+    x360_hle_refused(x);
     RET(X_ERROR_DEVICE_NOT_CONNECTED);
 }
 
 static void k_refused(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
-    (void)x, (void)t;
+    (void)t;
+    x360_hle_refused(x);
     RET(X_STATUS_NOT_SUPPORTED);
+}
+
+static void k_refused_zero(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    x360_hle_refused(x);
+    RET(0);
 }
 
 static void k_name_not_found(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -205,11 +218,11 @@ const x360_hle_row x360_tab_ob[] = {
     X360_HK(DrvSetAutobind, k_accept), X360_HK(DrvSetContentStorageCallback, k_accept),
     X360_HK(DrvSetDeviceConfigChangeCallback, k_accept), X360_HK(DrvSetMicArrayStartCallback, k_accept),
     X360_HK(DrvSetSysReqCallback, k_accept), X360_HK(DrvSetUserBindingCallback, k_accept),
-    X360_HK(ExIsBetaFeatureEnabled, k_accept), X360_HK(ExRegisterThreadNotification, k_accept),
-    X360_HK(ExRegisterXConfigNotification, k_accept), X360_HK(FscGetCacheElementCount, k_accept),
-    X360_HK(HalClampUnclampOutputDACs, k_accept), X360_HK(HalGetNotedArgonErrors, k_accept),
-    X360_HK(HalGetPowerUpCause, k_accept), X360_HK(HalIsExecutingPowerDownDpc, k_accept),
-    X360_HK(HalNotifyAddRemoveBackgroundTask, k_accept), X360_HK(HalNotifyBackgroundModeTransitionComplete, k_accept),
+    X360_HK(ExIsBetaFeatureEnabled, k_accept), X360_HK(ExRegisterXConfigNotification, k_accept),
+    X360_HK(FscGetCacheElementCount, k_accept), X360_HK(HalClampUnclampOutputDACs, k_accept),
+    X360_HK(HalGetNotedArgonErrors, k_accept), X360_HK(HalGetPowerUpCause, k_accept),
+    X360_HK(HalIsExecutingPowerDownDpc, k_accept), X360_HK(HalNotifyAddRemoveBackgroundTask, k_accept),
+    X360_HK(HalNotifyBackgroundModeTransitionComplete, k_accept),
     X360_HK(HalRegisterBackgroundModeTransitionCallback, k_accept),
     X360_HK(HalRegisterHdDvdRomNotification, k_accept), X360_HK(HalRegisterPowerDownCallback, k_accept),
     X360_HK(HalRegisterPowerDownNotification, k_accept), X360_HK(HalRegisterSMCNotification, k_accept),
@@ -230,14 +243,13 @@ const x360_hle_row x360_tab_ob[] = {
     X360_HK(XexSendDeferredNotifications, k_accept), X360_HK(XexSetExecutablePrivilege, k_accept),
     /* k_no_device */
     X360_HK(DetroitDeviceRequest, k_no_device), X360_HK(HidGetCapabilities, k_no_device),
-    X360_HK(HidGetLastInputTime, k_no_device), X360_HK(HidReadKeys, k_no_device),
-    X360_HK(HidReadMouseChanges, k_no_device), X360_HK(McaDeviceRequest, k_no_device),
-    X360_HK(MicDeviceRequest, k_no_device), X360_HK(MtpdBeginTransaction, k_no_device),
-    X360_HK(MtpdCancelTransaction, k_no_device), X360_HK(MtpdEndTransaction, k_no_device),
-    X360_HK(MtpdGetCurrentDevices, k_no_device), X360_HK(MtpdReadData, k_no_device),
-    X360_HK(MtpdReadEvent, k_no_device), X360_HK(MtpdResetDevice, k_no_device), X360_HK(MtpdSendData, k_no_device),
-    X360_HK(MtpdVerifyProximity, k_no_device), X360_HK(NicAttach, k_no_device), X360_HK(NicDetach, k_no_device),
-    X360_HK(NicFlushXmitQueue, k_no_device), X360_HK(NicGetLinkState, k_no_device), X360_HK(NicGetOpt, k_no_device),
+    X360_HK(HidReadKeys, k_no_device), X360_HK(HidReadMouseChanges, k_no_device),
+    X360_HK(McaDeviceRequest, k_no_device), X360_HK(MicDeviceRequest, k_no_device),
+    X360_HK(MtpdBeginTransaction, k_no_device), X360_HK(MtpdCancelTransaction, k_no_device),
+    X360_HK(MtpdEndTransaction, k_no_device), X360_HK(MtpdGetCurrentDevices, k_no_device),
+    X360_HK(MtpdReadData, k_no_device), X360_HK(MtpdReadEvent, k_no_device), X360_HK(MtpdResetDevice, k_no_device),
+    X360_HK(MtpdSendData, k_no_device), X360_HK(MtpdVerifyProximity, k_no_device), X360_HK(NicAttach, k_no_device),
+    X360_HK(NicDetach, k_no_device), X360_HK(NicFlushXmitQueue, k_no_device), X360_HK(NicGetOpt, k_no_device),
     X360_HK(NicGetStats, k_no_device), X360_HK(NicRegisterDevice, k_no_device), X360_HK(NicSetOpt, k_no_device),
     X360_HK(NicSetUnicastAddress, k_no_device), X360_HK(NicShutdown, k_no_device),
     X360_HK(NicUnregisterDevice, k_no_device), X360_HK(NicUpdateMcastMembership, k_no_device),
@@ -248,12 +260,7 @@ const x360_hle_row x360_tab_ob[] = {
     X360_HK(TidDeviceRequest, k_no_device), X360_HK(TitleDeviceAuthRequest, k_no_device),
     X360_HK(UsbdAddDeviceComplete, k_no_device), X360_HK(UsbdCallAndBlockOnDpcRoutine, k_no_device),
     X360_HK(UsbdCancelAsyncTransfer, k_no_device), X360_HK(UsbdCancelTimer, k_no_device),
-    X360_HK(UsbdEnableDisableRootHubPort, k_no_device), X360_HK(UsbdGetDeviceDescriptor, k_no_device),
-    X360_HK(UsbdGetDeviceRootPortType, k_no_device), X360_HK(UsbdGetDeviceSpeed, k_no_device),
-    X360_HK(UsbdGetDeviceTopology, k_no_device), X360_HK(UsbdGetEndpointDescriptor, k_no_device),
-    X360_HK(UsbdGetNatalHardwareVersion, k_no_device), X360_HK(UsbdGetNatalHub, k_no_device),
-    X360_HK(UsbdGetPortDeviceNode, k_no_device), X360_HK(UsbdGetRequiredDrivers, k_no_device),
-    X360_HK(UsbdGetRootHubDeviceNode, k_no_device), X360_HK(UsbdIsDeviceAuthenticated, k_no_device),
+    X360_HK(UsbdEnableDisableRootHubPort, k_no_device),
     X360_HK(UsbdNatalHubRegisterNotificationCallback, k_no_device), X360_HK(UsbdOpenDefaultEndpoint, k_no_device),
     X360_HK(UsbdOpenEndpoint, k_no_device), X360_HK(UsbdQueueAsyncTransfer, k_no_device),
     X360_HK(UsbdQueueCloseDefaultEndpoint, k_no_device), X360_HK(UsbdQueueCloseEndpoint, k_no_device),
@@ -262,13 +269,11 @@ const x360_hle_row x360_tab_ob[] = {
     X360_HK(UsbdResetEndpoint, k_no_device), X360_HK(UsbdSetTimer, k_no_device),
     X360_HK(UsbdTitleDriverResetAllUnrecognizedPorts, k_no_device),
     X360_HK(UsbdTitleDriverSetUnrecognizedPort, k_no_device), X360_HK(UsbdUnregisterDriverObject, k_no_device),
-    X360_HK(WifiBeginAuthentication, k_no_device), X360_HK(WifiCalculateRegulatoryDomain, k_no_device),
-    X360_HK(WifiChannelToFrequency, k_no_device), X360_HK(WifiCheckCounterMeasures, k_no_device),
+    X360_HK(WifiBeginAuthentication, k_no_device), X360_HK(WifiCheckCounterMeasures, k_no_device),
     X360_HK(WifiChooseAuthenCipherSetFromBSSID, k_no_device), X360_HK(WifiCompleteAuthentication, k_no_device),
-    X360_HK(WifiDeduceNetworkType, k_no_device), X360_HK(WifiGetAssociationIE, k_no_device),
     X360_HK(WifiOnMICError, k_no_device), X360_HK(WifiPrepareAuthenticationContext, k_no_device),
-    X360_HK(WifiRecvEAPOLPacket, k_no_device), X360_HK(WifiSelectAdHocChannel, k_no_device),
-    X360_HK(XUsbcamCreate, k_no_device), X360_HK(XUsbcamDestroy, k_no_device), X360_HK(XUsbcamGetConfig, k_no_device),
+    X360_HK(WifiRecvEAPOLPacket, k_no_device), X360_HK(XUsbcamCreate, k_no_device),
+    X360_HK(XUsbcamDestroy, k_no_device), X360_HK(XUsbcamGetConfig, k_no_device),
     X360_HK(XUsbcamGetState, k_no_device), X360_HK(XUsbcamGetView, k_no_device),
     X360_HK(XUsbcamReadFrame, k_no_device), X360_HK(XUsbcamReset, k_no_device),
     X360_HK(XUsbcamSetCaptureMode, k_no_device), X360_HK(XUsbcamSetConfig, k_no_device),
@@ -280,7 +285,7 @@ const x360_hle_row x360_tab_ob[] = {
     X360_HK(XInputdFFSetEffect, k_not_connected), X360_HK(XInputdFFSetRumble, k_not_connected),
     X360_HK(XInputdFFUpdateEffect, k_not_connected), X360_HK(XInputdGetCapabilities, k_not_connected),
     X360_HK(XInputdGetDevicePid, k_not_connected), X360_HK(XInputdGetDeviceStats, k_not_connected),
-    X360_HK(XInputdGetFailedConnectionOrBind, k_not_connected), X360_HK(XInputdGetLastTextInputTime, k_not_connected),
+    X360_HK(XInputdGetFailedConnectionOrBind, k_not_connected),
     X360_HK(XInputdGetTextDeviceKeyLocks, k_not_connected), X360_HK(XInputdNotify, k_not_connected),
     X360_HK(XInputdPassThroughRFCommand, k_not_connected), X360_HK(XInputdPowerDownDevice, k_not_connected),
     X360_HK(XInputdRawState, k_not_connected), X360_HK(XInputdReadState, k_not_connected),
@@ -291,77 +296,45 @@ const x360_hle_row x360_tab_ob[] = {
     X360_HK(XInputdSetTextMessengerIndicator, k_not_connected), X360_HK(XInputdSetWifiChannel, k_not_connected),
     X360_HK(XInputdWriteState, k_not_connected), X360_HK(XVoicedActivate, k_not_connected),
     X360_HK(XVoicedClose, k_not_connected), X360_HK(XVoicedGetBatteryStatus, k_not_connected),
-    X360_HK(XVoicedGetDirectionalData, k_not_connected), X360_HK(XVoicedHeadsetPresent, k_not_connected),
-    X360_HK(XVoicedIsActiveProcess, k_not_connected), X360_HK(XVoicedSendVPort, k_not_connected),
+    X360_HK(XVoicedGetDirectionalData, k_not_connected), X360_HK(XVoicedSendVPort, k_not_connected),
     X360_HK(XVoicedSubmitPacket, k_not_connected),
     /* k_refused */
     X360_HK(AniBlockOnAnimation, k_refused), X360_HK(AniSetLogo, k_refused),
     X360_HK(AniStartBootAnimation, k_refused), X360_HK(AniTerminateAnimation, k_refused),
-    X360_HK(DbgPrompt, k_refused), X360_HK(DevAuthGetStatistics, k_refused), X360_HK(DmPrintData, k_refused),
-    X360_HK(DrvBindToUser, k_refused), X360_HK(DrvDeviceConfigChange, k_refused),
-    X360_HK(DrvGetContentStorageNotification, k_refused), X360_HK(DrvXenonButtonPressed, k_refused),
-    X360_HK(DumpGetRawDumpInfo, k_refused), X360_HK(DumpRegisterDedicatedDataBlock, k_refused),
-    X360_HK(DumpSetCollectionFacility, k_refused), X360_HK(DumpUpdateDumpSettings, k_refused),
-    X360_HK(DumpWriteDump, k_refused), X360_HK(DumpXitThread, k_refused), X360_HK(EmaExecute, k_refused),
+    X360_HK(DevAuthGetStatistics, k_refused), X360_HK(DmPrintData, k_refused), X360_HK(DrvBindToUser, k_refused),
+    X360_HK(DrvDeviceConfigChange, k_refused), X360_HK(DrvGetContentStorageNotification, k_refused),
+    X360_HK(DrvXenonButtonPressed, k_refused), X360_HK(DumpGetRawDumpInfo, k_refused),
+    X360_HK(DumpRegisterDedicatedDataBlock, k_refused), X360_HK(DumpSetCollectionFacility, k_refused),
+    X360_HK(DumpUpdateDumpSettings, k_refused), X360_HK(DumpWriteDump, k_refused), X360_HK(DumpXitThread, k_refused),
     X360_HK(EtxBufferRegister, k_refused), X360_HK(EtxBufferUnregister, k_refused),
     X360_HK(EtxConsumerDisableEventType, k_refused), X360_HK(EtxConsumerEnableEventType, k_refused),
     X360_HK(EtxConsumerFlushBuffers, k_refused), X360_HK(EtxConsumerProcessLogs, k_refused),
     X360_HK(EtxConsumerRegister, k_refused), X360_HK(EtxConsumerUnregister, k_refused),
     X360_HK(EtxProducerLog, k_refused), X360_HK(EtxProducerLogV, k_refused), X360_HK(EtxProducerLogXwpp, k_refused),
     X360_HK(EtxProducerLogXwppV, k_refused), X360_HK(EtxProducerRegister, k_refused),
-    X360_HK(EtxProducerUnregister, k_refused), X360_HK(ExCancelAlarm, k_refused),
-    X360_HK(ExDebugMonitorService, k_refused), X360_HK(ExExpansionCall, k_refused),
-    X360_HK(ExExpansionInstall, k_refused), X360_HK(ExInitializeAlarm, k_refused),
-    X360_HK(ExReadModifyWriteXConfigSettingUlong, k_refused), X360_HK(ExSetAlarm, k_refused),
+    X360_HK(EtxProducerUnregister, k_refused), X360_HK(ExReadModifyWriteXConfigSettingUlong, k_refused),
     X360_HK(ExSetBetaFeaturesEnabled, k_refused), X360_HK(ExSetXConfigSetting, k_refused),
     X360_HK(HalCallBackgroundModeNotificationRoutines, k_refused), X360_HK(HalConfigureVeDevice, k_refused),
-    X360_HK(HalFinalizePowerLossRecovery, k_refused), X360_HK(HalGetMemoryInformation, k_refused),
-    X360_HK(HalGpioControl, k_refused), X360_HK(HalOpenCloseODDTray, k_refused),
-    X360_HK(HalPowerDownToBackgroundMode, k_refused), X360_HK(HalReadArgonEeprom, k_refused),
-    X360_HK(HalReadWritePCISpace, k_refused), X360_HK(HalSendSMCMessage, k_refused),
-    X360_HK(HalSetPowerLossRecovery, k_refused), X360_HK(HalWriteArgonEeprom, k_refused),
-    X360_HK(IoAcquireCancelSpinLock, k_refused), X360_HK(IoAcquireDeviceObjectLock, k_refused),
-    X360_HK(IoAllocateIrp, k_refused), X360_HK(IoBuildAsynchronousFsdRequest, k_refused),
-    X360_HK(IoBuildDeviceIoControlRequest, k_refused), X360_HK(IoBuildSynchronousFsdRequest, k_refused),
-    X360_HK(IoCallDriver, k_refused), X360_HK(IoCreateFile, k_refused), X360_HK(IoDismountVolume, k_refused),
-    X360_HK(IoDismountVolumeByFileHandle, k_refused), X360_HK(IoDismountVolumeByName, k_refused),
-    X360_HK(IoFreeIrp, k_refused), X360_HK(IoInitializeIrp, k_refused), X360_HK(IoQueueThreadIrp, k_refused),
-    X360_HK(IoReleaseCancelSpinLock, k_refused), X360_HK(IoReleaseDeviceObjectLock, k_refused),
-    X360_HK(IoSetIoCompletion, k_refused), X360_HK(IoStartNextPacket, k_refused),
-    X360_HK(IoStartNextPacketByKey, k_refused), X360_HK(IoStartPacket, k_refused),
-    X360_HK(IoSynchronousDeviceIoControlRequest, k_refused), X360_HK(IoSynchronousFsdRequest, k_refused),
-    X360_HK(IptvGetAesCtrTransform, k_refused), X360_HK(IptvGetSessionKeyHash, k_refused),
-    X360_HK(IptvSetBoundaryKey, k_refused), X360_HK(IptvSetSessionKey, k_refused),
-    X360_HK(IptvVerifyOmac1Signature, k_refused), X360_HK(KeBlowFuses, k_refused),
-    X360_HK(KeCallAndBlockOnDpcRoutine, k_refused), X360_HK(KeCallAndWaitForDpcRoutine, k_refused),
-    X360_HK(KeConnectInterrupt, k_refused), X360_HK(KeContextFromKframes, k_refused),
-    X360_HK(KeContextToKframes, k_refused), X360_HK(KeCreateUserMode, k_refused),
-    X360_HK(KeDeleteUserMode, k_refused), X360_HK(KeDisablePFMInterrupt, k_refused),
-    X360_HK(KeDisconnectInterrupt, k_refused), X360_HK(KeEnablePFMInterrupt, k_refused),
-    X360_HK(KeEnablePPUPerformanceMonitor, k_refused), X360_HK(KeEnterUserMode, k_refused),
-    X360_HK(KeExecuteOnProtectedStack, k_refused), X360_HK(KeGetImagePageTableEntry, k_refused),
-    X360_HK(KeGetPMWRegister, k_refused), X360_HK(KeGetPRVRegister, k_refused), X360_HK(KeGetSocRegister, k_refused),
-    X360_HK(KeGetSpecialPurposeRegister, k_refused), X360_HK(KeGetVidInfo, k_refused),
-    X360_HK(KeInitializeDeviceQueue, k_refused), X360_HK(KeInitializeInterrupt, k_refused),
-    X360_HK(KeInsertByKeyDeviceQueue, k_refused), X360_HK(KeInsertDeviceQueue, k_refused),
-    X360_HK(KeIpiGenericCall, k_refused), X360_HK(KeLeaveUserMode, k_refused),
-    X360_HK(KeRemoveByKeyDeviceQueue, k_refused), X360_HK(KeRemoveDeviceQueue, k_refused),
-    X360_HK(KeRemoveEntryDeviceQueue, k_refused), X360_HK(KeSetCurrentStackPointers, k_refused),
+    X360_HK(HalFinalizePowerLossRecovery, k_refused), X360_HK(HalOpenCloseODDTray, k_refused),
+    X360_HK(HalPowerDownToBackgroundMode, k_refused), X360_HK(HalSendSMCMessage, k_refused),
+    X360_HK(HalSetPowerLossRecovery, k_refused), X360_HK(IoAcquireCancelSpinLock, k_refused),
+    X360_HK(IoAcquireDeviceObjectLock, k_refused), X360_HK(IoCallDriver, k_refused), X360_HK(IoCreateFile, k_refused),
+    X360_HK(IoDismountVolume, k_refused), X360_HK(IoDismountVolumeByFileHandle, k_refused),
+    X360_HK(IoDismountVolumeByName, k_refused), X360_HK(IoFreeIrp, k_refused), X360_HK(IoInitializeIrp, k_refused),
+    X360_HK(IoQueueThreadIrp, k_refused), X360_HK(IoReleaseCancelSpinLock, k_refused),
+    X360_HK(IoReleaseDeviceObjectLock, k_refused), X360_HK(IoSetIoCompletion, k_refused),
+    X360_HK(IoStartNextPacket, k_refused), X360_HK(IoStartNextPacketByKey, k_refused),
+    X360_HK(IoStartPacket, k_refused), X360_HK(IoSynchronousDeviceIoControlRequest, k_refused),
+    X360_HK(IoSynchronousFsdRequest, k_refused), X360_HK(IptvGetAesCtrTransform, k_refused),
+    X360_HK(IptvGetSessionKeyHash, k_refused), X360_HK(IptvSetBoundaryKey, k_refused),
+    X360_HK(IptvSetSessionKey, k_refused), X360_HK(IptvVerifyOmac1Signature, k_refused),
+    X360_HK(KeBlowFuses, k_refused), X360_HK(KeDisablePFMInterrupt, k_refused),
+    X360_HK(KeEnablePFMInterrupt, k_refused), X360_HK(KeEnablePPUPerformanceMonitor, k_refused),
     X360_HK(KeSetPMWRegister, k_refused), X360_HK(KeSetPRVRegister, k_refused), X360_HK(KeSetProfilerISR, k_refused),
     X360_HK(KeSetSocRegister, k_refused), X360_HK(KeSetSpecialPurposeRegister, k_refused),
-    X360_HK(LDICreateDecompression, k_refused), X360_HK(LDIDecompress, k_refused),
-    X360_HK(LDIDestroyDecompression, k_refused), X360_HK(LDIResetDecompression, k_refused),
-    X360_HK(MmCreateKernelStack, k_refused), X360_HK(MmDbgReadCheck, k_refused),
-    X360_HK(MmDbgReleaseAddress, k_refused), X360_HK(MmDbgWriteCheck, k_refused),
-    X360_HK(MmDeleteKernelStack, k_refused), X360_HK(MmDoubleMapMemory, k_refused),
-    X360_HK(MmLockAndMapSegmentArray, k_refused), X360_HK(MmMapIoSpace, k_refused),
-    X360_HK(MmResetLowestAvailablePages, k_refused), X360_HK(MmSplitPhysicalMemoryAllocation, k_refused),
-    X360_HK(MmUnlockAndUnmapSegmentArray, k_refused), X360_HK(MmUnmapIoSpace, k_refused),
-    X360_HK(MmUnmapMemory, k_refused), X360_HK(NtAllocateEncryptedMemory, k_refused),
-    X360_HK(NtFreeEncryptedMemory, k_refused), X360_HK(VvcHandlerCancelTransfers, k_refused),
-    X360_HK(VvcHandlerRetrieveVoiceExtension, k_refused), X360_HK(XeKeysAesCbc, k_refused),
-    X360_HK(XeKeysAesCbcUsingKey, k_refused), X360_HK(XeKeysConsolePrivateKeySign, k_refused),
-    X360_HK(XeKeysConsoleSignatureVerification, k_refused), X360_HK(XeKeysDes2Cbc, k_refused),
+    X360_HK(NtAllocateEncryptedMemory, k_refused), X360_HK(NtFreeEncryptedMemory, k_refused),
+    X360_HK(VvcHandlerCancelTransfers, k_refused), X360_HK(VvcHandlerRetrieveVoiceExtension, k_refused),
+    X360_HK(XeKeysAesCbc, k_refused), X360_HK(XeKeysAesCbcUsingKey, k_refused), X360_HK(XeKeysDes2Cbc, k_refused),
     X360_HK(XeKeysDes2CbcUsingKey, k_refused), X360_HK(XeKeysDesCbc, k_refused),
     X360_HK(XeKeysDesCbcUsingKey, k_refused), X360_HK(XeKeysDvdAuthAP25GetTableVersion, k_refused),
     X360_HK(XeKeysDvdAuthAP25InstallTable, k_refused), X360_HK(XeKeysDvdAuthExActivate, k_refused),
@@ -370,30 +343,22 @@ const x360_hle_row x360_tab_ob[] = {
     X360_HK(XeKeysExecute, k_refused), X360_HK(XeKeysFcrtLoad, k_refused), X360_HK(XeKeysFcrtSave, k_refused),
     X360_HK(XeKeysFcrtSet, k_refused), X360_HK(XeKeysGeneratePrivateKey, k_refused),
     X360_HK(XeKeysGenerateRandomKey, k_refused), X360_HK(XeKeysGetConsoleCertificate, k_refused),
-    X360_HK(XeKeysGetConsoleID, k_refused), X360_HK(XeKeysGetConsoleType, k_refused),
-    X360_HK(XeKeysGetDigest, k_refused), X360_HK(XeKeysGetFactoryChallenge, k_refused),
-    X360_HK(XeKeysGetKeyProperties, k_refused), X360_HK(XeKeysGetMediaID, k_refused),
-    X360_HK(XeKeysGetProtectedFlag, k_refused), X360_HK(XeKeysGetStatus, k_refused),
-    X360_HK(XeKeysGetTruncatedSecondaryConsoleId, k_refused), X360_HK(XeKeysGetUpdateSequence, k_refused),
-    X360_HK(XeKeysGetVersions, k_refused), X360_HK(XeKeysHmacSha, k_refused),
-    X360_HK(XeKeysHmacShaUsingKey, k_refused), X360_HK(XeKeysInitializeFuses, k_refused),
-    X360_HK(XeKeysLoadKeyVault, k_refused), X360_HK(XeKeysLockSystemUpdate, k_refused),
-    X360_HK(XeKeysObfuscate, k_refused), X360_HK(XeKeysObfuscateEx, k_refused), X360_HK(XeKeysObscureKey, k_refused),
-    X360_HK(XeKeysQwNeRsaPrvCrypt, k_refused), X360_HK(XeKeysRevokeIsDeviceRevoked, k_refused),
+    X360_HK(XeKeysGetConsoleID, k_refused), X360_HK(XeKeysGetDigest, k_refused),
+    X360_HK(XeKeysGetFactoryChallenge, k_refused), X360_HK(XeKeysGetMediaID, k_refused),
+    X360_HK(XeKeysGetTruncatedSecondaryConsoleId, k_refused), X360_HK(XeKeysGetVersions, k_refused),
+    X360_HK(XeKeysHmacSha, k_refused), X360_HK(XeKeysHmacShaUsingKey, k_refused),
+    X360_HK(XeKeysInitializeFuses, k_refused), X360_HK(XeKeysLoadKeyVault, k_refused),
+    X360_HK(XeKeysLockSystemUpdate, k_refused), X360_HK(XeKeysObscureKey, k_refused),
     X360_HK(XeKeysRevokeSaveSettings, k_refused), X360_HK(XeKeysRevokeUpdateDynamic, k_refused),
     X360_HK(XeKeysSaveBootLoader, k_refused), X360_HK(XeKeysSaveBootLoaderEx, k_refused),
     X360_HK(XeKeysSaveKeyVault, k_refused), X360_HK(XeKeysSaveSystemUpdate, k_refused),
-    X360_HK(XeKeysSecurityGetActivated, k_refused), X360_HK(XeKeysSecurityGetDetected, k_refused),
     X360_HK(XeKeysSecurityInitialize, k_refused), X360_HK(XeKeysSecurityLoadSettings, k_refused),
     X360_HK(XeKeysSecuritySaveSettings, k_refused), X360_HK(XeKeysSecuritySetActivated, k_refused),
     X360_HK(XeKeysSecuritySetDetected, k_refused), X360_HK(XeKeysSecuritySetStat, k_refused),
     X360_HK(XeKeysSetFactoryResponse, k_refused), X360_HK(XeKeysSetKey, k_refused),
     X360_HK(XeKeysSetProtectedFlag, k_refused), X360_HK(XeKeysSetRevocationList, k_refused),
-    X360_HK(XeKeysUnObfuscate, k_refused), X360_HK(XeKeysUnObfuscateEx, k_refused),
-    X360_HK(XeKeysVerifyPIRSSignature, k_refused), X360_HK(XeKeysVerifyRSASignature, k_refused),
     X360_HK(XexActivationGetNonce, k_refused), X360_HK(XexActivationSetLicense, k_refused),
-    X360_HK(XexActivationVerifyOwnership, k_refused), X360_HK(XexCommitCodeBuffer, k_refused),
-    X360_HK(XexGetModuleImportVersions, k_refused), X360_HK(XexLoadExecutable, k_refused),
+    X360_HK(XexCommitCodeBuffer, k_refused), X360_HK(XexLoadExecutable, k_refused),
     X360_HK(XexLoadImageFromMemory, k_refused), X360_HK(XexLoadImageHeaders, k_refused),
     X360_HK(XexRegisterPatchDescriptor, k_refused), X360_HK(XexRegisterUsermodeModule, k_refused),
     X360_HK(XexReserveCodeBuffer, k_refused), X360_HK(XexSetLastKdcTime, k_refused),
@@ -403,5 +368,34 @@ const x360_hle_row x360_tab_ob[] = {
     X360_HK(XexTitleHashContinue, k_refused), X360_HK(XexTitleHashOpen, k_refused),
     X360_HK(XexTransformImageKey, k_refused), X360_HK(XexUnloadImageAndExitThread, k_refused),
     X360_HK(XexUnloadTitleModules, k_refused), X360_HK(XexVerifyImageHeaders, k_refused),
+    /* k_refused_zero */
+    X360_HK(HidGetLastInputTime, k_refused_zero), X360_HK(NicGetLinkState, k_refused_zero),
+    X360_HK(UsbdGetDeviceDescriptor, k_refused_zero), X360_HK(UsbdGetDeviceRootPortType, k_refused_zero),
+    X360_HK(UsbdGetDeviceSpeed, k_refused_zero), X360_HK(UsbdGetDeviceTopology, k_refused_zero),
+    X360_HK(UsbdGetEndpointDescriptor, k_refused_zero), X360_HK(UsbdGetNatalHardwareVersion, k_refused_zero),
+    X360_HK(UsbdGetNatalHub, k_refused_zero), X360_HK(UsbdGetPortDeviceNode, k_refused_zero),
+    X360_HK(UsbdGetRequiredDrivers, k_refused_zero), X360_HK(UsbdGetRootHubDeviceNode, k_refused_zero),
+    X360_HK(UsbdIsDeviceAuthenticated, k_refused_zero), X360_HK(WifiCalculateRegulatoryDomain, k_refused_zero),
+    X360_HK(WifiChannelToFrequency, k_refused_zero), X360_HK(WifiDeduceNetworkType, k_refused_zero),
+    X360_HK(WifiGetAssociationIE, k_refused_zero), X360_HK(WifiSelectAdHocChannel, k_refused_zero),
+    X360_HK(XInputdGetLastTextInputTime, k_refused_zero), X360_HK(XVoicedHeadsetPresent, k_refused_zero),
+    X360_HK(XVoicedIsActiveProcess, k_refused_zero), X360_HK(DbgPrompt, k_refused_zero),
+    X360_HK(IoAllocateIrp, k_refused_zero), X360_HK(IoBuildAsynchronousFsdRequest, k_refused_zero),
+    X360_HK(IoBuildDeviceIoControlRequest, k_refused_zero), X360_HK(IoBuildSynchronousFsdRequest, k_refused_zero),
+    X360_HK(KeGetImagePageTableEntry, k_refused_zero), X360_HK(KeGetPMWRegister, k_refused_zero),
+    X360_HK(KeGetPRVRegister, k_refused_zero), X360_HK(KeGetSocRegister, k_refused_zero),
+    X360_HK(KeGetSpecialPurposeRegister, k_refused_zero), X360_HK(KeGetVidInfo, k_refused_zero),
+    X360_HK(MmCreateKernelStack, k_refused_zero), X360_HK(MmDbgReadCheck, k_refused_zero),
+    X360_HK(MmDbgWriteCheck, k_refused_zero), X360_HK(MmDoubleMapMemory, k_refused_zero),
+    X360_HK(MmLockAndMapSegmentArray, k_refused_zero), X360_HK(MmMapIoSpace, k_refused_zero),
+    X360_HK(XeKeysConsolePrivateKeySign, k_refused_zero), X360_HK(XeKeysConsoleSignatureVerification, k_refused_zero),
+    X360_HK(XeKeysGetConsoleType, k_refused_zero), X360_HK(XeKeysGetKeyProperties, k_refused_zero),
+    X360_HK(XeKeysGetProtectedFlag, k_refused_zero), X360_HK(XeKeysGetStatus, k_refused_zero),
+    X360_HK(XeKeysGetUpdateSequence, k_refused_zero), X360_HK(XeKeysObfuscate, k_refused_zero),
+    X360_HK(XeKeysObfuscateEx, k_refused_zero), X360_HK(XeKeysQwNeRsaPrvCrypt, k_refused_zero),
+    X360_HK(XeKeysRevokeIsDeviceRevoked, k_refused_zero), X360_HK(XeKeysSecurityGetActivated, k_refused_zero),
+    X360_HK(XeKeysSecurityGetDetected, k_refused_zero), X360_HK(XeKeysUnObfuscate, k_refused_zero),
+    X360_HK(XeKeysUnObfuscateEx, k_refused_zero), X360_HK(XeKeysVerifyPIRSSignature, k_refused_zero),
+    X360_HK(XeKeysVerifyRSASignature, k_refused_zero), X360_HK(XexActivationVerifyOwnership, k_refused_zero),
 };
 const unsigned x360_tab_ob_n = sizeof x360_tab_ob / sizeof x360_tab_ob[0];
