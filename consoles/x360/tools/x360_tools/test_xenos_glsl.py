@@ -132,14 +132,17 @@ def comps(swz):
 
 
 class Ref:
-    def __init__(self, consts, bools=0, attrs=None):
+    def __init__(self, consts, bools=0, interpolators=(), stage="vertex"):
         self.c = consts
         self.bools = bools
-        self.attrs = attrs or {}
+        self.stage = stage
         self.r = [[0.0] * 4 for _ in range(64)]
+        for i, v in enumerate(interpolators):
+            self.r[i] = list(v)
         self.o = [[0.0] * 4 for _ in range(16)]
         self.ps = 0.0
         self.p0 = False
+        self.killed = False
 
     def operand(self, src, abs_c):
         reg, temp, swz, neg = src
@@ -156,9 +159,10 @@ class Ref:
         g = dict(vop=0, sop=50, vdest=0, sdest=0, vmask=0, smask=0, abs_c=0, export=0, vclamp=0, sclamp=0, pred=0,
                  pcond=0, sdest_rel=0, srcs=((0, 0, 0, 0),) * 3)
         g.update(ins)
-        if g["pred"] and self.p0 != bool(g["pcond"]):
+        if self.killed or (g["pred"] and self.p0 != bool(g["pcond"])):
             return
         vop, sop = g["vop"], g["sop"]
+        kill = False
         S = [self.operand(g["srcs"][k], g["abs_c"]) for k in range(VSRCS.get(vop, 2))]
         a, b = S[0], S[1] if len(S) > 1 else None
         c = S[2] if len(S) > 2 else None
@@ -209,6 +213,7 @@ class Ref:
             op = {24: lambda x, y: x == y, 25: lambda x, y: x > y, 26: lambda x, y: x >= y,
                   27: lambda x, y: x != y}[vop]
             v = [1.0 if any(op(x, y) for x, y in zip(a, b)) else 0.0] * 4
+            kill = v[0] == 1.0
         elif vop == 28:
             v = [1.0, lmul(a[1], b[1]), a[2], b[3]]
         else:
@@ -254,6 +259,7 @@ class Ref:
                 s, p0_new = (0.0 if t else 1.0), t
             elif sop in (35, 36, 37, 38, 39):
                 s = 1.0 if {35: A == 0, 36: A > 0, 37: A >= 0, 38: A != 0, 39: A == 1}[sop] else 0.0
+                kill = kill or s == 1.0
             elif sop == 31:
                 s, p0_new = (0.0 if A == 1 else 1.0 if A == 0 else A), A == 1
             elif sop == 32:
@@ -288,26 +294,29 @@ class Ref:
             self.ps = s
         if p0_new is not None:
             self.p0 = p0_new
+        if kill and self.stage == "pixel":
+            self.killed = True  # discard: nothing after it is seen
 
 
 def export(o, r):
     return dict(vop=2, sop=50, vdest=o, vmask=0xF, export=1, srcs=((r, 1, 0, 0), (r, 1, 0, 0), (0, 0, 0, 0)))
 
 
-def src(rng, temp_ok=True):
+def src(rng, temp_ok=True, temps=(5, 6)):
     if temp_ok and rng.random() < 0.25:
-        return (rng.choice([5, 6]) | (0x80 if rng.random() < 0.3 else 0), 1, rng.getrandbits(8), rng.getrandbits(1))
+        return (rng.choice(temps) | (0x80 if rng.random() < 0.3 else 0), 1, rng.getrandbits(8), rng.getrandbits(1))
     return (rng.randrange(16), 0, rng.getrandbits(8), rng.getrandbits(1))
 
 
-def make_case(rng):
+def make_case(rng, stage="vertex"):
     vop = rng.choice(VOPS)
     sop = rng.choice(SOPS)
     if vop in (20, 21, 22, 23) and sop in (27, 28, 29, 30, 31, 32, 33, 34):
         sop = 0
     ins = dict(vop=vop, sop=sop, vdest=1, sdest=2, vmask=rng.choice([0xF, 0xF, 0x5, 0xA, 0x7]),
                smask=rng.choice([0xF, 0xF, 0x3, 0x8]), abs_c=int(rng.random() < 0.2), vclamp=int(rng.random() < 0.2),
-               sclamp=int(rng.random() < 0.2), srcs=(src(rng), src(rng), src(rng)))
+               sclamp=int(rng.random() < 0.2), srcs=tuple(src(rng, temps=(0, 2, 5, 6) if stage == "pixel" else (5, 6))
+                                                          for _ in range(3)))
     pre = [dict(vop=2, vdest=5, vmask=0xF, srcs=((8, 0, rng.getrandbits(8), 0), (8, 0, 0x00, 0), (0, 0, 0, 0))),
            dict(vop=2, vdest=6, vmask=0xF, srcs=((9, 0, 0, 0), (9, 0, 0, 0), (0, 0, 0, 0)))]
     if sop in (42, 43, 44, 45, 46, 47):
@@ -316,6 +325,8 @@ def make_case(rng):
         pre.append(dict(vop=2, vdest=t, vmask=0xF, srcs=((10, 0, 0, 0), (10, 0, 0, 0), (0, 0, 0, 0))))
     post = [dict(vop=2, vdest=3, vmask=0xF, pred=1, pcond=1, srcs=((11, 0, 0, 0), (11, 0, 0, 0), (0, 0, 0, 0))),
             dict(vop=0, vmask=0, sop=50, sdest=4, smask=0xF)]
+    if stage == "pixel":  # one colour target: the vector result
+        return pre + [ins, export(0, 1)]
     exports = [export(0, 1), export(1, 2), export(2, 3), export(3, 4)]
     return pre + [ins] + post + exports
 
@@ -540,7 +551,21 @@ def test_against_mesa(tmp_path):
     for words in frags:
         src_, info = translate(words, "pixel", interpolators=2)
         (tmp_path / ("%d.frag" % n)).write_text(src_)
+        (tmp_path / ("%d.in" % n)).write_bytes(consts_blob([[0.0] * 4] * 256))
         cases.append((n, "frag", None))
+        n += 1
+    # pixel shaders run: random instructions on constants and interpolators (r0..r7), colour export, kills
+    for _ in range(150):
+        seq = make_case(rng, "pixel")
+        consts = [[rng.choice(VALUES) for _ in range(4)] for _ in range(16)] + [[0.0] * 4] * 240
+        interp = [[rng.choice(VALUES) for _ in range(4)] for _ in range(8)]
+        ref = Ref(consts, interpolators=interp, stage="pixel")
+        for ins in seq:
+            ref.alu(ins)
+        src_, _ = translate(to_words(seq), "pixel", interpolators=8)
+        (tmp_path / ("%d.frag" % n)).write_text(src_)
+        (tmp_path / ("%d.in" % n)).write_bytes(consts_blob(consts, 0, interp))
+        cases.append((n, dict(seq[-2], pixel=1), "killed" if ref.killed else [ref.o[0]]))
         n += 1
     r = subprocess.run([RUN, str(tmp_path)], capture_output=True, text=True, timeout=600)
     if r.returncode == 77:
@@ -556,6 +581,7 @@ def test_against_mesa(tmp_path):
         elif cur is not None:
             lines[cur] = lines[cur] + [line]
     bad = []
+    seen = {"vert": 0, "frag": 0, "killed": 0, "linked": 0}
     for n, what, want in cases:
         got = lines.get(n)
         if not got or got[0] == "error":
@@ -563,6 +589,16 @@ def test_against_mesa(tmp_path):
             continue
         if what == "frag":
             continue
+        if got[0] == "frag" and got[1:2] == ["linked"]:
+            seen["linked"] += 1
+            continue  # no float render target: compiled and linked only
+        if want == "killed" or got[1:2] == ["killed"]:
+            seen["killed"] += got[1:2] == ["killed"]
+            if (want == "killed") != (got[1:2] == ["killed"]):
+                bad.append((n, "vop %d sop %d" % (what["vop"], what["sop"]), "killed %s, want %s" % (
+                    got[1:2] == ["killed"], want == "killed")))
+            continue
+        seen[got[0]] += 1
         vals = [struct.unpack("<f", struct.pack("<I", int(h, 16)))[0] for h in got[1:]]
         flat = [x for o in want for x in o]
         loose = isinstance(what, dict) and (what.get("sop") in (14, 15, 16, 17, 18, 19, 20, 21, 22, 40, 48, 49))
@@ -572,3 +608,6 @@ def test_against_mesa(tmp_path):
                             "o%d.%s got %r want %r" % (i // 4, "xyzw"[i % 4], g, w)))
                 break
     assert not bad, "%d of %d cases differ: %s" % (len(bad), len(cases), bad[:8])
+    print("xenos_glsl on GLES:", seen)
+    # the pixel shaders did run (unless the implementation has no float target), some of them killed
+    assert seen["vert"] > 400 and (seen["linked"] or (seen["frag"] > 50 and seen["killed"] > 5)), seen

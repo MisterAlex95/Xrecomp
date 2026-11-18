@@ -10,8 +10,11 @@ muls); max / min as `a >= b ? a : b` / `a < b ? a : b`; the predicate and kill i
 scalar results both go to the export register, components written by both get 1.0); ps, the previous scalar result,
 kept when an instruction's predicate fails.
 
-What the GLSL expects of the host (the Vulkan / GLES back end, XBA-229 step 3): `uniform vec4 xe_c[256]` (this stage's
-float constants), `uniform uint xe_b[8]` (the 256 boolean constants), `in vec4 xe_v<n>` per vertex fetch (info's
+What the GLSL expects of the host (the Vulkan / GLES back end, XBA-229 step 3): one std140 uniform block per stage,
+`XeVertexConstants` / `XePixelConstants` { vec4 xe_c[256] (the stage's float constants); uvec4 xe_b[2] (the 256
+boolean constants); uvec4 xe_l[8] (the 32 loop constants) } -- 4256 bytes, the host picks the binding points (GLES 3.0
+guarantees 16 KB blocks, while 256 loose vec4 would take all of a pixel shader's guaranteed uniforms); `in vec4
+xe_v<n>` per vertex fetch (info's
 `attributes`: fetch constant, offset, format, stride, signedness: the host converts formats), `uniform sampler*D
 xe_t<n>` per texture fetch constant used (info's `textures`), the pixel shader's interpolators `in vec4 xe_i<n>`
 (copied to r0..),
@@ -20,7 +23,7 @@ conversion) and gl_PointSize; the pixel shader's `layout(location = n) out vec4 
 
 Control flow: exec clauses (conditional on a boolean or p0, ends only when the condition holds), and when a shader
 has loops, calls or jumps, a state machine on the control-flow index with the sequencer's four-deep loop (counter, aL)
-and return stacks (`uniform uint xe_l[32]`: the loop constants, count / start / signed step bytes). Relative
+and return stacks (`xe_l`, in the block: the 32 loop constants, count / start / signed step bytes). Relative
 addressing: r[aL + n], c[aL + n], c[a0 + n] (clamped to the register files).
 
 Textures: 1D / 2D / 3D / cube fetches (cube: tfetchCube's face coordinates turned back into a direction), offsets
@@ -62,7 +65,8 @@ float xe_max4(vec4 a) {
     if (a.y > a.z && a.y > a.w) return a.y;
     return a.z > a.w ? a.z : a.w;
 }
-bool xe_bool(int n) { return ((xe_b[n >> 5] >> uint(n & 31)) & 1u) != 0u; }
+bool xe_bool(int n) { return ((xe_b[n >> 7][(n >> 5) & 3] >> uint(n & 31)) & 1u) != 0u; }
+uint xe_loop(int n) { return xe_l[n >> 2][n & 3]; }
 float xe_clampinf(float t, float lo, float hi) { return isinf(t) ? (t < 0.0 ? lo : hi) : t; }
 // cube: (T, S, 2 * major axis, face) of the direction in src0's z, w, x (shaders pass .zzxy)
 vec4 xe_cube(vec4 s) {
@@ -130,6 +134,7 @@ class _Shader:
         self.depth = 1
         self.uses_a0 = False
         self.uses_al = False
+        self.exports_depth = self.exports_psize = False
 
     def emit(self, line):
         self.body.append("    " * self.depth + line)
@@ -192,6 +197,7 @@ class _Shader:
             if reg == 62:
                 return "xe_pos"
             if reg == 63:
+                self.exports_psize = True
                 return "xe_psize"
             if reg < 16:
                 self.outputs.add(reg)
@@ -201,6 +207,7 @@ class _Shader:
                 self.outputs.add(reg)
                 return "xe_color%d" % reg
             if reg == 61:
+                self.exports_depth = True
                 return "xe_depth"
         raise Unsupported("%s: export to register %d" % (where, reg))
 
@@ -499,13 +506,13 @@ def _flow_body(sh, cfs, words):
                 sh.depth -= 1
                 sh.emit("}")
         elif op == 7:
-            sh.emit("uint L_ = xe_l[%d];" % cf["loop_id"])
+            sh.emit("uint L_ = xe_loop(%d);" % cf["loop_id"])
             sh.emit("if ((L_ & 255u) == 0u) { pc = %d; break; }" % cf["address"])
             sh.emit("if (lsp < 4) { lc[lsp] = int(L_ & 255u); la[lsp] = aL; lsp++; }")
             if not cf["repeat"]:
                 sh.emit("aL = int((L_ >> 8) & 255u);")
         elif op == 8:
-            sh.emit("uint L_ = xe_l[%d];" % cf["loop_id"])
+            sh.emit("uint L_ = xe_loop(%d);" % cf["loop_id"])
             sh.emit("int t_ = max(lsp - 1, 0);")
             sh.emit("lc[t_] -= 1;")
             brk = " || %sp0" % ("" if cf["condition"] else "!") if cf["predicated_break"] else ""
@@ -555,10 +562,10 @@ def translate(words, stage="vertex", interpolators=0):
         _flow_body(sh, cfs, words)
     else:
         _straight_body(sh, cfs, words)
-    out = ["#version 300 es", "precision highp float;", "precision highp int;", "precision highp sampler3D;",
-           "uniform vec4 xe_c[256];", "uniform uint xe_b[8];"]
-    if getattr(sh, "uses_loops", False):
-        out.append("uniform uint xe_l[32];")
+    out = ["#version 300 es", "precision highp float;", "precision highp int;", "precision highp sampler2D;",
+           "precision highp sampler3D;", "precision highp samplerCube;",
+           "layout(std140) uniform %s { vec4 xe_c[256]; uvec4 xe_b[2]; uvec4 xe_l[8]; };" % (
+               "XeVertexConstants" if stage == "vertex" else "XePixelConstants")]
     for i, (_, a) in enumerate(sh.attributes):
         out.append("in vec4 xe_v%d;  // fetch constant %d, offset %d, format %d" % (i, a["fetch_constant"],
                                                                                     a["offset"], a["format"]))
@@ -590,9 +597,11 @@ def translate(words, stage="vertex", interpolators=0):
     out += sh.body
     if stage == "vertex":
         out.append("    gl_Position = xe_pos;")
-        out.append("    gl_PointSize = xe_psize.x;")
+        if sh.exports_psize:
+            out.append("    gl_PointSize = xe_psize.x;")
     else:
-        out.append("    gl_FragDepth = xe_depth.x;")
+        if sh.exports_depth:  # only then: writing it turns early depth testing off
+            out.append("    gl_FragDepth = xe_depth.x;")
     out.append("}")
     info = {"attributes": [a for _, a in sh.attributes], "textures": dict(sh.textures),
             "outputs": sorted(sh.outputs), "uses_a0": sh.uses_a0}

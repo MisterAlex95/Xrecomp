@@ -3,11 +3,17 @@
  *
  *   xenos_glsl_run DIR
  *
- * For N = 0, 1, ...: DIR/N.vert with DIR/N.in (256 vec4 float constants, then 8 uint32 boolean words, then 16 vec4
- * vertex attributes, then optionally 32 uint32 loop constants, little-endian) is linked with transform feedback
- * on its xe_o0 .. xe_o<k-1> outputs (k from DIR/N.nout, a decimal number), drawn as one point with rasterisation off, and its outputs are printed as
- * "N vert" followed by 4k 32-bit hex words. DIR/N.frag is compiled (with a pass-through vertex shader, linked) and
- * printed as "N frag ok". A shader that fails prints "N error" and the log. Stops at the first N with neither. */
+ * DIR/N.in: 256 vec4 float constants, 8 uint32 boolean words, 16 vec4 (vertex attributes / interpolator values),
+ * 32 uint32 loop constants, all little-endian. The constants go to the shader's uniform block (XeVertexConstants or
+ * XePixelConstants) as one std140 buffer.
+ *
+ * For N = 0, 1, ...:
+ * - DIR/N.vert is linked with transform feedback on its xe_o0 .. xe_o<k-1> outputs (k from DIR/N.nout), drawn as one
+ *   point with rasterisation off, the attributes as the generic values of xe_v0..15; prints "N vert" and 4k hex words.
+ * - DIR/N.frag runs behind a vertex shader that passes the 16 vec4 as interpolators xe_i0..15 on one point covering
+ *   a 1x1 RGBA32F target cleared to a sentinel; prints "N frag" and the 4 hex words of xe_color0, or "N frag killed"
+ *   when the target kept the sentinel (discard).
+ * A shader that fails prints "N error" and the log. Stops at the first N with neither file. */
 #define _GNU_SOURCE
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -15,6 +21,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define IN_SIZE (4096 + 32 + 256 + 128)
+#define SENTINEL (-12345.0f)
 
 static char *slurp(const char *path, size_t *len)
 {
@@ -68,31 +77,52 @@ static int link(GLuint p, int n)
     return ok;
 }
 
-static void set_uniforms(GLuint p, const uint8_t *in, size_t len)
-{
-    GLint l = glGetUniformLocation(p, "xe_l");
-    if (l >= 0 && len >= 4096 + 32 + 256 + 128)
-        glUniform1uiv(l, 32, (const GLuint *)(in + 4096 + 32 + 256));
-    GLint c = glGetUniformLocation(p, "xe_c");
-    if (c >= 0)
-        glUniform4fv(c, 256, (const GLfloat *)in);
-    GLint b = glGetUniformLocation(p, "xe_b");
-    if (b >= 0)
-        glUniform1uiv(b, 8, (const GLuint *)(in + 4096));
-}
-
-static void run_vertex(const char *dir, int n, const char *src)
+static uint8_t *read_in(const char *dir, int n)
 {
     char path[4096];
     snprintf(path, sizeof path, "%s/%d.in", dir, n);
     size_t len = 0;
     uint8_t *in = (uint8_t *)slurp(path, &len);
+    if (!in || len < IN_SIZE) {
+        printf("%d error\nbad %d.in\n", n, n);
+        free(in);
+        return NULL;
+    }
+    return in;
+}
+
+/* the constants as the std140 block: 256 vec4, 2 uvec4 of booleans, 8 uvec4 of loop constants */
+static GLuint bind_constants(GLuint p, const uint8_t *in)
+{
+    uint8_t block[4096 + 32 + 128];
+    memcpy(block, in, 4096 + 32);
+    memcpy(block + 4096 + 32, in + 4096 + 32 + 256, 128);
+    GLuint ubo;
+    glGenBuffers(1, &ubo);
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof block, block, GL_STATIC_DRAW);
+    static const char *names[2] = {"XeVertexConstants", "XePixelConstants"};
+    for (GLuint i = 0; i < 2; i++) {
+        GLuint idx = glGetUniformBlockIndex(p, names[i]);
+        if (idx != GL_INVALID_INDEX) {
+            glUniformBlockBinding(p, idx, i);
+            glBindBufferBase(GL_UNIFORM_BUFFER, i, ubo);
+        }
+    }
+    return ubo;
+}
+
+static void run_vertex(const char *dir, int n, const char *src)
+{
+    char path[4096];
+    uint8_t *in = read_in(dir, n);
     snprintf(path, sizeof path, "%s/%d.nout", dir, n);
     char *ns = slurp(path, NULL);
     int nout = ns ? atoi(ns) : 0;
     free(ns);
-    if (!in || len < 4096 + 32 + 256 || nout < 1 || nout > 16) {
-        printf("%d error\nbad %d.in / %d.nout\n", n, n, n);
+    if (!in || nout < 1 || nout > 16) {
+        if (in)
+            printf("%d error\nbad %d.nout\n", n, n);
         free(in);
         return;
     }
@@ -118,7 +148,7 @@ static void run_vertex(const char *dir, int n, const char *src)
         return;
     }
     glUseProgram(p);
-    set_uniforms(p, in, len);
+    GLuint ubo = bind_constants(p, in);
     for (int i = 0; i < 16; i++) {
         char an[16];
         snprintf(an, sizeof an, "xe_v%d", i);
@@ -147,32 +177,70 @@ static void run_vertex(const char *dir, int n, const char *src)
         glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
     }
     glDeleteBuffers(1, &buf);
+    glDeleteBuffers(1, &ubo);
     glDeleteProgram(p);
     glDeleteShader(vs);
     glDeleteShader(fs);
     free(in);
 }
 
-static void run_fragment(int n, const char *src)
+static void run_fragment(const char *dir, int n, const char *src, GLuint float_fbo)
 {
-    /* a vertex shader feeding sixteen interpolators, so a pixel shader with any count of xe_i links */
+    uint8_t *in = read_in(dir, n);
+    if (!in)
+        return;
     static const char vs_src[] =
         "#version 300 es\n"
+        "in vec4 a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15;\n"
         "out vec4 xe_i0, xe_i1, xe_i2, xe_i3, xe_i4, xe_i5, xe_i6, xe_i7, xe_i8, xe_i9, xe_i10, xe_i11, xe_i12, "
         "xe_i13, xe_i14, xe_i15;\n"
-        "void main() { xe_i0 = xe_i1 = xe_i2 = xe_i3 = xe_i4 = xe_i5 = xe_i6 = xe_i7 = xe_i8 = xe_i9 = xe_i10 = "
-        "xe_i11 = xe_i12 = xe_i13 = xe_i14 = xe_i15 = vec4(0); gl_Position = vec4(0); }\n";
+        "void main() { xe_i0 = a0; xe_i1 = a1; xe_i2 = a2; xe_i3 = a3; xe_i4 = a4; xe_i5 = a5; xe_i6 = a6; "
+        "xe_i7 = a7; xe_i8 = a8; xe_i9 = a9; xe_i10 = a10; xe_i11 = a11; xe_i12 = a12; xe_i13 = a13; xe_i14 = a14; "
+        "xe_i15 = a15; gl_Position = vec4(0.0, 0.0, 0.0, 1.0); gl_PointSize = 1.0; }\n";
     GLuint vs = shader(GL_VERTEX_SHADER, vs_src, n), fs = shader(GL_FRAGMENT_SHADER, src, n);
-    if (!vs || !fs)
+    if (!vs || !fs) {
+        free(in);
         return;
+    }
     GLuint p = glCreateProgram();
     glAttachShader(p, vs);
     glAttachShader(p, fs);
-    if (link(p, n))
-        printf("%d frag ok\n", n);
+    if (!link(p, n)) {
+        free(in);
+        return;
+    }
+    glUseProgram(p);
+    GLuint ubo = bind_constants(p, in);
+    for (int i = 0; i < 16; i++) {
+        char an[8];
+        snprintf(an, sizeof an, "a%d", i);
+        GLint loc = glGetAttribLocation(p, an);
+        if (loc >= 0)
+            glVertexAttrib4fv((GLuint)loc, (const GLfloat *)(in + 4096 + 32 + 16 * i));
+    }
+    if (!float_fbo) {
+        printf("%d frag linked\n", n); /* no float target: compiled and linked only */
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, float_fbo);
+        glViewport(0, 0, 1, 1);
+        static const GLfloat sentinel[4] = {SENTINEL, SENTINEL, SENTINEL, SENTINEL};
+        glClearBufferfv(GL_COLOR, 0, sentinel);
+        glDrawArrays(GL_POINTS, 0, 1);
+        float px[4] = {0};
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, px);
+        if (px[0] == SENTINEL && px[1] == SENTINEL && px[2] == SENTINEL && px[3] == SENTINEL) {
+            printf("%d frag killed\n", n);
+        } else {
+            uint32_t w[4];
+            memcpy(w, px, sizeof w);
+            printf("%d frag %08x %08x %08x %08x\n", n, w[0], w[1], w[2], w[3]);
+        }
+    }
+    glDeleteBuffers(1, &ubo);
     glDeleteProgram(p);
     glDeleteShader(vs);
     glDeleteShader(fs);
+    free(in);
 }
 
 int main(int argc, char **argv)
@@ -213,6 +281,20 @@ int main(int argc, char **argv)
         fprintf(stderr, "xenos_glsl_run: incomplete framebuffer\n");
         return 1;
     }
+    /* pixel shaders write into a float target when the implementation can render to one */
+    GLuint ffbo = 0, frb;
+    const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+    if (ext && strstr(ext, "GL_EXT_color_buffer_float")) {
+        glGenFramebuffers(1, &ffbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, ffbo);
+        glGenRenderbuffers(1, &frb);
+        glBindRenderbuffer(GL_RENDERBUFFER, frb);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA32F, 1, 1);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, frb);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            ffbo = 0;
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    }
     for (int n = 0;; n++) {
         char path[4096];
         snprintf(path, sizeof path, "%s/%d.vert", argv[1], n);
@@ -224,7 +306,8 @@ int main(int argc, char **argv)
         if (v)
             run_vertex(argv[1], n, v);
         if (f)
-            run_fragment(n, f);
+            run_fragment(argv[1], n, f, ffbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         free(v);
         free(f);
     }

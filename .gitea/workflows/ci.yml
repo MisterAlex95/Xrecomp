@@ -311,6 +311,11 @@ jobs:
       - name: Xbox 360 test titles through the runtime's ctest (recompiled)
         if: steps.paths.outputs.build == 'true'
         run: JOBS=4 bash tools/consoles/run_x360_homebrew.sh out/homebrew out/x360-homebrew
+      # XBA-270: the Xenos shader translator's GLSL run on Mesa llvmpipe (surfaceless EGL, a Debian image built on
+      # the spot) against test_xenos_glsl's reference interpreter: ~570 vertex / pixel shaders, about 30 s.
+      - name: Xbox 360 shader translator on Mesa (GLES 3.0)
+        if: steps.paths.outputs.build == 'true'
+        run: sh consoles/x360/tests/run_glsl_mesa.sh
 
       - name: PS1 test inputs (OpenBIOS, JaCzekanski/ps1-tests; cached)
         if: steps.paths.outputs.build == 'true'
