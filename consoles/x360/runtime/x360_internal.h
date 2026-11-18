@@ -105,6 +105,7 @@ struct x360_machine {
     uint32_t tls_raw, tls_raw_size, tls_data_size;
     uint32_t timestamp_bundle;          /* KeTimeStampBundle's storage (updated as virtual time runs) */
     int strict_imports;                 /* stop at the first import without an HLE */
+    uint64_t stop_at;                   /* x360_run's instruction budget (rc_native to stop at) */
     uint32_t title_id, execution_info; /* the execution info header (guest copy), its title id */
 
     x360_thunk *thunks;

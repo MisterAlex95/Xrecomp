@@ -13,6 +13,8 @@ project(console_x360_tests C)
 #                    a jump table) and it must end with exit code 0
 #   x360_hello_lzx   the same title encrypted (a made-up key) and LZX-compressed, rewritten plain by
 #                    python3 -m tools.xex --plain first
+#   x360_state       save states: the test title stopped by an instruction budget, a state saved, a fresh run
+#                    resumed from it: the two halves of the DbgPrint text make hello.txt (run_state.sh)
 #   x360_missed      the discovery loop: a function only a pointer reaches stops the first run (--missed), the
 #                    second, recompiled with it (--discovered), ends with exit code 42 (run_missed.sh)
 #   x360_hello_c     a C test title (tests/homebrew/hello_c: devkitPPC, -mpowerpc64 -maltivec; recursion, a GCC jump
@@ -61,6 +63,10 @@ if(TARGET x360_run)
                     ${CMAKE_CURRENT_BINARY_DIR}/${_name} ${_mode} ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt)
         set_tests_properties(${_name} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
     endforeach()
+    add_test(NAME x360_state
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_state.sh $<TARGET_FILE:x360_run>
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_state ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt)
+    set_tests_properties(x360_state PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     add_test(NAME x360_missed
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_missed.sh $<TARGET_FILE:x360_run>
                 ${CMAKE_CURRENT_BINARY_DIR}/x360_missed)

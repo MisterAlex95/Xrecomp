@@ -770,6 +770,56 @@ void x360_k_NtQueryVolumeInformationFile(x360_machine *x, x360_thread *t, xe_cpu
     }
 }
 
+/* save states (x360_state.c): open files by device, path and position (opened again at load), symbolic links */
+void x360_fs_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), void (*u64)(void *, uint64_t *),
+                   void (*i32)(void *, int *), void (*bytes)(void *, void *, size_t), int load)
+{
+    struct x360_fs *fs = fs_of(x);
+    for (int k = 0; k < MAX_FILES; k++) {
+        x360_file *f = &fs->files[k];
+        int used = f->used;
+        i32(s, &used);
+        if (load) {
+            if (f->used && f->fd >= 0)
+                close(f->fd);
+            for (uint32_t j = 0; j < f->nnames; j++)
+                free(f->names[j]);
+            free(f->names);
+            memset(f, 0, sizeof *f);
+            f->fd = -1;
+            f->used = used;
+        }
+        if (!used)
+            continue;
+        uint32_t off_lo = (uint32_t)f->st.offset, off_hi = (uint32_t)(f->st.offset >> 32), stsize = f->st.size;
+        int stdir = f->st.is_dir;
+        u32(s, &f->obj);
+        i32(s, &f->dev);
+        i32(s, &f->is_dir);
+        i32(s, &f->writable);
+        u64(s, &f->pos);
+        u64(s, &f->size);
+        u32(s, &off_lo);
+        u32(s, &off_hi);
+        u32(s, &stsize);
+        i32(s, &stdir);
+        u32(s, &f->next);
+        bytes(s, f->path, sizeof f->path);
+        if (load) {
+            f->path[sizeof f->path - 1] = 0;
+            f->st.offset = (uint64_t)off_hi << 32 | off_lo;
+            f->st.size = stsize;
+            f->st.is_dir = stdir;
+            if (!f->is_dir && !(f->dev == DEV_DISC && fs->img))
+                f->fd = open(f->path, (f->writable ? O_RDWR : O_RDONLY) | O_CLOEXEC);
+        }
+    }
+    for (int k = 0; k < MAX_LINKS; k++) {
+        bytes(s, fs->links[k].link, sizeof fs->links[k].link);
+        bytes(s, fs->links[k].target, sizeof fs->links[k].target);
+    }
+}
+
 static void ansi(x360_machine *x, uint32_t s, char *out, size_t n)
 {
     uint16_t l = s ? x360_r16(x, s) : 0;

@@ -1,12 +1,14 @@
 /* x360_run -- runs an Xbox 360 title, recompiled, headless (XBA-270): what it prints through DbgPrint goes to stdout.
  *
  *   x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--insns N] [--log FILE] [--dbg FILE]
- *            [--missed FILE] [--gpu-trace FILE] [--dump-shaders DIR] [--strict-imports] [--stats] [-v]
+ *            [--missed FILE] [--gpu-trace FILE] [--dump-shaders DIR] [--strict-imports]
+ *            [--save-state FILE] [--load-state FILE] [--stats] [-v]
  *
  * TITLE.xex: an unencrypted XEX2, compression none or basic (python3 -m tools.xex FILE --plain OUT makes one).
  * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
  * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
- * cache: / hdd:. --strict-imports: stop at the first import without an HLE (by name). Runs until the title ends or N instructions (default 2 billion). --missed: addresses reached without lifted code,
+ * cache: / hdd:. --save-state: write a save state when the run stops (budget or end); --load-state: start from one.
+ * --strict-imports: stop at the first import without an HLE (by name). Runs until the title ends or N instructions (default 2 billion). --missed: addresses reached without lifted code,
  * for x360_tools.recomp --discovered. Exit status: the title's exit code when it ended (0..255), 1 on an error, a
  * missed address or the budget running out, 2 on bad arguments or input. */
 #include <dlfcn.h>
@@ -37,7 +39,7 @@ static uint8_t *read_file(const char *path, size_t *size)
 int main(int argc, char **argv)
 {
     const char *path = NULL, *pack = NULL, *logp = NULL, *dbgp = NULL, *missedp = NULL, *disc = NULL, *data_dir = NULL,
-               *gpu_trace = NULL, *shaders = NULL;
+               *gpu_trace = NULL, *shaders = NULL, *save_state = NULL, *load_state = NULL;
     unsigned long long insns = 2000000000ull;
     int stats = 0, verbose = 0, strict = 0;
     for (int i = 1; i < argc; i++) {
@@ -45,6 +47,10 @@ int main(int argc, char **argv)
             insns = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--pack") && i + 1 < argc)
             pack = argv[++i];
+        else if (!strcmp(argv[i], "--save-state") && i + 1 < argc)
+            save_state = argv[++i];
+        else if (!strcmp(argv[i], "--load-state") && i + 1 < argc)
+            load_state = argv[++i];
         else if (!strcmp(argv[i], "--dump-shaders") && i + 1 < argc)
             shaders = argv[++i];
         else if (!strcmp(argv[i], "--strict-imports"))
@@ -126,7 +132,33 @@ int main(int argc, char **argv)
         fprintf(stderr, "x360_run: %s\n", x360_error(x));
         return 2;
     }
+    if (load_state) {
+        size_t n;
+        uint8_t *blob = read_file(load_state, &n);
+        char why2[256] = "";
+        int lr = blob ? x360_state_load(x, NULL, blob, n, why2, sizeof why2) : X360_STATE_ECORRUPT;
+        free(blob);
+        if (lr != X360_STATE_OK) {
+            fprintf(stderr, "x360_run: %s: %s\n", load_state, blob ? why2 : "cannot read");
+            return 2;
+        }
+        fprintf(log, "x360_run: state loaded from %s\n", load_state);
+    }
     int st = x360_run(x, insns);
+    if (save_state && (st == X360_BUDGET || st == X360_EXITED)) {
+        size_t cap = x360_state_size(x);
+        uint8_t *blob = malloc(cap);
+        size_t n = blob ? x360_state_save(x, NULL, blob, cap) : 0;
+        FILE *f = n ? fopen(save_state, "wb") : NULL;
+        if (!f || fwrite(blob, 1, n, f) != n) {
+            fprintf(stderr, "x360_run: cannot write the state to %s\n", save_state);
+            st = X360_ERROR;
+        } else
+            fprintf(log, "x360_run: state saved to %s (%zu bytes)\n", save_state, n);
+        if (f)
+            fclose(f);
+        free(blob);
+    }
     x360_stats s;
     x360_get_stats(x, &s);
     if (stats)

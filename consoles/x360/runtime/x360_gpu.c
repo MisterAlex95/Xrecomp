@@ -189,6 +189,48 @@ void x360_gpu_poll(x360_machine *x)
         }
 }
 
+/* save states (x360_state.c): the command processor and the interrupt state, field by field */
+void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), void (*u64)(void *, uint64_t *),
+                    void (*i32)(void *, int *))
+{
+    struct x360_gpu *g = gpu_of(x);
+    xenos_cp *cp = &g->cp;
+    for (uint32_t k = 0; k < XENOS_REGS; k++)
+        u32(s, &cp->regs[k]);
+    u32(s, &cp->rb_base);
+    u32(s, &cp->rb_size);
+    u32(s, &cp->rptr);
+    u32(s, &cp->wptr);
+    u32(s, &cp->rptr_writeback);
+    u32(s, &cp->counter);
+    i32(s, &cp->stalled);
+    u32(s, &cp->last_swap_fb);
+    u32(s, &cp->last_swap_w);
+    u32(s, &cp->last_swap_h);
+    for (int k = 0; k < 2; k++) {
+        xenos_shader *sh = &cp->shader[k];
+        u32(s, &sh->words);
+        u32(s, &sh->address);
+        u32(s, &sh->loads);
+        if (sh->words > XENOS_SHADER_WORDS)
+            sh->words = XENOS_SHADER_WORDS;
+        for (uint32_t w = 0; w < sh->words; w++)
+            u32(s, &sh->code[w]);
+    }
+    u64(s, &cp->packets);
+    u64(s, &cp->draws);
+    u64(s, &cp->swaps);
+    u32(s, &g->irq_callback);
+    u32(s, &g->irq_user);
+    u64(s, &g->next_vblank);
+    u32(s, &g->vblanks);
+    u32(s, &g->last_wptr);
+    i32(s, &g->irq_pending[0]);
+    i32(s, &g->irq_pending[1]);
+    i32(s, &g->ring);
+    i32(s, &g->irq_thread);
+}
+
 uint64_t x360_gpu_next_event(x360_machine *x)
 {
     return x->gpu && x->gpu->irq_callback ? x->gpu->next_vblank : 0;

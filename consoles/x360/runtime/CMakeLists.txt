@@ -16,7 +16,7 @@ if(NOT TARGET x360_core)
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/xiso xiso) # disc images (XDVDFS / GDFX)
     endif()
     add_library(x360_core STATIC x360_mem.c x360_load.c x360_thread.c x360_kernel.c x360_interp.c x360_file.c
-        x360_xam.c x360_gpu.c xenos_cp.c)
+        x360_xam.c x360_gpu.c xenos_cp.c x360_state.c)
     target_include_directories(x360_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${X360_GC_RUNTIME})
     target_compile_definitions(x360_core PUBLIC XE_RUNTIME=1 _GNU_SOURCE)
     target_compile_options(x360_core PRIVATE -Wall -Wextra -ffp-contract=off)

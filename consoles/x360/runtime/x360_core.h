@@ -63,6 +63,15 @@ unsigned x360_missed(const x360_machine *x, const uint32_t **addrs);
 /* image base, entry point, image size */
 void x360_image_info(const x360_machine *x, uint32_t *base, uint32_t *entry, uint32_t *size);
 
+/* Save states (x360_state.c), in the format of the other consoles' (gc_state.c): taken between time slices (after
+ * x360_run returned), loaded into a machine made from the same XEX with the same pack bound. key: the title key
+ * (NULL: the image's CRC). Results: */
+#define X360_STATE_VERSION 1
+enum { X360_STATE_OK = 0, X360_STATE_EGAME = -3, X360_STATE_EVERSION = -4, X360_STATE_ECORRUPT = -7 };
+size_t x360_state_size(x360_machine *x);
+size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t cap);
+int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n);
+
 typedef struct x360_stats {
     uint64_t native;       /* instructions run in lifted code */
     uint64_t interpreted;  /* instructions the interpreter ran */

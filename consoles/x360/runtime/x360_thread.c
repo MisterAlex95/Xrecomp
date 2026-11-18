@@ -412,6 +412,8 @@ static void run_thread(x360_machine *x, x360_thread *t)
             x->m.slice -= 8;
             continue;
         }
+        if (x->m.rc_native >= x->stop_at)
+            break; /* the caller's instruction budget: stop between two lifted functions */
         xe_rc_fn fn = pc >= x->code_lo && pc < x->code_hi && !(pc & 3) ? x->fn_tab[(pc - x->code_lo) >> 2] : NULL;
         if (!fn) {
             missed(x, pc);
@@ -473,6 +475,7 @@ int x360_run(x360_machine *x, uint64_t insns)
     }
     x360_install_fault_handler(x);
     uint64_t stop = x->m.rc_native + insns;
+    x->stop_at = stop;
     while (x->status == X360_RUNNING) {
         if (x->m.rc_native >= stop) {
             x->status = X360_BUDGET;
