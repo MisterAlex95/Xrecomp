@@ -44,7 +44,12 @@ def test_redump_base():
     _check(0x18300000)      # sparse: the hole before the partition costs no disk space
 
 
+def test_xgd3_base():
+    _check(0x02080000)      # an Xbox 360 XGD3 disc's game partition
+
+
 if __name__ == "__main__":
     test_bare_image()
     test_redump_base()
-    print("2 checks passed")
+    test_xgd3_base()
+    print("3 checks passed")

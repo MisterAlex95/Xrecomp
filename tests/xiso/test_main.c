@@ -292,9 +292,31 @@ static void extract_and_verify(const char *image_path, const char *what)
     printf("%s: ok\n", what);
 }
 
+static void test_base_at(const char *name, off_t base, const char *what)
+{
+    size_t len;
+    uint8_t *img = read_file(fixture("small.iso"), &len);
+    char *path = tmp_path(name);
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    CHECK(fd >= 0 && img);
+    if (fd >= 0 && img && pwrite(fd, img, len, base) == (ssize_t)len) {
+        close(fd);
+        extract_and_verify(path, what);
+    } else {
+        if (fd >= 0)
+            close(fd);
+        fprintf(stderr, "FAIL cannot write the sparse image %s\n", name);
+        g_fail++;
+    }
+    unlink(path);
+    free(img);
+}
+
 static void test_bases(void)
 {
     extract_and_verify(fixture("small_base30600.iso"), "base 0x30600");
+    /* An Xbox 360 XGD3 disc: the game partition at 0x02080000 (XBA-270). */
+    test_base_at("xgd3.iso", (off_t)0x02080000, "base 0x02080000 (Xbox 360 XGD3)");
 
     /* Redump layout: the game partition at 0x18300000 behind the video partition, written sparse. */
     size_t len;
