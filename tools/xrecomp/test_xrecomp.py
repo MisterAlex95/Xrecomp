@@ -20,6 +20,7 @@ from tools.prepare import gba, toolkit                         # noqa: E402
 from tools.prepare.test_gba_prepare import make_rom as gba_rom  # noqa: E402
 from tools.prepare.test_n64_prepare import make_rom as n64_rom  # noqa: E402
 from tools.prepare.test_ps1_prepare import make_exe as ps1_exe  # noqa: E402
+from tools.prepare.test_gc_prepare import make_disc as gc_disc  # noqa: E402
 from tools.xrecomp import __main__ as cli                      # noqa: E402
 from tools.xrecomp import config, library                      # noqa: E402
 from tools.xrecomp.home import Home, default_root              # noqa: E402
@@ -32,7 +33,8 @@ CC = shutil.which(os.environ.get("CC", "cc"))
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("XRECOMP_HOME", str(tmp_path / "home"))
-    for k in ("XBA_NO_TITLE_LAYER", "XRECOMP_GBA_PLAY", "XRECOMP_PS1_PLAY", "XRECOMP_N64_PLAY", "RECOMP_GPU",
+    for k in ("XBA_NO_TITLE_LAYER", "XRECOMP_GBA_PLAY", "XRECOMP_PS1_PLAY", "XRECOMP_N64_PLAY", "XRECOMP_GC_PLAY",
+              "RECOMP_GPU",
               "RECOMP_RUMBLE", "RECOMP_ASPECT"):
         monkeypatch.delenv(k, raising=False)
     return Home()
@@ -179,6 +181,40 @@ def test_identify_each_console(tmp_path):
     assert library.identify(str(tmp_path / "gone.iso")).error
     (tmp_path / "junk.iso").write_bytes(b"\0" * 4096)
     assert library.identify(str(tmp_path / "junk.iso")).error
+
+
+def test_identify_gamecube(tmp_path):
+    """XBA-274: a GameCube disc (an .iso read by content, before the PS1's) and a homebrew DOL: their keys and the
+    main DOL's SHA-256, the identity a GameCube pack.json records."""
+    import hashlib
+    import zlib
+    disc, _g, dol, _raw, _lo = gc_disc(tmp_path)
+    e = library.identify(str(disc))
+    assert (e.console, e.id, e.title, e.key) == ("gc", "gc-GXRP01-1", "XRecomp disc test", "GXRP01-1")
+    assert e.sha256 == hashlib.sha256(dol).hexdigest() and not e.error
+    (tmp_path / "prog.dol").write_bytes(dol)
+    e = library.identify(str(tmp_path / "prog.dol"))
+    assert (e.console, e.id, e.title) == ("gc", "gc-DOL-%08X" % (zlib.crc32(dol) & 0xFFFFFFFF), "prog")
+    assert sorted(os.path.basename(p) for p in library.candidates(str(tmp_path))) == ["Game.iso", "prog.dol"]
+    from tools.xrecomp.home import console_of
+    assert console_of("gc-GXRP01-1") == "gc"
+
+
+def test_gamecube_list_and_play(home, tmp_path, monkeypatch):
+    """XBA-274: a GameCube game in the library plays through gc_play (in the interpreter until prepared), its saves
+    in the consoles' save folder (RECOMP_SAVE_DIR: gc_play's memory cards and states)."""
+    disc, _g, _dol, _raw, _lo = gc_disc(tmp_path)
+    player = _fake_player(tmp_path, monkeypatch, "gc")
+    rc, out = run("list", str(tmp_path), "--json")
+    [e] = json.loads(out)
+    assert (e["id"], e["console"], e["state"], e["note"]) == ("gc-GXRP01-1", "gc", "absent",
+                                                              "plays in the interpreter")
+    rc, out = run("play", str(disc), "--print")
+    assert rc == 0
+    lines = out.splitlines()
+    assert "export RECOMP_SAVE_DIR=" + home.console_saves in lines
+    assert lines[-1] == "%s %s" % (player, disc)
+    assert cli.console_unsupported("gc", "win32") and "GameCube" in cli.console_unsupported("gc", "win32")
 
 
 def test_list_states_xbox(home, tmp_path):

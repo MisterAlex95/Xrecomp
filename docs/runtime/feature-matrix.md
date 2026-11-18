@@ -44,7 +44,7 @@ app and not in this matrix.
 | Host | Xbox | GBA | PS1 | N64 | GameCube |
 |---|---|---|---|---|---|
 | Android app | yes | yes | yes | yes | yes |
-| Desktop `xrecomp` CLI (Linux, macOS) | yes | yes (`gba_play`) | yes (`ps1_play`) | yes (`n64_play`) | no: `tools/xrecomp` knows four consoles (`home.py` CONSOLES, `__main__.py` PLAYERS); `gc_play` and `tools/prepare/gc.py` exist |
+| Desktop `xrecomp` CLI (Linux, macOS) | yes | yes (`gba_play`) | yes (`ps1_play`) | yes (`n64_play`) | yes (`gc_play`; XBA-274: `tools/xrecomp/library.py` `_identify_gc`, saves and states in RECOMP_SAVE_DIR, `--missed`) |
 | Desktop `xrecomp` CLI (Windows) | yes, without save states / rewind | no (`__main__.py` `console_unsupported`) | no | no | no |
 | macOS launcher (`macos/`) | yes: settings, cover art, game apps, save import | no: `LibraryScanner.swift` lists Xbox folders and images only | no | no | no |
 
@@ -56,7 +56,7 @@ or rewind UI on any desktop (hotkeys and files only), and no screenshot or fulls
 1. GameCube controls in the app: the Controls screen (`app/ConsoleControls`). Done.
 2. GameCube internal resolution in the app (`app/ConsoleVideo.applies`, `app/GameSettings.appliesTo`). Done.
 3. Xbox rewind in a game's settings (`app/GameSettings.appliesTo`). Done.
-4. GameCube in the desktop `xrecomp` CLI (`tools/xrecomp`).
+4. GameCube in the desktop `xrecomp` CLI (`tools/xrecomp`, `gc_play --missed`, `RECOMP_SAVE_DIR`). Done.
 5. GameCube frame generation on the texture present path (`src/video/host_window.c`).
 
 Left, with the reason:

@@ -20,6 +20,7 @@ SCAN_DEPTH = 3
 XBOX_IMAGE_EXT = (".iso", ".xiso", ".cso", ".zso", ".cci")
 ROM_EXT = (".gba", ".z64", ".v64", ".n64")
 PS1_EXT = (".cue", ".chd", ".bin", ".img", ".exe")
+GC_EXT = (".gcm", ".ciso", ".gcz", ".rvz", ".wia", ".dol")      # and .iso, read by content (XBA-274)
 
 
 class Entry:
@@ -46,12 +47,14 @@ class Entry:
 # ── identify ────────────────────────────────────────────────────
 
 def console_of_source(path):
-    """"n64" | "gba" | "ps1" | "xbox", in tools.prepare's order."""
-    from tools.prepare import gba, n64, ps1
+    """"n64" | "gba" | "gc" | "ps1" | "xbox", in tools.prepare's order (a GameCube disc before the PS1's .iso)."""
+    from tools.prepare import gba, gc, n64, ps1
     if n64.is_n64(path):
         return "n64"
     if gba.is_gba(path):
         return "gba"
+    if gc.is_gc(path):
+        return "gc"
     if ps1.is_ps1(path):
         return "ps1"
     return "xbox"
@@ -86,6 +89,8 @@ def identify(path):
             from tools.prepare import n64
             key, title, _order, sha, _size = n64.read_source(src)
             return Entry(src, "n64", "n64-" + key, title, key, sha)
+        if console == "gc":
+            return _identify_gc(src)
         from tools.prepare import identify as xid
         info = xid.identify(src)
         tid = info["title_id"]
@@ -94,6 +99,20 @@ def identify(path):
         code = getattr(e, "code", None)
         msg = getattr(e, "msg", None) or str(e) or type(e).__name__
         return Entry(src, console, error=("%s: %s" % (code, msg)) if code else msg)
+
+
+def _identify_gc(src):
+    """A GameCube disc or DOL (XBA-274): its key (« GALE01-0 », « DOL-<CRC32> ») and the main DOL's SHA-256, the
+    identity its pack.json records (tools/prepare/gc.py). An RVZ / WIA image is read through the runtime's extractor
+    into a temporary folder, as Prepare does."""
+    import tempfile
+    from tools.prepare import gc
+    if gc._gc_tools().gcm.needs_native(src):
+        with tempfile.TemporaryDirectory(prefix="xrecomp-gc-") as work:
+            key, title, dol, _rels = gc.read_source(src, work)
+    else:
+        key, title, dol, _rels = gc.read_source(src)
+    return Entry(src, "gc", "gc-" + key, title, key, hashlib.sha256(dol).hexdigest())
 
 
 def candidates(folder, depth=SCAN_DEPTH):
@@ -123,7 +142,7 @@ def candidates(folder, depth=SCAN_DEPTH):
                 continue
             if ext == ".exe" or (ln == "default.xbe" and level == 0):
                 continue        # a bare EXE / XBE is given by hand, not scanned
-            if ext in XBOX_IMAGE_EXT or ext in ROM_EXT or ext in PS1_EXT:
+            if ext in XBOX_IMAGE_EXT or ext in ROM_EXT or ext in PS1_EXT or ext in GC_EXT:
                 out.append(p)
     walk(os.path.abspath(os.path.expanduser(folder)), 0)
     return out
@@ -226,8 +245,8 @@ def state(entry, home):
 
 
 def _console_module(console):
-    from tools.prepare import gba, n64, ps1
-    return {"gba": gba, "ps1": ps1, "n64": n64}[console]
+    from tools.prepare import gba, gc, n64, ps1
+    return {"gba": gba, "ps1": ps1, "n64": n64, "gc": gc}[console]
 
 
 # ── the library ─────────────────────────────────────────────────
