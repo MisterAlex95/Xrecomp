@@ -91,7 +91,7 @@ final class RecompConfig {
     static final String ENV_480P = "RECOMP_480P";
     /** « 0 » stops every pad motor (XBA-181: the Xbox's emulated USB pad, the PS1 DualShock, the N64 Rumble Pak). */
     static final String ENV_RUMBLE = "RECOMP_RUMBLE";
-    /** Rewind of every console (XBA-194): « 1 » / « 0 », unset = on (XBA-278: the N64 and the GameCube too); its memory in MB. */
+    /** Rewind of every console (XBA-194): « 1 » / « 0 », unset = on but for the Xbox 360 (XBA-278: the N64 and the GameCube on); its memory in MB. */
     static final String ENV_REWIND = "RECOMP_REWIND";
     static final String ENV_REWIND_MB = "RECOMP_REWIND_MB";
 
