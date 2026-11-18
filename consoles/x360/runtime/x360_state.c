@@ -160,28 +160,6 @@ static void sec_kernel(x360_machine *x, io *s)
     io_u32(s, &x->kalloc_cur);
     io_u32(s, &x->kalloc_end);
     io_u64(s, &x->rng);
-    for (int k = 0; k < 4; k++) {
-        x360_pad_slot *p = &x->pads[k];
-        uint32_t b = p->state.buttons, tr = (uint32_t)p->state.left_trigger << 8 | p->state.right_trigger;
-        uint32_t l = (uint16_t)p->state.thumb_lx | (uint32_t)(uint16_t)p->state.thumb_ly << 16;
-        uint32_t r = (uint16_t)p->state.thumb_rx | (uint32_t)(uint16_t)p->state.thumb_ry << 16;
-        io_i32(s, &p->connected);
-        io_u32(s, &p->packet);
-        io_u32(s, &b);
-        io_u32(s, &tr);
-        io_u32(s, &l);
-        io_u32(s, &r);
-        if (s->load) {
-            p->state.buttons = (uint16_t)b, p->state.left_trigger = (uint8_t)(tr >> 8);
-            p->state.right_trigger = (uint8_t)tr;
-            p->state.thumb_lx = (int16_t)l, p->state.thumb_ly = (int16_t)(l >> 16);
-            p->state.thumb_rx = (int16_t)r, p->state.thumb_ry = (int16_t)(r >> 16);
-        }
-    }
-    uint32_t at = x->pad_script_at;
-    io_u32(s, &at);
-    if (s->load)
-        x->pad_script_at = at <= x->pad_script_n ? at : x->pad_script_n;
     for (int k = 0; k < 8; k++) {
         x360_audio_client *a = &x->audio[k];
         io_u32(s, &a->callback);
@@ -333,6 +311,34 @@ static void sec_files(x360_machine *x, io *s)
     x360_fs_state(x, s, cb_u32, cb_u64, cb_i32, cb_bytes, s->load);
 }
 
+/* the controllers and the pad script's position (x360_input.c): their own optional section, so states without it
+ * still load (pads disconnected) */
+static void sec_pads(x360_machine *x, io *s)
+{
+    for (int k = 0; k < 4; k++) {
+        x360_pad_slot *p = &x->pads[k];
+        uint32_t b = p->state.buttons, tr = (uint32_t)p->state.left_trigger << 8 | p->state.right_trigger;
+        uint32_t l = (uint16_t)p->state.thumb_lx | (uint32_t)(uint16_t)p->state.thumb_ly << 16;
+        uint32_t r = (uint16_t)p->state.thumb_rx | (uint32_t)(uint16_t)p->state.thumb_ry << 16;
+        io_i32(s, &p->connected);
+        io_u32(s, &p->packet);
+        io_u32(s, &b);
+        io_u32(s, &tr);
+        io_u32(s, &l);
+        io_u32(s, &r);
+        if (s->load) {
+            p->state.buttons = (uint16_t)b, p->state.left_trigger = (uint8_t)(tr >> 8);
+            p->state.right_trigger = (uint8_t)tr;
+            p->state.thumb_lx = (int16_t)l, p->state.thumb_ly = (int16_t)(l >> 16);
+            p->state.thumb_rx = (int16_t)r, p->state.thumb_ry = (int16_t)(r >> 16);
+        }
+    }
+    uint32_t at = x->pad_script_at;
+    io_u32(s, &at);
+    if (s->load)
+        x->pad_script_at = at <= x->pad_script_n ? at : x->pad_script_n;
+}
+
 typedef struct {
     char tag[5];
     uint32_t version;
@@ -343,6 +349,7 @@ typedef struct {
 static const section k_sections[] = {
     {"THRD", 1, 1, sec_threads}, {"KERN", 1, 1, sec_kernel}, {"HEAP", 1, 1, sec_heaps},
     {"MEM ", 1, 1, sec_memory},  {"GPU ", 1, 0, sec_gpu},    {"FILE", 1, 0, sec_files},
+    {"PADS", 1, 0, sec_pads},
 };
 #define NSEC (sizeof k_sections / sizeof k_sections[0])
 

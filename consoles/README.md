@@ -1915,7 +1915,8 @@ What is there:
   `d:` / `\Device\Cdrom0` and a writable data directory for `cache:` / `hdd:`, symbolic links, save data (XAM content
   as directories of the data directory, mounted on the title's root name), the video mode and display information,
   the audio render driver (its client callback runs every 256-sample frame of virtual time; frames are dropped: no
-  audio output yet), XMA contexts, XAM's user 0 signed in locally, no controller yet, message boxes and the device
+  audio output yet), XMA contexts, XAM's user 0 signed in locally, four controllers (`x360_input.c`: set by the host or from a script of timed
+  states, `XamInputGetState` / `GetCapabilities` / `SetState` / `GetKeystroke`), message boxes and the device
   selector answered at once, profile settings with defaults, no network. Arguments past the eighth come from the
   caller's stack slots (r1 + 0x50). `x360_interp.c` runs what the lifter hands to `RC_INTERP`: traps (a title's
   assert stops it with its address), FPSCR moves, `mcrxr`. `xenos_cp.c`: the GPU command processor, PM4 packets
@@ -1924,9 +1925,12 @@ What is there:
   token); the GPU register page is memory the scheduler reads between slices, and the title's graphics interrupt
   callback runs at each vertical blank (60 Hz of virtual time) on a reused guest context. `x360_state.c`: **save
   states** in the other consoles' format (`gc_state.c`: threads, kernel objects, heaps, guest memory without its zero
-  pages, the GPU, open files and links), taken between time slices.
+  pages, the GPU, open files and links, the pads), taken between time slices. `x360_cheat_read32` / `write32`: the
+  host layer's data cheats, on allocated guest memory only. Disc images: `src/xiso` also probes XGD3's game
+  partition base (0x02080000; XGD2's 0x0FD90000 was there).
 - `x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--gpu-trace FILE] [--dump-shaders DIR]
-  [--save-state FILE] [--load-state FILE] [--seconds N] [--strict-imports] [--missed FILE] [--stats]`: LIB.so is
+  [--save-state FILE] [--load-state FILE] [--pad-script FILE] [--seconds N] [--strict-imports] [--missed FILE]
+  [--stats]`: LIB.so is
   `x360_tools.recomp`'s C built with `-DXE_RUNTIME -shared` (stale packs are refused by CRC). A synthetic tight loop
   runs about 380 million guest instructions a second (x86-64, the pack at -O1); a recompile of 20,000 functions takes
   about 9 s and their pack about 100 s on three cores.
@@ -1943,7 +1947,7 @@ What is there:
   on arm64 under qemu (same text).
 
 Not there yet (XBA-229): rendering (shader translation, eDRAM and resolves, textures, a Vulkan back end), audio output
-(XMA decoding, the render driver's frames), controllers, real parallel hardware threads, structured exception
+(XMA decoding, the render driver's frames), vibration, real parallel hardware threads, structured exception
 handling (`__C_specific_handler` continues the search, `RtlUnwind` stops the title), the network, and whatever
 `hle_coverage` lists as missing on Alex's titles.
 

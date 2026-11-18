@@ -484,6 +484,22 @@ static void test_input_and_cheats(void)
     X->time_skip += 60000;
     x360_input_poll(X);
     CHECK(XM(X360_xam_XamInputGetState, 3, 1, 0, st) == 0x48F, "scripted unplug");
+    /* pads and the script position survive a save state: rewind the script, save, run it on, load */
+    x360_set_pad(X, 3, &p);
+    x360_set_pad_script(X, ev, 2);
+    size_t cap = x360_state_size(X), n;
+    uint8_t *blob = malloc(cap);
+    CHECK(blob && (n = x360_state_save(X, NULL, blob, cap)) > 0, "state saved");
+    X->time_skip += 120000;
+    x360_input_poll(X);
+    x360_set_pad(X, 3, NULL);
+    char why[128];
+    CHECK(blob && x360_state_load(X, NULL, blob, n, why, sizeof why) == 0, "state loaded");
+    CHECK(XM(X360_xam_XamInputGetState, 3, 3, 0, st) == 0 && x360_r16(X, st + 4) == 0x1010, "pad 3 restored");
+    CHECK(X->pad_script_at == 0, "script position restored");
+    free(blob);
+    x360_set_pad(X, 3, NULL);
+    x360_set_pad(X, 1, NULL);
     x360_set_pad_script(X, NULL, 0);
     /* cheats: allocated memory only */
     x360_cheat_write32(X, st, 0xCAFEF00Du);
