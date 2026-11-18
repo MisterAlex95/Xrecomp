@@ -56,7 +56,10 @@ runtimes now call instead of four copies; the window, its shaders, frame generat
 | macOS launcher (`macos/`) | yes: settings, cover art, game apps, save import | yes (XBA-278: `macos/Sources/XRecompCore/ConsoleGames.swift`; listed, prepared and played through `xrecomp identify` / `play --print --json`; settings rows per console, Controls, Manage, game apps; box art: no download, the monogram) | yes (a cue's tracks once) | yes (+ controller pak row) | yes (a GameCube `.iso` after the Xbox identify) | no |
 
 The desktop has no settings UI on Linux / Windows (`recomp.cfg`, `xrecomp settings KEY=VALUE`), no save-state, cheat
-or rewind UI on any desktop (hotkeys and files only), and no screenshot or fullscreen hotkey.
+or rewind UI on any desktop (hotkeys and files only). Every desktop game window (the console runtimes' `host_window.c`,
+the Xbox SDL presenter, the Xbox Windows presenter) has F11 / Alt+Enter for fullscreen and F12 for a screenshot
+(XBA-278, `src/platform/recomp_window_keys.h`; `RECOMP_FULLSCREEN=1` starts fullscreen, `RECOMP_SCREENSHOT_DIR`
+moves the screenshots from `$RECOMP_SAVE_DIR/screenshots`); on Android the window is always fullscreen.
 
 ## Gaps, in the order they are filled (XBA-274)
 

@@ -22,6 +22,8 @@
  *   fail        RECOMP_SHADER_TEST_FAIL=crt: the shader does not build, none is drawn, none active
  *   live        none at the start, scanlines set live (xbox_FramebufferWindowSetShader, the in-game menu) drawn
  *               from the window's next turn, then lcd set live: none
+ *   keys        XBA-278, the window's own keys: F12 writes the frame shown (grey) to RECOMP_SCREENSHOT_DIR, F11 and
+ *               Alt+Enter toggle fullscreen
  * Skipped (77) with no display or under XBR_BUILD_ONLY. `fb_present_sdl_test <case>` runs one case.
  * Before that, with or without a display (XBA-243): the performance line of headless flips
  * (xbox_FramebufferWindowFrameStats, xbox_FramebufferWindowPresentHost with no window), "xbox: perf over the run: ..."
@@ -33,6 +35,7 @@
 
 #include <SDL.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
@@ -296,6 +299,53 @@ static int guest_main(void)
             CHECK(c[0] == 128 && c[1] == 128 && c[2] == 128);
             unlink(bmp);
         }
+    } else if (!strcmp(s_case, "keys")) {
+        /* F12 from the event queue (the window's turn writes the frame shown), then F11 and Alt+Enter. */
+        char dir[600], bmp[900] = "";
+        int c[3] = { 0, 0, 0 };
+        snprintf(dir, sizeof dir, "%s/keys", s_dir);
+        for (int i = 0; i < 3; i++) {   /* the screenshot reads the slot behind the one on screen: fill it */
+            xbox_FramebufferWindowPresentHost(px, FW, FH, FW * 4u, XBOX_FB_HOST_BGRX8888);
+            sleep_ms(30);
+        }
+        SDL_Event e;
+        memset(&e, 0, sizeof e);
+        e.type = SDL_KEYDOWN;
+        e.key.state = SDL_PRESSED;
+        e.key.keysym.scancode = SDL_SCANCODE_F12;
+        SDL_PushEvent(&e);
+        for (int i = 0; i < 200 && !bmp[0]; i++) {
+            DIR *d = opendir(dir);
+            for (struct dirent *de; d && (de = readdir(d));)
+                if (strstr(de->d_name, ".bmp"))
+                    snprintf(bmp, sizeof bmp, "%s/%s", dir, de->d_name);
+            if (d)
+                closedir(d);
+            if (!bmp[0])
+                sleep_ms(10);
+        }
+        printf("  keys: F12 wrote %s\n", bmp[0] ? bmp : "nothing");
+        CHECK(bmp[0] && strstr(bmp, "/Xbox_Recomp-") != NULL);
+        CHECK(bmp[0] && read_bmp_centre(bmp, c));
+        CHECK(c[0] == 128 && c[1] == 128 && c[2] == 128);
+        if (bmp[0])
+            unlink(bmp);
+        rmdir(dir);
+        SDL_Window *win = SDL_GetWindowFromID(1);
+        CHECK(win != NULL);
+        e.key.keysym.scancode = SDL_SCANCODE_F11;
+        SDL_PushEvent(&e);
+        int full = 0;
+        for (int i = 0; i < 200 && win && !(full = (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) != 0); i++)
+            sleep_ms(10);
+        CHECK(full);
+        e.key.keysym.scancode = SDL_SCANCODE_RETURN;
+        e.key.keysym.mod = KMOD_LALT;
+        SDL_PushEvent(&e);
+        for (int i = 0; i < 200 && win && (full = (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) != 0); i++)
+            sleep_ms(10);
+        CHECK(!full);
+        printf("  keys: F11 / Alt+Enter toggled fullscreen\n");
     } else if (!strcmp(s_case, "fxaa") || !strcmp(s_case, "cas")) {
         int bad = 0;
         CHECK(xbox_FramebufferWindowShaderActive() == (s_case[0] == 'f' ? HOST_SHADER_FXAA : HOST_SHADER_CAS));
@@ -337,6 +387,7 @@ static const Case k_cases[] = {
     { "override", "crt", "scanlines", NULL, NULL },
     { "fail", "crt", NULL, "RECOMP_SHADER_TEST_FAIL", "crt" },
     { "live", NULL, NULL, NULL, NULL },
+    { "keys", NULL, NULL, "RECOMP_SCREENSHOT_DIR", NULL },
 };
 
 /* Runs fn in a child under a time limit; its exit status (-1: killed or crashed). */
@@ -382,7 +433,11 @@ static int case_child(const void *arg)
         setenv("RECOMP_XBOX_SHADER", c->xbox_shader, 1);
     else
         unsetenv("RECOMP_XBOX_SHADER");
-    if (c->extra_k)
+    if (c->extra_k && !strcmp(c->extra_k, "RECOMP_SCREENSHOT_DIR")) {
+        char dir[600];
+        snprintf(dir, sizeof dir, "%s/keys", s_dir);
+        setenv("RECOMP_SCREENSHOT_DIR", dir, 1);
+    } else if (c->extra_k)
         setenv(c->extra_k, c->extra_v, 1);
     return xbox_HostWindowMain(guest_main);
 }

@@ -4,6 +4,7 @@
 #include "recomp_states.h"
 #include "recomp_hotkeys.h"
 #include "recomp_play.h"
+#include "recomp_window_keys.h"
 #include "console_pad.h"
 
 #include <stdio.h>
@@ -651,6 +652,71 @@ static void test_play(void)
     CHECK(!f.rewinding && f.steps == 1);
 }
 
+/* XBA-278: the game windows' own keys (recomp_window_keys.h): F11 / Alt+Enter, F12; where screenshots go and their
+ * names. */
+static void test_window_keys(void)
+{
+    CHECK(recomp_window_key(RECOMP_WK_HID_F11, 0) == RECOMP_WK_FULLSCREEN);
+    CHECK(recomp_window_key(RECOMP_WK_HID_F11, 1) == RECOMP_WK_FULLSCREEN);
+    CHECK(recomp_window_key(RECOMP_WK_HID_RETURN, 1) == RECOMP_WK_FULLSCREEN);
+    CHECK(recomp_window_key(RECOMP_WK_HID_KP_ENTER, 1) == RECOMP_WK_FULLSCREEN);
+    CHECK(recomp_window_key(RECOMP_WK_HID_RETURN, 0) == RECOMP_WK_NONE); /* Enter alone: the game's Start */
+    CHECK(recomp_window_key(RECOMP_WK_HID_F12, 0) == RECOMP_WK_SCREENSHOT);
+    CHECK(recomp_window_key(RECOMP_WK_HID_F12, 1) == RECOMP_WK_NONE);
+    /* None of them is a default hotkey (F1-F4, Tab, R) or a console button. */
+    recomp_hotkeys hk;
+    recomp_hotkeys_defaults(&hk);
+    for (int a = 0; a < RECOMP_HK_COUNT; a++)
+        CHECK(hk.key[a].key != RECOMP_WK_HID_F11 && hk.key[a].key != RECOMP_WK_HID_F12);
+    for (int u = 4; u < 232; u++) /* every other key does nothing here */
+        if (u != RECOMP_WK_HID_F11 && u != RECOMP_WK_HID_F12)
+            CHECK(recomp_window_key(u, 0) == RECOMP_WK_NONE);
+
+    setenv("RECOMP_FULLSCREEN", "1", 1);
+    CHECK(recomp_window_fullscreen_env());
+    setenv("RECOMP_FULLSCREEN", "0", 1);
+    CHECK(!recomp_window_fullscreen_env());
+    unsetenv("RECOMP_FULLSCREEN");
+    CHECK(!recomp_window_fullscreen_env());
+
+    /* RECOMP_SCREENSHOT_DIR first, made with its parents; a taken name gets -2. */
+    char dir[400], path[1200], path2[1200];
+    snprintf(dir, sizeof dir, "%s/shots/deeper", s_dir);
+    setenv("RECOMP_SCREENSHOT_DIR", dir, 1);
+    time_t t = 1700000000;
+    struct tm tm;
+    localtime_r(&t, &tm);
+    char stamp[32];
+    strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
+    CHECK(recomp_screenshot_path(path, sizeof path, "Pocket Quest: The Game!", t) == 0);
+    char want[1200];
+    snprintf(want, sizeof want, "%s/Pocket_Quest_The_Game-%s.bmp", dir, stamp);
+    CHECK(!strcmp(path, want));
+    struct stat st;
+    CHECK(stat(dir, &st) == 0 && S_ISDIR(st.st_mode));
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL);
+    if (f)
+        fclose(f);
+    CHECK(recomp_screenshot_path(path2, sizeof path2, "Pocket Quest: The Game!", t) == 0);
+    snprintf(want, sizeof want, "%s/Pocket_Quest_The_Game-%s-2.bmp", dir, stamp);
+    CHECK(!strcmp(path2, want));
+    CHECK(recomp_screenshot_path(path, sizeof path, NULL, t) == 0 && strstr(path, "/screenshot-") != NULL);
+    CHECK(recomp_screenshot_path(path, sizeof path, "***", t) == 0 && strstr(path, "/screenshot-") != NULL);
+    CHECK(recomp_screenshot_path(path, 16, "x", t) == -1); /* does not fit */
+    /* Else the game's save folder's screenshots/. */
+    unsetenv("RECOMP_SCREENSHOT_DIR");
+    setenv("RECOMP_SAVE_DIR", s_dir, 1);
+    CHECK(recomp_screenshot_path(path, sizeof path, "gba", t) == 0);
+    snprintf(want, sizeof want, "%s/screenshots/gba-%s.bmp", s_dir, stamp);
+    CHECK(!strcmp(path, want));
+    unsetenv("RECOMP_SAVE_DIR");
+    /* A folder that cannot be made. */
+    setenv("RECOMP_SCREENSHOT_DIR", "/proc/no/such/place", 1);
+    CHECK(recomp_screenshot_path(path, sizeof path, "x", t) == -1);
+    unsetenv("RECOMP_SCREENSHOT_DIR");
+}
+
 int main(void)
 {
     snprintf(s_dir, sizeof s_dir, "/tmp/recomp_states_test.XXXXXX");
@@ -669,6 +735,7 @@ int main(void)
     test_hotkey_keys();
     test_hotkey_run();
     test_play();
+    test_window_keys();
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", s_dir);
     if (system(cmd) != 0)

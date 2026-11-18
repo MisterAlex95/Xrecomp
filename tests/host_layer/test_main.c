@@ -27,6 +27,7 @@
 
 #include <SDL.h>
 
+#include <dirent.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,36 @@
 static int s_fail;
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); s_fail = 1; } } while (0)
+
+/* XBA-278: the screenshots in dir (*.bmp), the newest one's name in newest. */
+static int count_bmps(const char *dir, char *newest, size_t n)
+{
+    DIR *d = opendir(dir);
+    int c = 0;
+    if (!d)
+        return 0;
+    for (struct dirent *e; (e = readdir(d));) {
+        size_t l = strlen(e->d_name);
+        if (l > 4 && !strcmp(e->d_name + l - 4, ".bmp")) {
+            c++;
+            if (newest && (!newest[0] || strcmp(e->d_name, newest) > 0))
+                snprintf(newest, n, "%s", e->d_name);
+        }
+    }
+    closedir(d);
+    return c;
+}
+
+static void push_key(int scancode, int alt)
+{
+    SDL_Event e;
+    memset(&e, 0, sizeof e);
+    e.type = SDL_KEYDOWN;
+    e.key.state = SDL_PRESSED;
+    e.key.keysym.scancode = (SDL_Scancode)scancode;
+    e.key.keysym.mod = alt ? KMOD_LALT : KMOD_NONE;
+    SDL_PushEvent(&e);
+}
 
 static int s_events;
 static void on_lifecycle(int paused, void *user)
@@ -369,6 +400,89 @@ static int run_window(void)
         CHECK(host_window_screenshot_bmp(bmp) == 0);
         CHECK(s_shared_calls == 3);
         unlink(bmp);
+    }
+    {
+        /* XBA-278: the window's own keys. F12: the next present writes the picture it shows to
+         * RECOMP_SCREENSHOT_DIR, a present_rgba picture and a GPU one (host_window_present_texture) alike. */
+        char dir[512], newest[256] = "", file[800];
+        const char *tmp = getenv("TMPDIR");
+        snprintf(dir, sizeof dir, "%s/xbr_host_keys_%d", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+        setenv("RECOMP_SCREENSHOT_DIR", dir, 1);
+        push_key(SDL_SCANCODE_F12, 0);
+        CHECK(host_window_pump());
+        CHECK(count_bmps(dir, NULL, 0) == 0); /* nothing until a picture is presented */
+        CHECK(host_window_present_rgba(px, W, H, W * 4));
+        CHECK(count_bmps(dir, NULL, 0) == 1);
+        CHECK(host_window_present_rgba(px, W, H, W * 4));
+        CHECK(count_bmps(dir, NULL, 0) == 1); /* once per press */
+        CHECK(count_bmps(dir, newest, sizeof newest) == 1);
+        snprintf(file, sizeof file, "%s/%s", dir, newest);
+        unlink(file); /* the next one alone in the folder */
+        newest[0] = 0;
+
+        typedef void (*gen_fn)(int, unsigned *);
+        typedef void (*bind_fn)(unsigned, unsigned);
+        typedef void (*param_fn)(unsigned, unsigned, int);
+        typedef void (*image_fn)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+        gen_fn gen = (gen_fn)host_window_gl_proc("glGenTextures");
+        bind_fn bind = (bind_fn)host_window_gl_proc("glBindTexture");
+        param_fn param = (param_fn)host_window_gl_proc("glTexParameteri");
+        image_fn image = (image_fn)host_window_gl_proc("glTexImage2D");
+        CHECK(gen && bind && param && image);
+        if (gen && bind && param && image) {
+            static uint32_t solid[W * H];
+            for (int i = 0; i < W * H; i++)
+                solid[i] = 0xFF00A0E0u; /* R E0, G A0, B 00 */
+            unsigned tex = 0;
+            gen(1, &tex);
+            bind(0x0DE1, tex);
+            param(0x0DE1, 0x2801, 0x2600); /* MIN_FILTER NEAREST: complete without mipmaps */
+            param(0x0DE1, 0x2800, 0x2600);
+            image(0x0DE1, 0, 0x1908, W, H, 0, 0x1908, 0x1401, solid);
+            push_key(SDL_SCANCODE_F12, 0);
+            CHECK(host_window_pump());
+            CHECK(host_window_present_texture(tex, W, H, 1));
+            CHECK(count_bmps(dir, newest, sizeof newest) == 1);
+            /* The GPU picture's middle pixel (BGR in the file). */
+            snprintf(file, sizeof file, "%s/%s", dir, newest);
+            FILE *f = fopen(file, "rb");
+            unsigned char hdr[54] = {0}, bgr[3] = {0};
+            int32_t bw = 0, bh = 0;
+            if (f && fread(hdr, 1, sizeof hdr, f) == sizeof hdr) {
+                memcpy(&bw, hdr + 18, 4);
+                memcpy(&bh, hdr + 22, 4);
+                long row = ((long)bw * 3 + 3) & ~3L;
+                fseek(f, 54 + row * (bh / 2) + (bw / 2) * 3, SEEK_SET);
+                CHECK(fread(bgr, 1, 3, f) == 3);
+            }
+            if (f)
+                fclose(f);
+            printf("host_layer window: F12 on a GPU picture: %s %dx%d, middle %02x%02x%02x\n", newest, bw, bh,
+                   bgr[2], bgr[1], bgr[0]);
+            CHECK(bw == W && bh == H && bgr[2] == 0xE0 && bgr[1] == 0xA0 && bgr[0] == 0x00);
+        }
+        /* F11, then Alt+Enter: fullscreen and back. */
+        SDL_Window *win = SDL_GL_GetCurrentWindow();
+        CHECK(win != NULL);
+        if (win) {
+            push_key(SDL_SCANCODE_F11, 0);
+            CHECK(host_window_pump());
+            CHECK((SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) != 0);
+            CHECK(host_window_present_rgba(px, W, H, W * 4));
+            push_key(SDL_SCANCODE_RETURN, 1);
+            CHECK(host_window_pump());
+            CHECK((SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) == 0);
+            CHECK(host_window_present_rgba(px, W, H, W * 4));
+            printf("host_layer window: F11 and Alt+Enter toggled fullscreen\n");
+        }
+        newest[0] = 0;
+        while (count_bmps(dir, newest, sizeof newest) > 0) {
+            snprintf(file, sizeof file, "%s/%s", dir, newest);
+            unlink(file);
+            newest[0] = 0;
+        }
+        rmdir(dir);
+        unsetenv("RECOMP_SCREENSHOT_DIR");
     }
     host_window_close();
     CHECK(host_window_stats(&fps, &presented) == 0);
