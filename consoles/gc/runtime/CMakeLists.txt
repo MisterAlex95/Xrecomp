@@ -23,6 +23,7 @@ if(NOT TARGET ps1_chdr)
 endif()
 
 if(NOT TARGET gc_core)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/console_pack.cmake) # gc_pack.c's shared part
     # gx/: the GPU (XBA-262): FIFO, command processor, vertex loader and transform, TEV shaders, textures, EFB
     # copies, on OpenGL ES 3.0 loaded at run time (no GL headers or libraries at build time; dlopen + pthreads).
     set(GC_GX_SRCS gx/gx_fifo.c gx/gx_vtx.c gx/gx_tex.c gx/gx_shader.c gx/gx_gl.c gx/gx_egl.c
@@ -35,6 +36,7 @@ if(NOT TARGET gc_core)
                                                ${GC_LIBCHDR}/deps/lzma-26.02/include)
     target_compile_definitions(gc_core PRIVATE MINIZ_NO_ARCHIVE_APIS MINIZ_NO_DEFLATE_APIS MINIZ_NO_STDIO MINIZ_NO_TIME)
     target_link_libraries(gc_core PUBLIC ps1_chdr)
+    target_link_libraries(gc_core PRIVATE console_pack)
     find_package(Threads REQUIRED)
     target_link_libraries(gc_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
     # -ffp-contract=off: fmul then fadd round twice on the 750, so the interpreter and lifted code (built the same
