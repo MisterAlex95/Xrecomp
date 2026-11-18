@@ -115,12 +115,24 @@ typedef struct __GLsync *GLsync;
 #define GL_PROGRAM_BINARY_LENGTH 0x8741
 #define GL_NUM_PROGRAM_BINARY_FORMATS 0x87FE
 #define GL_INVALID_INDEX 0xFFFFFFFFu
+#define GL_DRAW_FRAMEBUFFER_BINDING 0x8CA6
+#define GL_READ_FRAMEBUFFER_BINDING 0x8CAA
+#define GL_CURRENT_PROGRAM 0x8B8D
+#define GL_VERTEX_ARRAY_BINDING 0x85B5
+#define GL_VIEWPORT 0x0BA2
+#define GL_SCISSOR_BOX 0x0C10
+#define GL_COLOR_WRITEMASK 0x0C23
+#define GL_ACTIVE_TEXTURE 0x84E0
+#define GL_TEXTURE_BINDING_2D 0x8069
+#define GL_SAMPLER_BINDING 0x8919
 
 /* X(return type, name, parameters) */
 #define GX_GL_FUNCS(X) \
     X(const GLubyte *, glGetString, (GLenum)) \
     X(const GLubyte *, glGetStringi, (GLenum, GLuint)) \
     X(void, glGetIntegerv, (GLenum, GLint *)) \
+    X(void, glGetBooleanv, (GLenum, GLboolean *)) \
+    X(GLboolean, glIsEnabled, (GLenum)) \
     X(GLenum, glGetError, (void)) \
     X(void, glEnable, (GLenum)) \
     X(void, glDisable, (GLenum)) \

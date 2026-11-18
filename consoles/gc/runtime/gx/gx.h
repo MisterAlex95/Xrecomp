@@ -107,6 +107,12 @@ int gx_warmup_headless(const char *const *lists, size_t nlists, const char *cach
  * internal resolution, for a presenter that shows it without going through RAM. 0 when there is none. */
 unsigned gx_xfb_texture(gx_state *gx, uint32_t addr, int *w, int *h);
 
+/* RECOMP_GC_GX_XFB_DIAG (docs/runtime/environment-variables.md): true when the presenter should report each field. */
+bool gx_xfb_diag_enabled(const gx_state *gx);
+/* One diagnostic line for the field just presented. vi_addr: the address the video interface scans; path: how the
+ * field reached the window; presents: the swaps it took; busy_ns: the field's work, without the pacing sleep. */
+void gx_xfb_diag_field(gx_state *gx, uint32_t vi_addr, const char *path, unsigned presents, uint64_t busy_ns);
+
 typedef struct gx_stats {
     uint64_t fifo_bytes, draws, vertices, batches, efb_copies, xfb_copies, peeks, pokes;
     uint64_t tex_decodes, tex_hits, shaders_ready, shaders_pending, uber_draws, special_draws;
