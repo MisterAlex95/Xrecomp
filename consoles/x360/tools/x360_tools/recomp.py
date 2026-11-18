@@ -63,7 +63,8 @@ class CodeView:
         return self.img.u32(a)
 
 
-SPLIT_BYTES = 1000000  # C per generated file (XBA-283: Prepare's clang jobs, docs/android/prepare.md)
+BUCKET_BYTES = 0x10000  # guest code per generated file (XBA-283: ~1.2 MB of C; docs/android/prepare.md)
+SPLIT_BYTES = 2000000   # C past which a bucket's file is cut again (dense code)
 
 
 def fn_name(entry):
@@ -76,7 +77,7 @@ def image_crc(img):
 
 
 def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comments=True, omit=(),
-              split_bytes=SPLIT_BYTES):
+              split_bytes=SPLIT_BYTES, bucket_bytes=BUCKET_BYTES):
     if img.image is None:
         raise XexError("no image to recompile: %s" % img.image_note)
     view = CodeView(img)
@@ -100,37 +101,38 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     invalid = 0
     files = []
     head = '/* Lifted from an XEX2 by x360_tools.recomp (XBA-230). */\n#include "xenon_rt.h"\n\n'
-    out, size = [head], 0
-
-    def flush():
-        path = os.path.join(outdir, "x360_rc_%03d.c" % len(files))
-        with open(path, "w") as fh:
-            fh.write("".join(out))
-        files.append(path)
-
-    for n, f in enumerate(funcs):
-        lifter = TitleLifter(view, disc.insn, f, fn_name(f.entry), comments=comments, helpers=helpers,
-                             tables=disc.jt.tables)
-        text = lifter.function()
-        out.append(text)
-        out.append("\n")
-        size += len(text) + 1
-        fallbacks += lifter.fallbacks
-        inlined += lifter.inlined
-        for a in lifter.leaders:
-            resume.setdefault(a, f.entry)
-        for a in f.addrs:
-            i = disc.insn(a)
-            if lifter.needs_interp(i):
-                unlifted[i.name or ".invalid"] += 1
-                if i.name is None:
-                    invalid += 1
-        # XBA-283: files of about split_bytes of C (one clang job on a 6 MB file of the old 400-function split
-        # peaked near 1 GB for aarch64, over Prepare's 512 MB per job), at most per_file functions
-        if n + 1 < len(funcs) and (size >= split_bytes or len(out) // 2 >= per_file):
-            flush()
-            out, size = [head], 0
-    flush()
+    # XBA-283: one file per bucket_bytes of guest code (by function entry), cut again past split_bytes of C. One clang
+    # job on a 6 MB file of the old 400-function split peaked near 1 GB for aarch64, over Prepare's 512 MB per job;
+    # buckets by address keep every other file byte-identical when a Prepare adds functions, so its object cache
+    # recompiles only the files that changed (and the table).
+    buckets = collections.OrderedDict()
+    for f in funcs:
+        buckets.setdefault((f.entry - img.base) // bucket_bytes, []).append(f)
+    for b, group in buckets.items():
+        out, size, sub = [head], 0, 0
+        for n, f in enumerate(group):
+            lifter = TitleLifter(view, disc.insn, f, fn_name(f.entry), comments=comments, helpers=helpers,
+                                 tables=disc.jt.tables)
+            text = lifter.function()
+            out.append(text)
+            out.append("\n")
+            size += len(text) + 1
+            fallbacks += lifter.fallbacks
+            inlined += lifter.inlined
+            for a in lifter.leaders:
+                resume.setdefault(a, f.entry)
+            for a in f.addrs:
+                i = disc.insn(a)
+                if lifter.needs_interp(i):
+                    unlifted[i.name or ".invalid"] += 1
+                    if i.name is None:
+                        invalid += 1
+            if n + 1 == len(group) or size >= split_bytes or len(out) // 2 >= per_file:
+                path = os.path.join(outdir, "x360_rc_%05d_%d.c" % (b, sub))
+                with open(path, "w") as fh:
+                    fh.write("".join(out))
+                files.append(path)
+                out, size, sub = [head], 0, sub + 1
     table = ['/* Entry -> lifted function (XBA-230). */\n#include "xenon_rt.h"\n\n']
     for f in funcs:
         table.append("void %s(xe_machine *m_);\n" % fn_name(f.entry))
@@ -254,7 +256,9 @@ def main(argv=None):
     ap.add_argument("--no-comments", action="store_true")
     ap.add_argument("--discovered", action="append", default=[],
                     help="more seeds: a file of hex addresses (x360_run --missed), one per line")
-    ap.add_argument("--split-bytes", type=int, default=SPLIT_BYTES, help="C per generated file (default %(default)s)")
+    ap.add_argument("--bucket-bytes", type=lambda v: int(v, 0), default=BUCKET_BYTES,
+                    help="guest code per generated file (default %(default)s)")
+    ap.add_argument("--split-bytes", type=int, default=SPLIT_BYTES, help="C past which a file is cut again")
     ap.add_argument("--omit", action="append", default=[],
                     help="tests: a file of hex function entries to leave out of the pack (or one hex address)")
     a = ap.parse_args(argv)
@@ -285,7 +289,8 @@ def main(argv=None):
         for o in a.omit:
             omit |= read_addrs(o) if os.path.exists(o) else {int(o, 16)}
         s = recompile(img, a.outdir, extra_seeds=seeds, use_pdata=not a.no_pdata, comments=not a.no_comments,
-                      omit=omit, split_bytes=a.split_bytes)
+                      omit=omit, split_bytes=a.split_bytes,
+                      bucket_bytes=a.bucket_bytes)
         print("recomp: %(functions)d functions, %(instructions)d instructions, %(interp_fallback_insns)d handed to "
               "RC_INTERP, %(invalid_words)d invalid words" % s)
         print("  not lifted: %s" % ", ".join("%s %d" % kv for kv in list(s["unlifted"].items())[:30]))

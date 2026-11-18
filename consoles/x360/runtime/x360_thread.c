@@ -405,6 +405,8 @@ const x360_thunk *x360_thunk_at(x360_machine *x, uint32_t pc)
 
 void x360_note_missed(x360_machine *x, uint32_t pc)
 {
+    if ((pc & 3) || pc < x->image_base || pc - x->image_base >= x->image_size)
+        return; /* a jump through a bad pointer: not code to lift (x360_interp_run stops on it) */
     unsigned lo = 0, hi = x->nhelpers;
     while (lo < hi) { /* a save / restore helper the lifter inlines: not a function */
         unsigned mid = (lo + hi) / 2;
