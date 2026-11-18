@@ -19,7 +19,7 @@ printf 'xba-270-made-up!' >"$work/test.key"
 export PYTHONPATH="$repo:$repo/consoles/x360/tools"
 "$py" "$here/make_hello.py" "$work/enc.xex" --compression normal --key-file "$work/test.key" || exit 1
 timeout 600 "$py" -m x360_tools.bringup "$work/enc.xex" "$work/out" --key-file "$work/test.key" --disc "$work/disc" \
-    --x360-run "$run" || exit 1
+    --x360-run "$run" --app-pack "$work/packs" --app-abi x86_64 || exit 1
 s=$work/out/summary.txt
 grep -q "missing: 0" "$s" || { echo "imports not all covered"; exit 1; }
 grep -q "the title ended (exit code 0)" "$s" || { echo "the title did not end"; exit 1; }
@@ -27,4 +27,10 @@ if grep -q "Hello from the disc" "$s"; then
     echo "the summary holds the title's own text"
     exit 1
 fi
-echo "bringup: the summary is complete and holds no title text"
+# the app pack (XBA-280): pack.json for console x360 with the title key, the plain title, the library
+pj=$(ls "$work"/packs/x360-X360-*/pack.json 2>/dev/null | head -n 1)
+[ -n "$pj" ] || { echo "no app pack"; exit 1; }
+d=$(dirname "$pj")
+grep -q '"console": "x360"' "$pj" && grep -q '"title_key": "X360-58425A30-' "$pj" && [ -s "$d/libtitle.so" ] &&
+    [ -s "$d/default.xex" ] || { echo "app pack incomplete:"; cat "$pj"; exit 1; }
+echo "bringup: the summary is complete and holds no title text; app pack $(basename "$d")"
