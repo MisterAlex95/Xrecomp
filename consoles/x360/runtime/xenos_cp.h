@@ -46,6 +46,13 @@ typedef struct xenos_draw {
     uint32_t prim_type, source_select, index_size, num_indices, dma_base, dma_words;
 } xenos_draw;
 
+#define XENOS_SHADER_WORDS 0x4000 /* the sequencer's instruction memory: 4096 instructions of 3 dwords, rounded up */
+
+typedef struct xenos_shader {
+    uint32_t code[XENOS_SHADER_WORDS];
+    uint32_t words, address, loads;
+} xenos_shader;
+
 typedef struct xenos_cp {
     uint32_t regs[XENOS_REGS];
     /* the primary ring buffer: physical address, size in bytes, read / write pointers in dwords */
@@ -55,6 +62,8 @@ typedef struct xenos_cp {
     int stalled;             /* a WAIT_REG_MEM did not hold: the ring stops there until the next update */
     uint32_t last_swap_fb, last_swap_w, last_swap_h;
     xenos_draw last_draw;
+    xenos_shader shader[2]; /* the active vertex (0) and pixel (1) shader microcode, as last loaded */
+    uint64_t shader_loads;
     uint64_t packets, reg_writes, draws, swaps, interrupts, unknown;
     /* guest physical memory (big-endian words) and the interrupt sink, given by the runtime */
     void *ctx;

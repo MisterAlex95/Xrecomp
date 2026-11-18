@@ -301,6 +301,29 @@ static void test_gpu(void)
             irq = &X->threads[k];
     CHECK(irq && irq->cpu.pc == 0x82001000u && irq->cpu.gpr[3] == 0 && irq->cpu.gpr[4] == 0x55,
           "vblank interrupt thread (threads %d -> %d)", before, X->nthreads);
+    /* ten thousand vertical blanks (about three minutes of virtual time) reuse that one context */
+    int fired = 0, nthreads = X->nthreads;
+    uint32_t kfree = X->kalloc_cur;
+    for (int k = 0; k < 10000 && irq; k++) {
+        if (irq->state == TH_READY) {
+            fired++;
+            x360_thread_exit(X, irq, 0); /* the callback returned */
+        }
+        X->time_skip += 166667;
+        x360_gpu_poll(X);
+    }
+    CHECK(fired >= 9999 && X->nthreads == nthreads && X->kalloc_cur == kfree && X->status == X360_RUNNING,
+          "vblanks: %d callbacks, threads %d -> %d", fired, nthreads, X->nthreads);
+}
+
+static void test_strict_imports(void)
+{
+    X->strict_imports = 1;
+    K(X360_xboxkrnl_VdGetCurrentDisplayInformation, 1, 0);
+    CHECK(X->status == X360_ERROR && strstr(X->error, "VdGetCurrentDisplayInformation"), "strict imports: %s",
+          X->error);
+    X->status = X360_RUNNING;
+    X->strict_imports = 0;
 }
 
 static void test_files(const char *dir)
@@ -360,6 +383,7 @@ int main(void)
     test_threads_and_time();
     test_system();
     test_gpu();
+    test_strict_imports();
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {
         test_files(dir);

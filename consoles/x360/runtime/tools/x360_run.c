@@ -1,12 +1,12 @@
 /* x360_run -- runs an Xbox 360 title, recompiled, headless (XBA-270): what it prints through DbgPrint goes to stdout.
  *
  *   x360_run TITLE.xex --pack LIB.so [--disc IMAGE|DIR] [--data DIR] [--insns N] [--log FILE] [--dbg FILE]
- *            [--missed FILE] [--gpu-trace FILE] [--stats] [-v]
+ *            [--missed FILE] [--gpu-trace FILE] [--strict-imports] [--stats] [-v]
  *
  * TITLE.xex: an unencrypted XEX2, compression none or basic (python3 -m tools.xex FILE --plain OUT makes one).
  * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
  * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
- * cache: / hdd:. Runs until the title ends or N instructions (default 2 billion). --missed: addresses reached without lifted code,
+ * cache: / hdd:. --strict-imports: stop at the first import without an HLE (by name). Runs until the title ends or N instructions (default 2 billion). --missed: addresses reached without lifted code,
  * for x360_tools.recomp --discovered. Exit status: the title's exit code when it ended (0..255), 1 on an error, a
  * missed address or the budget running out, 2 on bad arguments or input. */
 #include <dlfcn.h>
@@ -39,12 +39,14 @@ int main(int argc, char **argv)
     const char *path = NULL, *pack = NULL, *logp = NULL, *dbgp = NULL, *missedp = NULL, *disc = NULL, *data_dir = NULL,
                *gpu_trace = NULL;
     unsigned long long insns = 2000000000ull;
-    int stats = 0, verbose = 0;
+    int stats = 0, verbose = 0, strict = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--insns") && i + 1 < argc)
             insns = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--pack") && i + 1 < argc)
             pack = argv[++i];
+        else if (!strcmp(argv[i], "--strict-imports"))
+            strict = 1;
         else if (!strcmp(argv[i], "--gpu-trace") && i + 1 < argc)
             gpu_trace = argv[++i];
         else if (!strcmp(argv[i], "--disc") && i + 1 < argc)
@@ -93,6 +95,7 @@ int main(int argc, char **argv)
         return 2;
     }
     x360_set_output(x, dbg, log, verbose);
+    x360_set_strict_imports(x, strict);
     if (disc && x360_set_disc(x, disc, why, sizeof why)) {
         fprintf(stderr, "x360_run: %s\n", why);
         return 2;

@@ -18,8 +18,15 @@ project(console_x360_tests C)
 #                    virtual / physical memory) packed by homebrew/elf2xex.py: hello_c.txt. Skipped (77) when not
 #                    built (the linux CI job has no devkitPPC): tools/consoles/build_homebrew.sh x360 build/homebrew
 # The recompiler's own tests (synthetic code) run with the Python suite: python3 -m pytest consoles/.
-if(WIN32 OR APPLE)
-    message(FATAL_ERROR "The Xbox 360 runtime is Linux-only for now")
+if(WIN32)
+    message(FATAL_ERROR "The console runtimes are POSIX-only")
+endif()
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # macOS (tools/run_c_tests.sh configures every consoles/*/tests there too): one test that skips, nothing built
+    enable_testing()
+    add_test(NAME x360_linux_only COMMAND sh -c "echo 'skipped: the Xbox 360 runtime is Linux-only (memfd_create)'; exit 77")
+    set_tests_properties(x360_linux_only PROPERTIES SKIP_RETURN_CODE 77)
+    return()
 endif()
 set(CMAKE_C_STANDARD 11)
 

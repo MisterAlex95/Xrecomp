@@ -103,6 +103,8 @@ struct x360_machine {
     uint32_t xex_header;      /* the XEX header copied to guest memory (RtlImageXexHeaderField) */
     uint32_t module;          /* LDR_DATA_TABLE_ENTRY-like block for XexExecutableModuleHandle */
     uint32_t tls_raw, tls_raw_size, tls_data_size;
+    uint32_t timestamp_bundle;          /* KeTimeStampBundle's storage (updated as virtual time runs) */
+    int strict_imports;                 /* stop at the first import without an HLE */
     uint32_t title_id, execution_info; /* the execution info header (guest copy), its title id */
 
     x360_thunk *thunks;
@@ -166,6 +168,7 @@ uint32_t x360_crc32(const uint8_t *p, size_t n);
 x360_thread *x360_thread_create(x360_machine *x, uint32_t stack_size, uint32_t entry, uint32_t r3, uint32_t r4,
                                 int suspended);
 x360_thread *x360_cur(x360_machine *x);
+int x360_thread_restart(x360_machine *x, x360_thread *t, uint32_t entry, uint32_t r3, uint32_t r4);
 x360_thread *x360_thread_by_kthread(x360_machine *x, uint32_t kthread);
 void x360_thread_exit(x360_machine *x, x360_thread *t, uint32_t code);
 uint32_t x360_handle_new(x360_machine *x, uint32_t obj);

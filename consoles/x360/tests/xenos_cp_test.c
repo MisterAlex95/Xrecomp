@@ -67,12 +67,16 @@ int main(void)
     put(B, t3(PM4_XE_SWAP, 4)), put(B, 0x53574150), put(B, 0x01000000), put(B, 1280), put(B, 720);
     put(B, t3(0x7E, 2)), put(B, 0), put(B, 0);
     put(B, t3(PM4_EVENT_WRITE_EXT, 2)), put(B, 6), put(B, 0x8030 | 2);
+    put(B, t3(PM4_IM_LOAD_IMMEDIATE, 5)), put(B, 1), put(B, 0u << 16 | 3), put(B, 0xC0DE0001), put(B, 0xC0DE0002),
+        put(B, 0xC0DE0003);
+    put(B, t3(PM4_IM_LOAD, 2)), put(B, 0xB000 | 0), put(B, 0u << 16 | 2);
+    mem[0xB000 / 4] = 0x5EED0001, mem[0xB004 / 4] = 0x5EED0002;
     uint32_t n = at;
     at = 0;
     put(0xA000, t0(0x2300, 2, 0)), put(0xA000, 0x1), put(0xA000, 0x2);
 
     uint32_t packets = xenos_cp_execute(&cp, B, n);
-    CHECK(packets == 21, "packets %u", packets);
+    CHECK(packets == 23, "packets %u", packets);
     CHECK(cp.regs[0x2000] == 1 && cp.regs[0x2001] == 2 && cp.regs[0x2002] == 3, "type 0 block: %X %X %X",
           cp.regs[0x2000], cp.regs[0x2001], cp.regs[0x2002]);
     CHECK(cp.regs[0x2100] == 9 && cp.regs[0x2101] == 0, "type 0 one register");
@@ -95,6 +99,10 @@ int main(void)
     CHECK(mem[0x8030 / 4] == (0u << 16 | 1024u) && mem[0x8034 / 4] == (0u << 16 | 1024u) &&
               mem[0x8038 / 4] == (0u << 16 | 1u), "screen extents %08X %08X %08X", mem[0x8030 / 4],
           mem[0x8034 / 4], mem[0x8038 / 4]);
+
+    CHECK(cp.shader[1].words == 3 && cp.shader[1].code[2] == 0xC0DE0003 && cp.shader[0].words == 2 &&
+              cp.shader[0].code[1] == 0x5EED0002 && cp.shader[0].address == 0xB000 && cp.shader_loads == 2,
+          "shader microcode kept");
 
     /* ---- the ring: 0x10000, 2^10 quadwords = 8 KB = 2048 dwords ---- */
     const uint32_t R = 0x10000;

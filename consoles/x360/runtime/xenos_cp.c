@@ -156,9 +156,10 @@ static void draw(xenos_cp *cp, reader *r, uint32_t words, const char *name)
     uint32_t used = 1;
     if (d.source_select == 0 && words >= 3) { /* DMA: index buffer base and size */
         d.dma_base = rd(cp, r);
-        d.dma_words = rd(cp, r) & 0xFFFFFF;
+        uint32_t size = rd(cp, r);
+        d.dma_words = size & 0xFFFFFF;
         xenos_cp_write_reg(cp, XENOS_REG_VGT_DMA_BASE, d.dma_base);
-        xenos_cp_write_reg(cp, XENOS_REG_VGT_DMA_SIZE, d.dma_words);
+        xenos_cp_write_reg(cp, XENOS_REG_VGT_DMA_SIZE, size); /* the swap mode (bits 30-31) kept */
         used = 3;
     }
     for (; used < words; used++) /* immediate indices (DRAW_INDX_2) */
@@ -330,15 +331,23 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
         TRACE("load_alu_constant %08X -> %04X x%u\n", addr, base + (ot & 0x7FF), n);
         break;
     }
-    case PM4_IM_LOAD: {
-        uint32_t at = rd(cp, r), ss = rd(cp, r);
-        TRACE("im_load %s %08X start %u, %u words\n", (at & 3) == 0 ? "vertex" : "pixel", at & ~3u, ss >> 16,
-              ss & 0xFFFF);
-        break;
-    }
+    case PM4_IM_LOAD:
     case PM4_IM_LOAD_IMMEDIATE: {
-        uint32_t t = rd(cp, r), ss = rd(cp, r);
-        TRACE("im_load_immediate %s start %u, %u words\n", t == 0 ? "vertex" : "pixel", ss >> 16, ss & 0xFFFF);
+        /* shader microcode: (type | address) or (type), then start << 16 | size in dwords; the words follow the
+         * packet (immediate) or sit at the address (physical) */
+        uint32_t at = rd(cp, r), ss = rd(cp, r), n = ss & 0xFFFF, type = op == PM4_IM_LOAD ? at & 3 : at;
+        xenos_shader *sh = &cp->shader[type == 0 ? 0 : 1];
+        if (n > XENOS_SHADER_WORDS)
+            n = XENOS_SHADER_WORDS;
+        sh->words = n;
+        sh->address = op == PM4_IM_LOAD ? at & ~3u : 0;
+        for (uint32_t k = 0; k < n; k++)
+            sh->code[k] = op == PM4_IM_LOAD ? (cp->read32 ? cp->read32(cp->ctx, ((at & ~3u) + 4 * k) & 0x1FFFFFFFu) : 0)
+                                            : rd(cp, r);
+        sh->loads++;
+        cp->shader_loads++;
+        TRACE("%s %s start %u, %u words\n", xenos_cp_opcode_name(op), type == 0 ? "vertex" : "pixel", ss >> 16,
+              ss & 0xFFFF);
         break;
     }
     case PM4_INTERRUPT: {

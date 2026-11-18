@@ -1470,6 +1470,11 @@ void x360_hle_call(x360_machine *x, const x360_thunk *th)
             HLE[k].fn(x, t, c);
             return;
         }
+    if (x->strict_imports) {
+        x360_fail(x, "%s!%s (ordinal %u) has no HLE (stopping: strict imports)", th->lib ? "xam" : "xboxkrnl",
+                  x360_export_name(th->lib, th->ordinal) ?: "?", th->ordinal);
+        return;
+    }
     if (th->lib < 2 && !x->unimpl_seen[th->lib][th->ordinal & 4095]) {
         x->unimpl_seen[th->lib][th->ordinal & 4095] = 1;
         x->st.unimplemented++;
@@ -1490,15 +1495,14 @@ static uint32_t var(x360_machine *x, int lib, unsigned ordinal, uint32_t size)
 int x360_kernel_init(x360_machine *x)
 {
     uint32_t a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxHardwareInfo, 16);
-    x360_w32(x, a, 0x00000020u); /* flags */
+    x360_w32(x, a, 0x00000020u); /* flags (Xenia: 0x20, storage initialised) */
     x360_w8(x, a + 4, 6);        /* hardware threads */
     a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxKrnlVersion, 8);
     x360_w16(x, a, 2);
     x360_w16(x, a + 2, 0);
     x360_w16(x, a + 4, 17559);
     x360_w16(x, a + 6, 0);
-    a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeTimeStampBundle, 32);
-    (void)a;
+    x->timestamp_bundle = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeTimeStampBundle, 24);
     /* the executable module: XexExecutableModuleHandle points at a pointer to an LDR_DATA_TABLE_ENTRY-like block
      * whose +0x58 is the XEX header (filled once the XEX is loaded, x360_create) */
     x->module = x360_kalloc(x, 0x100);

@@ -27,6 +27,7 @@ struct x360_gpu {
     uint32_t vblanks, last_wptr;
     int irq_pending[2]; /* source 0 (vblank), 1 (command processor) queued while one runs */
     int ring;
+    int irq_thread; /* the interrupt context's slot, -1 before the first interrupt */
 };
 
 static uint32_t phys_read(void *ctx, uint32_t phys)
@@ -59,6 +60,7 @@ static struct x360_gpu *gpu_of(x360_machine *x)
         x->gpu->cp.read32 = phys_read;
         x->gpu->cp.write32 = phys_write;
         x->gpu->cp.interrupt = cp_interrupt;
+        x->gpu->irq_thread = -1;
         xenos_cp_init(&x->gpu->cp);
     }
     return x->gpu;
@@ -87,15 +89,21 @@ static void raise_irq(x360_machine *x, struct x360_gpu *g, uint32_t source)
 {
     if (!g->irq_callback)
         return;
-    /* one interrupt thread at a time: a pending one waits for the running one to end */
-    for (int k = 0; k < x->nthreads; k++)
-        if (x->threads[k].state != TH_FREE && x->threads[k].state != TH_DONE && x->threads[k].interrupt) {
-            g->irq_pending[source & 1] = 1;
-            return;
-        }
-    x360_thread *t = x360_thread_create(x, 0x4000, g->irq_callback, source, g->irq_user, 0);
-    if (t)
+    /* one interrupt context, made once and reused: an interrupt raised while it runs waits for it to end */
+    x360_thread *t = g->irq_thread >= 0 ? &x->threads[g->irq_thread] : NULL;
+    if (t && t->state != TH_DONE) {
+        g->irq_pending[source & 1] = 1;
+        return;
+    }
+    if (t) {
+        x360_thread_restart(x, t, g->irq_callback, source, g->irq_user);
+        return;
+    }
+    t = x360_thread_create(x, 0x4000, g->irq_callback, source, g->irq_user, 0);
+    if (t) {
         t->interrupt = 1;
+        g->irq_thread = (int)(t - x->threads);
+    }
 }
 
 void x360_gpu_poll(x360_machine *x)

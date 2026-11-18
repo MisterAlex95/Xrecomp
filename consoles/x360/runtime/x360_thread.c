@@ -99,14 +99,19 @@ x360_thread *x360_thread_by_kthread(x360_machine *x, uint32_t kthread)
 x360_thread *x360_thread_create(x360_machine *x, uint32_t stack_size, uint32_t entry, uint32_t r3, uint32_t r4,
                                 int suspended)
 {
-    int k = 0; /* a free slot, or one whose thread ended (its KTHREAD stays, signalled, for waits on it) */
-    while (k < X360_MAX_THREADS && x->threads[k].state != TH_FREE && (k == 0 || x->threads[k].state != TH_DONE))
+    /* a free slot, or one whose thread ended (its KTHREAD stays, signalled, for waits on it; its stack is freed);
+     * never the main thread's, nor the interrupt context's (x360_thread_restart reuses it) */
+    int k = 0;
+    while (k < X360_MAX_THREADS && x->threads[k].state != TH_FREE &&
+           (k == 0 || x->threads[k].state != TH_DONE || x->threads[k].interrupt))
         k++;
     if (k == X360_MAX_THREADS)
         return NULL;
     if (k >= x->nthreads)
         x->nthreads = k + 1;
     x360_thread *t = &x->threads[k];
+    if (t->state == TH_DONE && t->stack_limit)
+        x360_heap_free(x, &x->heap_stack, t->stack_limit - 0x1000);
     memset(t, 0, sizeof *t);
     if (stack_size < 0x4000)
         stack_size = 0x4000;
@@ -159,12 +164,36 @@ x360_thread *x360_thread_create(x360_machine *x, uint32_t stack_size, uint32_t e
     return t;
 }
 
+/* Run entry(r3, r4) again on an ended thread's context (its stack, KTHREAD, PCR, TLS): the interrupt context. */
+int x360_thread_restart(x360_machine *x, x360_thread *t, uint32_t entry, uint32_t r3, uint32_t r4)
+{
+    if (t->state != TH_DONE)
+        return -1;
+    xe_cpu *c = &t->cpu;
+    memset(c, 0, sizeof *c);
+    c->pc = entry;
+    c->lr = X360_THREAD_EXIT;
+    c->gpr[1] = t->stack_base - 0x100;
+    c->gpr[3] = r3;
+    c->gpr[4] = r4;
+    c->gpr[13] = t->pcr;
+    c->vscr = 0x00010000u;
+    c->msr = 0x9030;
+    x360_w32(x, t->kthread + 4, 0);
+    t->state = TH_READY;
+    t->suspend = 0;
+    t->exit_code = 0;
+    return 0;
+}
+
 void x360_thread_exit(x360_machine *x, x360_thread *t, uint32_t code)
 {
     t->state = TH_DONE;
     t->exit_code = code;
     x360_w32(x, t->kthread + 4, 1); /* signalled: waits on the thread end */
     x360_w32(x, t->kthread + 0x140, code);
+    if (t->interrupt)
+        return; /* an interrupt callback returned: its context waits for the next one */
     if (t == &x->threads[0]) {
         /* the title's first thread returned from the entry point: the title is over */
         x->status = X360_EXITED;
@@ -172,7 +201,7 @@ void x360_thread_exit(x360_machine *x, x360_thread *t, uint32_t code)
     } else {
         int alive = 0;
         for (int k = 0; k < x->nthreads; k++)
-            alive |= x->threads[k].state != TH_FREE && x->threads[k].state != TH_DONE;
+            alive |= x->threads[k].state != TH_FREE && x->threads[k].state != TH_DONE && !x->threads[k].interrupt;
         if (!alive) {
             x->status = X360_EXITED;
             x->exit_code = code;
@@ -451,6 +480,12 @@ int x360_run(x360_machine *x, uint64_t insns)
         }
         x360_timers_fire(x);
         x360_gpu_poll(x);
+        if (x->timestamp_bundle) { /* KeTimeStampBundle: interrupt time, system time, tick count (ms) */
+            uint64_t now = x360_now(x);
+            x360_w64(x, x->timestamp_bundle, now);
+            x360_w64(x, x->timestamp_bundle + 8, X360_EPOCH + now);
+            x360_w32(x, x->timestamp_bundle + 16, (uint32_t)(now / 10000));
+        }
         int picked = -1;
         for (int n = 1; n <= x->nthreads; n++) {
             int k = (x->cur + n + x->nthreads) % x->nthreads;
@@ -568,6 +603,11 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
     for (unsigned k = 0; k < pack->count; k++)
         x->fn_tab[(r[k].entry - x->code_lo) / 4] = r[k].fn;
     return 0;
+}
+
+void x360_set_strict_imports(x360_machine *x, int on)
+{
+    x->strict_imports = on;
 }
 
 void x360_set_output(x360_machine *x, FILE *dbg, FILE *log, int verbose)
