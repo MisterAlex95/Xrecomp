@@ -4,7 +4,8 @@ ps_<crc>.frag, translated by x360_tools.xenos_glsl, the way bringup fills a titl
 
 Vertex shader: two vertex fetches from fetch constant 0 (position at offset 0, colour at offset 4, stride 8 dwords,
 32_32_32_32_FLOAT), position exported to oPos, colour to interpolator 0. Pixel shader: oC0 = interpolator 0 * c0.
-Textured pixel shader (ps_tex): oC0 = a 2D fetch from texture fetch constant 2 at interpolator 0's xy."""
+Textured pixel shader (ps_tex): oC0 = a 2D fetch from texture fetch constant 2 at interpolator 0's xy. Packed
+vertex formats (vs_u16, vs_h16): the colour as 16_16_16_16 (normalised) or 16_16_16_16_FLOAT, stride 6 dwords."""
 
 import os
 import struct
@@ -28,14 +29,20 @@ def shaders():
                                          srcs=((0, 1, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))))], {})])
     ps_tex = program([(2, [("fetch", fetch_words(1, 0, 1, XYZW, 2, dimension=1)),
                            ("alu", alu_words(**export(0, 1)))], {})])
-    return vs, ps, ps_tex
+    packed = {}
+    for name, fmt in (("vs_u16", 26), ("vs_h16", 32)):
+        packed[name] = program([(2, [("fetch", fetch_words(0, 0, 1, XYZW, 0, sel=0, format=38, stride=6, offset=0)),
+                                     ("fetch", fetch_words(0, 0, 2, XYZW, 0, sel=0, format=fmt, stride=6, offset=4)),
+                                     ("alu", alu_words(**export(62, 1))), ("alu", alu_words(**export(0, 2)))], {})])
+    return vs, ps, ps_tex, packed
 
 
 def main(out):
-    vs, ps, ps_tex = shaders()
+    vs, ps, ps_tex, packed = shaders()
     os.makedirs(os.path.join(out, "cache"), exist_ok=True)
-    for name, words, stage, ext in (("vs", vs, "vertex", "vert"), ("ps", ps, "pixel", "frag"),
-                                    ("ps_tex", ps_tex, "pixel", "frag")):
+    for name, words, stage, ext in [("vs", vs, "vertex", "vert"), ("ps", ps, "pixel", "frag"),
+                                    ("ps_tex", ps_tex, "pixel", "frag")] + \
+            [(n, w, "vertex", "vert") for n, w in sorted(packed.items())]:
         raw = struct.pack(">%dI" % len(words), *words)
         open(os.path.join(out, name + ".bin"), "wb").write(raw)
         src, _ = translate(words, stage, interpolators=1)

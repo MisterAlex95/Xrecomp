@@ -571,8 +571,9 @@ def translate(words, stage="vertex", interpolators=0):
            "#define xe_c xe_k.c", "#define xe_b xe_k.b", "#define xe_l xe_k.l"]
     for i, (_, a) in enumerate(sh.attributes):
         # the renderer reads this comment back (fetch constant, offset and stride in dwords, format, signedness)
-        out.append("in vec4 xe_v%d;  // fetch constant %d, offset %d, format %d, stride %d, signed %d" % (
-            i, a["fetch_constant"], a["offset"], a["format"], a["stride"], a["signed"]))
+        out.append("in vec4 xe_v%d;  // fetch constant %d, offset %d, format %d, stride %d, signed %d, integer %d, "
+                   "exp %d" % (i, a["fetch_constant"], a["offset"], a["format"], a["stride"], a["signed"],
+                               a["integer"], a["exp_adjust"]))
     for t, dim in sorted(sh.textures.items()):
         out.append("uniform %s xe_t%d;" % ({0: "sampler2D", 1: "sampler2D", 2: "sampler3D", 3: "samplerCube"}[dim],
                                             t))

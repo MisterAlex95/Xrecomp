@@ -22,7 +22,9 @@
  *            texture back (red again: render to texture);
  *   frame 14: a rectangle list: three corners (top-left red, top-right green, bottom-left blue) of a full-target
  *            rectangle; the fourth (bottom-right) gets green + blue - red, i.e. cyan once clamped;
- *   frame 15: the alpha test (less than 0.5): a green quad at alpha 0.25 passes, then a red one at 0.75 fails.
+ *   frame 15: the alpha test (less than 0.5): a green quad at alpha 0.25 passes, then a red one at 0.75 fails;
+ *   frames 16-17: packed vertex colours: 16_16_16_16 normalised (65535, 0, 32768, 65535) and 16_16_16_16_FLOAT
+ *            (0, 1, 0.5, 1), X in each dword's low half.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -474,9 +476,40 @@ int main(int argc, char **argv)
     c = px(g, W / 2, H / 2);
     CHECK(c[1] == 255 && c[0] == 0, "frame 15 (alpha test): %u,%u,%u, want green", c[0], c[1], c[2]);
 
+    /* frames 16-17: packed vertex formats */
+    static const char *const packed[2] = {"vs_u16.bin", "vs_h16.bin"};
+    static const uint32_t colour_words[2][2] = {{0x0000FFFFu, 0xFFFF8000u}, {0x3C000000u, 0x3C003800u}};
+    static const uint8_t want[2][3] = {{255, 0, 128}, {0, 255, 128}};
+    for (int f = 0; f < 2; f++) {
+        uint32_t npk_vs;
+        uint32_t *pvs = load(argv[1], packed[f], &npk_vs);
+        CHECK(pvs != NULL, "no %s", packed[f]);
+        if (!pvs)
+            continue;
+        im[0] = 0, im[1] = npk_vs;
+        memcpy(im + 2, pvs, 4 * npk_vs);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + npk_vs);
+        free(pvs);
+        static const float corner[4][2] = {{-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+        for (int k = 0; k < 4; k++) {
+            uint32_t at = 0x7200 + 24 * (uint32_t)k;
+            w32(at, fbits(corner[k][0])), w32(at + 4, fbits(corner[k][1])), w32(at + 8, fbits(0.5f));
+            w32(at + 12, fbits(1.0f)), w32(at + 16, colour_words[f][0]), w32(at + 20, colour_words[f][1]);
+        }
+        reg(0x4800, 0x7200u | 3u);
+        reg(0x4801, 2u | (24u << 2));
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        c = px(g, W / 2, H / 2);
+        CHECK(c[0] == want[f][0] && c[1] == want[f][1] && c[2] >= want[f][2] - 1 && c[2] <= want[f][2] + 1,
+              "frame %d (%s): %u,%u,%u, want %u,%u,%u", 16 + f, packed[f], c[0], c[1], c[2], want[f][0], want[f][1],
+              want[f][2]);
+    }
+
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 19 && st.frames == 16 && st.resolves == 1 && st.no_shader == 0 && st.unsupported == 0 &&
+    CHECK(st.drawn == 21 && st.frames == 18 && st.resolves == 1 && st.no_shader == 0 && st.unsupported == 0 &&
               st.unsupported_textures == 0,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
           (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
@@ -488,6 +521,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: sixteen frames drawn and read back as expected, one resolve\n");
+    printf("xenos_gl: eighteen frames drawn and read back as expected, one resolve\n");
     return 0;
 }

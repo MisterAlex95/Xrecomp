@@ -171,7 +171,8 @@ typedef unsigned int EGLBoolean, EGLenum;
 #define MAX_TEXTURES 128
 
 typedef struct attr {
-    uint32_t fetch_constant, offset, format, stride, is_signed;
+    uint32_t fetch_constant, offset, format, stride, is_signed, is_integer;
+    int exp_adjust;
 } attr;
 
 typedef struct program {
@@ -491,12 +492,13 @@ static int parse_attrs(const char *src, attr *out)
 {
     int n = 0;
     for (const char *p = strstr(src, "in vec4 xe_v"); p && n < MAX_ATTRS; p = strstr(p + 1, "in vec4 xe_v")) {
-        unsigned idx, fc, off, fmt, stride, sg;
-        if (sscanf(p, "in vec4 xe_v%u;  // fetch constant %u, offset %u, format %u, stride %u, signed %u", &idx, &fc,
-                   &off, &fmt, &stride, &sg) == 6 &&
-            idx == (unsigned)n) {
+        unsigned idx, fc, off, fmt, stride, sg, in = 0;
+        int ex = 0;
+        int got = sscanf(p, "in vec4 xe_v%u;  // fetch constant %u, offset %u, format %u, stride %u, signed %u, "
+                            "integer %u, exp %d", &idx, &fc, &off, &fmt, &stride, &sg, &in, &ex);
+        if (got >= 6 && idx == (unsigned)n) {
             out[n].fetch_constant = fc, out[n].offset = off, out[n].format = fmt, out[n].stride = stride;
-            out[n].is_signed = sg;
+            out[n].is_signed = sg, out[n].is_integer = got >= 8 ? in : 0, out[n].exp_adjust = got >= 8 ? ex : 0;
             n++;
         }
     }
@@ -650,13 +652,42 @@ static float as_float(uint32_t v)
     return f;
 }
 
-/* one attribute of one vertex as a vec4; 0 when the format is not handled */
+static float half_to_float(uint32_t h)
+{
+    uint32_t s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+    float v;
+    if (e == 0)
+        v = (float)m / 16777216.0f; /* 2^-24 */
+    else if (e == 31)
+        v = m ? 0.0f / 0.0f : 1.0f / 0.0f;
+    else
+        v = (1.0f + (float)m / 1024.0f) * (float)(1u << e) / 32768.0f;
+    return s ? -v : v;
+}
+
+/* a packed component: width bits at offset of v, normalised (or the integer) by the fetch's signedness */
+static float component(uint32_t v, unsigned offset, unsigned width, const attr *a)
+{
+    uint32_t mask = width == 32 ? 0xFFFFFFFFu : (1u << width) - 1, u = (v >> offset) & mask;
+    if (a->is_signed) {
+        int64_t sv = (u & (1u << (width - 1))) ? (int64_t)u - ((int64_t)1 << width) : (int64_t)u;
+        if (a->is_integer)
+            return (float)sv;
+        float f = (float)sv / (float)(((int64_t)1 << (width - 1)) - 1);
+        return f < -1.0f ? -1.0f : f; /* Microsoft's: two representations of -1 */
+    }
+    return a->is_integer ? (float)u : (float)u / (float)mask;
+}
+
+/* one attribute of one vertex as a vec4 (Xenia's spirv_shader_translator_fetch.cc gives the packings: X in the low
+ * bits); 0 when the format is not handled */
 static int fetch_vertex(const xenos_cp *cp, uint32_t base, uint32_t endian, const attr *a, uint32_t index,
                         float out[4])
 {
     uint32_t at = base + 4 * (a->offset + index * a->stride);
     out[0] = out[1] = out[2] = 0.0f;
     out[3] = 1.0f;
+    uint32_t w0 = gpu_read(cp, at, endian);
     switch (a->format) {
     case 36: /* 32_FLOAT */
     case 37: /* 32_32_FLOAT */
@@ -665,31 +696,54 @@ static int fetch_vertex(const xenos_cp *cp, uint32_t base, uint32_t endian, cons
         int n = a->format == 36 ? 1 : a->format == 37 ? 2 : a->format == 57 ? 3 : 4;
         for (int i = 0; i < n; i++)
             out[i] = as_float(gpu_read(cp, at + 4 * i, endian));
-        return 1;
+        break;
     }
-    case 6: { /* 8_8_8_8: x in the low byte (normalised; signed when the fetch says so) */
-        uint32_t v = gpu_read(cp, at, endian);
-        for (int i = 0; i < 4; i++) {
-            uint32_t b = (v >> (8 * i)) & 0xFF;
-            out[i] = a->is_signed ? (float)(int8_t)b / 127.0f : (float)b / 255.0f;
-            if (a->is_signed && out[i] < -1.0f)
-                out[i] = -1.0f;
-        }
-        return 1;
+    case 6: /* 8_8_8_8 */
+        for (int i = 0; i < 4; i++)
+            out[i] = component(w0, 8 * i, 8, a);
+        break;
+    case 7: /* 2_10_10_10 */
+        for (int i = 0; i < 3; i++)
+            out[i] = component(w0, 10 * i, 10, a);
+        out[3] = component(w0, 30, 2, a);
+        break;
+    case 16: /* 10_11_11: 11, 11, 10 bits from X */
+        out[0] = component(w0, 0, 11, a), out[1] = component(w0, 11, 11, a), out[2] = component(w0, 22, 10, a);
+        break;
+    case 17: /* 11_11_10: 10, 11, 11 bits from X */
+        out[0] = component(w0, 0, 10, a), out[1] = component(w0, 10, 11, a), out[2] = component(w0, 21, 11, a);
+        break;
+    case 25: /* 16_16 */
+    case 26: { /* 16_16_16_16 */
+        int n = a->format == 25 ? 2 : 4;
+        for (int i = 0; i < n; i++)
+            out[i] = component(i < 2 ? w0 : gpu_read(cp, at + 4, endian), 16 * (i & 1), 16, a);
+        break;
     }
-    case 25: { /* 16_16 normalised */
-        uint32_t v = gpu_read(cp, at, endian);
-        for (int i = 0; i < 2; i++) {
-            uint32_t h = (v >> (16 * i)) & 0xFFFF;
-            out[i] = a->is_signed ? (float)(int16_t)h / 32767.0f : (float)h / 65535.0f;
-            if (a->is_signed && out[i] < -1.0f)
-                out[i] = -1.0f;
-        }
-        return 1;
+    case 31: /* 16_16_FLOAT */
+    case 32: { /* 16_16_16_16_FLOAT */
+        int n = a->format == 31 ? 2 : 4;
+        for (int i = 0; i < n; i++)
+            out[i] = half_to_float(((i < 2 ? w0 : gpu_read(cp, at + 4, endian)) >> (16 * (i & 1))) & 0xFFFF);
+        return 1; /* exp_adjust does not apply to floats */
+    }
+    case 33: /* 32 */
+    case 34: /* 32_32 */
+    case 35: { /* 32_32_32_32 */
+        int n = a->format == 33 ? 1 : a->format == 34 ? 2 : 4;
+        for (int i = 0; i < n; i++)
+            out[i] = component(gpu_read(cp, at + 4 * i, endian), 0, 32, a);
+        break;
     }
     default:
         return 0;
     }
+    if (a->exp_adjust && a->format != 36 && a->format != 37 && a->format != 57 && a->format != 38) {
+        float k = a->exp_adjust > 0 ? (float)(1u << a->exp_adjust) : 1.0f / (float)(1u << -a->exp_adjust);
+        for (int i = 0; i < 4; i++)
+            out[i] *= k;
+    }
+    return 1;
 }
 
 static int gl_prim(uint32_t t)
