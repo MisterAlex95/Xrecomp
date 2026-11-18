@@ -2761,3 +2761,19 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
         g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     }
 }
+
+void xenos_gl_end_frame(xenos_gl *g)
+{
+    /* what a window's own drawing expects back (host_window_present_texture): framebuffer 0, no test, no blend */
+    g->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glDisable(GL_BLEND);
+    g->glDisable(GL_DEPTH_TEST);
+    g->glDisable(GL_STENCIL_TEST);
+    g->glDisable(GL_CULL_FACE);
+    g->glColorMask(1, 1, 1, 1);
+    g->glFrontFace(GL_CCW);
+    g->glActiveTexture(GL_TEXTURE0);
+    g->glBindVertexArray(0);
+    g->glUseProgram(0);
+}

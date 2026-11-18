@@ -10,6 +10,9 @@ project(console_x360_tests C)
 #                    resolved to their formats, mip levels, a vertex fetch at a computed index; xenos_draw_x2 the
 #                    same at an internal resolution of 2
 #   x360_render      the renderer through the machine: a ring, VdSwap, a front buffer frame, a save state loaded
+#   x360_pad_map     the title key and a host pad as a 360 controller (x360_runtime.h's pure helpers; XBA-280)
+#   x360_play        the test title played by x360_play headless, frame by frame, to its end (run_play.sh;
+#                    built when SDL2 is there)
 #   x360_hle         the kernel HLE called directly (x360_hle_test.c): formatters, memory, objects, waits, timers,
 #                    threads, files and symbolic links
 #   x360_hello       the synthetic test title (make_hello.py: our own PowerPC assembly in a synthetic XEX2, imports
@@ -66,6 +69,17 @@ set_tests_properties(xenos_draw_x2 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 EN
 add_test(NAME x360_render COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:x360_hle_test>
                                      ${CMAKE_CURRENT_BINARY_DIR}/x360_render --render)
 set_tests_properties(x360_render PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+if(TARGET x360_pad_map)
+    add_executable(x360_pad_map_test x360_pad_map_test.c)
+    target_link_libraries(x360_pad_map_test PRIVATE x360_pad_map)
+    add_test(NAME x360_pad_map COMMAND x360_pad_map_test)
+endif()
+if(TARGET x360_play)
+    add_test(NAME x360_play COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_play.sh $<TARGET_FILE:x360_play>
+                                     ${CMAKE_CURRENT_BINARY_DIR}/x360_play)
+    set_tests_properties(x360_play PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+endif()
 
 add_executable(x360_hle_test x360_hle_test.c)
 target_link_libraries(x360_hle_test PRIVATE x360_core)

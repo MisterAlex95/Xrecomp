@@ -32,6 +32,7 @@ enum {
     X360_ERROR = 2,    /* see x360_error() */
     X360_BUDGET = 3,   /* the instruction budget ran out */
     X360_MISSED = 4,   /* execution reached an address the pack does not cover (x360_missed()) */
+    X360_FRAME = 5,    /* x360_run_until: the virtual time asked for was reached (the machine goes on running) */
 };
 
 /* Load an XEX2 (unencrypted, compression none or basic: python3 -m tools.xex FILE --plain OUT makes one from an
@@ -60,6 +61,20 @@ void x360_gpu_opcode_histogram(x360_machine *x, FILE *out);
 int x360_set_renderer(x360_machine *x, const char *shader_cache, const char *frames_dir, unsigned max_frames,
                       int width, int height, char *why, size_t why_n);
 void x360_render_stats(x360_machine *x, FILE *out);
+/* The same with an internal resolution (scale 1-8: every eDRAM surface scale x its guest size) and, attach = 1, on
+ * the caller's current GLES 3 context (a window: no EGL of its own, no frame read back unless frames_dir is set or
+ * x360_render_set_readback asks). XBA-280. */
+int x360_set_renderer_ex(x360_machine *x, const char *shader_cache, const char *frames_dir, unsigned max_frames,
+                         int width, int height, int scale, int attach, char *why, size_t why_n);
+/* The last frame as a GL texture (*width x *height host pixels, top row first, the front buffer's swizzle set on it),
+ * 0 when there is none. */
+unsigned x360_render_texture(x360_machine *x, int *width, int *height);
+void x360_render_set_readback(x360_machine *x, int on);
+int x360_render_scale(x360_machine *x);
+/* after the frames a window shows ran: its context's state back as the window's drawing expects (attach mode) */
+void x360_render_end_frame(x360_machine *x);
+/* After a state load (x360_state_load calls it): the eDRAM is not in states, surfaces start clear. */
+void x360_render_reset(x360_machine *x);
 /* The renderer's last frame (RGBA, top row first) and its counters, or NULL / zeros when it is off. */
 const uint8_t *x360_render_frame(x360_machine *x, int *width, int *height);
 void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint64_t *front_buffer_frames);
@@ -92,6 +107,11 @@ void x360_set_output(x360_machine *x, FILE *dbg, FILE *log, int verbose);
 /* Run until the title exits, an error, a missed address or `insns` more instructions. Returns X360_*. */
 int x360_run(x360_machine *x, uint64_t insns);
 const char *x360_error(const x360_machine *x);
+/* Run until the virtual clock reaches `t` (100 ns units since the title started: x360_time + one frame for a
+ * player's frame) or the title stops; X360_FRAME when it was reached (the status stays running), else as x360_run.
+ * Waiting threads never take the clock past t. XBA-280. */
+int x360_run_until(x360_machine *x, uint64_t t);
+uint64_t x360_time(x360_machine *x);
 uint32_t x360_exit_code(const x360_machine *x);
 /* Addresses execution reached without lifted code (for x360_tools.recomp --discovered). */
 unsigned x360_missed(const x360_machine *x, const uint32_t **addrs);

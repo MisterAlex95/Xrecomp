@@ -120,6 +120,7 @@ struct x360_machine {
     int strict_imports;                 /* stop at the first import without an HLE */
     uint64_t stop_at;                   /* x360_run's instruction budget (rc_native to stop at) */
     uint64_t time_limit;                /* x360_set_time_limit: virtual 100 ns units, 0 = none */
+    uint64_t run_until;                 /* x360_run_until's deadline (virtual 100 ns), 0 = none */
     uint64_t rng;                       /* XeCryptRandom's generator (state: runs repeat, states resume it) */
     uint32_t title_id, execution_info; /* the execution info header (guest copy), its title id */
 

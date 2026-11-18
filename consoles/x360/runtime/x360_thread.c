@@ -503,6 +503,10 @@ int x360_run(x360_machine *x, uint64_t insns)
             x->status = X360_BUDGET;
             break;
         }
+        if (x->run_until && x360_now(x) >= x->run_until) {
+            x->status = X360_FRAME;
+            break;
+        }
         x360_timers_fire(x);
         x360_gpu_poll(x);
         x360_audio_poll(x);
@@ -532,6 +536,8 @@ int x360_run(x360_machine *x, uint64_t insns)
                 break;
             }
             uint64_t now = x360_now(x);
+            if (x->run_until && d > x->run_until)
+                d = x->run_until; /* a player's frame: the clock stops at its end */
             if (d > now)
                 x->time_skip += d - now;
             continue;
@@ -546,6 +552,25 @@ int x360_run(x360_machine *x, uint64_t insns)
         run_thread(x, &x->threads[picked]);
     }
     return x->status;
+}
+
+uint64_t x360_time(x360_machine *x)
+{
+    return x360_now(x);
+}
+
+int x360_run_until(x360_machine *x, uint64_t t)
+{
+    if (x->status != X360_RUNNING)
+        return x->status;
+    x->run_until = t ? t : 1;
+    int r = x360_run(x, ~0ull >> 2);
+    x->run_until = 0;
+    if (r == X360_FRAME) {
+        x->status = X360_RUNNING;
+        return X360_FRAME;
+    }
+    return r;
 }
 
 /* ---- the machine ---- */

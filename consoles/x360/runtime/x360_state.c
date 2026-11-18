@@ -487,5 +487,6 @@ int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_
         }
     }
     x->m.cur = x->cur >= 0 ? &x->threads[x->cur].cpu : NULL;
+    x360_render_reset(x); /* the eDRAM is not in states: the renderer's surfaces start clear */
     return X360_STATE_OK;
 }

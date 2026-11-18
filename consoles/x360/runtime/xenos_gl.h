@@ -79,6 +79,8 @@ int xenos_gl_scale(const xenos_gl *g);
 /* after a save state loads: the eDRAM is not in states (as the GameCube's EFB), surfaces start clear and the resolve
  * copies go (frames come from memory again until the title resolves) */
 void xenos_gl_reset(xenos_gl *g);
+/* hand an attached context back to its owner's drawing: framebuffer 0, blend / depth / stencil / scissor / cull off */
+void xenos_gl_end_frame(xenos_gl *g);
 void xenos_gl_destroy(xenos_gl *g);
 /* hooks for xenos_cp (draw / swap) */
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d);

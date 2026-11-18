@@ -988,6 +988,8 @@ static int formats_ok(recomp_cheat_console con, recomp_cheat_format f)
         return f == RECOMP_CF_XBOX;
     if (con == RECOMP_CHEAT_GC)
         return f == RECOMP_CF_AR || f == RECOMP_CF_GECKO;
+    if (con == RECOMP_CHEAT_X360)
+        return 0; /* raw only */
     return f == RECOMP_CF_GS;
 }
 
@@ -1152,6 +1154,8 @@ int recomp_cheat_compile(recomp_cheat *c, recomp_cheat_console con, recomp_cheat
     }
     if (con == RECOMP_CHEAT_XBOX) /* one format, whose raw lines cover ADDRESS:VALUE */
         return compile_as(c, con, RECOMP_CF_XBOX, code);
+    if (con == RECOMP_CHEAT_X360) /* raw: ADDRESS:VALUE or ADDRESS VALUE */
+        return compile_as(c, con, RECOMP_CF_RAW, code);
     if (con == RECOMP_CHEAT_GC) { /* raw with ':', AR when a line is a zero code, else Gecko */
         int colon = 0, zero = 0;
         const char *q = code ? code : "";
@@ -1384,6 +1388,7 @@ static const char *tag_of(const recomp_cheats *s)
            : s->console == RECOMP_CHEAT_PS1 ? "ps1"
            : s->console == RECOMP_CHEAT_XBOX ? "xbox"
            : s->console == RECOMP_CHEAT_GC   ? "gc"
+           : s->console == RECOMP_CHEAT_X360 ? "x360"
                                              : "n64";
 }
 
@@ -1552,6 +1557,8 @@ static int ptr_ok(recomp_cheat_console con, uint32_t p)
         return (p & 0x1FFFFFFFu) < 0x00200000u;
     case RECOMP_CHEAT_GC:
         return (p & 0x3FFFFFFFu) < 0x01800000u && (p >> 30) == 2; /* MEM1, cached or uncached */
+    case RECOMP_CHEAT_X360:
+        return 1; /* the whole 4 GB space: x360_cheat_read32 / write32 keep to allocated memory */
     default:
         return p >= 0x80000000u && p < 0x80800000u;
     }

@@ -75,6 +75,9 @@ def stwu(rs, d, ra):
     return (37 << 26) | (rs << 21) | (ra << 16) | (d & 0xFFFF)
 
 
+LINGER_MS = 0  # --linger: main sleeps this long before it returns (x360_play's test runs frames; default: none)
+
+
 def program(addr):
     """addr: label -> address for the data and the imports (thunks, variable records)."""
     p = Prog(TEXT)
@@ -277,6 +280,11 @@ def program(addr):
     p(A.li(4, 0))
     la(3, "s_end")
     call("DbgPrint")
+    if LINGER_MS:  # one long relative delay (negative 100 ns units), only with --linger: the default title is unchanged
+        v = (-LINGER_MS * 10000) & 0xFFFFFFFF
+        p(A.li(0, -1), A.stw(0, 0x60, 1), A.lis(0, (v >> 16) - (0x10000 if v >> 31 else 0)), A.ori(0, 0, v & 0xFFFF),
+          A.stw(0, 0x64, 1), A.li(3, 1), A.li(4, 0), A.addi(5, 1, 0x60))
+        call("KeDelayExecutionThread")
     p(A.li(3, 0), A.addi(1, 1, 0xC0))
     p.branch(A.b, "__restgprlr_24")
     p.end()
@@ -378,7 +386,10 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--compression", default="basic", choices=("none", "basic", "normal"))
     ap.add_argument("--key-file")
+    ap.add_argument("--linger", type=int, default=0, help="main sleeps MS milliseconds before it returns")
     a = ap.parse_args()
+    global LINGER_MS
+    LINGER_MS = a.linger
     key = None
     if a.key_file:
         with open(a.key_file, "rb") as f:
