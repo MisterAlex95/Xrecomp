@@ -5663,7 +5663,7 @@ public class LauncherActivity extends Activity {
     private Thread coverThread;
 
     /**
-     * Cover art for the GBA, PS1 and N64 games that have none (CoverArt: libretro-thumbnails, when « Download cover
+     * Cover art for the GBA, PS1, N64 and GameCube games that have none (CoverArt: libretro-thumbnails, when « Download cover
      * art » is on), one game after the other on a worker; each one found shows at once.
      */
     private void fetchCovers(LibraryIndex idx) {

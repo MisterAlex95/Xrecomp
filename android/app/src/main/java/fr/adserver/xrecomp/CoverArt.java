@@ -19,7 +19,7 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Cover art for the games of the other consoles (GBA, PS1, N64), which carry no title image of their own the way an
+ * Cover art for the games of the other consoles (GBA, PS1, N64, GameCube), which carry no title image of their own the way an
  * XBE does (TitleArt). Two sources, both kept on the device only, in TitleArt's cache (<files dir>/art/<key>.png):
  *
  * 1. Downloaded (« Download cover art », on by default): the box art of libretro-thumbnails, the public collection
@@ -46,6 +46,7 @@ final class CoverArt {
         case GBA: return "Nintendo_-_Game_Boy_Advance";
         case PS1: return "Sony_-_PlayStation";
         case N64: return "Nintendo_-_Nintendo_64";
+        case GC: return "Nintendo_-_GameCube";   // XBA-274: Redump-named discs
         default: return null;
         }
     }

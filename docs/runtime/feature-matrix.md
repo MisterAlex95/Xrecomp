@@ -33,7 +33,7 @@ app and not in this matrix.
 | Shader cache / warm-up | partial: runtime program cache (`nv2a_gl.c`, `RECOMP_GPU_SHADER_CACHE`), no app warm-up | n/a: software PPU | n/a: software GPU | yes: `n64_vk_cache.c`, warm-up `app/ShaderWarmup` | yes: `gx/gx_progcache.c`, warm-up `app/GcShaderWarmup` |
 | Texture filtering | yes: `RECOMP_TEX_BILINEAR` / `ANISO` (`nv2a_gl.c`), UI OPT_TEX | window filter only (`RECOMP_GBA_FILTER`, default nearest) | window filter only | window filter only | window filter only (`RECOMP_GC_FILTER`); no texture override in `gx_tex.c` |
 | Aspect / scale / picture shader | yes: `aspect_policy.c` (`RECOMP_ASPECT`), widescreen, `RECOMP_XBOX_SHADER` | yes: `RECOMP_GBA_SCALE`, shaders + LCD ghosting (`src/video/present_shaders.c`); menu Scale / Filter (`app/GameMenu`) | yes (4:3) | yes (4:3, edge crop) | yes (4:3); no widescreen hack |
-| Cover art | yes: the XBE's image (`app/TitleArt`) | yes: `app/CoverArt` (a captured frame until a cover comes, `ShellActivity.coverShotKey`) | yes | yes | yes |
+| Cover art | yes: the XBE's image (`app/TitleArt`) | yes: `app/CoverArt` (libretro-thumbnails download, a captured frame until a cover comes, `ShellActivity.coverShotKey`) | yes | yes | yes (XBA-274: the download was missing, `CoverArt.system` had no GameCube repository; a captured frame only before) |
 | Per-game apps / shortcuts | yes: `app/TitleApk.packageName`, `app/TitleShortcut` | yes: « tgba_… » packages | yes | yes | yes |
 | Save export / import, cloud saves | yes: `app/SaveArchive` (UDATA / TDATA), `app/CloudSaves` | yes: `save/<console>-<KEY>/` (`app/Storage.saves`) | yes | yes | yes |
 | Per-game settings | yes: `app/GameSettings` | yes | yes | yes (+ Vulkan driver, pak) | yes |
