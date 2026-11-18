@@ -20,7 +20,7 @@ RUN = os.environ.get("XENOS_GLSL_RUN", "")
 TINY = 1.17549435e-38
 FLT_MAX = 3.4028234663852886e38
 VSRCS = {8: 1, 9: 1, 10: 1, 11: 3, 12: 3, 13: 3, 14: 3, 17: 3, 19: 1}
-VOPS = [v for v in range(30) if v != 18]
+VOPS = list(range(30))
 SOPS = [s for s in range(51) if s != 41] + [63]
 VALUES = [0.0, -0.0, 1.0, -1.0, 0.5, 2.0, -3.25, 7.0, 0.001, 100.0, -0.75, 3.0, 0.25, -2.0, 10.0, 1.5]
 
@@ -90,7 +90,9 @@ def fetch_words(op, src_reg, dst_reg, dst_swz, const_index, **kw):
         d2 = kw.get("stride", 4) | (kw.get("offset", 0) & 0x7FFFFF) << 8
     else:
         d0 |= kw.get("src_swz", 0b100100) << 26 | kw.get("unnormalized", 0) << 25
-        d2 = kw.get("dimension", 1) << 14
+        d1 |= kw.get("use_reg_lod", 0) << 29
+        d2 = kw.get("dimension", 1) << 14 | kw.get("use_reg_gradients", 0) | (kw.get("lod_bias", 0) & 0x7F) << 2 | \
+            (kw.get("ox", 0) & 31) << 16 | (kw.get("oy", 0) & 31) << 21 | (kw.get("oz", 0) & 31) << 26
     return [d0, d1, d2]
 
 
@@ -188,6 +190,14 @@ class Ref:
             v = [f32(f32(f32(m[0] + m[1]) + m[2]) + (m[3] if vop == 15 else 0.0))] * 4
         elif vop == 17:
             v = [f32(f32(lmul(a[0], b[0]) + lmul(a[1], b[1])) + c[0])] * 4
+        elif vop == 18:
+            x, y, z = a[2], a[3], a[0]
+            if abs(z) >= abs(x) and abs(z) >= abs(y):
+                v = [-y, -x if z < 0 else x, f32(2.0 * z), 5.0 if z < 0 else 4.0]
+            elif abs(y) >= abs(x):
+                v = [-z if y < 0 else z, x, f32(2.0 * y), 3.0 if y < 0 else 2.0]
+            else:
+                v = [-y, z if x < 0 else -z, f32(2.0 * x), 1.0 if x < 0 else 0.0]
         elif vop == 19:
             x, y, z, w = a
             v = [x if (x > y and x > z and x > w) else y if (y > z and y > w) else z if z > w else w] * 4
@@ -449,7 +459,7 @@ def test_translation_shape():
     src_, info = translate(to_words(make_case(rng)), "vertex")
     assert src_.startswith("#version 300 es") and "xe_o3 = vec4(0.0);" in src_ and info["outputs"] == [0, 1, 2, 3]
     with pytest.raises(Unsupported):
-        translate(to_words([dict(vop=18, vdest=1, vmask=0xF)]), "vertex")        # cube
+        translate(program([(2, [("fetch", fetch_words(17, 0, 1, 0o3210, 0))], {})]), "pixel")  # getCompTexLOD
     with pytest.raises(Unsupported):
         translate(to_words([dict(vop=2, vdest=32, vmask=0xF, export=1)]), "vertex")  # memory export
 
@@ -511,13 +521,22 @@ def test_against_mesa(tmp_path):
     n += 1
     # pixel shaders: compiled and linked (interpolators, kill, texture fetches 1D / 2D / 3D, colour and depth exports)
     frags = []
-    for dim in (0, 1, 2):
+    for dim in (0, 1, 2, 3):
         frags.append(program([(1, [("fetch", fetch_words(1, 0, 1, 0 | 1 << 3 | 2 << 6 | 3 << 9, dim, dimension=dim)),
                                    ("alu", alu_words(vop=24, sop=36, vdest=2, sdest=3, vmask=0xF, smask=1,
                                                      srcs=((1, 1, 0, 0), (0, 0, 0, 0), (1, 1, 0, 0))))], {}),
                               (2, [("alu", alu_words(**export(0, 1))),
                                    ("alu", alu_words(vop=2, vdest=61, vmask=1, export=1,
                                                      srcs=((2, 1, 0, 0), (2, 1, 0, 0), (0, 0, 0, 0))))], {})]))
+    # offsets and a LOD bias, register LOD, register gradients (3D, with a z offset)
+    frags.append(program([(2, [("fetch", fetch_words(1, 0, 1, 0o3210, 2, dimension=1, ox=-3, oy=5, lod_bias=-20)),
+                               A(**export(0, 1))], {})]))
+    frags.append(program([(2, [("fetch", fetch_words(24, 0, 0, 0o7777, 0)),
+                               ("fetch", fetch_words(1, 0, 1, 0o3210, 2, dimension=1, use_reg_lod=1)),
+                               A(**export(0, 1))], {})]))
+    frags.append(program([(2, [("fetch", fetch_words(25, 0, 0, 0o7777, 0)), ("fetch", fetch_words(26, 1, 0, 0o7777, 0)),
+                               ("fetch", fetch_words(1, 0, 1, 0o3210, 2, dimension=2, use_reg_gradients=1, oz=2)),
+                               A(**export(0, 1))], {})]))
     for words in frags:
         src_, info = translate(words, "pixel", interpolators=2)
         (tmp_path / ("%d.frag" % n)).write_text(src_)

@@ -23,8 +23,11 @@ has loops, calls or jumps, a state machine on the control-flow index with the se
 and return stacks (`uniform uint xe_l[32]`: the loop constants, count / start / signed step bytes). Relative
 addressing: r[aL + n], c[aL + n], c[a0 + n] (clamped to the register files).
 
-Not translated yet (Unsupported is raised, naming the instruction): cube, memory export, the texture queries, texture
-fetches with offsets, register LOD / gradients; multiply-add is
+Textures: 1D / 2D / 3D / cube fetches (cube: tfetchCube's face coordinates turned back into a direction), offsets
+(half texels), LOD bias (1/16), register LOD (setTexLOD) and gradients (setGradientH / V).
+
+Not translated yet (Unsupported is raised, naming the instruction): memory export, the texture queries (getBCF,
+getCompTexLOD, getGradients, getWeights); multiply-add is
 written unfused (Xenos rounds once: small differences); log / rsq / sqrt of negative numbers are left to the host
 (GLSL ES leaves them undefined: llvmpipe gives 0). Integer and signed-normalised vertex formats are the host's
 conversion, exp_adjust too.
@@ -61,6 +64,24 @@ float xe_max4(vec4 a) {
 }
 bool xe_bool(int n) { return ((xe_b[n >> 5] >> uint(n & 31)) & 1u) != 0u; }
 float xe_clampinf(float t, float lo, float hi) { return isinf(t) ? (t < 0.0 ? lo : hi) : t; }
+// cube: (T, S, 2 * major axis, face) of the direction in src0's z, w, x (shaders pass .zzxy)
+vec4 xe_cube(vec4 s) {
+    float x = s.z, y = s.w, z = s.x;
+    if (abs(z) >= abs(x) && abs(z) >= abs(y)) return vec4(-y, z < 0.0 ? -x : x, 2.0 * z, z < 0.0 ? 5.0 : 4.0);
+    if (abs(y) >= abs(x)) return vec4(y < 0.0 ? -z : z, x, 2.0 * y, y < 0.0 ? 3.0 : 2.0);
+    return vec4(-y, x < 0.0 ? z : -z, 2.0 * x, x < 0.0 ? 1.0 : 0.0);
+}
+// tfetchCube's (S, T, face), S and T in [1, 2), back to a direction for samplerCube
+vec3 xe_cubedir(vec3 c) {
+    float s = c.x * 2.0 - 3.0, t = c.y * 2.0 - 3.0;
+    int f = int(c.z + 0.5);
+    if (f == 0) return vec3(1.0, -t, -s);
+    if (f == 1) return vec3(-1.0, -t, s);
+    if (f == 2) return vec3(s, 1.0, t);
+    if (f == 3) return vec3(s, -1.0, -t);
+    if (f == 4) return vec3(s, -t, 1.0);
+    return vec3(-s, -t, -1.0);
+}
 """
 
 # scalar ops: name -> GLSL of a (and b, ps); None = handled specially
@@ -214,8 +235,6 @@ class _Shader:
             vexpr = None
         else:
             n = VSRCS.get(vop, 2)
-            if vop == 18:
-                raise Unsupported("%s: cube" % where)
             S = [self.operand(a, k, where) for k in range(1, n + 1)]
             vexpr = {
                 0: lambda: "%s + %s" % (S[0], S[1]), 1: lambda: "xe_mul(%s, %s)" % (S[0], S[1]),
@@ -231,6 +250,7 @@ class _Shader:
                 15: lambda: "vec4(xe_dot4(%s, %s))" % (S[0], S[1]), 16: lambda: "vec4(xe_dot3(%s, %s))" % (S[0], S[1]),
                 17: lambda: "vec4(xe_mul((%s).x, (%s).x) + xe_mul((%s).y, (%s).y) + (%s).x)" % (S[0], S[1], S[0], S[1],
                                                                                                S[2]),
+                18: lambda: "xe_cube(%s)" % S[0],
                 19: lambda: "vec4(xe_max4(%s))" % S[0],
                 28: lambda: "vec4(1.0, xe_mul((%s).y, (%s).y), (%s).z, (%s).w)" % (S[0], S[1], S[0], S[1]),
                 29: lambda: "xe_max(%s, %s)" % (S[0], S[1]),
@@ -334,25 +354,47 @@ class _Shader:
                                               "exp_adjust": f["exp_adjust"]}))
                 names.append(key)
             src = "xe_v%d" % names.index(key)
+        elif f["op"] in (24, 25, 26):
+            # setTexLOD / setGradientH / setGradientV: kept for the texture fetches that use them
+            sw = f["src_swizzle"]
+            c = "%s.%s" % (self.temp(f["src_reg"], f["src_rel"]), "".join("xyzw"[(sw >> (2 * i)) & 3]
+                                                                           for i in range(3)))
+            target = {24: "xe_lod", 25: "xe_gh.xyz", 26: "xe_gv.xyz"}[f["op"]]
+            self.emit("%s = %s;" % (target, ("(%s).x" % c) if f["op"] == 24 else c))
+            return
         elif f["op"] == 1:
-            if f["offset_x"] or f["offset_y"] or f["offset_z"] or f["use_reg_lod"] or f["use_reg_gradients"]:
-                raise Unsupported("%s: texture fetch offsets / register LOD" % where)
             dim = f["dimension"]
-            if dim == 3:
-                raise Unsupported("%s: cube texture fetch" % where)
             k = f["const_index"]
             if self.textures.setdefault(k, dim) != dim:
                 raise Unsupported("%s: texture %d fetched with two dimensions" % (where, k))
             sw = f["src_swizzle"]
             sel = "".join("xyzw"[(sw >> (2 * i)) & 3] for i in range(3))
             c = "%s.%s" % (self.temp(f["src_reg"], f["src_rel"]), sel)
-            coord = {0: "vec2((%s).x, 0.5)" % c, 1: "(%s).xy" % c, 2: "(%s).xyz" % c}[dim]
-            if f["unnormalized"]:
-                coord = "%s / vec%d(textureSize(xe_t%d, 0))" % (coord, 2 if dim < 2 else 3, k)
-            if self.stage == "vertex":
-                src = "textureLod(xe_t%d, %s, 0.0)" % (k, coord)
-            elif f["lod_bias"]:
-                src = "texture(xe_t%d, %s, %s)" % (k, coord, repr(f["lod_bias"] / 32.0))
+            coord = {0: "vec2((%s).x, 0.5)" % c, 1: "(%s).xy" % c, 2: "(%s).xyz" % c,
+                     3: "xe_cubedir((%s).xyz)" % c}[dim]
+            size = "vec%d(textureSize(xe_t%d, 0))" % (2 if dim < 2 else 3, k)
+            if f["unnormalized"] and dim != 3:
+                coord = "%s / %s" % (coord, size)
+            # offsets: half texels (Xenia's ucode.h), 1D / 2D use x / y, 3D also z
+            offs = [f["offset_x"], f["offset_y"], f["offset_z"]][:{0: 1, 1: 2, 2: 3, 3: 0}[dim]]
+            if any(offs):
+                if dim == 0:
+                    coord = "(%s + vec2(%r, 0.0) / %s)" % (coord, offs[0] * 0.5, size)
+                else:
+                    coord = "(%s + vec%d(%s) / %s)" % (coord, len(offs), ", ".join(repr(o * 0.5) for o in offs), size)
+            bias = f["lod_bias"] / 16.0  # 1/16 steps (Xenia's ucode.h)
+            gd = {0: ".xy", 1: ".xy", 2: ".xyz", 3: ".xyz"}[dim]
+            if f["use_reg_gradients"]:
+                if dim == 0:
+                    src = "textureGrad(xe_t%d, %s, vec2(xe_gh.x, 0.0), vec2(xe_gv.x, 0.0))" % (k, coord)
+                else:
+                    src = "textureGrad(xe_t%d, %s, xe_gh%s, xe_gv%s)" % (k, coord, gd, gd)
+            elif f["use_reg_lod"]:
+                src = "textureLod(xe_t%d, %s, xe_lod + %r)" % (k, coord, bias)
+            elif self.stage == "vertex":
+                src = "textureLod(xe_t%d, %s, %r)" % (k, coord, bias)
+            elif bias:
+                src = "texture(xe_t%d, %s, %r)" % (k, coord, bias)
             else:
                 src = "texture(xe_t%d, %s)" % (k, coord)
         else:
@@ -521,7 +563,8 @@ def translate(words, stage="vertex", interpolators=0):
         out.append("in vec4 xe_v%d;  // fetch constant %d, offset %d, format %d" % (i, a["fetch_constant"],
                                                                                     a["offset"], a["format"]))
     for t, dim in sorted(sh.textures.items()):
-        out.append("uniform %s xe_t%d;" % ({0: "sampler2D", 1: "sampler2D", 2: "sampler3D"}[dim], t))
+        out.append("uniform %s xe_t%d;" % ({0: "sampler2D", 1: "sampler2D", 2: "sampler3D", 3: "samplerCube"}[dim],
+                                            t))
     if stage == "vertex":
         out += ["out vec4 xe_o%d;" % o for o in sorted(sh.outputs)]
     else:
@@ -534,6 +577,8 @@ def translate(words, stage="vertex", interpolators=0):
     out.append("    float ps = 0.0;")
     out.append("    bool p0 = false;")
     out.append("    int a0 = 0, aL = 0;")
+    out.append("    float xe_lod = 0.0;")
+    out.append("    vec4 xe_gh = vec4(0.0), xe_gv = vec4(0.0);")
     if stage == "vertex":
         out.append("    r[0].x = float(gl_VertexID);")
         out.append("    vec4 xe_pos = vec4(0.0), xe_psize = vec4(0.0);")
