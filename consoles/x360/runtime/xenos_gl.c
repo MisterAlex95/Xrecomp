@@ -205,6 +205,8 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glGetIntegerv, (GLenum, GLint *))                                                                          \
     X(void, glGetFloatv, (GLenum, GLfloat *))                                                                          \
     X(void, glUniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat))                                              \
+    X(void, glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei))                            \
+    X(void, glGetInternalformativ, (GLenum, GLenum, GLenum, GLsizei, GLint *))                                        \
     X(void, glUniform3i, (GLint, GLint, GLint, GLint))
 
 #define MAX_PROGRAMS 256
@@ -254,8 +256,11 @@ typedef struct texture {
  * MSAA) a draw or resolve meets is a host texture of guest width x height at the internal resolution (scale): its
  * height grows to what the window scissor asks for. Surfaces are kept least recently used first; two keys over the
  * same tiles are two surfaces, and the one bound or resolved takes what the other wrote since (sync_surface): the raw
- * bits at the same pitch for formats of one bit width, else the rows are cleared and counted. MSAA targets are rendered
- * single-sampled at the pixel grid (a resolve of any sample gives the pixel). */
+ * bits at the same pitch for formats of one bit width, else the rows are cleared and counted. An MSAA target (2x or 4x
+ * in RB_SURFACE_INFO) is drawn into a multisampled renderbuffer at the internal resolution when every attachment of the
+ * draw has one of the same sample count (the driver's list for each format, RECOMP_X360_MSAA=0 turns it off); `tex`
+ * stays the resolved picture every read uses, brought up to date by surface_flush. Otherwise it is drawn single-sampled
+ * at the pixel grid, as a resolve of any sample gives the pixel. */
 #define MAX_SURFACES 32
 #define MAX_COPIES 16
 
@@ -268,6 +273,10 @@ typedef struct surface {
     unsigned used;
     unsigned written;                      /* the write clock of its last contents (XBA-296) */
     int dirty_h;                           /* guest rows written so far */
+    GLuint rb;                             /* the multisampled colour or depth / stencil buffer, 0: none */
+    int samples;
+    int ms_dirty;                          /* rb has what tex does not yet */
+    int ms_reload;                         /* tex has what rb does not yet */
 } surface;
 
 /* what a resolve wrote to guest memory, kept as a host picture too (the front buffer at the internal resolution,
@@ -318,6 +327,10 @@ struct xenos_gl {
     GLuint aprog;             /* eDRAM aliasing: the pass that reinterprets a surface's bits in another format */
     GLint aprog_off, aprog_sc, aprog_dc;
     int aprog_failed;
+    GLuint zprog;             /* MSAA: the pass that writes a resolved depth back into a multisampled buffer */
+    int zprog_failed;
+    int msaa_on;              /* multisampled render targets are allowed (RECOMP_X360_MSAA=0: not) */
+    int cur_ms;               /* the draw FBO has the renderbuffers attached rather than the textures */
     int cur[4], cur_ds;       /* the surfaces bound (index into surf, -1 none) */
     int tw, th;               /* the guest size of the bound colour target 0 (the viewport's frame of reference) */
     rt_copy copies[MAX_COPIES];
@@ -497,6 +510,8 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     g->glGetIntegerv(0x821C /* GL_MINOR_VERSION */, &g->gl_minor);
     texture_options(g);
     memexport_caps(g);
+    const char *msaa_env = getenv("RECOMP_X360_MSAA");
+    g->msaa_on = !(msaa_env && !strcmp(msaa_env, "0"));
     while (g->scale > 1 && (g->width * g->scale > g->max_tex || g->height * g->scale > g->max_tex))
         g->scale--;
     g->glGenFramebuffers(1, &g->fbo);
@@ -623,9 +638,14 @@ void xenos_gl_destroy(xenos_gl *g)
         for (int i = 0; i < MAX_TEXTURES; i++)
             if (g->textures[i].tex)
                 g->glDeleteTextures(1, &g->textures[i].tex);
-        for (int i = 0; i < MAX_SURFACES; i++)
+        for (int i = 0; i < MAX_SURFACES; i++) {
             if (g->surf[i].tex)
                 g->glDeleteTextures(1, &g->surf[i].tex);
+            if (g->surf[i].rb)
+                g->glDeleteRenderbuffers(1, &g->surf[i].rb);
+        }
+        if (g->zprog)
+            g->glDeleteProgram(g->zprog);
         for (int i = 0; i < MAX_COPIES; i++)
             if (g->copies[i].tex)
                 g->glDeleteTextures(1, &g->copies[i].tex);
@@ -693,6 +713,8 @@ static void do_reset(xenos_gl *g)
     for (int i = 0; i < MAX_SURFACES; i++)
         if (g->surf[i].tex) {
             g->glDeleteTextures(1, &g->surf[i].tex);
+            if (g->surf[i].rb)
+                g->glDeleteRenderbuffers(1, &g->surf[i].rb);
             memset(&g->surf[i], 0, sizeof g->surf[i]);
         }
     for (int i = 0; i < MAX_COPIES; i++)
@@ -1300,6 +1322,59 @@ static int fmt_wide(uint32_t fmt)
 }
 
 static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound);
+static void surface_reload(xenos_gl *g, surface *s);
+
+/* the multisampled buffer of an MSAA surface: the smallest sample count the driver lists for its format that is at
+ * least the guest's; none (single-sampled) when it lists no such count */
+static void surface_ms_alloc(xenos_gl *g, surface *s)
+{
+    s->rb = 0, s->samples = 0, s->ms_dirty = 0, s->ms_reload = 0;
+    if (!s->msaa || !g->msaa_on)
+        return;
+    GLint n = 0, list[16];
+    int want = s->msaa == 1 ? 2 : 4, pick = 0;
+    g->glGetInternalformativ(GL_RENDERBUFFER, s->ifmt, 0x9380 /* GL_NUM_SAMPLE_COUNTS */, 1, &n);
+    n = n > 16 ? 16 : n;
+    if (n > 0)
+        g->glGetInternalformativ(GL_RENDERBUFFER, s->ifmt, 0x80A9 /* GL_SAMPLES */, n, list);
+    for (GLint i = 0; i < n; i++)
+        if (list[i] >= want && (!pick || list[i] < pick))
+            pick = list[i];
+    if (!pick)
+        return;
+    g->glGenRenderbuffers(1, &s->rb);
+    g->glBindRenderbuffer(GL_RENDERBUFFER, s->rb);
+    g->glRenderbufferStorageMultisample(GL_RENDERBUFFER, pick, s->ifmt, s->w * g->scale, s->h * g->scale);
+    s->samples = pick;
+    s->ms_reload = 1; /* it starts as the texture does */
+    g->st.msaa_surfaces++;
+}
+
+/* the texture brought up to date with the multisampled buffer: the samples resolved (the whole surface: GLES 3.0
+ * resolves identical rectangles only) */
+static void surface_flush(xenos_gl *g, surface *s)
+{
+    if (!s->rb || !s->ms_dirty)
+        return;
+    GLenum att = s->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
+    int hw = s->w * g->scale, hh = s->h * g->scale;
+    g->glBindFramebuffer(GL_READ_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferRenderbuffer(GL_READ_FRAMEBUFFER, att, GL_RENDERBUFFER, s->rb);
+    g->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g->tfbo_draw);
+    g->glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, att, GL_TEXTURE_2D, s->tex, 0);
+    if (s->kind != 2) {
+        static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+        g->glReadBuffer(GL_COLOR_ATTACHMENT0);
+        g->glDrawBuffers(1, &b0);
+    }
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glBlitFramebuffer(0, 0, hw, hh, 0, 0, hw, hh,
+                         s->kind == 2 ? GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT : GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    g->glFramebufferRenderbuffer(GL_READ_FRAMEBUFFER, att, GL_RENDERBUFFER, 0);
+    g->glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, att, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    s->ms_dirty = 0;
+}
 
 /* the surface for an eDRAM key, made (or grown to need_h rows) when needed; its index */
 static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt, int depth, uint32_t msaa,
@@ -1336,6 +1411,7 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
             if (s->h >= need_h)
                 return i;
             /* taller: a new texture, the old rows copied to the top */
+            surface_flush(g, s);
             GLenum tf, tt;
             surface n = *s;
             host_format(g, fmt, depth, &n, &tf, &tt);
@@ -1363,6 +1439,11 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
             g->glDeleteTextures(1, &s->tex);
             s->tex = t;
             s->h = need_h;
+            if (s->rb) { /* a blit cannot write a multisampled buffer: a new one, filled from the texture */
+                g->glDeleteRenderbuffers(1, &s->rb);
+                g->st.msaa_surfaces--;
+                surface_ms_alloc(g, s);
+            }
             for (int k = 0; k < 4; k++)
                 if (g->cur[k] == i)
                     g->cur[k] = -2; /* attached again */
@@ -1386,6 +1467,8 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
     surface *s = &g->surf[victim];
     if (s->tex)
         g->glDeleteTextures(1, &s->tex);
+    if (s->rb)
+        g->glDeleteRenderbuffers(1, &s->rb);
     for (int k = 0; k < 4; k++)
         if (g->cur[k] == victim)
             g->cur[k] = -1;
@@ -1399,6 +1482,7 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
     s->tex = new_texture(g, s->ifmt, tf, tt, s->w * g->scale, s->h * g->scale);
     s->used = ++g->surf_clock;
     clear_texture(g, s, s->tex);
+    surface_ms_alloc(g, s);
     g->st.surfaces++;
     return victim;
 }
@@ -1447,17 +1531,48 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         for (int i = 0; i < 5; i++)
             if (together[i] >= 0)
                 sync_surface(g, together[i], together, 5);
+        /* multisampled only when every attachment is, with one sample count */
+        int use_ms = 1, samples = 0;
+        for (int i = 0; i < 5; i++)
+            if (together[i] >= 0) {
+                const surface *w = &g->surf[together[i]];
+                use_ms &= w->rb != 0 && (!samples || samples == w->samples);
+                samples = w->samples;
+            }
+        for (int i = 0; i < 5; i++)
+            if (together[i] >= 0 && g->surf[together[i]].rb) {
+                surface *w = &g->surf[together[i]];
+                if (use_ms) {
+                    if (w->ms_reload)
+                        surface_reload(g, w);
+                    w->ms_dirty = 1;
+                } else { /* this draw goes to the texture: the buffer takes it up again when next used */
+                    surface_flush(g, w);
+                    w->ms_reload = 1;
+                }
+            }
         g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+        int reattach = use_ms != g->cur_ms;
+        g->cur_ms = use_ms;
         GLenum bufs[4];
         for (int i = 0; i < 4; i++) {
-            if (g->cur[i] != want[i])
-                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + (GLenum)i, GL_TEXTURE_2D,
-                                          want[i] >= 0 ? g->surf[want[i]].tex : 0, 0);
+            if (g->cur[i] != want[i] || reattach) {
+                GLenum att = GL_COLOR_ATTACHMENT0 + (GLenum)i;
+                if (want[i] >= 0 && use_ms)
+                    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, g->surf[want[i]].rb);
+                else
+                    g->glFramebufferTexture2D(GL_FRAMEBUFFER, att, GL_TEXTURE_2D, want[i] >= 0 ? g->surf[want[i]].tex : 0,
+                                              0);
+            }
             g->cur[i] = want[i];
             bufs[i] = want[i] >= 0 ? GL_COLOR_ATTACHMENT0 + (GLenum)i : 0 /* GL_NONE */;
         }
-        if (g->cur_ds != ds)
-            g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g->surf[ds].tex, 0);
+        if (g->cur_ds != ds || reattach) {
+            if (use_ms)
+                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, g->surf[ds].rb);
+            else
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g->surf[ds].tex, 0);
+        }
         g->cur_ds = ds;
         g->glDrawBuffers(4, bufs);
         if (g->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
@@ -1480,6 +1595,8 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
             if (g->surf[i].tex && g->surf[i].kind == 1) {
                 had_float = 1;
                 g->glDeleteTextures(1, &g->surf[i].tex);
+                if (g->surf[i].rb)
+                    g->glDeleteRenderbuffers(1, &g->surf[i].rb);
                 memset(&g->surf[i], 0, sizeof g->surf[i]);
             }
         for (int i = 0; i < 4; i++)
@@ -2721,7 +2838,10 @@ static const char ALIAS_FS[] =
     " if (k == 6) return vec4(xf(a & 0xFFFFu), xf(a >> 16), xf(b & 0xFFFFu), xf(b >> 16));\n"
     " if (k == 7) return vec4(unpackHalf2x16(a), unpackHalf2x16(b));\n"
     " return vec4(uintBitsToFloat(a), uintBitsToFloat(b), 0.0, 1.0); }\n"
-    "void main() { c = dec(enc(texelFetch(t, ivec2(gl_FragCoord.xy) + off.xy, 0), sc), dc); }\n";
+    "void main() { vec4 v = texelFetch(t, ivec2(gl_FragCoord.xy) + off.xy, 0); c = sc < 0 ? v : dec(enc(v, sc), dc); }\n";
+static const char RELOAD_DEPTH_FS[] =
+    "#version 300 es\nprecision highp float;\nuniform highp sampler2D d;\n"
+    "void main() { gl_FragDepth = texelFetch(d, ivec2(gl_FragCoord.xy), 0).r; }\n";
 
 /* the pass's name for a surface's format, -1 when its bits cannot be recovered */
 static int alias_class(const xenos_gl *g, const surface *s)
@@ -2846,6 +2966,82 @@ static void alias_clear(xenos_gl *g, const surface *d, int y0, int y1)
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
 }
 
+/* the multisampled buffer filled from the texture, every sample of a pixel alike: a pass, as a blit cannot write a
+ * multisampled buffer. GLES 3.0 cannot sample stencil: a depth buffer's stencil starts at 0 again (counted once it
+ * had contents). */
+static void surface_reload(xenos_gl *g, surface *s)
+{
+    int hw = s->w * g->scale, hh = s->h * g->scale, depth = s->kind == 2;
+    s->ms_reload = 0;
+    s->ms_dirty = 0;
+    if (depth && !g->zprog && !g->zprog_failed) {
+        GLuint v = compile(g, GL_VERTEX_SHADER, DEPTH_VS, "MSAA reload vs");
+        GLuint f = compile(g, GL_FRAGMENT_SHADER, RELOAD_DEPTH_FS, "MSAA reload fs");
+        GLint ok = 0;
+        if (v && f) {
+            g->zprog = g->glCreateProgram();
+            g->glAttachShader(g->zprog, v);
+            g->glAttachShader(g->zprog, f);
+            g->glLinkProgram(g->zprog);
+            g->glGetProgramiv(g->zprog, GL_LINK_STATUS, &ok);
+        }
+        if (v)
+            g->glDeleteShader(v);
+        if (f)
+            g->glDeleteShader(f);
+        if (!ok) {
+            if (g->zprog)
+                g->glDeleteProgram(g->zprog);
+            g->zprog = 0;
+            g->zprog_failed = 1;
+        }
+    }
+    if (depth ? !g->zprog : !alias_program(g)) {
+        g->st.edram_stale++;
+        return;
+    }
+    GLenum att = depth ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, s->rb);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glDisable(GL_BLEND);
+    g->glDisable(GL_STENCIL_TEST);
+    g->glDisable(GL_CULL_FACE);
+    g->glViewport(0, 0, hw, hh);
+    g->glActiveTexture(GL_TEXTURE0);
+    g->glBindTexture(GL_TEXTURE_2D, s->tex);
+    g->glBindVertexArray(g->vao);
+    if (depth) {
+        static const GLenum none = 0;
+        g->glDrawBuffers(1, &none);
+        g->glEnable(GL_DEPTH_TEST);
+        g->glDepthFunc(GL_NEVER + 7 /* GL_ALWAYS */);
+        g->glDepthMask(1);
+        g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+        g->glClearStencil(0);
+        g->glClear(GL_STENCIL_BUFFER_BIT);
+        g->glUseProgram(g->zprog);
+        g->glUniform1i(g->glGetUniformLocation(g->zprog, "d"), 0);
+        if (s->written)
+            g->st.edram_stale++;
+    } else {
+        static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+        g->glDrawBuffers(1, &b0);
+        g->glDisable(GL_DEPTH_TEST);
+        g->glColorMask(1, 1, 1, 1);
+        g->glUseProgram(g->aprog);
+        g->glUniform1i(g->glGetUniformLocation(g->aprog, "t"), 0);
+        g->glUniform3i(g->aprog_off, 0, 0, 0);
+        g->glUniform1i(g->aprog_sc, -1);
+        g->glUniform1i(g->aprog_dc, -1);
+    }
+    g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+    g->glDisable(GL_DEPTH_TEST);
+    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
+}
+
 static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
 {
     surface *d = &g->surf[si];
@@ -2875,6 +3071,10 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
             g->st.edram_stale++;
             continue;
         }
+        surface_flush(g, &g->surf[s - g->surf]); /* the source's samples resolved, this surface's own rows kept */
+        surface_flush(g, d);
+        if (d->rb)
+            d->ms_reload = 1;
         uint32_t sper = surface_row_tiles(s);
         int64_t tiles = (int64_t)s->base - (int64_t)d->base;
         int same_grid = s->pitch == d->pitch && s->msaa == d->msaa && sper == dper && tiles % (int64_t)dper == 0;
@@ -3013,6 +3213,7 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
         unsupported(g, "resolve of constant one"); /* the clears below still happen; 3 is no copy at all */
     int si = resolve_source(g, cp, src);
     surface *s = &g->surf[si];
+    surface_flush(g, s); /* multisampled: the samples averaged into the picture the copy reads */
     x0 = x0 < 0 ? 0 : x0, y0 = y0 < 0 ? 0 : y0;
     x1 = x1 > s->w ? s->w : x1, y1 = y1 > s->h ? s->h : y1;
     if (x1 <= x0 || y1 <= y0) {
@@ -3128,7 +3329,17 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
         if (clear_c && src < 4) { /* the resolved render target (none when the source is depth) */
             float colour[4];
             clear_colour(s->fmt, cp->regs[0x231E], cp->regs[0x231F], colour);
-            g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
+            if (s->rb) {
+                if (s->ms_reload)
+                    surface_reload(g, s);
+                g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+                g->glEnable(GL_SCISSOR_TEST);
+                g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
+                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s->rb);
+                s->ms_dirty = 1;
+            } else {
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
+            }
             static const GLenum b0 = GL_COLOR_ATTACHMENT0;
             g->glDrawBuffers(1, &b0);
             g->glColorMask(1, 1, 1, 1);
@@ -3140,7 +3351,19 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
         if (clear_d) {
             int di = resolve_source(g, cp, 4);
             uint32_t dc = cp->regs[0x231D];
-            g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g->surf[di].tex, 0);
+            surface *ds = &g->surf[di];
+            if (ds->rb) {
+                if (ds->ms_reload)
+                    surface_reload(g, ds);
+                ds->ms_dirty = 1;
+            }
+            g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+            g->glEnable(GL_SCISSOR_TEST);
+            g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
+            if (ds->rb)
+                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ds->rb);
+            else
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds->tex, 0);
             g->glDepthMask(1);
             g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
             g->glClearDepthf((float)(dc >> 8) / 16777215.0f);
@@ -3560,7 +3783,8 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
             fw = g->width, fh = g->height, swizzle = ident;
     }
     if (!done && !src && g->cur[0] >= 0 && g->surf[g->cur[0]].tex) { /* render target 0 as it stands */
-        const surface *s = &g->surf[g->cur[0]];
+        surface *s = &g->surf[g->cur[0]];
+        surface_flush(g, s);
         src = s->tex, src_fmt = s->ifmt;
         fw = fw < s->w ? fw : s->w, fh = fh < s->h ? fh : s->h;
         swizzle = ident;
@@ -3616,8 +3840,10 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
         if (g->cur[i] >= 0) {
             static const GLfloat black[4] = {0, 0, 0, 1};
             g->glClearBufferfv(0x1800 /* GL_COLOR */, i, black);
+            g->surf[g->cur[i]].ms_dirty = g->cur_ms;
         }
     if (g->cur_ds >= 0) {
+        g->surf[g->cur_ds].ms_dirty = g->cur_ms;
         g->glClearDepthf(1.0f);
         g->glClearStencil(0);
         g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);

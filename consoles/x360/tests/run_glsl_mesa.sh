@@ -34,7 +34,7 @@ cid=$(docker create --network none -e PYTHONDONTWRITEBYTECODE=1 -e EGL_PLATFORM=
     echo "== the same at an internal resolution of 2"
     XENOS_DRAW_SCALE=2 /tmp/xenos_draw_test /tmp/draw || exit 1
     echo "== the same with the GLES 3.1 paths off (the GLES 3.0 fallbacks)"
-    RECOMP_X360_MEMEXPORT=0 /tmp/xenos_draw_test /tmp/draw')
+    RECOMP_X360_MEMEXPORT=0 RECOMP_X360_MSAA=0 /tmp/xenos_draw_test /tmp/draw')
 tar -C "$repo" --exclude=__pycache__ -cf - consoles/x360/tests/xenos_glsl_run.c consoles/x360/tests/xenos_draw_test.c \
     consoles/x360/tests/make_draw.py consoles/x360/runtime/xenos_cp.c consoles/x360/runtime/xenos_cp.h \
     consoles/x360/runtime/xenos_gl.c consoles/x360/runtime/xenos_gl.h consoles/x360/tools tools/__init__.py \

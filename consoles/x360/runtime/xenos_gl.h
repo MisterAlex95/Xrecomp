@@ -28,10 +28,9 @@
  * depth / stencil target stand for the eDRAM (no eDRAM model: surface pitch, base, formats, MSAA ignored;
  * RB_COLOR_MASK's target 0 bits apply to all four: GLES 3.0 has no per-target mask).
  *
- * Not there yet: the eDRAM model (render target bases, formats, MSAA), the other resolve formats, mips, the other
- * texture formats, vertex fetches at a computed index (instancing), memory export, the
- * viewport's exact conventions (the scale / offset registers map to glViewport when enabled). A Vulkan back end (the
- * epic's plan) would take the same state; the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
+ * The eDRAM model, its aliasing between formats, MSAA and the rest are described where they live, in xenos_gl.c. Every
+ * draw that cannot be handled is counted in `unsupported` with a reason (xenos_gl_unsupported_reason). A Vulkan back end
+ * (the epic's plan) would take the same state; the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
 #ifndef XENOS_GL_H
 #define XENOS_GL_H
 
@@ -66,6 +65,7 @@ typedef struct xenos_gl_stats {
     uint64_t memexport_skipped;    /* shaders not run: memory export without GLES 3.1 vertex storage blocks */
     uint64_t edram_reinterpreted;  /* XBA-296: surfaces given what another format / position left in their eDRAM */
     uint64_t edram_stale;          /* overlaps that could not be carried over: the rows cleared (colour / depth: kept) */
+    uint64_t msaa_surfaces;        /* render targets with a multisampled buffer */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

@@ -1331,6 +1331,44 @@ int main(int argc, char **argv)
 #undef FILL
     }
 
+    /* MSAA: a 4x target at tile 0x500: a triangle's diagonal edge resolves to values between red and black where the
+     * driver gives multisampled buffers; inside and outside are exact either way (RECOMP_X360_MSAA=0: the fallback) */
+    {
+        xenos_gl_stats m0, m1;
+        xenos_gl_get_stats(g, &m0);
+        reg(0x2000, 64u | 2u << 16), reg(0x2001, 0x500u), reg(0x2002, 0x540u);
+        black();
+        vertex(0x41200, -1, -1, 1, 0, 0), vertex(0x41220, 1, -1, 1, 0, 0), vertex(0x41240, -1, 1, 1, 0, 0);
+        reg(0x4800, 0x41200u | 3u);
+        reg(0x4801, 2u | (24u << 2));
+        type3(PM4_DRAW_INDX_2, &init, 1);
+        reg(0x4800, 0x7000u | 3u);
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);
+        reg(0x2318, 0u);
+        reg(0x2319, 0x4E000);
+        reg(0x231A, W | (uint32_t)H << 16);
+        reg(0x231B, 2u | 6u << 7);
+        type3(PM4_DRAW_INDX_2, &rect, 1);
+        reg(0x2208, 4);
+        reg(0x2000, 0), reg(0x2001, 0), reg(0x2002, 0);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        xenos_gl_get_stats(g, &m1);
+        int between = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                uint32_t r = rd32(NULL, 0x4E000 + tiled_off(x, y)) & 0xFF;
+                between += r > 20 && r < 235;
+            }
+        uint32_t inside = rd32(NULL, 0x4E000 + tiled_off(8, 55)) & 0xFF, outside = rd32(NULL, 0x4E000 + tiled_off(55, 8)) & 0xFF;
+        CHECK(inside == 255 && outside == 0, "MSAA target: inside %u, outside %u", inside, outside);
+        if (m1.msaa_surfaces > m0.msaa_surfaces)
+            CHECK(between >= 16, "MSAA target: %d edge pixels between red and black", between);
+        else
+            printf("MSAA: no multisampled buffers here, drawn single-sampled (fallback)\n");
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;
