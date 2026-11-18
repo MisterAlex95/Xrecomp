@@ -20,6 +20,10 @@
  *   3. SignalState written to 1 by the title counts: XDK code sets and clears
  *      events by writing the header, not only through the kernel.
  *   4. A notification event stays set across two waits; KeResetEvent clears it.
+ *
+ *   timers         KeSetTimer / KeSetTimerEx, read back through the timer
+ *                  thread's firing pass on a clock the test gives. Timers are
+ *                  armed an hour ahead, so the real thread never fires them.
  */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -45,13 +49,18 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NUL
 
 extern recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
 
-enum { S_SET, S_WAIT, S_RESET, S_MULTI, S_INIT, N_SLOTS };
+enum { S_SET, S_WAIT, S_RESET, S_MULTI, S_INIT, S_SET_TIMER, S_SET_TIMER_EX,
+       S_DOWNCASE, S_UPCASE, N_SLOTS };
 static const uint32_t ORD[N_SLOTS] = {
     145,   /* KeSetEvent */
     159,   /* KeWaitForSingleObject */
     138,   /* KeResetEvent */
     158,   /* KeWaitForMultipleObjects */
     108,   /* KeInitializeEvent */
+    149,   /* KeSetTimer */
+    150,   /* KeSetTimerEx */
+    276,   /* RtlDowncaseUnicodeString */
+    314,   /* RtlUpcaseUnicodeString */
 };
 
 #define STATUS_TIMEOUT 0x00000102u
@@ -68,6 +77,9 @@ static uint32_t scratch;                 /* guest VA of a 64 KB block */
 #define FRESH_A (scratch + 0x3500)
 #define FRESH_B (scratch + 0x3600)
 #define EXPLICIT_B (scratch + 0x3700)
+#define TIMER_VA (scratch + 0x3B00)
+
+#define ONE_HOUR_100NS 36000000000LL
 
 static uint32_t slot_va[N_SLOTS];
 static int failures;
@@ -142,6 +154,33 @@ static void ke_init(uint32_t va)
     call(S_INIT, 3, args);
 }
 
+/* Arm TIMER_VA; a negative due time is relative, in 100 ns units. */
+static void ke_set_timer_ex(long long due_100ns, uint32_t period_ms)
+{
+    uint32_t args[5] = { TIMER_VA, (uint32_t)due_100ns,
+                         (uint32_t)((uint64_t)due_100ns >> 32), period_ms, 0 };
+    call(S_SET_TIMER_EX, 5, args);
+}
+
+/* When the armed timer is due, on the kernel's timer clock. */
+static long long timer_due(void)
+{
+    long long next = -1;
+    xbox_TimerFireForTest(0, &next);
+    return next;
+}
+
+static void timers_seam(void)
+{
+    long long due, next = -1;
+
+    ke_set_timer_ex(-ONE_HOUR_100NS, 0);
+    due = timer_due();
+    check(due > 0, "an armed timer is reported by the firing pass", NULL);
+    check(xbox_TimerFireForTest(due - 1, &next) == 0 && next == due,
+          "it does not fire before its due time", NULL);
+}
+
 static unsigned char *load_file(const char *path, size_t *len)
 {
     FILE *f = fopen(path, "rb");
@@ -167,6 +206,7 @@ int main(int argc, char **argv)
     const char *mode = argc > 1 ? argv[1] : "off";
     const char *path = argc > 2 ? argv[2] : "tools/conformance/test.xbe";
     int on = !strcmp(mode, "title-kevents");
+    int timers = !strcmp(mode, "timers");
     size_t xbe_len = 0;
     unsigned char *xbe;
     char d[160];
@@ -174,7 +214,7 @@ int main(int argc, char **argv)
     int i;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (!on && strcmp(mode, "off")) {
+    if (!on && !timers && strcmp(mode, "off")) {
         printf("unknown mode '%s'\n", mode);
         return 2;
     }
@@ -209,6 +249,13 @@ int main(int argc, char **argv)
     }
     G(ZERO_VA)[0] = G(ZERO_VA)[1] = 0;
     printf("mode: %s\n", mode);
+
+    if (timers) {
+        timers_seam();
+        /* The timer thread is still running: no layout shutdown under it. */
+        printf("\n%d failure(s)\n", failures);
+        return failures ? 1 : 0;
+    }
 
     ke_init(EXPLICIT_VA);
     ke_init(EXPLICIT_B);

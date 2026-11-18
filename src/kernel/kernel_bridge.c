@@ -4705,6 +4705,16 @@ static int kernel_fire_timers(long long now, long long *next_due_ms)
     return fired;
 }
 
+/* One firing pass at a time the caller gives, for tests/kernel_events: the
+ * real pass runs on the timer thread, against the real clock. */
+int xbox_TimerFireForTest(long long now_ms, long long *next_due_ms)
+{
+    *next_due_ms = -1;
+    if (!g_timer_started)
+        return 0;                       /* no timer armed yet, the lock is not made */
+    return kernel_fire_timers(now_ms, next_due_ms);
+}
+
 
 /* The timer thread's loop: sleep to the earliest of the next vblank edge,
  * the next kernel timer and a 10 ms cap, on the nanosecond clock, then
