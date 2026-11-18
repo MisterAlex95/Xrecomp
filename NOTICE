@@ -298,7 +298,8 @@ Derived algorithms — credited, independently implemented
   consoles/x360/runtime/xenos_gl.c
     tiled2d / tiled3d, the Xenos 2D / 3D tiled texture addressing, follow
     Xenia's src/xenia/gpu/texture_address.h (Tiled2D, Tiled3D, TiledCombine;
-    BSD 3-Clause, Copyright Ben Vanik, LICENSES/BSD-3-Clause-xenia.txt)
+    BSD 3-Clause, Copyright Ben Vanik, its text verbatim in
+    consoles/x360/runtime/LICENSE-xenia.txt: next to the code, which is not in the app)
     closely enough to be treated as derived code. The same file's base level
     texture layout, resolve rectangle and vertex fetch packings, and
     consoles/x360/tools/x360_tools/xenos_glsl.py's instruction semantics, are

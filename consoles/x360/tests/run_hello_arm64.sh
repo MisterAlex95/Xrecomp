@@ -39,9 +39,18 @@ core="$rt/x360_mem.c $rt/x360_load.c $rt/x360_thread.c $rt/x360_kernel.c $rt/x36
       $rt/x360_xam.c $rt/x360_gpu.c $rt/xenos_cp.c $rt/x360_state.c $rt/x360_crypt.c $rt/x360_more.c $rt/x360_input.c
       $rt/xenos_gl.c
       $repo/src/xiso/xiso.c $repo/src/xiso/xiso_source.c"
-for t in x360_hle_test xenos_cp_test; do
+for t in x360_hle_test xenos_cp_test xenos_draw_test; do
     # shellcheck disable=SC2086
     "$cc" -O2 -ffp-contract=off -DXE_RUNTIME=1 -D_GNU_SOURCE -I "$rt" -I "$repo/consoles/gc/runtime" \
         -I "$repo/src/xiso" -o "$work/$t" "$here/$t.c" $core -ldl -lm -lpthread
-    qemu-aarch64 -L "$sysroot" "$work/$t"
+    if [ "$t" = xenos_draw_test ]; then
+        # the renderer: needs make_draw.py's shaders and an arm64 libEGL / libGLESv2 in the sysroot (77 without)
+        PYTHONPATH="$repo/consoles/x360/tools" python3 "$here/make_draw.py" "$work/draw" || exit 1
+        rc=0
+        EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 qemu-aarch64 -L "$sysroot" "$work/$t" "$work/draw" || rc=$?
+        [ "$rc" = 0 ] || [ "$rc" = 77 ] || exit 1
+        [ "$rc" = 0 ] || echo "arm64 (qemu): xenos_draw_test skipped (no arm64 EGL / GLES 3.0 here)"
+    else
+        qemu-aarch64 -L "$sysroot" "$work/$t"
+    fi
 done

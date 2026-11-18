@@ -1,8 +1,8 @@
 /* x360_xam.c -- a first slice of xam.xex (XBA-270): what a title's start-up asks the system before its first
  * frame. Signatures and return values follow Xenia's xam_info.cc / xam_user.cc / xam_input.cc / xam_notify.cc (BSD).
  *
- * The machine looks like a console with user 0 signed in locally ("Player", offline), no controller connected
- * (pads come with the host layer: XBA-229 step 4), English, all regions, HDMI, no launch data, no notifications. */
+ * The machine looks like a console with user 0 signed in locally ("Player", offline), English, all regions, HDMI,
+ * no launch data, no notifications; the controllers are x360_input.c's. */
 #include <string.h>
 
 #include "x360_internal.h"

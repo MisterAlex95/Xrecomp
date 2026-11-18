@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #endif
 #include <dlfcn.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -765,7 +766,7 @@ static int fetch_vertex(const xenos_cp *cp, uint32_t base, uint32_t endian, cons
         return 0;
     }
     if (a->exp_adjust && a->format != 36 && a->format != 37 && a->format != 57 && a->format != 38) {
-        float k = a->exp_adjust > 0 ? (float)(1u << a->exp_adjust) : 1.0f / (float)(1u << -a->exp_adjust);
+        float k = ldexpf(1.0f, a->exp_adjust); /* -32..31: no shift of 32 */
         for (int i = 0; i < 4; i++)
             out[i] *= k;
     }

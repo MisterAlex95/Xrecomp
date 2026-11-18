@@ -41,6 +41,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "xenos_cp.h"
 #include "xenos_gl.h"
@@ -187,6 +189,11 @@ int main(int argc, char **argv)
         printf("skipped: %s\n", why);
         return 77;
     }
+    /* the frames: the first two written as PPM, the rest only counted */
+    char frames[1100];
+    snprintf(frames, sizeof frames, "%s/frames", argv[1]);
+    mkdir(frames, 0755);
+    xenos_gl_set_frames_dir(g, frames, 2);
     uint32_t nvs, nps;
     uint32_t *vs = load(argv[1], "vs.bin", &nvs), *ps = load(argv[1], "ps.bin", &nps);
     if (!vs || !ps) {
@@ -691,6 +698,21 @@ int main(int argc, char **argv)
     const uint8_t *in2 = px(g, 20, 20), *in3 = px(g, 44, 44), *out3 = px(g, 10, 10), *out4 = px(g, 52, 30);
     CHECK(in2[0] == 255 && in3[0] == 255 && out3[0] == 0 && out4[0] == 0,
           "frame 24 (screen space): (20,20) %u (44,44) %u (10,10) %u (52,30) %u", in2[0], in3[0], out3[0], out4[0]);
+
+    /* two PPM frames of 64x64 (header + RGB), not a third */
+    char fp[1200];
+    struct stat sb;
+    int f0, f1, f2;
+    snprintf(fp, sizeof fp, "%s/frame_00000.ppm", frames);
+    f0 = stat(fp, &sb) == 0 && sb.st_size == (off_t)(strlen("P6\n64 64\n255\n") + W * H * 3);
+    unlink(fp);
+    snprintf(fp, sizeof fp, "%s/frame_00001.ppm", frames);
+    f1 = stat(fp, &sb) == 0;
+    unlink(fp);
+    snprintf(fp, sizeof fp, "%s/frame_00002.ppm", frames);
+    f2 = stat(fp, &sb) == 0;
+    rmdir(frames);
+    CHECK(f0 && f1 && !f2, "PPM frames: first %d, second %d, third (over the limit) %d", f0, f1, f2);
 
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);

@@ -1,5 +1,6 @@
 /* x360_gpu.c -- the GPU as the CPU sees it (XBA-270): the Vd* kernel calls, the register page and the command
- * processor (xenos_cp.c) fed from the title's ring buffer. No rendering yet (XBA-229 step 3).
+ * processor (xenos_cp.c) fed from the title's ring buffer, and the renderer (xenos_gl.c) when x360_set_renderer
+ * attached one.
  *
  * The GPU's registers sit at 0x7FC80000 + 4 * index (Xenia's MMIO range). Here that page is ordinary memory: a
  * title's store to CP_RB_WPTR lands there and the scheduler, between time slices, sees the write pointer move and
@@ -7,7 +8,8 @@
  * Registers titles poll get plausible values written into the page (the vertical counter moves with time).
  * Vertical blank: every 1/60 s of virtual time, when the title registered a graphics interrupt callback, the
  * callback runs on a short-lived guest thread (r3 = 0: vblank, r4 = its user data), as an interrupt would;
- * PM4_INTERRUPT packets do the same with r3 = 1. The front buffer of each VdSwap is recorded (and traced). */
+ * PM4_INTERRUPT packets do the same with r3 = 1. VdSwap puts the front buffer's fetch constant and the swap token in
+ * the ring; the front buffer of each swap is recorded (and traced). */
 #include <stdlib.h>
 #include <string.h>
 
