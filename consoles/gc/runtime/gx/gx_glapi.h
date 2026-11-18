@@ -106,7 +106,10 @@ typedef struct __GLsync *GLsync;
 #define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
 #define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
 #define GL_MAP_WRITE_BIT 0x0002
+#define GL_MAP_INVALIDATE_RANGE_BIT 0x0004
 #define GL_MAP_INVALIDATE_BUFFER_BIT 0x0008
+#define GL_MAP_UNSYNCHRONIZED_BIT 0x0020
+#define GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT 0x8A34
 #define GL_PROGRAM_BINARY_RETRIEVABLE_HINT 0x8257
 #define GL_COMPLETION_STATUS_KHR 0x91B1
 #define GL_PROGRAM_BINARY_LENGTH 0x8741
@@ -180,6 +183,9 @@ typedef struct __GLsync *GLsync;
     X(void, glBindBuffer, (GLenum, GLuint)) \
     X(void, glBufferData, (GLenum, GLsizeiptr, const void *, GLenum)) \
     X(void, glBufferSubData, (GLenum, GLintptr, GLsizeiptr, const void *)) \
+    X(void *, glMapBufferRange, (GLenum, GLintptr, GLsizeiptr, GLbitfield)) \
+    X(GLboolean, glUnmapBuffer, (GLenum)) \
+    X(void, glBindBufferRange, (GLenum, GLuint, GLuint, GLintptr, GLsizeiptr)) \
     X(void, glGenVertexArrays, (GLsizei, GLuint *)) \
     X(void, glBindVertexArray, (GLuint)) \
     X(void, glDeleteVertexArrays, (GLsizei, const GLuint *)) \
