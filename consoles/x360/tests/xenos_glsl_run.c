@@ -133,7 +133,10 @@ static void run_vertex(const char *dir, int n, const char *src)
     }
     static const char fs_src[] =
         "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(0); }\n";
-    GLuint vs = shader(GL_VERTEX_SHADER, src, n), fs = shader(GL_FRAGMENT_SHADER, fs_src, n);
+    static const char fs_src31[] = /* a GLSL ES 3.10 vertex shader (memory export) links with a 3.10 one only */
+        "#version 310 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(0); }\n";
+    GLuint vs = shader(GL_VERTEX_SHADER, src, n);
+    GLuint fs = shader(GL_FRAGMENT_SHADER, strncmp(src, "#version 310 es", 15) ? fs_src : fs_src31, n);
     if (!vs || !fs) {
         free(in);
         return;
@@ -166,11 +169,41 @@ static void run_vertex(const char *dir, int n, const char *src)
     glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
     glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, 16 * nout, NULL, GL_STATIC_READ);
     glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
+    /* XBA-282: a memory export shader (GLSL ES 3.10) logs (address, dword) pairs into a storage buffer at binding 0:
+     * printed after the feedback as "N mem COUNT ADDR VALUE..." */
+    GLuint mx = 0;
+    int memexport = strstr(src, "XeMemExport") != NULL;
+    if (memexport) {
+        uint32_t init[2 + 2 * 64] = {0, 64};
+        glGenBuffers(1, &mx);
+        glBindBuffer(0x90D2 /* GL_SHADER_STORAGE_BUFFER */, mx);
+        glBufferData(0x90D2, sizeof init, init, GL_DYNAMIC_READ);
+        glBindBufferBase(0x90D2, 0, mx);
+    }
     glEnable(GL_RASTERIZER_DISCARD);
     glBeginTransformFeedback(GL_POINTS);
     glDrawArrays(GL_POINTS, 0, 1);
     glEndTransformFeedback();
     glDisable(GL_RASTERIZER_DISCARD);
+    if (memexport) {
+        void (*barrier)(GLbitfield) = (void (*)(GLbitfield))eglGetProcAddress("glMemoryBarrier");
+        if (barrier)
+            barrier(0xFFFFFFFFu);
+        glBindBuffer(0x90D2, mx);
+        const uint32_t *m = glMapBufferRange(0x90D2, 0, 8 + 8 * 64, GL_MAP_READ_BIT);
+        if (m) {
+            uint32_t cnt = m[0] < 64 ? m[0] : 64;
+            printf("%d mem %u", n, m[0]);
+            for (uint32_t i = 0; i < 2 * cnt; i++)
+                printf(" %08x", m[2 + i]);
+            printf("\n");
+            glUnmapBuffer(0x90D2);
+        } else {
+            printf("%d error\ncannot map the memory export buffer (0x%x)\n", n, glGetError());
+        }
+        glDeleteBuffers(1, &mx);
+        glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
+    }
     const uint32_t *out = glMapBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 16 * nout, GL_MAP_READ_BIT);
     if (!out) {
         printf("%d error\ncannot map the feedback buffer (0x%x)\n", n, glGetError());
