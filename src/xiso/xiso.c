@@ -45,9 +45,10 @@
 static const char XISO_MAGIC[20] = { 'M','I','C','R','O','S','O','F','T','*','X','B','O','X','*','M','E','D','I','A' };
 
 /* Game partition bases, probed in order (same list as tools/xiso/xdvdfs.py). */
-/* 0x02080000: Xbox 360 XGD3 discs (XBA-270; XGD2 is 0x0FD90000), the Xbox 360 runtime's disc images. */
+/* The Xbox 360 runtime's disc images (XBA-270): 0x02080000 (XGD3; XGD2 is 0x0FD90000), 0x0000FB20 and 0x00020600
+ * (rebuilt images), the offsets Xenia's disc image device probes, after the original Xbox's. */
 static const uint64_t BASES[] = { 0x00000000ull, 0x0000FD90ull, 0x00030600ull, 0x0FD90000ull, 0x18300000ull,
-                                  0x02080000ull };
+                                  0x02080000ull, 0x0000FB20ull, 0x00020600ull };
 
 typedef struct {
     uint32_t sector, size;

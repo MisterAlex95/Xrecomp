@@ -262,7 +262,12 @@ Xbox 360 — references (no code taken)
   consoles/x360 and tools/xex follow Xenia (https://github.com/xenia-project/
   xenia, BSD 3-Clause, Copyright Ben Vanik and contributors) for the XEX2
   layout, kernel / XAM signatures and structure layouts, the VMX128
-  encodings and pack formats, and the Xenos PM4 packet formats.
+  encodings and pack formats, the Xenos PM4 packet formats and registers,
+  the shader microcode instruction semantics that xenos_glsl.py translates
+  (ucode.h's descriptions: scalar operands, Direct3D 9 multiplication,
+  predicates, control flow, loop constants, cube) and the disc partition
+  offsets src/xiso probes (disc_image_device.cc). The renderer's tests run on
+  Mesa llvmpipe (MIT) in a container, as a tool: none of its code is here.
   consoles/x360/runtime/x360_exports.inc is a list of (library, ordinal,
   name, kind) made by x360_tools/gen_exports.py from Xenia's
   xboxkrnl_table.inc and xam_table.inc: the console's ABI, with Xenia
