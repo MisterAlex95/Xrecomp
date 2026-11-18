@@ -120,9 +120,11 @@ endif()
 # n64_pack: an N64 title pack, the runtime's side (pack.json checks, the ROM's identity, dlopen of the table, the
 # discovered code written at exit; n64_pack.h, XBA-174). No SDL: the tests link it alone.
 if(NOT TARGET n64_pack)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../../../src/platform/console_pack.cmake)
     add_library(n64_pack STATIC n64_pack.c)
     target_include_directories(n64_pack PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(n64_pack PUBLIC n64_core ${CMAKE_DL_LIBS})
+    target_link_libraries(n64_pack PRIVATE console_pack)
     target_compile_options(n64_pack PRIVATE -Wall -Wextra)
     set_target_properties(n64_pack PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
