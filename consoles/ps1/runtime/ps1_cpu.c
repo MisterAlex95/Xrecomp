@@ -1676,6 +1676,343 @@ static inline __attribute__((always_inline)) void run_fast(ps1_machine *m, const
  * compared with. */
 void ps1_cpu_set_reference(ps1_machine *m, int on) { m->interp_ref = on != 0; }
 
+/* ---- The HLE kernel's RAM code (XBA-279) ----
+ * Under the HLE BIOS every interrupt runs the exception vector, the kernel's handler chain walk (ps1_hle.c
+ * write_exception_handler) and its trap stubs: a few dozen instructions in the first 64 KB, cut into blocks of two or
+ * three by the branches, with a trap (a C call) every few. The block loop paid a lookup per block and step() per trap:
+ * about a fifth of a frame of a game with a fast timer interrupt. ps1_cpu_run_kernel steps that code in a loop of its
+ * own instead, for the instructions it is made of (SLL, ADDU, JR, JALR, ADDIU, LUI, BEQ, BNE, LW from main RAM or the
+ * scratchpad, the trap word). Each word is read from RAM as it runs (a game that patches the vector or the handler
+ * runs its own words; any other instruction, or a load elsewhere, goes to step()), and each one changes every field
+ * exactly as step() does (the scratch fields cur_pc / in_delay / branch_taken / pend_* included, the same cycles),
+ * with the run loop's checks between two (the next event, an interrupt, the hook address). The machine, its states
+ * and frames stay byte-identical; the reference loop (interp_ref) never takes this path. Returns the number of
+ * instructions run, 0 when step() must run the one at pc. */
+static inline bool kernel_pc(uint32_t pc)
+{
+    return (pc & 0x7FFF0003u) == 0; /* KUSEG / KSEG0, below 64 KB, aligned: step() fetches it from RAM at CPI_RAM */
+}
+
+/* The exception vector and the handler, while they hold the words kernel set-up wrote (ps1_hle.c s_exc_code): they
+ * then run as the C below, one macro per instruction doing what step() does (on locals: pc, the delay and load
+ * slots, the clock), with the run loop's time check in front of each. It leaves at a jump out of the listing (to a
+ * verifier or a handler: a trap stub, or a program's function), at a trap (ENTER, LEAVE: the loop below runs it) and
+ * when the time is up, wherever that falls; the machine is then exactly as step()'s loop leaves it there. */
+#define EXC_PC(i) (PS1_HLE_EXC + 4u * (uint32_t)(i)) /* KUSEG: the vector jumps to k0 = 0x00000C80 */
+
+static bool exc_intact(ps1_machine *m)
+{
+    /* the words are compared again only after a write into their RAM pages (ram_gen: every store, DMA and state load
+     * moves them) */
+    const uint32_t g0 = m->ram_gen[0x80 >> PS1_RAM_PAGE_SHIFT], g1 = m->ram_gen[PS1_HLE_EXC >> PS1_RAM_PAGE_SHIFT];
+    if (m->exc_checked && g0 == m->exc_gen[0] && g1 == m->exc_gen[1])
+        return m->exc_ok;
+    static const uint32_t vec[4] = {0x3C1A0000u, 0x275A0000u | PS1_HLE_EXC, 0x03400008u, 0}; /* lui, addiu, jr k0, nop */
+    const uint32_t *code = ps1_hle_exc_code();
+    bool ok = true;
+    for (int i = 0; i < 4 && ok; i++)
+        ok = rd32le(m->ram + 0x80 + 4 * i) == vec[i];
+    for (int i = 0; i < PS1_HLE_EXC_WORDS && ok; i++)
+        ok = rd32le(m->ram + PS1_HLE_EXC + 4 * i) == code[i];
+    m->exc_checked = true;
+    m->exc_gen[0] = g0;
+    m->exc_gen[1] = g1;
+    m->exc_ok = ok;
+    return ok;
+}
+
+static int exc_walk(ps1_machine *m)
+{
+    uint32_t *const R = m->r;
+    const uint8_t *const ram = m->ram;
+    uint32_t pc = m->pc, npc = m->next_pc, cur = m->cur_pc, hook = m->hook_at;
+    uint32_t ldr = m->ld_reg, ldv = m->ld_val, pr = m->pend_reg, pv = m->pend_val;
+    bool ind = m->in_delay, bt = m->branch_taken, nd = m->next_delay, nt = m->next_taken;
+    uint64_t cyc = m->cycles;
+    const uint64_t nev = m->next_event;
+    int n = 0;
+
+/* The run loop's check in front of every instruction but the first (the caller made that one). */
+#define K_CHECK()                                                                                                      \
+    do {                                                                                                               \
+        if (n && cyc >= nev)                                                                                           \
+            goto out;                                                                                                  \
+    } while (0)
+/* step()'s prologue and fetch (KSEG0 main RAM: CPI_RAM), its epilogue (the previous instruction's load lands). */
+#define K_PRO() (cur = pc, ind = nd, bt = nt, nd = false, nt = false, pr = ldr, pv = ldv, ldr = 0, cyc += CPI_RAM,      \
+                 pc = npc, npc += 4, n++)
+#define K_EPI() (R[pr] = pv, R[0] = 0)
+#define K_WR(d, v)                                                                                                     \
+    do {                                                                                                               \
+        R[d] = (v);                                                                                                    \
+        if ((d) == pr)                                                                                                 \
+            pr = 0;                                                                                                    \
+    } while (0)
+#define K_JUMP(t)                                                                                                      \
+    do {                                                                                                               \
+        uint32_t t_ = (t), p_ = t_ & 0x1FFFFFFFu;                                                                      \
+        npc = t_;                                                                                                      \
+        nt = true;                                                                                                     \
+        if (p_ == 0xA0 || p_ == 0xB0 || p_ == 0x00030000u)                                                             \
+            hook = t_;                                                                                                 \
+    } while (0)
+#define K_NOP()                                                                                                        \
+    do {                                                                                                               \
+        K_CHECK();                                                                                                     \
+        K_PRO();                                                                                                       \
+        K_WR(0, 0);                                                                                                    \
+        K_EPI();                                                                                                       \
+    } while (0)
+#define K_ALU(d, v)                                                                                                    \
+    do {                                                                                                               \
+        K_CHECK();                                                                                                     \
+        K_PRO();                                                                                                       \
+        K_WR(d, v);                                                                                                    \
+        K_EPI();                                                                                                       \
+    } while (0)
+#define K_LW(t, s, off)                                                                                                \
+    do {                                                                                                               \
+        K_CHECK();                                                                                                     \
+        uint32_t a_ = R[s] + (uint32_t)(off), v_;                                                                      \
+        if (a_ & 3)                                                                                                    \
+            goto out; /* an address error: step() */                                                                   \
+        if (RAM_LOAD32_OK(a_)) {                                                                                       \
+            K_PRO();                                                                                                   \
+            v_ = rd32le(ram + (phys_of(a_) & 0x1FFFFCu));                                                              \
+            cyc += LOAD_RAM;                                                                                           \
+        } else if (SCRATCH_LOAD32_OK(a_)) {                                                                            \
+            K_PRO();                                                                                                   \
+            v_ = rd32le(m->scratch + (phys_of(a_) & 0x3FCu));                                                          \
+        } else {                                                                                                       \
+            goto out; /* the bus: step() */                                                                            \
+        }                                                                                                              \
+        if ((t) == pr)                                                                                                 \
+            pr = 0;                                                                                                    \
+        ldr = (t);                                                                                                     \
+        ldv = v_;                                                                                                      \
+        K_EPI();                                                                                                       \
+    } while (0)
+#define K_BR(cond, i)                                                                                                  \
+    do {                                                                                                               \
+        K_CHECK();                                                                                                     \
+        K_PRO();                                                                                                       \
+        nd = true;                                                                                                     \
+        if (cond)                                                                                                      \
+            K_JUMP(EXC_PC(i));                                                                                         \
+        K_EPI();                                                                                                       \
+    } while (0)
+#define K_JALR(s)                                                                                                      \
+    do {                                                                                                               \
+        K_CHECK();                                                                                                     \
+        K_PRO();                                                                                                       \
+        uint32_t jt_ = R[s];                                                                                           \
+        K_WR(31, pc + 4);                                                                                              \
+        nd = true;                                                                                                     \
+        K_JUMP(jt_);                                                                                                   \
+        K_EPI();                                                                                                       \
+    } while (0)
+
+    if (nd || npc != pc + 4)
+        return 0; /* entered in a delay slot or after a jump (a state load, a program jumping in): step() */
+    switch (pc) {
+    case 0x80000080u: goto l_vec;
+    case EXC_PC(1): goto l_pl;
+    case EXC_PC(11): goto l_ret;
+    case EXC_PC(17): goto l_nh;
+    default: return 0;
+    }
+l_vec: /* lui k0, 0; addiu k0, k0, K_EXC; jr k0; nop: on to ENTER */
+    K_ALU(26, 0);
+    K_ALU(26, R[26] + PS1_HLE_EXC);
+    K_CHECK();
+    K_PRO();
+    nd = true;
+    K_JUMP(R[26]);
+    K_EPI();
+    K_NOP();
+    goto out;
+l_pl: /* 1: the priority's chain */
+    K_LW(22, 19, 0);
+    K_NOP();
+    K_BR(R[22] == R[0], 21);
+    K_NOP();
+    if (pc == EXC_PC(21))
+        goto l_np;
+l_hl: /* 5: a node: its verifier */
+    K_LW(17, 22, 8);
+    K_LW(16, 22, 4);
+    K_BR(R[17] == R[0], 17);
+    K_NOP();
+    if (pc == EXC_PC(17))
+        goto l_nh;
+    K_JALR(17);
+    K_NOP();
+    goto out;
+l_ret: /* 11: back from the verifier: its handler with v0 when v0 != 0 */
+    K_BR(R[2] == R[0], 17);
+    K_NOP();
+    if (pc == EXC_PC(17))
+        goto l_nh;
+    K_BR(R[16] == R[0], 17);
+    K_ALU(4, R[2] + R[0]);
+    if (pc == EXC_PC(17))
+        goto l_nh;
+    K_JALR(16);
+    K_NOP();
+    goto out;
+l_nh: /* 17: the next node */
+    K_LW(22, 22, 0);
+    K_NOP();
+    K_BR(R[22] != R[0], 5);
+    K_NOP();
+    if (pc == EXC_PC(5))
+        goto l_hl;
+l_np: /* 21: the next priority, else LEAVE */
+    K_ALU(19, R[19] + 8);
+    K_BR(R[20] != R[19], 1);
+    K_NOP();
+    if (pc == EXC_PC(1))
+        goto l_pl;
+out:
+    m->pc = pc;
+    m->next_pc = npc;
+    m->cur_pc = cur;
+    m->hook_at = hook;
+    m->ld_reg = ldr;
+    m->ld_val = ldv;
+    m->pend_reg = pr;
+    m->pend_val = pv;
+    m->in_delay = ind;
+    m->branch_taken = bt;
+    m->next_delay = nd;
+    m->next_taken = nt;
+    m->cycles = cyc;
+    return n;
+#undef K_CHECK
+#undef K_PRO
+#undef K_EPI
+#undef K_WR
+#undef K_JUMP
+#undef K_NOP
+#undef K_ALU
+#undef K_LW
+#undef K_BR
+#undef K_JALR
+}
+
+int ps1_cpu_run_kernel(ps1_machine *m)
+{
+    int n = 0;
+    if (!m->hle || m->interp_ref)
+        return 0;
+    for (;;) {
+        uint32_t pc = m->pc;
+        if (!kernel_pc(pc) || (m->cop0[C0_SR] & SR_KUC))
+            break;
+        if (n && (m->cycles >= m->next_event || m->irq_pending || pc == m->hook_at))
+            break;
+        if ((pc == 0x80000080u || pc == EXC_PC(1) || pc == EXC_PC(11) || pc == EXC_PC(17)) && exc_intact(m)) {
+            int k = exc_walk(m);
+            if (k) {
+                n += k;
+                continue;
+            }
+        }
+        uint32_t ins = rd32le(m->ram + (pc & 0xFFFCu));
+        uint32_t rs = (ins >> 21) & 31, rt = (ins >> 16) & 31, rd = (ins >> 11) & 31;
+        uint32_t addr = 0;
+        enum { O_SLL, O_ADDU, O_JR, O_JALR, O_ADDIU, O_LUI, O_BEQ, O_BNE, O_LW, O_TRAP } k;
+        switch (ins >> 26) {
+        case 0x00:
+            switch (ins & 63) {
+            case 0x00: k = O_SLL; break;
+            case 0x21: k = O_ADDU; break;
+            case 0x08: k = O_JR; break;
+            case 0x09: k = O_JALR; break;
+            default: return n;
+            }
+            break;
+        case 0x09: k = O_ADDIU; break;
+        case 0x0F: k = O_LUI; break;
+        case 0x04: k = O_BEQ; break;
+        case 0x05: k = O_BNE; break;
+        case 0x23:
+            addr = m->r[rs] + (uint32_t)(int32_t)(int16_t)ins;
+            if ((addr & 3) || !(RAM_LOAD32_OK(addr) || SCRATCH_LOAD32_OK(addr)))
+                return n; /* an address error or the bus: step() */
+            k = O_LW;
+            break;
+        default:
+            if ((ins & PS1_HLE_TRAP_MASK) != PS1_HLE_TRAP)
+                return n;
+            k = O_TRAP;
+            break;
+        }
+        /* step()'s prologue and fetch */
+        m->cur_pc = pc;
+        m->in_delay = m->next_delay;
+        m->branch_taken = m->next_taken;
+        m->next_delay = false;
+        m->next_taken = false;
+        m->pend_reg = m->ld_reg;
+        m->pend_val = m->ld_val;
+        m->ld_reg = 0;
+        m->cycles += CPI_RAM;
+        m->pc = m->next_pc;
+        m->next_pc += 4;
+        n++;
+        uint32_t v;
+        switch (k) {
+        case O_SLL: wr(m, rd, m->r[rt] << ((ins >> 6) & 31)); break;
+        case O_ADDU: wr(m, rd, m->r[rs] + m->r[rt]); break;
+        case O_JR:
+            m->next_delay = true;
+            jump(m, m->r[rs]);
+            break;
+        case O_JALR:
+            v = m->r[rs];
+            wr(m, rd, m->pc + 4);
+            m->next_delay = true;
+            jump(m, v);
+            break;
+        case O_ADDIU: wr(m, rt, m->r[rs] + (uint32_t)(int32_t)(int16_t)ins); break;
+        case O_LUI: wr(m, rt, (ins & 0xFFFFu) << 16); break;
+        case O_BEQ:
+            m->next_delay = true;
+            if (m->r[rs] == m->r[rt])
+                jump(m, m->pc + ((uint32_t)(int32_t)(int16_t)ins << 2));
+            break;
+        case O_BNE:
+            m->next_delay = true;
+            if (m->r[rs] != m->r[rt])
+                jump(m, m->pc + ((uint32_t)(int32_t)(int16_t)ins << 2));
+            break;
+        case O_LW:
+            if (RAM_LOAD32_OK(addr)) {
+                v = rd32le(m->ram + (phys_of(addr) & 0x1FFFFCu));
+                m->cycles += LOAD_RAM;
+            } else {
+                v = rd32le(m->scratch + (phys_of(addr) & 0x3FCu));
+            }
+            wr_delayed(m, rt, v);
+            break;
+        case O_TRAP:
+            /* step()'s default case: the call runs as one instruction, without the epilogue */
+            if (m->pend_reg)
+                m->r[m->pend_reg] = m->pend_val;
+            m->pend_reg = 0;
+            m->r[0] = 0;
+            ps1_hle_trap(m, ins & 0xFFFFu);
+            m->r[0] = 0;
+            continue;
+        }
+        /* step()'s epilogue: the previous instruction's load lands */
+        m->r[m->pend_reg] = m->pend_val;
+        m->r[0] = 0;
+    }
+    return n;
+}
+
 void ps1_cpu_step_unliftable(ps1_machine *m)
 {
     if (!m->interp_ref) {
@@ -1710,7 +2047,7 @@ void ps1_cpu_run(ps1_machine *m)
             hook(m);
         if (ref)
             slow_step(m);
-        else
+        else if (!(kernel_pc(m->pc) && ps1_cpu_run_kernel(m)))
             run_fast(m, false); /* one instruction at least, then on until the next check this loop makes */
     }
 }

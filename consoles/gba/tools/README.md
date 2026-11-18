@@ -10,7 +10,8 @@ runs on the core in `consoles/gba/runtime` (contract: `gba_recomp.h`, lifted-cod
 | `isa.py` | ARMv4T classification, bit for bit the interpreter's (`gba_cpu.c` `arm_execute` / `thumb_execute`) |
 | `discover.py` | function discovery, data barriers, table islands |
 | `lift.py` | one C function per discovered function |
-| `recomp.py` | the CLI: OUTDIR/gba_rc_AAAAAAAA{a,t}.c (1000-4000 instructions, see « Files ») + gba_rc_table.c |
+| `iwram.py` | code the game copies to IWRAM, lifted from the ROM's bytes (« IWRAM code ») |
+| `recomp.py` | the CLI: OUTDIR/gba_rc_AAAAAAAA{a,t}.c (1000-4000 instructions, see « Files »), gba_rc_iw_*.c + gba_rc_table.c |
 
 ## Discovery
 
@@ -29,11 +30,32 @@ lifted twice. Bodies are cut at 4000 instructions (the rest becomes new function
 contiguous run of a function's instructions, runs cut so they never overlap: the core finds the only function that
 can hold a PC as the run at or before it.
 
-Not lifted: code a game copies to IWRAM / EWRAM (always interpreted; no detection), the BIOS. A pointer the static
+Not lifted: code a game copies to EWRAM or makes at run time, the BIOS (code copied from the ROM to IWRAM is, see
+below). A pointer the static
 pass cannot see (a function table built at run time, a computed jump without a bounded table) is run by the
 interpreter the first time, recorded by the core (`gba_recomp_missed`, written by gba_play / gba_run `--missed` and
 by the app at exit) and lifted by the next build (`--discovered`): `tools/consoles/gba_recomp_build.py --loop N`
 iterates until a run finds nothing new. On our test ROMs it converges in one or two rounds.
+
+## IWRAM code (XBA-279)
+
+Games run their hottest code from IWRAM (the IRQ handler, mixers, rasterisers), copied there from the ROM by crt0 or
+by the game. The core stops where execution enters IWRAM code the pack does not hold (from the BIOS's IRQ entry, from
+the cartridge) and records that address, plus where the cartridge holds the same bytes (the first ROM word, at the
+same offset modulo 4, from which the next 32 bytes match IWRAM's), as a delta record in the discovered list:
+`0xE0000000 | (ROM address - IWRAM address - 0x04FF8000) / 4` (`gba_recomp.h` `GBA_RC_IW_DELTA_ENCODE`; never a code
+address, so the other consumers of the list ignore it). `iwram.py` explores each recorded IWRAM address in the ROM at
+the first recorded distance under which it decodes cleanly (gba_tools' discovery on an `IwramImage`), and lifts it
+with gba_tools' lifter and two overrides: the open-bus latch comes from IWRAM at run time (`RC_IW_AOB` / `RC_IW_TOB`,
+IWRAM's own pattern), and the function enters with `RC_ENTER_IW(T, LO, HI)`, the bytes it was lifted from. PC-relative
+literals in IWRAM are loaded at run time (only cartridge literals fold). The functions go to `gba_rc_iw_*.c`; the table
+(ABI 5) lists their spans with the bytes. The cartridge's functions, files and names are the same with or without.
+
+At run time IWRAM is also data and stack, written by lifted code without the bus, so a span is checked at every call
+into its function (a memcmp of the function's size) and a store of the function's own into its bytes stops it after
+that instruction (the next check leaves; the dispatcher looks at the bytes again). Code that IWRAM got elsewhere
+(generated, decompressed), or that the game patched, stays interpreted. One variant per address: when a game copies
+different code to the same IWRAM addresses, the first that decodes cleanly is lifted and the others are interpreted.
 
 ## Lifting
 

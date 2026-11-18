@@ -1,9 +1,9 @@
 """`python3 -m gba_tools.recomp ROM OUTDIR [--discovered FILE]`: a GBA ROM to C sources (XBA-150 / XBA-151).
 
-Writes OUTDIR/gba_rc_AAAAAAAA{a,t}.c (the lifted functions, each file named after its first one) and
-OUTDIR/gba_rc_table.c (the table, exported as gba_recomp_title_table), nothing else: compile every .c of OUTDIR with
--I consoles/gba/runtime into one shared library (consoles/gba/runtime/gba_recomp.h is the contract). Stale gba_rc_*.c
-files of an earlier run are removed.
+Writes OUTDIR/gba_rc_AAAAAAAA{a,t}.c (the lifted functions, each file named after its first one), with IWRAM code
+the discovered list names (iwram.py) OUTDIR/gba_rc_iw_AAAAAAAA{a,t}.c, and OUTDIR/gba_rc_table.c (the table, exported
+as gba_recomp_title_table), nothing else: compile every .c of OUTDIR with -I consoles/gba/runtime into one shared
+library (consoles/gba/runtime/gba_recomp.h is the contract). Stale gba_rc_*.c files of an earlier run are removed.
 Prints a JSON summary on stdout (functions, instructions, entries by origin); --report FILE writes it there too.
 """
 
@@ -13,6 +13,7 @@ import json
 import os
 import sys
 
+from . import iwram
 from .discover import Discovery, islands
 from .lift import FnLifter, hx
 from .rom import Rom
@@ -75,8 +76,12 @@ def chunks_of(funcs):
 
 
 def recompile(rom, outdir, discovered=(), comments=True):
+    discovered = list(discovered)
     disc = Discovery(rom, discovered)
     funcs = disc.run()
+    iw = iwram.discover(rom, discovered)
+    iw_funcs = [f for (f, _) in iw]
+    iw_image = {f.key: img for (f, img) in iw}
     os.makedirs(outdir, exist_ok=True)
     for old in glob.glob(os.path.join(outdir, "gba_rc_*.c")):
         os.remove(old)
@@ -92,17 +97,41 @@ def recompile(rom, outdir, discovered=(), comments=True):
         with open(path, "w", encoding="utf-8") as out:
             out.write("".join(parts))
         files.append(path)
-    entries = islands(funcs)
+    for chunk in chunks_of(iw_funcs):
+        path = os.path.join(outdir, "gba_rc_iw_%08X%s.c" % (chunk[0].entry, "t" if chunk[0].thumb else "a"))
+        parts = [HEADER % rom.sha256]
+        for f in chunk:
+            lifter = iwram.IwramLifter(iw_image[f.key], f.thumb, f.addrs)
+            parts.append("\n" + lifter.function(fn_name(f), region_of(f), comments))
+            fallbacks += lifter.fallbacks
+        with open(path, "w", encoding="utf-8") as out:
+            out.write("".join(parts))
+        files.append(path)
+    entries = islands(funcs + iw_funcs)
     tab = [HEADER % rom.sha256, "\n"]
-    for f in funcs:
+    for f in funcs + iw_funcs:
         tab.append("RC_FN %s(gba_machine *m_);\n" % fn_name(f))
     tab.append("\nstatic const gba_recomp_entry entries[] = {\n")
     for (addr, thumb, f) in entries:
         tab.append("    {%s, %d, %s},\n" % (hx(addr), 1 if thumb else 0, fn_name(f)))
     if not entries:
         tab.append("    {0, 0, 0},\n")
-    tab.append("};\n\nstatic const gba_recomp_table table = {GBA_RECOMP_ABI, %du, entries, \"%s\"};\n\n"
-               % (len(entries), rom.sha256))
+    spans = sorted((iwram.span_of(f) + (f,) for f in iw_funcs), key=lambda t: (t[0], t[1], t[2].key))
+    if spans:
+        # The bytes each IWRAM function was lifted from (ABI 5): the core runs it only while IWRAM holds them.
+        tab.append("};\n")
+        for i, (lo, hi, f) in enumerate(spans):
+            data = iw_image[f.key].span(lo, hi)
+            rows = [", ".join("0x%02X" % b for b in data[k:k + 16]) for k in range(0, len(data), 16)]
+            tab.append("\nstatic const uint8_t iw_bytes_%d[%d] = {\n    %s,\n};\n" % (i, len(data), ",\n    ".join(rows)))
+        tab.append("\nstatic const gba_recomp_span spans[] = {\n")
+        for i, (lo, hi, f) in enumerate(spans):
+            tab.append("    {%s, %s, iw_bytes_%d, %s},\n" % (hx(lo), hx(hi), i, fn_name(f)))
+        tab.append("};\n\nstatic const gba_recomp_table table = {GBA_RECOMP_ABI, %du, entries, \"%s\", %du, spans};\n\n"
+                   % (len(entries), rom.sha256, len(spans)))
+    else:
+        tab.append("};\n\nstatic const gba_recomp_table table = {GBA_RECOMP_ABI, %du, entries, \"%s\"};\n\n"
+                   % (len(entries), rom.sha256))
     tab.append("RC_EXPORT const gba_recomp_table *gba_recomp_title_table(void) { return &table; }\n")
     path = os.path.join(outdir, "gba_rc_table.c")
     with open(path, "w", encoding="utf-8") as out:
@@ -114,7 +143,9 @@ def recompile(rom, outdir, discovered=(), comments=True):
         "header": rom.header.as_dict() if rom.header else None,
         "table_entries": len(entries),
         "interp_fallback_insns": fallbacks,
-        "discovered_in": len(list(discovered)),
+        "iwram_functions": len(iw_funcs),
+        "iwram_instructions": sum(len(f.addrs) for f in iw_funcs),
+        "discovered_in": len(discovered),
         "files": [os.path.basename(p) for p in files],
     })
     return summary

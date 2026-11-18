@@ -15,6 +15,7 @@
 #define GBA_BIOS_SIZE 0x4000u
 #define GBA_EWRAM_SIZE 0x40000u
 #define GBA_IWRAM_SIZE 0x8000u
+#define GBA_IWRAM_BASE 0x03000000u
 #define GBA_IO_SIZE 0x400u
 #define GBA_PAL_SIZE 0x400u
 #define GBA_VRAM_SIZE 0x18000u
@@ -379,8 +380,10 @@ void gba_cpu_run(gba_machine *m);
 void gba_cpu_step(gba_machine *m);
 /* The recompiler's loop for code it does not cover (gba_recomp_run): steps while the next instruction is outside the
  * cartridge ROM or an IRQ is due to be taken, and the frame's time is not up and the CPU not halted, as that loop
- * would call gba_cpu_step for each, without a call per instruction. */
-void gba_cpu_step_outside_rom(gba_machine *m);
+ * would call gba_cpu_step for each, without a call per instruction. It also stops (no IRQ due) in front of IWRAM code
+ * at an address in [iw_lo, iw_hi) (the pack's IWRAM code) or entered from another region (XBA-279: the loop records
+ * it for the discovery); one instruction at least. */
+void gba_cpu_step_outside_rom(gba_machine *m, uint32_t iw_lo, uint32_t iw_hi);
 void gba_state_pin_rom_hash(gba_machine *m); /* gba_state.c: the ROM hash taken now (before a cheat patches it) */
 uint32_t gba_get_cpsr(const gba_machine *m);
 void gba_set_cpsr(gba_machine *m, uint32_t v);
@@ -394,7 +397,8 @@ void gba_cpu_jump(gba_machine *m, uint32_t addr, bool thumb);
 void gba_recomp_run(gba_machine *m);
 void gba_recomp_free(gba_machine *m);
 /* A save state was loaded (gba_state.c): the hand-offs between lifted code and the interpreter in flight are
- * forgotten (the dispatch cache stays: it is a function of the ROM). */
+ * forgotten (the dispatch cache stays: it is a function of the ROM, and IWRAM code is checked against its bytes at
+ * every call). */
 void gba_recomp_state_loaded(gba_machine *m);
 
 /* gba_bios.c */

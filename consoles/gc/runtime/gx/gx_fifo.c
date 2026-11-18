@@ -372,8 +372,15 @@ void gx_fifo_write(gx_state *gx, uint32_t v, unsigned size)
     bool crossed = false;
     if ((wp & 3) + size <= 4 && wp + size < lim && wp + size <= gx->ram_size) { /* the common case: no wrap */
         uint8_t *d = gx->ram + wp;
-        for (unsigned i = 0; i < size; i++)
-            d[i] = (uint8_t)(v >> (8 * (size - 1 - i)));
+        if (size == 4) { /* a word (most writes): big-endian at once (XBA-279) */
+            d[0] = (uint8_t)(v >> 24);
+            d[1] = (uint8_t)(v >> 16);
+            d[2] = (uint8_t)(v >> 8);
+            d[3] = (uint8_t)v;
+        } else {
+            for (unsigned i = 0; i < size; i++)
+                d[i] = (uint8_t)(v >> (8 * (size - 1 - i)));
+        }
         wp += size;
         gx->pi_wp = (gx->pi_wp & 0x20000000u) | wp;
         if ((wp & 31) == 0 && (gx->cp_cr & 0x10)) {

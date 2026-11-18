@@ -372,9 +372,15 @@ static inline uint32_t rc_refill_cost(gba_rc_head *h, uint64_t now, uint32_t r15
  *
  * Guest registers and flags live in locals between bus calls; `now` and `ne` (next event) too, synced around every
  * call; `fc` is the opcode fetch cost, reloaded after bus writes (WAITCNT). */
-#define RC_ENTER(T, REGION)                                                                                          \
+#define RC_ENTER(T, REGION) RC_ENTER_(T, REGION, 0u, 0u)
+/* An IWRAM function (ABI 5, gba_tools iwram.py) lifted from the bytes [LO, HI): the core calls it only while IWRAM
+ * holds them, and a store of its own into them stops it after that instruction (the next check leaves: the dispatcher
+ * looks at the bytes again). */
+#define RC_ENTER_IW(T, LO, HI) RC_ENTER_(T, 3, (uint32_t)(LO) & 0x7FFFu, (uint32_t)(HI) - (uint32_t)(LO))
+#define RC_ENTER_(T, REGION, OWN_LO, OWN_N)                                                                          \
     gba_rc_head *const h = (gba_rc_head *)(void *)m_;                                                                \
     enum { RC_T = (T), RC_PIPE = (T) ? 4 : 8, RC_REGION = (REGION) };                                                \
+    enum { RC_OWN_LO = (OWN_LO), RC_OWN_N = (OWN_N) };                                                               \
     uint32_t r0 = h->cpu.r[0], r1 = h->cpu.r[1], r2 = h->cpu.r[2], r3 = h->cpu.r[3], r4 = h->cpu.r[4];             \
     uint32_t r5 = h->cpu.r[5], r6 = h->cpu.r[6], r7 = h->cpu.r[7], r8 = h->cpu.r[8], r9 = h->cpu.r[9];             \
     uint32_t r10 = h->cpu.r[10], r11 = h->cpu.r[11], r12 = h->cpu.r[12], r13 = h->cpu.r[13], r14 = h->cpu.r[14];    \
@@ -469,6 +475,28 @@ static inline uint32_t rc_refill_cost(gba_rc_head *h, uint64_t now, uint32_t r15
         return;                                                                                                      \
     } while (0)
 
+/* An inline RAM store of SZ bytes at A into the function's own bytes (IWRAM functions only: RC_OWN_N is 0 for the
+ * others, and this folds away): the next check leaves. */
+#define RC_OWN_STORE(A, SZ)                                                                                          \
+    do {                                                                                                             \
+        if (RC_OWN_N && ((A) >> 24) == 3u &&                                                                         \
+            (uint32_t)(((A) & 0x7FFFu & ~(uint32_t)((SZ) - 1)) - RC_OWN_LO + (SZ) - 1) < RC_OWN_N + (SZ) - 1)         \
+            ne = 0;                                                                                                  \
+    } while (0)
+
+/* The open-bus latch of an IWRAM opcode at A (gba_bus.c gba_prefetch_latch), from IWRAM as it is now: ARM [A+8];
+ * Thumb [A+4] in the half it lands in, [A+2] in the other. */
+static inline uint32_t rc_iw_half(const gba_rc_head *h, uint32_t a)
+{
+    uint16_t t;
+    memcpy(&t, h->rc_iwram + (a & 0x7FFEu), 2);
+    return t;
+}
+#define RC_IW_AOB(A) (rc_iw_half(h, (A) + 8u) | rc_iw_half(h, (A) + 10u) << 16)
+#define RC_IW_TOB(A)                                                                                                 \
+    (((A) & 2u) ? rc_iw_half(h, (A) + 2u) | rc_iw_half(h, (A) + 4u) << 16                                            \
+                : rc_iw_half(h, (A) + 4u) | rc_iw_half(h, (A) + 2u) << 16)
+
 /* Bus accesses; OB is this instruction's opcode as the fetch left it in the open-bus latch. */
 #define RC_SYNC_OUT(OB) (h->now = now, h->open_bus = (OB))
 #define RC_SYNC_IN() (now = h->now, ne = h->next_event)
@@ -503,6 +531,7 @@ static inline uint8_t *rc_ram(gba_rc_head *h, uint32_t a, uint32_t align)
         if (__builtin_expect(RC_IS_RAM(a__), 1)) {                                                                   \
             now += h->W[a__ >> 24][SEQ];                                                                             \
             memcpy(rc_ram(h, a__, ALIGN), &t__, sizeof t__);                                                         \
+            RC_OWN_STORE(a__, BITS / 8);                                                                             \
         } else {                                                                                                     \
             RC_SYNC_OUT(OB);                                                                                         \
             gba_write##BITS(RC_M, a__, t__, (SEQ));                                                                  \
@@ -535,6 +564,7 @@ static inline uint8_t *rc_ram(gba_rc_head *h, uint32_t a, uint32_t align)
     do {                                                                                                             \
         uint32_t t__ = (V);                                                                                          \
         memcpy(rb__ + ((A) & rm__), &t__, 4);                                                                        \
+        RC_OWN_STORE((A), 4);                                                                                        \
     } while (0)
 #define RC_BRD32(A, SEQ, OB)                                                                                         \
     ({                                                                                                               \

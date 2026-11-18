@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Builds an N64 title pack on a desktop and runs the discovery loop (XBA-169 / XBA-170 / XBA-171).
 
-    tools/consoles/n64_recomp_build.py ROM WORKDIR [--discovered FILE] [--cc CC] [--opt -O1] [--jobs N] [--count]
+    tools/consoles/n64_recomp_build.py ROM WORKDIR [--discovered FILE] [--cc CC] [--opt -O2] [--jobs N] [--count]
                                        [--loop N --n64-run PATH [--frames F] [--run-args "ARGS"]] [--elf ELF]
 
 ROM: an N64 ROM in any byte order (nothing else: no symbol or ELF file goes into the pack).
 1. `python3 -m n64_tools.recomp ROM WORKDIR/src [--discovered WORKDIR/discovered.txt]` (consoles/n64/tools)
-2. every WORKDIR/src/*.c compiled with the host compiler (the lifted-code flags of Prepare: -O1 by default, no SLP
+2. every WORKDIR/src/*.c compiled with the host compiler (the lifted-code flags of Prepare: -O2 by default, no SLP
    vectorizer; -fPIC -I consoles/n64/runtime), linked into WORKDIR/libtitle.so (on macOS with -undefined
    dynamic_lookup: the core's symbols come from the executable). Objects are kept in WORKDIR/obj, named by a hash of
    the file and the command, as Prepare's object cache: a round compiles only the files the lifter changed.
@@ -137,7 +137,7 @@ def main(argv=None):
     ap.add_argument("workdir")
     ap.add_argument("--discovered", help="seed records (n64_recomp.h discovered format)")
     ap.add_argument("--cc", default=os.environ.get("CC", "cc"))
-    ap.add_argument("--opt", default="-O1", help="optimisation flag for the lifted C (default -O1)")
+    ap.add_argument("--opt", default="-O2", help="optimisation flag for the lifted C (default -O2, as Prepare)")
     ap.add_argument("--jobs", type=int, default=int(os.environ.get("JOBS", "4")))
     ap.add_argument("--count", action="store_true", help="build with -DN64_RC_COUNT")
     ap.add_argument("--loop", type=int, default=0, help="discovery rounds at most (needs --n64-run)")

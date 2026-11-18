@@ -2649,21 +2649,33 @@ static inline bool irq_due(const gba_machine *m)
     return m->irq_line && !(m->cpu.cpsr_ctl & CPSR_I);
 }
 
-void gba_cpu_step_outside_rom(gba_machine *m)
+/* gba_cpu_step_outside_rom goes on in front of pc (was: the pc of the instruction before): outside the cartridge,
+ * and, with no IRQ due, not at IWRAM code the recompiler's loop wants to see (see gba_internal.h). */
+static inline bool outside_go_on(gba_machine *m, uint32_t was, uint32_t iw_lo, uint32_t iw_hi)
 {
+    uint32_t pc = R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u);
+    if (irq_due(m))
+        return true;
+    if (pc - 0x08000000u < 0x06000000u)
+        return false;
+    return (pc >> 24) != 3 || ((was >> 24) == 3 && pc - iw_lo >= iw_hi - iw_lo);
+}
+
+void gba_cpu_step_outside_rom(gba_machine *m, uint32_t iw_lo, uint32_t iw_hi)
+{
+    uint32_t was;
     if (m->interp_ref) {
         do {
+            was = R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u);
             step(m);
-        } while (m->now < m->next_event && !m->cpu.halted && !m->cpu.stopped &&
-                 ((R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u)) - 0x08000000u >= 0x06000000u || irq_due(m)));
+        } while (m->now < m->next_event && !m->cpu.halted && !m->cpu.stopped && outside_go_on(m, was, iw_lo, iw_hi));
         return;
     }
     do {
-        uint32_t pc = R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u);
+        uint32_t pc = was = R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u);
         if (irq_due(m) || pc - 0x08000000u < 0x06000000u || !blk_step(m))
             gba_cpu_step(m);
-    } while (m->now < m->next_event && !m->cpu.halted && !m->cpu.stopped &&
-             ((R[15] - ((m->cpu.cpsr_ctl & CPSR_T) ? 4u : 8u)) - 0x08000000u >= 0x06000000u || irq_due(m)));
+    } while (m->now < m->next_event && !m->cpu.halted && !m->cpu.stopped && outside_go_on(m, was, iw_lo, iw_hi));
 }
 
 void gba_cpu_run(gba_machine *m)

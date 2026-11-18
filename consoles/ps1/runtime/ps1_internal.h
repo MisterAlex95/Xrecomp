@@ -255,6 +255,10 @@ struct ps1_machine {
     /* Host side only, after everything a save state holds (ps1_state.c saves the machine up to PS1_MACHINE_SAVED). */
     struct ps1_blocks *blocks; /* the interpreter's predecoded blocks (ps1_cpu.c, XBA-204), made on first use */
     bool interp_ref;           /* the reference interpreter loop (ps1_cpu_set_reference) */
+    /* ps1_cpu.c exc_intact (XBA-279): the HLE exception vector and handler were their words (exc_ok) when the write
+     * counters of their RAM pages were exc_gen */
+    bool exc_checked, exc_ok;
+    uint32_t exc_gen[2];
 };
 #define PS1_MACHINE_SAVED offsetof(ps1_machine, blocks)
 
@@ -311,6 +315,10 @@ static inline bool ps1_rc_liftable_pc(uint32_t pc)
  * no interrupt is pending, no hook is due and the time slice is not up, as that loop would call ps1_cpu_step for each
  * (the BIOS, its exception handler), without a call per instruction. */
 void ps1_cpu_step_unliftable(ps1_machine *m);
+/* Steps the HLE kernel's RAM code (the exception vector, the handler chain walk, the trap stubs) exactly as
+ * ps1_cpu_step would, with the run loop's checks between two instructions; returns how many ran (0: ps1_cpu_step must
+ * run the one at pc). ps1_cpu.c « The HLE kernel's RAM code ». */
+int ps1_cpu_run_kernel(ps1_machine *m);
 void ps1_cpu_hook_check(ps1_machine *m);   /* the run loop's BIOS / fast-boot hook test before an instruction */
 void ps1_cpu_take_interrupt(ps1_machine *m);
 

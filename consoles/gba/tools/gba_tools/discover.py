@@ -10,7 +10,7 @@ into. Addresses from earlier runs (`--discovered`, bit 0 = Thumb) are entries to
 Conservative by construction: an entry that only a literal pool suggests (weak) is kept only when its code decodes
 cleanly (no undefined encoding, no branch out of the cartridge, no torn BL pair, no data barrier); everything the
 static pass misses or refuses is run by the interpreter at run time and reported back by the discovery loop (the
-core's gba_recomp_missed). Code a game copies to IWRAM / EWRAM is not lifted: it always runs in the interpreter.
+core's gba_recomp_missed). Code a game copies to IWRAM from the ROM is lifted by iwram.py; code in EWRAM is not.
 Lifting data as code would only cost size, never correctness: the lifter gives every encoding the interpreter's
 meaning and the cartridge is read-only.
 """

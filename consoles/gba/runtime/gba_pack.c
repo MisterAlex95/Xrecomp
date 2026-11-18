@@ -368,8 +368,9 @@ int gba_pack_open(const char *lib, const char *rom_sha256, gba_pack *out, char *
         snprintf(why, why_n, "no %s in the pack", GBA_RECOMP_ENTRY_SYMBOL);
     else if (!t)
         snprintf(why, why_n, "%s returned no table", GBA_RECOMP_ENTRY_SYMBOL);
-    else if (t->abi != GBA_RECOMP_ABI)
-        snprintf(why, why_n, "table abi %u, this runtime is %u", t->abi, (unsigned)GBA_RECOMP_ABI);
+    else if (t->abi < GBA_RECOMP_ABI_MIN || t->abi > GBA_RECOMP_ABI)
+        snprintf(why, why_n, "table abi %u, this runtime takes %u to %u", t->abi, (unsigned)GBA_RECOMP_ABI_MIN,
+                 (unsigned)GBA_RECOMP_ABI);
     else if (t->count && !t->entries)
         snprintf(why, why_n, "table of %u entries without entries", t->count);
     else if (rom_sha256 && (!t->rom_sha256 || strcmp(t->rom_sha256, rom_sha256)))
