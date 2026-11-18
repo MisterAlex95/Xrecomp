@@ -5,7 +5,8 @@ ps_<crc>.frag, translated by x360_tools.xenos_glsl, the way bringup fills a titl
 Vertex shader: two vertex fetches from fetch constant 0 (position at offset 0, colour at offset 4, stride 8 dwords,
 32_32_32_32_FLOAT), position exported to oPos, colour to interpolator 0. Pixel shader: oC0 = interpolator 0 * c0.
 Textured pixel shader (ps_tex): oC0 = a 2D fetch from texture fetch constant 2 at interpolator 0's xy. Packed
-vertex formats (vs_u16, vs_h16): the colour as 16_16_16_16 (normalised) or 16_16_16_16_FLOAT, stride 6 dwords."""
+vertex formats (vs_u16, vs_h16): the colour as 16_16_16_16 (normalised) or 16_16_16_16_FLOAT, stride 6 dwords.
+vs_mx (XBA-282): a memory export, translated as GLSL ES 3.10 (xenos_glsl.translate_cached)."""
 
 import os
 import struct
@@ -16,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 
 from x360_tools.xenos_asm import alu_words, export, fetch_words, program  # noqa: E402
-from x360_tools.xenos_glsl import translate  # noqa: E402
+from x360_tools.xenos_glsl import translate_cached as translate  # noqa: E402
 
 XYZW = 0 | 1 << 3 | 2 << 6 | 3 << 9
 
@@ -53,6 +54,13 @@ def shaders():
         ("alu", alu_words(vop=1, vdest=2, vmask=0xF, srcs=((0, 1, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)))),
         ("fetch", fetch_words(0, 2, 3, XYZW, 0, sel=1, format=38, stride=4, offset=0)),
         ("alu", alu_words(**export(62, 1))), ("alu", alu_words(**export(0, 3)))], {})])
+    # vs_mx (XBA-282): the position at the vertex index, and a memory export: eA = c4, eM0 = c5 (GLSL ES 3.10)
+    packed["vs_mx"] = program([(2, [
+        ("fetch", fetch_words(0, 0, 1, XYZW, 0, sel=0, format=38, stride=4, offset=0)),
+        ("alu", alu_words(**export(62, 1))),
+        ("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1, srcs=((4, 0, 0, 0), (4, 0, 0, 0), (0, 0, 0, 0)))),
+        ("alu", alu_words(vop=2, vdest=33, vmask=0xF, export=1, srcs=((5, 0, 0, 0), (5, 0, 0, 0), (0, 0, 0, 0))))],
+        {})])
     return vs, ps, ps_tex, packed
 
 

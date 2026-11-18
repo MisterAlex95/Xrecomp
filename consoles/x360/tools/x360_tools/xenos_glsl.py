@@ -775,6 +775,18 @@ def translate(words, stage="vertex", interpolators=0, memexport=False):
     return "\n".join(out) + "\n", info
 
 
+def translate_cached(words, stage="vertex", interpolators=0):
+    """What the shader cache holds (bringup, tools/prepare/x360.py; XBA-282): GLSL ES 3.00 when the shader can be,
+    else, when memory export is what stops it, the GLSL ES 3.10 memory export translation (the renderer runs it where
+    GLES 3.1 allows, and skips its draws elsewhere)."""
+    try:
+        return translate(words, stage, interpolators)
+    except Unsupported as ex:
+        if not re.search(r"export to register 3[2-7]$", str(ex)):
+            raise
+    return translate(words, stage, interpolators, memexport=True)
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     stage = "pixel" if "--pixel" in argv else "vertex"

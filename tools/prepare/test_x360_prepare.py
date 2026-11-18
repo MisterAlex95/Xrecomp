@@ -108,7 +108,7 @@ def test_seeds_and_compile_flags(tmp_path):
 def test_shaders_translated_once(tmp_path):
     from x360_tools.xenos_asm import alu_words, export, program
     good = program([(2, [("alu", alu_words(**export(0, 1)))], {})])
-    bad = program([(2, [("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1))], {})])   # memory export
+    bad = program([(2, [("alu", alu_words(vop=2, vdest=40, vmask=0xF, export=1))], {})])   # no such register
     dump = tmp_path / "dump"
     dump.mkdir()
     for name, words in (("vs_00000001.bin", good), ("ps_00000002.bin", good), ("vs_00000003.bin", bad)):

@@ -37,7 +37,7 @@ from tools.xex.xex import COMPRESSION_NAMES, XexError, load_keys, parse_xex, pla
 
 from .hle_coverage import coverage
 from .recomp import REPO, RUNTIME_DIRS, recompile, sweep, sweep_shapes
-from .xenos_glsl import Unsupported, translate
+from .xenos_glsl import Unsupported, translate_cached as translate
 
 
 def find_x360_run(explicit):

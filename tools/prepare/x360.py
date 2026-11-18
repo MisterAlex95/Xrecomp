@@ -1,6 +1,6 @@
 """
-`python -m tools.prepare DEFAULT.XEX` (or an Xbox 360 disc image): an Xbox 360 title pack (XBA-282; docs/android/prepare.md
-« Xbox 360 packs », consoles/x360/runtime/x360_runtime.c).
+`python -m tools.prepare DEFAULT.XEX` (or an Xbox 360 disc image): an Xbox 360 title pack (XBA-282;
+docs/android/prepare.md « Xbox 360 packs », consoles/x360/runtime/x360_runtime.c).
 
 The same five steps and progress lines as a GameCube pack (tools/prepare/gc.py, whose Run this is):
 
@@ -239,7 +239,7 @@ def translate_shaders(dump_dir, out_dir):
     """Every vs_*/ps_*.bin of dump_dir not in out_dir yet: copied, and translated next to it (.vert / .frag) when
     xenos_glsl can. (new, translated) counts; what it cannot translate stays as its .bin (known, not tried again)."""
     _x360_tools()
-    from x360_tools.xenos_glsl import Unsupported, translate
+    from x360_tools.xenos_glsl import Unsupported, translate_cached as translate
     new = done = 0
     if not os.path.isdir(dump_dir):
         return 0, 0

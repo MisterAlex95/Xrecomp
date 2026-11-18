@@ -2124,12 +2124,43 @@ What is there:
   frame by frame to frame 120, rewind capturing), `x360_bringup` (the app pack), `tests/recomp_pack` (`test_x360`), the
   app's `ConsoleTest` / `ConsolePadMapTest` / `LibraryScannerTest`.
 
-Not there yet (XBA-229): memory export, the stencil in depth resolves, the packed mip tail, run-time translation of shaders the cache
-lacks (on the device: a pack made on a desktop), real MSAA, eDRAM aliasing between formats, XMA decoding itself (a
-backend to decide), XMA loops, several conventions (winding, channel orders, cube faces, RB_COLOR_CLEAR) that follow
-Xenia's descriptions and wait for a real title, real parallel hardware threads, structured exception handling
-(`__C_specific_handler` continues the search, `RtlUnwind` stops the title), the network, Prepare on the device, and
-whatever `hle_coverage` lists as missing on Alex's titles.
+XBA-282 (X360-3):
+- **Prepare on the device** (`tools/prepare/x360.py`, docs/android/prepare.md « Xbox 360 packs »): an XEX or a disc
+  image, the player's key file picked in the app (`X360Key`, `XEX_KEY_FILE`), lifted and compiled on the device. The
+  shaders the runs met are translated at Prepare time into the pack, and missed code and shaders feed Prepare again
+  (the self-healing loop).
+- **The app**:
+  - internal resolution and the texture filter (`RECOMP_TEX_BILINEAR` / `RECOMP_TEX_ANISO`, `xenos_gl.c`);
+  - cover art from the XEX's XDBF title image (`cover.png` in the pack);
+  - the title's saves in `save/x360-<KEY>/data` (exported, imported and synced with the states);
+  - the raw cheat shape.
+- **Structured exceptions** (`x360_seh.c`):
+  - `RtlRaiseException` dispatches to the frames' handlers. The frames are walked from `.pdata` and their prologs,
+    the handlers are called with `X360_SEH_RETURN` as LR, and the kernel's `__C_specific_handler` (filters,
+    `__except`, `__finally`) is done in the runtime.
+  - `RtlUnwind` resumes at the target frame with the non-volatile registers restored.
+  - `x360_tools.seh` seeds the code that only scope tables name.
+  - Test: `x360_seh` (`make_seh.py`).
+  - Not checked on a retail title yet: the `.pdata` exception flag bit, the CONTEXT / DISPATCHER_CONTEXT layouts,
+    C++ EH (`__CxxFrameHandler` is title code calling `RtlUnwind`), and VMX registers in unwinding.
+- **Memory export**:
+  - The translator (`translate_cached`, so bringup and Prepare) turns eA / eM exports into GLSL ES 3.10 that logs
+    (address, dword) pairs into a storage buffer. The renderer applies them to guest memory after the draw.
+  - This runs only when the context has GLES 3.1 with vertex storage blocks and `glMemoryBarrier`. It is checked at
+    run time (`xenos: memory export on/off` in the log; `RECOMP_X360_MEMEXPORT=0` turns it off). Elsewhere those
+    draws are skipped and counted.
+  - Formats: 8_8_8_8, 2_10_10_10, 16_16(_16_16), their _FLOAT forms, 32_FLOAT, 32_32_FLOAT, 32_32_32_32_FLOAT.
+  - Tests: `test_memexport_against_mesa`, and the `xenos_draw` memory export draw (written on llvmpipe; the fallback
+    with `RECOMP_X360_MEMEXPORT=0`).
+
+Not there yet (XBA-229):
+- the stencil in depth resolves, the packed mip tail, real MSAA, eDRAM aliasing between formats;
+- XMA decoding itself (a backend to decide) and XMA loops;
+- several conventions (winding, channel orders, cube faces, RB_COLOR_CLEAR) that follow Xenia's descriptions and wait
+  for a real title;
+- real parallel hardware threads and the network;
+- 1- and 2-byte memory export formats;
+- whatever `hle_coverage` lists as missing on Alex's titles.
 
 **Nintendo 3DS spike (XBA-228, epic XBA-222).** Does the ARM work extend to the 3DS's ARM11 (ARMv6K + VFPv2), and
 how much of Horizon (the 3DS operating system) must be emulated high-level for a libctru program? A libctru hello

@@ -44,9 +44,12 @@ def test_shader_report(tmp_path):
     from .bringup import shader_report
     from .xenos_asm import alu_words, export, program
     good = program([(2, [("alu", alu_words(**export(0, 1)))], {})])
-    loop = program([(2, [("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1))], {})])   # memory export
-    for name, words in (("vs_00000001.bin", good), ("ps_00000002.bin", good), ("vs_00000003.bin", loop)):
+    loop = program([(2, [("alu", alu_words(vop=2, vdest=40, vmask=0xF, export=1))], {})])   # no such register
+    mx = program([(2, [("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1))], {})])     # memory export (XBA-282)
+    for name, words in (("vs_00000001.bin", good), ("ps_00000002.bin", good), ("vs_00000003.bin", loop),
+                        ("vs_00000004.bin", mx)):
         (tmp_path / name).write_bytes(struct.pack(">%dI" % len(words), *words))
     rep = shader_report(str(tmp_path))
-    assert rep == {"total": 3, "translated": 2, "unsupported": {"export to register 32": 1}}
+    assert rep == {"total": 4, "translated": 3, "unsupported": {"export to register 40": 1}}
+    assert (tmp_path / "vs_00000004.vert").read_text().startswith("#version 310 es")   # GLSL ES 3.10: memexport
     assert (tmp_path / "vs_00000001.vert").exists() and (tmp_path / "ps_00000002.frag").exists()

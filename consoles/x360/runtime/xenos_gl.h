@@ -60,6 +60,10 @@ typedef struct xenos_gl_stats {
     uint64_t mipmapped;            /* textures uploaded with mip levels */
     uint64_t computed_fetches;     /* vertex buffers fetched at a computed index (instancing) */
     uint64_t depth_resolves;       /* resolves of the depth buffer to memory (24_8) */
+    uint64_t memexport_draws;      /* XBA-282: draws whose vertex shader exported to memory */
+    uint64_t memexport_dwords;     /* dwords they wrote to guest memory */
+    uint64_t memexport_dropped;    /* dwords past the log's capacity */
+    uint64_t memexport_skipped;    /* shaders not run: memory export without GLES 3.1 vertex storage blocks */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */
