@@ -878,14 +878,26 @@ void xbox_Cpuid(uint32_t leaf, uint32_t subleaf, uint32_t out[4]);
  * So a plain (float) cast is right only inside float's range -- outside it,
  * it would turn a large intermediate into inf (and inf*0 into NaN) or flush a
  * tiny one to 0, where the x87 carries on. Those go the long way. */
-static inline double recomp_fp_round24(double x) {
-    double ax = fabs(x);
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((cold, noinline))
+#endif
+static double recomp_fp_round24_wide(double x) {
     int e;
-    if ((ax <= 3.4028234663852886e38 && ax >= 1.1754943508222875e-38) || ax == 0.0
-        || x != x || ax == INFINITY)
-        return (double)(float)x;
     x = frexp(x, &e);                      /* |x| in [0.5, 1): float-exact range */
     return ldexp((double)(float)x, e);
+}
+/* The test is on the bits (XBA-273): the magnitude of a double orders like its bit pattern, so "|x| in [FLT_MIN,
+ * FLT_MAX]" is one unsigned compare; 0 is the zero pattern, and inf or NaN the patterns from 0x7FF0...0 up. The same
+ * cases as the float compares it replaces (fabs, three fcmp and their constants: about 12 instructions down to 6 on
+ * arm64, at every x87 operation of a PC=24 title), tools/recomp/test_fp_round24.py checks it bit for bit. */
+static inline double recomp_fp_round24(double x) {
+    uint64_t u;
+    memcpy(&u, &x, sizeof u);
+    u &= 0x7FFFFFFFFFFFFFFFull;
+    if (u - 0x3810000000000000ull <= 0x47EFFFFFE0000000ull - 0x3810000000000000ull   /* FLT_MIN .. FLT_MAX */
+        || u == 0 || u >= 0x7FF0000000000000ull)
+        return (double)(float)x;
+    return recomp_fp_round24_wide(x);
 }
 #define RECOMP_FP_PC(x) ((g_fp_control_word & 0x300u) ? (double)(x) : recomp_fp_round24(x))
 #define RECOMP_FCMP_CC(c) ((uint16_t)((c)==2 ? 0x4500u : (c)<0 ? 0x0100u : (c)>0 ? 0u : 0x4000u))

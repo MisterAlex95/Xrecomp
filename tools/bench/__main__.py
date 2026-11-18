@@ -34,6 +34,10 @@ builds of the hot loops. Slow (qemu logs every instruction): use
 clang with --target aarch64-linux-gnu --sysroot <aarch64 glibc root>
 (the build links with lld, as the Android one does).
 
+XBA_BENCH_FCW=0x007F in the environment runs the x87 workloads at precision
+control 24, as Xbox titles do (bench_rt.c); the checksums are then those of
+that mode.
+
 Nothing here comes from a game: the corpus is hand-written.
 """
 
