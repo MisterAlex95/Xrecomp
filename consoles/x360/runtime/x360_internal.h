@@ -137,7 +137,7 @@ typedef struct x360_hle_row {
 #define X360_HK(name, fn) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, fn}
 #define X360_HX(name, fn) {X360_LIB_XAM, X360_xam_##name, fn}
 /* the runtime files with a table of their own: const x360_hle_row x360_tab_<group>[], unsigned x360_tab_<group>_n */
-#define X360_HLE_TABLES(T)
+#define X360_HLE_TABLES(T) T(kdpc) T(rtl) T(crypt2) T(vd) T(xam2)
 #define X360_DECLARE_TABLE(group) extern const x360_hle_row x360_tab_##group[]; extern const unsigned x360_tab_##group##_n;
 X360_HLE_TABLES(X360_DECLARE_TABLE)
 
@@ -214,6 +214,7 @@ struct x360_machine {
     int verbose;
     x360_stats st;
     x360_hle_fn hle[2][4096]; /* every export with an HLE, by library and ordinal (x360_kernel_init; not state) */
+    int hle_conflict;         /* two tables gave one export different functions: the machine is not created */
 };
 
 /* guest memory (big-endian) */

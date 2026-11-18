@@ -1458,8 +1458,15 @@ static const x360_hle_row HLE[] = {
 
 void x360_hle_add(x360_machine *x, const x360_hle_row *rows, size_t n)
 {
-    for (size_t k = 0; k < n; k++)
-        x->hle[rows[k].lib][rows[k].ordinal & 4095] = rows[k].fn;
+    for (size_t k = 0; k < n; k++) {
+        x360_hle_fn *slot = &x->hle[rows[k].lib][rows[k].ordinal & 4095];
+        if (*slot && *slot != rows[k].fn) { /* two tables answer one export: one of them would silently never run */
+            snprintf(x->error, sizeof x->error, "two HLE functions for %s!%s", rows[k].lib ? "xam" : "xboxkrnl",
+                     x360_export_name(rows[k].lib, rows[k].ordinal) ?: "?");
+            x->hle_conflict = 1;
+        }
+        *slot = rows[k].fn;
+    }
 }
 
 x360_hle_fn x360_hle_lookup(const x360_machine *x, int lib, unsigned ordinal)
@@ -1467,7 +1474,7 @@ x360_hle_fn x360_hle_lookup(const x360_machine *x, int lib, unsigned ordinal)
     return lib >= 0 && lib < 2 && ordinal < 4096 ? x->hle[lib][ordinal] : NULL;
 }
 
-/* every table, the most specific last: a later row replaces an earlier one */
+/* every table; an export has one function (x360_hle_add) */
 static void hle_register(x360_machine *x)
 {
 #define X360_ADD_TABLE(group) x360_hle_add(x, x360_tab_##group, x360_tab_##group##_n);
@@ -1514,6 +1521,10 @@ static uint32_t var(x360_machine *x, int lib, unsigned ordinal, uint32_t size)
 int x360_kernel_init(x360_machine *x)
 {
     hle_register(x);
+    if (x->hle_conflict) {
+        x360_logf(x, "x360: %s\n", x->error);
+        return -1;
+    }
     uint32_t a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxHardwareInfo, 16);
     x360_w32(x, a, 0x00000020u); /* flags (Xenia: 0x20, storage initialised) */
     x360_w8(x, a + 4, 6);        /* hardware threads */

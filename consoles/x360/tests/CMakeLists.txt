@@ -17,6 +17,10 @@ project(console_x360_tests C)
 #                    built when SDL2 is there)
 #   x360_hle         the kernel HLE called directly (x360_hle_test.c): formatters, memory, objects, waits, timers,
 #                    threads, files and symbolic links
+#   x360_kdpc, x360_rtl, x360_crypt2, x360_vd, x360_xam2   the XBA-296 kernel groups called directly (DPCs, APCs,
+#                    timers, queues, SLists; strings and printf; hashes and ciphers on published vectors; Vd and audio;
+#                    XAM)
+#   x360_hle_table   hle_coverage's reading of the sources against the runtime's real dispatch table
 #   x360_hello       the synthetic test title (make_hello.py: our own PowerPC assembly in a synthetic XEX2, imports
 #                    by their real ordinals) recompiled and run under x360_run: its DbgPrint text must equal
 #                    hello.txt (memory, critical section, TLS, a second thread and an event, a delay, a semaphore,
@@ -102,6 +106,14 @@ target_link_libraries(x360_hle_test PRIVATE x360_core)
 target_compile_options(x360_hle_test PRIVATE -Wall -Wextra)
 add_test(NAME x360_hle COMMAND x360_hle_test)
 set_tests_properties(x360_hle PROPERTIES TIMEOUT 120)
+# XBA-296: the kernel groups, one test program each (x360_hle_util.h: the calling helpers)
+foreach(_group kdpc rtl crypt2 vd xam2)
+    add_executable(x360_${_group}_test x360_${_group}_test.c)
+    target_link_libraries(x360_${_group}_test PRIVATE x360_core)
+    target_compile_options(x360_${_group}_test PRIVATE -Wall -Wextra)
+    add_test(NAME x360_${_group} COMMAND x360_${_group}_test)
+    set_tests_properties(x360_${_group} PROPERTIES TIMEOUT 120)
+endforeach()
 # XBA-296: hle_coverage's reading of the sources is exactly the runtime's dispatch table
 add_test(NAME x360_hle_table
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_hle_table.sh $<TARGET_FILE:x360_hle_test>

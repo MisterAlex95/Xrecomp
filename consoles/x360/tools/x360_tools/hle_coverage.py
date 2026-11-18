@@ -35,7 +35,7 @@ def _table(src, start):
     for k in range(at, len(src)):
         depth += (src[k] == "{") - (src[k] == "}")
         if not depth:
-            return src[at:k]
+            return re.sub(r"^\s*#.*$", "", src[at:k], flags=re.M)  # a table's own #define E(name) is no row
     raise ValueError("unterminated table after " + start)
 
 
