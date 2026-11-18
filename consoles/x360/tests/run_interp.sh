@@ -1,11 +1,15 @@
 #!/bin/sh
-# ctest helper (XBA-283): run_interp.sh X360_RUN WORKDIR MODE EXPECTED_TXT [ELF] [OMIT_FLAGS] -- missed code is
-# interpreted and the run goes on. The test title (MODE basic: make_hello.py; c: the devkitPPC ELF, skipped (77)
-# when not built) is recompiled with functions left out of the pack on purpose (choose_omit.py OMIT_FLAGS: every
-# second function by default, --all: every one). Round 1: the run must still print EXPECTED_TXT through DbgPrint and
-# end with exit code 0, and --missed must name only left-out entries. Round 2 lifts what round 1 found (the rest
-# stays out): the run must print the same and miss nothing, so one run found every missed function it reached.
-# Round 3: --stop-at-miss stops at the first missed address (exit 1). Exits 77 when python3 or cc is missing.
+# ctest helper (XBA-283): run_interp.sh X360_RUN WORKDIR MODE EXPECTED_TXT [ELF] [OMIT_FLAGS] -- code the pack does not
+# hold is interpreted and the run goes on. The test title: MODE basic (make_hello.py) or c (the devkitPPC ELF,
+# skipped (77) when not built).
+# 1. The interpreter: functions left out of the pack on purpose (choose_omit.py OMIT_FLAGS: every second function,
+#    --all: every one, --scalar: not those with vector code). The run must still print EXPECTED_TXT through DbgPrint
+#    and end with exit code 0, --missed naming only left-out entries.
+# 2. The self-healing loop, as on a title: lifted from the entry point only (--no-pdata), the functions only a pointer
+#    reaches (a call table, a thread's start) are missed. Round 1 must print EXPECTED_TXT and name them; round 2,
+#    lifted with what round 1 found (--discovered), must print the same and miss nothing: one run found them all.
+# 3. --stop-at-miss stops at the first missed address (exit 1).
+# Exits 77 when python3 or cc is missing.
 run=$1
 work=$2
 mode=$3
@@ -33,41 +37,45 @@ fi
 printf 'Hello from the disc!' >"$work/disc/data/hello.txt"
 printf 'binary data' >"$work/disc/data/b.bin"
 printf 'readme\n' >"$work/disc/readme.txt"
-lift() { # lift OMIT_FILE
+lift() { # lift RECOMP_ARGS...
     rm -rf "$work/src"
-    "$py" -m x360_tools.recomp "$work/t.xex" "$work/src" --no-comments --omit "$1" >"$work/recomp.txt" ||
+    "$py" -m x360_tools.recomp "$work/t.xex" "$work/src" --no-comments "$@" >"$work/recomp.txt" ||
         { cat "$work/recomp.txt"; exit 1; }
     "$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 -I "$repo/consoles/x360/runtime" \
         -I "$repo/consoles/gc/runtime" -o "$work/libtitle.so" "$work"/src/*.c -lm || exit 1
 }
-: >"$work/none.txt"
-lift "$work/none.txt"
+play() { # play NAME: run, check the output, missed addresses sorted in NAME.m
+    timeout 300 "$run" "$work/t.xex" --pack "$work/libtitle.so" --disc "$work/disc" --dbg "$work/$1.dbg" \
+        --log "$work/$1.log" --stats --missed "$work/$1.missed"
+    rc=$?
+    grep -v '^#' "$work/$1.missed" 2>/dev/null | sort >"$work/$1.m"
+    echo "$1: exit $rc, $(wc -l <"$work/$1.m") missed, $(grep -o "interpreted [0-9]*" "$work/$1.log" | tail -n 1)"
+    [ "$rc" = 0 ] || { echo "$1: x360_run exited with $rc"; tail -n 20 "$work/$1.log"; exit 1; }
+    cmp -s "$work/$1.dbg" "$expected" || {
+        echo "$1: DbgPrint output differs:"; diff "$expected" "$work/$1.dbg" | head -n 20; exit 1; }
+}
+# 1. functions left out on purpose
+lift
 # shellcheck disable=SC2086
 "$py" "$here/choose_omit.py" "$work/src" "$work/omit.txt" $flags || exit 1
-lift "$work/omit.txt"
-for round in 1 2; do
-    timeout 300 "$run" "$work/t.xex" --pack "$work/libtitle.so" --disc "$work/disc" --dbg "$work/dbg$round.txt" \
-        --log "$work/log$round.txt" --stats --missed "$work/missed$round.txt"
-    rc=$?
-    grep -v '^#' "$work/missed$round.txt" | sort >"$work/m$round.txt"
-    echo "round $round: exit $rc, $(wc -l <"$work/m$round.txt") missed, $(grep -o "interpreted [0-9]*" "$work/log$round.txt" | tail -n 1)"
-    [ "$rc" = 0 ] || { echo "round $round: x360_run exited with $rc"; tail -n 20 "$work/log$round.txt"; exit 1; }
-    cmp -s "$work/dbg$round.txt" "$expected" || {
-        echo "round $round: DbgPrint output differs:"; diff "$expected" "$work/dbg$round.txt" | head -n 20; exit 1; }
-    if [ "$round" = 1 ]; then
-        [ -s "$work/m1.txt" ] || { echo "round 1 missed nothing: the left-out code was not reached"; exit 1; }
-        sort "$work/omit.txt" >"$work/omit_sorted.txt"
-        extra=$(comm -23 "$work/m1.txt" "$work/omit_sorted.txt")
-        [ -z "$extra" ] || { echo "round 1 names addresses that are not left-out entries: $extra"; exit 1; }
-        comm -23 "$work/omit_sorted.txt" "$work/m1.txt" >"$work/omit2.txt"
-        lift "$work/omit2.txt"
-    else
-        [ ! -s "$work/m2.txt" ] || { echo "round 2 still missed: $(cat "$work/m2.txt")"; exit 1; }
-    fi
-done
-lift "$work/omit.txt"
-timeout 300 "$run" "$work/t.xex" --pack "$work/libtitle.so" --disc "$work/disc" --dbg "$work/dbg3.txt" \
-    --log "$work/log3.txt" --stop-at-miss
+lift --omit "$work/omit.txt"
+play omit
+[ -s "$work/omit.m" ] || { echo "omit: missed nothing: the left-out code was not reached"; exit 1; }
+sort "$work/omit.txt" >"$work/omit_sorted.txt"
+extra=$(comm -23 "$work/omit.m" "$work/omit_sorted.txt")
+[ -z "$extra" ] || { echo "omit: names addresses that are not left-out entries: $extra"; exit 1; }
+# 2. the self-healing loop
+lift --no-pdata
+play round1
+[ -s "$work/round1.m" ] || { echo "round1: missed nothing"; exit 1; }
+lift --no-pdata --discovered "$work/round1.m"
+play round2
+[ ! -s "$work/round2.m" ] || { echo "round2 still missed: $(cat "$work/round2.m")"; exit 1; }
+# 3. the old behaviour
+lift --no-pdata
+timeout 300 "$run" "$work/t.xex" --pack "$work/libtitle.so" --disc "$work/disc" --dbg "$work/stop.dbg" \
+    --log "$work/stop.log" --stop-at-miss
 rc=$?
-[ "$rc" = 1 ] || { echo "round 3: --stop-at-miss should stop at the first missed address (exit $rc)"; exit 1; }
-echo "interpreter fallback: $(wc -l <"$work/m1.txt") missed function(s) found in one run, none left in round 2"
+[ "$rc" = 1 ] || { echo "--stop-at-miss should stop at the first missed address (exit $rc)"; exit 1; }
+echo "interpreter fallback: $(wc -l <"$work/omit.m") left-out function(s) interpreted; the self-healing loop found" \
+    "$(wc -l <"$work/round1.m") missed function(s) in one run, none left in round 2"

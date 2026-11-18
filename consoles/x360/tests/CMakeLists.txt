@@ -140,11 +140,11 @@ if(TARGET x360_run)
     # XBA-283: functions left out of the pack on purpose are interpreted, the run goes on and names them all at once
     add_test(NAME x360_interp
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_interp.sh $<TARGET_FILE:x360_run>
-                ${CMAKE_CURRENT_BINARY_DIR}/x360_interp basic ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt "" --scalar)
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_interp basic ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt "" --all)
     set_tests_properties(x360_interp PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
     add_test(NAME x360_interp_c
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_interp.sh $<TARGET_FILE:x360_run>
                 ${CMAKE_CURRENT_BINARY_DIR}/x360_interp_c c ${CMAKE_CURRENT_SOURCE_DIR}/hello_c.txt
-                ${X360_HOMEBREW_DIR}/hello_c.elf --scalar)
+                ${X360_HOMEBREW_DIR}/hello_c.elf --all)
     set_tests_properties(x360_interp_c PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
 endif()

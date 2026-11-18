@@ -160,6 +160,7 @@ struct x360_machine {
     xe_rc_fn *fn_tab;         /* lifted code by (pc - code_lo) / 4 */
     const uint32_t *helpers;  /* the pack's save / restore helper entries (x360_pack), sorted */
     unsigned nhelpers;
+    int pack_bound;           /* x360_bind succeeded (an empty pack has no fn_tab) */
     uint32_t code_lo, code_hi;
     uint32_t pdata_va, pdata_n; /* x360_seh.c: the image's .pdata (found at the first exception) */
     int pdata_scanned;

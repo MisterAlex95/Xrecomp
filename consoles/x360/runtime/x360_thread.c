@@ -536,7 +536,7 @@ void x360_install_fault_handler(x360_machine *x)
 
 int x360_run(x360_machine *x, uint64_t insns)
 {
-    if (!x->fn_tab) {
+    if (!x->fn_tab && !x->pack_bound) {
         x360_fail(x, "no pack bound");
         return x->status;
     }
@@ -693,8 +693,13 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
         return -1;
     }
     const xe_rc_entry *r = pack->resume;
-    if (!pack->count)
-        return -1;
+    x->helpers = pack->helpers;
+    x->nhelpers = pack->helpers ? pack->nhelpers : 0;
+    if (!pack->count) { /* XBA-283: nothing lifted, the interpreter runs it all (tests) */
+        x->code_lo = x->code_hi = 0;
+        x->pack_bound = 1;
+        return 0;
+    }
     x->code_lo = r[0].entry & ~3u;
     x->code_hi = (r[pack->count - 1].entry & ~3u) + 4;
     free(x->fn_tab);
