@@ -18,9 +18,9 @@ enum { T = 1, V = 2, C = 3 };             /* source mux */
 
 static void src(uint32_t w[4], int which, int mux, int reg, int swz)
 {
-    if (which == 0) { w[1] |= swz; w[2] |= (mux << 26) | (reg << 28); }
+    if (which == 0) { w[1] |= swz; w[2] |= ((uint32_t)mux << 26) | ((uint32_t)reg << 28); }
     else if (which == 1) { w[2] |= (swz << 17) | (mux << 11) | (reg << 13); }
-    else { w[2] |= (swz << 2) | (reg >> 2); w[3] |= (mux << 28) | ((reg & 3) << 30); }
+    else { w[2] |= (swz << 2) | (reg >> 2); w[3] |= ((uint32_t)mux << 28) | ((uint32_t)(reg & 3) << 30); }
 }
 
 int main(void)

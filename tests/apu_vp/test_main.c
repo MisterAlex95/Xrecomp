@@ -71,7 +71,7 @@ static void set_voice_reg(uint16_t v, uint32_t reg, uint32_t value)
  * the data read through SGE entries 0 and 1. */
 static void setup_adpcm_voice(MCPXAPUState *d, unsigned blocks)
 {
-    uint32_t fmt = (NV_PAVS_VOICE_CFG_FMT_CONTAINER_SIZE_ADPCM << 30) |
+    uint32_t fmt = ((uint32_t)NV_PAVS_VOICE_CFG_FMT_CONTAINER_SIZE_ADPCM << 30) |
                    (((blocks - 1) & 0x1F) << 16);
     uint32_t sge[4] = { DATA_BASE, 0, DATA_BASE + 0x1000u, 0 };
 
