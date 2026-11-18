@@ -539,10 +539,10 @@ static int exec(x360_machine *x, xe_cpu *c, uint32_t pc, uint32_t w)
         case 22: FSET_S(rd, sqrt(fb)); break;
         case 24: FSET_S(rd, ppc_fres(fb)); break;
         case 25: FSET_S(rd, fa * fc); break;
-        case 28: FSET_S(rd, fma(fa, fc, -fb)); break;
-        case 29: FSET_S(rd, fma(fa, fc, fb)); break;
-        case 30: FSET_S(rd, ppc_fnma(fma(fa, fc, -fb))); break;
-        case 31: FSET_S(rd, ppc_fnma(fma(fa, fc, fb))); break;
+        case 28: FSET_S(rd, ppc_fmsub(fa, fc, fb)); break;
+        case 29: FSET_S(rd, ppc_fmadd(fa, fc, fb)); break;
+        case 30: FSET_S(rd, ppc_fnmsub(fa, fc, fb)); break;
+        case 31: FSET_S(rd, ppc_fnmadd(fa, fc, fb)); break;
         default: return 1;
         }
         goto fp_rec;
@@ -559,10 +559,10 @@ static int exec(x360_machine *x, xe_cpu *c, uint32_t pc, uint32_t w)
             case 23: c->fpr[rd] = ppc_fsel(fa, fc, fb); break;
             case 25: c->fpr[rd] = fa * fc; break;
             case 26: c->fpr[rd] = ppc_frsqrte(fb); break;
-            case 28: c->fpr[rd] = fma(fa, fc, -fb); break;
-            case 29: c->fpr[rd] = fma(fa, fc, fb); break;
-            case 30: c->fpr[rd] = ppc_fnma(fma(fa, fc, -fb)); break;
-            case 31: c->fpr[rd] = ppc_fnma(fma(fa, fc, fb)); break;
+            case 28: c->fpr[rd] = ppc_fmsub(fa, fc, fb); break;
+            case 29: c->fpr[rd] = ppc_fmadd(fa, fc, fb); break;
+            case 30: c->fpr[rd] = ppc_fnmsub(fa, fc, fb); break;
+            case 31: c->fpr[rd] = ppc_fnmadd(fa, fc, fb); break;
             default: return 1;
             }
             goto fp_rec;
