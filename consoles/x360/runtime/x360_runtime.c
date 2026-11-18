@@ -392,7 +392,9 @@ int x360_runtime_run(const x360_runtime_opts *o)
         fprintf(stderr, "x360: %s does not start: %s\n", base_name(o->xex), why);
         return -1;
     }
-    void *lib = dlopen(o->pack_lib, RTLD_NOW | RTLD_LOCAL);
+    char libpath[1100];
+    snprintf(libpath, sizeof libpath, "%s%s", strchr(o->pack_lib, '/') ? "" : "./", o->pack_lib); /* not a search */
+    void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
     const void *resume = lib ? dlsym(lib, "xe_rc_resume") : NULL;
     const unsigned *count = lib ? dlsym(lib, "xe_rc_resume_count") : NULL;
     const uint32_t *crc = lib ? dlsym(lib, "xe_rc_image_crc") : NULL;

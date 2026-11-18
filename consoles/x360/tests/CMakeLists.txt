@@ -11,6 +11,8 @@ project(console_x360_tests C)
 #                    same at an internal resolution of 2
 #   x360_render      the renderer through the machine: a ring, VdSwap, a front buffer frame, a save state loaded
 #   x360_pad_map     the title key and a host pad as a 360 controller (x360_runtime.h's pure helpers; XBA-280)
+#   x360_window      the renderer on a window's context (xenos_gl_attach at scale 2, the frame texture presented,
+#                    the drawable captured): needs a display (xvfb-run -a ctest -R x360_window), 77 without
 #   x360_play        the test title played by x360_play headless, frame by frame, to its end (run_play.sh;
 #                    built when SDL2 is there)
 #   x360_hle         the kernel HLE called directly (x360_hle_test.c): formatters, memory, objects, waits, timers,
@@ -74,6 +76,14 @@ if(TARGET x360_pad_map)
     add_executable(x360_pad_map_test x360_pad_map_test.c)
     target_link_libraries(x360_pad_map_test PRIVATE x360_pad_map)
     add_test(NAME x360_pad_map COMMAND x360_pad_map_test)
+endif()
+if(TARGET x360_runtime)
+    add_executable(x360_window_test x360_window_test.c)
+    target_link_libraries(x360_window_test PRIVATE x360_core xbr_host)
+    target_compile_options(x360_window_test PRIVATE -Wall -Wextra)
+    add_test(NAME x360_window COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_window.sh $<TARGET_FILE:x360_window_test>
+                                       ${CMAKE_CURRENT_BINARY_DIR}/x360_window)
+    set_tests_properties(x360_window PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 endif()
 if(TARGET x360_play)
     add_test(NAME x360_play COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_play.sh $<TARGET_FILE:x360_play>

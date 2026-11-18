@@ -316,6 +316,7 @@ struct xenos_gl {
     uint32_t resolved[16];    /* destination bases resolved to since the last swap (the front buffer's source) */
     int nresolved;
     int title_clears;
+    volatile int reset_pending; /* xenos_gl_reset asked (maybe from another thread): done at the next draw / swap */
     FILE *log;
 };
 
@@ -555,7 +556,13 @@ unsigned xenos_gl_frame_texture(const xenos_gl *g, int *width, int *height)
 
 void xenos_gl_reset(xenos_gl *g)
 {
+    g->reset_pending = 1; /* no GL here: a state may be loaded from another thread than the context's */
+}
+
+static void do_reset(xenos_gl *g)
+{
     /* after a state load: the eDRAM is not in a state (as the GameCube's EFB): surfaces start clear, copies go */
+    g->reset_pending = 0;
     for (int i = 0; i < MAX_SURFACES; i++)
         if (g->surf[i].tex) {
             g->glDeleteTextures(1, &g->surf[i].tex);
@@ -638,6 +645,9 @@ static char *slurp(const char *path)
         b[n] = 0;
     return b;
 }
+
+/* the translator version the cache must have been made with (x360_tools.xenos_glsl GLSL_VERSION) */
+#define XENOS_GLSL_STAMP "// xenos_glsl 2\n"
 
 static void report_missing(xenos_gl *g, int pixel, uint32_t crc)
 {
@@ -750,12 +760,22 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
     char *vsrc = NULL, *psrc = NULL;
     if (kind != 2) {
         snprintf(path, sizeof path, "%s/vs_%08X.vert", g->cache, vc);
-        if (!(vsrc = slurp(path)))
+        if ((vsrc = slurp(path)) && !strstr(vsrc, XENOS_GLSL_STAMP)) { /* an older translator's: stale */
+            fprintf(g->log, "xenos_gl: %s was translated by an older xenos_glsl: translate it again\n", path);
+            free(vsrc);
+            vsrc = NULL;
+        }
+        if (!vsrc)
             report_missing(g, 0, vc);
     }
     if (kind != 1) {
         snprintf(path, sizeof path, "%s/ps_%08X.frag", g->cache, pc);
-        if (!(psrc = slurp(path)))
+        if ((psrc = slurp(path)) && !strstr(psrc, XENOS_GLSL_STAMP)) {
+            fprintf(g->log, "xenos_gl: %s was translated by an older xenos_glsl: translate it again\n", path);
+            free(psrc);
+            psrc = NULL;
+        }
+        if (!psrc)
             report_missing(g, 1, pc);
     }
     const char *vtext = kind == 2 ? RECT_VS : vsrc, *ftext = kind == 1 ? CAPTURE_FS : psrc;
@@ -1060,6 +1080,18 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
         pitch = (uint32_t)g->width;
     if (need_h <= 0)
         need_h = g->height;
+    /* the eDRAM's 2048 tiles of 80 x 16 samples (32-bit; 40 x 16 for the 64-bit formats); 2x MSAA doubles the
+     * samples vertically, 4x both ways: a title's scissor left at its maximum does not make an 8192-row surface */
+    {
+        int wide = !depth && (fmt == 4 || fmt == 5 || fmt == 7 || fmt == 15);
+        uint32_t sx = msaa == 2 ? 2 : 1, sy = msaa ? 2 : 1, tw = wide ? 40 : 80;
+        uint32_t per_row = (pitch * sx + tw - 1) / tw, left = base < 2048 ? 2048 - base : 1;
+        int max_h = per_row ? (int)(left / per_row * 16 / sy) : need_h;
+        if (max_h < 1)
+            max_h = 1;
+        if (need_h > max_h)
+            need_h = max_h;
+    }
     int lim = g->max_tex / g->scale;
     if ((int)pitch > lim)
         pitch = (uint32_t)lim;
@@ -2477,6 +2509,8 @@ static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const
 
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
 {
+    if (g->reset_pending)
+        do_reset(g);
     if ((cp->regs[0x2208] & 7) == 6) { /* eDRAM mode "copy": a resolve */
         resolve(g, cp);
         return;
@@ -2643,6 +2677,8 @@ static void frame_texture(xenos_gl *g, int fw, int fh, GLenum ifmt)
  * swizzle: xenos_gl_frame_texture for a window) and, with readback on, in `frame` at the guest resolution. */
 void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
 {
+    if (g->reset_pending)
+        do_reset(g);
     static const GLint swz[6] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};
     const uint32_t *fc = &cp->regs[0x4800];
     uint32_t base = fc[1] & 0x1FFFF000u, ident = 0 | 1 << 3 | 2 << 6 | 3 << 9;

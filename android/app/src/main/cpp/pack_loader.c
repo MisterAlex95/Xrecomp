@@ -271,6 +271,12 @@ static int x360_start(const char *rom, const char *pack_lib, const char *title_k
         setenv("RECOMP_X360_SHADERS", shaders, 1);
     if (!rom_is_xex && rom && !getenv("RECOMP_X360_DISC"))
         setenv("RECOMP_X360_DISC", rom, 1); /* the image the player imported is the disc */
+    if (rom_is_xex && !getenv("RECOMP_X360_DISC")) { /* an XEX by path: its folder holds the title's files */
+        char folder[RECOMP_PACK_PATH_MAX];
+        const char *s = strrchr(rom, '/');
+        snprintf(folder, sizeof folder, "%.*s", s ? (int)(s - rom) : 1, s ? rom : ".");
+        setenv("RECOMP_X360_DISC", folder, 1);
+    }
     return x360_runtime_start(have_xex ? xex : rom, pack_lib, title_key);
 }
 

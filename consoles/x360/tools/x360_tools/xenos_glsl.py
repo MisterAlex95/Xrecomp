@@ -54,6 +54,11 @@ from .xenos_ucode import EXEC_OPS, VECTOR, decode_alu, decode_cf, decode_fetch, 
 
 FLT_MAX = "3.402823466e+38"
 
+# Stamped in every translation; the renderer (xenos_gl.c XENOS_GLSL_STAMP) refuses a cached shader without it, so a
+# cache made before a change of the host contract is translated again (bringup does it) rather than drawn wrong.
+# 2: XBA-280 (PsParamGen from pg.zw, xe_vb<n> buffers for computed-index fetches).
+GLSL_VERSION = 2
+
 
 class Unsupported(Exception):
     pass
@@ -605,7 +610,7 @@ def translate(words, stage="vertex", interpolators=0):
             _flow_body(sh, cfs, words)
     else:
         _straight_body(sh, cfs, words)
-    out = ["#version 300 es", "precision highp float;", "precision highp int;", "precision highp sampler2D;",
+    out = ["#version 300 es", "// xenos_glsl %d" % GLSL_VERSION, "precision highp float;", "precision highp int;", "precision highp sampler2D;",
            "precision highp sampler3D;", "precision highp samplerCube;",
            # an instance name: block members are global to a program, and both stages have xe_c / xe_b / xe_l
            "layout(std140) uniform %s { vec4 c[256]; uvec4 b[2]; uvec4 l[8]; vec4 at; vec4 pg; vec4 vp; } xe_k;" % (
