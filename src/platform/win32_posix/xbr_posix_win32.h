@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,6 +69,38 @@ static inline long long xbr_pio(int fd, void *rbuf, const void *wbuf, size_t n, 
 }
 #define pread(fd, b, n, off) xbr_pio((fd), (b), NULL, (n), (long long)(off))
 #define pwrite(fd, b, n, off) xbr_pio((fd), NULL, (b), (n), (long long)(off))
+
+/* rename replaces an existing destination, as on POSIX (the C runtime's refuses one): saves, states and memory cards
+ * are written as "path.tmp" and renamed over the previous file. C only: a macro would rename std::rename in C++. */
+#ifndef __cplusplus
+__declspec(dllimport) int __stdcall MoveFileExA(const char *from, const char *to, unsigned long flags);
+__declspec(dllimport) unsigned long __stdcall GetLastError(void);
+static inline int xbr_rename(const char *from, const char *to)
+{
+    if (MoveFileExA(from, to, 1 /* MOVEFILE_REPLACE_EXISTING */ | 8 /* MOVEFILE_WRITE_THROUGH */))
+        return 0;
+    unsigned long e = GetLastError();
+    errno = (e == 2 || e == 3) ? ENOENT : (e == 5 || e == 32) ? EACCES : EIO; /* not found; denied or in use */
+    return -1;
+}
+#define rename(from, to) xbr_rename((from), (to))
+
+/* open is always binary: in the C runtime's default text mode a read stops at the first 0x1A and turns CR LF into LF,
+ * which truncates ROMs and disc images. An object-like macro, so that a struct member called open (recomp_pack.h's
+ * disc hook) is renamed at its declaration and at its calls alike. */
+static inline int xbr_open(const char *path, int flags, ...)
+{
+    int mode = 0;
+    if (flags & _O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = va_arg(ap, int);
+        va_end(ap);
+    }
+    return _open(path, flags | _O_BINARY, mode);
+}
+#define open xbr_open
+#endif
 
 /* sysconf(_SC_NPROCESSORS_ONLN) only. */
 __declspec(dllimport) unsigned long __stdcall GetActiveProcessorCount(unsigned short group);
