@@ -7,7 +7,7 @@ Android app (`android/app/src/main/java/fr/adserver/xrecomp/`, written `app/` be
 
 **yes**: the console has it, runtime and Android UI. **partial**: something is missing (said in the cell). **no**:
 missing; **n/a**: it means nothing for that console (the reason is given). Audited on main at 0.13.5
-(2026-11-18); a later commit that changes a cell updates it here.
+(2026-11-18); each XBA-274 commit that fills a gap updates its cell here.
 
 Consoles: Xbox (`src/`), Game Boy Advance (`consoles/gba`), PlayStation (`consoles/ps1`), Nintendo 64
 (`consoles/n64`), GameCube (`consoles/gc`). The spikes (DS, PSP, PS2, Dreamcast, 3DS, Xbox 360, Win32) are not in the
@@ -65,10 +65,20 @@ or rewind UI on any desktop (hotkeys and files only), and no screenshot or fulls
 3. Xbox rewind in a game's settings (`app/GameSettings.appliesTo`). Done.
 4. GameCube in the desktop `xrecomp` CLI (`tools/xrecomp`, `gc_play --missed`, `RECOMP_SAVE_DIR`). Done.
 5. GameCube frame generation on the texture present path (`src/video/host_window.c`). Done.
+6. Every hotkey in an Xbox title's Controls (`app/Hotkeys.Action.appliesTo`). Done.
+7. The frame loop's controls shared by the console runtimes (`src/platform/recomp_play.h`). Done.
+8. A GameCube on-screen pad (`app/TouchPad` Layout.GC). Done.
+9. The desktop keys' hotkeys for Xbox titles (`src/usb/usb_gamepad.c`, `src/input/keyboard.c`). Done.
+10. GameCube cover art download (`app/CoverArt.system`). Done.
 
 Left, with the reason:
 
 - GBA internal resolution and rumble: n/a (above).
+- N64 and GameCube rewind off by default: a capture is 4-8 MB (N64) and up to ~42 MB (GameCube: MEM1 + ARAM)
+  against 64 MB of history by default (`src/platform/recomp_rewind.c` `recomp_rewind_config`); on per game or in
+  Settings.
+- N64 internal resolution with the software RDP: it draws at the console's resolution by design; the Vulkan RDP
+  upscales.
 - Xbox in-run loads with mismatched thread chains, and Xbox states on Windows: runtime work (XBA-249 follow-ups).
 - Xbox keyboard hotkeys on Windows (the GDI window, `src/video/fb_present.c`): Windows builds have no Xbox save
   states yet, so only fast-forward would apply.
