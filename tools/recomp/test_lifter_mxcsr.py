@@ -58,7 +58,7 @@ class MxcsrLiftTest(unittest.TestCase):
         runtime_types = (_ROOT / "templates" / "runtime" / "recomp_types.h").read_text(encoding="utf-8")
         main = (_ROOT / "templates" / "new-game" / "src" / "main.c").read_text(encoding="utf-8")
         layout = (_ROOT / "src" / "kernel" / "xbox_memory_layout.c").read_text(encoding="utf-8")
-        self.assertIn("#define g_mxcsr           g_cpu.r_mxcsr", runtime_types)
+        self.assertIn("#define g_mxcsr           RECOMP_CPU_REF.r_mxcsr", runtime_types)
         self.assertNotIn("g_mxcsr;", main)
         self.assertIn(".r_mxcsr = 0x1F80u,", layout)
 

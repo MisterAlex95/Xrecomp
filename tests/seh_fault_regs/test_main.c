@@ -26,6 +26,14 @@
  * so the first write is dead. The output shows it; xbox_seh.c documents it.
  * POSIX only (exit 77 elsewhere); MSVC has no type-based aliasing to worry
  * about.
+ *
+ * SEH_TEST_CPU_SLOT (arm64 Linux): the same cases with g_cpu reached the way
+ * Android's generated code reaches it, through bionic's TLS_SLOT_APP
+ * (RECOMP_CPU_SLOT, XBA-273), while the handler reads g_cpu itself as the
+ * runtime does. On glibc tp + 16 is the start of the executable's own TLS
+ * block, so the first thread-local below stands in for the slot (checked).
+ * Then the slot's own cases: bound lazily on the main thread and on new
+ * threads, each to its own g_cpu, and the frame shadow macros through it.
  */
 #include "recomp_types.h"
 
@@ -44,6 +52,11 @@ int main(void)
 #include <sys/mman.h>
 #include <unistd.h>
 
+#ifdef SEH_TEST_CPU_SLOT
+#include <pthread.h>
+/* Zero, but in .tdata, which comes before g_cpu's .tbss: the executable's first thread-local. */
+__attribute__((section(".tdata"))) __thread void *seh_slot_standin = 0;
+#endif
 RECOMP_TLS RecompCpu g_cpu;
 ptrdiff_t g_xbox_mem_offset;
 
@@ -60,8 +73,8 @@ static int failures;
 static void on_fault(int sig, siginfo_t *si, void *uc)
 {
     (void)sig; (void)si; (void)uc;
-    s_esp = g_esp;              /* what xbox_SehRaiseHostFault would read */
-    s_esi = g_esi;
+    s_esp = g_cpu.r_esp;        /* what xbox_SehRaiseHostFault reads */
+    s_esi = g_cpu.r_esi;
     s_faulted = 1;
     siglongjmp(s_env, 1);
 }
@@ -116,6 +129,66 @@ static void run(const char *what, void (*fn)(uint32_t), int is_store)
     }
 }
 
+#ifdef SEH_TEST_CPU_SLOT
+/* A lifted function's shape: registers and a frame record through the slot. */
+__attribute__((noinline)) static void slot_body(uint32_t v)
+{
+    RECOMP_FRAME_ENTRY();
+    g_esp -= 4;
+    g_eax = v;
+    g_ebx += v;
+    RECOMP_FRAME_LEAVE();
+}
+
+__attribute__((noinline)) static void slot_work(uint32_t v)
+{
+    g_esp = 0x1000u;
+    slot_body(v);
+}
+
+/* Reads only g_cpu itself: the slot's asm is free to move within a function that uses it, so the slot is
+ * looked at before and after a call into one. */
+static void *slot_thread(void *arg)
+{
+    uintptr_t ok = 1;
+    if (seh_slot_standin != NULL)
+        ok = 0;                         /* a new thread's slot starts at zero */
+    slot_work((uint32_t)(uintptr_t)arg);
+    if (seh_slot_standin != (void *)&g_cpu || g_cpu.r_eax != (uint32_t)(uintptr_t)arg ||
+        g_cpu.r_esp != 0x1000u - 4 || g_cpu.r_ebx != (uint32_t)(uintptr_t)arg ||
+        !g_cpu.r_fbase || g_cpu.r_ftop != g_cpu.r_fbase)
+        ok = 0;
+    return (void *)ok;
+}
+
+static void slot_cases(void)
+{
+    pthread_t t[4];
+    void *main_cpu = &g_cpu;
+    int i;
+    if (seh_slot_standin != main_cpu) {
+        printf("FAIL slot: not bound to the main thread's g_cpu after the cases (%p, %p)\n",
+               seh_slot_standin, main_cpu);
+        failures++;
+    }
+    for (i = 0; i < 4; i++)
+        pthread_create(&t[i], NULL, slot_thread, (void *)(uintptr_t)(0x100 + i));
+    for (i = 0; i < 4; i++) {
+        void *r = NULL;
+        pthread_join(t[i], &r);
+        if (!r) {
+            printf("FAIL slot: thread %d did not see its own g_cpu through the slot\n", i);
+            failures++;
+        }
+    }
+    if (seh_slot_standin != main_cpu || g_cpu.r_eax == 0x100u) {
+        printf("FAIL slot: the main thread's slot or g_cpu changed\n");
+        failures++;
+    }
+    printf("slot cases done\n");
+}
+#endif
+
 int main(void)
 {
     struct sigaction sa;
@@ -128,6 +201,16 @@ int main(void)
         return 2;
     }
     g_xbox_mem_offset = (ptrdiff_t)(uintptr_t)p;
+#ifdef SEH_TEST_CPU_SLOT
+    if ((void *)&seh_slot_standin != (void *)((void **)__builtin_thread_pointer() + RECOMP_CPU_SLOT_INDEX)) {
+        puts("the slot's stand-in is not at tp + 16 (TLS layout): cannot test");
+        return 2;
+    }
+    if (seh_slot_standin != NULL) {
+        puts("FAIL slot: bound before any lifted code ran");
+        return 1;
+    }
+#endif
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = on_fault;
     sa.sa_flags = SA_SIGINFO;
@@ -148,6 +231,9 @@ int main(void)
     run("MEMD store", store_memd, 1);
     run("MEM32 store", store_mem32, 1);
     run("MEM8 store", store_mem8, 1);
+#ifdef SEH_TEST_CPU_SLOT
+    slot_cases();
+#endif
 
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
