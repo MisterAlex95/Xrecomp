@@ -41,6 +41,13 @@ def implemented():
         lib = "xam" if m.group(1) == "XAM" else "xboxkrnl"
         for n in re.finditer(r"\b[XY]\((\w+)", m.group(4)):
             out.add((lib, n.group(1)))
+    with open(os.path.join(RUNTIME, "x360_more.c")) as f:
+        more = f.read()
+    more = more[more.index("static const more_entry MORE[]"):]
+    for m in re.finditer(r"\bKM\((\w+),", more):
+        out.add(("xboxkrnl", m.group(1)))
+    for m in re.finditer(r"\bXM2\((\w+),", more):
+        out.add(("xam", m.group(1)))
     return out
 
 

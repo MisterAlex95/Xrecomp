@@ -1479,6 +1479,8 @@ void x360_hle_call(x360_machine *x, const x360_thunk *th)
             HLE[k].fn(x, t, c);
             return;
         }
+    if (x360_more_call(x, th, t))
+        return;
     if (x->strict_imports) {
         x360_fail(x, "%s!%s (ordinal %u) has no HLE (stopping: strict imports)", th->lib ? "xam" : "xboxkrnl",
                   x360_export_name(th->lib, th->ordinal) ?: "?", th->ordinal);

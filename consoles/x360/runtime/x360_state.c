@@ -160,6 +160,15 @@ static void sec_kernel(x360_machine *x, io *s)
     io_u32(s, &x->kalloc_cur);
     io_u32(s, &x->kalloc_end);
     io_u64(s, &x->rng);
+    for (int k = 0; k < 8; k++) {
+        x360_audio_client *a = &x->audio[k];
+        io_u32(s, &a->callback);
+        io_u32(s, &a->arg);
+        io_u64(s, &a->next);
+        io_i32(s, &a->thread);
+        io_u32(s, &a->frames_requested);
+        io_u32(s, &a->frames_submitted);
+    }
     int status = x->status == X360_BUDGET ? X360_RUNNING : x->status; /* a budget is the caller's, not state */
     io_i32(s, &status);
     if (s->load)

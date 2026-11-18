@@ -164,6 +164,21 @@ x360_thread *x360_thread_create(x360_machine *x, uint32_t stack_size, uint32_t e
     return t;
 }
 
+int x360_callback_run(x360_machine *x, int *slot, uint32_t entry, uint32_t r3, uint32_t r4)
+{
+    x360_thread *t = *slot >= 0 ? &x->threads[*slot] : NULL;
+    if (t && t->state != TH_DONE)
+        return -1;
+    if (t)
+        return x360_thread_restart(x, t, entry, r3, r4);
+    t = x360_thread_create(x, 0x4000, entry, r3, r4, 0);
+    if (!t)
+        return -1;
+    t->interrupt = 1;
+    *slot = (int)(t - x->threads);
+    return 0;
+}
+
 /* Run entry(r3, r4) again on an ended thread's context (its stack, KTHREAD, PCR, TLS): the interrupt context. */
 int x360_thread_restart(x360_machine *x, x360_thread *t, uint32_t entry, uint32_t r3, uint32_t r4)
 {
@@ -358,6 +373,9 @@ static uint64_t next_deadline(x360_machine *x)
     uint64_t g = x360_gpu_next_event(x);
     if (g && (!d || g < d))
         d = g;
+    g = x360_audio_next_event(x);
+    if (g && (!d || g < d))
+        d = g;
     return d;
 }
 
@@ -484,6 +502,7 @@ int x360_run(x360_machine *x, uint64_t insns)
         }
         x360_timers_fire(x);
         x360_gpu_poll(x);
+        x360_audio_poll(x);
         if (x->timestamp_bundle) { /* KeTimeStampBundle: interrupt time, system time, tick count (ms) */
             uint64_t now = x360_now(x);
             x360_w64(x, x->timestamp_bundle, now);

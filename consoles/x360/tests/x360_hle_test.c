@@ -386,11 +386,85 @@ static void test_crypt(void)
     CHECK(!strcmp(h, "bbf316e8d940af0ad3"), "RC4 %s", h);
 }
 
+static void test_more(const char *dir)
+{
+    uint32_t p = x360_kalloc(X, 0x400);
+    /* strings */
+    uint32_t u = p, ustr = p + 0x40, astr = p + 0x50;
+    const char *w = "Save1";
+    for (int k = 0; k < 5; k++)
+        x360_w16(X, u + 2 * (uint32_t)k, (uint8_t)w[k]);
+    x360_w16(X, ustr, 10);
+    x360_w16(X, ustr + 2, 12);
+    x360_w32(X, ustr + 4, u);
+    CHECK(K(X360_xboxkrnl_RtlUnicodeStringToAnsiString, 3, astr, ustr, 1) == 0 && x360_r16(X, astr) == 5 &&
+              !memcmp(X->base + x360_r32(X, astr + 4), "Save1", 6), "unicode to ANSI string");
+    CHECK(K(X360_xboxkrnl_RtlFreeAnsiString, 1, astr) == 0 && x360_r32(X, astr + 4) == 0, "free ANSI string");
+    CHECK(K(X360_xboxkrnl_RtlUpcaseUnicodeChar, 1, 'q') == 'Q', "upcase");
+    /* memory statistics */
+    x360_w32(X, p + 0x100, 104);
+    CHECK(K(X360_xboxkrnl_MmQueryStatistics, 1, p + 0x100) == 0 && x360_r32(X, p + 0x104) == 0x20000 &&
+              x360_r32(X, p + 0x10C) > 0 && x360_r32(X, p + 0x10C) <= 0x20000, "memory statistics");
+    /* save data: content created in the data directory, mounted on its root name */
+    x360_set_data_dir(X, dir);
+    uint32_t cd = x360_kalloc(X, 0x134), disp = x360_kalloc(X, 4);
+    x360_w32(X, cd, 1);
+    memcpy(X->base + cd + 0x108, "slot0", 6);
+    uint32_t root = x360_kalloc(X, 8);
+    memcpy(X->base + root, "save", 5);
+    uint32_t r = XM(X360_xam_XamContentCreateEx, 9, 0, root, cd, 3, disp, 0, 0, 0, 0);
+    CHECK(r == 0 && x360_r32(X, disp) == 1, "content created: %X, disposition %u", r, x360_r32(X, disp));
+    uint32_t hp = x360_kalloc(X, 8), iosb = x360_kalloc(X, 8);
+    CHECK(K(X360_xboxkrnl_NtCreateFile, 9, hp, 0xC0000000u, attrs("save:\\data.bin"), iosb, 0, 0, 0, 5, 0x40) == 0,
+          "a file in the content");
+    K(X360_xboxkrnl_NtClose, 1, x360_r32(X, hp));
+    char host[600];
+    snprintf(host, sizeof host, "%s/content/slot0/data.bin", dir);
+    CHECK(access(host, F_OK) == 0, "it is %s", host);
+    unlink(host);
+    snprintf(host, sizeof host, "%s/content/slot0", dir);
+    rmdir(host);
+    snprintf(host, sizeof host, "%s/content", dir);
+    rmdir(host);
+    /* profile settings: the size first, then defaults */
+    uint32_t ids = p + 0x200, sizep = p + 0x210, buf = x360_kalloc(X, 0x100);
+    x360_w32(X, ids, 0x10040002u);
+    x360_w32(X, ids + 4, 0x50040011u);
+    x360_w32(X, sizep, 0);
+    CHECK(XM(X360_xam_XamUserReadProfileSettings, 9, 0, 0, 0, 0, 2, ids, sizep, 0, 0) == 0x7A &&
+              x360_r32(X, sizep) == 8 + 80, "profile settings: size");
+    CHECK(XM(X360_xam_XamUserReadProfileSettings, 9, 0, 0, 0, 0, 2, ids, sizep, buf, 0) == 0 &&
+              x360_r32(X, buf) == 2 && x360_r32(X, buf + 8 + 40 + 16) == 0x50040011u &&
+              x360_r8(X, buf + 8 + 40 + 24) == 5, "profile settings: defaults");
+    /* a message box answered at once through its overlapped, which signals the event */
+    uint32_t ov = x360_kalloc(X, 0x1C), res = x360_kalloc(X, 4), evh = x360_kalloc(X, 4);
+    K(X360_xboxkrnl_NtCreateEvent, 4, evh, 0, 0, 0);
+    x360_w32(X, ov + 0xC, x360_r32(X, evh));
+    x360_w32(X, res, 7);
+    CHECK(XM(X360_xam_XamShowMessageBoxUI, 9, 0, 0, 0, 1, 0, 0, 0, res, ov) == 0x3E5 && x360_r32(X, ov) == 0 &&
+              x360_r32(X, res) == 0 && x360_r32(X, x360_handle_obj(X, x360_r32(X, evh)) + 4) == 1,
+          "message box through an overlapped");
+    /* the audio driver's client callback runs every frame on a guest context */
+    uint32_t cb = x360_kalloc(X, 8), drv = x360_kalloc(X, 4);
+    x360_w32(X, cb, 0x82002000u);
+    x360_w32(X, cb + 4, 0x1234);
+    CHECK(K(X360_xboxkrnl_XAudioRegisterRenderDriverClient, 2, cb, drv) == 0 &&
+              (x360_r32(X, drv) & 0xFFFF0000u) == 0x41550000u, "audio client registered");
+    X->time_skip += 60000;
+    x360_audio_poll(X);
+    x360_audio_client *a = &X->audio[x360_r32(X, drv) & 0xFFFF];
+    CHECK(a->thread >= 0 && X->threads[a->thread].cpu.pc == 0x82002000u && X->threads[a->thread].cpu.gpr[3] == 0x1234,
+          "audio callback context");
+    CHECK(XM(X360_xam_NetDll_inet_addr, 2, 0, attrs("10.1.2.3") ? x360_r32(X, x360_r32(X, attrs("10.1.2.3") + 4) + 4)
+                                                                 : 0) == 0x0A010203u, "inet_addr");
+    CHECK(XM(X360_xam_NetDll_socket, 4, 0, 2, 1, 6) == 0xFFFFFFFFu, "no network: sockets fail");
+}
+
 static void test_strict_imports(void)
 {
     X->strict_imports = 1;
-    K(X360_xboxkrnl_VdGetCurrentDisplayInformation, 1, 0);
-    CHECK(X->status == X360_ERROR && strstr(X->error, "VdGetCurrentDisplayInformation"), "strict imports: %s",
+    K(X360_xboxkrnl_XexLoadImage, 1, 0);
+    CHECK(X->status == X360_ERROR && strstr(X->error, "XexLoadImage"), "strict imports: %s",
           X->error);
     X->status = X360_RUNNING;
     X->strict_imports = 0;
@@ -445,6 +519,7 @@ int main(void)
     }
     X->dbg = stdout;
     X->log = stdout;
+    x360_install_fault_handler(X); /* a guest fault prints its address instead of a bare SIGSEGV */
     scratch = x360_heap_alloc(X, &X->heap_v4k, 0x10000, 0);
     stack_top = scratch + 0x8000;
     test_formatters();
@@ -458,6 +533,7 @@ int main(void)
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {
         test_files(dir);
+        test_more(dir);
         rmdir(dir);
     } else {
         CHECK(0, "mkdtemp");

@@ -86,6 +86,13 @@ typedef struct x360_timer {
     uint32_t period;  /* ms, 0: one shot */
 } x360_timer;
 
+typedef struct x360_audio_client {
+    uint32_t callback, arg;  /* XAudioRegisterRenderDriverClient's routine and argument */
+    uint64_t next;           /* virtual time of the next frame request */
+    int thread;              /* its guest context (x360_callback_run), -1 before the first */
+    uint32_t frames_requested, frames_submitted;
+} x360_audio_client;
+
 typedef struct x360_thunk {
     uint32_t addr;
     uint16_t ordinal;
@@ -123,6 +130,7 @@ struct x360_machine {
     uint32_t next_thread_id;
     x360_handle handles[X360_MAX_HANDLES];
     x360_timer timers[X360_MAX_TIMERS];
+    x360_audio_client audio[8];
     uint64_t tls_used;        /* KeTlsAlloc slots */
     uint64_t time_skip;       /* virtual 100 ns skipped while every thread waited */
 
@@ -172,6 +180,8 @@ x360_thread *x360_thread_create(x360_machine *x, uint32_t stack_size, uint32_t e
                                 int suspended);
 x360_thread *x360_cur(x360_machine *x);
 int x360_thread_restart(x360_machine *x, x360_thread *t, uint32_t entry, uint32_t r3, uint32_t r4);
+/* run entry(r3, r4) on a callback context kept in *slot (made once, reused): 0, or -1 while it still runs */
+int x360_callback_run(x360_machine *x, int *slot, uint32_t entry, uint32_t r3, uint32_t r4);
 x360_thread *x360_thread_by_kthread(x360_machine *x, uint32_t kthread);
 void x360_thread_exit(x360_machine *x, x360_thread *t, uint32_t code);
 uint32_t x360_handle_new(x360_machine *x, uint32_t obj);
@@ -195,6 +205,11 @@ void x360_hle_call(x360_machine *x, const x360_thunk *t);
 int x360_kernel_init(x360_machine *x);
 const char *x360_export_name(int lib, unsigned ordinal);
 uint64_t x360_stack_arg(x360_machine *x, xe_cpu *c, int n);
+/* x360_more.c: the rest of the surface a shipped title imports (1 when it handled the call) */
+int x360_more_call(x360_machine *x, const x360_thunk *th, x360_thread *t);
+void x360_audio_poll(x360_machine *x);
+uint64_t x360_audio_next_event(x360_machine *x);
+int x360_set_content_root(x360_machine *x, const char *root, const char *name);
 
 /* x360_file.c: the file calls (x360_kernel.c's table points at them) */
 void x360_file_close(x360_machine *x, uint32_t handle);

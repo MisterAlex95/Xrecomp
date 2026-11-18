@@ -820,6 +820,32 @@ void x360_fs_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), vo
     }
 }
 
+/* XamContentCreateEx: content <name> is the directory content/<name> of the data directory, mounted on <root>:
+ * 1 when it was created, 0 when it existed, -1 without a data directory */
+int x360_set_content_root(x360_machine *x, const char *root, const char *name)
+{
+    struct x360_fs *fs = fs_of(x);
+    if (!fs->data_dir[0] || !root[0] || !name[0])
+        return -1;
+    char path[1200];
+    snprintf(path, sizeof path, "%s/content", fs->data_dir);
+    mkdir(path, 0755);
+    snprintf(path, sizeof path, "%s/content/%s", fs->data_dir, name);
+    int created = mkdir(path, 0755) == 0;
+    if (!created && errno != EEXIST)
+        return -1;
+    char link[64], target[256];
+    snprintf(link, sizeof link, "%s:", root);
+    snprintf(target, sizeof target, "\\Device\\Harddisk0\\Partition1\\content\\%s", name);
+    for (int k = 0; k < MAX_LINKS; k++)
+        if (!fs->links[k].link[0] || !strcasecmp(fs->links[k].link, link)) {
+            snprintf(fs->links[k].link, sizeof fs->links[k].link, "%s", link);
+            snprintf(fs->links[k].target, sizeof fs->links[k].target, "%s", target);
+            return created;
+        }
+    return -1;
+}
+
 static void ansi(x360_machine *x, uint32_t s, char *out, size_t n)
 {
     uint16_t l = s ? x360_r16(x, s) : 0;
