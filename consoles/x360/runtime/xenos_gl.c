@@ -301,6 +301,8 @@ struct xenos_gl {
     GLuint dprog, dtex;       /* depth resolves: the pass that packs depth into RGBA8, its target */
     GLint dprog_at;
     int dtex_w, dtex_h, dprog_failed;
+    GLuint sprog, stex;       /* the stencil of depth resolves: the pass marking one bit, its target */
+    int stex_w, stex_h, sprog_failed;
     int rtex_w, rtex_h;
     GLenum rtex_fmt;
     int width, height;        /* the default target (a surface with pitch 0 / no scissor) and the frame size */
@@ -630,6 +632,10 @@ void xenos_gl_destroy(xenos_gl *g)
             g->glDeleteTextures(1, &g->dtex);
         if (g->dprog)
             g->glDeleteProgram(g->dprog);
+        if (g->stex)
+            g->glDeleteTextures(1, &g->stex);
+        if (g->sprog)
+            g->glDeleteProgram(g->sprog);
         if (g->frame_tex)
             g->glDeleteTextures(1, &g->frame_tex);
         g->glDeleteVertexArrays(1, &g->vao);
@@ -2563,8 +2569,8 @@ static void clear_colour(uint32_t fmt, uint32_t hi, uint32_t lo, float c[4])
 
 /* Depth out of the eDRAM (a resolve whose source is the depth buffer): GLES 3.0 reads no depth with glReadPixels, so
  * a pass samples the depth texture (texelFetch at the guest pixel's host texel) and packs its 24 bits into an RGBA8
- * target read back as bytes; the stencil is not readable in GLES 3.0 (0). Returns w * h depth values (0..2^24-1),
- * top row first, or NULL. */
+ * target read back as bytes (the stencil: read_stencil). Returns w * h depth values (0..2^24-1), top row first, or
+ * NULL. */
 static const char DEPTH_VS[] =
     "#version 300 es\nvoid main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));"
     " gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
@@ -2639,6 +2645,91 @@ static uint32_t *read_depth(xenos_gl *g, const surface *s, int x0, int y0, int w
     }
     free(b);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
+    return out;
+}
+
+/* The stencil of a depth resolve (XBA-296). GLES 3.0 cannot sample stencil, so it is read a bit at a time: for each of
+ * the 8 bits a full-target pass with the stencil test on that bit marks the pixels that have it, read back at the host
+ * texel of each guest pixel (the one read_depth takes). Returns w * h values, top row first, or NULL. */
+static const char STENCIL_FS[] =
+    "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(1.0); }\n";
+
+static uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0, int w, int h)
+{
+    if (!g->sprog && !g->sprog_failed) {
+        GLuint v = compile(g, GL_VERTEX_SHADER, DEPTH_VS, "stencil resolve vs");
+        GLuint f = compile(g, GL_FRAGMENT_SHADER, STENCIL_FS, "stencil resolve fs");
+        GLint ok = 0;
+        if (v && f) {
+            g->sprog = g->glCreateProgram();
+            g->glAttachShader(g->sprog, v);
+            g->glAttachShader(g->sprog, f);
+            g->glLinkProgram(g->sprog);
+            g->glGetProgramiv(g->sprog, GL_LINK_STATUS, &ok);
+        }
+        if (v)
+            g->glDeleteShader(v);
+        if (f)
+            g->glDeleteShader(f);
+        if (!ok) {
+            if (g->sprog)
+                g->glDeleteProgram(g->sprog);
+            g->sprog = 0;
+            g->sprog_failed = 1;
+        }
+    }
+    if (!g->sprog)
+        return NULL;
+    int sc = g->scale, hw = s->w * sc, hh = s->h * sc;
+    if (!g->stex || g->stex_w != hw || g->stex_h != hh) {
+        if (g->stex)
+            g->glDeleteTextures(1, &g->stex);
+        g->stex = new_texture(g, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, hw, hh);
+        g->stex_w = hw, g->stex_h = hh;
+    }
+    size_t n = (size_t)w * h;
+    uint8_t *out = calloc(n, 1), *row = malloc((size_t)hw * 4);
+    if (!out || !row) {
+        free(out);
+        free(row);
+        return NULL;
+    }
+    static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g->stex, 0);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, s->tex, 0);
+    g->glDrawBuffers(1, &b0);
+    g->glReadBuffer(GL_COLOR_ATTACHMENT0);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glDisable(GL_BLEND);
+    g->glDisable(GL_DEPTH_TEST);
+    g->glDisable(GL_CULL_FACE);
+    g->glDepthMask(0);
+    g->glColorMask(1, 1, 1, 1);
+    g->glEnable(GL_STENCIL_TEST);
+    g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0);
+    g->glStencilOpSeparate(GL_FRONT_AND_BACK, 0x1E00, 0x1E00, 0x1E00); /* GL_KEEP */
+    g->glViewport(0, 0, hw, hh);
+    g->glUseProgram(g->sprog);
+    g->glBindVertexArray(g->vao);
+    for (int bit = 0; bit < 8; bit++) {
+        g->glClearColor(0, 0, 0, 0);
+        g->glClear(GL_COLOR_BUFFER_BIT);
+        g->glStencilFuncSeparate(GL_FRONT_AND_BACK, 0x0202 /* GL_EQUAL */, 0xFF, 1u << bit);
+        g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+        for (int y = 0; y < h; y++) {
+            g->glReadPixels(0, (y0 + y) * sc, hw, 1, GL_RGBA, GL_UNSIGNED_BYTE, row);
+            for (int x = 0; x < w; x++)
+                if (row[4 * (x0 + x) * sc])
+                    out[(size_t)y * w + x] |= (uint8_t)(1u << bit);
+        }
+    }
+    free(row);
+    g->glDisable(GL_STENCIL_TEST);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
     g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
     return out;
@@ -2745,7 +2836,7 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
         } else {
             unsupported(g, "resolve destination format");
         }
-    } else if (cmd <= 1) { /* depth out: 24_8 (depth in the high 24 bits, stencil 0), tiled 32-bit */
+    } else if (cmd <= 1) { /* depth out: 24_8 (depth in the high 24 bits, stencil in the low 8), tiled 32-bit */
         uint32_t info = cp->regs[0x231B], fmt = (info >> 7) & 63, endian = info & 7;
         uint32_t pitch = cp->regs[0x231A] & 0x3FFF, base = cp->regs[0x2319] & 0x1FFFFFFFu;
         uint32_t *dv = (fmt == 22 || fmt == 6 || fmt == 33) && endian < 4 && cp->write32 && cp->read32
@@ -2753,13 +2844,18 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                            : NULL;
         if (dv) {
             uint32_t pitch_aligned = (pitch + 31) & ~31u;
+            uint8_t *sv = read_stencil(g, s, x0, y0, x1 - x0, y1 - y0);
+            if (!sv)
+                unsupported(g, "stencil of a depth resolve (written as 0)");
             for (int y = y0; y < y1; y++)
                 for (int x = x0; x < x1; x++) {
-                    uint32_t d = dv[(size_t)(y - y0) * (x1 - x0) + (x - x0)] << 8;
+                    size_t at = (size_t)(y - y0) * (x1 - x0) + (x - x0);
+                    uint32_t d = dv[at] << 8 | (sv ? sv[at] : 0);
                     uint8_t b4[4] = {(uint8_t)d, (uint8_t)(d >> 8), (uint8_t)(d >> 16), (uint8_t)(d >> 24)};
                     put_bytes(cp, base + (uint32_t)tiled2d(x, y, pitch_aligned, 2), b4, 4, endian);
                 }
             free(dv);
+            free(sv);
             g->st.resolves++;
             g->st.depth_resolves++;
             g->epoch++;

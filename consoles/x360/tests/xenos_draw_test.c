@@ -1228,6 +1228,33 @@ int main(int argc, char **argv)
         }
     }
 
+    /* the stencil of a depth resolve: the square of the line loops (z 0.5) writes stencil 0x5A where it covers; the 24_8
+     * copy holds it in the low byte there, 0 outside. A depth surface of its own, at tile 0x300 */
+    {
+        reg(0x2002, 0x300u);
+        reg(0x4800, 0x40000u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        reg(0x210D, 0x5Au | 0xFFu << 8 | 0xFFu << 16);              /* reference, mask, write mask */
+        reg(0x2200, 1u | 2u | 4u | 7u << 4 | 7u << 8 | 2u << 14);  /* stencil always, replace on pass; depth always */
+        uint32_t fan = 5u | 2u << 6 | 4u << 16;
+        type3(PM4_DRAW_INDX_2, &fan, 1);
+        reg(0x2200, 0);
+        reg(0x4800, 0x7000u | 3u);
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);
+        reg(0x2318, 4u);                                            /* source: depth, no clear, raw */
+        reg(0x2319, 0x44000);
+        reg(0x231A, W | (uint32_t)H << 16);
+        reg(0x231B, 2u | 22u << 7);                                 /* 8-in-32, 24_8 */
+        type3(PM4_DRAW_INDX_2, &rect, 1);
+        reg(0x2208, 4), reg(0x2002, 0);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        uint32_t in_s = rd32(NULL, 0x44000 + tiled_off(32, 32)), out_s = rd32(NULL, 0x44000 + tiled_off(4, 4));
+        CHECK((in_s & 0xFF) == 0x5A && (in_s >> 8) >= 0x7FFFF0u && (in_s >> 8) <= 0x800010u && (out_s & 0xFF) == 0,
+              "depth resolve with stencil: inside %08X (want 800000 << 8 | 5A), outside %08X", in_s, out_s);
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;
