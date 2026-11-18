@@ -110,7 +110,9 @@ struct gx_gl {
     GLint max_tex;
 
     GLuint efb_fbo, efb_color, efb_depth;
-    GLuint vao, vbo, ebo, ubo, empty_vao;
+    GLuint vao[9];           /* per number of texture coordinates in the batch: the attributes it enables */
+    GLuint vbo, ebo, ubo, empty_vao;
+    bool attr_defaults_set;  /* this field's batches: unused coordinates read (0, 0, 1, 1) */
     size_t ring_size[3], ring_off[3]; /* vbo, ebo, ubo as streaming rings (ring_put) */
     GLint ubo_align;
     int stream; /* STREAM_* */
@@ -1351,26 +1353,28 @@ void gx_gl_flush(gx_state *gx)
     fill_ubo(gx, &k);
     F.glUseProgram(prog);
     /* upload position, colours and only the texture coordinates generated: 24 + 12 x ntex bytes a vertex */
-    F.glBindVertexArray(g->vao);
     unsigned nt = g->batch_ntex;
+    F.glBindVertexArray(g->vao[nt]);
+    if (!g->attr_defaults_set) { /* context state, not the vertex arrays': the window may change it between fields */
+        for (unsigned i = 0; i < 8; i++)
+            F.glVertexAttrib4f(3 + i, 0, 0, 1, 1);
+        g->attr_defaults_set = true;
+    }
     size_t stride = offsetof(gx_vout, tex) + 12 * (size_t)nt;
-    for (uint32_t i = 0; i < g->nv; i++)
-        memcpy(g->packed + i * stride, &g->bv[i], stride);
-    size_t vo = ring_put(g, 0, g->vbo, GL_ARRAY_BUFFER, g->packed, g->nv * stride, 16);
+    const void *verts = g->bv; /* all eight coordinates: the batch is packed already */
+    if (stride != sizeof(gx_vout)) {
+        for (uint32_t i = 0; i < g->nv; i++)
+            memcpy(g->packed + i * stride, &g->bv[i], stride);
+        verts = g->packed;
+    }
+    size_t vo = ring_put(g, 0, g->vbo, GL_ARRAY_BUFFER, verts, g->nv * stride, 16);
     GLsizei st = (GLsizei)stride;
     F.glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, st, (const void *)(vo + offsetof(gx_vout, pos)));
     F.glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)(vo + offsetof(gx_vout, c0)));
     F.glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)(vo + offsetof(gx_vout, c1)));
-    for (unsigned i = 0; i < 8; i++) {
-        if (i < nt) {
-            F.glEnableVertexAttribArray(3 + i);
-            F.glVertexAttribPointer(3 + i, 3, GL_FLOAT, GL_FALSE, st,
-                                    (const void *)(vo + offsetof(gx_vout, tex) + 12 * i));
-        } else {
-            F.glDisableVertexAttribArray(3 + i);
-            F.glVertexAttrib4f(3 + i, 0, 0, 1, 1);
-        }
-    }
+    for (unsigned i = 0; i < nt; i++)
+        F.glVertexAttribPointer(3 + i, 3, GL_FLOAT, GL_FALSE, st,
+                                (const void *)(vo + offsetof(gx_vout, tex) + 12 * i));
     size_t io = ring_put(g, 1, g->ebo, GL_ELEMENT_ARRAY_BUFFER, g->bi, (size_t)g->ni * 4, 4);
     F.glDrawElements(GL_TRIANGLES, (GLsizei)g->ni, GL_UNSIGNED_INT, (const void *)io);
     stream_after_draw(gx);
@@ -2127,6 +2131,7 @@ void gx_gl_frame(gx_state *gx)
         }
     gx->stats.shaders_ready = ready;
     gx->stats.shaders_pending = pending;
+    g->attr_defaults_set = false;
 }
 
 /* A save state was loaded (XBA-264): RAM holds another moment. EFB copies kept as textures no longer match RAM (their
@@ -2392,7 +2397,7 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     F.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
     F.glGenSamplers(8, g->samplers);
     /* vertex layout */
-    F.glGenVertexArrays(1, &g->vao);
+    F.glGenVertexArrays(9, g->vao);
     F.glGenVertexArrays(1, &g->empty_vao);
     F.glGenBuffers(1, &g->vbo);
     F.glGenBuffers(1, &g->ebo);
@@ -2433,19 +2438,11 @@ int gx_gl_attach(gx_state *gx, const gx_gl_options *opt)
     F.glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &g->ubo_align);
     if (g->ubo_align < 16)
         g->ubo_align = 256;
-    F.glBindVertexArray(g->vao);
-    F.glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
-    GLsizei st = (GLsizei)sizeof(gx_vout);
-    F.glEnableVertexAttribArray(0);
-    F.glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, st, (const void *)offsetof(gx_vout, pos));
-    F.glEnableVertexAttribArray(1);
-    F.glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)offsetof(gx_vout, c0));
-    F.glEnableVertexAttribArray(2);
-    F.glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, (const void *)offsetof(gx_vout, c1));
-    for (int i = 0; i < 8; i++) {
-        F.glEnableVertexAttribArray((GLuint)(3 + i));
-        F.glVertexAttribPointer((GLuint)(3 + i), 3, GL_FLOAT, GL_FALSE, st,
-                                (const void *)(offsetof(gx_vout, tex) + 12 * (size_t)i));
+    /* the enabled attributes of a batch of nt coordinates; their pointers follow the ring, batch by batch */
+    for (unsigned nt = 0; nt < 9; nt++) {
+        F.glBindVertexArray(g->vao[nt]);
+        for (unsigned a = 0; a < 3 + nt; a++)
+            F.glEnableVertexAttribArray(a);
     }
     F.glBindVertexArray(0);
     /* programs */
@@ -2636,7 +2633,7 @@ void gx_gl_detach(gx_state *gx)
     F.glDeleteBuffers(1, &g->vbo);
     F.glDeleteBuffers(1, &g->ebo);
     F.glDeleteBuffers(1, &g->ubo);
-    F.glDeleteVertexArrays(1, &g->vao);
+    F.glDeleteVertexArrays(9, g->vao);
     F.glDeleteVertexArrays(1, &g->empty_vao);
     free(g->bv);
     free(g->packed);
