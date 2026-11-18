@@ -268,54 +268,6 @@ static void k_DbgPrint(x360_machine *x, x360_thread *t, xe_cpu *c)
     RET(0);
 }
 
-static void k_sprintf(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    char buf[2048];
-    gargs g = {x, c, 5, 1, 0};
-    size_t n = gformat(x, &g, A(1), buf, sizeof buf);
-    memcpy(x->base + A(0), buf, n + 1);
-    RET(n);
-}
-
-static void k__snprintf(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    char buf[2048];
-    gargs g = {x, c, 6, 1, 0};
-    size_t n = gformat(x, &g, A(2), buf, sizeof buf);
-    uint32_t cap = A(1);
-    if (cap) {
-        size_t w = n < cap ? n + 1 : cap;
-        memcpy(x->base + A(0), buf, w);
-    }
-    RET(n < cap ? n : (uint32_t)-1);
-}
-
-static void k_vsprintf(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    char buf[2048];
-    gargs g = {x, c, 0, 1, A(2)};
-    size_t n = gformat(x, &g, A(1), buf, sizeof buf);
-    memcpy(x->base + A(0), buf, n + 1);
-    RET(n);
-}
-
-static void k__vsnprintf(x360_machine *x, x360_thread *t, xe_cpu *c)
-{
-    (void)t;
-    char buf[2048];
-    gargs g = {x, c, 0, 1, A(3)};
-    size_t n = gformat(x, &g, A(2), buf, sizeof buf);
-    uint32_t cap = A(1);
-    if (cap) {
-        size_t w = n < cap ? n + 1 : cap;
-        memcpy(x->base + A(0), buf, w);
-    }
-    RET(n < cap ? n : (uint32_t)-1);
-}
-
 static void k_DbgBreakPoint(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t, (void)c;
@@ -1418,8 +1370,8 @@ static void k_RtlTimeFieldsToTime(x360_machine *x, x360_thread *t, xe_cpu *c)
 #define XM(name, fn) {X360_LIB_XAM, X360_xam_##name, fn}
 
 static const x360_hle_row HLE[] = {
-    K(DbgPrint), K(DbgBreakPoint), KA(DbgBreakPointWithStatus, k_DbgBreakPoint), K(sprintf), K(_snprintf),
-    K(vsprintf), K(_vsnprintf), KA(KeBugCheck, k_KeBugCheckEx), K(KeBugCheckEx), K(RtlRaiseException),
+    K(DbgPrint), K(DbgBreakPoint), KA(DbgBreakPointWithStatus, k_DbgBreakPoint),
+    KA(KeBugCheck, k_KeBugCheckEx), K(KeBugCheckEx), K(RtlRaiseException),
     K(HalReturnToFirmware),
     K(NtAllocateVirtualMemory), K(NtFreeVirtualMemory), K(NtQueryVirtualMemory), K(MmAllocatePhysicalMemoryEx),
     K(MmAllocatePhysicalMemory), K(MmFreePhysicalMemory), K(MmGetPhysicalAddress), K(MmQueryAllocationSize),
