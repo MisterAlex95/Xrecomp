@@ -28,7 +28,61 @@ struct x360_gpu {
     int irq_pending[2]; /* source 0 (vblank), 1 (command processor) queued while one runs */
     int ring;
     int irq_thread; /* the interrupt context's slot, -1 before the first interrupt */
+    char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
 };
+
+static struct x360_gpu *gpu_of(x360_machine *x);
+
+static void shader_loaded(void *ctx, int pixel, const uint32_t *code, uint32_t words)
+{
+    x360_machine *x = ctx;
+    struct x360_gpu *g = x->gpu;
+    if (!g || !g->shader_dir[0] || !words)
+        return;
+    uint8_t be[4 * XENOS_SHADER_WORDS];
+    for (uint32_t k = 0; k < words; k++) {
+        be[4 * k] = (uint8_t)(code[k] >> 24);
+        be[4 * k + 1] = (uint8_t)(code[k] >> 16);
+        be[4 * k + 2] = (uint8_t)(code[k] >> 8);
+        be[4 * k + 3] = (uint8_t)code[k];
+    }
+    char path[600];
+    snprintf(path, sizeof path, "%s/%s_%08X.bin", g->shader_dir, pixel ? "ps" : "vs", x360_crc32(be, 4 * words));
+    FILE *f = fopen(path, "rb");
+    if (f) { /* already there */
+        fclose(f);
+        return;
+    }
+    f = fopen(path, "wb");
+    if (f) {
+        fwrite(be, 4, words, f);
+        fclose(f);
+    }
+}
+
+void x360_set_shader_dump(x360_machine *x, const char *dir)
+{
+    struct x360_gpu *g = gpu_of(x);
+    if (g)
+        snprintf(g->shader_dir, sizeof g->shader_dir, "%s", dir ? dir : "");
+}
+
+void x360_gpu_opcode_histogram(x360_machine *x, FILE *out)
+{
+    struct x360_gpu *g = x->gpu;
+    if (!g || !g->cp.packets)
+        return;
+    fprintf(out, "gpu opcodes:");
+    for (uint32_t op = 0; op < 128; op++)
+        if (g->cp.op_count[op]) {
+            const char *n = xenos_cp_opcode_name(op);
+            if (n)
+                fprintf(out, " %s %u", n, g->cp.op_count[op]);
+            else
+                fprintf(out, " op%02X %u", op, g->cp.op_count[op]);
+        }
+    fprintf(out, "\n");
+}
 
 static uint32_t phys_read(void *ctx, uint32_t phys)
 {
@@ -61,6 +115,7 @@ static struct x360_gpu *gpu_of(x360_machine *x)
         x->gpu->cp.write32 = phys_write;
         x->gpu->cp.interrupt = cp_interrupt;
         x->gpu->irq_thread = -1;
+        x->gpu->cp.shader_loaded = shader_loaded;
         xenos_cp_init(&x->gpu->cp);
     }
     return x->gpu;

@@ -46,6 +46,10 @@ int x360_set_disc(x360_machine *x, const char *path, char *why, size_t why_len);
 int x360_set_data_dir(x360_machine *x, const char *path);
 /* Stop at the first call of an import without an HLE (default: log it once, return 0). */
 void x360_set_strict_imports(x360_machine *x, int on);
+/* Write each distinct shader microcode the title loads to DIR (vs_/ps_<crc>.bin, big-endian words: python3 -m
+ * x360_tools.xenos_ucode disassembles them); the type-3 packet counts of the GPU stream. */
+void x360_set_shader_dump(x360_machine *x, const char *dir);
+void x360_gpu_opcode_histogram(x360_machine *x, FILE *out);
 /* A trace of the GPU command stream (PM4 packets, register blocks, draws, swaps), or NULL. */
 void x360_set_gpu_trace(x360_machine *x, FILE *f);
 /* Where DbgPrint and the runtime's own messages go (default stdout / stderr), verbosity (0 quiet, 1 HLE calls). */

@@ -9,12 +9,14 @@ void xenos_cp_init(xenos_cp *cp)
     uint32_t (*r)(void *, uint32_t) = cp->read32;
     void (*w)(void *, uint32_t, uint32_t) = cp->write32;
     void (*irq)(void *, uint32_t, uint32_t) = cp->interrupt;
+    void (*sh)(void *, int, const uint32_t *, uint32_t) = cp->shader_loaded;
     FILE *trace = cp->trace;
     memset(cp, 0, sizeof *cp);
     cp->ctx = ctx;
     cp->read32 = r;
     cp->write32 = w;
     cp->interrupt = irq;
+    cp->shader_loaded = sh;
     cp->trace = trace;
 }
 
@@ -199,6 +201,7 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
         return 0;
     uint32_t op = (h >> 8) & 0x7F, count = ((h >> 16) & 0x3FFF) + 1;
     uint32_t end = (start + 1 + count) % r->size_dw;
+    cp->op_count[op]++;
     switch (op) {
     case PM4_INDIRECT_BUFFER:
     case PM4_INDIRECT_BUFFER_PFD: {
@@ -346,6 +349,8 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
                                             : rd(cp, r);
         sh->loads++;
         cp->shader_loads++;
+        if (cp->shader_loaded)
+            cp->shader_loaded(cp->ctx, type != 0, sh->code, n);
         TRACE("%s %s start %u, %u words\n", xenos_cp_opcode_name(op), type == 0 ? "vertex" : "pixel", ss >> 16,
               ss & 0xFFFF);
         break;

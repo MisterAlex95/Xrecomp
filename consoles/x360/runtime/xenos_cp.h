@@ -64,12 +64,14 @@ typedef struct xenos_cp {
     xenos_draw last_draw;
     xenos_shader shader[2]; /* the active vertex (0) and pixel (1) shader microcode, as last loaded */
     uint64_t shader_loads;
+    uint32_t op_count[128]; /* type-3 packets by opcode (the trace summary's histogram) */
     uint64_t packets, reg_writes, draws, swaps, interrupts, unknown;
     /* guest physical memory (big-endian words) and the interrupt sink, given by the runtime */
     void *ctx;
     uint32_t (*read32)(void *ctx, uint32_t phys);
     void (*write32)(void *ctx, uint32_t phys, uint32_t value);
     void (*interrupt)(void *ctx, uint32_t source, uint32_t cpu_mask);
+    void (*shader_loaded)(void *ctx, int pixel, const uint32_t *code, uint32_t words); /* optional */
     FILE *trace;
 } xenos_cp;
 

@@ -282,12 +282,38 @@ static void test_gpu(void)
     x360_w32(X, args + 4, 1280);
     x360_w32(X, args + 8, 720);
     K(X360_xboxkrnl_VdSwap, 10, ring + 16, args + 16, 0, 0, 0, args, args + 20, args + 24, args + 4, args + 8);
-    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, 4 + 64);
+    /* a pixel shader's microcode, dumped once to a directory */
+    char sdir[] = "/tmp/x360_shaders_XXXXXX";
+    int have_dir = mkdtemp(sdir) != NULL;
+    if (have_dir)
+        x360_set_shader_dump(X, sdir);
+    uint32_t sp = ring + 4 * (4 + 64);
+    x360_w32(X, sp, 3u << 30 | (5u - 1) << 16 | (uint32_t)PM4_IM_LOAD_IMMEDIATE << 8);
+    x360_w32(X, sp + 4, 1);
+    x360_w32(X, sp + 8, 3);
+    x360_w32(X, sp + 12, 0x11111111u);
+    x360_w32(X, sp + 16, 0x22222222u);
+    x360_w32(X, sp + 20, 0x33333333u);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, 4 + 64 + 6);
     x360_gpu_poll(X);
     x360_stats st;
     x360_get_stats(X, &st);
     CHECK(x360_r32(X, fence) == 0x1234, "fence %08X", x360_r32(X, fence));
-    CHECK(x360_r32(X, wb) == 68, "read pointer written back: %u", x360_r32(X, wb));
+    CHECK(x360_r32(X, wb) == 74, "read pointer written back: %u", x360_r32(X, wb));
+    if (have_dir) {
+        uint8_t want[12] = {0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22, 0x33, 0x33, 0x33, 0x33};
+        char path[128];
+        snprintf(path, sizeof path, "%s/ps_%08X.bin", sdir, x360_crc32(want, 12));
+        FILE *f = fopen(path, "rb");
+        uint8_t got[16];
+        size_t n = f ? fread(got, 1, sizeof got, f) : 0;
+        CHECK(n == 12 && !memcmp(got, want, 12), "shader dumped to %s (%zu bytes)", path, n);
+        if (f)
+            fclose(f);
+        unlink(path);
+        rmdir(sdir);
+        x360_set_shader_dump(X, NULL);
+    }
     CHECK(st.gpu_swaps == 1 && st.gpu_packets >= 3, "swap seen: %llu swaps, %llu packets",
           (unsigned long long)st.gpu_swaps, (unsigned long long)st.gpu_packets);
     /* the vertical blank interrupt runs the callback on its own thread */
