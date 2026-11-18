@@ -438,7 +438,7 @@ int main(int argc, char **argv)
     reg(0x2319, 0x18000);                               /* RB_COPY_DEST_BASE */
     reg(0x231A, W | (uint32_t)H << 16);                  /* pitch, height */
     reg(0x231B, 2u | 6u << 7);                          /* 8-in-32, 8_8_8_8 */
-    reg(0x231E, 0xFF00FF00u);                           /* clear: green (D3DCOLOR) */
+    reg(0x231E, 0xFF00FF00u);                           /* clear: green (the raw eDRAM value) */
     uint32_t rect = 8u | 2u << 6 | 3u << 16;
     type3(PM4_DRAW_INDX_2, &rect, 1);
     reg(0x2208, 4);                                     /* back to colour + depth */

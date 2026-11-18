@@ -1236,8 +1236,8 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
 /* ---- resolves ----
  * A draw with RB_MODECONTROL's eDRAM mode "copy" is a resolve (Xenia's draw_util.cc GetResolveInfo): the rectangle
  * comes from the three window-space vertices Direct3D 9 leaves at vertex fetch constant 0; RB_COPY_CONTROL says
- * whether the colour is copied out (raw / convert) and whether colour and depth are cleared (RB_COLOR_CLEAR as a
- * D3DCOLOR, RB_DEPTH_CLEAR as depth 24 : stencil 8); the copy goes to RB_COPY_DEST_BASE as a tiled texture of
+ * whether the colour is copied out (raw / convert) and whether colour and depth are cleared (RB_COLOR_CLEAR as the
+ * raw 8_8_8_8 eDRAM value, X in the low byte; RB_DEPTH_CLEAR as depth 24 : stencil 8); the copy goes to RB_COPY_DEST_BASE as a tiled texture of
  * RB_COPY_DEST_PITCH (pitch, height) in RB_COPY_DEST_INFO's format and endian swap, at the same pixel coordinates as
  * the source (Direct3D adjusts the base for offsets). Formats copied here: 8_8_8_8 and 5_6_5. */
 
@@ -1303,9 +1303,11 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
     int clear_colour = (ctl >> 8) & 1;
     GLfloat colour[4];
     if (clear_colour) { /* the resolved render target (0 when the source is depth) */
+        /* RB_COLOR_CLEAR is the raw value written to the eDRAM (Xenia's render target cache): for 8_8_8_8,
+         * X (red) in the low byte */
         uint32_t cc = cp->regs[0x231E];
-        colour[0] = ((cc >> 16) & 0xFF) / 255.0f, colour[1] = ((cc >> 8) & 0xFF) / 255.0f;
-        colour[2] = (cc & 0xFF) / 255.0f, colour[3] = (cc >> 24) / 255.0f;
+        colour[0] = (cc & 0xFF) / 255.0f, colour[1] = ((cc >> 8) & 0xFF) / 255.0f;
+        colour[2] = ((cc >> 16) & 0xFF) / 255.0f, colour[3] = (cc >> 24) / 255.0f;
     }
     if ((ctl >> 9) & 1) {
         uint32_t dc = cp->regs[0x231D];
