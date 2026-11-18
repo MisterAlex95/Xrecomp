@@ -96,6 +96,8 @@ static void sec_threads(x360_machine *x, io *s)
     io_u64(s, &x->m.rc_native);
     io_u64(s, &x->m.tb_base);
     io_u64(s, &x->time_skip);
+    io_u64(s, &x->st.hle_calls);   /* the virtual clock counts these too (x360_now) */
+    io_u64(s, &x->st.interpreted);
     if (s->load && (x->nthreads < 0 || x->nthreads > X360_MAX_THREADS || x->cur >= X360_MAX_THREADS)) {
         s->bad = 1;
         return;
@@ -157,6 +159,7 @@ static void sec_kernel(x360_machine *x, io *s)
     io_u64(s, &x->tls_used);
     io_u32(s, &x->kalloc_cur);
     io_u32(s, &x->kalloc_end);
+    io_u64(s, &x->rng);
     int status = x->status == X360_BUDGET ? X360_RUNNING : x->status; /* a budget is the caller's, not state */
     io_i32(s, &status);
     if (s->load)

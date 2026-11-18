@@ -478,7 +478,7 @@ int x360_run(x360_machine *x, uint64_t insns)
     uint64_t stop = x->m.rc_native + insns;
     x->stop_at = stop;
     while (x->status == X360_RUNNING) {
-        if (x->m.rc_native >= stop) {
+        if (x->m.rc_native >= stop || (x->time_limit && x360_now(x) >= x->time_limit)) {
             x->status = X360_BUDGET;
             break;
         }
@@ -607,6 +607,11 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
     for (unsigned k = 0; k < pack->count; k++)
         x->fn_tab[(r[k].entry - x->code_lo) / 4] = r[k].fn;
     return 0;
+}
+
+void x360_set_time_limit(x360_machine *x, uint32_t seconds)
+{
+    x->time_limit = (uint64_t)seconds * 10000000u;
 }
 
 void x360_set_strict_imports(x360_machine *x, int on)

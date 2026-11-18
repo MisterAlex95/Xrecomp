@@ -299,11 +299,12 @@ void x360_k_XeCryptRc4(x360_machine *x, x360_thread *t, xe_cpu *c)
 void x360_k_XeCryptRandom(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    static uint64_t seed = 0x9E3779B97F4A7C15ull;
     uint8_t *p = x->base + A(0);
+    if (!x->rng)
+        x->rng = 0x9E3779B97F4A7C15ull;
     for (uint32_t k = 0; k < A(1); k++) {
-        seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17;
-        p[k] = (uint8_t)(seed >> 24);
+        x->rng ^= x->rng << 13, x->rng ^= x->rng >> 7, x->rng ^= x->rng << 17;
+        p[k] = (uint8_t)(x->rng >> 24);
     }
     c->gpr[3] = 0;
 }

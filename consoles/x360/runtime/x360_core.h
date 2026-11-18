@@ -44,6 +44,9 @@ int x360_bind(x360_machine *x, const x360_pack *pack);
  * its files; the data directory (cache:, hdd:...: writable), optional. 0 on success. */
 int x360_set_disc(x360_machine *x, const char *path, char *why, size_t why_len);
 int x360_set_data_dir(x360_machine *x, const char *path);
+/* Stop a run (X360_BUDGET) once this much virtual time has passed since the title started, 0 = never: a title waiting
+ * forever on timers or vertical blanks (no input, no rendering yet) would otherwise skip time without end. */
+void x360_set_time_limit(x360_machine *x, uint32_t seconds);
 /* Stop at the first call of an import without an HLE (default: log it once, return 0). */
 void x360_set_strict_imports(x360_machine *x, int on);
 /* Write each distinct shader microcode the title loads to DIR (vs_/ps_<crc>.bin, big-endian words: python3 -m
