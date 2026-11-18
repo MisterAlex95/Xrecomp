@@ -90,6 +90,15 @@ void gx_field(gx_state *gx)
     gx->field_count++;
     gx->tex_epoch++;
     gx_gl_frame(gx);
+    gx_stats *st = &gx->stats;
+    st->tex_hash_bytes_field = st->tex_hash_bytes - gx->tex_hash_mark;
+    gx->tex_hash_mark = st->tex_hash_bytes;
+    if (st->tex_hash_bytes_field > st->tex_hash_bytes_field_max)
+        st->tex_hash_bytes_field_max = st->tex_hash_bytes_field;
+    if (gx->verbose && gx->field_count % 60 == 0)
+        gx_log(gx, "texture hashing: %llu bytes in the last field, at most %llu in a field, %llu in all",
+               (unsigned long long)st->tex_hash_bytes_field, (unsigned long long)st->tex_hash_bytes_field_max,
+               (unsigned long long)st->tex_hash_bytes);
 }
 
 /* ---- interrupts ---- */

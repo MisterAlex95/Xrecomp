@@ -113,6 +113,7 @@ struct gx_state {
     unsigned vout_ntex;        /* texture coordinates the draw in vout generated */
     uint32_t tex_epoch;        /* bumped by TX_INVALIDATE and each field: texture contents are hashed again */
     uint64_t field_count;
+    uint64_t tex_hash_mark;    /* stats.tex_hash_bytes at the last field's end */
 
     gx_gl *gl;
     gx_stats stats;

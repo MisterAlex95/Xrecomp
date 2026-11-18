@@ -714,6 +714,13 @@ static void tex_free(gx_gl *g, tex_entry *e)
     free(e);
 }
 
+/* gx_hash of texture bytes, counted for the statistics (per field: gx_field). */
+static uint64_t tex_hash(gx_state *gx, const uint8_t *p, size_t n, uint64_t seed)
+{
+    gx->stats.tex_hash_bytes += n;
+    return gx_hash(p, n, seed);
+}
+
 /* The GL texture for map n as the registers describe it now; *gw / *gh its texel size as GX sees it. */
 static GLuint tex_for(gx_state *gx, unsigned map, unsigned *tw, unsigned *th)
 {
@@ -732,7 +739,7 @@ static GLuint tex_for(gx_state *gx, unsigned map, unsigned *tw, unsigned *th)
             continue;
         if (e->w == ti.w && e->h == ti.h && e->fmt == tex_family(ti.fmt)) {
             if (e->epoch != gx->tex_epoch) {
-                if (gx_hash(gx->ram + e->addr, e->size, 0) != e->hash)
+                if (tex_hash(gx, gx->ram + e->addr, e->size, 0) != e->hash)
                     break; /* the CPU wrote over it: decode RAM */
                 e->epoch = gx->tex_epoch;
             }
@@ -747,7 +754,7 @@ static GLuint tex_for(gx_state *gx, unsigned map, unsigned *tw, unsigned *th)
         uint32_t a = ti.tlut_addr;
         if (a + tb > GX_TMEM_SIZE)
             a = GX_TMEM_SIZE - tb;
-        th_hash = gx_hash(gx->tmem + a, tb, ti.tlut_fmt);
+        th_hash = tex_hash(gx, gx->tmem + a, tb, ti.tlut_fmt);
     }
     tex_entry *e = NULL;
     for (tex_entry *x = *b; x; x = x->next)
@@ -761,7 +768,7 @@ static GLuint tex_for(gx_state *gx, unsigned map, unsigned *tw, unsigned *th)
         gx->stats.tex_hits++;
         return e->tex;
     }
-    uint64_t h = gx_hash(gx->ram + ti.addr, ti.size, ti.fmt);
+    uint64_t h = tex_hash(gx, gx->ram + ti.addr, ti.size, ti.fmt);
     if (e && e->hash == h) {
         e->epoch = gx->tex_epoch;
         e->last_field = gx->field_count;
@@ -1931,7 +1938,7 @@ void gx_gl_copy(gx_state *gx, uint32_t exec)
                 e->w = (unsigned)ow, e->h = (unsigned)oh, e->fmt = fam, e->levels = 1;
                 copy_pass(gx, e->tex, ow * s, oh * s, src, 0, fam, s0, s1, depth, 0);
                 e->size = size;
-                e->hash = gx_hash(gx->ram + dst, size, 0);
+                e->hash = tex_hash(gx, gx->ram + dst, size, 0);
                 gx->tex_epoch++;
                 e->epoch = gx->tex_epoch;
                 e->last_field = gx->field_count;
