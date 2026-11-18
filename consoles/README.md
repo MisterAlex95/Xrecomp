@@ -1936,8 +1936,8 @@ What is there:
   states** in the other consoles' format (`gc_state.c`: threads, kernel objects, heaps, guest memory without its zero
   pages, the GPU, open files and links, the pads), taken between time slices. `x360_cheat_read32` / `write32`: the
   host layer's data cheats, on allocated guest memory only. Disc images: `src/xiso` also probes XGD3's game
-  partition base (0x02080000; XGD2's 0x0FD90000 was there) and Xenia's two other offsets. `xenos_gl.c`: **the renderer**,
-  OpenGL ES 3.0 (the GameCube's choice for the Thor; the epic planned Vulkan: to settle), EGL / GLES loaded at run
+  partition base (0x02080000; XGD2's 0x0FD90000 was there) and Xenia's two other offsets. `xenos_gl.c`: **the
+  renderer**, OpenGL ES 3.0 (the GameCube's choice for the Thor; the epic planned Vulkan: to settle), EGL / GLES loaded at run
   time (no build dependency). At each draw: the shaders from the cache; vertex fetch constants give the buffers
   (float, 8_8_8_8, 2_10_10_10, 10_11_11, 16-bit, half-float and 32-bit integer formats, normalised or not, exp_adjust,
   converted on the CPU with the GPU's endian swaps); DMA or auto indices with VGT_INDX_OFFSET and the reset index;
