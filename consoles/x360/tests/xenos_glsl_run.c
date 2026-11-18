@@ -94,10 +94,12 @@ static uint8_t *read_in(const char *dir, int n)
 /* the constants as the std140 block: 256 vec4, 2 uvec4 of booleans, 8 uvec4 of loop constants, the alpha test */
 static GLuint bind_constants(GLuint p, const uint8_t *in)
 {
-    uint8_t block[4096 + 32 + 128 + 16];
+    uint8_t block[4096 + 32 + 128 + 32];
     memcpy(block, in, 4096 + 32);
     memcpy(block + 4096 + 32, in + 4096 + 32 + 256, 128);
     memset(block + 4096 + 32 + 128, 0, 16); /* the alpha test off */
+    static const float no_param_gen[4] = {-1.0f, 1.0f, 0.0f, 0.0f};
+    memcpy(block + 4096 + 32 + 128 + 16, no_param_gen, 16);
     GLuint ubo;
     glGenBuffers(1, &ubo);
     glBindBuffer(GL_UNIFORM_BUFFER, ubo);

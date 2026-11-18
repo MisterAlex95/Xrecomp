@@ -29,7 +29,10 @@ def shaders():
                                          srcs=((0, 1, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))))], {})])
     ps_tex = program([(2, [("fetch", fetch_words(1, 0, 1, XYZW, 2, dimension=1)),
                            ("alu", alu_words(**export(0, 1)))], {})])
-    packed = {}
+    # ps_pos: oC0 = r1 * c0, r1 being the pixel parameters (SQ_CONTEXT_MISC's param_gen_pos = 1)
+    ps_pos = program([(2, [("alu", alu_words(vop=1, vdest=0, vmask=0xF, export=1,
+                                             srcs=((1, 1, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))))], {})])
+    packed = {"ps_pos": ps_pos}
     for name, fmt in (("vs_u16", 26), ("vs_h16", 32)):
         packed[name] = program([(2, [("fetch", fetch_words(0, 0, 1, XYZW, 0, sel=0, format=38, stride=6, offset=0)),
                                      ("fetch", fetch_words(0, 0, 2, XYZW, 0, sel=0, format=fmt, stride=6, offset=4)),
@@ -42,7 +45,8 @@ def main(out):
     os.makedirs(os.path.join(out, "cache"), exist_ok=True)
     for name, words, stage, ext in [("vs", vs, "vertex", "vert"), ("ps", ps, "pixel", "frag"),
                                     ("ps_tex", ps_tex, "pixel", "frag")] + \
-            [(n, w, "vertex", "vert") for n, w in sorted(packed.items())]:
+            [(n, w, "pixel" if n.startswith("ps") else "vertex", "frag" if n.startswith("ps") else "vert")
+             for n, w in sorted(packed.items())]:
         raw = struct.pack(">%dI" % len(words), *words)
         open(os.path.join(out, name + ".bin"), "wb").write(raw)
         src, _ = translate(words, stage, interpolators=1)

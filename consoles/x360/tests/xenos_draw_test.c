@@ -24,7 +24,9 @@
  *            rectangle; the fourth (bottom-right) gets green + blue - red, i.e. cyan once clamped;
  *   frame 15: the alpha test (less than 0.5): a green quad at alpha 0.25 passes, then a red one at 0.75 fails;
  *   frames 16-17: packed vertex colours: 16_16_16_16 normalised (65535, 0, 32768, 65535) and 16_16_16_16_FLOAT
- *            (0, 1, 0.5, 1), X in each dword's low half.
+ *            (0, 1, 0.5, 1), X in each dword's low half;
+ *   frame 18: the pixel parameters (SQ_PROGRAM_CNTL param_gen, SQ_CONTEXT_MISC register 1): ps_pos writes
+ *            r1 * (1/64, 1/64, 0, 1), so a pixel's red / green are its x / y from the top-left, times 4.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -507,9 +509,39 @@ int main(int argc, char **argv)
               want[f][2]);
     }
 
+    /* frame 18: the pixel parameters */
+    {
+        uint32_t nps2;
+        uint32_t *pp = load(argv[1], "ps_pos.bin", &nps2), *pv = vs;
+        CHECK(pp != NULL, "no ps_pos.bin");
+        if (pp) {
+            im[0] = 0, im[1] = nvs;
+            memcpy(im + 2, pv, 4 * nvs);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nvs);
+            im[0] = 1, im[1] = nps2;
+            memcpy(im + 2, pp, 4 * nps2);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps2);
+            free(pp);
+            reg(0x2180, 1u << 18);
+            reg(0x2181, 1u << 8);
+            reg(0x4400, fbits(1.0f / 64)), reg(0x4401, fbits(1.0f / 64)), reg(0x4402, 0), reg(0x4403, fbits(1.0f));
+            reg(0x4800, 0x4000u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            reg(0x2180, 0);
+            const uint8_t *q = px(g, 10, 50), *q2 = px(g, 40, 3);
+            CHECK(q[0] >= 39 && q[0] <= 41 && q[1] >= 199 && q[1] <= 201 && q2[0] >= 159 && q2[0] <= 161 &&
+                      q2[1] >= 11 && q2[1] <= 13,
+                  "frame 18 (pixel parameters): (10, 50) %u,%u (40, 3) %u,%u, want 40,200 160,12", q[0], q[1], q2[0],
+                  q2[1]);
+        }
+    }
+
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 21 && st.frames == 18 && st.resolves == 1 && st.no_shader == 0 && st.unsupported == 0 &&
+    CHECK(st.drawn == 22 && st.frames == 19 && st.resolves == 1 && st.no_shader == 0 && st.unsupported == 0 &&
               st.unsupported_textures == 0,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
           (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
@@ -521,6 +553,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: eighteen frames drawn and read back as expected, one resolve\n");
+    printf("xenos_gl: nineteen frames drawn and read back as expected, one resolve\n");
     return 0;
 }
