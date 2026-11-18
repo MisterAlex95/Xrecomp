@@ -17,6 +17,7 @@
 #include "../kernel/guest_clock.h"     /* xbox_FastForwardPoll (XBA-240) */
 #include "input/xbox_pad_hotkeys.h"
 #include "input/input_overlay.h"     /* report_diag: whether the touch overlay is on */
+#include "input/keyboard.h"          /* xbox_InputHidKeys: the desktop hotkeys (XBA-274) */
 #include "platform/recomp_hotkeys.h"
 #include "platform/recomp_states.h"   /* recomp_ff_hold */
 #endif
@@ -613,8 +614,8 @@ static void pad_hotkeys(int pad, XBOX_GAMEPAD *g)
 {
     static recomp_hotkeys hk;
     static int hk_ready;
-    static recomp_hotkeys_state st[USB_GAMEPAD_MAX];
-    static uint32_t holding, rewinding;   /* bit n: pad n holds fast-forward / rewind */
+    static recomp_hotkeys_state st[USB_GAMEPAD_MAX], keys;
+    static uint32_t holding, rewinding;   /* bit n: pad n holds fast-forward / rewind; bit 31 the keyboard */
     const uint32_t ff = RECOMP_HK_BIT(RECOMP_HK_FF_HOLD) | RECOMP_HK_BIT(RECOMP_HK_FF_TOGGLE);
     uint32_t pressed = 0, swallow = 0, held;
 
@@ -622,8 +623,10 @@ static void pad_hotkeys(int pad, XBOX_GAMEPAD *g)
         int a, states = recomp_states_available() && !strcmp(recomp_states_console(), "xbox");
         hk = *recomp_hotkeys_get();
         for (a = 0; a < RECOMP_HK_COUNT; a++)
-            if (!(ff & RECOMP_HK_BIT(a)) && (!states || a == RECOMP_HK_MENU))
+            if (!(ff & RECOMP_HK_BIT(a)) && (!states || a == RECOMP_HK_MENU)) {
                 hk.pad[a].mod = hk.pad[a].button = -1;
+                hk.key[a].key = 0;
+            }
         hk_ready = 1;
     }
     pad &= USB_GAMEPAD_MAX - 1;
@@ -637,6 +640,15 @@ static void pad_hotkeys(int pad, XBOX_GAMEPAD *g)
         rewinding |= 1u << pad;
     else
         rewinding &= ~(1u << pad);
+    if (pad == 0) {   /* XBA-274: the desktop keys (RECOMP_HOTKEYS_KEYS), as the console runtimes read them */
+        int nkeys = 0;
+        uint32_t key_pressed = 0;
+        const uint8_t *ks = xbox_InputHidKeys(&nkeys);
+        uint32_t kheld = recomp_hotkeys_keys_update(&hk, &keys, ks, nkeys, &key_pressed);
+        pressed |= key_pressed;
+        holding = (holding & ~(1u << 31)) | ((kheld & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)) ? 1u << 31 : 0);
+        rewinding = (rewinding & ~(1u << 31)) | ((kheld & RECOMP_HK_BIT(RECOMP_HK_REWIND)) ? 1u << 31 : 0);
+    }
     recomp_ff_hold(holding != 0);
     if (pressed & ff)
         recomp_hotkeys_run(pressed & ff);   /* the toggle */

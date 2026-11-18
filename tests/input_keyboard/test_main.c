@@ -221,8 +221,26 @@ static void test_enable(void)
     xbox_InputKeysClear();
 }
 
+/* XBA-274: the keys by HID usage, for the desktop hotkeys. */
+static void test_hid(void)
+{
+    int n = 0;
+    const uint8_t *k = xbox_InputHidKeys(&n);
+    CHECK(k != NULL && n == XBOX_HID_KEYS, "the HID key array");
+    xbox_InputHidKeySet(43, 1);
+    xbox_InputHidKeySet(58, 1);
+    xbox_InputHidKeySet(-1, 1);              /* out of range: ignored */
+    xbox_InputHidKeySet(XBOX_HID_KEYS, 1);
+    CHECK(k[43] && k[58] && !k[0], "Tab and F1 held");
+    xbox_InputHidKeySet(58, 0);
+    CHECK(k[43] && !k[58], "F1 released");
+    xbox_InputKeysClear();
+    CHECK(!k[43], "cleared with the virtual keys");
+}
+
 int main(void)
 {
+    test_hid();
     test_rows();
     test_unique();
     test_combos();

@@ -28,7 +28,7 @@ app and not in this matrix.
 | Pad remapping | yes: `RECOMP_PAD_MAP` (`src/input/xinput_device.c`), UI `app/PadMapping` | yes: `console_pad` (`RECOMP_GBA_PAD_MAP`), UI `app/ConsoleControls` | yes | yes (+ stick range / dead zone) | yes: runtime `gc_runtime.c` `console_pad_load` + `gc_pad_map.c`; UI `app/ConsoleControls` (XBA-274: the Controls screen used to show the N64's 14 targets over the GameCube's 12, `targetLabel` / `groups` default branch) |
 | Rumble | yes: `src/usb/ohci.c` -> `xbox_InputSetState`; `RECOMP_RUMBLE` (`app/RecompConfig`, shared) | n/a: no motor on a GBA pad (rumble carts are cartridge hardware, not emulated) | yes: DualShock, `ps1_runtime.c` | yes: Rumble Pak, `n64_runtime.c`, UI `app/N64Pak` | yes: SI motor, `gc_runtime.c` `rumble()` |
 | On-screen (touch) pad | yes: `app/TouchPad` Layout.XBOX | yes: Layout.GBA | yes: Layout.PS1 / PS1_ANALOG | yes: Layout.N64 | yes: Layout.GC (XBA-274: both sticks, the cross, A B X Y, Z, L / R; the Xbox's layout before) |
-| Hotkeys (states, slots, fast-forward, rewind) | partial: pad chords only (`src/usb/usb_gamepad.c` `pad_hotkeys`, the state ones when the title's states work); the launcher's Xbox Controls lists every chord (`app/Hotkeys.Action.appliesTo`, XBA-274: menu and fast-forward only before); no keyboard hotkeys (`recomp_hotkeys_keys_update` never called under `src/`) | yes: pad + keyboard (`src/platform/recomp_hotkeys.c`, `gba_runtime.c`) | yes (+ F6 next disc) | yes | yes |
+| Hotkeys (states, slots, fast-forward, rewind) | yes: pad chords and, since XBA-274, the window's keys (`src/usb/usb_gamepad.c` `pad_hotkeys`, keys by HID usage from `src/input/keyboard_sdl.c`; the state ones when the title's states work; not on Windows, no states there); the launcher's Xbox Controls lists every chord (`app/Hotkeys.Action.appliesTo`, XBA-274) | yes: pad + keyboard (`src/platform/recomp_hotkeys.c`, `gba_runtime.c`) | yes (+ F6 next disc) | yes | yes |
 | Audio | yes: `src/apu/apu_sdl2.c`; volume `app/GameMenu` (every console) | yes: `gba_audio.c` | yes: `ps1_spu.c` | yes | yes: AI / DSP / AX |
 | Shader cache / warm-up | partial: runtime program cache (`nv2a_gl.c`, `RECOMP_GPU_SHADER_CACHE`), no app warm-up | n/a: software PPU | n/a: software GPU | yes: `n64_vk_cache.c`, warm-up `app/ShaderWarmup` | yes: `gx/gx_progcache.c`, warm-up `app/GcShaderWarmup` |
 | Texture filtering | yes: `RECOMP_TEX_BILINEAR` / `ANISO` (`nv2a_gl.c`), UI OPT_TEX | window filter only (`RECOMP_GBA_FILTER`, default nearest) | window filter only | window filter only | window filter only (`RECOMP_GC_FILTER`); no texture override in `gx_tex.c` |
@@ -70,6 +70,6 @@ Left, with the reason:
 
 - GBA internal resolution and rumble: n/a (above).
 - Xbox in-run loads with mismatched thread chains, and Xbox states on Windows: runtime work (XBA-249 follow-ups).
-- Xbox keyboard hotkeys: the Xbox keyboard (`src/input/keyboard_sdl.c`) hands F-keys and Tab to the game as Xbox
-  keys; taking them for hotkeys needs a rule for titles that use a keyboard.
+- Xbox keyboard hotkeys on Windows (the GDI window, `src/video/fb_present.c`): Windows builds have no Xbox save
+  states yet, so only fast-forward would apply.
 - macOS launcher for the other consoles, desktop settings / states UI: front-end work, not started.

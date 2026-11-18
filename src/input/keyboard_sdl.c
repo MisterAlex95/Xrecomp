@@ -152,6 +152,7 @@ void xbox_InputSdlEvent(const SDL_Event *ev)
         }
         if (ev->key.keysym.mod & KMOD_GUI)
             return;
+        xbox_InputHidKeySet((int)ev->key.keysym.scancode, 1);   /* the hotkeys' view (XBA-274) */
         vk = xbox_InputSdlKeyToVk(ev->key.keysym.sym);
         if (vk) {
             xbox_InputKeySet(vk, 1);
@@ -164,6 +165,7 @@ void xbox_InputSdlEvent(const SDL_Event *ev)
             xbox_InputKeySet(vk, 1);
         return;
     case SDL_KEYUP:
+        xbox_InputHidKeySet((int)ev->key.keysym.scancode, 0);
         vk = xbox_InputSdlKeyToVk(ev->key.keysym.sym);
         if (vk)
             xbox_InputKeySet(vk, 0);

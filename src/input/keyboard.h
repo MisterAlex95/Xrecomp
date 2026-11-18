@@ -90,6 +90,14 @@ void xbox_InputKeySet(int vk, int down);
 /* Release every key (focus lost). */
 void xbox_InputKeysClear(void);
 
+/* XBA-274: the keys by USB HID usage (= SDL_Scancode), for the desktop hotkeys (recomp_hotkeys_keys_update: Tab
+ * fast-forward, F1-F4 save, Shift+F1-F4 load, R rewind by default), which an Xbox title reads like the other
+ * consoles' runtimes. The window records them (keyboard_sdl.c) beside the virtual keys; xbox_InputKeysClear
+ * releases them too. xbox_InputHidKeys: the array (entries 0..*n-1, non-zero while held). */
+#define XBOX_HID_KEYS 512
+void xbox_InputHidKeySet(int usage, int down);
+const uint8_t *xbox_InputHidKeys(int *n);
+
 /* For the Win32 window (fb_present.c), here so every host tests them.
  *
  * WM_KEYDOWN reports both Shifts as VK_SHIFT, both Ctrls as VK_CONTROL and
