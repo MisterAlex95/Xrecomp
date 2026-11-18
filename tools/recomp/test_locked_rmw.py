@@ -31,14 +31,29 @@ def lift(code, needs_cf=True):
     return "\n".join(lifter.lift_instruction(insn)), insn.mnemonic
 
 
+# 32-bit forms whose result is the old value and one operand known before the access: one fetch-and-op (XBA-277).
+FETCH_OPS = [
+    (b"\xf0\xff\x00", "lock inc", "RECOMP_ATOMIC_ADD32(XBOX_PTR(eax), 1u)"),
+    (b"\xf0\xff\x08", "lock dec", "RECOMP_ATOMIC_ADD32(XBOX_PTR(eax), 0xFFFFFFFFu)"),
+    (b"\xf0\x01\x08", "lock add", "RECOMP_ATOMIC_ADD32(XBOX_PTR(eax), (uint32_t)(ecx))"),
+    (b"\xf0\x29\x08", "lock sub", "RECOMP_ATOMIC_ADD32(XBOX_PTR(eax), 0u - (uint32_t)(ecx))"),
+    (b"\xf0\x09\x08", "lock or", "RECOMP_ATOMIC_OR32(XBOX_PTR(eax), (uint32_t)(ecx))"),
+    (b"\xf0\x21\x08", "lock and", "RECOMP_ATOMIC_AND32(XBOX_PTR(eax), (uint32_t)(ecx))"),
+    (b"\xf0\x31\x08", "lock xor", "RECOMP_ATOMIC_XOR32(XBOX_PTR(eax), (uint32_t)(ecx))"),
+    (b"\xf0\x83\x00\xfd", "lock add", "RECOMP_ATOMIC_ADD32(XBOX_PTR(eax), (uint32_t)(0xFFFFFFFDu))"),
+    (b"\xf0\x81\x28\x00\x00\x00\x80", "lock sub", "RECOMP_ATOMIC_ADD32(XBOX_PTR(eax), 0u - (uint32_t)(0x80000000u))"),
+    (b"\xf0\xf7\x10", "lock not", "RECOMP_ATOMIC_XOR32(XBOX_PTR(eax), 0xFFFFFFFFu)"),
+]
+
+
+@pytest.mark.parametrize("code,mnemonic,call", FETCH_OPS)
+def test_32bit_forms_are_one_fetch_and_op(code, mnemonic, call):
+    out, m = lift(code)
+    assert m == mnemonic
+    assert call in out and "RECOMP_ATOMIC_CAS" not in out and "MEM32" not in out, out
+
+
 @pytest.mark.parametrize("code,mnemonic", [
-    (b"\xf0\xff\x00", "lock inc"),            # lock inc dword ptr [eax]
-    (b"\xf0\xff\x08", "lock dec"),            # lock dec dword ptr [eax]
-    (b"\xf0\x01\x08", "lock add"),            # lock add [eax], ecx
-    (b"\xf0\x29\x08", "lock sub"),            # lock sub [eax], ecx
-    (b"\xf0\x09\x08", "lock or"),             # lock or [eax], ecx
-    (b"\xf0\x21\x08", "lock and"),            # lock and [eax], ecx
-    (b"\xf0\x31\x08", "lock xor"),            # lock xor [eax], ecx
     (b"\xf0\x80\x00\x01", "lock add"),        # lock add byte ptr [eax], 1
     (b"\xf0\x66\xff\x00", "lock inc"),        # lock inc word ptr [eax]
     (b"\xf0\xf7\x18", "lock neg"),            # lock neg dword ptr [eax]
@@ -75,7 +90,86 @@ def test_flags_as_the_unlocked_form():
     # The same flag statements, on the local copy instead of memory.
     want = [l.strip() for l in plain.replace("MEM32(eax)", "_lk").splitlines()]
     got = [l.strip() for l in locked.splitlines()]
+    assert got[2:2 + len(want)] == want, (plain, locked)
+    locked, _ = lift(b"\xf0\x00\x08")          # lock add byte ptr [eax], cl: the loop
+    plain, _ = lift(b"\x00\x08")
+    want = [l.strip() for l in plain.replace("MEM8(eax)", "_lk").splitlines()]
+    got = [l.strip() for l in locked.splitlines()]
     assert got[3:3 + len(want)] == want, (plain, locked)
+
+
+DIFF = r"""
+#include <stdint.h>
+#include <stdio.h>
+static uint8_t g_mem[64] __attribute__((aligned(16)));
+static uintptr_t g_xbox_mem_offset;
+#define XBOX_PTR(addr) ((uintptr_t)(uint32_t)(addr) + g_xbox_mem_offset)
+#define MEM32(addr)  (*(volatile uint32_t *)XBOX_PTR(addr))
+%(macros)s
+static uint64_t rng = 88172645463325252ull;
+static uint32_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (uint32_t)rng; }
+static uint32_t pick(void)   /* edges and random words */
+{
+    static const uint32_t e[] = {0, 1, 2, 0x7FFFFFFFu, 0x80000000u, 0x80000001u, 0xFFFFFFFFu, 0xFFFFFFFEu, 3};
+    uint32_t r = rnd();
+    return (r & 3) ? rnd() : e[(r >> 2) %% 9];
+}
+int main(void)
+{
+    g_xbox_mem_offset = (uintptr_t)g_mem;
+    long bad = 0, n = 0;
+    for (int i = 0; i < 200000; i++) {
+        uint32_t m0 = pick(), c0 = pick();
+%(cases)s
+    }
+    printf("%%ld %%ld\n", n, bad);
+    return bad != 0;
+}
+"""
+
+CASE = r"""
+        {   /* %(name)s */
+            uint32_t eax = 0x10, ecx = c0, _fa = 0, _fb = 0, ma, fa, fb, fas, fbs; int32_t _fas = 0, _fbs = 0; int _cf = 0, cfa;
+            MEM32(0x10) = m0;
+            %(loop)s
+            ma = MEM32(0x10); fa = _fa; fb = _fb; fas = (uint32_t)_fas; fbs = (uint32_t)_fbs; cfa = _cf;
+            _fa = _fb = 0; _fas = _fbs = 0; _cf = 0; MEM32(0x10) = m0;
+            %(fetch)s
+            n++;
+            if (ma != MEM32(0x10) || fa != _fa || fb != _fb || fas != (uint32_t)_fas || fbs != (uint32_t)_fbs ||
+                    cfa != _cf) {
+                if (bad++ < 5) printf("%(name)s m=%%08X c=%%08X\n", m0, c0);
+            }
+            (void)eax; (void)ecx;
+        }"""
+
+
+def test_fetch_and_op_matches_the_loop(tmp_path):
+    """Each fetch-and-op form against the compare-and-swap loop it replaced (XBA-277), over edge and random
+    values: the memory, the flag snapshots and CF the same."""
+    cc = shutil.which("cc")
+    if not cc:
+        pytest.skip("no cc")
+    from tools.recomp import lifter as lifter_mod
+    cases = []
+    for code, mnemonic, _ in FETCH_OPS:
+        fetch, _ = lift(code)
+        real = lifter_mod.Lifter.__dict__["_locked_fetch_op"]
+        lifter_mod.Lifter._locked_fetch_op = staticmethod(lambda *a: None)
+        try:
+            loop, _ = lift(code)
+        finally:
+            lifter_mod.Lifter._locked_fetch_op = real
+        assert "RECOMP_ATOMIC_CAS32" in loop, loop
+        cases.append(CASE % {"name": mnemonic + " " + code.hex(), "loop": loop, "fetch": fetch})
+    src = DIFF % {"macros": _atomic_macros(), "cases": "\n".join(cases)}
+    (tmp_path / "d.c").write_text(src)
+    exe = str(tmp_path / "d")
+    for opt in ("-O0", "-O2"):
+        subprocess.check_call([cc, opt, "-std=gnu11", "-w", "-o", exe, str(tmp_path / "d.c")])
+        out = subprocess.check_output([exe], text=True, timeout=60)
+        n, bad = map(int, out.split()[-2:])
+        assert bad == 0 and n == 200000 * len(FETCH_OPS), out
 
 
 def block(code):

@@ -334,6 +334,11 @@ def compile_flags(opt, toolkit, proj, sysroot, profile=False, include_dirs=()):
         flags.append("-resource-dir=" + rd)
     flags += ["-O%s" % opt, "-g0", "-fPIC", "-std=gnu11", "-w",
               "-DXBOXRECOMP_SHELL_TITLE=1", "-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX", "-DNDEBUG"]
+    # Lock-prefixed instructions (RECOMP_ATOMIC_*, recomp_types.h) inline as exclusive load/store loops (XBA-277),
+    # which every ARMv8.0 core runs, instead of a call per atomic into libgcc's outline helpers (a feature test,
+    # then the ARMv8.1 atomic or the same loop). tools.bench w_lock: -17 % instructions. Inline ARMv8.1 atomics
+    # would need the device's features at Prepare time and a pack that refuses another device: not done.
+    flags.append("-mno-outline-atomics")
     if profile:
         flags.append("-DXBA_TITLE_PROFILE=1")
     # src and src/recomp as in the template's CMakeLists; src/recomp/gen too, for

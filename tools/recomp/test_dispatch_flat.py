@@ -53,6 +53,7 @@ size_t recomp_dispatch_flat_bytes(void);
 
 void f_a(void) {} void f_b(void) {} void f_c(void) {} void f_d(void) {}
 recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
+uint32_t g_xbox_code_lo, g_xbox_code_hi;   /* the inline window's (XBA-277) */
 
 static const uint32_t known[] = {0x00011000,0x00011004,0x00012000,0x000203FC};
 static const uint32_t absent[] = {
@@ -151,6 +152,7 @@ extern recomp_flat_dispatch_t g_recomp_flat;
         ? g_recomp_flat.table[(uint32_t)(_va) - g_recomp_flat.base] : (void (*)(void))0)
 
 void f_a(void) {} void f_b(void) {} void f_c(void) {} void f_d(void) {} void f_m(void) {}
+uint32_t g_xbox_code_lo = 0x00010000u, g_xbox_code_hi = 0x00030000u;   /* covers the table */
 static int manual_calls;
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     manual_calls++;
@@ -163,9 +165,7 @@ int main(void) {
         0x000203FD, 0x00020400, 0xFFFFFFFF, 0xFE000000, 0x80000000 };
     size_t i;
     if (RECOMP_FLAT_LOOKUP(0x00011000u)) { printf("FAIL: hit before init\n"); return 1; }
-    setenv("RECOMP_ICALL_TRACE", "1", 1);
     if (!recomp_dispatch_init()) { printf("FAIL: init\n"); return 1; }
-    if (!g_recomp_flat.trace) { printf("FAIL: trace not on\n"); return 1; }
     if (manual_calls != 4) { printf("FAIL: manual asked %d times\n", manual_calls); return 1; }
     if (RECOMP_FLAT_LOOKUP(0x00011000u) != f_a || RECOMP_FLAT_LOOKUP(0x00012000u) != f_c ||
         RECOMP_FLAT_LOOKUP(0x000203FCu) != f_d) { printf("FAIL: inline lookup\n"); return 1; }
@@ -175,6 +175,13 @@ int main(void) {
     /* recomp_lookup still answers with the generated function */
     if (recomp_lookup(0x00011004u) != f_b || recomp_lookup(0x00011000u) != f_a ||
         recomp_lookup(0x00011008u) != NULL) { printf("FAIL: recomp_lookup changed\n"); return 1; }
+    /* The trace on: the miss path writes it, so nothing hits inline (XBA-277). */
+    setenv("RECOMP_ICALL_TRACE", "1", 1);
+    if (!recomp_dispatch_init()) { printf("FAIL: re-init\n"); return 1; }
+    if (!g_recomp_flat.trace) { printf("FAIL: trace not on\n"); return 1; }
+    if (manual_calls != 4) { printf("FAIL: table built again\n"); return 1; }
+    if (RECOMP_FLAT_LOOKUP(0x00011000u)) { printf("FAIL: inline hit with the trace on\n"); return 1; }
+    if (recomp_lookup(0x00011000u) != f_a) { printf("FAIL: recomp_lookup with the trace on\n"); return 1; }
     printf("OK\n");
     return 0;
 }

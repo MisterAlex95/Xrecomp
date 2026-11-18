@@ -171,9 +171,11 @@ def test_failed_tail_target_pops_what_the_jumpers_ret_pops():
     if not cc:
         pytest.skip("no C compiler on PATH")
     lifted = _tail_line(_translate(THUNK, BASE, len(THUNK)))
-    src = (HARNESS.replace("FLAT_LOOKUP", _macro("RECOMP_FLAT_LOOKUP"))
+    src = (HARNESS.replace("FLAT_LOOKUP", "#define RECOMP_LIKELY(x) (x)\n" + _macro("RECOMP_FLAT_LOOKUP"))
                   .replace("IS_CODE", _macro("RECOMP_ICALL_IS_CODE"))
-                  .replace("ITAIL_RET", _macro("RECOMP_ITAIL_RET"))
+                  # the dispatch the macros share (XBA-277), after IS_CODE: it names it
+                  .replace("ITAIL_RET", _macro("RECOMP_ICALL_HIT_") + "\n" + _macro("RECOMP_ICALL_DISPATCH_") +
+                           "\n" + _macro("RECOMP_ITAIL_RET"))
                   .replace("LIFTED", lifted))
     with tempfile.TemporaryDirectory() as tmp:
         p = os.path.join(tmp, "t.c")

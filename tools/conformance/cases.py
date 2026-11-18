@@ -629,3 +629,19 @@ for _name, _setup, _count, _copy, _result in (
         ("rep_copy_zero", ["mov esi, eax", "lea edi, [eax+16]"], 0, "rep movsd", "mov eax, [edi]")):
     CASES.append(Case(_name, "REP copy preserves element order, direction and count",
         ["cld"] + _setup + ["mov ecx, %d" % _count, _copy, "cld", _result], _SSE, "sse"))
+
+# Locked read-modify-writes on a stack word (XBA-277: the 32-bit ones lift to one atomic fetch-and-op, the rest to a
+# compare-and-swap loop): the word and the flags the unlocked form gives, packed into eax (CF, OF, SF, ZF in the low
+# bits of cx / dx, the word rotated over them). `stc` first: inc / dec keep CF. `not` sets no flag: the word alone.
+_LOCK_FLAGS = ["setc cl", "seto ch", "sets dl", "setz dh", "pop eax", "movzx ecx, cx", "movzx edx, dx",
+               "shl edx, 2", "or ecx, edx", "rol eax, 7", "xor eax, ecx"]
+for _name, _op in (
+        ("lock_add", "lock add dword ptr [esp], ecx"), ("lock_sub", "lock sub dword ptr [esp], ecx"),
+        ("lock_inc", "lock inc dword ptr [esp]"), ("lock_dec", "lock dec dword ptr [esp]"),
+        ("lock_or", "lock or dword ptr [esp], ecx"), ("lock_and", "lock and dword ptr [esp], ecx"),
+        ("lock_xor", "lock xor dword ptr [esp], ecx"), ("lock_add_imm", "lock add dword ptr [esp], -3"),
+        ("lock_sub_imm", "lock sub dword ptr [esp], 0x80000000"), ("lock_neg", "lock neg dword ptr [esp]"), ("lock_add8", "lock add byte ptr [esp], cl"),
+        ("lock_dec16", "lock dec word ptr [esp]")):
+    CASES.append(Case(_name, "a locked read-modify-write: the word and the unlocked form's flags",
+        ["push eax", "test ecx, ecx", "stc", _op] + _LOCK_FLAGS, _PAIRS))
+CASES.append(Case("lock_not", "lock not: the word", ["push eax", "lock not dword ptr [esp]", "pop eax"], _PAIRS))

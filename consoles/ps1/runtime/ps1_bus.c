@@ -174,13 +174,23 @@ uint8_t ps1_peek8(ps1_machine *m, uint32_t addr)
     return p ? *p : 0;
 }
 
+/* The bytes of an aligned halfword / word lie in one region (each is a multiple of 1 KB, aligned): one lookup
+ * (XBA-277: the HLE BIOS reads its tables through these). An unaligned one byte by byte, as before. */
 uint16_t ps1_peek16(ps1_machine *m, uint32_t addr)
 {
+    if (!(addr & 1u)) {
+        const uint8_t *p = peek_ptr(m, addr);
+        return p ? (uint16_t)(p[0] | p[1] << 8) : 0;
+    }
     return (uint16_t)(ps1_peek8(m, addr) | ps1_peek8(m, addr + 1) << 8);
 }
 
 uint32_t ps1_peek32(ps1_machine *m, uint32_t addr)
 {
+    if (!(addr & 3u)) {
+        const uint8_t *p = peek_ptr(m, addr);
+        return p ? (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24 : 0;
+    }
     return (uint32_t)ps1_peek16(m, addr) | (uint32_t)ps1_peek16(m, addr + 2) << 16;
 }
 

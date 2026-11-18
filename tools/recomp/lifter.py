@@ -2539,12 +2539,42 @@ class Lifter:
             return self._unimplemented(insn, insn.mnemonic, " (locked form not liftable)")
         bits = width * 8
         addr = _fmt_mem(dst)
+        fetch = self._locked_fetch_op(base, ops, width)
+        if fetch:
+            # One atomic fetch-and-op does what the loop does (XBA-277): the memory ends as the unlocked op on its
+            # old value would leave it, and the flags are that op's on the old value, as on the loop's last pass.
+            fn, operand = fetch
+            return ([f"{{ uint32_t _lko, _lk;",
+                     f"  _lko = {fn}(XBOX_PTR({addr}), {operand}); _lk = _lko;"]
+                    + ["  " + line for line in body]
+                    + [f"  (void)_lk; }}  /* {insn.mnemonic} */"])
         return ([f"{{ uint{bits}_t _lko, _lk;",
                  "  do {",
                  f"    _lko = {token}; _lk = _lko;"]
                 + ["    " + line for line in body]
                 + [f"  }} while (RECOMP_ATOMIC_CAS{bits}(XBOX_PTR({addr}), _lko, _lk) != _lko);"
                    f" }}  /* {insn.mnemonic} */"])
+
+    @staticmethod
+    def _locked_fetch_op(base, ops, width):
+        """(RECOMP_ATOMIC_* fetch-and-op, its operand) for a 32-bit locked form whose memory result is the old value
+        combined with one value known before the access: add / sub / inc / dec / or / and / xor with a register or
+        an immediate, and not. None for the rest (neg, 8 / 16 bits, a memory source...), which keep the loop."""
+        if width != 4:
+            return None
+        if base in ("inc", "dec", "not"):
+            if len(ops) != 1:
+                return None
+            return {"inc": ("RECOMP_ATOMIC_ADD32", "1u"), "dec": ("RECOMP_ATOMIC_ADD32", "0xFFFFFFFFu"),
+                    "not": ("RECOMP_ATOMIC_XOR32", "0xFFFFFFFFu")}[base]
+        if base not in ("add", "sub", "or", "and", "xor") or len(ops) != 2 or ops[1].type not in ("reg", "imm"):
+            return None
+        if ops[1].type == "reg" and ops[1].reg not in ("eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp"):
+            return None
+        src = "(uint32_t)(%s)" % _fmt_operand_read(ops[1])
+        return {"add": ("RECOMP_ATOMIC_ADD32", src), "sub": ("RECOMP_ATOMIC_ADD32", "0u - " + src),
+                "or": ("RECOMP_ATOMIC_OR32", src), "and": ("RECOMP_ATOMIC_AND32", src),
+                "xor": ("RECOMP_ATOMIC_XOR32", src)}[base]
 
     def _lift_xchg_mem(self, insn, ops):
         """`xchg` with a memory operand: an atomic exchange. The hardware

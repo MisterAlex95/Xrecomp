@@ -4,6 +4,9 @@ from tools.recomp import config
 from tools.recomp.translator import FunctionTranslator
 from tools.recomp.test_icall_guarded_runtime import _macro, HARNESS, A, B
 
+# The dispatch the indirect-call macros share (XBA-277).
+_DISPATCH = _macro('RECOMP_ICALL_HIT_') + '\n' + _macro('RECOMP_ICALL_DISPATCH_') + '\n'
+
 BASE = 0x10000
 BODY = '6a01 6a02 ffd0 83c408 c3'
 
@@ -38,6 +41,7 @@ def test_non_immediate_cleanup_is_not_assumed(body):
 def test_actual_translated_call_restores_stack_for_every_target(guarded):
     source = HARNESS.split('IS_CODE')[0]
     source += _macro('RECOMP_ICALL_IS_CODE') + '\n'
+    source += _DISPATCH
     source += _macro('RECOMP_ICALL_SAFE_AT_CC') + '\n'
     source += translate(guarded=guarded)
     source += '''
@@ -62,7 +66,7 @@ int main(void) {
 
 @pytest.mark.parametrize('macro', ['RECOMP_ICALL_SAFE_CC', 'RECOMP_ICALL_SAFE_AT_CC'])
 def test_both_runtime_macros_preserve_caller_arguments(macro):
-    source = HARNESS.split('IS_CODE')[0] + _macro('RECOMP_ICALL_IS_CODE') + '\n' + _macro(macro)
+    source = HARNESS.split('IS_CODE')[0] + _macro('RECOMP_ICALL_IS_CODE') + '\n' + _DISPATCH + _macro(macro)
     call = (macro + '(targets[i], 0x1000u' +
             (', 0x10004u' if macro.endswith('_AT_CC') else '') + ');')
     source += '''

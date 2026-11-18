@@ -32,6 +32,7 @@
  * hardware's per-voice stagger within a sample, the transfer types other than normal, the external audio input. */
 #include "ps1_devices.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -210,6 +211,12 @@ static void sweep_tick(sweep_vol *v)
     }
     int exp = (r >> 14) & 1, dec = (r >> 13) & 1, neg = (r >> 12) & 1, shift = (r >> 2) & 31, step = r & 3;
     v->level = env_step(v->level, &v->counter, exp, dec, neg, shift, step, (r & 0x7F) == 0x7F);
+}
+
+/* A fixed volume that sweep_tick would leave as it is. */
+static inline bool sweep_still(const sweep_vol *v)
+{
+    return !(v->reg & 0x8000) && v->level == (int16_t)(v->reg << 1);
 }
 
 static void adsr_tick(voice *v)
@@ -536,6 +543,14 @@ static void sample(ps1_spu *s, ps1_cdrom *cd)
         if (s->kon & (1u << i)) {
             s->kon &= ~(1u << i);
             key_on(s, i);
+        }
+        if (v->phase == PH_OFF && v->env == 0 && v->pitch == 0 && !v->delay && v->counter < (28u << 12) &&
+            sweep_still(&v->vol[0]) && sweep_still(&v->vol[1])) {
+            /* An idle voice (off, silent, no pitch, fixed volumes): voice_sample and the sweeps would change nothing
+             * (pitch modulation of 0 is 0, no block is read) and it adds 0 to the mix (XBA-277). */
+            v->out = 0;
+            prev = 0;
+            continue;
         }
         int16_t o = voice_sample(s, i, prev);
         prev = o;

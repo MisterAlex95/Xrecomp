@@ -63,6 +63,14 @@ Every indirect call in generated code goes through the RECOMP_ICALL macro. It im
 
 (The macro above is the original shape. Since XBA-38 the macros first index the flat dispatch table inline, `RECOMP_FLAT_LOOKUP` over `g_recomp_flat`, exported by the generated `recomp_dispatch.c`: `recomp_dispatch_init` folds each translated VA's manual override into it, so a hit is what the tiers below would return, and a miss takes them as before.)
 
+Since XBA-277 the published window is only the part of the flat table inside the title's code range
+(`g_xbox_code_lo`..`g_xbox_code_hi` when `recomp_dispatch_init` runs, after the memory layout), and empty with
+`RECOMP_ICALL_TRACE=1`. A hit is then a target `RECOMP_ICALL_IS_CODE` lets through, so the macros (one shared body,
+`RECOMP_ICALL_DISPATCH_`) call it at once: a bounds check, a load and the call, 8 arm64 instructions instead of about
+20. Everything else takes the miss path in the old order: trace note, code-range check, manual, generated and kernel
+lookups. `tools/recomp/test_icall_window.py` runs every macro against the frozen old ones over every kind of target
+and runtime state and compares the outcomes.
+
 ### Tier 1: Manual Overrides
 
 Some functions need hand-written replacements because the generated code does not work correctly (e.g., functions that rely on GPU hardware, or functions with bugs in the recompiler output). The manual lookup checks a small table (~30 entries) first:

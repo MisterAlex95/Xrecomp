@@ -131,6 +131,7 @@ def test_dispatch_table_carries_the_sorted_sites_and_registers_them(tmp_path):
 typedef void (*recomp_func_t)(void);
 void f_a(void) {}
 recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return 0; }
+uint32_t g_xbox_code_lo, g_xbox_code_hi;   /* the inline window's (XBA-277) */
 int recomp_dispatch_init(void);
 #ifdef HOOK
 static const uint32_t *got; static uint32_t got_n;
