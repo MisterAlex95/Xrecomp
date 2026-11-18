@@ -93,6 +93,8 @@ VARIANTS = {
     "ld": ["-ftls-model=local-dynamic"],
     "thinlto": ["-flto=thin"],
     "a715": ["-mcpu=cortex-a715"],          # the reference device's big cores (arm64 builds only)
+    # g_cpu through bionic's TLS_SLOT_APP (XBA-273, recomp_types.h): on by default in Android's generated code,
+    # forced on here for an aarch64 glibc build (shared layout only, the slot emulated by bench_main.c), or off.
     "cpuslot": ["-DRECOMP_CPU_SLOT=1"],
     "cpuslot0": ["-DRECOMP_CPU_SLOT=0"],
     "memalias": ["-DRECOMP_GUEST_MEM_NOALIAS=1"],
@@ -273,8 +275,14 @@ def build(out, variant, cc="clang", target=None, sysroot=None, jobs=2):
                                          "-o", os.path.join(so, "libtitle.so")] + objs +
        ["-L" + so, "-lbenchrt", "-lm", "-Wl,-rpath,$ORIGIN"])
     link_s = time.time() - t1
-    sh([cc] + tflags + ldx + ["-O2", "-DBENCH_SHARED", "-o", os.path.join(so, "bench"), main, "-ldl"])
-    sh([cc] + rt_flags + ldx + lto_link + ["-o", os.path.join(bdir, "exe", "bench"), main, rt] + objs + ["-lm"])
+    # The slot variant (recomp_types.h RECOMP_CPU_SLOT): the shared layout's executable stands in for bionic's slot
+    # (bench_main.c); there is no slot in the executable layout (g_cpu is the first thread-local there), whose
+    # build is then left out. Android has no executable layout either.
+    slot = "-DRECOMP_CPU_SLOT=1" in extra
+    sh([cc] + tflags + ldx + ["-O2", "-DBENCH_SHARED"] + (["-DBENCH_CPU_SLOT"] if slot else []) +
+       ["-o", os.path.join(so, "bench"), main, "-ldl"])
+    if not slot:
+        sh([cc] + rt_flags + ldx + lto_link + ["-o", os.path.join(bdir, "exe", "bench"), main, rt] + objs + ["-lm"])
     try:
         size = sh(["size", "-A", os.path.join(so, "libtitle.so")], check=False).stdout
     except OSError:                 # no binutils `size` (the arm64 cross image)

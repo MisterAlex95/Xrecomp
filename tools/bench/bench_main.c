@@ -7,7 +7,12 @@
  * dlopened and its recomp_lookup dlsym'd, as the pack loader does
  * (src/platform/recomp_pack.c). The guest registers are then thread-locals of
  * a dlopened library, reached through the dynamic TLS path.
- * Otherwise the runtime and the lifted C are linked into this executable. */
+ * Otherwise the runtime and the lifted C are linked into this executable.
+ *
+ * BENCH_CPU_SLOT (variant cpuslot, BENCH_SHARED only): the lifted C reaches g_cpu through bionic's TLS_SLOT_APP
+ * (recomp_types.h RECOMP_CPU_SLOT, XBA-273), tp + 16 on arm64. On aarch64 glibc tp + 16 is where the executable's
+ * own TLS block starts (a 16-byte TCB, then the block), so this executable's only thread-local stands in for the
+ * slot: the same instructions as on Android, checked below. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +26,12 @@ typedef int (*bench_run_t)(recomp_func_t (*)(uint32_t), int (*)(void),
 #ifdef BENCH_SHARED
 #include <dlfcn.h>
 #include <libgen.h>
+#ifdef BENCH_CPU_SLOT
+#if !defined(__aarch64__)
+#error "BENCH_CPU_SLOT: arm64 only (bionic's TLS_SLOT_APP is emulated with aarch64 glibc's TLS layout)"
+#endif
+__thread void *bench_cpu_slot;
+#endif
 #else
 int bench_run(recomp_func_t (*)(uint32_t), int (*)(void),
               const unsigned char *, size_t, int, double, const char *);
@@ -52,6 +63,12 @@ int main(int argc, char **argv)
         bench_run_t run;
         recomp_func_t (*lookup)(uint32_t);
         int (*init)(void);
+#ifdef BENCH_CPU_SLOT
+        if ((void *)&bench_cpu_slot != (void *)((void **)__builtin_thread_pointer() + 2)) {
+            fprintf(stderr, "bench: the stand-in for TLS_SLOT_APP is not at tp + 16\n");
+            return 2;
+        }
+#endif
         strncpy(dir, argv[0], sizeof dir - 1);
         dir[sizeof dir - 1] = 0;
         snprintf(path, sizeof path, "%s/libbenchrt.so", dirname(dir));

@@ -577,49 +577,120 @@ typedef struct RecompCpu {
 #endif
 void *calloc(size_t, size_t);
 extern RECOMP_TLS RecompCpu g_cpu;
+/* The guest CPU through a reserved thread slot, in Android's generated code (XBA-273).
+ *
+ * On Android the lifted code lives in a library loaded with dlopen (a title pack's libtitle.so, or libmain.so for a
+ * title linked in, which System.loadLibrary dlopens too) and g_cpu belongs to libmain.so. Bionic gives such a library
+ * no static TLS (bionic docs/elf-tls.md: no surplus for dlopen), so every lifted function that touches a register
+ * began with a TLS descriptor call into bionic's dynamic resolver, about twenty instructions, once per call of the
+ * function (XBA-37, XBA-238: +27..31 % on call-heavy code against an executable).
+ *
+ * Bionic reserves a slot of the thread block for the app: TLS_SLOT_APP (bionic tls_defines.h, index 2 on arm64:
+ * "Available for use by apps in API level 29 and later"; the app's minSdk is 30). Generated code reads g_cpu's address
+ * from it: mrs + ldr + cbnz, and the first time a thread gets there (the slot of a new thread is zero) the binding
+ * below, which reaches &g_cpu the usual way and stores it. The read is an asm without memory operands, so the compiler
+ * treats it as constant and keeps one per function, across calls, as it did with the TLS address; what a function
+ * sees is always this thread's g_cpu (a slot once set never changes; a stale zero only takes the binding again).
+ *
+ * Why it is safe for the app's packs: the slot holds the address of libmain.so's g_cpu for the calling thread. A
+ * pack never owns it (libtitle.so links against libmain.so), libmain.so is never unloaded (the game's process ends
+ * with recomp_quit), and a thread's slot dies with its thread, so a pack dlclosed after a failed load, or a new pack,
+ * finds the same g_cpu. Nothing else in the game's process is known to use TLS_SLOT_APP (in-tree code, consoles/,
+ * third_party and SDL2 checked when this landed; GPU drivers use their own TLS_SLOT_OPENGL slots); as a canary the
+ * runtime binds it on each guest thread it starts and logs a foreign value (recomp_cpu_slot_check).
+ * Initial-exec TLS is not an option (no static TLS for dlopen'ed libraries on bionic), and a context pointer passed
+ * to every function would change every signature of the generated code.
+ *
+ * Only generated code reads the slot: the runtime keeps g_cpu (one call per runtime function, off the hot paths).
+ * Other hosts are unchanged: an executable already reaches g_cpu at a fixed offset (Linux, Windows), and Mach-O
+ * reserves its thread slots for the system. -DRECOMP_CPU_SLOT=0 restores the TLS access (tools/bench variant
+ * cpuslot0); RECOMP_CPU_SLOT_INDEX moves the slot (tools/bench emulates bionic's on glibc, see bench_main.c). */
+#ifndef RECOMP_CPU_SLOT
+#  if defined(RECOMP_GENERATED_CODE) && defined(__ANDROID__) && defined(__aarch64__) && \
+      (defined(__clang__) || defined(__GNUC__))
+#    define RECOMP_CPU_SLOT 1
+#  else
+#    define RECOMP_CPU_SLOT 0
+#  endif
+#endif
+#if RECOMP_CPU_SLOT
+#  if !defined(__aarch64__)
+#    error "RECOMP_CPU_SLOT: arm64 only"
+#  endif
+#  ifndef RECOMP_CPU_SLOT_INDEX
+#    define RECOMP_CPU_SLOT_INDEX 2     /* bionic TLS_SLOT_APP */
+#  endif
+#  define RECOMP_CPU_SLOT_STR2(x) #x
+#  define RECOMP_CPU_SLOT_STR(x) RECOMP_CPU_SLOT_STR2(x)
+/* The binding is inside the asm, so the compiler sees one value that is never null and has no slow path to lay out
+ * (in C, the null arm was threaded through the whole function: a bind before each register access, a cloned body,
+ * callee-saved registers spilled and the test repeated in loops). It is the standard TLS descriptor sequence for
+ * g_cpu, whose call preserves every register but x0 and x30 (the AArch64 TLSDESC convention), then the store. */
+static inline __attribute__((always_inline)) RecompCpu *recomp_cpu(void)
+{
+    RecompCpu *p;
+    __asm__("mrs %0, tpidr_el0\n\t"
+            "ldr %0, [%0, #" RECOMP_CPU_SLOT_STR(RECOMP_CPU_SLOT_INDEX) " * 8]\n\t"
+            "cbnz %0, 1f\n\t"
+            "adrp x0, :tlsdesc:g_cpu\n\t"
+            "ldr x1, [x0, :tlsdesc_lo12:g_cpu]\n\t"
+            "add x0, x0, :tlsdesc_lo12:g_cpu\n\t"
+            ".tlsdesccall g_cpu\n\t"
+            "blr x1\n\t"
+            "mrs x1, tpidr_el0\n\t"
+            "add %0, x1, x0\n\t"
+            "str %0, [x1, #" RECOMP_CPU_SLOT_STR(RECOMP_CPU_SLOT_INDEX) " * 8]\n"
+            "1:"
+            : "=r"(p) : : "x0", "x1", "x30", "cc");
+    return p;
+}
+#  define RECOMP_CPU_REF (*recomp_cpu())
+#else
+#  define RECOMP_CPU_REF g_cpu
+#endif
 /* The thread's first frame (the array allocated), or past the last slot the
  * spare. Without memory, a scratch pair: frames go nowhere, the chain is
  * unreadable, the code runs. */
 static RECOMP_FRAME_COLD RecompFrame *recomp_frames_slow(void)
 {
     static RecompFrame s_nowhere[2];
-    if (!g_cpu.r_fbase) {
+    if (!RECOMP_CPU_REF.r_fbase) {
         RecompFrame *f = (RecompFrame *)calloc(RECOMP_FRAME_SLOTS + 2, sizeof *f);
         if (!f)
             return s_nowhere;
-        g_cpu.r_fbase = f;
-        g_cpu.r_flimit = g_cpu.r_resume ? f : f + RECOMP_FRAME_SLOTS;
-        g_cpu.r_ftop = f;
-        return g_cpu.r_ftop;
+        RECOMP_CPU_REF.r_fbase = f;
+        RECOMP_CPU_REF.r_flimit = RECOMP_CPU_REF.r_resume ? f : f + RECOMP_FRAME_SLOTS;
+        RECOMP_CPU_REF.r_ftop = f;
+        return RECOMP_CPU_REF.r_ftop;
     }
     /* Resuming (XBA-250): the limit was lowered to the base so every entry comes here; the frame is the next one.
      * A plan is never deeper than the slots (an OVERFLOW chain is not resumable). */
-    if (RECOMP_FRAME_RARE(g_cpu.r_resume != 0))
-        return g_cpu.r_ftop && g_cpu.r_ftop < g_cpu.r_fbase + RECOMP_FRAME_SLOTS ? g_cpu.r_ftop : g_cpu.r_fbase;
+    if (RECOMP_FRAME_RARE(RECOMP_CPU_REF.r_resume != 0))
+        return RECOMP_CPU_REF.r_ftop && RECOMP_CPU_REF.r_ftop < RECOMP_CPU_REF.r_fbase + RECOMP_FRAME_SLOTS ? RECOMP_CPU_REF.r_ftop : RECOMP_CPU_REF.r_fbase;
     /* Past the slots: the two spares, the second shared by everything deeper (never read). The first keeps the
      * top exact for a function 1024 deep; deeper, the chain says OVERFLOW whatever the top. */
-    return g_cpu.r_ftop == g_cpu.r_flimit ? g_cpu.r_flimit : g_cpu.r_flimit + 1;
+    return RECOMP_CPU_REF.r_ftop == RECOMP_CPU_REF.r_flimit ? RECOMP_CPU_REF.r_flimit : RECOMP_CPU_REF.r_flimit + 1;
 }
 #if !defined(RECOMP_FRAME_SHADOW) || RECOMP_FRAME_SHADOW
 #define RECOMP_FRAME_ENTRY() \
-    RecompFrame *_gff = g_cpu.r_ftop; \
-    if (RECOMP_FRAME_RARE((uintptr_t)_gff >= (uintptr_t)g_cpu.r_flimit)) _gff = recomp_frames_slow(); \
-    _gff->f_ebp = g_cpu.r_ebp; _gff->f_esp = g_cpu.r_esp; g_cpu.r_ftop = _gff + 1
-#define RECOMP_FRAME_LEAVE() (g_cpu.r_ftop = _gff)
+    RecompFrame *_gff = RECOMP_CPU_REF.r_ftop; \
+    if (RECOMP_FRAME_RARE((uintptr_t)_gff >= (uintptr_t)RECOMP_CPU_REF.r_flimit)) _gff = recomp_frames_slow(); \
+    _gff->f_ebp = RECOMP_CPU_REF.r_ebp; _gff->f_esp = RECOMP_CPU_REF.r_esp; RECOMP_CPU_REF.r_ftop = _gff + 1
+#define RECOMP_FRAME_LEAVE() (RECOMP_CPU_REF.r_ftop = _gff)
 /* The same with a resume entry (XBA-250): while the thread re-enters its saved chain (r_resume set, the limit
  * lowered so the compare above already fails), the frame is recorded and the function jumps to its resume
  * block (_recomp_resume, emitted by the lifter at its end), which goes to the call it was in. The check is
  * inside the slow path: nothing more on the way in. */
 #define RECOMP_FRAME_ENTRY_R() \
-    RecompFrame *_gff = g_cpu.r_ftop; \
-    if (RECOMP_FRAME_RARE((uintptr_t)_gff >= (uintptr_t)g_cpu.r_flimit)) { \
+    RecompFrame *_gff = RECOMP_CPU_REF.r_ftop; \
+    if (RECOMP_FRAME_RARE((uintptr_t)_gff >= (uintptr_t)RECOMP_CPU_REF.r_flimit)) { \
         _gff = recomp_frames_slow(); \
-        if (RECOMP_FRAME_RARE(g_cpu.r_resume != 0)) { \
-            _gff->f_ebp = g_cpu.r_ebp; _gff->f_esp = g_cpu.r_esp; g_cpu.r_ftop = _gff + 1; \
+        if (RECOMP_FRAME_RARE(RECOMP_CPU_REF.r_resume != 0)) { \
+            _gff->f_ebp = RECOMP_CPU_REF.r_ebp; _gff->f_esp = RECOMP_CPU_REF.r_esp; RECOMP_CPU_REF.r_ftop = _gff + 1; \
             goto _recomp_resume; \
         } \
     } \
-    _gff->f_ebp = g_cpu.r_ebp; _gff->f_esp = g_cpu.r_esp; g_cpu.r_ftop = _gff + 1
+    _gff->f_ebp = RECOMP_CPU_REF.r_ebp; _gff->f_esp = RECOMP_CPU_REF.r_esp; RECOMP_CPU_REF.r_ftop = _gff + 1
 #else
 #define RECOMP_FRAME_ENTRY() (void)0
 #define RECOMP_FRAME_LEAVE() (void)0
@@ -643,40 +714,40 @@ void recomp_resume_lost(uint32_t func, uint32_t site);
 
 extern RECOMP_TLS RecompCpu g_cpu;
 
-#define g_eax             g_cpu.r_eax
-#define g_ecx             g_cpu.r_ecx
-#define g_edx             g_cpu.r_edx
-#define g_esp             g_cpu.r_esp
-#define g_ebx             g_cpu.r_ebx
-#define g_esi             g_cpu.r_esi
-#define g_edi             g_cpu.r_edi
-#define g_ebp             g_cpu.r_ebp
-#define g_seh_ebp         g_cpu.r_seh_ebp
-#define g_fs_base         g_cpu.r_fs_base
-#define g_eflags          g_cpu.r_eflags
-#define g_mxcsr           g_cpu.r_mxcsr
-#define g_df              g_cpu.r_df
-#define g_fp_top          g_cpu.r_fp_top
-#define g_fp_cmp          g_cpu.r_fp_cmp
-#define g_fp_control_word g_cpu.r_fp_control_word
-#define g_fp_cc           g_cpu.r_fp_cc
-#define g_fp_stack        g_cpu.r_fp_stack
-#define g_xmm0            g_cpu.r_xmm0
-#define g_xmm1            g_cpu.r_xmm1
-#define g_xmm2            g_cpu.r_xmm2
-#define g_xmm3            g_cpu.r_xmm3
-#define g_xmm4            g_cpu.r_xmm4
-#define g_xmm5            g_cpu.r_xmm5
-#define g_xmm6            g_cpu.r_xmm6
-#define g_xmm7            g_cpu.r_xmm7
-#define g_mm0             g_cpu.r_mm0
-#define g_mm1             g_cpu.r_mm1
-#define g_mm2             g_cpu.r_mm2
-#define g_mm3             g_cpu.r_mm3
-#define g_mm4             g_cpu.r_mm4
-#define g_mm5             g_cpu.r_mm5
-#define g_mm6             g_cpu.r_mm6
-#define g_mm7             g_cpu.r_mm7
+#define g_eax             RECOMP_CPU_REF.r_eax
+#define g_ecx             RECOMP_CPU_REF.r_ecx
+#define g_edx             RECOMP_CPU_REF.r_edx
+#define g_esp             RECOMP_CPU_REF.r_esp
+#define g_ebx             RECOMP_CPU_REF.r_ebx
+#define g_esi             RECOMP_CPU_REF.r_esi
+#define g_edi             RECOMP_CPU_REF.r_edi
+#define g_ebp             RECOMP_CPU_REF.r_ebp
+#define g_seh_ebp         RECOMP_CPU_REF.r_seh_ebp
+#define g_fs_base         RECOMP_CPU_REF.r_fs_base
+#define g_eflags          RECOMP_CPU_REF.r_eflags
+#define g_mxcsr           RECOMP_CPU_REF.r_mxcsr
+#define g_df              RECOMP_CPU_REF.r_df
+#define g_fp_top          RECOMP_CPU_REF.r_fp_top
+#define g_fp_cmp          RECOMP_CPU_REF.r_fp_cmp
+#define g_fp_control_word RECOMP_CPU_REF.r_fp_control_word
+#define g_fp_cc           RECOMP_CPU_REF.r_fp_cc
+#define g_fp_stack        RECOMP_CPU_REF.r_fp_stack
+#define g_xmm0            RECOMP_CPU_REF.r_xmm0
+#define g_xmm1            RECOMP_CPU_REF.r_xmm1
+#define g_xmm2            RECOMP_CPU_REF.r_xmm2
+#define g_xmm3            RECOMP_CPU_REF.r_xmm3
+#define g_xmm4            RECOMP_CPU_REF.r_xmm4
+#define g_xmm5            RECOMP_CPU_REF.r_xmm5
+#define g_xmm6            RECOMP_CPU_REF.r_xmm6
+#define g_xmm7            RECOMP_CPU_REF.r_xmm7
+#define g_mm0             RECOMP_CPU_REF.r_mm0
+#define g_mm1             RECOMP_CPU_REF.r_mm1
+#define g_mm2             RECOMP_CPU_REF.r_mm2
+#define g_mm3             RECOMP_CPU_REF.r_mm3
+#define g_mm4             RECOMP_CPU_REF.r_mm4
+#define g_mm5             RECOMP_CPU_REF.r_mm5
+#define g_mm6             RECOMP_CPU_REF.r_mm6
+#define g_mm7             RECOMP_CPU_REF.r_mm7
 #endif /* RECOMP_CPU_DEFINED */
 
 /* The runtime's view of a thread's frame shadow stack (XBA-247): how many frames are pushed (0 before its
@@ -939,6 +1010,8 @@ int xbox_ThreadStacksHighWater(void);
  * template the loader built. Returns the new TIB's Xbox VA, or 0. The TIB
  * names a KTHREAD of its own at fs:[0x28] (XBA-113). */
 uint32_t xbox_AllocThreadTib(void);
+/* Binds bionic's TLS_SLOT_APP to the calling thread's g_cpu (Android arm64, XBA-273); nothing elsewhere. */
+void recomp_cpu_slot_check(void);
 
 /* The console's KTHREAD/ETHREAD fields that XAPI and lifted code read, written
  * into the object at `kt` (XBA-113): header and empty lists, StackBase/Limit,

@@ -2544,6 +2544,22 @@ RECOMP_TLS RecompCpu g_cpu = {
     .r_eflags = 0x00000202u,
 };
 
+/* Android's generated code reaches g_cpu through bionic's TLS_SLOT_APP (XBA-273, recomp_types.h RECOMP_CPU_SLOT) and
+ * binds the slot itself the first time a thread needs it. A guest thread the runtime starts binds it here as well,
+ * and says so if something else held the slot: generated code trusts any non-zero value, so a foreign one would make
+ * it run on someone else's memory. Nothing in the app uses the slot; this is the canary if that ever changes. */
+void recomp_cpu_slot_check(void)
+{
+#if defined(__ANDROID__) && defined(__aarch64__)
+    void *volatile *slot = (void *volatile *)__builtin_thread_pointer() + 2;     /* TLS_SLOT_APP */
+    void *was = *slot;
+    if (was && was != (void *)&g_cpu)
+        fprintf(stderr, "  [KERNEL] TLS_SLOT_APP held %p, not this thread's guest CPU: taken over"
+                        " (another library uses the slot; lifted code needs it)\n", was);
+    *slot = (void *)&g_cpu;
+#endif
+}
+
 /* The shape of the TLS block the loader built, so a new thread can be
  * given one just like it: where the initialised image data starts, how
  * big the block is, and how big the per-thread structure slot 0 points
@@ -5364,6 +5380,7 @@ static int tib_per_thread_without_tls(void)
 
 uint32_t xbox_AllocThreadTib(void)
 {
+    recomp_cpu_slot_check();         /* every guest thread the runtime starts comes here */
     /* XBOX_VA is scoped to the loader; the same arithmetic, spelled here. */
     #define TIB_VA(va) ((void *)((uintptr_t)(va) + g_memory_offset))
     const uint32_t tib_size = 0x40;
