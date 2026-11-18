@@ -98,9 +98,11 @@ void x360_render_stats(x360_machine *x, FILE *out)
     xenos_gl_stats s;
     xenos_gl_get_stats(x->gpu->gl, &s);
     fprintf(out,
-            "render: drawn %llu, no shader %llu, unsupported %llu, frames %llu, shaders missing from the cache %u\n",
-            (unsigned long long)s.drawn, (unsigned long long)s.no_shader, (unsigned long long)s.unsupported,
-            (unsigned long long)s.frames, s.missing_shaders);
+            "render: drawn %llu, resolves %llu, frames %llu; skipped: no shader %llu, unsupported %llu; textures not "
+            "handled %llu; shaders missing from the cache %u\n",
+            (unsigned long long)s.drawn, (unsigned long long)s.resolves, (unsigned long long)s.frames,
+            (unsigned long long)s.no_shader, (unsigned long long)s.unsupported,
+            (unsigned long long)s.unsupported_textures, s.missing_shaders);
 }
 
 void x360_set_shader_dump(x360_machine *x, const char *dir)

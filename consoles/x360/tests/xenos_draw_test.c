@@ -16,7 +16,10 @@
  *            full-target quad with D3D texture coordinates, point sampling): a linear 2x2 8_8_8_8 texture (each
  *            quarter of the target one texel), the same with a red / blue swizzle, a tiled 32x32 8_8_8_8 texture
  *            (texel x, y = 8x, 8y, 0), a linear DXT1 block (8-in-16 swap, big-endian 16-bit words as the CPU writes
- *            them).
+ *            them);
+ *   frames 11-12, a resolve: a red quad, then a resolve of the whole target to a tiled 64x64 8_8_8_8 texture with
+ *            a green colour clear (the target is green afterwards, the texture red), and the next frame samples that
+ *            texture back (red again: render to texture).
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +44,14 @@ static int failures;
             failures++;                                                                                                \
         }                                                                                                              \
     } while (0)
+
+static void wr32(void *ctx, uint32_t phys, uint32_t v)
+{
+    (void)ctx;
+    if (phys + 4 <= MEM_SIZE)
+        mem[phys] = (uint8_t)(v >> 24), mem[phys + 1] = (uint8_t)(v >> 16), mem[phys + 2] = (uint8_t)(v >> 8),
+        mem[phys + 3] = (uint8_t)v;
+}
 
 static uint32_t rd32(void *ctx, uint32_t phys)
 {
@@ -148,6 +159,7 @@ int main(int argc, char **argv)
     static xenos_cp cp; /* zeroed: xenos_cp_init keeps the callbacks and the trace it finds */
     xenos_cp_init(&cp);
     cp.read32 = rd32;
+    cp.write32 = wr32;
     cp.render_ctx = g;
     cp.draw_hook = (void (*)(void *, const xenos_cp *, const xenos_draw *))xenos_gl_draw;
     cp.swap_hook = (void (*)(void *, const xenos_cp *))xenos_gl_swap;
@@ -295,13 +307,12 @@ int main(int argc, char **argv)
 
     /* frames 8..11: textures */
     uint32_t ntex;
-    uint32_t *pst = load(argv[1], "ps_tex.bin", &ntex);
+    uint32_t *pst = load(argv[1], "ps_tex.bin", &ntex), *pst2 = pst;
     CHECK(pst != NULL, "no ps_tex.bin");
     if (pst) {
         im[0] = 1, im[1] = ntex;
         memcpy(im + 2, pst, 4 * ntex);
         type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
-        free(pst);
     }
     /* the quad: colour = texture coordinates (u, v), v = 0 at the top */
     vertex(0x6000, -1, 1, 0, 0, 0);
@@ -370,19 +381,76 @@ int main(int argc, char **argv)
     c = px(g, W / 2, H / 2);
     CHECK(c[0] == 255 && c[1] == 0 && c[2] == 0, "frame 11 (DXT1): %u,%u,%u, want red", c[0], c[1], c[2]);
 
+    /* frames 12-13: a resolve, then the resolved texture sampled */
+    im[0] = 1, im[1] = nps; /* the colour pixel shader again */
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    reg(0x4800, 0x4080u | 3u); /* the red quad */
+    reg(0x4801, 2u | (32u << 2));
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);
+    /* the resolve: three window-space vertices at vertex fetch constant 0, eDRAM mode copy */
+    static const float rv[6] = {0, 0, W, 0, W, H};
+    for (int i = 0; i < 6; i++)
+        w32(0x7000 + 4 * (uint32_t)i, fbits(rv[i]));
+    reg(0x4800, 0x7000u | 3u);
+    reg(0x4801, 2u | (6u << 2));
+    reg(0x2208, 6);                                     /* RB_MODECONTROL: copy */
+    reg(0x2318, 0u | 1u << 8 | 0u << 20);               /* colour 0, clear colour, raw copy */
+    reg(0x2319, 0x18000);                               /* RB_COPY_DEST_BASE */
+    reg(0x231A, W | (uint32_t)H << 16);                  /* pitch, height */
+    reg(0x231B, 2u | 6u << 7);                          /* 8-in-32, 8_8_8_8 */
+    reg(0x231E, 0xFF00FF00u);                           /* clear: green (D3DCOLOR) */
+    uint32_t rect = 8u | 2u << 6 | 3u << 16;
+    type3(PM4_DRAW_INDX_2, &rect, 1);
+    reg(0x2208, 4);                                     /* back to colour + depth */
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    c = px(g, W / 2, H / 2);
+    CHECK(c[0] == 0 && c[1] == 255, "frame 12 (resolve clear): %u,%u,%u, want green", c[0], c[1], c[2]);
+    /* the copy: texel (x, y) of the tiled destination holds red (X = R in the low byte, 8-in-32: big-endian) */
+    uint32_t t10 = rd32(NULL, 0x18000 + 0), tmid = 0;
+    {
+        int x = 37, y = 21;
+        int32_t outer = ((y >> 5) * (W >> 5) + (x >> 5)) << 6, inner = (((y >> 1) & 7) << 3) | (x & 7);
+        int32_t oi = (outer | inner) << 2;
+        uint32_t bank = (y >> 4) & 1, pipe = ((x >> 3) & 3) ^ (((y >> 3) & 1) << 1);
+        int32_t off = (int32_t)((uint32_t)(y & 1) << 4 | pipe << 6 | bank << 11) | (oi & 15) | ((oi >> 4) & 1) << 5 |
+                      ((oi >> 5) & 7) << 8 | (oi >> 8) << 12;
+        tmid = rd32(NULL, 0x18000 + (uint32_t)off);
+    }
+    CHECK(t10 == 0xFF0000FFu && tmid == 0xFF0000FFu, "resolved texels %08X %08X, want FF0000FF", t10, tmid);
+    /* frame 13: sample the resolved texture */
+    if (pst2) {
+        im[0] = 1, im[1] = ntex;
+        memcpy(im + 2, pst2, 4 * ntex);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
+    }
+    reg(0x4800, 0x6000u | 3u);
+    reg(0x4801, 2u | (32u << 2));
+    uint32_t fcr[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22 | 1u << 31, 6u | 2u << 6 | 0x18000u, 63u | 63u << 13,
+                       sw_id << 1, 0, 1u << 9};
+    for (int i = 0; i < 6; i++)
+        reg(0x480C + i, fcr[i]);
+    type3(PM4_DRAW_INDX_2, &strip_a, 1);
+    type3(PM4_XE_SWAP, swap, 4);
+    run(&cp);
+    c = px(g, W / 2, H / 2);
+    CHECK(c[0] == 255 && c[1] == 0, "frame 13 (resolved texture sampled): %u,%u,%u, want red", c[0], c[1], c[2]);
+
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 14 && st.frames == 12 && st.no_shader == 0 && st.unsupported == 0 &&
+    CHECK(st.drawn == 16 && st.frames == 14 && st.resolves == 1 && st.no_shader == 0 && st.unsupported == 0 &&
               st.unsupported_textures == 0,
           "stats: drawn %llu frames %llu no shader %llu unsupported %llu", (unsigned long long)st.drawn,
           (unsigned long long)st.frames, (unsigned long long)st.no_shader, (unsigned long long)st.unsupported);
     xenos_gl_destroy(g);
+    free(pst);
     free(vs);
     free(ps);
     if (failures) {
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: twelve frames drawn and read back as expected\n");
+    printf("xenos_gl: fourteen frames drawn and read back as expected, one resolve\n");
     return 0;
 }

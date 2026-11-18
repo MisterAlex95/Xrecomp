@@ -211,6 +211,7 @@ struct xenos_gl {
     xenos_gl_stats st;
     texture textures[MAX_TEXTURES];
     unsigned tex_clock;
+    int title_clears;
     FILE *log;
 };
 
@@ -987,8 +988,98 @@ static void set_viewport(xenos_gl *g, const xenos_cp *cp)
     g->glViewport((GLint)(xo - ax), (GLint)(g->height - (yo + ay)), (GLsizei)(2 * ax), (GLsizei)(2 * ay));
 }
 
+/* ---- resolves ----
+ * A draw with RB_MODECONTROL's eDRAM mode "copy" is a resolve (Xenia's draw_util.cc GetResolveInfo): the rectangle
+ * comes from the three window-space vertices Direct3D 9 leaves at vertex fetch constant 0; RB_COPY_CONTROL says
+ * whether the colour is copied out (raw / convert) and whether colour and depth are cleared (RB_COLOR_CLEAR as a
+ * D3DCOLOR, RB_DEPTH_CLEAR as depth 24 : stencil 8); the copy goes to RB_COPY_DEST_BASE as a tiled texture of
+ * RB_COPY_DEST_PITCH (pitch, height) in RB_COPY_DEST_INFO's format and endian swap, at the same pixel coordinates as
+ * the source (Direct3D adjusts the base for offsets). Formats copied here: 8_8_8_8 and 5_6_5. */
+
+static void resolve(xenos_gl *g, const xenos_cp *cp)
+{
+    uint32_t c0 = cp->regs[0x4800], c1 = cp->regs[0x4801];
+    float v[6];
+    for (int i = 0; i < 6; i++)
+        v[i] = as_float(gpu_read(cp, (c0 & ~3u) + 4 * (uint32_t)i, c1 & 3));
+    float fx0 = v[0], fx1 = v[0], fy0 = v[1], fy1 = v[1];
+    for (int i = 1; i < 3; i++) {
+        fx0 = v[2 * i] < fx0 ? v[2 * i] : fx0, fx1 = v[2 * i] > fx1 ? v[2 * i] : fx1;
+        fy0 = v[2 * i + 1] < fy0 ? v[2 * i + 1] : fy0, fy1 = v[2 * i + 1] > fy1 ? v[2 * i + 1] : fy1;
+    }
+    int x0 = (int)(fx0 + 0.5f), y0 = (int)(fy0 + 0.5f), x1 = (int)(fx1 + 0.5f), y1 = (int)(fy1 + 0.5f);
+    x0 = x0 < 0 ? 0 : x0, y0 = y0 < 0 ? 0 : y0;
+    x1 = x1 > g->width ? g->width : x1, y1 = y1 > g->height ? g->height : y1;
+    if (x1 <= x0 || y1 <= y0) {
+        g->st.unsupported++;
+        return;
+    }
+    uint32_t ctl = cp->regs[0x2318], cmd = (ctl >> 20) & 3, src = ctl & 7;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    if (cmd <= 1 && src < 4) {
+        uint32_t info = cp->regs[0x231B], fmt = (info >> 7) & 63, endian = info & 7, swap_rb = (info >> 24) & 1;
+        uint32_t pitch = cp->regs[0x231A] & 0x3FFF, base = cp->regs[0x2319];
+        uint32_t pitch_aligned = (pitch + 31) & ~31u;
+        unsigned bpp_log2 = fmt == 6 ? 2 : fmt == 4 ? 1 : 0;
+        uint8_t *px = malloc((size_t)(x1 - x0) * (y1 - y0) * 4);
+        if ((fmt == 6 || fmt == 4) && endian < 4 && px && cp->write32 && cp->read32) {
+            g->glReadPixels(x0, g->height - y1, x1 - x0, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            for (int y = y0; y < y1; y++)
+                for (int x = x0; x < x1; x++) {
+                    const uint8_t *p = px + ((size_t)(y1 - 1 - y) * (x1 - x0) + (x - x0)) * 4; /* GL rows bottom up */
+                    uint8_t r = swap_rb ? p[2] : p[0], b = swap_rb ? p[0] : p[2];
+                    uint32_t off = (uint32_t)tiled2d(x, y, pitch_aligned, bpp_log2), a = base + off;
+                    uint32_t value, word_addr = a & ~3u, word;
+                    if (fmt == 6) {
+                        value = r | (uint32_t)p[1] << 8 | (uint32_t)b << 16 | (uint32_t)p[3] << 24;
+                        word = value;
+                    } else { /* 5_6_5, X in the low bits, two per dword */
+                        value = (uint32_t)(r * 31 + 127) / 255 | (uint32_t)(p[1] * 63 + 127) / 255 << 5 |
+                                (uint32_t)(b * 31 + 127) / 255 << 11;
+                        word = gpu_read(cp, word_addr, endian);
+                        uint32_t sh = 8 * (a & 2);
+                        word = (word & ~(0xFFFFu << sh)) | value << sh;
+                    }
+                    /* store the bytes the GPU reads back as `word` through the same swap */
+                    cp->write32(cp->ctx, word_addr & 0x1FFFFFFFu, __builtin_bswap32(gpu_swap(word, endian)));
+                }
+            g->st.resolves++;
+        } else {
+            g->st.unsupported++;
+        }
+        free(px);
+    }
+    uint32_t clear = 0;
+    if ((ctl >> 8) & 1) {
+        uint32_t cc = cp->regs[0x231E];
+        g->glClearColor(((cc >> 16) & 0xFF) / 255.0f, ((cc >> 8) & 0xFF) / 255.0f, (cc & 0xFF) / 255.0f,
+                        (cc >> 24) / 255.0f);
+        clear |= GL_COLOR_BUFFER_BIT;
+    }
+    if ((ctl >> 9) & 1) {
+        uint32_t dc = cp->regs[0x231D];
+        g->glClearDepthf((float)(dc >> 8) / 16777215.0f);
+        g->glClearStencil((GLint)(dc & 0xFF));
+        clear |= GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
+    }
+    if (clear) {
+        g->glEnable(GL_SCISSOR_TEST);
+        g->glScissor(x0, g->height - y1, x1 - x0, y1 - y0);
+        g->glColorMask(1, 1, 1, 1);
+        g->glDepthMask(1);
+        g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+        g->glClear(clear);
+        g->glDisable(GL_SCISSOR_TEST);
+        g->title_clears = 1; /* the title clears through resolves: swaps stop clearing */
+    }
+}
+
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
 {
+    if ((cp->regs[0x2208] & 7) == 6) { /* eDRAM mode "copy": a resolve */
+        resolve(g, cp);
+        return;
+    }
     int prim = gl_prim(d->prim_type);
     if (prim < 0 || d->source_select == 1 || !d->num_indices) {
         g->st.unsupported++;
@@ -1121,7 +1212,9 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
         }
     }
     g->st.frames++;
-    /* the next frame starts clear (eDRAM clears through resolves are not modelled yet) */
+    if (g->title_clears)
+        return; /* the title clears through its resolves */
+    /* until the title clears through a resolve, each frame starts clear */
     g->glViewport(0, 0, g->width, g->height);
     g->glDisable(GL_SCISSOR_TEST);
     g->glColorMask(1, 1, 1, 1);
