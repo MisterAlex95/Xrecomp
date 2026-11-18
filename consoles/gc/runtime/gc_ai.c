@@ -242,7 +242,13 @@ static void produce(gc_machine *m, uint64_t upto)
     while (a->out_done < upto) {
         int16_t d[2], s[2];
         gc_resampler_next(&a->rs_dma, d, fetch_dma, a);
-        gc_resampler_next(&a->rs_stream, s, fetch_stream, m);
+        /* the drive's stream off (or no drive): fetch_stream gives silence and changes nothing (XBA-279) */
+        if ((a->aicr & AICR_PSTAT) && m->di)
+            gc_resampler_next(&a->rs_stream, s, fetch_stream, m);
+        else if (gc_resampler_skip_silence(&a->rs_stream))
+            s[0] = s[1] = 0;
+        else
+            gc_resampler_next(&a->rs_stream, s, fetch_stream, m);
         int32_t l = d[0] + s[0], r = d[1] + s[1];
         if (a->rn == GC_OUT_RING) {
             a->rh = (a->rh + 1) % GC_OUT_RING;

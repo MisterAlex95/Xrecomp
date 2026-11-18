@@ -67,6 +67,9 @@ void gc_resampler_init(gc_resampler *r, uint32_t in_rate, uint32_t out_rate);
 void gc_resampler_set_rate(gc_resampler *r, uint32_t in_rate);
 /* One output frame; fetch is called for each input frame it needs (0, 1 or more). */
 void gc_resampler_next(gc_resampler *r, int16_t out[2], gc_resampler_fetch fetch, void *ctx);
+/* gc_resampler_next for a source known to give silence (and nothing else) for every frame fetched: when the history
+ * is silence too, the output is, and only the phase moves: done here, true; false (nothing done) otherwise. */
+bool gc_resampler_skip_silence(gc_resampler *r);
 
 /* The DSP accelerator's sample reader (what AX voices read ARAM through): ADPCM (8-byte frames: a header byte
  * pred << 4 | scale, then 14 4-bit samples; addresses in nibbles), PCM8 (bytes) and PCM16 (big-endian words),

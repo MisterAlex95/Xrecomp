@@ -77,6 +77,12 @@ void gc_resampler_next(gc_resampler *r, int16_t out[2], gc_resampler_fetch fetch
         r->hist[3][0] = in[0];
         r->hist[3][1] = in[1];
     }
+    /* Silence in, silence out (XBA-279): the interpolation of four zero frames is zero, whatever t */
+    if (!(r->hist[0][0] | r->hist[0][1] | r->hist[1][0] | r->hist[1][1] | r->hist[2][0] | r->hist[2][1] |
+          r->hist[3][0] | r->hist[3][1])) {
+        out[0] = out[1] = 0;
+        return;
+    }
     /* Catmull-Rom between hist[1] and hist[2], t in 1/65536 (coefficients doubled to stay integral) */
     int64_t t = (int64_t)r->phase * 65536 / r->out_rate;
     for (int c = 0; c < 2; c++) {
@@ -87,6 +93,17 @@ void gc_resampler_next(gc_resampler *r, int16_t out[2], gc_resampler_fetch fetch
         v = v * t / 65536;
         out[c] = (int16_t)clamp32(p1 + v / 2, -32768, 32767);
     }
+}
+
+bool gc_resampler_skip_silence(gc_resampler *r)
+{
+    if (r->hist[0][0] | r->hist[0][1] | r->hist[1][0] | r->hist[1][1] | r->hist[2][0] | r->hist[2][1] |
+        r->hist[3][0] | r->hist[3][1])
+        return false;
+    r->phase += r->in_rate;
+    while (r->phase >= r->out_rate)
+        r->phase -= r->out_rate; /* each frame fetched would be silence: the history stays zero */
+    return true;
 }
 
 /* ---- The DSP accelerator ---- */
