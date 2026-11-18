@@ -1853,8 +1853,9 @@ lines and framebuffer). No BIOS, no game, no decryption: [docs/technical/naomi.m
 
 **Xbox 360 (XBA-230 spike, XBA-270, epic XBA-229).** An XEX2 title, statically recompiled, runs headless on Linux to
 its `main()` and past it: threads, synchronisation, memory, files on its disc, save data, save states, controllers,
-and its GPU command stream decoded, its shaders translated to GLSL ES and its draws rendered off-screen (first cut). Linux only (`XBR_CONSOLE_X360`, ON on Linux, off on macOS, Android and
-Windows: `memfd_create` for the physical memory views), nothing in the app. Tested on titles of our own (assembly and
+and its GPU command stream decoded, its shaders translated to GLSL ES and its draws rendered off-screen (first cut).
+Linux only (`XBR_CONSOLE_X360`, ON on Linux, off on macOS, Android and Windows: `memfd_create` for the physical
+memory views), nothing in the app. Tested on titles of our own (assembly and
 devkitPPC C), never on title data; Alex's own dumps go through `python3 -m x360_tools.bringup` (XBA-270's check list).
 What is there:
 
@@ -1922,8 +1923,9 @@ What is there:
   `d:` / `\Device\Cdrom0` and a writable data directory for `cache:` / `hdd:`, symbolic links, save data (XAM content
   as directories of the data directory, mounted on the title's root name), the video mode and display information,
   the audio render driver (its client callback runs every 256-sample frame of virtual time; frames are dropped: no
-  audio output yet), XMA contexts, XAM's user 0 signed in locally, four controllers (`x360_input.c`: set by the host or from a script of timed
-  states, `XamInputGetState` / `GetCapabilities` / `SetState` / `GetKeystroke`), message boxes and the device
+  audio output yet), XMA contexts, XAM's user 0 signed in locally, four controllers (`x360_input.c`: set by the host
+  or from a script of timed states, `XamInputGetState` / `GetCapabilities` / `SetState` / `GetKeystroke`), message
+  boxes and the device
   selector answered at once, profile settings with defaults, no network. Arguments past the eighth come from the
   caller's stack slots (r1 + 0x50). `x360_interp.c` runs what the lifter hands to `RC_INTERP`: traps (a title's
   assert stops it with its address), FPSCR moves, `mcrxr`. `xenos_cp.c`: the GPU command processor, PM4 packets
