@@ -32,6 +32,7 @@ class Discovery:
         self.decoder = decoder
         self.seeds = {a for a in seeds if image.in_code(a) and a % 4 == 0}
         self._cache = {}
+        self.flow = self.insn  # what explore() reads a word through (a console layer may keep less per word)
 
     def insn(self, a):
         i = self._cache.get(a)
@@ -45,13 +46,17 @@ class Discovery:
         branches inside f. None here."""
         return ()
 
+    def finished(self, f):
+        """The form a function explored by run() is kept in (a console layer may compact it)."""
+        return f
+
     def explore(self, entry, entries):
         f = Function(entry)
         stack = [entry]
         while stack:
             a = stack.pop()
             while self.image.in_code(a) and a not in f.addrs:
-                i = self.insn(a)
+                i = self.flow(a)
                 f.addrs.add(a)
                 k = i.kind
                 if k == INVALID:
@@ -97,7 +102,7 @@ class Discovery:
         """[Function] sorted by entry."""
         entries = set(self.seeds)
         while True:
-            funcs = {e: self.explore(e, entries) for e in sorted(entries)}
+            funcs = {e: self.finished(self.explore(e, entries)) for e in sorted(entries)}
             more = set()
             for f in funcs.values():
                 more |= f.calls

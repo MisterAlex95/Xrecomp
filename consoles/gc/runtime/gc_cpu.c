@@ -830,10 +830,10 @@ static void op_fp(gc_machine *m, uint32_t pc, uint32_t w, bool single)
     case 26: /* frsqrte (63) */
         c->ps0[d] = gc_frsqrte(fb);
         goto rec;
-    case 28: r = fma(fa, fc, -fb); break;
-    case 29: r = fma(fa, fc, fb); break;
-    case 30: r = ppc_fnma(fma(fa, fc, -fb)); break;
-    case 31: r = ppc_fnma(fma(fa, fc, fb)); break;
+    case 28: r = ppc_fmsub(fa, fc, fb); break;
+    case 29: r = ppc_fmadd(fa, fc, fb); break;
+    case 30: r = ppc_fnmsub(fa, fc, fb); break;
+    case 31: r = ppc_fnmadd(fa, fc, fb); break;
     default:
         illegal(m, pc, w);
         return;

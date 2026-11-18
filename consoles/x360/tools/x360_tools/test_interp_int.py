@@ -229,16 +229,6 @@ static int interp(const tcase *t)
     }
     return 0;
 }
-/* fmadd / fmsub / fnmadd / fnmsub (and the s forms) with NaNs in both frA and frC: which NaN comes out depends on the
- * order the host compiler gives fma() its two (commutative) factors, which differs between lifted code (constant
- * register numbers) and the interpreter (tools/ppc lift.py emits fma(); the Xenon returns frA's). Any NaN result is
- * accepted there, and only there. */
-static int fma_nan(uint32_t w, const double *x, const double *y)
-{
-    unsigned op = w >> 26, x5 = (w >> 1) & 31, ra = (w >> 16) & 31, rc = (w >> 6) & 31;
-    double a = init_c.fpr[ra], c = init_c.fpr[rc];
-    return (op == 59 || op == 63) && x5 >= 28 && a != a && c != c && *x != *x && *y != *y;
-}
 static const char *diff(const xe_cpu *a, const xe_cpu *b, uint32_t ra, uint64_t va, uint32_t w)
 {
     static char why[96];
@@ -247,7 +237,7 @@ static const char *diff(const xe_cpu *a, const xe_cpu *b, uint32_t ra, uint64_t 
             return snprintf(why, sizeof why, "r%%d %%016llx/%%016llx", k, (unsigned long long)a->gpr[k],
                             (unsigned long long)b->gpr[k]), why;
     for (int k = 0; k < 32; k++)
-        if (memcmp(&a->fpr[k], &b->fpr[k], 8) && !fma_nan(w, &a->fpr[k], &b->fpr[k])) {
+        if (memcmp(&a->fpr[k], &b->fpr[k], 8)) {
             uint64_t x, y;
             memcpy(&x, &a->fpr[k], 8);
             memcpy(&y, &b->fpr[k], 8);
@@ -587,3 +577,67 @@ def test_oe_forms_set_ov_and_so(tmp_path):
                 (rd is not None and cr0 != want_cr0):
             bad.append("%s %x %x: got %s" % (name, a, b, " ".join(lifted)))
     assert not bad, bad
+
+
+@pytest.mark.skipif(not shutil.which("cc") or not sys.platform.startswith("linux"), reason="no C compiler / not Linux")
+def test_fused_family_interpreter_matches_lifted_code(tmp_path):
+    """XBA-292: many states per word, so that frA, frB and frC are NaNs together (0xFE85127A: the word that showed it)."""
+    rng = random.Random(292)
+    dec = XenonDecoder()
+    words = [0xFE85127A]
+    for op, xo in ((63, 28), (63, 29), (63, 30), (63, 31), (59, 28), (59, 29), (59, 30), (59, 31)):
+        words += [(op << 26) | (rng.getrandbits(20) << 6) | (xo << 1) for _ in range(12)]
+    cases = [(dec.decode(w, TEXT).name, w) for w in words]
+    exe, s = build(tmp_path, cases)
+    assert s["interp_fallback_insns"] == 0, s["unlifted"]
+    _, bad = run(exe, cases, states=512)
+    assert not bad, bad[:30]
+
+
+# XBA-292: the fused family's results, worked out here from the architecture's rule and run through ppc_ops.h: with a
+# NaN operand, frA's, else frB's, else frC's, quieted, sign kept whatever the form negates.
+FMA_A, FMA_B, FMA_C, FMA_ONE = 0x7FF8000000000A0A, 0xFFF80000000000B0, 0x7FF4000000000C0C, 0x3FF8000000000000
+QUIET = 0x0008000000000000
+FMA_FORMS = ("ppc_fmadd", "ppc_fmsub", "ppc_fnmadd", "ppc_fnmsub")
+TWO, THREE, MINUS3 = 0x4000000000000000, 0x4008000000000000, 0xC008000000000000
+# exact zeros: the sign of the fused result, then its negation as a sign flip (AArch64 fmsub / fnmadd folding lost it)
+FMA_ZEROS = [("ppc_fmadd", TWO, FMA_ONE, MINUS3, 0), ("ppc_fmsub", TWO, FMA_ONE, THREE, 0),
+             ("ppc_fnmadd", TWO, FMA_ONE, MINUS3, 1 << 63), ("ppc_fnmsub", TWO, FMA_ONE, THREE, 1 << 63)]
+
+
+def fma_vectors():
+    out = list(FMA_ZEROS)
+    for form in FMA_FORMS:
+        for mask in range(1, 8):
+            a, b, c = (FMA_A if mask & 1 else FMA_ONE), (FMA_B if mask & 2 else FMA_ONE), (FMA_C if mask & 4 else FMA_ONE)
+            first = a if mask & 1 else b if mask & 2 else c
+            out.append((form, a, c, b, first | QUIET))
+    return out
+
+
+@pytest.mark.skipif(not shutil.which("cc") or not sys.platform.startswith("linux"), reason="no C compiler / not Linux")
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+def test_fused_family_architected_results(tmp_path, opt):
+    vectors = fma_vectors()
+    rows = "".join("    {%s, 0x%016XULL, 0x%016XULL, 0x%016XULL, 0x%016XULL},\n" % v for v in vectors)
+    src = tmp_path / "fma.c"
+    src.write_text("""#include <stdio.h>
+#include "ppc_ops.h"
+static const struct { double (*f)(double, double, double); uint64_t a, c, b, want; } v[] = {
+%s};
+int main(void)
+{
+    int bad = 0;
+    for (unsigned k = 0; k < sizeof v / sizeof v[0]; k++) {
+        uint64_t got = ppc_f2u(v[k].f(ppc_u2f(v[k].a), ppc_u2f(v[k].c), ppc_u2f(v[k].b)));
+        if (got != v[k].want)
+            printf("%%u: %%016llx, want %%016llx\\n", k, (unsigned long long)got, (unsigned long long)v[k].want), bad = 1;
+    }
+    return bad;
+}
+""" % rows)
+    exe = str(tmp_path / "fma")
+    subprocess.run(["cc", opt, "-std=gnu11", "-w"] + ["-I" + d for d in RUNTIME_DIRS] + [str(src), "-o", exe, "-lm"],
+                   check=True)
+    r = subprocess.run([exe], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout

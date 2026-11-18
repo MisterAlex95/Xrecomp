@@ -1221,7 +1221,8 @@ interpreter (XBA-283) only runs the code a pack does not hold.
   | `x360_rc_table.c` with the list of parts (functions table, 1.9 MB of C) | 0.4 s | 107 MB |
   | one resume part (~39,000 entries, 1.4 MB of C; 25 of them) | 0.15 s | 70 MB |
 
-  A part's cost does not grow with the title. The lift's peak (3.9 GB at 24 MB of code) is now Prepare's largest.
+  A part's cost does not grow with the title. The lift's peak was 3.9 GB at 24 MB of code; XBA-293 brought it to 0.24 GB (0.14 GB at 12 MB) with the same C: decoded
+  instructions are no longer kept per guest word (`consoles/x360/tools/x360_tools/discover360.py`).
 
 Tests: `tools/prepare/test_x360_prepare.py` (with `$X360_RUN`, the pack is also run by x360_run), the app's
 `X360KeyTest` and `ConsoleTest`; ctest `x360_interp` / `x360_interp_c` (XBA-283: the interpreter and the one-round
