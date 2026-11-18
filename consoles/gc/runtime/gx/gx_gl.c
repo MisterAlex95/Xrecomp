@@ -645,6 +645,8 @@ static GLuint new_tex(gx_gl *g)
     F.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     F.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     F.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    /* one level until an upload says otherwise: Adreno crashes in a draw walking the mip chain GL's default of 1000 announces */
+    F.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
     return t;
 }
 
@@ -1678,6 +1680,9 @@ unsigned gx_xfb_texture(gx_state *gx, uint32_t addr, int *w, int *h)
     gx_gl *g = gx->gl;
     if (!g)
         return 0;
+    /* the window presents next: it must not sample through the last draw's samplers (bind_map sets them per draw) */
+    F.glBindSampler(0, 0);
+    F.glBindSampler(1, 0);
     addr &= 0x3FFFFFFFu;
     for (unsigned i = 0; i < 4; i++)
         if (g->xfb[i].tex && g->xfb[i].addr == addr) {
