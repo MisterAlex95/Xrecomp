@@ -2174,7 +2174,7 @@ void gx_xfb_diag_field(gx_state *gx, uint32_t vi_addr, const char *path, unsigne
     for (int i = 0; i < 4; i++)
         if (g->xfb[i].tex && g->xfb[i].tex == g->copy_att)
             att = i;
-    char line[XFB_DIAG_LINE], sl[4] = "-", at[4] = "-";
+    char line[XFB_DIAG_LINE], sl[12] = "-", at[12] = "-";
     if (slot >= 0)
         snprintf(sl, sizeof sl, "%d", slot);
     if (att >= 0)
