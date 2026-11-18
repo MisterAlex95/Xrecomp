@@ -682,7 +682,7 @@ static const x360_hle_row MORE[] = {
     KM(XAudioSubmitRenderDriverFrame, k_XAudioSubmitRenderDriverFrame),
     KM(XAudioGetVoiceCategoryVolume, k_XAudioGetVoiceCategoryVolume),
     KM(XAudioGetVoiceCategoryVolumeChangeMask, k_XAudioGetVoiceCategoryVolumeChangeMask),
-    KM(XAudioEnableDucker, k_ok), KM(XeCryptBnQwBeSigVerify, k_XeCryptBnQwBeSigVerify),
+    KM(XeCryptBnQwBeSigVerify, k_XeCryptBnQwBeSigVerify),
     KM(XeCryptRotSumSha, k_XeCryptRotSumSha), KM(XeKeysGetKey, k_XeKeysGetKey),
     KM(__C_specific_handler, k_C_specific_handler),
     XM2(XGetVideoMode, x_XGetVideoMode), XM2(XamContentCreateEx, x_XamContentCreateEx),

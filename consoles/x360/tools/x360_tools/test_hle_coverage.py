@@ -28,13 +28,12 @@ def test_title_coverage(capsys, tmp_path):
     rows = coverage(img)
     assert rows and all(r[4] for r in rows), [r for r in rows if not r[4]]
     have = implemented()
-    krnl = sorted(n for lib, n, k in all_exports() if lib == "xboxkrnl" and k == "FN" and (lib, n) not in have)[0]
-    xam = sorted(n for lib, n, k in all_exports() if lib == "xam" and k == "FN" and (lib, n) not in have)[0]
-    data, _ = build_xex([0x4E800020], imports={"xboxkrnl.exe": [(ordinal("xboxkrnl", krnl), "thunk")],
-                                               "xam.xex": [(ordinal("xam", xam), "thunk")]},
+    missing = sorted(n for lib, n, k in all_exports() if lib == "xam" and k == "FN" and (lib, n) not in have)[:2]
+    assert len(missing) == 2, "the test needs two exports without an HLE"
+    data, _ = build_xex([0x4E800020], imports={"xam.xex": [(ordinal("xam", n), "thunk") for n in missing]},
                         functions=[(0, 4)])
     rows = coverage(parse_xex(data))
-    assert [(r[2], r[4]) for r in rows] == [(krnl, False), (xam, False)]
+    assert sorted((r[2], r[4]) for r in rows) == [(n, False) for n in missing]
     path = tmp_path / "t.xex"
     path.write_bytes(data)
     assert main([str(path)]) == 0

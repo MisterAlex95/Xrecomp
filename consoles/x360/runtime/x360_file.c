@@ -892,3 +892,133 @@ void x360_k_ObDeleteSymbolicLink(x360_machine *x, x360_thread *t, xe_cpu *c)
             fs->links[k].link[0] = 0;
     RET(X_STATUS_SUCCESS);
 }
+
+/* ---- deleting a file, symbolic link objects (XBA-296) ---- */
+
+#define X_STATUS_ACCESS_DENIED 0xC0000022u
+#define X_STATUS_BUFFER_TOO_SMALL 0xC0000023u
+#define X_STATUS_DIRECTORY_NOT_EMPTY 0xC0000101u
+#define SYMLINK_OBJECT 0xFCu /* the object's first byte: not a dispatcher type */
+
+void x360_k_NtDeleteFile(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    struct x360_fs *fs = fs_of(x);
+    char kpath[512], rel[512];
+    if (path_of_attributes(x, A(0), kpath, sizeof kpath)) {
+        RET(X_STATUS_INVALID_PARAMETER);
+        return;
+    }
+    int dev = resolve(fs, kpath, rel, sizeof rel, 0);
+    if (dev == DEV_DISC) {
+        RET(X_STATUS_ACCESS_DENIED); /* the disc is read-only */
+        return;
+    }
+    lookup_t l;
+    if (dev != DEV_DATA || do_lookup(fs, dev, rel, &l) || !l.found) {
+        RET(X_STATUS_OBJECT_NAME_NOT_FOUND);
+        return;
+    }
+    if ((l.is_dir ? rmdir(l.host) : unlink(l.host)) == 0)
+        RET(X_STATUS_SUCCESS);
+    else
+        RET(errno == ENOTEMPTY ? X_STATUS_DIRECTORY_NOT_EMPTY : X_STATUS_ACCESS_DENIED);
+}
+
+static int link_slot(struct x360_fs *fs, const char *name)
+{
+    const char *l = !strncmp(name, "\\??\\", 4) ? name + 4 : name;
+    for (int k = 0; k < MAX_LINKS; k++)
+        if (fs->links[k].link[0] && !strcasecmp(fs->links[k].link, l))
+            return k;
+    return -1;
+}
+
+static uint32_t link_handle(x360_machine *x, uint32_t handle_ptr, int slot)
+{
+    uint32_t o = x360_kalloc(x, 8), h = o ? x360_handle_new(x, o) : 0;
+    if (!h)
+        return X_STATUS_NO_MEMORY;
+    x360_w8(x, o, SYMLINK_OBJECT);
+    x360_w32(x, o + 4, (uint32_t)slot);
+    x360_w32(x, handle_ptr, h);
+    return X_STATUS_SUCCESS;
+}
+
+/* the target into an ANSI_STRING the caller gave */
+static uint32_t link_target(x360_machine *x, uint32_t obj, uint32_t out, uint32_t *len)
+{
+    struct x360_fs *fs = fs_of(x);
+    uint32_t slot = x360_r32(x, obj + 4);
+    if (x360_r8(x, obj) != SYMLINK_OBJECT || slot >= MAX_LINKS || !fs->links[slot].link[0])
+        return X_STATUS_INVALID_HANDLE;
+    const char *target = fs->links[slot].target;
+    uint32_t n = (uint32_t)strlen(target), cap = x360_r16(x, out + 2), buf = x360_r32(x, out + 4);
+    *len = n;
+    if (n > cap)
+        return X_STATUS_BUFFER_TOO_SMALL;
+    memcpy(x->base + buf, target, n);
+    x360_w16(x, out, n);
+    return X_STATUS_SUCCESS;
+}
+
+void x360_k_NtCreateSymbolicLinkObject(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* (handle*, access, attributes, target ANSI_STRING*) */
+    struct x360_fs *fs = fs_of(x);
+    char link[64], target[256];
+    if (path_of_attributes(x, A(2), link, sizeof link)) {
+        RET(X_STATUS_INVALID_PARAMETER);
+        return;
+    }
+    ansi(x, A(3), target, sizeof target);
+    const char *l = !strncmp(link, "\\??\\", 4) ? link + 4 : link;
+    int slot = link_slot(fs, l);
+    for (int k = 0; slot < 0 && k < MAX_LINKS; k++)
+        if (!fs->links[k].link[0])
+            slot = k;
+    if (slot < 0) {
+        RET(X_STATUS_NO_MEMORY);
+        return;
+    }
+    snprintf(fs->links[slot].link, sizeof fs->links[slot].link, "%s", l);
+    snprintf(fs->links[slot].target, sizeof fs->links[slot].target, "%s", target);
+    RET(link_handle(x, A(0), slot));
+}
+
+void x360_k_NtOpenSymbolicLinkObject(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* (handle*, attributes) */
+    char link[64];
+    if (path_of_attributes(x, A(1), link, sizeof link)) {
+        RET(X_STATUS_INVALID_PARAMETER);
+        return;
+    }
+    int slot = link_slot(fs_of(x), link);
+    RET(slot < 0 ? X_STATUS_OBJECT_NAME_NOT_FOUND : link_handle(x, A(0), slot));
+}
+
+void x360_k_NtQuerySymbolicLinkObject(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* (handle, target ANSI_STRING*, returned length*) */
+    uint32_t o = x360_handle_obj(x, A(0)), len = 0;
+    if (!o) {
+        RET(X_STATUS_INVALID_HANDLE);
+        return;
+    }
+    uint32_t st = link_target(x, o, A(1), &len);
+    if (A(2) && st != X_STATUS_INVALID_HANDLE)
+        x360_w32(x, A(2), len);
+    RET(st);
+}
+
+void x360_k_ObTranslateSymbolicLink(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* (link object, target ANSI_STRING*) */
+    uint32_t len = 0;
+    RET(A(0) ? link_target(x, A(0), A(1), &len) : X_STATUS_INVALID_HANDLE);
+}

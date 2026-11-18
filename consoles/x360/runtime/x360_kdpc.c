@@ -1261,6 +1261,7 @@ static void k_MmIsAddressValid(x360_machine *x, x360_thread *t, xe_cpu *c)
 void x360_kobj_reset(x360_machine *x)
 {
     memset(&x->kobj, 0, sizeof x->kobj);
+    x360_vd_defaults(x);
     for (int k = 0; k < X360_MAX_TIMERS; k++) {
         x360_timer *tm = &x->timers[k];
         tm->apc_routine = tm->apc_ctx = tm->apc_thread = 0;
@@ -1293,6 +1294,8 @@ void x360_kobj_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), 
         k->nprot = X360_MAX_PROT;
     for (unsigned p = 0; p < k->nprot; p++)
         u32(s, &k->prot[p].base), u32(s, &k->prot[p].size), u32(s, &k->prot[p].prot);
+    u32(s, &k->duck_enabled), u32(s, &k->duck_level), u32(s, &k->duck_threshold);
+    u32(s, &k->duck_attack), u32(s, &k->duck_hold), u32(s, &k->duck_release);
     for (int n = 0; n < X360_MAX_TIMERS; n++) {
         x360_timer *tm = &x->timers[n];
         if (n >= X360_KERN_TIMERS)

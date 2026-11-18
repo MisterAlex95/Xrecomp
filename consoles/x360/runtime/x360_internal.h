@@ -146,6 +146,7 @@ typedef struct x360_kobj {
     uint64_t wait_stamp;
     uint32_t nprot;
     x360_prot prot[X360_MAX_PROT];
+    uint32_t duck_enabled, duck_level, duck_threshold, duck_attack, duck_hold, duck_release; /* x360_vd.c */
 } x360_kobj;
 
 typedef struct x360_audio_client {
@@ -171,7 +172,7 @@ typedef struct x360_hle_row {
 #define X360_HK(name, fn) {X360_LIB_XBOXKRNL, X360_xboxkrnl_##name, fn}
 #define X360_HX(name, fn) {X360_LIB_XAM, X360_xam_##name, fn}
 /* the runtime files with a table of their own: const x360_hle_row x360_tab_<group>[], unsigned x360_tab_<group>_n */
-#define X360_HLE_TABLES(T) T(kdpc) T(rtl) T(crypt2) T(vd) T(xam2)
+#define X360_HLE_TABLES(T) T(kdpc) T(rtl) T(crypt2) T(vd) T(xam2) T(ob)
 #define X360_DECLARE_TABLE(group) extern const x360_hle_row x360_tab_##group[]; extern const unsigned x360_tab_##group##_n;
 X360_HLE_TABLES(X360_DECLARE_TABLE)
 
@@ -335,6 +336,9 @@ x360_machine *x360_create_bare(char *why, size_t n); /* tests: memory, kernel an
 /* x360_kernel.c */
 void x360_hle_call(x360_machine *x, const x360_thunk *t);
 int x360_kernel_init(x360_machine *x);
+uint32_t x360_var(x360_machine *x, int lib, unsigned ordinal, uint32_t size); /* a variable export's zeroed storage */
+void x360_vd_vars(x360_machine *x);     /* x360_vd.c: the variable exports of the display, audio and devices */
+void x360_vd_defaults(x360_machine *x); /* the audio ducker's settings */
 const char *x360_export_name(int lib, unsigned ordinal);
 uint64_t x360_stack_arg(x360_machine *x, xe_cpu *c, int n);
 /* the dispatch table as the runtime answers imports: the function behind an export, NULL without an HLE */
@@ -353,7 +357,8 @@ void x360_fs_free(x360_machine *x);
 #define X360_FILE_CALLS(X)                                                                                             \
     X(NtCreateFile) X(NtOpenFile) X(NtReadFile) X(NtWriteFile) X(NtQueryInformationFile) X(NtSetInformationFile)      \
     X(NtQueryFullAttributesFile) X(NtQueryDirectoryFile) X(NtQueryVolumeInformationFile) X(ObCreateSymbolicLink)      \
-    X(ObDeleteSymbolicLink)
+    X(ObDeleteSymbolicLink) X(NtDeleteFile) X(NtCreateSymbolicLinkObject) X(NtOpenSymbolicLinkObject)                 \
+    X(NtQuerySymbolicLinkObject) X(ObTranslateSymbolicLink)
 #define X360_DECLARE_FILE_CALL(name) void x360_k_##name(x360_machine *x, x360_thread *t, xe_cpu *c);
 X360_FILE_CALLS(X360_DECLARE_FILE_CALL)
 

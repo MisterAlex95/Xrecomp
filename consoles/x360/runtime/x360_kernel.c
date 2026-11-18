@@ -1517,7 +1517,7 @@ void x360_hle_call(x360_machine *x, const x360_thunk *th)
 }
 
 /* the variable exports this runtime fills in, before the loader binds the imports */
-static uint32_t var(x360_machine *x, int lib, unsigned ordinal, uint32_t size)
+uint32_t x360_var(x360_machine *x, int lib, unsigned ordinal, uint32_t size)
 {
     uint32_t a = x360_kalloc(x, size);
     x->vars[lib][ordinal] = a;
@@ -1531,27 +1531,28 @@ int x360_kernel_init(x360_machine *x)
         x360_logf(x, "x360: %s\n", x->error);
         return -1;
     }
-    uint32_t a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxHardwareInfo, 16);
+    uint32_t a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxHardwareInfo, 16);
     x360_w32(x, a, 0x00000020u); /* flags (Xenia: 0x20, storage initialised) */
     x360_w8(x, a + 4, 6);        /* hardware threads */
-    a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxKrnlVersion, 8);
+    a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XboxKrnlVersion, 8);
     x360_w16(x, a, 2);
     x360_w16(x, a + 2, 0);
     x360_w16(x, a + 4, 17559);
     x360_w16(x, a + 6, 0);
-    x->timestamp_bundle = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeTimeStampBundle, 24);
+    x->timestamp_bundle = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeTimeStampBundle, 24);
     /* the executable module: XexExecutableModuleHandle points at a pointer to an LDR_DATA_TABLE_ENTRY-like block
      * whose +0x58 is the XEX header (filled once the XEX is loaded, x360_create) */
     x->module = x360_kalloc(x, 0x100);
-    a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XexExecutableModuleHandle, 16);
+    a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XexExecutableModuleHandle, 16);
     x360_w32(x, a, x->module);
-    a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedImageName, 64);
+    a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedImageName, 64);
     memcpy(x->base + a, "\\Device\\Cdrom0\\default.xex", 27);
-    a = var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedCommandLine, 64);
+    a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedCommandLine, 64);
     memcpy(x->base + a, "\"default.xex\"", 14);
-    var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeDebugMonitorData, 64);
-    var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExThreadObjectType, 16);
-    var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExEventObjectType, 16);
-    var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExSemaphoreObjectType, 16);
+    x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeDebugMonitorData, 64);
+    x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExThreadObjectType, 16);
+    x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExEventObjectType, 16);
+    x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExSemaphoreObjectType, 16);
+    x360_vd_vars(x);
     return 0;
 }
