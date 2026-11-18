@@ -77,6 +77,10 @@ typedef unsigned int EGLBoolean, EGLenum;
 #define GL_ALPHA 0x1906
 #define GL_ZERO 0
 #define GL_ONE 1
+#define GL_TRANSFORM_FEEDBACK_BUFFER 0x8C8E
+#define GL_INTERLEAVED_ATTRIBS 0x8C8C
+#define GL_RASTERIZER_DISCARD 0x8C89
+#define GL_MAP_READ_BIT 0x0001
 
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
 #define EGL_RENDERABLE_TYPE 0x3040
@@ -154,7 +158,12 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glDeleteTextures, (GLsizei, const GLuint *))                                                               \
     X(void, glBindTexture, (GLenum, GLuint))                                                                           \
     X(void, glTexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *))              \
-    X(void, glTexParameteri, (GLenum, GLenum, GLint))
+    X(void, glTexParameteri, (GLenum, GLenum, GLint))                                                                  \
+    X(void, glTransformFeedbackVaryings, (GLuint, GLsizei, const GLchar *const *, GLenum))                            \
+    X(void, glBeginTransformFeedback, (GLenum))                                                                        \
+    X(void, glEndTransformFeedback, (void))                                                                            \
+    X(void *, glMapBufferRange, (GLenum, GLintptr, GLsizeiptr, GLbitfield))                                           \
+    X(GLboolean, glUnmapBuffer, (GLenum))
 
 #define MAX_PROGRAMS 256
 #define MAX_ATTRS 16
@@ -167,6 +176,7 @@ typedef struct attr {
 
 typedef struct program {
     uint32_t vs_crc, ps_crc;
+    int kind;
     GLuint prog;
     int ok;
     int nattr;
@@ -200,7 +210,7 @@ struct xenos_gl {
     void *egl_lib, *gles_lib;
     EGLDisplay dpy;
     EGLContext ctx;
-    GLuint fbo, rb, ds, vao, vbo, ibo, ubo[2];
+    GLuint fbo, rb, ds, vao, vbo, ibo, ubo[2], tfbo;
     int width, height;
     uint8_t *frame;
     char cache[512], frames[512];
@@ -322,6 +332,7 @@ xenos_gl *xenos_gl_create(const char *cache_dir, int width, int height, char *wh
     g->glGenBuffers(1, &g->vbo);
     g->glGenBuffers(1, &g->ibo);
     g->glGenBuffers(2, g->ubo);
+    g->glGenBuffers(1, &g->tfbo);
     g->frame = calloc((size_t)width * height, 4);
     g->glDisable(GL_DEPTH_TEST);
     g->glDisable(GL_BLEND);
@@ -346,6 +357,7 @@ void xenos_gl_destroy(xenos_gl *g)
         g->glDeleteBuffers(1, &g->vbo);
         g->glDeleteBuffers(1, &g->ibo);
         g->glDeleteBuffers(2, g->ubo);
+        g->glDeleteBuffers(1, &g->tfbo);
         for (int i = 0; i < MAX_TEXTURES; i++)
             if (g->textures[i].tex)
                 g->glDeleteTextures(1, &g->textures[i].tex);
@@ -491,51 +503,94 @@ static int parse_attrs(const char *src, attr *out)
     return n;
 }
 
-static program *get_program(xenos_gl *g, const xenos_cp *cp)
+/* Rectangle lists: the vertex shader runs once with transform feedback (gl_Position and 15 interpolators: GLES 3.0
+ * guarantees 64 interleaved components), the fourth corner of each rectangle is made on the CPU, and the result is
+ * drawn as triangles through a pass-through vertex shader with the title's pixel shader. */
+#define RECT_VARYINGS 16 /* gl_Position + xe_i0..14 */
+
+static const char RECT_VS[] =
+    "#version 300 es\n"
+    "in vec4 xe_rp, xe_r0, xe_r1, xe_r2, xe_r3, xe_r4, xe_r5, xe_r6, xe_r7, xe_r8, xe_r9, xe_r10, xe_r11, xe_r12, "
+    "xe_r13, xe_r14;\n"
+    "out vec4 xe_i0, xe_i1, xe_i2, xe_i3, xe_i4, xe_i5, xe_i6, xe_i7, xe_i8, xe_i9, xe_i10, xe_i11, xe_i12, xe_i13, "
+    "xe_i14, xe_i15;\n"
+    "void main() { xe_i0 = xe_r0; xe_i1 = xe_r1; xe_i2 = xe_r2; xe_i3 = xe_r3; xe_i4 = xe_r4; xe_i5 = xe_r5; "
+    "xe_i6 = xe_r6; xe_i7 = xe_r7; xe_i8 = xe_r8; xe_i9 = xe_r9; xe_i10 = xe_r10; xe_i11 = xe_r11; xe_i12 = xe_r12; "
+    "xe_i13 = xe_r13; xe_i14 = xe_r14; xe_i15 = vec4(0.0); gl_Position = xe_rp; }\n";
+static const char CAPTURE_FS[] =
+    "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(0.0); }\n";
+
+/* kind 0: the title's two shaders; 1: its vertex shader with transform feedback; 2: the pass-through vertex shader
+ * with its pixel shader (rectangle lists) */
+static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
 {
     const xenos_shader *vs = &cp->shader[0], *ps = &cp->shader[1];
     if (!vs->words || !ps->words)
         return NULL;
-    uint32_t vc = crc32_words(vs->code, vs->words), pc = crc32_words(ps->code, ps->words);
+    uint32_t vc = kind == 2 ? 0 : crc32_words(vs->code, vs->words);
+    uint32_t pc = kind == 1 ? 0 : crc32_words(ps->code, ps->words);
     for (int i = 0; i < g->nprogs; i++)
-        if (g->progs[i].vs_crc == vc && g->progs[i].ps_crc == pc)
+        if (g->progs[i].vs_crc == vc && g->progs[i].ps_crc == pc && g->progs[i].kind == kind)
             return g->progs[i].ok ? &g->progs[i] : NULL;
     if (g->nprogs == MAX_PROGRAMS)
         return NULL;
     program *p = &g->progs[g->nprogs++];
     memset(p, 0, sizeof *p);
-    p->vs_crc = vc, p->ps_crc = pc;
-    char path[600], name[32];
-    snprintf(path, sizeof path, "%s/vs_%08X.vert", g->cache, vc);
-    char *vsrc = slurp(path);
-    snprintf(path, sizeof path, "%s/ps_%08X.frag", g->cache, pc);
-    char *psrc = slurp(path);
-    if (!vsrc)
-        report_missing(g, 0, vc);
-    if (!psrc)
-        report_missing(g, 1, pc);
-    if (vsrc && psrc) {
-        snprintf(name, sizeof name, "vs_%08X", vc);
-        GLuint v = compile(g, GL_VERTEX_SHADER, vsrc, name);
-        snprintf(name, sizeof name, "ps_%08X", pc);
-        GLuint f = compile(g, GL_FRAGMENT_SHADER, psrc, name);
+    p->vs_crc = vc, p->ps_crc = pc, p->kind = kind;
+    char path[600], name[40];
+    char *vsrc = NULL, *psrc = NULL;
+    if (kind != 2) {
+        snprintf(path, sizeof path, "%s/vs_%08X.vert", g->cache, vc);
+        if (!(vsrc = slurp(path)))
+            report_missing(g, 0, vc);
+    }
+    if (kind != 1) {
+        snprintf(path, sizeof path, "%s/ps_%08X.frag", g->cache, pc);
+        if (!(psrc = slurp(path)))
+            report_missing(g, 1, pc);
+    }
+    const char *vtext = kind == 2 ? RECT_VS : vsrc, *ftext = kind == 1 ? CAPTURE_FS : psrc;
+    if (vtext && ftext) {
+        snprintf(name, sizeof name, kind == 2 ? "rect pass-through" : "vs_%08X", vc);
+        GLuint v = compile(g, GL_VERTEX_SHADER, vtext, name);
+        snprintf(name, sizeof name, kind == 1 ? "capture" : "ps_%08X", pc);
+        GLuint f = compile(g, GL_FRAGMENT_SHADER, ftext, name);
         if (v && f) {
             p->prog = g->glCreateProgram();
             g->glAttachShader(p->prog, v);
             g->glAttachShader(p->prog, f);
+            if (kind == 1) {
+                static const char *const vary[RECT_VARYINGS] = {
+                    "gl_Position", "xe_i0", "xe_i1", "xe_i2",  "xe_i3",  "xe_i4",  "xe_i5",  "xe_i6",
+                    "xe_i7",       "xe_i8", "xe_i9", "xe_i10", "xe_i11", "xe_i12", "xe_i13", "xe_i14"};
+                g->glTransformFeedbackVaryings(p->prog, RECT_VARYINGS, vary, GL_INTERLEAVED_ATTRIBS);
+            }
             g->glLinkProgram(p->prog);
             GLint ok = 0;
             g->glGetProgramiv(p->prog, GL_LINK_STATUS, &ok);
             if (ok) {
                 p->ok = 1;
-                p->nattr = parse_attrs(vsrc, p->attrs);
-                for (int i = 0; i < p->nattr; i++) {
-                    char an[16];
-                    snprintf(an, sizeof an, "xe_v%d", i);
-                    p->loc[i] = g->glGetAttribLocation(p->prog, an);
+                if (kind == 2) {
+                    for (int i = 0; i < RECT_VARYINGS; i++) {
+                        char an[16];
+                        if (i == 0)
+                            snprintf(an, sizeof an, "xe_rp");
+                        else
+                            snprintf(an, sizeof an, "xe_r%d", i - 1);
+                        p->loc[i] = g->glGetAttribLocation(p->prog, an);
+                    }
+                } else {
+                    p->nattr = parse_attrs(vsrc, p->attrs);
+                    for (int i = 0; i < p->nattr; i++) {
+                        char an[16];
+                        snprintf(an, sizeof an, "xe_v%d", i);
+                        p->loc[i] = g->glGetAttribLocation(p->prog, an);
+                    }
                 }
-                parse_samplers(vsrc, p);
-                parse_samplers(psrc, p);
+                if (vsrc)
+                    parse_samplers(vsrc, p);
+                if (psrc)
+                    parse_samplers(psrc, p);
                 g->glUseProgram(p->prog);
                 for (int i = 0; i < p->nsamplers; i++) {
                     char un[16];
@@ -553,7 +608,7 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp)
             } else {
                 char log[2048] = "";
                 g->glGetProgramInfoLog(p->prog, sizeof log, NULL, log);
-                fprintf(g->log, "xenos_gl: vs_%08X + ps_%08X do not link: %s\n", vc, pc, log);
+                fprintf(g->log, "xenos_gl: vs_%08X + ps_%08X (kind %d) do not link: %s\n", vc, pc, kind, log);
                 g->glDeleteProgram(p->prog);
                 p->prog = 0;
             }
@@ -647,7 +702,8 @@ static int gl_prim(uint32_t t)
     case 5: return 6; /* triangle fan */
     case 6: return 5; /* triangle strip */
     case 13: return 4; /* quad list: drawn as two triangles per quad */
-    default: return -1; /* rectangle lists and the rest: not yet */
+    case 8: return 4;  /* rectangle list: the fourth corners made after the vertex shader, then triangles */
+    default: return -1; /* line loops, quad strips, polygons: not yet */
     }
 }
 
@@ -1074,6 +1130,80 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
     }
 }
 
+/* the capture program is bound with its attributes: run it on the n vertices into the feedback buffer, make each
+ * rectangle's fourth corner (opposite the right angle: the vertex off the longest edge is the corner, the fourth is
+ * the sum of the other two minus it, for every captured component), draw two triangles per rectangle */
+static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const uint32_t *idx, uint32_t n)
+{
+    enum { F = RECT_VARYINGS * 4 };
+    uint32_t nr = n / 3;
+    if (!nr)
+        return;
+    g->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, g->tfbo);
+    g->glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, (GLsizeiptr)nr * 3 * F * 4, NULL, GL_STREAM_DRAW);
+    g->glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, g->tfbo);
+    g->glEnable(GL_RASTERIZER_DISCARD);
+    g->glBeginTransformFeedback(0 /* GL_POINTS */);
+    if (idx) {
+        g->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g->ibo);
+        g->glBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * (GLsizeiptr)nr * 3, idx, GL_STREAM_DRAW);
+        g->glDrawElements(0, (GLsizei)(nr * 3), GL_UNSIGNED_INT, NULL);
+    } else {
+        g->glDrawArrays(0, 0, (GLsizei)(nr * 3));
+    }
+    g->glEndTransformFeedback();
+    g->glDisable(GL_RASTERIZER_DISCARD);
+    const float *cap =
+        g->glMapBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, (GLsizeiptr)nr * 3 * F * 4, GL_MAP_READ_BIT);
+    float *tri = cap ? malloc((size_t)nr * 6 * F * 4) : NULL;
+    if (!tri) {
+        if (cap)
+            g->glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
+        g->st.unsupported++;
+        return;
+    }
+    for (uint32_t r = 0; r < nr; r++) {
+        const float *v[3] = {cap + (3 * r) * F, cap + (3 * r + 1) * F, cap + (3 * r + 2) * F};
+        float sx[3], sy[3];
+        for (int k = 0; k < 3; k++) {
+            float w = v[k][3] != 0.0f ? v[k][3] : 1.0f;
+            sx[k] = v[k][0] / w, sy[k] = v[k][1] / w;
+        }
+        int corner = 0;
+        float best = -1.0f;
+        for (int k = 0; k < 3; k++) { /* the edge opposite vertex k */
+            int a = (k + 1) % 3, b = (k + 2) % 3;
+            float dx = sx[a] - sx[b], dy = sy[a] - sy[b], len = dx * dx + dy * dy;
+            if (len > best)
+                best = len, corner = k;
+        }
+        const float *c = v[corner], *a = v[(corner + 1) % 3], *b = v[(corner + 2) % 3];
+        float *o = tri + (size_t)r * 6 * F;
+        memcpy(o, c, F * 4);
+        memcpy(o + F, a, F * 4);
+        memcpy(o + 2 * F, b, F * 4);
+        memcpy(o + 3 * F, a, F * 4);
+        memcpy(o + 4 * F, b, F * 4);
+        for (int i = 0; i < F; i++)
+            o[5 * F + i] = a[i] + b[i] - c[i];
+    }
+    g->glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
+    g->glUseProgram(rp->prog);
+    bind_textures(g, cp, rp);
+    g->glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
+    g->glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nr * 6 * F * 4, tri, GL_STREAM_DRAW);
+    for (int i = 0; i < RECT_VARYINGS; i++)
+        if (rp->loc[i] >= 0) {
+            g->glEnableVertexAttribArray((GLuint)rp->loc[i]);
+            g->glVertexAttribPointer((GLuint)rp->loc[i], 4, GL_FLOAT, 0, F * 4, (void *)(uintptr_t)(i * 16));
+        }
+    g->glDrawArrays(4 /* GL_TRIANGLES */, 0, (GLsizei)(nr * 6));
+    for (int i = 0; i < RECT_VARYINGS; i++)
+        if (rp->loc[i] >= 0)
+            g->glDisableVertexAttribArray((GLuint)rp->loc[i]);
+    free(tri);
+}
+
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
 {
     if ((cp->regs[0x2208] & 7) == 6) { /* eDRAM mode "copy": a resolve */
@@ -1085,8 +1215,9 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         g->st.unsupported++;
         return;
     }
-    program *p = get_program(g, cp);
-    if (!p) {
+    program *p = get_program(g, cp, d->prim_type == 8 ? 1 : 0);
+    program *rp = d->prim_type == 8 ? get_program(g, cp, 2) : NULL;
+    if (!p || (d->prim_type == 8 && !rp)) {
         g->st.no_shader++;
         return;
     }
@@ -1172,7 +1303,9 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
             g->glVertexAttribPointer((GLuint)p->loc[a], 4, GL_FLOAT, 0, (GLsizei)(na * 16),
                                      (void *)(uintptr_t)(a * 16));
         }
-    if (idx) {
+    if (d->prim_type == 8) {
+        draw_rects(g, cp, rp, idx, n);
+    } else if (idx) {
         g->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g->ibo);
         g->glBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * (GLsizeiptr)n, idx, GL_STREAM_DRAW);
         g->glDrawElements((GLenum)prim, (GLsizei)n, GL_UNSIGNED_INT, NULL);

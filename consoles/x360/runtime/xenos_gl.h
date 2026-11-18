@@ -12,8 +12,10 @@
  * (or without a surfaceless EGL display) xenos_gl_create fails with a reason and the runtime runs without drawing.
  *
  * Render state: blending (factors, equations, constant colour), colour mask, depth test / write with a D24S8
- * buffer, stencil (front and back), culling and winding, the window scissor; quad lists become triangles. The vertex
- * shaders convert Direct3D's 0..w depth range to GL's (xenos_glsl).
+ * buffer, stencil (front and back), culling and winding, the window scissor. Quad lists become triangles; rectangle
+ * lists run the vertex shader with transform feedback, get their fourth corners on the CPU and are drawn as
+ * triangles through a pass-through vertex shader (15 interpolators: the 16th is zero). The vertex shaders convert
+ * Direct3D's 0..w depth range to GL's (xenos_glsl).
  *
  * Textures: 2D (and 1D) from the texture fetch constants, linear or tiled, 8 / 8_8 / 8_8_8_8 / 1_5_5_5 / 5_6_5 /
  * 4_4_4_4 / DXT1 / DXT2_3 / DXT4_5 decoded to RGBA8 (decoded again when their memory changes), clamp, filter and
@@ -24,7 +26,7 @@
  * clearing. The render target is the single host target (no eDRAM model: surface pitch, base, MSAA ignored).
  *
  * Not there yet: the eDRAM model (several render targets, formats, MSAA), the other resolve formats, mips, 3D / cube
- * and the other texture formats, rectangle lists, alpha test, more vertex formats, multiple render targets, the
+ * and the other texture formats, alpha test, more vertex formats, multiple render targets, the
  * viewport's exact conventions (the scale / offset registers map to glViewport when enabled). A Vulkan back end (the
  * epic's plan) would take the same state; the GameCube chose GLES 3.0 for the Thor (Plane « Decisions taken »). */
 #ifndef XENOS_GL_H
