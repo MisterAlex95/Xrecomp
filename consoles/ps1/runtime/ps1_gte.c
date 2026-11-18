@@ -188,7 +188,7 @@ static uint32_t gte_divide(ps1_gte *g)
 static void mat_vec(ps1_gte *g, const int16_t m[3][3], const int16_t v[3], const int32_t *t, int shift, int lm)
 {
     for (int i = 0; i < 3; i++) {
-        int64_t a = t ? (int64_t)t[i] << 12 : 0;
+        int64_t a = t ? (int64_t)t[i] * 4096 : 0; /* a multiplication: t[i] may be negative */
         a = chk44(g, i + 1, a + (int64_t)m[i][0] * v[0]);
         a = chk44(g, i + 1, a + (int64_t)m[i][1] * v[1]);
         a = a + (int64_t)m[i][2] * v[2];

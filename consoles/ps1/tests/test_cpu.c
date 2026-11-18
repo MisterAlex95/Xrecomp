@@ -25,7 +25,7 @@ enum { ZERO, AT, V0, V1, A0, A1, A2, A3, T0, T1, T2, T3, T4, T5, T6, T7, S0, S1,
        K0, K1, GP, SP, FP, RA };
 
 static uint32_t R(int fn, int rs, int rt, int rd, int sh) { return (uint32_t)(rs << 21 | rt << 16 | rd << 11 | sh << 6 | fn); }
-static uint32_t I(int op, int rs, int rt, int imm) { return (uint32_t)(op << 26 | rs << 21 | rt << 16 | (imm & 0xFFFF)); }
+static uint32_t I(int op, int rs, int rt, int imm) { return (uint32_t)op << 26 | (uint32_t)(rs << 21 | rt << 16 | (imm & 0xFFFF)); }
 #define NOP 0u
 #define ADDU(d, s, t) R(0x21, s, t, d, 0)
 #define ADD(d, s, t) R(0x20, s, t, d, 0)
