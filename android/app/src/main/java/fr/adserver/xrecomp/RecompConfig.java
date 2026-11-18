@@ -115,8 +115,9 @@ final class RecompConfig {
         // XBA-181: the pad's motors, for every console (the Xbox's USB pad, the PS1 DualShock, the N64 Rumble Pak).
         new Option(Section.GAME, R.string.OPT_RUMBLE, R.string.OPT_RUMBLE_DETAIL, keys(ENV_RUMBLE),
                    new Choice(R.string.VAL_ON, (String)null), new Choice(R.string.VAL_OFF, "0")).shared(),
-        // XBA-194: rewind for the GBA, PS1 and N64 (src/platform/recomp_rewind.h): on by default but for the N64, whose
-        // captures cost more; the history's memory cap. A game can have its own (GameSettings: not an Xbox title).
+        // XBA-194: rewind for every console (src/platform/recomp_rewind.h; the Xbox's, xbox_state_service.c): on by
+        // default but for the N64 and the GameCube, whose captures cost more; the history's memory cap. A game can have
+        // its own (GameSettings).
         new Option(Section.GAME, R.string.OPT_REWIND, R.string.OPT_REWIND_DETAIL, keys(ENV_REWIND),
                    new Choice(R.string.VAL_REWIND_AUTO, (String)null), new Choice(R.string.VAL_ON, "1"),
                    new Choice(R.string.VAL_OFF, "0")).shared(),

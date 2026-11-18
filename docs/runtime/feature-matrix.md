@@ -17,11 +17,11 @@ app and not in this matrix.
 
 | Feature | Xbox | GBA | PS1 | N64 | GameCube |
 |---|---|---|---|---|---|
-| Internal resolution (upscaling) | yes: `src/gpu/nv2a_gl.c` (`RECOMP_GPU_SCALE`, else `RECOMP_UPSCALE`); UI `app/GameSettings.appliesTo` | n/a: the PPU draws 240 x 160 in software; window scale and shaders instead | yes: `consoles/ps1/runtime/ps1_gpu.c` `ps1_gpu_set_upscale` (shadow VRAM 1/2/4x) | partial: `consoles/n64/runtime/n64_rdp_select.c` `n64_rdp_upscale_env`, the Vulkan RDP only (the software RDP draws native) | partial: runtime yes (`consoles/gc/runtime/gx/gx_gl.c` `gx_gl_attach`, `RECOMP_GC_UPSCALE` / `RECOMP_UPSCALE`, GX renderer), but the UI hides it (`app/ConsoleVideo.applies`, `app/GameSettings.appliesTo`) |
+| Internal resolution (upscaling) | yes: `src/gpu/nv2a_gl.c` (`RECOMP_GPU_SCALE`, else `RECOMP_UPSCALE`); UI `app/GameSettings.appliesTo` | n/a: the PPU draws 240 x 160 in software; window scale and shaders instead | yes: `consoles/ps1/runtime/ps1_gpu.c` `ps1_gpu_set_upscale` (shadow VRAM 1/2/4x) | partial: `consoles/n64/runtime/n64_rdp_select.c` `n64_rdp_upscale_env`, the Vulkan RDP only (the software RDP draws native) | yes: `consoles/gc/runtime/gx/gx_gl.c` `gx_gl_attach` (`RECOMP_GC_UPSCALE` / `RECOMP_UPSCALE`, 1..8x, GX renderer); UI `app/ConsoleVideo.applies` (XBA-274: was hidden) |
 | Fast-forward | yes: guest clock x2..16, `src/kernel/kernel_hal.c` `xbox_FastForwardPoll`; menu `app/GameMenu` (`fastForwardSupported`) | yes: frames per shown frame, `gba_runtime.c` (`recomp_ff_hold`) | yes: `ps1_runtime.c` | yes: `n64_runtime.c` | yes: `gc_runtime.c` |
 | Save states in a run | partial: `src/kernel/xbox_state.c` + `xbox_state_service.c` (`recomp_states_attach "xbox"`); a load needs every guest thread parked at the same call (else ECHAIN); not built on Windows (`kernel_bridge.c` `#ifndef _WIN32`); UI asks the runtime (`app/ShellActivity.statesSupported`) | yes: `gba_state.c` | yes: `ps1_state.c` | yes: `n64_state.c` | yes: `gc_state.c` |
 | Across runs (« Resume where I left off ») | partial: `xbox_state_service.c` `xbox_StateResumeAtBoot`, only with resume entries in the generated code (`app/Pack.resume`: PREPARE_AGAIN otherwise) | yes: `recomp_states_resume` (`src/platform/recomp_states.c`), `gba_runtime.c` | yes: `ps1_runtime.c` | yes: `n64_runtime.c` | yes: `gc_runtime.c` |
-| Rewind | partial: runtime yes, on by default, time-based (`xbox_state_service.c`, `recomp_rewind_config("xbox")`), hotkey shown with states (`app/Hotkeys`); but a game's own Rewind / Rewind memory rows are hidden for Xbox titles (`app/GameSettings.appliesTo`, comment « no Xbox save states », stale since XBA-249) | yes: on by default (`src/platform/recomp_rewind.c`) | yes: on by default | yes: off by default (4-8 MB a capture), a game can turn it on | yes: off by default (up to ~42 MB a capture: MEM1 + ARAM), a game can turn it on |
+| Rewind | yes: on by default, time-based (`xbox_state_service.c`, `recomp_rewind_config("xbox")`), when the title's states work; hotkey with states (`app/Hotkeys`); a game's own Rewind / Rewind memory rows (`app/GameSettings.appliesTo`, XBA-274: were hidden for Xbox titles) | yes: on by default (`src/platform/recomp_rewind.c`) | yes: on by default | yes: off by default (4-8 MB a capture), a game can turn it on | yes: off by default (up to ~42 MB a capture: MEM1 + ARAM), a game can turn it on |
 | Cheats | yes: `src/kernel/xbox_cheats.c` (per vblank); UI `app/Cheats.checkXbox` | yes: `gba_cheats.h` | yes: `ps1_runtime.c` | yes: `n64_runtime.c` | yes: `gc_runtime.c`; UI `app/Cheats.checkGc` |
 | Frame generation | yes: `src/video/fb_present_sdl.c` (framegen pacer) | yes: `src/video/host_window.c` `host_window_present_rgba` -> `fg_present` | yes: same path | yes: `host_window_present_rgba_shared` | partial: only the CPU-RGB fallback; the GX and GPU-YUV pictures go through `host_window_present_texture`, which never reaches `fg_present` |
 | Perf line | yes: `fb_present_sdl.c` `perf_overlay_tick`; menu `app/GameMenu` (Item.PERF, every console) | yes: `host_window.c` overlay + `host_perf` | yes | yes | yes |
@@ -54,8 +54,8 @@ or rewind UI on any desktop (hotkeys and files only), and no screenshot or fulls
 ## Gaps, in the order they are filled (XBA-274)
 
 1. GameCube controls in the app: the Controls screen (`app/ConsoleControls`). Done.
-2. GameCube internal resolution in the app (`app/ConsoleVideo.applies`, `app/GameSettings.appliesTo`).
-3. Xbox rewind in a game's settings (`app/GameSettings.appliesTo`).
+2. GameCube internal resolution in the app (`app/ConsoleVideo.applies`, `app/GameSettings.appliesTo`). Done.
+3. Xbox rewind in a game's settings (`app/GameSettings.appliesTo`). Done.
 4. GameCube in the desktop `xrecomp` CLI (`tools/xrecomp`).
 5. GameCube frame generation on the texture present path (`src/video/host_window.c`).
 

@@ -182,6 +182,7 @@ public class ConsoleVideoTest {
         assertTrue(ConsoleVideo.applies(u, Console.PS1));
         assertTrue(ConsoleVideo.applies(u, Console.N64));
         assertFalse(ConsoleVideo.applies(u, Console.GBA));
+        assertTrue("XBA-274: the GameCube GX renderer", ConsoleVideo.applies(u, Console.GC));
         assertTrue("XBA-237: the Xbox GPU renderer", ConsoleVideo.applies(u, Console.XBOX));
         assertFalse(ConsoleVideo.applies(ConsoleVideo.Setting.SCALE, Console.XBOX));
         assertFalse(ConsoleVideo.applies(ConsoleVideo.Setting.FRAMEGEN, Console.XBOX));
@@ -209,6 +210,8 @@ public class ConsoleVideoTest {
         assertEquals("the game's own", "4",
                      value(ConsoleVideo.runEnv(Console.PS1, null, null, "4", cfg), "RECOMP_UPSCALE"));
         assertEquals("8", value(ConsoleVideo.runEnv(Console.N64, null, null, "8", cfg), "RECOMP_UPSCALE"));
+        assertEquals("XBA-274: a GameCube game's own", "8",
+                     value(ConsoleVideo.runEnv(Console.GC, null, null, "8", cfg), "RECOMP_UPSCALE"));
         assertEquals("a GBA game: Settings' line, never its own", "2",
                      value(ConsoleVideo.runEnv(Console.GBA, null, null, "4", cfg), "RECOMP_UPSCALE"));
         assertEquals("the 4-argument form: Settings'", "2",
