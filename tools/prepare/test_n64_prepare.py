@@ -129,12 +129,12 @@ def test_not_an_n64_rom(tmp_path):
 
 
 def test_compile_flags_and_jobs():
-    """Lifted N64 code compiles at -O1 for --opt 2 / 3 without the SLP vectorizer, -I consoles/n64/runtime, and the
-    job pool counts 256 MB per compile with a 1 GB reserve."""
+    """Lifted N64 code compiles at -O2 for --opt 2 / 3 (XBA-279) without the SLP vectorizer, -I consoles/n64/runtime,
+    and the job pool counts 256 MB per compile with a 1 GB reserve."""
     from tools.prepare import compile as cc
-    assert [n64.lifted_opt(o) for o in ("0", "1", "2", "3", "s")] == ["0", "1", "1", "1", "s"]
+    assert [n64.lifted_opt(o) for o in ("0", "1", "2", "3", "s")] == ["0", "1", "2", "2", "s"]
     flags = n64.compile_flags(n64.lifted_opt("2"), ROOT, "/gen")
-    assert "-O1" in flags and "-fno-tree-slp-vectorize" in flags and "-O2" not in flags
+    assert "-O2" in flags and "-fno-tree-slp-vectorize" in flags and "-O1" not in flags
     assert "-I" + os.path.join(ROOT, "consoles", "n64", "runtime") in flags and "-I/gen" in flags
     assert cc.default_jobs(3 << 30, 8, n64.JOB_RSS, n64.RESERVED) == 5
 

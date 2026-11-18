@@ -183,15 +183,18 @@ def check(pack_dir, key, source_sha256, abi, shell_abi=pack.SHELL_ABI, verify_ha
     return None
 
 
-# Lifted N64 code (n64_tools README « Lifting »): -O1 -fno-tree-slp-vectorize like GBA and PS1 code (-O2 / -O3 compile
-# at -O1). Generated files hold 1000..4000 instructions, so one clang job peaks about as a PS1 one.
+# Lifted N64 code (n64_tools README « Lifting »): -O2 -fno-tree-slp-vectorize (-O3 compiles at -O2). Unlike GBA and
+# PS1 code it runs faster at -O2 (XBA-279: about a fifth on arm64): big lifted functions keep the guest registers in
+# locals, and -O1 left the runtime's own (RDRAM base, write counters, the code's range) spilled and reloaded at every
+# store in their loops; -O2 keeps them in registers, for the same compile time. Generated files hold 1000..4000
+# instructions, so one clang job peaks about as a PS1 one.
 JOB_RSS = 256 << 20
 RESERVED = 1 << 30
 
 
 def lifted_opt(opt):
     """The -O level lifted N64 code compiles at for a requested --opt."""
-    return gba.gba_opt(opt)
+    return "2" if opt == "3" else opt
 
 
 def compile_flags(opt, root, gen, sysroot=None, include_dirs=()):

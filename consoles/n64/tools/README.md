@@ -128,7 +128,9 @@ compile time on the phone):
 - **Stable files.** Functions in address order, a file cut after a function whose identity (start, hash) hashes to
   0 mod 8 once it holds 1000 instructions (at 4000 at most); files are named after their first function. A
   discovery round changes only the files that gained functions, and the object cache (`n64_recomp_build.py`, Prepare)
-  recompiles only those. Flags: `-O1 -fno-tree-slp-vectorize` (tools/prepare/gba.py `lifted_cflags`).
+  recompiles only those. Flags: `-O2 -fno-tree-slp-vectorize` (tools/prepare/gba.py `lifted_cflags`, n64.py
+  `lifted_opt`; XBA-279: at -O1 the big functions' loops reloaded the runtime's values from the stack at every store,
+  -O2 keeps them in registers: about a fifth less on arm64, the same compile time).
 
 `--resume-all` makes every instruction a block of its own (debugging).
 
