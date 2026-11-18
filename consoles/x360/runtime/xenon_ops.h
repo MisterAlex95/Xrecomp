@@ -8,10 +8,10 @@
  * Vector registers: union xe_v128, elements in PowerPC order (element 0 = the first in memory, the most significant
  * on a big-endian machine), each word in host order. Byte i (PowerPC numbering) is bits 24 - 8 (i % 4) of word i / 4.
  *
- * Known gaps (spike): VMX float ops run in host single precision with fused multiply-adds (fmaf), no flush of
- * denormals (Xenon's VMX128 runs non-Java mode, flushing them), NaN payloads are the host's; vrefp / vrsqrtefp are
- * exact (hardware gives estimates); vmsum3fp128 / vmsum4fp128 round after each product and sum. divd / divdu by zero
- * give 0 (undefined on hardware). */
+ * VMX float ops run in host single precision with fused multiply-adds (fmaf); denormals are flushed in non-Java mode
+ * by the lifter (xv_daz, xenon_vmx.h, XBA-270). Known gaps: NaN payloads are the host's; vrefp / vrsqrtefp are exact
+ * (hardware gives estimates); vmsum3fp128 / vmsum4fp128 round after each product and sum. divd / divdu by zero give 0
+ * (undefined on hardware). The integer element ops, packs, sums and the D3D pack ops are in xenon_vmx.h. */
 #ifndef XENON_OPS_H
 #define XENON_OPS_H
 
@@ -173,12 +173,15 @@ static inline float xv_f(uint32_t u)
 XV_MAP2(xv_addfp, f32[k] = a.f32[k] + b.f32[k])
 XV_MAP2(xv_subfp, f32[k] = a.f32[k] - b.f32[k])
 XV_MAP2(xv_mulfp, f32[k] = a.f32[k] * b.f32[k])
-/* vmaxfp / vminfp: a NaN operand gives a NaN (a + b propagates it). */
+/* vmaxfp / vminfp: a NaN operand gives a NaN (a + b propagates it); +0 is greater than -0 (AltiVec PEM: max(+0, -0)
+ * = +0, min(+0, -0) = -0), so equal operands combine their sign bits. */
 #define XV_NAN2(a, b) ((a) != (a) || (b) != (b))
 XV_MAP2(xv_maxfp, f32[k] = XV_NAN2(a.f32[k], b.f32[k]) ? a.f32[k] + b.f32[k]
-                                                       : (a.f32[k] > b.f32[k] ? a.f32[k] : b.f32[k]))
+                         : a.f32[k] == b.f32[k] ? xv_f(a.u32[k] & b.u32[k])
+                                                : (a.f32[k] > b.f32[k] ? a.f32[k] : b.f32[k]))
 XV_MAP2(xv_minfp, f32[k] = XV_NAN2(a.f32[k], b.f32[k]) ? a.f32[k] + b.f32[k]
-                                                       : (a.f32[k] < b.f32[k] ? a.f32[k] : b.f32[k]))
+                         : a.f32[k] == b.f32[k] ? xv_f(a.u32[k] | b.u32[k])
+                                                : (a.f32[k] < b.f32[k] ? a.f32[k] : b.f32[k]))
 XV_MAP2(xv_and, u32[k] = a.u32[k] & b.u32[k])
 XV_MAP2(xv_andc, u32[k] = a.u32[k] & ~b.u32[k])
 XV_MAP2(xv_or, u32[k] = a.u32[k] | b.u32[k])
@@ -429,5 +432,7 @@ static inline xe_v128 xv_lvsr(uint32_t ea)
         x[i] = (uint8_t)(16 - (ea & 15) + i);
     return xv_from_bytes(x);
 }
+
+#include "xenon_vmx.h"
 
 #endif

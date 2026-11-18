@@ -182,6 +182,11 @@ def vrlimi128(vd, vb, imm, z):
     return (6 << 26) | _r128(vd, 0, vb) | ((imm & 31) << 16) | ((z & 3) << 6) | 0x710
 
 
+def vpkd3d128(vd, vb, typ, pack, shift):
+    """IMM = type << 2 | pack, z = shift (VX128_4 form)."""
+    return (6 << 26) | _r128(vd, 0, vb) | ((((typ & 7) << 2) | (pack & 3)) << 16) | ((shift & 3) << 6) | 0x610
+
+
 def vsldoi128(vd, va, vb, sh):
     return (4 << 26) | _r128(vd, va, vb) | ((sh & 15) << 6) | 0x10
 
