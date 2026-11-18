@@ -121,7 +121,7 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     if img.image is None:
         raise XexError("no image to recompile: %s" % img.image_note)
     view = CodeView(img)
-    dec = XenonDecoder()
+    dec = XenonDecoder(text=comments)
     helpers = find_helpers(view, dec, img.code_ranges())
     view.hide(helpers)
     seeds = {img.entry} | set(extra_seeds)
@@ -164,12 +164,13 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
             inlined += lifter.inlined
             for a in lifter.leaders:
                 resume.setdefault(a, f.entry)
-            for a in f.addrs:
+            for a in f.packed:
                 i = disc.insn(a)
                 if lifter.needs_interp(i):
                     unlifted[i.name or ".invalid"] += 1
                     if i.name is None:
                         invalid += 1
+            f.release()
             if n + 1 == len(group) or size >= split_bytes or len(out) // 2 >= per_file:
                 path = os.path.join(outdir, "x360_rc_%05d_%d.c" % (b, sub))
                 with open(path, "w") as fh:
