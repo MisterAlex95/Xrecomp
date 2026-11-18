@@ -101,9 +101,10 @@ int xbox_ReserveHolds(uint32_t va, uint32_t bytes);
 
 /* NtFreeVirtualMemory for a lazy reservation: release (the whole reservation,
  * va its base) or decommit [va, va + size) (size 0: to its end). The pages go
- * back to the host and read as zero afterwards; the address is not handed out
- * again. Returns 1 with the page-rounded range in *out_base / *out_size, 0 when
- * va is not a live lazy reservation, -1 for a release not at its base. */
+ * back to the host and read as zero afterwards; a released range can be handed
+ * out again by a later reservation. Returns 1 with the page-rounded range in
+ * *out_base / *out_size, 0 when va is not a live lazy reservation, -1 for a
+ * release not at its base. */
 int xbox_ReserveFree(uint32_t va, uint32_t size, int release,
                      uint32_t *out_base, uint32_t *out_size);
 
