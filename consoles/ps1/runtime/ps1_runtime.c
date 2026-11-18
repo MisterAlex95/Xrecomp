@@ -37,6 +37,7 @@
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
+#include "recomp_play.h"
 #include "recomp_rewind.h"
 #include "recomp_states.h"
 
@@ -1092,8 +1093,9 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     static int16_t pcm[PS1_AUDIO_RATE / 10 * 2];
     int dw = 320, dh = 240, last_w = 0, last_h = 0, last_pal = -1, last_int = -1, display_on = -1;
     uint64_t frames = 0, next = now_ns(), t0 = next, late_resets = 0, dirty_at = 0, dirty_first = 0;
-    int was_paused = 0, heard = 0, rc = 0, toggle_held = 0, f6_held = 0, was_ff = 0;
-    recomp_hotkeys_state hk_keys = {0};
+    int was_paused = 0, heard = 0, rc = 0, toggle_held = 0, f6_held = 0;
+    recomp_play play; /* the hotkeys, fast-forward and rewind holds, frames per shown frame (XBA-274) */
+    recomp_play_init(&play, "ps1", "frame", &rw);
     recomp_ff_carry carry = {{0, 0}, 0};
     disc_swap swap = {"", 0};
     stall_watch stall = {0, 0, 0};
@@ -1184,28 +1186,17 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             }
             f6_held = f6;
         }
-        uint32_t hk_held = p1.hk_held | p2.hk_held, hk_pressed = p1.hk_pressed | p2.hk_pressed;
-        if (window) { /* the desktop keys (RECOMP_HOTKEYS_KEYS: Tab, F1-F4, Shift+F1-F4 by default) */
-            int nks = 0;
-            uint32_t key_pressed = 0;
-            const Uint8 *ks = SDL_GetKeyboardState(&nks);
-            hk_held |= recomp_hotkeys_keys_update(recomp_hotkeys_get(), &hk_keys, ks, nks, &key_pressed);
-            hk_pressed |= key_pressed;
-        }
-        recomp_hotkeys_run(hk_pressed);
-        recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
-        int rewinding = recomp_rewinder_begin(&rw, !!(hk_held & RECOMP_HK_BIT(RECOMP_HK_REWIND)));
-        int ff = recomp_ff_active(), speed = recomp_ff_speed();
-        if (ff != was_ff) {
-            printf("ps1: fast-forward %s at frame %llu\n", ff ? (speed ? "on" : "on (max)") : "off",
-                   (unsigned long long)frames);
-            fflush(stdout);
+        int nks = 0;
+        const Uint8 *ks = window ? SDL_GetKeyboardState(&nks) : NULL;
+        recomp_play_frame pf;
+        recomp_play_begin(&play, p1.hk_held | p2.hk_held, p1.hk_pressed | p2.hk_pressed, ks, nks, frames, &pf);
+        int rewinding = pf.rewinding, ff = pf.ff, speed = pf.speed;
+        if (pf.ff_changed) {
             carry = (recomp_ff_carry){{0, 0}, 0};
-            was_ff = ff;
             next = now_ns();
         }
         /* Fast-forward: `speed` PS1 frames per shown frame (max: as many as fit in one display frame). */
-        int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1, dirty = 0, on = 0;
+        int steps = pf.steps, dirty = 0, on = 0;
         uint64_t frame_ns = 16683333, burst_end = now_ns() + 15000000;
         if (rewinding) { /* rewind held: one capture back per shown frame, no PS1 frame runs, nothing heard */
             pthread_mutex_lock(&s_mu);

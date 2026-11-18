@@ -39,6 +39,13 @@ app and not in this matrix.
 | Per-game settings | yes: `app/GameSettings` | yes | yes | yes (+ Vulkan driver, pak) | yes |
 | Prepare on device | yes: `app/PrepareService` (XBE -> pack) | yes: `app/Console.prepares` | yes (+ CHD) | yes | yes (DOL, disc, RVZ / WIA / GCZ / CISO) |
 
+Shared layers (what a new console gets by plugging in, src/platform, xbr_host_core): save-state slots and the
+automatic slot (`recomp_states.h`), rewind (`recomp_rewind.h`), cheats (`recomp_cheats.h`), hotkeys
+(`recomp_hotkeys.h`), and since XBA-274 the frame loop's controls (`recomp_play.h`: the keys' hotkeys next to the
+pads', the fast-forward and rewind holds, console frames per shown frame), which the GBA, PS1, N64 and GameCube
+runtimes now call instead of four copies; the window, its shaders, frame generation and the perf overlay
+(`src/video/host_window.c`); pad mapping (`src/input/mapping/console_pad`).
+
 ## Hosts
 
 | Host | Xbox | GBA | PS1 | N64 | GameCube |

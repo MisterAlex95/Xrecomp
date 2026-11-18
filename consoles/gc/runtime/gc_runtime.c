@@ -41,6 +41,7 @@
 #include "recomp_exit_hook.h"
 #include "recomp_hotkeys.h"
 #include "recomp_lifecycle.h"
+#include "recomp_play.h"
 #include "recomp_rewind.h"
 #include "recomp_states.h"
 #include "tools/gc_png.h"
@@ -697,8 +698,8 @@ started:;
         printf("gc: resume from the automatic slot: %s\n", r == RECOMP_STATE_EEMPTY ? "nothing saved yet"
                                                                                     : recomp_states_error(r));
     }
-    recomp_hotkeys_state hk_keys;
-    memset(&hk_keys, 0, sizeof hk_keys);
+    recomp_play play; /* the hotkeys, fast-forward and rewind holds, fields per shown frame (XBA-274) */
+    recomp_play_init(&play, "gc", "field", &rw);
 
     /* The window, or none (headless checks: SDL dummy drivers). */
     int window = !o->headless && !host_window_headless();
@@ -758,7 +759,7 @@ started:;
     static uint8_t rgb[GC_XFB_MAX_W * GC_XFB_MAX_H * 3];
     static uint8_t rgba[GC_XFB_MAX_W * GC_XFB_MAX_H * 4];
     uint64_t frames = 0, t0 = now_ns(), next = t0, late_resets = 0, last_save = 0;
-    int was_paused = 0, rc = 0, was_ff = 0, stopped = 0, heard = 0;
+    int was_paused = 0, rc = 0, stopped = 0, heard = 0;
     static int16_t pcm[GC_AUDIO_RATE / 10 * 2];
     recomp_ff_carry ff_carry;
     memset(&ff_carry, 0, sizeof ff_carry);
@@ -819,26 +820,16 @@ started:;
         /* The hotkeys (XBA-190): the pads' chords (read with the pads below) and the desktop keys. */
         uint32_t hk_held = 0, hk_pressed = 0;
         pads_to_si(m, o, window, &hk_held, &hk_pressed);
-        if (window) {
-            int nks = 0;
-            uint32_t key_pressed = 0;
-            const Uint8 *ks = SDL_GetKeyboardState(&nks);
-            hk_held |= recomp_hotkeys_keys_update(recomp_hotkeys_get(), &hk_keys, ks, nks, &key_pressed);
-            hk_pressed |= key_pressed;
-        }
-        recomp_hotkeys_run(hk_pressed); /* quick save / load, slot steps, the fast-forward toggle */
-        recomp_ff_hold(!!(hk_held & RECOMP_HK_BIT(RECOMP_HK_FF_HOLD)));
-        int rewinding = recomp_rewinder_begin(&rw, !!(hk_held & RECOMP_HK_BIT(RECOMP_HK_REWIND)));
-        int ff = recomp_ff_active(), speed = recomp_ff_speed();
-        if (ff != was_ff) {
-            printf("gc: fast-forward %s at field %llu\n", ff ? (speed ? "on" : "on (max)") : "off",
-                   (unsigned long long)frames);
-            fflush(stdout);
+        int nks = 0;
+        const Uint8 *ks = window ? SDL_GetKeyboardState(&nks) : NULL;
+        recomp_play_frame pf; /* quick save / load, slot steps, the fast-forward toggle and hold, rewind */
+        recomp_play_begin(&play, hk_held, hk_pressed, ks, nks, frames, &pf);
+        int rewinding = pf.rewinding, ff = pf.ff, speed = pf.speed;
+        if (pf.ff_changed) {
             memset(&ff_carry, 0, sizeof ff_carry);
-            was_ff = ff;
             next = now_ns();
         }
-        int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1;
+        int steps = pf.steps;
         uint64_t burst_end = now_ns() + field_ns * 9 / 10;
         if (rewinding) { /* rewind held: one capture back per shown frame, no field runs, nothing heard */
             pthread_mutex_lock(&s_mu);

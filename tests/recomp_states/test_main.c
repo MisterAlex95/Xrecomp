@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "recomp_states.h"
 #include "recomp_hotkeys.h"
+#include "recomp_play.h"
 #include "console_pad.h"
 
 #include <stdio.h>
@@ -555,6 +556,101 @@ static void test_hotkey_run(void)
     recomp_states_detach();
 }
 
+/* recomp_play (XBA-274): the frame loop's controls every console runtime shares. */
+static int s_rw_machine;
+
+static size_t rw_size(void *user)
+{
+    (void)user;
+    return sizeof s_rw_machine;
+}
+
+static size_t rw_save(uint8_t *out, size_t cap, void *user)
+{
+    (void)user;
+    if (cap < sizeof s_rw_machine)
+        return 0;
+    memcpy(out, &s_rw_machine, sizeof s_rw_machine);
+    return sizeof s_rw_machine;
+}
+
+static int rw_load(const uint8_t *in, size_t n, void *user)
+{
+    (void)user;
+    if (n != sizeof s_rw_machine)
+        return -1;
+    memcpy(&s_rw_machine, in, n);
+    return 0;
+}
+
+static void test_play(void)
+{
+    recomp_rewind_cfg cfg = {1, 1, 1u << 20};
+    recomp_rewinder rw;
+    recomp_play play;
+    recomp_play_frame f;
+    uint8_t ks[256];
+    const uint32_t ffh = RECOMP_HK_BIT(RECOMP_HK_FF_HOLD), rwh = RECOMP_HK_BIT(RECOMP_HK_REWIND);
+
+    unsetenv("RECOMP_FF_SPEED");
+    recomp_ff_reset();
+    recomp_hotkeys_reset();
+    CHECK(recomp_rewinder_init(&rw, "gba", &cfg) == 1);
+    recomp_play_init(&play, "gba", NULL, &rw);
+    CHECK(!strcmp(play.unit, "frame"));
+    /* Nothing held: one frame. */
+    recomp_play_begin(&play, 0, 0, NULL, 0, 0, &f);
+    CHECK(f.steps == 1 && !f.ff && !f.ff_changed && !f.rewinding);
+    /* The pads' fast-forward hold: `speed` frames (4 by default), the change once. */
+    recomp_play_begin(&play, ffh, ffh, NULL, 0, 1, &f);
+    CHECK(f.ff && f.ff_changed && f.speed == 4 && f.steps == 4 && recomp_ff_active());
+    recomp_play_begin(&play, ffh, 0, NULL, 0, 5, &f);
+    CHECK(f.ff && !f.ff_changed && f.steps == 4);
+    recomp_play_begin(&play, 0, 0, NULL, 0, 9, &f);
+    CHECK(!f.ff && f.ff_changed && f.steps == 1 && !recomp_ff_active());
+    /* The keyboard's (Tab) the same; no keys without a window. */
+    memset(ks, 0, sizeof ks);
+    ks[43] = 1;
+    recomp_play_begin(&play, 0, 0, ks, 256, 10, &f);
+    CHECK(f.ff && f.held == ffh && f.steps == 4);
+    recomp_play_begin(&play, 0, 0, NULL, 0, 14, &f);
+    CHECK(!f.ff && f.steps == 1);
+    /* Max speed: as many as fit (RECOMP_PLAY_MAX_STEPS, the runtime stops the burst). */
+    setenv("RECOMP_FF_SPEED", "max", 1);
+    recomp_ff_reset();
+    recomp_play_begin(&play, ffh, 0, NULL, 0, 15, &f);
+    CHECK(f.ff && f.speed == 0 && f.steps == RECOMP_PLAY_MAX_STEPS);
+    unsetenv("RECOMP_FF_SPEED");
+    recomp_ff_reset();
+    recomp_play_begin(&play, 0, 0, NULL, 0, 16, &f);
+    /* The toggle (a pressed action) runs: on until pressed again. */
+    recomp_play_begin(&play, 0, RECOMP_HK_BIT(RECOMP_HK_FF_TOGGLE), NULL, 0, 17, &f);
+    CHECK(f.ff && recomp_ff_toggled());
+    recomp_play_begin(&play, 0, RECOMP_HK_BIT(RECOMP_HK_FF_TOGGLE), NULL, 0, 21, &f);
+    CHECK(!f.ff && f.ff_changed);
+    /* Rewind: frames captured, then held: no frame runs, each step goes back one. */
+    for (s_rw_machine = 1; s_rw_machine <= 3; s_rw_machine++) {
+        recomp_play_begin(&play, 0, 0, NULL, 0, 22, &f);
+        CHECK(f.steps == 1);
+        recomp_rewinder_frame(&rw, rw_size, rw_save, NULL);
+    }
+    recomp_play_begin(&play, rwh, rwh, NULL, 0, 25, &f);
+    CHECK(f.rewinding && f.steps == 0);
+    CHECK(recomp_rewinder_step(&rw, rw_load, NULL) == 0 && s_rw_machine == 3);
+    recomp_play_begin(&play, rwh | ffh, 0, NULL, 0, 25, &f);
+    CHECK(f.rewinding && f.steps == 0);   /* rewinding wins over fast-forward */
+    recomp_play_begin(&play, 0, 0, NULL, 0, 25, &f);
+    CHECK(!f.rewinding);
+    recomp_ff_hold(0);
+    recomp_play_begin(&play, 0, 0, NULL, 0, 25, &f);
+    CHECK(f.steps == 1);
+    recomp_rewinder_free(&rw);
+    /* No rewinder: the hold does nothing. */
+    recomp_play_init(&play, "gc", "field", NULL);
+    recomp_play_begin(&play, rwh, rwh, NULL, 0, 0, &f);
+    CHECK(!f.rewinding && f.steps == 1);
+}
+
 int main(void)
 {
     snprintf(s_dir, sizeof s_dir, "/tmp/recomp_states_test.XXXXXX");
@@ -572,6 +668,7 @@ int main(void)
     test_hotkey_pad();
     test_hotkey_keys();
     test_hotkey_run();
+    test_play();
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", s_dir);
     if (system(cmd) != 0)
