@@ -68,30 +68,9 @@ def python_for(home, env=None):
 
 
 def find_player(console, env=None, root=ROOT):
-    """gba_play / ps1_play / n64_play / gc_play: $XRECOMP_<CONSOLE>_PLAY, the PATH, a build folder of the toolkit (the
-    root build: build*/consoles/<c>/runtime/; a console's own: build*/<c>/<c>_runtime/), else the one a release
-    archive carries with its prebuilt runtime (runtime/<host>/bin/, XBA-87). None when not built."""
-    import glob
-    import shutil
-    env = os.environ if env is None else env
-    name = PLAYERS[console]
-    v = env.get("XRECOMP_%s_PLAY" % console.upper())
-    if v:
-        return v
-    exe = name + (".exe" if sys.platform.startswith("win") else "")
-    found = shutil.which(exe, path=env.get("PATH"))
-    if found:
-        return found
-    pats = ["build*/consoles/%s/runtime/%s" % (console, exe), "build*/%s/%s_runtime/%s" % (console, console, exe),
-            "build*/%s_runtime/%s" % (console, exe)]
-    hits = []
-    for p in pats:
-        hits += [h for h in glob.glob(os.path.join(root, p)) if os.access(h, os.X_OK)]
-    if hits:
-        return max(hits, key=os.path.getmtime)      # the newest build
-    from tools.prepare import runtime
-    packaged = os.path.join(runtime.runtime_dir(root), "bin", exe)
-    return packaged if os.access(packaged, os.X_OK) else None
+    """gba_play / ps1_play / n64_play / gc_play: $XRECOMP_<CONSOLE>_PLAY, the PATH, a build folder of the toolkit,
+    else a release archive's (library.find_exe). None when not built."""
+    return library.find_exe(PLAYERS[console], console, env, root)
 
 
 # ── prepare ─────────────────────────────────────────────────────

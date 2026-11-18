@@ -200,6 +200,36 @@ def test_identify_gamecube(tmp_path):
     assert console_of("gc-GXRP01-1") == "gc"
 
 
+def test_gamecube_rvz_identity_kept(home, tmp_path, monkeypatch):
+    """XBA-274: an RVZ image is read through gc_run --extract (found as the players are: $XRECOMP_GC_RUN here), once:
+    its identity is kept by path, size and time, so a second listing extracts nothing; a changed file is read
+    again."""
+    sys.path.insert(0, os.path.join(ROOT, "consoles", "gc", "tools"))
+    from gc_tools import disc as gcdisc
+    import hashlib
+    _p, g, dol, _raw, _lo = gc_disc(tmp_path)
+    gcm = tmp_path / "plain.gcm.bin"
+    gcm.write_bytes(g.data)
+    rvz = tmp_path / "lib" / "Game.rvz"
+    rvz.parent.mkdir()
+    rvz.write_bytes(gcdisc.to_wia(g, method="none"))
+    calls = tmp_path / "calls"
+    run = tmp_path / "gc_run"
+    run.write_text("#!/bin/sh\necho x >> %s\ncp %s \"$2\"\n" % (calls, gcm))
+    run.chmod(0o755)
+    monkeypatch.setenv("XBA_GC_RUN", "")                    # unset for the code; restored after the test
+    monkeypatch.setenv("XRECOMP_GC_RUN", str(run))
+    e = library.identify(str(rvz))
+    assert (e.console, e.id, e.sha256, e.error) == ("gc", "gc-GXRP01-1", hashlib.sha256(dol).hexdigest(), None)
+    assert os.environ["XBA_GC_RUN"] == str(run)            # what tools.prepare, a child, takes
+    assert calls.read_text().count("x") == 1
+    assert library.identify(str(rvz)).id == "gc-GXRP01-1"
+    assert calls.read_text().count("x") == 1                # kept
+    os.utime(rvz, ns=(1, 1))
+    assert library.identify(str(rvz)).id == "gc-GXRP01-1"
+    assert calls.read_text().count("x") == 2                # changed: read again
+
+
 def test_gamecube_list_and_play(home, tmp_path, monkeypatch):
     """XBA-274: a GameCube game in the library plays through gc_play (in the interpreter until prepared), its saves
     in the consoles' save folder (RECOMP_SAVE_DIR: gc_play's memory cards and states)."""

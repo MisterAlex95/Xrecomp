@@ -51,7 +51,7 @@ runtimes now call instead of four copies; the window, its shaders, frame generat
 | Host | Xbox | GBA | PS1 | N64 | GameCube |
 |---|---|---|---|---|---|
 | Android app | yes | yes | yes | yes | yes |
-| Desktop `xrecomp` CLI (Linux, macOS) | yes | yes (`gba_play`) | yes (`ps1_play`) | yes (`n64_play`) | yes (`gc_play`; XBA-274: `tools/xrecomp/library.py` `_identify_gc`, saves and states in RECOMP_SAVE_DIR, `--missed`) |
+| Desktop `xrecomp` CLI (Linux, macOS) | yes | yes (`gba_play`) | yes (`ps1_play`) | yes (`n64_play`) | yes (`gc_play`; XBA-274: `tools/xrecomp/library.py` `_identify_gc`, RVZ / WIA through a found `gc_run`, read once and kept; saves and states in RECOMP_SAVE_DIR, `--missed`) |
 | Desktop `xrecomp` CLI (Windows) | yes, without save states / rewind | no (`__main__.py` `console_unsupported`) | no | no | no |
 | macOS launcher (`macos/`) | yes: settings, cover art, game apps, save import | no: `LibraryScanner.swift` lists Xbox folders and images only | no | no | no |
 
