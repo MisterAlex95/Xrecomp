@@ -57,6 +57,11 @@ set(KERNEL_SOURCES
     xbox_dev_state.c
 )
 
+# The x86 interpreter (XBA-303): GNU C (recomp_types.h's generated-code path).
+if(NOT MSVC)
+    list(APPEND KERNEL_SOURCES xbox_interp_core.c)
+endif()
+
 # Save states (XBA-245): the XBXS container writes recomp_states slot files,
 # which only POSIX hosts build (xbr_host_core).
 if(NOT WIN32)
