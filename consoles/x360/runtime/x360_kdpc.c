@@ -1209,7 +1209,7 @@ static int mapped(x360_machine *x, uint32_t a, uint32_t size)
     x360_heap *h = x360_heap_of(x, a);
     if (!h)
         return 0;
-    uint32_t in = h->physical ? a & 0x1FFFFFFFu : a;
+    uint32_t in = h->physical ? x360_v2p(a) : a;
     return x360_heap_all_used(h, in & ~(h->page - 1), size ? size + (in & (h->page - 1)) : 1);
 }
 

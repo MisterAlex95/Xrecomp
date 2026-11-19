@@ -11,9 +11,12 @@
  *   0xA0000000-0xBFFFFFFF  physical memory (512 MB), 64 KB pages view
  *   0xC0000000-0xDFFFFFFF  the same physical memory, 16 MB pages view
  *   0xE0000000-0xFFFFFFFF  the same physical memory, 4 KB pages view
- * The three physical views map one memfd, so a write through one is seen through the others (Xenia offsets the
- * 0xE0000000 view by one page; not done here). Virtual ranges are committed (mprotect read / write) as the heaps
- * hand them out; a guest access to an uncommitted page faults in the host. */
+ * The three physical views map one memfd, so a write through one is seen through the others. As on the console, the
+ * 0xE0000000 view starts one page into physical memory (virtual 0xE0000000 is physical 0x1000; its last page is not
+ * mapped): x360_v2p / x360_p2v (x360_internal.h) are the only place that knows it. The physical heap is indexed by
+ * physical address and the runtime itself reads physical memory through the 0xA0000000 view. Virtual ranges are
+ * committed (mprotect read / write) as the heaps hand them out; a guest access to an uncommitted page faults in the
+ * host. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -54,11 +57,15 @@ int x360_mem_init(x360_machine *x, char *why, size_t n)
         snprintf(why, n, "cannot create the physical memory: %s", strerror(errno));
         return -1;
     }
-    for (uint64_t a = 0xA0000000u; a < 0x100000000ull; a += PHYS_SIZE)
-        if (mmap(x->base + a, PHYS_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, x->memfd, 0) == MAP_FAILED) {
-            snprintf(why, n, "cannot map the physical memory at %08X: %s", (unsigned)a, strerror(errno));
+    static const uint32_t views[] = {X360_VIEW_64K, X360_VIEW_16M, X360_VIEW_4K};
+    for (unsigned k = 0; k < 3; k++) {
+        uint32_t first = x360_v2p(views[k]); /* the physical address the view starts at */
+        if (mmap(x->base + views[k], PHYS_SIZE - first, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, x->memfd,
+                 first) == MAP_FAILED) {
+            snprintf(why, n, "cannot map the physical memory at %08X: %s", (unsigned)views[k], strerror(errno));
             return -1;
         }
+    }
     if (heap_init(&x->heap_v4k, "virtual 4K", 0x00010000u, 0x40000000u - 0x00010000u, 0x1000, 0) ||
         heap_init(&x->heap_v64k, "virtual 64K", 0x40000000u, 0x30000000u, 0x10000, 0) ||
         heap_init(&x->heap_stack, "stacks", 0x70000000u, 0x0F000000u, 0x1000, 0) ||
@@ -89,7 +96,7 @@ int x360_commit(x360_machine *x, uint32_t addr, uint32_t size)
 {
     uint32_t a = addr & ~0xFFFu;
     uint64_t e = ((uint64_t)addr + size + 0xFFF) & ~0xFFFull;
-    if (a >= 0xA0000000u)
+    if (a >= X360_VIEW_64K)
         return 0; /* physical: always mapped */
     return mprotect(x->base + a, (size_t)(e - a), PROT_READ | PROT_WRITE);
 }
@@ -122,7 +129,7 @@ uint32_t x360_heap_alloc(x360_machine *x, x360_heap *h, uint32_t size, uint32_t 
             uint32_t a = heap_addr(h, p);
             if (!h->physical)
                 x360_commit(x, a, n * h->page);
-            memset(x->base + (h->physical ? 0xA0000000u + a : a), 0, (size_t)n * h->page);
+            memset(x->base + (h->physical ? x360_p2v(X360_VIEW_64K, a) : a), 0, (size_t)n * h->page);
             return a;
         }
         p += k / step * step; /* skip the free run that was too short */
@@ -185,8 +192,8 @@ x360_heap *x360_heap_of(x360_machine *x, uint32_t addr)
     for (unsigned k = 0; k < 4; k++)
         if (addr >= hs[k]->base && addr - hs[k]->base < hs[k]->size)
             return hs[k];
-    if (addr >= 0xA0000000u)
-        return &x->heap_phys;
+    if (addr >= X360_VIEW_64K)
+        return &x->heap_phys; /* indexed by physical address: x360_v2p(addr) */
     return NULL;
 }
 

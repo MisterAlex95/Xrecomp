@@ -266,6 +266,25 @@ static inline void x360_w16(x360_machine *x, uint32_t a, uint32_t v) { xe_sth(&x
 static inline void x360_w8(x360_machine *x, uint32_t a, uint32_t v) { xe_stb(&x->m, a, v); }
 static inline void x360_w64(x360_machine *x, uint32_t a, uint64_t v) { xe_std(&x->m, a, v); }
 
+/* The three views of physical memory (x360_mem.c). Every conversion between a guest pointer and a physical address
+ * goes through this pair: the 4 KB view at 0xE0000000 starts one page into physical memory, the other two at 0.
+ * x360_v2p leaves an address below the views alone (it is physical already), so applying it twice is harmless.
+ * The host reaches physical address p at base + X360_VIEW_64K + p. */
+#define X360_VIEW_64K 0xA0000000u
+#define X360_VIEW_16M 0xC0000000u
+#define X360_VIEW_4K 0xE0000000u
+#define X360_VIEW_4K_SKEW 0x1000u
+static inline uint32_t x360_v2p(uint32_t v)
+{
+    if (v >= X360_VIEW_4K)
+        return v - X360_VIEW_4K + X360_VIEW_4K_SKEW;
+    return v >= X360_VIEW_64K ? v & 0x1FFFFFFFu : v;
+}
+static inline uint32_t x360_p2v(uint32_t view, uint32_t p)
+{
+    return view == X360_VIEW_4K ? X360_VIEW_4K + p - X360_VIEW_4K_SKEW : view + p;
+}
+
 /* x360_mem.c */
 int x360_mem_init(x360_machine *x, char *why, size_t n);
 void x360_mem_free(x360_machine *x);

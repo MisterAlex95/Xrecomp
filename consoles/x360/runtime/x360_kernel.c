@@ -370,7 +370,7 @@ static void k_NtQueryVirtualMemory(x360_machine *x, x360_thread *t, xe_cpu *c)
     x360_heap *h = x360_heap_of(x, a);
     uint32_t page = h ? h->page : 0x1000;
     uint32_t base = a & ~(page - 1);
-    uint32_t size = h ? x360_heap_size_of(h, base) : 0;
+    uint32_t size = h ? x360_heap_size_of(h, h->physical ? x360_v2p(base) : base) : 0;
     /* MEMORY_BASIC_INFORMATION: base, allocation base, allocation protect, region size, state, protect, type */
     x360_w32(x, info + 0, base);
     x360_w32(x, info + 4, base);
@@ -386,12 +386,13 @@ static void k_MmAllocatePhysicalMemoryEx(x360_machine *x, x360_thread *t, xe_cpu
 {
     (void)t;
     uint32_t size = A(1), protect = A(2), align = A(5);
-    uint32_t view = protect & MEM_16MB_PAGES ? 0xC0000000u : protect & MEM_LARGE_PAGES ? 0xA0000000u : 0xE0000000u;
-    uint32_t page = view == 0xC0000000u ? 0x1000000u : view == 0xA0000000u ? 0x10000u : 0x1000u;
+    uint32_t view = protect & MEM_16MB_PAGES ? X360_VIEW_16M : protect & MEM_LARGE_PAGES ? X360_VIEW_64K : X360_VIEW_4K;
+    uint32_t page = view == X360_VIEW_16M ? 0x1000000u : view == X360_VIEW_64K ? 0x10000u : 0x1000u;
     if (align < page)
         align = page;
+    /* the alignment is the physical address's (what the GPU and the audio hardware are given), as in Xenia */
     uint32_t a = x360_heap_alloc(x, &x->heap_phys, (size + page - 1) & ~(page - 1), align);
-    RET(a ? view + a : 0);
+    RET(a ? x360_p2v(view, a) : 0);
 }
 
 static void k_MmAllocatePhysicalMemory(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -406,7 +407,7 @@ static void k_MmAllocatePhysicalMemory(x360_machine *x, x360_thread *t, xe_cpu *
 static void k_MmFreePhysicalMemory(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    x360_heap_free(x, &x->heap_phys, A(1) & 0x1FFFFFFFu);
+    x360_heap_free(x, &x->heap_phys, x360_v2p(A(1)));
     RET(0);
 }
 
@@ -414,7 +415,7 @@ static void k_MmGetPhysicalAddress(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)x, (void)t;
     uint32_t a = A(0);
-    RET(a >= 0xA0000000u ? a & 0x1FFFFFFFu : a);
+    RET(x360_v2p(a));
 }
 
 static void k_MmQueryAllocationSize(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -422,7 +423,7 @@ static void k_MmQueryAllocationSize(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     uint32_t a = A(0);
     x360_heap *h = x360_heap_of(x, a);
-    RET(h ? x360_heap_size_of(h, h == &x->heap_phys ? a & 0x1FFFFFFFu : a) : 0);
+    RET(h ? x360_heap_size_of(h, h == &x->heap_phys ? x360_v2p(a) : a) : 0);
 }
 
 static void k_ExAllocatePoolTypeWithTag(x360_machine *x, x360_thread *t, xe_cpu *c)

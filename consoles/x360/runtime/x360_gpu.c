@@ -201,13 +201,13 @@ void x360_gpu_opcode_histogram(x360_machine *x, FILE *out)
 static uint32_t phys_read(void *ctx, uint32_t phys)
 {
     x360_machine *x = ctx;
-    return x360_r32(x, 0xA0000000u + (phys & 0x1FFFFFFFu));
+    return x360_r32(x, x360_p2v(X360_VIEW_64K, phys & 0x1FFFFFFFu));
 }
 
 static void phys_write(void *ctx, uint32_t phys, uint32_t v)
 {
     x360_machine *x = ctx;
-    x360_w32(x, 0xA0000000u + (phys & 0x1FFFFFFFu), v);
+    x360_w32(x, x360_p2v(X360_VIEW_64K, phys & 0x1FFFFFFFu), v);
 }
 
 static void cp_interrupt(void *ctx, uint32_t source, uint32_t cpu)
@@ -408,14 +408,14 @@ void x360_k_VdSwap(x360_machine *x, x360_thread *t, xe_cpu *c)
         for (uint32_t k = 0; k < 6; k++) {
             uint32_t v = x360_r32(x, fetch + 4 * k);
             if (k == 1)
-                v = (v & 0xFFFu) | ((v & 0xFFFFF000u) & 0x1FFFFFFFu); /* the physical views' addresses */
+                v = (v & 0xFFFu) | x360_v2p(v & 0xFFFFF000u); /* a pointer into a physical view */
             x360_w32(x, at + 4 + 4 * k, v);
         }
         at += 28;
     }
     x360_w32(x, at, 3u << 30 | (4u - 1) << 16 | (uint32_t)PM4_XE_SWAP << 8);
     x360_w32(x, at + 4, 0x53574150u); /* 'SWAP' */
-    x360_w32(x, at + 8, fb & 0x1FFFFFFFu);
+    x360_w32(x, at + 8, x360_v2p(fb));
     x360_w32(x, at + 12, w_ptr ? x360_r32(x, w_ptr) : 0);
     x360_w32(x, at + 16, h_ptr ? x360_r32(x, h_ptr) : 0);
     uint32_t used = (at + 20 - buf) / 4; /* the rest of the 64 words: one NOP packet */
@@ -465,7 +465,7 @@ void x360_k_VdPersistDisplay(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     if (A(1)) {
         uint32_t p = x360_heap_alloc(x, &x->heap_phys, 0x1000, 0);
-        x360_w32(x, A(1), p ? 0xE0000000u + p : 0);
+        x360_w32(x, A(1), p ? x360_p2v(X360_VIEW_4K, p) : 0);
     }
     RET(0);
 }

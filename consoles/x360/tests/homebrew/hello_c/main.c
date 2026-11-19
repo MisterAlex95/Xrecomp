@@ -122,7 +122,8 @@ int title_main(void)
 
     /* physical memory through two of its views */
     u8 *phys = MmAllocatePhysicalMemoryEx(0, 0x10000, PAGE_READWRITE | MEM_LARGE_PAGES, 0, 0xFFFFFFFF, 0);
-    volatile u8 *mirror = (u8 *)((u32)phys + 0x40000000u); /* 0xA... -> 0xE... */
+    /* 0xA... -> 0xE...: the 4 KB view starts one page into physical memory, the 64 KB view at its start */
+    volatile u8 *mirror = (u8 *)((u32)phys + 0x40000000u - 0x1000u);
     phys[0x123] = 0x5A;
     DbgPrint("physical: %s view, mirror %s\n", ((u32)phys >> 28) == 0xA ? "64 KB" : "other",
              mirror[0x123] == 0x5A ? "agrees" : "differs");

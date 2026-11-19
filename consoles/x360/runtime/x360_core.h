@@ -141,7 +141,9 @@ void x360_image_info(const x360_machine *x, uint32_t *base, uint32_t *entry, uin
 /* Save states (x360_state.c), in the format of the other consoles' (gc_state.c): taken between time slices (after
  * x360_run returned), loaded into a machine made from the same XEX with the same pack bound. key: the title key
  * (NULL: the image's CRC). Results: */
-#define X360_STATE_VERSION 1
+/* version 2: the 0xE0000000 view starts one page into physical memory (a pointer into it in an older state would name
+ * the wrong page, so older states are refused) */
+#define X360_STATE_VERSION 2
 enum { X360_STATE_OK = 0, X360_STATE_EGAME = -3, X360_STATE_EVERSION = -4, X360_STATE_ECORRUPT = -7 };
 size_t x360_state_size(x360_machine *x);
 size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t cap);

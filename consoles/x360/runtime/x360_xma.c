@@ -138,7 +138,7 @@ void x360_xma_free(x360_machine *x)
 static int ctx_index(x360_machine *x, uint32_t guest)
 {
     x360_xma *m = xma_of(x);
-    uint32_t p = guest & 0x1FFFFFFFu;
+    uint32_t p = x360_v2p(guest);
     if (!m || !m->array || p < m->array || p >= m->array + XMA_CONTEXTS * XMA_CONTEXT_BYTES)
         return -1;
     return (int)((p - m->array) / XMA_CONTEXT_BYTES);
@@ -146,7 +146,7 @@ static int ctx_index(x360_machine *x, uint32_t guest)
 
 static uint32_t ctx_addr(x360_machine *x, int i)
 {
-    return 0xA0000000u + x->xma->array + (uint32_t)i * XMA_CONTEXT_BYTES;
+    return x360_p2v(X360_VIEW_64K, x->xma->array) + (uint32_t)i * XMA_CONTEXT_BYTES;
 }
 
 static uint32_t rd(x360_machine *x, int i, int dw)
@@ -229,7 +229,7 @@ static void xma_work(x360_machine *x, int i)
                 return;
             uint32_t out = rd(x, i, 7);
             uint32_t n = m->npending[i] < 128 ? m->npending[i] : 128; /* 128 samples = one block */
-            uint32_t at = 0xA0000000u + (out & 0x1FFFFFFFu) + wo * 256;
+            uint32_t at = x360_p2v(X360_VIEW_64K, out & 0x1FFFFFFFu) + wo * 256;
             for (uint32_t k = 0; k < 128; k++)
                 x360_w16(x, at + 2 * k, k < n ? (uint16_t)m->pending[i][k] : 0);
             memmove(m->pending[i], m->pending[i] + n, (m->npending[i] - n) * 2);
@@ -265,7 +265,7 @@ static void xma_work(x360_machine *x, int i)
             continue;
         }
         uint8_t packet[XMA_PACKET];
-        uint32_t src = 0xA0000000u + base + pkt * XMA_PACKET;
+        uint32_t src = x360_p2v(X360_VIEW_64K, base) + pkt * XMA_PACKET;
         for (uint32_t k = 0; k < XMA_PACKET; k++)
             packet[k] = x360_r8(x, src + k);
         if (!m->dec[i])
@@ -387,10 +387,10 @@ static void k_XMAInitializeContext(x360_machine *x, x360_thread *t, xe_cpu *c)
     wr(x, i, 2, roff & 0x3FFFFFF);
     wr(x, i, 3, loop_start & 0x3FFFFFF);
     wr(x, i, 4, loop_end & 0x3FFFFFF);
-    wr(x, i, 5, in0 & 0x1FFFFFFFu);
-    wr(x, i, 6, in1 & 0x1FFFFFFFu);
-    wr(x, i, 7, out & 0x1FFFFFFFu);
-    wr(x, i, 8, work & 0x1FFFFFFFu);
+    wr(x, i, 5, x360_v2p(in0));
+    wr(x, i, 6, x360_v2p(in1));
+    wr(x, i, 7, x360_v2p(out));
+    wr(x, i, 8, x360_v2p(work));
     drop_decoder(x->xma, i);
     RET(0);
 }
@@ -451,7 +451,7 @@ static void k_XMASetInputBuffer0(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     int i = ctx_index(x, A(0));
     if (i >= 0) {
-        wr(x, i, 5, A(1) & 0x1FFFFFFFu);
+        wr(x, i, 5, x360_v2p(A(1)));
         wr(x, i, 0, with(rd(x, i, 0), 0, 12, A(2)));
     }
     RET(0);
@@ -462,7 +462,7 @@ static void k_XMASetInputBuffer1(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     int i = ctx_index(x, A(0));
     if (i >= 0) {
-        wr(x, i, 6, A(1) & 0x1FFFFFFFu);
+        wr(x, i, 6, x360_v2p(A(1)));
         wr(x, i, 1, with(rd(x, i, 1), 0, 12, A(2)));
     }
     RET(0);

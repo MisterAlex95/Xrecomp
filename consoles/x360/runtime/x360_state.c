@@ -246,7 +246,7 @@ static void each_page(x360_machine *x, void (*fn)(x360_machine *, uint32_t, void
             if (h->used[p])
                 for (uint32_t o = 0; o < h->page; o += PAGE) {
                     uint32_t a = h->base + p * h->page + o;
-                    fn(x, h->physical ? 0xA0000000u + a : a, ctx);
+                    fn(x, h->physical ? x360_p2v(X360_VIEW_64K, a) : a, ctx);
                 }
     }
 }

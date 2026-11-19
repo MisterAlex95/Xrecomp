@@ -158,7 +158,7 @@ static int allocated(x360_machine *x, uint32_t a)
     x360_heap *h = x360_heap_of(x, a);
     if (!h)
         return 0;
-    uint32_t off = h->physical ? (a & 0x1FFFFFFFu) : a;
+    uint32_t off = h->physical ? x360_v2p(a) : a;
     if (off < h->base || off - h->base >= h->size)
         return 0;
     return h->used[(off - h->base) / h->page];

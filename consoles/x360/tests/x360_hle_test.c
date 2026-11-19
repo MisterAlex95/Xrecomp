@@ -129,12 +129,33 @@ static void test_memory(void)
               x360_r32(X, size_p) == 0x10000, "release");
     uint32_t p = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0);
     CHECK(p >= 0xE0000000u, "physical 4 KB view: %08X", p);
-    CHECK(K(X360_xboxkrnl_MmGetPhysicalAddress, 1, p) == (p & 0x1FFFFFFFu), "physical address");
+    /* the 4 KB view starts one page into physical memory: virtual 0xE0000000 is physical 0x1000 */
+    uint32_t pp = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, p);
+    CHECK(pp == p - 0xE0000000u + 0x1000u, "physical address of %08X: %08X", p, pp);
+    CHECK(K(X360_xboxkrnl_MmGetPhysicalAddress, 1, p + 0x1234) == pp + 0x1234, "inside the allocation");
     CHECK(K(X360_xboxkrnl_MmQueryAllocationSize, 1, p) == 0x2000, "allocation size");
+    uint32_t info = x360_kalloc(X, 32);
+    CHECK(K(X360_xboxkrnl_NtQueryVirtualMemory, 2, p + 4, info) == 0 && x360_r32(X, info) == p &&
+              x360_r32(X, info + 16) == 0x1000 /* MEM_COMMIT */,
+          "a query inside it: base %08X state %X", x360_r32(X, info), x360_r32(X, info + 16));
+    CHECK(K(X360_xboxkrnl_MmIsAddressValid, 1, p + 0x1FFF) == 1 && K(X360_xboxkrnl_MmIsAddressValid, 1, p + 0x2000) == 0,
+          "valid to its last byte, not past it");
+    /* one memory through the three views */
     X->base[p + 5] = 0x77;
-    CHECK(X->base[(p & 0x1FFFFFFFu) + 0xA0000000u + 5] == 0x77, "mirror");
+    CHECK(X->base[0xA0000000u + pp + 5] == 0x77 && X->base[0xC0000000u + pp + 5] == 0x77, "mirrors");
+    CHECK(K(X360_xboxkrnl_MmGetPhysicalAddress, 1, 0xA0000000u + pp) == pp &&
+              K(X360_xboxkrnl_MmGetPhysicalAddress, 1, 0xC0000000u + pp) == pp, "the other views start at 0");
     uint32_t q = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x10000, 0x20000004u, 0, 0xFFFFFFFFu, 0);
     CHECK(q >= 0xA0000000u && q < 0xC0000000u && !(q & 0xFFFF), "physical 64 KB view: %08X", q);
+    CHECK(K(X360_xboxkrnl_MmGetPhysicalAddress, 1, q) == q - 0xA0000000u, "its physical address");
+    /* an alignment is the physical address's */
+    uint32_t r = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x1000, 4, 0, 0xFFFFFFFFu, 0x10000);
+    CHECK(r >= 0xE0000000u && !(K(X360_xboxkrnl_MmGetPhysicalAddress, 1, r) & 0xFFFF), "aligned: %08X", r);
+    /* freed by its virtual address: the next allocation of that size gets the pages back, zeroed */
+    K(X360_xboxkrnl_MmFreePhysicalMemory, 2, 0, p);
+    CHECK(K(X360_xboxkrnl_MmQueryAllocationSize, 1, p) == 0 && K(X360_xboxkrnl_MmIsAddressValid, 1, p) == 0, "freed");
+    uint32_t again = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0);
+    CHECK(again == p && X->base[p + 5] == 0, "the same pages again, cleared: %08X", again);
 }
 
 static void test_objects(void)
@@ -271,7 +292,8 @@ static void test_gpu(void)
     uint32_t ring = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0);
     uint32_t misc = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x1000, 4, 0, 0xFFFFFFFFu, 0);
     uint32_t ring_phys = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, ring);
-    uint32_t misc_phys = misc & 0x1FFFFFFFu, fence = misc + 0x100, wb = misc + 0x104;
+    /* what the GPU writes at a physical address, the title reads through its 4 KB view pointer */
+    uint32_t misc_phys = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, misc), fence = misc + 0x100, wb = misc + 0x104;
     K(X360_xboxkrnl_VdInitializeRingBuffer, 2, ring_phys, 10);
     K(X360_xboxkrnl_VdEnableRingBufferRPtrWriteBack, 2, misc_phys + 0x104, 6);
     /* a fence through EVENT_WRITE_SHD (8in32 endian mode), then the 64 words VdSwap fills */
@@ -533,7 +555,7 @@ static void test_xma_loop(void)
         x360_w8(X, in + 2048 * p + 4, (uint8_t)(0x10 + p)); /* each packet says which it is */
     uint32_t init = x360_kalloc(X, 64);
     /* four packets, loop from the middle of packet 1 to the end of packet 2, twice */
-    uint32_t iv[13] = {in & 0x1FFFFFFFu, 4, 0, 0, 0, out & 0x1FFFFFFFu, 31, 0, 0, 1, 3, 2048 * 8 + 40, 3 * 2048 * 8};
+    uint32_t iv[13] = {in, 4, 0, 0, 0, out, 31, 0, 0, 1, 3, 2048 * 8 + 40, 3 * 2048 * 8};
     for (int k = 0; k < 13; k++)
         x360_w32(X, init + 4 * (uint32_t)k, iv[k]);
     x360_w8(X, init + 52, 2);
@@ -575,7 +597,7 @@ static void test_xma(void)
     for (uint32_t k = 0; k < 0x2000; k += 4)
         x360_w32(X, out + k, 0x55555555u);
     uint32_t init = x360_kalloc(X, 64);
-    uint32_t iv[11] = {in & 0x1FFFFFFFu, 2, 0, 0, 0, out & 0x1FFFFFFFu, 31, 0, 0, 1, 0}; /* 31 blocks: a 5-bit count */
+    uint32_t iv[11] = {in, 2, 0, 0, 0, out, 31, 0, 0, 1, 0}; /* 31 blocks: a 5-bit count */
     for (int k = 0; k < 11; k++)
         x360_w32(X, init + 4 * (uint32_t)k, iv[k]);
     K(X360_xboxkrnl_XMAInitializeContext, 2, ctx, init);
@@ -809,8 +831,9 @@ static int render_test(const char *dir)
         return 1;
     uint32_t ring = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x4000, 4, 0, 0xFFFFFFFFu, 0);
     uint32_t data = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x20000, 4, 0, 0xFFFFFFFFu, 0x1000);
-    uint32_t ring_phys = ring & 0x1FFFFFFFu, data_phys = data & 0x1FFFFFFFu;
-    uint32_t fb = data + 0x10000, fb_phys = fb & 0x1FFFFFFFu; /* the front buffer: 64x64 8_8_8_8, tiled */
+    uint32_t ring_phys = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, ring);
+    uint32_t data_phys = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, data);
+    uint32_t fb = data + 0x10000, fb_phys = data_phys + 0x10000; /* the front buffer: 64x64 8_8_8_8, tiled */
     K(X360_xboxkrnl_VdInitializeRingBuffer, 2, ring_phys, 12);
     ring_va = ring, ring_at = 0;
     /* a red full-target quad (strip), then the resolve rectangle's vertices */
