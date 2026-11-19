@@ -228,6 +228,20 @@ def program():
     p.label("half_def")
     p(A.li(3, -5), A.blr())
     p.end()
+
+    # Leaf functions MSVC gives no .pdata entry, never called directly: leaf_data is named by a word of .rdata (a
+    # vtable slot), leaf_code by the lis / addi pair in take_ptr (a callback handed over)
+    p.func("leaf_data")
+    p(A.li(3, 77), A.blr())
+    p.end()
+    p.func("leaf_code")
+    p(A.li(3, 88), A.blr())
+    p.end()
+    p.func("take_ptr")
+    p.branch(lambda at, t: A.lis(3, ha(t)), "leaf_code")
+    p.branch(lambda at, t: A.addi(3, 3, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), "leaf_code")
+    p(A.blr())
+    p.end()
     words = p.link()
     funcs = {name: (a, b) for name, a, b in p.funcs}
     return words, {n: (TEXT + 4 * a, TEXT + 4 * b) for n, (a, b) in funcs.items()}, p.labels
@@ -235,8 +249,11 @@ def program():
 
 def build():
     words, funcs, labels = program()
-    pdata = [(lo_ - TEXT, hi - lo_) for lo_, hi in funcs.values()]  # helpers included, like a real .pdata
-    data, lay = build_xex(words, functions=pdata, compression="normal", entry=funcs["sum4"][0] - TEXT)
+    # helpers included, like a real .pdata; leaf functions are not in it
+    pdata = [(lo_ - TEXT, hi - lo_) for n, (lo_, hi) in funcs.items() if not n.startswith("leaf_")]
+    rdata = struct.pack(">3I", 0x12345678, funcs["leaf_data"][0], funcs["jt_abs"][0] + 8)  # the last: into a function
+    data, lay = build_xex(words, rdata=rdata, functions=pdata, compression="normal",
+                          entry=funcs["sum4"][0] - TEXT)
     img = parse_xex(data)
     assert img.image == lay.image
     return img, funcs, labels
@@ -260,8 +277,9 @@ def test_discovery_and_lifting(tmp_path):
     img, funcs, labels = build()
     s = recompile(img, str(tmp_path))
     assert s["interp_fallback_insns"] == 0, s["unlifted"]
-    # the helpers are not functions; the eight real ones are
-    assert s["functions"] == 8
+    # the helpers are not functions; the nine of .pdata are, and the two leaf functions only a pointer names (a word
+    # of .rdata, a lis / addi pair); a pointer into the middle of a .pdata function is not a function
+    assert s["functions"] == 11 and s["pointer_seeds"] == 2
     assert len(s["helpers"]) == 8 and s["helper_calls_inlined"] == 8
     assert s["jump_tables"] == 5 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 and s["unresolved_bctr"] == 0
     text = "".join(p.read_text() for p in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
@@ -377,6 +395,10 @@ def test_helpers_and_tables_run(tmp_path):
             cases.append(c_case(tag, funcs[name][0], b"", gpr={3: x & 0xFFFFFFFF if x >= 0 else x & M64},
                                 out_gpr=[3]))
             checks.append((tag, "r3", expect.get(x, default) & M64))
+    # the leaf functions are in the pack: entered at their own address, as a call through the pointer would
+    for name, value in (("leaf_data", 77), ("leaf_code", 88)):
+        cases.append(c_case(name, funcs[name][0], b"", gpr={3: 0}, out_gpr=[3]))
+        checks.append((name, "r3", value))
 
     harness = tmp_path / "harness.c"
     body = "\n".join(cases).replace("memset(mem, 0, sizeof mem);",

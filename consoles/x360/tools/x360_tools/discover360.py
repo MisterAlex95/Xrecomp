@@ -27,6 +27,8 @@ keeps its addresses in an array (`PackedFunction`).
 """
 
 from array import array
+from bisect import bisect_right
+from struct import iter_unpack
 
 from tools.ppc.discover import Discovery
 from tools.ppc.isa import BCCTR, BCLR, BCOND, BRANCH, INVALID, NORMAL, RFI
@@ -185,6 +187,71 @@ def _match_vmx(view, dec, a):
     if not (b.name == "bclr" and (b.rd & 0x14) == 0x14 and not b.lk):
         return None
     return Helper(kind, a, b.addr, entries, [b.addr])
+
+
+# ---------------------------------------------------------------- functions only a pointer reaches
+
+def pointer_seeds(img, view, decode):
+    """Leaf functions that only a pointer reaches. MSVC gives a leaf function no .pdata entry (nothing to unwind), so
+    one that is never called directly -- a virtual method, a callback -- is in no table and after no `bl`. Two places
+    name it all the same: a word of a data section holding its address (a vtable, a table of callbacks), and a
+    `lis` + `addi` / `ori` pair in code building it (a callback passed as an argument). A candidate is a word-aligned
+    code address outside every .pdata function (inside one it would be a label or a table of that function) whose
+    first word decodes and is not itself an address in the image (a table of addresses in a code section). Without
+    a .pdata table there is nothing to tell a function from a label: no candidates."""
+    if img.image is None or not img.pdata:
+        return set()
+    starts = sorted(s for s, _ in img.pdata)
+    ends = {s: s + n for s, n in img.pdata}
+    lo, hi = img.base, img.base + len(img.image)
+    code = sorted((s.va, s.va + s.size) for s in img.sections if s.code)
+    if not code:
+        return set()
+    c_lo, c_hi = code[0][0], code[-1][1]
+    seen = {}
+
+    def candidate(t):
+        r = seen.get(t)
+        if r is None:
+            r = False
+            if not t & 3 and view.in_code(t):
+                k = bisect_right(starts, t) - 1
+                if k < 0 or t >= ends[starts[k]]:
+                    w = view.u32(t)
+                    r = not lo <= w < hi and decode(t).kind != INVALID
+            seen[t] = r
+        return r
+
+    out = set()
+    image = memoryview(img.image)
+    for s in img.sections:
+        a, b = max(s.va, lo), min(s.va + s.size, hi) & ~3
+        if a >= b:
+            continue
+        if not s.code:  # (a) data: every aligned word
+            for (w,) in iter_unpack(">I", image[a - lo:a - lo + ((b - a) & ~3)]):
+                if c_lo <= w < c_hi and candidate(w):
+                    out.add(w)
+            continue
+        # (b) code: lis rD, hi; then within a few instructions addi rX, rD, lo or ori rD, rD, lo
+        at = a
+        for (w,) in iter_unpack(">I", image[a - lo:a - lo + ((b - a) & ~3)]):
+            if w & 0xFC1F0000 == 0x3C000000:
+                rd, top = (w >> 21) & 31, (w & 0xFFFF) << 16
+                for p in range(at + 4, min(at + 24, b), 4):
+                    v = img.u32(p)
+                    op = v >> 26
+                    if op == 14 and (v >> 16) & 31 == rd:
+                        t = (top + ((v & 0xFFFF) ^ 0x8000) - 0x8000) & 0xFFFFFFFF
+                    elif op == 24 and (v >> 21) & 31 == rd:
+                        t = top | (v & 0xFFFF)
+                    else:
+                        continue
+                    if c_lo <= t < c_hi and candidate(t):
+                        out.add(t)
+                    break
+            at += 4
+    return out
 
 
 # ---------------------------------------------------------------- jump tables
