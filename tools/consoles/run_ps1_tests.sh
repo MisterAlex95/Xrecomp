@@ -27,6 +27,9 @@ inputs=${3:-build/ps1-inputs}
 jobs=${JOBS:-4}
 tmo=${XBA_PS1_TESTS_TIMEOUT:-1800}
 exclude=${PS1_CI_EXCLUDE-}
+# ps1_present opens a real window (it skips, 77, under SDL's dummy video driver): the container has no display, so it
+# stays with the desktop runs (d3428744) instead of failing the skip check below.
+exclude="^ps1_present\$${exclude:+|$exclude}"
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 image=xba-linux-deps
 
