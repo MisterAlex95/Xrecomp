@@ -6,6 +6,12 @@
  *   - a composite matrix and viewport offset put a triangle where the
  *     transform says, scaled by the surface's anti-aliasing factor;
  *   - fixed-function lighting replaces the vertex colour with the light sum;
+ *   - XBA-306, on the CPU path: vertex blending, texgen (object and eye
+ *     linear, normal and sphere maps), a texture matrix, a spot light's
+ *     three zones, specular (separate, added, from v4, unlit, off) and
+ *     two-sided lighting; then fixed-function batches reach a CAP_PROGRAM
+ *     back end's draw_program by default with that state in the key, and
+ *     draw() with RECOMP_GPU_FFP=0 or a texgen mode the channel lacks;
  *   - the render state carries the stencil registers, with the hardware's
  *     reset values until the title writes them;
  *   - the semaphore release lands where the title said, method 0x0310 on
@@ -117,6 +123,8 @@ static struct {
     int unregister;                 /* give up in the call, as GL without a context */
     uint32_t raw_first;
     Nv2aRawAttr raw0, raw3;
+    int got_ffp;                    /* the last batch was fixed function (key below) */
+    Nv2aFfpKey key;
 } s_pg;
 
 static int be_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
@@ -138,6 +146,9 @@ static int be_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
         s_pg.raw0 = p->raw[0];
         s_pg.raw3 = p->raw[3];
     }
+    s_pg.got_ffp = p->ffp != NULL;
+    if (p->ffp)
+        s_pg.key = *p->ffp;
     s_pg.ins_count = p->ins_count;
     s_pg.hash = p->hash;
     s_pg.serial = p->const_serial;
@@ -507,6 +518,217 @@ int main(void)
         s_pg.unregister = 0;
         nv2a_backend_register(&s_backend_raw);
         m(0x1E94, 0);
+        nv2a_backend_register(&s_backend);
+    }
+
+    /* XBA-306: the parts of the fixed-function unit the CPU path used to
+     * leave out, each by hand on one triangle through the CPU path (a
+     * CAP_PIXEL back end: the full vertex), then where batches go. */
+    {
+        extern void nv2a_gpu_ffp_enable(int on);
+        static const float I[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        uint32_t k, a;
+
+        nv2a_backend_register(&s_backend_px);
+        m(0x0208, 0x0008);                            /* no anti-aliasing */
+        m(0x1E94, 0);                                 /* fixed function */
+        m(0x1EA4, 59);                                /* c[59] = 0: no viewport offset */
+        for (k = 0; k < 4; k++)
+            mf(0x0B80, 0.0f);
+        for (k = 0; k < 16; k++) {
+            mf(0x0680 + 4 * k, I[k]);                 /* composite: identity */
+            for (a = 0; a < 4; a++)
+                mf(0x0480 + 0x40 * a + 4 * k, I[k]);  /* model-view 0..3 */
+        }
+        for (a = 0; a < 16; a++)
+            m(0x1760 + 4 * a, 2);                     /* every array off */
+        /* v0 float3 at 0x5000, v2 normal float3 at 0x5100, v1 weights
+         * float2 at 0x5200, v4 specular D3DCOLOR at 0x5300, v9 float2 at
+         * 0x5400. */
+        putf(0x5000, 0); putf(0x5004, 0); putf(0x5008, 0.5f);
+        putf(0x500C, 1); putf(0x5010, 0); putf(0x5014, 0.5f);
+        putf(0x5018, 0); putf(0x501C, 3); putf(0x5020, 0.5f);
+        for (k = 0; k < 3; k++) {
+            putf(0x5100 + 12 * k, 0); putf(0x5104 + 12 * k, 0); putf(0x5108 + 12 * k, 1);
+            putf(0x5200 + 8 * k, 0.25f); putf(0x5204 + 8 * k, 0.5f);
+            put32(0x5300 + 4 * k, 0x80336699u);
+            putf(0x5400 + 8 * k, 0.1f); putf(0x5404 + 8 * k, 0.2f);
+        }
+        m(0x1720, 0x5000); m(0x1760, 2 | (3 << 4) | (12 << 8));
+#define TRI() do { s_be.draws = 0; m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0); \
+                   CHECK(s_be.draws == 1 && s_be.has_full); } while (0)
+
+        /* Vertex blending, _2G: MV0 moves x by 1, MV1 y by 2, weight 0.25
+         * on MV0 and 0.75 (1 - 0.25) on MV1: (0.25, 1.5); the composite
+         * matrix after the blend. */
+        m(0x1724, 0x5200); m(0x1764, 2 | (2 << 4) | (8 << 8));
+        mf(0x0480 + 12, 1.0f);                        /* MV0 row 0 w */
+        mf(0x04C0 + 28, 2.0f);                        /* MV1 row 1 w */
+        m(0x0328, 1);                                 /* SET_SKIN_MODE _2G */
+        TRI();
+        CHECK(near_(s_be.full[0].pos[0], 0.25f) && near_(s_be.full[0].pos[1], 1.5f));
+        CHECK(near_(s_be.full[1].pos[0], 1.25f) && near_(s_be.full[1].pos[1], 1.5f));
+        m(0x0328, 2);                                 /* _2: both weights given (0.25, 0.5) */
+        TRI();
+        /* e = 0.25 (1, 0, 0.5, 1) + 0.5 (0, 2, 0.5, 1): w 0.75 divides. */
+        CHECK(near_(s_be.full[0].pos[0], 1.0f / 3) && near_(s_be.full[0].pos[1], 4.0f / 3));
+        m(0x0328, 0);
+        m(0x1764, 2);
+        mf(0x04C0 + 28, 0.0f);
+
+        /* Texgen: S object linear (1,0,0,0) = x; T eye linear (0,1,0,0) = y;
+         * R eye linear (1,0,0,0) with MV0 moving x by 1 = x + 1. No
+         * coordinate array at all. */
+        m(0x03C0, 0x2401); m(0x03C4, 0x2400); m(0x03C8, 0x2400);
+        mf(0x0840, 1.0f); mf(0x0854, 1.0f); mf(0x0860, 1.0f);
+        TRI();
+        CHECK(near_(s_be.full[1].tex[0][0], 1.0f) && near_(s_be.full[2].tex[0][0], 0.0f));
+        CHECK(near_(s_be.full[2].tex[0][1], 3.0f) && near_(s_be.full[1].tex[0][2], 2.0f));
+        CHECK(near_(s_be.full[1].tex[0][3], 1.0f));   /* Q as fetched: absent, 1 */
+        m(0x03C0, 0); m(0x03C4, 0); m(0x03C8, 0);
+        mf(0x0480 + 12, 0.0f);
+
+        /* Normal map (S, T, R) and sphere map (S, T, infinite viewer) from
+         * the normal (0.6, 0, 0.8): r = (0,0,1) - 2 (n.u) n = (-0.96, 0,
+         * -0.28), |r + (0,0,1)| = 1.2: s = -0.96 / 2.4 + 0.5 = 0.1, t = 0.5. */
+        for (k = 0; k < 3; k++) {
+            putf(0x5100 + 12 * k, 0.6f); putf(0x5108 + 12 * k, 0.8f);
+        }
+        m(0x1728, 0x5100); m(0x1768, 2 | (3 << 4) | (12 << 8));
+        m(0x03D0, 0x8511); m(0x03D4, 0x8511); m(0x03D8, 0x8511);   /* stage 1 */
+        m(0x03C0, 0x2402); m(0x03C4, 0x2402);                      /* stage 0 */
+        m(0x09CC, 1);                                 /* SET_TEXGEN_VIEW_MODEL: infinite */
+        TRI();
+        CHECK(near_(s_be.full[0].tex[1][0], 0.6f) && near_(s_be.full[0].tex[1][2], 0.8f));
+        CHECK(near_(s_be.full[0].tex[0][0], 0.1f) && near_(s_be.full[0].tex[0][1], 0.5f));
+        m(0x03D0, 0); m(0x03D4, 0); m(0x03D8, 0); m(0x03C0, 0); m(0x03C4, 0);
+        m(0x09CC, 0);
+        for (k = 0; k < 3; k++) {
+            putf(0x5100 + 12 * k, 0); putf(0x5108 + 12 * k, 1);
+        }
+
+        /* Texture matrix: stage 0 (0.1, 0.2, 0, 1) moved by s + 0.5 and
+         * scaled t x 2: (0.6, 0.4). */
+        m(0x1744, 0x5400); m(0x1784, 2 | (2 << 4) | (8 << 8));
+        mf(0x06C0, 1.0f); mf(0x06C0 + 12, 0.5f); mf(0x06C0 + 20, 2.0f);
+        mf(0x06C0 + 40, 1.0f); mf(0x06C0 + 60, 1.0f);
+        m(0x0420, 1);                                 /* SET_TEXTURE_MATRIX_ENABLE(0) */
+        TRI();
+        CHECK(near_(s_be.full[0].tex[0][0], 0.6f) && near_(s_be.full[0].tex[0][1], 0.4f));
+        m(0x0420, 0);
+        TRI();
+        CHECK(near_(s_be.full[0].tex[0][0], 0.1f) && near_(s_be.full[0].tex[0][1], 0.2f));
+        m(0x1784, 2);
+
+        /* A spot light at (0,0,2), diffuse 0.5, direction (0,0,2), w -0.9,
+         * falloff (0,0,1): s = 2 L.z - 0.9 is 1.1 at vertex 0 (full), 0.764
+         * at vertex 1 (factor s) and below 0 at vertex 2 (dark). */
+        m(0x0314, 1);
+        m(0x03BC, 3);                                 /* light 0: spot */
+        for (k = 0; k < 3; k++) {
+            mf(0x1000 + 4 * k, 0.0f);                 /* ambient */
+            mf(0x100C + 4 * k, 0.5f);                 /* diffuse */
+            mf(0x1068 + 4 * k, k == 0 ? 1.0f : 0.0f); /* attenuation 1 */
+            mf(0x1040 + 4 * k, k == 2 ? 1.0f : 0.0f); /* falloff (0, 0, 1) */
+            mf(0x105C + 4 * k, k == 2 ? 2.0f : 0.0f); /* position */
+            mf(0x0A10 + 4 * k, 0.0f);
+        }
+        mf(0x1024, 0.0f);                             /* range: unlimited */
+        mf(0x104C, 0); mf(0x1050, 0); mf(0x1054, 2.0f); mf(0x1058, -0.9f);
+        mf(0x03B4, 1.0f);
+        TRI();
+        CHECK(near_(s_be.full[0].d0[0], 0.5f));
+        CHECK(near_(s_be.full[1].d0[0], 0.317885f));  /* 0.764101 x 0.5 x 0.832050 */
+        CHECK(near_(s_be.full[2].d0[0], 0.0f));
+        CHECK(near_(s_be.full[0].d1[0], 0.0f) && near_(s_be.full[0].d1[3], 0.0f));
+
+        /* Specular: an infinite light along +z, half vector +z, N.H = 1;
+         * SET_SPECULAR_PARAMS (-0.5, 0, 1): (1 - 0.5) / 1 = 0.5 x specular
+         * 0.8 = 0.4. Separate: d1; else added to d0 (scene ambient 0.1). */
+        m(0x03BC, 1);
+        mf(0x100C, 0.0f); mf(0x1010, 0.0f); mf(0x1014, 0.0f);
+        mf(0x103C, 1.0f);                             /* direction z */
+        mf(0x1030, 1.0f);                             /* half vector z */
+        mf(0x1018, 0.8f);                             /* specular r */
+        mf(0x09E0, -0.5f); mf(0x09E4, 0.0f); mf(0x09E8, 1.0f);
+        mf(0x0A10, 0.1f);
+        m(0x03B8, 1);                                 /* SET_SPECULAR_ENABLE */
+        m(0x0294, 1);                                 /* LIGHT_CONTROL: separate specular */
+        TRI();
+        CHECK(near_(s_be.full[0].d1[0], 0.4f) && near_(s_be.full[0].d1[3], 1.0f));
+        CHECK(near_(s_be.full[0].d0[0], 0.1f));
+        m(0x0294, 0);
+        TRI();
+        CHECK(near_(s_be.full[0].d0[0], 0.5f) && near_(s_be.full[0].d1[0], 0.0f));
+        m(0x0294, 1);
+        m(0x0298, 2u << 6);                           /* COLOR_MATERIAL: specular from v4 */
+        m(0x1730, 0x5300); m(0x1770, 0 | (4 << 4) | (4 << 8));
+        TRI();
+        CHECK(near_(s_be.full[0].d1[0], 0.4f * 0x33 / 255.0f));
+        CHECK(near_(s_be.full[0].d1[3], 0x80 / 255.0f));
+        m(0x0298, 0);
+        m(0x0314, 0);                                 /* unlit: d1 is v4 */
+        TRI();
+        CHECK(near_(s_be.full[0].d1[0], 0x33 / 255.0f) && near_(s_be.full[0].d1[2], 0x99 / 255.0f));
+        m(0x03B8, 0);                                 /* specular off: d1 0 */
+        TRI();
+        CHECK(near_(s_be.full[0].d1[0], 0.0f) && near_(s_be.full[0].d1[3], 0.0f));
+        m(0x1770, 2);
+
+        /* Two-sided lighting: the normal +z points away from the eye (the
+         * vertex is at z 0.5), so the back colours light the reversed
+         * normal: back scene ambient (0, 0.3, 0), back diffuse (0, 0, 0.5)
+         * with the light along -z, back alpha 0.25. Off: the front side,
+         * which the light misses (scene ambient 0.1 only). */
+        m(0x0314, 1);
+        mf(0x103C, -1.0f);
+        mf(0x100C, 0.7f);                             /* front diffuse r: unlit side */
+        mf(0x17A4, 0.3f);                             /* SET_BACK_SCENE_AMBIENT_COLOR g */
+        mf(0x0C14, 0.5f);                             /* SET_BACK_LIGHT_DIFFUSE_COLOR(0) b */
+        mf(0x17AC, 0.25f);                            /* SET_BACK_MATERIAL_ALPHA */
+        TRI();
+        CHECK(near_(s_be.full[0].d0[0], 0.1f) && near_(s_be.full[0].d0[2], 0.0f)
+              && near_(s_be.full[0].d0[3], 1.0f));
+        m(0x17C4, 1);                                 /* SET_TWO_SIDE_LIGHT_EN */
+        TRI();
+        CHECK(near_(s_be.full[0].d0[0], 0.0f) && near_(s_be.full[0].d0[1], 0.3f)
+              && near_(s_be.full[0].d0[2], 0.5f) && near_(s_be.full[0].d0[3], 0.25f));
+
+        /* Where batches go: a CAP_PROGRAM back end gets fixed-function
+         * batches as generated shaders by default, with the state above in
+         * the key; RECOMP_GPU_FFP=0 (enable(0)) sends them to draw(); so
+         * does state the generator does not model (sphere map on R). */
+        m(0x0328, 1);
+        m(0x1724, 0x5200); m(0x1764, 2 | (2 << 4) | (8 << 8));
+        m(0x03BC, 3);
+        m(0x03B8, 1);
+        m(0x03C0, 0x2401); m(0x03C4, 0x2402); m(0x09CC, 1);
+        m(0x0424, 1);                                 /* stage 1 texture matrix */
+        nv2a_backend_register(&s_backend_pg);
+        s_pg.calls = 0;
+        s_be.draws = 0;
+        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+        CHECK(s_pg.calls == 1 && s_pg.got_ffp && s_be.draws == 0);
+        CHECK(s_pg.key.skin == 2 && s_pg.key.skin_mix == 1 && s_pg.key.lit == 1);
+        CHECK(s_pg.key.light_kind[0] == 3 && s_pg.key.nlights == 1);
+        CHECK(s_pg.key.specular == 1 && s_pg.key.separate == 1 && s_pg.key.two_side == 1);
+        CHECK(s_pg.key.texgen[0][0] == 2 && s_pg.key.texgen[0][1] == 3
+              && s_pg.key.texgen[0][2] == 0 && s_pg.key.texgen_inf == 1);
+        CHECK(s_pg.key.texmat[1] == 1 && s_pg.key.texmat[0] == 0);
+        CHECK((s_pg.streams & (1u << 1)) && (s_pg.streams & (1u << 2)));   /* weights, normal */
+        nv2a_gpu_ffp_enable(0);
+        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+        CHECK(s_pg.calls == 1 && s_be.draws == 1);
+        nv2a_gpu_ffp_enable(1);
+        m(0x03C8, 0x2402);                            /* SET_TEXGEN_R: sphere map */
+        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+        CHECK(s_pg.calls == 1 && s_be.draws == 2);
+        m(0x03C8, 0);
+        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+        CHECK(s_pg.calls == 2 && s_be.draws == 2);
+#undef TRI
+        m(0x0328, 0); m(0x0314, 0); m(0x03B8, 0); m(0x17C4, 0); m(0x0294, 0);
+        m(0x03C0, 0); m(0x03C4, 0); m(0x09CC, 0); m(0x0424, 0);
         nv2a_backend_register(&s_backend);
     }
 

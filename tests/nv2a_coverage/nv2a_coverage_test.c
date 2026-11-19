@@ -10,7 +10,8 @@
  *   2. method names from xemu's list, arrays and light blocks included;
  *      mip level offsets (each level after the last, in its own layout);
  *   3. a batch of points, a texture format nothing decodes, a volume
- *      texture, logic op, a dot-product stage mode and fixed-function texgen
+ *      texture, logic op, a dot-product stage mode and a texgen mode the
+ *      channel does not have (sphere map on R; XBA-306 models the others)
  *      are each counted once per batch under their names, and reach the
  *      status file's "unsupported";
  *   4. the [GPU] report runs and the status file's "unmodelled" names the
@@ -487,10 +488,14 @@ int main(void)
     draw(8, 4);
     m(0x17BC, 0);
     CHECK(nv2a_gap_count("logic op") == 1);
-    m(0x03C0, 0x2402);                        /* SET_TEXGEN_S: sphere map */
+    m(0x03C0, 0x2402);                        /* SET_TEXGEN_S: sphere map (modelled) */
     draw(8, 4);
     m(0x03C0, 0);
-    CHECK(nv2a_gap_count("fixed-function texgen") == 1);
+    CHECK(nv2a_gap_count("fixed-function texgen mode") == 0);
+    m(0x03C8, 0x2402);                        /* SET_TEXGEN_R: sphere map, which R has not */
+    draw(8, 4);
+    m(0x03C8, 0);
+    CHECK(nv2a_gap_count("fixed-function texgen mode") == 1);
     /* Combiners with stage 1 in a dot-product mode. */
     m(0x1E60, 0x00001001u);                   /* COMBINER_CONTROL: 1 stage */
     m(0x1E70, 0x1u | (0x11u << 5));           /* stage 0 2D, stage 1 DOTPRODUCT */

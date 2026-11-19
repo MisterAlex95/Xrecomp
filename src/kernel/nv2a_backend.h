@@ -237,20 +237,32 @@ typedef struct {
 } Nv2aRawAttr;
 
 /* A fixed-function batch for a back end's generated vertex shader
- * (Nv2aProgramBatch.ffp, RECOMP_GPU_FFP=1; XBA-134). What ffp_vertex and
- * lit_color in nv2a_pb_exec.c compute, as state the shader is built from;
- * the numbers are in Nv2aProgramBatch.constants:
- *   c[0..3]   the composite matrix's rows (clip = c[i] . v0)
+ * (Nv2aProgramBatch.ffp; on by default, RECOMP_GPU_FFP=0 off; XBA-134,
+ * XBA-306). What ffp_batch_vertex and ffp_batch_lit in nv2a_pb_exec.c
+ * compute, as state the shader is built from; the numbers are in
+ * Nv2aProgramBatch.constants:
+ *   c[0..3]   the composite matrix's rows (clip = c[i] . v0; with vertex
+ *             blending clip = c[i] . e, e the blended eye position)
  *   c[4]      the viewport offset c[59] (xyz), added after the divide
  *   c[5..7]   the model-view matrix's rows (eye = c[i].xyz . v0.xyz + c[i].w;
- *             normals by c[i].xyz)
+ *             normals by c[i].xyz); c[41] its fourth row (eye w)
  *   c[8]      scene ambient (rgb), material alpha (w)
  *   c[9 + 4 i .. 12 + 4 i], light i of nlights: direction or eye-space
  *             position (xyz) and range (w); attenuation (xyz); ambient;
  *             diffuse.
+ *   c[42..53] model-view matrices 1..3, four rows each (vertex blending)
+ *   c[54], c[55] SET_SPECULAR_PARAMS front, back (L, M, N)
+ *   c[56]     SET_EYE_POSITION
+ *   c[57]     back scene ambient (rgb), back material alpha (w)
+ *   c[58 + 7 i .. 64 + 7 i], light i: specular colour; infinite half
+ *             vector; spot falloff (L, M, N); spot direction (xyzw); back
+ *             ambient, diffuse, specular colours
+ *   c[114 + 4 s + k] stage s's texgen plane k (S, T, R, Q)
+ *   c[130 + 4 s + r] stage s's texture matrix, row r
  * Inputs: v0 the position; v[nrm] the normal, v[col] the colour (D3DCOLOR
- * as r, g, b, a), v[tex[s]] stage s's coordinates, each only when its bit is
- * in Nv2aProgramBatch.streams (else: no normal -- unlit --, white, 0,0,0,1).
+ * as r, g, b, a), v[spc] the specular colour, v[wgt] the blend weights,
+ * v[tex[s]] stage s's coordinates, each only when its bit is in
+ * Nv2aProgramBatch.streams (else: no normal -- unlit --, white, 0,0,0,1).
  * The position comes out as a vertex program's oPos would: (clip.xyz /
  * clip.w + c[4].xyz, clip.w), logical pixels. */
 typedef struct {
@@ -260,7 +272,18 @@ typedef struct {
     uint32_t flip;                  /* RECOMP_FFP_FLIP_NORMALS */
     uint32_t amb_vc, dif_vc;        /* SET_COLOR_MATERIAL: ambient / diffuse from v[col] */
     uint32_t nlights;
-    uint32_t light_kind[8];         /* 1 infinite, else local (no spot cone) */
+    uint32_t light_kind[8];         /* 1 infinite, 2 local, 3 spot */
+    /* XBA-306 */
+    uint32_t spc, wgt;              /* input slots: specular colour, blend weights */
+    uint32_t skin, skin_mix;        /* matrices blended (0 off); last weight 1 - the others */
+    uint32_t specular;              /* SET_SPECULAR_ENABLE */
+    uint32_t separate, local_eye;   /* SET_LIGHT_CONTROL */
+    uint32_t spc_src;               /* SET_COLOR_MATERIAL specular: 1 v[col], 2 v[spc] */
+    uint32_t two_side;              /* SET_TWO_SIDE_LIGHT_EN */
+    uint32_t texgen[4][4];          /* stage, channel: 0 off, 1 eye linear, 2 object
+                                     * linear, 3 sphere map, 4 reflection, 5 normal */
+    uint32_t texgen_inf;            /* SET_TEXGEN_VIEW_MODEL: infinite viewer */
+    uint32_t texmat[4];             /* SET_TEXTURE_MATRIX_ENABLE */
 } Nv2aFfpKey;
 
 typedef struct {

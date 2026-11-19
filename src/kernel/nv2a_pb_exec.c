@@ -2605,9 +2605,10 @@ static uint32_t vertex_color(uint32_t index)
  * fixed-function batch shares the program path's near-plane clipping,
  * texturing, combiners and depth buffer.
  *
- * ponytail: no texture-coordinate generation or texture matrices (texture
- * coordinates are taken from the attribute streams as they are), no fog
- * coordinate, no specular, no point sprites. */
+ * ponytail: this per-vertex form (RECOMP_FFP_BATCH=0) has no
+ * texture-coordinate generation or texture matrices, no specular, no
+ * skinning; ffp_batch_vertex below (the default) has them (XBA-306). Neither
+ * has a fog coordinate or point sprites. */
 
 static int batch_is_screen_space(void);
 
@@ -2834,18 +2835,37 @@ typedef struct {
 } FfpAttr;
 
 typedef struct {
-    int   kind;             /* 1 infinite, else local / spot */
+    int   kind;             /* 1 infinite, 2 local, 3 spot */
     float l[3];             /* direction (infinite) or eye-space position */
     float range, att[3];
-    float amb[3], dif[3];
+    float amb[3], dif[3], spc[3];
+    float half[3];          /* SET_LIGHT_INFINITE_HALF_VECTOR */
+    float fall[3], spot[4]; /* SET_LIGHT_SPOT_FALLOFF (L, M, N), _DIRECTION */
+    float bamb[3], bdif[3], bspc[3];    /* SET_BACK_LIGHT_*_COLOR */
 } FfpLight;
 
+/* Texture coordinate generation (SET_TEXGEN_S..Q) as ffp_texgen_mode reads
+ * the register; the same numbers as Nv2aFfpKey.texgen. */
+enum {
+    FFP_TG_OFF = 0, FFP_TG_EYE, FFP_TG_OBJECT, FFP_TG_SPHERE, FFP_TG_REFLECT, FFP_TG_NORMAL,
+    FFP_TG_BAD                  /* a value or channel the unit does not have: off */
+};
+
 static struct {
-    FfpAttr pos, nrm, col, tex[4];
+    FfpAttr pos, nrm, col, spc, wgt, tex[4];
     float   m[16], off[3], aa_sx, aa_sy;
     int     lit, flip, amb_vc, dif_vc, nlights;
     float   mv[12], scene[3], alpha;
     FfpLight light[NV_LIGHTS];
+    /* XBA-306. eye: an eye-space position and normal are needed (lighting,
+     * texgen); skin_n matrices blended by v1, the last weight 1 - the
+     * others' when skin_mix (SET_SKIN_MODE). */
+    int     eye, skin_n, skin_mix;
+    float   mvs[4][16];             /* SET_MODEL_VIEW_MATRIX0..3 */
+    int     specular, separate, local_eye, spc_src, two_side;
+    float   spow[3], bspow[3], eyep[4], bscene[3], balpha;
+    int     texgen[4][4], tg_any[4], tg_inf, tg_refl, texmat[4];
+    float   plane[4][4][4], tmat[4][16];
 } s_ffp;
 
 static int s_ffp_batch = -1;                /* -1: read RECOMP_FFP_BATCH */
@@ -2899,15 +2919,53 @@ static int ffp_fetch(const FfpAttr *f, uint32_t index, float out[4])
     }
 }
 
+/* SET_TEXGEN_S..Q's value for channel k (0 S .. 3 Q) as FFP_TG_*: sphere
+ * maps make S and T only, reflection and normal maps S, T and R. */
+static int ffp_texgen_mode(uint32_t v, uint32_t k)
+{
+    switch (v) {
+    case 0x0000: return FFP_TG_OFF;
+    case 0x2400: return FFP_TG_EYE;
+    case 0x2401: return FFP_TG_OBJECT;
+    case 0x2402: return k < 2 ? FFP_TG_SPHERE : FFP_TG_BAD;
+    case 0x8512: return k < 3 ? FFP_TG_REFLECT : FFP_TG_BAD;
+    case 0x8511: return k < 3 ? FFP_TG_NORMAL : FFP_TG_BAD;
+    default:     return FFP_TG_BAD;
+    }
+}
+
+/* Does stage st generate a coordinate (texgen on some channel)? */
+static int ffp_stage_generates(uint32_t st)
+{
+    uint32_t ch;
+    for (ch = 0; ch < 4; ch++) {
+        int mode = ffp_texgen_mode(s_reg[(0x03C0u + 16u * st + 4u * ch) / 4], ch);
+        if (mode != FFP_TG_OFF && mode != FFP_TG_BAD)
+            return 1;
+    }
+    return 0;
+}
+
+/* SET_SKIN_MODE: matrices blended (0 off); *mix: the last weight is 1 minus
+ * the others (the _2G/_3G/_4G modes). Values above _4 (6) read as off. */
+static int ffp_skin_mode(uint32_t v, int *mix)
+{
+    *mix = (int)(v & 1);
+    return v >= 1 && v <= 6 ? (int)(v + 3) / 2 : 0;
+}
+
 static void ffp_batch_begin(void)
 {
     const float *off = nv2a_vsh_constant(59);
-    uint32_t mask = s_reg[0x03BC / 4], colmat = s_reg[0x0298 / 4], i;
-    int k;
+    uint32_t mask = s_reg[0x03BC / 4], colmat = s_reg[0x0298 / 4], i, st, ch;
+    uint32_t lc = s_reg[0x0294 / 4];                    /* SET_LIGHT_CONTROL */
+    int k, tg_eye = 0;
 
     ffp_attr_resolve(&s_ffp.pos, &s_gpu.attr[0]);
     ffp_attr_resolve(&s_ffp.nrm, &s_gpu.attr[2]);
     ffp_attr_resolve(&s_ffp.col, color_attr());
+    ffp_attr_resolve(&s_ffp.spc, &s_gpu.attr[4]);
+    ffp_attr_resolve(&s_ffp.wgt, &s_gpu.attr[1]);
     ffp_attr_resolve(&s_ffp.tex[0], texcoord_attr());
     for (i = 1; i < 4; i++)
         ffp_attr_resolve(&s_ffp.tex[i], &s_gpu.attr[9 + i]);
@@ -2916,20 +2974,63 @@ static void ffp_batch_begin(void)
     s_ffp.aa_sx = s_gpu.aa_sx;
     s_ffp.aa_sy = s_gpu.aa_sy;
 
+    /* Vertex blending: the position and normal by SET_MODEL_VIEW_MATRIX0..3
+     * weighted by v1, then by the composite matrix (the projection alone
+     * once a title skins). */
+    s_ffp.skin_n = ffp_skin_mode(s_reg[0x0328 / 4], &s_ffp.skin_mix);
+    memcpy(s_ffp.mvs, &s_reg[0x0480 / 4], sizeof s_ffp.mvs);
+    memcpy(s_ffp.mv, s_ffp.mvs[0], sizeof s_ffp.mv);
+
+    /* Texture coordinate generation and texture matrices, per stage. */
+    s_ffp.tg_inf = s_reg[0x09CC / 4] == 1;              /* SET_TEXGEN_VIEW_MODEL */
+    s_ffp.tg_refl = 0;
+    for (st = 0; st < 4; st++) {
+        s_ffp.tg_any[st] = 0;
+        for (ch = 0; ch < 4; ch++) {
+            int mode = ffp_texgen_mode(s_reg[(0x03C0u + 16u * st + 4u * ch) / 4], ch);
+            if (mode == FFP_TG_BAD)
+                mode = FFP_TG_OFF;
+            s_ffp.texgen[st][ch] = mode;
+            s_ffp.tg_any[st] |= mode != FFP_TG_OFF;
+            s_ffp.tg_refl |= mode == FFP_TG_SPHERE || mode == FFP_TG_REFLECT;
+            tg_eye |= mode != FFP_TG_OFF && mode != FFP_TG_OBJECT;
+        }
+        if (s_ffp.tg_any[st])                           /* SET_TEXGEN_PLANE_S..Q */
+            memcpy(s_ffp.plane[st], &s_reg[(0x0840u + 64u * st) / 4], sizeof s_ffp.plane[st]);
+        s_ffp.texmat[st] = s_reg[(0x0420u + 4u * st) / 4] != 0;
+        if (s_ffp.texmat[st])                           /* SET_TEXTURE_MATRIX */
+            memcpy(s_ffp.tmat[st], &s_reg[(0x06C0u + 64u * st) / 4], sizeof s_ffp.tmat[st]);
+    }
+
     s_ffp.lit = s_reg[0x0314 / 4] && s_gpu.attr[2].size;
+    s_ffp.specular = s_reg[0x03B8 / 4] != 0;            /* SET_SPECULAR_ENABLE */
+    s_ffp.eye = s_ffp.lit || tg_eye;
     s_ffp.nlights = 0;
     if (!s_ffp.lit)
         return;
-    memcpy(s_ffp.mv, &s_reg[0x0480 / 4], sizeof s_ffp.mv);
     s_ffp.flip = ffp_flip_normals();
     s_ffp.amb_vc = ((colmat >> 2) & 3) == 1;
     s_ffp.dif_vc = ((colmat >> 4) & 3) == 1;
+    s_ffp.spc_src = (int)((colmat >> 6) & 3);           /* 1 diffuse, 2 specular colour */
+    if (s_ffp.spc_src > 2)
+        s_ffp.spc_src = 0;
+    s_ffp.separate = (int)(lc & 1);
+    s_ffp.local_eye = (int)((lc >> 16) & 1);
+    s_ffp.two_side = s_reg[0x17C4 / 4] != 0;            /* SET_TWO_SIDE_LIGHT_EN */
     s_ffp.scene[0] = reg_f(0x0A10);
     s_ffp.scene[1] = reg_f(0x0A14);
     s_ffp.scene[2] = reg_f(0x0A18);
     s_ffp.alpha = reg_f(0x03B4);
+    for (k = 0; k < 3; k++) {
+        s_ffp.spow[k] = reg_f(0x09E0 + 4 * (uint32_t)k);   /* SET_SPECULAR_PARAMS L, M, N */
+        s_ffp.bspow[k] = reg_f(0x1E28 + 4 * (uint32_t)k);  /* _BACK */
+        s_ffp.bscene[k] = reg_f(0x17A0 + 4 * (uint32_t)k); /* SET_BACK_SCENE_AMBIENT_COLOR */
+    }
+    s_ffp.balpha = reg_f(0x17AC);                       /* SET_BACK_MATERIAL_ALPHA */
+    for (k = 0; k < 4; k++)
+        s_ffp.eyep[k] = reg_f(0x0A50 + 4 * (uint32_t)k);   /* SET_EYE_POSITION */
     for (i = 0; i < NV_LIGHTS; i++) {
-        uint32_t kind = (mask >> (2 * i)) & 3, b = 0x1000 + i * 0x80;
+        uint32_t kind = (mask >> (2 * i)) & 3, b = 0x1000 + i * 0x80, bb = 0x0C00 + i * 0x40;
         FfpLight *L = &s_ffp.light[s_ffp.nlights];
 
         if (!kind)
@@ -2945,44 +3046,133 @@ static void ffp_batch_begin(void)
             L->att[2] = reg_f(b + 0x70);
         }
         for (k = 0; k < 3; k++) {
-            L->amb[k] = reg_f(b + 0x00 + 4 * (uint32_t)k);
-            L->dif[k] = reg_f(b + 0x0C + 4 * (uint32_t)k);
+            uint32_t o = 4 * (uint32_t)k;
+            L->amb[k] = reg_f(b + 0x00 + o);
+            L->dif[k] = reg_f(b + 0x0C + o);
+            L->spc[k] = reg_f(b + 0x18 + o);
+            L->half[k] = reg_f(b + 0x28 + o);
+            L->fall[k] = reg_f(b + 0x40 + o);
+            L->bamb[k] = reg_f(bb + 0x00 + o);
+            L->bdif[k] = reg_f(bb + 0x0C + o);
+            L->bspc[k] = reg_f(bb + 0x18 + o);
         }
+        for (k = 0; k < 4; k++)
+            L->spot[k] = reg_f(b + 0x4C + 4 * (uint32_t)k);
         s_ffp.nlights++;
     }
 }
 
-/* lit_color, for a vertex whose position `pos` is already fetched. */
-static int ffp_batch_lit(uint32_t index, const float pos[4], float out[4])
+/* v scaled to unit length (left alone when it has none). */
+static void ffp_unit(float v[3])
 {
-    const float *mv = s_ffp.mv;
-    float nrm[4], vc[4], e[3], n[3], len;
-    int i, have_vc;
+    float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (len > 1e-8f) { v[0] /= len; v[1] /= len; v[2] /= len; }
+}
 
-    if (!s_ffp.lit || !ffp_fetch(&s_ffp.nrm, index, nrm))
-        return 0;
+/* The eye-space position e (w included) and unit normal n (0 without one)
+ * of a vertex whose position `pos` is fetched: by SET_MODEL_VIEW_MATRIX0,
+ * or with vertex blending by the weighted sum over the skinning matrices
+ * (weights v1; xemu's vsh-ff.c). Normals go through the model-view matrices
+ * themselves (see lit_color). Returns whether the normal was read. */
+static int ffp_batch_eye(uint32_t index, const float pos[4], float e[4], float n[3])
+{
+    float nrm[4];
+    int i, have_n = ffp_fetch(&s_ffp.nrm, index, nrm);
+
+    if (!s_ffp.skin_n) {
+        const float *mv = s_ffp.mvs[0];
+        for (i = 0; i < 3; i++) {
+            e[i] = mv[4 * i] * pos[0] + mv[4 * i + 1] * pos[1]
+                 + mv[4 * i + 2] * pos[2] + mv[4 * i + 3];
+            n[i] = mv[4 * i] * nrm[0] + mv[4 * i + 1] * nrm[1]
+                 + mv[4 * i + 2] * nrm[2];
+        }
+        e[3] = mv[12] * pos[0] + mv[13] * pos[1] + mv[14] * pos[2] + mv[15] * pos[3];
+    } else {
+        float wt[4], wn = 1.0f, wi;
+        int k;
+
+        ffp_fetch(&s_ffp.wgt, index, wt);
+        e[0] = e[1] = e[2] = e[3] = 0.0f;
+        n[0] = n[1] = n[2] = 0.0f;
+        for (k = 0; k < s_ffp.skin_n; k++) {
+            const float *mv = s_ffp.mvs[k];
+            if (s_ffp.skin_mix && k == s_ffp.skin_n - 1) {
+                wi = wn;
+            } else {
+                wi = wt[k];
+                wn -= wi;
+            }
+            for (i = 0; i < 4; i++)
+                e[i] += wi * (mv[4 * i] * pos[0] + mv[4 * i + 1] * pos[1]
+                            + mv[4 * i + 2] * pos[2] + mv[4 * i + 3] * pos[3]);
+            for (i = 0; i < 3; i++)
+                n[i] += wi * (mv[4 * i] * nrm[0] + mv[4 * i + 1] * nrm[1]
+                            + mv[4 * i + 2] * nrm[2]);
+        }
+    }
+    ffp_unit(n);
+    return have_n;
+}
+
+/* lit_color with the batch's state, for a vertex whose eye-space position e
+ * and unit normal n0 ffp_batch_eye gave; sp: the specular sum (lights'
+ * specular colours by the specular power function, 0 without
+ * SET_SPECULAR_ENABLE). Beyond lit_color, after xemu's vsh-ff.c:
+ *  - specular: N.H through SET_SPECULAR_PARAMS' (x + L) / (M x + N), H the
+ *    light's half vector (infinite) or the unit sum of the light direction
+ *    and the eye direction (SET_LIGHT_CONTROL's local eye: towards
+ *    SET_EYE_POSITION; else 0,0,1);
+ *  - spot lights: s = D.xyz . L + D.w (SET_LIGHT_SPOT_DIRECTION), 0 at or
+ *    below 0, 1 from 1, between them (s + L) / (M s + N) (SPOT_FALLOFF);
+ *  - two-sided lighting: a vertex whose normal points away from the eye is
+ *    lit with the normal reversed and the back colours (scene ambient,
+ *    material alpha, light colours, specular parameters). ponytail: the
+ *    hardware picks the side per face at rasterisation; this picks it per
+ *    vertex, as RECOMP_FFP_FLIP_NORMALS does. */
+static int ffp_batch_lit(uint32_t index, const float e[4], const float n0[3], float out[4],
+                         float sp[3])
+{
+    const float *scene = s_ffp.scene, *pw = s_ffp.spow;
+    float vc[4], sc[4], n[3], ve[3] = { 0.0f, 0.0f, 1.0f }, alpha = s_ffp.alpha;
+    int i, have_vc, back = 0;
+
     have_vc = ffp_fetch(&s_ffp.col, index, vc);
-
-    for (i = 0; i < 3; i++) {
-        e[i] = mv[4 * i] * pos[0] + mv[4 * i + 1] * pos[1]
-             + mv[4 * i + 2] * pos[2] + mv[4 * i + 3];
-        n[i] = mv[4 * i] * nrm[0] + mv[4 * i + 1] * nrm[1]
-             + mv[4 * i + 2] * nrm[2];
-    }
-    len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-    if (len > 1e-8f) { n[0] /= len; n[1] /= len; n[2] /= len; }
-    if (s_ffp.flip && n[0] * e[0] + n[1] * e[1] + n[2] * e[2] > 0.0f) {
+    n[0] = n0[0]; n[1] = n0[1]; n[2] = n0[2];
+    if ((s_ffp.two_side || s_ffp.flip) && n[0] * e[0] + n[1] * e[1] + n[2] * e[2] > 0.0f) {
         n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2];
+        back = s_ffp.two_side;
+    }
+    if (back) {
+        scene = s_ffp.bscene;
+        pw = s_ffp.bspow;
+        alpha = s_ffp.balpha;
+    }
+    sp[0] = sp[1] = sp[2] = 0.0f;
+    if (s_ffp.specular) {
+        ffp_fetch(&s_ffp.spc, index, sc);
+        if (s_ffp.local_eye) {
+            float d = s_ffp.eyep[3] != 0.0f ? s_ffp.eyep[3] : 1.0f;
+            ve[0] = s_ffp.eyep[0] / d - e[0];
+            ve[1] = s_ffp.eyep[1] / d - e[1];
+            ve[2] = s_ffp.eyep[2] / d - e[2];
+            ffp_unit(ve);
+        }
     }
 
-    out[0] = s_ffp.scene[0]; out[1] = s_ffp.scene[1]; out[2] = s_ffp.scene[2];
+    out[0] = scene[0]; out[1] = scene[1]; out[2] = scene[2];
     for (i = 0; i < s_ffp.nlights; i++) {
         const FfpLight *L = &s_ffp.light[i];
-        float l[3], att = 1.0f, ndl, amb[3], dif[3];
+        float l[3], h[3] = { 0.0f, 0.0f, 0.0f }, att = 1.0f, ndl, amb[3], dif[3];
         int k;
 
         if (L->kind == 1) {
             l[0] = L->l[0]; l[1] = L->l[1]; l[2] = L->l[2];
+            h[0] = L->half[0]; h[1] = L->half[1]; h[2] = L->half[2];
+            if (s_ffp.specular && s_ffp.local_eye) {
+                h[0] = l[0] + ve[0]; h[1] = l[1] + ve[1]; h[2] = l[2] + ve[2];
+                ffp_unit(h);
+            }
         } else {
             float d;
             l[0] = L->l[0] - e[0];
@@ -2994,36 +3184,141 @@ static int ffp_batch_lit(uint32_t index, const float pos[4], float out[4])
             if (d > 1e-8f) { l[0] /= d; l[1] /= d; l[2] /= d; }
             att = L->att[0] + L->att[1] * d + L->att[2] * d * d;
             att = att > 1e-8f ? 1.0f / att : 1.0f;
+            if (s_ffp.specular) {
+                h[0] = l[0] + ve[0]; h[1] = l[1] + ve[1]; h[2] = l[2] + ve[2];
+                ffp_unit(h);
+            }
+            if (L->kind == 3) {
+                float s = L->spot[0] * l[0] + L->spot[1] * l[1] + L->spot[2] * l[2] + L->spot[3];
+                if (s <= 0.0f) {
+                    att = 0.0f;
+                } else if (s < 1.0f) {
+                    float f = 0.0f;
+                    if (s > -L->fall[0]) {
+                        float den = L->fall[1] * s + L->fall[2];
+                        if (den == 0.0f)
+                            f = 1.0f;
+                        else if (den > 0.0f)
+                            f = fminf(fmaxf((s + L->fall[0]) / den, 0.0f), 1.0f);
+                    }
+                    att *= f;
+                }
+            }
         }
         ndl = n[0] * l[0] + n[1] * l[1] + n[2] * l[2];
         if (ndl < 0.0f) ndl = 0.0f;
         for (k = 0; k < 3; k++) {
-            amb[k] = L->amb[k];
-            dif[k] = L->dif[k];
+            amb[k] = back ? L->bamb[k] : L->amb[k];
+            dif[k] = back ? L->bdif[k] : L->dif[k];
             if (have_vc && s_ffp.amb_vc) amb[k] *= vc[k];
             if (have_vc && s_ffp.dif_vc) dif[k] *= vc[k];
             out[k] += att * (amb[k] + dif[k] * ndl);
         }
+        if (s_ffp.specular) {
+            float ndh = n[0] * h[0] + n[1] * h[1] + n[2] * h[2], pf = 0.0f;
+            if (ndh < 0.0f) ndh = 0.0f;
+            if (ndl > 0.0f && ndh > -pw[0]) {
+                float den = pw[1] * ndh + pw[2];
+                if (den == 0.0f)
+                    pf = 10000.0f;
+                else if (den > 0.0f)
+                    pf = fminf(fmaxf((ndh + pw[0]) / den, 0.0f), 10000.0f);
+            }
+            for (k = 0; k < 3; k++) {
+                float s = back ? L->bspc[k] : L->spc[k];
+                if (s_ffp.spc_src == 1 && have_vc) s *= vc[k];
+                if (s_ffp.spc_src == 2) s *= sc[k];
+                sp[k] += att * pf * s;
+            }
+        }
     }
-    out[3] = (have_vc && s_ffp.dif_vc) ? vc[3] : s_ffp.alpha;
+    out[3] = (have_vc && s_ffp.dif_vc) ? vc[3] : alpha;
     for (i = 0; i < 4; i++)
         out[i] = out[i] < 0.0f ? 0.0f : out[i] > 1.0f ? 1.0f : out[i];
     return 1;
 }
 
-/* ffp_vertex after ffp_batch_begin. */
+/* The reflection vector of texgen's sphere and reflection maps: the eye
+ * direction (0,0,1 with an infinite viewer, SET_TEXGEN_VIEW_MODEL) reflected
+ * about n; *im the sphere map's 1 / (2 |r + (0,0,1)|). */
+static void ffp_reflect(const float e[4], const float n[3], float r[3], float *im)
+{
+    float u[3] = { 0.0f, 0.0f, 1.0f }, d, len;
+    int i;
+
+    if (!s_ffp.tg_inf) {
+        u[0] = e[0]; u[1] = e[1]; u[2] = e[2];
+        ffp_unit(u);
+    }
+    d = n[0] * u[0] + n[1] * u[1] + n[2] * u[2];
+    for (i = 0; i < 3; i++)
+        r[i] = u[i] - 2.0f * d * n[i];
+    len = sqrtf(r[0] * r[0] + r[1] * r[1] + (r[2] + 1.0f) * (r[2] + 1.0f));
+    *im = len > 1e-8f ? 0.5f / len : 0.0f;
+}
+
+/* Stage st's coordinates t (as fetched) through texgen and the texture
+ * matrix: eye linear = plane . e, object linear = plane . position, sphere
+ * map r * im + 0.5, reflection map r, normal map n; then t = T t (rows). */
+static void ffp_batch_texcoord(uint32_t st, const float pos[4], const float e[4],
+                               const float n[3], float t[4])
+{
+    float r[3] = { 0.0f, 0.0f, 0.0f }, im = 0.0f, u[4];
+    int k, have_r = 0;
+
+    if (s_ffp.tg_any[st])
+        for (k = 0; k < 4; k++) {
+            const float *p = s_ffp.plane[st][k];
+            int mode = s_ffp.texgen[st][k];
+            if ((mode == FFP_TG_SPHERE || mode == FFP_TG_REFLECT) && !have_r) {
+                ffp_reflect(e, n, r, &im);
+                have_r = 1;
+            }
+            switch (mode) {
+            case FFP_TG_EYE:
+                t[k] = p[0] * e[0] + p[1] * e[1] + p[2] * e[2] + p[3] * e[3];
+                break;
+            case FFP_TG_OBJECT:
+                t[k] = p[0] * pos[0] + p[1] * pos[1] + p[2] * pos[2] + p[3] * pos[3];
+                break;
+            case FFP_TG_SPHERE:  t[k] = r[k] * im + 0.5f; break;
+            case FFP_TG_REFLECT: t[k] = r[k]; break;
+            case FFP_TG_NORMAL:  t[k] = n[k]; break;
+            default: break;
+            }
+        }
+    if (s_ffp.texmat[st]) {
+        const float *T = s_ffp.tmat[st];
+        memcpy(u, t, sizeof u);
+        for (k = 0; k < 4; k++)
+            t[k] = T[4 * k] * u[0] + T[4 * k + 1] * u[1] + T[4 * k + 2] * u[2]
+                 + T[4 * k + 3] * u[3];
+    }
+}
+
+/* ffp_vertex after ffp_batch_begin, with the parts of the unit ffp_vertex
+ * leaves out (XBA-306): vertex blending, specular, spot lights, two-sided
+ * lighting, texgen, texture matrices. nv2a_gl_vsh_ffp_body is the same on
+ * the GPU, expression for expression. */
 static int ffp_batch_vertex(uint32_t index, Nv2aVshOutput *out)
 {
-    const float *m = s_ffp.m, *off = s_ffp.off;
-    float in[4], clip[4], c[4], w;
+    const float *m = s_ffp.m, *off = s_ffp.off, *src;
+    float in[4], e[4] = { 0.0f, 0.0f, 0.0f, 1.0f }, n[3] = { 0.0f, 0.0f, 0.0f };
+    float clip[4], c[4], sp[3] = { 0.0f, 0.0f, 0.0f }, w;
     uint32_t st;
-    int i;
+    int i, have_n = 0, lit;
 
     if (!ffp_fetch(&s_ffp.pos, index, in))
         return 0;
+    src = in;
+    if (s_ffp.eye || s_ffp.skin_n) {
+        have_n = ffp_batch_eye(index, in, e, n);
+        if (s_ffp.skin_n)
+            src = e;                    /* blended in eye space: composite = projection */
+    }
     for (i = 0; i < 4; i++)
-        clip[i] = m[4 * i] * in[0] + m[4 * i + 1] * in[1]
-                + m[4 * i + 2] * in[2] + m[4 * i + 3] * in[3];
+        clip[i] = m[4 * i] * src[0] + m[4 * i + 1] * src[1]
+                + m[4 * i + 2] * src[2] + m[4 * i + 3] * src[3];
     w = clip[3];
     if (fabsf(w) <= 1e-6f)
         return 0;
@@ -3034,13 +3329,34 @@ static int ffp_batch_vertex(uint32_t index, Nv2aVshOutput *out)
     out->pos[2] = clip[2] / w + off[2];
     out->pos[3] = w;
 
-    if (!ffp_batch_lit(index, in, c) && !ffp_fetch(&s_ffp.col, index, c))
+    lit = s_ffp.lit && have_n && ffp_batch_lit(index, e, n, c, sp);
+    if (!lit && !ffp_fetch(&s_ffp.col, index, c))
         c[0] = c[1] = c[2] = c[3] = 1.0f;
     for (i = 0; i < 4; i++)
         out->d0[i] = c[i] < 0.0f ? 0.0f : c[i] > 1.0f ? 1.0f : c[i];
+    /* SET_SPECULAR_ENABLE: d1 the specular sum with SET_LIGHT_CONTROL's
+     * separate specular, else the sum is added to d0 and d1 is the vertex
+     * specular colour (v4); unlit, v4. Off: d1 stays 0. */
+    if (s_ffp.specular) {
+        float s4[4];
+        ffp_fetch(&s_ffp.spc, index, s4);
+        if (lit && s_ffp.separate) {
+            s4[0] = sp[0]; s4[1] = sp[1]; s4[2] = sp[2];
+        } else if (lit) {
+            for (i = 0; i < 3; i++) {
+                float d = out->d0[i] + sp[i];
+                out->d0[i] = d < 0.0f ? 0.0f : d > 1.0f ? 1.0f : d;
+            }
+        }
+        for (i = 0; i < 4; i++)
+            out->d1[i] = s4[i] < 0.0f ? 0.0f : s4[i] > 1.0f ? 1.0f : s4[i];
+    }
 
-    for (st = 0; st < 4; st++)
+    for (st = 0; st < 4; st++) {
         ffp_fetch(&s_ffp.tex[st], index, out->tex[st]);
+        if (s_ffp.tg_any[st] || s_ffp.texmat[st])
+            ffp_batch_texcoord(st, in, e, n, out->tex[st]);
+    }
     return 1;
 }
 
@@ -4934,11 +5250,13 @@ static int gpu_vsh_enabled(void)
     return on;
 }
 
-/* RECOMP_GPU_FFP=1 (XBA-134): fixed-function batches go to a back end
- * with NV2A_BACKEND_CAP_PROGRAM as a program batch with Nv2aProgramBatch.ffp
- * set, transformed and lit by a vertex shader generated from the state
- * (nv2a_gl_vsh.c) instead of on the CPU and uploaded per batch. Off by
- * default while it is measured on the device. */
+/* RECOMP_GPU_FFP (XBA-134, on by default since XBA-306): fixed-function
+ * batches go to a back end with NV2A_BACKEND_CAP_PROGRAM as a program batch
+ * with Nv2aProgramBatch.ffp set, transformed and lit by a vertex shader
+ * generated from the state (nv2a_gl_vsh.c) instead of on the CPU and
+ * uploaded per batch. RECOMP_GPU_FFP=0: every batch on the CPU, as before.
+ * A batch whose state the generator does not model (ffp_gpu_unmodelled)
+ * is transformed on the CPU. */
 static int s_gpu_ffp = -1;
 void nv2a_gpu_ffp_enable(int on) { s_gpu_ffp = on ? 1 : 0; }
 
@@ -4946,14 +5264,32 @@ static int gpu_ffp_enabled(void)
 {
     if (s_gpu_ffp < 0) {
         const char *e = getenv("RECOMP_GPU_FFP");
-        s_gpu_ffp = e && e[0] == '1';
+        s_gpu_ffp = !(e && e[0] == '0');
     }
     return s_gpu_ffp;
 }
 
+/* What the generated shader does not model in the current state, or NULL.
+ * Both paths read these as off (ffp_texgen_mode, ffp_skin_mode), so the
+ * CPU path, which also counts them as gaps, keeps them where they are
+ * looked at. */
+static const char *ffp_gpu_unmodelled(void)
+{
+    uint32_t st, ch;
+    int mix;
+
+    for (st = 0; st < 4; st++)
+        for (ch = 0; ch < 4; ch++)
+            if (ffp_texgen_mode(s_reg[(0x03C0u + 16u * st + 4u * ch) / 4], ch) == FFP_TG_BAD)
+                return "a texgen mode the channel does not have";
+    if (s_reg[0x0328 / 4] && !ffp_skin_mode(s_reg[0x0328 / 4], &mix))
+        return "a skin mode above 4 matrices";
+    return NULL;
+}
+
 /* The fixed-function state as constants (Nv2aFfpKey's layout), with change
  * stamps for the back end's sync. */
-#define NV_FFPC 41
+#define NV_FFPC 146
 static float s_ffpc[NV2A_VSH_CONSTANTS][4];
 static uint64_t s_ffpc_stamp[NV2A_VSH_CONSTANTS], s_ffpc_serial;
 static Nv2aFfpKey s_ffpk;
@@ -4967,12 +5303,15 @@ static void ffpc_set(uint32_t i, float x, float y, float z, float w)
     }
 }
 
+static void ffpc_set4(uint32_t i, const float v[4]) { ffpc_set(i, v[0], v[1], v[2], v[3]); }
+
 /* ffp_batch_begin's state (s_ffp) into s_ffpk and s_ffpc. Inputs read:
- * position, colour, the four texture coordinate sets, the normal when lit;
- * returns them as a mask. */
+ * position, colour, the four texture coordinate sets, the normal when lit
+ * or generating from it, the weights when blending, the specular colour
+ * when specular is on; returns them as a mask. */
 static uint32_t ffp_program_state(void)
 {
-    uint32_t i, inputs = 1u;
+    uint32_t i, k, st, inputs = 1u;
     const float *m;
 
     ffp_batch_begin();
@@ -4982,33 +5321,86 @@ static uint32_t ffp_program_state(void)
     for (i = 1; i < 4; i++)
         s_ffpk.tex[i] = 9 + i;
     s_ffpk.nrm = 2;
+    s_ffpk.wgt = 1;
+    s_ffpk.spc = 4;
     inputs |= 1u << s_ffpk.col;
     for (i = 0; i < 4; i++)
         inputs |= 1u << s_ffpk.tex[i];
     s_ffpk.lit = (uint32_t)s_ffp.lit;
-    if (s_ffp.lit)
+    if (s_ffp.eye)
         inputs |= 1u << 2;
     m = s_ffp.m;
     for (i = 0; i < 4; i++)
-        ffpc_set(i, m[4 * i], m[4 * i + 1], m[4 * i + 2], m[4 * i + 3]);
+        ffpc_set4(i, m + 4 * i);
     ffpc_set(4, s_ffp.off[0], s_ffp.off[1], s_ffp.off[2], 0.0f);
+
+    s_ffpk.specular = (uint32_t)s_ffp.specular;
+    if (s_ffp.specular)
+        inputs |= 1u << s_ffpk.spc;
+    s_ffpk.skin = (uint32_t)s_ffp.skin_n;
+    s_ffpk.skin_mix = s_ffp.skin_n ? (uint32_t)s_ffp.skin_mix : 0u;
+    if (s_ffp.skin_n) {
+        inputs |= 1u << s_ffpk.wgt;
+        for (k = 1; k < (uint32_t)s_ffp.skin_n; k++)
+            for (i = 0; i < 4; i++)
+                ffpc_set4(42 + 4 * (k - 1) + i, s_ffp.mvs[k] + 4 * i);
+    }
+    if (s_ffp.eye || s_ffp.skin_n) {
+        for (i = 0; i < 3; i++)
+            ffpc_set4(5 + i, s_ffp.mvs[0] + 4 * i);
+        ffpc_set4(41, s_ffp.mvs[0] + 12);
+    }
+    s_ffpk.texgen_inf = (uint32_t)(s_ffp.tg_refl && s_ffp.tg_inf);
+    for (st = 0; st < 4; st++) {
+        for (k = 0; k < 4; k++) {
+            s_ffpk.texgen[st][k] = (uint32_t)s_ffp.texgen[st][k];
+            if (s_ffp.texgen[st][k] == FFP_TG_EYE || s_ffp.texgen[st][k] == FFP_TG_OBJECT)
+                ffpc_set4(114 + 4 * st + k, s_ffp.plane[st][k]);
+        }
+        s_ffpk.texmat[st] = (uint32_t)s_ffp.texmat[st];
+        if (s_ffp.texmat[st])
+            for (i = 0; i < 4; i++)
+                ffpc_set4(130 + 4 * st + i, s_ffp.tmat[st] + 4 * i);
+    }
     if (!s_ffp.lit)
         return inputs;
     s_ffpk.flip = (uint32_t)s_ffp.flip;
     s_ffpk.amb_vc = (uint32_t)s_ffp.amb_vc;
     s_ffpk.dif_vc = (uint32_t)s_ffp.dif_vc;
+    s_ffpk.two_side = (uint32_t)s_ffp.two_side;
     s_ffpk.nlights = (uint32_t)s_ffp.nlights;
-    for (i = 0; i < 3; i++)
-        ffpc_set(5 + i, s_ffp.mv[4 * i], s_ffp.mv[4 * i + 1], s_ffp.mv[4 * i + 2],
-                 s_ffp.mv[4 * i + 3]);
     ffpc_set(8, s_ffp.scene[0], s_ffp.scene[1], s_ffp.scene[2], s_ffp.alpha);
+    if (s_ffp.two_side)
+        ffpc_set(57, s_ffp.bscene[0], s_ffp.bscene[1], s_ffp.bscene[2], s_ffp.balpha);
+    if (s_ffp.specular) {
+        s_ffpk.separate = (uint32_t)s_ffp.separate;
+        s_ffpk.local_eye = (uint32_t)s_ffp.local_eye;
+        s_ffpk.spc_src = (uint32_t)s_ffp.spc_src;
+        ffpc_set(54, s_ffp.spow[0], s_ffp.spow[1], s_ffp.spow[2], 0.0f);
+        ffpc_set(55, s_ffp.bspow[0], s_ffp.bspow[1], s_ffp.bspow[2], 0.0f);
+        ffpc_set4(56, s_ffp.eyep);
+    }
     for (i = 0; i < s_ffpk.nlights; i++) {
         const FfpLight *L = &s_ffp.light[i];
-        s_ffpk.light_kind[i] = L->kind == 1 ? 1u : 2u;
+        uint32_t x = 58 + 7 * i;
+        s_ffpk.light_kind[i] = (uint32_t)L->kind;
         ffpc_set(9 + 4 * i, L->l[0], L->l[1], L->l[2], L->range);
         ffpc_set(10 + 4 * i, L->att[0], L->att[1], L->att[2], 0.0f);
         ffpc_set(11 + 4 * i, L->amb[0], L->amb[1], L->amb[2], 0.0f);
         ffpc_set(12 + 4 * i, L->dif[0], L->dif[1], L->dif[2], 0.0f);
+        if (s_ffp.specular) {
+            ffpc_set(x + 0, L->spc[0], L->spc[1], L->spc[2], 0.0f);
+            ffpc_set(x + 1, L->half[0], L->half[1], L->half[2], 0.0f);
+        }
+        if (L->kind == 3) {
+            ffpc_set(x + 2, L->fall[0], L->fall[1], L->fall[2], 0.0f);
+            ffpc_set4(x + 3, L->spot);
+        }
+        if (s_ffp.two_side) {
+            ffpc_set(x + 4, L->bamb[0], L->bamb[1], L->bamb[2], 0.0f);
+            ffpc_set(x + 5, L->bdif[0], L->bdif[1], L->bdif[2], 0.0f);
+            ffpc_set(x + 6, L->bspc[0], L->bspc[1], L->bspc[2], 0.0f);
+        }
     }
     return inputs;
 }
@@ -5161,7 +5553,8 @@ static void raster_batch_program(void)
     xf_set_viewport();
     {
         const VertexAttr *tc = texcoord_attr();
-        s_xf_no_tex = !batch_uses_program() && !(tc->offset && tc->stride);
+        s_xf_no_tex = !batch_uses_program() && !(tc->offset && tc->stride)
+                      && !(ffp_batch_on() && ffp_stage_generates(0));
     }
     if (batch_uses_program()) {
         s_gpu.batches_program++;
@@ -5381,7 +5774,20 @@ static int raster_batch_backend_program(void)
         return 1;                       /* not drawn (counted as unsupported) */
     if (ffp) {
         /* The fixed-function unit as a generated shader (XBA-134); the
-         * key's hash once the streams are known, below. */
+         * key's hash once the streams are known, below. State it does not
+         * model stays on the CPU, said once per reason. */
+        const char *gap = ffp_gpu_unmodelled();
+        if (gap) {
+            static const char *said[4];
+            int j;
+            for (j = 0; j < 4 && said[j] && said[j] != gap; j++)
+                ;
+            if (j < 4 && !said[j]) {
+                said[j] = gap;
+                fprintf(stderr, "  [GPU] fixed function on the CPU: %s\n", gap);
+            }
+            return 0;
+        }
         inputs = ffp_program_state();
         pb.ffp = &s_ffpk;
         if (!pv_alloc())
@@ -5555,7 +5961,7 @@ gathered:
      * raster_batch_program has it (s_xf_no_tex). */
     current_pixel_state(&ps, (s_gpu.rc_seen && !no_rc) ? NV2A_SHADE_COMBINERS
                                                        : NV2A_SHADE_MODULATE,
-                        ffp ? (streams >> s_ffpk.tex[0]) & 1 : 1);
+                        ffp ? ((streams >> s_ffpk.tex[0]) & 1) || ffp_stage_generates(0) : 1);
     memset(&batch, 0, sizeof batch);
     batch.state = &rs;
     batch.pixel = &ps;
@@ -5852,28 +6258,35 @@ static void note_batch_gaps(void)
     if (!gpu && s_reg[0x032C / 4])                      /* SET_STENCIL_TEST_ENABLE */
         nv2a_gap_note("stencil test (CPU rasteriser)", 1);
     if (batch_is_ffp()) {
-        /* The fixed-function unit as ffp_vertex / lit_color model it:
-         * composite matrix, lights without specular or spot cones. */
+        /* The fixed-function unit as ffp_batch_vertex models it (XBA-306):
+         * what is left are register values it reads as off, and two-sided
+         * lighting's side, picked per vertex. RECOMP_FFP_BATCH=0's per-vertex
+         * ffp_vertex / lit_color still model only the composite matrix and
+         * lights without specular or spot cones. */
         uint32_t mask = s_reg[0x03BC / 4], k;
+        int mix, old = !ffp_batch_on();
         for (st = 0; st < 4; st++) {
             if (!(used & (1u << st)))
                 continue;
-            for (k = 0; k < 4; k++)
-                if (s_reg[(0x03C0u + 16u * (uint32_t)st + 4u * k) / 4]) {  /* SET_TEXGEN_S..Q */
-                    nv2a_gap_note("fixed-function texgen", 1);
+            for (k = 0; k < 4; k++) {
+                int mode = ffp_texgen_mode(s_reg[(0x03C0u + 16u * (uint32_t)st + 4u * k) / 4], k);
+                if (mode == FFP_TG_BAD || (old && mode != FFP_TG_OFF)) {
+                    nv2a_gap_note(old ? "fixed-function texgen" : "fixed-function texgen mode", 1);
                     break;
                 }
-            if (s_reg[(0x0420u + 4u * (uint32_t)st) / 4])  /* SET_TEXTURE_MATRIX_ENABLE */
+            }
+            if (old && s_reg[(0x0420u + 4u * (uint32_t)st) / 4])  /* SET_TEXTURE_MATRIX_ENABLE */
                 nv2a_gap_note("fixed-function texture matrix", 1);
         }
-        if (s_reg[0x0328 / 4])                          /* SET_SKIN_MODE */
-            nv2a_gap_note("fixed-function vertex blending (skinning)", 1);
+        if (s_reg[0x0328 / 4] && (old || !ffp_skin_mode(s_reg[0x0328 / 4], &mix)))
+            nv2a_gap_note(old ? "fixed-function vertex blending (skinning)"
+                              : "fixed-function skin mode", 1);
         if (s_reg[0x0314 / 4]) {                        /* SET_LIGHTING_ENABLE */
-            if (s_reg[0x03B8 / 4])                      /* SET_SPECULAR_ENABLE */
+            if (old && s_reg[0x03B8 / 4])               /* SET_SPECULAR_ENABLE */
                 nv2a_gap_note("fixed-function specular", 1);
             if (s_reg[0x17C4 / 4])                      /* SET_TWO_SIDE_LIGHT_EN */
-                nv2a_gap_note("two-sided lighting", 1);
-            for (k = 0; k < NV_LIGHTS; k++)
+                nv2a_gap_note(old ? "two-sided lighting" : "two-sided lighting (side per vertex)", 1);
+            for (k = 0; old && k < NV_LIGHTS; k++)
                 if (((mask >> (2 * k)) & 3) == 3) {
                     nv2a_gap_note("spot lights", 1);
                     break;

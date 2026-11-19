@@ -92,8 +92,10 @@ size_t nv2a_gl_vsh_body_fmt(const uint32_t (*ins)[4], uint32_t count, uint32_t f
                             Nv2aGlVshInfo *info);
 
 /* The fixed-function unit (XBA-134) as a shader body with the same inputs,
- * constants and endings as a program's: ffp_vertex / lit_color in
- * nv2a_pb_exec.c expression for expression, from the state in `key` and
+ * constants and endings as a program's: ffp_batch_vertex / ffp_batch_lit in
+ * nv2a_pb_exec.c expression for expression (vertex blending, texgen, texture
+ * matrices, specular, spot and two-sided lighting since XBA-306), from the
+ * state in `key` and
  * the constants laid out as nv2a_backend.h's Nv2aFfpKey says. Returns the
  * length, or 0 if it did not fit. tests/nv2a_gl_coverage compares it with
  * the CPU transform vertex by vertex. */

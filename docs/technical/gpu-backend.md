@@ -765,8 +765,9 @@ vertex buffers (4.6 MB), 979 index lists (2.3 MB), 730 vertex arrays. No GL
 errors; the frame dump differs from the gathered run only where the scene
 animates (sky, grass, the character, the pulsing button).
 
-**Fixed function on the GPU (`RECOMP_GPU_FFP=1`, XBA-134).** Off by
-default. A fixed-function batch then reaches `draw_program` like a
+**Fixed function on the GPU (`RECOMP_GPU_FFP`, XBA-134, on by default
+since XBA-306; `RECOMP_GPU_FFP=0` turns it off).** A fixed-function batch
+reaches `draw_program` like a
 vertex-program batch, with `Nv2aProgramBatch.ffp` set instead of program
 words: the state `ffp_batch_begin` resolves once a batch (commit 511f2c1)
 as a key (which inputs are streamed, lighting, the light kinds, colour
@@ -781,9 +782,46 @@ uploaded on the CPU each time (the `KB transformed on the CPU` of the frame
 line). `tests/nv2a_gl_coverage` compares it with the CPU transform output by
 output over 41 random states (worst difference 1.2e-7 on llvmpipe) and
 draws the same picture both ways. Differences left: a vertex with clip w
-within 1e-6 of 0 drops the whole batch on the CPU and is drawn on the GPU;
-texgen, texture matrices, specular, skinning and spot cones are modelled by
-neither (counted, "What is not drawn").
+within 1e-6 of 0 drops the whole batch on the CPU and is drawn on the GPU.
+
+XBA-306 filled the unit's gaps on both paths (`ffp_batch_vertex` on the CPU,
+still the reference, and the generated shader), after xemu's
+`vsh-ff.c`, and made the GPU path the default:
+- vertex blending (`SET_SKIN_MODE`, weights in v1): the position and normal
+  through `SET_MODEL_VIEW_MATRIX0..3` weighted (the `_2G/_3G/_4G` modes make
+  the last weight 1 minus the others), then the composite matrix, which is
+  the projection alone once a title skins;
+- texgen per stage and channel (`SET_TEXGEN_S..Q`): eye linear (plane . eye
+  position), object linear (plane . position), sphere map (S, T), reflection
+  and normal maps (S, T, R), the eye direction 0,0,1 with
+  `SET_TEXGEN_VIEW_MODEL`'s infinite viewer; then the texture matrix
+  (`SET_TEXTURE_MATRIX_ENABLE`);
+- specular (`SET_SPECULAR_ENABLE`): N.H through `SET_SPECULAR_PARAMS`'
+  (x + L) / (M x + N), H the light's half vector (infinite lights) or the
+  unit sum of the light direction and the eye direction (towards
+  `SET_EYE_POSITION` with `SET_LIGHT_CONTROL`'s local eye, else 0,0,1:
+  OpenGL's non-local viewer, where xemu adds a zero vector); into d1 with
+  separate specular, else added to d0 with d1 the vertex specular colour;
+  unlit, d1 is v4. The specular material may come from v3 or v4
+  (`SET_COLOR_MATERIAL` bits 6-7);
+- spot lights: s = D.xyz . L + D.w, 0 at or below 0, 1 from 1, between them
+  `SPOT_FALLOFF`'s (s + L) / (M s + N);
+- two-sided lighting (`SET_TWO_SIDE_LIGHT_EN`): a vertex whose normal points
+  away from the eye is lit with the normal reversed and the back colours
+  (scene ambient 0x17A0, material alpha 0x17AC, light colours 0x0C00 +
+  0x40 i, specular parameters 0x1E28). ponytail: the hardware picks the side
+  per face at rasterisation; this picks it per vertex, as
+  `RECOMP_FFP_FLIP_NORMALS` does (counted as `two-sided lighting (side per
+  vertex)`).
+Key and constants grew with them (`Nv2aFfpKey`, c[41..145]). A batch with a
+texgen value the channel does not have or a skin mode above 4 matrices stays
+on the CPU (said once per reason; both paths read them as off); so does a
+batch whose program is still compiling. `RECOMP_FFP_BATCH=0`'s per-vertex
+`ffp_vertex` / `lit_color` are left as they were (the old gap names are still
+counted under it). `tests/nv2a_ffp_backend` checks each part by hand on the
+CPU path and where batches go; `tests/nv2a_gl_coverage` compares the shader
+with the CPU transform over random states of each part alone and all
+together (d1 and the four coordinate sets included).
 
 **Vertices.** Otherwise the executor transforms: vertex programs run in
 `nv2a_vsh_interp.c`, fixed-function vertices in `ffp_vertex`, and triangles
@@ -1343,7 +1381,9 @@ counted for both. The names:
 | `texture stage mode 0xNN <name>` | dot-product and dependent-read modes (8 and up) on both paths, bump-env (6, 7) on the CPU path: they read zero. |
 | `logic op`, `polygon mode point`, `polygon mode line`, `flat shading` | the state is set for the batch; nothing models it. |
 | `stencil test (CPU rasteriser)` | stencil on, CPU path. |
-| `fixed-function texgen`, `fixed-function texture matrix`, `fixed-function vertex blending (skinning)`, `fixed-function specular`, `two-sided lighting`, `spot lights` | a fixed-function batch with that state on (`ffp_vertex` / `lit_color` model the composite matrix and lights without specular or cones). |
+| `fixed-function texgen mode`, `fixed-function skin mode` | a fixed-function batch with a texgen value the channel does not have (sphere map on R or Q, a map on Q, an unknown value) or a skin mode above `_4`: read as off. |
+| `two-sided lighting (side per vertex)` | lit with two-sided lighting on: the side is picked per vertex (XBA-306). |
+| `fixed-function texgen`, `fixed-function texture matrix`, `fixed-function vertex blending (skinning)`, `fixed-function specular`, `two-sided lighting`, `spot lights` | `RECOMP_FFP_BATCH=0` only: a fixed-function batch with that state on (`ffp_vertex` / `lit_color` model the composite matrix and lights without specular or cones). |
 | `batch with no vertex program, matrix or screen-space positions` | the batch is skipped. |
 
 The report prints them every period, most used first (`[GPU] unsupported
@@ -1423,8 +1463,8 @@ The original list (the interpreter was 41 % of the in-world executor):
    11:11:10 normals, unsigned bytes.
 5. Fog: the CPU computes the fog factor per vertex (`fog_factor`); move it
    into the vertex shader from `oFog.x` and the fog mode/parameters.
-6. Done behind `RECOMP_GPU_FFP=1` (XBA-134, "Fixed function on the GPU"
-   above); the original note: fixed-function T&L (`ffp_vertex`, `lit_color`) either as a second
+6. Done, on by default since XBA-306 (`RECOMP_GPU_FFP`, XBA-134, "Fixed
+   function on the GPU" above); the original note: fixed-function T&L (`ffp_vertex`, `lit_color`) either as a second
    generated vertex shader or kept on the CPU (menus only use it lightly).
 
 ### 7d: surfaces, readback, reports
@@ -1526,7 +1566,7 @@ The blockers the earlier note listed, checked against the code then:
 | Blocker | State |
 |---|---|
 | Synchronous visibility queries ending the render pass | Gone with deferred reports (G2, "Visibility tests"): no wait at `GET_REPORT`, a flush after 300 us and a wait after 2 ms only for a report the title spins on. `RECOMP_GPU_ZPASS=lazy` (never flush or wait from the idle hook) stays the candidate for a tiler, to measure on the device. |
-| Per-frame vertex uploads (115 MB/frame) | Vertex-program batches come from cached guest vertex buffers (G3, `RECOMP_GPU_VBO`, on by default; 0 KB a frame in Oakvale's steady state). Fixed-function and screen-space batches are still transformed on the CPU and uploaded per batch by default; the frame line gives that figure (`KB transformed on the CPU`). `RECOMP_GPU_FFP=1` (XBA-134) moves fixed-function batches to a generated vertex shader over cached vertex buffers: to measure on the device before it becomes the default. |
+| Per-frame vertex uploads (115 MB/frame) | Vertex-program batches come from cached guest vertex buffers (G3, `RECOMP_GPU_VBO`, on by default; 0 KB a frame in Oakvale's steady state). Fixed-function batches go to a generated vertex shader over cached vertex buffers by default (`RECOMP_GPU_FFP`, XBA-134, default since XBA-306); screen-space batches, and fixed-function ones while their program compiles, are still transformed on the CPU and uploaded per batch; the frame line gives that figure (`KB transformed on the CPU`). |
 | CPU writes into a surface the GPU does not see | Done: "Guest CPU writes". |
 | Clear rectangles on swizzled surfaces | Done: the executor hands a back end `SET_CLEAR_RECT` on a swizzled surface. |
 | Anti-aliased surfaces without a resolve | Done: "Present of an anti-aliased surface"; drawing and sampling them already worked at their real size. |

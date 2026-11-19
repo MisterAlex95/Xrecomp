@@ -137,6 +137,8 @@ static const char k_helpers[] =
     "  if (abs(f) > 1.884467e19) f = f < 0.0 ? -1.884467e19 : 1.884467e19;\n"
     "  return f;\n"
     "}\n"
+    "vec3 ffp_unit(vec3 v) { float l = sqrt(v.x * v.x + v.y * v.y + v.z * v.z);"
+    " return l > 1e-8 ? v / l : v; }\n"
     "float vsh_rsq(float x) { float a = abs(x); return a == 0.0 ? vsh_inf() : 1.0 / sqrt(a); }\n"
     "vec4 vsh_exp(float x) { float fl = floor(x); return vec4(exp2(fl), x - fl, exp2(x), 1.0); }\n"
     /* floor(log2f(|x|)): the exponent bits, unless log2 rounded up to the
@@ -334,74 +336,225 @@ size_t nv2a_gl_vsh_body_fmt(const uint32_t (*ins)[4], uint32_t count, uint32_t f
     return vsh_emit(b, prog, info, flags, formats, info_out);
 }
 
+/* Row r of skinning matrix k in Nv2aFfpKey's constants: matrix 0 is
+ * c[5..7] and c[41], matrices 1..3 c[42 + 4 (k - 1) + r]. */
+static uint32_t ffp_mv_row(uint32_t k, uint32_t r)
+{
+    return k ? 42 + 4 * (k - 1) + r : r < 3 ? 5 + r : 41;
+}
+
 size_t nv2a_gl_vsh_ffp_body(const Nv2aFfpKey *k, uint32_t flags, uint64_t formats,
                             char *buf, size_t cap)
 {
-    static char prog[16384];
+    static char prog[32768];
     Sb b = { buf, cap, 0, 0 }, body = { prog, sizeof prog, 0, 0 };
     Nv2aGlVshInfo info;
-    uint32_t st, i, has_col = (k->streams >> k->col) & 1;
+    uint32_t st, ch, i, has_col = (k->streams >> k->col) & 1;
+    uint32_t has_n = (k->streams >> k->nrm) & 1, has_s = (k->streams >> k->spc) & 1;
+    uint32_t has_w = (k->streams >> k->wgt) & 1, eye = 0, refl = 0;
+    int lit = k->lit && has_n;
 
     memset(&info, 0, sizeof info);
     if (!cap)
         return 0;
     buf[0] = 0;
     info.inputs = k->streams & 0xFFFFu;
-    /* ffp_batch_vertex: clip = M v0; oPos = (clip.xyz / w + offset, w). */
-    sb(&body, "  vec4 P = v0;\n"
-              "  vec4 clip = vec4(c[0].x * P.x + c[0].y * P.y + c[0].z * P.z + c[0].w * P.w,\n"
-              "                   c[1].x * P.x + c[1].y * P.y + c[1].z * P.z + c[1].w * P.w,\n"
-              "                   c[2].x * P.x + c[2].y * P.y + c[2].z * P.z + c[2].w * P.w,\n"
-              "                   c[3].x * P.x + c[3].y * P.y + c[3].z * P.z + c[3].w * P.w);\n"
+    for (st = 0; st < 4; st++)
+        for (ch = 0; ch < 4; ch++) {
+            uint32_t m = k->texgen[st][ch];
+            eye |= m == 1 || m >= 3;
+            refl |= m == 3 || m == 4;
+        }
+    eye |= (uint32_t)lit;
+    sb(&body, "  vec4 P = v0;\n");
+    if (has_n)
+        sb(&body, "  vec4 N = v%u;\n", k->nrm);
+    else
+        sb(&body, "  vec4 N = vec4(0.0, 0.0, 0.0, 1.0);\n");
+    /* ffp_batch_eye: the eye-space position and unit normal. */
+    sb(&body, "  vec4 e = vec4(0.0, 0.0, 0.0, 1.0);\n  vec3 n = vec3(0.0);\n");
+    if (k->skin) {
+        uint32_t m;
+        if (has_w)
+            sb(&body, "  vec4 W = v%u;\n", k->wgt);
+        else
+            sb(&body, "  vec4 W = vec4(0.0, 0.0, 0.0, 1.0);\n");
+        sb(&body, "  float wn = 1.0, wi;\n  e = vec4(0.0);\n");
+        for (m = 0; m < k->skin && m < 4; m++) {
+            uint32_t r0 = ffp_mv_row(m, 0), r1 = ffp_mv_row(m, 1);
+            uint32_t r2 = ffp_mv_row(m, 2), r3 = ffp_mv_row(m, 3);
+            if (k->skin_mix && m == k->skin - 1)
+                sb(&body, "  wi = wn;\n");
+            else
+                sb(&body, "  wi = W.%c; wn -= wi;\n", "xyzw"[m]);
+            sb(&body, "  e += wi * vec4(c[%u].x * P.x + c[%u].y * P.y + c[%u].z * P.z + c[%u].w * P.w,\n"
+                      "                 c[%u].x * P.x + c[%u].y * P.y + c[%u].z * P.z + c[%u].w * P.w,\n"
+                      "                 c[%u].x * P.x + c[%u].y * P.y + c[%u].z * P.z + c[%u].w * P.w,\n"
+                      "                 c[%u].x * P.x + c[%u].y * P.y + c[%u].z * P.z + c[%u].w * P.w);\n",
+               r0, r0, r0, r0, r1, r1, r1, r1, r2, r2, r2, r2, r3, r3, r3, r3);
+            sb(&body, "  n += wi * vec3(c[%u].x * N.x + c[%u].y * N.y + c[%u].z * N.z,\n"
+                      "                 c[%u].x * N.x + c[%u].y * N.y + c[%u].z * N.z,\n"
+                      "                 c[%u].x * N.x + c[%u].y * N.y + c[%u].z * N.z);\n",
+               r0, r0, r0, r1, r1, r1, r2, r2, r2);
+        }
+    } else if (eye) {
+        sb(&body, "  e = vec4(c[5].x * P.x + c[5].y * P.y + c[5].z * P.z + c[5].w,\n"
+                  "           c[6].x * P.x + c[6].y * P.y + c[6].z * P.z + c[6].w,\n"
+                  "           c[7].x * P.x + c[7].y * P.y + c[7].z * P.z + c[7].w,\n"
+                  "           c[41].x * P.x + c[41].y * P.y + c[41].z * P.z + c[41].w * P.w);\n"
+                  "  n = vec3(c[5].x * N.x + c[5].y * N.y + c[5].z * N.z,\n"
+                  "           c[6].x * N.x + c[6].y * N.y + c[6].z * N.z,\n"
+                  "           c[7].x * N.x + c[7].y * N.y + c[7].z * N.z);\n");
+    }
+    if (k->skin || eye)
+        sb(&body, "  n = ffp_unit(n);\n");
+    /* ffp_batch_vertex: clip = M v0 (M e when blending); oPos = (clip.xyz /
+     * w + offset, w). */
+    sb(&body, "  vec4 S0 = %s;\n", k->skin ? "e" : "P");
+    sb(&body, "  vec4 clip = vec4(c[0].x * S0.x + c[0].y * S0.y + c[0].z * S0.z + c[0].w * S0.w,\n"
+              "                   c[1].x * S0.x + c[1].y * S0.y + c[1].z * S0.z + c[1].w * S0.w,\n"
+              "                   c[2].x * S0.x + c[2].y * S0.y + c[2].z * S0.z + c[2].w * S0.w,\n"
+              "                   c[3].x * S0.x + c[3].y * S0.y + c[3].z * S0.z + c[3].w * S0.w);\n"
               "  R12 = vec4(clip.xyz / clip.w + c[4].xyz, clip.w);\n");
     if (has_col)
         sb(&body, "  vec4 vc = v%u;\n", k->col);
-    if (k->lit && ((k->streams >> k->nrm) & 1)) {
+    if (has_s)
+        sb(&body, "  vec4 sc = v%u;\n", k->spc);
+    else
+        sb(&body, "  vec4 sc = vec4(0.0, 0.0, 0.0, 1.0);\n");
+    sb(&body, "  vec3 spec = vec3(0.0);\n");
+    if (lit) {
         /* ffp_batch_lit. */
-        sb(&body, "  vec4 N = v%u;\n"
-                  "  vec3 e = vec3(c[5].x * P.x + c[5].y * P.y + c[5].z * P.z + c[5].w,\n"
-                  "                c[6].x * P.x + c[6].y * P.y + c[6].z * P.z + c[6].w,\n"
-                  "                c[7].x * P.x + c[7].y * P.y + c[7].z * P.z + c[7].w);\n"
-                  "  vec3 n = vec3(c[5].x * N.x + c[5].y * N.y + c[5].z * N.z,\n"
-                  "                c[6].x * N.x + c[6].y * N.y + c[6].z * N.z,\n"
-                  "                c[7].x * N.x + c[7].y * N.y + c[7].z * N.z);\n"
-                  "  float len = sqrt(n.x * n.x + n.y * n.y + n.z * n.z);\n"
-                  "  if (len > 1e-8) n /= len;\n", k->nrm);
-        if (k->flip)
-            sb(&body, "  if (n.x * e.x + n.y * e.y + n.z * e.z > 0.0) n = -n;\n");
-        sb(&body, "  vec4 col = vec4(c[8].rgb, 0.0);\n"
-                  "  vec3 l, amb, dif; float d, att, ndl;\n");
+        int two = k->two_side != 0, spc = k->specular != 0;
+        sb(&body, "  vec3 ln = n; bool bk = false;\n");
+        if (two || k->flip)
+            sb(&body, "  if (ln.x * e.x + ln.y * e.y + ln.z * e.z > 0.0) { ln = -ln; bk = %s; }\n",
+               two ? "true" : "false");
+        sb(&body, "  vec4 col = vec4(bk ? c[57].rgb : c[8].rgb, 0.0);\n"
+                  "  vec3 pw = bk ? c[55].xyz : c[54].xyz;\n"
+                  "  vec3 ve = vec3(0.0, 0.0, 1.0);\n"
+                  "  vec3 l, h, amb, dif, sp; float d, att, ndl, ndh, pf, s, f, den;\n");
+        if (spc && k->local_eye)
+            sb(&body, "  ve = ffp_unit(c[56].xyz / (c[56].w != 0.0 ? c[56].w : 1.0) - e.xyz);\n");
         for (i = 0; i < k->nlights && i < 8; i++) {
-            uint32_t base = 9 + 4 * i;
+            uint32_t base = 9 + 4 * i, x = 58 + 7 * i;
             if (k->light_kind[i] == 1) {
                 sb(&body, "  l = c[%u].xyz; att = 1.0;\n", base);
+                if (spc)
+                    sb(&body, k->local_eye ? "  h = ffp_unit(l + ve);\n" : "  h = c[%u].xyz;\n",
+                       x + 1);
                 sb(&body, "  {\n");
             } else {
-                sb(&body, "  l = c[%u].xyz - e;\n"
+                sb(&body, "  l = c[%u].xyz - e.xyz;\n"
                           "  d = sqrt(l.x * l.x + l.y * l.y + l.z * l.z);\n"
                           "  if (!(d > c[%u].w && c[%u].w > 0.0)) {\n"
                           "    if (d > 1e-8) l /= d;\n"
                           "    att = c[%u].x + c[%u].y * d + c[%u].z * d * d;\n"
                           "    att = att > 1e-8 ? 1.0 / att : 1.0;\n",
                    base, base, base, base + 1, base + 1, base + 1);
+                if (spc)
+                    sb(&body, "    h = ffp_unit(l + ve);\n");
+                if (k->light_kind[i] == 3)
+                    sb(&body, "    s = c[%u].x * l.x + c[%u].y * l.y + c[%u].z * l.z + c[%u].w;\n"
+                              "    if (s <= 0.0) att = 0.0;\n"
+                              "    else if (s < 1.0) {\n"
+                              "      f = 0.0;\n"
+                              "      if (s > -c[%u].x) {\n"
+                              "        den = c[%u].y * s + c[%u].z;\n"
+                              "        if (den == 0.0) f = 1.0;\n"
+                              "        else if (den > 0.0) f = min(max((s + c[%u].x) / den, 0.0), 1.0);\n"
+                              "      }\n"
+                              "      att *= f;\n"
+                              "    }\n",
+                       x + 3, x + 3, x + 3, x + 3, x + 2, x + 2, x + 2, x + 2);
             }
-            sb(&body, "    ndl = max(n.x * l.x + n.y * l.y + n.z * l.z, 0.0);\n"
-                      "    amb = c[%u].rgb; dif = c[%u].rgb;\n", base + 2, base + 3);
+            sb(&body, "    ndl = max(ln.x * l.x + ln.y * l.y + ln.z * l.z, 0.0);\n"
+                      "    amb = bk ? c[%u].rgb : c[%u].rgb; dif = bk ? c[%u].rgb : c[%u].rgb;\n",
+               x + 4, base + 2, x + 5, base + 3);
             if (has_col && k->amb_vc)
                 sb(&body, "    amb *= vc.rgb;\n");
             if (has_col && k->dif_vc)
                 sb(&body, "    dif *= vc.rgb;\n");
-            sb(&body, "    col.rgb += att * (amb + dif * ndl);\n  }\n");
+            sb(&body, "    col.rgb += att * (amb + dif * ndl);\n");
+            if (spc) {
+                sb(&body, "    ndh = max(ln.x * h.x + ln.y * h.y + ln.z * h.z, 0.0); pf = 0.0;\n"
+                          "    if (ndl > 0.0 && ndh > -pw.x) {\n"
+                          "      den = pw.y * ndh + pw.z;\n"
+                          "      if (den == 0.0) pf = 10000.0;\n"
+                          "      else if (den > 0.0) pf = min(max((ndh + pw.x) / den, 0.0), 10000.0);\n"
+                          "    }\n"
+                          "    sp = bk ? c[%u].rgb : c[%u].rgb;\n", x + 6, x);
+                if (k->spc_src == 1 && has_col)
+                    sb(&body, "    sp *= vc.rgb;\n");
+                if (k->spc_src == 2)
+                    sb(&body, "    sp *= sc.rgb;\n");
+                sb(&body, "    spec += att * pf * sp;\n");
+            }
+            sb(&body, "  }\n");
         }
-        sb(&body, "  col.a = %s;\n", has_col && k->dif_vc ? "vc.a" : "c[8].w");
+        sb(&body, "  col.a = %s;\n",
+           has_col && k->dif_vc ? "vc.a" : "(bk ? c[57].w : c[8].w)");
         sb(&body, "  o_d0 = clamp(col, 0.0, 1.0);\n");
     } else {
         sb(&body, "  o_d0 = clamp(%s, 0.0, 1.0);\n", has_col ? "vc" : "vec4(1.0)");
     }
-    sb(&body, "  o_d1 = vec4(0.0);\n");          /* ffp_vertex leaves d1 zero */
-    for (st = 0; st < 4; st++)
+    /* SET_SPECULAR_ENABLE (ffp_batch_vertex); off: d1 stays 0. */
+    if (!k->specular)
+        sb(&body, "  o_d1 = vec4(0.0);\n");
+    else if (lit && k->separate)
+        sb(&body, "  o_d1 = clamp(vec4(spec, sc.a), 0.0, 1.0);\n");
+    else if (lit)
+        sb(&body, "  o_d0.rgb = clamp(o_d0.rgb + spec, 0.0, 1.0);\n"
+                  "  o_d1 = clamp(sc, 0.0, 1.0);\n");
+    else
+        sb(&body, "  o_d1 = clamp(sc, 0.0, 1.0);\n");
+    /* ffp_batch_texcoord. */
+    if (refl) {
+        sb(&body, "  vec3 u = %s;\n", k->texgen_inf ? "vec3(0.0, 0.0, 1.0)" : "ffp_unit(e.xyz)");
+        sb(&body, "  float rd = n.x * u.x + n.y * u.y + n.z * u.z;\n"
+                  "  vec3 r = u - 2.0 * rd * n;\n"
+                  "  float rl = sqrt(r.x * r.x + r.y * r.y + (r.z + 1.0) * (r.z + 1.0));\n"
+                  "  float im = rl > 1e-8 ? 0.5 / rl : 0.0;\n");
+    }
+    for (st = 0; st < 4; st++) {
+        uint32_t any = 0;
+        for (ch = 0; ch < 4; ch++)
+            any |= k->texgen[st][ch];
+        if (!any && !k->texmat[st]) {
+            if ((k->streams >> k->tex[st]) & 1)
+                sb(&body, "  o_t%u = v%u;\n", st, k->tex[st]);
+            continue;
+        }
+        sb(&body, "  {\n    vec4 T = vec4(0.0, 0.0, 0.0, 1.0);\n");
         if ((k->streams >> k->tex[st]) & 1)
-            sb(&body, "  o_t%u = v%u;\n", st, k->tex[st]);
+            sb(&body, "    T = v%u;\n", k->tex[st]);
+        for (ch = 0; ch < 4; ch++) {
+            uint32_t p = 114 + 4 * st + ch;
+            char cc = "xyzw"[ch];
+            switch (k->texgen[st][ch]) {
+            case 1:
+                sb(&body, "    T.%c = c[%u].x * e.x + c[%u].y * e.y + c[%u].z * e.z + c[%u].w * e.w;\n",
+                   cc, p, p, p, p);
+                break;
+            case 2:
+                sb(&body, "    T.%c = c[%u].x * P.x + c[%u].y * P.y + c[%u].z * P.z + c[%u].w * P.w;\n",
+                   cc, p, p, p, p);
+                break;
+            case 3: if (ch < 3) sb(&body, "    T.%c = r.%c * im + 0.5;\n", cc, cc); break;
+            case 4: if (ch < 3) sb(&body, "    T.%c = r.%c;\n", cc, cc); break;
+            case 5: if (ch < 3) sb(&body, "    T.%c = n.%c;\n", cc, cc); break;
+            default: break;
+            }
+        }
+        if (k->texmat[st]) {
+            uint32_t t0 = 130 + 4 * st;
+            sb(&body, "    vec4 U = T;\n");
+            for (ch = 0; ch < 4; ch++)
+                sb(&body, "    T.%c = c[%u].x * U.x + c[%u].y * U.y + c[%u].z * U.z + c[%u].w * U.w;\n",
+                   "xyzw"[ch], t0 + ch, t0 + ch, t0 + ch, t0 + ch);
+        }
+        sb(&body, "    o_t%u = T;\n  }\n", st);
+    }
     if (body.overflow)
         return 0;
     return vsh_emit(b, prog, info, flags, formats, NULL);

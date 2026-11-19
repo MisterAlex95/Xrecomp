@@ -36,7 +36,10 @@
  *
  * Fixed function on the GPU (XBA-134 item 1):
  *  11. the generated vertex shader against the CPU transform, output by
- *      output over random states, and the same picture both ways.
+ *      output over random states, and the same picture both ways; then
+ *      over random states of each part XBA-306 added (vertex blending,
+ *      texgen, texture matrices, specular, two-sided, spot lights) alone
+ *      and all together.
  *
  * Streamed uploads (XBA-302):
  *  12. 240 overlapping batches, CPU-transformed and vertex-program
@@ -199,7 +202,7 @@ static struct {
     Nv2aFfpKey key;
     uint32_t rows, streams;
     float attrs[REC_MAX * 16 * 4];
-    float cst[64][4];
+    float cst[192][4];
 } s_rec;
 static Nv2aBackend s_spy;
 
@@ -280,7 +283,7 @@ static int ffp_capture(Nv2aVshOutput *out)
         return 0;
     sh_forget();                            /* raw GL below: the back end's shadow is stale */
     glUseProgram(prog);
-    for (i = 0; i < 64; i++) {
+    for (i = 0; i < 192; i++) {
         char name[12];
         GLint loc;
         snprintf(name, sizeof name, "c[%u]", i);
@@ -332,16 +335,43 @@ static float frand(float lo, float hi)
     return lo + (hi - lo) * (float)(s_rng >> 8) / 16777216.0f;
 }
 
+/* XBA-306 features a trial turns on (ffp_trial's feat). */
+#define FT_TEXGEN   1u
+#define FT_TEXMAT   2u
+#define FT_SKIN     4u
+#define FT_SPECULAR 8u
+#define FT_TWOSIDE  16u
+#define FT_SPOT     32u
+#define FT_ALL      63u
+static uint32_t s_ft_seen;              /* FT_* the shader batches' keys carried */
+
+/* Every XBA-306 register back off (the trials leave them set). */
+static void ffp_trial_reset(void)
+{
+    uint32_t st, k;
+    m(0x03B8, 0); m(0x0294, 0); m(0x17C4, 0); m(0x0328, 0); m(0x09CC, 0); m(0x0298, 0);
+    for (st = 0; st < 4; st++) {
+        for (k = 0; k < 4; k++)
+            m(0x03C0 + 16 * st + 4 * k, 0);
+        m(0x0420 + 4 * st, 0);
+    }
+}
+
 /* One random fixed-function state and batch (trial t), drawn through the
  * CPU transform and through the generated shader; the vertices compared.
- * Returns the worst difference. */
-static float ffp_trial(int t)
+ * feat: the XBA-306 parts turned on at random settings (every register of
+ * the others is written off). Returns the worst difference. */
+static float ffp_trial(int t, uint32_t feat)
 {
     static Nv2aVshOutput gpu[REC_MAX];
-    uint32_t i, k, n = 48, nl = (uint32_t)t % 9, mask = 0;
-    int lit = t % 4 != 3, col = t % 5 != 4, nrm = t % 7 != 6;
+    static const uint32_t tg_modes[6] = { 0, 0x2400, 0x2401, 0x2402, 0x8512, 0x8511 };
+    uint32_t i, k, st, n = 48, nl = (uint32_t)t % 9, mask = 0;
+    int force = (feat & (FT_SPECULAR | FT_TWOSIDE | FT_SPOT)) != 0;
+    int lit = force || t % 4 != 3, col = t % 5 != 4, nrm = force || t % 7 != 6;
     float worst = 0.0f;
 
+    if (force && !nl)
+        nl = 1 + (uint32_t)t % 8;
     /* Composite: viewport-ish scale, a little perspective, w in [1, 2]. */
     {
         const float M[16] = { 32 * frand(0.5f, 1.5f), frand(-4, 4), frand(-4, 4), 32,
@@ -353,9 +383,14 @@ static float ffp_trial(int t)
     }
     for (i = 0; i < 12; i++)                 /* model-view rows 0-2 */
         mf(0x0480 + 4 * i, (i % 5 == 0) ? frand(0.5f, 1.5f) : frand(-0.5f, 0.5f));
+    for (i = 12; i < 16; i++)                /* row 3: (0, 0, 0, 1) */
+        mf(0x0480 + 4 * i, i == 15 ? 1.0f : 0.0f);
     m(0x0314, (uint32_t)lit);
     for (i = 0; i < nl; i++) {
-        uint32_t b = 0x1000 + i * 0x80, kind = frand(0, 1) < 0.5f ? 1u : 2u;
+        uint32_t b = 0x1000 + i * 0x80, bb = 0x0C00 + i * 0x40;
+        uint32_t kind = frand(0, 1) < 0.5f ? 1u : 2u;
+        if (kind == 2 && (feat & FT_SPOT) && (t + i) % 2 == 0)
+            kind = 3;
         mask |= kind << (2 * i);
         for (k = 0; k < 3; k++) {
             mf(b + 4 * k, frand(0, 0.2f));                 /* ambient */
@@ -365,30 +400,93 @@ static float ffp_trial(int t)
             mf(b + 0x68 + 4 * k, k == 0 ? frand(0.5f, 1.5f) : frand(0, 0.3f));
         }
         mf(b + 0x24, frand(0, 1) < 0.3f ? frand(0.5f, 2.0f) : 0.0f);   /* range */
+        if (!feat)
+            continue;
+        for (k = 0; k < 3; k++) {
+            mf(b + 0x18 + 4 * k, frand(0, 0.6f));          /* specular */
+            mf(b + 0x28 + 4 * k, frand(-1, 1));            /* half vector */
+            mf(b + 0x40 + 4 * k, k == 0 ? frand(-0.2f, 0.2f) : k == 1 ? frand(0, 1)
+                                                               : frand(0.5f, 1.5f));
+            mf(bb + 4 * k, frand(0, 0.2f));                /* back ambient */
+            mf(bb + 0x0C + 4 * k, frand(0, 0.6f));         /* back diffuse */
+            mf(bb + 0x18 + 4 * k, frand(0, 0.6f));         /* back specular */
+        }
+        for (k = 0; k < 4; k++)                            /* spot direction */
+            mf(b + 0x4C + 4 * k, k < 3 ? frand(-2, 2) : frand(-1, 1));
     }
     m(0x03BC, mask);
-    m(0x0298, (uint32_t)(t & 3) << 2 | (uint32_t)((t >> 2) & 1) << 4);   /* colour material */
+    /* Colour material: ambient, diffuse from v[col]; specular 0..2. */
+    m(0x0298, (uint32_t)(t & 3) << 2 | (uint32_t)((t >> 2) & 1) << 4
+              | ((feat & FT_SPECULAR) ? (uint32_t)(t % 3) << 6 : 0u));
     for (k = 0; k < 3; k++)
         mf(0x0A10 + 4 * k, frand(0, 0.3f));
     mf(0x03B4, frand(0, 1));
     mf(0x0A20, frand(-2, 2)); mf(0x0A24, frand(-2, 2)); mf(0x0A28, frand(0, 1));
-    /* Vertices: position, D3DCOLOR, normal, texcoord 0 (float2) and 1 (float4). */
+    ffp_trial_reset();
+    if (feat) {
+        for (k = 0; k < 3; k++) {
+            mf(0x17A0 + 4 * k, frand(0, 0.3f));            /* back scene ambient */
+            mf(0x09E0 + 4 * k, k == 0 ? frand(-0.5f, 0.0f) : k == 1 ? frand(0, 0.5f)
+                                                             : frand(0.5f, 1.5f));
+            mf(0x1E28 + 4 * k, k == 0 ? frand(-0.5f, 0.0f) : k == 1 ? frand(0, 0.5f)
+                                                             : frand(0.5f, 1.5f));
+        }
+        mf(0x17AC, frand(0, 1));
+        for (k = 0; k < 4; k++)
+            mf(0x0A50 + 4 * k, k < 3 ? frand(-2, 2) : 1.0f);   /* eye position */
+    }
+    m(0x03B8, (feat & FT_SPECULAR) ? 1u : 0u);
+    m(0x0294, (feat & FT_SPECULAR) ? (uint32_t)(t & 1) | ((uint32_t)((t >> 1) & 1) << 16) : 0u);
+    m(0x17C4, (feat & FT_TWOSIDE) ? 1u : 0u);
+    /* Vertex blending: a random mode and matrices 1..3. */
+    m(0x0328, (feat & FT_SKIN) ? 1u + (uint32_t)t % 6 : 0u);
+    for (k = 1; (feat & FT_SKIN) && k < 4; k++)
+        for (i = 0; i < 16; i++)
+            mf(0x0480 + 0x40 * k + 4 * i, i >= 12 ? (i == 15 ? 1.0f : 0.0f)
+                                         : (i % 5 == 0) ? frand(0.5f, 1.5f) : frand(-0.5f, 0.5f));
+    /* Texgen and texture matrices, every stage. */
+    m(0x09CC, (uint32_t)t & 1);
+    for (st = 0; (feat & (FT_TEXGEN | FT_TEXMAT)) && st < 4; st++) {
+        for (k = 0; k < 4; k++) {
+            uint32_t mode = 0;
+            if ((feat & FT_TEXGEN) && frand(0, 1) < 0.7f) {
+                mode = tg_modes[(uint32_t)frand(0, 5.99f)];
+                if ((mode == 0x2402 && k >= 2) || ((mode & 0xFF00) == 0x8500 && k == 3))
+                    mode = 0x2401;
+            }
+            m(0x03C0 + 16 * st + 4 * k, mode);
+            for (i = 0; i < 4; i++)
+                mf(0x0840 + 64 * st + 16 * k + 4 * i, frand(-1, 1));
+        }
+        m(0x0420 + 4 * st, (feat & FT_TEXMAT) && frand(0, 1) < 0.7f ? 1u : 0u);
+        for (i = 0; i < 16; i++)
+            mf(0x06C0 + 64 * st + 4 * i, (i % 5 == 0) ? frand(0.5f, 1.5f) : frand(-0.5f, 0.5f));
+    }
+    /* Vertices (80 bytes): position, D3DCOLOR, normal, texcoord 0 (float2)
+     * and 1 (float4), weights (float3), specular (D3DCOLOR). */
     for (i = 0; i < n; i++) {
-        uint32_t at = VB + 64 * i;
+        uint32_t at = VB + 80 * i;
         putf(at, frand(-1, 1)); putf(at + 4, frand(-1, 1)); putf(at + 8, frand(0, 1));
         put32(at + 12, s_rng ^ (i * 0x9E3779B9u));
         putf(at + 16, frand(-1, 1)); putf(at + 20, frand(-1, 1)); putf(at + 24, frand(-1, 1));
         putf(at + 28, frand(0, 1)); putf(at + 32, frand(0, 1));
         putf(at + 36, frand(-2, 2)); putf(at + 40, frand(-2, 2)); putf(at + 44, frand(-2, 2));
         putf(at + 48, frand(0.5f, 2));
+        if (feat) {
+            putf(at + 52, frand(0, 0.6f)); putf(at + 56, frand(0, 0.4f));
+            putf(at + 60, frand(0, 0.3f));
+        }
+        put32(at + 64, (s_rng >> 3) ^ (i * 0x85EBCA6Bu));
     }
     for (k = 0; k < 16; k++)
         m(0x1760 + 4 * k, 2);
-    m(0x1720, VB);      m(0x1760, 2 | (3 << 4) | (64 << 8));
-    if (col) { m(0x172C, VB + 12); m(0x176C, 0 | (4 << 4) | (64 << 8)); }
-    if (nrm) { m(0x1728, VB + 16); m(0x1768, 2 | (3 << 4) | (64 << 8)); }
-    m(0x1744, VB + 28); m(0x1784, 2 | (2 << 4) | (64 << 8));
-    m(0x1748, VB + 36); m(0x1788, 2 | (4 << 4) | (64 << 8));
+    m(0x1720, VB);      m(0x1760, 2 | (3 << 4) | (80 << 8));
+    if (col) { m(0x172C, VB + 12); m(0x176C, 0 | (4 << 4) | (80 << 8)); }
+    if (nrm) { m(0x1728, VB + 16); m(0x1768, 2 | (3 << 4) | (80 << 8)); }
+    m(0x1744, VB + 28); m(0x1784, 2 | (2 << 4) | (80 << 8));
+    m(0x1748, VB + 36); m(0x1788, 2 | (4 << 4) | (80 << 8));
+    if (feat & FT_SKIN) { m(0x1724, VB + 52); m(0x1764, 2 | (3 << 4) | (80 << 8)); }
+    if (feat & FT_SPECULAR) { m(0x1730, VB + 64); m(0x1770, 0 | (4 << 4) | (80 << 8)); }
 
     memset(&s_rec, 0, sizeof s_rec);
     nv2a_gpu_ffp_enable(0);
@@ -397,20 +495,31 @@ static float ffp_trial(int t)
     draw(5, 0, n);                           /* the generated shader */
     nv2a_gpu_ffp_enable(0);
     if (s_rec.count != n || !s_rec.got_ffp || s_rec.rows != n || !ffp_capture(gpu)) {
-        printf("  trial %d: CPU %u vertices, shader batch %d with %u rows\n", t, s_rec.count,
-               s_rec.got_ffp, s_rec.rows);
+        printf("  trial %d (features 0x%x): CPU %u vertices, shader batch %d with %u rows\n",
+               t, feat, s_rec.count, s_rec.got_ffp, s_rec.rows);
         return 1e9f;
     }
+    for (st = 0; st < 4; st++) {
+        for (k = 0; k < 4; k++)
+            s_ft_seen |= s_rec.key.texgen[st][k] ? FT_TEXGEN : 0u;
+        s_ft_seen |= s_rec.key.texmat[st] ? FT_TEXMAT : 0u;
+    }
+    for (k = 0; k < s_rec.key.nlights; k++)
+        s_ft_seen |= s_rec.key.light_kind[k] == 3 ? FT_SPOT : 0u;
+    s_ft_seen |= (s_rec.key.skin ? FT_SKIN : 0u) | (s_rec.key.specular ? FT_SPECULAR : 0u)
+               | (s_rec.key.two_side ? FT_TWOSIDE : 0u);
     for (i = 0; i < n; i++) {
         const Nv2aVertexFull *c = &s_rec.full[i];
         const Nv2aVshOutput *g = &gpu[i];
         for (k = 0; k < 4; k++) {
-            float dp = fabsf(c->pos[k] - g->pos[k]) / (1.0f + fabsf(c->pos[k]));
-            float dc = fabsf(c->d0[k] - g->d0[k]);
-            float d0t = fabsf(c->tex[0][k] - g->tex[0][k]), d1t = fabsf(c->tex[1][k] - g->tex[1][k]);
-            float d = dp > dc ? dp : dc;
-            d = d > d0t ? d : d0t;
-            d = d > d1t ? d : d1t;
+            float d = fabsf(c->pos[k] - g->pos[k]) / (1.0f + fabsf(c->pos[k]));
+            float dc = fabsf(c->d0[k] - g->d0[k]), ds = fabsf(c->d1[k] - g->d1[k]);
+            d = d > dc ? d : dc;
+            d = d > ds ? d : ds;
+            for (st = 0; st < 4; st++) {
+                float dt = fabsf(c->tex[st][k] - g->tex[st][k]) / (1.0f + fabsf(c->tex[st][k]));
+                d = d > dt ? d : dt;
+            }
             if (d > worst)
                 worst = d;
         }
@@ -878,7 +987,7 @@ int main(void)
         m(0x1E70, 0);
         m(0x1B00, 0);
         for (t = 0; t < 41; t++) {        /* the last (40): lit, 4 lights */
-            w = ffp_trial(t);
+            w = ffp_trial(t, 0);
             if (w > worst)
                 worst = w;
         }
@@ -912,6 +1021,34 @@ int main(void)
         printf("    the same picture both ways: %d of 4096 pixels differ by more than 2"
                " (%d drawn)\n", pdiff, lit_px);
         CHECK(pdiff <= 4 && lit_px > 200);
+        /* XBA-306: each part the generator gained, alone (12 states each),
+         * then all of them together (24): vertex blending, texgen, texture
+         * matrices, specular, two-sided lighting, spot lights. d1 and the
+         * four coordinate sets compared too. */
+        {
+            static const struct { uint32_t feat; const char *name; } part[7] = {
+                { FT_TEXGEN, "texgen" }, { FT_TEXMAT, "texture matrices" },
+                { FT_SKIN, "vertex blending" }, { FT_SPECULAR, "specular" },
+                { FT_TWOSIDE, "two-sided" }, { FT_SPOT, "spot lights" },
+                { FT_ALL, "all together" },
+            };
+            int j;
+            for (j = 0; j < 7; j++) {
+                float pw = 0.0f;
+                int count = part[j].feat == FT_ALL ? 24 : 12;
+                s_ft_seen = 0;
+                for (t = 0; t < count; t++) {
+                    w = ffp_trial(t + 3 * j, part[j].feat);
+                    if (w > pw)
+                        pw = w;
+                }
+                printf("    %s: %d states x 48 vertices, worst difference %.2g\n",
+                       part[j].name, count, (double)pw);
+                CHECK(pw < 1e-3f);
+                CHECK(s_ft_seen == part[j].feat);     /* the part reached the shader */
+            }
+            ffp_trial_reset();
+        }
         m(0x0314, 0);
         nv2a_gl_install_from_env();
     }
