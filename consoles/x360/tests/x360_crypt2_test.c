@@ -34,7 +34,7 @@ static uint32_t unhex(const char *s, uint8_t *out)
 static uint32_t gbytes(const void *p, uint32_t n)
 {
     uint32_t a = galloc(n ? n : 1);
-    memcpy(X->base + a, p, n);
+    memcpy(x360_p(X, a), p, n);
     return a;
 }
 
@@ -49,14 +49,14 @@ static uint32_t ghex(const char *s, uint32_t *n)
 static uint32_t gstate(uint32_t size)
 {
     uint32_t a = galloc(size + 16);
-    memset(X->base + a + size, GUARD, 16);
+    memset(x360_p(X, a + size), GUARD, 16);
     return a;
 }
 
 static int guard_ok(uint32_t a, uint32_t size)
 {
     for (uint32_t i = 0; i < 16; i++)
-        if (X->base[a + size + i] != GUARD)
+        if (x360_p(X, a + size + i)[0] != GUARD)
             return 0;
     return 1;
 }
@@ -65,7 +65,7 @@ static void expect_hex(const char *what, uint32_t a, const char *hex)
 {
     static uint8_t want[4096];
     uint32_t n = unhex(hex, want);
-    OK(!memcmp(X->base + a, want, n), "%s differs from the published value", what);
+    OK(!memcmp(x360_p(X, a), want, n), "%s differs from the published value", what);
 }
 
 #define KX(name, n, ...) K(X360_xboxkrnl_##name, n, __VA_ARGS__)
@@ -95,7 +95,7 @@ static void hash_vector(const hash_api *h, const char *msg, uint32_t len, const 
     OK(guard_ok(out, h->digest), "%s: wrote past the digest", h->name);
 
     if (len > 3) { /* the three inputs of the one-shot call are one message */
-        memset(X->base + out, 0, h->digest);
+        memset(x360_p(X, out), 0, h->digest);
         K(h->one_shot, 8, in, 1u, in + 1, 2u, in + 3, len - 3, out, h->digest);
         expect_hex(h->name, out, want);
     }
@@ -110,12 +110,12 @@ static void hash_vector(const hash_api *h, const char *msg, uint32_t len, const 
             take = len - at;
         K(h->update, 3, st, in + at, take);
         at += take;
-        memcpy(X->base + st2, X->base + st, h->state); /* the state moves: nothing may be remembered by address */
-        memset(X->base + st, 0xEE, h->state);
+        memcpy(x360_p(X, st2), x360_p(X, st), h->state); /* the state moves: nothing may be remembered by address */
+        memset(x360_p(X, st), 0xEE, h->state);
         uint32_t tmp = st;
         st = st2, st2 = tmp;
     }
-    memset(X->base + out, 0, h->digest);
+    memset(x360_p(X, out), 0, h->digest);
     K(h->final, 3, st, out, h->digest);
     expect_hex(h->name, out, want);
     OK(guard_ok(st, h->state) && guard_ok(st2, h->state), "%s: wrote past the state", h->name);
@@ -131,7 +131,7 @@ static void hash_million(const hash_api *h, const char *want)
 {
     static const uint32_t cuts[] = {1, 3, 55, 56, 57, 63, 64, 65, 111, 112, 119, 127, 128, 129, 1000};
     uint32_t in = galloc(1000), out = gstate(h->digest), st = gstate(h->state), st2 = gstate(h->state);
-    memset(X->base + in, 'a', 1000);
+    memset(x360_p(X, in), 'a', 1000);
     K(h->init, 1, st);
     uint32_t left = 1000000;
     for (unsigned k = 0; left; k++) {
@@ -140,8 +140,8 @@ static void hash_million(const hash_api *h, const char *want)
             take = left;
         K(h->update, 3, st, in, take);
         left -= take;
-        memcpy(X->base + st2, X->base + st, h->state);
-        memset(X->base + st, 0xEE, h->state);
+        memcpy(x360_p(X, st2), x360_p(X, st), h->state);
+        memset(x360_p(X, st), 0xEE, h->state);
         uint32_t tmp = st;
         st = st2, st2 = tmp;
     }
@@ -240,7 +240,7 @@ static void hmac_md5_case(const char *key, const char *data, const char *want)
     expect_hex("HMAC-MD5 one shot", out, want);
     OK(guard_ok(out, 16), "HMAC-MD5: wrote past the MAC");
 
-    memset(X->base + out, 0, 16);
+    memset(x360_p(X, out), 0, 16);
     KX(XeCryptHmacMd5Init, 3, st, k, ks);
     KX(XeCryptHmacMd5Update, 3, st, d, 5u);
     KX(XeCryptHmacMd5Update, 3, st, d + 5, ds - 5);
@@ -256,21 +256,21 @@ static void hmac_sha_case(const char *key, const char *data, const char *want)
     KX(XeCryptHmacSha, 10, k, ks, d, ds, 0, 0, 0, 0, out, 20u);
     expect_hex("HMAC-SHA1 one shot (x360_crypt.c)", out, want);
 
-    memset(X->base + out, 0, 20);
+    memset(x360_p(X, out), 0, 20);
     KX(XeCryptHmacShaInit, 3, st, k, ks);
     KX(XeCryptHmacShaUpdate, 3, st, d, 5u);
-    memcpy(X->base + st2, X->base + st, 0xB0); /* a save state in the middle of the MAC */
-    memset(X->base + st, 0xEE, 0xB0);
+    memcpy(x360_p(X, st2), x360_p(X, st), 0xB0); /* a save state in the middle of the MAC */
+    memset(x360_p(X, st), 0xEE, 0xB0);
     KX(XeCryptHmacShaUpdate, 3, st2, d + 5, ds - 5);
     KX(XeCryptHmacShaFinal, 3, st2, out, 20u);
     expect_hex("HMAC-SHA1 incremental", out, want);
     OK(guard_ok(st, 0xB0) && guard_ok(st2, 0xB0), "HMAC-SHA1: wrote past the state");
 
     /* Verify: the whole MAC, a truncated one, a wrong one, one longer than a digest */
-    uint32_t mac = gbytes(X->base + out, 20);
+    uint32_t mac = gbytes(x360_p(X, out), 20);
     OK(KX(XeCryptHmacShaVerify, 10, k, ks, d, ds, 0, 0, 0, 0, mac, 20u) == 1, "HmacShaVerify refused the right MAC");
     OK(KX(XeCryptHmacShaVerify, 10, k, ks, d, ds, 0, 0, 0, 0, mac, 12u) == 1, "HmacShaVerify refused a truncated MAC");
-    X->base[mac + 11] ^= 1;
+    x360_p(X, mac + 11)[0] ^= 1;
     OK(KX(XeCryptHmacShaVerify, 10, k, ks, d, ds, 0, 0, 0, 0, mac, 12u) == 0, "HmacShaVerify accepted a wrong MAC");
     OK(KX(XeCryptHmacShaVerify, 10, k, ks, d, ds, 0, 0, 0, 0, mac, 21u) == 0, "HmacShaVerify accepted 21 bytes");
 }
@@ -303,33 +303,33 @@ static void cbc_both(const char *what, unsigned ord, uint32_t st, const char *iv
     uint32_t ivn, n, m, feed = ghex(iv, &ivn), in = ghex(pt, &n), want = ghex(ct, &m), out = gstate(n);
     OK(n == m, "%s: vector sizes", what);
     K(ord, 6, st, in, n, out, feed, 1u);
-    OK(!memcmp(X->base + out, X->base + want, n), "%s: encryption differs", what);
-    OK(!memcmp(X->base + feed, X->base + want + n - ivn, ivn), "%s: the feed is not the last ciphertext block", what);
+    OK(!memcmp(x360_p(X, out), x360_p(X, want), n), "%s: encryption differs", what);
+    OK(!memcmp(x360_p(X, feed), x360_p(X, want + n - ivn), ivn), "%s: the feed is not the last ciphertext block", what);
     OK(guard_ok(out, n), "%s: wrote past the output", what);
 
     feed = ghex(iv, &ivn);
     K(ord, 6, st, want, n, out, feed, 0u);
-    OK(!memcmp(X->base + out, X->base + in, n), "%s: decryption differs", what);
-    OK(!memcmp(X->base + feed, X->base + want + n - ivn, ivn), "%s: decrypt feed", what);
+    OK(!memcmp(x360_p(X, out), x360_p(X, in), n), "%s: decryption differs", what);
+    OK(!memcmp(x360_p(X, feed), x360_p(X, want + n - ivn), ivn), "%s: decrypt feed", what);
 
     feed = ghex(iv, &ivn);
-    memcpy(X->base + out, X->base + in, n);
+    memcpy(x360_p(X, out), x360_p(X, in), n);
     K(ord, 6, st, out, ivn, out, feed, 1u);
     K(ord, 6, st, out + ivn, n - ivn, out + ivn, feed, 1u);
-    OK(!memcmp(X->base + out, X->base + want, n), "%s: chained in-place encryption differs", what);
+    OK(!memcmp(x360_p(X, out), x360_p(X, want), n), "%s: chained in-place encryption differs", what);
     feed = ghex(iv, &ivn);
     K(ord, 6, st, out, n, out, feed, 0u);
-    OK(!memcmp(X->base + out, X->base + in, n), "%s: in-place decryption differs", what);
+    OK(!memcmp(x360_p(X, out), x360_p(X, in), n), "%s: in-place decryption differs", what);
 }
 
 static void ecb_both(const char *what, unsigned ord, uint32_t st, const char *pt, const char *ct)
 {
     uint32_t n, m, in = ghex(pt, &n), want = ghex(ct, &m), out = gstate(n);
     K(ord, 4, st, in, out, 1u);
-    OK(!memcmp(X->base + out, X->base + want, n), "%s: encryption differs", what);
+    OK(!memcmp(x360_p(X, out), x360_p(X, want), n), "%s: encryption differs", what);
     OK(guard_ok(out, n), "%s: wrote past the block", what);
     K(ord, 4, st, want, out, 0u);
-    OK(!memcmp(X->base + out, X->base + in, n), "%s: decryption differs", what);
+    OK(!memcmp(x360_p(X, out), x360_p(X, in), n), "%s: decryption differs", what);
 }
 
 #define NIST_KEY128 "2b7e151628aed2a6abf7158809cf4f3c"
@@ -373,13 +373,13 @@ static void test_aes(void)
     uint32_t len, m, pt = ghex(NIST_PT, &len), ct = ghex(CTR_CT, &m), out = gstate(len);
     uint32_t ctr = ghex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", &n);
     KX(XeCryptAesCtr, 5, st, pt, len, out, ctr);
-    OK(!memcmp(X->base + out, X->base + ct, len), "CTR-AES128 F.5.1 differs");
+    OK(!memcmp(x360_p(X, out), x360_p(X, ct), len), "CTR-AES128 F.5.1 differs");
     OK(guard_ok(out, len), "CTR wrote past the output");
     expect_hex("CTR counter after four blocks", ctr, "f0f1f2f3f4f5f6f7f8f9fafbfcfdff03");
     ctr = ghex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", &n);
     for (uint32_t k = 0; k < 4; k++)
         KX(XeCryptAesCtr, 5, st, ct + 16 * k, 16u, out + 16 * k, ctr);
-    OK(!memcmp(X->base + out, X->base + pt, len), "CTR-AES128 F.5.2 (block by block) differs");
+    OK(!memcmp(x360_p(X, out), x360_p(X, pt), len), "CTR-AES128 F.5.2 (block by block) differs");
     ctr = ghex("ffffffffffffffffffffffffffffffff", &n); /* the carry runs through all 128 bits */
     KX(XeCryptAesCtr, 5, st, pt, 16u, out, ctr);
     expect_hex("CTR counter wrap", ctr, "00000000000000000000000000000000");
@@ -391,7 +391,7 @@ static void test_aes(void)
     expect_hex("AES CBC-MAC, one block", mac, "3ad77bb40d7a3660a89ecaf32466ef97");
     uint32_t iv = ghex(NIST_IV, &n), msg = ghex(NIST_PT, &len);
     for (uint32_t i = 0; i < 16; i++)
-        X->base[msg + i] ^= X->base[iv + i];
+        x360_p(X, msg + i)[0] ^= x360_p(X, iv + i)[0];
     KX(XeCryptAesCbcMac, 4, key, msg, len, mac);
     expect_hex("AES CBC-MAC, four blocks", mac, "3ff1caa1681fac09120eca307586e1a7");
     OK(guard_ok(mac, 16), "CBC-MAC wrote past the MAC");
@@ -422,16 +422,16 @@ static void test_aes(void)
     KX(XeCryptAesCreateKeySchedule, 3, k256, ks, sch);
     uint32_t feed = ghex(NIST_IV, &n), c256 = ghex(CT256, &m);
     KX(XeCryptAesCbcEncrypt, 5, sch, pt, len, out, feed);
-    OK(!memcmp(X->base + out, X->base + c256, len), "CBC-AES256 F.2.5 differs");
+    OK(!memcmp(x360_p(X, out), x360_p(X, c256), len), "CBC-AES256 F.2.5 differs");
     feed = ghex(NIST_IV, &n);
     KX(XeCryptAesCbcDecrypt, 5, sch, c256, len, out, feed);
-    OK(!memcmp(X->base + out, X->base + pt, len), "CBC-AES256 F.2.6 differs");
+    OK(!memcmp(x360_p(X, out), x360_p(X, pt), len), "CBC-AES256 F.2.6 differs");
 
     /* a size that is no AES key: the schedule stays unusable and the cipher does nothing */
     KX(XeCryptAesCreateKeySchedule, 3, k256, 17u, sch);
-    memset(X->base + one, 0x5A, 16);
+    memset(x360_p(X, one), 0x5A, 16);
     KX(XeCryptAesEncryptOne, 3, sch, pt, one);
-    OK(X->base[one] == 0x5A && X->base[one + 15] == 0x5A, "a refused schedule still encrypted");
+    OK(x360_p(X, one)[0] == 0x5A && x360_p(X, one + 15)[0] == 0x5A, "a refused schedule still encrypted");
 }
 
 static void test_des(void)
@@ -519,20 +519,20 @@ static void test_bn_helpers(void)
     OK(guard_ok(dst, 16), "a swap wrote past the destination");
 
     /* in place */
-    memcpy(X->base + dst, X->base + src, 16);
+    memcpy(x360_p(X, dst), x360_p(X, src), 16);
     KX(XeCryptBnQw_SwapDwQwLeBe, 3, dst, dst, 2u);
     expect_hex("BnQw_SwapDwQwLeBe in place", dst, "0807060504030201 1817161514131211");
-    memcpy(X->base + dst, X->base + src, 16);
+    memcpy(x360_p(X, dst), x360_p(X, src), 16);
     KX(XeCryptBnQw_SwapDwQw, 3, dst, dst, 2u);
     expect_hex("BnQw_SwapDwQw in place", dst, "0506070801020304 1516171811121314");
 
-    memset(X->base + dst, 0, 16);
+    memset(x360_p(X, dst), 0, 16);
     KX(XeCryptBnDw_Copy, 3, src, dst, 3u);
     expect_hex("BnDw_Copy", dst, "0102030405060708 1112131400000000");
     KX(XeCryptBnDw_Zero, 2, dst, 1u);
     expect_hex("BnDw_Zero", dst, "0000000005060708 1112131400000000");
     KX(XeCryptBnQw_Copy, 3, src, dst, 2u);
-    OK(!memcmp(X->base + dst, X->base + src, 16), "BnQw_Copy");
+    OK(!memcmp(x360_p(X, dst), x360_p(X, src), 16), "BnQw_Copy");
     KX(XeCryptBnQw_Zero, 2, dst, 2u);
     expect_hex("BnQw_Zero", dst, "0000000000000000 0000000000000000");
     OK(guard_ok(dst, 16), "BnQw_Zero wrote past the number");
@@ -615,14 +615,14 @@ static void test_pkcs1(void)
     KX(XeCryptBnDwLePkcs1Format, 4, d, 0u, sig, 128u);
     int same = 1;
     for (int i = 0; i < 128; i++)
-        same &= X->base[sig + (uint32_t)i] == want[127 - i];
+        same &= x360_p(X, sig + (uint32_t)i)[0] == want[127 - i];
     OK(same, "Pkcs1Format: not the RFC 8017 block, reversed");
     OK(guard_ok(sig, 128), "Pkcs1Format wrote past the block");
     OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 128u) == 1, "Pkcs1Verify refused its own format");
-    X->base[sig + 3] ^= 1;
+    x360_p(X, sig + 3)[0] ^= 1;
     OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 128u) == 0, "Pkcs1Verify accepted another digest");
-    X->base[sig + 3] ^= 1;
-    X->base[sig + 60] ^= 1;
+    x360_p(X, sig + 3)[0] ^= 1;
+    x360_p(X, sig + 60)[0] ^= 1;
     OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 128u) == 0, "Pkcs1Verify accepted damaged padding");
     OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 38u) == 0, "Pkcs1Verify accepted a block too short");
     OK(KX(XeCryptBnDwLePkcs1Verify, 3, d, sig, 513u) == 0, "Pkcs1Verify accepted a block too long");
@@ -707,9 +707,9 @@ static void test_refused(void)
                                        X360_xboxkrnl_XeCryptBnQwNeRsaKeyGen};
     uint32_t buf = gstate(0x100);
     for (unsigned k = 0; k < sizeof refused / sizeof refused[0]; k++) {
-        memset(X->base + buf, 0x77, 0x100);
+        memset(x360_p(X, buf), 0x77, 0x100);
         OK(K(refused[k], 4, buf, buf, buf, buf) == 0, "export %u answered success", refused[k]);
-        OK(X->base[buf] == 0x77 && X->base[buf + 0xFF] == 0x77, "export %u wrote to the buffer", refused[k]);
+        OK(x360_p(X, buf)[0] == 0x77 && x360_p(X, buf + 0xFF)[0] == 0x77, "export %u wrote to the buffer", refused[k]);
     }
 }
 

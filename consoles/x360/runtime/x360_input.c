@@ -106,7 +106,7 @@ void x360_x_XamInputGetCapabilities(x360_machine *x, x360_thread *t, xe_cpu *c)
     uint32_t p = A(2);
     if (p) {
         x360_pad all = {0xF3FF, 0xFF, 0xFF, -1, -1, -1, -1};
-        memset(x->base + p, 0, 20);
+        memset(x360_p(x, p), 0, 20);
         x360_w8(x, p, 1);     /* XINPUT_DEVTYPE_GAMEPAD */
         x360_w8(x, p + 1, 1); /* XINPUT_DEVSUBTYPE_GAMEPAD */
         put_gamepad(x, p + 4, &all);

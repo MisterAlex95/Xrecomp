@@ -20,7 +20,9 @@ export PYTHONPATH="$repo:$repo/consoles/x360/tools"
 timeout 300 "$py" -m x360_tools.recomp "$work/seh.xex" "$work/src" --no-comments >"$work/recomp.txt" || {
     cat "$work/recomp.txt"; exit 1; }
 cat "$work/recomp.txt"
-"$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 -I "$repo/consoles/x360/runtime" \
+# X360_HOST_PAGE (the *_16k tests): a pack that follows the host's page size, on x86 too (xenon_rt.h)
+"$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 ${X360_HOST_PAGE:+-DXE_VIEW4K_DYNAMIC=1} \
+    -I "$repo/consoles/x360/runtime" \
     -I "$repo/consoles/gc/runtime" -o "$work/libtitle.so" "$work"/src/*.c -lm || exit 1
 timeout 120 "$run" "$work/seh.xex" --pack "$work/libtitle.so" --dbg "$work/dbg.txt" --log "$work/log.txt" --stats \
     --missed "$work/missed.txt"

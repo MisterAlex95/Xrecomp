@@ -1117,7 +1117,7 @@ static void k_ExGetXConfigSetting(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     uint32_t buf = A(2), size = A(3), req = A(4);
     if (buf && size <= 0x1000)
-        memset(x->base + buf, 0, size);
+        memset(x360_p(x, buf), 0, size);
     if (req)
         x360_w16(x, req, (uint16_t)size);
     RET(X_STATUS_SUCCESS);
@@ -1189,7 +1189,7 @@ static void k_VdQueryVideoMode(x360_machine *x, x360_thread *t, xe_cpu *c)
     float hz = 60.0f;
     uint32_t hzbits;
     memcpy(&hzbits, &hz, 4);
-    memset(x->base + m, 0, 48);
+    memset(x360_p(x, m), 0, 48);
     x360_w32(x, m, 1280);
     x360_w32(x, m + 4, 720);
     x360_w32(x, m + 12, 1);
@@ -1214,7 +1214,7 @@ static void k_XexGetModuleSection(x360_machine *x, x360_thread *t, xe_cpu *c)
     for (int k = 0; k < 8; k++)
         if (!(want[k] = (char)x360_r8(x, A(1) + (uint32_t)k)))
             break;
-    const uint8_t *pe = x->base + x->image_base;
+    const uint8_t *pe = x360_p(x, x->image_base);
     uint32_t lfanew = pe[0x3C] | pe[0x3D] << 8 | pe[0x3E] << 16 | (uint32_t)pe[0x3F] << 24;
     if (pe[0] != 'M' || lfanew > 0x800) {
         RET(X_STATUS_NOT_FOUND);
@@ -1524,9 +1524,9 @@ int x360_kernel_init(x360_machine *x)
     a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XexExecutableModuleHandle, 16);
     x360_w32(x, a, x->module);
     a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedImageName, 64);
-    memcpy(x->base + a, "\\Device\\Cdrom0\\default.xex", 27);
+    memcpy(x360_p(x, a), "\\Device\\Cdrom0\\default.xex", 27);
     a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedCommandLine, 64);
-    memcpy(x->base + a, "\"default.xex\"", 14);
+    memcpy(x360_p(x, a), "\"default.xex\"", 14);
     x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeDebugMonitorData, 64);
     x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExThreadObjectType, 16);
     x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExEventObjectType, 16);

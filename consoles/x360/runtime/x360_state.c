@@ -264,7 +264,7 @@ static int all_zero(const uint8_t *p)
 static void page_save(x360_machine *x, uint32_t a, void *ctx)
 {
     io *s = ctx;
-    const uint8_t *p = x->base + a;
+    const uint8_t *p = x360_p(x, a);
     if (all_zero(p))
         return;
     io_u32(s, &a);
@@ -275,7 +275,7 @@ static void page_commit_zero(x360_machine *x, uint32_t a, void *ctx)
 {
     (void)ctx;
     x360_commit(x, a, PAGE);
-    memset(x->base + a, 0, PAGE);
+    memset(x360_p(x, a), 0, PAGE);
 }
 
 static void sec_memory(x360_machine *x, io *s)
@@ -297,7 +297,7 @@ static void sec_memory(x360_machine *x, io *s)
             break;
         }
         x360_commit(x, a, PAGE);
-        io_bytes(s, x->base + a, PAGE);
+        io_bytes(s, x360_p(x, a), PAGE);
     }
 }
 

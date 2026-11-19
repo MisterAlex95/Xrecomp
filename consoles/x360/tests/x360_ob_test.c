@@ -47,12 +47,13 @@ static void test_links(void)
           "NtCreateSymbolicLinkObject");
     uint32_t h = x360_r32(X, hp);
     CHECK(K(X360_xboxkrnl_NtQuerySymbolicLinkObject, 3, h, out, len) == 0 && x360_r32(X, len) == 17 &&
-              x360_r16(X, out) == 17 && !memcmp(X->base + buf, "\\Device\\Harddisk0", 17), "the target comes back");
+              x360_r16(X, out) == 17 && !memcmp(x360_p(X, buf), "\\Device\\Harddisk0", 17), "the target comes back");
     CHECK(K(X360_xboxkrnl_NtOpenSymbolicLinkObject, 2, hp, attrs("SAVES:")) == 0, "opened by name, in any case");
     CHECK(K(X360_xboxkrnl_NtOpenSymbolicLinkObject, 2, hp, attrs("none:")) == 0xC0000034u, "no such link");
     uint32_t o = x360_handle_obj(X, x360_r32(X, hp));
-    memset(X->base + buf, 0, 64);
-    CHECK(K(X360_xboxkrnl_ObTranslateSymbolicLink, 2, o, out) == 0 && !memcmp(X->base + buf, "\\Device\\Harddisk0", 17),
+    memset(x360_p(X, buf), 0, 64);
+    CHECK(K(X360_xboxkrnl_ObTranslateSymbolicLink, 2, o, out) == 0 &&
+              !memcmp(x360_p(X, buf), "\\Device\\Harddisk0", 17),
           "ObTranslateSymbolicLink");
     x360_w16(X, out + 2, 4);
     CHECK(K(X360_xboxkrnl_NtQuerySymbolicLinkObject, 3, h, out, len) == 0xC0000023u && x360_r32(X, len) == 17,
@@ -86,9 +87,9 @@ static void test_refusals(void)
     CHECK(K(X360_xboxkrnl_XInputdReadState, 0) == 0x48Fu, "the controller driver: not connected");
     CHECK(K(X360_xboxkrnl_IptvSetSessionKey, 0) == 0xC00000BBu, "no IPTV");
     uint32_t buf = galloc(32);
-    memset(X->base + buf, 0x5A, 32);
+    memset(x360_p(X, buf), 0x5A, 32);
     CHECK(K(X360_xboxkrnl_XeKeysGetConsoleID, 2, buf, buf) == 0xC00000BBu, "no console id");
-    CHECK(X->base[buf] == 0x5A && X->base[buf + 31] == 0x5A, "and nothing written");
+    CHECK(x360_p(X, buf)[0] == 0x5A && x360_p(X, buf + 31)[0] == 0x5A, "and nothing written");
     CHECK(K(X360_xboxkrnl_XeKeysQwNeRsaPrvCrypt, 3, buf, buf, buf) == 0, "no private key");
     CHECK(K(X360_xboxkrnl_NtDeviceIoControlFile, 0) == 0xC0000010u, "no device controls");
     CHECK(K(X360_xboxkrnl_NtSetSystemTime, 0) == 0xC0000061u, "the clock is not the title's");

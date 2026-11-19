@@ -432,7 +432,7 @@ void x360_k_VdSwap(x360_machine *x, x360_thread *t, xe_cpu *c)
     uint32_t buf = A(0), fb_ptr = A(5), w_ptr = (uint32_t)x360_stack_arg(x, c, 8),
              h_ptr = (uint32_t)x360_stack_arg(x, c, 9);
     uint32_t fb = fb_ptr ? x360_r32(x, fb_ptr) : 0;
-    memset(x->base + buf, 0, 64 * 4);
+    memset(x360_p(x, buf), 0, 64 * 4);
     /* as Xenia's VdSwap: the front buffer's texture fetch constant (from the Direct3D texture header, its base made
      * physical) into fetch constant 0, then the token */
     uint32_t fetch = A(1), at = buf;
@@ -460,7 +460,7 @@ void x360_k_VdGetSystemCommandBuffer(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     if (A(0)) {
-        memset(x->base + A(0), 0, 0x94);
+        memset(x360_p(x, A(0)), 0, 0x94);
         x360_w32(x, A(0), 0xBEEF0000u);
     }
     if (A(1))

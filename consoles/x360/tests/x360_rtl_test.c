@@ -45,7 +45,7 @@ static uint64_t dbl(double d)
 static uint32_t gbuf(uint32_t n)
 {
     uint32_t a = x360_heap_alloc(X, &X->heap_v4k, n, 0);
-    memset(X->base + a, 0x7E, n);
+    memset(x360_p(X, a), 0x7E, n);
     return a;
 }
 
@@ -67,7 +67,7 @@ static int wneq(uint32_t a, const char *s, uint32_t n)
     return 1;
 }
 
-static const char *nstr(uint32_t a) { return (const char *)X->base + a; }
+static const char *nstr(uint32_t a) { return (const char *)x360_p(X, a); }
 
 /* ---- printf ---- */
 
@@ -176,7 +176,7 @@ static void test_conversions(void)
 
     /* the precision bounds the read: this string has no terminator in its 3 characters */
     uint32_t raw = galloc(4);
-    memcpy(X->base + raw, "abcd", 4);
+    memcpy(x360_p(X, raw), "abcd", 4);
     buf = gbuf(16);
     K(X360_xboxkrnl_sprintf, 3, buf, gstr("%.3s"), raw);
     T(!strcmp(nstr(buf), "abc"), "precision: \"%s\"", nstr(buf));
@@ -197,16 +197,16 @@ static void test_truncation(void)
     /* fits with room: terminated */
     T(K(X360_xboxkrnl__snwprintf, 4, buf, 5, f, 1234) == 4 && weq(buf, "1234"), "room");
     /* exact fit: the length, no terminator */
-    memset(X->base + buf, 0x7E, 64);
+    memset(x360_p(X, buf), 0x7E, 64);
     T(K(X360_xboxkrnl__snwprintf, 4, buf, 4, f, 1234) == 4 && wneq(buf, "1234", 4) && x360_r16(X, buf + 8) == 0x7E7E,
       "exact fit");
     /* one short: -1, the characters that fit, nothing after them */
-    memset(X->base + buf, 0x7E, 64);
+    memset(x360_p(X, buf), 0x7E, 64);
     T(K(X360_xboxkrnl__snwprintf, 4, buf, 3, f, 1234) == 0xFFFFFFFFu && wneq(buf, "123", 3) &&
           x360_r16(X, buf + 6) == 0x7E7E,
       "one short");
     /* a count of 0 writes nothing */
-    memset(X->base + buf, 0x7E, 64);
+    memset(x360_p(X, buf), 0x7E, 64);
     T(K(X360_xboxkrnl__snwprintf, 4, buf, 0, f, 1) == 0xFFFFFFFFu && x360_r16(X, buf) == 0x7E7E, "count 0");
     T(K(X360_xboxkrnl__snwprintf, 3, buf, 0, gwstr("")) == 0, "count 0, empty");
     /* a null buffer: the length with a count of 0, an error otherwise */
@@ -217,21 +217,21 @@ static void test_truncation(void)
     T(K(X360_xboxkrnl__scwprintf, 1, 0) == 0xFFFFFFFFu, "_scwprintf null format");
 
     uint32_t va = gva(1, (uint64_t[]){1234});
-    memset(X->base + buf, 0x7E, 64);
+    memset(x360_p(X, buf), 0x7E, 64);
     T(K(X360_xboxkrnl__vsnwprintf, 4, buf, 4, f, va) == 4 && x360_r16(X, buf + 8) == 0x7E7E, "_vsnwprintf exact");
     T(K(X360_xboxkrnl__vsnwprintf, 4, buf, 3, f, va) == 0xFFFFFFFFu && wneq(buf, "123", 3), "_vsnwprintf short");
 
     /* the narrow pair */
     uint32_t nf = gstr("%d");
-    memset(X->base + buf, 0x7E, 64);
-    T(K(X360_xboxkrnl__snprintf, 4, buf, 4, nf, 1234) == 4 && !memcmp(X->base + buf, "1234~", 5), "_snprintf exact");
-    memset(X->base + buf, 0x7E, 64);
-    T(K(X360_xboxkrnl__snprintf, 4, buf, 3, nf, 1234) == 0xFFFFFFFFu && !memcmp(X->base + buf, "123~", 4),
+    memset(x360_p(X, buf), 0x7E, 64);
+    T(K(X360_xboxkrnl__snprintf, 4, buf, 4, nf, 1234) == 4 && !memcmp(x360_p(X, buf), "1234~", 5), "_snprintf exact");
+    memset(x360_p(X, buf), 0x7E, 64);
+    T(K(X360_xboxkrnl__snprintf, 4, buf, 3, nf, 1234) == 0xFFFFFFFFu && !memcmp(x360_p(X, buf), "123~", 4),
       "_snprintf short");
     T(K(X360_xboxkrnl__vsnprintf, 4, buf, 5, nf, va) == 4 && !strcmp(nstr(buf), "1234"), "_vsnprintf room");
     /* padding past the capacity is counted, not written */
-    memset(X->base + buf, 0x7E, 64);
-    T(K(X360_xboxkrnl__snprintf, 4, buf, 2, gstr("%100d"), 1) == 0xFFFFFFFFu && !memcmp(X->base + buf, "  ~", 3),
+    memset(x360_p(X, buf), 0x7E, 64);
+    T(K(X360_xboxkrnl__snprintf, 4, buf, 2, gstr("%100d"), 1) == 0xFFFFFFFFu && !memcmp(x360_p(X, buf), "  ~", 3),
       "padding past the capacity");
     x360_heap_free(X, &X->heap_v4k, buf);
 }
@@ -259,16 +259,16 @@ static void test_long_output(void)
     uint32_t buf = gbuf(n + 2);
     T(K(X360_xboxkrnl_vsprintf, 3, buf, nf, va) == n, "vsprintf long");
     T(strlen(nstr(buf)) == n && nstr(buf)[0] == '[' && nstr(buf)[n - 1] == ']' &&
-          !memcmp(nstr(buf) + 1, X->base + s, LONG),
+          !memcmp(nstr(buf) + 1, x360_p(X, s), LONG),
       "vsprintf wrote %u bytes", (unsigned)strlen(nstr(buf)));
     T(x360_r8(X, buf + n + 1) == 0x7E, "vsprintf stayed in its buffer");
-    T(K(X360_xboxkrnl_sprintf, 3, buf, nf, s) == n && !memcmp(nstr(buf) + 1, X->base + s, LONG), "sprintf long");
-    T(K(X360_xboxkrnl_sprintf, 3, buf, nwf, w) == n && !memcmp(nstr(buf) + 1, X->base + s, LONG), "sprintf %%S long");
+    T(K(X360_xboxkrnl_sprintf, 3, buf, nf, s) == n && !memcmp(nstr(buf) + 1, x360_p(X, s), LONG), "sprintf long");
+    T(K(X360_xboxkrnl_sprintf, 3, buf, nwf, w) == n && !memcmp(nstr(buf) + 1, x360_p(X, s), LONG), "sprintf %%S long");
     x360_heap_free(X, &X->heap_v4k, buf);
 
     buf = gbuf(2 * (n + 2));
     T(K(X360_xboxkrnl_vswprintf, 3, buf, wf, wva) == n && x360_r16(X, buf + 2 * n) == 0 &&
-          !memcmp(X->base + buf + 2, X->base + w, 2 * LONG),
+          !memcmp(x360_p(X, buf + 2), x360_p(X, w), 2 * LONG),
       "vswprintf long");
     T(K(X360_xboxkrnl__snwprintf, 4, buf, n, wf, w) == n && x360_r16(X, buf + 2 * (n - 1)) == ']', "_snwprintf long");
     T(K(X360_xboxkrnl__snwprintf, 4, buf, n - 1, wf, w) == 0xFFFFFFFFu, "_snwprintf one short of long");
@@ -276,7 +276,7 @@ static void test_long_output(void)
 
     /* a %s just past gformat's limit, and a float wider than its work buffer */
     uint32_t cut = gbuf(300);
-    memset(X->base + cut, 'q', 299);
+    memset(x360_p(X, cut), 'q', 299);
     x360_w8(X, cut + 299, 0);
     buf = gbuf(512);
     T(K(X360_xboxkrnl_sprintf, 3, buf, gstr("%s"), cut) == 299 && strlen(nstr(buf)) == 299, "%%s of 299 characters");
@@ -401,16 +401,16 @@ static void test_copy(void)
     /* room to spare: STRING gets no terminator */
     uint32_t d = gs_make(9, 16, buf);
     K(X360_xboxkrnl_RtlCopyString, 2, d, ns("abc"));
-    T(gs_len(d) == 3 && !memcmp(X->base + buf, "abc~", 4), "RtlCopyString");
+    T(gs_len(d) == 3 && !memcmp(x360_p(X, buf), "abc~", 4), "RtlCopyString");
     /* truncated to the destination's maximum */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     d = gs_make(0, 2, buf);
     K(X360_xboxkrnl_RtlCopyString, 2, d, ns("abc"));
-    T(gs_len(d) == 2 && !memcmp(X->base + buf, "ab~", 3), "RtlCopyString truncates");
+    T(gs_len(d) == 2 && !memcmp(x360_p(X, buf), "ab~", 3), "RtlCopyString truncates");
     /* exact fit, empty, no source */
     d = gs_make(0, 3, buf);
     K(X360_xboxkrnl_RtlCopyString, 2, d, ns("xyz"));
-    T(gs_len(d) == 3 && !memcmp(X->base + buf, "xyz", 3), "RtlCopyString exact fit");
+    T(gs_len(d) == 3 && !memcmp(x360_p(X, buf), "xyz", 3), "RtlCopyString exact fit");
     K(X360_xboxkrnl_RtlCopyString, 2, d, ns(""));
     T(gs_len(d) == 0, "RtlCopyString empty");
     d = gs_make(5, 16, buf);
@@ -418,22 +418,22 @@ static void test_copy(void)
     T(gs_len(d) == 0, "RtlCopyString without a source");
 
     /* room for the terminator */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     d = gs_make(0, 16, buf);
     K(X360_xboxkrnl_RtlCopyUnicodeString, 2, d, us("abc"));
     T(gs_len(d) == 6 && weq(buf, "abc"), "RtlCopyUnicodeString");
     /* exact fit: no terminator past the maximum */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     d = gs_make(0, 6, buf);
     K(X360_xboxkrnl_RtlCopyUnicodeString, 2, d, us("abc"));
     T(gs_len(d) == 6 && wneq(buf, "abc", 3) && x360_r16(X, buf + 6) == 0x7E7E, "exact fit has no terminator");
     /* one byte of room is not room for a terminator */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     d = gs_make(0, 7, buf);
     K(X360_xboxkrnl_RtlCopyUnicodeString, 2, d, us("abc"));
     T(gs_len(d) == 6 && x360_r8(X, buf + 6) == 0x7E, "a spare byte stays untouched");
     /* truncated, in bytes: the odd maximum is the length */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     d = gs_make(0, 3, buf);
     K(X360_xboxkrnl_RtlCopyUnicodeString, 2, d, us("abc"));
     T(gs_len(d) == 3 && x360_r8(X, buf + 3) == 0x7E, "truncated to an odd maximum");
@@ -441,19 +441,19 @@ static void test_copy(void)
     K(X360_xboxkrnl_RtlCopyUnicodeString, 2, d, 0);
     T(gs_len(d) == 0, "RtlCopyUnicodeString without a source");
     /* overlapping: the string moves up inside its own buffer */
-    memcpy(X->base + buf, "abcdef", 6);
+    memcpy(x360_p(X, buf), "abcdef", 6);
     K(X360_xboxkrnl_RtlCopyString, 2, gs_make(0, 6, buf + 2), gs_make(4, 4, buf));
-    T(!memcmp(X->base + buf, "ababcd", 6), "overlap");
+    T(!memcmp(x360_p(X, buf), "ababcd", 6), "overlap");
     x360_heap_free(X, &X->heap_v4k, buf);
 }
 
 static void test_append(void)
 {
     uint32_t buf = gbuf(32);
-    memcpy(X->base + buf, "ab", 2);
+    memcpy(x360_p(X, buf), "ab", 2);
     uint32_t d = gs_make(2, 5, buf);
     T(K(X360_xboxkrnl_RtlAppendStringToString, 2, d, ns("cd")) == 0 && gs_len(d) == 4, "append");
-    T(!memcmp(X->base + buf, "abcd~", 5), "append has no terminator");
+    T(!memcmp(x360_p(X, buf), "abcd~", 5), "append has no terminator");
     /* one byte short changes nothing */
     T(K(X360_xboxkrnl_RtlAppendStringToString, 2, d, ns("ef")) == ST_TOO_SMALL && gs_len(d) == 4, "one byte short");
     T(x360_r8(X, buf + 4) == 0x7E, "nothing written");
@@ -462,7 +462,7 @@ static void test_append(void)
     T(K(X360_xboxkrnl_RtlAppendStringToString, 2, d, ns("")) == 0 && gs_len(d) == 5, "empty on a full string");
 
     /* UNICODE_STRING: terminated when there is room */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     d = gs_make(0, 8, buf);
     T(K(X360_xboxkrnl_RtlAppendUnicodeStringToString, 2, d, us("ab")) == 0 && gs_len(d) == 4 && weq(buf, "ab"),
       "wide append");
@@ -470,20 +470,20 @@ static void test_append(void)
     T(wneq(buf, "abcd", 4) && x360_r16(X, buf + 8) == 0x7E7E, "no terminator past the maximum");
     T(K(X360_xboxkrnl_RtlAppendUnicodeStringToString, 2, d, us("e")) == ST_TOO_SMALL && gs_len(d) == 8, "wide too small");
     /* an empty source writes nothing, not even a terminator */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     d = gs_make(0, 8, buf);
     T(K(X360_xboxkrnl_RtlAppendUnicodeStringToString, 2, d, us("")) == 0 && x360_r16(X, buf) == 0x7E7E, "empty source");
 
     /* from a C string: an empty one still terminates, a null one does nothing */
     T(K(X360_xboxkrnl_RtlAppendUnicodeToString, 2, d, gwstr("")) == 0 && x360_r16(X, buf) == 0, "empty C string");
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     T(K(X360_xboxkrnl_RtlAppendUnicodeToString, 2, d, 0) == 0 && x360_r16(X, buf) == 0x7E7E, "null C string");
     T(K(X360_xboxkrnl_RtlAppendUnicodeToString, 2, d, gwstr("abc")) == 0 && gs_len(d) == 6 && weq(buf, "abc"),
       "C string");
     T(K(X360_xboxkrnl_RtlAppendUnicodeToString, 2, d, gwstr("d")) == 0 && gs_len(d) == 8, "C string exact fit");
     T(K(X360_xboxkrnl_RtlAppendUnicodeToString, 2, d, gwstr("e")) == ST_TOO_SMALL && gs_len(d) == 8, "C string too small");
     /* appended at the byte length, even an odd one */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     d = gs_make(3, 16, buf);
     T(K(X360_xboxkrnl_RtlAppendUnicodeStringToString, 2, d, us("a")) == 0 && gs_len(d) == 5, "odd destination length");
     T(x360_r16(X, buf + 3) == 'a', "written at byte 3");
@@ -509,7 +509,7 @@ static void test_convert(void)
     d = gs_make(0, 8, buf);
     T(K(X360_xboxkrnl_RtlAnsiStringToUnicodeString, 3, d, ns("abc"), 0) == 0 && gs_len(d) == 6 && weq(buf, "abc"),
       "exact fit with the terminator");
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     d = gs_make(0, 6, buf);
     T(K(X360_xboxkrnl_RtlAnsiStringToUnicodeString, 3, d, ns("abc"), 0) == ST_OVERFLOW, "no room for the terminator");
     T(x360_r16(X, buf) == 0x7E7E, "nothing written on overflow");
@@ -559,16 +559,16 @@ static void test_utf8(void)
     T(K(X360_xboxkrnl_RtlUnicodeToUtf8Size, 3, out, src, 11) == 0 && x360_r32(X, out) == 10, "an odd byte is not counted");
 
     T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, src, 10) == 0 && x360_r32(X, out) == 10, "convert");
-    T(!memcmp(X->base + buf, want, 10) && x360_r8(X, buf + 10) == 0x7E, "the bytes, no terminator");
+    T(!memcmp(x360_p(X, buf), want, 10) && x360_r8(X, buf + 10) == 0x7E, "the bytes, no terminator");
     /* exact fit */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 10, out, src, 10) == 0 && x360_r32(X, out) == 10, "exact fit");
     /* one byte short: the pair is not split */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 9, out, src, 10) == ST_TOO_SMALL && x360_r32(X, out) == 6, "one short");
-    T(!memcmp(X->base + buf, want, 6) && x360_r8(X, buf + 6) == 0x7E, "whole characters only");
+    T(!memcmp(x360_p(X, buf), want, 6) && x360_r8(X, buf + 6) == 0x7E, "whole characters only");
     /* two bytes of a 3-byte sequence do not fit */
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 5, out, src, 10) == ST_TOO_SMALL && x360_r32(X, out) == 3, "3-byte cut");
     T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 0, out, src, 10) == ST_TOO_SMALL && x360_r32(X, out) == 0, "no room");
     /* no destination asks for the size */
@@ -582,9 +582,9 @@ static void test_utf8(void)
 
     /* unpaired surrogates become U+FFFD and say so */
     static const uint16_t lone_hi[] = {0xD834, 'A'}, lone_lo[] = {0xDD1E}, end_hi[] = {'A', 0xD834};
-    memset(X->base + buf, 0x7E, 32);
+    memset(x360_p(X, buf), 0x7E, 32);
     T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, gu16(lone_hi, 2), 4) == 0x107 && x360_r32(X, out) == 4, "lone high");
-    T(!memcmp(X->base + buf, "\xEF\xBF\xBD" "A", 4), "replaced");
+    T(!memcmp(x360_p(X, buf), "\xEF\xBF\xBD" "A", 4), "replaced");
     T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, gu16(lone_lo, 1), 2) == 0x107 && x360_r32(X, out) == 3, "lone low");
     T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, gu16(end_hi, 2), 4) == 0x107 && x360_r32(X, out) == 4, "high at the end");
     /* a pair cut by the byte count is unpaired */
@@ -595,7 +595,7 @@ static void test_utf8(void)
     static const uint8_t edge_bytes[] = {0x7F, 0xC2, 0x80, 0xDF, 0xBF, 0xE0, 0xA0, 0x80,
                                          0xEF, 0xBF, 0xBF, 0xF4, 0x8F, 0xBF, 0xBF};
     T(K(X360_xboxkrnl_RtlUnicodeToUtf8, 5, buf, 32, out, gu16(edges, 7), 14) == 0 && x360_r32(X, out) == 15, "edges");
-    T(!memcmp(X->base + buf, edge_bytes, 15), "edge bytes");
+    T(!memcmp(x360_p(X, buf), edge_bytes, 15), "edge bytes");
     x360_heap_free(X, &X->heap_v4k, buf);
 }
 
@@ -621,7 +621,7 @@ static void le16_put(uint32_t a, uint32_t v)
 static void section(unsigned k, const char *name, uint32_t va, uint32_t raw_size, uint32_t raw_ptr)
 {
     uint32_t s = img + SECTIONS + 40 * k;
-    memcpy(X->base + s, name, strlen(name));
+    memcpy(x360_p(X, s), name, strlen(name));
     le32_put(s + 8, raw_size);
     le32_put(s + 12, va);
     le32_put(s + 16, raw_size);
@@ -647,7 +647,7 @@ static void image_build(void)
     img = x360_heap_alloc(X, &X->heap_v4k, IMG_SIZE, 0);
     x360_w8(X, img, 'M'), x360_w8(X, img + 1, 'Z');
     le32_put(img + 0x3C, 0x80);
-    memcpy(X->base + img + 0x80, "PE\0\0", 4);
+    memcpy(x360_p(X, img + 0x80), "PE\0\0", 4);
     le16_put(img + 0x86, 2);    /* sections */
     le16_put(img + 0x94, 0xE0); /* optional header size */
     le16_put(img + OPT, 0x10B);
@@ -723,7 +723,7 @@ static void test_crc(void)
     T(K(X360_xboxkrnl_RtlComputeCrc32, 3, 0x1234, s, 0) == 0x1234, "no bytes keep the seed");
     uint32_t part = K(X360_xboxkrnl_RtlComputeCrc32, 3, 0, s, 4);
     T(K(X360_xboxkrnl_RtlComputeCrc32, 3, part, s + 4, 5) == 0xCBF43926u, "chained");
-    T(x360_crc32(X->base + s, 9) == 0xCBF43926u, "agrees with the loader's CRC");
+    T(x360_crc32(x360_p(X, s), 9) == 0xCBF43926u, "agrees with the loader's CRC");
 }
 
 /* frames C (at stack_top), B and A above it; a return address where each prolog stored it */

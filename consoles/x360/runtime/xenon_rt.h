@@ -57,7 +57,26 @@ typedef struct xe_machine {
      * own machine (parallel threads) */
     uint32_t resv_addr;
     uint64_t resv_val;
+    /* after every older field: what xe_ptr adds to an address in the 0xE0000000 view (x360_mem.c: 0 where the host
+     * maps 4 KB pages, 0x1000 where its pages are larger). Code built with XE_VIEW4K_DYNAMIC reads it. */
+    uint32_t view4k_skew;
 } xe_machine;
+
+/* XE_VIEW4K_DYNAMIC: 1, xe_ptr reads view4k_skew and the code runs on a host of any page size; 0, it does not (one
+ * comparison and one addition less per access) and the code runs where the host's pages are 4 KB only. By default 0
+ * on x86, whose pages are 4 KB (but for Android's x86 images, which may show 16 KB ones), and 1 elsewhere (arm64: 4,
+ * 16 or 64 KB). The runtime's own build sets 1 everywhere (runtime/CMakeLists.txt: it reaches guest memory far less
+ * often than a pack, and the tests use it); a pack says which it is in xe_rc_features (XE_RC_FEAT_VIEW4K), and
+ * x360_bind refuses one that cannot follow the machine. */
+#ifndef XE_VIEW4K_DYNAMIC
+#if (defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)) && !defined(__ANDROID__)
+#define XE_VIEW4K_DYNAMIC 0
+#else
+#define XE_VIEW4K_DYNAMIC 1
+#endif
+#endif
+#define XE_RC_FEAT_VIEW4K 2u /* xe_rc_features: the pack's memory accesses go through view4k_skew */
+#define XE_RC_PACK_FEATURES (XE_VIEW4K_DYNAMIC ? XE_RC_FEAT_VIEW4K : 0u) /* what this build of a pack adds to them */
 
 enum {
     XE_RC_EXIT_NORMAL = 0,      /* PC says where execution continues */
@@ -83,11 +102,17 @@ typedef struct xe_rc_part {
 
 #ifdef XE_RUNTIME
 /* The runtime (consoles/x360/runtime, XBA-270): mem is the base of a 4 GB host reservation, every 32-bit guest
- * address maps to mem + ea (pages the guest has not allocated fault in the host: x360_mem.c reports them). */
+ * address maps to mem + ea (pages the guest has not allocated fault in the host: x360_mem.c reports them). The one
+ * exception is the 0xE0000000 view of physical memory on a host whose pages are larger than 4 KB: the view starts
+ * 0x1000 into physical memory, which such a host cannot map, so its addresses sit view4k_skew higher (x360_mem.c). */
 static inline uint8_t *xe_ptr(xe_machine *m, uint32_t ea, uint32_t n)
 {
     (void)n;
+#if XE_VIEW4K_DYNAMIC
+    return m->mem + ea + (ea >= 0xE0000000u ? m->view4k_skew : 0u);
+#else
     return m->mem + ea;
+#endif
 }
 #else
 static inline uint8_t *xe_ptr(xe_machine *m, uint32_t ea, uint32_t n)

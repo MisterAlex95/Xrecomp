@@ -165,7 +165,7 @@ static void k_MmQueryStatistics(x360_machine *x, x360_thread *t, xe_cpu *c)
         RET(0xC0000023u); /* STATUS_BUFFER_TOO_SMALL */
         return;
     }
-    memset(x->base + p, 0, 104);
+    memset(x360_p(x, p), 0, 104);
     uint32_t used = 0;
     for (uint32_t k = 0; k < x->heap_phys.pages; k++)
         used += x->heap_phys.used[k];
@@ -197,7 +197,7 @@ static void k_NtReadFileScatter(x360_machine *x, x360_thread *t, xe_cpu *c)
         if (!page)
             page = x360_r32(x, segs + 8 * (o / 0x1000) + 4);
         uint32_t n = got - o < 0x1000 ? got - o : 0x1000;
-        memmove(x->base + page, x->base + tmp + o, n);
+        memmove(x360_p(x, page), x360_p(x, tmp + o), n);
     }
     x360_heap_free(x, &x->heap_v4k, tmp);
     RET(st);
@@ -215,7 +215,7 @@ static void k_RtlCaptureContext(x360_machine *x, x360_thread *t, xe_cpu *c)
         memcpy(k.fpr, c->fpr, sizeof k.fpr);
         k.lr = c->lr, k.ctr = c->ctr, k.pc = c->pc, k.cr = c->cr;
         k.xer = c->xer_so << 31 | c->xer_ov << 30 | c->xer_ca << 29;
-        memset(x->base + p, 0, 0x230);
+        memset(x360_p(x, p), 0, 0x230);
         x360_seh_write_context(x, p, &k);
     }
     RET(0);
@@ -234,7 +234,7 @@ static void k_VdGetCurrentDisplayInformation(x360_machine *x, x360_thread *t, xe
     float hz = 60.0f;
     uint32_t bits;
     memcpy(&bits, &hz, 4);
-    memset(x->base + p, 0, 0x58);
+    memset(x360_p(x, p), 0, 0x58);
     x360_w16(x, p, 1280);
     x360_w16(x, p + 2, 720);
     x360_w16(x, p + 0x48, 1280);
@@ -268,7 +268,7 @@ static void k_XeKeysGetKey(x360_machine *x, x360_thread *t, xe_cpu *c)
     /* (key number, buffer, size*): zeros; no console key is in this repository */
     uint32_t sz = A(2) ? x360_r32(x, A(2)) : 0;
     if (A(1) && sz <= 0x1000)
-        memset(x->base + A(1), 0, sz);
+        memset(x360_p(x, A(1)), 0, sz);
     RET(0);
 }
 
@@ -482,7 +482,7 @@ static void x_NetDll_WSAStartup(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     /* (caller, version, WSADATA*): version 2.2, no description */
     if (A(2)) {
-        memset(x->base + A(2), 0, 0x190);
+        memset(x360_p(x, A(2)), 0, 0x190);
         x360_w16(x, A(2), A(1) & 0xFFFF);
         x360_w16(x, A(2) + 2, 0x0202);
     }
@@ -494,7 +494,7 @@ static void x_NetDll_XNetGetTitleXnAddr(x360_machine *x, x360_thread *t, xe_cpu 
     (void)t;
     /* (caller, XNADDR*): loopback, as Xenia; XNET_GET_XNADDR_STATIC | ETHERNET */
     if (A(1)) {
-        memset(x->base + A(1), 0, 0x24);
+        memset(x360_p(x, A(1)), 0, 0x24);
         x360_w32(x, A(1), 0x7F000001u);
     }
     RET(0x4 | 0x2);

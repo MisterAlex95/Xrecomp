@@ -568,6 +568,7 @@ static void *sl_reserver(void *arg)
     m.mem = X->m.mem;
     m.mem_base = X->m.mem_base;
     m.mem_size = X->m.mem_size;
+    m.view4k_skew = X->m.view4k_skew;
     int dry = 0;
     while (!sl_done(&dry)) {
         uint64_t v = xe_ldarx(&m, &c, sl_head);

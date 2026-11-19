@@ -183,8 +183,11 @@ typedef struct x360_thunk {
 } x360_thunk;
 
 struct x360_machine {
-    xe_machine m;       /* m.mem = base; m.cur = the running thread's context */
-    uint8_t *base;      /* the 4 GB reservation */
+    xe_machine m;       /* m.mem = reservation; m.cur = the running thread's context */
+    uint8_t *reservation; /* the guest address space, 4 GB and one host page: a guest address is reached through
+                           * x360_p only (the 0xE0000000 view may sit one 4 KB page higher, x360_mem.c) */
+    size_t reserved;      /* its size */
+    uint32_t host_page;   /* the host's page size: what mmap and mprotect are aligned to (x360_mem.c) */
     int memfd;
     x360_heap heap_v4k, heap_v64k, heap_stack, heap_kernel, heap_phys;
     uint32_t kalloc_cur, kalloc_end;
@@ -256,7 +259,8 @@ struct x360_machine {
 };
 
 /* guest memory (big-endian) */
-static inline uint8_t *x360_p(x360_machine *x, uint32_t a) { return x->base + a; }
+/* the host address of a guest address: the only way from one to the other (xe_ptr, xenon_rt.h) */
+static inline uint8_t *x360_p(x360_machine *x, uint32_t a) { return xe_ptr(&x->m, a, 0); }
 static inline uint32_t x360_r32(x360_machine *x, uint32_t a) { return xe_lwz(&x->m, a); }
 static inline uint16_t x360_r16(x360_machine *x, uint32_t a) { return (uint16_t)xe_lhz(&x->m, a); }
 static inline uint8_t x360_r8(x360_machine *x, uint32_t a) { return (uint8_t)xe_lbz(&x->m, a); }
@@ -269,7 +273,7 @@ static inline void x360_w64(x360_machine *x, uint32_t a, uint64_t v) { xe_std(&x
 /* The three views of physical memory (x360_mem.c). Every conversion between a guest pointer and a physical address
  * goes through this pair: the 4 KB view at 0xE0000000 starts one page into physical memory, the other two at 0.
  * x360_v2p leaves an address below the views alone (it is physical already), so applying it twice is harmless.
- * The host reaches physical address p at base + X360_VIEW_64K + p. */
+ * The host reaches physical address p at x360_p(x, X360_VIEW_64K + p). */
 #define X360_VIEW_64K 0xA0000000u
 #define X360_VIEW_16M 0xC0000000u
 #define X360_VIEW_4K 0xE0000000u

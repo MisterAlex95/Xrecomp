@@ -67,7 +67,7 @@ static inline uint32_t galloc(uint32_t size) { return x360_kalloc(X, size); }
 static inline uint32_t gstr(const char *s)
 {
     uint32_t a = galloc((uint32_t)strlen(s) + 1);
-    memcpy(X->base + a, s, strlen(s) + 1);
+    memcpy(x360_p(X, a), s, strlen(s) + 1);
     return a;
 }
 

@@ -2002,7 +2002,12 @@ What is there:
   host base + a: no translation, no bounds check in lifted code) with the console's map: virtual 4 KB and 64 KB
   ranges, stacks, this runtime's kernel objects, the image, the GPU register page, and the 512 MB of physical memory
   seen through its three views (0xA0000000, 0xC0000000, 0xE0000000) on one memfd; a guest fault reports its guest
-  address, thread and function. `x360_load.c` loads a plain (or basic) XEX2, copies its header into guest memory and
+  address, thread and function. It works in the host's pages (16 KB on recent Android devices): commits are widened
+  to them, and the 0xE0000000 view, which starts 0x1000 into physical memory, sits one 4 KB page higher in the host
+  where that offset cannot be mapped (`xe_ptr` adds `view4k_skew` when built with `XE_VIEW4K_DYNAMIC`: the
+  runtime always, a pack by default except on x86 outside Android (4 KB pages); `X360_HOST_PAGE=16384` makes a 4 KB host
+  behave so, for the `*_16k` tests).
+  `x360_load.c` loads a plain (or basic) XEX2, copies its header into guest memory and
   binds the imports (variables get storage, function records their thunk; the dispatcher calls the HLE when PC lands
   on a thunk). `x360_thread.c`: cooperative guest threads (each with its context, stack, KTHREAD and PCR in r13, TLS;
   the hardware thread `KeSetAffinityThread` asks for is in their CPU byte), a time slice through `RC_BLOCK` (not taken

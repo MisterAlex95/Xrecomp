@@ -140,7 +140,7 @@ x360_thread *x360_thread_create(x360_machine *x, uint32_t stack_size, uint32_t e
     t->stack_limit = stack + 0x1000;
     t->stack_base = stack + 0x1000 + stack_size;
     if (x->tls_raw && x->tls_raw_size)
-        memcpy(x->base + t->tls_static, x->base + x->tls_raw,
+        memcpy(x360_p(x, t->tls_static), x360_p(x, x->tls_raw),
                x->tls_raw_size < x->tls_data_size ? x->tls_raw_size : x->tls_data_size);
     /* KTHREAD (Xenia's X_KTHREAD offsets): a thread dispatcher object, signalled when the thread ends */
     x360_w8(x, kth + 0, X_OBJ_THREAD);
@@ -501,10 +501,13 @@ static void on_fault(int sig, siginfo_t *si, void *ctx)
     uint8_t *a = si->si_addr;
     char msg[200];
     int n;
-    if (x && a >= x->base && a < x->base + (1ull << 32)) {
+    if (x && a >= x->reservation && a < x->reservation + x->reserved) {
+        uint64_t o = (uint64_t)(a - x->reservation); /* x360_p backwards */
+        if (o >= (uint64_t)X360_VIEW_4K + x->m.view4k_skew)
+            o -= x->m.view4k_skew;
         x360_thread *t = x360_cur(x);
         n = snprintf(msg, sizeof msg, "x360: guest access fault at %08X (thread %u, in lifted code entered at %08X)\n",
-                     (uint32_t)(a - x->base), t ? t->id : 0, fault_pc);
+                     (uint32_t)o, t ? t->id : 0, fault_pc);
     } else {
         n = snprintf(msg, sizeof msg, "x360: host signal %d at %p (not a guest address)\n", sig, (void *)a);
     }
@@ -670,6 +673,7 @@ static void host_run_thread(x360_machine *x, int k)
     lm.mem = x->m.mem;
     lm.mem_base = x->m.mem_base;
     lm.mem_size = x->m.mem_size;
+    lm.view4k_skew = x->m.view4k_skew;
     lm.rt = x;
     lm.cur = c;
     while (t->state == TH_READY && x->status == X360_RUNNING && !h->drain) {
@@ -1004,6 +1008,11 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
     x->helpers = pack->helpers;
     x->nhelpers = pack->helpers ? pack->nhelpers : 0;
     x->pack_features = pack->features;
+    if (total && x->m.view4k_skew && !(pack->features & XE_RC_FEAT_VIEW4K)) {
+        x360_fail(x, "the pack was built for hosts of 4 KB pages (this one's are %u bytes): build it again, with "
+                     "XE_VIEW4K_DYNAMIC=1", (unsigned)x->host_page);
+        return -1;
+    }
     if (!total) { /* XBA-283: nothing lifted, the interpreter runs it all (tests) */
         x->code_lo = x->code_hi = 0;
         x->pack_bound = 1;

@@ -16,7 +16,24 @@
  * mapped): x360_v2p / x360_p2v (x360_internal.h) are the only place that knows it. The physical heap is indexed by
  * physical address and the runtime itself reads physical memory through the 0xA0000000 view. Virtual ranges are
  * committed (mprotect read / write) as the heaps hand them out; a guest access to an uncommitted page faults in the
- * host. */
+ * host.
+ *
+ * The host's page size. The guest's pages are 4 KB, the host's may be larger (16 KB on recent Android devices, up to
+ * 64 KB on some arm64 kernels); mmap and mprotect work in host pages:
+ * - a commit is widened to whole host pages (a neighbour of a committed guest page may then be readable where the
+ *   console would fault; never the other way round);
+ * - a view 0x1000 into the file cannot be mapped where the page is larger, and no placement of the views in one
+ *   linear reservation makes the three alias (their distances are not multiples of the page). There the 4 KB view
+ *   is mapped from the start of the file and the address of a guest pointer into it is 0x1000 higher than
+ *   reservation + address: xe_ptr (xenon_rt.h) adds xe_machine.view4k_skew, for lifted code and, through x360_p,
+ *   for the runtime. Guest 0xE0000000 + v is then host reservation + 0xE0001000 + v, file offset 0x1000 + v, the
+ *   byte guest 0xA0001000 + v names. The view's last guest page lands in the host page past the 4 GB, reserved and
+ *   never mapped. xe_ptr does so when built with XE_VIEW4K_DYNAMIC (xenon_rt.h): the runtime always is, a pack is
+ *   by default except on x86 outside Android (4 KB pages), where its accesses stay reservation + address. A pack that
+ *   is not (or made before this) cannot run where the view moved (XE_RC_FEAT_VIEW4K, x360_bind).
+ * Every mapping call goes through map_view / protect_rw, which refuse what a host of that page size would refuse.
+ * X360_HOST_PAGE (tests only) makes the runtime behave as on a host of a larger page: a power of two, at least the
+ * real size, at most 64 KB. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -43,14 +60,58 @@ static int heap_init(x360_heap *h, const char *name, uint32_t base, uint32_t siz
     return h->len && h->used ? 0 : -1;
 }
 
+static uint32_t host_page_size(void)
+{
+    long real = sysconf(_SC_PAGESIZE);
+    uint32_t page = real > 0 ? (uint32_t)real : 0x1000u;
+    const char *e = getenv("X360_HOST_PAGE");
+    if (e && *e) {
+        unsigned long v = strtoul(e, NULL, 0);
+        if (v >= page && v <= 0x10000u && !(v & (v - 1)))
+            page = (uint32_t)v;
+    }
+    return page;
+}
+
+/* mmap of the physical file at a guest address, as a host of x->host_page would take it */
+static int map_view(x360_machine *x, uint64_t at, size_t len, uint32_t file_off)
+{
+    if ((at | file_off) & (x->host_page - 1)) {
+        errno = EINVAL;
+        return -1;
+    }
+    void *got = mmap(x->reservation + at, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, x->memfd, file_off);
+    return got == MAP_FAILED ? -1 : 0;
+}
+
+static int protect_rw(x360_machine *x, uint64_t at, uint64_t len)
+{
+    if ((at | len) & (x->host_page - 1)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return mprotect(x->reservation + at, (size_t)len, PROT_READ | PROT_WRITE);
+}
+
 int x360_mem_init(x360_machine *x, char *why, size_t n)
 {
-    void *b = mmap(NULL, 1ull << 32, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    x->host_page = host_page_size();
+    x->m.view4k_skew = x->host_page > X360_VIEW_4K_SKEW ? X360_VIEW_4K_SKEW : 0;
+    x->memfd = -1;
+    if (x->m.view4k_skew && !XE_VIEW4K_DYNAMIC) { /* x360_p would not follow the view */
+        snprintf(why, n, "this runtime was built for hosts of 4 KB pages (XE_VIEW4K_DYNAMIC=0); this one's are %u",
+                 (unsigned)x->host_page);
+        return -1;
+    }
+    /* one host page past the 4 GB: the skewed view's last guest page ends there, and must fault */
+    size_t size = (size_t)(1ull << 32) + x->host_page;
+    void *b = mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (b == MAP_FAILED) {
         snprintf(why, n, "cannot reserve the 4 GB guest address space: %s", strerror(errno));
         return -1;
     }
-    x->base = b;
+    x->reservation = b;
+    x->reserved = size;
     x->m.mem = b;
     x->memfd = memfd_create("x360-physical", MFD_CLOEXEC);
     if (x->memfd < 0 || ftruncate(x->memfd, PHYS_SIZE) != 0) {
@@ -60,9 +121,14 @@ int x360_mem_init(x360_machine *x, char *why, size_t n)
     static const uint32_t views[] = {X360_VIEW_64K, X360_VIEW_16M, X360_VIEW_4K};
     for (unsigned k = 0; k < 3; k++) {
         uint32_t first = x360_v2p(views[k]); /* the physical address the view starts at */
-        if (mmap(x->base + views[k], PHYS_SIZE - first, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, x->memfd,
-                 first) == MAP_FAILED) {
-            snprintf(why, n, "cannot map the physical memory at %08X: %s", (unsigned)views[k], strerror(errno));
+        int r;
+        if (first && x->m.view4k_skew) /* the whole file, from the view's base: its guest addresses sit a skew higher */
+            r = map_view(x, views[k], PHYS_SIZE, 0);
+        else
+            r = map_view(x, views[k], PHYS_SIZE - first, first);
+        if (r) {
+            snprintf(why, n, "cannot map the physical memory at %08X (host pages of %u bytes): %s",
+                     (unsigned)views[k], (unsigned)x->host_page, strerror(errno));
             return -1;
         }
     }
@@ -86,19 +152,24 @@ void x360_mem_free(x360_machine *x)
         free(hs[k]->len);
         free(hs[k]->used);
     }
-    if (x->base)
-        munmap(x->base, 1ull << 32);
+    if (x->reservation)
+        munmap(x->reservation, x->reserved);
     if (x->memfd >= 0)
         close(x->memfd);
 }
 
+/* Makes [addr, addr + size) readable and writable: whole host pages, so more than was asked where they are larger
+ * than the guest's. The physical views are always mapped. */
 int x360_commit(x360_machine *x, uint32_t addr, uint32_t size)
 {
-    uint32_t a = addr & ~0xFFFu;
-    uint64_t e = ((uint64_t)addr + size + 0xFFF) & ~0xFFFull;
-    if (a >= X360_VIEW_64K)
+    uint64_t page = x->host_page;
+    uint64_t a = addr & ~(page - 1);
+    uint64_t e = ((uint64_t)addr + size + page - 1) & ~(page - 1);
+    if (addr >= X360_VIEW_64K)
         return 0; /* physical: always mapped */
-    return mprotect(x->base + a, (size_t)(e - a), PROT_READ | PROT_WRITE);
+    if (e > X360_VIEW_64K)
+        e = X360_VIEW_64K;
+    return protect_rw(x, a, e - a);
 }
 
 static void mark(x360_heap *h, uint32_t first, uint32_t n)
@@ -125,11 +196,11 @@ uint32_t x360_heap_alloc(x360_machine *x, x360_heap *h, uint32_t size, uint32_t 
         while (k < n && !h->used[p + k])
             k++;
         if (k == n) {
-            mark(h, p, n);
             uint32_t a = heap_addr(h, p);
-            if (!h->physical)
-                x360_commit(x, a, n * h->page);
-            memset(x->base + (h->physical ? x360_p2v(X360_VIEW_64K, a) : a), 0, (size_t)n * h->page);
+            if (!h->physical && x360_commit(x, a, n * h->page))
+                return 0; /* the host refused: nothing to hand out (and nothing to clear) */
+            mark(h, p, n);
+            memset(x360_p(x, h->physical ? x360_p2v(X360_VIEW_64K, a) : a), 0, (size_t)n * h->page);
             return a;
         }
         p += k / step * step; /* skip the free run that was too short */
@@ -146,9 +217,9 @@ int x360_heap_alloc_at(x360_machine *x, x360_heap *h, uint32_t addr, uint32_t si
     for (uint32_t p = first; p < last; p++)
         if (h->used[p])
             return -1;
+    if (!h->physical && x360_commit(x, heap_addr(h, first), (last - first) * h->page))
+        return -1;
     mark(h, first, last - first);
-    if (!h->physical)
-        x360_commit(x, heap_addr(h, first), (last - first) * h->page);
     return 0;
 }
 
@@ -215,6 +286,6 @@ uint32_t x360_kalloc(x360_machine *x, uint32_t size)
     }
     uint32_t a = *cur;
     *cur += size;
-    memset(x->base + a, 0, size);
+    memset(x360_p(x, a), 0, size);
     return a;
 }

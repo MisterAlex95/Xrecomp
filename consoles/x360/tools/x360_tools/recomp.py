@@ -205,7 +205,9 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     table.append("\nconst uint32_t xe_rc_helpers[] = {\n%s};\nconst unsigned xe_rc_helper_count = %du;\n" % (
         "".join("    0x%08Xu,\n" % a for a in sorted(helpers)) or "    0u,\n", len(helpers)))
     # XBA-283: bit 0, lwarx / stwcx. through RC_LWARX / RC_STWCX (atomic: x360_run --host-threads needs it)
-    table.append("const unsigned xe_rc_features = 1u;\n")
+    # bit 1 (XE_RC_FEAT_VIEW4K), when the pack is built so (xenon_rt.h, XE_VIEW4K_DYNAMIC): its accesses follow the
+    # 0xE0000000 view where the host's pages moved it
+    table.append("const unsigned xe_rc_features = 1u | XE_RC_PACK_FEATURES;\n")
     table.append("const uint32_t xe_rc_image_crc = 0x%08Xu;\nconst uint32_t xe_rc_image_base = 0x%08Xu;\n"
                  % (image_crc(img), img.base))
     path = os.path.join(outdir, "x360_rc_table.c")

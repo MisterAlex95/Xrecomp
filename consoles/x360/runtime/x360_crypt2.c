@@ -217,7 +217,7 @@ static void hash_load(x360_machine *x, uint32_t g, hash *s, hash_id id)
     for (uint32_t i = 0; i < 8; i++)
         s->h[i] = i >= a->words ? 0 : a->word == 8 ? x360_r64(x, g + a->count + 8 * i) : x360_r32(x, g + a->count + 4 * i);
     memset(s->buf, 0, sizeof s->buf);
-    memcpy(s->buf, x->base + g + a->count + a->word * a->words, a->block);
+    memcpy(s->buf, x360_p(x, g + a->count + a->word * a->words), a->block);
 }
 
 static void hash_store(x360_machine *x, uint32_t g, const hash *s)
@@ -233,13 +233,13 @@ static void hash_store(x360_machine *x, uint32_t g, const hash *s)
         else
             x360_w32(x, g + a->count + 4 * i, (uint32_t)s->h[i]);
     }
-    memcpy(x->base + g + a->count + a->word * a->words, s->buf, a->block);
+    memcpy(x360_p(x, g + a->count + a->word * a->words), s->buf, a->block);
 }
 
 static void put_digest(x360_machine *x, uint32_t out, uint32_t out_size, const uint8_t *d, uint32_t n)
 {
     if (out)
-        memcpy(x->base + out, d, out_size < n ? out_size : n);
+        memcpy(x360_p(x, out), d, out_size < n ? out_size : n);
 }
 
 static void guest_init(x360_machine *x, uint32_t g, hash_id id)
@@ -254,7 +254,7 @@ static void guest_update(x360_machine *x, uint32_t g, hash_id id, uint32_t p, ui
     hash s;
     hash_load(x, g, &s, id);
     if (p && n)
-        hash_update(&s, x->base + p, n);
+        hash_update(&s, x360_p(x, p), n);
     hash_store(x, g, &s);
 }
 
@@ -276,7 +276,7 @@ static void one_shot(x360_machine *x, xe_cpu *c, hash_id id)
     hash_init(&s, id);
     for (int k = 0; k < 3; k++)
         if (A(2 * k) && A(2 * k + 1))
-            hash_update(&s, x->base + A(2 * k), A(2 * k + 1));
+            hash_update(&s, x360_p(x, A(2 * k)), A(2 * k + 1));
     hash_final(&s, d);
     put_digest(x, A(6), A(7), d, ALG[id].digest);
 }
@@ -337,10 +337,10 @@ static void hmac_key(x360_machine *x, hash_id id, uint32_t key, uint32_t key_siz
     if (key_size > block) {
         hash s;
         hash_init(&s, id);
-        hash_update(&s, x->base + key, key_size);
+        hash_update(&s, x360_p(x, key), key_size);
         hash_final(&s, k);
     } else if (key && key_size)
-        memcpy(k, x->base + key, key_size);
+        memcpy(k, x360_p(x, key), key_size);
     hash_init(inner, id);
     hash_init(outer, id);
     for (uint32_t i = 0; i < block; i++)
@@ -387,7 +387,7 @@ static void hmac_one_shot(x360_machine *x, xe_cpu *c, hash_id id, uint8_t *d)
     hmac_key(x, id, A(0), A(1), &inner, &outer);
     for (int k = 0; k < 3; k++)
         if (A(2 + 2 * k) && A(3 + 2 * k))
-            hash_update(&inner, x->base + A(2 + 2 * k), A(3 + 2 * k));
+            hash_update(&inner, x360_p(x, A(2 + 2 * k)), A(3 + 2 * k));
     hmac_finish(&inner, &outer, d);
 }
 
@@ -426,7 +426,7 @@ static void k_XeCryptHmacShaVerify(x360_machine *x, x360_thread *t, xe_cpu *c)
     uint8_t d[64];
     uint32_t cmp = A9(8), size = A9(9);
     hmac_one_shot(x, c, H_SHA1, d);
-    RET(size <= 20 && (!size || (cmp && !memcmp(x->base + cmp, d, size))));
+    RET(size <= 20 && (!size || (cmp && !memcmp(x360_p(x, cmp), d, size))));
 }
 
 /* ---- block modes: CBC over either cipher; a size is whole blocks, what is left over is not touched ---- */
@@ -580,8 +580,8 @@ static void aes_block(const void *key, const uint8_t *in, uint8_t *out, int encr
 static void aes_load(x360_machine *x, uint32_t g, aes_key *k)
 {
     k->nr = 10;
-    memcpy(k->enc, x->base + g, 11 * 16);
-    memcpy(k->dec, x->base + g + 11 * 16, 11 * 16);
+    memcpy(k->enc, x360_p(x, g), 11 * 16);
+    memcpy(k->dec, x360_p(x, g + 11 * 16), 11 * 16);
 }
 
 /* the guest's XECRYPT_AES_SCHEDULE; 0 when no valid key was set in it */
@@ -590,9 +590,9 @@ static int aes_load_schedule(x360_machine *x, uint32_t g, aes_key *k)
     k->nr = x360_r32(x, g + 0x1D0) + 1;
     if (k->nr != 10 && k->nr != 12 && k->nr != 14)
         return 0;
-    memcpy(k->enc, x->base + g, 16 * (k->nr + 1));
+    memcpy(k->enc, x360_p(x, g), 16 * (k->nr + 1));
     memcpy(k->dec, k->enc + 16 * k->nr, 16);
-    memcpy(k->dec + 16, x->base + g + 16 * (k->nr + 1), 16 * (k->nr - 1));
+    memcpy(k->dec + 16, x360_p(x, g + 16 * (k->nr + 1)), 16 * (k->nr - 1));
     memcpy(k->dec + 16 * k->nr, k->enc, 16);
     return 1;
 }
@@ -601,10 +601,10 @@ static void k_XeCryptAesKey(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     uint8_t rk[11 * 16], dk[11 * 16];
-    aes_expand(x->base + A(1), 4, rk);
+    aes_expand(x360_p(x, A(1)), 4, rk);
     aes_invert(rk, 10, dk);
-    memcpy(x->base + A(0), rk, sizeof rk);
-    memcpy(x->base + A(0) + sizeof rk, dk, sizeof dk);
+    memcpy(x360_p(x, A(0)), rk, sizeof rk);
+    memcpy(x360_p(x, A(0) + sizeof rk), dk, sizeof dk);
 }
 
 static void k_XeCryptAesEcb(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -612,7 +612,7 @@ static void k_XeCryptAesEcb(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     aes_key k;
     aes_load(x, A(0), &k);
-    aes_block(&k, x->base + A(1), x->base + A(2), A(3) != 0);
+    aes_block(&k, x360_p(x, A(1)), x360_p(x, A(2)), A(3) != 0);
 }
 
 static void k_XeCryptAesCbc(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -620,7 +620,7 @@ static void k_XeCryptAesCbc(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     aes_key k;
     aes_load(x, A(0), &k);
-    cbc_run(aes_block, &k, 16, x->base + A(1), A(2), x->base + A(3), x->base + A(4), A(5) != 0);
+    cbc_run(aes_block, &k, 16, x360_p(x, A(1)), A(2), x360_p(x, A(3)), x360_p(x, A(4)), A(5) != 0);
 }
 
 /* (state, input, size, output, counter): the counter is one big-endian 128-bit number (SP 800-38A B.1), left at the
@@ -629,8 +629,8 @@ static void k_XeCryptAesCtr(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     aes_key k;
-    const uint8_t *in = x->base + A(1);
-    uint8_t *out = x->base + A(3), *ctr = x->base + A(4), ks[16];
+    const uint8_t *in = x360_p(x, A(1));
+    uint8_t *out = x360_p(x, A(3)), *ctr = x360_p(x, A(4)), ks[16];
     aes_load(x, A(0), &k);
     for (uint32_t size = A(2); size;) {
         uint32_t n = size < 16 ? size : 16;
@@ -649,14 +649,14 @@ static void k_XeCryptAesCbcMac(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     aes_key k;
     uint8_t mac[16] = {0}, b[16];
-    const uint8_t *in = x->base + A(1);
-    k.nr = aes_expand(x->base + A(0), 4, k.enc);
+    const uint8_t *in = x360_p(x, A(1));
+    k.nr = aes_expand(x360_p(x, A(0)), 4, k.enc);
     for (uint32_t n = A(2) / 16; n; n--, in += 16) {
         for (int i = 0; i < 16; i++)
             b[i] = mac[i] ^ in[i];
         aes_block(&k, b, mac, 1);
     }
-    memcpy(x->base + A(3), mac, 16);
+    memcpy(x360_p(x, A(3)), mac, 16);
 }
 
 /* (key, key size in bytes, schedule) */
@@ -665,13 +665,13 @@ static void k_XeCryptAesCreateKeySchedule(x360_machine *x, x360_thread *t, xe_cp
     (void)t;
     uint32_t size = A(1), g = A(2);
     uint8_t rk[15 * 16], dk[15 * 16];
-    memset(x->base + g, 0, 0x1D4); /* a size that is no AES key leaves a schedule the ciphers refuse */
+    memset(x360_p(x, g), 0, 0x1D4); /* a size that is no AES key leaves a schedule the ciphers refuse */
     if (size != 16 && size != 24 && size != 32)
         return;
-    uint32_t nr = aes_expand(x->base + A(0), size / 4, rk);
+    uint32_t nr = aes_expand(x360_p(x, A(0)), size / 4, rk);
     aes_invert(rk, nr, dk);
-    memcpy(x->base + g, rk, 16 * (nr + 1));
-    memcpy(x->base + g + 16 * (nr + 1), dk + 16, 16 * (nr - 1));
+    memcpy(x360_p(x, g), rk, 16 * (nr + 1));
+    memcpy(x360_p(x, g + 16 * (nr + 1)), dk + 16, 16 * (nr - 1));
     x360_w32(x, g + 0x1D0, nr - 1);
 }
 
@@ -679,14 +679,14 @@ static void aes_one(x360_machine *x, xe_cpu *c, int encrypt)
 {
     aes_key k;
     if (aes_load_schedule(x, A(0), &k))
-        aes_block(&k, x->base + A(1), x->base + A(2), encrypt);
+        aes_block(&k, x360_p(x, A(1)), x360_p(x, A(2)), encrypt);
 }
 
 static void aes_schedule_cbc(x360_machine *x, xe_cpu *c, int encrypt)
 {
     aes_key k;
     if (aes_load_schedule(x, A(0), &k))
-        cbc_run(aes_block, &k, 16, x->base + A(1), A(2), x->base + A(3), x->base + A(4), encrypt);
+        cbc_run(aes_block, &k, 16, x360_p(x, A(1)), A(2), x360_p(x, A(3)), x360_p(x, A(4)), encrypt);
 }
 
 static void k_XeCryptAesEncryptOne(x360_machine *x, x360_thread *t, xe_cpu *c) { (void)t, aes_one(x, c, 1); }
@@ -820,7 +820,7 @@ static void k_XeCryptDesKey(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     uint64_t sub[16];
-    des_schedule(x->base + A(1), sub);
+    des_schedule(x360_p(x, A(1)), sub);
     for (uint32_t i = 0; i < 16; i++)
         x360_w64(x, A(0) + 8 * i, sub[i]);
 }
@@ -830,7 +830,7 @@ static void k_XeCryptDesEcb(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     uint64_t sub[16];
     des_load(x, A(0), sub, 1);
-    des_block(sub, x->base + A(1), x->base + A(2), A(3) != 0);
+    des_block(sub, x360_p(x, A(1)), x360_p(x, A(2)), A(3) != 0);
 }
 
 static void k_XeCryptDesCbc(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -838,7 +838,7 @@ static void k_XeCryptDesCbc(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     uint64_t sub[16];
     des_load(x, A(0), sub, 1);
-    cbc_run(des_block, sub, 8, x->base + A(1), A(2), x->base + A(3), x->base + A(4), A(5) != 0);
+    cbc_run(des_block, sub, 8, x360_p(x, A(1)), A(2), x360_p(x, A(3)), x360_p(x, A(4)), A(5) != 0);
 }
 
 /* (state, three 8-byte keys one after the other) */
@@ -847,7 +847,7 @@ static void k_XeCryptDes3Key(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     uint64_t sub[16];
     for (uint32_t k = 0; k < 3; k++) {
-        des_schedule(x->base + A(1) + 8 * k, sub);
+        des_schedule(x360_p(x, A(1) + 8 * k), sub);
         for (uint32_t i = 0; i < 16; i++)
             x360_w64(x, A(0) + 0x80 * k + 8 * i, sub[i]);
     }
@@ -858,7 +858,7 @@ static void k_XeCryptDes3Ecb(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     uint64_t sub[3][16];
     des_load(x, A(0), sub[0], 3);
-    des3_block(sub, x->base + A(1), x->base + A(2), A(3) != 0);
+    des3_block(sub, x360_p(x, A(1)), x360_p(x, A(2)), A(3) != 0);
 }
 
 static void k_XeCryptDes3Cbc(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -866,15 +866,15 @@ static void k_XeCryptDes3Cbc(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     uint64_t sub[3][16];
     des_load(x, A(0), sub[0], 3);
-    cbc_run(des3_block, sub, 8, x->base + A(1), A(2), x->base + A(3), x->base + A(4), A(5) != 0);
+    cbc_run(des3_block, sub, 8, x360_p(x, A(1)), A(2), x360_p(x, A(3)), x360_p(x, A(4)), A(5) != 0);
 }
 
 /* (input, size, output): every byte with odd parity, its lowest bit being the parity bit */
 static void k_XeCryptDesParity(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    const uint8_t *in = x->base + A(0);
-    uint8_t *out = x->base + A(2);
+    const uint8_t *in = x360_p(x, A(0));
+    uint8_t *out = x360_p(x, A(2));
     for (uint32_t i = 0; i < A(1); i++) {
         uint8_t v = in[i] & 0xFE, p = v;
         p ^= p >> 4, p ^= p >> 2, p ^= p >> 1;
@@ -888,25 +888,25 @@ static void k_XeCryptDesParity(x360_machine *x, x360_thread *t, xe_cpu *c)
 static void k_XeCryptBnDw_Zero(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    memset(x->base + A(0), 0, 4 * (size_t)A(1));
+    memset(x360_p(x, A(0)), 0, 4 * (size_t)A(1));
 }
 
 static void k_XeCryptBnQw_Zero(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    memset(x->base + A(0), 0, 8 * (size_t)A(1));
+    memset(x360_p(x, A(0)), 0, 8 * (size_t)A(1));
 }
 
 static void k_XeCryptBnDw_Copy(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    memmove(x->base + A(1), x->base + A(0), 4 * (size_t)A(2));
+    memmove(x360_p(x, A(1)), x360_p(x, A(0)), 4 * (size_t)A(2));
 }
 
 static void k_XeCryptBnQw_Copy(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    memmove(x->base + A(1), x->base + A(0), 8 * (size_t)A(2));
+    memmove(x360_p(x, A(1)), x360_p(x, A(0)), 8 * (size_t)A(2));
 }
 
 /* (source, destination, digits): every `unit` bytes of each digit reversed; the source may be the destination */
@@ -914,9 +914,9 @@ static void swap_units(x360_machine *x, uint32_t src, uint32_t dst, size_t bytes
 {
     for (size_t at = 0; at + unit <= bytes; at += unit) {
         uint8_t v[8];
-        memcpy(v, x->base + src + at, unit);
+        memcpy(v, x360_p(x, src + at), unit);
         for (uint32_t i = 0; i < unit; i++)
-            x->base[dst + at + i] = v[unit - 1 - i];
+            x360_p(x, dst + at + i)[0] = v[unit - 1 - i];
     }
 }
 
@@ -939,9 +939,9 @@ static void k_XeCryptBnQw_SwapDwQw(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     for (uint32_t i = 0; i < A(2); i++) {
         uint8_t v[8];
-        memcpy(v, x->base + A(0) + 8 * i, 8);
-        memcpy(x->base + A(1) + 8 * i, v + 4, 4);
-        memcpy(x->base + A(1) + 8 * i + 4, v, 4);
+        memcpy(v, x360_p(x, A(0) + 8 * i), 8);
+        memcpy(x360_p(x, A(1) + 8 * i), v + 4, 4);
+        memcpy(x360_p(x, A(1) + 8 * i + 4), v, 4);
     }
 }
 
@@ -1169,7 +1169,7 @@ static void pkcs1_format(const uint8_t *digest, uint32_t format, uint8_t *sig, u
 static void k_XeCryptBnDwLePkcs1Format(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    pkcs1_format(x->base + A(0), A(1), x->base + A(2), A(3));
+    pkcs1_format(x360_p(x, A(0)), A(1), x360_p(x, A(2)), A(3));
 }
 
 /* (digest, block, size): TRUE when the block is the one its format byte announces */
@@ -1177,13 +1177,13 @@ static void k_XeCryptBnDwLePkcs1Verify(x360_machine *x, x360_thread *t, xe_cpu *
 {
     (void)t;
     uint32_t size = A(2);
-    const uint8_t *sig = x->base + A(1);
+    const uint8_t *sig = x360_p(x, A(1));
     uint8_t want[512];
     if (size < 39 || size > 512) {
         RET(0);
         return;
     }
-    pkcs1_format(x->base + A(0), sig[0x16] == 0 ? 0 : sig[0x16] == 0x1A ? 1 : 2, want, size);
+    pkcs1_format(x360_p(x, A(0)), sig[0x16] == 0 ? 0 : sig[0x16] == 0x1A ? 1 : 2, want, size);
     RET(!memcmp(want, sig, size));
 }
 
@@ -1208,7 +1208,7 @@ static void parve_block(const uint8_t *key, const uint8_t *sbox, const uint8_t *
 static void k_XeCryptParveEcb(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    parve_block(x->base + A(0), x->base + A(1), x->base + A(2), x->base + A(3));
+    parve_block(x360_p(x, A(0)), x360_p(x, A(1)), x360_p(x, A(2)), x360_p(x, A(3)));
 }
 
 /* (key, table, 8-byte IV, input, size, 8-byte MAC): whole blocks only */
@@ -1216,14 +1216,14 @@ static void k_XeCryptParveCbcMac(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     uint8_t mac[8];
-    const uint8_t *in = x->base + A(3);
-    memcpy(mac, x->base + A(2), 8);
+    const uint8_t *in = x360_p(x, A(3));
+    memcpy(mac, x360_p(x, A(2)), 8);
     for (uint32_t n = A(4) / 8; n; n--, in += 8) {
         for (int i = 0; i < 8; i++)
             mac[i] ^= in[i];
-        parve_block(x->base + A(0), x->base + A(1), mac, mac);
+        parve_block(x360_p(x, A(0)), x360_p(x, A(1)), mac, mac);
     }
-    memcpy(x->base + A(5), mac, 8);
+    memcpy(x360_p(x, A(5)), mac, 8);
 }
 
 /* (cd[2], ab[2], input, 32-bit words, output[2]): the words are the console's, big-endian; pairs only */

@@ -61,7 +61,9 @@ if [ "$mode" = split ] && ! grep -q xe_rc_resume_parts "$work/src/x360_rc_table.
     exit 1
 fi
 cat "$work/recomp.txt"
-"$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 -I "$repo/consoles/x360/runtime" \
+# X360_HOST_PAGE (the *_16k tests): a pack that follows the host's page size, on x86 too (xenon_rt.h)
+"$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 ${X360_HOST_PAGE:+-DXE_VIEW4K_DYNAMIC=1} \
+    -I "$repo/consoles/x360/runtime" \
     -I "$repo/consoles/gc/runtime" -o "$work/libtitle.so" "$work"/src/*.c -lm || exit 1
 timeout 120 "$run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$disc" --dbg "$work/dbg.txt" --log "$work/log.txt" \
     --stats --missed "$work/missed.txt"

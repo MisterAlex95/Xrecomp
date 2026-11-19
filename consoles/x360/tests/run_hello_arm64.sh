@@ -55,3 +55,9 @@ for t in x360_hle_test x360_kdpc_test x360_rtl_test x360_crypt2_test x360_vd_tes
         qemu-aarch64 -L "$sysroot" "$work/$t"
     fi
 done
+# and as on a host of 16 KB pages (x360_mem.c: qemu's user mode keeps the host's page size, X360_HOST_PAGE does not)
+X360_HOST_PAGE=16384 qemu-aarch64 -L "$sysroot" "$work/x360_run" "$work/hello.xex" --pack "$work/libtitle.so" \
+    --disc "$work/disc.iso" --dbg "$work/dbg16k.txt"
+cmp "$work/dbg16k.txt" "$here/hello.txt"
+X360_HOST_PAGE=16384 qemu-aarch64 -L "$sysroot" "$work/x360_hle_test"
+echo "arm64 (qemu): the same with 16 KB host pages"

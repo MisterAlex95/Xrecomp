@@ -281,7 +281,7 @@ int main(int argc, char **argv)
     X.m.mem = mmap(NULL, 1ull << 32, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (X.m.mem == MAP_FAILED)
         return 99;
-    X.base = X.m.mem;
+    X.reservation = X.m.mem;
     X.m.cur = &X.m.cpu;
     X.m.rt = &X;
     if (states == 0) {

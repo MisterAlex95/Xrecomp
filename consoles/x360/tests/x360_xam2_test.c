@@ -35,7 +35,7 @@ static uint32_t content_data(const char *name, uint32_t type)
     x360_w32(X, cd, 1);
     x360_w32(X, cd + 4, type);
     x360_w16(X, cd + 8, 'S');
-    memcpy(X->base + cd + 0x108, name, strlen(name) + 1);
+    memcpy(x360_p(X, cd + 0x108), name, strlen(name) + 1);
     return cd;
 }
 
@@ -175,7 +175,7 @@ static void test_profile(void)
 
     /* written, then read back through the Ex call (buffer and overlapped on the stack) */
     uint32_t s = galloc(80), blob = galloc(8);
-    memcpy(X->base + blob, "SAVE", 4);
+    memcpy(x360_p(X, blob), "SAVE", 4);
     x360_w32(X, s + 16, 0x10040003u);
     x360_w8(X, s + 24, 1);
     x360_w32(X, s + 32, 77);
@@ -187,7 +187,7 @@ static void test_profile(void)
     CHECK(XAM(X360_xam_XamUserReadProfileSettingsEx, 10, 0, 0, 0, 0, 2, ids, sizep, 0, buf, 0) == 0, "read back");
     CHECK(x360_r32(X, buf + 8 + 32) == 77, "the integer");
     uint32_t b = buf + 48;
-    CHECK(x360_r32(X, b) == 2 && x360_r32(X, b + 32) == 4 && !memcmp(X->base + x360_r32(X, b + 36), "SAVE", 4),
+    CHECK(x360_r32(X, b) == 2 && x360_r32(X, b + 32) == 4 && !memcmp(x360_p(X, x360_r32(X, b + 36)), "SAVE", 4),
           "the title's own data");
     CHECK(XAM(X360_xam_XamUserWriteProfileSettings, 5, 0, 1, 1, s, 0) == 0x525, "write: no such user");
     CHECK(XAM(X360_xam_XamUserWriteProfileSettings, 5, 0, 0, 0, s, 0) == 0x57, "write: nothing");
@@ -313,12 +313,12 @@ static void test_content(void)
           "too small");
     uint32_t ev2, ov2 = ov_new(&ev2);
     CHECK(XAM(X360_xam_XamContentGetThumbnail, 5, 0, a, out, sizep, ov2) == IO_PENDING && x360_r32(X, ov2 + 4) == 7 &&
-              !memcmp(X->base + out, "PNGDATA", 7), "the bytes");
+              !memcmp(x360_p(X, out), "PNGDATA", 7), "the bytes");
 
     /* resolve */
     uint32_t path = galloc(128);
     CHECK(XAM(X360_xam_XamContentResolve, 7, 0, a, path, 128, 0, 0, 0) == 0 &&
-              !strcmp((char *)X->base + path, "\\Device\\Harddisk0\\Partition1\\content\\slot_a"), "resolved");
+              !strcmp((char *)x360_p(X, path), "\\Device\\Harddisk0\\Partition1\\content\\slot_a"), "resolved");
     CHECK(XAM(X360_xam_XamContentResolve, 7, 0, a, path, 4, 0, 0, 0) == INSUFFICIENT, "resolve: too small");
     CHECK(XAM(X360_xam_XamContentResolve, 7, 0, missing, path, 128, 0, 0, 0) == 3, "resolve: missing");
     CHECK(XAM(X360_xam_XamContentOpenFile, 7, 0, root, path, 3, 0, 0, 0) == 2, "no package file");
@@ -329,14 +329,14 @@ static void test_content(void)
           "every type");
     uint32_t h = x360_r32(X, hp);
     CHECK(XAM(X360_xam_XamEnumerate, 6, h, 0, buf, 0x134, countp, 0) == 0 && x360_r32(X, countp) == 1 &&
-              !strcmp((char *)X->base + buf + 0x108, "slot_a") && x360_r16(X, buf + 8) == 'S', "first");
+              !strcmp((char *)x360_p(X, buf + 0x108), "slot_a") && x360_r16(X, buf + 8) == 'S', "first");
     CHECK(XAM(X360_xam_XamEnumerate, 6, h, 0, buf, 0x134, countp, 0) == 0 &&
-              !strcmp((char *)X->base + buf + 0x108, "slot_b") && x360_r32(X, buf + 4) == 2, "second");
+              !strcmp((char *)x360_p(X, buf + 0x108), "slot_b") && x360_r32(X, buf + 4) == 2, "second");
     CHECK(XAM(X360_xam_XamEnumerate, 6, h, 0, buf, 0x134, countp, 0) == NO_MORE_FILES && x360_r32(X, countp) == 0,
           "the end");
     CHECK(XAM(X360_xam_XamContentCreateEnumerator, 7, 0, 1, 2, 0, 4, sizep, hp) == 0, "one type");
     CHECK(XAM(X360_xam_XamEnumerate, 6, x360_r32(X, hp), 0, buf, 0x400, countp, 0) == 0 && x360_r32(X, countp) == 1 &&
-              !strcmp((char *)X->base + buf + 0x108, "slot_b"), "only that type");
+              !strcmp((char *)x360_p(X, buf + 0x108), "slot_b"), "only that type");
     CHECK(XAM(X360_xam_XamContentCreateEnumerator, 7, 0, 7, 0, 0, 1, sizep, hp) == 0x80070057u && x360_r32(X, sizep) == 0,
           "an unknown device");
     CHECK(XAM(X360_xam_XamContentCreateEnumerator, 7, 2, 1, 0, 0, 1, sizep, hp) == 0x525, "another user");
@@ -443,7 +443,7 @@ static void test_services(void)
     x360_w32(X, out, 5);
     CHECK(XAM(X360_xam_XamVoiceCreate, 3, 0, 0, out) == 5 && x360_r32(X, out) == 0, "no voice");
     CHECK(XAM(X360_xam_XamVoiceHeadsetPresent, 1, 0) == 0 && XAM(X360_xam_XamVoiceIsActiveProcess, 0) == 0, "no headset");
-    memset(X->base + out, 0xFF, 24);
+    memset(x360_p(X, out), 0xFF, 24);
     XAM(X360_xam_XamNuiGetDeviceStatus, 1, out);
     CHECK(x360_r32(X, out + 12) == 0, "no Kinect");
     CHECK(XAM(X360_xam_XMsgSystemProcessCall, 4, 0, 0, 0, 0) == 0x490, "no system application");
@@ -471,8 +471,8 @@ static void test_services(void)
     CHECK(XAM(X360_xam_XamShowGameInviteUI, 4, 0, 0, 0, 0) == 0 && XAM(X360_xam_XamShowGameInviteUI, 4, 1, 0, 0, 0) != 0,
           "the invite UI: the signed-in user only");
     XAM(X360_xam_NetDll_XNetInAddrToString, 4, 0, 0x0A010203u, out, 16);
-    CHECK(!strcmp((char *)X->base + out, "10.1.2.3"), "address string");
-    memset(X->base + out, 0, 16);
+    CHECK(!strcmp((char *)x360_p(X, out), "10.1.2.3"), "address string");
+    memset(x360_p(X, out), 0, 16);
     CHECK(XAM(X360_xam_NetDll_XNetRandom, 3, 0, out, 16) == 0, "random");
     int any = 0;
     for (int k = 0; k < 16; k++)

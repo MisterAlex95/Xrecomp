@@ -373,7 +373,7 @@ static void set_path(x360_machine *x, uint32_t tmp, const char *path)
     uint32_t n = (uint32_t)strlen(path);
     if (n > T_DIR - T_PATH - 1)
         n = T_DIR - T_PATH - 1;
-    memcpy(x->base + tmp + T_PATH, path, n);
+    memcpy(x360_p(x, tmp + T_PATH), path, n);
     x360_w8(x, tmp + T_PATH + n, 0);
     x360_w16(x, tmp + T_ANSI, n);
     x360_w16(x, tmp + T_ANSI + 2, n + 1);
@@ -690,7 +690,7 @@ static uint32_t content_resolve(x360_machine *x, x360_thread *t, xe_cpu *c, uint
         result = X_ERROR_INSUFFICIENT_BUFFER;
     else {
         if (out)
-            memcpy(x->base + out, path, strlen(path) + 1);
+            memcpy(x360_p(x, out), path, strlen(path) + 1);
         result = X_ERROR_SUCCESS;
     }
     tmp_free(x, tmp);
@@ -721,7 +721,7 @@ static void x_XamContentOpenFile(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 static void device_put(x360_machine *x, uint32_t p)
 {
-    memset(x->base + p, 0, DEVICE_DATA_SIZE);
+    memset(x360_p(x, p), 0, DEVICE_DATA_SIZE);
     x360_w32(x, p, HDD_ID);
     x360_w32(x, p + 4, 1);
     x360_w64(x, p + 8, 20ull << 30);
@@ -805,7 +805,7 @@ static uint32_t content_fill(x360_machine *x, x360_thread *t, xe_cpu *c, uint32_
         char name[48], path[128];
         if (!(x360_r32(x, tmp + T_DIR + 56) & 0x10) || nl >= sizeof name)
             continue;
-        memcpy(name, x->base + tmp + T_DIR + 0x40, nl);
+        memcpy(name, x360_p(x, tmp + T_DIR + 0x40), nl);
         name[nl] = 0;
         if (name[0] == '.')
             continue;
@@ -819,15 +819,15 @@ static uint32_t content_fill(x360_machine *x, x360_thread *t, xe_cpu *c, uint32_
         if ((want && type != want) || seen++ < pos)
             continue;
         uint32_t p = buf + count * item;
-        memset(x->base + p, 0, item);
+        memset(x360_p(x, p), 0, item);
         if (have)
-            memcpy(x->base + p, x->base + tmp + T_META, XCONTENT_SIZE);
+            memcpy(x360_p(x, p), x360_p(x, tmp + T_META), XCONTENT_SIZE);
         else
             put_w(x, p + 8, 128, name);
         x360_w32(x, p, HDD_ID);
         x360_w32(x, p + 4, type);
-        memset(x->base + p + 0x108, 0, 42);
-        memcpy(x->base + p + 0x108, name, nl);
+        memset(x360_p(x, p + 0x108), 0, 42);
+        memcpy(x360_p(x, p + 0x108), name, nl);
         if (item >= XCONTENT_AGGREGATE_SIZE)
             x360_w32(x, p + 0x140, x->title_id);
         count++;
@@ -1030,7 +1030,7 @@ static uint32_t read_profile(x360_machine *x, x360_thread *t, xe_cpu *c, uint32_
         x360_w32(x, sizep, need);
         return X_ERROR_INSUFFICIENT_BUFFER; /* answered directly, with an overlapped or without */
     }
-    memset(x->base + buf, 0, need);
+    memset(x360_p(x, buf), 0, need);
     x360_w32(x, buf, rows * n);
     x360_w32(x, buf + 4, buf + 8);
     uint32_t root = root_of(x), s = buf + 8, data = buf + 8 + rows * n * SET_SIZE;
@@ -1052,7 +1052,7 @@ static uint32_t read_profile(x360_machine *x, x360_thread *t, xe_cpu *c, uint32_
                 if (len > room)
                     len = room;
                 if (len)
-                    memcpy(x->base + data, x->base + x360_r32(x, e + 12), len);
+                    memcpy(x360_p(x, data), x360_p(x, x360_r32(x, e + 12)), len);
                 x360_w32(x, s + SET_VALUE, len);
                 x360_w32(x, s + SET_PTR, data);
                 x360_w32(x, s + SET_FROM, e ? from : 0);
@@ -1122,9 +1122,9 @@ static void x_XamUserWriteProfileSettings(x360_machine *x, x360_thread *t, xe_cp
                 break;
             }
             if (src && len)
-                memmove(x->base + data, x->base + src, len);
+                memmove(x360_p(x, data), x360_p(x, src), len);
             else if (len)
-                memset(x->base + data, 0, len);
+                memset(x360_p(x, data), 0, len);
             x360_w32(x, e + 4, len);
             x360_w32(x, e + 12, data);
         } else {
@@ -1294,7 +1294,7 @@ static void x_XamShowKeyboardUI(x360_machine *x, x360_thread *t, xe_cpu *c)
         return;
     }
     ui_shown(x);
-    memset(x->base + buf, 0, 2 * (size_t)cap);
+    memset(x360_p(x, buf), 0, 2 * (size_t)cap);
     for (; def && n + 1 < cap; n++) {
         uint16_t ch = x360_r16(x, def + 2 * n);
         if (!ch)
@@ -1606,7 +1606,7 @@ static void x_XamNuiGetDeviceStatus(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     if (A(0))
-        memset(x->base + A(0), 0, 24); /* status 0: no Kinect */
+        memset(x360_p(x, A(0)), 0, 24); /* status 0: no Kinect */
     RET(0);
 }
 
@@ -1694,7 +1694,7 @@ static void x_XNetInAddrToString(x360_machine *x, x360_thread *t, xe_cpu *c)
     snprintf(s, sizeof s, "%u.%u.%u.%u", a >> 24, a >> 16 & 255, a >> 8 & 255, a & 255);
     if (A(2) && n) {
         uint32_t len = (uint32_t)strlen(s) < n - 1 ? (uint32_t)strlen(s) : n - 1;
-        memcpy(x->base + A(2), s, len);
+        memcpy(x360_p(x, A(2)), s, len);
         x360_w8(x, A(2) + len, 0);
     }
     RET(0);
