@@ -1525,6 +1525,62 @@ int main(int argc, char **argv)
         run(&cp);
     }
 
+    /* a resolve that exchanges red and blue (Direct3D's A8R8G8B8 destinations): memory has the red quad's red in Z,
+     * and the texture is still sampled from the resolve's host picture (no trip through memory, the internal
+     * resolution kept) with the two exchanged back: the fetch constant's swizzle sees what memory holds */
+    if (pst) {
+        xenos_gl_stats c0, c1;
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        reg(0x4800, 0x4080u | 3u); /* the red quad */
+        reg(0x4801, 2u | (32u << 2));
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        reg(0x4800, 0x7000u | 3u); /* the resolve rectangle of frame 12 */
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);
+        reg(0x2318, 0u | 0u << 20);                    /* colour 0, no clear, raw copy */
+        reg(0x2319, 0x58000);
+        reg(0x231A, W | (uint32_t)H << 16);
+        reg(0x231B, 2u | 6u << 7 | 1u << 24);          /* 8-in-32, 8_8_8_8, red and blue exchanged */
+        uint32_t rect2 = 8u | 2u << 6 | 3u << 16;
+        type3(PM4_DRAW_INDX_2, &rect2, 1);
+        reg(0x2208, 4);
+        run(&cp);
+        uint32_t sw = rd32(NULL, 0x58000 + tiled_off(37, 21));
+        CHECK(sw == 0xFFFF0000u, "resolved with the swap: texel %08X, want FFFF0000", sw);
+        im[0] = 1, im[1] = ntex;
+        memcpy(im + 2, pst, 4 * ntex);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
+        reg(0x4800, 0x6000u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        static const struct {
+            int exchange;
+            uint8_t want[3];
+        } sx[2] = {{1, {255, 0, 0}}, {0, {0, 0, 255}}};
+        xenos_gl_get_stats(g, &c0);
+        for (int k = 0; k < 2; k++) {
+            uint32_t fs[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22 | 1u << 31, 6u | 2u << 6 | 0x58000u, 63u | 63u << 13,
+                              (sx[k].exchange ? sw_rb : sw_id) << 1, 0, 1u << 9};
+            for (int i = 0; i < 6; i++)
+                reg(0x480C + (uint32_t)i, fs[i]);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            const uint8_t *cs = px(g, W / 2, H / 2);
+            CHECK(cs[0] == sx[k].want[0] && cs[1] == sx[k].want[1] && cs[2] == sx[k].want[2],
+                  "swapped resolve sampled (swizzle %s): %u,%u,%u, want %u,%u,%u", sx[k].exchange ? "BGRA" : "RGBA",
+                  cs[0], cs[1], cs[2], sx[k].want[0], sx[k].want[1], sx[k].want[2]);
+        }
+        xenos_gl_get_stats(g, &c1);
+        CHECK(c1.copy_textures == c0.copy_textures + 2, "sampled from the resolve's host picture: +%llu, want +2",
+              (unsigned long long)(c1.copy_textures - c0.copy_textures));
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;

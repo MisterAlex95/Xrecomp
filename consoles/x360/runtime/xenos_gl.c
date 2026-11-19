@@ -247,6 +247,7 @@ typedef struct texture {
     int used;
     uint32_t checked; /* the epoch its memory was last compared in */
     int copy;         /* 1 + the resolve copy it was made from (its host picture, at the internal resolution) */
+    int swap_rb;      /* that copy's: red and blue are the other way round from the memory the fetch constant reads */
     int levels;       /* mip levels uploaded */
 } texture;
 
@@ -290,6 +291,7 @@ typedef struct rt_copy {
     GLuint tex;            /* the destination's pitch x height at the internal resolution, top row first */
     int w, h;
     GLenum ifmt;
+    int swap_rb;           /* the resolve exchanged red and blue in memory; the picture has them as the surface did */
     unsigned used;
 } rt_copy;
 
@@ -2348,6 +2350,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
         uint32_t w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
         if ((int)w <= rc->w && (int)h <= rc->h) {
             if (t && t->copy == 1 + (int)(rc - g->copies) && t->hash == rc->hash) {
+                t->swap_rb = rc->swap_rb;
                 t->checked = g->epoch;
                 t->used = (int)++g->tex_clock;
                 return t->tex;
@@ -2368,6 +2371,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
             t->tex = new_texture(g, rc->ifmt, tf, tt, (int)w * g->scale, (int)h * g->scale);
             blit_tex(g, rc->tex, t->tex, 0, 0, (int)w, (int)h, 0, 0);
             t->copy = 1 + (int)(rc - g->copies);
+            t->swap_rb = rc->swap_rb;
             t->hash = rc->hash;
             t->checked = g->epoch;
             t->used = (int)++g->tex_clock;
@@ -2395,6 +2399,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
         g->glDeleteTextures(1, &t->tex);
     g->glGenTextures(1, &t->tex);
     t->copy = 0;
+    t->swap_rb = 0;
     t->hash = d.hash;
     t->checked = g->epoch;
     t->used = (int)++g->tex_clock;
@@ -2430,8 +2435,21 @@ static GLint wrap_mode(uint32_t c)
     return c == 0 ? GL_REPEAT : c == 1 ? GL_MIRRORED_REPEAT : GL_CLAMP_TO_EDGE;
 }
 
-/* a texture's sampling state from its fetch constant: wraps, filters (mips when it has them), swizzle */
-static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mipped)
+/* a swizzle (3 bits a component) over a host picture whose red and blue are the other way round from memory's: a
+ * resolve that swaps them writes the surface's red where the texture format has blue, the picture kept is unswapped */
+static uint32_t swizzle_swap_rb(uint32_t swizzle)
+{
+    uint32_t out = 0;
+    for (int c = 0; c < 4; c++) {
+        uint32_t s = (swizzle >> (3 * c)) & 7;
+        out |= (s == 0 ? 2u : s == 2 ? 0u : s) << (3 * c);
+    }
+    return out;
+}
+
+/* a texture's sampling state from its fetch constant: wraps, filters (mips when it has them), swizzle (over a
+ * resolve's picture kept with red and blue unswapped when swap_rb) */
+static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mipped, int swap_rb)
 {
     static const GLint swz[6] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};
     g->glTexParameteri(target, GL_TEXTURE_WRAP_S, wrap_mode((fc[0] >> 10) & 7));
@@ -2447,8 +2465,11 @@ static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mi
                        !mipped ? (min ? GL_LINEAR : GL_NEAREST)
                        : min   ? (mip ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST)
                                : (mip ? GL_NEAREST_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST));
+    uint32_t swizzle = (fc[3] >> 1) & 0xFFF;
+    if (swap_rb)
+        swizzle = swizzle_swap_rb(swizzle);
     for (int c = 0; c < 4; c++) {
-        uint32_t s = (fc[3] >> (1 + 3 * c)) & 7;
+        uint32_t s = (swizzle >> (3 * c)) & 7;
         g->glTexParameteri(target, GL_TEXTURE_SWIZZLE_R + (GLenum)c, s < 6 ? swz[s] : GL_ZERO);
     }
 }
@@ -2494,13 +2515,14 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
             g->st.unsupported_textures++;
             continue;
         }
-        int mipped = 0;
+        int mipped = 0, swap_rb = 0;
         for (int t = 0; t < MAX_TEXTURES; t++)
             if (g->textures[t].tex == tex) {
                 mipped = !g->textures[t].copy && g->textures[t].levels > 1;
+                swap_rb = g->textures[t].copy && g->textures[t].swap_rb;
                 break;
             }
-        sampler_state(g, target, fc, mipped);
+        sampler_state(g, target, fc, mipped, swap_rb);
     }
     g->glActiveTexture(GL_TEXTURE0);
 }
@@ -3282,7 +3304,9 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
             g->epoch++;
             if (g->nresolved < 16)
                 g->resolved[g->nresolved++] = base & 0x1FFFF000u;
-            /* the host picture at the internal resolution (not with a red / blue swap: memory's X would be blue) */
+            /* the host picture at the internal resolution. A resolve that swaps red and blue (what Direct3D asks for
+             * every A8R8G8B8 destination) keeps the picture unswapped and says so: whoever samples it exchanges the
+             * two in its swizzle (sampler_state, the frame at the swap). */
             if (!height)
                 height = (uint32_t)y1;
             uint32_t height_aligned = (height + 31) & ~31u;
@@ -3296,7 +3320,7 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                 if (!c->tex || (victim->tex && c->used < victim->used))
                     victim = c;
             }
-            if (swap_rb || s->kind == 2 || (base & 0xFFF)) {
+            if (s->kind == 2 || (base & 0xFFF)) {
                 if (rc) {
                     g->glDeleteTextures(1, &rc->tex);
                     memset(rc, 0, sizeof *rc);
@@ -3304,10 +3328,12 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
             } else {
                 if (!rc)
                     rc = victim;
-                if (rc->tex && (rc->ifmt != s->ifmt || rc->w != (int)pitch_aligned || rc->h != (int)height_aligned)) {
+                if (rc->tex && (rc->ifmt != s->ifmt || rc->w != (int)pitch_aligned || rc->h != (int)height_aligned ||
+                                rc->swap_rb != (int)swap_rb)) {
                     g->glDeleteTextures(1, &rc->tex);
                     rc->tex = 0;
                 }
+                rc->swap_rb = (int)swap_rb;
                 if (!rc->tex) {
                     GLenum tf, tt;
                     upload_fmt(s->ifmt, &tf, &tt);
@@ -3778,6 +3804,8 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
     }
     if (rc && fw <= rc->w && fh <= rc->h) {
         src = rc->tex, src_fmt = rc->ifmt;
+        if (rc->swap_rb)
+            swizzle = swizzle_swap_rb(swizzle);
         g->st.front_buffer_frames++;
     } else if (front) {
         decoded d;
