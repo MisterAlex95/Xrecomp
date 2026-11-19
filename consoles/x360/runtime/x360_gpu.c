@@ -283,8 +283,11 @@ void x360_gpu_poll(x360_machine *x)
     if (!g)
         return;
     uint64_t now = x360_now(x);
-    /* registers titles poll: the vertical counter, interrupt status, the viewport size */
+    /* registers titles poll: the vertical counter, the display interrupt status, the viewport size. The status
+     * reads 1 (the vertical blank occurred), as in Xenia: Direct3D's interrupt handler tests that bit before it
+     * runs its vertical blank routine, the only display interrupt this runtime raises. */
     x360_w32(x, GPU_MMIO + 4 * 0x194C, (uint32_t)(now % VBLANK_100NS * 750 / VBLANK_100NS));
+    x360_w32(x, GPU_MMIO + 4 * 0x1951, 1);
     x360_w32(x, GPU_MMIO + 4 * 0x1961, 1280u << 16 | 720u);
     if (g->ring) {
         uint32_t w = x360_r32(x, GPU_MMIO + 4 * XENOS_REG_CP_RB_WPTR);

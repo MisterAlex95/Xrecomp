@@ -351,6 +351,12 @@ static void test_gpu(void)
             irq = &X->threads[k];
     CHECK(irq && irq->cpu.pc == 0x82001000u && irq->cpu.gpr[3] == 0 && irq->cpu.gpr[4] == 0x55,
           "vblank interrupt thread (threads %d -> %d)", before, X->nthreads);
+    /* what its handler reads first: the display interrupt status says the vertical blank occurred, also after the
+     * handler wrote the register to acknowledge it */
+    CHECK(x360_r32(X, 0x7FC80000u + 4 * 0x1951) & 1, "the vertical blank status is set");
+    x360_w32(X, 0x7FC80000u + 4 * 0x1951, 0);
+    x360_gpu_poll(X);
+    CHECK(x360_r32(X, 0x7FC80000u + 4 * 0x1951) & 1, "and set again for the next interrupt");
     /* ten thousand vertical blanks (about three minutes of virtual time) reuse that one context */
     int fired = 0, nthreads = X->nthreads;
     uint32_t kfree = X->kalloc_cur;
