@@ -16,8 +16,9 @@ import java.io.IOException;
 /**
  * Hands the Prepare's log to another app (« Share log » on the launcher), read-only, through a temporary URI grant:
  * content://<app id>.logs/prepare/<TITLEID>/prepare.log; and the game's logcat dump (« Share log » on the companion
- * panel), content://<app id>.logs/game/game.log. Only files named prepare.log under <files>/prepare, and
- * <files>/logs/game.log, are served. A framework ContentProvider rather than AndroidX's FileProvider (the app has no AndroidX).
+ * panel), content://<app id>.logs/game/game.log; and the log of the game's last run, crash included, dumped by the
+ * launcher after the game's process ended (« Share the last game's log »), content://<app id>.logs/game/last-game.log.
+ * Only files named prepare.log under <files>/prepare, <files>/logs/game.log and <files>/logs/last-game.log are served. A framework ContentProvider rather than AndroidX's FileProvider (the app has no AndroidX).
  * Never anything under <files>/lsfg (the frame generation shaders taken from the player's Lossless.dll,
  * docs/technical/framegen.md): {@link #file} refuses any path that resolves there.
  */
@@ -35,6 +36,19 @@ public class LogProvider extends ContentProvider {
     static Uri gameUri(Context c) {
         return new Uri.Builder().scheme("content").authority(authority(c)).appendPath("game")
                 .appendPath("game.log").build();
+    }
+
+    /** The last game's log (« Share the last game's log » in Settings): content://<app id>.logs/game/last-game.log. */
+    static Uri lastGameUri(Context c) {
+        return new Uri.Builder().scheme("content").authority(authority(c)).appendPath("game")
+                .appendPath(LAST_GAME_LOG).build();
+    }
+
+    static final String LAST_GAME_LOG = "last-game.log";
+
+    /** <files>/logs/last-game.log: the game process's last run, written by {@link #dumpLastGame}. */
+    static File lastGameLogFile(Context c) {
+        return new File(new File(c.getFilesDir(), "logs"), LAST_GAME_LOG);
     }
 
     /**
@@ -72,6 +86,130 @@ public class LogProvider extends ContentProvider {
             return false;
         }
         return f.isFile() && f.length() > 0;
+    }
+
+    /**
+     * The game's last run into f, for « Share the last game's log » (the launcher runs in its own process, under the
+     * same user id, so it still reads what the game's process logged once that process has died): how the system says
+     * the process ended (ApplicationExitInfo: crash, native crash, not responding, killed…), the process's own lines
+     * (logcat main, system and crash buffers, --pid of the dead process), then the crash buffer as a whole (the native
+     * backtrace is logged by crash_dump, a process of its own under our user id), and the system's trace for a « not
+     * responding » end (text; a native crash's trace is a tombstone protobuf, its backtrace is in the crash buffer).
+     * False when nothing could be written.
+     */
+    static boolean dumpLastGame(Context c, File f) {
+        File d = f.getParentFile();
+        if (d != null && !(d.mkdirs() || d.isDirectory()))
+            return false;
+        android.app.ApplicationExitInfo exit = lastGameExit(c);
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(f)) {
+            StringBuilder head = new StringBuilder("# XRecomp: the game's last run\n");
+            head.append("# app ").append(c.getString(R.string.xba_version)).append(", Android ")
+                .append(android.os.Build.VERSION.RELEASE).append(", ").append(android.os.Build.MANUFACTURER)
+                .append(' ').append(android.os.Build.MODEL).append('\n');
+            if (exit == null)
+                head.append("# no record of how the game's process ended: the last lines of the app's log\n");
+            else
+                head.append(exitHeader(exit.getPid(), exit.getTimestamp(), reasonName(exit.getReason()),
+                                       exit.getStatus(), exit.getDescription()));
+            out.write(head.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            if (exit != null) {
+                section(out, "the game process's log (pid " + exit.getPid() + ")");
+                logcat(out, "-b", "main,system,crash", "--pid=" + exit.getPid());
+            } else {
+                section(out, "the app's log");
+                logcat(out, "-b", "main,system,crash", "-t", "20000");
+            }
+            section(out, "crash buffer");
+            logcat(out, "-b", "crash");
+            if (exit != null && exit.getReason() == android.app.ApplicationExitInfo.REASON_ANR) {
+                section(out, "system trace");
+                try (java.io.InputStream in = exit.getTraceInputStream()) {
+                    if (in != null)
+                        copy(in, out);
+                } catch (IOException e) {
+                    out.write(("(trace unreadable: " + e + ")\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+            }
+        } catch (IOException e) {
+            return false;
+        }
+        return f.isFile() && f.length() > 0;
+    }
+
+    /** The newest end of the game's process (the main one, named after the package), or null. */
+    private static android.app.ApplicationExitInfo lastGameExit(Context c) {
+        android.app.ActivityManager am = c.getSystemService(android.app.ActivityManager.class);
+        if (am == null)
+            return null;
+        try {
+            for (android.app.ApplicationExitInfo x : am.getHistoricalProcessExitReasons(c.getPackageName(), 0, 16))
+                if (c.getPackageName().equals(x.getProcessName()))
+                    return x;   // newest first
+        } catch (RuntimeException e) {
+            // no record
+        }
+        return null;
+    }
+
+    /** The header lines of the dump: when and how the game's process ended. */
+    static String exitHeader(int pid, long time, String reason, int status, String description) {
+        java.text.SimpleDateFormat fmt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.ROOT);
+        return "# game process " + pid + " ended " + fmt.format(new java.util.Date(time)) + ": " + reason
+               + (status != 0 ? ", status " + status : "")
+               + (description == null || description.isEmpty() ? "" : " (" + description + ")") + "\n";
+    }
+
+    /** ApplicationExitInfo's reason, in words. */
+    static String reasonName(int r) {
+        switch (r) {
+        case android.app.ApplicationExitInfo.REASON_CRASH_NATIVE: return "native crash";
+        case android.app.ApplicationExitInfo.REASON_CRASH: return "Java exception";
+        case android.app.ApplicationExitInfo.REASON_ANR: return "not responding";
+        case android.app.ApplicationExitInfo.REASON_LOW_MEMORY: return "killed for memory";
+        case android.app.ApplicationExitInfo.REASON_EXIT_SELF: return "exited";
+        case android.app.ApplicationExitInfo.REASON_SIGNALED: return "killed by a signal";
+        case android.app.ApplicationExitInfo.REASON_USER_REQUESTED: return "stopped by the user";
+        case android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE: return "killed for resource use";
+        case android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE: return "failed to start";
+        case android.app.ApplicationExitInfo.REASON_PERMISSION_CHANGE: return "killed: permission change";
+        case android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED: return "killed: a dependency died";
+        default: return "reason " + r;
+        }
+    }
+
+    private static void section(java.io.OutputStream out, String name) throws IOException {
+        out.write(("\n# ---- " + name + " ----\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /** logcat -d -v threadtime with these arguments, appended to out (an app reads its own user id's lines). */
+    private static void logcat(java.io.OutputStream out, String... args) throws IOException {
+        java.util.List<String> cmd = new java.util.ArrayList<>(java.util.Arrays.asList("logcat", "-d", "-v",
+                                                                                       "threadtime"));
+        cmd.addAll(java.util.Arrays.asList(args));
+        Process p;
+        try {
+            p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+        } catch (IOException e) {   // no logcat (a test host): said in the file, the rest is still written
+            out.write(("(logcat unavailable: " + e.getMessage() + ")\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return;
+        }
+        try (java.io.InputStream in = p.getInputStream()) {
+            copy(in, out);
+        }
+        try {
+            if (!p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS))
+                p.destroy();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            p.destroy();
+        }
+    }
+
+    private static void copy(java.io.InputStream in, java.io.OutputStream out) throws IOException {
+        byte[] b = new byte[64 * 1024];
+        for (int n; (n = in.read(b)) > 0; )
+            out.write(b, 0, n);
     }
 
     @Override
@@ -120,6 +258,8 @@ public class LogProvider extends ContentProvider {
         java.util.List<String> seg = uri.getPathSegments();
         if (seg.size() == 2 && seg.get(0).equals("game") && seg.get(1).equals("game.log"))
             return gameLogFile(c);
+        if (seg.size() == 2 && seg.get(0).equals("game") && seg.get(1).equals(LAST_GAME_LOG))
+            return lastGameLogFile(c);
         if (seg.size() == 2 && seg.get(0).equals(LibraryCheck.DIR) && seg.get(1).equals(LibraryCheck.RESULTS))
             return LibraryCheck.resultsFile(c.getFilesDir());
         if (seg.size() != 3 || !seg.get(0).equals("prepare") || !seg.get(2).equals("prepare.log"))
@@ -159,7 +299,7 @@ public class LogProvider extends ContentProvider {
         Object[] row = new Object[cols.length];
         for (int i = 0; i < cols.length; i++) {
             if (OpenableColumns.DISPLAY_NAME.equals(cols[i]))
-                row[i] = uri.getPathSegments().get(0).equals("game") ? "game.log"
+                row[i] = uri.getPathSegments().get(0).equals("game") ? uri.getPathSegments().get(1)
                          : uri.getPathSegments().get(0).equals(LibraryCheck.DIR) ? LibraryCheck.RESULTS
                          : "prepare-" + uri.getPathSegments().get(1) + ".log";
             else if (OpenableColumns.SIZE.equals(cols[i]))
