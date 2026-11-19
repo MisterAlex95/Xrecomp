@@ -4261,10 +4261,14 @@ static int raster_pool_size(void)
         const char *e = getenv("RECOMP_RASTER_THREADS");
         int n, k;
         init = 1;
-        /* The pool draws: the executor back on the guest's core, if it left
-         * it for a GPU back end that gave up (xbox_HostThreadFloat, XBA-305),
-         * before its mask sizes the pool and the workers inherit it. */
-        recomp_host_cpus_avoid_undo();
+        /* The CPU rasteriser draws (the GPU back end gave up before its
+         * first draw): the executor back on the guest's core, if it left it
+         * for that back end (xbox_HostThreadFloat, XBA-305), before its mask
+         * sizes the pool and the workers inherit it. Not while a back end
+         * draws: the pool then only transforms vertices, and its threads stay
+         * off the guest's core with the executor. */
+        if (!backend_draws() && recomp_host_cpus_avoid_undo())
+            fprintf(stderr, "  [GPU] executor back on every core for the CPU rasteriser's pool\n");
         n = e ? atoi(e) : raster_pool_default();
         if (n < 1) n = 1;
         if (n > NV_RASTER_MAX_THREADS) n = NV_RASTER_MAX_THREADS;
