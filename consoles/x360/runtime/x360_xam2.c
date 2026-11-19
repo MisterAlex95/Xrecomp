@@ -1715,6 +1715,23 @@ static void x_XNetRelease(x360_machine *x, x360_thread *t, xe_cpu *c)
     RET(A(1) ? 0 : X_STATUS_INVALID_PARAMETER);
 }
 
+static void x_XNetQosLookup(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)t;
+    /* (caller, count, addresses*, key ids*, keys*, service count, service addresses*, service ids*, probes, bits per
+     * second, flags, event, result**): the XDK's XNetQosLookup after the caller word. No probe is sent: no result. */
+    uint32_t out = A9(12);
+    if (out)
+        x360_w32(x, out, 0);
+    RET(WSAENETDOWN);
+}
+
+static void x_XNetConnect(x360_machine *x, x360_thread *t, xe_cpu *c)
+{
+    (void)x, (void)t;
+    RET(WSAENETDOWN); /* (caller, address): 0 or a Winsock error */
+}
+
 /* ---- the table ---- */
 
 const x360_hle_row x360_tab_xam2[] = {
@@ -1787,6 +1804,7 @@ const x360_hle_row x360_tab_xam2[] = {
     X360_HX(XamShowGamerCardUIForXUID, x_ui_ok),
     X360_HX(XamShowAchievementsUI, x_ui_ok),
     X360_HX(XamShowFriendsUI, x_ui_ok),
+    X360_HX(XamShowGameInviteUI, x_ui_ok),
     X360_HX(XamShowMarketplaceUI, x_ui_ok),
     X360_HX(XamShowMarketplaceUIEx, x_ui_ok),
     X360_HX(XamShowMarketplaceDownloadItemsUI, x_XamShowMarketplaceDownloadItemsUI),
@@ -1836,6 +1854,7 @@ const x360_hle_row x360_tab_xam2[] = {
     X360_HX(XamVoiceIsActiveProcess, x_ret0),
     X360_HX(XamVoiceCreate, x_XamVoiceCreate),
     X360_HX(XamVoiceClose, x_ret0),
+    X360_HX(XamVoiceSubmitPacket, x_ret0), /* no voice was created (XamVoiceCreate): nothing to send */
     X360_HX(XamVoiceHeadsetPresent, x_ret0),
     X360_HX(XamNuiGetDeviceStatus, x_XamNuiGetDeviceStatus),
     /* the network */
@@ -1863,6 +1882,10 @@ const x360_hle_row x360_tab_xam2[] = {
     X360_HX(NetDll_XNetQosServiceLookup, x_XNetLookup),
     X360_HX(NetDll_XNetQosRelease, x_XNetRelease),
     X360_HX(NetDll_XNetQosListen, x_function_failed),
+    X360_HX(NetDll_XNetQosLookup, x_XNetQosLookup),
+    X360_HX(NetDll_XNetConnect, x_XNetConnect),
+    X360_HX(NetDll_XNetGetConnectStatus, x_ret0), /* XNET_CONNECT_STATUS_IDLE: nothing was ever connected */
+    X360_HX(NetDll_WSAGetOverlappedResult, x_ret0), /* FALSE: the operation failed (WSAGetLastError: network down) */
     X360_HX(NetDll_shutdown, x_net_error),
     X360_HX(NetDll_ioctlsocket, x_net_error),
     X360_HX(NetDll_recvfrom, x_net_error),

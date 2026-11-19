@@ -460,6 +460,16 @@ static void test_services(void)
     CHECK(XAM(X360_xam_NetDll_XNetQosServiceLookup, 4, 0, 0, 0, out) == 0x2742, "no QoS");
     CHECK(XAM(X360_xam_NetDll_XNetDnsRelease, 2, 0, 0) == 0xC000000Du, "DNS release: nothing");
     CHECK(XAM(X360_xam_NetDll_XNetQosListen, 6, 0, 0, 0, 0, 0, 0) == FUNCTION_FAILED, "no QoS listen");
+    /* a QoS lookup's result pointer is the thirteenth argument (a stack slot): cleared, and the network is down */
+    x360_w32(X, out, 7);
+    CHECK(XAM(X360_xam_NetDll_XNetQosLookup, 13, 0, 1, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, out) == 0x2742 &&
+              x360_r32(X, out) == 0, "no QoS lookup: result %08X", x360_r32(X, out));
+    CHECK(XAM(X360_xam_NetDll_XNetConnect, 2, 0, 0x0A010203u) == 0x2742, "nothing to connect to");
+    CHECK(XAM(X360_xam_NetDll_XNetGetConnectStatus, 2, 0, 0x0A010203u) == 0, "connection status: idle");
+    CHECK(XAM(X360_xam_NetDll_WSAGetOverlappedResult, 6, 0, 1, out, out, 0, out) == 0, "no overlapped result");
+    CHECK(XAM(X360_xam_XamVoiceSubmitPacket, 3, 0, 4, out) == 0, "no voice to submit to");
+    CHECK(XAM(X360_xam_XamShowGameInviteUI, 4, 0, 0, 0, 0) == 0 && XAM(X360_xam_XamShowGameInviteUI, 4, 1, 0, 0, 0) != 0,
+          "the invite UI: the signed-in user only");
     XAM(X360_xam_NetDll_XNetInAddrToString, 4, 0, 0x0A010203u, out, 16);
     CHECK(!strcmp((char *)X->base + out, "10.1.2.3"), "address string");
     memset(X->base + out, 0, 16);
