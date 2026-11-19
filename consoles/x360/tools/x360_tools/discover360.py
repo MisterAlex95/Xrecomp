@@ -13,7 +13,10 @@
   before it) is resolved by evaluating the code before it backwards (`JumpTables`): absolute tables (`lwzx` of
   addresses: MSVC), tables of offsets added to a base (`lbzx` / `lhzx` / `lwzx`, optionally shifted, plus a constant:
   MSVC's compact forms, and GCC's relative tables). The index is the register as the bound check compared it: what
-  computed it before that (MSVC's `addi rI, rX, -lowest case`) is not part of the table's address. The targets become
+  computed it before that (MSVC's `addi rI, rX, -lowest case`) is not part of the table's address, and a load of the
+  stack slot the compared value came from is that value again (code built without optimisation). A table without a
+  check of its own takes the bound of the check further up that every path to it passes (`_shared_bound`: two
+  switches on one value), or, MSVC's absolute table only, is read to its end (`_unbounded`). The targets become
   branch targets inside the function and the lifter turns the `bctr` into a switch. Anything else stays an indirect
   jump through the dispatcher, counted as unresolved.
 
@@ -285,6 +288,56 @@ def pointer_seeds(img, view, decode):
 
 # ---------------------------------------------------------------- jump tables
 
+# Which general registers an instruction writes, for the instructions that may stand in a shared-bound region
+# (JumpTables._shared_bound). Extended opcodes of primary 31, OE bit dropped:
+_X31_WRITES_RD = frozenset((8, 9, 10, 11, 19, 21, 23, 40, 73, 75, 87, 104, 136, 138, 200, 202, 232, 233, 234, 235,
+                            266, 279, 339, 341, 343, 457, 459, 489, 491))
+_X31_WRITES_RA = frozenset((24, 26, 27, 28, 58, 60, 124, 284, 316, 412, 444, 476, 536, 539, 792, 794, 824, 826, 827,
+                            922, 954, 986))
+_X31_WRITES_NONE = frozenset((0, 32, 144, 149, 151, 215, 407, 467))   # compares, mtcrf, stores, mtspr
+_X31_OE = frozenset((8, 10, 40, 104, 136, 138, 200, 202, 232, 233, 234, 235, 266, 457, 459, 489, 491))
+
+
+def gpr_writes(w):
+    """The general registers the instruction word writes, as a tuple; None for a call, a system call, a trap, or
+    anything this does not know (the caller then gives up)."""
+    op, d, a = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+    if op in (7, 8, 12, 13, 14, 15, 32, 34, 40, 42):          # mulli .. addis, lwz, lbz, lhz, lha
+        return (d,)
+    if op in (33, 35, 41, 43):                                # the same loads with update
+        return (d, a)
+    if op in (20, 21, 23, 24, 25, 26, 27, 28, 29, 30):        # rotates, logical immediates
+        return (a,)
+    if op in (10, 11, 36, 38, 44, 48, 50, 52, 54):            # compares, stores, FP loads and stores
+        return ()
+    if op in (37, 39, 45, 49, 51, 53, 55):                    # stores and FP loads with update
+        return (a,)
+    if op in (16, 18):                                        # bc, b: not a call
+        return None if w & 1 else ()
+    if op == 19:                                              # bclr / bcctr (not a call), CR logic, mcrf
+        x = (w >> 1) & 0x3FF
+        if x in (16, 528):
+            return None if w & 1 else ()
+        return () if x in (0, 33, 129, 193, 225, 257, 289, 417, 449) else None
+    if op == 58:                                              # ld, ldu, lwa
+        return (d, a) if w & 3 == 1 else (d,)
+    if op == 62:                                              # std, stdu
+        return (a,) if w & 3 == 1 else ()
+    if op in (59, 63):                                        # FP arithmetic
+        return ()
+    if op == 31:
+        x = (w >> 1) & 0x3FF
+        if x & 0x200 and (x & 0x1FF) in _X31_OE:
+            x &= 0x1FF
+        if x in _X31_WRITES_RD:
+            return (d,)
+        if x in _X31_WRITES_RA:
+            return (a,)
+        if x in _X31_WRITES_NONE:
+            return ()
+    return None
+
+
 class _Expr:
     """A value computed before a bctr: const, the index register, a table load, a shift or a sum."""
     __slots__ = ("k", "a", "b", "c")
@@ -306,11 +359,18 @@ class JumpTables:
         self._index = None    # while a table is evaluated: (index register, where its bound check is in the window)
         self._slot = None     # and, when the compared value was loaded from the stack: (displacement, where)
         self._functions = None  # the .pdata functions, sorted (made when a table has no bound check)
+        self._busy = set()      # the bctr being resolved (a table's proof may ask for the function's other tables)
 
     def resolve(self, a):
         if a in self.tables:
             return self.tables[a]
-        t = self._resolve(a)
+        if a in self._busy:
+            return ()
+        self._busy.add(a)
+        try:
+            t = self._resolve(a)
+        finally:
+            self._busy.discard(a)
         if t is None:
             self.unresolved.add(a)
             return ()
@@ -491,7 +551,7 @@ class JumpTables:
         if bound is None:
             bc = self._bound_before(insns)
             if bc is None:
-                return self._unbounded(a, insns, k)
+                return self._unbounded(a, insns, k) or self._shared_bound(a, insns, k)
             bound = bc
         reg, n = bound
         if n > 4096:
@@ -518,11 +578,8 @@ class JumpTables:
             return None
         return targets
 
-    def _unbounded(self, a, insns, k):
-        """A table with no bound check: the compiler knew the index's range (a switch over every value of a small
-        type). Only MSVC's absolute table (`lwzx` of addresses at index << 2) inside a .pdata function: its entries
-        are read while they are code addresses of that function, and, for a table placed in the function's own code,
-        no further than the first case label after it. A word read too far is one more label of the same function."""
+    def _function(self, a):
+        """The .pdata function holding a, as (start, end), or None."""
         img = getattr(self.view, "img", None)
         pdata = getattr(img, "pdata", None)
         if not pdata:
@@ -532,7 +589,146 @@ class JumpTables:
         f = bisect_right(self._functions, (a, 0xFFFFFFFF)) - 1
         if f < 0 or not self._functions[f][0] <= a < self._functions[f][1]:
             return None
-        fs, fe = self._functions[f]
+        return self._functions[f]
+
+    @classmethod
+    def _leaves(cls, e, out):
+        if e.k == "reg":
+            out.add(e.a)
+        elif e.k == "shl":
+            cls._leaves(e.a, out)
+        elif e.k == "add":
+            cls._leaves(e.a, out)
+            cls._leaves(e.b, out)
+        elif e.k == "load":
+            cls._leaves(e.c, out)
+
+    SHARED_BOUND_GAP = 3   # instructions between the compare and its branch (loads the table code needs)
+
+    def _shared_bound(self, a, insns, k):
+        """A table whose bound check stands further up the function and serves more than one table: `cmplwi crF, rI,
+        N; bgt crF, default`, a first switch on rI, and in some of its cases a second switch on rI again, which the
+        compiler emits without a check. The bound is that compare's when the table code can only be reached through
+        it with rI untouched. That is shown for a region R of the function, from the instruction after the `bgt` to
+        the bctr at least:
+        - nothing in R writes rI, and nothing in R is a call (every instruction there is one `gpr_writes` knows);
+        - every branch of the function into R comes from R (R grows to hold a later branch that jumps back into
+          it; one from before R, the `bgt`'s own default included, refuses);
+        - the function's other bctr are resolved tables, their targets under the same rule.
+        So R is entered by falling out of the `bgt` only: rI is at most N throughout. Only inside a .pdata function
+        (taken to be entered at its start), and every target must be a word of that function."""
+        f = self._function(a)
+        if f is None:
+            return None
+        fs, fe = f
+        # the table code proper: what follows the last conditional branch before the bctr, all of it in the function
+        cut = next((j for j, i in enumerate(insns) if i.kind == BCOND or i.addr < fs), len(insns))
+        insns = insns[:cut]
+        if k >= len(insns):
+            return None
+        e = self._ev(insns, k + 1, insns[k].rd)
+        if e is None:
+            return None
+        regs = set()
+        self._leaves(e, regs)
+        if len(regs) != 1:
+            return None
+        idx = regs.pop()
+        flow = None
+        tried = 0
+        for c in range(a - 4, fs - 4, -4):
+            w = self.view.u32(c) if self.view.in_code(c) else 0
+            if w >> 26 != 10 or (w >> 21) & 1 or (w >> 16) & 31 != idx:
+                continue
+            crf, n = (w >> 23) & 7, w & 0xFFFF
+            g = self._bound_branch(c, crf, idx, min(a, fe - 4))
+            if g is None or n > 4096 or insns[-1].addr < g:
+                continue
+            if flow is None:
+                flow = self._function_flow(a, fs, fe)
+                if flow is None:
+                    return None
+            if self._single_entry(g, a, idx, fe, flow):
+                targets = []
+                try:
+                    for x in range(n + 1):
+                        targets.append(self._calc(e, idx, x) & 0xFFFFFFFF)
+                except ValueError:
+                    return None
+                if all(fs <= t < fe and not t & 3 and self.view.in_code(t) for t in targets):
+                    return targets
+                return None
+            tried += 1
+            if tried >= 4:
+                break
+        return None
+
+    def _bound_branch(self, c, crf, idx, limit):
+        """The address after the `bgt crF` that follows the compare at c, within a few loads that leave the index
+        alone; None when there is none."""
+        for p in range(c + 4, min(c + 4 * (self.SHARED_BOUND_GAP + 2), limit), 4):
+            if not self.view.in_code(p):
+                return None
+            w = self.view.u32(p)
+            op = w >> 26
+            if op == 16:
+                bo, bi = (w >> 21) & 31, (w >> 16) & 31
+                return p + 4 if (bo & 0x1C) == 0x0C and bi == 4 * crf + 1 and not w & 3 else None
+            # a load that sets no condition register and leaves the index alone
+            if not (op in (32, 34, 40) or (op == 31 and (w >> 1) & 0x3FF in (23, 87, 279))) \
+                    or (w >> 21) & 31 == idx:
+                return None
+        return None
+
+    def _function_flow(self, a, fs, fe):
+        """Every (source, target) of the function's direct branches and of its other tables; None when one of its
+        other bctr is no resolved table."""
+        out = []
+        for p in range(fs, fe, 4):
+            if not self.view.in_code(p):
+                continue
+            i = self.decode(p)
+            if i.kind in (BRANCH, BCOND):
+                out.append((p, i.target))
+            elif i.kind == BCCTR and not i.lk and p != a:
+                if (i.rd & 0x14) != 0x14:
+                    return None
+                t = self.resolve(p)
+                if not t:
+                    return None
+                out += [(p, x) for x in t]
+        return out
+
+    def _single_entry(self, g, a, idx, fe, flow):
+        """Whether a region from g to the bctr at a (or further) is entered at g only and keeps the index."""
+        lo, hi = g, a + 4
+        grown = True
+        while grown:
+            grown = False
+            for src, t in flow:
+                if lo <= t < hi and not lo <= src < hi:
+                    if src < lo:
+                        return False
+                    hi, grown = src + 4, True
+        if hi > fe:
+            return False
+        for p in range(lo, hi, 4):
+            if not self.view.in_code(p):
+                return False
+            wr = gpr_writes(self.view.u32(p))
+            if wr is None or idx in wr:
+                return False
+        return True
+
+    def _unbounded(self, a, insns, k):
+        """A table with no bound check: the compiler knew the index's range (a switch over every value of a small
+        type). Only MSVC's absolute table (`lwzx` of addresses at index << 2) inside a .pdata function: its entries
+        are read while they are code addresses of that function, and, for a table placed in the function's own code,
+        no further than the first case label after it. A word read too far is one more label of the same function."""
+        f = self._function(a)
+        if f is None:
+            return None
+        fs, fe = f
         insns = [i for i in insns if i.addr >= fs]  # what precedes the function (padding, another one) is not its code
         e = self._ev(insns, k + 1, insns[k].rd)
         if e is None or e.k != "load" or e.a != 4:
