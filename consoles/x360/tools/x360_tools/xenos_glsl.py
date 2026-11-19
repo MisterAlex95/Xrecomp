@@ -23,8 +23,10 @@ guarantees 16 KB blocks, while 256 loose vec4 would take all of a pixel shader's
 xe_v<n>` per vertex fetch, its comment giving the fetch constant, offset, format, stride and signedness (the renderer
 reads it back and converts formats); `uniform sampler*D xe_t<n>` per texture fetch constant used (info's
 `textures`); the interpolators `xe_i<n>`, the vertex shader's outputs (all sixteen, so any pixel shader links) and the
-pixel shader's inputs (copied to r0..); gl_Position (Xenos's, before the host's viewport conversion) and gl_PointSize;
-the pixel shader's `layout(location = n) out vec4 xe_color<n>` and gl_FragDepth (written only when exported).
+pixel shader's inputs (all declared; those whose register the shader names are copied to it, and only they are
+inputs the shader statically uses: GLES 3.0 promises 15 of those, not 16); gl_Position (Xenos's, before the host's
+viewport conversion) and gl_PointSize; the pixel shader's `layout(location = n) out vec4 xe_color<n>` and
+gl_FragDepth (written only when exported).
 
 Control flow: exec clauses (conditional on a boolean or p0, ends only when the condition holds), and when a shader
 has loops, calls or jumps, a state machine on the control-flow index with the sequencer's four-deep loop (counter, aL)
@@ -199,7 +201,7 @@ class _Shader:
         self.exports_depth = self.exports_psize = False
         self.last_full = None  # (fetch constant, stride) of the last full vertex fetch, for mini fetches
         self.vbuffers = []        # (key, dict): vertex fetches at a computed index, read from a buffer texture
-        self.r0_written = False   # r0 (the vertex index) overwritten so far
+        self.r0_written = False   # r0.x (the vertex index) overwritten so far: r0's other components are free temporaries
         self.force_computed = False
         self.tqueries = set()     # texture fetch constants whose xe_tq<k> a query reads
         self.uses_tq = False
@@ -286,7 +288,7 @@ class _Shader:
         if not mask:
             return
         comps = "".join("xyzw"[i] for i in range(4) if mask >> i & 1)
-        if target == "r[0]" or target.startswith("r[clamp("):
+        if (target == "r[0]" and mask & 1) or target.startswith("r[clamp("):
             self.r0_written = True
         v = "clamp(%s, 0.0, 1.0)" % value if clamp else value
         if target == "xe_eA":   # a new export address: what the previous one collected goes out first
@@ -482,8 +484,9 @@ class _Shader:
             key = (fc, f["offset"])
             desc = {"fetch_constant": fc, "offset": f["offset"], "format": f["format"], "stride": stride,
                     "signed": f["signed"], "integer": f["integer"], "exp_adjust": f["exp_adjust"]}
-            # the index: the untouched r0.x is the vertex index (an attribute); anything else -- another register or
-            # component, r0 after the shader wrote it (instancing: index / count) -- reads the buffer as a texture
+            # the index: the untouched r0.x is the vertex index (an attribute), whatever the shader keeps in r0's other
+            # components; anything else -- another register or component, r0.x after the shader wrote it (instancing:
+            # index / count) -- reads the buffer as a texture
             # at the computed index (truncated, as Xenia's fetch does when the index is not rounded)
             if f["src_reg"] or f["src_rel"] or f["src_swizzle"] or self.r0_written or self.force_computed:
                 names = [k for k, _ in self.vbuffers]
@@ -561,7 +564,7 @@ class _Shader:
         comps = "".join("xyzw"[i] for i in range(4) if mask >> i & 1)
         value = "vec%d(%s)" % (len(parts), ", ".join(parts)) if len(parts) > 1 else parts[0]
         dst = self.temp(f["dst_reg"], f["dst_rel"])
-        if dst == "r[0]" or dst.startswith("r[clamp("):
+        if (dst == "r[0]" and mask & 1) or dst.startswith("r[clamp("):
             self.r0_written = True
         self.emit("{ vec4 f_ = %s; %s.%s = %s; }" % (src, dst, comps, value))
         if pred:
@@ -851,12 +854,23 @@ def translate(words, stage="vertex", interpolators=0, memexport=False):
         out.append("    vec4 xe_pos = vec4(0.0), xe_psize = vec4(0.0);")
         out += ["    xe_i%d = vec4(0.0);" % o for o in range(16)]
     else:
-        out += ["    r[%d] = xe_i%d;" % (i, i) for i in range(interpolators)]
+        # An interpolator is read through its register. One the body never names needs no copy, and is then no
+        # input the shader statically uses: GLES 3.0 promises 15 fragment input vectors (gl_MaxFragmentInputVectors),
+        # one short of the console's sixteen, and a link may fail beyond what the host has. Loop-relative addressing
+        # may read any register: all are copied.
+        named = None
+        if not any("r[clamp(" in line for line in sh.body):
+            named = {int(n) for line in sh.body for n in re.findall(r"\br\[(\d+)\]", line)}
+        out += ["    r[%d] = xe_i%d;" % (i, i) for i in range(interpolators) if named is None or i in named]
         out.append("    vec4 xe_depth = vec4(gl_FragCoord.z);")
-        out += ["    if (xe_k.pg.x >= 0.0) {  // PsParamGen: the pixel position (y downwards), the face in X's sign",
-                "        vec2 p_ = gl_FragCoord.xy * xe_k.pg.zw + vec2(-0.5, xe_k.pg.y - 0.5);",
-                "        r[clamp(int(xe_k.pg.x), 0, 15)] = vec4(gl_FrontFacing ? p_.x : -p_.x, p_.y, 0.0, 0.0);",
-                "    }"]
+        # PsParamGen: the pixel position (y downwards), the face in X's sign, into the register pg.x names. Written by
+        # constant index, one register a line: a store at a computed index inside the condition (`if (pg.x >= 0.0)
+        # r[int(pg.x)] = ...`) was seen compiled, with the condition false, into zeros in r0's z and w (Mesa 25.2
+        # llvmpipe): interpolator 0's z and w were lost to every shader reading them.
+        out += ["    int xe_pgn = xe_k.pg.x >= 0.0 ? clamp(int(xe_k.pg.x), 0, 15) : -1;",
+                "    vec2 xe_pgp = gl_FragCoord.xy * xe_k.pg.zw + vec2(-0.5, xe_k.pg.y - 0.5);",
+                "    vec4 xe_pgv = vec4(gl_FrontFacing ? xe_pgp.x : -xe_pgp.x, xe_pgp.y, 0.0, 0.0);"]
+        out += ["    if (xe_pgn == %d) r[%d] = xe_pgv;" % (i, i) for i in range(16)]
         out += ["    xe_color%d = vec4(0.0);" % o for o in sorted(sh.outputs)]
     out += sh.body
     if sh.uses_memexport:

@@ -21,7 +21,9 @@ printf '0 0 1000 # A on pad 0\n2 0 0 0 0 -32768 32767 0 0\n4 1 8000\n6 0 -\n' >"
 export PYTHONPATH="$repo:$repo/consoles/x360/tools"
 "$py" "$here/make_hello.py" "$work/hello.xex" --compression basic || exit 1
 "$py" -m x360_tools.recomp "$work/hello.xex" "$work/src" --no-comments >/dev/null || exit 1
-"$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 -I "$repo/consoles/x360/runtime" \
+# X360_HOST_PAGE (the *_16k tests): a pack that follows the host's page size, on x86 too (xenon_rt.h)
+"$cc" -shared -fPIC -O1 -ffp-contract=off -DXE_RUNTIME=1 ${X360_HOST_PAGE:+-DXE_VIEW4K_DYNAMIC=1} \
+    -I "$repo/consoles/x360/runtime" \
     -I "$repo/consoles/gc/runtime" -o "$work/libtitle.so" "$work"/src/*.c -lm || exit 1
 timeout 60 "$run" "$work/hello.xex" --pack "$work/libtitle.so" --disc "$work/disc" --pad-script "$work/pads.txt" \
     --stats --dbg "$work/full.txt" \

@@ -1,8 +1,9 @@
 /* xenos_cp_test -- the PM4 command processor on hand-built packets (XBA-270). Expected values follow the packet
  * definitions (Xenia's xenos.h / command_processor.cc, BSD): register blocks, constants, read-modify-write, memory
  * writes and their endian modes, event fences, conditional writes, draw initiators, indirect buffers, interrupts,
- * the swap token; on the ring: a wait that stalls then resumes, a packet across the end of the ring, a packet the
- * CPU has not finished writing, the read pointer written back. */
+ * the swap token, scratch register write-back; on the ring: a wait that stalls then resumes, also inside nested
+ * indirect buffers, a packet across the end of the ring, a packet the CPU has not finished writing, the read pointer
+ * written back; tiled rendering's predicate (the bin mask and select, a header's bit 0). */
 #include <stdio.h>
 #include <string.h>
 
@@ -114,6 +115,29 @@ int main(void)
               cp.shader[0].code[1] == 0x5EED0002 && cp.shader[0].address == 0xB000 && cp.shader_loads == 2,
           "shader microcode kept");
 
+    /* ---- scratch register write-back: mask bits 0, 1 and 4, 8in32 mode, at 0xC000 ---- */
+    at = 0;
+    put(B, t0(XENOS_REG_SCRATCH_REG0 + 1, 1, 0)), put(B, 0x0BADF00D); /* before the mask is set: register only */
+    put(B, t0(XENOS_REG_SCRATCH_ADDR, 1, 0)), put(B, 0xC000);
+    put(B, t0(XENOS_REG_SCRATCH_UMSK, 1, 0)), put(B, 2u << 16 | 0x13);
+    put(B, t0(XENOS_REG_SCRATCH_REG0, 3, 0)), put(B, 0x11223344), put(B, 1), put(B, 0x55);
+    put(B, t0(XENOS_REG_SCRATCH_REG0 + 4, 1, 0)), put(B, 0xCAFEF00D);
+    /* what Direct3D does next: the GPU waits on the memory copy, here to write a register when it matches */
+    put(B, t3(PM4_COND_WRITE, 6)), put(B, 0x13), put(B, (0xC000 + 4) | 2), put(B, 1), put(B, 0xFFFFFFFFu),
+        put(B, 0x2210), put(B, 0x99);
+    put(B, t0(XENOS_REG_SCRATCH_UMSK, 1, 0)), put(B, 0u << 16 | 0x01);
+    put(B, t0(XENOS_REG_SCRATCH_REG0, 2, 0)), put(B, 0xA1B2C3D4), put(B, 7);
+    mem[0xC004 / 4] = mem[0xC008 / 4] = mem[0xC00C / 4] = mem[0xC010 / 4] = 0xEEEEEEEEu;
+    n = at;
+    xenos_cp_execute(&cp, B, n);
+    CHECK(cp.regs[XENOS_REG_SCRATCH_REG0 + 2] == 0x55 && cp.regs[XENOS_REG_SCRATCH_REG0 + 4] == 0xCAFEF00D,
+          "the scratch registers keep their values");
+    CHECK(mem[0xC008 / 4] == 0xEEEEEEEEu && mem[0xC00C / 4] == 0xEEEEEEEEu, "unmasked registers are not written back");
+    CHECK(mem[0xC010 / 4] == 0xCAFEF00D, "register 4 written back as the guest reads it: %08X", mem[0xC010 / 4]);
+    CHECK(cp.regs[0x2210] == 0x99, "the GPU reads its own write-back");
+    CHECK(mem[0xC000 / 4] == 0xD4C3B2A1 && mem[0xC004 / 4] == 1, "mask and mode changed: %08X %08X",
+          mem[0xC000 / 4], mem[0xC004 / 4]);
+
     /* ---- the ring: 0x10000, 2^10 quadwords = 8 KB = 2048 dwords ---- */
     const uint32_t R = 0x10000;
     xenos_cp_ring_init(&cp, R, 10);
@@ -137,6 +161,56 @@ int main(void)
     put(R, 0xB), put(R, 0xC);
     xenos_cp_set_wptr(&cp, at);
     CHECK(cp.rptr == at && cp.regs[0x2502] == 0xC, "then runs");
+    /* a wait inside an indirect buffer stops the command processor there, nested or not: what came before it ran
+     * once, what follows (in the buffers, then in the ring) runs when the wait holds. Buffer 0xD000 draws, calls
+     * 0xD100 (a wait on memory 0xC100, then a register) and writes a register; 0xD200 is nothing but a call. */
+    uint32_t w0 = at, draws0 = (uint32_t)cp.draws;
+    put(R, t3(PM4_INDIRECT_BUFFER, 2)), put(R, 0xD000), put(R, 8);
+    put(R, t0(0x2702, 1, 0)), put(R, 0x73);
+    put(R, t3(PM4_INDIRECT_BUFFER, 2)), put(R, 0xD200), put(R, 3);
+    put(R, t0(0x2705, 1, 0)), put(R, 0x76);
+    uint32_t w1 = at;
+    at = 0;
+    put(0xD000, t3(PM4_DRAW_INDX_2, 1)), put(0xD000, 8 | 2u << 6 | 3u << 16);
+    put(0xD000, t3(PM4_INDIRECT_BUFFER, 2)), put(0xD000, 0xD100), put(0xD000, 10);
+    put(0xD000, t0(0x2701, 1, 0)), put(0xD000, 0x72);
+    at = 0;
+    put(0xD100, t0(0x2703, 1, 0)), put(0xD100, 0x74);
+    put(0xD100, t3(PM4_WAIT_REG_MEM, 5)), put(0xD100, 0x13), put(0xD100, 0xC100 | 2), put(0xD100, 1),
+        put(0xD100, 0xFFFFFFFFu), put(0xD100, 0x10);
+    put(0xD100, t0(0x2700, 1, 0)), put(0xD100, 0x71);
+    at = 0;
+    put(0xD200, t3(PM4_INDIRECT_BUFFER, 2)), put(0xD200, 0xD100), put(0xD200, 10);
+    mem[0xC100 / 4] = 0;
+    cp.regs[0x2703] = 0;
+    xenos_cp_set_wptr(&cp, w1);
+    CHECK(cp.stalled && cp.draws == draws0 + 1 && cp.regs[0x2703] == 0x74, "stopped inside the nested buffer");
+    CHECK(cp.regs[0x2700] == 0 && cp.regs[0x2701] == 0 && cp.regs[0x2702] == 0, "nothing after the wait has run");
+    xenos_cp_set_wptr(&cp, w1); /* polled again while it does not hold */
+    CHECK(cp.stalled && cp.draws == draws0 + 1 && cp.regs[0x2700] == 0, "still stopped, nothing run twice");
+    mem[0xC100 / 4] = 1;
+    cp.regs[0x2703] = 0;
+    xenos_cp_set_wptr(&cp, w1);
+    CHECK(!cp.stalled && cp.draws == draws0 + 1, "resumed: the draw before the wait is not repeated");
+    CHECK(cp.regs[0x2700] == 0x71 && cp.regs[0x2701] == 0x72 && cp.regs[0x2702] == 0x73,
+          "the rest of both buffers, then the ring: %X %X %X", cp.regs[0x2700], cp.regs[0x2701], cp.regs[0x2702]);
+    CHECK(cp.regs[0x2703] == 0x74 && cp.regs[0x2705] == 0x76 && cp.rptr == w1 && mem[0xF000 / 4] == w1,
+          "the second call ran the buffer from its start, the ring to its end: rptr %u", cp.rptr);
+    /* stopped in a buffer that is all of its caller: resumed once, the caller not run again */
+    mem[0xC100 / 4] = 0;
+    cp.regs[0x2700] = cp.regs[0x2703] = 0;
+    at = w1;
+    put(R, t3(PM4_INDIRECT_BUFFER, 2)), put(R, 0xD200), put(R, 3);
+    put(R, t0(0x2706, 1, 0)), put(R, 0x77);
+    xenos_cp_set_wptr(&cp, at);
+    CHECK(cp.stalled && cp.regs[0x2703] == 0x74 && cp.regs[0x2706] == 0, "stopped again");
+    mem[0xC100 / 4] = 1;
+    cp.regs[0x2703] = 0;
+    xenos_cp_set_wptr(&cp, at);
+    CHECK(!cp.stalled && cp.regs[0x2700] == 0x71 && cp.regs[0x2703] == 0 && cp.regs[0x2706] == 0x77 && cp.rptr == at,
+          "resumed after the wait only: %X %X %X", cp.regs[0x2700], cp.regs[0x2703], cp.regs[0x2706]);
+    (void)w0;
+
     /* across the end of the ring */
     cp.rptr = 2046;
     mem[R / 4 + 2046] = t0(0x2600, 2, 0);
@@ -157,6 +231,49 @@ int main(void)
           imm_got[0], imm_got[1]);
     CHECK(cp.last_draw.source_select == 1 && cp.last_draw.imm == NULL && cp.rptr == 1, "the draw kept no pointer");
     cp.draw_hook = NULL;
+
+    /* Tiled rendering's predicate (Xenia's command_processor.cc): a type-3 packet whose header has bit 0 set runs
+     * only while the 64-bit bin select and bin mask share a bit; both start as 0xFFFFFFFF. SET_BIN_MASK / SELECT
+     * take the high word first, the _LO / _HI opcodes one half. A predicated swap never runs. */
+    const uint32_t P = 0xE000;
+    uint64_t swaps0 = cp.swaps;
+    CHECK(cp.bin_mask == 0xFFFFFFFFu && cp.bin_select == 0xFFFFFFFFu, "the bin registers' initial values");
+    at = 0;
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2800), put(P, 0x44); /* runs: the initial values */
+    put(P, t3(PM4_SET_BIN_MASK, 2)), put(P, 0), put(P, 0x10);
+    put(P, t3(PM4_SET_BIN_SELECT_LO, 1)), put(P, 0x01);
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2801), put(P, 0x55); /* skipped: 0x01 & 0x10 */
+    put(P, t3(PM4_SET_CONSTANT2, 2)), put(P, 0x2802), put(P, 0x66);     /* not predicated */
+    put(P, t3(PM4_SET_BIN_SELECT_LO, 1)), put(P, 0x30);
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2803), put(P, 0x77); /* runs: 0x30 & 0x10 */
+    put(P, t3(PM4_SET_BIN_MASK_LO, 1)), put(P, 0);
+    put(P, t3(PM4_SET_BIN_MASK_HI, 1)), put(P, 1);
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2804), put(P, 0x88); /* skipped: bit 32 against 0x30 */
+    put(P, t3(PM4_SET_BIN_SELECT_HI, 1)), put(P, 3);
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2805), put(P, 0x99); /* runs: bit 32 in both */
+    put(P, t3(PM4_SET_BIN_SELECT, 2)), put(P, 2), put(P, 0xFFFFFFFFu);
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2806), put(P, 0xAA); /* skipped: high word 2 against 1 */
+    put(P, t3(PM4_SET_BIN_MASK, 2)), put(P, 0xFFFFFFFFu), put(P, 0xFFFFFFFFu);
+    put(P, t3(PM4_XE_SWAP, 4) | 1), put(P, 0x53574150), put(P, 0x01000000), put(P, 1280), put(P, 720);
+    put(P, t0(0x2807, 1, 0)), put(P, 0xBB); /* the packet after each skipped one starts where it should */
+    for (uint32_t k = 0x2800; k <= 0x2807; k++)
+        cp.regs[k] = 0;
+    uint64_t pred0 = cp.predicated, skip0 = cp.predicated_skipped;
+    xenos_cp_execute(&cp, P, at);
+    CHECK(cp.regs[0x2800] == 0x44 && cp.regs[0x2802] == 0x66 && cp.regs[0x2803] == 0x77 && cp.regs[0x2805] == 0x99 &&
+              cp.regs[0x2807] == 0xBB,
+          "predicated packets that run: %X %X %X %X %X", cp.regs[0x2800], cp.regs[0x2802], cp.regs[0x2803],
+          cp.regs[0x2805], cp.regs[0x2807]);
+    CHECK(cp.regs[0x2801] == 0 && cp.regs[0x2804] == 0 && cp.regs[0x2806] == 0,
+          "predicated packets that are skipped: %X %X %X", cp.regs[0x2801], cp.regs[0x2804], cp.regs[0x2806]);
+    CHECK(cp.swaps == swaps0, "a predicated swap does not run");
+    CHECK(cp.bin_mask == 0xFFFFFFFFFFFFFFFFull && cp.bin_select == 0x2FFFFFFFFull, "bin registers %llX %llX",
+          (unsigned long long)cp.bin_mask, (unsigned long long)cp.bin_select);
+    CHECK(cp.predicated - pred0 == 7 && cp.predicated_skipped - skip0 == 4, "counted: %llu predicated, %llu skipped",
+          (unsigned long long)(cp.predicated - pred0), (unsigned long long)(cp.predicated_skipped - skip0));
+    CHECK(!strcmp(xenos_cp_opcode_name(PM4_SET_BIN_MASK_LO), "SET_BIN_MASK_LO") &&
+              xenos_cp_opcode_name(PM4_SET_BIN_SELECT_HI) && xenos_cp_opcode_name(PM4_SET_BIN_SELECT),
+          "the bin opcodes have names");
 
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "all command processor checks passed", failures,
            failures == 1 ? "" : "s");

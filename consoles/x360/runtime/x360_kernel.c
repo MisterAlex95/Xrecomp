@@ -370,7 +370,7 @@ static void k_NtQueryVirtualMemory(x360_machine *x, x360_thread *t, xe_cpu *c)
     x360_heap *h = x360_heap_of(x, a);
     uint32_t page = h ? h->page : 0x1000;
     uint32_t base = a & ~(page - 1);
-    uint32_t size = h ? x360_heap_size_of(h, base) : 0;
+    uint32_t size = h ? x360_heap_size_of(h, h->physical ? x360_v2p(base) : base) : 0;
     /* MEMORY_BASIC_INFORMATION: base, allocation base, allocation protect, region size, state, protect, type */
     x360_w32(x, info + 0, base);
     x360_w32(x, info + 4, base);
@@ -386,12 +386,13 @@ static void k_MmAllocatePhysicalMemoryEx(x360_machine *x, x360_thread *t, xe_cpu
 {
     (void)t;
     uint32_t size = A(1), protect = A(2), align = A(5);
-    uint32_t view = protect & MEM_16MB_PAGES ? 0xC0000000u : protect & MEM_LARGE_PAGES ? 0xA0000000u : 0xE0000000u;
-    uint32_t page = view == 0xC0000000u ? 0x1000000u : view == 0xA0000000u ? 0x10000u : 0x1000u;
+    uint32_t view = protect & MEM_16MB_PAGES ? X360_VIEW_16M : protect & MEM_LARGE_PAGES ? X360_VIEW_64K : X360_VIEW_4K;
+    uint32_t page = view == X360_VIEW_16M ? 0x1000000u : view == X360_VIEW_64K ? 0x10000u : 0x1000u;
     if (align < page)
         align = page;
+    /* the alignment is the physical address's (what the GPU and the audio hardware are given), as in Xenia */
     uint32_t a = x360_heap_alloc(x, &x->heap_phys, (size + page - 1) & ~(page - 1), align);
-    RET(a ? view + a : 0);
+    RET(a ? x360_p2v(view, a) : 0);
 }
 
 static void k_MmAllocatePhysicalMemory(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -406,7 +407,7 @@ static void k_MmAllocatePhysicalMemory(x360_machine *x, x360_thread *t, xe_cpu *
 static void k_MmFreePhysicalMemory(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    x360_heap_free(x, &x->heap_phys, A(1) & 0x1FFFFFFFu);
+    x360_heap_free(x, &x->heap_phys, x360_v2p(A(1)));
     RET(0);
 }
 
@@ -414,7 +415,7 @@ static void k_MmGetPhysicalAddress(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)x, (void)t;
     uint32_t a = A(0);
-    RET(a >= 0xA0000000u ? a & 0x1FFFFFFFu : a);
+    RET(x360_v2p(a));
 }
 
 static void k_MmQueryAllocationSize(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -422,7 +423,7 @@ static void k_MmQueryAllocationSize(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     uint32_t a = A(0);
     x360_heap *h = x360_heap_of(x, a);
-    RET(h ? x360_heap_size_of(h, h == &x->heap_phys ? a & 0x1FFFFFFFu : a) : 0);
+    RET(h ? x360_heap_size_of(h, h == &x->heap_phys ? x360_v2p(a) : a) : 0);
 }
 
 static void k_ExAllocatePoolTypeWithTag(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -446,6 +447,15 @@ static void k_ExFreePool(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 /* ---- threads ---- */
 
+/* Threads are cooperative on one host thread here, but the hardware thread a title asked for shows where it looks:
+ * the KTHREAD's and the PCR's CPU byte, the lowest bit of the affinity mask (titles ask for one hardware thread). */
+static void thread_set_cpu(x360_machine *x, x360_thread *n, uint32_t mask)
+{
+    uint32_t cpu = (uint32_t)__builtin_ctz(mask);
+    x360_w8(x, n->kthread + 0xBF, cpu);
+    x360_w8(x, n->pcr + 0x10C, cpu);
+}
+
 static void k_ExCreateThread(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
@@ -459,6 +469,10 @@ static void k_ExCreateThread(x360_machine *x, x360_thread *t, xe_cpu *c)
         RET(X_STATUS_NO_MEMORY);
         return;
     }
+    /* the creation flags' high byte is the affinity mask (0: none asked for), as in Xenia: a thread made for
+     * hardware thread 4 reads 4 as its processor number from its first instruction on */
+    if ((flags >> 24) & 0x3F)
+        thread_set_cpu(x, n, (flags >> 24) & 0x3F);
     if (handle_ptr)
         x360_w32(x, handle_ptr, n->handle);
     if (id_ptr)
@@ -535,17 +549,13 @@ static void k_NtSuspendThread(x360_machine *x, x360_thread *t, xe_cpu *c)
 static void k_KeSetAffinityThread(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    /* (KTHREAD, affinity mask, previous*): threads are cooperative on one host thread here, but the hardware thread
-     * a title asked for shows where it looks (the PCR's and KTHREAD's CPU byte: the lowest bit of the mask) */
+    /* (KTHREAD, affinity mask, previous*) */
     uint32_t prev_ptr = A(2), mask = A(1) & 0x3F;
     x360_thread *n = x360_thread_by_kthread(x, A(0));
     if (prev_ptr) /* the console stores the previous affinity there and returns a status (unlike NT) */
         x360_w32(x, prev_ptr, n ? 1u << x360_r8(x, n->kthread + 0xBF) : 0x3F);
-    if (n && mask) {
-        uint32_t cpu = (uint32_t)__builtin_ctz(mask);
-        x360_w8(x, n->kthread + 0xBF, cpu);
-        x360_w8(x, n->pcr + 0x10C, cpu);
-    }
+    if (n && mask)
+        thread_set_cpu(x, n, mask);
     RET(X_STATUS_SUCCESS);
 }
 
@@ -1107,7 +1117,7 @@ static void k_ExGetXConfigSetting(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     uint32_t buf = A(2), size = A(3), req = A(4);
     if (buf && size <= 0x1000)
-        memset(x->base + buf, 0, size);
+        memset(x360_p(x, buf), 0, size);
     if (req)
         x360_w16(x, req, (uint16_t)size);
     RET(X_STATUS_SUCCESS);
@@ -1179,7 +1189,7 @@ static void k_VdQueryVideoMode(x360_machine *x, x360_thread *t, xe_cpu *c)
     float hz = 60.0f;
     uint32_t hzbits;
     memcpy(&hzbits, &hz, 4);
-    memset(x->base + m, 0, 48);
+    memset(x360_p(x, m), 0, 48);
     x360_w32(x, m, 1280);
     x360_w32(x, m + 4, 720);
     x360_w32(x, m + 12, 1);
@@ -1204,7 +1214,7 @@ static void k_XexGetModuleSection(x360_machine *x, x360_thread *t, xe_cpu *c)
     for (int k = 0; k < 8; k++)
         if (!(want[k] = (char)x360_r8(x, A(1) + (uint32_t)k)))
             break;
-    const uint8_t *pe = x->base + x->image_base;
+    const uint8_t *pe = x360_p(x, x->image_base);
     uint32_t lfanew = pe[0x3C] | pe[0x3D] << 8 | pe[0x3E] << 16 | (uint32_t)pe[0x3F] << 24;
     if (pe[0] != 'M' || lfanew > 0x800) {
         RET(X_STATUS_NOT_FOUND);
@@ -1514,9 +1524,9 @@ int x360_kernel_init(x360_machine *x)
     a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_XexExecutableModuleHandle, 16);
     x360_w32(x, a, x->module);
     a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedImageName, 64);
-    memcpy(x->base + a, "\\Device\\Cdrom0\\default.xex", 27);
+    memcpy(x360_p(x, a), "\\Device\\Cdrom0\\default.xex", 27);
     a = x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExLoadedCommandLine, 64);
-    memcpy(x->base + a, "\"default.xex\"", 14);
+    memcpy(x360_p(x, a), "\"default.xex\"", 14);
     x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_KeDebugMonitorData, 64);
     x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExThreadObjectType, 16);
     x360_var(x, X360_LIB_XBOXKRNL, X360_xboxkrnl_ExEventObjectType, 16);

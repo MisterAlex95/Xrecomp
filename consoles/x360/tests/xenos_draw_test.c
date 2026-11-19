@@ -450,8 +450,8 @@ int main(int argc, char **argv)
             tiles_ok = 0, fprintf(stderr, "  texel %d,%d read %u,%u\n", probe[i][0], probe[i][1], p[0], p[1]);
     }
     CHECK(tiles_ok, "frame 10 (tiled texture)");
-    /* DXT1: one block, colour 0 = 5:6:5 0x001F (X = 31), colour 1 = 0, every index 0 */
-    static const uint16_t blk[4] = {0x001F, 0x0000, 0x0000, 0x0000};
+    /* DXT1: one block, colour 0 = S3TC's 5:6:5 (red in the 5 high bits: 0xF800), colour 1 = 0, every index 0 */
+    static const uint16_t blk[4] = {0xF800, 0x0000, 0x0000, 0x0000};
     for (int i = 0; i < 4; i++)
         mem[0x14000 + 2 * i] = (uint8_t)(blk[i] >> 8), mem[0x14000 + 2 * i + 1] = (uint8_t)blk[i];
     uint32_t fcd[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 18u | 1u << 6 | 0x14000u, 3u | 3u << 13, sw_id << 1, 0,
@@ -1442,6 +1442,313 @@ int main(int argc, char **argv)
             CHECK(between >= 16, "MSAA target: %d edge pixels between red and black", between);
         else
             printf("MSAA: no multisampled buffers here, drawn single-sampled (fallback)\n");
+    }
+
+    /* three textures in one draw (ps_tex3 adds them up): 1x1 red, green and blue ones, uploaded during the same draw,
+     * then all three rewritten as a video's planes are every frame: each sampler reads its own texture */
+    {
+        uint32_t n3;
+        uint32_t *p3 = load(argv[1], "ps_tex3.bin", &n3);
+        CHECK(p3 != NULL, "no ps_tex3.bin");
+        if (p3) {
+            im[0] = 1, im[1] = n3;
+            memcpy(im + 2, p3, 4 * n3);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + n3);
+            free(p3);
+            for (uint32_t k = 0; k < 4; k++)
+                vertex(0x41300 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? 1.0f : -1.0f, 0.5f, 0.5f, 0.0f);
+            static const uint32_t planes[2][3] = {{0xFF000040u, 0xFF008000u, 0xFFC00000u},
+                                                  {0xFF0000C0u, 0xFF004000u, 0xFF800000u}};
+            for (int f = 0; f < 2; f++) {
+                for (uint32_t t = 0; t < 3; t++) {
+                    w32(0x52000 + 0x1000 * t, planes[f][t]);
+                    uint32_t ft[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | (0x52000u + 0x1000u * t), 0,
+                                      sw_id << 1, 0, 1u << 9};
+                    for (uint32_t i = 0; i < 6; i++)
+                        reg(0x480C + 6 * t + i, ft[i]);
+                }
+                reg(0x4800, 0x41300u | 3u); /* the quad covers the target: nothing drawn before it with this shader */
+                reg(0x4801, 2u | (32u << 2));
+                type3(PM4_DRAW_INDX_2, &strip_a, 1);
+                type3(PM4_XE_SWAP, swap, 4);
+                run(&cp);
+                const uint8_t *c3 = px(g, W / 2, H / 2);
+                uint8_t want[3] = {(uint8_t)planes[f][0], (uint8_t)(planes[f][1] >> 8), (uint8_t)(planes[f][2] >> 16)};
+                CHECK(c3[0] == want[0] && c3[1] == want[1] && c3[2] == want[2],
+                      "three textures, pass %d: %u,%u,%u, want %u,%u,%u", f, c3[0], c3[1], c3[2], want[0], want[1],
+                      want[2]);
+            }
+        }
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
+    /* DXT colour endpoints are S3TC's: red in the 5 high bits, also behind DXT2_3's and DXT4_5's alpha. One block
+     * each, colour 0 on every texel: 0x001F is blue, 0xFFE0 yellow, 0xF81F magenta */
+    if (pst) {
+        im[0] = 1, im[1] = ntex;
+        memcpy(im + 2, pst, 4 * ntex);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
+        for (uint32_t k = 0; k < 4; k++)
+            vertex(0x41300 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? 1.0f : -1.0f, 0.5f, 0.5f, 0.0f);
+        static const struct {
+            uint32_t format;
+            uint16_t colour;
+            uint8_t want[3];
+        } dx[3] = {{18, 0x001F, {0, 0, 255}}, {19, 0xFFE0, {255, 255, 0}}, {20, 0xF81F, {255, 0, 255}}};
+        for (int k = 0; k < 3; k++) {
+            uint32_t at = 0x55000, cb = dx[k].format == 18 ? at : at + 8;
+            for (uint32_t i = 0; i < 16; i++)
+                mem[at + i] = dx[k].format == 18 ? 0 : 0xFF; /* the alpha half: opaque */
+            mem[cb] = (uint8_t)(dx[k].colour >> 8), mem[cb + 1] = (uint8_t)dx[k].colour; /* 8-in-16: big-endian words */
+            for (uint32_t i = 2; i < 8; i++)
+                mem[cb + i] = 0;
+            uint32_t fx[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, dx[k].format | 1u << 6 | at, 3u | 3u << 13, sw_id << 1,
+                              0, 1u << 9};
+            for (uint32_t i = 0; i < 6; i++)
+                reg(0x480C + i, fx[i]);
+            reg(0x4800, 0x41300u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            const uint8_t *cd = px(g, W / 2, H / 2);
+            CHECK(cd[0] == dx[k].want[0] && cd[1] == dx[k].want[1] && cd[2] == dx[k].want[2],
+                  "DXT colour %04X (format %u): %u,%u,%u, want %u,%u,%u", dx[k].colour, dx[k].format, cd[0], cd[1],
+                  cd[2], dx[k].want[0], dx[k].want[1], dx[k].want[2]);
+        }
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
+    /* a resolve that exchanges red and blue (Direct3D's A8R8G8B8 destinations): memory has the red quad's red in Z,
+     * and the texture is still sampled from the resolve's host picture (no trip through memory, the internal
+     * resolution kept) with the two exchanged back: the fetch constant's swizzle sees what memory holds */
+    if (pst) {
+        xenos_gl_stats c0, c1;
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        reg(0x4800, 0x4080u | 3u); /* the red quad */
+        reg(0x4801, 2u | (32u << 2));
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        reg(0x4800, 0x7000u | 3u); /* the resolve rectangle of frame 12 */
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);
+        reg(0x2318, 0u | 0u << 20);                    /* colour 0, no clear, raw copy */
+        reg(0x2319, 0x58000);
+        reg(0x231A, W | (uint32_t)H << 16);
+        reg(0x231B, 2u | 6u << 7 | 1u << 24);          /* 8-in-32, 8_8_8_8, red and blue exchanged */
+        uint32_t rect2 = 8u | 2u << 6 | 3u << 16;
+        type3(PM4_DRAW_INDX_2, &rect2, 1);
+        reg(0x2208, 4);
+        run(&cp);
+        uint32_t sw = rd32(NULL, 0x58000 + tiled_off(37, 21));
+        CHECK(sw == 0xFFFF0000u, "resolved with the swap: texel %08X, want FFFF0000", sw);
+        im[0] = 1, im[1] = ntex;
+        memcpy(im + 2, pst, 4 * ntex);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
+        reg(0x4800, 0x6000u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        static const struct {
+            int exchange;
+            uint8_t want[3];
+        } sx[2] = {{1, {255, 0, 0}}, {0, {0, 0, 255}}};
+        xenos_gl_get_stats(g, &c0);
+        for (int k = 0; k < 2; k++) {
+            uint32_t fs[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22 | 1u << 31, 6u | 2u << 6 | 0x58000u, 63u | 63u << 13,
+                              (sx[k].exchange ? sw_rb : sw_id) << 1, 0, 1u << 9};
+            for (int i = 0; i < 6; i++)
+                reg(0x480C + (uint32_t)i, fs[i]);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            const uint8_t *cs = px(g, W / 2, H / 2);
+            CHECK(cs[0] == sx[k].want[0] && cs[1] == sx[k].want[1] && cs[2] == sx[k].want[2],
+                  "swapped resolve sampled (swizzle %s): %u,%u,%u, want %u,%u,%u", sx[k].exchange ? "BGRA" : "RGBA",
+                  cs[0], cs[1], cs[2], sx[k].want[0], sx[k].want[1], sx[k].want[2]);
+        }
+        xenos_gl_get_stats(g, &c1);
+        CHECK(c1.copy_textures == c0.copy_textures + 2, "sampled from the resolve's host picture: +%llu, want +2",
+              (unsigned long long)(c1.copy_textures - c0.copy_textures));
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
+    /* a resolved texture reads as its memory does, host picture or not. An orange quad (1, 0.5, 0) resolved (a) to
+     * an 8-bit destination: X is in every component, so the swizzle's Y is the red, not the surface's green; (b) with
+     * an exponent bias of -1: half of each; (c) 8-in-32, then fetched with no endian swap: the texel's bytes the
+     * other way round, alpha in X and red in W */
+    if (pst) {
+        static const struct {
+            const char *what;
+            uint32_t base, info, format, fetch_endian, swizzle;
+            uint8_t lo[3], hi[3];
+        } rk[3] = {
+            {"to 8 bits", 0x5C000, 0u | 2u << 7, 2, 0, 1u | 4u << 3 | 4u << 6 | 5u << 9, {255, 0, 0}, {255, 0, 0}},
+            {"with an exponent bias", 0x60000, 2u | 6u << 7 | 0x3Fu << 16, 6, 2, 0u | 1u << 3 | 2u << 6 | 3u << 9,
+             {127, 63, 0}, {128, 64, 0}},
+            {"fetched with another endian mode", 0x64000, 2u | 6u << 7, 6, 0, 0u | 1u << 3 | 2u << 6 | 3u << 9,
+             {255, 0, 127}, {255, 0, 128}}};
+        for (uint32_t k = 0; k < 4; k++)
+            vertex(0x41500 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? -1.0f : 1.0f, 1.0f, 0.5f, 0.0f);
+        for (int k = 0; k < 3; k++) {
+            im[0] = 1, im[1] = nps;
+            memcpy(im + 2, ps, 4 * nps);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+            reg(0x4800, 0x41500u | 3u); /* the orange quad */
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            reg(0x4800, 0x7000u | 3u);
+            reg(0x4801, 2u | (6u << 2));
+            reg(0x2208, 6);
+            reg(0x2318, 0u | 0u << 20);
+            reg(0x2319, rk[k].base);
+            reg(0x231A, W | (uint32_t)H << 16);
+            reg(0x231B, rk[k].info);
+            uint32_t rect3 = 8u | 2u << 6 | 3u << 16;
+            type3(PM4_DRAW_INDX_2, &rect3, 1);
+            reg(0x2208, 4);
+            im[0] = 1, im[1] = ntex;
+            memcpy(im + 2, pst, 4 * ntex);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
+            reg(0x4800, 0x6000u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            uint32_t fk[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22 | 1u << 31,
+                              rk[k].format | rk[k].fetch_endian << 6 | rk[k].base, 63u | 63u << 13, rk[k].swizzle << 1,
+                              0, 1u << 9};
+            for (int i = 0; i < 6; i++)
+                reg(0x480C + (uint32_t)i, fk[i]);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            const uint8_t *ck = px(g, W / 2, H / 2);
+            int ok = 1;
+            for (int ch = 0; ch < 3; ch++)
+                ok &= ck[ch] >= rk[k].lo[ch] && ck[ch] <= rk[k].hi[ch];
+            CHECK(ok, "resolve %s read back: %u,%u,%u, want %u..%u,%u..%u,%u..%u", rk[k].what, ck[0], ck[1], ck[2],
+                  rk[k].lo[0], rk[k].hi[0], rk[k].lo[1], rk[k].hi[1], rk[k].lo[2], rk[k].hi[2]);
+        }
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
+    /* a colour target that grows keeps its depth buffer: a green quad at z 0.25 fills a 64-row depth buffer through
+     * one colour target, then a second colour target is drawn 32 rows tall with that depth buffer, then 64 rows tall
+     * (it grows; the depth buffer does not): a red quad at z 0.75 with the test "less" must not show */
+    {
+        vertex_z(0x41700, -1, -1, 0.25f, 0, 1, 0), vertex_z(0x41720, 1, -1, 0.25f, 0, 1, 0);
+        vertex_z(0x41740, -1, 1, 0.25f, 0, 1, 0), vertex_z(0x41760, 1, 1, 0.25f, 0, 1, 0);
+        vertex_z(0x41780, -1, -1, 0.75f, 1, 0, 0), vertex_z(0x417A0, 1, -1, 0.75f, 1, 0, 0);
+        vertex_z(0x417C0, -1, 1, 0.75f, 1, 0, 0), vertex_z(0x417E0, 1, 1, 0.75f, 1, 0, 0);
+        for (uint32_t i = 0; i < 4; i++)
+            reg(0x4400 + i, fbits(1.0f));
+        reg(0x2000, 64u), reg(0x2002, 0x7A0u);
+        reg(0x2200, 2u | 4u | 1u << 4); /* z test, z write, less */
+        reg(0x4801, 2u | (64u << 2));
+        reg(0x2001, 0x660u), reg(0x2082, 64u | 64u << 16);
+        reg(0x4800, 0x41700u | 3u);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1); /* depth 0.25 everywhere */
+        reg(0x2001, 0x640u), reg(0x2082, 64u | 32u << 16);
+        reg(0x2200, 2u | 4u | 3u << 4);      /* less or equal: the same quad again passes */
+        type3(PM4_DRAW_INDX_2, &strip_a, 1); /* the second target, 32 rows, green */
+        reg(0x2200, 2u | 4u | 1u << 4);
+        reg(0x2082, 64u | 64u << 16);
+        reg(0x4800, 0x41780u | 3u);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1); /* it grows; red behind what the depth buffer holds */
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        const uint8_t *cg = px(g, W / 2, 8), *ch = px(g, W / 2, H - 8);
+        CHECK(cg[0] == 0 && cg[1] == 255 && ch[0] == 0 && ch[1] == 0,
+              "depth kept when the colour target grows: %u,%u,%u (want green) / %u,%u,%u (want black)", cg[0], cg[1],
+              cg[2], ch[0], ch[1], ch[2]);
+        reg(0x2200, 0), reg(0x2082, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2000, 0);
+        run(&cp);
+    }
+
+    /* a texture whose fetch constant starts at mip level 1 (a streamed texture: the mips are loaded, the base is not,
+     * and the base address names the mip address again): a linear 32x32 8_8_8_8 texture, level 1 (16x16, green) at
+     * the mip address; magnified, the sampler would take level 0, and reads level 1 */
+    if (pst) {
+        for (uint32_t y = 0; y < 16; y++)
+            for (uint32_t x = 0; x < 16; x++)
+                w32(0x68000 + y * 256 + x * 4, 0xFF00FF00u);
+        im[0] = 1, im[1] = ntex;
+        memcpy(im + 2, pst, 4 * ntex);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
+        reg(0x4800, 0x6000u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        uint32_t fm[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | 0x68000u, 31u | 31u << 13, sw_id << 1,
+                          1u << 2 | 1u << 6, 1u << 9 | 0x68000u};
+        for (int i = 0; i < 6; i++)
+            reg(0x480C + (uint32_t)i, fm[i]);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        const uint8_t *cm = px(g, W / 2, H / 2), *cn = px(g, W - 4, H - 4);
+        CHECK(cm[0] == 0 && cm[1] == 255 && cm[2] == 0 && cn[1] == 255,
+              "first mip level 1: centre %u,%u,%u corner %u,%u,%u, want green", cm[0], cm[1], cm[2], cn[0], cn[1], cn[2]);
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
+    /* interpolator 0's z reaches the pixel shader with the pixel parameters off: ps_i0z writes r0.xyw, then puts
+     * r0.z (the quad's blue, 0.75) in every channel */
+    {
+        uint32_t nz;
+        uint32_t *pz = load(argv[1], "ps_i0z.bin", &nz);
+        CHECK(pz != NULL, "no ps_i0z.bin");
+        if (pz) {
+            im[0] = 1, im[1] = nz;
+            memcpy(im + 2, pz, 4 * nz);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nz);
+            free(pz);
+            uint32_t nvz;
+            uint32_t *vz = load(argv[1], "vs_i0xyz.bin", &nvz); /* interpolator 0's w is never written */
+            CHECK(vz != NULL, "no vs_i0xyz.bin");
+            if (vz) {
+                im[0] = 0, im[1] = nvz;
+                memcpy(im + 2, vz, 4 * nvz);
+                type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nvz);
+                free(vz);
+            }
+            w32(0x52000, 0xFF102030u); /* the texture the shader fetches into r0.w: 1x1 */
+            uint32_t fz[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | 0x52000u, 0, sw_id << 1, 0, 1u << 9};
+            for (uint32_t i = 0; i < 6; i++)
+                reg(0x480C + i, fz[i]);
+            for (uint32_t k = 0; k < 4; k++)
+                vertex(0x41600 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? -1.0f : 1.0f, 0.25f, 0.5f, 0.75f);
+            reg(0x2180, 0), reg(0x2181, 0);
+            for (uint32_t i = 0; i < 4; i++)
+                reg(0x4400 + i, fbits(0.125f));
+            reg(0x4800, 0x41600u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            const uint8_t *cz = px(g, W / 2, H / 2);
+            CHECK(cz[0] >= 190 && cz[0] <= 192 && cz[1] == cz[0] && cz[2] == cz[0],
+                  "interpolator 0's z: %u,%u,%u, want 191 in each", cz[0], cz[1], cz[2]);
+        }
+        for (uint32_t i = 0; i < 4; i++)
+            reg(0x4400 + i, fbits(1.0f));
+        im[0] = 0, im[1] = nvs;
+        memcpy(im + 2, vs, 4 * nvs);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nvs);
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
     }
 
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */

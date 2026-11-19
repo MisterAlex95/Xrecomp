@@ -473,9 +473,9 @@ void x360_k_NtReadFile(x360_machine *x, x360_thread *t, xe_cpu *c)
     if (len > f->size - off)
         len = (uint32_t)(f->size - off);
     if (f->fd >= 0)
-        got = pread(f->fd, x->base + buf, len, (off_t)off);
+        got = pread(f->fd, x360_p(x, buf), len, (off_t)off);
     else
-        got = xiso_pread(x->fs->img, &f->st, x->base + buf, len, off);
+        got = xiso_pread(x->fs->img, &f->st, x360_p(x, buf), len, off);
     if (got < 0) {
         complete(x, A(1), A(4), X_STATUS_UNSUCCESSFUL, 0);
         RET(X_STATUS_UNSUCCESSFUL);
@@ -500,7 +500,7 @@ void x360_k_NtWriteFile(x360_machine *x, x360_thread *t, xe_cpu *c)
         return;
     }
     uint64_t off = file_offset(x, f, A(7));
-    long put = pwrite(f->fd, x->base + A(5), A(6), (off_t)off);
+    long put = pwrite(f->fd, x360_p(x, A(5)), A(6), (off_t)off);
     if (put < 0) {
         complete(x, A(1), A(4), X_STATUS_UNSUCCESSFUL, 0);
         RET(X_STATUS_UNSUCCESSFUL);
@@ -739,7 +739,7 @@ void x360_k_NtQueryDirectoryFile(x360_machine *x, x360_thread *t, xe_cpu *c)
     x360_w64(x, p + 48, (l.size + 2047) & ~2047ull);
     x360_w32(x, p + 56, l.is_dir ? 0x10 : 0x80);
     x360_w32(x, p + 60, nl);
-    memcpy(x->base + p + 0x40, name, nl);
+    memcpy(x360_p(x, p + 0x40), name, nl);
     f->next++;
     complete(x, A(1), A(4), X_STATUS_SUCCESS, need);
     RET(X_STATUS_SUCCESS);
@@ -766,7 +766,7 @@ void x360_k_NtQueryVolumeInformationFile(x360_machine *x, x360_thread *t, xe_cpu
         x360_w32(x, p, 0);
         x360_w32(x, p + 4, 255);
         x360_w32(x, p + 8, 4);
-        memcpy(x->base + p + 12, n, 4);
+        memcpy(x360_p(x, p + 12), n, 4);
         io_status(x, A(1), X_STATUS_SUCCESS, 16);
         RET(X_STATUS_SUCCESS);
     } else {
@@ -957,7 +957,7 @@ static uint32_t link_target(x360_machine *x, uint32_t obj, uint32_t out, uint32_
     *len = n;
     if (n > cap)
         return X_STATUS_BUFFER_TOO_SMALL;
-    memcpy(x->base + buf, target, n);
+    memcpy(x360_p(x, buf), target, n);
     x360_w16(x, out, n);
     return X_STATUS_SUCCESS;
 }

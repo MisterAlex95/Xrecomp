@@ -161,7 +161,7 @@ static void k_NtWriteFileGather(x360_machine *x, x360_thread *t, xe_cpu *c)
         uint32_t page = x360_r32(x, segs + 8 * (o / 0x1000));
         if (!page)
             page = x360_r32(x, segs + 8 * (o / 0x1000) + 4);
-        memmove(x->base + tmp + o, x->base + page, len - o < 0x1000 ? len - o : 0x1000);
+        memmove(x360_p(x, tmp + o), x360_p(x, page), len - o < 0x1000 ? len - o : 0x1000);
     }
     c->gpr[8] = tmp;
     x360_thunk th = {0, X360_xboxkrnl_NtWriteFile, X360_LIB_XBOXKRNL};

@@ -242,7 +242,7 @@ int x360_apc_queue_user(x360_machine *x, uint32_t kthread, uint32_t routine, uin
         x->kobj.apc_free = x360_r32(x, apc + 8);
     else if (!(apc = x360_kalloc(x, 0x28)))
         return 0;
-    memset(x->base + apc, 0, 0x28);
+    memset(x360_p(x, apc), 0, 0x28);
     x360_w8(x, apc, 18);
     x360_w8(x, apc + 1, KAPC_POOLED);
     x360_w8(x, apc + 2, 1);
@@ -406,7 +406,7 @@ static void k_KeInitializeApc(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     uint32_t a = A(0);
-    memset(x->base + a, 0, 0x28);
+    memset(x360_p(x, a), 0, 0x28);
     x360_w8(x, a, 18);
     x360_w8(x, a + 2, A(5) & 0xFF);
     x360_w32(x, a + 4, A(1));
@@ -621,7 +621,7 @@ static void k_KeInitializeTimerEx(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     uint32_t o = A(0);
-    memset(x->base + o, 0, 0x28);
+    memset(x360_p(x, o), 0, 0x28);
     x360_w8(x, o, A(1) ? X_OBJ_TIMER_SYNC : X_OBJ_TIMER_NOTIFICATION);
     x360_w8(x, o + 2, 0x28 / 4);
     list_init(x, o + 8);
@@ -673,7 +673,7 @@ static void k_NtQueryTimer(x360_machine *x, x360_thread *t, xe_cpu *c)
 static void k_KeInitializeMutant(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     uint32_t o = A(0), owned = A(1) & 0xFF;
-    memset(x->base + o, 0, 0x20);
+    memset(x360_p(x, o), 0, 0x20);
     x360_w8(x, o, X_OBJ_MUTANT);
     x360_w8(x, o + 2, 0x20 / 4);
     x360_w32(x, o + 4, owned ? 0 : 1);
@@ -739,7 +739,7 @@ static void k_NtQuerySemaphore(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 static void queue_init(x360_machine *x, uint32_t q, uint32_t count)
 {
-    memset(x->base + q, 0, Q_SIZE);
+    memset(x360_p(x, q), 0, Q_SIZE);
     x360_w8(x, q, X_OBJ_QUEUE);
     x360_w8(x, q + 2, Q_SIZE / 4);
     list_init(x, q + 8);
@@ -990,13 +990,13 @@ static void k_NtQueryIoCompletion(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 static uint64_t slist_load(x360_machine *x, uint32_t h)
 {
-    return __builtin_bswap64(__atomic_load_n((uint64_t *)(x->base + h), __ATOMIC_ACQUIRE));
+    return __builtin_bswap64(__atomic_load_n((uint64_t *)(x360_p(x, h)), __ATOMIC_ACQUIRE));
 }
 
 static int slist_cas(x360_machine *x, uint32_t h, uint64_t old, uint64_t val)
 {
     uint64_t e = __builtin_bswap64(old);
-    return __atomic_compare_exchange_n((uint64_t *)(x->base + h), &e, __builtin_bswap64(val), 0, __ATOMIC_ACQ_REL,
+    return __atomic_compare_exchange_n((uint64_t *)(x360_p(x, h)), &e, __builtin_bswap64(val), 0, __ATOMIC_ACQ_REL,
                                        __ATOMIC_ACQUIRE);
 }
 
@@ -1073,7 +1073,7 @@ static void k_ExInitializeReadWriteLock(x360_machine *x, x360_thread *t, xe_cpu 
 {
     (void)t;
     uint32_t l = A(0);
-    memset(x->base + l, 0, 0x38);
+    memset(x360_p(x, l), 0, 0x38);
     x360_w32(x, l + RW_COUNT, 0xFFFFFFFFu);
     x360_w8(x, l + RW_EVENT, X_OBJ_EVENT_SYNC);
     x360_w8(x, l + RW_EVENT + 2, 4);
@@ -1209,7 +1209,7 @@ static int mapped(x360_machine *x, uint32_t a, uint32_t size)
     x360_heap *h = x360_heap_of(x, a);
     if (!h)
         return 0;
-    uint32_t in = h->physical ? a & 0x1FFFFFFFu : a;
+    uint32_t in = h->physical ? x360_v2p(a) : a;
     return x360_heap_all_used(h, in & ~(h->page - 1), size ? size + (in & (h->page - 1)) : 1);
 }
 

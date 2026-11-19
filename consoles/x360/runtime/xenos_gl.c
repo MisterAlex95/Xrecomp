@@ -247,6 +247,7 @@ typedef struct texture {
     int used;
     uint32_t checked; /* the epoch its memory was last compared in */
     int copy;         /* 1 + the resolve copy it was made from (its host picture, at the internal resolution) */
+    int swap_rb;      /* that copy's: red and blue are the other way round from the memory the fetch constant reads */
     int levels;       /* mip levels uploaded */
 } texture;
 
@@ -290,6 +291,8 @@ typedef struct rt_copy {
     GLuint tex;            /* the destination's pitch x height at the internal resolution, top row first */
     int w, h;
     GLenum ifmt;
+    int swap_rb;           /* the resolve exchanged red and blue in memory; the picture has them as the surface did */
+    uint32_t fmt, endian;  /* the destination's texture format and endian mode: how memory was written */
     unsigned used;
 } rt_copy;
 
@@ -1446,11 +1449,11 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
                 g->st.msaa_surfaces--;
                 surface_ms_alloc(g, s);
             }
+            /* every attachment of the draw FBO was taken off above, not only this surface's: all are attached again
+             * by the next bind (a depth buffer left believed attached would be missing from then on) */
             for (int k = 0; k < 4; k++)
-                if (g->cur[k] == i)
-                    g->cur[k] = -2; /* attached again */
-            if (g->cur_ds == i)
-                g->cur_ds = -2;
+                g->cur[k] = -2;
+            g->cur_ds = -2;
             return i;
         }
         int bound = 0;
@@ -1822,8 +1825,17 @@ static void alpha_block(const uint8_t *b, uint8_t out[16])
         out[i] = (uint8_t)ap[(ab >> (3 * i)) & 7];
 }
 
-/* one 4x4 block of a compressed format at `b` (bytes after the endian swap) to 16 RGBA texels; colours are 5:6:5
- * with the 5 low bits first (X) */
+/* a DXT colour endpoint: S3TC's 5:6:5 with red in the 5 high bits (the uncompressed 5_6_5 format is the other way
+ * round: X in the low bits). The GPU decodes the standard block: Xenia hands it to the host's BC decoder as it is. */
+static void unpack_dxt_colour(uint32_t v, uint8_t out[4])
+{
+    out[0] = (uint8_t)((((v >> 11) & 31) * 255 + 15) / 31);
+    out[1] = (uint8_t)((((v >> 5) & 63) * 255 + 31) / 63);
+    out[2] = (uint8_t)(((v & 31) * 255 + 15) / 31);
+    out[3] = 255;
+}
+
+/* one 4x4 block of a compressed format at `b` (bytes after the endian swap) to 16 RGBA texels */
 static void dxt_block(const uint8_t *b, uint32_t format, uint8_t out[16][4])
 {
     switch (format) {
@@ -1869,8 +1881,8 @@ static void dxt_block(const uint8_t *b, uint32_t format, uint8_t out[16][4])
     uint32_t c0 = cb[0] | cb[1] << 8, c1 = cb[2] | cb[3] << 8, bits = cb[4] | cb[5] << 8 | cb[6] << 16 |
                                                                         (uint32_t)cb[7] << 24;
     uint8_t pal[4][4];
-    unpack_565(c0, pal[0]);
-    unpack_565(c1, pal[1]);
+    unpack_dxt_colour(c0, pal[0]);
+    unpack_dxt_colour(c1, pal[1]);
     int three = format == 18 && c0 <= c1;
     for (int k = 0; k < 3; k++) {
         if (three) {
@@ -2040,7 +2052,8 @@ static void read_bytes(const xenos_cp *cp, uint32_t addr, uint32_t n, uint32_t e
 
 typedef struct decoded {
     uint32_t w, h, slices, dim; /* dim as the fetch constant has it: 0 1D, 1 2D, 2 3D, 3 cube */
-    int levels;                 /* mip levels decoded (1: the base only) */
+    int levels;                 /* mip levels of the texture, up to the fetch constant's last (1: the base only) */
+    int base_level;             /* the first one decoded: the fetch constant's first level */
     int is_float;               /* rgba holds floats (4 per texel) rather than bytes */
     void *level[14];            /* each level's slices of RGBA, top row first */
     uint32_t lw[14], lh[14], ld[14];
@@ -2168,11 +2181,17 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
         }
     }
     uint32_t tail = packed ? packed_level(w, h1) : 0xFFFFFFFFu; /* the level whose storage holds the tail */
+    /* the fetch constant's first level: a title that streams textures loads the mips, points the sampler at level 1
+     * or further and leaves the base address on memory that does not hold level 0 (often the mip address again).
+     * Nothing below that level is read, here or by the sampler (GL_TEXTURE_BASE_LEVEL). */
+    uint32_t min_level = (fc[4] >> 2) & 15;
+    int base_level = (int)min_level < levels ? (int)min_level : levels - 1;
     out->levels = levels;
+    out->base_level = base_level;
     out->is_float = tf->is_float;
     out->w = w, out->h = h1, out->slices = slices, out->dim = dim;
     uint64_t hash = (uint64_t)fc[3] << 32 ^ (uint64_t)levels;
-    for (int l = 0; l < levels; l++) {
+    for (int l = base_level; l < levels; l++) {
         /* what is drawn: the guest's size at this level (a compressed level is read in whole blocks, then cropped) */
         uint32_t lw = w >> l ? w >> l : 1, lh = h1 >> l ? h1 >> l : 1, ld = dim == 2 ? (depth >> l ? depth >> l : 1) : slices;
         /* where it is stored: the base, its own mip storage, or inside the tail's (the base of a texture that is
@@ -2290,6 +2309,15 @@ static rt_copy *copy_at(xenos_gl *g, const xenos_cp *cp, uint32_t base)
     return NULL;
 }
 
+/* A resolve's host picture stands for a texture only when the texture is read as the resolve wrote it: the same
+ * format and, for texels wider than a byte, the same endian mode (read with another one, the bytes land in other
+ * channels: a front buffer resolved for the display and sampled back as a big-endian texture). */
+static int copy_fits(const rt_copy *rc, const uint32_t *fc)
+{
+    uint32_t fmt = fc[1] & 63, endian = (fc[1] >> 6) & 3;
+    return fmt == rc->fmt && (endian == rc->endian || fmt == 2);
+}
+
 /* copy a w x h guest-pixel region at (sx, sy) of texture `src` into (0, 0) of texture `dst` (both at the internal
  * resolution, compatible formats) */
 static void blit_tex(xenos_gl *g, GLuint src, GLuint dst, int sx, int sy, int w, int h, int dx, int dy)
@@ -2335,10 +2363,13 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     }
     /* a resolve's picture */
     rt_copy *rc = dim == 1 ? copy_at(g, cp, fc[1]) : NULL;
+    if (rc && !copy_fits(rc, fc))
+        rc = NULL; /* read another way than it was written: decoded from memory */
     if (rc) {
         uint32_t w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
         if ((int)w <= rc->w && (int)h <= rc->h) {
             if (t && t->copy == 1 + (int)(rc - g->copies) && t->hash == rc->hash) {
+                t->swap_rb = rc->swap_rb;
                 t->checked = g->epoch;
                 t->used = (int)++g->tex_clock;
                 return t->tex;
@@ -2359,6 +2390,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
             t->tex = new_texture(g, rc->ifmt, tf, tt, (int)w * g->scale, (int)h * g->scale);
             blit_tex(g, rc->tex, t->tex, 0, 0, (int)w, (int)h, 0, 0);
             t->copy = 1 + (int)(rc - g->copies);
+            t->swap_rb = rc->swap_rb;
             t->hash = rc->hash;
             t->checked = g->epoch;
             t->used = (int)++g->tex_clock;
@@ -2386,6 +2418,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
         g->glDeleteTextures(1, &t->tex);
     g->glGenTextures(1, &t->tex);
     t->copy = 0;
+    t->swap_rb = 0;
     t->hash = d.hash;
     t->checked = g->epoch;
     t->used = (int)++g->tex_clock;
@@ -2394,7 +2427,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     size_t texel_n = d.is_float ? 16 : 4;
     GLenum target = gl_dim == 1 ? GL_TEXTURE_2D : gl_dim == 3 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_3D;
     g->glBindTexture(target, t->tex);
-    for (int l = 0; l < d.levels; l++) {
+    for (int l = d.base_level; l < d.levels; l++) {
         const uint8_t *px = d.level[l];
         if (gl_dim == 1) {
             g->glTexImage2D(GL_TEXTURE_2D, l, ifmt, (GLsizei)d.lw[l], (GLsizei)d.lh[l], 0, GL_RGBA, type, px);
@@ -2407,10 +2440,10 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
                             type, px);
         }
     }
-    g->glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
+    g->glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, d.base_level);
     g->glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, d.levels - 1);
-    t->levels = d.levels;
-    if (d.levels > 1)
+    t->levels = d.levels - d.base_level;
+    if (t->levels > 1)
         g->st.mipmapped++;
     free_decoded(&d);
     return t->tex;
@@ -2421,8 +2454,46 @@ static GLint wrap_mode(uint32_t c)
     return c == 0 ? GL_REPEAT : c == 1 ? GL_MIRRORED_REPEAT : GL_CLAMP_TO_EDGE;
 }
 
-/* a texture's sampling state from its fetch constant: wraps, filters (mips when it has them), swizzle */
-static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mipped)
+/* a swizzle (3 bits a component) over a host picture whose red and blue are the other way round from memory's: a
+ * resolve that swaps them writes the surface's red where the texture format has blue, the picture kept is unswapped */
+static uint32_t swizzle_swap_rb(uint32_t swizzle)
+{
+    uint32_t out = 0;
+    for (int c = 0; c < 4; c++) {
+        uint32_t s = (swizzle >> (3 * c)) & 7;
+        out |= (s == 0 ? 2u : s == 2 ? 0u : s) << (3 * c);
+    }
+    return out;
+}
+
+/* a swizzle over a host picture (the surface's four channels) that reads as the texture decoded from memory would:
+ * a one-channel format gives X in every component, a two-channel one (X, Y, 0, 1), a three-channel one alpha 1 */
+static uint32_t swizzle_as_decoded(uint32_t swizzle, uint32_t format)
+{
+    int channels = 4;
+    switch (format) {
+    case 2: case 22: case 23: case 24: case 30: case 36: channels = 1; break;
+    case 10: case 25: case 31: case 37: channels = 2; break;
+    case 4: case 5: case 16: case 17: case 55: case 56: case 57: channels = 3; break;
+    default: break;
+    }
+    uint32_t out = 0;
+    for (int c = 0; c < 4; c++) {
+        uint32_t s = (swizzle >> (3 * c)) & 7;
+        if (s < 4 && channels == 1)
+            s = 0;
+        else if (s == 2 && channels == 2)
+            s = 4;
+        else if (s == 3 && channels < 4)
+            s = 5;
+        out |= s << (3 * c);
+    }
+    return out;
+}
+
+/* a texture's sampling state from its fetch constant: wraps, filters (mips when it has them), swizzle. copy: 0 the
+ * texture was decoded from memory, 1 it is a resolve's host picture, 3 one kept with red and blue unswapped. */
+static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mipped, int copy)
 {
     static const GLint swz[6] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};
     g->glTexParameteri(target, GL_TEXTURE_WRAP_S, wrap_mode((fc[0] >> 10) & 7));
@@ -2438,8 +2509,13 @@ static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mi
                        !mipped ? (min ? GL_LINEAR : GL_NEAREST)
                        : min   ? (mip ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST)
                                : (mip ? GL_NEAREST_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST));
+    uint32_t swizzle = (fc[3] >> 1) & 0xFFF;
+    if (copy)
+        swizzle = swizzle_as_decoded(swizzle, fc[1] & 63);
+    if (copy & 2)
+        swizzle = swizzle_swap_rb(swizzle);
     for (int c = 0; c < 4; c++) {
-        uint32_t s = (fc[3] >> (1 + 3 * c)) & 7;
+        uint32_t s = (swizzle >> (3 * c)) & 7;
         g->glTexParameteri(target, GL_TEXTURE_SWIZZLE_R + (GLenum)c, s < 6 ? swz[s] : GL_ZERO);
     }
 }
@@ -2467,24 +2543,32 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
     for (int i = 0; i < p->ntq; i++)
         if (p->tq_loc[i] >= 0)
             set_tquery(g, p->tq_loc[i], &cp->regs[0x4800 + 6 * (p->tq_fetch[i] & 31)]);
+    /* every texture first, then the units: texture_of uploads (and copies resolves) through whatever unit is active,
+     * so binding as it goes would leave a sampler's unit on the texture uploaded for the next one */
+    GLuint texs[MAX_SAMPLERS];
+    for (int i = 0; i < p->nsamplers; i++) {
+        uint32_t k = p->sampler_fetch[i];
+        texs[i] = k < 32 ? texture_of(g, cp, &cp->regs[0x4800 + 6 * (k & 31)], p->sampler_dim[i]) : 0;
+    }
     for (int i = 0; i < p->nsamplers; i++) {
         uint32_t k = p->sampler_fetch[i], dim = p->sampler_dim[i];
         GLenum target = dim == 2 ? GL_TEXTURE_3D : dim == 3 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
         const uint32_t *fc = &cp->regs[0x4800 + 6 * (k & 31)];
-        GLuint tex = k < 32 ? texture_of(g, cp, fc, dim) : 0;
+        GLuint tex = texs[i];
         g->glActiveTexture(GL_TEXTURE0 + (GLenum)i);
         g->glBindTexture(target, tex);
         if (!tex) {
             g->st.unsupported_textures++;
             continue;
         }
-        int mipped = 0;
+        int mipped = 0, copy = 0;
         for (int t = 0; t < MAX_TEXTURES; t++)
             if (g->textures[t].tex == tex) {
                 mipped = !g->textures[t].copy && g->textures[t].levels > 1;
+                copy = g->textures[t].copy ? (g->textures[t].swap_rb ? 3 : 1) : 0;
                 break;
             }
-        sampler_state(g, target, fc, mipped);
+        sampler_state(g, target, fc, mipped, copy);
     }
     g->glActiveTexture(GL_TEXTURE0);
 }
@@ -3266,7 +3350,9 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
             g->epoch++;
             if (g->nresolved < 16)
                 g->resolved[g->nresolved++] = base & 0x1FFFF000u;
-            /* the host picture at the internal resolution (not with a red / blue swap: memory's X would be blue) */
+            /* the host picture at the internal resolution. A resolve that swaps red and blue (what Direct3D asks for
+             * every A8R8G8B8 destination) keeps the picture unswapped and says so: whoever samples it exchanges the
+             * two in its swizzle (sampler_state, the frame at the swap). */
             if (!height)
                 height = (uint32_t)y1;
             uint32_t height_aligned = (height + 31) & ~31u;
@@ -3280,7 +3366,8 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                 if (!c->tex || (victim->tex && c->used < victim->used))
                     victim = c;
             }
-            if (swap_rb || s->kind == 2 || (base & 0xFFF)) {
+            /* no picture where it would not read as the memory does: values scaled by an exponent bias */
+            if (s->kind == 2 || (base & 0xFFF) || bias) {
                 if (rc) {
                     g->glDeleteTextures(1, &rc->tex);
                     memset(rc, 0, sizeof *rc);
@@ -3288,10 +3375,13 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
             } else {
                 if (!rc)
                     rc = victim;
-                if (rc->tex && (rc->ifmt != s->ifmt || rc->w != (int)pitch_aligned || rc->h != (int)height_aligned)) {
+                if (rc->tex && (rc->ifmt != s->ifmt || rc->w != (int)pitch_aligned || rc->h != (int)height_aligned ||
+                                rc->swap_rb != (int)swap_rb)) {
                     g->glDeleteTextures(1, &rc->tex);
                     rc->tex = 0;
                 }
+                rc->swap_rb = (int)swap_rb;
+                rc->fmt = fmt, rc->endian = endian;
                 if (!rc->tex) {
                     GLenum tf, tt;
                     upload_fmt(s->ifmt, &tf, &tt);
@@ -3756,18 +3846,22 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
     GLenum src_fmt = GL_RGBA8;
     int fw = g->width, fh = g->height, done = 0;
     rt_copy *rc = front ? copy_at(g, cp, base) : NULL;
+    if (rc && !copy_fits(rc, fc))
+        rc = NULL;
     if (front) {
         fw = (int)(fc[2] & 0x1FFF) + 1, fh = (int)((fc[2] >> 13) & 0x1FFF) + 1;
         swizzle = (fc[3] >> 1) & 0xFFF;
     }
     if (rc && fw <= rc->w && fh <= rc->h) {
         src = rc->tex, src_fmt = rc->ifmt;
+        if (rc->swap_rb)
+            swizzle = swizzle_swap_rb(swizzle);
         g->st.front_buffer_frames++;
     } else if (front) {
         decoded d;
         if (decode_texture(cp, fc, 0, &d)) { /* from memory (no host picture of it) */
             g->st.front_buffer_frames++;
-            uint8_t *rgba = calloc((size_t)d.w * d.h, 4);
+            uint8_t *rgba = d.level[0] ? calloc((size_t)d.w * d.h, 4) : NULL; /* a front buffer has its level 0 */
             if (rgba) {
                 for (uint32_t i = 0; i < d.w * d.h; i++)
                     for (int c = 0; c < 4; c++) {

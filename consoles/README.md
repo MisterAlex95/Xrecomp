@@ -2003,7 +2003,12 @@ What is there:
   host base + a: no translation, no bounds check in lifted code) with the console's map: virtual 4 KB and 64 KB
   ranges, stacks, this runtime's kernel objects, the image, the GPU register page, and the 512 MB of physical memory
   seen through its three views (0xA0000000, 0xC0000000, 0xE0000000) on one memfd; a guest fault reports its guest
-  address, thread and function. `x360_load.c` loads a plain (or basic) XEX2, copies its header into guest memory and
+  address, thread and function. It works in the host's pages (16 KB on recent Android devices): commits are widened
+  to them, and the 0xE0000000 view, which starts 0x1000 into physical memory, sits one 4 KB page higher in the host
+  where that offset cannot be mapped (`xe_ptr` adds `view4k_skew` when built with `XE_VIEW4K_DYNAMIC`: the
+  runtime always, a pack by default except on x86 outside Android (4 KB pages); `X360_HOST_PAGE=16384` makes a 4 KB host
+  behave so, for the `*_16k` tests).
+  `x360_load.c` loads a plain (or basic) XEX2, copies its header into guest memory and
   binds the imports (variables get storage, function records their thunk; the dispatcher calls the HLE when PC lands
   on a thunk). `x360_thread.c`: cooperative guest threads (each with its context, stack, KTHREAD and PCR in r13, TLS;
   the hardware thread `KeSetAffinityThread` asks for is in their CPU byte), a time slice through `RC_BLOCK` (not taken
@@ -2046,7 +2051,7 @@ What is there:
   assert stops it with its address), FPSCR moves, `mcrxr`. `xenos_cp.c`: the GPU command processor, PM4 packets
   decoded and traced (register file, constants, memory writes with the GPU's endian modes, fences, conditional writes,
   waits that stall the ring, indirect buffers, draws recorded, the shader microcode kept, interrupts, the VdSwap
-  token); the GPU register page is memory the scheduler reads between slices, and the title's graphics interrupt
+  token, tiled rendering's bin mask / bin select and the packets they predicate); the GPU register page is memory the scheduler reads between slices, and the title's graphics interrupt
   callback runs at each vertical blank (60 Hz of virtual time) on a reused guest context. `x360_state.c`: **save
   states** in the other consoles' format (`gc_state.c`: threads, kernel objects, heaps, guest memory without its zero
   pages, the GPU, open files and links, the pads), taken between time slices. `x360_cheat_read32` / `write32`: the

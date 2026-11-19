@@ -139,7 +139,7 @@ static void state_in(x360_machine *x, uint32_t g, sha *s, int words)
     s->count = x360_r32(x, g);
     for (int i = 0; i < words; i++)
         s->h[i] = x360_r32(x, g + 4 + 4 * (uint32_t)i);
-    memcpy(s->buf, x->base + g + 4 + 4 * (uint32_t)words, 64);
+    memcpy(s->buf, x360_p(x, g + 4 + 4 * (uint32_t)words), 64);
 }
 
 static void state_out(x360_machine *x, uint32_t g, const sha *s)
@@ -147,13 +147,13 @@ static void state_out(x360_machine *x, uint32_t g, const sha *s)
     x360_w32(x, g, (uint32_t)s->count);
     for (int i = 0; i < s->words; i++)
         x360_w32(x, g + 4 + 4 * (uint32_t)i, s->h[i]);
-    memcpy(x->base + g + 4 + 4 * (uint32_t)s->words, s->buf, 64);
+    memcpy(x360_p(x, g + 4 + 4 * (uint32_t)s->words), s->buf, 64);
 }
 
 static void out_digest(x360_machine *x, uint32_t out, uint32_t out_size, const uint8_t *d, uint32_t n)
 {
     if (out)
-        memcpy(x->base + out, d, out_size < n ? out_size : n);
+        memcpy(x360_p(x, out), d, out_size < n ? out_size : n);
 }
 
 /* ---- exports ---- */
@@ -171,7 +171,7 @@ void x360_k_XeCryptShaUpdate(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     sha s;
     state_in(x, A(0), &s, 5);
-    sha_update(&s, x->base + A(1), A(2));
+    sha_update(&s, x360_p(x, A(1)), A(2));
     state_out(x, A(0), &s);
 }
 
@@ -196,7 +196,7 @@ void x360_k_XeCryptSha(x360_machine *x, x360_thread *t, xe_cpu *c)
     sha_init(&s, 5);
     for (int k = 0; k < 3; k++)
         if (A(2 * k) && A(2 * k + 1))
-            sha_update(&s, x->base + A(2 * k), A(2 * k + 1));
+            sha_update(&s, x360_p(x, A(2 * k)), A(2 * k + 1));
     sha_final(&s, d);
     out_digest(x, A(6), A(7), d, 20);
 }
@@ -214,7 +214,7 @@ void x360_k_XeCryptSha256Update(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     sha s;
     state_in(x, A(0), &s, 8);
-    sha_update(&s, x->base + A(1), A(2));
+    sha_update(&s, x360_p(x, A(1)), A(2));
     state_out(x, A(0), &s);
 }
 
@@ -237,17 +237,17 @@ void x360_k_XeCryptHmacSha(x360_machine *x, x360_thread *t, xe_cpu *c)
     sha s;
     if (ks > 64) {
         sha_init(&s, 5);
-        sha_update(&s, x->base + A(0), ks);
+        sha_update(&s, x360_p(x, A(0)), ks);
         sha_final(&s, key);
     } else if (ks)
-        memcpy(key, x->base + A(0), ks);
+        memcpy(key, x360_p(x, A(0)), ks);
     for (int i = 0; i < 64; i++)
         pad[i] = key[i] ^ 0x36;
     sha_init(&s, 5);
     sha_update(&s, pad, 64);
     for (int k = 0; k < 3; k++)
         if (A(2 + 2 * k) && A(3 + 2 * k))
-            sha_update(&s, x->base + A(2 + 2 * k), A(3 + 2 * k));
+            sha_update(&s, x360_p(x, A(2 + 2 * k)), A(3 + 2 * k));
     sha_final(&s, d);
     for (int i = 0; i < 64; i++)
         pad[i] = key[i] ^ 0x5C;
@@ -289,27 +289,27 @@ static void rc4_run(uint8_t *st, uint8_t *p, uint32_t n)
 void x360_k_XeCryptRc4Key(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    rc4_key(x->base + A(0), x->base + A(1), A(2));
+    rc4_key(x360_p(x, A(0)), x360_p(x, A(1)), A(2));
 }
 
 void x360_k_XeCryptRc4Ecb(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    rc4_run(x->base + A(0), x->base + A(1), A(2));
+    rc4_run(x360_p(x, A(0)), x360_p(x, A(1)), A(2));
 }
 
 void x360_k_XeCryptRc4(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     uint8_t st[258];
-    rc4_key(st, x->base + A(0), A(1));
-    rc4_run(st, x->base + A(2), A(3));
+    rc4_key(st, x360_p(x, A(0)), A(1));
+    rc4_run(st, x360_p(x, A(2)), A(3));
 }
 
 void x360_k_XeCryptRandom(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    uint8_t *p = x->base + A(0);
+    uint8_t *p = x360_p(x, A(0));
     if (!x->rng)
         x->rng = 0x9E3779B97F4A7C15ull;
     for (uint32_t k = 0; k < A(1); k++) {

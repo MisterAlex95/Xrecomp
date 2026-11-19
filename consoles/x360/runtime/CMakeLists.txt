@@ -20,7 +20,8 @@ if(NOT TARGET x360_core)
         x360_crypt.c x360_more.c x360_input.c x360_xma.c xenos_gl.c x360_seh.c
         x360_kdpc.c x360_rtl.c x360_crypt2.c x360_vd.c x360_xam2.c x360_ob.c)
     target_include_directories(x360_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${X360_GC_RUNTIME})
-    target_compile_definitions(x360_core PUBLIC XE_RUNTIME=1 _GNU_SOURCE)
+    # XE_VIEW4K_DYNAMIC (xenon_rt.h): the runtime follows the host's page size on every host
+    target_compile_definitions(x360_core PUBLIC XE_RUNTIME=1 XE_VIEW4K_DYNAMIC=1 _GNU_SOURCE)
     target_compile_options(x360_core PRIVATE -Wall -Wextra -ffp-contract=off)
     if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(x360_core PRIVATE -O2)

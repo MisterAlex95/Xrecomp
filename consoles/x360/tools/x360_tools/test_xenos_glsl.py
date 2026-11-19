@@ -8,6 +8,7 @@ fetches; pixel shaders compiled and linked. Without $XENOS_GLSL_RUN only the tra
 import math
 import os
 import random
+import re
 import struct
 import subprocess
 
@@ -382,6 +383,51 @@ def test_translation_shape():
         translate(program([(2, [("fetch", fetch_words(2, 0, 1, 0o3210, 0))], {})]), "pixel")  # no such fetch opcode
     with pytest.raises(Unsupported):
         translate(to_words([dict(vop=2, vdest=32, vmask=0xF, export=1)]), "vertex")  # memory export
+
+
+def test_pixel_parameters_are_written_by_constant_index():
+    """A pixel shader's register array is never stored into at a computed index: `if (c) r[int(u)] = v;` was seen
+    compiled (condition false) into zeros in r0's z and w by a host GLSL compiler. One guarded line a register."""
+    src_, _ = translate(program([(2, [("alu", alu_words(**export(0, 0)))], {})]), "pixel", interpolators=16)
+    stores = [ln.strip() for ln in src_.split("\n") if ln.strip().startswith(("r[", "if (xe_pgn")) and "= " in ln]
+    assert not [ln for ln in stores if "r[clamp(" in ln or "r[int(" in ln or "r[xe_" in ln], stores
+    for i in range(16):
+        assert "if (xe_pgn == %d) r[%d] = xe_pgv;" % (i, i) in stores
+    assert "int xe_pgn = xe_k.pg.x >= 0.0 ? clamp(int(xe_k.pg.x), 0, 15) : -1;" in src_
+
+
+def test_only_named_interpolators_are_pixel_shader_inputs():
+    """GLES 3.0 promises 15 fragment input vectors, the console has 16 interpolators. A pixel shader copies to its
+    registers only the interpolators whose register it names: the others stay declared (any vertex shader links) but
+    are not statically used. Loop-relative addressing may read any register: all are copied."""
+    def copies(text):
+        return [int(n) for n in re.findall(r"^    r\[(\d+)\] = xe_i\1;$", text, re.M)]
+    ps = program([(2, [ADD_RC(4, 3, 0), ("alu", alu_words(**export(0, 4)))], {})])   # r4 = r3 + c0; oC0 = r4
+    src_, _ = translate(ps, "pixel", interpolators=16)
+    assert copies(src_) == [3, 4]
+    assert all("in vec4 xe_i%d;" % i in src_ for i in range(16))
+    ps = program([(2, [A(vop=0, vdest=4, vmask=0xF, srcs=((3 | 0x40, 1, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))),
+                       ("alu", alu_words(**export(0, 4)))], {})])                    # r4 = r[aL + 3] + c0
+    src_, _ = translate(ps, "pixel", interpolators=16)
+    assert "r[clamp(aL + 3, 0, 63)]" in src_ and copies(src_) == list(range(16))
+    # a vertex shader still writes all sixteen
+    src_, _ = translate(to_words(make_case(random.Random(1))), "vertex")
+    assert all("out vec4 xe_i%d;" % i in src_ and "xe_i%d = vec4(0.0);" % i in src_ for i in range(16))
+
+
+def test_vertex_index_survives_writes_to_the_rest_of_r0():
+    """r0.x is the vertex index until the shader writes it: a compiler keeps values in r0.yzw (here a fetch's), and
+    the fetches after that are still attributes at the vertex index, not reads of the whole buffer as a texture."""
+    def shader(first_dst):
+        return program([(2, [("fetch", fetch_words(0, 0, 0, first_dst, 5, sel=2, format=6, stride=2, offset=0)),
+                             ("fetch", fetch_words(0, 0, 1, 0o3210, 5, sel=2, format=6, stride=2, offset=1)),
+                             ("alu", alu_words(**export(62, 1))), ("alu", alu_words(**export(0, 0)))], {})])
+    src_, info = translate(shader(0o3217), "vertex")       # r0.yzw = the first fetch: x kept
+    assert "xe_vb" not in src_ and "xe_vfetch" not in src_
+    assert [(a["fetch_constant"], a["offset"]) for a in info["attributes"]] == [(17, 0), (17, 1)]
+    src_, info = translate(shader(0o3210), "vertex")       # r0 = the first fetch: the index is gone
+    assert "xe_vfetch(xe_vb0, int(floor((r[0]).x)))" in src_
+    assert [(a["fetch_constant"], a["offset"]) for a in info["attributes"]] == [(17, 0)]
 
 
 @pytest.mark.skipif(not os.path.isfile(RUN), reason="$XENOS_GLSL_RUN not set (tests/run_glsl_mesa.sh sets it)")

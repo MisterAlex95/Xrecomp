@@ -153,7 +153,7 @@ static void k_XAudioQueryDriverPerformance(x360_machine *x, x360_thread *t, xe_c
 {
     (void)t;
     if (A(0))
-        memset(x->base + A(0), 0, 0x20);
+        memset(x360_p(x, A(0)), 0, 0x20);
     RET(X_STATUS_SUCCESS);
 }
 

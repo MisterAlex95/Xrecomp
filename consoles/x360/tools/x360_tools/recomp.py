@@ -28,7 +28,7 @@ import zlib
 
 from tools.xex.xex import IMPORT_THUNK, XexError, load_keys, parse_xex
 
-from .discover360 import XenonDiscovery, find_helpers
+from .discover360 import XenonDiscovery, find_helpers, pointer_seeds
 from .lift360 import TitleLifter
 from .seh import seh_seeds
 from .xenon import XenonDecoder, XenonLifter
@@ -125,9 +125,13 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     helpers = find_helpers(view, dec, img.code_ranges())
     view.hide(helpers)
     seeds = {img.entry} | set(extra_seeds)
+    pointed = set()
     if use_pdata:
         seeds |= {start for start, _ in img.pdata}
         seeds |= seh_seeds(img)   # XBA-282: __except blocks, filters, __finally (scope tables only name them)
+        # leaf functions outside .pdata that only a pointer reaches (vtables, callbacks)
+        pointed = pointer_seeds(img, view, lambda a: dec.decode(view.u32(a), a)) - seeds
+        seeds |= pointed
     seeds = {a for a in seeds if a not in view.hidden}
     disc = XenonDiscovery(view, dec, sorted(seeds))
     funcs = disc.run()
@@ -201,7 +205,9 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     table.append("\nconst uint32_t xe_rc_helpers[] = {\n%s};\nconst unsigned xe_rc_helper_count = %du;\n" % (
         "".join("    0x%08Xu,\n" % a for a in sorted(helpers)) or "    0u,\n", len(helpers)))
     # XBA-283: bit 0, lwarx / stwcx. through RC_LWARX / RC_STWCX (atomic: x360_run --host-threads needs it)
-    table.append("const unsigned xe_rc_features = 1u;\n")
+    # bit 1 (XE_RC_FEAT_VIEW4K), when the pack is built so (xenon_rt.h, XE_VIEW4K_DYNAMIC): its accesses follow the
+    # 0xE0000000 view where the host's pages moved it
+    table.append("const unsigned xe_rc_features = 1u | XE_RC_PACK_FEATURES;\n")
     table.append("const uint32_t xe_rc_image_crc = 0x%08Xu;\nconst uint32_t xe_rc_image_base = 0x%08Xu;\n"
                  % (image_crc(img), img.base))
     path = os.path.join(outdir, "x360_rc_table.c")
@@ -212,7 +218,7 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     stats = {"functions": st["functions"], "instructions": st["instructions"],
              "lifted_instructions": st["lifted_instructions"], "interp_fallback_insns": fallbacks,
              "invalid_words": invalid, "unlifted": dict(unlifted.most_common()), "seeds": len(seeds),
-             "pdata_functions": len(img.pdata), "files": [os.path.basename(p) for p in files],
+             "pointer_seeds": len(pointed), "pdata_functions": len(img.pdata), "files": [os.path.basename(p) for p in files],
              "helpers": sorted({"%s@%08X" % (h.kind, h.start) for h, _ in helpers.values()}),
              "helper_calls_inlined": inlined, "jump_tables": st["jump_tables"],
              "jump_table_targets": st["jump_table_targets"], "unresolved_bctr": st["unresolved_bctr"],

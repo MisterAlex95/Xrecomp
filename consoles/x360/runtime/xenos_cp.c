@@ -25,6 +25,7 @@ void xenos_cp_init(xenos_cp *cp)
     cp->interrupt = irq;
     cp->shader_loaded = sh;
     cp->trace = trace;
+    cp->bin_mask = cp->bin_select = 0xFFFFFFFFu;
 }
 
 void xenos_cp_ring_init(xenos_cp *cp, uint32_t base_phys, uint32_t size_log2)
@@ -33,6 +34,7 @@ void xenos_cp_ring_init(xenos_cp *cp, uint32_t base_phys, uint32_t size_log2)
     cp->rb_size = 1u << (size_log2 + 3); /* bytes (Xenia: 1 << (size_log2 + 3)) */
     cp->rptr = cp->wptr = 0;
     cp->stalled = 0;
+    cp->ib_depth = 0;
 }
 
 const char *xenos_cp_opcode_name(uint32_t op)
@@ -62,6 +64,12 @@ const char *xenos_cp_opcode_name(uint32_t op)
     case PM4_ME_INIT: return "ME_INIT";
     case PM4_SET_SHADER_BASES: return "SET_SHADER_BASES";
     case PM4_MEM_WRITE_CNTR: return "MEM_WRITE_CNTR";
+    case PM4_SET_BIN_MASK: return "SET_BIN_MASK";
+    case PM4_SET_BIN_SELECT: return "SET_BIN_SELECT";
+    case PM4_SET_BIN_MASK_LO: return "SET_BIN_MASK_LO";
+    case PM4_SET_BIN_MASK_HI: return "SET_BIN_MASK_HI";
+    case PM4_SET_BIN_SELECT_LO: return "SET_BIN_SELECT_LO";
+    case PM4_SET_BIN_SELECT_HI: return "SET_BIN_SELECT_HI";
     case PM4_INTERRUPT: return "INTERRUPT";
     case PM4_SET_CONSTANT2: return "SET_CONSTANT2";
     case PM4_SET_SHADER_CONSTANTS: return "SET_SHADER_CONSTANTS";
@@ -73,14 +81,6 @@ const char *xenos_cp_opcode_name(uint32_t op)
     case PM4_XE_SWAP: return "XE_SWAP";
     default: return NULL;
     }
-}
-
-void xenos_cp_write_reg(xenos_cp *cp, uint32_t index, uint32_t value)
-{
-    if (index >= XENOS_REGS)
-        return;
-    cp->regs[index] = value;
-    cp->reg_writes++;
 }
 
 /* the GPU's endian modes (the low 2 bits of an address): none, 8in16, 8in32, 16in32 */
@@ -100,6 +100,22 @@ static void mem_write(xenos_cp *cp, uint32_t addr, uint32_t value)
 {
     if (cp->write32)
         cp->write32(cp->ctx, addr & ~3u & 0x1FFFFFFFu, __builtin_bswap32(gpu_swap(value, addr & 3)));
+}
+
+void xenos_cp_write_reg(xenos_cp *cp, uint32_t index, uint32_t value)
+{
+    if (index >= XENOS_REGS)
+        return;
+    cp->regs[index] = value;
+    cp->reg_writes++;
+    /* scratch register write-back: a scratch register whose bit is set in SCRATCH_UMSK (bits 0-7) is also written
+     * to memory at SCRATCH_ADDR + 4 * its number, in the mask's endian mode (bits 16-17). Direct3D passes values to
+     * its interrupt handler this way and makes the GPU wait on the memory copy. */
+    if (index >= XENOS_REG_SCRATCH_REG0 && index < XENOS_REG_SCRATCH_REG0 + 8) {
+        uint32_t n = index - XENOS_REG_SCRATCH_REG0, umsk = cp->regs[XENOS_REG_SCRATCH_UMSK];
+        if (umsk >> n & 1)
+            mem_write(cp, ((cp->regs[XENOS_REG_SCRATCH_ADDR] & ~3u) + 4 * n) | (umsk >> 16 & 3), value);
+    }
 }
 
 static uint32_t mem_read(xenos_cp *cp, uint32_t addr)
@@ -193,7 +209,32 @@ static void draw(xenos_cp *cp, reader *r, uint32_t words, const char *name)
         TRACE(" (%s, base %08X, %u words)\n", d.index_size ? "32-bit" : "16-bit", d.dma_base, d.dma_words);
 }
 
-/* run one packet; returns 0, or 1 when it must be retried later (an unmet wait, only for rings) */
+static int packet(xenos_cp *cp, reader *r, int in_ring, int depth);
+
+/* run the indirect buffer at nesting level d from where it stands; returns 1 when a wait in it (or in a buffer it
+ * calls) does not hold: its position is kept in cp->ib and xenos_cp_set_wptr goes on from there */
+static int run_ib(xenos_cp *cp, int d, int in_ring)
+{
+    xenos_ib *ib = &cp->ib[d];
+    reader r = {ib->base, ib->len, ib->pos};
+    while (ib->done < ib->len) {
+        uint32_t before = r.pos;
+        int stall = packet(cp, &r, in_ring, d + 1);
+        uint32_t step = (r.pos + ib->len - before) % ib->len;
+        if (stall && !step && cp->ib_depth > (uint32_t)d + 1)
+            step = ib->len; /* a nested buffer stalled: its packet (all of this buffer) is behind us */
+        ib->done += step;
+        ib->pos = r.pos;
+        if (stall)
+            return 1;
+        if (!step)
+            break;
+    }
+    return 0;
+}
+
+/* run one packet; returns 0, or 1 when the command processor must stop here (an unmet wait under the ring: the
+ * wait itself is retried, an indirect buffer that stalled is resumed from cp->ib) */
 static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
 {
     uint32_t start = r->pos;
@@ -220,22 +261,30 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
     uint32_t op = (h >> 8) & 0x7F, count = ((h >> 16) & 0x3FFF) + 1;
     uint32_t end = (start + 1 + count) % r->size_dw;
     cp->op_count[op]++;
+    if (h & 1) {
+        /* a predicated packet: run only for a bin that is selected (Xenia: skipped unless bin_select & bin_mask;
+         * a predicated swap is never run) */
+        cp->predicated++;
+        if (!(cp->bin_select & cp->bin_mask) || op == PM4_XE_SWAP) {
+            cp->predicated_skipped++;
+            TRACE("type3 opcode %02X x%u predicated: skipped\n", op, count);
+            r->pos = end;
+            return 0;
+        }
+    }
     switch (op) {
     case PM4_INDIRECT_BUFFER:
     case PM4_INDIRECT_BUFFER_PFD: {
         uint32_t ptr = rd(cp, r) & 0x1FFFFFFFu, len = rd(cp, r) & 0xFFFFF;
         TRACE("indirect buffer %08X, %u words\n", ptr, len);
-        if (depth < 4 && len) {
-            reader ib = {ptr, len, 0};
-            uint32_t n = 0;
-            while (n < len) {
-                uint32_t before = ib.pos;
-                packet(cp, &ib, 0, depth + 1);
-                uint32_t step = (ib.pos + len - before) % len;
-                if (!step)
-                    break;
-                n += step;
+        if (depth < XENOS_IB_DEPTH && len) {
+            cp->ib[depth] = (xenos_ib){ptr, len, 0, 0};
+            cp->ib_depth = depth + 1;
+            if (run_ib(cp, depth, in_ring)) {
+                r->pos = end; /* this packet is done with: the buffer it started goes on from cp->ib */
+                return 1;
             }
+            cp->ib_depth = depth;
         }
         break;
     }
@@ -245,10 +294,12 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
         uint32_t v = info & 0x10 ? mem_read(cp, addr) : addr < XENOS_REGS ? cp->regs[addr] : 0;
         int ok = compare(info, v & mask, ref);
         TRACE("wait %s %08X & %08X vs %08X: %s\n", info & 0x10 ? "memory" : "register", addr, mask, ref,
-              ok ? "met" : in_ring ? "stall" : "not met (indirect buffer: passed)");
+              ok ? "met" : in_ring ? "stall" : "not met (not under the ring: passed)");
         if (!ok && in_ring) {
             r->pos = start;
             cp->stalled = 1;
+            cp->packets--; /* retried: counted when it holds */
+            cp->op_count[op]--;
             return 1;
         }
         break;
@@ -382,6 +433,25 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
                 cp->interrupt(cp->ctx, 1, cpu);
         break;
     }
+    case PM4_SET_BIN_MASK_LO:
+        cp->bin_mask = (cp->bin_mask & 0xFFFFFFFF00000000ull) | rd(cp, r);
+        break;
+    case PM4_SET_BIN_MASK_HI:
+        cp->bin_mask = (cp->bin_mask & 0xFFFFFFFFull) | (uint64_t)rd(cp, r) << 32;
+        break;
+    case PM4_SET_BIN_SELECT_LO:
+        cp->bin_select = (cp->bin_select & 0xFFFFFFFF00000000ull) | rd(cp, r);
+        break;
+    case PM4_SET_BIN_SELECT_HI:
+        cp->bin_select = (cp->bin_select & 0xFFFFFFFFull) | (uint64_t)rd(cp, r) << 32;
+        break;
+    case PM4_SET_BIN_MASK:
+    case PM4_SET_BIN_SELECT:
+        if (count >= 2) {
+            uint64_t hi = rd(cp, r), lo = rd(cp, r);
+            *(op == PM4_SET_BIN_MASK ? &cp->bin_mask : &cp->bin_select) = hi << 32 | lo;
+        }
+        break;
     case PM4_XE_SWAP: {
         rd(cp, r); /* magic */
         cp->last_swap_fb = rd(cp, r);
@@ -445,7 +515,12 @@ uint32_t xenos_cp_set_wptr(xenos_cp *cp, uint32_t wptr)
     cp->wptr = wptr % size_dw;
     cp->stalled = 0;
     reader r = {cp->rb_base, size_dw, cp->rptr};
-    while (r.pos != cp->wptr) {
+    /* indirect buffers a wait stopped: the innermost first, then those that called it */
+    while (cp->ib_depth && !cp->stalled) {
+        if (!run_ib(cp, (int)cp->ib_depth - 1, 1))
+            cp->ib_depth--;
+    }
+    while (!cp->stalled && r.pos != cp->wptr) {
         uint32_t avail = (cp->wptr + size_dw - r.pos) % size_dw;
         if (packet_words(cp, &r) > avail)
             break; /* the CPU has not written the whole packet yet */

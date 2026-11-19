@@ -60,7 +60,7 @@ static uint32_t K(unsigned ord, int n, ...)
 static uint32_t gstr(const char *s)
 {
     uint32_t a = x360_kalloc(X, (uint32_t)strlen(s) + 1);
-    memcpy(X->base + a, s, strlen(s) + 1);
+    memcpy(x360_p(X, a), s, strlen(s) + 1);
     return a;
 }
 
@@ -97,17 +97,17 @@ static void test_formatters(void)
     uint32_t r = K(X360_xboxkrnl_sprintf, 10, buf, gstr("%s|%5d|%-4x|%c|%%|%08X|%.3s|%u"), gstr("ab"),
                    (uint32_t)-42, 0xAB, 'z', 0xBEEF, gstr("abcdef"), 4000000000u, 0);
     const char *want = "ab|  -42|ab  |z|%|0000BEEF|abc|4000000000";
-    CHECK(!strcmp((char *)X->base + buf, want), "sprintf gave \"%s\"", (char *)X->base + buf);
+    CHECK(!strcmp((char *)x360_p(X, buf), want), "sprintf gave \"%s\"", (char *)x360_p(X, buf));
     CHECK(r == strlen(want), "sprintf returned %u", r);
-    memset(X->base + buf, 'q', 16);
+    memset(x360_p(X, buf), 'q', 16);
     r = K(X360_xboxkrnl__snprintf, 4, buf, 5, gstr("%d"), 123456);
-    CHECK(r == 0xFFFFFFFFu && !memcmp(X->base + buf, "12345q", 6), "_snprintf truncation: %d \"%.6s\"", (int)r,
-          (char *)X->base + buf);
+    CHECK(r == 0xFFFFFFFFu && !memcmp(x360_p(X, buf), "12345q", 6), "_snprintf truncation: %d \"%.6s\"", (int)r,
+          (char *)x360_p(X, buf));
     uint32_t va = x360_kalloc(X, 32);
     x360_w64(X, va, 7);
     x360_w64(X, va + 8, gstr("seven"));
     r = K(X360_xboxkrnl_vsprintf, 3, buf, gstr("%d=%s"), va);
-    CHECK(!strcmp((char *)X->base + buf, "7=seven"), "vsprintf gave \"%s\"", (char *)X->base + buf);
+    CHECK(!strcmp((char *)x360_p(X, buf), "7=seven"), "vsprintf gave \"%s\"", (char *)x360_p(X, buf));
 }
 
 static void test_memory(void)
@@ -123,18 +123,155 @@ static void test_memory(void)
     uint32_t st = K(X360_xboxkrnl_NtAllocateVirtualMemory, 5, base_p, size_p, 0x1000, 4, 0);
     CHECK(st == 0 && x360_r32(X, base_p) == base + 0x4000, "commit inside the reservation: %08X at %08X", st,
           x360_r32(X, base_p));
-    X->base[base + 0x5000] = 1; /* committed: writable */
+    x360_p(X, base + 0x5000)[0] = 1; /* committed: writable */
     x360_w32(X, base_p, base);
     CHECK(K(X360_xboxkrnl_NtFreeVirtualMemory, 4, base_p, size_p, 0x8000, 0) == 0 &&
               x360_r32(X, size_p) == 0x10000, "release");
     uint32_t p = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0);
     CHECK(p >= 0xE0000000u, "physical 4 KB view: %08X", p);
-    CHECK(K(X360_xboxkrnl_MmGetPhysicalAddress, 1, p) == (p & 0x1FFFFFFFu), "physical address");
+    /* the 4 KB view starts one page into physical memory: virtual 0xE0000000 is physical 0x1000 */
+    uint32_t pp = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, p);
+    CHECK(pp == p - 0xE0000000u + 0x1000u, "physical address of %08X: %08X", p, pp);
+    CHECK(K(X360_xboxkrnl_MmGetPhysicalAddress, 1, p + 0x1234) == pp + 0x1234, "inside the allocation");
     CHECK(K(X360_xboxkrnl_MmQueryAllocationSize, 1, p) == 0x2000, "allocation size");
-    X->base[p + 5] = 0x77;
-    CHECK(X->base[(p & 0x1FFFFFFFu) + 0xA0000000u + 5] == 0x77, "mirror");
+    uint32_t info = x360_kalloc(X, 32);
+    CHECK(K(X360_xboxkrnl_NtQueryVirtualMemory, 2, p + 4, info) == 0 && x360_r32(X, info) == p &&
+              x360_r32(X, info + 16) == 0x1000 /* MEM_COMMIT */,
+          "a query inside it: base %08X state %X", x360_r32(X, info), x360_r32(X, info + 16));
+    CHECK(K(X360_xboxkrnl_MmIsAddressValid, 1, p + 0x1FFF) == 1 && K(X360_xboxkrnl_MmIsAddressValid, 1, p + 0x2000) == 0,
+          "valid to its last byte, not past it");
+    /* one memory through the three views */
+    x360_p(X, p + 5)[0] = 0x77;
+    CHECK(x360_p(X, 0xA0000000u + pp + 5)[0] == 0x77 && x360_p(X, 0xC0000000u + pp + 5)[0] == 0x77, "mirrors");
+    CHECK(K(X360_xboxkrnl_MmGetPhysicalAddress, 1, 0xA0000000u + pp) == pp &&
+              K(X360_xboxkrnl_MmGetPhysicalAddress, 1, 0xC0000000u + pp) == pp, "the other views start at 0");
     uint32_t q = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x10000, 0x20000004u, 0, 0xFFFFFFFFu, 0);
     CHECK(q >= 0xA0000000u && q < 0xC0000000u && !(q & 0xFFFF), "physical 64 KB view: %08X", q);
+    CHECK(K(X360_xboxkrnl_MmGetPhysicalAddress, 1, q) == q - 0xA0000000u, "its physical address");
+    /* an alignment is the physical address's */
+    uint32_t r = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x1000, 4, 0, 0xFFFFFFFFu, 0x10000);
+    CHECK(r >= 0xE0000000u && !(K(X360_xboxkrnl_MmGetPhysicalAddress, 1, r) & 0xFFFF), "aligned: %08X", r);
+    /* freed by its virtual address: the next allocation of that size gets the pages back, zeroed */
+    K(X360_xboxkrnl_MmFreePhysicalMemory, 2, 0, p);
+    CHECK(K(X360_xboxkrnl_MmQueryAllocationSize, 1, p) == 0 && K(X360_xboxkrnl_MmIsAddressValid, 1, p) == 0, "freed");
+    uint32_t again = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0);
+    CHECK(again == p && x360_p(X, p + 5)[0] == 0, "the same pages again, cleared: %08X", again);
+}
+
+/* The host's page size (x360_mem.c). The guest's pages are 4 KB; where the host's are larger the 0xE0000000 view,
+ * which starts 0x1000 into physical memory, cannot be an mmap of the file at that offset: its guest addresses sit
+ * 0x1000 higher in the host instead. X360_HOST_PAGE makes a machine behave as on such a host, and refuse every
+ * mapping call that host would refuse. Checked on a machine of each size: one memory through the three views, in
+ * both directions and at the view's two ends, through the accessors lifted code uses and through the runtime's
+ * pointers; commits smaller than a host page; an allocation through the kernel; a pack whose accesses do not follow
+ * the view (XE_VIEW4K_DYNAMIC, xenon_rt.h) refused where it moved. */
+static void nothing_lifted(xe_machine *m) { (void)m; }
+
+static void check_host_page(uint32_t page)
+{
+    char why[256] = "", env[16];
+    long real = sysconf(_SC_PAGESIZE);
+    if (page < (uint32_t)real)
+        return; /* a host cannot act as one of smaller pages */
+    snprintf(env, sizeof env, "%u", (unsigned)page);
+    const char *before = getenv("X360_HOST_PAGE");
+    char *saved = before ? strdup(before) : NULL;
+    setenv("X360_HOST_PAGE", env, 1);
+    x360_machine *y = x360_create_bare(why, sizeof why);
+    if (saved)
+        setenv("X360_HOST_PAGE", saved, 1);
+    else
+        unsetenv("X360_HOST_PAGE");
+    free(saved);
+    CHECK(y != NULL, "a machine on host pages of %u bytes: %s", (unsigned)page, why);
+    if (!y)
+        return;
+    uint32_t skew = page > 0x1000 ? 0x1000 : 0;
+    CHECK(y->host_page == page && y->m.view4k_skew == skew, "page %u: host page %u, skew %X", (unsigned)page,
+          (unsigned)y->host_page, (unsigned)y->m.view4k_skew);
+    uint8_t *r = y->reservation;
+    CHECK(x360_p(y, 0xA0000000u) == r + 0xA0000000u && x360_p(y, 0xC0000000u) == r + 0xC0000000u &&
+              x360_p(y, 0xDFFFFFFFu) == r + 0xDFFFFFFFu && x360_p(y, 0x82000000u) == r + 0x82000000u &&
+              x360_p(y, 0xE0000000u) == r + 0xE0000000u + skew,
+          "page %u: only the 4 KB view moves", (unsigned)page);
+    /* virtual 0xE0000000 + v is physical v + 0x1000: the first and last bytes of the view, and a few inside, across
+     * the host's page boundaries */
+    static const uint32_t at[] = {0, 4, 0xFFC, 0x1000, 0x2FFC, 0x3000, 0x3FFC, 0x4000, 0xFFFC, 0x10000,
+                                  0x12344, 0x1FFFDFFC, 0x1FFFEFFC};
+    for (unsigned k = 0; k < sizeof at / sizeof at[0]; k++) {
+        uint32_t v = at[k], phys = v + 0x1000, tag = 0xC0DE0000u + k;
+        x360_w32(y, 0xE0000000u + v, tag); /* written through the 4 KB view ... */
+        CHECK(x360_r32(y, 0xA0000000u + phys) == tag && x360_r32(y, 0xC0000000u + phys) == tag &&
+                  x360_r32(y, x360_p2v(X360_VIEW_64K, x360_v2p(0xE0000000u + v))) == tag,
+              "page %u: E%07X written, seen at A%07X %08X and C%07X %08X", (unsigned)page, (unsigned)v, (unsigned)phys,
+              x360_r32(y, 0xA0000000u + phys), (unsigned)phys, x360_r32(y, 0xC0000000u + phys));
+        x360_w32(y, 0xA0000000u + phys, ~tag); /* ... and the other way round */
+        CHECK(x360_r32(y, 0xE0000000u + v) == ~tag && x360_r32(y, 0xC0000000u + phys) == ~tag,
+              "page %u: A%07X written, seen at E%07X %08X", (unsigned)page, (unsigned)phys, (unsigned)v,
+              x360_r32(y, 0xE0000000u + v));
+        x360_p(y, 0xC0000000u + phys)[1] = 0x5A; /* the runtime's pointer, a byte in the middle of the word */
+        CHECK(x360_p(y, 0xE0000000u + v)[1] == 0x5A && x360_r8(y, 0xE0000001u + v) == 0x5A &&
+                  x360_p(y, 0xA0000000u + phys)[1] == 0x5A,
+              "page %u: a byte at C%07X seen through the others", (unsigned)page, (unsigned)phys + 1);
+    }
+    /* the page below the view's start (physical 0) is not in it: what is written there stays out of the view */
+    x360_w32(y, 0xA0000FFCu, 0x11223344u);
+    x360_w32(y, 0xE0000000u, 0x55667788u);
+    CHECK(x360_r32(y, 0xA0000FFCu) == 0x11223344u && x360_r32(y, 0xA0001000u) == 0x55667788u,
+          "page %u: physical FFC %08X, 1000 %08X", (unsigned)page, x360_r32(y, 0xA0000FFCu), x360_r32(y, 0xA0001000u));
+    /* a commit of one guest page, anywhere in a host page */
+    for (uint32_t a = 0x30001000u; a < 0x30021000u; a += 0x5000) {
+        CHECK(x360_commit(y, a, 0x1000) == 0, "page %u: commit of %08X", (unsigned)page, a);
+        x360_w32(y, a + 0xFFC, a);
+        CHECK(x360_r32(y, a + 0xFFC) == a, "page %u: %08X committed", (unsigned)page, a);
+    }
+    /* the heaps hand out 4 KB pages all the same, and an allocation in the 4 KB view is the memory at its physical
+     * address */
+    uint32_t v1 = x360_heap_alloc(y, &y->heap_v4k, 0x1000, 0), v2 = x360_heap_alloc(y, &y->heap_v4k, 0x1000, 0);
+    CHECK(v1 && v2 == v1 + 0x1000, "page %u: 4 KB virtual pages %08X %08X", (unsigned)page, v1, v2);
+    x360_w32(y, v1 + 0xFFC, 1);
+    x360_w32(y, v2, 2);
+    CHECK(x360_r32(y, v1 + 0xFFC) == 1 && x360_r32(y, v2) == 2, "page %u: both usable", (unsigned)page);
+    uint32_t ph = x360_heap_alloc(y, &y->heap_phys, 0x3000, 0);
+    uint32_t pv = x360_p2v(X360_VIEW_4K, ph);
+    CHECK(ph && pv >= 0xE0000000u && x360_v2p(pv) == ph, "page %u: physical %08X is %08X", (unsigned)page, ph, pv);
+    memset(x360_p(y, pv), 0xA5, 0x3000);
+    CHECK(x360_r32(y, 0xA0000000u + ph) == 0xA5A5A5A5u && x360_r32(y, 0xA0000000u + ph + 0x2FFC) == 0xA5A5A5A5u &&
+              x360_r32(y, 0xA0000000u + ph - 4) != 0xA5A5A5A5u && x360_r32(y, 0xA0000000u + ph + 0x3000) != 0xA5A5A5A5u,
+          "page %u: the allocation filled through its 4 KB view pointer, and only it", (unsigned)page);
+    /* a pack whose accesses do not follow the view cannot run where it moved */
+    static const xe_rc_entry table[] = {{0x82000000u, nothing_lifted}};
+    x360_pack old = {table, 1, y->image_crc, NULL, 0, 1u, NULL, 0};
+    x360_pack now = {table, 1, y->image_crc, NULL, 0, 1u | XE_RC_FEAT_VIEW4K, NULL, 0};
+    int r_old = x360_bind(y, &old);
+    CHECK(r_old == (skew ? -1 : 0), "page %u: a pack without the view's feature: %d (%s)", (unsigned)page, r_old,
+          x360_error(y));
+    CHECK(x360_bind(y, &now) == 0, "page %u: a pack with it: %s", (unsigned)page, x360_error(y));
+    x360_destroy(y);
+}
+
+static void test_host_page(void)
+{
+    /* the machine of this run follows X360_HOST_PAGE (the *_16k tests) or the host */
+    const char *e = getenv("X360_HOST_PAGE");
+    long real = sysconf(_SC_PAGESIZE);
+    uint32_t want = e && strtoul(e, NULL, 0) >= (unsigned long)real ? (uint32_t)strtoul(e, NULL, 0) : (uint32_t)real;
+    CHECK(X->host_page == want && X->m.view4k_skew == (want > 0x1000 ? 0x1000u : 0u),
+          "this machine: host page %u, skew %X", (unsigned)X->host_page, (unsigned)X->m.view4k_skew);
+    check_host_page(0x1000);
+    check_host_page(0x4000);
+    check_host_page(0x10000);
+    /* a size that is no page size is ignored */
+    setenv("X360_HOST_PAGE", "12288", 1);
+    char why[64] = "";
+    x360_machine *y = x360_create_bare(why, sizeof why);
+    CHECK(y && y->host_page == (uint32_t)real, "a size that is no power of two is ignored");
+    if (y)
+        x360_destroy(y);
+    if (e)
+        setenv("X360_HOST_PAGE", e, 1);
+    else
+        unsetenv("X360_HOST_PAGE");
 }
 
 static void test_objects(void)
@@ -188,6 +325,16 @@ static void test_threads_and_time(void)
     uint32_t th = x360_r32(X, hp), prev = x360_kalloc(X, 4);
     K(X360_xboxkrnl_KeSetAffinityThread, 3, t1->kthread, 0x10, prev);
     CHECK(x360_r8(X, t1->pcr + 0x10C) == 4 && x360_r8(X, t1->kthread + 0xBF) == 4, "affinity: hardware thread 4");
+    /* the creation flags' high byte is an affinity mask too: a thread made (suspended) for hardware thread 5, another
+     * for 4, read their processor numbers without any later call */
+    for (uint32_t want = 4; want <= 5; want++) {
+        CHECK(K(X360_xboxkrnl_ExCreateThread, 7, hp + 12, 0, 0, 0, 0x82001000u, 0, (1u << want) << 24 | 1) == 0,
+              "ExCreateThread with an affinity");
+        x360_thread *ta = x360_thread_by_kthread(X, x360_handle_obj(X, x360_r32(X, hp + 12)));
+        CHECK(ta && ta->state == TH_SUSPENDED && x360_r8(X, ta->pcr + 0x10C) == want &&
+                  x360_r8(X, ta->kthread + 0xBF) == want,
+              "created on hardware thread %u: %u", want, ta ? x360_r8(X, ta->pcr + 0x10C) : 99);
+    }
     CHECK(K(X360_xboxkrnl_NtSuspendThread, 2, th, prev) == 0 && t1->state == TH_SUSPENDED, "suspend");
     CHECK(K(X360_xboxkrnl_NtResumeThread, 2, th, prev) == 0 && x360_r32(X, prev) == 1 && t1->state == TH_READY,
           "resume");
@@ -255,12 +402,12 @@ static void test_system(void)
     x360_w16(X, p + 28, 250);
     CHECK(K(X360_xboxkrnl_RtlTimeFieldsToTime, 2, p + 16, p + 32) == 1, "time fields to time");
     K(X360_xboxkrnl_RtlTimeToTimeFields, 2, p + 32, p + 48);
-    CHECK(!memcmp(X->base + p + 16, X->base + p + 48, 14), "round trip");
+    CHECK(!memcmp(x360_p(X, p + 16), x360_p(X, p + 48), 14), "round trip");
     K(X360_xboxkrnl_VdQueryVideoMode, 1, p);
     CHECK(x360_r32(X, p) == 1280 && x360_r32(X, p + 4) == 720 && x360_r32(X, p + 20) == 0x42700000u, "video mode");
     CHECK(XM(X360_xam_XamUserGetSigninState, 1, 0) == 1 && XM(X360_xam_XamUserGetSigninState, 1, 1) == 0, "sign-in");
     CHECK(XM(X360_xam_XamUserGetXUID, 3, 0, 1, p) == 0 && x360_r64(X, p) == 0xB13EBABEBABEBABEull, "xuid");
-    CHECK(XM(X360_xam_XamUserGetName, 3, 0, p, 16) == 0 && !strcmp((char *)X->base + p, "Player"), "user name");
+    CHECK(XM(X360_xam_XamUserGetName, 3, 0, p, 16) == 0 && !strcmp((char *)x360_p(X, p), "Player"), "user name");
     CHECK(XM(X360_xam_XamInputGetState, 3, 0, 0, p) == 0x48F, "no controller yet");
     CHECK(XM(X360_xam_XamAlloc, 3, 0, 100, p) == 0 && x360_r32(X, p) >= 0x10000, "XamAlloc");
     CHECK(XM(X360_xam_XamFree, 1, x360_r32(X, p)) == 0, "XamFree");
@@ -271,7 +418,8 @@ static void test_gpu(void)
     uint32_t ring = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0);
     uint32_t misc = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x1000, 4, 0, 0xFFFFFFFFu, 0);
     uint32_t ring_phys = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, ring);
-    uint32_t misc_phys = misc & 0x1FFFFFFFu, fence = misc + 0x100, wb = misc + 0x104;
+    /* what the GPU writes at a physical address, the title reads through its 4 KB view pointer */
+    uint32_t misc_phys = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, misc), fence = misc + 0x100, wb = misc + 0x104;
     K(X360_xboxkrnl_VdInitializeRingBuffer, 2, ring_phys, 10);
     K(X360_xboxkrnl_VdEnableRingBufferRPtrWriteBack, 2, misc_phys + 0x104, 6);
     /* a fence through EVENT_WRITE_SHD (8in32 endian mode), then the 64 words VdSwap fills */
@@ -329,6 +477,12 @@ static void test_gpu(void)
             irq = &X->threads[k];
     CHECK(irq && irq->cpu.pc == 0x82001000u && irq->cpu.gpr[3] == 0 && irq->cpu.gpr[4] == 0x55,
           "vblank interrupt thread (threads %d -> %d)", before, X->nthreads);
+    /* what its handler reads first: the display interrupt status says the vertical blank occurred, also after the
+     * handler wrote the register to acknowledge it */
+    CHECK(x360_r32(X, 0x7FC80000u + 4 * 0x1951) & 1, "the vertical blank status is set");
+    x360_w32(X, 0x7FC80000u + 4 * 0x1951, 0);
+    x360_gpu_poll(X);
+    CHECK(x360_r32(X, 0x7FC80000u + 4 * 0x1951) & 1, "and set again for the next interrupt");
     /* ten thousand vertical blanks (about three minutes of virtual time) reuse that one context */
     int fired = 0, nthreads = X->nthreads;
     uint32_t kfree = X->kalloc_cur;
@@ -342,6 +496,41 @@ static void test_gpu(void)
     }
     CHECK(fired >= 9999 && X->nthreads == nthreads && X->kalloc_cur == kfree && X->status == X360_RUNNING,
           "vblanks: %d callbacks, threads %d -> %d", fired, nthreads, X->nthreads);
+    /* Tiled rendering's predicate is in save states: bin select 0 (no bin selected), saved; select 1 again; the
+     * state loaded: a predicated fence does not run, the one after it does */
+    uint32_t rp = 4 + 64 + 6;
+    x360_w32(X, ring + 4 * rp++, 3u << 30 | (uint32_t)PM4_SET_BIN_SELECT_LO << 8);
+    x360_w32(X, ring + 4 * rp++, 0);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp);
+    x360_gpu_poll(X);
+    size_t cap = x360_state_size(X), n = 0;
+    uint8_t *blob = malloc(cap);
+    char why[128] = "";
+    CHECK(blob && (n = x360_state_save(X, NULL, blob, cap)) > 0, "state saved with the bin registers");
+    x360_w32(X, ring + 4 * rp, 3u << 30 | (uint32_t)PM4_SET_BIN_SELECT_LO << 8);
+    x360_w32(X, ring + 4 * rp + 4, 1);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp + 2);
+    x360_gpu_poll(X);
+    CHECK(blob && x360_state_load(X, NULL, blob, n, why, sizeof why) == 0, "state loaded: %s", why);
+    free(blob);
+    x360_w32(X, ring + 4 * rp++, 3u << 30 | 2u << 16 | (uint32_t)PM4_EVENT_WRITE_SHD << 8 | 1);
+    x360_w32(X, ring + 4 * rp++, 5);
+    x360_w32(X, ring + 4 * rp++, (misc_phys + 0x100) | 2);
+    x360_w32(X, ring + 4 * rp++, 0x5678);
+    x360_w32(X, ring + 4 * rp++, 3u << 30 | 2u << 16 | (uint32_t)PM4_EVENT_WRITE_SHD << 8);
+    x360_w32(X, ring + 4 * rp++, 5);
+    x360_w32(X, ring + 4 * rp++, (misc_phys + 0x108) | 2);
+    x360_w32(X, ring + 4 * rp++, 0x9ABC);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp);
+    x360_gpu_poll(X);
+    CHECK(x360_r32(X, fence) == 0x1234 && x360_r32(X, misc + 0x108) == 0x9ABC,
+          "after the load: the predicated fence %08X (not written), the plain one %08X", x360_r32(X, fence),
+          x360_r32(X, misc + 0x108));
+    /* back to the initial value for the tests that follow */
+    x360_w32(X, ring + 4 * rp++, 3u << 30 | (uint32_t)PM4_SET_BIN_SELECT_LO << 8);
+    x360_w32(X, ring + 4 * rp++, 0xFFFFFFFFu);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp);
+    x360_gpu_poll(X);
 }
 
 static void hex(const uint8_t *p, int n, char *out)
@@ -354,35 +543,35 @@ static void test_crypt(void)
 {
     char h[80];
     uint32_t buf = x360_kalloc(X, 0x400), st = buf + 0x100, out = buf + 0x200;
-    memcpy(X->base + buf, "abc", 3);
+    memcpy(x360_p(X, buf), "abc", 3);
     K(X360_xboxkrnl_XeCryptSha, 8, buf, 3, 0, 0, 0, 0, out, 20);
-    hex(X->base + out, 20, h);
+    hex(x360_p(X, out), 20, h);
     CHECK(!strcmp(h, "a9993e364706816aba3e25717850c26c9cd0d89d"), "SHA-1(abc) %s", h); /* FIPS 180-4 example */
     /* incremental, across blocks: 'a' * 1000 split oddly */
-    memset(X->base + buf, 'a', 1000 > 0x100 ? 0x100 : 1000);
+    memset(x360_p(X, buf), 'a', 1000 > 0x100 ? 0x100 : 1000);
     K(X360_xboxkrnl_XeCryptShaInit, 1, st);
     for (int k = 0; k < 10; k++)
         K(X360_xboxkrnl_XeCryptShaUpdate, 3, st, buf, 100);
     K(X360_xboxkrnl_XeCryptShaFinal, 3, st, out, 20);
-    hex(X->base + out, 20, h);
+    hex(x360_p(X, out), 20, h);
     CHECK(!strcmp(h, "291e9a6c66994949b57ba5e650361e98fc36b1ba"), "SHA-1('a' x 1000) %s", h);
-    memcpy(X->base + buf, "abc", 3);
+    memcpy(x360_p(X, buf), "abc", 3);
     K(X360_xboxkrnl_XeCryptSha256Init, 1, st);
     K(X360_xboxkrnl_XeCryptSha256Update, 3, st, buf, 3);
     K(X360_xboxkrnl_XeCryptSha256Final, 3, st, out, 32);
-    hex(X->base + out, 32, h);
+    hex(x360_p(X, out), 32, h);
     CHECK(!strcmp(h, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "SHA-256(abc) %s", h);
     /* RFC 2202 test case 2: key "Jefe", data "what do ya want for nothing?" */
-    memcpy(X->base + buf, "Jefe", 4);
-    memcpy(X->base + buf + 16, "what do ya want for nothing?", 28);
+    memcpy(x360_p(X, buf), "Jefe", 4);
+    memcpy(x360_p(X, buf + 16), "what do ya want for nothing?", 28);
     K(X360_xboxkrnl_XeCryptHmacSha, 10, buf, 4, buf + 16, 28, 0, 0, 0, 0, out, 20);
-    hex(X->base + out, 20, h);
+    hex(x360_p(X, out), 20, h);
     CHECK(!strcmp(h, "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"), "HMAC-SHA1 %s", h);
     /* RC4: key "Key", plaintext "Plaintext" -> BBF316E8D940AF0AD3 */
-    memcpy(X->base + buf, "Key", 3);
-    memcpy(X->base + buf + 16, "Plaintext", 9);
+    memcpy(x360_p(X, buf), "Key", 3);
+    memcpy(x360_p(X, buf + 16), "Plaintext", 9);
     K(X360_xboxkrnl_XeCryptRc4, 4, buf, 3, buf + 16, 9);
-    hex(X->base + buf + 16, 9, h);
+    hex(x360_p(X, buf + 16), 9, h);
     CHECK(!strcmp(h, "bbf316e8d940af0ad3"), "RC4 %s", h);
 }
 
@@ -398,7 +587,7 @@ static void test_more(const char *dir)
     x360_w16(X, ustr + 2, 12);
     x360_w32(X, ustr + 4, u);
     CHECK(K(X360_xboxkrnl_RtlUnicodeStringToAnsiString, 3, astr, ustr, 1) == 0 && x360_r16(X, astr) == 5 &&
-              !memcmp(X->base + x360_r32(X, astr + 4), "Save1", 6), "unicode to ANSI string");
+              !memcmp(x360_p(X, x360_r32(X, astr + 4)), "Save1", 6), "unicode to ANSI string");
     CHECK(K(X360_xboxkrnl_RtlFreeAnsiString, 1, astr) == 0 && x360_r32(X, astr + 4) == 0, "free ANSI string");
     CHECK(K(X360_xboxkrnl_RtlUpcaseUnicodeChar, 1, 'q') == 'Q', "upcase");
     /* memory statistics */
@@ -409,9 +598,9 @@ static void test_more(const char *dir)
     x360_set_data_dir(X, dir);
     uint32_t cd = x360_kalloc(X, 0x134), disp = x360_kalloc(X, 4);
     x360_w32(X, cd, 1);
-    memcpy(X->base + cd + 0x108, "slot0", 6);
+    memcpy(x360_p(X, cd + 0x108), "slot0", 6);
     uint32_t root = x360_kalloc(X, 8);
-    memcpy(X->base + root, "save", 5);
+    memcpy(x360_p(X, root), "save", 5);
     uint32_t r = XM(X360_xam_XamContentCreateEx, 9, 0, root, cd, 4, disp, 0, 0, 0, 0); /* OPEN_ALWAYS */
     CHECK(r == 0 && x360_r32(X, disp) == 1, "content created: %X, disposition %u", r, x360_r32(X, disp));
     uint32_t hp = x360_kalloc(X, 8), iosb = x360_kalloc(X, 8);
@@ -533,7 +722,7 @@ static void test_xma_loop(void)
         x360_w8(X, in + 2048 * p + 4, (uint8_t)(0x10 + p)); /* each packet says which it is */
     uint32_t init = x360_kalloc(X, 64);
     /* four packets, loop from the middle of packet 1 to the end of packet 2, twice */
-    uint32_t iv[13] = {in & 0x1FFFFFFFu, 4, 0, 0, 0, out & 0x1FFFFFFFu, 31, 0, 0, 1, 3, 2048 * 8 + 40, 3 * 2048 * 8};
+    uint32_t iv[13] = {in, 4, 0, 0, 0, out, 31, 0, 0, 1, 3, 2048 * 8 + 40, 3 * 2048 * 8};
     for (int k = 0; k < 13; k++)
         x360_w32(X, init + 4 * (uint32_t)k, iv[k]);
     x360_w8(X, init + 52, 2);
@@ -575,7 +764,7 @@ static void test_xma(void)
     for (uint32_t k = 0; k < 0x2000; k += 4)
         x360_w32(X, out + k, 0x55555555u);
     uint32_t init = x360_kalloc(X, 64);
-    uint32_t iv[11] = {in & 0x1FFFFFFFu, 2, 0, 0, 0, out & 0x1FFFFFFFu, 31, 0, 0, 1, 0}; /* 31 blocks: a 5-bit count */
+    uint32_t iv[11] = {in, 2, 0, 0, 0, out, 31, 0, 0, 1, 0}; /* 31 blocks: a 5-bit count */
     for (int k = 0; k < 11; k++)
         x360_w32(X, init + 4 * (uint32_t)k, iv[k]);
     K(X360_xboxkrnl_XMAInitializeContext, 2, ctx, init);
@@ -727,16 +916,16 @@ static void test_files(const char *dir)
     st = K(X360_xboxkrnl_NtCreateFile, 9, hp, 0xC0000000u, attrs("save:\\test.bin"), iosb, 0, 0, 0, 5, 0x40);
     CHECK(st == 0 && x360_r32(X, iosb + 4) == 2, "created: %08X, information %u", st, x360_r32(X, iosb + 4));
     uint32_t h = x360_r32(X, hp);
-    memcpy(X->base + buf, "hello world", 11);
+    memcpy(x360_p(X, buf), "hello world", 11);
     CHECK(K(X360_xboxkrnl_NtWriteFile, 8, h, 0, 0, 0, iosb, buf, 11, 0) == 0 && x360_r32(X, iosb + 4) == 11,
           "NtWriteFile");
     CHECK(K(X360_xboxkrnl_NtQueryInformationFile, 5, h, iosb, info, 8, 14) == 0 && x360_r64(X, info) == 11,
           "position after the write");
     x360_w64(X, info, 6);
     CHECK(K(X360_xboxkrnl_NtSetInformationFile, 5, h, iosb, info, 8, 14) == 0, "seek");
-    memset(X->base + buf, 0, 64);
+    memset(x360_p(X, buf), 0, 64);
     CHECK(K(X360_xboxkrnl_NtReadFile, 8, h, 0, 0, 0, iosb, buf, 64, 0) == 0 && x360_r32(X, iosb + 4) == 5 &&
-              !memcmp(X->base + buf, "world", 5), "read from the position");
+              !memcmp(x360_p(X, buf), "world", 5), "read from the position");
     CHECK(K(X360_xboxkrnl_NtReadFile, 8, h, 0, 0, 0, iosb, buf, 64, 0) == 0xC0000011u, "end of file");
     CHECK(K(X360_xboxkrnl_NtClose, 1, h) == 0, "close");
     CHECK(K(X360_xboxkrnl_NtQueryFullAttributesFile, 2, attrs("\\Device\\Harddisk0\\Partition1\\test.bin"), info) ==
@@ -809,8 +998,9 @@ static int render_test(const char *dir)
         return 1;
     uint32_t ring = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x4000, 4, 0, 0xFFFFFFFFu, 0);
     uint32_t data = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x20000, 4, 0, 0xFFFFFFFFu, 0x1000);
-    uint32_t ring_phys = ring & 0x1FFFFFFFu, data_phys = data & 0x1FFFFFFFu;
-    uint32_t fb = data + 0x10000, fb_phys = fb & 0x1FFFFFFFu; /* the front buffer: 64x64 8_8_8_8, tiled */
+    uint32_t ring_phys = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, ring);
+    uint32_t data_phys = K(X360_xboxkrnl_MmGetPhysicalAddress, 1, data);
+    uint32_t fb = data + 0x10000, fb_phys = data_phys + 0x10000; /* the front buffer: 64x64 8_8_8_8, tiled */
     K(X360_xboxkrnl_VdInitializeRingBuffer, 2, ring_phys, 12);
     ring_va = ring, ring_at = 0;
     /* a red full-target quad (strip), then the resolve rectangle's vertices */
@@ -932,6 +1122,7 @@ int main(int argc, char **argv)
     }
     test_formatters();
     test_memory();
+    test_host_page();
     test_objects();
     test_threads_and_time();
     test_system();

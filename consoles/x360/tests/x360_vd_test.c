@@ -26,6 +26,27 @@ static void test_vd(void)
     CHECK(K(X360_xboxkrnl_VdReadEEDIDBlock, 0) == 0xC00000BBu, "no display to read an EDID from");
 }
 
+/* the title's frame holds the words to copy and, above them, what its epilogue restores: arguments 10 and 11 say where
+ * the words are and how many; argument 9 is another pointer into that frame, never the destination */
+static void test_scaler_command_buffer(void)
+{
+    enum { WORDS = 200 };
+    uint32_t frame = galloc(0x1000), other = frame + 0x400, dest = frame + 0x10;
+    for (uint32_t k = 0; k < 0x1000; k += 4)
+        x360_w32(X, frame + k, 0xA5A5A5A5u);
+    uint32_t r = K(X360_xboxkrnl_VdInitializeScalerCommandBuffer, 12, 0, 0x050002D0, 0, 0x050002D0, 0x050002D0, 7,
+                   frame, 7, frame, other, dest, WORDS);
+    CHECK(r == WORDS, "the words to copy are the caller's count: %u", r);
+    for (uint32_t k = 0; k < WORDS; k++)
+        CHECK(x360_r32(X, dest + 4 * k) == 0x80000000u, "word %u is a NOP packet", k);
+    CHECK(x360_r32(X, dest - 4) == 0xA5A5A5A5u, "nothing is written before the destination");
+    CHECK(x360_r32(X, dest + 4 * WORDS) == 0xA5A5A5A5u, "nothing is written after the destination");
+    for (uint32_t k = 0; k < 0x730; k += 4)
+        CHECK(x360_r32(X, other + k) == 0xA5A5A5A5u, "the frame behind argument 9 is left alone (+%X)", k);
+    CHECK(K(X360_xboxkrnl_VdInitializeScalerCommandBuffer, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, WORDS) == 0,
+          "no destination, no words");
+}
+
 static void test_audio(void)
 {
     uint32_t p = galloc(0x40);
@@ -71,6 +92,7 @@ int main(void)
     if (hle_util_start())
         return 1;
     test_vd();
+    test_scaler_command_buffer();
     test_audio();
     test_vars();
     return hle_util_end("x360_vd");

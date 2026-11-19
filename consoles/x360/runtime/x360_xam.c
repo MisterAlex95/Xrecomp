@@ -167,7 +167,7 @@ void x360_x_XamUserGetSigninInfo(x360_machine *x, x360_thread *t, xe_cpu *c)
         RET(X_E_INVALIDARG);
         return;
     }
-    memset(x->base + info, 0, 40);
+    memset(x360_p(x, info), 0, 40);
     if (A(0)) {
         RET(X_E_NO_SUCH_USER);
         return;

@@ -195,19 +195,22 @@ void x360_gpu_opcode_histogram(x360_machine *x, FILE *out)
             else
                 fprintf(out, " op%02X %u", op, g->cp.op_count[op]);
         }
+    if (g->cp.predicated)
+        fprintf(out, "; predicated %llu, skipped %llu", (unsigned long long)g->cp.predicated,
+                (unsigned long long)g->cp.predicated_skipped);
     fprintf(out, "\n");
 }
 
 static uint32_t phys_read(void *ctx, uint32_t phys)
 {
     x360_machine *x = ctx;
-    return x360_r32(x, 0xA0000000u + (phys & 0x1FFFFFFFu));
+    return x360_r32(x, x360_p2v(X360_VIEW_64K, phys & 0x1FFFFFFFu));
 }
 
 static void phys_write(void *ctx, uint32_t phys, uint32_t v)
 {
     x360_machine *x = ctx;
-    x360_w32(x, 0xA0000000u + (phys & 0x1FFFFFFFu), v);
+    x360_w32(x, x360_p2v(X360_VIEW_64K, phys & 0x1FFFFFFFu), v);
 }
 
 static void cp_interrupt(void *ctx, uint32_t source, uint32_t cpu)
@@ -283,8 +286,11 @@ void x360_gpu_poll(x360_machine *x)
     if (!g)
         return;
     uint64_t now = x360_now(x);
-    /* registers titles poll: the vertical counter, interrupt status, the viewport size */
+    /* registers titles poll: the vertical counter, the display interrupt status, the viewport size. The status
+     * reads 1 (the vertical blank occurred), as in Xenia: Direct3D's interrupt handler tests that bit before it
+     * runs its vertical blank routine, the only display interrupt this runtime raises. */
     x360_w32(x, GPU_MMIO + 4 * 0x194C, (uint32_t)(now % VBLANK_100NS * 750 / VBLANK_100NS));
+    x360_w32(x, GPU_MMIO + 4 * 0x1951, 1);
     x360_w32(x, GPU_MMIO + 4 * 0x1961, 1280u << 16 | 720u);
     if (g->ring) {
         uint32_t w = x360_r32(x, GPU_MMIO + 4 * XENOS_REG_CP_RB_WPTR);
@@ -320,6 +326,17 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
     u32(s, &cp->rptr_writeback);
     u32(s, &cp->counter);
     i32(s, &cp->stalled);
+    u32(s, &cp->ib_depth);
+    if (cp->ib_depth > XENOS_IB_DEPTH)
+        cp->ib_depth = 0;
+    for (uint32_t k = 0; k < XENOS_IB_DEPTH; k++) {
+        u32(s, &cp->ib[k].base);
+        u32(s, &cp->ib[k].len);
+        u32(s, &cp->ib[k].pos);
+        u32(s, &cp->ib[k].done);
+        if (!cp->ib[k].len && k < cp->ib_depth)
+            cp->ib_depth = 0; /* a corrupt state must not divide by zero */
+    }
     u32(s, &cp->last_swap_fb);
     u32(s, &cp->last_swap_w);
     u32(s, &cp->last_swap_h);
@@ -350,6 +367,22 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
 uint64_t x360_gpu_next_event(x360_machine *x)
 {
     return x->gpu && x->gpu->irq_callback ? x->gpu->next_vblank : 0;
+}
+
+/* save states, section GBIN: tiled rendering's bin registers. A state from before them has no such section and
+ * loads with what the command processor starts with (x360_gpu_bin_reset). */
+void x360_gpu_bin_reset(x360_machine *x)
+{
+    struct x360_gpu *g = x->gpu;
+    if (g)
+        g->cp.bin_mask = g->cp.bin_select = 0xFFFFFFFFu;
+}
+
+void x360_gpu_bin_state(x360_machine *x, void *s, void (*u64)(void *, uint64_t *))
+{
+    struct x360_gpu *g = gpu_of(x);
+    u64(s, &g->cp.bin_mask);
+    u64(s, &g->cp.bin_select);
 }
 
 void x360_gpu_stats(x360_machine *x, uint64_t *packets, uint64_t *draws, uint64_t *swaps, uint32_t *vblanks)
@@ -399,7 +432,7 @@ void x360_k_VdSwap(x360_machine *x, x360_thread *t, xe_cpu *c)
     uint32_t buf = A(0), fb_ptr = A(5), w_ptr = (uint32_t)x360_stack_arg(x, c, 8),
              h_ptr = (uint32_t)x360_stack_arg(x, c, 9);
     uint32_t fb = fb_ptr ? x360_r32(x, fb_ptr) : 0;
-    memset(x->base + buf, 0, 64 * 4);
+    memset(x360_p(x, buf), 0, 64 * 4);
     /* as Xenia's VdSwap: the front buffer's texture fetch constant (from the Direct3D texture header, its base made
      * physical) into fetch constant 0, then the token */
     uint32_t fetch = A(1), at = buf;
@@ -408,14 +441,14 @@ void x360_k_VdSwap(x360_machine *x, x360_thread *t, xe_cpu *c)
         for (uint32_t k = 0; k < 6; k++) {
             uint32_t v = x360_r32(x, fetch + 4 * k);
             if (k == 1)
-                v = (v & 0xFFFu) | ((v & 0xFFFFF000u) & 0x1FFFFFFFu); /* the physical views' addresses */
+                v = (v & 0xFFFu) | x360_v2p(v & 0xFFFFF000u); /* a pointer into a physical view */
             x360_w32(x, at + 4 + 4 * k, v);
         }
         at += 28;
     }
     x360_w32(x, at, 3u << 30 | (4u - 1) << 16 | (uint32_t)PM4_XE_SWAP << 8);
     x360_w32(x, at + 4, 0x53574150u); /* 'SWAP' */
-    x360_w32(x, at + 8, fb & 0x1FFFFFFFu);
+    x360_w32(x, at + 8, x360_v2p(fb));
     x360_w32(x, at + 12, w_ptr ? x360_r32(x, w_ptr) : 0);
     x360_w32(x, at + 16, h_ptr ? x360_r32(x, h_ptr) : 0);
     uint32_t used = (at + 20 - buf) / 4; /* the rest of the 64 words: one NOP packet */
@@ -427,7 +460,7 @@ void x360_k_VdGetSystemCommandBuffer(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     if (A(0)) {
-        memset(x->base + A(0), 0, 0x94);
+        memset(x360_p(x, A(0)), 0, 0x94);
         x360_w32(x, A(0), 0xBEEF0000u);
     }
     if (A(1))
@@ -465,7 +498,7 @@ void x360_k_VdPersistDisplay(x360_machine *x, x360_thread *t, xe_cpu *c)
     (void)t;
     if (A(1)) {
         uint32_t p = x360_heap_alloc(x, &x->heap_phys, 0x1000, 0);
-        x360_w32(x, A(1), p ? 0xE0000000u + p : 0);
+        x360_w32(x, A(1), p ? x360_p2v(X360_VIEW_4K, p) : 0);
     }
     RET(0);
 }

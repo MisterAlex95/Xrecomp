@@ -20,6 +20,7 @@ project(console_x360_tests C)
 #   x360_kdpc, x360_rtl, x360_crypt2, x360_vd, x360_xam2, x360_ob   the XBA-296 kernel groups called directly (DPCs, APCs,
 #                    timers, queues, SLists; strings and printf; hashes and ciphers on published vectors; Vd and audio;
 #                    XAM)
+#   x360_*_16k, x360_hle_64k   the same tests on a host of larger pages (X360_HOST_PAGE: x360_mem.c)
 #   x360_hle_table   hle_coverage's reading of the sources against the runtime's real dispatch table
 #   x360_hello       the synthetic test title (make_hello.py: our own PowerPC assembly in a synthetic XEX2, imports
 #                    by their real ordinals) recompiled and run under x360_run: its DbgPrint text must equal
@@ -127,6 +128,15 @@ add_test(NAME x360_hle_table
             ${CMAKE_CURRENT_BINARY_DIR}/x360_hle_table)
 set_tests_properties(x360_hle_table PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 
+# The same on a host of 16 KB pages (X360_HOST_PAGE, x360_mem.c: the runtime then maps, commits and addresses the
+# 0xE0000000 view as it must there, and refuses what such a host would refuse).
+foreach(_group hle kdpc rtl crypt2 vd xam2 ob)
+    add_test(NAME x360_${_group}_16k COMMAND x360_${_group}_test)
+    set_tests_properties(x360_${_group}_16k PROPERTIES TIMEOUT 120 ENVIRONMENT "X360_HOST_PAGE=16384")
+endforeach()
+add_test(NAME x360_hle_64k COMMAND x360_hle_test)
+set_tests_properties(x360_hle_64k PROPERTIES TIMEOUT 120 ENVIRONMENT "X360_HOST_PAGE=65536")
+
 if(TARGET x360_run)
     foreach(_mode basic lzx split)
         if(_mode STREQUAL basic)
@@ -139,6 +149,14 @@ if(TARGET x360_run)
                     ${CMAKE_CURRENT_BINARY_DIR}/${_name} ${_mode} ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt)
         set_tests_properties(${_name} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
     endforeach()
+    add_test(NAME x360_hello_16k
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh $<TARGET_FILE:x360_run>
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_hello_16k basic ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt)
+    set_tests_properties(x360_hello_16k PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 ENVIRONMENT "X360_HOST_PAGE=16384")
+    add_test(NAME x360_state_16k
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_state.sh $<TARGET_FILE:x360_run>
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_state_16k ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt)
+    set_tests_properties(x360_state_16k PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 ENVIRONMENT "X360_HOST_PAGE=16384")
     add_test(NAME x360_state
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_state.sh $<TARGET_FILE:x360_run>
                 ${CMAKE_CURRENT_BINARY_DIR}/x360_state ${CMAKE_CURRENT_SOURCE_DIR}/hello.txt)
@@ -167,6 +185,16 @@ if(TARGET x360_run)
                 ${CMAKE_CURRENT_BINARY_DIR}/x360_hello_c c ${CMAKE_CURRENT_SOURCE_DIR}/hello_c.txt
                 ${X360_HOMEBREW_DIR}/hello_c.elf)
     set_tests_properties(x360_hello_c PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    add_test(NAME x360_hello_c_16k
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh $<TARGET_FILE:x360_run>
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_hello_c_16k c ${CMAKE_CURRENT_SOURCE_DIR}/hello_c.txt
+                ${X360_HOMEBREW_DIR}/hello_c.elf)
+    set_tests_properties(x360_hello_c_16k PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600
+                         ENVIRONMENT "X360_HOST_PAGE=16384")
+    add_test(NAME x360_seh_16k
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_seh.sh $<TARGET_FILE:x360_run>
+                ${CMAKE_CURRENT_BINARY_DIR}/x360_seh_16k ${CMAKE_CURRENT_SOURCE_DIR}/seh.txt)
+    set_tests_properties(x360_seh_16k PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 ENVIRONMENT "X360_HOST_PAGE=16384")
     # XBA-283: functions left out of the pack on purpose are interpreted, the run goes on and names them all at once
     add_test(NAME x360_interp
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_interp.sh $<TARGET_FILE:x360_run>

@@ -104,7 +104,7 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
         snprintf(why, n, "cannot commit the image's pages");
         return -1;
     }
-    uint8_t *img = x->base + x->image_base;
+    uint8_t *img = x360_p(x, x->image_base);
     const uint8_t *src = d + pe_off;
     size_t avail = size - pe_off;
     if (comp == 0) {
@@ -126,7 +126,7 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
 
     /* the XEX header in guest memory, for RtlImageXexHeaderField */
     x->xex_header = x360_kalloc(x, sec_off);
-    memcpy(x->base + x->xex_header, d, sec_off);
+    memcpy(x360_p(x, x->xex_header), d, sec_off);
     if (exec_off) {
         x->execution_info = x->xex_header + exec_off;
         x->title_id = be32(d + exec_off + 12);
