@@ -102,9 +102,9 @@ alone (0.6 at best) is reported, never bound.
 
 **Played by the library (XBA-309).** Some titles never call `XMVDecoder_GetNextFrame`: they hand the movie to the
 library's own `XMVDecoder_Play` (`ret 0xC`), which polls GetNextFrame itself and paces the pictures it shows on a
-clock (performance counter since a start time) that the library's GetNextFrame starts at its first frame. Bound
-there, the runtime's hook decodes the movie but never starts that clock, and Play presents almost none of the frames
-(a retail XDK 5849 title: 157 of 1765). So when the XMV section is known and the best candidate has no call site
+clock (performance counter since a start time) that, from its disassembly, the library's GetNextFrame starts at its
+first frame. Bound there in a retail XDK 5849 title, the runtime's hook decoded all 1765 frames but Play presented
+157 of them (presumably because that clock never started). So when the XMV section is known and the best candidate has no call site
 outside it, the report says `library_only` and nothing is bound, whatever the score or a signature: the title's own
 decoder plays the movie, as it does unbound. `python -m tools.xmv.find_api default.xbe` prints the evidence for
 each candidate (`--json` for the report as JSON); Prepare writes the same report to `<work>/analysis/xmv_api.json`.

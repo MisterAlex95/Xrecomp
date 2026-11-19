@@ -114,9 +114,9 @@ def test_a_recorded_signature_finds_it_without_the_structure(tmp_path):
 
 def test_a_title_that_plays_through_the_library_is_never_bound(tmp_path, monkeypatch):
     """XBA-309: the title hands its movie to the library's own player (XMVDecoder_Play's shape), which polls
-    GetNextFrame itself: GetNextFrame has no call site outside the XMV section. Binding it would leave Play's
-    clock unstarted (it showed 157 of 1765 frames in a retail title), so it is found but never bound, not even
-    with a recorded signature of its build."""
+    GetNextFrame itself: GetNextFrame has no call site outside the XMV section. Bound in a retail title, Play
+    presented 157 of the 1765 frames the hook decoded (its clock presumably never started), so it is found but
+    never bound, not even with a recorded signature of its build."""
     r, l, p = _find(tmp_path, play=True)
     assert r["best"]["get_next_frame"] == l["get_next_frame"]
     assert r["library_only"] and not r["high"]

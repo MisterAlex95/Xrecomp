@@ -50,10 +50,11 @@ the evidence):
 - Played by the library (XBA-309): when the XMV section is known and the best
   candidate is called only from inside it, the title never calls
   GetNextFrame: it hands its movies to the library's own XMVDecoder_Play,
-  which polls GetNextFrame and paces the pictures on a clock that the
-  library's GetNextFrame starts. Bound there, the runtime's hook never starts
-  that clock and Play shows almost none of the frames, so such a candidate is
-  never bound, whatever its score or signature (`library_only`).
+  which polls GetNextFrame and paces the pictures on a clock that (from its
+  disassembly) the library's GetNextFrame starts. Bound there in a retail
+  title, the runtime's hook decoded every frame but Play presented 157 of
+  1765 (presumably that clock never started), so such a candidate is never
+  bound, whatever its score or signature (`library_only`).
 
 Signatures. `--record get_next_frame=0x...` writes a masked signature of
 the confirmed function (tools/fusion/signatures.py's masking: opcodes and
