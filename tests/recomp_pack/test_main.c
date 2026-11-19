@@ -277,6 +277,42 @@ static void test_validate_and_find(void)
     snprintf(b.console, sizeof b.console, "gba");
     CHECK(recomp_pack_validate(&b, "4D530004", 1, dir, lib, sizeof lib, reason, sizeof reason) == -1);
     CHECK(strstr(reason, "console gba") != NULL);
+
+    /* XBA-313: "cpu_features" (tools/prepare/cpu.py). A pack compiled with the
+     * ARMv8.1 atomics loads only on a CPU that has them; a pack without the
+     * field (every pack before) anywhere; an unknown feature nowhere. */
+    {
+        char lack[16];
+        const char *j = "{\"format\":1,\"cpu_features\":\"lse\"}";
+        recomp_pack_meta c;
+        char err[160];
+        CHECK(recomp_pack_parse(j, strlen(j), &c, err, sizeof err) == 0);
+        CHECK(!strcmp(c.cpu_features, "lse") && (c.have & RECOMP_PACK_HAVE_CPU_FEATURES));
+        CHECK(recomp_pack_cpu_missing("", "", lack, sizeof lack) == 0 && !lack[0]);
+        CHECK(recomp_pack_cpu_missing("lse", "lse", lack, sizeof lack) == 0);
+        CHECK(recomp_pack_cpu_missing(" LSE ", "x,lse", lack, sizeof lack) == 0);
+        CHECK(recomp_pack_cpu_missing("lse", "", lack, sizeof lack) == 1 && !strcmp(lack, "lse"));
+        CHECK(recomp_pack_cpu_missing("lse,sve2", "lse", lack, sizeof lack) == 1 && !strcmp(lack, "sve2"));
+        CHECK(recomp_pack_cpu_missing("lse", "lsex", lack, sizeof lack) == 1);
+    }
+    b = m;
+    CHECK(!b.cpu_features[0] && !(b.have & RECOMP_PACK_HAVE_CPU_FEATURES));
+    recomp_pack_set_host_cpu_features("");
+    CHECK(recomp_pack_validate(&b, "4D530004", 1, dir, lib, sizeof lib, reason, sizeof reason) == 0);
+    snprintf(b.cpu_features, sizeof b.cpu_features, "lse");
+    CHECK(recomp_pack_validate(&b, "4D530004", 1, dir, lib, sizeof lib, reason, sizeof reason) == -1);
+    CHECK(strstr(reason, "lacks lse") != NULL);
+    recomp_pack_set_host_cpu_features("lse");
+    CHECK(recomp_pack_validate(&b, "4D530004", 1, dir, lib, sizeof lib, reason, sizeof reason) == 0);
+    snprintf(b.cpu_features, sizeof b.cpu_features, "lse,sve9");
+    CHECK(recomp_pack_validate(&b, "4D530004", 1, dir, lib, sizeof lib, reason, sizeof reason) == -1);
+    CHECK(strstr(reason, "lacks sve9") != NULL);
+    recomp_pack_set_host_cpu_features(NULL);
+#if defined(__aarch64__) && (defined(__linux__) || defined(__APPLE__))
+    printf("  this CPU's features: \"%s\"\n", recomp_pack_host_cpu_features());
+#else
+    CHECK(!strcmp(recomp_pack_host_cpu_features(), ""));
+#endif
 }
 
 /* ---- Other consoles (XBA-147) -------------------------------------------- */

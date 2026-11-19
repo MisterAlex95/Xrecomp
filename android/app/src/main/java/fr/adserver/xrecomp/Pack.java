@@ -21,8 +21,9 @@ import java.util.regex.Pattern;
  * pack.json: {"format":1, "title_id", "title", "xbe_sha256", "abi":"arm64-v8a", "shell_abi":1, "toolkit",
  * "toolkit_sha256", "lib":"libtitle.so", "lib_sha256", "lib_size", "entry":"recomp_title_main", "cc", "built_at"}, and
  * "env_force":{"RECOMP_LSFG":"0", ...} when the title profile forces options (the native loader sets them over
- * recomp.cfg; the launcher only shows them), and "resume" (XBA-258: the generated code has resume entries,
- * {@link #resume}).
+ * recomp.cfg; the launcher only shows them), "resume" (XBA-258: the generated code has resume entries,
+ * {@link #resume}), and "cpu_features" (XBA-313: "lse" when compiled with the device's ARMv8.1 atomics; such a pack
+ * is {@link Check#WRONG_CPU} on a CPU without them).
  *
  * Other consoles (XBA-147, {@link Console}): "console" ("xbox" when absent, so every pack made before stays valid, same
  * format 1) and, for gba / ps1 / n64, "title_key" in place of title_id. Such a pack is packs/&lt;console&gt;-&lt;key&gt;
@@ -36,8 +37,9 @@ final class Pack {
     static final int FORMAT = 1;
     static final String PACKS_DIR = "packs", JSON = "pack.json";
 
-    enum Check { VALID, NO_TITLE_ID, NO_PACK, BAD_JSON, BAD_FORMAT, WRONG_CONSOLE, WRONG_TITLE, WRONG_SHELL_ABI, NO_LIB,
-                 LIB_SIZE }
+    /** WRONG_CPU (XBA-313): compiled for CPU features this device lacks (pack.json cpu_features, {@link CpuFeatures}). */
+    enum Check { VALID, NO_TITLE_ID, NO_PACK, BAD_JSON, BAD_FORMAT, WRONG_CONSOLE, WRONG_TITLE, WRONG_SHELL_ABI, WRONG_CPU,
+                 NO_LIB, LIB_SIZE }
 
     static File packsDir(File filesDir) {
         return new File(filesDir, PACKS_DIR);
@@ -206,6 +208,9 @@ final class Pack {
             return Check.WRONG_TITLE;
         if (o.optInt("shell_abi", -1) != SHELL_ABI)
             return Check.WRONG_SHELL_ABI;
+        String cpu = CpuFeatures.host();
+        if (cpu != null && CpuFeatures.missing(o.optString("cpu_features", ""), cpu) != null)
+            return Check.WRONG_CPU;
         String lib = o.optString("lib", "");
         if (lib.isEmpty() || lib.contains("/") || lib.equals("..") || lib.equals("."))
             return Check.NO_LIB;

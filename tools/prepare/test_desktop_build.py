@@ -148,6 +148,15 @@ def test_linux_compile_and_link():
                     "-lm", "-Wl,--end-group"]
 
 
+def test_compile_flags_cpu_features():
+    """XBA-313: the host CPU's ARMv8.1 atomics inline on an aarch64 Linux, unless the runtime picks a -march."""
+    tc = _tc("linux-arm64")
+    assert "-march=armv8-a+lse" in db.compile_flags(tc, _man(), TK, "/p", cpu_features=("lse",))
+    assert not any(f.startswith("-march") for f in db.compile_flags(tc, _man(), TK, "/p"))
+    man = _man(compile_flags=["-DNDEBUG", "-mcpu=cortex-a76"])
+    assert "-march=armv8-a+lse" not in db.compile_flags(tc, man, TK, "/p", cpu_features=("lse",))
+
+
 def test_linux_cxx_runtime_links_with_lld_and_the_cxx_driver():
     tc = _tc(cc_path="/tk/toolchain/bin/clang", source="toolkit", lld="/tk/toolchain/bin/ld.lld")
     args = db.link_args(tc, _man(lang="CXX"), TK, ["/o/1.o"], "/p/build/t", exists=lambda p: False)

@@ -124,6 +124,47 @@ public class PackTest {
         assertEquals(Pack.Check.WRONG_SHELL_ABI, Pack.check(files(), TID));
     }
 
+    /** XBA-313: a pack compiled with the device's ARMv8.1 atomics is refused on a CPU without them. */
+    @Test
+    public void wrongCpu() throws Exception {
+        try {
+            TestSupport.writePack(files(), TID, 10);
+            CpuFeatures.setForTest("");
+            assertEquals(Pack.Check.VALID, Pack.check(files(), TID));        // no cpu_features: every CPU
+            edit("cpu_features", "lse");
+            assertEquals(Pack.Check.WRONG_CPU, Pack.check(files(), TID));
+            CpuFeatures.setForTest("lse");
+            assertEquals(Pack.Check.VALID, Pack.check(files(), TID));
+            edit("cpu_features", "lse,sve9");                                 // a feature this app does not know
+            assertEquals(Pack.Check.WRONG_CPU, Pack.check(files(), TID));
+            edit("cpu_features", "");
+            assertEquals(Pack.Check.VALID, Pack.check(files(), TID));
+        } finally {
+            CpuFeatures.setForTest(null);
+        }
+    }
+
+    @Test
+    public void cpuFeaturesFromAuxv() {
+        byte[] auxv = new byte[64];
+        putLe64(auxv, 0, 6);                 // AT_PAGESZ
+        putLe64(auxv, 8, 4096);
+        putLe64(auxv, 16, CpuFeatures.AT_HWCAP);
+        putLe64(auxv, 24, 0xFFL | CpuFeatures.HWCAP_ATOMICS);
+        assertEquals(Long.valueOf(0xFFL | CpuFeatures.HWCAP_ATOMICS), CpuFeatures.hwcap(auxv, 64));
+        assertNull(CpuFeatures.hwcap(auxv, 16));                             // cut before AT_HWCAP
+        assertNull(CpuFeatures.missing("", ""));
+        assertNull(CpuFeatures.missing(" LSE ", "lse"));
+        assertEquals("lse", CpuFeatures.missing("lse", ""));
+        assertEquals("sve2", CpuFeatures.missing("lse,sve2", "lse"));
+        assertEquals("", System.getProperty("os.arch").contains("aarch64") ? "" : CpuFeatures.host());
+    }
+
+    private static void putLe64(byte[] b, int o, long v) {
+        for (int i = 0; i < 8; i++)
+            b[o + i] = (byte) (v >>> (8 * i));
+    }
+
     @Test
     public void noLib() throws Exception {
         File dir = TestSupport.writePack(files(), TID, 10);

@@ -20,6 +20,7 @@ import sys
 import traceback
 
 from tools.prepare import compile as cc
+from tools.prepare import cpu
 from tools.prepare import metrics
 from tools.prepare import pack
 from tools.prepare import toolkit
@@ -89,6 +90,7 @@ class Run:
         self.jobs = 0
         self.sources = []
         self.tools_peak_kb = 0
+        self.cpu_features = ()        # tools/prepare/cpu.py: what the objects are compiled for (pack.json)
 
     # ── helpers ──
 
@@ -286,13 +288,21 @@ class Run:
         sources = cc.collect_sources(self.proj)
         has_profile = os.path.isdir(os.path.join(self.proj, "src", "title")) and \
             any(fn.endswith(".c") for fn in os.listdir(os.path.join(self.proj, "src", "title")))
-        flags = cc.compile_flags(a.opt, self.m.ROOT, self.proj, self.tc.sysroot, has_profile, a.include_dir)
+        # XBA-313: the CPU this Prepare runs on, which is the device that runs the pack (--cpu-features auto); a
+        # cross build on another host gets the ARMv8.0 baseline. The other images (other_images) resolve the same.
+        try:
+            self.cpu_features = cpu.resolve(getattr(a, "cpu_features", None) or "auto")
+        except ValueError as e:
+            raise cc.StepError("BAD_ARGS", str(e))
+        flags = cc.compile_flags(a.opt, self.m.ROOT, self.proj, self.tc.sysroot, has_profile, a.include_dir,
+                                 cpu_features=self.cpu_features)
         jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count())
         self.jobs, self.sources = jobs, sources
         self.tools_peak_kb = metrics.children_peak_kb()     # the pipeline tools so far (disasm, lift, ...)
         device_log = getattr(a, "device_log", None)
         limit = (lambda: metrics.jobs_now(device_log, jobs)) if device_log else None
-        self.rep.progress(4, 0, "compiling %d files, %d jobs, -O%s" % (len(sources), jobs, a.opt))
+        self.rep.progress(4, 0, "compiling %d files, %d jobs, -O%s, %s" % (len(sources), jobs, a.opt,
+                                                                          cpu.describe(self.cpu_features)))
 
         def prog(done, total, now, eta):
             self.rep.progress(4, done * 100 // max(1, total), "%d/%d files (%d compiled)" % (done, total, now),
@@ -389,6 +399,7 @@ class Run:
         # (same objects) still writes the pack again.
         h.update(("|env_force=%s" % json.dumps(self.env_force, sort_keys=True)).encode())
         h.update(("|layers=%s" % ",".join(self.layers)).encode())
+        h.update(("|cpu=%s" % cpu.text(self.cpu_features)).encode())
         for rel, objects, _ in self.images:
             h.update(("|image=%s:" % rel).encode())
             for o in objects:
@@ -403,7 +414,8 @@ class Run:
                 and meta.get("title_layer") == self.title_layer
                 and meta.get("images", {}) == images
                 and meta.get("toolkit_sha256", "") == self.toolkit_sha
-                and pack.check(final, a.shell_abi) is None):
+                and meta.get("cpu_features", "") == cpu.text(self.cpu_features)
+                and pack.check(final, a.shell_abi, cpu_features=self.cpu_features) is None):
             self.rep.progress(5, 100, "pack up to date")
         else:
             try:
@@ -419,7 +431,8 @@ class Run:
             meta = pack.make_meta(lib, self.tid, self.info.get("title", ""), self.xbe_sha, self.toolkit,
                                   "%s -O%s" % (self.tc.short_version(), a.opt), shell_abi=a.shell_abi,
                                   env_force=self.env_force, layers=self.layers,
-                                  toolkit_sha256=self.toolkit_sha, title_layer=self.title_layer)
+                                  toolkit_sha256=self.toolkit_sha, title_layer=self.title_layer,
+                                  cpu_features=cpu.text(self.cpu_features))
             if images:
                 meta["images"] = images
             # XBA-258: resume entries in the generated code, so the app can say before a launch that the title

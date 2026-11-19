@@ -59,6 +59,7 @@ prepare puts `.old` back if a kill fell between the two renames. So a reader see
 | `xbe_sha256` | hex | The XBE the pack was built from. The app compares it with the game folder's `default.xbe` before a start ([When a pack is stale](#when-a-pack-is-stale)). |
 | `abi` | string | `arm64-v8a`. |
 | `shell_abi` | int | The shell ABI the pack was linked against. The shell exports its own integer; **the loader refuses a mismatch** (the app then offers to prepare again). |
+| `cpu_features` | string | Optional (XBA-313): the CPU features the library was compiled for beyond ARMv8.0, comma-separated; today only `lse` (the ARMv8.1 atomics, [CPU features](#cpu-features-xba-313)). Absent: the ARMv8.0 baseline, every pack before. **Every reader refuses a pack whose features this CPU lacks** (the loader, `tools/prepare/pack.py` `check`, the app's `Pack.check` → `WRONG_CPU`): the app then offers to prepare again. |
 | `toolkit` | string | The toolkit commit (`git rev-parse HEAD`, or `tools/VERSION` in the assets), `unknown` if neither. Informative: the commit of the run that last relinked the pack. |
 | `toolkit_sha256` | hex | The toolkit digest (`tools/prepare/toolkit.py`) the pack was lifted with (XBA-127). The app compares it with its own ([When a pack is stale](#when-a-pack-is-stale)). Packs from before it lack it. |
 | `lib` | string | `libtitle.so`, relative to the pack directory. |
@@ -220,6 +221,8 @@ The same driver runs on the device and on hosts/CI (with the NDK's clang): no CM
      -c <file.c> -o <work>/obj/<key>.o
 ```
 
+Plus `-mno-outline-atomics` (XBA-277) and, on a device with the ARMv8.1 atomics, `-march=armv8-a+lse` ([CPU
+features](#cpu-features-xba-313)).
 `WIN32_LEAN_AND_MEAN`, `NOMINMAX` and `NDEBUG` are what the CMake build gives the same files (the template's
 definitions, a Release-type build). Sources: `src/main.c`, `src/recomp_manual.c`, `src/title/*.c` (the profile;
 `XBA_TITLE_PROFILE` when there is one), `src/extra/*.c`, `src/recomp/gen/*.c`.
@@ -262,6 +265,34 @@ ld.lld -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=16384 -z noe
 
 `max-page-size=16384`: 16 KB-page devices (Android 15+). `--no-undefined` turns a symbol the shell does not export
 into a link error on the device rather than a dlopen failure at start.
+
+### CPU features (XBA-313)
+
+An Xbox pack is prepared on the device that runs it, so Prepare compiles for that CPU (`tools/prepare/cpu.py`,
+`--cpu-features auto|none|lse`, default `auto`). `auto` reads the kernel's `AT_HWCAP` from `/proc/self/auxv` (else
+the `Features` line of `/proc/cpuinfo`, the same bits by name) when
+Prepare runs on an aarch64 Linux or Android, and finds `lse` when `HWCAP_ATOMICS` is set: lock-prefixed instructions
+then compile to one ARMv8.1 atomic (`ldadd`, `cas`, `swp`, ...) instead of an exclusive load/store loop
+(`-march=armv8-a+lse`: only the atomics are added to the ARMv8.0 target). Anywhere else (a cross build on an x86-64
+host, CI) it is `none`, the ARMv8.0 baseline, as before. The disc's other images get the same.
+
+The flags are in every object's cache key and the features in the link key, and `pack.json` records them
+(`cpu_features`). A pack moved to a CPU without them (a backup restored on another device; Cortex-A53/A57/A72 lack
+them) is refused by the loader (`built for CPU features lse, this CPU lacks lse`), by `pack.py check` and by the
+app (`Pack.Check.WRONG_CPU`), which offers to prepare it again. The three read the same bit (`getauxval(AT_HWCAP)` in
+`recomp_pack.c`, `/proc/self/auxv` in `cpu.py` and `CpuFeatures.java`), so a pack Prepare made is never refused on the
+device that made it; the app, if it cannot read the bit, does not refuse on it (the loader still would).
+
+Measured: `tools.bench icount`, scale 0.1, NDK clang 19 against an aarch64 glibc root under `qemu-aarch64 -cpu max`,
+shared layout, base (`-mno-outline-atomics`) -> `lse`: `w_lock` 5.10M -> 4.05M instructions (-21 %), every other
+workload unchanged (within 30 instructions), checksums identical. The lse library has 14 LSE instructions and no
+exclusive loops; neither has `__aarch64_*` helper calls. Packs prepared before stay valid (no `cpu_features`) but
+run the loops until prepared again.
+
+The desktop driver (`desktop_build.py`) does the same for the executable it builds on an aarch64 Linux host, unless
+the runtime's manifest already picks a `-march` / `-mcpu` (Apple arm64 compilers target the atomics already). The flags
+are in the object and link keys, so the project prepared again on another CPU is rebuilt; an executable copied to a
+CPU without the atomics is not guarded.
 
 ## Images (XBA-82)
 
@@ -627,8 +658,8 @@ over the title's code range, so a target the table holds there is called at once
 check and the lookups are the miss path's (`docs/technical/indirect-calls.md`). About 20 arm64 instructions of checks
 per indirect call become 8. Prepare's flags add `-mno-outline-atomics`: lock-prefixed instructions compile to inline
 exclusive load/store loops, which every ARMv8.0 core runs, instead of a call per atomic into the outline helpers
-(`w_lock` -17 %; inline ARMv8.1 atomics would give -31 %, but a pack would need the device's features at Prepare time
-and would have to refuse another device). And the lifter turns a 32-bit locked add / sub / inc / dec / or / and / xor /
+(`w_lock` -17 %; inline ARMv8.1 atomics would give -31 %: done per device since XBA-313, [CPU
+features](#cpu-features-xba-313)). And the lifter turns a 32-bit locked add / sub / inc / dec / or / and / xor /
 not with a register or immediate operand into one atomic fetch-and-op instead of a compare-and-swap loop (same memory,
 same flags: the conformance cases run them against the CPU). Same method as above, main -> XBA-277, checksums
 identical:
@@ -1281,7 +1312,7 @@ logcat lines in [app-shell.md](app-shell.md) « Title packs »):
 1. Only when no title is linked into `libmain.so` and `default.xbe` is found. Title ID from the XBE's certificate.
 2. `<files dir>/packs/<TITLEID>/pack.json`; absent → `PACK_MISSING <TID>`, the shell goes on as before.
 3. Checks: required fields, `format` 1, `title_id`, `abi` (`arm64-v8a`), `shell_abi` = `libmain.so`'s exported
-   `xba_shell_abi` (1), `lib` a plain name, present, `lib_size` bytes. **`lib_sha256` is not checked at load**
+   `xba_shell_abi` (1), `cpu_features` all on this CPU (XBA-313), `lib` a plain name, present, `lib_size` bytes. **`lib_sha256` is not checked at load**
    (private storage, atomic publish by prepare which hashed it; ~1 s per start for a large pack); the import drop,
    when it exists, checks it. Failure → `PACK_INVALID <reason>`.
 4. `dlopen(lib, RTLD_NOW | RTLD_LOCAL)`; `dlsym` of `entry` (required), `recomp_lookup`, `recomp_lookup_manual`,

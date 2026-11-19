@@ -22,6 +22,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from tools.prepare import cpu
+
 API = 30
 TARGET = "aarch64-linux-android%d" % API
 GB = 1 << 30
@@ -327,7 +329,7 @@ def collect_sources(proj):
     return out
 
 
-def compile_flags(opt, toolkit, proj, sysroot, profile=False, include_dirs=()):
+def compile_flags(opt, toolkit, proj, sysroot, profile=False, include_dirs=(), cpu_features=()):
     flags = ["--target=" + TARGET, "--sysroot=" + sysroot]
     rd = sysroot_resource_dir(sysroot)
     if rd:
@@ -336,9 +338,11 @@ def compile_flags(opt, toolkit, proj, sysroot, profile=False, include_dirs=()):
               "-DXBOXRECOMP_SHELL_TITLE=1", "-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX", "-DNDEBUG"]
     # Lock-prefixed instructions (RECOMP_ATOMIC_*, recomp_types.h) inline as exclusive load/store loops (XBA-277),
     # which every ARMv8.0 core runs, instead of a call per atomic into libgcc's outline helpers (a feature test,
-    # then the ARMv8.1 atomic or the same loop). tools.bench w_lock: -17 % instructions. Inline ARMv8.1 atomics
-    # would need the device's features at Prepare time and a pack that refuses another device: not done.
+    # then the ARMv8.1 atomic or the same loop). tools.bench w_lock: -17 % instructions.
     flags.append("-mno-outline-atomics")
+    # cpu_features (tools/prepare/cpu.py, XBA-313): the device's own CPU, which the pack records and every reader
+    # checks. "lse": the ARMv8.1 atomics inline instead of those loops.
+    flags += cpu.flags(cpu_features)
     if profile:
         flags.append("-DXBA_TITLE_PROFILE=1")
     # src and src/recomp as in the template's CMakeLists; src/recomp/gen too, for

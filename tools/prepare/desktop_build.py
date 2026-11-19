@@ -35,6 +35,7 @@ import subprocess
 import sys
 
 from tools.prepare import compile as cc
+from tools.prepare import cpu
 from tools.prepare import runtime as rt
 
 ROUTES = ("auto", "driver", "cmake")
@@ -297,7 +298,9 @@ def title_defines(proj, work_files):
     return out
 
 
-def compile_flags(tc, man, toolkit, proj, opt="2", defines=(), include_dirs=()):
+def compile_flags(tc, man, toolkit, proj, opt="2", defines=(), include_dirs=(), cpu_features=()):
+    """cpu_features (tools/prepare/cpu.py, XBA-313): the host CPU's, the one the executable is built for and runs
+    on; their flags go in unless the runtime's manifest already picks a -march / -mcpu (and never for MSVC)."""
     rdir = man["dir"]
     incs = [os.path.join(proj, "src"), os.path.join(proj, "src", "recomp"), os.path.join(proj, "src", "recomp", "gen"),
             os.path.join(toolkit, "include")]
@@ -320,6 +323,8 @@ def compile_flags(tc, man, toolkit, proj, opt="2", defines=(), include_dirs=()):
     if tc.isysroot:
         flags += ["-isysroot", tc.isysroot]
     flags += [f for f in man.get("compile_flags", []) if not f.startswith("/")]
+    if not any(f.startswith(("-march=", "-mcpu=")) for f in flags):
+        flags += cpu.flags(cpu_features)
     flags += ["-D" + d for d in defs] + ["-I" + i for i in incs]
     return flags
 
@@ -415,13 +420,22 @@ def _link_key(args, man):
 
 
 def build(proj, name, man, tc, toolkit, work_files, opt="2", jobs=0, log=None, on_progress=None,
-          include_dirs=(), extra_sources=()):
+          include_dirs=(), extra_sources=(), cpu_arg="auto"):
     """Compile and link <proj>/build/<name>. Returns (exe, compiled now, linked:
     False when the executable was up to date)."""
     bdir = os.path.join(proj, "build")
     os.makedirs(bdir, exist_ok=True)
     sources = cc.collect_sources(proj) + list(extra_sources)
-    flags = compile_flags(tc, man, toolkit, proj, opt, title_defines(proj, work_files), include_dirs)
+    # The executable is built for this machine (XBA-313): for a linux-arm64 host whose CPU has the ARMv8.1 atomics
+    # (cpu_arg auto, --cpu-features), they are inline; another host (a cross build too) gets none (macOS arm64
+    # compilers target them already). The flags are in every object's key and the link key, so the same project
+    # prepared on a CPU without them is rebuilt; an executable copied there is not guarded.
+    try:
+        feats = cpu.resolve(cpu_arg) if tc.host == "linux-arm64" else ()
+    except ValueError as e:
+        raise cc.StepError("BAD_ARGS", str(e))
+    flags = compile_flags(tc, man, toolkit, proj, opt, title_defines(proj, work_files), include_dirs,
+                          cpu_features=feats)
     jobs = jobs or cc.default_jobs(cc.mem_available() or windows_mem_available(), os.cpu_count())
     obj_dir = os.path.join(bdir, "obj")
     objects, n = cc.compile_all(sources, flags, tc, obj_dir, jobs, log=log, on_progress=on_progress)

@@ -1729,8 +1729,9 @@ On the Thor with a fresh install of the APK built from this branch, Settings
    `[FBWIN] frame times` lines (median and p95) and `[GPU] ... fps`; copy
    the `[GPUGL] frame ...` line (draws, `KB transformed on the CPU`, uploads,
    readbacks) and the `[GPU] visibility reports` line.
-5. Fable in Oakvale on GPU: repeat 4 with `RECOMP_GPU_ZPASS=lazy` added to
-   `recomp.cfg` by hand (adb): frame times against the default.
+5. Fable in Oakvale on GPU: repeat 4 with `RECOMP_GPU_ZPASS=deferred` added to
+   `recomp.cfg` by hand (adb): frame times against the default (lazy on the
+   device since XBA-313).
 6. Thermal: 10 minutes in-game in Fable on GPU, then 10 minutes on
    Software, from the same starting temperature; `adb shell dumpsys
    thermalservice | grep -i temperature` (or the Thor's overlay) and the

@@ -579,6 +579,11 @@ def main(argv=None):
     an.add_argument("--builtins", help="libclang_rt.builtins-aarch64-android.a (default: asked from CC)")
     an.add_argument("--shell-lib", help="the app shell's libmain.so, which the pack links against")
     an.add_argument("--shell-abi", type=int, default=1, help="the shell ABI the app exports (default 1)")
+    an.add_argument("--cpu-features", default="auto", metavar="auto|none|lse",
+                    help="CPU features an Xbox pack (or a linux-arm64 desktop build) is compiled for "
+                         "(tools/prepare/cpu.py, XBA-313): auto (default) detects the CPU Prepare runs on when it is "
+                         "an aarch64 Linux / Android (the device), else none (ARMv8.0); a pack records them and is "
+                         "refused on a CPU without them")
     an.add_argument("--jobs", type=int, default=0, help="parallel compiles (default: from free memory)")
     an.add_argument("--opt", default="2", choices=("0", "1", "2", "3", "s"),
                     help="clang -O level (default 2; a GBA ROM compiles 2 and 3 at 1)")
@@ -997,7 +1002,8 @@ def build_with_driver(a, proj, name, man, why, work_files, log):
         def prog(done, total, now, eta):
             progress(5 + 85 * done // max(1, total), "compiling %d/%d" % (done, total))
         exe, n, linked = desktop_build.build(proj, name, man, tc, ROOT, work_files, opt=a.opt, jobs=a.jobs,
-                                             log=log, on_progress=prog, include_dirs=a.include_dir)
+                                             log=log, on_progress=prog, include_dirs=a.include_dir,
+                                             cpu_arg=getattr(a, "cpu_features", "auto"))
     except cc.StepError as e:
         raise SystemExit("%s: %s (see %s)" % (e.code, e.msg, log))
     except BaseException:           # a cancel or a crash: no compile left running

@@ -14,6 +14,12 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__linux__) && defined(__aarch64__)
+#include <sys/auxv.h>
+#ifndef HWCAP_ATOMICS
+#define HWCAP_ATOMICS (1 << 8)      /* asm/hwcap.h: the ARMv8.1 atomics (LSE) */
+#endif
+#endif
 
 #define PACK_JSON_MAX (1 << 20)
 
@@ -40,6 +46,66 @@ const char *recomp_pack_host_abi(void)
 #else
     return "unknown";
 #endif
+}
+
+/* ---- CPU features (XBA-313) ---------------------------------------------- */
+
+static const char *s_cpu_override;
+
+void recomp_pack_set_host_cpu_features(const char *features)
+{
+    s_cpu_override = features;
+}
+
+const char *recomp_pack_host_cpu_features(void)
+{
+    if (s_cpu_override)
+        return s_cpu_override;
+#if defined(__linux__) && defined(__aarch64__)
+    return (getauxval(AT_HWCAP) & HWCAP_ATOMICS) ? "lse" : "";
+#elif defined(__APPLE__) && defined(__aarch64__)
+    return "lse";
+#else
+    return "";
+#endif
+}
+
+/* Whether the comma-separated list has `name` (len bytes). */
+static int list_has(const char *list, const char *name, size_t len)
+{
+    while (list && *list) {
+        const char *e = strchr(list, ',');
+        size_t n = e ? (size_t)(e - list) : strlen(list);
+        while (n && list[0] == ' ') { list++; n--; }
+        while (n && list[n - 1] == ' ') n--;
+        if (n == len && !strncasecmp(list, name, len))
+            return 1;
+        if (!e)
+            break;
+        list = e + 1;
+    }
+    return 0;
+}
+
+int recomp_pack_cpu_missing(const char *needed, const char *have, char *out, size_t out_n)
+{
+    if (out_n)
+        out[0] = 0;
+    while (needed && *needed) {
+        const char *e = strchr(needed, ',');
+        size_t n = e ? (size_t)(e - needed) : strlen(needed);
+        while (n && needed[0] == ' ') { needed++; n--; }
+        while (n && needed[n - 1] == ' ') n--;
+        if (n && !list_has(have, needed, n)) {
+            if (out_n)
+                snprintf(out, out_n, "%.*s", (int)n, needed);
+            return 1;
+        }
+        if (!e)
+            break;
+        needed = e + 1;
+    }
+    return 0;
 }
 
 /* ---- Title ID ------------------------------------------------------------ */
@@ -908,6 +974,7 @@ static const field FIELDS[] = {
     STR_FIELD("entry", 0, entry),
     STR_FIELD("console", RECOMP_PACK_HAVE_CONSOLE, console),
     STR_FIELD("title_key", RECOMP_PACK_HAVE_TITLE_KEY, title_key),
+    STR_FIELD("cpu_features", RECOMP_PACK_HAVE_CPU_FEATURES, cpu_features),
 };
 
 int recomp_pack_parse(const char *json, size_t len, recomp_pack_meta *m, char *err, size_t errn)
@@ -1012,6 +1079,13 @@ static int validate_lib(const recomp_pack_meta *m, long long shell_abi, const ch
     if (m->shell_abi != shell_abi) {
         say(reason, reason_n, "shell_abi %lld, this shell is %lld", m->shell_abi, shell_abi);
         return -1;
+    }
+    {
+        char lack[64];
+        if (recomp_pack_cpu_missing(m->cpu_features, recomp_pack_host_cpu_features(), lack, sizeof lack)) {
+            say(reason, reason_n, "built for CPU features %s, this CPU lacks %s", m->cpu_features, lack);
+            return -1;
+        }
     }
     if (!m->lib[0] || strchr(m->lib, '/') || !strcmp(m->lib, ".") || !strcmp(m->lib, "..")) {
         say(reason, reason_n, "lib \"%s\" is not a file name", m->lib);

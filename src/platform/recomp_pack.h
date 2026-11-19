@@ -76,6 +76,11 @@ typedef struct recomp_pack_meta {
      * "title_key" (recomp_pack_rom_identify). */
     char console[16];
     char title_key[48];
+    /* XBA-313: "cpu_features", the CPU features the library was compiled
+     * for beyond ARMv8.0, comma-separated ("lse": the ARMv8.1 atomics);
+     * empty (absent) for none. recomp_pack_validate refuses a pack whose
+     * features this CPU lacks (recomp_pack_host_cpu_features). */
+    char cpu_features[64];
 } recomp_pack_meta;
 
 #define RECOMP_PACK_HAVE_FORMAT    0x01u
@@ -87,6 +92,7 @@ typedef struct recomp_pack_meta {
 #define RECOMP_PACK_REQUIRED       0x3fu    /* an Xbox pack's */
 #define RECOMP_PACK_HAVE_CONSOLE   0x40u
 #define RECOMP_PACK_HAVE_TITLE_KEY 0x80u
+#define RECOMP_PACK_HAVE_CPU_FEATURES 0x100u
 
 /* The consoles a pack may be for (pack.json "console"). */
 enum {
@@ -167,6 +173,19 @@ int recomp_pack_dir_name(int console, const char *key, char *out, size_t out_n);
  * "x86", "armeabi-v7a", else "unknown". */
 const char *recomp_pack_host_abi(void);
 
+/* XBA-313: the CPU features of this host a pack may need (tools/prepare/cpu.py),
+ * comma-separated: "lse" on an arm64 Linux / Android whose getauxval(AT_HWCAP)
+ * has HWCAP_ATOMICS and on Apple arm64 (every one has them), else "". The same
+ * bit Prepare and the app read. recomp_pack_set_host_cpu_features(s) replaces
+ * the answer (tests); NULL goes back to the CPU's. */
+const char *recomp_pack_host_cpu_features(void);
+void recomp_pack_set_host_cpu_features(const char *features);
+
+/* The first feature of the comma-separated `needed` that `have` lacks, into
+ * out ("" and 0 when none is missing; 1 otherwise). An unknown name counts
+ * as missing. */
+int recomp_pack_cpu_missing(const char *needed, const char *have, char *out, size_t out_n);
+
 /* The title ID of an XBE image in memory / on disk, as 8 upper-case hex
  * digits in out (9 bytes). Header: "XBEH", base address at 0x104,
  * certificate address at 0x118; the title ID is at certificate + 0x08.
@@ -194,8 +213,8 @@ int recomp_pack_apply_env_force(const recomp_pack_meta *m);
 /* The checks on a parsed pack.json for title tid, this shell's ABI and the
  * pack directory: every required field, format 1, console xbox (or none),
  * title_id = tid, abi = the
- * host's, shell_abi, lib a plain file name, the file there and lib_size
- * bytes long. Fills lib_path (pack_dir/lib). Returns 0, or -1 with a short
+ * host's, shell_abi, cpu_features all on this CPU, lib a plain file name,
+ * the file there and lib_size bytes long. Fills lib_path (pack_dir/lib). Returns 0, or -1 with a short
  * reason ("shell_abi 0, this shell is 1"). */
 int recomp_pack_validate(const recomp_pack_meta *m, const char *tid, long long shell_abi,
                          const char *pack_dir, char *lib_path, size_t lib_path_n,

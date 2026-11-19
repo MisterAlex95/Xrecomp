@@ -13,6 +13,8 @@ import os
 import re
 import shutil
 
+from tools.prepare import cpu
+
 FORMAT = 1
 ABI = "arm64-v8a"
 LIB = "libtitle.so"
@@ -68,7 +70,7 @@ def env_force_of(profile):
 
 
 def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHELL_ABI, now=None,
-              env_force=None, layers=None, toolkit_sha256=None, title_layer=None):
+              env_force=None, layers=None, toolkit_sha256=None, title_layer=None, cpu_features=""):
     """pack.json's content. env_force (env_force_of) goes in only when it is
     not empty: a pack without it forces nothing. layers: the profile layers
     the pack was built with (tools.prepare.profiles), lowest first; the
@@ -77,7 +79,10 @@ def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHEL
     own to offer a Prepare again after an update (XBA-127). title_layer:
     "on" / "off" when the toolkit has optional enhancements for the title
     (profiles/titles/<id>) and they went in / were left out, which the app's
-    « Enhancements » switch is compared with (WP6); absent when it has none."""
+    « Enhancements » switch is compared with (WP6); absent when it has none.
+    cpu_features: what the library was compiled for beyond ARMv8.0 (cpu.text(),
+    "lse"; XBA-313), which every reader checks against its CPU; absent for
+    none, so a baseline pack reads as every pack made before."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     meta = {
         "format": FORMAT,
@@ -102,6 +107,8 @@ def make_meta(lib_path, title_id, title, xbe_sha256, toolkit, cc, shell_abi=SHEL
         meta["toolkit_sha256"] = toolkit_sha256
     if title_layer:
         meta["title_layer"] = title_layer
+    if cpu_features:
+        meta["cpu_features"] = cpu_features
     return meta
 
 
@@ -219,9 +226,10 @@ def read(pack_dir):
     return meta
 
 
-def check(pack_dir, shell_abi=SHELL_ABI, verify_hash=True):
+def check(pack_dir, shell_abi=SHELL_ABI, verify_hash=True, cpu_features=None):
     """None when the pack is loadable by this shell, else why not (the
-    loader's checks: format, abi, shell_abi, lib size and sha256)."""
+    loader's checks: format, abi, shell_abi, cpu_features, lib size and
+    sha256). cpu_features: the CPU's (default: this one, cpu.detect())."""
     meta = read(pack_dir)
     if meta is None:
         return "no pack.json"
@@ -231,6 +239,9 @@ def check(pack_dir, shell_abi=SHELL_ABI, verify_hash=True):
         return "abi %r" % meta["abi"]
     if meta["shell_abi"] != shell_abi:
         return "shell_abi %r, this shell is %d" % (meta["shell_abi"], shell_abi)
+    lacks = cpu.missing(str(meta.get("cpu_features") or ""), cpu_features)
+    if lacks:
+        return "built for CPU features %s, this CPU lacks %s" % (meta.get("cpu_features"), ",".join(lacks))
     lib = os.path.join(pack_dir, meta["lib"])
     if not os.path.isfile(lib) or os.path.getsize(lib) != meta["lib_size"]:
         return "%s missing or of the wrong size" % meta["lib"]

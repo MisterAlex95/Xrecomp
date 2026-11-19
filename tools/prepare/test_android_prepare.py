@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from tools.prepare import compile as cc            # noqa: E402
+from tools.prepare import cpu                       # noqa: E402
 from tools.prepare import pack                      # noqa: E402
 from tools.prepare.progress import (                # noqa: E402
     STEP_IDS, parse_line, progress_line, result_error, result_ok, Reporter)
@@ -160,6 +161,56 @@ def test_compile_flags():
                  "-mno-outline-atomics"):         # lock-prefixed instructions inline (XBA-277)
         assert want in f
     assert "-DXBA_TITLE_PROFILE=1" not in cc.compile_flags("1", "/tk", "/w/p", "/sys")
+    assert not any(x.startswith("-march") for x in f)                     # the ARMv8.0 baseline by default
+
+
+def test_compile_flags_cpu_features():
+    """XBA-313: the device's ARMv8.1 atomics inline when Prepare found them (only the atomics: not armv8.1-a)."""
+    f = cc.compile_flags("2", "/tk", "/w/p", "/sys", cpu_features=("lse",))
+    assert "-march=armv8-a+lse" in f and "-mno-outline-atomics" in f
+    assert cc.compile_flags("2", "/tk", "/w/p", "/sys", cpu_features=()) == cc.compile_flags("2", "/tk", "/w/p", "/sys")
+
+
+def _auxv(path, pairs):
+    import struct
+    with open(path, "wb") as f:
+        for k, v in list(pairs) + [(0, 0)]:
+            f.write(struct.pack("<QQ", k, v))
+    return str(path)
+
+
+def test_cpu_detect(tmp_path):
+    """The features come from AT_HWCAP (/proc/self/auxv), only on an aarch64 Linux / Android: the CPU that runs
+    the pack. Anywhere else, or unreadable: none (ARMv8.0)."""
+    lse = _auxv(tmp_path / "a", [(6, 4096), (cpu.AT_HWCAP, 0xFF | cpu.HWCAP_ATOMICS), (26, 0)])
+    plain = _auxv(tmp_path / "b", [(cpu.AT_HWCAP, 0xFF)])
+    assert cpu.hwcap(lse) == 0xFF | cpu.HWCAP_ATOMICS
+    assert cpu.detect("aarch64", "Linux", lse) == ("lse",)
+    assert cpu.detect("aarch64", "Android", lse) == ("lse",)
+    assert cpu.detect("aarch64", "Linux", plain) == ()
+    assert cpu.detect("x86_64", "Linux", lse) == ()
+    assert cpu.detect("arm64", "Darwin", lse) == ()
+    none = str(tmp_path / "none")
+    assert cpu.detect("aarch64", "Linux", none, none) == ()
+    assert cpu.hwcap(_auxv(tmp_path / "c", [(6, 4096)])) is None
+    # No auxv: /proc/cpuinfo's Features line, the same bit by name.
+    info = tmp_path / "cpuinfo"
+    info.write_text("processor\t: 0\nFeatures\t: fp asimd evtstrm aes crc32 atomics fphp\n")
+    assert cpu.detect("aarch64", "Linux", none, str(info)) == ("lse",)
+    info.write_text("processor\t: 0\nFeatures\t: fp asimd evtstrm aes crc32\n")
+    assert cpu.detect("aarch64", "Linux", none, str(info)) == ()
+    assert cpu.detect("aarch64", "Linux", lse, str(info)) == ("lse",)   # auxv first
+
+
+def test_cpu_resolve_and_missing():
+    assert cpu.resolve("none") == () and cpu.resolve("LSE") == ("lse",) and cpu.resolve("lse,lse") == ("lse",)
+    assert cpu.resolve("auto", machine="x86_64") == ()
+    with pytest.raises(ValueError):
+        cpu.resolve("sve9")
+    assert cpu.text(("lse",)) == "lse" and cpu.text(()) == ""
+    assert cpu.missing("lse", ()) == ("lse",) and cpu.missing("lse", ("lse",)) == ()
+    assert cpu.missing("", ()) == () and cpu.missing("lse,sve9", ("lse",)) == ("sve9",)
+    assert cpu.flags(("lse",)) == ["-march=armv8-a+lse"] and cpu.flags(()) == []
 
 
 def test_sysroot_resource_dir(tmp_path):
@@ -403,7 +454,8 @@ class _Tc:
         return "clang 19"
 
 
-def _make_pack(tmp_path, monkeypatch, env_force, layers=(), images=(), toolkit_sha="cd" * 32, title_layer=None):
+def _make_pack(tmp_path, monkeypatch, env_force, layers=(), images=(), toolkit_sha="cd" * 32, title_layer=None,
+               cpu_features=()):
     from tools.prepare import android
     links = []
 
@@ -429,6 +481,7 @@ def _make_pack(tmp_path, monkeypatch, env_force, layers=(), images=(), toolkit_s
     r.env_force = env_force
     r.layers = list(layers)
     r.title_layer = title_layer
+    r.cpu_features = tuple(cpu_features)
     r.images = [(rel, ["/o/%s.o" % rel], str(tmp_path / "work" / "images" / rel)) for rel in images]
     final = r.make_pack()
     return pack.read(final), links
@@ -478,6 +531,21 @@ def test_android_pack_json_toolkit_sha256(tmp_path, monkeypatch):
     assert links == []
     meta, links = _make_pack(tmp_path, monkeypatch, {}, toolkit_sha="ef" * 32)
     assert meta["toolkit_sha256"] == "ef" * 32 and len(links) == 1
+
+
+def test_android_pack_json_cpu_features(tmp_path, monkeypatch):
+    """XBA-313: pack.json records the CPU features the objects were compiled for; a CPU without them refuses the
+    pack (pack.check, like the loader and the app), and another feature set links again."""
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, cpu_features=("lse",))
+    assert meta["cpu_features"] == "lse" and len(links) == 1
+    final = pack.final_dir(str(tmp_path / "packs"), "4541005B")
+    assert pack.check(final, cpu_features=("lse",)) is None
+    assert "lacks lse" in pack.check(final, cpu_features=())
+    meta, links = _make_pack(tmp_path, monkeypatch, {}, cpu_features=("lse",))
+    assert links == []
+    meta, links = _make_pack(tmp_path, monkeypatch, {})
+    assert "cpu_features" not in meta and len(links) == 1
+    assert pack.check(final, cpu_features=()) is None
 
 
 def test_android_stamps_follow_the_toolkit_digest(tmp_path, monkeypatch):

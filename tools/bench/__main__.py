@@ -109,9 +109,10 @@ VARIANTS = {
     # The frame shadow stack compiled out (XBA-247, recomp_types.h): its cost, on one lift.
     "noframes": ["-DRECOMP_FRAME_SHADOW=0"],
     # Lock-prefixed instructions on arm64 (XBA-277): atomics inline as LL/SC loops (ARMv8.0, every device), or
-    # inline LSE (ARMv8.1 atomics; not every Android device has them), instead of the outline helpers.
+    # inline LSE (ARMv8.1 atomics; not every Android device has them), instead of the outline helpers. `lse` is
+    # what Prepare adds on a device that has them (tools/prepare/cpu.py, XBA-313).
     "noola": ["-mno-outline-atomics"],
-    "lse": ["-march=armv8-a+lse"],
+    "lse": list(pcc.cpu.FLAGS["lse"]),
     # Stack slots back to volatile + g_cpu barrier (XBA-307, recomp_types.h RECOMP_STK_FAST): the code before it.
     "stk0": ["-DRECOMP_STK_FAST=0"],
 }
