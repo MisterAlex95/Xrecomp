@@ -127,6 +127,10 @@ add_test(NAME x360_hle_table
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_hle_table.sh $<TARGET_FILE:x360_hle_test>
             ${CMAKE_CURRENT_BINARY_DIR}/x360_hle_table)
 set_tests_properties(x360_hle_table PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+# the script starts x360_hle_test itself: a cross build hands it the emulator, as run_draw.sh's tests above
+if(CMAKE_CROSSCOMPILING_EMULATOR)
+    set_property(TEST x360_hle_table APPEND PROPERTY ENVIRONMENT "XBR_TEST_EMULATOR=${_x360_emu}")
+endif()
 
 # The same on a host of 16 KB pages (X360_HOST_PAGE, x360_mem.c: the runtime then maps, commits and addresses the
 # 0xE0000000 view as it must there, and refuses what such a host would refuse).
