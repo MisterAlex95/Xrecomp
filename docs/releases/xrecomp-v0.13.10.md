@@ -2,6 +2,24 @@
 
 <!-- Highlights: what changed, what works, known problems. Written by hand, kept across updates. -->
 
+A crashed game's log can be sent from the device, and Xbox titles run missed code through an interpreter instead of
+stopping on it.
+
+- **Share the last game's log** (Settings › Advanced). The in-game « Share log » reads the game's own process, so a
+  crash took the log with it. The launcher now writes what the game's last run logged, how its process ended (native
+  crash, Java exception, not responding, killed…) and the crash's backtrace into one text file, ready to send. It holds
+  no game data.
+- **Xbox: an x86 interpreter behind the lifted code** (XBA-303). Code the Prepare missed is interpreted (dispatch
+  misses, SEH, save states), and one self-healing round collects every miss.
+- **Xbox rendering on GLES**: fixed function on the GPU by default, more texture stage modes, vertex data streamed
+  through rings, shader programs compiled off the draw path, with a « Shaders 12/304 » badge while they compile.
+- **XMV movies** are read from a disc image in place.
+
+**Known problems**
+
+- Warhammer: Battle March (Xbox 360) crashes on the Thor right after the Bandai logo. The cause is not known yet: this
+  release is the one to send its log from (play until the crash, then Settings › Advanced › Share the last game's log).
+
 ## Changes
 
 <!-- release:changes start (generated from the commits; rewritten on every push to main) -->
