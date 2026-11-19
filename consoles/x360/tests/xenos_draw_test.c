@@ -1641,6 +1641,34 @@ int main(int argc, char **argv)
         run(&cp);
     }
 
+    /* a texture whose fetch constant starts at mip level 1 (a streamed texture: the mips are loaded, the base is not,
+     * and the base address names the mip address again): a linear 32x32 8_8_8_8 texture, level 1 (16x16, green) at
+     * the mip address; magnified, the sampler would take level 0, and reads level 1 */
+    if (pst) {
+        for (uint32_t y = 0; y < 16; y++)
+            for (uint32_t x = 0; x < 16; x++)
+                w32(0x68000 + y * 256 + x * 4, 0xFF00FF00u);
+        im[0] = 1, im[1] = ntex;
+        memcpy(im + 2, pst, 4 * ntex);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
+        reg(0x4800, 0x6000u | 3u);
+        reg(0x4801, 2u | (32u << 2));
+        uint32_t fm[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | 0x68000u, 31u | 31u << 13, sw_id << 1,
+                          1u << 2 | 1u << 6, 1u << 9 | 0x68000u};
+        for (int i = 0; i < 6; i++)
+            reg(0x480C + (uint32_t)i, fm[i]);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        const uint8_t *cm = px(g, W / 2, H / 2), *cn = px(g, W - 4, H - 4);
+        CHECK(cm[0] == 0 && cm[1] == 255 && cm[2] == 0 && cn[1] == 255,
+              "first mip level 1: centre %u,%u,%u corner %u,%u,%u, want green", cm[0], cm[1], cm[2], cn[0], cn[1], cn[2]);
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;

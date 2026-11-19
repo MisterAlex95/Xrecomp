@@ -2052,7 +2052,8 @@ static void read_bytes(const xenos_cp *cp, uint32_t addr, uint32_t n, uint32_t e
 
 typedef struct decoded {
     uint32_t w, h, slices, dim; /* dim as the fetch constant has it: 0 1D, 1 2D, 2 3D, 3 cube */
-    int levels;                 /* mip levels decoded (1: the base only) */
+    int levels;                 /* mip levels of the texture, up to the fetch constant's last (1: the base only) */
+    int base_level;             /* the first one decoded: the fetch constant's first level */
     int is_float;               /* rgba holds floats (4 per texel) rather than bytes */
     void *level[14];            /* each level's slices of RGBA, top row first */
     uint32_t lw[14], lh[14], ld[14];
@@ -2180,11 +2181,17 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
         }
     }
     uint32_t tail = packed ? packed_level(w, h1) : 0xFFFFFFFFu; /* the level whose storage holds the tail */
+    /* the fetch constant's first level: a title that streams textures loads the mips, points the sampler at level 1
+     * or further and leaves the base address on memory that does not hold level 0 (often the mip address again).
+     * Nothing below that level is read, here or by the sampler (GL_TEXTURE_BASE_LEVEL). */
+    uint32_t min_level = (fc[4] >> 2) & 15;
+    int base_level = (int)min_level < levels ? (int)min_level : levels - 1;
     out->levels = levels;
+    out->base_level = base_level;
     out->is_float = tf->is_float;
     out->w = w, out->h = h1, out->slices = slices, out->dim = dim;
     uint64_t hash = (uint64_t)fc[3] << 32 ^ (uint64_t)levels;
-    for (int l = 0; l < levels; l++) {
+    for (int l = base_level; l < levels; l++) {
         /* what is drawn: the guest's size at this level (a compressed level is read in whole blocks, then cropped) */
         uint32_t lw = w >> l ? w >> l : 1, lh = h1 >> l ? h1 >> l : 1, ld = dim == 2 ? (depth >> l ? depth >> l : 1) : slices;
         /* where it is stored: the base, its own mip storage, or inside the tail's (the base of a texture that is
@@ -2420,7 +2427,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     size_t texel_n = d.is_float ? 16 : 4;
     GLenum target = gl_dim == 1 ? GL_TEXTURE_2D : gl_dim == 3 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_3D;
     g->glBindTexture(target, t->tex);
-    for (int l = 0; l < d.levels; l++) {
+    for (int l = d.base_level; l < d.levels; l++) {
         const uint8_t *px = d.level[l];
         if (gl_dim == 1) {
             g->glTexImage2D(GL_TEXTURE_2D, l, ifmt, (GLsizei)d.lw[l], (GLsizei)d.lh[l], 0, GL_RGBA, type, px);
@@ -2433,10 +2440,10 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
                             type, px);
         }
     }
-    g->glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
+    g->glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, d.base_level);
     g->glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, d.levels - 1);
-    t->levels = d.levels;
-    if (d.levels > 1)
+    t->levels = d.levels - d.base_level;
+    if (t->levels > 1)
         g->st.mipmapped++;
     free_decoded(&d);
     return t->tex;
@@ -3854,7 +3861,7 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
         decoded d;
         if (decode_texture(cp, fc, 0, &d)) { /* from memory (no host picture of it) */
             g->st.front_buffer_frames++;
-            uint8_t *rgba = calloc((size_t)d.w * d.h, 4);
+            uint8_t *rgba = d.level[0] ? calloc((size_t)d.w * d.h, 4) : NULL; /* a front buffer has its level 0 */
             if (rgba) {
                 for (uint32_t i = 0; i < d.w * d.h; i++)
                     for (int c = 0; c < 4; c++) {
