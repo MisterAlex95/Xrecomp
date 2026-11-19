@@ -2,6 +2,38 @@
 
 <!-- Highlights: what changed, what works, known problems. Written by hand, kept across updates. -->
 
+**A retail Xbox 360 game plays on a computer for the first time.** One title, dumped from its owner's disc, now runs from
+its logos through its menus into battles (measured up to 1,200 billion guest instructions) with no missing system call,
+no draw the renderer refuses, and no guest code left to the interpreter. All of it was measured on Linux. **Nothing was
+tried on a handheld yet**: whether it starts, draws, sounds or keeps up on the AYN Thor is unknown.
+
+- **The startup crash is fixed.** `VdInitializeScalerCommandBuffer` wrote its NOPs over the caller's stack, so the game
+  returned to address 0 a few frames in.
+- **Memory and GPU match the console.** The 4 KB physical view starts one page in, as on the console. The GPU's scratch
+  registers reach memory, `WAIT_REG_MEM` suspends an indirect buffer, and the display interrupt reports the vblank.
+  Predicated (tiled-rendering) packets run for the selected bin only. Threads keep the affinity they ask for.
+- **The renderer.** Texture units no longer overwrite each other, DXT colours are right, resolves keep their host
+  picture, the first mip level of a fetch is honoured, and framebuffers that grow drop stale attachments. Pixel shaders
+  read only the interpolators they name, so they fit GLES 3.0's 15 inputs.
+- **The recompiler finds more code.** It knows more jump-table forms, leaf functions reached only through pointers,
+  and address tables in code sections. Code it missed fell back to the interpreter: on this title, 3,112 such addresses
+  over a long run before, none now.
+- **Any page size.** The runtime now also works on hosts with 16 KB or 64 KB pages. This was checked with a test
+  setting that copies their limits, never on a real kernel with 16 KB pages.
+- **Also in this release**: Xbox kernel timer, DPC and memory fixes from an audit, faster GameCube texture handling, and
+  the shared console pack loader.
+
+Every Xbox 360 pack must be prepared again. Older packs are refused, and so are Xbox 360 save states made before this
+version.
+
+**Known problems**
+
+- Nothing in this release was tested on a device. In particular, the Adreno driver may reject shaders that Mesa
+  accepted, and the 16 KB-page support was never run on a real kernel.
+- Supporting any page size costs about 12 % of the game code's speed on a computer. Its cost on an Arm handheld is not
+  measured.
+- XMA audio was judged by its level only, never listened to.
+
 ## Changes
 
 <!-- release:changes start (generated from the commits; rewritten on every push to main) -->
