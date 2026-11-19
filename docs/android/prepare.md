@@ -551,9 +551,11 @@ by itself, with no question asked (`SelfHeal.java`, state in `<work>/selfheal.js
   entries: a round at once, the Preparing screen with a note (« The game crashed on code the preparation had missed:
   preparing it again with it (round N), then the game starts by itself. B stops it; Settings › General ›
   Self-healing turns this off. »), then the game starts again when the pack is ready.
-- **A run that ended well** with such entries (a skipped indirect call does not crash: the title goes on, maybe
-  wrong; the runtime says the first one in its log and counts them in the status line's `seeds`): a round **in the
-  background**. The Prepare runs with `background: true` in `status.json` (and in the queue): Home keeps **Play**
+- **A run that ended well** with such entries (since XBA-303 the runtime interprets code the analysis missed until it
+  reaches lifted code again, so the title goes on right, only slower there, and one run names every miss: one round
+  usually finds them all; with `RECOMP_INTERP=0` a missed indirect call is skipped and the title goes on, maybe
+  wrong; the runtime says the first one in its log and counts them in the status line's `seeds`,
+  [interpreter.md](../technical/interpreter.md)): a round **in the background**. The Prepare runs with `background: true` in `status.json` (and in the queue): Home keeps **Play**
   as the primary (the valid pack plays until the new one replaces it, atomic publish), its line says « Improving in
   the background · Compile · 68 % », a note explains, and a quiet **Stop** cancels it. Nothing starts by itself
   afterwards; the next start uses the new pack. PrepareService ends a background round, the launcher the others.

@@ -138,34 +138,20 @@ def _heal_xbe(tmp_path):
     return str(d)
 
 
-@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
-def test_the_self_healing_loop(tmp_path):
-    """XBA-64 + XBA-97 + XBA-65 + XBA-129 end to end, through `tools.compat
-    heal`: round 1 meets thread A with no dispatch entry and records it; the
-    next prepare seeds it and rebuilds, round 2 starts A, which meets B; round
-    3 starts B, which meets C; C is not code, the gates refuse it, so round 4's
-    prepare accepts nothing: the loop stops there, a round without progress,
-    not at a fixed count. The result carries the recall measure (3 misses, all
-    thread starts). Static discovery off (RECOMP_STATIC_DISCOVERY=0): its gap
-    pass would find A and B at the first prepare (XBA-137,
-    test_static_discovery_needs_no_round)."""
+def _heal(tmp_path, interp):
     if not shutil.which("cmake"):
         pytest.skip("no cmake")
     src, out, cw = _heal_xbe(tmp_path), tmp_path / "results.jsonl", tmp_path / "cw"
     r = subprocess.run([sys.executable, "-m", "tools.compat", "heal", src, "--work-root", str(cw),
                         "--seconds", "6", "--sustain", "3", "--out", str(out)],
                        cwd=ROOT, capture_output=True, text=True, timeout=3600,
-                       env=dict(os.environ, RECOMP_STATIC_DISCOVERY="0"))
+                       env=dict(os.environ, RECOMP_STATIC_DISCOVERY="0", RECOMP_INTERP=interp))
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     res = json.loads(out.read_text().splitlines()[-1])
-    h = res["heal"]
     work = cw / "heal"
     lines = [json.loads(l) for l in (work / "discovered.jsonl").read_text().splitlines()]
     for va in ("0x00011040", "0x00011080", "0x00011108"):
         assert {"t": "thread", "va": va, "ctx1": "0x00000000"} in lines, lines
-    assert [x["new_seeds"] for x in h["history"]] == [1, 1, 1, 0], h
-    assert [x["accepted"] for x in h["history"]] == [None, 1, 1, 0], h
-    assert h["rounds"] == 4 and h["stop"] == "no progress: the prepare accepted no new seed", h
     seeds = json.loads((work / "discovered-seeds.json").read_text())
     assert [s["start"] for s in seeds] == ["0x00011040", "0x00011080"]
     assert json.loads((work / "discovered-rejected.json").read_text()) == ["0x00011108"]
@@ -173,7 +159,47 @@ def test_the_self_healing_loop(tmp_path):
     rc = res["recall"]
     assert rc["misses"] == 3 and rc["seeded"] == 2 and rc["rejected"] == 1, rc
     assert rc["categories"]["thread start"] == 3, rc
+    return res, work
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_the_self_healing_loop(tmp_path):
+    """XBA-64 + XBA-97 + XBA-65 + XBA-129 + XBA-303 end to end, through
+    `tools.compat heal`: thread A has no dispatch entry, A starts B, B starts
+    C, and C is not code. The interpreter runs A and B in the first run, so
+    that run records all three (C, zeros, is refused by the interpreter's
+    gate and stays skipped); the next prepare seeds A and B (the gates
+    refuse C) and the second run meets nothing new: one round finds every
+    miss, where it took three (test_the_self_healing_loop_without_the_
+    interpreter). The result carries the recall measure (3 misses, all
+    thread starts). Static discovery off (RECOMP_STATIC_DISCOVERY=0): its
+    gap pass would find A and B at the first prepare (XBA-137,
+    test_static_discovery_needs_no_round)."""
+    res, work = _heal(tmp_path, "1")
+    h = res["heal"]
+    assert [x["new_seeds"] for x in h["history"]] == [3, 0], h
+    assert [x["accepted"] for x in h["history"]] == [None, 2], h
+    assert h["rounds"] == 2 and h["stop"] == "no progress: the same blocker twice", h
     # The runtime's own count of what it met that the analysis missed (the status line's "seeds").
+    assert [x["run_seeds"] for x in h["history"]] == [3, 0], h
+    # The first run interpreted A and B, and said so.
+    log0 = (work / "run-0.log").read_text(errors="replace")
+    assert "PsCreateSystemThreadEx: start routine 0x00011108 not found in dispatch!" in log0, log0[-3000:]
+
+
+@pytest.mark.skipif(os.environ.get("XBA_E2E") != "1", reason="XBA_E2E=1: builds and boots a title (minutes)")
+def test_the_self_healing_loop_without_the_interpreter(tmp_path):
+    """The same title with RECOMP_INTERP=0, the loop as it was before the
+    interpreter: round 1 meets thread A and records it; the next prepare seeds
+    it and rebuilds, round 2 starts A, which meets B; round 3 starts B, which
+    meets C; C is not code, the gates refuse it, so round 4's prepare accepts
+    nothing: the loop stops there, a round without progress, not at a fixed
+    count."""
+    res, work = _heal(tmp_path, "0")
+    h = res["heal"]
+    assert [x["new_seeds"] for x in h["history"]] == [1, 1, 1, 0], h
+    assert [x["accepted"] for x in h["history"]] == [None, 1, 1, 0], h
+    assert h["rounds"] == 4 and h["stop"] == "no progress: the prepare accepted no new seed", h
     assert [x["run_seeds"] for x in h["history"]] == [1, 1, 1, 0], h
 
 

@@ -155,7 +155,11 @@ runtime writes them to `icall_targets.dump` beside it (XBA-304, below), which `r
 `found_statically / targets`, else « recall unknown ». `run` adds a `recall` object to a title's line when a run
 missed anything, and `report` / `report --matrix` get a Recall column (« recall unknown (3 misses: 3 thread start) »).
 Tested on synthetic titles only (`tools/compat/test_heal.py`, and `test_e2e.py::test_the_self_healing_loop`: three
-threads found one round at a time, the third refused, four rounds); a real title's numbers are XBA-75.
+thread starts, the interpreter runs the first two in the first run (XBA-303, [interpreter.md](interpreter.md)), which
+records all three; the second round's prepare seeds two and refuses the third, and its run meets nothing new: two
+rounds, `no progress: the same blocker twice`. `..._without_the_interpreter` (`RECOMP_INTERP=0`): found one round at
+a time, four rounds); a real title's numbers are XBA-75. The status line's `interp_insns` / `interp_entries` say how
+much ran interpreted.
 
 ### Recording hits by default (XBA-138, XBA-304)
 

@@ -42,6 +42,7 @@ One per stage, in the order you run them.
 - [Indirect Call Dispatch](technical/indirect-calls.md) — The RECOMP_ICALL problem and how to solve it
 - [SEH and Exception Handling](technical/seh-handling.md) — Structured exception handling in recompiled code
 - [Guest Stack Switching](technical/stack-switching.md) — Fibers and coroutines: one host stack per guest stack, and what a longjmp may not cross
+- [The x86 Interpreter](technical/interpreter.md) — Code the analysis missed runs interpreted until it reaches lifted code; one Prepare round finds every miss (XBA-303)
 - [Recovering a Split Function](technical/function-coalescence.md) — When the detector splits one function at an interior branch target: `--coalesce-functions`
 - [MSVC RTTI Recovery](technical/rtti-recovery.md) — Class names, vtables and virtual methods from a title's RTTI, as seeds for disassembly
 - [Conformance Testing](technical/conformance-testing.md) — Lifted C against the real CPU, the oracle that cannot be wrong
