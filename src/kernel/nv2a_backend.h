@@ -169,9 +169,9 @@ enum {
 
 /* One texture stage. mode is the stage's SHADER_STAGE_PROGRAM field
  * (0 none, 1 2D, 2 3D, 3 cube, 4 pass-through, 5 clip plane, 6 bump-env,
- * 7 bump-env with luminance, others dot modes; the CPU rasteriser reads 6
- * and up as zero); valid says the stage's texture registers describe
- * something samplable.
+ * 7 bump-env with luminance, 8 and up the dot-product and dependent-read
+ * modes, Nv2aPixelState.dot_mapping); valid says the stage's texture
+ * registers describe something samplable.
  *
  * Stages 1-3, modes 6 and 7 (xemu psh.c PS_TEXTUREMODES_BUMPENVMAP[_LUM]):
  * the stage samples its texture at its coordinates plus bump_mat times
@@ -204,9 +204,58 @@ typedef struct {
     uint32_t     shadow_func;
     /* SET_SHADER_OTHER_STAGE_INPUT (0x1E78): the stage a bump-env stage
      * reads dU/dV from -- stage 1 always stage 0, stage 2 bits 16-19,
-     * stage 3 bits 20-23 (xemu psh.c input_tex). */
+     * stage 3 bits 20-23 (xemu psh.c input_tex). The dot-product and
+     * dependent-read modes read their input stage the same way. */
     uint32_t     other_stage_input;
+    /* XBA-311, the modes 8 and up (xemu psh.c, NV_texture_shader). A stage
+     * in a dot mode computes dot_i = dot(its s, t, r; map(input texel)),
+     * map from SET_DOT_RGBMAPPING (0x1E74; stage 1 bits 0-3, stage 2 4-7,
+     * stage 3 8-11): 0 the texel's r, g, b as they are, 1 (b - 128) / 127,
+     * 2 two's complement GL-style ((2b + 1) / 255), 3 two's complement over
+     * 127, 4 HILO (g, b, 1), 5-7 signed HILO (g, b) as 1-3 with a third
+     * component sqrt(1 - g^2 - b^2). Mappings 1-7 read the texel's bytes as
+     * fetched; 0 after SET_TEXTURE_FILTER's signed channels. Then:
+     *   0x11 DOTPRODUCT: dot_i, reads zero;
+     *   0x09 DOT_ST: 2D at (dot_i-1, dot_i);
+     *   0x0A DOT_ZW: reads zero; the fragment's depth is dot_i-1 / dot_i, the
+     *        fragment dropped outside 0..1 (GPU only);
+     *   0x0B DOT_RFLCT_DIFF (stage 2): cube at (dot_1, dot_2, dot_3), dot_3
+     *        stage 3's own dot;
+     *   0x0C DOT_RFLCT_SPEC (stage 3): cube at R = 2 N (N.E) / (N.N) - E,
+     *        N = (dot_1, dot_2, dot_3), E the q of stages 1-3;
+     *   0x12 DOT_RFLCT_SPEC_CONST: the same, E = eye (SET_EYE_VECTOR);
+     *   0x0D DOT_STR_3D / 0x0E DOT_STR_CUBE (stage 3): volume / cube at
+     *        (dot_1, dot_2, dot_3);
+     *   0x0F DPNDNT_AR / 0x10 DPNDNT_GB: 2D at the input texel's (a, r) /
+     *        (g, b);
+     *   0x08 BRDF: not modelled, reads zero.
+     * Results are texture coordinates as a PROJECT2D stage's are (texels
+     * for a linear texture). */
+    uint32_t     dot_mapping;
+    float        eye[3];
 } Nv2aPixelState;
+
+/* Stage modes that compute a dot (above), and the ones that read another
+ * stage's texel (bump-env, dot, dependent reads). */
+static inline int nv2a_stage_mode_dot(uint32_t mode)
+{
+    return (mode >= 0x09 && mode <= 0x0E) || mode == 0x11 || mode == 0x12;
+}
+
+static inline int nv2a_stage_mode_reads_stage(uint32_t mode)
+{
+    return mode == 6 || mode == 7 || nv2a_stage_mode_dot(mode) || mode == 0x0F || mode == 0x10;
+}
+
+/* The stage a stage-reading stage reads (xemu psh.c input_tex): stage 1
+ * stage 0, stages 2 and 3 SET_SHADER_OTHER_STAGE_INPUT bits 16-19 / 20-23;
+ * -1 for stage 0 or an input that is not fetched yet (not an earlier
+ * stage), which reads zero. */
+static inline int nv2a_stage_input(uint32_t other_stage_input, int st)
+{
+    uint32_t src = st == 1 ? 0u : (other_stage_input >> (st == 2 ? 16 : 20)) & 0xFu;
+    return st >= 1 && (int)src < st ? (int)src : -1;
+}
 
 /* A vertex-program batch for a back end with NV2A_BACKEND_CAP_PROGRAM.
  *

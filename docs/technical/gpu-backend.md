@@ -1091,7 +1091,7 @@ LOD bias (`SET_TEXTURE_FILTER` bits 0-12, signed 5.8) is a shader uniform
 level 0 (minified textures shimmer there); that is not counted as a gap.
 
 **Formats (XBA-120).** The decoder both paths share (`sample_tex` /
-`decode_texel`) now reads 51 of the 59 NV2A formats (the table in
+`decode_texel`) now reads 51 of the 59 NV2A formats (53 since XBA-311; the table in
 `nv2a_coverage.c`): added the swizzled twins SZ_A8Y8, SZ_R6G5B5, SZ_G8B8,
 SZ_R8B8, SZ_Y16, SZ_YB16YA16, SZ_R5G5B5A1, SZ_R4G4B4A4, SZ_A8B8G8R8,
 SZ_B8G8R8A8, SZ_R8G8B8A8 and the linear LU_IMAGE_SY8, X7SY9, R8B8, G8B8,
@@ -1100,16 +1100,58 @@ formats LU_IMAGE_DEPTH_X8_Y24_FIXED (depth in the top 24 bits, as a Z24S8
 surface stores it) and _Y16_FIXED read as grey. Bump-map formats (D3D's
 V8U8 = G8B8, L6V5U5 = R6G5B5, V16U16 = YB16YA16) hand their bytes over as
 they are; a channel a format lacks reads 1, as alpha does (an assumption
-xemu's own table should confirm); 16-bit values keep their top byte. Still
-counted as unsupported: LU_IMAGE_A8CR8CB8Y8 and LC_IMAGE_A4V6YB6A4U6YA6
-(`d3d8_format_is_swizzled` calls them swizzled, which they are not), the
-swizzled depth formats (0x2A-0x2D, which the same helper calls linear) and
-the float depth formats. A depth format on a projective combiner stage is
+xemu's own table should confirm); 16-bit values keep their top byte. The
+two remaining YUV formats are decoded since XBA-311, BT.601 video range as
+0x24/0x25: LU_IMAGE_A8CR8CB8Y8 (0x26) one AYUV texel a word, A Cr Cb Y from
+the top byte down; LC_IMAGE_A4V6YB6A4U6YA6 (0x34) two texels a word, the
+even one A4 U6 Y6 in bits 15-0, the odd one A4 V6 Y6 in 31-16, U and V
+shared by the pair. Both layouts are read from the names the way 0x24's
+is (CR8 YB8 CB8 YA8 being YUY2's Y0 U Y1 V bytes); xemu decodes neither,
+so a device picture should confirm them. Still counted as unsupported: the
+swizzled depth formats (0x2A-0x2D, which `d3d8_format_is_swizzled` calls
+linear) and the float depth formats. A depth format on a projective combiner stage is
 still a shadow map: compared on the GPU, white on the CPU path (which no
 longer reaches the decoder for it). `SET_TEXTURE_FILTER`'s signed channels
 (bits 28-31: A, R, G, B) are honoured on both paths: the texel's byte read
 as two's complement over 127 after the fetch (`rc_signed`, `nv_s8`), except
 on a stage a bump-env stage reads, which signs dU/dV itself.
+
+**Stage modes 8 and up (XBA-311).** The dot-product and dependent-read
+texture stage modes are drawn on both paths (`rc_stage_fetch` on the CPU,
+`emit_fetch` in `nv2a_gl_shader.c`), after xemu's `psh.c` and
+NV_texture_shader, the rule written out once in `nv2a_backend.h`
+(`Nv2aPixelState.dot_mapping`). A dot stage computes its s, t, r dotted
+with its input stage's texel (`SET_SHADER_OTHER_STAGE_INPUT`, as bump-env)
+mapped by `SET_DOT_RGBMAPPING` (stage 1 bits 0-3, 2 bits 4-7, 3 bits 8-11):
+0 the texel as it is (after the filter's signed channels), 1
+(b - 128) / 127, 2 two's complement GL-style, 3 two's complement over 127,
+4 HILO (g, b, 1), 5-7 signed HILO with sqrt(1 - hi² - lo²) as the third
+component. Mappings 1-7 read the bytes as fetched. HILO is approximate:
+the decoder keeps the top byte of each 16-bit half (in g and b), and xemu
+stubs these mappings. Then DOTPRODUCT reads zero; DOT_ST samples 2D at
+(dot i-1, dot i); DOT_STR_3D / DOT_STR_CUBE a volume / cube at (dot 1,
+dot 2, dot 3); DOT_RFLCT_DIFF (stage 2) the cube at (dot 1, dot 2, stage
+3's dot); DOT_RFLCT_SPEC (stage 3) the cube at R = 2N(N.E)/(N.N) - E, E the
+q of stages 1-3, and DOT_RFLCT_SPEC_CONST the same with E from
+`SET_EYE_VECTOR` (`u_eye`); DPNDNT_AR / _GB sample 2D at the input texel's
+(a, r) / (g, b). Results are coordinates as a PROJECT2D stage's are (times
+`u_tscale` on the GPU, texels for a linear texture). DOT_ZW reads zero and
+replaces the fragment's depth with dot i-1 / dot i, dropping the fragment
+outside 0..1 (`gl_FragDepth`), on the GPU only: the CPU rasteriser tests
+depth before shading and counts it. Bump-env (6, 7) is now drawn by the
+CPU rasteriser too, dU/dV signed texel by texel before the bilinear blend
+as the shader's `nv_dsdtl` does. The back end binds a texture for every
+stage mode that samples (`bind_stage_textures`), a cube for the reflection
+and STR_CUBE modes, a volume for DOT_STR_3D. Left: BRDF (8), which xemu
+does not model either, reads zero and is counted; a mode on a stage it is
+not valid on (xemu `psh_regs.h`) is drawn as far as it can be and counted
+under its name. Open questions a device picture should settle: DOT_ZW
+drops outside 0..1 where the spec says outside the depth range; mode 7
+scales alpha too and does not clamp the scale, as xemu (NV_texture_shader
+clamps it to 0..1 and leaves alpha). `tests/nv2a_gl_shader` checks the generated stages against
+hand-worked pictures (every dot mapping, each lookup, DOT_ZW's depth) and
+compiles random stage programs; `tests/nv2a_gl_coverage` (14) draws them
+through the executor on both paths and compares every pixel.
 
 **Cube and volume textures (XBA-120).** Cube maps (FORMAT bit 2, a
 CUBEMAP stage) were already sampled as `samplerCube` from six faces, each
@@ -1134,8 +1176,8 @@ combiner's constants, fog colour, alpha reference and texture-coordinate
 scales are uniforms, so a title animating a factor does not compile shaders.
 The generator transcribes `nv2a_rc_eval` (input mappings, dot products, mux,
 output scale/bias, the final combiner) and `rc_stage_fetch` (2D/3D projective,
-cube, pass-through, clip plane; bump and dot-product modes read zero, as on
-the CPU). The CPU rasteriser's two other colour rules are kept: stage 0 ×
+cube, pass-through, clip plane, bump-env, the dot-product and dependent-read
+modes; BRDF reads zero, as on the CPU). The CPU rasteriser's two other colour rules are kept: stage 0 ×
 diffuse before a title programs the combiners, and the screen-space path's
 texel-or-flat-colour without depth or alpha test (`Nv2aPixelState.shade`).
 Blend factors, equations, depth and stencil functions arrive in GL's own
@@ -1452,7 +1494,8 @@ counted for both. The names:
 | `point size attenuation` | points with `SET_POINT_PARAMS_ENABLE` on (drawn at `SET_POINT_SIZE`). |
 | `volume texture` | a stage in use has `DIMENSIONALITY` 3, on a path without `NV2A_BACKEND_CAP_VOLUME` (the CPU rasteriser). |
 | `volume texture, DXT` | a DXT volume on the GPU (not decoded: white). |
-| `texture stage mode 0xNN <name>` | dot-product and dependent-read modes (8 and up) on both paths, bump-env (6, 7) on the CPU path: they read zero. |
+| `texture stage mode 0xNN <name>` | BRDF (8, reads zero), a code that is not a mode, or a mode on a stage it is not valid on (xemu `psh_regs.h`: bump-env on stage 0, DOT_ST on stage 1, ...), on both paths. |
+| `dot-product depth replace (CPU rasteriser)` | a DOT_ZW stage on the CPU path: its colour is drawn, its depth is not replaced. |
 | `logic op`, `polygon mode point`, `polygon mode line`, `flat shading` | the state is set for the batch; nothing models it. |
 | `stencil test (CPU rasteriser)` | stencil on, CPU path. |
 | `fixed-function texgen mode`, `fixed-function skin mode` | a fixed-function batch with a texgen value the channel does not have (sphere map on R or Q, a map on Q, an unknown value) or a skin mode above `_4`: read as off. |
@@ -1461,7 +1504,7 @@ counted for both. The names:
 | `batch with no vertex program, matrix or screen-space positions` | the batch is skipped. |
 
 The report prints them every period, most used first (`[GPU] unsupported
-(batches): points x12, texture format 0x26 LU_IMAGE_A8CR8CB8Y8 x40, ...`), and
+(batches): points x12, texture format 0x2F LU_IMAGE_DEPTH_X8_Y24_FLOAT x40, ...`), and
 the status file carries them as `"unsupported":{name: batches}`
 (`recomp_status.h`), which the compat runner and Check my library append to a
 run's blocker ([compat-runner.md](compat-runner.md)). Methods the executor

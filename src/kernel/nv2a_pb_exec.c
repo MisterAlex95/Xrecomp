@@ -1852,6 +1852,20 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
     return decode_texel(t, fmt, p, u, argb);
 }
 
+/* One YUV texel to ARGB: BT.601 video range, the coefficients the D3D8
+ * upload path converts with, so the two paths agree on the colour. */
+static uint32_t yuv_argb(uint32_t y, uint32_t cb, uint32_t cr, uint32_t a)
+{
+    int c = (int)y - 16, cu = (int)cb - 128, cv = (int)cr - 128;
+    int r = (298 * c + 409 * cv + 128) >> 8;
+    int g = (298 * c - 100 * cu - 208 * cv + 128) >> 8;
+    int b = (298 * c + 516 * cu + 128) >> 8;
+    r = r < 0 ? 0 : (r > 255 ? 255 : r);
+    g = g < 0 ? 0 : (g > 255 ? 255 : g);
+    b = b < 0 ? 0 : (b > 255 ? 255 : b);
+    return (a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
 /* Texel u of the row (or swizzled image) at p, in linear format fmt (a
  * swizzled format's linear twin): the format switch of sample_tex, apart so
  * that a volume's 3D Morton index reads through it too. */
@@ -2043,20 +2057,27 @@ static int decode_texel(const Texture *t, uint32_t fmt, const uint8_t *p, uint32
     case 0x25: {                                    /* LC_YB8CR8YA8CB8, UYVY */
         uint32_t yoff = (fmt == 0x24) ? 0u : 1u;
         const uint8_t *g = p + (size_t)(u & ~1u) * 2;
-        int c  = (int)g[(u & 1u) ? 2 + yoff : yoff] - 16;
-        int cu = (int)g[1 - yoff] - 128;
-        int cv = (int)g[3 - yoff] - 128;
-        int r = (298 * c + 409 * cv + 128) >> 8;
-        int gg = (298 * c - 100 * cu - 208 * cv + 128) >> 8;
-        int b = (298 * c + 516 * cu + 128) >> 8;
-        if (r < 0) r = 0;
-        if (r > 255) r = 255;
-        if (gg < 0) gg = 0;
-        if (gg > 255) gg = 255;
-        if (b < 0) b = 0;
-        if (b > 255) b = 255;
-        *argb = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)gg << 8)
-              | (uint32_t)b;
+        *argb = yuv_argb(g[(u & 1u) ? 2 + yoff : yoff], g[1 - yoff], g[3 - yoff], 0xFFu);
+        return 1;
+    }
+
+    /* XBA-311. The names read from the top bit down of a little-endian
+     * word, as 0x24's does (CR8 YB8 CB8 YA8 is YUY2's Y0 U Y1 V bytes).
+     * A8CR8CB8Y8: one texel a word, its own chroma and alpha (AYUV). */
+    case 0x26: {                                    /* LU_IMAGE_A8CR8CB8Y8 */
+        uint32_t t = ((const uint32_t *)p)[u];
+        *argb = yuv_argb(t & 0xFFu, (t >> 8) & 0xFFu, (t >> 16) & 0xFFu, t >> 24);
+        return 1;
+    }
+    /* A4V6YB6A4U6YA6: two texels a word, 16 bits each; the even texel's
+     * half is A4 U6 Y6 (bits 15-0), the odd one's A4 V6 Y6 (31-16), U and V
+     * shared by the pair as in 0x24. Six-bit Y/U/V and four-bit alpha are
+     * scaled to 0..255 as every other format's narrow channels are. */
+    case 0x34: {                                    /* LC_IMAGE_A4V6YB6A4U6YA6 */
+        uint32_t w = ((const uint32_t *)p)[u >> 1];
+        uint32_t h = (u & 1u) ? w >> 16 : w & 0xFFFFu;
+        *argb = yuv_argb(expand(h & 0x3Fu, 6), expand((w >> 6) & 0x3Fu, 6),
+                         expand((w >> 22) & 0x3Fu, 6), expand((h >> 12) & 0xFu, 4));
         return 1;
     }
 
@@ -3556,6 +3577,8 @@ static void current_pixel_state(Nv2aPixelState *p, uint32_t shade, int textured)
         }
     }
     p->other_stage_input = s_reg[0x1E78 / 4];          /* SET_SHADER_OTHER_STAGE_INPUT */
+    p->dot_mapping = s_reg[0x1E74 / 4] & 0xFFFu;       /* SET_DOT_RGBMAPPING */
+    memcpy(p->eye, &s_reg[0x181C / 4], sizeof p->eye); /* SET_EYE_VECTOR */
 }
 
 /* ---- points and lines (XBA-120) -----------------------------------------
@@ -4028,26 +4051,144 @@ static void rc_signed(const Texture *t, float out[4])
     if (sg & 8) out[2] = rc_s8(out[2]);
 }
 
+/* A cube map at direction (x, y, z); a texture that is not a cube at
+ * (x, y), as a CUBEMAP stage reads it. */
+static void rc_cube(const Texture *t, float x, float y, float z, float out[4])
+{
+    float ax = fabsf(x), ay = fabsf(y), az = fabsf(z), ma, sc, tc;
+    uint32_t face;
+    if (!t->cube) {
+        rc_texel(t, 0, x, y, NULL, out);
+        return;
+    }
+    if (ax >= ay && ax >= az) {
+        face = x > 0 ? 0 : 1; ma = ax; sc = x > 0 ? -z : z; tc = -y;
+    } else if (ay >= az) {
+        face = y > 0 ? 2 : 3; ma = ay; sc = x; tc = y > 0 ? z : -z;
+    } else {
+        face = z > 0 ? 4 : 5; ma = az; sc = z > 0 ? x : -x; tc = -y;
+    }
+    if (ma == 0.0f)
+        ma = 1.0f;
+    rc_texel(t, face * tex_face_stride(t), (sc / ma + 1.0f) * 0.5f,
+             (tc / ma + 1.0f) * 0.5f, NULL, out);
+}
+
+/* The bump-env matrix (m00, m01, m10, m11), luminance scale and offset of
+ * stage st: SET_TEXTURE_SET_BUMP_ENV_MAT/_SCALE/_OFFSET(st), words 00, 01,
+ * 11, 10 (xemu pgraph.c's swizzle), scale, offset. */
+static void stage_bump_env(int st, float m[4], float *scale, float *offset)
+{
+    const uint32_t *w = &s_reg[(0x1B28u + 64u * (uint32_t)st) / 4];
+    memcpy(&m[0], &w[0], 4);
+    memcpy(&m[1], &w[1], 4);
+    memcpy(&m[3], &w[2], 4);
+    memcpy(&m[2], &w[3], 4);
+    memcpy(scale, &w[4], 4);
+    memcpy(offset, &w[5], 4);
+}
+
+/* A bump-env stage's dU, dV, L from input stage src's texture at (u, v)
+ * (rc_texel's coordinates) texel by texel, each texel signed before the
+ * bilinear blend (nv_dsdtl in nv2a_gl_shader.c). */
+static void rc_dsdtl(const Texture *t, float u, float v, float out[3])
+{
+    uint32_t mag = (t->filter >> 24) & 0xF, min = (t->filter >> 16) & 0xFF, texel;
+    int lin = mag == 2 || min == 2 || min == 4 || min == 6, k;
+    float fu, fv;
+    int32_t iu, iv;
+    if (tex_size_from_format(t->color)) {
+        u *= (float)t->width;
+        v *= (float)t->height;
+    }
+    if (lin) {
+        u -= 0.5f;
+        v -= 0.5f;
+    }
+    iu = (int32_t)floorf(u);
+    iv = (int32_t)floorf(v);
+    fu = lin ? u - floorf(u) : 0.0f;
+    fv = lin ? v - floorf(v) : 0.0f;
+    out[0] = out[1] = out[2] = 0.0f;
+    for (k = 0; k < 4; k++) {
+        float w = ((k & 1) ? fu : 1.0f - fu) * ((k & 2) ? fv : 1.0f - fv), c[4];
+        if (w == 0.0f)
+            continue;
+        if (!sample_tex(t, 0, (uint32_t)(iu + (k & 1)), (uint32_t)(iv + (k >> 1)), &texel))
+            texel = 0xFFFFFFFFu;
+        nv2a_rc_unpack(texel, c);
+        out[0] += w * rc_s8(c[2]);
+        out[1] += w * rc_s8(c[1]);
+        out[2] += w * c[0];
+    }
+}
+
+/* Stage st's dot mapping (nv2a_backend.h, dot_mapping) of a texel: `as`
+ * the texel as fetched, `sg` after the filter's signed channels. */
+static float rc_map_m(float x, uint32_t m)
+{
+    float b = floorf(x * 255.0f + 0.5f);
+    switch (m) {
+    case 1:  return (b - 128.0f) / 127.0f;
+    case 2:  return b >= 128.0f ? (b - 255.5f) / 127.5f : (b + 0.5f) / 127.5f;
+    default: return (b >= 128.0f ? b - 256.0f : b) / 127.0f;
+    }
+}
+
+static void rc_dotmap(uint32_t m, const float as[4], const float sg[4], float v[3])
+{
+    switch (m) {
+    case 0:
+        v[0] = sg[0]; v[1] = sg[1]; v[2] = sg[2];
+        return;
+    case 1: case 2: case 3:
+        v[0] = rc_map_m(as[0], m); v[1] = rc_map_m(as[1], m); v[2] = rc_map_m(as[2], m);
+        return;
+    case 4:
+        v[0] = as[1]; v[1] = as[2]; v[2] = 1.0f;
+        return;
+    default: {
+        float h = rc_map_m(as[1], m - 4), l = rc_map_m(as[2], m - 4), r = 1.0f - h * h - l * l;
+        v[0] = h; v[1] = l; v[2] = sqrtf(r > 0.0f ? r : 0.0f);
+        return;
+    }
+    }
+}
+
 /* What texture stage `st` contributes, by its SHADER_STAGE_PROGRAM mode
- * (xemu psh.c). Returns 0 when a clip-plane stage kills the pixel. */
-static int rc_stage_fetch(int st, const float c[4], const float *cx,
-                          const float *cy, float out[4])
+ * (xemu psh.c, NV_texture_shader; the rule nv2a_backend.h states and
+ * nv2a_gl_shader.c generates). tc: every stage's coordinates; tt the
+ * earlier stages' texels, `raw` the same before the filter's signed
+ * channels, dot their dots -- stage st's are written. Returns 0 when a
+ * clip-plane stage kills the pixel. */
+static int rc_stage_fetch(int st, const float (*tc)[4], const float *cx,
+                          const float *cy, float (*tt)[4], float (*raw)[4], float *dot)
 {
     const Texture *t = &s_gpu.texs[st];
+    const float *c = tc[st];
+    float *out = tt[st];
     uint32_t mode = (s_gpu.rc.stage_program >> (st * 5)) & 0x1F, j;
     float q = c[3] != 0.0f ? c[3] : 1.0f;
+    int in = nv2a_stage_input(s_reg[0x1E78 / 4], st);
+
+    if (nv2a_stage_mode_dot(mode)) {
+        float v[3] = { 0.0f, 0.0f, 0.0f };
+        if (in >= 0)
+            rc_dotmap((s_reg[0x1E74 / 4] >> ((st - 1) * 4)) & 7, raw[in], tt[in], v);
+        dot[st] = c[0] * v[0] + c[1] * v[1] + c[2] * v[2];
+    }
 
     switch (mode) {
     case 0:                                       /* NONE */
         out[0] = out[1] = out[2] = 0.0f; out[3] = 1.0f;
-        return 1;
+        break;
     case 1: case 2:                               /* PROJECT2D / 3D */
         if (t->color >= 0x2A && t->color <= 0x31) {
             /* A shadow map: this path has no depth compare, and reading the
              * depth as a colour (decoded since XBA-120) would darken what
              * white leaves lit, as before. */
             out[0] = out[1] = out[2] = out[3] = 1.0f;
-            return 1;
+            break;
         }
         if (cx && cy) {                           /* neighbours: the gradient */
             float qx = cx[3] != 0.0f ? cx[3] : 1.0f, qy = cy[3] != 0.0f ? cy[3] : 1.0f;
@@ -4055,39 +4196,23 @@ static int rc_stage_fetch(int st, const float c[4], const float *cx,
             float g[4] = { cx[0] / qx - u, cx[1] / qx - v,
                            cy[0] / qy - u, cy[1] / qy - v };
             rc_texel(t, 0, u, v, g, out);
+            memcpy(raw[st], out, 4 * sizeof(float));
             rc_signed(t, out);
             return 1;
         }
         rc_texel(t, 0, c[0] / q, c[1] / q, NULL, out);
+        memcpy(raw[st], out, 4 * sizeof(float));
         rc_signed(t, out);
         return 1;
-    case 3: {                                     /* CUBEMAP */
-        float x = c[0], y = c[1], z = c[2];
-        float ax = fabsf(x), ay = fabsf(y), az = fabsf(z), ma, sc, tc;
-        uint32_t face;
-        if (!t->cube) {
-            rc_texel(t, 0, c[0], c[1], NULL, out);
-            rc_signed(t, out);
-            return 1;
-        }
-        if (ax >= ay && ax >= az) {
-            face = x > 0 ? 0 : 1; ma = ax; sc = x > 0 ? -z : z; tc = -y;
-        } else if (ay >= az) {
-            face = y > 0 ? 2 : 3; ma = ay; sc = x; tc = y > 0 ? z : -z;
-        } else {
-            face = z > 0 ? 4 : 5; ma = az; sc = z > 0 ? x : -x; tc = -y;
-        }
-        if (ma == 0.0f)
-            ma = 1.0f;
-        rc_texel(t, face * tex_face_stride(t), (sc / ma + 1.0f) * 0.5f,
-                 (tc / ma + 1.0f) * 0.5f, NULL, out);
+    case 3:                                       /* CUBEMAP */
+        rc_cube(t, c[0], c[1], c[2], out);
+        memcpy(raw[st], out, 4 * sizeof(float));
         rc_signed(t, out);
         return 1;
-    }
     case 4:                                       /* PASSTHRU */
         for (j = 0; j < 4; j++)
             out[j] = c[j] < 0.0f ? 0.0f : (c[j] > 1.0f ? 1.0f : c[j]);
-        return 1;
+        break;
     case 5:                                       /* CLIPPLANE */
         out[0] = out[1] = out[2] = out[3] = 0.0f;
         for (j = 0; j < 4; j++) {
@@ -4095,13 +4220,105 @@ static int rc_stage_fetch(int st, const float c[4], const float *cx,
             if (ge ? c[j] >= 0.0f : c[j] < 0.0f)
                 return 0;
         }
-        return 1;
-    default:
-        /* ponytail: bump-env and dot-product modes read zero; they are water
-         * and bump effects -- add them when a title's look depends on one. */
-        out[0] = out[1] = out[2] = out[3] = 0.0f;
-        return 1;
+        break;
+    case 6: case 7: {                             /* BUMPENVMAP[_LUM] */
+        float b[3], m[4], scale, offset, du, dv;
+        uint32_t smode;
+        if (in < 0) {
+            out[0] = out[1] = out[2] = out[3] = 0.0f;
+            break;
+        }
+        smode = (s_gpu.rc.stage_program >> (in * 5)) & 0x1F;
+        if ((smode == 1 || smode == 2) && s_gpu.texs[in].valid && !s_gpu.texs[in].cube
+            && !(s_gpu.texs[in].color >= 0x2A && s_gpu.texs[in].color <= 0x31)) {
+            float iq = tc[in][3] != 0.0f ? tc[in][3] : 1.0f;
+            rc_dsdtl(&s_gpu.texs[in], tc[in][0] / iq, tc[in][1] / iq, b);
+        } else {
+            b[0] = rc_s8(raw[in][2]);
+            b[1] = rc_s8(raw[in][1]);
+            b[2] = raw[in][0];
+        }
+        if (t->cube) {
+            out[0] = out[1] = out[2] = out[3] = 1.0f;
+            break;
+        }
+        stage_bump_env(st, m, &scale, &offset);
+        du = m[0] * b[0] + m[2] * b[1];
+        dv = m[1] * b[0] + m[3] * b[1];
+        rc_texel(t, 0, c[0] + du, c[1] + dv, NULL, out);
+        if (mode == 7)
+            for (j = 0; j < 4; j++)
+                out[j] *= scale * b[2] + offset;
+        break;
     }
+    case 0x09:                                    /* DOT_ST */
+        if (st > 0 && !t->cube)
+            rc_texel(t, 0, dot[st - 1], dot[st], NULL, out);
+        else
+            out[0] = out[1] = out[2] = out[3] = 0.0f;
+        break;
+    case 0x0B:                                    /* DOT_RFLCT_DIFF */
+        if (st == 2) {
+            float n3 = 0.0f, v[3];
+            int in3 = nv2a_stage_input(s_reg[0x1E78 / 4], 3);
+            uint32_t m3 = (s_gpu.rc.stage_program >> 15) & 0x1F;
+            if (nv2a_stage_mode_dot(m3) && in3 >= 0 && in3 < st) {
+                rc_dotmap((s_reg[0x1E74 / 4] >> 8) & 7, raw[in3], tt[in3], v);
+                n3 = tc[3][0] * v[0] + tc[3][1] * v[1] + tc[3][2] * v[2];
+            }
+            rc_cube(t, dot[1], dot[2], n3, out);
+        } else {
+            out[0] = out[1] = out[2] = out[3] = 0.0f;
+        }
+        break;
+    case 0x0C: case 0x12:                         /* DOT_RFLCT_SPEC[_CONST] */
+        if (st == 3) {
+            float n[3] = { dot[1], dot[2], dot[3] }, e[3], nn, ne, r[3];
+            if (mode == 0x0C) {
+                e[0] = tc[1][3]; e[1] = tc[2][3]; e[2] = tc[3][3];
+            } else {
+                memcpy(e, &s_reg[0x181C / 4], sizeof e);  /* SET_EYE_VECTOR */
+            }
+            nn = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+            ne = n[0] * e[0] + n[1] * e[1] + n[2] * e[2];
+            for (j = 0; j < 3; j++)
+                r[j] = nn != 0.0f ? 2.0f * n[j] * ne / nn - e[j] : -e[j];
+            rc_cube(t, r[0], r[1], r[2], out);
+        } else {
+            out[0] = out[1] = out[2] = out[3] = 0.0f;
+        }
+        break;
+    case 0x0D:                                    /* DOT_STR_3D */
+        /* The CPU path has no volumes (counted): the 2D lookup. */
+        if (st == 3 && !t->cube)
+            rc_texel(t, 0, dot[1], dot[2], NULL, out);
+        else
+            out[0] = out[1] = out[2] = out[3] = 0.0f;
+        break;
+    case 0x0E:                                    /* DOT_STR_CUBE */
+        if (st == 3)
+            rc_cube(t, dot[1], dot[2], dot[3], out);
+        else
+            out[0] = out[1] = out[2] = out[3] = 0.0f;
+        break;
+    case 0x0F: case 0x10:                         /* DPNDNT_AR / _GB */
+        if (t->cube)
+            out[0] = out[1] = out[2] = out[3] = 0.0f;
+        else if (in < 0)
+            rc_texel(t, 0, 0.0f, 0.0f, NULL, out);
+        else if (mode == 0x0F)
+            rc_texel(t, 0, tt[in][3], tt[in][0], NULL, out);
+        else
+            rc_texel(t, 0, tt[in][1], tt[in][2], NULL, out);
+        break;
+    default:
+        /* DOTPRODUCT, DOT_ZW (its depth is not replaced here: counted),
+         * BRDF (not modelled) and codes that are not modes: zero. */
+        out[0] = out[1] = out[2] = out[3] = 0.0f;
+        break;
+    }
+    memcpy(raw[st], out, 4 * sizeof(float));
+    return 1;
 }
 
 /* The fixed-function fog unit, per vertex, from the program's oFog.x
@@ -4231,30 +4448,38 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
                         col[k] = l0 * va->d0[k] + l1 * vb->d0[k] + l2 * vc->d0[k];
                     pw = l0 * T->iw[0] + l1 * T->iw[1] + l2 * T->iw[2];
                     if (T->use_rc) {
-                        float d1[4], fog[4], t[4][4], out[4], tc[4];
+                        float d1[4], fog[4], t[4][4], out[4], tc[4][4], raw[4][4], dot[4];
                         int st, j, keep = 1;
                         for (k = 0; k < 4; k++)
                             d1[k] = l0 * va->d1[k] + l1 * vb->d1[k] + l2 * vc->d1[k];
                         fog[0] = T->fogc[0]; fog[1] = T->fogc[1]; fog[2] = T->fogc[2];
                         fog[3] = l0 * T->vfog[0] + l1 * T->vfog[1] + l2 * T->vfog[2];
+                        /* Every stage's coordinates first: a dot stage reads
+                         * the next one's (DOT_RFLCT_DIFF) and earlier q. */
+                        for (st = 0; st < 4; st++) {
+                            dot[st] = 0.0f;
+                            for (j = 0; j < 4; j++)
+                                tc[st][j] = (l0 * T->stc[0][st][j] + l1 * T->stc[1][st][j]
+                                           + l2 * T->stc[2][st][j]) / pw;
+                        }
                         for (st = 0; st < 4 && keep; st++) {
                             if (!((s_gpu.rc.stage_program >> (st * 5)) & 0x1F)) {
                                 t[st][0] = t[st][1] = t[st][2] = 0.0f;
                                 t[st][3] = 1.0f;
+                                memcpy(raw[st], t[st], sizeof t[st]);
                                 continue;
                             }
-                            for (j = 0; j < 4; j++)
-                                tc[j] = (l0 * T->stc[0][st][j] + l1 * T->stc[1][st][j]
-                                       + l2 * T->stc[2][st][j]) / pw;
                             if (aniso) {
                                 /* The same coordinate one pixel right and one
                                  * down: the difference is the gradient. */
                                 float tcx[4], tcy[4];
                                 xf_tc_step(T, st, l0, l1, l2, 0, tcx);
                                 xf_tc_step(T, st, l0, l1, l2, 1, tcy);
-                                keep = rc_stage_fetch(st, tc, tcx, tcy, t[st]);
+                                keep = rc_stage_fetch(st, (const float (*)[4])tc, tcx, tcy,
+                                                      t, raw, dot);
                             } else {
-                                keep = rc_stage_fetch(st, tc, NULL, NULL, t[st]);
+                                keep = rc_stage_fetch(st, (const float (*)[4])tc, NULL, NULL,
+                                                      t, raw, dot);
                             }
                         }
                         if (!keep)
@@ -6182,6 +6407,17 @@ static int backend_caps(uint32_t cap)
     return backend_draws() && (s_backend->caps & cap) == cap;
 }
 
+/* The stages a mode is valid on (xemu psh_regs.h PS_TEXTUREMODES). */
+static int stage_mode_valid(uint32_t mode, int st)
+{
+    static const uint8_t ok[0x13] = {
+        0xF, 0xF, 0xF, 0xF, 0xF, 0xF, 0xE, 0xE,      /* NONE .. BUMPENVMAP_LUM */
+        0xC, 0xC, 0xC, 0x4, 0x8, 0x8, 0x8,          /* BRDF .. DOT_STR_CUBE */
+        0xE, 0xE, 0x6, 0x8                          /* DPNDNT_AR .. DOT_RFLCT_SPEC_CONST */
+    };
+    return mode < 0x13 && ((ok[mode] >> st) & 1);
+}
+
 static void note_batch_gaps(void)
 {
     static int no_rc = -1;
@@ -6217,13 +6453,19 @@ static void note_batch_gaps(void)
                                   : (st == 0 && t->valid);
         if (!mode)
             continue;
-        /* Stage modes: bump-env (6, 7) on the GPU only, the dot-product
-         * and dependent-read modes (8 and up) nowhere; both read zero. */
-        if (mode >= 8 || (mode >= 6 && !(gpu && st > 0))) {
+        /* Stage modes (XBA-311): every one is modelled on both paths but
+         * BRDF; a mode on a stage it is not valid on (psh_regs.h) reads
+         * zero or a partial result, and is counted under its name. DOT_ZW
+         * replaces the depth on the GPU only. */
+        if (mode == 8 || mode > 0x12 || !stage_mode_valid(mode, st)) {
             const char *m = nv2a_stage_mode_name(mode);
             nv2a_gap_note(m ? m : "texture stage mode (not an NV2A mode)", 1);
+        } else if (mode == 0x0A && !gpu) {
+            nv2a_gap_note("dot-product depth replace (CPU rasteriser)", 1);
         }
-        if (!((mode >= 1 && mode <= 3) || mode == 6 || mode == 7) || !t->valid)
+        if (!((mode >= 1 && mode <= 3)
+              || (nv2a_stage_mode_reads_stage(mode) && mode != 0x0A && mode != 0x11))
+            || !t->valid)
             continue;
         used |= 1u << st;
         f = nv2a_tex_format(t->color);
@@ -7575,6 +7817,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         break;
     case 0x1E70: s_gpu.rc.stage_program = param; break;
     case 0x1E78: break;                           /* OTHER_STAGE_INPUT: from s_reg */
+    case 0x1E74: break;                           /* DOT_RGBMAPPING: from s_reg */
+    case 0x181C: case 0x1820: case 0x1824: break; /* EYE_VECTOR: from s_reg */
     case 0x17F8: s_gpu.clip_plane_mode = param; break;
 
     /* Alpha test and fog. */

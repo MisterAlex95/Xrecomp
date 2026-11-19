@@ -73,7 +73,7 @@ any blocker. These words (`tools/compat/blockers.py`) are the ones `heal.py` and
 (the status file's `unsupported`: texture formats, points and lines, volume textures, stage modes, state, by name and
 batches; [gpu-backend.md](gpu-backend.md#what-is-not-drawn-xba-120)) is kept in the run's summary (`unsupported`) and
 named after any blocker but a crash or a launch, the three most used first: « nothing lit on screen; renderer lacks
-texture format 0x26 LU_IMAGE_A8CR8CB8Y8 (40 batches), points (12 batches), +1 more ». The device's library check
+texture format 0x2F LU_IMAGE_DEPTH_X8_Y24_FLOAT (40 batches), points (12 batches), +1 more ». The device's library check
 grades through the same `classify()` (`tools/compat/device.py`), so its words are these.
 
 ## The « Compatibility » page (XBA-73)

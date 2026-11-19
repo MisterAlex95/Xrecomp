@@ -72,6 +72,13 @@ typedef struct {
      * (nv_s8); not for a stage a bump-env stage reads (it signs dU/dV
      * itself). */
     uint32_t tex_signed[4];
+    /* Stage modes 8 and up (XBA-311; Nv2aPixelState.dot_mapping): dep_src[st]
+     * is 0x10 | the input stage of a dot-product or dependent-read stage
+     * (0 when that stage is not fetched yet: the dot or read is of zero);
+     * dot_map[st] 0x10 | the stage's dot mapping (0..7), only for a stage
+     * that computes a dot. Zero for every other stage. */
+    uint32_t dep_src[4];
+    uint32_t dot_map[4];
 } Nv2aGlShaderKey;
 
 enum {
@@ -101,8 +108,10 @@ const char *nv2a_gl_vertex_body(void);
  * Returns the length, or 0 if it did not fit. Uniforms it declares:
  *   sampler2D/samplerCube/sampler2DShadow u_t0..u_t3, vec2 u_tscale[4],
  *   vec4 u_c0[8], u_c1[8], u_fc0, u_fc1, u_fogc, float u_aref,
- *   vec4 u_bm[4] (bump-env matrix per stage: m00, m01, m10, m11) and
- *   vec2 u_bso[4] (bump-env luminance scale, offset per stage). */
+ *   vec4 u_bm[4] (bump-env matrix per stage: m00, m01, m10, m11),
+ *   vec2 u_bso[4] (bump-env luminance scale, offset per stage), vec4 u_lodb
+ *   and vec3 u_eye (SET_EYE_VECTOR, for DOT_RFLCT_SPEC_CONST). A program
+ *   with a DOT_ZW stage writes gl_FragDepth. */
 size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *key, char *buf, size_t cap);
 
 #endif

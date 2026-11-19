@@ -40,13 +40,16 @@ void nv2a_gl_shader_key(const Nv2aPixelState *ps, const Nv2aRenderState *rs,
         for (s = 1; s < 4; s++) {
             uint32_t mode = (key->stage_program >> (s * 5)) & 0x1F, src, smode;
             const Nv2aTexture *t;
+            int in = nv2a_stage_input(ps->other_stage_input, (int)s);
+            if (nv2a_stage_mode_dot(mode))
+                key->dot_map[s] = 0x10 | ((ps->dot_mapping >> ((s - 1) * 4)) & 7);
+            if (in >= 0 && (nv2a_stage_mode_dot(mode) || mode == 0x0F || mode == 0x10))
+                key->dep_src[s] = 0x10 | (uint32_t)in;
             if (mode != 6 && mode != 7)
                 continue;
-            /* xemu psh.c input_tex: stage 1 reads stage 0, stages 2 and 3
-             * the stage SET_SHADER_OTHER_STAGE_INPUT names. */
-            src = s == 1 ? 0 : (ps->other_stage_input >> (s == 2 ? 16 : 20)) & 0xF;
-            if (src >= s)
+            if (in < 0)
                 continue;                   /* not fetched yet: reads zero */
+            src = (uint32_t)in;
             key->bump_src[s] = 0x10 | src;
             smode = (key->stage_program >> (src * 5)) & 0x1F;
             t = &ps->stage[src].tex;
@@ -303,6 +306,53 @@ static void emit_final(Sb *b, const Nv2aGlShaderKey *k)
     sb(b, "    o = vec4(D + C * (1.0 - A) + B * A, G);\n  }\n");
 }
 
+/* Stage st's dot mapping applied to its input stage's texel (the
+ * dot_mapping rule in nv2a_backend.h): mapping 0 reads T (after the
+ * filter's signed channels), the others U, the texel as fetched. */
+static void emit_dotmap(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
+{
+    uint32_t src = k->dep_src[st] & 0xF, m = k->dot_map[st] & 7;
+    char t[8];
+
+    if (!(k->dep_src[st] & 0x10)) {
+        sb(b, "vec3(0.0)");
+        return;
+    }
+    snprintf(t, sizeof t, "%c%u", m && k->tex_signed[src] ? 'U' : 'T', src);
+    switch (m) {
+    case 0:  sb(b, "%s.rgb", t); break;
+    case 1:  sb(b, "nv_m1(%s.rgb)", t); break;
+    case 2:  sb(b, "nv_m2(%s.rgb)", t); break;
+    case 3:  sb(b, "nv_m3(%s.rgb)", t); break;
+    case 4:  sb(b, "vec3(%s.gb, 1.0)", t); break;
+    case 5:  sb(b, "nv_hemi(nv_m1(%s.gbb).xy)", t); break;
+    case 6:  sb(b, "nv_hemi(nv_m2(%s.gbb).xy)", t); break;
+    default: sb(b, "nv_hemi(nv_m3(%s.gbb).xy)", t); break;
+    }
+}
+
+/* P<st>: the stage's dot of its s, t, r with the mapped input texel. */
+static void emit_dot(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
+{
+    sb(b, "  P%u = dot(v_t%u.xyz, ", st, st);
+    emit_dotmap(b, k, st);
+    sb(b, ");\n");
+}
+
+/* T<st> from a cube map at V<st>; a 2D texture at its x, y (what a CUBEMAP
+ * stage does without a cube); white without a texture. */
+static void emit_cube(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
+{
+    if (k->tex_kind[st] == NV2A_GL_TEX_CUBE)
+        sb(b, "  vec4 T%u = texture(u_t%u, V%u, u_lodb[%u]);\n", st, st, st, st);
+    else if (k->tex_kind[st] == NV2A_GL_TEX_2D)
+        sb(b, "  vec4 T%u = texture(u_t%u, V%u.xy * u_tscale[%u], u_lodb[%u]);\n",
+           st, st, st, st, st);
+    else
+        sb(b, "  vec4 T%u = vec4(%s);\n", st,
+           k->tex_kind[st] == NV2A_GL_TEX_NONE ? "1.0" : "0.0");
+}
+
 /* One texture stage's contribution (nv2a_pb_exec.c rc_stage_fetch). */
 static void emit_fetch(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
 {
@@ -368,7 +418,7 @@ static void emit_fetch(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
         /* xemu psh.c: dU, dV the input texel's blue and green as signed
          * bytes, L its red; coordinates (not divided by q) plus the matrix
          * times (dU, dV); mode 7 scales the texel by scale * L + offset.
-         * The CPU path reads these stages as zero. */
+         * rc_stage_fetch does the same on the CPU. */
         uint32_t src = k->bump_src[st] & 0xF, f = k->bump_fetch[src];
         if (!(k->bump_src[st] & 0x10)) {
             sb(b, "  vec4 T%u = vec4(0.0);\n", st);
@@ -393,8 +443,90 @@ static void emit_fetch(Sb *b, const Nv2aGlShaderKey *k, uint32_t st)
             sb(b, "  T%u *= u_bso[%u].x * B%u.z + u_bso[%u].y;\n", st, st, st, st);
         return;
     }
+    case 0x09:                                    /* DOT_ST */
+        emit_dot(b, k, st);
+        if (kind == NV2A_GL_TEX_2D && st > 0)
+            sb(b, "  vec4 T%u = texture(u_t%u, vec2(P%u, P%u) * u_tscale[%u], u_lodb[%u]);\n",
+               st, st, st - 1, st, st, st);
+        else
+            sb(b, "  vec4 T%u = vec4(%s);\n", st, kind == NV2A_GL_TEX_NONE ? "1.0" : "0.0");
+        return;
+    case 0x0A:                                    /* DOT_ZW */
+        emit_dot(b, k, st);
+        if (st > 0)
+            sb(b, "  ZW = P%u != 0.0 ? P%u / P%u : -1.0;\n", st, st - 1, st);
+        sb(b, "  vec4 T%u = vec4(0.0);\n", st);
+        return;
+    case 0x0B:                                    /* DOT_RFLCT_DIFF */
+        emit_dot(b, k, st);
+        if (st == 2) {
+            /* Stage 3's dot, as it will compute it, from an input already
+             * fetched (else zero). */
+            sb(b, "  float N%u = 0.0;\n", st);
+            if ((k->dot_map[3] & 0x10) && (k->dep_src[3] & 0x10) && (k->dep_src[3] & 0xF) < st) {
+                sb(b, "  N%u = dot(v_t3.xyz, ", st);
+                emit_dotmap(b, k, 3);
+                sb(b, ");\n");
+            }
+            sb(b, "  vec3 V%u = vec3(P1, P2, N%u);\n", st, st);
+            emit_cube(b, k, st);
+        } else {
+            sb(b, "  vec4 T%u = vec4(0.0);\n", st);
+        }
+        return;
+    case 0x0C: case 0x12:                         /* DOT_RFLCT_SPEC[_CONST] */
+        emit_dot(b, k, st);
+        if (st == 3) {
+            sb(b, "  vec3 N%u = vec3(P1, P2, P3);\n", st);
+            if (mode == 0x0C)
+                sb(b, "  vec3 E%u = vec3(v_t1.w, v_t2.w, v_t3.w);\n", st);
+            else
+                sb(b, "  vec3 E%u = u_eye;\n", st);
+            sb(b, "  float NN%u = dot(N%u, N%u);\n", st, st, st);
+            sb(b, "  vec3 V%u = NN%u != 0.0 ? 2.0 * N%u * dot(N%u, E%u) / NN%u - E%u : -E%u;\n",
+               st, st, st, st, st, st, st, st);
+            emit_cube(b, k, st);
+        } else {
+            sb(b, "  vec4 T%u = vec4(0.0);\n", st);
+        }
+        return;
+    case 0x0D:                                    /* DOT_STR_3D */
+        emit_dot(b, k, st);
+        if (st == 3 && kind == NV2A_GL_TEX_3D)
+            sb(b, "  vec4 T%u = texture(u_t%u, vec3(vec2(P1, P2) * u_tscale[%u], P3), u_lodb[%u]);\n",
+               st, st, st, st);
+        else if (st == 3 && kind == NV2A_GL_TEX_2D)
+            sb(b, "  vec4 T%u = texture(u_t%u, vec2(P1, P2) * u_tscale[%u], u_lodb[%u]);\n",
+               st, st, st, st);
+        else
+            sb(b, "  vec4 T%u = vec4(%s);\n", st, kind == NV2A_GL_TEX_NONE ? "1.0" : "0.0");
+        return;
+    case 0x0E:                                    /* DOT_STR_CUBE */
+        emit_dot(b, k, st);
+        if (st == 3) {
+            sb(b, "  vec3 V%u = vec3(P1, P2, P3);\n", st);
+            emit_cube(b, k, st);
+        } else {
+            sb(b, "  vec4 T%u = vec4(0.0);\n", st);
+        }
+        return;
+    case 0x0F: case 0x10:                         /* DPNDNT_AR / _GB */
+        if (kind == NV2A_GL_TEX_2D) {
+            if (k->dep_src[st] & 0x10)
+                sb(b, "  vec4 T%u = texture(u_t%u, T%u.%s * u_tscale[%u], u_lodb[%u]);\n",
+                   st, st, k->dep_src[st] & 0xF, mode == 0x0F ? "ar" : "gb", st, st);
+            else
+                sb(b, "  vec4 T%u = texture(u_t%u, vec2(0.0), u_lodb[%u]);\n", st, st, st);
+        } else {
+            sb(b, "  vec4 T%u = vec4(%s);\n", st, kind == NV2A_GL_TEX_NONE ? "1.0" : "0.0");
+        }
+        return;
+    case 0x11:                                    /* DOTPRODUCT */
+        emit_dot(b, k, st);
+        sb(b, "  vec4 T%u = vec4(0.0);\n", st);
+        return;
     default:
-        /* Dot-product modes read zero on the CPU path too. */
+        /* BRDF (8) and codes that are not modes: zero, on the CPU path too. */
         sb(b, "  vec4 T%u = vec4(0.0);\n", st);
         return;
     }
@@ -428,6 +560,26 @@ static void emit_bump_helpers(Sb *b)
           "    acc += w * vec3(nv_s8(t.b), nv_s8(t.g), t.r);\n"
           "  }\n"
           "  return acc;\n"
+          "}\n");
+}
+
+/* The dot mappings (nv2a_backend.h; xemu psh.c sign1, sign2, sign3), on
+ * the byte each channel holds. */
+static void emit_dot_helpers(Sb *b)
+{
+    sb(b, "vec3 nv_m1(vec3 c) {\n"
+          "  return (floor(c * 255.0 + 0.5) - 128.0) / 127.0;\n"
+          "}\n"
+          "vec3 nv_m2(vec3 c) {\n"
+          "  vec3 x = floor(c * 255.0 + 0.5);\n"
+          "  return mix((x + 0.5) / 127.5, (x - 255.5) / 127.5, step(128.0, x));\n"
+          "}\n"
+          "vec3 nv_m3(vec3 c) {\n"
+          "  vec3 x = floor(c * 255.0 + 0.5);\n"
+          "  return mix(x, x - 256.0, step(128.0, x)) / 127.0;\n"
+          "}\n"
+          "vec3 nv_hemi(vec2 h) {\n"
+          "  return vec3(h, sqrt(max(1.0 - dot(h, h), 0.0)));\n"
           "}\n");
 }
 
@@ -470,7 +622,7 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
            "uniform vec4 u_fc0;\nuniform vec4 u_fc1;\nuniform vec4 u_fogc;\n"
            "uniform float u_aref;\n"
            "uniform vec4 u_bm[4];\nuniform vec2 u_bso[4];\n"
-           "uniform vec4 u_lodb;\n"
+           "uniform vec4 u_lodb;\nuniform vec3 u_eye;\n"
            "layout(location = 0) out vec4 o_color;\n");
     /* Point sprites: every stage's coordinates are the position inside the
      * point, (0,0) at its top left -- gl_PointCoord's t runs from the top in
@@ -484,17 +636,35 @@ size_t nv2a_gl_fragment_body(const Nv2aGlShaderKey *k, char *buf, size_t cap)
         && (k->bump_src[1] | k->bump_src[2] | k->bump_src[3]
             | k->tex_signed[0] | k->tex_signed[1] | k->tex_signed[2] | k->tex_signed[3]))
         emit_bump_helpers(&b);
+    for (st = 0; st < 4; st++)
+        if (k->shade == NV2A_SHADE_COMBINERS && (k->dot_map[st] & 0x10)) {
+            emit_dot_helpers(&b);
+            break;
+        }
     sb(&b, "void main() {\n  vec4 o;\n");
 
     if (k->shade == NV2A_SHADE_COMBINERS) {
+        int zw = 0;
+        sb(&b, "  float P0 = 0.0, P1 = 0.0, P2 = 0.0, P3 = 0.0, ZW = 0.0;\n");
         for (st = 0; st < 4; st++) {
             static const char ch[4] = { 'a', 'r', 'g', 'b' };
             uint32_t c;
             emit_fetch(&b, k, st);
+            if (k->tex_signed[st])
+                sb(&b, "  vec4 U%u = T%u;\n", st, st);
             for (c = 0; c < 4; c++)
                 if ((k->tex_signed[st] >> c) & 1)
                     sb(&b, "  T%u.%c = nv_s8(T%u.%c);\n", st, ch[c], st, ch[c]);
+            if (((k->stage_program >> (st * 5)) & 0x1F) == 0x0A && st > 0)
+                zw = 1;
         }
+        /* DOT_ZW: the depth is z / w of the two dots, the fragment dropped
+         * where that is outside 0..1 (NV_texture_shader
+         * DOT_PRODUCT_DEPTH_REPLACE); normalised depth is the stored
+         * depth over its maximum, as the rest of the pipeline keeps it. */
+        if (zw)
+            sb(&b, "  if (!(ZW >= 0.0 && ZW <= 1.0)) discard;\n"
+                   "  gl_FragDepth = ZW;\n");
         /* Only the registers a program can read before writing need a value:
          * zero, r0, r1 and the final-combiner specials. */
         sb(&b, "  vec4 R0 = vec4(0.0), R1 = vec4(0.0), R2 = vec4(0.0);\n"

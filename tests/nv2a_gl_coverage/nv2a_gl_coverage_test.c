@@ -49,6 +49,12 @@
  *      rings: every picture byte for byte the first. Every scene's 240
  *      batches reach the back end, each on the path asked for (XBA-315).
  *
+ * Stage modes 8 and up (XBA-311):
+ *  14. DOT_ST, the dependent reads, DOT_STR_CUBE, the two reflections and
+ *      bump-env drawn by the GL back end and by the CPU rasteriser, every
+ *      pixel compared (a few cube-face ties allowed), hand-worked pixels
+ *      checked, none counted as unsupported.
+ *
  * Uniform shadow (XBA-312):
  *  13. the scene with the shadow off (every uniform sent at every batch)
  *      and on: the same picture, calls left out; with the fixed-function
@@ -980,6 +986,199 @@ int main(void)
         m(0x1B14, (1u << 16) | (1u << 24));
         m(0x1E70, 0);
         m(0x1B00, 0);
+    }
+
+    /* 14. Stage modes 8 and up (XBA-311) and bump-env, the CPU rasteriser
+     * against the GL back end: the same batch drawn both ways over a 16x16
+     * quad, every pixel compared. Stage 0 reads a one-colour normal N;
+     * stages 1-3 get their own float4 coordinates (v10-v12), X and Y
+     * running 0..1 across the quad. The final combiner shows one stage. */
+    {
+        enum { VB2 = VB + 0x1000, ST = 80, NTEX = TEX, GTEX = TEX + 0x100, CTEX = TEX + 0x200 };
+        static const uint32_t face[6] = { 0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu,
+                                          0xFFFFFF00u, 0xFFFFFFFFu, 0xFF00FFFFu };
+        static const struct {
+            const char *name;
+            uint32_t prog, map, n, show;          /* stage modes, dot mapping, N, stage shown */
+            float tc[3][4][3];                    /* stages 1-3: s t r q = base + X dx + Y dy */
+            int cube, bump;                       /* the stage holding the cube (0: none) */
+            uint32_t want;                        /* pixel (10, 10) by hand, or 0 */
+        } cases[] = {
+            /* map 3: N (-1, 0, 1); dot1 = X, dot2 = Y: texel (X * 4, Y * 4). */
+            { "DOT_ST", 0x1 | 0x11 << 5 | 0x09 << 10, 0x33, 0xFF81007Fu, 2,
+              { { { 0.3f, 0, 0 }, { 0.9f, 0, 0 }, { 0.3f, 1, 0 }, { 1, 0, 0 } },
+                { { 0.3f, 0, 0 }, { 0.9f, 0, 0 }, { 0.3f, 0, 1 }, { 1, 0, 0 } } }, 0, 0,
+              0x141400u },
+            /* The same with only SET_DOT_RGBMAPPING changed (0: N as it is):
+             * another picture (checked below), the same on both paths. */
+            { "DOT_ST map 0", 0x1 | 0x11 << 5 | 0x09 << 10, 0x00, 0xFF81007Fu, 2,
+              { { { 0.3f, 0, 0 }, { 0.9f, 0, 0 }, { 0.3f, 1, 0 }, { 1, 0, 0 } },
+                { { 0.3f, 0, 0 }, { 0.9f, 0, 0 }, { 0.3f, 0, 1 }, { 1, 0, 0 } } }, 0, 0, 0 },
+            /* A 0x60, R 0xE0: texel (1, 3). */
+            { "DPNDNT_AR", 0x1 | 0x0F << 5, 0, 0x60E020A0u, 1, { { { 0 } } }, 0, 0, 0x3C8C00u },
+            { "DPNDNT_GB", 0x1 | 0x10 << 5, 0, 0x60E020A0u, 1, { { { 0 } } }, 0, 0, 0x146400u },
+            /* map 0, N (0, 1, 0): each dot is the stage's t. Directions
+             * across the quad cross every face but -Z. */
+            { "DOT_STR_CUBE", 0x1 | 0x11 << 5 | 0x11 << 10 | 0x0E << 15, 0, 0xFF00FF00u, 3,
+              { { { 0.77f, 0, 0 }, { -1, 2, 0 }, { -0.4f, 0, 0 }, { 1, 0, 0 } },
+                { { 0.77f, 0, 0 }, { -0.9f, 0, 1.7f }, { -0.4f, 0, 0 }, { 1, 0, 0 } },
+                { { 0.77f, 0, 0 }, { 0.45f, 0, 0 }, { -0.4f, 0, 0 }, { 1, 0, 0 } } }, 3, 0, 0 },
+            /* Eye from the q: E (0.3, 0.2 + Y, 1). */
+            { "DOT_RFLCT_SPEC", 0x1 | 0x11 << 5 | 0x11 << 10 | 0x0C << 15, 0, 0xFF00FF00u, 3,
+              { { { 0.77f, 0, 0 }, { -1, 2, 0 }, { -0.4f, 0, 0 }, { 0.3f, 0, 0 } },
+                { { 0.77f, 0, 0 }, { -0.9f, 0, 1.7f }, { -0.4f, 0, 0 }, { 0.2f, 0, 1 } },
+                { { 0.77f, 0, 0 }, { 0.45f, 0, 0 }, { -0.4f, 0, 0 }, { 1, 0, 0 } } }, 3, 0, 0 },
+            /* The eye from SET_EYE_VECTOR (0.9, 0.2, -0.5), the q ignored. */
+            { "DOT_RFLCT_SPEC_CONST", 0x1 | 0x11 << 5 | 0x11 << 10 | 0x12 << 15, 0, 0xFF00FF00u, 3,
+              { { { 0.77f, 0, 0 }, { -1, 2, 0 }, { -0.4f, 0, 0 }, { 0.3f, 0, 0 } },
+                { { 0.77f, 0, 0 }, { -0.9f, 0, 1.7f }, { -0.4f, 0, 0 }, { 0.2f, 0, 1 } },
+                { { 0.77f, 0, 0 }, { 0.45f, 0, 0 }, { -0.4f, 0, 0 }, { 1, 0, 0 } } }, 3, 0, 0 },
+            /* Stage 2 looks up (dot1, dot2, stage 3's dot). */
+            { "DOT_RFLCT_DIFF", 0x1 | 0x11 << 5 | 0x0B << 10 | 0x0C << 15, 0, 0xFF00FF00u, 2,
+              { { { 0.77f, 0, 0 }, { -1, 2, 0 }, { -0.4f, 0, 0 }, { 1, 0, 0 } },
+                { { 0.77f, 0, 0 }, { -0.9f, 0, 1.7f }, { -0.4f, 0, 0 }, { 1, 0, 0 } },
+                { { 0.77f, 0, 0 }, { -0.45f, 0, 0 }, { -0.4f, 0, 0 }, { 1, 0, 0 } } }, 2, 0, 0 },
+            /* Bump-env: dU 1 (B 0x7F), dV -1 (G 0x81), matrix 0.25: one
+             * texel right and up of the stage's own (X, Y). */
+            { "BUMPENVMAP", 0x1 | 0x06 << 5, 0, 0xFF00817Fu, 1,
+              { { { 0, 1, 0 }, { 0, 0, 1 }, { 0, 0, 0 }, { 1, 0, 0 } } }, 0, 1, 0 },
+        };
+        static uint32_t gl_px[16 * 16], first[16 * 16];
+        uint32_t c, k, st, x, y;
+        int total_bad = 0;
+
+        m(0x1E60, 1);                           /* COMBINER_CONTROL: 1 stage */
+        m(0x0288, 0);
+        m(0x028C, 0x30u << 8);                  /* G = 1 */
+        /* Vertices: float3, D3DCOLOR, then t0..t3 as float4, 80 bytes. */
+        m(0x1720, VB2);      m(0x1760, 2 | (3 << 4) | (ST << 8));
+        m(0x172C, VB2 + 12); m(0x176C, 0 | (4 << 4) | (ST << 8));
+        for (st = 0; st < 4; st++) {
+            m(0x1744 + 4 * st, VB2 + 16 + 16 * st);
+            m(0x1784 + 4 * st, 2 | (4 << 4) | (ST << 8));
+        }
+        /* Textures: N 2x2, the 4x4 gradient (texel (x, y) is 40x + 20,
+         * 40y + 20, 0), a cube of 4x4 faces 128 bytes apart. */
+        for (y = 0; y < 4; y++)
+            for (x = 0; x < 4; x++)
+                put32(GTEX + 4 * xbox_swizzle_offset_3d(x, y, 0, 4, 4, 1),
+                      0xFF000000u | (40 * x + 20) << 16 | (40 * y + 20) << 8);
+        for (k = 0; k < 6; k++)
+            for (x = 0; x < 16; x++)
+                put32(CTEX + 128 * k + 4 * x, face[k]);
+        for (c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+            uint32_t bad = 0, pass;
+            for (k = 0; k < 4; k++)
+                put32(NTEX + 4 * k, cases[c].n);
+            for (st = 0; st < 4; st++) {
+                uint32_t b = 0x40 * st, cube = cases[c].cube && cases[c].cube == (int)st;
+                if (st == 0) {
+                    m(0x1B00, NTEX);
+                    m(0x1B04, (0x06u << 8) | (2u << 4) | (1u << 16) | (1u << 20) | (1u << 24));
+                } else if (cube && cases[c].cube) {
+                    m(0x1B00 + b, CTEX);
+                    m(0x1B04 + b, (0x06u << 8) | (2u << 4) | (1u << 2) | (1u << 16) | (2u << 20)
+                                  | (2u << 24));
+                } else {
+                    m(0x1B00 + b, GTEX);
+                    m(0x1B04 + b, (0x06u << 8) | (2u << 4) | (1u << 16) | (2u << 20) | (2u << 24));
+                }
+                m(0x1B08 + b, 0x0303);          /* clamp */
+                m(0x1B0C + b, 1u << 30);
+                m(0x1B14 + b, (1u << 16) | (1u << 24));   /* nearest */
+            }
+            if (cases[c].bump) {
+                mf(0x1B28 + 0x40, 0.25f);       /* m00 */
+                mf(0x1B2C + 0x40, 0.0f);        /* m01 */
+                mf(0x1B30 + 0x40, 0.25f);       /* m11 */
+                mf(0x1B34 + 0x40, 0.0f);        /* m10 */
+            }
+            m(0x1E70, cases[c].prog);
+            m(0x1E74, cases[c].map);            /* SET_DOT_RGBMAPPING */
+            m(0x1E78, 0);                       /* every stage reads stage 0 */
+            mf(0x181C, 0.9f);                   /* SET_EYE_VECTOR */
+            mf(0x1820, 0.2f);
+            mf(0x1824, -0.5f);
+            m(0x0288, 0x08u + cases[c].show);   /* final: D = the stage shown */
+            for (k = 0; k < 4; k++) {
+                float X = (k == 1 || k == 2) ? 1.0f : 0.0f, Y = k >= 2 ? 1.0f : 0.0f;
+                uint32_t at = VB2 + ST * k, j;
+                putf(at, nx(k == 1 || k == 2 ? 24 : 8));
+                putf(at + 4, ny(k >= 2 ? 24 : 8));
+                putf(at + 8, 0.5f);
+                put32(at + 12, 0xFFFFFFFFu);
+                putf(at + 16, 0.5f); putf(at + 20, 0.5f); putf(at + 24, 0); putf(at + 28, 1);
+                for (st = 1; st < 4; st++)
+                    for (j = 0; j < 4; j++) {
+                        const float *t = cases[c].tc[st - 1][j];
+                        putf(at + 16 + 16 * st + 4 * j, t[0] + t[1] * X + t[2] * Y);
+                    }
+                if (cases[c].tc[0][3][0] == 0 && cases[c].tc[0][3][1] == 0)
+                    for (st = 1; st < 4; st++)
+                        putf(at + 16 + 16 * st + 12, 1.0f);   /* q 1 where none given */
+            }
+            for (pass = 0; pass < 2; pass++) {
+                if (pass)
+                    nv2a_backend_register(NULL);
+                clear_black();
+                draw(8, 0, 4);
+                if (!pass)
+                    readback();
+                for (y = 0; y < 16; y++)
+                    for (x = 0; x < 16; x++) {
+                        uint32_t p = px(8 + x, 8 + y), q = gl_px[y * 16 + x], j;
+                        if (!pass) {
+                            gl_px[y * 16 + x] = p;
+                            continue;
+                        }
+                        for (j = 0; j < 24; j += 8)
+                            if (abs((int)((p >> j) & 0xFF) - (int)((q >> j) & 0xFF)) > 2) {
+                                if (bad++ < 3)
+                                    printf("   %s pixel %u,%u: GL %06X, CPU %06X\n",
+                                           cases[c].name, x, y, q, p);
+                                break;
+                            }
+                    }
+                if (pass)
+                    nv2a_gl_install_from_env();
+            }
+            /* Cube cases: a pixel whose direction ties two faces may land
+             * on either; a handful at most. */
+            if (c == 0)
+                memcpy(first, gl_px, sizeof first);
+            if (c == 1) {
+                uint32_t same = 0;
+                for (k = 0; k < 256; k++)
+                    same += gl_px[k] == first[k];
+                printf("14. DOT_ST, mapping 3 then 0: %u of 256 pixels the same\n", same);
+                if (same > 128)
+                    total_bad++;
+            }
+            printf("14. %s: %u of 256 pixels differ between GL and the CPU rasteriser, (10,10) %06X\n",
+                   cases[c].name, bad, gl_px[2 * 16 + 2]);
+            if (bad > (cases[c].cube ? 4u : 0u))
+                total_bad++;
+            if (cases[c].want && gl_px[2 * 16 + 2] != cases[c].want) {
+                printf("   %s: (10,10) want %06X\n", cases[c].name, cases[c].want);
+                total_bad++;
+            }
+            {
+                /* Not counted as unsupported: the stage modes drawn. */
+                uint32_t mo;
+                for (st = 1; st < 4; st++)
+                    if ((mo = (cases[c].prog >> (5 * st)) & 0x1F) != 0)
+                        CHECK(nv2a_gap_count(nv2a_stage_mode_name(mo)) == 0);
+            }
+        }
+        CHECK(total_bad == 0);
+        for (st = 0; st < 4; st++) {
+            m(0x1B00 + 0x40 * st, 0);
+            m(0x1B0C + 0x40 * st, 0);
+        }
+        m(0x1E70, 0);
+        m(0x1E74, 0);
+        m(0x0288, 0);
+        arrays();
     }
 
     /* 6. Nothing counted as unsupported; the CPU rasteriser draws none and

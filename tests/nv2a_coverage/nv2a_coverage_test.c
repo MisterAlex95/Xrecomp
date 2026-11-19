@@ -10,10 +10,12 @@
  *   2. method names from xemu's list, arrays and light blocks included;
  *      mip level offsets (each level after the last, in its own layout);
  *   3. a batch of points, a texture format nothing decodes, a volume
- *      texture, logic op, a dot-product stage mode and a texgen mode the
- *      channel does not have (sphere map on R; XBA-306 models the others)
- *      are each counted once per batch under their names, and reach the
- *      status file's "unsupported";
+ *      texture, logic op, BRDF, a stage mode on a stage it is not valid
+ *      on, DOT_ZW's depth on the CPU and a texgen mode the channel does
+ *      not have (sphere map on R; XBA-306 models the others) are each
+ *      counted once per batch under their names, and reach the status
+ *      file's "unsupported"; the stage modes and YUV formats XBA-311
+ *      models are not;
  *   4. the [GPU] report runs and the status file's "unmodelled" names the
  *      method nothing models (SET_LOGIC_OP).
  *   5. whole-image decode (the GL back end's uploads) reads, for every
@@ -223,6 +225,11 @@ static void check_new_formats(void)
         { 0x3A, 4, 0x11223344u, 0x11443322u },   /* SZ_A8B8G8R8 */
         { 0x3B, 4, 0x11223344u, 0x44332211u },   /* SZ_B8G8R8A8 */
         { 0x3C, 4, 0x11223344u, 0x44112233u },   /* SZ_R8G8B8A8 */
+        /* XBA-311, BT.601 video range: Y 81, Cb 90, Cr 240 is red. */
+        { 0x26, 4, 0xC0F05A51u, 0xC0FF0000u },   /* LU_IMAGE_A8CR8CB8Y8: A Cr Cb Y */
+        /* The even texel: A4 U6 Y6 in bits 15-0 (8, 0x16, 0x14), V6 in
+         * 27-22 (0x3C); six bits scale to 81, 89, 242, four to 0x88. */
+        { 0x34, 2, 0x0F008594u, 0x88FF0000u },   /* LC_IMAGE_A4V6YB6A4U6YA6 */
     };
     size_t i;
     int bad = 0;
@@ -243,8 +250,27 @@ static void check_new_formats(void)
             bad++;
         }
     }
+    {
+        /* 0x34's odd texel: its own A4 Y6 in bits 31-16 (4, 0x3F), the
+         * pair's U and V. */
+        Nv2aTexture t;
+        uint32_t out[2] = { 0, 0 }, raw = 0x4F3F8594u;
+        memset(&t, 0, sizeof t);
+        t.offset = 0x30000;
+        t.width = 2;
+        t.height = 1;
+        t.pitch = 4;
+        t.color = 0x34;
+        t.levels = 1;
+        memcpy(s_mem + 0x30000, &raw, 4);
+        if (!nv2a_backend_decode_texture(&t, out) || out[0] != 0x88FF0000u
+            || out[1] != 0x44FFC9C8u) {
+            printf("format 0x34 pair: 0x%08X 0x%08X\n", out[0], out[1]);
+            bad++;
+        }
+    }
     CHECK(bad == 0);
-    printf("2c. added formats: %d of %d wrong\n", bad, (int)(sizeof c / sizeof c[0]));
+    printf("2c. added formats: %d of %d wrong\n", bad, (int)(sizeof c / sizeof c[0]) + 1);
 }
 
 /* 5. Whole-image decode against one texel at a time. */
@@ -282,7 +308,7 @@ static int decode_matches(uint32_t fmt, uint32_t w, uint32_t h, uint32_t pitch)
             one.pitch = 4;
             if (f->swizzled) {
                 one.offset = DEC_AT + swizzle_offset(x, y, w, h) * f->bytes;
-            } else if (fmt == 0x24 || fmt == 0x25) {    /* YUV: two texels a group */
+            } else if (fmt == 0x24 || fmt == 0x25 || fmt == 0x34) {  /* YUV: two texels a group */
                 one.offset = DEC_AT + y * pitch + (x & ~1u) * 2u;
                 one.width = 2;
                 one.pitch = 4;
@@ -318,7 +344,7 @@ static void check_decode_walk(void)
             uint32_t w = sz[i][0], h = sz[i][1], pitch = w * f->bytes;
             if (!f->swizzled) {                     /* odd sizes, padded rows */
                 w = 1 + rnd() % 100u;
-                if (fmt == 0x24 || fmt == 0x25)
+                if (fmt == 0x24 || fmt == 0x25 || fmt == 0x34)
                     w = (w + 1) & ~1u;
                 h = 1 + rnd() % 60u;
                 pitch = (w * f->bytes + 4u * (rnd() % 4u) + 3u) & ~3u;
@@ -470,12 +496,17 @@ int main(void)
     texture0(0x06, 2);                        /* SZ_A8R8G8B8: decoded */
     draw(8, 4);                               /* QUADS */
     CHECK(nv2a_gap_count("texture format 0x06 SZ_A8R8G8B8") == 0);
-    texture0(0x26, 2);                        /* LU_IMAGE_A8CR8CB8Y8: nothing decodes it */
+    texture0(0x26, 2);                        /* LU_IMAGE_A8CR8CB8Y8: decoded (XBA-311) */
     m(0x1B10, 32u << 16);                     /* CONTROL1: pitch (linear) */
     m(0x1B1C, (8u << 16) | 8u);               /* IMAGE_RECT 8x8 */
     draw(8, 4);
+    CHECK(nv2a_gap_count("texture format 0x26 LU_IMAGE_A8CR8CB8Y8") == 0);
+    texture0(0x2F, 2);                        /* LU_IMAGE_DEPTH_X8_Y24_FLOAT: nothing decodes it */
+    m(0x1B10, 32u << 16);
+    m(0x1B1C, (8u << 16) | 8u);
     draw(8, 4);
-    CHECK(nv2a_gap_count("texture format 0x26 LU_IMAGE_A8CR8CB8Y8") == 2);
+    draw(8, 4);
+    CHECK(nv2a_gap_count("texture format 0x2F LU_IMAGE_DEPTH_X8_Y24_FLOAT") == 2);
     texture0(0x06, 3);                        /* a volume texture */
     draw(8, 4);
     CHECK(nv2a_gap_count("volume texture") == 1);
@@ -496,21 +527,38 @@ int main(void)
     draw(8, 4);
     m(0x03C8, 0);
     CHECK(nv2a_gap_count("fixed-function texgen mode") == 1);
-    /* Combiners with stage 1 in a dot-product mode. */
+    /* Combiners with the stage modes XBA-311 models: none is counted. */
     m(0x1E60, 0x00001001u);                   /* COMBINER_CONTROL: 1 stage */
-    m(0x1E70, 0x1u | (0x11u << 5));           /* stage 0 2D, stage 1 DOTPRODUCT */
     m(0x0288, 0x0000000Cu);
+    m(0x1E70, 0x1u | (0x11u << 5) | (0x09u << 10));  /* 2D, DOTPRODUCT, DOT_ST */
     draw(8, 4);
-    CHECK(nv2a_gap_count("texture stage mode 0x11 DOTPRODUCT") == 1);
-    /* Bump-env on stage 1: the CPU rasteriser reads zero; a back end with
-     * the pixel state draws it. */
-    m(0x1E70, 0x1u | (0x06u << 5));
+    m(0x1E70, 0x1u | (0x11u << 5) | (0x0Bu << 10) | (0x0Cu << 15));  /* reflections */
+    draw(8, 4);
+    m(0x1E70, 0x1u | (0x0Fu << 5) | (0x10u << 10) | (0x06u << 15));  /* AR, GB, bump-env */
+    draw(8, 4);
+    CHECK(nv2a_gap_count("texture stage mode 0x11 DOTPRODUCT") == 0);
+    CHECK(nv2a_gap_count("texture stage mode 0x09 DOT_ST") == 0);
+    CHECK(nv2a_gap_count("texture stage mode 0x0C DOT_RFLCT_SPEC") == 0);
+    CHECK(nv2a_gap_count("texture stage mode 0x0F DPNDNT_AR") == 0);
+    CHECK(nv2a_gap_count("texture stage mode 0x06 BUMPENVMAP") == 0);
+    /* Still counted: BRDF, a mode on a stage it is not valid on (DOT_ST
+     * on stage 1, bump-env on stage 0), DOT_ZW's depth on the CPU. */
+    m(0x1E70, 0x1u | (0x11u << 5) | (0x08u << 10));
+    draw(8, 4);
+    CHECK(nv2a_gap_count("texture stage mode 0x08 BRDF") == 1);
+    m(0x1E70, 0x1u | (0x09u << 5));
+    draw(8, 4);
+    CHECK(nv2a_gap_count("texture stage mode 0x09 DOT_ST") == 1);
+    m(0x1E70, 0x06u);
     draw(8, 4);
     CHECK(nv2a_gap_count("texture stage mode 0x06 BUMPENVMAP") == 1);
-    nv2a_backend_register(&s_backend_px);
+    m(0x1E70, 0x1u | (0x11u << 5) | (0x0Au << 10));
+    draw(8, 4);
+    CHECK(nv2a_gap_count("dot-product depth replace (CPU rasteriser)") == 1);
+    nv2a_backend_register(&s_backend_px);     /* a back end with the pixel state */
     draw(8, 4);
     CHECK(s_be.draws == 1);
-    CHECK(nv2a_gap_count("texture stage mode 0x06 BUMPENVMAP") == 1);
+    CHECK(nv2a_gap_count("dot-product depth replace (CPU rasteriser)") == 1);
     nv2a_backend_register(NULL);
     m(0x1E70, 0x1u);
 
@@ -518,7 +566,7 @@ int main(void)
     l = last_line(path);
     printf("3. status line: %s", l);
     CHECK(strstr(l, "\"points\":1") != NULL);
-    CHECK(strstr(l, "\"texture format 0x26 LU_IMAGE_A8CR8CB8Y8\":2") != NULL);
+    CHECK(strstr(l, "\"texture format 0x2F LU_IMAGE_DEPTH_X8_Y24_FLOAT\":2") != NULL);
     CHECK(strstr(l, "\"volume texture\":1") != NULL);
     CHECK(strstr(l, "\"logic op\":1") != NULL);
 

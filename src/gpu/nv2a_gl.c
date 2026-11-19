@@ -2688,6 +2688,7 @@ typedef struct {
     GLint u_bm, u_bso;              /* -1 without a bump-env stage */
     GLint u_psize;                  /* the vertex shader's point size */
     GLint u_lodb;                   /* each stage's LOD bias (vec4) */
+    GLint u_eye;                    /* SET_EYE_VECTOR (DOT_RFLCT_SPEC_CONST) */
     /* With a translated vertex program (vsh_hash != 0): its uniforms, the
      * location of each c[i] (-1 where the compiler dropped it), and the
      * constant serial this program's copy of c[] is synced to. */
@@ -2705,7 +2706,7 @@ typedef struct {
      * (allocated at the first sync_constants). */
     GLuint us_prog;
     uint32_t us_ok;
-    float us[126];
+    float us[129];
     float (*cshadow)[4];
     uint32_t cvalid[6];
 } GlProg;
@@ -3142,6 +3143,7 @@ static void prog_setup(GlProg *p, int program)
     p->u_bso = glGetUniformLocation(p->prog, "u_bso");
     p->u_psize = glGetUniformLocation(p->prog, "u_psize");
     p->u_lodb = glGetUniformLocation(p->prog, "u_lodb");
+    p->u_eye = glGetUniformLocation(p->prog, "u_eye");
     if (program) {
         p->u_xf = glGetUniformLocation(p->prog, "u_xf");
         p->u_fog = glGetUniformLocation(p->prog, "u_fog");
@@ -3421,6 +3423,7 @@ static void skip_init(void)
     s_standin.u_vp = s_standin.u_tscale = s_standin.u_c0 = s_standin.u_c1 = -1;
     s_standin.u_fc0 = s_standin.u_fc1 = s_standin.u_fogc = s_standin.u_aref = -1;
     s_standin.u_bm = s_standin.u_bso = s_standin.u_psize = s_standin.u_lodb = -1;
+    s_standin.u_eye = -1;
     s_standin.u_xf = s_standin.u_fog = -1;
     s_standin.const_synced = ~0ull;    /* never uploads constants */
 }
@@ -4545,14 +4548,19 @@ static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], floa
         kind[st] = NV2A_GL_TEX_NONE;
         tscale[st * 2] = tscale[st * 2 + 1] = 1.0f;
         s_stage_rt[st] = NULL;
-        /* Combiners: 2D, 3D, cube, and bump-env (6, 7) from stage 1 on. */
+        /* Combiners: 2D, 3D, cube, and from stage 1 on bump-env (6, 7)
+         * and the dot-product and dependent-read modes that sample
+         * (XBA-311; DOTPRODUCT and DOT_ZW do not, BRDF is not modelled). */
         if (ps->shade == NV2A_SHADE_COMBINERS
-            ? !((mode >= 1 && mode <= 3) || (st && (mode == 6 || mode == 7)))
+            ? !((mode >= 1 && mode <= 3)
+                || (st && nv2a_stage_mode_reads_stage(mode) && mode != 0x0A && mode != 0x11))
             : (st || !mode))
             continue;
         if (!ts->valid)
             continue;
-        if (ps->shade == NV2A_SHADE_COMBINERS && mode == 3 && ts->tex.cube)
+        /* Cube lookups: CUBEMAP, the reflections, DOT_STR_CUBE. */
+        if (ps->shade == NV2A_SHADE_COMBINERS && ts->tex.cube
+            && (mode == 3 || mode == 0x0B || mode == 0x0C || mode == 0x0E || mode == 0x12))
             cube = 1;
         if (ps->shade == NV2A_SHADE_COMBINERS && (mode == 1 || mode == 2)
             && shadow_kind(ts->tex.color)) {
@@ -4565,7 +4573,7 @@ static void bind_stage_textures(const Nv2aPixelState *ps, uint32_t kind[4], floa
         if (ts->tex.depth > 1) {
             /* A volume (XBA-120): PROJECT2D/3D on the combiners, stage 0
              * otherwise; never a render target. */
-            if (ps->shade == NV2A_SHADE_COMBINERS && mode != 1 && mode != 2)
+            if (ps->shade == NV2A_SHADE_COMBINERS && mode != 1 && mode != 2 && mode != 0x0D)
                 continue;
             if (!(e = tex_get(&ts->tex, 0, (int)st)))
                 continue;
@@ -4638,11 +4646,12 @@ static void break_feedback(GlRT *target)
 enum {
     NV_GL_U_VP, NV_GL_U_XF, NV_GL_U_FOG, NV_GL_U_TSCALE, NV_GL_U_LODB, NV_GL_U_C0, NV_GL_U_C1,
     NV_GL_U_FC0, NV_GL_U_FC1, NV_GL_U_FOGC, NV_GL_U_BM, NV_GL_U_BSO, NV_GL_U_AREF, NV_GL_U_PSIZE,
+    NV_GL_U_EYE,
     NV_GL_NU
 };
-/* Where each one's floats are in GlProg.us (sizes 4 4 4 8 4 32 32 4 4 4 16 8 1 1). */
+/* Where each one's floats are in GlProg.us (sizes 4 4 4 8 4 32 32 4 4 4 16 8 1 1 3). */
 static const uint8_t s_us_off[NV_GL_NU + 1] = {
-    0, 4, 8, 12, 20, 24, 56, 88, 92, 96, 100, 116, 124, 125, 126
+    0, 4, 8, 12, 20, 24, 56, 88, 92, 96, 100, 116, 124, 125, 126, 129
 };
 static int s_ushadow = -1;          /* RECOMP_GPU_UNIFORM_SHADOW (default on), -1 not read */
 
@@ -4721,6 +4730,8 @@ static void set_pixel_uniforms(GlProg *p, const Nv2aPixelState *ps,
             if (p->u_bso >= 0 && !us_same(p, NV_GL_U_BSO, bso))
                 glUniform2fv(p->u_bso, 4, bso);
         }
+        if (p->u_eye >= 0 && !us_same(p, NV_GL_U_EYE, ps->eye))
+            glUniform3fv(p->u_eye, 1, ps->eye);
     }
     v[0] = (float)(rs->alpha_ref & 0xFF);
     if (!us_same(p, NV_GL_U_AREF, v))

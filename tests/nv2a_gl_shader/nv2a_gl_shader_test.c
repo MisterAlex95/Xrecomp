@@ -6,7 +6,11 @@
  * nv2a_rc_eval() computes from the same inputs. Programs are random (every
  * input mapping, output scale/bias, dot products, the final combiner) plus a
  * few fixed ones D3D writes, so a rule that drifts between the two shows up
- * as a pixel off by more than rounding.
+ * as a pixel off by more than rounding. Then shadow maps, bump-env, and
+ * the stage modes 8 and up (XBA-311: dot products in every dot mapping,
+ * DOT_ST, the reflections and cube / volume lookups, dependent reads,
+ * DOT_ZW's depth) against values worked out by hand, and random stage
+ * programs, illegal ones included, that must compile.
  *
  * Needs a GL context (headless CGL on macOS, EGL elsewhere); without one the
  * GPU half is skipped (exit 77) after the text checks. */
@@ -61,6 +65,460 @@ static GLuint compile(GLenum type, const char *body)
 
 static float q8(float x) { return (float)(int)(x * 255.0f + 0.5f) / 255.0f; }
 
+static GLuint s_fbo;
+
+/* ---- stage modes 8 and up (XBA-311) ------------------------------------ *
+ * Every expected pixel here is worked out by hand from the rule in
+ * nv2a_backend.h (dot_mapping), not by running the same formula again:
+ * a 4x4 gradient texture (texel (x, y) is (40x + 20, 40y + 20, 0)) that
+ * says where a lookup landed, cube faces and volume slices of one colour
+ * each. The combiners pass one stage through (r0 = t<stage>). */
+
+/* A stage's coordinates over the quad: base + dx * X + dy * Y, X and Y
+ * running 0..1 across the 4x4 target (pixel x's centre at (x + 0.5) / 4). */
+typedef struct { float base[4], dx[4], dy[4]; } StageTc;
+
+static GLuint s_vs;
+
+/* Draw `ps` (kinds as given, the textures bound by the caller) over the
+ * 4x4 target, combiners passing t<out_st> through; pixels into got. */
+static int draw_stage_case(Nv2aPixelState *ps, const uint32_t kinds[4], const StageTc tc[4],
+                           int out_st, const float eye[3], const float zpos, uint8_t got[64])
+{
+    static char body[32768];
+    Nv2aRenderState rs;
+    Nv2aGlShaderKey k;
+    Nv2aVertexFull quad[6];
+    float tscale[8] = {1, 1, 1, 1, 1, 1, 1, 1}, vp[4] = {0.5f, 0.5f, 1.0f / 8388607.5f, 0};
+    GLuint fs, prog;
+    GLint ok = 0;
+    unsigned i, st, j;
+
+    ps->shade = NV2A_SHADE_COMBINERS;
+    ps->rc.control = 1;
+    ps->rc.color_icw[0] = (uint32_t)(0x08 + out_st) << 24 | 0x20u << 16;   /* A = t, B = 1 */
+    ps->rc.color_ocw[0] = 0x0Cu << 4;                                     /* r0 = A*B */
+    ps->rc.alpha_icw[0] = 0x30u << 24 | 0x30u << 16;                      /* 1 * 1 */
+    ps->rc.alpha_ocw[0] = 0x0Cu << 4;
+    memset(&rs, 0, sizeof rs);
+    nv2a_gl_shader_key(ps, &rs, kinds, &k);
+    if (!nv2a_gl_fragment_body(&k, body, sizeof body))
+        return 0;
+    fs = compile(GL_FRAGMENT_SHADER, body);
+    if (!fs)
+        return 0;
+    prog = glCreateProgram();
+    glAttachShader(prog, s_vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        glDeleteProgram(prog);
+        glDeleteShader(fs);
+        return 0;
+    }
+    glUseProgram(prog);
+    for (i = 0; i < 4; i++) {
+        char nm[8];
+        snprintf(nm, sizeof nm, "u_t%u", i);
+        glUniform1i(glGetUniformLocation(prog, nm), (GLint)i);
+    }
+    glUniform4fv(glGetUniformLocation(prog, "u_vp"), 1, vp);
+    glUniform2fv(glGetUniformLocation(prog, "u_tscale"), 4, tscale);
+    if (eye)
+        glUniform3fv(glGetUniformLocation(prog, "u_eye"), 1, eye);
+    for (i = 0; i < 6; i++) {
+        static const float xy[6][2] = { {0,0}, {4,0}, {4,4}, {0,0}, {4,4}, {0,4} };
+        float X = xy[i][0] / 4.0f, Y = xy[i][1] / 4.0f;
+        memset(&quad[i], 0, sizeof quad[i]);
+        quad[i].pos[0] = xy[i][0]; quad[i].pos[1] = xy[i][1];
+        quad[i].pos[2] = zpos;
+        quad[i].pos[3] = 1.0f;
+        for (st = 0; st < 4; st++)
+            for (j = 0; j < 4; j++)
+                quad[i].tex[st][j] = tc[st].base[j] + tc[st].dx[j] * X + tc[st].dy[j] * Y;
+    }
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STREAM_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, got);
+    glDeleteProgram(prog);
+    glDeleteShader(fs);
+    return 1;
+}
+
+static void tex2d(GLuint t, int unit, int w, int h, const uint8_t *px)
+{
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+}
+
+/* One byte off is rounding; more is a different texel. */
+static int px_is(const uint8_t *g, int r, int gg, int b)
+{
+    return abs(g[0] - r) <= 2 && abs(g[1] - gg) <= 2 && abs(g[2] - b) <= 2;
+}
+
+static int stage_mode_tests(void)
+{
+    static const uint8_t face[6][4] = {               /* +X -X +Y -Y +Z -Z */
+        { 200, 0, 0, 255 }, { 0, 200, 0, 255 }, { 0, 0, 200, 255 },
+        { 200, 200, 0, 255 }, { 0, 200, 200, 255 }, { 200, 0, 200, 255 },
+    };
+    uint8_t grad[64], got[64];
+    GLuint tx[4], cube, vol;
+    unsigned c, x, y, i;
+    int bad = 0;
+
+    for (y = 0; y < 4; y++)
+        for (x = 0; x < 4; x++) {
+            uint8_t *p = &grad[(y * 4 + x) * 4];
+            p[0] = (uint8_t)(40 * x + 20); p[1] = (uint8_t)(40 * y + 20); p[2] = 0; p[3] = 255;
+        }
+    glGenTextures(4, tx);
+    glGenTextures(1, &cube);
+    glGenTextures(1, &vol);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
+    for (i = 0; i < 6; i++)
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGBA8, 1, 1, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, face[i]);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 0);
+
+    /* 1. DOTPRODUCT then DOT_ST, every dot mapping. Stage 0 reads a 1x1
+     *    "normal" N; each case's coordinates are chosen so that s, t, r
+     *    dotted with map(N) is the coordinate c (X for stage 1, Y for
+     *    stage 2), whatever else the components hold: the lookup lands on
+     *    gradient texel (x, y) only if map(N) is what the rule says. */
+    {
+        static const struct {
+            uint32_t map, sgn;            /* dot mapping; stage 0's signed channels */
+            uint8_t n[4];                 /* N: r, g, b, a */
+            float k[3], o[3];             /* coordinates: c * k + o */
+        } cases[] = {
+            { 0, 0, { 0x00, 0xFF, 0x00, 255 }, { 0, 1, 0 }, { 0.37f, 0, 0.2f } },   /* (0, 1, 0) */
+            { 1, 0, { 0x80, 0xFF, 0x80, 255 }, { 0, 1, 0 }, { 0.37f, 0, 0.2f } },   /* (b-128)/127 */
+            { 2, 0, { 0x7F, 0x80, 0x00, 255 }, { 1, 0, 0 }, { 0.25f, 0.25f, 0 } },  /* (1, -1, .) */
+            { 3, 0, { 0x81, 0x00, 0x7F, 255 }, { 0, 0, 1 }, { 0.3f, 0.9f, 0.3f } }, /* (-1, 0, 1) */
+            { 4, 0, { 0x12, 0xFF, 0x00, 255 }, { 1, 0, 0 }, { -0.25f, 0.6f, 0.25f } }, /* HILO (1, 0, 1) */
+            { 5, 0, { 0x34, 0x80, 0x80, 255 }, { 0, 0, 1 }, { 0.4f, 0.7f, 0 } },   /* hemisphere (0, 0, 1) */
+            { 7, 0, { 0x34, 0x00, 0x00, 255 }, { 0, 0, 1 }, { 0.4f, 0.7f, 0 } },   /* hemisphere (0, 0, 1) */
+            /* The filter's signed channels: mapping 1 reads the bytes as
+             * fetched (signed first, 0x80 would be -1.01); mapping 0 reads
+             * them signed (0x7F is 1, not 0.5). */
+            { 1, 0xE, { 0x80, 0xFF, 0x80, 255 }, { 0, 1, 0 }, { 0.37f, 0, 0.2f } },
+            { 0, 0xE, { 0x00, 0x7F, 0x00, 255 }, { 0, 1, 0 }, { 0.37f, 0, 0.2f } },
+        };
+        const uint32_t kinds[4] = { NV2A_GL_TEX_2D, NV2A_GL_TEX_NONE, NV2A_GL_TEX_2D, NV2A_GL_TEX_NONE };
+        tex2d(tx[2], 2, 4, 4, grad);
+        for (c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+            Nv2aPixelState ps;
+            StageTc tc[4];
+            memset(&ps, 0, sizeof ps);
+            memset(tc, 0, sizeof tc);
+            tex2d(tx[0], 0, 1, 1, cases[c].n);
+            ps.rc.stage_program = 0x1u | 0x11u << 5 | 0x09u << 10;
+            ps.dot_mapping = cases[c].map | cases[c].map << 4;
+            ps.stage[0].valid = 1;
+            ps.stage[0].mode = 1;
+            ps.stage[0].tex.filter = 0x01010000u | cases[c].sgn << 28;
+            tc[0].base[0] = tc[0].base[1] = 0.5f;
+            tc[0].base[3] = 1.0f;
+            for (i = 0; i < 3; i++) {
+                tc[1].base[i] = cases[c].o[i];
+                tc[1].dx[i] = cases[c].k[i];
+                tc[2].base[i] = cases[c].o[i];
+                tc[2].dy[i] = cases[c].k[i];
+            }
+            tc[1].base[3] = tc[2].base[3] = 1.0f;
+            if (!draw_stage_case(&ps, kinds, tc, 2, NULL, 0.0f, got)) {
+                bad++;
+                continue;
+            }
+            for (y = 0; y < 4; y++)
+                for (x = 0; x < 4; x++)
+                    if (!px_is(&got[(y * 4 + x) * 4], 40 * (int)x + 20, 40 * (int)y + 20, 0)) {
+                        if (bad++ < 8)
+                            printf("DOT_ST mapping %u case %u pixel %u,%u: got %d,%d\n",
+                                   cases[c].map, c, x, y, got[(y * 4 + x) * 4],
+                                   got[(y * 4 + x) * 4 + 1]);
+                    }
+        }
+    }
+
+    /* 2. Cube lookups on stage 3 (2 for DOT_RFLCT_DIFF), N = (0, 1, 0)
+     *    with mapping 0, so each stage's dot is its t coordinate. */
+    {
+        static const struct {
+            uint32_t prog;                /* stage modes 1..3 */
+            float d[3], q[3];             /* each stage's dot (its t), q */
+            int eye;                      /* u_eye = (1, 0, 0) */
+            int out, face;                /* stage read, expected face */
+        } cases[] = {
+            { 0x11 | 0x11 << 5 | 0x0E << 10, { 1, 0.2f, -0.3f }, { 1, 1, 1 }, 0, 3, 0 },   /* STR_CUBE +X */
+            { 0x11 | 0x11 << 5 | 0x0E << 10, { 0.2f, -1, 0.3f }, { 1, 1, 1 }, 0, 3, 3 },   /* -Y */
+            { 0x11 | 0x11 << 5 | 0x0E << 10, { 0.1f, 0.2f, -1 }, { 1, 1, 1 }, 0, 3, 5 },   /* -Z */
+            /* R = 2 N (N.E) / (N.N) - E: N (1.2, 1, 0), E (1, 0, 0) gives
+             * (0.18, 0.98, 0), +Y (N alone is +X, -E -X). */
+            { 0x11 | 0x11 << 5 | 0x0C << 10, { 1.2f, 1, 0 }, { 1, 0, 0 }, 0, 3, 2 },
+            /* N (0, 0, 1), E (0.2, 0.5, 1): R (-0.2, -0.5, 1), +Z (-E is -Z). */
+            { 0x11 | 0x11 << 5 | 0x0C << 10, { 0, 0, 1 }, { 0.2f, 0.5f, 1 }, 0, 3, 4 },
+            /* CONST: E is u_eye (1, 0, 0), not the q (0, 0, 1, which would
+             * give R = -E' = -Z). */
+            { 0x11 | 0x11 << 5 | 0x12 << 10, { 1.2f, 1, 0 }, { 0, 0, 1 }, 1, 3, 2 },
+            /* DOT_RFLCT_DIFF: stage 2 looks up (dot1, dot2, stage 3's dot). */
+            { 0x11 | 0x0B << 5 | 0x0C << 10, { 0.2f, 0.3f, -1 }, { 1, 1, 1 }, 0, 2, 5 },
+            { 0x11 | 0x0B << 5 | 0x0C << 10, { 0.2f, -1, 0.3f }, { 1, 1, 1 }, 0, 2, 3 },
+        };
+        static const uint8_t n[4] = { 0, 255, 0, 255 };
+        static const float eye[3] = { 1, 0, 0 };
+        for (c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+            Nv2aPixelState ps;
+            StageTc tc[4];
+            uint32_t kinds[4] = { NV2A_GL_TEX_2D, NV2A_GL_TEX_NONE, NV2A_GL_TEX_NONE, NV2A_GL_TEX_CUBE };
+            memset(&ps, 0, sizeof ps);
+            memset(tc, 0, sizeof tc);
+            tex2d(tx[0], 0, 1, 1, n);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
+            if (cases[c].out == 2)
+                kinds[2] = NV2A_GL_TEX_CUBE;
+            ps.rc.stage_program = 0x1u | cases[c].prog << 5;
+            ps.stage[0].valid = 1;
+            ps.stage[0].mode = 1;
+            ps.stage[0].tex.filter = 0x01010000u;
+            tc[0].base[0] = tc[0].base[1] = 0.5f;
+            tc[0].base[3] = 1.0f;
+            for (i = 1; i < 4; i++) {
+                tc[i].base[0] = 0.77f;            /* times map(N).x = 0 */
+                tc[i].base[1] = cases[c].d[i - 1];
+                tc[i].base[2] = -0.4f;            /* times 0 */
+                tc[i].base[3] = cases[c].q[i - 1];
+            }
+            if (!draw_stage_case(&ps, kinds, tc, cases[c].out, cases[c].eye ? eye : NULL,
+                                 0.0f, got)) {
+                bad++;
+                continue;
+            }
+            for (i = 0; i < 16; i++) {
+                const uint8_t *f = face[cases[c].face];
+                if (!px_is(&got[i * 4], f[0], f[1], f[2])) {
+                    if (bad++ < 8)
+                        printf("cube case %u pixel %u: got %d,%d,%d want face %d\n", c, i,
+                               got[i * 4], got[i * 4 + 1], got[i * 4 + 2], cases[c].face);
+                    break;
+                }
+            }
+        }
+    }
+
+    /* 3. DOT_STR_3D: a 1x1x2 volume, slice 0 red, slice 1 green, at
+     *    r = dot3 = 0.25 and 0.75. */
+    {
+        static const uint8_t sl[8] = { 200, 0, 0, 255, 0, 200, 0, 255 };
+        static const uint8_t n[4] = { 0, 255, 0, 255 };
+        const uint32_t kinds[4] = { NV2A_GL_TEX_2D, NV2A_GL_TEX_NONE, NV2A_GL_TEX_NONE, NV2A_GL_TEX_3D };
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_3D, vol);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 1, 1, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, sl);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, 0);
+        for (c = 0; c < 2; c++) {
+            Nv2aPixelState ps;
+            StageTc tc[4];
+            memset(&ps, 0, sizeof ps);
+            memset(tc, 0, sizeof tc);
+            tex2d(tx[0], 0, 1, 1, n);
+            ps.rc.stage_program = 0x1u | 0x11u << 5 | 0x11u << 10 | 0x0Du << 15;
+            ps.stage[0].valid = 1;
+            ps.stage[0].mode = 1;
+            ps.stage[0].tex.filter = 0x01010000u;
+            tc[0].base[0] = tc[0].base[1] = 0.5f;
+            tc[0].base[3] = 1.0f;
+            tc[1].base[1] = 0.5f;
+            tc[2].base[1] = 0.5f;
+            tc[3].base[1] = c ? 0.75f : 0.25f;
+            if (!draw_stage_case(&ps, kinds, tc, 3, NULL, 0.0f, got)) {
+                bad++;
+                continue;
+            }
+            if (!px_is(&got[20], c ? 0 : 200, c ? 200 : 0, 0)) {
+                printf("DOT_STR_3D slice %u: got %d,%d,%d\n", c, got[20], got[21], got[22]);
+                bad++;
+            }
+        }
+    }
+
+    /* 4. Dependent reads: stage 1 samples the gradient at stage 0's
+     *    (a, r) or (g, b). A 0x60 R 0xE0: texel (1, 3); G 0x20 B 0xA0:
+     *    texel (0, 2). */
+    {
+        static const uint8_t n[4] = { 0xE0, 0x20, 0xA0, 0x60 };   /* r, g, b, a */
+        const uint32_t kinds[4] = { NV2A_GL_TEX_2D, NV2A_GL_TEX_2D, NV2A_GL_TEX_NONE, NV2A_GL_TEX_NONE };
+        for (c = 0; c < 2; c++) {
+            Nv2aPixelState ps;
+            StageTc tc[4];
+            memset(&ps, 0, sizeof ps);
+            memset(tc, 0, sizeof tc);
+            tex2d(tx[0], 0, 1, 1, n);
+            tex2d(tx[1], 1, 4, 4, grad);
+            ps.rc.stage_program = 0x1u | (c ? 0x10u : 0x0Fu) << 5;
+            ps.stage[0].valid = 1;
+            ps.stage[0].mode = 1;
+            ps.stage[0].tex.filter = 0x01010000u;
+            tc[0].base[0] = tc[0].base[1] = 0.5f;
+            tc[0].base[3] = 1.0f;
+            if (!draw_stage_case(&ps, kinds, tc, 1, NULL, 0.0f, got)) {
+                bad++;
+                continue;
+            }
+            if (!px_is(&got[20], c ? 20 : 60, c ? 100 : 140, 0)) {
+                printf("DPNDNT_%s: got %d,%d\n", c ? "GB" : "AR", got[20], got[21]);
+                bad++;
+            }
+        }
+    }
+
+    /* 5. DOT_ZW: depth dot1 / dot2, dot2 = 1, dot1 = 2X: columns at depth
+     *    0.25, 0.75, 1.25 and 1.75 -- the last two outside 0..1, dropped.
+     *    Then a plain quad at depth 0.5 with LESS: it covers every column
+     *    but the first. */
+    {
+        static const uint8_t n[4] = { 255, 0, 0, 255 };
+        const uint32_t kinds[4] = { NV2A_GL_TEX_2D, NV2A_GL_TEX_NONE, NV2A_GL_TEX_NONE, NV2A_GL_TEX_NONE };
+        GLuint zfbo, zrt, zrb;
+        Nv2aPixelState ps;
+        StageTc tc[4];
+        uint8_t first[64];
+        glGenTextures(1, &zrt);
+        glBindTexture(GL_TEXTURE_2D, zrt);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glGenRenderbuffers(1, &zrb);
+        glBindRenderbuffer(GL_RENDERBUFFER, zrb);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 4, 4);
+        glGenFramebuffers(1, &zfbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, zfbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, zrt, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, zrb);
+        CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+        glClearColor(0, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);   /* depth 1 */
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        memset(&ps, 0, sizeof ps);
+        memset(tc, 0, sizeof tc);
+        tex2d(tx[0], 0, 1, 1, n);                 /* N (1, 0, 0), mapping 0 */
+        ps.rc.stage_program = 0x1u | 0x11u << 5 | 0x0Au << 10;
+        ps.stage[0].valid = 1;
+        ps.stage[0].mode = 1;
+        ps.stage[0].tex.filter = 0x01010000u;
+        tc[0].base[0] = tc[0].base[1] = 0.5f;
+        tc[0].base[3] = 1.0f;
+        tc[1].dx[0] = 2.0f;                       /* dot1 = 2X */
+        tc[1].base[1] = 0.6f;                     /* times 0 */
+        tc[2].base[0] = 1.0f;                     /* dot2 = 1 */
+        tc[2].base[2] = 0.3f;
+        /* stage 0 passed through: N, red (255, 0, 0). */
+        if (!draw_stage_case(&ps, kinds, tc, 0, NULL, 0.0f, first)) {
+            bad++;
+        } else {
+            memset(&ps, 0, sizeof ps);
+            ps.rc.stage_program = 0x1u;
+            tc[1].dx[0] = 0.0f;
+            {
+                static const uint8_t green[4] = { 0, 255, 0, 255 };
+                tex2d(tx[0], 0, 1, 1, green);
+            }
+            /* Window depth z / 16777215: 0.5. */
+            if (!draw_stage_case(&ps, kinds, tc, 0, NULL, 8388607.5f, got))
+                bad++;
+            for (x = 0; x < 4; x++) {
+                const uint8_t *a = &first[(1 * 4 + x) * 4], *b = &got[(1 * 4 + x) * 4];
+                int want_first_red = x < 2, want_red = x == 0;
+                if (!px_is(a, want_first_red ? 255 : 0, 0, want_first_red ? 0 : 255)
+                    || !px_is(b, want_red ? 255 : 0, want_red ? 0 : 255, 0)) {
+                    printf("DOT_ZW column %u: first %d,%d,%d then %d,%d,%d\n", x,
+                           a[0], a[1], a[2], b[0], b[1], b[2]);
+                    bad++;
+                }
+            }
+        }
+        glDisable(GL_DEPTH_TEST);
+        glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
+        glDeleteFramebuffers(1, &zfbo);
+        glDeleteRenderbuffers(1, &zrb);
+        glDeleteTextures(1, &zrt);
+    }
+
+    /* 6. Every stage program compiles, illegal layouts included (a mode on
+     *    a stage it is not valid on, inputs after the stage reading them,
+     *    any dot mapping, any kind). */
+    {
+        static char body[32768];
+        static const uint32_t kk[] = { NV2A_GL_TEX_NONE, NV2A_GL_TEX_2D, NV2A_GL_TEX_CUBE,
+                                       NV2A_GL_TEX_3D };
+        int fails = 0;
+        for (c = 0; c < 150; c++) {
+            Nv2aPixelState ps;
+            Nv2aRenderState rs;
+            Nv2aGlShaderKey k;
+            uint32_t kinds[4];
+            GLuint fs;
+            memset(&ps, 0, sizeof ps);
+            memset(&rs, 0, sizeof rs);
+            ps.shade = NV2A_SHADE_COMBINERS;
+            ps.rc.control = 1;
+            for (i = 0; i < 4; i++) {
+                uint32_t mode = rnd() % 0x14, kind = kk[rnd() % 4];
+                /* Kinds as bind_stage_textures gives them: a cube only to
+                 * a cube lookup, a volume only to PROJECT2D/3D, STR_3D. */
+                if (kind == NV2A_GL_TEX_CUBE && mode != 3 && mode != 0x0B && mode != 0x0C
+                    && mode != 0x0E && mode != 0x12)
+                    kind = NV2A_GL_TEX_2D;
+                if (kind == NV2A_GL_TEX_3D && mode != 1 && mode != 2 && mode != 0x0D)
+                    kind = NV2A_GL_TEX_2D;
+                ps.rc.stage_program |= mode << (i * 5);
+                kinds[i] = kind;
+                ps.stage[i].valid = 1;
+                ps.stage[i].tex.filter = (rnd() & 0xF) << 28 | 0x01010000u;
+            }
+            ps.other_stage_input = rnd() & 0x00FF0000u;
+            ps.dot_mapping = rnd() & 0xFFF;
+            nv2a_gl_shader_key(&ps, &rs, kinds, &k);
+            if (!nv2a_gl_fragment_body(&k, body, sizeof body)) {
+                fails++;
+                continue;
+            }
+            fs = compile(GL_FRAGMENT_SHADER, body);
+            if (!fs) {
+                if (fails++ < 2)
+                    printf("stage program 0x%05X does not compile\n", ps.rc.stage_program);
+                continue;
+            }
+            glDeleteShader(fs);
+        }
+        if (fails)
+            printf("random stage programs: %d of 150 failed\n", fails);
+        bad += fails;
+    }
+
+    glDeleteTextures(4, tx);
+    glDeleteTextures(1, &cube);
+    glDeleteTextures(1, &vol);
+    printf("stage modes 8 and up: %s\n", bad ? "FAILED" : "ok");
+    return bad;
+}
+
+
 int main(void)
 {
     static char body[32768];
@@ -109,12 +567,14 @@ int main(void)
     /* ---- GPU: one 4x4 target, one quad, four 1x1 textures ------------- */
     vs = compile(GL_VERTEX_SHADER, nv2a_gl_vertex_body());
     CHECK(vs != 0);
+    s_vs = vs;
     glGenTextures(1, &rt);
     glBindTexture(GL_TEXTURE_2D, rt);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+    s_fbo = fbo;
     CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
     glViewport(0, 0, 4, 4);
     glGenTextures(4, tex);
@@ -515,6 +975,8 @@ int main(void)
         CHECK(bump_bad == 0);
         printf("bump-env stages: %s\n", bump_bad ? "FAILED" : "ok");
     }
+    CHECK(stage_mode_tests() == 0);
+    CHECK(glGetError() == GL_NO_ERROR);
     CHECK(tested == 400);
     CHECK(mism == 0);
     if (!s_fail)
