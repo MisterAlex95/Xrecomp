@@ -1,16 +1,22 @@
 """The x86 interpreter (XBA-303, src/kernel/xbox_interp_core.c) against the
 CPU and against lifted code.
 
-  - test_interpreter_matches_the_cpu: 300 random sequences (integer, flags
-    through their consumers, string instructions, shifts, rotates, xadd,
-    cmpxchg, bsf / bsr, div, push / pop, forward branches), each run from 8
-    random states on a real x86 CPU (tools/recomp/data/interp_golden.json,
-    made by `python3 -m tools.recomp.interp_fixture --golden` in the
+  - test_interpreter_matches_the_cpu: 600 random sequences (integer, flags
+    through their consumers, string instructions, shifts, rotates, stc / clc
+    / cmc, xadd, cmpxchg, bsf / bsr, div, push / pop, forward branches whose
+    join the flags cross) and the NAMED regressions, each run from 8 random
+    states on a real x86 CPU (tools/recomp/data/interp_golden.json, made by
+    `python3 -m tools.recomp.interp_fixture --golden`, which runs them in the
     linux/386 container), then by the interpreter on this host: every
     register and the data area must match. Needs only a GNU C compiler, so it
     runs on arm64 too.
-  - test_interpreter_matches_lifted_code: the same sequences the lifter gets
-    right on the CPU, lifted by the real translator and run both ways.
+  - test_lifted_code_matches_the_cpu (XBA-317): the same vectors, every
+    sequence lifted by the real translator and built at -O2. No sequence is
+    left out: the lifter answers every consumer of a defined flag.
+  - test_the_lifter_models_every_consumer: no golden sequence lifts to the
+    fallback flag, an unimplemented instruction or an undeclared carry.
+  - test_interpreter_matches_lifted_code: the same sequences, interpreter
+    against lifted code on this host (more states than the goldens hold).
   - test_sse_mmx_x87_match_lifted_code: the generated half, random SSE / MMX /
     x87 sequences against the lifted C.
   - tools/conformance runs its 7,662 vectors (integer, x87, SSE) through the
@@ -54,17 +60,37 @@ def test_interpreter_matches_the_cpu():
     assert f"ran {want}, bad 0" in out, out[-3000:]
 
 
+def test_lifted_code_matches_the_cpu():
+    """XBA-317: lifted code against the CPU's vectors, every sequence. The
+    lifter used to disagree on ~3 % of the sequences it claimed to model
+    (setle after xadd ignored OF, sbb after cmpxchg read a stale carry) and
+    fell back on a quarter of the rest (a second consumer after a join, seto
+    / cmovo, unsigned conditions after shld / shrd, the signed ones after a
+    string compare, rep lods)."""
+    _need_cc()
+    _capstone()
+    rc, out = F.run_golden(lifted=True)
+    with open(F.GOLDEN) as f:
+        doc = json.load(f)
+    want = sum(len(s["vectors"]) for s in doc["sequences"])
+    assert rc == 0 and f"ran {want}, bad 0" in out, out[-3000:]
+
+
+def test_the_lifter_models_every_consumer():
+    _capstone()
+    with open(F.GOLDEN) as f:
+        doc = json.load(f)
+    gaps = [s.get("name") or s["code"] for s in doc["sequences"]
+            if F.lifter_falls_back(bytes.fromhex(s["code"]), F.BASE)]
+    assert not gaps, gaps[:10]
+
+
 def test_interpreter_matches_lifted_code():
     _need_cc()
     _capstone()
     with open(F.GOLDEN) as f:
         doc = json.load(f)
-    # The lifter can match the CPU on 8 states by luck where it does not
-    # model a consumer (the fallback flag reads 0, an unlifted setcc leaves a
-    # byte that happened to be right): those are left out too.
-    seqs = [c for c in (bytes.fromhex(s["code"]) for s in doc["sequences"] if s["lifter_matches_cpu"])
-            if not F.lifter_falls_back(c, F.BASE)]
-    assert len(seqs) >= 120, len(seqs)
+    seqs = [bytes.fromhex(s["code"]) for s in doc["sequences"]]
     rc, out = F.build_and_run(seqs, 8)
     assert rc == 0 and "bad 0" in out, out[-3000:]
 
@@ -98,7 +124,9 @@ def test_fresh_sequences_on_the_cpu():
     seqs, _ = F.sequences(200, 20, int.from_bytes(os.urandom(3), "little"), native=True, filtered=False)
     with tempfile.TemporaryDirectory() as d:
         rc, out = F.run_native(seqs, 10, d)
-    assert rc == 0 and ", bad 0," in out, "\n".join(l for l in out.splitlines() if not l.startswith("GOLD"))[-3000:]
+    detail = "\n".join(l for l in out.splitlines() if not l.startswith(("GOLD", "LIFT")))[-3000:]
+    assert rc == 0 and ", bad 0," in out, detail
+    assert "lifter differs from the CPU in 0 sequences" in out, detail
 
 
 def test_the_generated_file_is_current():

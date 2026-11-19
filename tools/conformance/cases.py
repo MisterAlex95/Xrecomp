@@ -645,3 +645,29 @@ for _name, _op in (
     CASES.append(Case(_name, "a locked read-modify-write: the word and the unlocked form's flags",
         ["push eax", "test ecx, ecx", "stc", _op] + _LOCK_FLAGS, _PAIRS))
 CASES.append(Case("lock_not", "lock not: the word", ["push eax", "lock not dword ptr [esp]", "pop eax"], _PAIRS))
+
+# The flags a float compare leaves, through every consumer (XBA-317): comiss
+# and ucomiss, the fcomi family (ZF, PF, CF; OF, SF, AF cleared) and sahf after
+# fnstsw (SF, ZF, PF, CF from the condition codes), with NaN for the unordered
+# answer. eax receives the consumer's result.
+_FCMP_SETTERS = {
+    "comiss": ["fld qword ptr [eax]", "fstp dword ptr [eax+32]", "fld qword ptr [eax+16]",
+               "fstp dword ptr [eax+36]", "movss xmm0, dword ptr [eax+32]", "comiss xmm0, dword ptr [eax+36]"],
+    "ucomiss": ["fld qword ptr [eax]", "fstp dword ptr [eax+32]", "fld qword ptr [eax+16]",
+                "fstp dword ptr [eax+36]", "movss xmm0, dword ptr [eax+32]", "ucomiss xmm0, dword ptr [eax+36]"],
+    "fcomi": ["fld qword ptr [eax+16]", "fld qword ptr [eax]", "fcomi st, st(1)", "fstp st(0)", "fstp st(0)"],
+    "fcomip": ["fld qword ptr [eax+16]", "fld qword ptr [eax]", "fcomip st, st(1)", "fstp st(0)"],
+    "fucomip": ["fld qword ptr [eax+16]", "fld qword ptr [eax]", "fucomip st, st(1)", "fstp st(0)"],
+    "sahf": ["fld qword ptr [eax+16]", "fld qword ptr [eax]", "fcompp", "fnstsw ax", "sahf"],
+}
+for _setter, _asm in _FCMP_SETTERS.items():
+    _ccs = ["a", "ae", "b", "be", "e", "ne", "p", "np", "s", "ns"]
+    if _setter != "sahf":       # sahf leaves OF as it was
+        _ccs += ["o", "no", "l", "ge", "le", "g"]
+    for _cc in _ccs:
+        CASES.append(Case(f"fcmp_{_setter}_set{_cc}", "a float compare's flags through set" + _cc,
+                          _asm + [f"set{_cc} al", "movzx eax, al"], _FP_NAN, kind="fpu"))
+    CASES.append(Case(f"fcmp_{_setter}_cmova", "a float compare's flags through cmova",
+                      _asm + ["mov edx, 3", "mov ecx, 7", "cmova edx, ecx", "mov eax, edx"], _FP_NAN, kind="fpu"))
+    CASES.append(Case(f"fcmp_{_setter}_sbb", "a float compare's carry through sbb",
+                      _asm + ["sbb eax, eax"], _FP_NAN, kind="fpu"))

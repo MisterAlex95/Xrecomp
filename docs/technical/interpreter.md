@@ -125,10 +125,11 @@ that decode can now run where it used to be skipped (`RECOMP_INTERP=0` is the A/
 
 ## Tests
 
-- `tools/recomp/test_interp_diff.py`: 300 random integer sequences x 8 states run on a real CPU (`data/
-  interp_golden.json`, linux/386 container) against the interpreter on any host; the ones the lifter gets right,
-  interpreter against the lifted C; 200 random SSE / MMX / x87 sequences against the lifted C; a CF mutation must be
-  caught; fresh sequences on the CPU with `XBOXRECOMP_PYTEST_DOCKER=1`.
+- `tools/recomp/test_interp_diff.py`: 600 random integer sequences and 17 named ones x 8 states run on a real CPU
+  (`data/interp_golden.json`, linux/386 container) against the interpreter and against the lifted C on any host
+  (since XBA-317 the lifter agrees on every one); interpreter against the lifted C on the same sequences; 200
+  random SSE / MMX / x87 sequences against the lifted C; a CF mutation must be caught; fresh sequences on the CPU
+  with `XBOXRECOMP_PYTEST_DOCKER=1` (interpreter and lifter must both agree).
 - `tools/conformance`: a fourth pass runs the 7,662 vectors' snippets through the interpreter against the CPU.
 - `tests/seh_dispatch`: every SEH scenario of XBA-112 / XBA-132 (78 checks) with five of the fixture's functions
   unlifted (`seh_dispatch_interp_test`: an EH3 frame between two others, both frame handlers, a C++ frame and its

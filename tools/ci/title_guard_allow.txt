@@ -13,3 +13,6 @@ tools/recomp/analyze_unresolved.py 0036B7C0   # section table of upstream's anal
 
 # Words that are also a game's name
 android/app/src/main/res/values-fr/strings.xml halo   # « les effets comme le halo » : the light effect (bloom)
+
+# Random x86 sequences and the CPU state hashes they produced (XBA-303, XBA-317): numbers, no title in them
+tools/recomp/data/interp_golden.json     # FNV hashes and random immediates that can collide with a title ID

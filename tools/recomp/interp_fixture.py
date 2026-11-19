@@ -160,10 +160,10 @@ class Gen:
                 if w < 4 and cnt >= 8 * w:
                     self.defined = frozenset("ZSP")
             else:
-                self.defined = (self.defined - {"C", "O"}) | ({"C"} if cnt % (8 * w) else set())
-                if cnt % (8 * w) == 0 and kind in (0, 1):
-                    self.defined = self.defined - {"C"}
-                self.defined = frozenset(self.defined)
+                # rol / ror: a nonzero masked count writes CF (the result's
+                # low / top bit) even when it is a multiple of the width,
+                # and OF only for a count of 1; ZF, SF, PF stay.
+                self.defined = frozenset((self.defined - {"C", "O"}) | {"C"} | ({"O"} if cnt == 1 else set()))
             return pre + bytes([0xC0 if w == 1 else 0xC1]) + modrm(3, kind, self.reg8() if w == 1 else self.reg()) + bytes([cnt])
         if k == 8:                                              # imul
             self.defined = frozenset("CO")
@@ -197,8 +197,13 @@ class Gen:
             if g == 2:
                 return bytes([0xB8 | self.reg()]) + self.imm(4).to_bytes(4, "little")
             return bytes([0x88]) + modrm(3, self.reg8(), self.reg8())
-        if k == 13:                                             # cdq / cwde / push-pop pair
-            g = r.randrange(3)
+        if k == 13:                                             # cdq / cwde / push-pop pair / stc clc cmc
+            g = r.randrange(4)
+            if g == 3:
+                if "C" not in self.defined:
+                    self.defined = self.defined | {"C"}
+                    return r.choice([b"\xF9", b"\xF8"])
+                return r.choice([b"\xF9", b"\xF8", b"\xF5"])
             if g == 0:
                 return b"\x99"
             if g == 1:
@@ -616,12 +621,16 @@ def lifter_falls_back(code, base):
     or leaves an instruction unlifted: the lifter does not model that consumer
     after that setter (a gap of the lifter's lazy flags, not something to
     compare against)."""
+    import re
     c = translate_at(code, "probe", base)
     if "RECOMP_UNIMPL" in c:
         return True
-    if "_cf" in c and "int _cf" not in c:
+    if re.search(r"\b_cf\b", c) and "int _cf" not in c:
         return True                 # the lifter reads a carry it never declared (does not build)
-    return c.count("_flags") > c.count("int _flags = 0;") + c.count("(void)_flags")
+    # A consumer the lifter has no condition for reads the fallback flag,
+    # written as `_flags /* <consumer> */`; the rep compares' own _flags
+    # (their loop condition) are not that.
+    return re.search(r"\b_flags /\* [a-z]", c) is not None
 
 
 def sequences(count, length=10, seed=1000, native=False, filtered=True):
@@ -642,12 +651,41 @@ def sequences(count, length=10, seed=1000, native=False, filtered=True):
 GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "interp_golden.json")
 
 
+# Hand-picked sequences the CPU runs with the random ones (XBA-317): each
+# lifter disagreement the differential found, as its shortest form. Every
+# consumer reads flags its setter defines; addresses are Layout's data area.
+NAMED = (
+    ("xadd: setg reads OF", "66031d5c0020000fc1ff0f9fc7c3"),          # add bx,[m]; xadd edi,edi; setg bh
+    ("xadd: setle reads OF", "0fc1c80f9ec2c3"),                       # xadd eax,ecx; setle dl
+    ("cmpxchg: sbb reads its CF", "01f27e030fb1f81bdac3"),            # add edx,esi; jle; cmpxchg eax,edi; sbb ebx,edx
+    ("join: a second consumer", "21cb750681e7ff7f00000f9405780020000f96c7c3"),  # and; jne; and; sete [m]; setbe bh
+    ("rcl 1: seto", "01c8d1d30f90c0c3"),                              # add eax,ecx; rcl ebx,1; seto al
+    ("ror 1: seto", "01c8d1c80f90c1c3"),                              # add eax,ecx; ror eax,1; seto cl
+    ("rol ax, 17: setc", "01c866c1c0110f92c1c3"),                     # add; rol ax,17; setc cl
+    ("stc: sete keeps ZF", "85c0f90f94c0c3"),                         # test eax,eax; stc; sete al
+    ("cmc: setl keeps SF, OF", "29c8f50f9cc10f92c2c3"),               # sub eax,ecx; cmc; setl cl; setb dl
+    ("shrd: seta", "0facd8100f97c1c3"),                               # shrd eax,ebx,16; seta cl
+    ("shld 1: seto", "0fa4d8010f90c1c3"),                             # shld eax,ebx,1; seto cl
+    ("neg: setle reads OF", "f7d80f9ec1c3"),                          # neg eax; setle cl
+    ("mul: seto", "f7e10f90c30f93c7c3"),                              # mul ecx; seto bl; setae bh
+    ("repe cmpsb: setl", "fcbe04002000bf78002000b905000000f3a60f9cc00f9ec1c3"),
+    ("repne scasb: setg", "fcbf78002000b904000000f2ae0f9fc00f98c1c3"),
+    ("rep lodsb", "fcbe04002000b903000000f3acc3"),
+    ("undeclared _cf after a join",
+     "01f08d47b4f7db0f92059b002000f7e70f93052c002000010dd40020000f9ac47102f7e10fbf05300020000fcf"
+     "0f92c00facd31099565e0f9405b8002000c3"),
+)
+
+
 def make_golden(n, length, seed, vectors, workdir, path=GOLDEN):
     """Run fresh sequences on the CPU (linux/386 container) and keep what it
-    computed: the conformance vectors the interpreter is held to on any host
-    (test_interp_diff.py), and per sequence whether the lifter agreed."""
+    computed: the conformance vectors the interpreter and the lifted code
+    are held to on any host (test_interp_diff.py). The NAMED sequences come
+    last, with their name."""
     import json
     seqs, _ = sequences(n, length, seed, native=True, filtered=False)
+    names = [None] * len(seqs) + [name for name, _ in NAMED]
+    seqs += [bytes.fromhex(code) for _, code in NAMED]
     rc, out = run_native(seqs, vectors, workdir)
     gold = {i: [] for i in range(len(seqs))}
     lift = {}
@@ -659,9 +697,10 @@ def make_golden(n, length, seed, vectors, workdir, path=GOLDEN):
             lift[int(f[1])] = f[2] == "1"
     if rc != 0 or any(len(v) != vectors for v in gold.values()):
         raise AssertionError(out[-3000:])
-    doc = {"_why": "XBA-303: x86 sequences run on a CPU (python3 -m tools.recomp.interp_fixture --golden); "
-                   "per vector: seed, eax ecx edx ebx esp esi edi, FNV-1a of the 256-byte data area",
-           "sequences": [{"code": c.hex(), "lifter_matches_cpu": lift.get(i, False), "vectors": gold[i]}
+    doc = {"_why": "XBA-303, XBA-317: x86 sequences run on a CPU (python3 -m tools.recomp.interp_fixture "
+                   "--golden); per vector: seed, eax ecx edx ebx esp esi edi, FNV-1a of the 256-byte data area",
+           "sequences": [dict(({"name": names[i]} if names[i] else {}),
+                              code=c.hex(), lifter_matches_cpu=lift.get(i, False), vectors=gold[i])
                          for i, c in enumerate(seqs)]}
     write_golden(doc, path)
     return doc
@@ -681,24 +720,31 @@ typedef struct { uint64_t seed; uint32_t r[8]; } gold_t;
 @TABLE@
 int main(void)
 {
-    int i, k, bad = 0, ran = 0;
+    int i, k, bad = 0, ran = 0, bad_seqs = 0;
     layout();
     for (i = 0; i < (int)(sizeof k_code / sizeof k_code[0]); i++) {
         uint32_t code = CODE_VA + (uint32_t)i * STRIDE;
+        int seq_bad0 = bad;
         for (k = 0; k < @VECTORS@; k++) {
             const gold_t *g = &k_gold[i][k];
-            XboxInterpStop stop;
             snap_t b;
             uint32_t got[8];
-            int r, j;
+            int j;
             state(g->seed);
             memcpy(GUEST(code), k_code[i], k_len[i]);
-            r = xbox_InterpRun(code, 100000, &stop);
-            if (r != XBOX_INTERP_RETURNED) {
-                printf("seq %d: stopped (%d) at 0x%08X\n", i, r, stop.va);
-                bad++;
-                break;
+#if LIFTED
+            k_fn[i]();
+#else
+            {
+                XboxInterpStop stop;
+                int r = xbox_InterpRun(code, 100000, &stop);
+                if (r != XBOX_INTERP_RETURNED) {
+                    printf("seq %d: stopped (%d) at 0x%08X\n", i, r, stop.va);
+                    bad++;
+                    break;
+                }
             }
+#endif
             take(&b);
             got[0] = b.r[0]; got[1] = b.r[1]; got[2] = b.r[2]; got[3] = b.r[3];
             got[4] = b.r[4]; got[5] = b.r[6]; got[6] = b.r[7]; got[7] = fnv(b.data);
@@ -706,20 +752,23 @@ int main(void)
             for (j = 0; j < 8; j++)
                 if (got[j] != g->r[j]) {
                     static const char *nm[8] = { "eax", "ecx", "edx", "ebx", "esp", "esi", "edi", "data" };
-                    printf("seq %d seed %llu: %s cpu %08X interp %08X\n", i, (unsigned long long)g->seed, nm[j], g->r[j], got[j]);
+                    printf("seq %d seed %llu: %s cpu %08X %s %08X\n", i, (unsigned long long)g->seed, nm[j], g->r[j],
+                           LIFTED ? "lifted" : "interp", got[j]);
                     bad++;
                 }
-            if (bad) break;
+            if (bad > seq_bad0) { bad_seqs++; break; }
         }
+        if (!LIFTED && bad) break;
     }
-    printf("ran %d, bad %d\n", ran, bad);
+    printf("ran %d, bad %d, in %d sequences\n", ran, bad, bad_seqs);
     return bad ? 1 : 0;
 }
 """
 
 
-def golden_source(doc):
-    """A host harness: the interpreter alone against the CPU's vectors."""
+def golden_source(doc, lifted=False):
+    """A host harness: the interpreter alone (or, lifted, the translator's C
+    for every sequence) against the CPU's vectors."""
     lay = Layout(False)
     seqs = [bytes.fromhex(s["code"]) for s in doc["sequences"]]
     nv = len(doc["sequences"][0]["vectors"])
@@ -728,8 +777,13 @@ def golden_source(doc):
                  ("@BASE@", f"0x{lay.base:X}"), ("@STRIDE@", f"0x{lay.stride:X}"), ("@NATIVE@", "0"),
                  ("@FPMODE@", "0")):
         pre = pre.replace(k, v)
-    tab = "".join(f"static const uint8_t k_code_{i}[] = {{{', '.join(f'0x{b:02X}' for b in c)}}};\n"
-                  for i, c in enumerate(seqs))
+    pre = pre.replace("#define FPMODE", f"#define LIFTED {1 if lifted else 0}\n#define FPMODE", 1)
+    tab = ""
+    if lifted:
+        tab += "\n".join(translate_at(c, f"lifted_{i}", lay.base + i * lay.stride) for i, c in enumerate(seqs))
+        tab += f"\nstatic void (*const k_fn[{len(seqs)}])(void) = {{ {', '.join(f'lifted_{i}' for i in range(len(seqs)))} }};\n"
+    tab += "".join(f"static const uint8_t k_code_{i}[] = {{{', '.join(f'0x{b:02X}' for b in c)}}};\n"
+                   for i, c in enumerate(seqs))
     tab += f"static const uint8_t *const k_code[{len(seqs)}] = {{ {', '.join(f'k_code_{i}' for i in range(len(seqs)))} }};\n"
     tab += f"static const unsigned k_len[{len(seqs)}] = {{ {', '.join(str(len(c)) for c in seqs)} }};\n"
     rows = []
@@ -740,7 +794,7 @@ def golden_source(doc):
     return pre + GOLD_MAIN.replace("@TABLE@", tab).replace("@VECTORS@", str(nv))
 
 
-def run_golden(doc=None, cc=None, extra=(), runner=()):
+def run_golden(doc=None, cc=None, extra=(), runner=(), lifted=False):
     """Build golden_source on this host and run it. Returns (rc, output)."""
     import json
     if doc is None:
@@ -751,7 +805,7 @@ def run_golden(doc=None, cc=None, extra=(), runner=()):
         src = os.path.join(d, "g.c")
         exe = os.path.join(d, "g")
         with open(src, "w") as f:
-            f.write(golden_source(doc))
+            f.write(golden_source(doc, lifted))
         built = subprocess.run(
             [cc, "-std=gnu11", "-O2", "-w", *extra, "-I", RUNTIME, "-I", os.path.join(ROOT, "src", "kernel"),
              src, CORE, "-o", exe, "-lm", "-no-pie", "-Wl,--unresolved-symbols=ignore-all"],
@@ -767,7 +821,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="XBA-303 interpreter vectors")
     ap.add_argument("--golden", action="store_true",
                     help="regenerate data/interp_golden.json on the CPU (docker, linux/386)")
-    ap.add_argument("--count", type=int, default=300)
+    ap.add_argument("--count", type=int, default=600)
     ap.add_argument("--length", type=int, default=16)
     ap.add_argument("--seed", type=int, default=303000)
     ap.add_argument("--vectors", type=int, default=8)
@@ -808,7 +862,11 @@ class FPGen:
         return mem_abs(reg, off, self.data)
 
     def consumer(self):
-        cc = self.r.choice([0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0xA, 0xB])
+        # After comiss / ucomiss and the fcomi family every flag is defined
+        # (OF and SF cleared), and sbb reads the carry (XBA-317).
+        if self.r.randrange(6) == 0:
+            return bytes([0x1B]) + modrm(3, self.r.choice(POOL), self.r.choice(POOL))
+        cc = self.r.randrange(16)
         if self.r.randrange(2):
             return bytes([0x0F, 0x90 | cc]) + mem_abs(0, self.r.randrange(224, 256), self.data)
         return bytes([0x0F, 0x90 | cc]) + modrm(3, 0, self.r.choice([0, 1, 2, 3]))
