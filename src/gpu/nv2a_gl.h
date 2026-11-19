@@ -20,4 +20,21 @@ int nv2a_gl_install_from_env(void);
  * height. Read when the GL context is created. */
 void nv2a_gl_set_display_size(uint32_t w, uint32_t h);
 
+/* Zero-copy present (XBA-308, src/video/fb_gpu_frame.h; default on,
+ * RECOMP_GPU_ZERO_COPY=0 reads every frame back as before). The SDL
+ * presenter calls it once on its thread, its renderer's GL context current,
+ * before the guest starts: the back end's context will be created in that
+ * context's share group, and each flip hands the window the frame as a
+ * texture instead of pixels while wanted() (asked on the executor thread at
+ * each flip) says the window can take one. refuse: the window cannot draw
+ * such textures (why, for the log); the back end then reads frames back.
+ * Returns 1 when zero-copy will be tried. The mode is logged once when the
+ * context is created ("[GPUGL] present: ..."). */
+int nv2a_gl_present_share(int (*wanted)(void), const char *refuse);
+
+/* The window's GL context was lost and re-created (SDL_RENDER_DEVICE_RESET):
+ * the share group is gone. Any thread; at its next flip the back end drops
+ * its GL objects as after a context loss and reads frames back from then on. */
+void nv2a_gl_present_window_lost(void);
+
 #endif

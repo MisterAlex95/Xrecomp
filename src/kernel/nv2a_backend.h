@@ -468,6 +468,9 @@ typedef struct {
 #define NV2A_HOST_FORMAT_BGRX8888 1u    /* bytes B, G, R, X: 0xXXRRGGBB words
                                          * (desktop GL GL_BGRA read-back) */
 #define NV2A_HOST_FORMAT_RGBX8888 2u    /* bytes R, G, B, X (GLES GL_RGBA) */
+#define NV2A_HOST_FORMAT_GPU      3u    /* host_px is an XboxFbGpuFrame (src/video/fb_gpu_frame.h),
+                                         * host_pitch 0: the frame as a texture the window's GL
+                                         * context shares (zero-copy present, XBA-308) */
 
 /* Register a back end with a present hook instead of a present sync. At
  * every flip, before the window snapshot and the frame dump, the executor

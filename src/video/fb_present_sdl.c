@@ -33,6 +33,19 @@
  * the AvSetDisplayMode surface directly, as the GDI window does, for a title
  * that never flips.
  *
+ * Zero-copy frames (XBA-308, fb_gpu_frame.h; RECOMP_GPU_ZERO_COPY=0 turns
+ * them off): with the GL back end and SDL's opengl / opengles2 renderer on
+ * EGL, the back end's context shares this renderer's, and a flip hands over
+ * an XboxFbGpuFrame instead of pixels. The back slot then holds the name of
+ * a texture the back end blitted the frame into (one per slot) and its fence;
+ * the main loop waits for the fence and draws the texture into SDL's context
+ * itself (gpu_draw: the picture shader's program, or a plain one), then the
+ * perf overlay and the shader badge go over it through SDL as before.
+ * Whatever needs the pixels on the CPU makes the window ask for them instead
+ * (gpu_frames_wanted: frame generation, the video overlay, a letterbox zoom),
+ * and screenshots, the overlay's first picture and save-state thumbnails read
+ * a texture back on the main thread (gpu_copy_frame).
+ *
  * Aspect modes (aspect_policy.h, RECOMP_ASPECT): each published frame is
  * classed when it is published (or when it reaches the frame generation
  * pacer) as NORMAL (4:3), WIDE (stretched to 16:9: a title's anamorphic 3D
@@ -89,6 +102,7 @@
 #include "aspect_policy.h"
 #include "present_shaders.h"  /* picture shaders, shared with host_window (XBA-203) */
 #include "pvideo_posix.h"     /* the PVIDEO overlay's scan-out */
+#include "fb_gpu_frame.h"     /* zero-copy frames (XBA-308) */
 #include "keyboard_sdl.h"     /* src/input: keys into the pad stand-in */
 #include "xinput_xbox.h"
 #if defined(XBOXRECOMP_HAVE_GPU)
@@ -129,6 +143,14 @@ struct fb_slot {
     uint64_t aspect;            /* aspect_pack(): class, ZOOM rows */
     uint64_t seq;               /* s_ready_seq it was published as */
     uint64_t pub_ns;            /* when it was published (XBA-136: flip -> present) */
+    /* A zero-copy frame (gpu_take_locked): no pixels, the back end's texture
+     * gl_tex (w x h, RGBA: format XBGR8888 when read back). acquire: the
+     * back end's fence, waited for before the first draw (main thread, then
+     * NULL); release: the window's fence after its last draw from it, handed
+     * back with the slot. Both GLsync. */
+    int      gpu;
+    unsigned gl_tex;
+    void    *acquire, *release;
 };
 
 /* What the window takes from SDL, and gives back on every way out. */
@@ -277,6 +299,19 @@ void xbox_FramebufferWindowFrameTris(uint32_t tris)
     __atomic_store_n(&s_aspect_tris, tris, __ATOMIC_RELAXED);
 }
 
+/* The policy from the environment, once (presenting thread). */
+static void aspect_init(void)
+{
+    if (s_aspect_ready)
+        return;
+    aspect_policy_init_from_env(&s_aspect);
+    s_aspect_ready = 1;
+    fprintf(stderr, "  [FBWIN] aspect %s (RECOMP_ASPECT), 3D at %u triangles, zoom %s\n",
+            s_aspect.setting == ASPECT_SETTING_4_3 ? "4:3"
+            : s_aspect.setting == ASPECT_SETTING_16_9 ? "16:9" : "auto",
+            s_aspect.min_tris, s_aspect.zoom_on ? "on" : "off");
+}
+
 /* The class of a frame about to be shown, on the presenting thread; also
  * kept as the current one for the frame generation sink. Class changes are
  * logged. */
@@ -292,14 +327,7 @@ static uint64_t aspect_classify(const uint8_t *px, uint32_t w, uint32_t h, uint3
     int cls;
     uint64_t a;
 
-    if (!s_aspect_ready) {
-        aspect_policy_init_from_env(&s_aspect);
-        s_aspect_ready = 1;
-        fprintf(stderr, "  [FBWIN] aspect %s (RECOMP_ASPECT), 3D at %u triangles, zoom %s\n",
-                s_aspect.setting == ASPECT_SETTING_4_3 ? "4:3"
-                : s_aspect.setting == ASPECT_SETTING_16_9 ? "16:9" : "auto",
-                s_aspect.min_tris, s_aspect.zoom_on ? "on" : "off");
-    }
+    aspect_init();
     if (s_aspect.title_wide != __atomic_load_n(&s_aspect_title_wide, __ATOMIC_RELAXED)) {
         aspect_policy_set_title_wide(&s_aspect, !s_aspect.title_wide);
         fprintf(stderr, "  [FBWIN] aspect: the title %s wide 3D frames\n",
@@ -721,6 +749,7 @@ static struct fb_slot *back_slot(uint32_t pitch, uint32_t h)
  * overwritten (dropped), never waited for. */
 static void publish(uint32_t w, uint32_t h, uint32_t pitch, uint32_t format)
 {
+    s_slot[s_back].gpu = 0;            /* pixels (its fences stay for its next GPU frame) */
     s_slot[s_back].w = w;              /* only this thread touches s_back */
     s_slot[s_back].h = h;
     s_slot[s_back].pitch = pitch;
@@ -885,6 +914,279 @@ static int present_host_locked(const void *px, uint32_t w, uint32_t h,
     return taken;
 }
 
+/* ── Zero-copy frames (XBA-308, fb_gpu_frame.h) ───────────────────────── */
+
+/* The GL calls the window makes itself, from SDL's context (gpu_window_init). */
+#ifndef APIENTRY
+#define APIENTRY
+#endif
+typedef void *GpuSync;
+static struct {
+    GpuSync (APIENTRY *FenceSync)(unsigned, unsigned);
+    unsigned (APIENTRY *ClientWaitSync)(GpuSync, unsigned, uint64_t);
+    void (APIENTRY *DeleteSync)(GpuSync);
+    void (APIENTRY *Flush)(void);
+    void (APIENTRY *BindTexture)(unsigned, unsigned);
+    void (APIENTRY *TexParameteri)(unsigned, unsigned, int);
+    void (APIENTRY *ActiveTexture)(unsigned);
+    void (APIENTRY *GetIntegerv)(unsigned, int *);
+    const unsigned char *(APIENTRY *GetString)(unsigned);
+    void (APIENTRY *GenFramebuffers)(int, unsigned *);
+    void (APIENTRY *DeleteFramebuffers)(int, const unsigned *);
+    void (APIENTRY *BindFramebuffer)(unsigned, unsigned);
+    void (APIENTRY *FramebufferTexture2D)(unsigned, unsigned, unsigned, unsigned, int);
+    unsigned (APIENTRY *CheckFramebufferStatus)(unsigned);
+    void (APIENTRY *ReadPixels)(int, int, int, int, unsigned, unsigned, void *);
+    void (APIENTRY *PixelStorei)(unsigned, int);
+} s_gl;
+#define FGL_TEXTURE_2D            0x0DE1u
+#define FGL_TEXTURE0              0x84C0u
+#define FGL_ACTIVE_TEXTURE        0x84E0u
+#define FGL_TEXTURE_BINDING_2D    0x8069u
+#define FGL_TEXTURE_MIN_FILTER    0x2801u
+#define FGL_TEXTURE_MAG_FILTER    0x2800u
+#define FGL_NEAREST               0x2600
+#define FGL_LINEAR                0x2601
+#define FGL_VERSION               0x1F02u
+#define FGL_FRAMEBUFFER           0x8D40u
+#define FGL_FRAMEBUFFER_BINDING   0x8CA6u
+#define FGL_COLOR_ATTACHMENT0     0x8CE0u
+#define FGL_FRAMEBUFFER_COMPLETE  0x8CD5u
+#define FGL_RGBA                  0x1908u
+#define FGL_UNSIGNED_BYTE         0x1401u
+#define FGL_PACK_ALIGNMENT        0x0D05u
+#define FGL_SYNC_GPU_COMMANDS_COMPLETE 0x9117u
+#define FGL_ALREADY_SIGNALED      0x911Au
+#define FGL_CONDITION_SATISFIED   0x911Cu
+
+static int s_gpu_ready;                  /* set before the guest starts: the window draws zero-copy frames */
+static volatile int s_gpu_off;           /* SDL's context was lost (SDL_RENDER_DEVICE_RESET): no more */
+static const char *s_gpu_no;             /* executor thread: why the window last refused (logged on change) */
+
+/* Executor thread, at each flip (the back end asks; gpu_take_locked asks again): whether the window takes the frame
+ * as a texture now. Anything that needs the frame's pixels on the CPU says no. Changes are logged. */
+static int gpu_frames_wanted(void)
+{
+    const char *no = NULL;
+    int pv_up = 0;
+
+    if (!s_gpu_ready)
+        no = "the window cannot draw them";
+    else if (__atomic_load_n(&s_gpu_off, __ATOMIC_ACQUIRE))
+        no = "the window's GL context was lost";
+    else if (!__atomic_load_n(&s_running, __ATOMIC_SEQ_CST))
+        no = "no window";
+#if defined(XBOXRECOMP_LSFG)
+    else if (fg_feeding())
+        no = "frame generation";
+#endif
+    else if ((void)xbox_PvideoPicture(&pv_up), pv_up)
+        no = "the video overlay";
+    else {
+        aspect_init();
+        if (s_aspect.zoom_on && aspect_policy_wide(&s_aspect))
+            no = "letterbox zoom (RECOMP_ASPECT_ZOOM)";
+    }
+    if (no != s_gpu_no) {
+        fprintf(stderr, "  [FBWIN] zero-copy frames %s%s\n", no ? "paused: read back for " : "again",
+                no ? no : "");
+        s_gpu_no = no;
+    }
+    return !no;
+}
+
+/* A zero-copy frame into the back slot (present lock held, executor thread, the back end's context current):
+ * render() blits the frame into the slot's texture after the window's last draw from it; then the slot is
+ * published as a pixel frame is. 0: not taken (the caller asks for pixels). */
+static int gpu_take_locked(const XboxFbGpuFrame *f)
+{
+    struct fb_slot *s;
+    void *rel, *acq = NULL;
+    unsigned tex;
+    int taken = 0;
+
+    if (!f->render || !f->w || !f->h || f->w > 8192 || f->h > 8192 || !gpu_frames_wanted())
+        return 0;
+    __atomic_add_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&s_running, __ATOMIC_SEQ_CST)) {
+        s = &s_slot[s_back];
+        rel = s->release;
+        s->release = NULL;
+        if (s->acquire && f->drop)
+            f->drop(s->acquire);       /* published, never shown */
+        s->acquire = NULL;
+        tex = f->render(f, s_back, rel, &acq);
+        if (tex) {
+            uint32_t fmt = SDL_PIXELFORMAT_XBGR8888;
+            s->gl_tex = tex;
+            s->acquire = acq;
+            s->w = f->w;
+            s->h = f->h;
+            s->pitch = f->w * 4u;
+            s->format = fmt;
+            s->aspect = aspect_classify(NULL, f->w, f->h, f->w * 4u, fmt);   /* no letterbox scan: never ZOOM */
+            s->gpu = 1;
+            pthread_mutex_lock(&s_lock);
+            {
+                int t = s_ready;
+                s_ready = s_back;
+                s_back = t;
+                s_ready_seq++;
+                s_slot[s_ready].seq = s_ready_seq;
+                s_slot[s_ready].pub_ns = now_ns();
+            }
+            pthread_mutex_unlock(&s_lock);
+            wake_main_loop();
+            taken = 1;
+        } else if (acq && f->drop)
+            f->drop(acq);
+    }
+    __atomic_sub_fetch(&s_in_present, 1, __ATOMIC_SEQ_CST);
+    return taken;
+}
+
+/* A fence of the back end's, waited for on the main thread (bounded) and deleted. */
+static void gpu_acquire(struct fb_slot *s)
+{
+    if (!s->acquire)
+        return;
+    if (s_gl.ClientWaitSync) {
+        unsigned r = s_gl.ClientWaitSync((GpuSync)s->acquire, 0, 100000000ull);   /* 100 ms */
+        if (r != FGL_ALREADY_SIGNALED && r != FGL_CONDITION_SATISFIED) {
+            static int said;
+            if (!said++)
+                fprintf(stderr, "  [FBWIN] zero-copy: a frame's fence not signalled in 100 ms (0x%X)\n", r);
+        }
+        s_gl.DeleteSync((GpuSync)s->acquire);
+    }
+    s->acquire = NULL;
+}
+
+/* After a draw from slot s's texture: the fence the back end waits for before writing it again. */
+static void gpu_release(struct fb_slot *s)
+{
+    if (s->release)
+        s_gl.DeleteSync((GpuSync)s->release);
+    s->release = s_gl.FenceSync(FGL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    s_gl.Flush();                      /* the back end's context waits for it */
+}
+
+/* Main thread: slot s's texture read back into px (w * h * 4 bytes, RGBA, top row first). */
+static int gpu_read(struct fb_slot *s, uint8_t *px)
+{
+    int fb_was = 0, pack = 4;
+    unsigned fb = 0;
+    int ok;
+
+    if (!s->gpu || !s->gl_tex || !s_gpu_ready)
+        return 0;
+    gpu_acquire(s);
+    s_gl.GetIntegerv(FGL_FRAMEBUFFER_BINDING, &fb_was);
+    s_gl.GetIntegerv(FGL_PACK_ALIGNMENT, &pack);
+    s_gl.GenFramebuffers(1, &fb);
+    s_gl.BindFramebuffer(FGL_FRAMEBUFFER, fb);
+    s_gl.FramebufferTexture2D(FGL_FRAMEBUFFER, FGL_COLOR_ATTACHMENT0, FGL_TEXTURE_2D, s->gl_tex, 0);
+    ok = s_gl.CheckFramebufferStatus(FGL_FRAMEBUFFER) == FGL_FRAMEBUFFER_COMPLETE;
+    if (ok) {
+        s_gl.PixelStorei(FGL_PACK_ALIGNMENT, 4);
+        s_gl.ReadPixels(0, 0, (int)s->w, (int)s->h, FGL_RGBA, FGL_UNSIGNED_BYTE, px);
+        s_gl.PixelStorei(FGL_PACK_ALIGNMENT, pack);
+    }
+    s_gl.BindFramebuffer(FGL_FRAMEBUFFER, (unsigned)fb_was);
+    s_gl.DeleteFramebuffers(1, &fb);
+    gpu_release(s);
+    return ok;
+}
+
+/* Screenshots, the overlay's first picture, save-state thumbnails (any thread): a copy of the zero-copy frame on
+ * screen. The main thread reads it itself; any other asks it (its loop turns at least every 100 ms) and waits up to
+ * 2 s. *px is the caller's to free (w x h, format XBGR8888). */
+static pthread_mutex_t s_gcopy_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  s_gcopy_cv = PTHREAD_COND_INITIALIZER;
+static int             s_gcopy_req;      /* atomic */
+static uint64_t        s_gcopy_gen;      /* under s_gcopy_mu: requests served */
+static uint8_t        *s_gcopy_px;       /* under s_gcopy_mu: the last copy */
+static uint32_t        s_gcopy_w, s_gcopy_h;
+static uint64_t        s_gcopy_aspect;
+static pthread_t       s_main_thread;
+static int             s_main_known;
+
+/* Main thread: the front slot (on screen) into dst (realloc'd), when it is a zero-copy frame. */
+static int gpu_copy_front(uint8_t **dst, uint32_t *w, uint32_t *h, uint64_t *aspect)
+{
+    struct fb_slot *s = &s_slot[s_front];
+    uint8_t *p;
+
+    if (!s->gpu || !s->gl_tex || !s->w || !s->h)
+        return 0;
+    p = (uint8_t *)realloc(*dst, (size_t)s->w * s->h * 4);
+    if (!p)
+        return 0;
+    *dst = p;
+    if (!gpu_read(s, p))
+        return 0;
+    *w = s->w;
+    *h = s->h;
+    *aspect = s->aspect;
+    return 1;
+}
+
+/* Main loop, after it took the newest frame: a request waiting is served. */
+static void gpu_copy_serve(void)
+{
+    if (!__atomic_load_n(&s_gcopy_req, __ATOMIC_ACQUIRE))
+        return;
+    pthread_mutex_lock(&s_gcopy_mu);
+    __atomic_store_n(&s_gcopy_req, 0, __ATOMIC_RELAXED);
+    if (!gpu_copy_front(&s_gcopy_px, &s_gcopy_w, &s_gcopy_h, &s_gcopy_aspect))
+        s_gcopy_w = s_gcopy_h = 0;
+    s_gcopy_gen++;
+    pthread_cond_broadcast(&s_gcopy_cv);
+    pthread_mutex_unlock(&s_gcopy_mu);
+}
+
+static int gpu_copy_frame(uint8_t **px, uint32_t *w, uint32_t *h, uint64_t *aspect)
+{
+    uint64_t gen;
+    struct timespec until;
+    int got = 0;
+
+    *px = NULL;
+    if (s_main_known && pthread_equal(pthread_self(), s_main_thread))
+        return gpu_copy_front(px, w, h, aspect);
+    if (!__atomic_load_n(&s_running, __ATOMIC_SEQ_CST))
+        return 0;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += 2;
+    pthread_mutex_lock(&s_gcopy_mu);
+    gen = s_gcopy_gen;
+    __atomic_store_n(&s_gcopy_req, 1, __ATOMIC_RELEASE);
+    wake_main_loop();
+    while (s_gcopy_gen == gen)
+        if (pthread_cond_timedwait(&s_gcopy_cv, &s_gcopy_mu, &until) != 0)
+            break;
+    if (s_gcopy_gen != gen && s_gcopy_w && s_gcopy_h
+            && (*px = (uint8_t *)malloc((size_t)s_gcopy_w * s_gcopy_h * 4)) != NULL) {
+        memcpy(*px, s_gcopy_px, (size_t)s_gcopy_w * s_gcopy_h * 4);
+        *w = s_gcopy_w;
+        *h = s_gcopy_h;
+        *aspect = s_gcopy_aspect;
+        got = 1;
+    }
+    pthread_mutex_unlock(&s_gcopy_mu);
+    if (!got)
+        fprintf(stderr, "  [FBWIN] zero-copy: the window did not read its frame back\n");
+    return got;
+}
+
+/* The newest published frame is a zero-copy one (s_lock held). */
+static int gpu_newest_locked(void)
+{
+    struct fb_slot *a = &s_slot[s_ready], *b = &s_slot[s_front];
+    struct fb_slot *n = a->seq >= b->seq ? a : b;
+    return n->seq && n->gpu;
+}
+
 /* A GPU back end's own frame (FLIP_STALL with Nv2aPresentSurface.host_px):
  * copied into a slot like a guest frame, at its own size. Returns 1 when
  * the window took it, 0 when there is no window (headless, closing) or the
@@ -899,6 +1201,22 @@ int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h,
     recomp_lifecycle_hold();
     t_held = now_ns();
     pthread_mutex_lock(&s_present_mu);
+    if (format == XBOX_FB_HOST_GPU) {
+        /* A zero-copy frame: its texture into the back slot, or (the window
+         * needs pixels right now) a read-back, shown as any host frame. */
+        const XboxFbGpuFrame *f = (const XboxFbGpuFrame *)px;
+        if (f && gpu_take_locked(f)) {
+            pthread_mutex_unlock(&s_present_mu);
+            perf_present(t0, t_held, now_ns(), 1);
+            return 1;
+        }
+        px = f && f->pixels && __atomic_load_n(&s_running, __ATOMIC_SEQ_CST)
+           ? f->pixels(f, &pitch, &format) : NULL;
+        if (f) {
+            w = f->w;
+            h = f->h;
+        }
+    }
     if (px && w && h && w <= 8192 && h <= 8192 && pitch >= w * 4u && host_sdl_format(format)
             && pvideo_frame((const uint8_t *)px, w, h, pitch, host_sdl_format(format)))
         taken = __atomic_load_n(&s_running, __ATOMIC_SEQ_CST);
@@ -940,7 +1258,7 @@ void fbwin_to_xrgb(const uint8_t *src, uint32_t w, uint32_t h, uint32_t pitch,
  * the display surface in guest memory. */
 int fbwin_last_frame(uint32_t *dst)
 {
-    int got = 0;
+    int got = 0, gpu = 0;
 
 #if defined(XBOXRECOMP_LSFG)
     if (fg_feeding() && s_fg_window) {
@@ -962,12 +1280,24 @@ int fbwin_last_frame(uint32_t *dst)
     {
         struct fb_slot *a = &s_slot[s_ready], *b = &s_slot[s_front];
         struct fb_slot *n = a->seq >= b->seq ? a : b;
-        if (n->seq && n->px && n->w && n->h) {
+        if (n->seq && !n->gpu && n->px && n->w && n->h) {
             fbwin_to_xrgb(n->px, n->w, n->h, n->pitch, n->format, dst);
             got = 1;
         }
+        gpu = !got && gpu_newest_locked();
     }
     pthread_mutex_unlock(&s_lock);
+    if (gpu) {
+        /* A zero-copy frame: read back by the main thread. */
+        uint8_t *px = NULL;
+        uint32_t w = 0, h = 0;
+        uint64_t aspect;
+        if (gpu_copy_frame(&px, &w, &h, &aspect)) {
+            fbwin_to_xrgb(px, w, h, w * 4u, SDL_PIXELFORMAT_XBGR8888, dst);
+            got = 1;
+        }
+        free(px);
+    }
     if (!got && s_fb_va && s_fb_pitch) {
         uint32_t bpp = s_fb_pitch / FB_W;
         if (bpp == 2 || bpp == 4) {
@@ -1214,7 +1544,7 @@ int xbox_FramebufferDumpBmp(const char *path)
     uint32_t w = 0, h = 0, pitch = 0, format = 0;
     uint64_t aspect = 0;
     uint8_t *px = NULL;
-    int rc;
+    int rc, gpu;
 
 #if defined(XBOXRECOMP_LSFG)
     /* Frame generation: the frame on screen is the FIFO's last shown one. */
@@ -1238,7 +1568,8 @@ int xbox_FramebufferDumpBmp(const char *path)
     }
 #endif
     pthread_mutex_lock(&s_lock);
-    if (s_ready_seq && s_slot[s_ready].px) {
+    gpu = gpu_newest_locked();
+    if (!gpu && s_ready_seq && !s_slot[s_ready].gpu && s_slot[s_ready].px) {
         w = s_slot[s_ready].w;
         h = s_slot[s_ready].h;
         pitch = s_slot[s_ready].pitch;
@@ -1248,6 +1579,11 @@ int xbox_FramebufferDumpBmp(const char *path)
             memcpy(px, s_slot[s_ready].px, (size_t)pitch * h);
     }
     pthread_mutex_unlock(&s_lock);
+    if (gpu && gpu_copy_frame(&px, &w, &h, &aspect)) {
+        /* A zero-copy frame, read back by the main thread. */
+        pitch = w * 4u;
+        format = SDL_PIXELFORMAT_XBGR8888;
+    }
     if (!px)
         return -1;
     rc = write_bmp(path, px, w, h, pitch, format, aspect);
@@ -1550,6 +1886,112 @@ static int xshader_draw(SDL_Renderer *ren, SDL_Texture *tex, uint32_t tw, uint32
     return 1;
 }
 
+/* A zero-copy frame (slot s, on screen) into the rectangle rw x rh centred in the ow x oh drawable, after the clear
+ * SDL has queued: the picture shader's program, or a plain one (PRESENT_SHADER_AREA, one tap, the texture filtered
+ * as SDL would filter its own: linear or nearest). Every GL state SDL caches is put back (present_shader_draw_legacy,
+ * the texture of unit 0 here). Returns 0 when nothing could be drawn. */
+static PresentShaderProg s_gpu_prog;
+static int gpu_draw(SDL_Renderer *ren, struct fb_slot *s, int linear, uint64_t aspect, int ow, int oh,
+                    uint32_t rw, uint32_t rh)
+{
+    int p = xshader_preset(), active = 0, bound = 0, preset;
+    uint32_t th = s->h, y0 = 0, rows = th;
+    PresentShaderProg *sp;
+    unsigned err;
+
+    if (!s_gpu_ready || !s->gpu || !s->gl_tex || !rw || !rh)
+        return 0;
+    SDL_RenderFlush(ren);   /* the clear first; SDL's context is current from here */
+    gpu_acquire(s);
+    preset = p != HOST_SHADER_NONE;
+    sp = preset ? &s_xsprog[p] : &s_gpu_prog;
+    if (!present_shader_build(sp, (PresentGlsl)s_xshader_glsl, preset ? p : PRESENT_SHADER_AREA, "[FBWIN]")) {
+        if (preset)
+            __atomic_store_n(&s_xshader_active, HOST_SHADER_NONE, __ATOMIC_RELEASE);
+        sp = &s_gpu_prog;
+        preset = 0;
+        if (!present_shader_build(sp, (PresentGlsl)s_xshader_glsl, PRESENT_SHADER_AREA, "[FBWIN]"))
+            return 0;
+    }
+    if (aspect_cls(aspect) == ASPECT_ZOOM && aspect_y0(aspect) + aspect_rows(aspect) <= th && aspect_rows(aspect)) {
+        y0 = aspect_y0(aspect);
+        rows = aspect_rows(aspect);
+    }
+    s_gl.GetIntegerv(FGL_ACTIVE_TEXTURE, &active);
+    s_gl.ActiveTexture(FGL_TEXTURE0);
+    s_gl.GetIntegerv(FGL_TEXTURE_BINDING_2D, &bound);
+    s_gl.BindTexture(FGL_TEXTURE_2D, s->gl_tex);
+    linear = linear || p == HOST_SHADER_SHARP || p == HOST_SHADER_FXAA || p == HOST_SHADER_CAS;
+    s_gl.TexParameteri(FGL_TEXTURE_2D, FGL_TEXTURE_MIN_FILTER, linear ? FGL_LINEAR : FGL_NEAREST);
+    s_gl.TexParameteri(FGL_TEXTURE_2D, FGL_TEXTURE_MAG_FILTER, linear ? FGL_LINEAR : FGL_NEAREST);
+    {
+        int cells = present_shader_xbox_cells((int)th);
+        PresentShaderParams pp = {
+            .src_w = (float)s->w, .src_h = (float)th,
+            .out_w = (float)rw, .out_h = (float)rh * (float)th / (float)rows,
+            .cells_w = (float)s->w * (float)cells / (float)th, .cells_h = (float)cells,
+            .rect = { 0.0f, (float)y0 / (float)th, 1.0f, (float)rows / (float)th },
+            .flip = 1, .swap = 0,
+            .strength = present_shader_strength(&s_xshader), .curvature = s_xshader.curvature,
+            /* The plain copy samples once, as SDL's own copy of a pixel frame does. */
+            .downscale = preset ? present_downscale_env() : 0,
+        };
+        err = present_shader_draw_legacy(sp, &pp, (ow - (int)rw) / 2, (oh - (int)rh) / 2, (int)rw, (int)rh);
+    }
+    s_gl.BindTexture(FGL_TEXTURE_2D, (unsigned)bound);
+    s_gl.ActiveTexture((unsigned)active);
+    gpu_release(s);
+    if (err) {
+        static int logged;
+        if (!logged++)
+            fprintf(stderr, "  [FBWIN] zero-copy: GL error 0x%04x at the frame's draw\n", err);
+    }
+    return 1;
+}
+
+/* After the renderer (its context current), before the guest: whether this window can draw zero-copy frames, told
+ * to the GL back end (nv2a_gl_present_share), which logs the mode once its context exists. Needs SDL's opengl or
+ * opengles2 renderer on EGL, a context with sync objects (GL 3.2, GLES 3.0) and the calls above. */
+static void gpu_window_init(void)
+{
+#if defined(XBOXRECOMP_HAVE_GPU)
+    struct { void **slot; const char *name; } fns[] = {
+#define F(n) { (void **)&s_gl.n, "gl" #n }
+        F(FenceSync), F(ClientWaitSync), F(DeleteSync), F(Flush), F(BindTexture), F(TexParameteri),
+        F(ActiveTexture), F(GetIntegerv), F(GetString), F(GenFramebuffers), F(DeleteFramebuffers),
+        F(BindFramebuffer), F(FramebufferTexture2D), F(CheckFramebufferStatus), F(ReadPixels), F(PixelStorei),
+#undef F
+    };
+    const char *refuse = NULL, *v;
+    char why[160];
+    int major = 0, minor = 0;
+
+    if (s_xshader_glsl < 0)
+        refuse = "SDL's renderer is not opengl or opengles2";
+    else if (getenv("RECOMP_STATUS") && getenv("RECOMP_STATUS")[0])
+        refuse = "RECOMP_STATUS: the compat runner reads every frame";
+    for (size_t i = 0; !refuse && i < sizeof fns / sizeof fns[0]; i++) {
+        *fns[i].slot = SDL_GL_GetProcAddress(fns[i].name);
+        if (!*fns[i].slot) {
+            snprintf(why, sizeof why, "no %s in the window's GL context", fns[i].name);
+            refuse = why;
+        }
+    }
+    if (!refuse) {
+        v = (const char *)s_gl.GetString(FGL_VERSION);
+        if (v && !strncmp(v, "OpenGL ES ", 10))
+            v += 10;
+        if (!v || sscanf(v, "%d.%d", &major, &minor) != 2
+                || major * 10 + minor < (s_xshader_glsl == PRESENT_GLSL_ES100 ? 30 : 32)) {
+            snprintf(why, sizeof why, "the window's GL context is %s (sync objects need GL 3.2 / GLES 3.0)",
+                     v ? v : "?");
+            refuse = why;
+        }
+    }
+    s_gpu_ready = nv2a_gl_present_share(refuse ? NULL : gpu_frames_wanted, refuse);
+#endif
+}
+
 /* xbox_FramebufferWindowCapture: the drawable as drawn, before the present. */
 static void capture_drawable(SDL_Renderer *ren)
 {
@@ -1598,6 +2040,11 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     SDL_Texture *tex = NULL;
     uint32_t tex_w = 0, tex_h = 0, tex_format = 0;
     int tex_linear = 0;
+    /* What is on screen: the SDL texture's frame, or (tex_gpu) the front slot's zero-copy texture; pic_w x pic_h its size,
+     * pic_linear its filter. */
+    int tex_gpu = 0, pic_linear = 0;
+    uint32_t pic_w = 0, pic_h = 0;
+    int gpu_installed = 0;
     uint64_t tex_aspect = 0;            /* the shown frame's class (aspect_pack) */
     int log_cls = ASPECT_NORMAL;        /* the renderer's logical size's class */
     uint64_t shown_seq = 0, t_title = 0, flips_title = 0, t_overlay = 0;
@@ -1622,8 +2069,9 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * Before the guest starts, windowed or not; its context lives on the
      * executor thread, frames still reach this window through guest
      * memory (src/gpu/nv2a_gl.c). */
-    nv2a_gl_install_from_env();
+    gpu_installed = nv2a_gl_install_from_env();
 #endif
+    (void)gpu_installed;
     if (!env_on("RECOMP_FB_WINDOW") || env_on("RECOMP_HEADLESS")) {
 #if defined(XBOXRECOMP_LSFG)
         fg_start(0);
@@ -1648,6 +2096,11 @@ int xbox_HostWindowMain(int (*guest_main)(void))
      * in-game menu, docs/android/app-shell.md « In-game menu »), so the
      * Back-twice path below only runs where nothing above SDL takes it. */
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+    /* Zero-copy frames need SDL's context on EGL, as the back end's is: X11 defaults to GLX (Wayland is EGL). */
+    if (gpu_installed && !(getenv("RECOMP_GPU_ZERO_COPY") && !strcmp(getenv("RECOMP_GPU_ZERO_COPY"), "0")))
+        SDL_SetHint("SDL_VIDEO_X11_FORCE_EGL", "1");
 #endif
     if (SDL_Init(FBWIN_SDL_SUBSYSTEMS) != 0) {
         fprintf(stderr, "  [FBWIN] SDL video unavailable (%s); running headless\n",
@@ -1693,6 +2146,10 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             nv2a_gl_set_display_size((uint32_t)ow, (uint32_t)oh);
     }
 #endif
+    if (gpu_installed)
+        gpu_window_init();   /* zero-copy frames (XBA-308) */
+    s_main_thread = pthread_self();
+    s_main_known = 1;
 
     SDL_AddEventWatch(lifecycle_watch, NULL);
 
@@ -1811,6 +2268,17 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     perf_overlay_reset();
                     for (int i = 0; i < HOST_SHADER_COUNT; i++)
                         present_shader_release(&s_xsprog[i], 1);   /* went with the context */
+                    present_shader_release(&s_gpu_prog, 1);
+                    if (s_gpu_ready && !s_gpu_off) {
+                        /* The share group is gone: frames are read back from the next flip
+                         * (its texture cannot be drawn again; black until then). */
+                        __atomic_store_n(&s_gpu_off, 1, __ATOMIC_RELEASE);
+#if defined(XBOXRECOMP_HAVE_GPU)
+                        nv2a_gl_present_window_lost();
+#endif
+                        fprintf(stderr, "  [FBWIN] GL context lost: zero-copy frames off\n");
+                    }
+                    tex_gpu = 0;
                     reupload = 1;
                     dirty = 1;
                 } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat
@@ -1898,7 +2366,20 @@ int xbox_HostWindowMain(int (*guest_main)(void))
 
         if (px) {
             /* A frame generation entry, set above. */
-        } else if (seq != shown_seq || (reupload && shown_seq)) {
+        } else if (seq != shown_seq && s_slot[s_front].gpu) {
+            /* A zero-copy frame: drawn from its texture below. */
+            struct fb_slot *g = &s_slot[s_front];
+            frame_pub = g->pub_ns;
+            shown_seq = seq;
+            if (!tex_gpu || g->w != pic_w || g->h != pic_h)
+                fprintf(stderr, "  [FBWIN] zero-copy frames %ux%u\n", g->w, g->h);
+            tex_gpu = 1;
+            pic_w = g->w;
+            pic_h = g->h;
+            tex_aspect = g->aspect;
+            dirty = 1;
+            reupload = 0;
+        } else if (seq != shown_seq || (reupload && shown_seq && !s_slot[s_front].gpu)) {
             if (seq != shown_seq)
                 frame_pub = s_slot[s_front].pub_ns;
             shown_seq = seq;
@@ -1935,9 +2416,13 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             if (tex)
                 SDL_UpdateTexture(tex, NULL, px, (int)pitch);
             tex_aspect = aspect;
+            tex_gpu = 0;
+            pic_w = tex_w;
+            pic_h = tex_h;
             dirty = 1;
             reupload = 0;
         }
+        gpu_copy_serve();   /* a screenshot or thumbnail of a zero-copy frame, asked from another thread */
         if (xshader_live_take()) {
             dirty = 1;
             tex_linear = -1;   /* sharp bilinear samples linearly: the filter is chosen again */
@@ -1953,18 +2438,18 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             dirty = 1;
         }
         log_cls = aspect_cls(tex_aspect);
-        if (dirty && tex) {
+        if (dirty && (tex || tex_gpu)) {
             /* A 4:3 frame at the guest's 640x480 keeps the window's nearest
              * filter; any other (a GPU back end's internal resolution, a
              * frame widened to 16:9 or a ZOOM crop) is filtered linearly
              * unless what is shown of it maps 1:1 onto the letterboxed
              * rectangle of the current logical aspect it is shown in. */
             int linear = 0, cls = aspect_cls(tex_aspect);
-            if (tex_w != FB_W || tex_h != FB_H || cls != ASPECT_NORMAL) {
+            if (pic_w != FB_W || pic_h != FB_H || cls != ASPECT_NORMAL) {
                 int ow = 0, oh = 0;
                 uint32_t rw, rh, lw = cls == ASPECT_NORMAL ? FB_W : 16u;
                 uint32_t lh = cls == ASPECT_NORMAL ? FB_H : 9u;
-                uint32_t sh = cls == ASPECT_ZOOM ? aspect_rows(tex_aspect) : tex_h;
+                uint32_t sh = cls == ASPECT_ZOOM ? aspect_rows(tex_aspect) : pic_h;
                 SDL_GetRendererOutputSize(ren, &ow, &oh);
                 if ((uint64_t)ow * lh <= (uint64_t)oh * lw) {
                     rw = (uint32_t)ow;
@@ -1973,13 +2458,14 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                     rh = (uint32_t)oh;
                     rw = (uint32_t)((uint64_t)oh * lw / lh);
                 }
-                linear = tex_w != rw || sh != rh;
+                linear = pic_w != rw || sh != rh;
             }
             /* Sharp bilinear, FXAA and CAS blend texels themselves: they sample linearly whatever the scale. */
             if (xshader_preset() == HOST_SHADER_SHARP || xshader_preset() == HOST_SHADER_FXAA
                 || xshader_preset() == HOST_SHADER_CAS)
                 linear = 1;
-            if (linear != tex_linear) {
+            pic_linear = linear;
+            if (tex && !tex_gpu && linear != tex_linear) {
                 SDL_SetTextureScaleMode(tex, linear ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
                 tex_linear = linear;
             }
@@ -1989,7 +2475,22 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             dirty = 0;
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
             SDL_RenderClear(ren);
-            if (tex && xshader_preset() != HOST_SHADER_NONE) {
+            if (tex_gpu) {
+                /* The letterboxed rectangle, as below. */
+                int ow = 0, oh = 0, cls = aspect_cls(tex_aspect);
+                uint32_t rw, rh, lw = cls == ASPECT_NORMAL ? FB_W : 16u, lh = cls == ASPECT_NORMAL ? FB_H : 9u;
+                SDL_GetRendererOutputSize(ren, &ow, &oh);
+                if ((uint64_t)ow * lh <= (uint64_t)oh * lw) {
+                    rw = (uint32_t)ow;
+                    rh = (uint32_t)((uint64_t)ow * lh / lw);
+                } else {
+                    rh = (uint32_t)oh;
+                    rw = (uint32_t)((uint64_t)oh * lw / lh);
+                }
+                shaded = gpu_draw(ren, &s_slot[s_front], pic_linear, tex_aspect, ow, oh, rw, rh);
+                if (!shaded)
+                    shaded = 1;   /* nothing else to draw it with: the clear stays */
+            } else if (tex && xshader_preset() != HOST_SHADER_NONE) {
                 /* The letterboxed rectangle SDL's logical size gives: 640x480, or 16:9. */
                 int ow = 0, oh = 0, cls = aspect_cls(tex_aspect);
                 uint32_t rw, rh, lw = cls == ASPECT_NORMAL ? FB_W : 16u, lh = cls == ASPECT_NORMAL ? FB_H : 9u;
@@ -2014,7 +2515,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                 SDL_RenderCopy(ren, tex, NULL, NULL);
             perf_overlay_draw(ren);
             perf_overlay_badge_draw(ren);   /* "SHADERS 12/304" while shaders compile (XBA-314) */
-            if (tex)
+            if (tex || tex_gpu)
                 capture_drawable(ren);   /* a frame, not the clear of a window event before the first */
             {
                 uint64_t t_call = now_ns();
@@ -2115,6 +2616,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     perf_overlay_reset();
     for (int i = 0; i < HOST_SHADER_COUNT; i++)
         present_shader_release(&s_xsprog[i], 1);   /* go with the renderer's context */
+    present_shader_release(&s_gpu_prog, 1);
     __atomic_store_n(&s_xshader_active, HOST_SHADER_NONE, __ATOMIC_RELEASE);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);

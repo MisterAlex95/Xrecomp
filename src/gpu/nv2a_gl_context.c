@@ -5,7 +5,10 @@
  * needs a drawable: a headless CGL context on macOS, an EGL context with a
  * 1x1 pbuffer (or none, where EGL_KHR_surfaceless_context exists) elsewhere.
  * Created on the executor thread, which keeps it current for the whole run:
- * the SDL presenter on the main thread never touches it.
+ * the SDL presenter on the main thread never touches it, but with zero-copy
+ * present (XBA-308, nv2a_gl_context_share_window) it is created in the
+ * share group of SDL's context, on SDL's EGL display, so the window can draw
+ * the frame's texture.
  *
  * EGL (Android): the display is EGL_DEFAULT_DISPLAY, the one SDL uses;
  * Android's eglInitialize is reference-counted, and this file never calls
@@ -90,6 +93,15 @@ int nv2a_gl_shared_context_bind(void) { return 0; }
 void nv2a_gl_shared_context_unbind(void) {}
 void nv2a_gl_shared_context_destroy(void) {}
 
+/* No zero-copy present on macOS (XBA-308): SDL draws the window with Metal. */
+int nv2a_gl_context_share_window(char *why, size_t n)
+{
+    snprintf(why, n, "macOS: the window is not drawn with an EGL context");
+    return 0;
+}
+int nv2a_gl_context_shared(void) { return 0; }
+void nv2a_gl_context_unshare(void) {}
+
 #else  /* EGL: Android, Linux */
 
 #if defined(__ANDROID__)
@@ -124,6 +136,12 @@ static int env_on(const char *name)
 
 static EGLDisplay s_dpy = EGL_NO_DISPLAY;
 static EGLContext s_ctx = EGL_NO_CONTEXT;
+/* Zero-copy present (XBA-308, nv2a_gl_context_share_window): the window's
+ * display and context, set on its thread before the executor starts;
+ * s_shared: s_ctx is in that context's share group. */
+static EGLDisplay s_share_dpy = EGL_NO_DISPLAY;
+static EGLContext s_share_ctx = EGL_NO_CONTEXT;
+static int s_shared;
 static EGLSurface s_surf = EGL_NO_SURFACE;
 static EGLConfig  s_cfg;
 static int s_have_cfg;
@@ -204,7 +222,10 @@ int nv2a_gl_context_create(void)
     if (s_ctx != EGL_NO_CONTEXT)
         return 1;
     if (s_dpy == EGL_NO_DISPLAY) {
-        EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        /* Sharing with the window: its display (on Android the default one
+         * anyway; on Linux SDL's X11 or Wayland display). */
+        EGLDisplay dpy = s_share_ctx != EGL_NO_CONTEXT ? s_share_dpy
+                                                       : eglGetDisplay(EGL_DEFAULT_DISPLAY);
         if (dpy == EGL_NO_DISPLAY || !eglInitialize(dpy, &major, &minor)) {
             fprintf(stderr, "  [GPUGL] no EGL display (0x%X)\n", eglGetError());
             return 0;
@@ -249,10 +270,27 @@ int nv2a_gl_context_create(void)
         s_have_cfg = 1;
     }
 
-    /* Ask for everything, then drop what the driver refuses. */
+    /* Ask for everything, then drop what the driver refuses. In the
+     * window's share group (zero-copy present) without reset notification:
+     * the window's context has none, and the group must agree on it. */
     prio = want_prio;
     robust = want_robust;
-    s_ctx = try_context(prio, robust, EGL_NO_CONTEXT);
+    s_shared = 0;
+    if (s_share_ctx != EGL_NO_CONTEXT && s_dpy == s_share_dpy) {
+        s_ctx = try_context(prio, 0, s_share_ctx);
+        if (s_ctx == EGL_NO_CONTEXT && prio)
+            s_ctx = try_context(prio = 0, 0, s_share_ctx);
+        if (s_ctx != EGL_NO_CONTEXT) {
+            s_shared = 1;
+            robust = 0;
+        } else {
+            fprintf(stderr, "  [GPUGL] the window's GL context cannot be shared (0x%X): frames"
+                            " reach the window by read-back\n", eglGetError());
+            prio = want_prio;
+        }
+    }
+    if (s_ctx == EGL_NO_CONTEXT)
+        s_ctx = try_context(prio, robust, EGL_NO_CONTEXT);
     if (s_ctx == EGL_NO_CONTEXT && robust)
         s_ctx = try_context(prio, robust = 0, EGL_NO_CONTEXT);
     if (s_ctx == EGL_NO_CONTEXT && prio)
@@ -301,10 +339,11 @@ int nv2a_gl_context_create(void)
         EGLint got = 0;
         if (prio)
             eglQueryContext(s_dpy, s_ctx, EGL_CONTEXT_PRIORITY_LEVEL_IMG, &got);
-        fprintf(stderr, "  [GPUGL] EGL context: %s, priority %s, reset notification %s\n",
+        fprintf(stderr, "  [GPUGL] EGL context: %s, priority %s, reset notification %s%s\n",
                 s_surf == EGL_NO_SURFACE ? "surfaceless" : "1x1 pbuffer",
                 prio ? priority_name(got) : "default",
-                s_reset_status ? "on" : "off");
+                s_reset_status ? "on" : "off",
+                s_shared ? ", shared with the window" : "");
     }
     return 1;
 }
@@ -327,6 +366,47 @@ void nv2a_gl_context_destroy(void)
     eglMakeCurrent(s_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(s_dpy, s_ctx);
     s_ctx = EGL_NO_CONTEXT;
+    s_shared = 0;
+}
+
+int nv2a_gl_context_share_window(char *why, size_t n)
+{
+#if NV2A_GL_ES
+    const EGLint want = EGL_OPENGL_ES_API;
+#else
+    const EGLint want = EGL_OPENGL_API;
+#endif
+    EGLDisplay dpy = eglGetCurrentDisplay();
+    EGLContext ctx = eglGetCurrentContext();
+    EGLint type = 0;
+
+    if (dpy == EGL_NO_DISPLAY || ctx == EGL_NO_CONTEXT) {
+        snprintf(why, n, "the window's renderer has no current EGL context");
+        return 0;
+    }
+    if (!eglQueryContext(dpy, ctx, EGL_CONTEXT_CLIENT_TYPE, &type) || type != want) {
+        snprintf(why, n, "the window's context is %s, the back end's %s",
+                 type == EGL_OPENGL_ES_API ? "OpenGL ES" : type == EGL_OPENGL_API ? "OpenGL" : "?",
+                 want == EGL_OPENGL_ES_API ? "OpenGL ES" : "OpenGL");
+        return 0;
+    }
+    if (s_ctx != EGL_NO_CONTEXT) {
+        snprintf(why, n, "the back end's context already exists");
+        return 0;
+    }
+    s_share_dpy = dpy;
+    s_share_ctx = ctx;
+    return 1;
+}
+
+int nv2a_gl_context_shared(void)
+{
+    return s_ctx != EGL_NO_CONTEXT && s_shared;
+}
+
+void nv2a_gl_context_unshare(void)
+{
+    s_share_ctx = EGL_NO_CONTEXT;
 }
 
 /* The shader worker's context (XBA-310): the main one's config, version and

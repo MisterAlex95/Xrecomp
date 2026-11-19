@@ -22,6 +22,13 @@
  *   fail        RECOMP_SHADER_TEST_FAIL=crt: the shader does not build, none is drawn, none active
  *   live        none at the start, scanlines set live (xbox_FramebufferWindowSetShader, the in-game menu) drawn
  *               from the window's next turn, then lcd set live: none
+ *   gpu         XBA-308, zero-copy frames (Linux): the grey frame as a texture of a context in the window's share
+ *               group (RECOMP_GPU=1; the test stands in for the back end) draws the same picture as through pixels;
+ *               a screenshot from the guest thread reads the texture back; the shader badge is drawn over it.
+ *               Under opengles2 the desktop GL back end cannot share: the frame comes as pixels, the same picture
+ *   gpuoverlay  the perf overlay (RECOMP_OVERLAY=1) drawn over a zero-copy frame
+ *   gpuscan     scanlines drawn from a zero-copy frame
+ *   gpuoff      RECOMP_GPU_ZERO_COPY=0: no sharing, the frame comes as pixels, the same picture
  *   keys        XBA-278, the window's own keys: F12 writes the frame shown (grey) to RECOMP_SCREENSHOT_DIR, F11 and
  *               Alt+Enter toggle fullscreen
  * Skipped (77) with no display or under XBR_BUILD_ONLY. `fb_present_sdl_test <case>` runs one case.
@@ -32,8 +39,16 @@
 #include "video_player.h"
 #include "present_shaders.h"
 #include "host_perf_line.h"
+#include "fb_gpu_frame.h"
+#include "platform/host_shader_progress.h"
 
 #include <SDL.h>
+#if defined(__linux__)
+#include <epoxy/gl.h>    /* gpu, gpuoverlay: a stand-in for the GL back end (Linux, libepoxy as src/gpu) */
+#define ZC_CASES 1
+#else
+#define ZC_CASES 0
+#endif
 
 #include <dirent.h>
 #include <errno.h>
@@ -228,11 +243,197 @@ static int edge_columns(const Ppm *p)
     return n;
 }
 
+#if ZC_CASES
+/* ── Zero-copy frames (XBA-308, fb_gpu_frame.h) ──────────────────────────────────────────────────────────────────
+ * The guest thread stands in for the GL back end: its context from nv2a_gl_context_create (in the window's share
+ * group when the window shared it: RECOMP_GPU=1, SDL's opengl renderer on EGL), the grey frame in a texture of its
+ * own, blitted into the window's slot textures by render(). */
+int nv2a_gl_context_create(void);
+int nv2a_gl_context_shared(void);
+static GLuint s_zc_src_fbo, s_zc_slot_tex[XBOX_FB_GPU_SLOTS], s_zc_slot_fbo[XBOX_FB_GPU_SLOTS];
+static int s_zc_renders, s_zc_pixels;
+static uint32_t *s_zc_rgbx;
+
+static unsigned zc_render(const XboxFbGpuFrame *f, int slot, void *release, void **acquire)
+{
+    if (release) {
+        glClientWaitSync((GLsync)release, 0, 100000000ull);
+        glDeleteSync((GLsync)release);
+    }
+    if (!s_zc_slot_tex[slot]) {
+        glGenTextures(1, &s_zc_slot_tex[slot]);
+        glBindTexture(GL_TEXTURE_2D, s_zc_slot_tex[slot]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)f->w, (GLsizei)f->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glGenFramebuffers(1, &s_zc_slot_fbo[slot]);
+        glBindFramebuffer(GL_FRAMEBUFFER, s_zc_slot_fbo[slot]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_zc_slot_tex[slot], 0);
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, s_zc_src_fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_zc_slot_fbo[slot]);
+    glBlitFramebuffer(0, 0, (GLint)f->w, (GLint)f->h, 0, 0, (GLint)f->w, (GLint)f->h, GL_COLOR_BUFFER_BIT,
+                      GL_NEAREST);
+    *acquire = (void *)glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glFlush();
+    s_zc_renders++;
+    return s_zc_slot_tex[slot];
+}
+
+static const void *zc_pixels(const XboxFbGpuFrame *f, uint32_t *pitch, uint32_t *format)
+{
+    *pitch = f->w * 4u;
+    *format = XBOX_FB_HOST_RGBX8888;
+    s_zc_pixels++;
+    return s_zc_rgbx;
+}
+
+static void zc_drop(void *fence) { glDeleteSync((GLsync)fence); }
+
+static const XboxFbGpuFrame k_zc_frame = { FW, FH, zc_render, zc_pixels, zc_drop };
+
+/* Presents the zero-copy frame until the window has drawn it and written the capture. */
+static int zc_shot(Ppm *out)
+{
+    char path[600];
+
+    snprintf(path, sizeof path, "%s/zc_%s.ppm", s_dir, s_case);
+    unlink(path);
+    xbox_FramebufferWindowCapture(path);
+    for (int i = 0; i < 200; i++) {
+        xbox_FramebufferWindowPresentHost(&k_zc_frame, FW, FH, 0, XBOX_FB_HOST_GPU);
+        sleep_ms(25);
+        if (access(path, R_OK) == 0)
+            break;
+    }
+    if (!ppm_read(path, out) || out->w != WW || out->h != WH) {
+        fprintf(stderr, "  FAIL %s: no zero-copy capture\n", s_case);
+        return 0;
+    }
+    unlink(path);
+    return 1;
+}
+
+static int pixels_off(const Ppm *a, const Ppm *b, int x0, int y0, int x1, int y1)
+{
+    int n = 0;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++)
+            for (int c = 0; c < 3; c++)
+                if (at(a, x, y, c) != at(b, x, y, c)) {
+                    n++;
+                    break;
+                }
+    return n;
+}
+
+/* gpu: the same grey frame through the read-back path (pixels) and as a zero-copy frame: the window's two pictures
+ * are identical; a screenshot asked from this (non-main) thread reads the texture back; the shader badge is drawn
+ * over the zero-copy picture. gpuoverlay: RECOMP_OVERLAY=1, the perf overlay over it. Under SDL's opengles2 renderer
+ * the desktop GL back end cannot share (another client API): the frame comes as pixels, the picture the same. */
+static int gpu_case(void)
+{
+    Ppm a = { 0 }, b = { 0 }, c = { 0 };
+    uint32_t *bgrx = grey_frame(0);
+    int shared, want_shared = !strcmp(getenv("SDL_RENDER_DRIVER") ? getenv("SDL_RENDER_DRIVER") : "", "opengl")
+                              && strcmp(s_case, "gpuoff");   /* RECOMP_GPU_ZERO_COPY=0: no sharing, pixels */
+    GLuint src;
+
+    s_zc_rgbx = grey_frame(1);
+    if (!nv2a_gl_context_create()) {
+        fprintf(stderr, "  FAIL %s: no GL context for the producer\n", s_case);
+        return 1;
+    }
+    shared = nv2a_gl_context_shared();
+    glGenTextures(1, &src);
+    glBindTexture(GL_TEXTURE_2D, src);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, FW, FH, 0, GL_RGBA, GL_UNSIGNED_BYTE, s_zc_rgbx);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    glGenFramebuffers(1, &s_zc_src_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_zc_src_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, src, 0);
+    printf("  %s: producer context %s the window's\n", s_case, shared ? "shares" : "does not share");
+    CHECK(shared == want_shared);
+
+    if (!strcmp(s_case, "gpuscan")) {
+        /* The picture shader's pass over a zero-copy frame. */
+        if (zc_shot(&b))
+            check_scanlines(&b);
+        else
+            s_fail = 1;
+        CHECK(want_shared ? s_zc_renders > 0 : s_zc_pixels > 0);
+        free(b.rgb);
+        free(bgrx);
+        free(s_zc_rgbx);
+        return s_fail;
+    }
+    if (!strcmp(s_case, "gpuoverlay")) {
+        if (zc_shot(&b)) {
+            int lit = 0;
+            for (int y = 0; y < WH; y++)
+                for (int x = 0; x < WW; x++)
+                    lit += (x >= 128 || y >= 128) && abs(at(&b, x, y, 1) - 128) > 8;
+            printf("  %s: %d pixels of overlay over the frame (%d zero-copy renders)\n", s_case, lit, s_zc_renders);
+            CHECK(lit > 500);
+        } else
+            s_fail = 1;
+        CHECK(want_shared ? s_zc_renders > 0 : s_zc_pixels > 0);
+        free(b.rgb);
+        free(bgrx);
+        free(s_zc_rgbx);
+        return s_fail;
+    }
+
+    if (shot(bgrx, FW, FH, XBOX_FB_HOST_BGRX8888, &a) && zc_shot(&b)) {
+        int off = pixels_off(&a, &b, 0, 0, WW, WH);
+        printf("  %s: zero-copy picture %d pixels off the read-back one (%d renders, %d pixel fallbacks)\n",
+               s_case, off, s_zc_renders, s_zc_pixels);
+        CHECK(off == 0);
+        check_plain(&b);
+        CHECK(want_shared ? s_zc_renders > 0 && s_zc_pixels == 0 : s_zc_renders == 0 && s_zc_pixels > 0);
+        {
+            /* A screenshot from this thread: the main thread reads the texture back. */
+            char bmp[600];
+            int col[3] = { 0, 0, 0 };
+            snprintf(bmp, sizeof bmp, "%s/zc.bmp", s_dir);
+            CHECK(xbox_FramebufferDumpBmp(bmp) == 0);
+            CHECK(read_bmp_centre(bmp, col));
+            printf("  %s: screenshot centre %d %d %d\n", s_case, col[0], col[1], col[2]);
+            CHECK(col[0] == 128 && col[1] == 128 && col[2] == 128);
+            unlink(bmp);
+        }
+        /* The shader badge over the zero-copy picture. */
+        host_shader_progress_set(1, 2);
+        sleep_ms(300);
+        if (zc_shot(&c)) {
+            int badge = pixels_off(&b, &c, 0, 0, WW / 2, WH / 4);
+            int rest = pixels_off(&b, &c, 0, WH / 2, WW, WH);
+            printf("  %s: badge %d pixels, %d elsewhere\n", s_case, badge, rest);
+            CHECK(badge > 100 && rest == 0);
+        } else
+            s_fail = 1;
+        host_shader_progress_set(0, 0);
+    } else
+        s_fail = 1;
+    free(a.rgb);
+    free(b.rgb);
+    free(c.rgb);
+    free(bgrx);
+    free(s_zc_rgbx);
+    return s_fail;
+}
+
+#endif
+
 static int guest_main(void)
 {
     Ppm p = { 0 };
     int rgbx = !strcmp(s_case, "rgbx");
     uint32_t *px;
+
+#if ZC_CASES
+    if (!strncmp(s_case, "gpu", 3))
+        return gpu_case();
+#endif
 
     if (!strcmp(s_case, "sharp") || !strcmp(s_case, "linear")) {
         /* Not 640x480: the presenter filters it linearly (the plain copy), the sharp preset blends itself. */
@@ -388,6 +589,12 @@ static const Case k_cases[] = {
     { "fail", "crt", NULL, "RECOMP_SHADER_TEST_FAIL", "crt" },
     { "live", NULL, NULL, NULL, NULL },
     { "keys", NULL, NULL, "RECOMP_SCREENSHOT_DIR", NULL },
+#if ZC_CASES
+    { "gpu", NULL, NULL, NULL, NULL },
+    { "gpuoverlay", NULL, NULL, "RECOMP_OVERLAY", "1" },
+    { "gpuscan", "scanlines", NULL, NULL, NULL },
+    { "gpuoff", NULL, NULL, "RECOMP_GPU_ZERO_COPY", "0" },
+#endif
 };
 
 /* Runs fn in a child under a time limit; its exit status (-1: killed or crashed). */
@@ -423,6 +630,11 @@ static int case_child(const void *arg)
     setenv("RECOMP_PRESENT_VSYNC", "0", 1);
     unsetenv("RECOMP_HEADLESS");
     unsetenv("RECOMP_LSFG");
+    unsetenv("RECOMP_OVERLAY");
+    if (!strncmp(c->name, "gpu", 3))
+        setenv("RECOMP_GPU", "1", 1);   /* the window shares its context with the GL back end's */
+    else
+        setenv("RECOMP_GPU", "0", 1);
     unsetenv("RECOMP_ASPECT");
     unsetenv("RECOMP_SHADER_STRENGTH");
     if (c->shader)

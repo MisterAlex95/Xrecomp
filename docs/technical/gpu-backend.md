@@ -193,6 +193,80 @@ scale. Fable's 0x2121 binding (640 real pixels) and Burnout 3's HUD clip are
 not touched. Headless runs and frame dumps keep the full surface in guest
 memory. The `[GPUGL] host present` line counts the resolved frames.
 
+#### Zero-copy present
+
+Stage 7e (XBA-308), on by default in a window; `RECOMP_GPU_ZERO_COPY=0`
+restores the read-back paths above. The host present costs a `glReadPixels`
+into a pack buffer, a map, a copy into the window's slot and an
+`SDL_UpdateTexture` per frame (about 12 MB moved at 2.25x) plus one frame of
+latency; zero-copy replaces all four with one GPU blit and shows the flip's
+own frame.
+
+- **Sharing.** `xbox_HostWindowMain` calls `nv2a_gl_present_share` once its
+  renderer exists, with SDL's context current: the back end takes that EGL
+  display and context (`nv2a_gl_context_share_window`) and creates its own
+  context in the same share group, without reset notification (a share group
+  must agree on it; the window's context has none). Needs SDL's `opengl` or
+  `opengles2` renderer on EGL with the back end's client API (GLES on
+  Android, desktop GL on Linux, where the window then sets
+  `SDL_VIDEO_X11_FORCE_EGL`) and a context with sync objects (GL 3.2 /
+  GLES 3.0, checked on `GL_VERSION`). macOS (Metal), another API, a refused
+  share or `RECOMP_STATUS` (the compat runner hashes every frame) keep the
+  read-back. The mode is logged once when the context is created:
+  `[GPUGL] present: zero-copy (...)` or `[GPUGL] present: read-back (<why>)`.
+- **Hand-over** (`src/video/fb_gpu_frame.h`). At a flip the window can take
+  as a texture (`gpu_frames_wanted`, asked on the executor thread), the
+  present hook returns an `XboxFbGpuFrame` as `host_px` with
+  `NV2A_HOST_FORMAT_GPU` and pitch 0, so the executor calls
+  `xbox_FramebufferWindowPresentHost` as usual (the lifecycle hold and the
+  perf timing stay where they were; `nv2a_pb_exec.c` is unchanged). The
+  window, under its present lock, calls `render(slot)`: the back end waits
+  for the window's release fence of that slot (bounded, 100 ms), blits the
+  presented target (`present_source`: the same source a host frame reads,
+  anti-aliasing resolved) into the slot's own RGBA8 texture (re-allocated
+  when the size changes), inserts an acquire fence and flushes. The slot is
+  published like a pixel frame (`[FBWIN] zero-copy frames WxH`).
+- **Draw.** The main loop waits for the acquire fence (bounded) and draws the
+  texture inside SDL's renderer through `present_shader_draw_legacy`: the
+  picture shader's program, or the area program with one tap and the
+  filter SDL would use (nearest at 1:1, else linear), so the picture is the
+  read-back one pixel for pixel. Every state SDL caches is put back
+  (program, buffers, attributes, viewport, scissor, blend, active unit, the
+  texture of unit 0), then the perf overlay and the shader badge go over it
+  through SDL as before; a release fence follows each draw.
+- **Read-back where pixels are needed.** `gpu_frames_wanted` says no, and the
+  frame comes through the paths above, while frame generation runs (the
+  pacer takes pixels; `RECOMP_GPU_PRESENT=sync` is forced as before), the
+  video overlay is up (it composes on the CPU), or the letterbox zoom is on
+  (`RECOMP_ASPECT_ZOOM` scans pixels); a frame refused at the last moment is
+  read back synchronously (`pixels()`). Frame dumps (`sync`) and headless
+  runs never use it. Screenshots, the overlay's first picture and save-state
+  thumbnails (`xbox_FramebufferDumpBmp`, `fbwin_last_frame`) read the slot's
+  texture back on the main thread; another thread asks it and waits up to
+  2 s. Guest memory is not refreshed at a flip (as under host present, also
+  at 1x now): `RECOMP_GPU_READBACK=present` restores that for a title whose
+  CPU reads its front buffer.
+- **Loss.** `SDL_RENDER_DEVICE_RESET` (the window's context re-created)
+  turns zero-copy off for the run and tells the back end
+  (`nv2a_gl_present_window_lost`), which drops its GL objects at the next
+  flip as after a lost context and creates its next context alone. A lost
+  back-end context does the same. The slot textures survive
+  `gl_reset_objects` otherwise (a save-state load), since the window may
+  still be drawing one. Pause and resume (Home and back) keep both
+  contexts; the flip waits in the lifecycle hold as before.
+- **Log.** Every 600 frames `[GPUGL] zero-copy present: N frames at WxH,
+  x ms/frame (blit + fence), n read back for the window, n fence timeouts`
+  replaces the `[GPUGL] host present` and `[FBWIN] host frames ...: copy`
+  lines.
+- **Tests.** `tests/nv2a_gl_upscale` step 6: the slot texture after
+  `render` and the frame's `pixels()` equal the host frame exactly at 1x,
+  2x, 4x (GL and GLES). `tests/fb_present_sdl` `gpu` / `gpuoverlay` /
+  `gpuscan` (Linux, a display): a producer context in the window's share
+  group, the window's picture identical to the same frame given as pixels,
+  a screenshot from the guest thread, the shader badge, the perf overlay
+  and scanlines over a zero-copy frame; under `opengles2` the desktop GL
+  back end cannot share and the same picture comes as pixels.
+
 Rejected for 7b: a command queue to a GL thread (one more copy of every
 batch, and the executor would have to wait for readbacks anyway); a context
 shared with the presenter (SDL's renderer owns its context, is Metal on
@@ -1492,15 +1566,13 @@ The original list (the interpreter was 41 % of the in-world executor):
 
 0. Done: host present (Present, above) -- the presented target goes to the
    window at its real size through a pack buffer, bypassing guest memory
-   (an internal resolution needs it). Still a read-back and a texture
-   upload per frame; the zero-copy options below remove them.
-1. Present the finished FBO texture directly. On Android the SDL renderer is
-   GLES: create the executor context shared with a presenter-owned GL context
-   (or an `EGLImage` of the FBO texture), draw it in the presenter, and drop
-   the readback of the presented surface. On macOS the presenter would need
-   the SDL GL renderer (today Metal) or an IOSurface-backed texture.
-2. Keep `RECOMP_FB_DUMP` and the perf overlay working (dump reads back on
-   demand).
+   (an internal resolution needs it).
+1. Done (XBA-308): zero-copy present ("Zero-copy present" above) -- the
+   back end's context shares SDL's, the window draws a texture the frame was
+   blitted into. Left: macOS, whose SDL renderer is Metal (it would need the
+   SDL GL renderer or an IOSurface-backed texture).
+2. Done: `RECOMP_FB_DUMP`, screenshots, frame generation and the overlays
+   keep working (read-back where pixels are needed).
 3. Flip pacing: done for the uncapped case (`RECOMP_GPU_FPS_CAP`, above); a
    title that paces on vblank still wants `RECOMP_FLIP_PACING`.
 4. Device: profile on the AYN Thor (Adreno), check S3TC availability (if

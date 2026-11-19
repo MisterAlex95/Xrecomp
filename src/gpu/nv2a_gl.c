@@ -44,8 +44,11 @@
  * present hook below (gl_present) has read the frame back -- or, with host
  * present (RECOMP_GPU_PRESENT=host, or RECOMP_GPU_SCALE above 1, windowed),
  * with the target read at its real size into a pack buffer and handed over
- * as Nv2aPresentSurface.host_px. Presenting the FBO texture directly (a
- * context shared with the presenter) is stage 7e.
+ * as Nv2aPresentSurface.host_px. Zero-copy present (stage 7e, XBA-308,
+ * default on in a window): the context is created in the window's share
+ * group (nv2a_gl_present_share), and each flip hands the window the frame
+ * blitted into a texture of its back slot (src/video/fb_gpu_frame.h) instead
+ * of pixels; the read-back paths above stay for what needs the pixels.
  *
  * Selected with RECOMP_GPU=1 (nv2a_gl_install_from_env, called by the
  * presenter's xbox_HostWindowMain); the default on Android (XBA-119), where
@@ -63,6 +66,7 @@
 #include "d3d/d3d8_swizzle.h"
 #include "host_shader_progress.h"   /* the window's shader badge (XBA-314) */
 #include "video/gpu_ring.h"
+#include "video/fb_gpu_frame.h"   /* zero-copy present (XBA-308) */
 #ifdef XBOXRECOMP_LSFG
 #include "framegen/framegen_policy.h"   /* frame generation forces sync present */
 #endif
@@ -572,6 +576,7 @@ static float scale_from_env(void)
     return sc;
 }
 
+static void zc_mode(void);
 static int ensure_init(void)
 {
     if (s_init)
@@ -583,6 +588,7 @@ static int ensure_init(void)
         return 0;
     }
     sh_forget();
+    zc_mode();
     fprintf(stderr, "  [GPUGL] %s | %s | GLSL %s\n",
             (const char *)glGetString(GL_RENDERER),
             (const char *)glGetString(GL_VERSION),
@@ -1369,6 +1375,38 @@ static struct {
     uint32_t w, h;
     uint32_t aa_frames;                   /* resolved from an anti-aliased surface */
 } s_hst;
+
+/* Zero-copy present (XBA-308, src/video/fb_gpu_frame.h): with the context in
+ * the window's share group (s_zc_on: nv2a_gl_present_share asked for it and
+ * the share worked), a flip the window can take as a texture (s_zc_wanted)
+ * hands it s_zc_frame as host_px; the window then has the presented target
+ * blitted into its back slot's texture (zc_render: one GPU blit, a fence)
+ * and draws it itself. No read-back, no copy, no texture upload, and this
+ * flip's own frame rather than the previous one. The slot textures outlive
+ * gl_reset_objects (the window may still draw one) except on a lost
+ * context; after that, or when the window's context is lost
+ * (nv2a_gl_present_window_lost), frames are read back for the rest of the
+ * run. */
+static int (*s_zc_wanted)(void);
+static int s_zc_on;
+static char s_zc_why[160];                /* why frames are read back (the mode line) */
+static int s_zc_window_lost;              /* atomic: nv2a_gl_present_window_lost */
+static GLuint s_zc_tex[XBOX_FB_GPU_SLOTS], s_zc_fbo[XBOX_FB_GPU_SLOTS];
+static uint32_t s_zc_w[XBOX_FB_GPU_SLOTS], s_zc_h[XBOX_FB_GPU_SLOTS];
+static GLsync s_zc_prev;                  /* the last zero-copy flip's own fence (back-pressure) */
+static struct {
+    int pending;                          /* set by gl_present, until gl_flip */
+    GlRT *r;
+    Nv2aPresentSurface surf;
+} s_zcp;
+static XboxFbGpuFrame s_zc_frame;
+static uint8_t *s_zc_px;                  /* zc_pixels: the window wanted pixels after all */
+static size_t s_zc_px_cap;
+static struct {
+    uint32_t frames, readbacks, timeouts;
+    uint64_t ns;                          /* zc_render, this side */
+    uint32_t w, h;
+} s_zst;
 
 /* ---- guest CPU writes into targets (XBA-119) --------------------------- */
 
@@ -5721,6 +5759,12 @@ static void gl_check_frame(void)
     if (s_init <= 0)
         return;
     lost = nv2a_gl_context_lost();
+    if (__atomic_exchange_n(&s_zc_window_lost, 0, __ATOMIC_ACQ_REL)) {
+        /* The window's context went (and with it, most likely, the GPU
+         * state of the whole share group): start over, alone. */
+        fprintf(stderr, "  [GPUGL] the window's GL context was lost\n");
+        lost = 1;
+    }
     {
         /* RECOMP_GPU_FAKE_RESET=<frame>[,oom]: act as if the context were
          * lost (or out of memory) at that frame, to exercise this path on
@@ -5764,8 +5808,23 @@ static void gl_check_frame(void)
                 rt_readback(&s_rt[i]);
     }
     gl_reset_objects(lost);
-    if (lost)
+    if (lost) {
+        if (s_zc_on) {
+            /* Read back from now on: the slot textures are gone with the
+             * context (the window keeps their names until new frames
+             * come), and the next context is created alone. */
+            nv2a_gl_context_unshare();
+            s_zc_wanted = NULL;
+            snprintf(s_zc_why, sizeof s_zc_why, "the GL context was lost");
+        }
+        s_zc_on = 0;
+        memset(s_zc_tex, 0, sizeof s_zc_tex);
+        memset(s_zc_fbo, 0, sizeof s_zc_fbo);
+        memset(s_zc_w, 0, sizeof s_zc_w);
+        memset(s_zc_h, 0, sizeof s_zc_h);
+        s_zc_prev = NULL;
         nv2a_gl_context_destroy();
+    }
     if (++resets >= NV_GL_MAX_RESETS) {
         s_init = -1;
         unregister_self();
@@ -5847,16 +5906,31 @@ static uint64_t host_now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-/* Start reading target r at its real size into the next host pack buffer. */
-static void host_issue(GlRT *r, const Nv2aPresentSurface *surf)
+/* The size of the picture target r presents for surf: its real size, halved
+ * along each direction an anti-aliased surface doubles. */
+static void present_size(const GlRT *r, const Nv2aPresentSurface *surf, uint32_t *w, uint32_t *h)
+{
+    uint32_t fx, fy;
+
+    *w = rt_real_px(r, r->w);
+    *h = rt_real_px(r, r->h);
+    nv2a_gl_aa_factors(surf, &fx, &fy);
+    *w /= fx;
+    *h /= fy;
+}
+
+/* The framebuffer holding the picture target r presents for surf, at (0, 0),
+ * present_size big, top row first: what a host frame reads and what a
+ * zero-copy frame copies, so both show the same pixels. An anti-aliased
+ * surface is resolved here (host_issue's comment). 0: nothing to show. */
+static GLuint present_source(GlRT *r, const Nv2aPresentSurface *surf, uint32_t *pw, uint32_t *ph)
 {
     uint32_t w, h, fx, fy;
     GLuint fbo = rt_present_source(r, &w, &h);
-    int b = s_hnext;
-    size_t n;
 
+    *pw = *ph = 0;
     if (!fbo || !w || !h)
-        return;
+        return 0;
     nv2a_gl_aa_factors(surf, &fx, &fy);
     if (fx > 1 || fy > 1) {
         const GLint sr[4] = { 0, 0, (GLint)w, (GLint)h };
@@ -5884,6 +5958,21 @@ static void host_issue(GlRT *r, const Nv2aPresentSurface *surf)
         fbo = s_aa_fbo;
         s_hst.aa_frames++;
     }
+    *pw = w;
+    *ph = h;
+    return fbo;
+}
+
+/* Start reading target r at its real size into the next host pack buffer. */
+static void host_issue(GlRT *r, const Nv2aPresentSurface *surf)
+{
+    uint32_t w, h;
+    GLuint fbo = present_source(r, surf, &w, &h);
+    int b = s_hnext;
+    size_t n;
+
+    if (!fbo)
+        return;
     n = (size_t)w * h * 4;
     if (b == s_hmapped)
         b ^= 1;                           /* never into the buffer still mapped */
@@ -5990,6 +6079,201 @@ static int host_present(GlRT *r, const Nv2aPresentSurface *now, Nv2aPresentSurfa
     return 0;
 }
 
+/* ---- zero-copy present (XBA-308) ----------------------------------------- */
+
+/* The mode, logged when a context is created in a window (and again only
+ * when it changed: after a lost context). */
+static void zc_mode(void)
+{
+    static int said = -1;
+    int on = s_zc_wanted && nv2a_gl_context_shared();
+
+    s_zc_on = on;
+    if (!s_display_w || said == on)
+        return;
+    said = on;
+    if (on)
+        fprintf(stderr, "  [GPUGL] present: zero-copy (the window draws the frame's texture in"
+                        " a shared GL context; RECOMP_GPU_ZERO_COPY=0 reads frames back)\n");
+    else
+        fprintf(stderr, "  [GPUGL] present: read-back (%s)\n",
+                s_zc_why[0] ? s_zc_why : "the window's GL context is not shared");
+}
+
+/* A fence of the other side, waited for (bounded: a fence of a context that
+ * went away must not hang this one) and deleted. */
+static void zc_fence_wait(void *fence)
+{
+    GLsync f = (GLsync)fence;
+    GLenum r = glClientWaitSync(f, 0, 0);
+
+    if (r == GL_TIMEOUT_EXPIRED)
+        r = glClientWaitSync(f, 0, 100000000ull);   /* 100 ms */
+    if (r != GL_ALREADY_SIGNALED && r != GL_CONDITION_SATISFIED) {
+        static int said;
+        s_zst.timeouts++;
+        if (!said++)
+            fprintf(stderr, "  [GPUGL] zero-copy: a fence not signalled in 100 ms"
+                            " (0x%X); the slot is written anyway\n", r);
+    }
+    glDeleteSync(f);
+}
+
+static void zc_drop(void *fence)
+{
+    if (fence)
+        glDeleteSync((GLsync)fence);
+}
+
+/* XboxFbGpuFrame.render: the flip's picture into slot's texture. */
+static unsigned zc_render(const XboxFbGpuFrame *f, int slot, void *release, void **acquire)
+{
+    uint64_t t0 = host_now_ns();
+    uint32_t w, h;
+    GLuint src;
+
+    *acquire = NULL;
+    if (release)
+        zc_fence_wait(release);
+    if (!s_zcp.pending || !s_zcp.r || !s_zcp.r->tex || slot < 0 || slot >= XBOX_FB_GPU_SLOTS)
+        return 0;
+    src = present_source(s_zcp.r, &s_zcp.surf, &w, &h);
+    if (!src || w != f->w || h != f->h)
+        return 0;
+    if (!s_zc_tex[slot]) {
+        glGenTextures(1, &s_zc_tex[slot]);
+        glGenFramebuffers(1, &s_zc_fbo[slot]);
+    }
+    if (s_zc_w[slot] != w || s_zc_h[slot] != h) {
+        /* A new size (the first frame, an internal resolution or surface
+         * change): the window last drew this texture before the release
+         * fence above, so its storage can go. */
+        sh_tex_scratch(GL_TEXTURE_2D, s_zc_tex[slot]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        sh_fbo(s_zc_fbo[slot]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                               s_zc_tex[slot], 0);
+        s_zc_w[slot] = w;
+        s_zc_h[slot] = h;
+    }
+    {
+        const GLint r4[4] = { 0, 0, (GLint)w, (GLint)h };
+        sh_blit_rect(src, r4, s_zc_fbo[slot], r4, GL_NEAREST);
+    }
+    *acquire = (void *)glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glFlush();                            /* the window's context waits for it */
+    /* Back-pressure, as the read-back paths had it (they mapped frame N-1's
+     * pack buffer at flip N): the executor stays within a frame of the GPU,
+     * and visibility reports resolved at the flip have their counts. */
+    if (s_zc_prev)
+        zc_fence_wait((void *)s_zc_prev);
+    s_zc_prev = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    s_zst.frames++;
+    s_zst.w = w;
+    s_zst.h = h;
+    s_zst.ns += host_now_ns() - t0;
+    return s_zc_tex[slot];
+}
+
+/* XboxFbGpuFrame.pixels: the window needs the pixels after all (frame
+ * generation, the video overlay); a synchronous read-back. */
+static const void *zc_pixels(const XboxFbGpuFrame *f, uint32_t *pitch, uint32_t *format)
+{
+    uint32_t w, h;
+    GLuint src;
+    size_t n;
+
+    if (!s_zcp.pending || !s_zcp.r || !s_zcp.r->tex)
+        return NULL;
+    src = present_source(s_zcp.r, &s_zcp.surf, &w, &h);
+    if (!src || w != f->w || h != f->h)
+        return NULL;
+    n = (size_t)w * h * 4;
+    if (n > s_zc_px_cap) {
+        uint8_t *p = (uint8_t *)realloc(s_zc_px, n);
+        if (!p)
+            return NULL;
+        s_zc_px = p;
+        s_zc_px_cap = n;
+    }
+    sh_fbo(src);
+    glReadPixels(0, 0, (GLsizei)w, (GLsizei)h, NV_GL_READ_FORMAT, NV_GL_READ_TYPE, s_zc_px);
+    *pitch = w * 4;
+    *format = NV_GL_READ_ARGB ? NV2A_HOST_FORMAT_BGRX8888 : NV2A_HOST_FORMAT_RGBX8888;
+    s_zst.readbacks++;
+    return s_zc_px;
+}
+
+/* The flip's present as a zero-copy frame: target r's picture goes to the
+ * window as a texture (the window asks for it in xbox_FramebufferWindowPresentHost,
+ * still on this thread). Returns 0 when the window cannot take one now. */
+static int zc_present(GlRT *r, const Nv2aPresentSurface *now, Nv2aPresentSurface *ready)
+{
+    uint32_t w, h;
+
+    if (!s_zc_on || !s_zc_wanted || !s_zc_wanted())
+        return 0;
+    present_size(r, now, &w, &h);
+    if (!w || !h)
+        return 0;
+    /* Guest memory as with host frames: refreshed only when asked. */
+    if ((s_readback_present || s_readback_all) && r->dirty) {
+        if (s_present_sync_mode)
+            rt_readback(r);
+        else
+            pbo_issue(r, now);
+    }
+    s_hpend.pending = 0;                  /* a host read-back in flight is not shown */
+    s_zcp.pending = 1;
+    s_zcp.r = r;
+    s_zcp.surf = *now;
+    s_zc_frame.w = w;
+    s_zc_frame.h = h;
+    s_zc_frame.render = zc_render;
+    s_zc_frame.pixels = zc_pixels;
+    s_zc_frame.drop = zc_drop;
+    *ready = *now;
+    ready->host_px = &s_zc_frame;
+    ready->host_w = w;
+    ready->host_h = h;
+    ready->host_pitch = 0;
+    ready->host_format = NV2A_HOST_FORMAT_GPU;
+    s_rt_host_serial[r - s_rt] = r->serial;
+    return 1;
+}
+
+int nv2a_gl_present_share(int (*wanted)(void), const char *refuse)
+{
+    const char *e = getenv("RECOMP_GPU_ZERO_COPY");
+    char why[sizeof s_zc_why];
+
+    if (e && strcmp(e, "0") == 0) {
+        snprintf(s_zc_why, sizeof s_zc_why, "RECOMP_GPU_ZERO_COPY=0");
+        return 0;
+    }
+    if (refuse || !wanted) {
+        snprintf(s_zc_why, sizeof s_zc_why, "%s", refuse ? refuse : "no window");
+        return 0;
+    }
+    if (!nv2a_gl_context_share_window(why, sizeof why)) {
+        snprintf(s_zc_why, sizeof s_zc_why, "%s", why);
+        return 0;
+    }
+    s_zc_wanted = wanted;
+    return 1;
+}
+
+void nv2a_gl_present_window_lost(void)
+{
+    __atomic_store_n(&s_zc_window_lost, 1, __ATOMIC_RELEASE);
+}
+
 /* RECOMP_GPU_SCALE_DUMP=1: at a dumping flip, target r at its real size
  * (rt_present_source) into <RECOMP_FB_DUMP>S<n>.bmp, 24-bit, next to the guest-size
  * dumps the executor writes. */
@@ -6078,6 +6362,8 @@ static int gl_present(const Nv2aPresentSurface *now, int sync, Nv2aPresentSurfac
     rt_cpu_check(r, 0);
     if (sync && s_scale_dump)
         scaled_dump(r);
+    if (!sync && zc_present(r, now, ready))
+        return 1;
     if (!sync && (host_present_on() || (s_display_w && nv2a_gl_present_needs_host(now))))
         return host_present(r, now, ready);
     if (sync || s_present_sync_mode) {
@@ -6099,6 +6385,8 @@ static void gl_flip(void)
 {
     if (s_init > 0)
         host_unmap();                 /* the window has its copy */
+    s_zcp.pending = 0;                /* ... or its texture */
+    s_zcp.r = NULL;
     sig_flip();
     s_frame++;
     s_st.frames++;
@@ -6167,8 +6455,16 @@ static void gl_flip(void)
                             " surface\n",
                     s_hst.frames, s_hst.w, s_hst.h,
                     (double)s_hst.ns / 1e6 / (double)s_hst.frames, s_hst.aa_frames);
+        if (s_zst.frames || s_zst.readbacks)
+            fprintf(stderr, "  [GPUGL] zero-copy present: %u frames at %ux%u, %.3f ms/frame"
+                            " (blit + fence), %u read back for the window (frame generation,"
+                            " video overlay), %u fence timeouts\n",
+                    s_zst.frames, s_zst.w, s_zst.h,
+                    s_zst.frames ? (double)s_zst.ns / 1e6 / (double)s_zst.frames : 0.0,
+                    s_zst.readbacks, s_zst.timeouts);
         memset(&s_st, 0, sizeof s_st);
         memset(&s_hst, 0, sizeof s_hst);
+        memset(&s_zst, 0, sizeof s_zst);
         if (s_scale_cfg.scale != 1.0f)
             fprintf(stderr, "  [GPUGL] internal scale %.2f: %u resolves, %u seed blits,"
                             " %u target rescales, %u depth re-creations\n",

@@ -13,6 +13,8 @@
 #ifndef XBOXRECOMP_NV2A_GL_API_H
 #define XBOXRECOMP_NV2A_GL_API_H
 
+#include <stddef.h>
+
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION 1
 #include <OpenGL/gl3.h>
@@ -77,5 +79,19 @@ int  nv2a_gl_shared_context_create(void);
 int  nv2a_gl_shared_context_bind(void);
 void nv2a_gl_shared_context_unbind(void);
 void nv2a_gl_shared_context_destroy(void);
+
+/* Zero-copy present (XBA-308): the window's GL context joins the back end's
+ * share group, so the window draws the frame's texture itself.
+ * window: on the window's thread with its renderer's context current,
+ * before nv2a_gl_context_create; the next context is created in that
+ * context's share group (on its EGL display, without reset notification,
+ * which a share group must agree on). 0, with why[] filled: no EGL context
+ * current, another client API (GL against GLES), or macOS (CGL; SDL draws
+ * with Metal there). shared: 1 when the current context is in that share
+ * group (the share may still fail at creation; logged). unshare: the next
+ * context is created alone again (the window's context was lost). */
+int  nv2a_gl_context_share_window(char *why, size_t n);
+int  nv2a_gl_context_shared(void);
+void nv2a_gl_context_unshare(void);
 
 #endif

@@ -21,7 +21,10 @@
  *      where the context offers wide lines (desktop core GL: 1);
  *   5. what the guest reads back (the flip's sync read-back into its
  *      memory) is 640x480 at its own pitch, matches the 1x read-back within
- *      the same tolerance, and leaves the bytes after the surface alone. */
+ *      the same tolerance, and leaves the bytes after the surface alone;
+ *   6. zero-copy present (XBA-308): the texture the window would draw is
+ *      the host frame, pixel for pixel, and so is the frame's own read-back
+ *      for a window that needs pixels (zc_frame). */
 #include "../../src/gpu/nv2a_gl.c"
 #include <math.h>
 
@@ -171,7 +174,7 @@ static void readback(uint32_t va)
 /* The host frame of the surface at va (async present: read at one flip,
  * handed over at the next), as 0x00RRGGBB words in out (w x h, at most
  * 2560x1920). Returns 1 when one came. */
-static uint32_t *s_host;
+static uint32_t *s_host, *s_zc_out, *s_zc_rb;
 static int host_frame(uint32_t va, uint32_t *w, uint32_t *h)
 {
     Nv2aPresentSurface now, ready;
@@ -203,6 +206,76 @@ static int host_frame(uint32_t va, uint32_t *w, uint32_t *h)
         gl_flip();
     }
     return got;
+}
+
+/* Zero-copy present (XBA-308): the flip hands the window an XboxFbGpuFrame
+ * instead of pixels; as the window would, slot 0's texture is filled
+ * (render, after a release fence of the "window"), the acquire fence waited
+ * for, and the texture read back into out as 0x00RRGGBB words. *rb: the
+ * frame's pixels() read-back, alike. Returns 1 when both came. */
+static int zc_wanted_yes(void) { return 1; }
+static int zc_frame(uint32_t va, uint32_t *out, uint32_t *rb, uint32_t *w, uint32_t *h)
+{
+    Nv2aPresentSurface now, ready;
+    const XboxFbGpuFrame *f;
+    void *acq = NULL, *rel;
+    uint32_t pitch = 0, format = 0, x, y;
+    const uint8_t *px;
+    uint8_t *tmp;
+    GLuint fbo = 0, tex;
+    int ok = 0;
+
+    memset(&now, 0, sizeof now);
+    now.va = va;
+    now.pitch = PITCH;
+    now.bpp = 4;
+    now.format = 0x0008;
+    now.w = W;
+    now.h = H;
+    s_zc_on = 1;
+    s_zc_wanted = zc_wanted_yes;
+    memset(&ready, 0, sizeof ready);
+    if (gl_present(&now, 0, &ready) && ready.host_format == NV2A_HOST_FORMAT_GPU
+        && ready.host_px == &s_zc_frame && ready.host_pitch == 0) {
+        f = (const XboxFbGpuFrame *)ready.host_px;
+        *w = f->w;
+        *h = f->h;
+        rel = (void *)glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);   /* the window's last draw */
+        tex = f->render(f, 0, rel, &acq);
+        tmp = (uint8_t *)malloc((size_t)f->w * f->h * 4);
+        if (tex && acq && tmp && f->w == ready.host_w && f->h == ready.host_h) {
+            glClientWaitSync((GLsync)acq, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+            glDeleteSync((GLsync)acq);
+            glGenFramebuffers(1, &fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+            glReadPixels(0, 0, (GLsizei)f->w, (GLsizei)f->h, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glDeleteFramebuffers(1, &fbo);
+            s_sh.fbo = 0xFFFFFFFFu;           /* the back end's shadow of the binding */
+            for (y = 0; y < f->h; y++)
+                for (x = 0; x < f->w; x++) {
+                    const uint8_t *p = tmp + ((size_t)y * f->w + x) * 4;
+                    out[(size_t)y * f->w + x] = (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+                }
+            px = (const uint8_t *)f->pixels(f, &pitch, &format);
+            if (px && pitch == f->w * 4) {
+                int rgba = format == NV2A_HOST_FORMAT_RGBX8888;
+                for (y = 0; y < f->h; y++)
+                    for (x = 0; x < f->w; x++) {
+                        const uint8_t *p = px + (size_t)y * pitch + x * 4;
+                        rb[(size_t)y * f->w + x] = rgba ? ((uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2])
+                                                        : ((uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0]);
+                    }
+                ok = 1;
+            }
+        }
+        free(tmp);
+    }
+    gl_flip();
+    s_zc_on = 0;
+    s_zc_wanted = NULL;
+    return ok;
 }
 
 static uint32_t guest_px(uint32_t va, uint32_t x, uint32_t y)
@@ -299,6 +372,8 @@ int main(void)
 
     s_mem = (uint8_t *)calloc(1, MEM_BYTES);
     s_host = (uint32_t *)calloc((size_t)2560 * 1920, 4);
+    s_zc_out = (uint32_t *)calloc((size_t)2560 * 1920, 4);
+    s_zc_rb = (uint32_t *)calloc((size_t)2560 * 1920, 4);
     for (p = 0; p < 3; p++)
         memset(s_mem + pass[p].va + FB_BYTES, SENTINEL, 4096);
     setenv("RECOMP_GPU", "1", 1);
@@ -392,6 +467,20 @@ int main(void)
                ref_points * n * n, thick, (double)want_line);
         CHECK(pts == ref_points * n * n);
         CHECK(thick == (uint32_t)want_line);
+
+        /* 6. The zero-copy frame. */
+        {
+            uint32_t zw = 0, zh = 0, off = 0, rb_off = 0, i;
+            int got = zc_frame(va, s_zc_out, s_zc_rb, &zw, &zh);
+            for (i = 0; got && zw == hw && zh == hh && i < hw * hh; i++) {
+                off += s_zc_out[i] != s_host[i];
+                rb_off += s_zc_rb[i] != s_host[i];
+            }
+            printf("6. %ux zero-copy frame: %s %ux%u, %u pixels off the host frame, its read-back"
+                   " %u off\n", n, got ? "texture" : "NONE", zw, zh, off, rb_off);
+            CHECK(got && zw == hw && zh == hh);
+            CHECK(off == 0 && rb_off == 0);
+        }
     }
 
     CHECK(glGetError() == GL_NO_ERROR);
