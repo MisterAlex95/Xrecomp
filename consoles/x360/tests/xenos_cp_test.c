@@ -3,7 +3,7 @@
  * writes and their endian modes, event fences, conditional writes, draw initiators, indirect buffers, interrupts,
  * the swap token, scratch register write-back; on the ring: a wait that stalls then resumes, also inside nested
  * indirect buffers, a packet across the end of the ring, a packet the CPU has not finished writing, the read pointer
- * written back. */
+ * written back; tiled rendering's predicate (the bin mask and select, a header's bit 0). */
 #include <stdio.h>
 #include <string.h>
 
@@ -231,6 +231,49 @@ int main(void)
           imm_got[0], imm_got[1]);
     CHECK(cp.last_draw.source_select == 1 && cp.last_draw.imm == NULL && cp.rptr == 1, "the draw kept no pointer");
     cp.draw_hook = NULL;
+
+    /* Tiled rendering's predicate (Xenia's command_processor.cc): a type-3 packet whose header has bit 0 set runs
+     * only while the 64-bit bin select and bin mask share a bit; both start as 0xFFFFFFFF. SET_BIN_MASK / SELECT
+     * take the high word first, the _LO / _HI opcodes one half. A predicated swap never runs. */
+    const uint32_t P = 0xE000;
+    uint64_t swaps0 = cp.swaps;
+    CHECK(cp.bin_mask == 0xFFFFFFFFu && cp.bin_select == 0xFFFFFFFFu, "the bin registers' initial values");
+    at = 0;
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2800), put(P, 0x44); /* runs: the initial values */
+    put(P, t3(PM4_SET_BIN_MASK, 2)), put(P, 0), put(P, 0x10);
+    put(P, t3(PM4_SET_BIN_SELECT_LO, 1)), put(P, 0x01);
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2801), put(P, 0x55); /* skipped: 0x01 & 0x10 */
+    put(P, t3(PM4_SET_CONSTANT2, 2)), put(P, 0x2802), put(P, 0x66);     /* not predicated */
+    put(P, t3(PM4_SET_BIN_SELECT_LO, 1)), put(P, 0x30);
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2803), put(P, 0x77); /* runs: 0x30 & 0x10 */
+    put(P, t3(PM4_SET_BIN_MASK_LO, 1)), put(P, 0);
+    put(P, t3(PM4_SET_BIN_MASK_HI, 1)), put(P, 1);
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2804), put(P, 0x88); /* skipped: bit 32 against 0x30 */
+    put(P, t3(PM4_SET_BIN_SELECT_HI, 1)), put(P, 3);
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2805), put(P, 0x99); /* runs: bit 32 in both */
+    put(P, t3(PM4_SET_BIN_SELECT, 2)), put(P, 2), put(P, 0xFFFFFFFFu);
+    put(P, t3(PM4_SET_CONSTANT2, 2) | 1), put(P, 0x2806), put(P, 0xAA); /* skipped: high word 2 against 1 */
+    put(P, t3(PM4_SET_BIN_MASK, 2)), put(P, 0xFFFFFFFFu), put(P, 0xFFFFFFFFu);
+    put(P, t3(PM4_XE_SWAP, 4) | 1), put(P, 0x53574150), put(P, 0x01000000), put(P, 1280), put(P, 720);
+    put(P, t0(0x2807, 1, 0)), put(P, 0xBB); /* the packet after each skipped one starts where it should */
+    for (uint32_t k = 0x2800; k <= 0x2807; k++)
+        cp.regs[k] = 0;
+    uint64_t pred0 = cp.predicated, skip0 = cp.predicated_skipped;
+    xenos_cp_execute(&cp, P, at);
+    CHECK(cp.regs[0x2800] == 0x44 && cp.regs[0x2802] == 0x66 && cp.regs[0x2803] == 0x77 && cp.regs[0x2805] == 0x99 &&
+              cp.regs[0x2807] == 0xBB,
+          "predicated packets that run: %X %X %X %X %X", cp.regs[0x2800], cp.regs[0x2802], cp.regs[0x2803],
+          cp.regs[0x2805], cp.regs[0x2807]);
+    CHECK(cp.regs[0x2801] == 0 && cp.regs[0x2804] == 0 && cp.regs[0x2806] == 0,
+          "predicated packets that are skipped: %X %X %X", cp.regs[0x2801], cp.regs[0x2804], cp.regs[0x2806]);
+    CHECK(cp.swaps == swaps0, "a predicated swap does not run");
+    CHECK(cp.bin_mask == 0xFFFFFFFFFFFFFFFFull && cp.bin_select == 0x2FFFFFFFFull, "bin registers %llX %llX",
+          (unsigned long long)cp.bin_mask, (unsigned long long)cp.bin_select);
+    CHECK(cp.predicated - pred0 == 7 && cp.predicated_skipped - skip0 == 4, "counted: %llu predicated, %llu skipped",
+          (unsigned long long)(cp.predicated - pred0), (unsigned long long)(cp.predicated_skipped - skip0));
+    CHECK(!strcmp(xenos_cp_opcode_name(PM4_SET_BIN_MASK_LO), "SET_BIN_MASK_LO") &&
+              xenos_cp_opcode_name(PM4_SET_BIN_SELECT_HI) && xenos_cp_opcode_name(PM4_SET_BIN_SELECT),
+          "the bin opcodes have names");
 
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "all command processor checks passed", failures,
            failures == 1 ? "" : "s");

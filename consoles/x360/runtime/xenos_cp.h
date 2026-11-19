@@ -31,8 +31,10 @@ enum {
     PM4_INDIRECT_BUFFER_PFD = 0x37, PM4_INVALIDATE_STATE = 0x3B, PM4_WAIT_REG_MEM = 0x3C, PM4_MEM_WRITE = 0x3D,
     PM4_REG_TO_MEM = 0x3E, PM4_INDIRECT_BUFFER = 0x3F, PM4_COND_EXEC = 0x44, PM4_COND_WRITE = 0x45,
     PM4_EVENT_WRITE = 0x46, PM4_ME_INIT = 0x48, PM4_SET_SHADER_BASES = 0x4A, PM4_MEM_WRITE_CNTR = 0x4F,
+    PM4_SET_BIN_MASK = 0x50, PM4_SET_BIN_SELECT = 0x51, /* the 64-bit bin registers, high word first */
     PM4_INTERRUPT = 0x54, PM4_SET_CONSTANT2 = 0x55, PM4_SET_SHADER_CONSTANTS = 0x56, PM4_EVENT_WRITE_SHD = 0x58,
     PM4_EVENT_WRITE_CFL = 0x59, PM4_EVENT_WRITE_EXT = 0x5A, PM4_EVENT_WRITE_ZPD = 0x5B, PM4_CONTEXT_UPDATE = 0x5E,
+    PM4_SET_BIN_MASK_LO = 0x60, PM4_SET_BIN_MASK_HI = 0x61, PM4_SET_BIN_SELECT_LO = 0x62, PM4_SET_BIN_SELECT_HI = 0x63,
     PM4_XE_SWAP = 0x64, /* not hardware: the token this runtime's VdSwap writes (Xenia uses the same value) */
 };
 
@@ -79,6 +81,10 @@ typedef struct xenos_cp {
     xenos_shader shader[2]; /* the active vertex (0) and pixel (1) shader microcode, as last loaded */
     uint64_t shader_loads;
     uint32_t op_count[128]; /* type-3 packets by opcode (the trace summary's histogram) */
+    /* tiled rendering's predicate (Xenia's bin_mask_ / bin_select_): a type-3 packet whose header has bit 0 set runs
+     * only while the two share a bit. Both start as 0xFFFFFFFF. */
+    uint64_t bin_mask, bin_select;
+    uint64_t predicated, predicated_skipped; /* such packets met, and those of them not run */
     uint64_t packets, reg_writes, draws, swaps, interrupts, unknown;
     /* guest physical memory (big-endian words) and the interrupt sink, given by the runtime */
     void *ctx;

@@ -195,6 +195,9 @@ void x360_gpu_opcode_histogram(x360_machine *x, FILE *out)
             else
                 fprintf(out, " op%02X %u", op, g->cp.op_count[op]);
         }
+    if (g->cp.predicated)
+        fprintf(out, "; predicated %llu, skipped %llu", (unsigned long long)g->cp.predicated,
+                (unsigned long long)g->cp.predicated_skipped);
     fprintf(out, "\n");
 }
 
@@ -364,6 +367,22 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
 uint64_t x360_gpu_next_event(x360_machine *x)
 {
     return x->gpu && x->gpu->irq_callback ? x->gpu->next_vblank : 0;
+}
+
+/* save states, section GBIN: tiled rendering's bin registers. A state from before them has no such section and
+ * loads with what the command processor starts with (x360_gpu_bin_reset). */
+void x360_gpu_bin_reset(x360_machine *x)
+{
+    struct x360_gpu *g = x->gpu;
+    if (g)
+        g->cp.bin_mask = g->cp.bin_select = 0xFFFFFFFFu;
+}
+
+void x360_gpu_bin_state(x360_machine *x, void *s, void (*u64)(void *, uint64_t *))
+{
+    struct x360_gpu *g = gpu_of(x);
+    u64(s, &g->cp.bin_mask);
+    u64(s, &g->cp.bin_select);
 }
 
 void x360_gpu_stats(x360_machine *x, uint64_t *packets, uint64_t *draws, uint64_t *swaps, uint32_t *vblanks)

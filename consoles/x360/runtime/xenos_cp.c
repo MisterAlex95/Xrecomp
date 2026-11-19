@@ -25,6 +25,7 @@ void xenos_cp_init(xenos_cp *cp)
     cp->interrupt = irq;
     cp->shader_loaded = sh;
     cp->trace = trace;
+    cp->bin_mask = cp->bin_select = 0xFFFFFFFFu;
 }
 
 void xenos_cp_ring_init(xenos_cp *cp, uint32_t base_phys, uint32_t size_log2)
@@ -63,6 +64,12 @@ const char *xenos_cp_opcode_name(uint32_t op)
     case PM4_ME_INIT: return "ME_INIT";
     case PM4_SET_SHADER_BASES: return "SET_SHADER_BASES";
     case PM4_MEM_WRITE_CNTR: return "MEM_WRITE_CNTR";
+    case PM4_SET_BIN_MASK: return "SET_BIN_MASK";
+    case PM4_SET_BIN_SELECT: return "SET_BIN_SELECT";
+    case PM4_SET_BIN_MASK_LO: return "SET_BIN_MASK_LO";
+    case PM4_SET_BIN_MASK_HI: return "SET_BIN_MASK_HI";
+    case PM4_SET_BIN_SELECT_LO: return "SET_BIN_SELECT_LO";
+    case PM4_SET_BIN_SELECT_HI: return "SET_BIN_SELECT_HI";
     case PM4_INTERRUPT: return "INTERRUPT";
     case PM4_SET_CONSTANT2: return "SET_CONSTANT2";
     case PM4_SET_SHADER_CONSTANTS: return "SET_SHADER_CONSTANTS";
@@ -254,6 +261,17 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
     uint32_t op = (h >> 8) & 0x7F, count = ((h >> 16) & 0x3FFF) + 1;
     uint32_t end = (start + 1 + count) % r->size_dw;
     cp->op_count[op]++;
+    if (h & 1) {
+        /* a predicated packet: run only for a bin that is selected (Xenia: skipped unless bin_select & bin_mask;
+         * a predicated swap is never run) */
+        cp->predicated++;
+        if (!(cp->bin_select & cp->bin_mask) || op == PM4_XE_SWAP) {
+            cp->predicated_skipped++;
+            TRACE("type3 opcode %02X x%u predicated: skipped\n", op, count);
+            r->pos = end;
+            return 0;
+        }
+    }
     switch (op) {
     case PM4_INDIRECT_BUFFER:
     case PM4_INDIRECT_BUFFER_PFD: {
@@ -415,6 +433,25 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
                 cp->interrupt(cp->ctx, 1, cpu);
         break;
     }
+    case PM4_SET_BIN_MASK_LO:
+        cp->bin_mask = (cp->bin_mask & 0xFFFFFFFF00000000ull) | rd(cp, r);
+        break;
+    case PM4_SET_BIN_MASK_HI:
+        cp->bin_mask = (cp->bin_mask & 0xFFFFFFFFull) | (uint64_t)rd(cp, r) << 32;
+        break;
+    case PM4_SET_BIN_SELECT_LO:
+        cp->bin_select = (cp->bin_select & 0xFFFFFFFF00000000ull) | rd(cp, r);
+        break;
+    case PM4_SET_BIN_SELECT_HI:
+        cp->bin_select = (cp->bin_select & 0xFFFFFFFFull) | (uint64_t)rd(cp, r) << 32;
+        break;
+    case PM4_SET_BIN_MASK:
+    case PM4_SET_BIN_SELECT:
+        if (count >= 2) {
+            uint64_t hi = rd(cp, r), lo = rd(cp, r);
+            *(op == PM4_SET_BIN_MASK ? &cp->bin_mask : &cp->bin_select) = hi << 32 | lo;
+        }
+        break;
     case PM4_XE_SWAP: {
         rd(cp, r); /* magic */
         cp->last_swap_fb = rd(cp, r);

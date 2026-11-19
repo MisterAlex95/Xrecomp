@@ -2045,7 +2045,7 @@ What is there:
   assert stops it with its address), FPSCR moves, `mcrxr`. `xenos_cp.c`: the GPU command processor, PM4 packets
   decoded and traced (register file, constants, memory writes with the GPU's endian modes, fences, conditional writes,
   waits that stall the ring, indirect buffers, draws recorded, the shader microcode kept, interrupts, the VdSwap
-  token); the GPU register page is memory the scheduler reads between slices, and the title's graphics interrupt
+  token, tiled rendering's bin mask / bin select and the packets they predicate); the GPU register page is memory the scheduler reads between slices, and the title's graphics interrupt
   callback runs at each vertical blank (60 Hz of virtual time) on a reused guest context. `x360_state.c`: **save
   states** in the other consoles' format (`gc_state.c`: threads, kernel objects, heaps, guest memory without its zero
   pages, the GPU, open files and links, the pads), taken between time slices. `x360_cheat_read32` / `write32`: the

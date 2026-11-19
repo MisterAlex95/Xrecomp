@@ -380,6 +380,41 @@ static void test_gpu(void)
     }
     CHECK(fired >= 9999 && X->nthreads == nthreads && X->kalloc_cur == kfree && X->status == X360_RUNNING,
           "vblanks: %d callbacks, threads %d -> %d", fired, nthreads, X->nthreads);
+    /* Tiled rendering's predicate is in save states: bin select 0 (no bin selected), saved; select 1 again; the
+     * state loaded: a predicated fence does not run, the one after it does */
+    uint32_t rp = 4 + 64 + 6;
+    x360_w32(X, ring + 4 * rp++, 3u << 30 | (uint32_t)PM4_SET_BIN_SELECT_LO << 8);
+    x360_w32(X, ring + 4 * rp++, 0);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp);
+    x360_gpu_poll(X);
+    size_t cap = x360_state_size(X), n = 0;
+    uint8_t *blob = malloc(cap);
+    char why[128] = "";
+    CHECK(blob && (n = x360_state_save(X, NULL, blob, cap)) > 0, "state saved with the bin registers");
+    x360_w32(X, ring + 4 * rp, 3u << 30 | (uint32_t)PM4_SET_BIN_SELECT_LO << 8);
+    x360_w32(X, ring + 4 * rp + 4, 1);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp + 2);
+    x360_gpu_poll(X);
+    CHECK(blob && x360_state_load(X, NULL, blob, n, why, sizeof why) == 0, "state loaded: %s", why);
+    free(blob);
+    x360_w32(X, ring + 4 * rp++, 3u << 30 | 2u << 16 | (uint32_t)PM4_EVENT_WRITE_SHD << 8 | 1);
+    x360_w32(X, ring + 4 * rp++, 5);
+    x360_w32(X, ring + 4 * rp++, (misc_phys + 0x100) | 2);
+    x360_w32(X, ring + 4 * rp++, 0x5678);
+    x360_w32(X, ring + 4 * rp++, 3u << 30 | 2u << 16 | (uint32_t)PM4_EVENT_WRITE_SHD << 8);
+    x360_w32(X, ring + 4 * rp++, 5);
+    x360_w32(X, ring + 4 * rp++, (misc_phys + 0x108) | 2);
+    x360_w32(X, ring + 4 * rp++, 0x9ABC);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp);
+    x360_gpu_poll(X);
+    CHECK(x360_r32(X, fence) == 0x1234 && x360_r32(X, misc + 0x108) == 0x9ABC,
+          "after the load: the predicated fence %08X (not written), the plain one %08X", x360_r32(X, fence),
+          x360_r32(X, misc + 0x108));
+    /* back to the initial value for the tests that follow */
+    x360_w32(X, ring + 4 * rp++, 3u << 30 | (uint32_t)PM4_SET_BIN_SELECT_LO << 8);
+    x360_w32(X, ring + 4 * rp++, 0xFFFFFFFFu);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp);
+    x360_gpu_poll(X);
 }
 
 static void hex(const uint8_t *p, int n, char *out)
