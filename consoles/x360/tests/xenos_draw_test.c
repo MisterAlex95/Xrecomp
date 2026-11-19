@@ -1581,20 +1581,28 @@ int main(int argc, char **argv)
         run(&cp);
     }
 
-    /* a resolved texture reads as its memory does, host picture or not. The red quad resolved (a) to an 8-bit
-     * destination: X is in every component, so the swizzle's Y is the red, not the surface's green; (b) with an
-     * exponent bias of -1: half the red. */
+    /* a resolved texture reads as its memory does, host picture or not. An orange quad (1, 0.5, 0) resolved (a) to
+     * an 8-bit destination: X is in every component, so the swizzle's Y is the red, not the surface's green; (b) with
+     * an exponent bias of -1: half of each; (c) 8-in-32, then fetched with no endian swap: the texel's bytes the
+     * other way round, alpha in X and red in W */
     if (pst) {
         static const struct {
-            uint32_t base, info, format, swizzle;
-            uint8_t lo, hi;
-        } rk[2] = {{0x5C000, 0u | 2u << 7, 2, 1u | 4u << 3 | 4u << 6 | 5u << 9, 255, 255},
-                   {0x60000, 2u | 6u << 7 | 0x3Fu << 16, 6, 0u | 1u << 3 | 2u << 6 | 3u << 9, 127, 128}};
-        for (int k = 0; k < 2; k++) {
+            const char *what;
+            uint32_t base, info, format, fetch_endian, swizzle;
+            uint8_t lo[3], hi[3];
+        } rk[3] = {
+            {"to 8 bits", 0x5C000, 0u | 2u << 7, 2, 0, 1u | 4u << 3 | 4u << 6 | 5u << 9, {255, 0, 0}, {255, 0, 0}},
+            {"with an exponent bias", 0x60000, 2u | 6u << 7 | 0x3Fu << 16, 6, 2, 0u | 1u << 3 | 2u << 6 | 3u << 9,
+             {127, 63, 0}, {128, 64, 0}},
+            {"fetched with another endian mode", 0x64000, 2u | 6u << 7, 6, 0, 0u | 1u << 3 | 2u << 6 | 3u << 9,
+             {255, 0, 127}, {255, 0, 128}}};
+        for (uint32_t k = 0; k < 4; k++)
+            vertex(0x41500 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? -1.0f : 1.0f, 1.0f, 0.5f, 0.0f);
+        for (int k = 0; k < 3; k++) {
             im[0] = 1, im[1] = nps;
             memcpy(im + 2, ps, 4 * nps);
             type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
-            reg(0x4800, 0x4080u | 3u); /* the red quad */
+            reg(0x4800, 0x41500u | 3u); /* the orange quad */
             reg(0x4801, 2u | (32u << 2));
             type3(PM4_DRAW_INDX_2, &strip_a, 1);
             reg(0x4800, 0x7000u | 3u);
@@ -1612,17 +1620,20 @@ int main(int argc, char **argv)
             type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
             reg(0x4800, 0x6000u | 3u);
             reg(0x4801, 2u | (32u << 2));
-            uint32_t fk[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22 | 1u << 31, rk[k].format | 2u << 6 | rk[k].base,
-                              63u | 63u << 13, rk[k].swizzle << 1, 0, 1u << 9};
+            uint32_t fk[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22 | 1u << 31,
+                              rk[k].format | rk[k].fetch_endian << 6 | rk[k].base, 63u | 63u << 13, rk[k].swizzle << 1,
+                              0, 1u << 9};
             for (int i = 0; i < 6; i++)
                 reg(0x480C + (uint32_t)i, fk[i]);
             type3(PM4_DRAW_INDX_2, &strip_a, 1);
             type3(PM4_XE_SWAP, swap, 4);
             run(&cp);
             const uint8_t *ck = px(g, W / 2, H / 2);
-            CHECK(ck[0] >= rk[k].lo && ck[0] <= rk[k].hi && ck[1] == 0 && ck[2] == 0,
-                  "resolve %s read back: %u,%u,%u, want red %u..%u", k ? "with an exponent bias" : "to 8 bits", ck[0],
-                  ck[1], ck[2], rk[k].lo, rk[k].hi);
+            int ok = 1;
+            for (int ch = 0; ch < 3; ch++)
+                ok &= ck[ch] >= rk[k].lo[ch] && ck[ch] <= rk[k].hi[ch];
+            CHECK(ok, "resolve %s read back: %u,%u,%u, want %u..%u,%u..%u,%u..%u", rk[k].what, ck[0], ck[1], ck[2],
+                  rk[k].lo[0], rk[k].hi[0], rk[k].lo[1], rk[k].hi[1], rk[k].lo[2], rk[k].hi[2]);
         }
         im[0] = 1, im[1] = nps;
         memcpy(im + 2, ps, 4 * nps);

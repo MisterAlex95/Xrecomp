@@ -292,6 +292,7 @@ typedef struct rt_copy {
     int w, h;
     GLenum ifmt;
     int swap_rb;           /* the resolve exchanged red and blue in memory; the picture has them as the surface did */
+    uint32_t fmt, endian;  /* the destination's texture format and endian mode: how memory was written */
     unsigned used;
 } rt_copy;
 
@@ -2301,6 +2302,15 @@ static rt_copy *copy_at(xenos_gl *g, const xenos_cp *cp, uint32_t base)
     return NULL;
 }
 
+/* A resolve's host picture stands for a texture only when the texture is read as the resolve wrote it: the same
+ * format and, for texels wider than a byte, the same endian mode (read with another one, the bytes land in other
+ * channels: a front buffer resolved for the display and sampled back as a big-endian texture). */
+static int copy_fits(const rt_copy *rc, const uint32_t *fc)
+{
+    uint32_t fmt = fc[1] & 63, endian = (fc[1] >> 6) & 3;
+    return fmt == rc->fmt && (endian == rc->endian || fmt == 2);
+}
+
 /* copy a w x h guest-pixel region at (sx, sy) of texture `src` into (0, 0) of texture `dst` (both at the internal
  * resolution, compatible formats) */
 static void blit_tex(xenos_gl *g, GLuint src, GLuint dst, int sx, int sy, int w, int h, int dx, int dy)
@@ -2346,6 +2356,8 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     }
     /* a resolve's picture */
     rt_copy *rc = dim == 1 ? copy_at(g, cp, fc[1]) : NULL;
+    if (rc && !copy_fits(rc, fc))
+        rc = NULL; /* read another way than it was written: decoded from memory */
     if (rc) {
         uint32_t w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
         if ((int)w <= rc->w && (int)h <= rc->h) {
@@ -3362,6 +3374,7 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                     rc->tex = 0;
                 }
                 rc->swap_rb = (int)swap_rb;
+                rc->fmt = fmt, rc->endian = endian;
                 if (!rc->tex) {
                     GLenum tf, tt;
                     upload_fmt(s->ifmt, &tf, &tt);
@@ -3826,6 +3839,8 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
     GLenum src_fmt = GL_RGBA8;
     int fw = g->width, fh = g->height, done = 0;
     rt_copy *rc = front ? copy_at(g, cp, base) : NULL;
+    if (rc && !copy_fits(rc, fc))
+        rc = NULL;
     if (front) {
         fw = (int)(fc[2] & 0x1FFF) + 1, fh = (int)((fc[2] >> 13) & 0x1FFF) + 1;
         swizzle = (fc[3] >> 1) & 0xFFF;
