@@ -1822,8 +1822,17 @@ static void alpha_block(const uint8_t *b, uint8_t out[16])
         out[i] = (uint8_t)ap[(ab >> (3 * i)) & 7];
 }
 
-/* one 4x4 block of a compressed format at `b` (bytes after the endian swap) to 16 RGBA texels; colours are 5:6:5
- * with the 5 low bits first (X) */
+/* a DXT colour endpoint: S3TC's 5:6:5 with red in the 5 high bits (the uncompressed 5_6_5 format is the other way
+ * round: X in the low bits). The GPU decodes the standard block: Xenia hands it to the host's BC decoder as it is. */
+static void unpack_dxt_colour(uint32_t v, uint8_t out[4])
+{
+    out[0] = (uint8_t)((((v >> 11) & 31) * 255 + 15) / 31);
+    out[1] = (uint8_t)((((v >> 5) & 63) * 255 + 31) / 63);
+    out[2] = (uint8_t)(((v & 31) * 255 + 15) / 31);
+    out[3] = 255;
+}
+
+/* one 4x4 block of a compressed format at `b` (bytes after the endian swap) to 16 RGBA texels */
 static void dxt_block(const uint8_t *b, uint32_t format, uint8_t out[16][4])
 {
     switch (format) {
@@ -1869,8 +1878,8 @@ static void dxt_block(const uint8_t *b, uint32_t format, uint8_t out[16][4])
     uint32_t c0 = cb[0] | cb[1] << 8, c1 = cb[2] | cb[3] << 8, bits = cb[4] | cb[5] << 8 | cb[6] << 16 |
                                                                         (uint32_t)cb[7] << 24;
     uint8_t pal[4][4];
-    unpack_565(c0, pal[0]);
-    unpack_565(c1, pal[1]);
+    unpack_dxt_colour(c0, pal[0]);
+    unpack_dxt_colour(c1, pal[1]);
     int three = format == 18 && c0 <= c1;
     for (int k = 0; k < 3; k++) {
         if (three) {

@@ -450,8 +450,8 @@ int main(int argc, char **argv)
             tiles_ok = 0, fprintf(stderr, "  texel %d,%d read %u,%u\n", probe[i][0], probe[i][1], p[0], p[1]);
     }
     CHECK(tiles_ok, "frame 10 (tiled texture)");
-    /* DXT1: one block, colour 0 = 5:6:5 0x001F (X = 31), colour 1 = 0, every index 0 */
-    static const uint16_t blk[4] = {0x001F, 0x0000, 0x0000, 0x0000};
+    /* DXT1: one block, colour 0 = S3TC's 5:6:5 (red in the 5 high bits: 0xF800), colour 1 = 0, every index 0 */
+    static const uint16_t blk[4] = {0xF800, 0x0000, 0x0000, 0x0000};
     for (int i = 0; i < 4; i++)
         mem[0x14000 + 2 * i] = (uint8_t)(blk[i] >> 8), mem[0x14000 + 2 * i + 1] = (uint8_t)blk[i];
     uint32_t fcd[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 18u | 1u << 6 | 0x14000u, 3u | 3u << 13, sw_id << 1, 0,
@@ -1478,6 +1478,46 @@ int main(int argc, char **argv)
                       "three textures, pass %d: %u,%u,%u, want %u,%u,%u", f, c3[0], c3[1], c3[2], want[0], want[1],
                       want[2]);
             }
+        }
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
+    /* DXT colour endpoints are S3TC's: red in the 5 high bits, also behind DXT2_3's and DXT4_5's alpha. One block
+     * each, colour 0 on every texel: 0x001F is blue, 0xFFE0 yellow, 0xF81F magenta */
+    if (pst) {
+        im[0] = 1, im[1] = ntex;
+        memcpy(im + 2, pst, 4 * ntex);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
+        for (uint32_t k = 0; k < 4; k++)
+            vertex(0x41300 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? 1.0f : -1.0f, 0.5f, 0.5f, 0.0f);
+        static const struct {
+            uint32_t format;
+            uint16_t colour;
+            uint8_t want[3];
+        } dx[3] = {{18, 0x001F, {0, 0, 255}}, {19, 0xFFE0, {255, 255, 0}}, {20, 0xF81F, {255, 0, 255}}};
+        for (int k = 0; k < 3; k++) {
+            uint32_t at = 0x55000, cb = dx[k].format == 18 ? at : at + 8;
+            for (uint32_t i = 0; i < 16; i++)
+                mem[at + i] = dx[k].format == 18 ? 0 : 0xFF; /* the alpha half: opaque */
+            mem[cb] = (uint8_t)(dx[k].colour >> 8), mem[cb + 1] = (uint8_t)dx[k].colour; /* 8-in-16: big-endian words */
+            for (uint32_t i = 2; i < 8; i++)
+                mem[cb + i] = 0;
+            uint32_t fx[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, dx[k].format | 1u << 6 | at, 3u | 3u << 13, sw_id << 1,
+                              0, 1u << 9};
+            for (uint32_t i = 0; i < 6; i++)
+                reg(0x480C + i, fx[i]);
+            reg(0x4800, 0x41300u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            const uint8_t *cd = px(g, W / 2, H / 2);
+            CHECK(cd[0] == dx[k].want[0] && cd[1] == dx[k].want[1] && cd[2] == dx[k].want[2],
+                  "DXT colour %04X (format %u): %u,%u,%u, want %u,%u,%u", dx[k].colour, dx[k].format, cd[0], cd[1],
+                  cd[2], dx[k].want[0], dx[k].want[1], dx[k].want[2]);
         }
         im[0] = 1, im[1] = nps;
         memcpy(im + 2, ps, 4 * nps);
