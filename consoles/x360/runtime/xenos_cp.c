@@ -75,14 +75,6 @@ const char *xenos_cp_opcode_name(uint32_t op)
     }
 }
 
-void xenos_cp_write_reg(xenos_cp *cp, uint32_t index, uint32_t value)
-{
-    if (index >= XENOS_REGS)
-        return;
-    cp->regs[index] = value;
-    cp->reg_writes++;
-}
-
 /* the GPU's endian modes (the low 2 bits of an address): none, 8in16, 8in32, 16in32 */
 static uint32_t gpu_swap(uint32_t v, uint32_t mode)
 {
@@ -100,6 +92,22 @@ static void mem_write(xenos_cp *cp, uint32_t addr, uint32_t value)
 {
     if (cp->write32)
         cp->write32(cp->ctx, addr & ~3u & 0x1FFFFFFFu, __builtin_bswap32(gpu_swap(value, addr & 3)));
+}
+
+void xenos_cp_write_reg(xenos_cp *cp, uint32_t index, uint32_t value)
+{
+    if (index >= XENOS_REGS)
+        return;
+    cp->regs[index] = value;
+    cp->reg_writes++;
+    /* scratch register write-back: a scratch register whose bit is set in SCRATCH_UMSK (bits 0-7) is also written
+     * to memory at SCRATCH_ADDR + 4 * its number, in the mask's endian mode (bits 16-17). Direct3D passes values to
+     * its interrupt handler this way and makes the GPU wait on the memory copy. */
+    if (index >= XENOS_REG_SCRATCH_REG0 && index < XENOS_REG_SCRATCH_REG0 + 8) {
+        uint32_t n = index - XENOS_REG_SCRATCH_REG0, umsk = cp->regs[XENOS_REG_SCRATCH_UMSK];
+        if (umsk >> n & 1)
+            mem_write(cp, ((cp->regs[XENOS_REG_SCRATCH_ADDR] & ~3u) + 4 * n) | (umsk >> 16 & 3), value);
+    }
 }
 
 static uint32_t mem_read(xenos_cp *cp, uint32_t addr)

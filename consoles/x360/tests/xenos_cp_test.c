@@ -1,7 +1,7 @@
 /* xenos_cp_test -- the PM4 command processor on hand-built packets (XBA-270). Expected values follow the packet
  * definitions (Xenia's xenos.h / command_processor.cc, BSD): register blocks, constants, read-modify-write, memory
  * writes and their endian modes, event fences, conditional writes, draw initiators, indirect buffers, interrupts,
- * the swap token; on the ring: a wait that stalls then resumes, a packet across the end of the ring, a packet the
+ * the swap token, scratch register write-back; on the ring: a wait that stalls then resumes, a packet across the end of the ring, a packet the
  * CPU has not finished writing, the read pointer written back. */
 #include <stdio.h>
 #include <string.h>
@@ -113,6 +113,29 @@ int main(void)
     CHECK(cp.shader[1].words == 3 && cp.shader[1].code[2] == 0xC0DE0003 && cp.shader[0].words == 2 &&
               cp.shader[0].code[1] == 0x5EED0002 && cp.shader[0].address == 0xB000 && cp.shader_loads == 2,
           "shader microcode kept");
+
+    /* ---- scratch register write-back: mask bits 0, 1 and 4, 8in32 mode, at 0xC000 ---- */
+    at = 0;
+    put(B, t0(XENOS_REG_SCRATCH_REG0 + 1, 1, 0)), put(B, 0x0BADF00D); /* before the mask is set: register only */
+    put(B, t0(XENOS_REG_SCRATCH_ADDR, 1, 0)), put(B, 0xC000);
+    put(B, t0(XENOS_REG_SCRATCH_UMSK, 1, 0)), put(B, 2u << 16 | 0x13);
+    put(B, t0(XENOS_REG_SCRATCH_REG0, 3, 0)), put(B, 0x11223344), put(B, 1), put(B, 0x55);
+    put(B, t0(XENOS_REG_SCRATCH_REG0 + 4, 1, 0)), put(B, 0xCAFEF00D);
+    /* what Direct3D does next: the GPU waits on the memory copy, here to write a register when it matches */
+    put(B, t3(PM4_COND_WRITE, 6)), put(B, 0x13), put(B, (0xC000 + 4) | 2), put(B, 1), put(B, 0xFFFFFFFFu),
+        put(B, 0x2210), put(B, 0x99);
+    put(B, t0(XENOS_REG_SCRATCH_UMSK, 1, 0)), put(B, 0u << 16 | 0x01);
+    put(B, t0(XENOS_REG_SCRATCH_REG0, 2, 0)), put(B, 0xA1B2C3D4), put(B, 7);
+    mem[0xC004 / 4] = mem[0xC008 / 4] = mem[0xC00C / 4] = mem[0xC010 / 4] = 0xEEEEEEEEu;
+    n = at;
+    xenos_cp_execute(&cp, B, n);
+    CHECK(cp.regs[XENOS_REG_SCRATCH_REG0 + 2] == 0x55 && cp.regs[XENOS_REG_SCRATCH_REG0 + 4] == 0xCAFEF00D,
+          "the scratch registers keep their values");
+    CHECK(mem[0xC008 / 4] == 0xEEEEEEEEu && mem[0xC00C / 4] == 0xEEEEEEEEu, "unmasked registers are not written back");
+    CHECK(mem[0xC010 / 4] == 0xCAFEF00D, "register 4 written back as the guest reads it: %08X", mem[0xC010 / 4]);
+    CHECK(cp.regs[0x2210] == 0x99, "the GPU reads its own write-back");
+    CHECK(mem[0xC000 / 4] == 0xD4C3B2A1 && mem[0xC004 / 4] == 1, "mask and mode changed: %08X %08X",
+          mem[0xC000 / 4], mem[0xC004 / 4]);
 
     /* ---- the ring: 0x10000, 2^10 quadwords = 8 KB = 2048 dwords ---- */
     const uint32_t R = 0x10000;
