@@ -89,4 +89,44 @@ public class LogProviderTest {
         assertFalse(LogProvider.preparedKey(null));
         assertFalse(LogProvider.preparedKey("gc-" + "A".repeat(41)));
     }
+
+    /** « Share the last game's log »: the file the launcher dumps is served under its own name, nothing beside it. */
+    @Test
+    public void servesTheLastGamesLog() throws Exception {
+        File f = LogProvider.lastGameLogFile(c);
+        assertTrue(f.getParentFile().mkdirs() || f.getParentFile().isDirectory());
+        Files.write(f.toPath(), "the last run".getBytes(StandardCharsets.UTF_8));
+        Uri uri = LogProvider.lastGameUri(c);
+        assertEquals("the last run", read(uri));
+        android.database.Cursor q = provider.query(uri, null, null, null, null);
+        assertNotNull(q);
+        assertTrue(q.moveToFirst());
+        assertEquals(LogProvider.LAST_GAME_LOG, q.getString(0));
+        try {
+            provider.openFile(uri.buildUpon().appendPath("x").build(), "r");
+            fail("a path below last-game.log was served");
+        } catch (FileNotFoundException expected) {
+            // refused
+        }
+    }
+
+    @Test
+    public void exitHeaderSaysHowTheGameEnded() {
+        String h = LogProvider.exitHeader(17219, 0L, LogProvider.reasonName(
+                android.app.ApplicationExitInfo.REASON_CRASH_NATIVE), 11, "crash");
+        assertTrue(h, h.startsWith("# game process 17219 ended "));
+        assertTrue(h, h.endsWith(": native crash, status 11 (crash)\n"));
+        assertEquals("not responding", LogProvider.reasonName(android.app.ApplicationExitInfo.REASON_ANR));
+        assertEquals("reason 999", LogProvider.reasonName(999));
+    }
+
+    /** No record of the game's end (a fresh install): the dump still says so and is written. */
+    @Test
+    public void dumpLastGameWithoutARecord() throws Exception {
+        File f = LogProvider.lastGameLogFile(c);
+        assertTrue(LogProvider.dumpLastGame(c, f));
+        String text = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+        assertTrue(text, text.startsWith("# XRecomp: the game's last run\n"));
+        assertTrue(text, text.contains("# ---- crash buffer ----"));
+    }
 }

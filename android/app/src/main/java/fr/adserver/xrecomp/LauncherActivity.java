@@ -2299,6 +2299,8 @@ public class LauncherActivity extends Activity {
             onFocus(reset, () -> describe(getString(R.string.RESET_DETAIL),
                                           getString(R.string.SETTINGS_FOOTER, cfg.file().getAbsolutePath()),
                                           Theme.TEXT_DIM));
+            listRow(list, getString(R.string.SHARE_LAST_GAME_LOG), getString(R.string.SHARE_LAST_GAME_LOG_DETAIL),
+                    this::shareLastGameLog);
             MenuRow about = listRow(list, getString(R.string.ABOUT), getString(R.string.ABOUT_TEXT),
                                     () -> go(Screen.ABOUT));
             about.setValue(version());
@@ -4830,6 +4832,39 @@ public class LauncherActivity extends Activity {
         } catch (RuntimeException e) {
             Log.w(TAG, "launcher: cannot reach the Prepare service", e);
         }
+    }
+
+    /**
+     * « Share the last game's log » (Settings › Advanced): the game's process has ended (a crash takes its « Share log »
+     * with it), so the launcher dumps what that process logged and how it ended (LogProvider.dumpLastGame), then
+     * hands the file to whatever app the player picks.
+     */
+    private void shareLastGameLog() {
+        if (gameRunning()) {
+            setNote(getString(R.string.SHARE_LAST_GAME_LOG_RUNNING), NOTE_INFO);
+            return;
+        }
+        new Thread(() -> {
+            File f = LogProvider.lastGameLogFile(this);
+            boolean ok = LogProvider.dumpLastGame(this, f);
+            Log.i(TAG, "launcher: last game's log " + (ok ? f.length() + " bytes" : "not written"));
+            runOnUiThread(() -> {
+                if (!ok) {
+                    setNote(getString(R.string.SHARE_LOG_NONE), NOTE_INFO);
+                    return;
+                }
+                Uri uri = LogProvider.lastGameUri(this);
+                Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri)
+                        .putExtra(Intent.EXTRA_SUBJECT, getString(R.string.SHARE_LAST_GAME_LOG_SUBJECT))
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                send.setClipData(android.content.ClipData.newRawUri(LogProvider.LAST_GAME_LOG, uri));
+                try {
+                    startActivity(Intent.createChooser(send, getString(R.string.SHARE_LAST_GAME_LOG)));
+                } catch (ActivityNotFoundException e) {
+                    setNote(getString(R.string.SHARE_LOG_NO_APP), NOTE_ERROR);
+                }
+            });
+        }, "last-game-log").start();
     }
 
     /** « Share log »: prepare.log through LogProvider, to whatever app the player picks. */

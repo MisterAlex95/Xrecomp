@@ -289,6 +289,10 @@
     <string name="SHARE_LOG_NONE">No log yet.</string>
     <string name="SHARE_LOG_NO_APP">No app on this device can receive the log.</string>
     <string name="SHARE_LOG_SUBJECT">Prepare log: %1$s (%2$s)</string>
+    <string name="SHARE_LAST_GAME_LOG">Share the last game\'s log</string>
+    <string name="SHARE_LAST_GAME_LOG_DETAIL">After a game closed or crashed: what it logged, how it ended and the crash\'s backtrace, in one text file to send to whatever app you pick. It holds no game data.</string>
+    <string name="SHARE_LAST_GAME_LOG_RUNNING">A game is running: share its log from its own menu, or quit it first.</string>
+    <string name="SHARE_LAST_GAME_LOG_SUBJECT">XRecomp: the last game\'s log</string>
     <string name="CHIP_NEEDS_PREPARE">Needs preparing</string>
     <string name="CHIP_PREPARING">Preparing</string>
     <string name="CHIP_PREPARE_FAILED">Prepare failed</string>

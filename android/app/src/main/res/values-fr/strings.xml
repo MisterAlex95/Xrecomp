@@ -265,6 +265,10 @@
     <string name="SHARE_LOG_NONE">Pas encore de journal.</string>
     <string name="SHARE_LOG_NO_APP">Aucune application de cet appareil ne peut recevoir le journal.</string>
     <string name="SHARE_LOG_SUBJECT">Journal de préparation : %1$s (%2$s)</string>
+    <string name="SHARE_LAST_GAME_LOG">Partager le journal du dernier jeu</string>
+    <string name="SHARE_LAST_GAME_LOG_DETAIL">Après la fermeture ou le plantage d\'un jeu : ce qu\'il a journalisé, comment il s\'est terminé et la trace du plantage, dans un fichier texte à envoyer à l\'application de votre choix. Aucune donnée de jeu.</string>
+    <string name="SHARE_LAST_GAME_LOG_RUNNING">Un jeu est lancé : partagez son journal depuis son propre menu, ou quittez-le d\'abord.</string>
+    <string name="SHARE_LAST_GAME_LOG_SUBJECT">XRecomp : journal du dernier jeu</string>
     <string name="CHIP_NEEDS_PREPARE">À préparer</string>
     <string name="CHIP_PREPARING">Préparation</string>
     <string name="CHIP_PREPARE_FAILED">Préparation en échec</string>
