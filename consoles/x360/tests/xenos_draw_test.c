@@ -1581,6 +1581,55 @@ int main(int argc, char **argv)
         run(&cp);
     }
 
+    /* a resolved texture reads as its memory does, host picture or not. The red quad resolved (a) to an 8-bit
+     * destination: X is in every component, so the swizzle's Y is the red, not the surface's green; (b) with an
+     * exponent bias of -1: half the red. */
+    if (pst) {
+        static const struct {
+            uint32_t base, info, format, swizzle;
+            uint8_t lo, hi;
+        } rk[2] = {{0x5C000, 0u | 2u << 7, 2, 1u | 4u << 3 | 4u << 6 | 5u << 9, 255, 255},
+                   {0x60000, 2u | 6u << 7 | 0x3Fu << 16, 6, 0u | 1u << 3 | 2u << 6 | 3u << 9, 127, 128}};
+        for (int k = 0; k < 2; k++) {
+            im[0] = 1, im[1] = nps;
+            memcpy(im + 2, ps, 4 * nps);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+            reg(0x4800, 0x4080u | 3u); /* the red quad */
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            reg(0x4800, 0x7000u | 3u);
+            reg(0x4801, 2u | (6u << 2));
+            reg(0x2208, 6);
+            reg(0x2318, 0u | 0u << 20);
+            reg(0x2319, rk[k].base);
+            reg(0x231A, W | (uint32_t)H << 16);
+            reg(0x231B, rk[k].info);
+            uint32_t rect3 = 8u | 2u << 6 | 3u << 16;
+            type3(PM4_DRAW_INDX_2, &rect3, 1);
+            reg(0x2208, 4);
+            im[0] = 1, im[1] = ntex;
+            memcpy(im + 2, pst, 4 * ntex);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);
+            reg(0x4800, 0x6000u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            uint32_t fk[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22 | 1u << 31, rk[k].format | 2u << 6 | rk[k].base,
+                              63u | 63u << 13, rk[k].swizzle << 1, 0, 1u << 9};
+            for (int i = 0; i < 6; i++)
+                reg(0x480C + (uint32_t)i, fk[i]);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            const uint8_t *ck = px(g, W / 2, H / 2);
+            CHECK(ck[0] >= rk[k].lo && ck[0] <= rk[k].hi && ck[1] == 0 && ck[2] == 0,
+                  "resolve %s read back: %u,%u,%u, want red %u..%u", k ? "with an exponent bias" : "to 8 bits", ck[0],
+                  ck[1], ck[2], rk[k].lo, rk[k].hi);
+        }
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;

@@ -2447,9 +2447,34 @@ static uint32_t swizzle_swap_rb(uint32_t swizzle)
     return out;
 }
 
-/* a texture's sampling state from its fetch constant: wraps, filters (mips when it has them), swizzle (over a
- * resolve's picture kept with red and blue unswapped when swap_rb) */
-static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mipped, int swap_rb)
+/* a swizzle over a host picture (the surface's four channels) that reads as the texture decoded from memory would:
+ * a one-channel format gives X in every component, a two-channel one (X, Y, 0, 1), a three-channel one alpha 1 */
+static uint32_t swizzle_as_decoded(uint32_t swizzle, uint32_t format)
+{
+    int channels = 4;
+    switch (format) {
+    case 2: case 22: case 23: case 24: case 30: case 36: channels = 1; break;
+    case 10: case 25: case 31: case 37: channels = 2; break;
+    case 4: case 5: case 16: case 17: case 55: case 56: case 57: channels = 3; break;
+    default: break;
+    }
+    uint32_t out = 0;
+    for (int c = 0; c < 4; c++) {
+        uint32_t s = (swizzle >> (3 * c)) & 7;
+        if (s < 4 && channels == 1)
+            s = 0;
+        else if (s == 2 && channels == 2)
+            s = 4;
+        else if (s == 3 && channels < 4)
+            s = 5;
+        out |= s << (3 * c);
+    }
+    return out;
+}
+
+/* a texture's sampling state from its fetch constant: wraps, filters (mips when it has them), swizzle. copy: 0 the
+ * texture was decoded from memory, 1 it is a resolve's host picture, 3 one kept with red and blue unswapped. */
+static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mipped, int copy)
 {
     static const GLint swz[6] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};
     g->glTexParameteri(target, GL_TEXTURE_WRAP_S, wrap_mode((fc[0] >> 10) & 7));
@@ -2466,7 +2491,9 @@ static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mi
                        : min   ? (mip ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST)
                                : (mip ? GL_NEAREST_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST));
     uint32_t swizzle = (fc[3] >> 1) & 0xFFF;
-    if (swap_rb)
+    if (copy)
+        swizzle = swizzle_as_decoded(swizzle, fc[1] & 63);
+    if (copy & 2)
         swizzle = swizzle_swap_rb(swizzle);
     for (int c = 0; c < 4; c++) {
         uint32_t s = (swizzle >> (3 * c)) & 7;
@@ -2515,14 +2542,14 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
             g->st.unsupported_textures++;
             continue;
         }
-        int mipped = 0, swap_rb = 0;
+        int mipped = 0, copy = 0;
         for (int t = 0; t < MAX_TEXTURES; t++)
             if (g->textures[t].tex == tex) {
                 mipped = !g->textures[t].copy && g->textures[t].levels > 1;
-                swap_rb = g->textures[t].copy && g->textures[t].swap_rb;
+                copy = g->textures[t].copy ? (g->textures[t].swap_rb ? 3 : 1) : 0;
                 break;
             }
-        sampler_state(g, target, fc, mipped, swap_rb);
+        sampler_state(g, target, fc, mipped, copy);
     }
     g->glActiveTexture(GL_TEXTURE0);
 }
@@ -3320,7 +3347,8 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                 if (!c->tex || (victim->tex && c->used < victim->used))
                     victim = c;
             }
-            if (s->kind == 2 || (base & 0xFFF)) {
+            /* no picture where it would not read as the memory does: values scaled by an exponent bias */
+            if (s->kind == 2 || (base & 0xFFF) || bias) {
                 if (rc) {
                     g->glDeleteTextures(1, &rc->tex);
                     memset(rc, 0, sizeof *rc);
