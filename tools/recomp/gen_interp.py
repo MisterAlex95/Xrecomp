@@ -272,9 +272,17 @@ def _concrete(prefix, opcode, reg, mod3, has_imm, group, mnem):
 def _shape(prefix, opcode):
     """(has_modrm, has_imm8, is_group) of a two-byte opcode under a prefix, or None."""
     base = _decode(prefix + opcode + bytes([0x93]) + DISP.to_bytes(4, "little") + b"\xA5\xA5")
-    if base is None:
-        return None
     n = len(prefix) + len(opcode)
+    if base is None:
+        # register forms only (movmskps, pextrw, the shifts by an immediate)
+        reg = _decode(prefix + opcode + bytes([0xD6]) + b"\xA5\xA5")
+        if reg is None or reg.size not in (n + 1, n + 2):
+            return None
+        mn = set()
+        for r in range(8):
+            d = _decode(prefix + opcode + bytes([0xC6 | (r << 3)]) + b"\xA5\xA5")
+            mn.add(d.mnemonic if d else None)
+        return (True, reg.size == n + 2, len(mn) > 1)
     if base.size == n:
         return (False, False, False)
     if base.size == n + 5:

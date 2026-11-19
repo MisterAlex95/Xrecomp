@@ -330,6 +330,7 @@ STUB void xbox_Cpuid(uint32_t l, uint32_t s, uint32_t o[4]) { (void)l; (void)s; 
 #define CODE_VA  @BASE@u
 #define STRIDE   @STRIDE@u
 #define NATIVE   @NATIVE@
+#define FPMODE   @FPMODE@
 #if NATIVE
 static void layout(void)
 {
@@ -385,12 +386,46 @@ static void state(uint64_t seed)
     g_eax = pick(); g_ecx = pick(); g_edx = pick(); g_ebx = pick(); g_esi = pick(); g_edi = pick();
     g_ebp = EBP_VA;
     for (i = 0; i < 256; i++) GUEST(DATA_VA)[i] = (uint8_t)rnd();
+#if FPMODE
+    {   /* floats and doubles worth computing with, the registers from them */
+        static const float kf[] = { 0.0f, -0.0f, 1.0f, -1.5f, 2.0f, 0.5f, 3.25f, -7.0f, 100.0f, 1e10f, 1e-10f,
+                                    65536.0f, -0.25f, 12345.678f, 0.1f, -3.0e5f };
+        static const double kd[] = { 0.0, 1.0, -2.5, 0.5, 3.0, 1e10, -1e-3, 7.25, 1e100, -0.0, 2.0, 1024.5 };
+        float *f = (float *)GUEST(DATA_VA);
+        double *dd = (double *)GUEST(DATA_VA + 128);
+        RecompXmm *x = &g_cpu.r_xmm0;
+        RecompMmx *m = &g_cpu.r_mm0;
+        for (i = 0; i < 32; i++) f[i] = kf[rnd() % 16];
+        for (i = 0; i < 12; i++) dd[i] = kd[rnd() % 12];
+        for (i = 0; i < 8; i++) {
+            int k;
+            for (k = 0; k < 4; k++) x[i].f[k] = kf[rnd() % 16];
+            if (rnd() % 4 == 0) for (k = 0; k < 4; k++) x[i].u[k] = rnd();
+            m[i].ud[0] = rnd(); m[i].ud[1] = pick();
+        }
+        g_cpu.r_fp_control_word = 0x027F;
+        g_cpu.r_mxcsr = 0x1F80;
+        g_cpu.r_fp_top = 0;
+    }
+#endif
     g_esp = STACK_VA;
     g_esp -= 4; MEM32(g_esp) = 0xDEAD0000u;      /* the return address of the call */
 }
-typedef struct { uint32_t r[8]; uint8_t data[256]; } snap_t;
+typedef struct { uint32_t r[8]; uint8_t data[256]; uint8_t ext[128 + 64 + 64 + 8]; } snap_t;
 static void take(snap_t *s)
 {
+    memset(s->ext, 0, sizeof s->ext);
+#if FPMODE
+    {   /* xmm, mm, the x87 stack from its top, top and the condition bits */
+        int k;
+        memcpy(s->ext, &g_cpu.r_xmm0, 128);
+        memcpy(s->ext + 128, &g_cpu.r_mm0, 64);
+        for (k = 0; k < 8; k++) memcpy(s->ext + 192 + 8 * k, &g_cpu.r_fp_stack[(g_cpu.r_fp_top + k) & 7], 8);
+        s->ext[256] = (uint8_t)g_cpu.r_fp_top;
+        memcpy(s->ext + 258, &g_cpu.r_fp_cc, 2);
+        memcpy(s->ext + 260, &g_cpu.r_mxcsr, 4);
+    }
+#endif
     s->r[0] = g_eax; s->r[1] = g_ecx; s->r[2] = g_edx; s->r[3] = g_ebx;
     s->r[4] = g_esp; s->r[5] = 0; s->r[6] = g_esi; s->r[7] = g_edi;
     memcpy(s->data, GUEST(DATA_VA), 256);
@@ -410,6 +445,19 @@ static int compare(const char *what, int seq, uint64_t seed, const snap_t *a, co
         if (a->r[i] != b->r[i]) { printf("%s seq %d seed %llu: %s %08X vs %08X\n", what, seq, (unsigned long long)seed, k_names[i], a->r[i], b->r[i]); bad++; }
     for (i = 0; i < 256; i++)
         if (a->data[i] != b->data[i]) { printf("%s seq %d seed %llu: data+%d %02X vs %02X\n", what, seq, (unsigned long long)seed, i, a->data[i], b->data[i]); bad++; break; }
+    for (i = 0; i < (int)sizeof a->ext; i++)
+        if (a->ext[i] != b->ext[i]) {
+            if (i < 128) {      /* two NaNs in one float lane: which payload the compiler kept for a commutative op */
+                uint32_t la, lb;
+                memcpy(&la, a->ext + (i & ~3), 4); memcpy(&lb, b->ext + (i & ~3), 4);
+                if ((la & 0x7F800000u) == 0x7F800000u && (la & 0x7FFFFFu) && (lb & 0x7F800000u) == 0x7F800000u && (lb & 0x7FFFFFu))
+                    { i |= 3; continue; }
+            }
+            printf("%s seq %d seed %llu: %s+%d %02X vs %02X\n", what, seq, (unsigned long long)seed,
+                   i < 128 ? "xmm" : i < 192 ? "mm" : i < 256 ? "st" : "fpstate", i < 128 ? i : i < 192 ? i - 128 : i < 256 ? i - 192 : i - 256,
+                   a->ext[i], b->ext[i]);
+            bad++; break;
+        }
     return bad;
 }
 """
@@ -481,7 +529,7 @@ def translate_at(code, name, base):
     return c.replace(f"sub_{base:08X}", name)
 
 
-def source(seqs, vectors, lay, extra_main=""):
+def source(seqs, vectors, lay, extra_main="", fp=False):
     """The C of the whole harness."""
     funcs, table, codes = [], [], []
     for i, code in enumerate(seqs):
@@ -493,7 +541,7 @@ def source(seqs, vectors, lay, extra_main=""):
     pre = PRELUDE
     for k, v in (("@DATA@", f"0x{lay.data:X}"), ("@STACK@", f"0x{lay.stack:X}"), ("@EBP@", f"0x{lay.ebp:X}"),
                  ("@BASE@", f"0x{lay.base:X}"), ("@STRIDE@", f"0x{lay.stride:X}"),
-                 ("@NATIVE@", "1" if lay.native else "0")):
+                 ("@NATIVE@", "1" if lay.native else "0"), ("@FPMODE@", "1" if fp else "0")):
         pre = pre.replace(k, v)
     out = pre + "\n".join(funcs) + "\n"
     out += f"static void (*const k_fn[{len(seqs)}])(void) = {{ {', '.join(table)} }};\n"
@@ -504,12 +552,12 @@ def source(seqs, vectors, lay, extra_main=""):
     return out
 
 
-def build_and_run(seqs, vectors, extra_main="", opt="-O2", cflags=()):
+def build_and_run(seqs, vectors, extra_main="", opt="-O2", cflags=(), fp=False):
     """Lift every sequence, build them with the interpreter on this host, run
     `vectors` states through each, interpreter against lifted code. Returns
     (returncode, output)."""
     cc = gnu_cc()
-    main = source(seqs, vectors, Layout(False), extra_main)
+    main = source(seqs, vectors, Layout(False), extra_main, fp)
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, "t.c")
         exe = os.path.join(d, "t")
@@ -667,7 +715,8 @@ def golden_source(doc):
     nv = len(doc["sequences"][0]["vectors"])
     pre = PRELUDE
     for k, v in (("@DATA@", f"0x{lay.data:X}"), ("@STACK@", f"0x{lay.stack:X}"), ("@EBP@", f"0x{lay.ebp:X}"),
-                 ("@BASE@", f"0x{lay.base:X}"), ("@STRIDE@", f"0x{lay.stride:X}"), ("@NATIVE@", "0")):
+                 ("@BASE@", f"0x{lay.base:X}"), ("@STRIDE@", f"0x{lay.stride:X}"), ("@NATIVE@", "0"),
+                 ("@FPMODE@", "0")):
         pre = pre.replace(k, v)
     tab = "".join(f"static const uint8_t k_code_{i}[] = {{{', '.join(f'0x{b:02X}' for b in c)}}};\n"
                   for i, c in enumerate(seqs))
@@ -718,3 +767,172 @@ if __name__ == "__main__":
         doc = make_golden(a.count, a.length, a.seed, a.vectors, a.workdir)
         ok = sum(1 for s in doc["sequences"] if s["lifter_matches_cpu"])
         print(f"wrote {GOLDEN}: {len(doc['sequences'])} sequences, the lifter matches the CPU on {ok}")
+
+
+class FPGen:
+    """Random SSE / MMX / x87 sequences (the generated half of the
+    interpreter): every family's register and memory forms, immediates,
+    the compares with a consumer of their flags, the x87 stack kept between
+    0 and 8 deep. Floats are at data+0..127, doubles at data+128..223."""
+
+    PS = [0x58, 0x59, 0x5C, 0x5D, 0x5E, 0x5F, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x14, 0x15, 0x28]
+    MMX = [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x74, 0x75, 0x76,
+           0xD1, 0xD2, 0xD3, 0xD5, 0xD8, 0xD9, 0xDB, 0xDC, 0xDD, 0xDF, 0xE1, 0xE2, 0xE5, 0xE8, 0xE9,
+           0xEB, 0xEC, 0xED, 0xEF, 0xF1, 0xF2, 0xF3, 0xF5, 0xF8, 0xF9, 0xFA, 0xFC, 0xFD, 0xFE,
+           0xE0, 0xE3, 0xE4, 0xDA, 0xDE, 0xEA, 0xEE, 0xF6, 0x6F]
+
+    def __init__(self, seed, data):
+        self.r = random.Random(seed)
+        self.data = data
+        self.depth = 0
+
+    def x(self):
+        return self.r.randrange(8)
+
+    def m(self, align=4, lo=0, hi=128):
+        off = self.r.randrange(lo, hi - 16, align)
+        return modrm(0, 0, 5)[:0], off
+
+    def mem(self, reg, lo=0, hi=128, align=4):
+        off = self.r.randrange(lo, hi - 16, align)
+        return mem_abs(reg, off, self.data)
+
+    def consumer(self):
+        cc = self.r.choice([0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0xA, 0xB])
+        if self.r.randrange(2):
+            return bytes([0x0F, 0x90 | cc]) + mem_abs(0, self.r.randrange(224, 256), self.data)
+        return bytes([0x0F, 0x90 | cc]) + modrm(3, 0, self.r.choice([0, 1, 2, 3]))
+
+    def sse(self):
+        r = self.r
+        k = r.randrange(12)
+        if k <= 2:
+            op = r.choice(self.PS)
+            pre = b"\xF3" if op in (0x58, 0x59, 0x5C, 0x5D, 0x5E, 0x5F, 0x51, 0x52, 0x53) and r.randrange(2) else b""
+            if r.randrange(3) == 0 and op != 0x28:
+                return pre + bytes([0x0F, op]) + self.mem(self.x(), align=16)
+            return pre + bytes([0x0F, op]) + modrm(3, self.x(), self.x())
+        if k == 3:
+            op = r.choice([0xC6, 0xC2])
+            pre = b"\xF3" if op == 0xC2 and r.randrange(2) else b""
+            imm = r.randrange(256) if op == 0xC6 else r.randrange(8)
+            return pre + bytes([0x0F, op]) + modrm(3, self.x(), self.x()) + bytes([imm])
+        if k == 4:                      # moves with memory
+            g = r.randrange(6)
+            if g == 0: return bytes([0x0F, 0x10]) + self.mem(self.x())
+            if g == 1: return bytes([0x0F, 0x11]) + self.mem(self.x())
+            if g == 2: return bytes([0xF3, 0x0F, r.choice([0x10, 0x11])]) + self.mem(self.x())
+            if g == 3: return bytes([0x0F, r.choice([0x12, 0x13, 0x16, 0x17])]) + self.mem(self.x())
+            if g == 4: return bytes([0x0F, r.choice([0x12, 0x16])]) + modrm(3, self.x(), self.x())
+            return bytes([0xF3, 0x0F, 0x10]) + modrm(3, self.x(), self.x())
+        if k == 5:                      # compares and their consumer
+            return bytes([0x0F, r.choice([0x2E, 0x2F])]) + modrm(3, self.x(), self.x()) + self.consumer()
+        if k == 6:                      # conversions
+            g = r.randrange(6)
+            if g == 0: return bytes([0xF3, 0x0F, 0x2A]) + modrm(3, self.x(), r.choice(POOL))
+            if g == 1: return bytes([0xF3, 0x0F, r.choice([0x2C, 0x2D])]) + modrm(3, r.choice(POOL), self.x())
+            if g == 2: return bytes([0x0F, 0x2A]) + modrm(3, self.x(), self.x())
+            if g == 3: return bytes([0x0F, r.choice([0x2C, 0x2D])]) + modrm(3, self.x(), self.x())
+            if g == 4: return bytes([0x0F, 0x50]) + modrm(3, r.choice(POOL), self.x())
+            return bytes([0xF3, 0x0F, 0x2A]) + self.mem(self.x())
+        if k == 7:                      # SSE integer on mmx
+            g = r.randrange(4)
+            if g == 0: return bytes([0x0F, 0x70]) + modrm(3, self.x(), self.x()) + bytes([r.randrange(256)])
+            if g == 1: return bytes([0x0F, 0xC4]) + modrm(3, self.x(), r.choice(POOL)) + bytes([r.randrange(4)])
+            if g == 2: return bytes([0x0F, 0xC5]) + modrm(3, r.choice(POOL), self.x()) + bytes([r.randrange(4)])
+            return bytes([0x0F, 0xD7]) + modrm(3, r.choice(POOL), self.x())
+        if k <= 9:                      # mmx
+            op = r.choice(self.MMX)
+            if r.randrange(4) == 0:
+                return bytes([0x0F, op]) + self.mem(self.x())
+            return bytes([0x0F, op]) + modrm(3, self.x(), self.x())
+        if k == 10:                     # mmx shifts by imm, movd / movq
+            g = r.randrange(4)
+            if g == 0:
+                op = r.choice([0x71, 0x72, 0x73])
+                sub = r.choice([2, 4, 6]) if op != 0x73 else r.choice([2, 6])
+                return bytes([0x0F, op]) + modrm(3, sub, self.x()) + bytes([r.randrange(70)])
+            if g == 1: return bytes([0x0F, 0x6E]) + modrm(3, self.x(), r.choice(POOL))
+            if g == 2: return bytes([0x0F, 0x7E]) + modrm(3, self.x(), r.choice(POOL))
+            return bytes([0x0F, 0x7F]) + self.mem(self.x())
+        return self.x87()
+
+    def x87(self):
+        r = self.r
+        d = self.depth
+        opts = []
+        if d < 8:
+            opts += ["fld32", "fld64", "fildi", "fldst", "fldc"]
+        if d >= 1:
+            opts += ["fst", "fstp", "arith_m", "unary", "fcom_m", "fistp"]
+        if d >= 2:
+            opts += ["arith_st", "arith_p", "fxch", "fcomi", "fcmov", "fucompp"]
+        if not opts:
+            return b""
+        o = r.choice(opts)
+        i = r.randrange(1, max(2, d)) if d >= 2 else 0
+        if o == "fld32": self.depth += 1; return b"\xD9" + self.mem(0)
+        if o == "fld64": self.depth += 1; return b"\xDD" + self.mem(0, 128, 224, 8)
+        if o == "fildi": self.depth += 1; return r.choice([b"\xDB", b"\xDF"]) + self.mem(0)
+        if o == "fldst": self.depth += 1; return bytes([0xD9, 0xC0 | r.randrange(max(1, d))])
+        if o == "fldc": self.depth += 1; return bytes([0xD9, r.choice([0xE8, 0xEE, 0xEB, 0xE9])])
+        if o == "fst":
+            return r.choice([b"\xD9" + self.mem(2), b"\xDD" + self.mem(2, 128, 224, 8)])
+        if o == "fstp":
+            self.depth -= 1
+            return r.choice([b"\xD9" + self.mem(3), b"\xDD" + self.mem(3, 128, 224, 8),
+                             bytes([0xDD, 0xD8 | r.randrange(max(1, d))])])
+        if o == "fistp":
+            self.depth -= 1
+            return b"\xDB" + self.mem(3, 224, 256 + 16 - 4) if False else b"\xDB" + mem_abs(3, r.randrange(224, 252, 4), self.data)
+        if o == "arith_m":
+            sub = r.choice([0, 1, 4, 5, 6, 7])
+            return r.choice([b"\xD8" + self.mem(sub), b"\xDC" + self.mem(sub, 128, 224, 8)])
+        if o == "unary":
+            return bytes([0xD9, r.choice([0xE0, 0xE1, 0xFA, 0xFC, 0xE4, 0xE5])]) + (b"\xDF\xE0" if r.randrange(2) else b"")
+        if o == "fcom_m":
+            pops = r.randrange(2)
+            self.depth -= pops
+            return b"\xD8" + self.mem(2 + pops) + b"\xDF\xE0"
+        if o == "arith_st":
+            sub = r.choice([0, 1, 4, 5, 6, 7])
+            return bytes([r.choice([0xD8, 0xDC]), 0xC0 | (sub << 3) | i])
+        if o == "arith_p":
+            self.depth -= 1
+            sub = r.choice([0, 1, 4, 5, 6, 7])
+            return bytes([0xDE, 0xC0 | (sub << 3) | i])
+        if o == "fxch": return bytes([0xD9, 0xC8 | i])
+        if o == "fcomi":
+            if r.randrange(2):
+                self.depth -= 1
+                return bytes([0xDF, r.choice([0xE8, 0xF0]) | i]) + self.consumer()
+            return bytes([0xDB, r.choice([0xE8, 0xF0]) | i]) + self.consumer()
+        if o == "fcmov":
+            return bytes([0x0F, 0x2E]) + modrm(3, self.x(), self.x()) + bytes([r.choice([0xDA, 0xDB]), 0xC0 | (r.randrange(4) << 3) | i])
+        if o == "fucompp":
+            self.depth -= 2
+            return b"\xDA\xE9\xDF\xE0"
+        return b""
+
+    def sequence(self, n):
+        out = []
+        for _ in range(n):
+            out.append(self.sse())
+        while self.depth > 0:
+            out.append(b"\xDD\xD8")     # fstp st(0)
+            self.depth -= 1
+        out.append(b"\x0F\x77\xC3")     # emms; ret
+        return b"".join(out)
+
+
+def fp_sequences(count, length=14, seed=5000, filtered=True):
+    lay = Layout(False)
+    out, rejected, k = [], 0, 0
+    while len(out) < count:
+        code = FPGen(seed + k, lay.data).sequence(length)
+        k += 1
+        if filtered and lifter_falls_back(code, lay.base + len(out) * lay.stride):
+            rejected += 1
+            continue
+        out.append(code)
+    return out, rejected

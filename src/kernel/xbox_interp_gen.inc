@@ -47,6 +47,7 @@ static unsigned gen_0f_shape(unsigned pfx, unsigned op)
     case 0x02Eu: return 0x11u;
     case 0x02Fu: return 0x11u;
     case 0x031u: return 0x10u;
+    case 0x050u: return 0x11u;
     case 0x051u: return 0x11u;
     case 0x052u: return 0x11u;
     case 0x053u: return 0x11u;
@@ -75,6 +76,9 @@ static unsigned gen_0f_shape(unsigned pfx, unsigned op)
     case 0x06Eu: return 0x11u;
     case 0x06Fu: return 0x11u;
     case 0x070u: return 0x13u;
+    case 0x071u: return 0x13u;
+    case 0x072u: return 0x13u;
+    case 0x073u: return 0x13u;
     case 0x074u: return 0x11u;
     case 0x075u: return 0x11u;
     case 0x076u: return 0x11u;
@@ -84,11 +88,13 @@ static unsigned gen_0f_shape(unsigned pfx, unsigned op)
     case 0x0AEu: return 0x11u;
     case 0x0C2u: return 0x13u;
     case 0x0C4u: return 0x13u;
+    case 0x0C5u: return 0x13u;
     case 0x0C6u: return 0x13u;
     case 0x0D1u: return 0x11u;
     case 0x0D2u: return 0x11u;
     case 0x0D3u: return 0x11u;
     case 0x0D5u: return 0x11u;
+    case 0x0D7u: return 0x11u;
     case 0x0D8u: return 0x11u;
     case 0x0D9u: return 0x11u;
     case 0x0DAu: return 0x11u;
@@ -117,6 +123,7 @@ static unsigned gen_0f_shape(unsigned pfx, unsigned op)
     case 0x0F3u: return 0x11u;
     case 0x0F5u: return 0x11u;
     case 0x0F6u: return 0x11u;
+    case 0x0F7u: return 0x11u;
     case 0x0F8u: return 0x11u;
     case 0x0F9u: return 0x11u;
     case 0x0FAu: return 0x11u;
@@ -1307,6 +1314,19 @@ static int gen_exec_0f(XRun *x)
             eax = (uint32_t)_tsc; edx = (uint32_t)(_tsc >> 32); }
             return 1;
         }
+    case 0x050u:
+        if (d->mod == 3) {
+            { /* movmskps */
+                uint32_t GR = *REGP(c, d->reg), GR0 = GR;
+                RecompXmm XM = *gen_xmm(c, d->rm), XM0 = XM;
+                GR = XMM_MOVEMASK(XM);
+                if (memcmp(&XM, &XM0, sizeof XM)) *gen_xmm(c, d->rm) = XM;
+                if (GR != GR0) *REGP(c, d->reg) = GR;
+                return 1;
+            }
+            return 0;
+        }
+        return 0;
     case 0x051u:
         if (d->mod == 3) {
             { /* sqrtps */
@@ -1919,6 +1939,83 @@ static int gen_exec_0f(XRun *x)
                 MR = MMX_PSHUFW(MMX_MEM(_ea), _imm8);
                 if (MR.q != MR0.q) *gen_mmx(c, d->reg) = MR;
                 return 1;
+            }
+            return 0;
+        }
+        return 0;
+    case 0x071u:
+        if (d->mod == 3) {
+            switch (d->reg) {
+            case 2:
+                { /* psrlw */
+                    RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                    MM_ = MMX_PSRLW(MM_, _imm8);
+                    if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
+                    return 1;
+                }
+            case 4:
+                { /* psraw */
+                    RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                    MM_ = MMX_PSRAW(MM_, _imm8);
+                    if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
+                    return 1;
+                }
+            case 6:
+                { /* psllw */
+                    RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                    MM_ = MMX_PSLLW(MM_, _imm8);
+                    if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
+                    return 1;
+                }
+            }
+            return 0;
+        }
+        return 0;
+    case 0x072u:
+        if (d->mod == 3) {
+            switch (d->reg) {
+            case 2:
+                { /* psrld */
+                    RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                    MM_ = MMX_PSRLD(MM_, _imm8);
+                    if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
+                    return 1;
+                }
+            case 4:
+                { /* psrad */
+                    RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                    MM_ = MMX_PSRAD(MM_, _imm8);
+                    if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
+                    return 1;
+                }
+            case 6:
+                { /* pslld */
+                    RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                    MM_ = MMX_PSLLD(MM_, _imm8);
+                    if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
+                    return 1;
+                }
+            }
+            return 0;
+        }
+        return 0;
+    case 0x073u:
+        if (d->mod == 3) {
+            switch (d->reg) {
+            case 2:
+                { /* psrlq */
+                    RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                    MM_ = MMX_PSRLQ(MM_, _imm8);
+                    if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
+                    return 1;
+                }
+            case 6:
+                { /* psllq */
+                    RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                    MM_ = MMX_PSLLQ(MM_, _imm8);
+                    if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
+                    return 1;
+                }
             }
             return 0;
         }
@@ -2657,6 +2754,19 @@ static int gen_exec_0f(XRun *x)
             return 0;
         }
         return 0;
+    case 0x0C5u:
+        if (d->mod == 3) {
+            { /* pextrw */
+                uint32_t GR = *REGP(c, d->reg), GR0 = GR;
+                RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                GR = MMX_PEXTRW(MM_, _imm8);
+                if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
+                if (GR != GR0) *REGP(c, d->reg) = GR;
+                return 1;
+            }
+            return 0;
+        }
+        return 0;
     case 0x0C6u:
         if (d->mod == 3) {
             { /* shufps */
@@ -2762,6 +2872,19 @@ static int gen_exec_0f(XRun *x)
                 RecompMmx MR = *gen_mmx(c, d->reg), MR0 = MR;
                 MR = MMX_PMULLW(MR, MMX_MEM(_ea));
                 if (MR.q != MR0.q) *gen_mmx(c, d->reg) = MR;
+                return 1;
+            }
+            return 0;
+        }
+        return 0;
+    case 0x0D7u:
+        if (d->mod == 3) {
+            { /* pmovmskb */
+                uint32_t GR = *REGP(c, d->reg), GR0 = GR;
+                RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                GR = MMX_PMOVMSKB(MM_);
+                if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
+                if (GR != GR0) *REGP(c, d->reg) = GR;
                 return 1;
             }
             return 0;
@@ -3366,6 +3489,19 @@ static int gen_exec_0f(XRun *x)
             { /* psadbw */
                 RecompMmx MR = *gen_mmx(c, d->reg), MR0 = MR;
                 MR = MMX_PSADBW(MR, MMX_MEM(_ea));
+                if (MR.q != MR0.q) *gen_mmx(c, d->reg) = MR;
+                return 1;
+            }
+            return 0;
+        }
+        return 0;
+    case 0x0F7u:
+        if (d->mod == 3) {
+            { /* maskmovq */
+                RecompMmx MR = *gen_mmx(c, d->reg), MR0 = MR;
+                RecompMmx MM_ = *gen_mmx(c, d->rm), MM_0 = MM_;
+                { RecompMmx _mv = MR, _mk = MM_; int _mi; for (_mi = 0; _mi < 8; _mi++) if (_mk.ub[_mi] & 0x80u) MEM8(edi + (uint32_t)_mi) = _mv.ub[_mi]; }
+                if (MM_.q != MM_0.q) *gen_mmx(c, d->rm) = MM_;
                 if (MR.q != MR0.q) *gen_mmx(c, d->reg) = MR;
                 return 1;
             }

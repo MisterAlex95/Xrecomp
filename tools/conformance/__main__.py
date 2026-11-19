@@ -304,7 +304,8 @@ def main_with_args(argv, allow_container=True):
 
     dk = None
     if backend == "docker":
-        dk = _Container(workdir, mounts=[(runtime_inc, "/rt")])
+        dk = _Container(workdir, mounts=[(runtime_inc, "/rt"),
+                                         (os.path.join(os.path.dirname(root), "src", "kernel"), "/k")])
         if not dk.cid:
             print("could not start the linux/386 container:\n" + dk.error,
                   file=sys.stderr)
@@ -362,9 +363,10 @@ def main_with_args(argv, allow_container=True):
         extract = _bytes_from_objdump
 
     # 2. Lift those bytes with the real pipeline.
-    prepared, unlifted = [], []
+    prepared, unlifted, codes = [], [], {}
     for c in cases:
         code = extract(listing, c["name"])
+        codes[c["name"]] = code
         lines, mnemonics = _lift(code)
         # NOP and identity LEA are intentionally emitted as a bare comment.
         dropped = [l for l in lines
@@ -388,16 +390,19 @@ def main_with_args(argv, allow_container=True):
     # where this compiler happens to answer right. The native side is the
     # same object every time.
     with open(os.path.join(workdir, "harness.c"), "w") as f:
-        f.write(harness_source(prepared, _WHY, _TOL))
+        f.write(harness_source(prepared, _WHY, _TOL, codes))
     if backend == "msvc":
         passes = (("/Od", "/Od"), ("/O2", "/O2"))
     else:
         passes = (("-O0", "-O0"), ("-O2", "-O2"),
                   ("-O2, UBSan", "-O2 -fsanitize=signed-integer-overflow,shift"
-                                 " -fsanitize-trap=all"))
+                                 " -fsanitize-trap=all"),
+                  # the x86 interpreter (XBA-303) on the same vectors, in
+                  # place of the lifted side
+                  ("the interpreter", "-O2 -DXBR_CONF_INTERP=1 -I/k /k/xbox_interp_core.c"))
     rc = 0
     for label, flags in passes:
-        print(f"lifted side at {label}:")
+        print(f"lifted side at {label}:" if "interpreter" not in label else f"{label}:")
         if backend == "msvc":
             r = _cl(vcvars, workdir,
                     f'/W3 {flags} /I"{runtime_inc}" harness.c native.obj '

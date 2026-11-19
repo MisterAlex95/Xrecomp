@@ -60,6 +60,8 @@ set(KERNEL_SOURCES
 # The x86 interpreter (XBA-303): GNU C (recomp_types.h's generated-code path).
 if(NOT MSVC)
     list(APPEND KERNEL_SOURCES xbox_interp_core.c)
+    set_source_files_properties(xbox_interp_core.c PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../templates/runtime")
 endif()
 
 # Save states (XBA-245): the XBXS container writes recomp_states slot files,

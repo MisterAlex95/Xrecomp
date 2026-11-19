@@ -11,6 +11,10 @@ CPU and against lifted code.
     runs on arm64 too.
   - test_interpreter_matches_lifted_code: the same sequences the lifter gets
     right on the CPU, lifted by the real translator and run both ways.
+  - test_sse_mmx_x87_match_lifted_code: the generated half, random SSE / MMX /
+    x87 sequences against the lifted C.
+  - tools/conformance runs its 7,662 vectors (integer, x87, SSE) through the
+    interpreter as a fourth pass against the CPU.
   - test_fresh_sequences_on_the_cpu: new random sequences, three ways in the
     linux/386 container (XBOXRECOMP_PYTEST_DOCKER=1, as tools/conformance).
   - test_the_generated_file_is_current: xbox_interp_gen.inc is what
@@ -62,6 +66,18 @@ def test_interpreter_matches_lifted_code():
             if not F.lifter_falls_back(c, F.BASE)]
     assert len(seqs) >= 120, len(seqs)
     rc, out = F.build_and_run(seqs, 8)
+    assert rc == 0 and "bad 0" in out, out[-3000:]
+
+
+def test_sse_mmx_x87_match_lifted_code():
+    """The generated half: random SSE / MMX / x87 sequences (register and
+    memory forms, immediates, compares with a consumer, fcmov, the x87 stack
+    0..8 deep), interpreter against the lifted C: xmm, mm, the x87 stack and
+    its state, the integer registers and the data area."""
+    _need_cc()
+    _capstone()
+    seqs, _ = F.fp_sequences(200, 16, 5000)
+    rc, out = F.build_and_run(seqs, 8, fp=True)
     assert rc == 0 and "bad 0" in out, out[-3000:]
 
 

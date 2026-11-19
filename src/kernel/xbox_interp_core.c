@@ -21,7 +21,7 @@
 #ifndef RECOMP_CPU_SLOT
 #define RECOMP_CPU_SLOT 0       /* the runtime's g_cpu, not the generated-code slot */
 #endif
-#include "../../templates/runtime/recomp_types.h"
+#include "recomp_types.h"         /* templates/runtime: the include path names it */
 #include "xbox_interp.h"
 
 #include <setjmp.h>
@@ -1129,6 +1129,14 @@ static int exec(XRun *x)
     }
     case 0x0F:
         return exec_0f(x);
+    case 0xDA: case 0xDB:
+        if (d->mod == 3 && d->reg < 4) {        /* fcmovcc st(0), st(i): reads the flags */
+            static const unsigned char k_cc[4] = { 0x2, 0x4, 0x6, 0xA };   /* b e be p */
+            if (cond(c, k_cc[d->reg] | (op == 0xDB)))
+                c->r_fp_stack[c->r_fp_top & 7] = c->r_fp_stack[(c->r_fp_top + d->rm) & 7];
+            return X_NEXT;
+        }
+        break;
     }
     return gen_exec_1b(x) ? X_NEXT : X_UNIMPL;     /* x87, port I/O, hlt, cli, sti, int */
 }

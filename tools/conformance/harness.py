@@ -188,6 +188,37 @@ static void fp_restore_default(void) {
 static void fp_restore_default(void) { }
 #endif
 
+/* The interpreter pass (XBA-303, -DXBR_CONF_INTERP=1): the same vectors run
+   by src/kernel/xbox_interp_core.c over the snippet's bytes with a ret
+   appended, compared with the CPU as the lifted side is. */
+#if XBR_CONF_INTERP
+#include "xbox_interp.h"
+volatile int g_recomp_cas64_lock;
+#define CONF_STUB __attribute__((weak))
+CONF_STUB void recomp_debug_service(uint32_t s, uint32_t a) { (void)s; (void)a; }
+CONF_STUB void xbox_GuestInterruptFlag(int e) { (void)e; }
+CONF_STUB void xbox_Halt(uint32_t va) { (void)va; }
+CONF_STUB uint32_t xbox_PortIn(uint32_t p, int w) { (void)p; (void)w; return 0; }
+CONF_STUB void xbox_PortOut(uint32_t p, uint32_t v, int w) { (void)p; (void)v; (void)w; }
+CONF_STUB uint32_t xbox_ReadCr(int n) { (void)n; return 0; }
+CONF_STUB void xbox_WriteCr(int n, uint32_t v) { (void)n; (void)v; }
+CONF_STUB uint32_t xbox_ReadDr(int n) { (void)n; return 0; }
+CONF_STUB void xbox_WriteDr(int n, uint32_t v) { (void)n; (void)v; }
+CONF_STUB uint64_t xbox_ReadDtr(int w) { (void)w; return 0; }
+CONF_STUB void xbox_WriteDtr(int w, uint64_t v) { (void)w; (void)v; }
+CONF_STUB uint64_t xbox_ReadTimeStampCounter(void) { return 0; }
+CONF_STUB void xbox_Cpuid(uint32_t l, uint32_t s, uint32_t o[4]) { (void)l; (void)s; o[0] = o[1] = o[2] = o[3] = 0; }
+static int g_interp_stopped;
+static void interp_run(const unsigned char *code)
+{
+    XboxInterpStop stop;
+    g_esp -= 4;
+    MEM32(g_esp) = 0;               /* the return address the appended ret pops */
+    if (xbox_InterpRun((uint32_t)(uintptr_t)code, 100000, &stop) != XBOX_INTERP_RETURNED)
+        g_interp_stopped++;
+}
+#endif
+
 /* What the lifted run produced, in the same shape as the native capture. */
 static unsigned int  l_eax;
 static int           l_depth, n_depth;
@@ -316,8 +347,9 @@ static void cmp_sse(const char *name, const char *why, int *shown, int vec) {
 """
 
 
-def harness_source(prepared, why_of, tol_of):
-    """prepared: list of (name, kind, lifted_lines, inputs)."""
+def harness_source(prepared, why_of, tol_of, codes=None):
+    """prepared: list of (name, kind, lifted_lines, inputs). codes: {name:
+    the snippet's bytes}, for the interpreter pass (-DXBR_CONF_INTERP=1)."""
     from tools.recomp.translator import FP_STACK_LOCALS, FP_STACK_MACROS, FP_STACK_UNDEFS
     global _LIFTED_PROLOGUE, _LIFTED_EPILOGUE
     _LIFTED_PROLOGUE = dict(_LIFTED_PROLOGUE)
@@ -343,6 +375,17 @@ def harness_source(prepared, why_of, tol_of):
 {body}
 {_LIFTED_EPILOGUE[kind]}
 }}""")
+        if codes and name in codes:
+            raw = ", ".join(f"0x{b:02X}" for b in codes[name] + b"\xC3")
+            out.append(f"""#if XBR_CONF_INTERP
+static const unsigned char int_code_{name}[] = {{ {raw} }};
+static void int_{name}(void) {{
+{_LIFTED_PROLOGUE[kind]}
+    g_esp = (uint32_t)(uintptr_t)(g_guest_stack + sizeof(g_guest_stack) / 2);
+    interp_run(int_code_{name});
+{_LIFTED_EPILOGUE[kind]}
+}}
+#endif""")
     out.append(_COMPARE)
     out.append("int main(void) {\n    g_scratch_ptr = g_scratch;\n    int shown;")
     for name, kind, _, inputs in prepared:
@@ -355,11 +398,15 @@ def harness_source(prepared, why_of, tol_of):
                           if kind == "fpu" else ""))
             out.append("      fp_restore_default();"
                    f"\n      lif_{name}(); g_total++;")
+            if codes and name in codes:
+                # the interpreter instead of the lifted side, same comparison
+                out.append(f"#if XBR_CONF_INTERP\n      int_{name}();\n#else\n      lif_{name}();\n#endif")
             out.append(f"      cmp_{kind}(\"{name}\", \"{why_of[name]}\", "
                        f"&shown, {vec}"
                        + (f", {tol_of[name]!r}" if kind == "fpu" else "") + "); }")
         out.append('    if (shown > 3) printf("       ... and %d more@NL@", '
                    'shown - 3);')
+    out.append("#if XBR_CONF_INTERP\n    if (g_interp_stopped) { printf(\"interpreter stopped %d times@NL@\", g_interp_stopped); g_fail++; }\n#endif")
     out.append('    printf("@NL@%d vectors, %d mismatches@NL@", g_total, g_fail);'
                "\n    return g_fail != 0;\n}")
     return "\n".join(out).replace("@NL@", chr(92) + "n")
