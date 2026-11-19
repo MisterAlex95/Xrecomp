@@ -154,6 +154,13 @@ void recomp_icall_not_code_log(uint32_t va)
 {
     printf("  [icall] not code 0x%08X\n", va);
 }
+/* The generated recomp_dispatch.c defines this (XBA-304): no per-site slots here. */
+void (*recomp_icall_install(uint32_t va, void (*fn)(void)))(void);
+void (*recomp_icall_install(uint32_t va, void (*fn)(void)))(void)
+{
+    (void)va;
+    return fn;
+}
 
 /* RtlRaiseException(record), stdcall: what bridge_raise_record does. */
 void sub_0001F000(void)

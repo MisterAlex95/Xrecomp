@@ -7,6 +7,7 @@ import pytest
 from . import config
 from .translator import FunctionTranslator
 from .c_fixture import compiler, command
+from tools.recomp.stack_fast import FIXTURE_FALLBACK  # XBA-307
 
 ALU = {'add': 0, 'or': 1, 'adc': 2, 'sbb': 3, 'and': 4, 'sub': 5, 'xor': 6}
 SHIFT = {'shl': 0xE0, 'sar': 0xF8}
@@ -75,7 +76,7 @@ static uint32_t eax,esp;
     }'''
     with tempfile.TemporaryDirectory() as temp:
         source = Path(temp) / 'test.c'
-        source.write_text(code)
+        source.write_text(FIXTURE_FALLBACK + code)
         exe = Path(temp) / 'test.exe'
         result = subprocess.run(command(cc, [source], exe), capture_output=True, text=True)
         assert result.returncode == 0, result.stderr

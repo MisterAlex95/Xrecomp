@@ -31,6 +31,7 @@ import pytest
 
 from . import config
 from .translator import FunctionTranslator
+from tools.recomp.stack_fast import FIXTURE_FALLBACK  # XBA-307
 
 BASE = 0x10000
 
@@ -156,7 +157,7 @@ def _build_and_run(sources):
     code += MAIN
     with tempfile.TemporaryDirectory() as temp:
         src = Path(temp) / "t.c"
-        src.write_text(code)
+        src.write_text(FIXTURE_FALLBACK + code)
         exe = Path(temp) / "t"
         built = subprocess.run([cc, "-O2", str(src), "-o", str(exe)],
                                capture_output=True, text=True)

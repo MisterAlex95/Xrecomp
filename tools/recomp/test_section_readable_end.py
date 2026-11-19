@@ -84,7 +84,7 @@ def test_body_past_the_readable_end_is_refused(capsys):
 def test_ret_in_the_fill_lifts_with_its_zero_byte():
     t = translator(splits=[])
     code = t.translate_function(BASE, t.func_db[BASE])
-    assert "esp += 8; return; /* ret 4 */" in code
+    assert "esp += 8; RECOMP_STK_FENCE(); return; /* ret 4 */" in code
 
 
 def test_coalesce_end_in_the_fill_is_accepted():

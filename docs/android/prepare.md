@@ -641,6 +641,47 @@ identical:
 
 The generated `recomp_dispatch.c`, `recomp_types.h` and the flags change: every pack is stale.
 
+**Stack slots without volatile and without the g_cpu barrier (XBA-307).** Every guest access is volatile and goes
+through `recomp_guest_base()`, whose asm forces every dirty guest register into `g_cpu` first (an exact guest
+exception on a host fault, XBA-138). A stack slot needs neither. In a function that keeps its stack to itself (no esp
+or frame-ebp value leaves as data: no `lea` of a slot, `mov reg, esp`, `push esp`, `fs:[0] = esp`, pushad; no stack
+switch), `tools/recomp/stack_fast.py` lifts `[esp+N]`, `[ebp+N]` (ebp a frame pointer from `push ebp; mov ebp, esp`
+on) and push/pop to the STK forms of `recomp_types.h`. These are plain accesses that the compiler may forward and keep
+in registers. Other functions keep the MEM forms. Every 32-bit, 64-bit and float STK access is made of `recomp_gm_u32`
+words (MEM32's own type), and 8- and 16-bit ones are may_alias. The reason: clang reorders two accesses of
+non-aliasing types, and a stack slot is often written with one width and read with another (`fstp qword [esp]` read
+back as two dwords; a double pushed as two dwords and read by the callee with `fld qword`).
+
+Every lifted function also gets `RECOMP_STK_FENCE()` (a compiler barrier, no instruction) at its entry and before its
+returns (before a tail call, not between it and the return, so it stays a sibling call). This matters when the compiler
+inlines a callee: the callee's arguments live in the caller's frame, and a caller that is not fast reaches them
+through typed MEM accesses. A fault on a stack access (only a corrupt esp or a guest stack past guest memory) may show
+some registers stale to the guest handler; a handler that continues gets the exact host context back.
+
+A/B: `-DRECOMP_STK_FAST=0` (bench variant `stk0`) compiles the STK forms as the old MEM forms, instruction for
+instruction. `XBA_RECOMP_STK=0` in the lifter's environment emits the old text. Same method as above; "before" is the
+branch lifted with `XBA_RECOMP_STK=0`, which is main's code. Checksums are identical, and also with clang 19 for
+aarch64. Two workloads are new:
+- `w_stack`: locals and saved registers in `[esp+N]`, pushed arguments, a frame function, an x87 spill read back as
+  dwords, a double passed as two dword pushes, halfword and byte stores read as dwords.
+- `w_stkmix`: kept and fast functions calling each other with a double argument written with one width and read with
+  the other; clang inlines both callees.
+
+x86-64 is clang 19, exe layout. arm64 is gcc 14 cross (Debian aarch64-linux-gnu).
+
+| Workload | x86-64 | arm64 exe | arm64 so |
+|---|---|---|---|
+| w_stack (new) | 31.80M -> 25.10M (-21.1 %) | 28.50M -> 22.60M (-20.7 %) | 30.30M -> 24.40M (-19.5 %) |
+| w_vcall | 19.45M -> 18.05M (-7.2 %) | 26.50M -> 23.90M (-9.8 %) | 30.70M -> 27.50M (-10.4 %) |
+| w_int | 5.23M -> 5.08M (-2.9 %) | 3.45M -> 3.33M (-3.6 %) | 3.45M -> 3.33M (-3.6 %) |
+| w_icall | 9.25M -> 9.05M (-2.2 %) | 11.90M -> 11.70M (-1.7 %) | 13.70M -> 13.50M (-1.5 %) |
+| w_stkmix (new: the fences' worst case) | 5.96M -> 6.08M (+2.0 %) | 5.52M -> 5.28M (-4.3 %) | 5.97M -> 5.73M (-4.0 %) |
+| w_mem, w_rep, w_bytes, w_x87, w_sse, w_lock | 0 % | 0 % (w_rep +0.3 %) | 0 % (w_rep +0.3 %) |
+
+The float workloads keep their data in guest globals, not on the stack, so nothing changes there. A title's x87 code
+spills to the stack, and that is where its share of the gain shows. The generated C changes: **every pack is stale**
+and has to be prepared again.
+
 **Where a Prepare spends its time (XBA-209).** A title-size synthetic title of our own: `tools.bench lift --copies
 3000` (the bench corpus 3000 times: 39,013 functions, 2.3 MB of code, 96 MB of C), `tools.prepare --android` with
 NDK r28c clang 19 as the stand-in for the embedded clang, `--jobs 5` in a container limited to 5 CPUs of the x86-64

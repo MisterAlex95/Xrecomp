@@ -32,6 +32,8 @@ _start:
     call w_fib
     call w_vcall
     call w_lock
+    call w_stack
+    call w_stkmix
     call w_leaf0
     call w_leaf1
     call w_leaf2
@@ -389,6 +391,147 @@ w_vthunk:
     push dword ptr [esp+8]
     call dword ptr [fn_table+edx*4]
     add esp, 4
+    ret
+
+# ── stack-heavy code (XBA-307): locals and saved registers in [esp+N], an
+#    x87 temporary spilled to a stack slot and read back as two dwords,
+#    pushed arguments, and a frame function (push ebp; mov ebp, esp) whose
+#    locals live in [ebp-N] -- what MSVC /O2 code does between its loops ──
+    .globl w_stack
+w_stack:
+    push ebx
+    push esi
+    push edi
+    sub esp, 16                 # [esp] acc, [esp+4] i, [esp+8] double tmp
+    mov ecx, [esp+32]
+    mov dword ptr [esp], 0x9E3779B9
+    mov [esp+4], ecx
+1:
+    mov eax, [esp+4]
+    push eax
+    push dword ptr [esp+4]      # acc (esp moved by the push above)
+    call stk_mix
+    add esp, 8
+    add [esp], eax
+    fild dword ptr [esp+4]
+    fadd st(0), st(0)
+    fstp qword ptr [esp+8]
+    mov edx, [esp+12]           # high dword of the double
+    xor [esp], edx
+    mov edx, [esp+8]
+    add [esp], edx
+    push dword ptr [esp+12]     # the double as two dword pushes: high...
+    push dword ptr [esp+12]     # ...then low (esp moved by 4)
+    call stk_dbl                # reads them as one fld qword
+    add esp, 8
+    xor [esp], eax
+    dec dword ptr [esp+4]
+    jnz 1b
+    mov eax, [esp]
+    add esp, 16
+    pop edi
+    pop esi
+    pop ebx
+    ret
+
+    .globl stk_mix
+stk_mix:
+    push ebp
+    mov ebp, esp
+    sub esp, 12
+    push esi
+    mov eax, [ebp+8]
+    mov ecx, [ebp+12]
+    mov [ebp-4], eax
+    mov [ebp-8], ecx
+    imul eax, eax, 3
+    add eax, [ebp-8]
+    mov [ebp-12], eax
+    mov esi, [ebp-4]
+    shr esi, 2
+    mov eax, [ebp-12]
+    xor eax, esi
+    rol eax, 5
+    add eax, [ebp-8]
+    pop esi
+    mov esp, ebp
+    pop ebp
+    ret
+
+# ── fast and kept functions calling each other (XBA-307): a caller that
+#    keeps the MEM forms (a lea of one of its slots) writes a double argument
+#    with fstp qword for a fast callee that reads it as two dwords, and a
+#    fast caller pushes two dwords for a kept callee that reads them with
+#    fld qword. Inlined, only the fences keep their accesses apart ──
+    .globl w_stkmix
+w_stkmix:
+    push ebx
+    push esi
+    sub esp, 16
+    mov esi, [esp+28]
+    xor ebx, ebx
+1:
+    lea eax, [esp+8]            # kept: a slot's address in a register
+    mov [eax], esi
+    fild dword ptr [eax]
+    sub esp, 8
+    fstp qword ptr [esp]
+    call mix_lo_hi
+    add esp, 8
+    add ebx, eax
+    push esi
+    call stk_push2
+    add esp, 4
+    xor ebx, eax
+    rol ebx, 1
+    dec esi
+    jnz 1b
+    mov eax, ebx
+    add esp, 16
+    pop esi
+    pop ebx
+    ret
+
+    .globl mix_lo_hi
+mix_lo_hi:
+    mov eax, [esp+4]
+    xor eax, [esp+8]
+    ret
+
+    .globl stk_push2
+stk_push2:
+    mov eax, [esp+4]
+    and eax, 0xFFFFF
+    or eax, 0x41200000          # high dword: 2^19..2^20
+    push eax
+    push dword ptr [esp+8]      # low dword: the argument
+    call fld_esc
+    add esp, 8
+    ret
+
+    .globl fld_esc
+fld_esc:
+    lea ecx, [esp+4]            # kept
+    fld qword ptr [esp+4]
+    fistp dword ptr [ecx]
+    mov eax, [ecx]
+    ret
+
+# A slot written with one width and read with another: the stack accesses of
+# one function must stay ordered whatever their C types (XBA-307).
+    .globl stk_dbl
+stk_dbl:
+    fld qword ptr [esp+4]
+    fadd st(0), st(0)
+    sub esp, 8
+    fistp dword ptr [esp]
+    mov ecx, [esp]
+    mov word ptr [esp+6], cx    # halfword store, dword read below
+    mov byte ptr [esp+5], 0x5A  # byte store, dword read below
+    mov byte ptr [esp+4], cl
+    mov eax, [esp+4]
+    add eax, ecx
+    add esp, 8
     ret
 
 # ── lock-prefixed read-modify-writes on shared words (XBA-277): what

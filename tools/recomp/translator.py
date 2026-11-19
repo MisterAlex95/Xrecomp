@@ -26,6 +26,7 @@ from .config import va_to_file_offset, is_code_address
 from . import config as _config
 from .disasm import Disassembler
 from .seh_frames import analyze_seh_frame
+from . import stack_fast
 from .lifter import (Lifter, lift_basic_block, block_flag_out_state,
                      detect_seh_helpers,
                      _RESULT_SNAPSHOT_SETTERS, _as_addr_set,
@@ -680,6 +681,8 @@ class FunctionTranslator:
         # address of their last instruction. Each ends in a
         # recomp_cut_body trap (WP2); translate_batch_split counts them.
         self.cut_bodies = {}
+        self.stack_fast_functions = set()     # XBA-307
+        self.stack_fast_skipped = {}          # va -> why not
         # Exception frames whose handler targets no function enters, by the
         # frame's function: the targets (_seh_frame_of, XBA-139).
         self.seh_lost = {}
@@ -4032,6 +4035,28 @@ class FunctionTranslator:
                 ["    RECOMP_FRAME_ENTRY_R(); /* may park: recorded (XBA-247), resume entry (XBA-250) */"]
                 + body)
 
+        # Stack slots without volatile and without the g_cpu barrier
+        # (XBA-307, tools/recomp/stack_fast.py): last, once every pass that
+        # reads PUSH32 / MEM32 text has run.
+        if stack_fast.enabled():
+            body = lines[frame_entry_at:]
+            ok, ebp_frame, why = stack_fast.eligible(
+                instructions, single_body=not coalesced and recovered is None)
+            if ok and switch_sites:
+                ok, why = False, "stack switch"
+            # A frame built by the SEH helpers: its locals are [ebp-N] MEM
+            # accesses next to esp-relative ones, and its __except restores
+            # esp from the frame.
+            if ok and seh_funcs and any(insn.call_target in seh_funcs for insn in instructions):
+                ok, why = False, "SEH prolog helper"
+            if ok:
+                body, why = stack_fast.rewrite(body, ebp_frame)
+            if why is None:
+                self.stack_fast_functions.add(start)
+            else:
+                self.stack_fast_skipped[start] = why
+            lines[frame_entry_at:] = ["    RECOMP_STK_FENCE(); /* XBA-307 */"] + stack_fast.fence(body)
+
         return "\n".join(lines)
 
     _HOST_WAIT_RE = re.compile(
@@ -4810,6 +4835,20 @@ class BatchTranslator:
         stats["misdecoded"] = dict(
             getattr(self.translator.lifter, "misdecoded", {}))
         stats["manual_functions"] = len(manual_decls)
+        # Functions whose stack slots went to the STK forms (XBA-307), and
+        # why the others did not: the first words of each reason, counted.
+        fast = getattr(self.translator, "stack_fast_functions", set()) & lifted
+        skipped = {a: w for a, w in getattr(self.translator, "stack_fast_skipped", {}).items()
+                   if a in lifted}
+        why = {}
+        for w in skipped.values():
+            k = re.sub(r"\s*(?:at )?0x[0-9A-F]{8}.*$", "", w)
+            why[k] = why.get(k, 0) + 1
+        stats["stack_fast"] = {"fast": len(fast), "kept": len(skipped),
+                               "why": dict(sorted(why.items(), key=lambda kv: -kv[1])[:12])}
+        if fast or skipped:
+            print(f"  stack slots (XBA-307): {len(fast)} of {len(fast) + len(skipped)} functions"
+                  " in STK forms", file=sys.stderr)
         # Instructions the lifter has no translation for become a comment, and
         # a comment is a silent no-op. Surfacing the tally is the difference
         # between "bsf is unimplemented" being a line of build output and being

@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from tools.recomp import config  # noqa: E402
 from tools.recomp.translator import FunctionTranslator  # noqa: E402
 from tools.recomp.test_icall_guarded_runtime import install_stub  # noqa: E402
+from tools.recomp.stack_fast import FIXTURE_FALLBACK  # XBA-307
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 HEADER = os.path.join(ROOT, "templates", "runtime", "recomp_types.h")
@@ -61,7 +62,7 @@ def test_thunk_passes_its_ret_amount():
     c = _translate(THUNK, BASE, len(THUNK))
     line = _tail_line(c)
     assert "RECOMP_ITAIL_RET(MEM32(eax + 0x38), 24u);" in line, c
-    assert "esp += 28; RECOMP_FRAME_LEAVE(); return; /* ret 24 */" in c, c   # XBA-247: it may park
+    assert "esp += 28; RECOMP_FRAME_LEAVE(); RECOMP_STK_FENCE(); return; /* ret 24 */" in c, c   # XBA-247: it may park
 
 
 def test_plain_ret_keeps_the_plain_dispatch():
@@ -183,7 +184,7 @@ def test_failed_tail_target_pops_what_the_jumpers_ret_pops():
         p = os.path.join(tmp, "t.c")
         exe = os.path.join(tmp, "t.exe")
         with open(p, "w") as f:
-            f.write(src)
+            f.write(FIXTURE_FALLBACK + src)
         r = subprocess.run(command(cc, [p], exe), cwd=tmp, capture_output=True, text=True)
         assert r.returncode == 0, (r.stdout + r.stderr)[-3000:] + "\n" + src
         r = subprocess.run([exe], capture_output=True, text=True, cwd=tmp)

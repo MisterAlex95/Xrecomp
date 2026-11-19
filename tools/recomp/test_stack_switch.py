@@ -55,7 +55,7 @@ def test_xchg_with_memory_is_carried_at_the_ret():
     # The save comes before the exchange, the load right after it.
     assert c.index("_ss_save = esp") < c.index("RECOMP_ATOMIC_XCHG32") < c.index("_ss_load = esp;")
     assert ("if (_ss_save) recomp_stack_switch_ret(_ss_save, _ss_load, _ss_entry, 0u, _ss_site);"
-            " esp += 4; return;") in c
+            " esp += 4; RECOMP_STK_FENCE(); return;") in c
     assert "recomp_stack_switch_unhandled" not in c
 
 

@@ -14,6 +14,6 @@ def test_prologue_saves_inherited_frame_before_establishing_its_own():
     db = {base: {'start': hex(base), 'end': base + len(image),
                  '_addr': base, 'size': len(image)}}
     code = FunctionTranslator(image, db).translate_function(base, db[base])
-    assert code.index('ebp = g_ebp;') < code.index('PUSH32(esp, ebp);')
-    assert code.index('PUSH32(esp, ebp);') < code.index('ebp = esp;')
-    assert 'eax = MEM32(ebp);' in code
+    assert code.index('ebp = g_ebp;') < code.index('STK_PUSH32(esp, ebp);')
+    assert code.index('STK_PUSH32(esp, ebp);') < code.index('ebp = esp;')
+    assert 'eax = STK32(ebp);' in code

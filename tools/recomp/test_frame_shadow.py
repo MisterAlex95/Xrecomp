@@ -175,7 +175,7 @@ def test_park_plan_records_only_functions_that_may_park(monkeypatch):
     assert tr._park_plan() == frozenset({base + 0x20, base + 0x80, base + 0x90})
     code = tr.translate_function(base, db[base])
     assert code.count("RECOMP_FRAME_ENTRY_R();") == 1
-    assert "RECOMP_FRAME_LEAVE(); return;" in code
+    assert "RECOMP_FRAME_LEAVE(); RECOMP_STK_FENCE(); return;" in code
     assert (0x10005, base) not in tr.lifter.call_site_table      # into the quiet leafer
     assert (0x1000A, base) in tr.lifter.call_site_table          # into icaller
     assert "RECOMP_FRAME" not in tr.translate_function(base + 0x20, db[base + 0x20])

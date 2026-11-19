@@ -3,6 +3,7 @@ import pytest
 from tools.recomp import config
 from tools.recomp.translator import FunctionTranslator
 from tools.recomp.test_icall_guarded_runtime import _macro, install_stub, HARNESS, A, B
+from tools.recomp.stack_fast import FIXTURE_FALLBACK  # XBA-307
 
 # The dispatch the indirect-call macros share (XBA-277).
 _DISPATCH = _macro('RECOMP_ICALL_HIT_') + '\n' + install_stub() + _macro('RECOMP_ICALL_DISPATCH_') + '\n'
@@ -97,7 +98,7 @@ def _build_and_run(source):
         pytest.skip("C compiler unavailable")
     with tempfile.TemporaryDirectory(prefix="recomp-regression-") as tmp:
         c, exe = Path(tmp) / "fixture.c", Path(tmp) / "fixture.exe"
-        c.write_text(source, encoding="utf-8")
+        c.write_text(FIXTURE_FALLBACK + source, encoding="utf-8")
         args = ([cc, "/nologo", "/W0", "/O2", str(c), "/Fe:" + str(exe)]
                 if Path(cc).stem.lower() == "cl"
                 else [cc, "-w", "-O2", str(c), "-o", str(exe)])

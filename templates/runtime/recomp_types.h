@@ -1310,6 +1310,120 @@ static inline uintptr_t recomp_guest_base(void)
 #define MEMD(addr)   RECOMP_GM(recomp_gm_f64, addr)
 #endif
 
+/* Stack slots without volatile and without the g_cpu barrier (XBA-307).
+ *
+ * In a function the lifter proves keeps its stack to itself
+ * (tools/recomp/stack_fast.py: no esp or frame-ebp value leaves as data, no
+ * stack switch, ebp a frame pointer from its prologue on), [esp+N], [ebp+N]
+ * and push/pop are lifted to the STK forms below: plain loads and stores the
+ * compiler may forward, merge and keep in registers between calls. A stack
+ * slot is not MMIO, and since it is not reachable from anywhere else in the
+ * function, nothing else in it can observe the order.
+ *
+ * One type for every width. Two accesses the compiler sees through types
+ * that do not alias may be reordered (recomp_gm_u16 vs recomp_gm_u32 do not
+ * alias, nor recomp_gm_f64 vs recomp_gm_u32), and stack slots are typed
+ * differently by different instructions: `fstp qword [esp]; mov eax,
+ * [esp+4]`, two dword pushes read back as an fld qword argument. So every
+ * 32-, 64-bit and floating-point STK access is made of recomp_gm_u32 words
+ * (a float or double moved through its bits, MEM32's own type: it is ordered
+ * with every MEM32 and XMM lane access too), and 8- and 16-bit ones are
+ * may_alias, which alias everything. None of the word accesses aliases the
+ * registers in g_cpu, which is the point.
+ *
+ * Inlining: a callee's accesses meet the caller's once the compiler inlines
+ * a direct call (the lifted functions are ordinary C functions of one
+ * chunk). Its arguments live in the caller's frame, and a caller that is not
+ * fast reaches them through typed MEM accesses, as does a callee's pointer
+ * into its caller's frame. RECOMP_STK_FENCE (a compiler barrier, no
+ * instruction) at every lifted function's entry and before every return
+ * keeps both sides apart. Not inlined, a call already is such a barrier, so
+ * it costs nothing there.
+ *
+ * Faults: a stack access does not go through recomp_guest_base, so g_cpu
+ * may not hold every register when one faults; only a corrupt esp or a
+ * guest stack overflow past guest memory can fault there, and the guest
+ * exception then sees some registers stale (a handler that continues gets
+ * the exact host context back, xbox_seh.h). Every other access still has
+ * the barrier, whose asm (clang: reads memory) also completes every earlier
+ * stack store before it.
+ *
+ * RECOMP_STK_FAST=0 (tools/bench variant stk0) makes the STK forms the MEM
+ * forms again and the fence nothing: the code before XBA-307. XBA_RECOMP_STK=0
+ * in the lifter's environment emits MEM forms in the first place. */
+#ifndef RECOMP_STK_FAST
+#  define RECOMP_STK_FAST RECOMP_GUEST_MEM_NOALIAS
+#endif
+#if RECOMP_STK_FAST && RECOMP_GUEST_MEM_NOALIAS
+typedef struct RECOMP_MAY_ALIAS { uint8_t  v; } recomp_stk_u8;
+typedef struct RECOMP_MAY_ALIAS { int8_t   v; } recomp_stk_s8;
+typedef struct RECOMP_MAY_ALIAS { uint16_t v; } recomp_stk_u16;
+typedef struct RECOMP_MAY_ALIAS { int16_t  v; } recomp_stk_s16;
+#define RECOMP_STK(T, addr) \
+    (((T *)((uintptr_t)(uint32_t)(addr) + (uintptr_t)g_xbox_mem_offset))->v)
+#define STK32(addr)  RECOMP_STK(recomp_gm_u32, addr)
+#define STK16(addr)  RECOMP_STK(recomp_stk_u16, addr)
+#define STK8(addr)   RECOMP_STK(recomp_stk_u8, addr)
+#define STKS16(addr) RECOMP_STK(recomp_stk_s16, addr)
+#define STKS8(addr)  RECOMP_STK(recomp_stk_s8, addr)
+static inline uint64_t recomp_stk_ld64(uint32_t a)
+{
+    return (uint64_t)STK32(a) | ((uint64_t)STK32(a + 4u) << 32);
+}
+static inline void recomp_stk_st64(uint32_t a, uint64_t v)
+{
+    STK32(a) = (uint32_t)v;
+    STK32(a + 4u) = (uint32_t)(v >> 32);
+}
+static inline float recomp_stk_ldf(uint32_t a)
+{
+    uint32_t w = STK32(a); float f; memcpy(&f, &w, 4); return f;
+}
+static inline void recomp_stk_stf(uint32_t a, float f)
+{
+    uint32_t w; memcpy(&w, &f, 4); STK32(a) = w;
+}
+static inline double recomp_stk_ldd(uint32_t a)
+{
+    uint64_t w = recomp_stk_ld64(a); double d; memcpy(&d, &w, 8); return d;
+}
+static inline void recomp_stk_std(uint32_t a, double d)
+{
+    uint64_t w; memcpy(&w, &d, 8); recomp_stk_st64(a, w);
+}
+#define STKS32(addr)        ((int32_t)STK32(addr))
+#define STKS32_W(addr, v)   (STK32(addr) = (uint32_t)(int32_t)(v))
+#define STKS64(addr)        ((int64_t)recomp_stk_ld64(addr))
+#define STKS64_W(addr, v)   recomp_stk_st64((addr), (uint64_t)(int64_t)(v))
+#define STKF(addr)          recomp_stk_ldf(addr)
+#define STKF_W(addr, v)     recomp_stk_stf((addr), (float)(v))
+#define STKD(addr)          recomp_stk_ldd(addr)
+#define STKD_W(addr, v)     recomp_stk_std((addr), (double)(v))
+#define STK_PUSH32(sp, val) do { uint32_t _pv = (uint32_t)(val); (sp) -= 4; STK32(sp) = _pv; } while (0)
+#define STK_POP32(sp, dst)  do { uint32_t _pv = STK32(sp); (sp) += 4; (dst) = _pv; } while (0)
+#define RECOMP_STK_FENCE()  __asm__ __volatile__("" ::: "memory")
+#else
+#define STK32(addr)         MEM32(addr)
+#define STK16(addr)         MEM16(addr)
+#define STK8(addr)          MEM8(addr)
+#define STKS16(addr)        SMEM16(addr)
+#define STKS8(addr)         SMEM8(addr)
+#define STKS32(addr)        SMEM32(addr)
+#define STKS32_W(addr, v)   (SMEM32(addr) = (v))
+#define STKS64(addr)        SMEM64(addr)
+#define STKS64_W(addr, v)   (SMEM64(addr) = (v))
+#define STKF(addr)          MEMF(addr)
+#define STKF_W(addr, v)     (MEMF(addr) = (v))
+#define STKD(addr)          MEMD(addr)
+#define STKD_W(addr, v)     (MEMD(addr) = (v))
+#define STK_PUSH32(sp, val) PUSH32(sp, val)
+#define STK_POP32(sp, dst)  POP32(sp, dst)
+#define RECOMP_STK_FENCE()  ((void)0)
+#endif
+/* The XMM lane forms: MEM32 or STK32 words (XMM_MEM below). */
+#define STK_XMM(addr)          recomp_stk_xmm(addr)
+#define STK_XMM_STORE(addr, v) recomp_stk_xmm_store((addr), (v))
+
 /* rep stos's fast path (tools/recomp/lifter.py _lift_rep_stos, XBA-38):
  * `count` elements of `size` bytes (1, 2 or 4) of `value` at the host
  * address of a forward fill the lifter has checked stays below the MMIO
@@ -1569,6 +1683,20 @@ static inline RecompXmm XMM_MEM(uint32_t addr) {
 static inline void XMM_STORE(uint32_t addr, RecompXmm v) {
     MEM32(addr)      = v.u[0]; MEM32(addr + 4)  = v.u[1];
     MEM32(addr + 8)  = v.u[2]; MEM32(addr + 12) = v.u[3];
+}
+
+/* The same on a stack slot of a function the lifter proved keeps its stack to
+ * itself (XBA-307, STK32 above). */
+static inline RecompXmm recomp_stk_xmm(uint32_t addr) {
+    RecompXmm r;
+    r.u[0] = STK32(addr);      r.u[1] = STK32(addr + 4);
+    r.u[2] = STK32(addr + 8);  r.u[3] = STK32(addr + 12);
+    return r;
+}
+
+static inline void recomp_stk_xmm_store(uint32_t addr, RecompXmm v) {
+    STK32(addr)      = v.u[0]; STK32(addr + 4)  = v.u[1];
+    STK32(addr + 8)  = v.u[2]; STK32(addr + 12) = v.u[3];
 }
 
 /* movlps/movhps move 8 bytes into or out of one half, leaving the

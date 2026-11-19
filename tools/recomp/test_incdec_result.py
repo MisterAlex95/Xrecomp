@@ -8,6 +8,7 @@ import pytest
 from . import config
 from .translator import FunctionTranslator
 from .c_fixture import compiler, command
+from tools.recomp.stack_fast import FIXTURE_FALLBACK  # XBA-307
 
 def test_saved_incdec_result_compiled():
     cc=compiler()
@@ -50,7 +51,7 @@ static uint32_t eax,esp;
       return 0;
     }'''
     with tempfile.TemporaryDirectory() as temp:
-        source=Path(temp)/'test.c';source.write_text(code)
+        source=Path(temp)/'test.c';source.write_text(FIXTURE_FALLBACK + code)
         exe=Path(temp)/'test.exe'
         result=subprocess.run(command(cc,[source],exe),capture_output=True,text=True)
         assert result.returncode==0,result.stderr

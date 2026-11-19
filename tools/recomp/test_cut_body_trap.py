@@ -43,7 +43,7 @@ def test_cut_body_ends_in_the_trap():
     image = CUT + TAIL
     t, db = _translator(image, [(BASE, len(CUT))])
     code = t.translate_function(BASE, db[BASE])
-    assert f"recomp_cut_body(0x{LAST:08X}u); return;" in code
+    assert f"recomp_cut_body(0x{LAST:08X}u); RECOMP_STK_FENCE(); return;" in code
     # The trap is the last statement: nothing falls off after it.
     body = code[:code.rindex("}")].rstrip()
     assert body.splitlines()[-1].strip().startswith(f"recomp_cut_body(0x{LAST:08X}u)")

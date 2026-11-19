@@ -4,6 +4,7 @@ import os
 import tempfile
 
 from tools.recomp.manual_scan import scan
+from tools.recomp.stack_fast import FIXTURE_FALLBACK  # XBA-307
 
 
 def entry_hooks(path):
@@ -108,7 +109,7 @@ int main(void) {
 }
 '''
     c, exe = tmp_path / 'fixture.c', tmp_path / 'fixture.exe'
-    c.write_text(source, encoding='utf-8')
+    c.write_text(FIXTURE_FALLBACK + source, encoding='utf-8')
     args = ([cc, '/nologo', '/W0', '/O2', str(c), '/Fe:' + str(exe)]
             if Path(cc).stem.lower() == 'cl'
             else [cc, '-w', '-O2', str(c), '-o', str(exe)])

@@ -6,6 +6,7 @@ import pytest
 
 from tools.recomp import config
 from tools.recomp.translator import FunctionTranslator
+from tools.recomp.stack_fast import FIXTURE_FALLBACK  # XBA-307
 
 
 def test_general_ebp_across_calls(tmp_path, monkeypatch):
@@ -64,7 +65,7 @@ int main(void) {
 }
 '''
     src = tmp_path / 'check.c'; exe = tmp_path / 'check.exe'
-    src.write_text(source)
+    src.write_text(FIXTURE_FALLBACK + source)
     subprocess.run([cc, '-std=c11', '-O2', str(src), '-o', str(exe)], check=True,
                    capture_output=True, text=True)
     subprocess.run([str(exe)], check=True)

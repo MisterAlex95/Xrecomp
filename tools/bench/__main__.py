@@ -74,6 +74,8 @@ WORKLOADS = (
     ("w_fib", 25),
     ("w_vcall", 2000000),
     ("w_lock", 500000),
+    ("w_stack", 1000000),
+    ("w_stkmix", 300000),
 )
 DATA_SYMS = ("matrix", "src_buf", "byte_buf", "vec_in")
 
@@ -110,6 +112,8 @@ VARIANTS = {
     # inline LSE (ARMv8.1 atomics; not every Android device has them), instead of the outline helpers.
     "noola": ["-mno-outline-atomics"],
     "lse": ["-march=armv8-a+lse"],
+    # Stack slots back to volatile + g_cpu barrier (XBA-307, recomp_types.h RECOMP_STK_FAST): the code before it.
+    "stk0": ["-DRECOMP_STK_FAST=0"],
 }
 
 

@@ -5,6 +5,7 @@ import pytest
 from . import config
 from .translator import FunctionTranslator
 from .c_fixture import compiler, command
+from tools.recomp.stack_fast import FIXTURE_FALLBACK  # XBA-307
 
 def test_sar_width_and_carry_compiled():
     cc=compiler()
@@ -41,7 +42,7 @@ def test_sar_width_and_carry_compiled():
     }'''
 
     with tempfile.TemporaryDirectory() as temp:
-        path=Path(temp)/'test.c'; path.write_text(code)
+        path=Path(temp)/'test.c'; path.write_text(FIXTURE_FALLBACK + code)
         exe=Path(temp)/'test.exe'
         compiled=subprocess.run(command(cc,[path],exe),capture_output=True,text=True)
         assert compiled.returncode==0,compiled.stderr
