@@ -447,6 +447,15 @@ static void k_ExFreePool(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 /* ---- threads ---- */
 
+/* Threads are cooperative on one host thread here, but the hardware thread a title asked for shows where it looks:
+ * the KTHREAD's and the PCR's CPU byte, the lowest bit of the affinity mask (titles ask for one hardware thread). */
+static void thread_set_cpu(x360_machine *x, x360_thread *n, uint32_t mask)
+{
+    uint32_t cpu = (uint32_t)__builtin_ctz(mask);
+    x360_w8(x, n->kthread + 0xBF, cpu);
+    x360_w8(x, n->pcr + 0x10C, cpu);
+}
+
 static void k_ExCreateThread(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
@@ -460,6 +469,10 @@ static void k_ExCreateThread(x360_machine *x, x360_thread *t, xe_cpu *c)
         RET(X_STATUS_NO_MEMORY);
         return;
     }
+    /* the creation flags' high byte is the affinity mask (0: none asked for), as in Xenia: a thread made for
+     * hardware thread 4 reads 4 as its processor number from its first instruction on */
+    if ((flags >> 24) & 0x3F)
+        thread_set_cpu(x, n, (flags >> 24) & 0x3F);
     if (handle_ptr)
         x360_w32(x, handle_ptr, n->handle);
     if (id_ptr)
@@ -536,17 +549,13 @@ static void k_NtSuspendThread(x360_machine *x, x360_thread *t, xe_cpu *c)
 static void k_KeSetAffinityThread(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    /* (KTHREAD, affinity mask, previous*): threads are cooperative on one host thread here, but the hardware thread
-     * a title asked for shows where it looks (the PCR's and KTHREAD's CPU byte: the lowest bit of the mask) */
+    /* (KTHREAD, affinity mask, previous*) */
     uint32_t prev_ptr = A(2), mask = A(1) & 0x3F;
     x360_thread *n = x360_thread_by_kthread(x, A(0));
     if (prev_ptr) /* the console stores the previous affinity there and returns a status (unlike NT) */
         x360_w32(x, prev_ptr, n ? 1u << x360_r8(x, n->kthread + 0xBF) : 0x3F);
-    if (n && mask) {
-        uint32_t cpu = (uint32_t)__builtin_ctz(mask);
-        x360_w8(x, n->kthread + 0xBF, cpu);
-        x360_w8(x, n->pcr + 0x10C, cpu);
-    }
+    if (n && mask)
+        thread_set_cpu(x, n, mask);
     RET(X_STATUS_SUCCESS);
 }
 

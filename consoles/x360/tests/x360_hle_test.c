@@ -209,6 +209,16 @@ static void test_threads_and_time(void)
     uint32_t th = x360_r32(X, hp), prev = x360_kalloc(X, 4);
     K(X360_xboxkrnl_KeSetAffinityThread, 3, t1->kthread, 0x10, prev);
     CHECK(x360_r8(X, t1->pcr + 0x10C) == 4 && x360_r8(X, t1->kthread + 0xBF) == 4, "affinity: hardware thread 4");
+    /* the creation flags' high byte is an affinity mask too: a thread made (suspended) for hardware thread 5, another
+     * for 4, read their processor numbers without any later call */
+    for (uint32_t want = 4; want <= 5; want++) {
+        CHECK(K(X360_xboxkrnl_ExCreateThread, 7, hp + 12, 0, 0, 0, 0x82001000u, 0, (1u << want) << 24 | 1) == 0,
+              "ExCreateThread with an affinity");
+        x360_thread *ta = x360_thread_by_kthread(X, x360_handle_obj(X, x360_r32(X, hp + 12)));
+        CHECK(ta && ta->state == TH_SUSPENDED && x360_r8(X, ta->pcr + 0x10C) == want &&
+                  x360_r8(X, ta->kthread + 0xBF) == want,
+              "created on hardware thread %u: %u", want, ta ? x360_r8(X, ta->pcr + 0x10C) : 99);
+    }
     CHECK(K(X360_xboxkrnl_NtSuspendThread, 2, th, prev) == 0 && t1->state == TH_SUSPENDED, "suspend");
     CHECK(K(X360_xboxkrnl_NtResumeThread, 2, th, prev) == 0 && x360_r32(X, prev) == 1 && t1->state == TH_READY,
           "resume");
