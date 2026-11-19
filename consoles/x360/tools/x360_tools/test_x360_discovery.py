@@ -243,6 +243,34 @@ def program():
         p(A.li(3, v), A.blr())
     p.end()
 
+    # The bound check ends the block before the table code in two more ways: jt_ret returns when the index is out
+    # of range (`bgtlr`), jt_inv branches to the table code when it is in range (`ble` over a `b default`). Byte
+    # tables: an absolute one would be read without its bound
+    for name, base in (("ret", 4001), ("inv", 5001)):
+        p.func("jt_" + name)
+        p(cmplwi(6, 3, 2))
+        if name == "ret":
+            p(0x4D990020)  # bgtlr cr6
+        else:
+            p.branch(lambda at, t: A.bc(at, 4, 4 * 6 + 1, t), "inv_go")
+            p.branch(lambda at, t: A.b(at, t), "inv_def")
+            p.label("inv_go")
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_tbl")
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_tbl")
+        p(lbzx(0, 12, 3))
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_base")
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_base")
+        p(A.rlwinm(0, 0, 2, 0, 29), A.add(12, 12, 0), A.mtctr(12), A.bctr())
+        p.label(name + "_base")
+        for k in (0, 1, 2):
+            p(A.li(3, base + k), A.blr())
+        p.label(name + "_tbl")
+        p(*struct.unpack(">I", bytes((0, 2, 4, 0))))
+        if name == "inv":
+            p.label("inv_def")
+            p(A.li(3, -7), A.blr())
+        p.end()
+
     # Leaf functions MSVC gives no .pdata entry, never called directly: leaf_data is named by a word of .rdata (a
     # vtable slot), leaf_code by the lis / addi pair in take_ptr (a callback handed over)
     p.func("leaf_data")
@@ -322,16 +350,17 @@ def test_discovery_and_lifting(tmp_path):
     img, funcs, labels = build()
     s = recompile(img, str(tmp_path))
     assert s["interp_fallback_insns"] == 0, s["unlifted"]
-    # the helpers are not functions; the twelve of .pdata are, and the five leaf functions only a pointer names (a
+    # the helpers are not functions; the fourteen of .pdata are, and the five leaf functions only a pointer names (a
     # word of .rdata, a lis / addi pair, close or apart, a table in the code section); a pointer into the middle of
     # a .pdata function is not a function, nor is what a register no longer points at, nor a lone word between
     # instructions
-    assert s["functions"] == 17 and s["pointer_seeds"] == 5
+    assert s["functions"] == 19 and s["pointer_seeds"] == 5
     view, dec = CodeView(img), XenonDecoder()
     assert pointer_seeds(img, view, lambda a: dec.decode(view.u32(a), a)) \
         == {funcs[n][0] for n in ("leaf_data", "leaf_code", "leaf_far", "leaf_va", "leaf_vb")}
     assert len(s["helpers"]) == 8 and s["helper_calls_inlined"] == 8
-    assert s["jump_tables"] == 6 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 + 3 and s["unresolved_bctr"] == 0
+    assert s["jump_tables"] == 8 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 + 3 + 3 + 3
+    assert s["unresolved_bctr"] == 0
     text = "".join(p.read_text() for p in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
     assert "savegpr" in text and "switch (t_)" in text
     table = (tmp_path / "x360_rc_table.c").read_text()
@@ -439,8 +468,11 @@ def test_helpers_and_tables_run(tmp_path):
                                  ("jt_gcc", range(0, 4), {0: 111, 1: 222, 2: 333}),
                                  ("jt_min", range(8, 16), {10: 1010, 11: 1011, 12: 1012, 13: 1013}),
                                  ("jt_half", range(0, 6), {1: 2001, 2: 2002, 3: 2003}),
-                                 ("jt_open", range(0, 3), {0: 3001, 1: 3002, 2: 3003})):
-        default = {"jt_abs": -1, "jt_byte": -2, "jt_gcc": -3, "jt_min": -4, "jt_half": -5, "jt_open": 0}[name]
+                                 ("jt_open", range(0, 3), {0: 3001, 1: 3002, 2: 3003}),
+                                 ("jt_ret", range(0, 5), {0: 4001, 1: 4002, 2: 4003, 3: 3, 4: 4}),
+                                 ("jt_inv", range(0, 5), {0: 5001, 1: 5002, 2: 5003})):
+        default = {"jt_abs": -1, "jt_byte": -2, "jt_gcc": -3, "jt_min": -4, "jt_half": -5, "jt_open": 0,
+                   "jt_ret": 0, "jt_inv": -7}[name]
         for x in inputs:
             tag = "%s_%d" % (name, x & 0xFF)
             cases.append(c_case(tag, funcs[name][0], b"", gpr={3: x & 0xFFFFFFFF if x >= 0 else x & M64},

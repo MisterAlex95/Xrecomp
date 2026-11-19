@@ -525,7 +525,19 @@ class JumpTables:
         if not self.view.in_code(p):
             return None
         b = self.decode(p)
-        if b.kind != BCOND or (b.rd & 0x14) == 0x14:
+        if b.kind == BRANCH and not b.lk:
+            # the other way round: `ble crF, <the table code>; b <default>` right before the run
+            p -= 4
+            if not self.view.in_code(p):
+                return None
+            b = self.decode(p)
+            if b.kind != BCOND or (b.rd & 0x1C) != 0x04 or b.target != insns[-1].addr:
+                return None
+        elif b.kind == BCLR:
+            # a leaf function returns when the index is out of range: `bgtlr crF`
+            if (b.rd & 0x1C) != 0x0C or b.lk:
+                return None
+        elif b.kind != BCOND or (b.rd & 0x14) == 0x14:
             return None
         q = p - 4
         for _ in range(6):
