@@ -23,8 +23,10 @@ guarantees 16 KB blocks, while 256 loose vec4 would take all of a pixel shader's
 xe_v<n>` per vertex fetch, its comment giving the fetch constant, offset, format, stride and signedness (the renderer
 reads it back and converts formats); `uniform sampler*D xe_t<n>` per texture fetch constant used (info's
 `textures`); the interpolators `xe_i<n>`, the vertex shader's outputs (all sixteen, so any pixel shader links) and the
-pixel shader's inputs (copied to r0..); gl_Position (Xenos's, before the host's viewport conversion) and gl_PointSize;
-the pixel shader's `layout(location = n) out vec4 xe_color<n>` and gl_FragDepth (written only when exported).
+pixel shader's inputs (all declared; those whose register the shader names are copied to it, and only they are
+inputs the shader statically uses: GLES 3.0 promises 15 of those, not 16); gl_Position (Xenos's, before the host's
+viewport conversion) and gl_PointSize; the pixel shader's `layout(location = n) out vec4 xe_color<n>` and
+gl_FragDepth (written only when exported).
 
 Control flow: exec clauses (conditional on a boolean or p0, ends only when the condition holds), and when a shader
 has loops, calls or jumps, a state machine on the control-flow index with the sequencer's four-deep loop (counter, aL)
@@ -852,7 +854,14 @@ def translate(words, stage="vertex", interpolators=0, memexport=False):
         out.append("    vec4 xe_pos = vec4(0.0), xe_psize = vec4(0.0);")
         out += ["    xe_i%d = vec4(0.0);" % o for o in range(16)]
     else:
-        out += ["    r[%d] = xe_i%d;" % (i, i) for i in range(interpolators)]
+        # An interpolator is read through its register. One the body never names needs no copy, and is then no
+        # input the shader statically uses: GLES 3.0 promises 15 fragment input vectors (gl_MaxFragmentInputVectors),
+        # one short of the console's sixteen, and a link may fail beyond what the host has. Loop-relative addressing
+        # may read any register: all are copied.
+        named = None
+        if not any("r[clamp(" in line for line in sh.body):
+            named = {int(n) for line in sh.body for n in re.findall(r"\br\[(\d+)\]", line)}
+        out += ["    r[%d] = xe_i%d;" % (i, i) for i in range(interpolators) if named is None or i in named]
         out.append("    vec4 xe_depth = vec4(gl_FragCoord.z);")
         # PsParamGen: the pixel position (y downwards), the face in X's sign, into the register pg.x names. Written by
         # constant index, one register a line: a store at a computed index inside the condition (`if (pg.x >= 0.0)

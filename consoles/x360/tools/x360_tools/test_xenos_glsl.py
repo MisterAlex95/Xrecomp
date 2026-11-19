@@ -8,6 +8,7 @@ fetches; pixel shaders compiled and linked. Without $XENOS_GLSL_RUN only the tra
 import math
 import os
 import random
+import re
 import struct
 import subprocess
 
@@ -393,6 +394,25 @@ def test_pixel_parameters_are_written_by_constant_index():
     for i in range(16):
         assert "if (xe_pgn == %d) r[%d] = xe_pgv;" % (i, i) in stores
     assert "int xe_pgn = xe_k.pg.x >= 0.0 ? clamp(int(xe_k.pg.x), 0, 15) : -1;" in src_
+
+
+def test_only_named_interpolators_are_pixel_shader_inputs():
+    """GLES 3.0 promises 15 fragment input vectors, the console has 16 interpolators. A pixel shader copies to its
+    registers only the interpolators whose register it names: the others stay declared (any vertex shader links) but
+    are not statically used. Loop-relative addressing may read any register: all are copied."""
+    def copies(text):
+        return [int(n) for n in re.findall(r"^    r\[(\d+)\] = xe_i\1;$", text, re.M)]
+    ps = program([(2, [ADD_RC(4, 3, 0), ("alu", alu_words(**export(0, 4)))], {})])   # r4 = r3 + c0; oC0 = r4
+    src_, _ = translate(ps, "pixel", interpolators=16)
+    assert copies(src_) == [3, 4]
+    assert all("in vec4 xe_i%d;" % i in src_ for i in range(16))
+    ps = program([(2, [A(vop=0, vdest=4, vmask=0xF, srcs=((3 | 0x40, 1, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))),
+                       ("alu", alu_words(**export(0, 4)))], {})])                    # r4 = r[aL + 3] + c0
+    src_, _ = translate(ps, "pixel", interpolators=16)
+    assert "r[clamp(aL + 3, 0, 63)]" in src_ and copies(src_) == list(range(16))
+    # a vertex shader still writes all sixteen
+    src_, _ = translate(to_words(make_case(random.Random(1))), "vertex")
+    assert all("out vec4 xe_i%d;" % i in src_ and "xe_i%d = vec4(0.0);" % i in src_ for i in range(16))
 
 
 def test_vertex_index_survives_writes_to_the_rest_of_r0():
