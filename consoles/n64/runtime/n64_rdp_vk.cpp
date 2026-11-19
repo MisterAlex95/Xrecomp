@@ -71,6 +71,7 @@
  * after a resume. */
 #include "n64_rdp_backend.h"
 #include "n64_rdp.h"
+#include "host_shader_progress.h"
 #include "n64_vk_cache.h"
 #include "n64_vk_driver.h"
 
@@ -982,8 +983,17 @@ bool try_driver(VkRdp *d, bool *custom)
 
 bool g_warmup; /* n64_rdp_vk_warmup is running vk_create: a custom driver that fails is not replaced by the system's */
 
-/* Granite's build hook (any thread): one more pipeline for the start-up progress (ignored outside a start). */
-void on_pipeline_build(uint64_t, uint64_t) { n64_vk_progress_step(); }
+/* Granite's build hook (any thread): one more pipeline for the start-up progress (ignored outside a start), and for
+ * the window's shader badge (XBA-314): against the last start's count during a start, a live compile otherwise. */
+void on_pipeline_build(uint64_t, uint64_t)
+{
+    n64_vk_progress_step();
+    int done = 0, total = 0;
+    if (n64_vk_progress_get(&done, &total) && total > 0)
+        host_shader_progress_set((uint32_t)done, (uint32_t)total);
+    else
+        host_shader_progress_live();
+}
 
 /* The start-up progress from vk_create's start to its end, whatever path it leaves by. */
 struct StartupProgress {
@@ -992,7 +1002,11 @@ struct StartupProgress {
         Vulkan::set_pipeline_build_hook(on_pipeline_build);
         n64_vk_progress_begin();
     }
-    ~StartupProgress() { n64_vk_progress_end(); }
+    ~StartupProgress()
+    {
+        n64_vk_progress_end();
+        host_shader_progress_set(0, 0); /* the start's batch ends with it */
+    }
 };
 
 /* The start succeeded: its pipelines summed up, and their count kept as the next start's total. */

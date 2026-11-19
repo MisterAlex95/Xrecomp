@@ -34,6 +34,11 @@ target_include_directories(xbox_gpu PUBLIC
     ${XBOXRECOMP_SRC_DIR}/kernel
 )
 target_link_libraries(xbox_gpu PUBLIC xbox_kernel)
+# The shader badge's counter (XBA-314): the warm-up and the programs compiled report into it.
+include(${XBOXRECOMP_SRC_DIR}/platform/host_shader_progress.cmake)
+# Threads: the shader worker (XBA-310), which compiles programs off the draw path in a shared context.
+find_package(Threads REQUIRED)
+target_link_libraries(xbox_gpu PUBLIC host_shader_progress Threads::Threads)
 if(APPLE)
     target_link_libraries(xbox_gpu PUBLIC "-framework OpenGL")
 elseif(ANDROID)

@@ -7,6 +7,7 @@
 #   host_cpus         run on the fast cores of a big.LITTLE host (host_cpus.h)
 #   host_perf_hint    a console runtime's frame loop as an Android performance hint session (host_perf_hint.h),
 #                     POSIX; libandroid's ADPF looked up at run time, a no-op elsewhere
+#   host_shader_progress  the shader compile counter the window's badge shows (host_shader_progress.h, XBA-314)
 #   host_perf_line    the performance line every console logs every 10 s and at exit, and the overlay's live
 #                     figures (host_perf_line.h, XBA-243), POSIX
 #   recomp_storage    a title's data and save directories on a host without a shell (recomp_storage.h), POSIX
@@ -51,6 +52,8 @@ if(NOT TARGET host_time)
         target_compile_options(host_perf_hint PRIVATE -Wall -Wextra)
         set_target_properties(host_perf_hint PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+        include(${CMAKE_CURRENT_LIST_DIR}/host_shader_progress.cmake)
+
         add_library(host_perf_line STATIC ${CMAKE_CURRENT_LIST_DIR}/host_perf_line.c)
         target_include_directories(host_perf_line PUBLIC ${CMAKE_CURRENT_LIST_DIR})
         target_link_libraries(host_perf_line PUBLIC Threads::Threads)
@@ -74,7 +77,7 @@ if(NOT TARGET host_time)
         target_include_directories(xbr_host_core PUBLIC ${_xbr_core_src} ${CMAKE_CURRENT_LIST_DIR})
         find_package(Threads REQUIRED)
         target_link_libraries(xbr_host_core PUBLIC Threads::Threads recomp_exit_hook host_time recomp_cfg host_cpus
-                              host_perf_hint host_perf_line)
+                              host_perf_hint host_perf_line host_shader_progress)
         if(NOT APPLE)
             target_link_libraries(xbr_host_core PUBLIC m)   # libSystem has libm on macOS
         endif()
@@ -83,7 +86,7 @@ if(NOT TARGET host_time)
         endif()
         target_compile_options(xbr_host_core PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
         if(WIN32)
-            foreach(_t host_perf_hint host_perf_line recomp_storage xbr_host_core)
+            foreach(_t host_perf_hint host_perf_line host_shader_progress recomp_storage xbr_host_core)
                 target_link_libraries(${_t} PUBLIC xbr_posix_win32)
             endforeach()
         endif()

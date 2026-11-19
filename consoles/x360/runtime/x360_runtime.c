@@ -8,6 +8,7 @@
 #include "host_pad.h"
 #include "host_perf_hint.h"
 #include "host_perf_line.h"
+#include "host_shader_progress.h"
 #include "host_window.h"
 #include "recomp_cheats.h"
 #include "recomp_exit_hook.h"
@@ -661,8 +662,16 @@ int x360_runtime_run(const x360_runtime_opts *o)
                 break;
         }
         rumble(x);
-        if (render)
+        if (render) {
             x360_render_end_frame(x);
+            /* Programs linked this frame (at first use, from the translated shader cache): the shader badge's live
+             * count (XBA-314). */
+            static uint64_t programs_seen;
+            uint64_t programs = x360_render_programs(x);
+            for (uint64_t i = programs_seen; i < programs && i < programs_seen + 64; i++)
+                host_shader_progress_live();
+            programs_seen = programs;
+        }
         if (window && !stopped) {
             uint64_t tp = now_ns();
             int w = 0, h = 0;

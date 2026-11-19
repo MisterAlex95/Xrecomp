@@ -66,6 +66,7 @@ typedef struct xenos_gl_stats {
     uint64_t edram_reinterpreted;  /* XBA-296: surfaces given what another format / position left in their eDRAM */
     uint64_t edram_stale;          /* overlaps that could not be carried over: the rows cleared (colour / depth: kept) */
     uint64_t msaa_surfaces;        /* render targets with a multisampled buffer */
+    uint64_t programs;             /* XBA-314: programs compiled and linked (the window's shader badge counts them) */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

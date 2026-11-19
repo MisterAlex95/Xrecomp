@@ -174,6 +174,15 @@ void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint
     *drawn = s.drawn, *frames = s.frames, *front_buffer_frames = s.front_buffer_frames;
 }
 
+uint64_t x360_render_programs(x360_machine *x)
+{
+    xenos_gl_stats s;
+    if (!x->gpu || !x->gpu->gl)
+        return 0;
+    xenos_gl_get_stats(x->gpu->gl, &s);
+    return s.programs;
+}
+
 void x360_set_shader_dump(x360_machine *x, const char *dir)
 {
     struct x360_gpu *g = gpu_of(x);

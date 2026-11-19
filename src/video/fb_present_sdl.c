@@ -2010,6 +2010,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             } else if (tex)
                 SDL_RenderCopy(ren, tex, NULL, NULL);
             perf_overlay_draw(ren);
+            perf_overlay_badge_draw(ren);   /* "SHADERS 12/304" while shaders compile (XBA-314) */
             if (tex)
                 capture_drawable(ren);   /* a frame, not the clear of a window event before the first */
             {
@@ -2046,6 +2047,9 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             }
         }
 #endif
+        /* The shader badge: redrawn when it appears, counts or goes (the loop wakes every 100 ms at least). */
+        if (perf_overlay_badge_update(now))
+            dirty = 1;
         if (perf_overlay_enabled() && now - t_overlay >= 500) {
             char st[192];
             const char *status = window_status(st, sizeof st);

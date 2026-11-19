@@ -11,6 +11,7 @@ set(GPU_SOURCES
     ../../src/gpu/nv2a_gl_scale.c
     ../../src/gpu/nv2a_gl_shader.c
     ../../src/gpu/nv2a_gl_vsh.c
+    ../../src/platform/host_shader_progress.c
     ../../src/kernel/nv2a_combiner.c)
 set(VARIANTS nv2a-gl-backend)
 if(NOT APPLE AND NOT ANDROID)
@@ -18,9 +19,11 @@ if(NOT APPLE AND NOT ANDROID)
     pkg_check_modules(EPOXY REQUIRED epoxy)
     list(APPEND VARIANTS nv2a-gl-backend-es)
 endif()
+find_package(Threads REQUIRED)
 foreach(v ${VARIANTS})
     add_executable(${v}-test nv2a_gl_backend_test.c ${GPU_SOURCES})
-    target_include_directories(${v}-test PRIVATE ../../src/gpu ../../src/kernel ../../src)
+    target_link_libraries(${v}-test PRIVATE Threads::Threads)
+    target_include_directories(${v}-test PRIVATE ../../src/gpu ../../src/kernel ../../src ../../src/platform)
     if(APPLE)
         target_link_libraries(${v}-test PRIVATE "-framework OpenGL" m)
     elseif(ANDROID)

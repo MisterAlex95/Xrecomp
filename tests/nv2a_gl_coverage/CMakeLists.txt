@@ -12,6 +12,7 @@ set(SOURCES
     ../../src/gpu/nv2a_gl_scale.c
     ../../src/gpu/nv2a_gl_shader.c
     ../../src/gpu/nv2a_gl_vsh.c
+    ../../src/platform/host_shader_progress.c
     ../../src/kernel/nv2a_pb_exec.c
     ../../src/kernel/guest_clock.c
     ../../src/kernel/nv2a_coverage.c
@@ -30,7 +31,7 @@ endif()
 find_package(Threads REQUIRED)
 foreach(v ${VARIANTS})
     add_executable(${v}-test nv2a_gl_coverage_test.c ${SOURCES})
-    target_include_directories(${v}-test PRIVATE ../../src/gpu ../../src/kernel ../../src)
+    target_include_directories(${v}-test PRIVATE ../../src/gpu ../../src/kernel ../../src ../../src/platform)
     target_link_libraries(${v}-test PRIVATE Threads::Threads)
     if(APPLE)
         target_link_libraries(${v}-test PRIVATE "-framework OpenGL" m)

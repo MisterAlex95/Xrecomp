@@ -17,6 +17,7 @@
 #include "host_pad.h"
 #include "host_perf_line.h"
 #include "perf_overlay.h"
+#include "host_shader_progress.h"
 #include "host_time.h"
 #include "host_window.h"
 #include "present_shaders.h"
@@ -1325,6 +1326,34 @@ static int run_overlay(void)
     perf_overlay_tick(1000000000000ull, 0, PERF_OVERLAY_NO_DRAWS, NULL);
     perf_overlay_text(text, sizeof text);
     CHECK(strstr(text, "SPEED") == NULL && strstr(text, "WORST") == NULL); /* the game ended: no figures */
+
+    /* The shader badge (XBA-314): its text and pixels follow the counter, rebuilt only when the text changes, gone
+     * when the batch is done and 1 s after the last live compile; on whatever RECOMP_OVERLAY says. */
+    {
+        int w = 0, h = 0;
+        unsigned serial = 0, serial2 = 0;
+        host_shader_progress_reset();
+        CHECK(perf_overlay_badge_update(10000) == 0 && perf_overlay_badge_pixels(&w, &h, &serial) == NULL);
+        host_shader_progress_expect(304);
+        CHECK(perf_overlay_badge_update(10000) == 1);
+        perf_overlay_badge_text(text, sizeof text);
+        printf("badge: %s\n", text);
+        CHECK(!strcmp(text, "Shaders 1/304"));
+        CHECK(perf_overlay_badge_pixels(&w, &h, &serial) != NULL);
+        CHECK(w == (int)strlen("Shaders 1/304") * 4 - 1 + 4 && h == 9); /* one line of the 3x5 font, 2 px box */
+        CHECK(perf_overlay_badge_update(10010) == 0);                  /* the same text: nothing rebuilt */
+        host_shader_progress_done(1);
+        CHECK(perf_overlay_badge_update(10020) == 1 && perf_overlay_badge_pixels(&w, &h, &serial2) && serial2 != serial);
+        host_shader_progress_done(303);
+        CHECK(perf_overlay_badge_update(10030) == 1 && perf_overlay_badge_pixels(&w, &h, &serial) == NULL);
+        host_shader_progress_live_at(20000);
+        CHECK(perf_overlay_badge_update(20000) == 1 && perf_overlay_badge_pixels(&w, &h, &serial) != NULL);
+        perf_overlay_badge_text(text, sizeof text);
+        CHECK(!strcmp(text, "Shaders: compiling... (1)"));
+        CHECK(perf_overlay_badge_update(20999) == 0);
+        CHECK(perf_overlay_badge_update(21000) == 1 && perf_overlay_badge_pixels(&w, &h, &serial) == NULL);
+        host_shader_progress_reset();
+    }
     printf("%s\n", s_fail ? "host_layer overlay: FAIL" : "host_layer overlay: ok");
     return s_fail;
 }

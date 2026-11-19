@@ -36,6 +36,7 @@
 #include "host_pad.h"
 #include "host_perf_hint.h"
 #include "host_perf_line.h"
+#include "host_shader_progress.h"
 #include "host_window.h"
 #include "recomp_cheats.h"
 #include "recomp_exit_hook.h"
@@ -152,6 +153,27 @@ static uint8_t *read_all(const char *spec, size_t max, size_t *size)
     }
     *size = n;
     return buf;
+}
+
+/* The window's shader badge (XBA-314) from GX's programs per field: from the field a program is first pending, the
+ * programs ready since then against those plus the ones still pending ("SHADERS 3/40", the total growing as new
+ * states arrive); the batch ends when none is pending. GX draws the ubershader meanwhile: nothing waits. */
+static void report_shaders(const gx_stats *gs)
+{
+    static uint64_t base;
+    static int active;
+    if (!gs->shaders_pending) {
+        if (active)
+            host_shader_progress_set(0, 0);
+        active = 0;
+        return;
+    }
+    if (!active) {
+        base = gs->shaders_ready;
+        active = 1;
+    }
+    uint64_t done = gs->shaders_ready > base ? gs->shaders_ready - base : 0;
+    host_shader_progress_set((uint32_t)done, (uint32_t)(done + gs->shaders_pending));
 }
 
 static uint64_t now_ns(void)
@@ -910,6 +932,11 @@ started:;
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
             uint32_t xfb_at = gx_on ? gc_xfb_addr(m) : 0;
+            if (gx_on) {
+                gx_stats gs;
+                gx_get_stats(gc_gx(m), &gs);
+                report_shaders(&gs);
+            }
             /* RECOMP_GC_GX_XFB_DIAG: how this field reached the window, and in how many swaps */
             int xfb_diag = gx_on && gx_xfb_diag_enabled(gc_gx(m));
             uint64_t swaps0 = 0, swaps1 = 0;

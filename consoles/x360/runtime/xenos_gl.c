@@ -990,6 +990,7 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
             g->glGetProgramiv(p->prog, GL_LINK_STATUS, &ok);
             if (ok) {
                 p->ok = 1;
+                g->st.programs++;
                 if (kind == 2) {
                     for (int i = 0; i < RECT_VARYINGS; i++) {
                         char an[16];

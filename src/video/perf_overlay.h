@@ -29,11 +29,21 @@ void perf_overlay_draw(SDL_Renderer *ren);
 const uint32_t *perf_overlay_pixels(int *w, int *h, unsigned *serial);
 /* The overlay's text, its lines joined with '\n' (tests). */
 void perf_overlay_text(char *out, size_t n);
-void perf_overlay_reset(void);   /* the renderer's textures were lost */
+void perf_overlay_reset(void);   /* the renderer's textures were lost (the overlay's and the badge's) */
 /* Frame generation figures for the next tick's "LSFG" line: state 0 = no
  * line, 1 = generating (real and shown fps x 100, generation time in us),
  * 2 = fallen back or kept off ("LSFG OFF"), 3 = waiting for the title's
  * lock verdict ("LSFG WAITING", WP4). */
+/* The shader badge (host_shader_progress.h, XBA-314): "SHADERS 12/304" while shaders compile, at the top left of the
+ * game picture, in the overlay's font; always on (not RECOMP_OVERLAY). perf_overlay_badge_update: its text at now_ms
+ * (CLOCK_MONOTONIC ms, host_shader_progress_now_ms), pixels rebuilt only when it changed; returns 1 then (it
+ * appeared, changed or went), so a window redraws a held picture. A few atomic loads when nothing changed: call it
+ * every turn of the window's loop. perf_overlay_badge_draw: the SDL window, after the overlay; NULL from
+ * perf_overlay_badge_pixels when hidden (a GL window draws it itself); perf_overlay_badge_text for the tests. */
+int  perf_overlay_badge_update(uint64_t now_ms);
+void perf_overlay_badge_draw(SDL_Renderer *ren);
+const uint32_t *perf_overlay_badge_pixels(int *w, int *h, unsigned *serial);
+void perf_overlay_badge_text(char *out, size_t n);
 void perf_overlay_set_framegen(int state, uint32_t real_fps_centi, uint32_t shown_fps_centi,
                                uint32_t gen_us);
 

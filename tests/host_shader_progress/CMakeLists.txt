@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.20)
+project(host_shader_progress_test C)
+set(CMAKE_C_STANDARD 11)
+if(WIN32)
+    message(FATAL_ERROR "host_shader_progress_test is POSIX-only (pthreads)")
+endif()
+# host_shader_progress.c alone (XBA-314): the shader badge's counter and text, driven with made-up clocks, and the
+# counts from several threads at once.
+find_package(Threads REQUIRED)
+add_executable(host_shader_progress_test test_main.c ../../src/platform/host_shader_progress.c)
+target_include_directories(host_shader_progress_test PRIVATE ../../src/platform)
+target_compile_options(host_shader_progress_test PRIVATE -Wall -Wextra)
+target_link_libraries(host_shader_progress_test PRIVATE Threads::Threads)
+enable_testing()
+add_test(NAME host_shader_progress COMMAND host_shader_progress_test)

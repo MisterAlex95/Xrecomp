@@ -57,6 +57,7 @@
 #include "nv2a_gl_scale.h"
 #include "nv2a_backend.h"
 #include "d3d/d3d8_swizzle.h"
+#include "host_shader_progress.h"   /* the window's shader badge (XBA-314) */
 #ifdef XBOXRECOMP_LSFG
 #include "framegen/framegen_policy.h"   /* frame generation forces sync present */
 #endif
@@ -2845,6 +2846,7 @@ static void pc_init(void)
 
     s_pc_on = 0;
     s_pc_nlist = s_pc_next = 0;
+    host_shader_progress_reset();
     if (e && strcmp(e, "0") == 0)
         return;
     glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &nfmt);
@@ -2880,6 +2882,8 @@ static void pc_init(void)
         closedir(d);
     }
     s_pc_on = 1;
+    /* The badge: "SHADERS 1/<binaries>" until the warm-up has been through them. */
+    host_shader_progress_expect((uint32_t)s_pc_nlist);
     fprintf(stderr, "  [GPUGL] program binary cache %s: %d binaries, warm-up %d a frame\n",
             s_pc_dir, s_pc_nlist, NV_GL_PCACHE_WARM);
 }
@@ -2997,10 +3001,16 @@ static void pc_warm(void)
 {
     int n = 0;
 
-    while (s_pc_on && n < NV_GL_PCACHE_WARM && s_pc_next < s_pc_nlist
-           && s_nwarm < NV_GL_MAX_WARM) {
+    while (s_pc_on && n < NV_GL_PCACHE_WARM && s_pc_next < s_pc_nlist) {
         uint64_t h = s_pc_list[s_pc_next++];
         GLuint prog;
+        host_shader_progress_done(1);       /* loaded, already there or refused: the badge counts it */
+        if (s_nwarm >= NV_GL_MAX_WARM) {
+            /* No room left for warmed programs: the rest load when a draw needs them. */
+            host_shader_progress_done((uint32_t)(s_pc_nlist - s_pc_next));
+            s_pc_next = s_pc_nlist;
+            break;
+        }
         if (pc_have(h))
             continue;
         n++;
@@ -3094,6 +3104,7 @@ static int prog_link(GlProg *p, const char *fs_body, GlVsh *vsh)
     }
     s_st.compiles++;
     s_pc_total_compiled++;
+    host_shader_progress_live();            /* the badge: "COMPILING... (n)" */
     return 1;
 }
 
@@ -4484,6 +4495,7 @@ static void gl_reset_objects(int lost)
     s_pc_list = NULL;
     s_pc_nlist = s_pc_next = 0;
     s_pc_on = 0;
+    host_shader_progress_reset();   /* no warm-up in progress any more */
     s_pvao = s_pvbo = s_pebo = 0;
     /* The cache tables, emptied: with a live context their GL objects were
      * deleted above; with a lost one the names are only forgotten. */
@@ -5017,6 +5029,7 @@ static Nv2aBackend s_backend = {
 
 static void unregister_self(void)
 {
+    host_shader_progress_reset();
     nv2a_backend_register(NULL);
 }
 

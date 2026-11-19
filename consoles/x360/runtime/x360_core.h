@@ -87,6 +87,8 @@ void x360_render_reset(x360_machine *x);
 /* The renderer's last frame (RGBA, top row first) and its counters, or NULL / zeros when it is off. */
 const uint8_t *x360_render_frame(x360_machine *x, int *width, int *height);
 void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint64_t *front_buffer_frames);
+/* Programs the renderer has compiled and linked so far (0 when it is off): the window's shader badge (XBA-314). */
+uint64_t x360_render_programs(x360_machine *x);
 /* The audio the title submits to the render driver (256-sample frames of 6 channels at 48 kHz), written to F as a
  * 32-bit float WAV, sizes filled in when the machine is freed. XMA is not decoded: XMA voices stay silent. */
 void x360_set_audio_out(x360_machine *x, FILE *f);

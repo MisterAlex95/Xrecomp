@@ -4,6 +4,7 @@
  * and getrusage elsewhere, refreshed twice a second. */
 #include "perf_overlay.h"
 #include "host_perf_line.h"
+#include "host_shader_progress.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -313,46 +314,48 @@ void perf_overlay_text(char *out, size_t n)
     }
 }
 
+static SDL_Texture *s_badge_tex;  /* the shader badge's texture (the Xbox window) */
+
 void perf_overlay_reset(void)
 {
     if (s_tex)
         SDL_DestroyTexture(s_tex);
     s_tex = NULL;
     s_dirty_tex = 1;
+    if (s_badge_tex)
+        SDL_DestroyTexture(s_badge_tex);
+    s_badge_tex = NULL;
 }
 
-/* The text at 1 pixel per font pixel, white on a translucent black box
- * (0xAARRGGBB words), kept in s_px until the text changes. */
-static int build_pixels(void)
+/* Lines of text at 1 pixel per font pixel on a translucent black box (0xAARRGGBB words, row 0 at the top) into
+ * *buf (grown as needed): the first line in first_color, the others white. 0 when there is nothing to draw. */
+static int render_text(const char (*lines)[LINE_CHARS], int nlines, uint32_t first_color, uint32_t **buf,
+                       int *out_w, int *out_h)
 {
     int cols = 0, i, w, h, pad = 2;
     uint32_t *px;
 
-    if (!s_dirty_px && s_px)
-        return 1;
-    for (i = 0; i < s_nlines; i++) {
-        int l = (int)strlen(s_lines[i]);
+    for (i = 0; i < nlines; i++) {
+        int l = (int)strlen(lines[i]);
         if (l > cols)
             cols = l;
     }
     w = cols * 4 - 1 + 2 * pad;
-    h = s_nlines * 7 - 2 + 2 * pad;
+    h = nlines * 7 - 2 + 2 * pad;
     if (w <= 2 * pad || h <= 2 * pad)
         return 0;
-    px = (uint32_t *)realloc(s_px, (size_t)w * (size_t)h * sizeof *px);
+    px = (uint32_t *)realloc(*buf, (size_t)w * (size_t)h * sizeof *px);
     if (!px)
         return 0;
-    s_px = px;
-    s_px_w = w;
-    s_px_h = h;
-    s_dirty_px = 0;
-    s_px_serial++;
+    *buf = px;
+    *out_w = w;
+    *out_h = h;
     for (i = 0; i < w * h; i++)
         px[i] = 0xA0000000u;
-    for (i = 0; i < s_nlines; i++) {
-        const char *s = s_lines[i];
+    for (i = 0; i < nlines; i++) {
+        const char *s = lines[i];
         int c, x0 = pad, y0 = pad + i * 7;
-        uint32_t color = i == 0 ? 0xFF7CFC9Au : 0xFFFFFFFFu;   /* FPS line in green */
+        uint32_t color = i == 0 ? first_color : 0xFFFFFFFFu;
         for (c = 0; s[c]; c++, x0 += 4) {
             unsigned g = glyph(s[c]);
             int r, b;
@@ -362,6 +365,19 @@ static int build_pixels(void)
                         px[(y0 + r) * w + x0 + b] = color;
         }
     }
+    return 1;
+}
+
+/* The overlay's text as pixels, kept in s_px until the text changes. */
+static int build_pixels(void)
+{
+    if (!s_dirty_px && s_px)
+        return 1;
+    if (!render_text((const char (*)[LINE_CHARS])s_lines, s_nlines, 0xFF7CFC9Au /* FPS line in green */, &s_px,
+                     &s_px_w, &s_px_h))
+        return 0;
+    s_dirty_px = 0;
+    s_px_serial++;
     return 1;
 }
 
@@ -419,4 +435,86 @@ void perf_overlay_draw(SDL_Renderer *ren)
     dst.w = (float)s_tex_w * k;
     dst.h = (float)s_tex_h * k;
     SDL_RenderCopyF(ren, s_tex, NULL, &dst);
+}
+
+/* ---- the shader badge (XBA-314) ---- */
+
+/* Its text (host_shader_progress_text), pixels and serial: rebuilt only when the text changes. */
+static char s_badge[1][LINE_CHARS];
+static uint32_t *s_badge_px;
+static int s_badge_w, s_badge_h, s_badge_shown, s_badge_tex_w, s_badge_tex_h;
+static unsigned s_badge_serial, s_badge_tex_serial;
+
+int perf_overlay_badge_update(uint64_t now_ms)
+{
+    char t[LINE_CHARS];
+    int shown = host_shader_progress_text_at(now_ms, t, sizeof t);
+
+    if (!shown)
+        t[0] = 0;
+    if (shown == s_badge_shown && !strcmp(t, s_badge[0]))
+        return 0;
+    snprintf(s_badge[0], LINE_CHARS, "%s", t);
+    s_badge_shown = shown && render_text((const char (*)[LINE_CHARS])s_badge, 1, 0xFFFFE070u /* amber */,
+                                         &s_badge_px, &s_badge_w, &s_badge_h);
+    if (s_badge_shown)
+        s_badge_serial++;
+    return 1;
+}
+
+const uint32_t *perf_overlay_badge_pixels(int *w, int *h, unsigned *serial)
+{
+    if (!s_badge_shown || !s_badge_px)
+        return NULL;
+    *w = s_badge_w;
+    *h = s_badge_h;
+    *serial = s_badge_serial;
+    return s_badge_px;
+}
+
+void perf_overlay_badge_text(char *out, size_t n)
+{
+    if (n)
+        snprintf(out, n, "%s", s_badge_shown ? s_badge[0] : "");
+}
+
+void perf_overlay_badge_draw(SDL_Renderer *ren)
+{
+    int ow = 0, oh = 0, lw = 0, lh = 0;
+    float k, y;
+    SDL_FRect dst;
+
+    if (!s_badge_shown || !s_badge_px)
+        return;
+    if (!s_badge_tex || s_badge_tex_w != s_badge_w || s_badge_tex_h != s_badge_h) {
+        if (s_badge_tex)
+            SDL_DestroyTexture(s_badge_tex);
+        s_badge_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, s_badge_w,
+                                        s_badge_h);
+        if (!s_badge_tex)
+            return;
+        SDL_SetTextureBlendMode(s_badge_tex, SDL_BLENDMODE_BLEND);
+        s_badge_tex_w = s_badge_w;
+        s_badge_tex_h = s_badge_h;
+        s_badge_tex_serial = s_badge_serial - 1;
+    }
+    if (s_badge_tex_serial != s_badge_serial) {
+        SDL_UpdateTexture(s_badge_tex, NULL, s_badge_px, s_badge_w * 4);
+        s_badge_tex_serial = s_badge_serial;
+    }
+    /* The overlay's text size, at the picture's top left (the renderer's logical size is the picture), below the
+     * overlay when it is on. */
+    SDL_GetRendererOutputSize(ren, &ow, &oh);
+    SDL_RenderGetLogicalSize(ren, &lw, &lh);
+    k = lh > 0 ? (float)lh / 320.0f : (float)oh / 320.0f;
+    if (k < 1.0f)
+        k = 1.0f;
+    y = k;
+    if (perf_overlay_enabled() && s_nlines && s_tex)
+        y += (float)s_tex_h * k + k;
+    dst.x = k;
+    dst.y = y;
+    dst.w = (float)s_badge_w * k;
+    dst.h = (float)s_badge_h * k;
+    SDL_RenderCopyF(ren, s_badge_tex, NULL, &dst);
 }
