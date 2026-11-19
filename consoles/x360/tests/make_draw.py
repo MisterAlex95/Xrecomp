@@ -77,6 +77,15 @@ def shaders():
         ("alu", alu_words(vop=2, vdest=32, vmask=0xF, export=1, srcs=((4, 0, 0, 0), (4, 0, 0, 0), (0, 0, 0, 0)))),
         ("alu", alu_words(vop=2, vdest=33, vmask=0xF, export=1, srcs=((5, 0, 0, 0), (5, 0, 0, 0), (0, 0, 0, 0)))),
         ("alu", alu_words(**export(0, 0)))], {})])
+    # ps_tex3: oC0 = the sum of 2D fetches from texture fetch constants 2, 3 and 4 at interpolator 0's xy (a video's
+    # three planes: every sampler must read its own texture, also when they are uploaded during the same draw)
+    packed["ps_tex3"] = program([(2, [
+        ("fetch", fetch_words(1, 0, 1, XYZW, 2, dimension=1)),
+        ("fetch", fetch_words(1, 0, 2, XYZW, 3, dimension=1)),
+        ("fetch", fetch_words(1, 0, 3, XYZW, 4, dimension=1)),
+        ("alu", alu_words(vop=0, vdest=1, vmask=0xF, srcs=((1, 1, 0, 0), (2, 1, 0, 0), (0, 0, 0, 0)))),
+        ("alu", alu_words(vop=0, vdest=0, vmask=0xF, export=1, srcs=((1, 1, 0, 0), (3, 1, 0, 0), (0, 0, 0, 0))))],
+        {})])
     return vs, ps, ps_tex, packed
 
 

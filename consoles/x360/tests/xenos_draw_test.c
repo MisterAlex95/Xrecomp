@@ -1444,6 +1444,47 @@ int main(int argc, char **argv)
             printf("MSAA: no multisampled buffers here, drawn single-sampled (fallback)\n");
     }
 
+    /* three textures in one draw (ps_tex3 adds them up): 1x1 red, green and blue ones, uploaded during the same draw,
+     * then all three rewritten as a video's planes are every frame: each sampler reads its own texture */
+    {
+        uint32_t n3;
+        uint32_t *p3 = load(argv[1], "ps_tex3.bin", &n3);
+        CHECK(p3 != NULL, "no ps_tex3.bin");
+        if (p3) {
+            im[0] = 1, im[1] = n3;
+            memcpy(im + 2, p3, 4 * n3);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + n3);
+            free(p3);
+            for (uint32_t k = 0; k < 4; k++)
+                vertex(0x41300 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? 1.0f : -1.0f, 0.5f, 0.5f, 0.0f);
+            static const uint32_t planes[2][3] = {{0xFF000040u, 0xFF008000u, 0xFFC00000u},
+                                                  {0xFF0000C0u, 0xFF004000u, 0xFF800000u}};
+            for (int f = 0; f < 2; f++) {
+                for (uint32_t t = 0; t < 3; t++) {
+                    w32(0x52000 + 0x1000 * t, planes[f][t]);
+                    uint32_t ft[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | (0x52000u + 0x1000u * t), 0,
+                                      sw_id << 1, 0, 1u << 9};
+                    for (uint32_t i = 0; i < 6; i++)
+                        reg(0x480C + 6 * t + i, ft[i]);
+                }
+                reg(0x4800, 0x41300u | 3u); /* the quad covers the target: nothing drawn before it with this shader */
+                reg(0x4801, 2u | (32u << 2));
+                type3(PM4_DRAW_INDX_2, &strip_a, 1);
+                type3(PM4_XE_SWAP, swap, 4);
+                run(&cp);
+                const uint8_t *c3 = px(g, W / 2, H / 2);
+                uint8_t want[3] = {(uint8_t)planes[f][0], (uint8_t)(planes[f][1] >> 8), (uint8_t)(planes[f][2] >> 16)};
+                CHECK(c3[0] == want[0] && c3[1] == want[1] && c3[2] == want[2],
+                      "three textures, pass %d: %u,%u,%u, want %u,%u,%u", f, c3[0], c3[1], c3[2], want[0], want[1],
+                      want[2]);
+            }
+        }
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;

@@ -2467,11 +2467,18 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
     for (int i = 0; i < p->ntq; i++)
         if (p->tq_loc[i] >= 0)
             set_tquery(g, p->tq_loc[i], &cp->regs[0x4800 + 6 * (p->tq_fetch[i] & 31)]);
+    /* every texture first, then the units: texture_of uploads (and copies resolves) through whatever unit is active,
+     * so binding as it goes would leave a sampler's unit on the texture uploaded for the next one */
+    GLuint texs[MAX_SAMPLERS];
+    for (int i = 0; i < p->nsamplers; i++) {
+        uint32_t k = p->sampler_fetch[i];
+        texs[i] = k < 32 ? texture_of(g, cp, &cp->regs[0x4800 + 6 * (k & 31)], p->sampler_dim[i]) : 0;
+    }
     for (int i = 0; i < p->nsamplers; i++) {
         uint32_t k = p->sampler_fetch[i], dim = p->sampler_dim[i];
         GLenum target = dim == 2 ? GL_TEXTURE_3D : dim == 3 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
         const uint32_t *fc = &cp->regs[0x4800 + 6 * (k & 31)];
-        GLuint tex = k < 32 ? texture_of(g, cp, fc, dim) : 0;
+        GLuint tex = texs[i];
         g->glActiveTexture(GL_TEXTURE0 + (GLenum)i);
         g->glBindTexture(target, tex);
         if (!tex) {
