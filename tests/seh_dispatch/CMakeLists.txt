@@ -30,6 +30,17 @@ if(WIN32)
     target_link_libraries(seh_dispatch_interp_test PRIVATE winmm)
 endif()
 add_test(NAME seh_dispatch_interp_test COMMAND seh_dispatch_interp_test)
+# And with every fixture function interpreted: the handlers resume into
+# interpreted frames (from a raise, a #DE, a host fault).
+add_executable(seh_dispatch_allinterp_test test_main.c fixture_allinterp_gen.c)
+target_compile_definitions(seh_dispatch_allinterp_test PRIVATE SEH_ALL_INTERPRETED=1)
+target_include_directories(seh_dispatch_allinterp_test PRIVATE
+    ../../src/kernel ../../src ../../templates/runtime)
+target_link_libraries(seh_dispatch_allinterp_test PRIVATE xboxrecomp)
+if(WIN32)
+    target_link_libraries(seh_dispatch_allinterp_test PRIVATE winmm)
+endif()
+add_test(NAME seh_dispatch_allinterp_test COMMAND seh_dispatch_allinterp_test)
 
 # What an anchor costs per call (not a test): ./seh_anchor_bench [iterations]
 add_executable(seh_anchor_bench anchor_bench.c ../../src/kernel/xbox_seh.c

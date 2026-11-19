@@ -80,6 +80,10 @@ def load(path=FIXTURE_JSON):
 # interpreted frames. tests/seh_dispatch runs the same scenarios on it.
 INTERP_OMIT = ("f_inner", "my_handler3", "f_cxx_inner", "ehstub_inner", "my_cxx_handler")
 GENERATED_INTERP_C = os.path.join(FIXTURE_DIR, "fixture_interp_gen.c")
+# And every function unlifted: the frames that own the __except blocks and the
+# catch are interpreted too, so the handlers' resumes land in interpreted
+# frames (xbox_InterpResumeAt), from a #DE and a host fault as well.
+GENERATED_ALLINTERP_C = os.path.join(FIXTURE_DIR, "fixture_allinterp_gen.c")
 
 
 def lift(data=None, *, seh_anchors=True, omit=()):
@@ -198,6 +202,9 @@ def main(argv):
         with open(GENERATED_INTERP_C, "w", encoding="utf-8", newline="\n") as f:
             f.write(lift(omit=INTERP_OMIT))
         print(f"wrote {GENERATED_INTERP_C}")
+        with open(GENERATED_ALLINTERP_C, "w", encoding="utf-8", newline="\n") as f:
+            f.write(lift(omit=FUNCTIONS))
+        print(f"wrote {GENERATED_ALLINTERP_C}")
         return 0
     print(__doc__)
     return 2

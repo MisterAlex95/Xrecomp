@@ -59,9 +59,13 @@ typedef struct XboxInterpHooks {
     /* A loop that only polls one word (`cmp/test [m], imm; jcc back`), as
      * RECOMP_POLL_WAIT. */
     void (*poll_wait)(uint32_t addr, uint32_t mask, int while_set, uint32_t va);
-    /* Called before a native call and after it returns (depth: the number of
-     * native calls in progress in this activation, after the change). */
+    /* Called before a native call and after it returns. */
     void (*native_edge)(int entering, uint32_t va);
+    /* The runtime's resume point (xbox_SehPointTake, at most 32 bytes) at each
+     * native call and at entry, and putting it back before a longjmp to it
+     * (xbox_SehPointResume): 0 refuses the resume. */
+    void (*point_take)(uint64_t buf[4]);
+    int (*point_resume)(const uint64_t buf[4], uint32_t va, uint32_t func);
 } XboxInterpHooks;
 
 extern XboxInterpHooks xbox_interp_hooks;
@@ -94,6 +98,10 @@ int xbox_InterpRun(uint32_t va, uint64_t limit, XboxInterpStop *stop);
  * activation is executing, 0 when it is not interpreting. The fault path
  * reports it as the exception's address. */
 uint32_t xbox_InterpCurrentVa(void);
+
+/* Instructions this thread interpreted since the last call (the counters'
+ * feed, taken at back edges and at the end of each activation). */
+uint64_t xbox_InterpTakeInsns(void);
 
 /* Decode-only: the length of the instruction at va, 0 when the interpreter
  * cannot decode it (the entry gate, tests). */

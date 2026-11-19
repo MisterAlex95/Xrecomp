@@ -20,6 +20,15 @@
 #include "recomp_discovery.h"
 #include "xbox_memory_layout.h"
 #include "xbox_interp.h"
+/* The interpreter (XBA-303) is optional here: tests/seh_dispatch's anchor
+ * bench links this file alone. */
+#if defined(__GNUC__) || defined(__clang__)
+#pragma weak xbox_InterpResolve
+#pragma weak xbox_InterpCurrentVa
+#define SEH_INTERP_ON(f) (f)
+#else
+#define SEH_INTERP_ON(f) 1
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -322,7 +331,8 @@ static recomp_func_t seh_resolve(uint32_t va)
     recomp_func_t fn = recomp_lookup_manual(va);
     if (!fn) fn = recomp_lookup(va);
     if (!fn) fn = recomp_lookup_kernel(va);
-    if (!fn) fn = xbox_InterpResolve(va, 'r', 0);   /* a handler the analysis missed (XBA-303) */
+    if (!fn && SEH_INTERP_ON(xbox_InterpResolve))
+        fn = xbox_InterpResolve(va, 'r', 0);        /* a handler the analysis missed (XBA-303) */
     return fn;
 }
 
@@ -666,7 +676,8 @@ int xbox_SehRaiseHostFault(uint32_t va, uint32_t access, uintptr_t host_pc)
     g_esp = seh_fault_build_esp(t, esp);
     /* Interpreted code (XBA-303) knows its pc: the record's address and the
      * context's Eip are exact there (0 in lifted code, which keeps none). */
-    handled = seh_raise_new(XBOX_STATUS_ACCESS_VIOLATION, 0, xbox_InterpCurrentVa(), 2, params,
+    handled = seh_raise_new(XBOX_STATUS_ACCESS_VIOLATION, 0,
+                            SEH_INTERP_ON(xbox_InterpCurrentVa) ? xbox_InterpCurrentVa() : 0u, 2, params,
                             esp, 1);
     if (handled) {
         if ((g_eax != saved.r_eax || g_ecx != saved.r_ecx || g_edx != saved.r_edx
@@ -890,6 +901,43 @@ jmp_buf *recomp_seh_anchor(uint32_t reg, uint32_t ebp, const recomp_seh_desc *d)
     t->n = n + 1;
     t->st.anchors++;
     return &a->jb;
+}
+
+/* The interpreter's resume points (XBA-303): what an anchor keeps, for a jump
+ * back into interpreted frames (xbox_InterpResumeAt), which is a resume over the
+ * same runtime frames. */
+void xbox_SehPointTake(XboxSehPoint *p)
+{
+    seh_thread *t = seh_self();
+    p->runtime = xbox_SehRuntimeSnapshot();
+    p->host = t->host;
+    p->anchors = t->n;
+    p->depth = t->depth;
+    p->faults = t->faults;
+}
+
+static void seh_refuse(seh_thread *t, const char *why, uint32_t va, const seh_anchor *a);
+
+int xbox_SehPointResume(const XboxSehPoint *p, uint32_t va, uint32_t func)
+{
+    seh_thread *t = seh_self();
+    if (p->host != t->host) {
+        /* as for an anchor: never a longjmp across host stacks */
+        seh_refuse(t, "its interpreted frame is on another host stack", va, NULL);
+        recomp_discovery_stack_switch(va, func, "an exception handler resumes into an interpreted frame on "
+                                      "another host stack (SEH, XBA-303)");
+        return 0;
+    }
+    if (p->anchors < t->n)
+        t->n = p->anchors;          /* anchors taken under the frames the jump leaves */
+    t->depth = p->depth;
+    t->faults = p->faults;
+    xbox_SehRuntimeRestore(p->runtime);
+    t->refused = 0;
+    t->st.resumes++;
+    t->st.handled++;
+    xbox_GuestCpuAcquire();         /* guest code runs holding the guest CPU */
+    return 1;
 }
 
 static int seh_desc_index(const recomp_seh_desc *d, uint32_t va)

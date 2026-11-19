@@ -19,6 +19,7 @@
 #include "recomp_smc.h"
 #include "kernel.h"
 #include "xbox_memory_layout.h"
+#include "xbox_seh.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,7 @@
 int xbox_InterpEnabled(void) { return 0; }
 xbox_interp_fn xbox_InterpResolve(uint32_t va, int kind, uint32_t ret) { (void)va; (void)kind; (void)ret; return 0; }
 uint32_t xbox_InterpThunkVa(xbox_interp_fn fn) { (void)fn; return 0; }
+uint32_t xbox_InterpCurrentVa(void) { return 0; }
 void xbox_InterpGetStats(XboxInterpStats *out) { memset(out, 0, sizeof *out); }
 int xbox_InterpDepth(void) { return 0; }
 void xbox_InterpResumeAt(uint32_t va) { (void)va; }
@@ -112,7 +114,7 @@ static void interp_thunk_run(unsigned k)
 
     memset(&stop, 0, sizeof stop);
     r = xbox_InterpRun(va, 0, &stop);
-    __atomic_fetch_add(&s_insns, stop.insns, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&s_insns, xbox_InterpTakeInsns(), __ATOMIC_RELAXED);
     __atomic_fetch_add(&s_activations, 1u, __ATOMIC_RELAXED);
     __atomic_fetch_add(&s_hot[k], stop.insns, __ATOMIC_RELAXED);
     if (r == XBOX_INTERP_UNIMPL) {
@@ -190,7 +192,7 @@ uint32_t xbox_InterpThunkVa(xbox_interp_fn fn)
  * the first transfer): a run of zeros (add [eax], al), an undecodable byte
  * or a fall off a page into nothing is not a function, whatever pointed at
  * it. Cheap: once per new address. */
-static int gate(uint32_t va)
+static int gate(uint32_t va, int strict)
 {
     const uint8_t *p;
     int i;
@@ -207,6 +209,11 @@ static int gate(uint32_t va)
         if (n <= 0)
             return 0;
         b0 = *(const uint8_t *)((uintptr_t)va + (uintptr_t)g_xbox_mem_offset);
+        /* outside the image (a pointer into data is likelier there): no port
+         * I/O, hlt, cli / sti, int, before the first transfer */
+        if (strict && ((b0 >= 0xE4 && b0 <= 0xE7) || (b0 >= 0xEC && b0 <= 0xEF) || b0 == 0xF4
+                       || b0 == 0xFA || b0 == 0xFB || b0 == 0xCD || (b0 == 0xCC && i == 0)))
+            return 0;
         if (b0 == 0xC3 || b0 == 0xC2 || b0 == 0xE9 || b0 == 0xEB || b0 == 0xCC)
             return 1;
         va += (uint32_t)n;
@@ -254,7 +261,7 @@ xbox_interp_fn xbox_InterpResolve(uint32_t va, int kind, uint32_t ret)
         if (!xbox_SmcExecOutside(va, ret))
             return 0;
     }
-    if (!gate(va))
+    if (!gate(va, !in_image_code(va)))
         return 0;
     k = thunk_of(va, &fresh);
     if (k < 0) {
@@ -285,9 +292,9 @@ xbox_interp_fn xbox_InterpIcallMiss(uint32_t va, int outside)
     uint32_t ret;
     if (!xbox_InterpEnabled())
         return 0;
-    /* A jump back into interpreted code over the native frames below it (an
-     * SEH handler resuming at an __except block, a guest longjmp): goes back
-     * to that activation and does not return here. */
+    /* An indirect tail jump publishes only g_seh_ebp (a call both): that is
+     * the ebp the target starts with, or resumes with. */
+    g_cpu.r_ebp = g_cpu.r_seh_ebp;
     xbox_InterpResumeAt(va);
     ret = GUEST32(g_cpu.r_esp);
     if (outside) {
@@ -349,6 +356,12 @@ static void hook_note_call(uint32_t target, uint32_t ret)
 
 static void hook_back_edge(uint32_t va)
 {
+    /* a loop that never returns (an interpreted worker) still counts */
+    uint64_t n = xbox_InterpTakeInsns();
+    if (n) {
+        __atomic_fetch_add(&s_insns, n, __ATOMIC_RELAXED);
+        hot_report();
+    }
     if (__atomic_load_n(&g_xbox_guest_cpu_preempt, __ATOMIC_RELAXED))
         xbox_GuestCpuPreempt(va);
 }
@@ -359,8 +372,20 @@ static void hook_poll_wait(uint32_t addr, uint32_t mask, int while_set, uint32_t
                              mask, while_set, va);
 }
 
+static void hook_point_take(uint64_t buf[4])
+{
+    xbox_SehPointTake((XboxSehPoint *)buf);
+}
+
+static int hook_point_resume(const uint64_t buf[4], uint32_t va, uint32_t func)
+{
+    return xbox_SehPointResume((const XboxSehPoint *)buf, va, func);
+}
+
 static void interp_hooks_init(void)
 {
+    xbox_interp_hooks.point_take = hook_point_take;
+    xbox_interp_hooks.point_resume = hook_point_resume;
     xbox_interp_hooks.native = hook_native;
     xbox_interp_hooks.note_call = hook_note_call;
     xbox_interp_hooks.back_edge = hook_back_edge;

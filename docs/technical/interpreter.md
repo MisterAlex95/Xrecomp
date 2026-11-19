@@ -34,10 +34,13 @@ address on first use). So every place that wants a `recomp_func_t` takes one:
 The macro reaches the runtime through a weak reference (`xbox_InterpIcallMiss`), so a harness without the runtime
 links and keeps the skip.
 
-**The entry gate.** A new address is decoded first, up to its first transfer: two zero bytes (`add [eax], al`),
-`FF FF`, an undecodable byte, the null page or the kernel thunk range is not code, whatever pointed at it, and keeps
-the old skip (and its record). That is what refuses the self-healing test's thread C (zeros), as seed_from_log's
-gates refuse it at the next Prepare.
+**The entry gate.** A new address is decoded first, up to its first transfer (24 instructions at most): two zero
+bytes (`add [eax], al`), `FF FF`, a byte the interpreter does not run (an unknown opcode, bound, arpl, string port I/O,
+far transfers, les / lds, into, iret), the null page or the kernel thunk range is not code, whatever pointed at it,
+and keeps the old skip (and its record). Outside the image's code (a pointer into data is likelier there) port I/O,
+hlt, cli / sti and int before the first transfer refuse it too. That is what refuses the self-healing test's thread C
+(zeros), as seed_from_log's gates refuse it at the next Prepare. The gate is a heuristic: a wild pointer into bytes
+that decode can now run where it used to be skipped (`RECOMP_INTERP=0` is the A/B).
 
 ## How it runs
 
@@ -79,15 +82,27 @@ gates refuse it at the next Prepare.
   does (its entry esp, the published ebp) and puts the top back at its end.
 - **SEH.** A guest exception raised under interpreted frames walks the same chain: handlers, filters, funclets and
   unwinds the analysis missed are interpreted (`seh_resolve`), a lifted handler resumes into a lifted anchor as
-  before. A resume *into* interpreted code (a handler's `jmp` to an `__except` block of an interpreted frame, a guest
-  longjmp) arrives at the indirect-call miss path with esp above the native call the activation was making:
-  `xbox_InterpResumeAt` longjmps back to that activation (each takes a native setjmp at entry), puts the frame top
-  back and goes on interpreting at the target. Activations a longjmp went over are found dead by what decides it
-  outside their memory (their host frame below the caller's, or their shadow-stack frame gone) and dropped.
+  before. A resume *into* interpreted frames goes back to their activation, whose C frames are below the
+  dispatcher's: each activation takes a native `_setjmp` at entry and a resume point at each native call
+  (`xbox_SehPointTake`: what an anchor keeps, the dispatcher's depth, the anchors and fault trampolines above it, the
+  runtime snapshot), and `xbox_InterpResumeAt` puts that back (`xbox_SehPointResume`: refused, counted and recorded
+  as an anchor on another host stack would be) and longjmps there, to go on interpreting at the target with the
+  registers the handler left. It is reached two ways: a lifted handler's jump to an address with no lifted function
+  (the indirect-call miss path), and interpreted code that makes a transfer (jump, call, ret) with esp above its own
+  activation's entry -- an interpreted handler's `jmp` to an `__except` block, which reloads esp from its frame
+  (`mov esp, [ebp-18h]`) and runs straight on (so the resume is taken at the block's first transfer: the instructions
+  before it ran on the handler's activation, on the same guest state), a C++ handler's `mov esp, [ebp-10h]; jmp eax`,
+  a guest longjmp. The activation taking it is the first one, from the innermost out, whose stack holds the target's
+  esp: above the native call it was making, or, executing an instruction itself (a host fault, a #DE: `div` raises
+  through `recomp_divide_error` as a native call), at or above that instruction's esp. A jump to the activation's own
+  return address with esp above its entry (`pop ecx; add esp, N; jmp ecx`) is a return. Activations a longjmp went
+  over are found dead by what decides it outside their memory (their host frame below the caller's, or their
+  shadow-stack frame gone) and dropped.
 - **Faults.** A host fault on a guest address inside interpreted code becomes the same guest
-  `STATUS_ACCESS_VIOLATION` (xbox_seh_fault.c), and the record's address and the context's Eip are the faulting
-  instruction's (lifted code has 0 there). A handler that continues execution gets the access run again, as in
-  lifted code; its CONTEXT's registers are not applied (as in lifted code).
+  `STATUS_ACCESS_VIOLATION` (xbox_seh_fault.c) with the registers exact (the accessors' barrier); the record's
+  address and the context's Eip are the faulting instruction's (lifted code has 0 there; set, not checked by a test).
+  A handler that resumes lands in the activation (above); one that continues execution gets the access run again, as
+  in lifted code; its CONTEXT's registers are not applied (as in lifted code).
 - **Save states.** A thread parked inside an activation (a kernel call or a host wait made by interpreted code, or by
   lifted code it called) has no lifted frame a resume could re-enter, and the interpreter's position is in its host
   frames: the park record carries the activation count (`XboxParkRecord.interp`) and a capture **refuses**, « guest
@@ -100,9 +115,10 @@ gates refuse it at the next Prepare.
 
 ## Visibility
 
-- The status line (`RECOMP_STATUS`) gets `interp_insns` (instructions interpreted so far) and `interp_entries`
+- The status line (`RECOMP_STATUS`) gets `interp_insns` (instructions interpreted so far, taken at every 256th back
+  edge and at the end of each activation, so an interpreted loop that never returns counts too) and `interp_entries`
   (addresses resolved to thunks) once there are any: a hot interpreted path is a steep `interp_insns` between two
-  lines.
+  lines. There is no per-frame figure of its own; the slope between two status lines (one per second) is it.
 - The log says each new address once (`[INTERP] no lifted code at 0x... (indirect call target, return address 0x...):
   interpreted`), the first 256, and, each time the total doubles past 10 million, the three hottest entries
   (`[INTERP] N instructions interpreted so far (E entries); hottest: 0x... (n), ...`).
@@ -114,9 +130,13 @@ gates refuse it at the next Prepare.
   interpreter against the lifted C; 200 random SSE / MMX / x87 sequences against the lifted C; a CF mutation must be
   caught; fresh sequences on the CPU with `XBOXRECOMP_PYTEST_DOCKER=1`.
 - `tools/conformance`: a fourth pass runs the 7,662 vectors' snippets through the interpreter against the CPU.
-- `tests/seh_dispatch` (`seh_dispatch_interp_test`): every SEH scenario of XBA-112 / XBA-132 with five of the
-  fixture's functions unlifted (an EH3 frame between two others, both frame handlers, a C++ frame and its unwind
-  stub): 78 checks, the same results as the lifted run.
+- `tests/seh_dispatch`: every SEH scenario of XBA-112 / XBA-132 (78 checks) with five of the fixture's functions
+  unlifted (`seh_dispatch_interp_test`: an EH3 frame between two others, both frame handlers, a C++ frame and its
+  unwind stub) and with all of them unlifted (`seh_dispatch_allinterp_test`: the frames owning the `__except` blocks
+  and the catch too, so the handlers resume into interpreted frames, from a raise, a #DE and a host fault, on a
+  switched-to guest stack, and refused across host stacks): the same results as the lifted run (two checks read the
+  interpreted variant's counters: no anchor, the resume recorded at the first transfer).
+- `tests/park_chain`: an interpreted worker sleeping in a loop; a capture refuses it, naming the interpreter.
 - `tools/compat/test_e2e.py::test_the_self_healing_loop` (XBA_E2E=1): three thread starts found in one run where it
   took three rounds (`..._without_the_interpreter` keeps the old loop under `RECOMP_INTERP=0`).
 
@@ -125,8 +145,11 @@ gates refuse it at the next Prepare.
 - A thread parked inside interpreted code refuses a save state (above).
 - Code written over lifted code at run time (`code_write`) still runs the lifted copy: the interpreter only takes
   addresses with no lifted function.
-- Stack switches inside interpreted code (a fiber the interpreted code switches to) are not carried: the activation
-  ends at its own return address by esp.
+- A body a stack switch starts (recomp_stack_switch.c) is interpreted when it has no lifted function, but an
+  activation follows esp: interpreted code that switches guest stacks itself, without the runtime's switch, is not
+  carried.
+- An interpreted handler's resume is taken at the first transfer after it reloads esp (above), so a `stack_switch`
+  record of a refused one names that transfer, not the `__except` label.
 - 16-bit addressing (0x67), far calls and jumps, iret, task and segment instructions are not run (reported as above);
   SSE2 forms the lifter does not lift either (the Xbox's CPU is a Pentium III) are not run.
 - 4096 distinct missed addresses per run; the ones after are skipped (said once).

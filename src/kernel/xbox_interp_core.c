@@ -147,6 +147,11 @@ typedef struct XAct {
     uint32_t depth;             /* interpreted calls in progress (not native ones) */
     int in_native;              /* a native call is in progress */
     uint32_t native_esp;        /* esp at it (its return address) */
+    uint32_t insn_esp;          /* esp at the instruction being executed */
+    uint32_t entry_ra;          /* [entry_esp] at entry: the activation's return address */
+    uint32_t start_va;          /* where it was entered */
+    uint64_t native_point[4];   /* the runtime's resume point at the native call (hooks.point_take) */
+    uint64_t entry_point[4];    /* and at the activation's entry */
     RecompFrame *native_ftop;   /* the shadow stack's top at it */
     uint32_t fidx;              /* the activation's own frame (shadow stack index) */
     uint32_t resume_va;         /* xbox_InterpResumeAt's target */
@@ -154,6 +159,23 @@ typedef struct XAct {
 } XAct;
 
 static RECOMP_TLS XAct *t_act;
+static RECOMP_TLS uint64_t t_pending;       /* instructions not yet taken by xbox_InterpTakeInsns */
+
+uint64_t xbox_InterpTakeInsns(void)
+{
+    uint64_t n = t_pending;
+    t_pending = 0;
+    return n;
+}
+
+#if defined(_WIN32)
+#define XSETJMP(b) setjmp(b)
+#define XLONGJMP(b, v) longjmp((b), (v))
+#else
+/* no signal mask saved: bionic's setjmp would make a system call per activation */
+#define XSETJMP(b) _setjmp(b)
+#define XLONGJMP(b, v) _longjmp((b), (v))
+#endif
 
 
 /* ---- guest memory ----------------------------------------------------------------- */
@@ -337,6 +359,11 @@ static int decode(uint32_t va, XInsn *d)
             return 0;
     } else {
         fl = k_1b[b];
+        /* not run: bound, arpl, string port I/O (data decoded as code), far
+         * call / jump / return, les / lds, into, iret, int1 */
+        if (b == 0x62 || b == 0x63 || (b >= 0x6C && b <= 0x6F) || b == 0x9A || b == 0xC4 || b == 0xC5
+                || b == 0xCA || b == 0xCB || b == 0xCE || b == 0xCF || b == 0xEA || b == 0xF1)
+            return 0;
     }
     if (fl & D_M) {
         unsigned m = FETCH();
@@ -600,6 +627,7 @@ static void call_native(XRun *x, xbox_interp_fn fn, uint32_t va)
     a->in_native = 1;
     a->native_esp = esp0;
     a->native_ftop = c->r_ftop;
+    if (xbox_interp_hooks.point_take) xbox_interp_hooks.point_take(a->native_point);
     if (xbox_interp_hooks.native_edge) xbox_interp_hooks.native_edge(1, va);
     fn();
     if (xbox_interp_hooks.native_edge) xbox_interp_hooks.native_edge(0, va);
@@ -658,6 +686,8 @@ static int transfer(XRun *x, uint32_t target, int is_call, uint32_t ret)
         a->depth++;
         if (xbox_interp_hooks.note_call)
             xbox_interp_hooks.note_call(target, ret);
+    } else if (c->r_esp > a->entry_esp && target == a->entry_ra) {
+        return X_EXIT;      /* a return by hand (pop ecx; add esp, N; jmp ecx) */
     }
     x->next = target;
     return X_NEXT;
@@ -767,6 +797,21 @@ static int string_op(XRun *x)
     return X_NEXT;
 }
 
+/* #DE: the runtime raises it to the guest's handlers, which may resume at an
+ * __except block of this activation: a native call as far as a resume is
+ * concerned (its return address one slot below the instruction's esp). */
+static void div_error(XRun *x, uint32_t divisor)
+{
+    XAct *a = x->a;
+    RecompCpu *c = x->c;
+    a->in_native = 1;
+    a->native_esp = c->r_esp - 4u;
+    a->native_ftop = c->r_ftop;
+    if (xbox_interp_hooks.point_take) xbox_interp_hooks.point_take(a->native_point);
+    recomp_divide_error(x->d->va, divisor);
+    a->in_native = 0;
+}
+
 /* ---- group 3 (F6 / F7): test not neg mul imul div idiv ------------------------------- */
 
 static int group3(XRun *x)
@@ -815,7 +860,7 @@ static int group3(XRun *x)
             uint64_t n = sz == 1 ? (c->r_eax & 0xFFFFu) : sz == 2 ? (((c->r_edx & 0xFFFFu) << 16) | (c->r_eax & 0xFFFFu))
                                   : (((uint64_t)c->r_edx << 32) | c->r_eax);
             uint64_t q;
-            if (!dv || (q = n / dv) > m) { recomp_divide_error(d->va, dv); return X_NEXT; }
+            if (!dv || (q = n / dv) > m) { div_error(x, dv); return X_NEXT; }
             if (sz == 1) sreg(c, 0, (uint32_t)(q | ((n % dv) << 8)), 2);
             else if (sz == 2) { sreg(c, 0, (uint32_t)q, 2); sreg(c, 2, (uint32_t)(n % dv), 2); }
             else { c->r_eax = (uint32_t)q; c->r_edx = (uint32_t)(n % dv); }
@@ -824,10 +869,10 @@ static int group3(XRun *x)
             int64_t n = sz == 1 ? (int16_t)c->r_eax : sz == 2 ? (int32_t)(((c->r_edx & 0xFFFFu) << 16) | (c->r_eax & 0xFFFFu))
                                  : (int64_t)(((uint64_t)c->r_edx << 32) | c->r_eax);
             int64_t q, r, lo;
-            if (!sdv || (sdv == -1 && n == INT64_MIN)) { recomp_divide_error(d->va, dv); return X_NEXT; }
+            if (!sdv || (sdv == -1 && n == INT64_MIN)) { div_error(x, dv); return X_NEXT; }
             q = n / sdv; r = n % sdv;
             lo = sz == 1 ? (int8_t)q : sz == 2 ? (int16_t)q : (int32_t)q;
-            if (lo != q) { recomp_divide_error(d->va, dv); return X_NEXT; }
+            if (lo != q) { div_error(x, dv); return X_NEXT; }
             if (sz == 1) sreg(c, 0, ((uint32_t)q & 0xFFu) | (((uint32_t)r & 0xFFu) << 8), 2);
             else if (sz == 2) { sreg(c, 0, (uint32_t)q, 2); sreg(c, 2, (uint32_t)r, 2); }
             else { c->r_eax = (uint32_t)q; c->r_edx = (uint32_t)r; }
@@ -1078,7 +1123,7 @@ static int exec(XRun *x)
         return X_NEXT;
     case 0xD4: {                                    /* aam */
         uint32_t al = c->r_eax & 0xFFu, base = d->imm & 0xFFu;
-        if (!base) { recomp_divide_error(d->va, 0); return X_NEXT; }
+        if (!base) { div_error(x, 0); return X_NEXT; }
         sreg(c, 0, ((al / base) << 8) | (al % base), 2);
         set_arith(c, szp(al % base, 1), F_ZF | F_SF | F_PF);
         return X_NEXT;
@@ -1292,6 +1337,33 @@ static int step(XAct *a, XInsn *d)
     return r;
 }
 
+/* A transfer (jump, call, loop) made with esp above the activation's entry:
+ * the code now runs on an outer frame -- an __except block or a catch
+ * continuation an interpreted handler jumped to, which reloaded esp from its
+ * frame (mov esp, [ebp-18h]), a guest longjmp; a ret too (the activation's own
+ * ret runs with esp at the entry, not above it). Not a jump to the
+ * activation's own return address (a return by hand): that leaves it. */
+static int leaves_upward(const XAct *a, const XInsn *d)
+{
+    const RecompCpu *c = a->c;
+    uint32_t t;
+    if (d->op == 0xC2 || d->op == 0xC3)
+        return 1;           /* esp above the entry: not the activation's own return address it pops */
+    if (d->op == 0xE8 || (d->op >= 0x70 && d->op <= 0x7F) || (d->op >= 0xE0 && d->op <= 0xE3))
+        return 1;
+    if (d->op == 0x0F)
+        return d->op2 >= 0x80 && d->op2 <= 0x8F;
+    if (d->op == 0xE9 || d->op == 0xEB)
+        return d->va + d->len + d->imm != a->entry_ra;
+    if (d->op == 0xFF && (d->reg == 2 || d->reg == 4)) {
+        if (d->reg == 2)
+            return 1;
+        t = d->mod == 3 ? *REGP(c, d->rm) : MEM32(ea_of((RecompCpu *)c, d));
+        return t != a->entry_ra;
+    }
+    return 0;
+}
+
 /* RECOMP_INTERP_TRACE=1: every interpreted instruction and the registers before it, on stderr. */
 static int trace_on(void)
 {
@@ -1354,6 +1426,8 @@ int xbox_InterpRun(uint32_t va, uint64_t limit, XboxInterpStop *stop)
     act.c = c;
     act.eip = va;
     act.entry_esp = c->r_esp;
+    act.entry_ra = MEM32(c->r_esp);
+    act.start_va = va;
     act.magic = XACT_MAGIC;
     act.self = &act;
     acts_prune(FRAME_HERE());
@@ -1368,6 +1442,7 @@ int xbox_InterpRun(uint32_t va, uint64_t limit, XboxInterpStop *stop)
     f->f_esp = c->r_esp;
     c->r_ftop = f + 1;
     act.fidx = frames_depth(c) - 1u;
+    if (xbox_interp_hooks.point_take) xbox_interp_hooks.point_take(act.entry_point);
     slot = -1;
     if (t_acts && t_nacts < XACT_MAX) {
         slot = t_nacts++;
@@ -1379,7 +1454,7 @@ int xbox_InterpRun(uint32_t va, uint64_t limit, XboxInterpStop *stop)
     act.outer = t_act;
     t_act = &act;
 
-    if (setjmp(act.resume)) {
+    if (XSETJMP(act.resume)) {
         /* xbox_InterpResumeAt: a jump back into this activation over the
          * native frames of the call it was making. */
         act.in_native = 0;
@@ -1394,7 +1469,11 @@ int xbox_InterpRun(uint32_t va, uint64_t limit, XboxInterpStop *stop)
             result = XBOX_INTERP_UNIMPL;
             break;
         }
+        if (RECOMP_UNLIKELY(c->r_esp > act.entry_esp) && leaves_upward(&act, &d))
+            xbox_InterpResumeAt(d.va);      /* into an outer activation: does not return */
         act.insns++;
+        t_pending++;
+        act.insn_esp = c->r_esp;
         if (RECOMP_UNLIKELY(trace_on()))
             fprintf(stderr, "[INTERP] %08X %02X %02X %02X %02X  eax %08X ecx %08X edx %08X ebx %08X esp %08X ebp %08X esi %08X edi %08X\n",
                     d.va, d.bytes[0], d.bytes[1], d.bytes[2], d.bytes[3], c->r_eax, c->r_ecx, c->r_edx, c->r_ebx,
@@ -1429,17 +1508,39 @@ uint32_t xbox_InterpCurrentVa(void)
 
 void xbox_InterpResumeAt(uint32_t va)
 {
-    /* Only the innermost activation's native call can be abandoned to it: the
-     * target's frame (esp) above the call's return address, within the
-     * activation's own stack. */
-    XAct *a = acts_prune(FRAME_HERE());
-    if (!a || !a->in_native)
-        return;
-    if (a->c->r_esp > a->native_esp && a->c->r_esp <= a->entry_esp) {
+    /* From the innermost activation out: one the target's esp is above was
+     * left (the jump abandons it); the first one it is inside takes it when
+     * its frames are the ones abandoned -- the target's frame above the native
+     * call it was making, or, executing an instruction itself (a fault, a
+     * raise from interpreted code), at or above that instruction's esp. */
+    int k;
+    uint32_t sp = g_cpu.r_esp;
+    acts_prune(FRAME_HERE());
+    for (k = t_nacts - 1; k >= 0; k--) {
+        XAct *a = t_acts[k].act;
+        const uint64_t *point;
+        if (sp > a->entry_esp)
+            continue;
+        if (a->in_native) {
+            if (sp <= a->native_esp)
+                return;
+            point = a->native_point;
+        } else {
+            if (sp < a->insn_esp)
+                return;
+            point = a->entry_point;
+        }
+        if (xbox_interp_hooks.point_resume) {
+            if (!xbox_interp_hooks.point_resume(point, va, a->start_va))
+                return;                     /* refused (another host stack): the exception goes on */
+        } else {
+            a->c->r_ftop = a->in_native ? a->native_ftop : a->c->r_fbase + a->fidx + 1;
+        }
+        t_nacts = k + 1;
+        t_act = a;
         a->resume_va = va;
-        a->c->r_ftop = a->native_ftop;
-        a->c->r_ebp = a->c->r_seh_ebp;       /* an indirect jump publishes g_seh_ebp */
-        longjmp(a->resume, 1);
+        a->depth = 0;                        /* ebp is g_ebp as the jumping code left it */
+        XLONGJMP(a->resume, 1);
     }
 }
 

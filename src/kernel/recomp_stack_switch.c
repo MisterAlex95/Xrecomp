@@ -30,6 +30,7 @@
  * a raise on one stack never follows a record or resumes an anchor that lives
  * on another (stack-switching.md « Limits », seh-handling.md). */
 #include "recomp_stack_switch.h"
+#include "xbox_interp.h"
 #include "recomp_discovery.h"
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
@@ -534,7 +535,9 @@ static void ss_guest_bounds(uint32_t esp, uint32_t *lo, uint32_t *hi)
 static recomp_func_t ss_func(uint32_t va)
 {
     recomp_func_t f = recomp_lookup_manual(va);
-    return f ? f : recomp_lookup(va);
+    if (!f) f = recomp_lookup(va);
+    if (!f) f = xbox_InterpResolve(va, 'c', 0);     /* a body the analysis missed (XBA-303) */
+    return f;
 }
 
 /* The bottom of every new context: the guest ret landed at start_va with

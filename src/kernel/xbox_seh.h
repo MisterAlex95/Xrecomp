@@ -239,6 +239,22 @@ int      xbox_SehInRuntime(void);          /* async-signal-safe */
 uint64_t xbox_SehRuntimeSnapshot(void);
 void     xbox_SehRuntimeRestore(uint64_t snap);
 
+/* A resume point that is not an anchor (XBA-303): the interpreter takes one
+ * where an interpreted activation calls native code (and at its entry), and
+ * puts it back before it longjmps there over the runtime's frames: the
+ * dispatcher's depth, the anchors and fault trampolines above it, the runtime
+ * snapshot, the guest CPU held. */
+typedef struct XboxSehPoint {
+    uint64_t runtime;
+    uintptr_t host;
+    int anchors, depth, faults;
+} XboxSehPoint;
+void     xbox_SehPointTake(XboxSehPoint *p);
+/* 1: restored, longjmp to the point now (va: the resume target, for the
+ * report; func: where the frame's code was entered); 0: refused as an anchor on another host stack would be (counted,
+ * reported, the exception goes on unhandled). */
+int      xbox_SehPointResume(const XboxSehPoint *p, uint32_t va, uint32_t func);
+
 /* Counters, for tests and the status report. */
 typedef struct {
     uint32_t raises;        /* dispatches started */

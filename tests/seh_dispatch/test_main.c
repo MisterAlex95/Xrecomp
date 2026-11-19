@@ -693,7 +693,11 @@ int main(int argc, char **argv)
     check(esp == STACK_HI - 0x100, "guest stack balanced after the resume");
     check(G32(TIB_VA) == END_OF_CHAIN, "chain head restored");
     check(st.resumes == 1 && st.refused == 0, "one resume, nothing refused");
+#ifndef SEH_ALL_INTERPRETED
     check(st.anchors >= 1, "f_outer took an anchor");
+#else
+    check(st.anchors == 0, "f_outer, interpreted, took no anchor: the resume went to its activation");
+#endif
 
     /* 2. Filter continues execution: the raise returns, the normal path
      *    calls the __finally directly. */
@@ -727,8 +731,14 @@ int main(int argc, char **argv)
     check(eax == 0x111, "other host stack: refused, the raise returned");
     check(st.refused == 1 && st.resumes == 0, "counted as refused");
 #ifndef _WIN32
+#ifndef SEH_ALL_INTERPRETED
     check(strstr(disc_text(), "{\"t\":\"stack_switch\",\"va\":\"0x000100B1\",\"to\":\"0x00010078\"") != NULL,
           "recorded as a stack_switch blocker in the discovery file");
+#else
+    /* interpreted: the resume is taken at the first transfer after the esp reload (fo_out's ret) */
+    check(strstr(disc_text(), "{\"t\":\"stack_switch\",\"va\":\"0x000100D0\",\"to\":\"0x00010078\"") != NULL,
+          "recorded as a stack_switch blocker in the discovery file");
+#endif
 #endif
     check(esp == STACK_HI - 0x100 && G32(TIB_VA) == END_OF_CHAIN,
           "stack and chain balanced");
