@@ -78,14 +78,15 @@ def test_mixed_setters_evaluate_the_join_on_each_edge():
     # A result snapshot (sub) meets a compare snapshot (test): the states do
     # not merge, and the join used to read the never-assigned _flags.
     code = translate(bytes.fromhex('85c9740583e801eb0285c0750190c3'))
-    assert 'if (_jf_0001000B /* jne' in code, code
+    assert 'if (!_jZ_0001000B) goto' in code, code
     assert 'if (_flags' not in code, code
-    # the sub edge sets it before its jmp, the test edge before falling in
-    assert ('_jf_0001000B = ((_fa != 0)) ? 1 : 0; /* flags of this edge */\n'
+    # the sub edge stores ZF before its jmp, the test edge before falling in
+    # (the join image, XBA-317)
+    assert ('_jZ_0001000B = ((_fa == 0)) ? 1 : 0; /* flags of this edge */\n'
             '    goto loc_0001000B;') in code, code
-    tail = code.index('_jf_0001000B = (CMP_NE(_fa, _fb)) ? 1 : 0; /* flags of this edge */')
+    tail = code.index('_jZ_0001000B = (CMP_EQ(_fa, _fb)) ? 1 : 0; /* flags of this edge */')
     assert code.index('loc_00010009:') < tail < code.index('loc_0001000B:'), code
-    assert 'int _jf_0001000B = 0;' in code, code
+    assert 'int _jZ_0001000B = 0;' in code, code
 
 
 def test_edges_read_snapshots_across_a_move_at_the_join():
@@ -93,8 +94,8 @@ def test_edges_read_snapshots_across_a_move_at_the_join():
     # before its je. Both edges read their result snapshot, not eax.
     # test ecx,ecx; jz alt; neg eax; jmp join; alt: dec ebx; join: mov eax,1; je out; nop; out: ret
     code = translate(bytes.fromhex('85c97404f7d8eb014bb801000000740190c3'))
-    assert code.count('_jf_00010009 = ((_fa == 0)) ? 1 : 0;') == 2, code
-    assert 'if (_jf_00010009 /* je' in code, code
+    assert code.count('_jZ_00010009 = ((_fa == 0)) ? 1 : 0;') == 2, code
+    assert 'if (_jZ_00010009) goto' in code, code
 
 
 def test_a_join_with_an_unknown_predecessor_is_not_guessed():
@@ -110,7 +111,7 @@ def test_mixed_width_compares_join_on_each_edge():
     # test ecx,ecx; jz narrow; cmp ecx,eax; jmp join; narrow: cmp al,1;
     # join: jcc +1; inc eax; ret
     code = translate(bytes.fromhex('85c9740439c1eb023c01' + '7501' + '40c3'))
-    assert code.count('_jf_0001000A = (CMP_NE(_fa, _fb)) ? 1 : 0;') == 2, code
+    assert code.count('_jZ_0001000A = (CMP_EQ(_fa, _fb)) ? 1 : 0;') == 2, code
     assert 'if (_flags' not in code, code
     code = translate(bytes.fromhex('85c9740439c1eb023c01' + '7801' + '40c3'))
     assert '(uint32_t)(_fas) - (uint32_t)(_fbs)) >> 31' in code, code
@@ -123,9 +124,9 @@ def test_ors_into_different_registers_join_on_each_edge():
     # other, then branches on ZF; the fallback acted on an unpressed START.
     # test ecx,ecx; jz other; mov ecx,edx; or ecx,ebx; jmp join;
     # other: or edx,ebx; join: jcc +1; inc eax; ret
-    for jcc, cond in (('74', '(_fa == 0)'), ('75', '(_fa != 0)')):
+    for jcc in ('74', '75'):
         code = translate(bytes.fromhex('85c9740689d109d9eb0209da' + jcc + '0140c3'))
-        assert code.count(f'_jf_0001000C = ({cond}) ? 1 : 0;') == 2, code
+        assert code.count('_jZ_0001000C = ((_fa == 0)) ? 1 : 0;') == 2, code
         assert 'if (_flags' not in code, code
 
 

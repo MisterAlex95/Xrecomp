@@ -90,8 +90,18 @@ def test_jne_after_xadd_reads_the_snapshot():
     assert cond == "(_fa == 0)", cond
     cond, _ = _make_condition("js", "xadd", [REFCOUNT, EDX])
     assert cond == "(_fas < 0)", cond
+    # The signed conditions read OF too (XBA-317): `setle` after an xadd
+    # that overflowed answered from SF alone. OF comes from the sum and the
+    # source, which the lowering snapshots into _fb before the write.
     cond, _ = _make_condition("jg", "xadd", [REFCOUNT, EDX])
-    assert cond == "(_fas > 0)", cond
+    assert cond.startswith("(_fa != 0 && !((_fas < 0) != ") and "(_fa - _fb)" in cond, cond
+    cond, _ = _make_condition("jo", "xadd", [REFCOUNT, EDX])
+    assert "(_fa - _fb)" in cond, cond
+
+
+def test_xadd_snapshots_its_source():
+    out = _lift("lock xadd", [REFCOUNT, EDX])
+    assert "_fb = _add; _fbs = (int32_t)_add;" in out, out
 
 
 if __name__ == "__main__":

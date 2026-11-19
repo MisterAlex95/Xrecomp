@@ -31,7 +31,8 @@ from .lifter import (Lifter, lift_basic_block, block_flag_out_state,
                      detect_seh_helpers,
                      _RESULT_SNAPSHOT_SETTERS, _as_addr_set,
                      detect_setjmp_helpers, _func_ident, _operand_width,
-                     publish_flags, stack_switch_sites, ret_cleanup)
+                     publish_flags, stack_switch_sites, ret_cleanup, _rotate_sets_of,
+                     _is_rep_compare)
 
 
 # Float compares snapshot at the compare as well, and their conditions read
@@ -113,13 +114,22 @@ def _merge_zero_flag(states):
     return ("__zf_from_dest", [states[0][1][0]])
 
 
-def _incoming_flag_state(sources, known, is_entry, caller_flags=False):
+def _incoming_flag_state(sources, known, is_entry, caller_flags=False, join=None):
     """The flag state a block inherits, or None when it cannot be known.
 
     A predecessor with no computed state yet makes the result unknown rather
     than guessed: that costs a fallback condition and never a wrong one.
     An entry that reads its caller's flags (caller_flags) starts from
     g_eflags, which the caller published.
+
+    Predecessors whose states are all known but do not merge make a join
+    image when `join` (the block's address) is given: ("__join", [join,
+    partial]). Each predecessor then stores the flags the block reads into
+    the join's _jC_/_jZ_/_jS_/_jO_/_jP_ locals before it transfers control
+    (FunctionTranslator._join_image_lines), and every consumer downstream
+    answers from them -- a second setcc after the join, a lahf, a pushfd, a
+    rotate's untouched ZF (XBA-317). `partial` is what the predecessors
+    still agree on (_merge_zero_flag's ZF), answered first.
     """
     if is_entry and caller_flags:
         return _merge_flag_states([("eflags", []),
@@ -128,7 +138,12 @@ def _incoming_flag_state(sources, known, is_entry, caller_flags=False):
         return None
     if not all(p in known for p in sources):
         return None
-    return _merge_flag_states([known[p] for p in sources])
+    merged = _merge_flag_states([known[p] for p in sources])
+    if join is None or (merged and merged[0] != "__zf_from_dest"):
+        return merged
+    if not all(known[p] for p in sources):
+        return merged
+    return ("__join", [join, merged])
 
 
 _REG_TOKEN = None
@@ -650,6 +665,7 @@ class FunctionTranslator:
         """
         self.xbe_data = xbe_data
         self.func_db = func_db
+        self._force_cf = set()      # functions lifted again with the carry (translate_function)
         self.icall_sites = dict(icall_sites or {})
         self.label_db = label_db or {}
         self.classification_db = classification_db or {}
@@ -2078,7 +2094,7 @@ class FunctionTranslator:
 
         # These keep their carry in _cf alone (the 2/3-operand imul's jc
         # reads _fa, but an adc after it reads _cf, and adc already counts).
-        _CF_IN_CARRY = ("rol", "ror", "shld", "shrd", "xadd")
+        _CF_IN_CARRY = ("rol", "ror", "shld", "shrd", "xadd", "cmpxchg")
         last_setter = None
         # The walk is in address order, not along the edges: a carry test
         # placed before the bt it reads (a loop whose bt sits at the bottom)
@@ -2117,7 +2133,7 @@ class FunctionTranslator:
                          or last_setter in _CF_IN_CARRY
                          or last_setter == "rep-compare")):
                 return True
-            if cc in FunctionTranslator._OF_CC and last_setter in ("shl", "sal"):
+            if cc in FunctionTranslator._OF_CC and last_setter in ("shl", "sal", "shld"):
                 return True
             if m in FLAG_SETTERS or m in _EFLAGS_SETTERS:
                 last_setter = m
@@ -3324,11 +3340,33 @@ class FunctionTranslator:
                  f"{frame}    goto loc_{addr:08X};\n")
         return code[:first] + entry + code[first:]
 
+    _CF_USE = re.compile(r"\b_cf\b")
+
     def translate_function(self, func_addr, func_info):
         """
         Translate a single function to C code.
         Returns a string of C source code, or None on failure.
+
+        _function_needs_cf predicts, in address order, whether anything reads
+        the carry; when the lifted body reads _cf all the same (a carry
+        condition reached through a join, a composed condition, XBA-317), the
+        function is lifted again with the carry produced and declared, rather
+        than shipped with a _cf it never declared (which does not build).
         """
+        unimpl = {k: len(v) for k, v in self.lifter.unimplemented.items()}
+        c = self._translate_function(func_addr, func_info)
+        if (c is not None and not self.lifter.needs_cf and func_addr not in self._force_cf
+                and self._CF_USE.search(c)):
+            self._force_cf.add(func_addr)
+            for k in list(self.lifter.unimplemented):
+                if k not in unimpl:
+                    del self.lifter.unimplemented[k]
+                else:
+                    del self.lifter.unimplemented[k][unimpl[k]:]
+            c = self._translate_function(func_addr, func_info)
+        return c
+
+    def _translate_function(self, func_addr, func_info):
         start = func_addr
         recovered = self._recovered_cfg.get(start)
         end = recovered["end"] if recovered else func_info.get("end")
@@ -3629,16 +3667,23 @@ class FunctionTranslator:
                                  "lock cmpxchg", "inc", "dec", "imul", "mul", "sahf", "fcomi",
                                  "fcomip", "fcompi", "fucomi", "fucomip", "fucompi")
                or insn.mnemonic.removeprefix("lock ") in _RESULT_SNAPSHOT_SETTERS
+               or "cmps" in insn.mnemonic or "scas" in insn.mnemonic
                for insn in instructions):
             lines.append("    uint32_t _fa = 0, _fb = 0;")
             lines.append("    int32_t _fas = 0, _fbs = 0;")
             lines.append("    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;")
         # A shift by a register count records whether that count was zero
         # (Lifter._shift_count_guard).
-        if any(insn.mnemonic.removeprefix("lock ") in ("shl", "sal", "shr", "sar")
-               and len(insn.operands) >= 2 and insn.operands[1].type != "imm"
+        # A rep compare records a zero count the same way (Lifter._rep_compare).
+        if any((insn.mnemonic.removeprefix("lock ") in ("shl", "sal", "shr", "sar")
+                and len(insn.operands) >= 2 and insn.operands[1].type != "imm")
+               or _is_rep_compare(insn)
                for insn in instructions):
             lines.append("    int _shz = 0; (void)_shz;")
+        # A rotate by 1 (or by a register) publishes its OF (Lifter._rotate_overflow).
+        if any(insn.mnemonic in ("rol", "ror", "rcl", "rcr") and _rotate_sets_of(insn.operands)
+               for insn in instructions):
+            lines.append("    uint32_t _fo = 0; (void)_fo;")
             # Flag snapshot: a cmp/test that is not fused with its jcc records
             # its operands here, zero- and sign-extended to the compare's own
             # width, so the branch tests what the compare saw.
@@ -3680,7 +3725,7 @@ class FunctionTranslator:
             start, instructions, fallthrough_target)
         self.lifter.flag_publish_sites = publish_sites
         self.lifter.flag_live_returns = live_after
-        has_carry = (self._function_needs_cf(instructions)
+        has_carry = (start in self._force_cf or self._function_needs_cf(instructions)
                      or bool(publish_sites) or publish_tail)
         if has_carry:
             carry_in = "g_eflags & 1u" if caller_flags else "0"
@@ -3825,6 +3870,15 @@ class FunctionTranslator:
         # settled_state onto the dict that pass fills is what makes the two
         # cases one loop: it then reads exactly the states it has computed
         # itself, which is what this function did before the probe existed.
+        # Blocks entered from somewhere the edge list does not know -- a
+        # switch table, a code address taken as an immediate, an exception
+        # funclet or resume target -- get no join image: an unseen edge would
+        # leave its locals holding another edge's flags.
+        unseen_entries = set(self.lifter.imm_code_refs)
+        for insn in instructions:
+            if insn.mnemonic == "jmp" and not insn.jump_target and insn.operands:
+                unseen_entries.update(self.lifter._analyze_switch_table(insn.operands))
+        no_image = unseen_entries | set(switch_leaders or ()) | set(debug_slide_bypasses.values()) | {start}
         out_state = {}
         settled_state = out_state
         if any(p >= bb.start for bb in blocks for p in preds[bb.start]):
@@ -3833,7 +3887,7 @@ class FunctionTranslator:
                 for bb in blocks:
                     incoming = _incoming_flag_state(
                         preds[bb.start], out_state, bb.start == start,
-                        caller_flags)
+                        caller_flags, None if bb.start in no_image else bb.start)
                     new_out = block_flag_out_state(bb, flag_state=incoming)
                     if out_state.get(bb.start) != new_out:
                         out_state[bb.start] = new_out
@@ -3843,10 +3897,6 @@ class FunctionTranslator:
             settled_state = out_state
             out_state = {}
 
-        unseen_entries = set(self.lifter.imm_code_refs)
-        for insn in instructions:
-            if insn.mnemonic == "jmp" and not insn.jump_target and insn.operands:
-                unseen_entries.update(self.lifter._analyze_switch_table(insn.operands))
         edge_vars, edge_sets, block_lines, edge_inits = [], [], {}, {}
 
         for bb in blocks:
@@ -3865,7 +3915,8 @@ class FunctionTranslator:
             # predecessor is known here even though it sits later in address
             # order.
             incoming = _incoming_flag_state(preds[bb.start], settled_state,
-                                            bb.start == start, caller_flags)
+                                            bb.start == start, caller_flags,
+                                            None if bb.start in no_image else bb.start)
 
             stmts, out_state[bb.start] = lift_basic_block(
                 self.lifter, bb, flag_state=incoming)
@@ -3927,8 +3978,16 @@ class FunctionTranslator:
             if stop > first:
                 inserts.append((stop - 1 if transfers else stop,
                                 f"    {var} = ({cond}) ? 1 : 0; /* flags of this edge */"))
+        join_vars = []
+        for p, text in self._join_image_lines(lines, preds, settled_state, join_vars):
+            first, stop, transfers = block_lines.get(p, (0, 0, False))
+            if stop > first:
+                inserts.append((stop - 1 if transfers else stop, text))
         for at, text in sorted(inserts, key=lambda t: -t[0]):
             lines.insert(at, text)
+        if join_vars:
+            lines.insert(frame_entry_at, "    int " + ", ".join(f"{v} = 0" for v in join_vars)
+                         + "; /* flags of joins, set by each incoming edge */")
         if edge_vars:
             decl = next((k for k, ln in enumerate(lines) if "fallback flag var" in ln), None)
             if decl is not None:
@@ -4061,6 +4120,36 @@ class FunctionTranslator:
 
     _HOST_WAIT_RE = re.compile(
         r"(?:RECOMP_POLL_WAIT\([^;]*?|RECOMP_BACK_EDGE\(|xbox_Halt\()0x([0-9A-F]{8})u\);")
+
+    _JOIN_VAR = re.compile(r"\b_j([CZSOP])_([0-9A-F]{8})\b")
+
+    @classmethod
+    def _join_image_lines(cls, lines, preds, states, declared):
+        """The stores of a join image (see _incoming_flag_state): for every
+        _jF_<join> local the lifted body reads, each predecessor of the join
+        stores flag F as its own state answers it. A predecessor's answer may
+        read another join's image, whose stores are then needed in turn.
+        Returns [(predecessor, line)] and appends the locals to `declared`."""
+        from .lifter import _make_condition
+        jcc = {"C": "jb", "Z": "je", "S": "js", "O": "jo", "P": "jp"}
+        todo = sorted(set(cls._JOIN_VAR.findall("\n".join(lines))))
+        seen, out = set(todo), []
+        while todo:
+            flag, join = todo.pop()
+            var = f"_j{flag}_{join}"
+            declared.append(var)
+            for p in sorted(preds.get(int(join, 16), ())):
+                state = states.get(p)
+                r = _make_condition(jcc[flag], *state) if state else None
+                # No rule: the flag is undefined after that setter (SF after
+                # a mul), so any value is the CPU's.
+                cond = r[0] if r else "0"
+                out.append((p, f"    {var} = ({cond}) ? 1 : 0; /* flags of this edge */"))
+                for k in cls._JOIN_VAR.findall(cond):
+                    if k not in seen:
+                        seen.add(k)
+                        todo.append(k)
+        return out
 
     def _resume_host_waits(self, start, body, has_ebp):
         """The host waits of a function that may park (XBA-251), each given a

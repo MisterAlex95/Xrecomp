@@ -444,6 +444,12 @@ ZF_FROM_DEST = frozenset({
     "adc", "sbb", "shl", "shr", "sar",
 })
 
+def _rotate_sets_of(ops):
+    """A rotate whose OF is defined (a count of 1) or may be (a register
+    count): it publishes OF into _fo."""
+    return len(ops) >= 2 and (ops[1].type != "imm" or ops[1].imm & 31 == 1)
+
+
 # Additional instructions that modify EFLAGS (tracked but handled as generic)
 _EFLAGS_SETTERS = frozenset({
     "shld", "shrd", "rol", "ror", "rcl", "rcr",  # Shifts/rotates set CF
@@ -596,11 +602,63 @@ def _has_xmm_operand(ops):
                for op in (ops or ()))
 
 
+# Every condition code from the five flags it reads (XBA-317). C, Z, S, O, P
+# are the single-flag conditions jb, je, js, jo, jp of the same setter.
+_CC_FROM_FLAGS = {
+    "jb": "C", "jnae": "C", "jc": "C", "jae": "!C", "jnb": "!C", "jnc": "!C",
+    "je": "Z", "jz": "Z", "jne": "!Z", "jnz": "!Z",
+    "js": "S", "jns": "!S", "jo": "O", "jno": "!O", "jp": "P", "jnp": "!P",
+    "jbe": "C || Z", "jna": "C || Z", "ja": "!C && !Z", "jnbe": "!C && !Z",
+    "jl": "S != O", "jnge": "S != O", "jge": "S == O", "jnl": "S == O",
+    "jle": "Z || S != O", "jng": "Z || S != O",
+    "jg": "!Z && S == O", "jnle": "!Z && S == O",
+}
+_FLAG_JCC = {"C": "jb", "Z": "je", "S": "js", "O": "jo", "P": "jp"}
+_SNAP_SWAP = re.compile(r"\b_f([ab])(s?)\b")
+
+
 def _make_condition(jcc, flag_setter, flag_ops):
     """
     Generate a C condition expression for a jcc based on what set the flags.
     Returns (cond_expr, description) or None.
+
+    The per-setter rules (_condition_rules) answer first. A condition they
+    have no rule for is composed from the single flags it reads, when the
+    setter has a rule for each of them: `seta` after shld is !CF && !ZF,
+    `setle` after a neg is ZF || SF != OF (XBA-317). Before, such a consumer
+    fell to the never-assigned `_flags` (or, for seto / cmovo, to an
+    unimplemented no-op), silently.
     """
+    jcc = {"jpe": "jp", "jpo": "jnp", "jz": "je", "jnz": "jne", "jc": "jb",
+           "jnc": "jae"}.get(jcc, jcc)
+    if flag_setter == "xadd":
+        # The flags of the sum: add's, with the source snapshotted into _fb
+        # before the write, as add's are (see the atomic lowering).
+        flag_setter = "add"
+    elif flag_setter == "cmpxchg" and len(flag_ops) >= 2:
+        # The flags of cmp accumulator, destination: the lowering snapshots
+        # the old destination into _fa and the accumulator into _fb, so the
+        # cmp rules answer with the two snapshots swapped.
+        r = _make_condition(jcc, "cmp", flag_ops)
+        if not r:
+            return None
+        return _SNAP_SWAP.sub(lambda m: "_f" + ("b" if m.group(1) == "a" else "a") + m.group(2),
+                              r[0]), r[1]
+    r = _condition_rules(jcc, flag_setter, flag_ops)
+    if r or jcc not in _CC_FROM_FLAGS or jcc in ("jb", "je", "js", "jo", "jp"):
+        return r
+    flags = {}
+    for f in set(re.findall(r"[CZSOP]", _CC_FROM_FLAGS[jcc])):
+        v = _condition_rules(_FLAG_JCC[f], flag_setter, flag_ops)
+        if not v:
+            return None
+        flags[f] = f"(({v[0]}) != 0)"
+    expr = re.sub(r"[CZSOP]", lambda m: flags[m.group(0)], _CC_FROM_FLAGS[jcc])
+    return f"({expr})", COND_MAP.get(jcc, (None, None, jcc))[2]
+
+
+def _condition_rules(jcc, flag_setter, flag_ops):
+    """_make_condition's per-setter rules."""
     jcc = {"jpe": "jp", "jpo": "jnp"}.get(jcc, jcc)
     cond_info = COND_MAP.get(jcc)
     if not cond_info:
@@ -649,18 +707,24 @@ def _make_condition(jcc, flag_setter, flag_ops):
             return mine
         return f"(_shz ? ({before[0]}) : ({mine[0]}))", mine[1]
 
-    # rol/ror write CF (into _cf) and OF, and leave ZF/SF/PF as the setter
-    # before them made them. That setter rides along in the state, so
-    # `test eax, eax; rol ecx, 1; jz` still answers from the test; OF is not
-    # modelled (it is defined only for a count of 1) and has no rule.
+    # rol/ror/rcl/rcr write CF (into _cf) and OF, and leave ZF/SF/PF as the
+    # setter before them made them. That setter rides along in the state, so
+    # `test eax, eax; rol ecx, 1; jz` still answers from the test. OF is
+    # defined for a count of 1 only: the rotate then publishes it into _fo,
+    # and the state's third element says so (XBA-317); after any other count
+    # it is undefined and the previous setter's answer is as good as any.
     if flag_setter == "__cf_over":
-        prev, prev_ops = flag_ops if flag_ops else (None, [])
+        prev, prev_ops = (flag_ops[0], flag_ops[1]) if flag_ops else (None, [])
+        rot_of = flag_ops[2] if len(flag_ops or ()) > 2 else None
         if jcc in ("jb", "jnae", "jc"):
             return "_cf", desc
         if jcc in ("jae", "jnb", "jnc"):
             return "!_cf", desc
-        if jcc in ("jo", "jno", "jl", "jnge", "jge", "jnl", "jle", "jng",
-                   "jg", "jnle") or not prev:
+        if rot_of and jcc in ("jo", "jno"):
+            return ("(_fo != 0)" if jcc == "jo" else "(_fo == 0)"), desc
+        if jcc in ("jl", "jnge", "jge", "jnl", "jle", "jng", "jg", "jnle") and rot_of:
+            return None             # composed from SF and _fo by _make_condition
+        if not prev:
             return None
         if jcc in ("jbe", "jna", "ja", "jnbe"):
             zf = _make_condition("je", prev, prev_ops)
@@ -670,6 +734,20 @@ def _make_condition(jcc, flag_setter, flag_ops):
                 return f"(_cf || ({zf[0]}))", desc
             return f"(!_cf && !({zf[0]}))", desc
         return _make_condition(jcc, prev, prev_ops)
+
+    # A join whose predecessors' states do not merge: each stored the flags
+    # into the join's locals (translator._incoming_flag_state). What they
+    # still agree on answers first.
+    if flag_setter == "__join":
+        join, partial = flag_ops[0], (flag_ops[1] if len(flag_ops) > 1 else None)
+        if partial:
+            r = _make_condition(jcc, *partial)
+            if r:
+                return r
+        cc = _CC_FROM_FLAGS.get(jcc, "")
+        if len(cc.lstrip("!")) == 1:
+            return f"{cc[:-1]}_j{cc[-1]}_{join:08X}", desc
+        return None
 
     # After stc/clc/cmc, CF is _cf (the lift writes it) and nothing else is
     # known: the other flags keep whatever the instruction before left, and
@@ -875,6 +953,13 @@ def _make_condition(jcc, flag_setter, flag_ops):
             return f"({_top_bit('_fa')} ^ (uint32_t)(_cf != 0))"
         elif flag_setter == "sar":
             return "0"
+        elif flag_setter == "shld":
+            # Defined for a count of 1: the sign changed, i.e. the result's
+            # top bit against the bit shifted out (the old top bit, in _cf).
+            return f"({_top_bit('_fa')} ^ (uint32_t)(_cf != 0))"
+        elif flag_setter == "shrd":
+            # Count of 1: the old top bit is the result's next one down.
+            return _top_bit("_fa ^ (_fa << 1)")
         else:
             return None
         signs = f"(({t})({a}) ^ ({t})({b}))"
@@ -1691,6 +1776,7 @@ class Lifter:
         # The translator reports this at the end of a run, so the next one
         # costs a line of output instead of an afternoon.
         self.unimplemented = {}
+        self._bare_compare = False      # a cmps/scas without rep (_rep_compare)
         # String port I/O met in lifted code, {va: (text, function)}: see
         # _misdecoded (XBA-139).
         self.misdecoded = {}
@@ -1872,9 +1958,12 @@ class Lifter:
         # These were RECOMP_UNIMPL: no compare, no advance, stale flags --
         # and MSVC unrolls short memcmps into exactly `cmpsd; jne` chains.
         if m in _BARE_STRING_COMPARES and not _has_xmm_operand(ops):
-            return (["{ uint32_t _rc = ecx; ecx = 1;"]
-                    + self._lift_rep_string(insn, "repe " + m)
-                    + ["ecx = _rc; }"])
+            self._bare_compare = True
+            try:
+                body = self._lift_rep_string(insn, "repe " + m)
+            finally:
+                self._bare_compare = False
+            return ["{ uint32_t _rc = ecx; ecx = 1;"] + body + ["ecx = _rc; }"]
         if m == "wait":
             return ["/* wait - FPU sync */"]
 
@@ -2326,6 +2415,7 @@ class Lifter:
                     f"{{ uint{bits}_t _a = (uint{bits}_t)({dst}), _b = (uint{bits}_t)({src});",
                     f"  uint{bits}_t _s = (uint{bits}_t)(_a + _b);",
                     f"  _fa = (uint32_t)_s; _fas = (int32_t)(int{bits}_t)_s; /* {m} result */"
+                    f" _fb = (uint32_t)_b; _fbs = (int32_t)(int{bits}_t)_b; /* {m} source */"
                     + (" _cf = (int)(_s < _a);" if self.needs_cf else ""),
                     "  " + _fmt_operand_write(ops[1], "_a"),
                     "  " + _fmt_operand_write(ops[0], "_s") + " }" f"  /* {m} */",
@@ -2335,7 +2425,7 @@ class Lifter:
             acc_write = _fmt_set_reg(acc, "_old")
             return [
                 f"{{ uint{bits}_t _cmp = (uint{bits}_t)({acc_read}), _old = (uint{bits}_t)({dst});",
-                "  _fa = _old; _fb = _cmp;",
+                "  _fa = _old; _fb = _cmp;" + (" _cf = (int)(_cmp < _old);" if self.needs_cf else ""),
                 f"  _fas = (int32_t)(int{bits}_t)_fa; _fbs = (int32_t)(int{bits}_t)_fb;",
                 "  if (_old == _cmp) { " + _fmt_operand_write(ops[0], f"(uint{bits}_t)({src})") + " }",
                 "  else { " + acc_write + " } }" f"  /* {m} */",
@@ -2353,6 +2443,7 @@ class Lifter:
                     f"  do {{ _old = MEM{bits}({addr}); _new = (uint{bits}_t)(_old + _add); }}",
                     f"  while (RECOMP_ATOMIC_CAS{bits}(XBOX_PTR({addr}), _old, _new) != _old);",
                     f"  _fa = (uint32_t)_new; _fas = (int32_t)(int{bits}_t)_new; /* {m} result */"
+                    f" _fb = (uint32_t)_add; _fbs = (int32_t)(int{bits}_t)_add; /* {m} source */"
                     + (" _cf = (int)(_new < _old);" if self.needs_cf else ""),
                     "  " + _fmt_operand_write(ops[1], "_old") + " }" f"  /* {m} */",
                 ]
@@ -2360,7 +2451,7 @@ class Lifter:
             return [
                 f"{{ uint{bits}_t _cmp = (uint{bits}_t)({_fmt_reg(acc)});",
                 f"  uint{bits}_t _old = RECOMP_ATOMIC_CAS{bits}(XBOX_PTR({addr}), _cmp, (uint{bits}_t)({src}));",
-                "  _fa = _old; _fb = _cmp;",
+                "  _fa = _old; _fb = _cmp;" + (" _cf = (int)(_cmp < _old);" if self.needs_cf else ""),
                 f"  _fas = (int32_t)(int{bits}_t)_fa; _fbs = (int32_t)(int{bits}_t)_fb;",
                 "  if (_old != _cmp) { " + _fmt_set_reg(acc, "_old") + " } }" f"  /* {m} */",
             ]
@@ -2381,7 +2472,8 @@ class Lifter:
                         "  uint32_t _old = RECOMP_ATOMIC_ADD32("
                         f"XBOX_PTR({addr}), _add);",
                         "  _fa = _old + _add; _fas = (int32_t)_fa;"
-                        f" /* {m} result */"
+                        " _fb = _add; _fbs = (int32_t)_add;"
+                        f" /* {m} result, source */"
                         + (" _cf = (int)(_fa < _old);" if self.needs_cf else ""),
                         "  " + _fmt_operand_write(ops[1], "_old") + " }"
                         f"  /* {m} */",
@@ -2395,7 +2487,7 @@ class Lifter:
                     "{ uint32_t _cmp = eax;",
                     "  uint32_t _old = RECOMP_ATOMIC_CAS32("
                     f"XBOX_PTR({addr}), _cmp, {src});",
-                    "  _fa = _old; _fb = _cmp;",
+                    "  _fa = _old; _fb = _cmp;" + (" _cf = (int)(_cmp < _old);" if self.needs_cf else ""),
                     "  _fas = (int32_t)_fa; _fbs = (int32_t)_fb;",
                     "  if (_old != _cmp) eax = _old; }"
                     f"  /* {m} */",
@@ -3043,11 +3135,28 @@ class Lifter:
         cnt = _fmt_operand_read(ops[1])
         left = 1 if m == "rcl" else 0
         write = _fmt_operand_write(ops[0], "_rcv")
+        of = (" " + self._rotate_overflow("_rcv", width, m)) if _rotate_sets_of(ops) else ""
         return [
             f"{{ uint32_t _rcv = RC_ROT((uint32_t)({dst}), (unsigned)({cnt}),"
             f" &_cf, {width}, {left});",
-            f"  {write} }} /* {m} */",
+            f"  {write}{of} }} /* {m} */",
         ]
+
+    @staticmethod
+    def _rotate_overflow(result, width, m):
+        """OF of a rotate by 1, from its result (XBA-317): rol and rcl flip
+        the sign when the top bit differs from the carry out (the result's
+        bit 0 after rol, _cf after rcl); ror and rcr when the result's two
+        top bits differ. The count is 1 or in a register; for any other
+        count OF is undefined, so one formula serves."""
+        r = f"(uint32_t)({result})"
+        if m == "rol":
+            other = f"{r}"
+        elif m == "rcl":
+            other = "(uint32_t)(_cf != 0)"
+        else:
+            other = f"({r} >> {width - 2})"
+        return f"_fo = (({r} >> {width - 1}) ^ {other}) & 1u; /* {m} OF */"
 
     def _lift_rotate(self, insn, ops, m):
         """A rotate is at the OPERAND's width, not always at 32 bits.
@@ -3073,6 +3182,19 @@ class Lifter:
         suffix = {8: "8", 16: "16"}.get(bits, "32")
         func = ("ROL" if m == "rol" else "ROR") + suffix
         write = _fmt_operand_write(ops[0], f"{func}({dst}, {cnt})")
+        if _rotate_sets_of(ops):
+            # The rotated value, for OF (Lifter._rotate_overflow): the write
+            # goes through a temporary so a memory operand is read once.
+            of = self._rotate_overflow("_rov", bits, m)
+            carry = ""
+            if self.needs_cf:
+                carry = (" _cf = (int)(_rov & 1u);" if m == "rol"
+                         else f" _cf = (int)((_rov >> {bits - 1}) & 1u);")
+            wr = _fmt_operand_write(ops[0], "_rov")
+            if ops[1].type == "imm":
+                return [f"{{ uint32_t _rov = (uint32_t){func}({dst}, {cnt}); {wr} {of}{carry} }}"]
+            return [f"{{ uint32_t _rc = (uint32_t)({cnt}) & 31u; uint32_t _rov = (uint32_t){func}({dst}, _rc);"
+                    f" {wr} if (_rc) {{ {of}{carry} }} }}"]
         if not self.needs_cf:
             return [write]
         # CF is the bit that wrapped round: the result's bit 0 after rol,
@@ -3895,9 +4017,9 @@ class Lifter:
         if "stosw" in m:
             return self._lift_rep_stos(2, "LO16(eax)", m)
         if "cmpsb" in m:
-            return self._rep_compare(m, "MEM8(esi)", "MEM8(edi)", 1, True)
+            return self._rep_compare(m, "MEM8(esi)", "MEM8(edi)", 1, True, self._bare_compare)
         if "scasb" in m:
-            return self._rep_compare(m, "LO8(eax)", "MEM8(edi)", 1, False)
+            return self._rep_compare(m, "LO8(eax)", "MEM8(edi)", 1, False, self._bare_compare)
         # The word and dword forms, same shape as the byte forms above. They
         # used to be a bare comment: nothing compared, esi/edi never advanced,
         # and the flags kept whatever the previous instruction left, so the jcc
@@ -3908,16 +4030,24 @@ class Lifter:
             wide = "cmpsd" in m
             step, acc = (4, "MEM32") if wide else (2, "MEM16")
             return self._rep_compare(m, f"{acc}(esi)", f"{acc}(edi)", step,
-                                     True)
+                                     True, self._bare_compare)
         if "scasw" in m or "scasd" in m:
             wide = "scasd" in m
             step, acc = (4, "MEM32") if wide else (2, "MEM16")
             value = "eax" if wide else "LO16(eax)"
-            return self._rep_compare(m, value, f"{acc}(edi)", step, False)
-        # (rep lods*, ...: was a bare comment, a no-op nothing counted.)
+            return self._rep_compare(m, value, f"{acc}(edi)", step, False, self._bare_compare)
+        # rep lods: only the last element stays in the accumulator (XBA-317;
+        # was RECOMP_UNIMPL). A zero count does nothing.
+        for name, step, write in (("lodsb", 1, "SET_LO8(eax, MEM8(esi));"),
+                                  ("lodsw", 2, "SET_LO16(eax, MEM16(esi));"),
+                                  ("lodsd", 4, "eax = MEM32(esi);")):
+            if name in m:
+                return [f"{{ int32_t _st = RECOMP_DF_STEP({step}); if (ecx != 0) {{"
+                        f" esi += (ecx - 1u) * (uint32_t)_st; {write} esi += _st; ecx = 0; }} }}"
+                        f" /* {m} */"]
         return self._unimplemented(insn, m)
 
-    def _rep_compare(self, m, first, second, step, uses_esi):
+    def _rep_compare(self, m, first, second, step, uses_esi, bare=False):
         """REPE/REPNE CMPS and SCAS: compare element by element.
 
         `_flags` holds ZF of the last comparison, which is all je/jne/sete
@@ -3935,6 +4065,12 @@ class Lifter:
         A zero count leaves the flags as they were. _cf does that by itself
         (only an iteration writes it); for _flags, lift_basic_block loads
         the incoming ZF before this loop when a tracked setter provides it.
+
+        Every flag of the last comparison (XBA-317): the two elements are
+        snapshotted like a cmp's operands (_fa/_fb, _fas/_fbs), so SF, OF,
+        PF and the signed conditions answer through the cmp rules, and _shz
+        records a zero count, after which the setter before still answers
+        (the "__shift_cl" state, as for a shift by cl).
         """
         continue_on_equal = "repne" not in m and "repnz" not in m
         stop_condition = "!_flags" if continue_on_equal else "_flags"
@@ -3942,18 +4078,20 @@ class Lifter:
                    else "edi += _st; ecx--;")
         lines = [
             f"{{ int32_t _st = RECOMP_DF_STEP({step});",
-            "while (ecx != 0) {",
         ]
-        if self.needs_cf:
-            # Each element read once: the guest accessors are volatile, so
-            # `_flags = (A == B); _cf = (A < B);` loaded both twice, and the
-            # two answers could come from different bytes if another guest
-            # thread wrote in between.
-            t = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t"}[step]
-            lines.append(f"    {{ {t} _x = {first}, _y = {second};"
-                         " _flags = (_x == _y); _cf = (_x < _y); }")
-        else:
-            lines.append(f"    _flags = ({first} == {second});")
+        if not bare:
+            lines.append("_shz = (ecx == 0); /* a zero count keeps every flag */")
+        lines.append("while (ecx != 0) {")
+        # Each element read once: the guest accessors are volatile, so
+        # `_flags = (A == B); _cf = (A < B);` loaded both twice, and the
+        # two answers could come from different bytes if another guest
+        # thread wrote in between.
+        t = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t"}[step]
+        sx = {1: "int8_t", 2: "int16_t", 4: "int32_t"}[step]
+        carry = " _cf = (_x < _y);" if self.needs_cf else ""
+        lines.append(f"    {{ {t} _x = {first}, _y = {second};"
+                     f" _flags = (_x == _y);{carry} _fa = _x; _fb = _y;"
+                     f" _fas = ({sx})_x; _fbs = ({sx})_y; }}")
         lines += [
             f"    {advance}",
             f"    if ({stop_condition}) break;",
@@ -4442,8 +4580,12 @@ class Lifter:
                     if m.endswith("sd") and _is_xmm(op):
                         return f"{op.reg}.d[0]"
                     return _sse_read(op)
+                # CF as well, for adc / sbb, which read _cf (XBA-317: `comiss;
+                # sbb eax, eax` read a stale carry): below, or unordered.
+                carry = (" _cf = (_fca < _fcb || _fca != _fca || _fcb != _fcb);"
+                         if self.needs_cf else "")
                 return [f"_fca = {compare_read(ops[0])}; _fcb = {compare_read(ops[1])};"
-                        f" /* {m} */"]
+                        f"{carry} /* {m} */"]
 
         # ── Bitwise ──
         # Done on the integer lanes: these carry sign-mask and select idioms
@@ -5036,8 +5178,11 @@ def publish_flags(state, note="flags for pushfd"):
         return []
     mask = 0
     bits = []
-    for condition, bit in (("jb", 1), ("jp", 4), ("je", 0x40),
-                           ("js", 0x80), ("jo", 0x800)):
+    flags = (("jb", 1), ("jp", 4), ("je", 0x40), ("js", 0x80), ("jo", 0x800))
+    if (state[0] == "__cf_over" and state[1] and state[1][0] == "eflags"
+            and (state[1][2] if len(state[1]) > 2 else None) is None):
+        flags = flags[:1]       # stc / clc / cmc after popfd: the rest is in g_eflags already
+    for condition, bit in flags:
         value = _make_condition(condition, *state)
         if value:
             mask |= bit
@@ -5227,7 +5372,8 @@ def _flag_transition(curr, setter, ops, cf_only_over):
         # A single cmps/scas sets the flags like cmp. "cmpsd" is also
         # the SSE2 scalar compare, which is why it sits in
         # _EFLAGS_PRESERVE and has to be caught before that test.
-        setter = curr.mnemonic
+        # The lift snapshots the two elements as cmp's operands (XBA-317).
+        setter = "cmp" if len(curr.operands) >= 2 else curr.mnemonic
         ops = list(curr.operands)
     elif curr.mnemonic in _SSE_CMP_NAMED:
         pass  # SSE compares write a mask, not EFLAGS
@@ -5250,24 +5396,35 @@ def _flag_transition(curr, setter, ops, cf_only_over):
     elif curr.mnemonic in FLAG_SETTERS:
         setter, ops = normalise_zero_test(
             curr.mnemonic, list(curr.operands))
-    elif curr.mnemonic in ("rol", "ror"):
+    elif curr.mnemonic in ("rol", "ror", "rcl", "rcr"):
         # CF is now _cf; ZF/SF/PF stay the previous setter's, which the
         # state keeps (see _make_condition). A count of zero changes
         # nothing; one in a register may be zero, and the lift then
         # leaves _cf alone, so lift_basic_block loads the incoming CF first.
+        # A count of 1 (or one in a register) also publishes OF into _fo
+        # (Lifter._rotate_overflow).
         rot = curr.operands
         if not (len(rot) >= 2 and rot[1].type == "imm"
                 and not rot[1].imm & 31):
+            of = "_fo" if _rotate_sets_of(rot) else None
             if setter == "__cf_over":
-                pass        # still the same setter underneath
+                ops = [ops[0], ops[1], of]      # the same setter underneath
             else:
-                ops = [setter, ops]
+                ops = [setter, ops, of]
                 setter = "__cf_over"
     elif curr.mnemonic in ("stc", "clc", "cmc"):
-        # CF is now _cf (the lift writes it); nothing else is tracked.
-        if setter != "__cf_only":
-            cf_only_over = setter
-        setter, ops = "__cf_only", []
+        # CF is now _cf (the lift writes it). The other flags are the
+        # setter's before, which rides along as under a rotate (XBA-317:
+        # `stc; je` read the fallback). With no setter known, nothing else is.
+        if setter == "__cf_over":
+            pass
+        elif setter and setter != "__cf_only":
+            ops = [setter, ops, None]
+            setter = "__cf_over"
+        else:
+            if setter != "__cf_only":
+                cf_only_over = setter
+            setter, ops = "__cf_only", []
     elif curr.mnemonic == "popfd":
         # Every flag now comes from the image popfd loaded.
         setter, ops = "eflags", []
@@ -5327,12 +5484,19 @@ def _flag_transition(curr, setter, ops, cf_only_over):
         # the sbb that follows read the xor's CF instead of the compare's.
         _cmp_forms = ("cmpsb", "cmpsw", "cmpsd",
                       "scasb", "scasw", "scasd")
-        if any(f in raw_m for f in _cmp_forms):
-            setter = raw_m
-            ops = list(curr.operands)
-        elif any(f in rest for f in _cmp_forms):
-            setter = raw_m
-            ops = list(curr.operands)
+        if any(f in raw_m for f in _cmp_forms) or any(f in rest for f in _cmp_forms):
+            # The last comparison's elements are snapshotted as cmp's
+            # operands; a zero count (_shz) keeps the setter before
+            # (XBA-317, Lifter._rep_compare).
+            if len(curr.operands) >= 2:
+                prev = setter
+                if prev == "__shift_cl":
+                    prev, ops = None, []
+                ops = ["cmp", list(curr.operands), prev, ops]
+                setter = "__shift_cl"
+            else:
+                setter = raw_m
+                ops = list(curr.operands)
         else:
             pass  # rep movs/stos = data movement, flags preserved
     else:

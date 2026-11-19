@@ -64,6 +64,11 @@ static uint8_t mem[512];
 #define LO16(v) ((uint16_t)(v))
 #define RECOMP_DF_STEP(n) (n)
 #define CMP_EQ(a, b) ((a) == (b))
+#define CMP_NE(a, b) ((a) != (b))
+#define CMP_B(a, b)  ((uint32_t)(a) <  (uint32_t)(b))
+#define CMP_AE(a, b) ((uint32_t)(a) >= (uint32_t)(b))
+#define CMP_BE(a, b) ((uint32_t)(a) <= (uint32_t)(b))
+#define CMP_A(a, b)  ((uint32_t)(a) >  (uint32_t)(b))
 """
 
 MAIN = r"""
@@ -180,10 +185,14 @@ def test_negative_control_without_cf_the_order_is_lost():
     assert "want -1" in ran.stderr, ran.stderr
 
 
-def test_negative_control_without_the_zf_preload_a_zero_count_fails():
-    srcs = {n: re.sub(r"\n\s*_flags = \([^\n]*ZF in[^\n]*", "", s)
+def test_negative_control_without_the_zero_count_record_a_zero_count_fails():
+    # A zero count keeps the flags of the instruction before (XBA-317: the
+    # loop records it in _shz, and the conditions answer from that setter).
+    # Without the record, a zero count reads the snapshot of a comparison
+    # that never ran -- poisoned here so the sweep must see it.
+    srcs = {n: s.replace("_shz = (ecx == 0);", "_shz = 0; _fa = 1; _fb = 2;")
             for n, s in _generated().items()}
-    assert all("ZF in" not in s for s in srcs.values())
+    assert all("_shz = (ecx" not in s for s in srcs.values())
     ran = _build_and_run(srcs)
     assert ran.returncode == 1, "a zero count should then read 'not equal'"
     assert "count 0" in ran.stderr, ran.stderr
@@ -204,4 +213,4 @@ def test_cf_is_only_computed_where_the_function_reads_it():
     # compares are this, and they should cost nothing new.
     code = _translate("guid", bytes.fromhex("F3A77501C3C3"))
     assert "_cf" not in code, code
-    assert "_flags = (MEM32(esi) == MEM32(edi));" in code, code
+    assert "_x = MEM32(esi), _y = MEM32(edi); _flags = (_x == _y);" in code, code

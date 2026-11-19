@@ -219,6 +219,38 @@ The `CMP_*` macros perform the comparison with proper signedness:
 #define TEST_Z(a, b)  (((uint32_t)(a) & (uint32_t)(b)) == 0)
 ```
 
+### Flags (lazy, per function)
+
+EFLAGS is not kept. The lifter tracks, per basic block, which instruction set the flags last (the *setter*), and
+the setter snapshots what its flags depend on in function locals at the point it runs: a cmp / test its operands
+(`_fa` / `_fb`, sign-extended in `_fas` / `_fbs`), an arithmetic or logic instruction its result (and add / sub /
+xadd their source, adc / sbb / inc / dec their OF), a carry producer `_cf` (only in functions that read the carry),
+a rotate by 1 its OF (`_fo`). A consumer (jcc, setcc, cmovcc, adc / sbb, lahf, pushfd, fcmov) is answered from
+the setter's snapshots (`_make_condition`):
+
+- the setter's own rule for that condition when it has one (`CMP_L(_fas, _fbs)` after a cmp);
+- otherwise the condition composed from the single flags it reads (XBA-317): `seta` is !CF && !ZF, `setle` is
+  ZF || SF != OF, each flag from the setter's rule for it. A setter with no rule for a flag the condition reads is
+  one that leaves it undefined (SF after a mul).
+
+Instructions that write only some flags keep the setter before underneath: a rotate or stc / clc / cmc writes CF
+(and a rotate by 1 OF) and answers ZF / SF / PF from the previous setter; a shift by cl or a rep compare records a
+zero count (`_shz`), which keeps the previous setter's flags. A string compare (bare or rep) snapshots the last
+elements it compared, as cmp does; cmpxchg answers as `cmp accumulator, destination`.
+
+At a join whose predecessors' states differ (`sub` on one edge, `test` on the other), each predecessor stores the
+flags the join reads into the join's locals (`_jC_` / `_jZ_` / `_jS_` / `_jO_` / `_jP_<join>`) before it jumps,
+and every consumer after the join reads those: the *join image*. Only the flags read are stored. Blocks that may
+be entered from an edge the lifter does not see (a jump table, an address taken as an immediate, an exception
+funclet) keep the fallback, a `_flags` local nothing assigns, which `tools/recomp/test_interp_diff.py` checks no
+random sequence reaches. A function whose body reads `_cf` without the address-order carry analysis having asked
+for it is lifted again with the carry produced.
+
+The model is held to the CPU: `test_interp_diff.py::test_lifted_code_matches_the_cpu` runs 617 sequences x 8 states
+(random integer code whose consumers read only defined flags, forward branches whose joins the flags cross, and named
+regressions) lifted against vectors recorded on a real x86 (`data/interp_golden.json`), with no sequence left out;
+`tools/conformance` covers the x87 / SSE compares' flags through every consumer.
+
 ### Function Calls
 
 ```
@@ -496,7 +528,10 @@ Maintain a checklist of required patches and re-apply them after every regenerat
 
 2. **FS segment**: x86 `fs:` segment overrides (used for Thread Information Block access) are dropped. The lifter translates `mov eax, fs:[0x28]` as `MEM32(0x28)`, which reads from the wrong memory. This affects ~35 instructions in Burnout 3.
 
-3. **Precise flag behavior**: the `CMP_*` macros handle common flag patterns, but exotic sequences (e.g., using carry flag from arithmetic to feed into a conditional branch 10 instructions later) may require manual intervention.
+3. **Precise flag behavior**: every consumer of a defined flag is answered from the setter (see Flags above), across
+   joins. Not modelled: AF (lahf and pushfd write it 0), the flags a callee leaves except where the caller reads
+   them (`_flag_boundaries`), and joins entered from an edge the lifter cannot see (jump-table targets), which keep
+   the `_flags` fallback.
 
 4. **Exception handling**: the original code uses SEH for error recovery (e.g., catching access violations from bad pointers). The translated code cannot use SEH in the same way because it's not real x86 code. A Vectored Exception Handler (VEH) partially bridges this gap.
 

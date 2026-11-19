@@ -72,7 +72,8 @@ def test_loop_head_inherits_flags_from_both_predecessors():
 def test_disagreeing_predecessors_keep_the_fallback():
     # Two predecessors reach the jz: one after `sub`, one after `inc`, whose
     # flags come from a different operand. The join must not inherit either:
-    # each edge sets the join's own variable from its own result.
+    # each edge stores the join's ZF from its own result (the join image,
+    # XBA-317).
     #   +0  sub eax, ecx
     #   +2  jz +1             -> the jz at +5
     #   +4  inc edx           (falls through to the jz, different flag source)
@@ -85,8 +86,8 @@ def test_disagreeing_predecessors_keep_the_fallback():
              b"\xC3")             # ret
     code = _translate(image)
     assert "if (_flags /*" not in code, code
-    assert "if (_jf_00010005 /* je" in code, code
-    assert code.count("_jf_00010005 = ((_fa == 0)) ? 1 : 0;") == 2, code
+    assert "if (_jZ_00010005) goto" in code, code
+    assert code.count("_jZ_00010005 = ((_fa == 0)) ? 1 : 0;") == 2, code
 
 
 if __name__ == "__main__":

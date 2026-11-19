@@ -13,7 +13,7 @@ class StringCompareLifterTest(unittest.TestCase):
         generated = "\n".join(lifted)
 
         self.assertIn("while (ecx != 0)", generated)
-        self.assertIn("_flags = (LO8(eax) == MEM8(edi));", generated)
+        self.assertIn("_x = LO8(eax), _y = MEM8(edi); _flags = (_x == _y);", generated)
         self.assertIn("edi += _st; ecx--;", generated)
         self.assertIn("if (_flags) break;", generated)
         self.assertLess(
@@ -39,10 +39,12 @@ class StringCompareLifterTest(unittest.TestCase):
             lifter, BasicBlock(start=0, instructions=[compare, jump]))
         generated = "\n".join(lifted)
 
-        self.assertIn("_flags = (MEM8(esi) == MEM8(edi));", generated)
+        self.assertIn("_x = MEM8(esi), _y = MEM8(edi); _flags = (_x == _y);", generated)
         self.assertIn("esi += _st; edi += _st; ecx--;", generated)
         self.assertIn("if (!_flags) break;", generated)
-        self.assertIn("if ((_flags != 0)) goto loc_00000010;", generated)
+        # The je reads the last comparison's snapshot (XBA-317: the loop
+        # writes _fa/_fb for every element, as a cmp would).
+        self.assertIn("if (CMP_EQ(_fa, _fb)) goto loc_00000010;", generated)
 
     def test_dword_compare_sets_the_flags_its_jcc_reads(self):
         compare = Instruction(
@@ -65,17 +67,17 @@ class StringCompareLifterTest(unittest.TestCase):
         # Was a bare comment, so the jcc after it read whatever the previous
         # instruction had left in the flags. It compares four bytes at a time
         # and steps esi/edi by four, and the following je reads _flags.
-        self.assertIn("_flags = (MEM32(esi) == MEM32(edi));", generated)
+        self.assertIn("_x = MEM32(esi), _y = MEM32(edi); _flags = (_x == _y);", generated)
         self.assertIn("esi += _st; edi += _st; ecx--;", generated)
         # The step is four bytes, in whichever direction EFLAGS.DF says.
         self.assertIn("RECOMP_DF_STEP(4)", generated)
         self.assertIn("if (!_flags) break;", generated)
-        # The je reads the flag the loop set, in whichever equivalent form
-        # the emitter picks -- what matters is that it reads _flags and not
-        # a stale _fa/_fb snapshot left by some earlier compare.
+        # The je reads the flags the loop set: since XBA-317 every element's
+        # comparison is snapshotted into _fa/_fb, as a cmp's operands are, so
+        # the snapshot is the last comparison's, never an earlier one's.
         jcc = generated.splitlines()[-1]
-        self.assertIn("_flags", jcc)
-        self.assertNotIn("_fa", jcc)
+        self.assertIn("CMP_EQ(_fa, _fb)", jcc)
+        self.assertIn("_fa = _x; _fb = _y;", generated)
 
 
 if __name__ == "__main__":

@@ -74,10 +74,16 @@ class StringPortIoTest(unittest.TestCase):
             self.assertEqual(len(lifter.misdecoded), 1, m)
 
     def test_an_unknown_rep_form_is_counted_not_dropped(self):
-        """`rep lodsb` was a bare comment nothing counted."""
-        lifter, out = _lift("rep lodsb", "al, byte ptr [esi]", [])
+        """`rep lodsb` was a bare comment nothing counted (and is lifted
+        since XBA-317); a rep form the lifter has no rule for is counted."""
+        lifter, out = _lift("rep movsq", "qword ptr es:[edi], qword ptr [esi]", [])
         self.assertIn("RECOMP_UNIMPL(", out)
-        self.assertIn("rep lodsb", lifter.unimplemented)
+        self.assertIn("rep movsq", lifter.unimplemented)
+
+    def test_rep_lods_keeps_the_last_element(self):
+        lifter, out = _lift("rep lodsb", "al, byte ptr [esi]", [])
+        self.assertNotIn("RECOMP_UNIMPL(", out)
+        self.assertIn("esi += (ecx - 1u) * (uint32_t)_st; SET_LO8(eax, MEM8(esi)); esi += _st; ecx = 0;", out)
 
 
 class CallSiteTest(unittest.TestCase):

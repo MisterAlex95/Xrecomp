@@ -67,9 +67,9 @@ SWITCH = ("40" + "ff2485" + TABLE.to_bytes(4, "little").hex() + "c3" + "909090"
 
 def test_a_join_edge_variable_keeps_the_wrapped_goto_on_one_line():
     code = _translate(JOIN)
-    assert "_jf_00010006" in code, code
+    assert "_jZ_00010006" in code, code
     line = next(ln for ln in code.splitlines() if "RECOMP_BACK_EDGE" in ln)
-    assert "_jf_00010006" in line and "goto loc_00010000; }" in line, line
+    assert "_jZ_00010006" in line and "goto loc_00010000; }" in line, line
     assert code.count("RECOMP_BACK_EDGE") == 1
     # The edge assignments were inserted before the predecessors' jumps.
     assert code.count("/* flags of this edge */") == 2, code
