@@ -15,7 +15,7 @@ from tools.xex.synth import build_xex
 from tools.xex.xex import parse_xex
 
 from . import asm as A
-from .discover360 import JumpTables, find_helpers, gpr_writes, pointer_seeds
+from .discover360 import JumpTables, find_helpers, gpr_writes, is_call, pointer_seeds
 from .recomp import RUNTIME_DIRS, CodeView, recompile
 from .prog import Prog
 from .test_x360_tools import M64, c_case, parse_out
@@ -336,6 +336,47 @@ def program():
         p(A.li(3, -9), A.blr())
         p.end()
 
+    # The same with what a larger function has on the way: the default label stands between the first switch's cases
+    # and the second switch (other code branches there, none of it reaches the table), and a case calls a function
+    # before the second switch. jt_nv keeps the index in r31, which a callee preserves: resolved. jt_vol keeps it in
+    # r11, which a call may overwrite: unresolved
+    for name, reg in (("nv", 31), ("vol", 11)):
+        p.func("jt_" + name)
+        p(A.mflr(10), A.mr(reg, 3), cmplwi(6, reg, 2))
+        p.branch(lambda at, t: A.bc(at, 12, 4 * 6 + 1, t), name + "_def")
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_tbl1")
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_tbl1")
+        p(lbzx(0, 12, reg))
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_base1")
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_base1")
+        p(A.rlwinm(0, 0, 2, 0, 29), A.add(12, 12, 0), A.mtctr(12), A.bctr())
+        p.label(name + "_base1")
+        p(A.li(3, 50))
+        p.branch(A.bl, "twice")
+        p(A.mr(5, 3))
+        p.branch(lambda at, t: A.b(at, t), name + "_second")
+        p(A.li(5, 200))
+        p.branch(lambda at, t: A.b(at, t), name + "_second")
+        p(A.li(3, 7777), A.mtlr(10), A.blr())
+        p.label(name + "_def")
+        p(A.li(3, -10), A.mtlr(10), A.blr())
+        p.label(name + "_second")
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_tbl2")
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_tbl2")
+        p(A.rlwinm(0, reg, 1, 0, 30), lhzx(0, 12, 0))
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_base2")
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_base2")
+        p(A.add(12, 12, 0), A.mtctr(12), A.bctr())
+        p.label(name + "_base2")
+        for k in (0, 1, 2):
+            p.label("%s_d%d" % (name, k))
+            p(A.li(3, 9001 + k), A.add(3, 3, 5), A.mtlr(10), A.blr())
+        p.label(name + "_tbl1")
+        p(*struct.unpack(">I", bytes((0, 4, 6, 0))))
+        p.label(name + "_tbl2")
+        p(*struct.unpack(">2I", struct.pack(">4H", 0, 16, 32, 16)))
+        p.end()
+
     # Leaf functions MSVC gives no .pdata entry, never called directly: leaf_data is named by a word of .rdata (a
     # vtable slot), leaf_code by the lis / addi pair in take_ptr (a callback handed over)
     p.func("leaf_data")
@@ -415,25 +456,27 @@ def test_discovery_and_lifting(tmp_path):
     img, funcs, labels = build()
     s = recompile(img, str(tmp_path))
     assert s["interp_fallback_insns"] == 0, s["unlifted"]
-    # the helpers are not functions; the nineteen of .pdata are, and the five leaf functions only a pointer names (a
+    # the helpers are not functions; the twenty-one of .pdata are, and the five leaf functions only a pointer names (a
     # word of .rdata, a lis / addi pair, close or apart, a table in the code section); a pointer into the middle of
     # a .pdata function is not a function, nor is what a register no longer points at, nor a lone word between
     # instructions
-    assert s["functions"] == 24 and s["pointer_seeds"] == 5
+    assert s["functions"] == 26 and s["pointer_seeds"] == 5
     view, dec = CodeView(img), XenonDecoder()
     assert pointer_seeds(img, view, lambda a: dec.decode(view.u32(a), a)) \
         == {funcs[n][0] for n in ("leaf_data", "leaf_code", "leaf_far", "leaf_va", "leaf_vb")}
     assert len(s["helpers"]) == 8 and s["helper_calls_inlined"] == 8
-    assert s["jump_tables"] == 13 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 + 3 + 3 + 3 + 3 + 4 * 3
-    assert s["unresolved_bctr"] == 3   # jt_slot_st's, the second of jt_two_w and of jt_two_in, and only those
+    assert s["jump_tables"] == 16 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 + 3 + 3 + 3 + 3 + 4 * 3 + 3 * 3
+    # jt_slot_st's, the second of jt_two_w, of jt_two_in and of jt_vol, and only those
+    assert s["unresolved_bctr"] == 4
     jt = JumpTables(view, lambda a: dec.decode(view.u32(a), a))
     bctrs = {n: next(a for a in range(*funcs[n], 4) if view.u32(a) == A.bctr()) for n in ("jt_slot", "jt_slot_st")}
     assert jt.resolve(bctrs["jt_slot"]) == [labels["slot_c%d" % k] for k in range(3)]
     assert not jt.resolve(bctrs["jt_slot_st"])
-    for n in ("two", "two_w", "two_in"):
+    for n in ("two", "two_w", "two_in", "nv", "vol"):
         first, second = (a for a in range(*funcs["jt_" + n], 4) if view.u32(a) == A.bctr())
-        assert jt.resolve(first) == [labels[n + "_base1"] + 8 * k for k in range(3)]
-        assert jt.resolve(second) == ([labels["%s_d%d" % (n, k)] for k in range(3)] if n == "two" else ())
+        assert jt.resolve(first) == [labels[n + "_base1"] + 4 * k for k in ((0, 4, 6) if n in ("nv", "vol")
+                                                                              else (0, 2, 4))]
+        assert jt.resolve(second) == ([labels["%s_d%d" % (n, k)] for k in range(3)] if n in ("two", "nv") else ())
     text = "".join(p.read_text() for p in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
     assert "savegpr" in text and "switch (t_)" in text
     table = (tmp_path / "x360_rc_table.c").read_text()
@@ -545,9 +588,10 @@ def test_helpers_and_tables_run(tmp_path):
                                  ("jt_ret", range(0, 5), {0: 4001, 1: 4002, 2: 4003, 3: 3, 4: 4}),
                                  ("jt_inv", range(0, 5), {0: 5001, 1: 5002, 2: 5003}),
                                  ("jt_slot", range(0, 5), {0: 6001, 1: 6002, 2: 6003}),
-                                 ("jt_two", range(0, 5), {0: 7101, 1: 7202, 2: 7777})):
+                                 ("jt_two", range(0, 5), {0: 7101, 1: 7202, 2: 7777}),
+                                 ("jt_nv", range(0, 5), {0: 9101, 1: 9202, 2: 7777})):
         default = {"jt_abs": -1, "jt_byte": -2, "jt_gcc": -3, "jt_min": -4, "jt_half": -5, "jt_open": 0,
-                   "jt_ret": 0, "jt_inv": -7, "jt_slot": -8, "jt_two": -9}[name]
+                   "jt_ret": 0, "jt_inv": -7, "jt_slot": -8, "jt_two": -9, "jt_nv": -10}[name]
         for x in inputs:
             tag = "%s_%d" % (name, x & 0xFF)
             cases.append(c_case(tag, funcs[name][0], b"", gpr={1: STACK, 3: x & 0xFFFFFFFF if x >= 0 else x & M64},
@@ -594,6 +638,8 @@ def test_gpr_writes():
     assert gpr_writes(A.mtctr(9)) == () and gpr_writes(A.bctr()) == () and gpr_writes(A.blr()) == ()
     assert gpr_writes(A.b(0x1000, 0x1010)) == () and gpr_writes(A.bl(0x1000, 0x1010)) is None
     assert gpr_writes(A.bctr() | 1) is None and gpr_writes(0) is None and gpr_writes(A.vxor(9, 9, 9)) is None
+    assert is_call(A.bl(0x1000, 0x1010)) and is_call(A.bctr() | 1) and is_call(A.blr() | 1)
+    assert not is_call(A.b(0x1000, 0x1010)) and not is_call(A.bctr()) and not is_call(0) and not is_call(A.li(3, 1) | 1)
 
 
 def test_helper_words_match_xenonrecomp():

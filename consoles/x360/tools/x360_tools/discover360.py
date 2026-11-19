@@ -298,9 +298,15 @@ _X31_WRITES_NONE = frozenset((0, 32, 144, 149, 151, 215, 407, 467))   # compares
 _X31_OE = frozenset((8, 10, 40, 104, 136, 138, 200, 202, 232, 233, 234, 235, 266, 457, 459, 489, 491))
 
 
+def is_call(w):
+    """bl, bcl, blrl, bctrl: control comes back after it with the volatile registers undefined."""
+    op = w >> 26
+    return bool(w & 1) and (op in (16, 18) or (op == 19 and (w >> 1) & 0x3FF in (16, 528)))
+
+
 def gpr_writes(w):
-    """The general registers the instruction word writes, as a tuple; None for a call, a system call, a trap, or
-    anything this does not know (the caller then gives up)."""
+    """The general registers the instruction word writes, as a tuple; None for a call (`is_call`), a system call, a
+    trap, or anything this does not know (the caller then gives up)."""
     op, d, a = w >> 26, (w >> 21) & 31, (w >> 16) & 31
     if op in (7, 8, 12, 13, 14, 15, 32, 34, 40, 42):          # mulli .. addis, lwz, lbz, lhz, lha
         return (d,)
@@ -609,14 +615,16 @@ class JumpTables:
         """A table whose bound check stands further up the function and serves more than one table: `cmplwi crF, rI,
         N; bgt crF, default`, a first switch on rI, and in some of its cases a second switch on rI again, which the
         compiler emits without a check. The bound is that compare's when the table code can only be reached through
-        it with rI untouched. That is shown for a region R of the function, from the instruction after the `bgt` to
-        the bctr at least:
-        - nothing in R writes rI, and nothing in R is a call (every instruction there is one `gpr_writes` knows);
-        - every branch of the function into R comes from R (R grows to hold a later branch that jumps back into
-          it; one from before R, the `bgt`'s own default included, refuses);
-        - the function's other bctr are resolved tables, their targets under the same rule.
-        So R is entered by falling out of the `bgt` only: rI is at most N throughout. Only inside a .pdata function
-        (taken to be entered at its start), and every target must be a word of that function."""
+        it with rI untouched. That is shown by walking the function backwards from the bctr, over every way into
+        each instruction (falling into it, a branch, a case of one of the function's other tables), down to the
+        instruction after the `bgt` (`_only_through`):
+        - no instruction met writes rI (each is one `gpr_writes` knows; a call is allowed when rI is one of the
+          registers a callee preserves, r14 to r31);
+        - the walk never reaches the function's entry, nor leaves through the `bgt` itself (its default label
+          leading to the table), nor finds a second way to the instruction after the `bgt`;
+        - the function's other bctr are resolved tables.
+        So every path to the table falls out of the `bgt` and keeps rI: it is at most N. Only inside a .pdata
+        function (taken to be entered at its start), and every target must be a word of that function."""
         f = self._function(a)
         if f is None:
             return None
@@ -648,7 +656,7 @@ class JumpTables:
                 flow = self._function_flow(a, fs, fe)
                 if flow is None:
                     return None
-            if self._single_entry(g, a, idx, fe, flow):
+            if self._only_through(g, a, idx, fs, flow):
                 targets = []
                 try:
                     for x in range(n + 1):
@@ -699,25 +707,46 @@ class JumpTables:
                 out += [(p, x) for x in t]
         return out
 
-    def _single_entry(self, g, a, idx, fe, flow):
-        """Whether a region from g to the bctr at a (or further) is entered at g only and keeps the index."""
-        lo, hi = g, a + 4
-        grown = True
-        while grown:
-            grown = False
-            for src, t in flow:
-                if lo <= t < hi and not lo <= src < hi:
-                    if src < lo:
-                        return False
-                    hi, grown = src + 4, True
-        if hi > fe:
+    ONLY_THROUGH_LIMIT = 8192   # instructions walked back from a bctr before giving up
+
+    def _only_through(self, g, a, idx, fs, flow):
+        """Whether every path of the function to the bctr at a comes through g, entered by falling into it, and
+        writes the index nowhere from g on."""
+        into = {}
+        for src, t in flow:
+            into.setdefault(t, []).append(src)
+        if g in into:
             return False
-        for p in range(lo, hi, 4):
-            if not self.view.in_code(p):
-                return False
-            wr = gpr_writes(self.view.u32(p))
-            if wr is None or idx in wr:
-                return False
+        seen, work = {a}, [a]
+        while work:
+            n = work.pop()
+            if n != a:
+                w = self.view.u32(n)
+                wr = gpr_writes(w)
+                if wr is None:
+                    if not is_call(w) or idx < 14:
+                        return False
+                elif idx in wr:
+                    return False
+            if n == g:
+                continue
+            if n == fs or n == g - 4 or len(seen) > self.ONLY_THROUGH_LIMIT:
+                return False   # the entry, or the `bgt` itself: its default label leads to the table
+            before = list(into.get(n, ()))
+            p = n - 4
+            if self.view.in_code(p):
+                i = self.decode(p)
+                # everything runs on into n but a jump, a return and a word that is no instruction (a call does, when
+                # it returns)
+                always = i.kind == BRANCH or (i.kind in (BCOND, BCLR, BCCTR) and (i.rd & 0x14) == 0x14)
+                if not (i.kind in (INVALID, RFI) or (always and not i.lk)):
+                    before.append(p)
+            for p in before:
+                if p < fs:
+                    return False
+                if p not in seen:
+                    seen.add(p)
+                    work.append(p)
         return True
 
     def _unbounded(self, a, insns, k):
