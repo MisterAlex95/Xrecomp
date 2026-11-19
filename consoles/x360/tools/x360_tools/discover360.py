@@ -12,9 +12,10 @@
 - Jump tables. A `bctr` whose CTR comes from a table indexed by a bounded register (`cmplwi rI, N` + a branch on GT
   before it) is resolved by evaluating the code before it backwards (`JumpTables`): absolute tables (`lwzx` of
   addresses: MSVC), tables of offsets added to a base (`lbzx` / `lhzx` / `lwzx`, optionally shifted, plus a constant:
-  MSVC's compact forms, and GCC's relative tables). The targets become branch targets inside the function and the
-  lifter turns the `bctr` into a switch. Anything else stays an indirect jump through the dispatcher, counted as
-  unresolved.
+  MSVC's compact forms, and GCC's relative tables). The index is the register as the bound check compared it: what
+  computed it before that (MSVC's `addi rI, rX, -lowest case`) is not part of the table's address. The targets become
+  branch targets inside the function and the lifter turns the `bctr` into a switch. Anything else stays an indirect
+  jump through the dispatcher, counted as unresolved.
 
 Nothing here can be checked against MSVC output in this repository (no title code): the shapes are what XenonRecomp
 and Xenia describe; recognition is deliberately strict, and `stats()` reports what was found so a title's sweep shows
@@ -206,6 +207,7 @@ class JumpTables:
         self.decode = decode
         self.tables = {}      # bctr addr -> [targets]
         self.unresolved = set()
+        self._index = None    # while a table is evaluated: (index register, where its bound check is in the window)
 
     def resolve(self, a):
         if a in self.tables:
@@ -231,8 +233,13 @@ class JumpTables:
         return out
 
     def _def(self, insns, start, reg):
-        """Index in insns (nearest first) of the instruction that last wrote reg, at or after start."""
-        for k in range(start, len(insns)):
+        """Index in insns (nearest first) of the instruction that last wrote reg, at or after start. The index
+        register is followed no further back than its bound check (`_index`): the table is indexed by the value
+        that was compared, whatever computed it (MSVC subtracts the lowest case first: `addi rI, rX, -min`)."""
+        end = len(insns)
+        if self._index is not None and reg == self._index[0]:
+            end = min(end, self._index[1])
+        for k in range(start, end):
             i = insns[k]
             n = i.name
             if n is None:
@@ -339,17 +346,14 @@ class JumpTables:
         k = next((j for j, i in enumerate(insns) if i.name == "mtspr" and i.spr == 9), None)
         if k is None:
             return None
-        e = self._ev(insns, k + 1, insns[k].rd)
-        if e is None or e.k == "const":
-            return None
         # the bound: cmplwi crF, rI, N then a conditional branch on crF's GT bit, before the table code
-        bound = None
+        bound, at = None, len(insns)
         for j in range(k + 1, len(insns)):
             i = insns[j]
             if i.name == "cmpli" and not (i.rd & 1):
                 crf = i.rd >> 2
                 if any(b.kind == BCOND and b.ra == 4 * crf + 1 for b in insns[k + 1:j]):
-                    bound = (i.ra, i.uimm)
+                    bound, at = (i.ra, i.uimm), j
                     break
         if bound is None:
             bc = self._bound_before(insns)
@@ -358,6 +362,13 @@ class JumpTables:
             bound = bc
         reg, n = bound
         if n > 4096:
+            return None
+        self._index = (reg, at)
+        try:
+            e = self._ev(insns, k + 1, insns[k].rd)
+        finally:
+            self._index = None
+        if e is None or e.k == "const":
             return None
         targets = []
         try:

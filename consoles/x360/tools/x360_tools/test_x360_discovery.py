@@ -35,6 +35,10 @@ def lbzx(rd, ra, rb):
     return (31 << 26) | (rd << 21) | (ra << 16) | (rb << 11) | (87 << 1)
 
 
+def lhzx(rd, ra, rb):
+    return (31 << 26) | (rd << 21) | (ra << 16) | (rb << 11) | (279 << 1)
+
+
 def stwu(rs, d, ra):
     return (37 << 26) | (rs << 21) | (ra << 16) | (d & 0xFFFF)
 
@@ -186,6 +190,44 @@ def program():
     p.label("gcc_def")
     p(A.li(3, -3), A.blr())
     p.end()
+
+    # jt_min(i): cases 10..13. MSVC subtracts the lowest case before the bound check, into another register: the
+    # table is indexed by the value that was compared
+    p.func("jt_min")
+    p(A.addi(11, 3, -10), cmplwi(6, 11, 3))
+    p.branch(lambda at, t: A.bc(at, 12, 4 * 6 + 1, t), "min_def")
+    p.branch(lambda at, t: A.lis(12, ha(t)), "min_tbl")
+    p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), "min_tbl")
+    p(A.rlwinm(0, 11, 2, 0, 29), A.lwzx(0, 12, 0), A.mtctr(0), A.bctr())
+    p.label("min_tbl")
+    for k in range(4):
+        p.branch(lambda at, t: t, "min_c%d" % k)
+    for k, v in enumerate((1010, 1011, 1012, 1013)):
+        p.label("min_c%d" % k)
+        p(A.li(3, v), A.blr())
+    p.label("min_def")
+    p(A.li(3, -4), A.blr())
+    p.end()
+
+    # jt_half(i): cases 1..3, the index adjusted in place; halfword offsets (in bytes) from a base, and the nop MSVC
+    # leaves between mtctr and bctr
+    p.func("jt_half")
+    p(A.addi(3, 3, -1), cmplwi(6, 3, 2))
+    p.branch(lambda at, t: A.bc(at, 12, 4 * 6 + 1, t), "half_def")
+    p.branch(lambda at, t: A.lis(12, ha(t)), "half_tbl")
+    p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), "half_tbl")
+    p(A.rlwinm(0, 3, 1, 0, 30), lhzx(0, 12, 0))
+    p.branch(lambda at, t: A.lis(12, ha(t)), "half_base")
+    p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), "half_base")
+    p(A.add(12, 12, 0), A.mtctr(12), A.ori(0, 0, 0), A.bctr())
+    p.label("half_base")
+    for v in (2001, 2002, 2003):
+        p(A.li(3, v), A.blr())
+    p.label("half_tbl")
+    p(*struct.unpack(">2I", struct.pack(">4H", 0, 8, 16, 0)))
+    p.label("half_def")
+    p(A.li(3, -5), A.blr())
+    p.end()
     words = p.link()
     funcs = {name: (a, b) for name, a, b in p.funcs}
     return words, {n: (TEXT + 4 * a, TEXT + 4 * b) for n, (a, b) in funcs.items()}, p.labels
@@ -218,10 +260,10 @@ def test_discovery_and_lifting(tmp_path):
     img, funcs, labels = build()
     s = recompile(img, str(tmp_path))
     assert s["interp_fallback_insns"] == 0, s["unlifted"]
-    # the helpers are not functions; the six real ones are
-    assert s["functions"] == 6
+    # the helpers are not functions; the eight real ones are
+    assert s["functions"] == 8
     assert len(s["helpers"]) == 8 and s["helper_calls_inlined"] == 8
-    assert s["jump_tables"] == 3 and s["jump_table_targets"] == 5 + 6 + 3 and s["unresolved_bctr"] == 0
+    assert s["jump_tables"] == 5 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 and s["unresolved_bctr"] == 0
     text = "".join(p.read_text() for p in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
     assert "savegpr" in text and "switch (t_)" in text
     table = (tmp_path / "x360_rc_table.c").read_text()
@@ -326,8 +368,10 @@ def test_helpers_and_tables_run(tmp_path):
         checks.append(("fsum", "v%d" % r, int("".join("%08x" % ((r << 24) + k) for k in range(4)), 16)))
     for name, inputs, expect in (("jt_abs", range(-1, 7), {0: 10, 1: 20, 2: 30, 3: 40, 4: 50}),
                                  ("jt_byte", range(0, 8), {0: 7, 1: 8, 2: 8, 3: 9, 4: 100, 5: 7}),
-                                 ("jt_gcc", range(0, 4), {0: 111, 1: 222, 2: 333})):
-        default = {"jt_abs": -1, "jt_byte": -2, "jt_gcc": -3}[name]
+                                 ("jt_gcc", range(0, 4), {0: 111, 1: 222, 2: 333}),
+                                 ("jt_min", range(8, 16), {10: 1010, 11: 1011, 12: 1012, 13: 1013}),
+                                 ("jt_half", range(0, 6), {1: 2001, 2: 2002, 3: 2003})):
+        default = {"jt_abs": -1, "jt_byte": -2, "jt_gcc": -3, "jt_min": -4, "jt_half": -5}[name]
         for x in inputs:
             tag = "%s_%d" % (name, x & 0xFF)
             cases.append(c_case(tag, funcs[name][0], b"", gpr={3: x & 0xFFFFFFFF if x >= 0 else x & M64},
