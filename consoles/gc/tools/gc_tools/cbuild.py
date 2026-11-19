@@ -19,7 +19,8 @@ CODECS = [os.path.join(CHDR, "deps", "miniz-3.1.2", "miniz.c"), os.path.join(CHD
           os.path.join(CHDR, "deps", "lzma-26.02", "src", "LzmaDec.c")]
 DEFINES = ["-DMINIZ_NO_ARCHIVE_APIS", "-DMINIZ_NO_DEFLATE_APIS", "-DMINIZ_NO_STDIO", "-DMINIZ_NO_TIME"]
 INCLUDES = ["-I", RUNTIME, "-I", PLATFORM, "-I", os.path.join(CHDR, "deps", "miniz-3.1.2"), "-I", os.path.join(CHDR, "deps", "zstd-1.5.7"),
-            "-I", os.path.join(CHDR, "deps", "lzma-26.02", "include")]
+            "-I", os.path.join(CHDR, "deps", "lzma-26.02", "include"),
+            "-I", os.path.join(REPO, "src")]  # video/gpu_ring.h (gx_gl.c), shared with the NV2A back end
 
 
 def _compile(jobs):
