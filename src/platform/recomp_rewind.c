@@ -523,8 +523,12 @@ int recomp_rewinder_frame(recomp_rewinder *w, recomp_rewind_size_fn size, recomp
         int iv = need > 60 ? 60 : (int)need;
         if (iv < w->interval_set)
             iv = w->interval_set;
-        /* Up at once, down only when clearly cheaper (no flapping around a boundary). */
-        if (iv > w->interval || iv * 3 / 2 < w->interval) {
+        /* Up at once, down only when clearly cheaper (no flapping around a boundary): under two thirds of what the
+         * current spacing allows. Compared on the cost, not on the rounded spacing: iv * 3 / 2 < interval never let
+         * an interval one above a setting of 3 come back (3 * 3 / 2 is 4), so one slow capture (a preempted frame
+         * thread) kept it there for good. */
+        if (iv > w->interval ||
+            (iv < w->interval && w->cost_avg_ns * 3 / 2 < (uint64_t)w->interval * RECOMP_REWIND_COST_NS)) {
             printf("%s: rewind captures cost %.2f ms: one every %d frames\n", w->console,
                    (double)w->cost_avg_ns / 1e6, iv);
             fflush(stdout);
