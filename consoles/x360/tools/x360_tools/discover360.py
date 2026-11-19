@@ -200,11 +200,12 @@ _WRITES_RA = frozenset((20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 33, 35, 37, 39, 
 def pointer_seeds(img, view, decode):
     """Leaf functions that only a pointer reaches. MSVC gives a leaf function no .pdata entry (nothing to unwind), so
     one that is never called directly -- a virtual method, a callback -- is in no table and after no `bl`. Two places
-    name it all the same: a word of a data section holding its address (a vtable, a table of callbacks), and a
-    `lis` + `addi` / `ori` pair in code building it (a callback passed as an argument, a table filled in code). A
-    candidate is a word-aligned code address outside every .pdata function (inside one it would be a label or a table of that function) whose
-    first word decodes and is not itself an address in the image (a table of addresses in a code section). Without
-    a .pdata table there is nothing to tell a function from a label: no candidates."""
+    name it all the same: a word holding its address (a vtable, a table of callbacks; in a data section, or in a
+    code section among other addresses), and a `lis` + `addi` / `ori` pair in code building it (a callback passed
+    as an argument, a table filled in code). A candidate is a word-aligned code address outside every .pdata
+    function (inside one it would be a label or a table of that function) whose first word decodes and is not
+    itself an address in the image (a table of addresses in a code section). Without a .pdata table there is
+    nothing to tell a function from a label: no candidates."""
     if img.image is None or not img.pdata:
         return set()
     starts = sorted(s for s, _ in img.pdata)
@@ -228,6 +229,9 @@ def pointer_seeds(img, view, decode):
             seen[t] = r
         return r
 
+    def aligned_code(w):
+        return c_lo <= w < c_hi and not w & 3 and view.in_code(w)
+
     out = set()
     image = memoryview(img.image)
     for s in img.sections:
@@ -242,8 +246,19 @@ def pointer_seeds(img, view, decode):
         # (b) code: lis rD, hi; then, down the straight run and while rD keeps that value, addi rX, rD, lo or
         # ori rX, rD, lo. Several addresses are often prepared together (the lis first, the addi where each is
         # stored), and one lis may serve more than one address.
-        at = a
+        # (c) code sections also hold tables of addresses (vtables the linker merged into .text): a word that is a
+        # candidate, next to another aligned code address, outside every .pdata function (inside one it is that
+        # function's jump table, or an instruction: `lwz r16..r23` words look like addresses of the image)
+        at, before = a, False
         for (w,) in iter_unpack(">I", image[a - lo:a - lo + ((b - a) & ~3)]):
+            if c_lo <= w < c_hi and not w & 3:
+                if (before or (at + 4 < b and aligned_code(img.u32(at + 4)))) and candidate(w):
+                    k = bisect_right(starts, at) - 1
+                    if k < 0 or at >= ends[starts[k]]:
+                        out.add(w)
+                before = view.in_code(w)
+            else:
+                before = False
             if w & 0xFC1F0000 == 0x3C000000:
                 rd, top = (w >> 21) & 31, (w & 0xFFFF) << 16
                 for p in range(at + 4, min(at + 4 + 4 * POINTER_PAIR_SPAN, b), 4):

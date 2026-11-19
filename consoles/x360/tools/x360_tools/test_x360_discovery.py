@@ -274,6 +274,19 @@ def program():
     p.branch(lambda at, t: A.addi(4, 11, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), "leaf_stale")
     p(A.blr())
     p.end()
+    # leaf_va / leaf_vb: named by a table of addresses in the code section itself (a vtable merged into .text),
+    # outside every .pdata function; leaf_lone's address stands alone between instructions: that is no table
+    for name, v in (("leaf_va", 41), ("leaf_vb", 42), ("leaf_lone", 43)):
+        p.func(name)
+        p(A.li(3, v), A.blr())
+        p.end()
+    p.func("leaf_table")
+    p.branch(lambda at, t: t, "leaf_va")
+    p.branch(lambda at, t: t, "leaf_vb")
+    p(0, A.blr())
+    p.branch(lambda at, t: t, "leaf_lone")
+    p(A.blr())
+    p.end()
     words = p.link()
     funcs = {name: (a, b) for name, a, b in p.funcs}
     return words, {n: (TEXT + 4 * a, TEXT + 4 * b) for n, (a, b) in funcs.items()}, p.labels
@@ -309,13 +322,14 @@ def test_discovery_and_lifting(tmp_path):
     img, funcs, labels = build()
     s = recompile(img, str(tmp_path))
     assert s["interp_fallback_insns"] == 0, s["unlifted"]
-    # the helpers are not functions; the twelve of .pdata are, and the three leaf functions only a pointer names (a
-    # word of .rdata, a lis / addi pair, close or apart); a pointer into the middle of a .pdata function is not a
-    # function, nor is what a register no longer points at
-    assert s["functions"] == 15 and s["pointer_seeds"] == 3
+    # the helpers are not functions; the twelve of .pdata are, and the five leaf functions only a pointer names (a
+    # word of .rdata, a lis / addi pair, close or apart, a table in the code section); a pointer into the middle of
+    # a .pdata function is not a function, nor is what a register no longer points at, nor a lone word between
+    # instructions
+    assert s["functions"] == 17 and s["pointer_seeds"] == 5
     view, dec = CodeView(img), XenonDecoder()
     assert pointer_seeds(img, view, lambda a: dec.decode(view.u32(a), a)) \
-        == {funcs[n][0] for n in ("leaf_data", "leaf_code", "leaf_far")}
+        == {funcs[n][0] for n in ("leaf_data", "leaf_code", "leaf_far", "leaf_va", "leaf_vb")}
     assert len(s["helpers"]) == 8 and s["helper_calls_inlined"] == 8
     assert s["jump_tables"] == 6 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 + 3 and s["unresolved_bctr"] == 0
     text = "".join(p.read_text() for p in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
@@ -433,7 +447,7 @@ def test_helpers_and_tables_run(tmp_path):
                                 out_gpr=[3]))
             checks.append((tag, "r3", expect.get(x, default) & M64))
     # the leaf functions are in the pack: entered at their own address, as a call through the pointer would
-    for name, value in (("leaf_data", 77), ("leaf_code", 88), ("leaf_far", 99)):
+    for name, value in (("leaf_data", 77), ("leaf_code", 88), ("leaf_far", 99), ("leaf_va", 41), ("leaf_vb", 42)):
         cases.append(c_case(name, funcs[name][0], b"", gpr={3: 0}, out_gpr=[3]))
         checks.append((name, "r3", value))
 
