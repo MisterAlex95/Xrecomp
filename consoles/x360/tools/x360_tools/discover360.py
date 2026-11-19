@@ -304,6 +304,7 @@ class JumpTables:
         self.tables = {}      # bctr addr -> [targets]
         self.unresolved = set()
         self._index = None    # while a table is evaluated: (index register, where its bound check is in the window)
+        self._slot = None     # and, when the compared value was loaded from the stack: (displacement, where)
         self._functions = None  # the .pdata functions, sorted (made when a table has no bound check)
 
     def resolve(self, a):
@@ -389,6 +390,15 @@ class JumpTables:
             if sh == 0 and mb > 0 and me == 31:      # clrlwi: an index already bounded
                 return x
             return None
+        if n == "lwz":
+            # the index loaded again from the stack slot the compared value came from (code built without
+            # optimisation keeps every local in memory: `lwz rX, d(r1); cmplwi rX, N; bgt ...; lwz rY, d(r1)`): the
+            # same value, as nothing between the two loads stores to memory or moves the stack pointer
+            s = self._slot
+            if s is not None and i.ra == 1 and i.simm == s[0] and k < s[1] \
+                    and all(self._keeps_stack(x) for x in insns[k + 1:s[1]]):
+                return _Expr("reg", self._index[0])
+            return None
         if n in ("lwzx", "lhzx", "lbzx"):
             a, b = self._ev(insns, nxt, i.ra, depth + 1) if i.ra else _Expr("const", 0), \
                 self._ev(insns, nxt, i.rb, depth + 1)
@@ -399,6 +409,32 @@ class JumpTables:
             if a.k != "const":
                 return None
             return _Expr("load", {"lwzx": 4, "lhzx": 2, "lbzx": 1}[n], a.a, b)
+        return None
+
+    @staticmethod
+    def _keeps_stack(i):
+        """An instruction that stores nothing and leaves r1 alone, of the few that stand between a bound check and
+        its table code; anything else is taken to do either."""
+        if i.kind == BCOND:
+            return not i.lk
+        n = i.name
+        if n in ("cmpli", "cmpi", "cmp", "cmpl"):
+            return True
+        if n in ("lwz", "lbz", "lhz", "addi", "addis", "lis"):
+            return i.rd != 1
+        if n in ("ori", "rlwinm"):
+            return i.ra != 1
+        return False
+
+    def _stack_slot(self, insns, at, reg):
+        """(displacement, index in insns) of the `lwz reg, d(r1)` that loaded the register the bound check at
+        insns[at] compared, or None."""
+        k = self._def(insns, at + 1, reg)
+        if k is None or k < 0:
+            return None
+        i = insns[k]
+        if i.name == "lwz" and i.ra == 1 and i.rd == reg and reg != 1:
+            return (i.simm, k)
         return None
 
     @staticmethod
@@ -460,11 +496,12 @@ class JumpTables:
         reg, n = bound
         if n > 4096:
             return None
-        self._index = (reg, at)
+        slot = self._stack_slot(insns, at, reg) if at < len(insns) else None
+        self._index, self._slot = (reg, at), slot
         try:
             e = self._ev(insns, k + 1, insns[k].rd)
         finally:
-            self._index = None
+            self._index = self._slot = None
         if e is None or e.k == "const":
             return None
         targets = []

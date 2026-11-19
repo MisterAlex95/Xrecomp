@@ -15,7 +15,7 @@ from tools.xex.synth import build_xex
 from tools.xex.xex import parse_xex
 
 from . import asm as A
-from .discover360 import find_helpers, pointer_seeds
+from .discover360 import JumpTables, find_helpers, pointer_seeds
 from .recomp import RUNTIME_DIRS, CodeView, recompile
 from .prog import Prog
 from .test_x360_tools import M64, c_case, parse_out
@@ -271,6 +271,29 @@ def program():
             p(A.li(3, -7), A.blr())
         p.end()
 
+    # Code built without optimisation keeps the index in a stack slot and loads it twice, once for the bound check and
+    # once for the table: jt_slot. In jt_slot_st the slot is written between the two loads: the bound says nothing
+    # of the second value, and the table stays unresolved
+    for name in ("slot", "slot_st"):
+        p.func("jt_" + name)
+        p(stwu(1, -0x40, 1), A.stw(3, 0x20, 1), A.lwz(7, 0x20, 1), cmplwi(6, 7, 2))
+        p.branch(lambda at, t: A.bc(at, 12, 4 * 6 + 1, t), name + "_def")
+        if name == "slot_st":
+            p(A.stw(4, 0x20, 1))
+        p(A.lwz(11, 0x20, 1))
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_tbl")
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_tbl")
+        p(A.rlwinm(0, 11, 2, 0, 29), A.lwzx(0, 12, 0), A.mtctr(0), A.bctr())
+        p.label(name + "_tbl")
+        for k in (0, 1, 2):
+            p.branch(lambda at, t: t, "%s_c%d" % (name, k))
+        for k in (0, 1, 2):
+            p.label("%s_c%d" % (name, k))
+            p(A.li(3, 6001 + k), A.addi(1, 1, 0x40), A.blr())
+        p.label(name + "_def")
+        p(A.li(3, -8), A.addi(1, 1, 0x40), A.blr())
+        p.end()
+
     # Leaf functions MSVC gives no .pdata entry, never called directly: leaf_data is named by a word of .rdata (a
     # vtable slot), leaf_code by the lis / addi pair in take_ptr (a callback handed over)
     p.func("leaf_data")
@@ -350,17 +373,21 @@ def test_discovery_and_lifting(tmp_path):
     img, funcs, labels = build()
     s = recompile(img, str(tmp_path))
     assert s["interp_fallback_insns"] == 0, s["unlifted"]
-    # the helpers are not functions; the fourteen of .pdata are, and the five leaf functions only a pointer names (a
+    # the helpers are not functions; the sixteen of .pdata are, and the five leaf functions only a pointer names (a
     # word of .rdata, a lis / addi pair, close or apart, a table in the code section); a pointer into the middle of
     # a .pdata function is not a function, nor is what a register no longer points at, nor a lone word between
     # instructions
-    assert s["functions"] == 19 and s["pointer_seeds"] == 5
+    assert s["functions"] == 21 and s["pointer_seeds"] == 5
     view, dec = CodeView(img), XenonDecoder()
     assert pointer_seeds(img, view, lambda a: dec.decode(view.u32(a), a)) \
         == {funcs[n][0] for n in ("leaf_data", "leaf_code", "leaf_far", "leaf_va", "leaf_vb")}
     assert len(s["helpers"]) == 8 and s["helper_calls_inlined"] == 8
-    assert s["jump_tables"] == 8 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 + 3 + 3 + 3
-    assert s["unresolved_bctr"] == 0
+    assert s["jump_tables"] == 9 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 + 3 + 3 + 3 + 3
+    assert s["unresolved_bctr"] == 1   # jt_slot_st's, and only that one
+    jt = JumpTables(view, lambda a: dec.decode(view.u32(a), a))
+    bctrs = {n: next(a for a in range(*funcs[n], 4) if view.u32(a) == A.bctr()) for n in ("jt_slot", "jt_slot_st")}
+    assert jt.resolve(bctrs["jt_slot"]) == [labels["slot_c%d" % k] for k in range(3)]
+    assert not jt.resolve(bctrs["jt_slot_st"])
     text = "".join(p.read_text() for p in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
     assert "savegpr" in text and "switch (t_)" in text
     table = (tmp_path / "x360_rc_table.c").read_text()
@@ -470,12 +497,13 @@ def test_helpers_and_tables_run(tmp_path):
                                  ("jt_half", range(0, 6), {1: 2001, 2: 2002, 3: 2003}),
                                  ("jt_open", range(0, 3), {0: 3001, 1: 3002, 2: 3003}),
                                  ("jt_ret", range(0, 5), {0: 4001, 1: 4002, 2: 4003, 3: 3, 4: 4}),
-                                 ("jt_inv", range(0, 5), {0: 5001, 1: 5002, 2: 5003})):
+                                 ("jt_inv", range(0, 5), {0: 5001, 1: 5002, 2: 5003}),
+                                 ("jt_slot", range(0, 5), {0: 6001, 1: 6002, 2: 6003})):
         default = {"jt_abs": -1, "jt_byte": -2, "jt_gcc": -3, "jt_min": -4, "jt_half": -5, "jt_open": 0,
-                   "jt_ret": 0, "jt_inv": -7}[name]
+                   "jt_ret": 0, "jt_inv": -7, "jt_slot": -8}[name]
         for x in inputs:
             tag = "%s_%d" % (name, x & 0xFF)
-            cases.append(c_case(tag, funcs[name][0], b"", gpr={3: x & 0xFFFFFFFF if x >= 0 else x & M64},
+            cases.append(c_case(tag, funcs[name][0], b"", gpr={1: STACK, 3: x & 0xFFFFFFFF if x >= 0 else x & M64},
                                 out_gpr=[3]))
             checks.append((tag, "r3", expect.get(x, default) & M64))
     # the leaf functions are in the pack: entered at their own address, as a call through the pointer would
