@@ -247,12 +247,13 @@ static void k_VdGetCurrentDisplayInformation(x360_machine *x, x360_thread *t, xe
 static void k_VdInitializeScalerCommandBuffer(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    /* (..., the destination: the last two arguments, on the stack): zeros, its size in words (Xenia) */
-    uint32_t dest = A9(9), count = A9(8) ? A9(8) : 0x1CC;
-    (void)count;
-    if (dest)
-        memset(x->base + dest, 0, 0x1CC * 4);
-    RET(0x1CC);
+    /* (source xy, source wh, output xy, output wh, front buffer wh, vertical filter type, its parameters*, horizontal
+     * filter type, its parameters*, unknown*, destination*, destination size in words): the title copies the words this
+     * reports into its command buffer. No scaler here: the destination gets type 2 PM4 packets (NOPs), as in Xenia. */
+    uint32_t dest = A9(10), count = A9(11);
+    for (uint32_t k = 0; dest && k < count; k++)
+        x360_w32(x, dest + 4 * k, 0x80000000u);
+    RET(dest ? count : 0);
 }
 
 static void k_XeCryptBnQwBeSigVerify(x360_machine *x, x360_thread *t, xe_cpu *c)

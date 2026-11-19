@@ -725,7 +725,8 @@ int x360_interp_run(x360_machine *x, x360_thread *t, int fresh)
     for (;;) {
         uint32_t pc = c->pc;
         if (pc < x->image_base || pc - x->image_base >= x->image_size || (pc & 3)) {
-            x360_fail(x, "interpreted code jumped to %08X, outside the image", pc);
+            x360_fail(x, "interpreted code jumped to %08X, outside the image (thread %u, LR %08X, CTR %08X, r1 %08X)", pc,
+                      t->id, (uint32_t)c->lr, (uint32_t)c->ctr, (uint32_t)c->gpr[1]);
             return -1;
         }
         uint32_t w = x360_r32(x, pc);
