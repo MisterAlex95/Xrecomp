@@ -199,7 +199,7 @@ class _Shader:
         self.exports_depth = self.exports_psize = False
         self.last_full = None  # (fetch constant, stride) of the last full vertex fetch, for mini fetches
         self.vbuffers = []        # (key, dict): vertex fetches at a computed index, read from a buffer texture
-        self.r0_written = False   # r0 (the vertex index) overwritten so far
+        self.r0_written = False   # r0.x (the vertex index) overwritten so far: r0's other components are free temporaries
         self.force_computed = False
         self.tqueries = set()     # texture fetch constants whose xe_tq<k> a query reads
         self.uses_tq = False
@@ -286,7 +286,7 @@ class _Shader:
         if not mask:
             return
         comps = "".join("xyzw"[i] for i in range(4) if mask >> i & 1)
-        if target == "r[0]" or target.startswith("r[clamp("):
+        if (target == "r[0]" and mask & 1) or target.startswith("r[clamp("):
             self.r0_written = True
         v = "clamp(%s, 0.0, 1.0)" % value if clamp else value
         if target == "xe_eA":   # a new export address: what the previous one collected goes out first
@@ -482,8 +482,9 @@ class _Shader:
             key = (fc, f["offset"])
             desc = {"fetch_constant": fc, "offset": f["offset"], "format": f["format"], "stride": stride,
                     "signed": f["signed"], "integer": f["integer"], "exp_adjust": f["exp_adjust"]}
-            # the index: the untouched r0.x is the vertex index (an attribute); anything else -- another register or
-            # component, r0 after the shader wrote it (instancing: index / count) -- reads the buffer as a texture
+            # the index: the untouched r0.x is the vertex index (an attribute), whatever the shader keeps in r0's other
+            # components; anything else -- another register or component, r0.x after the shader wrote it (instancing:
+            # index / count) -- reads the buffer as a texture
             # at the computed index (truncated, as Xenia's fetch does when the index is not rounded)
             if f["src_reg"] or f["src_rel"] or f["src_swizzle"] or self.r0_written or self.force_computed:
                 names = [k for k, _ in self.vbuffers]
@@ -561,7 +562,7 @@ class _Shader:
         comps = "".join("xyzw"[i] for i in range(4) if mask >> i & 1)
         value = "vec%d(%s)" % (len(parts), ", ".join(parts)) if len(parts) > 1 else parts[0]
         dst = self.temp(f["dst_reg"], f["dst_rel"])
-        if dst == "r[0]" or dst.startswith("r[clamp("):
+        if (dst == "r[0]" and mask & 1) or dst.startswith("r[clamp("):
             self.r0_written = True
         self.emit("{ vec4 f_ = %s; %s.%s = %s; }" % (src, dst, comps, value))
         if pred:

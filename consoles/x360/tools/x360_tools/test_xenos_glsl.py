@@ -395,6 +395,21 @@ def test_pixel_parameters_are_written_by_constant_index():
     assert "int xe_pgn = xe_k.pg.x >= 0.0 ? clamp(int(xe_k.pg.x), 0, 15) : -1;" in src_
 
 
+def test_vertex_index_survives_writes_to_the_rest_of_r0():
+    """r0.x is the vertex index until the shader writes it: a compiler keeps values in r0.yzw (here a fetch's), and
+    the fetches after that are still attributes at the vertex index, not reads of the whole buffer as a texture."""
+    def shader(first_dst):
+        return program([(2, [("fetch", fetch_words(0, 0, 0, first_dst, 5, sel=2, format=6, stride=2, offset=0)),
+                             ("fetch", fetch_words(0, 0, 1, 0o3210, 5, sel=2, format=6, stride=2, offset=1)),
+                             ("alu", alu_words(**export(62, 1))), ("alu", alu_words(**export(0, 0)))], {})])
+    src_, info = translate(shader(0o3217), "vertex")       # r0.yzw = the first fetch: x kept
+    assert "xe_vb" not in src_ and "xe_vfetch" not in src_
+    assert [(a["fetch_constant"], a["offset"]) for a in info["attributes"]] == [(17, 0), (17, 1)]
+    src_, info = translate(shader(0o3210), "vertex")       # r0 = the first fetch: the index is gone
+    assert "xe_vfetch(xe_vb0, int(floor((r[0]).x)))" in src_
+    assert [(a["fetch_constant"], a["offset"]) for a in info["attributes"]] == [(17, 0)]
+
+
 @pytest.mark.skipif(not os.path.isfile(RUN), reason="$XENOS_GLSL_RUN not set (tests/run_glsl_mesa.sh sets it)")
 def test_against_mesa(tmp_path):
     rng = random.Random(2701)
