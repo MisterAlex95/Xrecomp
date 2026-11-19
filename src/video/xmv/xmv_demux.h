@@ -60,11 +60,14 @@ typedef struct {
     uint32_t audio_size[XMV_MAX_TRACKS];
 } XmvPacket;
 
-/* Byte source: read returns the bytes read; seek returns 0 on success. */
+/* Byte source: read returns the bytes read; seek returns 0 on success.
+ * close, when set, releases ctx: xmv_demux_open owns the source from the
+ * call on (also when it fails) and calls it from xmv_demux_close. */
 typedef struct {
     size_t (*read)(void *ctx, void *buf, size_t n);
     int (*seek)(void *ctx, uint64_t offset);
     void *ctx;
+    void (*close)(void *ctx);
 } XmvIo;
 
 typedef struct XmvDemux XmvDemux;

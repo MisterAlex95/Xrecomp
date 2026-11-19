@@ -51,7 +51,9 @@ and `XMVDecoder_CloseDecoder` can call `xmv_hle_close(decoder)`. What the hook d
 
 1. **Which movie.** The kernel notes every `.xmv` file the title opens (`NtCreateFile`, host path). A decoder object
    the hook has not seen plays the last one opened. A new open after a movie ended starts a new one on the same
-   object.
+   object. With the game data read in place from a disc image (`kernel_disc.h`, Prepare's default for an ISO),
+   that host path names a file inside the image: the hook then streams it through the disc layer (XBA-309; before,
+   it could not open it and every movie of such a title went to the title's own decoder).
 2. **Pacing.** The first call starts the movie's clock (host monotonic time). Each call returns `XMV_NOFRAME` until
    the next frame's time has come, then decodes it, writes it into `surface` and returns `XMV_NEWFRAME` with the
    frame's time (100 ns units, 64-bit). After the last frame: `XMV_ENDOFFILE`.
@@ -96,7 +98,15 @@ lifter: nothing of any one title is in the toolkit, and no title layer is involv
 
 The confidence is the best candidate's score (capped at 1), lowered by 0.3 when a second candidate is within 0.15 of
 it. **High** is 0.7 or more: an XMV section or a movie name on top of the call shape, or a signature. The shape
-alone (0.6 at best) is reported, never bound. `python -m tools.xmv.find_api default.xbe` prints the evidence for
+alone (0.6 at best) is reported, never bound.
+
+**Played by the library (XBA-309).** Some titles never call `XMVDecoder_GetNextFrame`: they hand the movie to the
+library's own `XMVDecoder_Play` (`ret 0xC`), which polls GetNextFrame itself and paces the pictures it shows on a
+clock (performance counter since a start time) that the library's GetNextFrame starts at its first frame. Bound
+there, the runtime's hook decodes the movie but never starts that clock, and Play presents almost none of the frames
+(a retail XDK 5849 title: 157 of 1765). So when the XMV section is known and the best candidate has no call site
+outside it, the report says `library_only` and nothing is bound, whatever the score or a signature: the title's own
+decoder plays the movie, as it does unbound. `python -m tools.xmv.find_api default.xbe` prints the evidence for
 each candidate (`--json` for the report as JSON); Prepare writes the same report to `<work>/analysis/xmv_api.json`.
 
 **Binding it.** With a high confidence, Prepare writes `<work>/analysis/xmv_bind.json` (GetNextFrame and, when
@@ -162,7 +172,8 @@ title's own decoder gave no frame for 10.0 s while the title polled: the runtime
 a polled API, and a movie poll loop that calls `GetNextFrame` is exactly what the watchdog sees.
 
 **What the logs say.** Prepare: `XMV: XMVDecoder_GetNextFrame at 0x... and XMVDecoder_CloseDecoder at 0x...
-(confidence 0.90): bound to the runtime's decoder`, or `best guess ... too low, not bound`, or `the title has movies
+(confidence 0.90): bound to the runtime's decoder`, or `best guess ... too low, not bound`, or `... is called only by
+the XMV library itself: the title plays its movies with the library's XMVDecoder_Play ...; not bound`, or `the title has movies
 but no XMVDecoder_GetNextFrame was found`, or nothing for a title with no sign of movies. The lift log:
 `XMV: bound ...`. Run time, at the first call: `[XMV] XMVDecoder_GetNextFrame at 0001xxxx bound by Prepare (found
 with confidence 0.90): the runtime decodes the title's movies it fully supports, the title's own decoder the
@@ -179,8 +190,10 @@ from real discs.
 
 **What only real titles can confirm.** The detector is tested on synthetic titles of our own
 (`tools/xmv/synth_title.py`: a fake XMV library with the API's shape, in a section of its own or not, with or
-without a movie name, and a title without movies). Unconfirmed on retail XBEs: that the XMV library's code sits in
-a section named `XMV` on every XDK build; whether the library table lists the XMV library at all; that titles call
+without a movie name, a title that plays through the library's `XMVDecoder_Play`, and a title without movies).
+Seen on one retail XBE (XDK 5849, XBA-309): the library's code in a section named `XMV`, an `XMV` entry in the
+library table, and a title that only calls `XMVDecoder_Play` (above). Unconfirmed on other XDK builds: that the
+XMV library's code sits in a section named `XMV`; whether the library table lists the XMV library; that titles call
 `XMVDecoder_GetNextFrame` directly (not through a C++ wrapper of their own, which would then be the candidate, and
 still a correct binding when it keeps the stdcall shape); that `CloseDecoder` follows the poll in the same
 function. A title where it is wrong can be prepared with `RECOMP_XMV=native` (nothing bound) and its
@@ -248,7 +261,10 @@ contiguous window, the movie noted as the kernel notes it, then `xmv_hle_get_nex
 12 `XMV_NEWFRAME` with rising timestamps, `XMV_NOFRAME` in between (paced), each picture in the surface identical to
 the player's own decode, `XMV_ENDOFFILE` after; a new open restarts the decoder object; `RECOMP_XMV=skip`, no movie
 opened, a non-XMV file and an unknown surface format behave as described above; `xmv_hle_bound` answers the
-runtime's decoder by default, with `auto` and `skip`, and the title's own with `native`.
+runtime's decoder by default, with `auto` and `skip`, and the title's own with `native`. With a disc image of our
+own (`movie_disc.iso`, written at configure time by `tools/xiso/mkxiso.py` around `basic.xmv`) mounted, the movie
+opened inside the image is the runtime's and plays its 12 frames; a name the image does not hold goes to the
+title's own decoder.
 
 The hand-over, on `tests/xmv_hle/fixtures` (`python -m tools.xmv.xmv_mux make-fallback-set tests/xmv_hle/fixtures`:
 `wmv2_synth.py` streams, no FFmpeg): the probe finds the X8 frame of `x8.xmv` from its picture header, the four
@@ -264,7 +280,8 @@ The binding (XBA-199):
 
 - `tools/xmv/test_find_api.py`: the synthetic movie title's API found in its `XMV` section (every feature, the
   title's own `ret 0x10` decoy far behind), found without a section through the movie name, the call shape alone
-  not bound, a title without movies binding nothing, an XMV library entry counted, `RECOMP_XMV=native` at
+  not bound, a title that plays through the library's `XMVDecoder_Play` never bound (not even with a signature of
+  its build), a title without movies binding nothing, an XMV library entry counted, `RECOMP_XMV=native` at
   prepare, a signature recorded on one title finding the API in another where only the call shape is left, a
   wrong-shaped function refused by `--record`, the CLI report, and the generated C.
 - `tools/compat/test_e2e.py`: `tools.prepare --no-build` binds the found functions (their bodies `sub_X_gen`,

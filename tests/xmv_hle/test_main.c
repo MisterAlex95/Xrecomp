@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "kernel/kernel.h"
+#include "kernel/kernel_disc.h"
 #include "kernel/xbox_memory_layout.h"
 #include "video/xmv_hle.h"
 #include "video/xmv/xmv_player.h"
@@ -182,6 +183,44 @@ static void test_routing(const char *xbe_path, uint32_t surf, uint32_t res, uint
 }
 
 #define W 96
+/* XBA-309: the game data read in place from a disc image (Prepare's default
+ * for an ISO). The movie the title opens is then a path inside the image,
+ * not a host file: the hook reads it through the disc layer. Before, it could
+ * not open it, and every movie of such a title went to the title's own
+ * decoder ("not an XMV file the runtime can play"). */
+static void test_disc_image(const char *iso, uint32_t surf, uint32_t res, uint32_t tim)
+{
+    char path[1024];
+    FILE *f;
+    uint32_t frames = 0, calls;
+    int rc = xbox_disc_mount(iso);
+    CHECK(rc == 0, "mount %s (%d)", iso, rc);
+    if (rc)
+        return;
+    snprintf(path, sizeof path, "%s/movie/basic.xmv", iso);
+    f = fopen(path, "rb");
+    CHECK(!f, "%s is not a host file", path);
+    if (f)
+        fclose(f);
+    CHECK(route(path, 0x00C00000u) == 1, "a movie inside the disc image: the runtime decodes it");
+    for (calls = 0; calls < 5000; calls++) {
+        xmv_hle_get_next_frame(0x00C00000u, surf, res, tim);
+        if (rd32(res) == XMV_ENDOFFILE)
+            break;
+        if (rd32(res) == XMV_NEWFRAME)
+            frames++;
+        else
+            nap_ms(2);
+    }
+    CHECK(frames == 12, "the disc image's movie: 12 frames delivered (%u)", frames);
+    xmv_hle_close(0x00C00000u);
+    /* A name the image does not hold: not playable, handed over as before. */
+    snprintf(path, sizeof path, "%s/movie/missing.xmv", iso);
+    CHECK(route(path, 0x00C10000u) == 0, "a movie missing from the image: the title's own decoder");
+    xmv_hle_close(0x00C10000u);
+    xbox_disc_unmount();
+}
+
 #define H 64
 #define PITCH 512                        /* a 128-pixel LIN_X8R8G8B8 surface */
 
@@ -299,6 +338,10 @@ int main(int argc, char **argv)
 
     wr32(surf + 0x0C, 0x1Eu << 8);                         /* LIN_X8R8G8B8 again */
     test_routing(xbe_path, surf, res, tim);
+    if (argc > 4)
+        test_disc_image(argv[4], surf, res, tim);
+    else
+        printf("xmv_hle: no disc image fixture (python3 missing at configure time): disc test skipped\n");
 
     xmv_player_close(ref);
     free(expect);

@@ -20,6 +20,8 @@ typedef struct XmvPlayer XmvPlayer;
 
 XmvPlayer *xmv_player_open_file(const char *path);
 XmvPlayer *xmv_player_open_memory(const void *buf, size_t size);
+/* Over any byte source (xmv_demux_open: the player owns it from the call on). */
+XmvPlayer *xmv_player_open_io(const XmvIo *io);
 void xmv_player_close(XmvPlayer *p);
 
 const XmvInfo *xmv_player_info(const XmvPlayer *p);

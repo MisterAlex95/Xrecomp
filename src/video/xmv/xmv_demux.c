@@ -80,8 +80,11 @@ fail:
 XmvDemux *xmv_demux_open(const XmvIo *io)
 {
     XmvDemux *x = (XmvDemux *)calloc(1, sizeof *x);
-    if (!x)
+    if (!x) {
+        if (io->close)
+            io->close(io->ctx);
         return NULL;
+    }
     x->io = *io;
     return open_io(x);
 }
@@ -152,6 +155,8 @@ void xmv_demux_close(XmvDemux *x)
         return;
     if (x->fp)
         fclose(x->fp);
+    if (x->io.close)
+        x->io.close(x->io.ctx);
     free(x->buf);
     free(x);
 }

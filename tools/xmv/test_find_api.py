@@ -112,6 +112,35 @@ def test_a_recorded_signature_finds_it_without_the_structure(tmp_path):
     assert "signature" in r["candidates"][0]["evidence"]
 
 
+def test_a_title_that_plays_through_the_library_is_never_bound(tmp_path, monkeypatch):
+    """XBA-309: the title hands its movie to the library's own player (XMVDecoder_Play's shape), which polls
+    GetNextFrame itself: GetNextFrame has no call site outside the XMV section. Binding it would leave Play's
+    clock unstarted (it showed 157 of 1765 frames in a retail title), so it is found but never bound, not even
+    with a recorded signature of its build."""
+    r, l, p = _find(tmp_path, play=True)
+    assert r["best"]["get_next_frame"] == l["get_next_frame"]
+    assert r["library_only"] and not r["high"]
+    assert find_api.bind_plan(r) is None
+    # The plain title (the title polls GetNextFrame itself) is not affected.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    rp, _, _ = _find(plain)
+    assert rp["high"] and not rp["library_only"]
+    # A signature of the title's own build lifts the score to the top, still not bound.
+    root = tmp_path / "xdk"
+    find_api.record(p, {"get_next_frame": l["get_next_frame"]}, root=str(root))
+    r = find_api.find(p, signatures=find_api.load_signatures(str(root)))
+    assert "signature" in r["candidates"][0]["evidence"] and r["confidence"] >= find_api.HIGH
+    assert r["library_only"] and not r["high"]
+    # What Prepare logs, and no bind file.
+    lines = []
+    monkeypatch.delenv("RECOMP_XMV", raising=False)
+    assert find_api.prepare_bind(p, str(tmp_path / "an"), log=lines.append) is None
+    assert not (tmp_path / "an" / "xmv_bind.json").exists()
+    assert "called only by the XMV library" in lines[0] and "XMVDecoder_Play" in lines[0], lines
+    assert "never bound" in find_api.format_report(r)
+
+
 def test_record_refuses_a_function_of_the_wrong_shape(tmp_path):
     p, l = movie_title(tmp_path / "default.xbe")
     with pytest.raises(SystemExit, match="ret 0x10"):

@@ -15,6 +15,7 @@
 #include <time.h>
 #include "platform/xbox_winnt.h"        /* VirtualQuery */
 #include "audio/host_audio.h"
+#include "kernel/kernel_disc.h"
 #endif
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
@@ -97,6 +98,55 @@ static uint64_t watchdog_ns(void)
     const char *e = getenv("RECOMP_XMV_WATCHDOG");
     double sec = e && *e ? atof(e) : 10.0;
     return sec > 0 ? (uint64_t)(sec * 1e9) : 0;
+}
+
+/* The movie the title opened, by its host path. With the game data read in
+ * place from a disc image (kernel_disc.h, Prepare's default for an ISO), that
+ * path names a file inside the image, not one on the host: it is then read
+ * through the disc layer, streamed like a file. */
+#if !defined(_WIN32)
+typedef struct {
+    const xbox_disc_node *node;
+    uint64_t pos;
+} DiscMovie;
+
+static size_t disc_movie_read(void *ctx, void *buf, size_t n)
+{
+    DiscMovie *d = (DiscMovie *)ctx;
+    long r = xbox_disc_read(d->node, buf, n, d->pos);
+    if (r <= 0)
+        return 0;
+    d->pos += (uint64_t)r;
+    return (size_t)r;
+}
+
+static int disc_movie_seek(void *ctx, uint64_t off)
+{
+    ((DiscMovie *)ctx)->pos = off;
+    return 0;
+}
+#endif
+
+static XmvPlayer *open_movie(const char *path)
+{
+    XmvPlayer *p = xmv_player_open_file(path);
+#if !defined(_WIN32)
+    if (!p && xbox_disc_mounted()) {
+        const char *rel = xbox_disc_rel(path);
+        const xbox_disc_node *n = rel ? xbox_disc_find(rel, NULL) : NULL;
+        DiscMovie *d;
+        if (n && !xbox_disc_node_is_dir(n) && (d = (DiscMovie *)calloc(1, sizeof *d)) != NULL) {
+            XmvIo io;
+            d->node = n;
+            io.read = disc_movie_read;
+            io.seek = disc_movie_seek;
+            io.ctx = d;
+            io.close = free;
+            p = xmv_player_open_io(&io);
+        }
+    }
+#endif
+    return p;
 }
 
 int xmv_hle_bound(int what, uint32_t va, unsigned confidence_pct)
@@ -245,7 +295,7 @@ static XmvSession *session_get(uint32_t decoder, int can_delegate)
     s->gen = s_gen;
     s->start_ns = now_ns();
     if (can_delegate && !mode_skip() && !mode_runtime() &&
-        (!s_path[0] || !(s->player = xmv_player_open_file(s_path)) || unsupported(s->player, why, sizeof why))) {
+        (!s_path[0] || !(s->player = open_movie(s_path)) || unsupported(s->player, why, sizeof why))) {
         if (!s_path[0])
             snprintf(why, sizeof why, "no .xmv file opened");
         else if (!s->player)
@@ -261,7 +311,7 @@ static XmvSession *session_get(uint32_t decoder, int can_delegate)
         return s;
     }
     if (!s->player)
-        s->player = xmv_player_open_file(s_path);
+        s->player = open_movie(s_path);
     if (!s->player) {
         fprintf(stderr, "[XMV] %s: not an XMV file the runtime can play, skipped\n", s_path);
         s->ended = 1;

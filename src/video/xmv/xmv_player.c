@@ -63,6 +63,7 @@ static XmvPlayer *open_common(XmvDemux *dmx)
 }
 
 XmvPlayer *xmv_player_open_file(const char *path) { return open_common(xmv_demux_open_file(path)); }
+XmvPlayer *xmv_player_open_io(const XmvIo *io) { return open_common(xmv_demux_open(io)); }
 XmvPlayer *xmv_player_open_memory(const void *buf, size_t size)
 {
     return open_common(xmv_demux_open_memory(buf, size));

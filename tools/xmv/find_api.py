@@ -47,6 +47,13 @@ the evidence):
   the candidate counts most. Many call sites (more than 8) count against.
 - The confidence is the best candidate's score, lowered when a second one
   comes close (ambiguous). `high` (>= 0.7, unique) is what Prepare binds.
+- Played by the library (XBA-309): when the XMV section is known and the best
+  candidate is called only from inside it, the title never calls
+  GetNextFrame: it hands its movies to the library's own XMVDecoder_Play,
+  which polls GetNextFrame and paces the pictures on a clock that the
+  library's GetNextFrame starts. Bound there, the runtime's hook never starts
+  that clock and Play shows almost none of the frames, so such a candidate is
+  never bound, whatever its score or signature (`library_only`).
 
 Signatures. `--record get_next_frame=0x...` writes a masked signature of
 the confirmed function (tools/fusion/signatures.py's masking: opcodes and
@@ -463,12 +470,14 @@ def find(path, signatures=None):
                         ev[k] = WEIGHTS[k]
         score = max(0.0, min(1.0, sum(ev.values())))
         cands.append({"va": t, "score": round(score, 3), "evidence": ev, "sites": len(sites),
-                      "site": best_site, "related": found})
+                      "site": best_site, "related": found, "public_sites": len(public)})
     cands.sort(key=lambda c: (-c["score"], c["va"]))
     best = {k: None for k in API}
     conf = 0.0
+    library_only = False
     if cands and cands[0]["score"] > 0:
         top = cands[0]
+        library_only = bool(sec) and top["public_sites"] == 0
         conf = top["score"]
         if len(cands) > 1 and cands[1]["score"] >= top["score"] - AMBIGUOUS_GAP:
             conf = max(0.0, conf - 0.3)
@@ -484,7 +493,8 @@ def find(path, signatures=None):
         "candidates": cands[:8],
         "best": best,
         "confidence": round(conf, 3),
-        "high": conf >= HIGH,
+        "high": conf >= HIGH and not library_only,
+        "library_only": library_only,
     }
 
 
@@ -510,6 +520,10 @@ def prepare_line(report, plan, mode):
         return ("XMV: %s at %s%s (confidence %.2f): bound to the runtime's decoder "
                 "(RECOMP_XMV=native at run time keeps the title's own)"
                 % (NAMES["get_next_frame"], plan["get_next_frame"], extra, plan["confidence"]))
+    if best and report.get("library_only"):
+        return ("XMV: %s at 0x%08X is called only by the XMV library itself: the title plays its movies with "
+                "the library's XMVDecoder_Play, which needs the library's own GetNextFrame; not bound, the title's "
+                "own decoder plays them" % (NAMES["get_next_frame"], best))
     if best:
         return ("XMV: best guess for %s 0x%08X, confidence %.2f: too low, not bound "
                 "(python -m tools.xmv.find_api default.xbe says why)" % (NAMES["get_next_frame"], best,
@@ -594,6 +608,8 @@ def format_report(report):
     best = report["best"]
     out.append("best: " + ", ".join("%s %s" % (NAMES[k], "0x%08X" % best[k] if best[k] else "-") for k in API))
     out.append("confidence %.2f: %s" % (report["confidence"], "high, tools.prepare binds it" if report["high"]
+                                        else "called only by the XMV library (XMVDecoder_Play): never bound"
+                                        if report.get("library_only")
                                         else "not bound by tools.prepare (needs %.2f)" % HIGH))
     return "\n".join(out)
 
