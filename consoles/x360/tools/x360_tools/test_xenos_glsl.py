@@ -384,6 +384,17 @@ def test_translation_shape():
         translate(to_words([dict(vop=2, vdest=32, vmask=0xF, export=1)]), "vertex")  # memory export
 
 
+def test_pixel_parameters_are_written_by_constant_index():
+    """A pixel shader's register array is never stored into at a computed index: `if (c) r[int(u)] = v;` was seen
+    compiled (condition false) into zeros in r0's z and w by a host GLSL compiler. One guarded line a register."""
+    src_, _ = translate(program([(2, [("alu", alu_words(**export(0, 0)))], {})]), "pixel", interpolators=16)
+    stores = [ln.strip() for ln in src_.split("\n") if ln.strip().startswith(("r[", "if (xe_pgn")) and "= " in ln]
+    assert not [ln for ln in stores if "r[clamp(" in ln or "r[int(" in ln or "r[xe_" in ln], stores
+    for i in range(16):
+        assert "if (xe_pgn == %d) r[%d] = xe_pgv;" % (i, i) in stores
+    assert "int xe_pgn = xe_k.pg.x >= 0.0 ? clamp(int(xe_k.pg.x), 0, 15) : -1;" in src_
+
+
 @pytest.mark.skipif(not os.path.isfile(RUN), reason="$XENOS_GLSL_RUN not set (tests/run_glsl_mesa.sh sets it)")
 def test_against_mesa(tmp_path):
     rng = random.Random(2701)

@@ -1669,6 +1669,55 @@ int main(int argc, char **argv)
         run(&cp);
     }
 
+    /* interpolator 0's z reaches the pixel shader with the pixel parameters off: ps_i0z writes r0.xyw, then puts
+     * r0.z (the quad's blue, 0.75) in every channel */
+    {
+        uint32_t nz;
+        uint32_t *pz = load(argv[1], "ps_i0z.bin", &nz);
+        CHECK(pz != NULL, "no ps_i0z.bin");
+        if (pz) {
+            im[0] = 1, im[1] = nz;
+            memcpy(im + 2, pz, 4 * nz);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nz);
+            free(pz);
+            uint32_t nvz;
+            uint32_t *vz = load(argv[1], "vs_i0xyz.bin", &nvz); /* interpolator 0's w is never written */
+            CHECK(vz != NULL, "no vs_i0xyz.bin");
+            if (vz) {
+                im[0] = 0, im[1] = nvz;
+                memcpy(im + 2, vz, 4 * nvz);
+                type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nvz);
+                free(vz);
+            }
+            w32(0x52000, 0xFF102030u); /* the texture the shader fetches into r0.w: 1x1 */
+            uint32_t fz[6] = {2u | 2u << 10 | 2u << 13 | 1u << 22, 6u | 2u << 6 | 0x52000u, 0, sw_id << 1, 0, 1u << 9};
+            for (uint32_t i = 0; i < 6; i++)
+                reg(0x480C + i, fz[i]);
+            for (uint32_t k = 0; k < 4; k++)
+                vertex(0x41600 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? -1.0f : 1.0f, 0.25f, 0.5f, 0.75f);
+            reg(0x2180, 0), reg(0x2181, 0);
+            for (uint32_t i = 0; i < 4; i++)
+                reg(0x4400 + i, fbits(0.125f));
+            reg(0x4800, 0x41600u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            const uint8_t *cz = px(g, W / 2, H / 2);
+            CHECK(cz[0] >= 190 && cz[0] <= 192 && cz[1] == cz[0] && cz[2] == cz[0],
+                  "interpolator 0's z: %u,%u,%u, want 191 in each", cz[0], cz[1], cz[2]);
+        }
+        for (uint32_t i = 0; i < 4; i++)
+            reg(0x4400 + i, fbits(1.0f));
+        im[0] = 0, im[1] = nvs;
+        memcpy(im + 2, vs, 4 * nvs);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nvs);
+        im[0] = 1, im[1] = nps;
+        memcpy(im + 2, ps, 4 * nps);
+        type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+        run(&cp);
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;

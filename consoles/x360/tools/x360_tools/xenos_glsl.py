@@ -853,10 +853,14 @@ def translate(words, stage="vertex", interpolators=0, memexport=False):
     else:
         out += ["    r[%d] = xe_i%d;" % (i, i) for i in range(interpolators)]
         out.append("    vec4 xe_depth = vec4(gl_FragCoord.z);")
-        out += ["    if (xe_k.pg.x >= 0.0) {  // PsParamGen: the pixel position (y downwards), the face in X's sign",
-                "        vec2 p_ = gl_FragCoord.xy * xe_k.pg.zw + vec2(-0.5, xe_k.pg.y - 0.5);",
-                "        r[clamp(int(xe_k.pg.x), 0, 15)] = vec4(gl_FrontFacing ? p_.x : -p_.x, p_.y, 0.0, 0.0);",
-                "    }"]
+        # PsParamGen: the pixel position (y downwards), the face in X's sign, into the register pg.x names. Written by
+        # constant index, one register a line: a store at a computed index inside the condition (`if (pg.x >= 0.0)
+        # r[int(pg.x)] = ...`) was seen compiled, with the condition false, into zeros in r0's z and w (Mesa 25.2
+        # llvmpipe): interpolator 0's z and w were lost to every shader reading them.
+        out += ["    int xe_pgn = xe_k.pg.x >= 0.0 ? clamp(int(xe_k.pg.x), 0, 15) : -1;",
+                "    vec2 xe_pgp = gl_FragCoord.xy * xe_k.pg.zw + vec2(-0.5, xe_k.pg.y - 0.5);",
+                "    vec4 xe_pgv = vec4(gl_FrontFacing ? xe_pgp.x : -xe_pgp.x, xe_pgp.y, 0.0, 0.0);"]
+        out += ["    if (xe_pgn == %d) r[%d] = xe_pgv;" % (i, i) for i in range(16)]
         out += ["    xe_color%d = vec4(0.0);" % o for o in sorted(sh.outputs)]
     out += sh.body
     if sh.uses_memexport:

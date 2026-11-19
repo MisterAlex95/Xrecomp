@@ -86,6 +86,20 @@ def shaders():
         ("alu", alu_words(vop=0, vdest=1, vmask=0xF, srcs=((1, 1, 0, 0), (2, 1, 0, 0), (0, 0, 0, 0)))),
         ("alu", alu_words(vop=0, vdest=0, vmask=0xF, export=1, srcs=((1, 1, 0, 0), (3, 1, 0, 0), (0, 0, 0, 0))))],
         {})])
+    # ps_i0z: a fetch from texture fetch constant 2 (at interpolator 1's xy) into r0.w, then oC0 = r0.zzzz:
+    # interpolator 0's z is still there once another component of its register is written (the parameter generation
+    # code before the body must leave it alone: the shape a host compiler was seen to get wrong)
+    packed["ps_i0z"] = program([(2, [
+        ("fetch", fetch_words(1, 1, 0, 7 | 7 << 3 | 7 << 6 | 0 << 9, 2, dimension=1)),
+        ("alu", alu_words(vop=2, vdest=0, vmask=0xF, export=1, srcs=((0, 1, 0xC6, 0), (0, 1, 0xC6, 0), (0, 0, 0, 0))))],
+        {})])
+    # vs_i0xyz: as vs, but only x, y and z of interpolator 0 are written (its w stays the initial 0)
+    packed["vs_i0xyz"] = program([(2, [
+        ("fetch", fetch_words(0, 0, 1, XYZW, 0, sel=0, format=38, stride=8, offset=0)),
+        ("fetch", fetch_words(0, 0, 2, XYZW, 0, sel=0, format=38, stride=8, offset=4)),
+        ("alu", alu_words(**export(62, 1))),
+        ("alu", alu_words(vop=2, sop=50, vdest=0, vmask=0x7, export=1, srcs=((2, 1, 0, 0), (2, 1, 0, 0), (0, 0, 0, 0))))],
+        {})])
     return vs, ps, ps_tex, packed
 
 
