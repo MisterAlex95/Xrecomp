@@ -59,8 +59,10 @@ def _macro(name):
 
 def install_stub():
     """RECOMP_ICALL_INSTALL_ (XBA-304) and an empty recomp_icall_install, for a harness with no generated dispatch."""
+    # No interpreter here (XBA-303): a miss is the skip these harnesses check.
     return (_macro("RECOMP_ICALL_INSTALL_") +
-            "\nstatic recomp_func_t recomp_icall_install(uint32_t va, recomp_func_t fn) { (void)va; return fn; }\n")
+            "\nstatic recomp_func_t recomp_icall_install(uint32_t va, recomp_func_t fn) { (void)va; return fn; }\n"
+            "#define RECOMP_ICALL_INTERP_(_va, outside) ((void (*)(void))0)\n")
 
 
 def _lifted_site():

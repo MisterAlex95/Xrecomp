@@ -29,7 +29,7 @@ import tempfile
 import pytest
 
 from . import interp_fixture as F
-from .lift_fixture import gnu_cc
+from .interp_fixture import gnu_cc
 
 
 def _need_cc():

@@ -197,6 +197,7 @@ uint32_t g_xbox_code_lo, g_xbox_code_hi;
 uint32_t g_esp, g_eax;
 #define eax g_eax
 #define RECOMP_UNLIKELY(x) (x)
+#define RECOMP_ICALL_INTERP_(_va, outside) ((void (*)(void))0)   /* no interpreter here (XBA-303) */
 #define RECOMP_ABI_CALL(va, fn) (fn)()
 typedef struct recomp_flat_dispatch { void (**table)(void); uint32_t base, span, trace; } recomp_flat_dispatch_t;
 extern recomp_flat_dispatch_t g_recomp_flat;

@@ -1,5 +1,6 @@
 /* The status file (XBA-79): recomp_status.h has the format. Depends only on
  * the discovery writer, so a test builds the two alone. */
+#include "xbox_interp.h"
 #include "recomp_status.h"
 #include "recomp_discovery.h"
 
@@ -154,6 +155,13 @@ void recomp_status_write_now(void)
             (unsigned long long)s_frames, s_hash, s_lit ? 1u : 0u,
             (unsigned long long)(s_audio_samples / 48u), (unsigned long long)s_pad_reads,
             (unsigned long long)s_threads, recomp_discovery_written(), recomp_discovery_seeds());
+    {   /* the interpreter (XBA-303): instructions run, addresses with no lifted code */
+        XboxInterpStats is;
+        xbox_InterpGetStats(&is);
+        if (is.entries)
+            fprintf(s_file, ",\"interp_insns\":%llu,\"interp_entries\":%u",
+                    (unsigned long long)is.insns, is.entries);
+    }
     named_write(s_file, "unsupported", s_gaps, s_ngaps);
     named_write(s_file, "unmodelled", s_unmod, s_nunmod);
     if (s_net)

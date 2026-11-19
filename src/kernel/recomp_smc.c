@@ -1,5 +1,6 @@
 /* Code written or run at run time (XBA-118): recomp_smc.h has the rules. */
 #include "recomp_smc.h"
+#include "xbox_interp.h"
 #include "recomp_discovery.h"
 
 #include <stdio.h>
@@ -364,8 +365,9 @@ int xbox_SmcExecOutside(uint32_t target, uint32_t ret)
     pthread_mutex_unlock(&lock);
 #endif
     if (fresh && nseen <= 64) {
-        fprintf(stderr, "[SMC] code run outside the image: 0x%08X (%s, first bytes %s), return address 0x%08X; "
-                "skipped, nothing runs code that was not lifted\n", target, where, *hex ? hex : "?", ret);
+        fprintf(stderr, "[SMC] code run outside the image: 0x%08X (%s, first bytes %s), return address 0x%08X; %s\n",
+                target, where, *hex ? hex : "?", ret,
+                xbox_InterpEnabled() ? "interpreted (XBA-303)" : "skipped (RECOMP_INTERP=0)");
         fflush(stderr);
     }
     recomp_discovery_smc_exec(target, ret, where, hex);

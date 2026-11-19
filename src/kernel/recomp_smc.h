@@ -1,17 +1,18 @@
 /* Code written or run at run time (XBA-118): detect it, report it.
  *
  * Static recompilation runs the C lifted from the XBE's code as it was on
- * disc. Two things it cannot see, and that no fallback here runs (no
- * interpreter, no JIT: docs/pipeline/04-lifting.md):
+ * disc. Two things it cannot see:
  *
  *   exec_outside_image  an indirect call or jump to an address outside the
  *                       image's code: heap, stack, the image's data, the
  *                       contiguous window (decompressed or generated code).
- *                       The macros skip it, as before; xbox_SmcExecOutside
- *                       names it.
+ *                       xbox_SmcExecOutside names it; the interpreter runs it
+ *                       (XBA-303, xbox_interp.h, docs/technical/interpreter.md;
+ *                       RECOMP_INTERP=0: the macros skip it, as before).
  *   code_write          a write into a page of a lifted code section: patched
  *                       thunks, copy protection, code unpacked in place. The
- *                       lifted C still runs the old bytes.
+ *                       lifted C still runs the old bytes (the interpreter
+ *                       only takes addresses with no lifted function).
  *
  * Each is written once to the discovery file (recomp_discovery.h):
  *   {"t":"smc","kind":"exec_outside_image","va":"0x...","ret":"0x...","where":"heap","bytes":"5589E5..."}

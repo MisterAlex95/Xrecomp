@@ -19,6 +19,7 @@
 #include "kernel.h"
 #include "recomp_discovery.h"
 #include "xbox_memory_layout.h"
+#include "xbox_interp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -321,6 +322,7 @@ static recomp_func_t seh_resolve(uint32_t va)
     recomp_func_t fn = recomp_lookup_manual(va);
     if (!fn) fn = recomp_lookup(va);
     if (!fn) fn = recomp_lookup_kernel(va);
+    if (!fn) fn = xbox_InterpResolve(va, 'r', 0);   /* a handler the analysis missed (XBA-303) */
     return fn;
 }
 
@@ -662,7 +664,9 @@ int xbox_SehRaiseHostFault(uint32_t va, uint32_t access, uintptr_t host_pc)
     }
 
     g_esp = seh_fault_build_esp(t, esp);
-    handled = seh_raise_new(XBOX_STATUS_ACCESS_VIOLATION, 0, 0, 2, params,
+    /* Interpreted code (XBA-303) knows its pc: the record's address and the
+     * context's Eip are exact there (0 in lifted code, which keeps none). */
+    handled = seh_raise_new(XBOX_STATUS_ACCESS_VIOLATION, 0, xbox_InterpCurrentVa(), 2, params,
                             esp, 1);
     if (handled) {
         if ((g_eax != saved.r_eax || g_ecx != saved.r_ecx || g_edx != saved.r_edx

@@ -32,6 +32,10 @@
  *   Snapshot   xbox_SehRuntimeSnapshot / Restore carry the frame top (a
  *              longjmp or an SEH resume over lifted frames)
  *   No table   with no call-site table registered, chains say NO_TABLE
+ *   Interp     XBA-303: a worker whose start routine was never lifted (guest bytes
+ *              in the heap) runs in the interpreter and sleeps in a loop; a
+ *              capture refuses it, naming the interpreter (states are taken at
+ *              lifted boundaries only), and it ends when asked
  *   Load       xbox_StateLoad (same run, XBA-249) compares chains: a state with
  *              the deep thread refuses (overflow), then with the fiber thread
  *              (stack switch); with render and audio only, a load is accepted
@@ -608,6 +612,56 @@ static unsigned char *load(const char *path, size_t *n)
     return b;
 }
 
+/* XBA-303: a thread in code the interpreter runs refuses a save state. The routine:
+ *     L: mov eax, esp; sub eax, 64; and eax, -8          the interval, below the stack
+ *        mov dword [eax], -30000; mov dword [eax+4], -1  3 ms, relative
+ *        push eax; push 0; push 0; call [KeDelayExecutionThread]
+ *        cmp dword [flag], 0; je L
+ *        ret                                              */
+static void phase_interp(void)
+{
+    uint32_t code = xbox_HeapAlloc(0x100, 16), flag = xbox_HeapAlloc(0x10, 16), hva = g_handles + 0x40u;
+    uint8_t *p = (uint8_t *)((uintptr_t)code + g_xbox_mem_offset);
+    uint32_t argv[10] = { hva, 0, 0, 0, 0, 0, 0, 0, 0, code };
+    uint8_t *b = NULL;
+    size_t n = 0;
+    XboxStateStats st;
+    char d[300];
+    int rc, k, i = 0;
+
+    printf("interpreted worker (XBA-303)\n");
+    G32(flag) = 0;
+#define B(x) (p[i++] = (uint8_t)(x))
+#define W(x) do { uint32_t _w = (uint32_t)(x); B(_w); B(_w >> 8); B(_w >> 16); B(_w >> 24); } while (0)
+    B(0x89); B(0xE0);                       /* mov eax, esp */
+    B(0x83); B(0xE8); B(0x40);              /* sub eax, 64 */
+    B(0x83); B(0xE0); B(0xF8);              /* and eax, -8 */
+    B(0xC7); B(0x00); W(-30000);            /* mov dword [eax], -30000 */
+    B(0xC7); B(0x40); B(0x04); W(-1);       /* mov dword [eax+4], -1 */
+    B(0x50); B(0x6A); B(0x00); B(0x6A); B(0x00);   /* push eax; push 0; push 0 */
+    B(0xFF); B(0x15); W(g_thunks);          /* call [KeDelayExecutionThread] (ORDS[0]) */
+    B(0x83); B(0x3D); W(flag); B(0x00);     /* cmp dword [flag], 0 */
+    B(0x74); B(0x100 - (i + 1));            /* je L */
+    B(0xC3);                                /* ret */
+#undef B
+#undef W
+    G32(g_stack) = 0xBEEF0001u;
+    for (k = 0; k < 10; k++)
+        G32(g_stack + 4 + 4 * k) = argv[k];
+    g_esp = g_stack;
+    thunk(ORD_PSCREATE)();
+    check(wait_threads(1, 3000), "the worker starts, in the interpreter", NULL);
+    usleep(50000);
+    rc = xbox_StateCapture(1000, &b, &n, &st);
+    snprintf(d, sizeof d, "rc %d: %s", rc, st.reason);
+    check(rc == XBOX_STATE_EBUSY && strstr(st.reason, "interpreter") != NULL,
+          "a capture refuses it, naming the interpreter", d);
+    if (rc == XBOX_STATE_OK)
+        free(b);
+    G32(flag) = 1;
+    check(wait_threads(0, 5000), "it ends when asked (its loop ran interpreted)", NULL);
+}
+
 int main(int argc, char **argv)
 {
     size_t len = 0;
@@ -658,6 +712,7 @@ int main(int argc, char **argv)
     g_stop = 1;
     check(wait_threads(0, 5000), "the workers end", NULL);
     check(g_deep_bad == 0, "the frame top came back exactly at every level, 1100 deep included", NULL);
+    phase_interp();
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

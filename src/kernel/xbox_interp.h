@@ -116,6 +116,14 @@ int xbox_InterpEnabled(void);
  * ret: the return address on the guest stack, for the record (0: none). */
 xbox_interp_fn xbox_InterpResolve(uint32_t va, int kind, uint32_t ret);
 
+/* The indirect-call miss path (recomp_types.h): a target with no dispatch
+ * entry, inside the image's code (outside 0) or not (outside 1, mapped guest
+ * memory: exec_outside_image). A jump back into an activation's frames goes
+ * there (xbox_InterpResumeAt) and does not return; otherwise the thunk to
+ * call, or NULL to skip as before (interpreter off, a wild pointer, not
+ * code). */
+xbox_interp_fn xbox_InterpIcallMiss(uint32_t va, int outside);
+
 /* The guest address a thunk from xbox_InterpResolve interprets, 0 for any
  * other function. */
 uint32_t xbox_InterpThunkVa(xbox_interp_fn fn);

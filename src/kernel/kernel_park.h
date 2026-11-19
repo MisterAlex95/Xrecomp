@@ -221,6 +221,8 @@ typedef struct {
     uint64_t cpu[XBOX_PARK_CPU_BYTES / 8];   /* the RecompCpuRegs, cpu_bytes of it */
     uint32_t site;           /* XBOX_PARK_SITE_*: a kernel call, or a host wait inside lifted code */
     int reissue;             /* a same-run load set its registers to make its call again at the thaw (XBA-249) */
+    int interp;              /* interpreter activations the thread is inside at the park point (XBA-303):
+                              * no lifted frame to resume it at, so a state refuses it */
 } XboxParkRecord;
 
 /* The registered threads' records (at most max), each read consistently: a record being rewritten is waited

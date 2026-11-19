@@ -21,8 +21,17 @@ import subprocess
 import tempfile
 
 from . import config
-from .lift_fixture import gnu_cc, RUNTIME
-from .translator import FunctionTranslator
+from .c_fixture import compiler, is_msvc
+
+RUNTIME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "templates", "runtime")
+
+
+def gnu_cc():
+    """A GNU-dialect C compiler, or None (lift_fixture's, without importing the translator:
+    the golden vectors need no capstone)."""
+    cc = os.environ.get("CC") or compiler()
+    return None if not cc or is_msvc(cc) else cc
+
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 CORE = os.path.join(ROOT, "src", "kernel", "xbox_interp_core.c")
@@ -525,6 +534,7 @@ def translate_at(code, name, base):
         [config.Section(".text", base, len(code), 0, len(code), True)],
         entry_point=base, kernel_thunk_addr=base, origin="interp-fixture")
     db = {base: {"start": f"0x{base:08X}", "end": base + len(code), "_addr": base, "size": len(code)}}
+    from .translator import FunctionTranslator      # capstone: only for the lifted side
     c = FunctionTranslator(code, db).translate_function(base, db[base])
     return c.replace(f"sub_{base:08X}", name)
 

@@ -19,6 +19,18 @@ add_test(NAME seh_dispatch_faults_off COMMAND seh_dispatch_test faults-off)
 set_tests_properties(seh_dispatch_faults_off PROPERTIES
     ENVIRONMENT "RECOMP_SEH_FAULTS=0" SKIP_RETURN_CODE 77)
 
+# XBA-303: the same scenarios with five of the fixture's functions left out of
+# the lift (f_inner, my_handler3, f_cxx_inner, ehstub_inner, my_cxx_handler):
+# the interpreter runs them, frames, handlers and funclets across the boundary.
+add_executable(seh_dispatch_interp_test test_main.c fixture_interp_gen.c)
+target_include_directories(seh_dispatch_interp_test PRIVATE
+    ../../src/kernel ../../src ../../templates/runtime)
+target_link_libraries(seh_dispatch_interp_test PRIVATE xboxrecomp)
+if(WIN32)
+    target_link_libraries(seh_dispatch_interp_test PRIVATE winmm)
+endif()
+add_test(NAME seh_dispatch_interp_test COMMAND seh_dispatch_interp_test)
+
 # What an anchor costs per call (not a test): ./seh_anchor_bench [iterations]
 add_executable(seh_anchor_bench anchor_bench.c ../../src/kernel/xbox_seh.c
     ../../src/kernel/xbox_seh_fault.c ../../src/kernel/recomp_discovery.c)

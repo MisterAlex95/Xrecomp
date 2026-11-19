@@ -43,6 +43,7 @@ set(KERNEL_SOURCES
     recomp_xdk_defaults.c
     recomp_d3d_service.c
     recomp_smc.c
+    xbox_interp.c
     recomp_stack_switch.c
     recomp_status.c
     prep_progress.c

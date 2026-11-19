@@ -40,6 +40,7 @@
 #include "guest_clock.h"            /* fast-forward (XBA-240) */
 #include "recomp_icall_feedback.h"
 #include "recomp_discovery.h"
+#include "xbox_interp.h"          /* missed routines interpreted (XBA-303) */
 #include "recomp_status.h"
 #include "kernel_disc.h"
 #include "xbox_cheats.h"
@@ -1185,6 +1186,8 @@ static void bridge_PsCreateSystemThreadEx(void)
     if (start_routine) {
         recomp_func_t fn = recomp_lookup(start_routine);
         if (!fn) fn = recomp_lookup_manual(start_routine);
+        if (!fn && (fn = xbox_InterpResolve(start_routine, 't', 0)) != NULL)
+            recomp_discovery_thread(start_routine, start_context1);   /* interpreted: the next Prepare lifts it (XBA-303) */
         if (fn) {
             if (is_first_call) {
                 /* Main game thread: run directly, inheriting register state */
@@ -3060,6 +3063,7 @@ static void bridge_NtUserIoApcDispatcher(void)
 
     fn = recomp_lookup(apc_context);
     if (!fn) fn = recomp_lookup_manual(apc_context);
+    if (!fn) fn = xbox_InterpResolve(apc_context, 'r', 0);
     if (!fn) {
         fprintf(stderr, "  [KERNEL] NtUserIoApcDispatcher: completion routine "
                 "0x%08X not in dispatch\n", apc_context);
@@ -3407,6 +3411,7 @@ static int kernel_run_dpc_call(uint32_t dpc_va, uint32_t routine, uint32_t conte
 
     fn = recomp_lookup(routine);
     if (!fn) fn = recomp_lookup_manual(routine);
+    if (!fn) fn = xbox_InterpResolve(routine, 'r', 0);
     if (!fn) {
         fprintf(stderr, "  [KERNEL] DPC routine 0x%08X not in dispatch\n",
                 routine);
@@ -3484,6 +3489,7 @@ static void bridge_KeSynchronizeExecution(void)
 
     fn = routine ? recomp_lookup(routine) : NULL;
     if (!fn && routine) fn = recomp_lookup_manual(routine);
+    if (!fn && routine) fn = xbox_InterpResolve(routine, 'r', 0);
     if (!fn) {
         fprintf(stderr, "  [KERNEL] KeSynchronizeExecution: routine 0x%08X "
                         "not in dispatch\n", routine);
@@ -3732,6 +3738,7 @@ static int kernel_call_isr(uint32_t vector)
         return -1;
     fn = recomp_lookup(routine);
     if (!fn) fn = recomp_lookup_manual(routine);
+    if (!fn) fn = xbox_InterpResolve(routine, 'r', 0);
     if (!fn)
         return -1;
 
@@ -5663,6 +5670,7 @@ static void deliver_one_apc(uint32_t apc_routine, uint32_t apc_context,
     recomp_func_t fn = recomp_lookup(apc_routine);
     if (!fn) fn = recomp_lookup_manual(apc_routine);
     if (!fn) fn = recomp_lookup_kernel(apc_routine);
+    if (!fn) fn = xbox_InterpResolve(apc_routine, 'r', 0);
     if (fn) {
         /* VOID NTAPI ApcRoutine(PVOID ApcContext, PIO_STATUS_BLOCK, ULONG)
          *
@@ -8046,6 +8054,7 @@ static uint32_t irp_call_guest(uint32_t va, const uint32_t *args, int n,
 
     if (!fn) fn = recomp_lookup_manual(va);
     if (!fn) fn = recomp_lookup_kernel(va);
+    if (!fn) fn = xbox_InterpResolve(va, 'r', 0);
     if (!fn) {
         fprintf(stderr, "  [KERNEL] IRP routine 0x%08X unresolved\n", va);
         return missing;
@@ -11169,6 +11178,7 @@ static void bridge_call_guest(uint32_t va, const uint32_t *args, int n)
 
     if (!fn) fn = recomp_lookup_manual(va);
     if (!fn) fn = recomp_lookup_kernel(va);
+    if (!fn) fn = xbox_InterpResolve(va, 'r', 0);
     if (!fn) {
         fprintf(stderr, "  [KERNEL] APC routine 0x%08X unresolved\n", va);
         fflush(stderr);
@@ -12681,6 +12691,8 @@ static void bridge_PsCreateSystemThread(void)
         recomp_func_t fn = recomp_lookup(start_routine);
         if (!fn)
             fn = recomp_lookup_manual(start_routine);
+        if (!fn && (fn = xbox_InterpResolve(start_routine, 't', 0)) != NULL)
+            recomp_discovery_thread(start_routine, start_context1);   /* interpreted: the next Prepare lifts it (XBA-303) */
         if (fn) {
             if (is_first_call) {
                 xbox_DpcMarkGuestThread();

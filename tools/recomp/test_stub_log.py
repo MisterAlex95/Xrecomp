@@ -52,7 +52,7 @@ def test_stub_calls_the_one_shot_log_and_still_pops():
         stubs = _emit(out)
     assert 'getenv("RECOMP_STUB_LOG")' in stubs
     assert (f"void sub_{MISSING:08X}(void) {{ RECOMP_STUB_HIT(0x{MISSING:08X}u); "
-            "g_esp += 12;") in stubs
+            f"RECOMP_STUB_INTERP(0x{MISSING:08X}u); g_esp += 12;") in stubs
 
 
 _TYPES_H = r"""
@@ -60,6 +60,7 @@ _TYPES_H = r"""
 static uint8_t g_stack[64];
 static uint32_t g_esp = 16;
 #define MEM32(a) (*(uint32_t *)(g_stack + (a)))
+#define RECOMP_STUB_INTERP(va) ((void)0)   /* no interpreter here: the skip (XBA-303) */
 """
 
 _MAIN_C = r"""

@@ -2545,12 +2545,37 @@ void (*recomp_icall_install(uint32_t xbox_va, void (*fn)(void)))(void);   /* ret
 #define RECOMP_ICALL_INSTALL_(_va, _fn) (_fn)
 #endif
 
+/* The interpreter (XBA-303, src/kernel/xbox_interp.h): a target the lookups
+ * miss -- in the image's code with no dispatch entry, or mapped guest memory
+ * outside it (exec_outside_image) -- is interpreted until it reaches lifted
+ * code again, and named in the discovery file for the next Prepare. The
+ * runtime answers NULL (the old skip, and its report) with RECOMP_INTERP=0,
+ * for a wild pointer, or for bytes that are not code. A weak reference: a
+ * harness without the runtime links and keeps the skip. */
+#if defined(__GNUC__) || defined(__clang__)
+void (*xbox_InterpIcallMiss(uint32_t va, int outside))(void) __attribute__((weak));
+#define RECOMP_ICALL_INTERP_(_va, outside) \
+    (xbox_InterpIcallMiss ? xbox_InterpIcallMiss((_va), (outside)) : (void (*)(void))0)
+#else
+#define RECOMP_ICALL_INTERP_(_va, outside) ((void (*)(void))0)
+#endif
+
+/* A direct call target the analysis did not lift (the translator's
+ * unresolved-call stubs): interpreted when the runtime can, else the stub's
+ * old skip runs. */
+#define RECOMP_STUB_INTERP(va) do { \
+    void (*_sif)(void) = RECOMP_ICALL_INTERP_((uint32_t)(va), 0); \
+    if (_sif) { _sif(); return; } \
+} while (0)
+
 #define RECOMP_ICALL_DISPATCH_(xbox_va, trace_stmt, site_stmt, fail_stmt) \
     uint32_t _va = (uint32_t)(xbox_va); \
     RECOMP_ICALL_HIT_(_va) \
     trace_stmt; \
     /* Skip garbage VAs outside code section + kernel thunk range */ \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
+        recomp_func_t _ifn = RECOMP_ICALL_INTERP_(_va, 1); \
+        if (_ifn) { RECOMP_ABI_CALL(_va, _ifn); break; } \
         recomp_icall_not_code_log(_va); \
         fail_stmt; break; \
     } \
@@ -2562,7 +2587,8 @@ void (*recomp_icall_install(uint32_t xbox_va, void (*fn)(void)))(void);   /* ret
                _fn = RECOMP_ICALL_INSTALL_(_va, _fn); \
                RECOMP_ABI_CALL(_va, _fn); } \
     else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); fail_stmt; }
+           if ((_fn = RECOMP_ICALL_INTERP_(_va, 0)) != 0) RECOMP_ABI_CALL(_va, _fn); \
+           else { recomp_icall_fail_log(_va); fail_stmt; } }
 
 /**
  * RECOMP_ICALL - Indirect call through the dispatch table.

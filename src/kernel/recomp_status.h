@@ -31,6 +31,12 @@
  *               (or "0x1234"), and how often they arrived; at most 16, the
  *               executor's report sets them
  *
+ * and once the interpreter ran code the analysis missed (XBA-303):
+ *
+ *   interp_insns    instructions interpreted so far (a hot interpreted path
+ *                   shows as a steep slope between two lines)
+ *   interp_entries  addresses with no lifted code that were interpreted
+ *
  * and once the title touched the Ethernet controller (XBA-117):
  *
  *   net         only once the title touched the Ethernet controller or the

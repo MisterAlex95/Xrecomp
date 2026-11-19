@@ -73,9 +73,19 @@ def load(path=FIXTURE_JSON):
         return json.load(f)
 
 
-def lift(data=None, *, seh_anchors=True):
+# The interpreter's variant (XBA-303): these are left unlifted, as functions the
+# analysis missed. A lifted caller's direct call reaches a stub that interprets
+# (RECOMP_STUB_INTERP); the dispatcher's call to a handler and an indirect call
+# miss the dispatch table and are interpreted; the frames in between are
+# interpreted frames. tests/seh_dispatch runs the same scenarios on it.
+INTERP_OMIT = ("f_inner", "my_handler3", "f_cxx_inner", "ehstub_inner", "my_cxx_handler")
+GENERATED_INTERP_C = os.path.join(FIXTURE_DIR, "fixture_interp_gen.c")
+
+
+def lift(data=None, *, seh_anchors=True, omit=()):
     """C for the fixture: the lifted functions, their funclet entries, a
-    dispatch table (recomp_lookup) and the image bytes."""
+    dispatch table (recomp_lookup) and the image bytes. omit: functions left
+    unlifted, each a stub that interprets it (the interpreter's variant)."""
     from tools.recomp import config
     from tools.recomp.translator import FunctionTranslator, _func_ident
 
@@ -99,10 +109,14 @@ def lift(data=None, *, seh_anchors=True):
                          "_addr": start, "size": end - start}
         tr = FunctionTranslator(image, db)
         tr.seh_anchors = seh_anchors
-        bodies, entries = [], []
+        bodies, entries, stubs = [], [], []
         for addr in sorted(db):
             info = db[addr]
             name = _func_ident(addr, info["name"])
+            if info["name"] in omit:
+                stubs.append(f"void {name}(void) {{ RECOMP_STUB_INTERP(0x{addr:08X}u); g_esp += 4; }}"
+                             f"  /* not lifted: interpreted (XBA-303) */")
+                continue
             code = tr.translate_function(addr, info)
             assert code, f"{name} did not translate"
             bodies.append(code)
@@ -126,6 +140,7 @@ def lift(data=None, *, seh_anchors=True):
         "typedef void (*recomp_func_t)(void);",
     ]
     out += [f"void {name}(void);" for _, name in entries]
+    out += stubs
     out += ["void sub_0001F000(void);  /* RAISE, the harness */",
             "void sub_0001F010(void);  /* UNWIND, the harness */",
             "void sub_0001F020(void);  /* COMMIT, the harness */", ""]
@@ -144,7 +159,15 @@ def lift(data=None, *, seh_anchors=True):
             "}", "",
             "/* The harness's own guest functions (a stack switch, a fiber body). */",
             "recomp_func_t seh_fixture_lookup_harness(uint32_t va);",
-            "recomp_func_t recomp_lookup_manual(uint32_t va) { return seh_fixture_lookup_harness(va); }",
+            "recomp_func_t recomp_lookup_manual(uint32_t va)",
+            "{",
+            "    switch (va) {     /* what interpreted code calls by address (lifted code calls them by name) */",
+            "    case 0x0001F000u: return sub_0001F000;",
+            "    case 0x0001F010u: return sub_0001F010;",
+            "    case 0x0001F020u: return sub_0001F020;",
+            "    }",
+            "    return seh_fixture_lookup_harness(va);",
+            "}",
             "",
             "/* No flat table (span 0): every indirect call takes the lookups above. */",
             "recomp_flat_dispatch_t g_recomp_flat;",
@@ -172,6 +195,9 @@ def main(argv):
         with open(GENERATED_C, "w", encoding="utf-8", newline="\n") as f:
             f.write(lift())
         print(f"wrote {GENERATED_C}")
+        with open(GENERATED_INTERP_C, "w", encoding="utf-8", newline="\n") as f:
+            f.write(lift(omit=INTERP_OMIT))
+        print(f"wrote {GENERATED_INTERP_C}")
         return 0
     print(__doc__)
     return 2

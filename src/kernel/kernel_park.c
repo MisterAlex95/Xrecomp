@@ -16,6 +16,7 @@
 #include "kernel_park.h"
 #include "kernel.h"
 #include "xbox_memory_layout.h"
+#include "xbox_interp.h"
 #include "platform/host_time.h"
 
 #include <stdlib.h>
@@ -70,6 +71,7 @@ typedef struct {
     RecompCpu *live;
     volatile int32_t reissue;
     volatile uint32_t frame_base;
+    volatile int32_t interp;         /* xbox_InterpDepth() at the last record (XBA-303) */
 } Slot;
 
 static Slot s_slots[XBOX_PARK_MAX_THREADS];
@@ -169,6 +171,7 @@ static void record_write(Slot *s, int returned, uint32_t site, uint32_t ordinal,
     }
     s->returned = returned;
     s->status = returned ? g_eax : 0;
+    s->interp = xbox_InterpDepth();
     memcpy(&s->cpu, (const void *)&g_cpu, sizeof s->cpu);   /* the registers, not the frames */
     STORE32((volatile int32_t *)&s->seq, (int32_t)(s->seq + 1));
 }
@@ -708,6 +711,7 @@ int xbox_ParkRecords(XboxParkRecord *out, int max)
             r->kernel_calls = s->kernel_calls;
             r->site = s->site;
             r->reissue = LOAD32(&s->reissue);
+            r->interp = s->interp;
             r->cpu_bytes = (uint32_t)sizeof(RecompCpuRegs);
             memcpy(r->cpu, (const void *)&s->cpu, sizeof(RecompCpuRegs));
             FENCE();

@@ -757,6 +757,13 @@ int xbox_StateCaptureFrozen(uint8_t **blob, size_t *blob_n, XboxStateStats *st)
             REASON(st->reason, "guest thread %lu is running (not frozen)", recs[i].tid);
             return XBOX_STATE_EFREEZE;
         }
+        if (recs[i].interp) {
+            /* Interpreted code (XBA-303) has no lifted frame a resume could re-enter, and the
+             * interpreter's position is in its host frames: saved only at lifted boundaries. */
+            REASON(st->reason, "guest thread %lu is in code the interpreter runs (%s at 0x%08X); "
+                   "the next Prepare lifts it", recs[i].tid, xbox_ParkSiteName(recs[i].site), recs[i].ret_va);
+            return XBOX_STATE_EBUSY;
+        }
         if (recs[i].dispatch && recs[i].site != XBOX_PARK_SITE_KERNEL) {
             REASON(st->reason, "guest thread %lu is held at DISPATCH_LEVEL (in %s at 0x%08X)", recs[i].tid,
                    xbox_ParkSiteName(recs[i].site), recs[i].ret_va);

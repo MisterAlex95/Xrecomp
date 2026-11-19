@@ -25,6 +25,7 @@
 #include "xbox_interp.h"
 
 #include <setjmp.h>
+#include <stdio.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -133,13 +134,17 @@ typedef struct XInsn {
 
 /* ---- the activation ------------------------------------------------------------- */
 
+#define XACT_MAGIC 0x58414354u       /* 'XACT' */
 typedef struct XAct {
+    uint32_t magic;
+    struct XAct *self;
     struct XAct *outer;
     RecompCpu *c;
     uint32_t eip;               /* the instruction being executed */
     uint32_t entry_esp;         /* [entry_esp] is the activation's return address */
     uint64_t insns;
     uint32_t edges;
+    uint32_t depth;             /* interpreted calls in progress (not native ones) */
     int in_native;              /* a native call is in progress */
     uint32_t native_esp;        /* esp at it (its return address) */
     RecompFrame *native_ftop;   /* the shadow stack's top at it */
@@ -150,10 +155,6 @@ typedef struct XAct {
 
 static RECOMP_TLS XAct *t_act;
 
-uint32_t xbox_InterpCurrentVa(void)
-{
-    return t_act ? t_act->eip : 0u;
-}
 
 /* ---- guest memory ----------------------------------------------------------------- */
 
@@ -633,17 +634,31 @@ static inline xbox_interp_fn native_at(uint32_t va)
 static int transfer(XRun *x, uint32_t target, int is_call, uint32_t ret)
 {
     RecompCpu *c = x->c;
+    XAct *a = x->a;
     xbox_interp_fn fn = native_at(target);
     if (fn) {
-        uint32_t ra = is_call ? ret : MEM32(c->r_esp);
+        uint32_t ra = is_call ? ret : (a->depth ? MEM32(c->r_esp) : 0u);
         call_native(x, fn, target);
-        if (c->r_esp > x->a->entry_esp)
-            return X_EXIT;              /* a tail jump that returned from the activation */
+        if (is_call) {
+            x->next = ra;
+            return X_NEXT;
+        }
+        /* A jump into native code: it returns for the function that jumped,
+         * as a lifted indirect tail jump returns (RECOMP_ITAIL, then return).
+         * From the activation's own code that ends the activation, whatever
+         * esp is (a handler whose resume was refused); from an interpreted
+         * callee, to its caller. */
+        if (!a->depth || c->r_esp > a->entry_esp)
+            return X_EXIT;
+        a->depth--;
         x->next = ra;
         return X_NEXT;
     }
-    if (is_call && xbox_interp_hooks.note_call)
-        xbox_interp_hooks.note_call(target, ret);
+    if (is_call) {
+        a->depth++;
+        if (xbox_interp_hooks.note_call)
+            xbox_interp_hooks.note_call(target, ret);
+    }
     x->next = target;
     return X_NEXT;
 }
@@ -655,6 +670,8 @@ static int do_ret(XRun *x, uint32_t pop_extra)
     c->r_esp += pop_extra;
     if (c->r_esp > x->a->entry_esp)
         return X_EXIT;
+    if (x->a->depth)
+        x->a->depth--;
     x->next = ra;
     return X_NEXT;
 }
@@ -1275,6 +1292,55 @@ static int step(XAct *a, XInsn *d)
     return r;
 }
 
+/* RECOMP_INTERP_TRACE=1: every interpreted instruction and the registers before it, on stderr. */
+static int trace_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_INTERP_TRACE");
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
+/* The thread's activations, innermost last, in a heap array (t_acts): an SEH
+ * resume or a guest longjmp can jump over an activation, whose stack memory
+ * then holds anything, so what decides whether one is still there is kept
+ * here, never read from it: its host frame must be above the caller's and
+ * its frame on the shadow stack must still be the one it pushed (the jump put
+ * the top back below it, xbox_SehRuntimeRestore). Deaths come from the top. */
+typedef struct XActRef {
+    XAct *act;
+    uintptr_t host;             /* the activation's address: its host frame */
+    uint32_t fidx, entry_esp;
+} XActRef;
+#define XACT_MAX 256
+static RECOMP_TLS XActRef *t_acts;
+static RECOMP_TLS int t_nacts;
+
+static int ref_live(const XActRef *r, uintptr_t frame)
+{
+    const RecompCpu *c = &g_cpu;
+    if (r->host <= frame)
+        return 0;
+    if (frames_depth(c) <= r->fidx || !c->r_fbase || c->r_fbase[r->fidx].f_esp != r->entry_esp)
+        return 0;
+    return 1;
+}
+
+/* Drops the activations jumped over; the innermost live one, or NULL. */
+static XAct *acts_prune(uintptr_t frame)
+{
+    while (t_nacts > 0 && !ref_live(&t_acts[t_nacts - 1], frame))
+        t_nacts--;
+    if (t_nacts > 0)
+        t_act = t_acts[t_nacts - 1].act;
+    else
+        t_act = 0;
+    return t_act;
+}
+#define FRAME_HERE() ((uintptr_t)__builtin_frame_address(0))
+
 int xbox_InterpRun(uint32_t va, uint64_t limit, XboxInterpStop *stop)
 {
     XAct act;
@@ -1282,12 +1348,17 @@ int xbox_InterpRun(uint32_t va, uint64_t limit, XboxInterpStop *stop)
     volatile int result = XBOX_INTERP_RETURNED;
     XInsn d;
     RecompFrame *f;
+    int slot;
 
     memset(&act, 0, sizeof act);
     act.c = c;
     act.eip = va;
     act.entry_esp = c->r_esp;
-    act.outer = t_act;
+    act.magic = XACT_MAGIC;
+    act.self = &act;
+    acts_prune(FRAME_HERE());
+    if (!t_acts)
+        t_acts = (XActRef *)calloc(XACT_MAX, sizeof *t_acts);
     /* The activation's frame on the shadow stack (XBA-247), as a lifted
      * function that may park records itself: its entry esp, the caller's ebp. */
     f = c->r_ftop;
@@ -1297,6 +1368,15 @@ int xbox_InterpRun(uint32_t va, uint64_t limit, XboxInterpStop *stop)
     f->f_esp = c->r_esp;
     c->r_ftop = f + 1;
     act.fidx = frames_depth(c) - 1u;
+    slot = -1;
+    if (t_acts && t_nacts < XACT_MAX) {
+        slot = t_nacts++;
+        t_acts[slot].act = &act;
+        t_acts[slot].host = (uintptr_t)&act;
+        t_acts[slot].fidx = act.fidx;
+        t_acts[slot].entry_esp = act.entry_esp;
+    }
+    act.outer = t_act;
     t_act = &act;
 
     if (setjmp(act.resume)) {
@@ -1315,6 +1395,10 @@ int xbox_InterpRun(uint32_t va, uint64_t limit, XboxInterpStop *stop)
             break;
         }
         act.insns++;
+        if (RECOMP_UNLIKELY(trace_on()))
+            fprintf(stderr, "[INTERP] %08X %02X %02X %02X %02X  eax %08X ecx %08X edx %08X ebx %08X esp %08X ebp %08X esi %08X edi %08X\n",
+                    d.va, d.bytes[0], d.bytes[1], d.bytes[2], d.bytes[3], c->r_eax, c->r_ecx, c->r_edx, c->r_ebx,
+                    c->r_esp, c->r_ebp, c->r_esi, c->r_edi);
         r = step(&act, &d);
         if (r == X_NEXT) continue;
         if (r == X_EXIT) { result = XBOX_INTERP_RETURNED; break; }
@@ -1329,47 +1413,38 @@ int xbox_InterpRun(uint32_t va, uint64_t limit, XboxInterpStop *stop)
     if (act.c->r_fbase)
         act.c->r_ftop = act.c->r_fbase + act.fidx;
     act.c->r_seh_ebp = act.c->r_ebp;
-    t_act = act.outer;
+    act.magic = 0;
+    if (slot >= 0)
+        t_nacts = slot;             /* this one, and any inner one left behind */
+    acts_prune(FRAME_HERE());
     return result;
 }
 
-static int act_live(const XAct *a)
+uint32_t xbox_InterpCurrentVa(void)
 {
-    const RecompCpu *c = a->c;
-    if ((uintptr_t)a <= (uintptr_t)__builtin_frame_address(0))
-        return 0;
-    if (frames_depth(c) <= a->fidx || !c->r_fbase || c->r_fbase[a->fidx].f_esp != a->entry_esp)
-        return 0;
-    return 1;
+    /* 0 inside a native call the activation made: that code is lifted */
+    XAct *a = acts_prune(FRAME_HERE());
+    return a && !a->in_native ? a->eip : 0u;
 }
 
 void xbox_InterpResumeAt(uint32_t va)
 {
-    XAct *a;
-    /* Activations a longjmp went over are gone: drop them first. */
-    while (t_act && !act_live(t_act))
-        t_act = t_act->outer;
-    for (a = t_act; a; a = a->outer) {
-        if (!a->in_native)
-            continue;
-        if (a->c->r_esp > a->native_esp && a->c->r_esp <= a->entry_esp) {
-            t_act = a;
-            a->resume_va = va;
-            a->c->r_ftop = a->native_ftop;
-            a->c->r_ebp = a->c->r_seh_ebp;   /* an indirect jump publishes g_seh_ebp */
-            longjmp(a->resume, 1);
-        }
-        break;          /* only the innermost activation's native call can be abandoned to it */
+    /* Only the innermost activation's native call can be abandoned to it: the
+     * target's frame (esp) above the call's return address, within the
+     * activation's own stack. */
+    XAct *a = acts_prune(FRAME_HERE());
+    if (!a || !a->in_native)
+        return;
+    if (a->c->r_esp > a->native_esp && a->c->r_esp <= a->entry_esp) {
+        a->resume_va = va;
+        a->c->r_ftop = a->native_ftop;
+        a->c->r_ebp = a->c->r_seh_ebp;       /* an indirect jump publishes g_seh_ebp */
+        longjmp(a->resume, 1);
     }
 }
 
 int xbox_InterpDepth(void)
 {
-    int n = 0;
-    XAct *a;
-    while (t_act && !act_live(t_act))
-        t_act = t_act->outer;
-    for (a = t_act; a; a = a->outer)
-        n++;
-    return n;
+    acts_prune(FRAME_HERE());
+    return t_nacts;
 }

@@ -5036,7 +5036,11 @@ class BatchTranslator:
             stub_lines.append(
                 " * they end in a `ret N` -- guessing cdecl there silently walks")
             stub_lines.append(
-                " * esp off by N on every call. */")
+                " * esp off by N on every call. With the interpreter (XBA-303) a stub")
+            stub_lines.append(
+                " * runs the code at its address instead (RECOMP_STUB_INTERP); the skip")
+            stub_lines.append(
+                " * is what is left with RECOMP_INTERP=0. */")
             stub_lines.append("")
             # A stub skips whatever code really lives at its address, so one
             # reached at runtime is a likely cause of a silent stall or a wrong
@@ -5087,7 +5091,8 @@ class BatchTranslator:
                     note = "; ".join(f"pop {r}" for r in regs) + f"; ret {n}"
                     stub_lines.append(
                         f"void {unresolved[addr]}(void) {{ "
-                        f"RECOMP_STUB_HIT(0x{addr:08X}u); {body} g_esp += {4 + n}; "
+                        f"RECOMP_STUB_HIT(0x{addr:08X}u); RECOMP_STUB_INTERP(0x{addr:08X}u); "
+                        f"{body} g_esp += {4 + n}; "
                         f"/* 0x{addr:08X}: {note} */ }}"
                     )
                     continue
@@ -5095,7 +5100,8 @@ class BatchTranslator:
                 note = (f"ret {popped}" if popped else "not detected")
                 stub_lines.append(
                     f"void {unresolved[addr]}(void) {{ "
-                    f"RECOMP_STUB_HIT(0x{addr:08X}u); g_esp += {4 + popped}; "
+                    f"RECOMP_STUB_HIT(0x{addr:08X}u); RECOMP_STUB_INTERP(0x{addr:08X}u); "
+                    f"g_esp += {4 + popped}; "
                     f"/* 0x{addr:08X}: {note} */ }}"
                 )
             stub_lines.append("")
