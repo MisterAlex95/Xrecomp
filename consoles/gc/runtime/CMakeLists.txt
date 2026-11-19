@@ -32,6 +32,8 @@ if(NOT TARGET gc_core)
                 gc_disc.c gc_disc_wia.c gc_bzip2.c gc_di.c gc_boot.c ${GC_GX_SRCS}
                 gc_dsp.c gc_ai.c gc_ax.c gc_asnd.c gc_zelda.c gc_aesnd.c gc_audio_util.c)
     target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    # video/gpu_ring.h (gx_gl.c's streaming rings), shared with the NV2A back end
+    target_include_directories(gc_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../src)
     target_include_directories(gc_core PRIVATE ${GC_LIBCHDR}/deps/miniz-3.1.2 ${GC_LIBCHDR}/deps/zstd-1.5.7
                                                ${GC_LIBCHDR}/deps/lzma-26.02/include)
     target_compile_definitions(gc_core PRIVATE MINIZ_NO_ARCHIVE_APIS MINIZ_NO_DEFLATE_APIS MINIZ_NO_STDIO MINIZ_NO_TIME)

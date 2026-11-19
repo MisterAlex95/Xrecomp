@@ -36,7 +36,14 @@
  *
  * Fixed function on the GPU (XBA-134 item 1):
  *  11. the generated vertex shader against the CPU transform, output by
- *      output over random states, and the same picture both ways. */
+ *      output over random states, and the same picture both ways.
+ *
+ * Streamed uploads (XBA-302):
+ *  12. 240 overlapping batches, CPU-transformed and vertex-program
+ *      (gathered: vertices and indices), drawn with a glBufferData per draw
+ *      (RECOMP_GPU_STREAM=off), then through 4 KB rings that wrap every few
+ *      batches (unsynchronised maps, then glBufferSubData) and the default
+ *      rings: every picture byte for byte the first. */
 #include "../../src/gpu/nv2a_gl.c"
 #include "nv2a_coverage.h"
 #include "nv2a_vsh_interp.h"   /* Nv2aVshOutput: the capture layout */
@@ -408,6 +415,60 @@ static float ffp_trial(int t)
 /* NDC of pixel position (x, y) on the 64x64 viewport above. */
 static float nx(float x) { return x / 32.0f - 1.0f; }
 static float ny(float y) { return 1.0f - y / 32.0f; }
+
+/* Case 12: 240 batches of 3 to 33 vertices at their own place in VB (the
+ * executor may read them late), every third through the vertex program
+ * (positions in pixels, indexed with vertices shared at random, so that
+ * the index lists differ), the others through the CPU transform; the picture
+ * into out. Returns the ring wraps counted while drawing. */
+static uint32_t stream_scene(uint32_t *out)
+{
+    uint32_t i, k, x, y, base = 0, rng = 777, wraps;
+
+    clear_black();
+    wraps = s_st.strm_wraps;
+    for (i = 0; i < 240; i++) {
+        uint32_t nv = 3 * (1 + (i * 7) % 11);
+        int prog = i % 3 == 0;
+        m(0x1E94, prog ? 2 : 0);
+        for (k = 0; k < nv; k++) {
+            float fx, fy;
+            uint32_t c;
+            rng = rng * 1103515245u + 12345u;
+            fx = (float)((rng >> 8) % 72) - 4.0f;
+            fy = (float)((rng >> 16) % 72) - 4.0f;
+            c = 0xFF000000u | ((rng * 2654435761u) >> 8);
+            if (prog)
+                vtx(base + k, fx, fy, 100, c, 0, 0);
+            else
+                vtx(base + k, nx(fx), ny(fy), 0.5f, c, 0, 0);
+        }
+        if (prog) {
+            /* Indexed (ARRAY_ELEMENT16), vertices shared at random: each
+             * batch's gathered index list is its own. */
+            uint32_t ni = 2 * nv;
+            m(0x17FC, 5);
+            for (k = 0; k < ni; k += 2) {
+                uint32_t a, b;
+                rng = rng * 1103515245u + 12345u;
+                a = base + (rng >> 8) % nv;
+                b = base + (rng >> 20) % nv;
+                m(0x1800, a | b << 16);
+            }
+            m(0x17FC, 0);
+        } else {
+            draw(5, base, nv);               /* TRIANGLES */
+        }
+        base += nv;
+    }
+    m(0x1E94, 0);
+    wraps = s_st.strm_wraps - wraps;         /* before the flip clears the counters */
+    readback();
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++)
+            out[y * W + x] = px(x, y);
+    return wraps;
+}
 
 int main(void)
 {
@@ -812,6 +873,55 @@ int main(void)
                " (%d drawn)\n", pdiff, lit_px);
         CHECK(pdiff <= 4 && lit_px > 200);
         m(0x0314, 0);
+        nv2a_gl_install_from_env();
+    }
+
+    /* 12. XBA-302: streamed vertex and index uploads, byte for byte the
+     * glBufferData-per-draw picture whatever the ring does. */
+    {
+        static const uint32_t prog[2][4] = {
+            { 0, (1u << 21) | (0u << 9) | 0x1Bu, 2u << 26, (0xFu << 12) | (1u << 11) | (0u << 3) },
+            { 0, (1u << 21) | (3u << 9) | 0x1Bu, 2u << 26, (0xFu << 12) | (1u << 11) | (3u << 3) | 1u },
+        };
+        static const struct { int mode; size_t kb; const char *name; } run[3] = {
+            { NV_GL_STREAM_RING, 4, "4 KB rings, unsynchronised maps" },
+            { NV_GL_STREAM_SUB, 4, "4 KB rings, glBufferSubData" },
+            { NV_GL_STREAM_RING, 0, "default rings" },
+        };
+        static uint32_t ref[W * H], got[W * H];
+        uint32_t k, w, lit_px = 0, wraps;
+        int r, j;
+        spy_install();                       /* gathered vertex-program batches */
+        nv2a_gpu_ffp_enable(0);
+        surface();
+        ffp();
+        m(0x0308, 0);                        /* no culling */
+        m(0x1E9C, 0);
+        for (k = 0; k < 2; k++)
+            for (w = 0; w < 4; w++)
+                m(0x0B00 + 4 * w, prog[k][w]);
+        m(0x1EA0, 0);
+        s_strm_mode = NV_GL_STREAM_OFF;
+        strm_reset(0);
+        stream_scene(ref);                   /* once to settle the pipelines' first use */
+        stream_scene(ref);
+        for (k = 0; k < W * H; k++)
+            lit_px += ref[k] != 0;
+        for (r = 0; r < 3; r++) {
+            uint32_t diff = 0;
+            s_strm_mode = run[r].mode;
+            for (j = 0; j < NV_GL_NSTRM; j++)
+                s_strm_size[j] = run[r].kb ? run[r].kb << 10 : (j == NV_GL_STRM_IDX ? 2u : 8u) << 20;
+            strm_reset(0);
+            wraps = stream_scene(got);
+            for (k = 0; k < W * H; k++)
+                diff += got[k] != ref[k];
+            printf("12. streamed uploads, %s: %u wraps, %u of 4096 pixels differ from"
+                   " glBufferData per draw (%u drawn)\n", run[r].name, wraps, diff, lit_px);
+            CHECK(diff == 0);
+            CHECK(run[r].kb == 0 || wraps >= 10);
+        }
+        CHECK(lit_px > 2000);
         nv2a_gl_install_from_env();
     }
 

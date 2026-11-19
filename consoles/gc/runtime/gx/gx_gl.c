@@ -29,7 +29,7 @@
 #include "gx_glapi.h"
 #include "gx_internal.h"
 #include "gx_progcache.h"
-#include "gx_ring.h"
+#include "video/gpu_ring.h"
 #include "gx_shader.h"
 
 #define BATCH_V (1u << 18)
@@ -117,7 +117,7 @@ struct gx_gl {
     GLint ubo_align;
     int stream; /* STREAM_* */
     /* STREAM_STORAGE: the three rings, mapped for their whole life */
-    gx_ring sr[3];
+    gpu_ring sr[3];
     uint8_t *sr_map[3];
     GLuint sr_big[3];     /* an upload too large for its ring: a buffer of its own until the draw is issued */
     EGLContext sr_ctx;    /* the context the rings live in */
@@ -1025,7 +1025,7 @@ static int sext11(uint32_t v)
     return v >= 0x400 ? (int)v - 0x800 : (int)v;
 }
 
-/* ---- RECOMP_GC_GX_STREAM=storage: persistently mapped rings (bookkeeping: gx_ring.h) ---- */
+/* ---- RECOMP_GC_GX_STREAM=storage: persistently mapped rings (bookkeeping: gpu_ring.h) ---- */
 
 static uint64_t stream_now_ns(void)
 {
@@ -1079,7 +1079,7 @@ static void sr_discard(void *user, void *sync)
         F.glDeleteSync((GLsync)sync);
 }
 
-static const gx_ring_ops sr_ops = {sr_fence, sr_retire, sr_discard};
+static const gpu_ring_ops sr_ops = {sr_fence, sr_retire, sr_discard};
 
 static bool has_extension(gx_glfn *f, const char *name)
 {
@@ -1101,7 +1101,7 @@ static void stream_storage_destroy(gx_gl *g, const GLuint *bufs)
     bool same_ctx = g->egl.eglGetCurrentContext() == g->sr_ctx;
     for (unsigned r = 0; r < 3; r++) {
         if (same_ctx) {
-            gx_ring_release(&g->sr[r], &sr_ops, g);
+            gpu_ring_release(&g->sr[r], &sr_ops, g);
             if (g->sr_big[r])
                 F.glDeleteBuffers(1, &g->sr_big[r]);
             if (g->sr_map[r]) {
@@ -1111,7 +1111,7 @@ static void stream_storage_destroy(gx_gl *g, const GLuint *bufs)
         }
         g->sr_big[r] = 0;
         g->sr_map[r] = NULL;
-        gx_ring_init(&g->sr[r], 0);
+        gpu_ring_init(&g->sr[r], 0);
     }
     if (same_ctx)
         F.glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
@@ -1148,7 +1148,7 @@ static const char *stream_storage_create(gx_gl *g)
             why = "the persistent map failed";
             break;
         }
-        gx_ring_init(&g->sr[r], size);
+        gpu_ring_init(&g->sr[r], size);
     }
     if (why) {
         stream_storage_destroy(g, bufs);
@@ -1177,7 +1177,7 @@ static void stream_after_draw(gx_state *gx)
         return;
     for (unsigned r = 0; r < 3; r++) {
         gx->stats.stream_wraps[r] = g->sr[r].wraps;
-        gx_ring_after_draw(&g->sr[r], &sr_ops, g);
+        gpu_ring_after_draw(&g->sr[r], &sr_ops, g);
         if (g->sr_big[r]) {
             F.glDeleteBuffers(1, &g->sr_big[r]);
             g->sr_big[r] = 0;
@@ -1189,7 +1189,7 @@ static void stream_after_draw(gx_state *gx)
 }
 
 /* Streaming buffers (vbo, ebo, ubo). STREAM_STORAGE: a copy into the ring's persistent mapping, no GL call for the data
- * at all, behind fences (gx_ring.h). The other modes: each upload goes after the previous one in a buffer that keeps
+ * at all, behind fences (gpu_ring.h). The other modes: each upload goes after the previous one in a buffer that keeps
  * its storage, and only a wrap orphans it (glBufferData once). A glBufferData of a new size at every draw made Adreno
  * drivers allocate GPU memory per draw (an ioctl each): Prince of Persia: The Two Thrones fell to 13 % in 3D scenes on
  * the Fold8. The ranges written after an orphan were never handed to the GPU, so they are mapped unsynchronised, without
@@ -1206,15 +1206,15 @@ static size_t ring_put(gx_gl *g, unsigned r, GLuint buf, GLenum target, const vo
         g->stream = STREAM_MAP;
     }
     if (g->stream == STREAM_STORAGE) {
-        gx_ring *ring = &g->sr[r];
-        if (!gx_ring_fits(ring, n)) {
+        gpu_ring *ring = &g->sr[r];
+        if (!gpu_ring_fits(ring, n)) {
             F.glGenBuffers(1, &g->sr_big[r]);
             F.glBindBuffer(target, g->sr_big[r]);
             F.glBufferData(target, (GLsizeiptr)n, data, GL_STREAM_DRAW);
             g->sr_oversize++;
             return 0;
         }
-        size_t off = (size_t)gx_ring_reserve(ring, &sr_ops, g, n, align);
+        size_t off = (size_t)gpu_ring_reserve(ring, &sr_ops, g, n, align);
         F.glBindBuffer(target, buf);
         memcpy(g->sr_map[r] + off, data, n);
         __atomic_thread_fence(__ATOMIC_RELEASE); /* the bytes are out before the draw that reads them is issued */

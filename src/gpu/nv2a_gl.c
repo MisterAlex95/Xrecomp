@@ -58,6 +58,7 @@
 #include "nv2a_backend.h"
 #include "d3d/d3d8_swizzle.h"
 #include "host_shader_progress.h"   /* the window's shader badge (XBA-314) */
+#include "video/gpu_ring.h"
 #ifdef XBOXRECOMP_LSFG
 #include "framegen/framegen_policy.h"   /* frame generation forces sync present */
 #endif
@@ -105,6 +106,11 @@ static struct {
     uint32_t ib_new, ib_kb;         /* index lists cached, their bytes */
     uint32_t cpu_merges, cpu_kpx;   /* guest CPU writes merged into targets, kilopixels */
     uint32_t points, lines;         /* point and line batches (XBA-120) */
+    /* Streamed vertex and index uploads (strm_put): wraps, waits for the
+     * GPU at a wrap and their time, rings grown, uploads too large for any
+     * ring, maps that failed (glBufferSubData instead). */
+    uint32_t strm_wraps, strm_waits, strm_grows, strm_oversize, strm_mapfail;
+    uint64_t strm_wait_ns, strm_wait_max_ns;
 } s_st;
 static float s_line_width = 1.0f;  /* glLineWidth as last set */
 
@@ -317,6 +323,7 @@ static struct {
     /* s_pvao (gl_draw_program): attribute layout (streams mask), element
      * buffer bound, generic values of the disabled attributes. */
     uint32_t pv_streams, pv_ebo;
+    size_t pv_off;                          /* where the vertices start in s_pvbo */
     float pv_imm[16][4];
 } s_sh;
 
@@ -3815,6 +3822,181 @@ static GLenum prim_setup(const Nv2aBatch *b, const GlProg *p, float sc)
     return GL_TRIANGLES;
 }
 
+/* ---- streamed vertex and index uploads ---------------------------------
+ *
+ * What is drawn from bytes that change at every batch -- gl_draw's
+ * CPU-transformed vertices, gl_draw_program's gathered attributes and its
+ * index list -- goes into a ring in a buffer that keeps its storage
+ * (src/video/gpu_ring.h, shared with the GameCube's renderer): each upload
+ * is mapped write-only and unsynchronised right after the previous one, and
+ * the GPU is only waited for when the ring comes back round to bytes a draw
+ * may still read (fences, every 1/16 of the ring). A glBufferData of a new
+ * size at every draw made Adreno drivers allocate GPU memory per draw (an
+ * ioctl each: 58 % of the GameCube game thread, 867b8603), and a map with
+ * GL_MAP_INVALIDATE_RANGE_BIT still allocated and copied (2f5dc00e).
+ *
+ * RECOMP_GPU_STREAM=sub writes the same ranges with glBufferSubData, =off
+ * goes back to a glBufferData per draw (for comparison on other drivers);
+ * RECOMP_GPU_STREAM_RING_KB sizes all rings (tests: small rings wrap all
+ * the time). A map that fails falls back to glBufferSubData on the range. */
+enum { NV_GL_STRM_FFP, NV_GL_STRM_PROG, NV_GL_STRM_IDX, NV_GL_NSTRM };
+enum { NV_GL_STREAM_RING, NV_GL_STREAM_SUB, NV_GL_STREAM_OFF };
+#define NV_GL_STRM_MAX (32u << 20)  /* a ring grows up to this, then a batch goes alone */
+
+typedef struct {
+    size_t size;                    /* allocated: 0 not yet (or after a reset) */
+    gpu_ring r;
+} GlStream;
+static GlStream s_strm[NV_GL_NSTRM];
+static int s_strm_mode = -1;        /* NV_GL_STREAM_*, -1 not read yet */
+static size_t s_strm_size[NV_GL_NSTRM];
+
+static void *strm_fence(void *user)
+{
+    GLsync f = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    (void)user;
+    if (!f)
+        glFinish();                 /* nothing to wait for later: complete now */
+    return f;
+}
+
+/* Returns once the GPU has passed the fence. A wait that fails, or lasts
+ * absurdly long (a lost context need not ever signal), ends in glFinish. */
+static void strm_retire(void *user, void *sync)
+{
+    GLsync f = (GLsync)sync;
+    GLenum r;
+    (void)user;
+    if (!f)
+        return;
+    r = glClientWaitSync(f, 0, 0);
+    if (r == GL_TIMEOUT_EXPIRED) {
+        struct timespec ts;
+        uint64_t t0, dt;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        t0 = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+        do {
+            r = glClientWaitSync(f, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000u);
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            dt = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - t0;
+        } while (r == GL_TIMEOUT_EXPIRED && dt < 10000000000ull);
+        s_st.strm_waits++;
+        s_st.strm_wait_ns += dt;
+        if (dt > s_st.strm_wait_max_ns)
+            s_st.strm_wait_max_ns = dt;
+    }
+    if (r != GL_ALREADY_SIGNALED && r != GL_CONDITION_SATISFIED)
+        glFinish();
+    glDeleteSync(f);
+}
+
+static void strm_discard(void *user, void *sync)
+{
+    (void)user;
+    if (sync)
+        glDeleteSync((GLsync)sync);
+}
+
+static const gpu_ring_ops s_strm_ops = {strm_fence, strm_retire, strm_discard};
+
+static void strm_config(void)
+{
+    static const size_t def[NV_GL_NSTRM] = {8u << 20, 8u << 20, 2u << 20};
+    const char *m = getenv("RECOMP_GPU_STREAM");
+    const char *kb = getenv("RECOMP_GPU_STREAM_RING_KB");
+    int i, k = kb && *kb ? atoi(kb) : 0;
+
+    s_strm_mode = m && strcmp(m, "sub") == 0 ? NV_GL_STREAM_SUB
+                : m && strcmp(m, "off") == 0 ? NV_GL_STREAM_OFF
+                                             : NV_GL_STREAM_RING;
+    for (i = 0; i < NV_GL_NSTRM; i++)
+        s_strm_size[i] = k > 0 ? (size_t)(k < 4 ? 4 : k) << 10 : def[i];
+    fprintf(stderr, "  [GPUGL] vertex streams: %s (rings %zu/%zu/%zu KB)\n",
+            s_strm_mode == NV_GL_STREAM_RING ? "ring, unsynchronised maps"
+            : s_strm_mode == NV_GL_STREAM_SUB ? "ring, glBufferSubData"
+                                              : "off, glBufferData per draw",
+            s_strm_size[0] >> 10, s_strm_size[1] >> 10, s_strm_size[2] >> 10);
+}
+
+/* Forget the rings (the buffers are the caller's: s_vbo, s_pvbo, s_pebo).
+ * lost: the context is gone, so its fences are only forgotten. */
+static void strm_reset(int lost)
+{
+    int i;
+    for (i = 0; i < NV_GL_NSTRM; i++) {
+        if (!lost)
+            gpu_ring_release(&s_strm[i].r, &s_strm_ops, NULL);
+        memset(&s_strm[i], 0, sizeof s_strm[i]);
+    }
+}
+
+/* Upload n bytes for the next draw to stream k, whose buffer the caller has
+ * bound to `target` (the element target: with its vertex array bound).
+ * Returns the byte offset to draw from, a multiple of align. At most once
+ * per draw in each stream, and strm_after_draw once the draw is issued. */
+static size_t strm_put(int k, GLenum target, const void *data, size_t n, size_t align)
+{
+    GlStream *st = &s_strm[k];
+    uint64_t wraps;
+    size_t off;
+    void *p = NULL;
+
+    if (s_strm_mode < 0)
+        strm_config();
+    if (s_strm_mode == NV_GL_STREAM_OFF || n == 0) {
+        glBufferData(target, (GLsizeiptr)n, data, GL_STREAM_DRAW);
+        gpu_ring_release(&st->r, &s_strm_ops, NULL);
+        st->size = 0;               /* the storage is that batch's now */
+        return 0;
+    }
+    if (st->size && !gpu_ring_fits(&st->r, n)) {
+        /* Too large for the ring: a larger one; the old storage stays the
+         * GPU's until its draws are done (orphaned, no wait). */
+        gpu_ring_release(&st->r, &s_strm_ops, NULL);
+        st->size = 0;
+        s_st.strm_grows++;
+    }
+    if (!st->size) {
+        size_t size = s_strm_size[k];
+        while (size < 4 * n && size < NV_GL_STRM_MAX)
+            size *= 2;
+        if (size < 4 * n) {
+            /* Larger than any ring: on its own, as before; a ring starts
+             * again at the next upload. */
+            glBufferData(target, (GLsizeiptr)n, data, GL_STREAM_DRAW);
+            s_st.strm_oversize++;
+            return 0;
+        }
+        glBufferData(target, (GLsizeiptr)size, NULL, GL_STREAM_DRAW);
+        gpu_ring_init(&st->r, size);
+        st->size = size;
+    }
+    wraps = st->r.wraps;
+    off = (size_t)gpu_ring_reserve(&st->r, &s_strm_ops, NULL, n, align);
+    if (st->r.wraps != wraps)
+        s_st.strm_wraps++;
+    if (s_strm_mode == NV_GL_STREAM_RING)
+        p = glMapBufferRange(target, (GLintptr)off, (GLsizeiptr)n,
+                             GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+    if (p) {
+        memcpy(p, data, n);
+        if (glUnmapBuffer(target))
+            return off;
+        s_st.strm_mapfail++;        /* the contents are undefined: again */
+    } else if (s_strm_mode == NV_GL_STREAM_RING) {
+        s_st.strm_mapfail++;
+    }
+    glBufferSubData(target, (GLintptr)off, (GLsizeiptr)n, data);
+    return off;
+}
+
+/* The draw reading stream k's latest upload is issued. */
+static void strm_after_draw(int k)
+{
+    if (s_strm[k].size)
+        gpu_ring_after_draw(&s_strm[k].r, &s_strm_ops, NULL);
+}
+
 static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
 {
     const Nv2aPixelState *ps = b->pixel;
@@ -3825,6 +4007,7 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     GlProg *p;
     GlTarget t;
     int query = 0;
+    size_t first;
 
     if (!b->full || !ps
         || b->count < (b->prim == NV2A_PRIM_POINTS ? 1u : b->prim == NV2A_PRIM_LINES ? 2u : 3u))
@@ -3858,8 +4041,9 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
 
     sh_vao(s_vao);
     sh_array_buffer(s_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)b->count * (GLsizeiptr)sizeof(Nv2aVertexFull),
-                 b->full, GL_STREAM_DRAW);
+    first = strm_put(NV_GL_STRM_FFP, GL_ARRAY_BUFFER, b->full,
+                     (size_t)b->count * sizeof(Nv2aVertexFull), sizeof(Nv2aVertexFull))
+          / sizeof(Nv2aVertexFull);
     s_st.ffp_kb += (uint32_t)(((size_t)b->count * sizeof(Nv2aVertexFull) + 1023) / 1024);
     if (rs->zpass_enable && s_qcount < NV_GL_MAX_QUERY) {
         GlQuery *q = &s_qring[(s_qhead + s_qcount) & (NV_GL_MAX_QUERY - 1)];
@@ -3869,7 +4053,8 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         glBeginQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED, q->q);
         query = 1;
     }
-    glDrawArrays(prim_setup(b, p, t.rt ? t.sc : 1.0f), 0, (GLsizei)b->count);
+    glDrawArrays(prim_setup(b, p, t.rt ? t.sc : 1.0f), (GLint)first, (GLsizei)b->count);
+    strm_after_draw(NV_GL_STRM_FFP);
     if (query) {
         glEndQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED);
         s_qcount++;
@@ -4297,6 +4482,7 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
     GlTarget t;
     int query = 0, ok;
     uint64_t fmt;
+    size_t voff = 0, ioff = 0;      /* this batch's bytes in the stream rings */
 
     if (!pb || !ps || !ensure_init())
         return 0;
@@ -4357,26 +4543,30 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
     }
     sh_vao(s_pvao);
     sh_array_buffer(s_pvbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 (GLsizeiptr)((size_t)pb->vertex_count * nstream * 4 * sizeof(float)),
-                 pb->attrs, GL_STREAM_DRAW);
-    /* The layout follows from the streams mask alone (one interleaved
-     * buffer, always s_pvbo): specified again only when the mask changes.
-     * The generic values of attributes without a stream are context state,
-     * set when they change. The element buffer is s_pvao's for good. */
-    if (s_sh.pv_streams != pb->streams) {
+    voff = strm_put(NV_GL_STRM_PROG, GL_ARRAY_BUFFER, pb->attrs,
+                    (size_t)pb->vertex_count * nstream * 4 * sizeof(float), 16);
+    /* The layout follows from the streams mask and where this batch's
+     * vertices start in s_pvbo's ring (one interleaved buffer; GLES 3.0 has
+     * no base vertex for the 16-bit indices): specified again when either
+     * changes, the attributes enabled again only when the mask does. The
+     * generic values of attributes without a stream are context state, set
+     * when they change. The element buffer is s_pvao's for good. */
+    if (s_sh.pv_streams != pb->streams || s_sh.pv_off != voff) {
+        int mask_changed = s_sh.pv_streams != pb->streams;
         for (a = 0, k = 0; a < 16; a++) {
             if (pb->streams & (1u << a)) {
-                glEnableVertexAttribArray(a);
+                if (mask_changed)
+                    glEnableVertexAttribArray(a);
                 glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE,
                                       (GLsizei)(nstream * 4 * sizeof(float)),
-                                      (const void *)((size_t)k * 4 * sizeof(float)));
+                                      (const void *)(voff + (size_t)k * 4 * sizeof(float)));
                 k++;
-            } else {
+            } else if (mask_changed) {
                 glDisableVertexAttribArray(a);
             }
         }
         s_sh.pv_streams = pb->streams;
+        s_sh.pv_off = voff;
     }
     if (s_sh.pv_ebo != s_pebo) {
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_pebo);
@@ -4390,8 +4580,8 @@ bound:
             memcpy(s_sh.pv_imm[a], pb->imm[a], sizeof s_sh.pv_imm[a]);
         }
     if (!pb->raw)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(pb->index_count * sizeof(uint16_t)),
-                 pb->indices, GL_STREAM_DRAW);
+        ioff = strm_put(NV_GL_STRM_IDX, GL_ELEMENT_ARRAY_BUFFER, pb->indices,
+                        (size_t)pb->index_count * sizeof(uint16_t), sizeof(uint16_t));
     if (rs->zpass_enable && s_qcount < NV_GL_MAX_QUERY) {
         GlQuery *q = &s_qring[(s_qhead + s_qcount) & (NV_GL_MAX_QUERY - 1)];
         q->q = query_new();
@@ -4401,7 +4591,11 @@ bound:
         query = 1;
     }
     glDrawElements(prim_setup(b, p, t.rt ? t.sc : 1.0f), (GLsizei)pb->index_count,
-                   GL_UNSIGNED_SHORT, NULL);
+                   GL_UNSIGNED_SHORT, (const void *)ioff);
+    if (!pb->raw) {
+        strm_after_draw(NV_GL_STRM_PROG);
+        strm_after_draw(NV_GL_STRM_IDX);
+    }
     if (query) {
         glEndQuery(NV2A_GL_ES ? GL_ANY_SAMPLES_PASSED : GL_SAMPLES_PASSED);
         s_qcount++;
@@ -4434,6 +4628,7 @@ static void gl_reset_objects(int lost)
 {
     int i;
 
+    strm_reset(lost);               /* their fences, before the buffers go */
     if (!lost) {
         for (i = 0; i < NV_GL_MAX_RT; i++) {
             if (s_rt[i].fbo) glDeleteFramebuffers(1, &s_rt[i].fbo);
@@ -4964,6 +5159,15 @@ static void gl_flip(void)
                     (double)s_st.vbo_hash_kb / s_st.frames, s_nvb, s_vb_bytes >> 10,
                     s_nvao, s_st.vao_new, (double)s_st.ib_new / s_st.frames,
                     (double)s_st.ib_kb / s_st.frames, s_nib, s_ib_bytes >> 10);
+        if (s_strm_mode >= 0 && s_strm_mode != NV_GL_STREAM_OFF && s_st.frames)
+            fprintf(stderr, "  [GPUGL] vertex streams: rings %zu/%zu/%zu KB, %u wraps,"
+                            " %u fence waits (%.1f ms/frame, longest %.1f ms), %u grown,"
+                            " %u too large, %u map failures\n",
+                    s_strm[0].size >> 10, s_strm[1].size >> 10, s_strm[2].size >> 10,
+                    s_st.strm_wraps, s_st.strm_waits,
+                    (double)s_st.strm_wait_ns / 1e6 / s_st.frames,
+                    (double)s_st.strm_wait_max_ns / 1e6, s_st.strm_grows, s_st.strm_oversize,
+                    s_st.strm_mapfail);
         if (s_st.cpu_merges)
             fprintf(stderr, "  [GPUGL] guest CPU writes into targets: %u merged (%u kpx)\n",
                     s_st.cpu_merges, s_st.cpu_kpx);

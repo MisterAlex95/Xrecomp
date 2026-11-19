@@ -62,12 +62,7 @@ add_executable(gc_gx_progcache_test gx_progcache_test.c)
 target_link_libraries(gc_gx_progcache_test PRIVATE gc_core)
 target_compile_options(gc_gx_progcache_test PRIVATE -Wall -Wextra)
 add_test(NAME gc_gx_progcache COMMAND gc_gx_progcache_test ${CMAKE_CURRENT_BINARY_DIR})
-# gx_ring: the bookkeeping of RECOMP_GC_GX_STREAM=storage against a simulated GPU (no GL): no byte the GPU may still read
-# is ever written, across wraps, with any alignment
-add_executable(gc_gx_ring_test gx_ring_test.c)
-target_include_directories(gc_gx_ring_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/gx)
-target_compile_options(gc_gx_ring_test PRIVATE -Wall -Wextra)
-add_test(NAME gc_gx_ring COMMAND gc_gx_ring_test)
+# The streaming rings' bookkeeping (RECOMP_GC_GX_STREAM=storage) is shared with the NV2A back end: tests/gpu_ring.
 # gx_hash: the content hash of the texture cache (no GL): every byte, its place, the length and the seed change it
 add_executable(gc_gx_hash_test gx_hash_test.c)
 target_link_libraries(gc_gx_hash_test PRIVATE gc_core)
