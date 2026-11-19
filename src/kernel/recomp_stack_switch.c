@@ -32,13 +32,9 @@
 #include "recomp_stack_switch.h"
 #include "xbox_interp.h"
 /* The interpreter (XBA-303) is optional here, as in xbox_seh.c:
- * tests/stack_switch links this file without it. */
-#if defined(__GNUC__) || defined(__clang__)
-#pragma weak xbox_InterpResolve
-#define SS_INTERP_ON(f) (f)
-#else
-#define SS_INTERP_ON(f) 1
-#endif
+ * tests/stack_switch links this file without it. xbox_interp.c fills this at
+ * load (xbox_interp.h « optional links »); NULL without it. */
+xbox_interp_fn (*recomp_stack_switch_interp_resolve)(uint32_t va, int kind, uint32_t ret);
 #include "recomp_discovery.h"
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
@@ -544,8 +540,8 @@ static recomp_func_t ss_func(uint32_t va)
 {
     recomp_func_t f = recomp_lookup_manual(va);
     if (!f) f = recomp_lookup(va);
-    if (!f && SS_INTERP_ON(xbox_InterpResolve))
-        f = xbox_InterpResolve(va, 'c', 0);         /* a body the analysis missed (XBA-303) */
+    if (!f && recomp_stack_switch_interp_resolve)
+        f = recomp_stack_switch_interp_resolve(va, 'c', 0);         /* a body the analysis missed (XBA-303) */
     return f;
 }
 

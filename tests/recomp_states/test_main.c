@@ -1,6 +1,9 @@
 /* recomp_states (XBA-182): slot files, thumbnails, the runtime's attach / save / load path, fast-forward; and the
  * hotkeys over them (XBA-190, recomp_hotkeys.h): the text forms, the pad chords and keys per frame, what they run. */
 #define _POSIX_C_SOURCE 200809L
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE          /* mkdtemp, hidden by _POSIX_C_SOURCE on macOS */
+#endif
 #include "recomp_states.h"
 #include "recomp_hotkeys.h"
 #include "recomp_play.h"

@@ -3,19 +3,16 @@
 #include "xbox_interp.h"
 #include "recomp_status.h"
 #include "recomp_discovery.h"
-/* The interpreter (XBA-303) is optional here: the nv2a test projects and
- * tests/recomp_status link this file without it (as xbox_seh.c). */
-#if defined(__GNUC__) || defined(__clang__)
-#pragma weak xbox_InterpGetStats
-#define STATUS_INTERP_ON(f) (f)
-#else
-#define STATUS_INTERP_ON(f) 1
-#endif
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* The interpreter (XBA-303) is optional here: the nv2a test projects and
+ * tests/recomp_status link this file without it (as xbox_seh.c).
+ * xbox_interp.c fills this at load (xbox_interp.h « optional links »). */
+void (*recomp_status_interp_stats)(XboxInterpStats *out);
 
 #ifdef _WIN32
 #include <windows.h>
@@ -166,8 +163,8 @@ void recomp_status_write_now(void)
     {   /* the interpreter (XBA-303): instructions run, addresses with no lifted code */
         XboxInterpStats is;
         memset(&is, 0, sizeof is);
-        if (STATUS_INTERP_ON(xbox_InterpGetStats))
-            xbox_InterpGetStats(&is);
+        if (recomp_status_interp_stats)
+            recomp_status_interp_stats(&is);
         if (is.entries)
             fprintf(s_file, ",\"interp_insns\":%llu,\"interp_entries\":%u",
                     (unsigned long long)is.insns, is.entries);

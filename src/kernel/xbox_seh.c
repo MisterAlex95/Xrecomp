@@ -21,14 +21,10 @@
 #include "xbox_memory_layout.h"
 #include "xbox_interp.h"
 /* The interpreter (XBA-303) is optional here: tests/seh_dispatch's anchor
- * bench links this file alone. */
-#if defined(__GNUC__) || defined(__clang__)
-#pragma weak xbox_InterpResolve
-#pragma weak xbox_InterpCurrentVa
-#define SEH_INTERP_ON(f) (f)
-#else
-#define SEH_INTERP_ON(f) 1
-#endif
+ * bench links this file alone. xbox_interp.c fills these at load
+ * (xbox_interp.h « optional links »); NULL without it. */
+xbox_interp_fn (*xbox_seh_interp_resolve)(uint32_t va, int kind, uint32_t ret);
+uint32_t (*xbox_seh_interp_current_va)(void);
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -331,8 +327,8 @@ static recomp_func_t seh_resolve(uint32_t va)
     recomp_func_t fn = recomp_lookup_manual(va);
     if (!fn) fn = recomp_lookup(va);
     if (!fn) fn = recomp_lookup_kernel(va);
-    if (!fn && SEH_INTERP_ON(xbox_InterpResolve))
-        fn = xbox_InterpResolve(va, 'r', 0);        /* a handler the analysis missed (XBA-303) */
+    if (!fn && xbox_seh_interp_resolve)
+        fn = xbox_seh_interp_resolve(va, 'r', 0);        /* a handler the analysis missed (XBA-303) */
     return fn;
 }
 
@@ -677,7 +673,7 @@ int xbox_SehRaiseHostFault(uint32_t va, uint32_t access, uintptr_t host_pc)
     /* Interpreted code (XBA-303) knows its pc: the record's address and the
      * context's Eip are exact there (0 in lifted code, which keeps none). */
     handled = seh_raise_new(XBOX_STATUS_ACCESS_VIOLATION, 0,
-                            SEH_INTERP_ON(xbox_InterpCurrentVa) ? xbox_InterpCurrentVa() : 0u, 2, params,
+                            xbox_seh_interp_current_va ? xbox_seh_interp_current_va() : 0u, 2, params,
                             esp, 1);
     if (handled) {
         if ((g_eax != saved.r_eax || g_ecx != saved.r_ecx || g_edx != saved.r_edx

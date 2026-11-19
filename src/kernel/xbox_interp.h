@@ -158,6 +158,18 @@ int xbox_InterpDepth(void);
  * does not return. Returns otherwise. */
 void xbox_InterpResumeAt(uint32_t va);
 
+/* ---- optional links ---------------------------------------------------------
+ * Runtime files that some test projects link without the interpreter reach it
+ * through these pointers: each is defined (NULL) in the file that calls it,
+ * and xbox_interp.c fills them all at load, in a constructor, before main and
+ * before any guest code runs. A caller checks for NULL. Not weak references:
+ * Mach-O refuses to link an undefined weak reference (macOS). */
+extern xbox_interp_fn (*xbox_seh_interp_resolve)(uint32_t va, int kind, uint32_t ret);   /* xbox_seh.c */
+extern uint32_t (*xbox_seh_interp_current_va)(void);                                     /* xbox_seh.c */
+extern xbox_interp_fn (*recomp_stack_switch_interp_resolve)(uint32_t va, int kind, uint32_t ret);
+                                                                     /* recomp_stack_switch.c */
+extern void (*recomp_status_interp_stats)(XboxInterpStats *out);                         /* recomp_status.c */
+
 #ifdef __cplusplus
 }
 #endif

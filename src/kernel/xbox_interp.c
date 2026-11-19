@@ -400,4 +400,15 @@ void xbox_InterpGetStats(XboxInterpStats *out)
     out->unimpl = s_unimpl;
 }
 
+/* The runtime files that also link without the interpreter (xbox_interp.h
+ * « optional links »): filled at load, before main, so the first guest code
+ * already finds them, as the weak references did. */
+__attribute__((constructor)) static void interp_links_register(void)
+{
+    xbox_seh_interp_resolve = xbox_InterpResolve;
+    xbox_seh_interp_current_va = xbox_InterpCurrentVa;
+    recomp_stack_switch_interp_resolve = xbox_InterpResolve;
+    recomp_status_interp_stats = xbox_InterpGetStats;
+}
+
 #endif /* !_MSC_VER */
