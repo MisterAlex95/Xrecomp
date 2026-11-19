@@ -72,6 +72,16 @@ void recomp_host_cpus_untrack(void);
  * many had drifted (and prints one line when any had). */
 int recomp_host_cpus_restore(void);
 
+/* The calling thread off the cores of `avoid` (XBA-305: the Xbox's floating threads off the guest's core while the
+ * GL back end draws): its mask less those cores, set and tracked as above. Nothing when that leaves no core or
+ * changes nothing. Returns the new mask, 0 when unchanged. The mask it had is kept for
+ * recomp_host_cpus_avoid_undo. Linux and Android; elsewhere it does nothing. */
+uint64_t recomp_host_cpus_avoid(uint64_t avoid);
+
+/* The calling thread back on the mask recomp_host_cpus_avoid took it from (the Xbox executor before it starts the
+ * raster pool, whose threads inherit its mask). Returns 1 when it was moved back. */
+int recomp_host_cpus_avoid_undo(void);
+
 #ifdef __cplusplus
 }
 #endif

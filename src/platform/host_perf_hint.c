@@ -10,6 +10,8 @@
 #include <string.h>
 
 #if defined(__linux__)
+#include <errno.h>
+#include <signal.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -142,6 +144,28 @@ static void remove_tid_locked(int32_t tid)
         }
 }
 
+/* Threads that ended without leaving (a guest thread a save state's load abandoned, a worker that exited past its
+ * hook): out of the list, so the session ADPF refuses for a thread that is gone opens without them. Returns how many
+ * went. Linux: a tid of this process that no longer exists answers ESRCH. */
+static int prune_dead_locked(void)
+{
+    int gone = 0;
+#if defined(__linux__)
+    pid_t pid = getpid();
+    for (int i = 0; i < s_ntids;)
+        if (syscall(SYS_tgkill, pid, (pid_t)s_tids[i], 0) != 0 && errno == ESRCH) {
+            if (s_tids[i] == s_main_tid)
+                s_main_tid = 0;
+            s_tids[i] = s_tids[--s_ntids];
+            s_dirty = 1;
+            gone++;
+        } else {
+            i++;
+        }
+#endif
+    return gone;
+}
+
 int recomp_perf_hint_begin(int64_t target_ns)
 {
     int32_t tid = self_tid();
@@ -181,12 +205,17 @@ void recomp_perf_hint_frame(int64_t work_ns, int64_t target_ns)
     }
     if (s_session && s_dirty) {
         /* Threads joined or left: told on API 34, the session opened again with them before. */
-        if (!s_api.set_threads || s_api.set_threads(s_session, s_tids, (size_t)s_ntids) != 0)
-            close_locked();
+        if (!s_api.set_threads || s_api.set_threads(s_session, s_tids, (size_t)s_ntids) != 0) {
+            if (!s_api.set_threads || !prune_dead_locked()
+                    || s_api.set_threads(s_session, s_tids, (size_t)s_ntids) != 0)
+                close_locked();
+        }
         s_dirty = 0;
     }
     if (!s_session && s_ntids) {
         s_session = s_api.create_session(s_manager, s_tids, (size_t)s_ntids, s_target);
+        if (!s_session && prune_dead_locked() && s_ntids) /* a thread that is gone: once more without it */
+            s_session = s_api.create_session(s_manager, s_tids, (size_t)s_ntids, s_target);
         s_dirty = 0;
         if (!s_logged) {
             printf("perf hint: ADPF session %s for %d thread(s), target %.2f ms per frame\n",
@@ -241,6 +270,36 @@ void recomp_perf_hint_thread_leave(void)
     pthread_mutex_lock(&s_lock);
     remove_tid_locked(tid);
     pthread_mutex_unlock(&s_lock);
+}
+
+void recomp_perf_hint_thread_take(int32_t *slot)
+{
+    int32_t tid = self_tid();
+    if (!tid || !slot)
+        return;
+    pthread_mutex_lock(&s_lock);
+    if (*slot && *slot != tid && *slot != s_main_tid)
+        remove_tid_locked(*slot);
+    add_tid_locked(tid);
+    *slot = tid;
+    pthread_mutex_unlock(&s_lock);
+}
+
+int64_t recomp_perf_hint_work_at(recomp_perf_hint_work *w, uint64_t now_ns, uint64_t slept_total_ns,
+                                 uint64_t gap_ns)
+{
+    uint64_t span, slept;
+    int first = !w->last_ns;
+    if (!first && now_ns >= w->last_ns)
+        span = now_ns - w->last_ns;
+    else
+        span = 0;
+    slept = slept_total_ns >= w->last_slept_ns ? slept_total_ns - w->last_slept_ns : 0;
+    w->last_ns = now_ns;
+    w->last_slept_ns = slept_total_ns;
+    if (first || !span || (gap_ns && span > gap_ns))
+        return 0;
+    return span > slept ? (int64_t)(span - slept) : 1; /* a sleep longer than the frame: ADPF refuses 0 */
 }
 
 void recomp_host_worker_hook(int starting, void *user)

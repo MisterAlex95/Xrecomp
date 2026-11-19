@@ -12,6 +12,9 @@
  */
 
 #include "platform/host_cpus.h"
+#if !defined(_WIN32)
+#include "platform/host_perf_hint.h"   /* the guest main thread in the ADPF session (XBA-305) */
+#endif
 #include "kernel.h"
 #include "guest_clock.h"   /* fast-forward: guest spans on the host (XBA-240) */
 #include "xbox_memory_layout.h"   /* XBOX_WORKER_STACK_* + worker-stack decls */
@@ -514,12 +517,17 @@ void xbox_worker_stack_free(int slot)
  * the process gets cpus 3-7 and =one is cpu 7, the X3 at 3.2 GHz, not cpu 3
  * at 2.8 (WP-E, KOTOR sound report).
  *
- * The core is not kept for the guest alone: the other runtime threads (GPU
- * executor and raster pool, APU, timer, USB) are not pinned, they float on
- * the process's cores and the scheduler moves them off a core a pinned,
- * always-runnable thread keeps busy. Taking the prime core away from them
- * would leave the raster pool four cores instead of five; it was not
- * exclusive on cpu 3 either.
+ * The other runtime threads (GPU executor and raster pool, APU, timer,
+ * vblank, USB) are not pinned to it. With the CPU rasteriser drawing they
+ * float on every core of the process, the guest's included: taking the
+ * prime core away would leave the raster pool four cores instead of five.
+ * With a GPU back end drawing (the Android default since XBA-119) the raster
+ * pool is idle, and a floating thread the scheduler puts on the guest's core
+ * only takes time from the title's main thread: then the executor, APU,
+ * timer, vblank and USB threads leave that core (xbox_HostThreadFloat,
+ * XBA-305; RECOMP_FLOAT_GUEST_CORE=1 lets them back on it). If the back end
+ * gives up before the first draw, the executor takes its full mask back
+ * before it starts the raster pool, whose threads inherit it.
  *
  * Unset: one on arm64 Linux and Android, all elsewhere (XBA-81). Lifted code
  * stores to guest memory with plain stores and assumes x86's ordering (TSO):
@@ -574,12 +582,26 @@ DWORD_PTR xbox_GuestCpuMask(void)
     return (DWORD_PTR)1 << core;
 }
 
+/* The title's main thread in the frame's performance hint session
+ * (host_perf_hint.h, XBA-305), with the GPU executor and the window's
+ * thread: the one that runs it now, in place of the one a save state's
+ * load left behind. */
+static void guest_main_perf_hint(void)
+{
+#if !defined(_WIN32)
+    static int32_t tid;
+    recomp_perf_hint_thread_take(&tid);
+#endif
+}
+
 void xbox_GuestThreadPin(const char *role)
 {
     static int announced, failed;
     DWORD_PTR mask = xbox_GuestCpuMask();
     int core = 0;
 
+    if (role && !strcmp(role, "guest-main"))
+        guest_main_perf_hint();
     if (!mask)
         return;
     while (!((mask >> core) & 1))
@@ -612,4 +634,33 @@ void xbox_GuestThreadPin(const char *role)
     }
     xbox_log(XBOX_LOG_DEBUG, XBOX_LOG_THREAD, "guest thread %s on cpu %d",
              role ? role : "?", core);
+}
+
+/* A runtime thread that is not the title's (the executor, APU, timer,
+ * vblank, USB: see "One host core for the title's threads" above), as it
+ * starts: off the guest's core while a GPU back end draws. */
+extern int nv2a_pb_exec_backend_draws(void);
+
+void xbox_HostThreadFloat(const char *role)
+{
+    const char *e = getenv("RECOMP_FLOAT_GUEST_CORE");
+    DWORD_PTR guest;
+    uint64_t now;
+    int core = 0;
+
+    if (e && *e == '1')
+        return;
+    guest = xbox_GuestCpuMask();
+    if (!guest || !nv2a_pb_exec_backend_draws())
+        return;
+    now = recomp_host_cpus_avoid((uint64_t)guest);
+    if (!now)
+        return;
+    while (!((guest >> core) & 1))
+        core++;
+    /* One line per thread (five at boot), for top -H on a device. */
+    fprintf(stderr, "  [KERNEL] %s thread off the guest's core (cpu %d) while the GPU back end"
+                    " draws: mask %#llx (RECOMP_FLOAT_GUEST_CORE=1 to undo)\n",
+            role ? role : "runtime", core, (unsigned long long)now);
+    fflush(stderr);
 }

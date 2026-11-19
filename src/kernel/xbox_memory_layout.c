@@ -2236,6 +2236,7 @@ int xbox_Nv2aApertureLoad(XdsReader *r)
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
+    xbox_HostThreadFloat("executor");   /* off the guest's core while a GPU back end draws (XBA-305) */
     InterlockedExchange(&s_poll_running, 1);
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
         nv2a_poll_hold_point();

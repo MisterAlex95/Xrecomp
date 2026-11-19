@@ -3877,6 +3877,7 @@ static DWORD WINAPI kernel_vblank_ack_thread(LPVOID unused)
     int r = XBOX_VBL_ACK_ON_TIME;
 
     (void)unused;
+    xbox_HostThreadFloat("vblank");     /* off the guest's core while a GPU back end draws (XBA-305) */
     for (;;) {
         long late_ms;
 
@@ -4840,6 +4841,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
     int slot = xbox_worker_stack_alloc();
 
     (void)unused;
+    xbox_HostThreadFloat("timer");      /* off the guest's core while a GPU back end draws (XBA-305) */
     if (slot < 0) {
         fprintf(stderr, "  [KERNEL] timer thread has no worker stack; "
                         "timer DPCs will not run\n");

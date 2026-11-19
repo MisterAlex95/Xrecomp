@@ -15,7 +15,11 @@
  *    run on that one core, and a thread that does not pin itself keeps the
  *    process's mask whether it was created before the main pin or after it
  *    by the pinned thread (the kernel timer thread is made that way);
- *  - GetProcessAffinityMask stays the process's on a pinned caller.
+ *  - GetProcessAffinityMask stays the process's on a pinned caller;
+ *  - a runtime thread that is not the title's (xbox_HostThreadFloat: the
+ *    executor, APU, timer, vblank, USB) keeps every core with the CPU
+ *    rasteriser, leaves the guest's core while a GPU back end draws, and
+ *    keeps it again under RECOMP_FLOAT_GUEST_CORE=1 (XBA-305).
  */
 #ifndef _WIN32
 #define _GNU_SOURCE     /* nftw, sched_getaffinity under -std=c11 */
@@ -24,6 +28,7 @@
 #include "xbox_memory_layout.h"
 
 #include "platform/host_cpus.h"   /* recomp_host_cpus_set_sysfs_root */
+#include "nv2a_backend.h"         /* a back end that draws (XBA-305) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -127,6 +132,22 @@ static DWORD WINAPI host(LPVOID unused)
 #endif
     return 0;
 }
+
+/* A runtime thread as it starts (xbox_HostThreadFloat). */
+static volatile DWORD_PTR s_float_mask;
+static DWORD WINAPI floating(LPVOID unused)
+{
+    (void)unused;
+    xbox_HostThreadFloat("test");
+#if defined(__linux__) || defined(_WIN32)
+    s_float_mask = thread_mask();
+#else
+    s_float_mask = 0;
+#endif
+    return 0;
+}
+
+static void fake_draw(const Nv2aSurface *s, const Nv2aBatch *b) { (void)s; (void)b; }
 
 static void join(HANDLE th)
 {
@@ -260,6 +281,36 @@ int main(void)
     CHECK(s_worker_mask == 0 && s_early_mask == 0 && s_host_mask == 0, "the threads ran");
 #endif
     (void)s_worker_prev;
+
+#if defined(__linux__)
+    {
+        /* XBA-305: the floating threads and the guest's core. */
+        static Nv2aBackend gl;
+        gl.draw = fake_draw;
+        th = CreateThread(NULL, 0, floating, NULL, 0, NULL);
+        join(th);
+        CHECK(s_float_mask == proc, "CPU rasteriser: every core (%#lx, wanted %#lx)",
+              (unsigned long)s_float_mask, (unsigned long)proc);
+        nv2a_backend_register(&gl);
+        th = CreateThread(NULL, 0, floating, NULL, 0, NULL);
+        join(th);
+        if (proc & ~mask)
+            CHECK(s_float_mask == (proc & ~mask), "GPU back end: off the guest's core (%#lx, wanted %#lx)",
+                  (unsigned long)s_float_mask, (unsigned long)(proc & ~mask));
+        else
+            CHECK(s_float_mask == proc, "one core only: left on it");
+        test_setenv("RECOMP_FLOAT_GUEST_CORE", "1");
+        th = CreateThread(NULL, 0, floating, NULL, 0, NULL);
+        join(th);
+        CHECK(s_float_mask == proc, "RECOMP_FLOAT_GUEST_CORE=1: every core (%#lx)", (unsigned long)s_float_mask);
+        test_setenv("RECOMP_FLOAT_GUEST_CORE", NULL);
+        test_setenv("RECOMP_GUEST_CPUS", "all");
+        th = CreateThread(NULL, 0, floating, NULL, 0, NULL);
+        join(th);
+        CHECK(s_float_mask == proc, "no guest core: every core (%#lx)", (unsigned long)s_float_mask);
+        nv2a_backend_register(NULL);
+    }
+#endif
 
     if (s_fail) {
         fprintf(stderr, "%d failure(s)\n", s_fail);

@@ -966,6 +966,11 @@ static int backend_draws(void)
     return s_backend && s_backend->draw;
 }
 
+int nv2a_pb_exec_backend_draws(void)
+{
+    return backend_draws();
+}
+
 /* Is there colour memory to draw into? Not at colour offset 0 (a depth-only
  * pass: Fable renders its shadow map with offset 0 and the colour mask 0),
  * nor where a write would land on the image. `masked`: also not when
@@ -4256,6 +4261,10 @@ static int raster_pool_size(void)
         const char *e = getenv("RECOMP_RASTER_THREADS");
         int n, k;
         init = 1;
+        /* The pool draws: the executor back on the guest's core, if it left
+         * it for a GPU back end that gave up (xbox_HostThreadFloat, XBA-305),
+         * before its mask sizes the pool and the workers inherit it. */
+        recomp_host_cpus_avoid_undo();
         n = e ? atoi(e) : raster_pool_default();
         if (n < 1) n = 1;
         if (n > NV_RASTER_MAX_THREADS) n = NV_RASTER_MAX_THREADS;
@@ -6499,6 +6508,7 @@ uint64_t nv2a_pb_exec_flip_cap_until_ns(void)
  * title. Vblanks keep the console's rate: only the flips are paced. */
 static FramePacer s_pacer;
 static uint64_t s_pace_slept_ns;        /* slept at the cap since the last flip */
+static uint64_t s_cap_slept_total_ns;   /* slept at the cap, never reset (nv2a_pb_exec_cap_slept_ns) */
 static uint32_t s_pace_rate, s_pace_logged;
 
 /* XBA-136: the slots in phase with the display (frame_pacing_align_slot).
@@ -6782,6 +6792,7 @@ static void flip_cap_wait(void)
     s_cap_held_total++;
 #endif
     s_pace_slept_ns += xbox_HostNowNs() - now;
+    s_cap_slept_total_ns += xbox_HostNowNs() - now;
     s_align_slot = due;
     now = xbox_HostNowNs();
     if (now > due) {
@@ -6789,6 +6800,34 @@ static void flip_cap_wait(void)
         if (now - due > s_cap_over_max_ns)
             s_cap_over_max_ns = now - due;
     }
+}
+
+/* The executor's sleep at the frame cap so far (the ADPF work, XBA-305:
+ * fb_present_sdl.c). Executor thread. */
+uint64_t nv2a_pb_exec_cap_slept_ns(void)
+{
+    return s_cap_slept_total_ns;
+}
+
+/* The frame rate the performance hint's target is the period of (XBA-305):
+ * the rate the title asks for, not the one the adaptive divisor settled on,
+ * so a title run below its ask keeps asking the governor for the clock that
+ * would take it back up; a title asking IMMEDIATE, the vblank rate; bounded
+ * by a cap that is set (frame generation's, RECOMP_GPU_FPS_CAP). 0 when
+ * nothing paces the flips. Executor thread. */
+uint32_t nv2a_pb_exec_hint_fps(void)
+{
+    uint32_t r = 0;
+    int hard = gpu_fps_cap();
+
+    if (pacing_auto()) {
+        r = s_pacer.ask_iv ? frame_pacing_ask(&s_pacer) : s_pacer.vblank_hz;
+        if (!r)
+            r = 60;
+    }
+    if (hard > 0 && (!r || (uint32_t)hard < r))
+        r = (uint32_t)hard;
+    return r;
 }
 
 #ifdef XBOXRECOMP_LSFG

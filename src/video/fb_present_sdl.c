@@ -84,6 +84,7 @@
 #include "video_player.h"
 #include "perf_overlay.h"
 #include "host_perf_line.h"   /* the performance line (XBA-243) */
+#include "host_perf_hint.h"   /* the ADPF session (XBA-305) */
 #include "aspect_policy.h"
 #include "present_shaders.h"  /* picture shaders, shared with host_window (XBA-203) */
 #include "pvideo_posix.h"     /* the PVIDEO overlay's scan-out */
@@ -1040,11 +1041,59 @@ void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
     }
 }
 
+/* ── The performance hint session (host_perf_hint.h, XBA-305) ─────────────
+ * As every console runtime has one: Android's ADPF told how long each frame may take and how long it took, so the
+ * governor clocks the cores those threads run on for the frames, rather than from their load. The executor opens
+ * it at its first flip and reports each flip from then on (one flip, one frame); the title's main thread joins as
+ * it starts (xbox_GuestThreadPin) and the window's thread for its loop: the three a frame waits on.
+ *
+ * The work is the time between two flips less the executor's sleep at the frame cap (recomp_perf_hint_work_at); the
+ * target the period of the rate the title asks for (nv2a_pb_exec_hint_fps), not the adaptive divisor's, so a title
+ * held below its ask keeps asking for the clock that would take it back up. Not reported: a gap of a quarter second
+ * or more (a load, a hold, the app in the background) and fast-forward, which runs as fast as it can.
+ * RECOMP_PERF_HINT=0: no session. Elsewhere than Android 13+ every call is a no-op. */
+extern uint64_t nv2a_pb_exec_cap_slept_ns(void);
+extern uint32_t nv2a_pb_exec_hint_fps(void);
+extern uint32_t xbox_GuestClockSpeed(void);
+#define XHINT_GAP_NS 250000000ull
+
+static int perf_hint_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_PERF_HINT");
+        on = !(e && *e == '0');
+    }
+    return on;
+}
+
+/* At a flip (the executor's thread). */
+static void perf_hint_flip(void)
+{
+    static int begun;
+    static recomp_perf_hint_work work;
+    uint32_t fps;
+    int64_t target, w;
+
+    if (!perf_hint_on())
+        return;
+    fps = nv2a_pb_exec_hint_fps();
+    target = fps ? (int64_t)(1000000000ull / fps) : 16666667;
+    if (!begun) {
+        begun = 1;
+        recomp_perf_hint_begin(target);
+    }
+    w = recomp_perf_hint_work_at(&work, now_ns(), nv2a_pb_exec_cap_slept_ns(), XHINT_GAP_NS);
+    if (w > 0 && xbox_GuestClockSpeed() <= 1)
+        recomp_perf_hint_frame(w, target);
+}
+
 void xbox_FramebufferWindowFrameStats(uint32_t draws)
 {
     __atomic_add_fetch(&s_flips, 1, __ATOMIC_RELAXED);
     __atomic_store_n(&s_frame_draws, draws, __ATOMIC_RELAXED);
     perf_flip();
+    perf_hint_flip();
 }
 
 /* The title bar's rate, kept for other readers (the Android companion
@@ -1667,6 +1716,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     fg_start(1);
 #endif
     s_running = 1;
+    if (perf_hint_on())
+        recomp_perf_hint_thread_join();   /* this thread presents each frame: in the ADPF session (XBA-305) */
     if (!start_guest()) {
         fprintf(stderr, "  [FBWIN] cannot start the guest thread; running headless\n");
         s_running = 0;
@@ -2040,6 +2091,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     }
 #endif
     fprintf(stderr, "  [FBWIN] %s\n", quit ? "window closed" : "guest returned");
+    if (perf_hint_on())
+        recomp_perf_hint_thread_leave();
     xbox_FramebufferWindowPerfLog();   /* "xbox: perf over the run" (recomp_quit below skips atexit on Android) */
     fflush(stdout);
     fflush(stderr);

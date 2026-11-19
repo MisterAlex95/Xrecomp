@@ -278,3 +278,42 @@ int recomp_host_cpus_restore(void)
     return 0;
 #endif
 }
+
+#if defined(__linux__)
+static __thread uint64_t s_avoid_from;   /* the mask recomp_host_cpus_avoid moved this thread from, 0: none */
+#endif
+
+uint64_t recomp_host_cpus_avoid(uint64_t avoid)
+{
+#if defined(__linux__)
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    uint64_t now = mask_of(tid), want = now & ~avoid;
+    if (!now || !want || want == now)
+        return 0;
+    if (set_mask(tid, want) != 0)
+        return 0;
+    if (!s_avoid_from)
+        s_avoid_from = now;
+    recomp_host_cpus_track(want);
+    return want;
+#else
+    (void)avoid;
+    return 0;
+#endif
+}
+
+int recomp_host_cpus_avoid_undo(void)
+{
+#if defined(__linux__)
+    uint64_t from = s_avoid_from;
+    if (!from)
+        return 0;
+    s_avoid_from = 0;
+    if (set_mask((pid_t)syscall(SYS_gettid), from) != 0)
+        return 0;
+    recomp_host_cpus_track(from);
+    return 1;
+#else
+    return 0;
+#endif
+}

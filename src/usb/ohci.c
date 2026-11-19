@@ -1643,6 +1643,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
     unsigned wanted = 0, wanted_age = 0;
 
     (void)unused;
+    xbox_HostThreadFloat("usb");        /* off the guest's core while a GPU back end draws (XBA-305) */
     {
         uint32_t tib = xbox_AllocThreadTib();
         if (!tib) {

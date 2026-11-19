@@ -1418,10 +1418,13 @@ static void apu_frame_thread_priority(void)
 #endif
 }
 
+extern void xbox_HostThreadFloat(const char *role);   /* kernel_thread.c (XBA-305) */
+
 static void *mcpx_apu_frame_thread(void *arg)
 {
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
     apu_frame_thread_priority();
+    xbox_HostThreadFloat("apu");        /* off the guest's core while a GPU back end draws */
     qemu_mutex_lock(&d->lock);
 
     while (!qatomic_read(&d->exiting)) {

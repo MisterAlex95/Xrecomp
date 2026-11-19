@@ -850,6 +850,10 @@ NTSTATUS __stdcall xbox_NtDuplicateObject(HANDLE SourceHandle, PHANDLE TargetHan
  * xbox_GuestThreadPin puts the calling thread on it. */
 DWORD_PTR xbox_GuestCpuMask(void);
 void      xbox_GuestThreadPin(const char *role);
+/* A runtime thread that is not the title's (executor, APU, timer, vblank,
+ * USB), as it starts: off the guest's core while a GPU back end draws
+ * (XBA-305, kernel_thread.c). */
+void      xbox_HostThreadFloat(const char *role);
 
 /* The guest CPU (kernel_guest_cpu.c, RECOMP_GUEST_LOCK=1): one guest thread
  * runs guest code at a time, as on the console. A guest thread joins before

@@ -147,6 +147,28 @@ int main(void)
             recomp_host_cpus_untrack();                 /* an ending thread: no longer moved */
             sched_setaffinity(0, sizeof all, &all);
             CHECK(recomp_host_cpus_restore() == 0, "untracked: left alone");
+
+            /* XBA-305: off the guest's core (the first one here) and back. */
+            uint64_t guest = (uint64_t)1 << first, now;
+            now = recomp_host_cpus_avoid(guest);
+            sched_getaffinity(0, sizeof set, &set);
+            CHECK(now && !(now & guest) && CPU_COUNT(&set) == n - 1 && !CPU_ISSET(first, &set),
+                  "off cpu %d (mask %#llx)", first, (unsigned long long)now);
+            CHECK(recomp_host_cpus_avoid(guest) == 0, "already off: nothing to do");
+            sched_setaffinity(0, sizeof all, &all);     /* the "cpuset move": put back off the guest's core */
+            CHECK(recomp_host_cpus_restore() == 1, "tracked with the mask that avoids the guest's core");
+            sched_getaffinity(0, sizeof set, &set);
+            CHECK(!CPU_ISSET(first, &set), "still off cpu %d after the restore", first);
+            CHECK(recomp_host_cpus_avoid_undo() == 1, "undone");
+            sched_getaffinity(0, sizeof set, &set);
+            CHECK(CPU_COUNT(&set) == n && CPU_ISSET(first, &set), "back on every core");
+            CHECK(recomp_host_cpus_avoid_undo() == 0, "nothing more to undo");
+            CPU_ZERO(&set);
+            CPU_SET(first, &set);
+            sched_setaffinity(0, sizeof set, &set);
+            CHECK(recomp_host_cpus_avoid(guest) == 0, "never on no core at all");
+            sched_setaffinity(0, sizeof all, &all);
+            recomp_host_cpus_untrack();
         } else {
             puts("one core only: the restore check is skipped");
         }

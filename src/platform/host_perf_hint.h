@@ -37,6 +37,22 @@ void recomp_perf_hint_end(void);
 void recomp_perf_hint_thread_join(void);
 void recomp_perf_hint_thread_leave(void);
 
+/* The calling thread joins in the place of the one *slot names (0: none), which leaves; *slot then names the calling
+ * thread. For a role one thread holds at a time but that may move to a new thread: the Xbox's guest main thread,
+ * started again on a save state's load while the old one is parked or gone. */
+void recomp_perf_hint_thread_take(int32_t *slot);
+
+/* A frame loop whose frames are not timed from inside (the Xbox: one frame per flip, the executor's sleep to the
+ * frame cap the only wait it knows): each frame's work from the time between two frames, less what the loop slept
+ * meanwhile. Call at every frame with the monotonic time and the loop's sleep so far (a running total); returns the
+ * work in ns, or 0 when there is none to report: the first frame, or a gap longer than gap_ns (a load, a pause, the
+ * app in the background), which restarts the count. Pure: `w` holds the state (zeroed to start). */
+typedef struct recomp_perf_hint_work {
+    uint64_t last_ns, last_slept_ns;
+} recomp_perf_hint_work;
+int64_t recomp_perf_hint_work_at(recomp_perf_hint_work *w, uint64_t now_ns, uint64_t slept_total_ns,
+                                 uint64_t gap_ns);
+
 /* For a runtime device's thread-start hook (n64_rdp_set_thread_hook, ps1_gpu_set_thread_hook): starting != 0 when a
  * worker begins, 0 as it ends. A beginning worker is noted by host_cpus (its fast-core mask, put back after a
  * resume: recomp_host_cpus_track) and joins the session; an ending one leaves both. `user` is unused. */

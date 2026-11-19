@@ -39,6 +39,15 @@ static int fake_report(void *s, int64_t w) { (void)s; f_reports++; f_last_work =
 static void fake_close(void *s) { (void)s; f_closed++; }
 static int fake_set_threads(void *s, const int32_t *tids, size_t n) { (void)s; (void)tids; f_set_threads++; f_ntids = n; return 0; }
 
+/* As ADPF does: no session for a thread that is not alive. */
+static void *fake_create_live(void *manager, const int32_t *tids, size_t n, int64_t target_ns)
+{
+    for (size_t i = 0; i < n; i++)
+        if (syscall(SYS_tgkill, getpid(), (pid_t)tids[i], 0) != 0)
+            return NULL;
+    return fake_create(manager, tids, n, target_ns);
+}
+
 static void fake_reset(void)
 {
     f_sessions_made = f_closed = f_set_threads = f_updates = f_reports = 0;
@@ -78,6 +87,25 @@ static void *worker(void *arg)
     stage_wait(2);
     recomp_host_worker_hook(0, NULL);
     stage_set(3);
+    return NULL;
+}
+
+/* A thread that takes a role (recomp_perf_hint_thread_take) and ends at once, or stays until told to end. */
+static pid_t t_tid;
+
+static void *taker(void *slot)
+{
+    t_tid = (pid_t)syscall(SYS_gettid);
+    recomp_perf_hint_thread_take((int32_t *)slot);
+    return NULL;
+}
+
+static void *taker_stays(void *slot)
+{
+    t_tid = (pid_t)syscall(SYS_gettid);
+    recomp_perf_hint_thread_take((int32_t *)slot);
+    stage_set(1);
+    stage_wait(2);
     return NULL;
 }
 
@@ -175,6 +203,51 @@ int main(void)
     pthread_join(th, NULL);
     recomp_perf_hint_end();
     recomp_perf_hint_set_api(NULL);
+
+    /* XBA-305, the Xbox's session: a role one thread holds at a time (the guest main thread, started again on a save
+     * state's load) and a joined thread that ends without leaving. ADPF refuses a session for a thread that is gone
+     * (fake_create_live below); the session opens without it rather than giving up for the run. */
+    static const recomp_perf_hint_api api_live = {fake_manager, fake_create_live, fake_update, fake_report,
+                                                  fake_close, NULL};
+    fake_reset();
+    recomp_perf_hint_set_api(&api_live);
+    int32_t main_slot = 0;
+    w_stage = 0;
+    pthread_create(&th, NULL, taker, &main_slot); /* the first guest main thread: takes the role and ends */
+    pthread_join(th, NULL);
+    CHECK(main_slot == t_tid && main_slot != 0, "the role names the thread that took it");
+    /* pthread_join returns once the kernel cleared the thread's tid word, a moment before the task is gone. */
+    for (int i = 0; i < 1000 && syscall(SYS_tgkill, getpid(), t_tid, 0) == 0; i++)
+        usleep(1000);
+    recomp_perf_hint_begin(33366667);
+    recomp_perf_hint_frame(5000000, 33366667);
+    CHECK(f_sessions_made == 1 && f_ntids == 1, "the ended thread pruned, the session opened (%d, %zu)",
+          f_sessions_made, f_ntids);
+    CHECK(f_reports == 1 && f_target == 33366667, "reported against 33.4 ms");
+    pthread_create(&th, NULL, taker_stays, &main_slot); /* the next one: in the old one's place */
+    stage_wait(1);
+    recomp_perf_hint_frame(5000000, 33366667);
+    CHECK(f_sessions_made == 2 && f_ntids == 2, "the new holder joined (%d, %zu)", f_sessions_made, f_ntids);
+    int32_t first_holder = main_slot;
+    stage_set(2);
+    pthread_join(th, NULL);
+    CHECK(first_holder == t_tid, "the second holder named");
+    recomp_perf_hint_thread_take(&main_slot); /* this thread takes it: the frame loop's, already in */
+    recomp_perf_hint_frame(5000000, 33366667);
+    CHECK(f_ntids == 1, "the holder that left is out, the frame loop stays (%zu)", f_ntids);
+    recomp_perf_hint_end();
+    recomp_perf_hint_set_api(NULL);
+
+    /* The work of a frame from flip to flip, less the sleep at the cap. */
+    recomp_perf_hint_work work = {0};
+    CHECK(recomp_perf_hint_work_at(&work, 1000000000ull, 0, 250000000ull) == 0, "first flip: nothing yet");
+    CHECK(recomp_perf_hint_work_at(&work, 1016666667ull, 6000000ull, 250000000ull) == 10666667,
+          "16.7 ms flip to flip, 6 ms asleep: 10.7 ms of work");
+    CHECK(recomp_perf_hint_work_at(&work, 1033333334ull, 6000000ull, 250000000ull) == 16666667,
+          "no sleep: the whole period");
+    CHECK(recomp_perf_hint_work_at(&work, 1533333334ull, 6000000ull, 250000000ull) == 0, "a half second gap: none");
+    CHECK(recomp_perf_hint_work_at(&work, 1550000000ull, 30000000ull, 250000000ull) == 1,
+          "slept longer than the frame (clock skew): 1 ns, never 0");
 
     if (failures) {
         printf("%d failure(s)\n", failures);
