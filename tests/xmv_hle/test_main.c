@@ -1,7 +1,8 @@
 /* The runtime's XMV hook (src/video/xmv_hle.c, XBA-70) on guest memory:
  * the kernel-side note of the movie the title opened, a D3DSurface in the
  * contiguous window, XMVDecoder_GetNextFrame's results, pacing and
- * timestamps, the pictures written, the skip fallback. */
+ * timestamps (both XDK layouts, nothing written past the field: XBA-316),
+ * the pictures written, the skip fallback. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +51,84 @@ static void nap_ms(int ms)
 {
     struct timespec ts = { 0, ms * 1000000L };
     nanosleep(&ts, NULL);
+}
+
+/* XBA-316: the timestamp field sits in TIME_GUARD bytes of sentinels on
+ * each side; the hook may write only the field's own width. */
+#define TIME_GUARD 8
+#define SENTINEL 0xA5
+static void time_fill(uint32_t tim)
+{
+    memset(host(tim - TIME_GUARD), SENTINEL, TIME_GUARD + 8 + TIME_GUARD);
+}
+
+/* 1 if no byte of the guard area outside [tim, tim + width) changed. */
+static int time_guard_intact(uint32_t tim, unsigned width)
+{
+    const uint8_t *p = host(tim - TIME_GUARD);
+    unsigned i, n = TIME_GUARD + 8 + TIME_GUARD;
+    for (i = 0; i < n; i++)
+        if ((i < TIME_GUARD || i >= TIME_GUARD + width) && p[i] != SENTINEL)
+            return 0;
+    return 1;
+}
+
+/* Plays basic.xmv on a new decoder object with the given layout; checks
+ * each frame's time against our own player, that XMV_NOFRAME and
+ * XMV_ENDOFFILE leave the field alone, and that nothing past the field's
+ * width is touched. Returns the frames seen. */
+static unsigned play_time_layout(uint32_t decoder, unsigned layout, uint32_t surf, uint32_t res, uint32_t tim)
+{
+    unsigned width = layout == XMV_TIME_100NS64 ? 8 : 4, frames = 0, calls;
+    XmvPlayer *ref = xmv_player_open_file(movie_basic);
+    CHECK(ref != NULL, "reference player");
+    if (!ref)
+        return 0;
+    xbox_MovieFileOpened(movie_basic);
+    time_fill(tim);
+    for (calls = 0; calls < 5000; calls++) {
+        uint8_t before[8];
+        memcpy(before, host(tim), 8);
+        xmv_hle_get_next_frame_ex(decoder, surf, res, tim, layout);
+        CHECK(time_guard_intact(tim, width), "layout %u: bytes past the %u-byte field untouched (call %u)", layout,
+              width, calls);
+        if (rd32(res) == XMV_NEWFRAME) {
+            uint32_t pts = 0;
+            CHECK(xmv_player_next_frame(ref, &pts) == 1, "reference frame %u", frames);
+            if (layout == XMV_TIME_100NS64) {
+                uint64_t t;
+                memcpy(&t, host(tim), 8);
+                CHECK(t == (uint64_t)pts * 10000u, "100 ns layout: frame %u at %llu, expected %u ms", frames,
+                      (unsigned long long)t, pts);
+            } else {
+                CHECK(rd32(tim) == pts, "ms layout: frame %u at %u ms, expected %u", frames, rd32(tim), pts);
+            }
+            frames++;
+        } else {
+            CHECK(!memcmp(before, host(tim), 8), "layout %u: result %u leaves the timestamp alone", layout,
+                  rd32(res));
+            if (rd32(res) == XMV_ENDOFFILE)
+                break;
+            nap_ms(2);
+        }
+    }
+    xmv_hle_close(decoder);
+    xmv_player_close(ref);
+    return frames;
+}
+
+static void test_time_layouts(uint32_t surf, uint32_t res, uint32_t tim)
+{
+    CHECK(play_time_layout(0x00D00000u, XMV_TIME_MS32, surf, res, tim) == 12, "ms layout: 12 frames");
+    CHECK(play_time_layout(0x00D10000u, XMV_TIME_100NS64, surf, res, tim) == 12, "100 ns layout: 12 frames");
+    /* The 4-argument form (hand-written overrides, packs prepared before
+     * XBA-316) is the ms one: one DWORD, the high word's sentinels intact. */
+    xbox_MovieFileOpened(movie_basic);
+    time_fill(tim);
+    xmv_hle_get_next_frame(0x00D20000u, surf, res, tim);
+    CHECK(rd32(res) == XMV_NEWFRAME && rd32(tim) == 0 && time_guard_intact(tim, 4),
+          "xmv_hle_get_next_frame writes the ms DWORD only");
+    xmv_hle_close(0x00D20000u);
 }
 
 /* XBA-199: the binding's routing. A movie the runtime decodes exactly is
@@ -252,8 +331,9 @@ int main(int argc, char **argv)
     surf = xbox_ContiguousAlloc(0x40, 16);
     pix = xbox_ContiguousAlloc(PITCH * H, 4096);
     res = xbox_ContiguousAlloc(16, 16);
-    CHECK(surf && pix && res, "guest allocations");
-    tim = res + 8;
+    tim = xbox_ContiguousAlloc(TIME_GUARD + 8 + TIME_GUARD, 16);
+    CHECK(surf && pix && res && tim, "guest allocations");
+    tim += TIME_GUARD;
     memset(host(pix), 0x5A, PITCH * H);
     wr32(surf + 0x04, pix - XBOX_CONTIG_BASE);            /* physical address */
     wr32(surf + 0x0C, 0x1Eu << 8);                         /* LIN_X8R8G8B8 */
@@ -265,6 +345,7 @@ int main(int argc, char **argv)
 
     /* The title opens the movie; a new decoder plays it. */
     xbox_MovieFileOpened(movie);
+    time_fill(tim);
     expect = (uint8_t *)malloc(PITCH * H);
     for (calls = 0; calls < 5000; calls++) {
         r = xmv_hle_get_next_frame(0x00A10000u, surf, res, tim);
@@ -275,12 +356,11 @@ int main(int argc, char **argv)
             uint32_t t = rd32(tim), pts;
             const uint8_t *pl[3];
             int st[3];
-            CHECK(rd32(tim + 4) == 0, "the timestamp's high word");
+            CHECK(time_guard_intact(tim, 4), "frame %u: one DWORD written, nothing past it", frames);
             CHECK(frames == 0 || t > last_t, "frame %u at %u after %u", frames, t, last_t);
             last_t = t;
             /* The same frame from a player of our own, converted the same way. */
-            CHECK(xmv_player_next_frame(ref, &pts) == 1 && pts * 10000u == t, "frame %u time %u (%u ms)", frames,
-                  t, pts);
+            CHECK(xmv_player_next_frame(ref, &pts) == 1 && pts == t, "frame %u time %u (%u ms)", frames, t, pts);
             pl[0] = xmv_player_plane(ref, 0, &st[0]);
             pl[1] = xmv_player_plane(ref, 1, &st[1]);
             pl[2] = xmv_player_plane(ref, 2, &st[2]);
@@ -337,6 +417,7 @@ int main(int argc, char **argv)
     unsetenv("RECOMP_XMV");
 
     wr32(surf + 0x0C, 0x1Eu << 8);                         /* LIN_X8R8G8B8 again */
+    test_time_layouts(surf, res, tim);
     test_routing(xbe_path, surf, res, tim);
     if (argc > 4)
         test_disc_image(argv[4], surf, res, tim);

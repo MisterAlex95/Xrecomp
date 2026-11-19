@@ -14,7 +14,12 @@ title layer: every title whose XMV library is found gets it, and nothing of
 any one title is in the toolkit.
 
 FILE (written by tools.xmv.find_api.prepare_bind):
-    {"get_next_frame": "0x...", "close_decoder": "0x..." (optional), "confidence": 0.9, "xdk": 5849}
+    {"get_next_frame": "0x...", "close_decoder": "0x..." (optional), "confidence": 0.9, "xdk": 5849,
+     "timestamp": "ms32" | "100ns64", "timestamp_source": "body" | "build" | "default" | "conflict"}
+
+"timestamp" is the layout of GetNextFrame's 4th argument for the title's XDK
+build (XBA-316, find_api.timestamp_layout); a file without it (written before
+XBA-316) gets "ms32", the layout read in XDK 5849.
 """
 
 import json
@@ -24,14 +29,20 @@ import sys
 FILE_NAME = "recomp_xmv_bind.c"
 # The shape of the generated binding, part of the lift's stamp (find_api.bind_key): a change re-lifts.
 # 2: GetNextFrame routed per movie (xmv_hle_route, xmv_hle_native_result: the hand-over, XBA-199).
-VERSION = 2
+# 3: the timestamp's layout passed to xmv_hle_get_next_frame_ex (XBA-316).
+VERSION = 3
+# The runtime's XMV_TIME_* (src/video/xmv_hle.h).
+TIME_LAYOUT = {"ms32": (0, "XMV_TIME_MS32: one DWORD, ms"), "100ns64": (1, "XMV_TIME_100NS64: 64-bit, 100 ns")}
 WHAT = {"get_next_frame": (0, "XMVDecoder_GetNextFrame"), "close_decoder": (1, "XMVDecoder_CloseDecoder")}
 
 
 def load(path):
     with open(path, encoding="utf-8") as f:
         plan = json.load(f)
-    out = {"confidence": float(plan.get("confidence", 0)), "xdk": plan.get("xdk")}
+    out = {"confidence": float(plan.get("confidence", 0)), "xdk": plan.get("xdk"),
+           "timestamp": plan.get("timestamp") or "ms32"}
+    if out["timestamp"] not in TIME_LAYOUT:
+        raise ValueError("%s: timestamp %r is not one of %s" % (path, out["timestamp"], ", ".join(TIME_LAYOUT)))
     for k in WHAT:
         v = plan.get(k)
         if v:
@@ -75,13 +86,14 @@ def source(bound, plan):
         '#include "recomp_funcs.h"',
         "",
         "extern int xmv_hle_bound(int what, uint32_t va, unsigned confidence_pct);",
-        "extern uint32_t xmv_hle_get_next_frame(uint32_t decoder_va, uint32_t surface_va,",
-        "                                       uint32_t result_va, uint32_t time_va);",
+        "extern uint32_t xmv_hle_get_next_frame_ex(uint32_t decoder_va, uint32_t surface_va,",
+        "                                          uint32_t result_va, uint32_t time_va, unsigned time_layout);",
         "extern void xmv_hle_close(uint32_t decoder_va);",
         "extern int xmv_hle_route(uint32_t va, unsigned confidence_pct, uint32_t decoder_va);",
         "extern void xmv_hle_native_result(uint32_t decoder_va, uint32_t result_va);",
         "",
     ]
+    layout, layout_what = TIME_LAYOUT[plan.get("timestamp") or "ms32"]
     for k, addr in sorted(bound.items(), key=lambda kv: WHAT[kv[0]][0]):
         what, api = WHAT[k]
         name = "sub_%08X" % addr
@@ -96,7 +108,8 @@ def source(bound, plan):
                 "        xmv_hle_native_result(decoder, result);",
                 "        return;",
                 "    }",
-                "    eax = xmv_hle_get_next_frame(MEM32(esp + 4), MEM32(esp + 8), MEM32(esp + 12), MEM32(esp + 16));",
+                "    eax = xmv_hle_get_next_frame_ex(MEM32(esp + 4), MEM32(esp + 8), MEM32(esp + 12), MEM32(esp + 16),",
+                "                                    %du);  /* timestamp: %s */" % (layout, layout_what),
                 "    esp += 4 + 16;              /* stdcall: ret 0x10 */",
                 "}",
                 "",

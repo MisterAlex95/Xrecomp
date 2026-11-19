@@ -425,7 +425,35 @@ static void put32(uint32_t va, uint32_t v)
         memcpy((uint8_t *)((uintptr_t)va + (uintptr_t)xbox_GetMemoryOffset()), &v, 4);
 }
 
+/* The frame's time in the title's timestamp (XBA-316): only with
+ * XMV_NEWFRAME, as XDK 5849's GetNextFrame does (its other paths leave it),
+ * and only as wide as the field the title's XDK build has. */
+static void put_time(uint32_t time_va, unsigned layout, uint32_t t_ms)
+{
+    static int logged;
+    if (!time_va)
+        return;
+    if (!logged) {
+        logged = 1;
+        fprintf(stderr, "[XMV] frame times written as %s\n",
+                layout == XMV_TIME_100NS64 ? "64-bit, 100 ns units" : "one DWORD, milliseconds");
+    }
+    if (layout == XMV_TIME_100NS64) {
+        uint64_t t = (uint64_t)t_ms * 10000u;
+        put32(time_va, (uint32_t)t);
+        put32(time_va + 4, (uint32_t)(t >> 32));
+    } else {
+        put32(time_va, t_ms);           /* XMV_TIME_MS32: one DWORD, nothing past it */
+    }
+}
+
 uint32_t xmv_hle_get_next_frame(uint32_t decoder, uint32_t surface, uint32_t result_va, uint32_t time_va)
+{
+    return xmv_hle_get_next_frame_ex(decoder, surface, result_va, time_va, XMV_TIME_MS32);
+}
+
+uint32_t xmv_hle_get_next_frame_ex(uint32_t decoder, uint32_t surface, uint32_t result_va, uint32_t time_va,
+                                   unsigned time_layout)
 {
     XmvSession *s;
     uint32_t result = XMV_NOFRAME, t_ms = 0;
@@ -461,11 +489,8 @@ uint32_t xmv_hle_get_next_frame(uint32_t decoder, uint32_t surface, uint32_t res
     }
     unlock();
     put32(result_va, result);
-    if (time_va) {
-        uint64_t t = (uint64_t)t_ms * 10000u;
-        put32(time_va, (uint32_t)t);
-        put32(time_va + 4, (uint32_t)(t >> 32));
-    }
+    if (result == XMV_NEWFRAME)
+        put_time(time_va, time_layout, t_ms);
     return 0;                           /* S_OK */
 }
 

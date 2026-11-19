@@ -23,7 +23,10 @@ a section of its own), strings=False (no movie name in the image),
 movie=False (no movie player at all: the negative case), and play=True: the
 title hands the movie to the library's own player, play(dec, 0, 0) (ret 0xC,
 XMVDecoder_Play's shape), which polls get_next_frame itself; the title never
-calls get_next_frame (XBA-309).
+calls get_next_frame (XBA-309). time_store="dword" or "qword": get_next_frame
+has an ebp frame and stores a 4-byte or an 8-byte timestamp through its 4th
+argument (the shapes tools.xmv.find_api.timestamp_store reads, XBA-316);
+default: an esp-only body storing 8 bytes, which it does not read.
 """
 
 import struct
@@ -41,7 +44,7 @@ LIN_X8R8G8B8 = 0x1E
 
 
 def movie_title(path, section="XMV", strings=True, movie=True, libs=None, title_id=0x58424199, title="Movie",
-                play=False):
+                play=False, time_store=None):
     """Write the title to path; returns (path, labels {name: va}) for the API and title functions."""
     t = Title()
     x = t.section(".text")
@@ -87,9 +90,18 @@ def movie_title(path, section="XMV", strings=True, movie=True, libs=None, title_
     lib.hex("8b4510 c700").abs("decoder_obj")                             # *ppDecoder = &decoder_obj
     lib.hex("33c0 5d c20c00").align(16)
     lib.label("get_next_frame")
-    lib.hex("8b44240c c70000000000")                                      # *pResult = XMV_NOFRAME
-    lib.hex("8b442410 85c0 7408 c70000000000 c7400400000000")             # *pTimeStamp = 0 (if any)
-    lib.hex("33c0 c21000").align(16)
+    if time_store:                      # ebp frame: the store is read by find_api (XBA-316)
+        lib.hex("558bec")
+        lib.hex("8b4510 c70000000000")                                    # *pResult = XMV_NOFRAME
+        if time_store == "qword":
+            lib.hex("8b4514 85c0 740d c70000000000 c7400400000000")       # *pTimeStamp = 0, 8 bytes
+        else:
+            lib.hex("8b4514 85c0 7406 c70000000000")                      # *pTimeStamp = 0, one DWORD
+        lib.hex("33c0 5d c21000").align(16)
+    else:
+        lib.hex("8b44240c c70000000000")                                  # *pResult = XMV_NOFRAME
+        lib.hex("8b442410 85c0 7408 c70000000000 c7400400000000")         # *pTimeStamp = 0 (if any)
+        lib.hex("33c0 c21000").align(16)
     lib.label("close").hex("33c0 c20400").align(16)
     if play:                            # XMVDecoder_Play: polls get_next_frame until XMV_ENDOFFILE
         lib.label("play").hex("558bec 83ec10")

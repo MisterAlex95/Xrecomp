@@ -37,10 +37,22 @@ extern "C" {
  * ".xmv" (the host path): the movie the next new decoder plays. */
 void xbox_MovieFileOpened(const char *host_path);
 
+/* The layout of XMVDecoder_GetNextFrame's timestamp (its 4th argument),
+ * which depends on the title's XDK build (XBA-316, docs/runtime/xmv.md):
+ * XMV_TIME_MS32, one DWORD in milliseconds, is what XDK 5849's library
+ * stores (read from its code) and the default for a build nobody has
+ * checked; XMV_TIME_100NS64, a 64-bit time in 100 ns units (REFERENCE_TIME),
+ * is what the hook wrote before XBA-316 and is used only when Prepare reads
+ * an 8-byte store in the title's own GetNextFrame. */
+#define XMV_TIME_MS32     0u
+#define XMV_TIME_100NS64  1u
+
 /* XMVDecoder_GetNextFrame(decoder, surface, &result, &timestamp), stdcall,
- * four guest pointers: writes XMVRESULT at result_va (if not 0) and the
- * frame's time in 100 ns units (64-bit) at time_va (if not 0). Returns the
- * HRESULT for eax (S_OK). A title override:
+ * four guest pointers: writes XMVRESULT at result_va (if not 0) and, with
+ * XMV_NEWFRAME only, the frame's time at time_va (if not 0) in time_layout:
+ * 4 bytes (ms) or 8 bytes (100 ns), never more. Returns the HRESULT for eax
+ * (S_OK). xmv_hle_get_next_frame is the XMV_TIME_MS32 form. A title
+ * override:
  *
  *     void sub_XXXXXXXX(void)            // XMVDecoder_GetNextFrame
  *     {
@@ -51,6 +63,9 @@ void xbox_MovieFileOpened(const char *host_path);
  */
 uint32_t xmv_hle_get_next_frame(uint32_t decoder_va, uint32_t surface_va,
                                 uint32_t result_va, uint32_t time_va);
+uint32_t xmv_hle_get_next_frame_ex(uint32_t decoder_va, uint32_t surface_va,
+                                   uint32_t result_va, uint32_t time_va,
+                                   unsigned time_layout);
 
 /* XMVDecoder_CloseDecoder: forget the decoder's movie. */
 void xmv_hle_close(uint32_t decoder_va);
@@ -63,7 +78,7 @@ void xmv_hle_close(uint32_t decoder_va);
 int xmv_hle_bound(int what, uint32_t va, unsigned confidence_pct);
 
 /* The binding's XMVDecoder_GetNextFrame asks this on each call, with the
- * decoder object (its first argument): 1 = call xmv_hle_get_next_frame, 0 =
+ * decoder object (its first argument): 1 = call xmv_hle_get_next_frame(_ex), 0 =
  * call the title's own lifted body. 0 with RECOMP_XMV=native, and, with
  * RECOMP_XMV=auto, for a movie the runtime would not decode exactly (X8
  * intra frames, WMA or 5.1 sound, damaged data) or cannot open: that movie

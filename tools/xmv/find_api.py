@@ -9,7 +9,7 @@ the library's
     HRESULT WINAPI XMVDecoder_GetNextFrame(XMVDecoder *pDecoder,
                                            D3DSurface *pSurface,
                                            XMVRESULT *pResult,
-                                           REFERENCE_TIME *pTimeStamp);
+                                           <timestamp> *pTimeStamp);
 
 (stdcall, four stack arguments, `ret 0x10`), the call a title polls while a
 movie plays. This module finds that function, and the decoder's
@@ -56,6 +56,19 @@ the evidence):
   1765 (presumably that clock never started), so such a candidate is never
   bound, whatever its score or signature (`library_only`).
 
+The timestamp (XBA-316): how wide *pTimeStamp is, and its unit, depends on
+the XDK build. XDK 5849's library stores one DWORD, the frame's time in
+milliseconds (read from its code: one load of the 4th argument, one 32-bit
+store, the value summed from the stream's ms frame deltas). The report's
+`timestamp` says what the runtime should write, from, in this order: the
+store read in this XBE's own GetNextFrame (`body`: an ebp frame, the 4th
+argument loaded into a register, the stores through it; conservative: 4 or
+8 bytes, else not read), the builds where it was read (TIME_BY_BUILD), and
+otherwise the default, one DWORD in ms (`default`, assumed: it never writes
+past a DWORD). An 8-byte store is taken as 100 ns units (REFERENCE_TIME),
+a presumption: no build seen so far has one. A body that disagrees with its
+build's entry gets the DWORD (the safe side) and says so.
+
 Signatures. `--record get_next_frame=0x...` writes a masked signature of
 the confirmed function (tools/fusion/signatures.py's masking: opcodes and
 structure offsets kept, absolute addresses and branch targets wildcarded,
@@ -99,6 +112,14 @@ WEIGHTS = {
     "close_xmv": 0.1, "movie": 0.2, "movie_near": 0.12, "section": 0.25, "outside_section": -0.25,
     "library": 0.05, "signature": 0.5, "signature_other_build": 0.3, "many_sites": -0.3,
 }
+
+# XBA-316: *pTimeStamp per XDK build, where someone read the store in the library's GetNextFrame.
+# Only builds actually read go here; every other build gets TIME_DEFAULT (assumed, reported as such).
+TIME_LAYOUTS = ("ms32", "100ns64")      # the runtime's XMV_TIME_MS32, XMV_TIME_100NS64
+TIME_BY_BUILD = {
+    5849: "ms32",       # XBA-309/316: one retail XBE (XMV library 5849): `mov [eax], edi`, the time in ms
+}
+TIME_DEFAULT = "ms32"
 
 _HEX = re.compile(r"0x[0-9a-f]+|\b\d+\b")
 _STACK = re.compile(r"\[(ebp|esp)\b")
@@ -484,6 +505,7 @@ def find(path, signatures=None):
             conf = max(0.0, conf - 0.3)
         best["get_next_frame"] = top["va"]
         best.update({k: v for k, v in top["related"].items()})
+    timestamp = timestamp_layout(img, best["get_next_frame"], build)
     return {
         "path": os.path.abspath(path),
         "xdk": build,
@@ -496,7 +518,75 @@ def find(path, signatures=None):
         "confidence": round(conf, 3),
         "high": conf >= HIGH and not library_only,
         "library_only": library_only,
+        "timestamp": timestamp,
     }
+
+
+# ── the timestamp's layout (XBA-316) ─────────────────────────────────────
+_REG32 = ("eax", "ebx", "ecx", "edx", "esi", "edi")
+_SIZES = {"byte": 1, "word": 2, "dword": 4, "qword": 8, "xmmword": 16}
+FOLLOW = 32             # instructions followed after the 4th argument is loaded
+_NOT_STORES = ("cmp", "test", "push")
+
+
+def timestamp_store(img, f):
+    """How many bytes the GetNextFrame at f stores through its 4th argument: 4, 8, or None when that cannot
+    be read safely. Only the plain shape: an ebp frame (push ebp; mov ebp, esp), `mov reg, [ebp + 0x14]`,
+    then stores `[reg]` / `[reg + n]` before reg changes, a call or a jmp/ret. Every load is followed and the
+    widths joined; anything else (an esp-only frame, a pointer handed to a helper, an indexed store) is None."""
+    ins = img.decode(f, img.function_end(f))
+    if len(ins) < 2 or ins[0][2:] != ("push", "ebp") or ins[1][2:] != ("mov", "ebp, esp"):
+        return None
+    reach = 0
+    for i, (_, _, m, op) in enumerate(ins):
+        dst, _, src = (x.strip() for x in op.partition(","))
+        if m != "mov" or dst not in _REG32 or src != "dword ptr [ebp + 0x14]":
+            continue
+        mem = re.compile(r"(byte|word|dword|qword|xmmword) ptr \[%s(?: \+ (0x[0-9a-f]+|\d+))?\]$" % dst)
+        for _, _, m2, op2 in ins[i + 1:i + 1 + FOLLOW]:
+            if m2 in ("call", "ret", "jmp", "leave"):
+                break
+            d2 = op2.partition(",")[0].strip()
+            if m2 in _NOT_STORES:
+                continue
+            hit = mem.match(d2)
+            if hit:
+                reach = max(reach, int(hit.group(2) or "0", 0) + _SIZES[hit.group(1)])
+            elif "ptr [" in d2 and re.search(r"\b%s\b" % dst, d2):
+                return None                     # a store through it of a shape not read here
+            elif d2 == dst:
+                break                           # the register now holds something else
+    return reach if reach in (4, 8) else None
+
+
+def timestamp_layout(img, f, build):
+    """{"layout", "source", "store_bytes", "build_entry"}: what the runtime writes at *pTimeStamp."""
+    width = timestamp_store(img, f) if f else None
+    body = {4: "ms32", 8: "100ns64"}.get(width)
+    known = TIME_BY_BUILD.get(build)
+    if body and known and body != known:
+        layout, source = TIME_DEFAULT, "conflict"
+    elif body:
+        layout, source = body, "body"
+    elif known:
+        layout, source = known, "build"
+    else:
+        layout, source = TIME_DEFAULT, "default"
+    return {"layout": layout, "source": source, "store_bytes": width, "build_entry": known}
+
+
+def timestamp_text(ts, build=None):
+    """How the report and the prepare log say it."""
+    what = {"ms32": "one DWORD in ms", "100ns64": "64-bit in 100 ns units"}[ts["layout"]]
+    why = {
+        "body": "the %d-byte store read in this XBE's GetNextFrame%s" % (
+            ts["store_bytes"] or 0, ", 100 ns presumed" if ts["layout"] == "100ns64" else ""),
+        "build": "as read in XDK %s's library" % build,
+        "default": "assumed: no store read here, XDK %s not checked" % (build or "unknown"),
+        "conflict": "the %s-byte store read here disagrees with XDK %s's (%s): the DWORD, which never writes "
+                    "past the field" % (ts["store_bytes"], build, ts["build_entry"]),
+    }[ts["source"]]
+    return "%s (%s)" % (what, why)
 
 
 # ── what Prepare binds ──────────────────────────────────────────────────────
@@ -505,6 +595,8 @@ def bind_plan(report):
     if not report.get("high") or not report["best"].get("get_next_frame"):
         return None
     plan = {"confidence": report["confidence"], "xdk": report["xdk"]}
+    ts = report.get("timestamp") or {"layout": TIME_DEFAULT, "source": "default"}
+    plan["timestamp"], plan["timestamp_source"] = ts["layout"], ts["source"]
     for k in ("get_next_frame", "close_decoder"):
         if report["best"].get(k):
             plan[k] = "0x%08X" % report["best"][k]
@@ -518,9 +610,11 @@ def prepare_line(report, plan, mode):
         return "XMV: RECOMP_XMV=native, the title's own movie decoder is kept (nothing bound)"
     if plan:
         extra = " and %s at %s" % (NAMES["close_decoder"], plan["close_decoder"]) if plan.get("close_decoder") else ""
+        ts = report.get("timestamp")
         return ("XMV: %s at %s%s (confidence %.2f): bound to the runtime's decoder "
-                "(RECOMP_XMV=native at run time keeps the title's own)"
-                % (NAMES["get_next_frame"], plan["get_next_frame"], extra, plan["confidence"]))
+                "(RECOMP_XMV=native at run time keeps the title's own)%s"
+                % (NAMES["get_next_frame"], plan["get_next_frame"], extra, plan["confidence"],
+                   "; frame times written as " + timestamp_text(ts, report["xdk"]) if ts else ""))
     if best and report.get("library_only"):
         return ("XMV: %s at 0x%08X is called only by the XMV library itself: the title plays its movies with "
                 "the library's XMVDecoder_Play, which needs the library's own GetNextFrame; not bound, the title's "
@@ -608,6 +702,8 @@ def format_report(report):
         out.append("  none")
     best = report["best"]
     out.append("best: " + ", ".join("%s %s" % (NAMES[k], "0x%08X" % best[k] if best[k] else "-") for k in API))
+    if best["get_next_frame"] and report.get("timestamp"):
+        out.append("timestamp: " + timestamp_text(report["timestamp"], report["xdk"]))
     out.append("confidence %.2f: %s" % (report["confidence"], "high, tools.prepare binds it" if report["high"]
                                         else "called only by the XMV library (XMVDecoder_Play): never bound"
                                         if report.get("library_only")

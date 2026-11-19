@@ -56,7 +56,9 @@ and `XMVDecoder_CloseDecoder` can call `xmv_hle_close(decoder)`. What the hook d
    it could not open it and every movie of such a title went to the title's own decoder).
 2. **Pacing.** The first call starts the movie's clock (host monotonic time). Each call returns `XMV_NOFRAME` until
    the next frame's time has come, then decodes it, writes it into `surface` and returns `XMV_NEWFRAME` with the
-   frame's time (100 ns units, 64-bit). After the last frame: `XMV_ENDOFFILE`.
+   frame's time in the title's timestamp field, as wide and in the unit its XDK build has
+   ([below](#the-timestamp-xba-316)); `XMV_NOFRAME` and `XMV_ENDOFFILE` leave that field alone, as XDK 5849's
+   library does. After the last frame: `XMV_ENDOFFILE`.
 3. **The picture.** The surface is the title's (`D3DSurface`: `Data` at +4, `Format` at +0x0C, `Size` at +0x10);
    `Data` is a physical address, seen through the contiguous mapping at 0x80000000. The picture is converted to
    the surface's format (BT.601 studio range, as the Xbox's player) at its top left; the title then shows the
@@ -119,6 +121,39 @@ decoder object stays, and its open is what tells the hook the file name) and pas
 CloseDecoder calls `xmv_hle_close`, then the title's own close. A function the analysis did not find, or one a developer's
 `--exclude-manual` file defines, is not bound. The binding is part of the lift's stamp (desktop `stamp.json`
 `xmv_bind`, Android the lift key, with the generated binding's version `xmv_bind.VERSION`): a change re-lifts.
+
+### The timestamp (XBA-316)
+
+`GetNextFrame`'s fourth argument points at the frame's time. Its width and unit depend on the XDK build, and the
+hook writes exactly that field, never a byte past it:
+
+| Layout | Written | Where it comes from |
+|---|---|---|
+| `ms32` (`XMV_TIME_MS32`) | one DWORD, milliseconds | **Observed** in XDK 5849 (XBA-309/316, one retail XBE with an `XMV` 5849 library entry): the library's GetNextFrame loads its fourth argument once and stores one DWORD through it (`mov [eax], edi`), only on the path that returns `XMV_NEWFRAME`; the value is the sum of the stream's per-frame deltas, which are in ms (the format below), and Play compares it with a ms clock. |
+| `100ns64` (`XMV_TIME_100NS64`) | 64-bit, 100 ns units (`REFERENCE_TIME`) | **Not observed** in any build. It is what the hook wrote before XBA-316, taken from a `REFERENCE_TIME *` guess in an old title override, with no source. Used only when Prepare reads an 8-byte store in the title's own GetNextFrame. The 100 ns unit is then presumed. |
+
+At Prepare, `find_api` decides the layout from three sources, best first. Its report (`timestamp`), the bind plan
+(`timestamp`, `timestamp_source`), the prepare log (`... frame times written as one DWORD in ms (...)`) and the
+first frame's run-time line (`[XMV] frame times written as ...`) all say which one it used:
+
+1. `body`: the store read in this XBE's own GetNextFrame (`find_api.timestamp_store`). This is the plain shape
+   only: an ebp frame, `mov reg, [ebp + 0x14]`, then stores `[reg]` / `[reg + n]` before the register changes or a
+   call or jump. Only a 4- or 8-byte result counts. Anything else is not read: an esp-only frame, the pointer
+   handed to a helper, an indexed store, or a title's own wrapper.
+2. `build`: `TIME_BY_BUILD` in `find_api.py`, the builds where somebody read the store. Today that is 5849 only.
+3. `default`: `ms32`, reported as **assumed**. It is the only layout seen so far, and a DWORD never overruns the
+   field. If the field is in fact 64-bit, the high half is left as it was, so the value may be wrong, but nothing
+   past the field is touched.
+
+A body read that disagrees with its build's entry (`conflict`) gets `ms32`, the safe side, and the log says so.
+The generated binding passes the layout to `xmv_hle_get_next_frame_ex`. The 4-argument `xmv_hle_get_next_frame`
+(hand-written overrides, and packs prepared before XBA-316, whose binding calls it) is the `ms32` form. The layout
+is part of the bind plan and of the binding's version (3), so a title prepared before XBA-316 is lifted again.
+
+Unconfirmed, for every build other than 5849: the field's width and unit. One more title's GetNextFrame read
+(`python -m tools.xmv.find_api default.xbe` prints the `timestamp:` line), or a disassembly of its store, is
+enough to add its build to `TIME_BY_BUILD`. One other title, seen through its lifted code, passes no timestamp
+at all (a null fourth argument), which the hook allows.
 
 **The switch, `RECOMP_XMV`:**
 
@@ -258,10 +293,14 @@ same file in its bit-exact mode.
 
 `tests/xmv_hle` (the runtime linked, guest memory set up from `tools/conformance/test.xbe`): a `D3DSurface` in the
 contiguous window, the movie noted as the kernel notes it, then `xmv_hle_get_next_frame` polled until the end:
-12 `XMV_NEWFRAME` with rising timestamps, `XMV_NOFRAME` in between (paced), each picture in the surface identical to
+12 `XMV_NEWFRAME` with rising timestamps (the player's ms, one DWORD), `XMV_NOFRAME` in between (paced), each picture in the surface identical to
 the player's own decode, `XMV_ENDOFFILE` after; a new open restarts the decoder object; `RECOMP_XMV=skip`, no movie
 opened, a non-XMV file and an unknown surface format behave as described above; `xmv_hle_bound` answers the
-runtime's decoder by default, with `auto` and `skip`, and the title's own with `native`. With a disc image of our
+runtime's decoder by default, with `auto` and `skip`, and the title's own with `native`. The timestamp (XBA-316):
+`basic.xmv` played with each layout through `xmv_hle_get_next_frame_ex`, the field between sentinel bytes. Each
+frame's time must be the player's (ms, or ms x 10000 in 64 bits). No byte past the field's 4 or 8 may change, and
+`XMV_NOFRAME` and `XMV_ENDOFFILE` must leave the field as it was. The 4-argument form must write the DWORD only.
+With a disc image of our
 own (`movie_disc.iso`, written at configure time by `tools/xiso/mkxiso.py` around `basic.xmv`) mounted, the movie
 opened inside the image is the runtime's and plays its 12 frames; a name the image does not hold goes to the
 title's own decoder.
@@ -283,7 +322,11 @@ The binding (XBA-199):
   not bound, a title that plays through the library's `XMVDecoder_Play` never bound (not even with a signature of
   its build), a title without movies binding nothing, an XMV library entry counted, `RECOMP_XMV=native` at
   prepare, a signature recorded on one title finding the API in another where only the call shape is left, a
-  wrong-shaped function refused by `--record`, the CLI report, and the generated C.
+  wrong-shaped function refused by `--record`, the CLI report, and the generated C. For the timestamp (XBA-316),
+  the synthetic title's GetNextFrame comes with a 4-byte store, an 8-byte store, or neither (esp-only). Each one
+  is checked under build 5849 and under a build with no entry: the body read, the build's entry, the default, and a
+  conflict going to `ms32`. The test also checks that the layout reaches the plan, the prepare log and the
+  generated call, and that a plan with an unknown layout is refused.
 - `tools/compat/test_e2e.py`: `tools.prepare --no-build` binds the found functions (their bodies `sub_X_gen`,
   `recomp_xmv_bind.c`, no title layer) and redoes the lift without them under `RECOMP_XMV=native`; a title with no
   XMV library gets nothing. With `XBA_E2E=1`, the title is built and run: its own GetNextFrame never gives a frame,

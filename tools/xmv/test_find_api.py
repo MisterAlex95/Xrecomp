@@ -163,7 +163,10 @@ def test_the_generated_binding(tmp_path):
     assert bound == {"get_next_frame": 0x12050, "close_decoder": 0x12080}
     c = xmv_bind.source(bound, plan)
     assert "void sub_00012050(void)" in c and "sub_00012050_gen();" in c
-    assert "xmv_hle_get_next_frame(MEM32(esp + 4), MEM32(esp + 8), MEM32(esp + 12), MEM32(esp + 16));" in c
+    assert "xmv_hle_get_next_frame_ex(MEM32(esp + 4), MEM32(esp + 8), MEM32(esp + 12), MEM32(esp + 16)," in c
+    assert "0u);  /* timestamp: XMV_TIME_MS32" in c        # a plan without a layout: one DWORD in ms
+    c64 = xmv_bind.source(bound, dict(plan, timestamp="100ns64"))
+    assert "1u);  /* timestamp: XMV_TIME_100NS64" in c64
     assert "esp += 4 + 16;" in c
     assert "xmv_hle_close(MEM32(esp + 4));" in c and "sub_00012080_gen();" in c
     assert "xmv_hle_route(0x00012050u, 90u, decoder)" in c and "xmv_hle_native_result(decoder, result);" in c
@@ -173,4 +176,45 @@ def test_the_generated_binding(tmp_path):
     assert xmv_bind.select(plan, {0x12050}, set(), log=lambda m: None) == {"get_next_frame": 0x12050}
     f = tmp_path / "b.json"
     f.write_text(json.dumps({"get_next_frame": "0x00012050", "confidence": 0.8}))
-    assert xmv_bind.load(str(f)) == {"get_next_frame": 0x12050, "confidence": 0.8, "xdk": None}
+    assert xmv_bind.load(str(f)) == {"get_next_frame": 0x12050, "confidence": 0.8, "xdk": None, "timestamp": "ms32"}
+    f.write_text(json.dumps({"get_next_frame": "0x00012050", "confidence": 0.8, "timestamp": "100ns64"}))
+    assert xmv_bind.load(str(f))["timestamp"] == "100ns64"
+    f.write_text(json.dumps({"get_next_frame": "0x00012050", "confidence": 0.8, "timestamp": "us48"}))
+    with pytest.raises(ValueError):
+        xmv_bind.load(str(f))
+
+
+@pytest.mark.parametrize("store, build, layout, source, width", [
+    ("dword", 5933, "ms32", "body", 4),          # the store read in the body
+    ("qword", 5933, "100ns64", "body", 8),
+    ("dword", 5849, "ms32", "body", 4),          # agrees with the build's entry
+    ("qword", 5849, "ms32", "conflict", 8),      # disagrees: the DWORD, never past the field
+    (None, 5849, "ms32", "build", None),         # esp-only body, not read: the build's entry
+    (None, 5933, "ms32", "default", None),       # neither: assumed one DWORD in ms
+])
+def test_the_timestamp_layout(tmp_path, monkeypatch, store, build, layout, source, width):
+    """XBA-316: what the runtime writes at *pTimeStamp, from the title's own GetNextFrame, its XDK build, or the
+    default; it reaches the bind plan, the prepare log and the generated binding."""
+    libs = (("XAPILIB", build, 0), ("XMV", build, 0))
+    r, l, p = _find(tmp_path, libs=libs, time_store=store)
+    assert r["high"] and r["best"]["get_next_frame"] == l["get_next_frame"]
+    assert r["timestamp"] == {"layout": layout, "source": source, "store_bytes": width,
+                              "build_entry": find_api.TIME_BY_BUILD.get(build)}
+    monkeypatch.delenv("RECOMP_XMV", raising=False)
+    lines = []
+    plan = json.loads(open(find_api.prepare_bind(p, str(tmp_path / "an"), log=lines.append)).read())
+    assert plan["timestamp"] == layout and plan["timestamp_source"] == source
+    assert "frame times written as " in lines[0], lines
+    assert ("assumed" in lines[0]) == (source == "default"), lines
+    assert "timestamp: " in find_api.format_report(r)
+    want = xmv_bind.TIME_LAYOUT[layout][0]
+    assert "%du);  /* timestamp:" % want in xmv_bind.source({"get_next_frame": l["get_next_frame"]}, plan)
+
+
+def test_only_the_plain_store_shape_is_read(tmp_path):
+    """No ebp frame, or no 4th argument: no width (the build's entry or the default decides)."""
+    p, l = movie_title(tmp_path / "default.xbe", time_store="dword")
+    img = find_api.Image(p)
+    assert find_api.timestamp_store(img, l["get_next_frame"]) == 4
+    assert find_api.timestamp_store(img, l["close"]) is None        # no ebp frame
+    assert find_api.timestamp_store(img, l["create"]) is None       # ebp frame, no 4th argument
