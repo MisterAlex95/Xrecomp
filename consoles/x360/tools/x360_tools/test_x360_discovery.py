@@ -229,6 +229,20 @@ def program():
     p(A.li(3, -5), A.blr())
     p.end()
 
+    # jt_open(i): no bound check (the compiler knew the range): an absolute table in the function's own code, which
+    # ends at the first case label
+    p.func("jt_open")
+    p.branch(lambda at, t: A.lis(12, ha(t)), "open_tbl")
+    p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), "open_tbl")
+    p(A.rlwinm(0, 3, 2, 0, 29), A.lwzx(0, 12, 0), A.mtctr(0), A.bctr())
+    p.label("open_tbl")
+    for k in (0, 1, 2):
+        p.branch(lambda at, t: t, "open_c%d" % k)
+    for k, v in enumerate((3001, 3002, 3003)):
+        p.label("open_c%d" % k)
+        p(A.li(3, v), A.blr())
+    p.end()
+
     # Leaf functions MSVC gives no .pdata entry, never called directly: leaf_data is named by a word of .rdata (a
     # vtable slot), leaf_code by the lis / addi pair in take_ptr (a callback handed over)
     p.func("leaf_data")
@@ -277,11 +291,11 @@ def test_discovery_and_lifting(tmp_path):
     img, funcs, labels = build()
     s = recompile(img, str(tmp_path))
     assert s["interp_fallback_insns"] == 0, s["unlifted"]
-    # the helpers are not functions; the nine of .pdata are, and the two leaf functions only a pointer names (a word
+    # the helpers are not functions; the ten of .pdata are, and the two leaf functions only a pointer names (a word
     # of .rdata, a lis / addi pair); a pointer into the middle of a .pdata function is not a function
-    assert s["functions"] == 11 and s["pointer_seeds"] == 2
+    assert s["functions"] == 12 and s["pointer_seeds"] == 2
     assert len(s["helpers"]) == 8 and s["helper_calls_inlined"] == 8
-    assert s["jump_tables"] == 5 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 and s["unresolved_bctr"] == 0
+    assert s["jump_tables"] == 6 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 + 3 and s["unresolved_bctr"] == 0
     text = "".join(p.read_text() for p in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
     assert "savegpr" in text and "switch (t_)" in text
     table = (tmp_path / "x360_rc_table.c").read_text()
@@ -388,8 +402,9 @@ def test_helpers_and_tables_run(tmp_path):
                                  ("jt_byte", range(0, 8), {0: 7, 1: 8, 2: 8, 3: 9, 4: 100, 5: 7}),
                                  ("jt_gcc", range(0, 4), {0: 111, 1: 222, 2: 333}),
                                  ("jt_min", range(8, 16), {10: 1010, 11: 1011, 12: 1012, 13: 1013}),
-                                 ("jt_half", range(0, 6), {1: 2001, 2: 2002, 3: 2003})):
-        default = {"jt_abs": -1, "jt_byte": -2, "jt_gcc": -3, "jt_min": -4, "jt_half": -5}[name]
+                                 ("jt_half", range(0, 6), {1: 2001, 2: 2002, 3: 2003}),
+                                 ("jt_open", range(0, 3), {0: 3001, 1: 3002, 2: 3003})):
+        default = {"jt_abs": -1, "jt_byte": -2, "jt_gcc": -3, "jt_min": -4, "jt_half": -5, "jt_open": 0}[name]
         for x in inputs:
             tag = "%s_%d" % (name, x & 0xFF)
             cases.append(c_case(tag, funcs[name][0], b"", gpr={3: x & 0xFFFFFFFF if x >= 0 else x & M64},

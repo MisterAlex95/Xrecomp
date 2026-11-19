@@ -275,6 +275,7 @@ class JumpTables:
         self.tables = {}      # bctr addr -> [targets]
         self.unresolved = set()
         self._index = None    # while a table is evaluated: (index register, where its bound check is in the window)
+        self._functions = None  # the .pdata functions, sorted (made when a table has no bound check)
 
     def resolve(self, a):
         if a in self.tables:
@@ -425,7 +426,7 @@ class JumpTables:
         if bound is None:
             bc = self._bound_before(insns)
             if bc is None:
-                return None
+                return self._unbounded(a, insns, k)
             bound = bc
         reg, n = bound
         if n > 4096:
@@ -450,6 +451,41 @@ class JumpTables:
         if not all(self.view.in_code(t) and t % 4 == 0 for t in targets):
             return None
         return targets
+
+    def _unbounded(self, a, insns, k):
+        """A table with no bound check: the compiler knew the index's range (a switch over every value of a small
+        type). Only MSVC's absolute table (`lwzx` of addresses at index << 2) inside a .pdata function: its entries
+        are read while they are code addresses of that function, and, for a table placed in the function's own code,
+        no further than the first case label after it. A word read too far is one more label of the same function."""
+        img = getattr(self.view, "img", None)
+        pdata = getattr(img, "pdata", None)
+        if not pdata:
+            return None
+        if self._functions is None:
+            self._functions = sorted((s, s + n) for s, n in pdata)
+        f = bisect_right(self._functions, (a, 0xFFFFFFFF)) - 1
+        if f < 0 or not self._functions[f][0] <= a < self._functions[f][1]:
+            return None
+        fs, fe = self._functions[f]
+        insns = [i for i in insns if i.addr >= fs]  # what precedes the function (padding, another one) is not its code
+        e = self._ev(insns, k + 1, insns[k].rd)
+        if e is None or e.k != "load" or e.a != 4:
+            return None
+        index = e.c
+        if index.k != "shl" or index.b != 2 or index.a.k != "reg":
+            return None
+        table, targets, label = e.b, [], 0xFFFFFFFF
+        while len(targets) < 4096:
+            p = table + 4 * len(targets)
+            if p >= label:
+                break
+            t = self._read(p, 4)
+            if t is None or t & 3 or not fs <= t < fe or not self.view.in_code(t):
+                break
+            targets.append(t)
+            if p < t < label and fs <= table < fe:
+                label = t
+        return targets if len(targets) > 1 else None
 
     def _bound_before(self, insns):
         """The bound check may sit just before the straight run (the conditional branch ends it): look one block
