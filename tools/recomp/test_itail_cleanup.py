@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tools.recomp import config  # noqa: E402
 from tools.recomp.translator import FunctionTranslator  # noqa: E402
+from tools.recomp.test_icall_guarded_runtime import install_stub  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 HEADER = os.path.join(ROOT, "templates", "runtime", "recomp_types.h")
@@ -174,7 +175,8 @@ def test_failed_tail_target_pops_what_the_jumpers_ret_pops():
     src = (HARNESS.replace("FLAT_LOOKUP", "#define RECOMP_LIKELY(x) (x)\n" + _macro("RECOMP_FLAT_LOOKUP"))
                   .replace("IS_CODE", _macro("RECOMP_ICALL_IS_CODE"))
                   # the dispatch the macros share (XBA-277), after IS_CODE: it names it
-                  .replace("ITAIL_RET", _macro("RECOMP_ICALL_HIT_") + "\n" + _macro("RECOMP_ICALL_DISPATCH_") +
+                  .replace("ITAIL_RET", _macro("RECOMP_ICALL_HIT_") + "\n" + install_stub() +
+                           _macro("RECOMP_ICALL_DISPATCH_") +
                            "\n" + _macro("RECOMP_ITAIL_RET"))
                   .replace("LIFTED", lifted))
     with tempfile.TemporaryDirectory() as tmp:

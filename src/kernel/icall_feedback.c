@@ -14,9 +14,11 @@
  * where they land relative to known functions, which is inference; this is
  * measurement.
  *
- * Opt-in: define RECOMP_ICALL_FEEDBACK. Without it this file compiles to
+ * Opt-in: define RECOMP_ICALL_FEEDBACK. Without it the part below compiles to
  * nothing and the RECOMP_ICALL_OBSERVE hook in recomp_types.h expands to
- * (void)0, so release builds pay neither the store nor the 8 MiB.
+ * (void)0, so release builds pay neither the store nor the 8 MiB. Every build
+ * records the targets the analysis found (the hits above, XBA-304), from the
+ * generated dispatch's own window, at no cost on a hit.
  *
  * Cost when enabled: one byte OR per indirect branch, into a flat array indexed
  * by guest VA. A byte array rather than a bitmap because a byte store needs no
@@ -26,14 +28,144 @@
  */
 
 #include <stdint.h>
-
-#ifdef RECOMP_ICALL_FEEDBACK
-
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "recomp_icall_feedback.h"
+
+/* ── Hits in every build (XBA-304) ───────────────────────────────────────
+ * The generated dispatch's window (recomp_dispatch_init): a slot is filled
+ * the first time the miss path resolves a translated target, so the filled
+ * slots are the targets the run reached that the analysis found -- what
+ * tools.compat recall divides by. Read here without a lock: a slot is one
+ * aligned pointer, written once (or rewritten with the same function). */
+static recomp_icall_func_t const *s_hits;
+static uint32_t s_hits_base, s_hits_span;
+static volatile int s_hits_dumping;
+
+static void hits_at_exit(void)
+{
+    recomp_icall_hits_dump();
+}
+
+void recomp_icall_hits_register(recomp_icall_func_t const *table, uint32_t base, uint32_t span)
+{
+    static int registered;
+    s_hits = table;
+    s_hits_base = base;
+    s_hits_span = table ? span : 0;
+    if (table && !registered) {
+        registered = 1;
+        atexit(hits_at_exit);   /* a desktop run's clean exit; the other ends dump themselves */
+    }
+}
+
+void recomp_icall_hits_reset(void)
+{
+    s_hits = NULL;
+    s_hits_base = s_hits_span = 0;
+}
+
+/* The dump's path: $RECOMP_ICALL_DUMP, else icall_targets.dump in the
+ * discovery file's folder; 0 when there is none. */
+static int hits_path(char *out, size_t size)
+{
+    const char *e = getenv("RECOMP_ICALL_DUMP");
+    const char *disc, *slash;
+    size_t dir;
+    if (e && *e) {
+        if (!strcmp(e, "0"))
+            return 0;
+        return snprintf(out, size, "%s", e) < (int)size;
+    }
+    disc = getenv("RECOMP_DISCOVERY");   /* the discovery file (recomp_discovery.h): same folder */
+    if (!disc || !*disc || !strcmp(disc, "0"))
+        return 0;
+    slash = strrchr(disc, '/');
+#ifdef _WIN32
+    {
+        const char *bs = strrchr(disc, '\\');
+        if (bs && (!slash || bs > slash))
+            slash = bs;
+    }
+#endif
+    dir = slash ? (size_t)(slash - disc) + 1 : 0;
+    return snprintf(out, size, "%.*sicall_targets.dump", (int)dir, disc) < (int)size;
+}
+
+static int hit_at(uint32_t va)
+{
+    uint32_t off = va - s_hits_base;
+    return off < s_hits_span && s_hits[off] != NULL;
+}
+
+int recomp_icall_hits_dump(void)
+{
+    char path[1024], tmp[1100], line[64];
+    FILE *old, *f;
+    unsigned long now = 0, kept = 0;
+    uint32_t off;
+    int rc = -1;
+
+    if (!s_hits || !hits_path(path, sizeof path))
+        return -1;
+#if defined(__GNUC__) || defined(__clang__)
+    if (__sync_lock_test_and_set(&s_hits_dumping, 1))
+        return -1;              /* another thread is writing it (the window's end and atexit) */
+#endif
+    for (off = 0; off < s_hits_span; off++)
+        now += s_hits[off] != NULL;
+    old = fopen(path, "r");
+    if (!now && !old)
+        goto out;               /* nothing reached (a pack from before XBA-304): no file, recall stays unknown */
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    f = fopen(tmp, "w");
+    if (!f) {
+        if (old)
+            fclose(old);
+        goto out;
+    }
+    fprintf(f, "# icall-feedback v1\n");
+    fprintf(f, "# va flags   (1=resolved): indirect-call targets reached that the analysis found (XBA-304)\n");
+    fprintf(f, "# window 0x%08X-0x%08X\n", (unsigned)s_hits_base, (unsigned)(s_hits_base + s_hits_span));
+    if (old) {
+        /* Earlier runs' targets this one did not reach. */
+        while (fgets(line, sizeof line, old)) {
+            unsigned va, flags;
+            if (line[0] == '#' || sscanf(line, "%x %u", &va, &flags) != 2 || !flags)
+                continue;
+            if (hit_at((uint32_t)va))
+                continue;
+            fprintf(f, "%08X %u\n", va, flags);
+            kept++;
+        }
+        fclose(old);
+    }
+    for (off = 0; off < s_hits_span; off++)
+        if (s_hits[off])
+            fprintf(f, "%08X 1\n", (unsigned)(s_hits_base + off));
+    if (fclose(f) != 0) {
+        remove(tmp);
+        goto out;
+    }
+#ifdef _WIN32
+    remove(path);               /* rename does not replace on Windows */
+#endif
+    if (rename(tmp, path) != 0) {
+        remove(tmp);
+        goto out;
+    }
+    fprintf(stderr, "[icall] %s: %lu target(s) reached this run, %lu from earlier runs\n", path, now, kept);
+    rc = (int)(now + kept);
+out:
+#if defined(__GNUC__) || defined(__clang__)
+    __sync_lock_release(&s_hits_dumping);
+#endif
+    return rc;
+}
+
+#ifdef RECOMP_ICALL_FEEDBACK
 
 /* One byte per guest VA in the image window. Zero-initialised in BSS; the OS
  * only commits the pages actually touched, so a title that reaches 4k distinct
@@ -176,9 +308,4 @@ void recomp_icall_feedback_init(void)
     atexit(dump_at_exit);
 }
 
-#else  /* !RECOMP_ICALL_FEEDBACK */
-
-/* ISO C forbids an empty translation unit. */
-typedef int recomp_icall_feedback_disabled;
-
-#endif
+#endif  /* RECOMP_ICALL_FEEDBACK */

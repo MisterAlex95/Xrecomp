@@ -3,7 +3,7 @@ Prepare-time recall (XBA-129, XBA-75): of the code a title reached at run
 time through an indirect call or a thread start, how much did the static
 analysis find, and what kind of reference hid the rest.
 
-    python -m tools.compat recall WORK XBE [--icall-dump icall.txt] [--json]
+    python -m tools.compat recall WORK XBE [--icall-dump icall_targets.dump] [--json]
 
 Inputs, all from the title's work folder:
 
@@ -14,10 +14,13 @@ Inputs, all from the title's work folder:
   * the XBE, to say where a missed address is referenced from.
 
 The share found statically needs the targets the run reached that the
-analysis did find, which the discovery file does not record (only misses):
-an icall-feedback dump (a runtime built with RECOMP_ICALL_FEEDBACK,
-tools/recomp/icall_feedback.py) gives them. Without one the misses and their
-categories are still reported; the recall is then unknown.
+analysis did find, which the discovery file does not record (only misses).
+Every runtime records them since XBA-304 (the generated dispatch's window
+fills as targets are reached) and writes icall_targets.dump beside
+discovered.jsonl, merged over the runs; --icall-dump names another dump (a
+RECOMP_ICALL_FEEDBACK build's, tools/recomp/icall_feedback.py). Without one,
+or with an empty one (a pack prepared before XBA-304 records nothing), the
+misses and their categories are still reported; the recall is then unknown.
 
 Categories of a miss, from the image (input for the disassembler):
 
@@ -117,6 +120,9 @@ def parse_icall_dump(path):
     return parse_dump(path)
 
 
+DUMP_NAME = "icall_targets.dump"     # the runtime's, beside discovered.jsonl (recomp_icall_hits_dump)
+
+
 def report(work, xbe=None, icall_dump=None, image=None):
     """The recall of one title as a dict (see the module docstring)."""
     history = entries_from(os.path.join(work, "discovered.jsonl"))
@@ -153,8 +159,11 @@ def report(work, xbe=None, icall_dump=None, image=None):
            "runs": sum(1 for e in history if e.get("t") == "run"),
            "categories": by_cat if image else None, "inside_known": inside, "targets": None,
            "found_statically": None, "recall": None, "rows": rows}
-    if icall_dump:
-        reached = parse_icall_dump(icall_dump)
+    if not icall_dump and os.path.isfile(os.path.join(work, DUMP_NAME)):
+        icall_dump = os.path.join(work, DUMP_NAME)
+    reached = parse_icall_dump(icall_dump) if icall_dump and os.path.isfile(icall_dump) else {}
+    out["icall_dump"] = icall_dump if reached else None
+    if reached:
         targets = set(reached) | set(missed)
         # Reached and resolved, and not one the runs taught the analysis.
         found = {va for va, flags in reached.items() if flags & 1 and va not in missed}
@@ -179,7 +188,8 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("work", help="the title's prepare work folder (discovered.jsonl, discovered-seeds.json)")
     ap.add_argument("xbe", nargs="?", help="its default.xbe, for the categories")
-    ap.add_argument("--icall-dump", help="an icall-feedback dump (RECOMP_ICALL_FEEDBACK), for the share found")
+    ap.add_argument("--icall-dump", help="an icall-feedback dump, for the share found (default: the work "
+                    "folder's %s, which the runtime writes)" % DUMP_NAME)
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     r = report(a.work, a.xbe, a.icall_dump)

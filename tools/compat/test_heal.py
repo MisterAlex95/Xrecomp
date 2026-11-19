@@ -140,6 +140,14 @@ def test_recall_categories_and_outcomes(tmp_path):
     r = recall.report(str(work), icall_dump=str(dump), image=_image())
     assert r["found_statically"] == 5 and r["targets"] == 9 and r["recall"] == round(5 / 9, 3)
     assert recall.summary(r).startswith("56 % (4 misses")
+    # XBA-304: the runtime's own dump in the work folder is read without --icall-dump; an empty one (a pack from
+    # before it records nothing, only headers) leaves the recall unknown rather than 0 %.
+    (work / recall.DUMP_NAME).write_text("# icall-feedback v1\n# window 0x00011000-0x00011200\n")
+    r = recall.report(str(work), image=_image())
+    assert r["recall"] is None and r["icall_dump"] is None and recall.summary(r).startswith("recall unknown")
+    (work / recall.DUMP_NAME).write_text(dump.read_text())
+    r = recall.report(str(work), image=_image())
+    assert r["recall"] == round(5 / 9, 3) and r["icall_dump"].endswith(recall.DUMP_NAME)
 
 
 def test_the_report_has_a_recall_column_when_a_line_has_one():

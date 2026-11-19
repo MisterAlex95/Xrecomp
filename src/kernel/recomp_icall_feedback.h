@@ -29,6 +29,27 @@
 #define RECOMP_ICALL_SEEN_RESOLVED   1u  /* dispatch found a translation */
 #define RECOMP_ICALL_SEEN_UNRESOLVED 2u  /* dispatch failed: a real gap */
 
+/* Hits recorded in every build (XBA-304). The generated recomp_dispatch.c's
+ * window starts empty and fills as the miss path resolves targets
+ * (recomp_icall_install, recomp_types.h); recomp_dispatch_init hands that
+ * table here (base: its first slot's VA, span: its slots). Weak in the
+ * generated code: a runtime without it, or a pack generated before it,
+ * records nothing. */
+typedef void (*recomp_icall_func_t)(void);
+void recomp_icall_hits_register(recomp_icall_func_t const *table, uint32_t base, uint32_t span);
+
+/* Write the targets reached so far: icall_targets.dump beside the discovery
+ * file (recomp_discovery.h), or $RECOMP_ICALL_DUMP ("0": none), in this
+ * header's text format (`VA 1`), merged with what the file already held
+ * (every run adds its targets), through a temporary file and a rename.
+ * Nothing when no table was registered, when nothing was reached and the
+ * file holds nothing, or without a discovery file. Returns the targets
+ * written, -1 when it wrote nothing. Not from a signal handler (stdio). */
+int recomp_icall_hits_dump(void);
+
+/* Tests: forget the registered table. */
+void recomp_icall_hits_reset(void);
+
 #ifdef RECOMP_ICALL_FEEDBACK
 
 extern volatile unsigned char g_icall_seen[RECOMP_ICALL_FB_SIZE];

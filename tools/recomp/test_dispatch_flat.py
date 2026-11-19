@@ -160,13 +160,28 @@ recomp_func_t recomp_lookup_manual(uint32_t va) {
     return NULL;
 }
 
+recomp_func_t recomp_icall_install(uint32_t xbox_va, recomp_func_t fn);
+
 int main(void) {
     static const uint32_t absent[] = { 0x00000000, 0x00010FFF, 0x00011001, 0x00011008,
         0x000203FD, 0x00020400, 0xFFFFFFFF, 0xFE000000, 0x80000000 };
     size_t i;
+    const char *rec = getenv("RECOMP_ICALL_RECORD");
     if (RECOMP_FLAT_LOOKUP(0x00011000u)) { printf("FAIL: hit before init\n"); return 1; }
     if (!recomp_dispatch_init()) { printf("FAIL: init\n"); return 1; }
     if (manual_calls != 4) { printf("FAIL: manual asked %d times\n", manual_calls); return 1; }
+    if (!(rec && *rec == '0')) {
+        /* XBA-304: the window starts empty; the miss path's answers fill it (the slow path asks
+         * recomp_lookup_manual first, so f_m at 0x11004), a VA with no translation is never put in. */
+        if (RECOMP_FLAT_LOOKUP(0x00011000u) || RECOMP_FLAT_LOOKUP(0x00011004u)) {
+            printf("FAIL: a slot filled before any call\n"); return 1;
+        }
+        recomp_icall_install(0x00011000u, f_a);
+        recomp_icall_install(0x00012000u, f_c);
+        recomp_icall_install(0x000203FCu, f_d);
+        recomp_icall_install(0x00011004u, f_m);
+        recomp_icall_install(0x00011008u, f_m);
+    }
     if (RECOMP_FLAT_LOOKUP(0x00011000u) != f_a || RECOMP_FLAT_LOOKUP(0x00012000u) != f_c ||
         RECOMP_FLAT_LOOKUP(0x000203FCu) != f_d) { printf("FAIL: inline lookup\n"); return 1; }
     if (RECOMP_FLAT_LOOKUP(0x00011004u) != f_m) { printf("FAIL: override not folded\n"); return 1; }
@@ -208,8 +223,11 @@ def test_inline_flat_lookup_folds_manual_overrides():
         r = subprocess.run(command(cc, [hp, disp], exe, include_dirs=[tmp]),
                            cwd=tmp, capture_output=True, text=True)
         assert r.returncode == 0, (r.stdout + r.stderr)[-2000:]
-        r = subprocess.run([exe], capture_output=True, text=True)
-        assert r.returncode == 0 and r.stdout.startswith("OK"), r.stdout + r.stderr
+        for rec in ("0", ""):           # the whole table published (XBA-304's A/B switch), then recording
+            env = {k: v for k, v in os.environ.items() if k != "RECOMP_ICALL_TRACE"}
+            env["RECOMP_ICALL_RECORD"] = rec
+            r = subprocess.run([exe], capture_output=True, text=True, env=env)
+            assert r.returncode == 0 and r.stdout.startswith("OK"), (rec, r.stdout + r.stderr)
 
 
 def test_empty_translation_set_does_not_divide_by_zero():

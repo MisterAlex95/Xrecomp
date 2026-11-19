@@ -85,6 +85,7 @@
 #include "perf_overlay.h"
 #include "host_perf_line.h"   /* the performance line (XBA-243) */
 #include "host_perf_hint.h"   /* the ADPF session (XBA-305) */
+#include "kernel/recomp_icall_feedback.h" /* the indirect-call targets reached (XBA-304) */
 #include "aspect_policy.h"
 #include "present_shaders.h"  /* picture shaders, shared with host_window (XBA-203) */
 #include "pvideo_posix.h"     /* the PVIDEO overlay's scan-out */
@@ -1326,8 +1327,10 @@ static int start_guest(void)
 static int SDLCALL lifecycle_watch(void *user, SDL_Event *ev)
 {
     (void)user;
-    if (ev->type == SDL_APP_WILLENTERBACKGROUND)
+    if (ev->type == SDL_APP_WILLENTERBACKGROUND) {
         recomp_lifecycle_pause();
+        recomp_icall_hits_dump();      /* Android may end the process in the background (XBA-304) */
+    }
     else if (ev->type == SDL_APP_DIDENTERFOREGROUND)
         recomp_lifecycle_resume();
     return 1;
@@ -2097,6 +2100,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     fprintf(stderr, "  [FBWIN] %s\n", quit ? "window closed" : "guest returned");
     if (perf_hint_on())
         recomp_perf_hint_thread_leave();
+    recomp_icall_hits_dump();          /* the targets reached (XBA-304): atexit is skipped on Android */
     xbox_FramebufferWindowPerfLog();   /* "xbox: perf over the run" (recomp_quit below skips atexit on Android) */
     fflush(stdout);
     fflush(stderr);

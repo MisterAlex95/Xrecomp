@@ -2,10 +2,10 @@
 import pytest
 from tools.recomp import config
 from tools.recomp.translator import FunctionTranslator
-from tools.recomp.test_icall_guarded_runtime import _macro, HARNESS, A, B
+from tools.recomp.test_icall_guarded_runtime import _macro, install_stub, HARNESS, A, B
 
 # The dispatch the indirect-call macros share (XBA-277).
-_DISPATCH = _macro('RECOMP_ICALL_HIT_') + '\n' + _macro('RECOMP_ICALL_DISPATCH_') + '\n'
+_DISPATCH = _macro('RECOMP_ICALL_HIT_') + '\n' + install_stub() + _macro('RECOMP_ICALL_DISPATCH_') + '\n'
 
 BASE = 0x10000
 BODY = '6a01 6a02 ffd0 83c408 c3'

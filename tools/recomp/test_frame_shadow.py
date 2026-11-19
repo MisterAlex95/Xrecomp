@@ -225,6 +225,7 @@ uint32_t recomp_resume_target(void) { return 0; }
 void recomp_resume_lost(uint32_t func, uint32_t site) { (void)func; (void)site; abort(); }
 void recomp_icall_fail_log(uint32_t va) { printf("FAIL lookup %%x\n", va); bad++; }
 void recomp_icall_not_code_log(uint32_t va) { printf("FAIL not code %%x\n", va); bad++; }
+recomp_func_t recomp_icall_install(uint32_t va, recomp_func_t fn) { (void)va; return fn; }   /* the generated dispatch's (XBA-304) */
 void sub_00010030(void); void sub_00010060(void);
 %(bodies)s
 int main(void)

@@ -149,37 +149,69 @@ where each one is referenced from in the image, as input for the disassembler:
 | computed jump | appears nowhere in the image: computed at run time |
 
 `inside_known` counts misses inside a function the analysis knows (the sweep decoded through them). The share found
-statically needs the targets reached that the analysis did find, which the discovery file does not hold: given an
-icall-feedback dump (a runtime built with `RECOMP_ICALL_FEEDBACK`, `tools/recomp/icall_feedback.py`) it is
+statically needs the targets reached that the analysis did find, which the discovery file does not hold. Every
+runtime writes them to `icall_targets.dump` beside it (XBA-304, below), which `recall` reads by default
+(`--icall-dump` names another, e.g. a `RECOMP_ICALL_FEEDBACK` build's): the share is then
 `found_statically / targets`, else « recall unknown ». `run` adds a `recall` object to a title's line when a run
 missed anything, and `report` / `report --matrix` get a Recall column (« recall unknown (3 misses: 3 thread start) »).
 Tested on synthetic titles only (`tools/compat/test_heal.py`, and `test_e2e.py::test_the_self_healing_loop`: three
 threads found one round at a time, the third refused, four rounds); a real title's numbers are XBA-75.
 
-### Recording hits by default (XBA-138): measured, not done
+### Recording hits by default (XBA-138, XBA-304)
 
-A default build does not record hits because `RECOMP_ICALL_OBSERVE` sits in every `RECOMP_ICALL*` macro, the hottest
-path of the generated code. What it would cost, from `tools/compat/icall_record_bench.c` (the macro's work: trace
-ring, global count, range check, direct-map lookup, call), x86-64 container on the shared host, gcc -O2, 40 M
-calls, two runs:
+Every build records the targets a run reaches that the analysis found (the hits), at no cost on a hit. Since
+XBA-277 a hit is a bounds check and a load in the generated dispatch's window (`g_recomp_flat`), which never reaches
+`RECOMP_ICALL_OBSERVE`. Recording on the hit path (test-before-set into a seen array, the XBA-138 proposal) would add
+a load, a compare and a branch to every hit, a few percent of `w_icall`. Instead the window records itself:
 
-| Variant | 1 thread, 64 targets | 1 thread, 4096 targets | 2 threads, 64 targets | 2 threads, 4096 targets |
-|---|---|---|---|---|
-| no record (today's default) | 2.5 ns | 2.7–2.9 ns | 21–27 ns | 21–25 ns |
-| `\|=` on every call (the `RECOMP_ICALL_FEEDBACK` build) | 2.8 ns | 3.7 ns | 41–43 ns | 40–50 ns |
-| test-before-set (a store the first time only) | 2.8 ns | 3.6 ns | 15 ns | 19 ns |
+- `recomp_dispatch_init` (generated, `tools/recomp/translator.py`) points the window at `g_hit_table`, a second
+  table as large as the flat one that starts empty (calloc: only touched pages are committed).
+- A call whose slot is empty takes the miss path as before (trace note, `RECOMP_ICALL_IS_CODE`, manual, generated
+  and kernel lookups). Its answer goes through `recomp_icall_install` (`recomp_types.h`, `RECOMP_ICALL_INSTALL_`),
+  which puts it in its slot when the VA is a translated function. The value stored is the slow path's own answer
+  (the manual override first), so a hit calls what the full table would have. The next call to that target hits.
+- So the filled slots are exactly the targets reached that the analysis found. Each target pays one slow call;
+  a hit pays nothing. Filled slots survive a later `recomp_dispatch_init` (the window moving).
+- `recomp_dispatch_init` hands the table to the runtime through the weak `recomp_icall_hits_register`
+  (`src/kernel/icall_feedback.c`). `recomp_icall_hits_dump` writes `icall_targets.dump` beside `discovered.jsonl`,
+  in the icall-feedback text format (`VA 1`, a `# window` line giving the range covered). It merges with what the
+  file already held, so every run adds its targets, and writes through a temporary file and a rename. It dumps:
+  - at a clean exit (atexit);
+  - at `HalReturnToFirmware` and at a bug check (`ExitProcess` skips atexit);
+  - when the SDL window's loop ends (Android skips atexit);
+  - when the app goes to the background (Android may end it there).
 
-One thread pays a load of the 8 MiB seen array per call (+0.3 ns when it stays cached, +0.8 ns over 4096 scattered
-targets). With two threads the instrumented build's `|=` dirties a shared cache line on every call and doubles the
-cost; test-before-set writes nothing once a target is known and stays within the noise of today's build, whose own
-shared `g_icall_count++` dominates. Even at a million indirect calls a second, +1 ns is 0.1 % of a core.
+  It writes nothing when nothing was reached and no file exists. It is not called from a signal handler: a crash
+  keeps the last dump.
+- `recall` reads that file from the work folder by default (`--icall-dump` names another), so a title's line gets a
+  share instead of « recall unknown ». A missing or empty dump keeps the recall unknown, never 0 %.
+- Switches: `RECOMP_ICALL_RECORD=0` (read at the first `recomp_dispatch_init`) publishes the whole table as the
+  window again and records nothing, the A/B switch. `RECOMP_ICALL_DUMP=<path>` writes the dump elsewhere; `=0` writes
+  none. Without a discovery file (`RECOMP_DISCOVERY` unset) there is nowhere to write by default.
+- A `RECOMP_ICALL_FEEDBACK` build keeps its own instrument: every call goes through the miss path,
+  `RECOMP_ICALL_OBSERVE` and the per-site records, and `icall_targets.dump` / `icall_sites.dump` in the working
+  directory.
 
-So the cheap variant is: the seen array and `RECOMP_ICALL_OBSERVE` in every build, as test-before-set on resolved
-targets only (the per-site cache stays opt-in), dumped next to `discovered.jsonl` at exit and on the crash path,
-with an A/B switch, and `recall` reading that dump from the work folder instead of asking for `--icall-dump`. Not
-done here: it changes `templates/runtime/recomp_types.h` and `src/kernel/icall_feedback.c` (the runtime), and has
-to be measured on a real title first (a frame-time A/B on the Thor). Thread starts need no hot-path hook (the kernel
-sees each one).
+**Measured** (`python -m tools.bench icount`, scale 0.1, instructions executed under qemu-user less a run at scale 0,
+origin/main -> XBA-304 on the same corpus; x86-64 clang 19 exe layout, arm64 gcc 14 cross (Debian
+aarch64-linux-gnu) exe and so layouts):
+
+| Workload | x86-64 | arm64 exe | arm64 so |
+|---|---|---|---|
+| w_int, w_mem, w_rep, w_bytes, w_x87, w_sse, w_lock | 0 % | 0 % | 0 % (±11, scale-0 jitter) |
+| w_icall (an indirect call in a loop) | 9,250,488 -> 9,250,662 (+0.002 %) | 11,900,382 -> 11,900,556 (+0.001 %) | 13,700,373 -> 13,700,560 (+0.001 %) |
+| w_vcall (calls into a function that makes an indirect call) | 19,450,451 -> 19,450,625 (+0.001 %) | 26,500,319 -> 26,500,487 (+0.001 %) | 30,700,298 -> 30,700,470 (+0.001 %) |
+
+The ~170 instructions are each target's first call through the miss path, once per run. The macro's install
+returns the function it was given, so the miss and the hit still end in one shared call. A first version that
+called the install and then the target had the hit path jump over it: +1 instruction per call, +2.2 % on `w_icall`
+(x86-64).
+
+**Every generated pack is stale**: titles must be prepared again. A pack generated before XBA-304 never registers its
+table: it runs as before, writes no dump, and its recall stays unknown. The generated dispatch and `recomp_types.h`
+change together, since the macros call `recomp_icall_install`, which the generated dispatch defines. Memory: the
+hit table doubles the flat table's virtual size (8 bytes per byte of code span); pages are committed only where
+targets are reached. Windows hosts (no weak symbols in the generated code) record nothing.
 
 Each run keeps the status file's `apu_dsp` object (what the title asked of the APU's DSPs, XBA-122:
 [APU DSP](apu-dsp.md)); once one title has it, `report` gets a DSP column (« GP image 9cd378fc (1500 words), 13 cmds,

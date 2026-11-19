@@ -26,7 +26,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tools.recomp.disasm import Instruction, Operand  # noqa: E402
-from tools.recomp.icall_feedback import parse_sites_dump  # noqa: E402
+from tools.recomp.icall_feedback import parse_dump, parse_sites_dump  # noqa: E402
 from tools.recomp.lifter import Lifter  # noqa: E402
 from tools.recomp.translator import _fixup_icall_esp_save  # noqa: E402
 
@@ -55,6 +55,12 @@ def _macro(name):
                 out.append(lines[i])
             return "\n".join(out)
     raise AssertionError(f"{name} not defined in {HEADER}")
+
+
+def install_stub():
+    """RECOMP_ICALL_INSTALL_ (XBA-304) and an empty recomp_icall_install, for a harness with no generated dispatch."""
+    return (_macro("RECOMP_ICALL_INSTALL_") +
+            "\nstatic recomp_func_t recomp_icall_install(uint32_t va, recomp_func_t fn) { (void)va; return fn; }\n")
 
 
 def _lifted_site():
@@ -187,7 +193,8 @@ def test_guarded_site_matches_generic_dispatch_for_every_target():
         pytest.skip("no C compiler on PATH")
     src = (HARNESS.replace("IS_CODE", _macro("RECOMP_ICALL_IS_CODE"))
                   # the dispatch the macros share (XBA-277), after IS_CODE: it names it
-                  .replace("SAFE_AT", _macro("RECOMP_ICALL_HIT_") + "\n" + _macro("RECOMP_ICALL_DISPATCH_") +
+                  .replace("SAFE_AT", _macro("RECOMP_ICALL_HIT_") + "\n" + install_stub() +
+                           _macro("RECOMP_ICALL_DISPATCH_") +
                            "\n" + _macro("RECOMP_ICALL_SAFE_AT"))
                   .replace("LIFTED", _lifted_site()))
     with tempfile.TemporaryDirectory() as tmp:
@@ -235,3 +242,63 @@ def test_runtime_site_dump_round_trips_through_the_merge_parser():
         targets, saturated = sites[0x000100C0]
         assert saturated and len(targets) < 9
         assert len(sites) == 3
+
+
+# Every build's hits (XBA-304): the table the generated dispatch registers, dumped beside the discovery file,
+# merged over runs, nothing written for a table nothing reached.
+HITS = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include "recomp_icall_feedback.h"
+static void f(void) {}
+static recomp_icall_func_t table[0x100];
+int main(int argc, char **argv) {
+    (void)argc;
+    recomp_icall_hits_register(table, 0x00011000u, 0x100);
+    if (argv[1][0] == 'e')                        /* nothing reached */
+        return recomp_icall_hits_dump() == -1 ? 0 : 1;
+    table[0] = f;
+    table[argv[1][0] == '2' ? 0x20 : 0x10] = f;
+    printf("%d\n", recomp_icall_hits_dump());
+    return 0;
+}
+"""
+
+
+def test_hits_dump_beside_the_discovery_file_and_merged_over_runs():
+    if not _cc():
+        pytest.skip("no C compiler on PATH")
+    from tools.compat import recall
+    from tools.recomp.c_fixture import command
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, "hits.c")
+        with open(p, "w") as f:
+            f.write(HITS)
+        exe = os.path.join(tmp, "hits.exe")
+        r = subprocess.run(command(_cc(), [p, FEEDBACK_C], exe, include_dirs=[FEEDBACK_H_DIR]),
+                           cwd=tmp, capture_output=True, text=True)
+        assert r.returncode == 0, (r.stdout + r.stderr)[-3000:]
+        work = os.path.join(tmp, "work")
+        os.makedirs(work)
+        env = {k: v for k, v in os.environ.items() if k != "RECOMP_ICALL_DUMP"}
+        env["RECOMP_DISCOVERY"] = os.path.join(work, "discovered.jsonl")
+        dump = os.path.join(work, recall.DUMP_NAME)
+
+        def run(arg, **extra):
+            return subprocess.run([exe, arg], capture_output=True, text=True, cwd=tmp, env=dict(env, **extra))
+        assert run("e").returncode == 0 and not os.path.exists(dump), "nothing reached: no file"
+        r = run("1")
+        assert r.returncode == 0 and r.stdout.strip() == "2", r.stdout + r.stderr
+        assert parse_dump(dump) == {0x00011000: 1, 0x00011010: 1}
+        r = run("2")                                  # a second run: its targets added to the first's
+        assert r.stdout.strip() == "3", r.stdout + r.stderr
+        assert parse_dump(dump) == {0x00011000: 1, 0x00011010: 1, 0x00011020: 1}
+        assert open(dump).read().startswith("# icall-feedback v1\n")
+        assert not os.path.exists(dump + ".tmp")
+        assert run("1", RECOMP_ICALL_DUMP="0").stdout.strip() == "-1"      # off
+        other = os.path.join(tmp, "elsewhere.dump")
+        r = run("1", RECOMP_ICALL_DUMP=other)                              # another path
+        assert r.stdout.strip() == "2" and parse_dump(other) == {0x00011000: 1, 0x00011010: 1}
+        env.pop("RECOMP_DISCOVERY")                                        # no discovery file: nowhere
+        assert run("1").stdout.strip() == "-1"

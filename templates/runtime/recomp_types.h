@@ -2404,8 +2404,17 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
     recomp_func_t _hit = RECOMP_FLAT_LOOKUP(_va); \
     if (RECOMP_LIKELY(_hit != 0)) { RECOMP_ABI_CALL(_va, _hit); break; } \
 }
+/* Hits recorded in every build (XBA-304): the window starts empty and a
+ * target the miss path resolved goes into it here (the generated
+ * recomp_dispatch.c: only a translated function, as the slow path answered
+ * it), so the slots filled are the targets the run reached that the
+ * analysis found, and a hit pays nothing. RECOMP_ICALL_RECORD=0: the whole
+ * table is the window again and this does nothing. */
+void (*recomp_icall_install(uint32_t xbox_va, void (*fn)(void)))(void);   /* returns fn */
+#define RECOMP_ICALL_INSTALL_(_va, _fn) recomp_icall_install((_va), (_fn))
 #else
 #define RECOMP_ICALL_HIT_(_va) /* every call is recorded */
+#define RECOMP_ICALL_INSTALL_(_va, _fn) (_fn)
 #endif
 
 #define RECOMP_ICALL_DISPATCH_(xbox_va, trace_stmt, site_stmt, fail_stmt) \
@@ -2422,6 +2431,7 @@ int xbox_GuestPollWait(volatile uint32_t *word, uint32_t mask, int while_set,
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_kernel(_va); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
+               _fn = RECOMP_ICALL_INSTALL_(_va, _fn); \
                RECOMP_ABI_CALL(_va, _fn); } \
     else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
            recomp_icall_fail_log(_va); fail_stmt; }

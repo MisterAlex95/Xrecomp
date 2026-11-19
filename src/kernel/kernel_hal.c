@@ -17,6 +17,7 @@
 #include "xbox_seh.h"            /* recomp_divide_error raises #DE (XBA-112) */
 #include "kernel_park.h"          /* hlt is a park point (XBA-251) */
 #include "recomp_discovery.h"     /* an unhandled #DE is recorded (XBA-129) */
+#include "recomp_icall_feedback.h" /* the targets reached, dumped at a bug check (XBA-304) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1519,6 +1520,7 @@ void xbox_BugCheckStop(int ex, uint32_t caller, ULONG BugCheckCode,
     /* ExitProcess skips atexit. Guest code calls this, never from inside
      * the report's lock, so the summary's list write may take it. */
     xbox_missing_summary("bugcheck");
+    recomp_icall_hits_dump();          /* the targets reached, for tools.compat recall (XBA-304) */
     recomp_discovery_flush();
 
     if (caller)

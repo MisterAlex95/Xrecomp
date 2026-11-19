@@ -177,6 +177,7 @@ def _macro(name, nth=0):
 def _new_macros(feedback):
     # RECOMP_ICALL_HIT_ has two definitions: without and with RECOMP_ICALL_FEEDBACK.
     hit = _macro("RECOMP_ICALL_HIT_", 1 if feedback else 0)
+    hit += "\n" + _macro("RECOMP_ICALL_INSTALL_", 1 if feedback else 0)   # XBA-304
     names = ("RECOMP_LIKELY", "RECOMP_ICALL_IS_CODE", "RECOMP_FLAT_LOOKUP", "RECOMP_ICALL_TRACE_NOTE",
              "RECOMP_ICALL_DISPATCH_", "RECOMP_ICALL", "RECOMP_ICALL_SAFE",
              "RECOMP_ICALL_SAFE_CC", "RECOMP_ICALL_SAFE_AT", "RECOMP_ICALL_SAFE_AT_CC", "RECOMP_ITAIL_RET")
@@ -200,6 +201,7 @@ uint32_t g_esp, g_eax;
 typedef struct recomp_flat_dispatch { void (**table)(void); uint32_t base, span, trace; } recomp_flat_dispatch_t;
 extern recomp_flat_dispatch_t g_recomp_flat;
 recomp_func_t recomp_lookup(uint32_t);
+recomp_func_t recomp_icall_install(uint32_t, recomp_func_t);   /* the generated dispatch's (XBA-304) */
 int recomp_dispatch_init(void);
 
 static char logbuf[4096];
@@ -343,18 +345,44 @@ int recomp_dispatch_init(void);
 uint32_t g_xbox_code_lo, g_xbox_code_hi;
 void f_a(void) {} void f_b(void) {} void f_c(void) {} void f_d(void) {}
 recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return 0; }
+recomp_func_t recomp_icall_install(uint32_t xbox_va, recomp_func_t fn);
+/* What the runtime would dump (recomp_icall_hits_register, weak in the generated code). */
+static recomp_func_t const *s_hits; static uint32_t s_hits_base, s_hits_span;
+void recomp_icall_hits_register(recomp_func_t const *t, uint32_t base, uint32_t span) {
+    s_hits = t; s_hits_base = base; s_hits_span = span;
+}
+static int rec;   /* RECOMP_ICALL_RECORD on: the window starts empty */
 static int window(uint32_t lo, uint32_t hi, uint32_t base, uint32_t span, recomp_func_t first) {
     g_xbox_code_lo = lo; g_xbox_code_hi = hi;
     recomp_dispatch_init();
     if (g_recomp_flat.span != span ||
-            (span && (g_recomp_flat.base != base || g_recomp_flat.table[0] != first))) {
+            (span && (g_recomp_flat.base != base || g_recomp_flat.table[0] != (rec ? (base == 0x11000 ? f_a : 0) : first)))) {
         printf("FAIL [%X,%X): base %X span %X\n", lo, hi, g_recomp_flat.base, g_recomp_flat.span);
         return 1;
     }
     return 0;
 }
-int main(void) {
+/* XBA-304: a resolved target fills its slot (a translated function only), the slot stays across inits, and the
+ * table handed to the runtime holds it. */
+static int record(void) {
     int bad = 0;
+    g_xbox_code_lo = 0x10000; g_xbox_code_hi = 0x30000;
+    recomp_dispatch_init();
+    if (!s_hits || s_hits_base != 0x11000 || s_hits_span != 0xF3FD) { printf("FAIL: not registered\n"); return 1; }
+    recomp_icall_install(0x11000, f_a);
+    recomp_icall_install(0x11008, f_c);          /* no translation there: not installed */
+    recomp_icall_install(0x40000, f_c);          /* outside the table */
+    bad |= g_recomp_flat.table[0] != f_a || g_recomp_flat.table[8] != 0 || s_hits[0] != f_a;
+    g_xbox_code_lo = 0x11000; g_xbox_code_hi = 0x20000;
+    recomp_dispatch_init();                      /* the window moves: the slot stays */
+    bad |= g_recomp_flat.table[0] != f_a || g_recomp_flat.table[4] != 0;
+    if (bad) printf("FAIL: install\n");
+    return bad;
+}
+int main(int argc, char **argv) {
+    int bad = 0;
+    rec = argc > 1 && argv[1][0] == '1';
+    if (rec && record()) return 1;
     bad |= window(0, 0, 0, 0, 0);                                  /* range not set */
     bad |= window(0x10000, 0x30000, 0x11000, 0xF3FD, f_a);         /* all of it */
     bad |= window(0x12000, 0x20000, 0x12000, 0xE000, f_c);         /* moved: computed anew */
@@ -383,5 +411,9 @@ def test_window_is_the_code_range_part_of_the_table():
         r = subprocess.run(command(cc, [src, disp], exe, include_dirs=[tmp]), cwd=tmp,
                            capture_output=True, text=True)
         assert r.returncode == 0, (r.stdout + r.stderr)[-3000:]
-        r = subprocess.run([exe], capture_output=True, text=True, env=_env())
-        assert r.returncode == 0 and r.stdout.startswith("OK"), r.stdout + r.stderr
+        # RECOMP_ICALL_RECORD=0: the whole table published, as before XBA-304; on (the default): the same window
+        # over an empty table that the miss path fills.
+        for mode, rec in (("0", "0"), ("1", "")):
+            env = dict(_env(), RECOMP_ICALL_RECORD=rec)
+            r = subprocess.run([exe, mode], capture_output=True, text=True, env=env)
+            assert r.returncode == 0 and r.stdout.startswith("OK"), (mode, r.stdout + r.stderr)

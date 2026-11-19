@@ -2264,6 +2264,7 @@ static void bridge_HalReturnToFirmware(void)
      * boot is exactly the one whose targets are worth having. No-op unless
      * RECOMP_ICALL_FEEDBACK is on. */
     RECOMP_ICALL_FEEDBACK_DUMP();
+    recomp_icall_hits_dump();          /* every build's: the targets the analysis found (XBA-304) */
 
     /* The missing-file summary, for the same reason. On POSIX ExitProcess is
      * exit() and atexit runs after all; the summary prints once either way. */
