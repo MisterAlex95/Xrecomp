@@ -142,7 +142,7 @@ void x360_image_info(const x360_machine *x, uint32_t *base, uint32_t *entry, uin
  * x360_run returned), loaded into a machine made from the same XEX with the same pack bound. key: the title key
  * (NULL: the image's CRC). Results: */
 /* version 2: the 0xE0000000 view starts one page into physical memory (a pointer into it in an older state would name
- * the wrong page, so older states are refused) */
+ * the wrong page, so older states are refused); the GPU section holds the indirect buffers a wait stopped */
 #define X360_STATE_VERSION 2
 enum { X360_STATE_OK = 0, X360_STATE_EGAME = -3, X360_STATE_EVERSION = -4, X360_STATE_ECORRUPT = -7 };
 size_t x360_state_size(x360_machine *x);

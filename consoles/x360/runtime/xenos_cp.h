@@ -59,6 +59,12 @@ typedef struct xenos_shader {
     uint32_t words, address, loads;
 } xenos_shader;
 
+/* an indirect buffer being run: physical address, length and position in dwords, dwords done */
+#define XENOS_IB_DEPTH 4
+typedef struct xenos_ib {
+    uint32_t base, len, pos, done;
+} xenos_ib;
+
 typedef struct xenos_cp {
     uint32_t regs[XENOS_REGS];
     /* the primary ring buffer: physical address, size in bytes, read / write pointers in dwords */
@@ -66,6 +72,8 @@ typedef struct xenos_cp {
     uint32_t rptr_writeback; /* physical address the read pointer is written back to (0: none) */
     uint32_t counter;        /* CP_PROG_COUNTER-like event counter */
     int stalled;             /* a WAIT_REG_MEM did not hold: the ring stops there until the next update */
+    xenos_ib ib[XENOS_IB_DEPTH]; /* the indirect buffers that wait stopped, outermost first: resumed before the ring */
+    uint32_t ib_depth;
     uint32_t last_swap_fb, last_swap_w, last_swap_h;
     xenos_draw last_draw;
     xenos_shader shader[2]; /* the active vertex (0) and pixel (1) shader microcode, as last loaded */

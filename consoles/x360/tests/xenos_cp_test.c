@@ -1,8 +1,9 @@
 /* xenos_cp_test -- the PM4 command processor on hand-built packets (XBA-270). Expected values follow the packet
  * definitions (Xenia's xenos.h / command_processor.cc, BSD): register blocks, constants, read-modify-write, memory
  * writes and their endian modes, event fences, conditional writes, draw initiators, indirect buffers, interrupts,
- * the swap token, scratch register write-back; on the ring: a wait that stalls then resumes, a packet across the end of the ring, a packet the
- * CPU has not finished writing, the read pointer written back. */
+ * the swap token, scratch register write-back; on the ring: a wait that stalls then resumes, also inside nested
+ * indirect buffers, a packet across the end of the ring, a packet the CPU has not finished writing, the read pointer
+ * written back. */
 #include <stdio.h>
 #include <string.h>
 
@@ -160,6 +161,56 @@ int main(void)
     put(R, 0xB), put(R, 0xC);
     xenos_cp_set_wptr(&cp, at);
     CHECK(cp.rptr == at && cp.regs[0x2502] == 0xC, "then runs");
+    /* a wait inside an indirect buffer stops the command processor there, nested or not: what came before it ran
+     * once, what follows (in the buffers, then in the ring) runs when the wait holds. Buffer 0xD000 draws, calls
+     * 0xD100 (a wait on memory 0xC100, then a register) and writes a register; 0xD200 is nothing but a call. */
+    uint32_t w0 = at, draws0 = (uint32_t)cp.draws;
+    put(R, t3(PM4_INDIRECT_BUFFER, 2)), put(R, 0xD000), put(R, 8);
+    put(R, t0(0x2702, 1, 0)), put(R, 0x73);
+    put(R, t3(PM4_INDIRECT_BUFFER, 2)), put(R, 0xD200), put(R, 3);
+    put(R, t0(0x2705, 1, 0)), put(R, 0x76);
+    uint32_t w1 = at;
+    at = 0;
+    put(0xD000, t3(PM4_DRAW_INDX_2, 1)), put(0xD000, 8 | 2u << 6 | 3u << 16);
+    put(0xD000, t3(PM4_INDIRECT_BUFFER, 2)), put(0xD000, 0xD100), put(0xD000, 10);
+    put(0xD000, t0(0x2701, 1, 0)), put(0xD000, 0x72);
+    at = 0;
+    put(0xD100, t0(0x2703, 1, 0)), put(0xD100, 0x74);
+    put(0xD100, t3(PM4_WAIT_REG_MEM, 5)), put(0xD100, 0x13), put(0xD100, 0xC100 | 2), put(0xD100, 1),
+        put(0xD100, 0xFFFFFFFFu), put(0xD100, 0x10);
+    put(0xD100, t0(0x2700, 1, 0)), put(0xD100, 0x71);
+    at = 0;
+    put(0xD200, t3(PM4_INDIRECT_BUFFER, 2)), put(0xD200, 0xD100), put(0xD200, 10);
+    mem[0xC100 / 4] = 0;
+    cp.regs[0x2703] = 0;
+    xenos_cp_set_wptr(&cp, w1);
+    CHECK(cp.stalled && cp.draws == draws0 + 1 && cp.regs[0x2703] == 0x74, "stopped inside the nested buffer");
+    CHECK(cp.regs[0x2700] == 0 && cp.regs[0x2701] == 0 && cp.regs[0x2702] == 0, "nothing after the wait has run");
+    xenos_cp_set_wptr(&cp, w1); /* polled again while it does not hold */
+    CHECK(cp.stalled && cp.draws == draws0 + 1 && cp.regs[0x2700] == 0, "still stopped, nothing run twice");
+    mem[0xC100 / 4] = 1;
+    cp.regs[0x2703] = 0;
+    xenos_cp_set_wptr(&cp, w1);
+    CHECK(!cp.stalled && cp.draws == draws0 + 1, "resumed: the draw before the wait is not repeated");
+    CHECK(cp.regs[0x2700] == 0x71 && cp.regs[0x2701] == 0x72 && cp.regs[0x2702] == 0x73,
+          "the rest of both buffers, then the ring: %X %X %X", cp.regs[0x2700], cp.regs[0x2701], cp.regs[0x2702]);
+    CHECK(cp.regs[0x2703] == 0x74 && cp.regs[0x2705] == 0x76 && cp.rptr == w1 && mem[0xF000 / 4] == w1,
+          "the second call ran the buffer from its start, the ring to its end: rptr %u", cp.rptr);
+    /* stopped in a buffer that is all of its caller: resumed once, the caller not run again */
+    mem[0xC100 / 4] = 0;
+    cp.regs[0x2700] = cp.regs[0x2703] = 0;
+    at = w1;
+    put(R, t3(PM4_INDIRECT_BUFFER, 2)), put(R, 0xD200), put(R, 3);
+    put(R, t0(0x2706, 1, 0)), put(R, 0x77);
+    xenos_cp_set_wptr(&cp, at);
+    CHECK(cp.stalled && cp.regs[0x2703] == 0x74 && cp.regs[0x2706] == 0, "stopped again");
+    mem[0xC100 / 4] = 1;
+    cp.regs[0x2703] = 0;
+    xenos_cp_set_wptr(&cp, at);
+    CHECK(!cp.stalled && cp.regs[0x2700] == 0x71 && cp.regs[0x2703] == 0 && cp.regs[0x2706] == 0x77 && cp.rptr == at,
+          "resumed after the wait only: %X %X %X", cp.regs[0x2700], cp.regs[0x2703], cp.regs[0x2706]);
+    (void)w0;
+
     /* across the end of the ring */
     cp.rptr = 2046;
     mem[R / 4 + 2046] = t0(0x2600, 2, 0);

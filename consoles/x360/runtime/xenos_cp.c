@@ -33,6 +33,7 @@ void xenos_cp_ring_init(xenos_cp *cp, uint32_t base_phys, uint32_t size_log2)
     cp->rb_size = 1u << (size_log2 + 3); /* bytes (Xenia: 1 << (size_log2 + 3)) */
     cp->rptr = cp->wptr = 0;
     cp->stalled = 0;
+    cp->ib_depth = 0;
 }
 
 const char *xenos_cp_opcode_name(uint32_t op)
@@ -201,7 +202,32 @@ static void draw(xenos_cp *cp, reader *r, uint32_t words, const char *name)
         TRACE(" (%s, base %08X, %u words)\n", d.index_size ? "32-bit" : "16-bit", d.dma_base, d.dma_words);
 }
 
-/* run one packet; returns 0, or 1 when it must be retried later (an unmet wait, only for rings) */
+static int packet(xenos_cp *cp, reader *r, int in_ring, int depth);
+
+/* run the indirect buffer at nesting level d from where it stands; returns 1 when a wait in it (or in a buffer it
+ * calls) does not hold: its position is kept in cp->ib and xenos_cp_set_wptr goes on from there */
+static int run_ib(xenos_cp *cp, int d, int in_ring)
+{
+    xenos_ib *ib = &cp->ib[d];
+    reader r = {ib->base, ib->len, ib->pos};
+    while (ib->done < ib->len) {
+        uint32_t before = r.pos;
+        int stall = packet(cp, &r, in_ring, d + 1);
+        uint32_t step = (r.pos + ib->len - before) % ib->len;
+        if (stall && !step && cp->ib_depth > (uint32_t)d + 1)
+            step = ib->len; /* a nested buffer stalled: its packet (all of this buffer) is behind us */
+        ib->done += step;
+        ib->pos = r.pos;
+        if (stall)
+            return 1;
+        if (!step)
+            break;
+    }
+    return 0;
+}
+
+/* run one packet; returns 0, or 1 when the command processor must stop here (an unmet wait under the ring: the
+ * wait itself is retried, an indirect buffer that stalled is resumed from cp->ib) */
 static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
 {
     uint32_t start = r->pos;
@@ -233,17 +259,14 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
     case PM4_INDIRECT_BUFFER_PFD: {
         uint32_t ptr = rd(cp, r) & 0x1FFFFFFFu, len = rd(cp, r) & 0xFFFFF;
         TRACE("indirect buffer %08X, %u words\n", ptr, len);
-        if (depth < 4 && len) {
-            reader ib = {ptr, len, 0};
-            uint32_t n = 0;
-            while (n < len) {
-                uint32_t before = ib.pos;
-                packet(cp, &ib, 0, depth + 1);
-                uint32_t step = (ib.pos + len - before) % len;
-                if (!step)
-                    break;
-                n += step;
+        if (depth < XENOS_IB_DEPTH && len) {
+            cp->ib[depth] = (xenos_ib){ptr, len, 0, 0};
+            cp->ib_depth = depth + 1;
+            if (run_ib(cp, depth, in_ring)) {
+                r->pos = end; /* this packet is done with: the buffer it started goes on from cp->ib */
+                return 1;
             }
+            cp->ib_depth = depth;
         }
         break;
     }
@@ -253,10 +276,12 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
         uint32_t v = info & 0x10 ? mem_read(cp, addr) : addr < XENOS_REGS ? cp->regs[addr] : 0;
         int ok = compare(info, v & mask, ref);
         TRACE("wait %s %08X & %08X vs %08X: %s\n", info & 0x10 ? "memory" : "register", addr, mask, ref,
-              ok ? "met" : in_ring ? "stall" : "not met (indirect buffer: passed)");
+              ok ? "met" : in_ring ? "stall" : "not met (not under the ring: passed)");
         if (!ok && in_ring) {
             r->pos = start;
             cp->stalled = 1;
+            cp->packets--; /* retried: counted when it holds */
+            cp->op_count[op]--;
             return 1;
         }
         break;
@@ -453,7 +478,12 @@ uint32_t xenos_cp_set_wptr(xenos_cp *cp, uint32_t wptr)
     cp->wptr = wptr % size_dw;
     cp->stalled = 0;
     reader r = {cp->rb_base, size_dw, cp->rptr};
-    while (r.pos != cp->wptr) {
+    /* indirect buffers a wait stopped: the innermost first, then those that called it */
+    while (cp->ib_depth && !cp->stalled) {
+        if (!run_ib(cp, (int)cp->ib_depth - 1, 1))
+            cp->ib_depth--;
+    }
+    while (!cp->stalled && r.pos != cp->wptr) {
         uint32_t avail = (cp->wptr + size_dw - r.pos) % size_dw;
         if (packet_words(cp, &r) > avail)
             break; /* the CPU has not written the whole packet yet */

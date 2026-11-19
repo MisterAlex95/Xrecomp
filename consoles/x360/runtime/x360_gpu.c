@@ -320,6 +320,17 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
     u32(s, &cp->rptr_writeback);
     u32(s, &cp->counter);
     i32(s, &cp->stalled);
+    u32(s, &cp->ib_depth);
+    if (cp->ib_depth > XENOS_IB_DEPTH)
+        cp->ib_depth = 0;
+    for (uint32_t k = 0; k < XENOS_IB_DEPTH; k++) {
+        u32(s, &cp->ib[k].base);
+        u32(s, &cp->ib[k].len);
+        u32(s, &cp->ib[k].pos);
+        u32(s, &cp->ib[k].done);
+        if (!cp->ib[k].len && k < cp->ib_depth)
+            cp->ib_depth = 0; /* a corrupt state must not divide by zero */
+    }
     u32(s, &cp->last_swap_fb);
     u32(s, &cp->last_swap_w);
     u32(s, &cp->last_swap_h);
