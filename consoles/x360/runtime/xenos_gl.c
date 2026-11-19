@@ -1449,11 +1449,11 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
                 g->st.msaa_surfaces--;
                 surface_ms_alloc(g, s);
             }
+            /* every attachment of the draw FBO was taken off above, not only this surface's: all are attached again
+             * by the next bind (a depth buffer left believed attached would be missing from then on) */
             for (int k = 0; k < 4; k++)
-                if (g->cur[k] == i)
-                    g->cur[k] = -2; /* attached again */
-            if (g->cur_ds == i)
-                g->cur_ds = -2;
+                g->cur[k] = -2;
+            g->cur_ds = -2;
             return i;
         }
         int bound = 0;

@@ -1641,6 +1641,39 @@ int main(int argc, char **argv)
         run(&cp);
     }
 
+    /* a colour target that grows keeps its depth buffer: a green quad at z 0.25 fills a 64-row depth buffer through
+     * one colour target, then a second colour target is drawn 32 rows tall with that depth buffer, then 64 rows tall
+     * (it grows; the depth buffer does not): a red quad at z 0.75 with the test "less" must not show */
+    {
+        vertex_z(0x41700, -1, -1, 0.25f, 0, 1, 0), vertex_z(0x41720, 1, -1, 0.25f, 0, 1, 0);
+        vertex_z(0x41740, -1, 1, 0.25f, 0, 1, 0), vertex_z(0x41760, 1, 1, 0.25f, 0, 1, 0);
+        vertex_z(0x41780, -1, -1, 0.75f, 1, 0, 0), vertex_z(0x417A0, 1, -1, 0.75f, 1, 0, 0);
+        vertex_z(0x417C0, -1, 1, 0.75f, 1, 0, 0), vertex_z(0x417E0, 1, 1, 0.75f, 1, 0, 0);
+        for (uint32_t i = 0; i < 4; i++)
+            reg(0x4400 + i, fbits(1.0f));
+        reg(0x2000, 64u), reg(0x2002, 0x7A0u);
+        reg(0x2200, 2u | 4u | 1u << 4); /* z test, z write, less */
+        reg(0x4801, 2u | (64u << 2));
+        reg(0x2001, 0x660u), reg(0x2082, 64u | 64u << 16);
+        reg(0x4800, 0x41700u | 3u);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1); /* depth 0.25 everywhere */
+        reg(0x2001, 0x640u), reg(0x2082, 64u | 32u << 16);
+        reg(0x2200, 2u | 4u | 3u << 4);      /* less or equal: the same quad again passes */
+        type3(PM4_DRAW_INDX_2, &strip_a, 1); /* the second target, 32 rows, green */
+        reg(0x2200, 2u | 4u | 1u << 4);
+        reg(0x2082, 64u | 64u << 16);
+        reg(0x4800, 0x41780u | 3u);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1); /* it grows; red behind what the depth buffer holds */
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        const uint8_t *cg = px(g, W / 2, 8), *ch = px(g, W / 2, H - 8);
+        CHECK(cg[0] == 0 && cg[1] == 255 && ch[0] == 0 && ch[1] == 0,
+              "depth kept when the colour target grows: %u,%u,%u (want green) / %u,%u,%u (want black)", cg[0], cg[1],
+              cg[2], ch[0], ch[1], ch[2]);
+        reg(0x2200, 0), reg(0x2082, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2000, 0);
+        run(&cp);
+    }
+
     /* a texture whose fetch constant starts at mip level 1 (a streamed texture: the mips are loaded, the base is not,
      * and the base address names the mip address again): a linear 32x32 8_8_8_8 texture, level 1 (16x16, green) at
      * the mip address; magnified, the sampler would take level 0, and reads level 1 */
