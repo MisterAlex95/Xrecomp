@@ -34,7 +34,11 @@
  *
  * Threading: every call arrives on the executor thread (nv2a_backend.h).
  * The GL context is created there, headless (nv2a_gl_context.c), on the
- * first call and stays current on that thread; no other thread touches GL.
+ * first call and stays current on that thread. The one other thread that
+ * touches GL is the shader worker (XBA-310, "programs compiled off the draw
+ * path" below): a context of its own in the same share group, which only
+ * compiles and links programs (and stores their binaries) and hands them
+ * over through the job table; everything else stays on the executor.
  * The SDL presenter keeps its own renderer on the main thread and is fed
  * exactly as with the CPU rasteriser -- through guest memory, after the
  * present hook below (gl_present) has read the frame back -- or, with host
@@ -71,6 +75,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <pthread.h>
+#include <unistd.h>                 /* truncate */
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -515,6 +521,7 @@ static void sh_stencil_mask(GLuint m)
 /* ---- set-up ------------------------------------------------------------- */
 
 static void unregister_self(void);
+static void job_init(void);
 static void pc_init(void);
 static void sig_init(void);
 
@@ -704,6 +711,7 @@ static int ensure_init(void)
                                                  + (size_t)t * 4 * sizeof(float)));
         }
     }
+    job_init();                     /* before pc_init: the list's warm-up depends on it */
     pc_init();
     sig_init();
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
@@ -2641,6 +2649,8 @@ typedef struct {
     GLint *cloc;
     uint64_t const_synced;
     uint64_t src_hash;              /* the program binary cache's key */
+    int pending;                    /* compiling off the draw path (XBA-310): prog 0 until done */
+    int job;                        /* then its job, index + 1 */
 } GlProg;
 
 /* A translated vertex program (nv2a_gl_vsh.c): its GLSL, kept so that the
@@ -2674,6 +2684,8 @@ static uint32_t s_prog_drops, s_vsh_drops;   /* for the tests */
  * is on; a dropped vertex shader is translated again. Neither is called
  * between a lookup and its use: gl_draw and gl_draw_program take the
  * vertex shader first, then the program, and use both at once. */
+static void job_disown_all(void);
+
 static void prog_drop_all(void)
 {
     uint32_t i;
@@ -2692,6 +2704,7 @@ static void prog_drop_all(void)
     memset(s_prog, 0, sizeof s_prog);
     s_nprog = 0;
     s_prog_drops++;
+    job_disown_all();               /* compiles in flight go to the warm table when done */
 }
 
 /* The programs keep their vertex shader's hash (it is computed from the
@@ -2811,6 +2824,11 @@ static int s_nwarm;
 static uint32_t s_pc_total_compiled, s_pc_total_loaded;
 
 extern const char *xbox_path_save_dir_utf8(void);
+static void pl_load(void);
+static void pl_warm(void);
+static void pl_flush(void);
+static int s_async;                 /* how programs compile (XBA-310): NV_ASYNC_* below */
+static uint32_t s_wait_max_us, s_wait_left_us;
 
 static void mkdir_p(char *path)
 {
@@ -2893,6 +2911,7 @@ static void pc_init(void)
     host_shader_progress_expect((uint32_t)s_pc_nlist);
     fprintf(stderr, "  [GPUGL] program binary cache %s: %d binaries, warm-up %d a frame\n",
             s_pc_dir, s_pc_nlist, NV_GL_PCACHE_WARM);
+    pl_load();                      /* the program list: what has no binary, compiled ahead */
 }
 
 /* The program in file `h`, linked from its binary; 0 when there is no file
@@ -2992,15 +3011,13 @@ static GLuint pc_take(uint64_t h)
 {
     int i;
 
-    if (!s_pc_on)
-        return 0;
     for (i = 0; i < s_nwarm; i++)
         if (s_warm[i].hash == h) {
             GLuint prog = s_warm[i].prog;
             s_warm[i] = s_warm[--s_nwarm];
             return prog;
         }
-    return pc_load(h);
+    return s_pc_on ? pc_load(h) : 0;
 }
 
 /* Warm-up, at the flip: the next few files found at start-up. */
@@ -3035,6 +3052,12 @@ static void pc_warm(void)
         s_pc_list = NULL;
         s_pc_nlist = s_pc_next = 0;
     }
+    /* XBA-310: a new frame's wait budget, the program list's new records
+     * written, compiles nobody waits for collected, the list's next queued. */
+    s_wait_left_us = s_wait_max_us * 2u;
+    pl_flush();
+    if (s_async)
+        pl_warm();
 }
 
 /* Uniform locations and sampler units of a linked program (a program
@@ -3115,6 +3138,838 @@ static int prog_link(GlProg *p, const char *fs_body, GlVsh *vsh)
     return 1;
 }
 
+/* ---- programs compiled off the draw path (XBA-310) --------------------- */
+
+/* A program a draw needs for the first time used to be compiled and linked
+ * there and then (prog_link), on the executor thread, mid-frame: tens of
+ * milliseconds a program on a mobile driver, every first run and after
+ * every driver update (the binary cache above only helps from the second).
+ * Now the draw starts a compile job and waits a little for it:
+ *
+ *   worker   a thread with a context of its own in the back end's share
+ *            group (nv2a_gl_shared_context_*) compiles and links the job's
+ *            GLSL, stores the binary (pc_store) and hands the linked
+ *            program back; the default where the context can be had
+ *   khr      GL_KHR_parallel_shader_compile (or ARB): the job's compile and
+ *            link are issued on the executor and polled for completion
+ *            (GL_COMPLETION_STATUS_KHR); where there is no shared context
+ *   sync     neither (macOS 4.1 core), or RECOMP_GPU_ASYNC_SHADERS=0: at
+ *            the draw, as before
+ * RECOMP_GPU_ASYNC_SHADERS=khr forces khr (tests).
+ *
+ * While a program is not ready its batches wait a short bounded time, then
+ * are skipped: a draw that finds its program compiling waits up to
+ * RECOMP_GPU_SHADER_WAIT_MS (default 4 ms) for it, at most twice that over
+ * a frame; past that the batch is drawn with a stand-in program that
+ * produces no fragment (s_standin: every vertex at one point outside the clip
+ * volume, the fragment shader discards), so the caller's work and its GL
+ * state stay as they are and nothing reaches the target. The cost: an
+ * object can be missing from the first frame or two it appears in, rather
+ * than the frame stalling for the whole compile; a target the title draws
+ * once and keeps (a cached render target, a loading screen) keeps the hole
+ * until it is drawn again. Occlusion queries around a skipped batch count
+ * no sample. A large RECOMP_GPU_SHADER_WAIT_MS (the GL tests) waits for
+ * every program.
+ *
+ * The program list (programs.list next to the binaries): the GLSL of every
+ * program linked, written as they appear (the vertex shaders once each),
+ * kept whatever the driver: a run whose binaries are gone or of another
+ * driver (a driver update, the first run after the app's data was cleared
+ * but not the save dir) compiles them ahead from it during the first
+ * frames, a few in flight at a time, with a known total for the window's
+ * badge (host_shader_progress.h). Format: "NV2AGLPL", version, GLES flag,
+ * generator version (NV_GL_PCACHE_VERSION), then records 'V' <vertex hash>
+ * <length> <body> and 'P' <vertex hash, 0 for the fixed one> <length>
+ * <fragment body>, native byte order (the file stays on its device). A file
+ * of another version, GL flavour or generator is replaced; a broken record
+ * at the end (a run killed while appending) is cut off. At most
+ * NV_GL_PLIST_MAX programs (what the warm table holds). */
+#ifndef GL_COMPLETION_STATUS_KHR
+#define GL_COMPLETION_STATUS_KHR 0x91B1
+#endif
+#define NV_GL_MAX_JOBS     256      /* compiles in flight or done and not taken */
+#define NV_GL_AHEAD_WORKER 4        /* list programs queued ahead at a time: worker */
+#define NV_GL_AHEAD_KHR    2        /* ... and with KHR_parallel_shader_compile */
+#define NV_GL_PLIST_VERSION 1
+#define NV_GL_PLIST_MAX    NV_GL_MAX_WARM
+#define NV_GL_PLIST_BODY   (256u << 10)  /* a longer record is not read */
+
+enum { NV_ASYNC_SYNC, NV_ASYNC_WORKER, NV_ASYNC_KHR };
+enum { JOB_FREE, JOB_QUEUED, JOB_COMPILING, JOB_READY, JOB_FAILED };
+
+typedef struct {
+    int state;                      /* atomic: the worker publishes READY / FAILED */
+    int ahead;                      /* compiled ahead from the program list (the badge's batch) */
+    GlProg *owner;                  /* the pending program table entry waiting for it */
+    int next;                       /* the worker's queue: next job index, -1 none */
+    uint64_t src_hash;
+    char *vs, *fs;                  /* bodies without the GLSL header; vs NULL: s_vs's */
+    GLuint prog, sh_v, sh_f;        /* khr: the shaders stay attached until done */
+} GlJob;
+
+static GlJob s_job[NV_GL_MAX_JOBS];
+static int s_ahead_inflight;
+static uint32_t s_skips, s_waited_us, s_async_done;   /* since the last log */
+static GlProg s_standin;            /* the stand-in that draws nothing */
+
+static pthread_t s_worker;
+static pthread_mutex_t s_job_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t s_job_cv = PTHREAD_COND_INITIALIZER;
+static int s_worker_on, s_worker_quit;
+static int s_worker_state;          /* the worker's start: 0 waiting, 1 its context is current, -1 not */
+static int s_qlive_head = -1, s_qlive_tail = -1, s_qahead_head = -1, s_qahead_tail = -1;
+
+/* The program list in memory: the source hashes known (read or recorded),
+ * the vertex shaders written, the warm-up's to-do (list order, the
+ * programs without a binary first) and the records not written yet. */
+typedef struct { uint64_t src_hash; int vsi; char *fs; int bin; } GlPlTodo;
+static uint64_t *s_pl_known;
+static int s_npl_known;
+static uint64_t *s_pl_vknown;
+static int s_npl_vknown;
+static struct { uint64_t hash; char *src; } *s_plv;   /* the list's vertex bodies (warm-up) */
+static int s_nplv;
+static GlPlTodo *s_pl_todo;
+static int s_npl_todo, s_pl_next;
+static char *s_pl_buf;
+static size_t s_pl_buf_n, s_pl_buf_cap;
+
+static int job_is_done(GlJob *j);
+
+/* The whole program's source hash, as prog_get computes it. */
+static uint64_t prog_src_hash(const char *vs_body, const char *fs_body)
+{
+    return hash_str(hash_str(hash_str(0xCBF29CE484222325ull, nv2a_gl_glsl_header(NV2A_GL_ES)),
+                             vs_body ? vs_body : nv2a_gl_vertex_body()),
+                    fs_body);
+}
+
+/* Link vs + fs into a program in the current context (either thread);
+ * 0 on failure (logged). */
+static GLuint link_bodies(const char *vs_body, const char *fs_body, uint64_t h)
+{
+    GLuint vs = compile(GL_VERTEX_SHADER, vs_body ? vs_body : nv2a_gl_vertex_body());
+    GLuint fs = vs ? compile(GL_FRAGMENT_SHADER, fs_body) : 0;
+    GLuint prog = 0;
+    GLint ok = 0;
+
+    if (vs && fs) {
+        prog = glCreateProgram();
+        if (s_pc_on)
+            glProgramParameteri(prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+        glAttachShader(prog, vs);
+        glAttachShader(prog, fs);
+        glLinkProgram(prog);
+        glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            char log[2048];
+            glGetProgramInfoLog(prog, sizeof log, NULL, log);
+            fprintf(stderr, "  [GPUGL] link failed: %s\n", log);
+            glDeleteProgram(prog);
+            prog = 0;
+        } else if (s_pc_on) {
+            pc_store(prog, h);
+        }
+    }
+    if (vs)
+        glDeleteShader(vs);
+    if (fs)
+        glDeleteShader(fs);
+    return prog;
+}
+
+extern void xbox_HostThreadFloat(const char *role);   /* kernel_thread.c (XBA-305) */
+extern void recomp_host_cpus_untrack(void);           /* host_cpus.c */
+
+static void *job_worker(void *arg)
+{
+    int ok;
+
+    xbox_HostThreadFloat("shader worker");   /* off the guest's core, as the executor */
+    ok = nv2a_gl_shared_context_bind();
+
+    (void)arg;
+    pthread_mutex_lock(&s_job_mu);
+    s_worker_state = ok ? 1 : -1;   /* job_init waits for this */
+    pthread_cond_broadcast(&s_job_cv);
+    pthread_mutex_unlock(&s_job_mu);
+    if (!ok)
+        return NULL;
+    for (;;) {
+        GlJob *j;
+        int i;
+        pthread_mutex_lock(&s_job_mu);
+        while (s_qlive_head < 0 && s_qahead_head < 0 && !s_worker_quit)
+            pthread_cond_wait(&s_job_cv, &s_job_mu);
+        if (s_worker_quit) {
+            pthread_mutex_unlock(&s_job_mu);
+            break;
+        }
+        /* A program a draw is waiting for goes before the list's. */
+        if (s_qlive_head >= 0) {
+            i = s_qlive_head;
+            s_qlive_head = s_job[i].next;
+            if (s_qlive_head < 0)
+                s_qlive_tail = -1;
+        } else {
+            i = s_qahead_head;
+            s_qahead_head = s_job[i].next;
+            if (s_qahead_head < 0)
+                s_qahead_tail = -1;
+        }
+        j = &s_job[i];
+        pthread_mutex_unlock(&s_job_mu);
+        j->prog = link_bodies(j->vs, j->fs, j->src_hash);
+        glFinish();                 /* complete before the executor's context uses it */
+        __atomic_store_n(&j->state, j->prog ? JOB_READY : JOB_FAILED, __ATOMIC_RELEASE);
+    }
+    nv2a_gl_shared_context_unbind();
+    recomp_host_cpus_untrack();     /* its tid may go to another thread */
+    return NULL;
+}
+
+/* The stand-in program skipped batches are drawn with (see above). */
+static void skip_init(void)
+{
+    static const char vs[] =
+        "void main() { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; }\n";
+    static const char fs[] = "out vec4 o;\nvoid main() { o = vec4(0.0); discard; }\n";
+    GLuint v = compile(GL_VERTEX_SHADER, vs), f = v ? compile(GL_FRAGMENT_SHADER, fs) : 0;
+    GLint ok = 0;
+    int i;
+
+    memset(&s_standin, 0, sizeof s_standin);
+    if (v && f) {
+        s_standin.prog = glCreateProgram();
+        glAttachShader(s_standin.prog, v);
+        glAttachShader(s_standin.prog, f);
+        glLinkProgram(s_standin.prog);
+        glGetProgramiv(s_standin.prog, GL_LINK_STATUS, &ok);
+    }
+    if (v)
+        glDeleteShader(v);
+    if (f)
+        glDeleteShader(f);
+    s_standin.cloc = (GLint *)malloc(192 * sizeof(GLint));
+    if (!ok || !s_standin.cloc) {
+        if (s_standin.prog)
+            glDeleteProgram(s_standin.prog);
+        free(s_standin.cloc);
+        memset(&s_standin, 0, sizeof s_standin);
+        return;
+    }
+    for (i = 0; i < 192; i++)
+        s_standin.cloc[i] = -1;
+    s_standin.u_vp = s_standin.u_tscale = s_standin.u_c0 = s_standin.u_c1 = -1;
+    s_standin.u_fc0 = s_standin.u_fc1 = s_standin.u_fogc = s_standin.u_aref = -1;
+    s_standin.u_bm = s_standin.u_bso = s_standin.u_psize = s_standin.u_lodb = -1;
+    s_standin.u_xf = s_standin.u_fog = -1;
+    s_standin.const_synced = ~0ull;    /* never uploads constants */
+}
+
+/* At context creation (ensure_init, before pc_init): how programs compile
+ * from now on, its worker started. */
+static void job_init(void)
+{
+    const char *e = getenv("RECOMP_GPU_ASYNC_SHADERS");
+    const char *w = getenv("RECOMP_GPU_SHADER_WAIT_MS");
+    int i, khr = has_ext("GL_KHR_parallel_shader_compile") || has_ext("GL_ARB_parallel_shader_compile");
+
+    for (i = 0; i < NV_GL_MAX_JOBS; i++)
+        s_job[i].state = JOB_FREE;
+    s_qlive_head = s_qlive_tail = s_qahead_head = s_qahead_tail = -1;
+    s_ahead_inflight = 0;
+    s_async = NV_ASYNC_SYNC;
+    if (w && *w) {
+        double ms = atof(w);
+        s_wait_max_us = ms <= 0 ? 0 : ms >= 600000.0 ? 600000000u : (uint32_t)(ms * 1000.0);
+    } else {
+        s_wait_max_us = 4000;
+    }
+    s_wait_left_us = s_wait_max_us * 2u;
+    skip_init();
+    if (!s_standin.prog || (e && strcmp(e, "0") == 0)) {
+        fprintf(stderr, "  [GPUGL] shaders: compiled at the draw%s\n",
+                s_standin.prog ? " (RECOMP_GPU_ASYNC_SHADERS=0)" : " (no stand-in program)");
+        return;
+    }
+    if (!(e && strcmp(e, "khr") == 0) && nv2a_gl_shared_context_create()) {
+        s_worker_quit = 0;
+        s_worker_state = 0;
+        if (pthread_create(&s_worker, NULL, job_worker, NULL) == 0) {
+            /* Its context current before any job is queued for it. */
+            pthread_mutex_lock(&s_job_mu);
+            while (!s_worker_state)
+                pthread_cond_wait(&s_job_cv, &s_job_mu);
+            pthread_mutex_unlock(&s_job_mu);
+            if (s_worker_state > 0) {
+                s_worker_on = 1;
+                s_async = NV_ASYNC_WORKER;
+            } else {
+                pthread_join(s_worker, NULL);
+            }
+        }
+        if (s_async != NV_ASYNC_WORKER)
+            nv2a_gl_shared_context_destroy();
+    }
+    if (s_async == NV_ASYNC_SYNC && khr)
+        s_async = NV_ASYNC_KHR;
+    fprintf(stderr, "  [GPUGL] shaders: %s, a draw waits up to %.1f ms for its program, then is skipped\n",
+            s_async == NV_ASYNC_WORKER ? "compiled on a worker thread (shared context)"
+            : s_async == NV_ASYNC_KHR ? "compiled in parallel (KHR_parallel_shader_compile)"
+                                      : "compiled at the draw (no shared context, no parallel compile)",
+            (double)s_wait_max_us / 1000.0);
+}
+
+/* The jobs, their worker and the stand-in, gone (gl_reset_objects): the
+ * worker joined first; lost: the context is gone, names only forgotten. */
+static void job_shutdown(int lost)
+{
+    int i;
+
+    if (s_async == NV_ASYNC_WORKER) {
+        pthread_mutex_lock(&s_job_mu);
+        s_worker_quit = 1;
+        pthread_cond_broadcast(&s_job_cv);
+        pthread_mutex_unlock(&s_job_mu);
+        pthread_join(s_worker, NULL);
+        s_worker_on = 0;
+        nv2a_gl_shared_context_destroy();
+    }
+    for (i = 0; i < NV_GL_MAX_JOBS; i++) {
+        GlJob *j = &s_job[i];
+        if (j->state == JOB_FREE)
+            continue;
+        if (!lost) {
+            if (j->prog)
+                glDeleteProgram(j->prog);
+            if (j->sh_v)
+                glDeleteShader(j->sh_v);
+            if (j->sh_f)
+                glDeleteShader(j->sh_f);
+        }
+        free(j->vs);
+        free(j->fs);
+        memset(j, 0, sizeof *j);
+    }
+    if (!lost && s_standin.prog)
+        glDeleteProgram(s_standin.prog);
+    free(s_standin.cloc);
+    memset(&s_standin, 0, sizeof s_standin);
+    s_qlive_head = s_qlive_tail = s_qahead_head = s_qahead_tail = -1;
+    s_ahead_inflight = 0;
+    s_async = NV_ASYNC_SYNC;
+}
+
+static GlJob *job_find(uint64_t h)
+{
+    int i;
+
+    for (i = 0; i < NV_GL_MAX_JOBS; i++)
+        if (s_job[i].state != JOB_FREE && s_job[i].src_hash == h)
+            return &s_job[i];
+    return NULL;
+}
+
+/* A compile of (vs, fs) started the configured way; NULL when it cannot be
+ * (sync mode, no free slot, the worker gone): the caller compiles at once. */
+static GlJob *job_start(uint64_t h, const char *vs, const char *fs, int ahead)
+{
+    GlJob *j = NULL;
+    int i;
+
+    if (s_async == NV_ASYNC_SYNC)
+        return NULL;
+    for (i = 0; i < NV_GL_MAX_JOBS; i++)
+        if (s_job[i].state == JOB_FREE) {
+            j = &s_job[i];
+            break;
+        }
+    if (!j)
+        return NULL;
+    memset(j, 0, sizeof *j);
+    j->src_hash = h;
+    j->ahead = ahead;
+    j->next = -1;
+    if ((vs && !(j->vs = strdup(vs))) || !(j->fs = strdup(fs))) {
+        free(j->vs);
+        free(j->fs);
+        memset(j, 0, sizeof *j);
+        return NULL;
+    }
+    if (ahead)
+        s_ahead_inflight++;
+    if (s_async == NV_ASYNC_WORKER) {
+        j->state = JOB_QUEUED;
+        pthread_mutex_lock(&s_job_mu);
+        if (ahead) {
+            if (s_qahead_tail >= 0)
+                s_job[s_qahead_tail].next = i;
+            else
+                s_qahead_head = i;
+            s_qahead_tail = i;
+        } else {
+            if (s_qlive_tail >= 0)
+                s_job[s_qlive_tail].next = i;
+            else
+                s_qlive_head = i;
+            s_qlive_tail = i;
+        }
+        pthread_cond_signal(&s_job_cv);
+        pthread_mutex_unlock(&s_job_mu);
+    } else {
+        /* KHR: issued here, the driver's threads do the work. */
+        const char *src[2];
+        src[0] = nv2a_gl_glsl_header(NV2A_GL_ES);
+        j->sh_v = glCreateShader(GL_VERTEX_SHADER);
+        src[1] = j->vs ? j->vs : nv2a_gl_vertex_body();
+        glShaderSource(j->sh_v, 2, src, NULL);
+        glCompileShader(j->sh_v);
+        j->sh_f = glCreateShader(GL_FRAGMENT_SHADER);
+        src[1] = j->fs;
+        glShaderSource(j->sh_f, 2, src, NULL);
+        glCompileShader(j->sh_f);
+        j->prog = glCreateProgram();
+        if (s_pc_on)
+            glProgramParameteri(j->prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+        glAttachShader(j->prog, j->sh_v);
+        glAttachShader(j->prog, j->sh_f);
+        glLinkProgram(j->prog);
+        j->state = JOB_COMPILING;
+    }
+    if (!ahead)
+        host_shader_progress_live();    /* the badge: "COMPILING... (n)" */
+    return j;
+}
+
+/* The job that will give program table entry p its program: one compiling
+ * it already that nobody waits for (the list's warm-up), else a new one;
+ * NULL: compile it at once. */
+static GlJob *job_claim(GlProg *p, const char *vs, const char *fs)
+{
+    GlJob *j = job_find(p->src_hash);
+
+    if (!j || j->owner)
+        j = job_start(p->src_hash, vs, fs, 0);
+    if (j) {
+        j->owner = p;
+        p->job = (int)(j - s_job) + 1;
+        p->pending = 1;
+    }
+    return j;
+}
+
+/* prog_drop_all: the table's entries are gone, their jobs nobody's (the
+ * warm table takes them when done). */
+static void job_disown_all(void)
+{
+    int i;
+
+    for (i = 0; i < NV_GL_MAX_JOBS; i++)
+        s_job[i].owner = NULL;
+}
+
+/* Done (ready or failed)? KHR: polled, finished here when complete. */
+static int job_is_done(GlJob *j)
+{
+    int st = __atomic_load_n(&j->state, __ATOMIC_ACQUIRE);
+
+    if (st == JOB_COMPILING) {
+        GLint done = 0, ok = 0;
+        glGetProgramiv(j->prog, GL_COMPLETION_STATUS_KHR, &done);
+        if (!done)
+            return 0;
+        glGetProgramiv(j->prog, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            char log[2048];
+            log[0] = 0;
+            glGetShaderInfoLog(j->sh_f, sizeof log, NULL, log);
+            if (!log[0])
+                glGetShaderInfoLog(j->sh_v, sizeof log, NULL, log);
+            if (!log[0])
+                glGetProgramInfoLog(j->prog, sizeof log, NULL, log);
+            fprintf(stderr, "  [GPUGL] shader compile or link failed: %s\n", log);
+            glDeleteProgram(j->prog);
+            j->prog = 0;
+        } else if (s_pc_on) {
+            pc_store(j->prog, j->src_hash);
+        }
+        glDeleteShader(j->sh_v);
+        glDeleteShader(j->sh_f);
+        j->sh_v = j->sh_f = 0;
+        j->state = st = j->prog ? JOB_READY : JOB_FAILED;
+    }
+    return st == JOB_READY || st == JOB_FAILED;
+}
+
+/* A done job's program (0: it failed), its slot freed. */
+static GLuint job_take(GlJob *j)
+{
+    GLuint prog = j->state == JOB_READY ? j->prog : 0;
+
+    if (j->ahead) {
+        s_ahead_inflight--;
+        host_shader_progress_done(1);
+    }
+    s_st.compiles++;
+    s_pc_total_compiled++;
+    s_async_done++;
+    free(j->vs);
+    free(j->fs);
+    memset(j, 0, sizeof *j);
+    return prog;
+}
+
+/* Wait for j within the draw's and the frame's budget. */
+static void job_wait(GlJob *j)
+{
+    uint32_t budget = s_wait_max_us < s_wait_left_us ? s_wait_max_us : s_wait_left_us;
+    struct timespec t0, t1;
+    uint32_t spent = 0;
+
+    if (!budget || job_is_done(j))
+        return;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    while (spent < budget && !job_is_done(j)) {
+        struct timespec nap = { 0, 100000 };   /* 0.1 ms */
+        nanosleep(&nap, NULL);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        spent = (uint32_t)((t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000);
+    }
+    s_wait_left_us = spent < s_wait_left_us ? s_wait_left_us - spent : 0;
+    s_waited_us += spent;
+}
+
+/* ---- the program list ---- */
+
+static int u64_in(const uint64_t *a, int n, uint64_t v)
+{
+    int i;
+
+    for (i = 0; i < n; i++)
+        if (a[i] == v)
+            return 1;
+    return 0;
+}
+
+static void pl_path(char *out, size_t n)
+{
+    snprintf(out, n, "%s/programs.list", s_pc_dir);
+}
+
+static void pl_put(const void *p, size_t n)
+{
+    if (s_pl_buf_n + n > s_pl_buf_cap) {
+        size_t cap = s_pl_buf_cap ? s_pl_buf_cap * 2 : 65536;
+        char *b;
+        while (cap < s_pl_buf_n + n)
+            cap *= 2;
+        if (!(b = (char *)realloc(s_pl_buf, cap)))
+            return;
+        s_pl_buf = b;
+        s_pl_buf_cap = cap;
+    }
+    memcpy(s_pl_buf + s_pl_buf_n, p, n);
+    s_pl_buf_n += n;
+}
+
+static void pl_record_body(char type, uint64_t hash, const char *body)
+{
+    uint32_t len = (uint32_t)strlen(body);
+
+    pl_put(&type, 1);
+    pl_put(&hash, 8);
+    pl_put(&len, 4);
+    pl_put(body, len);
+}
+
+/* A program linked for the first time: into the list (written at the next
+ * flip) unless it is there already. */
+static void pl_record(uint64_t src_hash, const GlVsh *vsh, const char *fs)
+{
+    if (!s_pc_on || !s_pl_known || s_npl_known >= NV_GL_PLIST_MAX
+        || u64_in(s_pl_known, s_npl_known, src_hash))
+        return;
+    s_pl_known[s_npl_known++] = src_hash;
+    if (vsh && !u64_in(s_pl_vknown, s_npl_vknown, vsh->src_hash) && s_npl_vknown < NV_GL_PLIST_MAX) {
+        s_pl_vknown[s_npl_vknown++] = vsh->src_hash;
+        pl_record_body('V', vsh->src_hash, vsh->src);
+    }
+    pl_record_body('P', vsh ? vsh->src_hash : 0, fs);
+}
+
+/* At the flip: the records of the programs linked since, appended. */
+static void pl_flush(void)
+{
+    char path[1024];
+    FILE *f;
+
+    if (!s_pl_buf_n || !s_pc_on)
+        return;
+    pl_path(path, sizeof path);
+    if ((f = fopen(path, "ab")) != NULL) {
+        fseek(f, 0, SEEK_END);
+        if (ftell(f) == 0) {
+            uint32_t hd[3] = { NV_GL_PLIST_VERSION, NV2A_GL_ES, NV_GL_PCACHE_VERSION };
+            fwrite("NV2AGLPL", 8, 1, f);
+            fwrite(hd, sizeof hd, 1, f);
+        }
+        fwrite(s_pl_buf, s_pl_buf_n, 1, f);
+        fclose(f);
+    }
+    s_pl_buf_n = 0;
+}
+
+static void pl_free_warm(void)
+{
+    int i;
+
+    for (i = 0; i < s_npl_todo; i++)
+        free(s_pl_todo[i].fs);
+    free(s_pl_todo);
+    s_pl_todo = NULL;
+    s_npl_todo = s_pl_next = 0;
+    for (i = 0; i < s_nplv; i++)
+        free(s_plv[i].src);
+    free(s_plv);
+    s_plv = NULL;
+    s_nplv = 0;
+}
+
+static void pl_free(void)
+{
+    pl_free_warm();
+    free(s_pl_known);
+    free(s_pl_vknown);
+    s_pl_known = s_pl_vknown = NULL;
+    s_npl_known = s_npl_vknown = 0;
+    free(s_pl_buf);
+    s_pl_buf = NULL;
+    s_pl_buf_n = s_pl_buf_cap = 0;
+}
+
+/* One body of a record; NULL at the end of the file or on a bad length. */
+static char *pl_read_body(FILE *f)
+{
+    uint32_t len;
+    char *b;
+
+    if (fread(&len, 4, 1, f) != 1 || len > NV_GL_PLIST_BODY || !(b = (char *)malloc(len + 1u)))
+        return NULL;
+    if (len && fread(b, len, 1, f) != 1) {
+        free(b);
+        return NULL;
+    }
+    b[len] = 0;
+    return b;
+}
+
+/* At pc_init: the list read, the programs it has that have no binary
+ * queued to be compiled ahead (with async compiles), then those with one
+ * (compiled only if their binary does not load). */
+static void pl_load(void)
+{
+    char path[1024], magic[8];
+    uint32_t hd[3];
+    FILE *f;
+    int i, nbin = 0;
+    long good;
+
+    pl_free();
+    s_pl_known = (uint64_t *)malloc(NV_GL_PLIST_MAX * sizeof *s_pl_known);
+    s_pl_vknown = (uint64_t *)malloc(NV_GL_PLIST_MAX * sizeof *s_pl_vknown);
+    if (!s_pl_known || !s_pl_vknown) {
+        pl_free();
+        return;
+    }
+    pl_path(path, sizeof path);
+    if (!(f = fopen(path, "rb")))
+        return;
+    if (fread(magic, 8, 1, f) != 1 || memcmp(magic, "NV2AGLPL", 8) != 0
+        || fread(hd, sizeof hd, 1, f) != 1 || hd[0] != NV_GL_PLIST_VERSION || hd[1] != NV2A_GL_ES
+        || hd[2] != NV_GL_PCACHE_VERSION) {
+        fclose(f);
+        remove(path);               /* another version, GL flavour or generator: written again */
+        return;
+    }
+    good = ftell(f);
+    s_pl_todo = (GlPlTodo *)calloc(NV_GL_PLIST_MAX, sizeof *s_pl_todo);
+    s_plv = calloc(NV_GL_PLIST_MAX, sizeof *s_plv);
+    while (s_pl_todo && s_plv && s_npl_known < NV_GL_PLIST_MAX) {
+        char type;
+        uint64_t hash;
+        char *body;
+        if (fread(&type, 1, 1, f) != 1 || fread(&hash, 8, 1, f) != 1 || !(body = pl_read_body(f)))
+            break;
+        if (type == 'V' || type == 'P')
+            good = ftell(f);        /* the end of the last whole record */
+        if (type == 'V' && s_npl_vknown < NV_GL_PLIST_MAX) {
+            s_pl_vknown[s_npl_vknown++] = hash;
+            s_plv[s_nplv].hash = hash;
+            s_plv[s_nplv++].src = body;
+        } else if (type == 'P') {
+            int vsi = -1;
+            uint64_t h;
+            if (hash) {
+                for (i = 0; i < s_nplv; i++)
+                    if (s_plv[i].hash == hash)
+                        vsi = i;
+                if (vsi < 0) {      /* its vertex shader is not in the file */
+                    free(body);
+                    continue;
+                }
+            }
+            h = prog_src_hash(vsi >= 0 ? s_plv[vsi].src : NULL, body);
+            if (u64_in(s_pl_known, s_npl_known, h)) {
+                free(body);
+                continue;
+            }
+            s_pl_known[s_npl_known++] = h;
+            s_pl_todo[s_npl_todo].src_hash = h;
+            s_pl_todo[s_npl_todo].vsi = vsi;
+            s_pl_todo[s_npl_todo].fs = body;
+            s_pl_todo[s_npl_todo].bin = u64_in(s_pc_list, s_pc_nlist, h);
+            nbin += s_pl_todo[s_npl_todo].bin;
+            s_npl_todo++;
+        } else {
+            free(body);
+            break;
+        }
+    }
+    fclose(f);
+    {
+        /* A run killed while appending leaves a broken record: cut it off,
+         * or every record appended after it would never be read. */
+        struct stat st;
+        if (s_pl_todo && s_plv && stat(path, &st) == 0 && st.st_size > good
+            && s_npl_known < NV_GL_PLIST_MAX && truncate(path, good) != 0)
+            remove(path);
+    }
+    if (s_async == NV_ASYNC_SYNC || !s_npl_todo) {
+        pl_free_warm();             /* nothing compiled ahead: only the known hashes kept */
+    } else {
+        /* The ones without a binary first (stable: list order kept). */
+        GlPlTodo *t = (GlPlTodo *)malloc((size_t)s_npl_todo * sizeof *t);
+        int n = 0;
+        if (t) {
+            for (i = 0; i < s_npl_todo; i++)
+                if (!s_pl_todo[i].bin)
+                    t[n++] = s_pl_todo[i];
+            for (i = 0; i < s_npl_todo; i++)
+                if (s_pl_todo[i].bin)
+                    t[n++] = s_pl_todo[i];
+            memcpy(s_pl_todo, t, (size_t)n * sizeof *t);
+            free(t);
+        }
+        host_shader_progress_expect((uint32_t)(s_npl_todo - nbin));
+    }
+    fprintf(stderr, "  [GPUGL] program list %s: %d programs, %d without a binary%s\n", path, s_npl_known,
+            s_npl_known - nbin, s_pl_todo ? ", compiled ahead" : "");
+}
+
+static void prog_install(GlProg *p, GlJob *j);
+
+/* At the flip (pc_warm): finished jobs into the program table entry
+ * waiting for them (a pipeline drawn only while it compiled is never asked
+ * for again: its job would stay, its slot and the badge's count with it),
+ * the others into the warm table; then the list's next programs queued, a
+ * few in flight at a time. Those with a binary wait for the binary warm-up,
+ * and are compiled only if it did not link them. */
+static void pl_warm(void)
+{
+    int i, cap = s_async == NV_ASYNC_WORKER ? NV_GL_AHEAD_WORKER : NV_GL_AHEAD_KHR;
+
+    for (i = 0; i < NV_GL_MAX_JOBS; i++) {
+        GlJob *j = &s_job[i];
+        uint64_t h;
+        GLuint prog;
+        if (j->state == JOB_FREE || !job_is_done(j))
+            continue;
+        if (j->owner) {
+            prog_install(j->owner, j);
+            continue;
+        }
+        h = j->src_hash;
+        prog = job_take(j);
+        if (!prog)
+            continue;
+        if (s_nwarm < NV_GL_MAX_WARM && !pc_have(h)) {
+            s_warm[s_nwarm].hash = h;
+            s_warm[s_nwarm].prog = prog;
+            s_nwarm++;
+        } else {
+            glDeleteProgram(prog);
+        }
+    }
+    while (s_pl_todo && s_pl_next < s_npl_todo && s_ahead_inflight < cap) {
+        GlPlTodo *t = &s_pl_todo[s_pl_next];
+        if (t->bin && s_pc_list)
+            break;                  /* the binary warm-up is not through yet */
+        if (pc_have(t->src_hash) || job_find(t->src_hash)) {
+            if (!t->bin)
+                host_shader_progress_done(1);
+            s_pl_next++;
+            continue;
+        }
+        if (s_nwarm + s_ahead_inflight >= NV_GL_MAX_WARM
+            || !job_start(t->src_hash, t->vsi >= 0 ? s_plv[t->vsi].src : NULL, t->fs, 1)) {
+            if (s_nwarm + s_ahead_inflight >= NV_GL_MAX_WARM || s_async == NV_ASYNC_SYNC) {
+                /* No room to keep more: the rest compile when a draw needs them. */
+                for (; s_pl_next < s_npl_todo; s_pl_next++)
+                    if (!s_pl_todo[s_pl_next].bin)
+                        host_shader_progress_done(1);
+            }
+            break;
+        }
+        if (t->bin)
+            host_shader_progress_expect(1);   /* its binary did not load: counted again */
+        s_pl_next++;
+    }
+    if (s_pl_todo && s_pl_next >= s_npl_todo && !s_ahead_inflight) {
+        if (s_verbose)
+            fprintf(stderr, "  [GPUGL] program list: warm-up done, %d programs ready\n", s_nwarm);
+        pl_free_warm();
+    }
+    if (s_frame % 600 == 0 && (s_skips || s_async_done)) {
+        fprintf(stderr, "  [GPUGL] shaders: %u compiled off the draw path, %u batches skipped while"
+                        " compiling, %.1f ms waited (last 600 frames)\n",
+                s_async_done, s_skips, (double)s_waited_us / 1000.0);
+        s_skips = s_waited_us = s_async_done = 0;
+    }
+}
+
+/* The draw met program p still compiling: wait within the budget; ready,
+ * set up and returned; else the stand-in (the batch drawn as nothing). */
+static GlProg *prog_pending(GlProg *p)
+{
+    GlJob *j = p->job > 0 && p->job <= NV_GL_MAX_JOBS ? &s_job[p->job - 1] : NULL;
+
+    if (!j || j->owner != p || j->state == JOB_FREE) {   /* cannot happen: a pending entry owns its job */
+        p->pending = 0;
+        p->failed = 1;
+        return NULL;
+    }
+    job_wait(j);
+    if (!job_is_done(j)) {
+        s_skips++;
+        return &s_standin;
+    }
+    prog_install(p, j);
+    return p->failed ? NULL : p;
+}
+
+/* Done job j's program into its entry p, set up (failed: p refused). */
+static void prog_install(GlProg *p, GlJob *j)
+{
+    p->prog = job_take(j);
+    p->pending = 0;
+    p->job = 0;
+    if (!p->prog)
+        p->failed = 1;
+    else
+        prog_setup(p, p->vsh_hash != 0);
+}
+
 /* The program for pipeline `key` with the fixed vertex shader (vsh NULL:
  * CPU-transformed vertices) or a translated vertex program. */
 static GlProg *prog_get(const Nv2aGlShaderKey *key, GlVsh *vsh)
@@ -3127,12 +3982,12 @@ static GlProg *prog_get(const Nv2aGlShaderKey *key, GlVsh *vsh)
 
     for (i = 0; i < NV_GL_MAX_PROG; i++) {
         GlProg *c = &s_prog[(slot + i) & (NV_GL_MAX_PROG - 1)];
-        if (!c->prog && !c->failed) {
+        if (!c->prog && !c->failed && !c->pending) {
             p = c;
             break;
         }
         if (c->hash == h && c->vsh_hash == vh && memcmp(&c->key, key, sizeof *key) == 0)
-            return c->failed ? NULL : c;
+            return c->failed ? NULL : c->pending ? prog_pending(c) : c;
     }
     if (!p || s_nprog >= NV_GL_MAX_PROG * 3 / 4) {
         prog_drop_all();
@@ -3147,16 +4002,18 @@ static GlProg *prog_get(const Nv2aGlShaderKey *key, GlVsh *vsh)
         return NULL;
     }
     /* The whole program's source, as the cache keys it. */
-    p->src_hash = hash_str(hash_str(hash_str(0xCBF29CE484222325ull,
-                                             nv2a_gl_glsl_header(NV2A_GL_ES)),
-                                    vsh ? vsh->src : nv2a_gl_vertex_body()),
-                           body);
+    p->src_hash = prog_src_hash(vsh ? vsh->src : NULL, body);
     if ((p->prog = pc_take(p->src_hash)) != 0) {
         s_st.cache_loads++;
         s_pc_total_loaded++;
+    } else if (job_claim(p, vsh ? vsh->src : NULL, body)) {
+        /* Compiling off the draw path (XBA-310): a short wait, else skipped. */
+        pl_record(p->src_hash, vsh, body);
+        return prog_pending(p);
     } else if (prog_link(p, body, vsh)) {
         if (s_pc_on)
             pc_store(p->prog, p->src_hash);
+        pl_record(p->src_hash, vsh, body);
     } else {
         p->failed = 1;
         return NULL;
@@ -4628,6 +5485,7 @@ static void gl_reset_objects(int lost)
 {
     int i;
 
+    job_shutdown(lost);             /* the shader worker joined before its context goes */
     strm_reset(lost);               /* their fences, before the buffers go */
     if (!lost) {
         for (i = 0; i < NV_GL_MAX_RT; i++) {
@@ -4687,6 +5545,7 @@ static void gl_reset_objects(int lost)
     s_nvsh = 0;
     s_nwarm = 0;
     free(s_pc_list);                /* ensure_init scans the cache again */
+    pl_free();
     s_pc_list = NULL;
     s_pc_nlist = s_pc_next = 0;
     s_pc_on = 0;

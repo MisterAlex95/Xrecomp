@@ -84,6 +84,12 @@ void nv2a_gl_context_destroy(void)
     s_cgl = NULL;
 }
 
+/* No shader worker on macOS (XBA-310): the back end compiles at the draw. */
+int nv2a_gl_shared_context_create(void) { return 0; }
+int nv2a_gl_shared_context_bind(void) { return 0; }
+void nv2a_gl_shared_context_unbind(void) {}
+void nv2a_gl_shared_context_destroy(void) {}
+
 #else  /* EGL: Android, Linux */
 
 #if defined(__ANDROID__)
@@ -150,7 +156,7 @@ static const char *priority_name(EGLint v)
 
 /* Try a context with the version attributes plus, if asked, high priority
  * and reset notification. */
-static EGLContext try_context(int priority, int robust)
+static EGLContext try_context(int priority, int robust, EGLContext share)
 {
     EGLint a[16];
     int n = 0;
@@ -171,7 +177,7 @@ static EGLContext try_context(int priority, int robust)
         a[n++] = EGL_LOSE_CONTEXT_ON_RESET_EXT;
     }
     a[n] = EGL_NONE;
-    return eglCreateContext(s_dpy, s_cfg, EGL_NO_CONTEXT, a);
+    return eglCreateContext(s_dpy, s_cfg, share, a);
 }
 
 int nv2a_gl_context_create(void)
@@ -246,13 +252,13 @@ int nv2a_gl_context_create(void)
     /* Ask for everything, then drop what the driver refuses. */
     prio = want_prio;
     robust = want_robust;
-    s_ctx = try_context(prio, robust);
+    s_ctx = try_context(prio, robust, EGL_NO_CONTEXT);
     if (s_ctx == EGL_NO_CONTEXT && robust)
-        s_ctx = try_context(prio, robust = 0);
+        s_ctx = try_context(prio, robust = 0, EGL_NO_CONTEXT);
     if (s_ctx == EGL_NO_CONTEXT && prio)
-        s_ctx = try_context(prio = 0, robust = want_robust);
+        s_ctx = try_context(prio = 0, robust = want_robust, EGL_NO_CONTEXT);
     if (s_ctx == EGL_NO_CONTEXT && robust)
-        s_ctx = try_context(prio, robust = 0);
+        s_ctx = try_context(prio, robust = 0, EGL_NO_CONTEXT);
     if (s_ctx == EGL_NO_CONTEXT) {
         fprintf(stderr, "  [GPUGL] eglCreateContext failed (0x%X)\n", eglGetError());
         return 0;
@@ -317,8 +323,78 @@ void nv2a_gl_context_destroy(void)
 {
     if (s_ctx == EGL_NO_CONTEXT)
         return;
+    nv2a_gl_shared_context_destroy();   /* normally gone already (the worker stopped first) */
     eglMakeCurrent(s_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(s_dpy, s_ctx);
     s_ctx = EGL_NO_CONTEXT;
+}
+
+/* The shader worker's context (XBA-310): the main one's config, version and
+ * reset strategy (a share group whose contexts disagree on it is refused,
+ * EGL_BAD_MATCH), the default priority (compiles must not queue ahead of
+ * the frame), its own 1x1 pbuffer (a surface is current on one thread at a
+ * time) or none where EGL_KHR_surfaceless_context exists. */
+static EGLContext s_wctx = EGL_NO_CONTEXT;
+static EGLSurface s_wsurf = EGL_NO_SURFACE;
+
+int nv2a_gl_shared_context_create(void)
+{
+    const EGLint pb_attrs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+    const char *exts;
+    EGLint st = 0;
+
+    if (s_wctx != EGL_NO_CONTEXT)
+        return 1;
+    if (s_ctx == EGL_NO_CONTEXT || s_dpy == EGL_NO_DISPLAY)
+        return 0;
+    s_wctx = try_context(0, s_robust, s_ctx);
+    if (s_wctx == EGL_NO_CONTEXT) {
+        fprintf(stderr, "  [GPUGL] no shared context for the shader worker (0x%X)\n", eglGetError());
+        return 0;
+    }
+    exts = eglQueryString(s_dpy, EGL_EXTENSIONS);
+    eglGetConfigAttrib(s_dpy, s_cfg, EGL_SURFACE_TYPE, &st);
+    if (st & EGL_PBUFFER_BIT)
+        s_wsurf = eglCreatePbufferSurface(s_dpy, s_cfg, pb_attrs);
+    if (s_wsurf == EGL_NO_SURFACE && !ext_in(exts ? exts : "", "EGL_KHR_surfaceless_context")) {
+        fprintf(stderr, "  [GPUGL] no surface for the shader worker's context (0x%X)\n", eglGetError());
+        eglDestroyContext(s_dpy, s_wctx);
+        s_wctx = EGL_NO_CONTEXT;
+        return 0;
+    }
+    return 1;
+}
+
+int nv2a_gl_shared_context_bind(void)
+{
+#if NV2A_GL_ES
+    const EGLenum api = EGL_OPENGL_ES_API;
+#else
+    const EGLenum api = EGL_OPENGL_API;
+#endif
+    if (s_wctx == EGL_NO_CONTEXT)
+        return 0;
+    if (!eglBindAPI(api) || !eglMakeCurrent(s_dpy, s_wsurf, s_wsurf, s_wctx)) {
+        fprintf(stderr, "  [GPUGL] the shader worker cannot make its context current (0x%X)\n",
+                eglGetError());
+        return 0;
+    }
+    return 1;
+}
+
+void nv2a_gl_shared_context_unbind(void)
+{
+    if (s_wctx != EGL_NO_CONTEXT)
+        eglMakeCurrent(s_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+}
+
+void nv2a_gl_shared_context_destroy(void)
+{
+    if (s_wctx != EGL_NO_CONTEXT)
+        eglDestroyContext(s_dpy, s_wctx);
+    if (s_wsurf != EGL_NO_SURFACE)
+        eglDestroySurface(s_dpy, s_wsurf);
+    s_wctx = EGL_NO_CONTEXT;
+    s_wsurf = EGL_NO_SURFACE;
 }
 #endif

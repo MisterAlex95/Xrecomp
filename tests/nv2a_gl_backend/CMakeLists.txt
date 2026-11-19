@@ -32,7 +32,9 @@ foreach(v ${VARIANTS})
         target_include_directories(${v}-test PRIVATE ${EPOXY_INCLUDE_DIRS})
         target_link_libraries(${v}-test PRIVATE ${EPOXY_LINK_LIBRARIES} m)
     endif()
-    set(env "EGL_PLATFORM=surfaceless")
+    # A full wait for every program compiled off the draw path (XBA-310): the
+    # pixels do not depend on how fast the compiles go; case 12 sets its own.
+    set(env "EGL_PLATFORM=surfaceless;RECOMP_GPU_SHADER_WAIT_MS=600000")
     if(v STREQUAL "nv2a-gl-backend-es")
         target_compile_definitions(${v}-test PRIVATE NV2A_GL_FORCE_ES=1)
         # Mesa held to GLES 3.0, the version the Android build asks for.
@@ -45,4 +47,12 @@ foreach(v ${VARIANTS})
     set_tests_properties(${v} PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "${env}")
     set_tests_properties(${v}-cpu-writes-off PROPERTIES SKIP_RETURN_CODE 77
                          ENVIRONMENT "${env};RECOMP_GPU_CPU_WRITES=0")
+    # The other two ways programs compile: KHR_parallel_shader_compile, and
+    # at the draw (no shared context, no extension; macOS).
+    add_test(NAME ${v}-khr COMMAND ${v}-test)
+    set_tests_properties(${v}-khr PROPERTIES SKIP_RETURN_CODE 77
+                         ENVIRONMENT "${env};RECOMP_GPU_ASYNC_SHADERS=khr")
+    add_test(NAME ${v}-sync COMMAND ${v}-test)
+    set_tests_properties(${v}-sync PROPERTIES SKIP_RETURN_CODE 77
+                         ENVIRONMENT "${env};RECOMP_GPU_ASYNC_SHADERS=0")
 endforeach()

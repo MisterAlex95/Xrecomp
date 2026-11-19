@@ -44,10 +44,19 @@
  * frame is decoded once (the table used to be dropped whole at 384 keys).
  * Program table (case 11): a full table is dropped and the new pipeline
  * linked (it used to be refused for the rest of the run).
+ * Programs off the draw path (case 12, XBA-310), in whichever mode the
+ * ctest entry selects (worker by default, RECOMP_GPU_ASYNC_SHADERS=khr / =0):
+ * with no wait a new pipeline's batch gets the stand-in (no fragment) until
+ * its compile is done, then its own program; with the binary cache in a
+ * scratch save dir, the programs linked go to programs.list, and a run
+ * whose binaries are gone (a driver update) compiles them ahead from it
+ * during its first flips, the shader badge counting "Shaders 1/5" .. done,
+ * so the draws that need them find them linked.
  * Also: RECOMP_GPU unset selects the platform's default (gpu_selected).
  * RECOMP_GPU_CPU_WRITES=0 (another ctest entry) checks that the same cases
  * fail without the merge, so the test tells the two apart. */
 #include "../../src/gpu/nv2a_gl.c"
+#include <unistd.h>
 
 #define MEM_BYTES (16u << 20)
 #define FB32   0x00100000u          /* 64x32 A8R8G8B8, pitch 256 */
@@ -66,7 +75,10 @@ static int s_fail, s_cpu_on = 1;
 } } while (0)
 
 ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem; }
-const char *xbox_path_save_dir_utf8(void) { return NULL; }
+static const char *s_save_dir;      /* case 12: a scratch save dir */
+const char *xbox_path_save_dir_utf8(void) { return s_save_dir; }
+void xbox_HostThreadFloat(const char *role) { (void)role; }   /* the shader worker's placement */
+void recomp_host_cpus_untrack(void) {}
 /* Textures: LIN_A8R8G8B8 only, read as is; decodes counted per address. */
 #define TEX_LIVE 0x00F00000u        /* 4x4, sampled every frame (case 10) */
 static uint32_t s_live_decodes;
@@ -189,6 +201,22 @@ static uint32_t count_bad(uint32_t va, uint32_t bx0, uint32_t by0, uint32_t bx1,
 }
 
 static void flip(void) { s_be->flip(); }
+
+/* Case 12: the files of a scratch directory, deleted. */
+static void rm_files(const char *dir)
+{
+    DIR *d = opendir(dir);
+    struct dirent *de;
+    if (!d)
+        return;
+    while ((de = readdir(d)) != NULL)
+        if (de->d_name[0] != '.') {
+            char f[1500];
+            snprintf(f, sizeof f, "%s/%s", dir, de->d_name);
+            remove(f);
+        }
+    closedir(d);
+}
 
 int main(void)
 {
@@ -545,6 +573,120 @@ int main(void)
                p && p->prog ? "linked" : "refused", s_prog_drops - drops);
         CHECK(p != NULL && p->prog != 0);
         CHECK(s_prog_drops == drops + 1 && s_nprog == 1);
+    }
+
+    /* 12. Programs compiled off the draw path, the program list. */
+    {
+        Nv2aGlShaderKey key;
+        GlProg *p;
+        char dir[] = "/tmp/nv2a-gl-plist-XXXXXX", path[1200], badge[64];
+        uint32_t i, k, saved_wait = s_wait_max_us, standins = 0;
+        int flips = 0, binaries;
+        memset(&key, 0, sizeof key);
+        /* No wait: the first draw of a new pipeline gets the stand-in while its
+         * compile runs (a driver may finish a KHR compile at once: then its
+         * own program), every later one too until it is done. */
+        s_wait_max_us = 0;
+        key.final0 = 0x0BADF00Du;
+        p = prog_get(&key, NULL);
+        CHECK(p != NULL);
+        if (s_async && p == &s_standin) {
+            CHECK(p->prog && p->cloc && p->cloc[0] == -1 && p->u_vp == -1);
+            for (i = 0; i < 4000 && (p = prog_get(&key, NULL)) == &s_standin; i++)
+                usleep(1000);
+        }
+        CHECK(p != NULL && p != &s_standin && p->prog != 0 && !p->pending);
+        s_wait_max_us = saved_wait;
+
+        /* The cache in a scratch dir: five programs linked, listed. */
+        CHECK(mkdtemp(dir) != NULL);
+        s_save_dir = dir;
+        gl_reset_objects(0);
+        CHECK(ensure_init());
+        binaries = s_pc_on;
+        for (k = 0; k < 5; k++) {
+            key.final0 = 0x5EED0000u + k;
+            p = prog_get(&key, NULL);
+            standins += p == &s_standin;
+            CHECK(p != NULL && p->prog != 0);
+        }
+        flip();                     /* the list's records written */
+        snprintf(path, sizeof path, "%s/shadercache/00000000/programs.list", dir);
+        printf("12. shaders %s, binary cache %s, %u stand-ins with a full wait; list %s\n",
+               s_async == NV_ASYNC_WORKER ? "on a worker" : s_async == NV_ASYNC_KHR ? "KHR parallel" : "at the draw",
+               binaries ? "on" : "off (no binary format)", standins, access(path, R_OK) == 0 ? "written" : "absent");
+        CHECK(standins == 0);
+        if (binaries) {
+            DIR *d;
+            struct dirent *de;
+            CHECK(access(path, R_OK) == 0 && s_npl_known == 5);
+            /* A broken record at the end (a run killed while appending): cut off. */
+            {
+                FILE *f = fopen(path, "ab");
+                if (f) {
+                    fwrite("P\x01\x02", 3, 1, f);
+                    fclose(f);
+                }
+            }
+            /* A driver update: the binaries gone, the list kept. */
+            snprintf(path, sizeof path, "%s/shadercache/00000000", dir);
+            if ((d = opendir(path)) != NULL) {
+                while ((de = readdir(d)) != NULL)
+                    if (strstr(de->d_name, ".bin")) {
+                        char f[1500];
+                        snprintf(f, sizeof f, "%s/%s", path, de->d_name);
+                        remove(f);
+                    }
+                closedir(d);
+            }
+            gl_reset_objects(0);
+            CHECK(ensure_init());
+            host_shader_progress_text(badge, sizeof badge);
+            printf("    fresh run: %d programs to compile ahead, badge \"%s\"\n", s_npl_todo, badge);
+            if (s_async) {
+                CHECK(s_npl_todo == 5 && strcmp(badge, "Shaders 1/5") == 0);
+                /* The first list program claimed by a draw while it compiles (no
+                 * wait), never asked for again: the flip installs it, the badge
+                 * still closes. */
+                flip();
+                s_wait_max_us = 0;
+                key.final0 = 0x5EED0000u;
+                p = prog_get(&key, NULL);
+                s_wait_max_us = saved_wait;
+                printf("    a list program drawn while compiling: %s\n",
+                       p == &s_standin ? "stand-in" : p && p->prog ? "ready" : "refused");
+                CHECK(p != NULL);
+                while (s_pl_todo && flips < 4000) {
+                    flip();
+                    flips++;
+                    usleep(1000);
+                }
+                host_shader_progress_text(badge, sizeof badge);
+                printf("    warm-up done after %d flips: %d programs warm, %d in flight, badge \"%s\"\n",
+                       flips, s_nwarm, s_ahead_inflight, badge);
+                CHECK(!s_pl_todo && s_nwarm == 4 && s_ahead_inflight == 0 && badge[0] == 0);
+                for (k = 0; k < 5; k++) {
+                    uint32_t loads = s_st.cache_loads, compiles = s_st.compiles;
+                    key.final0 = 0x5EED0000u + k;
+                    p = prog_get(&key, NULL);
+                    CHECK(p != NULL && p != &s_standin && p->prog != 0 && !p->pending);
+                    /* the first in the table already, the others warm: no compile */
+                    CHECK(s_st.compiles == compiles && s_st.cache_loads == loads + (k ? 1u : 0u));
+                }
+                CHECK(s_nwarm == 0);
+            } else {
+                CHECK(s_npl_todo == 0 && badge[0] == 0);   /* compiled at the draw: nothing ahead */
+            }
+        }
+        gl_reset_objects(0);
+        s_save_dir = NULL;
+        snprintf(path, sizeof path, "%s/shadercache/00000000", dir);
+        rm_files(path);
+        rmdir(path);
+        snprintf(path, sizeof path, "%s/shadercache", dir);
+        rmdir(path);
+        rmdir(dir);
+        CHECK(ensure_init());
     }
 
     CHECK(glGetError() == GL_NO_ERROR);

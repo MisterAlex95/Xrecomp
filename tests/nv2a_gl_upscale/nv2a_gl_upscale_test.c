@@ -46,6 +46,7 @@ static int s_fail;
 /* ---- what the executor expects the runtime to provide ------------------ */
 ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem; }
 const char *xbox_path_save_dir_utf8(void) { return NULL; }
+void xbox_HostThreadFloat(const char *role) { (void)role; }   /* the shader worker's placement */
 uint32_t g_xbox_image_lo, g_xbox_image_hi;
 uint32_t g_xbox_stack_base, g_xbox_stack_size;
 uint32_t xbox_ContiguousAllocatedBytes(void) { return 0; }

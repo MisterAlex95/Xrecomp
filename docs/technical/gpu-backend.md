@@ -1060,6 +1060,57 @@ reaches Oakvale with 0 compiled. Off when the driver offers no binary
 format (`[GPUGL] program binary cache off`) or with
 `RECOMP_GPU_SHADER_CACHE=0`.
 
+**Programs compiled off the draw path (XBA-310).** A program missing from
+the cache is no longer compiled inside the draw. The draw starts a compile
+job, the way GX does (`consoles/gc/runtime/gx/gx_gl.c`), and the log says
+which way at context creation (`[GPUGL] shaders: ...`):
+
+- *worker*: a thread with an EGL context in the back end's share group
+  (`nv2a_gl_shared_context_*`, same config, version and reset strategy,
+  default priority, its own 1x1 pbuffer) compiles, links, stores the binary
+  and hands the program back through the job table. This is the default
+  where the context can be had.
+- *KHR*: `GL_KHR_parallel_shader_compile` (or ARB). The compile and link
+  are issued on the executor and polled with `GL_COMPLETION_STATUS_KHR`.
+- *sync*: at the draw, as before (macOS 4.1 core, or
+  `RECOMP_GPU_ASYNC_SHADERS=0`; `=khr` forces the KHR path).
+
+What is drawn meanwhile: a short bounded wait, then a skip. The draw waits
+up to `RECOMP_GPU_SHADER_WAIT_MS` (4 ms) for its program, and at most twice
+that over a frame. Past that the batch is drawn with a stand-in program
+that produces no fragment (every vertex at one point outside the clip
+volume, a fragment shader that discards). The executor's work and the GL
+state stay as they are and nothing reaches the target, so the functions
+that draw are untouched. The cost: an object can be missing from the first
+frame or two it appears in, instead of that frame stalling for the whole
+compile (tens of ms on a mobile driver). A target drawn once and kept (a
+cached render target, a loading screen) keeps the hole until it is drawn
+again, and an occlusion query around a skipped batch counts no sample.
+Every 600 frames the log sums it up: `[GPUGL] shaders: N compiled off the
+draw path, S batches skipped while compiling, W ms waited`. A program a
+draw waits for goes before the list's in the worker's queue.
+
+**Program list.** The binaries only help from the second run on the same
+driver. `programs.list`, next to them, keeps the GLSL of every program
+linked: the fragment body and a reference to the vertex body, each vertex
+body once, appended at the flip after the program first appears. A run
+whose binaries are missing or refused (a driver update, an emptied cache)
+compiles the list's programs ahead during its first flips, a few in flight
+at a time (4 on the worker, 2 with KHR). They go to the warm table the
+draws take them from, so a fresh run starts with a known total. The ones
+without a binary go first; the ones with a binary are compiled only if the
+binary warm-up did not link them. Format: `NV2AGLPL`, a version and a GLES
+flag, then records `V <hash> <length> <body>` and `P <vertex hash, 0 for
+the fixed shader> <length> <fragment body>`. A file of another version or
+GL flavour is replaced, and at most 1024 programs are kept (the warm
+table's size).
+
+**Shader badge (XBA-314).** The binary warm-up's binaries plus the list's
+programs without one are the badge's total (`host_shader_progress_expect`;
+each one loaded, linked or refused counts as done, so the badge always
+closes). A compile a draw starts counts as live (« Shaders: compiling...
+(n) », gone 1 s after the last one). See `src/platform/host_shader_progress.h`.
+
 **Visibility tests.** Batches drawn while `SET_ZPASS_PIXEL_COUNT_ENABLE` is
 on are wrapped in occlusion queries (a ring of recycled query objects).
 Reading them at every `GET_REPORT` made the executor wait for the GPU 341

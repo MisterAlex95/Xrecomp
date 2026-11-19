@@ -64,4 +64,18 @@ int nv2a_gl_context_lost(void);
  * new one (EGL keeps the display, config and pbuffer). */
 void nv2a_gl_context_destroy(void);
 
+/* A second context in the same share group, for the shader worker thread
+ * (XBA-310: programs compiled off the draw path; nv2a_gl.c). create: on the
+ * thread whose context is current (the executor), after
+ * nv2a_gl_context_create; 0 when it cannot be had (macOS: none; EGL: the
+ * driver refuses a shared context, no surface to be current on), and the
+ * back end then compiles another way. bind / unbind: on the worker thread,
+ * which keeps it current for its life. destroy: once the worker has ended
+ * (it unbound), before the main context goes. Programs and shaders made in
+ * it are the main context's too. */
+int  nv2a_gl_shared_context_create(void);
+int  nv2a_gl_shared_context_bind(void);
+void nv2a_gl_shared_context_unbind(void);
+void nv2a_gl_shared_context_destroy(void);
+
 #endif

@@ -42,7 +42,8 @@ foreach(v ${VARIANTS})
         target_include_directories(${v}-test PRIVATE ${EPOXY_INCLUDE_DIRS})
         target_link_libraries(${v}-test PRIVATE ${EPOXY_LINK_LIBRARIES} m)
     endif()
-    set(env "EGL_PLATFORM=surfaceless")
+    # A full wait for every program compiled off the draw path (XBA-310).
+    set(env "EGL_PLATFORM=surfaceless;RECOMP_GPU_SHADER_WAIT_MS=600000")
     if(v STREQUAL "nv2a-gl-upscale-es")
         target_compile_definitions(${v}-test PRIVATE NV2A_GL_FORCE_ES=1)
         # Mesa held to GLES 3.0, the version the Android build asks for.
