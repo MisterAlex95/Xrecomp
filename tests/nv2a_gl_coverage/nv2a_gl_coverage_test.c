@@ -46,7 +46,8 @@
  *      (gathered: vertices and indices), drawn with a glBufferData per draw
  *      (RECOMP_GPU_STREAM=off), then through 4 KB rings that wrap every few
  *      batches (unsynchronised maps, then glBufferSubData) and the default
- *      rings: every picture byte for byte the first.
+ *      rings: every picture byte for byte the first. Every scene's 240
+ *      batches reach the back end, each on the path asked for (XBA-315).
  *
  * Uniform shadow (XBA-312):
  *  13. the scene with the shadow off (every uniform sent at every batch)
@@ -206,8 +207,14 @@ static struct {
 } s_rec;
 static Nv2aBackend s_spy;
 
+/* Batches the back end received (XBA-315): CPU-transformed (draw with full
+ * vertices), vertex-program and fixed-function program batches. */
+static uint32_t s_got_cpu, s_got_prog, s_got_ffp;
+
 static void spy_draw(const Nv2aSurface *s, const Nv2aBatch *b)
 {
+    if (b->full)
+        s_got_cpu++;
     if (b->full && b->count <= REC_MAX) {
         s_rec.count = b->count;
         memcpy(s_rec.full, b->full, b->count * sizeof *b->full);
@@ -218,6 +225,10 @@ static void spy_draw(const Nv2aSurface *s, const Nv2aBatch *b)
 static int spy_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
 {
     const Nv2aProgramBatch *pb = b->program;
+    if (pb->ffp)
+        s_got_ffp++;
+    else
+        s_got_prog++;
     if (pb->ffp && pb->attrs && pb->vertex_count <= REC_MAX) {
         uint32_t a, ns = 0;
         for (a = 0; a < 16; a++)
@@ -548,6 +559,7 @@ static uint32_t stream_scene(uint32_t *out, int gpu_ffp)
     Nv2aPresentSurface now, ready;
     uint32_t i, k, x, y, base = 0, rng = 777, wraps;
 
+    s_got_cpu = s_got_prog = s_got_ffp = 0;
     nv2a_gpu_ffp_enable(gpu_ffp);
     m(0x030C, 0);                            /* no depth test */
     clear_black();
@@ -616,6 +628,16 @@ static uint32_t stream_scene(uint32_t *out, int gpu_ffp)
     for (y = 0; y < H; y++)
         for (x = 0; x < W; x++)
             out[y * W + x] = px(x, y);
+    /* Every batch reached the back end (XBA-315): 80 through the vertex
+     * program, 160 fixed-function ones on the path asked for. */
+    if (s_got_prog != 80 || s_got_cpu != (gpu_ffp ? 0u : 160u)
+        || s_got_ffp != (gpu_ffp ? 160u : 0u))
+        printf("    scene (fixed function on the %s): back end got %u CPU-transformed,"
+               " %u fixed-function, %u vertex-program batches of 160 + 80\n",
+               gpu_ffp ? "GPU" : "CPU", s_got_cpu, s_got_ffp, s_got_prog);
+    CHECK(s_got_prog == 80);
+    CHECK(s_got_cpu == (gpu_ffp ? 0u : 160u));
+    CHECK(s_got_ffp == (gpu_ffp ? 160u : 0u));
     return wraps;
 }
 
@@ -1072,6 +1094,7 @@ int main(void)
         nv2a_gpu_ffp_enable(0);
         surface();
         ffp();
+        arrays();                            /* case 11 left 80-byte strides (XBA-315) */
         m(0x0308, 0);                        /* no culling */
         m(0x1E9C, 0);
         for (k = 0; k < 2; k++)
@@ -1080,11 +1103,6 @@ int main(void)
         m(0x1EA0, 0);
         s_strm_mode = NV_GL_STREAM_OFF;
         strm_reset(0);
-        /* Twice: the first scene after case 11 hands the back end only
-         * part of its fixed-function batches (the executor's doing, the
-         * same with or without the rings); from the second on, every
-         * scene is the same. */
-        stream_scene(ref, 0);
         stream_scene(ref, 0);
         for (k = 0; k < W * H; k++)
             lit_px += ref[k] != 0;
@@ -1102,7 +1120,7 @@ int main(void)
             CHECK(diff == 0);
             CHECK(run[r].kb == 0 || wraps >= 10);
         }
-        CHECK(lit_px > 1500);
+        CHECK(lit_px > 3500);
         /* 13. XBA-312: the uniform shadow changes nothing in the picture,
          * with the fixed-function batches on the CPU (pixel uniforms) and
          * on the GPU (c[] changing in part from batch to batch). */
