@@ -43,7 +43,12 @@
  *      (gathered: vertices and indices), drawn with a glBufferData per draw
  *      (RECOMP_GPU_STREAM=off), then through 4 KB rings that wrap every few
  *      batches (unsynchronised maps, then glBufferSubData) and the default
- *      rings: every picture byte for byte the first. */
+ *      rings: every picture byte for byte the first.
+ *
+ * Uniform shadow (XBA-312):
+ *  13. the scene with the shadow off (every uniform sent at every batch)
+ *      and on: the same picture, calls left out; with the fixed-function
+ *      batches on the CPU, and on the GPU (c[] changing in part). */
 #include "../../src/gpu/nv2a_gl.c"
 #include "nv2a_coverage.h"
 #include "nv2a_vsh_interp.h"   /* Nv2aVshOutput: the capture layout */
@@ -417,28 +422,47 @@ static float ffp_trial(int t)
 static float nx(float x) { return x / 32.0f - 1.0f; }
 static float ny(float y) { return 1.0f - y / 32.0f; }
 
-/* Case 12: 240 batches of 3 to 33 vertices at their own place in VB (the
- * executor may read them late), every third through the vertex program
- * (positions in pixels, indexed with vertices shared at random, so that
- * the index lists differ), the others through the CPU transform; the picture
- * into out. Returns the ring wraps counted while drawing. */
-static uint32_t stream_scene(uint32_t *out)
+/* Cases 12 and 13: 240 batches of 3 to 33 vertices at their own place in
+ * VB (the executor may read them late), alpha tested against a reference
+ * that changes at every batch (a uniform that changes), depth test off.
+ * Every third goes through the vertex program (positions in pixels,
+ * indexed with vertices shared at random, so that the index lists differ),
+ * the others through the fixed-function unit: transformed on the CPU, or
+ * with gpu_ffp by the generated vertex shader, from c[] (the composite
+ * matrix's translation and x scale changing from batch to batch, back and
+ * forth: part of the constants change). The picture into out. Returns the
+ * ring wraps counted while drawing; s_scene_uni the uniform calls issued
+ * and left out. */
+static uint32_t s_scene_uni[2];
+static uint32_t stream_scene(uint32_t *out, int gpu_ffp)
 {
+    Nv2aPresentSurface now, ready;
     uint32_t i, k, x, y, base = 0, rng = 777, wraps;
 
+    nv2a_gpu_ffp_enable(gpu_ffp);
+    m(0x030C, 0);                            /* no depth test */
     clear_black();
     wraps = s_st.strm_wraps;
+    s_scene_uni[0] = s_st.uni_calls;
+    s_scene_uni[1] = s_st.uni_skipped;
+    m(0x0300, 1);                            /* alpha test, GREATER: the reference */
+    m(0x033C, 0x0204);                       /* (a uniform) changes every batch */
     for (i = 0; i < 240; i++) {
         uint32_t nv = 3 * (1 + (i * 7) % 11);
         int prog = i % 3 == 0;
         m(0x1E94, prog ? 2 : 0);
+        m(0x0340, (i * 37u) & 0x7F);
+        if (gpu_ffp && !prog) {
+            mf(0x0680 + 4 * 3, 32.0f + (float)(i % 5));      /* translation x */
+            mf(0x0680 + 4 * 0, 32.0f - (float)(i % 3));      /* scale x */
+        }
         for (k = 0; k < nv; k++) {
             float fx, fy;
             uint32_t c;
             rng = rng * 1103515245u + 12345u;
             fx = (float)((rng >> 8) % 72) - 4.0f;
             fy = (float)((rng >> 16) % 72) - 4.0f;
-            c = 0xFF000000u | ((rng * 2654435761u) >> 8);
+            c = rng * 2654435761u;
             if (prog)
                 vtx(base + k, fx, fy, 100, c, 0, 0);
             else
@@ -463,8 +487,23 @@ static uint32_t stream_scene(uint32_t *out)
         base += nv;
     }
     m(0x1E94, 0);
-    wraps = s_st.strm_wraps - wraps;         /* before the flip clears the counters */
-    readback();
+    m(0x0300, 0);
+    ffp();
+    nv2a_gpu_ffp_enable(0);
+    /* readback(), counted between the present (every batch drawn) and the
+     * flip (which may clear the counters). */
+    memset(&now, 0, sizeof now);
+    now.va = FB;
+    now.pitch = 256;
+    now.bpp = 4;
+    now.format = 0x0008;
+    now.w = W;
+    now.h = H;
+    gl_present(&now, 1, &ready);
+    wraps = s_st.strm_wraps - wraps;
+    s_scene_uni[0] = s_st.uni_calls - s_scene_uni[0];
+    s_scene_uni[1] = s_st.uni_skipped - s_scene_uni[1];
+    gl_flip();
     for (y = 0; y < H; y++)
         for (x = 0; x < W; x++)
             out[y * W + x] = px(x, y);
@@ -904,8 +943,12 @@ int main(void)
         m(0x1EA0, 0);
         s_strm_mode = NV_GL_STREAM_OFF;
         strm_reset(0);
-        stream_scene(ref);                   /* once to settle the pipelines' first use */
-        stream_scene(ref);
+        /* Twice: the first scene after case 11 hands the back end only
+         * part of its fixed-function batches (the executor's doing, the
+         * same with or without the rings); from the second on, every
+         * scene is the same. */
+        stream_scene(ref, 0);
+        stream_scene(ref, 0);
         for (k = 0; k < W * H; k++)
             lit_px += ref[k] != 0;
         for (r = 0; r < 3; r++) {
@@ -914,7 +957,7 @@ int main(void)
             for (j = 0; j < NV_GL_NSTRM; j++)
                 s_strm_size[j] = run[r].kb ? run[r].kb << 10 : (j == NV_GL_STRM_IDX ? 2u : 8u) << 20;
             strm_reset(0);
-            wraps = stream_scene(got);
+            wraps = stream_scene(got, 0);
             for (k = 0; k < W * H; k++)
                 diff += got[k] != ref[k];
             printf("12. streamed uploads, %s: %u wraps, %u of 4096 pixels differ from"
@@ -922,7 +965,29 @@ int main(void)
             CHECK(diff == 0);
             CHECK(run[r].kb == 0 || wraps >= 10);
         }
-        CHECK(lit_px > 2000);
+        CHECK(lit_px > 1500);
+        /* 13. XBA-312: the uniform shadow changes nothing in the picture,
+         * with the fixed-function batches on the CPU (pixel uniforms) and
+         * on the GPU (c[] changing in part from batch to batch). */
+        for (r = 0; r < 2; r++) {
+            uint32_t diff = 0, on_calls, on_skipped, off_calls, off_skipped;
+            s_ushadow = 0;
+            stream_scene(ref, r);
+            off_calls = s_scene_uni[0];
+            off_skipped = s_scene_uni[1];
+            s_ushadow = 1;
+            stream_scene(got, r);
+            on_calls = s_scene_uni[0];
+            on_skipped = s_scene_uni[1];
+            for (k = 0; k < W * H; k++)
+                diff += got[k] != ref[k];
+            printf("13. uniform shadow, fixed function on the %s: %u calls, %u left out"
+                   " (off: %u calls); %u of 4096 pixels differ\n", r ? "GPU" : "CPU",
+                   on_calls, on_skipped, off_calls, diff);
+            CHECK(diff == 0);
+            CHECK(on_calls > 0 && on_skipped > 0 && off_skipped == 0);
+            CHECK(on_calls + on_skipped == off_calls);
+        }
         nv2a_gl_install_from_env();
     }
 

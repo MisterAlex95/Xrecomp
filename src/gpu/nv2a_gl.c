@@ -117,6 +117,12 @@ static struct {
      * ring, maps that failed (glBufferSubData instead). */
     uint32_t strm_wraps, strm_waits, strm_grows, strm_oversize, strm_mapfail;
     uint64_t strm_wait_ns, strm_wait_max_ns;
+    /* glUniform* calls issued and left out because the program already
+     * held the values (us_same, sync_constants); bytes hashed, exact (the
+     * _kb counters drop what is under 1 KB a call): textures (tex_hash),
+     * vertex ranges and index lists (vb_hash), the rest (hash_bytes). */
+    uint32_t uni_calls, uni_skipped;
+    uint64_t hash_tex_b, hash_vtx_b, hash_other_b;
 } s_st;
 static float s_line_width = 1.0f;  /* glLineWidth as last set */
 
@@ -229,6 +235,7 @@ static uint64_t hash_bytes(const uint8_t *p, size_t n)
     for (; i < n; i++)
         h = (h ^ p[i]) * 0x100000001B3ull;
     s_st.hashes_kb += (uint32_t)(n >> 10);
+    s_st.hash_other_b += n;
     return h;
 }
 
@@ -2240,9 +2247,11 @@ static uint64_t tex_hash(const Nv2aTexture *t, uint32_t bytes)
 {
     uint64_t h = hash4_bytes(guest(t->offset), bytes);
     s_st.hashes_kb += bytes >> 10;
+    s_st.hash_tex_b += bytes;
     if (t->color == 0x0B && t->palette) {        /* the palette is content too */
         h ^= hash4_bytes(guest(t->palette), 1024) * 31u;
         s_st.hashes_kb += 1;
+        s_st.hash_tex_b += 1024;
     }
     return h;
 }
@@ -2651,6 +2660,16 @@ typedef struct {
     uint64_t src_hash;              /* the program binary cache's key */
     int pending;                    /* compiling off the draw path (XBA-310): prog 0 until done */
     int job;                        /* then its job, index + 1 */
+    /* The uniform values this program was last sent (us_same): one not
+     * changed since is not sent again. Valid for GL program us_prog only
+     * (0: nothing yet; a program linked again starts over): us_ok has a bit
+     * per NV_GL_U_* held in us[], cvalid one per c[i] held in cshadow
+     * (allocated at the first sync_constants). */
+    GLuint us_prog;
+    uint32_t us_ok;
+    float us[126];
+    float (*cshadow)[4];
+    uint32_t cvalid[6];
 } GlProg;
 
 /* A translated vertex program (nv2a_gl_vsh.c): its GLSL, kept so that the
@@ -2700,6 +2719,7 @@ static void prog_drop_all(void)
             glDeleteProgram(s_prog[i].prog);
         }
         free(s_prog[i].cloc);
+        free(s_prog[i].cshadow);
     }
     memset(s_prog, 0, sizeof s_prog);
     s_nprog = 0;
@@ -4570,15 +4590,67 @@ static void break_feedback(GlRT *target)
     }
 }
 
+/* ---- uniform shadow (XBA-312) ----------------------------------------
+ * A batch used to send 10-13 uniforms whatever they held (~12k glUniform
+ * calls a frame in Fable); each program now keeps the values it was last
+ * sent and only a changed one goes out, compared byte for byte (memcmp:
+ * -0 and NaN payloads count as changes, so the program ends up holding
+ * exactly what it did before). RECOMP_GPU_UNIFORM_SHADOW=0 sends every
+ * value again, for comparison. */
+enum {
+    NV_GL_U_VP, NV_GL_U_XF, NV_GL_U_FOG, NV_GL_U_TSCALE, NV_GL_U_LODB, NV_GL_U_C0, NV_GL_U_C1,
+    NV_GL_U_FC0, NV_GL_U_FC1, NV_GL_U_FOGC, NV_GL_U_BM, NV_GL_U_BSO, NV_GL_U_AREF, NV_GL_U_PSIZE,
+    NV_GL_NU
+};
+/* Where each one's floats are in GlProg.us (sizes 4 4 4 8 4 32 32 4 4 4 16 8 1 1). */
+static const uint8_t s_us_off[NV_GL_NU + 1] = {
+    0, 4, 8, 12, 20, 24, 56, 88, 92, 96, 100, 116, 124, 125, 126
+};
+static int s_ushadow = -1;          /* RECOMP_GPU_UNIFORM_SHADOW (default on), -1 not read */
+
+/* Program p is about to get uniforms; its shadow starts over if it is no
+ * longer the GL program it was made for. */
+static void us_check(GlProg *p)
+{
+    if (s_ushadow < 0) {
+        const char *e = getenv("RECOMP_GPU_UNIFORM_SHADOW");
+        s_ushadow = !(e && strcmp(e, "0") == 0);
+    }
+    if (p->us_prog != p->prog) {
+        p->us_prog = p->prog;
+        p->us_ok = 0;
+        memset(p->cvalid, 0, sizeof p->cvalid);
+    }
+}
+
+/* 1 when program p already holds v for uniform u (nothing to send);
+ * otherwise records v as sent, counts the call, 0: the caller sends it. */
+static int us_same(GlProg *p, int u, const float *v)
+{
+    size_t n = (size_t)(s_us_off[u + 1] - s_us_off[u]) * sizeof(float);
+    float *sh = p->us + s_us_off[u];
+
+    us_check(p);
+    if (s_ushadow && (p->us_ok >> u & 1u) && memcmp(sh, v, n) == 0) {
+        s_st.uni_skipped++;
+        return 1;
+    }
+    memcpy(sh, v, n);
+    p->us_ok |= 1u << u;
+    s_st.uni_calls++;
+    return 0;
+}
+
 /* The fragment shader's uniforms (combiner constants, fog colour, alpha
- * reference, texture scales). */
-static void set_pixel_uniforms(const GlProg *p, const Nv2aPixelState *ps,
+ * reference, texture scales), those that changed. */
+static void set_pixel_uniforms(GlProg *p, const Nv2aPixelState *ps,
                                const Nv2aRenderState *rs, const float tscale[8])
 {
     float c0[32], c1[32], v[4];
 
-    glUniform2fv(p->u_tscale, 4, tscale);
-    if (p->u_lodb >= 0)
+    if (!us_same(p, NV_GL_U_TSCALE, tscale))
+        glUniform2fv(p->u_tscale, 4, tscale);
+    if (p->u_lodb >= 0 && !us_same(p, NV_GL_U_LODB, s_lodb))
         glUniform4fv(p->u_lodb, 1, s_lodb);
     if (ps->shade == NV2A_SHADE_COMBINERS) {
         int i;
@@ -4586,14 +4658,19 @@ static void set_pixel_uniforms(const GlProg *p, const Nv2aPixelState *ps,
             unpack4(ps->rc.factor0[i], &c0[i * 4]);
             unpack4(ps->rc.factor1[i], &c1[i * 4]);
         }
-        glUniform4fv(p->u_c0, 8, c0);
-        glUniform4fv(p->u_c1, 8, c1);
+        if (!us_same(p, NV_GL_U_C0, c0))
+            glUniform4fv(p->u_c0, 8, c0);
+        if (!us_same(p, NV_GL_U_C1, c1))
+            glUniform4fv(p->u_c1, 8, c1);
         unpack4(ps->rc.final_c0, v);
-        glUniform4fv(p->u_fc0, 1, v);
+        if (!us_same(p, NV_GL_U_FC0, v))
+            glUniform4fv(p->u_fc0, 1, v);
         unpack4(ps->rc.final_c1, v);
-        glUniform4fv(p->u_fc1, 1, v);
+        if (!us_same(p, NV_GL_U_FC1, v))
+            glUniform4fv(p->u_fc1, 1, v);
         unpack4(ps->fog_color, v);
-        glUniform4fv(p->u_fogc, 1, v);
+        if (!us_same(p, NV_GL_U_FOGC, v))
+            glUniform4fv(p->u_fogc, 1, v);
         if (p->u_bm >= 0 || p->u_bso >= 0) {
             float bm[16], bso[8];
             for (i = 0; i < 4; i++) {
@@ -4601,13 +4678,15 @@ static void set_pixel_uniforms(const GlProg *p, const Nv2aPixelState *ps,
                 bso[i * 2] = ps->stage[i].bump_scale;
                 bso[i * 2 + 1] = ps->stage[i].bump_offset;
             }
-            if (p->u_bm >= 0)
+            if (p->u_bm >= 0 && !us_same(p, NV_GL_U_BM, bm))
                 glUniform4fv(p->u_bm, 4, bm);
-            if (p->u_bso >= 0)
+            if (p->u_bso >= 0 && !us_same(p, NV_GL_U_BSO, bso))
                 glUniform2fv(p->u_bso, 4, bso);
         }
     }
-    glUniform1f(p->u_aref, (float)(rs->alpha_ref & 0xFF));
+    v[0] = (float)(rs->alpha_ref & 0xFF);
+    if (!us_same(p, NV_GL_U_AREF, v))
+        glUniform1f(p->u_aref, v[0]);
 }
 
 /* Near plane and depth mapping. CPU-transformed triangles arrive clipped:
@@ -4654,19 +4733,21 @@ static void set_near_mode(int program, float near01)
 /* The GL primitive for a batch (Nv2aBatch.prim), with the point size and
  * line width it draws at: surface pixels times the internal scale, clamped
  * to what the context offers (desktop lines stay 1, see ensure_init). */
-static GLenum prim_setup(const Nv2aBatch *b, const GlProg *p, float sc)
+static GLenum prim_setup(const Nv2aBatch *b, GlProg *p, float sc)
 {
+    float one = 1.0f;
+
     if (b->prim == NV2A_PRIM_POINTS) {
         float size = b->point_size * sc;
         if (size < 1.0f) size = 1.0f;
         if (size > s_point_max) size = s_point_max;
-        if (p->u_psize >= 0)
+        if (p->u_psize >= 0 && !us_same(p, NV_GL_U_PSIZE, &size))
             glUniform1f(p->u_psize, size);
         s_st.points++;
         return GL_POINTS;
     }
-    if (p->u_psize >= 0)
-        glUniform1f(p->u_psize, 1.0f);
+    if (p->u_psize >= 0 && !us_same(p, NV_GL_U_PSIZE, &one))
+        glUniform1f(p->u_psize, one);
     if (b->prim == NV2A_PRIM_LINES) {
         float w = sc < 1.0f ? 1.0f : (sc > s_line_max ? s_line_max : sc);
         if (w != s_line_width) {
@@ -4893,7 +4974,8 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     v[1] = 2.0f / (float)t.h;
     v[2] = 2.0f / zmax_of(s->format);
     v[3] = s_depth_clamp ? 0.0f : 1.0f;    /* vertex-shader clamp instead */
-    glUniform4fv(p->u_vp, 1, v);
+    if (!us_same(p, NV_GL_U_VP, v))
+        glUniform4fv(p->u_vp, 1, v);
     set_pixel_uniforms(p, ps, rs, tscale);
 
     sh_vao(s_vao);
@@ -4928,13 +5010,26 @@ static void gl_draw(const Nv2aSurface *s, const Nv2aBatch *b)
 }
 
 /* Upload what changed in c[] since this program last drew (nv2a_backend.h:
- * stamps), as runs of consecutive uniform locations. */
+ * stamps), as runs of consecutive uniform locations. With the uniform
+ * shadow, a run is trimmed at both ends to the constants whose values the
+ * program does not hold already (a title that writes the same constants
+ * again at every draw sends nothing), one call for what is left. */
+static int c_held(const GlProg *p, uint32_t i, const float *v)
+{
+    return (p->cvalid[i >> 5] >> (i & 31) & 1u) && memcmp(p->cshadow[i], v, 16) == 0;
+}
+
 static void sync_constants(GlProg *p, const Nv2aProgramBatch *pb)
 {
-    uint32_t i, lo = 192, hi = 0;
+    uint32_t i, k, lo = 192, hi = 0;
+    int sh;
 
     if (p->const_synced >= pb->const_serial)
         return;
+    us_check(p);
+    if (!p->cshadow)
+        p->cshadow = (float (*)[4])malloc(192 * sizeof *p->cshadow);
+    sh = p->cshadow != NULL;            /* recorded even with the shadow off */
     for (i = 0; i < 192; i++)
         if (pb->const_stamp[i] > p->const_synced) {
             if (lo == 192)
@@ -4942,14 +5037,31 @@ static void sync_constants(GlProg *p, const Nv2aProgramBatch *pb)
             hi = i;
         }
     for (i = lo; i <= hi && i < 192;) {
-        uint32_t j = i + 1;
+        uint32_t j = i + 1, a = i, b;
         if (p->cloc[i] < 0) {
             i++;
             continue;
         }
         while (j <= hi && p->cloc[j] == p->cloc[j - 1] + 1)
             j++;
-        glUniform4fv(p->cloc[i], (GLsizei)(j - i), pb->constants[i]);
+        b = j;
+        if (sh && s_ushadow) {
+            while (a < b && c_held(p, a, pb->constants[a]))
+                a++;
+            while (b > a && c_held(p, b - 1, pb->constants[b - 1]))
+                b--;
+        }
+        if (a < b) {
+            glUniform4fv(p->cloc[a], (GLsizei)(b - a), pb->constants[a]);
+            s_st.uni_calls++;
+            if (sh) {
+                memcpy(p->cshadow[a], pb->constants[a], (size_t)(b - a) * sizeof *p->cshadow);
+                for (k = a; k < b; k++)
+                    p->cvalid[k >> 5] |= 1u << (k & 31);
+            }
+        } else {
+            s_st.uni_skipped++;
+        }
         i = j;
     }
     p->const_synced = pb->const_serial;
@@ -5030,6 +5142,7 @@ static int s_vbo_on;                /* RECOMP_GPU_VBO, default on */
 static uint64_t vb_hash(const uint8_t *p, size_t n)
 {
     s_st.vbo_hash_kb += (uint32_t)(n >> 10);
+    s_st.hash_vtx_b += n;
     return hash4_bytes(p, n);
 }
 
@@ -5374,14 +5487,17 @@ static int gl_draw_program(const Nv2aSurface *s, const Nv2aBatch *b)
     v[1] = 2.0f / (float)t.h;
     v[2] = 2.0f / (zmax - zmin);
     v[3] = 0.0f;                    /* GL clips near and far itself (set_near_mode) */
-    glUniform4fv(p->u_vp, 1, v);
+    if (!us_same(p, NV_GL_U_VP, v))
+        glUniform4fv(p->u_vp, 1, v);
     v[0] = pb->aa_sx;
     v[1] = pb->aa_sy;
     v[2] = zmin;
-    glUniform4fv(p->u_xf, 1, v);
+    if (!us_same(p, NV_GL_U_XF, v))
+        glUniform4fv(p->u_xf, 1, v);
     nv2a_gl_vsh_fog_uniform(pb->fog_enable, pb->fog_mode, pb->fog_param[0],
                             pb->fog_param[1], v);
-    glUniform4fv(p->u_fog, 1, v);
+    if (!us_same(p, NV_GL_U_FOG, v))
+        glUniform4fv(p->u_fog, 1, v);
     set_pixel_uniforms(p, ps, rs, tscale);
     sync_constants(p, pb);
 
@@ -5535,8 +5651,10 @@ static void gl_reset_objects(int lost)
     memset(s_bound, 0, sizeof s_bound);
     memset(s_stage_rt, 0, sizeof s_stage_rt);
     s_ntex = 0;
-    for (i = 0; i < NV_GL_MAX_PROG; i++)
+    for (i = 0; i < NV_GL_MAX_PROG; i++) {
         free(s_prog[i].cloc);
+        free(s_prog[i].cshadow);
+    }
     memset(s_prog, 0, sizeof s_prog);
     s_nprog = 0;
     for (i = 0; i < NV_GL_MAX_VSH; i++)
@@ -5999,14 +6117,23 @@ static void gl_flip(void)
                         " %u uploads (%u KB), %u KB hashed, %d textures,"
                         " %d targets, %d programs (%u compiled, %u from cache;"
                         " run %u/%u),"
-                        " %.1f target switches/frame\n",
+                        " %.1f target switches/frame, %.0f uniform calls/frame (%.0f left out),"
+                        " %.0f KB hashed/frame (textures %.0f, vertices and indices %.0f,"
+                        " other %.0f)\n",
                 s_frame, s_st.draws, s_st.vsh_draws, s_st.vsh_kb, s_st.ffp_kb, s_st.tris,
                 s_st.clears, s_st.readbacks, s_st.rt_creates, s_st.relayouts, s_st.rt_grows,
                 s_st.rt_direct, s_st.rt_copies, s_st.shadow_binds, s_st.bump_draws, s_st.seeds,
                 s_st.seeds_skipped, s_st.invalidates,
                 s_st.uploads, s_st.upload_kb, s_st.hashes_kb, s_ntex, nrt, nprog,
                 s_st.compiles, s_st.cache_loads, s_pc_total_compiled, s_pc_total_loaded,
-                s_st.frames ? (double)s_st.target_switches / s_st.frames : 0.0);
+                s_st.frames ? (double)s_st.target_switches / s_st.frames : 0.0,
+                s_st.frames ? (double)s_st.uni_calls / s_st.frames : 0.0,
+                s_st.frames ? (double)s_st.uni_skipped / s_st.frames : 0.0,
+                s_st.frames ? (double)(s_st.hash_tex_b + s_st.hash_vtx_b + s_st.hash_other_b)
+                                  / 1024.0 / s_st.frames : 0.0,
+                s_st.frames ? (double)s_st.hash_tex_b / 1024.0 / s_st.frames : 0.0,
+                s_st.frames ? (double)s_st.hash_vtx_b / 1024.0 / s_st.frames : 0.0,
+                s_st.frames ? (double)s_st.hash_other_b / 1024.0 / s_st.frames : 0.0);
         if (s_vbo_on && s_st.frames)
             fprintf(stderr, "  [GPUGL] vertex buffers: %.0f raw batches/frame,"
                             " %.1f KB/frame uploaded (%.1f new, %.1f changed buffers/frame),"
