@@ -1288,10 +1288,22 @@ through the same queue, so counts stay cumulative from the clear, as before.
 `RECOMP_GPU_ZPASS=sync` reads synchronously, `=always` runs no queries and
 reports 1, `=lazy` never flushes or waits from the idle hook: where it would
 wait, the reports pending then read 1 (visible) at once and their GPU counts
-are dropped when they come in (a candidate default for a tiler, where a
-mid-frame flush ends the render pass). The `[GPU] visibility reports` line
+are dropped when they come in. `=deferred` is the flush-then-wait path above.
+**Default (XBA-313): lazy on GLES (Android), deferred on desktop GL.** The
+back end says which with `NV2A_BACKEND_CAP_ZPASS_ANY`: GLES 3.0 queries only
+say whether any sample passed, so a report there is already 0 or "some", and
+answering 1 can only turn a hidden object into a drawn one (over-draw for a
+frame), never cull a visible one; and on a tiler the mid-frame flush or wait
+lazy avoids ends the render pass. Desktop GL counts pixels exactly, where 1
+would be a wrong count (a lens flare's visible ratio), so it keeps waiting
+for the real one. `RECOMP_GPU_ZPASS=deferred` brings back the old path on
+Android; a value that is no mode is the default. The 512-pending cap still
+waits in both modes. The `[GPU] visibility reports` line
 counts reports written when idle and at the flip, waits, flushes and lazy
-answers, and the idle hook's time per frame (not part of `render`).
+answers, and the idle hook's time per frame (not part of `render`); its mode
+reads `lazy (default)` when nothing was asked. `nv2a_gl_coverage` case 15
+checks the counts on real queries (behind an occluder 0, visible 256 on
+desktop GL and 1 on GLES) and the spun-on report in each default.
 GLES 3.0 only says whether any sample passed, which reports 1.
 
 ## Verification (2026-11-11, M1 Max, Fable title screen)
@@ -1680,7 +1692,7 @@ The blockers the earlier note listed, checked against the code then:
 
 | Blocker | State |
 |---|---|
-| Synchronous visibility queries ending the render pass | Gone with deferred reports (G2, "Visibility tests"): no wait at `GET_REPORT`, a flush after 300 us and a wait after 2 ms only for a report the title spins on. `RECOMP_GPU_ZPASS=lazy` (never flush or wait from the idle hook) stays the candidate for a tiler, to measure on the device. |
+| Synchronous visibility queries ending the render pass | Gone with deferred reports (G2, "Visibility tests"): no wait at `GET_REPORT`, a flush after 300 us and a wait after 2 ms only for a report the title spins on. `RECOMP_GPU_ZPASS=lazy` (never flush or wait from the idle hook) is the default on GLES since XBA-313 (`=deferred` to go back); the device measurement is the XBA-313 check list. |
 | Per-frame vertex uploads (115 MB/frame) | Vertex-program batches come from cached guest vertex buffers (G3, `RECOMP_GPU_VBO`, on by default; 0 KB a frame in Oakvale's steady state). Fixed-function batches go to a generated vertex shader over cached vertex buffers by default (`RECOMP_GPU_FFP`, XBA-134, default since XBA-306); screen-space batches, and fixed-function ones while their program compiles, are still transformed on the CPU and uploaded per batch; the frame line gives that figure (`KB transformed on the CPU`). |
 | CPU writes into a surface the GPU does not see | Done: "Guest CPU writes". |
 | Clear rectangles on swizzled surfaces | Done: the executor hands a back end `SET_CLEAR_RECT` on a swizzled surface. |

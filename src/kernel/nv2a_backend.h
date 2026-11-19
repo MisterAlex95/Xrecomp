@@ -417,6 +417,11 @@ typedef struct {
 /* With CAP_PIXEL: the back end samples volume textures (Nv2aTexture.depth);
  * without it a stage holding one is counted as unsupported. */
 #define NV2A_BACKEND_CAP_VOLUME 0x20u
+/* The visibility counts (zpass_read / zpass_resolve) only say whether any
+ * sample of a batch passed (GLES 3.0's GL_ANY_SAMPLES_PASSED), not how many.
+ * The executor then answers a report a title spins on lazily by default
+ * (RECOMP_GPU_ZPASS=lazy, nv2a_pb_exec.c "Visibility reports"). */
+#define NV2A_BACKEND_CAP_ZPASS_ANY 0x40u
 
 typedef struct {
     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).
@@ -452,7 +457,8 @@ typedef struct {
      * without waiting for it (glFlush), so the counts zpass_resolve polls
      * for come in. The executor calls it at most once per report that a
      * title may be spinning on (unresolved at the head of the queue for
-     * 300 us across idle calls), never with RECOMP_GPU_ZPASS=lazy. NULL:
+     * 300 us across idle calls), never in lazy mode (RECOMP_GPU_ZPASS=lazy,
+     * the default with NV2A_BACKEND_CAP_ZPASS_ANY). NULL:
      * the executor waits for that report after 2 ms instead. */
     void (*zpass_flush)(void);
     /* Optional, save states (XBA-248, xbox_dev_state.h), on the executor

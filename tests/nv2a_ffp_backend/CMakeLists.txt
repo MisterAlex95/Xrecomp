@@ -58,6 +58,15 @@ add_test(NAME nv2a-zpass-lazy COMMAND nv2a-zpass-test)
 set_tests_properties(nv2a-zpass-lazy PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=lazy")
 add_test(NAME nv2a-zpass-always COMMAND nv2a-zpass-test)
 set_tests_properties(nv2a-zpass-always PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=always")
+# The default (XBA-313): lazy with a back end whose counts are any-samples-passed (GLES), deferred
+# with exact counts; RECOMP_GPU_ZPASS=deferred goes back to deferred, a value that is no mode is the default.
+add_test(NAME nv2a-zpass-any COMMAND nv2a-zpass-test any)
+add_test(NAME nv2a-zpass-any-deferred COMMAND nv2a-zpass-test any)
+set_tests_properties(nv2a-zpass-any-deferred PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=deferred")
+add_test(NAME nv2a-zpass-any-bogus COMMAND nv2a-zpass-test any)
+set_tests_properties(nv2a-zpass-any-bogus PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=bogus")
+add_test(NAME nv2a-zpass-deferred COMMAND nv2a-zpass-test)
+set_tests_properties(nv2a-zpass-deferred PROPERTIES ENVIRONMENT "RECOMP_GPU_ZPASS=deferred")
 # RECOMP_GPU_FPS_CAP on a fake clock: fast frames held, slow frames not.
 add_test(NAME nv2a-flip-cap COMMAND nv2a-flip-cap-test)
 # RECOMP_PACING=auto (XBA-107, XBA-135): synthetic titles of 10, 20, 40 ms, a flip-locked one,

@@ -6519,7 +6519,8 @@ static void gl_state(int op)
 static Nv2aBackend s_backend = {
     gl_clear, gl_draw, gl_flip,
     NV2A_BACKEND_CAP_PIXEL | NV2A_BACKEND_CAP_CULL | NV2A_BACKEND_CAP_PROGRAM
-        | NV2A_BACKEND_CAP_POINTS_LINES | NV2A_BACKEND_CAP_VOLUME,
+        | NV2A_BACKEND_CAP_POINTS_LINES | NV2A_BACKEND_CAP_VOLUME
+        | (NV2A_GL_ES ? NV2A_BACKEND_CAP_ZPASS_ANY : 0u),   /* GL_ANY_SAMPLES_PASSED */
     gl_zpass_read, gl_zpass_end, gl_zpass_resolve, gl_draw_program, gl_zpass_flush,
     gl_state
 };

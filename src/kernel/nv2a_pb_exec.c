@@ -1020,24 +1020,40 @@ static int surface_color_valid(int masked)
  * queries at all and reports 1 (everything visible); =lazy is the deferred
  * path that never waits or flushes mid-frame: where it would wait, the
  * reports pending then are answered 1 (visible) at once, and the GPU's
- * counts for them are dropped when they come in -- a candidate default for a
- * tiler, where a mid-frame flush ends the render pass. The CPU rasteriser
- * counts its own pixels and is not affected. */
+ * counts for them are dropped when they come in. =deferred is the path
+ * described above.
+ *
+ * The default (XBA-313) is lazy for a back end whose counts only say
+ * whether any sample passed (NV2A_BACKEND_CAP_ZPASS_ANY: GLES 3.0, the
+ * Android build, a tiler where a mid-frame flush or wait ends the render
+ * pass), deferred otherwise. With such counts a report is 0 or "some", and
+ * lazy can only turn a 0 the title spun on for 2 ms into a 1: the object is
+ * drawn although hidden (over-draw), never culled although visible. With
+ * exact counts (desktop GL) 1 would be an arbitrary pixel count (a lens
+ * flare's ratio), so the desktop waits for the real one. Any other value
+ * of RECOMP_GPU_ZPASS is the default. The CPU rasteriser counts its own
+ * pixels and is not affected. */
 enum { ZPASS_DEFER = 0, ZPASS_SYNC = 1, ZPASS_ALWAYS = 2, ZPASS_LAZY = 3 };
 
+#define ZPASS_DEFAULT (-2)                 /* RECOMP_GPU_ZPASS unset (or not a mode) */
+static int s_zp_asked = -1;                /* RECOMP_GPU_ZPASS, read once */
 static int zpass_mode(void)
 {
-    static int mode = -1;
+    int mode;
 
     if (!s_backend || !s_backend->draw)
         return ZPASS_SYNC;                 /* the CPU rasteriser's own count */
-    if (mode < 0) {
+    if (s_zp_asked == -1) {
         const char *e = getenv("RECOMP_GPU_ZPASS");
-        mode = e && strcmp(e, "always") == 0 ? ZPASS_ALWAYS
-             : e && strcmp(e, "sync") == 0   ? ZPASS_SYNC
-             : e && strcmp(e, "lazy") == 0   ? ZPASS_LAZY
-             : ZPASS_DEFER;
+        s_zp_asked = e && strcmp(e, "always") == 0   ? ZPASS_ALWAYS
+                   : e && strcmp(e, "sync") == 0     ? ZPASS_SYNC
+                   : e && strcmp(e, "lazy") == 0     ? ZPASS_LAZY
+                   : e && strcmp(e, "deferred") == 0 ? ZPASS_DEFER
+                   : ZPASS_DEFAULT;
     }
+    /* The default follows the back end registered now (see above). */
+    mode = s_zp_asked != ZPASS_DEFAULT ? s_zp_asked
+         : (s_backend->caps & NV2A_BACKEND_CAP_ZPASS_ANY) ? ZPASS_LAZY : ZPASS_DEFER;
     if ((mode == ZPASS_DEFER || mode == ZPASS_LAZY)
             && !(s_backend->zpass_end && s_backend->zpass_resolve))
         return ZPASS_SYNC;
@@ -8553,12 +8569,13 @@ void nv2a_pb_exec_report(void)
                     (double)s_render_max_ns / 1e6, s_render_frames,
                     backend_draws() ? "back end" : "CPU rasteriser", 10);
             if (s_gpu.reports && backend_draws())
-                fprintf(stderr, "[GPU] visibility reports: %s, %u written (%u when idle,"
+                fprintf(stderr, "[GPU] visibility reports: %s%s, %u written (%u when idle,"
                                 " %u at the flip; %u waited on in %u waits, %u flushes, %u"
                                 " answered lazily), %u pending; idle hook %.2f ms/frame%c",
                         zpass_mode() == ZPASS_DEFER ? "deferred"
                         : zpass_mode() == ZPASS_LAZY ? "lazy"
                         : zpass_mode() == ZPASS_ALWAYS ? "always 1" : "synchronous",
+                        s_zp_asked == ZPASS_DEFAULT ? " (default)" : "",
                         s_zp_resolves, s_zp_res_idle, s_zp_res_flip, s_zp_blocks,
                         s_zp_waits, s_zp_flushes, s_zp_lazy, s_zp_count,
                         (double)s_zp_idle_ns / s_render_frames / 1e6, 10);

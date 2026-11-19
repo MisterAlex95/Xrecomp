@@ -58,7 +58,19 @@
  * Uniform shadow (XBA-312):
  *  13. the scene with the shadow off (every uniform sent at every batch)
  *      and on: the same picture, calls left out; with the fixed-function
- *      batches on the CPU, and on the GPU (c[] changing in part). */
+ *      batches on the CPU, and on the GPU (c[] changing in part).
+ *
+ * Visibility reports (XBA-313):
+ *  15. GET_REPORT on real occlusion queries, through the executor's
+ *      deferred queue: a quad behind an occluder reports 0, one in front or
+ *      beside it reports its pixels (desktop GL: exactly 256; GLES 3.0
+ *      says only "any passed": at least 1). Nothing is written at
+ *      GET_REPORT; every slot once the queue is resolved (a save state's
+ *      prepare waits for all). The back end says its counts are
+ *      any-samples-passed exactly on GLES (NV2A_BACKEND_CAP_ZPASS_ANY),
+ *      which makes lazy the default there: a report the title spins on for
+ *      2 ms reads 0 (the GPU's answer, if in) or 1, never anything else, and
+ *      no glFlush is asked; on desktop GL (deferred) it reads the real 0. */
 #include "../../src/gpu/nv2a_gl.c"
 #include "nv2a_coverage.h"
 #include "nv2a_vsh_interp.h"   /* Nv2aVshOutput: the capture layout */
@@ -100,7 +112,8 @@ int xbox_FramebufferWindowPresentHost(const void *px, uint32_t w, uint32_t h, ui
 void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }
-uint64_t xbox_HostNowNs(void) { return 0; }
+static uint64_t s_now_ns;            /* case 15 moves it; 0 before */
+uint64_t xbox_HostNowNs(void) { return s_now_ns; }
 void xbox_HostSleepNs(uint64_t ns) { (void)ns; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL; }
@@ -645,6 +658,54 @@ static uint32_t stream_scene(uint32_t *out, int gpu_ffp)
     CHECK(s_got_cpu == (gpu_ffp ? 0u : 160u));
     CHECK(s_got_ffp == (gpu_ffp ? 160u : 0u));
     return wraps;
+}
+
+/* ---- XBA-313: visibility reports ---------------------------------------- */
+extern void nv2a_pb_exec_idle(void);
+extern void nv2a_pb_exec_state_prepare(void);
+#define REPORTS 0x00700000u                 /* report slots, 16 bytes each */
+static uint32_t s_zp_flush_calls;
+static void spy_zpass_flush(void)
+{
+    s_zp_flush_calls++;
+    gl_zpass_flush();
+}
+
+static void slot_init(uint32_t n)
+{
+    memset(s_mem + REPORTS + 16u * n, 0, 12);
+    memset(s_mem + REPORTS + 16u * n + 12, 0xFF, 4);
+}
+static uint32_t slot_word(uint32_t n, uint32_t off)
+{
+    uint32_t v;
+    memcpy(&v, s_mem + REPORTS + 16u * n + off, 4);
+    return v;
+}
+
+/* A quad over pixels [x0,x1)x[y0,y1) at depth z (of 2^24 - 1), two triangles
+ * from vertex `first` on. */
+static void quad(uint32_t first, float x0, float y0, float x1, float y1, float z, uint32_t argb)
+{
+    vtx(first + 0, nx(x0), ny(y0), z, argb, 0, 0);
+    vtx(first + 1, nx(x1), ny(y0), z, argb, 0, 0);
+    vtx(first + 2, nx(x0), ny(y1), z, argb, 0, 0);
+    vtx(first + 3, nx(x1), ny(y0), z, argb, 0, 0);
+    vtx(first + 4, nx(x1), ny(y1), z, argb, 0, 0);
+    vtx(first + 5, nx(x0), ny(y1), z, argb, 0, 0);
+    draw(5, first, 6);                       /* TRIANGLES */
+}
+
+/* D3D's visibility test around one quad: CLEAR_REPORT_VALUE, the counted
+ * batch, GET_REPORT into slot n. */
+static void vis_test(uint32_t n, uint32_t first, float x0, float y0, float x1, float y1, float z)
+{
+    slot_init(n);
+    m(0x17C8, 1);                            /* CLEAR_REPORT_VALUE */
+    m(0x17CC, 1);                            /* SET_ZPASS_PIXEL_COUNT_ENABLE */
+    quad(first, x0, y0, x1, y1, z, 0xFF00FFFFu);
+    m(0x17CC, 0);
+    m(0x17D0, REPORTS + 16u * n);            /* GET_REPORT */
 }
 
 int main(void)
@@ -1343,6 +1404,74 @@ int main(void)
             CHECK(on_calls + on_skipped == off_calls);
         }
         nv2a_gl_install_from_env();
+    }
+
+    /* 15. XBA-313: visibility reports on real occlusion queries. */
+    {
+        const float zf = 16777215.0f;
+        uint32_t c0, c1, c2, c3;
+        int any = (s_backend.caps & NV2A_BACKEND_CAP_ZPASS_ANY) != 0;
+        CHECK(any == NV2A_GL_ES);
+        s_backend.zpass_flush = spy_zpass_flush;  /* the executor holds &s_backend */
+        nv2a_gpu_ffp_enable(0);
+        surface();
+        ffp();
+        arrays();
+        m(0x0308, 0);                        /* no culling */
+        m(0x0300, 0);                        /* no alpha test */
+        m(0x1D8C, 0xFFFFFF00u);              /* ZSTENCIL_CLEAR_VALUE: far */
+        m(0x1D90, 0xFF000000u);
+        m(0x1D94, 0xF1);                     /* CLEAR_SURFACE: colour and Z */
+        m(0x030C, 1);                        /* DEPTH_TEST_ENABLE */
+        m(0x0354, 0x0203);                   /* DEPTH_FUNC LEQUAL */
+        m(0x035C, 1);                        /* DEPTH_MASK */
+        quad(0, 8, 8, 40, 40, 0.25f * zf, 0xFFFF0000u);     /* the occluder */
+        m(0x035C, 0);                        /* the tests write no depth */
+        vis_test(0, 6, 16, 16, 32, 32, 0.75f * zf);   /* behind it */
+        vis_test(1, 12, 16, 16, 32, 32, 0.10f * zf);  /* in front of it */
+        vis_test(2, 18, 44, 44, 60, 60, 0.75f * zf);  /* beside it */
+        /* Deferred: nothing written at GET_REPORT, no wait. */
+        CHECK(slot_word(0, 12) == 0xFFFFFFFFu && slot_word(1, 12) == 0xFFFFFFFFu
+              && slot_word(2, 12) == 0xFFFFFFFFu);
+        nv2a_pb_exec_state_prepare();        /* waits for every report */
+        c0 = slot_word(0, 8);
+        c1 = slot_word(1, 8);
+        c2 = slot_word(2, 8);
+        printf("15. visibility reports (%s counts, %s by default): behind %u, in front %u,"
+               " beside %u (done %08X %08X %08X)\n", any ? "any-samples" : "exact",
+               any ? "lazy" : "deferred", c0, c1, c2,
+               slot_word(0, 12), slot_word(1, 12), slot_word(2, 12));
+        CHECK(slot_word(0, 12) == 0 && slot_word(1, 12) == 0 && slot_word(2, 12) == 0);
+        CHECK(c0 == 0);
+        if (any)
+            CHECK(c1 >= 1 && c2 >= 1);
+        else
+            CHECK(c1 == 256 && c2 == 256);
+        /* A report the title spins on: the idle hook sees it pending at 1 ms,
+         * and again 2.1 ms later. Lazy (GLES): answered by then, 0 if the
+         * GPU's count was in, else 1; never a glFlush. Deferred (desktop):
+         * waited for, the real 0 (a glFlush may have been asked once). */
+        s_zp_flush_calls = 0;
+        vis_test(3, 24, 16, 16, 32, 32, 0.75f * zf);
+        CHECK(slot_word(3, 12) == 0xFFFFFFFFu);
+        s_now_ns += 1000000;
+        nv2a_pb_exec_idle();
+        s_now_ns += 400000;
+        nv2a_pb_exec_idle();
+        s_now_ns += 1700000;
+        nv2a_pb_exec_idle();
+        c3 = slot_word(3, 8);
+        printf("    spun on: done %08X, count %u, %u flush(es)\n", slot_word(3, 12), c3,
+               s_zp_flush_calls);
+        CHECK(slot_word(3, 12) == 0);
+        if (any)
+            CHECK((c3 == 0 || c3 == 1) && s_zp_flush_calls == 0);
+        else
+            CHECK(c3 == 0 && s_zp_flush_calls <= 1);
+        nv2a_pb_exec_state_prepare();        /* the queue drained: a lazy slot stays as written */
+        CHECK(slot_word(3, 8) == c3 && slot_word(3, 12) == 0);
+        m(0x030C, 0);
+        s_backend.zpass_flush = gl_zpass_flush;
     }
 
     CHECK(glGetError() == GL_NO_ERROR);

@@ -21,7 +21,12 @@
  *     idle hook; after 2 ms the pending reports read visible (1) and the
  *     GPU's counts for them, once in, do not overwrite the slots;
  *   - RECOMP_GPU_ZPASS=always (another run) reports 1 at once and hands the
- *     back end no counting batches. */
+ *     back end no counting batches;
+ *   - the default (XBA-313): argument "any" registers a back end with
+ *     NV2A_BACKEND_CAP_ZPASS_ANY (counts that only say whether any sample
+ *     passed, GLES 3.0): with RECOMP_GPU_ZPASS unset, or not a mode, it runs
+ *     the lazy checks; RECOMP_GPU_ZPASS=deferred brings back the deferred
+ *     ones, which a back end without the cap gets by default. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -164,11 +169,13 @@ static void visibility_test(uint32_t slot, uint32_t tris)
     m(0x17D0, REPORT_AT + 16u * slot);  /* GET_REPORT */
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     const char *mode = getenv("RECOMP_GPU_ZPASS");
+    int any = argc > 1 && strcmp(argv[1], "any") == 0;
     int always = mode && strcmp(mode, "always") == 0;
-    int lazy = mode && strcmp(mode, "lazy") == 0;
+    int deferred = mode && strcmp(mode, "deferred") == 0;
+    int lazy = (mode && strcmp(mode, "lazy") == 0) || (any && !always && !deferred);
     uint32_t i;
 
     m(0x0208, 0x0008);                  /* A8R8G8B8 */
@@ -191,6 +198,8 @@ int main(void)
     }
     m(0x1720, POS_AT);
     m(0x1760, 2 | (3 << 4) | (12 << 8));
+    if (any)
+        s_backend.caps |= NV2A_BACKEND_CAP_ZPASS_ANY;
     nv2a_backend_register(&s_backend);
 
     if (always) {
@@ -244,7 +253,8 @@ int main(void)
         CHECK(slot_done(4) == 0 && slot_count(4) == 9);
         CHECK(!s_out_of_order && s_blocking == 0 && s_flushes == 0);
         if (!s_fail)
-            puts("NV2A deferred visibility reports (RECOMP_GPU_ZPASS=lazy): ok");
+            printf("NV2A deferred visibility reports (lazy, %s): ok\n",
+                   mode ? mode : "unset: the default with CAP_ZPASS_ANY");
         return s_fail;
     }
 
@@ -343,6 +353,7 @@ int main(void)
     }
 
     if (!s_fail)
-        puts("NV2A deferred visibility reports: ok");
+        printf("NV2A deferred visibility reports (deferred, %s, %s): ok\n", mode ? mode : "unset",
+               any ? "CAP_ZPASS_ANY" : "exact counts");
     return s_fail;
 }
