@@ -15,7 +15,7 @@ from tools.xex.synth import build_xex
 from tools.xex.xex import parse_xex
 
 from . import asm as A
-from .discover360 import find_helpers
+from .discover360 import find_helpers, pointer_seeds
 from .recomp import RUNTIME_DIRS, CodeView, recompile
 from .prog import Prog
 from .test_x360_tools import M64, c_case, parse_out
@@ -256,6 +256,24 @@ def program():
     p.branch(lambda at, t: A.addi(3, 3, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), "leaf_code")
     p(A.blr())
     p.end()
+    # leaf_far: its two halves are further apart (several addresses prepared together), down a straight run that
+    # keeps the register; leaf_stale is no function: the register holds something else by the time of the addi
+    for name, v in (("leaf_far", 99), ("leaf_stale", 55)):
+        p.func(name)
+        p(A.li(3, v), A.blr())
+        p.end()
+    p.func("take_far")
+    p.branch(lambda at, t: A.lis(11, ha(t)), "leaf_far")
+    p(A.li(3, 1), A.li(5, 2), A.li(6, 3), A.li(7, 4), A.li(8, 5), A.li(9, 6), A.li(10, 7))
+    p.branch(lambda at, t: A.addi(4, 11, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), "leaf_far")
+    p(A.blr())
+    p.end()
+    p.func("take_stale")
+    p.branch(lambda at, t: A.lis(11, ha(t)), "leaf_stale")
+    p(A.li(11, 0))
+    p.branch(lambda at, t: A.addi(4, 11, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), "leaf_stale")
+    p(A.blr())
+    p.end()
     words = p.link()
     funcs = {name: (a, b) for name, a, b in p.funcs}
     return words, {n: (TEXT + 4 * a, TEXT + 4 * b) for n, (a, b) in funcs.items()}, p.labels
@@ -291,9 +309,13 @@ def test_discovery_and_lifting(tmp_path):
     img, funcs, labels = build()
     s = recompile(img, str(tmp_path))
     assert s["interp_fallback_insns"] == 0, s["unlifted"]
-    # the helpers are not functions; the ten of .pdata are, and the two leaf functions only a pointer names (a word
-    # of .rdata, a lis / addi pair); a pointer into the middle of a .pdata function is not a function
-    assert s["functions"] == 12 and s["pointer_seeds"] == 2
+    # the helpers are not functions; the twelve of .pdata are, and the three leaf functions only a pointer names (a
+    # word of .rdata, a lis / addi pair, close or apart); a pointer into the middle of a .pdata function is not a
+    # function, nor is what a register no longer points at
+    assert s["functions"] == 15 and s["pointer_seeds"] == 3
+    view, dec = CodeView(img), XenonDecoder()
+    assert pointer_seeds(img, view, lambda a: dec.decode(view.u32(a), a)) \
+        == {funcs[n][0] for n in ("leaf_data", "leaf_code", "leaf_far")}
     assert len(s["helpers"]) == 8 and s["helper_calls_inlined"] == 8
     assert s["jump_tables"] == 6 and s["jump_table_targets"] == 5 + 6 + 3 + 4 + 3 + 3 and s["unresolved_bctr"] == 0
     text = "".join(p.read_text() for p in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
@@ -411,7 +433,7 @@ def test_helpers_and_tables_run(tmp_path):
                                 out_gpr=[3]))
             checks.append((tag, "r3", expect.get(x, default) & M64))
     # the leaf functions are in the pack: entered at their own address, as a call through the pointer would
-    for name, value in (("leaf_data", 77), ("leaf_code", 88)):
+    for name, value in (("leaf_data", 77), ("leaf_code", 88), ("leaf_far", 99)):
         cases.append(c_case(name, funcs[name][0], b"", gpr={3: 0}, out_gpr=[3]))
         checks.append((name, "r3", value))
 

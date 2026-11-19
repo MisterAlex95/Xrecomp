@@ -191,12 +191,18 @@ def _match_vmx(view, dec, a):
 
 # ---------------------------------------------------------------- functions only a pointer reaches
 
+POINTER_PAIR_SPAN = 32  # instructions after a lis in which the other half of an address is looked for
+_WRITES_RD = frozenset((7, 8, 12, 13, 14, 15, 32, 33, 34, 35, 40, 41, 42, 43, 58))  # the destination is rD
+# the destination is rA: rotates and logical immediates, and the update forms of loads and stores
+_WRITES_RA = frozenset((20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 33, 35, 37, 39, 41, 43, 45, 47, 49, 51, 53, 55))
+
+
 def pointer_seeds(img, view, decode):
     """Leaf functions that only a pointer reaches. MSVC gives a leaf function no .pdata entry (nothing to unwind), so
     one that is never called directly -- a virtual method, a callback -- is in no table and after no `bl`. Two places
     name it all the same: a word of a data section holding its address (a vtable, a table of callbacks), and a
-    `lis` + `addi` / `ori` pair in code building it (a callback passed as an argument). A candidate is a word-aligned
-    code address outside every .pdata function (inside one it would be a label or a table of that function) whose
+    `lis` + `addi` / `ori` pair in code building it (a callback passed as an argument, a table filled in code). A
+    candidate is a word-aligned code address outside every .pdata function (inside one it would be a label or a table of that function) whose
     first word decodes and is not itself an address in the image (a table of addresses in a code section). Without
     a .pdata table there is nothing to tell a function from a label: no candidates."""
     if img.image is None or not img.pdata:
@@ -233,23 +239,31 @@ def pointer_seeds(img, view, decode):
                 if c_lo <= w < c_hi and candidate(w):
                     out.add(w)
             continue
-        # (b) code: lis rD, hi; then within a few instructions addi rX, rD, lo or ori rD, rD, lo
+        # (b) code: lis rD, hi; then, down the straight run and while rD keeps that value, addi rX, rD, lo or
+        # ori rX, rD, lo. Several addresses are often prepared together (the lis first, the addi where each is
+        # stored), and one lis may serve more than one address.
         at = a
         for (w,) in iter_unpack(">I", image[a - lo:a - lo + ((b - a) & ~3)]):
             if w & 0xFC1F0000 == 0x3C000000:
                 rd, top = (w >> 21) & 31, (w & 0xFFFF) << 16
-                for p in range(at + 4, min(at + 24, b), 4):
+                for p in range(at + 4, min(at + 4 + 4 * POINTER_PAIR_SPAN, b), 4):
                     v = img.u32(p)
-                    op = v >> 26
-                    if op == 14 and (v >> 16) & 31 == rd:
+                    op, d, s_ = v >> 26, (v >> 21) & 31, (v >> 16) & 31
+                    if op == 18 or (op == 19 and (v >> 1) & 0x3FF in (16, 528) and d & 0x14 == 0x14):
+                        if not v & 1 or rd < 14:  # the run ends, or a call leaves a volatile register undefined
+                            break
+                        continue
+                    if op == 14 and s_ == rd:
                         t = (top + ((v & 0xFFFF) ^ 0x8000) - 0x8000) & 0xFFFFFFFF
-                    elif op == 24 and (v >> 21) & 31 == rd:
+                    elif op == 24 and d == rd:
                         t = top | (v & 0xFFFF)
                     else:
-                        continue
-                    if c_lo <= t < c_hi and candidate(t):
+                        t = None
+                    if t is not None and c_lo <= t < c_hi and candidate(t):
                         out.add(t)
-                    break
+                    if (op in _WRITES_RD and d == rd) or (op in _WRITES_RA and s_ == rd) \
+                            or (op == 31 and rd in (d, s_)):
+                        break  # rD is written again (op 31: either field may be the destination)
             at += 4
     return out
 
