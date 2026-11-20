@@ -139,7 +139,7 @@ class Run:
             data = f.read()
         try:
             self.mods = patch.plan("xbox", patch.xbe_title_id(data) or "00000000", data,
-                                   off=self.m.no_title_layer())
+                                   off=self.m.no_title_layer() or getattr(self.a, "other_image", False))
         except ModError as e:
             raise cc.StepError("BAD_MOD", "mods: %s" % e)
         if self.mods.patched:
@@ -380,6 +380,7 @@ class Run:
                 continue
             sub_a = copy.copy(self.a)
             sub_a.source = p
+            sub_a.other_image = True    # the mods are default.xbe's (RECOMP_MOD_FOR keeps them off this one at run time)
             sub_a.work = os.path.join(self.work, "images", re.sub(r"[^A-Za-z0-9._-]", "_", rel))
             os.makedirs(sub_a.work, exist_ok=True)
             r = Run(sub_a, self.m)

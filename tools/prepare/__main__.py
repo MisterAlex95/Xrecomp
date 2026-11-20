@@ -418,15 +418,16 @@ def mods_store_has(tid):
     return patch.enabled_count("xbox", tid) > 0
 
 
-def mods_plan(tid, xbe):
+def mods_plan(tid, xbe, other_image=False):
     """The title's enabled mods (tools.mods.patch.plan): their patches applied
     to a copy of the XBE's bytes, the mod-set hash, the options they force.
-    None of it when the launcher's switch leaves them out. Raises
+    None of it when the launcher's switch leaves them out, nor for a disc's
+    other image (a mod is made for default.xbe). Raises
     tools.mods.package.ModError (code BAD_MOD, WRONG_TITLE, WRONG_BINARY...)."""
     from tools.mods import patch
     with open(xbe, "rb") as f:
         data = f.read()
-    return patch.plan("xbox", tid, data, off=no_title_layer())
+    return patch.plan("xbox", tid, data, off=no_title_layer() or other_image)
 
 
 def write_patched(path, data):
@@ -827,7 +828,7 @@ def desktop(a):
     # original is only read); the options they force go with the layers'.
     from tools.mods.package import ModError
     try:
-        mods = mods_plan(tid, xbe)
+        mods = mods_plan(tid, xbe, other_image=bool(a.image_name))
         xbe_source_sha = mods.original_sha256
         if mods.patched:
             xbe = write_patched(os.path.join(work, "mods", "default.xbe"), mods.data)
@@ -835,7 +836,7 @@ def desktop(a):
     except ModError as e:
         _CODE = "BAD_MOD"
         raise SystemExit("mods: %s" % e)
-    if mods.mods or mods_store_has(tid):
+    if (mods.mods or mods_store_has(tid)) and not a.image_name:
         print("      " + mods.summary() + (" (left out: Enhancements off)" if no_title_layer() else ""),
               flush=True)
     progress(100, "%s (title ID %s)%s" % ((profile or {}).get("name") or info["title"], tid,

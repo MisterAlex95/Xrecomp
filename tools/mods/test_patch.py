@@ -156,7 +156,8 @@ def test_plan_applies_in_load_order(tmp_path):
     assert p.ids() == ["first", "second"] and len(p.mod_set) == 64
     env = p.env("/w/mods/default.xbe")
     assert env == {"RECOMP_MOD_SET": p.mod_set, "RECOMP_MOD_FRAMES": "anamorphic-16:9",
-                   "RECOMP_MOD_XBE": "/w/mods/default.xbe"}
+                   "RECOMP_MOD_XBE": "/w/mods/default.xbe", "RECOMP_MOD_FOR": patch.binary_key(data)}
+    assert patch.binary_key(b"123456789") == "9-CBF43926"         # the runtime's key (tests/xbox_mods: same CRC)
     assert data == xbe_bytes()                              # the original's bytes untouched
     # Switched off (the app's Enhancements switch): the game as it is.
     p = patch.plan("xbox", TID, data, root=str(root), off=True)

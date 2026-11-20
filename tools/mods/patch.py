@@ -13,11 +13,13 @@ The original is only read: the patched bytes go to a copy in the work folder (th
 
 import hashlib
 import os
+import zlib
 
 from tools.mods import bps, display, ips, store
 from tools.mods.package import ModError, wrong_binary_msg
 
 ENV_XBE = "RECOMP_MOD_XBE"
+ENV_FOR = "RECOMP_MOD_FOR"              # "<size>-<CRC32>" of the binary the mods were made for (another image: none)
 ENV_OFF = "XBA_NO_MODS"                 # Prepare as if no mod were on (also XBA_NO_TITLE_LAYER, the app's switch)
 
 
@@ -70,7 +72,8 @@ def apply_mods(data, mods, original_sha=None):
 
 
 class Plan(object):
-    def __init__(self, console, title_id, mods, data, original_sha):
+    def __init__(self, console, title_id, mods, data, original_sha, original_for=""):
+        self.original_for = original_for
         self.console = console
         self.title_id = title_id
         self.mods = mods
@@ -90,6 +93,8 @@ class Plan(object):
         if not self.mods:
             return {}
         env = {store.ENV_MOD_SET: self.mod_set}
+        if self.console == "xbox":
+            env[ENV_FOR] = self.original_for
         env.update(display.env(self.mods))
         if self.patched and patched_path and self.console == "xbox":
             p = os.path.abspath(patched_path)
@@ -113,15 +118,24 @@ def switched_off(env=None):
 
 def plan(console, title_id, data, root=None, off=None):
     """The Plan for this game: the store's enabled mods (none when switched off: XBA_NO_MODS=1 or the app's
-    Enhancements switch, XBA_NO_TITLE_LAYER=1), their patches applied to data (the original binary's bytes)."""
+    Enhancements switch, XBA_NO_TITLE_LAYER=1; none either for a disc's other image, which the caller says with
+    off=True: a mod is made for the title's default.xbe), their patches applied to data (the binary's bytes)."""
     original_sha = sha256(data)
+    original_for = binary_key(data)
     if off is None:
         off = switched_off()
     if off:
-        return Plan(console, title_id, [], data, original_sha)
+        return Plan(console, title_id, [], data, original_sha, original_for)
     root = root or store.default_root()
     mods = store.enabled_mods(root, console, title_id, original_sha)
-    return Plan(console, title_id, mods, apply_mods(data, mods, original_sha), original_sha)
+    return Plan(console, title_id, mods, apply_mods(data, mods, original_sha), original_sha, original_for)
+
+
+def binary_key(data):
+    """"<size>-<CRC32, 8 upper-case hex>" of a binary: RECOMP_MOD_FOR, how the runtime tells the image the mods
+    were made for from the disc's other images, which share the title ID and the pack's options
+    (src/kernel/xbox_mods.c)."""
+    return "%d-%08X" % (len(data), zlib.crc32(data) & 0xFFFFFFFF)
 
 
 def enabled_count(console, title_id, root=None):

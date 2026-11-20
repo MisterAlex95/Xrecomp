@@ -132,7 +132,12 @@ patching before Prepare is the only way, and it works the same with or without a
    `RECOMP_MOD_XBE`, the patched copy's path, so the runtime loads its headers and sections (a patch's data changes;
    its code changes came with the lift). A pack moved to another device without its work folder loads the disc's XBE
    and says so (`[MODS] ... cannot be opened`): its data changes are then missing.
-4. The discovery file (`discovered.jsonl`) is shared with the unpatched game's runs; its entries go through the
+4. A disc's other images (XBA-82: `--image-name` sub-prepares, the Android pack's `images`) get no mod: a mod is
+   made for the title's `default.xbe`. They share the pack's options on Android, so Prepare also forces
+   `RECOMP_MOD_FOR`, `<size>-<CRC32>` of the `default.xbe` the mods were made for, and the runtime applies nothing
+   (no patched copy, no frames hint, no writes) to an XBE that does not match (`[MODS] this XBE is not the one the
+   mods were made for`).
+5. The discovery file (`discovered.jsonl`) is shared with the unpatched game's runs; its entries go through the
    analysis' gates against the binary being lifted, so an address that is not code in the patched copy is refused.
 
 The other consoles' Prepares do not read the store yet (XBA-288): their runtimes read the ROM or disc at run time

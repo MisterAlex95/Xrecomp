@@ -113,6 +113,8 @@ static void env(const char *k, const char *v)
         unsetenv(k);
 }
 
+static const char *g_for;       /* RECOMP_MOD_FOR for the next runs (NULL: unset) */
+
 /* One run in a child: env as given (NULL values unset), then init. The child's bits: 1 the patched byte is
  * loaded, 2 the wide write landed, 4 init failed. */
 static int run(const char *mod_xbe, const char *frames, const char *aspect, const char *writes)
@@ -126,6 +128,7 @@ static int run(const char *mod_xbe, const char *frames, const char *aspect, cons
         env("RECOMP_MOD_FRAMES", frames);
         env("RECOMP_ASPECT", aspect);
         env("RECOMP_MOD_WIDE_WRITES", writes);
+        env("RECOMP_MOD_FOR", g_for);
         if (!xbox_MemoryLayoutInit(g_xbe, g_len))
             _exit(4);
         if (*guest(g_va) == (uint8_t)(g_xbe[g_raw] ^ 0x5A))
@@ -185,6 +188,22 @@ int main(int argc, char **argv)
     check(run(NULL, "anamorphic-16:9", NULL, writes) == 0, "auto on a desktop: no wide write");
     check(run(NULL, NULL, "16:9", writes) == 0, "no frames hint: no wide write, whatever the setting");
     check(run(NULL, "anamorphic-16:9", "16:9", "00001000=DEADBEEF") == 0, "a write outside the image: skipped");
+
+    printf("RECOMP_MOD_FOR (the disc's other images share the pack's options)\n");
+    {
+        static char key[40], other_key[40];
+        snprintf(key, sizeof key, "%zu-%08X", g_len, xbox_ModsCrc32(g_xbe, g_len));
+        snprintf(other_key, sizeof other_key, "%zu-%08X", g_len, xbox_ModsCrc32(g_xbe, g_len) ^ 1u);
+        check(xbox_ModsCrc32((const uint8_t *)"123456789", 9) == 0xCBF43926u, "CRC32 check value (zlib's)");
+        check(xbox_ModsForThis(g_xbe, g_len, key) && xbox_ModsForThis(g_xbe, g_len, NULL)
+              && !xbox_ModsForThis(g_xbe, g_len, other_key), "the key matches this XBE only");
+        g_for = key;
+        check(run(patched, "anamorphic-16:9", "16:9", writes) == 3, "made for this XBE: patched copy and wide write");
+        g_for = other_key;
+        check(run(patched, "anamorphic-16:9", "16:9", writes) == 0,
+              "made for another XBE of the title: neither the patched copy nor the wide write");
+        g_for = NULL;
+    }
 
     remove(patched);
     remove(other);

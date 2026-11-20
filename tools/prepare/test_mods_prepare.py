@@ -66,8 +66,15 @@ def test_prepare_with_a_mod_and_back(tmp_path, monkeypatch, capsys):
     target[0x400] ^= 0xFF
     install(mods, "onebyte", data, bytes(target), original, display={"frames": "anamorphic-16:9"})
     store.enable(str(mods), "xbox", TID, "onebyte")
-    assert "mods" in prep.check_state(xbe, str(work))["reasons"] or \
-        prep.check_state(xbe, str(work))["state"] == "absent"
+    # --check on a built title (a planted executable): stale, reason "mods".
+    exe = work / "project" / "build" / "title_12345678"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("#!/bin/sh\n")
+    st = stamp()
+    st["built"] = True
+    (work / "stamp.json").write_text(json.dumps(st))
+    chk = prep.check_state(xbe, str(work))
+    assert chk["state"] == "stale" and "mods" in chk["reasons"] and chk["title_layer"] == "on", chk
     assert prep.check_mod_set(TID) == store.mod_set_hash(store.enabled_mods(str(mods), "xbox", TID))
     assert prep.main([xbe, "--work", str(work), "--no-build"]) == 0
     out = capsys.readouterr().out
@@ -79,7 +86,11 @@ def test_prepare_with_a_mod_and_back(tmp_path, monkeypatch, capsys):
     assert s["xbe"] == sha(str(patched)) and s["xbe_source"] == original and s["mods"] == prep.check_mod_set(TID)
     h = env_h.read_text()
     assert '"RECOMP_MOD_SET", "%s"' % s["mods"] in h and '"RECOMP_MOD_FRAMES", "anamorphic-16:9"' in h
-    assert '"RECOMP_MOD_XBE", "%s"' % patched in h
+    assert '"RECOMP_MOD_XBE", "%s"' % patched in h and '"RECOMP_MOD_FOR", "%d-' % len(data) in h
+    st = stamp()
+    st["built"] = True
+    (work / "stamp.json").write_text(json.dumps(st))
+    assert "mods" not in prep.check_state(xbe, str(work))["reasons"]       # up to date with the store again
     # The analysis ran on the patched copy (its JSON beside it).
     assert (work / "mods" / "default_analysis.json").is_file()
 
@@ -146,3 +157,11 @@ def test_android_identify_patches_a_copy(tmp_path, monkeypatch):
     assert r.mods.ids() == ["onebyte"] and r.mods.patched
     assert open(os.path.join(A.work, "xbe", "default.xbe"), "rb").read() == data      # the plain copy stays
     assert pack.sha256_file(str(src / "default.xbe")) == original
+    # A disc's other image (other_images()): no mod, even of the same title.
+    A.other_image = True
+    A.work = str(tmp_path / "work-image")
+    r = android.Run(A(), prep)
+    monkeypatch.setattr(r.procs, "run_logged", no_parse)
+    with pytest.raises(Stop):
+        r.identify()
+    assert r.mods.mods == [] and r.xbe == os.path.join(A.work, "xbe", "default.xbe")

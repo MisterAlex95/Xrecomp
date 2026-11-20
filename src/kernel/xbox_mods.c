@@ -89,6 +89,38 @@ static uint32_t xbe_title(const uint8_t *b, size_t n)
     return rd32(b + (cert - base) + 8);
 }
 
+static int s_not_for_this = 0;     /* RECOMP_MOD_FOR names another binary: no mod applies to this one */
+
+uint32_t xbox_ModsCrc32(const uint8_t *b, size_t n)
+{
+    static uint32_t table[256];
+    uint32_t c = 0xFFFFFFFFu;
+    size_t i;
+
+    if (!table[1]) {
+        uint32_t k, v;
+        int j;
+        for (k = 0; k < 256; k++) {
+            for (v = k, j = 0; j < 8; j++)
+                v = v & 1 ? 0xEDB88320u ^ (v >> 1) : v >> 1;
+            table[k] = v;
+        }
+    }
+    for (i = 0; i < n; i++)
+        c = table[(c ^ b[i]) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+
+int xbox_ModsForThis(const uint8_t *xbe, size_t n, const char *mod_for)
+{
+    char key[40];
+
+    if (!mod_for || !*mod_for)
+        return 1;
+    snprintf(key, sizeof key, "%zu-%08X", n, xbox_ModsCrc32(xbe, n));
+    return strcmp(key, mod_for) == 0;
+}
+
 const uint8_t *xbox_ModsXbe(const uint8_t *xbe, size_t *n)
 {
     static uint8_t *patched;
@@ -98,7 +130,17 @@ const uint8_t *xbox_ModsXbe(const uint8_t *xbe, size_t *n)
     long len;
     uint8_t *buf;
 
-    if (!path || !*path || !xbe || !n)
+    if (!xbe || !n)
+        return xbe;
+    if (!patched && getenv("RECOMP_MOD_FOR") && *getenv("RECOMP_MOD_FOR")) {
+        s_not_for_this = !xbox_ModsForThis(xbe, *n, getenv("RECOMP_MOD_FOR"));
+        if (s_not_for_this) {
+            fprintf(stderr, "[MODS] this XBE is not the one the mods were made for (%s): no mod applies to it "
+                            "(another image of the disc)\n", getenv("RECOMP_MOD_FOR"));
+            return xbe;
+        }
+    }
+    if (!path || !*path)
         return xbe;
     if (patched) {
         *n = patched_n;
@@ -144,7 +186,7 @@ int xbox_ModsAfterLoad(void)
     const int android = 0;
 #endif
 
-    if (!frames || !*frames)
+    if (!frames || !*frames || s_not_for_this)
         return 0;
     wide = xbox_ModsFramesWide(frames, getenv("RECOMP_ASPECT"), android);
     fprintf(stderr, "[MODS] frames %s: %s (RECOMP_ASPECT %s)\n", frames,
