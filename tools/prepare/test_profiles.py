@@ -186,26 +186,13 @@ def test_no_xdk_or_engine_layer_ships():
         assert not profiles.load_layer("titles/" + n)["json"].get("layers"), n
 
 
-def test_only_fable_has_a_title_layer_and_it_holds_enhancements_only():
-    """WP6: Burnout 3's layer (a name and a state) is gone; Fable's holds its two enhancements (16:9 scenes, the
-    front-end rate) and nothing a run needs: no layers, params, seeds or switches."""
-    assert _shipped("titles") == ["4d5300d1"]
-    assert profiles.find_title_layer("4541005B") is None
-    for ident_ in (ident(FABLE_LIBS), None):          # also when the XBE cannot be identified
-        fable = profiles.resolve("4D5300D1", ident_)
-        assert fable["keys"] == ["titles/4d5300d1"] and fable["missing"] == []
-        assert fable["hooks"] == ["fable"] and fable["exclude_manual"] == ["titles_4d5300d1__overrides.c"]
-        assert fable["params"] == {} and fable["seed_functions"] == [] and fable["env_force"] == {}
-        assert fable["env_default"] == {"android": {}, "desktop": {}}
-        assert fable["enhancements"] and "project" not in fable     # the executable is title_4d5300d1 either way
-        for plat in ("android", "desktop"):
-            assert effective(fable, plat) == XDK_ENV
-    assert profiles.title_line("4D5300D1").startswith("title enhancements: titles/4d5300d1 (16:9 scenes")
-    assert profiles.title_line("4D5300D1", left_out=True).startswith("title enhancements left out")
-    assert profiles.title_line("4541005B") is None
-    # The D3D KickOff wait override went: the lifter's poll-wait mark does it for every XDK D3D.
-    with open(os.path.join(profiles.PROFILES, "titles", "4d5300d1", "overrides.c")) as f:
-        assert "void sub_008556D0(void)" not in f.read()
+def test_no_title_layer_ships():
+    """XBA-236: Fable's layer, the last one, became a player's mod (docs/technical/mods.md): no title has a layer,
+    and the prepare of any title runs on the toolkit's defaults."""
+    assert _shipped("titles") == []
+    for tid in ("4D5300D1", "4541005B"):
+        assert profiles.find_title_layer(tid) is None and profiles.title_line(tid) is None
+    assert profiles.resolve("4D5300D1", ident(FABLE_LIBS)) is None
 
 
 def test_a_renderware_title_with_no_profile_gets_no_layer():
@@ -249,29 +236,6 @@ def test_an_empty_profiles_tree_gives_no_profile(tmp_path):
         assert profiles.resolve("4541005B", ident(libs, engines), str(tmp_path)) is None
 
 
-def test_the_layer_c_compiles(tmp_path):
-    """Each title's assembled src/title/ (its layers' C and the generated files)
-    passes the host compiler's syntax check, as a desktop POSIX build and as
-    Android (the __ANDROID__ branches)."""
-    cc = shutil.which("cc")
-    if not cc:
-        pytest.skip("no cc")
-    inc = tmp_path / "inc" / "recomp" / "gen"
-    inc.mkdir(parents=True)
-    shutil.copy(os.path.join(ROOT, "templates", "runtime", "recomp_types.h"), inc / "recomp_types.h")
-    for tid, libs in (("4D5300D1", FABLE_LIBS),):
-        proj = tmp_path / tid
-        prep.assemble_project(str(proj), profiles.resolve(tid, ident(libs)), {"title_id": "0x" + tid})
-        t = proj / "src" / "title"
-        for fn in sorted(os.listdir(t)):
-            if not fn.endswith(".c"):
-                continue
-            for extra in ([], ["-D__ANDROID__"]):
-                subprocess.check_call([cc, "-std=gnu11", "-fsyntax-only", "-Werror=implicit-function-declaration",
-                                       "-I", str(tmp_path / "inc"), "-I", os.path.join(ROOT, "include")]
-                                      + extra + [str(t / fn)])
-
-
 # ── Effective settings: what a run starts with ─────────────────
 
 def _xdk_defaults():
@@ -302,8 +266,7 @@ XDK_ENV = {"RECOMP_PB_EXEC": "1", "RECOMP_VBLANK": "paced", "RECOMP_AC97_READY":
 # layer, Burnout 3's title.c and Fable's Android cap to run time), with one change by design: KOTOR (D3D8 5455)
 # moves from the segment scan to the DMA walk (K-7: 5 of 5 runs each way without a difference).
 REFERENCE = {
-    "4D5300D1": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849)), (),
-                 ["titles/4d5300d1"], ["fable"], XDK_ENV, XDK_ENV),
+    "4D5300D1": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849)), (), None, None, XDK_ENV, XDK_ENV),
     "4541005B": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849), ("XMV", 5849)), ("renderware",),
                  None, None, XDK_ENV, XDK_ENV),
     "45410083": ((("XAPILIB", 5849), ("D3D8LTCG", 5849), ("DSOUND", 5849)), ("renderware",), None, None,
@@ -367,13 +330,24 @@ def test_without_the_title_layer_a_title_is_any_title(tree):
     assert profiles.resolve("4D530001", ident({"XNET": 5849}), str(tree), title_layer=False) is None
 
 
-def test_the_enhancements_switch_state(monkeypatch):
-    """What pack.json and --check say for a launcher's « Enhancements » switch (WP6): "on" / "off" for a title the
-    toolkit has a title layer for, nothing for any other."""
+def test_the_enhancements_switch_state(monkeypatch, tmp_path):
+    """What pack.json and --check say for a launcher's « Enhancements » switch: "on" / "off" for a title with mods
+    turned on in the store (docs/technical/mods.md), nothing for any other."""
+    import json as _json
+    from tools.mods import store
+    d = tmp_path / "xbox" / "58420001" / "wide"
+    d.mkdir(parents=True)
+    (d / "mod.json").write_text(_json.dumps({"format": 1, "id": "wide", "name": "W", "version": "1",
+                                             "console": "xbox", "title_id": "58420001"}))
+    monkeypatch.setenv("XBA_MODS_DIR", str(tmp_path))
     monkeypatch.delenv("XBA_NO_TITLE_LAYER", raising=False)
-    assert prep.title_layer_state("4D5300D1") == "on" and prep.title_layer_state("45410083") is None
+    monkeypatch.delenv("XBA_NO_MODS", raising=False)
+    assert prep.title_layer_state("58420001") is None                  # installed, not turned on
+    store.enable(str(tmp_path), "xbox", "58420001", "wide")
+    assert prep.title_layer_state("58420001") == "on" and prep.title_layer_state("45410083") is None
     monkeypatch.setenv("XBA_NO_TITLE_LAYER", "1")
-    assert prep.title_layer_state("4D5300D1") == "off" and prep.title_layer_state("45410083") is None
-    assert prep.load_profile("4D5300D1", ident(FABLE_LIBS)) is None
+    assert prep.title_layer_state("58420001") == "off" and prep.title_layer_state("45410083") is None
     monkeypatch.setenv("XBA_NO_TITLE_LAYER", "0")
-    assert prep.title_layer_state("4D5300D1") == "on"
+    assert prep.title_layer_state("58420001") == "on"
+    monkeypatch.setenv("XBA_NO_MODS", "1")
+    assert prep.title_layer_state("58420001") == "off"

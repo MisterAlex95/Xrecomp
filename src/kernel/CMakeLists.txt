@@ -36,6 +36,7 @@ set(KERNEL_SOURCES
     xbox_seh.c
     xbox_seh_fault.c
     xbox_cheats.c
+    xbox_mods.c
     guest_vmem.c
     icall_feedback.c
     recomp_trace.c

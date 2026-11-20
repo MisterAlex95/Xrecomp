@@ -8,9 +8,9 @@
     <string name="HOME_RESUME_NOT_SAVED">Point de reprise non sauvegardé · %1$s</string>
     <string name="HOME_OLDER_TOOLKIT_NOTE">Cette mise à jour traduit mieux les jeux. Préparer à nouveau (%1$s) pour en profiter ; d\'ici là, le jeu se lance comme avant. Vos sauvegardes sont gardées.</string>
     <string name="ENHANCEMENTS">Améliorations</string>
-    <string name="ENHANCEMENTS_DETAIL">Des extras que l\'app a pour %1$s, comme une image en 16:9 ou des menus plus fluides. Le jeu tourne sans eux, comme sur la console. S\'applique à la prochaine préparation.</string>
-    <string name="ENHANCEMENTS_ON">Améliorations activées : la prochaine préparation les ajoute.</string>
-    <string name="ENHANCEMENTS_OFF">Améliorations désactivées : la prochaine préparation les laisse de côté.</string>
+    <string name="ENHANCEMENTS_DETAIL">Les mods que vous avez activés pour %1$s, comme une image en 16:9 ou des menus plus fluides. Désactivé, le jeu est préparé tel qu\'il est sur le disque. S\'applique à la prochaine préparation.</string>
+    <string name="ENHANCEMENTS_ON">Améliorations activées : la prochaine préparation ajoute les mods.</string>
+    <string name="ENHANCEMENTS_OFF">Améliorations désactivées : la prochaine préparation laisse les mods de côté.</string>
     <string name="HOME_ENHANCEMENTS_CHANGED">Améliorations modifiées · à préparer à nouveau</string>
     <string name="HOME_ENHANCEMENTS_CHANGED_NOTE">Le réglage Améliorations n\'est pas celui avec lequel le jeu a été préparé. Préparer à nouveau (%1$s) pour l\'appliquer ; d\'ici là, le jeu se lance tel quel. Vos sauvegardes sont gardées.</string>
 </resources>

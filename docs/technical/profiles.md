@@ -7,31 +7,29 @@ service with the DMA walk, run-time pacing and the frame-lock verdict), what the
 discovery, packed tables) and what the runs find (the gated discovery loop). A title with no layer is the normal case,
 and every reference title runs that way (profile-free WP1-WP6, report `profile-free-report.md`).
 
-What `profiles/` can still add is **optional**: a title layer holds enhancements of one game that cannot be derived (a
-16:9 mod of its camera, a faster front end), never something the title needs to boot, draw, play sound, take input
-or keep its speed. `tools.prepare` picks the layers, merges them and puts them into the title project (`src/title/`),
-on the desktop and on the device alike (the tree ships in the app's `toolkit.zip`). Code:
-`tools/prepare/profiles.py`; spec: Plane XBA « Spec · Universal titles », section 3.
+**No layer ships** (XBA-236). One game's enhancement that cannot be derived (a 16:9 picture, a faster front end) is
+a player's **mod** ([mods.md](mods.md)), kept by the player with their game, never toolkit code: Fable's title layer,
+the last one, became a mod on 2026-11-20 (its generator lives outside the repository). The layer mechanism stays in
+`tools/prepare/profiles.py` for a developer's local A/B; `tools.prepare` picks local layers, merges them and puts
+them into the title project (`src/title/`). Spec: Plane XBA « Spec · Universal titles », section 3.
 
 ## Optional by construction
 
-- **Prepare says what it adds.** A title the toolkit has enhancements for prints
-  `title enhancements: titles/<id> (16:9 scenes, front end at the display rate)` (title.json `"enhancements"`).
-- **The A/B switch.** `python -m tools.prepare SOURCE --no-title-layer`, or `XBA_NO_TITLE_LAYER=1` in the environment,
-  prepares the title as an unknown one: no title layer, nor the layers it names (prepare prints
-  `title enhancements left out ...`). The prepare stamps hash the layers, so switching re-lifts. The executable is
-  `title_<id>` either way (no shipped title layer sets `"project"`).
+- **The A/B switch.** `python -m tools.prepare SOURCE --no-mods` (also `--no-title-layer`), or `XBA_NO_MODS=1` /
+  `XBA_NO_TITLE_LAYER=1` in the environment, prepares the title as it is: no mod, no local title layer. The prepare
+  stamps hash the layers and the mods' patched XBE, so switching re-lifts.
 - **Launchers.** The macOS launcher (Manage › More › Enhancements) and the Android app (Settings › General ›
-  Enhancements, per game) offer the switch for a title the toolkit has enhancements for. Off, their prepares run with
+  Enhancements, per game) keep their switch: it now turns the title's mods on or off. Off, their prepares run with
   `--no-title-layer` / `XBA_NO_TITLE_LAYER=1`. `prepare --check --json` and `pack.json` say `"title_layer": "on"` or
-  `"off"` for such a title (nothing for another), so a build made the other way is offered for Prepare again (the Mac
-  through `--check`'s `profile` reason, the app by comparing pack.json with the switch).
+  `"off"` for a title with mods turned on (nothing for another), so a build made the other way is offered for Prepare
+  again (the Mac through `--check`'s `mods` reason, the app by comparing pack.json with the switch).
 - **The compatibility matrix both ways.** `python -m tools.compat run <sources> --no-title-layer` prepares in a work
   folder of its own (`<name>-no-title-layer`) with the variable set and marks its result lines `"title_layer": false`;
   `tools.compat report` then shows a « No title layer » column next to the normal stage, a lower stage there in bold.
   The stage must not drop: a title layer may never be needed to run.
 - **The CI guard.** `tools/ci/layer_guard.py` (run by `tools/ci/test_layer_guard.py` in `pytest tools/`) fails the
-  build when a shipped layer carries what a general mechanism covers (below). A justified exception goes into
+  build when anything ships under `profiles/titles/` (rule `title-layer`), when an xdk or engine layer ships, and when
+  a layer carries what a general mechanism covers (below). A justified exception goes into
   `tools/ci/layer_guard_allow.txt` with its reason.
 
 ## The layers, lowest first
@@ -42,7 +40,7 @@ on the desktop and on the device alike (the tree ships in the app's `toolkit.zip
 | XDK library | `profiles/xdk/<name>/layer.json`: none ships | a title's `"layers"` names it (a developer's A/B, never shipped) |
 | (XDK signatures) | `profiles/xdk/<build>/xmv.json`: masked signatures of the XMV library's API, data for `tools.xmv.find_api`, not a layer; none recorded yet | read by every prepare ([xmv.md](../runtime/xmv.md#binding-at-prepare-xba-199)) |
 | Engine | `profiles/engines/<name>/layer.json`: none ships | `tools.xbe_ident` finds the engine whose `layer` (in `tools/xbe_ident/engines.json`) is `<name>` |
-| Title | `profiles/titles/<title id>/title.json`: optional enhancements | the title ID matches, unless `--no-title-layer` / `XBA_NO_TITLE_LAYER=1` |
+| Title | `profiles/titles/<title id>/title.json`: none ships (a game's enhancement is a mod, [mods.md](mods.md)) | a developer's local layer: the title ID matches, unless `--no-title-layer` / `XBA_NO_TITLE_LAYER=1` |
 
 A title's `"layers"` lists engine (or developer XDK) layers to pick even when the XBE does not select them, and prepare
 prints `asked for by the title profile, not selected by the XBE`; a shipped title may not use it.
@@ -56,6 +54,7 @@ but an enhancement, and only that stays with a title.
 
 | Fails | Why | Instead |
 |---|---|---|
+| anything in `profiles/titles/<id>/` (`title-layer`) | no title layer ships (XBA-236) | a player's mod ([mods.md](mods.md)), or a developer's local A/B layer |
 | a `profiles/xdk/*/layer.json` or `profiles/engines/*/layer.json` | what they did is the toolkit's default | `src/`, or a developer's local A/B layer |
 | a title.json without `"enhancements"` | a layer with nothing to add is deleted (Burnout 3's went in WP6: a name and a state) | the XBE certificate's name, the prepare's state |
 | `"layers"` | the XDK layers are defaults, engines are found from the XBE | nothing |
@@ -129,16 +128,15 @@ three generated files (a title with no layer gets no `src/title/`):
 - `xba_params.h`: the merged `params`.
 - `env_force.h` when the stack forces options (Android: `pack.json` `env_force` instead).
 
-`pack.json` records the layers (`"layers"`) and, for a title the toolkit has enhancements for, `"title_layer"`
-(`"on"` / `"off"`); the prepare stamps hash every layer's files: changing a layer, or the switch, re-lifts the title.
+`pack.json` records the layers (`"layers"`) and, for a title with mods turned on, `"title_layer"` (`"on"` / `"off"`)
+and `"mods"`; the prepare stamps hash every layer's files: changing a layer, or the switch, re-lifts the title.
 
 ## The layers today
 
-| Layer | Holds |
-|---|---|
-| `titles/4d5300d1` | Fable, optional: 16:9 scenes (`overrides.c` entry hooks on the camera and the cutscene bars, `title.c` `fable_aspect_configure`) and the front end at the display rate (`title.c`: its `Sleep(50)` shortened to 16 ms) |
-
-Nothing else ships. Gone with the profile-free work: the XDK layers (WP3: the toolkit's defaults and the D3D
+None. Gone: Fable's title layer (16:9 scenes and the front end at the display rate, XBA-236, 2026-11-20): it became
+a player's mod made from their own XBE by a generator kept outside the repository (a BPS patch of the front end's
+`Sleep(50)` and of the camera's display-size load, and the `display` hint, [mods.md](mods.md)). Gone with the
+profile-free work: the XDK layers (WP3: the toolkit's defaults and the D3D
 service), `engines/renderware` (WP4: the DMA walk is the default, pacing and frame generation are decided at run time,
 [framegen.md](framegen.md#titles-locked-to-the-flip-rate)), both `seed_functions.json` (WP5: packed-table discovery),
 Fable's `[CACHE]` thread (WP7: the runtime's « preparing data » indicator), Fable's D3D KickOff wait override
@@ -212,14 +210,15 @@ Nothing to add: `python -m tools.prepare SOURCE` with no layer. The toolkit's de
 discovery loop (Prepare again after a run that found code) are the path. When a title does not run, the fix goes to
 the toolkit (the runtime, the lifter, the analysis), found by its general rule, never to a title layer.
 
-A title layer is only for an optional enhancement of one game: `profiles/titles/<title id>/` with `title.json`
-(`"enhancements"`, `"hooks"`, `"status"`), its `.c` files and a `NOTES.md`. Check that the title still runs with it
-left out (`tools.compat run ... --no-title-layer`) and that `python3 tools/ci/layer_guard.py` passes.
+An optional enhancement of one game is a mod ([mods.md](mods.md)): a patch of the player's own binary and, for a
+picture made for 16:9, the `display` hint. Its maker keeps it outside the toolkit; `profiles/titles/` stays empty
+(`python3 tools/ci/layer_guard.py`). A developer may still try a local title layer (`profiles/titles/<title id>/` with
+`title.json`, `"enhancements"`, `"hooks"`, its `.c` files) for an A/B; it never ships.
 
-## No per-title code outside profiles/titles (XBA-109)
+## No per-title code in the toolkit (XBA-109)
 
-A title ID, a game's name or one game's guest address belongs in `profiles/titles/<title id>/`, never in `src/`,
-`include/`, `templates/`, `tools/` or `android/`. `tools/ci/title_guard.py` checks it in the linux CI job (through
+A title ID, a game's name or one game's guest address belongs in a player's mod (outside the repository), never in
+`src/`, `include/`, `templates/`, `tools/` or `android/`. `tools/ci/title_guard.py` checks it in the linux CI job (through
 `tools/ci/test_title_guard.py`, part of `pytest tools/`); run it by hand with `python3 tools/ci/title_guard.py`.
 
 It reads **code tokens**, not prose. Comments are history and stay free: « Fable does X, hence this generic path »
@@ -230,8 +229,9 @@ prose for names, but not for title IDs and addresses (it is printed by `--help` 
   whose low word is below `0x1000`. `5842xxxx` (« XB ») is ours: tests and the synthetic library use it.
 - **Game name**: a short list of distinctive names in the guard, matched on whole words (`isFableHook` and
   `BURNOUT3_X` match, `Halogen` does not).
-- **Game address**: a `0x` value or `sub_XXXXXXXX` that a title's profile names (its `.json` values, the `sub_`
-  functions of its `.c`), plus a few known former defaults.
+- **Game address**: a `0x` value or `sub_XXXXXXXX` that a (local) title profile names (its `.json` values, the `sub_`
+  functions of its `.c`), plus the guard's own list: a few former defaults and the addresses of the former Fable
+  layer.
 
 Not scanned: Markdown, tests (`tools/**/test_*.py`, `android/**/src/test/**`), `docs/`, `profiles/`, `tests/`. A real
 exception goes into `tools/ci/title_guard_allow.txt` with its reason (today: upstream's reference section tables,

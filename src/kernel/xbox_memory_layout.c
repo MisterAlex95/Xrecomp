@@ -21,6 +21,7 @@
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
 #include "xbox_xbe_sections.h"
+#include "xbox_mods.h"
 #include "kernel.h"
 #include "kernel_park.h"          /* host waits are park points (XBA-251) */
 #include "guest_vmem.h"
@@ -3469,7 +3470,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
     g_force_return = getenv("RECOMP_FORCE_RETURN") != NULL;
     recomp_status_start();      /* RECOMP_STATUS: the headless run's status file */
     DWORD old_protect;
-    const uint8_t *xbe = (const uint8_t *)xbe_data;
+    /* The player's mods (xbox_mods.h): their patched copy of the XBE when Prepare made one. */
+    const uint8_t *xbe = xbox_ModsXbe((const uint8_t *)xbe_data, &xbe_size);
 
     if (g_memory_base) {
         fprintf(stderr, "xbox_MemoryLayoutInit: already initialized\n");
@@ -3899,6 +3901,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         }
         /* Reference counts, overlaps, copies for XeLoadSection (XBA-124). */
         xbox_XbeSectionsInit(xbe, xbe_size);
+        /* What the mods ask once the image is in place: wide frames, their data writes. */
+        xbox_ModsAfterLoad();
     }
 
     /*

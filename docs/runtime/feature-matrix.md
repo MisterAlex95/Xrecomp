@@ -41,6 +41,7 @@ device). The spikes (DS, PSP, PS2, Dreamcast, 3DS, Win32) are not in the app and
 | Per-game apps / shortcuts | yes: `app/TitleApk.packageName`, `app/TitleShortcut` | yes: « tgba_… » packages (`app/LauncherActivity.consoleAppRow`, any key `TitleApk.normKey` takes) | yes | yes | yes: « tgc_… », the same row (a disc image goes into the app whole) | not checked (`app/TitleApk` takes any key) |
 | Save export / import, cloud saves | yes: `app/SaveArchive` (UDATA / TDATA), `app/CloudSaves` | yes: `save/<console>-<KEY>/` (`app/Storage.saves`, `SaveArchive` roots: the key's folder for any console but the Xbox) | yes | yes | yes: `save/gc-<KEY>/` (cardA.raw, cardB.raw, states), the same path | yes: `save/x360-<KEY>/` holds the states and, since XBA-282, the title's own saves (`data/`: hdd:, cache:; `x360_runtime_start` moves an older `work/x360-<KEY>/data` there) |
 | Per-game settings | yes: `app/GameSettings` | yes | yes | yes (+ Vulkan driver, pak) | yes | yes: Controls, scale / filter, internal resolution, texture filter, rewind, shaders (XBA-282) |
+| Mods (XBA-285) | partial: `tools/mods` (mod.json, per-title store and load order, BPS / IPS patches of the XBE before Prepare, the `display` hint: `src/kernel/xbox_mods.c`), the mod set in a save state's identity (`xbox_state.c`); store `<external files>/mods` (`app/PrepareService` `XBA_MODS_DIR`), on / off per game with Settings › Enhancements; no Mods screen yet (MOD-4), no file overlay (MOD-2) | no: patches before Prepare not wired (`tools/prepare/gba.py`; the runtime reads the ROM at run time too) | no: as GBA | no: as GBA | no: as GBA | no |
 | Prepare on device | yes: `app/PrepareService` (XBE -> pack) | yes: `app/Console.prepares` | yes (+ CHD) | yes | yes (DOL, disc, RVZ / WIA / GCZ / CISO) | yes: `app/Console.prepares` (XBA-282: an XEX or a disc image, with the player's key file, `app/X360Key`; `tools/prepare/x360.py`); a desktop pack still works (`x360_tools.bringup --app-pack`) |
 
 Shared layers (what a new console gets by plugging in, src/platform, xbr_host_core): save-state slots and the
@@ -77,6 +78,9 @@ moves the screenshots from `$RECOMP_SAVE_DIR/screenshots`); on Android the windo
 8. A GameCube on-screen pad (`app/TouchPad` Layout.GC). Done.
 9. The desktop keys' hotkeys for Xbox titles (`src/usb/usb_gamepad.c`, `src/input/keyboard.c`). Done.
 10. GameCube cover art download (`app/CoverArt.system`). Done.
+11. Mods on the other consoles (XBA-288): the Xbox has patches before Prepare and the display hint; the GBA, PS1, N64,
+    GameCube and Xbox 360 Prepares do not read the mod store yet (each pack's runtime also reads its ROM or disc at
+    run time, so a patch's data changes need the patched copy there, as `RECOMP_MOD_XBE` does for the Xbox).
 
 Left, with the reason:
 

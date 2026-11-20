@@ -79,6 +79,19 @@ run-time lock verdict and stays off by itself for a title locked to 60, [Frame G
   sets it first thing.
 - Log, one line per option: `[TITLE] 4541005B forces RECOMP_GPU=0 (title profile)`.
 
+### Forced by the player's mods
+
+Prepare forces these the same way (pack.json `env_force`, `src/title/env_force.h`) for the mods turned on for the
+title ([mods.md](../technical/mods.md)); nobody sets them by hand.
+
+| Variable | Read by | What |
+|---|---|---|
+| `RECOMP_MOD_SET` | `xbox_state.c` | the mod-set hash: its first 8 hex digits are in a save state's identity; a state made under another set is refused |
+| `RECOMP_MOD_XBE` | `xbox_memory_layout.c` (`xbox_ModsXbe`) | the patched copy of the XBE Prepare lifted: its headers and sections are loaded instead of the disc's (a copy of another title, or a missing file, is refused with a `[MODS]` line and the disc's is loaded) |
+| `RECOMP_MOD_FRAMES` | `xbox_mods.c` | `anamorphic-16:9`: the 3D frames are drawn for a 16:9 screen; presented 16:9 when `RECOMP_ASPECT` is 16:9, or auto on Android |
+| `RECOMP_MOD_FOR` | `xbox_mods.c` | `<size>-<CRC32>` of the `default.xbe` the mods were made for: another XBE of the disc (which shares the pack's options) gets no patched copy, frames hint or writes |
+| `RECOMP_MOD_WIDE_WRITES` | `xbox_mods.c` | `<va>=<hex bytes>;...`: guest data written once the XBE is loaded, only when those frames are presented 16:9; each must lie inside the image |
+
 ## Bring-up and diagnostics
 
 Start here when a title does not run. See [Step 6: Iterative Debugging](../pipeline/06-debugging.md) for the workflow these belong to.
