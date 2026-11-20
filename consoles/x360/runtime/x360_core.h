@@ -131,6 +131,11 @@ unsigned x360_missed(const x360_machine *x, const uint32_t **addrs);
 /* XBA-283: on (the default), code the pack does not hold is interpreted and recorded (x360_missed), and the run goes
  * on; off, the machine stops at the first missed address (X360_MISSED). */
 void x360_set_interp(x360_machine *x, int on);
+/* A SIGSEGV / SIGBUS handler that says where the fault was (guest address, or host pc) and what the runtime was
+ * doing (x360_set_stage: a static string, or NULL), then hands the signal on to the handler found before it.
+ * x360_run installs it; a host installs it earlier to cover the start (x may be NULL then). */
+void x360_install_fault_handler(x360_machine *x);
+void x360_set_stage(const char *stage);
 /* XBA-283, experimental (x360_run --host-threads): each guest thread runs its lifted code on a host thread of its
  * own, in parallel; the kernel, the interpreter and the scheduler stay serial under one lock. Not deterministic
  * (virtual time follows the host clock), no save states. Needs a bound pack made with atomic reservations
@@ -150,6 +155,10 @@ enum { X360_STATE_OK = 0, X360_STATE_EGAME = -3, X360_STATE_EVERSION = -4, X360_
 size_t x360_state_size(x360_machine *x);
 size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t cap);
 int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n);
+/* The same, and a state found damaged once loading began puts the machine back as it was (from a copy taken before
+ * the load: a full state's memory for the time of the load) instead of leaving it stopped (X360_ERROR). For states
+ * from files (slots, the automatic one at start); the rewinder's own states use x360_state_load. */
+int x360_state_load_undo(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n);
 
 /* Controllers (x360_input.c): an XInput-style gamepad, set now or from a script of timed states (virtual ms). NULL
  * disconnects. user 0..3. */

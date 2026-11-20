@@ -153,9 +153,18 @@ final class SaveArchive {
         return null;
     }
 
+    /**
+     * Files of a save folder that stay on this device: the marker of a resume in progress and the automatic slots set
+     * aside after a resume crashed the game or was refused (recomp_states.h). Another device taking the marker would
+     * set aside its own good slot; the set-aside slots are only there to be looked at.
+     */
+    static final java.util.Set<String> LOCAL_ONLY = new java.util.HashSet<>(
+            Arrays.asList("auto.pending", "auto-crashed.st", "auto-bad.st"));
+
     private static void walk(File f, String path, Map<String, File> out) {
         if (f.isFile()) {
-            out.put(path, f);
+            if (!LOCAL_ONLY.contains(f.getName()))
+                out.put(path, f);
             return;
         }
         String[] l = f.list();

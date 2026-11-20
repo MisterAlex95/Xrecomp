@@ -99,6 +99,18 @@ public class SaveArchiveTest {
         assertNull(SaveArchive.keyOf(".backup/gba-AXVE/x"));
     }
 
+    /** A resume's marker and the automatic slots set aside stay on the device: not exported, not in the hash. */
+    @Test
+    public void localOnlyFilesStay() throws Exception {
+        save(GBA + "/auto.st", "state");
+        String before = SaveArchive.hash(d, GBA);
+        save(GBA + "/auto.pending", "resume in progress");
+        save(GBA + "/auto-crashed.st", "crashed");
+        save(GBA + "/auto-bad.st", "bad");
+        assertEquals(Collections.singleton(GBA + "/auto.st"), SaveArchive.files(d, GBA).keySet());
+        assertEquals(before, SaveArchive.hash(d, GBA));
+    }
+
     /** Out and back on another device: the same files, only the saves (no caches), the manifest with names. */
     @Test
     public void roundTrip() throws Exception {

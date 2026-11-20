@@ -1076,6 +1076,83 @@ static int render_test(const char *dir)
     return 0;
 }
 
+/* a section's bytes in a state blob (72-byte header, then tag, version, length, bytes), or NULL */
+static uint8_t *state_section(uint8_t *blob, size_t n, const char *tag, uint32_t *len)
+{
+    for (size_t p = 72; p + 12 <= n;) {
+        uint32_t l = (uint32_t)blob[p + 8] | (uint32_t)blob[p + 9] << 8 | (uint32_t)blob[p + 10] << 16 |
+                     (uint32_t)blob[p + 11] << 24;
+        if (!memcmp(blob + p, tag, 4)) {
+            *len = l;
+            return blob + p + 12;
+        }
+        p += 12 + l;
+    }
+    return NULL;
+}
+
+/* A damaged state is refused and leaves the machine as it was (no dead machine, no write outside the pages in use) */
+static void test_damaged_states(void)
+{
+    char why[256] = "";
+    x360_w32(X, scratch + 0x100, 0xC0FFEE01u);
+    size_t cap = x360_state_size(X), n = 0;
+    uint8_t *blob = malloc(cap), *bad = malloc(cap + 4);
+    CHECK(blob && bad && (n = x360_state_save(X, NULL, blob, cap)) > 0, "state saved");
+    if (!blob || !bad || !n) {
+        free(blob);
+        free(bad);
+        return;
+    }
+    x360_w32(X, scratch + 0x100, 0xC0FFEE02u); /* the machine moved on after the save */
+    uint32_t len = 0;
+    /* MEM naming a page no heap holds: refused before anything is written there */
+    memcpy(bad, blob, n);
+    uint8_t *mem = state_section(bad, n, "MEM ", &len);
+    CHECK(mem && len >= 4 + 4096, "the state has a MEM section");
+    if (mem) {
+        uint32_t nowhere = 0x3FF00000u; /* in the 4 KB heap, far past what the tests allocate */
+        memcpy(mem, &nowhere, 4);    /* little-endian host: the stream's order */
+        int rc = x360_state_load_undo(X, NULL, bad, n, why, sizeof why);
+        CHECK(rc == X360_STATE_ECORRUPT && strstr(why, "MEM") && strstr(why, "back as it was"),
+              "a page outside the heaps: %d (%s)", rc, why);
+        CHECK(X->status == X360_RUNNING && x360_r32(X, scratch + 0x100) == 0xC0FFEE02u,
+              "the machine is as it was before the load (status %d, %08X)", X->status, x360_r32(X, scratch + 0x100));
+    }
+    /* KERN one field longer (another build's layout): refused, the machine as it was */
+    uint8_t *kern = state_section(blob, n, "KERN", &len);
+    CHECK(kern != NULL, "the state has a KERN section");
+    if (kern) {
+        size_t at = (size_t)(kern - blob), end = at + len;
+        memcpy(bad, blob, end);
+        memset(bad + end, 0, 4);
+        memcpy(bad + end + 4, blob + end, n - end);
+        uint32_t l2 = len + 4;
+        for (int i = 0; i < 4; i++)
+            bad[at - 4 + i] = (uint8_t)(l2 >> (8 * i));
+        int rc = x360_state_load_undo(X, NULL, bad, n + 4, why, sizeof why);
+        CHECK(rc == X360_STATE_ECORRUPT && strstr(why, "KERN"), "a longer KERN section: %d (%s)", rc, why);
+        CHECK(X->status == X360_RUNNING && x360_r32(X, scratch + 0x100) == 0xC0FFEE02u,
+              "the machine is as it was before the load (status %d, %08X)", X->status, x360_r32(X, scratch + 0x100));
+    }
+    /* without the undo, a damaged section stops the machine, as before */
+    memcpy(bad, blob, n);
+    mem = state_section(bad, n, "MEM ", &len);
+    if (mem) {
+        uint32_t nowhere = 0x3FF00000u;
+        memcpy(mem, &nowhere, 4);
+        int rc = x360_state_load(X, NULL, bad, n, why, sizeof why);
+        CHECK(rc == X360_STATE_ECORRUPT && X->status == X360_ERROR, "no undo: %d, status %d", rc, X->status);
+        X->status = X360_RUNNING; /* the load below sets every section again */
+    }
+    /* the state itself still loads */
+    CHECK(x360_state_load(X, NULL, blob, n, why, sizeof why) == X360_STATE_OK &&
+              x360_r32(X, scratch + 0x100) == 0xC0FFEE01u,
+          "the undamaged state loads: %s", why);
+    free(blob);
+    free(bad);
+}
+
 int main(int argc, char **argv)
 {
     char why[256] = "";
@@ -1127,6 +1204,7 @@ int main(int argc, char **argv)
     test_threads_and_time();
     test_system();
     test_gpu();
+    test_damaged_states();
     test_strict_imports();
     test_input_and_cheats();
     test_audio_out();
