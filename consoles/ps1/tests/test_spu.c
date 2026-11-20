@@ -146,6 +146,23 @@ static void test_adpcm(void)
     ps1_spu_destroy(s);
 }
 
+/* A block that starts 8 bytes before the end of SPU RAM (voice addresses are in 8-byte units) wraps to its start, as
+ * on the console: its second half is RAM 0-7. decode_block read those 8 bytes past the 512 KB buffer before (the
+ * same over-read as XBA-318's: AddressSanitizer reports it, a plain build faults only when the buffer ends a page).
+ * The voice plays the block, flags read from it, through to its end. */
+static void test_ram_end_wrap(void)
+{
+    uint8_t head[8] = {0x00, 0x03, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}; /* shift 0 filter 0, end + repeat */
+    ps1_spu *s = spu_new();
+    ram_write(s, 0x7FFF8, head, sizeof head);
+    voice(s, 1, 0x7FFF8, 0x1000, 0x000F, 0x7FC0 | 0x1F);
+    ps1_spu_write16(s, 0x1E, (uint16_t)(0x7FFF8 >> 3)); /* repeat address */
+    key_on(s, 1);
+    samples(s, 28 + 4 + KON_DELAY);
+    CHECK(ps1_spu_read16(s, 0x19C) & 2, "ENDX of the voice at the end of RAM");
+    ps1_spu_destroy(s);
+}
+
 /* Interpolation at a fractional pitch: 800h (index 80h on odd samples). */
 static void test_gauss_fraction(void)
 {
@@ -582,6 +599,7 @@ static void test_main_volume_mix(void)
 int main(void)
 {
     test_adpcm();
+    test_ram_end_wrap();
     test_gauss_fraction();
     test_loop();
     test_adsr();
