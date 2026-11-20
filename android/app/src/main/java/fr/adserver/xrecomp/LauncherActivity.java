@@ -7356,10 +7356,12 @@ public class LauncherActivity extends Activity {
         openSheet(R.string.NET_SOURCES);
         for (RemoteLibrary.Source s : RemoteLibrary.sources(getFilesDir()))
             sheetRow(s.name.isEmpty() ? s.shortId() : s.name, () -> confirmRemoveSource(s)).setValue(sourceValue(s));
+        // No value on the add rows: a long one squeezed the label to « … » (Alex, 2026-11-20: « je vois pas comment
+        // j'ajoute plus de torrent »). A clipboard without a magnet link says so when the row is pressed.
         sheetRow(getString(R.string.NET_ADD_TORRENT), this::openTorrentPicker)
-                .setValue(getString(R.string.NET_ADD_TORRENT_SUB));
+                .setDescription(getString(R.string.NET_ADD_TORRENT_SUB));
         sheetRow(getString(R.string.NET_PASTE_MAGNET), this::onPasteMagnet)
-                .setValue(getString(R.string.NET_PASTE_MAGNET_SUB));
+                .setDescription(getString(R.string.NET_PASTE_MAGNET_SUB));
         boolean show = NetService.showInLibrary(this);
         sheetRow(getString(R.string.NET_SHOW), () -> {
             NetService.setShowInLibrary(this, !show);

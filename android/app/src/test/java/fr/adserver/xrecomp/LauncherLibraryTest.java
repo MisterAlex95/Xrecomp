@@ -1449,6 +1449,8 @@ public class LauncherLibraryTest {
                                              app.getString(R.string.NET_SHOW),
                                              app.getString(R.string.NET_MOBILE_DATA)), rows);
         assertEquals(app.getString(R.string.NET_SOURCE_GAMES_N, 3), sheet.rowsForTest().get(0).value);
+        assertNull("the add rows' labels stay whole", sheet.rowsForTest().get(1).value);
+        assertNull(sheet.rowsForTest().get(2).value);
         assertEquals(app.getString(R.string.NET_ON), sheet.rowsForTest().get(3).value);
         TestSupport.screenshot(a.getWindow().getDecorView(), "library-network-sources");
 
