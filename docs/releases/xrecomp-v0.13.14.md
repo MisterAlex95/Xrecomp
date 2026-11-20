@@ -2,6 +2,34 @@
 
 <!-- Highlights: what changed, what works, known problems. Written by hand, kept across updates. -->
 
+Mods arrive, the last piece of per-game code leaves the toolkit, and Xbox save states load in more places.
+
+- **Mods (Xbox first).** A mod is your own change to a game you own: a `mod.json`, BPS or IPS patches applied to a
+  copy of the game's executable before Prepare (never the original), and display hints. Mods are kept per game, in a
+  load order, and turned on or off with the game's « Enhancements » switch (Android, macOS, `xrecomp`). Turning them
+  off and preparing again brings back the original game. A save state remembers the mods it was made with and is
+  refused under another set. Format and limits: `docs/technical/mods.md`. Other consoles come later.
+- **No per-game code left.** Fable's two extras (16:9 scenes, menus at the screen's rate) were the last title layer
+  in the toolkit; they are now a mod you build from your own `default.xbe`, and CI refuses any new title layer.
+  Every Xbox game runs on the same generic runtime.
+- **Xbox save states: loads at other call chains.** A load during a game used to be refused (« ECHAIN ») when a game
+  thread had moved somewhere else since the save; that thread now goes back to where the state froze it. No new
+  Prepare needed for packs made since 0.12.
+- **Network library.** Add a .torrent or magnet of your own games: they are listed in the library without
+  downloading, and one game is downloaded when you start it, then prepared as usual. A Show pill switches between
+  local and network games.
+- **A guided first start.** Four steps on first launch, a Help screen with questions and drawings, « Good to know »
+  bubbles and a short « How it works » on Prepare.
+- **SpikeOut: Battle Street.** The black screen on about one boot in ten, still listed as known in earlier notes, was
+  already fixed in 0.13.0 (a rewind capture made a USB wait time out); a regression test now holds it.
+
+**Known problems**
+
+- Fable runs without its 16:9 scenes and faster menus until you install its mod. The generator's patch has only been
+  checked on test executables, not on the game itself: report what you see.
+- Xbox save states are still not available on Windows.
+- The new loads, the mods and the network library have not been checked on the Thor yet.
+
 ## Changes
 
 <!-- release:changes start (generated from the commits; rewritten on every push to main) -->
