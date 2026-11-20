@@ -199,6 +199,82 @@ public class LauncherPrepareTest {
         shot(a, "3b-home-failed");
     }
 
+    /** XBA-335: « Send report » beside a failed Prepare: a sheet says what leaves, Send posts it, Cancel does not. */
+    @Test
+    public void failedSendsAReportOnlyOnSend() throws Exception {
+        java.util.List<byte[]> posted = new java.util.ArrayList<>();
+        CrashReport.transport = (url, h, body) -> {
+            posted.add(body);
+            return 200;
+        };
+        try {
+            withToolchain();
+            TestSupport.write(PrepareService.logFile(app, TID), "XBA_RESULT error code=CC_FAILED msg=x\n");
+            status(PrepareProtocol.FAILED, "compile", 4, 37, -1, "clang: error: 3 files failed to compile",
+                   "CC_FAILED");
+            LauncherActivity a = launch(null);
+            Widgets.PillButton report = pillNamed(a.getWindow().getDecorView(), app.getString(R.string.REPORT_BUTTON));
+            assertNotNull("the Send report pill", report);
+            report.performClick();
+            shadowOf(Looper.getMainLooper()).idle();
+            assertNotNull(a.sheetForTest());
+            CrashReport r = a.reportShownForTest();
+            assertNotNull(r);
+            assertEquals(CrashReport.KIND_PREPARE, r.kind);
+            assertEquals("CC_FAILED: clang: error: 3 files failed to compile", r.value);
+            shot(a, "3c-report-sheet");
+            // B closes it: nothing sent.
+            a.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BUTTON_B));
+            a.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BUTTON_B));
+            assertNull(a.sheetForTest());
+            assertTrue(posted.isEmpty());
+            // Again, then Send (the sheet's first row).
+            report.performClick();
+            shadowOf(Looper.getMainLooper()).idle();
+            a.focusForTest().performClick();
+            for (int i = 0; i < 200 && posted.isEmpty(); i++)
+                Thread.sleep(10);
+            assertEquals(1, posted.size());
+            for (int i = 0; i < 200 && !app.getString(R.string.REPORT_SENT).equals(a.noteForTest()); i++) {
+                Thread.sleep(10);
+                shadowOf(Looper.getMainLooper()).idle();
+            }
+            assertEquals(app.getString(R.string.REPORT_SENT), a.noteForTest());
+            assertTrue(new String(posted.get(0), java.nio.charset.StandardCharsets.UTF_8).contains("\"prepare_code\":\"CC_FAILED\""));
+        } finally {
+            CrashReport.transport = CrashReport.HTTP;
+        }
+    }
+
+    /** The report sheet on 4:3 and square screens: Send and Cancel stay on screen. */
+    @Test
+    @Config(qualifiers = "w1440dp-h1080dp-land-mdpi")
+    public void reportSheet4x3() throws Exception {
+        reportSheetShot("3c-report-sheet-4x3");
+    }
+
+    @Test
+    @Config(qualifiers = "w1080dp-h1080dp-land-mdpi")
+    public void reportSheet1x1() throws Exception {
+        reportSheetShot("3c-report-sheet-1x1");
+    }
+
+    private void reportSheetShot(String name) throws Exception {
+        withToolchain();
+        TestSupport.write(PrepareService.logFile(app, TID), "XBA_RESULT error code=CC_FAILED msg=x\n");
+        status(PrepareProtocol.FAILED, "compile", 4, 37, -1, "clang: error: 3 files failed to compile", "CC_FAILED");
+        LauncherActivity a = launch(null);
+        pillNamed(a.getWindow().getDecorView(), app.getString(R.string.REPORT_BUTTON)).performClick();
+        shadowOf(Looper.getMainLooper()).idle();
+        View send = a.focusForTest();
+        assertTrue(send instanceof Widgets.MenuRow);
+        int[] at = new int[2];
+        send.getLocationOnScreen(at);
+        int h = a.getWindow().getDecorView().getHeight();
+        assertTrue("Send is on screen: " + at[1] + "+" + send.getHeight() + " of " + h, at[1] + send.getHeight() <= h);
+        shot(a, name);
+    }
+
     @Test
     public void killedTwice() throws Exception {
         withToolchain();

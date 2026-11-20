@@ -293,6 +293,15 @@
     <string name="SHARE_LAST_GAME_LOG_DETAIL">After a game closed or crashed: what it logged, how it ended and the crash\'s backtrace, in one text file to send to whatever app you pick. It holds no game data.</string>
     <string name="SHARE_LAST_GAME_LOG_RUNNING">A game is running: share its log from its own menu, or quit it first.</string>
     <string name="SHARE_LAST_GAME_LOG_SUBJECT">XRecomp: the last game\'s log</string>
+    <string name="REPORT_BUTTON">Send report</string>
+    <string name="REPORT_TITLE">Send a report</string>
+    <string name="REPORT_EXPLAIN">Sent to the XRecomp developers only if you choose Send: what is below and the log, without folders, addresses or links. No game data, no account.</string>
+    <string name="REPORT_SEND">Send</string>
+    <string name="REPORT_SENDING">Sending the report…</string>
+    <string name="REPORT_SENT">Report sent. Thank you!</string>
+    <string name="REPORT_NOT_SENT">Could not send the report: it will leave with the next one.</string>
+    <string name="REPORT_LAST_GAME">Send a report about the last game</string>
+    <string name="REPORT_LAST_GAME_DETAIL">After a game crashed: how it ended and its log go to the XRecomp developers, once you have seen what is sent and chosen Send. No game data.</string>
     <string name="CHIP_NEEDS_PREPARE">Needs preparing</string>
     <string name="CHIP_PREPARING">Preparing</string>
     <string name="CHIP_PREPARE_FAILED">Prepare failed</string>

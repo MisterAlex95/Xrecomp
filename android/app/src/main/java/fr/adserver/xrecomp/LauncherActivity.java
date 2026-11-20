@@ -3006,6 +3006,9 @@ public class LauncherActivity extends Activity {
                                           Theme.TEXT_DIM));
             listRow(list, getString(R.string.SHARE_LAST_GAME_LOG), getString(R.string.SHARE_LAST_GAME_LOG_DETAIL),
                     this::shareLastGameLog);
+            if (CrashReport.available(this))
+                listRow(list, getString(R.string.REPORT_LAST_GAME), getString(R.string.REPORT_LAST_GAME_DETAIL),
+                        this::reportLastGame);
             MenuRow about = listRow(list, getString(R.string.ABOUT), getString(R.string.ABOUT_TEXT),
                                     () -> go(Screen.ABOUT));
             about.setValue(version());
@@ -5125,8 +5128,11 @@ public class LauncherActivity extends Activity {
             Runnable act = directAction;
             directPrimary = pill(buttons, directActionLabel == R.string.PLAY ? Icon.PLAY : null,
                                  getString(directActionLabel), true, act);
-            if (directShareLog)
+            if (directShareLog) {
                 pill(buttons, null, getString(R.string.SHARE_LOG), false, this::shareLog);
+                if (CrashReport.available(this))
+                    pill(buttons, null, getString(R.string.REPORT_BUTTON), false, this::reportPrepare);
+            }
             defaultFocus = directPrimary;
             startAction = act;
             addHint("A", R.string.HINT_SELECT, this::clickFocused);
@@ -5459,6 +5465,8 @@ public class LauncherActivity extends Activity {
                                             getString(cancelled ? R.string.PREPARE_RESUME : R.string.PREPARE_RETRY),
                                             true, this::startPrepare);
             pill(buttons, Icon.COPY, getString(R.string.SHARE_LOG), false, this::shareLog);
+            if (!cancelled && CrashReport.available(this))
+                pill(buttons, null, getString(R.string.REPORT_BUTTON), false, this::reportPrepare);
             defaultFocus = retry;
             yAction = this::shareLog;
             addHint("A", R.string.HINT_SELECT, this::clickFocused);
@@ -5589,6 +5597,69 @@ public class LauncherActivity extends Activity {
         } catch (ActivityNotFoundException e) {
             setNote(getString(R.string.SHARE_LOG_NO_APP), NOTE_ERROR);
         }
+    }
+
+    // ---- « Send report » (XBA-335) -----------------------------------------------------------------------------
+
+    /** « Send report » beside a failed Prepare: its code, message and prepare.log. */
+    private void reportPrepare() {
+        String tid = prepTid();
+        if (tid == null || !PrepareService.logFile(this, tid).isFile()) {
+            setNote(getString(R.string.SHARE_LOG_NONE), NOTE_INFO);
+            return;
+        }
+        PrepareProtocol.Status s = readPrepStatus();
+        confirmReport(CrashReport.prepare(this, tid, prepTitle(), s == null ? "" : s.code, s == null ? "" : s.msg,
+                                          PrepareService.logFile(this, tid)));
+    }
+
+    /** « Send a report about the last game » (Settings › Advanced): the dump of « Share the last game's log ». */
+    private void reportLastGame() {
+        if (gameRunning()) {
+            setNote(getString(R.string.SHARE_LAST_GAME_LOG_RUNNING), NOTE_INFO);
+            return;
+        }
+        new Thread(() -> {
+            File f = LogProvider.lastGameLogFile(this);
+            boolean ok = LogProvider.dumpLastGame(this, f);
+            String key = GameStore.sessionTid(this);
+            CrashReport r = ok ? CrashReport.game(this, key, null, f) : null;
+            runOnUiThread(() -> {
+                if (r == null)
+                    setNote(getString(R.string.SHARE_LOG_NONE), NOTE_INFO);
+                else
+                    confirmReport(r);
+            });
+        }, "report-last-game").start();
+    }
+
+    /** The sheet before anything leaves: what the report holds, Send or Cancel. Nothing is sent without Send. */
+    private void confirmReport(CrashReport r) {
+        Widgets.Sheet s = openSheet(R.string.REPORT_TITLE);
+        s.addText(getString(R.string.REPORT_EXPLAIN), 5);
+        TextView sum = s.addText(r.summary(), 6);
+        sum.setTextColor(Theme.TEXT);
+        ((LinearLayout.LayoutParams)sum.getLayoutParams()).topMargin = Theme.S2;
+        sheetRow(getString(R.string.REPORT_SEND), () -> sendReport(r));
+        sheetRow(getString(R.string.CANCEL), () -> restoreFocus(false));
+        sheetReady();
+        reportShown = r;
+        Log.i(TAG, "launcher: report " + r.kind + " offered");
+    }
+
+    private CrashReport reportShown;
+
+    CrashReport reportShownForTest() {
+        return reportShown;
+    }
+
+    private void sendReport(CrashReport r) {
+        setNote(getString(R.string.REPORT_SENDING), NOTE_INFO);
+        new Thread(() -> {
+            boolean ok = r.send(this);
+            runOnUiThread(() -> setNote(getString(ok ? R.string.REPORT_SENT : R.string.REPORT_NOT_SENT),
+                                        ok ? NOTE_OK : NOTE_WARN));
+        }, "report-send").start();
     }
 
     /** Every PREPARE_POLL_MS while resumed: status.json into the Preparing screen, or into Home's row. */
