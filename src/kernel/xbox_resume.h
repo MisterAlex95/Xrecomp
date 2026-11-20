@@ -90,6 +90,9 @@ XboxResumePlan *xbox_ResumePlanBuild(const XboxResumeChainFrame *fr, uint32_t n,
  * limit lowered so every RECOMP_FRAME_ENTRY_R takes its slow path), esp and ebp as the routine was entered. The
  * plan must live until the thread has re-entered its innermost frame (plan->done). */
 void xbox_ResumeBegin(XboxResumePlan *p);
+/* The same on a thread whose routine runs above `base` frames of its own (XBA-294: the INLINE main thread
+ * re-entered in the same run keeps its creator's frames below its routine). */
+void xbox_ResumeBeginAt(XboxResumePlan *p, uint32_t base);
 /* 1 while the calling thread is re-entering its chain. */
 int  xbox_ResumeActive(void);
 

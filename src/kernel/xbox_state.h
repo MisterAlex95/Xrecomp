@@ -46,7 +46,10 @@
  * state (same ordinal, guest return address and esp at the call) through the same call chain (XBA-247: the
  * chain signature of its frame shadow stack, every lifted frame's return address and esp, neither chain
  * unrestorable) with the same ebp in every frame: the host stack below it is then the one the state's thread
- * had (chain_matches in xbox_state.c). Otherwise ECHAIN with the reason, and nothing changes. Then, with the
+ * had (chain_matches in xbox_state.c). A thread at another chain re-enters the state's instead, on its own host
+ * thread, through the resume entries (XBA-294: kernel_park.h xbox_ParkReenterThread); when it cannot (the same
+ * guest thread and routine, a chain the resume entries can re-enter), ECHAIN with both reasons, and nothing
+ * changes. Then, with the
  * devices held: MEM, RAM, KOBJ, NV2A, APU, USB and any other section in registration order, and each thread's
  * registers (the ones it sees when its call returns, or the call made again when the state has the thread
  * inside it). A section that fails part way puts back a capture taken
@@ -332,6 +335,7 @@ typedef struct XboxStateLoadStats {
     int threads;
     int reissued;            /* threads whose call is made again (the state had them inside it) */
     char reason[256];        /* why it was refused or failed, or "" */
+    int reentered;           /* threads at another call chain than in the state, re-entering the state's (XBA-294) */
 } XboxStateLoadStats;
 
 /* Freezes every guest thread (timeout_ms for the freeze, and again for the waits in progress to end), loads the

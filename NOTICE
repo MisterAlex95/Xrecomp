@@ -405,6 +405,20 @@ The Android app (XRecomp) — what the APK ships
     Copyright (c) 2016, The Android Open Source Project
     Full text: LICENSES/Apache-2.0-apksig.txt
 
+  libtorrent4j 2.1.0-39, MIT (classes.dex, libtorrent4j.so: the network
+    library's torrent downloads, XBA-319)
+    https://github.com/aldenml/libtorrent4j
+    Copyright (c) 2018-2025 Alden Torres. Full text: LICENSES/MIT-libtorrent4j.txt
+    Inside libtorrent4j.so:
+    - libtorrent 2.1, BSD-3-Clause, https://libtorrent.org
+      Copyright (c) 2003-2020, Arvid Norberg. Full text:
+      LICENSES/BSD-3-Clause-libtorrent.txt
+    - Boost, Boost Software License 1.0, https://www.boost.org
+      Full text: LICENSES/BSL-1.0-Boost.txt
+    - OpenSSL 3.5, Apache License 2.0, https://www.openssl.org
+      Copyright (c) 1998-2026 The OpenSSL Project Authors. Full text:
+      LICENSES/Apache-2.0-OpenSSL.txt
+
   OpenBIOS (pcsx-redux/nugget f044c6b8), MIT (assets/ps1-bios/openbios.bin:
     the PlayStation BIOS the PS1 runtime boots; built from source by the
     ps1-bios stage of tools/docker/android.Dockerfile, as

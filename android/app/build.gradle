@@ -388,14 +388,20 @@ android {
     }
 }
 
-// The app uses no AndroidX and one library: apksig, which signs the game apps « Create an app » makes on the device
+// The app uses no AndroidX and two libraries. apksig, which signs the game apps « Create an app » makes on the device
 // (TitleApk; docs/android/app-shell.md « A game's own app »). APK Signature Scheme v2 is a binary format with
 // exact digest rules that the platform's verifier must accept; AOSP's own signer (Apache-2.0, pure Java, no
 // dependencies, the code apksigner and AGP use) is safer than a home-made one. The version is AGP's, already in the
 // Gradle cache of the build images (NOTICE « The Android app », LICENSES/Apache-2.0-apksig.txt).
+// The network library (XBA-319) uses libtorrent4j (MIT; libtorrent 2.x, BSD-3-Clause, with Boost and OpenSSL inside
+// its native library): the Java API and the arm64 libtorrent4j.so (a plain jar whose lib/arm64-v8a/ AGP packages as
+// a native library). Only LibtorrentEngine touches it, so no unit test loads the native library (NOTICE « The
+// Android app », LICENSES/MIT-libtorrent4j.txt, LICENSES/BSD-3-Clause-libtorrent.txt).
 // The rest is test-only (Robolectric brings test-only AndroidX).
 dependencies {
     implementation 'com.android.tools.build:apksig:8.7.3'
+    implementation 'org.libtorrent4j:libtorrent4j:2.1.0-39'
+    implementation 'org.libtorrent4j:libtorrent4j-android-arm64:2.1.0-39'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.robolectric:robolectric:4.14.1'
 }

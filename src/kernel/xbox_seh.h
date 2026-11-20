@@ -254,6 +254,9 @@ void     xbox_SehPointTake(XboxSehPoint *p);
  * report; func: where the frame's code was entered); 0: refused as an anchor on another host stack would be (counted,
  * reported, the exception goes on unhandled). */
 int      xbox_SehPointResume(const XboxSehPoint *p, uint32_t va, uint32_t func);
+/* The same state put back with no jump counted and the guest CPU left as it is (XBA-294: a thread leaving
+ * its host frames to re-enter a save state's chain, on the same host stack, holding the CPU already). */
+void     xbox_SehPointRestore(const XboxSehPoint *p);
 
 /* Counters, for tests and the status report. */
 typedef struct {

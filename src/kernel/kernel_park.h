@@ -242,6 +242,42 @@ int  xbox_ParkRestoreThread(int slot, const void *cpu, int reissue);   /* cpu: a
 /* On the calling guest thread, after xbox_ParkKernelLeave: 1 (once) when its call must be issued again. */
 int  xbox_ParkTakeReissue(void);
 
+/* ---- Re-entry in the same run (XBA-294) ---------------------------------------------------------------------
+ *
+ * A same-run load whose state has a thread parked at another call chain than the one it stands at now cannot
+ * write that thread's registers back: the host frames below it are not the state's. Such a thread is
+ * re-entered instead: it leaves its host frames (a longjmp to where its routine was started, on the same host
+ * thread, so its kernel objects stay bound to it) and calls its routine again in resume mode (xbox_resume.h,
+ * the plan the XBA-250 resume entries follow), as a thread of a fresh process does.
+ *
+ *   xbox_ParkRunRoutine      xbox_ParkThreadStart; fn(); xbox_ParkThreadEnd, with the re-entry point taken
+ *                            first (the SEH dispatcher's state, the frame count). The runtime starts every guest
+ *                            routine through it; a thread registered with xbox_ParkThreadStart alone cannot be
+ *                            re-entered. A routine run nested on a registered thread (a worker run inline) only
+ *                            nests. resume: a plan the routine re-enters at once (a thread of a fresh process,
+ *                            xbox_StateResume; the caller keeps it alive), or NULL.
+ *   xbox_ParkReenterCheck    whether the frozen thread in `slot` can be re-entered: started through
+ *                            xbox_ParkRunRoutine with routine `fn`, not nested, not inside the interpreter, held
+ *                            at the end of a top-level park point. 1, or 0 with the reason.
+ *   xbox_ParkReenterThread   with a freeze in force: at the thaw, the thread in `slot` leaves its frames at the
+ *                            end of its park point and re-enters `plan` (an XboxResumePlan, owned by the thread
+ *                            from then on; one set before and not taken yet is freed). 0, or -1.
+ *   xbox_ParkReenterPending  1 while a re-entry set on `slot` has not been taken by its thread: its record and
+ *                            frames still show the chain it leaves.
+ *   xbox_ParkReenterPoint    the jump, on the guest thread, at the end of a park point (after the guest CPU is
+ *                            taken back): kernel_thunk_dispatch after xbox_ParkKernelLeave, and the outermost
+ *                            xbox_ParkHostWaitLeave. Returns when nothing is asked. */
+typedef void (*xbox_park_routine_t)(void);
+void xbox_ParkRunRoutine(xbox_park_routine_t fn, void *resume);
+int  xbox_ParkReenterCheck(int slot, xbox_park_routine_t fn, char *why, size_t why_n);
+int  xbox_ParkReenterThread(int slot, void *plan);
+int  xbox_ParkReenterPending(int slot);
+void xbox_ParkReenterPoint(void);
+/* The routine the thread in `slot` was started with through xbox_ParkRunRoutine (NULL: none, or nested). */
+xbox_park_routine_t xbox_ParkRoutine(int slot);
+/* Threads re-entered since the start (tests). */
+uint32_t xbox_ParkReentered(void);
+
 /* Threads that started while every slot was taken (untracked: a state cannot cover them). */
 int  xbox_ParkDropped(void);
 /* 1 when the calling thread is a registered guest thread. */

@@ -100,6 +100,11 @@ XboxResumePlan *xbox_ResumePlanBuild(const XboxResumeChainFrame *fr, uint32_t n,
 
 void xbox_ResumeBegin(XboxResumePlan *p)
 {
+    xbox_ResumeBeginAt(p, 0);
+}
+
+void xbox_ResumeBeginAt(XboxResumePlan *p, uint32_t base)
+{
     p->at = 0;
     p->done = 0;
     t_kernel = NULL;
@@ -107,9 +112,12 @@ void xbox_ResumeBegin(XboxResumePlan *p)
     /* Every entry compares the frame top with the limit; at the base (or with no array yet, NULL against NULL)
      * the compare fails and RECOMP_FRAME_ENTRY_R goes to the slow path, which records the frame and jumps to the
      * function's resume block. */
-    g_cpu.r_flimit = g_cpu.r_fbase;
-    if (g_cpu.r_fbase)
-        g_cpu.r_ftop = g_cpu.r_fbase;
+    if (g_cpu.r_fbase) {
+        g_cpu.r_ftop = g_cpu.r_fbase + (base < RECOMP_FRAME_SLOTS ? base : 0);
+        g_cpu.r_flimit = g_cpu.r_ftop;
+    } else {
+        g_cpu.r_flimit = g_cpu.r_fbase;
+    }
     g_esp = p->entry_esp;
     g_ebp = p->entry_ebp;
     g_seh_ebp = p->entry_ebp;
