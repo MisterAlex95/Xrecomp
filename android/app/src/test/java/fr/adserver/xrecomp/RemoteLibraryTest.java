@@ -227,4 +227,36 @@ public class RemoteLibraryTest {
         i.folder = "content://elsewhere";   // the same path in a library folder of the player's is not that download
         assertEquals(2, RemoteLibrary.notLocal(files, local).size());
     }
+
+    @Test
+    public void tagsSayRegionLanguagesDiscAndTheRest() {
+        RemoteLibrary.Tags t = RemoteLibrary.Tags.of("Ace Combat - Assault Horizon (USA) (En,Fr,Es) (Disc 1).zip");
+        assertEquals(java.util.Arrays.asList("USA"), t.regions);
+        assertEquals(java.util.Arrays.asList("En", "Fr", "Es"), t.languages);
+        assertEquals(1, t.disc);
+        assertEquals("USA · En, Fr, Es · Disc 1", t.label("Disc"));
+        t = RemoteLibrary.Tags.of("Game (USA, Europe) (Rev 1) (Kinect) [!].iso");
+        assertEquals(java.util.Arrays.asList("USA", "Europe"), t.regions);
+        assertTrue(t.languages.isEmpty());
+        assertEquals(java.util.Arrays.asList("Rev 1", "Kinect"), t.extras);
+        assertEquals("", RemoteLibrary.Tags.of("Plain.iso").label("Disc"));
+    }
+
+    @Test
+    public void versionsStackTheBestForThePlayerFirst() throws IOException {
+        TorrentMeta m = TorrentMeta.parse(torrent("Set", false, files(
+                file(1, "Ace Combat (Japan).zip"), file(2, "Ace Combat (USA) (En,Fr,Es).zip"),
+                file(3, "Ace Combat (Europe) (En,Fr,De,It).zip"), file(4, "Other Game (USA).zip"))));
+        List<RemoteLibrary.Game> g = RemoteLibrary.games(source(Console.X360), m);
+        List<List<RemoteLibrary.Game>> fr = RemoteLibrary.stacks(g, java.util.Locale.FRANCE, new java.util.HashSet<>());
+        assertEquals(2, fr.size());
+        assertEquals(3, fr.get(0).size());
+        assertEquals("Ace Combat (Europe) (En,Fr,De,It).zip", fr.get(0).get(0).name());   // French, and Europe
+        assertEquals("Ace Combat (Japan).zip", fr.get(0).get(2).name());
+        assertEquals("Ace Combat (USA) (En,Fr,Es).zip",
+                     RemoteLibrary.stacks(g, java.util.Locale.US, new java.util.HashSet<>()).get(0).get(0).name());
+        java.util.Set<String> dl = new java.util.HashSet<>();
+        dl.add(g.get(0).key);   // the Japanese one downloading: shown first, whatever the locale
+        assertEquals("Ace Combat (Japan).zip", RemoteLibrary.stacks(g, java.util.Locale.FRANCE, dl).get(0).get(0).name());
+    }
 }

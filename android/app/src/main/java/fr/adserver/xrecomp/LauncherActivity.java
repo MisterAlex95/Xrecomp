@@ -6489,6 +6489,9 @@ public class LauncherActivity extends Activity {
             if (i.otherConsole() && CoverArt.wanted(files, g.getKey(), now))
                 todo.add(new String[] { g.getKey(), i.name });
         }
+        for (LibraryScreen.Entry e : libEntries)   // XBA-332: the network library's games, by their file's name
+            if (e.remote != null && CoverArt.wanted(files, e.tid, now))
+                todo.add(new String[] { e.tid, e.remote.name() });
         if (todo.isEmpty())
             return;
         Log.i(TAG, "launcher: cover art: looking for " + todo.size() + " game(s)");
@@ -6573,10 +6576,21 @@ public class LauncherActivity extends Activity {
      */
     /** The library grid's columns: five on 16:9, fewer on a narrower stage (LibraryScreen.columns). */
     private int libColumns = LibraryScreen.COLUMNS;
+    /** XBA-332: how many network games the last library had (a change looks for their covers). */
+    private int libCoverRemote = -1;
 
     private void buildLibrary() {
         screenTitle.setText(R.string.LIB_TITLE);
         libEntries = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
+        int remote = 0;
+        for (LibraryScreen.Entry e : libEntries)
+            if (e.remote != null)
+                remote++;
+        if (remote != libCoverRemote) {   // XBA-332: network games came (a source added): their covers are looked for
+            libCoverRemote = remote;
+            if (remote > 0)
+                fetchCovers(index != null ? index : new LibraryIndex());
+        }
         LibraryView.State view = libView();
         // Games of several consoles: each card says its console (an Xbox-only library looks as before), and the top
         // bar's tabs filter them (XBA-206: All, Xbox, GBA, PS1, N64; L1 / R1).
@@ -6631,6 +6645,8 @@ public class LauncherActivity extends Activity {
             libWherePill = libHasRemote() ? pill(bar, Icon.CLOUD, whereLabel(), false, this::stepWhere) : null;
             if (libWherePill == null)
                 libView().where = LibraryView.Where.ALL;   // (no game on the network shown: nothing to filter)
+            else if (libView().where == LibraryView.Where.DOWNLOADING && !libHasDownloads())
+                libView().where = LibraryView.Where.REMOTE;   // the downloads ended: what is left on the network
             LinearLayout.LayoutParams bp = lp(MATCH, Theme.BUTTON_H);
             bp.bottomMargin = Theme.S3;
             col.addView(bar, bp);
@@ -6688,6 +6704,14 @@ public class LauncherActivity extends Activity {
         return libWherePill;
     }
 
+    /** XBA-332: some game is being downloaded (the Show pill's « Downloading » has something to show). */
+    private boolean libHasDownloads() {
+        for (LibraryScreen.Entry e : libEntries)
+            if (e.download != null && e.download.active())
+                return true;
+        return false;
+    }
+
     /** Some entry of the library is a game on the network (the Show pill has something to tell apart). */
     private boolean libHasRemote() {
         for (LibraryScreen.Entry e : libEntries)
@@ -6706,6 +6730,8 @@ public class LauncherActivity extends Activity {
             return;
         LibraryView.State view = libView();
         view.where = view.where.next();
+        if (view.where == LibraryView.Where.DOWNLOADING && !libHasDownloads())
+            view.where = view.where.next();   // XBA-332: nothing downloads: no empty view on the way
         saveLibView();
         Log.i(TAG, "launcher: library: showing " + view.where.name().toLowerCase(Locale.ROOT));
         fillLibrary(focusTid);
@@ -7215,8 +7241,33 @@ public class LauncherActivity extends Activity {
                     .setValue(failed ? getString(R.string.NET_FAILED, why)
                                      : getString(R.string.LIB_ST_FREE, size(netFree())));
         }
+        // XBA-332: what its name says (region, languages, disc), then the other versions of the game, each its own sheet
+        String tags = e.remote.tags().label(getString(R.string.NET_DISC));
+        if (!tags.isEmpty())
+            sheetRow(getString(R.string.NET_VERSION), () -> {}).setValue(tags);
+        java.util.Map<String, NetDownloads.Job> jobs = new java.util.HashMap<>();
+        if (e.versions.size() > 1)
+            for (NetDownloads.Job x : NetDownloads.read(getFilesDir()))
+                jobs.put(x.key, x);
+        for (RemoteLibrary.Game v : e.versions) {
+            if (v == e.remote)
+                continue;
+            NetDownloads.Job vj = jobs.get(v.key);
+            String vt = v.tags().label(getString(R.string.NET_DISC));
+            sheetRow(vt.isEmpty() ? v.name() : vt, () -> openRemoteVersion(e, v))
+                    .setValue(vj != null && vj.active() ? getString(R.string.NET_CHIP_DOWNLOADING) : size(v.size()));
+        }
         sheetRow(from, () -> {});
         sheetReady();
+    }
+
+    /** XBA-332: another version of a stacked network game: its own sheet (download, cancel), the stack kept. */
+    private void openRemoteVersion(LibraryScreen.Entry stack, RemoteLibrary.Game v) {
+        LibraryScreen.Entry en = LibraryScreen.entry(getFilesDir(), v.key, games, index, libEnv());
+        if (en.remote == null)
+            return;
+        en.versions = stack.versions;
+        openRemoteGame(en);
     }
 
     private String netError(String e) {

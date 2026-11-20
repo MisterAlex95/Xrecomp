@@ -47,6 +47,10 @@ final class CoverArt {
         case PS1: return "Sony_-_PlayStation";
         case N64: return "Nintendo_-_Nintendo_64";
         case GC: return "Nintendo_-_GameCube";   // XBA-274: Redump-named discs
+        // XBA-332: for the network library's games, named after their Redump file before any download (a local
+        // Xbox game shows its XBE's title image, an Xbox 360 game its XEX's tile: TitleArt, packArtFile)
+        case XBOX: return "Microsoft_-_Xbox";
+        case X360: return "Microsoft_-_Xbox_360";
         default: return null;
         }
     }
@@ -157,7 +161,9 @@ final class CoverArt {
 
     /** Whether to ask the network for this game now: no downloaded cover yet, and no recent miss. */
     static boolean wanted(File filesDir, String key, long now) {
-        if (system(Console.ofKey(key)) == null || artFile(filesDir, key).isFile())
+        Console c = Console.ofKey(key);
+        if (system(c) == null || artFile(filesDir, key).isFile()
+            || (c == Console.XBOX && !RemoteLibrary.isRemoteKey(key)))   // a local Xbox game has its XBE's image
             return false;
         File miss = missFile(filesDir, key);
         return !miss.isFile() || now - miss.lastModified() > MISS_RETRY_MS;

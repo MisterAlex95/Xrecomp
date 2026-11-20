@@ -82,7 +82,13 @@ public class CoverArtTest {
         assertTrue(CoverArt.url(Console.N64, "x").contains("/Nintendo_-_Nintendo_64/"));
         assertTrue(CoverArt.url(Console.GBA, "x").contains("/Nintendo_-_Game_Boy_Advance/"));
         assertTrue("XBA-274", CoverArt.url(Console.GC, "x").contains("/Nintendo_-_GameCube/"));
-        assertNull(CoverArt.system(Console.XBOX));
+        // XBA-332: the network library's Xbox / Xbox 360 games, by name; a local Xbox game keeps its XBE's image
+        assertTrue(CoverArt.url(Console.XBOX, "x").contains("/Microsoft_-_Xbox/"));
+        assertTrue(CoverArt.url(Console.X360, "x").contains("/Microsoft_-_Xbox_360/"));
+        File files = new File(tmp.getRoot(), "w");
+        assertFalse(CoverArt.wanted(files, "58420001", 0));
+        assertTrue(CoverArt.wanted(files, "net-0123456789ab-00000001", 0));
+        assertTrue(CoverArt.wanted(files, "x360-net-0123456789ab-00000001", 0));
     }
 
     @Test
