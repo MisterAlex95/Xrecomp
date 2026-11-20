@@ -254,9 +254,10 @@ int main(int argc, char **argv)
     type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
     static const uint32_t swap[4] = {0x53574150u, 0, W, H};
 
-    /* the render state a title sets first: all colour channels written, no blending (src * 1 + dst * 0) */
-    reg(0x2104, 0xFu);
-    reg(0x2201, 0x00010001u);
+    /* the render state a title sets first: all colour channels of the four targets written, no blending (src * 1 +
+     * dst * 0) */
+    reg(0x2104, 0xFFFFu);
+    reg(0x2201, 0x00010001u), reg(0x2209, 0x00010001u), reg(0x220A, 0x00010001u), reg(0x220B, 0x00010001u);
     full_viewport();
 
     /* frame 0: a red triangle */
@@ -658,6 +659,31 @@ int main(int argc, char **argv)
             CHECK(c[1] == 255 && c[2] == 0 && t1 == 0xFFFF0000u,
                   "frame 20 (render targets): target 0 %u,%u,%u, target 1 resolved %08X (want FFFF0000)", c[0], c[1],
                   c[2], t1);
+            /* each target its own blend and colour mask (RB_BLENDCONTROL1, RB_COLOR_MASK's second nibble): red added
+             * to target 1's blue (one + one) while target 0 is written opaque, then green with target 1 masked off:
+             * target 1 resolves magenta, target 0 shows green */
+            reg(0x4404, fbits(1.0f)), reg(0x4405, 0), reg(0x4406, 0), reg(0x4407, fbits(1.0f)); /* c1: red */
+            reg(0x2209, 1u | 1u << 8 | 1u << 16 | 1u << 24);
+            reg(0x4800, 0x4000u | 3u);
+            reg(0x4801, 2u | (64u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            reg(0x2209, 0x00010001u);
+            reg(0x4404, 0), reg(0x4405, fbits(1.0f));                                        /* c1: green */
+            reg(0x2104, 0x000Fu);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            reg(0x2104, 0xFFFFu);
+            reg(0x4800, 0x7000u | 3u);
+            reg(0x4801, 2u | (6u << 2));
+            reg(0x2208, 6);
+            type3(PM4_DRAW_INDX_2, &rect, 1);
+            reg(0x2208, 4);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            c = px(g, W / 2, H / 2);
+            t1 = rd32(NULL, 0x20000 + tiled_off(5, 5));
+            CHECK(c[0] == 0 && c[1] == 255 && c[2] == 0 && t1 == 0xFFFF00FFu,
+                  "per-target blend / mask: target 0 %u,%u,%u (want green), target 1 resolved %08X (want FFFF00FF)",
+                  c[0], c[1], c[2], t1);
         }
     }
 
@@ -948,7 +974,7 @@ int main(int argc, char **argv)
 
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 33 + st.memexport_draws && st.frames == 31 && st.resolves == 5 && st.depth_resolves == 1 &&
+    CHECK(st.drawn == 35 + st.memexport_draws && st.frames == 32 && st.resolves == 6 && st.depth_resolves == 1 &&
               st.no_shader == (st.memexport_skipped ? 1u : 0u) && /* XBA-282: the memory export draw, or its fallback */
               st.unsupported == 0 &&
               st.unsupported_textures == 0 && st.computed_fetches >= 1 && st.mipmapped >= 1 && st.surfaces >= 4 &&
@@ -1925,6 +1951,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: every frame drawn and read back as expected (the first 31 with five resolves, then XBA-296's)\n");
+    printf("xenos_gl: every frame drawn and read back as expected (the first 32 with six resolves, then XBA-296's)\n");
     return 0;
 }

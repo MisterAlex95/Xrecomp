@@ -368,6 +368,13 @@ struct xenos_gl {
     int memexport;            /* XBA-282: memory export shaders run (GLES 3.1, vertex storage blocks) */
     int memexport_ps;         /* XBA-296: in pixel shaders too (fragment storage blocks) */
     void (*glMemoryBarrier)(GLbitfield);
+    /* per-target blend and colour mask (GLES 3.2 or OES / EXT_draw_buffers_indexed); NULL: render target 0's state for
+     * every target, as GLES 3.0 has it */
+    void (*glEnablei)(GLenum, GLuint);
+    void (*glDisablei)(GLenum, GLuint);
+    void (*glBlendFuncSeparatei)(GLuint, GLenum, GLenum, GLenum, GLenum);
+    void (*glBlendEquationSeparatei)(GLuint, GLenum, GLenum);
+    void (*glColorMaski)(GLuint, GLboolean, GLboolean, GLboolean, GLboolean);
     GLuint mxbuf;             /* their log: count, capacity, then (byte address, dword) pairs */
     int mx_warned;
     FILE *log;
@@ -512,6 +519,42 @@ static void memexport_caps(xenos_gl *g)
             g->gl_major, g->gl_minor, (int)blocks, (int)fblocks);
 }
 
+/* an optional entry point: eglGetProcAddress, then libGLESv2 (NULL when neither has it) */
+static void *gl_proc(xenos_gl *g, const char *name)
+{
+    void *f = g->eglGetProcAddress ? g->eglGetProcAddress(name) : NULL;
+    if (!f && g->gles_lib)
+        f = dlsym(g->gles_lib, name);
+    return f;
+}
+
+/* per-target blend state and colour masks: GLES 3.2's glEnablei & co., else OES / EXT_draw_buffers_indexed's */
+static void draw_buffers_caps(xenos_gl *g)
+{
+    const char *sfx = g->gl_major > 3 || (g->gl_major == 3 && g->gl_minor >= 2) ? ""
+                      : has_ext(g, "GL_OES_draw_buffers_indexed")                 ? "OES"
+                      : has_ext(g, "GL_EXT_draw_buffers_indexed")                 ? "EXT"
+                                                                                  : NULL;
+    if (sfx) {
+        char n[64];
+#define ISYM(name)                                                                                                     \
+    snprintf(n, sizeof n, "%s%s", #name, sfx);                                                                         \
+    *(void **)&g->name = gl_proc(g, n)
+        ISYM(glEnablei);
+        ISYM(glDisablei);
+        ISYM(glBlendFuncSeparatei);
+        ISYM(glBlendEquationSeparatei);
+        ISYM(glColorMaski);
+#undef ISYM
+    }
+    if (!g->glEnablei || !g->glDisablei || !g->glBlendFuncSeparatei || !g->glBlendEquationSeparatei ||
+        !g->glColorMaski)
+        g->glEnablei = NULL, g->glDisablei = NULL, g->glBlendFuncSeparatei = NULL, g->glBlendEquationSeparatei = NULL,
+        g->glColorMaski = NULL;
+    fprintf(g->log, "xenos: per-target blend and colour mask %s\n",
+            g->glEnablei ? "on" : "off (render target 0's state for all)");
+}
+
 static int setup(xenos_gl *g, char *why, size_t why_n)
 {
     g->max_tex = 4096;
@@ -520,6 +563,7 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     g->glGetIntegerv(0x821C /* GL_MINOR_VERSION */, &g->gl_minor);
     texture_options(g);
     memexport_caps(g);
+    draw_buffers_caps(g);
     const char *msaa_env = getenv("RECOMP_X360_MSAA");
     g->msaa_on = !(msaa_env && !strcmp(msaa_env, "0"));
     while (g->scale > 1 && (g->width * g->scale > g->max_tex || g->height * g->scale > g->max_tex))
@@ -1805,20 +1849,39 @@ static void apply_polygon_offset(xenos_gl *g, const xenos_cp *cp, uint32_t prim_
 
 static void apply_state(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
 {
-    /* blending: off when it is src * 1 + dst * 0 for colour and alpha */
-    uint32_t bc = cp->regs[0x2201];
-    if ((bc & 0x1FFF1FFFu) == 0x00010001u) {
-        g->glDisable(GL_BLEND);
-    } else {
-        g->glEnable(GL_BLEND);
-        g->glBlendFuncSeparate(blend_factor(bc & 31), blend_factor((bc >> 8) & 31), blend_factor((bc >> 16) & 31),
-                               blend_factor((bc >> 24) & 31));
-        g->glBlendEquationSeparate(blend_op((bc >> 5) & 7), blend_op((bc >> 21) & 7));
-        g->glBlendColor(as_float(cp->regs[0x2105]), as_float(cp->regs[0x2106]), as_float(cp->regs[0x2107]),
-                        as_float(cp->regs[0x2108]));
-    }
+    /* blending, render target n from RB_BLENDCONTROLn (off when it is src * 1 + dst * 0 for colour and alpha), and
+     * RB_COLOR_MASK's nibble n; without per-target state (GLES 3.0) target 0's for all */
+    static const uint32_t blend_reg[4] = {0x2201, 0x2209, 0x220A, 0x220B};
+    int indexed = g->glEnablei != NULL;
     uint32_t cm = cp->regs[0x2104];
-    g->glColorMask(cm & 1, (cm >> 1) & 1, (cm >> 2) & 1, (cm >> 3) & 1);
+    g->glBlendColor(as_float(cp->regs[0x2105]), as_float(cp->regs[0x2106]), as_float(cp->regs[0x2107]),
+                    as_float(cp->regs[0x2108]));
+    for (GLuint i = 0; i < (indexed ? 4u : 1u); i++) {
+        uint32_t bc = cp->regs[blend_reg[i]], m = cm >> (4 * i);
+        GLenum sc = blend_factor(bc & 31), dc = blend_factor((bc >> 8) & 31);
+        GLenum sa = blend_factor((bc >> 16) & 31), da = blend_factor((bc >> 24) & 31);
+        GLenum oc = blend_op((bc >> 5) & 7), oa = blend_op((bc >> 21) & 7);
+        int on = (bc & 0x1FFF1FFFu) != 0x00010001u;
+        if (indexed) {
+            if (on) {
+                g->glEnablei(GL_BLEND, i);
+                g->glBlendFuncSeparatei(i, sc, dc, sa, da);
+                g->glBlendEquationSeparatei(i, oc, oa);
+            } else {
+                g->glDisablei(GL_BLEND, i);
+            }
+            g->glColorMaski(i, m & 1, (m >> 1) & 1, (m >> 2) & 1, (m >> 3) & 1);
+        } else {
+            if (on) {
+                g->glEnable(GL_BLEND);
+                g->glBlendFuncSeparate(sc, dc, sa, da);
+                g->glBlendEquationSeparate(oc, oa);
+            } else {
+                g->glDisable(GL_BLEND);
+            }
+            g->glColorMask(m & 1, (m >> 1) & 1, (m >> 2) & 1, (m >> 3) & 1);
+        }
+    }
     /* depth and stencil */
     uint32_t dc = cp->regs[0x2200];
     if (dc & 2) {
