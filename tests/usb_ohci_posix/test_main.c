@@ -27,6 +27,10 @@
  * service pass walks the list, runs the USB interrupt and the DPC on the
  * waiting thread, and the wait succeeds. Nothing queued, it times out as
  * before. With RECOMP_OHCI_CATCHUP=0 the transfer one times out too.
+ * Then the transfer already retired, its done queue written back and the
+ * USB line posted but not run (what a rewind capture left SpikeOut's pad
+ * transfer in, XBA-327): the wait's service pass runs the ISR and the DPC,
+ * and the wait succeeds instead of timing out into a cancel.
  *
  * With the argument "state" (RECOMP_USB_PADS=1, another CTest entry), the
  * save state of the USB section (XBA-248): a pad enumerated through the
@@ -355,6 +359,48 @@ static void timed_wait(volatile uint32_t *hc0)
         check(w.st == STATUS_TIMEOUT && head == TW_TD0 && s_tw_dpc_runs == 0,
               "RECOMP_OHCI_CATCHUP=0: the wait times out, the list is left alone",
               detail);
+    }
+
+    /* The transfer already retired and its done queue written back, the
+     * USB line raised but its ISR not run yet: what a rewind capture left
+     * behind (XBA-327). The controller's last pass before the hold retired
+     * the descriptor; the capture held the gate, so the interrupt waited;
+     * XAPI's 50 ms wait for the transfer ran out meanwhile, and the title
+     * cancelled a transfer that had completed. XAPI's USB DPC then looped
+     * for ever at DISPATCH_LEVEL on that cancel and the boot stayed black
+     * (about one boot in ten). Nothing is owed on the list any more, only
+     * the posted line: the wait's service pass must still run the ISR and
+     * the DPC before it reports a timeout, so the wait sees its transfer
+     * complete and nothing is cancelled. */
+    if (on) {
+        long isr0 = s_tw_isr_runs, dpc0 = s_tw_dpc_runs;
+        uint32_t posted_head, posted_status;
+
+        mem[TW_ED / 4 + 1] = TW_TD1;            /* TailP                  */
+        mem[TW_ED / 4 + 2] = TW_TD0;            /* HeadP                  */
+        mem[TW_TD0 / 4 + 0] = (2u << 19) | (0xFu << 28);
+        mem[TW_TD0 / 4 + 2] = TW_TD1;
+        s_tw_done = 0;
+        hc0[0x08 / 4] = 0x00000002u;            /* ControlListFilled      */
+        xbox_OhciCatchUp();                     /* retires it, posts the line */
+        posted_head = mem[TW_ED / 4 + 2] & ~0xFu;
+        posted_status = hc0[0x0C / 4];
+        snprintf(detail, sizeof detail, "HeadP 0x%08X status 0x%08X ISR %ld",
+                 posted_head, posted_status, s_tw_isr_runs - isr0);
+        check(posted_head == TW_TD1 && (posted_status & 0x02u)
+              && s_tw_isr_runs == isr0,
+              "transfer retired, line posted, its ISR not run yet", detail);
+
+        tw_wait(&w);
+        snprintf(detail, sizeof detail,
+                 "status 0x%08X after %.1f ms, done 0x%08X ISR %ld DPC %ld",
+                 (unsigned)w.st, w.ms, s_tw_done, s_tw_isr_runs - isr0,
+                 s_tw_dpc_runs - dpc0);
+        check(w.st == 0 && s_tw_done == TW_TD0,
+              "completed, interrupt pending: the 50 ms wait succeeds", detail);
+        check(s_tw_isr_runs - isr0 == 1 && s_tw_dpc_runs - dpc0 == 1
+              && s_tw_dpc_tid == w.tid,
+              "the pending ISR and its DPC ran on the waiting thread", detail);
     }
     CloseHandle(s_tw_event);
 }
