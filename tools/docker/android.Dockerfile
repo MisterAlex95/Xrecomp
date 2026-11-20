@@ -387,6 +387,14 @@ RUN --mount=type=secret,id=xba_keystore --mount=type=secret,id=xba_keystore_pass
         assembleRelease; \
     mkdir -p /out; \
     cp app/build/outputs/apk/release/app-release.apk /out/xrecomp.apk; \
+    # The symbols of the APK's native libraries (docs/releases/README.md « Crash symbols »): the unstripped libraries
+    # Gradle merged, less their DWARF, keep every function's name (the static ones a tombstone shows as bare
+    # offsets) for a few MB. Same build, same BuildId as in the APK; tools/symbolize.sh reads a pasted log with them.
+    bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"; mkdir -p /tmp/sym/lib/arm64-v8a; \
+    for so in $(find app/build/intermediates/merged_native_libs -path '*arm64-v8a/*.so' -type f); do \
+        "$bin/llvm-objcopy" --strip-debug "$so" "/tmp/sym/lib/arm64-v8a/$(basename "$so")"; done; \
+    [ -s /tmp/sym/lib/arm64-v8a/libmain.so ] || { echo "no unstripped libmain.so under merged_native_libs"; exit 1; }; \
+    tar -C /tmp/sym -czf /out/xrecomp-symbols.tar.gz lib; rm -rf /tmp/sym; \
     rm -rf /root/.gradle/caches /root/.gradle/daemon app/build app/.cxx build .gradle local.properties
 # What is in it, checked: the toolchain, the licences of what it ships (NOTICE « The Android app »), no XBE but our
 # synthetic self-test, the version, debuggable, and who signed it (xrecomp-signing.txt: release or DEBUG).
@@ -410,6 +418,15 @@ RUN set -e; bt=$(ls -d "$ANDROID_HOME"/build-tools/* | tail -1); apk=/out/xrecom
     "$nm" -D --defined-only /tmp/libimp.so | grep -q 'DxbcModule' \
         || { echo "xrecomp.apk: no DXBC translator in libxba_import.so (XBA-187)"; exit 1; }; \
     echo "frame generation: bridge in libmain.so, translator in libxba_import.so" | tee /out/xrecomp-lsfg.txt; \
+    # the symbols belong to this APK: libmain.so's BuildId in both
+    rd="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"; mkdir -p /tmp/symchk; \
+    tar -C /tmp/symchk -xzf /out/xrecomp-symbols.tar.gz lib/arm64-v8a/libmain.so; \
+    a=$("$rd" -n /tmp/libmain.so | grep 'Build ID'); b=$("$rd" -n /tmp/symchk/lib/arm64-v8a/libmain.so | grep 'Build ID'); \
+    [ -n "$a" ] && [ "$a" = "$b" ] || { echo "xrecomp-symbols.tar.gz: libmain.so BuildId ${b:-none} is not the APK's ${a:-none}"; exit 1; }; \
+    [ "$("$nm" /tmp/symchk/lib/arm64-v8a/libmain.so | grep -c ' t ')" -gt 1000 ] \
+        || { echo "xrecomp-symbols.tar.gz: libmain.so has no static function names"; exit 1; }; \
+    echo "symbols: libmain.so $a, $(du -h /out/xrecomp-symbols.tar.gz | cut -f1)" | tee /out/xrecomp-symbols.txt; \
+    rm -rf /tmp/symchk; \
     rm -f /tmp/libmain.so /tmp/libimp.so; \
     ! unzip -Z1 "$apk" | grep -iE '\.(xbe|iso|xiso)$' | grep -vx 'assets/selftest.xbe' \
         || { echo "xrecomp.apk: an XBE or disc image other than the self-test"; exit 1; }; \

@@ -57,6 +57,8 @@ Downloads: the [GitHub releases](https://github.com/MisterAlex95/Xrecomp/release
   (`tools/prepare/desktop_build.py`). On Linux and macOS its `bin/` has the console players (`gba_play`, `ps1_play`,
   `n64_play`) that `./xrecomp play` starts (XBA-87); Windows has none.
 - A `.sha256` next to each.
+- `xrecomp-v<version>-symbols.tar.gz`: the APK's native libraries before Gradle stripped them, less their DWARF
+  (« Crash symbols » below). Not needed to play.
 - **Frame generation** (LSFG, XBA-187) in every one of them: the APK has the Vulkan bridge in `libmain.so` and the
   shader translator in `libxba_import.so` (Settings › Graphics › Frame generation, « Choose Lossless.dll »); the
   desktop folders carry its pinned sources (`third_party/lsfg-sources`), which a game build compiles in by default.
@@ -80,6 +82,19 @@ Check a download with `apksigner verify --print-certs xrecomp-v<version>.apk` (A
 `Signer #1 certificate SHA-256 digest` must be the same, lower case without colons. Any other signer is not ours.
 
 The Mac app and the toolkit can also be built from the source at the tag (README « Get it »).
+
+## Crash symbols
+
+The APK's libraries are stripped: in a tombstone (Settings › Advanced › « Share the last game's log ») a static
+function shows as a bare offset in `libmain.so`. The release's `-symbols.tar.gz` has the same libraries with their
+symbol tables (the same build: CI checks that libmain.so's BuildId matches the APK's), so
+
+```
+sh tools/symbolize.sh last-game.log xrecomp-v<version>-symbols.tar.gz
+```
+
+prints each backtrace frame of ours with its function (`llvm-symbolizer`, from LLVM or the NDK). A BuildId that
+differs from the tombstone's means the log comes from another version. `xrecomp-latest` APKs have no symbols file.
 
 ## Making a release (maintainers)
 

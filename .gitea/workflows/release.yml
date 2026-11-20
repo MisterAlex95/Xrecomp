@@ -160,6 +160,8 @@ jobs:
           cat out/apk/xrecomp-badging.txt out/apk/xrecomp-signing.txt
           cp out/apk/xrecomp.apk "out/$tag.apk"
           (cd out && sha256sum "$tag.apk" > "$tag.apk.sha256")
+          cp out/apk/xrecomp-symbols.tar.gz "out/$tag-symbols.tar.gz"   # crash symbols (tools/symbolize.sh)
+          cat out/apk/xrecomp-symbols.txt
           { cat "docs/releases/$tag.md"
             printf '\n---\n\nBuilt by CI from %s. arm64-v8a, Android 11+. No game inside.\n\n```\n' "$sha8"
             cat out/apk/xrecomp-signing.txt
@@ -176,7 +178,7 @@ jobs:
             '{tag_name: $tag, name: ("XRecomp " + ($tag | ltrimstr("xrecomp-"))), prerelease: false, body: $notes}')
           id=$(curl -fsS -X POST -H "$auth" -H "Content-Type: application/json" -d "$body" "$api/releases" | jq -r .id)
           ffmpeg=$(sh tools/ci/ffmpeg_source.sh out)   # the LGPL source of the APK's libavcodec (NOTICE « FFmpeg »)
-          for f in "$tag.apk" "$tag.apk.sha256" "$(basename "$ffmpeg")"; do
+          for f in "$tag.apk" "$tag.apk.sha256" "$tag-symbols.tar.gz" "$(basename "$ffmpeg")"; do
             curl -fsS -X POST -H "$auth" -F "attachment=@out/$f" "$api/releases/$id/assets?name=$f" \
               | jq -r .browser_download_url
           done
@@ -188,7 +190,7 @@ jobs:
         run: |
           tag=$TAG
           sh tools/ci/github_release.sh "$tag" "$GITHUB_SHA" "XRecomp ${tag#xrecomp-}" false out/notes.md \
-            "out/$tag.apk" "out/$tag.apk.sha256" "$(sh tools/ci/ffmpeg_source.sh out)"
+            "out/$tag.apk" "out/$tag.apk.sha256" "out/$tag-symbols.tar.gz" "$(sh tools/ci/ffmpeg_source.sh out)"
 
       - name: Clean up
         if: always()
