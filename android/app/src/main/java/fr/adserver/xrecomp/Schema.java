@@ -18,10 +18,10 @@ final class Schema {
     private Schema() {}
 
     /** STAGES: STEPS without its bar (a panel that draws its own). */
-    enum Kind { PIPE, STEPS, STAGES, LOOP, HEAL, SAVES, AT_ONCE }
+    enum Kind { PIPE, STEPS, STAGES, LOOP, HEAL, SAVES, AT_ONCE, NET }
 
     /** The drawing that goes with each Help question (LauncherActivity.HELP order). */
-    static final Kind[] FOR_HELP = { Kind.PIPE, Kind.STEPS, Kind.LOOP, Kind.HEAL, Kind.SAVES, Kind.AT_ONCE };
+    static final Kind[] FOR_HELP = { Kind.PIPE, Kind.STEPS, Kind.LOOP, Kind.HEAL, Kind.SAVES, Kind.AT_ONCE, Kind.NET };
 
     /**
      * Draws kind in r. progress: STEPS' bar and lit steps (0 to 1, negative: three of four lit, as an example);
@@ -48,6 +48,10 @@ final class Schema {
             break;
         case SAVES:
             saves(c, cv, b, p);
+            break;
+        case NET:
+            pipe(c, cv, b, p, R.string.SCH_ELSEWHERE, R.string.SCH_ELSEWHERE_SUB, R.string.SCH_DOWNLOAD,
+                 R.string.SCH_DOWNLOAD_SUB, R.string.SCH_LIBRARY, R.string.SCH_LIBRARY_SUB, b.centerY());
             break;
         case AT_ONCE:
             float lane = BOX_H / 2 + 4;
@@ -156,7 +160,7 @@ final class Schema {
                 continue;
             float x = b.left + i * (bw + gap);
             box(c, cv, p, new RectF(x, y - bh / 2, x + bw, y + bh / 2), boxes[i][0], boxes[i][1],
-                i == 1 && t2 == R.string.SCH_PREPARE ? Theme.ACCENT : Theme.LINE);
+                i == 1 && (t2 == R.string.SCH_PREPARE || t2 == R.string.SCH_DOWNLOAD) ? Theme.ACCENT : Theme.LINE);
             if (i > 0)
                 arrow(cv, p, x - gap + p.u, x - p.u, y);
         }

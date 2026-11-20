@@ -163,4 +163,18 @@
     <string name="JOURNAL_FOUND_CRASH">The game crashed on code the preparation had missed. The next preparation adds it.</string>
     <string name="JOURNAL_NEEDS_FIX">Crashed · needs a fix</string>
     <string name="JOURNAL_NONE">Nothing yet. Each preparation, and each run that finds code the preparation missed, adds a line here.</string>
+
+    <!-- The network library in the first start and Help (XBA-319) -->
+    <string name="SETUP_NETWORK">Games on the network</string>
+    <string name="SETUP_NETWORK_TEXT">Your own dumps kept elsewhere (a NAS, a PC, a server) can show in the library before they are on the device: add a torrent of them, one per console (a private torrent is best). A on a game downloads it, then it is set up like any game. Downloads wait for Wi-Fi unless you allow mobile data. Library › Options › Network sources lists them later.</string>
+    <string name="SETUP_FOUND_NETWORK">Games on the network are downloaded first: A on one in the library.</string>
+    <string name="SETUP_DOWNLOAD_FIRST">Download first</string>
+    <string name="HELP_Q_NET">Can I play games I keep on another device?</string>
+    <string name="HELP_A_NET">Yes, with the network library. Make a torrent of your own dumps (one per console; a private torrent is best) and add it in Library › Options › Network sources, as a .torrent file or a magnet link. Its games show in the library with a cloud and « On the network ». A on one downloads only that game, then it is set up like any game: an Xbox game is prepared, the others play at once. Downloads wait for Wi-Fi unless you allow mobile data. The app ships no torrent and no catalog.</string>
+    <string name="SCH_ELSEWHERE">Your dumps</string>
+    <string name="SCH_ELSEWHERE_SUB">NAS, PC, server</string>
+    <string name="SCH_DOWNLOAD">Download</string>
+    <string name="SCH_DOWNLOAD_SUB">A on the game</string>
+    <string name="SCH_LIBRARY">Library</string>
+    <string name="SCH_LIBRARY_SUB">set up as any game</string>
 </resources>

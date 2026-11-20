@@ -161,4 +161,18 @@
     <string name="JOURNAL_FOUND_CRASH">Le jeu a planté sur du code que la préparation avait manqué. La prochaine préparation l\'ajoute.</string>
     <string name="JOURNAL_NEEDS_FIX">Planté · besoin d\'un correctif</string>
     <string name="JOURNAL_NONE">Rien pour l\'instant. Chaque préparation, et chaque partie qui trouve du code que la préparation avait manqué, ajoute une ligne ici.</string>
+
+    <!-- La bibliothèque réseau dans le premier lancement et l'aide (XBA-319) -->
+    <string name="SETUP_NETWORK">Jeux sur le réseau</string>
+    <string name="SETUP_NETWORK_TEXT">Vos propres dumps gardés ailleurs (un NAS, un PC, un serveur) peuvent apparaître dans la bibliothèque avant d\'être sur l\'appareil : ajoutez-en un torrent, un par console (un torrent privé, c\'est mieux). A sur un jeu le télécharge, puis il est installé comme n\'importe quel jeu. Les téléchargements attendent le Wi-Fi, sauf si vous autorisez les données mobiles. Bibliothèque › Options › Sources réseau les liste ensuite.</string>
+    <string name="SETUP_FOUND_NETWORK">Les jeux sur le réseau sont d\'abord téléchargés : A sur l\'un d\'eux dans la bibliothèque.</string>
+    <string name="SETUP_DOWNLOAD_FIRST">À télécharger</string>
+    <string name="HELP_Q_NET">Puis-je jouer à des jeux gardés sur un autre appareil ?</string>
+    <string name="HELP_A_NET">Oui, avec la bibliothèque réseau. Faites un torrent de vos propres dumps (un par console ; un torrent privé, c\'est mieux) et ajoutez-le dans Bibliothèque › Options › Sources réseau, en fichier .torrent ou en lien magnet. Ses jeux apparaissent dans la bibliothèque avec un nuage et « Sur le réseau ». A sur l\'un d\'eux télécharge ce jeu seulement, puis il est installé comme n\'importe quel jeu : un jeu Xbox est préparé, les autres se lancent tout de suite. Les téléchargements attendent le Wi-Fi, sauf si vous autorisez les données mobiles. L\'app ne fournit ni torrent ni catalogue.</string>
+    <string name="SCH_ELSEWHERE">Vos dumps</string>
+    <string name="SCH_ELSEWHERE_SUB">NAS, PC, serveur</string>
+    <string name="SCH_DOWNLOAD">Télécharger</string>
+    <string name="SCH_DOWNLOAD_SUB">A sur le jeu</string>
+    <string name="SCH_LIBRARY">Bibliothèque</string>
+    <string name="SCH_LIBRARY_SUB">installé comme les autres</string>
 </resources>

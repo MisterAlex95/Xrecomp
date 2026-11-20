@@ -200,6 +200,39 @@ public class LauncherFirstStartTest {
         assertEquals(0, a.setupStep());
     }
 
+    /** Games on the network (XBA-319): a .torrent added from step 1 goes on to step 2, its games « On the network ». */
+    @Test
+    public void aNetworkSourceTakesTheSetupToItsGames() throws Exception {
+        File tor = new File(tmp.newFolder(), "mine.torrent");
+        TestSupport.write(tor, TorrentMetaTest.torrent("My games", true,
+                TorrentMetaTest.files(TorrentMetaTest.file(4L << 30, "Halo Sample (USA).iso"),
+                                      TorrentMetaTest.file(2L << 30, "Night Racer.xiso"),
+                                      TorrentMetaTest.file(16L << 20, "gba", "Pocket Quest (Europe).gba"))));
+        for (String loc : LOCALES) {
+            RuntimeEnvironment.setQualifiers(loc + "-" + SIZES[0][1]);
+            GameStore.prefs(app).edit().clear().commit();
+            for (RemoteLibrary.Source src : RemoteLibrary.sources(app.getFilesDir()))
+                RemoteLibrary.remove(app.getFilesDir(), src.id);
+            LauncherActivity a = launch();
+            assertEquals(0, a.setupStep());
+            press(a, app.getString(R.string.SETUP_NETWORK));
+            assertNotNull(a.sheetForTest());
+            shot(a, "first-network-" + loc + "-1080");
+            press(a, app.getString(R.string.NET_ADD_TORRENT));
+            ShadowActivity.IntentForResult r, last = null;
+            while ((r = shadowOf(a).getNextStartedActivityForResult()) != null)
+                last = r;
+            assertNotNull(last);
+            shadowOf(a).receiveResult(last.intent, Activity.RESULT_OK, new Intent().setData(Uri.fromFile(tor)));
+            idle(300);
+            press(a, app.getString(R.string.NET_CONSOLE_BY_NAME));
+            assertEquals(LauncherActivity.Screen.SETUP, a.screenForTest());
+            assertEquals(1, a.setupStep());
+            assertEquals(3, a.libraryCountForTest());
+            shot(a, "first-2-network-" + loc + "-1080");
+        }
+    }
+
     @Test
     public void justOneGameTakesWelcomesRoute() {
         LauncherActivity a = launch();

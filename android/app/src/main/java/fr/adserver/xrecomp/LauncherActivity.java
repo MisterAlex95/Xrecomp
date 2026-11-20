@@ -1881,22 +1881,38 @@ public class LauncherActivity extends Activity {
                                          + getString(all ? R.string.SETUP_LIBRARY_IN_PLACE : R.string.SETUP_LIBRARY_ASK));
         defaultFocus = pill(buttons, Icon.FOLDER, getString(R.string.SETUP_CHOOSE_FOLDER), true,
                             this::onChooseLibraryFolder);
+        pill(buttons, Icon.SWAP, getString(R.string.SETUP_NETWORK), false, this::setupNetwork);
         pill(buttons, Icon.DISC, getString(R.string.SETUP_ONE_GAME), false, () -> {
             setupDone();   // the one-game route: Choose your game, as Welcome's (B: Welcome)
             history.clear();
             history.push(Screen.WELCOME);
             show(Screen.SOURCE);
         });
+        ((LinearLayout.LayoutParams)h.getChildAt(0).getLayoutParams()).weight = 1.8f;   // three buttons: room for them
         LinearLayout right = setupRight(h);
         right.addView(Theme.label(this, getString(R.string.SETUP_EXAMPLE)), lp(MATCH, WRAP));
         TextView tree = Theme.body(this, getString(R.string.SETUP_EXAMPLE_TREE));
         tree.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tree.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, Theme.T_SMALL);
+        tree.setHorizontallyScrolling(true);   // a path never wraps: cut at the edge on a narrow stage
         tree.setTextColor(Theme.TEXT_DIM);
         LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
         tl.topMargin = Theme.S2;
         right.addView(tree, tl);
         addHint("A", R.string.HINT_CHOOSE, this::onChooseLibraryFolder);
         addHint("B", R.string.HINT_QUIT, this::back);
+    }
+
+    /**
+     * « Games on the network » (XBA-319): what the network library is, then Add a .torrent file / Paste a magnet link
+     * as Options › Network sources has them; a source added goes on to the games step.
+     */
+    private void setupNetwork() {
+        Widgets.Sheet sh = openSheet(R.string.SETUP_NETWORK);
+        sh.addText(getString(R.string.SETUP_NETWORK_TEXT), 12);   // the text says what the rows' lines would
+        sheetRow(getString(R.string.NET_ADD_TORRENT), this::openTorrentPicker);
+        sheetRow(getString(R.string.NET_PASTE_MAGNET), this::onPasteMagnet);
+        sheetReady();
     }
 
     /** Whether a console's games must be prepared before they play: the Xbox and the Xbox 360 (no interpreter). */
@@ -1928,8 +1944,13 @@ public class LauncherActivity extends Activity {
             return;
         }
         java.util.Map<Console, List<String>> byConsole = new java.util.TreeMap<>();
+        List<String> onNetwork = new ArrayList<>();
         for (LibraryScreen.Entry e : libEntries) {
             Console c = e.console();
+            if (e.remote != null) {   // XBA-319: listed apart, downloaded first
+                onNetwork.add(e.title());
+                continue;
+            }
             if (c == null)
                 continue;
             List<String> names = byConsole.get(c);
@@ -1950,6 +1971,8 @@ public class LauncherActivity extends Activity {
             text += " " + getString(R.string.SETUP_FOUND_AT_ONCE);
         if (someFirst)
             text += " " + getString(R.string.SETUP_FOUND_PREPARE);
+        if (!onNetwork.isEmpty())
+            text += " " + getString(R.string.SETUP_FOUND_NETWORK);
         LinearLayout buttons = setupLeft(h, R.string.SETUP_FOUND_HERO, text);
         h.addView(right);
         defaultFocus = pill(buttons, Icon.ARROW, getString(R.string.SETUP_CONTINUE), true, () -> setupGo(2));
@@ -1962,6 +1985,11 @@ public class LauncherActivity extends Activity {
                       getString(first ? R.string.SETUP_NEEDS_PREPARE : R.string.SETUP_PLAYS_NOW),
                       first ? Theme.WARN : Theme.OK, sub);
         }
+        if (!onNetwork.isEmpty())
+            setupFact(right, getString(R.string.NET_CHIP_ON_NETWORK) + " · " + onNetwork.size(),
+                      getString(R.string.SETUP_DOWNLOAD_FIRST), Theme.ACCENT,
+                      TextUtils.join(", ", onNetwork.subList(0, Math.min(3, onNetwork.size())))
+                      + (onNetwork.size() > 3 ? ", …" : ""));
         addHint("A", R.string.SETUP_CONTINUE, () -> setupGo(2));
         addHint("B", R.string.HINT_BACK, this::setupBack);
     }
@@ -2005,9 +2033,11 @@ public class LauncherActivity extends Activity {
         defaultFocus = pill(buttons, Icon.PLAY, getString(R.string.SETUP_OPEN_LIBRARY), true, open);
         LinearLayout right = setupRight(h);
         libEntries = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
-        int first = 0;
+        int first = 0, net = 0;
         for (LibraryScreen.Entry e : libEntries)
-            if (e.console() != null && preparesFirst(e.console()))
+            if (e.remote != null)
+                net++;
+            else if (e.console() != null && preparesFirst(e.console()))
                 first++;
         List<Library.Folder> folders = Library.folders(this);
         if (!folders.isEmpty())
@@ -2016,6 +2046,9 @@ public class LauncherActivity extends Activity {
                                                           libEntries.size()),
                   null, 0, first > 0 ? getResources().getQuantityString(R.plurals.SETUP_READY_PREPARE_N, first, first)
                                      : null);
+        if (net > 0)
+            setupFact(right, getString(R.string.NET_CHIP_ON_NETWORK) + " · " + net, null, 0,
+                      getString(R.string.SETUP_DOWNLOAD_FIRST));
         if (Toolchain.available(this))
             setupFact(right, getString(R.string.SELF_HEAL), getString(SelfHeal.auto(this) ? R.string.VAL_ON
                                                                                          : R.string.VAL_OFF),
@@ -2207,7 +2240,7 @@ public class LauncherActivity extends Activity {
     // Help and questions
 
     static final int HELP_PREPARE = 0, HELP_TIME = 1, HELP_AGAIN = 2, HELP_HEAL = 3, HELP_SAVES = 4, HELP_AT_ONCE = 5,
-            HELP_DEMO = 6;
+            HELP_NET = 6, HELP_DEMO = 7;
     /** Each question and its answer, in the screen's order (the HELP_ indexes). */
     static final int[][] HELP = { { R.string.HELP_Q_PREPARE, R.string.HELP_A_PREPARE },
                                   { R.string.HELP_Q_TIME, R.string.HELP_A_TIME },
@@ -2215,6 +2248,7 @@ public class LauncherActivity extends Activity {
                                   { R.string.HELP_Q_HEAL, R.string.HELP_A_HEAL },
                                   { R.string.HELP_Q_SAVES, R.string.HELP_A_SAVES },
                                   { R.string.HELP_Q_AT_ONCE, R.string.HELP_A_AT_ONCE },
+                                  { R.string.HELP_Q_NET, R.string.HELP_A_NET },
                                   { R.string.HELP_Q_DEMO, R.string.HELP_A_DEMO } };
 
     /** Help, its focus on one question (Settings opens it on the first, a bubble on its own). */
@@ -7363,9 +7397,14 @@ public class LauncherActivity extends Activity {
     }
 
     /** Which console a new source's games are for: each file's own (first, as B), or one of the consoles. */
-    private void chooseSourceConsole(java.util.function.Consumer<Console> then) {
-        if (screen != Screen.LIBRARY)
+    private void chooseSourceConsole(java.util.function.Consumer<Console> then0) {
+        if (screen != Screen.LIBRARY && screen != Screen.SETUP)
             return;
+        java.util.function.Consumer<Console> then = c -> {   // on the first start: on to the games found
+            then0.accept(c);
+            if (screen == Screen.SETUP && setupDue())
+                setupGo(1);
+        };
         openSheet(R.string.NET_CONSOLE_TITLE);
         sheetRow(getString(R.string.NET_CONSOLE_BY_NAME), () -> then.accept(null));
         for (Console c : Console.values())
