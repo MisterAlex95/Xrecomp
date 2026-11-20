@@ -736,3 +736,115 @@ def test_helper_prefilter_rejects_only_what_cannot_match():
     gap[1] = A.std(16, -0x90, 1)
     assert 14 not in {reg for _, reg in found(gap).values()}
     assert not found(run[-9:])  # r25..r31: one register short of MIN_REGS
+
+
+def _nop_tables():
+    """MSVC's table code with `nop` (`ori r0, r0, 0`) between its instructions, as Adventure Time has it (82865F80:
+    byte offsets, 82B81BA8: halfword offsets): the `nop` names r0, the register the offset was loaded into."""
+    nop = A.ori(0, 0, 0)
+    p = Prog(TEXT)
+
+    def table_code(name, crf, load, scale):
+        p.func(name)
+        p(A.addi(11, 3, -2), cmplwi(crf, 11, 4))
+        p.branch(lambda at, t: A.bc(at, 12, 4 * crf + 1, t), name + "_def")
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_tbl")
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_tbl")
+        if scale:
+            p(A.rlwinm(11, 11, scale, 0, 31 - scale))
+        p(load(0, 12, 11))
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_base")
+        p(nop)
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_base")
+        p(nop, A.add(12, 12, 0), A.mtctr(12), A.bctr())
+        p.label(name + "_base")
+        for v in range(4):
+            p.label("%s_c%d" % (name, v))
+            p(A.li(3, v), A.blr())
+        p.label(name + "_tbl")
+        offs = [0, 8, 8, 16, 24]     # byte offsets from the base, two cases shared
+        if scale:
+            raw = struct.pack(">5H", *offs) + bytes(2)
+        else:
+            raw = bytes(offs) + bytes(3)
+        p(*struct.unpack(">%dI" % (len(raw) // 4), raw))
+        p.label(name + "_def")
+        p(A.li(3, -1), A.blr())
+        p.end()
+
+    table_code("jt_nop_b", 6, lbzx, 0)
+    table_code("jt_nop_h", 7, lhzx, 1)
+    words = p.link()
+    funcs = {n: (TEXT + 4 * a, TEXT + 4 * b) for n, a, b in p.funcs}
+    data, _ = build_xex(words, functions=[(a - TEXT, b - a) for a, b in funcs.values()],
+                        entry=funcs["jt_nop_b"][0] - TEXT)
+    return parse_xex(data), funcs, p.labels
+
+
+def test_tables_behind_a_nop():
+    img, funcs, labels = _nop_tables()
+    view, dec = CodeView(img), XenonDecoder()
+    jt = JumpTables(view, lambda a: dec.decode(view.u32(a), a))
+    for n in ("jt_nop_b", "jt_nop_h"):
+        bctr = next(a for a in range(*funcs[n], 4) if view.u32(a) == A.bctr())
+        want = [labels["%s_c%d" % (n, c)] for c in (0, 1, 1, 2, 3)]
+        assert jt.resolve(bctr) == want, n
+    # a nop writes nothing; `ori rX, rY, 0` is a move and does
+    assert gpr_writes(A.ori(0, 0, 0)) == () and gpr_writes(A.ori(9, 9, 0)) == ()
+    assert gpr_writes(A.ori(9, 3, 0)) == (9,) and gpr_writes(A.ori(9, 9, 1)) == (9,)
+
+
+def test_spin_hints_lifted(tmp_path):
+    """`or 31,31,31` / `or 1,1,1` (the SMT priority hints of a spin-wait) become XE_SPIN_HINT(); `or 2,2,2` (back to
+    normal priority), the record form and a plain `or` stay ors."""
+    p = Prog(TEXT)
+    p.func("spin")
+    p(A.li(11, 4), A.mtctr(11))
+    p.label("spin_loop")
+    p(A.or_(31, 31, 31), A.or_(31, 31, 31), A.or_(1, 1, 1))
+    p.branch(lambda at, t: A.bc(at, 16, 0, t), "spin_loop")    # bdnz
+    p(A.or_(2, 2, 2), A.or_(31, 31, 31) | 1, A.or_(3, 4, 5), A.blr())
+    p.end()
+    words = p.link()
+    a, b = p.funcs[0][1:]
+    data, _ = build_xex(words, functions=[(4 * a, 4 * (b - a))], entry=4 * a)
+    s = recompile(parse_xex(data), str(tmp_path))
+    assert s["interp_fallback_insns"] == 0
+    text = "".join(f.read_text() for f in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
+    assert text.count("XE_SPIN_HINT();") == 3
+    assert "R(2) = R(2) | R(2);" in text and "R(31) = R(31) | R(31); RC_CR0(R(31));" in text
+    assert "R(3) = R(4) | R(5);" in text
+
+
+def test_traps_lifted(tmp_path):
+    """twi / tdi / tw / td are lifted as their test: MSVC's `twi 6, rD, 0` before a division (trap if equal or
+    logically lower: if zero) costs a compare, and only a trap that is taken goes to the interpreter (which stops the
+    title on it). TO = 0 never traps, TO = 31 always does."""
+    def trap(op, to, ra, x):
+        return (op << 26) | (to << 21) | (ra << 16) | (x & 0xFFFF)
+
+    p = Prog(TEXT)
+    p.func("traps")
+    p(trap(3, 6, 4, 0),                      # twi 6, r4, 0
+      A.add(3, 3, 4),
+      trap(2, 4, 5, -1),                     # tdi 4, r5, -1 (equal)
+      trap(31, 16, 6, 7 << 11) | (4 << 1),   # tw 16, r6, r7 (lower)
+      trap(31, 1, 6, 7 << 11) | (68 << 1),   # td 1, r6, r7 (logically greater)
+      trap(3, 0, 3, 5),                      # twi 0: never
+      trap(3, 31, 0, 0),                     # twi 31, r0, 0: a debug break, always
+      A.blr())
+    p.end()
+    words = p.link()
+    a, b = p.funcs[0][1:]
+    data, _ = build_xex(words, functions=[(4 * a, 4 * (b - a))], entry=4 * a)
+    s = recompile(parse_xex(data), str(tmp_path))
+    assert s["interp_fallback_insns"] == 0
+    text = "".join(f.read_text() for f in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
+    at = TEXT + 4 * a
+    for k, want in ((0, "if ((uint32_t)R(4) == (uint32_t)(int64_t)0 || (uint32_t)R(4) < (uint32_t)(int64_t)0)"),
+                    (2, "if ((uint64_t)R(5) == (uint64_t)(int64_t)-1)"),
+                    (3, "if ((int32_t)R(6) < (int32_t)R(7))"),
+                    (4, "if ((uint64_t)R(6) > (uint64_t)R(7))"),
+                    (6, "")):
+        assert ("%s RC_INTERP(0x%08Xu);" % (want, at + 4 * k)).strip() in text, k
+    assert "/* trap never taken */" in text

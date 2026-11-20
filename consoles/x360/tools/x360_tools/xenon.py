@@ -327,7 +327,9 @@ def V(n):
     return "V(%d)" % n
 
 
-XENON_INTERP = {"td", "tdi"}
+# Traps: MSVC puts `twi 6, rD, 0` / `tdi 6, rD, 0` (trap if zero) before each division. Lifted as the
+# test; the word goes to the interpreter only when it traps (x360_interp.c reports the trap and stops the title)
+TRAPS = ("tw", "twi", "td", "tdi")
 
 # OE forms (XBA-284): XER[OV] = the overflow, XER[SO] |= OV, before the record form's CR0 reads SO. 32-bit mode: the add
 # / subtract family overflows on the low word (the sign of the two addends against the result's, carry in included);
@@ -351,6 +353,42 @@ class XenonLifter(FnLifter):
         pre, c = FnLifter.cond(i)
         return pre, c.replace("c->ctr == 0", "(uint32_t)c->ctr == 0").replace("c->ctr != 0", "(uint32_t)c->ctr != 0")
 
+    def op_or(self, i):
+        # `or 31,31,31` / `or 1,1,1`: the SMT thread-priority hints (very low / low) MSVC's spin-wait loops run while
+        # they poll; they change no register. XE_SPIN_HINT (xenon_rt.h) charges virtual time for them, so a busy
+        # wait reaches its event in little host time. `or 2,2,2` (back to normal priority) ends the wait: a plain or.
+        if i.rd == i.ra == i.rb and i.rd in (1, 31) and not i.rec:
+            return "XE_SPIN_HINT();"
+        return FnLifter.op_or(self, i)
+
+    def _trap(self, i, b, wide):
+        """`if (TO's conditions on rA against b) RC_INTERP(pc);`: the trapping case goes to the interpreter, which
+        reports it; TO = 0 never traps, TO = 31 always does."""
+        to = i.rd
+        if to == 0:
+            return "/* trap never taken */"
+        if to & 0x1F == 0x1F:
+            return "RC_INTERP(%s);" % hx(i.addr)
+        s, u = ("int64_t", "uint64_t") if wide else ("int32_t", "uint32_t")
+        a = R(i.ra)
+        terms = []
+        for bit, t, op in ((16, s, "<"), (8, s, ">"), (4, u, "=="), (2, u, "<"), (1, u, ">")):
+            if to & bit:
+                terms.append("(%s)%s %s (%s)%s" % (t, a, op, t, b))
+        return "if (%s) RC_INTERP(%s);" % (" || ".join(terms), hx(i.addr))
+
+    def op_twi(self, i):
+        return self._trap(i, "(int64_t)%d" % i.simm, False)
+
+    def op_tdi(self, i):
+        return self._trap(i, "(int64_t)%d" % i.simm, True)
+
+    def op_tw(self, i):
+        return self._trap(i, R(i.rb), False)
+
+    def op_td(self, i):
+        return self._trap(i, R(i.rb), True)
+
     def op_mtmsrd(self, i):
         # titles use mtmsrd rS, 1 around short critical sections (MSR[EE], external interrupts): the L = 1 form
         # changes only EE and RI (the architecture's definition); xenon_rt.h does not preempt a thread while EE is
@@ -362,8 +400,8 @@ class XenonLifter(FnLifter):
 
     def needs_interp(self, i):
         n = i.name
-        if n in XENON_INTERP:
-            return True
+        if n in TRAPS:
+            return False  # op_tw / op_twi / op_td / op_tdi: the test, the interpreter when it traps
         if i.op == 31 and i.oe and (n in OE_FORMS or n in OE_OTHER):
             return False  # lifted with OV / SO (_xo)
         return super().needs_interp(i)
