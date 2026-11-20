@@ -2523,7 +2523,10 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     t->hash = d.hash;
     t->checked = g->epoch;
     t->used = (int)++g->tex_clock;
-    GLint ifmt = d.is_float ? (GLint)GL_RGBA16F : (GLint)GL_RGBA8;
+    /* a fetch constant whose X sign is gamma (Xenia's TextureSign::kGamma, 3) samples the bytes as gamma-encoded and
+     * returns them linear: an sRGB texture does that (the sRGB curve for the console's piecewise-linear one) */
+    int gamma = !d.is_float && ((fc[0] >> 2) & 3) == 3;
+    GLint ifmt = d.is_float ? (GLint)GL_RGBA16F : gamma ? (GLint)GL_SRGB8_ALPHA8 : (GLint)GL_RGBA8;
     GLenum type = d.is_float ? GL_FLOAT : GL_UNSIGNED_BYTE;
     size_t texel_n = d.is_float ? 16 : 4;
     GLenum target = gl_dim == 1 ? GL_TEXTURE_2D : gl_dim == 3 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_3D;
