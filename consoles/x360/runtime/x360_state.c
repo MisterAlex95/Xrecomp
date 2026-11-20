@@ -535,11 +535,17 @@ size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t ca
 static int state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n,
                       int undo);
 
-/* Loads a state, every check first; a section found damaged once loading began (the machine is then half old, half
- * new) puts back the machine as it was before the load, from a state taken of it just before, so a bad state never
- * leaves a dead machine behind (the auto slot at start would stop the game at frame 0). Without memory for that copy,
- * or when the machine cannot be saved (an error already, host threads), the machine stops (X360_ERROR) as before. */
+/* Loads a state, every check first. A section found damaged once loading began leaves the machine half old, half
+ * new: x360_state_load stops it (X360_ERROR); x360_state_load_undo puts it back as it was before the load, from a
+ * state taken of it just before, so a bad slot never leaves a dead machine behind (the auto slot at start would stop
+ * the game at frame 0). Without memory for that copy, or when the machine cannot be saved (an error already, host
+ * threads), it stops as with x360_state_load. */
 int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n)
+{
+    return state_load(x, key, data, size, why, why_n, 0);
+}
+
+int x360_state_load_undo(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n)
 {
     return state_load(x, key, data, size, why, why_n, 1);
 }

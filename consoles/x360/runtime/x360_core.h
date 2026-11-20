@@ -155,6 +155,10 @@ enum { X360_STATE_OK = 0, X360_STATE_EGAME = -3, X360_STATE_EVERSION = -4, X360_
 size_t x360_state_size(x360_machine *x);
 size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t cap);
 int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n);
+/* The same, and a state found damaged once loading began puts the machine back as it was (from a copy taken before
+ * the load: a full state's memory for the time of the load) instead of leaving it stopped (X360_ERROR). For states
+ * from files (slots, the automatic one at start); the rewinder's own states use x360_state_load. */
+int x360_state_load_undo(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n);
 
 /* Controllers (x360_input.c): an XInput-style gamepad, set now or from a script of timed states (virtual ms). NULL
  * disconnects. user 0..3. */

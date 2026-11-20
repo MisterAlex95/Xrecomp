@@ -1113,7 +1113,7 @@ static void test_damaged_states(void)
     if (mem) {
         uint32_t nowhere = 0x3FF00000u; /* in the 4 KB heap, far past what the tests allocate */
         memcpy(mem, &nowhere, 4);    /* little-endian host: the stream's order */
-        int rc = x360_state_load(X, NULL, bad, n, why, sizeof why);
+        int rc = x360_state_load_undo(X, NULL, bad, n, why, sizeof why);
         CHECK(rc == X360_STATE_ECORRUPT && strstr(why, "MEM") && strstr(why, "back as it was"),
               "a page outside the heaps: %d (%s)", rc, why);
         CHECK(X->status == X360_RUNNING && x360_r32(X, scratch + 0x100) == 0xC0FFEE02u,
@@ -1130,10 +1130,20 @@ static void test_damaged_states(void)
         uint32_t l2 = len + 4;
         for (int i = 0; i < 4; i++)
             bad[at - 4 + i] = (uint8_t)(l2 >> (8 * i));
-        int rc = x360_state_load(X, NULL, bad, n + 4, why, sizeof why);
+        int rc = x360_state_load_undo(X, NULL, bad, n + 4, why, sizeof why);
         CHECK(rc == X360_STATE_ECORRUPT && strstr(why, "KERN"), "a longer KERN section: %d (%s)", rc, why);
         CHECK(X->status == X360_RUNNING && x360_r32(X, scratch + 0x100) == 0xC0FFEE02u,
               "the machine is as it was before the load (status %d, %08X)", X->status, x360_r32(X, scratch + 0x100));
+    }
+    /* without the undo, a damaged section stops the machine, as before */
+    memcpy(bad, blob, n);
+    mem = state_section(bad, n, "MEM ", &len);
+    if (mem) {
+        uint32_t nowhere = 0x3FF00000u;
+        memcpy(mem, &nowhere, 4);
+        int rc = x360_state_load(X, NULL, bad, n, why, sizeof why);
+        CHECK(rc == X360_STATE_ECORRUPT && X->status == X360_ERROR, "no undo: %d, status %d", rc, X->status);
+        X->status = X360_RUNNING; /* the load below sets every section again */
     }
     /* the state itself still loads */
     CHECK(x360_state_load(X, NULL, blob, n, why, sizeof why) == X360_STATE_OK &&

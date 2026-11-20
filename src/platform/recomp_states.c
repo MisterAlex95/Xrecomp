@@ -463,6 +463,7 @@ static void set_aside(const char *dir, const char *as)
     if (recomp_states_slot_path(dir, RECOMP_STATE_AUTO, from, sizeof from) != 0)
         return;
     snprintf(to, sizeof to, "%s/%s", dir, as);
+    remove(to); /* the one set aside before goes: Windows' rename does not replace */
     if (rename(from, to) == 0)
         printf("states: the automatic slot is set aside as %s\n", to);
     else

@@ -355,7 +355,7 @@ static int state_load_op(int slot, void *user)
         if (!s_x) {
             rc = RECOMP_STATE_ENOGAME;
         } else {
-            rc = x360_state_load(s_x, s_key, blob, n, why, sizeof why); /* X360_STATE_* = RECOMP_STATE_* */
+            rc = x360_state_load_undo(s_x, s_key, blob, n, why, sizeof why); /* X360_STATE_* = RECOMP_STATE_* */
             if (rc == X360_STATE_OK)
                 s_state_loaded = 1;
         }
