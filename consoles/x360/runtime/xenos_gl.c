@@ -1659,6 +1659,12 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         for (int i = 0; i < 4; i++) /* a later get_surface may have reused an earlier one's slot */
             if (want[i] >= 0 && !g->surf[want[i]].tex)
                 want[i] = -1;
+        /* a draw that neither tests nor writes depth or stencil (RB_DEPTHCONTROL's stencil, z and z write enables off)
+         * takes no depth attachment when its depth surface is shorter than colour target 0: GL draws only where every
+         * attachment reaches, and a 1080p title can leave RB_DEPTH_INFO where the eDRAM holds fewer rows than the
+         * colour target (Adventure Time: depth base tile 0x3FC at pitch 1920, 672 of 1080 rows) */
+        if (ds >= 0 && want[0] >= 0 && !(cp->regs[0x2200] & 7) && g->surf[ds].h < g->surf[want[0]].h)
+            ds = -1;
         /* what another format or position left in these tiles since (not what is bound together with them) */
         int together[5] = {want[0], want[1], want[2], want[3], ds};
         for (int i = 0; i < 5; i++)
@@ -1701,7 +1707,9 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
             bufs[i] = want[i] >= 0 ? GL_COLOR_ATTACHMENT0 + (GLenum)i : 0 /* GL_NONE */;
         }
         if (g->cur_ds != ds || reattach) {
-            if (use_ms)
+            if (ds < 0)
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+            else if (use_ms)
                 g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, g->surf[ds].rb);
             else
                 g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g->surf[ds].tex, 0);

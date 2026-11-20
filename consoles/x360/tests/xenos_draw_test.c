@@ -1974,6 +1974,68 @@ int main(int argc, char **argv)
               "short immediate draw: unsupported +%llu, reason %s", (unsigned long long)(s1.unsupported - s0.unsupported),
               why ? why : "(none)");
     }
+
+    /* a depth surface the eDRAM leaves shorter than the colour target (a 1080p title: pitch 1920, colour at tile 0,
+     * RB_DEPTH_INFO at tile 0x3FC, (2048 - 1020) / 24 tiles a row = 672 rows of depth for 1080 of colour): a
+     * screen-space green quad over all 1920x1080 with depth and stencil unused reaches row 1079; then a blue quad at
+     * z 0.25 (z test always, z write) and a red one at z 0.75 (test less) still use the depth buffer: blue stays where
+     * it reaches. A resolve of a 32-wide column at rows 640..1080 to memory reads the target back. */
+    {
+        const uint32_t vq = 0xF0000, rq = 0xF0400, dst = 0xC0000;
+        static const float qz[3] = {0.5f, 0.25f, 0.75f}, qc[3][3] = {{0, 1, 0}, {0, 0, 1}, {1, 0, 0}};
+        for (uint32_t q = 0; q < 3; q++)
+            for (uint32_t k = 0; k < 4; k++)
+                vertex_z(vq + 0x80 * q + 32 * k, k & 1 ? 1920.0f : 0.0f, k & 2 ? 1080.0f : 0.0f, qz[q], qc[q][0],
+                         qc[q][1], qc[q][2]);
+        for (uint32_t i = 0; i < 4; i++)
+            reg(0x4400 + i, fbits(1.0f));
+        reg(0x2206, 0);                                 /* VTE off: positions are pixels */
+        reg(0x2205, 0), reg(0x2208, 4);
+        reg(0x2000, 1920u), reg(0x2001, 0), reg(0x2002, 0x3FCu);
+        reg(0x2081, 0), reg(0x2082, 1920u | 1080u << 16);
+        reg(0x4801, 2u | (32u << 2));
+        reg(0x2200, 0); /* no stencil, no z test, no z write */
+        reg(0x4800, vq | 3u);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        reg(0x2200, 2u | 4u | 7u << 4); /* z test always, z write */
+        reg(0x4800, (vq + 0x80) | 3u);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        reg(0x2200, 2u | 1u << 4); /* z test less, no write: behind the blue quad */
+        reg(0x4800, (vq + 0x100) | 3u);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        reg(0x2200, 0);
+        static const float rv2[6] = {0, 640, 32, 640, 32, 1080};
+        for (int i = 0; i < 6; i++)
+            w32(rq + 4 * (uint32_t)i, fbits(rv2[i]));
+        reg(0x4800, rq | 3u);
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);                 /* copy */
+        reg(0x2318, 0u);                /* colour 0, raw copy, no clear */
+        reg(0x2319, dst);
+        reg(0x231A, 32u | 1080u << 16); /* pitch 32, height 1080 */
+        reg(0x231B, 2u | 6u << 7);      /* 8-in-32, 8_8_8_8 */
+        type3(PM4_DRAW_INDX_2, &rect, 1);
+        reg(0x2208, 4);
+        run(&cp);
+        static const struct {
+            int y;
+            uint32_t want;
+            const char *what;
+        } rows[5] = {
+            {650, 0xFFFF0000u, "row 650 (depth reaches it): blue, red fails the test"},
+            {671, 0xFFFF0000u, "row 671, the depth surface's last: blue"},
+            {672, 0xFF00FF00u, "row 672: green (black when the depth surface clips the draw)"},
+            {900, 0xFF00FF00u, "row 900: green"},
+            {1079, 0xFF00FF00u, "row 1079: green"},
+        };
+        for (int r = 0; r < 5; r++) {
+            uint32_t t = rd32(NULL, dst + tiled_off_pitch(16, rows[r].y, 32, 2));
+            CHECK(t == rows[r].want, "1080p target, unused short depth surface, %s: %08X, want %08X", rows[r].what, t,
+                  rows[r].want);
+        }
+        reg(0x2206, 0x3Fu), reg(0x2082, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2000, 0);
+        run(&cp);
+    }
     xenos_gl_destroy(g);
     free(pst);
     free(vs);
