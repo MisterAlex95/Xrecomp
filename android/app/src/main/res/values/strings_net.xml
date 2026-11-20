@@ -56,4 +56,9 @@
     <string name="NET_CHANNEL_DESC">Games downloaded from your network sources</string>
     <string name="NET_NOTIF_TITLE">Downloading %1$s</string>
     <string name="NET_NOTIF_TITLE_PLAIN">Network library</string>
+    <!-- The library's Show pill (next to Sort) and the option to hide the network's games -->
+    <string name="LIB_WHERE_ALL">All games</string>
+    <string name="LIB_WHERE_LOCAL">On this device</string>
+    <string name="LIB_WHERE_REMOTE">On the network</string>
+    <string name="NET_SHOW">Show their games in the library</string>
 </resources>

@@ -1445,9 +1445,63 @@ public class LauncherLibraryTest {
             rows.add(r.title);
         assertEquals(java.util.Arrays.asList("My Xbox games", app.getString(R.string.NET_ADD_TORRENT),
                                              app.getString(R.string.NET_PASTE_MAGNET),
+                                             app.getString(R.string.NET_SHOW),
                                              app.getString(R.string.NET_MOBILE_DATA)), rows);
         assertEquals(app.getString(R.string.NET_SOURCE_GAMES_N, 3), sheet.rowsForTest().get(0).value);
+        assertEquals(app.getString(R.string.NET_ON), sheet.rowsForTest().get(3).value);
         TestSupport.screenshot(a.getWindow().getDecorView(), "library-network-sources");
+
+        // Show their games in the library: Off hides them (and the Show pill), On brings them back.
+        sheet.rowsForTest().get(3).requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertEquals(app.getString(R.string.NET_OFF), a.sheetForTest().rowsForTest().get(3).value);
+        key(a, KeyEvent.KEYCODE_BUTTON_B);
+        idle(300);
+        assertNull(card(a, "Halo Sample"));
+        assertNotNull(card(a, NAMES[0]));
+        assertNull(a.libraryWherePillForTest());
+        NetService.setShowInLibrary(app, true);
+        a.refreshForTest();
+        idle(300);
+        assertNotNull(card(a, "Halo Sample"));
+    }
+
+    /**
+     * The Show pill (XBA-319): all games, those on this device, those on the network, kept; the cards on the network
+     * are told apart by their art and chip. Rendered (library-network-where-*.png).
+     */
+    @Test
+    public void showPillSeparatesLocalAndNetworkGames() throws Exception {
+        folderGame(0);
+        folderGame(1);
+        useFolder();
+        RemoteLibrary.addTorrent(app.getFilesDir(), TorrentMetaTest.torrent("Mixed", false,
+                TorrentMetaTest.files(TorrentMetaTest.file(4L << 30, "Halo Sample (USA).iso"),
+                                      TorrentMetaTest.file(16L << 20, "Pocket Quest.gba"))), null, 1);
+        LauncherActivity a = launch();
+        Widgets.PillButton where = a.libraryWherePillForTest();
+        assertNotNull(where);
+        assertEquals(app.getString(R.string.LIB_WHERE_ALL), where.title);
+        assertEquals(4, a.libraryCardsForTest().size());
+        where.performClick();
+        idle(300);
+        assertEquals(app.getString(R.string.LIB_WHERE_LOCAL), a.libraryWherePillForTest().title);
+        assertEquals(2, a.libraryCardsForTest().size());
+        for (GameCard c : a.libraryCardsForTest())
+            assertFalse(c.remoteForTest());
+        a.libraryWherePillForTest().performClick();
+        idle(300);
+        assertEquals(2, a.libraryCardsForTest().size());
+        for (GameCard c : a.libraryCardsForTest())
+            assertTrue(c.remoteForTest());
+        TestSupport.screenshot(a.getWindow().getDecorView(), "library-network-where");
+        assertEquals(LibraryView.Where.REMOTE, LibraryView.load(app.getFilesDir()).where);   // kept
+        // No game on the network any more (the source removed): no pill, every game shows.
+        RemoteLibrary.remove(app.getFilesDir(), RemoteLibrary.sources(app.getFilesDir()).get(0).id);
+        a.refreshForTest();
+        idle(300);
+        assertNull(a.libraryWherePillForTest());
+        assertEquals(2, a.libraryCardsForTest().size());
     }
 
     /** The same library in every size and language (the remote art and chip must read on a 4:3 and a square screen). */
@@ -1462,6 +1516,11 @@ public class LauncherLibraryTest {
                                       TorrentMetaTest.file(700L << 20, "ps1", "Disc Racer.cue"))),
                 null, 1);
         render("network", null);
+        // The longest Show label (« Afficher : Sur le réseau ») beside Search and Sort on every screen
+        LibraryView.State v = LibraryView.load(app.getFilesDir());
+        v.where = LibraryView.Where.REMOTE;
+        LibraryView.save(app.getFilesDir(), v);
+        render("network-where", null);
     }
 
     /**

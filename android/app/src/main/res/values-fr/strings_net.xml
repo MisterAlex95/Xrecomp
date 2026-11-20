@@ -52,4 +52,9 @@
     <string name="NET_CHANNEL_DESC">Jeux téléchargés depuis vos sources réseau</string>
     <string name="NET_NOTIF_TITLE">Téléchargement de %1$s</string>
     <string name="NET_NOTIF_TITLE_PLAIN">Bibliothèque réseau</string>
+    <!-- The library's Show pill (next to Sort) and the option to hide the network's games -->
+    <string name="LIB_WHERE_ALL">Tous les jeux</string>
+    <string name="LIB_WHERE_LOCAL">Sur l\'appareil</string>
+    <string name="LIB_WHERE_REMOTE">Sur le réseau</string>
+    <string name="NET_SHOW">Afficher leurs jeux dans la bibliothèque</string>
 </resources>
