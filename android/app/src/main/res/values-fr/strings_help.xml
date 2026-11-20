@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Premier lancement de XRecomp (SETUP), Aide et questions (HELP), bulles « Bon à savoir » de l'accueil d'un jeu. -->
+<resources>
+    <string name="SETUP_TITLE">Premier lancement</string>
+    <string name="SETUP_PAGE">%1$d / %2$d</string>
+    <string name="SETUP_STEP_LIBRARY">Bibliothèque</string>
+    <string name="SETUP_STEP_GAMES">Vos jeux</string>
+    <string name="SETUP_STEP_SETTINGS">Réglages</string>
+    <string name="SETUP_STEP_READY">Prêt</string>
+    <string name="SETUP_CONTINUE">Continuer</string>
+
+    <string name="SETUP_LIBRARY_HERO">Où sont vos jeux ?</string>
+    <string name="SETUP_LIBRARY_TEXT">Choisissez un dossier : l\'app y cherche les jeux de toutes les consoles, jusqu\'à quatre niveaux de sous-dossiers.</string>
+    <string name="SETUP_LIBRARY_IN_PLACE">Avec l\'accès à tous les fichiers, les jeux sont lus sur place : rien n\'est copié.</string>
+    <string name="SETUP_LIBRARY_ASK">L\'app demande ensuite comment le lire : sur place avec l\'accès à tous les fichiers, ou par le sélecteur de dossiers d\'Android.</string>
+    <string name="SETUP_CHOOSE_FOLDER">Choisir un dossier</string>
+    <string name="SETUP_ONE_GAME">Un seul jeu</string>
+    <string name="SETUP_EXAMPLE">Par exemple</string>
+    <string name="SETUP_EXAMPLE_TREE">Jeux/\n  Xbox/Night Drive/\n  GBA/puzzle-garden.gba\n  PS1/ocean-trip.cue\n  N64/tiny-tanks.z64</string>
+
+    <string name="SETUP_SCAN_HERO">Recherche des jeux…</string>
+    <string name="SETUP_SCAN_TEXT">Lecture du dossier. Les images disque sont ouvertes pour trouver leur titre : un gros dossier prend un moment.</string>
+    <string name="SETUP_SCANNING">%1$d trouvés pour l\'instant</string>
+    <string name="SETUP_OTHER_FOLDER">Un autre dossier</string>
+    <string name="SETUP_NONE_HERO">Aucun jeu trouvé</string>
+    <string name="SETUP_NONE_TEXT">Rien dans ce dossier ne ressemble à un jeu que l\'app connaît : un disque Xbox extrait (default.xbe), une image disque, ou un fichier GBA, PS1, N64 ou GameCube. Choisissez un autre dossier, ou continuez et ajoutez-en un plus tard depuis la bibliothèque.</string>
+    <string name="SETUP_FOUND_HERO">Vos jeux</string>
+    <plurals name="SETUP_FOUND_TEXT_N">
+        <item quantity="one">%1$d jeu trouvé.</item>
+        <item quantity="other">%1$d jeux trouvés.</item>
+    </plurals>
+    <string name="SETUP_FOUND_AT_ONCE">Les jeux Game Boy Advance, PS1, N64 et GameCube se lancent tout de suite, dans l\'interpréteur.</string>
+    <string name="SETUP_FOUND_PREPARE">Les jeux Xbox et Xbox 360 sont d\'abord préparés : traduits pour cet appareil, une fois, appareil branché. Vous le lancez depuis chaque jeu.</string>
+    <string name="SETUP_NEEDS_PREPARE">À préparer</string>
+    <string name="SETUP_PLAYS_NOW">Prêts à jouer</string>
+
+    <string name="SETUP_SETTINGS_LATER">Tout se change plus tard dans Réglages › Général. Continuez quand c\'est bon.</string>
+
+    <string name="SETUP_READY_HERO">C\'est prêt</string>
+    <string name="SETUP_READY_TEXT">Quand l\'accueil d\'un jeu dit qu\'il a rencontré du code que la préparation avait manqué, le préparer à nouveau prend quelques minutes et le rend plus fluide. Les réponses aux questions courantes sont dans Réglages › Général › Aide et questions.</string>
+    <string name="SETUP_OPEN_LIBRARY">Ouvrir la bibliothèque</string>
+    <string name="SETUP_READY_FOLDER">Dossier de la bibliothèque</string>
+    <plurals name="SETUP_READY_GAMES_N">
+        <item quantity="one">%1$d jeu</item>
+        <item quantity="other">%1$d jeux</item>
+    </plurals>
+    <plurals name="SETUP_READY_PREPARE_N">
+        <item quantity="one">%1$d à préparer avant de jouer</item>
+        <item quantity="other">%1$d à préparer avant de jouer</item>
+    </plurals>
+
+    <string name="HELP_TITLE">Aide et questions</string>
+    <string name="HELP_ROW_DETAIL">Pourquoi les jeux sont préparés, pourquoi préparer à nouveau vaut parfois le coup, l\'auto-réparation, vos sauvegardes.</string>
+    <string name="HELP_OPEN_SETTING">A ouvre le réglage.</string>
+    <string name="HELP_Q_PREPARE">Pourquoi préparer un jeu ?</string>
+    <string name="HELP_A_PREPARE">Un jeu est écrit pour le processeur de sa console. Préparer lit son code, le réécrit pour le processeur de cet appareil et le compile, ici sur l\'appareil. Le jeu tourne alors en code natif, à pleine vitesse. C\'est fait une fois par jeu ; les correctifs de l\'app pour le jeu et ses améliorations optionnelles viennent avec.</string>
+    <string name="HELP_Q_TIME">Combien de temps ça prend ?</string>
+    <string name="HELP_A_TIME">De quelques minutes pour un petit jeu à bien plus pour un gros jeu Xbox. L\'accueil du jeu affiche le temps restant. Gardez l\'appareil branché ; la préparation continue si vous quittez l\'app.</string>
+    <string name="HELP_Q_AGAIN">Pourquoi préparer un jeu à nouveau ?</string>
+    <string name="HELP_A_AGAIN">Lire un jeu trouve l\'essentiel de son code, pas tout : une partie n\'est atteinte qu\'en jouant. Quand un jeu rencontre du code que la préparation avait manqué, il continue, plus lentement à cet endroit, et l\'app le note ; l\'accueil du jeu le dit alors. Préparer à nouveau traduit ce code aussi, et c\'est rapide : seul ce qui a changé est recompilé. Préparer à nouveau est aussi proposé après une mise à jour de l\'app qui traduit mieux les jeux, pour une autre version du disque, ou si vous activez ou désactivez Améliorations.</string>
+    <string name="HELP_Q_HEAL">Que fait l\'auto-réparation ?</string>
+    <string name="HELP_A_HEAL">Activée par défaut. Quand une partie a rencontré du code que la préparation avait manqué, l\'app prépare le jeu à nouveau d\'elle-même : après un plantage, puis le relance ; après une bonne partie, en arrière-plan pendant que vous continuez à jouer. Une note le dit à chaque fois, et vous pouvez l\'arrêter. Un plantage sans rien de nouveau à apprendre n\'est pas retenté : l\'accueil du jeu dit qu\'il a besoin d\'un correctif.</string>
+    <string name="HELP_Q_SAVES">Mes sauvegardes risquent-elles quelque chose ?</string>
+    <string name="HELP_A_SAVES">Non. Une préparation ne touche jamais vos sauvegardes, une mise à jour de l\'app non plus : elles sont gardées à part du code préparé. Options › Stockage, dans la bibliothèque, les exporte.</string>
+    <string name="HELP_Q_AT_ONCE">Pourquoi certains jeux se lancent sans préparer ?</string>
+    <string name="HELP_A_AT_ONCE">Les jeux Game Boy Advance, PS1, N64 et GameCube ont un interpréteur : ils se lancent tout de suite. Les préparer les fait tourner en natif, plus fluides et plus économes en batterie. Les jeux Xbox et Xbox 360 n\'ont pas d\'interpréteur ici : ils se jouent une fois préparés.</string>
+
+    <!-- Bulles « Bon à savoir » de l'accueil d'un jeu -->
+    <string name="TIP_TITLE">Bon à savoir</string>
+    <string name="TIP_GOT_IT">Compris</string>
+    <string name="TIP_LEARN_MORE">En savoir plus</string>
+    <string name="TIP_NEXT_TIME">La prochaine fois</string>
+    <string name="TIP_HEAL_AUTO">Le faire tout seul</string>
+    <string name="TIP_HEAL_ASK">Me demander</string>
+    <string name="TIP_PREPARE_H">Pourquoi préparer ?</string>
+    <string name="TIP_PREPARE_T">Ce jeu est traduit pour cet appareil avant de se lancer : une fois, appareil branché. Ensuite il tourne en code natif.</string>
+    <string name="TIP_PREPARING_H">Pendant la préparation</string>
+    <string name="TIP_PREPARING_T">Gardez l\'appareil branché. Vous pouvez quitter l\'app : la préparation continue, et l\'accueil affiche le temps restant. Vos sauvegardes ne sont jamais touchées.</string>
+    <string name="TIP_NEW_CODE_H">Du nouveau code trouvé</string>
+    <string name="TIP_NEW_CODE_T">Votre dernière partie a rencontré du code que la préparation avait manqué : il a tourné plus lentement. Préparer à nouveau l\'ajoute en quelques minutes, car seul ce qui a changé est recompilé. Jouer reste disponible.</string>
+    <string name="TIP_UPDATE_H">L\'app a été mise à jour</string>
+    <string name="TIP_UPDATE_T">Cette version traduit mieux les jeux. Le jeu marche comme avant ; le préparer à nouveau récupère les correctifs. Vos sauvegardes sont gardées.</string>
+    <string name="TIP_AT_ONCE_H">Jouable tout de suite</string>
+    <string name="TIP_AT_ONCE_T">Ce jeu tourne dans l\'interpréteur : il se lance tout de suite. Préparer le traduit en code natif (quelques minutes) : plus fluide, plus économe en batterie. Vous pouvez jouer pendant ce temps.</string>
+
+    <!-- Les schémas de l'aide (Schema) -->
+    <string name="SCH_GAME">Votre jeu</string>
+    <string name="SCH_GAME_SUB">code de sa console</string>
+    <string name="SCH_PREPARE">Préparer</string>
+    <string name="SCH_PREPARE_SUB">traduire, compiler</string>
+    <string name="SCH_NATIVE">Code natif</string>
+    <string name="SCH_NATIVE_SUB">pleine vitesse</string>
+    <string name="SCH_READ">Lecture</string>
+    <string name="SCH_TRANSLATE">Traduction</string>
+    <string name="SCH_COMPILE">Compilation</string>
+    <string name="SCH_PACK">Paquet</string>
+    <string name="SCH_PLAY">Jouer</string>
+    <string name="SCH_PLAY_SUB">code natif</string>
+    <string name="SCH_MISSED">Code manqué</string>
+    <string name="SCH_MISSED_SUB">noté, plus lent</string>
+    <string name="SCH_AGAIN">Préparer à nouveau</string>
+    <string name="SCH_AGAIN_SUB">seul ce qui change</string>
+    <string name="SCH_FOUND">adresses trouvées</string>
+    <string name="SCH_CRASH">Après un plantage</string>
+    <string name="SCH_CRASH_SUB">préparé à nouveau, relancé</string>
+    <string name="SCH_GOOD">Bonne partie</string>
+    <string name="SCH_GOOD_SUB">amélioré entre-temps</string>
+    <string name="SCH_NOTHING">Rien de nouveau</string>
+    <string name="SCH_NOTHING_SUB">« besoin d\'un correctif »</string>
+    <string name="SCH_SAVES">Vos sauvegardes</string>
+    <string name="SCH_SAVES_SUB">gardées à part</string>
+    <string name="SCH_CODE">Code préparé</string>
+    <string name="SCH_CODE_SUB">refait librement</string>
+    <string name="SCH_FILE">Fichier du jeu</string>
+    <string name="SCH_FILE_SUB">GBA, PS1, N64, GC</string>
+    <string name="SCH_INTERP">Interpréteur</string>
+    <string name="SCH_INTERP_SUB">démarre tout de suite</string>
+    <string name="LIB_NEW_CODE_N">Préparé · +%1$d nouvelles</string>
+
+    <!-- Traduction en direct (TranslationDemo) -->
+    <string name="DEMO_TITLE">Traduction en direct</string>
+    <string name="DEMO_SKIP">Passer</string>
+    <string name="DEMO_TAGLINE">Natif, pas émulé.</string>
+    <string name="DEMO_PANE_X86">LE JEU · CODE DE SA CONSOLE (x86)</string>
+    <string name="DEMO_PANE_ARM">APRÈS PRÉPARER · CODE DE CET APPAREIL (arm64)</string>
+    <string name="DEMO_WHERE">où ?</string>
+    <string name="DEMO_PLAYING">Partie en cours</string>
+    <string name="DEMO_BADGE_5_OF_6">5 instructions sur 6 traduites</string>
+    <string name="DEMO_BADGE_FOUND">+1 adresse trouvée</string>
+    <string name="DEMO_BADGE_ONE_FILE">1 fichier recompilé</string>
+    <string name="DEMO_BADGE_ALL">6 / 6 · tout en natif</string>
+    <string name="DEMO_1_H">Votre jeu parle la langue de sa console.</string>
+    <string name="DEMO_1_T">Ici, du code x86, comme dans un jeu Xbox. Cet appareil, lui, comprend l\'arm64.</string>
+    <string name="DEMO_2_H">Préparer le traduit, une fois.</string>
+    <string name="DEMO_2_T">Chaque fonction est réécrite pour ce processeur, puis compilée sur l\'appareil.</string>
+    <string name="DEMO_3_H">Certaines destinations ne se voient qu\'en jouant.</string>
+    <string name="DEMO_3_T">« call [eax] » : l\'adresse n\'existe qu\'au moment où le jeu tourne. Une partie la trouvera.</string>
+    <string name="DEMO_4_H">Vous jouez. Le jeu trouve l\'adresse.</string>
+    <string name="DEMO_4_T">Ce passage tourne plus lentement, dans l\'interpréteur, et l\'app le note.</string>
+    <string name="DEMO_5_H">Préparer à nouveau l\'ajoute.</string>
+    <string name="DEMO_5_T">Seul ce qui a changé est recompilé : quelques minutes au lieu d\'une préparation entière.</string>
+    <string name="HELP_Q_DEMO">Pour les curieux : à quoi ressemble une traduction ?</string>
+    <string name="HELP_A_DEMO">Une animation de 20 secondes sur une petite fonction à nous : son code x86 réécrit en arm64 ligne à ligne, un appel dont seule une partie connaît la destination, et Préparer à nouveau qui l\'ajoute.</string>
+    <string name="HELP_PLAY_DEMO">A la lance.</string>
+
+    <!-- Le carnet d'un jeu (GameJournal) -->
+    <string name="JOURNAL">Carnet</string>
+    <string name="JOURNAL_DETAIL">Ce qui est arrivé à ce jeu : chaque préparation, le code que ses parties ont trouvé et que la préparation avait manqué, un plantage qui demande un correctif.</string>
+    <string name="JOURNAL_EMPTY_VALUE">Vide</string>
+    <string name="JOURNAL_TITLE">%1$s · Carnet</string>
+    <string name="JOURNAL_PREPARED">Préparé</string>
+    <string name="JOURNAL_PREPARED_BG">Préparé à nouveau en arrière-plan</string>
+    <string name="JOURNAL_TOOK">Durée : %1$s.</string>
+    <string name="JOURNAL_FILES">%1$d fichiers compilés sur %2$d.</string>
+    <string name="JOURNAL_SEEDED">Préparé avant que l\'app ne tienne un carnet : le carnet commence ici.</string>
+    <plurals name="JOURNAL_FOUND_N">
+        <item quantity="one">Une partie a trouvé %1$d adresse</item>
+        <item quantity="other">Une partie a trouvé %1$d adresses</item>
+    </plurals>
+    <string name="JOURNAL_FOUND_OK">Du code que la préparation avait manqué : il a tourné plus lentement. La prochaine préparation l\'ajoute.</string>
+    <string name="JOURNAL_FOUND_CRASH">Le jeu a planté sur du code que la préparation avait manqué. La prochaine préparation l\'ajoute.</string>
+    <string name="JOURNAL_NEEDS_FIX">Planté · besoin d\'un correctif</string>
+    <string name="JOURNAL_NONE">Rien pour l\'instant. Chaque préparation, et chaque partie qui trouve du code que la préparation avait manqué, ajoute une ligne ici.</string>
+</resources>

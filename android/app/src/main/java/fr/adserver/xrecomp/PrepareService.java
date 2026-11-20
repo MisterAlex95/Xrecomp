@@ -874,6 +874,8 @@ public class PrepareService extends Service {
         if (monitor != null)
             monitor.stop();
         monitor = null;
+        if (PrepareProtocol.DONE.equals(s.state))   // the game's journal: prepared (GameJournal)
+            GameJournal.prepared(getFilesDir(), s.titleId, s.background, System.currentTimeMillis());
         // XBA-128, quick first: the -O1 pack is published; the -O2 rebuild follows in the background.
         if (done != null && done.opt() == 1 && PrepareProtocol.DONE.equals(s.state) && quickFirst(this)) {
             loadQueue();

@@ -165,8 +165,14 @@ public class LauncherActivity extends Activity {
         DRIVERS,
         /** Settings › General › Updates: XRecomp's own updates (AppUpdate). */
         UPDATE,
-        /** How it works (XRecomp's onboarding): a few pages on the library, Prepare and Prepare again; buildGuide. */
-        GUIDE
+        /** Help and questions (Settings › General, a bubble's « Learn more »): questions and answers; buildHelp. */
+        HELP,
+        /** XRecomp's first start: library folder, the games found, a few settings, ready; buildSetup. */
+        SETUP,
+        /** « Translation, live » (TranslationDemo): before the first start, and from Help; buildDemo. */
+        DEMO,
+        /** A game's journal (GameJournal), from Game settings › Game; buildJournal. */
+        JOURNAL
     }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
@@ -528,16 +534,11 @@ public class LauncherActivity extends Activity {
                 history.push(Screen.LIBRARY);
                 history.push(Screen.HOME);
                 first = Screen.PREPARE;
-            } else if (guideDue()) {   // How it works, once: B or its last page lands on the library
-                history.push(Screen.LIBRARY);
-                first = Screen.GUIDE;
+            } else if (setupDue() && setupStep() > 0) {   // a first start left half way (a folder picked)
+                first = Screen.SETUP;
             }
         } else if (state() == State.NONE) {
-            first = Screen.WELCOME;
-            if (guideDue()) {
-                history.push(Screen.WELCOME);
-                first = Screen.GUIDE;
-            }
+            first = setupDue() ? setupStep() == 0 ? Screen.DEMO : Screen.SETUP : Screen.WELCOME;
         } else {
             first = Screen.HOME;
             Prep p = prep();
@@ -690,6 +691,25 @@ public class LauncherActivity extends Activity {
 
     void goForTest(Screen s) {
         go(s);
+    }
+
+    List<View> focusablesForTest() {
+        return new ArrayList<>(focusables);
+    }
+
+    /** The games the library lists now (LibraryScreen.entries). */
+    int libraryCountForTest() {
+        return LibraryScreen.entries(getFilesDir(), games, index, libEnv()).size();
+    }
+
+    void showTipForTest(Tip t, boolean heal) {
+        showTip(t, heal);
+    }
+
+    void openJournalForTest(String key, String name) {
+        journalKey = key;
+        journalTitle = name;
+        go(Screen.JOURNAL);
     }
 
     UiFeedback feedbackForTest() {
@@ -1002,6 +1022,12 @@ public class LauncherActivity extends Activity {
         }
         if (clearSearch())   // XBA-206: B first takes the library's search away
             return;
+        if (screen == Screen.SETUP && setupStepBack())
+            return;
+        if (screen == Screen.DEMO && history.isEmpty() && setupDue()) {   // before the first start: B skips too
+            demoEnd();
+            return;
+        }
         if (history.isEmpty()) {
             if (screen != Screen.LIBRARY && screen != Screen.WELCOME && libraryOn()) {
                 show(Screen.LIBRARY, -1);   // Home of a library game: back to the library
@@ -1049,6 +1075,7 @@ public class LauncherActivity extends Activity {
         focusables.clear();
         defaultFocus = null;
         desc = null;
+        setupScan = null;
         licencesScroll = null;
         xAction = yAction = startAction = l1Action = r1Action = null;
         topRight.setText("");
@@ -1143,15 +1170,26 @@ public class LauncherActivity extends Activity {
         case DRIVERS:
             buildDrivers();
             break;
-        case GUIDE:
-            buildGuide();
+        case HELP:
+            buildHelp();
+            break;
+        case SETUP:
+            buildSetup();
+            break;
+        case DEMO:
+            buildDemo();
+            break;
+        case JOURNAL:
+            buildJournal();
             break;
         case UPDATE:
             buildUpdate();
             break;
         }
         restoreFocus(false);
-        if (companion != null && s != Screen.HOME && s != Screen.LIBRARY && s != Screen.PREPARE)
+        if (companion != null && (s == Screen.SETUP || s == Screen.HELP || s == Screen.DEMO))
+            companionGuide(s);   // the bottom screen: the step's or the question's drawing, two touch actions
+        else if (companion != null && s != Screen.HOME && s != Screen.LIBRARY && s != Screen.PREPARE)
             companion.artOnly();   // the bottom screen: the game's art alone
         // A library folder read as files: a (stat-only) rescan each time the library opens.
         if (s == Screen.LIBRARY && was != Screen.LIBRARY && Library.anyFolderPath(this))
@@ -1458,6 +1496,9 @@ public class LauncherActivity extends Activity {
     private void closeSheet(boolean restore) {
         if (sheet == null)
             return;
+        if (tipShown != null && !restore)   // a rebuild closed the bubble: it is offered again
+            GameStore.prefs(this).edit().putBoolean(tipShown.key(), false).apply();
+        tipShown = null;
         host.removeView(sheet);
         sheet = null;
         stageRoot.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
@@ -1680,103 +1721,584 @@ public class LauncherActivity extends Activity {
         addHint("B", R.string.HINT_QUIT, this::back);
     }
 
-    // ---- GUIDE (How it works) -----------------------------------------------------------------------------------
+    // ---- First-start guidance: SETUP, HELP ----------------------------------------------------------------------
 
     /**
-     * Shown by itself once, on the first start of XRecomp (the library, or Welcome); a game's own app never shows it.
-     * The JVM tests start with it seen (build.gradle: xba.guide=seen), LauncherGuideTest turns it back on.
+     * The first start's guidance (SETUP; Home's « Good to know » bubbles) is on by default. The JVM tests start past it
+     * (build.gradle: xba.guide=seen) so that A on Home still plays; LauncherGuideTest turns it back on.
      */
-    static boolean guideOnFirstStart = !"seen".equals(System.getProperty("xba.guide"));
-    /** Bump it when the guide says something new that everyone should read once. */
-    static final int GUIDE_VERSION = 1;
-    static final String KEY_GUIDE_SEEN = "guide_seen";
-    /** The page How it works shows, 0 to GUIDE_PAGES.length - 1. */
-    private int guidePage;
+    static boolean guidanceOn = !"seen".equals(System.getProperty("xba.guide"));
+    static final String KEY_SETUP_DONE = "setup_done", KEY_SETUP_STEP = "setup_step";
+    static final int SETUP_STEPS = 4;
+    /** The step's label in the step bar, in order. */
+    private static final int[] SETUP_LABELS = { R.string.SETUP_STEP_LIBRARY, R.string.SETUP_STEP_GAMES,
+                                                R.string.SETUP_STEP_SETTINGS, R.string.SETUP_STEP_READY };
+    /** The games step's « Looking for games… » line while the scan runs, else null. */
+    private TextView setupScan;
 
-    /** Each page: its heading, its text, then its points as (title, line) pairs. */
-    static final int[][] GUIDE_PAGES = {
-        { R.string.GUIDE_1_HERO, R.string.GUIDE_1_TEXT, R.string.GUIDE_1_P1, R.string.GUIDE_1_P1_SUB,
-          R.string.GUIDE_1_P2, R.string.GUIDE_1_P2_SUB, R.string.GUIDE_1_P3, R.string.GUIDE_1_P3_SUB },
-        { R.string.GUIDE_2_HERO, R.string.GUIDE_2_TEXT, R.string.GUIDE_2_P1, R.string.GUIDE_2_P1_SUB,
-          R.string.GUIDE_2_P2, R.string.GUIDE_2_P2_SUB, R.string.GUIDE_2_P3, R.string.GUIDE_2_P3_SUB },
-        { R.string.GUIDE_3_HERO, R.string.GUIDE_3_TEXT, R.string.GUIDE_3_P1, R.string.GUIDE_3_P1_SUB,
-          R.string.GUIDE_3_P2, R.string.GUIDE_3_P2_SUB, R.string.GUIDE_3_P3, R.string.GUIDE_3_P3_SUB },
-        { R.string.GUIDE_4_HERO, R.string.GUIDE_4_TEXT, R.string.GUIDE_4_P1, R.string.GUIDE_4_P1_SUB,
-          R.string.GUIDE_4_P2, R.string.GUIDE_4_P2_SUB, R.string.GUIDE_4_P3, R.string.GUIDE_4_P3_SUB },
-    };
-
-    /** Whether the first start shows How it works: not seen at this GUIDE_VERSION, not a game's own app. */
-    private boolean guideDue() {
-        return guideOnFirstStart && TitleApp.ownTitleId(this) == null
-               && GameStore.prefs(this).getInt(KEY_GUIDE_SEEN, 0) < GUIDE_VERSION;
+    /** XRecomp's first start shows SETUP: not done yet, not a game's own app nor a console game's. */
+    private boolean setupDue() {
+        return guidanceOn && TitleApp.ownTitleId(this) == null && ConsoleApp.ownKey(this) == null
+               && !GameStore.prefs(this).getBoolean(KEY_SETUP_DONE, false);
     }
 
-    int guidePageForTest() {
-        return guidePage;
+    /** The step SETUP is on, kept in the prefs: the folder picker or All files access may recreate the activity. */
+    int setupStep() {
+        return Math.max(0, Math.min(SETUP_STEPS - 1, GameStore.prefs(this).getInt(KEY_SETUP_STEP, 0)));
     }
 
-    private void guideStep(int d) {
-        int next = guidePage + d;
-        if (next < 0)
-            return;
-        if (next >= GUIDE_PAGES.length) {
-            guidePage = 0;
-            back();
-            return;
-        }
-        guidePage = next;
-        show(Screen.GUIDE, d);
+    private void setSetupStep(int step) {
+        GameStore.prefs(this).edit().putInt(KEY_SETUP_STEP, step).apply();
     }
 
-    /** One page of How it works: the heading and text on the left with Next and Skip, its three points on the right. */
-    private void buildGuide() {
-        GameStore.prefs(this).edit().putInt(KEY_GUIDE_SEEN, GUIDE_VERSION).apply();   // seen once shown: never nags
-        int[] page = GUIDE_PAGES[guidePage];
-        boolean last = guidePage == GUIDE_PAGES.length - 1;
-        screenTitle.setText(R.string.GUIDE_TITLE);
-        topRight.setText(getString(R.string.GUIDE_PAGE, guidePage + 1, GUIDE_PAGES.length));
-        LinearLayout h = rowLayout();
+    private void setupGo(int step) {
+        int was = setupStep();
+        setSetupStep(step);
+        show(Screen.SETUP, step >= was ? 1 : -1);
+    }
+
+    /** The first start is over (finished, or the single-game route taken): never again. */
+    private void setupDone() {
+        GameStore.prefs(this).edit().putBoolean(KEY_SETUP_DONE, true).remove(KEY_SETUP_STEP).apply();
+    }
+
+    private void setupBack() {
+        back();
+    }
+
+    /** B on SETUP past its first step: the step before (a scan running is cut short). */
+    private boolean setupStepBack() {
+        int step = setupStep();
+        if (step == 0)
+            return false;
+        if (step == 1 && scanning())
+            scanCancel = true;
+        setupGo(step - 1);
+        return true;
+    }
+
+    /** The left column of a SETUP step: its heading, its text and its row of pills (returned, empty). */
+    private LinearLayout setupLeft(LinearLayout h, int hero, String text) {
         LinearLayout left = column();
         left.setGravity(Gravity.CENTER_VERTICAL);
-        left.addView(Theme.text(this, Theme.T_DISPLAY, Theme.MEDIUM, Theme.TEXT, getString(page[0])),
-                     lp(MATCH, WRAP));
-        TextView t = Theme.body(this, getString(page[1]));
+        left.addView(Theme.text(this, Theme.T_DISPLAY, Theme.MEDIUM, Theme.TEXT, getString(hero)), lp(MATCH, WRAP));
+        TextView t = Theme.body(this, text);
         LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
         tl.topMargin = Theme.S3;
         left.addView(t, tl);
-        LinearLayout buttons = new Widgets.PillRow(this);   // Previous turns into a circle on a narrow stage
+        LinearLayout buttons = new Widgets.PillRow(this);
         LinearLayout.LayoutParams bl = lp(MATCH, Theme.BUTTON_H);
         bl.topMargin = Theme.S5;
         left.addView(buttons, bl);
-        defaultFocus = pill(buttons, last ? Icon.CHECK : Icon.ARROW,
-                            getString(last ? R.string.GUIDE_DONE : R.string.GUIDE_NEXT), true, () -> guideStep(1));
-        if (guidePage > 0)
-            pill(buttons, Icon.BACK, getString(R.string.GUIDE_PREVIOUS), false, () -> guideStep(-1));
-        h.addView(left, lp(0, MATCH, 1.4f));   // the points get narrower with the stage (4:3, square)
+        h.addView(left, lp(0, MATCH, 1.2f));
+        return buttons;
+    }
 
-        LinearLayout points = column();
-        points.setGravity(Gravity.CENTER_VERTICAL);
-        for (int i = 2; i + 1 < page.length; i += 2) {
-            TextView n = Theme.text(this, Theme.T_ROW, Theme.MEDIUM, Theme.TEXT, getString(page[i]));
-            LinearLayout.LayoutParams nl = lp(MATCH, WRAP);
-            nl.topMargin = i == 2 ? 0 : Theme.S5;
-            points.addView(n, nl);
-            TextView d = Theme.body(this, getString(page[i + 1]));
+    /** The right column of a SETUP step. */
+    private LinearLayout setupRight(LinearLayout h) {
+        LinearLayout right = column();
+        right.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams rl = lp(0, MATCH, 1);
+        rl.leftMargin = Theme.S6;
+        h.addView(right, rl);
+        return right;
+    }
+
+    /** A line of the right column: a label, its value on the right in colour, a smaller line below. */
+    private void setupFact(LinearLayout col, String label, String value, int valueColor, String sub) {
+        LinearLayout box = column();
+        box.setPadding(Theme.S4, Theme.S3, Theme.S4, Theme.S3);
+        box.setBackground(new Widgets.Panel());
+        LinearLayout top = rowLayout();
+        TextView l = Theme.oneLine(Theme.text(this, Theme.T_ROW, Theme.MEDIUM, Theme.TEXT, label));
+        top.addView(l, lp(0, WRAP, 1));
+        if (value != null)
+            top.addView(Theme.text(this, Theme.T_BODY, Theme.MEDIUM, valueColor, value), lp(WRAP, WRAP));
+        box.addView(top, lp(MATCH, WRAP));
+        if (sub != null && !sub.isEmpty()) {
+            TextView d = Theme.oneLine(Theme.body(this, sub));
             LinearLayout.LayoutParams dl = lp(MATCH, WRAP);
             dl.topMargin = Theme.S1;
-            points.addView(d, dl);
+            box.addView(d, dl);
         }
-        LinearLayout.LayoutParams sl = lp(0, MATCH, 1);
-        sl.leftMargin = Theme.S6;
-        h.addView(points, sl);
-        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
-        l1Action = () -> guideStep(-1);
-        r1Action = () -> guideStep(1);
-        addHint("A", last ? R.string.GUIDE_DONE : R.string.GUIDE_NEXT, () -> guideStep(1));
-        addHint("B", last ? R.string.HINT_BACK : R.string.GUIDE_SKIP, () -> {
-            guidePage = 0;
-            back();
+        LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+        p.topMargin = col.getChildCount() == 0 ? 0 : Theme.S2;
+        col.addView(box, p);
+    }
+
+    /** Above the step: one thin bar per step (lit up to this one) and its label. */
+    private View setupBar(int step) {
+        LinearLayout bar = rowLayout();
+        for (int i = 0; i < SETUP_STEPS; i++) {
+            LinearLayout cell = column();
+            View line = new View(this);
+            line.setBackgroundColor(i <= step ? Theme.ACCENT : Theme.LINE);
+            cell.addView(line, lp(MATCH, 6));
+            TextView t = Theme.oneLine(Theme.text(this, Theme.T_SMALL, i == step ? Theme.MEDIUM : Theme.REGULAR,
+                                                  i == step ? Theme.TEXT : Theme.TEXT_FAINT,
+                                                  (i + 1) + ". " + getString(SETUP_LABELS[i])));
+            LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
+            tl.topMargin = Theme.S1;
+            cell.addView(t, tl);
+            LinearLayout.LayoutParams cl = lp(0, WRAP, 1);
+            cl.leftMargin = i == 0 ? 0 : Theme.S2;
+            bar.addView(cell, cl);
+        }
+        return bar;
+    }
+
+    /** The first start, one step at a time: where the games are, what was found, a few settings, ready. */
+    private void buildSetup() {
+        int step = setupStep();
+        screenTitle.setText(R.string.SETUP_TITLE);
+        topRight.setText(getString(R.string.SETUP_PAGE, step + 1, SETUP_STEPS));
+        LinearLayout page = column();
+        page.setClipChildren(false);   // the list's rows and focus plates reach into the margin
+        page.setClipToPadding(false);
+        page.addView(setupBar(step), lp(MATCH, WRAP));
+        if (step == 2) {   // the settings: the list template under the step bar
+            body.addView(page, new FrameLayout.LayoutParams(MATCH, MATCH));
+            buildSetupSettings(page);
+            return;
+        }
+        LinearLayout h = rowLayout();
+        LinearLayout.LayoutParams hl = lp(MATCH, 0, 1);
+        hl.topMargin = Theme.S4;
+        page.addView(h, hl);
+        body.addView(page, new FrameLayout.LayoutParams(MATCH, MATCH));
+        if (step == 0)
+            buildSetupLibrary(h);
+        else if (step == 1)
+            buildSetupGames(h);
+        else
+            buildSetupReady(h);
+    }
+
+    private void buildSetupLibrary(LinearLayout h) {
+        boolean all = Environment.isExternalStorageManager();
+        LinearLayout buttons = setupLeft(h, R.string.SETUP_LIBRARY_HERO,
+                                         getString(R.string.SETUP_LIBRARY_TEXT) + " "
+                                         + getString(all ? R.string.SETUP_LIBRARY_IN_PLACE : R.string.SETUP_LIBRARY_ASK));
+        defaultFocus = pill(buttons, Icon.FOLDER, getString(R.string.SETUP_CHOOSE_FOLDER), true,
+                            this::onChooseLibraryFolder);
+        pill(buttons, Icon.DISC, getString(R.string.SETUP_ONE_GAME), false, () -> {
+            setupDone();   // the one-game route: Choose your game, as Welcome's (B: Welcome)
+            history.clear();
+            history.push(Screen.WELCOME);
+            show(Screen.SOURCE);
         });
+        LinearLayout right = setupRight(h);
+        right.addView(Theme.label(this, getString(R.string.SETUP_EXAMPLE)), lp(MATCH, WRAP));
+        TextView tree = Theme.body(this, getString(R.string.SETUP_EXAMPLE_TREE));
+        tree.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tree.setTextColor(Theme.TEXT_DIM);
+        LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
+        tl.topMargin = Theme.S2;
+        right.addView(tree, tl);
+        addHint("A", R.string.HINT_CHOOSE, this::onChooseLibraryFolder);
+        addHint("B", R.string.HINT_QUIT, this::back);
+    }
+
+    /** Whether a console's games must be prepared before they play: the Xbox and the Xbox 360 (no interpreter). */
+    static boolean preparesFirst(Console c) {
+        return !c.directLaunch() || c == Console.X360;
+    }
+
+    /** The games step: the scan's progress, then the games found per console, or none. */
+    private void buildSetupGames(LinearLayout h) {
+        libEntries = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
+        LinearLayout right = setupRight(h);
+        if (scanning()) {
+            LinearLayout buttons = setupLeft(h, R.string.SETUP_SCAN_HERO, getString(R.string.SETUP_SCAN_TEXT));
+            h.removeView(right);
+            h.addView(right);   // left first
+            defaultFocus = pill(buttons, Icon.BACK, getString(R.string.SETUP_OTHER_FOLDER), false, () -> setupGo(0));
+            setupScan = Theme.body(this, getString(R.string.SETUP_SCANNING, scanFound));
+            right.addView(setupScan, lp(MATCH, WRAP));
+            addHint("B", R.string.HINT_BACK, this::setupBack);
+            return;
+        }
+        h.removeView(right);
+        if (libEntries.isEmpty()) {
+            LinearLayout buttons = setupLeft(h, R.string.SETUP_NONE_HERO, getString(R.string.SETUP_NONE_TEXT));
+            h.addView(right);
+            defaultFocus = pill(buttons, Icon.FOLDER, getString(R.string.SETUP_OTHER_FOLDER), true, () -> setupGo(0));
+            pill(buttons, Icon.ARROW, getString(R.string.SETUP_CONTINUE), false, () -> setupGo(2));
+            addHint("B", R.string.HINT_BACK, this::setupBack);
+            return;
+        }
+        java.util.Map<Console, List<String>> byConsole = new java.util.TreeMap<>();
+        for (LibraryScreen.Entry e : libEntries) {
+            Console c = e.console();
+            if (c == null)
+                continue;
+            List<String> names = byConsole.get(c);
+            if (names == null)
+                byConsole.put(c, names = new ArrayList<>());
+            names.add(e.title());
+        }
+        boolean someFirst = false, someAtOnce = false;
+        for (Console c : byConsole.keySet()) {
+            if (preparesFirst(c))
+                someFirst = true;
+            else
+                someAtOnce = true;
+        }
+        String text = getResources().getQuantityString(R.plurals.SETUP_FOUND_TEXT_N, libEntries.size(),
+                                                       libEntries.size());
+        if (someAtOnce)
+            text += " " + getString(R.string.SETUP_FOUND_AT_ONCE);
+        if (someFirst)
+            text += " " + getString(R.string.SETUP_FOUND_PREPARE);
+        LinearLayout buttons = setupLeft(h, R.string.SETUP_FOUND_HERO, text);
+        h.addView(right);
+        defaultFocus = pill(buttons, Icon.ARROW, getString(R.string.SETUP_CONTINUE), true, () -> setupGo(2));
+        for (java.util.Map.Entry<Console, List<String>> g : byConsole.entrySet()) {
+            List<String> names = g.getValue();
+            String sub = TextUtils.join(", ", names.subList(0, Math.min(3, names.size())))
+                         + (names.size() > 3 ? ", …" : "");
+            boolean first = preparesFirst(g.getKey());
+            setupFact(right, g.getKey().badge() + " · " + names.size(),
+                      getString(first ? R.string.SETUP_NEEDS_PREPARE : R.string.SETUP_PLAYS_NOW),
+                      first ? Theme.WARN : Theme.OK, sub);
+        }
+        addHint("A", R.string.SETUP_CONTINUE, () -> setupGo(2));
+        addHint("B", R.string.HINT_BACK, this::setupBack);
+    }
+
+    /** The settings step: the settings that matter on day one, as Settings › General has them, and Continue. */
+    private void buildSetupSettings(LinearLayout page) {
+        LinearLayout list = listTemplate();   // added to body: moved under the step bar
+        View split = body.getChildAt(body.getChildCount() - 1);
+        body.removeView(split);
+        LinearLayout.LayoutParams sl = lp(MATCH, 0, 1);
+        sl.topMargin = Theme.S4;
+        page.addView(split, sl);
+        if (Toolchain.available(this))
+            launcherToggle(list, R.string.SELF_HEAL, R.string.SELF_HEAL_DETAIL, SelfHeal::auto, SelfHeal::setAuto,
+                           R.string.SELF_HEAL_ON, R.string.SELF_HEAL_OFF);
+        launcherToggle(list, R.string.COVER_DOWNLOAD, R.string.COVER_DOWNLOAD_DETAIL, CoverArt::downloadOn,
+                       CoverArt::setDownloadOn, R.string.COVER_DOWNLOAD_ON, R.string.COVER_DOWNLOAD_OFF);
+        if (DualScreen.available(this, CompanionScreen.ownDisplayId(this)))
+            bottomScreenRow(list);
+        MenuRow next = listRow(list, getString(R.string.SETUP_CONTINUE), getString(R.string.SETUP_SETTINGS_LATER),
+                               () -> setupGo(3));
+        next.setValue("›");
+        describe(getString(R.string.SETUP_SETTINGS_LATER));
+        startAction = r1Action = () -> setupGo(3);
+        addHint("A", R.string.HINT_CHANGE, () -> {
+            View f = host.findFocus();
+            if (f != null)
+                f.performClick();
+        });
+        addHint("R1", R.string.SETUP_CONTINUE, () -> setupGo(3));
+        addHint("B", R.string.HINT_BACK, this::setupBack);
+    }
+
+    private void buildSetupReady(LinearLayout h) {
+        LinearLayout buttons = setupLeft(h, R.string.SETUP_READY_HERO, getString(R.string.SETUP_READY_TEXT));
+        Runnable open = () -> {
+            setupDone();
+            history.clear();
+            show(Screen.LIBRARY);
+        };
+        defaultFocus = pill(buttons, Icon.PLAY, getString(R.string.SETUP_OPEN_LIBRARY), true, open);
+        LinearLayout right = setupRight(h);
+        libEntries = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
+        int first = 0;
+        for (LibraryScreen.Entry e : libEntries)
+            if (e.console() != null && preparesFirst(e.console()))
+                first++;
+        List<Library.Folder> folders = Library.folders(this);
+        if (!folders.isEmpty())
+            setupFact(right, getString(R.string.SETUP_READY_FOLDER), null, 0, folders.get(0).name());
+        setupFact(right, getResources().getQuantityString(R.plurals.SETUP_READY_GAMES_N, libEntries.size(),
+                                                          libEntries.size()),
+                  null, 0, first > 0 ? getResources().getQuantityString(R.plurals.SETUP_READY_PREPARE_N, first, first)
+                                     : null);
+        if (Toolchain.available(this))
+            setupFact(right, getString(R.string.SELF_HEAL), getString(SelfHeal.auto(this) ? R.string.VAL_ON
+                                                                                         : R.string.VAL_OFF),
+                      Theme.OK, null);
+        addHint("A", R.string.SETUP_OPEN_LIBRARY, open);
+        addHint("B", R.string.HINT_BACK, this::setupBack);
+    }
+
+    // Home's « Good to know » bubbles
+
+    /**
+     * A bubble Home shows once, the first time its situation comes up (a sheet: its explanation, « Got it », « Learn
+     * more » on the Help question, and for new code the Self-healing choice): seen, it never shows again.
+     */
+    enum Tip {
+        PREPARE(R.string.TIP_PREPARE_H, R.string.TIP_PREPARE_T, HELP_PREPARE),
+        PREPARING(R.string.TIP_PREPARING_H, R.string.TIP_PREPARING_T, HELP_TIME),
+        NEW_CODE(R.string.TIP_NEW_CODE_H, R.string.TIP_NEW_CODE_T, HELP_AGAIN),
+        UPDATE(R.string.TIP_UPDATE_H, R.string.TIP_UPDATE_T, HELP_AGAIN),
+        AT_ONCE(R.string.TIP_AT_ONCE_H, R.string.TIP_AT_ONCE_T, HELP_AT_ONCE);
+
+        final int head, text, help;
+
+        Tip(int head, int text, int help) {
+            this.head = head;
+            this.text = text;
+            this.help = help;
+        }
+
+        String key() {
+            return "tip_" + name().toLowerCase(Locale.ROOT);
+        }
+    }
+
+    /** The bubble open now, else null; a rebuild that closes it (closeSheet(false)) offers it again. */
+    private Tip tipShown;
+
+    static boolean tipSeen(android.content.Context c, Tip t) {
+        return GameStore.prefs(c).getBoolean(t.key(), false);
+    }
+
+    /** Offers a bubble after the screen is built: not seen yet, no sheet open; heal: with the Self-healing choice. */
+    private void offerTip(Tip t, boolean heal) {
+        if (!guidanceOn || t == null || tipSeen(this, t) || sheet != null)
+            return;
+        Screen on = screen;
+        host.post(() -> {
+            if (screen == on && sheet == null && !isFinishing() && !tipSeen(this, t))
+                showTip(t, heal);
+        });
+    }
+
+    Tip tipShownForTest() {
+        return tipShown;
+    }
+
+    private void showTip(Tip t, boolean heal) {
+        Widgets.Sheet s = openSheet(R.string.TIP_TITLE);
+        tipShown = t;
+        GameStore.prefs(this).edit().putBoolean(t.key(), true).apply();
+        TextView h = s.addText(getString(t.head), 2);   // above the rows: the heading, then the explanation
+        h.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, Theme.T_ROW);
+        h.setTypeface(Theme.MEDIUM);
+        h.setTextColor(Theme.TEXT);
+        ((LinearLayout.LayoutParams)h.getLayoutParams()).bottomMargin = Theme.S2;
+        s.addText(getString(t.text), 10);
+        if (heal && Toolchain.available(this)) {
+            MenuRow r = new MenuRow(this);
+            r.set(getString(R.string.TIP_NEXT_TIME), null);
+            String[] labels = { getString(R.string.TIP_HEAL_AUTO), getString(R.string.TIP_HEAL_ASK) };
+            r.setChoices(labels);
+            Runnable refresh = () -> r.setValue(labels[SelfHeal.auto(this) ? 0 : 1]);
+            refresh.run();
+            r.cycler = d -> {
+                SelfHeal.setAuto(this, !SelfHeal.auto(this));
+                refresh.run();
+                feedback.play(UiFeedback.Cue.MOVE, r);
+                Log.i(TAG, "launcher: tip: self-healing " + (SelfHeal.auto(this) ? "on" : "off"));
+            };
+            r.setOnClickListener(v -> r.cycler.step(1));
+            s.addRow(r);
+        }
+        tipRow(s, getString(R.string.TIP_GOT_IT), () -> {});
+        tipRow(s, getString(R.string.TIP_LEARN_MORE), () -> openHelp(t.help));
+        sheetReady();
+        Log.i(TAG, "launcher: tip " + t.key() + " shown");
+    }
+
+    private void tipRow(Widgets.Sheet s, String title, Runnable action) {
+        MenuRow r = new MenuRow(this);
+        r.set(title, null);
+        r.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, r);
+        r.setOnClickListener(v -> {
+            tipShown = null;
+            closeSheet(true);
+            action.run();
+        });
+        s.addRow(r);
+    }
+
+    // A game's journal
+
+    private String journalKey, journalTitle;
+
+    /** Game settings › Game › Journal: how many lines, the last one's date. */
+    private void journalRow(LinearLayout list, String key, String name) {
+        MenuRow r = listRow(list, getString(R.string.JOURNAL), getString(R.string.JOURNAL_DETAIL), () -> {
+            journalKey = key;
+            journalTitle = name;
+            go(Screen.JOURNAL);
+        });
+        List<GameJournal.Event> ev = GameJournal.read(getFilesDir(), key);
+        r.setValue(ev.isEmpty() ? getString(R.string.JOURNAL_EMPTY_VALUE) : journalDate(ev.get(0).time));
+    }
+
+    private String journalDate(long t) {
+        return java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT,
+                                                        getResources().getConfiguration().getLocales().get(0))
+                                   .format(new java.util.Date(t));
+    }
+
+    /** The journal, newest first: what happened (Prepared, Code found, Needs a fix), when, and its details. */
+    private void buildJournal() {
+        String key = journalKey == null ? titleId() : journalKey;
+        screenTitle.setText(getString(R.string.JOURNAL_TITLE, journalTitle == null ? "" : journalTitle));
+        LinearLayout list = listTemplate();
+        List<GameJournal.Event> events = key == null ? new ArrayList<>() : GameJournal.read(getFilesDir(), key);
+        for (GameJournal.Event e : events) {
+            String title, detail;
+            org.json.JSONObject o = e.o;
+            if (GameJournal.PREPARED.equals(e.kind)) {
+                title = getString(o.optBoolean("background") ? R.string.JOURNAL_PREPARED_BG : R.string.JOURNAL_PREPARED);
+                double s = o.optDouble("total_s", -1);
+                int files = o.optInt("files", 0), compiled = o.optInt("compiled", 0);
+                detail = (s >= 0 ? getString(R.string.JOURNAL_TOOK, PrepareFacts.duration(s)) + " " : "")
+                         + (files > 0 ? getString(R.string.JOURNAL_FILES, compiled, files) : "")
+                         + (o.optBoolean("seeded") ? "\n" + getString(R.string.JOURNAL_SEEDED) : "");
+            } else if (GameJournal.FOUND.equals(e.kind)) {
+                title = getResources().getQuantityString(R.plurals.JOURNAL_FOUND_N, o.optInt("n"), o.optInt("n"));
+                detail = getString(o.optBoolean("crash") ? R.string.JOURNAL_FOUND_CRASH : R.string.JOURNAL_FOUND_OK);
+            } else if (GameJournal.NEEDS_FIX.equals(e.kind)) {
+                title = getString(R.string.JOURNAL_NEEDS_FIX);
+                detail = o.optString("blocker", "");
+            } else {
+                continue;
+            }
+            MenuRow r = listRow(list, title, detail.trim(), null);
+            r.setValue(journalDate(e.time));
+        }
+        if (events.isEmpty())
+            describe(getString(R.string.JOURNAL_NONE));
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    // Translation, live
+
+    /** The animation: any key or its end goes on (to the first start, or back where Help was). */
+    private void buildDemo() {
+        screenTitle.setText(R.string.DEMO_TITLE);
+        TranslationDemo d = new TranslationDemo(this, this::demoEnd);
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(MATCH, MATCH);
+        d.setFocusable(true);   // A (or a tap) on it skips
+        d.setOnClickListener(v -> demoEnd());
+        body.addView(d, p);
+        defaultFocus = d;
+        demo = d;
+        startAction = this::demoEnd;
+        addHint("A", R.string.DEMO_SKIP, this::demoEnd);
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    private TranslationDemo demo;
+
+    TranslationDemo demoForTest() {
+        return demo;
+    }
+
+    /** The animation is over (or skipped): the first start when it led there, else back. */
+    private void demoEnd() {
+        if (screen != Screen.DEMO)
+            return;
+        demo = null;
+        if (history.isEmpty() && setupDue())
+            show(Screen.SETUP);
+        else
+            back();
+    }
+
+    // Help and questions
+
+    static final int HELP_PREPARE = 0, HELP_TIME = 1, HELP_AGAIN = 2, HELP_HEAL = 3, HELP_SAVES = 4, HELP_AT_ONCE = 5,
+            HELP_DEMO = 6;
+    /** Each question and its answer, in the screen's order (the HELP_ indexes). */
+    static final int[][] HELP = { { R.string.HELP_Q_PREPARE, R.string.HELP_A_PREPARE },
+                                  { R.string.HELP_Q_TIME, R.string.HELP_A_TIME },
+                                  { R.string.HELP_Q_AGAIN, R.string.HELP_A_AGAIN },
+                                  { R.string.HELP_Q_HEAL, R.string.HELP_A_HEAL },
+                                  { R.string.HELP_Q_SAVES, R.string.HELP_A_SAVES },
+                                  { R.string.HELP_Q_AT_ONCE, R.string.HELP_A_AT_ONCE },
+                                  { R.string.HELP_Q_DEMO, R.string.HELP_A_DEMO } };
+
+    /** Help, its focus on one question (Settings opens it on the first, a bubble on its own). */
+    private void openHelp(int topic) {
+        focusMemory.put(Screen.HELP, topic);
+        go(Screen.HELP);
+    }
+
+    /** The questions on the left, the focused one's answer and its drawing on the right; Self-healing's opens Settings. */
+    private void buildHelp() {
+        screenTitle.setText(R.string.HELP_TITLE);
+        LinearLayout list = listTemplate();
+        for (int i = 0; i < HELP.length; i++) {
+            int q = i;
+            boolean toSettings = i == HELP_HEAL && Toolchain.available(this);
+            MenuRow r = listRow(list, getString(HELP[i][0]), getString(HELP[i][1]),
+                                toSettings ? () -> go(Screen.SETTINGS) : i == HELP_DEMO ? () -> go(Screen.DEMO) : null);
+            if (toSettings || i == HELP_DEMO)
+                r.setValue("›");
+            onFocus(r, () -> helpAnswer(q));
+        }
+        Integer f = focusMemory.get(Screen.HELP);   // the answer shows before the focus lands
+        helpAnswer(f == null || f < 0 || f >= HELP.length ? 0 : f);
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /** The question Help shows (the bottom screen's ‹ › step through them). */
+    private int helpShown;
+
+    /** The second screen on SETUP and HELP (GuidePanel): the drawing of the step or question, its two actions. */
+    private void companionGuide(Screen s) {
+        if (s == Screen.DEMO) {
+            companion.guide(null, 0, getString(R.string.DEMO_TITLE), null, null, getString(R.string.DEMO_SKIP),
+                            this::demoEnd);
+            return;
+        }
+        if (s == Screen.HELP) {
+            int i = helpShown;
+            companion.guide(i < Schema.FOR_HELP.length ? Schema.FOR_HELP[i] : null, 0, getString(HELP[i][0]),
+                            i > 0 ? "‹" : null, () -> helpFocus(i - 1),
+                            i < HELP.length - 1 ? "›" : null, () -> helpFocus(i + 1));
+            return;
+        }
+        int step = setupStep();
+        Schema.Kind[] kinds = { Schema.Kind.PIPE, Schema.Kind.AT_ONCE, null, Schema.Kind.LOOP };
+        String back = step == 0 ? null : getString(R.string.HINT_BACK);
+        String next = step == 0 ? getString(R.string.SETUP_CHOOSE_FOLDER)
+                    : step == 3 ? getString(R.string.SETUP_OPEN_LIBRARY) : getString(R.string.SETUP_CONTINUE);
+        companion.guide(kinds[step], 0, getString(SETUP_LABELS[step]), back, this::setupBack, next, () -> {
+            if (step == 0)
+                onChooseLibraryFolder();
+            else if (step == 3)
+                clickFocused();
+            else
+                setupGo(step + 1);
+        });
+    }
+
+    /** Help's focus on question i (the bottom screen's ‹ ›). */
+    private void helpFocus(int i) {
+        if (screen != Screen.HELP || i < 0 || i >= HELP.length || i >= focusables.size())
+            return;
+        View v = focusables.get(i);
+        if (!v.requestFocus())
+            v.requestFocusFromTouch();
+    }
+
+    /** Help's description column: the answer, « A opens the setting » for Self-healing, the drawing below. */
+    private void helpAnswer(int i) {
+        helpShown = i;
+        if (companion != null && screen == Screen.HELP && !building)
+            companionGuide(Screen.HELP);
+        if (i == HELP_HEAL && Toolchain.available(this))
+            describe(getString(HELP[i][1]), getString(R.string.HELP_OPEN_SETTING), Theme.TEXT_FAINT);
+        else if (i == HELP_DEMO)
+            describe(getString(HELP[i][1]), getString(R.string.HELP_PLAY_DEMO), Theme.TEXT_FAINT);
+        else
+            describe(getString(HELP[i][1]));
+        if (desc == null || i >= Schema.FOR_HELP.length)
+            return;
+        Schema.SchemaView v = new Schema.SchemaView(this, Schema.FOR_HELP[i]);
+        LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+        p.topMargin = Theme.S5;
+        desc.addView(v, p);
     }
 
     // ---- SOURCE and FOLDER_ACCESS --------------------------------------------------------------------------------
@@ -1944,6 +2466,13 @@ public class LauncherActivity extends Activity {
     }
 
     /** The row of buttons under the title: one solid primary and quiet pills. */
+    /** Home's track under its lines: the Prepare's stages lit, a dot per address found since (Schema.TrackView). */
+    private void heroTrack(LinearLayout info, int lit, int found) {
+        LinearLayout.LayoutParams p = lp(MATCH, Schema.TrackView.H);
+        p.topMargin = Theme.S3;
+        info.addView(new Schema.TrackView(this, lit, found), p);
+    }
+
     private LinearLayout heroButtons(LinearLayout info) {
         LinearLayout row = new Widgets.PillRow(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -2107,6 +2636,14 @@ public class LauncherActivity extends Activity {
         else if (resume == Pack.Resume.PREPARE_AGAIN && !olderToolkit)   // older toolkit: its line says Prepare again
             heroLine(info, getString(R.string.HOME_RESUME_PREPARE), Theme.WARN);
 
+        if (st == State.READY && !copying && (prep == Prep.PLAYABLE || prep == Prep.RUNNING)) {
+            Library.Record tr = rec();
+            int found = improve ? SelfHeal.read(workDir(tid)).seeds : 0;
+            int lit = prep == Prep.RUNNING
+                      ? Schema.TrackView.litFor(ps == null ? 0 : PrepareProtocol.overall(ps.step, ps.n, ps.pct))
+                      : 3 + (tr != null && tr.playMs > 0 || GameStore.playTime(this) > 0 ? 1 : 0);
+            heroTrack(info, lit, healing != null ? 0 : found);
+        }
         LinearLayout buttons = heroButtons(info);
         Widgets.PillButton play;
         if (st == State.NONE || st == State.MISSING || st == State.NO_ACCESS) {
@@ -2169,6 +2706,12 @@ public class LauncherActivity extends Activity {
         if (st != State.NONE && rec() != null)
             favouriteHint(currentEntry());   // XBA-206: X adds the game to the favourites
 
+        if (st == State.READY && !copying)   // the first time each of these comes up: a « Good to know » bubble
+            offerTip(preparing && prep == Prep.NEEDED && !otherXbe ? Tip.PREPARE
+                     : prep == Prep.RUNNING ? Tip.PREPARING
+                     : improve || healing != null || heal != null && heal.offer == SelfHeal.Offer.PREPARE_AGAIN
+                       ? Tip.NEW_CODE
+                     : olderToolkit && !enhChanged ? Tip.UPDATE : null, true);
         if (copying)
             setNote(getString(R.string.HANDOVER_COPYING_NOTE), NOTE_INFO);
         else if (preparing && prep == Prep.INTERRUPTED)
@@ -2365,11 +2908,7 @@ public class LauncherActivity extends Activity {
                 bottomScreenRow(list);
             if (TitleApp.ownTitleId(this) == null)   // a game's own app is made again from XRecomp, never updated
                 updatesRow(list);
-            if (TitleApp.ownTitleId(this) == null)
-                listRow(list, getString(R.string.GUIDE_TITLE), getString(R.string.GUIDE_ROW_DETAIL), () -> {
-                    guidePage = 0;
-                    go(Screen.GUIDE);
-                });
+            listRow(list, getString(R.string.HELP_TITLE), getString(R.string.HELP_ROW_DETAIL), () -> openHelp(0));
             String dir = gameDir();
             if (dir != null && state() != State.NONE && GameStore.findXbe(new File(dir)) != null && titleId() != null) {
                 gameThemeRow(list, titleId(), gameTitle(dir));
@@ -5204,6 +5743,10 @@ public class LauncherActivity extends Activity {
             homeStatus = (Widgets.Chip)status;
         if (e.record != null && (e.record.lastPlayed > 0 || e.record.playMs > 0))   // XBA-206: as an Xbox game's Home
             heroLine(info, homeMeta(e.record.lastPlayed, e.record.playMs), 0);
+        if (prepares && (p == Prep.PLAYABLE || p == Prep.RUNNING))
+            heroTrack(info, p == Prep.RUNNING
+                            ? Schema.TrackView.litFor(ps == null ? 0 : PrepareProtocol.overall(ps.step, ps.n, ps.pct))
+                            : 3 + (e.record != null && e.record.playMs > 0 ? 1 : 0), p == Prep.PLAYABLE ? found : 0);
 
         LinearLayout buttons = heroButtons(info);
         // Where the player left off saved: Resume (that point) first, Start (the console's boot) beside it.
@@ -5262,6 +5805,10 @@ public class LauncherActivity extends Activity {
             companion.home(e.title(), line, color, true, play.title);
         }
 
+        if (prepares)
+            offerTip(p == Prep.RUNNING ? Tip.PREPARING
+                     : p == Prep.PLAYABLE ? (older ? Tip.UPDATE : found > 0 ? Tip.NEW_CODE : null)
+                     : p == Prep.NEEDED ? (x360 ? Tip.PREPARE : Tip.AT_ONCE) : null, false);
         if (e.chip == GameState.Chip.RUNNING)
             setNote(getString(R.string.GAME_RUNNING_HOME), NOTE_INFO);
         else if (n64 && !prepares)
@@ -5787,6 +6334,12 @@ public class LauncherActivity extends Activity {
         pickLibrary = false;
         focusTid = null;
         history.clear();
+        if (setupDue()) {   // the first start goes on: the games found
+            setSetupStep(1);
+            show(Screen.SETUP);
+            startScan();
+            return;
+        }
         show(Screen.LIBRARY);   // a path is scanned as the library opens
         if (path == null)
             startScan();
@@ -5946,7 +6499,7 @@ public class LauncherActivity extends Activity {
             if (libEntries.isEmpty())
                 focusTid = null;   // the first games found: the focus goes to the selected one, not the folder tile
         }
-        if (screen == Screen.LIBRARY)
+        if (screen == Screen.LIBRARY || screen == Screen.SETUP)
             refreshKeepingFocus();
         else if (screen == Screen.HOME && state() == State.LIBRARY)
             refreshKeepingFocus();
@@ -5954,6 +6507,8 @@ public class LauncherActivity extends Activity {
 
     /** Under the grid: the scan's progress, an empty library's hint, a scan cut short, the « Other files » line. */
     private void paintScanCaption() {
+        if (setupScan != null && scanning())
+            setupScan.setText(getString(R.string.SETUP_SCANNING, scanFound));
         if (libCaption == null)
             return;
         List<String> parts = new ArrayList<>();
@@ -7754,6 +8309,8 @@ public class LauncherActivity extends Activity {
         } else {
             gameControlsRow(list, key, con);
             cheatsRow(list, key, con);   // XBA-241: an Xbox title's too
+            if (Toolchain.available(this) && (con == Console.XBOX || con.prepares()))
+                journalRow(list, key, gameName);
             if (con == Console.XBOX) {
                 gameThemeRow(list, key, gameName);
                 if (Toolchain.available(this) && Pack.titleLayer(getFilesDir(), key) != null)
@@ -9209,6 +9766,12 @@ public class LauncherActivity extends Activity {
             try {
                 if (SelfHeal.onExit(work, lastGameExit())) {
                     SelfHeal.State s = SelfHeal.read(work);
+                    long now = System.currentTimeMillis();   // the game's journal (GameJournal)
+                    if ((s.offer == SelfHeal.Offer.IMPROVE || s.offer == SelfHeal.Offer.PREPARE_AGAIN) && s.seeds > 0)
+                        GameJournal.add(getFilesDir(), tid, GameJournal.FOUND, now, "n", s.seeds, "crash",
+                                        s.offer == SelfHeal.Offer.PREPARE_AGAIN);
+                    else if (s.offer == SelfHeal.Offer.NEEDS_FIX)
+                        GameJournal.add(getFilesDir(), tid, GameJournal.NEEDS_FIX, now, "blocker", s.blocker);
                     Log.i(TAG, "launcher: " + tid + "'s last run: " + s.offer
                                + (s.blocker.isEmpty() ? "" : " (" + s.blocker + ")") + ", rounds " + s.rounds);
                 }
