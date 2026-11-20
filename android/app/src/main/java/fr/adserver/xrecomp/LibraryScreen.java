@@ -439,7 +439,9 @@ final class LibraryScreen {
             return c.getString(R.string.LIB_QUEUED_N, e.queuePos);
         if (e.chip == GameState.Chip.DOWNLOADING && e.download != null)
             return NetDownloads.RUNNING.equals(e.download.state)
-                   ? c.getString(R.string.NET_CHIP_DOWNLOADING_N, e.download.percent())
+                   ? c.getString(NetUnpack.E_UNPACKING.equals(e.download.error) ? R.string.NET_CHIP_UNPACKING_N
+                                                                               : R.string.NET_CHIP_DOWNLOADING_N,
+                                 e.download.percent())
                    : c.getString(R.string.NET_CHIP_WAITING);
         if (e.found > 0 && e.prepared != GameState.Prepared.OUTDATED)
             return c.getString(R.string.LIB_NEW_CODE_N, e.found);

@@ -145,6 +145,8 @@ public final class NetService extends Service {
         File downloads = LibraryScanner.netDir(this);
         if (ACTION_CANCEL.equals(action)) {
             String key = intent.getStringExtra(EXTRA_KEY);
+            if (runner != null && key != null)
+                runner.requestCancel(key);   // an archive being unpacked stops now; the cancel follows on the worker
             todo.add(() -> {
                 try {
                     if (runner != null)
@@ -337,6 +339,8 @@ public final class NetService extends Service {
         b.setContentTitle(getString(R.string.NET_NOTIF_TITLE, j.title));
         if (NetRunner.E_WIFI.equals(j.error))
             b.setContentText(getString(R.string.NET_WAIT_WIFI));
+        else if (NetUnpack.E_UNPACKING.equals(j.error))
+            b.setContentText(getString(R.string.NET_CHIP_UNPACKING_N, j.percent())).setProgress(100, j.percent(), false);
         else if (NetDownloads.RUNNING.equals(j.state))
             b.setContentText(getString(R.string.NET_PROGRESS, j.percent(), android.text.format.Formatter.formatShortFileSize(this, j.rate),
                                        j.peers))

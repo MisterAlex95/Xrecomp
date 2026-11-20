@@ -144,7 +144,7 @@ final class RemoteLibrary {
      * never be found again).
      */
     static int maxPathDepth(TorrentMeta m) {
-        return LibraryScanner.NET_MAX_DEPTH - (m.multiFile ? 2 : 1);
+        return LibraryScanner.NET_MAX_DEPTH - NetUnpack.MAX_DEPTH - (m.multiFile ? 2 : 1);
     }
 
     /** The games of source s, whose torrent is m, in torrent order (cached per torrent and console). */
@@ -200,6 +200,10 @@ final class RemoteLibrary {
                         continue;   // a later part of a set listed with its first
                     taken.addAll(set);
                     out.add(new Game(s, consoleOf(s, n), set));
+                } else if (NetUnpack.isArchive(n)) {   // XBA-331: unpacked once downloaded (NetUnpack)
+                    List<TorrentMeta.File> one = new ArrayList<>();
+                    one.add(f);
+                    out.add(new Game(s, archiveConsole(s, n), one));
                 } else if (LibraryScanner.isRom(n)) {
                     if (isTrack(n) && hasCue)
                         continue;   // a track of a .cue in this folder (named otherwise): not a game of its own
@@ -223,6 +227,36 @@ final class RemoteLibrary {
         if (c != null)
             return s.console != null && Console.isPlainIso(name) ? s.console : c;
         return s.console != null ? s.console : Console.XBOX;
+    }
+
+    /**
+     * An archive's console: the source's, else the name's inside it (« Game.gba.zip »: GBA), else the Xbox.
+     */
+    static Console archiveConsole(Source s, String name) {
+        if (s.console != null)
+            return s.console;
+        Console c = Console.byName(LibraryScanner.stripExtension(name));
+        return c != null ? c : Console.XBOX;
+    }
+
+    /**
+     * What a torrent holds, for a source with no game (« 238 .7z, 2 .txt »): the commonest extensions of its files,
+     * at most three, with their counts; "" for an empty torrent.
+     */
+    static String fileSummary(TorrentMeta m) {
+        Map<String, Integer> n = new LinkedHashMap<>();
+        for (TorrentMeta.File f : m.files) {
+            String name = f.name();
+            int dot = name.lastIndexOf('.');
+            String ext = dot > 0 && name.length() - dot <= 8 ? name.substring(dot).toLowerCase(Locale.ROOT) : "—";
+            n.merge(ext, 1, Integer::sum);
+        }
+        List<Map.Entry<String, Integer>> l = new ArrayList<>(n.entrySet());
+        l.sort((a, b) -> b.getValue() - a.getValue());
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < l.size() && i < 3; i++)
+            sb.append(i == 0 ? "" : ", ").append(l.get(i).getValue()).append(' ').append(l.get(i).getKey());
+        return sb.toString();
     }
 
     /** f's split set among kids (LibraryScanner.splitSet by name); null when f is a later part of a complete set. */
@@ -255,6 +289,12 @@ final class RemoteLibrary {
      * name without its extension.
      */
     static String cleanTitle(String fileName) {
+        if (NetUnpack.isArchive(fileName) && fileName.length() > 4) {   // « Game (Europe).zip », « Game.gba.zip »
+            String inner = fileName.substring(0, fileName.length() - 4);
+            if (Console.importable(inner) || DiscImages.isImageName(inner))
+                return cleanTitle(inner);
+            // else only the .zip is taken off, below (« Game v1.2.zip » → « Game v1.2 »)
+        }
         String n = fileName;
         DiscImages.Part p = DiscImages.part(n);
         if (p != null) {   // the set's base name: « Game.iso. », « Game.part », « Game. » before the number
@@ -433,6 +473,21 @@ final class RemoteLibrary {
         torrentFile(filesDir, id).delete();
     }
 
+    /**
+     * An archive game unpacked in the download folder: a scanned item lies in its folder (NetUnpack.dirPath), at
+     * <net>/<12 hex>/[<torrent name>/]<folder>/….
+     */
+    static boolean unpackedHere(Source s, TorrentMeta m, Game g, List<String> netLocs) {
+        if (netLocs.isEmpty() || g.files.size() != 1 || !NetUnpack.isArchive(g.name()))
+            return false;
+        String want = "/" + s.shortId() + "/" + (m.multiFile ? m.name + "/" : "")
+                      + NetUnpack.dirPath(g.files.get(0).path) + "/";
+        for (String loc : netLocs)
+            if (loc.contains(want))
+                return true;
+        return false;
+    }
+
     static Source find(List<Source> l, String id) {
         for (Source s : l)
             if (s.id.equals(id))
@@ -449,16 +504,20 @@ final class RemoteLibrary {
      */
     static Map<String, Game> notLocal(File filesDir, LibraryIndex local) {
         Set<String> here = new HashSet<>();
+        List<String> netLocs = new ArrayList<>();
         if (local != null)
-            for (LibraryIndex.Item i : local.items)
+            for (LibraryIndex.Item i : local.items) {
                 here.add(i.name + "\u0000" + i.size);
+                if (LibraryScanner.NET_FOLDER.equals(i.folder))
+                    netLocs.add(i.loc);
+            }
         Map<String, Game> out = new LinkedHashMap<>();
         for (Source s : sources(filesDir)) {
             TorrentMeta m = meta(filesDir, s.id);
             if (m == null)
                 continue;
             for (Game g : games(s, m))
-                if (!here.contains(g.name() + "\u0000" + g.size()))
+                if (!here.contains(g.name() + "\u0000" + g.size()) && !unpackedHere(s, m, g, netLocs))
                     out.putIfAbsent(g.key, g);
         }
         return out;
