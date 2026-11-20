@@ -1917,9 +1917,13 @@ static uint8_t unorm8(uint32_t v, unsigned bits)
     return (uint8_t)(((v & m) * 255 + m / 2) / m);
 }
 
+/* `s` holds one texel of tex_format(format)->bytes bytes and no more: the last texel of an 8 or 16 bpp level ends its
+ * buffer, which can end its page (a 1024 x 768 k_8 one in Warhammer - Battle March, XBA-318) */
 static void texel(uint32_t format, const uint8_t *s, uint8_t out[4])
 {
-    uint32_t v = s[0] | (uint32_t)s[1] << 8, d = v | (uint32_t)s[2] << 16 | (uint32_t)s[3] << 24;
+    unsigned bytes = format == 2 ? 1 : (format == 10 || format == 3 || format == 4 || format == 5 || format == 15) ? 2 : 4;
+    uint32_t v = s[0] | (bytes > 1 ? (uint32_t)s[1] << 8 : 0),
+             d = v | (bytes > 2 ? (uint32_t)s[2] << 16 | (uint32_t)s[3] << 24 : 0);
     switch (format) {
     case 2: out[0] = out[1] = out[2] = out[3] = s[0]; break; /* 8: replicated, the swizzle picks */
     case 10: out[0] = s[0], out[1] = s[1], out[2] = 0, out[3] = 255; break;
