@@ -209,7 +209,6 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glGetInternalformativ, (GLenum, GLenum, GLenum, GLsizei, GLint *))                                        \
     X(void, glUniform3i, (GLint, GLint, GLint, GLint))
 
-#define MAX_PROGRAMS 256
 #define MAX_ATTRS 16
 #define MAX_SAMPLERS 16
 #define MAX_TEXTURES 128
@@ -237,6 +236,7 @@ typedef struct program {
     int ntq;          /* XBA-296: texture queries: the fetch constants whose size / border modes xe_tq<k> carries */
     uint32_t tq_fetch[MAX_SAMPLERS];
     GLint tq_loc[MAX_SAMPLERS];
+    struct program *next; /* the next program in its hash bucket */
 } program;
 
 /* a texture as last uploaded: its fetch constant's words (address, format, size, layout) and the source's hash */
@@ -345,8 +345,10 @@ struct xenos_gl {
     uint8_t *frame;
     char cache[512], frames[512];
     unsigned max_frames;
-    program progs[MAX_PROGRAMS];
-    int nprogs;
+    program **progs;          /* every (vs, ps, kind) met, failed ones too: each allocated once, never moved */
+    int nprogs, cap_progs;
+    program **prog_hash;      /* buckets of progs by (vs crc, ps crc, kind), prog_buckets of them (a power of two) */
+    unsigned prog_buckets;
     uint32_t missing[64];
     int nmissing;
     xenos_gl_stats st;
@@ -632,8 +634,8 @@ void xenos_gl_destroy(xenos_gl *g)
         return;
     if (g->ready) {
         for (int i = 0; i < g->nprogs; i++)
-            if (g->progs[i].prog)
-                g->glDeleteProgram(g->progs[i].prog);
+            if (g->progs[i]->prog)
+                g->glDeleteProgram(g->progs[i]->prog);
         g->glDeleteBuffers(1, &g->vbo);
         g->glDeleteBuffers(1, &g->ibo);
         g->glDeleteBuffers(2, g->ubo);
@@ -683,6 +685,10 @@ void xenos_gl_destroy(xenos_gl *g)
     if (g->dpy && g->eglTerminate)
         g->eglTerminate(g->dpy);
     /* the libraries stay loaded: Mesa does not like being unloaded with threads of its own alive */
+    for (int i = 0; i < g->nprogs; i++)
+        free(g->progs[i]);
+    free(g->progs);
+    free(g->prog_hash);
     free(g->frame);
     free(g);
 }
@@ -907,6 +913,49 @@ static const char RECT_VS[] =
 static const char CAPTURE_FS[] =
     "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(0.0); }\n";
 
+static unsigned prog_bucket(uint32_t vc, uint32_t pc, int kind, unsigned buckets)
+{
+    uint32_t h = vc * 0x9E3779B1u ^ (pc + 0x7F4A7C15u) * 0x85EBCA77u ^ (uint32_t)kind * 0xC2B2AE3Du;
+    h ^= h >> 15;
+    h *= 0x2C1B3C6Du;
+    h ^= h >> 13;
+    return h & (buckets - 1);
+}
+
+/* a new, zeroed program for (vc, pc, kind) in progs and the hash (no limit: the table and the buckets grow, a program
+ * itself never moves, as a draw holds two at once); NULL only when memory runs out */
+static program *add_program(xenos_gl *g, uint32_t vc, uint32_t pc, int kind)
+{
+    if (g->nprogs == g->cap_progs) {
+        int cap = g->cap_progs ? g->cap_progs * 2 : 256;
+        program **a = realloc(g->progs, (size_t)cap * sizeof *a);
+        if (!a)
+            return NULL;
+        g->progs = a, g->cap_progs = cap;
+    }
+    if ((unsigned)g->nprogs + 1 > g->prog_buckets / 2) { /* load factor 1/2 */
+        unsigned nb = g->prog_buckets ? g->prog_buckets * 2 : 512;
+        program **h = calloc(nb, sizeof *h);
+        if (!h)
+            return NULL;
+        for (int i = 0; i < g->nprogs; i++) {
+            program *q = g->progs[i];
+            unsigned b = prog_bucket(q->vs_crc, q->ps_crc, q->kind, nb);
+            q->next = h[b], h[b] = q;
+        }
+        free(g->prog_hash);
+        g->prog_hash = h, g->prog_buckets = nb;
+    }
+    program *p = calloc(1, sizeof *p);
+    if (!p)
+        return NULL;
+    p->vs_crc = vc, p->ps_crc = pc, p->kind = kind;
+    unsigned b = prog_bucket(vc, pc, kind, g->prog_buckets);
+    p->next = g->prog_hash[b], g->prog_hash[b] = p;
+    g->progs[g->nprogs++] = p;
+    return p;
+}
+
 /* kind 0: the title's two shaders; 1: its vertex shader with transform feedback; 2: the pass-through vertex shader
  * with its pixel shader (rectangle lists) */
 static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
@@ -916,14 +965,13 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
         return NULL;
     uint32_t vc = kind == 2 ? 0 : crc32_words(vs->code, vs->words);
     uint32_t pc = kind == 1 ? 0 : crc32_words(ps->code, ps->words);
-    for (int i = 0; i < g->nprogs; i++)
-        if (g->progs[i].vs_crc == vc && g->progs[i].ps_crc == pc && g->progs[i].kind == kind)
-            return g->progs[i].ok ? &g->progs[i] : NULL;
-    if (g->nprogs == MAX_PROGRAMS)
+    if (g->prog_buckets)
+        for (program *q = g->prog_hash[prog_bucket(vc, pc, kind, g->prog_buckets)]; q; q = q->next)
+            if (q->vs_crc == vc && q->ps_crc == pc && q->kind == kind)
+                return q->ok ? q : NULL;
+    program *p = add_program(g, vc, pc, kind);
+    if (!p)
         return NULL;
-    program *p = &g->progs[g->nprogs++];
-    memset(p, 0, sizeof *p);
-    p->vs_crc = vc, p->ps_crc = pc, p->kind = kind;
     char path[600], name[40];
     char *vsrc = NULL, *psrc = NULL;
     if (kind != 2) {

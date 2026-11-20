@@ -1751,6 +1751,60 @@ int main(int argc, char **argv)
         run(&cp);
     }
 
+    /* no limit on programs: 300 pixel shaders missing from the cache (each a (vs, ps) pair the renderer keeps, as
+     * failed), then a pair never seen (vs_i0xyz + ps, both in the cache) still draws: frame 1's green quad */
+    {
+        xenos_gl_stats s0, s1;
+        xenos_gl_get_stats(g, &s0);
+        FILE *quiet = fopen("/dev/null", "w");
+        xenos_gl_set_log(g, quiet); /* 300 "not in the shader cache" lines */
+        for (uint32_t i = 0; i < 300; i++) {
+            im[0] = 1, im[1] = nps + 1;
+            memcpy(im + 2, ps, 4 * nps);
+            im[2 + nps] = 0xC0DE0000u | i; /* a word more: a crc the cache has no shader for */
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 3 + nps);
+            reg(0x4800, 0x2000u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            run(&cp);
+        }
+        xenos_gl_set_log(g, NULL);
+        if (quiet)
+            fclose(quiet);
+        xenos_gl_get_stats(g, &s1);
+        CHECK(s1.no_shader == s0.no_shader + 300 && s1.drawn == s0.drawn, "300 missing pixel shaders: no_shader +%llu, drawn +%llu, unsupported +%llu",
+              (unsigned long long)(s1.no_shader - s0.no_shader), (unsigned long long)(s1.drawn - s0.drawn),
+              (unsigned long long)(s1.unsupported - s0.unsupported));
+        uint32_t nvz;
+        uint32_t *vz = load(argv[1], "vs_i0xyz.bin", &nvz);
+        CHECK(vz != NULL, "no vs_i0xyz.bin");
+        if (vz) {
+            im[0] = 0, im[1] = nvz;
+            memcpy(im + 2, vz, 4 * nvz);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nvz);
+            free(vz);
+            im[0] = 1, im[1] = nps;
+            memcpy(im + 2, ps, 4 * nps);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+            black();
+            reg(0x4800, 0x2000u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            xenos_gl_stats s2;
+            xenos_gl_get_stats(g, &s2);
+            const uint8_t *cp0 = px(g, W / 2, H / 2);
+            CHECK(s2.no_shader == s1.no_shader && cp0[0] == 0 && cp0[1] == 255 && cp0[2] == 0,
+                  "program 301+: no_shader +%llu, centre %u,%u,%u, want green",
+                  (unsigned long long)(s2.no_shader - s1.no_shader), cp0[0], cp0[1], cp0[2]);
+            im[0] = 0, im[1] = nvs;
+            memcpy(im + 2, vs, 4 * nvs);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nvs);
+            run(&cp);
+        }
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;
