@@ -279,6 +279,12 @@ android {
                  ((findProperty('xbaGoogleClientId') ?: System.getenv('XBA_GOOGLE_CLIENT_ID') ?: '') as String).trim()
         resValue 'string', 'xba_google_client_secret',
                  ((findProperty('xbaGoogleClientSecret') ?: System.getenv('XBA_GOOGLE_CLIENT_SECRET') ?: '') as String).trim()
+        // « Send report » (XBA-335, CrashReport.java): the Sentry DSN reports go to, public by design (it ships in the
+        // APK). Default: the project's Rustrak server. -PxbaReportDsn / XBA_REPORT_DSN replace it; set to an empty
+        // value, the build has no « Send report ».
+        def xbaReportDsn = findProperty('xbaReportDsn') ?: System.getenv('XBA_REPORT_DSN')
+        resValue 'string', 'xba_report_dsn', (xbaReportDsn == null
+                 ? 'https://b3f3a378974546b0bd69b26fdfb24fa6@rustrak.adserver.fr/1' : xbaReportDsn as String).trim()
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {
