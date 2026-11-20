@@ -105,7 +105,7 @@ PACK_INPUTS = (
     "tools/recomp/__main__.py", "tools/kernel_audit/stubs.py",                              # XBA-115
     "templates/runtime/recomp_types.h", "src/kernel/xbox_seh.h", "src/kernel/recomp_stack_switch.h",
     "src/kernel/recomp_discovery.h", "src/kernel/kernel_stubs.h",
-    "profiles/titles/4d5300d1/overrides.c", "profiles/titles/4d5300d1/title.json",
+    "profiles/README.md",
     # Wave 3: images as sources (XBA-126), the XDK defaults (XBA-106), SMC (XBA-118), renderer coverage (XBA-120).
     "tools/xiso/source.py", "tools/xiso/xdvdfs.py", "tools/prepare/android.py", "tools/prepare/profiles.py",
     "templates/new-game/src/main.c", "src/kernel/recomp_smc.h",
