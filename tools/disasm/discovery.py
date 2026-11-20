@@ -997,6 +997,26 @@ class StaticDiscovery:
                 return p, True
         return fill, False
 
+    def _past_entry(self, addr: int, hi: int) -> Tuple[int, bool]:
+        """Where the gap sweep goes on after a known entry at `addr` (a
+        candidate or an alias entry): what _next_fill gives, the next
+        padding, but found by the entry's own linear decode, so always on one
+        of its instruction boundaries: its first int3 or nop, bytes that do
+        not decode, or the end measured for an alias, then past padding.
+        A 0xCC or four zero bytes inside an instruction are not padding.
+        (address, right after a terminator)"""
+        stop = min(hi, self.d._alias_entries.get(addr) or hi)
+        data = self.image.read_bytes_at_va(addr, max(0, stop - addr)) or b""
+        end, last = addr, None
+        for insn in self.engine._cs.disasm(data, addr):
+            if insn.mnemonic in ("int3", "nop") or not any(insn.bytes):
+                break                       # padding: int3, nop, zero fill
+            end, last = insn.address + insn.size, insn.mnemonic
+        if end == addr:
+            return self._next_fill(addr, hi), False
+        nxt = self._skip_fill(end, hi)
+        return nxt, nxt == end and last in ("ret", "retn", "jmp")
+
     def gap_body(self, addr: int, hi: int, after_terminator: bool) -> Optional[int]:
         """The end of the function body at `addr` in the gap [addr, hi), or
         None when the gates refuse it (module docstring, level 2)."""
@@ -1068,10 +1088,18 @@ class StaticDiscovery:
                 for _ in range(64):
                     if addr >= hi:
                         break
-                    if (self._in_ranges(tables, addr) or addr in arms
-                            or addr in self.d._candidates or addr in self.d._alias_entries):
+                    if self._in_ranges(tables, addr) or addr in arms:
                         addr = self._next_fill(addr, hi)
                         after_terminator = False
+                        continue
+                    if addr in self.d._candidates or addr in self.d._alias_entries:
+                        # Code someone else owns: to its next padding by its
+                        # decode, not by a byte scan. A 0xCC in an immediate
+                        # (`push 0x3CCC40`) is not an int3: the scan restarted
+                        # the sweep inside that push, and the body found there
+                        # cut the entry's own function short by its first
+                        # instructions (SpikeOut, GitHub #3).
+                        addr, after_terminator = self._past_entry(addr, hi)
                         continue
                     end = self.gap_body(addr, hi, after_terminator)
                     if end is None:

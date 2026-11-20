@@ -198,34 +198,60 @@ void recomp_icall_fail_log(uint32_t va)
  * them *silently* is not. They almost always arrive inside a loop, so the
  * symptom is a hang with no output rather than a diagnosable null vtable call.
  *
- * Rate-limited per address: a spin can produce millions of these, and the
- * useful information is which addresses occur, not how often.
+ * Rate-limited per (target, call site): a spin can produce millions of these,
+ * and the useful information is which call sites skip which targets, not how
+ * often. Keyed on the call site too because the target is nearly always 0: a
+ * null skipped once at boot must not hide the call site that spins on a null
+ * later (SpikeOut's Story mode, GitHub #3: one "target 0x00000000" line for a
+ * run, no way to tell where). The call site is the guest return address the
+ * call pushed, still on the stack here (for an indirect tail jump, the
+ * jumping function's own return address).
  */
 void recomp_icall_not_code_log(uint32_t va)
 {
-    enum { SLOTS = 16 };
-    static uint32_t seen[SLOTS];
+    enum { SLOTS = 32 };
+    static uint32_t seen[SLOTS], from[SLOTS];
     static uint64_t hits[SLOTS];
     static unsigned char smc[SLOTS];
-    static int count;
+    static int count, full_said;
+    uint32_t ret = *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset);
     int i;
 
     for (i = 0; i < count; i++)
-        if (seen[i] == va)
+        if (seen[i] == va && from[i] == ret)
             break;
     if (i == count) {
-        /* The first time: mapped guest memory (heap, stack, data) is code
-         * made at run time, named once by the runtime (the push of the
-         * return address is still on the stack); then quiet here. */
-        uint32_t ret = *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset);
-        int made = xbox_SmcExecOutside(va, ret);
-        if (count == SLOTS)
+        int made;
+        if (count == SLOTS) {
+            /* Full: quiet, and nothing per call (a spin goes through here). */
+            if (!full_said) {
+                full_said = 1;
+                fprintf(stderr, "[ICALL] %d call sites with a target that is not code: further ones are"
+                                " not printed (target 0x%08X, call returns to 0x%08X)\n", SLOTS, va, ret);
+                fflush(stderr);
+            }
             return;
+        }
+        /* The first time: mapped guest memory (heap, stack, data) is code
+         * made at run time, named once by the runtime; then quiet here. */
+        made = xbox_SmcExecOutside(va, ret);
         /* Otherwise a wild pointer: in the discovery file it names its call
          * site as wild and marks the run tainted (profile-free WP1). */
-        if (!made)
+        if (!made) {
+            /* The guest registers and the stack at the first skip of each
+             * site: what a device log needs to tell a null slot from a
+             * register a callee broke. */
+            const volatile uint32_t *st =
+                (const volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset);
             recomp_discovery_wild(va, ret);
+            fprintf(stderr, "[ICALL] first skip of 0x%08X returning to 0x%08X: eax=%08X ecx=%08X edx=%08X"
+                            " ebx=%08X esi=%08X edi=%08X ebp=%08X esp=%08X; stack %08X %08X %08X %08X"
+                            " %08X %08X %08X %08X\n",
+                    va, ret, g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi, g_ebp, g_esp,
+                    st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7]);
+        }
         seen[count] = va;
+        from[count] = ret;
         hits[count] = 0;
         smc[count] = (unsigned char)made;
         count++;
@@ -245,8 +271,8 @@ void recomp_icall_not_code_log(uint32_t va)
             return;
     }
     fprintf(stderr, "[ICALL] target 0x%08X is not code -- skipped %llu time(s) "
-                    "(null or wild function pointer, at call #%llu)\n",
-            va, (unsigned long long)hits[i],
+                    "(null or wild function pointer, call returns to 0x%08X, at call #%llu)\n",
+            va, (unsigned long long)hits[i], ret,
             (unsigned long long)g_icall_count);
     fflush(stderr);
 }
