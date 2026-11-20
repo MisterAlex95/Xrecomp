@@ -164,7 +164,9 @@ public class LauncherActivity extends Activity {
         /** Settings › Graphics › Vulkan driver: the system driver, the installed ones, the downloadable list. */
         DRIVERS,
         /** Settings › General › Updates: XRecomp's own updates (AppUpdate). */
-        UPDATE
+        UPDATE,
+        /** How it works (XRecomp's onboarding): a few pages on the library, Prepare and Prepare again; buildGuide. */
+        GUIDE
     }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
@@ -525,9 +527,16 @@ public class LauncherActivity extends Activity {
                 history.push(Screen.LIBRARY);
                 history.push(Screen.HOME);
                 first = Screen.PREPARE;
+            } else if (guideDue()) {   // How it works, once: B or its last page lands on the library
+                history.push(Screen.LIBRARY);
+                first = Screen.GUIDE;
             }
         } else if (state() == State.NONE) {
             first = Screen.WELCOME;
+            if (guideDue()) {
+                history.push(Screen.WELCOME);
+                first = Screen.GUIDE;
+            }
         } else {
             first = Screen.HOME;
             Prep p = prep();
@@ -1127,6 +1136,9 @@ public class LauncherActivity extends Activity {
         case DRIVERS:
             buildDrivers();
             break;
+        case GUIDE:
+            buildGuide();
+            break;
         case UPDATE:
             buildUpdate();
             break;
@@ -1659,6 +1671,105 @@ public class LauncherActivity extends Activity {
         body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
         addHint("A", R.string.HINT_START, () -> go(Screen.SOURCE));
         addHint("B", R.string.HINT_QUIT, this::back);
+    }
+
+    // ---- GUIDE (How it works) -----------------------------------------------------------------------------------
+
+    /**
+     * Shown by itself once, on the first start of XRecomp (the library, or Welcome); a game's own app never shows it.
+     * The JVM tests start with it seen (build.gradle: xba.guide=seen), LauncherGuideTest turns it back on.
+     */
+    static boolean guideOnFirstStart = !"seen".equals(System.getProperty("xba.guide"));
+    /** Bump it when the guide says something new that everyone should read once. */
+    static final int GUIDE_VERSION = 1;
+    static final String KEY_GUIDE_SEEN = "guide_seen";
+    /** The page How it works shows, 0 to GUIDE_PAGES.length - 1. */
+    private int guidePage;
+
+    /** Each page: its heading, its text, then its points as (title, line) pairs. */
+    static final int[][] GUIDE_PAGES = {
+        { R.string.GUIDE_1_HERO, R.string.GUIDE_1_TEXT, R.string.GUIDE_1_P1, R.string.GUIDE_1_P1_SUB,
+          R.string.GUIDE_1_P2, R.string.GUIDE_1_P2_SUB, R.string.GUIDE_1_P3, R.string.GUIDE_1_P3_SUB },
+        { R.string.GUIDE_2_HERO, R.string.GUIDE_2_TEXT, R.string.GUIDE_2_P1, R.string.GUIDE_2_P1_SUB,
+          R.string.GUIDE_2_P2, R.string.GUIDE_2_P2_SUB, R.string.GUIDE_2_P3, R.string.GUIDE_2_P3_SUB },
+        { R.string.GUIDE_3_HERO, R.string.GUIDE_3_TEXT, R.string.GUIDE_3_P1, R.string.GUIDE_3_P1_SUB,
+          R.string.GUIDE_3_P2, R.string.GUIDE_3_P2_SUB, R.string.GUIDE_3_P3, R.string.GUIDE_3_P3_SUB },
+        { R.string.GUIDE_4_HERO, R.string.GUIDE_4_TEXT, R.string.GUIDE_4_P1, R.string.GUIDE_4_P1_SUB,
+          R.string.GUIDE_4_P2, R.string.GUIDE_4_P2_SUB, R.string.GUIDE_4_P3, R.string.GUIDE_4_P3_SUB },
+    };
+
+    /** Whether the first start shows How it works: not seen at this GUIDE_VERSION, not a game's own app. */
+    private boolean guideDue() {
+        return guideOnFirstStart && TitleApp.ownTitleId(this) == null
+               && GameStore.prefs(this).getInt(KEY_GUIDE_SEEN, 0) < GUIDE_VERSION;
+    }
+
+    int guidePageForTest() {
+        return guidePage;
+    }
+
+    private void guideStep(int d) {
+        int next = guidePage + d;
+        if (next < 0)
+            return;
+        if (next >= GUIDE_PAGES.length) {
+            guidePage = 0;
+            back();
+            return;
+        }
+        guidePage = next;
+        show(Screen.GUIDE, d);
+    }
+
+    /** One page of How it works: the heading and text on the left with Next and Skip, its three points on the right. */
+    private void buildGuide() {
+        GameStore.prefs(this).edit().putInt(KEY_GUIDE_SEEN, GUIDE_VERSION).apply();   // seen once shown: never nags
+        int[] page = GUIDE_PAGES[guidePage];
+        boolean last = guidePage == GUIDE_PAGES.length - 1;
+        screenTitle.setText(R.string.GUIDE_TITLE);
+        topRight.setText(getString(R.string.GUIDE_PAGE, guidePage + 1, GUIDE_PAGES.length));
+        LinearLayout h = rowLayout();
+        LinearLayout left = column();
+        left.setGravity(Gravity.CENTER_VERTICAL);
+        left.addView(Theme.text(this, Theme.T_DISPLAY, Theme.MEDIUM, Theme.TEXT, getString(page[0])),
+                     lp(MATCH, WRAP));
+        TextView t = Theme.body(this, getString(page[1]));
+        LinearLayout.LayoutParams tl = lp(MATCH, WRAP);
+        tl.topMargin = Theme.S3;
+        left.addView(t, tl);
+        LinearLayout buttons = new Widgets.PillRow(this);   // Previous turns into a circle on a narrow stage
+        LinearLayout.LayoutParams bl = lp(MATCH, Theme.BUTTON_H);
+        bl.topMargin = Theme.S5;
+        left.addView(buttons, bl);
+        defaultFocus = pill(buttons, last ? Icon.CHECK : Icon.ARROW,
+                            getString(last ? R.string.GUIDE_DONE : R.string.GUIDE_NEXT), true, () -> guideStep(1));
+        if (guidePage > 0)
+            pill(buttons, Icon.BACK, getString(R.string.GUIDE_PREVIOUS), false, () -> guideStep(-1));
+        h.addView(left, lp(0, MATCH, 1.4f));   // the points get narrower with the stage (4:3, square)
+
+        LinearLayout points = column();
+        points.setGravity(Gravity.CENTER_VERTICAL);
+        for (int i = 2; i + 1 < page.length; i += 2) {
+            TextView n = Theme.text(this, Theme.T_ROW, Theme.MEDIUM, Theme.TEXT, getString(page[i]));
+            LinearLayout.LayoutParams nl = lp(MATCH, WRAP);
+            nl.topMargin = i == 2 ? 0 : Theme.S5;
+            points.addView(n, nl);
+            TextView d = Theme.body(this, getString(page[i + 1]));
+            LinearLayout.LayoutParams dl = lp(MATCH, WRAP);
+            dl.topMargin = Theme.S1;
+            points.addView(d, dl);
+        }
+        LinearLayout.LayoutParams sl = lp(0, MATCH, 1);
+        sl.leftMargin = Theme.S6;
+        h.addView(points, sl);
+        body.addView(h, new FrameLayout.LayoutParams(MATCH, MATCH));
+        l1Action = () -> guideStep(-1);
+        r1Action = () -> guideStep(1);
+        addHint("A", last ? R.string.GUIDE_DONE : R.string.GUIDE_NEXT, () -> guideStep(1));
+        addHint("B", last ? R.string.HINT_BACK : R.string.GUIDE_SKIP, () -> {
+            guidePage = 0;
+            back();
+        });
     }
 
     // ---- SOURCE and FOLDER_ACCESS --------------------------------------------------------------------------------
@@ -2247,6 +2358,11 @@ public class LauncherActivity extends Activity {
                 bottomScreenRow(list);
             if (TitleApp.ownTitleId(this) == null)   // a game's own app is made again from XRecomp, never updated
                 updatesRow(list);
+            if (TitleApp.ownTitleId(this) == null)
+                listRow(list, getString(R.string.GUIDE_TITLE), getString(R.string.GUIDE_ROW_DETAIL), () -> {
+                    guidePage = 0;
+                    go(Screen.GUIDE);
+                });
             String dir = gameDir();
             if (dir != null && state() != State.NONE && GameStore.findXbe(new File(dir)) != null && titleId() != null) {
                 gameThemeRow(list, titleId(), gameTitle(dir));
