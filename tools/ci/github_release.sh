@@ -33,7 +33,12 @@ gh() {
 # The tag at SHA on GitHub (the mirror's push), else after GH_TAG_WAIT seconds go on and let GitHub create it.
 waited=0
 while :; do
-    at=$(gh "$api/git/ref/tags/$tag" 2>/dev/null | jq -r '.object.sha // empty' || true)
+    ref=$(gh "$api/git/ref/tags/$tag" 2>/dev/null || true)
+    at=$(printf '%s' "$ref" | jq -r '.object.sha // empty' 2>/dev/null || true)
+    # An annotated tag (release.yml's xrecomp-v*) points at a tag object: its commit is one step further.
+    if [ "$(printf '%s' "$ref" | jq -r '.object.type // empty' 2>/dev/null || true)" = tag ]; then
+        at=$(gh "$api/git/tags/$at" 2>/dev/null | jq -r '.object.sha // empty' || true)
+    fi
     [ "$at" = "$sha" ] && break
     if [ "$waited" -ge "${GH_TAG_WAIT:-900}" ]; then
         echo "GitHub tag $tag is at ${at:-nothing}, not $sha, after ${waited}s: GitHub will create or keep it" >&2
