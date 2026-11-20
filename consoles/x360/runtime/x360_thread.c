@@ -493,6 +493,11 @@ static void run_thread(x360_machine *x, x360_thread *t)
 /* ---- guest faults ---- */
 
 static x360_machine *fault_machine;
+static struct sigaction prev_segv, prev_bus; /* what was there before on_fault: SIG_DFL when zeroed */
+
+/* platform/android_log.h, linked in by the hosts that pump stdout / stderr into logcat */
+int xbox_log_drain(int timeout_ms) __attribute__((weak));
+#define X360_FAULT_LOG_DRAIN_MS 200
 
 static void on_fault(int sig, siginfo_t *si, void *ctx)
 {
@@ -513,17 +518,42 @@ static void on_fault(int sig, siginfo_t *si, void *ctx)
     }
     if (n > 0 && write(2, msg, (size_t)n) < 0)
         n = 0;
-    _exit(1);
+    /* On Android stderr is a pipe a thread hands to logcat: drain it, or the line above dies with the process
+     * (the Xbox fault path does the same, XBA-52). Weak: x360_core alone (x360_run, the tests) has no log pump. */
+    if (xbox_log_drain)
+        xbox_log_drain(X360_FAULT_LOG_DRAIN_MS);
+    /* Then the handler that was there before ours (debuggerd on Android, through the shell's: a tombstone with the
+     * backtrace, and the system records a native crash), else the default action: restored, the instruction faults
+     * again and the process dies of the original signal. No _exit(1): it hid the crash from both. */
+    struct sigaction *prev = sig == SIGBUS ? &prev_bus : &prev_segv;
+    if (prev->sa_flags & SA_SIGINFO) {
+        if (prev->sa_sigaction) {
+            prev->sa_sigaction(sig, si, ctx);
+            return;
+        }
+    } else if (prev->sa_handler != SIG_DFL && prev->sa_handler != SIG_IGN) {
+        prev->sa_handler(sig);
+        return;
+    }
+    signal(sig, SIG_DFL);
 }
 
 void x360_install_fault_handler(x360_machine *x)
 {
-    struct sigaction sa;
+    struct sigaction sa, cur;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = on_fault;
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
     fault_machine = x;
+    /* x360_run installs it on every call (once a frame): keep the handler found the first time as the one to
+     * chain to, never ours. */
+    sigaction(SIGSEGV, NULL, &cur);
+    if (!((cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == on_fault))
+        prev_segv = cur;
+    sigaction(SIGBUS, NULL, &cur);
+    if (!((cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == on_fault))
+        prev_bus = cur;
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
 }
