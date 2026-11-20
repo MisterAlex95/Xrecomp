@@ -567,6 +567,9 @@ def test_android_stamps_follow_the_toolkit_digest(tmp_path, monkeypatch):
         def toolkit_version(self):
             return self.commit
 
+        def no_title_layer(self):           # the mods left out: nothing read from the store
+            return True
+
         def read_stamp(self, p):
             try:
                 with open(p) as f:

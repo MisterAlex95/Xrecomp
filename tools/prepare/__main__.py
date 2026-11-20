@@ -8,11 +8,14 @@ SOURCE is a disc image (.iso / .xiso), a folder holding default.xbe (the
 extracted disc), or a default.xbe. Steps, each skipped when its output is
 already there for this XBE, this toolkit and this title profile:
 
-  1. find default.xbe (out of the image if needed) and read its title ID
+  1. find default.xbe (out of the image if needed) and read its title ID;
+     the player's mods turned on for it (docs/technical/mods.md): their
+     patches go to a copy of the XBE in the work folder, which the next steps
+     use (left out with --no-mods)
   2. the analysis pipeline: xbe_parser, disasm, func_id, abi_analysis
   3. the title project: templates/new-game on the toolkit's defaults, plus
-     the optional layers of profiles/ (a title's enhancements; left out with
-     --no-title-layer; docs/technical/profiles.md)
+     the optional layers of profiles/ (docs/technical/profiles.md) and the
+     options the layers and mods force
   4. the C lift (tools.recomp) into the project
   5. build it for this host, with the game data next to it: the compile
      driver against the toolkit's prebuilt runtime when it has one for this
@@ -398,23 +401,57 @@ def load_profile(tid, ident):
 
 
 def title_layer_state(tid):
-    """"on" when the toolkit has optional enhancements for tid
-    (profiles/titles/<tid>) and they go in, "off" when they are left out
-    (--no-title-layer / XBA_NO_TITLE_LAYER=1), None when it has none: what
+    """"on" when the title has optional enhancements (the player's mods turned
+    on in the store, docs/technical/mods.md; or a profiles/titles/<tid> layer)
+    and they go in, "off" when they are left out (--no-mods / --no-title-layer,
+    XBA_NO_MODS=1 / XBA_NO_TITLE_LAYER=1), None when it has none: what
     pack.json and --check say, for a launcher's « Enhancements » switch."""
     from tools.prepare import profiles
-    if not profiles.find_title_layer(tid, PROFILES):
+    from tools.mods import patch
+    if not profiles.find_title_layer(tid, PROFILES) and not patch.enabled_count("xbox", tid):
         return None
     return "off" if no_title_layer() else "on"
 
 
+def mods_store_has(tid):
+    from tools.mods import patch
+    return patch.enabled_count("xbox", tid) > 0
+
+
+def mods_plan(tid, xbe):
+    """The title's enabled mods (tools.mods.patch.plan): their patches applied
+    to a copy of the XBE's bytes, the mod-set hash, the options they force.
+    None of it when the launcher's switch leaves them out. Raises
+    tools.mods.package.ModError (code BAD_MOD, WRONG_TITLE, WRONG_BINARY...)."""
+    from tools.mods import patch
+    with open(xbe, "rb") as f:
+        data = f.read()
+    return patch.plan("xbox", tid, data, off=no_title_layer())
+
+
+def write_patched(path, data):
+    """The patched XBE at path (written only when it differs): the original is
+    never touched."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path, "rb") as f:
+            if f.read() == data:
+                return path
+    except OSError:
+        pass
+    with open(path + ".tmp", "wb") as f:
+        f.write(data)
+    os.replace(path + ".tmp", path)
+    return path
+
+
 def no_title_layer():
     """--no-title-layer, or XBA_NO_TITLE_LAYER=1 in the environment (what a
-    launcher's child inherits, its per-title « Enhancements » switch off):
-    prepare as for a title nobody has a profile for, its optional
-    enhancements left out. The option sets the variable, so the disc's other
-    images follow."""
-    return os.environ.get("XBA_NO_TITLE_LAYER", "") not in ("", "0")
+    launcher's child inherits, its per-title « Enhancements » switch off),
+    or XBA_NO_MODS=1: prepare with the title's optional enhancements (its
+    mods) left out. The option sets the variable, so the disc's other images
+    follow."""
+    return any(os.environ.get(k, "") not in ("", "0") for k in ("XBA_NO_TITLE_LAYER", "XBA_NO_MODS"))
 
 
 def sync_generated(new_dir, dest_dir):
@@ -493,14 +530,16 @@ def identify_xbe(xbe, work):
     return ident
 
 
-def assemble_project(proj, profile, info):
+def assemble_project(proj, profile, info, env=None):
     """templates/new-game + the profile layers in src/title/: each layer's .c
     files (profiles.c_name), xba_layers.c (the hooks main.c calls),
-    xba_params.h, and env_force.h when the layers force options. main.c gets
+    xba_params.h, and env_force.h when options are forced (env: the layers'
+    env_force and the mods' options; default the layers' alone). main.c gets
     the title's name and entry point in place of the template's placeholders."""
     from tools.prepare import profiles
     from tools.prepare import pack
-    env = pack.env_force_of(profile)
+    if env is None:
+        env = pack.env_force_of(profile)
     os.makedirs(os.path.join(proj, "src", "recomp", "gen"), exist_ok=True)
     name = (profile or {}).get("project") or "title_%s" % info["title_id"][2:].lower()
     with open(os.path.join(TEMPLATE, "CMakeLists.txt")) as f:
@@ -534,9 +573,10 @@ def assemble_project(proj, profile, info):
             f.write(profiles.layers_source(profile))
         with open(os.path.join(tdir, "xba_params.h"), "w") as f:
             f.write(profiles.params_header(profile))
-        if env:
-            with open(os.path.join(tdir, "env_force.h"), "w") as f:
-                f.write(env_force_header(info["title_id"][2:], env))
+    if env:
+        os.makedirs(tdir, exist_ok=True)
+        with open(os.path.join(tdir, "env_force.h"), "w") as f:
+            f.write(env_force_header(info["title_id"][2:], env))
     return name
 
 
@@ -553,9 +593,12 @@ def main(argv=None):
                     help="extract the disc image into <work>/game for the desktop build, as before XBA-126 "
                          "(default: the build reads the image in place)")
     ap.add_argument("--force", action="store_true", help="redo every step")
-    ap.add_argument("--no-title-layer", action="store_true",
-                    help="leave profiles/titles/<title id> out (its optional enhancements): prepare as for "
-                         "an unknown title (also XBA_NO_TITLE_LAYER=1 in the environment)")
+    ap.add_argument("--no-mods", "--no-title-layer", dest="no_title_layer", action="store_true",
+                    help="leave the title's optional enhancements out (the mods turned on for it, "
+                         "docs/technical/mods.md): prepare the game as it is (also XBA_NO_MODS=1 or "
+                         "XBA_NO_TITLE_LAYER=1 in the environment: a launcher's « Enhancements » switch off)")
+    ap.add_argument("--mods", metavar="DIR",
+                    help="the mod store (default: $XBA_MODS_DIR, else <user data>/mods; docs/technical/mods.md)")
     mi = ap.add_argument_group("for a launcher (docs/macos/launcher.md « Prepare interface »)")
     mi.add_argument("--progress", action="store_true",
                     help="also print XBA_PROGRESS / XBA_RESULT lines (tools/prepare/progress.py)")
@@ -610,6 +653,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.no_title_layer:
         os.environ["XBA_NO_TITLE_LAYER"] = "1"
+    if a.mods:
+        os.environ["XBA_MODS_DIR"] = os.path.abspath(a.mods)    # the disc's other images follow
     from tools.prepare import x360
     if x360.is_x360(a.source):          # an XEX or an Xbox 360 disc (first, as recomp_pack_rom_identify): XBA-282
         return x360.run(a, sys.modules[__name__], a.android)
@@ -777,6 +822,22 @@ def desktop(a):
     else:
         print("      no profile layer for this XBE: the generic template only, on the toolkit's defaults "
               "(the normal case)", flush=True)
+    # The player's mods (docs/technical/mods.md): their patches go to a copy of
+    # the XBE in the work folder, which is what gets analysed and lifted (the
+    # original is only read); the options they force go with the layers'.
+    from tools.mods.package import ModError
+    try:
+        mods = mods_plan(tid, xbe)
+        xbe_source_sha = mods.original_sha256
+        if mods.patched:
+            xbe = write_patched(os.path.join(work, "mods", "default.xbe"), mods.data)
+        env = dict(env, **mods.env(xbe if mods.patched else None))
+    except ModError as e:
+        _CODE = "BAD_MOD"
+        raise SystemExit("mods: %s" % e)
+    if mods.mods or mods_store_has(tid):
+        print("      " + mods.summary() + (" (left out: Enhancements off)" if no_title_layer() else ""),
+              flush=True)
     progress(100, "%s (title ID %s)%s" % ((profile or {}).get("name") or info["title"], tid,
                                           ", title profile" if profile and profile["title"] else ""))
 
@@ -804,6 +865,9 @@ def desktop(a):
     same = toolkit_same(stamp) and all(stamp.get(k, "" if k == "discovered" else None) == v
                                        for k, v in want.items() if k != "toolkit_sha256")
     want["toolkit"] = toolkit_version()     # recorded, not compared
+    # The game's own XBE and the mod set, for --check (the stamp's "xbe" is the
+    # one lifted: the patched copy when a mod patches it).
+    want["xbe_source"], want["mods"] = xbe_source_sha, mods.mod_set
 
     step(2, "analysing the executable (a few minutes the first time)")
     if same and stamp.get("analysis"):
@@ -838,10 +902,14 @@ def desktop(a):
         with open(stamp_path, "w") as f:
             json.dump(stamp, f)
         progress(100, "analysis done")
+    if stamp.get("mods", "") != mods.mod_set or stamp.get("xbe_source") != xbe_source_sha:
+        stamp["mods"], stamp["xbe_source"] = mods.mod_set, xbe_source_sha     # display-only mods: same lift
+        with open(stamp_path, "w") as f:
+            json.dump(stamp, f)
 
     step(3, "assembling the title project")
     proj = os.path.join(work, "project")
-    name = assemble_project(proj, profile, info)
+    name = assemble_project(proj, profile, info, env)
     progress(100, "project %s" % name)
 
     step(4, "lifting the code to C (a few minutes the first time)")
@@ -1016,11 +1084,11 @@ def build_with_driver(a, proj, name, man, why, work_files, log):
 def check_state(source, work=None):
     """--check: {"state": "absent" | "stale" | "ready", "reasons": [...],
     "exe", "title", "title_id", "env_force", "work", and "title_layer": "on" |
-    "off" when the toolkit has optional enhancements for the title, and "lift_health":
+    "off" when the title has optional enhancements (mods on), and "lift_health":
     {seh_lost, unresolved_calls, unimplemented, misdecoded, cut_bodies} when the
     last lift reported them (XBA-139)} for SOURCE, from what
     a prepare would compare (the stamp: XBE, toolkit commit, profile layers,
-    seeds from earlier runs) and what it built. Reads only: nothing is
+    mod set, seeds from earlier runs) and what it built. Reads only: nothing is
     written, not even the work folder. identify.IdentifyError when SOURCE is
     not usable; profiles.ProfileError / ValueError for a bad profile."""
     import tempfile
@@ -1065,8 +1133,12 @@ def check_state(source, work=None):
     if stamp and isinstance(stamp.get("lift_health"), dict):
         out["lift_health"] = stamp["lift_health"]   # what the last lift could not reach (XBA-139)
     if stamp:
-        if stamp.get("xbe") != hashlib.sha256(data).hexdigest():
+        # A stamp made with mods holds the game's own XBE in "xbe_source" ("xbe"
+        # is the patched copy it lifted) and the mod set in "mods".
+        if stamp.get("xbe_source", stamp.get("xbe")) != hashlib.sha256(data).hexdigest():
             reasons.append("xbe")
+        if stamp.get("mods", "") != check_mod_set(tid):
+            reasons.append("mods")
         if not toolkit_same(stamp):
             reasons.append("toolkit")
         elif stamp.get("built") is not False and not runtime_same(stamp):
@@ -1085,6 +1157,20 @@ def check_state(source, work=None):
     elif stamp:
         out["reasons"] = ["not_built"]
     return out
+
+
+def check_mod_set(tid):
+    """The mod-set hash a prepare would use now ("" for none; "?" when the store
+    says something a prepare would refuse: it is then stale, and the prepare
+    gives the reason)."""
+    if no_title_layer():
+        return ""
+    from tools.mods import store
+    from tools.mods.package import ModError
+    try:
+        return store.mod_set_hash(store.enabled_mods(store.default_root(), "xbox", tid))
+    except ModError:
+        return "?"
 
 
 def discovered_changed(work, stamp):

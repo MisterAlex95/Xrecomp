@@ -80,6 +80,7 @@ class Run:
         self.env_force = {}
         self.layers = []
         self.title_layer = None
+        self.mods = None              # tools.mods.patch.Plan (identify)
         self.toolkit_sha = ""         # tools/prepare/toolkit.py: what a stale pack is judged by
         self.data_dir = None
         self.image = None             # a disc image source (XBA-126): the other images come out of it
@@ -128,7 +129,23 @@ class Run:
             shutil.copyfile(xbe, mine + ".tmp")
             os.replace(mine + ".tmp", mine)
         self.xbe = mine
-        self.xbe_sha = h
+        self.xbe_sha = h                # the game's own XBE: pack.json xbe_sha256, what the app compares
+        # The player's mods (docs/technical/mods.md): their patches go to another copy, <work>/mods/default.xbe,
+        # which is what gets analysed and lifted; the stamp follows that copy, so another patch set (or none)
+        # starts over from the parse, and turning the mods off brings the original pack back.
+        from tools.mods import patch
+        from tools.mods.package import ModError
+        with open(mine, "rb") as f:
+            data = f.read()
+        try:
+            self.mods = patch.plan("xbox", patch.xbe_title_id(data) or "00000000", data,
+                                   off=self.m.no_title_layer())
+        except ModError as e:
+            raise cc.StepError("BAD_MOD", "mods: %s" % e)
+        if self.mods.patched:
+            self.xbe = self.m.write_patched(os.path.join(self.work, "mods", "default.xbe"), self.mods.data)
+            h = self.mods.sha256
+        self.mods.data = None           # the bytes are on disk now
         self.toolkit = self.m.toolkit_version()
         # The toolkit's content, not its commit: an app update that changed
         # only Java or the shell's .c files keeps the steps done (XBA-127).
@@ -139,9 +156,9 @@ class Run:
             self.save_stamp(xbe=h, toolkit=self.toolkit, toolkit_sha256=self.toolkit_sha)
         # Steps a killed or repeated Prepare finds done already (pack.json "prepare" "skipped", XBA-128).
         self.steps.skipped = [k for k in ("parse", "disasm", "func_id", "abi", "lift", "link") if self.stamp.get(k)]
-        self.xjson = os.path.join(self.work, "xbe", "default_analysis.json")
+        self.xjson = os.path.splitext(self.xbe)[0] + "_analysis.json"
         if not (self.stamp.get("parse") and os.path.isfile(self.xjson)):
-            rc, _ = self.procs.run_logged([self.py, "-m", "tools.xbe_parser", mine, "--json", self.xjson],
+            rc, _ = self.procs.run_logged([self.py, "-m", "tools.xbe_parser", self.xbe, "--json", self.xjson],
                                           self.log, cwd=self.m.ROOT)
             if rc != 0:
                 raise cc.StepError("BAD_XBE", "xbe_parser failed (exit %d), see %s" % (rc, self.log))
@@ -155,6 +172,12 @@ class Run:
             self.env_force = pack.env_force_of(self.profile)
         except ValueError as e:
             raise cc.StepError("BAD_PROFILE", "profiles: %s" % e)
+        try:
+            self.env_force.update(self.mods.env(self.xbe if self.mods.patched else None))
+        except ValueError as e:
+            raise cc.StepError("BAD_MOD", "mods: %s" % e)
+        if self.mods.mods:
+            self.rep.progress(1, 99, self.mods.summary())
         self.layers = self.profile["keys"] if self.profile else []
         from tools.prepare import profiles
         for line in profiles.xdk_report(self.ident, self.m.PROFILES):     # XBA-106
@@ -435,6 +458,9 @@ class Run:
                                   cpu_features=cpu.text(self.cpu_features))
             if images:
                 meta["images"] = images
+            if self.mods and self.mods.mods:  # the mods that went in (docs/technical/mods.md)
+                meta["mods"] = {"set": self.mods.mod_set, "ids": self.mods.ids(),
+                                "binary_sha256": self.mods.sha256}
             # XBA-258: resume entries in the generated code, so the app can say before a launch that the title
             # resumes where the player left off (its card's « Resume » tag) or that it needs preparing again.
             meta["resume"] = pack.resume_entries(self.sources)
