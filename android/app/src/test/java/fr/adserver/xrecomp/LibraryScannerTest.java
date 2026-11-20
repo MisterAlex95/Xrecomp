@@ -304,6 +304,17 @@ public class LibraryScannerTest {
     }
 
     @Test
+    public void theDownloadFolderIsWalkedAsDeepAsATorrentGoes() {
+        // <net>/<source id>/<torrent name>/ then six folders of the torrent's own (XBA-320)
+        FakeTree t = new FakeTree()
+                .file("id/T/a/b/c/d/e/f/deep.iso", iso(1, "deep"), 1)
+                .file("a/b/c/d/folder5.iso", iso(2, "five"), 1);
+        LibraryScanner.Result r = scan(java.util.Collections.singletonList(
+                new LibraryScanner.Root(LibraryScanner.NET_FOLDER, t, LibraryScanner.NET_MAX_DEPTH)), null);
+        assertEquals(Arrays.asList("deep.iso", "folder5.iso"), names(r.index));
+    }
+
+    @Test
     public void depthLimitAndSkippedNames() {
         FakeTree t = new FakeTree()
                 .file("a/b/c/deep4.iso", iso(1, "four"), 1)            // 4 levels below the folder: found

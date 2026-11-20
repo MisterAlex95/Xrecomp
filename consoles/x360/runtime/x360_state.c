@@ -2,17 +2,21 @@
  *
  * The blob: a header (magic "XRSTATE\0", console "x360", X360_STATE_VERSION, the title key, the section count), then
  * sections, each a tag (four characters), a section version, a length and its bytes. Fields are written one by one
- * in little-endian order (no struct copied), one walker per section for the size, the save and the load alike.
+ * in little-endian order (no struct copied), one walker per section for the size, the save and the load alike. A
+ * walker sees the section's version (io.version): a field added in a later version is read only from states that
+ * have it, an older one loads with its default.
  *
  *   THRD  required  every guest thread: its context (GPRs, FPRs, the 128 vector registers, LR, CTR, PC, CR, XER,
  *                   FPSCR, VSCR, MSR, the reservation) and the scheduler's view (state, suspend count, ids, KTHREAD /
  *                   PCR / TLS / stack addresses, the wait it is in), the running thread, the virtual clock
- *   KERN  required  handles, timers, TLS slots, the kernel bump allocator, the title's status
+ *   KERN  required  handles, timers, TLS slots, the kernel bump allocator, the title's status; version 2: the audio
+ *                   clients' argument cells
  *   HEAP  required  the five heaps' page maps (what is allocated, and how long each allocation is)
  *   MEM   required  guest memory in use: the image, every allocated page of every heap (the physical memory through
  *                   its view), the GPU register page; pages that are all zero are left out
  *   GPU   optional  the command processor (register file, ring, write-back, the shaders last loaded, counters) and
- *                   the interrupt state (callback, next vertical blank, pending interrupts)
+ *                   the interrupt state (callback, next vertical blank, pending interrupts); version 2: the CPUs a
+ *                   PM4_INTERRUPT still has to run its callback as
  *   XMA   optional  the XMA context array's place, which contexts are in use and enabled (XBA-280)
  *   SEH   optional  an exception being dispatched on each thread (x360_seh.c, XBA-282)
  *   GBIN  optional  the command processor's bin mask and bin select (tiled rendering's predicate); a state without
@@ -40,6 +44,7 @@ typedef struct io {
     const uint8_t *in;
     size_t at, cap;
     int load, bad;
+    uint32_t version; /* the section's version: this build's when saving, the state's when loading */
 } io;
 
 static void io_bytes(io *s, void *p, size_t n)
@@ -104,7 +109,8 @@ static void sec_threads(x360_machine *x, io *s)
     io_u64(s, &x->time_skip);
     io_u64(s, &x->st.hle_calls);   /* the virtual clock counts these too (x360_now) */
     io_u64(s, &x->st.interpreted);
-    if (s->load && (x->nthreads < 0 || x->nthreads > X360_MAX_THREADS || x->cur >= X360_MAX_THREADS)) {
+    /* the running thread is one of the state's, or none (-1) */
+    if (s->load && (x->nthreads < 0 || x->nthreads > X360_MAX_THREADS || x->cur < -1 || x->cur >= x->nthreads)) {
         s->bad = 1;
         return;
     }
@@ -134,6 +140,11 @@ static void sec_threads(x360_machine *x, io *s)
         io_u32(s, &c->msr);
         io_u32(s, &c->reserve);
         io_i32(s, &t->state);
+        if (s->load && (t->state < TH_FREE || t->state > TH_DONE)) { /* the scheduler indexes nothing by it, but a
+                                                                       * value outside the enum is a misread state */
+            s->bad = 1;
+            return;
+        }
         io_i32(s, &t->suspend);
         io_u32(s, &t->id);
         io_u32(s, &t->handle);
@@ -188,6 +199,11 @@ static void sec_kernel(x360_machine *x, io *s)
     if (s->load)
         x->status = status;
     io_u32(s, &x->exit_code);
+    /* version 2: the audio clients' argument cells (x360_more.c); a version 1 state gets new ones at the next poll */
+    if (s->version >= 2)
+        io_u32(s, &x->audio_cells);
+    else if (s->load)
+        x->audio_cells = 0;
 }
 
 static x360_heap *heap_k(x360_machine *x, int k)
@@ -277,9 +293,37 @@ static void page_save(x360_machine *x, uint32_t a, void *ctx)
 
 static void page_commit_zero(x360_machine *x, uint32_t a, void *ctx)
 {
-    (void)ctx;
-    x360_commit(x, a, PAGE);
+    io *s = ctx;
+    if (x360_commit(x, a, PAGE)) { /* not writable: the memset would fault */
+        s->bad = 1;
+        return;
+    }
     memset(x360_p(x, a), 0, PAGE);
+}
+
+/* a page each_page visits once the heaps are restored: the only addresses a MEM section may hold. A state that names
+ * another one (damaged, or misread after a section of another layout) would write where nothing is mapped. */
+static int page_known(x360_machine *x, uint32_t a)
+{
+    if (a >= x->image_base && a - x->image_base < x->image_size)
+        return 1;
+    if ((a >= 0x7FC80000u && a < 0x7FC90000u) || (a >= 0x7FEA0000u && a < 0x7FEB0000u))
+        return 1;
+    for (int k = 0; k < 5; k++) {
+        x360_heap *h = heap_k(x, k);
+        uint32_t v = a;
+        if (h->physical) {
+            if (a < X360_VIEW_64K || a >= X360_VIEW_4K)
+                continue;
+            v = x360_v2p(a);
+        }
+        if (v < h->base)
+            continue;
+        uint64_t p = (uint64_t)(v - h->base) / h->page;
+        if (p < h->pages && h->used[p])
+            return 1;
+    }
+    return 0;
 }
 
 static void sec_memory(x360_machine *x, io *s)
@@ -290,23 +334,28 @@ static void sec_memory(x360_machine *x, io *s)
         io_u32(s, &end);
         return;
     }
-    each_page(x, page_commit_zero, NULL); /* the restored heaps say which pages exist; their content follows */
+    each_page(x, page_commit_zero, s); /* the restored heaps say which pages exist; their content follows */
     for (;;) {
         uint32_t a = 0;
+        if (s->bad)
+            break;
         io_u32(s, &a);
         if (s->bad || a == 0xFFFFFFFFu)
             break;
-        if (a & (PAGE - 1)) {
+        if ((a & (PAGE - 1)) || !page_known(x, a) || x360_commit(x, a, PAGE)) {
             s->bad = 1;
             break;
         }
-        x360_commit(x, a, PAGE);
+        if (s->at + PAGE > s->cap) { /* truncated: io_bytes would zero the page, keep it as it is */
+            s->bad = 1;
+            break;
+        }
         io_bytes(s, x360_p(x, a), PAGE);
     }
 }
 
 void x360_gpu_state(x360_machine *x, void *io_, void (*u32)(void *, uint32_t *), void (*u64)(void *, uint64_t *),
-                    void (*i32)(void *, int *));
+                    void (*i32)(void *, int *), uint32_t version, int load);
 
 static void cb_u32(void *s, uint32_t *v) { io_u32(s, v); }
 static void cb_u64(void *s, uint64_t *v) { io_u64(s, v); }
@@ -314,7 +363,7 @@ static void cb_i32(void *s, int *v) { io_i32(s, v); }
 
 static void sec_gpu(x360_machine *x, io *s)
 {
-    x360_gpu_state(x, s, cb_u32, cb_u64, cb_i32);
+    x360_gpu_state(x, s, cb_u32, cb_u64, cb_i32, s->version, s->load);
 }
 
 void x360_fs_state(x360_machine *x, void *io_, void (*u32)(void *, uint32_t *), void (*u64)(void *, uint64_t *),
@@ -430,8 +479,8 @@ typedef struct {
 } section;
 
 static const section k_sections[] = {
-    {"THRD", 1, 1, sec_threads}, {"KERN", 1, 1, sec_kernel}, {"HEAP", 1, 1, sec_heaps},
-    {"MEM ", 1, 1, sec_memory},  {"GPU ", 1, 0, sec_gpu},    {"FILE", 1, 0, sec_files},
+    {"THRD", 1, 1, sec_threads}, {"KERN", 2, 1, sec_kernel}, {"HEAP", 1, 1, sec_heaps},
+    {"MEM ", 1, 1, sec_memory},  {"GPU ", 2, 0, sec_gpu},    {"FILE", 1, 0, sec_files},
     {"PADS", 1, 0, sec_pads},    {"XMA ", 1, 0, sec_xma},    {"SEH ", 1, 0, sec_seh},
     {"KOBJ", 1, 0, sec_kobj},    {"GBIN", 1, 0, sec_gpu_bins},
 };
@@ -461,6 +510,7 @@ size_t x360_state_size(x360_machine *x)
     size_t n = HEADER_BYTES;
     for (size_t i = 0; i < NSEC; i++) {
         io s = {0};
+        s.version = k_sections[i].version;
         k_sections[i].walk(x, &s);
         n += 12 + s.at;
     }
@@ -484,6 +534,7 @@ size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t ca
     for (size_t i = 0; i < NSEC; i++) {
         io s = {0};
         s.out = out + at + 12;
+        s.version = k_sections[i].version;
         k_sections[i].walk(x, &s);
         memcpy(out + at, k_sections[i].tag, 4);
         put32(out + at + 4, k_sections[i].version);
@@ -493,7 +544,26 @@ size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t ca
     return at;
 }
 
+static int state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n,
+                      int undo);
+
+/* Loads a state, every check first. A section found damaged once loading began leaves the machine half old, half
+ * new: x360_state_load stops it (X360_ERROR); x360_state_load_undo puts it back as it was before the load, from a
+ * state taken of it just before, so a bad slot never leaves a dead machine behind (the auto slot at start would stop
+ * the game at frame 0). Without memory for that copy, or when the machine cannot be saved (an error already, host
+ * threads), it stops as with x360_state_load. */
 int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n)
+{
+    return state_load(x, key, data, size, why, why_n, 0);
+}
+
+int x360_state_load_undo(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n)
+{
+    return state_load(x, key, data, size, why, why_n, 1);
+}
+
+static int state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n,
+                      int undo)
 {
     char k[KEY_BYTES];
     if (!x || !data || size < HEADER_BYTES || memcmp(data, STATE_MAGIC, 8)) {
@@ -516,6 +586,7 @@ int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_
     /* find each section first: a missing required one refuses the state before anything changes */
     const uint8_t *at[NSEC] = {0};
     size_t len[NSEC] = {0};
+    uint32_t ver[NSEC] = {0};
     uint32_t n = get32(data + 16 + KEY_BYTES);
     size_t p = HEADER_BYTES;
     for (uint32_t i = 0; i < n; i++) {
@@ -531,6 +602,7 @@ int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_
                 }
                 at[j] = data + p + 12;
                 len[j] = get32(data + p + 8);
+                ver[j] = get32(data + p + 4);
             }
         p += 12 + get32(data + p + 8);
     }
@@ -539,6 +611,14 @@ int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_
             snprintf(why, why_n, "section %.4s missing", k_sections[j].tag);
             return X360_STATE_ECORRUPT;
         }
+    uint8_t *before = NULL;
+    size_t before_n = 0;
+    if (undo) {
+        size_t cap = x360_state_size(x);
+        before = malloc(cap);
+        if (before)
+            before_n = x360_state_save(x, key, before, cap);
+    }
     x360_kobj_reset(x); /* a state from before XBA-296 has no KOBJ section: none of that state */
     x360_gpu_bin_reset(x); /* nor has an older one a GBIN section */
     for (size_t j = 0; j < NSEC; j++) {
@@ -548,14 +628,27 @@ int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_
         s.in = at[j];
         s.cap = len[j];
         s.load = 1;
+        s.version = ver[j];
         k_sections[j].walk(x, &s);
+        if (!s.bad && s.at != s.cap) /* every field read and nothing left: a section of another layout is refused */
+            s.bad = 1;
         if (s.bad) {
-            snprintf(why, why_n, "section %.4s is damaged (the machine is in an undefined state)", k_sections[j].tag);
-            x->status = X360_ERROR;
+            char back[160];
+            int restored = before_n && state_load(x, key, before, before_n, back, sizeof back, 0) == X360_STATE_OK;
+            snprintf(why, why_n, "section %.4s is damaged (%s)", k_sections[j].tag,
+                     restored ? "the machine is back as it was before the load"
+                              : "the machine is in an undefined state");
+            if (!restored)
+                x->status = X360_ERROR;
+            free(before);
             return X360_STATE_ECORRUPT;
         }
     }
+    free(before);
     x->m.cur = x->cur >= 0 ? &x->threads[x->cur].cpu : NULL;
     x360_render_reset(x); /* the eDRAM is not in states: the renderer's surfaces start clear */
+    if (x->audio_cells)
+        x360_audio_cells_write(x);
+    x360_xma_loaded(x);
     return X360_STATE_OK;
 }

@@ -359,4 +359,91 @@ public class NetRunnerTest {
         assertTrue(NetDownloads.safePath("a/b.iso"));
         assertNull(NetDownloads.localFile(downloads, src.id, RemoteLibrary.meta(files, src.id), "../x"));
     }
+
+    /** XBA-331: a source of .zip games (one per disc), its first game queued and its archive « downloaded ». */
+    private RemoteLibrary.Game zipGame(String content) throws IOException {
+        RemoteLibrary.Source z = RemoteLibrary.addTorrent(files, torrent("Set", false, files(
+                file(content.length() + 200, "d", "Game (Disc 1).zip"), file(10, "d", "Game (Disc 2).zip"))),
+                Console.X360, 1);
+        RemoteLibrary.Game g = RemoteLibrary.games(z, RemoteLibrary.meta(files, z.id)).get(0);
+        NetDownloads.enqueue(files, g, 1);
+        return g;
+    }
+
+    private File writeZip(RemoteLibrary.Game g, String... entries) throws IOException {
+        File f = NetDownloads.jobFile(downloads, job(g.key), g.files.get(0).path);
+        NetUnpackTest.zip(f, entries);
+        return f;
+    }
+
+    @Test
+    public void aZipGameIsUnpackedOnceDownloadedThenItsTorrentLeavesTheSession() throws IOException {
+        RemoteLibrary.Game g = zipGame("image");
+        assertTrue(runner.step(ok(0)));
+        File zip = writeZip(g, "Game (Disc 1).iso", "image");
+        engine.progress.get(g.source.id)[0] = g.size();
+        assertFalse(runner.step(ok(1000)));
+        NetDownloads.Job j = job(g.key);
+        assertEquals(NetDownloads.DONE, j.state);
+        assertEquals("", j.error);
+        File dir = new File(zip.getParentFile(), "Game (Disc 1)");
+        assertEquals(dir, NetUnpack.dirOf(downloads, j));
+        assertTrue(new File(dir, "Game (Disc 1).iso").isFile());
+        assertFalse("the archive is deleted", zip.exists());
+        assertFalse("its pieces forgotten: a later download comes again", engine.has(g.source.id));
+        assertTrue(engine.forgotten.contains(g.source.id));
+        // the download folder's scan finds the image (net/<id>/Set/d/Game (Disc 1)/…)
+        assertEquals(5, downloads.toPath().relativize(new File(dir, "Game (Disc 1).iso").toPath()).getNameCount());
+    }
+
+    @Test
+    public void aZipWithNoGameFailsAndOneThatDoesNotFitWaits() throws IOException {
+        RemoteLibrary.Game g = zipGame("image");
+        runner.step(ok(0));
+        File zip = writeZip(g, "Game (Disc 1).iso", "image");
+        engine.progress.get(g.source.id)[0] = g.size();
+        NetRunner.Conditions c = ok(1000);
+        c.free = 2;
+        assertTrue(runner.step(c));
+        assertEquals(NetDownloads.QUEUED, job(g.key).state);
+        assertEquals(NetRunner.E_SPACE, job(g.key).error);
+        assertTrue(zip.isFile());
+
+        writeZip(g, "readme.txt", "no game");
+        runner.step(ok(2000));
+        assertEquals(NetDownloads.FAILED, job(g.key).state);
+        assertEquals(NetUnpack.E_NO_GAME, job(g.key).error);
+    }
+
+    @Test
+    public void anUnpackFinishedBeforeARestartIsDoneAndACancelStopsIt() throws IOException {
+        RemoteLibrary.Game g = zipGame("image");
+        File zip = writeZip(g, "Game (Disc 1).iso", "image");
+        File dir = NetUnpack.dirOf(downloads, job(g.key));
+        dir.mkdirs();   // renamed into place, then the process died: the archive is still there
+        assertFalse(runner.step(ok(0)));
+        assertEquals(NetDownloads.DONE, job(g.key).state);
+        assertFalse(zip.exists());
+
+        // a cancel asked while it unpacks: nothing left, the job gone
+        NetUnpack.deleteTree(dir);
+        NetDownloads.enqueue(files, g, 2);
+        runner.step(ok(1));
+        writeZip(g, "Game (Disc 1).iso", "image");
+        engine.progress.get(g.source.id)[0] = g.size();
+        runner.requestCancel(g.key);
+        runner.step(ok(2));
+        assertFalse(dir.exists());
+        assertFalse(NetUnpack.tempDir(dir).exists());
+        runner.cancel(g.key);
+        assertNull(job(g.key));
+        assertFalse(zip.exists());
+        // queued again later: the old cancel does not stop it
+        NetDownloads.enqueue(files, g, 3);
+        runner.step(ok(3));
+        writeZip(g, "Game (Disc 1).iso", "image");
+        engine.progress.get(g.source.id)[0] = g.size();
+        runner.step(ok(4));
+        assertEquals(NetDownloads.DONE, job(g.key).state);
+    }
 }

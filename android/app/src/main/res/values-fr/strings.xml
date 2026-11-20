@@ -269,6 +269,15 @@
     <string name="SHARE_LAST_GAME_LOG_DETAIL">Après la fermeture ou le plantage d\'un jeu : ce qu\'il a journalisé, comment il s\'est terminé et la trace du plantage, dans un fichier texte à envoyer à l\'application de votre choix. Aucune donnée de jeu.</string>
     <string name="SHARE_LAST_GAME_LOG_RUNNING">Un jeu est lancé : partagez son journal depuis son propre menu, ou quittez-le d\'abord.</string>
     <string name="SHARE_LAST_GAME_LOG_SUBJECT">XRecomp : journal du dernier jeu</string>
+    <string name="REPORT_BUTTON">Envoyer le rapport</string>
+    <string name="REPORT_TITLE">Envoyer un rapport</string>
+    <string name="REPORT_EXPLAIN">Part chez les développeurs d’XRecomp seulement si vous choisissez Envoyer : ce qui suit et le journal, sans dossiers, adresses ni liens. Aucune donnée de jeu, aucun compte.</string>
+    <string name="REPORT_SEND">Envoyer</string>
+    <string name="REPORT_SENDING">Envoi du rapport…</string>
+    <string name="REPORT_SENT">Rapport envoyé. Merci !</string>
+    <string name="REPORT_NOT_SENT">Le rapport n’a pas pu partir : il partira avec le prochain.</string>
+    <string name="REPORT_LAST_GAME">Envoyer un rapport sur le dernier jeu</string>
+    <string name="REPORT_LAST_GAME_DETAIL">Après un plantage : sa fin et son journal partent chez les développeurs d’XRecomp, une fois que vous avez vu ce qui part et choisi Envoyer. Aucune donnée de jeu.</string>
     <string name="CHIP_NEEDS_PREPARE">À préparer</string>
     <string name="CHIP_PREPARING">Préparation</string>
     <string name="CHIP_PREPARE_FAILED">Préparation en échec</string>

@@ -101,6 +101,15 @@ final class RemoteLibrary {
             return files.get(0).name();
         }
 
+        private Tags tags;
+
+        /** What its name's tags say: region, languages, disc, the rest (XBA-332). */
+        Tags tags() {
+            if (tags == null)
+                tags = Tags.of(name());
+            return tags;
+        }
+
         /** The sizes summed, as a scan records a split set or a .cue with its tracks. */
         long size() {
             long s = 0;
@@ -108,6 +117,139 @@ final class RemoteLibrary {
                 s += f.size;
             return s;
         }
+    }
+
+    /**
+     * The tags of a No-Intro / Redump name (XBA-332): « Ace Combat - Assault Horizon (USA) (En,Fr,Es) (Disc 1) » →
+     * region USA, languages En Fr Es, disc 1. Groups that are none of these (« Rev 1 », « Kinect », « Demo ») are
+     * extras. Plain parsing of the name: nothing is read.
+     */
+    static final class Tags {
+        static final java.util.Set<String> REGIONS = new java.util.HashSet<>(java.util.Arrays.asList(
+                "USA", "Europe", "Japan", "World", "Asia", "Korea", "China", "Taiwan", "Hong Kong", "Australia",
+                "New Zealand", "Brazil", "Canada", "Mexico", "Argentina", "Latin America", "France", "Germany", "Spain",
+                "Italy", "UK", "Netherlands", "Belgium", "Sweden", "Norway", "Denmark", "Finland", "Scandinavia",
+                "Nordic", "Russia", "Poland", "Portugal", "Greece", "Austria", "Switzerland", "India", "Israel",
+                "South Africa", "Unknown"));
+        private static final java.util.regex.Pattern LANGS =
+                java.util.regex.Pattern.compile("[A-Z][a-z](-[A-Z][a-z]+)?(,\\s*[A-Z][a-z](-[A-Z][a-z]+)?)*");
+        private static final java.util.regex.Pattern DISC =
+                java.util.regex.Pattern.compile("(?i)(Disc|Disk|CD) ?(\\d+)( of \\d+)?");
+
+        final List<String> regions = new ArrayList<>();
+        final List<String> languages = new ArrayList<>();
+        int disc;
+        final List<String> extras = new ArrayList<>();
+
+        static Tags of(String fileName) {
+            Tags t = new Tags();
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("[\\(\\[]([^\\)\\]]*)[\\)\\]]").matcher(fileName);
+            while (m.find()) {
+                String g = m.group(1).trim();
+                if (g.isEmpty())
+                    continue;
+                java.util.regex.Matcher d = DISC.matcher(g);
+                if (d.matches()) {
+                    t.disc = Integer.parseInt(d.group(2));
+                    continue;
+                }
+                String[] parts = g.split("\\s*,\\s*");
+                boolean allRegions = true;
+                for (String r : parts)
+                    allRegions &= REGIONS.contains(r);
+                if (allRegions) {
+                    for (String r : parts)
+                        if (!t.regions.contains(r))
+                            t.regions.add(r);
+                } else if (LANGS.matcher(g).matches() && t.languages.isEmpty()) {
+                    for (String l : parts)
+                        t.languages.add(l);
+                } else if (!g.equals("!")) {
+                    t.extras.add(g);
+                }
+            }
+            return t;
+        }
+
+        /** « USA · En, Fr, Es · Disc 1 · Rev 1 »; "" with no tag. */
+        String label(String discWord) {
+            List<String> l = new ArrayList<>();
+            if (!regions.isEmpty())
+                l.add(String.join(", ", regions));
+            if (!languages.isEmpty())
+                l.add(String.join(", ", languages));
+            if (disc > 0)
+                l.add(discWord + " " + disc);
+            l.addAll(extras);
+            return String.join(" · ", l);
+        }
+
+        /**
+         * How well it suits a player in locale loc (higher first): their language in it, then their region (or a
+         * world / multi-region release), then the first disc.
+         */
+        int score(Locale loc) {
+            int s = 0;
+            String lang = loc.getLanguage();
+            for (String l : languages)
+                if (l.toLowerCase(Locale.ROOT).startsWith(lang))
+                    s += 100;
+            String country = loc.getCountry();
+            for (String r : regions) {
+                if (regionHas(r, country))
+                    s += 50;
+                else if (r.equals("World"))
+                    s += 30;
+            }
+            if (languages.isEmpty() && "en".equals(lang) && (regions.contains("USA") || regions.contains("UK")))
+                s += 100;   // an English release names no language
+            if (disc <= 1)
+                s += 5;
+            return s;
+        }
+
+        private static boolean regionHas(String region, String country) {
+            switch (region) {
+            case "USA": return country.equals("US");
+            case "Canada": return country.equals("CA");
+            case "Japan": return country.equals("JP");
+            case "UK": return country.equals("GB");
+            case "France": return country.equals("FR");
+            case "Germany": return country.equals("DE");
+            case "Spain": return country.equals("ES");
+            case "Italy": return country.equals("IT");
+            case "Australia": return country.equals("AU");
+            case "Brazil": return country.equals("BR");
+            case "Korea": return country.equals("KR");
+            case "Europe":
+                return java.util.Arrays.asList("FR", "DE", "ES", "IT", "GB", "NL", "BE", "SE", "NO", "DK", "FI", "PT",
+                                               "PL", "AT", "CH", "IE", "GR").contains(country);
+            default: return false;
+            }
+        }
+    }
+
+    /**
+     * The library's stacks (XBA-332): the versions of one game (same console, same cleaned title: other regions,
+     * languages, discs) in one entry, the version shown first: one being downloaded, else the one that suits the
+     * player best (Tags.score), else the torrent's first. Stacks in the games' order, each version list best first.
+     */
+    static List<List<Game>> stacks(java.util.Collection<Game> games, Locale loc, Set<String> downloading) {
+        Map<String, List<Game>> by = new LinkedHashMap<>();
+        for (Game g : games)
+            by.computeIfAbsent(g.console.id + "\u0000" + g.title.toLowerCase(Locale.ROOT), k -> new ArrayList<>()).add(g);
+        List<List<Game>> out = new ArrayList<>();
+        for (List<Game> l : by.values()) {
+            List<Game> sorted = new ArrayList<>(l);
+            sorted.sort((a, b) -> {
+                int da = downloading.contains(a.key) ? 1 : 0, db = downloading.contains(b.key) ? 1 : 0;
+                if (da != db)
+                    return db - da;
+                return b.tags().score(loc) - a.tags().score(loc);   // (stable: the torrent's order on a tie)
+            });
+            out.add(sorted);
+        }
+        return out;
     }
 
     // ---- Keys -------------------------------------------------------------------------------------------------------
@@ -139,11 +281,12 @@ final class RemoteLibrary {
 
     /**
      * The deepest torrent path (in components) the download folder's scan reaches once downloaded: the scan goes
-     * LibraryScanner.MAX_DEPTH levels below <external files>/net, whose first is the source's folder and, for a
-     * multi-file torrent, the second its name. A deeper file is not listed (it could never be found again).
+     * LibraryScanner.NET_MAX_DEPTH levels below <external files>/net, whose first is the source's folder and, for a
+     * multi-file torrent, the second its name: every path TorrentMeta takes. A deeper file is not listed (it could
+     * never be found again).
      */
     static int maxPathDepth(TorrentMeta m) {
-        return LibraryScanner.MAX_DEPTH - (m.multiFile ? 2 : 1);
+        return LibraryScanner.NET_MAX_DEPTH - NetUnpack.MAX_DEPTH - (m.multiFile ? 2 : 1);
     }
 
     /** The games of source s, whose torrent is m, in torrent order (cached per torrent and console). */
@@ -199,6 +342,10 @@ final class RemoteLibrary {
                         continue;   // a later part of a set listed with its first
                     taken.addAll(set);
                     out.add(new Game(s, consoleOf(s, n), set));
+                } else if (NetUnpack.isArchive(n)) {   // XBA-331: unpacked once downloaded (NetUnpack)
+                    List<TorrentMeta.File> one = new ArrayList<>();
+                    one.add(f);
+                    out.add(new Game(s, archiveConsole(s, n), one));
                 } else if (LibraryScanner.isRom(n)) {
                     if (isTrack(n) && hasCue)
                         continue;   // a track of a .cue in this folder (named otherwise): not a game of its own
@@ -222,6 +369,36 @@ final class RemoteLibrary {
         if (c != null)
             return s.console != null && Console.isPlainIso(name) ? s.console : c;
         return s.console != null ? s.console : Console.XBOX;
+    }
+
+    /**
+     * An archive's console: the source's, else the name's inside it (« Game.gba.zip »: GBA), else the Xbox.
+     */
+    static Console archiveConsole(Source s, String name) {
+        if (s.console != null)
+            return s.console;
+        Console c = Console.byName(LibraryScanner.stripExtension(name));
+        return c != null ? c : Console.XBOX;
+    }
+
+    /**
+     * What a torrent holds, for a source with no game (« 238 .7z, 2 .txt »): the commonest extensions of its files,
+     * at most three, with their counts; "" for an empty torrent.
+     */
+    static String fileSummary(TorrentMeta m) {
+        Map<String, Integer> n = new LinkedHashMap<>();
+        for (TorrentMeta.File f : m.files) {
+            String name = f.name();
+            int dot = name.lastIndexOf('.');
+            String ext = dot > 0 && name.length() - dot <= 8 ? name.substring(dot).toLowerCase(Locale.ROOT) : "—";
+            n.merge(ext, 1, Integer::sum);
+        }
+        List<Map.Entry<String, Integer>> l = new ArrayList<>(n.entrySet());
+        l.sort((a, b) -> b.getValue() - a.getValue());
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < l.size() && i < 3; i++)
+            sb.append(i == 0 ? "" : ", ").append(l.get(i).getValue()).append(' ').append(l.get(i).getKey());
+        return sb.toString();
     }
 
     /** f's split set among kids (LibraryScanner.splitSet by name); null when f is a later part of a complete set. */
@@ -254,6 +431,12 @@ final class RemoteLibrary {
      * name without its extension.
      */
     static String cleanTitle(String fileName) {
+        if (NetUnpack.isArchive(fileName) && fileName.length() > 4) {   // « Game (Europe).zip », « Game.gba.zip »
+            String inner = fileName.substring(0, fileName.length() - 4);
+            if (Console.importable(inner) || DiscImages.isImageName(inner))
+                return cleanTitle(inner);
+            // else only the .zip is taken off, below (« Game v1.2.zip » → « Game v1.2 »)
+        }
         String n = fileName;
         DiscImages.Part p = DiscImages.part(n);
         if (p != null) {   // the set's base name: « Game.iso. », « Game.part », « Game. » before the number
@@ -432,6 +615,21 @@ final class RemoteLibrary {
         torrentFile(filesDir, id).delete();
     }
 
+    /**
+     * An archive game unpacked in the download folder: a scanned item lies in its folder (NetUnpack.dirPath), at
+     * <net>/<12 hex>/[<torrent name>/]<folder>/….
+     */
+    static boolean unpackedHere(Source s, TorrentMeta m, Game g, List<String> netLocs) {
+        if (netLocs.isEmpty() || g.files.size() != 1 || !NetUnpack.isArchive(g.name()))
+            return false;
+        String want = "/" + s.shortId() + "/" + (m.multiFile ? m.name + "/" : "")
+                      + NetUnpack.dirPath(g.files.get(0).path) + "/";
+        for (String loc : netLocs)
+            if (loc.contains(want))
+                return true;
+        return false;
+    }
+
     static Source find(List<Source> l, String id) {
         for (Source s : l)
             if (s.id.equals(id))
@@ -448,16 +646,20 @@ final class RemoteLibrary {
      */
     static Map<String, Game> notLocal(File filesDir, LibraryIndex local) {
         Set<String> here = new HashSet<>();
+        List<String> netLocs = new ArrayList<>();
         if (local != null)
-            for (LibraryIndex.Item i : local.items)
+            for (LibraryIndex.Item i : local.items) {
                 here.add(i.name + "\u0000" + i.size);
+                if (LibraryScanner.NET_FOLDER.equals(i.folder))
+                    netLocs.add(i.loc);
+            }
         Map<String, Game> out = new LinkedHashMap<>();
         for (Source s : sources(filesDir)) {
             TorrentMeta m = meta(filesDir, s.id);
             if (m == null)
                 continue;
             for (Game g : games(s, m))
-                if (!here.contains(g.name() + "\u0000" + g.size()))
+                if (!here.contains(g.name() + "\u0000" + g.size()) && !unpackedHere(s, m, g, netLocs))
                     out.putIfAbsent(g.key, g);
         }
         return out;

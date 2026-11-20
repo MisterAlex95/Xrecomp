@@ -12,6 +12,8 @@
  * yields), synchronisation (events, semaphores, mutants, timers, by handle and by object; waits on one or several;
  * critical sections; spin locks and IRQLs), time, the module and XEX header queries a CRT start-up makes, strings,
  * and the title ending (HalReturnToFirmware, XamLoaderTerminateTitle, KeBugCheck). */
+#include <setjmp.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1148,12 +1150,76 @@ static void k_RtlInitUnicodeString(x360_machine *x, x360_thread *t, xe_cpu *c)
     RET(0);
 }
 
+/* NTSTATUS -> Win32 error, as Windows maps them (winerror.h's values): every status this runtime returns, and their
+ * neighbours titles test for. GetLastError() after a failed ReadFile or CreateFile is this: the XDK's WMV reader
+ * takes the end of a stream (ERROR_HANDLE_EOF) as normal and anything else as fatal. Anything else is 317
+ * (ERROR_MR_MID_NOT_FOUND, Windows' answer for a status it has no mapping for). */
+static const struct {
+    uint32_t status;
+    uint16_t error;
+} k_dos_errors[] = {
+    {0x00000102u, 1460}, /* TIMEOUT -> ERROR_TIMEOUT */
+    {0x00000103u, 997},  /* PENDING -> ERROR_IO_PENDING */
+    {0x00000107u, 1301}, /* SOME_NOT_MAPPED -> ERROR_SOME_NOT_MAPPED */
+    {0x80000005u, 234},  /* BUFFER_OVERFLOW -> ERROR_MORE_DATA */
+    {0x80000006u, 18},   /* NO_MORE_FILES -> ERROR_NO_MORE_FILES */
+    {0x8000001Au, 259},  /* NO_MORE_ENTRIES -> ERROR_NO_MORE_ITEMS */
+    {0xC0000001u, 31},   /* UNSUCCESSFUL -> ERROR_GEN_FAILURE */
+    {0xC0000002u, 1},    /* NOT_IMPLEMENTED -> ERROR_INVALID_FUNCTION */
+    {0xC0000003u, 87},   /* INVALID_INFO_CLASS -> ERROR_INVALID_PARAMETER */
+    {0xC0000004u, 24},   /* INFO_LENGTH_MISMATCH -> ERROR_BAD_LENGTH */
+    {0xC0000005u, 998},  /* ACCESS_VIOLATION -> ERROR_NOACCESS */
+    {0xC0000008u, 6},    /* INVALID_HANDLE -> ERROR_INVALID_HANDLE */
+    {0xC000000Du, 87},   /* INVALID_PARAMETER -> ERROR_INVALID_PARAMETER */
+    {0xC000000Eu, 2},    /* NO_SUCH_DEVICE -> ERROR_FILE_NOT_FOUND */
+    {0xC000000Fu, 2},    /* NO_SUCH_FILE -> ERROR_FILE_NOT_FOUND */
+    {0xC0000010u, 1},    /* INVALID_DEVICE_REQUEST -> ERROR_INVALID_FUNCTION */
+    {0xC0000011u, 38},   /* END_OF_FILE -> ERROR_HANDLE_EOF */
+    {0xC0000013u, 21},   /* NO_MEDIA_IN_DEVICE -> ERROR_NOT_READY */
+    {0xC0000016u, 234},  /* MORE_PROCESSING_REQUIRED -> ERROR_MORE_DATA */
+    {0xC0000017u, 8},    /* NO_MEMORY -> ERROR_NOT_ENOUGH_MEMORY */
+    {0xC0000018u, 487},  /* CONFLICTING_ADDRESSES -> ERROR_INVALID_ADDRESS */
+    {0xC0000022u, 5},    /* ACCESS_DENIED -> ERROR_ACCESS_DENIED */
+    {0xC0000023u, 122},  /* BUFFER_TOO_SMALL -> ERROR_INSUFFICIENT_BUFFER */
+    {0xC0000024u, 6},    /* OBJECT_TYPE_MISMATCH -> ERROR_INVALID_HANDLE */
+    {0xC000002Du, 487},  /* NOT_COMMITTED -> ERROR_INVALID_ADDRESS */
+    {0xC0000033u, 123},  /* OBJECT_NAME_INVALID -> ERROR_INVALID_NAME */
+    {0xC0000034u, 2},    /* OBJECT_NAME_NOT_FOUND -> ERROR_FILE_NOT_FOUND */
+    {0xC0000035u, 183},  /* OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS */
+    {0xC0000039u, 161},  /* OBJECT_PATH_INVALID -> ERROR_BAD_PATHNAME */
+    {0xC000003Au, 3},    /* OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND */
+    {0xC000003Bu, 161},  /* OBJECT_PATH_SYNTAX_BAD -> ERROR_BAD_PATHNAME */
+    {0xC0000043u, 32},   /* SHARING_VIOLATION -> ERROR_SHARING_VIOLATION */
+    {0xC0000046u, 288},  /* MUTANT_NOT_OWNED -> ERROR_NOT_OWNER */
+    {0xC0000047u, 298},  /* SEMAPHORE_LIMIT_EXCEEDED -> ERROR_TOO_MANY_POSTS */
+    {0xC0000054u, 33},   /* FILE_LOCK_CONFLICT -> ERROR_LOCK_VIOLATION */
+    {0xC0000056u, 5},    /* DELETE_PENDING -> ERROR_ACCESS_DENIED */
+    {0xC0000061u, 1314}, /* PRIVILEGE_NOT_HELD -> ERROR_PRIVILEGE_NOT_HELD */
+    {0xC000007Fu, 112},  /* DISK_FULL -> ERROR_DISK_FULL */
+    {0xC000009Du, 1167}, /* DEVICE_NOT_CONNECTED -> ERROR_DEVICE_NOT_CONNECTED */
+    {0xC00000BAu, 5},    /* FILE_IS_A_DIRECTORY -> ERROR_ACCESS_DENIED */
+    {0xC00000BBu, 50},   /* NOT_SUPPORTED -> ERROR_NOT_SUPPORTED */
+    {0xC00000EFu, 87},   /* INVALID_PARAMETER_1 .. _5 -> ERROR_INVALID_PARAMETER */
+    {0xC00000F0u, 87},
+    {0xC00000F1u, 87},
+    {0xC00000F2u, 87},
+    {0xC00000F3u, 87},
+    {0xC0000101u, 145},  /* DIRECTORY_NOT_EMPTY -> ERROR_DIR_NOT_EMPTY */
+    {0xC0000103u, 267},  /* NOT_A_DIRECTORY -> ERROR_DIRECTORY */
+    {0xC0000120u, 995},  /* CANCELLED -> ERROR_OPERATION_ABORTED */
+    {0xC0000225u, 1168}, /* NOT_FOUND -> ERROR_NOT_FOUND */
+};
+
 static void k_RtlNtStatusToDosError(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)x, (void)t;
-    uint32_t s = A(0);
-    RET(s == 0 ? 0 : s == X_STATUS_TIMEOUT ? 1460 : s == X_STATUS_NO_MEMORY ? 8 : s == X_STATUS_INVALID_HANDLE ? 6
-                                                                                                             : 317);
+    uint32_t s = A(0), e = s ? 317 : 0;
+    for (size_t k = 0; s && k < sizeof k_dos_errors / sizeof k_dos_errors[0]; k++)
+        if (k_dos_errors[k].status == s) {
+            e = k_dos_errors[k].error;
+            break;
+        }
+    RET(e);
 }
 
 static void k_RtlFillMemoryUlong(x360_machine *x, x360_thread *t, xe_cpu *c)
@@ -1465,6 +1531,30 @@ void x360_hle_refused(x360_machine *x)
     }
 }
 
+/* WP8: an HLE touched an unmapped guest address (on_fault jumped back to x360_hle_call). The machine stops with a
+ * message naming the export, the address, the thread and the caller; this is not a recovery (the HLE stopped half
+ * way). x->hle_lib / hle_ordinal still name the innermost export (an HLE that calls another, e.g. NtWriteFileGather). */
+static void __attribute__((noinline, cold)) hle_fault_stop(x360_machine *x, x360_thread *t,
+                                                           const x360_thunk *outer, uint32_t lr)
+{
+    /* sigsetjmp(env, 0) saved no mask: the handler's (SIGSEGV or SIGBUS blocked) is still in force. Unblocked, or the
+     * next fault on this thread would kill the process without reaching any handler. */
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGSEGV);
+    sigaddset(&s, SIGBUS);
+    pthread_sigmask(SIG_UNBLOCK, &s, NULL);
+    atomic_store_explicit(&x->hle_jmp, NULL, memory_order_relaxed);
+    const char *lib = x->hle_lib ? "xam" : "xboxkrnl", *name = x360_export_name(x->hle_lib, x->hle_ordinal) ?: "?";
+    char via[96] = "";
+    if (outer->lib != x->hle_lib || outer->ordinal != x->hle_ordinal)
+        snprintf(via, sizeof via, ", inside %s!%s", outer->lib ? "xam" : "xboxkrnl",
+                 x360_export_name(outer->lib, outer->ordinal) ?: "?");
+    x360_fail(x, "%s!%s touched the unmapped guest address %08X (thread %u, caller's LR %08X%s): title stopped",
+              lib, name, x->hle_fault_addr, t->id, lr, via);
+    x360_logf(x, "x360: %s\n", x->error);
+}
+
 void x360_hle_call(x360_machine *x, const x360_thunk *th)
 {
     x360_thread *t = x360_cur(x);
@@ -1476,8 +1566,29 @@ void x360_hle_call(x360_machine *x, const x360_thunk *th)
                       x360_export_name(th->lib, th->ordinal) ?: "?", A(0), A(1), A(2), A(3));
         x->hle_lib = th->lib;
         x->hle_ordinal = th->ordinal;
+        /* called by another HLE: the outermost call catches a fault (under host threads every HLE runs under the
+         * machine lock, so the outer one is on this host thread) */
+        if (atomic_load_explicit(&x->hle_jmp, memory_order_relaxed)) {
+            fn(x, t, c);
+            x360_apc_after_hle(x, t);
+            return;
+        }
+        /* A fault on a guest address inside the HLE jumps back here (on_fault, x360_thread.c). sigsetjmp(env, 0):
+         * no sigprocmask system call on this hot path (a few register stores); hle_fault_stop unblocks the signal.
+         * x, t, th and lr are not modified after the sigsetjmp, so they are intact after the jump. Under host threads
+         * the machine lock is held from here to the jump (no HLE releases it): x360_hle_call returns with it held,
+         * as always, and host_run_thread sees the stopped machine. */
+        uint32_t lr = (uint32_t)c->lr;
+        sigjmp_buf env;
+        if (sigsetjmp(env, 0)) {
+            hle_fault_stop(x, t, th, lr);
+            return;
+        }
+        x->hle_host = pthread_self();
+        atomic_store_explicit(&x->hle_jmp, (void *)&env, memory_order_release);
         fn(x, t, c);
         x360_apc_after_hle(x, t);
+        atomic_store_explicit(&x->hle_jmp, NULL, memory_order_relaxed);
         return;
     }
     if (x->strict_imports) {

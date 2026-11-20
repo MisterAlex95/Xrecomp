@@ -16,7 +16,11 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <sched.h>
+#include <setjmp.h>
 #include <signal.h>
+#if defined(__linux__)
+#include <ucontext.h> /* the host pc of a fault (macOS refuses the header without _XOPEN_SOURCE) */
+#endif
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -499,22 +503,53 @@ static struct sigaction prev_segv, prev_bus; /* what was there before on_fault: 
 int xbox_log_drain(int timeout_ms) __attribute__((weak));
 #define X360_FAULT_LOG_DRAIN_MS 200
 
+/* what the runtime was doing (x360_set_stage): a fault names it, so a crash before the first frame says where */
+static const char *volatile fault_stage;
+
+void x360_set_stage(const char *stage)
+{
+    fault_stage = stage;
+}
+
+static void *fault_host_pc(void *ctx)
+{
+#if defined(__linux__) && defined(__aarch64__)
+    return ctx ? (void *)((ucontext_t *)ctx)->uc_mcontext.pc : NULL;
+#elif defined(__linux__) && defined(__x86_64__) && defined(REG_RIP)
+    return ctx ? (void *)((ucontext_t *)ctx)->uc_mcontext.gregs[REG_RIP] : NULL;
+#else
+    (void)ctx;
+    return NULL;
+#endif
+}
+
 static void on_fault(int sig, siginfo_t *si, void *ctx)
 {
-    (void)ctx;
     x360_machine *x = fault_machine;
     uint8_t *a = si->si_addr;
-    char msg[200];
+    const char *stage = fault_stage;
+    char msg[300];
     int n;
     if (x && a >= x->reservation && a < x->reservation + x->reserved) {
         uint64_t o = (uint64_t)(a - x->reservation); /* x360_p backwards */
         if (o >= (uint64_t)X360_VIEW_4K + x->m.view4k_skew)
             o -= x->m.view4k_skew;
+        /* WP8: inside an HLE, on the host thread running it: back to x360_hle_call, which stops the machine with the
+         * export's name (hle_fault_stop). Only reads of this machine's fields, pthread_self and siglongjmp here:
+         * async-signal-safe for a synchronous fault on this thread. A fault in lifted code running in parallel on
+         * another host thread (host threads) is not this HLE's and takes the path below. */
+        void *jb = atomic_load_explicit(&x->hle_jmp, memory_order_acquire);
+        if (jb && pthread_equal(pthread_self(), x->hle_host)) {
+            x->hle_fault_addr = (uint32_t)o;
+            siglongjmp(*(sigjmp_buf *)jb, 1);
+        }
         x360_thread *t = x360_cur(x);
-        n = snprintf(msg, sizeof msg, "x360: guest access fault at %08X (thread %u, in lifted code entered at %08X)\n",
-                     (uint32_t)o, t ? t->id : 0, fault_pc);
+        n = snprintf(msg, sizeof msg,
+                     "x360: guest access fault at %08X (thread %u, in lifted code entered at %08X, stage %s)\n",
+                     (uint32_t)o, t ? t->id : 0, fault_pc, stage ? stage : "?");
     } else {
-        n = snprintf(msg, sizeof msg, "x360: host signal %d at %p (not a guest address)\n", sig, (void *)a);
+        n = snprintf(msg, sizeof msg, "x360: host signal %d (code %d) at %p, host pc %p, stage %s (not a guest "
+                     "address)\n", sig, si->si_code, (void *)a, fault_host_pc(ctx), stage ? stage : "?");
     }
     if (n > 0 && write(2, msg, (size_t)n) < 0)
         n = 0;

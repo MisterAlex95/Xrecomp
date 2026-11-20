@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.robolectric.Shadows.shadowOf;
 
@@ -1448,6 +1449,8 @@ public class LauncherLibraryTest {
                                              app.getString(R.string.NET_SHOW),
                                              app.getString(R.string.NET_MOBILE_DATA)), rows);
         assertEquals(app.getString(R.string.NET_SOURCE_GAMES_N, 3), sheet.rowsForTest().get(0).value);
+        assertNull("the add rows' labels stay whole", sheet.rowsForTest().get(1).value);
+        assertNull(sheet.rowsForTest().get(2).value);
         assertEquals(app.getString(R.string.NET_ON), sheet.rowsForTest().get(3).value);
         TestSupport.screenshot(a.getWindow().getDecorView(), "library-network-sources");
 
@@ -1601,5 +1604,63 @@ public class LauncherLibraryTest {
         key(a, KeyEvent.KEYCODE_BUTTON_B);
         idle(2500);   // the sheet closed: it goes on (a GBA game is ready: the focus moves to it)
         assertFalse(NetDownloads.find(NetDownloads.read(app.getFilesDir()), j.key).auto);
+    }
+
+    /**
+     * A second torrent while a download moves on (Alex, 2026-11-20: « ça propose pas la plateforme »): the library
+     * poll saw the progress change every 2 s and rebuilt the screen, closing the console sheet before a choice. The
+     * sheet stays; the refresh comes once it closes; the source gets the console picked.
+     */
+    @Test
+    public void theConsoleSheetStaysWhileADownloadMovesOn() throws Exception {
+        folderGame(0);
+        useFolder();
+        byte[] tor = TorrentMetaTest.torrent("First", true,
+                TorrentMetaTest.files(TorrentMetaTest.file(64L << 20, "Halo Sample (USA).iso")));
+        RemoteLibrary.Source s = RemoteLibrary.addTorrent(app.getFilesDir(), tor, null, 1);
+        RemoteLibrary.Game g = RemoteLibrary.games(s, RemoteLibrary.meta(app.getFilesDir(), s.id)).get(0);
+        NetDownloads.Job j = NetDownloads.enqueue(app.getFilesDir(), g, 2);
+        NetDownloads.edit(app.getFilesDir(), l -> NetDownloads.find(l, j.key).state = NetDownloads.RUNNING);
+        LauncherActivity a = launch();
+        a.forceFocusForTest();
+        idle(300);
+
+        String hash = "0123456789abcdef0123456789abcdef01234567";
+        app.getSystemService(android.content.ClipboardManager.class)
+           .setPrimaryClip(android.content.ClipData.newPlainText("m", "magnet:?xt=urn:btih:" + hash + "&dn=Second"));
+        key(a, KeyEvent.KEYCODE_BUTTON_Y);   // Options › Network sources › Paste a magnet link
+        Widgets.Sheet sheet = a.sheetForTest();
+        for (Widgets.MenuRow r : sheet.rowsForTest())
+            if (r.title.equals(app.getString(R.string.NET_SOURCES)))
+                r.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        for (Widgets.MenuRow r : a.sheetForTest().rowsForTest())
+            if (r.title.equals(app.getString(R.string.NET_PASTE_MAGNET)))
+                r.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        sheet = a.sheetForTest();
+        assertNotNull(sheet);
+        assertEquals(app.getString(R.string.NET_CONSOLE_BY_NAME), sheet.rowsForTest().get(0).title);
+
+        for (int p = 1; p <= 3; p++) {   // the download moves on: polls see it
+            long done = p * (8L << 20);
+            NetDownloads.edit(app.getFilesDir(), l -> NetDownloads.find(l, j.key).done = done);
+            idle(2500);
+            assertSame("the console sheet stays open", sheet, a.sheetForTest());
+        }
+        Widgets.MenuRow gba = null;
+        for (Widgets.MenuRow r : sheet.rowsForTest())
+            if (r.title.equals(Console.GBA.badge()))
+                gba = r;
+        assertNotNull(gba);
+        gba.requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        idle(300);
+        assertNull(a.sheetForTest());
+        List<RemoteLibrary.Source> l = RemoteLibrary.sources(app.getFilesDir());
+        assertEquals(2, l.size());
+        assertEquals(hash, l.get(1).id);
+        assertEquals(Console.GBA, l.get(1).console);
+        assertEquals(null, l.get(0).console);
     }
 }

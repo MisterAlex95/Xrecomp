@@ -178,11 +178,85 @@ public class RemoteLibraryTest {
     }
 
     @Test
-    public void filesTooDeepForTheScanAreNotListed() throws IOException {
-        // multi-file: the scan reaches <net>/<id>/<name>/<one folder>/file at most
+    public void filesDeepInTheTorrentAreListed() throws IOException {
+        // the download folder is walked as deep as any path TorrentMeta takes (XBA-320: 5–6 levels of folders seen)
         TorrentMeta m = TorrentMeta.parse(torrent("T", false, files(file(1, "A.iso"), file(2, "d", "B.iso"),
-                                                                    file(3, "d", "e", "C.iso"))));
-        assertEquals(2, RemoteLibrary.maxPathDepth(m));
-        assertEquals(java.util.Arrays.asList("xbox:A:1:1", "xbox:B:1:2"), titles(RemoteLibrary.games(source(null), m)));
+                                                                    file(3, "a", "b", "c", "d", "e", "f", "C.iso"))));
+        assertEquals(TorrentMeta.MAX_DEPTH, RemoteLibrary.maxPathDepth(m));
+        assertEquals(java.util.Arrays.asList("xbox:A:1:1", "xbox:B:1:2", "xbox:C:1:3"),
+                     titles(RemoteLibrary.games(source(null), m)));
+    }
+
+    @Test
+    public void zipsAreGamesOfTheSourcesConsole() throws IOException {
+        // XBA-331: a Redump set, one .zip per disc
+        TorrentMeta m = TorrentMeta.parse(torrent("Microsoft - Xbox 360", false, files(
+                file(70, "A", "Adidas miCoach (Europe) (Disc 1).zip"), file(80, "A", "Adidas miCoach (Europe) (Disc 2).zip"),
+                file(1, "readme.txt"))));
+        assertEquals(java.util.Arrays.asList("x360:Adidas miCoach:1:70", "x360:Adidas miCoach:1:80"),
+                     titles(RemoteLibrary.games(source(Console.X360), m)));
+        // no console chosen: the name inside, else the Xbox
+        TorrentMeta r = TorrentMeta.parse(torrent("R", false, files(file(5, "Pocket.gba.zip"), file(6, "Disc.zip"))));
+        assertEquals(java.util.Arrays.asList("gba:Pocket:1:5", "xbox:Disc:1:6"), titles(RemoteLibrary.games(source(null), r)));
+        assertEquals("Game v1.2", RemoteLibrary.cleanTitle("Game v1.2 (USA).zip"));
+        assertEquals("Halo", RemoteLibrary.cleanTitle("Halo (USA).iso.zip"));
+    }
+
+    @Test
+    public void aTorrentWithNoGameSaysWhatItHolds() throws IOException {
+        TorrentMeta m = TorrentMeta.parse(torrent("T", false, files(file(1, "a.7z"), file(1, "b.7z"), file(1, "c.7z"),
+                                                                    file(1, "x.txt"), file(1, "noext"))));
+        assertTrue(RemoteLibrary.games(source(null), m).isEmpty());
+        assertEquals("3 .7z, 1 .txt, 1 —", RemoteLibrary.fileSummary(m));
+    }
+
+    @Test
+    public void anUnpackedZipIsLocalNow() throws IOException {
+        RemoteLibrary.Source s = RemoteLibrary.addTorrent(files, torrent("Set", false, files(
+                file(70, "d", "Game (Disc 1).zip"), file(80, "d", "Game (Disc 2).zip"))), Console.X360, 1);
+        LibraryIndex local = new LibraryIndex();
+        LibraryIndex.Item i = new LibraryIndex.Item();
+        i.folder = LibraryScanner.NET_FOLDER;
+        i.loc = "file:/x/net/" + s.shortId() + "/Set/d/Game (Disc 1)/Game (Disc 1).iso";
+        i.name = "Game (Disc 1).iso";
+        i.size = 1000;
+        local.items.add(i);
+        Map<String, RemoteLibrary.Game> m = RemoteLibrary.notLocal(files, local);
+        assertEquals(1, m.size());
+        assertEquals("d/Game (Disc 2).zip", m.values().iterator().next().files.get(0).path);
+        i.folder = "content://elsewhere";   // the same path in a library folder of the player's is not that download
+        assertEquals(2, RemoteLibrary.notLocal(files, local).size());
+    }
+
+    @Test
+    public void tagsSayRegionLanguagesDiscAndTheRest() {
+        RemoteLibrary.Tags t = RemoteLibrary.Tags.of("Ace Combat - Assault Horizon (USA) (En,Fr,Es) (Disc 1).zip");
+        assertEquals(java.util.Arrays.asList("USA"), t.regions);
+        assertEquals(java.util.Arrays.asList("En", "Fr", "Es"), t.languages);
+        assertEquals(1, t.disc);
+        assertEquals("USA · En, Fr, Es · Disc 1", t.label("Disc"));
+        t = RemoteLibrary.Tags.of("Game (USA, Europe) (Rev 1) (Kinect) [!].iso");
+        assertEquals(java.util.Arrays.asList("USA", "Europe"), t.regions);
+        assertTrue(t.languages.isEmpty());
+        assertEquals(java.util.Arrays.asList("Rev 1", "Kinect"), t.extras);
+        assertEquals("", RemoteLibrary.Tags.of("Plain.iso").label("Disc"));
+    }
+
+    @Test
+    public void versionsStackTheBestForThePlayerFirst() throws IOException {
+        TorrentMeta m = TorrentMeta.parse(torrent("Set", false, files(
+                file(1, "Ace Combat (Japan).zip"), file(2, "Ace Combat (USA) (En,Fr,Es).zip"),
+                file(3, "Ace Combat (Europe) (En,Fr,De,It).zip"), file(4, "Other Game (USA).zip"))));
+        List<RemoteLibrary.Game> g = RemoteLibrary.games(source(Console.X360), m);
+        List<List<RemoteLibrary.Game>> fr = RemoteLibrary.stacks(g, java.util.Locale.FRANCE, new java.util.HashSet<>());
+        assertEquals(2, fr.size());
+        assertEquals(3, fr.get(0).size());
+        assertEquals("Ace Combat (Europe) (En,Fr,De,It).zip", fr.get(0).get(0).name());   // French, and Europe
+        assertEquals("Ace Combat (Japan).zip", fr.get(0).get(2).name());
+        assertEquals("Ace Combat (USA) (En,Fr,Es).zip",
+                     RemoteLibrary.stacks(g, java.util.Locale.US, new java.util.HashSet<>()).get(0).get(0).name());
+        java.util.Set<String> dl = new java.util.HashSet<>();
+        dl.add(g.get(0).key);   // the Japanese one downloading: shown first, whatever the locale
+        assertEquals("Ace Combat (Japan).zip", RemoteLibrary.stacks(g, java.util.Locale.FRANCE, dl).get(0).get(0).name());
     }
 }

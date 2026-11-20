@@ -419,7 +419,7 @@ locked to its disc). The normal XRecomp app is unchanged.
 | Not the disc the app is locked to | « Wrong game », the `WRONG_GAME` text, **Choose a game**. |
 | The folder or image XRecomp named is gone | « Game data missing », where it was, **Choose a game**. |
 | XRecomp missing, without a pack, refusing, or the copy failing | The Prepare starts by itself on the same screen: its progress line (« Compile · 42 % · about 12 min left »), why it prepares and that the app may be left (the Prepare runs in its service; the next tap shows its progress); when it is done the game starts by itself. |
-| The Prepare failed | « Prepare failed · CODE », its message, **Prepare again** and **Share log**. Stopped from the notification: **Prepare**. |
+| The Prepare failed | « Prepare failed · CODE », its message, **Prepare again**, **Share log** and **Send report** (« Send report »). Stopped from the notification: **Prepare**. |
 | The shell found no game data / refused the pack | « Game data missing » + **Choose the game again** / « The prepared game could not be loaded » (the pack is dropped) + **Prepare again**. |
 | The game ended by itself (dashboard, shutdown) | « The game ended », the kernel's reason, **Play**. |
 | In the game: in-game menu › **Back to the home screen** (« Back to launcher » in XRecomp) | The task goes behind Android's home screen, the game held as in the background; the icon brings it back. The companion panel's Launcher does the same. |
@@ -2592,8 +2592,8 @@ the network. Any value but All narrows the grid (« Recently played » steps asi
 and the search. No game on the network shown: no pill, every game shows.
 
 **Games before the download.** Every file a scan would list as a game, by name only (nothing is read before the
-download), no deeper than the download folder's scan reaches (one folder inside a multi-file torrent): a disc image or a split set (its parts' sizes summed), a `.cue` with the `.bin` tracks named after it, a
-lone `.bin`, a ROM. Its card has no cover (Alex, 2026-11-20): the **remote-content art**, a cloud with a down arrow on
+download), at any depth (the download folder's scan goes `NET_MAX_DEPTH` levels down, as deep as any path a torrent may hold): a disc image or a split set (its parts' sizes summed), a `.cue` with the `.bin` tracks named after it, a
+lone `.bin`, a ROM, a `.zip` (XBA-331: a Redump set is one `.zip` per disc; the source's console, else the name inside, « Game.gba.zip », else the Xbox). A source with no game says what it holds instead (« No game (238 .7z, 2 .txt) », `RemoteLibrary.fileSummary`). Its card has no cover (Alex, 2026-11-20): the **remote-content art**, a cloud with a down arrow on
 the console's hue, the console badge, and the chip **On the network**. The title is the file name cleaned: no
 extension, no split-part number, no bracketed tags, underscores as spaces (« Halo (USA) (Rev 1).iso » → « Halo »).
 Sort, search, console tabs and favourites work on them. Its key is `[<console>-]net-<12 hex of the info hash>-<CRC32
@@ -2618,6 +2618,26 @@ no permission, removed with the app), which the scan reads as one more library r
 `"folder": "net:"`); a download's files stay invisible to it until the download is done (`NetDownloads.incomplete`).
 Once done, the launcher rescans, finds the game by its file, moves the focus to it and goes on: an Xbox game is
 imported (read in place) and its Prepare follows as for any game; a GBA / PS1 / N64 game is ready.
+
+**Versions, tags, covers** (XBA-332). A game's name tags are read (`RemoteLibrary.Tags`: regions, languages,
+disc, the rest: « (USA) (En,Fr,Es) (Disc 1) »). The versions of one game (same console and cleaned title: other
+regions, languages, discs) stack into one card (`RemoteLibrary.stacks`), the one shown first being one that
+downloads, else the one that suits the player's locale best (their language in it, then their region), else the
+torrent's first. Its sheet says « This version: USA · En, Fr, Es · Disc 1 », then lists the other versions, each
+opening its own sheet. The Show pill gains **Downloading** (games queued, downloading or unpacking; skipped when
+none). With « Download cover art » on, a network game's cover is looked for by its file's name in libretro-thumbnails
+(`Microsoft_-_Xbox`, `Microsoft_-_Xbox_360`, and the other consoles' sets), and drawn instead of the cloud; the
+chip still says On the network. The Xbox 360 set is nearly empty today (a dozen covers): its games get their XEX's
+tile once prepared.
+
+**Archives** (`NetUnpack`, XBA-331). A `.zip` game, once downloaded, is unpacked on the service's thread into a folder
+beside it named after it (`a/Game (Disc 1).zip` → `a/Game (Disc 1)/`), through a hidden `.Game (Disc 1).unpacking`
+renamed when complete; the chip reads « Unpacking · 42 % ». Then its torrent leaves the session (libtorrent would
+otherwise believe it still has the archive's pieces), the `.zip` is deleted and the job is done; the launcher and
+the library find the game below that folder (`RemoteLibrary.unpackedHere`). Each step is redone safely after a
+restart. Refused before anything is written: an entry path a torrent could not hold, deeper than 4, more than 10,000
+entries (« Cannot open the archive »), or no file a scan lists as a game (« No game in the archive »). Not enough room
+for what it unpacks: it waits (« Not enough space »). A cancel stops it at once. `.7z` and `.rar` are not taken.
 
 **Session** (`LibtorrentEngine`, libtorrent4j 2.1.0-39 / libtorrent 2.1): a random listening port, no UPnP and no
 NAT-PMP (nothing opened on the router), DHT and local peer discovery on (a magnet needs the DHT; LSD finds a NAS on the
@@ -3030,7 +3050,7 @@ toolkit than the APK's (it still plays; Home keeps Play and offers **Prepare aga
 |---|---|---|
 | No valid pack, nothing run | **Prepare** instead of Play, « about 20–30 min » (30–45 below 8 cores, 40–60 under 6 GB of RAM), « Needs preparing · once, about … » with an amber dot. Prepare refuses under 2 GB of free internal space, and warns (a note) under 6 GB of memory. | |
 | Running | « Preparing… », the line « Compile · 42 % · about 12 min left » | Home's layout: « Preparing · step 5 of 6 · Compile », one bar, the percentage, the time left, « You can leave the app ». Nothing to focus: B twice cancels; Y hides it and the Prepare carries on. Polls `status.json` twice a second; the screen stays on. |
-| Failed | **See what failed**, the line « Prepare failed · CODE » with a red dot | « Preparation failed · CODE » with a red dot, the message (a hint for `KILLED` and `NO_SPACE`), **Retry** and **Share log** (also Y) as buttons. |
+| Failed | **See what failed**, the line « Prepare failed · CODE » with a red dot | « Preparation failed · CODE » with a red dot, the message (a hint for `KILLED` and `NO_SPACE`), **Retry**, **Share log** (also Y) and **Send report** as buttons. |
 | Cancelled, or interrupted (a `running` status older than 15 s with no `:prepare` process) | « Prepare » carries on where it stopped | « Preparation stopped » with an amber dot, why, **Resume** and **Share log**. |
 | Pack valid | **Play**, as before | Done: back to Home, « … is ready ». |
 
@@ -3106,6 +3126,46 @@ A toolchain APK and one prepared game (Play on Home).
 5. Install an APK whose commit changed only Java (or docs): no « older version » line; Play as before.
 6. From step 4, **Prepare again**: a full Prepare runs; when it ends, Home shows Play without the line, and the game
    does not start by itself.
+
+## Send report (XBA-335)
+
+A report about a failed Prepare or the last game's run goes to the project's error tracker only when the player
+chooses **Send**. Epic XBA-334.
+
+| Where | What |
+|---|---|
+| A failed Prepare (the Preparing screen, and the game app's DIRECT error) | **Send report** beside Retry and Share log (not on a stopped or cancelled Prepare). Y stays Share log. |
+| Settings › Advanced | **Send a report about the last game**, under « Share the last game's log ». A game still running: the note says to quit it first. |
+
+The sheet « Send a report » says where it goes and shows the report in four lines (the problem; the game, its key and
+console; the device, Android and app version; the log and its size). **Send** (the first row, focused) sends it,
+Cancel or B sends nothing. Then a note: « Report sent. Thank you! », or « Could not send the report: it will leave
+with the next one ».
+
+`CrashReport.java`: one Sentry envelope (an event and the log as a `text/plain` attachment) posted to the DSN in
+`R.string.xba_report_dsn` (Gradle `-PxbaReportDsn` / env `XBA_REPORT_DSN`; default the project's Rustrak server
+`rustrak.adserver.fr`; an empty value hides both entries). No Sentry SDK. The event: release `xrecomp@<version>`,
+environment `release` or `debug`, tags `kind` (`prepare` / `game`), `console`, `game_key`, `game`, `device`,
+`android`, `abi`, plus `prepare_code` or `end` (how the process ended, from the header of `last-game.log`); the
+fingerprint groups by console, game, code or end, and the crash's first native frame (`#00 pc …`, addresses dropped).
+The log is `prepare.log` or the dump of « Share the last game's log », trimmed to 256 KB (its first 32 KB and its end,
+the cut said in the file).
+
+Everything is scrubbed first: shared storage, SD card and USB paths keep only the file name (`<path>/Halo.iso`), the
+app's own folders keep their names (`<app:fr.adserver.xrecomp.shell>/files/…`), URLs lose their host and login
+(`smb://<host>/…`), magnet links, IPv4 / IPv6 and e-mail addresses go. No game data is ever read into a report.
+
+Offline or refused (not 2xx): one retry, then the envelope waits in `files/reports/` (the newest 5) and leaves after
+the next report that gets through.
+
+Check on the device (Alex):
+1. Make a Prepare fail (for example fill the storage): the failed screen shows **Send report**.
+2. Press it: the sheet shows the four lines, Send focused. B: nothing sent.
+3. Again, Send: « Report sent. Thank you! ». On rustrak.adserver.fr › XRecomp, a new issue with the console, title id,
+   device and `prepare.log` attached, no `/storage` or `/sdcard` path in it.
+4. Crash a game, come back to the launcher, Settings › Advanced › **Send a report about the last game** › Send: a
+   second issue, « Game: native crash … », with `last-game.log` and the top frame.
+5. Airplane mode, send a report: « Could not send … ». Network back, send another: both arrive.
 
 ## Library check (XBA-130)
 

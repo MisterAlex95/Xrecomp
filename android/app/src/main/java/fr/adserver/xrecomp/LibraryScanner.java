@@ -32,7 +32,7 @@ import java.util.Locale;
  * out of a folder by a plain copy. Everything that reads an XBE by path (title, art, theme, hash, the Prepare's source
  * before import) then works on that copy.
  *
- * Walk, per folder: at most MAX_DEPTH levels below it and MAX_ENTRIES entries; names starting with « . » and the
+ * Walk, per folder: at most MAX_DEPTH levels below it (NET_MAX_DEPTH for the network download folder) and MAX_ENTRIES entries; names starting with « . » and the
  * Android directory are skipped; a game folder is not descended. A rescan reuses every item whose location, size and
  * modification time are unchanged without opening it (a stat-only rescan; a .cue's fingerprint covers its tracks).
  * Failures stay in the index with their status (LibraryIndex.NOT_XISO, NO_XBE, BAD_XBE, UNREADABLE, NOT_ROM): the
@@ -49,6 +49,12 @@ final class LibraryScanner {
 
     static final String TAG = "xboxrecomp";
     static final int MAX_DEPTH = 4, MAX_ENTRIES = 5000;
+    /**
+     * The download folder's depth (<net>/<source id>/<torrent name>/<the torrent's own folders>…, then the folder an
+     * archive unpacks into and its entries, NetUnpack): deep enough for any torrent path TorrentMeta takes and any
+     * archive entry NetUnpack writes, so every game a torrent lists is found again once downloaded.
+     */
+    static final int NET_MAX_DEPTH = TorrentMeta.MAX_DEPTH + 2 + NetUnpack.MAX_DEPTH;
     /**
      * The revision of the identification (Console.identify, the image peek, the native readers). Bump it when they
      * learn to read a file they gave up on: the next scan opens every failed item again.
@@ -94,10 +100,17 @@ final class LibraryScanner {
     static final class Root {
         final String folder;
         final Tree tree;
+        /** The levels walked below it (MAX_DEPTH; NET_MAX_DEPTH for the download folder). */
+        final int maxDepth;
 
         Root(String folder, Tree tree) {
+            this(folder, tree, MAX_DEPTH);
+        }
+
+        Root(String folder, Tree tree, int maxDepth) {
             this.folder = folder == null ? "" : folder;
             this.tree = tree;
+            this.maxDepth = maxDepth;
         }
     }
 
@@ -203,6 +216,7 @@ final class LibraryScanner {
         final Listener listener;
         final Cancel cancel;
         final Result r;
+        final int maxDepth;
         /** This folder's entries and whether it reached MAX_ENTRIES. */
         int entries;
         boolean truncated;
@@ -212,6 +226,7 @@ final class LibraryScanner {
             this.r = r;
             this.t = root.tree;
             this.folder = root.folder;
+            this.maxDepth = root.maxDepth;
             this.prev = prev;
             this.seen = seen;
             this.peek = peek;
@@ -271,7 +286,7 @@ final class LibraryScanner {
                 if (k.name.startsWith(".") || k.name.equalsIgnoreCase("Android"))
                     continue;
                 if (k.dir) {
-                    if (depth + 1 < MAX_DEPTH)
+                    if (depth + 1 < maxDepth)
                         dir(k, depth + 1);
                 } else if (isImage(k.name)) {
                     List<Node> parts = splitSet(kids, k);
@@ -843,7 +858,7 @@ final class LibraryScanner {
         File d = netDir(c);
         if (d == null || !d.isDirectory())
             return null;
-        return new Root(NET_FOLDER, new FilteredPathTree(d, NetDownloads.incomplete(c.getFilesDir(), d)));
+        return new Root(NET_FOLDER, new FilteredPathTree(d, NetDownloads.incomplete(c.getFilesDir(), d)), NET_MAX_DEPTH);
     }
 
     /** A PathTree that does not list some files (absolute paths). */

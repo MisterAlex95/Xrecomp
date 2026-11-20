@@ -226,6 +226,12 @@ public class LauncherActivity extends Activity {
     /** The open sheet (the library's Options), and the view focused before it opened. */
     private Widgets.Sheet sheet;
     private View sheetReturn;
+    /**
+     * A refresh a background change asked for (a poll, a scan) while a sheet was open, on that screen: done when the
+     * sheet closes, never under it (it would close the sheet and lose what the player was choosing, as a torrent's
+     * console while a download moves on).
+     */
+    private Screen refreshAfterSheet;
     private FrameLayout body, host;
     private Widgets.Backdrop backdrop;
     private Widgets.Glide glide;
@@ -1053,6 +1059,7 @@ public class LauncherActivity extends Activity {
             if (i >= 0)
                 focusMemory.put(screen, i);
         }
+        refreshAfterSheet = null;   // this rebuild is it
         closeSheet(false);
         if (s == Screen.HOME || s == Screen.LIBRARY || s == Screen.WELCOME)
             romEntry = null;
@@ -1504,6 +1511,8 @@ public class LauncherActivity extends Activity {
         stageRoot.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
         View back = sheetReturn;
         sheetReturn = null;
+        if (refreshAfterSheet != null)   // after the row's action (it may open another sheet: then after that one)
+            poller.post(() -> backgroundRefresh(refreshAfterSheet));
         if (restore) {
             if (back != null && back.isAttachedToWindow()) {
                 if (!back.requestFocus())
@@ -2997,6 +3006,9 @@ public class LauncherActivity extends Activity {
                                           Theme.TEXT_DIM));
             listRow(list, getString(R.string.SHARE_LAST_GAME_LOG), getString(R.string.SHARE_LAST_GAME_LOG_DETAIL),
                     this::shareLastGameLog);
+            if (CrashReport.available(this))
+                listRow(list, getString(R.string.REPORT_LAST_GAME), getString(R.string.REPORT_LAST_GAME_DETAIL),
+                        this::reportLastGame);
             MenuRow about = listRow(list, getString(R.string.ABOUT), getString(R.string.ABOUT_TEXT),
                                     () -> go(Screen.ABOUT));
             about.setValue(version());
@@ -5116,8 +5128,11 @@ public class LauncherActivity extends Activity {
             Runnable act = directAction;
             directPrimary = pill(buttons, directActionLabel == R.string.PLAY ? Icon.PLAY : null,
                                  getString(directActionLabel), true, act);
-            if (directShareLog)
+            if (directShareLog) {
                 pill(buttons, null, getString(R.string.SHARE_LOG), false, this::shareLog);
+                if (CrashReport.available(this))
+                    pill(buttons, null, getString(R.string.REPORT_BUTTON), false, this::reportPrepare);
+            }
             defaultFocus = directPrimary;
             startAction = act;
             addHint("A", R.string.HINT_SELECT, this::clickFocused);
@@ -5450,6 +5465,8 @@ public class LauncherActivity extends Activity {
                                             getString(cancelled ? R.string.PREPARE_RESUME : R.string.PREPARE_RETRY),
                                             true, this::startPrepare);
             pill(buttons, Icon.COPY, getString(R.string.SHARE_LOG), false, this::shareLog);
+            if (!cancelled && CrashReport.available(this))
+                pill(buttons, null, getString(R.string.REPORT_BUTTON), false, this::reportPrepare);
             defaultFocus = retry;
             yAction = this::shareLog;
             addHint("A", R.string.HINT_SELECT, this::clickFocused);
@@ -5582,6 +5599,69 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    // ---- « Send report » (XBA-335) -----------------------------------------------------------------------------
+
+    /** « Send report » beside a failed Prepare: its code, message and prepare.log. */
+    private void reportPrepare() {
+        String tid = prepTid();
+        if (tid == null || !PrepareService.logFile(this, tid).isFile()) {
+            setNote(getString(R.string.SHARE_LOG_NONE), NOTE_INFO);
+            return;
+        }
+        PrepareProtocol.Status s = readPrepStatus();
+        confirmReport(CrashReport.prepare(this, tid, prepTitle(), s == null ? "" : s.code, s == null ? "" : s.msg,
+                                          PrepareService.logFile(this, tid)));
+    }
+
+    /** « Send a report about the last game » (Settings › Advanced): the dump of « Share the last game's log ». */
+    private void reportLastGame() {
+        if (gameRunning()) {
+            setNote(getString(R.string.SHARE_LAST_GAME_LOG_RUNNING), NOTE_INFO);
+            return;
+        }
+        new Thread(() -> {
+            File f = LogProvider.lastGameLogFile(this);
+            boolean ok = LogProvider.dumpLastGame(this, f);
+            String key = GameStore.sessionTid(this);
+            CrashReport r = ok ? CrashReport.game(this, key, null, f) : null;
+            runOnUiThread(() -> {
+                if (r == null)
+                    setNote(getString(R.string.SHARE_LOG_NONE), NOTE_INFO);
+                else
+                    confirmReport(r);
+            });
+        }, "report-last-game").start();
+    }
+
+    /** The sheet before anything leaves: what the report holds, Send or Cancel. Nothing is sent without Send. */
+    private void confirmReport(CrashReport r) {
+        Widgets.Sheet s = openSheet(R.string.REPORT_TITLE);
+        s.addText(getString(R.string.REPORT_EXPLAIN), 5);
+        TextView sum = s.addText(r.summary(), 6);
+        sum.setTextColor(Theme.TEXT);
+        ((LinearLayout.LayoutParams)sum.getLayoutParams()).topMargin = Theme.S2;
+        sheetRow(getString(R.string.REPORT_SEND), () -> sendReport(r));
+        sheetRow(getString(R.string.CANCEL), () -> restoreFocus(false));
+        sheetReady();
+        reportShown = r;
+        Log.i(TAG, "launcher: report " + r.kind + " offered");
+    }
+
+    private CrashReport reportShown;
+
+    CrashReport reportShownForTest() {
+        return reportShown;
+    }
+
+    private void sendReport(CrashReport r) {
+        setNote(getString(R.string.REPORT_SENDING), NOTE_INFO);
+        new Thread(() -> {
+            boolean ok = r.send(this);
+            runOnUiThread(() -> setNote(getString(ok ? R.string.REPORT_SENT : R.string.REPORT_NOT_SENT),
+                                        ok ? NOTE_OK : NOTE_WARN));
+        }, "report-send").start();
+    }
+
     /** Every PREPARE_POLL_MS while resumed: status.json into the Preparing screen, or into Home's row. */
     private void pollPrepare() {
         if (!resumed)
@@ -5609,7 +5689,7 @@ public class LauncherActivity extends Activity {
         } else if (screen == Screen.ROM_HOME && romEntry != null && romPrepShown != null) {
             Prep now = romPrep(romEntry());
             if (now != romPrepShown) {
-                refreshKeepingFocus();
+                backgroundRefresh(screen);
                 return;
             }
             if (now == Prep.RUNNING) {
@@ -5620,12 +5700,12 @@ public class LauncherActivity extends Activity {
         } else if (screen == Screen.HOME && homeChip != null) {
             LibraryScreen.Entry e = ++libPolls % LIBRARY_POLL_EVERY == 0 ? currentEntry() : null;
             if (e != null && e.chip != homeChip)
-                refreshKeepingFocus();
+                backgroundRefresh(screen);
         } else if (screen == Screen.LIBRARY && !scanning()) {
             // (not while the search is typed: the field and its keyboard would go)
             if (++libPolls % LIBRARY_POLL_EVERY == 0 && (libSearch == null || !libSearch.hasFocus())
                 && libraryChanged())
-                refreshKeepingFocus();
+                backgroundRefresh(screen);
         } else if (screen == Screen.HOME && homePrep != null) {
             Prep now = prep();
             if (now != homePrep) {
@@ -6489,6 +6569,9 @@ public class LauncherActivity extends Activity {
             if (i.otherConsole() && CoverArt.wanted(files, g.getKey(), now))
                 todo.add(new String[] { g.getKey(), i.name });
         }
+        for (LibraryScreen.Entry e : libEntries)   // XBA-332: the network library's games, by their file's name
+            if (e.remote != null && CoverArt.wanted(files, e.tid, now))
+                todo.add(new String[] { e.tid, e.remote.name() });
         if (todo.isEmpty())
             return;
         Log.i(TAG, "launcher: cover art: looking for " + todo.size() + " game(s)");
@@ -6534,9 +6617,9 @@ public class LauncherActivity extends Activity {
                 focusTid = null;   // the first games found: the focus goes to the selected one, not the folder tile
         }
         if (screen == Screen.LIBRARY || screen == Screen.SETUP)
-            refreshKeepingFocus();
+            backgroundRefresh(screen);
         else if (screen == Screen.HOME && state() == State.LIBRARY)
-            refreshKeepingFocus();
+            backgroundRefresh(screen);
     }
 
     /** Under the grid: the scan's progress, an empty library's hint, a scan cut short, the « Other files » line. */
@@ -6573,10 +6656,21 @@ public class LauncherActivity extends Activity {
      */
     /** The library grid's columns: five on 16:9, fewer on a narrower stage (LibraryScreen.columns). */
     private int libColumns = LibraryScreen.COLUMNS;
+    /** XBA-332: how many network games the last library had (a change looks for their covers). */
+    private int libCoverRemote = -1;
 
     private void buildLibrary() {
         screenTitle.setText(R.string.LIB_TITLE);
         libEntries = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
+        int remote = 0;
+        for (LibraryScreen.Entry e : libEntries)
+            if (e.remote != null)
+                remote++;
+        if (remote != libCoverRemote) {   // XBA-332: network games came (a source added): their covers are looked for
+            libCoverRemote = remote;
+            if (remote > 0)
+                fetchCovers(index != null ? index : new LibraryIndex());
+        }
         LibraryView.State view = libView();
         // Games of several consoles: each card says its console (an Xbox-only library looks as before), and the top
         // bar's tabs filter them (XBA-206: All, Xbox, GBA, PS1, N64; L1 / R1).
@@ -6631,6 +6725,8 @@ public class LauncherActivity extends Activity {
             libWherePill = libHasRemote() ? pill(bar, Icon.CLOUD, whereLabel(), false, this::stepWhere) : null;
             if (libWherePill == null)
                 libView().where = LibraryView.Where.ALL;   // (no game on the network shown: nothing to filter)
+            else if (libView().where == LibraryView.Where.DOWNLOADING && !libHasDownloads())
+                libView().where = LibraryView.Where.REMOTE;   // the downloads ended: what is left on the network
             LinearLayout.LayoutParams bp = lp(MATCH, Theme.BUTTON_H);
             bp.bottomMargin = Theme.S3;
             col.addView(bar, bp);
@@ -6688,6 +6784,14 @@ public class LauncherActivity extends Activity {
         return libWherePill;
     }
 
+    /** XBA-332: some game is being downloaded (the Show pill's « Downloading » has something to show). */
+    private boolean libHasDownloads() {
+        for (LibraryScreen.Entry e : libEntries)
+            if (e.download != null && e.download.active())
+                return true;
+        return false;
+    }
+
     /** Some entry of the library is a game on the network (the Show pill has something to tell apart). */
     private boolean libHasRemote() {
         for (LibraryScreen.Entry e : libEntries)
@@ -6706,6 +6810,8 @@ public class LauncherActivity extends Activity {
             return;
         LibraryView.State view = libView();
         view.where = view.where.next();
+        if (view.where == LibraryView.Where.DOWNLOADING && !libHasDownloads())
+            view.where = view.where.next();   // XBA-332: nothing downloads: no empty view on the way
         saveLibView();
         Log.i(TAG, "launcher: library: showing " + view.where.name().toLowerCase(Locale.ROOT));
         fillLibrary(focusTid);
@@ -7116,8 +7222,11 @@ public class LauncherActivity extends Activity {
         for (NetDownloads.Job j : NetDownloads.read(getFilesDir())) {
             if (!NetDownloads.DONE.equals(j.state) || !j.auto || j.files.isEmpty())
                 continue;
-            File f = NetDownloads.jobFile(dl, j, j.files.get(0).path);
-            LibraryScreen.Entry e = f == null ? null : entryAt(LibraryIndex.fileLoc(f));
+            File unpacked = NetUnpack.dirOf(dl, j);   // XBA-331: an archive's game is in the folder it unpacked into
+            File f = unpacked != null ? unpacked : NetDownloads.jobFile(dl, j, j.files.get(0).path);
+            LibraryScreen.Entry e = f == null ? null
+                                    : unpacked != null ? entryUnder(LibraryIndex.fileLoc(f) + "/")
+                                    : entryAt(LibraryIndex.fileLoc(f));
             if (e == null) {
                 int scans = netScans.getOrDefault(j.key, 0);
                 if (f != null && scans < 3) {
@@ -7166,6 +7275,14 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    /** The first library entry whose active file is below the folder location prefix (ends with « / »), or null. */
+    private LibraryScreen.Entry entryUnder(String prefix) {
+        for (LibraryScreen.Entry e : LibraryScreen.entries(getFilesDir(), games, index, libEnv()))
+            if (e.active != null && e.active.loc.startsWith(prefix))
+                return e;
+        return null;
+    }
+
     /** The library entry whose active file is at loc, or null. */
     private LibraryScreen.Entry entryAt(String loc) {
         for (LibraryScreen.Entry e : LibraryScreen.entries(getFilesDir(), games, index, libEnv()))
@@ -7204,8 +7321,33 @@ public class LauncherActivity extends Activity {
                     .setValue(failed ? getString(R.string.NET_FAILED, why)
                                      : getString(R.string.LIB_ST_FREE, size(netFree())));
         }
+        // XBA-332: what its name says (region, languages, disc), then the other versions of the game, each its own sheet
+        String tags = e.remote.tags().label(getString(R.string.NET_DISC));
+        if (!tags.isEmpty())
+            sheetRow(getString(R.string.NET_VERSION), () -> {}).setValue(tags);
+        java.util.Map<String, NetDownloads.Job> jobs = new java.util.HashMap<>();
+        if (e.versions.size() > 1)
+            for (NetDownloads.Job x : NetDownloads.read(getFilesDir()))
+                jobs.put(x.key, x);
+        for (RemoteLibrary.Game v : e.versions) {
+            if (v == e.remote)
+                continue;
+            NetDownloads.Job vj = jobs.get(v.key);
+            String vt = v.tags().label(getString(R.string.NET_DISC));
+            sheetRow(vt.isEmpty() ? v.name() : vt, () -> openRemoteVersion(e, v))
+                    .setValue(vj != null && vj.active() ? getString(R.string.NET_CHIP_DOWNLOADING) : size(v.size()));
+        }
         sheetRow(from, () -> {});
         sheetReady();
+    }
+
+    /** XBA-332: another version of a stacked network game: its own sheet (download, cancel), the stack kept. */
+    private void openRemoteVersion(LibraryScreen.Entry stack, RemoteLibrary.Game v) {
+        LibraryScreen.Entry en = LibraryScreen.entry(getFilesDir(), v.key, games, index, libEnv());
+        if (en.remote == null)
+            return;
+        en.versions = stack.versions;
+        openRemoteGame(en);
     }
 
     private String netError(String e) {
@@ -7220,6 +7362,12 @@ public class LauncherActivity extends Activity {
             return getString(R.string.NET_WAIT_META);
         case NetRunner.E_SPACE:
             return getString(R.string.NET_WAIT_SPACE);
+        case NetUnpack.E_UNPACKING:
+            return getString(R.string.NET_UNPACKING);
+        case NetUnpack.E_NO_GAME:
+            return getString(R.string.NET_ERR_NO_GAME);
+        case NetUnpack.E_BAD_ZIP:
+            return getString(R.string.NET_ERR_BAD_ZIP);
         default:
             return e;
         }
@@ -7279,10 +7427,12 @@ public class LauncherActivity extends Activity {
         openSheet(R.string.NET_SOURCES);
         for (RemoteLibrary.Source s : RemoteLibrary.sources(getFilesDir()))
             sheetRow(s.name.isEmpty() ? s.shortId() : s.name, () -> confirmRemoveSource(s)).setValue(sourceValue(s));
+        // No value on the add rows: a long one squeezed the label to « … » (Alex, 2026-11-20: « je vois pas comment
+        // j'ajoute plus de torrent »). A clipboard without a magnet link says so when the row is pressed.
         sheetRow(getString(R.string.NET_ADD_TORRENT), this::openTorrentPicker)
-                .setValue(getString(R.string.NET_ADD_TORRENT_SUB));
+                .setDescription(getString(R.string.NET_ADD_TORRENT_SUB));
         sheetRow(getString(R.string.NET_PASTE_MAGNET), this::onPasteMagnet)
-                .setValue(getString(R.string.NET_PASTE_MAGNET_SUB));
+                .setDescription(getString(R.string.NET_PASTE_MAGNET_SUB));
         boolean show = NetService.showInLibrary(this);
         sheetRow(getString(R.string.NET_SHOW), () -> {
             NetService.setShowInLibrary(this, !show);
@@ -7305,7 +7455,9 @@ public class LauncherActivity extends Activity {
         TorrentMeta m = RemoteLibrary.meta(getFilesDir(), s.id);
         if (m == null)
             return getString(s.metaError.isEmpty() ? R.string.NET_SOURCE_FETCHING : R.string.NET_SOURCE_NOT_FOUND);
-        String n = getString(R.string.NET_SOURCE_GAMES_N, RemoteLibrary.games(s, m).size());
+        int count = RemoteLibrary.games(s, m).size();
+        String n = count == 0 ? getString(R.string.NET_SOURCE_NO_GAME, RemoteLibrary.fileSummary(m))
+                              : getString(R.string.NET_SOURCE_GAMES_N, count);
         return s.console == null ? n : n + " · " + s.console.badge();
     }
 
@@ -7362,7 +7514,11 @@ public class LauncherActivity extends Activity {
                 int n = m == null ? 0 : RemoteLibrary.games(s, m).size();
                 Log.i(TAG, "launcher: net: torrent " + s.id + " (" + s.name + ") added, " + n + " games, console "
                            + (c == null ? "by file" : c.id));
-                setNote(getString(R.string.NET_SOURCE_ADDED, s.name, n), NOTE_OK);
+                if (n == 0 && m != null)   // say what it holds: an archive kind or an extension the app does not take
+                    setNote(getString(R.string.NET_SOURCE_ADDED_NONE, s.name, RemoteLibrary.fileSummary(m)),
+                            NOTE_ERROR);
+                else
+                    setNote(getString(R.string.NET_SOURCE_ADDED, s.name, n), NOTE_OK);
             } catch (IOException e) {
                 setNote(getString(R.string.NET_BAD_TORRENT, e.getMessage()), NOTE_ERROR);
             }
@@ -9745,6 +9901,21 @@ public class LauncherActivity extends Activity {
     }
 
     /** Rebuilds the current screen (a fact computed in the background arrived), keeping its focus and note. */
+    /**
+     * A refresh for a change in the background (a poll, a scan), meant for screen s: while a sheet is open it waits
+     * for it to close; dropped when the player went to another screen meanwhile.
+     */
+    private void backgroundRefresh(Screen s) {
+        if (s == null || s != screen)
+            return;
+        if (sheet != null) {
+            refreshAfterSheet = s;
+            return;
+        }
+        refreshAfterSheet = null;
+        refreshKeepingFocus();
+    }
+
     private void refreshKeepingFocus() {
         String text = noteText;
         int kind = noteKind;

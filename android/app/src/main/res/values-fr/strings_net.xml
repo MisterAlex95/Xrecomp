@@ -5,7 +5,7 @@
     <string name="NET_SOURCES_NONE">Aucune</string>
     <string name="NET_SOURCES_N">%1$d sources</string>
     <string name="NET_ADD_TORRENT">Ajouter un fichier .torrent</string>
-    <string name="NET_ADD_TORRENT_SUB">Un par console : ses jeux s\'affichent dans la bibliothèque</string>
+    <string name="NET_ADD_TORRENT_SUB">Autant que vous voulez, chacun pour sa console</string>
     <string name="NET_PASTE_MAGNET">Coller un lien magnet</string>
     <string name="NET_PASTE_MAGNET_SUB">Copiez d\'abord le lien</string>
     <string name="NET_MOBILE_DATA">Télécharger en données mobiles</string>
@@ -41,6 +41,14 @@
     <string name="NET_WAIT_PEERS">Personne ne le partage</string>
     <string name="NET_WAIT_META">En attente de sa liste</string>
     <string name="NET_WAIT_SPACE">Pas assez d\'espace</string>
+    <string name="NET_CHIP_UNPACKING_N">Décompression · %1$d %%</string>
+    <string name="NET_UNPACKING">Décompression de l\'archive</string>
+    <string name="NET_ERR_NO_GAME">Aucun jeu dans l\'archive</string>
+    <string name="NET_ERR_BAD_ZIP">Impossible d\'ouvrir l\'archive</string>
+    <string name="NET_SOURCE_NO_GAME">Aucun jeu (%1$s)</string>
+    <string name="NET_SOURCE_ADDED_NONE">%1$s ajouté, mais il ne contient aucun jeu que l\'app prend en charge (%2$s).</string>
+    <string name="NET_VERSION">Cette version</string>
+    <string name="NET_DISC">Disque</string>
     <string name="NET_FAILED">Échec : %1$s</string>
     <string name="NET_NO_SPACE">%1$s demande %2$s, seuls %3$s sont libres.</string>
     <string name="NET_NO_STORAGE">Aucun stockage où télécharger.</string>
@@ -56,5 +64,6 @@
     <string name="LIB_WHERE_ALL">Tous les jeux</string>
     <string name="LIB_WHERE_LOCAL">Sur l\'appareil</string>
     <string name="LIB_WHERE_REMOTE">Sur le réseau</string>
+    <string name="LIB_WHERE_DOWNLOADING">En téléchargement</string>
     <string name="NET_SHOW">Afficher leurs jeux dans la bibliothèque</string>
 </resources>
