@@ -342,6 +342,7 @@ struct xenos_gl {
     unsigned copy_clock;
     GLuint frame_tex;         /* the last swap's picture: a texture of frame_w x frame_h host pixels, top row first */
     int frame_w, frame_h;
+    GLenum frame_fmt;         /* frame_tex's internal format */
     uint8_t *frame;
     char cache[512], frames[512];
     unsigned max_frames;
@@ -3916,8 +3917,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
 static void frame_texture(xenos_gl *g, int fw, int fh, GLenum ifmt)
 {
     GLenum want = is_float_fmt(ifmt) ? GL_RGBA16F : GL_RGBA8;
-    static GLenum have;
-    if (!g->frame_tex || g->frame_w != fw * g->scale || g->frame_h != fh * g->scale || have != want) {
+    if (!g->frame_tex || g->frame_w != fw * g->scale || g->frame_h != fh * g->scale || g->frame_fmt != want) {
         if (g->frame_tex)
             g->glDeleteTextures(1, &g->frame_tex);
         GLenum tf, tt;
@@ -3926,7 +3926,7 @@ static void frame_texture(xenos_gl *g, int fw, int fh, GLenum ifmt)
         g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         g->frame_w = fw * g->scale, g->frame_h = fh * g->scale;
-        have = want;
+        g->frame_fmt = want;
     }
 }
 
