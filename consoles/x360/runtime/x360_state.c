@@ -648,5 +648,6 @@ static int state_load(x360_machine *x, const char *key, const uint8_t *data, siz
     x360_render_reset(x); /* the eDRAM is not in states: the renderer's surfaces start clear */
     if (x->audio_cells)
         x360_audio_cells_write(x);
+    x360_xma_loaded(x);
     return X360_STATE_OK;
 }

@@ -762,12 +762,38 @@ static void test_xma_loop(void)
     x360_xma_set_backend(NULL);
 }
 
+/* XMA's APU registers are little-endian: register 0x600 (the context array's physical address), kicks and clears */
+static uint32_t xma_array(uint8_t *enabled)
+{
+    uint32_t array = 0;
+    uint8_t used[320], en[320];
+    x360_xma_state(X, &array, used, enabled ? enabled : en, 0);
+    return array;
+}
+
 static void test_xma(void)
 {
     x360_xma_set_backend(NULL); /* these packets are headers only: the silent backend */
+    /* the array exists from x360_create on (no XMA export called yet): XMCORE reads register 0x600 when it starts */
+    uint32_t array = xma_array(NULL);
+    CHECK(array && x360_r32(X, 0x7FEA0000u + 4 * 0x600) == __builtin_bswap32(array),
+          "XMA register 0x600: %08X for the array at %08X", x360_r32(X, 0x7FEA0000u + 4 * 0x600), array);
+    /* a state whose memory has no register 0x600 (made before it) gets it at load */
+    {
+        char why[256] = "";
+        x360_w32(X, 0x7FEA0000u + 4 * 0x600, 0);
+        size_t cap = x360_state_size(X), n = 0;
+        uint8_t *blob = malloc(cap);
+        CHECK(blob && (n = x360_state_save(X, NULL, blob, cap)) > 0 &&
+                  x360_state_load(X, NULL, blob, n, why, sizeof why) == X360_STATE_OK && xma_array(NULL) == array &&
+                  x360_r32(X, 0x7FEA0000u + 4 * 0x600) == __builtin_bswap32(array),
+              "XMA register 0x600 after a state load: %08X (%s)", x360_r32(X, 0x7FEA0000u + 4 * 0x600), why);
+        free(blob);
+    }
     uint32_t pctx = x360_kalloc(X, 4);
     CHECK(K(X360_xboxkrnl_XMACreateContext, 1, pctx) == 0 && x360_r32(X, pctx) >= 0xA0000000u, "XMA context");
     uint32_t ctx = x360_r32(X, pctx);
+    CHECK(x360_v2p(ctx) == array, "XMA context 0 at the array's start: %08X", ctx);
     uint32_t in = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0x1000);
     uint32_t out = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0x1000);
     for (int p = 0; p < 2; p++) { /* two packets of 3 frames: header frame count 3, metadata 1, no skip */
@@ -815,10 +841,19 @@ static void test_xma(void)
     K(X360_xboxkrnl_XMASetOutputBufferReadOffset, 2, ctx, 17);
     x360_xma_poll(X);
     CHECK(K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 1, "XMA disabled: nothing decoded");
-    x360_w32(X, 0x7FEA0000u + 4 * 0x650, 1u); /* context 0 */
+    x360_w32(X, 0x7FEA0000u + 4 * 0x650, 0x01000000u); /* bytes 01 00 00 00, the title's stwbrx of 1: context 0 */
     x360_xma_poll(X);
-    CHECK(K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 0 && x360_r32(X, 0x7FEA0000u + 4 * 0x650) == 0,
-          "XMA kick register");
+    uint8_t en[320];
+    xma_array(en);
+    int nen = 0;
+    for (int i = 0; i < 320; i++)
+        nen += en[i];
+    CHECK(K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 0 && x360_r32(X, 0x7FEA0000u + 4 * 0x650) == 0 &&
+              en[0] && nen == 1, "XMA kick register: context 0 only (%d enabled)", nen);
+    x360_w32(X, 0x7FEA0000u + 4 * 0x6A0, 0x01000000u); /* the clear register, as little-endian */
+    x360_xma_poll(X);
+    xma_array(en);
+    CHECK(!en[0] && x360_r32(X, 0x7FEA0000u + 4 * 0x6A0) == 0, "XMA clear register: context 0 disabled");
     K(X360_xboxkrnl_XMAReleaseContext, 1, ctx);
     x360_xma_get_stats(X, &packets, &frames, &blocks, &nctx);
     CHECK(nctx == 0, "XMA context released");

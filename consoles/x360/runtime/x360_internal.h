@@ -450,6 +450,7 @@ void x360_xma_free(x360_machine *x);
 void x360_xma_poll(x360_machine *x);
 void x360_xma_register(x360_machine *x);
 void x360_xma_state(x360_machine *x, uint32_t *array, uint8_t *used, uint8_t *enabled, int load);
+void x360_xma_loaded(x360_machine *x); /* after a state load: the array exists and register 0x600 names it */
 void x360_audio_mix_frame(x360_machine *x, int client, const float *planar6);
 void x360_audio_tick(x360_machine *x);
 void x360_pad_set_motors(x360_machine *x, int user, unsigned left, unsigned right);
