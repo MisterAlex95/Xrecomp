@@ -170,7 +170,7 @@ public final class NetService extends Service {
         if (worker != null && worker.isAlive())
             return;
         if (engine == null)
-            engine = new LibtorrentEngine(new File(getCacheDir(), "net-meta"));
+            engine = new LibtorrentEngine(new File(getCacheDir(), "net-meta"), RemoteLibrary.dir(getFilesDir()));
         if (runner == null)
             runner = new NetRunner(engine, getFilesDir(), downloads);
         worker = new Thread(this::loop, "xba-net");
@@ -185,9 +185,45 @@ public final class NetService extends Service {
         stopSelf();
     }
 
+    /**
+     * While the worker runs: the CPU stays awake and Wi-Fi stays up with the screen off (a game is gigabytes; the
+     * player puts the handheld down). Released when the service ends.
+     */
+    private android.os.PowerManager.WakeLock wakeLock;
+    private android.net.wifi.WifiManager.WifiLock wifiLock;
+
+    @SuppressWarnings("deprecation")
+    private void holdLocks(boolean on) {
+        try {
+            if (on) {
+                android.os.PowerManager pm = getSystemService(android.os.PowerManager.class);
+                if (pm != null && wakeLock == null) {
+                    wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "xboxrecomp:net");
+                    wakeLock.acquire(12 * 60 * 60_000L);
+                }
+                android.net.wifi.WifiManager wm = getApplicationContext()
+                        .getSystemService(android.net.wifi.WifiManager.class);
+                if (wm != null && wifiLock == null) {
+                    wifiLock = wm.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "xboxrecomp:net");
+                    wifiLock.acquire();
+                }
+            } else {
+                if (wakeLock != null && wakeLock.isHeld())
+                    wakeLock.release();
+                if (wifiLock != null && wifiLock.isHeld())
+                    wifiLock.release();
+                wakeLock = null;
+                wifiLock = null;
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "net: locks: " + e);
+        }
+    }
+
     private void loop() {
         long lastNotif = 0;
         boolean more = true;
+        holdLocks(true);
         while (!ending) {
             Runnable r;
             while ((r = todo.poll()) != null)
@@ -215,6 +251,7 @@ public final class NetService extends Service {
         }
         Log.i(TAG, "net: nothing more to do, the service ends");
         engine.stop();
+        holdLocks(false);
         synchronized (this) {
             worker = null;
         }

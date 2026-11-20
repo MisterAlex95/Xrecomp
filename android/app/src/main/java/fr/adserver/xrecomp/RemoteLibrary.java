@@ -137,12 +137,42 @@ final class RemoteLibrary {
 
     // ---- Games ------------------------------------------------------------------------------------------------------
 
-    /** The games of source s, whose torrent is m, in torrent order. */
+    /**
+     * The deepest torrent path (in components) the download folder's scan reaches once downloaded: the scan goes
+     * LibraryScanner.MAX_DEPTH levels below <external files>/net, whose first is the source's folder and, for a
+     * multi-file torrent, the second its name. A deeper file is not listed (it could never be found again).
+     */
+    static int maxPathDepth(TorrentMeta m) {
+        return LibraryScanner.MAX_DEPTH - (m.multiFile ? 2 : 1);
+    }
+
+    /** The games of source s, whose torrent is m, in torrent order (cached per torrent and console). */
     static List<Game> games(Source s, TorrentMeta m) {
+        // (the info hash names the torrent's content: same id, same files)
+        String k = m.infoHash + "\u0000" + (s.console == null ? "" : s.console.id) + "\u0000" + s.name;
+        synchronized (GAMES_CACHE) {
+            List<Game> c = GAMES_CACHE.get(k);
+            if (c != null)
+                return c;
+        }
+        List<Game> out = java.util.Collections.unmodifiableList(gamesOf(s, m));
+        synchronized (GAMES_CACHE) {
+            if (GAMES_CACHE.size() > 32)
+                GAMES_CACHE.clear();
+            GAMES_CACHE.put(k, out);
+        }
+        return out;
+    }
+
+    private static final Map<String, List<Game>> GAMES_CACHE = new java.util.HashMap<>();
+
+    private static List<Game> gamesOf(Source s, TorrentMeta m) {
         List<Game> out = new ArrayList<>();
         Map<String, List<TorrentMeta.File>> byDir = new LinkedHashMap<>();
+        int max = maxPathDepth(m);
         for (TorrentMeta.File f : m.files)
-            byDir.computeIfAbsent(f.dir(), d -> new ArrayList<>()).add(f);
+            if (f.path.split("/").length <= max)
+                byDir.computeIfAbsent(f.dir(), d -> new ArrayList<>()).add(f);
         for (List<TorrentMeta.File> kids : byDir.values()) {
             Set<TorrentMeta.File> taken = new HashSet<>();
             boolean hasCue = false;

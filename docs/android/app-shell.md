@@ -2553,7 +2553,7 @@ file** (the system picker) and **Paste a magnet link** (the clipboard's text; co
 console's); **Download on mobile data** (Off by default: downloads wait for Wi-Fi or Ethernet).
 
 **Games before the download.** Every file a scan would list as a game, by name only (nothing is read before the
-download): a disc image or a split set (its parts' sizes summed), a `.cue` with the `.bin` tracks named after it, a
+download), no deeper than the download folder's scan reaches (one folder inside a multi-file torrent): a disc image or a split set (its parts' sizes summed), a `.cue` with the `.bin` tracks named after it, a
 lone `.bin`, a ROM. Its card has no cover (Alex, 2026-11-20): the **remote-content art**, a cloud with a down arrow on
 the console's hue, the console badge, and the chip **On the network**. The title is the file name cleaned: no
 extension, no split-part number, no bracketed tags, underscores as spaces (« Halo (USA) (Rev 1).iso » → « Halo »).
@@ -2567,8 +2567,12 @@ to download**, then **Downloading · 42 %**; A on the card then shows the rate a
 nobody shares it now — it keeps trying, not enough space) and **Cancel the download** (what came is deleted). After a
 failure: **Try again** and why. One game downloads at a time, in the order asked. `NetService` (a foreground service
 in the launcher's process, notification « Downloading <game> » with its progress and Cancel) runs while something is
-queued or a magnet's list is missing, and ends after; a download left waiting for Wi-Fi goes on at the next resume of
-the launcher.
+queued or a magnet's list is missing, and ends after. It holds a partial wake lock and a Wi-Fi lock while it runs
+(the handheld put down, screen off), stays through a Wi-Fi drop (« Waiting for Wi-Fi »), and writes libtorrent's
+resume data every 30 s and when it ends (`files/net/<info hash>.resume`), so a new start goes on from what came
+without checking it again. Cancel and Remove are the service's own work: the torrent leaves the session and its resume
+data goes before the partial files are deleted (libtorrent would otherwise keep believing it has those pieces, and the
+game downloaded again would keep holes).
 
 **Then everything else.** Files land in `<external files>/net/<12 hex>/<the torrent's path>` (the app's own folder:
 no permission, removed with the app), which the scan reads as one more library root (`LibraryScanner.netRoot`, items
@@ -2595,7 +2599,10 @@ the queue, only the game's files, done and paused, Wi-Fi, no peers, space, error
 read back), `LibraryScreenTest` / `GameStateTest` (the entries and chips), `LauncherLibraryTest` (the cards, the
 sheet, Download / Cancel, Options › Network sources; `library-network-*.png` in every size and language). The engine
 itself against real libtorrent: `tools/android/net_host_check.sh` (Linux x86-64: a seeder and the app's engine on
-localhost, only the wanted file arrives, byte for byte).
+localhost, a hybrid and a v1-only torrent whose pieces straddle the files: only the wanted file arrives, byte for byte,
+the neighbours' bytes stay in the hidden `.parts` file; stopped halfway and started again from the resume data;
+cancelled at 40 % and asked again, whole). A peer connection asked while a torrent still checks its files is lost:
+NET-4's « Add a peer » must retry it.
 
 ### Device check (network library, XBA-325), for Alex
 
@@ -2616,10 +2623,13 @@ Only your own dumps, in a private torrent.
 7. A GBA ROM: downloaded, then Play at once.
 8. Turn Wi-Fi off (mobile data on): a new download waits « Waiting for Wi-Fi »; Download on mobile data On: it
    starts. Back Off.
-9. Cancel a running download: the card is « On the network » again, its partial file gone.
-10. Options › Network sources › the GBA source › Remove: its games not downloaded leave the grid, the downloaded one
+9. Cancel a running download: the card is « On the network » again, its partial file gone. Download it again: it
+   ends whole and plays.
+10. Start a big download, turn the screen off for 10 minutes: it went on. Start a game during a download: the
+    download goes on (the notification), the game plays normally.
+11. Options › Network sources › the GBA source › Remove: its games not downloaded leave the grid, the downloaded one
     stays.
-11. French and English labels; the cards and the sheet on a 4:3 and a square screen.
+12. French and English labels; the cards and the sheet on a 4:3 and a square screen.
 
 ### The library screen
 

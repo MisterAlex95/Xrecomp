@@ -26,6 +26,8 @@ final class NetRunner {
     /** The key of the job that runs now and its source, or null. */
     String current, currentSource;
     private final Map<String, Long> lastPeer = new HashMap<>();
+    private long lastSave;
+    static final long SAVE_EVERY_MS = 30_000L;
 
     NetRunner(NetEngine engine, File filesDir, File downloadDir) {
         this.engine = engine;
@@ -52,10 +54,10 @@ final class NetRunner {
             pauseCurrent();
             return false;
         }
-        if (!c.network) {
+        if (!c.network) {   // the service stays (« Waiting for Wi-Fi »): a short drop must not end a long download
             pauseCurrent();
             markWaiting(pending, E_WIFI);
-            return false;
+            return true;
         }
         NetDownloads.Job j = pending.get(0);
         TorrentMeta m = RemoteLibrary.meta(filesDir, j.source);
@@ -96,6 +98,10 @@ final class NetRunner {
             current = j.key;
             currentSource = j.source;
             lastPeer.put(j.key, c.now);
+        }
+        if (c.now - lastSave >= SAVE_EVERY_MS) {   // resume data: a restart does not check what came again
+            lastSave = c.now;
+            engine.saveResume(j.source);
         }
         long[] prog = engine.fileProgress(j.source);
         long done = 0;
@@ -187,6 +193,11 @@ final class NetRunner {
     void cancel(String key) throws IOException {
         if (key.equals(current))
             pauseCurrent();
+        // Its torrent leaves the session (and its resume data goes) before its files are deleted: libtorrent would
+        // otherwise go on believing it has those pieces, and a later download of the game would keep holes.
+        NetDownloads.Job j = NetDownloads.find(NetDownloads.read(filesDir), key);
+        if (j != null && !NetDownloads.DONE.equals(j.state) && engine.has(j.source))
+            engine.remove(j.source);
         cancelFiles(filesDir, downloadDir, key);
     }
 
@@ -197,8 +208,7 @@ final class NetRunner {
         if (j == null)
             return;
         NetDownloads.cancel(filesDir, key);
-        TorrentMeta m = RemoteLibrary.meta(filesDir, j.source);
-        if (m == null || NetDownloads.DONE.equals(j.state))
+        if (NetDownloads.DONE.equals(j.state))
             return;
         java.util.Set<String> kept = new java.util.HashSet<>();
         for (NetDownloads.Job o : l)
@@ -206,7 +216,7 @@ final class NetRunner {
                 for (NetDownloads.FileRef f : o.files)
                     kept.add(f.path);
         for (NetDownloads.FileRef f : j.files) {
-            File lf = NetDownloads.localFile(downloadDir, j.source, m, f.path);
+            File lf = NetDownloads.jobFile(downloadDir, j, f.path);
             if (lf != null && !kept.contains(f.path) && lf.isFile() && !lf.delete())
                 LibraryScanner.warn("net: cannot delete " + lf);
         }
@@ -219,6 +229,8 @@ final class NetRunner {
     static void removeSource(NetEngine engine, File filesDir, File downloadDir, String id) throws IOException {
         if (engine != null && engine.has(id))
             engine.remove(id);
+        else if (engine != null)
+            engine.forgetResume(id);
         for (NetDownloads.Job j : NetDownloads.read(filesDir))
             if (j.source.equals(id) && !NetDownloads.DONE.equals(j.state))
                 cancelFiles(filesDir, downloadDir, j.key);

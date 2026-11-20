@@ -30,10 +30,60 @@ import java.util.Map;
 final class LibtorrentEngine implements NetEngine {
     private SessionManager s;
     private final Map<String, TorrentInfo> infos = new HashMap<>();
-    private final File metaTmp;
+    private final File metaTmp, resumeDir;
 
-    LibtorrentEngine(File metaTmp) {
+    /** metaTmp: a scratch folder for magnet fetches; resumeDir: where <id>.resume files are kept. */
+    LibtorrentEngine(File metaTmp, File resumeDir) {
         this.metaTmp = metaTmp;
+        this.resumeDir = resumeDir;
+    }
+
+    File resumeFile(String id) {
+        return new File(resumeDir, id + ".resume");
+    }
+
+    /** libtorrent hands resume data over in an alert: written beside the torrent, atomically. */
+    private final org.libtorrent4j.AlertListener resumeWriter = new org.libtorrent4j.AlertListener() {
+        @Override
+        public int[] types() {
+            return new int[] { org.libtorrent4j.alerts.AlertType.SAVE_RESUME_DATA.swig() };
+        }
+
+        @Override
+        public void alert(org.libtorrent4j.alerts.Alert<?> a) {
+            if (!(a instanceof org.libtorrent4j.alerts.SaveResumeDataAlert))
+                return;
+            org.libtorrent4j.alerts.SaveResumeDataAlert sa = (org.libtorrent4j.alerts.SaveResumeDataAlert)a;
+            String id = idOf(sa.handle());
+            if (id == null)
+                return;
+            try {
+                byte[] b = org.libtorrent4j.AddTorrentParams.writeResumeDataBuf(sa.params());
+                resumeDir.mkdirs();
+                File f = resumeFile(id), tmp = new File(resumeDir, "." + id + ".resume.tmp");
+                java.nio.file.Files.write(tmp.toPath(), b);
+                if (!tmp.renameTo(f))
+                    tmp.delete();
+            } catch (IOException | RuntimeException e) {
+                System.err.println("net: cannot write the resume data of " + id + ": " + e);   // (no Android here)
+            } finally {
+                synchronized (pendingSaves) {
+                    pendingSaves.remove(id);
+                    pendingSaves.notifyAll();
+                }
+            }
+        }
+    };
+    private final java.util.Set<String> pendingSaves = new java.util.HashSet<>();
+
+    private synchronized String idOf(TorrentHandle h) {
+        if (h == null || !h.isValid())
+            return null;
+        org.libtorrent4j.Sha1Hash best = h.infoHash();
+        for (Map.Entry<String, TorrentInfo> e : infos.entrySet())
+            if (e.getValue().infoHash().equals(best))
+                return e.getKey();
+        return null;
     }
 
     @Override
@@ -48,6 +98,7 @@ final class LibtorrentEngine implements NetEngine {
             sp.setBoolean(settings_pack.bool_types.enable_lsd.swigValue(), true);
             sp.listenInterfaces("0.0.0.0:0,[::]:0");
             s = new SessionManager(false);
+            s.addListener(resumeWriter);
             s.start(new SessionParams(sp));
         } catch (RuntimeException | LinkageError e) {
             s = null;
@@ -56,7 +107,26 @@ final class LibtorrentEngine implements NetEngine {
     }
 
     @Override
-    public synchronized void stop() {
+    public void stop() {
+        synchronized (this) {   // what came is saved first: the next session goes on without checking it again
+            for (String id : infos.keySet())
+                saveResume(id);
+        }
+        long until = System.currentTimeMillis() + 3000;
+        synchronized (pendingSaves) {
+            while (!pendingSaves.isEmpty() && System.currentTimeMillis() < until) {
+                try {
+                    pendingSaves.wait(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        stopSession();
+    }
+
+    private synchronized void stopSession() {
         if (s != null) {
             try {
                 s.stop();
@@ -113,7 +183,8 @@ final class LibtorrentEngine implements NetEngine {
         if (!saveDir.isDirectory() && !saveDir.mkdirs())
             throw new IOException("cannot create " + saveDir);
         infos.put(id, ti);
-        s.download(ti, saveDir, null, Priority.array(Priority.IGNORE, ti.numFiles()), null,
+        File resume = resumeFile(id);
+        s.download(ti, saveDir, resume.isFile() ? resume : null, Priority.array(Priority.IGNORE, ti.numFiles()), null,
                    TorrentFlags.DEFAULT_DONT_DOWNLOAD.or_(TorrentFlags.PAUSED));
         for (int i = 0; i < 100 && handle(id) == null; i++) {   // the add is asynchronous: at most 5 s
             try {
@@ -141,8 +212,9 @@ final class LibtorrentEngine implements NetEngine {
         Priority[] p = Priority.array(Priority.IGNORE, ti.numFiles());
         for (int k = 0; k < fileIndexes.length; k++) {
             int i = fileIndexes[k];
+            String fp = i < 0 || i >= fs.numFiles() ? "" : fs.filePath(i).replace('\\', '/');
             if (i < 0 || i >= fs.numFiles() || fs.padFileAt(i) || fs.fileSize(i) != sizes[k]
-                || !fs.filePath(i).replace('\\', '/').endsWith(paths[k]))
+                || !(fp.equals(paths[k]) || fp.equals(ti.name() + "/" + paths[k])))
                 throw new IOException("libtorrent: file " + i + " is not " + paths[k]);
             p[i] = Priority.DEFAULT;
         }
@@ -198,10 +270,27 @@ final class LibtorrentEngine implements NetEngine {
     }
 
     @Override
+    public synchronized void saveResume(String id) {
+        TorrentHandle h = handle(id);
+        if (h == null)
+            return;
+        synchronized (pendingSaves) {
+            pendingSaves.add(id);
+        }
+        h.saveResumeData(TorrentHandle.FLUSH_DISK_CACHE);
+    }
+
+    @Override
+    public void forgetResume(String id) {
+        resumeFile(id).delete();
+    }
+
+    @Override
     public synchronized void remove(String id) {
         TorrentHandle h = handle(id);
         if (h != null)
             s.remove(h);
         infos.remove(id);
+        forgetResume(id);
     }
 }

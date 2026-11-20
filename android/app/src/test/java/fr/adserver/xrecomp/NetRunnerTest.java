@@ -111,9 +111,23 @@ public class NetRunnerTest {
         public void connectPeer(String id, String host, int port) {
         }
 
+        int saves;
+        final java.util.Set<String> forgotten = new java.util.HashSet<>();
+
+        @Override
+        public void saveResume(String id) {
+            saves++;
+        }
+
+        @Override
+        public void forgetResume(String id) {
+            forgotten.add(id);
+        }
+
         @Override
         public void remove(String id) {
             saveDirs.remove(id);
+            forgotten.add(id);
         }
     }
 
@@ -136,6 +150,12 @@ public class NetRunnerTest {
                 null, 1);
         games = RemoteLibrary.games(src, RemoteLibrary.meta(files, src.id));
         assertEquals(3, games.size());
+    }
+
+    private static Map<String, Object> pad5() {
+        Map<String, Object> pad = file(5, ".pad", "5");
+        pad.put("attr", "p");
+        return pad;
     }
 
     private NetRunner.Conditions ok(long now) {
@@ -179,6 +199,17 @@ public class NetRunnerTest {
     }
 
     @Test
+    public void resumeDataIsSavedEveryHalfMinute() throws IOException {
+        NetDownloads.enqueue(files, games.get(0), 1);
+        runner.step(ok(NetRunner.SAVE_EVERY_MS));
+        int n = engine.saves;
+        runner.step(ok(NetRunner.SAVE_EVERY_MS + 1000));
+        assertEquals(n, engine.saves);
+        runner.step(ok(2 * NetRunner.SAVE_EVERY_MS + 1));
+        assertEquals(n + 1, engine.saves);
+    }
+
+    @Test
     public void downloadsRunOneAfterTheOther() throws IOException {
         NetDownloads.enqueue(files, games.get(0), 1);
         NetDownloads.enqueue(files, games.get(2), 2);
@@ -203,7 +234,7 @@ public class NetRunnerTest {
         NetDownloads.enqueue(files, games.get(0), 1);
         NetRunner.Conditions c = ok(0);
         c.network = false;
-        assertFalse(runner.step(c));   // the service may end; the job stays queued
+        assertTrue(runner.step(c));   // the service stays, waiting for Wi-Fi; the job stays queued
         assertEquals(NetDownloads.QUEUED, job(games.get(0).key).state);
         assertEquals(NetRunner.E_WIFI, job(games.get(0).key).error);
 
@@ -257,6 +288,19 @@ public class NetRunnerTest {
         assertNull(job(halo.key));
         assertFalse(haloFile.exists());
         assertEquals(0, engine.wanted.get(src.id).length);
+        assertFalse("out of the session, resume data forgotten: no holes later", engine.has(src.id));
+        assertTrue(engine.forgotten.contains(src.id));
+        // The service not running: the launcher's job file is enough to find and delete the files.
+        NetDownloads.enqueue(files, halo, 5);
+        haloFile.getParentFile().mkdirs();
+        Files.write(haloFile.toPath(), new byte[10]);
+        RemoteLibrary.remove(files, src.id);   // even with the torrent gone
+        assertTrue(NetDownloads.incomplete(files, downloads).contains(haloFile.getAbsolutePath()));
+        NetRunner.cancelFiles(files, downloads, halo.key);
+        assertFalse(haloFile.exists());
+        RemoteLibrary.addTorrent(files, torrent("Xbox", true, files(
+                file(100, "Halo.iso"), pad5(), file(10, "Big.1.iso"), file(20, "Big.2.iso"), file(50, "Fable.iso"))),
+                null, 1);
 
         // A done game keeps its file and is not hidden from the scan.
         NetDownloads.enqueue(files, fable, 2);

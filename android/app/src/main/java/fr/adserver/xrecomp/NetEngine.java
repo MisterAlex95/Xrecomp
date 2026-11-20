@@ -52,6 +52,12 @@ interface NetEngine {
     /** Connects the torrent to a peer the player named (their own NAS running a client, say; NET-4's « Add a peer »). */
     void connectPeer(String id, String host, int port) throws IOException;
 
-    /** Takes the torrent out of the session (files stay). */
+    /** Asks for the torrent's resume data (what came, checked), written when libtorrent hands it over. */
+    void saveResume(String id);
+
+    /** Deletes the torrent's resume data (its files were deleted, or its source removed). */
+    void forgetResume(String id);
+
+    /** Takes the torrent out of the session (files stay) and forgets its resume data. */
     void remove(String id);
 }

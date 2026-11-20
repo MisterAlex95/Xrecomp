@@ -176,4 +176,13 @@ public class RemoteLibraryTest {
         java.nio.file.Files.write(RemoteLibrary.sourcesFile(files).toPath(), "{nope".getBytes());
         assertTrue(RemoteLibrary.sources(files).isEmpty());
     }
+
+    @Test
+    public void filesTooDeepForTheScanAreNotListed() throws IOException {
+        // multi-file: the scan reaches <net>/<id>/<name>/<one folder>/file at most
+        TorrentMeta m = TorrentMeta.parse(torrent("T", false, files(file(1, "A.iso"), file(2, "d", "B.iso"),
+                                                                    file(3, "d", "e", "C.iso"))));
+        assertEquals(2, RemoteLibrary.maxPathDepth(m));
+        assertEquals(java.util.Arrays.asList("xbox:A:1:1", "xbox:B:1:2"), titles(RemoteLibrary.games(source(null), m)));
+    }
 }

@@ -45,6 +45,11 @@ final class NetDownloads {
 
     static final class Job {
         String key = "", source = "", title = "";
+        /**
+         * Where its paths start, relative to the download folder: « <12 hex> » or, for a multi-file torrent,
+         * « <12 hex>/<torrent name> » (kept so the files stay hidden and deletable without the torrent).
+         */
+        String base = "";
         final List<FileRef> files = new ArrayList<>();
         String state = QUEUED;
         long done, total;
@@ -68,6 +73,7 @@ final class NetDownloads {
             o.put("key", key);
             o.put("source", source);
             o.put("title", title);
+            o.put("base", base);
             JSONArray a = new JSONArray();
             for (FileRef f : files) {
                 JSONObject j = new JSONObject();
@@ -93,6 +99,8 @@ final class NetDownloads {
             j.key = o.optString("key", "");
             j.source = o.optString("source", "");
             j.title = o.optString("title", "");
+            String b = o.optString("base", "");
+            j.base = safePath(b) ? b : "";
             JSONArray a = o.optJSONArray("files");
             for (int i = 0; a != null && i < a.length(); i++) {
                 JSONObject f = a.optJSONObject(i);
@@ -141,6 +149,19 @@ final class NetDownloads {
             return null;
         File base = sourceDir(downloadDir, sourceId);
         return m.multiFile ? new File(new File(base, m.name), path) : new File(base, path);
+    }
+
+    /** The base of a job of source id whose torrent is m (Job.base). */
+    static String base(String id, TorrentMeta m) {
+        String s = id.length() > 12 ? id.substring(0, 12) : id;
+        return m.multiFile ? s + "/" + m.name : s;
+    }
+
+    /** Where a job's file lands, from the job alone; null without a base or for an unsafe path. */
+    static File jobFile(File downloadDir, Job j, String path) {
+        if (j.base.isEmpty() || !safePath(j.base) || !safePath(path))
+            return null;
+        return new File(new File(downloadDir, j.base), path);
     }
 
     // ---- The file ---------------------------------------------------------------------------------------------------
@@ -227,6 +248,8 @@ final class NetDownloads {
             }
             j.source = g.source.id;
             j.title = g.title;
+            TorrentMeta m = RemoteLibrary.meta(filesDir, g.source.id);
+            j.base = m == null ? "" : base(g.source.id, m);
             j.files.clear();
             for (TorrentMeta.File f : g.files)
                 j.files.add(new FileRef(f.index, f.path, f.size));
@@ -272,11 +295,8 @@ final class NetDownloads {
         for (Job j : read(filesDir)) {
             if (DONE.equals(j.state))
                 continue;
-            TorrentMeta m = RemoteLibrary.meta(filesDir, j.source);
-            if (m == null)
-                continue;
             for (FileRef f : j.files) {
-                File lf = localFile(downloadDir, j.source, m, f.path);
+                File lf = jobFile(downloadDir, j, f.path);
                 if (lf != null)
                     s.add(lf.getAbsolutePath());
             }

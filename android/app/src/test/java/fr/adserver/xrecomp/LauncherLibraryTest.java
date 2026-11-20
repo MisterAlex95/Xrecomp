@@ -1463,4 +1463,84 @@ public class LauncherLibraryTest {
                 null, 1);
         render("network", null);
     }
+
+    /**
+     * A download that ended (its job DONE): the next polls find the game in the download folder's scan, move the
+     * focus to it and import it (an Xbox image read in place), once, on the library screen only.
+     */
+    @Test
+    public void aFinishedDownloadGoesOnToTheImport() throws Exception {
+        folderGame(0);
+        useFolder();
+        byte[] tor = TorrentMetaTest.torrent("My Xbox games", true,
+                TorrentMetaTest.files(TorrentMetaTest.file(64, "Night Racer (USA).iso")));
+        RemoteLibrary.Source s = RemoteLibrary.addTorrent(app.getFilesDir(), tor, null, 1);
+        RemoteLibrary.Game g = RemoteLibrary.games(s, RemoteLibrary.meta(app.getFilesDir(), s.id)).get(0);
+        NetDownloads.Job j = NetDownloads.enqueue(app.getFilesDir(), g, 2);
+        NetDownloads.edit(app.getFilesDir(), l -> {
+            NetDownloads.find(l, j.key).state = NetDownloads.DONE;
+            NetDownloads.find(l, j.key).done = 64;
+        });
+        // The downloaded image, and the index item a scan made of it (not opened again: same fingerprint).
+        File dl = LibraryScanner.netDir(app);
+        File iso = NetDownloads.jobFile(dl, NetDownloads.find(NetDownloads.read(app.getFilesDir()), j.key),
+                                        "Night Racer (USA).iso");
+        TestSupport.write(iso, new byte[64]);
+        LibraryIndex x = new LibraryIndex();
+        LibraryIndex.Item it = new LibraryIndex.Item();
+        it.loc = LibraryIndex.fileLoc(iso);
+        it.kind = LibraryIndex.KIND_ISO;
+        it.name = iso.getName();
+        it.size = iso.length();
+        it.mtime = iso.lastModified();
+        it.tid = tidHex(5);
+        it.title = NAMES[5];
+        it.xbeSha256 = "00";
+        it.xbe = "xbe/" + it.tid + "-00000000/default.xbe";
+        it.folder = LibraryScanner.NET_FOLDER;
+        TestSupport.write(it.xbeFile(app.getFilesDir()), TestSupport.xbe(tid(5), NAMES[5]));
+        x.items.add(it);
+        x.identify = LibraryScanner.identifyStamp(app);
+        LibraryIndex.write(Library.indexFile(app.getFilesDir()), x);
+
+        LauncherActivity a = launch();
+        assertNull("the network entry left: the game is local", card(a, "Night Racer"));
+        assertNotNull(card(a, NAMES[5]));
+        idle(2500);   // the next net poll
+        waitScan(a);
+        assertFalse(NetDownloads.find(NetDownloads.read(app.getFilesDir()), j.key).auto);
+        assertEquals(tidHex(5), Library.read(Library.gamesFile(app.getFilesDir())).selected);
+        Thread w = a.workerForTest();
+        assertNotNull("the import started", w);
+        w.join(20_000);
+        idle(500);
+    }
+
+    @Test
+    public void aFinishedDownloadWaitsWhileASheetIsOpen() throws Exception {
+        folderGame(0);
+        useFolder();
+        byte[] rom = ConsoleTest.gba("AXVE");
+        byte[] tor = TorrentMetaTest.torrent("T", true,
+                TorrentMetaTest.files(TorrentMetaTest.file(rom.length, "Pocket Quest.gba")));
+        RemoteLibrary.Source s = RemoteLibrary.addTorrent(app.getFilesDir(), tor, null, 1);
+        RemoteLibrary.Game g = RemoteLibrary.games(s, RemoteLibrary.meta(app.getFilesDir(), s.id)).get(0);
+        NetDownloads.Job j = NetDownloads.enqueue(app.getFilesDir(), g, 2);
+        TestSupport.write(NetDownloads.jobFile(LibraryScanner.netDir(app), j, "Pocket Quest.gba"), rom);
+        NetDownloads.edit(app.getFilesDir(), l -> NetDownloads.find(l, j.key).state = NetDownloads.DONE);
+        NetDownloads.edit(app.getFilesDir(), l -> NetDownloads.find(l, j.key).auto = false);   // (until Options opens)
+        LauncherActivity a = launch();
+        assertNotNull(card(a, "Pocket Quest"));
+        assertFalse("the network entry left: the ROM is local", card(a, "Pocket Quest").remoteForTest());
+        a.forceFocusForTest();
+        idle(300);
+        key(a, KeyEvent.KEYCODE_BUTTON_Y);   // Options open: nothing moves under it
+        assertNotNull(a.sheetForTest());
+        NetDownloads.edit(app.getFilesDir(), l -> NetDownloads.find(l, j.key).auto = true);   // the download ends now
+        idle(2500);
+        assertTrue(NetDownloads.find(NetDownloads.read(app.getFilesDir()), j.key).auto);
+        key(a, KeyEvent.KEYCODE_BUTTON_B);
+        idle(2500);   // the sheet closed: it goes on (a GBA game is ready: the focus moves to it)
+        assertFalse(NetDownloads.find(NetDownloads.read(app.getFilesDir()), j.key).auto);
+    }
 }

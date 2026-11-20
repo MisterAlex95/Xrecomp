@@ -6453,8 +6453,8 @@ public class LauncherActivity extends Activity {
     // ---- Network library (XBA-319: NET-1 sources, NET-2 downloads) ------------------------------------------------
 
     private int netPolls;
-    /** Downloads seen done whose game still has to go on (import, Prepare) once a scan lists it, and the scans tried. */
-    private final java.util.Map<String, Integer> netDone = new java.util.HashMap<>();
+    /** Downloads done whose game is not listed yet: the scans started for each. */
+    private final java.util.Map<String, Integer> netScans = new java.util.HashMap<>();
 
     /** A download's state in one string, so the library notices a percent or a waiting reason that changed. */
     private static String netState(LibraryScreen.Entry e) {
@@ -6472,77 +6472,68 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * Every few ticks: a download that became DONE makes the download folder be scanned again; its game then goes on
-     * (netAfterScan). A magnet whose metadata arrived shows its games.
+     * Every few ticks, and after each scan: a game just downloaded (its job DONE, « auto ») goes on as Alex asked
+     * (« ça le télécharge puis ça fait tout comme il faut »). Not in the index yet: the download folder is scanned
+     * (three scans at most, then it is given up and logged). Found: on the library screen only, with no sheet open
+     * and no import running (else it waits for the next tick, « auto » kept), the focus moves to it, a note says so,
+     * and an Xbox game is imported (read in place; its Prepare follows as for any game); a console game is ready.
+     * One game per tick.
      */
     private void netPoll() {
-        boolean scan = false;
+        File dl = LibraryScanner.netDir(this);
+        if (dl == null)
+            return;
         for (NetDownloads.Job j : NetDownloads.read(getFilesDir())) {
-            if (NetDownloads.DONE.equals(j.state) && j.auto && !netDone.containsKey(j.key)) {
-                netDone.put(j.key, 0);
-                Log.i(TAG, "launcher: net: " + j.key + " (" + j.title + ") downloaded, scanning");
-                scan = true;
+            if (!NetDownloads.DONE.equals(j.state) || !j.auto || j.files.isEmpty())
+                continue;
+            File f = NetDownloads.jobFile(dl, j, j.files.get(0).path);
+            LibraryScreen.Entry e = f == null ? null : entryAt(LibraryIndex.fileLoc(f));
+            if (e == null) {
+                int scans = netScans.getOrDefault(j.key, 0);
+                if (f != null && scans < 3) {
+                    if (!scanning()) {
+                        netScans.put(j.key, scans + 1);
+                        Log.i(TAG, "launcher: net: " + j.key + " (" + j.title + ") downloaded, scanning");
+                        startScan();
+                    }
+                    return;
+                }
+                Log.w(TAG, "launcher: net: " + j.key + " downloaded but no scan found " + f);
+                netClearAuto(j.key);
+                continue;
             }
+            if (screen != Screen.LIBRARY || sheet != null || workerBusy || (worker != null && worker.isAlive()))
+                return;   // later: never pulled out of another screen, a sheet or an import
+            netClearAuto(j.key);
+            netScans.remove(j.key);
+            Log.i(TAG, "launcher: net: " + j.key + " is " + e.tid + " now (" + e.chip + ")");
+            setNote(getString(R.string.NET_DONE_NOTE, e.title()), NOTE_OK);
+            focusTid = e.tid;
+            if (e.chip == GameState.Chip.NOT_IMPORTED && e.realTid()) {
+                selectEntry(e);
+                importEntry(e);
+            } else {
+                refreshKeepingFocus();
+            }
+            return;
         }
-        if (scan)
-            startScan();
     }
 
-    /**
-     * After a scan: each game just downloaded is found by its file (its first one) and goes on as Alex asked (« ça le
-     * télécharge puis ça fait tout comme il faut »): the focus moves to it, an Xbox game is imported (read in place,
-     * then its Prepare as for any game), a console game is ready. Not found yet (a scan already running when the
-     * download ended): one more scan, twice at most.
-     */
+    /** After a scan: a downloaded game may be listed now. */
     private void netAfterScan() {
-        if (netDone.isEmpty())
-            return;
-        File dl = LibraryScanner.netDir(this);
-        List<NetDownloads.Job> jobs = NetDownloads.read(getFilesDir());
-        LibraryScreen.Entry go = null;
-        boolean again = false;
-        for (java.util.Iterator<java.util.Map.Entry<String, Integer>> it = netDone.entrySet().iterator();
-             it.hasNext();) {
-            java.util.Map.Entry<String, Integer> m = it.next();
-            NetDownloads.Job j = NetDownloads.find(jobs, m.getKey());
-            TorrentMeta meta = j == null ? null : RemoteLibrary.meta(getFilesDir(), j.source);
-            File f = meta == null || dl == null || j.files.isEmpty() ? null
-                     : NetDownloads.localFile(dl, j.source, meta, j.files.get(0).path);
-            LibraryScreen.Entry e = f == null ? null : entryAt(LibraryIndex.fileLoc(f));
-            if (e == null && f != null && m.getValue() < 2) {
-                m.setValue(m.getValue() + 1);
-                again = true;
-                continue;
-            }
-            it.remove();
-            if (j != null) {
-                try {
-                    NetDownloads.edit(getFilesDir(), l -> {
-                        NetDownloads.Job x = NetDownloads.find(l, j.key);
-                        if (x != null)
-                            x.auto = false;
-                    });
-                } catch (IOException ex) {
-                    Log.w(TAG, "launcher: net: cannot write the downloads", ex);
-                }
-            }
-            if (e == null) {
-                Log.w(TAG, "launcher: net: " + m.getKey() + " downloaded but not found by the scan");
-                continue;
-            }
-            Log.i(TAG, "launcher: net: " + m.getKey() + " is " + e.tid + " now (" + e.chip + ")");
-            setNote(getString(R.string.NET_DONE_NOTE, e.title()), NOTE_OK);
-            go = e;
+        poller.post(this::netPoll);
+    }
+
+    private void netClearAuto(String key) {
+        try {
+            NetDownloads.edit(getFilesDir(), l -> {
+                NetDownloads.Job x = NetDownloads.find(l, key);
+                if (x != null)
+                    x.auto = false;
+            });
+        } catch (IOException ex) {
+            Log.w(TAG, "launcher: net: cannot write the downloads", ex);
         }
-        if (go != null) {
-            focusTid = go.tid;
-            if (go.chip == GameState.Chip.NOT_IMPORTED && go.realTid() && worker == null) {
-                selectEntry(go);
-                importEntry(go);
-            }
-        }
-        if (again)
-            poller.post(this::startScan);
     }
 
     /** The library entry whose active file is at loc, or null. */
@@ -6688,15 +6679,11 @@ public class LauncherActivity extends Activity {
         openSheet(name);
         sheetRow(getString(R.string.NET_SOURCE_KEEP), this::openNetSheet);
         sheetRow(getString(R.string.NET_SOURCE_REMOVE), () -> {
-            try {   // out of the library at once; the service ends its torrent and deletes partial downloads
-                RemoteLibrary.remove(getFilesDir(), s.id);
-            } catch (IOException ex) {
-                Log.w(TAG, "launcher: net: cannot remove " + s.id, ex);
-            }
+            // The service does it all (its torrent out of the session, its partial downloads deleted, then the
+            // source): the launcher deleting the torrent first would leave half-written files it can no longer find.
             NetService.removeSource(this, s.id);
-            Log.i(TAG, "launcher: net: source " + s.id + " (" + name + ") removed");
+            Log.i(TAG, "launcher: net: removing source " + s.id + " (" + name + ")");
             setNote(getString(R.string.NET_SOURCE_REMOVED, name), NOTE_OK);
-            refreshKeepingFocus();
         }).setValue(getString(R.string.NET_SOURCE_REMOVE_SUB));
         sheetReady();
     }
