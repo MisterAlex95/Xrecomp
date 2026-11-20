@@ -843,9 +843,9 @@ static void bridge_run_thread_inline(recomp_func_t fn, uint32_t ctx1,
     g_esp -= 4; BRIDGE_MEM32(g_esp) = ctx1;
     g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
     g_seh_ebp = g_esp;
-    xbox_ParkThreadStart();      /* a guest thread for the park detector (XBA-244) */
-    fn();
-    xbox_ParkThreadEnd();
+    /* A guest thread for the park detector (XBA-244), with the point a same-run state load re-enters its
+     * routine from (XBA-294). */
+    xbox_ParkRunRoutine(fn, NULL);
     g_esp += 12;
     xbox_GuestCpuLeaveCallback(took);
 }
@@ -979,10 +979,7 @@ static DWORD WINAPI bridge_resume_main(LPVOID param)
     guest_cpu_join();
     {
         int took = xbox_GuestCpuEnterCallback();
-        xbox_ParkThreadStart();
-        xbox_ResumeBegin(r.plan);
-        r.fn();
-        xbox_ParkThreadEnd();
+        xbox_ParkRunRoutine(r.fn, r.plan);
         xbox_GuestCpuLeaveCallback(took);
     }
     guest_cpu_part();
@@ -1217,9 +1214,7 @@ static void bridge_PsCreateSystemThreadEx(void)
                  * worker, the race the lock is for. */
                 {
                     int took = xbox_GuestCpuEnterCallback();
-                    xbox_ParkThreadStart();
-                    fn();
-                    xbox_ParkThreadEnd();
+                    xbox_ParkRunRoutine(fn, NULL);   /* re-entered from here by a same-run load (XBA-294) */
                     xbox_GuestCpuLeaveCallback(took);
                 }
                 g_esp += 12;
@@ -14355,6 +14350,9 @@ static void kernel_thunk_dispatch(void)
         if (held)
             xbox_GuestCpuAcquire();
         xbox_ParkKernelLeave();
+        /* A same-run state load (XBA-294) whose state has this thread at another call chain: it leaves these
+         * host frames for its routine's start and re-enters the state's chain (no return). */
+        xbox_ParkReenterPoint();
         /* A same-run state load (XBA-249) put this thread back « in this call »:
          * its registers are the ones the guest made the call with (the restored
          * guest stack holds the arguments), so it is made again. */

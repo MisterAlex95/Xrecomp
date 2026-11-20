@@ -720,6 +720,7 @@ static int capture_once(XboxStateWriter *w, const XboxStateContext *ctx, XboxSta
 }
 
 static size_t s_last_blob;   /* the previous capture's size: the next one's first allocation */
+static volatile int32_t s_loading; /* a load is in progress (its backup capture is one of its steps) */
 
 /* RECOMP_STATE_CAPTURE_STALL_MS=N (bring-up, docs/runtime/environment-variables.md): each capture sleeps N ms
  * with the guest frozen and the device threads held, in its first attempt after the park records are read (a
@@ -776,6 +777,12 @@ int xbox_StateCaptureFrozen(uint8_t **blob, size_t *blob_n, XboxStateStats *st)
         if (recs[i].state == XBOX_PARK_RUNNING) {
             REASON(st->reason, "guest thread %lu is running (not frozen)", recs[i].tid);
             return XBOX_STATE_EFREEZE;
+        }
+        if (!s_loading && xbox_ParkReenterPending(recs[i].slot)) {
+            /* A load made it re-enter the state's chain and it has not run since (XBA-294): its record and
+             * frames are still those of the chain it leaves. */
+            REASON(st->reason, "guest thread %lu has not re-entered the chain of the last load yet", recs[i].tid);
+            return XBOX_STATE_EBUSY;
         }
         if (recs[i].interp) {
             /* Interpreted code (XBA-303) has no lifted frame a resume could re-enter, and the
@@ -1244,7 +1251,113 @@ static int chain_matches(const XboxStateThread *sv, const XboxParkRecord *cur, c
     return ok;
 }
 
-static volatile int32_t s_loading;
+
+typedef void (*state_routine_t)(void);
+state_routine_t recomp_lookup(uint32_t va);                         /* the generated code's dispatch */
+state_routine_t recomp_lookup_manual(uint32_t va);
+XboxResumePlan *xbox_state_resume_plan(const XboxStateThread *t, const XboxStateFrame *fs, char *why, size_t n);
+
+/* Thread `cur` stands at another call chain than `sv` in the state (or a re-entry set by an earlier load has not
+ * been taken yet): the plan that makes it re-enter the state's chain on the same host thread (XBA-294), or NULL
+ * with the reason. It must be the same guest thread (TIB, KTHREAD, guest stack, guest thread id, the routine the
+ * runtime started it with), the frames below its routine the same (the INLINE main thread's creator), its
+ * current chain left on its own host stack (no stack switch, no hand-written frame), and the state's chain one
+ * the resume entries can re-enter (every site with an entry: generated code since XBA-250). */
+static XboxResumePlan *reenter_plan(const XboxStateThread *sv, const XboxParkRecord *cur, const uint8_t *cp,
+                                    size_t cl, int idx, char *why, size_t why_n)
+{
+    XboxStateThread now;
+    XboxStateChain c;
+    XboxStateFrame *fs = NULL;
+    XboxResumePlan *p = NULL;
+    state_routine_t fn = NULL;
+    uint32_t k, n = sv->chain.frames, kthread = 0;
+
+    record_thread(cur, &now);
+    if (sv->tib != now.cpu.r_fs_base) {
+        snprintf(why, why_n, "its TIB is 0x%08X, 0x%08X in the state", now.cpu.r_fs_base, sv->tib);
+        return NULL;
+    }
+    if (sv->tib)
+        kthread = guest_read32(sv->tib + 0x28);
+    if (kthread != sv->kthread
+        || (kthread && (guest_read32(kthread + 0x1C) != sv->stack_base
+                        || guest_read32(kthread + 0x20) != sv->stack_limit
+                        || guest_read32(kthread + 0x12C) != sv->guest_tid))) {
+        snprintf(why, why_n, "it is not the same guest thread as in the state (KTHREAD, stack or id)");
+        return NULL;
+    }
+    if (xbox_StateChain(&now, NULL, 0, &c) < 0) {
+        snprintf(why, why_n, "its call chain cannot be read");
+        return NULL;
+    }
+    if (c.base != sv->chain.base) {
+        snprintf(why, why_n, "%u frames below its routine, %u in the state", c.base, sv->chain.base);
+        return NULL;
+    }
+    if (c.flags & XBOX_CHAIN_UNRESTORABLE) {
+        snprintf(why, why_n, "the chain it is at now cannot be left safely (%s)",
+                 (c.flags & XBOX_CHAIN_STACK_SWITCH) ? "through a stack-switching function"
+                 : (c.flags & XBOX_CHAIN_OVERFLOW) ? "deeper than the frame shadow stack"
+                 : (c.flags & XBOX_CHAIN_NO_TABLE) ? "no call-site table"
+                 : (c.flags & XBOX_CHAIN_UNKNOWN_SITE) ? "a return address no call site names"
+                 : "its frames disagree with its park record");
+        return NULL;
+    }
+    {   /* The park point itself: a lifted site (a host wait a hand-written function makes names none). */
+        uint32_t func = 0, flags = 0;
+        uint32_t key = cur->site == XBOX_PARK_SITE_KERNEL ? cur->ret_va : (XBOX_RESUME_HOST_WAIT | cur->ret_va);
+        if (!cur->ret_va || !xbox_CallSiteLookup(key, &func, &flags) || (flags & XBOX_CALL_SITE_MANUAL)) {
+            snprintf(why, why_n, "it is parked at 0x%08X, which is not a lifted call site", cur->ret_va);
+            return NULL;
+        }
+    }
+    if (c.frames) {
+        XboxStateFrame *fn_now = malloc(c.frames * sizeof *fn_now);
+        int bad = !fn_now || xbox_StateChain(&now, fn_now, c.frames, &c) != (int)c.frames;
+        for (k = 0; !bad && k < c.frames; k++)
+            if (fn_now[k].flags & (XBOX_CALL_SITE_MANUAL | XBOX_CALL_SITE_STACK_SWITCH))
+                bad = 2;
+        free(fn_now);
+        if (bad) {
+            snprintf(why, why_n, bad == 2 ? "the chain it is at now goes through hand-written code"
+                                          : "the chain it is at now cannot be read");
+            return NULL;
+        }
+    }
+    fs = malloc((n ? n : 1) * sizeof *fs);
+    if (!fs || xbox_StateCpuChain(cp, cl, idx, fs, n) != (int)n) {
+        free(fs);
+        snprintf(why, why_n, "its chain in the state cannot be read");
+        return NULL;
+    }
+    p = xbox_state_resume_plan(sv, fs, why, why_n);
+    free(fs);
+    if (!p)
+        return NULL;
+    fn = recomp_lookup(p->f[0].func);
+    if (!fn)
+        fn = recomp_lookup_manual(p->f[0].func);
+    if (!fn) {
+        snprintf(why, why_n, "its routine 0x%08X is not in the generated code", p->f[0].func);
+        free(p);
+        return NULL;
+    }
+    if (!xbox_ParkReenterCheck(cur->slot, (xbox_park_routine_t)fn, why, why_n)) {
+        free(p);
+        return NULL;
+    }
+    return p;
+}
+
+static void free_plans(XboxResumePlan **plans, int n)
+{
+    int k;
+    for (k = 0; k < n; k++) {
+        free(plans[k]);
+        plans[k] = NULL;
+    }
+}
 
 /* Every section but CPU, in the order the load puts them back: MEM, RAM, then the others as registered. */
 static int apply_sections(const uint8_t *blob, size_t n, char *why, size_t why_n)
@@ -1287,6 +1400,7 @@ int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, Xbox
 {
     static XboxParkRecord recs[XBOX_PARK_MAX_THREADS];   /* one load at a time (s_loading) */
     static XboxStateThread saved[XBOX_PARK_MAX_THREADS];
+    static XboxResumePlan *plans[XBOX_PARK_MAX_THREADS];   /* threads re-entering the state's chain (XBA-294) */
     int pair[XBOX_PARK_MAX_THREADS];
     XboxStateLoadStats local;
     XboxStateInfo info;
@@ -1387,26 +1501,41 @@ int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, Xbox
             REASON(st->reason, "guest thread %lu is held at DISPATCH_LEVEL", recs[k].tid);
             return XBOX_STATE_EBUSY;
         }
-        if (!chain_restorable(&saved[pair[k]], &recs[k], why, sizeof why)) {
-            REASON(st->reason, "%s", why);
-            return XBOX_STATE_ECHAIN;
-        }
     }
+    /* A thread at the same chain as in the state gets its registers back over the same host frames (XBA-249);
+     * one at another chain (or with a re-entry an earlier load set and it has not taken yet) leaves its host
+     * frames and re-enters the state's chain (XBA-294), else the load refuses with both reasons. Every plan is
+     * made here, before anything changes. */
+    memset(plans, 0, sizeof plans);
     for (k = 0; k < nc; k++) {
-        if (!chain_matches(&saved[pair[k]], &recs[k], cp, cl, pair[k], why, sizeof why)) {
-            REASON(st->reason, "%s", why);
+        char again[200];
+        if (xbox_ParkReenterPending(recs[k].slot))
+            REASON(why, "guest thread %lu has not re-entered the chain of the previous load yet", recs[k].tid);
+        else if (chain_restorable(&saved[pair[k]], &recs[k], why, sizeof why)
+                 && chain_matches(&saved[pair[k]], &recs[k], cp, cl, pair[k], why, sizeof why))
+            continue;
+        plans[k] = reenter_plan(&saved[pair[k]], &recs[k], cp, cl, pair[k], again, sizeof again);
+        if (!plans[k]) {
+            REASON(st->reason, "%s; it cannot re-enter the state's chain either (%s)", why, again);
+            free_plans(plans, nc);
+            st->reentered = 0;
             return XBOX_STATE_ECHAIN;
         }
+        st->reentered++;
     }
     xbox_StateSection(blob, n, XBOX_STATE_TAG_RAM, &rp, &rl, NULL);
     rc = xbox_state_ram_precheck(rp, rl, why, sizeof why);
     if (rc != XBOX_STATE_OK) {
         REASON(st->reason, "%s", why);
+        free_plans(plans, nc);
+        st->reentered = 0;
         return rc;
     }
     xbox_StateSection(blob, n, XBOX_STATE_TAG_MEM, &mp, &ml, NULL);
     if (xbox_MemStateLoadCheck(mp, ml, why, sizeof why) != 0) {
         REASON(st->reason, "%s", why);
+        free_plans(plans, nc);
+        st->reentered = 0;
         return XBOX_STATE_ECHAIN;
     }
 
@@ -1417,6 +1546,8 @@ int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, Xbox
     st->backup_ms = ms_since(t0);
     if (rc != XBOX_STATE_OK) {
         REASON(st->reason, "the state of now could not be kept first: %s", bst.reason);
+        free_plans(plans, nc);
+        st->reentered = 0;
         return rc;
     }
 
@@ -1426,6 +1557,8 @@ int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, Xbox
         SwitchToThread();
     if (!gate) {
         free(backup);
+        free_plans(plans, nc);
+        st->reentered = 0;
         REASON(st->reason, "the dispatch gate is held (by host thread %lu)", xbox_DispatchGateOwner());
         return XBOX_STATE_EBUSY;
     }
@@ -1433,6 +1566,8 @@ int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, Xbox
         xbox_DevStateThaw(0);
         xbox_DispatchGateLeave();
         free(backup);
+        free_plans(plans, nc);
+        st->reentered = 0;
         REASON(st->reason, "the NV2A poll thread did not stop within 2 s");
         return XBOX_STATE_EBUSY;
     }
@@ -1448,11 +1583,24 @@ int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, Xbox
         xbox_DevStateThaw(1);
         xbox_DispatchGateLeave();
         free(backup);
+        free_plans(plans, nc);
+        st->reentered = 0;
         return rc == XBOX_STATE_ECHAIN ? rc : XBOX_STATE_ESECTION;
     }
     for (k = 0; k < nc; k++) {
         const XboxStateThread *sv = &saved[pair[k]];
         int reissue = !sv->returned;
+        if (plans[k]) {
+            /* The thread owns its plan from here; it re-enters at the thaw. */
+            if (xbox_ParkReenterThread(recs[k].slot, plans[k]) != 0) {
+                fprintf(stderr, "  [STATE] load: guest thread %u could not be made to re-enter its chain\n",
+                        sv->tid);
+                free(plans[k]);
+            }
+            plans[k] = NULL;
+            st->reissued += reissue;
+            continue;
+        }
         if (xbox_ParkRestoreThread(recs[k].slot, &sv->cpu, reissue) != 0)
             fprintf(stderr, "  [STATE] load: guest thread %u could not take its registers back\n", sv->tid);
         st->reissued += reissue;
@@ -1464,9 +1612,34 @@ int xbox_StateLoadFrozen(const uint8_t *blob, size_t n, uint32_t settle_ms, Xbox
     return XBOX_STATE_OK;
 }
 
+/* After the thaw of a load that made threads re-enter the state's chains (XBA-294): each takes its plan as soon
+ * as it runs (a thread still in a host wait when its wait ends). The load stays the one capture or load in
+ * progress until then, so the next one never finds a thread whose record and frames are those of the chain it
+ * is leaving (a capture refuses such a thread, a load makes it re-enter again). Bounded: a host wait that does
+ * not end leaves its re-entry for later. */
+static void wait_reentries(uint32_t max_ms)
+{
+    uint64_t t0 = xbox_HostNowNs();
+    int k, pending;
+
+    do {
+        for (k = 0, pending = 0; k < XBOX_PARK_MAX_THREADS && !pending; k++)
+            pending = xbox_ParkReenterPending(k);
+        if (pending)
+            SwitchToThread();
+    } while (pending && ms_since(t0) < (double)max_ms);
+}
+
 static void log_load(int rc, const XboxStateLoadStats *st)
 {
-    if (rc == XBOX_STATE_OK)
+    if (rc == XBOX_STATE_OK && st->reentered)
+        fprintf(stderr, "  [STATE] load: %d guest thread%s back at their calls (%d made again, %d re-entering the"
+                        " state's call chain), %u RAM pages written; %.2f ms (freeze %.2f, settle %.2f, backup %.2f,"
+                        " sections %.2f)\n",
+                st->threads, st->threads == 1 ? "" : "s", st->reissued, st->reentered, xbox_state_ram_written(),
+                st->freeze_ms + st->settle_ms + st->backup_ms + st->load_ms, st->freeze_ms, st->settle_ms,
+                st->backup_ms, st->load_ms);
+    else if (rc == XBOX_STATE_OK)
         fprintf(stderr, "  [STATE] load: %d guest thread%s back at their calls (%d made again), %u RAM pages"
                         " written; %.2f ms (freeze %.2f, settle %.2f, backup %.2f, sections %.2f)\n",
                 st->threads, st->threads == 1 ? "" : "s", st->reissued, xbox_state_ram_written(),
@@ -1506,6 +1679,8 @@ int xbox_StateLoad(const uint8_t *blob, size_t n, uint32_t timeout_ms, XboxState
         st->freeze_ms = ms_since(t0);
         rc = xbox_StateLoadFrozen(blob, n, timeout_ms, st);
         xbox_ParkThaw();
+        if (rc == XBOX_STATE_OK && st->reentered)
+            wait_reentries(timeout_ms);
     }
     InterlockedExchange((volatile LONG *)&s_loading, 0);
     InterlockedExchange((volatile LONG *)&s_capturing, 0);

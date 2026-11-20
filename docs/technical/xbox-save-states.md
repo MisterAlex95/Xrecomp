@@ -567,8 +567,9 @@ thread, one capture or load at a time:
    where the guest CPU lock preempts: either kind matches), with esp at the same place when it was entered, and the
    same call chain (XBA-247: frame count and signature of the frame shadow stack, every lifted frame's return address
    and esp; neither chain `XBOX_CHAIN_UNRESTORABLE`). The host frames below the thread are then the state's. Any
-   difference: `ECHAIN` (`RECOMP_STATE_EREFUSED` for the menu) with the reason, nothing changed. Every frame must also
-   hold the same `ebp` as in the state, since no host frame's `ebp` can be written (« Guest call chains »).
+   difference: the thread re-enters the state's chain instead (XBA-294, « Same-run load at another chain » below);
+   when it cannot, `ECHAIN` (`RECOMP_STATE_EREFUSED` for the menu) with both reasons, nothing changed. Every frame
+   must also hold the same `ebp` as in the state, since no host frame's `ebp` can be written (« Guest call chains »).
 4. **Pre-checks**: every saved guest page is mapped now; the memory manager's `RECOMP_EXT_VMA` page table is what it
    was (commits are not redone yet).
 5. **Backup**: a capture of now (the same freeze), put back if a section fails part way: never a partial load.
@@ -809,12 +810,98 @@ also with the guest CPU lock and the dispatch gate on). App: `GameMenuTest.xboxR
 **Every generated pack is stale again**: the generated code's `RecompCpu` has one more pointer and its functions
 the resume entries; titles must be prepared again.
 
+## Same-run load at another chain (XBA-294)
+
+Before XBA-294 a same-run load refused unless every guest thread stood at the same call chain as in the state: a
+loader thread at another stage, or a render loop whose frame pointer varies, made a quick load or a rewind step
+refuse whenever the game had moved on in that way (not measured on a title). Since the resume entries of XBA-250 a thread can rebuild its host frames from guest
+memory; a load now uses them in the running process for each thread that is elsewhere.
+
+**Where the routine was started.** The runtime starts every guest routine through `xbox_ParkRunRoutine`
+(`kernel_park.c`): a spawned worker (`bridge_run_thread_inline`), the INLINE main thread inside its creator's
+`PsCreateSystemThreadEx`, a thread of a resumed process. Before calling the routine it takes a re-entry point on
+that host thread: a `setjmp`, the SEH dispatcher's per-thread state (`xbox_SehPointTake`: anchors, dispatch depth,
+fault depth, the runtime snapshot with the park depths and the frame count), and the slot remembers the routine.
+A routine run nested on a registered thread (`RECOMP_WORKERS=inline`) only nests and has no point of its own.
+
+**The load** (`xbox_StateLoadFrozen`, step 3). A thread whose chain does not match (or one an earlier load set to
+re-enter and that has not run since) gets a plan instead of its registers, built before anything changes
+(`reenter_plan` in `xbox_state.c`); the load refuses, with the mismatch and the reason the plan cannot be made, when:
+
+- it is not the same guest thread: TIB, KTHREAD, guest stack bounds, guest thread id, or the routine the runtime
+  started it with (the plan's first function, through `recomp_lookup`), or another number of frames below its
+  routine (the INLINE main thread's creator);
+- the chain it stands at now goes through a stack switch (another host stack: no `longjmp` there) or a hand-written
+  function, or it is inside the interpreter (XBA-303), or held at DISPATCH_LEVEL;
+- the state's chain cannot be re-entered: the same rules as « Across runs » (`xbox_ResumePlanBuild`: a site without
+  resume entry, `__try` / SEH anchor, tail jump, setjmp, hand-written callee, stack switch, overflow). Code
+  without resume entries (prepared before XBA-250) refuses as before.
+
+After the sections are back (never before: a failed section puts the backup back with nothing to undo), each such
+thread gets its plan (`xbox_ParkReenterThread`); the others get their registers as in XBA-249.
+
+**The jump.** At the thaw, the thread leaves its park point (`kernel_thunk_dispatch` after `xbox_ParkKernelLeave`,
+or the outermost `xbox_ParkHostWaitLeave`, both after the guest CPU is taken back) and `xbox_ParkReenterPoint`
+`longjmp`s to its re-entry point: the host frames of the chain it was at are dropped (lifted C holds nothing there
+but `ebp`, and every bridge has returned), the SEH dispatcher's state is put back (`xbox_SehPointRestore`), and the
+routine is called again in resume mode (`xbox_ResumeBeginAt`, keeping the frames below the routine), as a thread of
+a fresh process does (« Across runs »): each function re-enters its call site, the innermost kernel call gives its
+status back or is made again, a host wait goes on after its helper. The same host thread, so the kernel objects
+loaded in session (bound by host thread id) stay its own.
+
+**After the thaw** the load waits (its timeout at most) until every re-entering thread has taken its plan, and stays
+the one capture or load in progress meanwhile: the next capture never sees a thread whose record and frames are the
+chain it is leaving (it refuses one, `EBUSY`), and a load that finds one makes it re-enter again with the new plan.
+
+```
+[STATE] load: 5 guest threads back at their calls (4 made again, 3 re-entering the state's call chain), 5 RAM pages written; 134.05 ms (freeze 0.00, settle 119.55, backup 6.47, sections 8.02)
+[STATE] load refused: the game is not at a point this state can be loaded at (guest thread 1007 is in kernel call 99 from 0x00013220, in call 99 from 0x00013210 in the state; it cannot re-enter the state's chain either (guest thread 1007: frame 1 was called from 0x00013110, in a function with an exception handler (__try)))
+```
+
+Still refused in a run: a thread created or ended since the state (a host thread would have to be made, or ended
+with its kernel objects), a wait only another guest thread can end (the settle step, unchanged), the chains above.
+
+Tests: `tests/park_reenter` (both lock modes; Linux x86-64 and arm64 under qemu): the INLINE main thread under a
+lifted creator frame and four workers written as the lifter emits code; a phase word in guest memory sends three of
+them down another chain (other call sites, one frame deeper) between the capture and the load, a render loop's
+frame pointer flips every turn, a hlt loop always matches, a 120 ms sleep is captured inside its call. The state of
+phase 0 loads in phase 1: three or four threads re-enter, every thread's first turn after the load finds the state's
+count, the registers after each wait and every frame's ebp are right, the threads go back to phase 0; ten rounds,
+each followed by a capture at once; two loads back to back; every thread ends, the main thread back through its
+creator's frame. A thread at another site whose state chain goes through `__try` refuses the load with both
+reasons and nothing changes. `tests/park_chain`'s fixture (no resume entries) flags its sites `NO_RESUME` and
+keeps refusing.
+
+## Windows
+
+Xbox save states are not built on Windows (`src/kernel/CMakeLists.txt`: `xbox_state*.c` only `if(NOT WIN32)`;
+`kernel_bridge.c` starts the service under `#ifndef _WIN32`). The Windows toolkit is built by MSVC on GitHub's runner
+(`.github/workflows/desktop.yml`, job `windows`, pushes to main and tags), and `tools/docker/windows-mingw.Dockerfile`
+cross-compiles the runtime libraries with MinGW-w64 (not in CI). The re-entry code of XBA-294 lives in files Windows
+builds (`kernel_park.c`, `xbox_resume.c`, `xbox_seh.c`, `kernel_bridge.c`) and compiles there (MinGW-w64 checked;
+MSVC by the next desktop run); on Windows nothing ever sets a re-entry. What states on Windows need:
+
+1. `recomp_states` and the service on Windows: `xbr_host_core` (log pump, lifecycle, `recomp_states.c`) is libc +
+   pthreads; build it with winpthreads (MinGW-w64) or port its threads to Win32, then drop the `NOT WIN32` guards.
+2. The kernel objects (`kernel_kobj_state.c`, refused on Windows today): events, semaphores, mutants and timers are
+   real Win32 handles there, whose state cannot be read without changing it (an auto-reset event's signal). Either
+   route them through `win32_compat` on Windows too (the runtime's own objects, as on POSIX), or keep a shadow of
+   each object's state in the bridges.
+3. The build ID of the generated code (`xbox_state.c` reads the ELF / Mach-O build ID): the PE's debug directory
+   (CodeView GUID + age) for the DLL or executable.
+4. The guest page walk (`xbox_ParkGuestPages`: POSIX `mincore`) and the host fault path the SEH dispatcher uses on
+   POSIX (XBA-132, off on Windows): their Windows equivalents (`VirtualQuery`, vectored exception handlers).
+5. Tests: the state tests are POSIX-only CMake projects (`if(WIN32) FATAL_ERROR`); a Windows run needs a Windows
+   runner or wine with the MinGW build. Nothing of this was run on Windows.
+
 ## Limits
 
 - **Titles outside the class** (above) never offer states. The status file and the app name the reason: fibers or
   stack-switch contexts, a thread that never parks (with its last call), the native-call path.
-- **In-session loads refuse when a chain differs** (a thread at another call site, created or ended since the
-  state). A state from another run loads only when the game starts (XBA-250), not into a game already running.
+- **In-session loads** re-enter a thread that stands at another chain (XBA-294) and refuse when it cannot (a
+  chain the resume entries cannot re-enter, another host stack, the interpreter) or when a thread was created or
+  ended since the state. A state from another run loads only when the game starts (XBA-250), not into a game
+  already running.
 - **Across runs** (XBA-250): chains through a function with an SEH anchor, a tail jump, a setjmp / longjmp site, a
   hand-written callee or a stack switch refuse; a real title resumed after a kill is not verified yet.
 - **A frozen thread at DISPATCH_LEVEL** (holding the one-CPU gate) makes the capture wait for another freeze.
@@ -840,4 +927,5 @@ the resume entries; titles must be prepared again.
 | XBA-249 | In-session restore: rewind, quick save / load within a run, attach to `recomp_states`: done (`xbox_StateLoad`, `xbox_state_service.c`; chains compared by signature since XBA-247) | 245, 246, 248 (247: the chain signature) |
 | XBA-250 | Resume entries in lifted code: states across runs, « Resume where I left off »: done for chains with resume entries (`xbox_StateResume`, `CPU ` v5, `tests/park_resume`); a real title not verified yet | 247, 249 |
 | XBA-251 | Park points at host waits inside lifted code (guest poll waits, NV2A kick waits, hlt, preempts): done (`CPU ` v2) | |
+| XBA-294 | Same-run load at another chain: the thread re-enters the state's chain (`xbox_ParkRunRoutine`, `tests/park_reenter`); Windows plan (« Windows ») | 250 |
 | XBA-252 | Park statistics on our titles (Linux arm64, device) | |

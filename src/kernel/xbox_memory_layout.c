@@ -2738,6 +2738,22 @@ jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
     return &s_jmp[s_jmp_used++].native;
 }
 
+/* A thread re-entering a save state's chain in the same run (XBA-294, kernel_park.c) leaves its host frames above
+ * `frames` (its routine's): the native buffers armed there point into them. Dropped, as a fresh thread has none (a
+ * guest longjmp to one of their guest buffers runs the guest's own longjmp). */
+void recomp_setjmp_drop_above(uint32_t frames)
+{
+    int i, kept = 0;
+
+    for (i = 0; i < s_jmp_used; i++)
+        if ((uint32_t)(s_jmp[i].runtime >> 32) <= frames) {
+            if (kept != i)
+                s_jmp[kept] = s_jmp[i];
+            kept++;
+        }
+    s_jmp_used = kept;
+}
+
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
 {
     const uint8_t *mem = (const uint8_t *)g_xbox_mem_offset;

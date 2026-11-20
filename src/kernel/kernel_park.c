@@ -18,7 +18,10 @@
 #include "xbox_memory_layout.h"
 #include "xbox_interp.h"
 #include "platform/host_time.h"
+#include "xbox_resume.h"
+#include "xbox_seh.h"
 
+#include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
@@ -36,6 +39,8 @@
 #define LOAD64(p)      ((uint64_t)_InterlockedOr64((volatile __int64 *)(p), 0))
 #define STORE64(p, v)  ((void)_InterlockedExchange64((volatile __int64 *)(p), (__int64)(v)))
 #define FENCE()        MemoryBarrier()
+#define XCHGPTR(p, v)  _InterlockedExchangePointer((void *volatile *)(p), (void *)(v))
+#define LOADPTR(p)     _InterlockedCompareExchangePointer((void *volatile *)(p), NULL, NULL)
 #else
 #define ADD32(p, v)    __atomic_add_fetch((p), (int32_t)(v), __ATOMIC_SEQ_CST)
 #define LOAD32(p)      __atomic_load_n((p), __ATOMIC_SEQ_CST)
@@ -46,6 +51,8 @@
 #define LOAD64(p)      __atomic_load_n((p), __ATOMIC_RELAXED)
 #define STORE64(p, v)  __atomic_store_n((p), (uint64_t)(v), __ATOMIC_RELAXED)
 #define FENCE()        __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#define XCHGPTR(p, v)  __atomic_exchange_n((p), (void *)(v), __ATOMIC_SEQ_CST)
+#define LOADPTR(p)     __atomic_load_n((p), __ATOMIC_SEQ_CST)
 #endif
 
 typedef char park_cpu_fits[sizeof(RecompCpuRegs) <= XBOX_PARK_CPU_BYTES ? 1 : -1];
@@ -72,6 +79,10 @@ typedef struct {
     volatile int32_t reissue;
     volatile uint32_t frame_base;
     volatile int32_t interp;         /* xbox_InterpDepth() at the last record (XBA-303) */
+    /* Re-entry in the same run (XBA-294): the routine xbox_ParkRunRoutine started (NULL: none), and a plan
+     * the thread re-enters at the end of its park point once the freeze lets it go. */
+    xbox_park_routine_t volatile routine;
+    void *volatile reenter;
 } Slot;
 
 static Slot s_slots[XBOX_PARK_MAX_THREADS];
@@ -85,6 +96,7 @@ static volatile int32_t s_dropped;      /* threads that found no slot */
 static volatile uint64_t s_frozen_total_ns, s_frozen_since_ns;
 static volatile uint32_t s_fseq;
 static volatile int32_t s_let_expire;   /* the freezer lets timed waits expire until the thaw */
+static volatile int32_t s_reentered;    /* threads that re-entered a chain in the same run (XBA-294) */
 
 /* All-parked statistics. */
 static volatile uint64_t s_since_ns;    /* when s_busy last reached 0 (0: it is not 0) */
@@ -100,6 +112,17 @@ static XBOX_THREAD_LOCAL int t_slot = -1;
 static XBOX_THREAD_LOCAL int t_base_depth, t_base_cb, t_nest;
 static XBOX_THREAD_LOCAL int t_hw;       /* host waits this thread is inside (nested ones count once) */
 static XBOX_THREAD_LOCAL int t_hw_counted;   /* the outermost one is a kernel-call level (park_enter) */
+/* The re-entry point (XBA-294): where xbox_ParkRunRoutine called the routine, the SEH dispatcher's state there,
+ * and the plan taken at the last jump (freed at the next jump or when the routine ends). */
+static XBOX_THREAD_LOCAL jmp_buf *t_jb;
+static XBOX_THREAD_LOCAL XboxSehPoint t_seh_point;
+static XBOX_THREAD_LOCAL void *t_plan;
+/* The interrupt flag and IRQL the routine was started at: the chain a thread leaves may have changed them. */
+static XBOX_THREAD_LOCAL int t_base_irql, t_base_cli;
+
+void xbox_GuestInterruptFlag(int enabled);                   /* kernel_hal.c */
+int  xbox_GuestInterruptsMasked(void);
+void recomp_setjmp_drop_above(uint32_t frames);              /* xbox_memory_layout.c */
 
 static BOOL CALLBACK park_init(PINIT_ONCE o, PVOID p, PVOID *c)
 {
@@ -251,6 +274,8 @@ void xbox_ParkThreadStart(void)
             s->call_esp = 0;
             s->live = (RecompCpu *)&g_cpu;
             s->reissue = 0;
+            s->routine = NULL;
+            free(XCHGPTR(&s->reenter, NULL));
             memset(&s->cpu, 0, sizeof s->cpu);
             s->frame_base = recomp_frames_depth(&g_cpu);
             /* A new generation of the slot: a capture that read the previous thread's record sees it change. */
@@ -276,6 +301,8 @@ static void unregister(int was_busy)
     if (ADD32(&s_threads, -1) == 0)
         STORE64(&s_since_ns, 0);        /* no thread, no all-parked window */
     t_slot = -1;
+    s->routine = NULL;
+    free(XCHGPTR(&s->reenter, NULL));   /* a re-entry it never took */
     STORE32(&s->state, XBOX_PARK_FREE);
     /* A freezer waiting for this thread to park sees it gone instead. */
     if (LOAD32(&s_freeze)) {
@@ -369,6 +396,9 @@ int xbox_ParkHostWaitLeave(void)
     if (t_hw_counted) {
         park_leave();
         again = xbox_ParkTakeReissue();   /* a same-run load put the thread back inside this wait (XBA-249) */
+        t_hw_counted = 0;
+        t_hw = 0;
+        xbox_ParkReenterPoint();          /* or made it re-enter the state's chain instead (XBA-294) */
     }
     t_hw_counted = 0;
     return again;
@@ -786,6 +816,139 @@ int xbox_ParkTakeReissue(void)
     if (t_slot < 0)
         return 0;
     return InterlockedExchange((volatile LONG *)&s_slots[t_slot].reissue, 0) != 0;
+}
+
+/* ---- Re-entry in the same run (XBA-294) ---- */
+
+void xbox_ParkRunRoutine(xbox_park_routine_t fn, void *resume)
+{
+    jmp_buf jb;
+    jmp_buf *prev = t_jb;
+    int outer;
+
+    xbox_ParkThreadStart();
+    outer = t_slot >= 0 && t_nest == 0 && !s_slots[t_slot].routine;
+    if (outer) {
+        Slot *s = &s_slots[t_slot];
+        xbox_SehPointTake(&t_seh_point);
+        t_base_irql = xbox_IrqlCurrent();
+        t_base_cli = xbox_GuestInterruptsMasked();
+        t_jb = &jb;
+        s->routine = fn;
+        if (setjmp(jb)) {
+            /* Back from the end of a park point (xbox_ParkReenterPoint): its host frames are gone. The thread
+             * is at its routine's start again, holding the guest CPU as it did there: the SEH dispatcher's
+             * per-thread state as it was then, the frames below the routine kept, the routine called in
+             * resume mode. */
+            s = &s_slots[t_slot];
+            xbox_SehPointRestore(&t_seh_point);
+            t_depth = t_base_depth;
+            t_cb = t_base_cb;
+            t_hw = t_hw_counted = 0;
+            /* Host thread state of the chain it left, as a fresh thread of a resumed process has it: the
+             * interrupt flag and IRQL of the routine's start (only below DISPATCH_LEVEL: a thread held there
+             * is not re-entered), no native jmp_buf of a guest setjmp armed in the frames it left. */
+            if (xbox_GuestInterruptsMasked() != t_base_cli)
+                xbox_GuestInterruptFlag(!t_base_cli);
+            if (xbox_IrqlCurrent() != t_base_irql)
+                xbox_IrqlLeaveInterrupt(t_base_irql);
+            recomp_setjmp_drop_above(s->frame_base);
+            xbox_ResumeBeginAt((XboxResumePlan *)t_plan, s->frame_base);
+        } else if (resume) {
+            xbox_ResumeBeginAt((XboxResumePlan *)resume, s->frame_base);
+        }
+    } else if (resume) {
+        xbox_ResumeBegin((XboxResumePlan *)resume);
+    }
+    fn();
+    if (outer) {
+        t_jb = prev;
+        free(t_plan);
+        t_plan = NULL;
+        if (t_slot >= 0)
+            s_slots[t_slot].routine = NULL;
+    }
+    xbox_ParkThreadEnd();
+}
+
+xbox_park_routine_t xbox_ParkRoutine(int slot)
+{
+    if (slot < 0 || slot >= XBOX_PARK_MAX_THREADS || LOAD32(&s_slots[slot].state) == XBOX_PARK_FREE)
+        return NULL;
+    return s_slots[slot].routine;
+}
+
+int xbox_ParkReenterCheck(int slot, xbox_park_routine_t fn, char *why, size_t why_n)
+{
+    const Slot *s;
+    int st;
+
+#define NO(...) do { if (why && why_n) snprintf(why, why_n, __VA_ARGS__); return 0; } while (0)
+    if (slot < 0 || slot >= XBOX_PARK_MAX_THREADS)
+        NO("no such thread");
+    s = &s_slots[slot];
+    st = LOAD32(&s->state);
+    if (st == XBOX_PARK_FREE)
+        NO("it has ended");
+    if (!s->routine)
+        NO("its routine was not started by the runtime's thread start");
+    if (fn && s->routine != fn)
+        NO("it runs another routine than the one in the state");
+    if (s->interp)
+        NO("it is in code the interpreter runs");
+    if (st == XBOX_PARK_RUNNING)
+        NO("it is running (not frozen)");
+    if (s->dispatch)
+        NO("it is held at DISPATCH_LEVEL");
+#undef NO
+    if (why && why_n)
+        why[0] = 0;
+    return 1;
+}
+
+int xbox_ParkReenterThread(int slot, void *plan)
+{
+    Slot *s;
+
+    if (slot < 0 || slot >= XBOX_PARK_MAX_THREADS || !plan || !LOAD32(&s_freeze))
+        return -1;
+    s = &s_slots[slot];
+    if (LOAD32(&s->state) == XBOX_PARK_FREE || !s->routine)
+        return -1;
+    STORE32(&s->reissue, 0);            /* the call it was to make again belongs to the chain it leaves */
+    free(XCHGPTR(&s->reenter, plan));
+    return 0;
+}
+
+int xbox_ParkReenterPending(int slot)
+{
+    if (slot < 0 || slot >= XBOX_PARK_MAX_THREADS)
+        return 0;
+    return LOADPTR(&s_slots[slot].reenter) != NULL;
+}
+
+void xbox_ParkReenterPoint(void)
+{
+    Slot *s;
+    void *p;
+
+    if (t_slot < 0 || !t_jb || t_nest || t_depth != t_base_depth || t_cb != t_base_cb || t_hw)
+        return;
+    s = &s_slots[t_slot];
+    if (!LOADPTR(&s->reenter))
+        return;
+    p = XCHGPTR(&s->reenter, NULL);
+    if (!p)
+        return;
+    free(t_plan);                       /* the previous re-entry's: done with since the thread parked again */
+    t_plan = p;
+    ADD32(&s_reentered, 1);
+    longjmp(*t_jb, 1);
+}
+
+uint32_t xbox_ParkReentered(void)
+{
+    return (uint32_t)LOAD32(&s_reentered);
 }
 
 /* ---- Frames and call sites (XBA-247) ---- */
