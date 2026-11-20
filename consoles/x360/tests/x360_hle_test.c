@@ -496,9 +496,52 @@ static void test_gpu(void)
     }
     CHECK(fired >= 9999 && X->nthreads == nthreads && X->kalloc_cur == kfree && X->status == X360_RUNNING,
           "vblanks: %d callbacks, threads %d -> %d", fired, nthreads, X->nthreads);
+    char why_irq[128] = "";
+    /* PM4_INTERRUPT: the callback runs (r3 = 1) as each CPU the mask names, one after the other; what Direct3D's
+     * handler reads with lbz 0x10C(r13) is that CPU. The CPUs still to run are in save states. */
+    uint32_t ip = 4 + 64 + 6;
+    struct { uint32_t mask; int cpus[2]; } irqs[2] = {{0x04, {2, -1}}, {0x05, {0, 2}}};
+    for (int q = 0; q < 2 && irq; q++) {
+        if (irq->state == TH_READY)
+            x360_thread_exit(X, irq, 0);
+        x360_w32(X, ring + 4 * ip, 3u << 30 | (uint32_t)PM4_INTERRUPT << 8);
+        x360_w32(X, ring + 4 * ip + 4, irqs[q].mask);
+        ip += 2;
+        x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, ip);
+        x360_gpu_poll(X);
+        uint8_t *blob1 = NULL;
+        size_t n1 = 0;
+        for (int k = 0; k < 2 && irqs[q].cpus[k] >= 0; k++) {
+            uint32_t got = irq->state == TH_READY ? x360_r8(X, (uint32_t)irq->cpu.gpr[13] + 0x10C) : 0xFF;
+            CHECK(irq->state == TH_READY && irq->cpu.gpr[3] == 1 && got == (uint32_t)irqs[q].cpus[k] &&
+                      x360_r8(X, irq->kthread + 0xBF) == got,
+                  "PM4_INTERRUPT mask %02X: callback %d as CPU %u (want %d)", irqs[q].mask, k, got, irqs[q].cpus[k]);
+            if (q == 1 && k == 0) { /* CPU 2 still to run: saved, run, then loaded again */
+                size_t cap1 = x360_state_size(X);
+                blob1 = malloc(cap1);
+                n1 = blob1 ? x360_state_save(X, NULL, blob1, cap1) : 0;
+            }
+            x360_thread_exit(X, irq, 0);
+            x360_gpu_poll(X);
+        }
+        CHECK(irq->state == TH_DONE, "PM4_INTERRUPT mask %02X: no more callbacks", irqs[q].mask);
+        if (blob1) {
+            CHECK(n1 && x360_state_load(X, NULL, blob1, n1, why_irq, sizeof why_irq) == 0 && irq->state == TH_READY,
+                  "state loaded in CPU 0's callback: %s", why_irq);
+            x360_thread_exit(X, irq, 0);
+            x360_gpu_poll(X);
+            CHECK(irq->state == TH_READY && x360_r8(X, (uint32_t)irq->cpu.gpr[13] + 0x10C) == 2,
+                  "after the load, CPU 2's callback still runs");
+            x360_thread_exit(X, irq, 0);
+            x360_gpu_poll(X);
+            free(blob1);
+        }
+    }
+    /* the ring went on past the fences of the tests below: put them after it */
+    uint32_t rp0 = ip;
     /* Tiled rendering's predicate is in save states: bin select 0 (no bin selected), saved; select 1 again; the
      * state loaded: a predicated fence does not run, the one after it does */
-    uint32_t rp = 4 + 64 + 6;
+    uint32_t rp = rp0;
     x360_w32(X, ring + 4 * rp++, 3u << 30 | (uint32_t)PM4_SET_BIN_SELECT_LO << 8);
     x360_w32(X, ring + 4 * rp++, 0);
     x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp);

@@ -15,7 +15,8 @@
  *   MEM   required  guest memory in use: the image, every allocated page of every heap (the physical memory through
  *                   its view), the GPU register page; pages that are all zero are left out
  *   GPU   optional  the command processor (register file, ring, write-back, the shaders last loaded, counters) and
- *                   the interrupt state (callback, next vertical blank, pending interrupts)
+ *                   the interrupt state (callback, next vertical blank, pending interrupts); version 2: the CPUs a
+ *                   PM4_INTERRUPT still has to run its callback as
  *   XMA   optional  the XMA context array's place, which contexts are in use and enabled (XBA-280)
  *   SEH   optional  an exception being dispatched on each thread (x360_seh.c, XBA-282)
  *   GBIN  optional  the command processor's bin mask and bin select (tiled rendering's predicate); a state without
@@ -354,7 +355,7 @@ static void sec_memory(x360_machine *x, io *s)
 }
 
 void x360_gpu_state(x360_machine *x, void *io_, void (*u32)(void *, uint32_t *), void (*u64)(void *, uint64_t *),
-                    void (*i32)(void *, int *));
+                    void (*i32)(void *, int *), uint32_t version, int load);
 
 static void cb_u32(void *s, uint32_t *v) { io_u32(s, v); }
 static void cb_u64(void *s, uint64_t *v) { io_u64(s, v); }
@@ -362,7 +363,7 @@ static void cb_i32(void *s, int *v) { io_i32(s, v); }
 
 static void sec_gpu(x360_machine *x, io *s)
 {
-    x360_gpu_state(x, s, cb_u32, cb_u64, cb_i32);
+    x360_gpu_state(x, s, cb_u32, cb_u64, cb_i32, s->version, s->load);
 }
 
 void x360_fs_state(x360_machine *x, void *io_, void (*u32)(void *, uint32_t *), void (*u64)(void *, uint64_t *),
@@ -479,7 +480,7 @@ typedef struct {
 
 static const section k_sections[] = {
     {"THRD", 1, 1, sec_threads}, {"KERN", 2, 1, sec_kernel}, {"HEAP", 1, 1, sec_heaps},
-    {"MEM ", 1, 1, sec_memory},  {"GPU ", 1, 0, sec_gpu},    {"FILE", 1, 0, sec_files},
+    {"MEM ", 1, 1, sec_memory},  {"GPU ", 2, 0, sec_gpu},    {"FILE", 1, 0, sec_files},
     {"PADS", 1, 0, sec_pads},    {"XMA ", 1, 0, sec_xma},    {"SEH ", 1, 0, sec_seh},
     {"KOBJ", 1, 0, sec_kobj},    {"GBIN", 1, 0, sec_gpu_bins},
 };
