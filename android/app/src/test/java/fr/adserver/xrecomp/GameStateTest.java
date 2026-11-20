@@ -319,4 +319,21 @@ public class GameStateTest {
         f.prepare = null;
         assertEquals(GameState.Chip.NOT_IMPORTED, GameState.chip(f));
     }
+
+    @Test
+    public void aGameOnTheNetworkIsOnTheNetworkOrDownloadingWhateverItsConsole() {
+        for (Console c : Console.values()) {
+            GameState.Facts f = new GameState.Facts();
+            f.console = c;
+            f.titleId = "net-0123456789ab-00000001";
+            f.source = GameState.Source.REMOTE;
+            f.toolchain = true;
+            assertEquals(c.id, GameState.Chip.ON_NETWORK, GameState.chip(f));
+            f.downloading = true;
+            assertEquals(c.id, GameState.Chip.DOWNLOADING, GameState.chip(f));
+            assertEquals(GameState.Prepared.NONE, GameState.prepared(f, GameState.chip(f)));
+            assertFalse(GameState.playable(GameState.chip(f)));
+            assertTrue(GameState.inGrid(GameState.chip(f)));
+        }
+    }
 }

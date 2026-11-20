@@ -32,6 +32,8 @@
          the app. Also XRecomp's own updates (AppUpdate: this repository's releases on GitHub). XRecomp only:
          TitleApk drops this permission from a game's own app (PARENT_ONLY_PERMISSIONS). -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The network library (XBA-321): downloads only on Wi-Fi unless the player allows mobile data. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- The pack handover (XBA-176, docs/android/prepare.md « Handing a pack to a game's own app »): a game's own app
          looks for XRecomp. TitleApk leaves this <package> as it is, so in the copy it names the parent. -->
     <queries>
@@ -113,6 +115,19 @@
             android:name=".ShaderWarmupService"
             android:exported="false"
             android:process=":warmup" />
+
+        <!-- The network library's downloads (XBA-321, NetService): in the launcher's process, which writes the same
+             files (downloads.json, sources.json). specialUse: a game is gigabytes, more than dataSync's 6 h a day
+             may need on a slow link; started by the player, with progress and Cancel in the notification. -->
+        <service
+            android:name=".NetService"
+            android:exported="false"
+            android:process=":launcher"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Downloads a game the user picked from the user's own network sources (a torrent they added), with progress and Cancel in the notification" />
+        </service>
 
         <!-- « Check my library » (XBA-130): its screen and the service that drives it, in the launcher's process; the
              service keeps that process alive while a checked game runs in front of it. -->
