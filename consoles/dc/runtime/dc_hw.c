@@ -270,8 +270,10 @@ int dc_framebuffer_rgb(dc_machine *m, uint8_t *out, int *w, int *h)
         uint32_t base = interlace ? ((y & 1) ? PVR(FB_R_SOF2) : PVR(FB_R_SOF1)) + (uint32_t)(y >> 1) * stride
                                   : PVR(FB_R_SOF1) + (uint32_t)y * stride;
         for (int x = 0; x < width; x++) {
-            uint32_t a = (base + (uint32_t)(x * bpp)) & (DC_VRAM_SIZE - 1);
-            const uint8_t *p = m->vram + a;
+            uint32_t a = base + (uint32_t)(x * bpp);
+            /* each byte wrapped: FB_R_SOF is the guest's, unaligned, and a 24 bpp pixel can start at VRAM's last byte */
+            const uint8_t p[3] = {m->vram[a & (DC_VRAM_SIZE - 1)], m->vram[(a + 1) & (DC_VRAM_SIZE - 1)],
+                                  m->vram[(a + 2) & (DC_VRAM_SIZE - 1)]};
             uint8_t *o = out + ((size_t)y * (size_t)width + (size_t)x) * 3;
             uint32_t px;
             switch (depth) {

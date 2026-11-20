@@ -268,7 +268,9 @@ static void decode_block(ps1_spu *s, voice *v)
 {
     uint32_t a = v->addr & RAM_MASK;
     irq_block(s, a);
-    const uint8_t *b = s->ram + a;
+    uint8_t b[16]; /* the block wraps at the end of SPU RAM: a voice address is in 8-byte units, so 0x7FFF8 is one */
+    for (int k = 0; k < 16; k++)
+        b[k] = s->ram[(a + (uint32_t)k) & RAM_MASK];
     int shift = b[0] & 15, filter = (b[0] >> 4) & 7;
     if (shift > 12)
         shift = 9;

@@ -105,7 +105,8 @@ static void to_rgb(ctr_machine *m, const ctr_fb_info *fb, int w, int h, uint8_t 
     static const unsigned bpp_of[8] = {4, 3, 2, 2, 2, 3, 3, 3};
     unsigned format = fb->format & 7, bpp = bpp_of[format];
     /* The LCDs are portrait: a framebuffer holds columns of h pixels, bottom to top, one column per screen x. */
-    if (!fb->valid || !fb->stride || !ctr_mem_mapped(m, fb->addr, fb->stride * (uint32_t)w))
+    /* the last column ends h pixels after its start, past stride * w when the guest's stride is shorter than a column */
+    if (!fb->valid || !fb->stride || !ctr_mem_mapped(m, fb->addr, fb->stride * (uint32_t)(w - 1) + (uint32_t)h * bpp))
         return;
     for (int x = 0; x < w; x++) {
         const uint8_t *col = m->h.mem + fb->addr + fb->stride * (uint32_t)x;

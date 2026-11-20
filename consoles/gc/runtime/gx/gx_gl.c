@@ -1980,7 +1980,10 @@ void gx_gl_copy(gx_state *gx, uint32_t exec)
                     uint32_t blk = fam == TF_RGBA8 ? 64 : 32;
                     uint32_t st = stride ? stride : (((uint32_t)ow + bw - 1) / bw) * blk;
                     uint32_t bh = fam == TF_I4 ? 8 : 4;
-                    uint32_t need = st * (((uint32_t)oh + bh - 1) / bh);
+                    /* the last block row ends a row of blocks after its start, past st when the stride is short */
+                    uint32_t need = st * (((uint32_t)oh + bh - 1) / bh - 1) + (((uint32_t)ow + bw - 1) / bw) * blk;
+                    if (need < st * (((uint32_t)oh + bh - 1) / bh))
+                        need = st * (((uint32_t)oh + bh - 1) / bh);
                     if (need <= gx->ram_size - dst)
                         gx_tex_encode(fam, buf, (unsigned)ow, (unsigned)oh, gx->ram + dst, st);
                     free(buf);
