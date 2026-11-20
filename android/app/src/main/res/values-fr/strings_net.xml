@@ -5,7 +5,7 @@
     <string name="NET_SOURCES_NONE">Aucune</string>
     <string name="NET_SOURCES_N">%1$d sources</string>
     <string name="NET_ADD_TORRENT">Ajouter un fichier .torrent</string>
-    <string name="NET_ADD_TORRENT_SUB">Un par console : ses jeux s\'affichent dans la bibliothèque</string>
+    <string name="NET_ADD_TORRENT_SUB">Autant que vous voulez, chacun pour sa console</string>
     <string name="NET_PASTE_MAGNET">Coller un lien magnet</string>
     <string name="NET_PASTE_MAGNET_SUB">Copiez d\'abord le lien</string>
     <string name="NET_MOBILE_DATA">Télécharger en données mobiles</string>
