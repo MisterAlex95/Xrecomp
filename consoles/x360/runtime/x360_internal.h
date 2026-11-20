@@ -7,7 +7,9 @@
 #ifndef XE_RUNTIME
 #define XE_RUNTIME 1
 #endif
+#include <pthread.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 
 #include "x360_core.h"
@@ -257,6 +259,13 @@ struct x360_machine {
     x360_kobj kobj;
     uint8_t hle_lib;          /* the export being answered (x360_hle_refused) */
     uint16_t hle_ordinal;
+    /* WP8: while an HLE runs, the outermost x360_hle_call's sigjmp_buf and the host thread running it (not state).
+     * on_fault jumps back there when that thread touches an unmapped guest address: the machine stops, the process
+     * does not. Set with release after hle_host, read with acquire (host threads: a worker faulting in lifted code
+     * then sees the hle_host that goes with the buffer, never its own stale id). */
+    _Atomic(void *) hle_jmp;
+    pthread_t hle_host;
+    uint32_t hle_fault_addr;  /* the guest address of that fault */
     int hle_conflict;         /* two tables gave one export different functions: the machine is not created */
 };
 
