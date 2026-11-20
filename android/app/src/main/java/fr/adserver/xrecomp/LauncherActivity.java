@@ -1160,7 +1160,9 @@ public class LauncherActivity extends Activity {
             break;
         }
         restoreFocus(false);
-        if (companion != null && s != Screen.HOME && s != Screen.LIBRARY && s != Screen.PREPARE)
+        if (companion != null && (s == Screen.SETUP || s == Screen.HELP))
+            companionGuide(s);   // the bottom screen: the step's or the question's drawing, two touch actions
+        else if (companion != null && s != Screen.HOME && s != Screen.LIBRARY && s != Screen.PREPARE)
             companion.artOnly();   // the bottom screen: the game's art alone
         // A library folder read as files: a (stat-only) rescan each time the library opens.
         if (s == Screen.LIBRARY && was != Screen.LIBRARY && Library.anyFolderPath(this))
@@ -2104,22 +2106,75 @@ public class LauncherActivity extends Activity {
         go(Screen.HELP);
     }
 
-    /** The questions on the left, the focused one's answer on the right; Self-healing's opens Settings. */
+    /** The questions on the left, the focused one's answer and its drawing on the right; Self-healing's opens Settings. */
     private void buildHelp() {
         screenTitle.setText(R.string.HELP_TITLE);
         LinearLayout list = listTemplate();
         for (int i = 0; i < HELP.length; i++) {
-            String answer = getString(HELP[i][1]);
+            int q = i;
             boolean toSettings = i == HELP_HEAL && Toolchain.available(this);
-            MenuRow r = listRow(list, getString(HELP[i][0]), answer, toSettings ? () -> go(Screen.SETTINGS) : null);
-            if (toSettings) {
+            MenuRow r = listRow(list, getString(HELP[i][0]), getString(HELP[i][1]),
+                                toSettings ? () -> go(Screen.SETTINGS) : null);
+            if (toSettings)
                 r.setValue("›");
-                onFocus(r, () -> describe(answer, getString(R.string.HELP_OPEN_SETTING), Theme.TEXT_FAINT));
-            }
+            onFocus(r, () -> helpAnswer(q));
         }
         Integer f = focusMemory.get(Screen.HELP);   // the answer shows before the focus lands
-        describe(getString(HELP[f == null || f < 0 || f >= HELP.length ? 0 : f][1]));
+        helpAnswer(f == null || f < 0 || f >= HELP.length ? 0 : f);
         addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    /** The question Help shows (the bottom screen's ‹ › step through them). */
+    private int helpShown;
+
+    /** The second screen on SETUP and HELP (GuidePanel): the drawing of the step or question, its two actions. */
+    private void companionGuide(Screen s) {
+        if (s == Screen.HELP) {
+            int i = helpShown;
+            companion.guide(Schema.FOR_HELP[i], 0, getString(HELP[i][0]),
+                            i > 0 ? "‹" : null, () -> helpFocus(i - 1),
+                            i < HELP.length - 1 ? "›" : null, () -> helpFocus(i + 1));
+            return;
+        }
+        int step = setupStep();
+        Schema.Kind[] kinds = { Schema.Kind.PIPE, Schema.Kind.AT_ONCE, null, Schema.Kind.LOOP };
+        String back = step == 0 ? null : getString(R.string.HINT_BACK);
+        String next = step == 0 ? getString(R.string.SETUP_CHOOSE_FOLDER)
+                    : step == 3 ? getString(R.string.SETUP_OPEN_LIBRARY) : getString(R.string.SETUP_CONTINUE);
+        companion.guide(kinds[step], 0, getString(SETUP_LABELS[step]), back, this::setupBack, next, () -> {
+            if (step == 0)
+                onChooseLibraryFolder();
+            else if (step == 3)
+                clickFocused();
+            else
+                setupGo(step + 1);
+        });
+    }
+
+    /** Help's focus on question i (the bottom screen's ‹ ›). */
+    private void helpFocus(int i) {
+        if (screen != Screen.HELP || i < 0 || i >= HELP.length || i >= focusables.size())
+            return;
+        View v = focusables.get(i);
+        if (!v.requestFocus())
+            v.requestFocusFromTouch();
+    }
+
+    /** Help's description column: the answer, « A opens the setting » for Self-healing, the drawing below. */
+    private void helpAnswer(int i) {
+        helpShown = i;
+        if (companion != null && screen == Screen.HELP && !building)
+            companionGuide(Screen.HELP);
+        if (i == HELP_HEAL && Toolchain.available(this))
+            describe(getString(HELP[i][1]), getString(R.string.HELP_OPEN_SETTING), Theme.TEXT_FAINT);
+        else
+            describe(getString(HELP[i][1]));
+        if (desc == null)
+            return;
+        Schema.SchemaView v = new Schema.SchemaView(this, Schema.FOR_HELP[i]);
+        LinearLayout.LayoutParams p = lp(MATCH, WRAP);
+        p.topMargin = Theme.S5;
+        desc.addView(v, p);
     }
 
     // ---- SOURCE and FOLDER_ACCESS --------------------------------------------------------------------------------
@@ -2287,6 +2342,13 @@ public class LauncherActivity extends Activity {
     }
 
     /** The row of buttons under the title: one solid primary and quiet pills. */
+    /** Home's track under its lines: the Prepare's stages lit, a dot per address found since (Schema.TrackView). */
+    private void heroTrack(LinearLayout info, int lit, int found) {
+        LinearLayout.LayoutParams p = lp(MATCH, Schema.TrackView.H);
+        p.topMargin = Theme.S3;
+        info.addView(new Schema.TrackView(this, lit, found), p);
+    }
+
     private LinearLayout heroButtons(LinearLayout info) {
         LinearLayout row = new Widgets.PillRow(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -2450,6 +2512,14 @@ public class LauncherActivity extends Activity {
         else if (resume == Pack.Resume.PREPARE_AGAIN && !olderToolkit)   // older toolkit: its line says Prepare again
             heroLine(info, getString(R.string.HOME_RESUME_PREPARE), Theme.WARN);
 
+        if (st == State.READY && !copying && (prep == Prep.PLAYABLE || prep == Prep.RUNNING)) {
+            Library.Record tr = rec();
+            int found = improve ? SelfHeal.read(workDir(tid)).seeds : 0;
+            int lit = prep == Prep.RUNNING
+                      ? Schema.TrackView.litFor(ps == null ? 0 : PrepareProtocol.overall(ps.step, ps.n, ps.pct))
+                      : 3 + (tr != null && tr.playMs > 0 || GameStore.playTime(this) > 0 ? 1 : 0);
+            heroTrack(info, lit, healing != null ? 0 : found);
+        }
         LinearLayout buttons = heroButtons(info);
         Widgets.PillButton play;
         if (st == State.NONE || st == State.MISSING || st == State.NO_ACCESS) {
@@ -5547,6 +5617,10 @@ public class LauncherActivity extends Activity {
             homeStatus = (Widgets.Chip)status;
         if (e.record != null && (e.record.lastPlayed > 0 || e.record.playMs > 0))   // XBA-206: as an Xbox game's Home
             heroLine(info, homeMeta(e.record.lastPlayed, e.record.playMs), 0);
+        if (prepares && (p == Prep.PLAYABLE || p == Prep.RUNNING))
+            heroTrack(info, p == Prep.RUNNING
+                            ? Schema.TrackView.litFor(ps == null ? 0 : PrepareProtocol.overall(ps.step, ps.n, ps.pct))
+                            : 3 + (e.record != null && e.record.playMs > 0 ? 1 : 0), p == Prep.PLAYABLE ? found : 0);
 
         LinearLayout buttons = heroButtons(info);
         // Where the player left off saved: Resume (that point) first, Start (the console's boot) beside it.

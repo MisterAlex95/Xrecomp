@@ -84,4 +84,38 @@
     <string name="TIP_UPDATE_T">This version translates games better. The game plays as before; preparing it again gets the fixes. Your saves are kept.</string>
     <string name="TIP_AT_ONCE_H">Plays right away</string>
     <string name="TIP_AT_ONCE_T">This game runs in the interpreter, so it starts at once. Prepare translates it into native code (a few minutes): smoother, lighter on the battery. You can play meanwhile.</string>
+
+    <!-- Help's drawings (Schema) -->
+    <string name="SCH_GAME">Your game</string>
+    <string name="SCH_GAME_SUB">its console\'s code</string>
+    <string name="SCH_PREPARE">Prepare</string>
+    <string name="SCH_PREPARE_SUB">translate, compile</string>
+    <string name="SCH_NATIVE">Native code</string>
+    <string name="SCH_NATIVE_SUB">full speed</string>
+    <string name="SCH_READ">Read</string>
+    <string name="SCH_TRANSLATE">Translate</string>
+    <string name="SCH_COMPILE">Compile</string>
+    <string name="SCH_PACK">Pack</string>
+    <string name="SCH_PLAY">Play</string>
+    <string name="SCH_PLAY_SUB">native code</string>
+    <string name="SCH_MISSED">Code missed</string>
+    <string name="SCH_MISSED_SUB">noted, slower</string>
+    <string name="SCH_AGAIN">Prepare again</string>
+    <string name="SCH_AGAIN_SUB">only what changed</string>
+    <string name="SCH_FOUND">addresses found</string>
+    <string name="SCH_CRASH">After a crash</string>
+    <string name="SCH_CRASH_SUB">prepared again, restarted</string>
+    <string name="SCH_GOOD">After a good run</string>
+    <string name="SCH_GOOD_SUB">improved meanwhile</string>
+    <string name="SCH_NOTHING">Nothing new</string>
+    <string name="SCH_NOTHING_SUB">« needs a fix »</string>
+    <string name="SCH_SAVES">Your saves</string>
+    <string name="SCH_SAVES_SUB">kept apart</string>
+    <string name="SCH_CODE">Prepared code</string>
+    <string name="SCH_CODE_SUB">made again freely</string>
+    <string name="SCH_FILE">Game file</string>
+    <string name="SCH_FILE_SUB">GBA, PS1, N64, GC</string>
+    <string name="SCH_INTERP">Interpreter</string>
+    <string name="SCH_INTERP_SUB">starts at once</string>
+    <string name="LIB_NEW_CODE_N">Prepared · +%1$d new</string>
 </resources>

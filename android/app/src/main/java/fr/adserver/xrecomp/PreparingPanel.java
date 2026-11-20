@@ -19,6 +19,8 @@ final class PreparingPanel extends PanelView {
 
     static final int CANCEL = 1;
     static final long DIM_MS = 30_000;
+    /** The stages' drawing is made for the main screen's sizes: larger here. */
+    private static final float STAGES_SCALE = 1.3f;
     /** The bar: 800 x 12, centred. */
     private static final RectF BAR = new RectF(220, 440, 1020, 452);
 
@@ -106,6 +108,14 @@ final class PreparingPanel extends PanelView {
         drawBattery(c, batteryText);
         boolean done = status != null && PrepareProtocol.DONE.equals(status.state);
         boolean failed = status != null && !status.running() && !done;
+        if (!failed) {   // the stages above, as Help draws them (Read, Translate, Compile, Pack), lit by the progress
+            c.save();
+            c.translate(BAR.left, 70);
+            c.scale(STAGES_SCALE, STAGES_SCALE);
+            Schema.draw(getContext(), c, new RectF(0, 0, BAR.width() / STAGES_SCALE, 130), Schema.Kind.STAGES,
+                        frac, 0);
+            c.restore();
+        }
         text.setColor(failed ? Theme.ERROR : Theme.TEXT);
         c.drawText(pct, W / 2, 380, text);
 

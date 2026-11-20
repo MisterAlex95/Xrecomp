@@ -310,6 +310,78 @@ public class LauncherFirstStartTest {
         }
     }
 
+    /** Help's six answers with their drawings; an Xbox game's Home with its track and the addresses its runs found. */
+    @Test
+    public void helpAndTrackScreenshots() throws Exception {
+        withToolchain();
+        TestSupport.write(new File(GameStore.defaultGameDir(app), "default.xbe"),
+                          TestSupport.xbe(0x4D530004, "Sample Game"));
+        TestSupport.writePack(app.getFilesDir(), "4D530004", 1 << 20);
+        GameStore.sessionStart(app, System.currentTimeMillis() - 40 * 60_000L);
+        GameStore.sessionEnd(app, System.currentTimeMillis() - 2 * 60_000L);
+        SelfHeal.State st = new SelfHeal.State();
+        st.offer = SelfHeal.Offer.IMPROVE;
+        st.seeds = 14;
+        SelfHeal.write(new File(new File(app.getFilesDir(), "work"), "4D530004"), st);
+        String[][] sizes = { SIZES[0], SIZES[2] };
+        for (String loc : LOCALES) {
+            for (String[] size : sizes) {
+                RuntimeEnvironment.setQualifiers(loc + "-" + size[1]);
+                String sfx = "-" + loc + "-" + size[0];
+                GameStore.prefs(app).edit().clear().commit();
+                SelfHeal.setAuto(app, false);
+                for (LauncherActivity.Tip t : LauncherActivity.Tip.values())
+                    GameStore.prefs(app).edit().putBoolean(t.key(), true).commit();
+                LauncherActivity a = launch();
+                assertEquals(LauncherActivity.Screen.HOME, a.screenForTest());
+                shot(a, "home-track" + sfx);
+                a.goForTest(LauncherActivity.Screen.HELP);
+                idle(300);
+                for (int i = 0; i < LauncherActivity.HELP.length; i++) {
+                    a.focusablesForTest().get(i).requestFocus();
+                    idle(300);
+                    shot(a, "help-" + (i + 1) + sfx);
+                }
+            }
+        }
+    }
+
+    /** A second display (AYN Thor): the first start's and Help's drawings there, with their touch actions. */
+    @Test
+    public void theBottomScreenDrawsTheStepAndTheQuestion() throws Exception {
+        games(true);
+        org.robolectric.shadows.ShadowDisplayManager.addDisplay("w1240dp-h1080dp-mdpi");
+        idle(300);
+        LauncherActivity a = launch();
+        assertEquals(LauncherActivity.Screen.SETUP, a.screenForTest());
+        CompanionScreen screen = a.companionForTest().screen();
+        assertTrue(screen.isShowing());
+        assertTrue(a.companionForTest().guideForTest());
+        assertTrue(screen.content() instanceof GuidePanel);
+        assertEquals(Schema.Kind.PIPE, ((GuidePanel)screen.content()).kindForTest());
+        TestSupport.screenshot(screen.content(), "dual-first-1");
+        press(a, app.getString(R.string.SETUP_CHOOSE_FOLDER));
+        pickFolder(a);
+        TestSupport.screenshot(a.companionForTest().screen().content(), "dual-first-2");
+        GameStore.prefs(a).edit().putBoolean(LauncherActivity.KEY_SETUP_DONE, true).commit();
+        a.goForTest(LauncherActivity.Screen.HELP);
+        idle(300);
+        for (int i = 0; i < LauncherActivity.HELP_AGAIN; i++) {   // the bottom screen's › twice
+            GuidePanel g = (GuidePanel)a.companionForTest().screen().content();
+            g.onAction(g.button(GuidePanel.RIGHT));
+            idle(300);
+        }
+        assertTrue(a.descriptionForTest(), a.descriptionForTest().startsWith(app.getString(R.string.HELP_A_AGAIN)));
+        View c = a.companionForTest().screen().content();
+        assertTrue(c instanceof GuidePanel);
+        assertEquals(Schema.Kind.LOOP, ((GuidePanel)c).kindForTest());
+        TestSupport.screenshot(c, "dual-help-3");
+        a.goForTest(LauncherActivity.Screen.LIBRARY);
+        idle(300);
+        assertFalse(a.companionForTest().guideForTest());
+        assertFalse(a.companionForTest().screen().content() instanceof GuidePanel);
+    }
+
     private void shot(LauncherActivity a, String name) throws Exception {
         if (a.focusForTest() == null)
             a.forceFocusForTest();

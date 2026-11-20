@@ -76,6 +76,8 @@ final class LibraryScreen {
         int queuePos;
         /** XBA-258: whether the game resumes where the player left off (Pack.resume), read for a Ready game only. */
         Pack.Resume resume = Pack.Resume.NO;
+        /** A prepared game's runs met this much code its preparation missed (its card says « +N new »). */
+        int found;
 
         Entry(String tid) {
             this.tid = tid;
@@ -240,6 +242,22 @@ final class LibraryScreen {
         en.prepared = GameState.prepared(f, en.chip);
         en.queuePos = env.queue.position(en.tid);
         en.resume = en.chip == GameState.Chip.READY ? Pack.resume(filesDir, en.tid) : Pack.Resume.NO;
+        en.found = en.prepared == GameState.Prepared.PREPARED || en.chip == GameState.Chip.READY && prepares
+                   ? found(filesDir, en) : 0;
+    }
+
+    /**
+     * What a prepared game's runs found that its preparation missed: an Xbox title's Self-healing offer (its seeds,
+     * work/<TID>/selfheal.json), the other consoles' discovered addresses beyond the pack's (cached count, no read).
+     */
+    static int found(File filesDir, Entry en) {
+        if (en.facts == null || en.facts.pack != Pack.Check.VALID)
+            return 0;
+        if (en.realTid()) {
+            SelfHeal.State s = SelfHeal.read(new File(new File(filesDir, "work"), en.tid));
+            return s.offer == SelfHeal.Offer.IMPROVE || s.offer == SelfHeal.Offer.PREPARE_AGAIN ? s.seeds : 0;
+        }
+        return Math.max(0, Pack.newlyDiscoveredNow(filesDir, en.tid));
     }
 
     /**
@@ -325,6 +343,8 @@ final class LibraryScreen {
 
     /** The colour of an entry's state: its preparation's when it says one (OK, WARN, neutral), else its chip's. */
     static int chipColor(Entry e) {
+        if (e.found > 0 && e.prepared != GameState.Prepared.OUTDATED)
+            return Theme.WARN;
         switch (e.prepared) {
         case PREPARED:
             return Theme.OK;
@@ -347,7 +367,7 @@ final class LibraryScreen {
 
     /** The card shows a state line: not for a plain « Ready » (no toolchain: nothing worth saying). */
     static boolean chipShown(Entry e) {
-        return e.chip != GameState.Chip.READY || e.prepared != GameState.Prepared.NONE;
+        return e.chip != GameState.Chip.READY || e.prepared != GameState.Prepared.NONE || e.found > 0;
     }
 
     static int chipColor(GameState.Chip c) {
@@ -374,6 +394,8 @@ final class LibraryScreen {
     static String chipText(Context c, Entry e) {
         if (e.chip == GameState.Chip.QUEUED && e.queuePos > 0)
             return c.getString(R.string.LIB_QUEUED_N, e.queuePos);
+        if (e.found > 0 && e.prepared != GameState.Prepared.OUTDATED)
+            return c.getString(R.string.LIB_NEW_CODE_N, e.found);
         if (e.prepared != GameState.Prepared.NONE)
             return c.getString(preparedLabel(e.prepared));
         return c.getString(chipLabel(e.chip));

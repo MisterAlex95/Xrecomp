@@ -82,4 +82,38 @@
     <string name="TIP_UPDATE_T">Cette version traduit mieux les jeux. Le jeu marche comme avant ; le préparer à nouveau récupère les correctifs. Vos sauvegardes sont gardées.</string>
     <string name="TIP_AT_ONCE_H">Jouable tout de suite</string>
     <string name="TIP_AT_ONCE_T">Ce jeu tourne dans l\'interpréteur : il se lance tout de suite. Préparer le traduit en code natif (quelques minutes) : plus fluide, plus économe en batterie. Vous pouvez jouer pendant ce temps.</string>
+
+    <!-- Les schémas de l'aide (Schema) -->
+    <string name="SCH_GAME">Votre jeu</string>
+    <string name="SCH_GAME_SUB">code de sa console</string>
+    <string name="SCH_PREPARE">Préparer</string>
+    <string name="SCH_PREPARE_SUB">traduire, compiler</string>
+    <string name="SCH_NATIVE">Code natif</string>
+    <string name="SCH_NATIVE_SUB">pleine vitesse</string>
+    <string name="SCH_READ">Lecture</string>
+    <string name="SCH_TRANSLATE">Traduction</string>
+    <string name="SCH_COMPILE">Compilation</string>
+    <string name="SCH_PACK">Paquet</string>
+    <string name="SCH_PLAY">Jouer</string>
+    <string name="SCH_PLAY_SUB">code natif</string>
+    <string name="SCH_MISSED">Code manqué</string>
+    <string name="SCH_MISSED_SUB">noté, plus lent</string>
+    <string name="SCH_AGAIN">Préparer à nouveau</string>
+    <string name="SCH_AGAIN_SUB">seul ce qui change</string>
+    <string name="SCH_FOUND">adresses trouvées</string>
+    <string name="SCH_CRASH">Après un plantage</string>
+    <string name="SCH_CRASH_SUB">préparé à nouveau, relancé</string>
+    <string name="SCH_GOOD">Bonne partie</string>
+    <string name="SCH_GOOD_SUB">amélioré entre-temps</string>
+    <string name="SCH_NOTHING">Rien de nouveau</string>
+    <string name="SCH_NOTHING_SUB">« besoin d\'un correctif »</string>
+    <string name="SCH_SAVES">Vos sauvegardes</string>
+    <string name="SCH_SAVES_SUB">gardées à part</string>
+    <string name="SCH_CODE">Code préparé</string>
+    <string name="SCH_CODE_SUB">refait librement</string>
+    <string name="SCH_FILE">Fichier du jeu</string>
+    <string name="SCH_FILE_SUB">GBA, PS1, N64, GC</string>
+    <string name="SCH_INTERP">Interpréteur</string>
+    <string name="SCH_INTERP_SUB">démarre tout de suite</string>
+    <string name="LIB_NEW_CODE_N">Préparé · +%1$d nouvelles</string>
 </resources>

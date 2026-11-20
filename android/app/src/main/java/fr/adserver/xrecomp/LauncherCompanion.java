@@ -30,6 +30,12 @@ final class LauncherCompanion {
     private int statusColor = Theme.TEXT_DIM;
     private android.graphics.Bitmap art;
     private boolean canPlay = true, preparing, artOnly;
+    /** The first start's or Help's drawing instead of the game (GuidePanel). */
+    private boolean guide;
+    private Schema.Kind guideKind;
+    private int guideFound;
+    private String guideCaption, guideLeft, guideRight;
+    private Runnable guideLeftAction, guideRightAction;
     /** Home's action label (Play, Prepare, Choose…); the library's (null: greyed). */
     private String homeAction, libraryAction;
     /** The focused library game instead of Home, and its action. */
@@ -67,7 +73,8 @@ final class LauncherCompanion {
         this.statusColor = statusColor;
         this.canPlay = canPlay;
         homeAction = action;
-        boolean was = preparing || library;
+        boolean was = preparing || library || guide;
+        guide = false;
         preparing = false;
         library = false;
         artOnly = false;
@@ -90,7 +97,8 @@ final class LauncherCompanion {
         this.statusColor = statusColor;
         this.art = art;
         libraryAction = action;
-        boolean was = library && !preparing;
+        boolean was = library && !preparing && !guide;
+        guide = false;
         library = true;
         preparing = false;
         artOnly = false;
@@ -110,6 +118,11 @@ final class LauncherCompanion {
         if (preparing)
             return;   // a running Prepare keeps its panel
         artOnly = true;
+        if (guide) {
+            guide = false;
+            screen.rebuild();
+            return;
+        }
         View v = screen.content();
         if (v instanceof LauncherPanel)
             ((LauncherPanel)v).setArtOnly(true);
@@ -132,8 +145,43 @@ final class LauncherCompanion {
         preparing = true;
         library = false;
         artOnly = false;
+        guide = false;
         if (!same)
             screen.rebuild();
+    }
+
+    /**
+     * The first start or Help: kind's drawing (count for LOOP), a caption, two touch actions (a null label: none).
+     * A running Prepare keeps its panel.
+     */
+    void guide(Schema.Kind kind, int found, String caption, String left, Runnable leftAction, String right,
+               Runnable rightAction) {
+        if (preparing)
+            return;
+        guideKind = kind;
+        guideFound = found;
+        guideCaption = caption;
+        guideLeft = left;
+        guideLeftAction = leftAction;
+        guideRight = right;
+        guideRightAction = rightAction;
+        boolean was = guide;
+        guide = true;
+        library = false;
+        artOnly = false;
+        View v = screen.content();
+        if (was && v instanceof GuidePanel)
+            fillGuide((GuidePanel)v);
+        else
+            screen.rebuild();
+    }
+
+    boolean guideForTest() {
+        return guide;
+    }
+
+    private void fillGuide(GuidePanel p) {
+        p.set(guideKind, guideFound, guideCaption, guideLeft, guideLeftAction, guideRight, guideRightAction);
     }
 
     private void fill(LauncherPanel p) {
@@ -156,6 +204,11 @@ final class LauncherCompanion {
                     Log.w(LauncherActivity.TAG, "launcher: cannot reach the Prepare service", e);
                 }
             });
+        }
+        if (guide) {
+            GuidePanel g = new GuidePanel(c);
+            fillGuide(g);
+            return g;
         }
         LauncherPanel p = new LauncherPanel(c, () -> {
             if (library) {
