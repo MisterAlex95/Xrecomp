@@ -3,7 +3,7 @@
  * writes and their endian modes, event fences, conditional writes, draw initiators, indirect buffers, interrupts,
  * the swap token, scratch register write-back; on the ring: a wait that stalls then resumes, also inside nested
  * indirect buffers, a packet across the end of the ring, a packet the CPU has not finished writing, the read pointer
- * written back; tiled rendering's predicate (the bin mask and select, a header's bit 0). */
+ * written back; tiled rendering's predicate (the bin mask and select, a header's bit 0); occlusion queries. */
 #include <stdio.h>
 #include <string.h>
 
@@ -274,6 +274,39 @@ int main(void)
     CHECK(!strcmp(xenos_cp_opcode_name(PM4_SET_BIN_MASK_LO), "SET_BIN_MASK_LO") &&
               xenos_cp_opcode_name(PM4_SET_BIN_SELECT_HI) && xenos_cp_opcode_name(PM4_SET_BIN_SELECT),
           "the bin opcodes have names");
+
+    /* ---- occlusion queries: EVENT_WRITE_ZPD on a sample-count block at 0xD000 (eight little-endian dwords:
+     * Total, ZFail, ZPass, StencilFail, each A and B). Begin: the block is cleared. End (Direct3D's 0xFFFFFEED in
+     * both ZPass halves, or both ZFail halves): cleared, then 1000 passed samples in Total_A and ZPass_A. ---- */
+    for (int k = 0; k < 8; k++)
+        mem[0xD000 / 4 + k] = 0x12345678u;
+    at = 0;
+    put(B, t0(XENOS_REG_RB_SAMPLE_COUNT_ADDR, 1, 0)), put(B, 0xD000);
+    put(B, t3(PM4_EVENT_WRITE_ZPD, 1)), put(B, 0x40 | 21); /* ZPASS_DONE, a high bit the register drops */
+    xenos_cp_execute(&cp, B, at);
+    CHECK(cp.regs[XENOS_REG_VGT_EVENT_INITIATOR] == 21, "zpd initiator %u", cp.regs[XENOS_REG_VGT_EVENT_INITIATOR]);
+    int zero = 1;
+    for (int k = 0; k < 8; k++)
+        zero &= mem[0xD000 / 4 + k] == 0;
+    CHECK(zero, "query begin: the block cleared");
+    for (int pass = 0; pass < 2; pass++) {
+        for (int k = 0; k < 8; k++)
+            mem[0xD000 / 4 + k] = 0x12345678u;
+        mem[0xD000 / 4 + (pass ? 2 : 4)] = mem[0xD000 / 4 + (pass ? 3 : 5)] = 0xFFFFFEEDu;
+        at = 0;
+        put(B, t3(PM4_EVENT_WRITE_ZPD, 1)), put(B, 21);
+        xenos_cp_execute(&cp, B, at);
+        int ok = mem[0xD000 / 4] == 0xE8030000u && mem[0xD000 / 4 + 4] == 0xE8030000u; /* 1000, little-endian */
+        for (int k = 0; k < 8; k++)
+            ok &= k == 0 || k == 4 || mem[0xD000 / 4 + k] == 0;
+        CHECK(ok, "query end via %s: %08X %08X %08X %08X %08X %08X", pass ? "ZFail" : "ZPass", mem[0xD000 / 4],
+              mem[0xD000 / 4 + 1], mem[0xD000 / 4 + 2], mem[0xD000 / 4 + 3], mem[0xD000 / 4 + 4], mem[0xD000 / 4 + 5]);
+    }
+    mem[0xD000 / 4 + 4] = 0xFFFFFEEDu, mem[0xD000 / 4 + 5] = 0; /* one half only: not an end */
+    at = 0;
+    put(B, t3(PM4_EVENT_WRITE_ZPD, 1)), put(B, 21);
+    xenos_cp_execute(&cp, B, at);
+    CHECK(mem[0xD000 / 4] == 0 && mem[0xD000 / 4 + 4] == 0, "one sentinel half is a begin");
 
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "all command processor checks passed", failures,
            failures == 1 ? "" : "s");

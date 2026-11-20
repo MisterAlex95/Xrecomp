@@ -368,6 +368,25 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
         TRACE("event_ext %u -> %08X\n", init & 0x3F, addr & ~3u);
         break;
     }
+    case PM4_EVENT_WRITE_ZPD: {
+        /* an occlusion query's begin or end (Xenia: ExecutePacketType3_EVENT_WRITE_ZPD). The GPU would write the
+         * sample counts to the block at RB_SAMPLE_COUNT_ADDR: eight little-endian dwords, Total, ZFail, ZPass and
+         * StencilFail, each as an A and a B half. Direct3D marks the end by writing 0xFFFFFEED (big-endian) to both
+         * ZPass halves, or both ZFail halves in older versions, then spins on GetData until the GPU replaces it: the
+         * block is cleared, and at the end a fixed count of 1000 passed samples is reported (Xenia's default), so
+         * the query completes and the object is drawn. */
+        uint32_t init = rd(cp, r);
+        xenos_cp_write_reg(cp, XENOS_REG_VGT_EVENT_INITIATOR, init & 0x3F);
+        uint32_t addr = cp->regs[XENOS_REG_RB_SAMPLE_COUNT_ADDR] & ~3u & 0x1FFFFFFFu, w[8] = {0};
+        for (int k = 0; k < 8 && cp->read32; k++)
+            w[k] = cp->read32(cp->ctx, (addr + 4 * (uint32_t)k) & 0x1FFFFFFFu);
+        int end = (w[4] == 0xFFFFFEEDu && w[5] == 0xFFFFFEEDu) || (w[2] == 0xFFFFFEEDu && w[3] == 0xFFFFFEEDu);
+        for (int k = 0; k < 8 && cp->write32; k++)
+            cp->write32(cp->ctx, (addr + 4 * (uint32_t)k) & 0x1FFFFFFFu,
+                        end && (k == 0 || k == 4) ? __builtin_bswap32(1000u) : 0);
+        TRACE("event_zpd %u -> %08X, query %s\n", init & 0x3F, addr, end ? "end" : "begin");
+        break;
+    }
     case PM4_DRAW_INDX:
         if (count >= 2) {
             rd(cp, r); /* viz query condition */
