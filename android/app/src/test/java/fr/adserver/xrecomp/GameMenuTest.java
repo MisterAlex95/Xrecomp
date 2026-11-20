@@ -179,6 +179,7 @@ public class GameMenuTest {
         activity.setContentView(new FakeGame(activity));
         host = new FakeHost();
         menu = new GameMenu(activity, host);
+        menu.saver = Runnable::run;   // onStop's automatic save in place
         menu.setAnimate(false);
         menu.attach();
         menu.onStart();
@@ -592,6 +593,7 @@ public class GameMenuTest {
                                 new Ps1Discs.Disc("Game (Disc 2).chd", "/g/Game (Disc 2).chd", 2, false));
         final List<Ps1Discs.Disc> chosen = host.chosen;
         menu = new GameMenu(activity, host);
+        menu.saver = Runnable::run;   // onStop's automatic save in place
         menu.setAnimate(false);
         menu.attach();
         menu.onStart();

@@ -29,6 +29,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.function.LongSupplier;
 
 /**
@@ -528,7 +530,10 @@ final class GameMenu {
         started = false;
         handler.removeCallbacks(perfTick);
         handler.removeCallbacks(stateTick);
-        autoSave("background");   // Back to launcher, Home, the screen off: the next start resumes here
+        // Back to launcher, Home, the screen off: the next start resumes here. Off the UI thread: an Xbox 360 state
+        // took 2.3 s on the Thor, the whole time onStop held the UI thread (the runtime's lock orders it with a
+        // start that comes meanwhile; the slot is written to a temporary file and renamed).
+        saver.execute(() -> autoSave("background"));
         settleLauncher();
     }
 
@@ -1410,13 +1415,23 @@ final class GameMenu {
     }
 
     /** Saves the automatic slot when resuming applies (leaving the game: quit, background, back to launcher). */
+    /** Where onStop's automatic save runs: one thread, in order (tests run it in place). */
+    Executor saver = SAVER;
+    private static final Executor SAVER = Executors.newSingleThreadExecutor(r -> {
+        Thread th = new Thread(r, "auto-save");
+        th.setDaemon(true);
+        return th;
+    });
+
     void autoSave(String why) {
         // XBA-265: an Xbox title asks its runtime even when it cannot resume: the runtime writes why beside the slot
         // (save/xbox-<TID>/auto.why, no capture then), which the title's Home shows.
         if (!autoResumes() && !(GameStore.autoResume(activity) && xboxTitle()))
             return;
+        long t0 = SystemClock.elapsedRealtime();
         int code = host.saveState(AUTO_SLOT);
-        Log.i(LauncherActivity.TAG, "shell: menu: automatic slot (" + why + "): " + code);
+        Log.i(LauncherActivity.TAG, "shell: menu: automatic slot (" + why + "): " + code + " in "
+              + (SystemClock.elapsedRealtime() - t0) + " ms");
     }
 
     void setAutoResume(boolean on) {
