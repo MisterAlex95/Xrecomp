@@ -29,7 +29,7 @@ final class GameCard extends View {
     private int monoColor = Theme.ACCENT_DEEP;
     private String title = "", chip = "", badge = "", resume = "";
     private int chipColor = Theme.TEXT_DIM;
-    private boolean chipShown = true, dim, favourite;
+    private boolean chipShown = true, dim, favourite, remote;
     private float focusT;
     private ValueAnimator anim;
 
@@ -72,6 +72,19 @@ final class GameCard extends View {
 
     String resumeForTest() {
         return resume;
+    }
+
+    /**
+     * XBA-319: a game of the network library, not on the device: instead of a monogram, the « remote content » art (a
+     * cloud with a down arrow on the console's hue; set the key to the console's id). No cover before the download.
+     */
+    void setRemote(boolean r) {
+        remote = r;
+        invalidate();
+    }
+
+    boolean remoteForTest() {
+        return remote;
     }
 
     /** XBA-206: a favourite, a star in the art's top right corner. */
@@ -162,6 +175,35 @@ final class GameCard extends View {
         invalidate();
     }
 
+    /** The « remote content » glyph: a cloud (three discs on a rounded base) with a down arrow cut through it. */
+    private void drawCloud(Canvas c, RectF r, float side) {
+        float cx = r.centerX(), cy = r.centerY() - side * 0.02f, u = side * 0.11f;
+        Path cloud = new Path();
+        cloud.addCircle(cx - 1.15f * u, cy + 0.25f * u, 0.95f * u, Path.Direction.CW);
+        cloud.addCircle(cx + 0.1f * u, cy - 0.45f * u, 1.35f * u, Path.Direction.CW);
+        cloud.addCircle(cx + 1.35f * u, cy + 0.35f * u, 0.85f * u, Path.Direction.CW);
+        cloud.addRoundRect(new RectF(cx - 2.1f * u, cy + 0.1f * u, cx + 2.2f * u, cy + 1.2f * u), 0.55f * u, 0.55f * u,
+                           Path.Direction.CW);
+        fillP.setShader(null);
+        fillP.setColor(Theme.alpha(Theme.TEXT_BRIGHT, 0.9f));
+        c.drawPath(cloud, fillP);
+        // The down arrow, in the art's own dark colour so it reads as cut out of the cloud.
+        Path arrow = new Path();
+        float aw = 0.32f * u, top = cy - 0.75f * u, tip = cy + 1.05f * u, head = 0.8f * u;
+        arrow.moveTo(cx - aw / 2, top);
+        arrow.lineTo(cx + aw / 2, top);
+        arrow.lineTo(cx + aw / 2, tip - head * 0.75f);
+        arrow.lineTo(cx + head * 0.75f, tip - head * 0.75f);
+        arrow.lineTo(cx, tip);
+        arrow.lineTo(cx - head * 0.75f, tip - head * 0.75f);
+        arrow.lineTo(cx - aw / 2, tip - head * 0.75f);
+        arrow.close();
+        float[] hsv = new float[3];
+        android.graphics.Color.colorToHSV(monoColor, hsv);
+        fillP.setColor(Theme.hsv(hsv[0] + 34, 0.70f, 0.22f));
+        c.drawPath(arrow, fillP);
+    }
+
     @Override
     protected void onDraw(Canvas c) {
         float w = getWidth(), t = focusT;
@@ -187,6 +229,9 @@ final class GameCard extends View {
                                                Shader.TileMode.CLAMP));
             c.drawRect(artR, fillP);
             fillP.setShader(null);
+            if (remote) {
+                drawCloud(c, artR, side);
+            } else {
             String s = initials.isEmpty() ? "?" : initials;
             monoP.setColor(Theme.alpha(Theme.TEXT_BRIGHT, 0.94f));
             monoP.setTextSize(side * 0.38f);
@@ -196,6 +241,7 @@ final class GameCard extends View {
             Paint.FontMetrics fm = monoP.getFontMetrics();
             c.drawText(s, artR.centerX() - monoP.measureText(s) / 2, artR.centerY() - (fm.ascent + fm.descent) / 2,
                        monoP);
+            }
         }
         if (dim || isPressed()) {
             fillP.setShader(null);

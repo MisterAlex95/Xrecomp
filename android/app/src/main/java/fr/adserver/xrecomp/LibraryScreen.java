@@ -55,6 +55,10 @@ final class LibraryScreen {
         long now = System.currentTimeMillis();
         /** Title IDs whose pack the shell refused this session. */
         java.util.Set<String> packDropped = Collections.emptySet();
+        /** XBA-319: the network library's games not on the device (RemoteLibrary.notLocal), by key. */
+        Map<String, RemoteLibrary.Game> remote = Collections.emptyMap();
+        /** XBA-321: the downloads (NetDownloads), by key. */
+        Map<String, NetDownloads.Job> downloads = Collections.emptyMap();
 
         /** The folder of item i can be read (accessible, and not one of noAccess). */
         boolean accessible(LibraryIndex.Item i) {
@@ -76,6 +80,10 @@ final class LibraryScreen {
         int queuePos;
         /** XBA-258: whether the game resumes where the player left off (Pack.resume), read for a Ready game only. */
         Pack.Resume resume = Pack.Resume.NO;
+        /** XBA-319: a game of the network library not on the device (then no record, no variant), else null. */
+        RemoteLibrary.Game remote;
+        /** XBA-321: its download job (any state), or null. */
+        NetDownloads.Job download;
 
         Entry(String tid) {
             this.tid = tid;
@@ -86,6 +94,8 @@ final class LibraryScreen {
                 return record.title;
             if (active != null && !active.title.isEmpty())
                 return active.title;
+            if (remote != null)
+                return remote.title;
             return tid;
         }
 
@@ -126,7 +136,7 @@ final class LibraryScreen {
          * theme, no XBE art).
          */
         boolean realTid() {
-            return !Library.isLocalKey(tid) && !otherConsole();
+            return !Library.isLocalKey(tid) && !RemoteLibrary.isRemoteKey(tid) && !otherConsole();
         }
     }
 
@@ -160,7 +170,16 @@ final class LibraryScreen {
             en.variants = e.getValue();
             m.put(e.getKey(), en);
         }
+        for (RemoteLibrary.Game rg : env.remote.values()) {   // XBA-319: games of the network library
+            if (m.containsKey(rg.key))
+                continue;
+            Entry en = new Entry(rg.key);
+            en.remote = rg;
+            m.put(rg.key, en);
+        }
         for (Library.Record r : g.games.values()) {
+            if (RemoteLibrary.isRemoteKey(r.titleId))
+                continue;   // never a record for a remote key (none is written: an older build's, say)
             Entry en = m.get(r.titleId);
             if (en == null) {
                 en = new Entry(r.titleId);
@@ -188,12 +207,29 @@ final class LibraryScreen {
         List<LibraryIndex.Item> v = x == null ? null : x.games().get(tid);
         if (v != null)
             en.variants = v;
+        if (RemoteLibrary.isRemoteKey(tid)) {
+            en.record = null;
+            en.remote = env.remote.get(tid);
+        }
         fill(filesDir, en, env);
         return en;
     }
 
     /** The active variant, the facts and the chip of en (reads the pack and the Prepare status: small files). */
     static void fill(File filesDir, Entry en, Env env) {
+        if (RemoteLibrary.isRemoteKey(en.tid)) {   // XBA-319: nothing of it on the device: no pack, no Prepare
+            GameState.Facts f = new GameState.Facts();
+            f.titleId = en.tid;
+            f.console = en.console();
+            en.download = env.downloads.get(en.tid);
+            f.source = en.remote != null ? GameState.Source.REMOTE : GameState.Source.MISSING;
+            f.downloading = en.download != null && en.download.active();
+            en.facts = f;
+            en.chip = GameState.chip(f);
+            en.prepared = GameState.Prepared.NONE;
+            en.resume = Pack.Resume.NO;
+            return;
+        }
         en.active = LibraryIndex.active(en.variants, en.record == null ? null : en.record.source);
         GameState.Facts f = new GameState.Facts();
         f.titleId = en.tid;
@@ -304,6 +340,10 @@ final class LibraryScreen {
             return R.string.LIB_CHIP_SOURCE_GONE;
         case NOT_PLAYABLE_YET:
             return R.string.LIB_CHIP_NOT_PLAYABLE_YET;
+        case ON_NETWORK:
+            return R.string.NET_CHIP_ON_NETWORK;
+        case DOWNLOADING:
+            return R.string.NET_CHIP_DOWNLOADING;
         default:
             return R.string.STATE_MISSING;
         }
@@ -361,7 +401,10 @@ final class LibraryScreen {
             return Theme.ACCENT;
         case NOT_IMPORTED:
         case NOT_PLAYABLE_YET:
+        case ON_NETWORK:
             return Theme.TEXT_DIM;   // neutral: nothing is wrong (ACCENT is the « ready » green in stock)
+        case DOWNLOADING:
+            return Theme.ACCENT;
         case PREPARE_FAILED:
         case PACK_INVALID:
             return Theme.ERROR;
@@ -374,6 +417,10 @@ final class LibraryScreen {
     static String chipText(Context c, Entry e) {
         if (e.chip == GameState.Chip.QUEUED && e.queuePos > 0)
             return c.getString(R.string.LIB_QUEUED_N, e.queuePos);
+        if (e.chip == GameState.Chip.DOWNLOADING && e.download != null)
+            return NetDownloads.RUNNING.equals(e.download.state)
+                   ? c.getString(R.string.NET_CHIP_DOWNLOADING_N, e.download.percent())
+                   : c.getString(R.string.NET_CHIP_WAITING);
         if (e.prepared != GameState.Prepared.NONE)
             return c.getString(preparedLabel(e.prepared));
         return c.getString(chipLabel(e.chip));
@@ -400,6 +447,8 @@ final class LibraryScreen {
 
     /** The title image from the shared cache (files/art/<TID>.png, TitleArt), decoded once per title; null if none. */
     static Bitmap art(File filesDir, Map<String, Bitmap> cache, Entry e) {
+        if (RemoteLibrary.isRemoteKey(e.tid))
+            return null;   // XBA-319: no cover before the download, the card draws the « remote content » art
         if (e.otherConsole() && !Library.isLocalKey(e.tid)) {   // a GBA / PS1 / N64 game: its cover (CoverArt)
             if (!cache.containsKey(e.tid))
                 cache.put(e.tid, CoverArt.load(filesDir, e.tid));

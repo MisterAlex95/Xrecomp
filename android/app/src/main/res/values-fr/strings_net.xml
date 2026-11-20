@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- La bibliothèque réseau (XBA-319). -->
+<resources>
+    <string name="NET_SOURCES">Sources réseau</string>
+    <string name="NET_SOURCES_NONE">Aucune</string>
+    <string name="NET_SOURCES_N">%1$d sources</string>
+    <string name="NET_ADD_TORRENT">Ajouter un fichier .torrent</string>
+    <string name="NET_ADD_TORRENT_SUB">Un par console : ses jeux s\'affichent dans la bibliothèque</string>
+    <string name="NET_PASTE_MAGNET">Coller un lien magnet</string>
+    <string name="NET_PASTE_MAGNET_SUB">Copiez d\'abord le lien</string>
+    <string name="NET_MOBILE_DATA">Télécharger en données mobiles</string>
+    <string name="NET_ON">Oui</string>
+    <string name="NET_OFF">Non</string>
+    <string name="NET_SOURCE_GAMES_N">%1$d jeux</string>
+    <string name="NET_SOURCE_FETCHING">Recherche…</string>
+    <string name="NET_SOURCE_NOT_FOUND">Personne ne le partage en ce moment</string>
+    <string name="NET_SOURCE_KEEP">La garder</string>
+    <string name="NET_SOURCE_REMOVE">Retirer de la bibliothèque</string>
+    <string name="NET_SOURCE_REMOVE_SUB">Les jeux téléchargés restent</string>
+    <string name="NET_SOURCE_REMOVED">%1$s n\'est plus dans la bibliothèque. Les jeux téléchargés restent.</string>
+    <string name="NET_CONSOLE_TITLE">Pour quelle console sont ses jeux ?</string>
+    <string name="NET_CONSOLE_BY_NAME">Celle de chaque fichier (d\'après son nom)</string>
+    <string name="NET_SOURCE_ADDED">%1$s ajouté : %2$d jeux dans la bibliothèque.</string>
+    <string name="NET_MAGNET_ADDED">Lien magnet ajouté : ses jeux s\'affichent dès qu\'un pair a envoyé sa liste.</string>
+    <string name="NET_NOT_MAGNET">Le presse-papiers ne contient pas de lien magnet. Copiez-en un, puis collez-le ici.</string>
+    <string name="NET_BAD_TORRENT">Ce fichier n\'est pas un torrent que l\'application sait lire (%1$s).</string>
+
+    <string name="NET_CHIP_ON_NETWORK">Sur le réseau</string>
+    <string name="NET_CHIP_DOWNLOADING">Téléchargement</string>
+    <string name="NET_CHIP_DOWNLOADING_N">Téléchargement · %1$d %%</string>
+    <string name="NET_CHIP_WAITING">En attente de téléchargement</string>
+    <string name="NET_DOWNLOAD">Télécharger</string>
+    <string name="NET_DOWNLOAD_SIZE">Télécharger (%1$s)</string>
+    <string name="NET_DOWNLOAD_SUB">%1$s libres · puis il est installé comme les autres jeux</string>
+    <string name="NET_CANCEL_DOWNLOAD">Annuler le téléchargement</string>
+    <string name="NET_CANCEL_DOWNLOAD_SUB">Ce qui a été téléchargé est supprimé</string>
+    <string name="NET_RETRY">Réessayer</string>
+    <string name="NET_FROM">Depuis %1$s</string>
+    <string name="NET_PROGRESS">%1$d %% · %2$s/s · %3$d pairs</string>
+    <string name="NET_WAIT_WIFI">En attente du Wi-Fi (ou autorisez les données mobiles dans Bibliothèque › Options › Sources réseau)</string>
+    <string name="NET_WAIT_PEERS">Personne ne partage ce jeu en ce moment : l\'application continue d\'essayer</string>
+    <string name="NET_WAIT_META">En attente de la liste des jeux de la source</string>
+    <string name="NET_WAIT_SPACE">Pas assez d\'espace libre pour la suite</string>
+    <string name="NET_FAILED">Le téléchargement a échoué : %1$s</string>
+    <string name="NET_NO_SPACE">%1$s demande %2$s, seuls %3$s sont libres.</string>
+    <string name="NET_NO_STORAGE">Aucun stockage où télécharger.</string>
+    <string name="NET_QUEUED_NOTE">%1$s va se télécharger : l\'avancement s\'affiche sur sa carte.</string>
+    <string name="NET_DONE_NOTE">%1$s est téléchargé.</string>
+    <string name="NET_CANCELLED_NOTE">Le téléchargement de %1$s est annulé.</string>
+
+    <string name="NET_CHANNEL">Téléchargements</string>
+    <string name="NET_CHANNEL_DESC">Jeux téléchargés depuis vos sources réseau</string>
+    <string name="NET_NOTIF_TITLE">Téléchargement de %1$s</string>
+    <string name="NET_NOTIF_TITLE_PLAIN">Bibliothèque réseau</string>
+</resources>

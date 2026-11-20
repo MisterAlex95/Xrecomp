@@ -438,4 +438,66 @@ public class LibraryScreenTest {
         assertEquals(Console.XBOX, Console.ofKey(FABLE));
         assertEquals(Console.XBOX, Console.ofKey("local-0a1b2c3d"));
     }
+
+    @Test
+    public void gamesOnTheNetworkAreEntriesWithoutRecordsOrPacks() throws Exception {
+        RemoteLibrary.Source s = RemoteLibrary.addTorrent(files, TorrentMetaTest.torrent("Mixed", false,
+                TorrentMetaTest.files(TorrentMetaTest.file(100, "Halo (USA).iso"),
+                                      TorrentMetaTest.file(8, "Golden Sun.gba"),
+                                      TorrentMetaTest.file(9, "Fable.iso"))), null, 1);
+        LibraryIndex x = new LibraryIndex();
+        LibraryIndex.Item fable = iso(FABLE, "Fable", "Fable.iso", 1);
+        fable.size = 9;   // the same file, downloaded: the local game wins
+        x.items.add(fable);
+        Library.Games g = new Library.Games();
+        LibraryScreen.Env env = env();
+        env.toolchain = true;
+        env.remote = RemoteLibrary.notLocal(files, x);
+        assertEquals(2, env.remote.size());
+        String haloKey = null, gbaKey = null;
+        for (RemoteLibrary.Game rg : env.remote.values()) {
+            if (rg.console == Console.GBA)
+                gbaKey = rg.key;
+            else
+                haloKey = rg.key;
+        }
+        NetDownloads.Job j = new NetDownloads.Job();
+        j.key = gbaKey;
+        j.state = NetDownloads.RUNNING;
+        j.done = 4;
+        j.total = 8;
+        env.downloads = java.util.Collections.singletonMap(gbaKey, j);
+
+        List<LibraryScreen.Entry> l = LibraryScreen.entries(files, g, x, env);
+        assertEquals(3, l.size());
+        assertEquals("Fable", l.get(0).title());
+        assertEquals("Golden Sun", l.get(1).title());
+        assertEquals("Halo", l.get(2).title());
+        LibraryScreen.Entry halo = l.get(2), gba = l.get(1);
+        assertEquals(GameState.Chip.ON_NETWORK, halo.chip);
+        assertFalse(halo.realTid());
+        assertNull(halo.record);
+        assertNotNull(halo.remote);
+        assertEquals(Console.XBOX, halo.console());
+        assertEquals(GameState.Chip.DOWNLOADING, gba.chip);
+        assertEquals(Console.GBA, gba.console());
+        assertNull(LibraryScreen.art(files, new java.util.HashMap<>(), halo));
+        assertEquals(50, gba.download.percent());
+
+        // A record left under a remote key (never written by this build) is ignored.
+        Library.Record stray = new Library.Record();
+        stray.titleId = haloKey;
+        stray.title = "Stray";
+        g.put(stray);
+        l = LibraryScreen.entries(files, g, x, env);
+        assertEquals(3, l.size());
+        assertEquals("Halo", LibraryScreen.entry(files, haloKey, g, x, env).title());
+        assertEquals(GameState.Chip.ON_NETWORK, LibraryScreen.entry(files, haloKey, g, x, env).chip);
+
+        // Its source gone: the entry leaves the grid.
+        RemoteLibrary.remove(files, s.id);
+        env.remote = RemoteLibrary.notLocal(files, x);
+        assertEquals(1, LibraryScreen.entries(files, new Library.Games(), x, env).size());
+        assertEquals(GameState.Chip.GONE, LibraryScreen.entry(files, haloKey, g, x, env).chip);
+    }
 }

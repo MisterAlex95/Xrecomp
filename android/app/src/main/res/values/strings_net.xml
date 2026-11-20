@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The network library (XBA-319, docs « Network library »): torrent sources, games listed before they are
+     downloaded, their downloads. A file of its own so that it does not collide with other strings edits. -->
+<resources>
+    <!-- Library › Options -->
+    <string name="NET_SOURCES">Network sources</string>
+    <string name="NET_SOURCES_NONE">None</string>
+    <string name="NET_SOURCES_N">%1$d sources</string>
+    <string name="NET_ADD_TORRENT">Add a .torrent file</string>
+    <string name="NET_ADD_TORRENT_SUB">One per console: its games show in the library</string>
+    <string name="NET_PASTE_MAGNET">Paste a magnet link</string>
+    <string name="NET_PASTE_MAGNET_SUB">Copy the link first</string>
+    <string name="NET_MOBILE_DATA">Download on mobile data</string>
+    <string name="NET_ON">On</string>
+    <string name="NET_OFF">Off</string>
+    <string name="NET_SOURCE_GAMES_N">%1$d games</string>
+    <string name="NET_SOURCE_FETCHING">Looking for it…</string>
+    <string name="NET_SOURCE_NOT_FOUND">Nobody shares it now</string>
+    <string name="NET_SOURCE_KEEP">Keep it</string>
+    <string name="NET_SOURCE_REMOVE">Remove from the library</string>
+    <string name="NET_SOURCE_REMOVE_SUB">Downloaded games stay</string>
+    <string name="NET_SOURCE_REMOVED">%1$s is no longer in the library. Downloaded games stay.</string>
+    <string name="NET_CONSOLE_TITLE">Which console are its games for?</string>
+    <string name="NET_CONSOLE_BY_NAME">Each file\'s own (by its name)</string>
+    <string name="NET_SOURCE_ADDED">%1$s added: %2$d games in the library.</string>
+    <string name="NET_MAGNET_ADDED">Magnet link added: its games show once a peer has sent its list.</string>
+    <string name="NET_NOT_MAGNET">The clipboard holds no magnet link. Copy one, then paste it here.</string>
+    <string name="NET_BAD_TORRENT">This file is not a torrent this app can read (%1$s).</string>
+
+    <!-- A game on the network -->
+    <string name="NET_CHIP_ON_NETWORK">On the network</string>
+    <string name="NET_CHIP_DOWNLOADING">Downloading</string>
+    <string name="NET_CHIP_DOWNLOADING_N">Downloading · %1$d %%</string>
+    <string name="NET_CHIP_WAITING">Waiting to download</string>
+    <string name="NET_DOWNLOAD">Download</string>
+    <string name="NET_DOWNLOAD_SIZE">Download (%1$s)</string>
+    <string name="NET_DOWNLOAD_SUB">%1$s free · then it is set up like any game</string>
+    <string name="NET_CANCEL_DOWNLOAD">Cancel the download</string>
+    <string name="NET_CANCEL_DOWNLOAD_SUB">What was downloaded is deleted</string>
+    <string name="NET_RETRY">Try again</string>
+    <string name="NET_FROM">From %1$s</string>
+    <string name="NET_PROGRESS">%1$d %% · %2$s/s · %3$d peers</string>
+    <string name="NET_WAIT_WIFI">Waiting for Wi-Fi (or allow mobile data in Library › Options › Network sources)</string>
+    <string name="NET_WAIT_PEERS">Nobody shares this game right now: it keeps trying</string>
+    <string name="NET_WAIT_META">Waiting for the list of the source\'s games</string>
+    <string name="NET_WAIT_SPACE">Not enough free space for the rest</string>
+    <string name="NET_FAILED">The download failed: %1$s</string>
+    <string name="NET_NO_SPACE">%1$s needs %2$s, only %3$s is free.</string>
+    <string name="NET_NO_STORAGE">No storage to download into.</string>
+    <string name="NET_QUEUED_NOTE">%1$s will download: it shows on its card.</string>
+    <string name="NET_DONE_NOTE">%1$s is downloaded.</string>
+    <string name="NET_CANCELLED_NOTE">The download of %1$s is cancelled.</string>
+
+    <!-- The notification -->
+    <string name="NET_CHANNEL">Downloads</string>
+    <string name="NET_CHANNEL_DESC">Games downloaded from your network sources</string>
+    <string name="NET_NOTIF_TITLE">Downloading %1$s</string>
+    <string name="NET_NOTIF_TITLE_PLAIN">Network library</string>
+</resources>

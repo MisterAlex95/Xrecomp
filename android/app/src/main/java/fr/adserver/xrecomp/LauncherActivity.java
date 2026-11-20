@@ -195,6 +195,7 @@ public class LauncherActivity extends Activity {
     static final int REQ_SAVES_EXPORT = 9;
     private static final int REQ_SAVES_IMPORT = 10;
     private static final int REQ_X360_KEY = 11;   // XBA-282
+    private static final int REQ_TORRENT = 12;    // XBA-320
     /** The titles the pending « Export saves » writes (set before the picker opens), and its key (null: all). */
     /**
      * The games of an export waiting on the file picker: kept in the saved state (STATE_EXPORT_KEYS), since the
@@ -596,6 +597,7 @@ public class LauncherActivity extends Activity {
         showAppUpdateOutcome();
         updateAtLaunch();
         cloudAutoSync();
+        netKickIfNeeded();
         poller.removeCallbacks(pollTick);
         poller.postDelayed(pollTick, PREPARE_POLL_MS);
         // N64 shader warm-up: after an app update, and what was asked while a game ran (never next to a Prepare)
@@ -5007,6 +5009,8 @@ public class LauncherActivity extends Activity {
         if (!resumed)
             return;
         poller.postDelayed(pollTick, PREPARE_POLL_MS);
+        if (++netPolls % LIBRARY_POLL_EVERY == 0)
+            netPoll();
         if (screen == Screen.DIRECT) {
             directPoll();
         } else if (screen == Screen.PREPARE) {
@@ -5349,7 +5353,8 @@ public class LauncherActivity extends Activity {
 
     /** The game library is on: a library folder is set, or the launcher knows two games or more. */
     private boolean libraryOn() {
-        return !Library.folders(this).isEmpty() || games.games.size() >= 2;
+        return !Library.folders(this).isEmpty() || games.games.size() >= 2
+               || !RemoteLibrary.sources(getFilesDir()).isEmpty();   // XBA-319
     }
 
     private void setIndex(LibraryIndex x) {
@@ -5395,6 +5400,11 @@ public class LauncherActivity extends Activity {
         e.queue = PrepareProtocol.readQueue(PrepareProtocol.queueFile(getFilesDir()));
         e.packDropped = droppedPacks;
         e.toolkit = Toolchain.toolkitDigest(this);
+        e.remote = RemoteLibrary.notLocal(getFilesDir(), index);   // XBA-319
+        java.util.Map<String, NetDownloads.Job> d = new java.util.HashMap<>();
+        for (NetDownloads.Job j : NetDownloads.read(getFilesDir()))
+            d.put(j.key, j);
+        e.downloads = d;
         return e;
     }
 
@@ -5484,6 +5494,10 @@ public class LauncherActivity extends Activity {
      * why it does not play yet).
      */
     private void openGame(LibraryScreen.Entry e) {
+        if (RemoteLibrary.isRemoteKey(e.tid)) {   // XBA-319: not on the device: its download sheet, no Home
+            openRemoteGame(e);
+            return;
+        }
         if (e.directLaunch()) {
             // Its Home: Play and Prepare with the toolchain (GBA, PS1, N64, GameCube: XBA-264); an N64 game's always
             // (Play and its pak, XBA-174).
@@ -5518,6 +5532,10 @@ public class LauncherActivity extends Activity {
 
     /** Start on a card (or the bottom screen's big button): the game's primary action, without opening Home. */
     private void libraryPrimary(LibraryScreen.Entry e) {
+        if (RemoteLibrary.isRemoteKey(e.tid)) {
+            libraryAction(e);
+            return;
+        }
         if (e.directLaunch()) {
             launchRom(e);
             return;
@@ -5621,6 +5639,12 @@ public class LauncherActivity extends Activity {
         if (e == null)
             return;
         switch (e.chip) {
+        case ON_NETWORK:   // XBA-321
+            startDownload(e);
+            break;
+        case DOWNLOADING:
+            openRemoteGame(e);
+            break;
         case PREPARING:
             go(Screen.PREPARE);
             break;
@@ -5661,6 +5685,10 @@ public class LauncherActivity extends Activity {
             return getString(R.string.LIB_COPY);
         case NO_FILE_ACCESS:
             return getString(R.string.LIB_CHOOSE_FOLDER);
+        case ON_NETWORK:
+            return getString(R.string.NET_DOWNLOAD);
+        case DOWNLOADING:
+            return LibraryScreen.chipText(this, e);
         default:
             return null;
         }
@@ -5787,7 +5815,7 @@ public class LauncherActivity extends Activity {
 
     /** Y: scan the library folders again (or choose one). */
     private void rescanLibrary() {
-        if (Library.folders(this).isEmpty()) {
+        if (Library.folders(this).isEmpty() && LibraryScanner.netRoot(this) == null) {
             onChooseLibraryFolder();
             return;
         }
@@ -5907,6 +5935,7 @@ public class LauncherActivity extends Activity {
             }
             libArt.values().removeIf(java.util.Objects::isNull);   // art the scan made shows now
             fetchCovers(r.index);
+            netAfterScan();   // XBA-321: a game just downloaded goes on (import, Prepare)
             if (libEntries.isEmpty())
                 focusTid = null;   // the first games found: the focus goes to the selected one, not the folder tile
         }
@@ -5923,7 +5952,7 @@ public class LauncherActivity extends Activity {
         List<String> parts = new ArrayList<>();
         if (scanning())
             parts.add(getString(R.string.LIB_SCANNING, scanFound));
-        else if (Library.folders(this).isEmpty())
+        else if (Library.folders(this).isEmpty() && RemoteLibrary.sources(getFilesDir()).isEmpty())
             parts.add(getString(R.string.LIB_NO_FOLDER));
         else if (libEntries.isEmpty())
             parts.add(getString(R.string.LIB_EMPTY));
@@ -6093,8 +6122,10 @@ public class LauncherActivity extends Activity {
     /** A card of the library for e (the grid's or the « Recently played » row's). */
     private GameCard libCard(LibraryScreen.Entry e) {
         GameCard c = new GameCard(this);
-        c.setGame(LibraryScreen.art(getFilesDir(), libArt, e), e.tid, e.title(), LibraryScreen.chipText(this, e),
-                  LibraryScreen.chipColor(e));
+        boolean remote = RemoteLibrary.isRemoteKey(e.tid);   // XBA-319: the « remote content » art on its console's hue
+        c.setGame(LibraryScreen.art(getFilesDir(), libArt, e), remote ? e.console().id : e.tid, e.title(),
+                  LibraryScreen.chipText(this, e), LibraryScreen.chipColor(e));
+        c.setRemote(remote);
         c.setChipShown(LibraryScreen.chipShown(e));
         if (libBadges)
             c.setBadge(e.console().badge());
@@ -6360,6 +6391,11 @@ public class LauncherActivity extends Activity {
         List<Library.Folder> folders = Library.folders(this);
         sheetRow(getString(R.string.LIB_FOLDERS), this::openFoldersSheet)
                 .setValue(folders.isEmpty() ? getString(R.string.LIB_FOLDER_NONE) : foldersValue(folders));
+        List<RemoteLibrary.Source> sources = RemoteLibrary.sources(getFilesDir());   // XBA-320
+        sheetRow(getString(R.string.NET_SOURCES), this::openNetSheet)
+                .setValue(sources.isEmpty() ? getString(R.string.NET_SOURCES_NONE)
+                          : sources.size() == 1 ? sources.get(0).name
+                          : getString(R.string.NET_SOURCES_N, sources.size()));
         if (Toolchain.available(this))   // XBA-130: prepares and boots every game, a report
             sheetRow(getString(R.string.CHECK_LIBRARY), () -> startActivity(CheckActivity.intent(this)));
         sheetRow(getString(R.string.SETTINGS), () -> go(Screen.SETTINGS));
@@ -6411,6 +6447,342 @@ public class LauncherActivity extends Activity {
         sheetRow(getString(R.string.LIB_FOLDER_KEEP), this::openFoldersSheet);
         sheetRow(getString(R.string.LIB_FOLDER_REMOVE), () -> removeLibraryFolder(f))
                 .setValue(getString(R.string.LIB_FOLDER_REMOVE_SUB));
+        sheetReady();
+    }
+
+    // ---- Network library (XBA-319: NET-1 sources, NET-2 downloads) ------------------------------------------------
+
+    private int netPolls;
+    /** Downloads seen done whose game still has to go on (import, Prepare) once a scan lists it, and the scans tried. */
+    private final java.util.Map<String, Integer> netDone = new java.util.HashMap<>();
+
+    /** A download's state in one string, so the library notices a percent or a waiting reason that changed. */
+    private static String netState(LibraryScreen.Entry e) {
+        NetDownloads.Job j = e.download;
+        return j == null ? "" : j.state + "/" + j.percent() + "/" + j.error;
+    }
+
+    /** At each resume: the service goes on with what was queued (a download waiting for Wi-Fi, a magnet to fetch). */
+    private void netKickIfNeeded() {
+        File files = getFilesDir();
+        new Thread(() -> {
+            if (!NetDownloads.pending(NetDownloads.read(files)).isEmpty() || !NetService.missingMeta(files).isEmpty())
+                NetService.kick(this);
+        }, "xba-net-kick").start();
+    }
+
+    /**
+     * Every few ticks: a download that became DONE makes the download folder be scanned again; its game then goes on
+     * (netAfterScan). A magnet whose metadata arrived shows its games.
+     */
+    private void netPoll() {
+        boolean scan = false;
+        for (NetDownloads.Job j : NetDownloads.read(getFilesDir())) {
+            if (NetDownloads.DONE.equals(j.state) && j.auto && !netDone.containsKey(j.key)) {
+                netDone.put(j.key, 0);
+                Log.i(TAG, "launcher: net: " + j.key + " (" + j.title + ") downloaded, scanning");
+                scan = true;
+            }
+        }
+        if (scan)
+            startScan();
+    }
+
+    /**
+     * After a scan: each game just downloaded is found by its file (its first one) and goes on as Alex asked (« ça le
+     * télécharge puis ça fait tout comme il faut »): the focus moves to it, an Xbox game is imported (read in place,
+     * then its Prepare as for any game), a console game is ready. Not found yet (a scan already running when the
+     * download ended): one more scan, twice at most.
+     */
+    private void netAfterScan() {
+        if (netDone.isEmpty())
+            return;
+        File dl = LibraryScanner.netDir(this);
+        List<NetDownloads.Job> jobs = NetDownloads.read(getFilesDir());
+        LibraryScreen.Entry go = null;
+        boolean again = false;
+        for (java.util.Iterator<java.util.Map.Entry<String, Integer>> it = netDone.entrySet().iterator();
+             it.hasNext();) {
+            java.util.Map.Entry<String, Integer> m = it.next();
+            NetDownloads.Job j = NetDownloads.find(jobs, m.getKey());
+            TorrentMeta meta = j == null ? null : RemoteLibrary.meta(getFilesDir(), j.source);
+            File f = meta == null || dl == null || j.files.isEmpty() ? null
+                     : NetDownloads.localFile(dl, j.source, meta, j.files.get(0).path);
+            LibraryScreen.Entry e = f == null ? null : entryAt(LibraryIndex.fileLoc(f));
+            if (e == null && f != null && m.getValue() < 2) {
+                m.setValue(m.getValue() + 1);
+                again = true;
+                continue;
+            }
+            it.remove();
+            if (j != null) {
+                try {
+                    NetDownloads.edit(getFilesDir(), l -> {
+                        NetDownloads.Job x = NetDownloads.find(l, j.key);
+                        if (x != null)
+                            x.auto = false;
+                    });
+                } catch (IOException ex) {
+                    Log.w(TAG, "launcher: net: cannot write the downloads", ex);
+                }
+            }
+            if (e == null) {
+                Log.w(TAG, "launcher: net: " + m.getKey() + " downloaded but not found by the scan");
+                continue;
+            }
+            Log.i(TAG, "launcher: net: " + m.getKey() + " is " + e.tid + " now (" + e.chip + ")");
+            setNote(getString(R.string.NET_DONE_NOTE, e.title()), NOTE_OK);
+            go = e;
+        }
+        if (go != null) {
+            focusTid = go.tid;
+            if (go.chip == GameState.Chip.NOT_IMPORTED && go.realTid() && worker == null) {
+                selectEntry(go);
+                importEntry(go);
+            }
+        }
+        if (again)
+            poller.post(this::startScan);
+    }
+
+    /** The library entry whose active file is at loc, or null. */
+    private LibraryScreen.Entry entryAt(String loc) {
+        for (LibraryScreen.Entry e : LibraryScreen.entries(getFilesDir(), games, index, libEnv()))
+            if (e.active != null && loc.equals(e.active.loc))
+                return e;
+        return null;
+    }
+
+    /**
+     * A on a game on the network: a sheet with its source and size and « Download » (with the free space); while it
+     * downloads, its progress (or why it waits) and « Cancel the download »; after a failure, why and « Try again ».
+     */
+    private void openRemoteGame(LibraryScreen.Entry e) {
+        if (screen != Screen.LIBRARY || e.remote == null)
+            return;
+        Log.i(TAG, "launcher: net: open " + e.tid + " (" + e.title() + ", " + e.chip + ")");
+        openSheet(e.title());
+        NetDownloads.Job j = e.download;
+        String from = getString(R.string.NET_FROM, e.remote.source.name.isEmpty() ? e.remote.source.shortId()
+                                                                                  : e.remote.source.name);
+        if (j != null && j.active()) {
+            MenuRow p = sheetRow(netWaitText(j), () -> openRemoteGame(e));
+            p.setValue(from);
+            sheetRow(getString(R.string.NET_CANCEL_DOWNLOAD), () -> cancelDownload(e))
+                    .setValue(getString(R.string.NET_CANCEL_DOWNLOAD_SUB));
+        } else {
+            boolean failed = j != null && NetDownloads.FAILED.equals(j.state);
+            String label = failed ? getString(R.string.NET_RETRY)
+                                  : getString(R.string.NET_DOWNLOAD_SIZE, size(e.remote.size()));
+            sheetRow(label, () -> startDownload(e))
+                    .setValue(failed ? getString(R.string.NET_FAILED, netError(j.error))
+                                     : getString(R.string.NET_DOWNLOAD_SUB, size(netFree())));
+            sheetRow(e.remote.name(), () -> {}).setValue(from);
+        }
+        sheetReady();
+    }
+
+    /** « 42 % · 3 MB/s · 5 peers », or why the download waits. */
+    private String netWaitText(NetDownloads.Job j) {
+        if (!j.error.isEmpty())
+            return netError(j.error);
+        if (NetDownloads.RUNNING.equals(j.state))
+            return getString(R.string.NET_PROGRESS, j.percent(), size(j.rate), j.peers);
+        return getString(R.string.NET_CHIP_WAITING);
+    }
+
+    private String netError(String e) {
+        switch (e == null ? "" : e) {
+        case NetRunner.E_WIFI:
+            return getString(R.string.NET_WAIT_WIFI);
+        case NetRunner.E_NO_PEERS:
+            return getString(R.string.NET_WAIT_PEERS);
+        case NetRunner.E_NO_META:
+            return getString(R.string.NET_WAIT_META);
+        case NetRunner.E_SPACE:
+            return getString(R.string.NET_WAIT_SPACE);
+        default:
+            return e;
+        }
+    }
+
+    private long netFree() {
+        File d = LibraryScanner.netDir(this);
+        if (d == null)
+            return 0;
+        d.mkdirs();
+        return d.getUsableSpace();
+    }
+
+    /** Queues the download of a game on the network (space checked first) and starts the service. */
+    private void startDownload(LibraryScreen.Entry e) {
+        if (e.remote == null)
+            return;
+        if (LibraryScanner.netDir(this) == null) {
+            setNote(getString(R.string.NET_NO_STORAGE), NOTE_ERROR);
+            return;
+        }
+        long need = e.remote.size(), free = netFree();
+        if (free < need + (64L << 20)) {
+            setNote(getString(R.string.NET_NO_SPACE, e.title(), size(need), size(free)), NOTE_ERROR);
+            return;
+        }
+        try {
+            NetDownloads.enqueue(getFilesDir(), e.remote, System.currentTimeMillis());
+        } catch (IOException ex) {
+            Log.w(TAG, "launcher: net: cannot queue " + e.tid, ex);
+            setNote(ex.getMessage(), NOTE_ERROR);
+            return;
+        }
+        Log.i(TAG, "launcher: net: download of " + e.tid + " (" + e.title() + ", " + need + " bytes) queued");
+        NetService.kick(this);
+        setNote(getString(R.string.NET_QUEUED_NOTE, e.title()), NOTE_INFO);
+        refreshKeepingFocus();
+    }
+
+    private void cancelDownload(LibraryScreen.Entry e) {
+        NetService.cancel(this, e.tid);
+        try {   // out of the queue at once, so the card says so; the service deletes the files
+            NetDownloads.cancel(getFilesDir(), e.tid);
+        } catch (IOException ex) {
+            Log.w(TAG, "launcher: net: cannot cancel " + e.tid, ex);
+        }
+        setNote(getString(R.string.NET_CANCELLED_NOTE, e.title()), NOTE_INFO);
+        refreshKeepingFocus();
+    }
+
+    /**
+     * Options › Network sources (XBA-320): one row per source (its name; its games, or that its list is being looked
+     * for), A on one asks to take it out; « Add a .torrent file », « Paste a magnet link », « Download on mobile data ».
+     */
+    private void openNetSheet() {
+        if (screen != Screen.LIBRARY)
+            return;
+        openSheet(R.string.NET_SOURCES);
+        for (RemoteLibrary.Source s : RemoteLibrary.sources(getFilesDir()))
+            sheetRow(s.name.isEmpty() ? s.shortId() : s.name, () -> confirmRemoveSource(s)).setValue(sourceValue(s));
+        sheetRow(getString(R.string.NET_ADD_TORRENT), this::openTorrentPicker)
+                .setValue(getString(R.string.NET_ADD_TORRENT_SUB));
+        sheetRow(getString(R.string.NET_PASTE_MAGNET), this::onPasteMagnet)
+                .setValue(getString(R.string.NET_PASTE_MAGNET_SUB));
+        boolean mobile = NetService.mobileData(this);
+        sheetRow(getString(R.string.NET_MOBILE_DATA), () -> {
+            NetService.setMobileData(this, !mobile);
+            if (!mobile)
+                netKickIfNeeded();
+            openNetSheet();
+        }).setValue(getString(mobile ? R.string.NET_ON : R.string.NET_OFF));
+        sheetReady();
+    }
+
+    /** « 12 games · Xbox », « Looking for it… », « Nobody shares it now ». */
+    private String sourceValue(RemoteLibrary.Source s) {
+        TorrentMeta m = RemoteLibrary.meta(getFilesDir(), s.id);
+        if (m == null)
+            return getString(s.metaError.isEmpty() ? R.string.NET_SOURCE_FETCHING : R.string.NET_SOURCE_NOT_FOUND);
+        String n = getString(R.string.NET_SOURCE_GAMES_N, RemoteLibrary.games(s, m).size());
+        return s.console == null ? n : n + " · " + s.console.badge();
+    }
+
+    private void confirmRemoveSource(RemoteLibrary.Source s) {
+        if (screen != Screen.LIBRARY)
+            return;
+        String name = s.name.isEmpty() ? s.shortId() : s.name;
+        openSheet(name);
+        sheetRow(getString(R.string.NET_SOURCE_KEEP), this::openNetSheet);
+        sheetRow(getString(R.string.NET_SOURCE_REMOVE), () -> {
+            try {   // out of the library at once; the service ends its torrent and deletes partial downloads
+                RemoteLibrary.remove(getFilesDir(), s.id);
+            } catch (IOException ex) {
+                Log.w(TAG, "launcher: net: cannot remove " + s.id, ex);
+            }
+            NetService.removeSource(this, s.id);
+            Log.i(TAG, "launcher: net: source " + s.id + " (" + name + ") removed");
+            setNote(getString(R.string.NET_SOURCE_REMOVED, name), NOTE_OK);
+            refreshKeepingFocus();
+        }).setValue(getString(R.string.NET_SOURCE_REMOVE_SUB));
+        sheetReady();
+    }
+
+    private void openTorrentPicker() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+        try {
+            startActivityForResult(i, REQ_TORRENT);
+        } catch (ActivityNotFoundException e) {
+            setNote(getString(R.string.PICKER_MISSING), NOTE_ERROR);
+        }
+    }
+
+    /** The picked .torrent read (at most RemoteLibrary.MAX_TORRENT), checked, then its console asked. */
+    private void onTorrentPicked(Uri u) {
+        byte[] b;
+        try (java.io.InputStream in = getContentResolver().openInputStream(u)) {
+            if (in == null)
+                throw new IOException("cannot open " + u);
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[64 << 10];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                if (out.size() > RemoteLibrary.MAX_TORRENT)
+                    throw new IOException("too large");
+            }
+            b = out.toByteArray();
+            TorrentMeta.parse(b);
+        } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "launcher: net: bad torrent " + u + ": " + e);
+            setNote(getString(R.string.NET_BAD_TORRENT, e.getMessage()), NOTE_ERROR);
+            return;
+        }
+        chooseSourceConsole(c -> {
+            try {
+                RemoteLibrary.Source s = RemoteLibrary.addTorrent(getFilesDir(), b, c, System.currentTimeMillis());
+                TorrentMeta m = RemoteLibrary.meta(getFilesDir(), s.id);
+                int n = m == null ? 0 : RemoteLibrary.games(s, m).size();
+                Log.i(TAG, "launcher: net: torrent " + s.id + " (" + s.name + ") added, " + n + " games, console "
+                           + (c == null ? "by file" : c.id));
+                setNote(getString(R.string.NET_SOURCE_ADDED, s.name, n), NOTE_OK);
+            } catch (IOException e) {
+                setNote(getString(R.string.NET_BAD_TORRENT, e.getMessage()), NOTE_ERROR);
+            }
+            refreshKeepingFocus();
+        });
+    }
+
+    /** « Paste a magnet link »: the clipboard's text, when it is a magnet link, becomes a source (console asked). */
+    private void onPasteMagnet() {
+        String text = null;
+        android.content.ClipboardManager cm = getSystemService(android.content.ClipboardManager.class);
+        if (cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip() != null && cm.getPrimaryClip().getItemCount() > 0) {
+            CharSequence cs = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+            text = cs == null ? null : cs.toString().trim();
+        }
+        String link = text;
+        if (TorrentMeta.magnetHash(link) == null) {
+            setNote(getString(R.string.NET_NOT_MAGNET), NOTE_WARN);
+            return;
+        }
+        chooseSourceConsole(c -> {
+            try {
+                RemoteLibrary.Source s = RemoteLibrary.addMagnet(getFilesDir(), link, c, System.currentTimeMillis());
+                Log.i(TAG, "launcher: net: magnet " + s.id + " added, console " + (c == null ? "by file" : c.id));
+                setNote(getString(R.string.NET_MAGNET_ADDED), NOTE_OK);
+                NetService.kick(this);
+            } catch (IOException e) {
+                setNote(e.getMessage(), NOTE_ERROR);
+            }
+            refreshKeepingFocus();
+        });
+    }
+
+    /** Which console a new source's games are for: each file's own (first, as B), or one of the consoles. */
+    private void chooseSourceConsole(java.util.function.Consumer<Console> then) {
+        if (screen != Screen.LIBRARY)
+            return;
+        openSheet(R.string.NET_CONSOLE_TITLE);
+        sheetRow(getString(R.string.NET_CONSOLE_BY_NAME), () -> then.accept(null));
+        for (Console c : Console.values())
+            sheetRow(c.badge(), () -> then.accept(c));
         sheetReady();
     }
 
@@ -6537,7 +6909,8 @@ public class LauncherActivity extends Activity {
             return true;
         for (int i = 0; i < now.size(); i++) {
             LibraryScreen.Entry a = now.get(i), b = libEntries.get(i);
-            if (!a.tid.equals(b.tid) || a.chip != b.chip || a.prepared != b.prepared || a.queuePos != b.queuePos)
+            if (!a.tid.equals(b.tid) || a.chip != b.chip || a.prepared != b.prepared || a.queuePos != b.queuePos
+                || !netState(a).equals(netState(b)))
                 return true;
         }
         return false;
@@ -9915,5 +10288,7 @@ public class LauncherActivity extends Activity {
             onSavesImportPicked(data.getData());
         else if (requestCode == REQ_X360_KEY && data.getData() != null)
             onX360KeyPicked(data.getData());
+        else if (requestCode == REQ_TORRENT && data.getData() != null)
+            onTorrentPicked(data.getData());
     }
 }

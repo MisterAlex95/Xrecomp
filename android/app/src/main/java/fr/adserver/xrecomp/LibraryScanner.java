@@ -820,7 +820,51 @@ final class LibraryScanner {
         List<Root> l = new ArrayList<>();
         for (Library.Folder f : Library.folders(c))
             l.add(new Root(f.tree, tree(c, f, allFilesAccess)));
+        Root net = netRoot(c);
+        if (net != null)
+            l.add(net);
         return l;
+    }
+
+    /** The folder field of the items found in the network library's download folder (never a tree URI). */
+    static final String NET_FOLDER = "net:";
+
+    /** Where the network library's games land (XBA-321): <external files>/net, or null without external storage. */
+    static File netDir(Context c) {
+        File e = c.getExternalFilesDir(null);
+        return e == null ? null : new File(e, "net");
+    }
+
+    /**
+     * The download folder as one more library root (read as files: the app's own folder needs no permission), the
+     * files of downloads not done left out (NetDownloads.incomplete); null when nothing was ever downloaded.
+     */
+    static Root netRoot(Context c) {
+        File d = netDir(c);
+        if (d == null || !d.isDirectory())
+            return null;
+        return new Root(NET_FOLDER, new FilteredPathTree(d, NetDownloads.incomplete(c.getFilesDir(), d)));
+    }
+
+    /** A PathTree that does not list some files (absolute paths). */
+    static final class FilteredPathTree extends PathTree {
+        final java.util.Set<String> hidden;
+
+        FilteredPathTree(File root, java.util.Set<String> hidden) {
+            super(root);
+            this.hidden = hidden;
+        }
+
+        @Override
+        public List<Node> list(Node dir) throws IOException {
+            List<Node> l = super.list(dir);
+            if (!hidden.isEmpty())
+                l.removeIf(n -> {
+                    File f = LibraryIndex.locFile(n.loc);
+                    return f != null && !n.dir && hidden.contains(f.getAbsolutePath());
+                });
+            return l;
+        }
     }
 
     static List<Root> folderRoots(Context c) {

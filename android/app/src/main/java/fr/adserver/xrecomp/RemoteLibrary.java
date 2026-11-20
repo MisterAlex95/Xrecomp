@@ -45,6 +45,8 @@ final class RemoteLibrary {
         /** The magnet link it was added with, or "" (added from a .torrent file). */
         String magnet = "";
         long addedAt;
+        /** Why a magnet's metadata could not be fetched last time ("" : none, or not tried yet). */
+        String metaError = "";
 
         /** The 12 hex digits of the info hash that keys its games. */
         String shortId() {
@@ -59,6 +61,8 @@ final class RemoteLibrary {
             o.put("console", console == null ? "" : console.id);
             o.put("magnet", magnet);
             o.put("added_at", addedAt);
+            if (!metaError.isEmpty())
+                o.put("meta_error", metaError);
             return o;
         }
 
@@ -70,6 +74,7 @@ final class RemoteLibrary {
             s.console = byId(o.optString("console", ""));
             s.magnet = o.optString("magnet", "");
             s.addedAt = o.optLong("added_at", 0);
+            s.metaError = o.optString("meta_error", "");
             return s;
         }
     }
@@ -288,14 +293,30 @@ final class RemoteLibrary {
         File f = torrentFile(filesDir, id);
         if (!f.isFile() || f.length() > MAX_TORRENT)
             return null;
+        String stamp = f.getAbsolutePath() + "\u0000" + f.length() + "\u0000" + f.lastModified();
+        synchronized (META_CACHE) {
+            TorrentMeta c = META_CACHE.get(stamp);
+            if (c != null)
+                return c;
+        }
         try {
             TorrentMeta m = TorrentMeta.parse(java.nio.file.Files.readAllBytes(f.toPath()));
-            return m.infoHash.equals(id) ? m : null;
+            if (!m.infoHash.equals(id))
+                return null;
+            synchronized (META_CACHE) {
+                if (META_CACHE.size() > 32)
+                    META_CACHE.clear();
+                META_CACHE.put(stamp, m);
+            }
+            return m;
         } catch (IOException e) {
             LibraryScanner.warn("net: bad " + f + ": " + e);
             return null;
         }
     }
+
+    /** Parsed torrents by file and its size and time: the library asks for them at every refresh. */
+    private static final Map<String, TorrentMeta> META_CACHE = new java.util.HashMap<>();
 
     /** The largest .torrent taken (a library of a few thousand files: well under a megabyte or two). */
     static final int MAX_TORRENT = 16 << 20;
@@ -357,9 +378,20 @@ final class RemoteLibrary {
         Source s = find(l, id);
         if (s != null) {
             s.name = m.name;
+            s.metaError = "";
             writeSources(filesDir, l);
         }
         return true;
+    }
+
+    /** Notes why source id's metadata could not be fetched (shown in Options › Network sources). */
+    static void setMetaError(File filesDir, String id, String why) throws IOException {
+        List<Source> l = sources(filesDir);
+        Source s = find(l, id);
+        if (s != null) {
+            s.metaError = why == null ? "" : why;
+            writeSources(filesDir, l);
+        }
     }
 
     /** Takes source id out of the network library (its metadata too; downloaded games stay where they are). */
