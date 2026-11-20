@@ -2592,7 +2592,7 @@ the network. Any value but All narrows the grid (« Recently played » steps asi
 and the search. No game on the network shown: no pill, every game shows.
 
 **Games before the download.** Every file a scan would list as a game, by name only (nothing is read before the
-download), no deeper than the download folder's scan reaches (one folder inside a multi-file torrent): a disc image or a split set (its parts' sizes summed), a `.cue` with the `.bin` tracks named after it, a
+download), at any depth (the download folder's scan goes `NET_MAX_DEPTH` levels down, as deep as any path a torrent may hold): a disc image or a split set (its parts' sizes summed), a `.cue` with the `.bin` tracks named after it, a
 lone `.bin`, a ROM. Its card has no cover (Alex, 2026-11-20): the **remote-content art**, a cloud with a down arrow on
 the console's hue, the console badge, and the chip **On the network**. The title is the file name cleaned: no
 extension, no split-part number, no bracketed tags, underscores as spaces (« Halo (USA) (Rev 1).iso » → « Halo »).

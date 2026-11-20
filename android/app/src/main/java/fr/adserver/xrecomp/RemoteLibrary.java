@@ -139,11 +139,12 @@ final class RemoteLibrary {
 
     /**
      * The deepest torrent path (in components) the download folder's scan reaches once downloaded: the scan goes
-     * LibraryScanner.MAX_DEPTH levels below <external files>/net, whose first is the source's folder and, for a
-     * multi-file torrent, the second its name. A deeper file is not listed (it could never be found again).
+     * LibraryScanner.NET_MAX_DEPTH levels below <external files>/net, whose first is the source's folder and, for a
+     * multi-file torrent, the second its name: every path TorrentMeta takes. A deeper file is not listed (it could
+     * never be found again).
      */
     static int maxPathDepth(TorrentMeta m) {
-        return LibraryScanner.MAX_DEPTH - (m.multiFile ? 2 : 1);
+        return LibraryScanner.NET_MAX_DEPTH - (m.multiFile ? 2 : 1);
     }
 
     /** The games of source s, whose torrent is m, in torrent order (cached per torrent and console). */
