@@ -70,6 +70,17 @@ public final class NetService extends Service {
         }
     }
 
+    static final String PREF_SHOW = "show_in_library";
+
+    /** XBA-319: the network sources' games show in the library (On by default); downloads go on either way. */
+    static boolean showInLibrary(Context c) {
+        return c.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_SHOW, true);
+    }
+
+    static void setShowInLibrary(Context c, boolean on) {
+        c.getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(PREF_SHOW, on).apply();
+    }
+
     static boolean mobileData(Context c) {
         return c.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_MOBILE_DATA, false);
     }

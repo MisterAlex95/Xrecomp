@@ -52,11 +52,43 @@ final class LibraryView {
         }
     }
 
+    /**
+     * XBA-319: where the games shown are: all, on this device, on the network (RemoteLibrary: not downloaded yet,
+     * downloading included). The Show pill, next to Sort, when the library lists games of a network source.
+     */
+    enum Where {
+        ALL(R.string.LIB_WHERE_ALL), LOCAL(R.string.LIB_WHERE_LOCAL), REMOTE(R.string.LIB_WHERE_REMOTE);
+
+        final int label;
+
+        Where(int label) {
+            this.label = label;
+        }
+
+        Where next() {
+            return values()[(ordinal() + 1) % values().length];
+        }
+
+        static Where parse(String s) {
+            for (Where x : values())
+                if (x.name().equalsIgnoreCase(s))
+                    return x;
+            return ALL;
+        }
+
+        boolean shows(LibraryScreen.Entry e) {
+            boolean remote = RemoteLibrary.isRemoteKey(e.tid);
+            return this == ALL || (this == REMOTE) == remote;
+        }
+    }
+
     /** The view state: its sort and console filter are kept, the search is not. */
     static final class State {
         Sort sort = Sort.NAME;
         /** null: every console. */
         Console console;
+        /** XBA-319: on the device, on the network, or both. */
+        Where where = Where.ALL;
         String query = "";
         final Set<String> favourites = new LinkedHashSet<>();
 
@@ -76,7 +108,7 @@ final class LibraryView {
 
         /** Something narrows the grid (a console or a search): the « Recently played » row steps aside. */
         boolean narrowed() {
-            return console != null || !query.trim().isEmpty();
+            return console != null || where != Where.ALL || !query.trim().isEmpty();
         }
     }
 
@@ -97,6 +129,7 @@ final class LibraryView {
             return s;
         }
         s.sort = Sort.parse(p.getProperty("sort", ""));
+        s.where = Where.parse(p.getProperty("where", ""));
         String con = p.getProperty("console", "");
         s.console = con.isEmpty() ? null : Console.fromPack(con);   // (fromPack would read "" as the Xbox)
         for (String k : p.getProperty("favourites", "").split("\n"))
@@ -109,6 +142,7 @@ final class LibraryView {
         StringBuilder b = new StringBuilder("# XRecomp library view (XBA-206)\n");
         b.append("sort=").append(s.sort.name().toLowerCase(Locale.ROOT)).append('\n');
         b.append("console=").append(s.console == null ? "" : s.console.id).append('\n');
+        b.append("where=").append(s.where.name().toLowerCase(Locale.ROOT)).append('\n');
         b.append("favourites=").append(escape(String.join("\n", s.favourites))).append('\n');
         try {
             Library.writeAtomically(file(filesDir), b.toString());
@@ -175,11 +209,14 @@ final class LibraryView {
         }
     }
 
-    /** The grid: the entries of the console filter that match the search, favourites first, each part sorted. */
+    /**
+     * The grid: the entries of the console filter and of where they are that match the search, favourites first,
+     * each part sorted.
+     */
     static List<LibraryScreen.Entry> apply(List<LibraryScreen.Entry> all, State s) {
         List<LibraryScreen.Entry> out = new ArrayList<>();
         for (LibraryScreen.Entry e : all)
-            if ((s.console == null || e.console() == s.console) && matches(e.title(), s.query))
+            if ((s.console == null || e.console() == s.console) && s.where.shows(e) && matches(e.title(), s.query))
                 out.add(e);
         Comparator<LibraryScreen.Entry> c = comparator(s.sort);
         out.sort(Comparator.<LibraryScreen.Entry>comparingInt(e -> s.favourite(e.tid) ? 0 : 1).thenComparing(c));
