@@ -387,6 +387,19 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
         TRACE("event_zpd %u -> %08X, query %s\n", init & 0x3F, addr, end ? "end" : "begin");
         break;
     }
+    case PM4_VIZ_QUERY: {
+        /* a visibility query's begin or end, id in bits 0-5, end in bit 8 (Xenia: ExecutePacketType3_VIZ_QUERY):
+         * the event VIZQUERY_START (7) or VIZQUERY_END (8); at the end the scan converter would post the result in
+         * PA_SC_VIZ_QUERY_STATUS_0/1, one bit per id. Nothing is culled here, so the query reports visible, in case
+         * the title reads it back. */
+        uint32_t q = rd(cp, r), id = q & 0x3F, end = q & 0x100;
+        xenos_cp_write_reg(cp, XENOS_REG_VGT_EVENT_INITIATOR, end ? 8 : 7);
+        if (end)
+            cp->regs[id < 32 ? XENOS_REG_PA_SC_VIZ_QUERY_STATUS_0 : XENOS_REG_PA_SC_VIZ_QUERY_STATUS_1] |=
+                1u << (id & 31);
+        TRACE("viz_query %u %s\n", id, end ? "end" : "begin");
+        break;
+    }
     case PM4_DRAW_INDX:
         if (count >= 2) {
             rd(cp, r); /* viz query condition */

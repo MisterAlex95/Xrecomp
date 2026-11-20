@@ -3,7 +3,7 @@
  * writes and their endian modes, event fences, conditional writes, draw initiators, indirect buffers, interrupts,
  * the swap token, scratch register write-back; on the ring: a wait that stalls then resumes, also inside nested
  * indirect buffers, a packet across the end of the ring, a packet the CPU has not finished writing, the read pointer
- * written back; tiled rendering's predicate (the bin mask and select, a header's bit 0); occlusion queries. */
+ * written back; tiled rendering's predicate (the bin mask and select, a header's bit 0); occlusion and visibility queries. */
 #include <stdio.h>
 #include <string.h>
 
@@ -307,6 +307,27 @@ int main(void)
     put(B, t3(PM4_EVENT_WRITE_ZPD, 1)), put(B, 21);
     xenos_cp_execute(&cp, B, at);
     CHECK(mem[0xD000 / 4] == 0 && mem[0xD000 / 4 + 4] == 0, "one sentinel half is a begin");
+
+    /* ---- visibility queries: VIZ_QUERY begin (event 7) and end (event 8, the id's bit set in STATUS_0 for ids
+     * 0-31, STATUS_1 for 32-63) ---- */
+    cp.regs[XENOS_REG_PA_SC_VIZ_QUERY_STATUS_0] = cp.regs[XENOS_REG_PA_SC_VIZ_QUERY_STATUS_1] = 0;
+    at = 0;
+    put(B, t3(PM4_VIZ_QUERY, 1)), put(B, 5);
+    xenos_cp_execute(&cp, B, at);
+    CHECK(cp.regs[XENOS_REG_VGT_EVENT_INITIATOR] == 7 && cp.regs[XENOS_REG_PA_SC_VIZ_QUERY_STATUS_0] == 0,
+          "viz query begin: initiator %u, status %08X", cp.regs[XENOS_REG_VGT_EVENT_INITIATOR],
+          cp.regs[XENOS_REG_PA_SC_VIZ_QUERY_STATUS_0]);
+    at = 0;
+    put(B, t3(PM4_VIZ_QUERY, 1)), put(B, 0x100 | 5);
+    put(B, t3(PM4_VIZ_QUERY, 1)), put(B, 0x100 | 31);
+    put(B, t3(PM4_VIZ_QUERY, 1)), put(B, 0x100 | 33);
+    xenos_cp_execute(&cp, B, at);
+    CHECK(cp.regs[XENOS_REG_VGT_EVENT_INITIATOR] == 8, "viz query end: initiator %u",
+          cp.regs[XENOS_REG_VGT_EVENT_INITIATOR]);
+    CHECK(cp.regs[XENOS_REG_PA_SC_VIZ_QUERY_STATUS_0] == (1u << 5 | 1u << 31) &&
+              cp.regs[XENOS_REG_PA_SC_VIZ_QUERY_STATUS_1] == 1u << 1,
+          "viz query status %08X %08X", cp.regs[XENOS_REG_PA_SC_VIZ_QUERY_STATUS_0],
+          cp.regs[XENOS_REG_PA_SC_VIZ_QUERY_STATUS_1]);
 
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "all command processor checks passed", failures,
            failures == 1 ? "" : "s");
