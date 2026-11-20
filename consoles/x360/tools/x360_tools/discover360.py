@@ -298,6 +298,11 @@ _X31_WRITES_NONE = frozenset((0, 32, 144, 149, 151, 215, 407, 467))   # compares
 _X31_OE = frozenset((8, 10, 40, 104, 136, 138, 200, 202, 232, 233, 234, 235, 266, 457, 459, 489, 491))
 
 
+def is_nop(w):
+    """`ori rX, rX, 0` (`nop` is `ori r0, r0, 0`; MSVC pads code with it, table code included): writes nothing."""
+    return w >> 26 == 24 and (w >> 21) & 31 == (w >> 16) & 31 and not w & 0xFFFF
+
+
 def is_call(w):
     """bl, bcl, blrl, bctrl: control comes back after it with the volatile registers undefined."""
     op = w >> 26
@@ -312,6 +317,8 @@ def gpr_writes(w):
         return (d,)
     if op in (33, 35, 41, 43):                                # the same loads with update
         return (d, a)
+    if is_nop(w):
+        return ()
     if op in (20, 21, 23, 24, 25, 26, 27, 28, 29, 30):        # rotates, logical immediates
         return (a,)
     if op in (10, 11, 36, 38, 44, 48, 50, 52, 54):            # compares, stores, FP loads and stores
@@ -408,6 +415,8 @@ class JumpTables:
             n = i.name
             if n is None:
                 return None
+            if is_nop(i.word):
+                continue   # a `nop` between the table code's instructions writes nothing
             if n in ("addi", "addis", "lwzx", "lhzx", "lbzx", "lwz", "lhz", "lbz", "add", "mfspr", "lis",
                      "subf", "mulli", "lwax", "ld", "ldx") and i.rd == reg:
                 return k
@@ -682,7 +691,9 @@ class JumpTables:
             if op == 16:
                 bo, bi = (w >> 21) & 31, (w >> 16) & 31
                 return p + 4 if (bo & 0x1C) == 0x0C and bi == 4 * crf + 1 and not w & 3 else None
-            # a load that sets no condition register and leaves the index alone
+            # a `nop`, or a load that sets no condition register and leaves the index alone
+            if is_nop(w):
+                continue
             if not (op in (32, 34, 40) or (op == 31 and (w >> 1) & 0x3FF in (23, 87, 279))) \
                     or (w >> 21) & 31 == idx:
                 return None

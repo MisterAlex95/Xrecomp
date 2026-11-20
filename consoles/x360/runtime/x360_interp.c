@@ -342,7 +342,13 @@ static int exec(x360_machine *x, xe_cpu *c, uint32_t pc, uint32_t w)
         /* logic and shifts: rA = f(rS, rB) */
         case 28: R(ra) = R(rd) & b; goto x_rec;
         case 60: R(ra) = R(rd) & ~b; goto x_rec;
-        case 444: R(ra) = R(rd) | b; goto x_rec;
+        case 444:
+            if (rd == ra && ra == rb && (rd == 1 || rd == 31) && !rec && x->m.slice > 0) {
+                x->m.rc_native += XE_SPIN_COST; /* a spin-wait's priority hint: as xenon_rt.h XE_SPIN_HINT */
+                x->m.slice = 0;
+            }
+            R(ra) = R(rd) | b;
+            goto x_rec;
         case 412: R(ra) = R(rd) | ~b; goto x_rec;
         case 316: R(ra) = R(rd) ^ b; goto x_rec;
         case 124: R(ra) = ~(R(rd) | b); goto x_rec;

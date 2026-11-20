@@ -372,6 +372,34 @@ static inline void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
         m_->rc_exit = XE_RC_EXIT_NOT_COVERED;                                                                          \
         return;                                                                                                        \
     } while (0)
+/* `or 31,31,31` / `or 1,1,1` (x360_tools/xenon.py): the SMT priority hints of a spin-wait loop (MSVC's waits for the
+ * GPU, spin locks). The hardware gives the spinning thread's cycles to the core's other thread; the cooperative
+ * scheduler would spend a whole time slice of host time on the loop instead. So the first hint of a turn ends the
+ * thread's slice (at the next block: the other threads and the devices get their turn, as fair as without the hint)
+ * and charges XE_SPIN_COST instructions of virtual time, once per turn whatever the number of hints in the loop: 32000
+ * instructions are 10 us of the virtual clock (x360_thread.c: one 100 ns tick per 320), so the event the loop polls
+ * for (the next vertical blank, another thread's flag) comes in little host time and is overshot by at most that.
+ * Adventure Time, 30 s of game headless: 55 s of host without the hint, 24 s with it, the same 1388 swaps (a charge
+ * per hint without ending the slice: 20 s but 1.2 % fewer swaps, the other threads lose time to the spinner; a turn
+ * of 1 us: 55 s, the scheduler's own work then dominates). The charge counts in rc_native ("native" in the stats);
+ * x360_interp.c does the same for interpreted code. A thread past its slice (MSR[EE] clear, XE_EE_GRACE) pays nothing
+ * more. Code built without XE_RUNTIME (the tests' harness) has no slice: each hint charges. */
+#ifndef XE_SPIN_COST
+#define XE_SPIN_COST 32000
+#endif
+#ifndef XE_SPIN_HINT
+#ifdef XE_RUNTIME
+#define XE_SPIN_HINT()                                                                                                 \
+    do {                                                                                                               \
+        if (m_->slice > 0) {                                                                                           \
+            m_->rc_native += XE_SPIN_COST;                                                                             \
+            m_->slice = 0;                                                                                             \
+        }                                                                                                              \
+    } while (0)
+#else
+#define XE_SPIN_HINT() (m_->rc_native += XE_SPIN_COST)
+#endif
+#endif
 #define RC_CHECK(next_) ((void)0)
 #define RC_FPCHECK(pc_) ((void)0)
 #define RC_IDLE(pc_) RC_EXIT(pc_)
