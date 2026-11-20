@@ -168,7 +168,11 @@ public class LauncherActivity extends Activity {
         /** Help and questions (Settings › General, a bubble's « Learn more »): questions and answers; buildHelp. */
         HELP,
         /** XRecomp's first start: library folder, the games found, a few settings, ready; buildSetup. */
-        SETUP
+        SETUP,
+        /** « Translation, live » (TranslationDemo): before the first start, and from Help; buildDemo. */
+        DEMO,
+        /** A game's journal (GameJournal), from Game settings › Game; buildJournal. */
+        JOURNAL
     }
 
     /** The Preparing screen dims after this long without input (OLED burn-in); any key or touch wakes it. */
@@ -533,7 +537,7 @@ public class LauncherActivity extends Activity {
                 first = Screen.SETUP;
             }
         } else if (state() == State.NONE) {
-            first = setupDue() ? Screen.SETUP : Screen.WELCOME;
+            first = setupDue() ? setupStep() == 0 ? Screen.DEMO : Screen.SETUP : Screen.WELCOME;
         } else {
             first = Screen.HOME;
             Prep p = prep();
@@ -698,6 +702,12 @@ public class LauncherActivity extends Activity {
 
     void showTipForTest(Tip t, boolean heal) {
         showTip(t, heal);
+    }
+
+    void openJournalForTest(String key, String name) {
+        journalKey = key;
+        journalTitle = name;
+        go(Screen.JOURNAL);
     }
 
     UiFeedback feedbackForTest() {
@@ -1007,6 +1017,10 @@ public class LauncherActivity extends Activity {
             return;
         if (screen == Screen.SETUP && setupStepBack())
             return;
+        if (screen == Screen.DEMO && history.isEmpty() && setupDue()) {   // before the first start: B skips too
+            demoEnd();
+            return;
+        }
         if (history.isEmpty()) {
             if (screen != Screen.LIBRARY && screen != Screen.WELCOME && libraryOn()) {
                 show(Screen.LIBRARY, -1);   // Home of a library game: back to the library
@@ -1155,12 +1169,18 @@ public class LauncherActivity extends Activity {
         case SETUP:
             buildSetup();
             break;
+        case DEMO:
+            buildDemo();
+            break;
+        case JOURNAL:
+            buildJournal();
+            break;
         case UPDATE:
             buildUpdate();
             break;
         }
         restoreFocus(false);
-        if (companion != null && (s == Screen.SETUP || s == Screen.HELP))
+        if (companion != null && (s == Screen.SETUP || s == Screen.HELP || s == Screen.DEMO))
             companionGuide(s);   // the bottom screen: the step's or the question's drawing, two touch actions
         else if (companion != null && s != Screen.HOME && s != Screen.LIBRARY && s != Screen.PREPARE)
             companion.artOnly();   // the bottom screen: the game's art alone
@@ -2089,16 +2109,106 @@ public class LauncherActivity extends Activity {
         s.addRow(r);
     }
 
+    // A game's journal
+
+    private String journalKey, journalTitle;
+
+    /** Game settings › Game › Journal: how many lines, the last one's date. */
+    private void journalRow(LinearLayout list, String key, String name) {
+        MenuRow r = listRow(list, getString(R.string.JOURNAL), getString(R.string.JOURNAL_DETAIL), () -> {
+            journalKey = key;
+            journalTitle = name;
+            go(Screen.JOURNAL);
+        });
+        List<GameJournal.Event> ev = GameJournal.read(getFilesDir(), key);
+        r.setValue(ev.isEmpty() ? getString(R.string.JOURNAL_EMPTY_VALUE) : journalDate(ev.get(0).time));
+    }
+
+    private String journalDate(long t) {
+        return java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT,
+                                                        getResources().getConfiguration().getLocales().get(0))
+                                   .format(new java.util.Date(t));
+    }
+
+    /** The journal, newest first: what happened (Prepared, Code found, Needs a fix), when, and its details. */
+    private void buildJournal() {
+        String key = journalKey == null ? titleId() : journalKey;
+        screenTitle.setText(getString(R.string.JOURNAL_TITLE, journalTitle == null ? "" : journalTitle));
+        LinearLayout list = listTemplate();
+        List<GameJournal.Event> events = key == null ? new ArrayList<>() : GameJournal.read(getFilesDir(), key);
+        for (GameJournal.Event e : events) {
+            String title, detail;
+            org.json.JSONObject o = e.o;
+            if (GameJournal.PREPARED.equals(e.kind)) {
+                title = getString(o.optBoolean("background") ? R.string.JOURNAL_PREPARED_BG : R.string.JOURNAL_PREPARED);
+                double s = o.optDouble("total_s", -1);
+                int files = o.optInt("files", 0), compiled = o.optInt("compiled", 0);
+                detail = (s >= 0 ? getString(R.string.JOURNAL_TOOK, PrepareFacts.duration(s)) + " " : "")
+                         + (files > 0 ? getString(R.string.JOURNAL_FILES, compiled, files) : "")
+                         + (o.optBoolean("seeded") ? "\n" + getString(R.string.JOURNAL_SEEDED) : "");
+            } else if (GameJournal.FOUND.equals(e.kind)) {
+                title = getResources().getQuantityString(R.plurals.JOURNAL_FOUND_N, o.optInt("n"), o.optInt("n"));
+                detail = getString(o.optBoolean("crash") ? R.string.JOURNAL_FOUND_CRASH : R.string.JOURNAL_FOUND_OK);
+            } else if (GameJournal.NEEDS_FIX.equals(e.kind)) {
+                title = getString(R.string.JOURNAL_NEEDS_FIX);
+                detail = o.optString("blocker", "");
+            } else {
+                continue;
+            }
+            MenuRow r = listRow(list, title, detail.trim(), null);
+            r.setValue(journalDate(e.time));
+        }
+        if (events.isEmpty())
+            describe(getString(R.string.JOURNAL_NONE));
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    // Translation, live
+
+    /** The animation: any key or its end goes on (to the first start, or back where Help was). */
+    private void buildDemo() {
+        screenTitle.setText(R.string.DEMO_TITLE);
+        TranslationDemo d = new TranslationDemo(this, this::demoEnd);
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(MATCH, MATCH);
+        d.setFocusable(true);   // A (or a tap) on it skips
+        d.setOnClickListener(v -> demoEnd());
+        body.addView(d, p);
+        defaultFocus = d;
+        demo = d;
+        startAction = this::demoEnd;
+        addHint("A", R.string.DEMO_SKIP, this::demoEnd);
+        addHint("B", R.string.HINT_BACK, this::back);
+    }
+
+    private TranslationDemo demo;
+
+    TranslationDemo demoForTest() {
+        return demo;
+    }
+
+    /** The animation is over (or skipped): the first start when it led there, else back. */
+    private void demoEnd() {
+        if (screen != Screen.DEMO)
+            return;
+        demo = null;
+        if (history.isEmpty() && setupDue())
+            show(Screen.SETUP);
+        else
+            back();
+    }
+
     // Help and questions
 
-    static final int HELP_PREPARE = 0, HELP_TIME = 1, HELP_AGAIN = 2, HELP_HEAL = 3, HELP_SAVES = 4, HELP_AT_ONCE = 5;
+    static final int HELP_PREPARE = 0, HELP_TIME = 1, HELP_AGAIN = 2, HELP_HEAL = 3, HELP_SAVES = 4, HELP_AT_ONCE = 5,
+            HELP_DEMO = 6;
     /** Each question and its answer, in the screen's order (the HELP_ indexes). */
     static final int[][] HELP = { { R.string.HELP_Q_PREPARE, R.string.HELP_A_PREPARE },
                                   { R.string.HELP_Q_TIME, R.string.HELP_A_TIME },
                                   { R.string.HELP_Q_AGAIN, R.string.HELP_A_AGAIN },
                                   { R.string.HELP_Q_HEAL, R.string.HELP_A_HEAL },
                                   { R.string.HELP_Q_SAVES, R.string.HELP_A_SAVES },
-                                  { R.string.HELP_Q_AT_ONCE, R.string.HELP_A_AT_ONCE } };
+                                  { R.string.HELP_Q_AT_ONCE, R.string.HELP_A_AT_ONCE },
+                                  { R.string.HELP_Q_DEMO, R.string.HELP_A_DEMO } };
 
     /** Help, its focus on one question (Settings opens it on the first, a bubble on its own). */
     private void openHelp(int topic) {
@@ -2114,8 +2224,8 @@ public class LauncherActivity extends Activity {
             int q = i;
             boolean toSettings = i == HELP_HEAL && Toolchain.available(this);
             MenuRow r = listRow(list, getString(HELP[i][0]), getString(HELP[i][1]),
-                                toSettings ? () -> go(Screen.SETTINGS) : null);
-            if (toSettings)
+                                toSettings ? () -> go(Screen.SETTINGS) : i == HELP_DEMO ? () -> go(Screen.DEMO) : null);
+            if (toSettings || i == HELP_DEMO)
                 r.setValue("›");
             onFocus(r, () -> helpAnswer(q));
         }
@@ -2129,9 +2239,14 @@ public class LauncherActivity extends Activity {
 
     /** The second screen on SETUP and HELP (GuidePanel): the drawing of the step or question, its two actions. */
     private void companionGuide(Screen s) {
+        if (s == Screen.DEMO) {
+            companion.guide(null, 0, getString(R.string.DEMO_TITLE), null, null, getString(R.string.DEMO_SKIP),
+                            this::demoEnd);
+            return;
+        }
         if (s == Screen.HELP) {
             int i = helpShown;
-            companion.guide(Schema.FOR_HELP[i], 0, getString(HELP[i][0]),
+            companion.guide(i < Schema.FOR_HELP.length ? Schema.FOR_HELP[i] : null, 0, getString(HELP[i][0]),
                             i > 0 ? "‹" : null, () -> helpFocus(i - 1),
                             i < HELP.length - 1 ? "›" : null, () -> helpFocus(i + 1));
             return;
@@ -2167,9 +2282,11 @@ public class LauncherActivity extends Activity {
             companionGuide(Screen.HELP);
         if (i == HELP_HEAL && Toolchain.available(this))
             describe(getString(HELP[i][1]), getString(R.string.HELP_OPEN_SETTING), Theme.TEXT_FAINT);
+        else if (i == HELP_DEMO)
+            describe(getString(HELP[i][1]), getString(R.string.HELP_PLAY_DEMO), Theme.TEXT_FAINT);
         else
             describe(getString(HELP[i][1]));
-        if (desc == null)
+        if (desc == null || i >= Schema.FOR_HELP.length)
             return;
         Schema.SchemaView v = new Schema.SchemaView(this, Schema.FOR_HELP[i]);
         LinearLayout.LayoutParams p = lp(MATCH, WRAP);
@@ -7787,6 +7904,8 @@ public class LauncherActivity extends Activity {
         } else {
             gameControlsRow(list, key, con);
             cheatsRow(list, key, con);   // XBA-241: an Xbox title's too
+            if (Toolchain.available(this) && (con == Console.XBOX || con.prepares()))
+                journalRow(list, key, gameName);
             if (con == Console.XBOX) {
                 gameThemeRow(list, key, gameName);
                 if (Toolchain.available(this) && Pack.titleLayer(getFilesDir(), key) != null)
@@ -9242,6 +9361,12 @@ public class LauncherActivity extends Activity {
             try {
                 if (SelfHeal.onExit(work, lastGameExit())) {
                     SelfHeal.State s = SelfHeal.read(work);
+                    long now = System.currentTimeMillis();   // the game's journal (GameJournal)
+                    if ((s.offer == SelfHeal.Offer.IMPROVE || s.offer == SelfHeal.Offer.PREPARE_AGAIN) && s.seeds > 0)
+                        GameJournal.add(getFilesDir(), tid, GameJournal.FOUND, now, "n", s.seeds, "crash",
+                                        s.offer == SelfHeal.Offer.PREPARE_AGAIN);
+                    else if (s.offer == SelfHeal.Offer.NEEDS_FIX)
+                        GameJournal.add(getFilesDir(), tid, GameJournal.NEEDS_FIX, now, "blocker", s.blocker);
                     Log.i(TAG, "launcher: " + tid + "'s last run: " + s.offer
                                + (s.blocker.isEmpty() ? "" : " (" + s.blocker + ")") + ", rounds " + s.rounds);
                 }

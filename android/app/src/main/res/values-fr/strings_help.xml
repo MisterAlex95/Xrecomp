@@ -116,4 +116,49 @@
     <string name="SCH_INTERP">Interpréteur</string>
     <string name="SCH_INTERP_SUB">démarre tout de suite</string>
     <string name="LIB_NEW_CODE_N">Préparé · +%1$d nouvelles</string>
+
+    <!-- Traduction en direct (TranslationDemo) -->
+    <string name="DEMO_TITLE">Traduction en direct</string>
+    <string name="DEMO_SKIP">Passer</string>
+    <string name="DEMO_TAGLINE">Natif, pas émulé.</string>
+    <string name="DEMO_PANE_X86">LE JEU · CODE DE SA CONSOLE (x86)</string>
+    <string name="DEMO_PANE_ARM">APRÈS PRÉPARER · CODE DE CET APPAREIL (arm64)</string>
+    <string name="DEMO_WHERE">où ?</string>
+    <string name="DEMO_PLAYING">Partie en cours</string>
+    <string name="DEMO_BADGE_5_OF_6">5 instructions sur 6 traduites</string>
+    <string name="DEMO_BADGE_FOUND">+1 adresse trouvée</string>
+    <string name="DEMO_BADGE_ONE_FILE">1 fichier recompilé</string>
+    <string name="DEMO_BADGE_ALL">6 / 6 · tout en natif</string>
+    <string name="DEMO_1_H">Votre jeu parle la langue de sa console.</string>
+    <string name="DEMO_1_T">Ici, du code x86, comme dans un jeu Xbox. Cet appareil, lui, comprend l\'arm64.</string>
+    <string name="DEMO_2_H">Préparer le traduit, une fois.</string>
+    <string name="DEMO_2_T">Chaque fonction est réécrite pour ce processeur, puis compilée sur l\'appareil.</string>
+    <string name="DEMO_3_H">Certaines destinations ne se voient qu\'en jouant.</string>
+    <string name="DEMO_3_T">« call [eax] » : l\'adresse n\'existe qu\'au moment où le jeu tourne. Une partie la trouvera.</string>
+    <string name="DEMO_4_H">Vous jouez. Le jeu trouve l\'adresse.</string>
+    <string name="DEMO_4_T">Ce passage tourne plus lentement, dans l\'interpréteur, et l\'app le note.</string>
+    <string name="DEMO_5_H">Préparer à nouveau l\'ajoute.</string>
+    <string name="DEMO_5_T">Seul ce qui a changé est recompilé : quelques minutes au lieu d\'une préparation entière.</string>
+    <string name="HELP_Q_DEMO">Pour les curieux : à quoi ressemble une traduction ?</string>
+    <string name="HELP_A_DEMO">Une animation de 20 secondes sur une petite fonction à nous : son code x86 réécrit en arm64 ligne à ligne, un appel dont seule une partie connaît la destination, et Préparer à nouveau qui l\'ajoute.</string>
+    <string name="HELP_PLAY_DEMO">A la lance.</string>
+
+    <!-- Le carnet d'un jeu (GameJournal) -->
+    <string name="JOURNAL">Carnet</string>
+    <string name="JOURNAL_DETAIL">Ce qui est arrivé à ce jeu : chaque préparation, le code que ses parties ont trouvé et que la préparation avait manqué, un plantage qui demande un correctif.</string>
+    <string name="JOURNAL_EMPTY_VALUE">Vide</string>
+    <string name="JOURNAL_TITLE">%1$s · Carnet</string>
+    <string name="JOURNAL_PREPARED">Préparé</string>
+    <string name="JOURNAL_PREPARED_BG">Préparé à nouveau en arrière-plan</string>
+    <string name="JOURNAL_TOOK">Durée : %1$s.</string>
+    <string name="JOURNAL_FILES">%1$d fichiers compilés sur %2$d.</string>
+    <string name="JOURNAL_SEEDED">Préparé avant que l\'app ne tienne un carnet : le carnet commence ici.</string>
+    <plurals name="JOURNAL_FOUND_N">
+        <item quantity="one">Une partie a trouvé %1$d adresse</item>
+        <item quantity="other">Une partie a trouvé %1$d adresses</item>
+    </plurals>
+    <string name="JOURNAL_FOUND_OK">Du code que la préparation avait manqué : il a tourné plus lentement. La prochaine préparation l\'ajoute.</string>
+    <string name="JOURNAL_FOUND_CRASH">Le jeu a planté sur du code que la préparation avait manqué. La prochaine préparation l\'ajoute.</string>
+    <string name="JOURNAL_NEEDS_FIX">Planté · besoin d\'un correctif</string>
+    <string name="JOURNAL_NONE">Rien pour l\'instant. Chaque préparation, et chaque partie qui trouve du code que la préparation avait manqué, ajoute une ligne ici.</string>
 </resources>

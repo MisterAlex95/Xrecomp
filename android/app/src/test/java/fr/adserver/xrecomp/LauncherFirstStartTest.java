@@ -33,6 +33,7 @@ import org.robolectric.shadows.ShadowEnvironment;
 
 import java.io.File;
 import java.time.Duration;
+import java.util.List;
 
 /**
  * XRecomp's first start (SETUP: library folder, the games found, a few settings, ready), Help and questions, and
@@ -90,6 +91,10 @@ public class LauncherFirstStartTest {
     private LauncherActivity launch() {
         LauncherActivity a = Robolectric.buildActivity(LauncherActivity.class).setup().get();
         idle(300);
+        if (a.screenForTest() == LauncherActivity.Screen.DEMO) {   // the animation first: skipped (demo tests below)
+            key(a, KeyEvent.KEYCODE_BUTTON_A);
+            idle(300);
+        }
         return a;
     }
 
@@ -203,6 +208,60 @@ public class LauncherFirstStartTest {
         key(a, KeyEvent.KEYCODE_BUTTON_B);
         assertEquals(LauncherActivity.Screen.WELCOME, a.screenForTest());
         assertEquals(LauncherActivity.Screen.WELCOME, launch().screenForTest());   // the setup is over
+    }
+
+    /** A fresh start opens on « Translation, live »; its end (or B) goes on to the first start. */
+    @Test
+    public void theAnimationLeadsToTheFirstStart() throws Exception {
+        long[] now = { 0 };
+        TranslationDemo.clock = () -> now[0];
+        try {
+            LauncherActivity a = Robolectric.buildActivity(LauncherActivity.class).setup().get();
+            idle(300);
+            assertEquals(LauncherActivity.Screen.DEMO, a.screenForTest());
+            now[0] = TranslationDemo.total() + 10;
+            TestSupport.screenshot(a.getWindow().getDecorView(), "demo-end");   // a frame: the end is seen there
+            idle(500);
+            assertEquals(LauncherActivity.Screen.SETUP, a.screenForTest());
+            LauncherActivity b = Robolectric.buildActivity(LauncherActivity.class).setup().get();
+            idle(300);
+            key(b, KeyEvent.KEYCODE_BUTTON_B);
+            assertEquals(LauncherActivity.Screen.SETUP, b.screenForTest());
+        } finally {
+            TranslationDemo.clock = android.os.SystemClock::uptimeMillis;
+        }
+    }
+
+    /** Each scene of the animation, half way through it (and the call found, scene 4, late). */
+    @Test
+    public void animationScreenshots() throws Exception {
+        long[] now = { 0 };
+        TranslationDemo.clock = () -> now[0];
+        try {
+            for (String loc : LOCALES) {
+                for (String[] size : SIZES) {
+                    if (!size[0].equals("1080") && loc.equals("fr"))
+                        continue;
+                    RuntimeEnvironment.setQualifiers(loc + "-" + size[1]);
+                    now[0] = 0;
+                    LauncherActivity a = Robolectric.buildActivity(LauncherActivity.class).setup().get();
+                    idle(300);
+                    assertEquals(LauncherActivity.Screen.DEMO, a.screenForTest());
+                    long base = 0;
+                    for (int s = 0; s < TranslationDemo.SCENES.length; s++) {
+                        long at = s == 3 ? TranslationDemo.SCENES[s] - 300 : s == 4 ? 2000 : TranslationDemo.SCENES[s] - 200;
+                        now[0] = base + at;
+                        a.demoForTest().invalidate();
+                        idle(16);
+                        assertTrue(TestSupport.screenshot(a.getWindow().getDecorView(),
+                                                          "demo-" + (s + 1) + "-" + loc + "-" + size[0]).length() > 0);
+                        base += TranslationDemo.SCENES[s];
+                    }
+                }
+            }
+        } finally {
+            TranslationDemo.clock = android.os.SystemClock::uptimeMillis;
+        }
     }
 
     @Test
@@ -380,6 +439,37 @@ public class LauncherFirstStartTest {
         idle(300);
         assertFalse(a.companionForTest().guideForTest());
         assertFalse(a.companionForTest().screen().content() instanceof GuidePanel);
+    }
+
+    /** A game's journal: a prepared game gets its first line from pack.json, then what PrepareService and runs add. */
+    @Test
+    public void theJournalListsWhatHappenedNewestFirst() throws Exception {
+        withToolchain();
+        TestSupport.write(new File(GameStore.defaultGameDir(app), "default.xbe"),
+                          TestSupport.xbe(0x4D530004, "Sample Game"));
+        TestSupport.writePack(app.getFilesDir(), "4D530004", 1 << 20);
+        File files = app.getFilesDir();
+        long day = 24 * 3600_000L, t0 = System.currentTimeMillis() - 3 * day;
+        List<GameJournal.Event> seeded = GameJournal.read(files, "4D530004");
+        assertEquals(1, seeded.size());
+        assertEquals(GameJournal.PREPARED, seeded.get(0).kind);
+        assertTrue(seeded.get(0).o.optBoolean("seeded"));
+        GameJournal.add(files, "4D530004", GameJournal.FOUND, t0 + day, "n", 37, "crash", false);
+        GameJournal.add(files, "4D530004", GameJournal.PREPARED, t0 + day + 3600_000L, "total_s", 252.0, "files", 160,
+                        "compiled", 6, "background", true);
+        GameJournal.add(files, "4D530004", GameJournal.FOUND, t0 + 2 * day, "n", 2, "crash", true);
+        assertEquals(GameJournal.FOUND, GameJournal.read(files, "4D530004").get(0).kind);
+        for (LauncherActivity.Tip tip : LauncherActivity.Tip.values())
+            GameStore.prefs(app).edit().putBoolean(tip.key(), true).commit();
+        for (String loc : LOCALES) {
+            RuntimeEnvironment.setQualifiers(loc + "-" + SIZES[0][1]);
+            LauncherActivity a = launch();
+            a.openJournalForTest("4D530004", "Sample Game");
+            idle(300);
+            assertEquals(LauncherActivity.Screen.JOURNAL, a.screenForTest());
+            assertEquals(4, a.focusablesForTest().size());
+            shot(a, "journal-" + loc + "-1080");
+        }
     }
 
     private void shot(LauncherActivity a, String name) throws Exception {

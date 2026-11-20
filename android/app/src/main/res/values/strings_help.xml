@@ -118,4 +118,49 @@
     <string name="SCH_INTERP">Interpreter</string>
     <string name="SCH_INTERP_SUB">starts at once</string>
     <string name="LIB_NEW_CODE_N">Prepared · +%1$d new</string>
+
+    <!-- Translation, live (TranslationDemo) -->
+    <string name="DEMO_TITLE">Translation, live</string>
+    <string name="DEMO_SKIP">Skip</string>
+    <string name="DEMO_TAGLINE">Native, not emulated.</string>
+    <string name="DEMO_PANE_X86">THE GAME · ITS CONSOLE\'S CODE (x86)</string>
+    <string name="DEMO_PANE_ARM">AFTER PREPARE · THIS DEVICE\'S CODE (arm64)</string>
+    <string name="DEMO_WHERE">where?</string>
+    <string name="DEMO_PLAYING">Playing</string>
+    <string name="DEMO_BADGE_5_OF_6">5 of 6 instructions translated</string>
+    <string name="DEMO_BADGE_FOUND">+1 address found</string>
+    <string name="DEMO_BADGE_ONE_FILE">1 file compiled again</string>
+    <string name="DEMO_BADGE_ALL">6 / 6 · all native</string>
+    <string name="DEMO_1_H">Your game speaks its console\'s language.</string>
+    <string name="DEMO_1_T">Here, x86 code, as in an Xbox game. This device understands arm64.</string>
+    <string name="DEMO_2_H">Prepare translates it, once.</string>
+    <string name="DEMO_2_T">Every function is written again for this processor, then compiled on the device.</string>
+    <string name="DEMO_3_H">Some targets only show while playing.</string>
+    <string name="DEMO_3_T">« call [eax] »: the address exists only once the game runs. A run will find it.</string>
+    <string name="DEMO_4_H">You play. The game finds the address.</string>
+    <string name="DEMO_4_T">That part runs slower, in the interpreter, and the app notes it.</string>
+    <string name="DEMO_5_H">Prepare again adds it.</string>
+    <string name="DEMO_5_T">Only what changed is compiled again: a few minutes instead of a whole preparation.</string>
+    <string name="HELP_Q_DEMO">For the curious: what does a translation look like?</string>
+    <string name="HELP_A_DEMO">A 20-second animation on a small function of our own: its x86 code written again in arm64 line by line, a call whose target only a run knows, and Prepare again adding it.</string>
+    <string name="HELP_PLAY_DEMO">A plays it.</string>
+
+    <!-- A game's journal (GameJournal) -->
+    <string name="JOURNAL">Journal</string>
+    <string name="JOURNAL_DETAIL">What happened to this game: each preparation, the code its runs found that the preparation missed, a crash that needs a fix.</string>
+    <string name="JOURNAL_EMPTY_VALUE">Empty</string>
+    <string name="JOURNAL_TITLE">%1$s · Journal</string>
+    <string name="JOURNAL_PREPARED">Prepared</string>
+    <string name="JOURNAL_PREPARED_BG">Prepared again in the background</string>
+    <string name="JOURNAL_TOOK">Took %1$s.</string>
+    <string name="JOURNAL_FILES">%1$d of %2$d files compiled.</string>
+    <string name="JOURNAL_SEEDED">Prepared before the app kept a journal: the journal starts here.</string>
+    <plurals name="JOURNAL_FOUND_N">
+        <item quantity="one">A run found %1$d address</item>
+        <item quantity="other">A run found %1$d addresses</item>
+    </plurals>
+    <string name="JOURNAL_FOUND_OK">Code the preparation had missed: it ran slower there. The next preparation adds it.</string>
+    <string name="JOURNAL_FOUND_CRASH">The game crashed on code the preparation had missed. The next preparation adds it.</string>
+    <string name="JOURNAL_NEEDS_FIX">Crashed · needs a fix</string>
+    <string name="JOURNAL_NONE">Nothing yet. Each preparation, and each run that finds code the preparation missed, adds a line here.</string>
 </resources>

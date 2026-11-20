@@ -153,8 +153,10 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 | Library | The [game library](#game-library): a full-width grid of the games (five columns), the focused game's state and play time as one context line at the bottom left; Rescan, Storage, Library folders, Settings and About in the **Options** sheet (Y). Over the grid the **Search** and **Sort** pills, « Recently played » and the favourites first, the console tabs in the top bar ([Library view](#library-view-xba-206)). | Every start when the library is on, B from a game's Home. |
 | Storage | What the app stores per game, each deleted on its own ([Storage](#storage)); saves exported to a zip and imported back ([Saves out and back](#saves-out-and-back)), synced through Google Drive ([Cloud saves](#cloud-saves)). | Options (Y) on the library. |
 | First start | XRecomp's first start (`buildSetup`, strings in `strings_help.xml`), four steps under a step bar (« 1. Library · 2. Your games · 3. Settings · 4. Ready », the step top right): **Library**: where the games are, **Choose a folder** (the library folder picker, through Read the game in place? without All files access) or **Just one game** (Choose your game, as from Welcome; B: Welcome), an example folder on the right; **Your games**: « Looking for games… » and the count while the scan runs, then the games found per console from the library's entries (« Xbox · 1 — To prepare », « GBA · 1 — Ready to play », the first three names), the text saying which consoles start at once (GBA, PS1, N64, GameCube) and which are prepared first (Xbox, Xbox 360); none found: **Another folder** or **Continue**; **Settings**: the list template with Self-healing (with the toolchain), Download cover art, Bottom screen (two screens), as Settings › General has them, then Continue (R1, Start); **Ready**: the folder, the games and how many to prepare, Self-healing's value, **Open the library**. B goes back a step (on the first: quit). | The first start of XRecomp with nothing set up (no game, no library folder) instead of Welcome; never in a game's own app or a console game's. The step is kept in the launcher's prefs (`setup_step`: the picker may recreate the activity; a start with the library on goes back to it), `setup_done` once Open the library or Just one game. The JVM tests start past it and past the bubbles (`xba.guide=seen` in build.gradle); `LauncherFirstStartTest` renders `first-<1..4>`, `help`, `tip-prepare`, `tip-new_code` in en / fr at 1080, 4:3, 1:1. |
-| Help and questions | The list template: six questions (why prepare, how long, why prepare again, Self-healing, saves, why some games start without preparing), the focused one's answer on the right; A on Self-healing's opens Settings. | Settings › General › Help and questions, a bubble's **Learn more** (on its question). |
+| Help and questions | The list template: seven questions (why prepare, how long, why prepare again, Self-healing, saves, why some games start without preparing, « For the curious: what does a translation look like? »), the focused one's answer on the right with its drawing below (`Schema`: the prepare pipeline, its stages, the prepare-again loop, Self-healing's three cases, saves kept apart, the consoles that start at once; left out on a column narrower than 480, a square screen); A on Self-healing's opens Settings, on the last one plays Translation, live. | Settings › General › Help and questions, a bubble's **Learn more** (on its question). |
 | Good to know (bubble) | A sheet over a game's Home, **once per situation** (`tip_<name>` in the launcher's prefs): its heading and explanation, **Got it**, **Learn more** (Help on its question); for new code on an Xbox game, **Next time: Do it by itself / Ask me** (Self-healing). Situations: needs preparing (Xbox, Xbox 360: « Why prepare? »; GBA, PS1, N64, GameCube: « Plays right away »), preparing, new code found (a good run's finds, a background round, a crash with finds and Self-healing off, a ROM's new addresses), an older toolkit (« The app was updated »). B or Got it: seen; a rebuild of Home that closes it offers it again. | A game's Home (Xbox and the other consoles). |
+| Translation, live | `TranslationDemo`, about 22 s in six scenes: x86 lines of a function of our own (no game's) written again in arm64 one by one, the call whose target only a run knows (orange, « where? »), the run finding the address, Prepare again compiling that one line (« 1 file compiled again », « 6 / 6 · all native »), then « XRecomp · Native, not emulated ». A, B, Start or a tap skips. | Before the first start (a fresh start opens on it, its end or B goes on to step 1), Help's last question. |
+| Journal | A game's journal (`GameJournal`, files/journal/<key>.jsonl, newest first, 200 lines at most): « Prepared » (its time, files compiled of all; « in the background » for a Self-healing round), « A run found N addresses » (a crash or not), « Crashed · needs a fix » (the blocker), each with its date. A game prepared before the journal existed gets one line from its pack.json (built_at). Written by PrepareService (a Prepare that ended well) and the launcher (selfheal.json's offer after a run). | Game settings › Game › Journal (Xbox and the consoles with a Prepare, with the toolchain). |
 | Welcome | What the app is (a recompiled game, the game not included: bring your own copy), three plain steps, a « Get started » button. | First start, when no game is set up at all. |
 | Choose your game (source) | A list: **Game folder** (read in place with All files access, otherwise copied; the value says which), **Disc image (ISO)** (extracted once; the free space in the top bar), **Game library folder**; the focused choice explained on the right. | Welcome, Manage › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
 | Read the game in place? | Only without All files access: **Allow all files access** (recommended; opens the system page, then the folder picker) and **Copy into the app** (the folder picker), with the explanation on the right (in place: no copy, fine for a 4 GB disc, only that folder is read; copy: as much free space again, a few minutes, removed with the app). | Game folder. |
@@ -174,6 +176,18 @@ the left of the footer line (the hints are on its right), with a dot coloured by
 `launcher: shown (...)` naming why, then one `launcher:` line per step (folder, hash, copy, import, game set, play,
 settings saved, errors).
 
+### Home's track, the cards' new code, the bottom screen's guide
+
+- **Home's track** (Xbox and the other consoles with a Prepare, once prepared or while preparing): under its lines,
+  « Read › Translate › Compile › Play » (`Schema.TrackView`), lit as far as the game got (a running Prepare: from its
+  overall progress; prepared: three, Play once played), then one orange dot per address its runs found that the
+  preparation missed (twelve, then « +N »): Self-healing's seeds after a good run for an Xbox title, the discovered
+  addresses beyond the pack's for the others.
+- **Library cards**: « Prepared · +N new » in WARN when a prepared game's runs found such code (`LibraryScreen.found`).
+- **Bottom screen** (two screens): the first start's steps and Help show `GuidePanel` (the step's or question's drawing,
+  a caption, Back / Continue or ‹ ›), Translation, live a Skip; the Preparing panel draws the four stages above its
+  percentage.
+
 ### Device check (first start, help, bubbles), for Alex
 
 1. Clear XRecomp's data and open it. Expected: « First start », step 1 / 4, Choose a folder focused.
@@ -189,6 +203,13 @@ settings saved, errors).
 8. Open a GBA game not prepared. Expected: « Plays right away » once.
 9. Settings › General › Help and questions: six questions; A on « What does Self-healing do? » opens Settings.
 10. Phone in French: the same in French. Send screenshots of steps 2 and 3 and of a bubble.
+11. Fresh start: Translation, live plays first (about 22 s); A skips to step 1.
+12. Help › each question: its drawing under the answer; on the Thor's bottom screen too, ‹ › step through them.
+13. A prepared game: Home's track lit up to Compile (Play once played); after a run that found code, orange dots and
+    the card « Prepared · +N new ».
+14. During a Prepare: the bottom screen's stages light up with the progress.
+15. Game settings › Game › Journal: a line for the preparation (« Prepared before the app kept a journal » for an old
+    pack), then one per Prepare and per run that found code.
 
 ### When it shows
 
