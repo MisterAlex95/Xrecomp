@@ -1805,6 +1805,63 @@ int main(int argc, char **argv)
         }
     }
 
+    /* an 8_8_8_8_GAMMA target keeps what the shader writes gamma-encoded, and the guest shows those bytes (a resolve
+     * copies them to memory, the front buffer is scanned out through the gamma ramp, linear by default): a white quad
+     * times c0 = (0.5, 0.2, 0.02) is (188, 124, 39) in the frame -- as render target 0 at the swap, as the resolve's
+     * host picture of the front buffer -- and in the resolved memory, not the linear (128, 51, 5) */
+    {
+        static const int want[3] = {188, 124, 39};
+        for (uint32_t k = 0; k < 4; k++)
+            vertex(0x5E000 + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? -1.0f : 1.0f, 1, 1, 1);
+        reg(0x2000, 64u);               /* RB_SURFACE_INFO: pitch 64, no MSAA */
+        reg(0x2001, 0x300u | 1u << 16); /* RB_COLOR_INFO: base 0x300, 8_8_8_8_GAMMA */
+        reg(0x4400, fbits(0.5f)), reg(0x4401, fbits(0.2f)), reg(0x4402, fbits(0.02f)), reg(0x4403, fbits(1.0f));
+        for (int pass = 0; pass < 2; pass++) {
+            reg(0x4800, 0x5E000u | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            if (pass == 1) { /* resolved to a tiled 8_8_8_8 front buffer at 0xA0000, which the swap shows */
+                reg(0x4800, 0x7000u | 3u);
+                reg(0x4801, 2u | (6u << 2));
+                reg(0x2208, 6);
+                reg(0x2318, 0u);
+                reg(0x2319, 0xA0000);
+                reg(0x231A, W | (uint32_t)H << 16);
+                reg(0x231B, 2u | 6u << 7);
+                type3(PM4_DRAW_INDX_2, &rect, 1);
+                reg(0x2208, 4);
+                const uint32_t ff[6] = {2u | 1u << 31, 6u | 2u << 6 | 0xA0000u, (W - 1u) | (H - 1u) << 13,
+                                        sw_id << 1, 0, 1u << 9};
+                for (uint32_t i = 0; i < 6; i++)
+                    reg(0x4800 + i, ff[i]);
+            }
+            xenos_gl_stats f0, f1;
+            xenos_gl_get_stats(g, &f0);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            xenos_gl_get_stats(g, &f1);
+            const uint8_t *cg = px(g, W / 2, H / 2);
+            int ok = 1;
+            for (int i = 0; i < 3; i++)
+                ok &= cg[i] >= want[i] - 2 && cg[i] <= want[i] + 2;
+            CHECK(ok && f1.front_buffer_frames == f0.front_buffer_frames + (uint64_t)pass,
+                  "8_8_8_8_GAMMA target, %s: %u,%u,%u, want %d,%d,%d", pass ? "front buffer" : "render target 0",
+                  cg[0], cg[1], cg[2], want[0], want[1], want[2]);
+            if (pass == 1) {
+                uint32_t tg = rd32(NULL, 0xA0000 + tiled_off(5, 5));
+                ok = 1;
+                for (int i = 0; i < 3; i++)
+                    ok &= (int)((tg >> (8 * i)) & 0xFF) >= want[i] - 2 && (int)((tg >> (8 * i)) & 0xFF) <= want[i] + 2;
+                CHECK(ok, "8_8_8_8_GAMMA target resolved: %08X, want about FF%02X%02X%02X", tg, want[2], want[1],
+                      want[0]);
+            }
+        }
+        reg(0x2001, 0), reg(0x2000, 0);
+        for (uint32_t i = 0; i < 4; i++)
+            reg(0x4400 + i, fbits(1.0f));
+        run(&cp);
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;

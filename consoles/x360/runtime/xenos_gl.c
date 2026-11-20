@@ -3927,6 +3927,40 @@ static void frame_texture(xenos_gl *g, int fw, int fh, GLenum ifmt)
     }
 }
 
+/* an 8_8_8_8_GAMMA picture (GL_SRGB8_ALPHA8) into the RGBA8 frame texture with its gamma-encoded values: the guest
+ * scans out the bytes its gamma target holds (through the display's gamma ramp, linear by default), where a blit
+ * from sRGB into a linear texture would decode them to linear (a darker picture). The eDRAM alias pass does it:
+ * texelFetch decodes, the gamma class encodes again, written as 8_8_8_8. 0 when that pass is not available. */
+static int frame_encode(xenos_gl *g, GLuint src, int fw, int fh)
+{
+    if (!alias_program(g))
+        return 0;
+    static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+    int k = g->scale;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g->frame_tex, 0);
+    g->glDrawBuffers(1, &b0);
+    g->glDisable(GL_BLEND);
+    g->glDisable(GL_DEPTH_TEST);
+    g->glDisable(GL_STENCIL_TEST);
+    g->glDisable(GL_CULL_FACE);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glColorMask(1, 1, 1, 1);
+    g->glViewport(0, 0, fw * k, fh * k);
+    g->glUseProgram(g->aprog);
+    g->glActiveTexture(GL_TEXTURE0);
+    g->glBindTexture(GL_TEXTURE_2D, src);
+    g->glUniform1i(g->glGetUniformLocation(g->aprog, "t"), 0);
+    g->glUniform3i(g->aprog_off, 0, 0, 0);
+    g->glUniform1i(g->aprog_sc, 1); /* gamma */
+    g->glUniform1i(g->aprog_dc, 0); /* 8_8_8_8 */
+    g->glBindVertexArray(g->vao);
+    g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    return 1;
+}
+
 /* At a swap, the picture: the front buffer VdSwap names (its fetch constant, in fetch constant 0) when a resolve
  * wrote it this frame -- the resolve's host picture at the internal resolution, or decoded from guest memory --,
  * else render target 0 as it stands. It lands in frame_tex (with the fetch constant's swizzle as the texture's
@@ -4002,7 +4036,8 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
     }
     if (src) {
         frame_texture(g, fw, fh, src_fmt);
-        blit_tex(g, src, g->frame_tex, 0, 0, fw, fh, 0, 0);
+        if (src_fmt != GL_SRGB8_ALPHA8 || !frame_encode(g, src, fw, fh))
+            blit_tex(g, src, g->frame_tex, 0, 0, fw, fh, 0, 0);
         g->glBindTexture(GL_TEXTURE_2D, g->frame_tex);
         for (int c = 0; c < 4; c++) {
             uint32_t sel = (swizzle >> (3 * c)) & 7;
