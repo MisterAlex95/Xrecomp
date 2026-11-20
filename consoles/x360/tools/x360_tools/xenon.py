@@ -351,6 +351,14 @@ class XenonLifter(FnLifter):
         pre, c = FnLifter.cond(i)
         return pre, c.replace("c->ctr == 0", "(uint32_t)c->ctr == 0").replace("c->ctr != 0", "(uint32_t)c->ctr != 0")
 
+    def op_or(self, i):
+        # `or 31,31,31` / `or 1,1,1`: the SMT thread-priority hints (very low / low) MSVC's spin-wait loops run while
+        # they poll; they change no register. XE_SPIN_HINT (xenon_rt.h) charges virtual time for them, so a busy
+        # wait reaches its event in little host time. `or 2,2,2` (back to normal priority) ends the wait: a plain or.
+        if i.rd == i.ra == i.rb and i.rd in (1, 31) and not i.rec:
+            return "XE_SPIN_HINT();"
+        return FnLifter.op_or(self, i)
+
     def op_mtmsrd(self, i):
         # titles use mtmsrd rS, 1 around short critical sections (MSR[EE], external interrupts): the L = 1 form
         # changes only EE and RI (the architecture's definition); xenon_rt.h does not preempt a thread while EE is

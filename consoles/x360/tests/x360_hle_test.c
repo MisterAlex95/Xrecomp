@@ -1153,6 +1153,42 @@ static void test_damaged_states(void)
     free(bad);
 }
 
+/* the SMT priority hints of a spin-wait (`or 31,31,31`, `or 1,1,1`) end the time slice and charge XE_SPIN_COST
+ * instructions of virtual time once per turn, in interpreted code as in lifted code (xenon_rt.h XE_SPIN_HINT); `or
+ * 2,2,2` and the record form are plain ors */
+static void test_spin_hint(void)
+{
+    static const uint32_t words[] = {
+        0x7FFFFB78u, /* or r31, r31, r31: very low priority */
+        0x7C421378u, /* or r2, r2, r2: normal priority again */
+        0x7FFFFB79u, /* or. r31, r31, r31: sets CR0, no hint */
+        0x7C210B78u, /* or r1, r1, r1: low priority */
+        0x48000000u, /* b . */
+    };
+    uint32_t code = scratch + 0x9000, base = X->image_base, size = X->image_size;
+    for (unsigned k = 0; k < sizeof words / sizeof words[0]; k++)
+        x360_w32(X, code + 4 * k, words[k]);
+    X->image_base = code;
+    X->image_size = sizeof words;
+    x360_thread *t = x360_cur(X);
+    xe_cpu save = t->cpu;
+    t->cpu.pc = code;
+    t->cpu.gpr[31] = 0x80000000u;
+    uint64_t before = X->m.rc_native, stop = X->stop_at;
+    X->stop_at = before + 1;
+    X->m.slice = 1000;
+    int r = x360_interp_run(X, t, 0);
+    uint64_t charged = X->m.rc_native - before;
+    CHECK(r == 1 && charged == 5 + XE_SPIN_COST && X->m.slice < 0,
+          "spin hints: %d, %llu instructions charged, slice %lld", r, (unsigned long long)charged,
+          (long long)X->m.slice);
+    CHECK(t->cpu.gpr[31] == 0x80000000u && (t->cpu.cr >> 28) == 0x8, "or. r31 still sets CR0 (LT): %08X", t->cpu.cr);
+    t->cpu = save;
+    X->stop_at = stop;
+    X->image_base = base;
+    X->image_size = size;
+}
+
 int main(int argc, char **argv)
 {
     char why[256] = "";
@@ -1211,6 +1247,7 @@ int main(int argc, char **argv)
     test_xma();
     test_xma_loop();
     test_crypt();
+    test_spin_hint();
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {
         test_files(dir);

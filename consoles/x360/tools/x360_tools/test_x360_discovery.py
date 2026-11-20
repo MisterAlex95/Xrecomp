@@ -792,3 +792,25 @@ def test_tables_behind_a_nop():
     # a nop writes nothing; `ori rX, rY, 0` is a move and does
     assert gpr_writes(A.ori(0, 0, 0)) == () and gpr_writes(A.ori(9, 9, 0)) == ()
     assert gpr_writes(A.ori(9, 3, 0)) == (9,) and gpr_writes(A.ori(9, 9, 1)) == (9,)
+
+
+def test_spin_hints_lifted(tmp_path):
+    """`or 31,31,31` / `or 1,1,1` (the SMT priority hints of a spin-wait) become XE_SPIN_HINT(); `or 2,2,2` (back to
+    normal priority), the record form and a plain `or` stay ors."""
+    p = Prog(TEXT)
+    p.func("spin")
+    p(A.li(11, 4), A.mtctr(11))
+    p.label("spin_loop")
+    p(A.or_(31, 31, 31), A.or_(31, 31, 31), A.or_(1, 1, 1))
+    p.branch(lambda at, t: A.bc(at, 16, 0, t), "spin_loop")    # bdnz
+    p(A.or_(2, 2, 2), A.or_(31, 31, 31) | 1, A.or_(3, 4, 5), A.blr())
+    p.end()
+    words = p.link()
+    a, b = p.funcs[0][1:]
+    data, _ = build_xex(words, functions=[(4 * a, 4 * (b - a))], entry=4 * a)
+    s = recompile(parse_xex(data), str(tmp_path))
+    assert s["interp_fallback_insns"] == 0
+    text = "".join(f.read_text() for f in sorted(tmp_path.glob("x360_rc_[0-9]*.c")))
+    assert text.count("XE_SPIN_HINT();") == 3
+    assert "R(2) = R(2) | R(2);" in text and "R(31) = R(31) | R(31); RC_CR0(R(31));" in text
+    assert "R(3) = R(4) | R(5);" in text
