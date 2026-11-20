@@ -1862,6 +1862,46 @@ int main(int argc, char **argv)
         run(&cp);
     }
 
+    /* depth bias (PA_SU_SC_MODE_CNTL's poly_offset_front_enable, PA_SU_POLY_OFFSET_FRONT_OFFSET): a green quad at z 0.5
+     * fills the depth buffer, then coplanar quads at z 0.5: red with the test "less" fails without a bias and passes
+     * pulled 8 depth steps nearer; blue with "less or equal" passes without one and fails pushed 8 steps away */
+    {
+        static const float zrgb[4][3] = {{0, 1, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, 0}};
+        for (uint32_t q = 0; q < 3; q++)
+            for (uint32_t k = 0; k < 4; k++)
+                vertex_z(0xA0000 + 0x80 * q + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? -1.0f : 1.0f, 0.5f, zrgb[q][0],
+                         zrgb[q][1], zrgb[q][2]);
+        reg(0x4801, 2u | (32u << 2));
+        static const struct {
+            uint32_t quad, zfunc, sc;
+            float offset;
+            uint8_t want[3];
+            const char *what;
+        } bias[4] = {
+            {1, 1, 0, 0.0f, {0, 255, 0}, "red, less, no bias: fails"},
+            {1, 1, 1u << 11, -8.0f / 16777215.0f, {255, 0, 0}, "red, less, pulled nearer: passes"},
+            {2, 3, 0, 0.0f, {0, 0, 255}, "blue, less or equal, no bias: passes"},
+            {2, 3, 1u << 11, 8.0f / 16777215.0f, {0, 255, 0}, "blue, less or equal, pushed away: fails"},
+        };
+        for (int t = 0; t < 4; t++) {
+            reg(0x2205, 0), reg(0x2380, 0), reg(0x2381, 0);
+            reg(0x2200, 2u | 4u | 7u << 4); /* z test always, z write: the green quad at 0.5 everywhere */
+            reg(0x4800, 0xA0000u | 3u);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            reg(0x2200, 2u | bias[t].zfunc << 4); /* z test, no write */
+            reg(0x2205, bias[t].sc), reg(0x2381, fbits(bias[t].offset));
+            reg(0x4800, (0xA0000u + 0x80 * bias[t].quad) | 3u);
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            const uint8_t *cb = px(g, W / 2, H / 2);
+            CHECK(cb[0] == bias[t].want[0] && cb[1] == bias[t].want[1] && cb[2] == bias[t].want[2],
+                  "depth bias (%s): %u,%u,%u", bias[t].what, cb[0], cb[1], cb[2]);
+        }
+        reg(0x2200, 0), reg(0x2205, 0), reg(0x2381, 0);
+        run(&cp);
+    }
+
     /* a draw whose packet holds fewer indices than it says is counted, with its reason */
     {
         xenos_gl_stats s0, s1;

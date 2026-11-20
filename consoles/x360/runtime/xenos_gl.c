@@ -87,6 +87,7 @@ typedef unsigned int EGLBoolean, EGLenum;
 #define GL_TEXTURE_CUBE_MAP 0x8513
 #define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515
 #define GL_TEXTURE_WRAP_R 0x8072
+#define GL_POLYGON_OFFSET_FILL 0x8037
 
 #define GL_READ_FRAMEBUFFER 0x8CA8
 #define GL_DRAW_FRAMEBUFFER 0x8CA9
@@ -180,6 +181,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glStencilMaskSeparate, (GLenum, GLuint))                                                                   \
     X(void, glCullFace, (GLenum))                                                                                      \
     X(void, glFrontFace, (GLenum))                                                                                     \
+    X(void, glPolygonOffset, (GLfloat, GLfloat))                                                                       \
     X(void, glScissor, (GLint, GLint, GLsizei, GLsizei))                                                               \
     X(void, glClearDepthf, (GLfloat))                                                                                  \
     X(void, glClearStencil, (GLint))                                                                                   \
@@ -1770,7 +1772,38 @@ static GLenum stencil_op(uint32_t o)
     return map[o & 7];
 }
 
-static void apply_state(xenos_gl *g, const xenos_cp *cp)
+/* the guest's depth bias (Xenia's draw_util.cc GetPreferredFacePolygonOffset): GL has one pair for both faces, so
+ * the front pair when its offset is on and front faces are not culled, else the back pair; non-polygonal primitives
+ * (rectangle lists here: points and lines take no offset in GLES) use the front pair when poly_offset_para is on. The
+ * guest's constant is absolute depth, GL's is in units of the depth buffer's resolution (unorm24: x (2^24 - 1)); the
+ * guest's slope scale is per subpixel (x 1/16, Xenia's kPolygonOffsetScaleSubpixelUnit), x the internal resolution
+ * as a host pixel is that much smaller. */
+static void apply_polygon_offset(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
+{
+    uint32_t sc = cp->regs[0x2205];
+    float scale = 0.0f, offset = 0.0f;
+    int polygonal = (prim_type >= 4 && prim_type <= 7) || (prim_type >= 13 && prim_type <= 15);
+    if (polygonal) {
+        if ((sc >> 11) & 1 && !(sc & 1))
+            scale = as_float(cp->regs[0x2380]), offset = as_float(cp->regs[0x2381]);
+        if ((sc >> 12) & 1 && !(sc & 2) && scale == 0.0f && offset == 0.0f)
+            scale = as_float(cp->regs[0x2382]), offset = as_float(cp->regs[0x2383]);
+    } else if ((sc >> 13) & 1) {
+        scale = as_float(cp->regs[0x2380]), offset = as_float(cp->regs[0x2381]);
+    }
+    if (!(fabsf(scale) < 1e30f)) /* NaN / infinite: none */
+        scale = 0.0f;
+    if (!(fabsf(offset) < 1e30f))
+        offset = 0.0f;
+    if (scale != 0.0f || offset != 0.0f) {
+        g->glEnable(GL_POLYGON_OFFSET_FILL);
+        g->glPolygonOffset(scale * (1.0f / 16.0f) * (float)g->scale, offset * 16777215.0f);
+    } else {
+        g->glDisable(GL_POLYGON_OFFSET_FILL);
+    }
+}
+
+static void apply_state(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
 {
     /* blending: off when it is src * 1 + dst * 0 for colour and alpha */
     uint32_t bc = cp->regs[0x2201];
@@ -1819,6 +1852,7 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp)
         g->glDisable(GL_CULL_FACE);
     }
     g->glFrontFace((sc >> 2) & 1 ? GL_CCW : GL_CW);
+    apply_polygon_offset(g, cp, prim_type);
     /* the window scissor (top-left / bottom-right, y downwards), when it is set and smaller than the target */
     uint32_t tl = cp->regs[0x2081], br = cp->regs[0x2082];
     int x0 = (int)(tl & 0x7FFF), y0 = (int)((tl >> 16) & 0x7FFF);
@@ -3870,7 +3904,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     }
     g->glUseProgram(p->prog);
     upload_constants(g, cp); /* the guest viewport is applied in the vertex shader (xe_k.vp) */
-    apply_state(g, cp);
+    apply_state(g, cp, d->prim_type);
     bind_textures(g, cp, p);
     if (p->nvb && !bind_vertex_buffers(g, cp, p)) {
         free(vb);
@@ -4108,6 +4142,7 @@ void xenos_gl_end_frame(xenos_gl *g)
     g->glDisable(GL_DEPTH_TEST);
     g->glDisable(GL_STENCIL_TEST);
     g->glDisable(GL_CULL_FACE);
+    g->glDisable(GL_POLYGON_OFFSET_FILL);
     g->glColorMask(1, 1, 1, 1);
     g->glFrontFace(GL_CCW);
     g->glActiveTexture(GL_TEXTURE0);
