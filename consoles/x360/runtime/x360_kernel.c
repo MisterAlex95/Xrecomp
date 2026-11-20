@@ -1148,12 +1148,76 @@ static void k_RtlInitUnicodeString(x360_machine *x, x360_thread *t, xe_cpu *c)
     RET(0);
 }
 
+/* NTSTATUS -> Win32 error, as Windows maps them (winerror.h's values): every status this runtime returns, and their
+ * neighbours titles test for. GetLastError() after a failed ReadFile or CreateFile is this: the XDK's WMV reader
+ * takes the end of a stream (ERROR_HANDLE_EOF) as normal and anything else as fatal. Anything else is 317
+ * (ERROR_MR_MID_NOT_FOUND, Windows' answer for a status it has no mapping for). */
+static const struct {
+    uint32_t status;
+    uint16_t error;
+} k_dos_errors[] = {
+    {0x00000102u, 1460}, /* TIMEOUT -> ERROR_TIMEOUT */
+    {0x00000103u, 997},  /* PENDING -> ERROR_IO_PENDING */
+    {0x00000107u, 1301}, /* SOME_NOT_MAPPED -> ERROR_SOME_NOT_MAPPED */
+    {0x80000005u, 234},  /* BUFFER_OVERFLOW -> ERROR_MORE_DATA */
+    {0x80000006u, 18},   /* NO_MORE_FILES -> ERROR_NO_MORE_FILES */
+    {0x8000001Au, 259},  /* NO_MORE_ENTRIES -> ERROR_NO_MORE_ITEMS */
+    {0xC0000001u, 31},   /* UNSUCCESSFUL -> ERROR_GEN_FAILURE */
+    {0xC0000002u, 1},    /* NOT_IMPLEMENTED -> ERROR_INVALID_FUNCTION */
+    {0xC0000003u, 87},   /* INVALID_INFO_CLASS -> ERROR_INVALID_PARAMETER */
+    {0xC0000004u, 24},   /* INFO_LENGTH_MISMATCH -> ERROR_BAD_LENGTH */
+    {0xC0000005u, 998},  /* ACCESS_VIOLATION -> ERROR_NOACCESS */
+    {0xC0000008u, 6},    /* INVALID_HANDLE -> ERROR_INVALID_HANDLE */
+    {0xC000000Du, 87},   /* INVALID_PARAMETER -> ERROR_INVALID_PARAMETER */
+    {0xC000000Eu, 2},    /* NO_SUCH_DEVICE -> ERROR_FILE_NOT_FOUND */
+    {0xC000000Fu, 2},    /* NO_SUCH_FILE -> ERROR_FILE_NOT_FOUND */
+    {0xC0000010u, 1},    /* INVALID_DEVICE_REQUEST -> ERROR_INVALID_FUNCTION */
+    {0xC0000011u, 38},   /* END_OF_FILE -> ERROR_HANDLE_EOF */
+    {0xC0000013u, 21},   /* NO_MEDIA_IN_DEVICE -> ERROR_NOT_READY */
+    {0xC0000016u, 234},  /* MORE_PROCESSING_REQUIRED -> ERROR_MORE_DATA */
+    {0xC0000017u, 8},    /* NO_MEMORY -> ERROR_NOT_ENOUGH_MEMORY */
+    {0xC0000018u, 487},  /* CONFLICTING_ADDRESSES -> ERROR_INVALID_ADDRESS */
+    {0xC0000022u, 5},    /* ACCESS_DENIED -> ERROR_ACCESS_DENIED */
+    {0xC0000023u, 122},  /* BUFFER_TOO_SMALL -> ERROR_INSUFFICIENT_BUFFER */
+    {0xC0000024u, 6},    /* OBJECT_TYPE_MISMATCH -> ERROR_INVALID_HANDLE */
+    {0xC000002Du, 487},  /* NOT_COMMITTED -> ERROR_INVALID_ADDRESS */
+    {0xC0000033u, 123},  /* OBJECT_NAME_INVALID -> ERROR_INVALID_NAME */
+    {0xC0000034u, 2},    /* OBJECT_NAME_NOT_FOUND -> ERROR_FILE_NOT_FOUND */
+    {0xC0000035u, 183},  /* OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS */
+    {0xC0000039u, 161},  /* OBJECT_PATH_INVALID -> ERROR_BAD_PATHNAME */
+    {0xC000003Au, 3},    /* OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND */
+    {0xC000003Bu, 161},  /* OBJECT_PATH_SYNTAX_BAD -> ERROR_BAD_PATHNAME */
+    {0xC0000043u, 32},   /* SHARING_VIOLATION -> ERROR_SHARING_VIOLATION */
+    {0xC0000046u, 288},  /* MUTANT_NOT_OWNED -> ERROR_NOT_OWNER */
+    {0xC0000047u, 298},  /* SEMAPHORE_LIMIT_EXCEEDED -> ERROR_TOO_MANY_POSTS */
+    {0xC0000054u, 33},   /* FILE_LOCK_CONFLICT -> ERROR_LOCK_VIOLATION */
+    {0xC0000056u, 5},    /* DELETE_PENDING -> ERROR_ACCESS_DENIED */
+    {0xC0000061u, 1314}, /* PRIVILEGE_NOT_HELD -> ERROR_PRIVILEGE_NOT_HELD */
+    {0xC000007Fu, 112},  /* DISK_FULL -> ERROR_DISK_FULL */
+    {0xC000009Du, 1167}, /* DEVICE_NOT_CONNECTED -> ERROR_DEVICE_NOT_CONNECTED */
+    {0xC00000BAu, 5},    /* FILE_IS_A_DIRECTORY -> ERROR_ACCESS_DENIED */
+    {0xC00000BBu, 50},   /* NOT_SUPPORTED -> ERROR_NOT_SUPPORTED */
+    {0xC00000EFu, 87},   /* INVALID_PARAMETER_1 .. _5 -> ERROR_INVALID_PARAMETER */
+    {0xC00000F0u, 87},
+    {0xC00000F1u, 87},
+    {0xC00000F2u, 87},
+    {0xC00000F3u, 87},
+    {0xC0000101u, 145},  /* DIRECTORY_NOT_EMPTY -> ERROR_DIR_NOT_EMPTY */
+    {0xC0000103u, 267},  /* NOT_A_DIRECTORY -> ERROR_DIRECTORY */
+    {0xC0000120u, 995},  /* CANCELLED -> ERROR_OPERATION_ABORTED */
+    {0xC0000225u, 1168}, /* NOT_FOUND -> ERROR_NOT_FOUND */
+};
+
 static void k_RtlNtStatusToDosError(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)x, (void)t;
-    uint32_t s = A(0);
-    RET(s == 0 ? 0 : s == X_STATUS_TIMEOUT ? 1460 : s == X_STATUS_NO_MEMORY ? 8 : s == X_STATUS_INVALID_HANDLE ? 6
-                                                                                                             : 317);
+    uint32_t s = A(0), e = s ? 317 : 0;
+    for (size_t k = 0; s && k < sizeof k_dos_errors / sizeof k_dos_errors[0]; k++)
+        if (k_dos_errors[k].status == s) {
+            e = k_dos_errors[k].error;
+            break;
+        }
+    RET(e);
 }
 
 static void k_RtlFillMemoryUlong(x360_machine *x, x360_thread *t, xe_cpu *c)

@@ -851,6 +851,28 @@ static void test_raise(void)
     X->status = 0;
 }
 
+/* RtlNtStatusToDosError: Windows' Win32 errors (winerror.h), 317 for a status it does not know */
+static void test_dos_errors(void)
+{
+    static const uint32_t rows[][2] = {
+        {0x00000000u, 0},    {0x00000102u, 1460}, {0x00000103u, 997},  {0x00000107u, 1301}, {0x80000005u, 234},
+        {0x80000006u, 18},   {0x8000001Au, 259},  {0xC0000001u, 31},   {0xC0000002u, 1},    {0xC0000003u, 87},
+        {0xC0000004u, 24},   {0xC0000005u, 998},  {0xC0000008u, 6},    {0xC000000Du, 87},   {0xC000000Eu, 2},
+        {0xC000000Fu, 2},    {0xC0000010u, 1},    {0xC0000011u, 38},   {0xC0000013u, 21},   {0xC0000016u, 234},
+        {0xC0000017u, 8},    {0xC0000018u, 487},  {0xC0000022u, 5},    {0xC0000023u, 122},  {0xC0000024u, 6},
+        {0xC000002Du, 487},  {0xC0000033u, 123},  {0xC0000034u, 2},    {0xC0000035u, 183},  {0xC0000039u, 161},
+        {0xC000003Au, 3},    {0xC000003Bu, 161},  {0xC0000043u, 32},   {0xC0000046u, 288},  {0xC0000047u, 298},
+        {0xC0000054u, 33},   {0xC0000056u, 5},    {0xC0000061u, 1314}, {0xC000007Fu, 112},  {0xC000009Du, 1167},
+        {0xC00000BAu, 5},    {0xC00000BBu, 50},   {0xC00000EFu, 87},   {0xC00000F1u, 87},   {0xC00000F3u, 87},
+        {0xC0000101u, 145},  {0xC0000103u, 267},  {0xC0000120u, 995},  {0xC0000225u, 1168},
+        {0xC0001234u, 317},  {0x40000000u, 317}, /* unknown */
+    };
+    for (size_t k = 0; k < sizeof rows / sizeof rows[0]; k++) {
+        uint32_t e = K(X360_xboxkrnl_RtlNtStatusToDosError, 1, rows[k][0]);
+        T(e == rows[k][1], "RtlNtStatusToDosError(%08X) = %u, want %u", rows[k][0], e, rows[k][1]);
+    }
+}
+
 /* RtlCaptureContext writes the CONTEXT RtlVirtualUnwind and the exception dispatcher read */
 static void test_capture_context(void)
 {
@@ -882,6 +904,7 @@ int main(void)
     test_convert();
     test_utf8();
     test_raise();
+    test_dos_errors();
     printf("x360_rtl: %d checks\n", checks);
     test_capture_context();
     return hle_util_end("x360_rtl");
