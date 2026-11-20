@@ -6566,33 +6566,31 @@ public class LauncherActivity extends Activity {
         String from = getString(R.string.NET_FROM, e.remote.source.name.isEmpty() ? e.remote.source.shortId()
                                                                                   : e.remote.source.name);
         if (j != null && j.active()) {
-            MenuRow p = sheetRow(netWaitText(j), () -> openRemoteGame(e));
-            p.setValue(from);
+            // « Downloading · 42 % » with its rate, or « Waiting to download » with why it waits
+            String what = NetDownloads.RUNNING.equals(j.state) && j.error.isEmpty()
+                          ? getString(R.string.NET_RATE, size(j.rate), j.peers) : netError(j.error);
+            sheetRow(LibraryScreen.chipText(this, e), () -> openRemoteGame(e)).setValue(what);
             sheetRow(getString(R.string.NET_CANCEL_DOWNLOAD), () -> cancelDownload(e))
                     .setValue(getString(R.string.NET_CANCEL_DOWNLOAD_SUB));
         } else {
             boolean failed = j != null && NetDownloads.FAILED.equals(j.state);
             String label = failed ? getString(R.string.NET_RETRY)
                                   : getString(R.string.NET_DOWNLOAD_SIZE, size(e.remote.size()));
+            String why = failed ? netError(j.error) : "";
+            if (why.length() > 32)
+                why = why.substring(0, 31) + "…";
             sheetRow(label, () -> startDownload(e))
-                    .setValue(failed ? getString(R.string.NET_FAILED, netError(j.error))
-                                     : getString(R.string.NET_DOWNLOAD_SUB, size(netFree())));
-            sheetRow(e.remote.name(), () -> {}).setValue(from);
+                    .setValue(failed ? getString(R.string.NET_FAILED, why)
+                                     : getString(R.string.LIB_ST_FREE, size(netFree())));
         }
+        sheetRow(from, () -> {});
         sheetReady();
-    }
-
-    /** « 42 % · 3 MB/s · 5 peers », or why the download waits. */
-    private String netWaitText(NetDownloads.Job j) {
-        if (!j.error.isEmpty())
-            return netError(j.error);
-        if (NetDownloads.RUNNING.equals(j.state))
-            return getString(R.string.NET_PROGRESS, j.percent(), size(j.rate), j.peers);
-        return getString(R.string.NET_CHIP_WAITING);
     }
 
     private String netError(String e) {
         switch (e == null ? "" : e) {
+        case "":
+            return getString(R.string.NET_CHIP_WAITING);
         case NetRunner.E_WIFI:
             return getString(R.string.NET_WAIT_WIFI);
         case NetRunner.E_NO_PEERS:
@@ -6640,15 +6638,14 @@ public class LauncherActivity extends Activity {
         refreshKeepingFocus();
     }
 
+    /**
+     * The service cancels it (pauses its torrent first, then takes it out of the queue and deletes its files: never
+     * the launcher, or libtorrent could write a file again after it was deleted); the card follows at the next poll.
+     */
     private void cancelDownload(LibraryScreen.Entry e) {
         NetService.cancel(this, e.tid);
-        try {   // out of the queue at once, so the card says so; the service deletes the files
-            NetDownloads.cancel(getFilesDir(), e.tid);
-        } catch (IOException ex) {
-            Log.w(TAG, "launcher: net: cannot cancel " + e.tid, ex);
-        }
+        Log.i(TAG, "launcher: net: cancel " + e.tid + " asked");
         setNote(getString(R.string.NET_CANCELLED_NOTE, e.title()), NOTE_INFO);
-        refreshKeepingFocus();
     }
 
     /**

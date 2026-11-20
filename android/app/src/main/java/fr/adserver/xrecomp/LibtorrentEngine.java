@@ -107,8 +107,9 @@ final class LibtorrentEngine implements NetEngine {
         } catch (RuntimeException e) {
             throw new IOException("libtorrent: not a torrent: " + e.getMessage(), e);
         }
-        if (!ti.infoHash().toHex().equalsIgnoreCase(id))
-            throw new IOException("libtorrent: the torrent's hash is not " + id);
+        // The v1 hash (TorrentMeta's): infoHash() is libtorrent's « best » one, a hybrid torrent's truncated v2 hash.
+        if (!ti.hasV1() || !ti.infoHashes().getV1().toHex().equalsIgnoreCase(id))
+            throw new IOException("libtorrent: the torrent's v1 hash is not " + id);
         if (!saveDir.isDirectory() && !saveDir.mkdirs())
             throw new IOException("cannot create " + saveDir);
         infos.put(id, ti);
@@ -182,6 +183,18 @@ final class LibtorrentEngine implements NetEngine {
             return null;
         ErrorCode e = st.errorCode();
         return e != null && e.isError() ? e.getMessage() : null;
+    }
+
+    @Override
+    public synchronized void connectPeer(String id, String host, int port) throws IOException {
+        TorrentHandle h = handle(id);
+        if (h == null)
+            throw new IOException("libtorrent: " + id + " is not in the session");
+        try {
+            h.swig().connect_peer(new org.libtorrent4j.TcpEndpoint(host, port).swig());
+        } catch (RuntimeException e) {
+            throw new IOException("libtorrent: cannot connect to " + host + ":" + port + ": " + e.getMessage(), e);
+        }
     }
 
     @Override

@@ -23,8 +23,8 @@ final class NetRunner {
 
     final NetEngine engine;
     final File filesDir, downloadDir;
-    /** The key of the job that runs now, or null. */
-    String current;
+    /** The key of the job that runs now and its source, or null. */
+    String current, currentSource;
     private final Map<String, Long> lastPeer = new HashMap<>();
 
     NetRunner(NetEngine engine, File filesDir, File downloadDir) {
@@ -94,6 +94,7 @@ final class NetRunner {
                 return pending.size() > 1;
             }
             current = j.key;
+            currentSource = j.source;
             lastPeer.put(j.key, c.now);
         }
         long[] prog = engine.fileProgress(j.source);
@@ -105,6 +106,7 @@ final class NetRunner {
         if (err != null) {
             fail(j.key, err);
             current = null;
+            currentSource = null;
             engine.want(j.source, new int[0], new String[0], new long[0]);
             return pending.size() > 1;
         }
@@ -131,6 +133,7 @@ final class NetRunner {
             LibraryScanner.warn("net: " + j.key + " (" + j.title + ") downloaded, " + total + " bytes");
             engine.want(j.source, new int[0], new String[0], new long[0]);
             current = null;
+            currentSource = null;
             return pending.size() > 1;
         }
         return true;
@@ -139,10 +142,7 @@ final class NetRunner {
     private void pauseCurrent() {
         if (current == null)
             return;
-        String src = null;
-        for (NetDownloads.Job x : NetDownloads.read(filesDir))
-            if (x.key.equals(current))
-                src = x.source;
+        String src = currentSource;   // (its job may be gone already: cancelled)
         if (src != null && engine.has(src)) {
             try {
                 engine.want(src, new int[0], new String[0], new long[0]);
@@ -151,6 +151,7 @@ final class NetRunner {
             }
         }
         current = null;
+        currentSource = null;
     }
 
     private void markWaiting(List<NetDownloads.Job> jobs, String why) throws IOException {

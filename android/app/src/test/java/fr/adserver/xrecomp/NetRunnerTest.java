@@ -108,6 +108,10 @@ public class NetRunnerTest {
         }
 
         @Override
+        public void connectPeer(String id, String host, int port) {
+        }
+
+        @Override
         public void remove(String id) {
             saveDirs.remove(id);
         }

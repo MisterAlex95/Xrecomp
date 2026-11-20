@@ -49,6 +49,9 @@ interface NetEngine {
     /** The torrent's error (a disk full, a folder gone), or null. */
     String error(String id);
 
+    /** Connects the torrent to a peer the player named (their own NAS running a client, say; NET-4's « Add a peer »). */
+    void connectPeer(String id, String host, int port) throws IOException;
+
     /** Takes the torrent out of the session (files stay). */
     void remove(String id);
 }

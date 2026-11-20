@@ -369,7 +369,8 @@ public class LauncherLibraryTest {
         for (Widgets.MenuRow r : sheet.rowsForTest())
             rows.add(r.title);
         assertEquals(java.util.Arrays.asList(app.getString(R.string.LIB_RESCAN), app.getString(R.string.LIB_STORAGE),
-                                             app.getString(R.string.LIB_FOLDERS), app.getString(R.string.SETTINGS),
+                                             app.getString(R.string.LIB_FOLDERS), app.getString(R.string.NET_SOURCES),
+                                             app.getString(R.string.SETTINGS),
                                              app.getString(R.string.ABOUT)), rows);
         assertEquals(root.getName(), sheet.rowsForTest().get(2).value);
         assertTrue(a.focusForTest() == sheet.rowsForTest().get(0));
@@ -1364,5 +1365,102 @@ public class LauncherLibraryTest {
         e.chip = GameState.Chip.NEEDS_PREPARING;
         assertEquals(Theme.WARN, LibraryScreen.chipColor(e));
         assertEquals(app.getString(R.string.CHIP_NEEDS_PREPARE), LibraryScreen.chipText(app, e));
+    }
+
+    // ---- Network library (XBA-320, XBA-321) ----------------------------------------------------------------------
+
+    /**
+     * A torrent source: its games show before they are downloaded (the remote-content art, the cleaned file name,
+     * « On the network »), alongside a local game; A opens the download sheet, Download queues it (NetService started)
+     * and the card says so; Cancel takes it out. Options › Network sources lists the source. Rendered in every size
+     * and language (library-network-*.png).
+     */
+    @Test
+    public void torrentGamesShowAndDownloadOnA() throws Exception {
+        folderGame(0);
+        useFolder();
+        RemoteLibrary.addTorrent(app.getFilesDir(), TorrentMetaTest.torrent("My Xbox games", true,
+                TorrentMetaTest.files(TorrentMetaTest.file(4L << 30, "Halo Sample (USA) (Rev 1).iso"),
+                                      TorrentMetaTest.file(2L << 30, "Night Racer [!].xiso"),
+                                      TorrentMetaTest.file(16L << 20, "gba", "Pocket Quest (Europe).gba"))),
+                null, 1);
+        LauncherActivity a = launch();
+        assertEquals(LauncherActivity.Screen.LIBRARY, a.screenForTest());
+        GameCard halo = card(a, "Halo Sample");
+        assertNotNull(halo);
+        assertTrue(halo.remoteForTest());
+        assertFalse(halo.hasArtForTest());
+        assertEquals(app.getString(R.string.NET_CHIP_ON_NETWORK), halo.chipForTest());
+        assertNotNull(card(a, "Night Racer"));
+        assertNotNull(card(a, "Pocket Quest"));
+        assertFalse(card(a, NAMES[0]).remoteForTest());
+        TestSupport.screenshot(a.getWindow().getDecorView(), "library-network");
+
+        // A on the card: the sheet with Download (its size); A again queues it.
+        halo.requestFocusFromTouch();
+        idle(200);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        Widgets.Sheet sheet = a.sheetForTest();
+        assertNotNull(sheet);
+        assertTrue(sheet.rowsForTest().get(0).title.startsWith(app.getString(R.string.NET_DOWNLOAD)));
+        TestSupport.screenshot(a.getWindow().getDecorView(), "library-network-sheet");
+        shadowOf(app).clearStartedServices();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        assertNull(a.sheetForTest());
+        Intent svc = shadowOf(app).getNextStartedService();
+        assertNotNull(svc);
+        assertEquals(NetService.ACTION_KICK, svc.getAction());
+        List<NetDownloads.Job> jobs = NetDownloads.read(app.getFilesDir());
+        assertEquals(1, jobs.size());
+        assertEquals("Halo Sample", jobs.get(0).title);
+        assertEquals(NetDownloads.QUEUED, jobs.get(0).state);
+        halo = card(a, "Halo Sample");
+        assertEquals(app.getString(R.string.NET_CHIP_WAITING), halo.chipForTest());
+
+        // A on it while it waits: progress / Cancel; Cancel takes it out.
+        halo.requestFocusFromTouch();
+        idle(200);
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        sheet = a.sheetForTest();
+        assertEquals(app.getString(R.string.NET_CANCEL_DOWNLOAD), sheet.rowsForTest().get(1).title);
+        shadowOf(app).clearStartedServices();
+        sheet.rowsForTest().get(1).requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        svc = shadowOf(app).getNextStartedService();   // the service cancels it (pause, then delete)
+        assertEquals(NetService.ACTION_CANCEL, svc.getAction());
+        assertEquals(jobs.get(0).key, svc.getStringExtra(NetService.EXTRA_KEY));
+        NetRunner.cancelFiles(app.getFilesDir(), LibraryScanner.netDir(app), jobs.get(0).key);   // as it does
+        idle(2500);   // the next library poll
+        assertEquals(app.getString(R.string.NET_CHIP_ON_NETWORK), card(a, "Halo Sample").chipForTest());
+
+        // Options › Network sources: the source with its games, then the add rows.
+        key(a, KeyEvent.KEYCODE_BUTTON_Y);
+        sheet = a.sheetForTest();
+        assertEquals("My Xbox games", sheet.rowsForTest().get(3).value);
+        sheet.rowsForTest().get(3).requestFocusFromTouch();
+        key(a, KeyEvent.KEYCODE_BUTTON_A);
+        sheet = a.sheetForTest();
+        List<String> rows = new ArrayList<>();
+        for (Widgets.MenuRow r : sheet.rowsForTest())
+            rows.add(r.title);
+        assertEquals(java.util.Arrays.asList("My Xbox games", app.getString(R.string.NET_ADD_TORRENT),
+                                             app.getString(R.string.NET_PASTE_MAGNET),
+                                             app.getString(R.string.NET_MOBILE_DATA)), rows);
+        assertEquals(app.getString(R.string.NET_SOURCE_GAMES_N, 3), sheet.rowsForTest().get(0).value);
+        TestSupport.screenshot(a.getWindow().getDecorView(), "library-network-sources");
+    }
+
+    /** The same library in every size and language (the remote art and chip must read on a 4:3 and a square screen). */
+    @Test
+    public void torrentGamesRender() throws Exception {
+        folderGame(0);
+        folderGame(1);
+        useFolder();
+        RemoteLibrary.addTorrent(app.getFilesDir(), TorrentMetaTest.torrent("Mixed", false,
+                TorrentMetaTest.files(TorrentMetaTest.file(4L << 30, "Halo Sample (USA).iso"),
+                                      TorrentMetaTest.file(16L << 20, "Pocket Quest.gba"),
+                                      TorrentMetaTest.file(700L << 20, "ps1", "Disc Racer.cue"))),
+                null, 1);
+        render("network", null);
     }
 }
