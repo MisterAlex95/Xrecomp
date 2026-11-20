@@ -63,6 +63,12 @@ target_compile_options(xenos_cp_test PRIVATE -Wall -Wextra)
 add_test(NAME xenos_cp COMMAND xenos_cp_test)
 set_tests_properties(xenos_cp PROPERTIES TIMEOUT 60)
 
+add_executable(xenos_texture_hash_test xenos_texture_hash_test.c)
+target_link_libraries(xenos_texture_hash_test PRIVATE x360_core)
+target_link_options(xenos_texture_hash_test PRIVATE -Wl,--allow-multiple-definition)
+add_test(NAME xenos_texture_hash COMMAND xenos_texture_hash_test)
+set_tests_properties(xenos_texture_hash PROPERTIES TIMEOUT 120)
+
 add_executable(xenos_texel_bounds_test xenos_texel_bounds_test.c)
 target_link_libraries(xenos_texel_bounds_test PRIVATE x360_core)
 target_link_options(xenos_texel_bounds_test PRIVATE -Wl,--allow-multiple-definition)

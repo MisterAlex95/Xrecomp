@@ -92,6 +92,10 @@ typedef struct xenos_cp {
     void (*write32)(void *ctx, uint32_t phys, uint32_t value);
     void (*interrupt)(void *ctx, uint32_t source, uint32_t cpu_mask);
     void (*shader_loaded)(void *ctx, int pixel, const uint32_t *code, uint32_t words); /* optional */
+    /* optional: the host bytes of the whole 512 MB of physical memory as the guest lays them out (big-endian words),
+     * readable at any physical address; the renderer then reads textures, vertices and hashes there directly rather
+     * than through read32 a dword at a time (x360_gpu.c: the 0xA0000000 view, mapped whole) */
+    const uint8_t *mem;
     /* a renderer (xenos_gl.c): each draw initiator and each swap, with the state as it stands (optional) */
     void *render_ctx;
     void (*draw_hook)(void *render_ctx, const struct xenos_cp *cp, const xenos_draw *d);

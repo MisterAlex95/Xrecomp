@@ -1078,8 +1078,35 @@ static uint32_t gpu_swap(uint32_t le, uint32_t endian)
  * big-endian value the CPU sees */
 static uint32_t gpu_read(const xenos_cp *cp, uint32_t phys, uint32_t endian)
 {
+    if (cp->mem) { /* the guest's big-endian word, byte-swapped: its bytes as a little-endian load reads them */
+        uint32_t le;
+        memcpy(&le, cp->mem + (phys & 0x1FFFFFFFu), 4);
+        return gpu_swap(le, endian);
+    }
     uint32_t be = cp->read32 ? cp->read32(cp->ctx, phys & 0x1FFFFFFFu) : 0;
     return gpu_swap(__builtin_bswap32(be), endian);
+}
+
+/* A fast hash of n bytes (4 lanes of 8 bytes: ~10x FNV's byte at a time), for "has this memory changed" checks run
+ * on every cached texture after each swap and resolve. Not for anything that needs a good distribution. */
+static uint64_t span_hash(const uint8_t *p, size_t n, uint64_t seed)
+{
+    const uint64_t k = 0x9E3779B97F4A7C15ull;
+    uint64_t h[4] = {seed ^ k, seed + k, seed ^ (k >> 1), seed - k};
+    size_t i = 0;
+    for (; i + 32 <= n; i += 32)
+        for (int l = 0; l < 4; l++) {
+            uint64_t w;
+            memcpy(&w, p + i + 8 * l, 8);
+            h[l] = (h[l] ^ w) * 0xFF51AFD7ED558CCDull;
+            h[l] ^= h[l] >> 29;
+        }
+    uint64_t r = (uint64_t)n * k;
+    for (; i < n; i++)
+        r = (r ^ p[i]) * 0x100000001B3ull;
+    for (int l = 0; l < 4; l++)
+        r = (r ^ h[l]) * 0xC4CEB9FE1A85EC53ull, r ^= r >> 31;
+    return r;
 }
 
 static float as_float(uint32_t v)
@@ -1778,7 +1805,7 @@ typedef struct texfmt {
 static const texfmt *tex_format(uint32_t f)
 {
     static const texfmt fmts[] = {
-        {2, 1, 1, 0},   {10, 1, 2, 0},  {6, 1, 4, 0},   {14, 1, 4, 0},  {50, 1, 4, 0},  {62, 1, 4, 0},
+        {2, 1, 1, 0},   {8, 1, 1, 0},   {9, 1, 1, 0},   {10, 1, 2, 0},  {6, 1, 4, 0},   {14, 1, 4, 0},  {50, 1, 4, 0},  {62, 1, 4, 0},
         {3, 1, 2, 0},   {4, 1, 2, 0},   {5, 1, 2, 0},   {15, 1, 2, 0},  {7, 1, 4, 0},   {54, 1, 4, 0},
         {16, 1, 4, 0},  {17, 1, 4, 0},  {55, 1, 4, 0},  {56, 1, 4, 0},  {24, 1, 2, 1},  {25, 1, 4, 1},
         {26, 1, 8, 1},  {30, 1, 2, 1},  {31, 1, 4, 1},  {32, 1, 8, 1},  {36, 1, 4, 1},  {37, 1, 8, 1},
@@ -1921,11 +1948,13 @@ static uint8_t unorm8(uint32_t v, unsigned bits)
  * buffer, which can end its page (a 1024 x 768 k_8 one in Warhammer - Battle March, XBA-318) */
 static void texel(uint32_t format, const uint8_t *s, uint8_t out[4])
 {
-    unsigned bytes = format == 2 ? 1 : (format == 10 || format == 3 || format == 4 || format == 5 || format == 15) ? 2 : 4;
+    unsigned bytes = format == 2 || format == 8 || format == 9 ? 1 : (format == 10 || format == 3 || format == 4 || format == 5 || format == 15) ? 2 : 4;
     uint32_t v = s[0] | (bytes > 1 ? (uint32_t)s[1] << 8 : 0),
              d = v | (bytes > 2 ? (uint32_t)s[2] << 16 | (uint32_t)s[3] << 24 : 0);
     switch (format) {
-    case 2: out[0] = out[1] = out[2] = out[3] = s[0]; break; /* 8: replicated, the swizzle picks */
+    case 2: /* 8: replicated, the swizzle picks */
+    case 8: /* 8_A, 8_B: one byte as well (Xenia's host format for both is R8_UNORM) */
+    case 9: out[0] = out[1] = out[2] = out[3] = s[0]; break;
     case 10: out[0] = s[0], out[1] = s[1], out[2] = 0, out[3] = 255; break;
     case 6:
     case 14:
@@ -2196,6 +2225,7 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
     out->is_float = tf->is_float;
     out->w = w, out->h = h1, out->slices = slices, out->dim = dim;
     uint64_t hash = (uint64_t)fc[3] << 32 ^ (uint64_t)levels;
+    uint32_t hashed_at = 0xFFFFFFFFu; /* the storage hashed last (the levels of a packed tail share one) */
     for (int l = base_level; l < levels; l++) {
         /* what is drawn: the guest's size at this level (a compressed level is read in whole blocks, then cropped) */
         uint32_t lw = w >> l ? w >> l : 1, lh = h1 >> l ? h1 >> l : 1, ld = dim == 2 ? (depth >> l ? depth >> l : 1) : slices;
@@ -2219,6 +2249,20 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
             packed_offset(w, h1, depth, dim, tf->block, (uint32_t)l, &ox, &oy, &oz);
         uint32_t bw = (lw + tf->block - 1) / tf->block, bh = (lh + tf->block - 1) / tf->block;
         size_t slice_n = (size_t)bw * bh * tf->bytes, src_n = slice_n * ld;
+        /* With physical memory at hand the hash is of the level's whole storage as it lies in memory (padding
+         * included): no decode to know a texture has not changed, which every cached texture is asked after each
+         * swap and resolve (likely much of the 47 ms a Warhammer frame took on the Thor, XBA-318). */
+        if (cp->mem) {
+            uint32_t at = level_addr & 0x1FFFFFFFu, span = st.stride * (dim == 3 ? 6 : 1);
+            if (at != hashed_at) {
+                hash = span_hash(cp->mem + at, span < 0x20000000u - at ? span : 0x20000000u - at, hash);
+                hashed_at = at;
+            }
+            if (hash_only) {
+                out->lw[l] = lw, out->lh[l] = lh, out->ld[l] = ld;
+                continue;
+            }
+        }
         uint8_t *src = malloc(src_n);
         if (!src) {
             free_decoded(out);
@@ -2241,7 +2285,8 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
                     read_bytes(cp, level_addr + off, tf->bytes, endian, row + (size_t)bx * tf->bytes);
                 }
             }
-        hash = (hash * 1099511628211ull) ^ fnv(src, src_n);
+        if (!cp->mem)
+            hash = (hash * 1099511628211ull) ^ fnv(src, src_n);
         out->lw[l] = lw, out->lh[l] = lh, out->ld[l] = ld;
         if (hash_only) {
             free(src);
@@ -2286,6 +2331,9 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
 
 static uint64_t memory_hash(const xenos_cp *cp, uint32_t base, uint32_t bytes)
 {
+    base &= 0x1FFFFFFFu;
+    if (cp->mem)
+        return span_hash(cp->mem + base, bytes < 0x20000000u - base ? bytes : 0x20000000u - base, 0);
     uint64_t h = 1469598103934665603ull;
     for (uint32_t i = 0; i < bytes; i += 4)
         h = (h ^ (cp->read32 ? cp->read32(cp->ctx, (base + i) & 0x1FFFFFFFu) : 0)) * 1099511628211ull;

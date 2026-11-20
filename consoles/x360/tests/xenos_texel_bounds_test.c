@@ -14,7 +14,7 @@ int main(void)
         perror("mmap");
         return 1;
     }
-    static const struct { uint32_t format; unsigned bytes; } fmts[] = {{2, 1}, {10, 2}, {3, 2}, {4, 2}, {5, 2}, {15, 2}};
+    static const struct { uint32_t format; unsigned bytes; } fmts[] = {{2, 1}, {8, 1}, {9, 1}, {10, 2}, {3, 2}, {4, 2}, {5, 2}, {15, 2}};
     uint8_t out[4];
     for (size_t i = 0; i < sizeof fmts / sizeof fmts[0]; i++) {
         const texfmt *tf = tex_format(fmts[i].format);
