@@ -155,4 +155,27 @@ public class LibraryViewTest {
         assertEquals(LibraryView.Sort.NAME, v.sort);
         assertNull(v.console);
     }
+
+    @Test
+    public void showAllOnTheDeviceOrOnTheNetwork() throws Exception {
+        List<LibraryScreen.Entry> all = library();
+        all.add(entry("net-0123456789ab-00000001", "Halo", 0, 0));
+        all.add(entry("gba-net-0123456789ab-00000002", "Golden Sun", 0, 0));
+        LibraryView.State s = new LibraryView.State();
+        assertEquals(7, LibraryView.apply(all, s).size());
+        assertFalse(s.narrowed());
+        s.where = LibraryView.Where.REMOTE;
+        assertTrue(s.narrowed());   // (« Recently played » steps aside)
+        assertEquals(Arrays.asList("Golden Sun", "Halo"), titles(LibraryView.apply(all, s)));
+        s.where = s.where.next();
+        assertEquals(LibraryView.Where.ALL, s.where);
+        s.where = LibraryView.Where.LOCAL;
+        assertEquals(5, LibraryView.apply(all, s).size());
+        s.console = Console.GBA;   // with the console filter: the GBA games on the device only
+        assertEquals(Arrays.asList("Pocket Quest"), titles(LibraryView.apply(all, s)));
+        File files = tmp.newFolder("files");
+        assertTrue(LibraryView.save(files, s));
+        assertEquals(LibraryView.Where.LOCAL, LibraryView.load(files).where);
+        assertEquals(LibraryView.Where.ALL, LibraryView.Where.parse("nonsense"));
+    }
 }

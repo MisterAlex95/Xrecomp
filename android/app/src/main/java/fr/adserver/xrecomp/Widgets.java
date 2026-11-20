@@ -300,6 +300,8 @@ final class Widgets {
         PLAY, SLIDERS, DISC, INFO, FOLDER, KEY, COPY, SWAP, TRASH, ARROW, CHECK, BACK, RESET, PAD, SOUND, BUZZ,
         // The library's search and sort pills, a favourite (XBA-206).
         SEARCH, SORT, STAR,
+        // XBA-319: the library's Show pill (on the device, on the network).
+        CLOUD,
         // The in-game menu's (GameMenu), drawn by PanelIcons.
         CAMERA, SHARE, HOME, POWER, BARS, SCREEN
     }
@@ -359,6 +361,15 @@ final class Widgets {
         case STAR:
             c.drawPath(star(cx, cy, h * 0.9f), f);
             break;
+        case CLOUD: {   // an outlined cloud: two bumps on a rounded base
+            Path cl = new Path();
+            cl.addCircle(cx - h * 0.3f, cy - h * 0.05f, h * 0.42f, Path.Direction.CW);
+            cl.addCircle(cx + h * 0.3f, cy - h * 0.2f, h * 0.5f, Path.Direction.CW);
+            cl.addRoundRect(new RectF(cx - h * 0.85f, cy, cx + h * 0.9f, cy + h * 0.55f), h * 0.27f, h * 0.27f,
+                            Path.Direction.CW);
+            c.drawPath(cl, f);
+            break;
+        }
         case INFO:
             c.drawCircle(cx, cy, h * 0.82f, p);
             c.drawLine(cx, cy - h * 0.05f, cx, cy + h * 0.42f, p);

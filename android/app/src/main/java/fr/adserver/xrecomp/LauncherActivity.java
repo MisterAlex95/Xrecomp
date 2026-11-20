@@ -738,6 +738,11 @@ public class LauncherActivity extends Activity {
         return contextText;
     }
 
+    /** The screen built again, the focus kept (as a poll that saw a change does). */
+    void refreshForTest() {
+        refreshKeepingFocus();
+    }
+
     /** The library's cards as built (the « Library folder » tile last). */
     List<GameCard> libraryCardsForTest() {
         return libCards;
@@ -1074,7 +1079,7 @@ public class LauncherActivity extends Activity {
         libContent = null;
         libScroll = null;
         libSearch = null;
-        libSearchPill = libSortPill = null;
+        libSearchPill = libSortPill = libWherePill = null;
         setNote(null, NOTE_INFO);
         refreshIdentity();
         switch (s) {
@@ -5400,7 +5405,9 @@ public class LauncherActivity extends Activity {
         e.queue = PrepareProtocol.readQueue(PrepareProtocol.queueFile(getFilesDir()));
         e.packDropped = droppedPacks;
         e.toolkit = Toolchain.toolkitDigest(this);
-        e.remote = RemoteLibrary.notLocal(getFilesDir(), index);   // XBA-319
+        // XBA-319: the network sources' games, unless the player hid them (Options › Network sources)
+        e.remote = NetService.showInLibrary(this) ? RemoteLibrary.notLocal(getFilesDir(), index)
+                                                   : java.util.Collections.emptyMap();
         java.util.Map<String, NetDownloads.Job> d = new java.util.HashMap<>();
         for (NetDownloads.Job j : NetDownloads.read(getFilesDir()))
             d.put(j.key, j);
@@ -6031,6 +6038,10 @@ public class LauncherActivity extends Activity {
             Widgets.PillRow bar = new Widgets.PillRow(this);
             libSearchPill = pill(bar, Icon.SEARCH, searchLabel(), false, this::openSearch);
             libSortPill = pill(bar, Icon.SORT, sortLabel(), false, this::stepSort);
+            // XBA-319: Show (all / on this device / on the network), when some games are on the network
+            libWherePill = libHasRemote() ? pill(bar, Icon.CLOUD, whereLabel(), false, this::stepWhere) : null;
+            if (libWherePill == null)
+                libView().where = LibraryView.Where.ALL;   // (no game on the network shown: nothing to filter)
             LinearLayout.LayoutParams bp = lp(MATCH, Theme.BUTTON_H);
             bp.bottomMargin = Theme.S3;
             col.addView(bar, bp);
@@ -6081,8 +6092,38 @@ public class LauncherActivity extends Activity {
     /** Under the Search and Sort pills: « Recently played », then the grid (rebuilt as the search is typed). */
     private LinearLayout libContent;
     private ScrollView libScroll;
-    private Widgets.PillButton libSearchPill, libSortPill;
+    private Widgets.PillButton libSearchPill, libSortPill, libWherePill;
     private android.widget.EditText libSearch;
+
+    Widgets.PillButton libraryWherePillForTest() {
+        return libWherePill;
+    }
+
+    /** Some entry of the library is a game on the network (the Show pill has something to tell apart). */
+    private boolean libHasRemote() {
+        for (LibraryScreen.Entry e : libEntries)
+            if (RemoteLibrary.isRemoteKey(e.tid))
+                return true;
+        return false;
+    }
+
+    private String whereLabel() {
+        return getString(libView().where.label);   // (no « Show: »: it must fit beside Search and Sort on a square screen)
+    }
+
+    /** A on Show: all games, those on this device, those on the network; kept; the focus stays on the pill. */
+    private void stepWhere() {
+        if (screen != Screen.LIBRARY || libContent == null || libWherePill == null)
+            return;
+        LibraryView.State view = libView();
+        view.where = view.where.next();
+        saveLibView();
+        Log.i(TAG, "launcher: library: showing " + view.where.name().toLowerCase(Locale.ROOT));
+        fillLibrary(focusTid);
+        libWherePill.set(Icon.CLOUD, whereLabel(), false);
+        libWherePill.requestLayout();
+        feedback.play(UiFeedback.Cue.MOVE, libWherePill);
+    }
 
     private LibraryView.State libView() {
         if (libView == null)
@@ -6653,6 +6694,13 @@ public class LauncherActivity extends Activity {
                 .setValue(getString(R.string.NET_ADD_TORRENT_SUB));
         sheetRow(getString(R.string.NET_PASTE_MAGNET), this::onPasteMagnet)
                 .setValue(getString(R.string.NET_PASTE_MAGNET_SUB));
+        boolean show = NetService.showInLibrary(this);
+        sheetRow(getString(R.string.NET_SHOW), () -> {
+            NetService.setShowInLibrary(this, !show);
+            Log.i(TAG, "launcher: net: games of the network " + (show ? "hidden" : "shown") + " in the library");
+            refreshKeepingFocus();
+            openNetSheet();
+        }).setValue(getString(show ? R.string.NET_ON : R.string.NET_OFF));
         boolean mobile = NetService.mobileData(this);
         sheetRow(getString(R.string.NET_MOBILE_DATA), () -> {
             NetService.setMobileData(this, !mobile);

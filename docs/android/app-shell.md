@@ -1918,6 +1918,7 @@ What the library shows and in which order, `LibraryView` (pure; the launcher han
 | **Sort** pill | Name → Last played → Console (Xbox, GBA, PS1, N64, by name in each) → Most played, A for the next; the focus stays on the pill. Names compare without accents (« Écran » with the E's). Never played: last, by name. |
 | Console tabs | In the top bar with games of several consoles: **All**, then the consoles present; L1 / R1 (or a tap). An Xbox-only library has none. A console saved while its games were there and gone now shows All. |
 | **Search** pill | A on it: a text field in its place with the on-screen keyboard (not full screen: `IME_FLAG_NO_EXTRACT_UI`), the grid follows each letter; every word typed must be in the title, any case, accents not needed (« pokemon » finds « Pokémon »). The keyboard's Search key goes to the first game found. B clears the search (before leaving the library); the pill shows « *query* » while one is typed. The library's poll does not rebuild the screen while the field has the focus. |
+| Show pill | XBA-319, only when some games are on the network: All games → On this device → On the network, A for the next, kept. |
 | Favourites | X on a card (or on a game's Home: **Add to favourites** / **Remove from favourites**): first in the grid in every sort, a star in the art's top right corner; note « *Game* is a favourite: first in the library ». The focus follows the card. |
 | **Recently played** | A row of the last five games played, any console, above **All games**; not while a console or a search narrows the grid, nor in a library of one row (five games or fewer). A on a card there opens the game as in the grid. |
 
@@ -2550,7 +2551,14 @@ for it… » while a magnet's list is fetched, « Nobody shares it now » when n
 offers Keep / **Remove from the library** (its partial downloads are deleted, downloaded games stay); **Add a .torrent
 file** (the system picker) and **Paste a magnet link** (the clipboard's text; copy the link first), each followed by
 **Which console are its games for?** (each file's own by its name, or one console: a plain `.iso` then counts as that
-console's); **Download on mobile data** (Off by default: downloads wait for Wi-Fi or Ethernet).
+console's); **Show their games in the library** (On by default; Off hides every game not downloaded and the Show
+pill, downloads go on); **Download on mobile data** (Off by default: downloads wait for Wi-Fi or Ethernet).
+
+**Local or on the network.** The cards tell them apart (the cloud art and « On the network »), and when some games
+are on the network a third pill follows Search and Sort, with a cloud: **All games** → **On this device** → **On the
+network**, A for the next, kept with the sort (`library_view.properties`, `where`). A game downloading counts as on
+the network. Any value but All narrows the grid (« Recently played » steps aside), together with the console tabs
+and the search. No game on the network shown: no pill, every game shows.
 
 **Games before the download.** Every file a scan would list as a game, by name only (nothing is read before the
 download), no deeper than the download folder's scan reaches (one folder inside a multi-file torrent): a disc image or a split set (its parts' sizes summed), a `.cue` with the `.bin` tracks named after it, a
