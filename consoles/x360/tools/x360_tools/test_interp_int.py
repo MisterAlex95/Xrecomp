@@ -32,9 +32,12 @@ INTERP_C = os.path.normpath(os.path.join(HERE, "..", "..", "runtime", "x360_inte
 
 # handed to the interpreter by the lifter (by design): not comparable here
 DEFERRED = {
-    "rfi", "sc", "tw", "twi", "td", "tdi", "mtsr", "mtsrin", "mfsr", "mfsrin", "lswi", "stswi", "lswx", "stswx",
+    "rfi", "sc", "mtsr", "mtsrin", "mfsr", "mfsrin", "lswi", "stswi", "lswx", "stswx",
     "eciwx", "ecowx", "mcrfs", "mtfsf", "mtfsb0", "mtfsb1", "mtfsfi", "mffs", "mcrxr", "tlbie", "tlbia", "tlbsync",
 }
+# traps are lifted as their test (xenon.py XenonLifter._trap): a word that traps on the state it ran from is still handed
+# to the interpreter (which stops the title on it), one that does not is compared like any other
+TRAPS = {"tw", "twi", "td", "tdi"}
 # deferred words the interpreter does not run either (supervisor instructions; the string forms MSVC's Xenon code
 # generator does not emit): a title reaching one stops with the word and its address
 NOT_INTERPRETED = {"rfi", "sc", "mtsr", "mtsrin", "mfsr", "mfsrin", "lswi", "stswi", "lswx", "stswx", "eciwx",
@@ -489,7 +492,9 @@ def test_integer_interpreter_matches_lifted_code(tmp_path):
     deferred, bad = run(exe, cases)
     assert not bad, bad[:30]
     want = DEFERRED | FP_REC
-    assert set(deferred) == want, sorted(set(deferred) ^ want)
+    assert want <= set(deferred) <= want | TRAPS, sorted(set(deferred) ^ want)
+    # a trap handed over is one the interpreter takes (-1), never one it runs past
+    assert all(deferred[n] == {"-1"} for n in TRAPS & set(deferred)), {n: deferred[n] for n in TRAPS & set(deferred)}
     # the deferred words the interpreter must run (r = 0 ran, -1 trapped / failed on purpose, 1 unknown)
     unknown = sorted(n for n, rs in deferred.items() if "1" in rs and n not in NOT_INTERPRETED)
     assert not unknown, unknown
