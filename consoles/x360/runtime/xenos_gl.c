@@ -2376,8 +2376,11 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
     uint32_t mip_addr = fc[5] & 0xFFFFF000u, max_level = (fc[4] >> 6) & 15, packed = (fc[5] >> 11) & 1;
     uint32_t mip_filter = (fc[3] >> 23) & 3, h1 = dim == 0 ? 1 : h, d3 = dim == 2 ? depth : 1;
     int levels = 1;
-    if (mip_addr && max_level && mip_filter != 2) {
-        for (uint32_t l = 1; l <= max_level && l < 14; l++) {
+    /* mip filter "base map" (2) samples one level, the fetch constant's first (Xenia: mip_min_level), so the levels
+     * go up to that one only: a streamed texture's level 0 may not be in memory at all */
+    uint32_t last_level = mip_filter == 2 ? (fc[4] >> 2) & 15 : max_level;
+    if (mip_addr && last_level) {
+        for (uint32_t l = 1; l <= last_level && l < 14; l++) {
             if (!(w >> (l - 1) > 1 || h1 >> (l - 1) > 1 || d3 >> (l - 1) > 1))
                 break; /* the level before was 1 x 1 x 1 */
             levels++;
