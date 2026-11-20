@@ -178,11 +178,12 @@ public class RemoteLibraryTest {
     }
 
     @Test
-    public void filesTooDeepForTheScanAreNotListed() throws IOException {
-        // multi-file: the scan reaches <net>/<id>/<name>/<one folder>/file at most
+    public void filesDeepInTheTorrentAreListed() throws IOException {
+        // the download folder is walked as deep as any path TorrentMeta takes (XBA-320: 5–6 levels of folders seen)
         TorrentMeta m = TorrentMeta.parse(torrent("T", false, files(file(1, "A.iso"), file(2, "d", "B.iso"),
-                                                                    file(3, "d", "e", "C.iso"))));
-        assertEquals(2, RemoteLibrary.maxPathDepth(m));
-        assertEquals(java.util.Arrays.asList("xbox:A:1:1", "xbox:B:1:2"), titles(RemoteLibrary.games(source(null), m)));
+                                                                    file(3, "a", "b", "c", "d", "e", "f", "C.iso"))));
+        assertEquals(TorrentMeta.MAX_DEPTH, RemoteLibrary.maxPathDepth(m));
+        assertEquals(java.util.Arrays.asList("xbox:A:1:1", "xbox:B:1:2", "xbox:C:1:3"),
+                     titles(RemoteLibrary.games(source(null), m)));
     }
 }
