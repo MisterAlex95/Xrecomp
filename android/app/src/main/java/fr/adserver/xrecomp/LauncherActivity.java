@@ -226,6 +226,12 @@ public class LauncherActivity extends Activity {
     /** The open sheet (the library's Options), and the view focused before it opened. */
     private Widgets.Sheet sheet;
     private View sheetReturn;
+    /**
+     * A refresh a background change asked for (a poll, a scan) while a sheet was open, on that screen: done when the
+     * sheet closes, never under it (it would close the sheet and lose what the player was choosing, as a torrent's
+     * console while a download moves on).
+     */
+    private Screen refreshAfterSheet;
     private FrameLayout body, host;
     private Widgets.Backdrop backdrop;
     private Widgets.Glide glide;
@@ -1053,6 +1059,7 @@ public class LauncherActivity extends Activity {
             if (i >= 0)
                 focusMemory.put(screen, i);
         }
+        refreshAfterSheet = null;   // this rebuild is it
         closeSheet(false);
         if (s == Screen.HOME || s == Screen.LIBRARY || s == Screen.WELCOME)
             romEntry = null;
@@ -1504,6 +1511,8 @@ public class LauncherActivity extends Activity {
         stageRoot.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
         View back = sheetReturn;
         sheetReturn = null;
+        if (refreshAfterSheet != null)   // after the row's action (it may open another sheet: then after that one)
+            poller.post(() -> backgroundRefresh(refreshAfterSheet));
         if (restore) {
             if (back != null && back.isAttachedToWindow()) {
                 if (!back.requestFocus())
@@ -5609,7 +5618,7 @@ public class LauncherActivity extends Activity {
         } else if (screen == Screen.ROM_HOME && romEntry != null && romPrepShown != null) {
             Prep now = romPrep(romEntry());
             if (now != romPrepShown) {
-                refreshKeepingFocus();
+                backgroundRefresh(screen);
                 return;
             }
             if (now == Prep.RUNNING) {
@@ -5620,12 +5629,12 @@ public class LauncherActivity extends Activity {
         } else if (screen == Screen.HOME && homeChip != null) {
             LibraryScreen.Entry e = ++libPolls % LIBRARY_POLL_EVERY == 0 ? currentEntry() : null;
             if (e != null && e.chip != homeChip)
-                refreshKeepingFocus();
+                backgroundRefresh(screen);
         } else if (screen == Screen.LIBRARY && !scanning()) {
             // (not while the search is typed: the field and its keyboard would go)
             if (++libPolls % LIBRARY_POLL_EVERY == 0 && (libSearch == null || !libSearch.hasFocus())
                 && libraryChanged())
-                refreshKeepingFocus();
+                backgroundRefresh(screen);
         } else if (screen == Screen.HOME && homePrep != null) {
             Prep now = prep();
             if (now != homePrep) {
@@ -6537,9 +6546,9 @@ public class LauncherActivity extends Activity {
                 focusTid = null;   // the first games found: the focus goes to the selected one, not the folder tile
         }
         if (screen == Screen.LIBRARY || screen == Screen.SETUP)
-            refreshKeepingFocus();
+            backgroundRefresh(screen);
         else if (screen == Screen.HOME && state() == State.LIBRARY)
-            refreshKeepingFocus();
+            backgroundRefresh(screen);
     }
 
     /** Under the grid: the scan's progress, an empty library's hint, a scan cut short, the « Other files » line. */
@@ -9819,6 +9828,21 @@ public class LauncherActivity extends Activity {
     }
 
     /** Rebuilds the current screen (a fact computed in the background arrived), keeping its focus and note. */
+    /**
+     * A refresh for a change in the background (a poll, a scan), meant for screen s: while a sheet is open it waits
+     * for it to close; dropped when the player went to another screen meanwhile.
+     */
+    private void backgroundRefresh(Screen s) {
+        if (s == null || s != screen)
+            return;
+        if (sheet != null) {
+            refreshAfterSheet = s;
+            return;
+        }
+        refreshAfterSheet = null;
+        refreshKeepingFocus();
+    }
+
     private void refreshKeepingFocus() {
         String text = noteText;
         int kind = noteKind;
