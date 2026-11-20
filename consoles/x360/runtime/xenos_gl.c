@@ -375,6 +375,8 @@ struct xenos_gl {
     void (*glBlendFuncSeparatei)(GLuint, GLenum, GLenum, GLenum, GLenum);
     void (*glBlendEquationSeparatei)(GLuint, GLenum, GLenum);
     void (*glColorMaski)(GLuint, GLboolean, GLboolean, GLboolean, GLboolean);
+    int float_blend;          /* EXT_float_blend: 32-bit float targets blend (else a draw blending one is an error) */
+    uint64_t float_blend_off; /* draws whose blending was turned off on a 32-bit float target for want of it */
     GLuint mxbuf;             /* their log: count, capacity, then (byte address, dword) pairs */
     int mx_warned;
     FILE *log;
@@ -553,6 +555,9 @@ static void draw_buffers_caps(xenos_gl *g)
         g->glColorMaski = NULL;
     fprintf(g->log, "xenos: per-target blend and colour mask %s\n",
             g->glEnablei ? "on" : "off (render target 0's state for all)");
+    /* RECOMP_X360_FLOAT_BLEND=0 behaves as a driver without the extension (tests) */
+    const char *fb = getenv("RECOMP_X360_FLOAT_BLEND");
+    g->float_blend = has_ext(g, "GL_EXT_float_blend") && !(fb && !strcmp(fb, "0"));
 }
 
 static int setup(xenos_gl *g, char *why, size_t why_n)
@@ -1847,6 +1852,17 @@ static void apply_polygon_offset(xenos_gl *g, const xenos_cp *cp, uint32_t prim_
     }
 }
 
+/* render target i (-1: any bound) is 32-bit float (32_FLOAT, 32_32_FLOAT as host_format makes them) */
+static int float32_target(const xenos_gl *g, int i)
+{
+    for (int k = i < 0 ? 0 : i; k < (i < 0 ? 4 : i + 1); k++) {
+        int s = g->cur[k];
+        if (s >= 0 && (g->surf[s].ifmt == GL_R32F || g->surf[s].ifmt == GL_RG32F))
+            return 1;
+    }
+    return 0;
+}
+
 static void apply_state(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
 {
     /* blending, render target n from RB_BLENDCONTROLn (off when it is src * 1 + dst * 0 for colour and alpha), and
@@ -1862,6 +1878,13 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
         GLenum sa = blend_factor((bc >> 16) & 31), da = blend_factor((bc >> 24) & 31);
         GLenum oc = blend_op((bc >> 5) & 7), oa = blend_op((bc >> 21) & 7);
         int on = (bc & 0x1FFF1FFFu) != 0x00010001u;
+        /* blending a 32-bit float target needs EXT_float_blend (GL_INVALID_OPERATION, the draw lost, without it):
+         * that target unblended; without per-target state, every target */
+        if (on && !g->float_blend && float32_target(g, indexed ? (int)i : -1)) {
+            on = 0;
+            if (!g->float_blend_off++)
+                fprintf(g->log, "xenos_gl: no EXT_float_blend: blending off on 32-bit float render targets\n");
+        }
         if (indexed) {
             if (on) {
                 g->glEnablei(GL_BLEND, i);

@@ -1428,6 +1428,27 @@ int main(int argc, char **argv)
         run(&cp);
         v = rd32(NULL, 0x4D000 + tiled_off(5, 5));
         CHECK(v == 0xFFFF0000u, "a neighbour under a maximum scissor: %08X, want FFFF0000 (blue)", v);
+        /* blending on a 32_FLOAT target (R32F): 0.25 filled, then 0.75 drawn with src * 0 + dst * 1. With
+         * EXT_float_blend the target keeps 0.25; without it (RECOMP_X360_FLOAT_BLEND=0, xenos_draw_x2) blending is
+         * off on that target and the draw lands (0.75) rather than being lost to GL_INVALID_OPERATION */
+        {
+            const char *fb = getenv("RECOMP_X360_FLOAT_BLEND");
+            int no_fb = fb && !strcmp(fb, "0");
+            reg(0x2002, 0x700u), reg(0x2000, 64u), reg(0x2001, 0x6A0u | 14u << 16);
+            FILL(0.25f, 0.0f, 0.0f, 1.0f);
+            reg(0x2201, 0u | 1u << 8 | 0u << 16 | 1u << 24);
+            FILL(0.75f, 0.0f, 0.0f, 1.0f);
+            reg(0x2201, 0x00010001u);
+            RESOLVE_TO(0xA4000u, 36); /* 32_FLOAT */
+            reg(0x2001, 0), reg(0x2002, 0), reg(0x2000, 0);
+            for (int i = 0; i < 4; i++)
+                reg(0x4400 + (uint32_t)i, fbits(1.0f));
+            run(&cp);
+            v = rd32(NULL, 0xA4000 + tiled_off(5, 5));
+            CHECK(v == fbits(0.75f) || (!no_fb && v == fbits(0.25f)),
+                  "blending on a 32_FLOAT target%s: %08X, want %08X", no_fb ? " without EXT_float_blend" : "", v,
+                  fbits(no_fb ? 0.75f : 0.25f));
+        }
 #undef RESOLVE_TO
 #undef FILL
     }

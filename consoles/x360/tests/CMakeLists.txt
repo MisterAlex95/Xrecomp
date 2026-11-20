@@ -8,7 +8,7 @@ project(console_x360_tests C)
 #   xenos_draw       the GLES renderer draws a hand-built PM4 stream, read back (skipped without EGL / GLES 3.0):
 #                    its frames, among them (XBA-280) eDRAM surfaces at tile bases, a 2_10_10_10 and a float target
 #                    resolved to their formats, a depth resolve, mip levels, a computed-index fetch; xenos_draw_x2 the
-#                    same at an internal resolution of 2
+#                    same at an internal resolution of 2 and as without EXT_float_blend
 #   x360_render      the renderer through the machine: a ring, VdSwap, a front buffer frame, a save state loaded
 #   x360_pad_map     the title key and a host pad as a 360 controller (x360_runtime.h's pure helpers; XBA-280)
 #   x360_window      the renderer on a window's context (xenos_gl_attach at scale 2, the frame texture presented,
@@ -81,10 +81,12 @@ target_compile_options(xenos_draw_test PRIVATE -Wall -Wextra)
 add_test(NAME xenos_draw COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:xenos_draw_test>
                                     ${CMAKE_CURRENT_BINARY_DIR}/xenos_draw)
 set_tests_properties(xenos_draw PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
-# the same frames at an internal resolution of 2 (XBA-280): surfaces, resolves and frames read back at the guest size
+# the same frames at an internal resolution of 2 (XBA-280): surfaces, resolves and frames read back at the guest size;
+# and as a driver without EXT_float_blend (RECOMP_X360_FLOAT_BLEND=0: blending off on 32-bit float targets)
 add_test(NAME xenos_draw_x2 COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:xenos_draw_test>
                                        ${CMAKE_CURRENT_BINARY_DIR}/xenos_draw_x2)
-set_tests_properties(xenos_draw_x2 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 ENVIRONMENT XENOS_DRAW_SCALE=2)
+set_tests_properties(xenos_draw_x2 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120
+                     ENVIRONMENT "XENOS_DRAW_SCALE=2;RECOMP_X360_FLOAT_BLEND=0")
 add_test(NAME x360_render COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_draw.sh $<TARGET_FILE:x360_hle_test>
                                      ${CMAKE_CURRENT_BINARY_DIR}/x360_render --render)
 set_tests_properties(x360_render PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
