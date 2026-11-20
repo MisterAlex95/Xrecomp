@@ -2,6 +2,30 @@
 
 <!-- Highlights: what changed, what works, known problems. Written by hand, kept across updates. -->
 
+Xbox 360 games run faster and look more like the console, and a crash now comes with readable symbols.
+
+- **Xbox 360: faster.** After each frame the renderer checked every cached texture for changes by decoding it again.
+  It now hashes the texture's memory directly, about 100 times faster per texture on a desktop. Warhammer: Battle
+  March ran at 20 frames/s on the Thor; tell us what « perf speed » says now.
+- **Xbox 360: closer to the console.** Fixes from a review against Xenia:
+  - occlusion and visibility queries now complete, so a game that waits on them no longer stalls;
+  - more than 256 shader programs work, with no geometry missing in long sessions;
+  - depth bias works: decals and shadows no longer flicker;
+  - each render target keeps its own blending and colour mask;
+  - gamma targets and gamma textures show the right brightness;
+  - two more texture formats (8_A, 8_B);
+  - "base map" textures read the right mip level.
+- **Crash symbols.** Each release now has an `-symbols.tar.gz` file next to the APK, and `tools/symbolize.sh` names
+  the functions in a crash log taken with « Share the last game's log ».
+- **Leaving a game no longer freezes the app.** The automatic save on leaving now runs in the background.
+- **Safer emulation.** Fixed reads past the end of a buffer in the PS1 sound chip, the Dreamcast and 3DS screens,
+  GameCube copies to RAM, and in the Xbox 360 loader for damaged XEX files and save states.
+
+**Known problems**
+
+- Most of the Xbox 360 changes have only been tested on desktop GPUs (Mesa). Report anything that looks wrong on the
+  Thor, with the last game's log.
+
 ## Changes
 
 <!-- release:changes start (generated from the commits; rewritten on every push to main) -->
