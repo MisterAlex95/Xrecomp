@@ -93,19 +93,22 @@ enum { K_RENDER, K_AUDIO, K_DEEP, K_FIBER, K_COUNT };
 #define RET_FIBER     0x00012035u   /* worker: call fiber */
 #define RET_F_SLEEP   0x00012610u   /* fiber: call [KeDelay...] */
 
+/* These functions use RECOMP_FRAME_ENTRY, not the resume entries of XBA-250: no site can be re-entered (NR), so a
+ * load at another chain is refused here, not re-entered (XBA-294; tests/park_reenter covers the re-entry). */
+#define NR XBOX_CALL_SITE_NO_RESUME
 static const uint32_t SITES[] = {
-    RET_MAIN, F_WORKER, 0,
-    RET_MIX, F_WORKER, 0,
-    RET_MIX2, F_WORKER, 0,
-    RET_RECURSE0, F_WORKER, 0,
-    RET_FIBER, F_WORKER, XBOX_CALL_SITE_STACK_SWITCH,   /* a chain through a stack switch */
-    RET_FRAME, F_MAIN, 0,
-    RET_PRESENT, F_FRAME, 0,
-    RET_P_SLEEP, F_PRESENT, XBOX_CALL_SITE_INDIRECT | XBOX_CALL_SITE_NO_EBP,
-    RET_MIX_SLEEP, F_MIX, XBOX_CALL_SITE_INDIRECT,
-    RET_RECURSE, F_RECURSE, 0,
-    RET_R_SLEEP, F_RECURSE, XBOX_CALL_SITE_INDIRECT,
-    RET_F_SLEEP, F_FIBER, XBOX_CALL_SITE_INDIRECT,
+    RET_MAIN, F_WORKER, NR,
+    RET_MIX, F_WORKER, NR,
+    RET_MIX2, F_WORKER, NR,
+    RET_RECURSE0, F_WORKER, NR,
+    RET_FIBER, F_WORKER, XBOX_CALL_SITE_STACK_SWITCH | NR,   /* a chain through a stack switch */
+    RET_FRAME, F_MAIN, NR,
+    RET_PRESENT, F_FRAME, NR,
+    RET_P_SLEEP, F_PRESENT, XBOX_CALL_SITE_INDIRECT | XBOX_CALL_SITE_NO_EBP | NR,
+    RET_MIX_SLEEP, F_MIX, XBOX_CALL_SITE_INDIRECT | NR,
+    RET_RECURSE, F_RECURSE, NR,
+    RET_R_SLEEP, F_RECURSE, XBOX_CALL_SITE_INDIRECT | NR,
+    RET_F_SLEEP, F_FIBER, XBOX_CALL_SITE_INDIRECT | NR,
 };
 #define NSITES (sizeof SITES / sizeof SITES[0] / 3)
 
@@ -690,7 +693,7 @@ int main(int argc, char **argv)
     {
         uint32_t fn = 0, fl = 0;
         check(xbox_CallSiteLookup(RET_P_SLEEP, &fn, &fl) && fn == F_PRESENT
-              && fl == (XBOX_CALL_SITE_INDIRECT | XBOX_CALL_SITE_NO_EBP) && !xbox_CallSiteLookup(0x12345u, NULL, NULL),
+              && fl == (XBOX_CALL_SITE_INDIRECT | XBOX_CALL_SITE_NO_EBP | NR) && !xbox_CallSiteLookup(0x12345u, NULL, NULL),
               "a call site is found by its return VA, an unknown one is not", NULL);
     }
 

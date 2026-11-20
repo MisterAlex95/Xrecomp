@@ -62,8 +62,12 @@ GAME_NAMES = (
 )
 
 # One game's addresses that are not (yet) in a profile: the Burnout 3 thunk table / .rdata base and Halo's thunk
-# table, both once used as defaults.
-EXTRA_GAME_ADDRESSES = {0x0036B7C0, 0x00253090}
+# table, both once used as defaults; and Fable's, whose title layer became a player's mod kept outside the repository
+# (XBA-236, 2026-11-20): the front-end Sleep sites and their return addresses, the camera setup and its display-size
+# pointer, the cutscene bars' callee and call sites.
+EXTRA_GAME_ADDRESSES = {0x0036B7C0, 0x00253090,
+                        0x0020BD93, 0x0020C3C5, 0x0020BD9A, 0x0020C3CC, 0x0020BBB5, 0x00132D00, 0x009A1188,
+                        0x0023EB70, 0x003C0070, 0x003C01A4, 0x00303170, 0x004B7CB8}
 
 C_EXT = {".c", ".h", ".cpp", ".cc", ".hpp", ".m", ".mm", ".java", ".kt", ".kts", ".gradle", ".js", ".glsl", ".frag",
          ".vert", ".inc"}

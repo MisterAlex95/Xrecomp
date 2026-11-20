@@ -269,6 +269,11 @@ final class Library {
      * never fill the same temporary file; the last rename wins with one writer's complete text.
      */
     static void writeAtomically(File file, String text) throws IOException {
+        writeAtomically(file, text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** The same for bytes (a .torrent, RemoteLibrary). */
+    static void writeAtomically(File file, byte[] bytes) throws IOException {
         File dir = file.getAbsoluteFile().getParentFile();
         if (dir != null && !(dir.mkdirs() || dir.isDirectory()))
             throw new IOException("cannot create " + dir);
@@ -276,7 +281,7 @@ final class Library {
         boolean done = false;
         try {
             try (FileOutputStream out = new FileOutputStream(tmp)) {
-                out.write(text.getBytes(StandardCharsets.UTF_8));
+                out.write(bytes);
                 out.getFD().sync();
             }
             if (!tmp.renameTo(file))

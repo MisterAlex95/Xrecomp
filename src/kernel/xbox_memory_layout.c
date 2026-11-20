@@ -21,6 +21,7 @@
 #include "xbox_memory_layout.h"
 #include "xbox_seh.h"
 #include "xbox_xbe_sections.h"
+#include "xbox_mods.h"
 #include "kernel.h"
 #include "kernel_park.h"          /* host waits are park points (XBA-251) */
 #include "guest_vmem.h"
@@ -2738,6 +2739,22 @@ jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
     return &s_jmp[s_jmp_used++].native;
 }
 
+/* A thread re-entering a save state's chain in the same run (XBA-294, kernel_park.c) leaves its host frames above
+ * `frames` (its routine's): the native buffers armed there point into them. Dropped, as a fresh thread has none (a
+ * guest longjmp to one of their guest buffers runs the guest's own longjmp). */
+void recomp_setjmp_drop_above(uint32_t frames)
+{
+    int i, kept = 0;
+
+    for (i = 0; i < s_jmp_used; i++)
+        if ((uint32_t)(s_jmp[i].runtime >> 32) <= frames) {
+            if (kept != i)
+                s_jmp[kept] = s_jmp[i];
+            kept++;
+        }
+    s_jmp_used = kept;
+}
+
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
 {
     const uint8_t *mem = (const uint8_t *)g_xbox_mem_offset;
@@ -3453,7 +3470,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
     g_force_return = getenv("RECOMP_FORCE_RETURN") != NULL;
     recomp_status_start();      /* RECOMP_STATUS: the headless run's status file */
     DWORD old_protect;
-    const uint8_t *xbe = (const uint8_t *)xbe_data;
+    /* The player's mods (xbox_mods.h): their patched copy of the XBE when Prepare made one. */
+    const uint8_t *xbe = xbox_ModsXbe((const uint8_t *)xbe_data, &xbe_size);
 
     if (g_memory_base) {
         fprintf(stderr, "xbox_MemoryLayoutInit: already initialized\n");
@@ -3883,6 +3901,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         }
         /* Reference counts, overlaps, copies for XeLoadSection (XBA-124). */
         xbox_XbeSectionsInit(xbe, xbe_size);
+        /* What the mods ask once the image is in place: wide frames, their data writes. */
+        xbox_ModsAfterLoad();
     }
 
     /*

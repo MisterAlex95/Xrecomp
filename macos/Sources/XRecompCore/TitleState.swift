@@ -92,6 +92,7 @@ public struct TitleState: Codable, Equatable, Sendable {
         if r.contains(where: { $0.contains("toolkit") || $0.contains("commit") }) {
             return "Prepare again (toolkit updated)"
         }
+        if r.contains("mods") { return "Prepare again (mods changed)" }
         if r.contains(where: { $0.contains("profile") }) { return "Prepare again (enhancements or title profile changed)" }
         if r.contains(where: { $0.contains("xbe") }) { return "Prepare again (the game's files changed)" }
         if r.contains("not_built") { return "The last build did not finish: prepare again" }

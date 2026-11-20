@@ -7,7 +7,7 @@
  *
  *   header   "XBXS", format version, header size, section count, the identity (title ID, SHA-1 of the
  *            XBE's headers, build ID of the binary, toolkit version, RAM / mapped / contiguous sizes,
- *            sizeof(RecompCpuRegs)), when it was taken, a hash of the header
+ *            sizeof(RecompCpuRegs), the mod set), when it was taken, a hash of the header
  *   sections each: u32 tag, u32 version, u64 length, u64 hash of the payload, then the payload
  *
  * All integers little-endian (every host we build for is). A state only loads into the binary that
@@ -36,7 +36,7 @@
  * before the first capture (an init function of the component).
  *
  * Reading a state checks, in order: the magic and format version, the header hash, the identity
- * against the running title (another title or XBE: EGAME; another build, toolkit or memory size:
+ * against the running title (another title or XBE: EGAME; another build, toolkit, memory size or mod set:
  * EVERSION), then every section: its bounds and hash (ECORRUPT), that it is registered here with the
  * same version (EVERSION), its check callback; and that every registered section is present.
  *
@@ -46,7 +46,10 @@
  * state (same ordinal, guest return address and esp at the call) through the same call chain (XBA-247: the
  * chain signature of its frame shadow stack, every lifted frame's return address and esp, neither chain
  * unrestorable) with the same ebp in every frame: the host stack below it is then the one the state's thread
- * had (chain_matches in xbox_state.c). Otherwise ECHAIN with the reason, and nothing changes. Then, with the
+ * had (chain_matches in xbox_state.c). A thread at another chain re-enters the state's instead, on its own host
+ * thread, through the resume entries (XBA-294: kernel_park.h xbox_ParkReenterThread); when it cannot (the same
+ * guest thread and routine, a chain the resume entries can re-enter), ECHAIN with both reasons, and nothing
+ * changes. Then, with the
  * devices held: MEM, RAM, KOBJ, NV2A, APU, USB and any other section in registration order, and each thread's
  * registers (the ones it sees when its call returns, or the call made again when the state has the thread
  * inside it). A section that fails part way puts back a capture taken
@@ -186,6 +189,7 @@ typedef struct XboxStateIdentity {
     char toolkit[16];        /* "0.14.0" */
     uint32_t ram_size, mapped_size, contig_size;
     uint32_t cpu_bytes;      /* sizeof(RecompCpuRegs) */
+    uint32_t mod_set;        /* the enabled mods (XBA-286): RECOMP_MOD_SET's first 8 hex digits; 0 no mod */
 } XboxStateIdentity;
 
 /* The running title's identity. The build ID is the binary's (ELF NT_GNU_BUILD_ID of the module this code
@@ -193,6 +197,10 @@ typedef struct XboxStateIdentity {
 void xbox_StateIdentityGet(XboxStateIdentity *out);
 /* Overrides the build ID (n bytes, at most 32; n 0: back to the binary's). Hosts without one, tests. */
 void xbox_StateSetBuildId(const uint8_t *id, size_t n);
+/* The mod set of a hex mod-set hash (tools/mods/store.py state_mod_set): its first 8 hex digits, big-endian, 1 when
+ * they are all 0; 0 for NULL, "" or no hex digits (no mod). xbox_StateIdentityGet reads RECOMP_MOD_SET, which
+ * Prepare forces from the enabled mods (docs/technical/mods.md). */
+uint32_t xbox_StateModSet(const char *hex);
 
 /* ---- Capture -------------------------------------------------------------------------------------------- */
 
@@ -327,6 +335,7 @@ typedef struct XboxStateLoadStats {
     int threads;
     int reissued;            /* threads whose call is made again (the state had them inside it) */
     char reason[256];        /* why it was refused or failed, or "" */
+    int reentered;           /* threads at another call chain than in the state, re-entering the state's (XBA-294) */
 } XboxStateLoadStats;
 
 /* Freezes every guest thread (timeout_ms for the freeze, and again for the waits in progress to end), loads the

@@ -555,8 +555,13 @@ public class PrepareService extends Service {
                 e.put("PYTHONUNBUFFERED", "1");
                 e.put("PYTHONPATH", in.toolkit.getAbsolutePath());   // tools.prepare from the toolkit root
                 e.put("XBA_PYTHON", new File(nat, Toolchain.PYTHON).getAbsolutePath());
-                if (!rom && !GameStore.enhancements(c, titleId))   // Settings › Enhancements off (profile-free WP6)
+                if (!rom && !GameStore.enhancements(c, titleId))   // Settings › Enhancements off: the mods left out
                     e.put("XBA_NO_TITLE_LAYER", "1");
+                // The player's mods (docs/technical/mods.md): <external files>/mods/<console>/<title id>/, where a
+                // computer can copy them over USB or adb until the app has its Mods screen (MOD-4).
+                File ext = GameStore.externalFilesDir(c);
+                if (ext != null)
+                    e.put("XBA_MODS_DIR", new File(ext, "mods").getAbsolutePath());
                 if (x360Keys != null)   // XBA-282, XBA-300: the player's key file and the APK's (X360Key), by path only
                     e.put(X360Key.ENV, x360Keys);
                 return e;

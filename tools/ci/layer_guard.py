@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Profiles are optional enhancements (profile-free WP6): what a shipped layer under profiles/ may hold.
+"""No title layer ships, and profiles/ holds no layer at all (profile-free WP6, XBA-236): what a shipped tree may hold.
 
 Runs in the linux CI job through tools/ci/test_layer_guard.py (the `pytest tools/` pass), or by hand:
 
     python3 tools/ci/layer_guard.py [--root DIR]
 
 A title runs on the toolkit alone: its defaults (the XDK switches, the D3D service, the DMA walk, run-time pacing and
-the frame-lock verdict) and what the analysis and the runs find. A title layer only adds what cannot be derived, an
-enhancement of one game (a 16:9 mod, a front-end rate), and the title still runs with it left out
-(--no-title-layer / XBA_NO_TITLE_LAYER=1). So a shipped tree fails when:
+the frame-lock verdict) and what the analysis and the runs find. One game's enhancement (a 16:9 picture, a front-end
+rate) is a player's mod (docs/technical/mods.md), never toolkit code: the last title layer became one on 2026-11-20
+(XBA-236's « no profiles/titles code left »). So a shipped tree fails when:
 
+  - profiles/titles/<id>/ holds anything (rule `title-layer`): no title layer ships;
   - profiles/xdk/<name>/ or profiles/engines/<name>/ holds a layer.json: what those layers did is a toolkit default
     now; a developer's A/B layer is not shipped;
+
+and, for a developer's local title layer (the mechanism stays for an A/B; tools.prepare reads it), when:
+
   - a title.json has a key outside KNOWN_KEYS (a typo, or a key this guard does not know yet);
   - a title.json says no "enhancements": a layer with nothing to add (a name and a state) is deleted, the XBE's
     certificate and the prepare give those;
@@ -25,8 +29,8 @@ A justified exception goes into tools/ci/layer_guard_allow.txt, one per line wit
 
     <layer> <rule>            e.g.  titles/58424104 env_default:RECOMP_PB_WALK   # why
 
-where <rule> is what a finding prints after the layer (`layers`, `seed_functions`, `params:XBA_D3D_X`,
-`env_force:RECOMP_X`, `layer.json`, `key:<name>`, `enhancements`).
+where <rule> is what a finding prints after the layer (`title-layer`, `layers`, `seed_functions`,
+`params:XBA_D3D_X`, `env_force:RECOMP_X`, `layer.json`, `key:<name>`, `enhancements`).
 """
 import argparse
 import json
@@ -111,9 +115,11 @@ def scan(root, allow_path=None):
     for n in _subdirs(os.path.join(profiles, "titles")):
         key = "titles/%s" % n
         path = os.path.join(profiles, "titles", n, "title.json")
+        if not os.listdir(os.path.join(profiles, "titles", n)):
+            continue                # an empty folder git does not even keep
+        found.append((key, "title-layer", "a shipped title layer: one game's enhancement is a player's mod "
+                                          "(docs/technical/mods.md), not toolkit code (XBA-236)"))
         if not os.path.isfile(path):
-            if not os.listdir(os.path.join(profiles, "titles", n)):
-                continue            # an empty folder git does not even keep
             found.append((key, "title.json", "a title folder without title.json"))
             continue
         try:
@@ -134,8 +140,9 @@ def main(argv=None):
     for layer, rule, why in found:
         print("profiles/%s: %s: %s" % (layer, rule, why))
     if found:
-        print("%d finding(s): a title layer holds optional enhancements only (docs/technical/profiles.md); a real "
-              "exception goes into %s with its reason" % (len(found), ALLOW), file=sys.stderr)
+        print("%d finding(s): no layer ships under profiles/ (docs/technical/profiles.md; a game's enhancement is "
+              "a mod, docs/technical/mods.md); a real exception goes into %s with its reason" % (len(found), ALLOW),
+              file=sys.stderr)
         return 1
     return 0
 

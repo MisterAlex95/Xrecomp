@@ -70,6 +70,7 @@ One per stage, in the order you run them.
 ### Preparing and checking a title
 
 - [Profiles in Layers](technical/profiles.md) — A title's switches and fixes in `profiles/`: XDK library, engine and title layers, picked from the XBE by `tools.prepare`; no per-title code outside `profiles/titles` (the CI guard)
+- [Mods](technical/mods.md) — A player's own mods per title: mod.json, the store and load order, the mod-set hash in save states, patches before Prepare, the display hint
 - [The Discovery File](technical/discovery.md) — What a run meets that the static analysis missed, recorded for the next prepare: the entry kinds, and who reads them
 - [The Compat Runner](technical/compat-runner.md) — Prepare, boot headless with a pad script, and record the stage each title reaches; heal / recall; the library report
 

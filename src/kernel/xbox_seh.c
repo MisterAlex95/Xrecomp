@@ -936,6 +936,17 @@ int xbox_SehPointResume(const XboxSehPoint *p, uint32_t va, uint32_t func)
     return 1;
 }
 
+void xbox_SehPointRestore(const XboxSehPoint *p)
+{
+    seh_thread *t = seh_self();
+    if (p->anchors < t->n)
+        t->n = p->anchors;
+    t->depth = p->depth;
+    t->faults = p->faults;
+    xbox_SehRuntimeRestore(p->runtime);
+    t->refused = 0;
+}
+
 static int seh_desc_index(const recomp_seh_desc *d, uint32_t va)
 {
     uint32_t i;

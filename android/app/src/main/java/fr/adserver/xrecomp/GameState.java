@@ -5,6 +5,9 @@ package fr.adserver.xrecomp;
  * about it (record, scan item, pack, Prepare status, the running game, the toolchain). No I/O here: the caller
  * gathers Facts, so the JVM tests cover every combination.
  *
+ * A game of the network library (XBA-319, any console) is On the network, or Downloading while its download runs or
+ * waits; once downloaded it is a scanned game like any other.
+ *
  * Chip priority (first that applies): Running; Preparing; Queued; Importing; then, with the game's files present,
  * Prepare failed, Pack invalid, Ready, Needs preparing (without the on-device toolchain, Ready: the shell runs the
  * game its own way); without them, Not imported / Needs copying / No file access (a source is there), else
@@ -25,7 +28,11 @@ final class GameState {
 
     enum Chip {
         RUNNING, PREPARING, QUEUED, IMPORTING, PREPARE_FAILED, PACK_INVALID, READY, NEEDS_PREPARING, NOT_IMPORTED,
-        NEEDS_COPYING, NO_FILE_ACCESS, SOURCE_GONE, DATA_MISSING, GONE, NOT_PLAYABLE_YET
+        NEEDS_COPYING, NO_FILE_ACCESS, SOURCE_GONE, DATA_MISSING, GONE, NOT_PLAYABLE_YET,
+        /** XBA-319: a game of the network library, not on the device: A downloads it. */
+        ON_NETWORK,
+        /** XBA-319: its download runs or waits its turn. */
+        DOWNLOADING
     }
 
     /** The active source in the library folder. */
@@ -37,7 +44,9 @@ final class GameState {
         /** Listed, but the app lost its access (permission revoked, All files access off). */
         NO_ACCESS,
         /** Not in the library folder (or no library folder). */
-        MISSING
+        MISSING,
+        /** XBA-319: a game of a network source (RemoteLibrary), not on the device yet. */
+        REMOTE
     }
 
     static final class Facts {
@@ -68,9 +77,13 @@ final class GameState {
         String runningTid;
         /** The title ID being imported now, or null. */
         String importingTid;
+        /** XBA-319: a REMOTE game whose download runs or is queued (NetDownloads). */
+        boolean downloading;
     }
 
     static Chip chip(Facts f) {
+        if (f.source == Source.REMOTE)   // any console: nothing of it is here yet
+            return f.downloading ? Chip.DOWNLOADING : Chip.ON_NETWORK;
         if (f.console != Console.XBOX) {
             if (f.source == Source.MISSING)
                 return Chip.GONE;

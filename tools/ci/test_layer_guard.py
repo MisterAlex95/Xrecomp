@@ -1,5 +1,5 @@
-"""layer_guard.py (profile-free WP6): the shipped profiles/ tree holds optional enhancements only, and each rule fails
-on a planted layer in a synthetic tree. Runs with the rest of `pytest tools/` in the linux job: this is the CI check."""
+"""layer_guard.py (profile-free WP6, XBA-236): the shipped profiles/ tree holds no layer (no title layer either), and
+each rule fails on a planted layer in a synthetic tree. Runs with the rest of `pytest tools/` in the linux job: this is the CI check."""
 import json
 import os
 import subprocess
@@ -19,14 +19,24 @@ def test_the_shipped_tree_is_clean():
     assert found == [], "\n".join("profiles/%s: %s: %s" % f for f in found)
 
 
-def tree(tmp_path, layers, allow=""):
+def test_no_title_layer_ships(tmp_path):
+    """XBA-236: profiles/titles stays empty; a game's enhancement is a mod (docs/technical/mods.md)."""
+    titles = os.path.join(ROOT, "profiles", "titles")
+    assert not [n for n in (os.listdir(titles) if os.path.isdir(titles) else [])
+                if os.listdir(os.path.join(titles, n))]
+    assert tree(tmp_path, {"titles/58424104": GOOD}, keep_title_layer=True) == [("titles/58424104", "title-layer")]
+    (tmp_path / "e" / "profiles" / "titles" / "58424104").mkdir(parents=True)     # an empty folder is nothing
+    assert lg.scan(str(tmp_path / "e")) == []
+
+
+def tree(tmp_path, layers, allow="", keep_title_layer=False):
     for key, obj in layers.items():
         d = tmp_path / "profiles" / key
         d.mkdir(parents=True, exist_ok=True)
         (d / ("title.json" if key.startswith("titles/") else "layer.json")).write_text(json.dumps(obj))
     (tmp_path / "tools" / "ci").mkdir(parents=True, exist_ok=True)
     (tmp_path / "tools" / "ci" / "layer_guard_allow.txt").write_text(allow)
-    return [(layer, rule) for layer, rule, _ in lg.scan(str(tmp_path))]
+    return [(layer, rule) for layer, rule, _ in lg.scan(str(tmp_path)) if keep_title_layer or rule != "title-layer"]
 
 
 def test_an_enhancement_layer_passes(tmp_path):
@@ -70,6 +80,7 @@ def test_the_allow_list(tmp_path):
     found = tree(tmp_path, {"titles/58424104": bad},
                  allow="# header\ntitles/58424104 env_force:RECOMP_LSFG   # a reason\n")
     assert found == [("titles/58424104", "params:XBA_D3D_DEVICE")]
+    assert ("titles/58424104", "title-layer") in [(a, b) for a, b, _ in lg.scan(str(tmp_path))]
 
 
 def test_the_command_line_exit_code(tmp_path):

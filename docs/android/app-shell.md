@@ -735,7 +735,7 @@ exist in the runtime and mean something to a player are offered. Graphics and Au
 | General › Bottom screen (only with a second display) | Panel (default), Black, Off | none: [Dual screen](#dual-screen-ayn-thor), `GameStore.bottomScreen` |
 | General › Updates (not in a game's own app) | the last check as the value; A opens the Updates screen | none: [Updates](#updates), `app_update` SharedPreferences |
 | General › Game theme (only with a game that has a title ID) | Art and colours (default), Colours only, Off | none: [Game theme](#game-theme), `files/settings/theme_<TID>` |
-| General › Enhancements (only for a game whose pack has `title_layer`: the toolkit has optional enhancements for it) | On (default), Off | none: `files/settings/enhancements_<TID>`; off, the game's next Prepare runs with `XBA_NO_TITLE_LAYER=1`, and Home offers Prepare again while the pack differs ([profiles.md](../technical/profiles.md#optional-by-construction), [prepare.md](prepare.md#packjson) `title_layer`) |
+| General › Enhancements (only for a game whose pack has `title_layer`: mods were on for it, [mods.md](../technical/mods.md)) | On (default), Off | none: `files/settings/enhancements_<TID>`; off, the game's next Prepare runs with `XBA_NO_TITLE_LAYER=1` (its mods left out), and Home offers Prepare again while the pack differs ([profiles.md](../technical/profiles.md#optional-by-construction), [prepare.md](prepare.md#packjson) `title_layer`) |
 | General › Language | Same as Android (default), English, Français, Deutsch, Español, Italiano, Português, 日本語, 한국어, 中文 | `RECOMP_LANGUAGE=…`; « Same as Android » writes nothing ([Game language](#game-language)) |
 | General › Controller rumble (all consoles) | On (default), Off | `RECOMP_RUMBLE=0` when off: no motor for the Xbox's emulated USB pad, the PS1 DualShock or the N64 Rumble Pak |
 | General › Rewind (all consoles; GBA, PS1, N64, GameCube only) | Auto (default), On, Off | XBA-194: `RECOMP_REWIND=1` / `0`; the default writes nothing (on for every console but the Xbox 360; the N64 and the GameCube since XBA-278, their costly captures spaced out: [consoles/README.md « Rewind »](../../consoles/README.md)). Hold the rewind hotkey (Select + L2) to go back; a game can have its own |
@@ -1918,6 +1918,7 @@ What the library shows and in which order, `LibraryView` (pure; the launcher han
 | **Sort** pill | Name → Last played → Console (Xbox, GBA, PS1, N64, by name in each) → Most played, A for the next; the focus stays on the pill. Names compare without accents (« Écran » with the E's). Never played: last, by name. |
 | Console tabs | In the top bar with games of several consoles: **All**, then the consoles present; L1 / R1 (or a tap). An Xbox-only library has none. A console saved while its games were there and gone now shows All. |
 | **Search** pill | A on it: a text field in its place with the on-screen keyboard (not full screen: `IME_FLAG_NO_EXTRACT_UI`), the grid follows each letter; every word typed must be in the title, any case, accents not needed (« pokemon » finds « Pokémon »). The keyboard's Search key goes to the first game found. B clears the search (before leaving the library); the pill shows « *query* » while one is typed. The library's poll does not rebuild the screen while the field has the focus. |
+| Show pill | XBA-319, only when some games are on the network: All games → On this device → On the network, A for the next, kept. |
 | Favourites | X on a card (or on a game's Home: **Add to favourites** / **Remove from favourites**): first in the grid in every sort, a star in the art's top right corner; note « *Game* is a favourite: first in the library ». The focus follows the card. |
 | **Recently played** | A row of the last five games played, any console, above **All games**; not while a console or a search narrows the grid, nor in a library of one row (five games or fewer). A on a card there opens the game as in the grid. |
 
@@ -2536,6 +2537,107 @@ out/hb` (Docker; `out/hb/n64/gfx.z64`, `hello.z64`, `cpu.z64`, `timer_irq.z64`).
     they differ. Send the logcat if the game stops or the Vulkan RDP logs `[ERROR]` lines (tag `Granite`).
 14. With frame generation on (an Xbox game with LSFG enabled, then an N64 game, then the Xbox game again): both
     still work. Each uses its own Vulkan device.
+
+### Network library (XBA-319)
+
+Games the player keeps elsewhere (dumps from their own discs on a NAS, a server, another device) show in the library
+before they are on the device; A on one downloads it, then it is set up like any game. First source kind: a
+**torrent**, one per console (NET-1, NET-2); SMB / SFTP / WebDAV folders come on the same path later (NET-5). The app
+ships no torrent, tracker or catalog: the player adds their own. A private torrent (the private flag: no DHT, no PEX,
+no local discovery for it) is the setup to use for one's own dumps.
+
+**Sources.** Library › Options › **Network sources**: one row per source (its name; « 12 games · Xbox », « Looking
+for it… » while a magnet's list is fetched, « Nobody shares it now » when no peer answered within a minute), A on one
+offers Keep / **Remove from the library** (its partial downloads are deleted, downloaded games stay); **Add a .torrent
+file** (the system picker) and **Paste a magnet link** (the clipboard's text; copy the link first), each followed by
+**Which console are its games for?** (each file's own by its name, or one console: a plain `.iso` then counts as that
+console's); **Show their games in the library** (On by default; Off hides every game not downloaded and the Show
+pill, downloads go on); **Download on mobile data** (Off by default: downloads wait for Wi-Fi or Ethernet).
+
+**Local or on the network.** The cards tell them apart (the cloud art and « On the network »), and when some games
+are on the network a third pill follows Search and Sort, with a cloud: **All games** → **On this device** → **On the
+network**, A for the next, kept with the sort (`library_view.properties`, `where`). A game downloading counts as on
+the network. Any value but All narrows the grid (« Recently played » steps aside), together with the console tabs
+and the search. No game on the network shown: no pill, every game shows.
+
+**Games before the download.** Every file a scan would list as a game, by name only (nothing is read before the
+download), no deeper than the download folder's scan reaches (one folder inside a multi-file torrent): a disc image or a split set (its parts' sizes summed), a `.cue` with the `.bin` tracks named after it, a
+lone `.bin`, a ROM. Its card has no cover (Alex, 2026-11-20): the **remote-content art**, a cloud with a down arrow on
+the console's hue, the console badge, and the chip **On the network**. The title is the file name cleaned: no
+extension, no split-part number, no bracketed tags, underscores as spaces (« Halo (USA) (Rev 1).iso » → « Halo »).
+Sort, search, console tabs and favourites work on them. Its key is `[<console>-]net-<12 hex of the info hash>-<CRC32
+of its path>`: never a title ID, never a record in `games.json`, no Home. A game whose file name and size match a
+scanned item (in a library folder or the download folder) is that local game, and its network entry goes.
+
+**Download.** A (or Start) on the card: a sheet with **Download (4.2 GB)** and the free space, the file name and its
+source. A queues it (not enough room for it plus 64 MB: a note says how much is missing); the chip becomes **Waiting
+to download**, then **Downloading · 42 %**; A on the card then shows the rate and peers (or why it waits: Wi-Fi,
+nobody shares it now — it keeps trying, not enough space) and **Cancel the download** (what came is deleted). After a
+failure: **Try again** and why. One game downloads at a time, in the order asked. `NetService` (a foreground service
+in the launcher's process, notification « Downloading <game> » with its progress and Cancel) runs while something is
+queued or a magnet's list is missing, and ends after. It holds a partial wake lock and a Wi-Fi lock while it runs
+(the handheld put down, screen off), stays through a Wi-Fi drop (« Waiting for Wi-Fi »), and writes libtorrent's
+resume data every 30 s and when it ends (`files/net/<info hash>.resume`), so a new start goes on from what came
+without checking it again. Cancel and Remove are the service's own work: the torrent leaves the session and its resume
+data goes before the partial files are deleted (libtorrent would otherwise keep believing it has those pieces, and the
+game downloaded again would keep holes).
+
+**Then everything else.** Files land in `<external files>/net/<12 hex>/<the torrent's path>` (the app's own folder:
+no permission, removed with the app), which the scan reads as one more library root (`LibraryScanner.netRoot`, items
+`"folder": "net:"`); a download's files stay invisible to it until the download is done (`NetDownloads.incomplete`).
+Once done, the launcher rescans, finds the game by its file, moves the focus to it and goes on: an Xbox game is
+imported (read in place) and its Prepare follows as for any game; a GBA / PS1 / N64 game is ready.
+
+**Session** (`LibtorrentEngine`, libtorrent4j 2.1.0-39 / libtorrent 2.1): a random listening port, no UPnP and no
+NAT-PMP (nothing opened on the router), DHT and local peer discovery on (a magnet needs the DHT; LSD finds a NAS on the
+same network). A torrent is added with every file at priority 0 (nothing created; pieces shared with a wanted file go
+to libtorrent's hidden part file), only the game's files are then wanted, and the torrent pauses once they are whole:
+**no seeding** until NET-4 sets the policy.
+
+Files (`files/net/`): `sources.json` (`{"v":1, "sources":[{"id": "<info hash>", "kind": "torrent", "name", "console",
+"magnet", "added_at", "meta_error"}]}`), `<info hash>.torrent` (the metadata), `downloads.json` (`{"v":1,
+"jobs":[{"key", "source", "title", "files":[{"index", "path", "size"}], "state": "queued|running|failed|done",
+"done", "total", "rate", "peers", "error", "auto", "added_at"}]}`). Paths are checked when the torrent is read (no
+`..`, no absolute path, no NUL: the whole torrent is refused) and again when read back from `downloads.json`. A v2-only
+torrent is refused (make it hybrid or v1). logcat: `launcher: net: …`, `net: …`.
+
+Tests: `TorrentMetaTest` (bencode, the info hash over the raw bytes, pad files, bad paths, magnets),
+`RemoteLibraryTest` (files as games, titles, keys, sources, local games left out), `NetRunnerTest` (a fake engine:
+the queue, only the game's files, done and paused, Wi-Fi, no peers, space, errors, cancel, a source removed, paths
+read back), `LibraryScreenTest` / `GameStateTest` (the entries and chips), `LauncherLibraryTest` (the cards, the
+sheet, Download / Cancel, Options › Network sources; `library-network-*.png` in every size and language). The engine
+itself against real libtorrent: `tools/android/net_host_check.sh` (Linux x86-64: a seeder and the app's engine on
+localhost, a hybrid and a v1-only torrent whose pieces straddle the files: only the wanted file arrives, byte for byte,
+the neighbours' bytes stay in the hidden `.parts` file; stopped halfway and started again from the resume data;
+cancelled at 40 % and asked again, whole). A peer connection asked while a torrent still checks its files is lost:
+NET-4's « Add a peer » must retry it.
+
+### Device check (network library, XBA-325), for Alex
+
+Only your own dumps, in a private torrent.
+
+1. On a PC, put 3 Xbox images and 3 GBA ROMs from your own dumps in two folders; make one private torrent per folder
+   (qBittorrent: Tools › Torrent Creator, « Private torrent »); seed both.
+2. Library › Options › Network sources › Add a .torrent file: the Xbox one, console Xbox. The 3 games appear at once
+   with the cloud art, the cleaned file name, « On the network ».
+3. Copy a magnet link of the GBA torrent, then Paste a magnet link, « Each file's own »: after a few seconds (« Looking
+   for it… » in the sources list) the 3 ROMs appear.
+4. A on an Xbox game: Download (its size) and the free space. A: the card says Waiting, then Downloading · n %; a
+   notification with the progress and Cancel. Close the app during the download, open it again: it goes on.
+5. At the end: a note « … is downloaded », the focus on the game, which is imported and prepared as any game, then
+   plays.
+6. In `Android/data/fr.adserver.xrecomp/files/net/`: only that game's file (plus a hidden `.parts` file), nothing of
+   the other games.
+7. A GBA ROM: downloaded, then Play at once.
+8. Turn Wi-Fi off (mobile data on): a new download waits « Waiting for Wi-Fi »; Download on mobile data On: it
+   starts. Back Off.
+9. Cancel a running download: the card is « On the network » again, its partial file gone. Download it again: it
+   ends whole and plays.
+10. Start a big download, turn the screen off for 10 minutes: it went on. Start a game during a download: the
+    download goes on (the notification), the game plays normally.
+11. Options › Network sources › the GBA source › Remove: its games not downloaded leave the grid, the downloaded one
+    stays.
+12. French and English labels; the cards and the sheet on a 4:3 and a square screen.
 
 ### The library screen
 
