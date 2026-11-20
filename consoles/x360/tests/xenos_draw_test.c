@@ -853,6 +853,16 @@ int main(int argc, char **argv)
         CHECK(c[0] == (want_level == 0 ? 255 : 0) && c[1] == (want_level == 1 ? 255 : 0) &&
                   c[2] == (want_level == 2 ? 255 : 0),
               "frame 27 (mip level %d): %u,%u,%u", want_level, c[0], c[1], c[2]);
+        /* the same with the mip filter "base map": level 0 only, however far minified */
+        mfc[3] |= 2u << 23;
+        for (int i = 0; i < 6; i++)
+            reg(0x480C + (uint32_t)i, mfc[i]);
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        c = px(g, W / 2, H / 2);
+        CHECK(c[0] == 255 && c[1] == 0 && c[2] == 0, "frame 27 (mip filter base map): %u,%u,%u, want level 0 (red)",
+              c[0], c[1], c[2]);
 
         /* frame 28: vs_inst: positions at the vertex index, colours from fetch constant 1 at r0.x * 0.5 (vertices
          * 0, 1 -> green, 2, 3 -> red): the bottom edge green, the top red */
@@ -974,7 +984,7 @@ int main(int argc, char **argv)
 
     xenos_gl_stats st;
     xenos_gl_get_stats(g, &st);
-    CHECK(st.drawn == 35 + st.memexport_draws && st.frames == 32 && st.resolves == 6 && st.depth_resolves == 1 &&
+    CHECK(st.drawn == 36 + st.memexport_draws && st.frames == 33 && st.resolves == 6 && st.depth_resolves == 1 &&
               st.no_shader == (st.memexport_skipped ? 1u : 0u) && /* XBA-282: the memory export draw, or its fallback */
               st.unsupported == 0 &&
               st.unsupported_textures == 0 && st.computed_fetches >= 1 && st.mipmapped >= 1 && st.surfaces >= 4 &&
@@ -1972,6 +1982,6 @@ int main(int argc, char **argv)
         printf("%d check(s) failed\n", failures);
         return 1;
     }
-    printf("xenos_gl: every frame drawn and read back as expected (the first 32 with six resolves, then XBA-296's)\n");
+    printf("xenos_gl: every frame drawn and read back as expected (the first 33 with six resolves, then XBA-296's)\n");
     return 0;
 }

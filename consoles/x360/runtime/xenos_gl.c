@@ -2717,10 +2717,17 @@ static uint32_t swizzle_as_decoded(uint32_t swizzle, uint32_t format)
 }
 
 /* a texture's sampling state from its fetch constant: wraps, filters (mips when it has them), swizzle. copy: 0 the
- * texture was decoded from memory, 1 it is a resolve's host picture, 3 one kept with red and blue unswapped. */
+ * texture was decoded from memory, 1 it is a resolve's host picture, 3 one kept with red and blue unswapped. The
+ * fetch constant's mip range (dword 4: mip_min_level bits 2-5, mip_max_level 6-9) is the texture's own
+ * GL_TEXTURE_BASE_LEVEL / MAX_LEVEL (texture_of), GL's LOD counting from the base level; the mip filter "base map"
+ * (2) samples the base level only, as a filter without mipmaps does (Xenia's mip_base_map: MaxLOD = MinLOD). Xenia's
+ * base level there is mip_min_level; decode_texture uploads level 0 alone for a base map fetch constant, so one
+ * with mip_min_level >= 1 still reads level 0 from the base address. */
 static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mipped, int copy)
 {
     static const GLint swz[6] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};
+    if (((fc[3] >> 23) & 3) == 2)
+        mipped = 0;
     g->glTexParameteri(target, GL_TEXTURE_WRAP_S, wrap_mode((fc[0] >> 10) & 7));
     g->glTexParameteri(target, GL_TEXTURE_WRAP_T, wrap_mode((fc[0] >> 13) & 7));
     g->glTexParameteri(target, GL_TEXTURE_WRAP_R, wrap_mode((fc[0] >> 16) & 7));
