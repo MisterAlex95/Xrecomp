@@ -50,6 +50,8 @@
     <string name="NET_ERR_BAD_ZIP">Cannot open the archive</string>
     <string name="NET_SOURCE_NO_GAME">No game (%1$s)</string>
     <string name="NET_SOURCE_ADDED_NONE">%1$s added, but it holds no game this app takes (%2$s).</string>
+    <string name="NET_VERSION">This version</string>
+    <string name="NET_DISC">Disc</string>
     <string name="NET_FAILED">Failed: %1$s</string>
     <string name="NET_NO_SPACE">%1$s needs %2$s, only %3$s is free.</string>
     <string name="NET_NO_STORAGE">No storage to download into.</string>
@@ -66,5 +68,6 @@
     <string name="LIB_WHERE_ALL">All games</string>
     <string name="LIB_WHERE_LOCAL">On this device</string>
     <string name="LIB_WHERE_REMOTE">On the network</string>
+    <string name="LIB_WHERE_DOWNLOADING">Downloading</string>
     <string name="NET_SHOW">Show their games in the library</string>
 </resources>

@@ -101,6 +101,15 @@ final class RemoteLibrary {
             return files.get(0).name();
         }
 
+        private Tags tags;
+
+        /** What its name's tags say: region, languages, disc, the rest (XBA-332). */
+        Tags tags() {
+            if (tags == null)
+                tags = Tags.of(name());
+            return tags;
+        }
+
         /** The sizes summed, as a scan records a split set or a .cue with its tracks. */
         long size() {
             long s = 0;
@@ -108,6 +117,139 @@ final class RemoteLibrary {
                 s += f.size;
             return s;
         }
+    }
+
+    /**
+     * The tags of a No-Intro / Redump name (XBA-332): « Ace Combat - Assault Horizon (USA) (En,Fr,Es) (Disc 1) » →
+     * region USA, languages En Fr Es, disc 1. Groups that are none of these (« Rev 1 », « Kinect », « Demo ») are
+     * extras. Plain parsing of the name: nothing is read.
+     */
+    static final class Tags {
+        static final java.util.Set<String> REGIONS = new java.util.HashSet<>(java.util.Arrays.asList(
+                "USA", "Europe", "Japan", "World", "Asia", "Korea", "China", "Taiwan", "Hong Kong", "Australia",
+                "New Zealand", "Brazil", "Canada", "Mexico", "Argentina", "Latin America", "France", "Germany", "Spain",
+                "Italy", "UK", "Netherlands", "Belgium", "Sweden", "Norway", "Denmark", "Finland", "Scandinavia",
+                "Nordic", "Russia", "Poland", "Portugal", "Greece", "Austria", "Switzerland", "India", "Israel",
+                "South Africa", "Unknown"));
+        private static final java.util.regex.Pattern LANGS =
+                java.util.regex.Pattern.compile("[A-Z][a-z](-[A-Z][a-z]+)?(,\\s*[A-Z][a-z](-[A-Z][a-z]+)?)*");
+        private static final java.util.regex.Pattern DISC =
+                java.util.regex.Pattern.compile("(?i)(Disc|Disk|CD) ?(\\d+)( of \\d+)?");
+
+        final List<String> regions = new ArrayList<>();
+        final List<String> languages = new ArrayList<>();
+        int disc;
+        final List<String> extras = new ArrayList<>();
+
+        static Tags of(String fileName) {
+            Tags t = new Tags();
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("[\\(\\[]([^\\)\\]]*)[\\)\\]]").matcher(fileName);
+            while (m.find()) {
+                String g = m.group(1).trim();
+                if (g.isEmpty())
+                    continue;
+                java.util.regex.Matcher d = DISC.matcher(g);
+                if (d.matches()) {
+                    t.disc = Integer.parseInt(d.group(2));
+                    continue;
+                }
+                String[] parts = g.split("\\s*,\\s*");
+                boolean allRegions = true;
+                for (String r : parts)
+                    allRegions &= REGIONS.contains(r);
+                if (allRegions) {
+                    for (String r : parts)
+                        if (!t.regions.contains(r))
+                            t.regions.add(r);
+                } else if (LANGS.matcher(g).matches() && t.languages.isEmpty()) {
+                    for (String l : parts)
+                        t.languages.add(l);
+                } else if (!g.equals("!")) {
+                    t.extras.add(g);
+                }
+            }
+            return t;
+        }
+
+        /** « USA · En, Fr, Es · Disc 1 · Rev 1 »; "" with no tag. */
+        String label(String discWord) {
+            List<String> l = new ArrayList<>();
+            if (!regions.isEmpty())
+                l.add(String.join(", ", regions));
+            if (!languages.isEmpty())
+                l.add(String.join(", ", languages));
+            if (disc > 0)
+                l.add(discWord + " " + disc);
+            l.addAll(extras);
+            return String.join(" · ", l);
+        }
+
+        /**
+         * How well it suits a player in locale loc (higher first): their language in it, then their region (or a
+         * world / multi-region release), then the first disc.
+         */
+        int score(Locale loc) {
+            int s = 0;
+            String lang = loc.getLanguage();
+            for (String l : languages)
+                if (l.toLowerCase(Locale.ROOT).startsWith(lang))
+                    s += 100;
+            String country = loc.getCountry();
+            for (String r : regions) {
+                if (regionHas(r, country))
+                    s += 50;
+                else if (r.equals("World"))
+                    s += 30;
+            }
+            if (languages.isEmpty() && "en".equals(lang) && (regions.contains("USA") || regions.contains("UK")))
+                s += 100;   // an English release names no language
+            if (disc <= 1)
+                s += 5;
+            return s;
+        }
+
+        private static boolean regionHas(String region, String country) {
+            switch (region) {
+            case "USA": return country.equals("US");
+            case "Canada": return country.equals("CA");
+            case "Japan": return country.equals("JP");
+            case "UK": return country.equals("GB");
+            case "France": return country.equals("FR");
+            case "Germany": return country.equals("DE");
+            case "Spain": return country.equals("ES");
+            case "Italy": return country.equals("IT");
+            case "Australia": return country.equals("AU");
+            case "Brazil": return country.equals("BR");
+            case "Korea": return country.equals("KR");
+            case "Europe":
+                return java.util.Arrays.asList("FR", "DE", "ES", "IT", "GB", "NL", "BE", "SE", "NO", "DK", "FI", "PT",
+                                               "PL", "AT", "CH", "IE", "GR").contains(country);
+            default: return false;
+            }
+        }
+    }
+
+    /**
+     * The library's stacks (XBA-332): the versions of one game (same console, same cleaned title: other regions,
+     * languages, discs) in one entry, the version shown first: one being downloaded, else the one that suits the
+     * player best (Tags.score), else the torrent's first. Stacks in the games' order, each version list best first.
+     */
+    static List<List<Game>> stacks(java.util.Collection<Game> games, Locale loc, Set<String> downloading) {
+        Map<String, List<Game>> by = new LinkedHashMap<>();
+        for (Game g : games)
+            by.computeIfAbsent(g.console.id + "\u0000" + g.title.toLowerCase(Locale.ROOT), k -> new ArrayList<>()).add(g);
+        List<List<Game>> out = new ArrayList<>();
+        for (List<Game> l : by.values()) {
+            List<Game> sorted = new ArrayList<>(l);
+            sorted.sort((a, b) -> {
+                int da = downloading.contains(a.key) ? 1 : 0, db = downloading.contains(b.key) ? 1 : 0;
+                if (da != db)
+                    return db - da;
+                return b.tags().score(loc) - a.tags().score(loc);   // (stable: the torrent's order on a tie)
+            });
+            out.add(sorted);
+        }
+        return out;
     }
 
     // ---- Keys -------------------------------------------------------------------------------------------------------

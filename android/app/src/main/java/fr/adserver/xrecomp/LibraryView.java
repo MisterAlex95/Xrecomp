@@ -57,7 +57,9 @@ final class LibraryView {
      * downloading included). The Show pill, next to Sort, when the library lists games of a network source.
      */
     enum Where {
-        ALL(R.string.LIB_WHERE_ALL), LOCAL(R.string.LIB_WHERE_LOCAL), REMOTE(R.string.LIB_WHERE_REMOTE);
+        ALL(R.string.LIB_WHERE_ALL), LOCAL(R.string.LIB_WHERE_LOCAL), REMOTE(R.string.LIB_WHERE_REMOTE),
+        /** XBA-332: the games being downloaded or unpacked (queued and waiting included). */
+        DOWNLOADING(R.string.LIB_WHERE_DOWNLOADING);
 
         final int label;
 
@@ -77,6 +79,8 @@ final class LibraryView {
         }
 
         boolean shows(LibraryScreen.Entry e) {
+            if (this == DOWNLOADING)
+                return e.download != null && e.download.active();
             boolean remote = RemoteLibrary.isRemoteKey(e.tid);
             return this == ALL || (this == REMOTE) == remote;
         }

@@ -2619,6 +2619,17 @@ no permission, removed with the app), which the scan reads as one more library r
 Once done, the launcher rescans, finds the game by its file, moves the focus to it and goes on: an Xbox game is
 imported (read in place) and its Prepare follows as for any game; a GBA / PS1 / N64 game is ready.
 
+**Versions, tags, covers** (XBA-332). A game's name tags are read (`RemoteLibrary.Tags`: regions, languages,
+disc, the rest: « (USA) (En,Fr,Es) (Disc 1) »). The versions of one game (same console and cleaned title: other
+regions, languages, discs) stack into one card (`RemoteLibrary.stacks`), the one shown first being one that
+downloads, else the one that suits the player's locale best (their language in it, then their region), else the
+torrent's first. Its sheet says « This version: USA · En, Fr, Es · Disc 1 », then lists the other versions, each
+opening its own sheet. The Show pill gains **Downloading** (games queued, downloading or unpacking; skipped when
+none). With « Download cover art » on, a network game's cover is looked for by its file's name in libretro-thumbnails
+(`Microsoft_-_Xbox`, `Microsoft_-_Xbox_360`, and the other consoles' sets), and drawn instead of the cloud; the
+chip still says On the network. The Xbox 360 set is nearly empty today (a dozen covers): its games get their XEX's
+tile once prepared.
+
 **Archives** (`NetUnpack`, XBA-331). A `.zip` game, once downloaded, is unpacked on the service's thread into a folder
 beside it named after it (`a/Game (Disc 1).zip` → `a/Game (Disc 1)/`), through a hidden `.Game (Disc 1).unpacking`
 renamed when complete; the chip reads « Unpacking · 42 % ». Then its torrent leaves the session (libtorrent would

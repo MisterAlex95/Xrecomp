@@ -168,6 +168,14 @@ public class LibraryViewTest {
         assertTrue(s.narrowed());   // (« Recently played » steps aside)
         assertEquals(Arrays.asList("Golden Sun", "Halo"), titles(LibraryView.apply(all, s)));
         s.where = s.where.next();
+        assertEquals(LibraryView.Where.DOWNLOADING, s.where);   // XBA-332: then the games being downloaded
+        NetDownloads.Job j = new NetDownloads.Job();
+        j.state = NetDownloads.RUNNING;
+        all.get(all.size() - 1).download = j;
+        assertEquals(Arrays.asList("Golden Sun"), titles(LibraryView.apply(all, s)));
+        j.state = NetDownloads.DONE;
+        assertTrue(LibraryView.apply(all, s).isEmpty());
+        s.where = s.where.next();
         assertEquals(LibraryView.Where.ALL, s.where);
         s.where = LibraryView.Where.LOCAL;
         assertEquals(5, LibraryView.apply(all, s).size());

@@ -84,6 +84,11 @@ final class LibraryScreen {
         RemoteLibrary.Game remote;
         /** XBA-321: its download job (any state), or null. */
         NetDownloads.Job download;
+        /**
+         * XBA-332: every version of a network game in this entry's stack (other regions, languages, discs), the one
+         * shown ({@link #remote}) first; empty for a local game.
+         */
+        List<RemoteLibrary.Game> versions = Collections.emptyList();
         /** A prepared game's runs met this much code its preparation missed (its card says « +N new »). */
         int found;
 
@@ -172,11 +177,19 @@ final class LibraryScreen {
             en.variants = e.getValue();
             m.put(e.getKey(), en);
         }
-        for (RemoteLibrary.Game rg : env.remote.values()) {   // XBA-319: games of the network library
+        // XBA-319: games of the network library, XBA-332: one entry per game, its versions stacked in it
+        java.util.Set<String> downloading = new java.util.HashSet<>();
+        for (NetDownloads.Job j : env.downloads.values())
+            if (j.active())
+                downloading.add(j.key);
+        for (List<RemoteLibrary.Game> stack : RemoteLibrary.stacks(env.remote.values(), java.util.Locale.getDefault(),
+                                                                   downloading)) {
+            RemoteLibrary.Game rg = stack.get(0);
             if (m.containsKey(rg.key))
                 continue;
             Entry en = new Entry(rg.key);
             en.remote = rg;
+            en.versions = stack;
             m.put(rg.key, en);
         }
         for (Library.Record r : g.games.values()) {
@@ -471,8 +484,11 @@ final class LibraryScreen {
 
     /** The title image from the shared cache (files/art/<TID>.png, TitleArt), decoded once per title; null if none. */
     static Bitmap art(File filesDir, Map<String, Bitmap> cache, Entry e) {
-        if (RemoteLibrary.isRemoteKey(e.tid))
-            return null;   // XBA-319: no cover before the download, the card draws the « remote content » art
+        if (RemoteLibrary.isRemoteKey(e.tid)) {   // XBA-332: its cover downloaded by name (CoverArt), else the cloud art
+            if (!cache.containsKey(e.tid))
+                cache.put(e.tid, CoverArt.load(filesDir, e.tid));
+            return cache.get(e.tid);
+        }
         if (e.otherConsole() && !Library.isLocalKey(e.tid)) {   // a GBA / PS1 / N64 game: its cover (CoverArt)
             if (!cache.containsKey(e.tid))
                 cache.put(e.tid, CoverArt.load(filesDir, e.tid));
