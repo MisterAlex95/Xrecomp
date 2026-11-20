@@ -7,7 +7,7 @@
  *
  *   header   "XBXS", format version, header size, section count, the identity (title ID, SHA-1 of the
  *            XBE's headers, build ID of the binary, toolkit version, RAM / mapped / contiguous sizes,
- *            sizeof(RecompCpuRegs)), when it was taken, a hash of the header
+ *            sizeof(RecompCpuRegs), the mod set), when it was taken, a hash of the header
  *   sections each: u32 tag, u32 version, u64 length, u64 hash of the payload, then the payload
  *
  * All integers little-endian (every host we build for is). A state only loads into the binary that
@@ -36,7 +36,7 @@
  * before the first capture (an init function of the component).
  *
  * Reading a state checks, in order: the magic and format version, the header hash, the identity
- * against the running title (another title or XBE: EGAME; another build, toolkit or memory size:
+ * against the running title (another title or XBE: EGAME; another build, toolkit, memory size or mod set:
  * EVERSION), then every section: its bounds and hash (ECORRUPT), that it is registered here with the
  * same version (EVERSION), its check callback; and that every registered section is present.
  *
@@ -186,6 +186,7 @@ typedef struct XboxStateIdentity {
     char toolkit[16];        /* "0.14.0" */
     uint32_t ram_size, mapped_size, contig_size;
     uint32_t cpu_bytes;      /* sizeof(RecompCpuRegs) */
+    uint32_t mod_set;        /* the enabled mods (XBA-286): RECOMP_MOD_SET's first 8 hex digits; 0 no mod */
 } XboxStateIdentity;
 
 /* The running title's identity. The build ID is the binary's (ELF NT_GNU_BUILD_ID of the module this code
@@ -193,6 +194,10 @@ typedef struct XboxStateIdentity {
 void xbox_StateIdentityGet(XboxStateIdentity *out);
 /* Overrides the build ID (n bytes, at most 32; n 0: back to the binary's). Hosts without one, tests. */
 void xbox_StateSetBuildId(const uint8_t *id, size_t n);
+/* The mod set of a hex mod-set hash (tools/mods/store.py state_mod_set): its first 8 hex digits, big-endian, 1 when
+ * they are all 0; 0 for NULL, "" or no hex digits (no mod). xbox_StateIdentityGet reads RECOMP_MOD_SET, which
+ * Prepare forces from the enabled mods (docs/technical/mods.md). */
+uint32_t xbox_StateModSet(const char *hex);
 
 /* ---- Capture -------------------------------------------------------------------------------------------- */
 

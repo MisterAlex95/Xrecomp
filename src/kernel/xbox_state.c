@@ -481,13 +481,32 @@ void xbox_StateIdentityGet(XboxStateIdentity *out)
     out->mapped_size = (uint32_t)xbox_GetMappedSize();
     out->contig_size = XBOX_CONTIG_SIZE;
     out->cpu_bytes = (uint32_t)sizeof(RecompCpuRegs);
+    out->mod_set = xbox_StateModSet(getenv("RECOMP_MOD_SET"));
+}
+
+uint32_t xbox_StateModSet(const char *hex)
+{
+    uint32_t v = 0;
+    int i;
+
+    if (!hex || !*hex)
+        return 0;
+    for (i = 0; i < 8; i++) {
+        char c = hex[i];
+        int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10
+              : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0)
+            return i ? (v ? v : 1) : 0;
+        v = v << 4 | (uint32_t)d;
+    }
+    return v ? v : 1;
 }
 
 /* Header layout (XBOX_STATE_HEADER_BYTES). */
 enum {
     H_MAGIC = 0, H_VERSION = 4, H_HEADER = 8, H_COUNT = 12, H_TITLE = 16, H_SHA1 = 20, H_BUILD_N = 40,
     H_BUILD = 44, H_TOOLKIT = 76, H_RAM = 92, H_MAPPED = 96, H_CONTIG = 100, H_CPU = 104, H_SAVED = 108,
-    H_HASH = 120
+    H_MODS = 116, H_HASH = 120
 };
 
 static void header_write(uint8_t *h, const XboxStateIdentity *id, uint32_t count, int64_t saved_ms)
@@ -507,6 +526,7 @@ static void header_write(uint8_t *h, const XboxStateIdentity *id, uint32_t count
     le32(h + H_CONTIG, id->contig_size);
     le32(h + H_CPU, id->cpu_bytes);
     le64(h + H_SAVED, (uint64_t)saved_ms);
+    le32(h + H_MODS, id->mod_set);          /* 0 in a state from before XBA-286: no mod, as it was */
     le64(h + H_HASH, xbox_StateHash(h, H_HASH));
 }
 
@@ -935,6 +955,7 @@ int xbox_StateParseHeader(const uint8_t *b, size_t n, XboxStateInfo *info)
     info->id.mapped_size = rd32(b + H_MAPPED);
     info->id.contig_size = rd32(b + H_CONTIG);
     info->id.cpu_bytes = rd32(b + H_CPU);
+    info->id.mod_set = rd32(b + H_MODS);
     info->saved_ms = (int64_t)rd64(b + H_SAVED);
     info->sections = (int)rd32(b + H_COUNT);
     if (info->sections < 0 || info->sections > XBOX_STATE_MAX_SECTIONS) {
@@ -974,6 +995,15 @@ static int identity_check(const XboxStateIdentity *s, XboxStateInfo *info)
     }
     if (s->cpu_bytes != cur.cpu_bytes) {
         REASON(info->reason, "register set of %u bytes (this build: %u)", s->cpu_bytes, cur.cpu_bytes);
+        return XBOX_STATE_EVERSION;
+    }
+    if (s->mod_set != cur.mod_set) {
+        if (!s->mod_set)
+            REASON(info->reason, "made without mods (mods on now: set %08X)", cur.mod_set);
+        else if (!cur.mod_set)
+            REASON(info->reason, "made with mods (set %08X), none on now", s->mod_set);
+        else
+            REASON(info->reason, "made with another set of mods (set %08X, now %08X)", s->mod_set, cur.mod_set);
         return XBOX_STATE_EVERSION;
     }
     return XBOX_STATE_OK;
