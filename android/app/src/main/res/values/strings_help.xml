@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- XRecomp's first start (SETUP), Help and questions (HELP), Home's « Good to know » bubbles. -->
+<resources>
+    <!-- First start -->
+    <string name="SETUP_TITLE">First start</string>
+    <string name="SETUP_PAGE">%1$d / %2$d</string>
+    <string name="SETUP_STEP_LIBRARY">Library</string>
+    <string name="SETUP_STEP_GAMES">Your games</string>
+    <string name="SETUP_STEP_SETTINGS">Settings</string>
+    <string name="SETUP_STEP_READY">Ready</string>
+    <string name="SETUP_CONTINUE">Continue</string>
+
+    <string name="SETUP_LIBRARY_HERO">Where are your games?</string>
+    <string name="SETUP_LIBRARY_TEXT">Choose a folder: the app looks for the games of every console in it, up to four levels of folders down.</string>
+    <string name="SETUP_LIBRARY_IN_PLACE">With All files access, games are read where they are: nothing is copied.</string>
+    <string name="SETUP_LIBRARY_ASK">The app then asks how to read it: in place with All files access, or through Android\'s folder picker.</string>
+    <string name="SETUP_CHOOSE_FOLDER">Choose a folder</string>
+    <string name="SETUP_ONE_GAME">Just one game</string>
+    <string name="SETUP_EXAMPLE">For example</string>
+    <string name="SETUP_EXAMPLE_TREE">Games/\n  Xbox/Night Drive/\n  GBA/puzzle-garden.gba\n  PS1/ocean-trip.cue\n  N64/tiny-tanks.z64</string>
+
+    <string name="SETUP_SCAN_HERO">Looking for games…</string>
+    <string name="SETUP_SCAN_TEXT">Reading the folder. Disc images are opened to find their title, so a large folder takes a moment.</string>
+    <string name="SETUP_SCANNING">%1$d found so far</string>
+    <string name="SETUP_OTHER_FOLDER">Another folder</string>
+    <string name="SETUP_NONE_HERO">No games found</string>
+    <string name="SETUP_NONE_TEXT">Nothing in this folder looks like a game the app knows: an extracted Xbox disc (default.xbe), a disc image, or a GBA, PS1, N64 or GameCube file. Pick another folder, or continue and add one later from the library.</string>
+    <string name="SETUP_FOUND_HERO">Your games</string>
+    <plurals name="SETUP_FOUND_TEXT_N">
+        <item quantity="one">%1$d game found.</item>
+        <item quantity="other">%1$d games found.</item>
+    </plurals>
+    <string name="SETUP_FOUND_AT_ONCE">Game Boy Advance, PS1, N64 and GameCube games start at once, in the interpreter.</string>
+    <string name="SETUP_FOUND_PREPARE">Xbox and Xbox 360 games are prepared first: translated for this device, once, plugged in. You start it from each game.</string>
+    <string name="SETUP_NEEDS_PREPARE">To prepare</string>
+    <string name="SETUP_PLAYS_NOW">Ready to play</string>
+
+    <string name="SETUP_SETTINGS_LATER">Change any of these later in Settings › General. Continue when you are done.</string>
+
+    <string name="SETUP_READY_HERO">All set</string>
+    <string name="SETUP_READY_TEXT">When a game\'s Home says it met code the preparation missed, preparing it again takes a few minutes and makes it run smoother. Answers to the usual questions are in Settings › General › Help and questions.</string>
+    <string name="SETUP_OPEN_LIBRARY">Open the library</string>
+    <string name="SETUP_READY_FOLDER">Library folder</string>
+    <plurals name="SETUP_READY_GAMES_N">
+        <item quantity="one">%1$d game</item>
+        <item quantity="other">%1$d games</item>
+    </plurals>
+    <plurals name="SETUP_READY_PREPARE_N">
+        <item quantity="one">%1$d to prepare before it plays</item>
+        <item quantity="other">%1$d to prepare before they play</item>
+    </plurals>
+
+    <!-- Help and questions -->
+    <string name="HELP_TITLE">Help and questions</string>
+    <string name="HELP_ROW_DETAIL">Why games are prepared, why preparing again is sometimes worth it, Self-healing, your saves.</string>
+    <string name="HELP_OPEN_SETTING">A opens the setting.</string>
+    <string name="HELP_Q_PREPARE">Why prepare a game?</string>
+    <string name="HELP_A_PREPARE">A game is written for its console\'s processor. Prepare reads its code, rewrites it as code for this device\'s processor and compiles it, here on the device. The game then runs as native code, at full speed. It is done once per game; the app\'s fixes for the game and its optional enhancements come with it.</string>
+    <string name="HELP_Q_TIME">How long does it take?</string>
+    <string name="HELP_A_TIME">From a few minutes for a small game to much longer for a large Xbox game. The game\'s Home shows the time left. Keep the device plugged in; the preparation goes on if you leave the app.</string>
+    <string name="HELP_Q_AGAIN">Why prepare a game again?</string>
+    <string name="HELP_A_AGAIN">Reading a game finds most of its code, not all of it: some is only reached while playing. When a game meets code the preparation missed, it goes on, slower there, and the app notes it; the game\'s Home then says so. Preparing again translates that code too, and it is quick: only what changed is compiled again. Prepare again is also offered after an app update that translates games better, for another version of the disc, or when you turn Enhancements on or off.</string>
+    <string name="HELP_Q_HEAL">What does Self-healing do?</string>
+    <string name="HELP_A_HEAL">On by default. When a run met code the preparation missed, the app prepares the game again by itself: after a crash, then starts it again; after a good run, in the background while you keep playing. A note says so each time, and you can stop it. A crash with nothing new to learn is not retried: the game\'s Home says it needs a fix.</string>
+    <string name="HELP_Q_SAVES">Are my saves at risk?</string>
+    <string name="HELP_A_SAVES">No. A preparation never touches your saves, and neither does an app update: they are kept apart from the prepared code. The library\'s Options › Storage exports them.</string>
+    <string name="HELP_Q_AT_ONCE">Why do some games start without preparing?</string>
+    <string name="HELP_A_AT_ONCE">Game Boy Advance, PS1, N64 and GameCube games have an interpreter: they start at once. Preparing them makes them run natively, smoother and lighter on the battery. Xbox and Xbox 360 games have no interpreter here: they play once prepared.</string>
+
+    <!-- Home's « Good to know » bubbles -->
+    <string name="TIP_TITLE">Good to know</string>
+    <string name="TIP_GOT_IT">Got it</string>
+    <string name="TIP_LEARN_MORE">Learn more</string>
+    <string name="TIP_NEXT_TIME">Next time</string>
+    <string name="TIP_HEAL_AUTO">Do it by itself</string>
+    <string name="TIP_HEAL_ASK">Ask me</string>
+    <string name="TIP_PREPARE_H">Why prepare?</string>
+    <string name="TIP_PREPARE_T">This game is translated for this device before it plays: once, with the device plugged in. Afterwards it runs as native code.</string>
+    <string name="TIP_PREPARING_H">While it prepares</string>
+    <string name="TIP_PREPARING_T">Keep the device plugged in. You can leave the app: the preparation goes on, and Home shows the time left. Your saves are never touched.</string>
+    <string name="TIP_NEW_CODE_H">New code found</string>
+    <string name="TIP_NEW_CODE_T">Your last run met code the preparation had missed: it ran slower there. Preparing again adds it in a few minutes, as only what changed is compiled again. Play stays available meanwhile.</string>
+    <string name="TIP_UPDATE_H">The app was updated</string>
+    <string name="TIP_UPDATE_T">This version translates games better. The game plays as before; preparing it again gets the fixes. Your saves are kept.</string>
+    <string name="TIP_AT_ONCE_H">Plays right away</string>
+    <string name="TIP_AT_ONCE_T">This game runs in the interpreter, so it starts at once. Prepare translates it into native code (a few minutes): smoother, lighter on the battery. You can play meanwhile.</string>
+</resources>

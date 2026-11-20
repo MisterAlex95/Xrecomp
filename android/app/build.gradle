@@ -367,7 +367,7 @@ android {
             all {
                 systemProperty 'robolectric.graphicsMode', 'NATIVE'
                 systemProperty 'xba.screenshots', "${buildDir}/screenshots"
-                // The launcher's How it works shows once on a first start; every test but LauncherGuideTest starts past it.
+                // The launcher's first start and Home's bubbles: every test but LauncherFirstStartTest starts past them.
                 systemProperty 'xba.guide', 'seen'
                 maxHeapSize = '2g'
                 // The assertion's message in the CI log, not just its line: a failure seen
