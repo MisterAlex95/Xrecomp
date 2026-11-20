@@ -152,6 +152,7 @@ One activity, a small state machine of screens (`LauncherActivity.Screen`) with 
 |---|---|---|
 | Library | The [game library](#game-library): a full-width grid of the games (five columns), the focused game's state and play time as one context line at the bottom left; Rescan, Storage, Library folders, Settings and About in the **Options** sheet (Y). Over the grid the **Search** and **Sort** pills, « Recently played » and the favourites first, the console tabs in the top bar ([Library view](#library-view-xba-206)). | Every start when the library is on, B from a game's Home. |
 | Storage | What the app stores per game, each deleted on its own ([Storage](#storage)); saves exported to a zip and imported back ([Saves out and back](#saves-out-and-back)), synced through Google Drive ([Cloud saves](#cloud-saves)). | Options (Y) on the library. |
+| How it works | The onboarding (`buildGuide`, strings in `strings_guide.xml`): four pages, each a heading, a short text, **Next** (or **Got it** on the last) and **Previous**, and three points on the right; the page number top right. 1 native, not emulated (bring your own games; add, prepare, play); 2 what Prepare does (full speed, fixes and enhancements, which consoles need it); 3 why prepare again (code the preparation missed, an app update, another disc or the Enhancements switch; only what changed is compiled again); 4 Self-healing (after a crash, after a good run, when it cannot help). A / R1 next, L1 previous, B skips. On a narrow stage Previous turns into a circle (`PillRow`). | By itself **once**, on the first start that would show the library or Welcome (`guide_seen` in the launcher's prefs holds `GUIDE_VERSION`; bump it to show a new guide once more); never in a game's own app, nor when the start goes to a game, a Prepare or a note. Settings › General › How it works. B or Got it lands where the start would have. The JVM tests start past it (`xba.guide=seen` in build.gradle); `LauncherGuideTest` renders `guide-<page>-<en\|fr>-<1080\|4x3\|1x1>`. |
 | Welcome | What the app is (a recompiled game, the game not included: bring your own copy), three plain steps, a « Get started » button. | First start, when no game is set up at all. |
 | Choose your game (source) | A list: **Game folder** (read in place with All files access, otherwise copied; the value says which), **Disc image (ISO)** (extracted once; the free space in the top bar), **Game library folder**; the focused choice explained on the right. | Welcome, Manage › Change game, Play with no usable game, the « Change game » shortcut, `NO_GAME_DATA`. |
 | Read the game in place? | Only without All files access: **Allow all files access** (recommended; opens the system page, then the folder picker) and **Copy into the app** (the folder picker), with the explanation on the right (in place: no copy, fine for a 4 GB disc, only that folder is read; copy: as much free space again, a few minutes, removed with the app). | Game folder. |
@@ -170,6 +171,16 @@ Messages and errors (`NOT_A_GAME_FOLDER`, `WRONG_GAME`, `NOT_ENOUGH_SPACE`, « I
 the left of the footer line (the hints are on its right), with a dot coloured by kind; there are no toasts and no dialogs (the one modal is the « Update available » sheet, [Updates](#updates)). logcat (tag `xboxrecomp`):
 `launcher: shown (...)` naming why, then one `launcher:` line per step (folder, hash, copy, import, game set, play,
 settings saved, errors).
+
+### Device check (How it works), for Alex
+
+1. Clear the app's data (or install fresh) and open XRecomp. Expected: « How it works », page 1 / 4, Next focused.
+2. Press A three times, reading each page; L1 goes back one page, R1 forward. Expected: pages 2, 3, 4, the last
+   button says « Got it ».
+3. Press A on « Got it ». Expected: the library (or Welcome with nothing set up).
+4. Close and reopen the app. Expected: no guide, straight to the library.
+5. Settings › General › How it works. Expected: page 1; B goes back to Settings.
+6. Phone language in French: the same pages in French. Send a screenshot of page 3 in each language.
 
 ### When it shows
 
