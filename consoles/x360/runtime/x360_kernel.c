@@ -12,6 +12,8 @@
  * yields), synchronisation (events, semaphores, mutants, timers, by handle and by object; waits on one or several;
  * critical sections; spin locks and IRQLs), time, the module and XEX header queries a CRT start-up makes, strings,
  * and the title ending (HalReturnToFirmware, XamLoaderTerminateTitle, KeBugCheck). */
+#include <setjmp.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1465,6 +1467,30 @@ void x360_hle_refused(x360_machine *x)
     }
 }
 
+/* WP8: an HLE touched an unmapped guest address (on_fault jumped back to x360_hle_call). The machine stops with a
+ * message naming the export, the address, the thread and the caller; this is not a recovery (the HLE stopped half
+ * way). x->hle_lib / hle_ordinal still name the innermost export (an HLE that calls another, e.g. NtWriteFileGather). */
+static void __attribute__((noinline, cold)) hle_fault_stop(x360_machine *x, x360_thread *t,
+                                                           const x360_thunk *outer, uint32_t lr)
+{
+    /* sigsetjmp(env, 0) saved no mask: the handler's (SIGSEGV or SIGBUS blocked) is still in force. Unblocked, or the
+     * next fault on this thread would kill the process without reaching any handler. */
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGSEGV);
+    sigaddset(&s, SIGBUS);
+    pthread_sigmask(SIG_UNBLOCK, &s, NULL);
+    atomic_store_explicit(&x->hle_jmp, NULL, memory_order_relaxed);
+    const char *lib = x->hle_lib ? "xam" : "xboxkrnl", *name = x360_export_name(x->hle_lib, x->hle_ordinal) ?: "?";
+    char via[96] = "";
+    if (outer->lib != x->hle_lib || outer->ordinal != x->hle_ordinal)
+        snprintf(via, sizeof via, ", inside %s!%s", outer->lib ? "xam" : "xboxkrnl",
+                 x360_export_name(outer->lib, outer->ordinal) ?: "?");
+    x360_fail(x, "%s!%s touched the unmapped guest address %08X (thread %u, caller's LR %08X%s): title stopped",
+              lib, name, x->hle_fault_addr, t->id, lr, via);
+    x360_logf(x, "x360: %s\n", x->error);
+}
+
 void x360_hle_call(x360_machine *x, const x360_thunk *th)
 {
     x360_thread *t = x360_cur(x);
@@ -1476,8 +1502,29 @@ void x360_hle_call(x360_machine *x, const x360_thunk *th)
                       x360_export_name(th->lib, th->ordinal) ?: "?", A(0), A(1), A(2), A(3));
         x->hle_lib = th->lib;
         x->hle_ordinal = th->ordinal;
+        /* called by another HLE: the outermost call catches a fault (under host threads every HLE runs under the
+         * machine lock, so the outer one is on this host thread) */
+        if (atomic_load_explicit(&x->hle_jmp, memory_order_relaxed)) {
+            fn(x, t, c);
+            x360_apc_after_hle(x, t);
+            return;
+        }
+        /* A fault on a guest address inside the HLE jumps back here (on_fault, x360_thread.c). sigsetjmp(env, 0):
+         * no sigprocmask system call on this hot path (a few register stores); hle_fault_stop unblocks the signal.
+         * x, t, th and lr are not modified after the sigsetjmp, so they are intact after the jump. Under host threads
+         * the machine lock is held from here to the jump (no HLE releases it): x360_hle_call returns with it held,
+         * as always, and host_run_thread sees the stopped machine. */
+        uint32_t lr = (uint32_t)c->lr;
+        sigjmp_buf env;
+        if (sigsetjmp(env, 0)) {
+            hle_fault_stop(x, t, th, lr);
+            return;
+        }
+        x->hle_host = pthread_self();
+        atomic_store_explicit(&x->hle_jmp, (void *)&env, memory_order_release);
         fn(x, t, c);
         x360_apc_after_hle(x, t);
+        atomic_store_explicit(&x->hle_jmp, NULL, memory_order_relaxed);
         return;
     }
     if (x->strict_imports) {
