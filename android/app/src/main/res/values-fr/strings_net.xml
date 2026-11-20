@@ -41,6 +41,12 @@
     <string name="NET_WAIT_PEERS">Personne ne le partage</string>
     <string name="NET_WAIT_META">En attente de sa liste</string>
     <string name="NET_WAIT_SPACE">Pas assez d\'espace</string>
+    <string name="NET_CHIP_UNPACKING_N">Décompression · %1$d %%</string>
+    <string name="NET_UNPACKING">Décompression de l\'archive</string>
+    <string name="NET_ERR_NO_GAME">Aucun jeu dans l\'archive</string>
+    <string name="NET_ERR_BAD_ZIP">Impossible d\'ouvrir l\'archive</string>
+    <string name="NET_SOURCE_NO_GAME">Aucun jeu (%1$s)</string>
+    <string name="NET_SOURCE_ADDED_NONE">%1$s ajouté, mais il ne contient aucun jeu que l\'app prend en charge (%2$s).</string>
     <string name="NET_FAILED">Échec : %1$s</string>
     <string name="NET_NO_SPACE">%1$s demande %2$s, seuls %3$s sont libres.</string>
     <string name="NET_NO_STORAGE">Aucun stockage où télécharger.</string>

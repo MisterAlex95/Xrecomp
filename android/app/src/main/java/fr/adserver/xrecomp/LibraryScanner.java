@@ -50,10 +50,11 @@ final class LibraryScanner {
     static final String TAG = "xboxrecomp";
     static final int MAX_DEPTH = 4, MAX_ENTRIES = 5000;
     /**
-     * The download folder's depth (<net>/<source id>/<torrent name>/<the torrent's own folders>…): deep enough for any
-     * torrent path TorrentMeta takes, so every game a torrent lists is found again once downloaded.
+     * The download folder's depth (<net>/<source id>/<torrent name>/<the torrent's own folders>…, then the folder an
+     * archive unpacks into and its entries, NetUnpack): deep enough for any torrent path TorrentMeta takes and any
+     * archive entry NetUnpack writes, so every game a torrent lists is found again once downloaded.
      */
-    static final int NET_MAX_DEPTH = TorrentMeta.MAX_DEPTH + 2;
+    static final int NET_MAX_DEPTH = TorrentMeta.MAX_DEPTH + 2 + NetUnpack.MAX_DEPTH;
     /**
      * The revision of the identification (Console.identify, the image peek, the native readers). Bump it when they
      * learn to read a file they gave up on: the next scan opens every failed item again.

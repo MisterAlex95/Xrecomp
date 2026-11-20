@@ -7116,8 +7116,11 @@ public class LauncherActivity extends Activity {
         for (NetDownloads.Job j : NetDownloads.read(getFilesDir())) {
             if (!NetDownloads.DONE.equals(j.state) || !j.auto || j.files.isEmpty())
                 continue;
-            File f = NetDownloads.jobFile(dl, j, j.files.get(0).path);
-            LibraryScreen.Entry e = f == null ? null : entryAt(LibraryIndex.fileLoc(f));
+            File unpacked = NetUnpack.dirOf(dl, j);   // XBA-331: an archive's game is in the folder it unpacked into
+            File f = unpacked != null ? unpacked : NetDownloads.jobFile(dl, j, j.files.get(0).path);
+            LibraryScreen.Entry e = f == null ? null
+                                    : unpacked != null ? entryUnder(LibraryIndex.fileLoc(f) + "/")
+                                    : entryAt(LibraryIndex.fileLoc(f));
             if (e == null) {
                 int scans = netScans.getOrDefault(j.key, 0);
                 if (f != null && scans < 3) {
@@ -7164,6 +7167,14 @@ public class LauncherActivity extends Activity {
         } catch (IOException ex) {
             Log.w(TAG, "launcher: net: cannot write the downloads", ex);
         }
+    }
+
+    /** The first library entry whose active file is below the folder location prefix (ends with « / »), or null. */
+    private LibraryScreen.Entry entryUnder(String prefix) {
+        for (LibraryScreen.Entry e : LibraryScreen.entries(getFilesDir(), games, index, libEnv()))
+            if (e.active != null && e.active.loc.startsWith(prefix))
+                return e;
+        return null;
     }
 
     /** The library entry whose active file is at loc, or null. */
@@ -7220,6 +7231,12 @@ public class LauncherActivity extends Activity {
             return getString(R.string.NET_WAIT_META);
         case NetRunner.E_SPACE:
             return getString(R.string.NET_WAIT_SPACE);
+        case NetUnpack.E_UNPACKING:
+            return getString(R.string.NET_UNPACKING);
+        case NetUnpack.E_NO_GAME:
+            return getString(R.string.NET_ERR_NO_GAME);
+        case NetUnpack.E_BAD_ZIP:
+            return getString(R.string.NET_ERR_BAD_ZIP);
         default:
             return e;
         }
@@ -7305,7 +7322,9 @@ public class LauncherActivity extends Activity {
         TorrentMeta m = RemoteLibrary.meta(getFilesDir(), s.id);
         if (m == null)
             return getString(s.metaError.isEmpty() ? R.string.NET_SOURCE_FETCHING : R.string.NET_SOURCE_NOT_FOUND);
-        String n = getString(R.string.NET_SOURCE_GAMES_N, RemoteLibrary.games(s, m).size());
+        int count = RemoteLibrary.games(s, m).size();
+        String n = count == 0 ? getString(R.string.NET_SOURCE_NO_GAME, RemoteLibrary.fileSummary(m))
+                              : getString(R.string.NET_SOURCE_GAMES_N, count);
         return s.console == null ? n : n + " · " + s.console.badge();
     }
 
@@ -7362,7 +7381,11 @@ public class LauncherActivity extends Activity {
                 int n = m == null ? 0 : RemoteLibrary.games(s, m).size();
                 Log.i(TAG, "launcher: net: torrent " + s.id + " (" + s.name + ") added, " + n + " games, console "
                            + (c == null ? "by file" : c.id));
-                setNote(getString(R.string.NET_SOURCE_ADDED, s.name, n), NOTE_OK);
+                if (n == 0 && m != null)   // say what it holds: an archive kind or an extension the app does not take
+                    setNote(getString(R.string.NET_SOURCE_ADDED_NONE, s.name, RemoteLibrary.fileSummary(m)),
+                            NOTE_ERROR);
+                else
+                    setNote(getString(R.string.NET_SOURCE_ADDED, s.name, n), NOTE_OK);
             } catch (IOException e) {
                 setNote(getString(R.string.NET_BAD_TORRENT, e.getMessage()), NOTE_ERROR);
             }

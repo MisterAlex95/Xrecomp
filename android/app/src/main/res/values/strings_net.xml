@@ -44,6 +44,12 @@
     <string name="NET_WAIT_PEERS">Nobody shares it now</string>
     <string name="NET_WAIT_META">Waiting for its list</string>
     <string name="NET_WAIT_SPACE">Not enough space</string>
+    <string name="NET_CHIP_UNPACKING_N">Unpacking · %1$d %%</string>
+    <string name="NET_UNPACKING">Unpacking the archive</string>
+    <string name="NET_ERR_NO_GAME">No game in the archive</string>
+    <string name="NET_ERR_BAD_ZIP">Cannot open the archive</string>
+    <string name="NET_SOURCE_NO_GAME">No game (%1$s)</string>
+    <string name="NET_SOURCE_ADDED_NONE">%1$s added, but it holds no game this app takes (%2$s).</string>
     <string name="NET_FAILED">Failed: %1$s</string>
     <string name="NET_NO_SPACE">%1$s needs %2$s, only %3$s is free.</string>
     <string name="NET_NO_STORAGE">No storage to download into.</string>

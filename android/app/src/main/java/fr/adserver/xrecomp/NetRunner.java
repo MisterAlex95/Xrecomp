@@ -28,6 +28,10 @@ final class NetRunner {
     private final Map<String, Long> lastPeer = new HashMap<>();
     private long lastSave;
     static final long SAVE_EVERY_MS = 30_000L;
+    /** A cancel asked from another thread while an archive is unpacked on this one ({@link #requestCancel}). */
+    private volatile String cancelling;
+    /** The unpack's progress is written to its job at most this often. */
+    static final long UNPACK_SAVE_MS = 1000L;
 
     NetRunner(NetEngine engine, File filesDir, File downloadDir) {
         this.engine = engine;
@@ -72,6 +76,11 @@ final class NetRunner {
         }
         if (current != null && !current.equals(j.key))
             pauseCurrent();
+        File unpacked = NetUnpack.dirOf(downloadDir, j);
+        if (unpacked != null && unpacked.isDirectory()) {   // unpacked before the app stopped: only the end is left
+            finishUnpack(j, unpacked);
+            return pending.size() > 1;
+        }
         int n = j.files.size();
         int[] idx = new int[n];
         String[] paths = new String[n];
@@ -120,6 +129,7 @@ final class NetRunner {
         if (peers > 0)
             lastPeer.put(j.key, c.now);
         boolean whole = done >= total;
+        boolean archive = whole && unpacked != null;
         String waiting = !whole && total - done > c.free ? E_SPACE
                          : !whole && c.now - lastPeer.getOrDefault(j.key, c.now) > NO_PEERS_MS ? E_NO_PEERS : "";
         long d = done, t = total;
@@ -132,9 +142,15 @@ final class NetRunner {
             x.total = t;
             x.rate = whole ? 0 : rate;
             x.peers = peers;
-            x.error = waiting;
-            x.state = whole ? NetDownloads.DONE : NetDownloads.RUNNING;
+            x.error = archive ? NetUnpack.E_UNPACKING : waiting;
+            x.state = whole && !archive ? NetDownloads.DONE : NetDownloads.RUNNING;
         });
+        if (archive) {
+            engine.want(j.source, new int[0], new String[0], new long[0]);
+            current = null;
+            currentSource = null;
+            return unpack(j, unpacked, c) || pending.size() > 1;
+        }
         if (whole) {
             LibraryScanner.warn("net: " + j.key + " (" + j.title + ") downloaded, " + total + " bytes");
             engine.want(j.source, new int[0], new String[0], new long[0]);
@@ -143,6 +159,82 @@ final class NetRunner {
             return pending.size() > 1;
         }
         return true;
+    }
+
+    /** Asks the unpack of key's archive, if one runs, to stop (any thread; the cancel itself follows on this one). */
+    void requestCancel(String key) {
+        cancelling = key;
+    }
+
+    /**
+     * Unpacks job j's archive (downloaded whole) into its folder, on this thread (the service's ticks wait: one job at
+     * a time anyway), its progress in the job. Done: finishUnpack. Not enough space: it waits (E_SPACE, tried again
+     * at the next tick). Cancelled: left to the cancel queued behind it. Anything else fails the job. Returns true
+     * while the job is still pending.
+     */
+    private boolean unpack(NetDownloads.Job j, File dir, Conditions c) throws IOException {
+        File zip = NetUnpack.zipOf(downloadDir, j);
+        LibraryScanner.warn("net: " + j.key + " (" + j.title + ") downloaded, unpacking " + zip);
+        long[] last = { 0 };
+        String r;
+        try {
+            r = NetUnpack.unpack(zip, dir, c.free, () -> j.key.equals(cancelling), (d, t) -> {
+                long now = System.currentTimeMillis();
+                if (now - last[0] < UNPACK_SAVE_MS)
+                    return;
+                last[0] = now;
+                try {
+                    NetDownloads.edit(filesDir, l -> {
+                        NetDownloads.Job x = NetDownloads.find(l, j.key);
+                        if (x != null) {
+                            x.done = d;
+                            x.total = t;
+                        }
+                    });
+                } catch (IOException ignored) {
+                    // the progress shown lags; the unpack goes on
+                }
+            });
+        } catch (IOException e) {
+            r = e.getMessage() == null ? e.toString() : e.getMessage();
+        }
+        if (r == null) {
+            finishUnpack(j, dir);
+            return false;
+        }
+        if (NetUnpack.CANCELLED.equals(r))
+            return false;
+        if (E_SPACE.equals(r)) {
+            markWaiting(java.util.Collections.singletonList(j), E_SPACE);
+            return true;
+        }
+        fail(j.key, r);
+        return false;
+    }
+
+    /**
+     * The end of an unpack, redone safely after a restart: the torrent leaves the session (libtorrent would otherwise
+     * believe it still has the archive's pieces, and a later download of the game would be « whole » with no file),
+     * the archive is deleted, the job is DONE.
+     */
+    private void finishUnpack(NetDownloads.Job j, File dir) throws IOException {
+        if (engine.has(j.source))
+            engine.remove(j.source);
+        else
+            engine.forgetResume(j.source);
+        File zip = NetUnpack.zipOf(downloadDir, j);
+        if (zip != null && zip.isFile() && !zip.delete())
+            LibraryScanner.warn("net: cannot delete " + zip);
+        NetDownloads.edit(filesDir, l -> {
+            NetDownloads.Job x = NetDownloads.find(l, j.key);
+            if (x == null)
+                return;
+            x.state = NetDownloads.DONE;
+            x.error = "";
+            x.rate = 0;
+            x.done = x.total;
+        });
+        LibraryScanner.warn("net: " + j.key + " (" + j.title + ") unpacked into " + dir);
     }
 
     private void pauseCurrent() {
@@ -199,6 +291,8 @@ final class NetRunner {
         if (j != null && !NetDownloads.DONE.equals(j.state) && engine.has(j.source))
             engine.remove(j.source);
         cancelFiles(filesDir, downloadDir, key);
+        if (key.equals(cancelling))
+            cancelling = null;
     }
 
     /** The same without an engine (the service is not running): the queue and the files. */
@@ -220,6 +314,9 @@ final class NetRunner {
             if (lf != null && !kept.contains(f.path) && lf.isFile() && !lf.delete())
                 LibraryScanner.warn("net: cannot delete " + lf);
         }
+        File dir = NetUnpack.dirOf(downloadDir, j);   // an unpack cut short leaves its hidden folder
+        if (dir != null)
+            NetUnpack.deleteTree(NetUnpack.tempDir(dir));
     }
 
     /**

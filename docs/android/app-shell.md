@@ -2593,7 +2593,7 @@ and the search. No game on the network shown: no pill, every game shows.
 
 **Games before the download.** Every file a scan would list as a game, by name only (nothing is read before the
 download), at any depth (the download folder's scan goes `NET_MAX_DEPTH` levels down, as deep as any path a torrent may hold): a disc image or a split set (its parts' sizes summed), a `.cue` with the `.bin` tracks named after it, a
-lone `.bin`, a ROM. Its card has no cover (Alex, 2026-11-20): the **remote-content art**, a cloud with a down arrow on
+lone `.bin`, a ROM, a `.zip` (XBA-331: a Redump set is one `.zip` per disc; the source's console, else the name inside, « Game.gba.zip », else the Xbox). A source with no game says what it holds instead (« No game (238 .7z, 2 .txt) », `RemoteLibrary.fileSummary`). Its card has no cover (Alex, 2026-11-20): the **remote-content art**, a cloud with a down arrow on
 the console's hue, the console badge, and the chip **On the network**. The title is the file name cleaned: no
 extension, no split-part number, no bracketed tags, underscores as spaces (« Halo (USA) (Rev 1).iso » → « Halo »).
 Sort, search, console tabs and favourites work on them. Its key is `[<console>-]net-<12 hex of the info hash>-<CRC32
@@ -2618,6 +2618,15 @@ no permission, removed with the app), which the scan reads as one more library r
 `"folder": "net:"`); a download's files stay invisible to it until the download is done (`NetDownloads.incomplete`).
 Once done, the launcher rescans, finds the game by its file, moves the focus to it and goes on: an Xbox game is
 imported (read in place) and its Prepare follows as for any game; a GBA / PS1 / N64 game is ready.
+
+**Archives** (`NetUnpack`, XBA-331). A `.zip` game, once downloaded, is unpacked on the service's thread into a folder
+beside it named after it (`a/Game (Disc 1).zip` → `a/Game (Disc 1)/`), through a hidden `.Game (Disc 1).unpacking`
+renamed when complete; the chip reads « Unpacking · 42 % ». Then its torrent leaves the session (libtorrent would
+otherwise believe it still has the archive's pieces), the `.zip` is deleted and the job is done; the launcher and
+the library find the game below that folder (`RemoteLibrary.unpackedHere`). Each step is redone safely after a
+restart. Refused before anything is written: an entry path a torrent could not hold, deeper than 4, more than 10,000
+entries (« Cannot open the archive »), or no file a scan lists as a game (« No game in the archive »). Not enough room
+for what it unpacks: it waits (« Not enough space »). A cancel stops it at once. `.7z` and `.rar` are not taken.
 
 **Session** (`LibtorrentEngine`, libtorrent4j 2.1.0-39 / libtorrent 2.1): a random listening port, no UPnP and no
 NAT-PMP (nothing opened on the router), DHT and local peer discovery on (a magnet needs the DHT; LSD finds a NAS on the
