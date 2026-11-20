@@ -1287,6 +1287,8 @@ void x360_kobj_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), 
 {
     x360_kobj *k = &x->kobj;
     u32(s, &k->dpc_head), u32(s, &k->dpc_tail), i32(s, &k->dpc_slot);
+    if (k->dpc_slot < 0 || k->dpc_slot > X360_MAX_THREADS) /* a damaged state: no DPC context yet */
+        k->dpc_slot = 0;
     u32(s, &k->apc_free), u32(s, &k->iocp_free);
     u64(s, &k->wait_stamp);
     u32(s, &k->nprot);

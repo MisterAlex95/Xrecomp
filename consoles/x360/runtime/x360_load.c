@@ -72,7 +72,8 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
     x->stack_size = 0x40000;
     for (uint32_t k = 0; k < count; k++) {
         uint32_t key = be32(d + 0x18 + 8 * k), val = be32(d + 0x1C + 8 * k);
-        const uint8_t *blk = (key & 0xFF) > 1 && val < size ? d + val : NULL;
+        /* a block's fixed part inside the file (16 bytes: the longest, TLS); sizes it gives are checked below */
+        const uint8_t *blk = (key & 0xFF) > 1 && val + 16ull <= size ? d + val : NULL;
         switch (key) {
         case H_FILE_FORMAT_INFO: ff = blk; break;
         case H_ENTRY_POINT: x->entry = val; break;
@@ -80,7 +81,7 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
         case H_IMPORT_LIBRARIES: imports = blk; break;
         case H_TLS_INFO: tls = blk; break;
         case H_DEFAULT_STACK_SIZE: x->stack_size = val; break;
-        case H_EXECUTION_INFO: exec_off = val + 24 <= sec_off ? val : 0; break;
+        case H_EXECUTION_INFO: exec_off = val + 24ull <= sec_off ? val : 0; break;
         }
     }
     x->image_size = be32(d + sec_off + 4);
@@ -111,6 +112,10 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
         memcpy(img, src, avail < x->image_size ? avail : x->image_size);
     } else {
         uint32_t ffsize = be32(ff), o = 0, out = 0;
+        if (ffsize > size - (uint32_t)(ff - d)) {
+            snprintf(why, n, "file format header runs past the file");
+            return -1;
+        }
         for (uint32_t b = 8; b + 8 <= ffsize; b += 8) {
             uint32_t ds = be32(ff + b), zs = be32(ff + b + 4);
             if (o + (uint64_t)ds > avail || out + (uint64_t)ds + zs > x->image_size) {
@@ -141,13 +146,17 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
     /* imports */
     if (imports) {
         uint32_t isize = be32(imports), str_size = be32(imports + 4);
+        if (isize < 12 || isize > size - (uint32_t)(imports - d) || str_size > isize - 12) {
+            snprintf(why, n, "import libraries run past the file");
+            return -1;
+        }
         const char *names[64] = {0};
         unsigned nnames = 0;
         for (uint32_t o = 12; o < 12 + str_size && nnames < 64;) {
             const char *s = (const char *)imports + o;
             if (*s) {
                 names[nnames++] = s;
-                o += (uint32_t)strlen(s) + 1;
+                o += (uint32_t)strnlen(s, 12 + str_size - o) + 1;
             } else
                 o++;
         }
@@ -161,7 +170,7 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
                 uint32_t lsize = be32(imports + o);
                 uint16_t name_index = be16(imports + o + 0x24), nrec = be16(imports + o + 0x26);
                 int lib = name_index < nnames ? lib_id(names[name_index]) : X360_LIB_OTHER;
-                if (lsize < 0x28 + 4u * nrec) {
+                if (lsize < 0x28 + 4u * nrec || lsize > isize - o) {
                     snprintf(why, n, "import library %u: bad size", idx);
                     return -1;
                 }

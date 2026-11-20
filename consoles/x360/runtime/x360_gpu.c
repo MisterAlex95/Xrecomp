@@ -371,6 +371,8 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
     i32(s, &g->irq_pending[1]);
     i32(s, &g->ring);
     i32(s, &g->irq_thread);
+    if (g->irq_thread >= X360_MAX_THREADS) /* a damaged state: made again at the next interrupt */
+        g->irq_thread = -1;
 }
 
 uint64_t x360_gpu_next_event(x360_machine *x)

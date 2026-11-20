@@ -146,6 +146,8 @@ static void sec_threads(x360_machine *x, io *s)
         io_i32(s, &t->wait_kind);
         io_i32(s, &t->wait_all);
         io_i32(s, &t->wait_count);
+        if (t->wait_count < 0 || t->wait_count > X360_MAX_WAIT) /* a damaged state: wait_obj has X360_MAX_WAIT */
+            t->wait_count = 0;
         for (int w = 0; w < X360_MAX_WAIT; w++)
             io_u32(s, &t->wait_obj[w]);
         io_u64(s, &t->wait_deadline);
@@ -176,6 +178,8 @@ static void sec_kernel(x360_machine *x, io *s)
         io_u32(s, &a->arg);
         io_u64(s, &a->next);
         io_i32(s, &a->thread);
+        if (a->thread >= X360_MAX_THREADS) /* a damaged state: no thread rather than one past threads[] */
+            a->thread = -1;
         io_u32(s, &a->frames_requested);
         io_u32(s, &a->frames_submitted);
     }

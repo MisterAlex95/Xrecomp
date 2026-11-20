@@ -182,7 +182,7 @@ static int resolve(struct x360_fs *fs, const char *in, char *rel, size_t n, int 
         dev[l] = 0;
         s += l;
         if (ieq(dev, "harddisk0")) { /* \Device\Harddisk0\Partition1 */
-            const char *e2 = strchr(s + 1, '\\');
+            const char *e2 = *s ? strchr(s + 1, '\\') : NULL; /* "\\Device\\Harddisk0" alone: s is its end */
             s = e2 ? e2 : s + strlen(s);
         }
     } else {
@@ -822,6 +822,8 @@ void x360_fs_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), vo
     for (int k = 0; k < MAX_LINKS; k++) {
         bytes(s, fs->links[k].link, sizeof fs->links[k].link);
         bytes(s, fs->links[k].target, sizeof fs->links[k].target);
+        fs->links[k].link[sizeof fs->links[k].link - 1] = 0; /* a damaged state still gives strings */
+        fs->links[k].target[sizeof fs->links[k].target - 1] = 0;
     }
 }
 

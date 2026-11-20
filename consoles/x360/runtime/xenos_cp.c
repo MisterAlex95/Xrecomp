@@ -31,7 +31,7 @@ void xenos_cp_init(xenos_cp *cp)
 void xenos_cp_ring_init(xenos_cp *cp, uint32_t base_phys, uint32_t size_log2)
 {
     cp->rb_base = base_phys & 0x1FFFFFFFu;
-    cp->rb_size = 1u << (size_log2 + 3); /* bytes (Xenia: 1 << (size_log2 + 3)) */
+    cp->rb_size = size_log2 < 28 ? 1u << (size_log2 + 3) : 1u << 31; /* bytes (Xenia: 1 << (size_log2 + 3)) */
     cp->rptr = cp->wptr = 0;
     cp->stalled = 0;
     cp->ib_depth = 0;
@@ -509,7 +509,7 @@ static uint32_t packet_words(xenos_cp *cp, reader *r)
 
 uint32_t xenos_cp_set_wptr(xenos_cp *cp, uint32_t wptr)
 {
-    if (!cp->rb_size)
+    if (cp->rb_size < 4) /* none yet, or a damaged state: a ring of no dwords */
         return 0;
     uint32_t size_dw = cp->rb_size / 4, n = 0;
     cp->wptr = wptr % size_dw;
