@@ -736,3 +736,59 @@ def test_helper_prefilter_rejects_only_what_cannot_match():
     gap[1] = A.std(16, -0x90, 1)
     assert 14 not in {reg for _, reg in found(gap).values()}
     assert not found(run[-9:])  # r25..r31: one register short of MIN_REGS
+
+
+def _nop_tables():
+    """MSVC's table code with `nop` (`ori r0, r0, 0`) between its instructions, as Adventure Time has it (82865F80:
+    byte offsets, 82B81BA8: halfword offsets): the `nop` names r0, the register the offset was loaded into."""
+    nop = A.ori(0, 0, 0)
+    p = Prog(TEXT)
+
+    def table_code(name, crf, load, scale):
+        p.func(name)
+        p(A.addi(11, 3, -2), cmplwi(crf, 11, 4))
+        p.branch(lambda at, t: A.bc(at, 12, 4 * crf + 1, t), name + "_def")
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_tbl")
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_tbl")
+        if scale:
+            p(A.rlwinm(11, 11, scale, 0, 31 - scale))
+        p(load(0, 12, 11))
+        p.branch(lambda at, t: A.lis(12, ha(t)), name + "_base")
+        p(nop)
+        p.branch(lambda at, t: A.addi(12, 12, lo(t) - (0x10000 if lo(t) & 0x8000 else 0)), name + "_base")
+        p(nop, A.add(12, 12, 0), A.mtctr(12), A.bctr())
+        p.label(name + "_base")
+        for v in range(4):
+            p.label("%s_c%d" % (name, v))
+            p(A.li(3, v), A.blr())
+        p.label(name + "_tbl")
+        offs = [0, 8, 8, 16, 24]     # byte offsets from the base, two cases shared
+        if scale:
+            raw = struct.pack(">5H", *offs) + bytes(2)
+        else:
+            raw = bytes(offs) + bytes(3)
+        p(*struct.unpack(">%dI" % (len(raw) // 4), raw))
+        p.label(name + "_def")
+        p(A.li(3, -1), A.blr())
+        p.end()
+
+    table_code("jt_nop_b", 6, lbzx, 0)
+    table_code("jt_nop_h", 7, lhzx, 1)
+    words = p.link()
+    funcs = {n: (TEXT + 4 * a, TEXT + 4 * b) for n, a, b in p.funcs}
+    data, _ = build_xex(words, functions=[(a - TEXT, b - a) for a, b in funcs.values()],
+                        entry=funcs["jt_nop_b"][0] - TEXT)
+    return parse_xex(data), funcs, p.labels
+
+
+def test_tables_behind_a_nop():
+    img, funcs, labels = _nop_tables()
+    view, dec = CodeView(img), XenonDecoder()
+    jt = JumpTables(view, lambda a: dec.decode(view.u32(a), a))
+    for n in ("jt_nop_b", "jt_nop_h"):
+        bctr = next(a for a in range(*funcs[n], 4) if view.u32(a) == A.bctr())
+        want = [labels["%s_c%d" % (n, c)] for c in (0, 1, 1, 2, 3)]
+        assert jt.resolve(bctr) == want, n
+    # a nop writes nothing; `ori rX, rY, 0` is a move and does
+    assert gpr_writes(A.ori(0, 0, 0)) == () and gpr_writes(A.ori(9, 9, 0)) == ()
+    assert gpr_writes(A.ori(9, 3, 0)) == (9,) and gpr_writes(A.ori(9, 9, 1)) == (9,)
