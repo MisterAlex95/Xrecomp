@@ -374,6 +374,10 @@ public class LauncherActivity extends Activity {
     private List<LibraryScreen.Entry> libEntries = new ArrayList<>();
     private final List<GameCard> libCards = new ArrayList<>();
     private final java.util.Map<String, Bitmap> libArt = new java.util.HashMap<>();
+    /** The library's cards by game key (the grid's and « Recently played »'s): a cover found updates them alone. */
+    private final java.util.Map<String, List<GameCard>> libCardsByKey = new java.util.HashMap<>();
+    /** The art tile of the last hero() built (Home's): a cover found for its game repaints it alone. */
+    private Widgets.ArtTile heroTile;
     /** The focused card's title ID on the library ("" for the folder tile). */
     private String focusTid;
     private TextView libCaption;
@@ -598,6 +602,8 @@ public class LauncherActivity extends Activity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        CoverFetcher.setListener(coverListener);
+        onCoversMissed(CoverFetcher.takeUndelivered());
         TitleAppReceiver.listener = () -> runOnUiThread(this::showTitleAppOutcome);
         showTitleAppOutcome();
         AppUpdateReceiver.listener = () -> runOnUiThread(this::showAppUpdateOutcome);
@@ -618,6 +624,7 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onPause() {
         resumed = false;
+        CoverFetcher.clearListener(coverListener);
         TitleAppReceiver.listener = null;
         AppUpdateReceiver.listener = null;
         poller.removeCallbacks(pollTick);
@@ -671,6 +678,7 @@ public class LauncherActivity extends Activity {
         // next one scans again. A recreation by the system lets it finish (it writes index.json).
         if (isFinishing())
             scanCancel = true;
+        CoverFetcher.clearListener(coverListener);
         if (feedback != null)
             feedback.release();
         super.onDestroy();
@@ -772,6 +780,11 @@ public class LauncherActivity extends Activity {
     /** The library's cards as built (the « Library folder » tile last). */
     List<GameCard> libraryCardsForTest() {
         return libCards;
+    }
+
+    /** The library grid's scroll view (a new one means the library was built again). */
+    ScrollView libraryScrollForTest() {
+        return libScroll;
     }
 
     // ---- Window and stage ----------------------------------------------------------------------------------------
@@ -1109,6 +1122,8 @@ public class LauncherActivity extends Activity {
         libCards.clear();
         libRecentCards.clear();
         libCardEntries.clear();
+        libCardsByKey.clear();
+        heroTile = null;
         libCaption = null;
         libContent = null;
         libScroll = null;
@@ -2468,6 +2483,7 @@ public class LauncherActivity extends Activity {
         LinearLayout hero = new Widgets.HeroRow(this);
         hero.setGravity(Gravity.CENTER_VERTICAL);
         Widgets.ArtTile tile = new Widgets.ArtTile(this);
+        heroTile = tile;
         if (empty)
             tile.setEmpty();
         else if (art != null)
@@ -6480,47 +6496,77 @@ public class LauncherActivity extends Activity {
         return scanner != null && scanner.isAlive();
     }
 
-    private Thread coverThread;
+    /** Covers found told to this launcher while it is resumed (CoverFetcher holds no activity). */
+    private final CoverFetcher.Listener coverListener = this::onCoverFound;
+    /** More covers found while away than this: the screen is built again once instead of card by card. */
+    private static final int COVER_UPDATES_MAX = 32;
 
     /**
      * Cover art for the GBA, PS1, N64 and GameCube games that have none (CoverArt: libretro-thumbnails, when « Download cover
-     * art » is on), one game after the other on a worker; each one found shows at once.
+     * art » is on), and for the network library's games: handed to the process' one worker (CoverFetcher), which
+     * sorts out those that want one and looks for them one after the other; each one found shows on its card at once.
      */
     private void fetchCovers(LibraryIndex idx) {
-        if (!CoverArt.downloadOn(this) || !VkDriverIndex.networkAllowed(this)
-            || (coverThread != null && coverThread.isAlive()))
+        if (!CoverArt.downloadOn(this) || !VkDriverIndex.networkAllowed(this))
             return;
-        File files = getFilesDir();
-        long now = System.currentTimeMillis();
-        List<String[]> todo = new ArrayList<>();
+        List<String[]> candidates = new ArrayList<>();
         for (java.util.Map.Entry<String, List<LibraryIndex.Item>> g : idx.games().entrySet()) {
             LibraryIndex.Item i = g.getValue().get(0);
-            if (i.otherConsole() && CoverArt.wanted(files, g.getKey(), now))
-                todo.add(new String[] { g.getKey(), i.name });
+            if (i.otherConsole())
+                candidates.add(new String[] { g.getKey(), i.name });
         }
         for (LibraryScreen.Entry e : libEntries)   // XBA-332: the network library's games, by their file's name
-            if (e.remote != null && CoverArt.wanted(files, e.tid, now))
-                todo.add(new String[] { e.tid, e.remote.name() });
-        if (todo.isEmpty())
+            if (e.remote != null)
+                candidates.add(new String[] { e.tid, e.remote.name() });
+        if (!candidates.isEmpty())
+            CoverFetcher.enqueue(getFilesDir(), candidates);
+    }
+
+    /**
+     * A cover was stored for key: its library cards and Home's art tile show it, nothing else is built again (report
+     * launcher-lag RC1: a rebuild per cover kept the main thread busy for minutes with thousands of games).
+     */
+    private void onCoverFound(String key) {
+        if (isFinishing() || isDestroyed())
             return;
-        Log.i(TAG, "launcher: cover art: looking for " + todo.size() + " game(s)");
-        coverThread = new Thread(() -> {
-            VkDriverIndex.Http http = new VkDriverIndex.UrlHttp();
-            for (String[] t : todo) {
-                if (!CoverArt.fetch(http, files, t[0], t[1]))
-                    continue;
-                runOnUiThread(() -> {
-                    libArt.remove(t[0]);
-                    if (t[0].equals(artTid))
-                        artTid = null;   // Home's image is read again
-                    if (isFinishing() || isDestroyed())
-                        return;
-                    if (screen == Screen.LIBRARY || screen == Screen.HOME)
-                        refreshKeepingFocus();
-                });
+        libArt.remove(key);
+        List<GameCard> cards = libCardsByKey.get(key);
+        if (cards != null && !cards.isEmpty()) {
+            LibraryScreen.Entry e = cardEntry(cards.get(0));
+            Bitmap b = e == null ? null : LibraryScreen.art(getFilesDir(), libArt, e);
+            for (GameCard c : cards)
+                c.setArt(b);
+        }
+        if (key.equals(artTid)) {
+            artTid = null;   // Home's image is read again
+            if (screen == Screen.HOME && heroTile != null) {
+                refreshIdentity();
+                if (art != null)
+                    heroTile.setArt(art, artColor);
             }
-        }, "cover-art");
-        coverThread.start();
+        } else if (screen == Screen.ROM_HOME && romEntry != null && key.equals(romEntry.tid) && heroTile != null) {
+            Bitmap b = LibraryScreen.art(getFilesDir(), libArt, romEntry);
+            if (b != null)
+                heroTile.setArt(b, artColor);
+        }
+    }
+
+    /** Covers found while no launcher was resumed: card by card when few, else the screen once. */
+    private void onCoversMissed(List<String> keys) {
+        if (keys.isEmpty())
+            return;
+        if (keys.size() <= COVER_UPDATES_MAX) {
+            for (String k : keys)
+                onCoverFound(k);
+            return;
+        }
+        for (String k : keys) {
+            libArt.remove(k);
+            if (k.equals(artTid))
+                artTid = null;
+        }
+        if (screen == Screen.LIBRARY || screen == Screen.HOME || screen == Screen.ROM_HOME)
+            refreshKeepingFocus();
     }
 
     private void onScanDone(LibraryScanner.Result r, LibraryIndex before) {
@@ -6785,7 +6831,7 @@ public class LauncherActivity extends Activity {
     }
 
     /** A card of the library for e (the grid's or the « Recently played » row's). */
-    private GameCard libCard(LibraryScreen.Entry e) {
+    private GameCard libCard(LibraryScreen.Entry e, int gridIndex) {
         GameCard c = new GameCard(this);
         boolean remote = RemoteLibrary.isRemoteKey(e.tid);   // XBA-319: the « remote content » art on its console's hue
         c.setGame(LibraryScreen.art(getFilesDir(), libArt, e), remote ? e.console().id : e.tid, e.title(),
@@ -6806,12 +6852,12 @@ public class LauncherActivity extends Activity {
         onFocus(c, () -> {
             libFocus(e);
             // The first row of cards: back to the top, the Search and Sort pills in sight (not under the title).
-            boolean top = libRecentCards.contains(c) || libRecentCards.isEmpty() && libCards.indexOf(c) >= 0
-                          && libCards.indexOf(c) < libColumns;
+            boolean top = gridIndex < 0 || libRecentCards.isEmpty() && gridIndex < libColumns;
             if (top && libScroll != null)
                 libScroll.post(() -> libScroll.scrollTo(0, 0));
         });
         libCardEntries.put(c, e);
+        libCardsByKey.computeIfAbsent(e.tid, k -> new ArrayList<>(1)).add(c);
         return focusable(c);
     }
 
@@ -6829,6 +6875,7 @@ public class LauncherActivity extends Activity {
             libCardEntries.remove(c);
         libCards.clear();
         libRecentCards.clear();
+        libCardsByKey.clear();
         libContent.removeAllViews();
         LibraryView.State view = libView();
         libShown = LibraryView.apply(libEntries, view);
@@ -6840,7 +6887,7 @@ public class LauncherActivity extends Activity {
         if (!recent.isEmpty()) {
             libContent.addView(Theme.label(this, getString(R.string.LIB_RECENT)), lp(MATCH, WRAP));
             for (LibraryScreen.Entry e : recent) {
-                GameCard c = libCard(e);
+                GameCard c = libCard(e, -1);   // (a card of « Recently played »: the top row)
                 libRecentCards.add(c);
                 if (e.tid.equals(want) && recentWant == null)
                     recentWant = c;
@@ -6851,7 +6898,7 @@ public class LauncherActivity extends Activity {
             libContent.addView(Theme.label(this, getString(R.string.LIB_ALL_GAMES)), p);
         }
         for (LibraryScreen.Entry e : libShown) {
-            GameCard c = libCard(e);
+            GameCard c = libCard(e, libCards.size());
             libCards.add(c);
             if (e.tid.equals(want))
                 focusCard = c;

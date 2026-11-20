@@ -2759,7 +2759,11 @@ GBA, PS1 and N64 games carry no title image (an XBE does, `TitleArt`), so their 
   dumps are named so), then without dumper tags (`[!]`, `(EDC)`, `(Track 1)`), then the bare title with the usual
   regions; libretro's characters `&*/:`<>?\|"` become `_`. Only the file's name goes out, in the URL. A game with
   no art is remembered (`<key>.miss`) and asked again after 7 days; a network error is retried at the next scan.
-  Each cover found shows at once. Logcat « launcher: cover art <key>: <name> » or « none for … ».
+  Each cover found shows at once on its card (and Home's art tile), without the library being built again. One
+  worker for the whole launcher process (`CoverFetcher`): a second launcher activity adds the games not queued yet
+  instead of starting a second walk, so each game is asked for once; which games want a cover is worked out on that
+  worker. Covers found while no launcher is resumed show when one is (more than 32: the screen is built once).
+  Logcat « launcher: cover art <key>: <name> » or « none for … ».
 - **Captured**, otherwise: 45 s into a game without a cover (`ShellActivity`, menu closed), a frame of the game is
   kept as `<key>.shot.png`. A downloaded cover, when one comes later, wins over it.
 

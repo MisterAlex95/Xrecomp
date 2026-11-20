@@ -113,6 +113,12 @@ final class GameCard extends View {
         return this;
     }
 
+    /** Its art only (a cover that came after the card was built; null: the monogram or the remote art). */
+    void setArt(Bitmap art) {
+        this.art = art;
+        invalidate();
+    }
+
     /** Whether the state line shows (not for a plain « Ready »: only a state worth saying is drawn). */
     void setChipShown(boolean shown) {
         chipShown = shown;
