@@ -633,7 +633,8 @@ static void test_more(const char *dir)
     CHECK(XM(X360_xam_XamShowMessageBoxUI, 9, 0, 0, 0, 1, 0, 0, 0, res, ov) == 0x3E5 && x360_r32(X, ov) == 0 &&
               x360_r32(X, res) == 0 && x360_r32(X, x360_handle_obj(X, x360_r32(X, evh)) + 4) == 1,
           "message box through an overlapped");
-    /* the audio driver's client callback runs every frame on a guest context */
+    /* the audio driver's client callback runs every frame on a guest context, given the address of a word that holds
+     * its argument (XAudio2's routine starts with lwz r3,0(r3)) */
     uint32_t cb = x360_kalloc(X, 8), drv = x360_kalloc(X, 4);
     x360_w32(X, cb, 0x82002000u);
     x360_w32(X, cb + 4, 0x1234);
@@ -642,8 +643,21 @@ static void test_more(const char *dir)
     X->time_skip += 60000;
     x360_audio_poll(X);
     x360_audio_client *a = &X->audio[x360_r32(X, drv) & 0xFFFF];
-    CHECK(a->thread >= 0 && X->threads[a->thread].cpu.pc == 0x82002000u && X->threads[a->thread].cpu.gpr[3] == 0x1234,
-          "audio callback context");
+    uint32_t cell = a->thread >= 0 ? (uint32_t)X->threads[a->thread].cpu.gpr[3] : 0;
+    CHECK(a->thread >= 0 && X->threads[a->thread].cpu.pc == 0x82002000u && cell && x360_r32(X, cell) == 0x1234,
+          "audio callback context: r3 %08X holds %08X", cell, cell ? x360_r32(X, cell) : 0);
+    /* registered again (another argument): the slot's word again, no new block */
+    uint32_t kcur = X->kalloc_cur;
+    K(X360_xboxkrnl_XAudioUnregisterRenderDriverClient, 1, x360_r32(X, drv));
+    x360_w32(X, cb + 4, 0x5678);
+    K(X360_xboxkrnl_XAudioRegisterRenderDriverClient, 2, cb, drv);
+    CHECK(X->kalloc_cur == kcur, "registering again allocates nothing (%u bytes)", X->kalloc_cur - kcur);
+    X->time_skip += 60000;
+    x360_audio_poll(X);
+    a = &X->audio[x360_r32(X, drv) & 0xFFFF];
+    CHECK(a->thread >= 0 && X->threads[a->thread].cpu.gpr[3] == cell && x360_r32(X, cell) == 0x5678,
+          "audio client registered again: r3 %08X holds %08X", (uint32_t)X->threads[a->thread].cpu.gpr[3],
+          x360_r32(X, cell));
     CHECK(XM(X360_xam_NetDll_inet_addr, 2, 0, attrs("10.1.2.3") ? x360_r32(X, x360_r32(X, attrs("10.1.2.3") + 4) + 4)
                                                                  : 0) == 0x0A010203u, "inet_addr");
     CHECK(XM(X360_xam_NetDll_socket, 4, 0, 2, 1, 6) == 0xFFFFFFFFu, "no network: sockets fail");
@@ -1153,6 +1167,49 @@ static void test_damaged_states(void)
     free(bad);
 }
 
+/* the audio clients' argument cells in states: a state keeps their block; one whose KERN section is version 1 (made
+ * before them) loads without it, and the next poll makes a new block holding each client's argument */
+static void test_audio_state(void)
+{
+    char why[256] = "";
+    uint32_t cb = x360_kalloc(X, 8), drv = x360_kalloc(X, 4);
+    x360_w32(X, cb, 0x82003000u);
+    x360_w32(X, cb + 4, 0x9ABC);
+    K(X360_xboxkrnl_XAudioRegisterRenderDriverClient, 2, cb, drv);
+    uint32_t k = x360_r32(X, drv) & 0xFFFF, cells = X->audio_cells;
+    CHECK(k < 8 && cells && x360_r32(X, cells + 4 * k) == 0x9ABC, "audio cell %08X", cells + 4 * k);
+    size_t cap = x360_state_size(X), n = 0;
+    uint8_t *blob = malloc(cap), *old = malloc(cap);
+    CHECK(blob && old && (n = x360_state_save(X, NULL, blob, cap)) > 0, "state saved");
+    uint32_t len = 0;
+    uint8_t *kern = blob && n ? state_section(blob, n, "KERN", &len) : NULL;
+    CHECK(kern && kern[-8] == 2 && len >= 4, "KERN is version 2");
+    if (old && kern && len >= 4) {
+        x360_w32(X, cells + 4 * k, 0); /* the state's memory has the cell: it comes back with it */
+        CHECK(x360_state_load(X, NULL, blob, n, why, sizeof why) == X360_STATE_OK && X->audio_cells == cells &&
+                  x360_r32(X, cells + 4 * k) == 0x9ABC, "version 2: the same cells (%s)", why);
+        /* the same state as a version 1 KERN: its last field (the cells) left out */
+        size_t at = (size_t)(kern - blob), end = at + len;
+        memcpy(old, blob, end - 4);
+        memcpy(old + end - 4, blob + end, n - end);
+        uint32_t l1 = len - 4;
+        old[at - 8] = 1;
+        for (int i = 0; i < 4; i++)
+            old[at - 4 + i] = (uint8_t)(l1 >> (8 * i));
+        CHECK(x360_state_load(X, NULL, old, n - 4, why, sizeof why) == X360_STATE_OK && X->audio_cells == 0,
+              "version 1 KERN loads without the cells (%s)", why);
+        X->time_skip += 60000;
+        x360_audio_poll(X);
+        x360_audio_client *a = &X->audio[k];
+        uint32_t r3 = a->thread >= 0 ? (uint32_t)X->threads[a->thread].cpu.gpr[3] : 0;
+        CHECK(X->audio_cells && r3 == X->audio_cells + 4 * k && x360_r32(X, r3) == 0x9ABC,
+              "a new cell at the next poll: r3 %08X holds %08X", r3, r3 ? x360_r32(X, r3) : 0);
+    }
+    K(X360_xboxkrnl_XAudioUnregisterRenderDriverClient, 1, x360_r32(X, drv));
+    free(blob);
+    free(old);
+}
+
 int main(int argc, char **argv)
 {
     char why[256] = "";
@@ -1216,6 +1273,7 @@ int main(int argc, char **argv)
         test_files(dir);
         test_more(dir);
         rmdir(dir);
+        test_audio_state();
     } else {
         CHECK(0, "mkdtemp");
     }

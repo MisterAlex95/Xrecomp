@@ -287,6 +287,21 @@ static void k_XeCryptRotSumSha(x360_machine *x, x360_thread *t, xe_cpu *c)
 
 #define AUDIO_FRAME_100NS 53333u /* 256 samples at 48 kHz */
 
+/* A client's routine is given the address of a word that holds its argument, not the argument: XAudio2's routine
+ * starts with lwz r3,0(r3) (Xenia wraps the argument the same way). One block of 8 words, one per client slot, made
+ * once: registering again reuses the slot's word. A state keeps the block's address (KERN); one from before it gets
+ * a new block at the next poll. */
+void x360_audio_cells_write(x360_machine *x)
+{
+    if (!x->audio_cells)
+        x->audio_cells = x360_kalloc(x, 4 * 8);
+    if (!x->audio_cells)
+        return;
+    for (int k = 0; k < 8; k++)
+        if (x->audio[k].callback)
+            x360_w32(x, x->audio_cells + 4 * (uint32_t)k, x->audio[k].arg);
+}
+
 void x360_audio_poll(x360_machine *x)
 {
     uint64_t now = x360_now(x);
@@ -297,7 +312,10 @@ void x360_audio_poll(x360_machine *x)
         a->next = now + AUDIO_FRAME_100NS - (now - a->next) % AUDIO_FRAME_100NS;
         if (k == 0 || !x->audio[0].callback)
             x360_audio_tick(x); /* a new frame: the last one's mix is complete */
-        if (x360_callback_run(x, &a->thread, a->callback, a->arg, 0) == 0)
+        if (!x->audio_cells)
+            x360_audio_cells_write(x);
+        if (x->audio_cells &&
+            x360_callback_run(x, &a->thread, a->callback, x->audio_cells + 4 * (uint32_t)k, 0) == 0)
             a->frames_requested++;
     }
 }
@@ -322,6 +340,7 @@ static void k_XAudioRegisterRenderDriverClient(x360_machine *x, x360_thread *t, 
             x->audio[k].arg = x360_r32(x, cb + 4);
             x->audio[k].next = x360_now(x) + AUDIO_FRAME_100NS;
             x->audio[k].thread = -1;
+            x360_audio_cells_write(x);
             if (A(1))
                 x360_w32(x, A(1), 0x41550000u | (uint32_t)k);
             RET(0);

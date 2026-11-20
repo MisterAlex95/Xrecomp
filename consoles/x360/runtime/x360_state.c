@@ -2,12 +2,15 @@
  *
  * The blob: a header (magic "XRSTATE\0", console "x360", X360_STATE_VERSION, the title key, the section count), then
  * sections, each a tag (four characters), a section version, a length and its bytes. Fields are written one by one
- * in little-endian order (no struct copied), one walker per section for the size, the save and the load alike.
+ * in little-endian order (no struct copied), one walker per section for the size, the save and the load alike. A
+ * walker sees the section's version (io.version): a field added in a later version is read only from states that
+ * have it, an older one loads with its default.
  *
  *   THRD  required  every guest thread: its context (GPRs, FPRs, the 128 vector registers, LR, CTR, PC, CR, XER,
  *                   FPSCR, VSCR, MSR, the reservation) and the scheduler's view (state, suspend count, ids, KTHREAD /
  *                   PCR / TLS / stack addresses, the wait it is in), the running thread, the virtual clock
- *   KERN  required  handles, timers, TLS slots, the kernel bump allocator, the title's status
+ *   KERN  required  handles, timers, TLS slots, the kernel bump allocator, the title's status; version 2: the audio
+ *                   clients' argument cells
  *   HEAP  required  the five heaps' page maps (what is allocated, and how long each allocation is)
  *   MEM   required  guest memory in use: the image, every allocated page of every heap (the physical memory through
  *                   its view), the GPU register page; pages that are all zero are left out
@@ -40,6 +43,7 @@ typedef struct io {
     const uint8_t *in;
     size_t at, cap;
     int load, bad;
+    uint32_t version; /* the section's version: this build's when saving, the state's when loading */
 } io;
 
 static void io_bytes(io *s, void *p, size_t n)
@@ -194,6 +198,11 @@ static void sec_kernel(x360_machine *x, io *s)
     if (s->load)
         x->status = status;
     io_u32(s, &x->exit_code);
+    /* version 2: the audio clients' argument cells (x360_more.c); a version 1 state gets new ones at the next poll */
+    if (s->version >= 2)
+        io_u32(s, &x->audio_cells);
+    else if (s->load)
+        x->audio_cells = 0;
 }
 
 static x360_heap *heap_k(x360_machine *x, int k)
@@ -469,7 +478,7 @@ typedef struct {
 } section;
 
 static const section k_sections[] = {
-    {"THRD", 1, 1, sec_threads}, {"KERN", 1, 1, sec_kernel}, {"HEAP", 1, 1, sec_heaps},
+    {"THRD", 1, 1, sec_threads}, {"KERN", 2, 1, sec_kernel}, {"HEAP", 1, 1, sec_heaps},
     {"MEM ", 1, 1, sec_memory},  {"GPU ", 1, 0, sec_gpu},    {"FILE", 1, 0, sec_files},
     {"PADS", 1, 0, sec_pads},    {"XMA ", 1, 0, sec_xma},    {"SEH ", 1, 0, sec_seh},
     {"KOBJ", 1, 0, sec_kobj},    {"GBIN", 1, 0, sec_gpu_bins},
@@ -500,6 +509,7 @@ size_t x360_state_size(x360_machine *x)
     size_t n = HEADER_BYTES;
     for (size_t i = 0; i < NSEC; i++) {
         io s = {0};
+        s.version = k_sections[i].version;
         k_sections[i].walk(x, &s);
         n += 12 + s.at;
     }
@@ -523,6 +533,7 @@ size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t ca
     for (size_t i = 0; i < NSEC; i++) {
         io s = {0};
         s.out = out + at + 12;
+        s.version = k_sections[i].version;
         k_sections[i].walk(x, &s);
         memcpy(out + at, k_sections[i].tag, 4);
         put32(out + at + 4, k_sections[i].version);
@@ -574,6 +585,7 @@ static int state_load(x360_machine *x, const char *key, const uint8_t *data, siz
     /* find each section first: a missing required one refuses the state before anything changes */
     const uint8_t *at[NSEC] = {0};
     size_t len[NSEC] = {0};
+    uint32_t ver[NSEC] = {0};
     uint32_t n = get32(data + 16 + KEY_BYTES);
     size_t p = HEADER_BYTES;
     for (uint32_t i = 0; i < n; i++) {
@@ -589,6 +601,7 @@ static int state_load(x360_machine *x, const char *key, const uint8_t *data, siz
                 }
                 at[j] = data + p + 12;
                 len[j] = get32(data + p + 8);
+                ver[j] = get32(data + p + 4);
             }
         p += 12 + get32(data + p + 8);
     }
@@ -614,6 +627,7 @@ static int state_load(x360_machine *x, const char *key, const uint8_t *data, siz
         s.in = at[j];
         s.cap = len[j];
         s.load = 1;
+        s.version = ver[j];
         k_sections[j].walk(x, &s);
         if (!s.bad && s.at != s.cap) /* every field read and nothing left: a section of another layout is refused */
             s.bad = 1;
@@ -632,5 +646,7 @@ static int state_load(x360_machine *x, const char *key, const uint8_t *data, siz
     free(before);
     x->m.cur = x->cur >= 0 ? &x->threads[x->cur].cpu : NULL;
     x360_render_reset(x); /* the eDRAM is not in states: the renderer's surfaces start clear */
+    if (x->audio_cells)
+        x360_audio_cells_write(x);
     return X360_STATE_OK;
 }
