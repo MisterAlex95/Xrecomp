@@ -628,6 +628,42 @@ static void phase_refused(void)
     xbox_StateSetBuildId(NULL, 0);
     rc = xbox_StateCheck(g_blob, g_blob_n, NULL);
     check(rc == XBOX_STATE_OK, "the binary's own build ID again: accepted", xbox_StateError(rc));
+
+    /* Another mod set (XBA-286): the blob was made with no mod on (RECOMP_MOD_SET unset). The value is
+     * tools/mods/store.py state_mod_set's, same vectors as tools/mods/test_mods.py. */
+    check(xbox_StateModSet("8f3e09a1" "00000000") == 0x8F3E09A1u && xbox_StateModSet("00000000ff") == 1
+          && xbox_StateModSet("") == 0 && xbox_StateModSet(NULL) == 0,
+          "the mod set of a mod-set hash: its first 8 hex digits (0 none, never 0 with mods)", "");
+    setenv("RECOMP_MOD_SET", "8f3e09a1" "0123456789abcdef", 1);
+    rc = xbox_StateCheck(g_blob, g_blob_n, &info);
+    snprintf(d, sizeof d, "%s: %s", xbox_StateError(rc), info.reason);
+    check(rc == XBOX_STATE_EVERSION && strstr(info.reason, "without mods"),
+          "a state made without mods, mods on now: refused, saying so", d);
+    {
+        uint8_t *blob2 = NULL;
+        size_t n2 = 0;
+        XboxStateStats st2;
+        rc = xbox_StateCapture(2000, &blob2, &n2, &st2);
+        check(rc == XBOX_STATE_OK, "a capture with mods on", xbox_StateError(rc));
+        if (rc == XBOX_STATE_OK) {
+            rc = xbox_StateCheck(blob2, n2, &info);
+            check(rc == XBOX_STATE_OK && info.id.mod_set == 0x8F3E09A1u, "the same mod set: accepted", info.reason);
+            setenv("RECOMP_MOD_SET", "12345678", 1);
+            rc = xbox_StateCheck(blob2, n2, &info);
+            snprintf(d, sizeof d, "%s: %s", xbox_StateError(rc), info.reason);
+            check(rc == XBOX_STATE_EVERSION && strstr(info.reason, "another set of mods"),
+                  "another mod set: refused, saying so", d);
+            unsetenv("RECOMP_MOD_SET");
+            rc = xbox_StateCheck(blob2, n2, &info);
+            snprintf(d, sizeof d, "%s: %s", xbox_StateError(rc), info.reason);
+            check(rc == XBOX_STATE_EVERSION && strstr(info.reason, "none on now"),
+                  "mods off now: refused, saying so", d);
+        }
+        free(blob2);
+    }
+    unsetenv("RECOMP_MOD_SET");
+    rc = xbox_StateCheck(g_blob, g_blob_n, NULL);
+    check(rc == XBOX_STATE_OK, "no mod again: the state made without mods is accepted", xbox_StateError(rc));
 }
 
 static void phase_sections(void)
