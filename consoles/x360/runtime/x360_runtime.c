@@ -403,12 +403,22 @@ static int env_int(const char *name, int dflt)
 
 /* ---- the run --------------------------------------------------------------------------------------------------- */
 
+/* Each step of the start, in the log and for the fault handler: a crash before the first frame says where it was */
+static void stage(const char *what)
+{
+    x360_set_stage(what);
+    printf("x360: stage: %s\n", what);
+    fflush(stdout);
+}
+
 int x360_runtime_run(const x360_runtime_opts *o)
 {
     if (!o || !o->xex || !o->pack_lib || !*o->pack_lib) {
         fprintf(stderr, "x360: a plain XEX and its pack are needed\n");
         return -1;
     }
+    x360_install_fault_handler(NULL); /* the start too: the machine's own faults once it exists */
+    stage("read the XEX");
     size_t n = 0;
     uint8_t *xex = read_all(o->xex, 256u << 20, &n);
     if (!xex) {
@@ -420,17 +430,22 @@ int x360_runtime_run(const x360_runtime_opts *o)
         snprintf(key, sizeof key, "%s", o->title_key);
     else if (x360_runtime_key(xex, n, key, sizeof key))
         snprintf(key, sizeof key, "X360-UNKNOWN");
+    stage("create the machine");
     x360_machine *x = x360_create(xex, n, why, sizeof why);
     free(xex);
     if (!x) {
         fprintf(stderr, "x360: %s does not start: %s\n", base_name(o->xex), why);
         return -1;
     }
+    x360_install_fault_handler(x);
+    stage("load the pack");
     char libpath[1100];
     snprintf(libpath, sizeof libpath, "%s%s", strchr(o->pack_lib, '/') ? "" : "./", o->pack_lib); /* not a search */
     void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
     x360_pack pk;
     int not_pack = !lib || x360_pack_from_lib(lib, &pk);
+    if (!not_pack)
+        stage("bind the pack");
     if (not_pack || x360_bind(x, &pk)) {
         fprintf(stderr, "x360: the pack %s %s\n", o->pack_lib,
                 !lib ? dlerror() : not_pack ? "is not an x360_tools.recomp pack" : "was made from another image");
@@ -441,6 +456,7 @@ int x360_runtime_run(const x360_runtime_opts *o)
     }
     if (getenv("RECOMP_X360_INTERP") && !strcmp(getenv("RECOMP_X360_INTERP"), "0"))
         x360_set_interp(x, 0); /* XBA-283: stop at the first missed address, as before */
+    stage("open the disc");
     if (o->disc && *o->disc && x360_set_disc(x, o->disc, why, sizeof why))
         fprintf(stderr, "x360: disc %s: %s (running without it)\n", o->disc, why);
     if (o->data_dir && *o->data_dir) {
@@ -465,6 +481,7 @@ int x360_runtime_run(const x360_runtime_opts *o)
     printf("x360: %s, title %s, key %s, pack %s\n", x360_runtime_version(), base_name(o->xex), key,
            base_name(o->pack_lib));
 
+    stage("open the window");
     /* the window, or none (headless checks: SDL dummy drivers) */
     int window = !o->headless && !host_window_headless();
     if (SDL_WasInit(SDL_INIT_EVENTS) == 0)
@@ -483,12 +500,14 @@ int x360_runtime_run(const x360_runtime_opts *o)
     console_pad_load(&s_pad_map, CONSOLE_PAD_X360, getenv(console_pad_env(CONSOLE_PAD_X360)));
     int upscale = o->upscale > 0 ? o->upscale : env_int("RECOMP_X360_UPSCALE", env_int("RECOMP_UPSCALE", 1));
     upscale = upscale < 1 ? 1 : upscale > 8 ? 8 : upscale;
+    stage("start the renderer");
     /* the renderer on the window's context (this thread runs the machine), or off-screen with frames read back */
     int render = x360_set_renderer_ex(x, cache, NULL, 0, RENDER_W, RENDER_H, upscale, window, why, sizeof why) == 0;
     if (!render)
         fprintf(stderr, "x360: no renderer (%s): running without drawing\n", why);
     else if (o->screenshot)
         x360_render_set_readback(x, 1);
+    stage("open the audio");
     int audio = host_audio_open(AUDIO_RATE, 2);
     FILE *wav = o->wav_path && *o->wav_path ? fopen(o->wav_path, "w+b") : NULL;
     uint32_t wav_frames = 0;
@@ -520,10 +539,12 @@ int x360_runtime_run(const x360_runtime_opts *o)
     unsigned cheat_polls = 0;
     int resume_on = recomp_states_resume_enabled() && s_state_dir[0];
     if (resume_on) {
+        stage("resume from the automatic slot");
         int r = recomp_states_resume();
         printf("x360: resume from the automatic slot: %s\n",
                r == RECOMP_STATE_EEMPTY ? "nothing saved yet" : recomp_states_error(r));
     }
+    stage("first frame");
     recomp_play play;
     recomp_play_init(&play, "x360", "frame", &rw);
     fflush(stdout);
@@ -617,6 +638,8 @@ int x360_runtime_run(const x360_runtime_opts *o)
                     save_missed_locked();
                 }
             }
+            if (r == X360_FRAME && frames == 0 && step == 0)
+                stage("running");
             if (r == X360_FRAME) {
                 if (recomp_cheats_pending(&cheats))
                     recomp_cheats_apply(&cheats, &cheat_bus);

@@ -131,6 +131,11 @@ unsigned x360_missed(const x360_machine *x, const uint32_t **addrs);
 /* XBA-283: on (the default), code the pack does not hold is interpreted and recorded (x360_missed), and the run goes
  * on; off, the machine stops at the first missed address (X360_MISSED). */
 void x360_set_interp(x360_machine *x, int on);
+/* A SIGSEGV / SIGBUS handler that says where the fault was (guest address, or host pc) and what the runtime was
+ * doing (x360_set_stage: a static string, or NULL), then hands the signal on to the handler found before it.
+ * x360_run installs it; a host installs it earlier to cover the start (x may be NULL then). */
+void x360_install_fault_handler(x360_machine *x);
+void x360_set_stage(const char *stage);
 /* XBA-283, experimental (x360_run --host-threads): each guest thread runs its lifted code on a host thread of its
  * own, in parallel; the kernel, the interpreter and the scheduler stay serial under one lock. Not deterministic
  * (virtual time follows the host clock), no save states. Needs a bound pack made with atomic reservations

@@ -149,6 +149,11 @@ int recomp_states_resume_enabled(void);
 /* Loads the automatic slot when it holds this game's state and records an event (RECOMP_STATE_EV_RESUMED, or
  * nothing when the slot is empty). RECOMP_STATE_*. */
 int recomp_states_resume(void);
+/* The resume went well: removes <dir>/auto.pending, the marker recomp_states_resume writes before it loads the
+ * automatic slot (also removed after 15 s of play, or when the automatic slot is saved). A marker still there at the
+ * next resume means the game died on that state: the slot is set aside (auto-crashed.st) and the game starts afresh
+ * (RECOMP_STATE_ECORRUPT). A slot the core refuses as damaged is set aside too (auto-bad.st). */
+void recomp_states_resume_settled(void);
 
 /* What the last quick save / load / resume did, for the UI: seq grows with each event (0: none yet). */
 enum { RECOMP_STATE_EV_SAVED = 1, RECOMP_STATE_EV_LOADED = 2, RECOMP_STATE_EV_RESUMED = 3, RECOMP_STATE_EV_SLOT = 4 };

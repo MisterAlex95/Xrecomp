@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -251,6 +252,8 @@ void recomp_states_thumb(const uint8_t *rgba, int w, int h, int stride, int aspe
 /* ---- The attached game ---------------------------------------------------------------------------------------- */
 
 static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned s_pending_gen;
+static void settle_locked(unsigned gen);
 static recomp_state_ops s_ops;
 static char s_console[8];
 static char s_dir[1024];
@@ -312,6 +315,8 @@ static int run_op(int slot, int load)
         atomic_fetch_add(&s_loads, 1);
     if (rc == RECOMP_STATE_OK && slot != RECOMP_STATE_AUTO)
         s_quick = slot;
+    if (rc == RECOMP_STATE_OK && slot == RECOMP_STATE_AUTO && !load)
+        settle_locked(s_pending_gen); /* the player left: the slot is a new one, the resume went well */
     pthread_mutex_unlock(&s_mu);
     return rc;
 }
@@ -436,9 +441,114 @@ int recomp_states_resume_enabled(void)
     return v && (!strcmp(v, "1") || !strcmp(v, "on") || !strcmp(v, "yes"));
 }
 
+/* ---- A resume that crashed the game ----------------------------------------------------------------------------
+ * <dir>/auto.pending is written before the automatic slot is loaded and removed once the game has run on it for a
+ * while (RESUME_SETTLE_MS), or when the automatic slot is saved again (the player left). Still there at the next
+ * resume: the last one died on that state (a native crash leaves no other trace), so it is set aside as
+ * auto-crashed.st and the game starts afresh instead of crashing at every start. A slot found damaged is set aside
+ * the same way (auto-bad.st). Set aside, not deleted: the file can still be looked at. */
+#define RESUME_SETTLE_MS 15000
+
+static char s_pending[1100];   /* the marker of the resume in progress, "" when settled (under s_mu) */
+/* s_pending_gen (top of the file): bumped at each resume, so an older settle timer leaves a newer marker alone */
+
+static void pending_path(const char *dir, char *out, size_t n)
+{
+    snprintf(out, n, "%s/auto.pending", dir);
+}
+
+static void set_aside(const char *dir, const char *as)
+{
+    char from[1100], to[1100];
+    if (recomp_states_slot_path(dir, RECOMP_STATE_AUTO, from, sizeof from) != 0)
+        return;
+    snprintf(to, sizeof to, "%s/%s", dir, as);
+    if (rename(from, to) == 0)
+        printf("states: the automatic slot is set aside as %s\n", to);
+    else
+        printf("states: the automatic slot cannot be set aside (%s): %s\n", strerror(errno), from);
+    fflush(stdout);
+}
+
+static void settle_locked(unsigned gen)
+{
+    if (s_pending[0] && gen == s_pending_gen) {
+        unlink(s_pending);
+        s_pending[0] = 0;
+    }
+}
+
+void recomp_states_resume_settled(void)
+{
+    pthread_mutex_lock(&s_mu);
+    settle_locked(s_pending_gen);
+    pthread_mutex_unlock(&s_mu);
+}
+
+static void *settle_later(void *arg)
+{
+    unsigned gen = (unsigned)(uintptr_t)arg;
+    struct timespec ts = {RESUME_SETTLE_MS / 1000, (RESUME_SETTLE_MS % 1000) * 1000000L};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+    pthread_mutex_lock(&s_mu);
+    settle_locked(gen);
+    pthread_mutex_unlock(&s_mu);
+    return NULL;
+}
+
 int recomp_states_resume(void)
 {
+    char dir[1024], marker[1100], slot[1100];
+    pthread_mutex_lock(&s_mu);
+    snprintf(dir, sizeof dir, "%s", s_attached ? s_dir : "");
+    pthread_mutex_unlock(&s_mu);
+    struct stat st;
+    int have_slot = dir[0] && recomp_states_slot_path(dir, RECOMP_STATE_AUTO, slot, sizeof slot) == 0 &&
+                    stat(slot, &st) == 0;
+    if (dir[0]) {
+        pending_path(dir, marker, sizeof marker);
+        if (stat(marker, &st) == 0) {
+            unlink(marker);
+            if (have_slot) {
+                printf("states: the last resume did not survive (the game died on the automatic slot): starting "
+                       "afresh\n");
+                set_aside(dir, "auto-crashed.st");
+                note(RECOMP_STATE_EV_RESUMED, RECOMP_STATE_AUTO, RECOMP_STATE_ECORRUPT);
+                return RECOMP_STATE_ECORRUPT;
+            }
+        }
+    }
+    unsigned gen = 0;
+    if (have_slot) {
+        FILE *f = fopen(marker, "w");
+        if (f) {
+            fputs("a resume from auto.st is in progress\n", f);
+            fclose(f);
+            pthread_mutex_lock(&s_mu);
+            gen = ++s_pending_gen;
+            snprintf(s_pending, sizeof s_pending, "%s", marker);
+            pthread_mutex_unlock(&s_mu);
+        }
+    }
     int rc = recomp_states_load(RECOMP_STATE_AUTO);
+    if (gen) {
+        if (rc == RECOMP_STATE_OK) {
+            pthread_t t;
+            pthread_attr_t a;
+            pthread_attr_init(&a);
+            pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+            if (pthread_create(&t, &a, settle_later, (void *)(uintptr_t)gen) != 0)
+                recomp_states_resume_settled(); /* no timer: no marker rather than one that never goes */
+            pthread_attr_destroy(&a);
+        } else {
+            pthread_mutex_lock(&s_mu);
+            settle_locked(gen);
+            pthread_mutex_unlock(&s_mu);
+            if (rc == RECOMP_STATE_ECORRUPT)
+                set_aside(dir, "auto-bad.st"); /* refused at every start otherwise */
+        }
+    }
     if (rc != RECOMP_STATE_EEMPTY)
         note(RECOMP_STATE_EV_RESUMED, RECOMP_STATE_AUTO, rc);
     return rc;

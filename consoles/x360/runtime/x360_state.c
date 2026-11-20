@@ -104,7 +104,8 @@ static void sec_threads(x360_machine *x, io *s)
     io_u64(s, &x->time_skip);
     io_u64(s, &x->st.hle_calls);   /* the virtual clock counts these too (x360_now) */
     io_u64(s, &x->st.interpreted);
-    if (s->load && (x->nthreads < 0 || x->nthreads > X360_MAX_THREADS || x->cur >= X360_MAX_THREADS)) {
+    /* the running thread is one of the state's, or none (-1) */
+    if (s->load && (x->nthreads < 0 || x->nthreads > X360_MAX_THREADS || x->cur < -1 || x->cur >= x->nthreads)) {
         s->bad = 1;
         return;
     }
@@ -134,6 +135,11 @@ static void sec_threads(x360_machine *x, io *s)
         io_u32(s, &c->msr);
         io_u32(s, &c->reserve);
         io_i32(s, &t->state);
+        if (s->load && (t->state < TH_FREE || t->state > TH_DONE)) { /* the scheduler indexes nothing by it, but a
+                                                                       * value outside the enum is a misread state */
+            s->bad = 1;
+            return;
+        }
         io_i32(s, &t->suspend);
         io_u32(s, &t->id);
         io_u32(s, &t->handle);
@@ -277,9 +283,37 @@ static void page_save(x360_machine *x, uint32_t a, void *ctx)
 
 static void page_commit_zero(x360_machine *x, uint32_t a, void *ctx)
 {
-    (void)ctx;
-    x360_commit(x, a, PAGE);
+    io *s = ctx;
+    if (x360_commit(x, a, PAGE)) { /* not writable: the memset would fault */
+        s->bad = 1;
+        return;
+    }
     memset(x360_p(x, a), 0, PAGE);
+}
+
+/* a page each_page visits once the heaps are restored: the only addresses a MEM section may hold. A state that names
+ * another one (damaged, or misread after a section of another layout) would write where nothing is mapped. */
+static int page_known(x360_machine *x, uint32_t a)
+{
+    if (a >= x->image_base && a - x->image_base < x->image_size)
+        return 1;
+    if ((a >= 0x7FC80000u && a < 0x7FC90000u) || (a >= 0x7FEA0000u && a < 0x7FEB0000u))
+        return 1;
+    for (int k = 0; k < 5; k++) {
+        x360_heap *h = heap_k(x, k);
+        uint32_t v = a;
+        if (h->physical) {
+            if (a < X360_VIEW_64K || a >= X360_VIEW_4K)
+                continue;
+            v = x360_v2p(a);
+        }
+        if (v < h->base)
+            continue;
+        uint64_t p = (uint64_t)(v - h->base) / h->page;
+        if (p < h->pages && h->used[p])
+            return 1;
+    }
+    return 0;
 }
 
 static void sec_memory(x360_machine *x, io *s)
@@ -290,17 +324,22 @@ static void sec_memory(x360_machine *x, io *s)
         io_u32(s, &end);
         return;
     }
-    each_page(x, page_commit_zero, NULL); /* the restored heaps say which pages exist; their content follows */
+    each_page(x, page_commit_zero, s); /* the restored heaps say which pages exist; their content follows */
     for (;;) {
         uint32_t a = 0;
+        if (s->bad)
+            break;
         io_u32(s, &a);
         if (s->bad || a == 0xFFFFFFFFu)
             break;
-        if (a & (PAGE - 1)) {
+        if ((a & (PAGE - 1)) || !page_known(x, a) || x360_commit(x, a, PAGE)) {
             s->bad = 1;
             break;
         }
-        x360_commit(x, a, PAGE);
+        if (s->at + PAGE > s->cap) { /* truncated: io_bytes would zero the page, keep it as it is */
+            s->bad = 1;
+            break;
+        }
         io_bytes(s, x360_p(x, a), PAGE);
     }
 }
@@ -493,7 +532,20 @@ size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t ca
     return at;
 }
 
+static int state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n,
+                      int undo);
+
+/* Loads a state, every check first; a section found damaged once loading began (the machine is then half old, half
+ * new) puts back the machine as it was before the load, from a state taken of it just before, so a bad state never
+ * leaves a dead machine behind (the auto slot at start would stop the game at frame 0). Without memory for that copy,
+ * or when the machine cannot be saved (an error already, host threads), the machine stops (X360_ERROR) as before. */
 int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n)
+{
+    return state_load(x, key, data, size, why, why_n, 1);
+}
+
+static int state_load(x360_machine *x, const char *key, const uint8_t *data, size_t size, char *why, size_t why_n,
+                      int undo)
 {
     char k[KEY_BYTES];
     if (!x || !data || size < HEADER_BYTES || memcmp(data, STATE_MAGIC, 8)) {
@@ -539,6 +591,14 @@ int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_
             snprintf(why, why_n, "section %.4s missing", k_sections[j].tag);
             return X360_STATE_ECORRUPT;
         }
+    uint8_t *before = NULL;
+    size_t before_n = 0;
+    if (undo) {
+        size_t cap = x360_state_size(x);
+        before = malloc(cap);
+        if (before)
+            before_n = x360_state_save(x, key, before, cap);
+    }
     x360_kobj_reset(x); /* a state from before XBA-296 has no KOBJ section: none of that state */
     x360_gpu_bin_reset(x); /* nor has an older one a GBIN section */
     for (size_t j = 0; j < NSEC; j++) {
@@ -549,12 +609,21 @@ int x360_state_load(x360_machine *x, const char *key, const uint8_t *data, size_
         s.cap = len[j];
         s.load = 1;
         k_sections[j].walk(x, &s);
+        if (!s.bad && s.at != s.cap) /* every field read and nothing left: a section of another layout is refused */
+            s.bad = 1;
         if (s.bad) {
-            snprintf(why, why_n, "section %.4s is damaged (the machine is in an undefined state)", k_sections[j].tag);
-            x->status = X360_ERROR;
+            char back[160];
+            int restored = before_n && state_load(x, key, before, before_n, back, sizeof back, 0) == X360_STATE_OK;
+            snprintf(why, why_n, "section %.4s is damaged (%s)", k_sections[j].tag,
+                     restored ? "the machine is back as it was before the load"
+                              : "the machine is in an undefined state");
+            if (!restored)
+                x->status = X360_ERROR;
+            free(before);
             return X360_STATE_ECORRUPT;
         }
     }
+    free(before);
     x->m.cur = x->cur >= 0 ? &x->threads[x->cur].cpu : NULL;
     x360_render_reset(x); /* the eDRAM is not in states: the renderer's surfaces start clear */
     return X360_STATE_OK;

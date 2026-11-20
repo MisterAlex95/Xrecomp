@@ -285,6 +285,28 @@ static void test_quick(void)
     recomp_states_last_event(&ev);
     CHECK(ev.kind == RECOMP_STATE_EV_RESUMED && ev.slot == RECOMP_STATE_AUTO && ev.rc == RECOMP_STATE_OK);
 
+    /* A resume the game survived leaves no marker; one it died on (the marker still there at the next start) sets
+     * the automatic slot aside and starts afresh, once. */
+    char marker[400], aside[400];
+    snprintf(marker, sizeof marker, "%s/auto.pending", s_dir);
+    snprintf(aside, sizeof aside, "%s/auto-crashed.st", s_dir);
+    CHECK(access(marker, F_OK) == 0);   /* written before the load, until the game has run on it */
+    recomp_states_resume_settled();
+    CHECK(access(marker, F_OK) != 0);
+    CHECK(recomp_states_resume() == RECOMP_STATE_OK && access(marker, F_OK) == 0);
+    s_machine = 0;                      /* the process dies here: the marker stays */
+    CHECK(recomp_states_resume() == RECOMP_STATE_ECORRUPT && s_machine == 0);
+    recomp_states_last_event(&ev);
+    CHECK(ev.kind == RECOMP_STATE_EV_RESUMED && ev.rc == RECOMP_STATE_ECORRUPT);
+    CHECK(access(marker, F_OK) != 0 && access(aside, F_OK) == 0);
+    CHECK(recomp_states_resume() == RECOMP_STATE_EEMPTY);   /* next start: afresh */
+    unlink(aside);
+    /* Saving the automatic slot (the player left) also ends the resume's watch. */
+    s_machine = 8;
+    CHECK(recomp_states_save(RECOMP_STATE_AUTO) == RECOMP_STATE_OK);
+    CHECK(recomp_states_resume() == RECOMP_STATE_OK && access(marker, F_OK) == 0);
+    CHECK(recomp_states_save(RECOMP_STATE_AUTO) == RECOMP_STATE_OK && access(marker, F_OK) != 0);
+
     /* A new run: the quick slot is the most recently saved numbered slot. */
     recomp_states_attach(&ops, s_dir);
     CHECK(recomp_states_quick_slot() == 3);
