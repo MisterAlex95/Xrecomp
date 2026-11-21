@@ -5825,11 +5825,13 @@ static const uint32_t *read_depth_stencil(xenos_gl *g, const surface *s, int x0,
     g->glDisable(GL_CULL_FACE);
     g->glDepthMask(0);
     g->glViewport(0, 0, hw, hh);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glColorMask(1, 1, 1, 1);
+    g->glClearColor(0, 0, 0, 0);
+    g->glClear(GL_COLOR_BUFFER_BIT); /* whole: a tiler need not load stex's old contents */
     g->glEnable(GL_SCISSOR_TEST);
     g->glScissor(x0 * sc, y0 * sc, w * sc, h * sc);
     g->glColorMask(0, 0, 0, 1);
-    g->glClearColor(0, 0, 0, 0);
-    g->glClear(GL_COLOR_BUFFER_BIT);
     g->glEnable(GL_STENCIL_TEST);
     g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0);
     g->glStencilOpSeparate(GL_FRONT_AND_BACK, 0x1E00, 0x1E00, 0x1E00); /* GL_KEEP */
@@ -5879,8 +5881,9 @@ static const uint32_t *read_depth_stencil(xenos_gl *g, const surface *s, int x0,
 /* WP-38: the packed path checked against the split one, once, before the first depth resolve uses it: a 16 x 16
  * depth-stencil target (at the internal scale) cleared guest pixel by guest pixel to the 256 stencil values and as
  * many depths, read both ways; any word that differs (a GPU whose blending is not exact in 8 bits) and depth resolves
- * stay split. Logged ("depth resolves packed OK" / "BROKEN (n of 256 words differ)"). Returns the words that differ,
- * -1 when a path is missing. */
+ * stay split, as when the split path does not read the pattern back (the check would be of nothing). Logged ("depth
+ * resolves packed OK" / "BROKEN (n of 256 words differ)" / "self-check pattern not written"). Returns the words that
+ * differ, -1 when a path is missing or the pattern is not there. */
 static int ds_selftest(xenos_gl *g)
 {
     enum { N = 16 };
@@ -5906,23 +5909,28 @@ static int ds_selftest(xenos_gl *g)
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
     uint32_t packed[N * N];
     const uint32_t *pv = read_depth_stencil(g, &t, 0, 0, N, N);
-    int bad = -1;
+    int bad = -1, unset = 0;
     if (pv) {
         memcpy(packed, pv, sizeof packed); /* read_depth reuses the buffer */
         const uint32_t *dv = read_depth(g, &t, 0, 0, N, N);
         const uint8_t *sv = dv ? read_stencil(g, &t, 0, 0, N, N) : NULL;
         if (sv) {
             bad = 0;
-            for (int i = 0; i < N * N; i++)
+            for (int i = 0; i < N * N; i++) {
                 bad += packed[i] != (dv[i] | (uint32_t)sv[i] << 24);
+                unset += sv[i] != ((i ^ 0x5A) & 0xFF); /* the pattern itself, so that the check is not of zeros */
+            }
         }
     }
     g->glDeleteTextures(1, &t.tex);
-    if (bad)
+    if (unset)
+        fprintf(g->log, "xenos_gl: depth resolves self-check pattern not written (%d of %d stencil values): split "
+                        "read-backs\n", unset, N * N);
+    else if (bad)
         fprintf(g->log, "xenos_gl: depth resolves packed BROKEN (%d of %d words differ): split read-backs\n", bad, N * N);
     else
         fprintf(g->log, "xenos_gl: depth resolves packed OK\n");
-    return bad;
+    return unset ? -1 : bad;
 }
 
 static void resolve_copy(xenos_gl *g, const xenos_cp *cp);
