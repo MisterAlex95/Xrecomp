@@ -12,7 +12,9 @@ project(console_x360_tests C)
 #   x360_render      the renderer through the machine: a ring, VdSwap, a front buffer frame, a save state loaded
 #   x360_pad_map     the title key and a host pad as a 360 controller (x360_runtime.h's pure helpers; XBA-280)
 #   x360_vmx_ref     the VMX helpers as packs build them (host-order lanes, vector ops) equal the same helpers as plain
-#                    C (-DXV_SCALAR) on random and edge vectors, VSCR[SAT] included (the interpreter shares them)
+#                    C (-DXV_SCALAR) on random and edge vectors, VSCR[SAT] included (the interpreter shares them);
+#                    the float helpers' NaN lanes against the AltiVec rule, and a float digest that must be the same
+#                    on every compiler, -O level and host (run_vmx_ref_matrix.sh)
 #   x360_vmx_ref_ssse3  the same built with -mssse3 (x86-64: the pshufb vperm)
 #   x360_window      the renderer on a window's context (xenos_gl_attach at scale 2, the frame texture presented,
 #                    the drawable captured): needs a display (xvfb-run -a ctest -R x360_window), 77 without

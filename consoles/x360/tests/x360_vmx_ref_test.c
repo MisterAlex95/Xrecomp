@@ -2,7 +2,7 @@
  * XV_VEC; NEON / SSE2 / SSSE3 intrinsics: XV_NEON / XV_SSE2 / XV_SSSE3; build it with -mssse3 for the SSSE3 vperm)
  * against the same helpers as plain C (x360_vmx_ref_scalar.c, -DXV_SCALAR): equal results and VSCR on
  * random vectors and on the edges (saturation bounds, the sticky SAT bit, shift counts 0 / 15 and above, permute
- * controls with bits 5-7 set). The interpreter runs the same helpers, so the interpreter-vs-lifted tests cannot see a
+ * controls with bits 5-7 set), and the float helpers' NaN lanes against the AltiVec rule (float_checks). The interpreter runs the same helpers, so the interpreter-vs-lifted tests cannot see a
  * mistake in them: this test can. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,6 +84,275 @@ static xe_v128 pack_vec(int mode)
     return v;
 }
 
+/* ---- float helpers: NaNs, infinities, denormals ----
+ * The plain C and the packs' build are compared like the rest; on top of that each NaN lane is checked against the
+ * AltiVec rule worked out from the operands' bits alone (no host float arithmetic, so the host's NaN conventions cannot
+ * leak into the expectation), and every result goes into a digest printed at the end: the same on every compiler,
+ * -O level and host (x86-64, aarch64), which run_vmx_matrix-style comparisons check. Lanes as the lifter feeds them:
+ * inputs and result through xv_daz, VSCR[NJ] on and off. */
+
+static const uint32_t fspecial[] = {
+    0x00000000u, 0x80000000u, 0x3F800000u, 0xBF800000u, 0x40000000u, 0x3F000000u, 0xC0400000u, 0x42F6E979u,
+    0x00000001u, 0x807FFFFFu, 0x00400000u, 0x80000010u,                         /* denormals */
+    0x00800000u, 0x80800000u, 0x7F7FFFFFu, 0xFF7FFFFFu, 0x5E800000u, 0xDE800000u, /* min normal, max, 2^62 */
+    0x7F800000u, 0xFF800000u,                                                   /* infinities */
+    0x7FC00000u, 0xFFC00000u, 0x7FC12345u, 0xFFE54321u, 0x7FFFFFFFu,            /* quiet NaNs */
+    0x7F800001u, 0xFF812345u, 0x7FA00000u, 0xFFBFFFFFu,                         /* signalling NaNs */
+};
+#define NFSPECIAL (int)(sizeof fspecial / sizeof fspecial[0])
+
+static uint32_t flane(void)
+{
+    if (rnd() & 3)
+        return fspecial[rnd() % NFSPECIAL];
+    uint32_t u = rnd(); /* one call per statement: the digest needs the same draws on every compiler */
+    u ^= rnd() << 16;
+    return (rnd() & 1) ? (u & 0x83FFFFFFu) | 0x3C000000u : u; /* now and then near 1.0, else anything */
+}
+
+static xe_v128 fvec(void)
+{
+    xe_v128 v;
+    for (int k = 0; k < 4; k++)
+        v.u32[k] = flane();
+    return v;
+}
+
+static int f_nan(uint32_t u) { return (u & 0x7FFFFFFFu) > 0x7F800000u; }
+static int f_inf(uint32_t u) { return (u & 0x7FFFFFFFu) == 0x7F800000u; }
+static int f_zero(uint32_t u) { return (u & 0x7FFFFFFFu) == 0; }
+static int f_big(uint32_t u) { return ((u >> 23) & 0xFF) >= 127 + 60 && !f_inf(u) && !f_nan(u); }
+
+#define O_QNAN 0x7FC00000u /* AltiVec PEM 3.2.5.5: the NaN an operation makes */
+#define NOTNAN 1u /* the oracle's "no NaN here" (1 is not a NaN's bit pattern) */
+
+static uint32_t q(uint32_t u) { return u | 0x00400000u; }
+
+static uint32_t o_pick(uint32_t a, uint32_t b, uint32_t c, int na)
+{
+    if (na > 0 && f_nan(a))
+        return q(a);
+    if (na > 1 && f_nan(b))
+        return q(b);
+    if (na > 2 && f_nan(c))
+        return q(c);
+    return 0;
+}
+
+/* the expected NaN of a lane (inputs already flushed), or NOTNAN */
+static uint32_t o_add(uint32_t a, uint32_t b, int sub)
+{
+    uint32_t n = o_pick(a, b, 0, 2);
+    if (n)
+        return n;
+    if (f_inf(a) && f_inf(b) && ((a ^ b ^ (sub ? 0x80000000u : 0)) >> 31))
+        return O_QNAN;
+    return NOTNAN;
+}
+
+static uint32_t o_mul(uint32_t a, uint32_t b)
+{
+    uint32_t n = o_pick(a, b, 0, 2);
+    if (n)
+        return n;
+    return (f_inf(a) && f_zero(b)) || (f_zero(a) && f_inf(b)) ? O_QNAN : NOTNAN;
+}
+
+/* a * c + b (neg: a * c - b, the NaN not negated); precedence a, b, c */
+static uint32_t o_fma(uint32_t a, uint32_t c, uint32_t b, int neg)
+{
+    uint32_t n = o_pick(a, b, c, 3);
+    if (n)
+        return n;
+    if ((f_inf(a) && f_zero(c)) || (f_zero(a) && f_inf(c)))
+        return O_QNAN;
+    if ((f_inf(a) || f_inf(c)) && f_inf(b) && ((a ^ c ^ b ^ (neg ? 0x80000000u : 0)) >> 31))
+        return O_QNAN;
+    return NOTNAN;
+}
+
+/* our vmsum rule (xenon_ops.h): products, then sums left to right; F stands for a finite value */
+#define O_F 2u
+static uint32_t o_msum(xe_v128 a, xe_v128 b, int n)
+{
+    uint32_t s = 0;
+    for (int k = 0; k < n; k++) {
+        uint32_t x = a.u32[k], y = b.u32[k], p;
+        if (f_nan(x) || f_nan(y))
+            p = o_pick(x, y, 0, 2);
+        else if ((f_inf(x) && f_zero(y)) || (f_zero(x) && f_inf(y)))
+            p = O_QNAN;
+        else if (f_inf(x) || f_inf(y))
+            p = 0x7F800000u | ((x ^ y) & 0x80000000u);
+        else
+            p = O_F;
+        if (k == 0)
+            s = p;
+        else if (f_nan(s))
+            s = q(s);
+        else if (f_nan(p))
+            s = q(p);
+        else if (f_inf(s) && f_inf(p))
+            s = ((s ^ p) >> 31) ? O_QNAN : s;
+        else if (f_inf(p))
+            s = p;
+    }
+    return f_nan(s) ? s : NOTNAN;
+}
+
+static uint32_t o_one(int op, uint32_t b)
+{
+    if (f_nan(b))
+        return q(b);
+    if ((op == 1 || op == 3) && (b >> 31) && !f_zero(b)) /* vrsqrtefp, vlogefp of a negative number */
+        return O_QNAN;
+    return NOTNAN;
+}
+
+static uint32_t fdigest = 2166136261u;
+
+static void dig(uint32_t u)
+{
+    for (int i = 0; i < 4; i++) {
+        fdigest ^= (u >> (8 * i)) & 0xFF;
+        fdigest *= 16777619u;
+    }
+}
+
+static void dig_v(xe_v128 v)
+{
+    for (int k = 0; k < 4; k++)
+        dig(v.u32[k]);
+}
+
+static int ffails;
+
+/* lane k of r against the oracle's e (NOTNAN: r must not be a NaN) */
+static void fcheck(const char *what, int n, int k, uint32_t e, uint32_t r, xe_v128 a, xe_v128 b, xe_v128 c)
+{
+    if (e == NOTNAN ? !f_nan(r) : r == e)
+        return;
+    if (++ffails <= 20)
+        printf("FAIL %s #%d lane %d: a %08X b %08X c %08X: %08X, the rule says %s%08X\n", what, n, k, a.u32[k], b.u32[k],
+               c.u32[k], r, e == NOTNAN ? "not a NaN, not " : "", e == NOTNAN ? r : e);
+}
+
+static void float_checks(const xv_ref_set *F, const xv_ref_set *R, long *checks)
+{
+    static const char *const f2n[] = {XV_REF_F2(XV_REF_NAME)}, *const f3n[] = {XV_REF_F3(XV_REF_NAME)},
+                             *const f1n[] = {XV_REF_F1(XV_REF_NAME)};
+    const int nf2 = (int)(sizeof f2n / sizeof f2n[0]), nf3 = (int)(sizeof f3n / sizeof f3n[0]),
+              nf1 = (int)(sizeof f1n / sizeof f1n[0]);
+    rng = 0x2545F4914F6CDD1Dull; /* a stream of its own: the digest does not depend on the checks above */
+    for (int n = 0; n < 100000; n++) {
+        uint32_t vscr = (n & 1) ? XV_VSCR_NJ : 0;
+        xe_v128 a0 = fvec(), b0 = fvec(), c0 = fvec();
+        xe_v128 a = xv_daz(vscr, a0), b = xv_daz(vscr, b0), c = xv_daz(vscr, c0);
+        for (int i = 0; i < nf2; i++, (*checks)++) {
+            xe_v128 f = xv_daz(vscr, F->f2[i](a, b)), r = xv_daz(vscr, R->f2[i](a, b));
+            cmpv(f2n[i], n, a, b, c, f, r, 0, 0);
+            dig_v(r);
+            if (i >= 5) { /* msum: the oracle knows no rounding, so not where a finite product could overflow */
+                int big = 0;
+                for (int k = 0; k < 4; k++)
+                    big |= f_big(a.u32[k]) | f_big(b.u32[k]);
+                if (!big)
+                    for (int k = 0; k < 4; k++)
+                        fcheck(f2n[i], n, k, o_msum(a, b, i == 5 ? 3 : 4), r.u32[k], a, b, c);
+                continue;
+            }
+            for (int k = 0; k < 4; k++) {
+                uint32_t x = a.u32[k], y = b.u32[k];
+                uint32_t e = i == 0 ? o_add(x, y, 0) : i == 1 ? o_add(x, y, 1) : i == 2 ? o_mul(x, y) : o_pick(x, y, 0, 2);
+                if (i >= 3 && !e)
+                    e = NOTNAN;
+                fcheck(f2n[i], n, k, e, r.u32[k], a, b, c);
+            }
+        }
+        for (int i = 0; i < nf3; i++, (*checks)++) {
+            xe_v128 f = xv_daz(vscr, F->f3[i](a, c, b)), r = xv_daz(vscr, R->f3[i](a, c, b));
+            cmpv(f3n[i], n, a, b, c, f, r, 0, 0);
+            dig_v(r);
+            for (int k = 0; k < 4; k++)
+                fcheck(f3n[i], n, k, o_fma(a.u32[k], c.u32[k], b.u32[k], i), r.u32[k], a, b, c);
+        }
+        for (int i = 0; i < nf1; i++, (*checks)++) {
+            xe_v128 f = xv_daz(vscr, F->f1[i](b)), r = xv_daz(vscr, R->f1[i](b));
+            cmpv(f1n[i], n, a, b, c, f, r, 0, 0);
+            for (int k = 0; k < 4; k++) {
+                uint32_t e = o_one(i, b.u32[k]);
+                fcheck(f1n[i], n, k, e, r.u32[k], a, b, c);
+                /* exp2f / log2f may differ in the last bit between C libraries: their finite results stay out */
+                if (!(i == 2 || i == 3) || e != NOTNAN || f_inf(b.u32[k]) || f_zero(b.u32[k]))
+                    dig(r.u32[k]);
+            }
+        }
+        int imm = (int)(rnd() & 31);
+        for (int s = 0; s < 2; s++, *checks += 2) {
+            uint32_t vf = vscr | (n & 2 ? XV_VSCR_SAT : 0), vr = vf;
+            xe_v128 f = s ? F->ctuxs(b, imm, &vf) : F->ctsxs(b, imm, &vf);
+            xe_v128 r = s ? R->ctuxs(b, imm, &vr) : R->ctsxs(b, imm, &vr);
+            cmpv(s ? "xv_ctuxs" : "xv_ctsxs", n, a, b, c, f, r, vf, vr);
+            dig_v(r);
+            dig(vr);
+            int allnan = 1;
+            for (int k = 0; k < 4; k++) {
+                allnan &= f_nan(b.u32[k]);
+                if (f_nan(b.u32[k]) && r.u32[k] && ++ffails <= 20)
+                    printf("FAIL %s #%d lane %d: NaN %08X gives %08X, not 0\n", s ? "xv_ctuxs" : "xv_ctsxs", n, k,
+                           b.u32[k], r.u32[k]);
+            }
+            if (allnan && vr != (vscr | (n & 2 ? XV_VSCR_SAT : 0)) && ++ffails <= 20)
+                printf("FAIL %s #%d: NaN lanes changed VSCR to %X\n", s ? "xv_ctuxs" : "xv_ctsxs", n, vr);
+            f = s ? F->cfux(a0, imm) : F->cfsx(a0, imm);
+            r = s ? R->cfux(a0, imm) : R->cfsx(a0, imm);
+            cmpv(s ? "xv_cfux" : "xv_cfsx", n, a0, b, c, f, r, 0, 0);
+            dig_v(r);
+        }
+    }
+    /* the cases the rule is about, spelled out: both operands NaNs, signalling after quiet, made NaNs */
+    static const struct {
+        const char *what;
+        int op; /* 0 add, 1 sub, 2 mul, 3 max, 4 min, 5 madd, 6 nmsub */
+        uint32_t a, b, c, want;
+    } cases[] = {
+        {"two NaNs: vA's", 0, 0x7FC11111u, 0x7FC22222u, 0, 0x7FC11111u},
+        {"two NaNs: vA's (swapped)", 0, 0x7FC22222u, 0x7FC11111u, 0, 0x7FC22222u},
+        {"quiet vA before signalling vB", 0, 0x7FC11111u, 0x7F822222u, 0, 0x7FC11111u},
+        {"signalling vA quieted", 2, 0xFF811111u, 0x7FC22222u, 0, 0xFFC11111u},
+        {"inf - inf", 1, 0x7F800000u, 0x7F800000u, 0, 0x7FC00000u},
+        {"inf + -inf", 0, 0xFF800000u, 0x7F800000u, 0, 0x7FC00000u},
+        {"0 * inf", 2, 0x80000000u, 0x7F800000u, 0, 0x7FC00000u},
+        {"max of two NaNs", 3, 0xFFC33333u, 0x7FC44444u, 0, 0xFFC33333u},
+        {"min of a number and a NaN", 4, 0x3F800000u, 0x7F855555u, 0, 0x7FC55555u},
+        {"madd: vB (addend) before vC", 5, 0x3F800000u, 0x7FC66666u, 0x7FC77777u, 0x7FC66666u},
+        {"madd: inf * 0 + NaN gives the NaN", 5, 0x7F800000u, 0x7FC66666u, 0, 0x7FC66666u},
+        {"madd: inf * 0", 5, 0x7F800000u, 0x3F800000u, 0, 0x7FC00000u},
+        {"nmsub: the NaN not negated", 6, 0x7FC88888u, 0x3F800000u, 0x3F800000u, 0x7FC88888u},
+        {"nmsub: made NaN not negated", 6, 0x7F800000u, 0x7F800000u, 0x3F800000u, 0x7FC00000u},
+    };
+    for (int i = 0; i < (int)(sizeof cases / sizeof cases[0]); i++)
+        for (int s = 0; s < 2; s++, (*checks)++) {
+            const xv_ref_set *S = s ? R : F;
+            xe_v128 a = xv_splat32(cases[i].a), b = xv_splat32(cases[i].b), c = xv_splat32(cases[i].c), r;
+            switch (cases[i].op) {
+            case 0: r = S->f2[0](a, b); break;
+            case 1: r = S->f2[1](a, b); break;
+            case 2: r = S->f2[2](a, b); break;
+            case 3: r = S->f2[3](a, b); break;
+            case 4: r = S->f2[4](a, b); break;
+            case 5: r = S->f3[0](a, c, b); break;
+            default: r = S->f3[1](a, c, b); break;
+            }
+            for (int k = 0; k < 4; k++)
+                if (r.u32[k] != cases[i].want && ++ffails <= 40)
+                    printf("FAIL %s (%s): %08X, want %08X\n", cases[i].what, s ? "plain C" : "fast", r.u32[k],
+                           cases[i].want);
+        }
+    fails += ffails;
+    printf("x360_vmx_ref: float digest %08X\n", fdigest);
+}
+
 int main(void)
 {
     const xv_ref_set *F = &xv_ref_fast, *R = &xv_ref_scalar;
@@ -160,6 +429,7 @@ int main(void)
             printf("FAIL vector stores #%d at %08X (element size %u)\n", n, ea, sz);
         checks += 6;
     }
+    float_checks(F, R, &checks);
     if (fails) {
         printf("x360_vmx_ref: %d of %ld checks differ\n", fails, checks);
         return 1;
