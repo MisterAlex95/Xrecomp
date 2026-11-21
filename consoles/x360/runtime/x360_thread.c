@@ -682,6 +682,10 @@ int x360_run(x360_machine *x, uint64_t insns)
             }
         }
         if (picked < 0) {
+            /* WP-22 stage 2, unpaced: the GL thread's posted work first (a fence or interrupt a thread waits on),
+             * then the jump; a paced frame (run_until) keeps its one frame of pipeline. Off the GPU thread: 0. */
+            if (!x->run_until && x360_gpu_wait_posted(x))
+                continue;
             uint64_t d = next_deadline(x);
             if (!d) {
                 x360_fail(x, "every thread is blocked with no timeout (deadlock)");

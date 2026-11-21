@@ -102,7 +102,7 @@ state byte-identical to `perf/ref-wp9` (eager and lazy), and to `perf/ref-main` 
 ### 5.0 What landed (`x360_gpu_overlap`, `x360_gpu.c`): off, awaiting a device check
 
 Off by default (`RECOMP_X360_GPU_THREAD=1` turns it on), as `RECOMP_X360_DIRECT_PRESENT`: the gain is not measured on
-a phone yet, an unpaced run loses virtual time to a slower GPU (below), and frames differ from stage 1's.
+a phone yet, and frames differ from stage 1's (an unpaced run no longer loses virtual time to a slower GPU: below).
 
 A smaller shape than 5.1's: the frame loop keeps its thread, its GL context and everything it did between
 `x360_run_until` calls; only the call itself moves.
@@ -149,12 +149,30 @@ Virtual time. The perf line's 58-59 swaps per virtual second (60 in stage 1) on 
 frame of pipeline, not lost time: a swap is counted when the GL thread runs it, up to one job (frame) after the guest
 posted it, so a run stopped at its N-th swap holds one frame more (30 swaps: 30 / 31 frames x 60 = 58.1; 60 swaps:
 59.0; 34: 58.3, as measured), and the guest's work per swap is the same (2.00 M dispatches per swap in both modes).
-Back-pressure does not cost virtual time: the worker sleeps on a condition variable, executing nothing. Virtual time
-is really lost in one case: an unpaced single job (`x360_run` with `=1` and no `--swaps`), where every guest thread
-waiting lets the clock jump to the next deadline at once while the GPU takes host time, so Direct3D's frame throttle
-sees the GPU many virtual frames late (2 swaps in 1.5 G instructions against 34). The player is paced (one job per
-1/60 s of virtual time, 60 Hz of host time) and does not do that; a fix for the harness would be the scheduler waiting
-for the GL thread's posted work before such a jump.
+Back-pressure does not cost virtual time: the worker sleeps on a condition variable, executing nothing.
+
+Unpaced jobs (`x360_run` with `=1` and no `--swaps`: no `run_until`). Virtual time is the guest's instructions, and
+the GL thread takes host time, so without a bound the guest ran ahead of its GPU: a thread spinning on a fence (or
+the read pointer) burned virtual frames while the GL thread was still on the posted work, and when every thread
+waited the scheduler jumped the clock to the next deadline at once; Direct3D's frame throttle then saw the GPU many
+virtual frames late (on a retail stretch, 1 swap in 1.5 G instructions against 28 inline, 52 in 15 G against 287).
+Two bounds, both only for an unpaced job on the worker (`overlap_remote`; the off path, the player's paced frames and
+`--swaps` never reach them):
+- before a clock jump (`x360_run`'s idle branch), `x360_gpu_wait_posted`: while the GL thread runs or has posted work
+  left (`link.post` ahead of `link.taken`, not held), the worker waits on `done`; it then polls again instead of
+  jumping (the run may have written the fence, raised the swap interrupt). Nothing posted: the jump as before.
+- in `x360_gpu_poll` (`overlap_lag`): posted work may wait at most half a vertical blank of virtual time (`lag_t`,
+  reset by `link_sync`); past it the worker waits the same way. This is the case the spin hits (the retail stretch
+  above has almost no jumps).
+
+A run that stops at an unmet `WAIT_REG_MEM` sets `taken` like any other, so neither wait outlasts the GL thread's
+current run: a wait that needs the guest is the guest's to open, as with the swap back-pressure. `held` is only set
+inside a Vd* call on the worker, never across these waits; drains and states are unchanged (they run between jobs or
+ask the GL thread as before); a job's end is the worker's, which is the thread waiting, so the GL thread is still
+serving. Result on that stretch: 28 / 287 swaps with `=1`, the same as inline (over 15 G: the same draws and swaps, 2
+packets fewer, 1.1 k fewer HLE calls of the 7.7 M; the guest sees the GPU a little later, as above); the off path is byte for byte origin's (stats, end save
+state, debug output; boot and loaded-state runs). The player is paced (one job per 1/60 s of virtual time) and keeps
+its one frame of pipeline.
 
 Left from 5.1 / later stages: the GPU runs only while a job runs (it idles while the frame loop does audio, present
 and pacing, so overlap is within a frame); no partial hold for rewind (section 6); present on swap (section 7).

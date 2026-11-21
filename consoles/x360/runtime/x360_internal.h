@@ -472,6 +472,9 @@ void x360_gpu_free(x360_machine *x);
 void x360_gpu_poll(x360_machine *x);
 int x360_gpu_run(x360_machine *x);
 void x360_gpu_drain(x360_machine *x, int flush_resolves);
+/* stage 2, the CPU worker's scheduler before a clock jump of an unpaced run: waits for the GL thread to run what is
+ * posted; 1 when it waited (poll again, do not jump), 0 otherwise and always off the GPU thread */
+int x360_gpu_wait_posted(x360_machine *x);
 /* on: x360_gpu_poll posts without running (x360_gpu_run / _drain do): stage 2's hook, and tests of the seam */
 void x360_gpu_set_deferred(x360_machine *x, int on);
 uint64_t x360_gpu_next_event(x360_machine *x);
