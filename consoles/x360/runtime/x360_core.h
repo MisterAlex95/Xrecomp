@@ -94,19 +94,25 @@ void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint
 /* Programs the renderer has compiled and linked so far (0 when it is off): the window's shader badge (XBA-314). */
 uint64_t x360_render_programs(x360_machine *x);
 /* Where the GPU's time goes, running totals (the perf line's gpu field): wall time on the thread running the machine
- * (CLOCK_MONOTONIC ns) in the command processor (gpu_ns: every packet, draws and resolves included), in resolves (of
+ * (CLOCK_MONOTONIC ns) in the command processor (gpu_ns: every packet, draws and resolves included), of it the
+ * thread's CPU time (cpu_ns, CLOCK_THREAD_CPUTIME_ID: gpu - cpu is waiting, mostly for the host GPU), in resolves (of
  * which reading the picture back and writing it to guest memory), and counts. Zeros when there is no GPU / renderer. */
 typedef struct x360_render_perf {
-    uint64_t gpu_ns, resolve_ns, read_ns, write_ns;
+    uint64_t gpu_ns, cpu_ns, resolve_ns, read_ns, write_ns;
     uint64_t draws;     /* draw packets handed to the renderer, resolves included */
     uint64_t resolves;  /* resolves written to guest memory */
     uint64_t pixels;    /* their pixels */
     uint64_t vertices;  /* vertices converted from guest memory */
     uint64_t swaps;     /* VdSwap packets run (this one is in save states: it jumps at a load) */
+    uint64_t noop_draws; /* of draws, those that could not write anything (WP-15) */
+    uint64_t rect_draws; /* rectangle lists (Direct3D's clears) */
+    uint64_t passes;     /* render passes (draws, clears, blits after a framebuffer change) */
+    uint64_t hashed;     /* guest memory bytes hashed to see whether it changed */
 } x360_render_perf;
 void x360_render_perf_get(x360_machine *x, x360_render_perf *out);
-/* now - since, per frame (frames of the caller's own unit): "gpu 96.1 (resolve 88.0: read 30.2 write 57.8; 865 draws,
- * 4.4 resolves, 5.8 Mpx, 120.3 k vertices) ms/frame". Returns what snprintf returns. */
+/* now - since, per frame (frames of the caller's own unit): "gpu 41.0 (cpu 15.2, resolve 2.0: read 0.0 write 0.0; 73
+ * draws + 795 no-op, 6.1 rects, 90 passes, 3.4 resolves, 0.0 Mpx, 1.9 k vertices, 7.1 MB hashed) ms/frame" (draws:
+ * those that can write; resolves included). Returns what snprintf returns. */
 int x360_render_perf_format(const x360_render_perf *now, const x360_render_perf *since, uint64_t frames,
                             const char *unit, char *out, size_t n);
 /* The audio the title submits to the render driver (256-sample frames of 6 channels at 48 kHz), written to F as a

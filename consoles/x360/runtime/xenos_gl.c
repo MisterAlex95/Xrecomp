@@ -496,6 +496,93 @@ static uint64_t mono_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
+/* WP-15, the perf line's passes: render passes as a tiler sees them, counted in the GL entry points rather than at the
+ * ~40 places that bind framebuffers. A pass starts at the first draw, clear or blit after the draw framebuffer or one
+ * of its attachments changed. The wrappers go in g's function table (load_gl); the real entry points and the count are
+ * process-wide (the renderers of a process share one GLES library, and in practice there is one renderer, on one
+ * thread). A renderer whose entry points are not the ones the wrappers call keeps its own, uncounted. */
+static struct {
+    void (*bind)(GLenum, GLuint);
+    void (*tex2d)(GLenum, GLenum, GLenum, GLuint, GLint);
+    void (*rb)(GLenum, GLenum, GLenum, GLuint);
+    void (*draw_arrays)(GLenum, GLint, GLsizei);
+    void (*draw_elements)(GLenum, GLsizei, GLenum, const void *);
+    void (*clear)(GLbitfield);
+    void (*clear_fv)(GLenum, GLint, const GLfloat *);
+    void (*blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+    GLuint draw_fb;
+    int changed;
+    uint64_t passes;
+} pc = {.changed = 1};
+static uint64_t hashed_bytes; /* WP-15: bytes of guest memory hashed (textures, copies, vertex buffers), process-wide */
+
+#define PC_DRAW_TARGET(t) ((t) == GL_FRAMEBUFFER || (t) == GL_DRAW_FRAMEBUFFER)
+static inline void pc_render(void)
+{
+    if (pc.changed)
+        pc.changed = 0, pc.passes++;
+}
+static void pc_bind(GLenum t, GLuint fb)
+{
+    pc.bind(t, fb);
+    if (PC_DRAW_TARGET(t) && fb != pc.draw_fb)
+        pc.draw_fb = fb, pc.changed = 1;
+}
+static void pc_tex2d(GLenum t, GLenum a, GLenum tt, GLuint tex, GLint l)
+{
+    pc.tex2d(t, a, tt, tex, l);
+    if (PC_DRAW_TARGET(t))
+        pc.changed = 1;
+}
+static void pc_rb(GLenum t, GLenum a, GLenum rt, GLuint rb)
+{
+    pc.rb(t, a, rt, rb);
+    if (PC_DRAW_TARGET(t))
+        pc.changed = 1;
+}
+static void pc_draw_arrays(GLenum m, GLint f, GLsizei n)
+{
+    pc_render();
+    pc.draw_arrays(m, f, n);
+}
+static void pc_draw_elements(GLenum m, GLsizei n, GLenum t, const void *i)
+{
+    pc_render();
+    pc.draw_elements(m, n, t, i);
+}
+static void pc_clear(GLbitfield b)
+{
+    pc_render();
+    pc.clear(b);
+}
+static void pc_clear_fv(GLenum b, GLint i, const GLfloat *v)
+{
+    pc_render();
+    pc.clear_fv(b, i, v);
+}
+static void pc_blit(GLint a, GLint b, GLint c, GLint d, GLint e, GLint f, GLint h, GLint i, GLbitfield m, GLenum fl)
+{
+    pc_render();
+    pc.blit(a, b, c, d, e, f, h, i, m, fl);
+}
+
+static void count_passes(xenos_gl *g)
+{
+    if (!pc.bind) {
+        pc.bind = g->glBindFramebuffer, pc.tex2d = g->glFramebufferTexture2D, pc.rb = g->glFramebufferRenderbuffer;
+        pc.draw_arrays = g->glDrawArrays, pc.draw_elements = g->glDrawElements;
+        pc.clear = g->glClear, pc.clear_fv = g->glClearBufferfv, pc.blit = g->glBlitFramebuffer;
+    }
+    if (pc.bind != g->glBindFramebuffer || pc.tex2d != g->glFramebufferTexture2D ||
+        pc.rb != g->glFramebufferRenderbuffer || pc.draw_arrays != g->glDrawArrays ||
+        pc.draw_elements != g->glDrawElements || pc.clear != g->glClear || pc.clear_fv != g->glClearBufferfv ||
+        pc.blit != g->glBlitFramebuffer)
+        return;
+    g->glBindFramebuffer = pc_bind, g->glFramebufferTexture2D = pc_tex2d, g->glFramebufferRenderbuffer = pc_rb;
+    g->glDrawArrays = pc_draw_arrays, g->glDrawElements = pc_draw_elements;
+    g->glClear = pc_clear, g->glClearBufferfv = pc_clear_fv, g->glBlitFramebuffer = pc_blit;
+}
+
 static void fail(char *why, size_t n, const char *msg)
 {
     if (why && n)
@@ -545,6 +632,7 @@ static int load_gl(xenos_gl *g, char *why, size_t why_n)
         fail(why, why_n, "GLES 3.0 entry points missing");
         return 0;
     }
+    count_passes(g);
     return 1;
 }
 
@@ -925,6 +1013,7 @@ void xenos_gl_get_stats(const xenos_gl *g, xenos_gl_stats *s)
 {
     *s = g->st;
     s->missing_shaders = (uint32_t)g->nmissing;
+    s->passes = pc.passes, s->hashed_bytes = hashed_bytes;
 }
 
 /* ---- shaders ---- */
@@ -1310,6 +1399,7 @@ static uint32_t gpu_read(const xenos_cp *cp, uint32_t phys, uint32_t endian)
  * on every cached texture after each swap and resolve. Not for anything that needs a good distribution. */
 static uint64_t span_hash(const uint8_t *p, size_t n, uint64_t seed)
 {
+    hashed_bytes += n;
     const uint64_t k = 0x9E3779B97F4A7C15ull;
     uint64_t h[4] = {seed ^ k, seed + k, seed ^ (k >> 1), seed - k};
     size_t i = 0;
@@ -2729,6 +2819,7 @@ static uint64_t memory_hash(const xenos_cp *cp, uint32_t base, uint32_t bytes)
     if (cp->mem)
         return span_hash(cp->mem + base, bytes < 0x20000000u - base ? bytes : 0x20000000u - base, 0);
     uint64_t h = 1469598103934665603ull;
+    hashed_bytes += bytes;
     for (uint32_t i = 0; i < bytes; i += 4)
         h = (h ^ (cp->read32 ? cp->read32(cp->ctx, (base + i) & 0x1FFFFFFFu) : 0)) * 1099511628211ull;
     return h;
@@ -2764,6 +2855,7 @@ static uint64_t sparse_hash(const xenos_cp *cp, uint32_t base, uint32_t bytes)
         if (cp->mem) {
             h = span_hash(cp->mem + at, n, h);
         } else {
+            hashed_bytes += n;
             for (uint32_t i = 0; i + 4 <= n; i += 4)
                 h = (h ^ (cp->read32 ? cp->read32(cp->ctx, at + i) : 0)) * 1099511628211ull;
             h ^= h >> 29;
@@ -4678,6 +4770,16 @@ static void memexport_end(xenos_gl *g, const xenos_cp *cp)
     g->epoch++; /* memory changed under the cached textures: compare them again */
 }
 
+/* WP-15 (WP-9's test): a draw that cannot change a pixel or memory: eDRAM mode colour + depth, every colour channel of
+ * every target masked, depth writes and stencil off, no memory export (Direct3D's dummy draws, ~800 a frame in
+ * Adventure Time) */
+static int draw_writes_nothing(const xenos_cp *cp, const program *p, const program *rp)
+{
+    uint32_t depth = cp->regs[0x2200]; /* RB_DEPTHCONTROL: stencil enable 0, z enable 1, z write 2 */
+    return (cp->regs[0x2208] & 7) == 4 && !(cp->regs[0x2104] & 0xFFFF) && !(depth & 1) && (depth & 6) != 6 &&
+           !p->memexport && !(rp && rp->memexport);
+}
+
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
 {
     g->st.draw_calls++;
@@ -4846,6 +4948,8 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         if (p->loc[a] >= 0)
             g->glDisableVertexAttribArray((GLuint)p->loc[a]);
     g->st.drawn++;
+    g->st.noop_draws += (uint64_t)draw_writes_nothing(cp, p, rp);
+    g->st.rect_draws += d->prim_type == 8;
     free(conv);
 }
 
