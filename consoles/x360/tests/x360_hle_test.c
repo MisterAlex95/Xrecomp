@@ -461,6 +461,34 @@ static void test_gpu(void)
         if (f)
             fclose(f);
         unlink(path);
+    }
+    /* the same words as a vertex shader, another pixel shader, then the first one again: the first two are written,
+     * the third is remembered without a file system call (its file, deleted above, is not written again) */
+    uint32_t words2[3][3] = {{0x11111111u, 0x22222222u, 0x33333333u},
+                             {0x44444444u, 0x55555555u, 0x66666666u},
+                             {0x11111111u, 0x22222222u, 0x33333333u}};
+    for (int k = 0; k < 3; k++) {
+        uint32_t at = sp + 24 + 24 * k;
+        x360_w32(X, at, 3u << 30 | (5u - 1) << 16 | (uint32_t)PM4_IM_LOAD_IMMEDIATE << 8);
+        x360_w32(X, at + 4, k == 0 ? 0 : 1);
+        x360_w32(X, at + 8, 3);
+        for (int w = 0; w < 3; w++)
+            x360_w32(X, at + 12 + 4 * w, words2[k][w]);
+    }
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, 4 + 64 + 6 + 18);
+    x360_gpu_poll(X);
+    if (have_dir) {
+        uint8_t a[12] = {0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22, 0x33, 0x33, 0x33, 0x33};
+        uint8_t b[12] = {0x44, 0x44, 0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x66, 0x66, 0x66, 0x66};
+        char pa[128], pb[128], va[128];
+        snprintf(va, sizeof va, "%s/vs_%08X.bin", sdir, x360_crc32(a, 12));
+        snprintf(pb, sizeof pb, "%s/ps_%08X.bin", sdir, x360_crc32(b, 12));
+        snprintf(pa, sizeof pa, "%s/ps_%08X.bin", sdir, x360_crc32(a, 12));
+        CHECK(access(va, F_OK) == 0 && access(pb, F_OK) == 0, "the vertex shader and the second pixel shader dumped");
+        CHECK(access(pa, F_OK) != 0, "a pixel shader already dumped is not looked up on disk again");
+        unlink(va);
+        unlink(pb);
+        unlink(pa);
         rmdir(sdir);
         x360_set_shader_dump(X, NULL);
     }
@@ -499,7 +527,7 @@ static void test_gpu(void)
     char why_irq[128] = "";
     /* PM4_INTERRUPT: the callback runs (r3 = 1) as each CPU the mask names, one after the other; what Direct3D's
      * handler reads with lbz 0x10C(r13) is that CPU. The CPUs still to run are in save states. */
-    uint32_t ip = 4 + 64 + 6;
+    uint32_t ip = 4 + 64 + 6 + 18;
     struct { uint32_t mask; int cpus[2]; } irqs[2] = {{0x04, {2, -1}}, {0x05, {0, 2}}};
     for (int q = 0; q < 2 && irq; q++) {
         if (irq->state == TH_READY)

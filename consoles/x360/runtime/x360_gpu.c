@@ -35,6 +35,13 @@ struct x360_gpu {
     int ring;
     int irq_thread; /* the interrupt context's slot, -1 before the first interrupt */
     char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
+    /* --dump-shaders without a file system call per load (host state, not in save states): the (stage, CRC) of each
+     * microcode already on disk, open-addressed (0 = empty, else stage << 32 | CRC | 1 << 33), and per stage the
+     * microcode of the last load, so a reload of the same words skips even the byte swap and the CRC */
+    uint64_t *dumped;
+    uint32_t dumped_cap, dumped_n; /* cap: a power of two, at most half full */
+    uint32_t last_words[2];        /* 0: no previous load for that stage */
+    uint32_t *last_code[2];
     xenos_gl *gl;         /* --render: the GLES renderer (host state: not in save states) */
 };
 
@@ -50,11 +57,63 @@ static void gl_swap(void *ctx, const xenos_cp *cp)
 
 static struct x360_gpu *gpu_of(x360_machine *x);
 
+/* the set of dumped (stage, CRC): 1 when key was already in it, else inserted (when there is room) and 0 */
+static int dumped_test(struct x360_gpu *g, uint64_t key, int insert)
+{
+    if (g->dumped_cap) {
+        uint32_t m = g->dumped_cap - 1, i = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 32) & m;
+        for (; g->dumped[i]; i = (i + 1) & m)
+            if (g->dumped[i] == key)
+                return 1;
+        if (!insert)
+            return 0;
+        if (2 * (g->dumped_n + 1) <= g->dumped_cap) {
+            g->dumped[i] = key;
+            g->dumped_n++;
+            return 0;
+        }
+    }
+    if (!insert)
+        return 0;
+    uint32_t cap = g->dumped_cap ? 2 * g->dumped_cap : 1024;
+    uint64_t *t = calloc(cap, sizeof *t);
+    if (!t)
+        return 0; /* no memory: the file system check stays the only one */
+    for (uint32_t k = 0; k < g->dumped_cap; k++)
+        if (g->dumped[k]) {
+            uint32_t j = (uint32_t)((g->dumped[k] * 0x9E3779B97F4A7C15ull) >> 32) & (cap - 1);
+            while (t[j])
+                j = (j + 1) & (cap - 1);
+            t[j] = g->dumped[k];
+        }
+    free(g->dumped);
+    g->dumped = t;
+    g->dumped_cap = cap;
+    return dumped_test(g, key, 1);
+}
+
+static void dumped_reset(struct x360_gpu *g)
+{
+    free(g->dumped);
+    g->dumped = NULL;
+    g->dumped_cap = g->dumped_n = 0;
+    for (int k = 0; k < 2; k++) {
+        free(g->last_code[k]);
+        g->last_code[k] = NULL;
+        g->last_words[k] = 0;
+    }
+}
+
 static void shader_loaded(void *ctx, int pixel, const uint32_t *code, uint32_t words)
 {
     x360_machine *x = ctx;
     struct x360_gpu *g = x->gpu;
     if (!g || !g->shader_dir[0] || !words)
+        return;
+    int st = pixel ? 1 : 0;
+    /* the same words as this stage's previous load (the code buffer is the command processor's, so its address says
+     * nothing: the words themselves are compared) */
+    if (g->last_words[st] == words && !memcmp(g->last_code[st], code, 4 * (size_t)words))
         return;
     uint8_t be[4 * XENOS_SHADER_WORDS];
     for (uint32_t k = 0; k < words; k++) {
@@ -63,17 +122,30 @@ static void shader_loaded(void *ctx, int pixel, const uint32_t *code, uint32_t w
         be[4 * k + 2] = (uint8_t)(code[k] >> 8);
         be[4 * k + 3] = (uint8_t)code[k];
     }
-    char path[600];
-    snprintf(path, sizeof path, "%s/%s_%08X.bin", g->shader_dir, pixel ? "ps" : "vs", x360_crc32(be, 4 * words));
-    FILE *f = fopen(path, "rb");
-    if (f) { /* already there */
-        fclose(f);
-        return;
+    uint32_t crc = x360_crc32(be, 4 * words);
+    uint64_t key = (uint64_t)st << 32 | crc | 1ull << 33;
+    int known = dumped_test(g, key, 0);
+    if (!known) {
+        char path[600];
+        snprintf(path, sizeof path, "%s/%s_%08X.bin", g->shader_dir, pixel ? "ps" : "vs", crc);
+        FILE *f = fopen(path, "rb");
+        if (f) { /* already there */
+            fclose(f);
+            known = 1;
+        } else if ((f = fopen(path, "wb"))) {
+            known = fwrite(be, 4, words, f) == words;
+            known &= fclose(f) == 0;
+        }
+        if (known)
+            dumped_test(g, key, 1);
     }
-    f = fopen(path, "wb");
-    if (f) {
-        fwrite(be, 4, words, f);
-        fclose(f);
+    if (!known)
+        return; /* not on disk: the next load of these words tries again */
+    if (!g->last_code[st])
+        g->last_code[st] = malloc(4 * XENOS_SHADER_WORDS);
+    if (g->last_code[st]) {
+        memcpy(g->last_code[st], code, 4 * (size_t)words);
+        g->last_words[st] = words;
     }
 }
 
@@ -189,8 +261,10 @@ uint64_t x360_render_programs(x360_machine *x)
 void x360_set_shader_dump(x360_machine *x, const char *dir)
 {
     struct x360_gpu *g = gpu_of(x);
-    if (g)
+    if (g) {
         snprintf(g->shader_dir, sizeof g->shader_dir, "%s", dir ? dir : "");
+        dumped_reset(g); /* another directory: what the old one holds says nothing */
+    }
 }
 
 void x360_gpu_opcode_histogram(x360_machine *x, FILE *out)
@@ -261,8 +335,10 @@ int x360_gpu_init(x360_machine *x)
 
 void x360_gpu_free(x360_machine *x)
 {
-    if (x->gpu)
+    if (x->gpu) {
         xenos_gl_destroy(x->gpu->gl);
+        dumped_reset(x->gpu);
+    }
     free(x->gpu);
     x->gpu = NULL;
 }
