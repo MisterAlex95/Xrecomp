@@ -1944,6 +1944,26 @@ static void comp8_init(void)
     }
 }
 
+/* WP-36: the same for 16 bits (16_16, 16_16_16_16: a division per component), and half_to_float of every 16-bit
+ * pattern (16_16_FLOAT, 16_16_16_16_FLOAT: up to two divisions each), made once by component / half_to_float */
+static float comp16_lut[4][65536], vhalf_lut[65536];
+static pthread_once_t comp16_once = PTHREAD_ONCE_INIT, vhalf_once = PTHREAD_ONCE_INIT;
+static void comp16_init(void)
+{
+    for (int k = 0; k < 4; k++) {
+        attr t;
+        memset(&t, 0, sizeof t);
+        t.is_signed = (uint32_t)(k >> 1), t.is_integer = (uint32_t)(k & 1);
+        for (uint32_t u = 0; u < 65536; u++)
+            comp16_lut[k][u] = component(u, 0, 16, &t);
+    }
+}
+static void vhalf_init(void)
+{
+    for (uint32_t u = 0; u < 65536; u++)
+        vhalf_lut[u] = half_to_float(u);
+}
+
 static inline __attribute__((always_inline)) void packed_vertex(uint32_t format, uint32_t w0, uint32_t w1,
                                                                 const attr *a, const float *l8, float *o)
 {
@@ -1965,21 +1985,21 @@ static inline __attribute__((always_inline)) void packed_vertex(uint32_t format,
         o[0] = component(w0, 0, 10, a), o[1] = component(w0, 10, 11, a), o[2] = component(w0, 21, 11, a);
         o[3] = 1.0f;
         break;
-    case 25:
-        o[0] = component(w0, 0, 16, a), o[1] = component(w0, 16, 16, a);
+    case 25: /* l8: comp16_lut for the attribute's flags */
+        o[0] = l8[w0 & 0xFFFF], o[1] = l8[w0 >> 16];
         o[2] = 0.0f, o[3] = 1.0f;
         break;
     case 26:
-        o[0] = component(w0, 0, 16, a), o[1] = component(w0, 16, 16, a);
-        o[2] = component(w1, 0, 16, a), o[3] = component(w1, 16, 16, a);
+        o[0] = l8[w0 & 0xFFFF], o[1] = l8[w0 >> 16];
+        o[2] = l8[w1 & 0xFFFF], o[3] = l8[w1 >> 16];
         break;
-    case 31:
-        o[0] = half_to_float(w0 & 0xFFFF), o[1] = half_to_float(w0 >> 16);
+    case 31: /* l8: vhalf_lut */
+        o[0] = l8[w0 & 0xFFFF], o[1] = l8[w0 >> 16];
         o[2] = 0.0f, o[3] = 1.0f;
         break;
     default: /* 32 */
-        o[0] = half_to_float(w0 & 0xFFFF), o[1] = half_to_float(w0 >> 16);
-        o[2] = half_to_float(w1 & 0xFFFF), o[3] = half_to_float(w1 >> 16);
+        o[0] = l8[w0 & 0xFFFF], o[1] = l8[w0 >> 16];
+        o[2] = l8[w1 & 0xFFFF], o[3] = l8[w1 >> 16];
         break;
     }
 }
@@ -2016,6 +2036,12 @@ static int fetch_packed_mem(const uint8_t *mem, uint32_t format, uint32_t endian
     if (format == 6) {
         pthread_once(&comp8_once, comp8_init);
         l8 = comp8_lut[2 * (a->is_signed != 0) + (a->is_integer != 0)];
+    } else if (format == 25 || format == 26) {
+        pthread_once(&comp16_once, comp16_init);
+        l8 = comp16_lut[2 * (a->is_signed != 0) + (a->is_integer != 0)];
+    } else if (format == 31 || format == 32) {
+        pthread_once(&vhalf_once, vhalf_init);
+        l8 = vhalf_lut;
     }
     switch (format) {
     case 6: PACKED_E(6) return 1;
