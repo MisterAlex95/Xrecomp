@@ -44,6 +44,11 @@ final class AppStore: LauncherActions {
     /// Titles whose check is queued or running, and those asked again meanwhile (the answer may be old by then).
     private var checking = Set<String>()
     private var checkAgain = Set<String>()
+    /// « Send report » (XBA-342): the build's DSN (nil: no report buttons); posts run on their own queue, never
+    /// behind a scan, and a 15 s timeout never blocks the main thread.
+    private let reportDsn = CrashReport.dsn(info: Bundle.main.infoDictionary,
+                                            environment: ProcessInfo.processInfo.environment)
+    private let reportWork = DispatchQueue(label: "xrecomp.report", qos: .utility)
 
     init() {
         var broken: URL?
@@ -61,6 +66,7 @@ final class AppStore: LauncherActions {
         model.setup.appHome = basePaths.root.path
         model.setup.libraryFolders = settings.libraryFolders
         model.setup.workRoot = settings.workRoot
+        model.reportsAvailable = reportDsn != nil
         ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.preparing != nil || self.game != nil else { return }
@@ -829,6 +835,46 @@ final class AppStore: LauncherActions {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } else {
             NSWorkspace.shared.open(url.deletingLastPathComponent())
+        }
+    }
+
+    // ---- send report (XBA-342) -----------------------------------------------------------------------------------
+
+    func draftReport(_ subject: ReportSubject) {
+        guard let dsn = reportDsn else { return }
+        let host = CrashReport.Host.current(info: Bundle.main.infoDictionary, bundleURL: Bundle.main.bundleURL)
+        let report: CrashReport
+        switch subject {
+        case .prepare(let id):
+            guard let g = model.game(id), case .failed(let code, let message, _, let log)? = g.prepare else { return }
+            report = .prepare(host: host, key: g.titleId, title: g.name, code: code, message: message, log: log)
+        case .game(let id):
+            guard let g = model.game(id), let tid = g.titleId else { return }
+            report = .game(host: host, key: tid, title: g.name, log: RunLog(dir: paths.title(tid).logs).latest)
+        case .lastGame:
+            if let g = model.runningGame {
+                return model.notice = "\(g.name) is running: quit it first, then send the report."
+            }
+            guard let last = CrashReport.lastRun(paths: paths) else {
+                return model.notice = "No game has run yet: there is no report to send."
+            }
+            let name = model.games.first { $0.titleId == last.titleId }?.name
+            report = .game(host: host, key: last.titleId, title: name, log: last.log)
+        }
+        model.report = ReportDraft(report: report, server: dsn.host)
+    }
+
+    func sendReport(_ report: CrashReport) {
+        model.report = nil
+        guard let dsn = reportDsn else { return }
+        let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "dev"
+        let sender = ReportSender(dsn: dsn, version: version, queueDir: basePaths.reports, transport: CrashReport.http)
+        reportWork.async {
+            let ok = sender.send(report)
+            DispatchQueue.main.async {
+                AppStore.current?.model.notice = ok ? "Report sent. Thank you!"
+                    : "Could not send the report: it will leave with the next one."
+            }
         }
     }
 

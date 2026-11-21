@@ -40,6 +40,8 @@ public struct AppPaths: Sendable {
     public var packs: URL { root.appendingPathComponent("packs", isDirectory: true) }
     /// The console runtimes' RECOMP_SAVE_DIR: they add `<console>-<KEY>/` (= the game ID) themselves.
     public var consoleSaves: URL { root.appendingPathComponent("save", isDirectory: true) }
+    /// « Send report »'s envelopes that could not leave yet (CrashReport, XBA-342), the newest 5.
+    public var reports: URL { root.appendingPathComponent("reports", isDirectory: true) }
 
     /// A title's folders. An Xbox title ID is upper case (`4D530004`); a console game ID is kept as it is
     /// (`gba-AXVE-1A2B3C4D`), as the xrecomp command line names it (tools/xrecomp/home.py TitlePaths).

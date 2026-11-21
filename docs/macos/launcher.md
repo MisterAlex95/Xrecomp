@@ -25,6 +25,7 @@ it lists and plays Game Boy Advance, PlayStation, Nintendo 64 and GameCube games
 - [Per-title settings](#per-title-settings)
 - [Look](#look)
 - [Game apps](#game-apps)
+- [Send report](#send-report)
 - [Licence, legal, CI](#licence-legal-ci)
 - [Prepare interface](#prepare-interface)
 - [Mac checklist](#mac-checklist)
@@ -52,15 +53,15 @@ games, Setup, Default settings, About) and the detail pane.
 | Screen | What it does |
 |---|---|
 | Library | A grid of cards: the title image (decoded from the game's own `default.xbe`) or a monogram, the name, one status line with a dot. Right-click: Settings, Manage, Show source in Finder. Drop a disc image (`.iso`, `.xiso`, `.cso`, `.zso`, `.cci`) or a game folder on the window, or use **Add game…**: its folder joins the library. |
-| Home | The blurred title image behind, the title, one status line, a solid **Play** / **Prepare** / **Stop** and three quiet pills: Settings, Controls, Manage. Below: the prepare's progress or failure, a run's problem and log tail, the facts (title ID, source, size, play time, options the title forces). |
+| Home | The blurred title image behind, the title, one status line, a solid **Play** / **Prepare** / **Stop** and three quiet pills: Settings, Controls, Manage. Below: the prepare's progress or failure, a run's problem and log tail (with **Send report**), the facts (title ID, source, size, play time, options the title forces). |
 | Preparing | Step *i* of 5 with its name, the overall bar, five step dots, the step's message (`compiling 12/345`), elapsed time, Show log. One prepare at a time, the others queued ("Queued (2)"). Cancel stops the whole process group; the next Prepare resumes. |
-| Prepare failed | The error code in words, prepare's message, the last 40 lines of `prepare.log`, Reveal log in Finder, Copy log. |
+| Prepare failed | The error code in words, prepare's message, the last 40 lines of `prepare.log`, Reveal log in Finder, Copy log, **Send report** ([Send report](#send-report)). |
 | Settings | Per title, four tabs (General, Graphics, Audio, Advanced) over the [option table](#per-title-settings), saved to the title's `recomp.cfg` at once: each row « As in Default settings (value) » or the title's own value, with a « This game » badge ([Settings per game](#settings-per-game)); Graphics also has [frame generation's Lossless.dll](#frame-generation); Advanced has a free editor for your own lines. **Default settings** (sidebar) is the same screen for every title. |
 | Controls | The pad mapping the game gets (L1 = Black, R1 = White, View = Back) and the connected controller's name (GameController). |
 | Manage | Per title: the size of the work folder, saves, the Z: cache, logs and the title image (and an extracted disc, only in a work folder made before XBA-126), each deletable after a confirmation and revealable in Finder; "Re-prepare…" (`--force`); "Import saves from command-line runs"; for a title with mods turned on (`--check`'s `title_layer`; mods: [mods.md](../technical/mods.md), store `<storage root>/mods`), an **Enhancements** switch (on by default; off, the title's prepares and checks run with `--no-title-layer` / `XBA_NO_TITLE_LAYER=1`, the mods left out, kept in `state.json` `"enhancements": false`, and a build made the other way shows « Prepare again (enhancements or title profile changed) »); **Create an app for this game** ([Game apps](#game-apps)). |
 | Log | The live output of the running game (or prepare), copyable; run logs are kept in `logs/`. |
 | Setup | The toolkit found (and from where), every dependency with the command that installs it, the Python environment (with **Create it**), the library folders, the work folder location. Shown first when the toolkit is not found. |
-| About | Version, the toolkit's commit, "No game data included", the licence texts read from the toolkit (`LICENSE`, `NOTICE`, `LICENSES/*.txt`). |
+| About | Version, the toolkit's commit, "No game data included", **Send a report about the last game** ([Send report](#send-report)), the licence texts read from the toolkit (`LICENSE`, `NOTICE`, `LICENSES/*.txt`). |
 
 Not in v1: the in-game menu, dual screen and the companion (the game is a separate SDL window; the launcher has
 Stop), gamepad navigation of the launcher itself, live fps, the pad mapping editor (`RECOMP_PAD_MAP`,
@@ -123,6 +124,7 @@ macos/
     GameRunner RecompConfig OptionTable GameSettings Storage PlayTime      play, settings and storage
     SaveImport LsfgCache                                                    saves, frame generation's shader cache
     TitleApp                                                               game apps: names, Info.plist, icon, ICNS
+    CrashReport                                                            Send report: scrub, envelope, queue
   Sources/XRecomp/           the SwiftUI app: main (--smoke/--demo), XRecompApp, AppStore, LauncherModel, views
   Sources/xrecomp-check/     the checks
   scripts/                   check.sh, build-app.sh, mkicon.swift
@@ -130,7 +132,7 @@ macos/
 ```
 
 The views see a `LauncherModel` (published state) and call a `LauncherActions` protocol; `AppStore` implements it
-with Core, `PreviewStore` (`--demo`) with mock data. Swift ports of our own Java: `RecompConfig` (RecompConfig.java),
+with Core, `PreviewStore` (`--demo`) with mock data. Swift ports of our own Java: `CrashReport` (CrashReport.java), `RecompConfig` (RecompConfig.java),
 `TitleArt`/`Xpr`/`Dxt` (TitleArt.java), `PrepareProtocol` (PrepareProtocol.java and `tools/prepare/progress.py`); their
 checks reuse the Java tests' cases, so change both sides together.
 
@@ -378,12 +380,56 @@ Only for a prepared game (playable, as on Android): before that the row says « 
 - **Legal**: a game app holds no game code or data, only our launcher, the title's name and ID and an icon drawn from
   the player's own disc at run time. It is fine to keep locally; like the title images, it is not shared or committed.
 
+## Send report
+
+XBA-342, the Android app's « Send report » ([app-shell.md](../android/app-shell.md), search « Rustrak ») on the Mac,
+for feature uniformity ([feature-matrix.md](../runtime/feature-matrix.md)): the same Sentry envelope to the same
+Rustrak project, the same scrubbing, the same fingerprint. Tap-only: nothing leaves without Send; no account, no
+e-mail, no install id.
+
+| Where | What |
+|---|---|
+| Prepare failed (Home) | **Send report** beside Reveal log and Copy log (a cancelled Prepare has no failure panel). |
+| A run that ended badly (Home) | **Send report** beside Show log and Dismiss: that title's newest `logs/run-*.log`. |
+| About | **Send a report about the last game**: the newest run log of any title. A game still running: dimmed, « quit it first ». |
+
+The sheet « Send a report » says where it goes (the DSN's host) and shows the report in four lines: the problem; the
+game, its ID and console; the Mac's model, macOS, the architecture and `xrecomp@<version>`; the log and its size.
+**Send** (Return) posts it off the main thread, **Cancel** (Escape) sends nothing; then « Report sent. Thank you! » or
+« Could not send the report: it will leave with the next one ».
+
+`Sources/XRecompCore/CrashReport.swift` (a port of `CrashReport.java`): one envelope (an event and the log as a
+`text/plain` attachment, trimmed to 256 KB: its first 32 KB and its end) posted with URLSession. The event: release
+`xrecomp@<CFBundleShortVersionString>` (`dev` under `swift run`), environment `release` (an app bundle with a
+version) or `debug`, tags `kind` (`prepare` / `game`), `console`, `game_key`, `game`, `device` (`sysctl hw.model`,
+« Mac14,2 »), `os` (« macOS 15.1 »), `arch`, plus `prepare_code` or `end`. `end` comes from the run log's last line,
+which GameRunner writes (« # ended: signal 11 after 12 s » → `signal 11 (SIGSEGV)`); the fingerprint groups by
+console, game, code or end, and a backtrace's first frame when the log has one, never the duration. No breadcrumbs:
+the Android app's come from its own event ring; the Mac host keeps none.
+
+DSN: `$XBA_REPORT_DSN` when set (empty: no report buttons), else the Info.plist key `XBAReportDsn`, else the
+project's server (the same public DSN as the APK's `xba_report_dsn`).
+
+Scrubbing (the Android patterns, both sides in step with the same test vectors: `CrashReportTest.scrubsHomeFolders`
+and `xrecomp-check`'s `report:` checks): the launcher's data folder keeps its names
+(`<app:xboxrecomp>/titles/4D530004/…`), any other path in a home folder (`/Users/<name>/…`, `/home/<name>/…`,
+`C:\Users\<name>\…`) keeps only its file name (`<path>/Halo.iso`), a bare home folder goes whole (`<path>`); URLs
+lose host and login, magnet links, IP and e-mail addresses go; on the Mac the account's short and full names (4
+characters or more) become `<user>` too.
+
+Offline or refused (not 2xx): one retry, then the envelope waits in `<data folder>/reports/` (the newest 5) and leaves
+after the next report that gets through.
+
+Linux and Windows have no launcher (the `xrecomp` command line and the game window only): no reports there
+([feature-matrix.md](../runtime/feature-matrix.md) « Crash reports »).
+
 ## Licence, legal, CI
 
 - The Swift code is MIT like the repo; there are no third-party Swift packages and nothing is bundled, so `NOTICE`
   and `LICENSES/` are unchanged. The only asset is the app icon, original art.
 - Title images, extracted XBEs and discs, generated C and logs stay in Application Support; nothing of a game enters
-  the repo or the app. The checks use synthetic bytes and `tools/conformance/test.xbe` (ours).
+  the repo or the app. The one thing that leaves the Mac is a report the player chooses to send ([Send
+  report](#send-report)): one scrubbed log, no game data. The checks use synthetic bytes and `tools/conformance/test.xbe` (ours).
 - Linux CI is unaffected: `macos/` is not referenced by the root `CMakeLists.txt` and holds no Python.
 - Mac CI: Gitea's `.gitea/workflows/macos.yml` builds the toolkit's C libraries with AppleClang on the Mac runner at
   every push to main (not the Swift package). The Swift package is built and checked by GitHub's
@@ -630,3 +676,21 @@ Game apps ([Game apps](#game-apps)), with `macos/build/XRecomp.app` opened from 
 18. Remove the game from the library (take its folder out of the library folders, or rename its ISO), then open its
     game app: after the scan it says « This game is not in your library »; **Open XRecomp** opens the main app. Put
     the game back, Scan again: the game's Home comes back.
+
+Send report ([Send report](#send-report), XBA-342), with `macos/build/XRecomp.app` opened from Finder:
+
+33. `bash macos/scripts/check.sh`: the nine `report:` checks pass, and the app builds (the report sheet and buttons
+    were written without a Mac: send the first compile error if there is one).
+34. Crash a title (Stop is a clean end: kill it instead, `kill -SEGV <pid>` from Terminal). Home shows « Stopped
+    unexpectedly (signal 11) » with **Send report**. Press it: the sheet shows four lines (« Game: signal 11 (SIGSEGV):
+    after N s », the game and its ID, your Mac's model · macOS · arm64 · xrecomp@<version>, `+ run-….log (n KB)`).
+    Cancel: nothing sent.
+35. Again, Send: « Report sent. Thank you! ». On rustrak.adserver.fr › XRecomp, a new issue tagged `os` macOS,
+    `device` your Mac's model, the run log attached: no `/Users/` and no account name in it, the data folder written
+    `<app:xboxrecomp>/…`.
+36. About › **Send a report about the last game** › Send: the same game's issue gets a second event (same
+    fingerprint), not a new issue.
+37. Make a Prepare fail (for example on a nearly full disk, or by killing its `cmake` / `ninja` from Terminal mid-build):
+    the failed panel has **Send report**; Send: an issue « PrepareFailed » with `prepare_code` and `prepare.log`.
+38. Wi-Fi off, send a report: « Could not send … », and `~/Library/Application Support/xboxrecomp/reports/` holds one
+    `.envelope`. Wi-Fi on, send another: both arrive, the folder is empty.

@@ -60,6 +60,14 @@ runtimes now call instead of four copies; the window, its shaders, frame generat
 | Desktop `xrecomp` CLI (Windows) | yes, without save states / rewind | partial (XBA-278): plays in the interpreter, players cross-built with MinGW-w64 (`src/platform/win32_posix`, docs/desktop/windows.md « Console games »); no native pack (prepare refuses it); not in the MSVC zip | partial: the same | partial: the same | partial: the same | no |
 | macOS launcher (`macos/`) | yes: settings, cover art, game apps, save import | yes (XBA-278: `macos/Sources/XRecompCore/ConsoleGames.swift`; listed, prepared and played through `xrecomp identify` / `play --print --json`; settings rows per console, Controls, Manage, game apps; box art: no download, the monogram) | yes (a cue's tracks once) | yes (+ controller pak row) | yes (a GameCube `.iso` after the Xbox identify) | no |
 
+Crash reports (« Send report », XBA-334: a failed Prepare or the last game's run, sent to the project's Rustrak
+server only when the player presses Send): the Android app (`app/CrashReport`, XBA-335) and the macOS launcher
+(`macos/Sources/XRecompCore/CrashReport.swift`, XBA-342), for every console they run, with the same envelope, tags,
+fingerprint and scrubbing (home folders included, one set of test vectors on both sides). Not on Linux or Windows:
+neither has a launcher, only the `xrecomp` command line and the game window, so there is no screen to show the
+report and its Send button, and a command line that posted logs by itself would break the rule that nothing leaves
+without the player seeing it first. A crash there: attach the run log (`xrecomp` prints where it is) to an issue.
+
 The desktop has no settings UI on Linux / Windows (`recomp.cfg`, `xrecomp settings KEY=VALUE`), no save-state, cheat
 or rewind UI on any desktop (hotkeys and files only). Every desktop game window (the console runtimes' `host_window.c`,
 the Xbox SDL presenter, the Xbox Windows presenter) has F11 / Alt+Enter for fullscreen and F12 for a screenshot

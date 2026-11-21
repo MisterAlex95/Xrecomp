@@ -24,9 +24,31 @@ struct AboutView: View {
                     VStack(alignment: .leading, spacing: Theme.s1) {
                         Text("No game data included").font(.headline).foregroundStyle(Theme.text)
                         Text("XRecomp prepares games from your own copies. Title images, extracted discs, generated "
-                             + "code and logs stay on this Mac, in ~/Library/Application Support/xboxrecomp, and are "
-                             + "never uploaded or shared. The app bundles no third-party code.")
+                             + "code and logs stay on this Mac, in ~/Library/Application Support/xboxrecomp. Nothing is "
+                             + "uploaded, except a report you choose to send: one log, its folders removed. The app "
+                             + "bundles no third-party code.")
                             .foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if model.reportsAvailable {
+                    Panel {
+                        VStack(alignment: .leading, spacing: Theme.s1) {
+                            Text("A game crashed?").font(.headline).foregroundStyle(Theme.text)
+                            Text("Send its last run's log to the XRecomp project. You see what it holds before it "
+                                 + "leaves.")
+                                .foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: Theme.s1) {
+                                Button { model.actions?.draftReport(.lastGame) } label: {
+                                    Label("Send a report about the last game", systemImage: "paperplane")
+                                }
+                                .buttonStyle(PillButtonStyle())
+                                .disabled(model.runningGame != nil)
+                                if let g = model.runningGame {
+                                    Text("\(g.name) is running: quit it first.")
+                                        .font(.caption).foregroundStyle(Theme.textFaint)
+                                }
+                            }
+                        }
                     }
                 }
                 SectionTitle(text: "Licences")

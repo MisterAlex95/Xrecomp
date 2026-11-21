@@ -235,6 +235,10 @@ struct ExitProblemView: View {
                 }
                 HStack {
                     Button("Show log") { model.route = .log(game.id) }.buttonStyle(PillButtonStyle(compact: true))
+                    if model.reportsAvailable {
+                        Button("Send report") { model.actions?.draftReport(.game(game.id)) }
+                            .buttonStyle(PillButtonStyle(compact: true))
+                    }
                     Button("Dismiss") { model.update(game.id) { $0.lastExit = nil } }.buttonStyle(PillButtonStyle(compact: true))
                 }
             }
