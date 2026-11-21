@@ -156,6 +156,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 endif()
 
+# Math functions never set errno, as in the Android Prepare (tools/prepare/compile.py): with errno, every libm call
+# in the x87 helpers may write memory and the lifted code reloads the guest registers after it. MSVC has no such
+# option and keeps errno out of its inlined intrinsics.
+if(NOT MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE -fno-math-errno)
+endif()
+
 # MSVC-specific: large address aware, increase section limit for big generated files
 if(MSVC)
     target_link_options(${PROJECT_NAME} PRIVATE

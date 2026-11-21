@@ -4,8 +4,10 @@ roundeven on arm64. Same results as the code they replaced, bit for bit:
 edge patterns around 0, FLT_MIN, FLT_MAX, the float subnormals, inf and NaN
 (both signs, neighbours one ulp either side), halves and integers up to
 2^64, then random bit patterns and random values near the float range,
-compiled at -O0 and -O2 against the old functions kept here as the reference
-(frndint with the four rounding controls, fist at 16, 32 and 64 bits).
+compiled at -O0, -O2 and -O2 -fno-math-errno against the old functions kept here
+as the reference (frndint with the four rounding controls, fist at 16, 32 and
+64 bits; fist's limit is a constant and its tie test an integer parity since
+lifter speed 6).
 """
 import os
 import shutil
@@ -103,6 +105,8 @@ int main(void)
         0x47EFFFFFE0000000ull, 0x47EFFFFFF0000000ull, 0x47F0000000000000ull,   /* FLT_MAX, its rounding edge, 2^128 */
         0x3FF0000000000000ull, 0x7FEFFFFFFFFFFFFFull,
         0x7FF0000000000000ull, 0x7FF0000000000001ull, 0x7FF8000000000000ull, 0x7FFFFFFFFFFFFFFFull,
+        0x40E0000000000000ull, 0x41E0000000000000ull, 0x43E0000000000000ull,   /* fist's limits 2^15, 2^31, 2^63 */
+        0x40DFFFE000000000ull, 0x41DFFFFFFFE00000ull, 0x40DFFFF000000000ull,   /* 32767.5, 2^31 - 0.5, ... */
     };
     unsigned i;
     int d, sign;
@@ -131,21 +135,27 @@ int main(void)
 
 class FpRound24Test(unittest.TestCase):
     def test_bits_test_matches_the_float_compares(self):
-        cc = shutil.which("clang") or shutil.which("gcc") or shutil.which("cc")
+        # XBA_FP_TEST_CC / XBA_FP_TEST_RUN: another compiler and a runner, e.g. aarch64-linux-gnu-gcc and
+        # 'qemu-aarch64 -L /usr/aarch64-linux-gnu' (the arm64 paths: frintn).
+        cc = os.environ.get("XBA_FP_TEST_CC") or shutil.which("clang") or shutil.which("gcc") or shutil.which("cc")
+        runner = os.environ.get("XBA_FP_TEST_RUN", "").split()
         if not cc or sys.platform == "win32":
             self.skipTest("no POSIX C compiler")
         with tempfile.TemporaryDirectory() as tmp:
             c = os.path.join(tmp, "t.c")
             with open(c, "w") as f:
                 f.write(_SRC)
-            for opt in ("-O0", "-O2"):
+            # -fno-math-errno: Prepare's flags (lifter speed 6). It lets the compiler call a libm function before
+            # the test that guards it (fmod before the tie test did), so it is checked too.
+            for opts in (["-O0"], ["-O2"], ["-O2", "-fno-math-errno"]):
+                opt = "".join(opts)
                 exe = os.path.join(tmp, "t" + opt)
-                r = subprocess.run([cc, "-std=gnu11", opt, "-I", str(_ROOT / "templates" / "runtime"),
+                r = subprocess.run([cc, "-std=gnu11"] + opts + ["-I", str(_ROOT / "templates" / "runtime"),
                                     "-Wl,-undefined,dynamic_lookup" if sys.platform == "darwin"
                                     else "-Wl,--unresolved-symbols=ignore-all",
                                     c, "-o", exe, "-lm"], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
-                run = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+                run = subprocess.run(runner + [exe], capture_output=True, text=True, timeout=600)
                 self.assertEqual(run.returncode, 0, opt + ": " + run.stdout)
                 self.assertIn(" 0 differences", run.stdout)
 

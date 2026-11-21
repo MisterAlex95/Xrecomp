@@ -94,6 +94,9 @@ VARIANTS = {
     "nofp": ["-fomit-frame-pointer"],
     "sections": ["-ffunction-sections", "-fdata-sections"],
     "nomatherrno": ["-fno-math-errno"],
+    # Prepare passes -fno-math-errno (Android's default, written out for the bench's glibc proxy and desktop builds);
+    # this puts errno back: the code a desktop build made before.
+    "matherrno": ["-fmath-errno"],
     "tlsdesc": ["-mtls-dialect=desc"],
     "tlstrad": ["-mtls-dialect=trad"],
     "ie": ["-ftls-model=initial-exec"],

@@ -926,34 +926,46 @@ static inline uint16_t recomp_fxam(double value) {
  * so a frndint lifted as rint() made both of them round to nearest.
  * NaN, the infinities and values already integral come back unchanged, and a
  * zero result keeps the operand's sign, as FRNDINT's does. */
-static inline double recomp_frndint(double value, uint16_t control) {
-    double rounded;
-    if (!isfinite(value)) return value;
+/* The rounding itself, for an operand already known finite or whose NaN / infinity the caller rejects (FIST). */
+static inline double recomp_round_rc(double value, uint16_t control) {
     switch((control>>10)&3) {
-    case 1: rounded=floor(value); break;
-    case 2: rounded=ceil(value); break;
-    case 3: rounded=trunc(value); break;
+    case 1: return floor(value);
+    case 2: return ceil(value);
+    case 3: return trunc(value);
     default: {
 #if defined(__aarch64__) && (defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 10))
         /* Ties to even whatever the host's rounding mode: one frintn (XBA-273; the floor, compares and fmod below
          * cost every fistp of a title some ten instructions). tools/recomp/test_fp_round24.py compares the two. */
-        rounded=__builtin_roundeven(value);
+        return __builtin_roundeven(value);
 #else
+        /* A tie means |lo| < 2^52, where lo converts exactly: its parity is its low bit. It was fmod(lo, 2.0) != 0,
+         * which a compiler that knows fmod leaves errno alone (-fno-math-errno) calls before the tie test, at
+         * every rounding. */
         double lo=floor(value), fraction=value-lo;
-        rounded=lo;
-        if(fraction>0.5 || (fraction==0.5 && fmod(lo,2.0)!=0.0)) rounded=lo+1.0;
+        if(fraction>0.5 || (fraction==0.5 && ((uint64_t)(int64_t)lo & 1u))) return lo+1.0;
+        return lo;
 #endif
-        break;
     }
     }
+}
+static inline double recomp_frndint(double value, uint16_t control) {
+    double rounded;
+    if (!isfinite(value)) return value;
+    rounded = recomp_round_rc(value, control);
     return rounded == 0.0 ? copysign(0.0, value) : rounded;
 }
 /* x87 integer stores use the guest RC bits, independently of host rounding.
- * Masked invalid conversions store the signed integer-indefinite value. */
+ * Masked invalid conversions store the signed integer-indefinite value.
+ *
+ * The limit is 2^(bits-1) as an exact constant (lifter speed 6): it was ldexp(1.0, bits - 1), which no compiler folds, so
+ * every fistp of a title (MSVC's _ftol, every float-to-int cast, is one) called into libm, about 50 instructions,
+ * and the call made the compiler reload the guest registers after it. NaN and the infinities fail both compares, as
+ * they failed the isfinite test before; the sign of a zero, which recomp_frndint keeps, does not reach an integer.
+ * tools/recomp/test_fp_round24.py compares it with the code before, bit for bit. */
 static inline int64_t recomp_fist(double value, uint16_t control, unsigned bits) {
-    double rounded = recomp_frndint(value, control);
-    double limit=ldexp(1.0,(int)bits-1);
-    if(!isfinite(rounded) || rounded < -limit || rounded >= limit)
+    double rounded = recomp_round_rc(value, control);
+    double limit = (double)(UINT64_C(1) << ((bits - 1u) & 63u));
+    if (!(rounded >= -limit && rounded < limit))
         return bits==64?INT64_MIN:-(INT64_C(1)<<(bits-1));
     return (int64_t)rounded;
 }

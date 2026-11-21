@@ -319,7 +319,8 @@ def compile_flags(tc, man, toolkit, proj, opt="2", defines=(), include_dirs=(), 
         flags += mflags
         flags += ["/D" + d for d in defs] + ["/I" + i for i in incs]
         return flags
-    flags = ["-O%s" % opt, "-g0", "-std=gnu11", "-w"]
+    # -fno-math-errno: as the Android Prepare (compile.py compile_flags), whose target has it by default.
+    flags = ["-O%s" % opt, "-g0", "-std=gnu11", "-w", "-fno-math-errno"]
     if tc.isysroot:
         flags += ["-isysroot", tc.isysroot]
     flags += [f for f in man.get("compile_flags", []) if not f.startswith("/")]

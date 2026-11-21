@@ -136,7 +136,7 @@ def test_linux_compile_and_link():
     tc = _tc()
     man = _man()
     flags = db.compile_flags(tc, man, TK, "/p", "2", ['XBA_DISCOVERY_FILE="/w/d.jsonl"'])
-    assert flags[:4] == ["-O2", "-g0", "-std=gnu11", "-w"]
+    assert flags[:5] == ["-O2", "-g0", "-std=gnu11", "-w", "-fno-math-errno"]
     assert "-DNDEBUG" in flags and "-DNOMINMAX" in flags and '-DXBA_DISCOVERY_FILE="/w/d.jsonl"' in flags
     incs = [f[2:] for f in flags if f.startswith("-I")]
     assert incs == ["/p/src", "/p/src/recomp", "/p/src/recomp/gen", "/tk/include", "/tk/src/kernel",
@@ -177,7 +177,7 @@ def test_macos_link_line():
         {"arg": "/opt/homebrew/lib/libSDL2.dylib", "role": "libraries"},
         {"arg": "-framework", "role": "libraries"}, {"arg": "OpenGL", "role": "libraries"}])
     flags = db.compile_flags(tc, man, TK, "/p")
-    assert flags[4:6] == ["-isysroot", "/sdk/MacOSX.sdk"]
+    assert flags[5:7] == ["-isysroot", "/sdk/MacOSX.sdk"]
     args = db.link_args(tc, man, TK, ["/o/1.o"], "/p/build/t", exists=lambda p: True)
     assert args == ["/tk/toolchain/bin/clang", "--driver-mode=g++", "--ld-path=/tk/toolchain/bin/ld64.lld",
                     "-isysroot", "/sdk/MacOSX.sdk", "-o", "/p/build/t", "/o/1.o",
