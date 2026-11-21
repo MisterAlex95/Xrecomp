@@ -432,6 +432,90 @@ static void *save_elsewhere(void *arg)
     return NULL;
 }
 
+/* test_gpu's stage-2 stress (WP-22): this "guest" runs on the CPU worker (x360_gpu_overlap) while the test's thread
+ * runs the command processor. Every iteration: a MEM_WRITE, every 7th a WAIT_REG_MEM on a memory word this side
+ * opens a few polls later (stall, re-post), a fence (EVENT_WRITE_SHD), every 3rd a VdSwap (back-pressure), the write
+ * pointer moved; every 13th a drain from this thread (the GL thread runs what was posted, this one waits), after
+ * which everything must be in memory; every 50th VdEnableRingBufferRPtrWriteBack (gpu_hold / gpu_release). */
+#define STRESS_RING_DW 2048u
+typedef struct {
+    uint32_t ring, misc, misc_phys, rp, args, swaps, bad;
+    pthread_t self;
+} gpu_stress;
+static gpu_stress S2;
+
+static void stress_put(uint32_t v)
+{
+    x360_w32(X, S2.ring + 4 * S2.rp, v);
+    S2.rp = (S2.rp + 1) % STRESS_RING_DW;
+}
+
+static void stress_kick(void)
+{
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, S2.rp);
+    x360_gpu_poll(X);
+}
+
+static int stress_job(x360_machine *x, uint64_t iters)
+{
+    (void)x;
+    S2.self = pthread_self();
+    uint32_t last_gate = 0;
+    for (uint32_t k = 1; k <= (uint32_t)iters; k++) {
+        stress_put(3u << 30 | 1u << 16 | (uint32_t)PM4_MEM_WRITE << 8);
+        stress_put((S2.misc_phys + 0x200) | 2);
+        stress_put(k);
+        int gate = k % 7 == 0;
+        if (gate) {
+            stress_put(3u << 30 | 4u << 16 | (uint32_t)PM4_WAIT_REG_MEM << 8);
+            stress_put(0x10 | 5); /* memory, >= (the GPU may reach it after the next gate opened) */
+            stress_put((S2.misc_phys + 0x204) | 2);
+            stress_put(k);
+            stress_put(0xFFFFFFFFu);
+            stress_put(0);
+            stress_put(3u << 30 | 1u << 16 | (uint32_t)PM4_MEM_WRITE << 8);
+            stress_put((S2.misc_phys + 0x208) | 2);
+            stress_put(k);
+        }
+        stress_put(3u << 30 | 2u << 16 | (uint32_t)PM4_EVENT_WRITE_SHD << 8);
+        stress_put(5);
+        stress_put((S2.misc_phys + 0x20C) | 2);
+        stress_put(k);
+        if (k % 3 == 0) { /* VdSwap's 64 words in one piece: type-2 fillers to the ring's start when they do not fit */
+            while (STRESS_RING_DW - S2.rp < 64)
+                stress_put(2u << 30);
+            K(X360_xboxkrnl_VdSwap, 10, S2.ring + 4 * S2.rp, S2.args + 16, 0, 0, 0, S2.args, S2.args + 20,
+              S2.args + 24, S2.args + 4, S2.args + 8);
+            S2.rp = (S2.rp + 64) % STRESS_RING_DW;
+            S2.swaps++;
+        }
+        stress_kick();
+        if (gate) { /* the GPU stalls on the wait meanwhile (or has not reached it): open it a few polls later */
+            for (int p = 0; p < 3; p++) {
+                sched_yield();
+                x360_gpu_poll(X);
+            }
+            x360_w32(X, S2.misc + 0x204, k);
+            x360_gpu_poll(X);
+            last_gate = k;
+        }
+        if (k % 13 == 0) {
+            x360_gpu_drain(X, 0);
+            if (x360_r32(X, S2.misc + 0x200) != k || x360_r32(X, S2.misc + 0x20C) != k ||
+                x360_r32(X, S2.misc + 0x208) != last_gate || x360_r32(X, S2.misc + 0x104) != S2.rp) {
+                if (!S2.bad++)
+                    printf("FAIL stage-2 stress: after the drain at %u: write %u, fence %u, behind the wait %u (want "
+                           "%u), read pointer %u (want %u)\n", k, x360_r32(X, S2.misc + 0x200),
+                           x360_r32(X, S2.misc + 0x20C), x360_r32(X, S2.misc + 0x208), last_gate,
+                           x360_r32(X, S2.misc + 0x104), S2.rp);
+            }
+        }
+        if (k % 50 == 0)
+            K(X360_xboxkrnl_VdEnableRingBufferRPtrWriteBack, 2, S2.misc_phys + 0x104, 6);
+    }
+    return 1234;
+}
+
 static void test_gpu(void)
 {
     uint32_t ring = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0);
@@ -652,6 +736,29 @@ static void test_gpu(void)
     free(sv.blob);
     x360_gpu_set_deferred(X, 0);
     x360_gpu_poll(X);
+    /* WP-22 stage 2: the machine on the CPU worker, the command processor here (the run half's thread), at once */
+    x360_stats st0, st1;
+    x360_get_stats(X, &st0);
+    memset(&S2, 0, sizeof S2);
+    S2.ring = ring, S2.misc = misc, S2.misc_phys = misc_phys, S2.rp = rp % STRESS_RING_DW, S2.args = args;
+    x360_w32(X, misc + 0x204, 0);
+    x360_w32(X, misc + 0x208, 0);
+    const char *it = getenv("X360_STRESS_ITERS");
+    uint32_t iters = it ? (uint32_t)strtoul(it, NULL, 0) : 3000;
+    int rc = x360_gpu_overlap(X, stress_job, iters);
+    CHECK(rc == 1234 && !pthread_equal(S2.self, pthread_self()), "stage 2: the job ran on the worker (%d)", rc);
+    CHECK(!S2.bad, "stage 2: %u drains on the worker left work undone", S2.bad);
+    x360_gpu_drain(X, 0);
+    x360_get_stats(X, &st1);
+    CHECK(x360_r32(X, misc + 0x200) == iters && x360_r32(X, misc + 0x20C) == iters &&
+              x360_r32(X, misc + 0x208) == iters / 7 * 7 && x360_r32(X, wb) == S2.rp &&
+              st1.gpu_swaps - st0.gpu_swaps == S2.swaps && X->status == X360_RUNNING,
+          "stage 2: after %u iterations: write %u, fence %u, behind the waits %u, read pointer %u (want %u), swaps %llu "
+          "(want %u)", iters, x360_r32(X, misc + 0x200), x360_r32(X, misc + 0x20C), x360_r32(X, misc + 0x208),
+          x360_r32(X, wb), S2.rp, (unsigned long long)(st1.gpu_swaps - st0.gpu_swaps), S2.swaps);
+    /* a second job reuses the parked worker; RECOMP_X360_GPU_THREAD=0 is the caller's business (x360_runtime.c) */
+    rc = x360_gpu_overlap(X, stress_job, 0);
+    CHECK(rc == 1234, "stage 2: a second job on the same worker (%d)", rc);
 }
 
 static void hex(const uint8_t *p, int n, char *out)
@@ -1153,6 +1260,21 @@ static uint32_t fbits32(float f)
     return v;
 }
 
+/* render_test's stage-2 part: the same draw, posted from the CPU worker, drawn on this thread (the GL context's) */
+static uint32_t render_data_phys;
+static int render_job(x360_machine *x, uint64_t draws)
+{
+    (void)x;
+    for (uint64_t k = 0; k < draws; k++) {
+        rreg(0x4800, render_data_phys | 3u), rreg(0x4801, 2u | 32u << 2);
+        rput(3u << 30 | 0u << 16 | (uint32_t)PM4_DRAW_INDX_2 << 8);
+        rput(6u | 2u << 6 | 4u << 16);
+        x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, ring_at);
+        x360_gpu_poll(X);
+    }
+    return 7;
+}
+
 static int render_test(const char *dir)
 {
     char why[256] = "", cache[1024];
@@ -1241,6 +1363,13 @@ static int render_test(const char *dir)
     x360_gpu_poll(X);
     x360_render_counts(X, &drawn, &frames, &fbf);
     CHECK(drawn == 2 && ring_at > start, "drawn after the state was loaded: %llu", (unsigned long long)drawn);
+    /* WP-22 stage 2: draws posted from the worker, run here; a drain makes them all done */
+    render_data_phys = data_phys;
+    int rc = x360_gpu_overlap(X, render_job, 3);
+    x360_gpu_drain(X, 1);
+    x360_render_counts(X, &drawn, &frames, &fbf);
+    CHECK(rc == 7 && drawn == 5, "stage 2: drawn from the worker's posts: %llu (job %d)", (unsigned long long)drawn,
+          rc);
     free(vs);
     free(ps);
     return 0;
