@@ -359,7 +359,15 @@ void x360_thread_exit(x360_machine *x, x360_thread *t, uint32_t code);
 uint32_t x360_handle_new(x360_machine *x, uint32_t obj);
 uint32_t x360_handle_obj(x360_machine *x, uint32_t handle);
 int x360_handle_close(x360_machine *x, uint32_t handle);
-uint64_t x360_now(x360_machine *x);
+uint64_t x360_now_host(x360_machine *x);
+/* Virtual time, 100 ns. Inline: the cooperative scheduler reads it several times a turn (polls, timed waits). */
+static inline uint64_t x360_now(x360_machine *x)
+{
+    if (x->host) /* XBA-283: threads run in parallel, the sum of their instructions is no clock */
+        return x360_now_host(x);
+    /* interpreted instructions are in rc_native too (RC_BLOCK counts an RC_INTERP one, x360_interp_run the rest) */
+    return x->m.rc_native / 320 + x->st.hle_calls * 2 + x->time_skip;
+}
 /* start a wait for thread t (objects / delay); timeout_ptr: guest pointer to a 64-bit timeout, 0 = infinite */
 void x360_wait(x360_machine *x, x360_thread *t, int kind, const uint32_t *objs, int count, int wait_all,
                uint32_t timeout_ptr);
