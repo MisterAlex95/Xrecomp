@@ -81,9 +81,17 @@ typedef struct xenos_gl_stats {
     uint64_t resolves_deferred;    /* resolves that left guest memory as it was (pending) */
     uint64_t resolve_flushes;      /* pending resolves written to guest memory afterwards */
     uint64_t resolves_dropped;     /* pending resolves dropped unwritten: the CPU wrote that memory first */
-    /* WP-10: rectangle lists (Direct3D clears among them) */
-    uint64_t rect_lists_gpu;       /* drawn with the fourth corner made on the GPU (no read-back) */
-    uint64_t rect_lists_read_back; /* their capture read back, the corner made on the CPU (RECOMP_X360_RECTS=cpu) */
+    /* WP-15, the perf line */
+    uint64_t noop_draws;           /* draws made that could not write anything (colour masked, no depth / stencil
+                                    * write, no memory export: Direct3D's dummy draws) */
+    uint64_t rect_draws;           /* rectangle-list draws (Direct3D's clears) */
+    uint64_t passes;               /* render passes: draws / clears / blits after the draw framebuffer changed
+                                    * (process-wide, as hashed_bytes) */
+    uint64_t hashed_bytes;         /* guest memory hashed to see whether it changed (textures, resolve copies,
+                                    * vertex buffers) */
+    /* WP-10: rectangle lists (rect_draws) whose capture was read back and the fourth corner made on the CPU
+     * (RECOMP_X360_RECTS=cpu); the others had it made on the GPU */
+    uint64_t rect_lists_read_back;
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

@@ -269,7 +269,7 @@ int main(int argc, char **argv)
         x360_gpu_opcode_histogram(x, log);
     x360_render_stats(x, log);
     if (perf1.swaps > perf0.swaps) { /* the runtime's perf line's gpu field, per swap of this run */
-        char line[256];
+        char line[512];
         x360_render_perf_format(&perf1, &perf0, perf1.swaps - perf0.swaps, "swap", line, sizeof line);
         fprintf(log, "render: perf over %llu swaps: %s\n", (unsigned long long)(perf1.swaps - perf0.swaps), line);
     }

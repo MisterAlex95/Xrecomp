@@ -46,12 +46,20 @@ struct x360_gpu {
     uint32_t *last_code[2];
     xenos_gl *gl;         /* --render: the GLES renderer (host state: not in save states) */
     uint64_t cp_ns;       /* wall time running the ring's packets (draws and resolves included): the perf line's gpu */
+    uint64_t cp_cpu_ns;   /* the same span in the thread's CPU time (WP-15): the rest of cp_ns is waiting (the GPU) */
 };
 
 static uint64_t mono_ns(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static uint64_t thread_cpu_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
@@ -208,8 +216,8 @@ void x360_render_stats(x360_machine *x, FILE *out)
         fprintf(out, "render: lazy resolves: %llu deferred, %llu written later, %llu dropped (the CPU wrote first)\n",
                 (unsigned long long)s.resolves_deferred, (unsigned long long)s.resolve_flushes,
                 (unsigned long long)s.resolves_dropped);
-    fprintf(out, "render: rectangle lists: %llu on the GPU, %llu read back\n", (unsigned long long)s.rect_lists_gpu,
-            (unsigned long long)s.rect_lists_read_back);
+    fprintf(out, "render: rectangle lists: %llu on the GPU, %llu read back\n",
+            (unsigned long long)(s.rect_draws - s.rect_lists_read_back), (unsigned long long)s.rect_lists_read_back);
     fprintf(out, "render: eDRAM overlaps: %llu carried over, %llu not; multisampled targets: %llu\n",
             (unsigned long long)s.edram_reinterpreted, (unsigned long long)s.edram_stale,
             (unsigned long long)s.msaa_surfaces);
@@ -277,6 +285,7 @@ void x360_render_perf_get(x360_machine *x, x360_render_perf *out)
     if (!x->gpu)
         return;
     out->gpu_ns = x->gpu->cp_ns;
+    out->cpu_ns = x->gpu->cp_cpu_ns;
     out->swaps = x->gpu->cp.swaps;
     if (!x->gpu->gl)
         return;
@@ -285,6 +294,8 @@ void x360_render_perf_get(x360_machine *x, x360_render_perf *out)
     out->resolve_ns = s.resolve_ns, out->read_ns = s.resolve_read_ns, out->write_ns = s.resolve_write_ns;
     out->draws = s.draw_calls, out->resolves = s.resolves, out->pixels = s.resolved_pixels;
     out->vertices = s.vertices_fetched;
+    out->noop_draws = s.noop_draws, out->rect_draws = s.rect_draws, out->passes = s.passes;
+    out->hashed = s.hashed_bytes;
 }
 
 int x360_render_perf_format(const x360_render_perf *now, const x360_render_perf *since, uint64_t frames,
@@ -292,12 +303,14 @@ int x360_render_perf_format(const x360_render_perf *now, const x360_render_perf 
 {
 #define D(f) (now->f >= since->f ? now->f - since->f : 0) /* a counter behind the snapshot: none in this window */
     double k = frames ? 1.0 / (double)frames : 0.0, ms = k / 1e6;
+    uint64_t noop = D(noop_draws), draws = D(draws);
     return snprintf(out, n,
-                    "gpu %.1f (resolve %.1f: read %.1f write %.1f; %.0f draws, %.1f resolves, %.1f Mpx, "
-                    "%.1f k vertices) ms/%s",
-                    (double)D(gpu_ns) * ms, (double)D(resolve_ns) * ms, (double)D(read_ns) * ms,
-                    (double)D(write_ns) * ms, (double)D(draws) * k, (double)D(resolves) * k,
-                    (double)D(pixels) * k / 1e6, (double)D(vertices) * k / 1e3, unit);
+                    "gpu %.1f (cpu %.1f, resolve %.1f: read %.1f write %.1f; %.0f draws + %.0f no-op, %.1f rects, "
+                    "%.0f passes, %.1f resolves, %.1f Mpx, %.1f k vertices, %.1f MB hashed) ms/%s",
+                    (double)D(gpu_ns) * ms, (double)D(cpu_ns) * ms, (double)D(resolve_ns) * ms,
+                    (double)D(read_ns) * ms, (double)D(write_ns) * ms, (double)(draws > noop ? draws - noop : 0) * k,
+                    (double)noop * k, (double)D(rect_draws) * k, (double)D(passes) * k, (double)D(resolves) * k,
+                    (double)D(pixels) * k / 1e6, (double)D(vertices) * k / 1e3, (double)D(hashed) * k / 1e6, unit);
 #undef D
 }
 
@@ -452,9 +465,10 @@ void x360_gpu_poll(x360_machine *x)
         uint32_t w = x360_r32(x, GPU_MMIO + 4 * XENOS_REG_CP_RB_WPTR);
         if (w != g->last_wptr || g->cp.stalled) {
             g->last_wptr = w;
-            uint64_t t0 = mono_ns();
+            uint64_t t0 = mono_ns(), c0 = thread_cpu_ns();
             xenos_cp_set_wptr(&g->cp, w);
             g->cp_ns += mono_ns() - t0;
+            g->cp_cpu_ns += thread_cpu_ns() - c0;
         }
     }
     if (g->irq_callback && now >= g->next_vblank) {

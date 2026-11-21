@@ -2230,10 +2230,9 @@ int main(int argc, char **argv)
             run(&cp);
             xenos_gl_stats rs;
             xenos_gl_get_stats(g, &rs);
-            CHECK(mode ? rs.rect_lists_read_back == 1 && rs.rect_lists_gpu == 0
-                       : rs.rect_lists_gpu == 1 && rs.rect_lists_read_back == 0,
-                  "rectangle lists (%s): %llu on the GPU, %llu read back", mode ? "cpu" : "gpu",
-                  (unsigned long long)rs.rect_lists_gpu, (unsigned long long)rs.rect_lists_read_back);
+            CHECK(rs.rect_draws == 1 && rs.rect_lists_read_back == (uint64_t)mode,
+                  "rectangle lists (%s): %llu drawn, %llu read back", mode ? "cpu" : "gpu",
+                  (unsigned long long)rs.rect_draws, (unsigned long long)rs.rect_lists_read_back);
             int bad = 0;
             for (int r = 0; r < NR && !bad && cpu_ok; r++) {
                 int x = (r % 4) * W / 4 + W / 8, y = (int)((float)(r / 4) * H / 5.0f + H / 10.0f);
