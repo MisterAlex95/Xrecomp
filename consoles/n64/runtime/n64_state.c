@@ -424,6 +424,7 @@ int n64_state_load(n64_machine *m, const uint8_t *data, size_t size)
     m->rom_hash = hash;
     m->rom_hashed = hashed;
     m->save_dirty = false;
+    m->ai_quiet = 0; /* the loaded history is filtered until AI_TAPS zero samples follow */
     for (int p = 0; p < 4; p++)
         m->pak_dirty[p] = false;
 
