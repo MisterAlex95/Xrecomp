@@ -209,8 +209,8 @@ static inline void wr32(ps1_machine *m, uint32_t a, uint32_t v)
     wr16(m, a + 2, v >> 16);
 }
 
-/* The n bytes at a when all their words lie in main RAM where rd32 and wr32 take their RAM path (a aligned, KUSEG / KSEG0 /
- * KSEG1, not across the end of the 2 MB): their offset in m->ram, else -1. */
+/* The n bytes at a when all their words lie in main RAM where rd32 and wr32 take their RAM path (a aligned, KUSEG /
+ * KSEG0 / KSEG1, not across the end of the 2 MB): their offset in m->ram, else -1. */
 static inline int32_t ram_span(uint32_t a, uint32_t n)
 {
     uint32_t seg = a >> 29, p = a & 0x1FFFFFFFu, o = p & (PS1_RAM_SIZE - 1);

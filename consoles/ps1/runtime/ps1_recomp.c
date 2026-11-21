@@ -544,6 +544,14 @@ void ps1_recomp_get_stats(ps1_machine *m, ps1_recomp_stats *out)
 
 /* ---- the run loop ---- */
 
+/* ps1_cpu.c: the recompiler's loop for the instructions lifted code hands over (PS1_RC_EXIT_INTERP, below): steps from
+ * pc while *left > 1 and execution stays in sequence, as that loop would one call at a time: while the time slice is
+ * not up, no interrupt is pending, no hook is due and the next instruction is liftable. One step at least; returns how
+ * many ran. *chained: the last one went on in sequence (*left counted down for it): the next instruction is still
+ * handed over. Declared here, not in ps1_internal.h: the runtime headers are in the toolkit digest, and a change there
+ * makes every pack stale (tools/prepare/toolkit.py). */
+uint32_t ps1_cpu_step_handed(ps1_machine *m, uint32_t *left, bool *chained);
+
 /* Main RAM above the kernel area, through KUSEG / KSEG0 / KSEG1: where lifted code may run. */
 static inline bool liftable_pc(uint32_t pc)
 {
