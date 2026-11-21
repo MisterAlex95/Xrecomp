@@ -129,6 +129,14 @@
                 android:value="Downloads a game the user picked from the user's own network sources (a torrent they added), with progress and Cancel in the notification" />
         </service>
 
+        <!-- « Send reports automatically » (XBA-336, AutoReports): posts the kept sessions and reports through the
+             consent gate once the network the option asks for is there; only the system may bind it. -->
+        <service
+            android:name=".ReportJobService"
+            android:exported="false"
+            android:process=":launcher"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
         <!-- « Check my library » (XBA-130): its screen and the service that drives it, in the launcher's process; the
              service keeps that process alive while a checked game runs in front of it. -->
         <activity

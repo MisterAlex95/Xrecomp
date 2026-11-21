@@ -84,6 +84,10 @@
     <string name="TIP_UPDATE_T">This version translates games better. The game plays as before; preparing it again gets the fixes. Your saves are kept.</string>
     <string name="TIP_AT_ONCE_H">Plays right away</string>
     <string name="TIP_AT_ONCE_T">This game runs in the interpreter, so it starts at once. Prepare translates it into native code (a few minutes): smoother, lighter on the battery. You can play meanwhile.</string>
+    <string name="TIP_AUTO_REPORTS_H">Help fix crashes</string>
+    <string name="TIP_AUTO_REPORTS_T">Something went wrong. XRecomp can send such reports by itself, on Wi-Fi: how it ended and the log, no game data, no account. Off unless you turn it on; Settings › Advanced › Privacy changes it any time.</string>
+    <string name="TIP_AUTO_REPORTS_ON">Send reports automatically</string>
+    <string name="TIP_NOT_NOW">Not now</string>
 
     <!-- Help's drawings (Schema) -->
     <string name="SCH_GAME">Your game</string>

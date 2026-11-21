@@ -278,6 +278,15 @@
     <string name="REPORT_NOT_SENT">Le rapport n’a pas pu partir : il partira avec le prochain.</string>
     <string name="REPORT_LAST_GAME">Envoyer un rapport sur le dernier jeu</string>
     <string name="REPORT_LAST_GAME_DETAIL">Après un plantage : sa fin et son journal partent chez les développeurs d’XRecomp, une fois que vous avez vu ce qui part et choisi Envoyer. Aucune donnée de jeu.</string>
+    <string name="PRIVACY">Confidentialité</string>
+    <string name="PRIVACY_DETAIL">Les rapports automatiques (désactivés sauf si vous les activez), ce qu’ils contiennent et l’identifiant d’installation aléatoire.</string>
+    <string name="AUTO_REPORTS">Rapports automatiques</string>
+    <string name="AUTO_REPORTS_MOBILE">Données mobiles aussi</string>
+    <string name="AUTO_REPORTS_RESET">Réinitialiser l’identifiant</string>
+    <string name="AUTO_REPORTS_RESET_DONE">Un nouvel identifiant d’installation aléatoire est utilisé désormais.</string>
+    <string name="AUTO_REPORTS_ON">Les rapports partent d’eux-mêmes, en Wi-Fi.</string>
+    <string name="AUTO_REPORTS_OFF">Rien ne part sans que vous choisissiez Envoyer. L’identifiant d’installation et les rapports en attente sont effacés.</string>
+    <string name="AUTO_REPORTS_WHAT">Désactivé (par défaut), rien ne part sans Envoyer. Activé, un plantage ou une préparation en échec envoie son rapport seul, en Wi-Fi, comme Envoyer : sans dossiers, adresses, liens ni données de jeu. Chaque partie envoie aussi deux identifiants aléatoires (partie, installation), sa fin, sa durée et la version de l’app. Rien d’autre : aucun compte, aucun identifiant d’appareil.</string>
     <string name="CHIP_NEEDS_PREPARE">À préparer</string>
     <string name="CHIP_PREPARING">Préparation</string>
     <string name="CHIP_PREPARE_FAILED">Préparation en échec</string>

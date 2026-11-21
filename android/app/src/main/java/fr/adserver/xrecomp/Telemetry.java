@@ -43,10 +43,13 @@ final class Telemetry {
     /** Turns the option on (with a fresh install id) or off (the id is deleted). */
     static void setAuto(Context c, boolean on) {
         if (on) {
-            if (!auto(c))
+            if (!auto(c)) {
                 write(f(c, "auto"), newId());
+                AutoReports.optionChanged(c, true);   // only what happens from now on counts
+            }
         } else {
             f(c, "auto").delete();
+            AutoReports.optionChanged(c, false);   // what waited goes unsent, the job is cancelled
         }
     }
 

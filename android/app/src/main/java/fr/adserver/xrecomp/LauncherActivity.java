@@ -620,6 +620,7 @@ public class LauncherActivity extends Activity {
         showTitleAppOutcome();
         AppUpdateReceiver.listener = () -> runOnUiThread(this::showAppUpdateOutcome);
         showAppUpdateOutcome();
+        autoReportsLook();
         updateAtLaunch();
         cloudAutoSync();
         netKickIfNeeded();
@@ -3087,6 +3088,8 @@ public class LauncherActivity extends Activity {
             if (CrashReport.available(this))
                 listRow(list, getString(R.string.REPORT_LAST_GAME), getString(R.string.REPORT_LAST_GAME_DETAIL),
                         this::reportLastGame);
+            if (AutoReports.possible(this))
+                privacyRow(list);
             MenuRow about = listRow(list, getString(R.string.ABOUT), getString(R.string.ABOUT_TEXT),
                                     () -> go(Screen.ABOUT));
             about.setValue(version());
@@ -5206,8 +5209,10 @@ public class LauncherActivity extends Activity {
                                  getString(directActionLabel), true, act);
             if (directShareLog) {
                 pill(buttons, null, getString(R.string.SHARE_LOG), false, this::shareLog);
-                if (CrashReport.available(this))
+                if (CrashReport.available(this)) {
                     pill(buttons, null, getString(R.string.REPORT_BUTTON), false, this::reportPrepare);
+                    autoReportPrepare();
+                }
             }
             defaultFocus = directPrimary;
             startAction = act;
@@ -5542,8 +5547,10 @@ public class LauncherActivity extends Activity {
                                             getString(cancelled ? R.string.PREPARE_RESUME : R.string.PREPARE_RETRY),
                                             true, this::startPrepare);
             pill(buttons, Icon.COPY, getString(R.string.SHARE_LOG), false, this::shareLog);
-            if (!cancelled && CrashReport.available(this))
+            if (!cancelled && CrashReport.available(this)) {
                 pill(buttons, null, getString(R.string.REPORT_BUTTON), false, this::reportPrepare);
+                autoReportPrepare();
+            }
             defaultFocus = retry;
             yAction = this::shareLog;
             addHint("A", R.string.HINT_SELECT, this::clickFocused);
@@ -5737,6 +5744,118 @@ public class LauncherActivity extends Activity {
             runOnUiThread(() -> setNote(getString(ok ? R.string.REPORT_SENT : R.string.REPORT_NOT_SENT),
                                         ok ? NOTE_OK : NOTE_WARN));
         }, "report-send").start();
+    }
+
+    // ---- « Send reports automatically » (XBA-336, AutoReports) -------------------------------------------------
+
+    /**
+     * On resume: how the last game run ended, counted once (its session, and with the option on a crash's report,
+     * leave through ReportJobService); a crash with the option off offers it (once per version).
+     */
+    private void autoReportsLook() {
+        if (!AutoReports.possible(this))
+            return;
+        boolean running = gameRunning();
+        new Thread(() -> {
+            AutoReports.Run r = AutoReports.collect(this, running);
+            if (r != null && r.failed())
+                runOnUiThread(this::offerAutoReports);
+            else if (AutoReports.enabled(this) && AutoReports.pending(this) > 0)
+                AutoReports.schedule(this);   // the job is not kept across a reboot
+        }, "xba-reports-look").start();
+    }
+
+    /** A failed Prepare on screen: its report leaves by itself with the option on, else the offer (once). */
+    private void autoReportPrepare() {
+        String tid = prepTid();
+        if (!AutoReports.possible(this) || tid == null)
+            return;
+        PrepareProtocol.Status s = readPrepStatus();
+        String title = prepTitle();
+        new Thread(() -> {
+            if (AutoReports.prepareFailed(this, tid, title, s, PrepareService.logFile(this, tid))
+                && !Telemetry.auto(this))
+                runOnUiThread(this::offerAutoReports);
+        }, "xba-reports-prepare").start();
+    }
+
+    /** The « Good to know » bubble offering the option: once per app version, never while another sheet is open. */
+    private void offerAutoReports() {
+        if (!guidanceOn || !resumed || sheet != null || isFinishing() || !AutoReports.offerDue(this))
+            return;
+        AutoReports.offered(this);
+        Widgets.Sheet s = openSheet(R.string.TIP_TITLE);
+        TextView h = s.addText(getString(R.string.TIP_AUTO_REPORTS_H), 2);
+        h.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, Theme.T_ROW);
+        h.setTypeface(Theme.MEDIUM);
+        h.setTextColor(Theme.TEXT);
+        ((LinearLayout.LayoutParams)h.getLayoutParams()).bottomMargin = Theme.S2;
+        s.addText(getString(R.string.TIP_AUTO_REPORTS_T), 10);
+        tipRow(s, getString(R.string.TIP_AUTO_REPORTS_ON), () -> setAutoReports(true));
+        tipRow(s, getString(R.string.TIP_NOT_NOW), () -> {});
+        sheetReady();
+        Log.i(TAG, "launcher: tip auto_reports shown");
+    }
+
+    private void setAutoReports(boolean on) {
+        Telemetry.setAuto(this, on);
+        if (privacyRow != null)
+            privacyRow.setValue(getString(on ? R.string.VAL_ON : R.string.VAL_OFF));
+        setNote(getString(on ? R.string.AUTO_REPORTS_ON : R.string.AUTO_REPORTS_OFF), NOTE_OK);
+        Log.i(TAG, "launcher: automatic reports " + (on ? "on" : "off"));
+    }
+
+    /** Settings › Advanced › Privacy: its value is the option (On / Off); it opens the privacy sheet. */
+    private MenuRow privacyRow;
+
+    private void privacyRow(LinearLayout list) {
+        privacyRow = listRow(list, getString(R.string.PRIVACY), getString(R.string.PRIVACY_DETAIL),
+                             this::openPrivacy);
+        privacyRow.setValue(getString(Telemetry.auto(this) ? R.string.VAL_ON : R.string.VAL_OFF));
+    }
+
+    /** The privacy sheet: what is sent, the option, and while it is on « Also on mobile data » and « Reset ». */
+    private void openPrivacy() {
+        View back = sheet != null ? sheetReturn : null;   // reopened after the option changed: same way back
+        Widgets.Sheet s = openSheet(R.string.PRIVACY);
+        if (back != null)
+            sheetReturn = back;
+        s.addText(getString(R.string.AUTO_REPORTS_WHAT), 14);
+        boolean on = Telemetry.auto(this);
+        sheetToggle(s, R.string.AUTO_REPORTS, () -> Telemetry.auto(this), () -> {
+            setAutoReports(!Telemetry.auto(this));
+            openPrivacy();   // the rows below come or go
+        });
+        if (on) {
+            sheetToggle(s, R.string.AUTO_REPORTS_MOBILE, () -> AutoReports.mobileData(this),
+                        () -> AutoReports.setMobileData(this, !AutoReports.mobileData(this)));
+            MenuRow reset = new MenuRow(this);
+            reset.set(getString(R.string.AUTO_REPORTS_RESET), null);
+            reset.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, reset);
+            reset.setOnClickListener(v -> {
+                Telemetry.resetInstallId(this);
+                setNote(getString(R.string.AUTO_REPORTS_RESET_DONE), NOTE_OK);
+                Log.i(TAG, "launcher: install id reset");
+            });
+            s.addRow(reset);
+        }
+        sheetReady();
+    }
+
+    /** An On / Off row of a sheet: left / right or A flip it. */
+    private void sheetToggle(Widgets.Sheet s, int title, java.util.function.BooleanSupplier get, Runnable flip) {
+        MenuRow r = new MenuRow(this);
+        r.set(getString(title), null);
+        r.setChoices(new String[] { getString(R.string.VAL_ON), getString(R.string.VAL_OFF) });
+        Runnable refresh = () -> r.setValue(getString(get.getAsBoolean() ? R.string.VAL_ON : R.string.VAL_OFF));
+        refresh.run();
+        r.cycler = d -> {
+            flip.run();
+            refresh.run();
+            feedback.play(UiFeedback.Cue.MOVE, r);
+        };
+        r.setOnClickListener(v -> r.cycler.step(1));
+        s.addRow(r);
     }
 
     /** Every PREPARE_POLL_MS while resumed: status.json into the Preparing screen, or into Home's row. */
@@ -10467,6 +10586,7 @@ public class LauncherActivity extends Activity {
         if (pid == 0)
             return;
         Log.i(TAG, "launcher: ending the running game (pid " + pid + ")");
+        AutoReports.launcherEnded(this, pid, GameStore.lastPlayed(this));   // XBA-336: an end, not a crash
         Process.killProcess(pid);
         long until = SystemClock.uptimeMillis() + 2000;
         while (mainProcessPid() != 0 && SystemClock.uptimeMillis() < until)

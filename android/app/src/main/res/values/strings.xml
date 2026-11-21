@@ -302,6 +302,15 @@
     <string name="REPORT_NOT_SENT">Could not send the report: it will leave with the next one.</string>
     <string name="REPORT_LAST_GAME">Send a report about the last game</string>
     <string name="REPORT_LAST_GAME_DETAIL">After a game crashed: how it ended and its log go to the XRecomp developers, once you have seen what is sent and chosen Send. No game data.</string>
+    <string name="PRIVACY">Privacy</string>
+    <string name="PRIVACY_DETAIL">Automatic reports (off unless you turn them on), what they hold, and the random install id.</string>
+    <string name="AUTO_REPORTS">Send reports automatically</string>
+    <string name="AUTO_REPORTS_MOBILE">Also on mobile data</string>
+    <string name="AUTO_REPORTS_RESET">Reset install id</string>
+    <string name="AUTO_REPORTS_RESET_DONE">A new random install id is used from now on.</string>
+    <string name="AUTO_REPORTS_ON">Reports leave by themselves, on Wi-Fi.</string>
+    <string name="AUTO_REPORTS_OFF">Nothing leaves unless you choose Send. The install id and the waiting reports are deleted.</string>
+    <string name="AUTO_REPORTS_WHAT">Off (the default), nothing leaves without Send. On, a crash or a failed Prepare sends its report by itself, on Wi-Fi, as Send would: no folders, addresses, links or game data. Each game run also sends two random ids (run, install), how it ended, how long it lasted and the app version. Nothing else: no account, no device id.</string>
     <string name="CHIP_NEEDS_PREPARE">Needs preparing</string>
     <string name="CHIP_PREPARING">Preparing</string>
     <string name="CHIP_PREPARE_FAILED">Prepare failed</string>
