@@ -2,6 +2,24 @@
 
 <!-- Highlights: what changed, what works, known problems. Written by hand, kept across updates. -->
 
+A second Xbox 360 performance night, measured headless on Warhammer: Battle March. Frames and save states are byte
+identical to 0.18.0, except where a change is opt-in or per title (below).
+
+- **Guest CPU**: `MmQueryStatistics` keeps a page count instead of scanning (it was half of the boot's host CPU). The
+  VMX helpers work on 16- and 8-bit lanes, use the compiler's vector extensions and are inlined. Host CPU: the boot
+  is 3× faster and in-game play 1.8× (141 → 79 ms of guest time per swap). The scheduler turn is cheaper and makes
+  the same decisions. Prepare is not slower: the VMX-heavy files compile 27–41 % faster with NDK clang.
+- **Renderer**: 16-bit resolve formats take the fast path, and the stencil is read back in 2 passes instead of 8.
+  Tiled addressing is worked out per tile row, texture rows are read 16 bytes at a time, texture memory is hashed in
+  8 lanes and packed vertex formats use tables. Renderer CPU per swap is about half of 0.18.0's.
+- **Warhammer** resolves lazily by default (a per-title default). Over 921 swaps, frames and states are identical
+  to the eager mode.
+- **GPU thread** (WP-22 stage 2) is in but **off by default**. To try it, add `RECOMP_X360_GPU_THREAD=1` to
+  `recomp.cfg`.
+
+Known: none of this is measured on a device yet (XBA-345). X360 packs show as stale: Prepare them again to get the
+VMX gain (old packs still run).
+
 ## Changes
 
 <!-- release:changes start (generated from the commits; rewritten on every push to main) -->
