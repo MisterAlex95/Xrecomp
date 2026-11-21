@@ -544,6 +544,14 @@ void ps1_recomp_get_stats(ps1_machine *m, ps1_recomp_stats *out)
 
 /* ---- the run loop ---- */
 
+/* ps1_cpu.c: the recompiler's loop for the instructions lifted code hands over (PS1_RC_EXIT_INTERP, below): steps from
+ * pc while *left > 1 and execution stays in sequence, as that loop would one call at a time: while the time slice is
+ * not up, no interrupt is pending, no hook is due and the next instruction is liftable. One step at least; returns how
+ * many ran. *chained: the last one went on in sequence (*left counted down for it): the next instruction is still
+ * handed over. Declared here, not in ps1_internal.h: the runtime headers are in the toolkit digest, and a change there
+ * makes every pack stale (tools/prepare/toolkit.py). */
+uint32_t ps1_cpu_step_handed(ps1_machine *m, uint32_t *left, bool *chained);
+
 /* Main RAM above the kernel area, through KUSEG / KSEG0 / KSEG1: where lifted code may run. */
 static inline bool liftable_pc(uint32_t pc)
 {
@@ -608,19 +616,20 @@ void ps1_recomp_run(ps1_machine *m)
         }
         if (pc == s->interp_pc || m->next_delay || (m->cop0[C0_SR] & (SR_KUC | SR_ISC))) {
             /* the instruction lifted code left to the interpreter (after the loop's checks), a delay slot, user mode
-             * or an isolated cache. Then the rest of its block, while execution stays in sequence: inside a block
-             * nothing is a resume point. */
-            bool handed = pc == s->interp_pc;
-            if (handed)
-                s->stats.fallbacks++;
-            s->interp_pc = KEY_NONE;
-            s->stats.interp_ram++;
-            ps1_cpu_step(m);
+             * or an isolated cache. Then the rest of its block, while execution stays in sequence (one loop,
+             * ps1_cpu_step_handed): inside a block nothing is a resume point. */
             s->expect = KEY_NONE;
-            if (handed && s->interp_left > 1 && m->pc == pc + 4) {
-                s->interp_pc = pc + 4;
-                s->interp_left--;
+            if (pc != s->interp_pc) {
+                s->interp_pc = KEY_NONE;
+                s->stats.interp_ram++;
+                ps1_cpu_step(m);
+                continue;
             }
+            bool chained;
+            uint32_t n = ps1_cpu_step_handed(m, &s->interp_left, &chained);
+            s->stats.fallbacks += n;
+            s->stats.interp_ram += n;
+            s->interp_pc = chained ? m->pc : KEY_NONE;
             continue;
         }
         if (m->ld_reg) {

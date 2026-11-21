@@ -769,6 +769,25 @@ static inline __attribute__((always_inline)) void step(ps1_machine *m)
 
 void ps1_cpu_step(ps1_machine *m) { step(m); }
 
+uint32_t ps1_cpu_step_handed(ps1_machine *m, uint32_t *left, bool *chained)
+{
+    uint32_t n = 0;
+    for (;;) {
+        uint32_t pc = m->pc;
+        step(m);
+        n++;
+        if (*left <= 1 || m->pc != pc + 4) {
+            *chained = false;
+            return n;
+        }
+        (*left)--;
+        *chained = true;
+        /* ps1_recomp_run's checks before it hands the next instruction over */
+        if (m->cycles >= m->next_event || m->irq_pending || m->pc == m->hook_at || !ps1_rc_liftable_pc(m->pc))
+            return n;
+    }
+}
+
 /* ---- The block loop (XBA-204) ----
  * ps1_cpu_run (and the recompiler's unliftable loop) run predecoded blocks (below) with the CPU state in locals, and
  * step() for whatever a block doesn't hold. Between instructions where the run loop looks at the machine (cycles >=

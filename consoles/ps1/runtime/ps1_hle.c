@@ -209,6 +209,57 @@ static inline void wr32(ps1_machine *m, uint32_t a, uint32_t v)
     wr16(m, a + 2, v >> 16);
 }
 
+/* The n bytes at a when all their words lie in main RAM where rd32 and wr32 take their RAM path (a aligned, KUSEG /
+ * KSEG0 / KSEG1, not across the end of the 2 MB): their offset in m->ram, else -1. */
+static inline int32_t ram_span(uint32_t a, uint32_t n)
+{
+    uint32_t seg = a >> 29, p = a & 0x1FFFFFFFu, o = p & (PS1_RAM_SIZE - 1);
+    if ((a & 3u) || p >= 0x00800000u || !(seg == 0 || seg == 4 || seg == 5) || o + n > PS1_RAM_SIZE)
+        return -1;
+    return (int32_t)o;
+}
+/* rd32 of an aligned word of main RAM at offset o (a KUSEG address below 2 MB) */
+static inline uint32_t ram_ld32(const ps1_machine *m, uint32_t o)
+{
+    const uint8_t *q = m->ram + o;
+    return (uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24;
+}
+
+/* r1..r31 (not r26, k0: the vector's) to or from a TCB's register words, r(i) at a + 4 (i - 1): the exception entry
+ * and exit, for every interrupt. When they all lie in main RAM, two block copies (the RAM words are little-endian, as
+ * the host's: ps1_recomp.c reads instructions likewise) and the page counters moved as one wr32 per word would
+ * (XBA-295); else a word at a time. */
+static void tcb_regs(ps1_machine *m, uint32_t a, bool save)
+{
+    int32_t so = ram_span(a, 31 * 4);
+    if (so < 0) {
+        for (uint32_t i = 1; i < 32; i++) {
+            if (i == 26)
+                continue;
+            if (save)
+                wr32(m, a + 4u * (i - 1), m->r[i]);
+            else
+                m->r[i] = rd32(m, a + 4u * (i - 1));
+        }
+        return;
+    }
+    uint32_t o = (uint32_t)so;
+    uint8_t *q = m->ram + o;
+    if (!save) {
+        memcpy(&m->r[1], q, 25 * 4);
+        memcpy(&m->r[27], q + 26 * 4, 5 * 4);
+        return;
+    }
+    memcpy(q, &m->r[1], 25 * 4);
+    memcpy(q + 26 * 4, &m->r[27], 5 * 4);
+    if (o >> PS1_RAM_PAGE_SHIFT == (o + 31 * 4 - 1) >> PS1_RAM_PAGE_SHIFT)
+        m->ram_gen[o >> PS1_RAM_PAGE_SHIFT] += 30 * 4;
+    else
+        for (uint32_t i = 1; i < 32; i++)
+            if (i != 26)
+                m->ram_gen[(o + 4u * (i - 1)) >> PS1_RAM_PAGE_SHIFT] += 4;
+}
+
 /* A NUL-terminated guest string into buf (truncated to n - 1). */
 static void gstr(ps1_machine *m, uint32_t a, char *buf, size_t n)
 {
@@ -412,8 +463,8 @@ static bool deliver_event(ps1_machine *m, uint32_t cls, uint32_t spec)
 {
     ps1_hle *h = m->hle;
     for (uint32_t i = 0; i < h->evcb_count; i++) {
-        uint32_t e = PS1_HLE_EVCB + i * EVCB_SIZE;
-        if (rd32(m, e + 4) != EV_ENABLED || rd32(m, e) != cls || rd32(m, e + 8) != spec)
+        uint32_t e = PS1_HLE_EVCB + i * EVCB_SIZE; /* KUSEG main RAM (EVCB_MAX of them): rd32 reads it straight */
+        if (ram_ld32(m, e + 4) != EV_ENABLED || ram_ld32(m, e) != cls || ram_ld32(m, e + 8) != spec)
             continue;
         uint32_t mode = rd32(m, e + 12);
         if (mode == EVM_NOCALLBACK) {
@@ -512,9 +563,7 @@ static uint32_t hinfo(int n)
 static void exc_enter(ps1_machine *m)
 {
     uint32_t t = tcb_cur(m) + 8;
-    for (int i = 1; i < 32; i++)
-        if (i != 26)
-            wr32(m, t + 4u * (uint32_t)i, m->r[i]);
+    tcb_regs(m, t + 4, true);
     uint32_t cause = m->cop0[C0_CAUSE], epc = m->cop0[C0_EPC];
     /* An interrupt taken on a GTE command: it already ran (ps1_cpu.c), resume after it. */
     if ((cause & 0x3Cu) == 0 && ((rd32(m, epc) >> 24) & 0xFEu) == 0x4Au)
@@ -536,9 +585,7 @@ static void exc_enter(ps1_machine *m)
 static void return_from_exception(ps1_machine *m)
 {
     uint32_t t = tcb_cur(m) + 8;
-    for (int i = 1; i < 32; i++)
-        if (i != 26)
-            m->r[i] = rd32(m, t + 4u * (uint32_t)i);
+    tcb_regs(m, t + 4, false);
     m->hi = rd32(m, t + 0x84);
     m->lo = rd32(m, t + 0x88);
     uint32_t sr = rd32(m, t + 0x8C);
