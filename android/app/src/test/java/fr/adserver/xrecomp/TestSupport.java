@@ -305,8 +305,8 @@ final class TestSupport {
 
     /**
      * Puts the stock colours back after each test (Theme's tokens are mutable statics, GameTheme applies a game's),
-     * and bakes a missing game theme in place rather than on a thread (the launcher's re-show stays posted), so a
-     * launcher test sees the same colours at every run:
+     * and bakes a missing game theme (and loads game art, ArtCache) in place rather than on a thread (the launcher's
+     * re-show stays posted), so a launcher test sees the same colours and art at every run:
      * {@code @Rule public final TestSupport.StockTheme stock = new TestSupport.StockTheme();}
      */
     static final class StockTheme extends ExternalResource {
@@ -314,12 +314,16 @@ final class TestSupport {
         protected void before() {
             Theme.reset();
             LauncherActivity.themeExecutor = Runnable::run;
+            ArtCache.clear();   // art loads in place: a card has its cover when first drawn
+            ArtCache.setExecutorForTest(Runnable::run);
         }
 
         @Override
         protected void after() {
             Theme.reset();
             LauncherActivity.themeExecutor = LauncherActivity.THEME_THREAD;
+            ArtCache.setExecutorForTest(null);
+            ArtCache.clear();
         }
     }
 

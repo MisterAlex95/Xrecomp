@@ -24,7 +24,11 @@ final class GameCard extends View {
     /** The art square, in design pixels, and the card's size (the title may use the gap after the art). */
     static final int ART = 288, W = 336, H = 416;
 
-    private Bitmap art;
+    /** Its art's key and reader in ArtCache (asked when drawn: only the cards on screen load theirs). */
+    private String artKey;
+    private ArtCache.Loader artLoader;
+    /** Drawn out of its ScrollView's viewport without asking for its art: asked when scrolled into view (reveal). */
+    private boolean artDeferred;
     private String initials = "";
     private int monoColor = Theme.ACCENT_DEEP;
     private String title = "", chip = "", badge = "", resume = "";
@@ -101,9 +105,17 @@ final class GameCard extends View {
         return badge;
     }
 
-    /** A game: its art (null: the monogram of title on the colour of key), its title and its state. */
-    GameCard setGame(Bitmap art, String key, String title, String chip, int chipColor) {
-        this.art = art;
+    /**
+     * A game: its art (artKey in ArtCache, read by loader when the card is drawn; a null loader or no art: the monogram
+     * of title on the colour of key), its title and its state.
+     */
+    GameCard setGame(String artKey, ArtCache.Loader loader, String key, String title, String chip, int chipColor) {
+        if (!java.util.Objects.equals(artKey, this.artKey) && isAttachedToWindow()) {
+            ArtCache.unwatch(this.artKey, this);
+            ArtCache.watch(artKey, this);
+        }
+        this.artKey = artKey;
+        this.artLoader = loader;
         this.title = title == null ? "" : title;
         this.initials = TitleArt.initials(this.title);
         this.monoColor = TitleArt.monogramColor(key == null ? this.title : key);
@@ -142,8 +154,64 @@ final class GameCard extends View {
         return chipShown && !chip.isEmpty();
     }
 
+    /** The art's key in ArtCache (the game's), null for none. */
+    String artKey() {
+        return artKey;
+    }
+
+    private Bitmap art() {
+        return artLoader == null ? null : ArtCache.get(artKey, artLoader, ArtCache.px(ART), null);
+    }
+
+    /**
+     * Whether the card is in its ScrollView's viewport, or a row from it (the library's rows do not clip their
+     * children, so the framework draws every card, on screen or not). True outside a ScrollView.
+     */
+    private boolean nearViewport() {
+        int y = 0;
+        View v = this;
+        while (v.getParent() instanceof View) {
+            View p = (View)v.getParent();
+            y += v.getTop();
+            if (p instanceof android.widget.ScrollView) {
+                int top = y - p.getScrollY();
+                return top + getHeight() > -H && top < p.getHeight() + H;
+            }
+            v = p;
+        }
+        return true;
+    }
+
+    /**
+     * The library's ScrollView scrolled to y (viewport height h): the cards of col's rows now near it that were drawn
+     * without their art are drawn again, and so ask ArtCache for it.
+     */
+    static void reveal(android.view.ViewGroup col, int y, int h) {
+        for (int i = 0; i < col.getChildCount(); i++) {
+            View row = col.getChildAt(i);
+            if (row.getBottom() <= y - H || row.getTop() >= y + h + H || !(row instanceof android.view.ViewGroup))
+                continue;
+            android.view.ViewGroup g = (android.view.ViewGroup)row;
+            for (int j = 0; j < g.getChildCount(); j++)
+                if (g.getChildAt(j) instanceof GameCard && ((GameCard)g.getChildAt(j)).artDeferred)
+                    g.getChildAt(j).invalidate();
+        }
+    }
+
     boolean hasArtForTest() {
-        return art != null;
+        return art() != null;
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        ArtCache.watch(artKey, this);
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        ArtCache.unwatch(artKey, this);
+        super.onDetachedFromWindow();
     }
 
     /** The art square in the card's own coordinates (the Glide's ring goes around it). */
@@ -213,6 +281,9 @@ final class GameCard extends View {
         clip.addRoundRect(artR, rad, rad, Path.Direction.CW);
         c.save();
         c.clipPath(clip);
+        // Only a card near the viewport loads its art; one further away draws what the cache holds, if anything.
+        artDeferred = artLoader != null && !nearViewport();
+        Bitmap art = artDeferred ? ArtCache.peek(artKey) : art();
         if (art != null) {
             fillP.setShader(null);
             fillP.setColor(0xFF000000);

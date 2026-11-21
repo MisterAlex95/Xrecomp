@@ -251,7 +251,7 @@ public class LibraryScreenTest {
         assertEquals(Pack.Check.NO_PACK, e.facts.pack);
         assertEquals(GameState.Chip.READY, e.chip);
         assertTrue(GameState.playable(e.chip));
-        assertNull(LibraryScreen.art(files, new java.util.HashMap<>(), e));
+        assertNull(LibraryScreen.art(files, e));
         env.runningTid = "gba-AXVE-1A2B3C4D";
         assertEquals(GameState.Chip.RUNNING, LibraryScreen.entry(files, e.tid, new Library.Games(), x, env).chip);
         env.runningTid = null;
@@ -481,7 +481,7 @@ public class LibraryScreenTest {
         assertEquals(Console.XBOX, halo.console());
         assertEquals(GameState.Chip.DOWNLOADING, gba.chip);
         assertEquals(Console.GBA, gba.console());
-        assertNull(LibraryScreen.art(files, new java.util.HashMap<>(), halo));
+        assertNull(LibraryScreen.art(files, halo));
         assertEquals(50, gba.download.percent());
 
         // A record left under a remote key (never written by this build) is ignored.

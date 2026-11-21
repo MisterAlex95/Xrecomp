@@ -129,6 +129,7 @@ final class Widgets {
             int w = MeasureSpec.getSize(wSpec), h = MeasureSpec.getSize(hSpec);
             int aw = Math.max(1, w - cut.left - cut.right), ah = Math.max(1, h - cut.top - cut.bottom);
             scale = Math.min(aw / (float)Theme.DESIGN_MIN_W, ah / (float)Theme.DESIGN_H);
+            ArtCache.setScale(scale);   // art is decoded at the size it is drawn
             dw = Math.round(aw / scale);
             dh = Math.round(ah / scale);
             content.measure(MeasureSpec.makeMeasureSpec(dw, MeasureSpec.EXACTLY),
