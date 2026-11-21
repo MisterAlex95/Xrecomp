@@ -32,9 +32,10 @@ static uint32_t stream_rate(const gc_audio *a)
     return (a->aicr & AICR_AISFR) ? 48000u : 32000u;
 }
 
+/* 8ull * GC_CPU_HZ / dma_rate(a), the two rates' quotients as constants (no division at every block) */
 static uint64_t block_cycles(const gc_audio *a)
 {
-    return 8ull * GC_CPU_HZ / dma_rate(a);
+    return (a->aicr & AICR_AIDFR) ? 8ull * GC_CPU_HZ / 32000u : 8ull * GC_CPU_HZ / 48000u;
 }
 
 /* ---- the streaming sample counter and its interrupt ---- */
@@ -190,10 +191,16 @@ static void dma_block(gc_machine *m)
             fifo_push(a, 0, 0);
         return;
     }
-    for (int i = 0; i < 8; i++) {
-        uint32_t p = a->aid_cur + 4u * (uint32_t)i;
-        int16_t r = (int16_t)dsp_rd16(m, p), l = (int16_t)dsp_rd16(m, p + 2);
-        fifo_push(a, l, r);
+    if (a->aid_cur <= GC_RAM_SIZE - 32u) { /* the whole block in MEM1 (aid_cur stays below dsp_pa's mask) */
+        const uint8_t *b = m->h.ram + a->aid_cur;
+        for (int i = 0; i < 8; i++, b += 4)
+            fifo_push(a, (int16_t)(b[2] << 8 | b[3]), (int16_t)(b[0] << 8 | b[1]));
+    } else {
+        for (int i = 0; i < 8; i++) {
+            uint32_t p = a->aid_cur + 4u * (uint32_t)i;
+            int16_t r = (int16_t)dsp_rd16(m, p), l = (int16_t)dsp_rd16(m, p + 2);
+            fifo_push(a, l, r);
+        }
     }
     a->dma_blocks++;
     if (a->aid_left) {
@@ -210,19 +217,6 @@ static void dma_block(gc_machine *m)
 
 /* ---- mixing to 48 kHz ---- */
 
-static void fetch_dma(void *ctx, int16_t lr[2])
-{
-    gc_audio *a = ctx;
-    if (!a->fn) {
-        lr[0] = lr[1] = 0;
-        return;
-    }
-    lr[0] = a->fifo[a->fh][0];
-    lr[1] = a->fifo[a->fh][1];
-    a->fh = (a->fh + 1) % GC_AID_FIFO;
-    a->fn--;
-}
-
 static void fetch_stream(void *ctx, int16_t lr[2])
 {
     gc_machine *m = ctx;
@@ -236,30 +230,107 @@ static void fetch_stream(void *ctx, int16_t lr[2])
     lr[1] = (int16_t)(lr[1] * vr / 255);
 }
 
+static int16_t clamp16(int64_t v)
+{
+    return (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v);
+}
+
+static bool hist_silent(const gc_resampler *r)
+{
+    return !(r->hist[0][0] | r->hist[0][1] | r->hist[1][0] | r->hist[1][1] | r->hist[2][0] | r->hist[2][1] |
+             r->hist[3][0] | r->hist[3][1]);
+}
+
+/* gc_resampler_next(&a->rs_dma, out, fetch, a) with the fetch from the DMA's frames (fifo, *fh, *fn) inlined: the
+ * same arithmetic, frame for frame (gc_audio_util.c). t's division is by a constant at the 48 kHz output, and t = 0
+ * (the DMA at 48 kHz: every frame) gives hist[1], as the polynomial does: v = c1 * 0 / 65536 = 0. */
+static inline void rs_dma_next(gc_resampler *r, const int16_t (*fifo)[2], unsigned *fh, unsigned *fn,
+                               int16_t out[2])
+{
+    r->phase += r->in_rate;
+    while (r->phase >= r->out_rate) {
+        r->phase -= r->out_rate;
+        int32_t l = 0, rr = 0; /* an empty FIFO gives silence */
+        if (*fn) {
+            l = fifo[*fh][0];
+            rr = fifo[*fh][1];
+            *fh = (*fh + 1) % GC_AID_FIFO;
+            (*fn)--;
+        }
+        r->hist[0][0] = r->hist[1][0], r->hist[0][1] = r->hist[1][1];
+        r->hist[1][0] = r->hist[2][0], r->hist[1][1] = r->hist[2][1];
+        r->hist[2][0] = r->hist[3][0], r->hist[2][1] = r->hist[3][1];
+        r->hist[3][0] = l, r->hist[3][1] = rr;
+    }
+    if (hist_silent(r)) {
+        out[0] = out[1] = 0;
+        return;
+    }
+    int64_t t = r->out_rate == GC_AUDIO_RATE ? (int64_t)r->phase * 65536 / GC_AUDIO_RATE
+                                             : (int64_t)r->phase * 65536 / r->out_rate;
+    if (t == 0) {
+        out[0] = clamp16(r->hist[1][0]);
+        out[1] = clamp16(r->hist[1][1]);
+        return;
+    }
+    for (int c = 0; c < 2; c++) {
+        int64_t p0 = r->hist[0][c], p1 = r->hist[1][c], p2 = r->hist[2][c], p3 = r->hist[3][c];
+        int64_t c1 = p2 - p0, c2 = 2 * p0 - 5 * p1 + 4 * p2 - p3, c3 = (p3 - p0) + 3 * (p1 - p2);
+        int64_t v = c3 * t / 65536 + c2;
+        v = v * t / 65536 + c1;
+        v = v * t / 65536;
+        out[c] = clamp16(p1 + v / 2);
+    }
+}
+
+/* The 48 kHz frames up to upto: the DMA's resampler, FIFO and the ring in locals for the loop (the stream's fetch
+ * touches none of them). quiet: the stream gives silence and its phase has moved already (produce). */
+static inline __attribute__((always_inline)) void produce_span(gc_machine *m, gc_audio *a, uint64_t upto,
+                                                               bool quiet)
+{
+    gc_resampler *st = &a->rs_stream;
+    gc_resampler rd = a->rs_dma;
+    unsigned fh = a->fh, fn = a->fn, rh = a->rh, rn = a->rn;
+    uint64_t done = a->out_done, overruns = a->overruns;
+    while (done < upto) {
+        int16_t d[2], s[2] = {0, 0};
+        rs_dma_next(&rd, (const int16_t (*)[2])a->fifo, &fh, &fn, d);
+        if (!quiet)
+            gc_resampler_next(st, s, fetch_stream, m);
+        int32_t l = d[0] + s[0], r = d[1] + s[1];
+        if (rn == GC_OUT_RING) {
+            rh = (rh + 1) % GC_OUT_RING;
+            rn--;
+            overruns++;
+        }
+        unsigned i = (rh + rn) % GC_OUT_RING;
+        a->ring[i][0] = (int16_t)(l < -32768 ? -32768 : l > 32767 ? 32767 : l);
+        a->ring[i][1] = (int16_t)(r < -32768 ? -32768 : r > 32767 ? 32767 : r);
+        rn++;
+        done++;
+    }
+    a->rs_dma = rd;
+    a->fh = fh, a->fn = fn, a->rh = rh, a->rn = rn;
+    a->out_done = done, a->overruns = overruns;
+}
+
 static void produce(gc_machine *m, uint64_t upto)
 {
     gc_audio *a = m->audio;
-    while (a->out_done < upto) {
-        int16_t d[2], s[2];
-        gc_resampler_next(&a->rs_dma, d, fetch_dma, a);
-        /* the drive's stream off (or no drive): fetch_stream gives silence and changes nothing (XBA-279) */
-        if ((a->aicr & AICR_PSTAT) && m->di)
-            gc_resampler_next(&a->rs_stream, s, fetch_stream, m);
-        else if (gc_resampler_skip_silence(&a->rs_stream))
-            s[0] = s[1] = 0;
-        else
-            gc_resampler_next(&a->rs_stream, s, fetch_stream, m);
-        int32_t l = d[0] + s[0], r = d[1] + s[1];
-        if (a->rn == GC_OUT_RING) {
-            a->rh = (a->rh + 1) % GC_OUT_RING;
-            a->rn--;
-            a->overruns++;
-        }
-        unsigned i = (a->rh + a->rn) % GC_OUT_RING;
-        a->ring[i][0] = (int16_t)(l < -32768 ? -32768 : l > 32767 ? 32767 : l);
-        a->ring[i][1] = (int16_t)(r < -32768 ? -32768 : r > 32767 ? 32767 : r);
-        a->rn++;
-        a->out_done++;
+    if (a->out_done >= upto)
+        return;
+    /* The drive's stream off (or no drive) and its history silent: every frame it would fetch is silence, so its
+     * output is and only its phase moves, by in_rate a frame less out_rate while it is out_rate or more -- for the
+     * whole span at once: (phase + frames * in_rate) % out_rate (XBA-279). A live stream or a history still
+     * decaying goes frame by frame, as before (so does a phase or rate from a save state that the frame by frame
+     * sum would wrap). */
+    gc_resampler *st = &a->rs_stream;
+    if (!((a->aicr & AICR_PSTAT) && m->di) && hist_silent(st) && st->phase < st->out_rate &&
+        (uint64_t)st->out_rate + st->in_rate <= UINT32_MAX && upto - a->out_done <= UINT32_MAX) {
+        st->phase = (uint32_t)(((uint64_t)st->phase + (upto - a->out_done) * st->in_rate) % st->out_rate);
+        produce_span(m, a, upto, true);
+    } else {
+        produce_span(m, a, upto, false);
     }
 }
 
@@ -298,14 +369,12 @@ void gc_ai_events(gc_machine *m)
 size_t gc_audio_pull(gc_machine *m, int16_t *lr, size_t max_frames)
 {
     gc_audio *a = m->audio;
-    size_t n = 0;
-    while (n < max_frames && a->rn) {
-        lr[2 * n] = a->ring[a->rh][0];
-        lr[2 * n + 1] = a->ring[a->rh][1];
-        a->rh = (a->rh + 1) % GC_OUT_RING;
-        a->rn--;
-        n++;
-    }
+    size_t n = a->rn < max_frames ? a->rn : max_frames;
+    size_t first = GC_OUT_RING - a->rh < n ? GC_OUT_RING - a->rh : n; /* up to the ring's end, then from its start */
+    memcpy(lr, a->ring[a->rh], first * sizeof a->ring[0]);
+    memcpy(lr + 2 * first, a->ring[0], (n - first) * sizeof a->ring[0]);
+    a->rh = (unsigned)((a->rh + n) % GC_OUT_RING);
+    a->rn -= (unsigned)n;
     return n;
 }
 
