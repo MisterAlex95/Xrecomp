@@ -62,3 +62,11 @@ X360_HOST_PAGE=16384 qemu-aarch64 -L "$sysroot" "$work/x360_run" "$work/hello.xe
 cmp "$work/dbg16k.txt" "$here/hello.txt"
 X360_HOST_PAGE=16384 qemu-aarch64 -L "$sysroot" "$work/x360_hle_test"
 echo "arm64 (qemu): the same with 16 KB host pages"
+# the lifted code's loads and stores through two views of one page, at the packs' -O1 and at -O2, both view modes
+for o in 1 2; do
+    for v in 0 1; do
+        "$cc" -O$o -ffp-contract=off -DXE_VIEW4K_DYNAMIC=$v -I "$rt" -I "$repo/consoles/gc/runtime" \
+            -o "$work/x360_mirror_test" "$here/x360_mirror_test.c"
+        qemu-aarch64 -L "$sysroot" "$work/x360_mirror_test"
+    done
+done

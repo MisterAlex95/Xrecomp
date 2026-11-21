@@ -16,6 +16,8 @@ project(console_x360_tests C)
 #                    the float helpers' NaN lanes against the AltiVec rule, and a float digest that must be the same
 #                    on every compiler, -O level and host (run_vmx_ref_matrix.sh)
 #   x360_vmx_ref_ssse3  the same built with -mssse3 (x86-64: the pshufb vperm)
+#   x360_mirror_o1, x360_mirror_o2   the lifted code's GPR loads and stores as packs build them (the base in a local,
+#                    xenon_rt.h) keep their order through two views of one physical page, at -O1 and -O2
 #   x360_window      the renderer on a window's context (xenos_gl_attach at scale 2, the frame texture presented,
 #                    the drawable captured): needs a display (xvfb-run -a ctest -R x360_window), 77 without
 #   x360_play        the test title played by x360_play headless, frame by frame, to its end (run_play.sh;
@@ -91,6 +93,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
         set_tests_properties(x360_vmx_ref_ssse3 PROPERTIES TIMEOUT 120)
     endif()
 endif()
+
+# the lifted code's GPR loads and stores keep their order through two views of one physical page, at -O1 (the packs')
+# and -O2
+foreach(lvl 1 2)
+    add_executable(x360_mirror_o${lvl}_test x360_mirror_test.c)
+    target_include_directories(x360_mirror_o${lvl}_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime
+                                                                ${CMAKE_CURRENT_SOURCE_DIR}/../../gc/runtime)
+    target_compile_options(x360_mirror_o${lvl}_test PRIVATE -Wall -Wextra -Wno-unused-function -O${lvl})
+    add_test(NAME x360_mirror_o${lvl} COMMAND x360_mirror_o${lvl}_test)
+    set_tests_properties(x360_mirror_o${lvl} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+endforeach()
 
 add_executable(xenos_texture_hash_test xenos_texture_hash_test.c)
 target_link_libraries(xenos_texture_hash_test PRIVATE x360_core)
