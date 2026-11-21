@@ -107,6 +107,9 @@ typedef struct xenos_gl_stats {
     uint64_t msaa_views;           /* WP-28: rectangle lists through an MSAA view drawn into its 1x stand-in surfaces */
     int rect_selftest;             /* WP-29: of 3 vertices, those the start-up check of rectangle lists' transform
                                     * feedback capture got back (3: "rect lists OK") */
+    int ds_selftest;               /* WP-38: words of 256 the packed depth resolve and the split one disagree on
+                                    * (checked before the first depth resolve; 0 "depth resolves packed OK"), -1 not
+                                    * checked (no depth resolve yet, or RECOMP_X360_DEPTH_RESOLVE=split) */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

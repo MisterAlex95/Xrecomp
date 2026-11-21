@@ -181,15 +181,16 @@ int main(void)
             }
         }
     }
-    /* depth: depth_write against the put_bytes loop it replaced */
+    /* depth: depth_write against the put_bytes loop it replaced; without stencil, with it, and packed (WP-38: depth |
+     * stencil << 24 in one word, read_depth_stencil's) */
     {
-        uint32_t *dv = malloc(64 * 64 * 4);
+        uint32_t *dv = malloc(64 * 64 * 4), *pv = malloc(64 * 64 * 4);
         uint8_t *sv = malloc(64 * 64);
         for (int i = 0; i < 64 * 64; i++)
-            dv[i] = rnd() & 0xFFFFFFu, sv[i] = (uint8_t)rnd();
+            dv[i] = rnd() & 0xFFFFFFu, sv[i] = (uint8_t)rnd(), pv[i] = dv[i] | (uint32_t)sv[i] << 24;
         for (int wm = 0; wm < 2; wm++)
             for (uint32_t e = 0; e < 4; e++)
-                for (int st = 0; st < 2; st++)
+                for (int st = 0; st < 3; st++)
                     for (uint32_t base = 0x200000u; base <= 0x200002u; base += 2, cases++) {
                         xenos_cp cp;
                         memset(&cp, 0, sizeof cp);
@@ -209,7 +210,10 @@ int main(void)
                             }
                         memcpy(ref, g_mem, PHYS);
                         memcpy(g_mem, g_noise, PHYS);
-                        depth_write(&cp, base, 64, e, dv, s, 3, 2, 61, 48);
+                        if (st == 2)
+                            depth_write(&cp, base, 64, e, pv, NULL, 1, 3, 2, 61, 48);
+                        else
+                            depth_write(&cp, base, 64, e, dv, s, 0, 3, 2, 61, 48);
                         if (memcmp(ref, g_mem, PHYS)) {
                             fprintf(stderr, "depth endian %u stencil %d %s base %08X: differs\n", e, st,
                                     wm ? "wmem" : "write32", base);
@@ -217,6 +221,7 @@ int main(void)
                         }
                     }
         free(dv);
+        free(pv);
         free(sv);
     }
     /* time: a 1920 x 1080 RGBA8 resolve to 8_8_8_8, 8-in-32, red / blue exchanged (Direct3D's A8R8G8B8) */
@@ -242,8 +247,12 @@ int main(void)
         printf("1920 x 1080 5_6_5 resolve write: direct %.2f ms\n", (now_ms() - t3) / 10);
         double t4 = now_ms();
         for (int i = 0; i < 10; i++) /* the picture's bytes as depth values and stencil */
-            depth_write(&cp, 0x100000u, 1920, 2, (const uint32_t *)px, px, 0, 0, 1920, 1080);
+            depth_write(&cp, 0x100000u, 1920, 2, (const uint32_t *)px, px, 0, 0, 0, 1920, 1080);
         printf("1920 x 1080 24_8 depth write: %.2f ms\n", (now_ms() - t4) / 10);
+        double t5 = now_ms();
+        for (int i = 0; i < 10; i++) /* the picture's bytes as packed words (WP-38) */
+            depth_write(&cp, 0x100000u, 1920, 2, (const uint32_t *)px, NULL, 1, 0, 0, 1920, 1080);
+        printf("1920 x 1080 24_8 depth write, packed: %.2f ms\n", (now_ms() - t5) / 10);
     }
     free(px);
     free(ref);
