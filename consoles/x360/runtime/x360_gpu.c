@@ -696,6 +696,29 @@ static void overlap_posted(struct x360_gpu *g)
     pthread_mutex_unlock(&o->mu);
 }
 
+/* Stage 2, from the scheduler when every guest thread is blocked: while the GL thread has posted work (running or
+ * not taken yet), wait for it instead of letting the clock jump to the next deadline. As in stage 1, the GPU's work
+ * then takes no virtual time when the guest waits for it (a fence, an interrupt): without this a title blocked on the
+ * GPU lost frames of virtual time (58 swaps per virtual second instead of 60 on a GPU-bound stretch). Returns 1 when
+ * it waited (the scheduler polls again), 0 when there was nothing to wait for. */
+int x360_gpu_wait_busy(x360_machine *x)
+{
+    struct x360_gpu *g = x->gpu;
+    if (!g || !overlap_remote(g))
+        return 0;
+    gpu_overlap *o = &g->ov;
+    int waited = 0;
+    pthread_mutex_lock(&o->mu);
+    while (o->running ||
+           (!o->held && (uint32_t)(__atomic_load_n(&g->link.post, __ATOMIC_RELAXED) >> 32) !=
+                            __atomic_load_n(&g->link.taken, __ATOMIC_ACQUIRE))) {
+        pthread_cond_wait(&o->done, &o->mu);
+        waited = 1;
+    }
+    pthread_mutex_unlock(&o->mu);
+    return waited;
+}
+
 /* Post half, first part: the registers titles poll, and the write pointer posted when the title moved it (or the
  * run half stalled on a wait that may hold now: it looks again). Guest thread. */
 static void gpu_post(x360_machine *x, struct x360_gpu *g, uint64_t now)
@@ -859,6 +882,7 @@ int x360_gpu_overlap(x360_machine *x, int (*job)(x360_machine *, uint64_t), uint
                 xenos_gl_flush_resolves(g->gl, &g->cp);
                 pthread_mutex_lock(&o->mu);
                 o->running = 0;
+                pthread_cond_broadcast(&o->done);
             }
             continue;
         }
@@ -903,9 +927,9 @@ void x360_gpu_drain(x360_machine *x, int flush_resolves)
             while ((int32_t)(o->drain_ack - mine) < 0)
                 pthread_cond_wait(&o->done, &o->mu);
             pthread_mutex_unlock(&o->mu);
-            if (!g->ring || !__atomic_load_n(&g->link.stalled, __ATOMIC_ACQUIRE) ||
+            if (round == 3 || !g->ring || !__atomic_load_n(&g->link.stalled, __ATOMIC_ACQUIRE) ||
                 stall_retry_useless(x, g, g->last_wptr))
-                break;
+                break; /* the last round posts nothing it would not drain */
             uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_RELAXED);
             __atomic_store_n(&g->link.post, ((post >> 32) + 1) << 32 | g->last_wptr, __ATOMIC_RELEASE);
         }
@@ -932,6 +956,8 @@ static void gpu_hold(x360_machine *x, struct x360_gpu *g)
     if (overlap_remote(g)) { /* stage 2: the GL thread is idle after the drain; it starts nothing until the release */
         pthread_mutex_lock(&g->ov.mu);
         g->ov.held = 1;
+        while (g->ov.running) /* nothing should be running after the drain; never change state under a run */
+            pthread_cond_wait(&g->ov.done, &g->ov.mu);
         pthread_mutex_unlock(&g->ov.mu);
     }
 }

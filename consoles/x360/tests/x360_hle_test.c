@@ -1260,6 +1260,21 @@ static uint32_t fbits32(float f)
     return v;
 }
 
+/* render_test's stage-2 part: the same draw, posted from the CPU worker, drawn on this thread (the GL context's) */
+static uint32_t render_data_phys;
+static int render_job(x360_machine *x, uint64_t draws)
+{
+    (void)x;
+    for (uint64_t k = 0; k < draws; k++) {
+        rreg(0x4800, render_data_phys | 3u), rreg(0x4801, 2u | 32u << 2);
+        rput(3u << 30 | 0u << 16 | (uint32_t)PM4_DRAW_INDX_2 << 8);
+        rput(6u | 2u << 6 | 4u << 16);
+        x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, ring_at);
+        x360_gpu_poll(X);
+    }
+    return 7;
+}
+
 static int render_test(const char *dir)
 {
     char why[256] = "", cache[1024];
@@ -1348,6 +1363,13 @@ static int render_test(const char *dir)
     x360_gpu_poll(X);
     x360_render_counts(X, &drawn, &frames, &fbf);
     CHECK(drawn == 2 && ring_at > start, "drawn after the state was loaded: %llu", (unsigned long long)drawn);
+    /* WP-22 stage 2: draws posted from the worker, run here; a drain makes them all done */
+    render_data_phys = data_phys;
+    int rc = x360_gpu_overlap(X, render_job, 3);
+    x360_gpu_drain(X, 1);
+    x360_render_counts(X, &drawn, &frames, &fbf);
+    CHECK(rc == 7 && drawn == 5, "stage 2: drawn from the worker's posts: %llu (job %d)", (unsigned long long)drawn,
+          rc);
     free(vs);
     free(ps);
     return 0;
