@@ -45,6 +45,9 @@
 #define XGL_PACK_SKIP_PIXELS    0x0D04
 #define XGL_PIXEL_PACK_BUFFER   0x88EB
 #define XGL_PIXEL_PACK_BUFFER_BINDING 0x88ED
+#define XGL_PIXEL_UNPACK_BUFFER 0x88EC
+#define XGL_PIXEL_UNPACK_BUFFER_BINDING 0x88EF
+#define XGL_VIEWPORT            0x0BA2
 #define XGL_STREAM_READ         0x88E1
 #define XGL_BUFFER_SIZE         0x8764
 #define XGL_MAP_READ_BIT        0x0001
@@ -160,6 +163,24 @@ static size_t s_last_cap;
 static int s_last_w, s_last_h, s_last_anum, s_last_aden;
 static host_window_last_fn s_last_fn; /* host_window_present_rgba_shared: the caller has the picture */
 static void *s_last_user;
+/* What the window shows last, for host_window_screenshot_bmp. Written by the presenting thread only (under s_last_mu,
+ * which lets it read it without), read by any thread under s_last_mu. LAST_GPU: a texture (present_texture), read
+ * back when asked by the presenting thread (s_gpu_last, the grab below); s_last then holds the last grab. */
+enum { LAST_NONE, LAST_COPY, LAST_SHARED, LAST_GPU };
+static int s_last_kind;
+static struct {
+    unsigned tex;
+    int w, h, top_down, anum, aden;
+    SDL_GLContext ctx;
+} s_gpu_last;   /* the presenting thread's own: no lock */
+/* A screenshot of a GPU picture asked from another thread: served by the presenting thread at its next
+ * present_texture or pump (a paused game only pumps). Serials and result under s_last_mu. */
+static pthread_cond_t s_grab_cv = PTHREAD_COND_INITIALIZER;
+static int s_grab_req;              /* atomic: a request waits */
+static unsigned s_grab_asked, s_grab_served;
+static int s_grab_ok;               /* the last service read the picture into s_last */
+static pthread_t s_present_thread;  /* the thread that opened the window */
+static void grab_service(void);
 
 static int env_set(const char *name)
 {
@@ -476,6 +497,7 @@ int host_window_open(const char *title, int width, int height, int vsync)
     __atomic_store_n(&s_frames_pub, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&s_fps_centi, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&s_last_present_ns, 0, __ATOMIC_RELAXED);
+    s_present_thread = pthread_self();
     __atomic_store_n(&s_open, 1, __ATOMIC_RELEASE);
     fprintf(stderr, "  [HOST] window: %dx%d, GL%s %d.%d, vsync %s\n", width, height, s_gles ? " ES" : " core",
             s_major, s_minor, s_vsync ? "on" : "off");
@@ -556,6 +578,7 @@ int host_window_pump(void)
         if (s_hook)
             s_hook(&ev, s_hook_user);
     }
+    grab_service();   /* a paused game only pumps: a screenshot asked meanwhile is read here */
     return !s_quit;
 }
 
@@ -601,20 +624,15 @@ static void count_frame(void)
     }
 }
 
-/* host_window_screenshot_bmp: keeps the picture just shown. */
-static void keep_last(const uint8_t *px, int w, int h, int pitch)
+/* The picture into s_last, s_last_mu held; 0 when there is no room for it. */
+static int last_store(const uint8_t *px, int w, int h, int pitch, int anum, int aden)
 {
-    if (w <= 0 || h <= 0)
-        return;
     size_t need = (size_t)w * h * 4;
 
-    pthread_mutex_lock(&s_last_mu);
     if (need > s_last_cap) {
         uint8_t *n = realloc(s_last, need);
-        if (!n) {
-            pthread_mutex_unlock(&s_last_mu);
-            return;
-        }
+        if (!n)
+            return 0;
         s_last = n;
         s_last_cap = need;
     }
@@ -622,9 +640,20 @@ static void keep_last(const uint8_t *px, int w, int h, int pitch)
         memcpy(s_last + (size_t)y * w * 4, px + (size_t)y * pitch, (size_t)w * 4);
     s_last_w = w;
     s_last_h = h;
-    s_last_anum = s_aspect_num;
-    s_last_aden = s_aspect_den;
+    s_last_anum = anum;
+    s_last_aden = aden;
     s_last_fn = NULL;
+    return 1;
+}
+
+/* host_window_screenshot_bmp: keeps the picture just shown. */
+static void keep_last(const uint8_t *px, int w, int h, int pitch)
+{
+    if (w <= 0 || h <= 0)
+        return;
+    pthread_mutex_lock(&s_last_mu);
+    /* No room: an older copy, or a texture's grab, is not this picture. */
+    s_last_kind = last_store(px, w, h, pitch, s_aspect_num, s_aspect_den) ? LAST_COPY : LAST_NONE;
     pthread_mutex_unlock(&s_last_mu);
 }
 
@@ -638,6 +667,7 @@ static void keep_shared(host_window_last_fn fn, void *user, int w, int h)
     s_last_h = h;
     s_last_anum = s_aspect_num;
     s_last_aden = s_aspect_den;
+    s_last_kind = LAST_SHARED;
     pthread_mutex_unlock(&s_last_mu);
 }
 
@@ -875,19 +905,30 @@ static int fg_present(const void *px, int w, int h, int pitch);
 static const uint8_t *rb_picture(unsigned tex, int w, int h, int top_down);
 static void rb_idle(void);
 static int s_rb_feeding;   /* fg_present is given the picture rb_picture returned */
-#endif
 static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down);
+#endif
 
 int host_window_present_texture(unsigned tex, int w, int h, int top_down)
 {
+    int rc;
+
     live_take();
-    if (__atomic_load_n(&s_shot_req, __ATOMIC_RELAXED)) {
-        /* XBA-278: a GPU picture (the GameCube's GX, a PS1 GPU-YUV frame) is kept only for the F12 screenshot. */
-        const uint8_t *px = texture_pixels(tex, w, h, top_down);
-        if (px)
-            keep_last(px, w, h, w * 4);
-        shot_write();
+    /* What is shown, read back only when a screenshot asks for it (grab_service, after the draw; F12 now). */
+    s_gpu_last.tex = tex;
+    s_gpu_last.w = w;
+    s_gpu_last.h = h;
+    s_gpu_last.top_down = top_down;
+    s_gpu_last.anum = s_aspect_num;
+    s_gpu_last.aden = s_aspect_den;
+    s_gpu_last.ctx = SDL_GL_GetCurrentContext();
+    if (s_last_kind != LAST_GPU) {   /* the presenting thread is the only writer: read without the lock */
+        pthread_mutex_lock(&s_last_mu);
+        s_last_kind = LAST_GPU;
+        s_last_fn = NULL;
+        pthread_mutex_unlock(&s_last_mu);
     }
+    if (__atomic_load_n(&s_shot_req, __ATOMIC_RELAXED))
+        shot_write();   /* XBA-278: on this thread, the picture of this present grabbed at once */
 #if defined(XBOXRECOMP_LSFG)
     /* XBA-274: frame generation for a picture the runtime drew on the GPU (the GameCube's GX and GPU-YUV paths):
      * read back while frame generation runs (not under fast-forward, which draws directly, nor once the pacer fell
@@ -898,13 +939,17 @@ int host_window_present_texture(unsigned tex, int w, int h, int top_down)
         s_rb_feeding = 1;
         int taken = px && fg_present(px, w, h, w * 4);
         s_rb_feeding = 0;
-        if (taken)
+        if (taken) {
+            grab_service();
             return 1;
+        }
     } else {
         rb_idle();
     }
 #endif
-    return draw(tex, 0, w, h, top_down);
+    rc = draw(tex, 0, w, h, top_down);
+    grab_service();
+    return rc;
 }
 
 /* The last upload_draw's texture pair and size, for host_window_present_again. */
@@ -1063,7 +1108,7 @@ static void fg_service(uint64_t now)
 
 #endif /* XBOXRECOMP_LSFG */
 
-/* A GPU picture read back (frame generation's pacer, the F12 screenshot): RGBA, row 0 at the top. */
+/* A GPU picture read back (frame generation's pacer; screenshots through texture_grab): RGBA, row 0 at the top. */
 static void (APIENTRY *s_gen_fbs)(int, unsigned *);
 static void (APIENTRY *s_del_fbs)(int, const unsigned *);
 static void (APIENTRY *s_fb_tex2d)(unsigned, unsigned, unsigned, unsigned, int);
@@ -1073,7 +1118,10 @@ static unsigned s_read_fb;
 static uint8_t *s_read_px;
 static size_t s_read_cap;
 static int s_read_failed;
-static SDL_GLContext s_read_ctx;   /* the context s_read_fb and the pack buffers belong to */
+static SDL_GLContext s_read_ctx;   /* the context s_read_fb, s_grab_tex and the pack buffers belong to */
+static unsigned s_grab_tex;        /* texture_grab's RGBA8 target */
+static int s_grab_w, s_grab_h;
+static unsigned char (APIENTRY *s_is_texture)(unsigned);
 
 /* The pack state a read needs, and what the renderer sharing this context had set (put back by pack_leave). */
 typedef struct {
@@ -1132,9 +1180,16 @@ static void read_context_check(void)
     s_read_ctx = now;
     s_read_fb = 0;
     s_read_failed = 0;
+    s_grab_tex = 0;
+    s_grab_w = s_grab_h = 0;
 #if defined(XBOXRECOMP_LSFG)
     rb_forget();
 #endif
+    if (s_last_kind == LAST_GPU && s_gpu_last.ctx != now) {   /* the texture shown was the old context's */
+        pthread_mutex_lock(&s_last_mu);
+        s_last_kind = LAST_NONE;
+        pthread_mutex_unlock(&s_last_mu);
+    }
 }
 
 /* The read-back's framebuffer bound with tex attached; 0 when that is incomplete (read_detach in both cases). */
@@ -1151,27 +1206,37 @@ static void read_detach(void)
     s_gl.BindFramebuffer(XGL_FRAMEBUFFER, 0);
 }
 
-/* The pixels of a texture of the window's context as they are now (RGBA, packed, row 0 at the top), through a
- * framebuffer of our own: the F12 screenshot, and frame generation when no earlier read-back can serve. NULL when it
- * cannot be read (no framebuffer objects, an incomplete attachment). The buffer stays valid until the next read. */
+/* The read-back's framebuffer, made the first time; 0 when there are no framebuffer objects. */
+static int read_fb_make(void)
+{
+    if (s_read_fb)
+        return 1;
+    s_gen_fbs = (void (APIENTRY *)(int, unsigned *))SDL_GL_GetProcAddress("glGenFramebuffers");
+    s_del_fbs = (void (APIENTRY *)(int, const unsigned *))SDL_GL_GetProcAddress("glDeleteFramebuffers");
+    s_bind_buffer = (void (APIENTRY *)(unsigned, unsigned))SDL_GL_GetProcAddress("glBindBuffer");
+    s_fb_tex2d = (void (APIENTRY *)(unsigned, unsigned, unsigned, unsigned, int))
+        SDL_GL_GetProcAddress("glFramebufferTexture2D");
+    s_fb_status = (unsigned (APIENTRY *)(unsigned))SDL_GL_GetProcAddress("glCheckFramebufferStatus");
+    s_is_texture = (unsigned char (APIENTRY *)(unsigned))SDL_GL_GetProcAddress("glIsTexture");
+    if (s_gen_fbs && s_fb_tex2d && s_fb_status)
+        s_gen_fbs(1, &s_read_fb);
+    return s_read_fb != 0;
+}
+
+#if defined(XBOXRECOMP_LSFG)
+/* The raw pixels of a texture of the window's context as they are now (RGBA, packed, row 0 at the top), through a
+ * framebuffer of our own: frame generation's read-back. Its sampler state (an X360 frame's swizzle) is not applied
+ * and a float texture may not be readable as bytes: screenshots use texture_grab. NULL when it cannot be read (no
+ * framebuffer objects, an incomplete attachment). The buffer stays valid until the next read. */
 static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
 {
     read_context_check();
     if (s_read_failed || !tex || w <= 0 || h <= 0)
         return NULL;
     if (!s_read_fb) {
-        s_gen_fbs = (void (APIENTRY *)(int, unsigned *))SDL_GL_GetProcAddress("glGenFramebuffers");
-        s_del_fbs = (void (APIENTRY *)(int, const unsigned *))SDL_GL_GetProcAddress("glDeleteFramebuffers");
-        s_bind_buffer = (void (APIENTRY *)(unsigned, unsigned))SDL_GL_GetProcAddress("glBindBuffer");
-        s_fb_tex2d = (void (APIENTRY *)(unsigned, unsigned, unsigned, unsigned, int))
-            SDL_GL_GetProcAddress("glFramebufferTexture2D");
-        s_fb_status = (unsigned (APIENTRY *)(unsigned))SDL_GL_GetProcAddress("glCheckFramebufferStatus");
-        if (s_gen_fbs && s_fb_tex2d && s_fb_status)
-            s_gen_fbs(1, &s_read_fb);
-        if (!s_read_fb) {
+        if (!read_fb_make()) {
             s_read_failed = 1;
-            fprintf(stderr, "  [HOST] window: no framebuffer objects: frame generation and screenshots skip GPU "
-                            "pictures\n");
+            fprintf(stderr, "  [HOST] window: no framebuffer objects: frame generation skips GPU pictures\n");
             return NULL;
         }
     }
@@ -1187,8 +1252,7 @@ static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
     read_detach();
     if (!ok) {
         s_read_failed = 1;
-        fprintf(stderr, "  [HOST] window: a GPU picture cannot be read back: frame generation and screenshots skip "
-                        "them\n");
+        fprintf(stderr, "  [HOST] window: a GPU picture cannot be read back: frame generation skips them\n");
         return NULL;
     }
     /* The texture's row 0 comes first: the top when top_down, else the bottom (flipped here). */
@@ -1207,12 +1271,148 @@ static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
     }
     return s_read_px;
 }
+#endif
+
+/* The longest side of a grab: a 4x internal resolution is read at 1920 (drawn smaller, sampled). */
+#define GRAB_MAX_SIDE 1920
+
+/* Texture tex as the window samples it (its swizzle, any format the present program reads), drawn with the plain
+ * present program into an RGBA8 target of gw x gh and read back: RGBA, packed, row 0 the picture's top, in s_read_px.
+ * Touches only what draw() sets anyway (framebuffer, viewport, program, unit 0, vertex array, the tests it turns
+ * off) and the pack state (put back); ends with framebuffer 0 and the viewport it found. NULL when it cannot; nothing
+ * is latched (the next request tries again). */
+static const uint8_t *texture_grab(unsigned tex, int top_down, int gw, int gh)
+{
+    int vp[4] = {0, 0, 0, 0};
+
+    read_context_check();
+    if (!tex || gw <= 0 || gh <= 0 || !s_prog || !s_vao || !read_fb_make())
+        return NULL;
+    if (!read_room((size_t)gw * (size_t)gh * 4))
+        return NULL;
+    s_gl.ActiveTexture(XGL_TEXTURE0);
+    if (!s_grab_tex || s_grab_w != gw || s_grab_h != gh) {
+        int unpack = 0;
+        if (!s_grab_tex)
+            s_gl.GenTextures(1, &s_grab_tex);
+        if (!s_grab_tex)
+            return NULL;
+        s_gl.BindTexture(XGL_TEXTURE_2D, s_grab_tex);
+        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_MIN_FILTER, XGL_NEAREST);
+        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_MAG_FILTER, XGL_NEAREST);
+        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_WRAP_S, XGL_CLAMP_TO_EDGE);
+        s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_WRAP_T, XGL_CLAMP_TO_EDGE);
+        /* A renderer's unpack buffer would be read as the texture's (absent) pixels. */
+        s_gl.GetIntegerv(XGL_PIXEL_UNPACK_BUFFER_BINDING, &unpack);
+        if (unpack && s_bind_buffer)
+            s_bind_buffer(XGL_PIXEL_UNPACK_BUFFER, 0);
+        s_gl.TexImage2D(XGL_TEXTURE_2D, 0, (int)XGL_RGBA8, gw, gh, 0, XGL_RGBA, XGL_UNSIGNED_BYTE, NULL);
+        if (unpack && s_bind_buffer)
+            s_bind_buffer(XGL_PIXEL_UNPACK_BUFFER, (unsigned)unpack);
+        s_grab_w = gw;
+        s_grab_h = gh;
+    }
+    s_gl.GetIntegerv(XGL_VIEWPORT, vp);
+    int ok = read_attach(s_grab_tex);
+    if (ok) {
+        PackState pack;
+        s_gl.ColorMask(1, 1, 1, 1);
+        s_gl.Disable(XGL_CULL_FACE);
+        s_gl.Disable(XGL_STENCIL_TEST);
+        s_gl.Disable(XGL_SCISSOR_TEST);
+        s_gl.Disable(XGL_BLEND);
+        s_gl.Disable(XGL_DEPTH_TEST);
+        s_gl.Viewport(0, 0, gw, gh);
+        s_gl.UseProgram(s_prog);
+        s_gl.BindTexture(XGL_TEXTURE_2D, tex);
+        s_gl.Uniform1i(s_u_tex, 0);
+        /* Read-back row 0 is the target's bottom: the picture's top goes there (draw() flips the other way). */
+        s_gl.Uniform1f(s_u_flip, top_down ? 0.0f : 1.0f);
+        s_gl.BindVertexArray(s_vao);
+        s_gl.DrawArrays(XGL_TRIANGLES, 0, 3);
+        s_gl.BindVertexArray(0);
+        pack_enter(&pack);
+        s_gl.ReadPixels(0, 0, gw, gh, XGL_RGBA, XGL_UNSIGNED_BYTE, s_read_px);
+        pack_leave(&pack);
+    }
+    read_detach();
+    s_gl.Viewport(vp[0], vp[1], vp[2], vp[3]);
+    return ok ? s_read_px : NULL;
+}
+
+/* The picture present_texture showed last, grabbed into s_last (presenting thread). 0, with the reason on stderr,
+ * when it cannot be had now: no window, another context current (the app in the background), the texture gone. */
+static int grab_now(void)
+{
+    const char *why = NULL;
+    int w = s_gpu_last.w, h = s_gpu_last.h, gw = w, gh = h;
+
+    if (!s_win || !s_gpu_last.tex || w <= 0 || h <= 0)
+        why = "nothing shown";
+    else if (!s_gpu_last.ctx || SDL_GL_GetCurrentContext() != s_gpu_last.ctx)
+        why = "not the context it was shown in";
+    else if (!read_fb_make())
+        why = "no framebuffer objects";
+    else if (s_is_texture && !s_is_texture(s_gpu_last.tex))
+        why = "its texture is gone";
+    if (!why) {
+        if (w > GRAB_MAX_SIDE || h > GRAB_MAX_SIDE) {   /* the shape kept */
+            gw = w >= h ? GRAB_MAX_SIDE : (int)((int64_t)w * GRAB_MAX_SIDE / h);
+            gh = w >= h ? (int)((int64_t)h * GRAB_MAX_SIDE / w) : GRAB_MAX_SIDE;
+            gw = gw > 0 ? gw : 1;
+            gh = gh > 0 ? gh : 1;
+        }
+        unsigned before = s_gl.GetError();   /* the renderer's, not the grab's */
+        if (before)
+            fprintf(stderr, "  [HOST] window: GL error 0x%04x before a screenshot\n", before);
+        const uint8_t *px = texture_grab(s_gpu_last.tex, s_gpu_last.top_down, gw, gh);
+        unsigned err = s_gl.GetError();
+        if (!px || err) {
+            why = "it cannot be drawn into a picture of our own";
+        } else {
+            pthread_mutex_lock(&s_last_mu);
+            int stored = s_last_kind == LAST_GPU &&
+                         last_store(px, gw, gh, gw * 4, s_gpu_last.anum, s_gpu_last.aden);
+            pthread_mutex_unlock(&s_last_mu);
+            if (stored)
+                return 1;
+            why = "no memory";
+        }
+    }
+    fprintf(stderr, "  [HOST] window: screenshot: the picture shown cannot be read (%s)\n", why);
+    return 0;
+}
+
+/* A screenshot asked from another thread, read here on the presenting thread; one atomic load when none is. */
+static void grab_service(void)
+{
+    unsigned asked;
+
+    if (!__atomic_load_n(&s_grab_req, __ATOMIC_ACQUIRE))
+        return;
+    pthread_mutex_lock(&s_last_mu);
+    __atomic_store_n(&s_grab_req, 0, __ATOMIC_RELAXED);
+    asked = s_grab_asked;
+    int gpu = s_last_kind == LAST_GPU;
+    pthread_mutex_unlock(&s_last_mu);
+    int ok = gpu && grab_now();   /* not a GPU picture any more: the waiter takes the copy (it sees the kind) */
+    pthread_mutex_lock(&s_last_mu);
+    s_grab_served = asked;
+    s_grab_ok = ok;
+    pthread_cond_broadcast(&s_grab_cv);
+    pthread_mutex_unlock(&s_last_mu);
+}
 
 /* The read-back's framebuffer and memory, while the window's context is current. */
 static void read_release(void)
 {
-    if (s_read_fb && s_del_fbs && SDL_GL_GetCurrentContext() == s_read_ctx)
+    int current = SDL_GL_GetCurrentContext() == s_read_ctx;
+    if (s_read_fb && s_del_fbs && current)
         s_del_fbs(1, &s_read_fb);
+    if (s_grab_tex && current && s_gl.DeleteTextures)
+        s_gl.DeleteTextures(1, &s_grab_tex);
+    s_grab_tex = 0;
+    s_grab_w = s_grab_h = 0;
     s_read_fb = 0;
     s_read_failed = 0;
     s_read_ctx = NULL;
@@ -1663,6 +1863,41 @@ int host_window_stats(uint32_t *fps_centi, uint64_t *frames)
     return open;
 }
 
+/* How long a screenshot from another thread waits for the presenting thread to read a GPU picture. */
+#define GRAB_WAIT_MS 500
+
+/* s_last_mu held, the picture shown a texture: has it read into s_last (released while the presenting thread works).
+ * 1 when s_last holds it now, or when what is shown changed meanwhile (the caller looks at s_last_kind again); 0 when
+ * it cannot be had (the texture gone, nothing presenting or pumping for GRAB_WAIT_MS, the window closed). */
+static int grab_wait(void)
+{
+    if (pthread_equal(pthread_self(), s_present_thread)) {
+        pthread_mutex_unlock(&s_last_mu);
+        int ok = grab_now();
+        pthread_mutex_lock(&s_last_mu);
+        return ok || s_last_kind != LAST_GPU;
+    }
+    unsigned mine = ++s_grab_asked;
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);   /* pthread_cond_timedwait's clock everywhere (macOS has no other) */
+    until.tv_sec += GRAB_WAIT_MS / 1000;
+    until.tv_nsec += (long)(GRAB_WAIT_MS % 1000) * 1000000L;
+    if (until.tv_nsec >= 1000000000L) {
+        until.tv_sec++;
+        until.tv_nsec -= 1000000000L;
+    }
+    __atomic_store_n(&s_grab_req, 1, __ATOMIC_RELEASE);
+    while (s_last_kind == LAST_GPU && (int)(s_grab_served - mine) < 0) {
+        if (pthread_cond_timedwait(&s_grab_cv, &s_last_mu, &until) != 0 && (int)(s_grab_served - mine) < 0) {
+            if (s_grab_asked == mine)   /* nobody else waits: the request is withdrawn */
+                __atomic_store_n(&s_grab_req, 0, __ATOMIC_RELAXED);
+            fprintf(stderr, "  [HOST] window: screenshot: nothing presented or pumped in %d ms\n", GRAB_WAIT_MS);
+            return 0;
+        }
+    }
+    return s_last_kind != LAST_GPU || s_grab_ok;
+}
+
 int host_window_screenshot_bmp(const char *path)
 {
     uint8_t *px = NULL, hdr[54], *line;
@@ -1671,6 +1906,10 @@ int host_window_screenshot_bmp(const char *path)
     if (!path || !path[0])
         return -1;
     pthread_mutex_lock(&s_last_mu);
+    if ((s_last_kind == LAST_GPU && !grab_wait()) || s_last_kind == LAST_NONE) {
+        pthread_mutex_unlock(&s_last_mu);
+        return -1;
+    }
     host_window_last_fn fn = s_last_fn;
     void *user = s_last_user;
     w = s_last_w;
@@ -1783,7 +2022,13 @@ void host_window_close(void)
     s_last_cap = 0;
     s_last_w = s_last_h = 0;
     s_last_fn = NULL;
+    s_last_kind = LAST_NONE;
+    s_grab_served = s_grab_asked;   /* a screenshot waiting gets -1 now */
+    s_grab_ok = 0;
+    __atomic_store_n(&s_grab_req, 0, __ATOMIC_RELAXED);
+    pthread_cond_broadcast(&s_grab_cv);
     pthread_mutex_unlock(&s_last_mu);
+    memset(&s_gpu_last, 0, sizeof s_gpu_last);
     SDL_DelEventWatch(lifecycle_watch, NULL);
     host_pad_shutdown();
     if (s_ctx) {

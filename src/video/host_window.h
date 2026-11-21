@@ -49,8 +49,10 @@ int host_window_open(const char *title, int width, int height, int vsync);
 
 /* Handles the pending events: quit, resize, app background / foreground
  * (recomp_lifecycle_pause / resume) and pads (host_pad_handle_event), then
- * the hook, if any. Returns 0 once quit was asked (window closed, SDL_QUIT),
- * 1 otherwise. */
+ * the hook, if any; then serves a host_window_screenshot_bmp of a GPU picture
+ * asked from another thread (a paused game only pumps), between two frames:
+ * the window's context is the window's then. Returns 0 once quit was asked
+ * (window closed, SDL_QUIT), 1 otherwise. */
 int host_window_pump(void);
 
 /* Called by host_window_pump for every event, after the host layer's own
@@ -84,7 +86,8 @@ int host_window_present_again(void);
  * the real and generated frames of its timed FIFO at their due times, during the next presents and during
  * host_window_sleep_until. Fast-forward (recomp_ff_active) draws directly; a state load (recomp_states_loads), the
  * app pausing or resuming and the in-game menu start a fresh history; host_window_screenshot_bmp keeps the last
- * real picture, host_window_capture never captures a generated one. Not used by host_window_present_texture. */
+ * real picture, host_window_capture never captures a generated one. host_window_present_texture reads its texture
+ * back for the pacer (GC-003). */
 
 /* Sleeps until CLOCK_MONOTONIC deadline_ns (xbox_HostNowNs), drawing the frame generation FIFO's entries at their
  * due times meanwhile; a plain sleep without frame generation. The runtimes' frame pacing sleeps through it. */
@@ -96,7 +99,11 @@ int host_window_framegen_active(void);
 /* Presents texture `tex` of this context (w x h, its aspect kept). top_down:
  * 1 when its row 0 is the top of the picture (uploaded pixels), 0 when it is
  * the bottom (a texture rendered by GL). Binds framebuffer 0, draws, swaps.
- * Returns 1, or 0 on a GL error. */
+ * The texture is remembered, not copied: a host_window_screenshot_bmp asked
+ * meanwhile is read from it after the swap, here or at the next
+ * host_window_pump, so it must stay alive until the next present (or be
+ * deleted on this thread: the screenshot then fails). Returns 1, or 0 on a
+ * GL error. */
 int host_window_present_texture(unsigned tex, int w, int h, int top_down);
 
 /* How host_window_present_rgba / _texture fit the picture in the window.
@@ -186,12 +193,20 @@ void host_window_request_picture(int scale, int filter, const HostShader *s);
  * (both outputs 0). */
 int host_window_stats(uint32_t *fps_centi, uint64_t *frames);
 
-/* Writes the last picture host_window_present_rgba showed, as a 24-bit BMP,
- * from any thread (also while the game is held: a copy of it is kept). It is
+/* Writes the last picture presented, as a 24-bit BMP, from any thread (also
+ * while the game is held). host_window_present_rgba keeps a copy of it;
+ * host_window_present_texture's texture is read when asked: drawn by the
+ * presenting thread with the plain present program into an RGBA8 picture of
+ * its own (its sampler swizzle applied, a float texture too; no overlay,
+ * shader or letterbox), at its next present or host_window_pump, at most
+ * 1920 pixels on the long side. From another thread the call waits for that,
+ * 500 ms at most: call it off the UI thread (the Android callers are). It is
  * the picture at its own size, reshaped to host_window_set_aspect's shape
- * when one is set (nearest, never smaller: 256x240 at 4:3 -> 320x240), no
- * letterbox. Returns 0, or -1 when no picture was presented since open or the
- * file cannot be written. */
+ * (the one it was shown at) when one is set (nearest, never smaller: 256x240
+ * at 4:3 -> 320x240), no letterbox. Returns 0, or -1 when no picture was
+ * presented since open, a texture cannot be read now (deleted, the context
+ * lost, nothing presenting or pumping for 500 ms, the window closed) or the
+ * file cannot be written. A failure is not kept: the next call tries again. */
 int host_window_screenshot_bmp(const char *path);
 
 /* The window's own keys (XBA-278, src/platform/recomp_window_keys.h), handled by host_window_pump before the hook:

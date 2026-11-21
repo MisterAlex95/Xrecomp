@@ -3199,6 +3199,8 @@ The screenshot: taken when the box is ticked (the frame the runtime shows, `Comp
 game held behind the menu), decoded near size, downscaled to 640 px on its longest side, JPEG (quality 85, lower
 until it fits) under `CrashReport.SHOT_MAX` (512 KB); the preview is those exact bytes decoded. Unticking drops it. No
 frame: the box unticks itself and says so. The log gathering, the picture and the send run off the UI thread.
+A game presented as a texture (Xbox 360, GameCube GX / GPU-YUV) has its frame read by the game's thread at its next
+pump, held games included (`host_window_screenshot_bmp`, 500 ms at most); the cover shot and the panel screenshot too.
 
 ### Breadcrumbs (XBA-340)
 

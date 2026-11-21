@@ -72,3 +72,9 @@ set_tests_properties(host_layer_fg_readback PROPERTIES SKIP_RETURN_CODE 77 TIMEO
 # XBA-243: the performance overlay's text fed by each console's performance line, no display
 add_test(NAME host_layer_overlay COMMAND host_layer_test overlay)
 set_tests_properties(host_layer_overlay PROPERTIES TIMEOUT 60)
+# host_window_screenshot_bmp of a texture present (the X360 runtime, the GameCube's GX and GPU-YUV paths): grabbed by
+# the presenting thread at its next present or pump, sampled as the window samples it; skipped (77) like the window test
+add_executable(host_layer_grab test_grab.c)
+target_link_libraries(host_layer_grab PRIVATE xbr_host)
+add_test(NAME host_layer_grab COMMAND host_layer_grab)
+set_tests_properties(host_layer_grab PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
