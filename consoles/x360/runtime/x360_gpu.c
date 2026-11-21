@@ -20,13 +20,16 @@
  * guest memory (read pointer write-back, MEM_WRITE / REG_TO_MEM / COND_WRITE / EVENT_WRITE_*, scratch write-back,
  * resolves, memory export), a stalled flag (an unmet WAIT_REG_MEM: post again) and an interrupt-pending word the
  * post half turns into raise_irq; x360_gpu_drain finishes what was posted (save states, rewind, lazy-resolve
- * flushes) and gpu_hold / gpu_release bracket a change of the run half's state from the guest side (VdInitialize
- * RingBuffer, VdEnableRingBufferRPtrWriteBack, a state load). Stage 1: the run half is called right after the post,
+ * flushes; only on the run half's own thread: elsewhere it leaves posted work posted) and gpu_hold / gpu_release
+ * bracket a change of the run half's state from the guest side (VdInitializeRingBuffer, VdEnableRingBuffer
+ * RPtrWriteBack). Stage 1: the run half is called right after the post,
  * on the same thread, so runs are what they were before the split, frame for frame and byte for byte. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#include <pthread.h>
 
 #include "x360_internal.h"
 #include "xenos_cp.h"
@@ -64,6 +67,11 @@ struct x360_gpu {
     int ring;
     int irq_thread; /* the interrupt context's slot, -1 before the first interrupt */
     gpu_link link;  /* the seam */
+    /* the thread the run half belongs to (the renderer's GL context): the one that attached the renderer, else the
+     * first to run packets. x360_gpu_drain elsewhere (an app's menu or auto-save thread) leaves posted work posted. */
+    pthread_t owner;
+    int owner_set;
+    int deferred; /* x360_gpu_set_deferred: x360_gpu_poll posts only; x360_gpu_run / _drain run (stage 2's hook) */
     /* the run half's host state (from here down) */
     char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
     /* --dump-shaders without a file system call per load (host state, not in save states): the (stage, CRC) of each
@@ -216,6 +224,7 @@ int x360_set_renderer_ex(x360_machine *x, const char *shader_cache, const char *
     if (x->log)
         xenos_gl_set_log(gl, x->log);
     g->gl = gl;
+    g->owner = pthread_self(), g->owner_set = 1; /* the GL context is current here: the run half's thread */
     g->cp.render_ctx = gl;
     g->cp.draw_hook = gl_draw;
     g->cp.swap_hook = gl_swap;
@@ -495,13 +504,19 @@ static void gpu_take_irq(struct x360_gpu *g)
     }
 }
 
-/* the seam as the run half's state stands (after the guest side changed it under gpu_hold, or loaded it): nothing
- * posted is left to run, the stalled flag is the command processor's */
-static void link_sync(struct x360_gpu *g)
+/* the seam after the guest side replaced the run half's state (a ring initialised, a state loaded), from the command
+ * processor: its stalled flag; what was posted before is dropped (it was for the old ring / the old timeline), except
+ * that after a load a post is made pending again when the loaded command processor is behind the loaded write
+ * pointer (a state saved where the drain could not run: posted, not run). A drained state has cp.wptr == last_wptr. */
+static void link_sync(struct x360_gpu *g, int loaded)
 {
     uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_RELAXED);
-    __atomic_store_n(&g->link.taken, (uint32_t)(post >> 32), __ATOMIC_RELAXED);
+    uint32_t seq = (uint32_t)(post >> 32), size_dw = g->cp.rb_size / 4;
     __atomic_store_n(&g->link.stalled, (uint32_t)(g->cp.stalled != 0), __ATOMIC_RELAXED);
+    if (loaded && g->ring && size_dw && g->cp.wptr != g->last_wptr % size_dw)
+        __atomic_store_n(&g->link.post, (uint64_t)(seq + 1) << 32 | g->last_wptr, __ATOMIC_RELEASE);
+    else
+        __atomic_store_n(&g->link.taken, seq, __ATOMIC_RELAXED);
 }
 
 /* Run half: the packets up to the write pointer last posted (draws, resolves, swaps through the renderer's hooks).
@@ -516,6 +531,8 @@ int x360_gpu_run(x360_machine *x)
     uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_ACQUIRE);
     if ((uint32_t)(post >> 32) == __atomic_load_n(&g->link.taken, __ATOMIC_RELAXED))
         return 0;
+    if (!g->owner_set)
+        g->owner = pthread_self(), g->owner_set = 1;
     uint32_t w = (uint32_t)post;
     uint64_t t0 = mono_ns(), c0 = thread_cpu_ns();
     xenos_cp_set_wptr(&g->cp, w);
@@ -571,36 +588,54 @@ void x360_gpu_poll(x360_machine *x)
         return;
     uint64_t now = x360_now(x);
     gpu_post(x, g, now);
-    x360_gpu_run(x); /* stage 1: the run half right here, on the guest thread (a later stage wakes the GL thread) */
+    if (!g->deferred)
+        x360_gpu_run(x); /* stage 1: the run half right here, on the guest thread (a later stage wakes the GL thread) */
     gpu_post_irq(x, g, now);
+}
+
+void x360_gpu_set_deferred(x360_machine *x, int on)
+{
+    struct x360_gpu *g = gpu_of(x);
+    if (g)
+        g->deferred = on != 0;
 }
 
 /* Everything posted run to its end, and (flush_resolves) the lazy resolves written to guest memory, the interrupts
  * the run half raised queued on the post side: afterwards guest memory and the GPU state are what a save state takes,
  * as long as the post side posts nothing new (the caller holds the machine: s_mu, x360_run not running). Stage 1:
- * the run half is called here; a later stage hands the request to the GL thread and waits for it. */
+ * the run half is called here; a later stage hands the request to the GL thread and waits for it.
+ * Only on the run half's thread: elsewhere (an app's menu or auto-save thread, no GL context) nothing runs and
+ * nothing is flushed; posted work stays posted (a state then has the command processor behind its write pointer,
+ * and link_sync posts again after loading it) and lazy resolves stay pending (the title resolves them again). */
 void x360_gpu_drain(x360_machine *x, int flush_resolves)
 {
     struct x360_gpu *g = x->gpu;
     if (!g)
         return;
+    if (g->owner_set && !pthread_equal(pthread_self(), g->owner)) {
+        gpu_take_irq(g);
+        return;
+    }
     x360_gpu_run(x);
     if (flush_resolves && g->gl)
         xenos_gl_flush_resolves(g->gl, &g->cp);
     gpu_take_irq(g);
 }
 
-/* A change of the run half's state from the guest side (a Vd* call, a state load) between gpu_hold and gpu_release:
- * drained first, so nothing posted runs against the old state; a later stage also takes the run half's mutex here. */
+/* A Vd* call that changes the run half's state from the guest side, between gpu_hold and gpu_release: drained first
+ * where the drain can run, so nothing posted runs against the state changed under it; a later stage also takes the
+ * run half's mutex here. replaced (the ring initialised): link_sync drops what was posted for the old ring. States
+ * do not use the bracket: x360_state_save / state_load drain at their start, x360_gpu_state calls link_sync. */
 static void gpu_hold(x360_machine *x, struct x360_gpu *g)
 {
     (void)g;
     x360_gpu_drain(x, 0);
 }
 
-static void gpu_release(struct x360_gpu *g)
+static void gpu_release(struct x360_gpu *g, int replaced)
 {
-    link_sync(g);
+    if (replaced)
+        link_sync(g, 0);
 }
 
 /* save states (x360_state.c): the command processor and the interrupt state, field by field */
@@ -609,7 +644,8 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
 {
     struct x360_gpu *g = gpu_of(x);
     xenos_cp *cp = &g->cp;
-    gpu_hold(x, g); /* x360_state_save / _load drained already: nothing to run, only the bracket */
+    /* no gpu_hold: x360_state_save / state_load drained at their start (where a drain can run); a drain here, between
+     * sections, would run posted work against a half-loaded machine */
     for (uint32_t k = 0; k < XENOS_REGS; k++)
         u32(s, &cp->regs[k]);
     u32(s, &cp->rb_base);
@@ -662,7 +698,8 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
         g->irq_cpus &= 0x3F;
     } else if (load)
         g->irq_cpus = 0;
-    gpu_release(g); /* a load: the seam follows the loaded command processor (its stalled flag) */
+    if (load)
+        link_sync(g, 1); /* the seam follows the loaded command processor */
 }
 
 uint64_t x360_gpu_next_event(x360_machine *x)
@@ -675,20 +712,15 @@ uint64_t x360_gpu_next_event(x360_machine *x)
 void x360_gpu_bin_reset(x360_machine *x)
 {
     struct x360_gpu *g = x->gpu;
-    if (g) {
-        gpu_hold(x, g);
-        g->cp.bin_mask = g->cp.bin_select = 0xFFFFFFFFu;
-        gpu_release(g);
-    }
+    if (g)
+        g->cp.bin_mask = g->cp.bin_select = 0xFFFFFFFFu; /* in state_load, drained (see x360_gpu_state) */
 }
 
 void x360_gpu_bin_state(x360_machine *x, void *s, void (*u64)(void *, uint64_t *))
 {
-    struct x360_gpu *g = gpu_of(x);
-    gpu_hold(x, g);
+    struct x360_gpu *g = gpu_of(x); /* drained by x360_state_save / state_load (see x360_gpu_state) */
     u64(s, &g->cp.bin_mask);
     u64(s, &g->cp.bin_select);
-    gpu_release(g);
 }
 
 /* packets, draws and swaps are the run half's counters: read as they stand (a later stage: after a drain, or racy for
@@ -710,7 +742,7 @@ void x360_k_VdInitializeRingBuffer(x360_machine *x, x360_thread *t, xe_cpu *c)
     struct x360_gpu *g = gpu_of(x);
     gpu_hold(x, g);
     xenos_cp_ring_init(&g->cp, A(0), A(1)); /* (physical address, log2 of the size in quadwords) */
-    gpu_release(g);
+    gpu_release(g, 1);
     g->ring = 1;
     g->last_wptr = 0;
     x360_w32(x, GPU_MMIO + 4 * XENOS_REG_CP_RB_WPTR, 0);
@@ -723,7 +755,7 @@ void x360_k_VdEnableRingBufferRPtrWriteBack(x360_machine *x, x360_thread *t, xe_
     struct x360_gpu *g = gpu_of(x);
     gpu_hold(x, g);
     g->cp.rptr_writeback = A(0);
-    gpu_release(g);
+    gpu_release(g, 0);
     RET(0);
 }
 

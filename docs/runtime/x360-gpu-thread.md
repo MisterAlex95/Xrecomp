@@ -36,10 +36,24 @@ The order of everything guest-visible is the order before the split, which is wh
 | `link.stalled` (u32) | run → post | the command processor stopped at an unmet `WAIT_REG_MEM`; the post side posts the same pointer again at its next poll (before the split: `\|\| g->cp.stalled`). |
 | `link.irq` (u32) | run → post, `fetch_or` / `exchange` | `PM4_INTERRUPT`: `LINK_IRQ_SRC1` and one bit per CPU of its mask (`LINK_IRQ_SRC0` reserved). `gpu_take_irq` turns it into `irq_pending` / `irq_cpus`, which `raise_irq` consumes. The run half never creates or restarts a guest thread. |
 | guest memory | run → guest | word stores through `phys_write` (`cp.write32`) and the renderer's direct resolve stores into `cp.wmem`. Plain stores, as a bus master's; a release fence in `xenos_cp_set_wptr` orders a run's stores before its read-pointer write-back. |
-| `x360_gpu_drain(x, flush_resolves)` | post → run, synchronous | everything posted run to its end, the lazy resolves written to memory if asked, the run half's interrupts queued on the post side. Called by `x360_state_save`, `state_load` (both in `x360_state.c`) and `x360_render_flush`. |
-| `gpu_hold` / `gpu_release` | post side brackets | a change of run-half state from the guest side: drain first; on release the seam is re-synchronised from the command processor (`link_sync`: nothing pending, `stalled` copied). Used by `VdInitializeRingBuffer`, `VdEnableRingBufferRPtrWriteBack`, `x360_gpu_state`, `x360_gpu_bin_state` / `_reset`. |
+| `x360_gpu_drain(x, flush_resolves)` | post → run, synchronous | everything posted run to its end, the lazy resolves written to memory if asked, the run half's interrupts queued on the post side. Called by `x360_state_save`, `state_load` (both in `x360_state.c`, at their start, never between sections) and `x360_render_flush`. **Only on the run half's thread** (below). |
+| `gpu_hold` / `gpu_release` | post side brackets | a Vd* call that changes run-half state: drain first; after `VdInitializeRingBuffer` the seam is re-synchronised (`link_sync`: what was posted for the old ring dropped, `stalled` copied). Used by `VdInitializeRingBuffer`, `VdEnableRingBufferRPtrWriteBack`. |
+| `link_sync` after a load | `x360_gpu_state` | `stalled` copied from the loaded command processor; a post is made pending again when the loaded `cp.wptr` is behind the loaded `last_wptr` (a state saved where the drain could not run), else nothing is pending. |
+| `x360_gpu_set_deferred(x, on)` | host knob | `x360_gpu_poll` posts without running; `x360_gpu_run` / `_drain` run. Off by default; stage 2's hook and the seam test's. |
 
-The link is host state, not in save states: a state is always taken or loaded drained.
+The link is host state, not in save states.
+
+**The run half's thread.** The thread that attached the renderer (`x360_set_renderer_ex`: the GL context is current
+there), else the first thread that ran packets. `x360_gpu_drain` (hence `x360_state_save`, `state_load`,
+`x360_render_flush`) called on any other thread runs no packet and flushes nothing: the app's menu thread and its
+auto-save thread have no GL context, and draws or resolves there would crash or raise GL errors. Posted work stays
+posted for the run half; a state saved there has the command processor behind its write pointer (consistent: what
+the hardware state is while the GPU lags), and loading it posts the rest again (`link_sync`); lazy resolves stay
+pending (the state goes without the last 2 frames' resolves, as before WP-22: the title resolves them again). In
+stage 1 nothing is ever left posted after a poll (the run follows the post; a stalled `WAIT_REG_MEM` is re-posted
+and re-run at the next poll, not left pending), so this only matters with the deferred knob and from stage 2 on.
+Checked by `x360_hle_test` (`test_gpu`, end): a deferred post, a state saved and `x360_render_flush` called on another
+thread (nothing runs), a drain on the owner thread (it runs), that state loaded (posted again, run by the next drain).
 
 ## 3. Inventory: where the run half meets guest-visible state
 
@@ -66,9 +80,9 @@ or the guest side touched run-half state, and how it goes now.
 | `VdInitializeRingBuffer` | `xenos_cp_ring_init`, `last_wptr`, `CP_RB_WPTR` | guest → run state | `gpu_hold` / `gpu_release` around the ring init |
 | `VdEnableRingBufferRPtrWriteBack` | `cp.rptr_writeback` | guest → run state | `gpu_hold` / `gpu_release` |
 | post side's retry test | `g->cp.stalled` | run state read | `link.stalled` |
-| `x360_gpu_state`, `x360_gpu_bin_state` / `_reset` | the command processor in a state | run state | drained by `x360_state_save` / `state_load`, bracketed by hold / release |
+| `x360_gpu_state`, `x360_gpu_bin_state` / `_reset` | the command processor in a state | run state | drained by `x360_state_save` / `state_load` at their start; `link_sync` after a load |
 | `x360_state_save` / `state_load` | MEM must hold the run half's stores | | `x360_gpu_drain(x, 0)` at entry (rewind uses the same calls) |
-| `x360_render_flush` (`state_save_op` on the machine thread, `x360_run --save-state`) | lazy resolves into memory | GL | `x360_gpu_drain(x, 1)` |
+| `x360_render_flush` (`state_save_op` on the machine thread, `x360_run --save-state`) | lazy resolves into memory | GL | `x360_gpu_drain(x, 1)`: nothing on a thread other than the run half's |
 | `x360_render_reset` (end of a state load) | renderer starts over | GL | already a flag (`reset_pending`) the renderer acts on at its next draw / swap / flush |
 | `x360_gpu_stats`, `x360_render_perf_get`, `x360_gpu_opcode_histogram` | counters | run state read | read as they stand (racy in stage 2: make them relaxed atomics, or read after a drain) |
 
@@ -93,9 +107,11 @@ The SDL thread keeps the window pump, the GPU loop and the present.
 - GPU thread loop: wait until `link.post >> 32 != link.taken` or a request is set; take the GPU mutex; `x360_gpu_run`;
   serve requests (flush resolves); release; broadcast "drained".
 - `x360_gpu_drain`: on the GPU thread itself, run inline (as now: `state_save_op` from a hotkey on the SDL thread).
-  Elsewhere: set the request bits (flush resolves), wake, wait for `taken == post >> 32` and the requests acknowledged,
+  From the CPU thread (rewind, states taken between steps): set the request bits (flush resolves), wake, wait for `taken == post >> 32` and the requests acknowledged,
   then `gpu_take_irq`. It is only correct while the post side posts nothing new: callers hold `s_mu` with the CPU
-  thread outside `x360_run_until`, which is already so for states and rewind.
+  thread outside `x360_run_until`, which is already so for states and rewind. This replaces stage 1's "skip off the
+  owner thread" for any caller that can wait (the CPU thread, and then also the menu and auto-save threads, whose
+  saves would then get the lazy resolves too); the skip stays for a caller that must not block on the GL thread.
 - `gpu_hold` = drain + take the GPU mutex; `gpu_release` = `link_sync` + unlock.
 - Stalls: the GPU thread never spins on a `WAIT_REG_MEM`; it sleeps until the next post. The post side re-posts at
   every poll while `link.stalled` (469 polls per swap here); if that wakes it too often, re-post only when the guest
