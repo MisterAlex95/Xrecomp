@@ -18,7 +18,7 @@ from capstone.x86_const import (
 )
 from capstone import x86_const
 
-from . import config
+from . import config, ranges
 from .loader import BinaryImage, SectionInfo
 
 
@@ -387,11 +387,13 @@ class DisasmEngine:
                 continue
 
             end = tbl + entries * 4
+            gone = []
             for insn in self.get_instructions_in_range(
                     tbl - 16, end):
                 if insn.end_address > tbl and insn.address < end:
                     del self.instructions[insn.address]
-            self._sorted_addrs = None
+                    gone.append(insn.address)
+            self._sorted_update(removed=gone)
 
             self.jump_tables[tbl] = end
             self.decode_at(end)
@@ -481,7 +483,7 @@ class DisasmEngine:
         _bound_before), and kept only when every entry lands in the code
         section of the dispatch. Nothing is decoded or dropped: the table is
         data the sweep never read as code. Returns how many."""
-        in_code = lambda va: any(lo <= va < hi for lo, hi in code_ranges)
+        in_code = ranges.contains_fn(code_ranges)
         found = 0
         for tbl in sorted(self._jt_candidates):
             if tbl in self.jump_tables or tbl in self._jt_base or in_code(tbl):
@@ -605,6 +607,7 @@ class DisasmEngine:
             return 0
 
         added = 0
+        new_addrs = []
         overlaps = set()
         for cs_insn in self._cs.disasm(data[offset:], addr):
             if cs_insn.address >= file_end:
@@ -622,6 +625,7 @@ class DisasmEngine:
                 self.instructions[cs_insn.address] = \
                     self._classify_instruction(cs_insn)
                 added += 1
+                new_addrs.append(cs_insn.address)
             insn = self.instructions[cs_insn.address]
             if insn.is_terminator:
                 break
@@ -631,7 +635,7 @@ class DisasmEngine:
         for old_addr in overlaps:
             del self.instructions[old_addr]
         if added or overlaps:
-            self._sorted_addrs = None
+            self._sorted_update(added=new_addrs, removed=overlaps)
         return added
 
     def block_tail_jump(self, addr: int, max_insns: int = 256):
@@ -1255,8 +1259,7 @@ class DisasmEngine:
         worklist = list(start_addresses)
         visited_starts: Set[int] = set()
 
-        def in_bounds(addr: int) -> bool:
-            return any(s <= addr < e for s, e in section_bounds)
+        in_bounds = ranges.contains_fn(section_bounds)
 
         while worklist:
             addr = worklist.pop()
@@ -1316,6 +1319,29 @@ class DisasmEngine:
     def get_instruction(self, address: int) -> Optional[Instruction]:
         """Get a decoded instruction by address."""
         return self.instructions.get(address)
+
+    def _sorted_update(self, added=(), removed=()):
+        """Bring the sorted address list in line with self.instructions after
+        these addresses were added or removed, in place: resync_jump_tables
+        and decode_at change a few addresses at a time, and sorting every key
+        again after each (hundreds of thousands) was a few percent of a
+        title's disassembly. Many changes at once: rebuilt when next needed."""
+        sa = self._sorted_addrs
+        if sa is None:
+            return
+        if len(added) + len(removed) > 256:
+            self._sorted_addrs = None
+            return
+        for a in removed:
+            if a not in self.instructions:
+                i = bisect.bisect_left(sa, a)
+                if i < len(sa) and sa[i] == a:
+                    del sa[i]
+        for a in added:
+            if a in self.instructions:
+                i = bisect.bisect_left(sa, a)
+                if not (i < len(sa) and sa[i] == a):
+                    sa.insert(i, a)
 
     def _ensure_sorted_addrs(self):
         """Build sorted address list if not cached."""

@@ -6,6 +6,7 @@ BinaryImage interface for the disassembly engine.
 """
 
 import json
+import bisect
 import struct
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -70,6 +71,7 @@ class BinaryImage:
     # Lookup tables built after loading
     _section_by_name: Dict[str, SectionInfo] = field(default_factory=dict, repr=False)
     _thunk_to_import: Dict[int, KernelImport] = field(default_factory=dict, repr=False)
+    _va_index: Optional[tuple] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         self._section_by_name = {s.name: s for s in self.sections}
@@ -83,7 +85,22 @@ class BinaryImage:
         """Find the section containing a virtual address. Where sections
         overlap, the one whose bytes the static tools read there
         (tools/xbe_parser lookup_order, XBA-138): code before data, then the
-        one in memory at boot."""
+        one in memory at boot.
+
+        By bisection over the intervals the section bounds cut the address
+        space into (the answer is the same over each one): an XBE of hundreds
+        of sections (SpikeOut: 398) made the scan below a few percent of the
+        disassembler's time."""
+        key = (len(self.sections), id(self.sections))
+        if self._va_index is None or self._va_index[0] != key:
+            points = sorted({p for sec in self.sections
+                             for p in (sec.virtual_addr, sec.virtual_addr + sec.virtual_size)})
+            self._va_index = (key, points, [self._section_at_va_scan(p) for p in points])
+        _, points, owners = self._va_index
+        i = bisect.bisect_right(points, va) - 1
+        return owners[i] if i >= 0 else None
+
+    def _section_at_va_scan(self, va: int) -> Optional[SectionInfo]:
         hits = [sec for sec in self.sections
                 if sec.virtual_addr <= va < sec.virtual_addr + sec.virtual_size]
         if len(hits) > 1:

@@ -80,7 +80,7 @@ class Insn:
         self.rc = (w >> 6) & 31    # frC / MB
         self.mb = (w >> 6) & 31
         self.me = (w >> 1) & 31
-        self.simm = sext(w & 0xFFFF, 16)
+        self.simm = ((w & 0xFFFF) ^ 0x8000) - 0x8000   # sext(w & 0xFFFF, 16) without the call (millions a lift)
         self.uimm = w & 0xFFFF
         self.rec = w & 1           # Rc
         self.oe = (w >> 10) & 1

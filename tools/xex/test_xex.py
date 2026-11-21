@@ -36,6 +36,23 @@ def test_aes_known_answer_and_round_trip():
     assert aes.ecb_decrypt(TEST_KEY, aes.ecb_encrypt(TEST_KEY, data)) == data
 
 
+def test_cbc_decrypt_in_parts(monkeypatch):
+    """A large image is decrypted in parts by subprocesses (python -m tools.xex.aes), the same bytes as in one
+    piece; no interpreter to start falls back to decrypting in this process."""
+    if aes.Cipher is not None:
+        monkeypatch.setattr(aes, "Cipher", None)
+    monkeypatch.setattr(aes, "PARALLEL_MIN", 4096)
+    data = bytes((i * 7 + (i >> 8)) & 255 for i in range(3 * 4096 + 48)) + b"tail"
+    iv = bytes(range(16, 32))
+    n = len(data) & ~15
+    one = aes._cbc_decrypt_here(TEST_KEY, data, n, iv)
+    assert aes._cbc_decrypt_parallel(TEST_KEY, data, n, iv) + data[n:] == one
+    assert aes.cbc_decrypt(TEST_KEY, data, iv) == one
+    assert aes.cbc_decrypt(TEST_KEY, aes.cbc_encrypt(TEST_KEY, data[:n], iv), iv) == data[:n]
+    monkeypatch.setattr(aes, "_python", lambda: None)
+    assert aes.cbc_decrypt(TEST_KEY, data, iv) == one
+
+
 @pytest.mark.parametrize("compression", ["none", "basic", "normal"])
 @pytest.mark.parametrize("encrypted", [False, True])
 def test_round_trip(compression, encrypted):

@@ -8,6 +8,10 @@ path the tests cover is the one the device runs.
 Objects live in a cache keyed by sha256(source path + source + flags +
 compiler id + headers): an object whose key exists is not compiled again, so
 a killed run resumes where it stopped and a second run compiles nothing.
+The key names the toolkit's own directory as <toolkit> (the app extracts each
+toolkit to a new files/toolkit-<version>) and the compiler by its bytes (an
+app update extracts the same libxbacc.so again, with a new mtime): a Prepare
+after an app update recompiles only what its C or headers changed.
 <obj>/keys.json remembers each key with its inputs' stat (size, mtime,
 ctime, inode): a second run re-reads and re-hashes only what changed.
 """
@@ -276,13 +280,42 @@ class Toolchain:
 
     def compiler_id(self):
         """What goes into the object cache key: the version line, and the
-        size and mtime of the binary (a rebuilt toolchain of the same version)."""
+        size and sha256 of the binary (a rebuilt toolchain of the same
+        version). Not its mtime: an app update installs the same libxbacc.so
+        again, and every object would be compiled again."""
+        return self.compiler_id_cached(None)
+
+    def compiler_id_cached(self, cache_dir):
+        """compiler_id(), the binary's sha256 remembered in
+        cache_dir/compiler.json with its stat (hashed again when that changes)."""
         try:
-            st = os.stat(self.cc)
-            stamp = "%d:%d" % (st.st_size, int(st.st_mtime))
+            sig = stat_sig(self.cc)
         except OSError:
-            stamp = "?"
-        return "%s|%s|%s" % (self.version_text(), " ".join(self.cc_prefix), stamp)
+            return "%s|%s|?" % (self.version_text(), " ".join(self.cc_prefix))
+        path = os.path.join(cache_dir, COMPILER_FILE) if cache_dir else None
+        sha = None
+        if path:
+            try:
+                with open(path) as f:
+                    c = json.load(f)
+                if c.get("cc") == os.path.abspath(self.cc) and c.get("sig") == sig:
+                    sha = c.get("sha256")
+            except (OSError, ValueError, AttributeError):
+                pass
+        if not isinstance(sha, str):
+            h = hashlib.sha256()
+            with open(self.cc, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            sha = h.hexdigest()
+            if path and sig[1] < time.time_ns() - RACY_NS:
+                try:
+                    with open(path + ".tmp", "w") as f:
+                        json.dump({"cc": os.path.abspath(self.cc), "sig": sig, "sha256": sha}, f)
+                    os.replace(path + ".tmp", path)
+                except OSError:
+                    pass
+        return "%s|%s|%d:%s" % (self.version_text(), " ".join(self.cc_prefix), sig[0], sha)
 
     def short_version(self):
         """'clang 19.0.1'."""
@@ -368,6 +401,18 @@ _FUNC_DECL = re.compile(rb"^void [A-Za-z_]\w*\(void\);[^\n]*\n?", re.M)
 _COMMENT = re.compile(rb"/\*.*?\*/", re.S)
 
 
+TOOLKIT_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+TOOLKIT_TAG = "<toolkit>"
+
+
+def portable(text, roots=None):
+    """text with the toolkit's directory spelled TOOLKIT_TAG: what the cache keys see of a path or a flag. Two
+    toolkits with the same headers compile the same objects, wherever they were extracted."""
+    for root in roots or (TOOLKIT_ROOT, os.path.realpath(TOOLKIT_ROOT)):
+        text = text.replace(root + os.sep, TOOLKIT_TAG + "/")
+    return text
+
+
 def _headers(dirs):
     """Every .h under `dirs` once, in digest order: (real path, file name)."""
     seen = set()
@@ -398,7 +443,7 @@ def header_digest(dirs, generated=False):
     src/title, src/extra) keeps the whole header in its key."""
     h = hashlib.sha256()
     for p, fn in _headers(dirs):
-        h.update(p.encode() + b"\0")
+        h.update(portable(p).encode() + b"\0")
         with open(p, "rb") as f:
             if generated and fn == FUNCS_H:
                 h.update(_FUNC_DECL.sub(b"", _COMMENT.sub(b"", f.read())))
@@ -420,7 +465,8 @@ def header_digest(dirs, generated=False):
 # made before keys.json existed stays valid.
 
 KEYS_FILE = "keys.json"
-KEYS_VERSION = 1             # bump when header_digest() or cache_key() changes what it computes
+COMPILER_FILE = "compiler.json"   # the compiler binary's sha256 with its stat (Toolchain.compiler_id_cached)
+KEYS_VERSION = 2             # bump when header_digest() or cache_key() changes what it computes
 # A file changed less than this before keys.json is written is not
 # remembered: a second write within the file system's timestamp step, with
 # the same size, would keep the stat (git's « racily clean » entries).
@@ -487,10 +533,11 @@ def plan_keys(sources, flags, cid, obj_dir):
     else:
         headers = header_digest(dirs)
         gen_headers = header_digest(dirs, generated=True)
+    kflags = [portable(f) for f in flags]
     ctx = {}
     for name, hd in (("all", headers), ("gen", gen_headers)):
         h = hashlib.sha256()
-        h.update(("\x1f".join(flags) + "\0" + cid + "\0" + hd).encode())
+        h.update(("\x1f".join(kflags) + "\0" + cid + "\0" + hd).encode())
         ctx[name] = h.hexdigest()
     files = old.get("files") if isinstance(old.get("files"), dict) else {}
     new_files = {}
@@ -506,7 +553,7 @@ def plan_keys(sources, flags, cid, obj_dir):
             with open(s, "rb") as f:
                 data = f.read()
             # sig is from before the read: a change during it is hashed again next time.
-            key = cache_key(s, data, flags, cid, gen_headers if which == "gen" else headers)
+            key = cache_key(portable(s), data, kflags, cid, gen_headers if which == "gen" else headers)
             hashed += 1
         if sig[1] < now - RACY_NS:
             new_files[s] = sig + [ctx[which], key]
@@ -561,7 +608,8 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     hashed for their key: plan_keys()).
     Raises StepError (COMPILE_FAILED / NO_SPACE) or Cancelled."""
     os.makedirs(obj_dir, exist_ok=True)
-    plan, hashed = plan_keys(sources, flags, tc.compiler_id(), obj_dir)
+    cached_id = getattr(tc, "compiler_id_cached", None)
+    plan, hashed = plan_keys(sources, flags, cached_id(obj_dir) if cached_id else tc.compiler_id(), obj_dir)
     if stats is not None:
         stats["hashed"] = hashed
     total = len(plan)
@@ -666,9 +714,10 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
 
 def prune(obj_dir, keep):
     """Remove the cached objects not in `keep` (an old lift's, or an old -O):
-    the device's storage is not free. keys.json stays."""
+    the device's storage is not free. keys.json and compiler.json stay."""
     keep = {os.path.abspath(k) for k in keep}
     keep.add(os.path.abspath(os.path.join(obj_dir, KEYS_FILE)))
+    keep.add(os.path.abspath(os.path.join(obj_dir, COMPILER_FILE)))
     for fn in os.listdir(obj_dir):
         p = os.path.abspath(os.path.join(obj_dir, fn))
         if p not in keep:

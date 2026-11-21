@@ -30,6 +30,7 @@ import subprocess
 import sys
 
 from . import CONSOLE  # noqa: F401  (puts the repository root on sys.path)
+import struct
 import zlib
 
 from tools.xex.xex import IMPORT_THUNK, XexError, load_keys, parse_xex
@@ -55,20 +56,29 @@ class CodeView:
         for t in self.thunks:
             self.thunk_words.update(range(t, t + 16, 4))
         self.hidden = set()
+        # img.in_code as (first, last) word addresses, and the words left out in one set: discovery and the lift ask
+        # for every word they read (millions of calls), the sections' loop was a sixth of the lift's time
+        end = img.base + len(img.image) if img.image is not None else 0
+        self._ranges = [(lo, min(hi, end) - 4) for lo, hi in img.code_ranges()] if img.image is not None else []
+        self._out = set(self.thunk_words)
+        self._image, self._base = img.image, img.base
 
     def hide(self, helpers):
         for h, _ in helpers.values():
             self.hidden.update(range(h.start, h.end + 4, 4))
+        self._out = self.thunk_words | self.hidden
 
     def in_code(self, a):
-        if not self.img.in_code(a):
-            return False
-        return (a & ~3) not in self.thunk_words and (a & ~3) not in self.hidden
+        for lo, last in self._ranges:
+            if lo <= a <= last:
+                return (a & ~3) not in self._out
+        return False
 
     def u32(self, a):
-        return self.img.u32(a)
+        return _BE32(self._image, a - self._base)[0]   # img.u32 without its two calls (as many as in_code)
 
 
+_BE32 = struct.Struct(">I").unpack_from
 BUCKET_BYTES = 0x10000  # guest code per generated file (XBA-283: ~1.2 MB of C; docs/android/prepare.md)
 SPLIT_BYTES = 2000000   # C past which a bucket's file is cut again (dense code)
 
@@ -152,15 +162,18 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     if direct_calls is None:
         direct_calls = direct_calls_default()
     direct = None
+    leaders = {}
     if direct_calls:
         # WP-16: a `bl` calls its target's function from C when the target is a function of the pack and the resume
         # table will map the return point to the caller (lift360.py TitleLifter.direct_call): the table first, from
         # the leaders alone, built as below (an address several functions hold goes to the first, entries to their own)
         owner = {}
         for f in funcs:
-            for a in TitleLifter(view, disc.insn, f, fn_name(f.entry), comments=False, helpers=helpers,
-                                 tables=disc.jt.tables).leaders:
+            lead = TitleLifter(view, disc.insn, f, fn_name(f.entry), comments=False, helpers=helpers,
+                               tables=disc.jt.tables).leaders
+            for a in lead:
                 owner.setdefault(a, f.entry)
+            leaders[f.entry] = lead      # the lift below takes them as they are (find_leaders twice was a third)
             f.release()
         for f in funcs:
             owner[f.entry] = f.entry
@@ -189,7 +202,7 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
         out, size, sub, callees = [head], 0, 0, set()
         for n, f in enumerate(group):
             lifter = TitleLifter(view, disc.insn, f, fn_name(f.entry), comments=comments, helpers=helpers,
-                                 tables=disc.jt.tables, direct=direct)
+                                 tables=disc.jt.tables, direct=direct, leaders=leaders.pop(f.entry, None))
             text = lifter.function()
             out.append(text)
             out.append("\n")

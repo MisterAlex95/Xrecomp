@@ -8,10 +8,13 @@ from .xenon import XenonLifter
 
 
 class TitleLifter(XenonLifter):
-    def __init__(self, image, decode, func, name, comments=True, helpers=None, tables=None, direct=None):
+    def __init__(self, image, decode, func, name, comments=True, helpers=None, tables=None, direct=None,
+                 leaders=None):
         """direct (WP-16): None, every call leaves to the dispatcher; or (callable, owner): `callable` the entries of
         the pack's functions a `bl` may call straight from C, `owner` a mapping resume point -> the entry of the
-        function the runtime's resume table gives it."""
+        function the runtime's resume table gives it. leaders: this function's find_leaders() when a lifter of the
+        same function computed them already (recomp.py's direct-call pass), taken as they are."""
+        self._leaders = leaders
         self.helpers = helpers or {}
         self.tables = tables or {}
         self.inlined = 0
@@ -63,6 +66,8 @@ class TitleLifter(XenonLifter):
         return "if (c->pc == %s) goto L_%08X;" % (hx(self.f.entry), self.f.entry)
 
     def find_leaders(self):
+        if self._leaders is not None:
+            return self._leaders
         lead = super().find_leaders()
         for a in self.f.addrs:
             if a in self.tables and self.decode(a).kind == BCCTR:

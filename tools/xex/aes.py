@@ -7,6 +7,12 @@ is installed it is used instead (much faster on large images); results are ident
 No key lives here or anywhere in the repository: callers pass the keys.
 """
 
+import os
+import struct
+import subprocess
+import sys
+import threading
+
 try:  # optional fast path
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # type: ignore
 except Exception:  # pragma: no cover - depends on the host
@@ -160,13 +166,119 @@ def cbc_decrypt(key, data, iv=bytes(16)):
     n = len(data) & ~15
     if Cipher is not None:
         return _fast(key, modes.CBC(bytes(iv)), data[:n], True) + bytes(data[n:])
-    a = AES128(key)
+    if n >= PARALLEL_MIN:
+        out = _cbc_decrypt_parallel(key, data, n, iv)
+        if out is not None:
+            return out + bytes(data[n:])
+    return _cbc_decrypt_here(key, data, n, iv)
+
+
+# CBC decryption needs no result of the block before, only its ciphertext: a large image is cut into parts that
+# python -m tools.xex.aes decrypts side by side (subprocesses, as tools.prepare runs every step: the multiprocessing
+# module needs sem_open, which Android lacks). 15 MB of XEX took 17 s on one desktop core, about three times that
+# on a phone's; with 4 parts a quarter, plus the interpreters' start. Anything going wrong there (no interpreter to
+# start, a part of the wrong size) falls back to decrypting here, the same bytes either way.
+PARALLEL_MIN = 1 << 20
+PARALLEL_JOBS = 4
+PYTHON = None      # the interpreter for the parts (tools.prepare sets its --python); else $XBA_PYTHON, sys.executable
+
+
+def _python():
+    exe = PYTHON or os.environ.get("XBA_PYTHON") or sys.executable
+    return exe if exe and os.path.isfile(exe) else None
+
+
+def _cbc_decrypt_parallel(key, data, n, iv):
+    jobs = min(PARALLEL_JOBS, os.cpu_count() or 1)
+    exe = _python()
+    if jobs < 2 or exe is None:
+        return None
+    blocks = n // 16
+    cuts = [16 * (blocks * k // jobs) for k in range(jobs + 1)]
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    parts = [None] * jobs
+    procs = []
+
+    def one(k, p, chunk):
+        try:
+            out, _ = p.communicate(chunk)
+            if p.returncode == 0 and len(out) == len(chunk) - 32:
+                parts[k] = out
+        except (OSError, ValueError):
+            pass
+    try:
+        threads = []
+        for k in range(jobs):
+            lo, hi = cuts[k], cuts[k + 1]
+            prev = bytes(iv) if lo == 0 else bytes(data[lo - 16:lo])
+            p = subprocess.Popen([exe, "-m", "tools.xex.aes"], cwd=root, env=env,
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            procs.append(p)
+            t = threading.Thread(target=one, args=(k, p, bytes(key) + prev + bytes(data[lo:hi])))
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+    except (OSError, ValueError):
+        for p in procs:
+            try:
+                p.kill()
+                p.wait()
+            except OSError:
+                pass
+        return None
+    if any(x is None for x in parts):
+        return None
+    return b"".join(parts)
+
+
+def _part_main(argv):
+    """python -m tools.xex.aes: stdin is the key, the IV (16 bytes each: the key never on a command line) and
+    the blocks, CBC-decrypted to stdout; the part's IV is the ciphertext block before it (cbc_decrypt's
+    parallel path)."""
+    data = sys.stdin.buffer.read()
+    if len(data) < 32:
+        return 2
+    key, iv, data = data[:16], data[16:32], data[32:]
+    sys.stdout.buffer.write(_cbc_decrypt_here(key, data, len(data) & ~15, iv))
+    sys.stdout.buffer.flush()
+    return 0
+
+
+def _cbc_decrypt_here(key, data, n, iv):
+    """decrypt_block's rounds inline, 64 KB of words unpacked at a time (about 15 % faster than a call per block)."""
+    k = AES128(key).dk
+    t0, t1, t2, t3 = TD
+    S = INV_SBOX
+    k0, k1, k2, k3 = k[0:4]
+    k40, k41, k42, k43 = k[40:44]
+    rounds = [tuple(k[4 * r:4 * r + 4]) for r in range(1, 10)]
+    p0, p1, p2, p3 = struct.unpack(">4I", bytes(iv))
     out = bytearray()
-    prev = int.from_bytes(iv, "big")
-    for i in range(0, n, 16):
-        blk = bytes(data[i:i + 16])
-        out += (int.from_bytes(a.decrypt_block(blk), "big") ^ prev).to_bytes(16, "big")
-        prev = int.from_bytes(blk, "big")
+    mv = memoryview(data)
+    for c in range(0, n, 1 << 16):
+        w = struct.unpack(">%dI" % (min(1 << 16, n - c) >> 2), mv[c:c + min(1 << 16, n - c)])
+        o = [0] * len(w)
+        for j in range(0, len(w), 4):
+            c0, c1, c2, c3 = w[j], w[j + 1], w[j + 2], w[j + 3]
+            s0, s1, s2, s3 = c0 ^ k0, c1 ^ k1, c2 ^ k2, c3 ^ k3
+            for r0, r1, r2, r3 in rounds:
+                s0, s1, s2, s3 = (
+                    t0[s0 >> 24] ^ t1[(s3 >> 16) & 255] ^ t2[(s2 >> 8) & 255] ^ t3[s1 & 255] ^ r0,
+                    t0[s1 >> 24] ^ t1[(s0 >> 16) & 255] ^ t2[(s3 >> 8) & 255] ^ t3[s2 & 255] ^ r1,
+                    t0[s2 >> 24] ^ t1[(s1 >> 16) & 255] ^ t2[(s0 >> 8) & 255] ^ t3[s3 & 255] ^ r2,
+                    t0[s3 >> 24] ^ t1[(s2 >> 16) & 255] ^ t2[(s1 >> 8) & 255] ^ t3[s0 & 255] ^ r3)
+            o[j] = (S[s0 >> 24] << 24 | S[(s3 >> 16) & 255] << 16 | S[(s2 >> 8) & 255] << 8 | S[s1 & 255]) ^ k40 ^ p0
+            o[j + 1] = (S[s1 >> 24] << 24 | S[(s0 >> 16) & 255] << 16 | S[(s3 >> 8) & 255] << 8
+                        | S[s2 & 255]) ^ k41 ^ p1
+            o[j + 2] = (S[s2 >> 24] << 24 | S[(s1 >> 16) & 255] << 16 | S[(s0 >> 8) & 255] << 8
+                        | S[s3 & 255]) ^ k42 ^ p2
+            o[j + 3] = (S[s3 >> 24] << 24 | S[(s2 >> 16) & 255] << 16 | S[(s1 >> 8) & 255] << 8
+                        | S[s0 & 255]) ^ k43 ^ p3
+            p0, p1, p2, p3 = c0, c1, c2, c3
+        out += struct.pack(">%dI" % len(o), *o)
     return bytes(out) + bytes(data[n:])
 
 
@@ -183,3 +295,7 @@ def cbc_encrypt(key, data, iv=bytes(16)):
         prev = a.encrypt_block(x)
         out += prev
     return bytes(out)
+
+
+if __name__ == "__main__":
+    sys.exit(_part_main(sys.argv[1:]))

@@ -13,7 +13,7 @@ import bisect
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from . import config
+from . import config, ranges
 from .engine import DisasmEngine, Instruction
 from .loader import DATA_SECTION_NAMES, MAX_INSN_LEN, BinaryImage, SectionInfo
 from .xrefs import XRefTracker
@@ -532,6 +532,7 @@ class FunctionDetector:
         starts = [b[0] for b in bounds]
         code_ranges = [(sec.virtual_addr, sec.virtual_addr + sec.virtual_size)
                        for sec in sections]
+        in_code_ranges = ranges.contains_fn(code_ranges)
 
         def in_a_gap(addr: int) -> bool:
             i = bisect.bisect_right(starts, addr) - 1
@@ -558,7 +559,7 @@ class FunctionDetector:
                 continue
             if addr in self._candidates or addr in self.functions:
                 continue
-            if not any(lo <= addr < hi for lo, hi in code_ranges):
+            if not in_code_ranges(addr):
                 continue
             if not in_a_gap(addr):
                 continue
@@ -1235,8 +1236,7 @@ class FunctionDetector:
         code_ranges = [(sec.virtual_addr, sec.virtual_addr + sec.virtual_size)
                        for sec in sections]
 
-        def in_code_section(addr: int) -> bool:
-            return any(lo <= addr < hi for lo, hi in code_ranges)
+        in_code_section = ranges.contains_fn(code_ranges)
 
         # Optional (skip_library_immediates): an immediate that sits in a
         # library section (D3D, DSOUND, XPP...) never names a function of the
@@ -1432,8 +1432,7 @@ class FunctionDetector:
                        for sec in sections]
         code_names = {sec.name for sec in sections}
 
-        def in_code_section(addr: int) -> bool:
-            return any(lo <= addr < hi for lo, hi in code_ranges)
+        in_code_section = ranges.contains_fn(code_ranges)
 
         bounds = sorted((f.start, f.end) for f in self.functions.values())
         starts = [b[0] for b in bounds]

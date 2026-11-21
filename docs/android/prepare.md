@@ -230,12 +230,23 @@ definitions, a Release-type build). Sources: `src/main.c`, `src/recomp_manual.c`
 `XBA_TITLE_PROFILE` when there is one), `src/extra/*.c`, `src/recomp/gen/*.c`.
 
 **Object cache.** `key = sha256(source path, source bytes, flags, compiler id, headers digest)`; compiler id = the
-`--version` line + the binary's size and mtime; headers digest = every `.h` under the include directories. A second
-run with nothing changed compiles 0 files. After a successful link, objects not used by it are deleted (storage).
+`--version` line + the binary's size and SHA-256; headers digest = every `.h` under the include directories (path and
+bytes). A second run with nothing changed compiles 0 files. After a successful link, objects not used by it are deleted (storage).
 `<work>/obj/keys.json` keeps each key with the stat of its inputs (size, mtime, ctime, inode of the source; of every
 header for the headers digests): a file whose stat is unchanged keeps its key without being read, so that run reads
 and hashes nothing either (250 MB of lifted C: 1.16 s → 0.01 s on a desktop core with the built-in SHA-2 the device's
 Python has). A file changed less than 2 s before keys.json is written is left out of it (read again next time).
+
+**An app update recompiles what changed, not everything.** The app extracts each toolkit to a new
+`files/toolkit-<version>` and installs `libxbacc.so` again (a new mtime and inode, the same bytes). Until 2026-11-21
+both were in every key (the `-I<toolkit>/...` flags, the header paths, the binary's mtime), so the first Prepare after
+any update compiled every file again, even where the lift wrote the same C and the headers had not changed: the
+whole compile, the largest part of a Prepare. Now the keys spell the toolkit's directory `<toolkit>`
+(`compile.portable`) and name the compiler by its bytes (its SHA-256, kept in `<work>/obj/compiler.json` with the
+binary's stat, so it is hashed once per install). The sysroot keeps its path in the flags: `sysroot-<version>` is
+named after its zip's content and changes only with the toolchain. Measured on Warhammer (below): a toolkit change
+that leaves the generated C and the headers as they were, 233 files compiled before, 0 now (SpikeOut, an Xbox title:
+83 files, 0 compiled). A change to any header under the include directories still compiles every file.
 
 **A re-lift recompiles what changed (XBA-209).** The discovery loop re-prepares a title with a few more functions
 ([discovery.md](../technical/discovery.md)); until XBA-209 that recompiled all of it. Two things make it cheap:
@@ -654,6 +665,28 @@ compiled largest first, so the big ones never run all at once. `min(5, (MemAvail
 and room for a title whose largest file is twice this one. **Since XBA-209: 512 MB** — the 5 MB file came from the
 250-function split; chunks are now at most ~1.5 MB of C and one compile peaks at ~170 MB on the synthetic title
 below, so a device with 5.5 GB available gets the 5 jobs (it got 2).
+
+**Prepare's own Python (2026-11-21).** Two titles from Alex's own discs (kept outside the repository; numbers
+only), on the Zen 5 host in the Android image (Xbox 360: `tools.prepare --android`, NDK 28 clang, the device's
+flags, 8 jobs; Xbox: the steps alone, `disasm --lean` as on the device), before and after the same night's changes,
+the two runs of a pair side by side on the same load (wall time; user time within 1 %). The generated C, the
+analysis, the objects and the x360 `libtitle.so` are byte for byte the same.
+
+| Step | Before | After | What changed |
+|---|---|---|---|
+| Xbox 360 (Warhammer, 49,575 functions): identify | 13.3 s | 3.2 s | AES in 4 parts; 0.3 s once `plain.xex` is there |
+| Xbox 360: lift (`x360_tools.recomp`) | 77.2 s | 47.1 s | leaders found once, not twice; code ranges and words looked up directly; the helper scan decodes as it reads |
+| Xbox (SpikeOut, 392 code sections): disasm | 226 s | 184 s | section and range lookups by bisection (`tools/disasm/ranges.py`), sorted addresses kept in place |
+| Xbox: lift (`tools.recomp`) | 82.5 s | 76.8 s | the operand-free decode rules out a trailing jump table first |
+| Xbox 360, a toolkit change that leaves C and headers alone | 358 s, 233 files compiled | 64 s, 0 compiled | the object cache keys (« Compile and link ») |
+
+The last row holds only for an update that leaves every header under the include directories as it was: a change to
+`xenon_rt.h` (or the Xbox toolkit's headers) still compiles every file, as it must.
+
+The compile itself was not the lever here: Warhammer's 233 files keep 8 jobs busy to the end (1,890 s of CPU for a
+wall of 230 s, alone on the host) and an empty file with `xenon_rt.h` compiles in 0.02 s, so fewer or other files
+would not shorten it. What a phone's Prepare spends where is to be measured on the device (the `prepare` spans,
+XBA-341).
 
 **On a Thor (Snapdragon 8 Gen 2: 1× X3 3.2 GHz, 4× A715/A710 2.8 GHz, 3× A510), a rough estimate.** Per thread,
 clang runs at about 0.6× a Zen 5 core on the X3 and 0.4× on an A715/A710 (published SPECint-class ratios; clang is
@@ -1320,7 +1353,13 @@ interpreter (XBA-283) only runs the code a pack does not hold.
   360 partition offsets). A document is copied into the work folder as `source.xex`: the XEX itself, or the
   `default.xex` of a disc image (`Console.x360DiscXex`). That is a few MB, never the 7 GB image.
 - **Steps.** 1: the XEX is written plain to `<work>/plain.xex`; the key is `X360-<title id>-<CRC32>` and the identity
-  is the plain XEX's SHA-256. 2: `<work>/discovered.txt` (the runtime's misses; since XBA-282 the file only grows) is
+  is the plain XEX's SHA-256. Decrypting is the step's whole cost (AES in pure Python: no OpenSSL in the app's
+  Python), so a large image is decrypted in 4 parts side by side (`python -m tools.xex.aes`, the key on its stdin;
+  CBC decryption needs only the ciphertext of the block before), and `<work>/plain.json` names the source XEX
+  (SHA-256), a digest of `tools/xex`'s code and the plain bytes: a later Prepare of the same XEX, by a toolkit whose
+  `tools/xex` is the same, reads `plain.xex` back instead (no key needed then, and no AES). Warhammer, 15 MB of
+  XEX, on the desktop host of « Measurements »: 13-16 s → 3-4 s the first time, 0.3 s after (an app update
+  included). 2: `<work>/discovered.txt` (the runtime's misses; since XBA-282 the file only grows) is
   merged with the earlier seeds. 3: `x360_tools.recomp`. 4: the shared compile driver at -O1, `-DXE_RUNTIME=1
   -ffp-contract=off`, `-DXE_VIEW4K_DYNAMIC=0` or `1` (below). 5: `libtitle.so`, `pack.json` (`console` x360, `entry` xe_rc_resume), `default.xex` and
   `shaders/`.
