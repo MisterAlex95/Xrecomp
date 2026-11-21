@@ -2,7 +2,8 @@
  * lifted code, against rc_pf_fetch, the function the interpreter uses: from random buffer states (every flag,
  * count, capacity, duty, cycles left, and `now` before, at and after the state's time) and fetch addresses (at the
  * head, beside it, in the other state), both must return the same cycles and leave the same state. rc_pf_fetch_n (RC_IN, XBA-295), a run of 2 to 16
- * fetches with random internal cycles between them, against as many calls of rc_pf_fetch. Our own code. */
+ * fetches with random internal cycles and folded literal loads (rc_pf_stop) between them, against as many calls of
+ * rc_pf_fetch. Our own code. */
 #include "gba_internal.h"
 
 #include <stdio.h>
@@ -85,22 +86,31 @@ int main(void)
         uint64_t now = p.time - 8 + rnd(40);
         uint32_t ncost = 1 + rnd(9), k = 2 + rnd(15);
         uint64_t extras = 0;
-        for (uint32_t j = 0; j + 1 < k; j++) /* mostly none, as in lifted code */
+        uint32_t stops = 0;
+        for (uint32_t j = 0; j + 1 < k; j++) { /* mostly none, as in lifted code */
             extras |= (uint64_t)(rnd(3) ? 0 : rnd(4) ? 1 + rnd(2) : rnd(16)) << (4 * j);
+            stops |= (rnd(6) ? 0u : 1u) << j;
+        }
         x.pf = p;
         y = x;
-        uint32_t a = rc_pf_fetch_n(&x, now, addr, thumb, ncost, k, extras), b = 0;
+        uint32_t a = rc_pf_fetch_n(&x, now, addr, thumb, ncost, k | stops << 8, extras), b = 0;
         uint64_t t = now, e = extras;
         for (uint32_t j = 0; j < k; j++, e >>= 4) {
             uint32_t c = rc_pf_fetch(&y, t, addr + j * w, thumb, ncost);
             b += c;
-            t += c + (uint32_t)(e & 15);
+            t += c;
+            if (j + 1 < k && (stops >> j & 1)) { /* a folded literal: RC_LIT */
+                uint32_t s = rc_pf_stop(&y, t, true);
+                b += s;
+                t += s + y.wait32[8][0];
+            }
+            t += (uint32_t)(e & 15);
         }
         if (a != b || !same(&x.pf, &y.pf)) {
             bad++;
-            printf("FAIL run %ld (%u fetches, extras %llx): cycles %u vs %u; state valid %d run %d count %u left %u "
-                   "time %llu now %llu\n", i, k, (unsigned long long)extras, a, b, p.valid, p.run, p.count, p.left,
-                   (unsigned long long)p.time, (unsigned long long)now);
+            printf("FAIL run %ld (%u fetches, extras %llx, stops %x): cycles %u vs %u; state valid %d run %d count %u "
+                   "left %u time %llu now %llu\n", i, k, (unsigned long long)extras, stops, a, b, p.valid, p.run,
+                   p.count, p.left, (unsigned long long)p.time, (unsigned long long)now);
         }
     }
     if (bad)

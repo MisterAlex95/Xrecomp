@@ -726,10 +726,11 @@ class FnLifter:
         else:
             out.append("    default: RC_NOT_COVERED();")
         out.append("    }")
-        runs, in_run, fetched = {}, set(), set()
+        runs, in_run, fetched, folded = {}, set(), set(), set()
         if self.fetch_runs:
-            runs = fetch_runs(addrs, size, bodies, leaders | segs | self.targets)
-            in_run = {x + k * size for x, (n, _) in runs.items() for k in range(1, n)}
+            runs = fetch_runs(addrs, size, bodies, leaders | segs | self.targets, region)
+            in_run = {x + k * size for x, r in runs.items() for k in range(1, r[0])}
+            folded = {x + k * size for x, r in runs.items() for k in range(r[0]) if r[2] >> k & 1}
         for i, x in enumerate(addrs):
             op, body = ops[x], bodies[x]
             text = disasm(op, x, self.thumb) if comments else ""
@@ -742,18 +743,20 @@ class FnLifter:
             if x in leaders:
                 seg = segment_cost(addrs, i, size, leaders, bodies)
                 if is_run_segment(runs, x, seg):  # the check and the run's fetches in one (« runs of opcode fetches »)
-                    out.append("    RC_STOP_IN(%s, %s, %d, %s);" % (hx(x), seg, left[x], run_extras(runs[x][1])))
+                    out.append("    RC_STOP_IN(%s, %s, %d, %s);" % (hx(x), seg, left[x], run_args(runs[x], False)))
                     fetched.add(x)
                 else:
                     out.append("    RC_STOP(%s, %s, %d);" % (hx(x), seg, left[x]))
             if x in fetched:
                 pass
             elif x in runs:
-                out.append("    RC_IN(%s, %d, %s);" % (hx(x), runs[x][0], run_extras(runs[x][1])))
+                out.append("    RC_IN(%s, %s);" % (hx(x), run_args(runs[x], True)))
             elif x not in in_run:
                 out.append("    RC_I(%s);" % hx(x))
             if body:
                 out.append("    {")
+                if x in folded:  # its stop of the buffer is in its run's cycles: the load's wait states stay
+                    body = [LIT_RE.sub(r"\1", s) for s in body]
                 out += ["        " + s for s in body]
                 out.append("    }")
             nxt = x + size
@@ -764,7 +767,7 @@ class FnLifter:
                 lab = "%s:" % label(nxt) if nxt in segs else ""
                 if is_run_segment(runs, nxt, seg):
                     out.append("%s    RC_CHECK_IN(%s, %s, %d, %s);" % (lab, hx(nxt), seg, left[nxt],
-                                                                    run_extras(runs[nxt][1])))
+                                                                    run_args(runs[nxt], False)))
                     fetched.add(nxt)
                 else:
                     out.append("%s    RC_CHECK(%s, %s, %d);" % (lab, hx(nxt), seg, left[nxt]))
@@ -843,22 +846,30 @@ def segment_cost(addrs, i, size, leaders, bodies):
 # ---- runs of opcode fetches (XBA-295) ---------------------------------------------------------------------------
 #
 # The cartridge's prefetch buffer (rc_pf_fetch) is a call per instruction. Where instructions in a row do nothing to
-# the clock but static internal cycles (no memory access, no folded literal, no multiply, no jump or exit, nothing
-# else that reads `now` or the machine), their bodies cannot tell when the fetches after theirs happen: RC_IN charges
-# the fetches of such a run, plus the next instruction's, at its start, in one call (rc_pf_fetch_n), each fetch at the
-# cycle it would have had (EXTRAS: 4 bits per instruction, its internal cycles before the next fetch). The run's last
-# instruction (any kind) then runs with `now` where it was before. A run never crosses a label.
+# the clock but static internal cycles (no memory access, no multiply, no jump or exit, nothing else that reads `now`
+# or the machine), their bodies cannot tell when the fetches after theirs happen: RC_IN charges the fetches of such a
+# run, plus the next instruction's, at its start, in one call (rc_pf_fetch_n), each fetch at the cycle it would have
+# had (EXTRAS: 4 bits per instruction, its internal cycles before the next fetch). A literal folded from the
+# function's own region joins a cartridge function's runs too (STOPS: a bit per instruction): its stop of the buffer
+# goes into the run's cycles, its body keeps the load's wait states (with the buffer off it is stopped already). The
+# run's last instruction (any kind) then runs with `now` where it was before. A run never crosses a label. A segment
+# that is one run (RC_STOP_IN / RC_CHECK_IN) checks the next event against the run's exact cycles when the bound
+# fails.
 
 PLAIN_NOW = re.compile(r"^now \+= (\d+);$")
 RUN_MAX = 16  # fetches per run at most (EXTRAS: 4 bits for each of the first 15)
 
 
-def plain_extra(body):
-    """The internal cycles of a plain instruction (one whose fetch a run may move: see above), or None."""
+def plain_extra(body, lit=None):
+    """(internal cycles, folded literal) of a plain instruction (one whose fetch a run may move: see above), or None.
+    lit: the wait-state term of a literal load that may join the run (RC_LIT(lit) at the top level), if any."""
     if body is None or is_memory(body):
         return None
-    extra = 0
+    extra, folded = 0, False
     for s in body:
+        if lit and not folded and s == "now += RC_LIT(%s);" % lit:
+            folded = True
+            continue
         m = PLAIN_NOW.match(s)  # top level only: a conditional instruction's cycles are not static
         if m:
             extra += int(m.group(1))
@@ -867,11 +878,14 @@ def plain_extra(body):
         t = s.replace("now += RC_NEXTRA();", "")
         if re.search(r"\bnow\b|\bRC_|\bh->|\bgoto\b|\breturn\b|\bepc\b|\bm_\b|rc_mul_cycles", t):
             return None
-    return extra if extra < 16 else None
+    return (extra, folded) if extra < 16 else None
 
 
-def run_extras(extras):
-    return "0x%X%s" % (extras, "u" if extras < 1 << 32 else "ull")
+def run_args(run, fetches):
+    """RC_IN's N, X, S (RC_STOP_IN / RC_CHECK_IN: X, S; N is the segment's)."""
+    n, extras, stops = run
+    x = "0x%X%s" % (extras, "u" if extras < 1 << 32 else "ull")
+    return ("%d, " % n if fetches else "") + "%s, 0x%Xu" % (x, stops)
 
 
 def is_run_segment(runs, x, seg):
@@ -880,21 +894,23 @@ def is_run_segment(runs, x, seg):
     return x in runs and runs[x][0] == int(seg.split(",", 1)[0])
 
 
-def fetch_runs(addrs, size, bodies, labels):
-    """{first address: (fetches, extras)} for every run of two fetches or more."""
+def fetch_runs(addrs, size, bodies, labels, region=0):
+    """{first address: (fetches, extras, stops)} for every run of two fetches or more."""
+    lit = "h->wait32[%d][0]" % region if 8 <= region <= 13 else None
     runs = {}
     i = 0
     while i < len(addrs):
-        j, extras = i, 0
+        j, extras, stops = i, 0, 0
         while j - i + 1 < RUN_MAX and j + 1 < len(addrs) and addrs[j + 1] == addrs[j] + size \
                 and addrs[j + 1] not in labels and bodies[addrs[j + 1]] is not None:
-            e = plain_extra(bodies[addrs[j]])
+            e = plain_extra(bodies[addrs[j]], lit)
             if e is None:
                 break
-            extras |= e << (4 * (j - i))
+            extras |= e[0] << (4 * (j - i))
+            stops |= e[1] << (j - i)
             j += 1
         if j > i and bodies[addrs[i]] is not None:
-            runs[addrs[i]] = (j - i + 1, extras)
+            runs[addrs[i]] = (j - i + 1, extras, stops)
         i = j + 1
     return runs
 

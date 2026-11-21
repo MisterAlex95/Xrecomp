@@ -332,49 +332,53 @@ static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_i(gba_rc_head *h, 
 
 /* N (>= 2) opcode fetches from the cartridge in a row with the buffer on, the first at `now` from addr, each next one
  * at the following opcode, X's low 4 bits cycles after the previous one ended (X: 4 bits per fetch, the instruction's
- * internal cycles): the sum of what N calls of rc_pf_fetch return, leaving the same state (RC_IN, XBA-295; checked by
- * consoles/gba/tests/test_prefetch.c). After the first fetch the next one is always at the buffer's head with the unit
- * reading, on locals. Once the buffer is empty and no internal cycles are left, each fetch waits for the opcode being
- * read: the rest of that read, then a whole one (`duty`) each, at once. */
+ * internal cycles); NS = N | S << 8, S's bit k set when the k-th instruction is a literal load from this region (RC_LIT,
+ * folded: the buffer stops after the fetch, then the load's wait states). Returns the sum of what N calls of
+ * rc_pf_fetch return and the stops' waits (rc_pf_stop), leaving the same state (RC_IN, XBA-295; checked by
+ * consoles/gba/tests/test_prefetch.c). After the first fetch the next one is at the buffer's head with the unit reading,
+ * or, after a stop, a new start; on locals. Once the buffer is empty and nothing is left between the fetches, each
+ * waits for the opcode being read: the rest of that read, then a whole one (`duty`) each, at once. */
 static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, uint64_t now, uint32_t addr,
-                                                                bool thumb, uint32_t ncost, uint32_t n, uint64_t x)
+                                                                bool thumb, uint32_t ncost, uint32_t ns, uint64_t x)
 {
     gba_rc_prefetch *p = &h->pf;
-    uint32_t w = thumb ? 2u : 4u, total = 0, c;
+    const uint32_t w = thumb ? 2u : 4u, rg = (addr >> 24) & 15;
+    uint32_t n = ns & 0xFFu, stops = ns >> 8, total = 0, c;
+    bool first = true, idle = false;
     if (!(p->valid && addr == p->head && p->thumb == thumb && (p->run || p->count))) {
-        if (!p->run) { /* rc_pf_fetch's miss with the unit idle (after a stop): no wait, a new start */
-            uint32_t s16 = h->wait16[(addr >> 24) & 15][1];
-            p->valid = p->run = true;
-            p->thumb = thumb;
-            p->count = 0;
-            p->cap = thumb ? 8 : 4;
-            p->duty = (uint8_t)(thumb ? s16 : 2 * s16);
-            p->head = addr + w;
-            p->left = p->duty;
-            p->time = now + ncost;
-            total = ncost;
+        if (p->run) {
+            c = rc_pf_fetch_ool(h, now, addr, thumb, ncost); /* the state then reads at the head */
+            first = false;
         } else {
-            total = rc_pf_fetch_ool(h, now, addr, thumb, ncost); /* the state then reads at the head */
+            idle = true; /* rc_pf_fetch's miss with the unit idle: no wait, a new start (below) */
         }
-        now += total + (uint32_t)(x & 15);
-        x >>= 4;
-        n--;
     }
     uint64_t time = p->time;
-    uint32_t head = p->head, left = p->left, count = p->count;
-    const uint32_t cap = p->cap, duty = p->duty;
-    if (!p->run) { /* full (only before the first fetch): advancing only moves `time` */
+    uint32_t head = p->head, left = p->left, count = p->count, duty = p->duty;
+    const uint32_t cap = thumb ? 8u : 4u;
+    if (first && !idle && !p->run) { /* full (only before the first fetch): advancing only moves `time` */
         if (now > time)
             time = now;
         count--;
         head += w;
         left = duty;
-        total += 1;
-        now += 1 + (uint32_t)(x & 15);
-        x >>= 4;
-        n--;
+        c = 1;
+        first = false;
     }
-    while (n) {
+    if (!first)
+        goto next;
+    for (;;) {
+        if (idle) { /* a new start: a non-sequential access, then the unit reads behind it */
+            uint32_t s16 = h->wait16[rg][1];
+            duty = thumb ? s16 : 2 * s16;
+            count = 0;
+            head = addr + w;
+            left = duty;
+            c = ncost;
+            time = now + c;
+            idle = false;
+            goto next;
+        }
         if (now > time) { /* rc_pf_advance */
             uint64_t e = now - time;
             time = now;
@@ -395,7 +399,7 @@ static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, 
             count--;
             head += w;
             c = 1;
-        } else if (!x) { /* empty, back to back from here: the rest of this read, then a whole read for each */
+        } else if (!x && !stops) { /* empty, back to back from here: the rest of this read, then a whole read each */
             c = left + (n - 1) * duty;
             head += n * w;
             left = duty;
@@ -410,15 +414,41 @@ static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, 
         }
     next:
         total += c;
-        now += c + (uint32_t)(x & 15);
+        if (--n == 0)
+            break;
+        now += c;
+        if (stops & 1) { /* the literal load stops the buffer (rc_pf_stop from the cartridge), then waits */
+            uint32_t wait = 1;
+            if (now > time) { /* rc_pf_advance: the unit stops reading once full */
+                uint64_t e = now - time;
+                while (e >= left) {
+                    e -= left;
+                    if (++count >= cap) {
+                        wait = 0;
+                        break;
+                    }
+                    left = duty;
+                }
+                left -= (uint32_t)e;
+            }
+            wait = wait && (left == 1 || (!thumb && left == duty / 2u + 1u));
+            total += wait;
+            now += wait + h->wait32[rg][0];
+            idle = true;
+        }
+        stops >>= 1;
+        now += (uint32_t)(x & 15);
         x >>= 4;
-        n--;
+        addr += w;
     }
     p->time = time;
     p->head = head;
     p->left = left;
     p->count = (uint8_t)count;
-    p->run = true;
+    p->cap = (uint8_t)cap;
+    p->duty = (uint8_t)duty;
+    p->valid = p->run = true;
+    p->thumb = thumb;
     return total;
 }
 
@@ -507,12 +537,12 @@ static inline uint32_t rc_refill_cost(gba_rc_head *h, uint64_t now, uint32_t r15
     } while (0)
 
 /* RC_I for the N instructions from A, a run (gba_tools lift.py « runs of opcode fetches »): their fetches at once, X
- * the internal cycles of each but the last (4 bits each); the run's other instructions have no RC_I. */
-#define RC_IN(A, N, X)                                                                                               \
+ * the internal cycles of each but the last (4 bits each), S the folded literal loads (a bit each: their stop of the
+ * buffer is in the run's cycles, their body adds the load's wait states); the run's other instructions have no RC_I.
+ * With the buffer off it is stopped already: the stops change nothing. */
+#define RC_IN(A, N, X, S)                                                                                            \
     do {                                                                                                             \
-        now += pf_ ? rc_pf_fetch_n(h, now, (uint32_t)(A) + RC_PIPE, RC_T,                                            \
-                                   RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0], (N), (X))               \
-                   : (uint32_t)(N) * fc;                                                                             \
+        now += RC_RUN_FETCHES(A, N, X, S);                                                                           \
         RC_COUNT_N(N);                                                                                               \
     } while (0)
 
@@ -533,43 +563,43 @@ static inline uint32_t rc_refill_cost(gba_rc_head *h, uint64_t now, uint32_t r15
 /* RC_STOP + RC_IN for a block whose first segment is one run (gba_tools lift.py « runs of opcode fetches »): when
  * the bound says the event may fall inside, the run's exact cycles decide (its fetches computed, the buffer's state
  * put back when the interpreter runs it instead). The segment's static cycles are EXTRA, exact for a run. */
-#define RC_STOP_IN(A, NFC, EXTRA, HINT, X)                                                                           \
+#define RC_STOP_IN(A, NFC, EXTRA, HINT, X, S)                                                                        \
     do {                                                                                                             \
         uint32_t c__;                                                                                                \
         if (__builtin_expect(now + (uint32_t)(NFC) * fb + (uint32_t)(EXTRA) >= ne, 0)) {                             \
             epc = (A);                                                                                               \
             if (now >= ne)                                                                                           \
                 goto x_exit;                                                                                         \
-            RC_RUN_EXACT(A, NFC, EXTRA, HINT, X);                                                                    \
+            RC_RUN_EXACT(A, NFC, EXTRA, HINT, X, S);                                                                 \
         } else {                                                                                                     \
-            c__ = RC_RUN_FETCHES(A, NFC, X);                                                                         \
+            c__ = RC_RUN_FETCHES(A, NFC, X, S);                                                                      \
         }                                                                                                            \
         now += c__;                                                                                                  \
         RC_COUNT_N(NFC);                                                                                             \
     } while (0)
 
 /* RC_CHECK + RC_IN likewise. */
-#define RC_CHECK_IN(A, NFC, EXTRA, HINT, X)                                                                          \
+#define RC_CHECK_IN(A, NFC, EXTRA, HINT, X, S)                                                                       \
     do {                                                                                                             \
         uint32_t c__;                                                                                                \
         if (__builtin_expect(now + (uint32_t)(NFC) * fb + (uint32_t)(EXTRA) >= ne, 0)) {                             \
             epc = (A);                                                                                               \
-            RC_RUN_EXACT(A, NFC, EXTRA, HINT, X);                                                                    \
+            RC_RUN_EXACT(A, NFC, EXTRA, HINT, X, S);                                                                 \
         } else {                                                                                                     \
-            c__ = RC_RUN_FETCHES(A, NFC, X);                                                                         \
+            c__ = RC_RUN_FETCHES(A, NFC, X, S);                                                                      \
         }                                                                                                            \
         now += c__;                                                                                                  \
         RC_COUNT_N(NFC);                                                                                             \
     } while (0)
 
-#define RC_RUN_FETCHES(A, N, X)                                                                                      \
+#define RC_RUN_FETCHES(A, N, X, S)                                                                                   \
     (pf_ ? rc_pf_fetch_n(h, now, (uint32_t)(A) + RC_PIPE, RC_T,                                                      \
-                         RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0], (N), (X))                         \
+                         RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0], (uint32_t)(N) | (S) << 8, (X))    \
          : (uint32_t)(N) * fc)
-#define RC_RUN_EXACT(A, NFC, EXTRA, HINT, X)                                                                         \
+#define RC_RUN_EXACT(A, NFC, EXTRA, HINT, X, S)                                                                      \
     do {                                                                                                             \
         gba_rc_prefetch s__ = h->pf;                                                                                 \
-        c__ = RC_RUN_FETCHES(A, NFC, X);                                                                             \
+        c__ = RC_RUN_FETCHES(A, NFC, X, S);                                                                          \
         if (now + c__ + (uint32_t)(EXTRA) >= ne) {                                                                   \
             h->pf = s__;                                                                                             \
             h->rc_hint = (HINT);                                                                                     \
