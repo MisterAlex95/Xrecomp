@@ -395,6 +395,11 @@ void gx_fifo_write(gx_state *gx, uint32_t v, unsigned size)
             d[1] = (uint8_t)(v >> 16);
             d[2] = (uint8_t)(v >> 8);
             d[3] = (uint8_t)v;
+        } else if (size == 2) { /* vertex data mixes in shorts and bytes */
+            d[0] = (uint8_t)(v >> 8);
+            d[1] = (uint8_t)v;
+        } else if (size == 1) {
+            d[0] = (uint8_t)v;
         } else {
             for (unsigned i = 0; i < size; i++)
                 d[i] = (uint8_t)(v >> (8 * (size - 1 - i)));

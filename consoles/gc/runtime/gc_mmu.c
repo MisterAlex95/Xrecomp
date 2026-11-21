@@ -207,7 +207,7 @@ uint32_t gc_load(gc_machine *m, uint32_t ea, unsigned size, uint32_t pc)
     return gc_phys_read(m, pa, size);
 }
 
-void gc_store(gc_machine *m, uint32_t ea, uint32_t v, unsigned size, uint32_t pc)
+static __attribute__((noinline)) void store_walk(gc_machine *m, uint32_t ea, uint32_t v, unsigned size, uint32_t pc)
 {
     if (in_lc(m, ea, size)) {
         for (unsigned i = 0; i < size; i++)
@@ -225,6 +225,29 @@ void gc_store(gc_machine *m, uint32_t ea, uint32_t v, unsigned size, uint32_t pc
         return;
     }
     gc_phys_write(m, pa, v, size);
+}
+
+/* An instruction's store. The common case first, with nothing kept across a call: not the locked cache, the data
+ * translation real mode or the remembered BAT block (xlate's inline cases), then the write-gather pipe or the bus
+ * (lifted code's stores to hardware registers and the pipe come here: XBA-295). store_walk does the rest as before. */
+void gc_store(gc_machine *m, uint32_t ea, uint32_t v, unsigned size, uint32_t pc)
+{
+    if (!in_lc(m, ea, size)) {
+        uint32_t pa;
+        if (!(m->h.cpu.msr & PPC_MSR_DR))
+            pa = ea & 0x3FFFFFFFu;
+        else if (m->xl_memo_blk[ACC_WRITE] == (ea >> 17) + 1u)
+            pa = m->xl_memo_pa[ACC_WRITE] | (ea & 0x1FFFFu);
+        else
+            goto walk;
+        if ((pa & 0xFFFF8000u) == 0x0C008000u)
+            gx_fifo_write(m->gx, v, size);
+        else
+            gc_phys_write(m, pa, v, size);
+        return;
+    }
+walk:
+    store_walk(m, ea, v, size, pc);
 }
 
 /* Not an instruction's access: no DSI, an untranslatable address reads 0 and drops writes. */
