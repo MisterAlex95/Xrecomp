@@ -1284,8 +1284,23 @@ interpreter (XBA-283) only runs the code a pack does not hold.
 - **Steps.** 1: the XEX is written plain to `<work>/plain.xex`; the key is `X360-<title id>-<CRC32>` and the identity
   is the plain XEX's SHA-256. 2: `<work>/discovered.txt` (the runtime's misses; since XBA-282 the file only grows) is
   merged with the earlier seeds. 3: `x360_tools.recomp`. 4: the shared compile driver at -O1, `-DXE_RUNTIME=1
-  -ffp-contract=off`. 5: `libtitle.so`, `pack.json` (`console` x360, `entry` xe_rc_resume), `default.xex` and
+  -ffp-contract=off`, `-DXE_VIEW4K_DYNAMIC=0` or `1` (below). 5: `libtitle.so`, `pack.json` (`console` x360, `entry` xe_rc_resume), `default.xex` and
   `shaders/`.
+- **The 4 KB view (WP-33).** The 360 maps a 4 KB-page view of physical memory at `0xE0000000` with a 0x1000 offset.
+  A host whose pages are larger (16 KB: Apple silicon, Android 15+ devices built for 16 KB pages; 64 KB) cannot map it
+  there, so the runtime moves it 0x1000 higher (`view4k_skew`, `x360_mem.c`) and every guest memory access of the
+  lifted code checks for it (`xe_ptr`, `xenon_rt.h`, with `XE_VIEW4K_DYNAMIC=1`). Where the pages are 4 KB nothing
+  moves, so Prepare compiles the pack with `-DXE_VIEW4K_DYNAMIC=0`: one comparison and one addition less per access
+  (about 19 % fewer instructions in Adventure Time's hottest file). The page size is the real one of the machine that
+  runs the Prepare, `os.sysconf("SC_PAGE_SIZE")` (`x360.host_page_size`, raised by `X360_HOST_PAGE` as the runtime's):
+  on Android the Prepare runs on the device that plays the pack, on a desktop on the machine that runs it, so no
+  setting is passed. `pack.json` records it (`"view4k": "static"` or `"dynamic"`, `"host_page"`). A static pack on a
+  device of larger pages (a backup restored on another phone) is refused twice over: `x360.check` returns « prepared
+  for a device with 4 KB memory pages (this one's are N bytes): Prepare it again », so the next Prepare builds it
+  again instead of « pack up to date », and `x360_bind` refuses to load it (« the pack was prepared for a device with
+  4 KB memory pages ... Prepare it again on this device »); the runtime then returns `X360_RUN_PACK_REFUSED` and the
+  shell goes back to the launcher with « this Xbox 360 game's pack was prepared for another device or app version:
+  Prepare it again on its page, then Play ». A device's page size: `adb shell getconf PAGE_SIZE`.
 - **Shaders.** They are known only once a run has met them. The runtime dumps the microcode of every shader it meets
   to `<work>/shaders/*.bin`. Prepare translates the new ones to GLSL ES (xenos_glsl) into `<work>/glsl/` and copies
   them into the pack's `shaders/`. A shader that does not translate stays there as its `.bin` and is not tried again.

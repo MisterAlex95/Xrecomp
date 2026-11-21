@@ -370,7 +370,12 @@ int main(int argc, char *argv[])
         if ((console == RECOMP_CONSOLE_GBA || console == RECOMP_CONSOLE_PS1 || console == RECOMP_CONSOLE_N64
              || console == RECOMP_CONSOLE_GC || console == RECOMP_CONSOLE_X360)
             && pack_rc == RECOMP_PACK_OK) {
-            if (console_rc != 0)
+            if (console == RECOMP_CONSOLE_X360 && console_rc == X360_RUN_PACK_REFUSED)
+                /* WP-33: its library would not load or bind (a pack prepared for 4 KB memory pages restored on a
+                 * device of 16 KB ones, another runtime...; the log has the runtime's line) */
+                exit_via_launcher("this Xbox 360 game's pack was prepared for another device or app version: "
+                                  "Prepare it again on its page, then Play");
+            else if (console_rc != 0)
                 exit_via_launcher(console == RECOMP_CONSOLE_PS1
                                       ? "the game cannot start: its disc or the PlayStation BIOS cannot be read"
                                       : "the game file cannot be read");
