@@ -85,7 +85,8 @@ typedef struct rc_line {
     int32_t e;     /* entry index, E_NONE: nothing covers pc, E_STALE: candidates whose code is not in memory */
     uint32_t tg;   /* mapped pc: the TLB generation the translation was made under (and ERL in bit 31) */
     uint32_t pbase; /* the physical address the entry's start maps to (E_STALE: unused) */
-    uint32_t p0, p1, sum; /* E_STALE: the RDRAM pages of the candidates and their counter sum then */
+    uint32_t p0, p1, sum; /* E_STALE: the RDRAM pages of the candidates and their counter sum then; an entry: its
+                           * pages at pbase and their counter sum when it was last found valid there */
     uint32_t run;  /* E_NONE / E_STALE: the instructions from pc that no other entry covers (to the next entry's start
                     * or the page's end): the interpreter's block may run them (n64_recomp_run) */
     uint32_t rec_n;   /* E_NONE / E_STALE: 1 + the record count when recording pc last changed nothing, 0: unknown */
@@ -499,7 +500,11 @@ static int32_t lookup(n64_machine *m, struct n64_rc_state *s, uint32_t pc, uint3
     uint32_t tg = direct ? 0 : tlb_key(m);
     if (ln->key == pc && ln->tg == tg) {
         if (ln->e >= 0) {
-            if (entry_valid(m, s, (uint32_t)ln->e, ln->pbase)) {
+            /* No write in the entry's pages since it was found valid at pbase: still valid, no other look. Else its
+             * check (the page sum it was checked at may be another line's). */
+            uint32_t sum = page_sum(m, ln->p0, ln->p1);
+            if (sum == ln->sum || entry_valid(m, s, (uint32_t)ln->e, ln->pbase)) {
+                ln->sum = sum;
                 *pbase = ln->pbase;
                 return ln->e;
             }
@@ -545,6 +550,9 @@ static int32_t lookup(n64_machine *m, struct n64_rc_state *s, uint32_t pc, uint3
     if (found >= 0) {
         ln->e = found;
         ln->pbase = fbase;
+        ln->p0 = fbase >> 12; /* the pages entry_valid summed (s->vsum: their sum now) */
+        ln->p1 = (fbase + s->table->entries[found].len - 1) >> 12;
+        ln->sum = s->vsum[found];
         *pbase = fbase;
         return found;
     }
