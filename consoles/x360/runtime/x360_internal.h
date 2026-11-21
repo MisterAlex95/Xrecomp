@@ -257,7 +257,9 @@ struct x360_machine {
     x360_stats st;
     /* WP-19, the perf line's guest figures, running totals (host state: not in save states; the cooperative mode
      * only): lifted functions entered by the dispatcher (run_thread), scheduler turns (a thread run until its slice
-     * ends, it blocks or it ends), and the thread CPU time of those turns (lifted code, HLE calls, the interpreter) */
+     * ends, it blocks or it ends), and the thread CPU time of x360_run (WP-31: read at its entry and exit, not per
+     * turn) less that of the command processor run inside it (x360_gpu_run): lifted code, HLE calls, the interpreter
+     * and the scheduler's polls */
     struct {
         uint64_t dispatches, turns, guest_cpu_ns;
     } perf;
@@ -460,6 +462,7 @@ void x360_gpu_drain(x360_machine *x, int flush_resolves);
 /* on: x360_gpu_poll posts without running (x360_gpu_run / _drain do): stage 2's hook, and tests of the seam */
 void x360_gpu_set_deferred(x360_machine *x, int on);
 uint64_t x360_gpu_next_event(x360_machine *x);
+uint64_t x360_gpu_cpu_ns(x360_machine *x);
 void x360_gpu_stats(x360_machine *x, uint64_t *packets, uint64_t *draws, uint64_t *swaps, uint32_t *vblanks);
 #define X360_DECLARE_XAM_CALL(name) void x360_x_##name(x360_machine *x, x360_thread *t, xe_cpu *c);
 X360_XAM_CALLS(X360_DECLARE_XAM_CALL)

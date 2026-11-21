@@ -552,6 +552,12 @@ static void link_sync(struct x360_gpu *g, int loaded)
  * Reads only the seam's post word and guest memory; answers through guest memory, link.stalled and link.irq.
  * Returns 1 when there was a post to run. Stage 1: called by x360_gpu_poll right after the post (and by
  * x360_gpu_drain); a later stage calls it on the GL thread. */
+/* WP-31: the thread CPU time spent in x360_gpu_run so far (x360_run takes it out of the perf line's guest time) */
+uint64_t x360_gpu_cpu_ns(x360_machine *x)
+{
+    return x->gpu ? x->gpu->cp_cpu_ns : 0;
+}
+
 int x360_gpu_run(x360_machine *x)
 {
     struct x360_gpu *g = x->gpu;
@@ -563,10 +569,18 @@ int x360_gpu_run(x360_machine *x)
     if (!g->owner_set)
         g->owner = pthread_self(), g->owner_set = 1;
     uint32_t w = (uint32_t)post;
-    uint64_t t0 = mono_ns(), c0 = thread_cpu_ns();
-    xenos_cp_set_wptr(&g->cp, w);
-    g->cp_ns += mono_ns() - t0;
-    g->cp_cpu_ns += thread_cpu_ns() - c0;
+    /* WP-31: the perf line's gpu / cpu time, only when packets run. A post that only retries a stalled wait (write
+     * pointer where the ring already was) whose condition still does not hold stops at the same wait again: it
+     * happens every scheduler turn while the wait lasts, and is not timed (4 clock reads, a system call on Linux). */
+    uint32_t size_dw = g->cp.rb_size / 4;
+    if (g->cp.stalled && size_dw && w % size_dw == g->cp.wptr && !xenos_cp_stall_may_end(&g->cp)) {
+        xenos_cp_set_wptr(&g->cp, w);
+    } else {
+        uint64_t t0 = mono_ns(), c0 = thread_cpu_ns();
+        xenos_cp_set_wptr(&g->cp, w);
+        g->cp_ns += mono_ns() - t0;
+        g->cp_cpu_ns += thread_cpu_ns() - c0;
+    }
     __atomic_store_n(&g->link.stalled, (uint32_t)(g->cp.stalled != 0), __ATOMIC_RELAXED);
     __atomic_store_n(&g->link.swaps, g->cp.swaps, __ATOMIC_RELAXED);
     __atomic_store_n(&g->link.taken, (uint32_t)(post >> 32), __ATOMIC_RELEASE); /* drain waits on this one */
@@ -695,6 +709,7 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
     u32(s, &cp->rptr_writeback);
     u32(s, &cp->counter);
     i32(s, &cp->stalled);
+    cp->wait_known = 0; /* WP-31/32: the stalled wait is read again at the next retry */
     u32(s, &cp->ib_depth);
     if (cp->ib_depth > XENOS_IB_DEPTH)
         cp->ib_depth = 0;

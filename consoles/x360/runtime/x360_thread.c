@@ -508,7 +508,7 @@ static void run_thread(x360_machine *x, x360_thread *t)
     x->perf.dispatches += dispatches;
 }
 
-/* WP-19: the calling thread's CPU time (the perf line's guest time, read around each scheduler turn) */
+/* WP-19: the calling thread's CPU time (the perf line's guest time, read at x360_run's entry and exit: WP-31) */
 static uint64_t thread_cpu_ns(void)
 {
     struct timespec ts;
@@ -626,6 +626,7 @@ int x360_run(x360_machine *x, uint64_t insns)
     x360_install_fault_handler(x);
     if (x->host)
         return run_host(x, insns);
+    uint64_t c0 = thread_cpu_ns(), gpu0 = x360_gpu_cpu_ns(x);
     uint64_t stop = x->m.rc_native + insns;
     x->stop_at = stop;
     x->m.rc_stop = stop; /* WP-16: run_thread's budget, as direct calls (RC_CALL) see it */
@@ -681,11 +682,12 @@ int x360_run(x360_machine *x, uint64_t insns)
             x->threads[picked].cpu.reserve = 0;
         }
         x->cur = picked;
-        uint64_t c0 = thread_cpu_ns();
         run_thread(x, &x->threads[picked]);
-        x->perf.guest_cpu_ns += thread_cpu_ns() - c0;
         x->perf.turns++;
     }
+    /* WP-31: the guest time once per call, not around every turn (two clock reads a turn were ~1.1 ms a swap) */
+    uint64_t cpu = thread_cpu_ns() - c0, gpu = x360_gpu_cpu_ns(x) - gpu0;
+    x->perf.guest_cpu_ns += cpu > gpu ? cpu - gpu : 0;
     return x->status;
 }
 
