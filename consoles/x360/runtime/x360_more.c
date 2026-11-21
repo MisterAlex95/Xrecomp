@@ -166,9 +166,9 @@ static void k_MmQueryStatistics(x360_machine *x, x360_thread *t, xe_cpu *c)
         return;
     }
     memset(x360_p(x, p), 0, 104);
-    uint32_t used = 0;
-    for (uint32_t k = 0; k < x->heap_phys.pages; k++)
-        used += x->heap_phys.used[k];
+    /* the heap's count, not a scan of its 128 Ki page flags: the scan was half of the host CPU in Warhammer, which
+     * asks for them over and over every frame */
+    uint32_t used = x->heap_phys.nused;
     x360_w32(x, p, 104);
     x360_w32(x, p + 4, 0x20000);
     x360_w32(x, p + 8, 0x300);
