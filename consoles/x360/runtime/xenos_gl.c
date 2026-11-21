@@ -146,6 +146,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glBindBuffer, (GLenum, GLuint))                                                                            \
     X(void, glBufferData, (GLenum, GLsizeiptr, const void *, GLenum))                                                  \
     X(void, glBindBufferBase, (GLenum, GLuint, GLuint))                                                                \
+    X(void, glBindBufferRange, (GLenum, GLuint, GLuint, GLintptr, GLsizeiptr))                                         \
     X(GLint, glGetAttribLocation, (GLuint, const GLchar *))                                                            \
     X(void, glEnableVertexAttribArray, (GLuint))                                                                       \
     X(void, glDisableVertexAttribArray, (GLuint))                                                                      \
@@ -202,6 +203,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glDrawBuffers, (GLsizei, const GLenum *))                                                                  \
     X(void, glReadBuffer, (GLenum))                                                                                    \
     X(void, glClearBufferfv, (GLenum, GLint, const GLfloat *))                                                        \
+    X(void, glClearBufferfi, (GLenum, GLint, GLfloat, GLint))                                                         \
     X(void, glTexImage3D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *))   \
     X(void, glFramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint))                                          \
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum))          \
@@ -269,6 +271,8 @@ typedef struct texture {
     int copy;         /* 1 + the resolve copy it was made from (its host picture, at the internal resolution) */
     int swap_rb;      /* that copy's: red and blue are the other way round from the memory the fetch constant reads */
     int levels;       /* mip levels uploaded */
+    int copy_w, copy_h; /* a copy's texture: its host size and internal format (kept for the next copy that fits) */
+    GLenum copy_ifmt;
     uint32_t gen;     /* the copy's generation it was taken from (rt_copy.gen) */
     uint32_t lo, hi;  /* decoded from memory: the physical bytes its levels lie in (lazy resolves flush over them) */
 } texture;
@@ -309,7 +313,9 @@ typedef struct surface {
 typedef struct rt_copy {
     uint32_t base, bytes;  /* physical destination, extent */
     uint64_t hash;         /* of those bytes after the resolve */
+    uint64_t sparse;       /* WP-12: sparse_hash of the same bytes, what the check once per epoch compares */
     uint32_t checked;      /* the epoch the hash was last confirmed in */
+    uint32_t checks;       /* sparse checks since the last full one (COPY_FULL_EVERY) */
     GLuint tex;            /* the destination's pitch x height at the internal resolution, top row first */
     int w, h;
     GLenum ifmt;
@@ -324,6 +330,11 @@ typedef struct rt_copy {
     int px0, py0, px1, py1;
     unsigned frame;
 } rt_copy;
+
+/* WP-10: rectangles per second pass of a rectangle list on the GPU: their 3 captured vertices of 16 vec4 each are one
+ * uniform block of 768 vec4 (12,288 bytes, under GLES 3.0's minimum GL_MAX_UNIFORM_BLOCK_SIZE of 16,384) */
+#define RECT_CHUNK 16
+#define RECT_CHUNK_BYTES (RECT_CHUNK * 3 * 16 * 16)
 
 struct xenos_gl {
 #define DECL(ret, name, args) ret(*name) args;
@@ -373,12 +384,21 @@ struct xenos_gl {
     int msaa_on;              /* multisampled render targets are allowed (RECOMP_X360_MSAA=0: not) */
     int cur_ms;               /* the draw FBO has the renderbuffers attached rather than the textures */
     int cur[4], cur_ds;       /* the surfaces bound (index into surf, -1 none) */
+    int fbo_checked;          /* the draw FBO was found complete and no attachment changed since (bind_targets) */
+    /* sync_surface's stale-row clears of the surfaces bind_targets binds, done on the draw FBO once they are attached
+     * (WP-11): not a pass of their own through rfbo each */
+    struct {
+        int si, y0, y1;
+    } dclear[16];
+    int ndclear, defer_clears;
     int tw, th;               /* the guest size of the bound colour target 0 (the viewport's frame of reference) */
     rt_copy copies[MAX_COPIES];
     unsigned copy_clock;
     uint32_t copy_gen;        /* the last rt_copy.gen given */
     int lazy;                 /* WP-2: RECOMP_X360_RESOLVE=lazy, resolves write guest memory only when needed */
     int keep_noop;            /* WP-9: RECOMP_X360_NOOP_DRAWS=keep, draws that cannot write go through all the same */
+    int rects_gpu;            /* WP-10: rectangle lists' fourth corner made on the GPU (RECOMP_X360_RECTS=cpu: not) */
+    int copy_hash_full;       /* WP-12: RECOMP_X360_COPY_HASH=full, every check of a copy's memory hashes all of it */
     int npending;             /* copies with pending set */
     int in_resolve;           /* resolve() is timing itself (resolve_ns) */
     unsigned swaps;           /* xenos_gl_swap calls (the age of a pending copy) */
@@ -392,6 +412,11 @@ struct xenos_gl {
     int nprogs, cap_progs;
     program **prog_hash;      /* buckets of progs by (vs crc, ps crc, kind), prog_buckets of them (a power of two) */
     unsigned prog_buckets;
+    /* WP-12: each stage's microcode CRC (get_program), kept while the command processor loads nothing into that stage
+     * (xenos_shader.loads and words unchanged, the same xenos_cp; a state load forgets them: do_reset) */
+    const xenos_cp *crc_cp;
+    uint32_t crc_loads[2], crc_words[2], crc_val[2];
+    int crc_ok[2];
     uint32_t missing[64];
     int nmissing;
     xenos_gl_stats st;
@@ -489,6 +514,93 @@ static uint64_t mono_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
+/* WP-15, the perf line's passes: render passes as a tiler sees them, counted in the GL entry points rather than at the
+ * ~40 places that bind framebuffers. A pass starts at the first draw, clear or blit after the draw framebuffer or one
+ * of its attachments changed. The wrappers go in g's function table (load_gl); the real entry points and the count are
+ * process-wide (the renderers of a process share one GLES library, and in practice there is one renderer, on one
+ * thread). A renderer whose entry points are not the ones the wrappers call keeps its own, uncounted. */
+static struct {
+    void (*bind)(GLenum, GLuint);
+    void (*tex2d)(GLenum, GLenum, GLenum, GLuint, GLint);
+    void (*rb)(GLenum, GLenum, GLenum, GLuint);
+    void (*draw_arrays)(GLenum, GLint, GLsizei);
+    void (*draw_elements)(GLenum, GLsizei, GLenum, const void *);
+    void (*clear)(GLbitfield);
+    void (*clear_fv)(GLenum, GLint, const GLfloat *);
+    void (*blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+    GLuint draw_fb;
+    int changed;
+    uint64_t passes;
+} pc = {.changed = 1};
+static uint64_t hashed_bytes; /* WP-15: bytes of guest memory hashed (textures, copies, vertex buffers), process-wide */
+
+#define PC_DRAW_TARGET(t) ((t) == GL_FRAMEBUFFER || (t) == GL_DRAW_FRAMEBUFFER)
+static inline void pc_render(void)
+{
+    if (pc.changed)
+        pc.changed = 0, pc.passes++;
+}
+static void pc_bind(GLenum t, GLuint fb)
+{
+    pc.bind(t, fb);
+    if (PC_DRAW_TARGET(t) && fb != pc.draw_fb)
+        pc.draw_fb = fb, pc.changed = 1;
+}
+static void pc_tex2d(GLenum t, GLenum a, GLenum tt, GLuint tex, GLint l)
+{
+    pc.tex2d(t, a, tt, tex, l);
+    if (PC_DRAW_TARGET(t))
+        pc.changed = 1;
+}
+static void pc_rb(GLenum t, GLenum a, GLenum rt, GLuint rb)
+{
+    pc.rb(t, a, rt, rb);
+    if (PC_DRAW_TARGET(t))
+        pc.changed = 1;
+}
+static void pc_draw_arrays(GLenum m, GLint f, GLsizei n)
+{
+    pc_render();
+    pc.draw_arrays(m, f, n);
+}
+static void pc_draw_elements(GLenum m, GLsizei n, GLenum t, const void *i)
+{
+    pc_render();
+    pc.draw_elements(m, n, t, i);
+}
+static void pc_clear(GLbitfield b)
+{
+    pc_render();
+    pc.clear(b);
+}
+static void pc_clear_fv(GLenum b, GLint i, const GLfloat *v)
+{
+    pc_render();
+    pc.clear_fv(b, i, v);
+}
+static void pc_blit(GLint a, GLint b, GLint c, GLint d, GLint e, GLint f, GLint h, GLint i, GLbitfield m, GLenum fl)
+{
+    pc_render();
+    pc.blit(a, b, c, d, e, f, h, i, m, fl);
+}
+
+static void count_passes(xenos_gl *g)
+{
+    if (!pc.bind) {
+        pc.bind = g->glBindFramebuffer, pc.tex2d = g->glFramebufferTexture2D, pc.rb = g->glFramebufferRenderbuffer;
+        pc.draw_arrays = g->glDrawArrays, pc.draw_elements = g->glDrawElements;
+        pc.clear = g->glClear, pc.clear_fv = g->glClearBufferfv, pc.blit = g->glBlitFramebuffer;
+    }
+    if (pc.bind != g->glBindFramebuffer || pc.tex2d != g->glFramebufferTexture2D ||
+        pc.rb != g->glFramebufferRenderbuffer || pc.draw_arrays != g->glDrawArrays ||
+        pc.draw_elements != g->glDrawElements || pc.clear != g->glClear || pc.clear_fv != g->glClearBufferfv ||
+        pc.blit != g->glBlitFramebuffer)
+        return;
+    g->glBindFramebuffer = pc_bind, g->glFramebufferTexture2D = pc_tex2d, g->glFramebufferRenderbuffer = pc_rb;
+    g->glDrawArrays = pc_draw_arrays, g->glDrawElements = pc_draw_elements;
+    g->glClear = pc_clear, g->glClearBufferfv = pc_clear_fv, g->glBlitFramebuffer = pc_blit;
+}
+
 static void fail(char *why, size_t n, const char *msg)
 {
     if (why && n)
@@ -538,6 +650,7 @@ static int load_gl(xenos_gl *g, char *why, size_t why_n)
         fail(why, why_n, "GLES 3.0 entry points missing");
         return 0;
     }
+    count_passes(g);
     return 1;
 }
 
@@ -650,6 +763,21 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     fprintf(stderr, "xenos: resolves %s\n", g->lazy ? "lazy (RECOMP_X360_RESOLVE=lazy)" : "eager");
     const char *noop_env = getenv("RECOMP_X360_NOOP_DRAWS"); /* skip (default) | keep (WP-9) */
     g->keep_noop = noop_env && !strcmp(noop_env, "keep");
+    /* WP-10: a rectangle list's captured vertices are read by the second pass as a uniform block of RECT_CHUNK
+     * rectangles, bound at a multiple of its size in the capture buffer */
+    const char *rects_env = getenv("RECOMP_X360_RECTS"); /* gpu (default) | cpu (read back, the corner on the CPU) */
+    GLint ublock = 0, ualign = 0;
+    g->glGetIntegerv(0x8A30 /* GL_MAX_UNIFORM_BLOCK_SIZE */, &ublock);
+    g->glGetIntegerv(0x8A34 /* GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT */, &ualign);
+    g->rects_gpu = !(rects_env && !strcmp(rects_env, "cpu")) && ublock >= RECT_CHUNK_BYTES && ualign > 0 &&
+                   RECT_CHUNK_BYTES % ualign == 0;
+    if (!g->rects_gpu && !(rects_env && !strcmp(rects_env, "cpu")))
+        fprintf(g->log, "xenos_gl: rectangle lists read back (uniform block size %d, offset alignment %d)\n", ublock,
+                ualign);
+    const char *hash_env = getenv("RECOMP_X360_COPY_HASH"); /* sparse (default) | full (WP-12) */
+    g->copy_hash_full = hash_env && !strcmp(hash_env, "full");
+    if (g->copy_hash_full)
+        fprintf(stderr, "xenos: resolve copies hashed whole at every check (RECOMP_X360_COPY_HASH=full)\n");
     while (g->scale > 1 && (g->width * g->scale > g->max_tex || g->height * g->scale > g->max_tex))
         g->scale--;
     g->glGenFramebuffers(1, &g->fbo);
@@ -886,9 +1014,11 @@ static void do_reset(xenos_gl *g)
     for (int i = 0; i < 4; i++)
         g->cur[i] = -1;
     g->cur_ds = -1;
+    g->fbo_checked = 0;
     g->nresolved = 0;
     g->epoch++;
     g->ubo_valid[0] = g->ubo_valid[1] = 0;
+    g->crc_ok[0] = g->crc_ok[1] = 0; /* the state's microcode, with its own load counts */
 }
 
 void xenos_gl_set_frames_dir(xenos_gl *g, const char *dir, unsigned max_frames)
@@ -915,6 +1045,7 @@ void xenos_gl_get_stats(const xenos_gl *g, xenos_gl_stats *s)
 {
     *s = g->st;
     s->missing_shaders = (uint32_t)g->nmissing;
+    s->passes = pc.passes, s->hashed_bytes = hashed_bytes;
 }
 
 /* ---- shaders ---- */
@@ -1059,6 +1190,40 @@ static const char RECT_VS[] =
     "void main() { xe_i0 = xe_r0; xe_i1 = xe_r1; xe_i2 = xe_r2; xe_i3 = xe_r3; xe_i4 = xe_r4; xe_i5 = xe_r5; "
     "xe_i6 = xe_r6; xe_i7 = xe_r7; xe_i8 = xe_r8; xe_i9 = xe_r9; xe_i10 = xe_r10; xe_i11 = xe_r11; xe_i12 = xe_r12; "
     "xe_i13 = xe_r13; xe_i14 = xe_r14; xe_i15 = vec4(0.0); gl_Position = xe_rp; }\n";
+/* WP-10: the same pass-through without the read-back: the captured buffer of RECT_CHUNK rectangles is bound as the
+ * uniform block XeRect (binding 2) and vertex gl_VertexID makes corner k of rectangle gl_VertexID / 6 as draw_rects'
+ * CPU path does: c, a, b, a, b, a + b - c with c the vertex opposite the longest edge after the divide by w (the first
+ * of equal edges: the same strictly-greater test from -1) */
+static const char RECT_VS_GPU[] =
+    "#version 300 es\n"
+    "layout(std140) uniform XeRect { highp vec4 xe_rv[768]; };\n"
+    "out vec4 xe_i0, xe_i1, xe_i2, xe_i3, xe_i4, xe_i5, xe_i6, xe_i7, xe_i8, xe_i9, xe_i10, xe_i11, xe_i12, xe_i13, "
+    "xe_i14, xe_i15;\n"
+    "void main() {\n"
+    "    int r = gl_VertexID / 6, k = gl_VertexID - 6 * r, b0 = 48 * r;\n"
+    "    vec2 s[3];\n"
+    "    for (int j = 0; j < 3; j++) {\n"
+    "        vec4 q = xe_rv[b0 + 16 * j];\n"
+    "        float w = q.w != 0.0 ? q.w : 1.0;\n"
+    "        s[j] = vec2(q.x / w, q.y / w);\n"
+    "    }\n"
+    "    int corner = 0;\n"
+    "    float best = -1.0;\n"
+    "    for (int j = 0; j < 3; j++) {\n"
+    "        vec2 e = s[(j + 1) % 3] - s[(j + 2) % 3];\n"
+    "        float len = e.x * e.x + e.y * e.y;\n"
+    "        if (len > best) { best = len; corner = j; }\n"
+    "    }\n"
+    "    int c = b0 + 16 * corner, a = b0 + 16 * ((corner + 1) % 3), b = b0 + 16 * ((corner + 2) % 3);\n"
+    "    int o = k == 0 ? c : (k == 1 || k == 3) ? a : b;\n"
+    "    bool d = k == 5;\n"
+    "#define XE_RC(i) (d ? (xe_rv[a + i] + xe_rv[b + i]) - xe_rv[c + i] : xe_rv[o + i])\n"
+    "    gl_Position = XE_RC(0); xe_i0 = XE_RC(1); xe_i1 = XE_RC(2); xe_i2 = XE_RC(3); xe_i3 = XE_RC(4);\n"
+    "    xe_i4 = XE_RC(5); xe_i5 = XE_RC(6); xe_i6 = XE_RC(7); xe_i7 = XE_RC(8); xe_i8 = XE_RC(9);\n"
+    "    xe_i9 = XE_RC(10); xe_i10 = XE_RC(11); xe_i11 = XE_RC(12); xe_i12 = XE_RC(13); xe_i13 = XE_RC(14);\n"
+    "    xe_i14 = XE_RC(15); xe_i15 = vec4(0.0);\n"
+    "}\n";
+_Static_assert(RECT_CHUNK_BYTES == 768 * 16 && RECT_VARYINGS == 16, "RECT_VS_GPU's block is RECT_CHUNK rectangles");
 static const char CAPTURE_FS[] =
     "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(0.0); }\n";
 
@@ -1106,14 +1271,27 @@ static program *add_program(xenos_gl *g, uint32_t vc, uint32_t pc, int kind)
 }
 
 /* kind 0: the title's two shaders; 1: its vertex shader with transform feedback; 2: the pass-through vertex shader
- * with its pixel shader (rectangle lists) */
+ * with its pixel shader (rectangle lists); 3: the same with the pass-through that reads the capture as a uniform block
+ * (WP-10, RECT_VS_GPU) */
+static uint32_t stage_crc(xenos_gl *g, const xenos_cp *cp, int k)
+{
+    const xenos_shader *sh = &cp->shader[k];
+    if (g->crc_cp != cp)
+        g->crc_cp = cp, g->crc_ok[0] = g->crc_ok[1] = 0;
+    if (!g->crc_ok[k] || g->crc_loads[k] != sh->loads || g->crc_words[k] != sh->words) {
+        g->crc_val[k] = crc32_words(sh->code, sh->words);
+        g->crc_loads[k] = sh->loads, g->crc_words[k] = sh->words, g->crc_ok[k] = 1;
+    }
+    return g->crc_val[k];
+}
+
 static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
 {
     const xenos_shader *vs = &cp->shader[0], *ps = &cp->shader[1];
     if (!vs->words || !ps->words)
         return NULL;
-    uint32_t vc = kind == 2 ? 0 : crc32_words(vs->code, vs->words);
-    uint32_t pc = kind == 1 ? 0 : crc32_words(ps->code, ps->words);
+    uint32_t vc = kind >= 2 ? 0 : stage_crc(g, cp, 0);
+    uint32_t pc = kind == 1 ? 0 : stage_crc(g, cp, 1);
     if (g->prog_buckets)
         for (program *q = g->prog_hash[prog_bucket(vc, pc, kind, g->prog_buckets)]; q; q = q->next)
             if (q->vs_crc == vc && q->ps_crc == pc && q->kind == kind)
@@ -1123,7 +1301,7 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
         return NULL;
     char path[600], name[40];
     char *vsrc = NULL, *psrc = NULL;
-    if (kind != 2) {
+    if (kind < 2) {
         snprintf(path, sizeof path, "%s/vs_%08X.vert", g->cache, vc);
         if ((vsrc = slurp(path)) && !strstr(vsrc, XENOS_GLSL_STAMP)) { /* an older translator's: stale */
             fprintf(g->log, "xenos_gl: %s was translated by an older xenos_glsl: translate it again\n", path);
@@ -1146,8 +1324,12 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
     /* XBA-282, XBA-296: a shader that exports to memory is GLSL ES 3.10: it needs the capability of its stage, and the
      * other stage is linked as 3.10 too (GLES links one version only; 3.00 source is 3.10 source) */
     int vs310 = vsrc && !strncmp(vsrc, "#version 310 es", 15), ps310 = psrc && !strncmp(psrc, "#version 310 es", 15);
-    char rect_vs[sizeof RECT_VS], capture_fs[sizeof CAPTURE_FS];
-    memcpy(rect_vs, RECT_VS, sizeof RECT_VS);
+    char rect_vs[sizeof RECT_VS_GPU > sizeof RECT_VS ? sizeof RECT_VS_GPU : sizeof RECT_VS];
+    char capture_fs[sizeof CAPTURE_FS];
+    if (kind == 3)
+        memcpy(rect_vs, RECT_VS_GPU, sizeof RECT_VS_GPU);
+    else
+        memcpy(rect_vs, RECT_VS, sizeof RECT_VS);
     memcpy(capture_fs, CAPTURE_FS, sizeof CAPTURE_FS);
     if (vs310 || ps310) {
         if ((vs310 && !g->memexport) || (ps310 && !g->memexport_ps)) {
@@ -1166,9 +1348,10 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
             psrc[10] = '1';
         rect_vs[10] = capture_fs[10] = '1';
     }
-    const char *vtext = kind == 2 ? rect_vs : vsrc, *ftext = kind == 1 ? capture_fs : psrc;
+    const char *vtext = kind >= 2 ? rect_vs : vsrc, *ftext = kind == 1 ? capture_fs : psrc;
     if (vtext && ftext) {
-        snprintf(name, sizeof name, kind == 2 ? "rect pass-through" : "vs_%08X", vc);
+        snprintf(name, sizeof name, kind == 3 ? "rect pass-through (gpu)" : kind == 2 ? "rect pass-through" : "vs_%08X",
+                 vc);
         GLuint v = compile(g, GL_VERTEX_SHADER, vtext, name);
         snprintf(name, sizeof name, kind == 1 ? "capture" : "ps_%08X", pc);
         GLuint f = compile(g, GL_FRAGMENT_SHADER, ftext, name);
@@ -1197,7 +1380,7 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
                             snprintf(an, sizeof an, "xe_r%d", i - 1);
                         p->loc[i] = g->glGetAttribLocation(p->prog, an);
                     }
-                } else {
+                } else if (kind == 0 || kind == 1) { /* kind 3 has no attributes: gl_VertexID */
                     p->nattr = parse_attrs(vsrc, p->attrs);
                     p->nvb = parse_attrs_of(vsrc, p->vbufs, "uniform highp sampler2D xe_vb");
                     for (int i = 0; i < p->nattr; i++) {
@@ -1241,6 +1424,9 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
                 b = g->glGetUniformBlockIndex(p->prog, "XePixelConstants");
                 if (b != GL_INVALID_INDEX)
                     g->glUniformBlockBinding(p->prog, b, 1);
+                b = g->glGetUniformBlockIndex(p->prog, "XeRect");
+                if (b != GL_INVALID_INDEX)
+                    g->glUniformBlockBinding(p->prog, b, 2); /* draw_rects binds the capture there */
             } else {
                 char log[2048] = "";
                 g->glGetProgramInfoLog(p->prog, sizeof log, NULL, log);
@@ -1288,6 +1474,7 @@ static uint32_t gpu_read(const xenos_cp *cp, uint32_t phys, uint32_t endian)
  * on every cached texture after each swap and resolve. Not for anything that needs a good distribution. */
 static uint64_t span_hash(const uint8_t *p, size_t n, uint64_t seed)
 {
+    hashed_bytes += n;
     const uint64_t k = 0x9E3779B97F4A7C15ull;
     uint64_t h[4] = {seed ^ k, seed + k, seed ^ (k >> 1), seed - k};
     size_t i = 0;
@@ -1623,6 +1810,8 @@ static int fmt_wide(uint32_t fmt)
 
 static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound);
 static void surface_reload(xenos_gl *g, surface *s);
+static void alias_clear_to(xenos_gl *g, const surface *d, int y0, int y1, GLuint rb);
+static void deferred_clears_flush(xenos_gl *g, int si, int use_ms);
 
 /* the multisampled buffer of an MSAA surface: the smallest sample count the driver lists for its format that is at
  * least the guest's; none (single-sampled) when it lists no such count */
@@ -1749,6 +1938,7 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
             for (int k = 0; k < 4; k++)
                 g->cur[k] = -2;
             g->cur_ds = -2;
+            g->fbo_checked = 0;
             return i;
         }
         int bound = 0;
@@ -1771,9 +1961,9 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
         g->glDeleteRenderbuffers(1, &s->rb);
     for (int k = 0; k < 4; k++)
         if (g->cur[k] == victim)
-            g->cur[k] = -1;
+            g->cur[k] = -1, g->fbo_checked = 0;
     if (g->cur_ds == victim)
-        g->cur_ds = -1;
+        g->cur_ds = -1, g->fbo_checked = 0;
     memset(s, 0, sizeof *s);
     GLenum tf, tt;
     host_format(g, fmt, depth, s, &tf, &tt);
@@ -1834,9 +2024,12 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
             ds = -1;
         /* what another format or position left in these tiles since (not what is bound together with them) */
         int together[5] = {want[0], want[1], want[2], want[3], ds};
+        g->ndclear = 0;
+        g->defer_clears = 1;
         for (int i = 0; i < 5; i++)
             if (together[i] >= 0)
                 sync_surface(g, together[i], together, 5);
+        g->defer_clears = 0;
         /* multisampled only when every attachment is, with one sample count */
         int use_ms = 1, samples = 0;
         for (int i = 0; i < 5; i++)
@@ -1860,9 +2053,11 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
         int reattach = use_ms != g->cur_ms;
         g->cur_ms = use_ms;
+        int changed = reattach || g->cur_ds != ds;
         GLenum bufs[4];
         for (int i = 0; i < 4; i++) {
             if (g->cur[i] != want[i] || reattach) {
+                changed = 1;
                 GLenum att = GL_COLOR_ATTACHMENT0 + (GLenum)i;
                 if (want[i] >= 0 && use_ms)
                     g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, g->surf[want[i]].rb);
@@ -1883,7 +2078,39 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         }
         g->cur_ds = ds;
         g->glDrawBuffers(4, bufs);
-        if (g->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        /* completeness depends on the attachments only (GLES 3.0: not on the draw buffers): asked again only when one
+         * changed here or elsewhere (a surface deleted or grown, a state loaded) since it was last found complete */
+        if (changed || !g->fbo_checked)
+            g->fbo_checked = g->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (g->fbo_checked && g->ndclear) { /* the stale rows, on the attachment each surface is bound at */
+            int k = g->scale;
+            g->glEnable(GL_SCISSOR_TEST);
+            for (int c = 0; c < g->ndclear; c++) {
+                const surface *d = &g->surf[g->dclear[c].si];
+                int slot = -1;
+                for (int i = 0; i < 4; i++)
+                    slot = want[i] == g->dclear[c].si ? i : slot;
+                if (d->kind == 2 ? ds != g->dclear[c].si : slot < 0) { /* not attached (not expected): as before */
+                    alias_clear_to(g, d, g->dclear[c].y0, g->dclear[c].y1, use_ms ? d->rb : 0);
+                    g->glEnable(GL_SCISSOR_TEST);
+                    continue;
+                }
+                g->glScissor(0, g->dclear[c].y0 * k, d->w * k, (g->dclear[c].y1 - g->dclear[c].y0) * k);
+                if (d->kind == 2) {
+                    g->glDepthMask(1);
+                    g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+                    g->glClearBufferfi(GL_DEPTH_STENCIL, 0, 1.0f, 0);
+                } else {
+                    static const GLfloat zero[4] = {0, 0, 0, 0};
+                    g->glColorMask(1, 1, 1, 1);
+                    g->glClearBufferfv(0x1800 /* GL_COLOR */, slot, zero);
+                }
+            }
+            g->glDisable(GL_SCISSOR_TEST);
+            g->ndclear = 0;
+        }
+        deferred_clears_flush(g, -1, use_ms); /* no complete framebuffer: each through rfbo, as before */
+        if (g->fbo_checked) {
             const surface *ref = want[0] >= 0 ? &g->surf[want[0]] : &g->surf[ds];
             unsigned stamp = ++g->write_clock;
             /* how far down this draw can reach: the scissor unless it is left at its maximum, and the viewport */
@@ -1921,6 +2148,7 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         for (int i = 0; i < 4; i++)
             g->cur[i] = -1;
         g->cur_ds = -1;
+        g->fbo_checked = 0;
         for (int i = 0; i < 4; i++)
             g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + (GLenum)i, GL_TEXTURE_2D, 0, 0);
         g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
@@ -2707,9 +2935,59 @@ static uint64_t memory_hash(const xenos_cp *cp, uint32_t base, uint32_t bytes)
     if (cp->mem)
         return span_hash(cp->mem + base, bytes < 0x20000000u - base ? bytes : 0x20000000u - base, 0);
     uint64_t h = 1469598103934665603ull;
+    hashed_bytes += bytes;
     for (uint32_t i = 0; i < bytes; i += 4)
         h = (h ^ (cp->read32 ? cp->read32(cp->ctx, (base + i) & 0x1FFFFFFFu) : 0)) * 1099511628211ull;
     return h;
+}
+
+/* WP-12: what the check of a copy's memory once per epoch hashes when the copy is large (COPY_SPARSE_MIN and up: the
+ * full-screen buffers, 8 MB at 1080p, ~26 MB of hashing per frame before): one 64-byte line of each 4 KB page, at an
+ * offset that changes from page to page (1/64 of the bytes). A write the CPU makes over a resolve's destination is nearly
+ * always a whole buffer (a texture loaded or decoded there, the memory handed to something else): it changes a line of
+ * every page it covers. One that misses every sampled line (less than a page, or the same bytes there) is caught by the
+ * full hash every COPY_FULL_EVERY checks instead of the next one: until then the picture is sampled for that memory,
+ * and a lazy resolve pending there that is written in between (WP-2) goes over the CPU's bytes. Smaller copies are
+ * hashed whole every time, as before (cheap); RECOMP_X360_COPY_HASH=full hashes every copy whole every time. Nothing in
+ * the runtime tracks guest writes (the recompiled code stores straight into the mapped physical memory): a hash is
+ * the only way to know. */
+#define COPY_FULL_EVERY 16
+#define COPY_SPARSE_MIN (256u << 10)
+static uint64_t sparse_hash(const xenos_cp *cp, uint32_t base, uint32_t bytes)
+{
+    base &= 0x1FFFFFFFu;
+    if (bytes > 0x20000000u - base)
+        bytes = 0x20000000u - base;
+    uint32_t end = base + bytes;
+    uint64_t h = 0x243F6A8885A308D3ull ^ bytes;
+    for (uint32_t page = base & ~0xFFFu; page < end; page += 0x1000) {
+        uint32_t lo = page < base ? base : page, hi = end - page > 0x1000 ? page + 0x1000 : end;
+        uint32_t at = page + ((((page >> 12) * 0x9E3779B1u) >> 26) << 6);
+        if (at + 64 > hi)
+            at = hi - lo >= 64 ? hi - 64 : lo;
+        if (at < lo)
+            at = lo;
+        uint32_t n = hi - at < 64 ? hi - at : 64;
+        if (cp->mem) {
+            h = span_hash(cp->mem + at, n, h);
+        } else {
+            hashed_bytes += n;
+            for (uint32_t i = 0; i + 4 <= n; i += 4)
+                h = (h ^ (cp->read32 ? cp->read32(cp->ctx, at + i) : 0)) * 1099511628211ull;
+            h ^= h >> 29;
+        }
+    }
+    return h;
+}
+
+/* a copy's memory as it is now becomes what its checks compare with (after a resolve or a flush wrote it, or when it is
+ * made): hashed whole, and sparsely */
+static void copy_rehash(xenos_gl *g, const xenos_cp *cp, rt_copy *rc)
+{
+    rc->hash = memory_hash(cp, rc->base, rc->bytes);
+    rc->sparse = sparse_hash(cp, rc->base, rc->bytes);
+    rc->checks = 0;
+    rc->checked = g->epoch;
 }
 
 /* a copy goes: its picture, its pending write if any (the CPU wrote that memory since: its bytes win, as they would
@@ -2741,7 +3019,12 @@ static rt_copy *copy_at(xenos_gl *g, const xenos_cp *cp, uint32_t base)
         if (!c->tex || c->base != base)
             continue;
         if (c->checked != g->epoch) {
-            if (memory_hash(cp, c->base, c->bytes) != c->hash) { /* the CPU (or a texture upload) wrote it */
+            /* a large copy sparsely, and whole every COPY_FULL_EVERY checks (WP-12) */
+            int full = g->copy_hash_full || c->bytes < COPY_SPARSE_MIN || ++c->checks >= COPY_FULL_EVERY;
+            if (full)
+                c->checks = 0;
+            if (full ? memory_hash(cp, c->base, c->bytes) != c->hash
+                     : sparse_hash(cp, c->base, c->bytes) != c->sparse) { /* the CPU (or a texture upload) wrote it */
                 drop_copy(g, c, 0);
                 return NULL;
             }
@@ -2822,16 +3105,23 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
                 t = victim;
                 memcpy(t->key, fc, sizeof t->key);
             }
-            if (t->tex)
+            /* another copy's picture in a texture of this size and format: the blit below overwrites all of it, the
+             * texture object is kept (a new 1080p texture per copy change is a reallocation and a render pass more) */
+            int hw = (int)w * g->scale, hh = (int)h * g->scale;
+            int keep = t->tex && t->copy && t->copy_w == hw && t->copy_h == hh && t->copy_ifmt == rc->ifmt;
+            if (t->tex && !keep)
                 g->glDeleteTextures(1, &t->tex);
-            GLenum tf = GL_RGBA, tt = GL_UNSIGNED_BYTE;
-            if (rc->ifmt == GL_RGB10_A2)
-                tt = GL_UNSIGNED_INT_2_10_10_10_REV;
-            else if (rc->ifmt == GL_RGBA16F || rc->ifmt == GL_RG16F)
-                tf = rc->ifmt == GL_RG16F ? GL_RG : GL_RGBA, tt = GL_HALF_FLOAT;
-            else if (rc->ifmt == GL_R32F || rc->ifmt == GL_RG32F)
-                tf = rc->ifmt == GL_R32F ? GL_RED : GL_RG, tt = GL_FLOAT;
-            t->tex = new_texture(g, rc->ifmt, tf, tt, (int)w * g->scale, (int)h * g->scale);
+            if (!keep) {
+                GLenum tf = GL_RGBA, tt = GL_UNSIGNED_BYTE;
+                if (rc->ifmt == GL_RGB10_A2)
+                    tt = GL_UNSIGNED_INT_2_10_10_10_REV;
+                else if (rc->ifmt == GL_RGBA16F || rc->ifmt == GL_RG16F)
+                    tf = rc->ifmt == GL_RG16F ? GL_RG : GL_RGBA, tt = GL_HALF_FLOAT;
+                else if (rc->ifmt == GL_R32F || rc->ifmt == GL_RG32F)
+                    tf = rc->ifmt == GL_R32F ? GL_RED : GL_RG, tt = GL_FLOAT;
+                t->tex = new_texture(g, rc->ifmt, tf, tt, hw, hh);
+                t->copy_w = hw, t->copy_h = hh, t->copy_ifmt = rc->ifmt;
+            }
             blit_tex(g, rc->tex, t->tex, 0, 0, (int)w, (int)h, 0, 0);
             t->copy = 1 + (int)(rc - g->copies);
             t->swap_rb = rc->swap_rb;
@@ -3490,8 +3780,7 @@ static void flush_copy(xenos_gl *g, const xenos_cp *cp, rt_copy *rc)
     rc->pending = 0;
     g->npending--;
     g->epoch++; /* memory changed under the cached textures: compare them again */
-    rc->hash = memory_hash(cp, rc->base, rc->bytes);
-    rc->checked = g->epoch;
+    copy_rehash(g, cp, rc);
     uint64_t t2 = mono_ns();
     g->st.resolve_flushes++;
     g->st.resolve_read_ns += t1 - t0;
@@ -3587,10 +3876,8 @@ static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint3
             flush_copy(g, cp, rc);
     }
     blit_tex(g, s->tex, rc->tex, x0, y0, x1 - x0, y1 - y0, x0, y0);
-    if (fresh) {
-        rc->hash = memory_hash(cp, rc->base, rc->bytes); /* of the memory as it is: a CPU write still shows */
-        rc->checked = g->epoch;
-    }
+    if (fresh)
+        copy_rehash(g, cp, rc); /* of the memory as it is: a CPU write still shows */
     if (!rc->pending) {
         rc->pending = 1;
         g->npending++;
@@ -3882,13 +4169,17 @@ static void alias_depth(xenos_gl *g, const surface *d, const surface *s, int dy,
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
 }
 
-/* rows y0..y1 of a surface whose eDRAM was overwritten in a way that cannot be carried over */
-static void alias_clear(xenos_gl *g, const surface *d, int y0, int y1)
+/* rows y0..y1 of a surface whose eDRAM was overwritten in a way that cannot be carried over: its texture, or its
+ * multisampled buffer rb when that is what is drawn into from now on */
+static void alias_clear_to(xenos_gl *g, const surface *d, int y0, int y1, GLuint rb)
 {
     int k = g->scale;
+    GLenum att = d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
-    g->glFramebufferTexture2D(GL_FRAMEBUFFER, d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0,
-                              GL_TEXTURE_2D, d->tex, 0);
+    if (rb)
+        g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, rb);
+    else
+        g->glFramebufferTexture2D(GL_FRAMEBUFFER, att, GL_TEXTURE_2D, d->tex, 0);
     g->glEnable(GL_SCISSOR_TEST);
     g->glScissor(0, y0 * k, d->w * k, (y1 - y0) * k);
     if (d->kind == 2) {
@@ -3905,9 +4196,33 @@ static void alias_clear(xenos_gl *g, const surface *d, int y0, int y1)
         g->glClear(GL_COLOR_BUFFER_BIT);
     }
     g->glDisable(GL_SCISSOR_TEST);
-    g->glFramebufferTexture2D(GL_FRAMEBUFFER, d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0,
-                              GL_TEXTURE_2D, 0, 0);
+    if (rb)
+        g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, 0);
+    else
+        g->glFramebufferTexture2D(GL_FRAMEBUFFER, att, GL_TEXTURE_2D, 0, 0);
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+}
+
+static void alias_clear(xenos_gl *g, const surface *d, int y0, int y1)
+{
+    alias_clear_to(g, d, y0, y1, 0);
+}
+
+/* the clears deferred for surface si (all for -1) done now through rfbo, in their order: before another write to
+ * the surface (an alias copy) or when bind_targets finds no complete framebuffer (use_ms: on the multisampled buffer
+ * the draw would have used) */
+static void deferred_clears_flush(xenos_gl *g, int si, int use_ms)
+{
+    int n = 0;
+    for (int c = 0; c < g->ndclear; c++) {
+        if (si >= 0 && g->dclear[c].si != si) {
+            g->dclear[n++] = g->dclear[c];
+            continue;
+        }
+        const surface *d = &g->surf[g->dclear[c].si];
+        alias_clear_to(g, d, g->dclear[c].y0, g->dclear[c].y1, use_ms ? d->rb : 0);
+    }
+    g->ndclear = n;
 }
 
 /* the multisampled buffer filled from the texture, every sample of a pixel alike: a pass, as a blit cannot write a
@@ -4028,6 +4343,7 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
         int dy = same_grid ? (int)(tiles / (int64_t)dper) * 16 / (int)dsy : 0;
         int y0 = dy > 0 ? dy : 0, y1 = dy + s->dirty_h < d->h ? dy + s->dirty_h : d->h;
         if (same_grid && y1 > y0) {
+            deferred_clears_flush(g, si, 0); /* rows cleared before them stay before them */
             if (d->kind == 2) {
                 alias_depth(g, d, s, dy, y0, y1);
                 g->st.edram_reinterpreted++;
@@ -4044,8 +4360,12 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
         uint32_t to = (send < dend ? send : dend) - d->base;
         int r0 = (int)(from / dper * 16 / dsy), r1 = (int)((to + dper - 1) / dper * 16 / dsy);
         r1 = r1 < d->h ? r1 : d->h;
-        if (r1 > r0)
+        if (r1 > r0 && g->defer_clears && g->ndclear < (int)(sizeof g->dclear / sizeof g->dclear[0])) {
+            g->dclear[g->ndclear].si = si, g->dclear[g->ndclear].y0 = r0, g->dclear[g->ndclear].y1 = r1;
+            g->ndclear++;
+        } else if (r1 > r0) {
             alias_clear(g, d, r0, r1);
+        }
         g->st.edram_stale++;
     }
     if (touched) {
@@ -4249,8 +4569,7 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
                 int cw = x1 < rc->w ? x1 - x0 : rc->w - x0, ch = y1 < rc->h ? y1 - y0 : rc->h - y0;
                 if (cw > 0 && ch > 0)
                     blit_tex(g, s->tex, rc->tex, x0, y0, cw, ch, x0, y0);
-                rc->hash = memory_hash(cp, rc->base, rc->bytes);
-                rc->checked = g->epoch;
+                copy_rehash(g, cp, rc);
                 rc->used = ++g->copy_clock;
                 rc->gen = ++g->copy_gen;
                 rc->frame = g->swaps;
@@ -4290,28 +4609,38 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
 cleared:;
     int clear_c = (ctl >> 8) & 1, clear_d = (ctl >> 9) & 1;
     if (clear_c || clear_d) {
-        g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
-        g->glEnable(GL_SCISSOR_TEST);
-        g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
+        /* a surface the draw FBO has attached (complete, its buffer the one cleared here: the multisampled one when
+         * the surface has one) is cleared there, through its draw buffer: no pass through rfbo (WP-11) */
         if (clear_c && src < 4) { /* the resolved render target (none when the source is depth) */
             float colour[4];
             clear_colour(s->fmt, cp->regs[0x231E], cp->regs[0x231F], colour);
             if (s->rb) {
                 if (s->ms_reload)
                     surface_reload(g, s);
-                g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
-                g->glEnable(GL_SCISSOR_TEST);
-                g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
-                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s->rb);
                 s->ms_dirty = 1;
-            } else {
-                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
             }
-            static const GLenum b0 = GL_COLOR_ATTACHMENT0;
-            g->glDrawBuffers(1, &b0);
+            int slot = -1;
+            for (int i = 0; i < 4; i++)
+                slot = g->cur[i] == si ? i : slot;
+            if (slot < 0 || !g->fbo_checked || (s->rb && !g->cur_ms))
+                slot = -1;
+            if (slot >= 0) {
+                g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+            } else {
+                g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+                if (s->rb)
+                    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s->rb);
+                else
+                    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
+                static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+                g->glDrawBuffers(1, &b0);
+            }
+            g->glEnable(GL_SCISSOR_TEST);
+            g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
             g->glColorMask(1, 1, 1, 1);
-            g->glClearBufferfv(0x1800 /* GL_COLOR */, 0, colour);
-            g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            g->glClearBufferfv(0x1800 /* GL_COLOR */, slot >= 0 ? slot : 0, colour);
+            if (slot < 0)
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
             s->written = ++g->write_clock;
             s->dirty_h = y1 > s->dirty_h ? y1 : s->dirty_h;
         }
@@ -4324,19 +4653,28 @@ cleared:;
                     surface_reload(g, ds);
                 ds->ms_dirty = 1;
             }
-            g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+            int attached = g->cur_ds == di && g->fbo_checked && (!ds->rb || g->cur_ms);
+            if (attached) {
+                g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+            } else {
+                g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+                if (ds->rb)
+                    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ds->rb);
+                else
+                    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds->tex, 0);
+            }
             g->glEnable(GL_SCISSOR_TEST);
             g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
-            if (ds->rb)
-                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ds->rb);
-            else
-                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds->tex, 0);
             g->glDepthMask(1);
             g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
-            g->glClearDepthf((float)(dc >> 8) / 16777215.0f);
-            g->glClearStencil((GLint)(dc & 0xFF));
-            g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-            g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+            if (attached) {
+                g->glClearBufferfi(GL_DEPTH_STENCIL, 0, (float)(dc >> 8) / 16777215.0f, (GLint)(dc & 0xFF));
+            } else {
+                g->glClearDepthf((float)(dc >> 8) / 16777215.0f);
+                g->glClearStencil((GLint)(dc & 0xFF));
+                g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+            }
             g->surf[di].written = ++g->write_clock;
             g->surf[di].dirty_h = y1 > g->surf[di].dirty_h ? y1 : g->surf[di].dirty_h;
         }
@@ -4471,14 +4809,22 @@ static int bind_vertex_buffers(xenos_gl *g, const xenos_cp *cp, const program *p
     return 1;
 }
 
-static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const uint32_t *idx, uint32_t n)
+/* rp kind 3 (WP-10): the capture stays on the GPU and the second pass reads it as uniform blocks of RECT_CHUNK
+ * rectangles; kind 2: it is read back and the triangles are made here. p's vertex attributes (the capture's) are
+ * turned off before a kind 3 pass: it has none. */
+static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *p, uint32_t na, const program *rp,
+                       const uint32_t *idx, uint32_t n)
 {
     enum { F = RECT_VARYINGS * 4 };
     uint32_t nr = n / 3;
     if (!nr)
         return;
+    int gpu = rp->kind == 3;
+    uint32_t chunks = (nr + RECT_CHUNK - 1) / RECT_CHUNK;
     g->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, g->tfbo);
-    g->glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, (GLsizeiptr)nr * 3 * F * 4, NULL, GL_STREAM_DRAW);
+    /* gpu: whole blocks, so that the last chunk's uniform block lies inside the buffer */
+    g->glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,
+                    gpu ? (GLsizeiptr)chunks * RECT_CHUNK_BYTES : (GLsizeiptr)nr * 3 * F * 4, NULL, GL_STREAM_DRAW);
     g->glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, g->tfbo);
     g->glEnable(GL_RASTERIZER_DISCARD);
     g->glBeginTransformFeedback(0 /* GL_POINTS */);
@@ -4491,6 +4837,25 @@ static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const
     }
     g->glEndTransformFeedback();
     g->glDisable(GL_RASTERIZER_DISCARD);
+    if (gpu) {
+        /* the capture ended before it is read (GL orders the two in the command stream: no read-back, no barrier);
+         * off the feedback bindings so that it is never bound for feedback and as a uniform buffer at once */
+        g->glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0);
+        g->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        for (uint32_t a = 0; a < na; a++)
+            if (p->loc[a] >= 0)
+                g->glDisableVertexAttribArray((GLuint)p->loc[a]);
+        g->glUseProgram(rp->prog);
+        bind_textures(g, cp, rp);
+        for (uint32_t k = 0; k < chunks; k++) {
+            uint32_t m = nr - k * RECT_CHUNK < RECT_CHUNK ? nr - k * RECT_CHUNK : RECT_CHUNK;
+            g->glBindBufferRange(GL_UNIFORM_BUFFER, 2, g->tfbo, (GLintptr)k * RECT_CHUNK_BYTES, RECT_CHUNK_BYTES);
+            g->glDrawArrays(4 /* GL_TRIANGLES */, 0, (GLsizei)(m * 6));
+        }
+        g->glBindBufferBase(GL_UNIFORM_BUFFER, 2, 0);
+        return;
+    }
+    g->st.rect_lists_read_back++;
     const float *cap =
         g->glMapBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, (GLsizeiptr)nr * 3 * F * 4, GL_MAP_READ_BIT);
     float *tri = cap ? malloc((size_t)nr * 6 * F * 4) : NULL;
@@ -4609,22 +4974,22 @@ static void memexport_end(xenos_gl *g, const xenos_cp *cp)
 
 /* WP-9: a draw that cannot change the eDRAM or memory: eDRAM mode colour + depth, RB_COLOR_MASK's nibble 0 for every
  * colour target the pixel shader writes (and target 0, always bound), RB_DEPTHCONTROL with stencil off and not both z
- * enable and z write, no memory export. Direct3D issues such dummy draws by the hundred per frame (Adventure Time: 1
- * point, runs of 24, ~795 of ~868 draws). Nothing else the GPU does here depends on a draw: occlusion and visibility
- * queries report fixed results (xenos_cp.c), screen extents are faked. Skipped, the draw does not bind its targets,
- * which would mark them written and make overlapping surfaces stale (rows cleared) for nothing, and it does not fetch
- * indices or vertices (pending lazy resolves under them are written when something else reads that memory).
- * RECOMP_X360_NOOP_DRAWS=keep runs them as before. */
-static int cannot_write(const xenos_cp *cp, unsigned outputs, int exports)
+ * enable and z write, no memory export in either stage. Direct3D issues such dummy draws by the hundred per frame
+ * (Adventure Time: 1 point, runs of 24, ~792 of ~868 draws). Nothing else the GPU does here depends on a draw:
+ * occlusion and visibility queries report fixed results (xenos_cp.c), screen extents are faked. Skipped, the draw does
+ * not bind its targets, which would mark them written and make overlapping surfaces stale (rows cleared) for nothing,
+ * and it does not fetch indices or vertices (pending lazy resolves under them are written when something else reads
+ * that memory). Counted in noop_draws (the perf line's "no-op") either way; RECOMP_X360_NOOP_DRAWS=keep draws them. */
+static int draw_writes_nothing(const xenos_cp *cp, const program *p, const program *rp)
 {
-    if ((cp->regs[0x2208] & 7) != 4 || exports)
+    if ((cp->regs[0x2208] & 7) != 4 || p->memexport || (rp && rp->memexport))
         return 0;
-    uint32_t cm = cp->regs[0x2104], dc = cp->regs[0x2200];
-    unsigned targets = (outputs | 1u) & 15u;
+    uint32_t cm = cp->regs[0x2104], depth = cp->regs[0x2200]; /* RB_DEPTHCONTROL: stencil enable 0, z 1, z write 2 */
+    unsigned targets = ((rp ? rp : p)->outputs | 1u) & 15u;
     for (int i = 0; i < 4; i++)
         if ((targets >> i) & 1 && (cm >> (4 * i)) & 15)
             return 0;
-    return !(dc & 1) && (dc & 6) != 6;
+    return !(depth & 1) && (depth & 6) != 6;
 }
 
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
@@ -4655,14 +5020,21 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         return;
     }
     program *p = get_program(g, cp, d->prim_type == 8 ? 1 : 0);
-    program *rp = d->prim_type == 8 ? get_program(g, cp, 2) : NULL;
+    program *rp = NULL;
+    if (d->prim_type == 8) { /* WP-10: the GPU pass-through; the read-back one if that does not compile here */
+        if (g->rects_gpu)
+            rp = get_program(g, cp, 3);
+        if (!rp)
+            rp = get_program(g, cp, 2);
+    }
     if (!p || (d->prim_type == 8 && !rp)) {
         g->st.no_shader++;
         return;
     }
-    if (!g->keep_noop && cannot_write(cp, (rp ? rp : p)->outputs, p->memexport || (rp && rp->memexport))) {
+    if (draw_writes_nothing(cp, p, rp)) {
         g->st.noop_draws++;
-        return;
+        if (!g->keep_noop)
+            return;
     }
     /* indices: from the DMA buffer or the packet (16 or 32 bits, VGT_DMA_SIZE's swap mode) or 0..n-1 */
     uint32_t n = d->num_indices, *idx = NULL, max_index = n - 1, min_index = 0;
@@ -4781,7 +5153,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     if (exports)
         memexport_begin(g);
     if (d->prim_type == 8) {
-        draw_rects(g, cp, rp, idx, n);
+        draw_rects(g, cp, p, na, rp, idx, n);
     } else if (idx) {
         g->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g->ibo);
         g->glBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * (GLsizeiptr)n, idx, GL_STREAM_DRAW);
@@ -4799,6 +5171,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         if (p->loc[a] >= 0)
             g->glDisableVertexAttribArray((GLuint)p->loc[a]);
     g->st.drawn++;
+    g->st.rect_draws += d->prim_type == 8;
     free(conv);
 }
 
