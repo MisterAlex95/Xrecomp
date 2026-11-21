@@ -14,4 +14,15 @@
     <string name="REPORT_PROBLEM_EXPLAIN">Sent only if you choose Send: your line, the game\'s log and its last events (no names, only what was done), without folders, addresses or links. No game data, no account, no e-mail.</string>
     <string name="REPORT_PROBLEM_NO_TEXT">Write what goes wrong first.</string>
     <string name="REPORT_PROBLEM_RUNNING">A game is running: use Report a problem in its menu.</string>
+    <!-- Benchmark (game performance): the in-game menu's page, its result and Send (GameMenu, GamePerf). -->
+    <string name="BENCH">Benchmark</string>
+    <string name="BENCH_EXPLAIN">Plays 60 s without touching the controls, then shows the frame rate. Nothing is sent unless you choose Send.</string>
+    <string name="BENCH_FROM_STATE">From your newest save state (%1$s)</string>
+    <string name="BENCH_FROM_BOOT">No save state: the game restarts and is measured from boot</string>
+    <string name="BENCH_START">Start</string>
+    <string name="BENCH_RUNNING">Benchmark: 60 s, hands off the controls</string>
+    <string name="BENCH_NO_FIGURES">Benchmark: no figures (the game did not run)</string>
+    <string name="BENCH_SEND_EXPLAIN">Send gives the developers this result: the frame times, the game\'s key and console, the device, Android and app version. No name, no game data.</string>
+    <string name="BENCH_SEND">Send the result</string>
+    <string name="BENCH_NOT_SENT">Could not send the result.</string>
 </resources>

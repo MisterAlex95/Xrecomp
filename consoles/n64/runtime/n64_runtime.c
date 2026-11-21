@@ -1786,6 +1786,12 @@ int n64_runtime_run(const n64_runtime_opts *o)
         printf("n64: perf over the run: %s\n", line);
         n64_runtime_perf_detail_format(&s_perf_last, line, sizeof line);
         printf("n64: perf detail over the run: %s\n", line);
+        /* The run summary (host_perf_line.h): the shared figures, the RSP's time and share of a frame noted. */
+        host_perf_summary_note_num("rsp_ms", s_perf_last.rsp_ms);
+        if (s_perf_last.frames && s_perf_last.seconds > 0) /* of the wall time per N64 frame */
+            host_perf_summary_note_num("rsp_share_pct", 100.0 * s_perf_last.rsp_ms * (double)s_perf_last.frames /
+                                                            (s_perf_last.seconds * 1000.0));
+        host_perf_summary_write(&hp, t_end, 1);
         host_perf_live_clear(); /* the overlay's figures went with the game */
     }
     saves_flush("exit");

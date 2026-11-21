@@ -14,4 +14,15 @@
     <string name="REPORT_PROBLEM_EXPLAIN">Part seulement si vous choisissez Envoyer : votre ligne, le journal du jeu et ses derniers événements (aucun nom, seulement ce qui a été fait), sans dossiers, adresses ni liens. Aucune donnée de jeu, aucun compte, aucune adresse e-mail.</string>
     <string name="REPORT_PROBLEM_NO_TEXT">Écrivez d’abord ce qui ne va pas.</string>
     <string name="REPORT_PROBLEM_RUNNING">Un jeu tourne : utilisez Signaler un problème dans son menu.</string>
+    <!-- Benchmark (performances du jeu) : la page du menu en jeu, son résultat et Envoyer (GameMenu, GamePerf). -->
+    <string name="BENCH">Benchmark</string>
+    <string name="BENCH_EXPLAIN">Joue 60 s sans toucher la manette, puis affiche les images par seconde. Rien ne part sans que vous choisissiez Envoyer.</string>
+    <string name="BENCH_FROM_STATE">Depuis votre sauvegarde d’état la plus récente (%1$s)</string>
+    <string name="BENCH_FROM_BOOT">Aucune sauvegarde d’état : le jeu redémarre et est mesuré depuis le début</string>
+    <string name="BENCH_START">Démarrer</string>
+    <string name="BENCH_RUNNING">Benchmark : 60 s, ne touchez pas la manette</string>
+    <string name="BENCH_NO_FIGURES">Benchmark : aucun chiffre (le jeu n’a pas tourné)</string>
+    <string name="BENCH_SEND_EXPLAIN">Envoyer donne ce résultat aux développeurs : les temps d’image, la clé et la console du jeu, l’appareil, les versions d’Android et de l’app. Aucun nom, aucune donnée de jeu.</string>
+    <string name="BENCH_SEND">Envoyer le résultat</string>
+    <string name="BENCH_NOT_SENT">Le résultat n’a pas pu partir.</string>
 </resources>

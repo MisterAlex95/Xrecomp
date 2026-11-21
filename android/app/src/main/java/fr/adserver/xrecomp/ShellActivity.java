@@ -112,6 +112,7 @@ public class ShellActivity extends SDLActivity {
         }
         ShaderWarmup.cancel(this);   // an N64 shader warm-up never runs next to a game (its GPU memory, its driver)
         applyAutoResume();
+        GamePerf.beginRun(this);   // the run summary (host_perf_line.h), for the « game » performance transaction
         applyCheats(rom != null);
         applyVkDriver(rom != null);
         Console console = applyGameSettings(rom != null);
@@ -948,6 +949,24 @@ public class ShellActivity extends SDLActivity {
         public File reportLog() {
             File f = LogProvider.gameLogFile(ShellActivity.this);
             return LogProvider.dumpOwnLogcat(f) ? f : null;
+        }
+
+        @Override
+        public void benchMark() {
+            try {
+                MenuNative.nativeBenchMark();
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: no native benchmark", e);
+            }
+        }
+
+        @Override
+        public boolean benchTake(java.io.File f) {
+            try {
+                return MenuNative.nativeBenchTake(f.getPath());
+            } catch (UnsatisfiedLinkError e) {
+                return false;
+            }
         }
 
         @Override

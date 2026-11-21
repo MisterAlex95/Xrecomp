@@ -3167,7 +3167,8 @@ Offline or refused (not 2xx): one retry, then the envelope waits in `files/repor
 the next report that gets through.
 
 With « Send reports automatically » on, each ended Prepare also sends its time per stage as a performance transaction
-(XBA-341, [prepare.md](prepare.md#timings-per-stage-xba-341)); off, nothing.
+(XBA-341, [prepare.md](prepare.md#timings-per-stage-xba-341)), and each ended game run its frame rate and frame times
+([Game performance](#game-performance)); off, nothing.
 
 Check on the device (Alex):
 1. Make a Prepare fail (for example fill the storage): the failed screen shows **Send report**.
@@ -3305,6 +3306,86 @@ Check on the device (Alex):
    counts as `exited`, not `abnormal` (Rustrak's release health, abnormal count unchanged).
 9. With the option on, the Privacy sheet (and the bubble) in English and French: the whole text and the three rows
    show, nothing cut (the JVM render `ui-privacy-<en|fr>-<720|1080|4x3|1x1>` checks the same).
+
+### Game performance
+
+How a game ran on the device, as numbers in Rustrak, without adb. Two ways out, both one performance transaction
+**`game`** (op `game.run`) built by `GamePerf`:
+
+| | When | Consent |
+|---|---|---|
+| A game run | The launcher sees the run's end (`AutoReports.collect`, on resume): quit from the menu, the title leaving by itself, the launcher ending a held game, or the system killing it in the background (`end=abnormal`). Not a crash or « not responding » (the crash report covers those). | « Send reports automatically » on, Telemetry's gate open, a network the option allows (unmetered, or any with « Also on mobile data »). Off: nothing is built or sent. |
+| **Benchmark** | In-game menu › **Benchmark** (under Report a problem; hidden in a game's own app, which cannot send) | The result page's **Send the result** only: one post (`CrashReport.sendOnce`), whatever the option says. Back: nothing leaves. |
+
+Both are **never queued**: offline, refused or a metered network without the option, the item is dropped.
+
+*Where the figures come from.* The game's frame loop (every console, through `host_perf_line`: the same counters as
+the perf line) keeps a small JSON summary at `XBA_PERF_SUMMARY` (`ShellActivity` sets it to
+`files/perf/game-<pid>.json`, one per game process, with the library key noted beside it at the start: a game started
+before the launcher saw the last one end, Back to launcher then another game, takes nothing from it; files older than
+7 days go). It is refreshed every 10 s while frames run, when the game is held (menu, background: a held game ended
+later by the launcher keeps its figures) and at the run's line, through a temporary file and a rename. Numbers and
+fixed words only (`host_perf_kv`: keys `[a-z0-9_]`, words `[a-z0-9_-]`, 23 characters); the app checks them again.
+Each ended run (`AutoReports.collect`) takes its own process's file, which then goes (option off: deleted unsent).
+
+*fps median and 5th percentile*: from 1 s samples (the newest 2 h, `HOST_PERF_SAMPLE_NS`) of guest frames per second
+(`fps_speed_*`) and pictures shown per second (`fps_shown_*`). The p5 is the sample at or under which 5 % of the
+seconds are: the slow parts of the run.
+
+| Measurement | Unit | What |
+|---|---|---|
+| `fps_shown_median`, `fps_shown_p5`, `fps_speed_median`, `fps_speed_p5` | none | the 1 s samples' median and 5th percentile |
+| `fps_shown`, `fps_speed` | none | over the whole run (or the Benchmark) |
+| `speed_pct` | percent | guest frames against the console's full rate (not on the Xbox: a title picks its own rate) |
+| `frame_time_mean`, `frame_time_p99` | millisecond | host frame length, top to top (the perf line's frame time) |
+| `worst_frame`, `slow_frames_pct` | ms, percent | the slowest host frame's work; host frames over the budget |
+| `guest_ms`, `render_ms`, `present_ms`, `idle_ms`, `busy_ms` | millisecond | per guest frame: the console's work (the Xbox's `guest`), drawing, the copy to the window, the sleep; work per host frame |
+| `stage_<name>_ms` | millisecond | each stage of the runtime's perf line, and its rest (`stage_other_ms`, `stage_guest_ms`) |
+| `run_seconds` | second | time played (holds left out) |
+| Xbox 360: `gpu_ms`, `gpu_cpu_ms`, `gpu_wait_ms`, `resolve_ms`, `resolve_read_ms`, `resolve_write_ms`, `guest_cpu_ms`, `turns`, `gpu_time_ms` | ms (turns: none) | per guest frame: the perf line's gpu field (its thread CPU time and the rest, waiting), resolves, perf2's guest CPU and scheduler turns, the GPU timer when the driver has one |
+| N64: `rsp_ms`, `rsp_share_pct` | ms, percent | the RSP's time per N64 frame and its share of the wall time, over the run (not in a Benchmark) |
+
+Tags: `console`, `game_key` (the library key, as the crash reports), `device`, `android`, `abi`, `toolkit` (the
+pack's toolkit digest, 12 characters), `runtime` (the perf line's prefix), `benchmark` (`0` / `1`), `end` (`exited` /
+`abnormal`; a run), `state` (the Benchmark's state: a hash, or `boot`), `samples`, and the Xbox 360's `gpu_thread`
+(`on` / `off`) and `resolve_mode` (`eager` / `lazy`). Release and environment as the other reports. No title, path,
+file name, pid or install id.
+
+**Benchmark.** The page says what it does and where it starts from. **Start**:
+- With a save state (the newest of the menu's slots and « Where you left off »): it is loaded, fast-forward goes
+  off, the menu closes and « Benchmark: 60 s, hands off the controls » shows. `state` is the first 12 hex digits of
+  SHA-256 over the game's key, the slot, when it was saved and its thumbnail (the same state gives the same hash).
+- Without one: the game restarts fresh (`GameStore.requestFreshStart`, not the automatic slot) and its next start
+  measures the boot (`state=boot`).
+
+The Benchmark's own window (`HOST_PERF_WIN_BENCH`, and its own samples; the run's figures go on) starts at the
+game's next frame (`MenuNative.nativeBenchMark`); each second the menu asks the frame loop for that window's summary
+(`nativeBenchTake`, `files/perf/bench.json`) until it has 60 s played (held time counts none; given up after
+15 min on the wall clock). Then the menu opens on the result: « 59.8 fps (5 %: 57.0) · p99 17.1 ms » (shown fps
+median, 5th percentile, frame time p99), what Send gives, **Send the result**, Back. Input is not blocked: the
+player is asked to leave the controls alone (the library check's pad script is not used here).
+
+Check on the device (Alex):
+1. Settings › Advanced › Privacy › Send reports automatically **on**, Wi-Fi. Play a game 2 minutes, menu › Quit.
+   Back in the launcher, within a minute: Rustrak › XRecomp › Performance shows a `game` transaction (op
+   `game.run`, release `xrecomp@<version>`) with `end=exited`, your `device`, `game_key`, `toolkit`, and measurements
+   `fps_shown_median`, `fps_shown_p5`, `frame_time_p99`… close to the perf overlay's figures.
+2. Same with an Xbox 360 title: the transaction also has `gpu_ms`, `gpu_wait_ms`, `resolve_read_ms`,
+   `resolve_write_ms`, `guest_cpu_ms` and tags `gpu_thread`, `resolve_mode`. With an N64 game: `rsp_ms`,
+   `rsp_share_pct`.
+3. Play a game, menu › Back to launcher, then start another game: the first game's transaction arrives (the launcher
+   ended it, `end=exited`).
+4. Crash a game: a crash report, no `game` transaction for that run.
+5. Turn the option off, play and quit a game: no transaction.
+6. In a game with a save state: menu › **Benchmark**: the row says « From your newest save state (…) ». Start: the
+   state loads, the menu closes, « Benchmark: 60 s … » shows. Leave the controls. After about a minute the menu opens
+   on the result (fps, p99). Back: nothing in Rustrak. Run it again and choose **Send the result**: « Report sent »,
+   and a `game` transaction with `benchmark=1` and a 12-digit `state`; again from the same state: the same `state`.
+7. With the option off, the Benchmark's Send still sends (the tap is the consent).
+8. In a game with no save state (or a console without states): Benchmark says « No save state: the game restarts … »;
+   Start restarts the game from its boot and the result comes about a minute later, `state=boot`.
+9. Open the menu during the Benchmark for a while, then resume: the result still covers 60 s of play.
+10. The Benchmark page and its result in French, and on a 4:3 / square screen: every row reachable, nothing cut.
 
 ## Library check (XBA-130)
 

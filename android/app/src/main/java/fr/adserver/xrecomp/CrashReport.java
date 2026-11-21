@@ -314,6 +314,27 @@ final class CrashReport {
      */
     static byte[] transactionEnvelope(String name, String op, String status, long startMs, long endMs,
                                       List<Span> spans, Map<String, String> tags, String release, String environment) {
+        return transactionEnvelope(name, op, status, startMs, endMs, spans, tags, null, release, environment);
+    }
+
+    /** A measurement of a transaction (Sentry « measurements »): its value and unit (« millisecond », « none »). */
+    static final class Measure {
+        final double value;
+        final String unit;
+
+        Measure(double value, String unit) {
+            this.value = value;
+            this.unit = unit;
+        }
+    }
+
+    /**
+     * The same with measurements (XBA game performance): numbers only, their names lower case letters, digits, « _ »
+     * and « . »; a value that is not finite is left out.
+     */
+    static byte[] transactionEnvelope(String name, String op, String status, long startMs, long endMs,
+                                      List<Span> spans, Map<String, String> tags, Map<String, Measure> measures,
+                                      String release, String environment) {
         String id = UUID.randomUUID().toString().replace("-", "");
         String trace = UUID.randomUUID().toString().replace("-", "");
         String root = id.substring(0, 16);
@@ -341,7 +362,25 @@ final class CrashReport {
             first = false;
             field(t, e.getKey(), scrub(e.getValue()));
         }
-        t.append("},\"spans\":[");
+        t.append('}');
+        if (measures != null && !measures.isEmpty()) {
+            t.append(",\"measurements\":{");
+            boolean firstM = true;
+            for (Map.Entry<String, Measure> e : measures.entrySet()) {
+                Measure m = e.getValue();
+                if (m == null || Double.isNaN(m.value) || Double.isInfinite(m.value)
+                    || !e.getKey().matches("[a-z0-9_.]{1,64}"))
+                    continue;
+                if (!firstM)
+                    t.append(',');
+                firstM = false;
+                str(t, e.getKey()).append(":{\"value\":")
+                 .append(String.format(Locale.ROOT, "%.3f", m.value)).append(',');
+                field(t, "unit", m.unit == null ? "none" : m.unit).append('}');
+            }
+            t.append('}');
+        }
+        t.append(",\"spans\":[");
         for (int i = 0; i < spans.size(); i++) {
             Span sp = spans.get(i);
             t.append(i > 0 ? ",{" : "{");
@@ -380,6 +419,15 @@ final class CrashReport {
             return false;
         Dsn d = dsn(c);
         return d != null && post(c, d, body);
+    }
+
+    /**
+     * Sends an item the player chose to send with a tap (the Benchmark's result): one post, never queued, not behind
+     * « Send reports automatically » (the tap is the consent). Off the UI thread. True when accepted.
+     */
+    static boolean sendOnce(Context c, byte[] body) {
+        Dsn d = dsn(c);
+        return d != null && body != null && post(c, d, body);
     }
 
     /** What the player sees before sending, in four lines at most: the problem, the game, the device, the log. */

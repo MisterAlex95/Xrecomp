@@ -14,6 +14,7 @@
 #include "host_window.h"
 #include "n64_rdp.h"
 #include "ps1_runtime.h"
+#include "platform/host_perf_line.h"
 #include "platform/recomp_lifecycle.h"
 #include "platform/recomp_quit.h"
 #include "platform/recomp_states.h"
@@ -253,4 +254,26 @@ JNIEXPORT jintArray JNICALL JNI_FN(nativeShaderProgress)(JNIEnv *env, jclass cls
     if (out)
         (*env)->SetIntArrayRegion(env, out, 0, 3, v);
     return out;
+}
+
+/* The Benchmark (docs/android/app-shell.md « Game performance »): its window starts at the game's next host frame
+ * (host_perf_bench_mark); take asks the frame loop to write that window's summary to path (host_perf_bench_take). */
+JNIEXPORT void JNICALL JNI_FN(nativeBenchMark)(JNIEnv *env, jclass cls)
+{
+    (void)env;
+    (void)cls;
+    host_perf_bench_mark();
+}
+
+JNIEXPORT jboolean JNICALL JNI_FN(nativeBenchTake)(JNIEnv *env, jclass cls, jstring jpath)
+{
+    (void)cls;
+    if (!jpath)
+        return JNI_FALSE;
+    const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (!path)
+        return JNI_FALSE;
+    int r = host_perf_bench_take(path);
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    return r == 0 ? JNI_TRUE : JNI_FALSE;
 }
