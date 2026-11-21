@@ -2,6 +2,30 @@
 
 <!-- Highlights: what changed, what works, known problems. Written by hand, kept across updates. -->
 
+A speed night on every console but the Xbox 360. Every change is bit-exact: frame, RAM and audio hashes over 600
+frames or more are identical to 0.17.0, and lockstep with the interpreters holds.
+
+| Console | x86-64 instructions per frame (bench) | Prepare again? |
+|---|---|---|
+| GBA | 9.06M → 7.09M (−22 %) | yes |
+| PS1 | 8.08M → 6.49M (−20 %) | no |
+| N64 | 6.58M → 5.65M (−14 %) | yes |
+| GameCube | audio mix −24 %, GX front end −14 % | no |
+| Xbox | float stack code −30 % on arm64 (`fistp` without libm) | yes |
+
+- **GBA**: the prefetch model charges a run of plain instructions in one call, and exact segment cycles keep lifted
+  code running (instructions handed to the interpreter −43 %).
+- **PS1**: the SPU skips idle voices and silent reverb; handed instructions run in one loop; the HLE interrupt entry
+  and exit copy registers in blocks.
+- **N64**: COUNT reads stay in lifted code (polling screens 7× cheaper); one range test per store; the AI resampler
+  skips silence; a cheaper dispatcher hit.
+- **GameCube**: the 48 kHz audio mix without a call per frame; unaligned GX pipe writes take the fast path.
+- **Xbox**: the OHCI controller no longer advances the frame number while a guest thread walks the USB lists
+  (XBA-329).
+
+Known: not measured on the Thor yet (XBA-295, XBA-329 device checks). GBA, N64 and Xbox packs show stale; Prepare
+them again. Save states from 0.17.0 load.
+
 ## Changes
 
 <!-- release:changes start (generated from the commits; rewritten on every push to main) -->
