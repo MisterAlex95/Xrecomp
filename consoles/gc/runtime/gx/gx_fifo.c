@@ -386,7 +386,9 @@ void gx_fifo_write(gx_state *gx, uint32_t v, unsigned size)
     uint32_t base = gx->pi_base & 0x03FFFFE0u, lim = ring_limit(gx->pi_end & 0x03FFFFFFu);
     uint32_t wp = gx->pi_wp & 0x03FFFFFFu;
     bool crossed = false;
-    if ((wp & 3) + size <= 4 && wp + size < lim && wp + size <= gx->ram_size) { /* the common case: no wrap */
+    /* The common case: no wrap, and within one 32-byte line, so that only the last byte can reach a line's end (a
+     * word after a command byte is unaligned: it stays here too) */
+    if ((wp & 31) + size <= 32 && wp + size < lim && wp + size <= gx->ram_size) {
         uint8_t *d = gx->ram + wp;
         if (size == 4) { /* a word (most writes): big-endian at once (XBA-279) */
             d[0] = (uint8_t)(v >> 24);
