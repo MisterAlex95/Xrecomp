@@ -4589,23 +4589,58 @@ static inline __attribute__((always_inline)) void direct_texel(int kind, const u
     }
 }
 
+/* WP-36: tiled2d(x, y) is tiled2d(x & ~31, y) ^ tiled2d(x & 31, 0) (each address bit comes from one bit of x or of y,
+ * the pipe bits from an exclusive or of both, and a 32-texel tile row's x never reaches the tile number's bits), so a
+ * row's addresses take one tiled2d per 32 texels and a table lookup (xenos_resolve_write_test checks the identity).
+ * The 8_8_8_8 resolves of Warhammer (~8 Mpx a frame) wrote at ~2 ns a texel with a tiled2d per 16 bytes, ~1 ns now. */
+static inline uint32_t tiled2d_split(int32_t x, int32_t y, uint32_t pitch_blocks, unsigned bpb_log2)
+{
+    return (uint32_t)tiled2d(x & ~31, y, pitch_blocks, bpb_log2) ^ (uint32_t)tiled2d(x & 31, 0, 32, bpb_log2);
+}
+
 static inline __attribute__((always_inline)) void direct_rows(const xenos_cp *cp, const resolve_dest *d,
                                                              const uint8_t *px, int x0, int y0, int w, int h,
                                                              int kind, int swap_rb, uint32_t endian)
 {
     const unsigned bpp_log2 = kind == DIRECT_HALF4 ? 3 : 2, bpp = 1u << bpp_log2, per = 16u >> bpp_log2;
     const size_t stride = kind == DIRECT_8888 || kind == DIRECT_2101010 ? 4 : 16;
+    const uint32_t base = d->base, pitch = d->pitch_aligned; /* locals: the stores through wmem could alias *d, *cp */
+    uint8_t *const wmem = cp->wmem;
+    uint32_t in_tile[32]; /* tiled2d of x in a 32-texel tile row at y = 0: see tiled2d_split */
+    for (int i = 0; i < 32; i++)
+        in_tile[i] = (uint32_t)tiled2d(i, 0, 32, bpp_log2);
     for (int y = 0; y < h; y++) {
         const uint8_t *sp = px + (size_t)y * w * stride;
         for (int x = 0; x < w;) {
-            int gx = x0 + x;
-            uint32_t a = (d->base + (uint32_t)tiled2d(gx, y0 + y, d->pitch_aligned, bpp_log2)) & 0x1FFFFFFFu;
+            int gx = x0 + x, xe = x + 32 - (gx & 31); /* this tile row: [x, xe) */
+            xe = xe < w ? xe : w;
+            const uint32_t tile = (uint32_t)tiled2d(gx & ~31, y0 + y, pitch, bpp_log2);
+            /* a whole tile row, its 32 texels inside the tile's 1024 << bpp_log2 bytes, below the end of memory */
+            const uint32_t tile_bytes = 1024u << bpp_log2;
+            if (xe - x == 32 && wmem && (uint64_t)base + (tile & ~(tile_bytes - 1)) + tile_bytes <= 0x20000000u) {
+                for (unsigned g = 0; g < 32; g += per, sp += per * stride) {
+                    uint8_t *dp = wmem + ((base + (tile ^ in_tile[g])) & 0x1FFFFFFFu);
+                    for (unsigned i = 0; i < per; i++)
+                        direct_texel(kind, sp + i * stride, swap_rb, endian, dp + i * bpp);
+                }
+                x = xe;
+                continue;
+            }
+            for (; x < xe; ) {
+            gx = x0 + x;
+            uint32_t a = (base + (tile ^ in_tile[gx & 31])) & 0x1FFFFFFFu;
             int run = (int)(per - ((unsigned)gx & (per - 1)));
-            run = run < w - x ? run : w - x;
-            if (cp->wmem && a + (uint32_t)run * bpp <= 0x20000000u) {
-                uint8_t *dp = cp->wmem + a;
-                for (int i = 0; i < run; i++, sp += stride, dp += bpp)
-                    direct_texel(kind, sp, swap_rb, endian, dp);
+            run = run < xe - x ? run : xe - x;
+            if (wmem && a + (uint32_t)run * bpp <= 0x20000000u) {
+                uint8_t *dp = wmem + a;
+                if (run == (int)per) { /* a whole 16 bytes: a loop of known length, unrolled */
+                    for (unsigned i = 0; i < per; i++)
+                        direct_texel(kind, sp + i * stride, swap_rb, endian, dp + i * bpp);
+                    sp += per * stride;
+                } else {
+                    for (int i = 0; i < run; i++, sp += stride, dp += bpp)
+                        direct_texel(kind, sp, swap_rb, endian, dp);
+                }
             } else { /* through write32, or at the very end of physical memory */
                 for (int i = 0; i < run; i++, sp += stride) {
                     uint8_t t[8];
@@ -4618,6 +4653,7 @@ static inline __attribute__((always_inline)) void direct_rows(const xenos_cp *cp
                 }
             }
             x += run;
+            }
         }
     }
 }

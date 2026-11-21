@@ -139,7 +139,8 @@ int main(void)
                                                               {PIX_F32X4, 32},   {PIX_F32X4, 36},   {PIX_U8X4, 3},
                                                               {PIX_U8X4, 4},     {PIX_U8X4, 5},     {PIX_U8X4, 10},
                                                               {PIX_U8X4, 15},    {PIX_U8X4, 24}};
-    static const struct { int x0, y0, w, h; } rects[] = {{0, 0, 64, 64}, {3, 5, 61, 37}, {1, 30, 2, 3}, {0, 0, 1280, 6}};
+    static const struct { int x0, y0, w, h; } rects[] = {{0, 0, 64, 64}, {3, 5, 61, 37}, {1, 30, 2, 3}, {0, 0, 1280, 6},
+                                                         {29, 27, 100, 40}};
     static const uint32_t bases[] = {0x200000u, 0x300004u, 0x400008u};
     int cases = 0;
     for (size_t p = 0; p < sizeof pairs / sizeof pairs[0]; p++) {
@@ -152,6 +153,17 @@ int main(void)
                             one(pairs[p].lay, pairs[p].fmt, e, sw, wm, bases[b], rects[r].x0, rects[r].y0, rects[r].w,
                                 rects[r].h, ref, px);
     }
+    /* tiled2d_split, what the direct way's rows compute addresses with (WP-36), is tiled2d */
+    for (unsigned bl = 0; bl <= 4; bl++)
+        for (uint32_t pitch = 32; pitch <= 8192; pitch *= 4, cases++)
+            for (int32_t y = 0; y < 256; y++)
+                for (int32_t x = 0; x < (int32_t)pitch; x++)
+                    if ((uint32_t)tiled2d(x, y, pitch, bl) != tiled2d_split(x, y, pitch, bl)) {
+                        fprintf(stderr, "tiled2d_split(%d, %d, %u, %u) differs\n", x, y, pitch, bl);
+                        fails++;
+                        y = 256;
+                        break;
+                    }
     /* what the direct way leaves to the generic one */
     {
         xenos_cp cp;
