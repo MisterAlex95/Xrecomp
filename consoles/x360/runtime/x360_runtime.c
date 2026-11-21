@@ -156,6 +156,9 @@ static const struct {
     /* Adventure Time: Explore the Dungeon: every resolve is only sampled back by the GPU (its
      * host picture) and the CPU never reads them: lazy resolves (WP-2), no read-back each frame */
     {"X360-44500807-", "RECOMP_X360_RESOLVE", "lazy"},
+    /* and single-sampled targets (WP-11): the same frames as with MSAA in the dungeon scene, without the full-surface
+     * resolve / reload passes each MSAA target costs when a draw or resolve needs its texture (8 a frame there) */
+    {"X360-44500807-", "RECOMP_X360_MSAA", "0"},
 };
 
 static void title_env(const char *key)
