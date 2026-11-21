@@ -576,6 +576,9 @@ int x360_runtime_run(const x360_runtime_opts *o)
         printf("x360: resume from the automatic slot: %s\n",
                r == RECOMP_STATE_EEMPTY ? "nothing saved yet" : recomp_states_error(r));
     }
+    int gpu_thread = x360_gpu_overlap_wanted();
+    x360_gpu_set_worker_hook(x, recomp_host_worker_hook, NULL); /* the worker in the ADPF session, on the fast cores */
+    printf("x360: GPU thread %s\n", gpu_thread ? "on (the machine on a worker thread)" : "off (RECOMP_X360_GPU_THREAD=0)");
     stage("first frame");
     recomp_play play;
     recomp_play_init(&play, "x360", "frame", &rw);
@@ -665,7 +668,9 @@ int x360_runtime_run(const x360_runtime_opts *o)
         for (int step = 0; step < pf.steps; step++) {
             uint64_t te = now_ns();
             pthread_mutex_lock(&s_mu);
-            int r = x360_run_until(x, x360_time(x) + FRAME_100NS);
+            /* WP-22 stage 2: the machine on a CPU worker, the command processor and the renderer here, at once */
+            int r = gpu_thread ? x360_gpu_overlap(x, x360_run_until, x360_time(x) + FRAME_100NS)
+                               : x360_run_until(x, x360_time(x) + FRAME_100NS);
             if ((frames & 255) == 0) { /* XBA-283: runs go on past missed code: keep discovered.txt current */
                 const uint32_t *mm;
                 unsigned nm = x360_missed(x, &mm);

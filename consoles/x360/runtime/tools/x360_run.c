@@ -20,6 +20,9 @@
  * silent). --save-state: write a save state when
  * the run stops (budget or end; lazy resolves written to memory first, X360_SAVE_FLUSH=0: not); --load-state: start from one. --pad-script FILE: timed controller states (see
  * load_pad_script). --seconds N: stop after N seconds of the title's virtual time (default 3600; 0: no limit).
+ * --swaps N: run in frames of 1/60 s of virtual time (x360_run_until, as the player) until N more swaps ran (no
+ * instruction budget). RECOMP_X360_GPU_THREAD=1: the command processor and
+ * the renderer on this thread while the machine runs on a worker (WP-22 stage 2; off here: reference runs).
  * --strict-imports: stop at the first import without an HLE (by name). Runs until the title ends or N instructions
  * (default 2 billion). --missed: addresses reached without lifted code,
  * for x360_tools.recomp --discovered: the run interprets that code and goes on (XBA-283), so one run finds them all;
@@ -97,6 +100,7 @@ int main(int argc, char **argv)
     unsigned long long insns = 2000000000ull;
     int stats = 0, verbose = 0, strict = 0, stop_at_miss = 0, host_threads = 0;
     uint32_t seconds = 3600;
+    uint64_t stop_swaps = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--insns") && i + 1 < argc)
             insns = strtoull(argv[++i], NULL, 0);
@@ -123,6 +127,8 @@ int main(int argc, char **argv)
             shaders = argv[++i];
         else if (!strcmp(argv[i], "--pad-script") && i + 1 < argc)
             pad_script = argv[++i];
+        else if (!strcmp(argv[i], "--swaps") && i + 1 < argc)
+            stop_swaps = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--seconds") && i + 1 < argc)
             seconds = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--strict-imports"))
@@ -246,7 +252,24 @@ int main(int argc, char **argv)
     x360_render_perf perf0, perf1;
     x360_render_perf_get(x, &perf0);
     uint64_t vt0 = x360_time(x); /* the second perf line's swaps per second: of virtual time here (no pacing) */
-    int st = x360_run(x, insns);
+    /* WP-22 stage 2 only when asked (RECOMP_X360_GPU_THREAD=1): this harness makes reference runs, which stage 2's
+     * timing-dependent GPU results would make unreproducible */
+    const char *gt = getenv("RECOMP_X360_GPU_THREAD");
+    int gpu_thread = gt && *gt == '1';
+    int st;
+    if (stop_swaps) { /* --swaps N: frames of 1/60 s of virtual time, as the player runs them, until N swaps ran */
+        x360_stats s0, s1;
+        x360_get_stats(x, &s0);
+        do {
+            uint64_t t = x360_time(x) + 166667u;
+            st = gpu_thread ? x360_gpu_overlap(x, x360_run_until, t) : x360_run_until(x, t);
+            x360_get_stats(x, &s1);
+        } while (st == X360_FRAME && s1.gpu_swaps - s0.gpu_swaps < stop_swaps);
+        if (st == X360_FRAME)
+            st = X360_BUDGET;
+    } else {
+        st = gpu_thread ? x360_gpu_overlap(x, x360_run, insns) : x360_run(x, insns);
+    }
     uint64_t vt1 = x360_time(x);
     x360_render_perf_get(x, &perf1);
     if (save_state && (st == X360_BUDGET || st == X360_EXITED)) {

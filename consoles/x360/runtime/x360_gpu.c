@@ -56,6 +56,30 @@ typedef struct gpu_link {
     uint64_t swaps;    /* run side: cp.swaps after its last run (the post side counts swaps where it sees them) */
 } gpu_link;
 
+/* Stage 2 (WP-22): the run half on the renderer's thread (the GL thread) while the machine runs on a CPU worker.
+ * x360_gpu_overlap hands a job (x360_run_until, x360_run) to the worker and serves the run half on the calling thread
+ * until the job ends: posts (x360_gpu_run), drain requests from the worker (gpu_hold), lazy-resolve flushes. Host
+ * state; mu guards everything here but `active` (set before the job is handed over, cleared after it ended). */
+typedef struct gpu_overlap {
+    pthread_mutex_t mu;
+    pthread_cond_t work;   /* the GL thread waits: a post, a drain request, the job's end */
+    pthread_cond_t done;   /* the worker waits: a run ended (drain, back-pressure), a drain acknowledged */
+    pthread_cond_t job_cv; /* the CPU worker waits for a job */
+    pthread_t cpu, gl;     /* the worker; the thread serving the run half while a job runs */
+    int cpu_made, quit, ok;
+    int (*job)(x360_machine *, uint64_t);
+    uint64_t arg;
+    int job_rc, job_pending, job_done;
+    int active;  /* a job runs on the worker and gl serves the run half (atomic: read by the worker unlocked) */
+    int running; /* gl is inside x360_gpu_run or a flush, with mu released: the run half's state is busy */
+    int held;    /* gpu_hold on the worker: gl starts nothing until gpu_release */
+    uint32_t drain_req, drain_ack;
+    int flush_req;
+    int lockstep; /* RECOMP_X360_GPU_LOCKSTEP=1 (checks): every post waits for its run, as in stage 1 (same results) */
+    void (*worker_hook)(int starting, void *user); /* x360_gpu_set_worker_hook: run on the worker as it starts / ends */
+    void *worker_user;
+} gpu_overlap;
+
 struct x360_gpu {
     /* the run half's state: only x360_gpu_run (and code holding the GPU: gpu_hold, x360_gpu_drain) touches it */
     xenos_cp cp;
@@ -77,6 +101,9 @@ struct x360_gpu {
     pthread_t owner;
     int owner_set;
     int deferred; /* x360_gpu_set_deferred: x360_gpu_poll posts only; x360_gpu_run / _drain run (stage 2's hook) */
+    gpu_overlap ov;         /* stage 2: the CPU worker and the GL thread's service (x360_gpu_overlap) */
+    uint64_t swaps_issued;  /* post side: VdSwap calls (counted from cp.swaps at link_sync), stage 2's back-pressure */
+    uint64_t inline_cpu_ns; /* the part of cp_cpu_ns spent on the guest's own thread (stage 1 runs): x360_gpu_cpu_ns */
     /* the run half's host state (from here down) */
     char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
     /* --dump-shaders without a file system call per load (host state, not in save states): the (stage, CRC) of each
@@ -456,6 +483,9 @@ static struct x360_gpu *gpu_of(x360_machine *x)
         x->gpu->cp.mem = x360_p(x, X360_VIEW_64K); /* physical memory, mapped whole (x360_mem.c) */
         x->gpu->cp.wmem = x360_p(x, X360_VIEW_64K); /* the same, for resolves' stores (what phys_write does) */
         xenos_cp_init(&x->gpu->cp);
+        gpu_overlap *o = &x->gpu->ov;
+        o->ok = !pthread_mutex_init(&o->mu, NULL) && !pthread_cond_init(&o->work, NULL) &&
+                !pthread_cond_init(&o->done, NULL) && !pthread_cond_init(&o->job_cv, NULL);
     }
     return x->gpu;
 }
@@ -469,6 +499,20 @@ int x360_gpu_init(x360_machine *x)
 void x360_gpu_free(x360_machine *x)
 {
     if (x->gpu) {
+        gpu_overlap *o = &x->gpu->ov;
+        if (o->cpu_made) { /* the worker is idle between jobs: tell it to end */
+            pthread_mutex_lock(&o->mu);
+            o->quit = 1;
+            pthread_cond_signal(&o->job_cv);
+            pthread_mutex_unlock(&o->mu);
+            pthread_join(o->cpu, NULL);
+        }
+        if (o->ok) {
+            pthread_mutex_destroy(&o->mu);
+            pthread_cond_destroy(&o->work);
+            pthread_cond_destroy(&o->done);
+            pthread_cond_destroy(&o->job_cv);
+        }
         xenos_gl_destroy(x->gpu->gl);
         dumped_reset(x->gpu);
     }
@@ -542,6 +586,7 @@ static void link_sync(struct x360_gpu *g, int loaded)
     __atomic_store_n(&g->link.stalled, (uint32_t)(g->cp.stalled != 0), __ATOMIC_RELAXED);
     __atomic_store_n(&g->link.swaps, g->cp.swaps, __ATOMIC_RELAXED); /* a load sets cp.swaps: not swaps seen */
     g->swaps_seen = g->cp.swaps;
+    g->swaps_issued = g->cp.swaps; /* stage 2's back-pressure counts from here */
     if (loaded && g->ring && size_dw && g->cp.wptr != g->last_wptr % size_dw)
         __atomic_store_n(&g->link.post, (uint64_t)(seq + 1) << 32 | g->last_wptr, __ATOMIC_RELEASE);
     else
@@ -555,7 +600,8 @@ static void link_sync(struct x360_gpu *g, int loaded)
 /* WP-31: the thread CPU time spent in x360_gpu_run so far (x360_run takes it out of the perf line's guest time) */
 uint64_t x360_gpu_cpu_ns(x360_machine *x)
 {
-    return x->gpu ? x->gpu->cp_cpu_ns : 0;
+    /* only runs on the guest's own thread: stage 2's runs on the GL thread are not in that thread's CPU time */
+    return x->gpu ? __atomic_load_n(&x->gpu->inline_cpu_ns, __ATOMIC_RELAXED) : 0;
 }
 
 int x360_gpu_run(x360_machine *x)
@@ -578,8 +624,11 @@ int x360_gpu_run(x360_machine *x)
     } else {
         uint64_t t0 = mono_ns(), c0 = thread_cpu_ns();
         xenos_cp_set_wptr(&g->cp, w);
+        uint64_t cpu = thread_cpu_ns() - c0;
         g->cp_ns += mono_ns() - t0;
-        g->cp_cpu_ns += thread_cpu_ns() - c0;
+        g->cp_cpu_ns += cpu;
+        if (!__atomic_load_n(&g->ov.active, __ATOMIC_RELAXED))
+            __atomic_store_n(&g->inline_cpu_ns, g->inline_cpu_ns + cpu, __ATOMIC_RELAXED);
     }
     __atomic_store_n(&g->link.stalled, (uint32_t)(g->cp.stalled != 0), __ATOMIC_RELAXED);
     __atomic_store_n(&g->link.swaps, g->cp.swaps, __ATOMIC_RELAXED);
@@ -591,10 +640,10 @@ int x360_gpu_run(x360_machine *x)
  * (not deferred), nothing posted is waiting, the retry would stop at the same wait (xenos_cp_stall_may_end: same
  * packet, condition still false) and the read pointer it writes back is already there. Then the poll does not post;
  * the wait is looked at again at the next one (every scheduler turn), as the retry would have. */
-static int stall_retry_useless(x360_machine *x, struct x360_gpu *g, uint32_t w)
+static int stall_retry_core(x360_machine *x, struct x360_gpu *g, uint32_t w)
 {
     uint32_t size_dw = g->cp.rb_size / 4;
-    if (g->deferred || !g->cp.stalled || !size_dw || w % size_dw != g->cp.wptr)
+    if (!g->cp.stalled || !size_dw || w % size_dw != g->cp.wptr)
         return 0;
     uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_RELAXED);
     if ((uint32_t)(post >> 32) != __atomic_load_n(&g->link.taken, __ATOMIC_RELAXED))
@@ -602,6 +651,49 @@ static int stall_retry_useless(x360_machine *x, struct x360_gpu *g, uint32_t w)
     if (g->cp.rptr_writeback && g->cp.write32 && phys_read(x, g->cp.rptr_writeback & 0x1FFFFFFFu) != g->cp.rptr)
         return 0;
     return !xenos_cp_stall_may_end(&g->cp);
+}
+
+/* Stage 2: a job runs on the CPU worker and this is that thread (x360_gpu_overlap) */
+static int overlap_remote(struct x360_gpu *g)
+{
+    return __atomic_load_n(&g->ov.active, __ATOMIC_ACQUIRE) && !pthread_equal(pthread_self(), g->ov.gl);
+}
+
+/* the same, from the post side. Stage 2: the command processor is the GL thread's. While it runs (or a post waits
+ * for it) a retry is useless: that run ends with the wait looked at again, and the next poll retries if it still
+ * stalls. While it is idle it starts nothing without a post, which only this thread makes, nor while held: under the
+ * lock the command processor can be read here. */
+static int stall_retry_useless(x360_machine *x, struct x360_gpu *g, uint32_t w)
+{
+    if (g->deferred)
+        return 0;
+    if (!overlap_remote(g))
+        return stall_retry_core(x, g, w);
+    gpu_overlap *o = &g->ov;
+    pthread_mutex_lock(&o->mu);
+    uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_RELAXED);
+    int r = o->running || o->held || (uint32_t)(post >> 32) != __atomic_load_n(&g->link.taken, __ATOMIC_ACQUIRE)
+                ? 1
+                : stall_retry_core(x, g, w);
+    pthread_mutex_unlock(&o->mu);
+    return r;
+}
+
+/* Stage 2, on the CPU worker: wake the GL thread for the post just made; then back-pressure: while more than
+ * GPU_QUEUE_SWAPS swaps are issued and not run, wait for the GL thread, unless it stalled on a wait (which may need
+ * this thread's progress) or has nothing posted left (the swaps are ring words not posted yet). */
+#define GPU_QUEUE_SWAPS 2
+static void overlap_posted(struct x360_gpu *g)
+{
+    gpu_overlap *o = &g->ov;
+    pthread_mutex_lock(&o->mu);
+    pthread_cond_signal(&o->work);
+    while ((o->lockstep || (g->swaps_issued - __atomic_load_n(&g->link.swaps, __ATOMIC_RELAXED) > GPU_QUEUE_SWAPS &&
+                            !__atomic_load_n(&g->link.stalled, __ATOMIC_RELAXED))) &&
+           (o->running || (uint32_t)(__atomic_load_n(&g->link.post, __ATOMIC_RELAXED) >> 32) !=
+                              __atomic_load_n(&g->link.taken, __ATOMIC_ACQUIRE)))
+        pthread_cond_wait(&o->done, &o->mu);
+    pthread_mutex_unlock(&o->mu);
 }
 
 /* Post half, first part: the registers titles poll, and the write pointer posted when the title moved it (or the
@@ -623,6 +715,8 @@ static void gpu_post(x360_machine *x, struct x360_gpu *g, uint64_t now)
             /* release: the ring's packets (and what they point at), stored by the guest before it moved the write
              * pointer, are visible to the run half before the post is */
             __atomic_store_n(&g->link.post, ((post >> 32) + 1) << 32 | w, __ATOMIC_RELEASE);
+            if (overlap_remote(g))
+                overlap_posted(g);
         }
     }
 }
@@ -658,8 +752,8 @@ void x360_gpu_poll(x360_machine *x)
         return;
     uint64_t now = x360_now(x);
     gpu_post(x, g, now);
-    if (!g->deferred)
-        x360_gpu_run(x); /* stage 1: the run half right here, on the guest thread (a later stage wakes the GL thread) */
+    if (!g->deferred && !overlap_remote(g))
+        x360_gpu_run(x); /* stage 1: the run half right here; stage 2: gpu_post woke the GL thread */
     gpu_post_irq(x, g, now);
 }
 
@@ -668,6 +762,119 @@ void x360_gpu_set_deferred(x360_machine *x, int on)
     struct x360_gpu *g = gpu_of(x);
     if (g)
         g->deferred = on != 0;
+}
+
+/* ---- stage 2: the run half on the GL thread, the machine on a CPU worker (WP-22) ---- */
+
+static void *cpu_worker(void *arg)
+{
+    x360_machine *x = arg;
+    gpu_overlap *o = &x->gpu->ov;
+    if (o->worker_hook)
+        o->worker_hook(1, o->worker_user);
+    pthread_mutex_lock(&o->mu);
+    for (;;) {
+        while (!o->job_pending && !o->quit)
+            pthread_cond_wait(&o->job_cv, &o->mu);
+        if (o->quit)
+            break;
+        o->job_pending = 0;
+        pthread_mutex_unlock(&o->mu);
+        int rc = o->job(x, o->arg);
+        pthread_mutex_lock(&o->mu);
+        o->job_rc = rc;
+        o->job_done = 1;
+        pthread_cond_signal(&o->work);
+    }
+    pthread_mutex_unlock(&o->mu);
+    if (o->worker_hook)
+        o->worker_hook(0, o->worker_user);
+    return NULL;
+}
+
+void x360_gpu_set_worker_hook(x360_machine *x, void (*hook)(int starting, void *user), void *user)
+{
+    struct x360_gpu *g = gpu_of(x);
+    if (g && !g->ov.cpu_made)
+        g->ov.worker_hook = hook, g->ov.worker_user = user;
+}
+
+int x360_gpu_overlap_wanted(void)
+{
+    const char *e = getenv("RECOMP_X360_GPU_THREAD");
+    return !(e && *e == '0');
+}
+
+/* Runs job(x, arg) on the CPU worker while this thread (the renderer's: its GL context is current here) runs the
+ * command processor and the renderer for what the job posts, and returns the job's result. Between jobs the worker
+ * is parked and nothing runs on it: callers keep doing what they did between x360_run_until calls (states, rewind,
+ * cheats, audio) on their own thread. Posted work may be left over when the job ends; this thread's next job, drain
+ * (x360_state_save / _load, x360_render_flush) or x360_gpu_run runs it. Falls back to job(x, arg) right here when the
+ * run half belongs to another thread, the GPU is deferred (tests), guest threads run on host threads, or the worker
+ * cannot be made. */
+int x360_gpu_overlap(x360_machine *x, int (*job)(x360_machine *, uint64_t), uint64_t arg)
+{
+    struct x360_gpu *g = gpu_of(x);
+    if (!g || !g->ov.ok || g->deferred || x->host || __atomic_load_n(&g->ov.active, __ATOMIC_RELAXED) ||
+        (g->owner_set && !pthread_equal(pthread_self(), g->owner)))
+        return job(x, arg);
+    gpu_overlap *o = &g->ov;
+    if (!o->cpu_made) {
+        pthread_attr_t at;
+        int made = 0;
+        if (!pthread_attr_init(&at)) {
+            pthread_attr_setstacksize(&at, 16u << 20); /* lifted code: up to XE_CALL_DEPTH direct calls deep */
+            made = !pthread_create(&o->cpu, &at, cpu_worker, x);
+            pthread_attr_destroy(&at);
+        }
+        if (!made)
+            return job(x, arg);
+        o->cpu_made = 1;
+    }
+    if (!g->owner_set)
+        g->owner = pthread_self(), g->owner_set = 1;
+    const char *ls = getenv("RECOMP_X360_GPU_LOCKSTEP");
+    pthread_mutex_lock(&o->mu);
+    o->lockstep = ls && *ls == '1';
+    o->gl = pthread_self();
+    o->job = job, o->arg = arg, o->job_done = 0, o->job_pending = 1;
+    __atomic_store_n(&o->active, 1, __ATOMIC_RELEASE);
+    pthread_cond_signal(&o->job_cv);
+    for (;;) {
+        uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_ACQUIRE);
+        if (!o->held && (uint32_t)(post >> 32) != __atomic_load_n(&g->link.taken, __ATOMIC_RELAXED)) {
+            o->running = 1;
+            pthread_mutex_unlock(&o->mu);
+            x360_gpu_run(x);
+            pthread_mutex_lock(&o->mu);
+            o->running = 0;
+            pthread_cond_broadcast(&o->done);
+            continue;
+        }
+        if (o->flush_req) { /* after the posts: a drain's flush sees every resolve they made */
+            o->flush_req = 0;
+            if (g->gl) {
+                o->running = 1;
+                pthread_mutex_unlock(&o->mu);
+                xenos_gl_flush_resolves(g->gl, &g->cp);
+                pthread_mutex_lock(&o->mu);
+                o->running = 0;
+            }
+            continue;
+        }
+        if (o->drain_ack != o->drain_req) {
+            o->drain_ack = o->drain_req;
+            pthread_cond_broadcast(&o->done);
+            continue;
+        }
+        if (o->job_done)
+            break;
+        pthread_cond_wait(&o->work, &o->mu);
+    }
+    __atomic_store_n(&o->active, 0, __ATOMIC_RELEASE);
+    int rc = o->job_rc;
+    pthread_mutex_unlock(&o->mu);
+    return rc;
 }
 
 /* Everything posted run to its end, and (flush_resolves) the lazy resolves written to guest memory, the interrupts
@@ -682,6 +889,29 @@ void x360_gpu_drain(x360_machine *x, int flush_resolves)
     struct x360_gpu *g = x->gpu;
     if (!g)
         return;
+    if (overlap_remote(g)) { /* stage 2, on the CPU worker: the GL thread drains, this thread waits for it */
+        gpu_overlap *o = &g->ov;
+        /* A wait that stalled while this thread opened it (the GL thread read the word before the store, and the
+         * poll after the store skipped the retry: it was still running) is retried here, as stage 1's poll would
+         * have at once: posted again while its condition may hold, a few rounds (each may stop at the next wait). */
+        for (int round = 0; round < 4; round++) {
+            pthread_mutex_lock(&o->mu);
+            uint32_t mine = ++o->drain_req;
+            if (flush_resolves)
+                o->flush_req = 1;
+            pthread_cond_signal(&o->work);
+            while ((int32_t)(o->drain_ack - mine) < 0)
+                pthread_cond_wait(&o->done, &o->mu);
+            pthread_mutex_unlock(&o->mu);
+            if (!g->ring || !__atomic_load_n(&g->link.stalled, __ATOMIC_ACQUIRE) ||
+                stall_retry_useless(x, g, g->last_wptr))
+                break;
+            uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_RELAXED);
+            __atomic_store_n(&g->link.post, ((post >> 32) + 1) << 32 | g->last_wptr, __ATOMIC_RELEASE);
+        }
+        gpu_take_irq(g);
+        return;
+    }
     if (g->owner_set && !pthread_equal(pthread_self(), g->owner)) {
         gpu_take_irq(g);
         return;
@@ -698,14 +928,24 @@ void x360_gpu_drain(x360_machine *x, int flush_resolves)
  * do not use the bracket: x360_state_save / state_load drain at their start, x360_gpu_state calls link_sync. */
 static void gpu_hold(x360_machine *x, struct x360_gpu *g)
 {
-    (void)g;
     x360_gpu_drain(x, 0);
+    if (overlap_remote(g)) { /* stage 2: the GL thread is idle after the drain; it starts nothing until the release */
+        pthread_mutex_lock(&g->ov.mu);
+        g->ov.held = 1;
+        pthread_mutex_unlock(&g->ov.mu);
+    }
 }
 
 static void gpu_release(struct x360_gpu *g, int replaced)
 {
     if (replaced)
         link_sync(g, 0);
+    if (overlap_remote(g)) {
+        pthread_mutex_lock(&g->ov.mu);
+        g->ov.held = 0;
+        pthread_cond_signal(&g->ov.work);
+        pthread_mutex_unlock(&g->ov.mu);
+    }
 }
 
 /* save states (x360_state.c): the command processor and the interrupt state, field by field */
@@ -849,6 +1089,9 @@ void x360_k_VdSwap(x360_machine *x, x360_thread *t, xe_cpu *c)
      * the caller's stack slots. The 64 words reserved in the ring get the swap token, then a NOP over the rest. */
     uint32_t buf = A(0), fb_ptr = A(5), w_ptr = (uint32_t)x360_stack_arg(x, c, 8),
              h_ptr = (uint32_t)x360_stack_arg(x, c, 9);
+    struct x360_gpu *g = gpu_of(x);
+    if (g)
+        g->swaps_issued++; /* stage 2's back-pressure (overlap_posted) */
     uint32_t fb = fb_ptr ? x360_r32(x, fb_ptr) : 0;
     memset(x360_p(x, buf), 0, 64 * 4);
     /* as Xenia's VdSwap: the front buffer's texture fetch constant (from the Direct3D texture header, its base made

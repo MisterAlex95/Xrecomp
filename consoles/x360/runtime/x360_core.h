@@ -167,6 +167,17 @@ const char *x360_error(const x360_machine *x);
  * player's frame) or the title stops; X360_FRAME when it was reached (the status stays running), else as x360_run.
  * Waiting threads never take the clock past t. XBA-280. */
 int x360_run_until(x360_machine *x, uint64_t t);
+/* WP-22 stage 2: job(x, arg) (x360_run_until, x360_run) on a CPU worker thread while the calling thread, the
+ * renderer's (x360_set_renderer_ex), runs the command processor and the renderer alongside; returns the job's result.
+ * Runs the job right here when the GPU belongs to another thread, under host threads, or the worker cannot be made.
+ * Guest-visible GPU results then land after a host-timing-dependent number of guest instructions: runs are not
+ * reproducible instruction for instruction (docs/runtime/x360-gpu-thread.md, 8). x360_gpu_overlap_wanted: 0 when
+ * RECOMP_X360_GPU_THREAD=0 (reference runs), else 1. */
+int x360_gpu_overlap(x360_machine *x, int (*job)(x360_machine *, uint64_t), uint64_t arg);
+int x360_gpu_overlap_wanted(void);
+/* called on the worker as it starts (1) and ends (0), before the first job: the host's thread bookkeeping (performance
+ * hint session, fast cores: recomp_host_worker_hook) */
+void x360_gpu_set_worker_hook(x360_machine *x, void (*hook)(int starting, void *user), void *user);
 uint64_t x360_time(x360_machine *x);
 uint32_t x360_exit_code(const x360_machine *x);
 /* Addresses execution reached without lifted code (for x360_tools.recomp --discovered). */
