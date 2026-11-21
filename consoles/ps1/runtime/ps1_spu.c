@@ -120,6 +120,35 @@ struct ps1_spu {
     uint32_t ring_head, ring_count;
 };
 
+/* What the sample loop knows about the state above, kept after it in the same allocation (XBA-295): never in a save
+ * state (the state is the struct's bytes), rebuilt from it at create and load. */
+typedef struct spu_fast {
+    uint32_t idle;        /* voices that are idle (see sample()) with out = 0, until a write to their registers */
+    uint8_t rin_zero[2];  /* the newest reverb inputs that are 0, at most 39: 39 = rev_in[c] is all zeros */
+    uint8_t rout_zero[2]; /* the same for rev_out[c], at most 20 */
+} spu_fast;
+
+static inline spu_fast *fast(ps1_spu *s) { return (spu_fast *)(void *)(s + 1); }
+
+/* The newest entries of a[0..n-1] that are 0 (n when all are). */
+static uint8_t zero_tail(const int16_t *a, int n)
+{
+    int k = 0;
+    while (k < n && a[n - 1 - k] == 0)
+        k++;
+    return (uint8_t)k;
+}
+
+static void fast_rebuild(ps1_spu *s)
+{
+    spu_fast *f = fast(s);
+    f->idle = 0; /* every voice goes through the full test once */
+    for (int c = 0; c < 2; c++) {
+        f->rin_zero[c] = zero_tail(s->rev_in[c], 39);
+        f->rout_zero[c] = zero_tail(s->rev_out[c], 20);
+    }
+}
+
 /* ---- helpers ------------------------------------------------------------------------------------------------ */
 
 static inline int16_t clamp16(int32_t v) { return (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v); }
@@ -385,9 +414,19 @@ static uint32_t rev_ea(const ps1_spu *s, int32_t off_bytes)
     if (!size)
         return base;
     int64_t a = (int64_t)s->rev_addr - base + off_bytes;
-    a %= (int64_t)size;
-    if (a < 0)
+    /* the offsets are within +-512 KB and the address in the area: at most one wrap but for a tiny area */
+    if (a >= (int64_t)size) {
+        a -= size;
+        if (a >= (int64_t)size)
+            a %= (int64_t)size;
+    } else if (a < 0) {
         a += size;
+        if (a < 0) {
+            a %= (int64_t)size;
+            if (a < 0)
+                a += size;
+        }
+    }
     return (uint32_t)(base + (uint32_t)a) & ~1u;
 }
 
@@ -471,32 +510,46 @@ static void reverb_step(ps1_spu *s, int32_t lin, int32_t rin, int32_t out[2])
 /* Reverb for one 44.1 kHz sample: input in, output out (both before EVOL). */
 static void reverb(ps1_spu *s, int32_t inl, int32_t inr, int32_t out[2])
 {
+    /* A history that is all zeros and gets a 0 stays as it is, and a filter over it gives 0 (spu_fast's counts): the
+     * shifts and the FIRs are skipped then, reverb_step still runs (its RAM reads, IRQs and buffer address). */
+    spu_fast *f = fast(s);
     for (int c = 0; c < 2; c++) {
+        int16_t x = clamp16(c ? inr : inl);
+        if (x == 0 && f->rin_zero[c] == 39)
+            continue;
         memmove(s->rev_in[c], s->rev_in[c] + 1, 38 * sizeof(int16_t));
-        s->rev_in[c][38] = clamp16(c ? inr : inl);
+        s->rev_in[c][38] = x;
+        f->rin_zero[c] = x ? 0 : (uint8_t)(f->rin_zero[c] + 1);
     }
     s->rev_phase ^= 1;
     if (s->rev_phase) {
         int32_t in[2];
         for (int c = 0; c < 2; c++) {
             int32_t acc = 0;
-            for (int k = 0; k < 39; k += 2) /* odd taps are zero, but for the centre (19) */
-                acc += rev_fir[k] * s->rev_in[c][k];
-            acc += rev_fir[19] * s->rev_in[c][19];
+            if (f->rin_zero[c] < 39) {
+                for (int k = 0; k < 39; k += 2) /* odd taps are zero, but for the centre (19) */
+                    acc += rev_fir[k] * s->rev_in[c][k];
+                acc += rev_fir[19] * s->rev_in[c][19];
+            }
             in[c] = clamp16(acc >> 15);
         }
         int32_t o[2];
         reverb_step(s, in[0], in[1], o);
         for (int c = 0; c < 2; c++) {
+            if (o[c] == 0 && f->rout_zero[c] == 20)
+                continue;
             memmove(s->rev_out[c], s->rev_out[c] + 1, 19 * sizeof(int16_t));
             s->rev_out[c][19] = (int16_t)o[c];
+            f->rout_zero[c] = o[c] ? 0 : (uint8_t)(f->rout_zero[c] + 1);
         }
     }
     /* upsample: zero-stuffed 22.05 kHz stream through the FIR (gain 2). On the sample phase only the centre tap
      * lands on a value; between samples the even taps (non-zero) do. */
     for (int c = 0; c < 2; c++) {
         int32_t acc;
-        if (s->rev_phase) {
+        if (f->rout_zero[c] == 20) {
+            acc = 0;
+        } else if (s->rev_phase) {
             acc = rev_fir[19] * s->rev_out[c][9] * 2; /* the sample half the filter back */
         } else {
             acc = 0;
@@ -535,8 +588,13 @@ static void sample(ps1_spu *s, ps1_cdrom *cd)
 {
     noise_tick(s);
     int32_t dry[2] = {0, 0}, wet[2] = {0, 0};
-    int16_t prev = 0;
-    for (int i = 0; i < 24; i++) {
+    spu_fast *f = fast(s);
+    /* The voices in order, but those known idle with nothing latched for them: they would take the idle branch
+     * below and change nothing (out is already 0). */
+    uint32_t todo = (~f->idle | s->kon | s->koff) & 0xFFFFFFu;
+    while (todo) {
+        int i = __builtin_ctz(todo);
+        todo &= todo - 1;
         voice *v = &s->v[i];
         if (s->koff & (1u << i)) {
             s->koff &= ~(1u << i);
@@ -545,17 +603,19 @@ static void sample(ps1_spu *s, ps1_cdrom *cd)
         if (s->kon & (1u << i)) {
             s->kon &= ~(1u << i);
             key_on(s, i);
+            f->idle &= ~(1u << i);
         }
         if (v->phase == PH_OFF && v->env == 0 && v->pitch == 0 && !v->delay && v->counter < (28u << 12) &&
             sweep_still(&v->vol[0]) && sweep_still(&v->vol[1])) {
             /* An idle voice (off, silent, no pitch, fixed volumes): voice_sample and the sweeps would change nothing
-             * (pitch modulation of 0 is 0, no block is read) and it adds 0 to the mix (XBA-277). */
+             * (pitch modulation of 0 is 0, no block is read) and it adds 0 to the mix (XBA-277). It stays so until
+             * a write to its registers or a key on (XBA-295). */
             v->out = 0;
-            prev = 0;
+            f->idle |= 1u << i;
             continue;
         }
-        int16_t o = voice_sample(s, i, prev);
-        prev = o;
+        /* the previous voice's output this sample: 0 when it is idle */
+        int16_t o = voice_sample(s, i, i ? s->v[i - 1].out : 0);
         sweep_tick(&v->vol[0]);
         sweep_tick(&v->vol[1]);
         int32_t l = (o * v->vol[0].level) >> 15, r = (o * v->vol[1].level) >> 15;
@@ -637,7 +697,7 @@ static void fifo_flush(ps1_spu *s)
 
 ps1_spu *ps1_spu_create(ps1_irq_sink irq)
 {
-    ps1_spu *s = calloc(1, sizeof *s);
+    ps1_spu *s = calloc(1, sizeof *s + sizeof(spu_fast));
     if (!s)
         return NULL;
     s->ram = calloc(1, RAM_SIZE);
@@ -647,6 +707,7 @@ ps1_spu *ps1_spu_create(ps1_irq_sink irq)
     }
     s->irq = irq;
     s->tctrl = 4;
+    fast_rebuild(s);
     return s;
 }
 
@@ -733,6 +794,7 @@ void ps1_spu_write16(ps1_spu *s, uint32_t off, uint16_t v)
     s->regs[off >> 1] = v;
     if (off < 0x180) {
         voice *vc = &s->v[off >> 4];
+        fast(s)->idle &= ~(1u << (off >> 4));
         switch (off & 15) {
         case 0x0: vc->vol[0].reg = v; break;
         case 0x2: vc->vol[1].reg = v; break;
@@ -747,6 +809,7 @@ void ps1_spu_write16(ps1_spu *s, uint32_t off, uint16_t v)
     }
     if (off >= 0x200 && off < 0x260) {
         s->v[(off - 0x200) >> 2].vol[(off >> 1) & 1].level = (int16_t)v;
+        fast(s)->idle &= ~(1u << ((off - 0x200) >> 2));
         return;
     }
     if (off >= 0x1C0 && off < 0x200) {
@@ -904,5 +967,6 @@ int ps1_spu_state_load(ps1_spu *s, const uint8_t *in, size_t n)
     s->irq = irq;
     s->ram = ram;
     memcpy(s->ram, in + sizeof *s, RAM_SIZE);
+    fast_rebuild(s);
     return 0;
 }
