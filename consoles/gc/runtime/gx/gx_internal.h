@@ -119,6 +119,7 @@ struct gx_state {
     gx_gl *gl;
     gx_stats stats;
     bool warned[64];
+    struct gx_vplan *vplan;    /* gx_vtx.c: each VAT's decoded vertex format, kept while its registers stay */
 };
 
 /* ---- gx_fifo.c ---- */
@@ -135,6 +136,41 @@ static inline uint32_t gx_be32(const uint8_t *p)
 static inline uint16_t gx_be16(const uint8_t *p)
 {
     return (uint16_t)(p[0] << 8 | p[1]);
+}
+
+/* The write-gather pipe's writes (gx_fifo_write), in line where the CPU stores to the pipe (gc_store): the common
+ * case is no wrap and inside MEM1, whatever the alignment (a word after a command byte is unaligned, and one in
+ * four of those straddles a 32-byte line); gx_fifo_write_wrap does the rest byte by byte. Reaching or passing a
+ * line's end with the FIFOs linked moves the GP FIFO's write pointer to the last whole line and runs the CP. */
+void gx_fifo_write_wrap(gx_state *gx, uint32_t v, unsigned size);
+void gx_cp_run(gx_state *gx);
+static inline void gx_fifo_write_inline(gx_state *gx, uint32_t v, unsigned size)
+{
+    uint32_t pi_wp = gx->pi_wp, wp = pi_wp & 0x03FFFFFFu, end = wp + size;
+    if (end >= (((gx->pi_end & 0x03FFFFFFu) + 31u) & ~31u) || end > gx->ram_size) {
+        gx_fifo_write_wrap(gx, v, size);
+        return;
+    }
+    uint8_t *d = gx->ram + wp;
+    if (size == 4) { /* a word (most writes): big-endian at once (XBA-279) */
+        d[0] = (uint8_t)(v >> 24);
+        d[1] = (uint8_t)(v >> 16);
+        d[2] = (uint8_t)(v >> 8);
+        d[3] = (uint8_t)v;
+    } else if (size == 2) { /* vertex data mixes in shorts and bytes */
+        d[0] = (uint8_t)(v >> 8);
+        d[1] = (uint8_t)v;
+    } else if (size == 1) {
+        d[0] = (uint8_t)v;
+    } else {
+        for (unsigned i = 0; i < size; i++)
+            d[i] = (uint8_t)(v >> (8 * (size - 1 - i)));
+    }
+    gx->pi_wp = (pi_wp & 0x20000000u) | end;
+    if (((wp ^ end) & ~31u) && (gx->cp_cr & 0x10)) {
+        gx->cp_wp = end & ~31u;
+        gx_cp_run(gx);
+    }
 }
 
 /* ---- gx_vtx.c ---- */

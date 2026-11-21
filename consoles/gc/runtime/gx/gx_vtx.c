@@ -14,6 +14,7 @@
  * or a texture coordinate (AB11 / ABC1 forms), emboss (bump) offsets, colour sources, then the dual-texture post
  * matrix with optional normalisation. Results are 8-bit colours and (s, t, q) as the rasteriser interpolates them. */
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "gx_internal.h"
@@ -135,6 +136,78 @@ static void read_color(const uint8_t *p, unsigned fmt, uint8_t out[4])
         out[0] = p[0], out[1] = p[1], out[2] = p[2], out[3] = p[3];
         break;
     }
+}
+
+/* n components of one format at once (read_comp's values: the switch once per attribute, not per component). */
+static inline void read_comps(const uint8_t *p, unsigned fmt, unsigned n, float scale, float *out)
+{
+    switch (fmt) {
+    case 0:
+        for (unsigned k = 0; k < n; k++)
+            out[k] = p[k] * scale;
+        break;
+    case 1:
+        for (unsigned k = 0; k < n; k++)
+            out[k] = (int8_t)p[k] * scale;
+        break;
+    case 2:
+        for (unsigned k = 0; k < n; k++)
+            out[k] = gx_be16(p + 2 * k) * scale;
+        break;
+    case 3:
+        for (unsigned k = 0; k < n; k++)
+            out[k] = (int16_t)gx_be16(p + 2 * k) * scale;
+        break;
+    default:
+        for (unsigned k = 0; k < n; k++)
+            out[k] = gx_f32(gx_be32(p + 4 * k));
+        break;
+    }
+}
+
+/* A VAT's vertex format decoded once (XBA-262): kept while the VCD and the VAT's three words stay the same, so a
+ * draw reads only the attributes present, with sizes and scales already known. */
+typedef struct gx_vplan {
+    uint32_t key[5]; /* VCD low / high, VAT A / B / C */
+    bool ok;
+    vfmt f;
+    float pos_scale, nrm_scale, tex_scale[8];
+    unsigned pos_size, nrm_size, col_size[2], tex_size[8]; /* bytes of a direct attribute */
+    unsigned ntex;                                         /* texture coordinates present, */
+    uint8_t tex[8];                                        /* which */
+} gx_vplan;
+
+static void vplan_build(gx_state *gx, unsigned vat, gx_vplan *P)
+{
+    vfmt *f = &P->f;
+    vfmt_get(gx, vat, f);
+    P->key[0] = f->vcd_lo, P->key[1] = f->vcd_hi, P->key[2] = f->a, P->key[3] = f->b, P->key[4] = f->c;
+    P->pos_scale = 1.0f / (float)(1u << f->pos_frac);
+    P->nrm_scale = (f->nrm_fmt == 0 || f->nrm_fmt == 1) ? 1.0f / 64.0f : 1.0f / 16384.0f;
+    P->pos_size = f->pos_n * comp_size[f->pos_fmt];
+    P->nrm_size = 3 * (f->nrm_nbt ? 3 : 1) * comp_size[f->nrm_fmt];
+    for (unsigned k = 0; k < 2; k++)
+        P->col_size[k] = color_size[f->col_fmt[k]];
+    P->ntex = 0;
+    for (unsigned t = 0; t < 8; t++) {
+        P->tex_scale[t] = 1.0f / (float)(1u << f->tex_frac[t]);
+        P->tex_size[t] = f->tex_n[t] * comp_size[f->tex_fmt[t]];
+        if (f->tex_type[t])
+            P->tex[P->ntex++] = (uint8_t)t;
+    }
+    P->ok = true;
+}
+
+/* The draw's plan: the cached one when the registers did not change (local when there is no cache). */
+static const gx_vplan *vplan_get(gx_state *gx, unsigned vat, gx_vplan *local)
+{
+    if (!gx->vplan)
+        gx->vplan = calloc(8, sizeof *gx->vplan);
+    gx_vplan *P = gx->vplan ? &gx->vplan[vat & 7] : local;
+    if (!P->ok || P->key[0] != gx->cpr[0x50] || P->key[1] != gx->cpr[0x60] || P->key[2] != gx->cpr[0x70 + vat] ||
+        P->key[3] != gx->cpr[0x80 + vat] || P->key[4] != gx->cpr[0x90 + vat])
+        vplan_build(gx, vat, P);
+    return P;
 }
 
 /* Where an attribute's data is: the stream for direct ones, the array for indexed ones. */
@@ -280,15 +353,15 @@ static inline uint8_t to8(float v)
 
 void gx_load_vertices(gx_state *gx, unsigned vat, const uint8_t *src, unsigned n)
 {
-    vfmt f;
-    vfmt_get(gx, vat, &f);
+    gx_vplan local;
+    local.ok = false;
+    const gx_vplan *P = vplan_get(gx, vat, &local);
+    const vfmt *fp = &P->f;
     const uint32_t *xr = gx->xf_reg;
     uint32_t mi_a = xr[0x18], mi_b = xr[0x19];
-    float pos_scale = 1.0f / (float)(1u << f.pos_frac);
-    float nrm_scale = (f.nrm_fmt == 0 || f.nrm_fmt == 1) ? 1.0f / 64.0f : 1.0f / 16384.0f;
-    float tex_scale[8];
-    for (unsigned t = 0; t < 8; t++)
-        tex_scale[t] = 1.0f / (float)(1u << f.tex_frac[t]);
+    const unsigned pidx0 = BITS(mi_a, 0, 6);
+    const unsigned tidx0[8] = {BITS(mi_a, 6, 6), BITS(mi_a, 12, 6), BITS(mi_a, 18, 6), BITS(mi_a, 24, 6),
+                               BITS(mi_b, 0, 6), BITS(mi_b, 6, 6), BITS(mi_b, 12, 6), BITS(mi_b, 18, 6)};
     /* viewport, projection, scissor offset: EFB pixels -> GL clip space of the whole EFB */
     float sx = gx_f32(xr[0x1A]), sy = gx_f32(xr[0x1B]), sz = gx_f32(xr[0x1C]);
     float ox = gx_f32(xr[0x1D]), oy = gx_f32(xr[0x1E]), oz = gx_f32(xr[0x1F]);
@@ -336,6 +409,19 @@ void gx_load_vertices(gx_state *gx, unsigned vat, const uint8_t *src, unsigned n
         if (type >= 2 || (type == 0 && row == 2))
             need_litf = true;
     }
+    struct {
+        unsigned type, row, srcc, light;
+        bool proj, abc1, norm;
+        const float *post;
+    } tg[8];
+    for (unsigned t = 0; t < ntex; t++) {
+        uint32_t info = xr[0x40 + t], post = xr[0x50 + t];
+        tg[t].type = BITS(info, 4, 3), tg[t].row = BITS(info, 7, 5);
+        tg[t].srcc = BITS(info, 12, 3), tg[t].light = BITS(info, 15, 3);
+        tg[t].proj = info & 2, tg[t].abc1 = info & 4;
+        tg[t].norm = post & 0x100;
+        tg[t].post = xfm(gx, 0x500 + BITS(post, 0, 6) * 4);
+    }
     bool chan_any_lit[2] = {chan[0][0].lit || chan[0][1].lit, chan[1][0].lit || chan[1][1].lit};
     uint8_t mat8[2][4];
     for (unsigned c = 0; c < 2; c++)
@@ -345,52 +431,47 @@ void gx_load_vertices(gx_state *gx, unsigned vat, const uint8_t *src, unsigned n
     for (unsigned v = 0; v < n; v++) {
         gx_vout *o = &gx->vout[v];
         const uint8_t *s = src;
-        unsigned pidx = BITS(mi_a, 0, 6);
-        unsigned tidx[8] = {BITS(mi_a, 6, 6), BITS(mi_a, 12, 6), BITS(mi_a, 18, 6), BITS(mi_a, 24, 6),
-                            BITS(mi_b, 0, 6), BITS(mi_b, 6, 6), BITS(mi_b, 12, 6), BITS(mi_b, 18, 6)};
-        if (f.vcd_lo & 1)
-            pidx = *s++ & 63;
-        for (unsigned t = 0; t < 8; t++)
-            if (f.vcd_lo & (2u << t))
-                tidx[t] = *s++ & 63;
+        unsigned pidx = pidx0;
+        unsigned tidx[8];
+        memcpy(tidx, tidx0, sizeof tidx);
+        if (fp->vcd_lo & 0x1FF) {
+            if (fp->vcd_lo & 1)
+                pidx = *s++ & 63;
+            for (unsigned t = 0; t < 8; t++)
+                if (fp->vcd_lo & (2u << t))
+                    tidx[t] = *s++ & 63;
+        }
         float pos[4] = {0, 0, 0, 1};
-        if (f.pos_type) {
-            unsigned cs = comp_size[f.pos_fmt];
-            const uint8_t *d = attr_src(gx, f.pos_type, 0, &s, f.pos_n * cs);
-            for (unsigned k = 0; k < f.pos_n; k++)
-                pos[k] = read_comp(d + k * cs, f.pos_fmt, pos_scale);
+        if (fp->pos_type) {
+            const uint8_t *d = attr_src(gx, fp->pos_type, 0, &s, P->pos_size);
+            read_comps(d, fp->pos_fmt, fp->pos_n, P->pos_scale, pos);
         }
         float nbt[3][3] = {{0, 0, 1}, {0, 1, 0}, {1, 0, 0}};
-        if (f.nrm_type) {
-            unsigned cs = comp_size[f.nrm_fmt], nv = f.nrm_nbt ? 3 : 1;
-            if (f.nrm_type != A_DIRECT && f.nrm_nbt && f.nrm_idx3) {
+        if (fp->nrm_type) {
+            unsigned cs = comp_size[fp->nrm_fmt], nv = fp->nrm_nbt ? 3 : 1;
+            if (fp->nrm_type != A_DIRECT && fp->nrm_nbt && fp->nrm_idx3) {
                 for (unsigned k = 0; k < 3; k++) {
-                    const uint8_t *d = attr_src(gx, f.nrm_type, 1, &s, 0);
-                    for (unsigned c = 0; c < 3; c++)
-                        nbt[k][c] = read_comp(d + c * cs, f.nrm_fmt, nrm_scale);
+                    const uint8_t *d = attr_src(gx, fp->nrm_type, 1, &s, 0);
+                    read_comps(d, fp->nrm_fmt, 3, P->nrm_scale, nbt[k]);
                 }
             } else {
-                const uint8_t *d = attr_src(gx, f.nrm_type, 1, &s, 3 * nv * cs);
+                const uint8_t *d = attr_src(gx, fp->nrm_type, 1, &s, P->nrm_size);
                 for (unsigned k = 0; k < nv; k++)
-                    for (unsigned c = 0; c < 3; c++)
-                        nbt[k][c] = read_comp(d + (3 * k + c) * cs, f.nrm_fmt, nrm_scale);
+                    read_comps(d + 3 * k * cs, fp->nrm_fmt, 3, P->nrm_scale, nbt[k]);
             }
         }
         uint8_t vc[2][4] = {{255, 255, 255, 255}, {255, 255, 255, 255}};
         for (unsigned k = 0; k < 2; k++) {
-            if (!f.col_type[k])
+            if (!fp->col_type[k])
                 continue;
-            const uint8_t *d = attr_src(gx, f.col_type[k], 2 + k, &s, color_size[f.col_fmt[k]]);
-            read_color(d, f.col_fmt[k], vc[k]);
+            const uint8_t *d = attr_src(gx, fp->col_type[k], 2 + k, &s, P->col_size[k]);
+            read_color(d, fp->col_fmt[k], vc[k]);
         }
         float vt[8][2] = {{0}};
-        for (unsigned t = 0; t < 8; t++) {
-            if (!f.tex_type[t])
-                continue;
-            unsigned cs = comp_size[f.tex_fmt[t]];
-            const uint8_t *d = attr_src(gx, f.tex_type[t], 4 + t, &s, f.tex_n[t] * cs);
-            for (unsigned k = 0; k < f.tex_n[t]; k++)
-                vt[t][k] = read_comp(d + k * cs, f.tex_fmt[t], tex_scale[t]);
+        for (unsigned i = 0; i < P->ntex; i++) {
+            unsigned t = P->tex[i];
+            const uint8_t *d = attr_src(gx, fp->tex_type[t], 4 + t, &s, P->tex_size[t]);
+            read_comps(d, fp->tex_fmt[t], fp->tex_n[t], P->tex_scale[t], vt[t]);
         }
         src += (size_t)(s - src);
 
@@ -452,9 +533,8 @@ void gx_load_vertices(gx_state *gx, unsigned vat, const uint8_t *src, unsigned n
 
         /* texgen */
         for (unsigned t = 0; t < ntex; t++) {
-            uint32_t info = xr[0x40 + t];
-            unsigned type = BITS(info, 4, 3), row = BITS(info, 7, 5);
-            bool proj = info & 2, abc1 = info & 4;
+            unsigned type = tg[t].type, row = tg[t].row;
+            bool proj = tg[t].proj, abc1 = tg[t].abc1;
             float stq[3] = {0, 0, 1};
             if (type == 0) {
                 float in[4] = {0, 0, 1, 1};
@@ -475,17 +555,16 @@ void gx_load_vertices(gx_state *gx, unsigned vat, const uint8_t *src, unsigned n
                 stq[1] = m[4] * in[0] + m[5] * in[1] + m[6] * in[2] + m[7] * in[3];
                 stq[2] = proj ? m[8] * in[0] + m[9] * in[1] + m[10] * in[2] + m[11] * in[3] : 1.0f;
                 if (dual) {
-                    uint32_t post = xr[0x50 + t];
-                    if (post & 0x100) {
+                    if (tg[t].norm) {
                         float l = sqrtf(stq[0] * stq[0] + stq[1] * stq[1] + stq[2] * stq[2]);
                         if (l > 0)
                             stq[0] /= l, stq[1] /= l, stq[2] /= l;
                     }
                     float pin[4] = {stq[0], stq[1], stq[2], 1.0f};
-                    mul34(xfm(gx, 0x500 + BITS(post, 0, 6) * 4), pin, stq);
+                    mul34(tg[t].post, pin, stq);
                 }
             } else if (type == 1) { /* emboss: an earlier coordinate shifted along the light */
-                unsigned srcc = BITS(info, 12, 3), light = BITS(info, 15, 3);
+                unsigned srcc = tg[t].srcc, light = tg[t].light;
                 const float *lpos = xfm(gx, 0x600 + 16 * light + 10);
                 float ld[3] = {lpos[0] - vp[0], lpos[1] - vp[1], lpos[2] - vp[2]};
                 normalize3(ld);
