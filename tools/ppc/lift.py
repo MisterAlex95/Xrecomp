@@ -19,7 +19,7 @@ Shape: the function is cut into blocks at its leaders (entry, branch targets, th
 call, instructions handed to the interpreter and the one after, the instruction after a system-register write); an
 entry switch on PC jumps to the block, so every leader is a resume point the core can enter at (after a call
 returns, after an event check). Branches inside the function are gotos; calls, returns, indirect jumps and branches
-out of it set PC and return to the dispatcher. Rare or privileged instructions (rfi, sc, tw, segment registers,
+out of it set PC and return to the dispatcher (a layer may call a `bl` target straight from C instead: `direct_call`). Rare or privileged instructions (rfi, sc, tw, segment registers,
 string ops, FPSCR moves, OE / record forms of FP) are handed to the interpreter.
 
 A console layer subclasses FnLifter and adds `op_<name>` methods for the mnemonics its decoder adds (`.` in a
@@ -102,6 +102,15 @@ class FnLifter:
         """A memory macro call for instruction i."""
         return "%s(%s)" % (macro, ", ".join(args))
 
+    def direct_call(self, i):
+        """The statement of the call `bl` i when the layer calls its target straight from C (WP-16: x360_tools'
+        RC_CALL), or None: the call sets LR and leaves to the dispatcher (the default, every console's shape before)."""
+        return None
+
+    def entry_check(self):
+        """A statement before the entry switch (WP-16: x360's `if (c->pc == entry) goto L_entry;`), or ""."""
+        return ""
+
     def guard(self, i, state):
         """Checks before instruction i (state: a dict the block's earlier guards filled), or ""."""
         if self.is_fp(i) and not state.get("fp"):
@@ -154,7 +163,9 @@ class FnLifter:
     def function(self):
         f = self.f
         addrs = sorted(f.addrs)
-        out = ["RC_FN %s(RC_MACHINE *m_)\n{\n    RC_PROLOGUE;\n    switch (c->pc) {\n" % self.name]
+        head = self.entry_check()
+        out = ["RC_FN %s(RC_MACHINE *m_)\n{\n    RC_PROLOGUE;\n%s    switch (c->pc) {\n"
+               % (self.name, "    %s\n" % head if head else "")]
         for a in sorted(self.leaders):
             out.append("    case %s: goto L_%08X;\n" % (hx(a), a))
         out.append("    default: RC_NOT_COVERED();\n    }\n")
@@ -239,7 +250,7 @@ class FnLifter:
     def op_b(self, i):
         t = i.target
         if i.lk:
-            return "c->lr = %s; RC_EXIT(%s);" % (hx(i.addr + 4), hx(t))
+            return self.direct_call(i) or "c->lr = %s; RC_EXIT(%s);" % (hx(i.addr + 4), hx(t))
         if t == i.addr:
             return "RC_IDLE(%s);" % hx(t)
         return self.go(t) if t in self.f.addrs else "RC_EXIT(%s);" % hx(t)

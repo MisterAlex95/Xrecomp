@@ -1,6 +1,8 @@
 /* x360_pad_map.c -- x360_runtime.h's pure helpers (XBA-280): the title key of an XEX and a host pad as an Xbox 360
- * controller. libc and console_pad.h only (tests link it without SDL). */
+ * controller, and the per-title defaults (x360_title_env; WP-25: the app and x360_run apply the same table). libc and
+ * console_pad.h only (tests link it without SDL). */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "x360_runtime.h"
@@ -91,4 +93,31 @@ void x360_runtime_pad_of(const ConsolePadMap *m, const ConsolePadOut *o, int lt,
         out->thumb_lx = o->stick_x[0], out->thumb_ly = flip(o->stick_y[0]);
     if (!m || m->stick[1] != CONSOLE_STICK_NONE)
         out->thumb_rx = o->stick_x[1], out->thumb_ry = flip(o->stick_y[1]);
+}
+
+/* Per-title defaults: renderer options a title is known to want, by title ID (the key's X360-XXXXXXXX- prefix). Set
+ * unless something already did (the environment, recomp.cfg, the pack's env_force): the player can still say
+ * otherwise. */
+static const struct {
+    const char *key_prefix, *name, *value;
+} k_title_env[] = {
+    /* Adventure Time: Explore the Dungeon: every resolve is only sampled back by the GPU (its
+     * host picture) and the CPU never reads them: lazy resolves (WP-2), no read-back each frame */
+    {"X360-44500807-", "RECOMP_X360_RESOLVE", "lazy"},
+    /* and single-sampled targets (WP-11): the same frames as with MSAA in the dungeon scene, without the full-surface
+     * resolve / reload passes each MSAA target costs when a draw or resolve needs its texture (8 a frame there) */
+    {"X360-44500807-", "RECOMP_X360_MSAA", "0"},
+};
+
+void x360_title_env(const char *key, FILE *out)
+{
+    for (size_t i = 0; i < sizeof k_title_env / sizeof k_title_env[0]; i++)
+        if (!strncmp(key, k_title_env[i].key_prefix, strlen(k_title_env[i].key_prefix))) {
+            const char *had = getenv(k_title_env[i].name);
+            if (!had)
+                setenv(k_title_env[i].name, k_title_env[i].value, 0);
+            if (out)
+                fprintf(out, "x360: title default %s=%s%s\n", k_title_env[i].name, k_title_env[i].value,
+                        had ? " not applied (already set)" : "");
+        }
 }

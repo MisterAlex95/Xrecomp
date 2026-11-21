@@ -68,6 +68,10 @@ void x360_runtime_set_save_dir(const char *dir);
 /* "X360-" + the title id and the image CRC: X360-4D5307E6-1A2B3C4D (what recomp_pack_rom_identify gives an XEX). 0,
  * or -1 when the XEX cannot be read or out is too small. */
 int x360_runtime_key(const uint8_t *xex, size_t size, char *out, size_t out_n);
+/* The per-title defaults of the title whose key this is (renderer options it is known to want: RECOMP_X360_RESOLVE,
+ * RECOMP_X360_MSAA...): each set in the environment unless already set, one line per default on out (NULL: none).
+ * The app (x360_runtime_start) and x360_run (WP-25) both call it before the renderer starts. */
+void x360_title_env(const char *key, FILE *out);
 /* XINPUT buttons of console_pad targets (bit X360_T_*); opposite directions cancelled. */
 uint16_t x360_runtime_buttons_of(uint32_t targets);
 /* One host pad through the player's mapping as an Xbox 360 controller: buttons, the sticks (host +y down -> XInput +y

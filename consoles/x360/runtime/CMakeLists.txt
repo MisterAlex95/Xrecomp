@@ -98,6 +98,7 @@ endif()
 
 if(NOT ANDROID AND NOT TARGET x360_run)
     add_executable(x360_run tools/x360_run.c)
-    target_link_libraries(x360_run PRIVATE x360_core ${CMAKE_DL_LIBS})
+    # x360_pad_map: the title key and the per-title defaults the app applies too (x360_title_env, WP-25)
+    target_link_libraries(x360_run PRIVATE x360_pad_map ${CMAKE_DL_LIBS}) # x360_core through it
     target_compile_options(x360_run PRIVATE -Wall -Wextra)
 endif()
