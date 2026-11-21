@@ -81,6 +81,9 @@ typedef struct xenos_gl_stats {
     uint64_t resolves_deferred;    /* resolves that left guest memory as it was (pending) */
     uint64_t resolve_flushes;      /* pending resolves written to guest memory afterwards */
     uint64_t resolves_dropped;     /* pending resolves dropped unwritten: the CPU wrote that memory first */
+    /* WP-10: rectangle lists (Direct3D clears among them) */
+    uint64_t rect_lists_gpu;       /* drawn with the fourth corner made on the GPU (no read-back) */
+    uint64_t rect_lists_read_back; /* their capture read back, the corner made on the CPU (RECOMP_X360_RECTS=cpu) */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

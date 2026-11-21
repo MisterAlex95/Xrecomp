@@ -208,6 +208,8 @@ void x360_render_stats(x360_machine *x, FILE *out)
         fprintf(out, "render: lazy resolves: %llu deferred, %llu written later, %llu dropped (the CPU wrote first)\n",
                 (unsigned long long)s.resolves_deferred, (unsigned long long)s.resolve_flushes,
                 (unsigned long long)s.resolves_dropped);
+    fprintf(out, "render: rectangle lists: %llu on the GPU, %llu read back\n", (unsigned long long)s.rect_lists_gpu,
+            (unsigned long long)s.rect_lists_read_back);
     fprintf(out, "render: eDRAM overlaps: %llu carried over, %llu not; multisampled targets: %llu\n",
             (unsigned long long)s.edram_reinterpreted, (unsigned long long)s.edram_stale,
             (unsigned long long)s.msaa_surfaces);
