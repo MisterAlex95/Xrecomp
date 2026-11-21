@@ -274,7 +274,8 @@ the compile no longer waits for the last one. While the lifter runs, `compile.Ea
 step's own flags, into a temporary `obj/early-*.o`. After the lift, `compile_all` computes every key as before and
 *adopts* an early object (renames it to `<key>.o`) only when the source's stat is still the one taken before that
 compile started, and the headers it saw are unchanged (`recomp_funcs.h` left out for a file that does not include it:
-the lift writes it last). Everything else is compiled as before; an early object that is not adopted is deleted, and
+the lift writes it last). The early compiles still running when the lifter exits keep their slots, their files are
+left out of `compile_all`'s queue, and they are adopted when they end. Everything else is compiled as before; an early object that is not adopted is deleted, and
 an early compile that fails says nothing (`compile_all` compiles the file again and reports the error). So the
 objects, their keys and `libtitle.so` are byte for byte those of a compile after the lift.
 
