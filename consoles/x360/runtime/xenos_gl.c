@@ -359,7 +359,7 @@ typedef struct rt_copy {
 /* WP-10: rectangles per second pass of a rectangle list on the GPU: their 3 captured vertices of 16 vec4 each are one
  * uniform block of 768 vec4 (12,288 bytes, under GLES 3.0's minimum GL_MAX_UNIFORM_BLOCK_SIZE of 16,384) */
 #define RECT_CHUNK 16
-#define RECT_CHUNK_BYTES (RECT_CHUNK * 3 * 16 * 16)
+#define RECT_CHUNK_BYTES (RECT_CHUNK * 3 * 15 * 16)
 
 #define GPU_TIMER_QUERIES 4 /* frames in flight a timer query may trail by */
 #define GL_TIME_ELAPSED_EXT 0x88BF
@@ -1531,34 +1531,36 @@ static int parse_attrs(const char *src, attr *out)
     return parse_attrs_of(src, out, "in vec4 xe_v");
 }
 
-/* Rectangle lists: the vertex shader runs once with transform feedback (gl_Position and 15 interpolators: GLES 3.0
- * guarantees 64 interleaved components), the fourth corner of each rectangle is made on the CPU, and the result is
+/* Rectangle lists: the vertex shader runs once with transform feedback (gl_Position and 14 interpolators, 60
+ * components: GLES 3.0 guarantees 64 interleaved components, but on Apple's GL (ANGLE on the Mac) a captured vertex of
+ * exactly 64 components, 256 bytes, is not advanced and every vertex lands at offset 0; xe_i14 is 0 in rect lists),
+ * the fourth corner of each rectangle is made on the CPU, and the result is
  * drawn as triangles through a pass-through vertex shader with the title's pixel shader. */
-#define RECT_VARYINGS 16 /* gl_Position + xe_i0..14 */
+#define RECT_VARYINGS 15 /* gl_Position + xe_i0..13: 60 components (64 = 256-byte vertices are not captured on Apple GL) */
 
 static const char RECT_VS[] =
     "#version 300 es\n"
     "in vec4 xe_rp, xe_r0, xe_r1, xe_r2, xe_r3, xe_r4, xe_r5, xe_r6, xe_r7, xe_r8, xe_r9, xe_r10, xe_r11, xe_r12, "
-    "xe_r13, xe_r14;\n"
+    "xe_r13;\n"
     "out vec4 xe_i0, xe_i1, xe_i2, xe_i3, xe_i4, xe_i5, xe_i6, xe_i7, xe_i8, xe_i9, xe_i10, xe_i11, xe_i12, xe_i13, "
     "xe_i14, xe_i15;\n"
     "void main() { xe_i0 = xe_r0; xe_i1 = xe_r1; xe_i2 = xe_r2; xe_i3 = xe_r3; xe_i4 = xe_r4; xe_i5 = xe_r5; "
     "xe_i6 = xe_r6; xe_i7 = xe_r7; xe_i8 = xe_r8; xe_i9 = xe_r9; xe_i10 = xe_r10; xe_i11 = xe_r11; xe_i12 = xe_r12; "
-    "xe_i13 = xe_r13; xe_i14 = xe_r14; xe_i15 = vec4(0.0); gl_Position = xe_rp; }\n";
+    "xe_i13 = xe_r13; xe_i14 = vec4(0.0); xe_i15 = vec4(0.0); gl_Position = xe_rp; }\n";
 /* WP-10: the same pass-through without the read-back: the captured buffer of RECT_CHUNK rectangles is bound as the
  * uniform block XeRect (binding 2) and vertex gl_VertexID makes corner k of rectangle gl_VertexID / 6 as draw_rects'
  * CPU path does: c, a, b, a, b, a + b - c with c the vertex opposite the longest edge after the divide by w (the first
  * of equal edges: the same strictly-greater test from -1) */
 static const char RECT_VS_GPU[] =
     "#version 300 es\n"
-    "layout(std140) uniform XeRect { highp vec4 xe_rv[768]; };\n"
+    "layout(std140) uniform XeRect { highp vec4 xe_rv[720]; };\n"
     "out vec4 xe_i0, xe_i1, xe_i2, xe_i3, xe_i4, xe_i5, xe_i6, xe_i7, xe_i8, xe_i9, xe_i10, xe_i11, xe_i12, xe_i13, "
     "xe_i14, xe_i15;\n"
     "void main() {\n"
-    "    int r = gl_VertexID / 6, k = gl_VertexID - 6 * r, b0 = 48 * r;\n"
+    "    int r = gl_VertexID / 6, k = gl_VertexID - 6 * r, b0 = 45 * r;\n"
     "    vec2 s[3];\n"
     "    for (int j = 0; j < 3; j++) {\n"
-    "        vec4 q = xe_rv[b0 + 16 * j];\n"
+    "        vec4 q = xe_rv[b0 + 15 * j];\n"
     "        float w = q.w != 0.0 ? q.w : 1.0;\n"
     "        s[j] = vec2(q.x / w, q.y / w);\n"
     "    }\n"
@@ -1569,16 +1571,16 @@ static const char RECT_VS_GPU[] =
     "        float len = e.x * e.x + e.y * e.y;\n"
     "        if (len > best) { best = len; corner = j; }\n"
     "    }\n"
-    "    int c = b0 + 16 * corner, a = b0 + 16 * ((corner + 1) % 3), b = b0 + 16 * ((corner + 2) % 3);\n"
+    "    int c = b0 + 15 * corner, a = b0 + 15 * ((corner + 1) % 3), b = b0 + 15 * ((corner + 2) % 3);\n"
     "    int o = k == 0 ? c : (k == 1 || k == 3) ? a : b;\n"
     "    bool d = k == 5;\n"
     "#define XE_RC(i) (d ? (xe_rv[a + i] + xe_rv[b + i]) - xe_rv[c + i] : xe_rv[o + i])\n"
     "    gl_Position = XE_RC(0); xe_i0 = XE_RC(1); xe_i1 = XE_RC(2); xe_i2 = XE_RC(3); xe_i3 = XE_RC(4);\n"
     "    xe_i4 = XE_RC(5); xe_i5 = XE_RC(6); xe_i6 = XE_RC(7); xe_i7 = XE_RC(8); xe_i8 = XE_RC(9);\n"
     "    xe_i9 = XE_RC(10); xe_i10 = XE_RC(11); xe_i11 = XE_RC(12); xe_i12 = XE_RC(13); xe_i13 = XE_RC(14);\n"
-    "    xe_i14 = XE_RC(15); xe_i15 = vec4(0.0);\n"
+    "    xe_i14 = vec4(0.0); xe_i15 = vec4(0.0);\n"
     "}\n";
-_Static_assert(RECT_CHUNK_BYTES == 768 * 16 && RECT_VARYINGS == 16, "RECT_VS_GPU's block is RECT_CHUNK rectangles");
+_Static_assert(RECT_CHUNK_BYTES == 720 * 16 && RECT_VARYINGS == 15, "RECT_VS_GPU's block is RECT_CHUNK rectangles");
 static const char CAPTURE_FS[] =
     "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(0.0); }\n";
 
@@ -1717,7 +1719,7 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
             if (kind == 1) {
                 static const char *const vary[RECT_VARYINGS] = {
                     "gl_Position", "xe_i0", "xe_i1", "xe_i2",  "xe_i3",  "xe_i4",  "xe_i5",  "xe_i6",
-                    "xe_i7",       "xe_i8", "xe_i9", "xe_i10", "xe_i11", "xe_i12", "xe_i13", "xe_i14"};
+                    "xe_i7",       "xe_i8", "xe_i9", "xe_i10", "xe_i11", "xe_i12", "xe_i13"};
                 g->glTransformFeedbackVaryings(p->prog, RECT_VARYINGS, vary, GL_INTERLEAVED_ATTRIBS);
             }
             g->glLinkProgram(p->prog);
@@ -5736,7 +5738,7 @@ static int bind_vertex_buffers(xenos_gl *g, const xenos_cp *cp, const program *p
 /* WP-29: rectangle lists (every Direct3D clear) go through a transform feedback capture of the vertex shader's
  * outputs, as points (draw_rects). On the Mac harness (ANGLE over Apple's GL) the capture holds the first vertex and
  * zeros, so every clear draws nothing. Checked once at start-up, the same way draw_rects captures (the shared vertex
- * array, gl_Position and 15 vectors interleaved, points, rasterizer discard): three known vertices drawn,
+ * array, gl_Position and 14 vectors interleaved, points, rasterizer discard): three known vertices drawn,
  * the capture read back and compared. Only logged ("rect lists OK" / "BROKEN (n of 3 vertices captured)"); never
  * fails the renderer. The GL state it touches is put back (or the shadows told). */
 static void rect_line(xenos_gl *g, FILE *f)
@@ -5752,12 +5754,12 @@ static void rects_selftest(xenos_gl *g)
     enum { V = RECT_VARYINGS, N = 3 };
     static const char vs[] =
         "#version 300 es\nin vec4 xe_v0;\nout vec4 xe_i0, xe_i1, xe_i2, xe_i3, xe_i4, xe_i5, xe_i6, xe_i7, xe_i8, xe_i9, "
-        "xe_i10, xe_i11, xe_i12, xe_i13, xe_i14;\nvoid main() {\n gl_Position = xe_v0;\n xe_i0 = xe_v0 + 1.0; "
+        "xe_i10, xe_i11, xe_i12, xe_i13;\nvoid main() {\n gl_Position = xe_v0;\n xe_i0 = xe_v0 + 1.0; "
         "xe_i1 = xe_v0 + 2.0; xe_i2 = xe_v0 + 3.0; xe_i3 = xe_v0 + 4.0; xe_i4 = xe_v0 + 5.0; xe_i5 = xe_v0 + 6.0; "
         "xe_i6 = xe_v0 + 7.0; xe_i7 = xe_v0 + 8.0; xe_i8 = xe_v0 + 9.0; xe_i9 = xe_v0 + 10.0; xe_i10 = xe_v0 + 11.0; "
-        "xe_i11 = xe_v0 + 12.0; xe_i12 = xe_v0 + 13.0; xe_i13 = xe_v0 + 14.0; xe_i14 = xe_v0 + 15.0;\n}\n";
+        "xe_i11 = xe_v0 + 12.0; xe_i12 = xe_v0 + 13.0; xe_i13 = xe_v0 + 14.0;\n}\n";
     static const char *const vary[V] = {"gl_Position", "xe_i0", "xe_i1", "xe_i2",  "xe_i3",  "xe_i4",  "xe_i5",  "xe_i6",
-                                        "xe_i7",       "xe_i8", "xe_i9", "xe_i10", "xe_i11", "xe_i12", "xe_i13", "xe_i14"};
+                                        "xe_i7",       "xe_i8", "xe_i9", "xe_i10", "xe_i11", "xe_i12", "xe_i13"};
     static const float in[N][4] = {{0.25f, 0.5f, 0.75f, 1.0f}, {-0.5f, 0.125f, 0.5f, 1.0f}, {0.625f, -0.75f, 0.25f, 1.0f}};
     g->rects_captured = 0;
     GLuint v = compile(g, GL_VERTEX_SHADER, vs, "rect self-test");
