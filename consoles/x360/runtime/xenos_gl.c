@@ -375,6 +375,7 @@ struct xenos_gl {
     int msaa_on;              /* multisampled render targets are allowed (RECOMP_X360_MSAA=0: not) */
     int cur_ms;               /* the draw FBO has the renderbuffers attached rather than the textures */
     int cur[4], cur_ds;       /* the surfaces bound (index into surf, -1 none) */
+    int fbo_checked;          /* the draw FBO was found complete and no attachment changed since (bind_targets) */
     int tw, th;               /* the guest size of the bound colour target 0 (the viewport's frame of reference) */
     rt_copy copies[MAX_COPIES];
     unsigned copy_clock;
@@ -885,6 +886,7 @@ static void do_reset(xenos_gl *g)
     for (int i = 0; i < 4; i++)
         g->cur[i] = -1;
     g->cur_ds = -1;
+    g->fbo_checked = 0;
     g->nresolved = 0;
     g->epoch++;
     g->ubo_valid[0] = g->ubo_valid[1] = 0;
@@ -1748,6 +1750,7 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
             for (int k = 0; k < 4; k++)
                 g->cur[k] = -2;
             g->cur_ds = -2;
+            g->fbo_checked = 0;
             return i;
         }
         int bound = 0;
@@ -1770,9 +1773,9 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
         g->glDeleteRenderbuffers(1, &s->rb);
     for (int k = 0; k < 4; k++)
         if (g->cur[k] == victim)
-            g->cur[k] = -1;
+            g->cur[k] = -1, g->fbo_checked = 0;
     if (g->cur_ds == victim)
-        g->cur_ds = -1;
+        g->cur_ds = -1, g->fbo_checked = 0;
     memset(s, 0, sizeof *s);
     GLenum tf, tt;
     host_format(g, fmt, depth, s, &tf, &tt);
@@ -1859,9 +1862,11 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
         int reattach = use_ms != g->cur_ms;
         g->cur_ms = use_ms;
+        int changed = reattach || g->cur_ds != ds;
         GLenum bufs[4];
         for (int i = 0; i < 4; i++) {
             if (g->cur[i] != want[i] || reattach) {
+                changed = 1;
                 GLenum att = GL_COLOR_ATTACHMENT0 + (GLenum)i;
                 if (want[i] >= 0 && use_ms)
                     g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, g->surf[want[i]].rb);
@@ -1882,7 +1887,11 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         }
         g->cur_ds = ds;
         g->glDrawBuffers(4, bufs);
-        if (g->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        /* completeness depends on the attachments only (GLES 3.0: not on the draw buffers): asked again only when one
+         * changed here or elsewhere (a surface deleted or grown, a state loaded) since it was last found complete */
+        if (changed || !g->fbo_checked)
+            g->fbo_checked = g->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (g->fbo_checked) {
             const surface *ref = want[0] >= 0 ? &g->surf[want[0]] : &g->surf[ds];
             unsigned stamp = ++g->write_clock;
             /* how far down this draw can reach: the scissor unless it is left at its maximum, and the viewport */
@@ -1920,6 +1929,7 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         for (int i = 0; i < 4; i++)
             g->cur[i] = -1;
         g->cur_ds = -1;
+        g->fbo_checked = 0;
         for (int i = 0; i < 4; i++)
             g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + (GLenum)i, GL_TEXTURE_2D, 0, 0);
         g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
