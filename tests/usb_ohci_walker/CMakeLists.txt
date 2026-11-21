@@ -24,3 +24,7 @@ target_link_libraries(usb_ohci_walker_test PRIVATE xboxrecomp Threads::Threads)
 enable_testing()
 add_test(NAME usb_ohci_walker_test COMMAND usb_ohci_walker_test ${TEST_XBE})
 set_tests_properties(usb_ohci_walker_test PROPERTIES SKIP_RETURN_CODE 77)
+# XBA-329: controller passes back to back against guest-side walks of the
+# same list; the frame clock never moves under a walk and loses no frame.
+add_test(NAME usb_ohci_walker_frame_race COMMAND usb_ohci_walker_test ${TEST_XBE} frame_race)
+set_tests_properties(usb_ohci_walker_frame_race PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)

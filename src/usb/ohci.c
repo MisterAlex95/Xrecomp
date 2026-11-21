@@ -266,7 +266,15 @@ static uint64_t ohci_read(void *dev, uint32_t off, int size)
  * thread overdue has them walked at its next release point
  * (xbox_OhciCatchUp, called by kernel_hal.c), and the interrupt that follows
  * runs there too. s_list_busy keeps the two walkers apart; the controller
- * thread never waits for it. */
+ * thread never waits for it.
+ *
+ * The frame clock moves under s_list_busy too (ohci_pass_lists_and_frame,
+ * XBA-329): StartOfFrame tells the driver no walk still holds an ED it
+ * skipped, so it may not be raised while the guest's side is in the middle
+ * of one. A pass that finds the lists busy walks nothing and owes its
+ * frames to the next pass instead of waiting: a guest thread can be stopped
+ * mid-walk (a rewind freeze, a debugger), and a controller thread blocked
+ * behind it would hold up every xbox_OhciStateHold as well. */
 static volatile int      s_list_kick;       /* CLF or BLF written, not walked yet */
 static volatile int      s_list_busy;       /* a thread is walking the lists      */
 static volatile uint64_t s_tick_ns;         /* the controller thread's last pass  */
@@ -1461,6 +1469,86 @@ static int ohci_service_lists(OhciController *hc, uint32_t control)
     return 1;
 }
 
+/* Frames a pass could not move the clock by, because the guest's side held
+ * the lists (below). Only the controller thread touches it. Capped below
+ * 0x8000 so that one advance still crosses bit 15 at most once and
+ * FrameNumberOverflow stays exact; in practice it is one tick. */
+static uint32_t s_frames_owed;
+#define OHCI_FRAMES_OWED_MAX  0x4000u
+
+/* One controller pass's lists, then its frame clock, both under s_list_busy.
+ * Returns 1 when the pass walked and moved the clock, 0 when the guest's
+ * side was walking (xbox_OhciCatchUp): then this pass has nothing left to do
+ * on the lists, and its frames go to the next one.
+ *
+ * The frame clock at the end of the pass, after the done queue is
+ * published, not before the walk: StartOfFrame is how a driver knows the
+ * controller has let go of an ED it skipped (set sKip, wait for SF, then
+ * unlink or rewrite HeadP). Raised before the walk, it told the driver a
+ * pass was over while that pass was still about to read the ED. Raised
+ * here, every pass that could have seen the ED unskipped has finished.
+ *
+ * And still holding the lists (XBA-329). Raised after list_leave, or by a
+ * pass that found them busy, SF could fall in the middle of a guest-side
+ * walk that read the ED before the driver set sKip and is about to act on
+ * it: the driver unlinks or frees the ED under that walk. It happened in 3 of
+ * 80 SpikeOut boots (XBA-327), harmlessly there. Holding s_list_busy from the
+ * walk through the advance means no walk is in progress when SF goes up, and
+ * any walk that starts after it sees sKip.
+ *
+ * INTR_SF was defined and never raised, and HcFmNumber only moved when
+ * something read it. That is enough for a driver that polls, and not enough
+ * for one that waits: USB enumeration is full of delays counted in frames
+ * -- the recovery time after SET_ADDRESS is the first -- and the Xbox stack
+ * enables StartOfFrame precisely to count them. Without a frame ever
+ * starting, enumeration stops one transfer past SET_ADDRESS with the driver
+ * waiting for time to pass.
+ *
+ * OHCI_TICK_MS frames a tick because a frame is 1 ms and this loop sleeps
+ * that long. The count is what drivers compare; the rate is what they feel,
+ * and both are closer to right this way than a counter that never moves. */
+static int ohci_pass_lists_and_frame(OhciController *hc, uint32_t control)
+{
+    uint32_t frames = s_frames_owed + OHCI_TICK_MS;
+
+    if (!list_try()) {
+        s_frames_owed = frames < OHCI_FRAMES_OWED_MAX ? frames
+                                                      : OHCI_FRAMES_OWED_MAX;
+        return 0;
+    }
+    s_frames_owed = 0;
+    ohci_service_lists(hc, control);
+    ohci_frame_advance(hc, frames);
+    list_leave();
+    return 1;
+}
+
+void xbox_OhciControlHeadForTest(uint32_t ed)
+{
+    s_hc[0].reg[HcControlHeadED / 4] = ed;
+}
+
+int xbox_OhciControllerPassForTest(uint32_t control)
+{
+    return ohci_pass_lists_and_frame(&s_hc[0], control);
+}
+
+int xbox_OhciGuestWalkForTest(uint32_t control, uint32_t *frame)
+{
+    OhciController *hc = &s_hc[0];
+    uint32_t before, after;
+
+    if (!list_try())
+        return -1;
+    before = hc->reg[HcFmNumber / 4];
+    if (frame)
+        *frame = before;
+    ohci_service_lists(hc, control);
+    after = hc->reg[HcFmNumber / 4];
+    list_leave();
+    return before != after;
+}
+
 static void ohci_isr_on_holder(void);
 
 /* RECOMP_OHCI_CATCHUP=0: the controller thread alone, as before (an A/B
@@ -1773,35 +1861,8 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
             }
         }
 
-        /* The lists, unless the guest's side is walking them right now
-         * (xbox_OhciCatchUp): then this pass has nothing left to do. */
-        if (list_try()) {
-            ohci_service_lists(hc, control);
-            list_leave();
-        }
-
-        /* The frame clock, at the end of the pass.
-         *
-         * After the done queue is published, not before the walk: StartOfFrame
-         * is how a driver knows the controller has let go of an ED it skipped
-         * (set sKip, wait for SF, then unlink or rewrite HeadP). Raised before
-         * the walk, it told the driver a pass was over while that pass was
-         * still about to read the ED. Raised here, every pass that could have
-         * seen the ED unskipped has finished.
-         *
-         * INTR_SF was defined and never raised, and HcFmNumber only moved when
-         * something read it. That is enough for a driver that polls, and not
-         * enough for one that waits: USB enumeration is full of delays counted
-         * in frames -- the recovery time after SET_ADDRESS is the first -- and
-         * the Xbox stack enables StartOfFrame precisely to count them. Without
-         * a frame ever starting, enumeration stops one transfer past
-         * SET_ADDRESS with the driver waiting for time to pass.
-         *
-         * OHCI_TICK_MS frames a tick because a frame is 1 ms and this loop
-         * sleeps that long. The count is what drivers compare; the rate is
-         * what they feel, and both are closer to right this way than a
-         * counter that never moves. */
-        ohci_frame_advance(hc, OHCI_TICK_MS);
+        /* The lists and the frame clock (ohci_pass_lists_and_frame). */
+        ohci_pass_lists_and_frame(hc, control);
 
         /* Level-triggered, which is what OHCI is: while an enabled source is
          * set, the line is asserted. The handler clears the status bit, so

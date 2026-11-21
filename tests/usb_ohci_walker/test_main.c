@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Supplied by recompiled game code in a real build; nothing here calls one. */
 typedef void (*recomp_func_t)(void);
@@ -266,6 +267,118 @@ static void driver_step(void)
     }
 }
 
+/* ---- The frame clock against a guest-side walk (XBA-329) -----------------
+ *
+ * StartOfFrame tells the driver that no walk still holds an ED it skipped.
+ * The controller thread used to advance the frame and raise SF even when a
+ * guest thread was in the middle of a catch-up walk (its own walk skipped,
+ * list_try() having failed), and right after list_leave() otherwise. Here one
+ * thread runs controller passes back to back and the other walks the same
+ * long control list from the guest's side; HcFmNumber must never move inside
+ * a guest walk, and no frame may be lost: the passes that found the lists
+ * busy owe theirs to the next one. */
+#define FR_ED_VA(i)  (0x00410000u + (uint32_t)(i) * 16u)
+#define FR_EDS       60
+#define FR_CONTROL   (0x80u | 0x10u)     /* operational, ControlListEnable */
+#define FR_TICK      4u                  /* frames a controller pass moves */
+
+static int s_fr_stop;
+static long s_fr_walked, s_fr_deferred;
+
+static void *fr_controller(void *unused)
+{
+    (void)unused;
+    while (!__atomic_load_n(&s_fr_stop, __ATOMIC_ACQUIRE)) {
+        /* A nap between passes, as the real thread sleeps a tick between
+         * two: passes back to back would keep the lists from the guest
+         * side, and a guest walker preempted while it holds them would see
+         * thousands of busy passes go by. */
+        struct timespec nap = { 0, 20000 };
+        if (xbox_OhciControllerPassForTest(FR_CONTROL))
+            s_fr_walked++;
+        else
+            __atomic_fetch_add(&s_fr_deferred, 1, __ATOMIC_RELAXED);
+        nanosleep(&nap, NULL);
+    }
+    return NULL;
+}
+
+static int frame_race(void)
+{
+    pthread_t c;
+    long walks = 0, busy = 0, moved = 0, total;
+    uint32_t f0 = 0, f1 = 0, expect;
+    int i, failures = 0;
+    uint64_t t0;
+    struct timespec ts;
+
+    /* Sixty endpoints with nothing queued (HeadP == TailP): a walk reads
+     * every one of them and retires nothing, so no done queue blocks the
+     * next pass. Long enough for the two sides to overlap. */
+    for (i = 0; i < FR_EDS; i++) {
+        st(FR_ED_VA(i) + 0, 1u | (8u << 16));
+        st(FR_ED_VA(i) + 4, 0x00411000u);
+        st(FR_ED_VA(i) + 8, 0x00411000u);
+        st(FR_ED_VA(i) + 12, i + 1 < FR_EDS ? FR_ED_VA(i + 1) : 0);
+    }
+    xbox_OhciControlHeadForTest(FR_ED_VA(0));
+    xbox_OhciFrameAdvanceForTest(0, 0, NULL);
+    xbox_OhciGuestWalkForTest(FR_CONTROL, &f0);
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    t0 = (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+    pthread_create(&c, NULL, fr_controller, NULL);
+    /* At least 50000 walks, and on until a few hundred passes have found
+     * the lists busy (the two sides did race), within 10 s. */
+    for (;;) {
+        uint64_t now;
+        int r = xbox_OhciGuestWalkForTest(FR_CONTROL, NULL);
+        if (r < 0)
+            busy++;
+        else {
+            walks++;
+            moved += r;
+        }
+        /* Gaps, as a guest has between two release points, or the
+         * controller would hardly ever get the lists (a slow build, TSan)
+         * and owe more frames than it may carry. */
+        if (((walks + busy) & 15) == 0) {
+            struct timespec nap = { 0, 20000 };
+            nanosleep(&nap, NULL);
+        }
+        if (((walks + busy) & 1023) != 0)
+            continue;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        now = (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+        if ((walks >= 50000
+             && __atomic_load_n(&s_fr_deferred, __ATOMIC_RELAXED) >= 300)
+            || now - t0 > 10000)
+            break;
+    }
+    __atomic_store_n(&s_fr_stop, 1, __ATOMIC_RELEASE);
+    pthread_join(c, NULL);
+
+    /* One last pass with the lists free pays what is still owed. */
+    if (xbox_OhciControllerPassForTest(FR_CONTROL))
+        s_fr_walked++;
+    xbox_OhciGuestWalkForTest(FR_CONTROL, &f1);
+    total = s_fr_walked + s_fr_deferred;
+    expect = (f0 + (uint32_t)total * FR_TICK) & 0xFFFFu;
+
+    printf("  frame race: %ld guest walks (%ld found the lists busy), %ld "
+           "controller passes (%ld found them busy), frame %04X -> %04X\n",
+           walks, busy, total, s_fr_deferred, f0, f1);
+#define FR_CHECK(ok, what) do { int ok_ = (ok); \
+        printf("  %-60s %s\n", what, ok_ ? "PASS" : "FAIL"); \
+        if (!ok_) failures++; } while (0)
+    FR_CHECK(moved == 0, "the frame never moved inside a guest-side walk");
+    FR_CHECK(s_fr_deferred > 0 && busy > 0, "the controller and the guest side raced");
+    FR_CHECK(f1 == expect, "no frame lost: busy passes owed theirs to the next");
+    if (moved)
+        printf("  %ld guest walks saw the frame advance under them\n", moved);
+    return failures;
+}
+
 int main(int argc, char **argv)
 {
     pthread_t w;
@@ -295,6 +408,14 @@ int main(int argc, char **argv)
         return 2;
     }
     s_mem = (uint8_t *)xbox_GetMemoryOffset();
+
+    /* `frame_race`: only the frame clock against a guest-side walk (its own
+     * ctest entry, and the one worth running under -fsanitize=thread). */
+    if (argc > 2 && strcmp(argv[2], "frame_race") == 0) {
+        failures = frame_race();
+        printf("\n%d failure(s)\n", failures);
+        return failures ? 1 : 0;
+    }
 
     /* An interrupt IN endpoint of function address 1, endpoint 1; no pad is
      * plugged, so the walker retires every descriptor without moving data. */

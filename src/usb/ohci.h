@@ -59,6 +59,24 @@ int  xbox_OhciWalkListForTest(uint32_t ed, uint32_t *done_head);
  * return 1 if FrameNumberOverflow was raised. */
 int  xbox_OhciFrameAdvanceForTest(uint32_t from, uint32_t frames, uint32_t *to);
 
+/* Tests only (XBA-329): set controller 0's HcControlHeadED, before the two
+ * calls below start racing. */
+void xbox_OhciControlHeadForTest(uint32_t ed);
+
+/* Tests only (XBA-329): one controller pass's list walk and frame advance
+ * on controller 0, exactly as the controller thread runs them, with
+ * `control` as HcControl. Returns 1 when it walked and advanced the frame,
+ * 0 when the guest's side held the lists (the frames are owed to the next
+ * pass). */
+int  xbox_OhciControllerPassForTest(uint32_t control);
+
+/* Tests only (XBA-329): one walk of controller 0's lists from the guest's
+ * side, under the exclusion xbox_OhciCatchUp takes. Returns -1 when the lists
+ * were busy, 1 when HcFmNumber moved while it walked (StartOfFrame raised
+ * under a walk: the bug), 0 otherwise; *frame (may be NULL) gets HcFmNumber
+ * as the walk began. */
+int  xbox_OhciGuestWalkForTest(uint32_t control, uint32_t *frame);
+
 /* Tests only: hold (1) or release (0) the controller thread between two
  * passes, so that it is deterministically overdue for xbox_OhciCatchUp and
  * does not race it. Holding returns 1 once the thread stands still, 0 if it
