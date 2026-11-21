@@ -28,6 +28,14 @@ static void check(const char *what, uint64_t got, uint64_t want)
     }
 }
 
+/* a vector's first word as the guest stores it (big-endian) */
+static uint32_t xv_to_bytes_word(xe_v128 v)
+{
+    uint8_t b[16];
+    xv_to_bytes(v, b);
+    return (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | b[3];
+}
+
 /* read, write the other view, read again: the second read sees the write */
 __attribute__((noinline)) static void t_raw(xe_machine *m_)
 {
@@ -72,6 +80,17 @@ __attribute__((noinline)) static void t_widths(xe_machine *m_)
     RC_ST64(a + 24, 0x89ABCDEF01234567ull);
     R(10) = RC_LD64(x + 24);
     R(11) = RC_LWZ(x + 24); /* the high word of the doubleword just written, big-endian */
+}
+
+/* the vector accesses (xv_load / xv_store through xe_ptr) against each other and against a GPR store */
+__attribute__((noinline)) static void t_vmx(xe_machine *m_)
+{
+    RC_PROLOGUE;
+    V(1) = xv_load(m_, VIEW_A + 32);
+    xv_store(m_, VIEW_C + 32, V(2));
+    V(3) = xv_load(m_, VIEW_A + 32);
+    RC_STW(VIEW_C + 48, 0x5A5A5A5Au);
+    V(4) = xv_load(m_, VIEW_A + 48);
 }
 
 int main(void)
@@ -125,6 +144,16 @@ int main(void)
     check("std / ld", R(10), 0x89ABCDEF01234567ull);
     check("std / lwz high word", R(11), 0x89ABCDEFu);
     check("big-endian bytes", mem[VIEW_A + 24], 0x89);
+
+    for (unsigned i = 0; i < 16; i++) {
+        mem[VIEW_A + 32 + i] = (uint8_t)i;
+        mem[VIEW_A + 48 + i] = 0;
+    }
+    c->vr[2] = xv_splat32(0xC3C3C3C3u);
+    t_vmx(&m);
+    check("vmx first load", xv_to_bytes_word(c->vr[1]), 0x00010203u);
+    check("vmx load after the other view's store", xv_to_bytes_word(c->vr[3]), 0xC3C3C3C3u);
+    check("vmx load after a GPR store", xv_to_bytes_word(c->vr[4]), 0x5A5A5A5Au);
 
     if (fails)
         return 1;

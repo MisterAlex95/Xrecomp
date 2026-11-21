@@ -136,13 +136,22 @@ typedef struct xe_rc_part {
  * address maps to mem + ea (pages the guest has not allocated fault in the host: x360_mem.c reports them). The one
  * exception is the 0xE0000000 view of physical memory on a host whose pages are larger than 4 KB: the view starts
  * 0x1000 into physical memory, which such a host cannot map, so its addresses sit view4k_skew higher (x360_mem.c). */
+/* XE_GIDX: a guest address as an index the compiler knows nothing of (an empty asm, no instruction), so that it never
+ * proves two accesses through two views of one physical byte apart (the lifted accesses below say more) */
+#if defined(__GNUC__)
+#define XE_GIDX(i) __asm__("" : "+r"(i))
+#else
+#define XE_GIDX(i) ((void)0)
+#endif
 static inline uint8_t *xe_ptr(xe_machine *m, uint32_t ea, uint32_t n)
 {
+    uint64_t i = ea;
     (void)n;
+    XE_GIDX(i);
 #if XE_VIEW4K_DYNAMIC
-    return m->mem + ea + (ea >= 0xE0000000u ? m->view4k_skew : 0u);
+    return m->mem + i + (i >= 0xE0000000u ? m->view4k_skew : 0u);
 #else
-    return m->mem + ea;
+    return m->mem + i;
 #endif
 }
 #else
@@ -239,14 +248,17 @@ static inline void xe_zero(xe_machine *m, uint32_t ea, uint32_t line)
  * store over it. Opaque indices keep every access in order against every other, as the base read at each access
  * did. The asm is not volatile and touches no memory: no instruction, nothing else held back (two accesses of the
  * same index value may share it: they are the same address). Zero-extended to 64 bits before the asm, so x86-64 does
- * not extend it again after. ldr + rev (aarch64) / mov + bswap (x86-64) per access, the address [base, index]. */
+ * not extend it again after. ldr + rev (aarch64) / mov + bswap (x86-64) per access, the address [base, index].
+ * With clang, RC_PROLOGUE also says that guest memory is a separate allocation from the context and the machine
+ * (__builtin_assume_separate_storage): guest stores then no longer make it read guest registers, FPRs and m_'s
+ * fields again from memory. xe_ptr (the VMX accesses, the interpreter, the runtime) takes an opaque index too. */
 #if defined(XE_RUNTIME) && defined(__GNUC__)
 #define XE_GA_HOT static inline __attribute__((always_inline))
 #if XE_VIEW4K_DYNAMIC
 XE_GA_HOT uint8_t *xe_gp(uint8_t *mb, uint32_t sk, uint32_t ea)
 {
     uint64_t i = ea;
-    __asm__("" : "+r"(i));
+    XE_GIDX(i);
     return mb + i + (i >= 0xE0000000u ? sk : 0u);
 }
 #else
@@ -254,7 +266,7 @@ XE_GA_HOT uint8_t *xe_gp(uint8_t *mb, uint32_t sk, uint32_t ea)
 {
     uint64_t i = ea;
     (void)sk;
-    __asm__("" : "+r"(i));
+    XE_GIDX(i);
     return mb + i;
 }
 #endif
@@ -505,10 +517,23 @@ XV_HOT void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
  * thread has MSR[EE] clear (mtmsrd: a short section with interrupts off, which the kernel never reschedules) it keeps
  * running, up to XE_EE_GRACE blocks past its slice. */
 #if XE_GA_LOCALS
+/* Guest memory (the 4 GB reservation mb_ points into) holds neither the context nor the machine (host heap or
+ * stack): clang may keep guest registers and m_'s fields in host registers across guest stores. */
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_assume_separate_storage)
+#define XE_GA_SEPARATE()                                                                                               \
+    __builtin_assume_separate_storage(mb_, c);                                                                         \
+    __builtin_assume_separate_storage(mb_, m_)
+#endif
+#endif
+#ifndef XE_GA_SEPARATE
+#define XE_GA_SEPARATE() ((void)0)
+#endif
 #define RC_PROLOGUE                                                                                                    \
     xe_cpu *c = m_->cur;                                                                                               \
     uint8_t *const mb_ = m_->mem;                                                                                      \
     const uint32_t sk_ = XE_VIEW4K_DYNAMIC ? m_->view4k_skew : 0u;                                                     \
+    XE_GA_SEPARATE();                                                                                                  \
     (void)c, (void)mb_, (void)sk_
 #else
 #define RC_PROLOGUE                                                                                                    \
