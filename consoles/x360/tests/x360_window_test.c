@@ -151,6 +151,34 @@ int main(int argc, char **argv)
         fprintf(stderr, "FAIL present\n");
         rc = 1;
     }
+    /* The report screenshot of the frame shown (host_window_screenshot_bmp of a texture present: the frame texture
+     * sampled with its swizzle, read back on this, the presenting thread). */
+    char bmp[1100];
+    uint8_t shot[3] = {0, 0, 0};
+    int bw = 0, bh = 0;
+    snprintf(bmp, sizeof bmp, "%s.bmp", argv[2]);
+    if (tex && host_window_screenshot_bmp(bmp) != 0) {
+        fprintf(stderr, "FAIL screenshot of the frame texture\n");
+        rc = 1;
+    } else if (tex) {
+        uint8_t hdr[54];
+        FILE *b = fopen(bmp, "rb");
+        if (b && fread(hdr, 1, sizeof hdr, b) == sizeof hdr) {
+            memcpy(&bw, hdr + 18, 4);
+            memcpy(&bh, hdr + 22, 4);
+            long row = ((long)bw * 3 + 3) & ~3L;
+            uint8_t bgr[3];
+            fseek(b, 54 + row * (bh / 2) + (long)(bw / 2) * 3, SEEK_SET);   /* bottom-up: the centre either way */
+            if (fread(bgr, 1, 3, b) == 3)
+                shot[0] = bgr[2], shot[1] = bgr[1], shot[2] = bgr[0];
+        }
+        if (b)
+            fclose(b);
+        if (bw != w || bh != h) {
+            fprintf(stderr, "FAIL screenshot %dx%d, want %dx%d\n", bw, bh, w, h);
+            rc = 1;
+        }
+    }
     xenos_gl_destroy(g);
     host_window_close();
     /* the capture: a binary PPM of the drawable (256 x 256 or the window's real size) */
@@ -174,6 +202,11 @@ int main(int argc, char **argv)
     if (!(c[0] > 200 && c[1] < 50 && k[0] < 50 && top[0] > 200 && base[0] > 200)) {
         fprintf(stderr, "FAIL window picture: centre %u,%u,%u corner %u,%u,%u apex %u base %u\n", c[0], c[1], c[2],
                 k[0], k[1], k[2], top[0], base[0]);
+        rc = 1;
+    }
+    if (tex && !(abs((int)shot[0] - c[0]) <= 2 && abs((int)shot[1] - c[1]) <= 2 && abs((int)shot[2] - c[2]) <= 2)) {
+        fprintf(stderr, "FAIL screenshot centre %u,%u,%u, the window's %u,%u,%u\n", shot[0], shot[1], shot[2], c[0],
+                c[1], c[2]);
         rc = 1;
     }
     free(px);

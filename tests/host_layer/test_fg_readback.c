@@ -36,7 +36,10 @@ static unsigned s_pic;
 static uint8_t s_px[400 * 300 * 4];
 static char s_ppm[512], s_bmp[512], s_dir[512];
 
-/* Frame k's colours: the top half, then the bottom half. */
+/* Frame k's colours: the top half, then the bottom half. s_swapped: as shown by a texture whose sampler swaps red
+ * and blue (an X360 frame's channel order), uploaded as before. */
+static int s_swapped;
+
 static void colour_top(int k, uint8_t *c)
 {
     c[0] = (uint8_t)(40 + k * 2);
@@ -49,6 +52,26 @@ static void colour_bottom(int k, uint8_t *c)
     c[0] = 40;
     c[1] = (uint8_t)(40 + k * 2);
     c[2] = 200;
+}
+
+static void shown_top(int k, uint8_t *c)
+{
+    colour_top(k, c);
+    if (s_swapped) {
+        uint8_t r = c[0];
+        c[0] = c[2];
+        c[2] = r;
+    }
+}
+
+static void shown_bottom(int k, uint8_t *c)
+{
+    colour_bottom(k, c);
+    if (s_swapped) {
+        uint8_t r = c[0];
+        c[0] = c[2];
+        c[2] = r;
+    }
 }
 
 static int near(const uint8_t *a, const uint8_t *b)
@@ -64,8 +87,8 @@ static int decode(const uint8_t *top, const uint8_t *bottom)
 {
     for (int k = 0; k < 100; k++) {
         uint8_t t[3], b[3];
-        colour_top(k, t);
-        colour_bottom(k, b);
+        shown_top(k, t);
+        shown_bottom(k, b);
         if (near(top, t) && near(bottom, b))
             return k;
     }
@@ -110,7 +133,9 @@ static int capture_frame(void)
 
     if (!f)
         return -2;
-    if (fscanf(f, "P6 %d %d %d", &w, &h, &max) == 3 && w == WIN_W && h == WIN_H && fgetc(f) != EOF) {
+    /* The drawable: WIN_W x WIN_H, or a multiple of it on a HiDPI screen. */
+    if (fscanf(f, "P6 %d %d %d", &w, &h, &max) == 3 && w >= WIN_W && h >= WIN_H && w * WIN_H == h * WIN_W &&
+        fgetc(f) != EOF) {
         long base = ftell(f);
         uint8_t top[3] = {0}, bottom[3] = {0};
         fseek(f, base + (long)(h / 4) * w * 3 + (long)(w / 2) * 3, SEEK_SET);
@@ -388,6 +413,29 @@ static void test_events(void)
     CHECK(s_rb.pbo[0] != 0);
 }
 
+/* An X360 frame's channel order is its texture's sampler swizzle: the pacer gets the picture as the window shows it,
+ * through the pack buffers and synchronously (a raw read of the texture would hand it red and blue swapped). */
+static void test_swizzle(void)
+{
+    printf("swizzled texture\n");
+    drain();
+    s_gl.BindTexture(XGL_TEXTURE_2D, s_pic);
+    s_gl.TexParameteri(XGL_TEXTURE_2D, 0x8E42 /* SWIZZLE_R */, 0x1905 /* BLUE */);
+    s_gl.TexParameteri(XGL_TEXTURE_2D, 0x8E44 /* SWIZZLE_B */, 0x1903 /* RED */);
+    if (s_gl.GetError() != 0) {
+        printf("  no texture swizzle here, skipped\n");
+        return;
+    }
+    s_swapped = 1;
+    run_steady(0, 16, PIC_W, PIC_H, 1);
+    run_steady(20, 16, PIC_W, PIC_H, 0);
+    s_swapped = 0;
+    s_gl.BindTexture(XGL_TEXTURE_2D, s_pic);
+    s_gl.TexParameteri(XGL_TEXTURE_2D, 0x8E42, 0x1903);
+    s_gl.TexParameteri(XGL_TEXTURE_2D, 0x8E44, 0x1905);
+    drain();
+}
+
 /* Without the entry points everything still works, synchronously. */
 static void test_no_pack_buffers(void)
 {
@@ -435,6 +483,7 @@ int main(void)
     test_screenshot_is_current();
     test_pack_state();
     test_events();
+    test_swizzle();
     test_no_pack_buffers();
 
     /* Closed and opened again: nothing of the old context is used. */
