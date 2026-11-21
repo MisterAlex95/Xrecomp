@@ -310,7 +310,7 @@
     <string name="AUTO_REPORTS_RESET_DONE">A new random install id is used from now on.</string>
     <string name="AUTO_REPORTS_ON">Reports leave by themselves, on Wi-Fi.</string>
     <string name="AUTO_REPORTS_OFF">Nothing leaves unless you choose Send. The install id and the waiting reports are deleted.</string>
-    <string name="AUTO_REPORTS_WHAT">Off (the default), nothing leaves without Send. On, a crash or a failed Prepare sends its report by itself, on Wi-Fi, as Send would: no folders, addresses, links or game data. Each game run also sends two random ids (run, install), how it ended, how long it lasted and the app version. Nothing else: no account, no device id.</string>
+    <string name="AUTO_REPORTS_WHAT">Off (the default), nothing leaves without Send. On, a crash or a failed Prepare sends its report by itself, on Wi-Fi, as Send would: no folders, addresses, links or game data. Each game run also sends two random ids (run, install), how it ended, how long it lasted, the app version, and its frame rate and frame times (with the game\'s key and the device model). Nothing else: no account, no device id.</string>
     <string name="CHIP_NEEDS_PREPARE">Needs preparing</string>
     <string name="CHIP_PREPARING">Preparing</string>
     <string name="CHIP_PREPARE_FAILED">Prepare failed</string>

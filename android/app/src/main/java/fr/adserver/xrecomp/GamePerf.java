@@ -36,7 +36,7 @@ import java.util.regex.Pattern;
  *
  * What it carries: tags console, game_key (the library key, as the crash reports), device, android, abi, toolkit (the
  * pack's toolkit digest, 12 characters), end (exited / abnormal), benchmark (0 / 1), state (the Benchmark's state:
- * a hash, or « none »), and the summary's fixed words (gpu_thread, resolve_mode); measurements: the summary's
+ * a hash, or « boot »), and the summary's fixed words (gpu_thread, resolve_mode); measurements: the summary's
  * numbers. No title, path, file name or install id.
  */
 final class GamePerf {

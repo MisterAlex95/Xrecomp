@@ -234,6 +234,14 @@ FRAME 3.9  EMU 3.1  DRAW 0.4 MS   (work per host frame; emulation and drawing pe
 WORST 9 MS  SLOW 0/30  SHOWN 60   (slowest frame, frames over the budget, pictures per second)
 ```
 
+**The run summary** (game performance reports): with `XBA_PERF_SUMMARY` set (the app sets it), `host_perf_line`
+also keeps 1 s fps samples and writes a small JSON of the run's figures (numbers and fixed words only, the samples'
+median and 5th percentile, the stages by name, the runtime's own figures through `host_perf_config.summary` or
+`host_perf_summary_note_*`) every 10 s, at a pause and at the run's line. The Xbox 360 adds its gpu, resolve and perf2
+figures, GPU thread and resolve mode; the N64 its RSP over the run. The Benchmark has a window of its own
+(`host_perf_bench_mark` / `host_perf_bench_take`, from any thread, applied at the loop's next host frame). The app
+sends it: [app-shell.md « Game performance »](../../docs/android/app-shell.md#game-performance).
+
 Tests: `tests/host_perf_line` (the helper with made-up clocks), `host_layer_test overlay` (the overlay's lines fed by
 each console's configuration), and each runtime's headless test checks its run line (`gba_runtime`, `ps1_runtime`,
 `n64_runtime`, `fb_present_sdl_test perf`).

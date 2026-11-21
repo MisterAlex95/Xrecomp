@@ -31,6 +31,28 @@ adb logcat -s xboxrecomp | grep ': perf '
 The ticket asked for every 5 s; the line kept its 10 s period (XBA-243), and `profile.sh` saves the lines logged
 during a recording in `frames.log`.
 
+## Game performance in Rustrak (no adb)
+
+With « Send reports automatically » on, every game run that ends without a crash sends its figures to the project's
+Rustrak as a performance transaction `game` (op `game.run`); the in-game menu's **Benchmark** sends the same, tagged
+`benchmark=1`, when the player taps Send. What it holds and when it leaves:
+[app-shell.md « Game performance »](app-shell.md#game-performance). The figures are the perf line's (same counters,
+`host_perf_line` « The run summary »), plus the 1 s fps samples' median and 5th percentile.
+
+Reading it:
+- **Rustrak › Performance**, transaction `game`: one row per run; filter by release (`xrecomp@<version>`) to compare
+  two builds, by tag `game_key` for one title, `device` for one handheld, `benchmark:1` for Benchmarks only (and
+  `state:<hash>` to compare the same state across builds: the fair comparison).
+- The measurements: `fps_shown_median` (what the player saw most of the time), `fps_shown_p5` (the slow parts),
+  `frame_time_p99` (stutter), `guest_ms` vs `render_ms` / `present_ms` (the console's work against drawing), and on the
+  Xbox 360 `gpu_ms` = `gpu_cpu_ms` + `gpu_wait_ms`, `resolve_read_ms` / `resolve_write_ms`, `guest_cpu_ms`, with the
+  tags `gpu_thread` and `resolve_mode` (the two switches that move them most). N64: `rsp_share_pct`.
+- From a shell, the Rustrak MCP (`list_transactions` with name `game`, then `get_transaction`) gives the same
+  payload, measurements included.
+
+`run_seconds` is time played (holds left out); a short run (a crash at the menu, a quick look) has few samples
+(tag `samples`): read its median with care.
+
 ## A CPU profile: `profile.sh`
 
 ```bash

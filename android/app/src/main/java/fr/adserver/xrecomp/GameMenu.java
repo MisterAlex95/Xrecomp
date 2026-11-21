@@ -54,7 +54,7 @@ import java.util.function.LongSupplier;
  *       Settings (performance overlay, game volume, bottom screen, a console game's scale and filter
  *       and the picture shader (XBA-206): all live; this game's language, widescreen and 480p, internal resolution,
  *       Vulkan driver and most Game settings: read at the start, so « Restart to apply » shows at the top once one
- *       of them changed (a second press restarts the game in a new process); Share log), Controls, Screenshot, Report a problem (XBA-339), Back to launcher (the game stays alive and held in the
+ *       of them changed (a second press restarts the game in a new process); Share log), Controls, Screenshot, Report a problem (XBA-339), Benchmark (game performance), Back to launcher (the game stays alive and held in the
  *       background; « Back to the home screen » in a game's own app, which has no launcher to show), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
  *       title and « Paused · 0:42 played ».</li>
  * </ul>
