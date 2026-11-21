@@ -803,8 +803,9 @@ void x360_gpu_set_worker_hook(x360_machine *x, void (*hook)(int starting, void *
 
 int x360_gpu_overlap_wanted(void)
 {
+    /* off by default until checked on a device (gain unmeasured there; runs not reproducible against stage 1) */
     const char *e = getenv("RECOMP_X360_GPU_THREAD");
-    return !(e && *e == '0');
+    return e && *e == '1';
 }
 
 /* Runs job(x, arg) on the CPU worker while this thread (the renderer's: its GL context is current here) runs the

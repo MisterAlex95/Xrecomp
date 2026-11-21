@@ -578,7 +578,7 @@ int x360_runtime_run(const x360_runtime_opts *o)
     }
     int gpu_thread = x360_gpu_overlap_wanted();
     x360_gpu_set_worker_hook(x, recomp_host_worker_hook, NULL); /* the worker in the ADPF session, on the fast cores */
-    printf("x360: GPU thread %s\n", gpu_thread ? "on (the machine on a worker thread)" : "off (RECOMP_X360_GPU_THREAD=0)");
+    printf("x360: GPU thread %s\n", gpu_thread ? "on (the machine on a worker thread)" : "off (RECOMP_X360_GPU_THREAD=1 turns it on)");
     stage("first frame");
     recomp_play play;
     recomp_play_init(&play, "x360", "frame", &rw);

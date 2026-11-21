@@ -2,9 +2,9 @@
 
 > Part of the [Documentation Index](../INDEX.md)
 
-Status: **stage 1 done** (the seam, same thread, runs byte-identical). **Stage 2 landed** (section 5.0: the run half
-on the renderer's thread while the machine runs on a CPU worker, on by default in the player, `RECOMP_X360_GPU_THREAD=0`
-turns it off). Stages 3-4 and the rest of 5.1 below are designs, not code.
+Status: **stage 1 done** (the seam, same thread, runs byte-identical). **Stage 2 landed, off** (section 5.0: the run half
+on the renderer's thread while the machine runs on a CPU worker; `RECOMP_X360_GPU_THREAD=1` turns it on in the player,
+off by default awaiting a device check). Stages 3-4 and the rest of 5.1 below are designs, not code.
 Source: `consoles/x360/runtime/x360_gpu.c` (the seam), `xenos_cp.c` (the command processor), `xenos_gl.c` (the
 renderer), `x360_state.c` (states), `x360_runtime.c` (the frame loop).
 
@@ -99,7 +99,10 @@ state byte-identical to `perf/ref-wp9` (eager and lazy), and to `perf/ref-main` 
 
 ## 5. Stage 2: the threads
 
-### 5.0 What landed (`x360_gpu_overlap`, `x360_gpu.c`)
+### 5.0 What landed (`x360_gpu_overlap`, `x360_gpu.c`): off, awaiting a device check
+
+Off by default (`RECOMP_X360_GPU_THREAD=1` turns it on), as `RECOMP_X360_DIRECT_PRESENT`: the gain is not measured on
+a phone yet, an unpaced run loses virtual time to a slower GPU (below), and frames differ from stage 1's.
 
 A smaller shape than 5.1's: the frame loop keeps its thread, its GL context and everything it did between
 `x360_run_until` calls; only the call itself moves.
@@ -139,9 +142,19 @@ posted from the worker, drawn on the GL thread), the x360 ctest set, and a retai
 gives stage 1's frames and states byte for byte; the default gives frames that differ only in animated elements
 (trees, units, banners: the guest sees the GPU later in virtual time, section 8), and two such runs are identical
 to each other here. Wall time on that stretch is GPU-bound on llvmpipe (about 270 ms of GPU and 50 ms of guest per
-swap): 60 swaps in 17.8-20.0 s before, 16.8-19.0 s after (4 runs each), a gain within this shared host's noise; the
-guest's spin-wait on the slower GPU costs virtual time (58-59 swaps per virtual second instead of 60: it spins, it does
-not block, so the scheduler cannot wait for the GPU instead). Not measured on a phone yet.
+swap): 60 swaps in 17.8-20.0 s before, 16.8-19.0 s after (4 runs each), a gain within this shared host's noise. Not
+measured on a phone yet.
+
+Virtual time. The perf line's 58-59 swaps per virtual second (60 in stage 1) on those frame-by-frame runs is one
+frame of pipeline, not lost time: a swap is counted when the GL thread runs it, up to one job (frame) after the guest
+posted it, so a run stopped at its N-th swap holds one frame more (30 swaps: 30 / 31 frames x 60 = 58.1; 60 swaps:
+59.0; 34: 58.3, as measured), and the guest's work per swap is the same (2.00 M dispatches per swap in both modes).
+Back-pressure does not cost virtual time: the worker sleeps on a condition variable, executing nothing. Virtual time
+is really lost in one case: an unpaced single job (`x360_run` with `=1` and no `--swaps`), where every guest thread
+waiting lets the clock jump to the next deadline at once while the GPU takes host time, so Direct3D's frame throttle
+sees the GPU many virtual frames late (2 swaps in 1.5 G instructions against 34). The player is paced (one job per
+1/60 s of virtual time, 60 Hz of host time) and does not do that; a fix for the harness would be the scheduler waiting
+for the GL thread's posted work before such a jump.
 
 Left from 5.1 / later stages: the GPU runs only while a job runs (it idles while the frame loop does audio, present
 and pacing, so overlap is within a frame); no partial hold for rewind (section 6); present on swap (section 7).
@@ -229,9 +242,9 @@ different count, interrupts land at different virtual times, the scheduler's cho
 content but runs are not reproducible, and a pad script drifts. Consequences and options:
 
 - References, regressions and pad-script checks run with `RECOMP_X360_GPU_THREAD=0` (= stage 1; `x360_run` is
-  stage 1 unless `=1`). Stage 2 shipped on by default in the player (repo rule: no opt-in features); the first plan was
-  to keep stage 1 the default
-  until the phone numbers justify the switch per title (`k_title_env`).
+  stage 1 unless `=1`). Stage 2 is off by default in the player too (`=1`) until the device numbers; the plan is to
+  switch it on
+  when the phone numbers justify it, per title (`k_title_env`) or for all.
 - States and rewind stay correct (consistent snapshots), only replay after a load is not bit-exact.
 - A deterministic variant is possible on top of the same seam ("delayed commit"): the run half's guest-visible word
   stores (everything on the seam's store path but the bulk resolves) and its interrupts go into a log tagged with the

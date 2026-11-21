@@ -171,8 +171,8 @@ int x360_run_until(x360_machine *x, uint64_t t);
  * renderer's (x360_set_renderer_ex), runs the command processor and the renderer alongside; returns the job's result.
  * Runs the job right here when the GPU belongs to another thread, under host threads, or the worker cannot be made.
  * Guest-visible GPU results then land after a host-timing-dependent number of guest instructions: runs are not
- * reproducible instruction for instruction (docs/runtime/x360-gpu-thread.md, 8). x360_gpu_overlap_wanted: 0 when
- * RECOMP_X360_GPU_THREAD=0 (reference runs), else 1. */
+ * reproducible instruction for instruction (docs/runtime/x360-gpu-thread.md, 8). x360_gpu_overlap_wanted: 1 when
+ * RECOMP_X360_GPU_THREAD=1, else 0 (off by default until checked on a device). */
 int x360_gpu_overlap(x360_machine *x, int (*job)(x360_machine *, uint64_t), uint64_t arg);
 int x360_gpu_overlap_wanted(void);
 /* called on the worker as it starts (1) and ends (0), before the first job: the host's thread bookkeeping (performance
