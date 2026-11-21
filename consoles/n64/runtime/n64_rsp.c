@@ -16,10 +16,14 @@
  * reciprocal and inverse square root ROMs computed at create time from their defining formulas. Computational ops are
  * branchless 8-lane loops over 16 / 32-bit values the compiler vectorises; on arm64 the hot ones (multiply-accumulate
  * family, add / sub, compares, clips, merge, logic, divide moves), the element selectors and the aligned quad / double
- * loads and stores are NEON intrinsics instead (vu_op_neon), bit-identical to the loops.
+ * loads and stores are NEON intrinsics instead (vu_op_neon), on x86-64 the same set in SSE2 (vu_op_sse2), both
+ * bit-identical to the loops.
  *
- * Dispatch: every IMEM word runs from a predecoded entry (rsp_dec, n64_rsp_run) that checks itself against IMEM at
- * each fetch, so IMEM writers never invalidate anything; the vector ops are one function per opcode and selector class.
+ * Dispatch: every IMEM word runs from a predecoded entry (rsp_dec, rsp_loop) that checks itself against IMEM at each
+ * fetch, so IMEM writers never invalidate anything; each handler ends in its own fetch and indirect jump (GCC and
+ * clang); the vector ops are one function per opcode and selector class. Loops that only wait (a status poll, a
+ * delay countdown) have their whole iterations counted at once, the state left exactly as running them leaves it
+ * (rsp_idle, RK_CDOWN).
  *
  * Timing: one RSP cycle per instruction (no dual issue, no pipeline stalls); SP DMA completes instantly (DMA_BUSY and
  * DMA_FULL always read 0). */
@@ -36,6 +40,14 @@
 #include <arm_neon.h>
 #else
 #define RSP_NEON 0
+#endif
+/* x86-64: the same ops and loads / stores in SSE2 (every x86-64 CPU has it). -DN64_RSP_NO_SSE2 forces the portable
+ * code. */
+#if !RSP_NEON && (defined(__SSE2__) || defined(_M_X64)) && !defined(N64_RSP_NO_SSE2)
+#define RSP_SSE2 1
+#include <emmintrin.h>
+#else
+#define RSP_SSE2 0
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -785,6 +797,327 @@ static RSP_INLINE int vu_op_neon(n64_rsp *s, uint32_t op, int whole, unsigned e,
 }
 #endif /* RSP_NEON */
 
+#if RSP_SSE2
+/* ---- Vector unit on SSE2 (x86-64) --------------------------------------------------------------------------------- */
+
+/* The ops vu_op_neon runs, the same results as the portable loops of vu_exec bit for bit (test_rsp.c's ares-checked
+ * groups), in SSE2 only (every x86-64 CPU): 32-bit products from the low and high 16-bit halves, unsigned compares as
+ * signed ones on values with bit 15 flipped, signed x unsigned products as signed ones corrected by the multiplicand
+ * where the unsigned operand has bit 15 set. Flags are 0 / 1 per lane in memory, masks here. */
+#define SV_LD(p) _mm_loadu_si128((const __m128i *)(const void *)(p))
+#define SV_ST(p, v) _mm_storeu_si128((__m128i *)(void *)(p), (v))
+
+static inline __m128i sv_sel(const int16_t *tv, unsigned e, int whole)
+{
+    __m128i v = SV_LD(tv);
+    if (whole) /* selectors 0 and 1, known when the op was decoded */
+        return v;
+    switch (e) {
+    case 0:
+    case 1: return v;
+    case 2: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0xA0), 0xA0); /* 0 0 2 2 4 4 6 6 */
+    case 3: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0xF5), 0xF5); /* 1 1 3 3 5 5 7 7 */
+    case 4: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0x00), 0x00); /* 0 x 4, 4 x 4 */
+    case 5: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0x55), 0x55);
+    case 6: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0xAA), 0xAA);
+    case 7: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0xFF), 0xFF);
+    default: return _mm_set1_epi16(tv[e & 7]); /* 8..15: one element everywhere */
+    }
+}
+
+static inline __m128i sv_bsl(__m128i m, __m128i x, __m128i y) /* m ? x : y, bit by bit */
+{
+    return _mm_or_si128(_mm_and_si128(m, x), _mm_andnot_si128(m, y));
+}
+
+static inline __m128i sv_not(__m128i x)
+{
+    return _mm_xor_si128(x, _mm_set1_epi32(-1));
+}
+
+static inline __m128i sv_mask(const uint16_t *f) /* 0 / 1 flags -> 0 / all-ones */
+{
+    return _mm_sub_epi16(_mm_setzero_si128(), SV_LD(f));
+}
+
+static inline void sv_flag(uint16_t *f, __m128i m) /* mask -> 0 / 1 flags */
+{
+    SV_ST(f, _mm_srli_epi16(m, 15));
+}
+
+static inline __m128i sv_ltu(__m128i x, __m128i y) /* unsigned x < y */
+{
+    const __m128i k = _mm_set1_epi16((short)0x8000);
+    return _mm_cmplt_epi16(_mm_xor_si128(x, k), _mm_xor_si128(y, k));
+}
+
+static inline __m128i sv_lo32(__m128i x) /* lanes 0..3 sign-extended to 32 bits */
+{
+    return _mm_srai_epi32(_mm_unpacklo_epi16(x, x), 16);
+}
+
+static inline __m128i sv_hi32(__m128i x) /* lanes 4..7 */
+{
+    return _mm_srai_epi32(_mm_unpackhi_epi16(x, x), 16);
+}
+
+/* clamp_u: 0 below 0, 0xFFFF above 0x7FFF. */
+static inline __m128i sv_clamp_u(__m128i h0, __m128i h1)
+{
+    __m128i x = _mm_packs_epi32(h0, h1);
+    __m128i k = _mm_set1_epi32(32767);
+    __m128i gt = _mm_packs_epi32(_mm_cmpgt_epi32(h0, k), _mm_cmpgt_epi32(h1, k));
+    return _mm_or_si128(_mm_andnot_si128(_mm_srai_epi16(x, 15), x), gt);
+}
+
+/* clamp_lo: acc[15:0], 0 when acc[47:16] < -32768, 0xFFFF when it is > 32767. */
+static inline __m128i sv_clamp_lo(__m128i h0, __m128i h1, __m128i lo)
+{
+    __m128i kl = _mm_set1_epi32(-32768), kh = _mm_set1_epi32(32767);
+    __m128i lt = _mm_packs_epi32(_mm_cmplt_epi32(h0, kl), _mm_cmplt_epi32(h1, kl));
+    __m128i gt = _mm_packs_epi32(_mm_cmpgt_epi32(h0, kh), _mm_cmpgt_epi32(h1, kh));
+    return _mm_andnot_si128(lt, _mm_or_si128(lo, gt));
+}
+
+/* sx * ux, sx signed and ux unsigned 16-bit: the 32-bit products' high halves (the low ones are _mm_mullo_epi16). */
+static inline __m128i sv_mulhi_su(__m128i sx, __m128i ux)
+{
+    return _mm_add_epi16(_mm_mulhi_epi16(sx, ux), _mm_and_si128(sx, _mm_srai_epi16(ux, 15)));
+}
+
+/* acc += addend, given as its low 16 bits l16 and its bits 47..16 (h0, h1): ACC_ADD on 8 lanes. */
+#define SV_ACC_ADD(l16, h0, h1)                                                                                        \
+    do {                                                                                                               \
+        __m128i nl_ = _mm_add_epi16(accl, (l16));                                                                      \
+        __m128i c_ = sv_ltu(nl_, accl); /* the carry out of bit 15, as a mask */                                       \
+        acch0 = _mm_sub_epi32(_mm_add_epi32(acch0, (h0)), _mm_unpacklo_epi16(c_, c_));                                 \
+        acch1 = _mm_sub_epi32(_mm_add_epi32(acch1, (h1)), _mm_unpackhi_epi16(c_, c_));                                 \
+        accl = nl_;                                                                                                    \
+    } while (0)
+
+#define SV_ACC_LOAD()                                                                                                  \
+    do {                                                                                                               \
+        acch0 = SV_LD(s->acch);                                                                                        \
+        acch1 = SV_LD(s->acch + 4);                                                                                    \
+        accl = SV_LD(s->accl);                                                                                         \
+    } while (0)
+
+/* The hot computational ops; returns 0 for the others, which the portable code runs. */
+static RSP_INLINE int vu_op_sse2(n64_rsp *s, uint32_t op, int whole, unsigned e, const int16_t *pt,
+                                 const int16_t *ps, int16_t *pd, unsigned vs)
+{
+    __m128i a = SV_LD(ps), t = sv_sel(pt, e, whole), r;
+    __m128i acch0, acch1, accl, z = _mm_setzero_si128();
+    switch (op & 63) {
+    case 0x00: /* VMULF */
+    case 0x01: /* VMULU */
+    {
+        __m128i lo = _mm_mullo_epi16(a, t), hi = _mm_mulhi_epi16(a, t), rnd = _mm_set1_epi32(0x4000);
+        acch0 = _mm_srai_epi32(_mm_add_epi32(_mm_unpacklo_epi16(lo, hi), rnd), 15); /* (p + 0x4000) >> 15 */
+        acch1 = _mm_srai_epi32(_mm_add_epi32(_mm_unpackhi_epi16(lo, hi), rnd), 15);
+        accl = _mm_add_epi16(_mm_slli_epi16(lo, 1), _mm_set1_epi16((short)0x8000));
+        r = (op & 1) ? sv_clamp_u(acch0, acch1) : _mm_packs_epi32(acch0, acch1);
+        break;
+    }
+    case 0x04: /* VMUDL */
+        accl = _mm_mulhi_epu16(a, t);
+        acch0 = acch1 = z;
+        r = accl;
+        break;
+    case 0x05: /* VMUDM: a * ub */
+    case 0x06: /* VMUDN: ua * b */
+    {
+        __m128i hi = (op & 1) ? sv_mulhi_su(a, t) : sv_mulhi_su(t, a);
+        accl = _mm_mullo_epi16(a, t);
+        acch0 = sv_lo32(hi);
+        acch1 = sv_hi32(hi);
+        r = (op & 1) ? hi : accl;
+        break;
+    }
+    case 0x07: /* VMUDH */
+    {
+        __m128i lo = _mm_mullo_epi16(a, t), hi = _mm_mulhi_epi16(a, t);
+        acch0 = _mm_unpacklo_epi16(lo, hi);
+        acch1 = _mm_unpackhi_epi16(lo, hi);
+        accl = z;
+        r = _mm_packs_epi32(acch0, acch1);
+        break;
+    }
+    case 0x08: /* VMACF */
+    case 0x09: /* VMACU */
+    {
+        __m128i lo = _mm_mullo_epi16(a, t), hi = _mm_mulhi_epi16(a, t);
+        __m128i h0 = _mm_srai_epi32(_mm_unpacklo_epi16(lo, hi), 15), h1 = _mm_srai_epi32(_mm_unpackhi_epi16(lo, hi), 15);
+        SV_ACC_LOAD();
+        SV_ACC_ADD(_mm_slli_epi16(lo, 1), h0, h1);
+        r = (op & 1) ? sv_clamp_u(acch0, acch1) : _mm_packs_epi32(acch0, acch1);
+        break;
+    }
+    case 0x0C: /* VMADL */
+        SV_ACC_LOAD();
+        SV_ACC_ADD(_mm_mulhi_epu16(a, t), z, z);
+        r = sv_clamp_lo(acch0, acch1, accl);
+        break;
+    case 0x0D: /* VMADM: a * ub */
+    case 0x0E: /* VMADN: ua * b */
+    {
+        __m128i hi = (op & 1) ? sv_mulhi_su(a, t) : sv_mulhi_su(t, a);
+        SV_ACC_LOAD();
+        SV_ACC_ADD(_mm_mullo_epi16(a, t), sv_lo32(hi), sv_hi32(hi));
+        r = (op & 1) ? _mm_packs_epi32(acch0, acch1) : sv_clamp_lo(acch0, acch1, accl);
+        break;
+    }
+    case 0x0F: /* VMADH: ACCL unchanged */
+    {
+        __m128i lo = _mm_mullo_epi16(a, t), hi = _mm_mulhi_epi16(a, t);
+        acch0 = _mm_add_epi32(SV_LD(s->acch), _mm_unpacklo_epi16(lo, hi));
+        acch1 = _mm_add_epi32(SV_LD(s->acch + 4), _mm_unpackhi_epi16(lo, hi));
+        SV_ST(s->acch, acch0);
+        SV_ST(s->acch + 4, acch1);
+        SV_ST(pd, _mm_packs_epi32(acch0, acch1));
+        return 1;
+    }
+    case 0x10: /* VADD */
+    case 0x11: /* VSUB */
+    {
+        __m128i c = SV_LD(s->vcol), v0, v1;
+        if (op & 1) {
+            v0 = _mm_sub_epi32(_mm_sub_epi32(sv_lo32(a), sv_lo32(t)), sv_lo32(c));
+            v1 = _mm_sub_epi32(_mm_sub_epi32(sv_hi32(a), sv_hi32(t)), sv_hi32(c));
+            SV_ST(s->accl, _mm_sub_epi16(_mm_sub_epi16(a, t), c));
+        } else {
+            v0 = _mm_add_epi32(_mm_add_epi32(sv_lo32(a), sv_lo32(t)), sv_lo32(c));
+            v1 = _mm_add_epi32(_mm_add_epi32(sv_hi32(a), sv_hi32(t)), sv_hi32(c));
+            SV_ST(s->accl, _mm_add_epi16(_mm_add_epi16(a, t), c));
+        }
+        SV_ST(s->vcol, z);
+        SV_ST(s->vcoh, z);
+        SV_ST(pd, _mm_packs_epi32(v0, v1));
+        return 1;
+    }
+    case 0x14: /* VADDC */
+    {
+        __m128i sum = _mm_add_epi16(a, t);
+        SV_ST(s->accl, sum);
+        sv_flag(s->vcol, sv_ltu(sum, a));
+        SV_ST(s->vcoh, z);
+        SV_ST(pd, sum);
+        return 1;
+    }
+    case 0x15: /* VSUBC */
+    {
+        __m128i d = _mm_sub_epi16(a, t);
+        SV_ST(s->accl, d);
+        sv_flag(s->vcol, sv_ltu(a, t));
+        sv_flag(s->vcoh, sv_not(_mm_cmpeq_epi16(a, t)));
+        SV_ST(pd, d);
+        return 1;
+    }
+    case 0x20: /* VLT */
+    case 0x21: /* VEQ */
+    case 0x22: /* VNE */
+    case 0x23: /* VGE */
+    {
+        __m128i eq = _mm_cmpeq_epi16(a, t), coh = sv_mask(s->vcoh), col = sv_mask(s->vcol), c;
+        switch (op & 3) {
+        case 0: c = _mm_or_si128(_mm_cmplt_epi16(a, t), _mm_and_si128(eq, _mm_and_si128(coh, col))); break;
+        case 1: c = _mm_andnot_si128(coh, eq); break;
+        case 2: c = _mm_or_si128(sv_not(eq), coh); break;
+        default: c = _mm_or_si128(_mm_cmpgt_epi16(a, t), _mm_andnot_si128(_mm_and_si128(coh, col), eq)); break;
+        }
+        r = sv_bsl(c, a, t);
+        SV_ST(s->accl, r);
+        sv_flag(s->vccl, c);
+        SV_ST(s->vcch, z);
+        SV_ST(s->vcol, z);
+        SV_ST(s->vcoh, z);
+        SV_ST(pd, r);
+        return 1;
+    }
+    case 0x24: /* VCL */
+    {
+        __m128i sum = _mm_add_epi16(a, t);
+        __m128i zero = _mm_cmpeq_epi16(sum, z), nocy = sv_not(sv_ltu(sum, a));
+        __m128i carry = sv_mask(s->vcol), ne = sv_mask(s->vcoh), ce = sv_mask(s->vce);
+        __m128i lo_new = sv_bsl(ce, _mm_or_si128(zero, nocy), _mm_and_si128(zero, nocy));
+        __m128i hi_new = sv_not(sv_ltu(a, t));
+        __m128i ccl = sv_bsl(_mm_andnot_si128(ne, carry), lo_new, sv_mask(s->vccl));
+        __m128i cch = sv_bsl(_mm_or_si128(carry, ne), sv_mask(s->vcch), hi_new);
+        __m128i sel = sv_bsl(carry, ccl, cch);
+        __m128i other = sv_bsl(carry, _mm_sub_epi16(z, t), t);
+        __m128i lo = sv_bsl(sel, other, a);
+        sv_flag(s->vccl, ccl);
+        sv_flag(s->vcch, cch);
+        SV_ST(s->accl, lo);
+        SV_ST(s->vcol, z);
+        SV_ST(s->vcoh, z);
+        SV_ST(s->vce, z);
+        SV_ST(pd, lo);
+        return 1;
+    }
+    case 0x25: /* VCH: a + b (signs differ) or a - b (same signs) never overflows 16 bits */
+    {
+        __m128i dm = _mm_srai_epi16(_mm_xor_si128(a, t), 15), tnm = _mm_srai_epi16(t, 15);
+        __m128i v = sv_bsl(dm, _mm_add_epi16(a, t), _mm_sub_epi16(a, t));
+        __m128i lem = sv_not(_mm_cmpgt_epi16(v, z)), gem = sv_not(_mm_srai_epi16(v, 15));
+        __m128i lo = sv_bsl(sv_bsl(dm, lem, gem), sv_bsl(dm, _mm_sub_epi16(z, t), t), a);
+        __m128i ne = _mm_andnot_si128(_mm_cmpeq_epi16(a, sv_not(t)), sv_not(_mm_cmpeq_epi16(v, z)));
+        sv_flag(s->vccl, sv_bsl(dm, lem, tnm));
+        sv_flag(s->vcch, sv_bsl(dm, tnm, gem));
+        sv_flag(s->vcol, dm);
+        sv_flag(s->vcoh, ne);
+        sv_flag(s->vce, _mm_and_si128(dm, _mm_cmpeq_epi16(v, _mm_set1_epi32(-1))));
+        SV_ST(s->accl, lo);
+        SV_ST(pd, lo);
+        return 1;
+    }
+    case 0x27: /* VMRG */
+        r = sv_bsl(sv_mask(s->vccl), a, t);
+        SV_ST(s->vcol, z);
+        SV_ST(s->vcoh, z);
+        goto logic;
+    case 0x28: r = _mm_and_si128(a, t); goto logic;         /* VAND */
+    case 0x29: r = sv_not(_mm_and_si128(a, t)); goto logic; /* VNAND */
+    case 0x2A: r = _mm_or_si128(a, t); goto logic;          /* VOR */
+    case 0x2B: r = sv_not(_mm_or_si128(a, t)); goto logic;  /* VNOR */
+    case 0x2C: r = _mm_xor_si128(a, t); goto logic;         /* VXOR */
+    case 0x2D: r = sv_not(_mm_xor_si128(a, t)); goto logic; /* VNXOR */
+    logic:
+        SV_ST(s->accl, r);
+        SV_ST(pd, r);
+        return 1;
+    case 0x30: /* VRCP */
+    case 0x31: /* VRCPL */
+    case 0x34: /* VRSQ */
+    case 0x35: /* VRSQL */
+    {
+        int32_t input = (op & 1) && s->divdp ? (int32_t)((uint32_t)(uint16_t)s->divin << 16 | (uint16_t)pt[e & 7])
+                                             : (int32_t)pt[e & 7];
+        SV_ST(s->accl, t);
+        vu_divide(s, (op & 4) != 0, input, &pd[vs & 7]);
+        return 1;
+    }
+    case 0x32: /* VRCPH */
+    case 0x36: /* VRSQH */
+        SV_ST(s->accl, t);
+        s->divdp = 1;
+        s->divin = pt[e & 7];
+        pd[vs & 7] = s->divout;
+        return 1;
+    case 0x37: /* VNOP */
+    case 0x3F: /* VNULL */
+        return 1;
+    default:
+        return 0;
+    }
+    SV_ST(s->acch, acch0);
+    SV_ST(s->acch + 4, acch1);
+    SV_ST(s->accl, accl);
+    SV_ST(pd, r);
+    return 1;
+}
+#endif /* RSP_SSE2 */
+
 /* One computational op, op being its 6-bit opcode (and only that: the rest of the word is in e, the registers vt,
  * vs and vd as pt, ps and pd, and vs again for the ops that use it as an element number), whole
  * set when the element selector is 0 or 1 (b is vt as it is). Always inlined into the vu_fn_* below, each with
@@ -794,6 +1127,9 @@ static RSP_INLINE void vu_exec(n64_rsp *s, uint32_t op, int whole, unsigned e, c
 {
 #if RSP_NEON
     if (vu_op_neon(s, op, whole, e, pt, ps, pd, vs))
+        return;
+#elif RSP_SSE2
+    if (vu_op_sse2(s, op, whole, e, pt, ps, pd, vs))
         return;
 #endif
     const int16_t *tv = pt;
@@ -1203,6 +1539,9 @@ static inline void ld_be16x8(int16_t *v, const uint8_t *p)
 {
 #if RSP_NEON
     vst1q_s16(v, vreinterpretq_s16_u8(vrev16q_u8(vld1q_u8(p))));
+#elif RSP_SSE2
+    __m128i x = SV_LD(p);
+    SV_ST(v, _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8)));
 #else
     for (int k = 0; k < 8; k++)
         v[k] = (int16_t)n64_be16(p + 2 * k);
@@ -1213,6 +1552,9 @@ static inline void ld_be16x4(int16_t *v, const uint8_t *p)
 {
 #if RSP_NEON
     vst1_s16(v, vreinterpret_s16_u8(vrev16_u8(vld1_u8(p))));
+#elif RSP_SSE2
+    __m128i x = _mm_loadl_epi64((const __m128i *)(const void *)p);
+    _mm_storel_epi64((__m128i *)(void *)v, _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8)));
 #else
     for (int k = 0; k < 4; k++)
         v[k] = (int16_t)n64_be16(p + 2 * k);
@@ -1223,6 +1565,9 @@ static inline void st_be16x8(uint8_t *p, const int16_t *v)
 {
 #if RSP_NEON
     vst1q_u8(p, vrev16q_u8(vreinterpretq_u8_s16(vld1q_s16(v))));
+#elif RSP_SSE2
+    __m128i x = SV_LD(v);
+    SV_ST(p, _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8)));
 #else
     for (int k = 0; k < 8; k++)
         n64_wbe16(p + 2 * k, (uint16_t)v[k]);
@@ -1233,6 +1578,9 @@ static inline void st_be16x4(uint8_t *p, const int16_t *v)
 {
 #if RSP_NEON
     vst1_u8(p, vrev16_u8(vreinterpret_u8_s16(vld1_s16(v))));
+#elif RSP_SSE2
+    __m128i x = _mm_loadl_epi64((const __m128i *)(const void *)v);
+    _mm_storel_epi64((__m128i *)(void *)p, _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8)));
 #else
     for (int k = 0; k < 4; k++)
         n64_wbe16(p + 2 * k, (uint16_t)v[k]);
