@@ -80,7 +80,10 @@ class CodeView:
 
 _BE32 = struct.Struct(">I").unpack_from
 BUCKET_BYTES = 0x10000  # guest code per generated file (XBA-283: ~1.2 MB of C; docs/android/prepare.md)
-SPLIT_BYTES = 2000000   # C past which a bucket's file is cut again (dense code)
+# C past which a bucket's file is cut again (dense code). 1.5 MB since the dead CR stores (xenon.py) made the C ~8 %
+# bigger: one NDK clang -O1 job on a 1.8 MB file peaked at 502 MB, at the edge of Prepare's 512 MB per job. A function
+# that would take a file past it starts the next file.
+SPLIT_BYTES = 1500000
 
 
 def fn_name(entry):
@@ -198,12 +201,24 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     buckets = collections.OrderedDict()
     for f in funcs:
         buckets.setdefault((f.entry - img.base) // bucket_bytes, []).append(f)
+    def flush(b, sub, out, callees):
+        if callees:  # WP-16: the functions this file calls directly (xenon_rt.h XE_RC_LOCAL)
+            out[0] = head + "".join("XE_RC_LOCAL void %s(xe_machine *m_);\n" % fn_name(e)
+                                    for e in sorted(callees)) + "\n"
+        path = os.path.join(outdir, "x360_rc_%05d_%d.c" % (b, sub))
+        with open(path, "w") as fh:
+            fh.write("".join(out))
+        files.append(path)
+
     for b, group in buckets.items():
         out, size, sub, callees = [head], 0, 0, set()
         for n, f in enumerate(group):
             lifter = TitleLifter(view, disc.insn, f, fn_name(f.entry), comments=comments, helpers=helpers,
                                  tables=disc.jt.tables, direct=direct, leaders=leaders.pop(f.entry, None))
             text = lifter.function()
+            if size and size + len(text) >= split_bytes:  # a big function starts a file of its own (clang's memory)
+                flush(b, sub, out, callees)
+                out, size, sub, callees = [head], 0, sub + 1, set()
             out.append(text)
             out.append("\n")
             size += len(text) + 1
@@ -222,13 +237,7 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
                         invalid += 1
             f.release()
             if n + 1 == len(group) or size >= split_bytes or len(out) // 2 >= per_file:
-                if callees:  # WP-16: the functions this file calls directly (xenon_rt.h XE_RC_LOCAL)
-                    out[0] = head + "".join("XE_RC_LOCAL void %s(xe_machine *m_);\n" % fn_name(e)
-                                            for e in sorted(callees)) + "\n"
-                path = os.path.join(outdir, "x360_rc_%05d_%d.c" % (b, sub))
-                with open(path, "w") as fh:
-                    fh.write("".join(out))
-                files.append(path)
+                flush(b, sub, out, callees)
                 out, size, sub, callees = [head], 0, sub + 1, set()
     table = ['/* Entry -> lifted function (XBA-230). */\n#include "xenon_rt.h"\n\n']
     for f in funcs:
