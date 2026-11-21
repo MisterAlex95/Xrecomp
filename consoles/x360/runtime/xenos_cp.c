@@ -16,8 +16,10 @@ void xenos_cp_init(xenos_cp *cp)
     void (*dh)(void *, const xenos_cp *, const xenos_draw *) = cp->draw_hook;
     void (*sw)(void *, const xenos_cp *) = cp->swap_hook;
     const uint8_t *mem = cp->mem;
+    uint8_t *wmem = cp->wmem;
     memset(cp, 0, sizeof *cp);
     cp->mem = mem;
+    cp->wmem = wmem;
     cp->render_ctx = rctx;
     cp->draw_hook = dh;
     cp->swap_hook = sw;
