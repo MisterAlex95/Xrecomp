@@ -1908,13 +1908,28 @@ static float component(uint32_t v, unsigned offset, unsigned width, const attr *
  * (component, half_to_float), without gpu_read's call and switch per word. Warhammer fetches ~3.5 M attribute values
  * a frame, most of them 8_8_8_8 and 16_16. The generic loops stay for a runtime without cp->mem; xenos_vertex_fetch_test
  * checks that both give the same floats. */
+/* component() of every 8-bit value for each signedness and integer flag (index 2 * signed + integer), made once by
+ * component itself: 8_8_8_8 took a division per component */
+static float comp8_lut[4][256];
+static pthread_once_t comp8_once = PTHREAD_ONCE_INIT;
+static void comp8_init(void)
+{
+    for (int k = 0; k < 4; k++) {
+        attr t;
+        memset(&t, 0, sizeof t);
+        t.is_signed = (uint32_t)(k >> 1), t.is_integer = (uint32_t)(k & 1);
+        for (uint32_t u = 0; u < 256; u++)
+            comp8_lut[k][u] = component(u, 0, 8, &t);
+    }
+}
+
 static inline __attribute__((always_inline)) void packed_vertex(uint32_t format, uint32_t w0, uint32_t w1,
-                                                                const attr *a, float *o)
+                                                                const attr *a, const float *l8, float *o)
 {
     switch (format) {
-    case 6:
+    case 6: /* l8: comp8_lut for the attribute's flags */
         for (int i = 0; i < 4; i++)
-            o[i] = component(w0, 8 * i, 8, a);
+            o[i] = l8[(w0 >> (8 * i)) & 255];
         break;
     case 7:
         for (int i = 0; i < 3; i++)
@@ -1950,7 +1965,7 @@ static inline __attribute__((always_inline)) void packed_vertex(uint32_t format,
 
 static inline __attribute__((always_inline)) void packed_loop(const uint8_t *mem, uint32_t format, uint32_t endian,
                                                               uint32_t at, uint32_t step, uint32_t count, float *out,
-                                                              size_t ostride, const attr *a)
+                                                              size_t ostride, const attr *a, const float *l8)
 {
     const int two = format == 26 || format == 32;
     for (uint32_t v = 0; v < count; v++, at += step) {
@@ -1961,7 +1976,7 @@ static inline __attribute__((always_inline)) void packed_loop(const uint8_t *mem
             memcpy(&w1, mem + ((at + 4) & 0x1FFFFFFFu), 4);
             w1 = gpu_swap(w1, endian);
         }
-        packed_vertex(format, w0, w1, a, out + (size_t)v * ostride);
+        packed_vertex(format, w0, w1, a, l8, out + (size_t)v * ostride);
     }
 }
 
@@ -1969,7 +1984,18 @@ static inline __attribute__((always_inline)) void packed_loop(const uint8_t *mem
 static int fetch_packed_mem(const uint8_t *mem, uint32_t format, uint32_t endian, uint32_t at, uint32_t step,
                             uint32_t count, float *out, size_t ostride, const attr *a)
 {
-#define PACKED_E(F)                                                                                                        switch (endian & 3) {                                                                                                  case 0: packed_loop(mem, F, 0, at, step, count, out, ostride, a); break;                                              case 1: packed_loop(mem, F, 1, at, step, count, out, ostride, a); break;                                              case 2: packed_loop(mem, F, 2, at, step, count, out, ostride, a); break;                                              default: packed_loop(mem, F, 3, at, step, count, out, ostride, a); break;                                             }
+#define PACKED_E(F)                                                                                                    \
+    switch (endian & 3) {                                                                                              \
+    case 0: packed_loop(mem, F, 0, at, step, count, out, ostride, a, l8); break;                                       \
+    case 1: packed_loop(mem, F, 1, at, step, count, out, ostride, a, l8); break;                                       \
+    case 2: packed_loop(mem, F, 2, at, step, count, out, ostride, a, l8); break;                                       \
+    default: packed_loop(mem, F, 3, at, step, count, out, ostride, a, l8); break;                                      \
+    }
+    const float *l8 = NULL;
+    if (format == 6) {
+        pthread_once(&comp8_once, comp8_init);
+        l8 = comp8_lut[2 * (a->is_signed != 0) + (a->is_integer != 0)];
+    }
     switch (format) {
     case 6: PACKED_E(6) return 1;
     case 7: PACKED_E(7) return 1;
