@@ -286,6 +286,20 @@ static void keep_line(int run, const char *line)
     pthread_mutex_unlock(&s_mu);
 }
 
+/* the runtime's own figures after the shared ones (host_perf_config.extra) */
+static void append_extra(const host_perf *p, const host_perf_figures *f, int run, char *line, size_t n)
+{
+    char extra[512];
+    size_t len = strlen(line);
+
+    if (!p->cfg.extra)
+        return;
+    extra[0] = 0;
+    p->cfg.extra(p->cfg.extra_ctx, f, run, extra, sizeof extra);
+    if (extra[0] && len + 2 < n)
+        snprintf(line + len, n - len, "; %s", extra);
+}
+
 int host_perf_log_due(host_perf *p, uint64_t now_ns)
 {
     host_perf_figures f;
@@ -295,6 +309,7 @@ int host_perf_log_due(host_perf *p, uint64_t now_ns)
         return 0;
     host_perf_take(p, HOST_PERF_WIN_LINE, now_ns, &f, 1);
     host_perf_format(&f, line, sizeof line);
+    append_extra(p, &f, 0, line, sizeof line);
     printf("%s: perf %s\n", p->cfg.console, line);
     fflush(stdout);
     keep_line(0, line);
@@ -308,6 +323,7 @@ void host_perf_log_run(host_perf *p, uint64_t now_ns, host_perf_figures *out)
 
     host_perf_take(p, HOST_PERF_WIN_RUN, now_ns, &f, 0);
     host_perf_format(&f, line, sizeof line);
+    append_extra(p, &f, 1, line, sizeof line);
     printf("%s: perf over the run: %s\n", p->cfg.console, line);
     fflush(stdout);
     keep_line(1, line);

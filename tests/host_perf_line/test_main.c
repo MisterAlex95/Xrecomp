@@ -7,6 +7,8 @@
  *   ff          fast-forward: several guest frames per host frame, the stages per guest frame
  *   pause       a time away counts in no window; the frame in progress is dropped
  *   due         the 10 s line logged once due, its window started again; the run's line; the last lines kept
+ *   extra       a runtime's own figures appended to both lines ("; <text>"), from the window's figures; nothing
+ *               appended when it writes nothing
  *   live        the overlay's figures published every 500 ms, stale after 2 s, cleared
  *   budget      the budget follows the frame period unless the config sets one
  *   frame time  the host frames' length, top to top: mean and 99th percentile per window, the histogram's fine and
@@ -16,6 +18,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define MS 1000000ull
@@ -234,6 +237,41 @@ static void test_due(void)
           "due: the run's line");
 }
 
+static void extra_text(void *ctx, const struct host_perf_figures *f, int run, char *out, size_t n)
+{
+    int *calls = ctx;
+    if (++*calls == 3)
+        return; /* the third call writes nothing */
+    snprintf(out, n, "gpu %s %llu frames", run ? "run" : "line", (unsigned long long)f->guest_frames);
+}
+
+static void test_extra(void)
+{
+    host_perf p;
+    host_perf_config c = gba_cfg();
+    char line[1024];
+    int calls = 0;
+    uint64_t t = 5 * MS;
+    c.extra = extra_text, c.extra_ctx = &calls;
+    host_perf_init(&p, &c, t);
+    for (int i = 0; i < 700; i++) {
+        t = frame(&p, t, 3 * MS, 0, 1 * MS, 16742706, 1);
+        host_perf_log_due(&p, t);
+    }
+    host_perf_last_line(0, line, sizeof line);
+    const char *e = strstr(line, "; gpu line ");
+    check(calls == 1 && e && strtoull(e + 11, NULL, 10) > 590 && strcmp(e + strlen(e) - 7, " frames") == 0,
+          "extra: appended to the 10 s line, its window's frames");
+    host_perf_log_run(&p, t, NULL);
+    host_perf_last_line(1, line, sizeof line);
+    e = strstr(line, "; gpu run 700 frames");
+    check(calls == 2 && e && e[20] == 0, "extra: appended to the run's line");
+    host_perf_log_run(&p, t, NULL);
+    host_perf_last_line(1, line, sizeof line);
+    check(calls == 3 && !strstr(line, "; gpu") && line[strlen(line) - 1] != ' ',
+          "extra: nothing written, nothing appended");
+}
+
 static void test_live(void)
 {
     host_perf p;
@@ -329,6 +367,7 @@ int main(void)
     test_ff();
     test_pause();
     test_due();
+    test_extra();
     test_live();
     test_budget();
     test_frame_time();
