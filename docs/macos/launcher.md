@@ -14,6 +14,7 @@ it lists and plays Game Boy Advance, PlayStation, Nintendo 64 and GameCube games
 
 ## Contents
 
+- [Install](#install)
 - [Features](#features)
 - [Building and checking](#building-and-checking)
 - [Layout of the code](#layout-of-the-code)
@@ -27,6 +28,21 @@ it lists and plays Game Boy Advance, PlayStation, Nintendo 64 and GameCube games
 - [Licence, legal, CI](#licence-legal-ci)
 - [Prepare interface](#prepare-interface)
 - [Mac checklist](#mac-checklist)
+
+## Install
+
+macOS 14 or later. Download `xrecomp-v<version>-macos-arm64.zip` (Apple silicon) from the
+[latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest) and unzip it; on an Intel Mac, build it
+(below). The app is not notarized, so clear the quarantine flag first ([why](#building-and-checking)):
+
+```bash
+xattr -dr com.apple.quarantine XRecomp
+open XRecomp/XRecomp.app
+```
+
+Keep `XRecomp.app` in its `XRecomp` folder: it drives the toolkit around it. On first start it sets up its own Python
+environment (Setup › **Create it**), then prepares and plays your library. To build it from a checkout instead:
+`bash macos/scripts/build-app.sh` ([Building and checking](#building-and-checking)).
 
 ## Features
 

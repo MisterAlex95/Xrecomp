@@ -34,12 +34,16 @@ The compile driver picks, in order: `--cc` / `%XBA_CC%`, `toolchain\bin\clang-cl
 PATH (with lld-link), MSVC's cl (with the link.exe beside it). The title links against the MSVC-built runtime with the
 same C runtime (`/MD`).
 
+Bringing up a new game by hand, each pipeline stage at a time (upstream's MSVC route):
+[GETTING_STARTED.md](../GETTING_STARTED.md).
+
 ## Limits
 
 - **Console games (GBA, PS1, N64, GameCube) play in the interpreter only** (XBA-278, [below](#console-games)): their
   players are not in the zip (it is built with MSVC) but cross-build with MinGW-w64; `xrecomp prepare` refuses a
   console game's native pack there and says so (the pack build and loader are the POSIX hosts').
 - No frame generation (LSFG is POSIX-only), no GL render back end: D3D11.
+- For console games at full speed (their native packs), use Linux, macOS or WSL2 ([cli.md](cli.md#install)).
 - A disc image read in place, or a game folder, is linked into the build folder as `game`: a symbolic link when
   Windows allows one (Developer Mode), else a directory junction (a folder) or a hard link (an image on the same
   drive). Otherwise prepare stops and suggests Developer Mode or `--extract`.

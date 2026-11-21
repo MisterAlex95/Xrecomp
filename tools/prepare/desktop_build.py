@@ -381,7 +381,7 @@ def route(toolkit, builder="auto", host=None, which=shutil.which, runtime_digest
     if which("cmake"):
         return "cmake", None, "CMake (%s)" % why
     raise cc.StepError("NO_BUILDER", "%s and no cmake on PATH: install CMake, or make the runtime with "
-                       "`python3 -m tools.prepare.runtime` where CMake is (docs: README « Linux »)" % why)
+                       "`python3 -m tools.prepare.runtime` where CMake is (docs: docs/desktop/cli.md « Install »)" % why)
 
 
 # ── The build ───────────────────────────────────────────────────

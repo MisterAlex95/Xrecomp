@@ -51,7 +51,7 @@ Downloads: the [GitHub releases](https://github.com/MisterAlex95/Xrecomp/release
   Ad-hoc signed, not notarized: run `xattr -dr com.apple.quarantine <the XRecomp folder>` once before opening it,
   otherwise macOS blocks it or runs it from a translocated copy that cannot see its toolkit (Setup then asks for it).
 - `xrecomp-v<version>-linux-x86_64.tar.gz` and `xrecomp-v<version>-linux-arm64.tar.gz`: the toolkit for Linux
-  (README « Linux »), each built and smoke-tested on its own architecture (GitHub's Ubuntu 24.04 runners, XBA-87).
+  ([cli.md « Install »](../desktop/cli.md#install)), each built and smoke-tested on its own architecture (GitHub's Ubuntu 24.04 runners, XBA-87).
   Up to 0.12 there was one `-linux.tar.gz`, x86-64 only.
 - `xrecomp-v<version>-windows-x86_64.zip` (**experimental**, XBA-89): the toolkit for Windows x86-64 with
   `xrecomp.cmd`, Xbox games only (the console runtimes are POSIX-only). Needs Python 3 and Visual Studio's Build
@@ -86,7 +86,7 @@ BC:F2:04:46:E6:FE:38:6F:3C:FA:A1:B8:75:B2:5E:99:7A:77:0A:E6:1A:B2:48:68:DD:4C:9C
 Check a download with `apksigner verify --print-certs xrecomp-v<version>.apk` (Android SDK build-tools): its
 `Signer #1 certificate SHA-256 digest` must be the same, lower case without colons. Any other signer is not ours.
 
-The Mac app and the toolkit can also be built from the source at the tag (README « Get it »).
+The Mac app and the toolkit can also be built from the source at the tag ([README « Try it »](../../README.md#-try-it-in-five-minutes), the guides it links).
 
 ## Crash symbols
 

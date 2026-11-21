@@ -1,0 +1,62 @@
+name: Bug
+description: Something in the app, the launcher, the command line or the build is broken (not a single game)
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A problem with one game goes in a **Game report** instead. No game data and no links to ROMs, ISOs or BIOS
+        files: issues that carry them are deleted. Security issues: see SECURITY.md, not a public issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you see, and what you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Settings > Graphics
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - Android app
+        - macOS app
+        - Command line (xrecomp, Linux / macOS)
+        - Windows (xrecomp.cmd)
+        - Building from source
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: From About (Settings > Advanced > About; the macOS app's About), or the commit when building from source
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Exact model, OS version (e.g. AYN Thor, Android 13; Ubuntu 24.04 x86-64)
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The in-game menu's Share log, logcat, or the terminal output. Drag a file here.
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, settings you changed, other devices tried

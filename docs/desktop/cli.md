@@ -14,6 +14,32 @@ It is a small Python program in the toolkit (`tools/xrecomp`, started by the `xr
 or `python3 -m tools.xrecomp`), with no dependency beyond what `tools.prepare` needs. Link it onto your PATH to run
 it from anywhere: `ln -s "$PWD/xrecomp" ~/.local/bin/xrecomp`.
 
+## Install
+
+Linux x86-64 or arm64 (macOS works too; its app is in [launcher.md](../macos/launcher.md)). Download
+`xrecomp-v<version>-linux-x86_64.tar.gz` (or `-linux-arm64.tar.gz`) from the
+[latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest), or use a git checkout, then in its
+`XRecomp` folder:
+
+```bash
+bash tools/linux/install_deps.sh            # apt / pacman / dnf  (macOS: bash tools/macos/setup.sh)
+python3 -m pip install capstone pefile numpy
+./xrecomp prepare /path/to/game.iso         # or a disc folder, a .gba, a PS1 .cue / .chd, a .z64
+./xrecomp list                              # your library: Prepared, Prepared · out of date, Not prepared
+./xrecomp play game                         # by title, title ID or path
+./xrecomp settings game RECOMP_GPU=1        # per game; without a game: Default settings
+```
+
+Games are read where they are; work folders, settings and saves go to `~/.local/share/xrecomp` ([Storage](#storage)).
+`python3 -m tools.prepare` stays underneath (`--check`, `--help`).
+
+Each release archive carries the runtime prebuilt for its architecture (`runtime/linux-x86_64/` or
+`runtime/linux-arm64/`, built on Ubuntu 24.04): prepare then compiles and links the title with clang (or the system's
+`cc`) alone, no CMake or Ninja. A `toolchain/bin/clang` next to the toolkit is used first when there is one, else
+`--cc` / `$XBA_CC`, else the system's. The GBA / PS1 / N64 players `./xrecomp play` starts are in the same folder
+(`bin/`). A git checkout builds with CMake as before; `python3 -m tools.prepare.runtime` makes the prebuilt runtime
+and the players once where CMake is, and `--builder driver|cmake` picks the route.
+
 ## Commands
 
 | Command | Does |
@@ -117,7 +143,7 @@ compiled in, they win): `settings GAME` shows them as « set by the title ».
 - **Prepare's public entry**: xrecomp runs `python -m tools.prepare` and nothing below it, so either compile route
   works (CMake today, the compile driver of XBA-86 later).
 - **Python**: `$XBA_PYTHON`, else settings.json `python_path`, else the toolkit's `.venv`, else the Python running
-  xrecomp; it needs what `tools.prepare` needs (`capstone`, `pefile`, `numpy`; README « Linux »).
+  xrecomp; it needs what `tools.prepare` needs (`capstone`, `pefile`, `numpy`; [Install](#install)).
 - **The toolkit digest** leaves `tools/xrecomp` out (`tools/prepare/toolkit_tree.json`): a change to the command line
   never makes a pack stale.
 - **Windows** (experimental, [windows.md](windows.md)): `xrecomp.cmd` in the Windows zip, Xbox titles only, built

@@ -131,7 +131,7 @@ jobs:
           test -f "out/XRecomp/runtime/linux-${{ matrix.arch }}/runtime.json"
           tar -C out -czf "out/$ARCHIVE" XRecomp
           (cd out && sha256sum "$ARCHIVE" > "$ARCHIVE.sha256" && cat ./*.sha256)
-      # From the archive, as a user would (README « Linux »; the venv because Ubuntu's pip refuses system installs):
+      # From the archive, as a user would (docs/desktop/cli.md « Install »; the venv because Ubuntu's pip refuses system installs):
       # ./xrecomp prepare of the synthetic retail XBE without CMake, the title started headless, the three console
       # players through ./xrecomp play, then the runtime's CMake build with frame generation (XBA-187).
       - name: Smoke test of the archive
@@ -306,7 +306,7 @@ jobs:
             runs it from a copy that cannot see its toolkit). Setup lists the Homebrew packages and Python it needs.
           - `*-linux-x86_64.tar.gz`, `*-linux-arm64.tar.gz`: the toolkit for Linux, with its prebuilt runtime and the
             GBA / PS1 / N64 players: `bash tools/linux/install_deps.sh`, then `./xrecomp prepare /path/to/game.iso`,
-            `./xrecomp play <game>` (README, « Linux »; docs/desktop/cli.md).
+            `./xrecomp play <game>` (docs/desktop/cli.md « Install »).
           EOF
             if ls out/*-windows-x86_64.zip >/dev/null 2>&1; then
               cat >> body.md <<'EOF'

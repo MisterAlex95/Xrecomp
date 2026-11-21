@@ -1,0 +1,91 @@
+name: Game report
+description: How far a game gets (does not start, starts, in game, playable), or what goes wrong in it
+labels: ["game", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! **No game data and no links to ROMs, ISOs or BIOS files**: never attach or link game
+        files, disc images, XBEs or saves, only the log. Issues that do are deleted.
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      description: Title and region (e.g. Sonic Heroes, PAL)
+    validations:
+      required: true
+  - type: dropdown
+    id: console
+    attributes:
+      label: Console
+      options:
+        - Original Xbox
+        - Xbox 360
+        - GameCube
+        - Nintendo 64
+        - PlayStation
+        - Game Boy Advance
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: From About (Settings > Advanced > About, or About in the library's options menu; the macOS app's About; command line: `tools/VERSION`)
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Exact model and GPU, OS version (e.g. AYN Thor, Adreno 740, Android 13; MacBook Air M2, macOS 15)
+    validations:
+      required: true
+  - type: dropdown
+    id: progress
+    attributes:
+      label: How far does it get?
+      options:
+        - Does not start (Prepare fails, crash or black screen before anything shows)
+        - Starts (logos, menus or intro, but not in game)
+        - In game (reaches gameplay, with problems)
+        - Playable (can be played through with minor issues)
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What goes wrong
+      multiple: true
+      options:
+        - Prepare fails
+        - Black screen
+        - Hangs / freezes
+        - Crashes back to the system
+        - Graphics wrong
+        - Sound wrong
+        - Controls / input
+        - Too slow
+        - Nothing, it works
+        - Other
+  - type: textarea
+    id: when
+    attributes:
+      label: When
+      description: What you did just before (e.g. title screen fine, black after pressing Start), how long you waited, every time or only sometimes.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        Reproduce the problem, then open the in-game menu (swipe) > Share log, and drag the file here
+        (macOS: the Log tab; command line: the terminal output). Without a log we usually cannot do anything.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Settings you changed, mods turned on, screenshot, other devices tried

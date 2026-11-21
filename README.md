@@ -17,20 +17,22 @@ No emulator. No JIT. The game's machine code becomes C, then a real executable f
 
 ---
 
-**Ocarina of Time at full speed on an Android handheld.** Crash Bandicoot. Pokémon Pinball. Fable booting into
-Oakvale with music. Not through an emulator interpreting instructions one by one, but as programs **compiled ahead
+**Star Wars: Knights of the Old Republic, in game on an Android handheld.** Crash Bandicoot at 4× resolution. Fable
+booting into Oakvale with music. Not through an emulator interpreting instructions one by one, but as programs **compiled ahead
 of time** from the original game code, running against a runtime that stands in for the console's hardware and OS.
 
 And you don't need a PC for it: point the Android app at a game you dumped, press **Prepare**, wait 20–30 minutes
 once, press **Play**. The whole recompiler (Python, capstone, LLVM) runs on the phone.
 
+<!-- Teaser video (XBA-344): docs/images/teaser.gif here, linking to docs/images/teaser.mp4. -->
+
 <table>
   <tr>
-    <td width="50%" align="center"><img src="docs/images/screens/n64-ocarina-of-time.jpg" alt="The Legend of Zelda: Ocarina of Time, Link meets Saria in the Kokiri Forest"><br><sub><b>Ocarina of Time</b> · N64 · Vulkan RDP, upscaled</sub></td>
+    <td width="50%" align="center"><img src="docs/images/screens/xbox-kotor.jpg" alt="Star Wars: Knights of the Old Republic, in game on the Endar Spire"><br><sub><b>Star Wars: KotOR</b> · Original Xbox · in game</sub></td>
     <td width="50%" align="center"><img src="docs/images/screens/ps1-crash-bandicoot.jpg" alt="Crash Bandicoot on N. Sanity Beach, upscaled"><br><sub><b>Crash Bandicoot</b> · PS1 · 4× internal resolution</sub></td>
   </tr>
   <tr>
-    <td width="50%" align="center"><img src="docs/images/screens/xbox-kotor.jpg" alt="Star Wars: Knights of the Old Republic, in game on the Endar Spire"><br><sub><b>Star Wars: KotOR</b> · Original Xbox · in game</sub></td>
+    <td width="50%" align="center"><img src="docs/images/screens/n64-ocarina-of-time.jpg" alt="The Legend of Zelda: Ocarina of Time, Link meets Saria in the Kokiri Forest"><br><sub><b>Ocarina of Time</b> · N64 · Vulkan RDP, upscaled</sub></td>
     <td width="50%" align="center"><img src="docs/images/screens/gba-pokemon-pinball.png" alt="Pokémon Pinball: Ruby &amp; Sapphire, Ruby table"><br><sub><b>Pokémon Pinball: Ruby &amp; Sapphire</b> · GBA · 60 fps</sub></td>
   </tr>
   <tr>
@@ -53,8 +55,7 @@ once, press **Play**. The whole recompiler (Python, capstone, LLVM) runs on the 
   desktop step.
 - 🎮 **A real launcher, not a demo.** Library with cover art, gamepad-first UI, dual-screen support, per-game
   options, save states with thumbnails, quick save / load on the pad, *resume where I left off* (or start from the
-  boot), fast-forward, rewind, cheats, a first-start guide and Help, and games listed from your own torrents and
-  downloaded on demand.
+  boot), fast-forward, rewind, cheats, a first-start guide and Help.
 - 🖼️ **Better than the original.** PS1 and N64 at 2×, 4× or 8× internal resolution, frame generation (LSFG) on every
   console, custom Vulkan drivers (Mesa Turnip) downloaded from the app.
 - 📦 **One game, one app.** Turn a prepared game into its own standalone Android or macOS app.
@@ -69,56 +70,20 @@ once, press **Play**. The whole recompiler (Python, capstone, LLVM) runs on the 
 **Android** (arm64, Android 11+)
 
 1. Install `xrecomp-v<version>.apk` from the [latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest)
-   (or [`xrecomp-latest`](https://github.com/MisterAlex95/Xrecomp/releases/tag/xrecomp-latest), rebuilt from every
-   push; both update each other in place).
-2. Add a game: an ISO or extracted Xbox folder, a `.gba`, a PS1 `.cue` / `.bin` / `.iso`, a `.z64` / `.n64` / `.v64`, a
-   GameCube `.iso` / `.gcm` / `.ciso` / `.rvz` / `.gcz` / `.wia` or homebrew `.dol`, an Xbox 360 `.xex` or disc image.
-3. **Prepare**, then **Play**.
+   (or the rolling [`xrecomp-latest`](https://github.com/MisterAlex95/Xrecomp/releases/tag/xrecomp-latest)).
+2. Add a game: an Xbox ISO or folder, a `.gba`, a PS1 `.cue` / `.bin` / `.iso`, a `.z64` / `.n64` / `.v64`, a GameCube
+   `.iso` / `.gcm` / `.ciso` / `.rvz` / `.gcz` / `.wia` or `.dol`, an Xbox 360 `.xex` or disc image.
+3. **Prepare**, then **Play**. N64 on Adreno: pick a Turnip driver in Settings › Graphics
+   ([details](docs/android/app-shell.md#vulkan-drivers)).
 
-For N64 on Adreno GPUs, pick a Turnip driver in Settings › Graphics › Vulkan driver: the app lists and downloads them
-([details](docs/android/app-shell.md#vulkan-drivers)).
+**macOS** (Apple Silicon / Intel): download the `-macos-arm64.zip` from the same release, clear the quarantine flag
+and open `XRecomp.app` ([Mac guide](docs/macos/launcher.md#install)).
 
-**macOS** (Apple Silicon / Intel)
+**Linux** (x86-64 / arm64): download the `-linux-*.tar.gz`, install the dependencies, then
+`./xrecomp prepare game.iso` and `./xrecomp play game` ([command line guide](docs/desktop/cli.md#install)).
 
-Download `xrecomp-v<version>-macos-arm64.zip` from the [latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest),
-unzip, run `xattr -dr com.apple.quarantine XRecomp` (the app is not notarized) and open `XRecomp/XRecomp.app`, kept
-in its folder. It sets up its own Python environment and prepares and plays your library
-([launcher guide](docs/macos/launcher.md)). Or build it: `bash macos/scripts/build-app.sh`.
-
-**Linux** (x86-64 / arm64), or any terminal
-
-Download `xrecomp-v<version>-linux-x86_64.tar.gz` (or `-linux-arm64.tar.gz`) from the [latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest)
-(or use a checkout), then in its `XRecomp` folder:
-
-```bash
-bash tools/linux/install_deps.sh            # apt / pacman / dnf  (macOS: bash tools/macos/setup.sh)
-python3 -m pip install capstone pefile numpy
-./xrecomp prepare /path/to/game.iso         # or a disc folder, a .gba, a PS1 .cue / .chd, a .z64
-./xrecomp list                              # your library: Prepared, Prepared · out of date, Not prepared
-./xrecomp play game                         # by title, title ID or path
-./xrecomp settings game RECOMP_GPU=1        # per game; without a game: Default settings
-```
-
-Games are read where they are; work folders, settings and saves go to `~/.local/share/xrecomp`
-([command line guide](docs/desktop/cli.md)). `python3 -m tools.prepare` stays there underneath (`--check`, `--help`).
-
-Each release archive carries the runtime prebuilt for its architecture (`runtime/linux-x86_64/` or
-`runtime/linux-arm64/`, built on Ubuntu 24.04): prepare then compiles and links the title with clang (or the
-system's `cc`) alone, no CMake or Ninja. A `toolchain/bin/clang` next to the toolkit is used first when there is one,
-else `--cc` / `$XBA_CC`, else the system's. The GBA / PS1 / N64 players `./xrecomp play` starts are in the same
-folder (`bin/`). A git checkout builds with CMake as before; `python3 -m tools.prepare.runtime` makes the prebuilt
-runtime and the players once where CMake is, and `--builder driver|cmake` picks the route.
-
-**Windows** (x86-64, experimental, Xbox games only)
-
-Download `xrecomp-v<version>-windows-x86_64.zip` from the [latest release](https://github.com/MisterAlex95/Xrecomp/releases/latest).
-It carries the runtime prebuilt with MSVC (`runtime/windows-x86_64/`) and `xrecomp.cmd`. You need Python 3
-(`python -m pip install capstone pefile numpy`) and Visual Studio's Build Tools (C++); then, in the `XRecomp` folder,
-`xrecomp.cmd prepare C:\path\to\game.iso` and `xrecomp.cmd play game`. The GBA, PS1 and N64 runtimes are
-POSIX-only, so console games are not supported on Windows (use Linux, macOS or WSL2). It is built and smoke-tested on
-GitHub's Windows runner, but no game has been played on it by this fork yet ([Windows guide](docs/desktop/windows.md)).
-[GETTING_STARTED.md](docs/GETTING_STARTED.md) walks through each pipeline stage by hand (upstream's MSVC route),
-which is also the way to bring up a new game on any host.
+**Windows** (x86-64, experimental, Xbox games only): the `-windows-x86_64.zip` and `xrecomp.cmd`, with Python and
+Visual Studio's Build Tools ([Windows guide](docs/desktop/windows.md)).
 
 ## 🎮 What's running today
 
@@ -177,7 +142,7 @@ There's room for you whether you like compilers, GPUs, Android or just testing g
 
 | If you like… | Good places to start |
 |---|---|
-| **Trying games** | Run a game you own, report how far it gets (device, version from About, logcat). [Candidate games](docs/technical/candidate-games.md) lists likely next targets |
+| **Trying games** | Run a game you own, report how far it gets in a [game report](https://github.com/MisterAlex95/Xrecomp/issues/new?template=game-report.yml) (device, version from About, log). [Candidate games](docs/technical/candidate-games.md) lists likely next targets |
 | **Compilers & reverse engineering** | The lifters in `tools/` and `consoles/*/tools/`, indirect calls, function discovery. Start with [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
 | **Graphics** | NV2A / D3D8 on GLES, N64 upscaling, PS1 GPU. [GPU back end](docs/technical/gpu-backend.md) |
 | **Android / macOS apps** | Editable touch layouts, launcher polish. [App shell](docs/android/app-shell.md), [Mac launcher](docs/macos/launcher.md) |

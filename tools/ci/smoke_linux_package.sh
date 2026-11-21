@@ -10,7 +10,7 @@
 #    players the archive carries (runtime/<host>/bin/) run 60 frames headless.
 # 3. --cmake: the runtime's CMake build from the same archive, frame generation from the tarballs it carries.
 #
-# The machine needs what README « Linux » lists (tools/linux/install_deps.sh). Environment:
+# The machine needs what docs/desktop/cli.md « Install » lists (tools/linux/install_deps.sh). Environment:
 #   PYTHON            a Python with capstone, pefile and numpy (default python3)
 #   XBA_RUN_WRAPPER   runs the arm64 executables on another host, e.g. "qemu-aarch64 -L /" with XBA_HOST=linux-arm64
 #                     and XBA_CC=aarch64-linux-gnu-gcc (a cross check on x86-64; GitHub's arm64 runner needs none)
