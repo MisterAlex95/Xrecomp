@@ -37,8 +37,12 @@
  *   frames 21-23: a linear 4x4 cube texture (one colour per face, faces 4 KB apart) sampled through tfetchCube's
  *            (S, T, face) coordinates at the centres of faces 4 (+Z: cyan) and 1 (-X: green), and a linear 4x4x4
  *            3D texture (one colour per slice) at depth 0.625 (slice 2: blue).
+ * Then WP-26's window offset (a picture drawn and resolved as two tiles: scissor and resolve rectangle moved, the
+ * right tile resolved into the left one's picture), eagerly and with lazy resolves; WP-27's viewport z (scale -1,
+ * offset 1, the test "greater"); WP-28's clear through a 4x view of 1x tiles.
  * At the end (renderers of their own): WP-2's lazy resolves; WP-10's rectangle lists, 20 in one list (two passes of
- * the GPU path), drawn on the GPU and with RECOMP_X360_RECTS=cpu, the same bytes.
+ * the GPU path), drawn on the GPU and with RECOMP_X360_RECTS=cpu, the same bytes, and WP-29's start-up self-test
+ * of the capture agreeing with what the read-back path drew.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -129,10 +133,12 @@ static void reg(uint32_t index, uint32_t v)
     pk[npk++] = v;
 }
 
-/* the viewport Direct3D sets for the whole target: VTE scale / offset on, (W/2, -H/2) around the centre */
+/* the viewport Direct3D sets for the whole target: VTE scale / offset on, (W/2, -H/2) around the centre, z 0..1 */
 static void full_viewport(void)
 {
     reg(0x2206, 0x3Fu);
+    reg(0x2113, fbits(1.0f));
+    reg(0x2114, 0);
     reg(0x210F, fbits(W / 2.0f));
     reg(0x2110, fbits(W / 2.0f));
     reg(0x2111, fbits(-H / 2.0f));
@@ -210,6 +216,196 @@ static const uint8_t *px(xenos_gl *g, int x, int y)
     int w, h;
     const uint8_t *f = xenos_gl_frame(g, &w, &h);
     return f + 4 * ((size_t)y * w + x);
+}
+
+/* a screen-space quad (VTE off: positions are pixels) from (x0, y0) to (x1, y1) of one colour at z, vertices at `at`,
+ * drawn with the colour pixel shader (ps) as a strip */
+static void screen_quad(uint32_t at, float x0, float y0, float x1, float y1, float z, float r, float g, float b,
+                        const uint32_t *ps, uint32_t nps)
+{
+    static uint32_t im[2 + 1024];
+    vertex_z(at, x0, y0, z, r, g, b), vertex_z(at + 32, x1, y0, z, r, g, b);
+    vertex_z(at + 64, x0, y1, z, r, g, b), vertex_z(at + 96, x1, y1, z, r, g, b);
+    im[0] = 1, im[1] = nps;
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    reg(0x4800, at | 3u), reg(0x4801, 2u | (32u << 2));
+    uint32_t strip = 6u | 2u << 6 | 4u << 16;
+    type3(PM4_DRAW_INDX_2, &strip, 1);
+}
+
+/* a resolve of render target 0's rectangle (x0, y0)-(x1, y1) to a tiled 8_8_8_8 at dst (pitch 64, 64 rows), no clear;
+ * its three corners at `at` */
+static void resolve_rect(uint32_t at, float x0, float y0, float x1, float y1, uint32_t dst)
+{
+    const float v[6] = {x0, y0, x1, y0, x1, y1};
+    for (int i = 0; i < 6; i++)
+        w32(at + 4 * (uint32_t)i, fbits(v[i]));
+    reg(0x4800, at | 3u), reg(0x4801, 2u | (6u << 2));
+    reg(0x2208, 6), reg(0x2318, 0), reg(0x2319, dst), reg(0x231A, 64u | 64u << 16), reg(0x231B, 2u | 6u << 7);
+    uint32_t rect = 8u | 2u << 6 | 3u << 16;
+    type3(PM4_DRAW_INDX_2, &rect, 1);
+    reg(0x2208, 4);
+}
+
+/* WP-26, PA_SC_WINDOW_OFFSET: a 64-wide picture drawn as two 32-wide tiles on one surface (pitch 32, tile 0), the way
+ * a 1080p title draws 1920 as 2 x 960. Left tile: green over everything, resolved (0,0)-(32,64) to dst. Right tile:
+ * the window offset -32 (PA_SU_SC_MODE_CNTL bit 16 on), the window scissor 40..64 (in window coordinates: 8..32 on the
+ * surface), a red quad over all the window; resolved from (32,0)-(64,64) (window coordinates) into dst + one
+ * 32x32 block (Direct3D moves the base by the left tile's blocks). Memory: x 0..39 green, 40..63 red. Lazy: both
+ * resolves into dst's one host picture (one pending rectangle: written once). */
+static void window_offset_tiles(xenos_gl *g, xenos_cp *cp, const uint32_t *ps, uint32_t nps, int lazy)
+{
+    enum { DST = 0xE4000, VQ = 0xE8000, RQ = 0xE8800 };
+    for (uint32_t i = 0; i < 64 * 64 * 4; i += 4)
+        w32(DST + i, 0xABABABABu);
+    xenos_gl_stats s0, s1;
+    xenos_gl_get_stats(g, &s0);
+    for (uint32_t i = 0; i < 4; i++)
+        reg(0x4400 + i, fbits(1.0f));
+    reg(0x2104, 0xFFFFu), reg(0x2201, 0x00010001u), reg(0x2200, 0), reg(0x2206, 0), reg(0x2208, 4);
+    reg(0x2000, 32u), reg(0x2001, 0), reg(0x2002, 0x200u);
+    reg(0x2205, 1u << 16), reg(0x2080, 0);
+    reg(0x2081, 0), reg(0x2082, 32u | 64u << 16);
+    screen_quad(VQ, -8, -8, 72, 72, 0.5f, 0, 1, 0, ps, nps);
+    resolve_rect(RQ, 0, 0, 32, 64, DST);
+    reg(0x2080, 0x7FE0u);                               /* x -32 */
+    reg(0x2081, 40u), reg(0x2082, 64u | 64u << 16);
+    screen_quad(VQ + 0x100, -8, -8, 72, 72, 0.5f, 1, 0, 0, ps, nps);
+    resolve_rect(RQ + 0x40, 32, 0, 64, 64, DST + 32 * 32 * 4);
+    reg(0x2080, 0), reg(0x2205, 0), reg(0x2081, 0), reg(0x2082, 0);
+    reg(0x2000, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2206, 0x3Fu);
+    run(cp);
+    xenos_gl_get_stats(g, &s1);
+    const char *mode = lazy ? "lazy" : "eager";
+    CHECK(s1.unsupported == s0.unsupported && s1.resolves == s0.resolves + 2,
+          "window offset tiles (%s): resolves +%llu (want 2), unsupported +%llu (want 0)", mode,
+          (unsigned long long)(s1.resolves - s0.resolves), (unsigned long long)(s1.unsupported - s0.unsupported));
+    if (lazy) {
+        CHECK(s1.resolves_deferred == s0.resolves_deferred + 2 &&
+                  rd32(NULL, DST + tiled_off_pitch(50, 10, 64, 2)) == 0xABABABABu,
+              "window offset tiles (lazy): deferred +%llu (want 2), memory %08X (want ABABABAB)",
+              (unsigned long long)(s1.resolves_deferred - s0.resolves_deferred),
+              rd32(NULL, DST + tiled_off_pitch(50, 10, 64, 2)));
+        xenos_gl_flush_resolves(g, cp);
+        xenos_gl_get_stats(g, &s1);
+        CHECK(s1.resolve_flushes == s0.resolve_flushes + 1,
+              "window offset tiles (lazy): written %llu times, want once (the two tiles one rectangle)",
+              (unsigned long long)(s1.resolve_flushes - s0.resolve_flushes));
+    }
+    static const struct {
+        int x, y;
+        uint32_t want;
+        const char *what;
+    } at[6] = {
+        {1, 1, 0xFF00FF00u, "left tile: green"},
+        {31, 63, 0xFF00FF00u, "left tile's last column: green"},
+        {32, 5, 0xFF00FF00u, "right tile, left of its scissor: green (the left tile's quad)"},
+        {39, 40, 0xFF00FF00u, "right tile, the scissor's edge - 1: green"},
+        {40, 40, 0xFF0000FFu, "right tile, in the scissor moved by the window offset: red"},
+        {63, 63, 0xFF0000FFu, "right tile's last pixel: red"},
+    };
+    for (int i = 0; i < 6; i++) {
+        uint32_t t = rd32(NULL, DST + tiled_off_pitch(at[i].x, at[i].y, 64, 2));
+        CHECK(t == at[i].want, "window offset tiles (%s), %s: %08X, want %08X", mode, at[i].what, t, at[i].want);
+    }
+}
+
+/* WP-27, the viewport's z (PA_CL_VPORT_ZSCALE -1, ZOFFSET 1: depth reversed, as Adventure Time draws): window z =
+ * 1 - z. A blue quad at z 1 (window 0, test always, z write) "clears" the depth to 0; a green one at z 0.25 (window
+ * 0.75) passes the test "greater" and writes; a red one at z 0.75 (window 0.25) then fails it: green. Without the
+ * viewport's z the green quad fails (0.25 < 1): blue. */
+static void viewport_z_reversed(xenos_gl *g, xenos_cp *cp, const uint32_t *ps, uint32_t nps)
+{
+    enum { VQ = 0xE9000 };
+    static const uint32_t swap[4] = {0x53574150u, 0, W, H};
+    static uint32_t im[2 + 1024];
+    static const float qz[3] = {1.0f, 0.25f, 0.75f}, qc[3][3] = {{0, 0, 1}, {0, 1, 0}, {1, 0, 0}};
+    static const uint32_t zfunc[3] = {7, 4, 4}, zwrite[3] = {4, 4, 0}; /* always / greater; z write */
+    for (uint32_t q = 0; q < 3; q++)
+        for (uint32_t k = 0; k < 4; k++)
+            vertex_z(VQ + 0x80 * q + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? -1.0f : 1.0f, qz[q], qc[q][0], qc[q][1],
+                     qc[q][2]);
+    im[0] = 1, im[1] = nps;
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    for (uint32_t i = 0; i < 4; i++)
+        reg(0x4400 + i, fbits(1.0f));
+    reg(0x2104, 0xFFFFu), reg(0x2201, 0x00010001u), reg(0x2205, 0), reg(0x2208, 4);
+    reg(0x2000, 0), reg(0x2001, 0), reg(0x2002, 0x100u), reg(0x2081, 0), reg(0x2082, 0);
+    reg(0x2206, 0x3Fu);
+    reg(0x210F, fbits(W / 2.0f)), reg(0x2110, fbits(W / 2.0f)), reg(0x2111, fbits(-H / 2.0f));
+    reg(0x2112, fbits(H / 2.0f)), reg(0x2113, fbits(-1.0f)), reg(0x2114, fbits(1.0f));
+    reg(0x4801, 2u | (32u << 2));
+    uint32_t strip = 6u | 2u << 6 | 4u << 16;
+    for (uint32_t q = 0; q < 3; q++) {
+        reg(0x2200, 2u | zwrite[q] | zfunc[q] << 4);
+        reg(0x4800, (VQ + 0x80 * q) | 3u);
+        type3(PM4_DRAW_INDX_2, &strip, 1);
+    }
+    type3(PM4_XE_SWAP, swap, 4);
+    reg(0x2200, 0), reg(0x2002, 0), reg(0x2113, fbits(1.0f)), reg(0x2114, 0);
+    run(cp);
+    const uint8_t *c = px(g, W / 2, H / 2);
+    CHECK(c[0] == 0 && c[1] == 255 && c[2] == 0,
+          "viewport z scale -1 offset 1, test greater: %u,%u,%u, want green (blue: the viewport's z ignored)", c[0],
+          c[1], c[2]);
+}
+
+/* WP-28, an MSAA view of single-sampled tiles (Direct3D's clears): a 64x64 1x picture (pitch 64, colour tile 0, depth
+ * tile 0x200) green at z 0.5; then a rectangle list through the 4x view of the same tiles (pitch 32, RB_SURFACE_INFO
+ * msaa 4x) over the view's (0,0)-(32,16): red at z 0.25 (test always, z write); then, at 1x again, a blue quad at
+ * z 0.35 with the test "less" (fails where the view's clear put 0.25). The view's pixel (x, y) is the picture's
+ * 2x2 block at (2x, 2y): the top half red, the bottom blue. Resolved to dst and read back. */
+static void msaa_view_clear(xenos_gl *g, xenos_cp *cp, const uint32_t *ps, uint32_t nps)
+{
+    enum { DST = 0xE4000, VQ = 0xEA000, RQ = 0xEA800 };
+    static uint32_t im[2 + 1024];
+    xenos_gl_stats s0, s1;
+    xenos_gl_get_stats(g, &s0);
+    for (uint32_t i = 0; i < 64 * 64 * 4; i += 4)
+        w32(DST + i, 0xABABABABu);
+    for (uint32_t i = 0; i < 4; i++)
+        reg(0x4400 + i, fbits(1.0f));
+    reg(0x2104, 0xFFFFu), reg(0x2201, 0x00010001u), reg(0x2205, 0), reg(0x2206, 0), reg(0x2208, 4);
+    reg(0x2080, 0), reg(0x2081, 0), reg(0x2082, 0);
+    reg(0x2000, 64u), reg(0x2001, 0), reg(0x2002, 0x200u);
+    reg(0x2200, 2u | 4u | 7u << 4); /* z test always, z write */
+    screen_quad(VQ, -8, -8, 72, 72, 0.5f, 0, 1, 0, ps, nps);
+    reg(0x2000, 32u | 2u << 16); /* the 4x view */
+    vertex_z(VQ + 0x100, 0, 0, 0.25f, 1, 0, 0), vertex_z(VQ + 0x120, 32, 0, 0.25f, 1, 0, 0);
+    vertex_z(VQ + 0x140, 0, 16, 0.25f, 1, 0, 0);
+    im[0] = 1, im[1] = nps;
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    reg(0x4800, (VQ + 0x100) | 3u), reg(0x4801, 2u | (24u << 2));
+    uint32_t rect = 8u | 2u << 6 | 3u << 16;
+    type3(PM4_DRAW_INDX_2, &rect, 1);
+    reg(0x2000, 64u);
+    reg(0x2200, 2u | 1u << 4); /* z test less, no write */
+    screen_quad(VQ + 0x200, -8, -8, 72, 72, 0.35f, 0, 0, 1, ps, nps);
+    reg(0x2200, 0);
+    resolve_rect(RQ, 0, 0, 64, 64, DST);
+    reg(0x2000, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2206, 0x3Fu);
+    run(cp);
+    xenos_gl_get_stats(g, &s1);
+    CHECK(s1.msaa_views == s0.msaa_views + 1, "MSAA view: drawn into its 1x surfaces %llu times, want 1",
+          (unsigned long long)(s1.msaa_views - s0.msaa_views));
+    static const struct {
+        int x, y;
+        uint32_t want;
+        const char *what;
+    } at[5] = {
+        {1, 1, 0xFF0000FFu, "the view's clear: red"},
+        {62, 30, 0xFF0000FFu, "the view's clear, its last 2x2 block: red"},
+        {62, 33, 0xFFFF0000u, "below it: blue (depth 0.5 from the green quad, 0.35 passes)"},
+        {1, 40, 0xFFFF0000u, "below it: blue"},
+        {40, 63, 0xFFFF0000u, "the last row: blue"},
+    };
+    for (int i = 0; i < 5; i++) {
+        uint32_t t = rd32(NULL, DST + tiled_off_pitch(at[i].x, at[i].y, 64, 2));
+        CHECK(t == at[i].want, "MSAA view of 1x tiles, %s: %08X, want %08X", at[i].what, t, at[i].want);
+    }
 }
 
 int main(int argc, char **argv)
@@ -2057,7 +2253,31 @@ int main(int argc, char **argv)
         reg(0x2206, 0x3Fu), reg(0x2082, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2000, 0);
         run(&cp);
     }
+    window_offset_tiles(g, &cp, ps, nps, 0);
+    viewport_z_reversed(g, &cp, ps, nps);
     xenos_gl_destroy(g);
+
+    /* WP-28's clear through an MSAA view, on a renderer of its own whose rectangle lists are read back
+     * (RECOMP_X360_RECTS=cpu): the GPU path loses a rectangle now and then under SwiftShader at scale 2 on a loaded
+     * machine (a plain 1x rectangle too: WP-29's capture read as a uniform block), which is not what this checks */
+    {
+        const char *env = getenv("RECOMP_X360_RECTS");
+        char saved[16] = "";
+        if (env)
+            snprintf(saved, sizeof saved, "%s", env);
+        setenv("RECOMP_X360_RECTS", "cpu", 1);
+        g = xenos_gl_create_scaled(cache, W, H, scale, why, sizeof why);
+        if (env)
+            setenv("RECOMP_X360_RECTS", saved, 1);
+        else
+            unsetenv("RECOMP_X360_RECTS");
+        CHECK(g != NULL, "MSAA view: no renderer: %s", why);
+        if (g) {
+            cp.render_ctx = g;
+            msaa_view_clear(g, &cp, ps, nps);
+            xenos_gl_destroy(g);
+        }
+    }
 
     /* WP-2, lazy resolves (RECOMP_X360_RESOLVE=lazy), on a renderer of their own: a resolve leaves memory as it was
      * and only draws into its host picture; the pixels reach memory when a texture reads that memory another way, 2
@@ -2196,6 +2416,7 @@ int main(int argc, char **argv)
         #undef LAZY_RESOLVE
         #undef LAZY_SAMPLE
         #undef LAZY_AT
+        window_offset_tiles(g, &cp, ps, nps, 1);
         xenos_gl_destroy(g);
     }
     /* WP-10, rectangle lists on the GPU (the capture read as a uniform block, 16 rectangles a pass) and with
@@ -2207,7 +2428,7 @@ int main(int argc, char **argv)
     {
         enum { RV = 0xEE000, NR = 20 };
         uint8_t *rect_frame[2] = {NULL, NULL};
-        int cpu_ok = 1;
+        int cpu_ok = 1, g_selftest = -1;
         for (int mode = 1; mode >= 0; mode--) { /* 1: cpu, 0: gpu */
             const char *env = getenv("RECOMP_X360_RECTS");
             char saved[16] = "";
@@ -2249,6 +2470,8 @@ int main(int argc, char **argv)
             run(&cp);
             xenos_gl_stats rs;
             xenos_gl_get_stats(g, &rs);
+            CHECK(rs.rect_selftest >= 0 && rs.rect_selftest <= 3, "rectangle lists: self-test %d of 3",
+                  rs.rect_selftest);
             CHECK(rs.rect_draws == 1 && rs.rect_lists_read_back == (uint64_t)mode,
                   "rectangle lists (%s): %llu drawn, %llu read back", mode ? "cpu" : "gpu",
                   (unsigned long long)rs.rect_draws, (unsigned long long)rs.rect_lists_read_back);
@@ -2270,12 +2493,18 @@ int main(int argc, char **argv)
                 CHECK(!bad, "rectangle lists (%s): rectangle %d at %d,%d is %u,%u,%u, want %d,%d,%d",
                       mode ? "cpu" : "gpu", r, x, y, q[0], q[1], q[2], want[0], want[1], want[2]);
             }
+            if (mode)
+                g_selftest = rs.rect_selftest;
             int fw, fh;
             const uint8_t *f = xenos_gl_frame(g, &fw, &fh);
             if (f && (rect_frame[mode] = malloc((size_t)fw * fh * 4)))
                 memcpy(rect_frame[mode], f, (size_t)fw * fh * 4);
             xenos_gl_destroy(g);
         }
+        /* WP-29: the start-up self-test says what the read-back path showed */
+        if (g_selftest >= 0)
+            CHECK(cpu_ok == (g_selftest == 3), "rectangle lists: drawn %s, but the self-test captured %d of 3",
+                  cpu_ok ? "right" : "wrong", g_selftest);
         if (cpu_ok && rect_frame[0] && rect_frame[1])
             CHECK(!memcmp(rect_frame[0], rect_frame[1], (size_t)W * H * 4),
                   "rectangle lists: the GPU's picture differs from the read-back one");
