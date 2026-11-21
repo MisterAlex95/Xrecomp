@@ -202,6 +202,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glDrawBuffers, (GLsizei, const GLenum *))                                                                  \
     X(void, glReadBuffer, (GLenum))                                                                                    \
     X(void, glClearBufferfv, (GLenum, GLint, const GLfloat *))                                                        \
+    X(void, glClearBufferfi, (GLenum, GLint, GLfloat, GLint))                                                         \
     X(void, glTexImage3D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *))   \
     X(void, glFramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint))                                          \
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum))          \
@@ -376,6 +377,12 @@ struct xenos_gl {
     int cur_ms;               /* the draw FBO has the renderbuffers attached rather than the textures */
     int cur[4], cur_ds;       /* the surfaces bound (index into surf, -1 none) */
     int fbo_checked;          /* the draw FBO was found complete and no attachment changed since (bind_targets) */
+    /* sync_surface's stale-row clears of the surfaces bind_targets binds, done on the draw FBO once they are attached
+     * (WP-11): not a pass of their own through rfbo each */
+    struct {
+        int si, y0, y1;
+    } dclear[16];
+    int ndclear, defer_clears;
     int tw, th;               /* the guest size of the bound colour target 0 (the viewport's frame of reference) */
     rt_copy copies[MAX_COPIES];
     unsigned copy_clock;
@@ -1624,6 +1631,8 @@ static int fmt_wide(uint32_t fmt)
 
 static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound);
 static void surface_reload(xenos_gl *g, surface *s);
+static void alias_clear_to(xenos_gl *g, const surface *d, int y0, int y1, GLuint rb);
+static void deferred_clears_flush(xenos_gl *g, int si, int use_ms);
 
 /* the multisampled buffer of an MSAA surface: the smallest sample count the driver lists for its format that is at
  * least the guest's; none (single-sampled) when it lists no such count */
@@ -1836,9 +1845,12 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
             ds = -1;
         /* what another format or position left in these tiles since (not what is bound together with them) */
         int together[5] = {want[0], want[1], want[2], want[3], ds};
+        g->ndclear = 0;
+        g->defer_clears = 1;
         for (int i = 0; i < 5; i++)
             if (together[i] >= 0)
                 sync_surface(g, together[i], together, 5);
+        g->defer_clears = 0;
         /* multisampled only when every attachment is, with one sample count */
         int use_ms = 1, samples = 0;
         for (int i = 0; i < 5; i++)
@@ -1891,6 +1903,34 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
          * changed here or elsewhere (a surface deleted or grown, a state loaded) since it was last found complete */
         if (changed || !g->fbo_checked)
             g->fbo_checked = g->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (g->fbo_checked && g->ndclear) { /* the stale rows, on the attachment each surface is bound at */
+            int k = g->scale;
+            g->glEnable(GL_SCISSOR_TEST);
+            for (int c = 0; c < g->ndclear; c++) {
+                const surface *d = &g->surf[g->dclear[c].si];
+                int slot = -1;
+                for (int i = 0; i < 4; i++)
+                    slot = want[i] == g->dclear[c].si ? i : slot;
+                if (d->kind == 2 ? ds != g->dclear[c].si : slot < 0) { /* not attached (not expected): as before */
+                    alias_clear_to(g, d, g->dclear[c].y0, g->dclear[c].y1, use_ms ? d->rb : 0);
+                    g->glEnable(GL_SCISSOR_TEST);
+                    continue;
+                }
+                g->glScissor(0, g->dclear[c].y0 * k, d->w * k, (g->dclear[c].y1 - g->dclear[c].y0) * k);
+                if (d->kind == 2) {
+                    g->glDepthMask(1);
+                    g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+                    g->glClearBufferfi(GL_DEPTH_STENCIL, 0, 1.0f, 0);
+                } else {
+                    static const GLfloat zero[4] = {0, 0, 0, 0};
+                    g->glColorMask(1, 1, 1, 1);
+                    g->glClearBufferfv(0x1800 /* GL_COLOR */, slot, zero);
+                }
+            }
+            g->glDisable(GL_SCISSOR_TEST);
+            g->ndclear = 0;
+        }
+        deferred_clears_flush(g, -1, use_ms); /* no complete framebuffer: each through rfbo, as before */
         if (g->fbo_checked) {
             const surface *ref = want[0] >= 0 ? &g->surf[want[0]] : &g->surf[ds];
             unsigned stamp = ++g->write_clock;
@@ -3898,13 +3938,17 @@ static void alias_depth(xenos_gl *g, const surface *d, const surface *s, int dy,
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
 }
 
-/* rows y0..y1 of a surface whose eDRAM was overwritten in a way that cannot be carried over */
-static void alias_clear(xenos_gl *g, const surface *d, int y0, int y1)
+/* rows y0..y1 of a surface whose eDRAM was overwritten in a way that cannot be carried over: its texture, or its
+ * multisampled buffer rb when that is what is drawn into from now on */
+static void alias_clear_to(xenos_gl *g, const surface *d, int y0, int y1, GLuint rb)
 {
     int k = g->scale;
+    GLenum att = d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
-    g->glFramebufferTexture2D(GL_FRAMEBUFFER, d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0,
-                              GL_TEXTURE_2D, d->tex, 0);
+    if (rb)
+        g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, rb);
+    else
+        g->glFramebufferTexture2D(GL_FRAMEBUFFER, att, GL_TEXTURE_2D, d->tex, 0);
     g->glEnable(GL_SCISSOR_TEST);
     g->glScissor(0, y0 * k, d->w * k, (y1 - y0) * k);
     if (d->kind == 2) {
@@ -3921,9 +3965,33 @@ static void alias_clear(xenos_gl *g, const surface *d, int y0, int y1)
         g->glClear(GL_COLOR_BUFFER_BIT);
     }
     g->glDisable(GL_SCISSOR_TEST);
-    g->glFramebufferTexture2D(GL_FRAMEBUFFER, d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0,
-                              GL_TEXTURE_2D, 0, 0);
+    if (rb)
+        g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, 0);
+    else
+        g->glFramebufferTexture2D(GL_FRAMEBUFFER, att, GL_TEXTURE_2D, 0, 0);
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+}
+
+static void alias_clear(xenos_gl *g, const surface *d, int y0, int y1)
+{
+    alias_clear_to(g, d, y0, y1, 0);
+}
+
+/* the clears deferred for surface si (all for -1) done now through rfbo, in their order: before another write to
+ * the surface (an alias copy) or when bind_targets finds no complete framebuffer (use_ms: on the multisampled buffer
+ * the draw would have used) */
+static void deferred_clears_flush(xenos_gl *g, int si, int use_ms)
+{
+    int n = 0;
+    for (int c = 0; c < g->ndclear; c++) {
+        if (si >= 0 && g->dclear[c].si != si) {
+            g->dclear[n++] = g->dclear[c];
+            continue;
+        }
+        const surface *d = &g->surf[g->dclear[c].si];
+        alias_clear_to(g, d, g->dclear[c].y0, g->dclear[c].y1, use_ms ? d->rb : 0);
+    }
+    g->ndclear = n;
 }
 
 /* the multisampled buffer filled from the texture, every sample of a pixel alike: a pass, as a blit cannot write a
@@ -4044,6 +4112,7 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
         int dy = same_grid ? (int)(tiles / (int64_t)dper) * 16 / (int)dsy : 0;
         int y0 = dy > 0 ? dy : 0, y1 = dy + s->dirty_h < d->h ? dy + s->dirty_h : d->h;
         if (same_grid && y1 > y0) {
+            deferred_clears_flush(g, si, 0); /* rows cleared before them stay before them */
             if (d->kind == 2) {
                 alias_depth(g, d, s, dy, y0, y1);
                 g->st.edram_reinterpreted++;
@@ -4060,8 +4129,12 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
         uint32_t to = (send < dend ? send : dend) - d->base;
         int r0 = (int)(from / dper * 16 / dsy), r1 = (int)((to + dper - 1) / dper * 16 / dsy);
         r1 = r1 < d->h ? r1 : d->h;
-        if (r1 > r0)
+        if (r1 > r0 && g->defer_clears && g->ndclear < (int)(sizeof g->dclear / sizeof g->dclear[0])) {
+            g->dclear[g->ndclear].si = si, g->dclear[g->ndclear].y0 = r0, g->dclear[g->ndclear].y1 = r1;
+            g->ndclear++;
+        } else if (r1 > r0) {
             alias_clear(g, d, r0, r1);
+        }
         g->st.edram_stale++;
     }
     if (touched) {
