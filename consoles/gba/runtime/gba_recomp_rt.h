@@ -333,15 +333,29 @@ static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_i(gba_rc_head *h, 
 /* N (>= 2) opcode fetches from the cartridge in a row with the buffer on, the first at `now` from addr, each next one
  * at the following opcode, X's low 4 bits cycles after the previous one ended (X: 4 bits per fetch, the instruction's
  * internal cycles): the sum of what N calls of rc_pf_fetch return, leaving the same state (RC_IN, XBA-295; checked by
- * consoles/gba/tests/test_prefetch.c). After the first fetch the next one is always at the buffer's head, with the
- * unit reading: only that case runs here, on locals. */
+ * consoles/gba/tests/test_prefetch.c). After the first fetch the next one is always at the buffer's head with the unit
+ * reading, on locals. Once the buffer is empty and no internal cycles are left, each fetch waits for the opcode being
+ * read: the rest of that read, then a whole one (`duty`) each, at once. */
 static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, uint64_t now, uint32_t addr,
                                                                 bool thumb, uint32_t ncost, uint32_t n, uint64_t x)
 {
     gba_rc_prefetch *p = &h->pf;
     uint32_t w = thumb ? 2u : 4u, total = 0, c;
     if (!(p->valid && addr == p->head && p->thumb == thumb && (p->run || p->count))) {
-        total = rc_pf_fetch_ool(h, now, addr, thumb, ncost); /* the state then reads at the head */
+        if (!p->run) { /* rc_pf_fetch's miss with the unit idle (after a stop): no wait, a new start */
+            uint32_t s16 = h->wait16[(addr >> 24) & 15][1];
+            p->valid = p->run = true;
+            p->thumb = thumb;
+            p->count = 0;
+            p->cap = thumb ? 8 : 4;
+            p->duty = (uint8_t)(thumb ? s16 : 2 * s16);
+            p->head = addr + w;
+            p->left = p->duty;
+            p->time = now + ncost;
+            total = ncost;
+        } else {
+            total = rc_pf_fetch_ool(h, now, addr, thumb, ncost); /* the state then reads at the head */
+        }
         now += total + (uint32_t)(x & 15);
         x >>= 4;
         n--;
@@ -377,11 +391,19 @@ static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, 
             }
             left -= (uint32_t)e;
         }
-        head += w;
         if (count) {
             count--;
+            head += w;
             c = 1;
+        } else if (!x) { /* empty, back to back from here: the rest of this read, then a whole read for each */
+            c = left + (n - 1) * duty;
+            head += n * w;
+            left = duty;
+            time = now + c;
+            total += c;
+            break;
         } else { /* being read: the rest of that read, then the next one starts */
+            head += w;
             c = left;
             left = duty;
             time = now + c;
