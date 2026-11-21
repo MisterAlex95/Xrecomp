@@ -93,6 +93,11 @@ typedef struct xenos_gl_stats {
     /* WP-10: rectangle lists (rect_draws) whose capture was read back and the fourth corner made on the CPU
      * (RECOMP_X360_RECTS=cpu); the others had it made on the GPU */
     uint64_t rect_lists_read_back;
+    /* WP-17 (RECOMP_X360_TILER): attachment sets invalidated before being overwritten whole (magenta: cleared) */
+    uint64_t tiler_invalidated;
+    uint64_t pending_clears;       /* WP-17: resolve clears left for the next pass that binds their surface */
+    uint64_t copy_blits;           /* WP-18: of copy_textures, those copied into a texture of their own (smaller than
+                                    * the picture, or RECOMP_X360_COPY_TEXTURES=blit); the others sample it in place */
     /* WP-19, the perf line */
     uint64_t loads;                /* attachments loaded at the start of a pass (not cleared whole nor invalidated
                                     * by its first operation: what a tiler reads back from memory), process-wide */
