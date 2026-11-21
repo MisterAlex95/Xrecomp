@@ -1093,3 +1093,46 @@ def test_prune_keeps_keys_json(tmp_path):
     (obj / "old.o").write_bytes(b"x")
     cc.prune(str(obj), objs)
     assert sorted(os.listdir(str(obj))) == sorted([os.path.basename(o) for o in objs] + [cc.KEYS_FILE])
+
+
+def test_keys_do_not_name_the_toolkit_directory(tmp_path, monkeypatch):
+    """The app extracts each toolkit to a new files/toolkit-<version>: the same headers and C at another toolkit
+    directory are the same objects (an app update recompiles what changed, not everything)."""
+    proj, flags = _key_project(tmp_path)
+    obj = tmp_path / "obj"
+    keys = []
+    for name in ("toolkit-aaaa", "toolkit-bbbb"):
+        tk = tmp_path / name
+        (tk / "include").mkdir(parents=True)
+        (tk / "include" / "rt.h").write_text("#define RT 1\n")
+        _age(tk)
+        monkeypatch.setattr(cc, "TOOLKIT_ROOT", str(tk))
+        keys.append(_compile(proj, flags + ["-I" + str(tk / "include")], obj))
+    assert keys[1][0] == keys[0][0] and keys[1][1] == 0
+    (tmp_path / "toolkit-bbbb" / "include" / "rt.h").write_text("#define RT 2\n")     # other headers: compiled
+    assert _compile(proj, flags + ["-I" + str(tmp_path / "toolkit-bbbb" / "include")], obj)[1] == 2
+
+
+def test_compiler_id_is_the_binary_not_its_mtime(tmp_path):
+    """The same compiler installed again (an app update: a new mtime and inode) keeps every object's key; other
+    bytes do not. Its digest is remembered in compiler.json while its stat holds."""
+    exe = tmp_path / "clang"
+    exe.write_bytes(b"#!/bin/sh\necho 'clang version 19.1.7'\n")
+    os.chmod(str(exe), 0o755)
+    _age(tmp_path)
+    tc = cc.Toolchain(str(exe), "/sys")
+    a = tc.compiler_id_cached(str(tmp_path))
+    assert (tmp_path / cc.COMPILER_FILE).is_file() and a == tc.compiler_id()
+    data = exe.read_bytes()
+    exe.unlink()
+    exe.write_bytes(data)
+    os.chmod(str(exe), 0o755)
+    assert cc.Toolchain(str(exe), "/sys").compiler_id_cached(str(tmp_path)) == a
+    exe.write_bytes(data + b"# rebuilt\n")
+    assert cc.Toolchain(str(exe), "/sys").compiler_id_cached(str(tmp_path)) != a
+    objs = tmp_path / "o"
+    objs.mkdir()
+    (objs / cc.COMPILER_FILE).write_text("{}")
+    (objs / "x.o").write_bytes(b"")
+    cc.prune(str(objs), [])
+    assert os.listdir(str(objs)) == [cc.COMPILER_FILE]
