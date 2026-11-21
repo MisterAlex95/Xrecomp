@@ -139,7 +139,8 @@ int main(void)
                                                               {PIX_F32X4, 32},   {PIX_F32X4, 36},   {PIX_U8X4, 3},
                                                               {PIX_U8X4, 4},     {PIX_U8X4, 5},     {PIX_U8X4, 10},
                                                               {PIX_U8X4, 15},    {PIX_U8X4, 24}};
-    static const struct { int x0, y0, w, h; } rects[] = {{0, 0, 64, 64}, {3, 5, 61, 37}, {1, 30, 2, 3}, {0, 0, 1280, 6}};
+    static const struct { int x0, y0, w, h; } rects[] = {{0, 0, 64, 64}, {3, 5, 61, 37}, {1, 30, 2, 3}, {0, 0, 1280, 6},
+                                                         {29, 27, 100, 40}};
     static const uint32_t bases[] = {0x200000u, 0x300004u, 0x400008u};
     int cases = 0;
     for (size_t p = 0; p < sizeof pairs / sizeof pairs[0]; p++) {
@@ -152,6 +153,17 @@ int main(void)
                             one(pairs[p].lay, pairs[p].fmt, e, sw, wm, bases[b], rects[r].x0, rects[r].y0, rects[r].w,
                                 rects[r].h, ref, px);
     }
+    /* tiled2d_split, what the direct way's rows compute addresses with (WP-36), is tiled2d */
+    for (unsigned bl = 0; bl <= 4; bl++)
+        for (uint32_t pitch = 32; pitch <= 8192; pitch *= 4, cases++)
+            for (int32_t y = 0; y < 256; y++)
+                for (int32_t x = 0; x < (int32_t)pitch; x++)
+                    if ((uint32_t)tiled2d(x, y, pitch, bl) != tiled2d_split(x, y, pitch, bl)) {
+                        fprintf(stderr, "tiled2d_split(%d, %d, %u, %u) differs\n", x, y, pitch, bl);
+                        fails++;
+                        y = 256;
+                        break;
+                    }
     /* what the direct way leaves to the generic one */
     {
         xenos_cp cp;
@@ -223,6 +235,15 @@ int main(void)
             resolve_write_direct(&cp, &d, px, PIX_U8X4, 0, 0, 1920, 1080);
         double t2 = now_ms();
         printf("1920 x 1080 8_8_8_8 resolve write: generic %.2f ms, direct %.2f ms\n", t1 - t0, (t2 - t1) / 10);
+        resolve_dest d16 = {0x100000u, 1920, 4, 1, 0, 0}; /* 5_6_5, 8-in-16 */
+        double t3 = now_ms();
+        for (int i = 0; i < 10; i++)
+            resolve_write_direct(&cp, &d16, px, PIX_U8X4, 0, 0, 1920, 1080);
+        printf("1920 x 1080 5_6_5 resolve write: direct %.2f ms\n", (now_ms() - t3) / 10);
+        double t4 = now_ms();
+        for (int i = 0; i < 10; i++) /* the picture's bytes as depth values and stencil */
+            depth_write(&cp, 0x100000u, 1920, 2, (const uint32_t *)px, px, 0, 0, 1920, 1080);
+        printf("1920 x 1080 24_8 depth write: %.2f ms\n", (now_ms() - t4) / 10);
     }
     free(px);
     free(ref);

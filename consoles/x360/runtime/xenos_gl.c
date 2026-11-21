@@ -1831,25 +1831,46 @@ static uint32_t gpu_read(const xenos_cp *cp, uint32_t phys, uint32_t endian)
     return gpu_swap(__builtin_bswap32(be), endian);
 }
 
-/* A fast hash of n bytes (4 lanes of 8 bytes: ~10x FNV's byte at a time), for "has this memory changed" checks run
- * on every cached texture after each swap and resolve. Not for anything that needs a good distribution. */
+/* A fast hash of n bytes, for "has this memory changed" checks run on every cached texture after each swap and resolve.
+ * Not for anything that needs a good distribution. WP-36: 8 lanes of 8 bytes, each a chain of xor, multiply and
+ * xorshift, in scalar registers (4 lanes left the multiplies' latency showing, and GCC vectorized them into SSE2
+ * pmuludq triples: 5.3 GB/s; ~20 GB/s now, Warhammer hashes ~155 MB a frame). The values are only ever compared with
+ * values of this same function in the same run. */
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("no-tree-vectorize")))
+#endif
 static uint64_t span_hash(const uint8_t *p, size_t n, uint64_t seed)
 {
     hashed_bytes += n;
     const uint64_t k = 0x9E3779B97F4A7C15ull;
-    uint64_t h[4] = {seed ^ k, seed + k, seed ^ (k >> 1), seed - k};
+    uint64_t h0 = seed ^ k, h1 = seed + k, h2 = seed ^ (k >> 1), h3 = seed - k;
+    uint64_t h4 = seed ^ (k >> 2), h5 = seed + (k >> 1), h6 = seed ^ (k >> 3), h7 = seed - (k >> 1);
     size_t i = 0;
-    for (; i + 32 <= n; i += 32)
-        for (int l = 0; l < 4; l++) {
-            uint64_t w;
-            memcpy(&w, p + i + 8 * l, 8);
-            h[l] = (h[l] ^ w) * 0xFF51AFD7ED558CCDull;
-            h[l] ^= h[l] >> 29;
-        }
+#define SPAN_LANE(h, o)                                                                                               \
+    do {                                                                                                              \
+        uint64_t w;                                                                                                   \
+        memcpy(&w, p + i + (o), 8);                                                                                   \
+        h = (h ^ w) * 0xFF51AFD7ED558CCDull;                                                                          \
+        h ^= h >> 29;                                                                                                 \
+    } while (0)
+    for (; i + 64 <= n; i += 64) {
+        SPAN_LANE(h0, 0);
+        SPAN_LANE(h1, 8);
+        SPAN_LANE(h2, 16);
+        SPAN_LANE(h3, 24);
+        SPAN_LANE(h4, 32);
+        SPAN_LANE(h5, 40);
+        SPAN_LANE(h6, 48);
+        SPAN_LANE(h7, 56);
+    }
+    for (; i + 8 <= n; i += 8)
+        SPAN_LANE(h0, 0);
+#undef SPAN_LANE
     uint64_t r = (uint64_t)n * k;
     for (; i < n; i++)
         r = (r ^ p[i]) * 0x100000001B3ull;
-    for (int l = 0; l < 4; l++)
+    const uint64_t h[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
+    for (int l = 0; l < 8; l++)
         r = (r ^ h[l]) * 0xC4CEB9FE1A85EC53ull, r ^= r >> 31;
     return r;
 }
@@ -1923,6 +1944,26 @@ static void comp8_init(void)
     }
 }
 
+/* WP-36: the same for 16 bits (16_16, 16_16_16_16: a division per component), and half_to_float of every 16-bit
+ * pattern (16_16_FLOAT, 16_16_16_16_FLOAT: up to two divisions each), made once by component / half_to_float */
+static float comp16_lut[4][65536], vhalf_lut[65536];
+static pthread_once_t comp16_once = PTHREAD_ONCE_INIT, vhalf_once = PTHREAD_ONCE_INIT;
+static void comp16_init(void)
+{
+    for (int k = 0; k < 4; k++) {
+        attr t;
+        memset(&t, 0, sizeof t);
+        t.is_signed = (uint32_t)(k >> 1), t.is_integer = (uint32_t)(k & 1);
+        for (uint32_t u = 0; u < 65536; u++)
+            comp16_lut[k][u] = component(u, 0, 16, &t);
+    }
+}
+static void vhalf_init(void)
+{
+    for (uint32_t u = 0; u < 65536; u++)
+        vhalf_lut[u] = half_to_float(u);
+}
+
 static inline __attribute__((always_inline)) void packed_vertex(uint32_t format, uint32_t w0, uint32_t w1,
                                                                 const attr *a, const float *l8, float *o)
 {
@@ -1944,21 +1985,21 @@ static inline __attribute__((always_inline)) void packed_vertex(uint32_t format,
         o[0] = component(w0, 0, 10, a), o[1] = component(w0, 10, 11, a), o[2] = component(w0, 21, 11, a);
         o[3] = 1.0f;
         break;
-    case 25:
-        o[0] = component(w0, 0, 16, a), o[1] = component(w0, 16, 16, a);
+    case 25: /* l8: comp16_lut for the attribute's flags */
+        o[0] = l8[w0 & 0xFFFF], o[1] = l8[w0 >> 16];
         o[2] = 0.0f, o[3] = 1.0f;
         break;
     case 26:
-        o[0] = component(w0, 0, 16, a), o[1] = component(w0, 16, 16, a);
-        o[2] = component(w1, 0, 16, a), o[3] = component(w1, 16, 16, a);
+        o[0] = l8[w0 & 0xFFFF], o[1] = l8[w0 >> 16];
+        o[2] = l8[w1 & 0xFFFF], o[3] = l8[w1 >> 16];
         break;
-    case 31:
-        o[0] = half_to_float(w0 & 0xFFFF), o[1] = half_to_float(w0 >> 16);
+    case 31: /* l8: vhalf_lut */
+        o[0] = l8[w0 & 0xFFFF], o[1] = l8[w0 >> 16];
         o[2] = 0.0f, o[3] = 1.0f;
         break;
     default: /* 32 */
-        o[0] = half_to_float(w0 & 0xFFFF), o[1] = half_to_float(w0 >> 16);
-        o[2] = half_to_float(w1 & 0xFFFF), o[3] = half_to_float(w1 >> 16);
+        o[0] = l8[w0 & 0xFFFF], o[1] = l8[w0 >> 16];
+        o[2] = l8[w1 & 0xFFFF], o[3] = l8[w1 >> 16];
         break;
     }
 }
@@ -1995,6 +2036,12 @@ static int fetch_packed_mem(const uint8_t *mem, uint32_t format, uint32_t endian
     if (format == 6) {
         pthread_once(&comp8_once, comp8_init);
         l8 = comp8_lut[2 * (a->is_signed != 0) + (a->is_integer != 0)];
+    } else if (format == 25 || format == 26) {
+        pthread_once(&comp16_once, comp16_init);
+        l8 = comp16_lut[2 * (a->is_signed != 0) + (a->is_integer != 0)];
+    } else if (format == 31 || format == 32) {
+        pthread_once(&vhalf_once, vhalf_init);
+        l8 = vhalf_lut;
     }
     switch (format) {
     case 6: PACKED_E(6) return 1;
@@ -4589,35 +4636,71 @@ static inline __attribute__((always_inline)) void direct_texel(int kind, const u
     }
 }
 
+/* WP-36: tiled2d(x, y) is tiled2d(x & ~31, y) ^ tiled2d(x & 31, 0) (each address bit comes from one bit of x or of y,
+ * the pipe bits from an exclusive or of both, and a 32-texel tile row's x never reaches the tile number's bits), so a
+ * row's addresses take one tiled2d per 32 texels and a table lookup (xenos_resolve_write_test checks the identity).
+ * (A 1920 x 1080 8_8_8_8 write in xenos_resolve_write_test: 3.9 ms with a tiled2d per 16 bytes, 2.4 ms so.) */
+static inline uint32_t tiled2d_split(int32_t x, int32_t y, uint32_t pitch_blocks, unsigned bpb_log2)
+{
+    return (uint32_t)tiled2d(x & ~31, y, pitch_blocks, bpb_log2) ^ (uint32_t)tiled2d(x & 31, 0, 32, bpb_log2);
+}
+
 static inline __attribute__((always_inline)) void direct_rows(const xenos_cp *cp, const resolve_dest *d,
                                                              const uint8_t *px, int x0, int y0, int w, int h,
                                                              int kind, int swap_rb, uint32_t endian)
 {
     const unsigned bpp_log2 = kind == DIRECT_HALF4 ? 3 : 2, bpp = 1u << bpp_log2, per = 16u >> bpp_log2;
     const size_t stride = kind == DIRECT_8888 || kind == DIRECT_2101010 ? 4 : 16;
+    const uint32_t base = d->base, pitch = d->pitch_aligned; /* locals: the stores through wmem could alias *d, *cp */
+    uint8_t *const wmem = cp->wmem;
+    uint32_t in_tile[32]; /* tiled2d of x in a 32-texel tile row at y = 0: see tiled2d_split */
+    for (int i = 0; i < 32; i++)
+        in_tile[i] = tiled2d_split(i, 0, 32, bpp_log2);
     for (int y = 0; y < h; y++) {
         const uint8_t *sp = px + (size_t)y * w * stride;
         for (int x = 0; x < w;) {
-            int gx = x0 + x;
-            uint32_t a = (d->base + (uint32_t)tiled2d(gx, y0 + y, d->pitch_aligned, bpp_log2)) & 0x1FFFFFFFu;
-            int run = (int)(per - ((unsigned)gx & (per - 1)));
-            run = run < w - x ? run : w - x;
-            if (cp->wmem && a + (uint32_t)run * bpp <= 0x20000000u) {
-                uint8_t *dp = cp->wmem + a;
-                for (int i = 0; i < run; i++, sp += stride, dp += bpp)
-                    direct_texel(kind, sp, swap_rb, endian, dp);
-            } else { /* through write32, or at the very end of physical memory */
-                for (int i = 0; i < run; i++, sp += stride) {
-                    uint8_t t[8];
-                    uint32_t v;
-                    direct_texel(kind, sp, swap_rb, endian, t);
-                    for (unsigned k = 0; k < bpp; k += 4) {
-                        memcpy(&v, t + k, 4);
-                        gpu_store(cp, a + (uint32_t)i * bpp + k, v);
+            int gx = x0 + x, xe = x + 32 - (gx & 31); /* this tile row: [x, xe) */
+            xe = xe < w ? xe : w;
+            const uint32_t tile = (uint32_t)tiled2d(gx & ~31, y0 + y, pitch, bpp_log2);
+            /* a whole tile row, its 32 texels inside the tile's 1024 << bpp_log2 bytes, below the end of memory */
+            const uint32_t tile_bytes = 1024u << bpp_log2;
+            if (xe - x == 32 && wmem && (uint64_t)base + (tile & ~(tile_bytes - 1)) + tile_bytes <= 0x20000000u) {
+                for (unsigned g = 0; g < 32; g += per, sp += per * stride) {
+                    uint8_t *dp = wmem + ((base + (tile ^ in_tile[g])) & 0x1FFFFFFFu);
+                    for (unsigned i = 0; i < per; i++)
+                        direct_texel(kind, sp + i * stride, swap_rb, endian, dp + i * bpp);
+                }
+                x = xe;
+                continue;
+            }
+            while (x < xe) {
+                gx = x0 + x;
+                uint32_t a = (base + (tile ^ in_tile[gx & 31])) & 0x1FFFFFFFu;
+                int run = (int)(per - ((unsigned)gx & (per - 1)));
+                run = run < xe - x ? run : xe - x;
+                if (wmem && a + (uint32_t)run * bpp <= 0x20000000u) {
+                    uint8_t *dp = wmem + a;
+                    if (run == (int)per) { /* a whole 16 bytes: a loop of known length, unrolled */
+                        for (unsigned i = 0; i < per; i++)
+                            direct_texel(kind, sp + i * stride, swap_rb, endian, dp + i * bpp);
+                        sp += per * stride;
+                    } else {
+                        for (int i = 0; i < run; i++, sp += stride, dp += bpp)
+                            direct_texel(kind, sp, swap_rb, endian, dp);
+                    }
+                } else { /* through write32, or at the very end of physical memory */
+                    for (int i = 0; i < run; i++, sp += stride) {
+                        uint8_t t[8];
+                        uint32_t v;
+                        direct_texel(kind, sp, swap_rb, endian, t);
+                        for (unsigned k = 0; k < bpp; k += 4) {
+                            memcpy(&v, t + k, 4);
+                            gpu_store(cp, a + (uint32_t)i * bpp + k, v);
+                        }
                     }
                 }
+                x += run;
             }
-            x += run;
         }
     }
 }
@@ -4645,18 +4728,38 @@ static void direct16_rows(const xenos_cp *cp, const resolve_dest *d, const uint8
             lut[c][b] = (uint16_t)(o[0] | o[1] << 8);
         }
     const int sr = d->swap_rb ? 2 : 0, sb = d->swap_rb ? 0 : 2; /* the source byte of the format's red / blue */
+    const uint32_t base = d->base, endian = d->endian;
+    uint8_t *const wmem = cp->wmem;
+    uint32_t in_tile[32]; /* the addresses by tile row, as direct_rows (tiled2d_split) */
+    for (int i = 0; i < 32; i++)
+        in_tile[i] = tiled2d_split(i, 0, 32, 1);
     for (int y = 0; y < h; y++) {
         const uint8_t *row = px + (size_t)y * w * 4;
+        uint32_t tile = 0;
         for (int x = 0; x < w;) {
             int gx = x0 + x, run = 8 - (gx & 7);
             run = run < w - x ? run : w - x;
+            if (x == 0 || (gx & 31) == 0)
+                tile = (uint32_t)tiled2d(gx & ~31, y0 + y, d->pitch_aligned, 1);
+            uint32_t a = base + (tile ^ in_tile[gx & 31]), pa = a & 0x1FFFFFFFu;
+            if (run == 8 && wmem && !(a & 3) && pa <= 0x20000000u - 16) { /* 4 whole dwords: put_bytes' stores */
+                const uint8_t *sp = row + (size_t)x * 4;
+                for (int k = 0; k < 4; k++, sp += 8) {
+                    uint32_t lo = lut[0][sp[sr]] | lut[1][sp[1]] | lut[2][sp[sb]] | lut[3][sp[3]];
+                    uint32_t hi = lut[0][sp[4 + sr]] | lut[1][sp[5]] | lut[2][sp[4 + sb]] | lut[3][sp[7]];
+                    uint32_t word = gpu_swap(lo | hi << 16, endian);
+                    memcpy(wmem + pa + 4 * (uint32_t)k, &word, 4);
+                }
+                x += run;
+                continue;
+            }
             uint8_t t[16];
             for (int i = 0; i < run; i++) {
                 const uint8_t *sp = row + (size_t)(x + i) * 4;
                 uint32_t v = lut[0][sp[sr]] | lut[1][sp[1]] | lut[2][sp[sb]] | lut[3][sp[3]];
                 t[2 * i] = (uint8_t)v, t[2 * i + 1] = (uint8_t)(v >> 8);
             }
-            put_bytes(cp, d->base + (uint32_t)tiled2d(gx, y0 + y, d->pitch_aligned, 1), t, 2 * run, d->endian);
+            put_bytes(cp, a, t, 2 * run, endian);
             x += run;
         }
     }
@@ -4716,9 +4819,38 @@ static int resolve_write(const xenos_cp *cp, const resolve_dest *d, const uint8_
 
 /* A depth resolve's rectangle into guest memory: 24_8 (depth dv in the high 24 bits, stencil sv, or 0 when sv is NULL,
  * in the low 8), tiled 32-bit texels, w x h values top row first for the guest pixels at (x0, y0) */
+static inline __attribute__((always_inline)) void depth_rows(uint8_t *wmem, uint32_t base, uint32_t pitch_aligned,
+                                                            uint32_t endian, const uint32_t *dv, const uint8_t *sv,
+                                                            int x0, int y0, int w, int h)
+{
+    uint32_t in_tile[32]; /* the addresses by tile row, as direct_rows (tiled2d_split) */
+    for (int i = 0; i < 32; i++)
+        in_tile[i] = tiled2d_split(i, 0, 32, 2);
+    for (int y = 0; y < h; y++) {
+        uint32_t tile = 0;
+        for (int x = 0; x < w; x++) {
+            int gx = x0 + x;
+            if (x == 0 || (gx & 31) == 0)
+                tile = (uint32_t)tiled2d(gx & ~31, y0 + y, pitch_aligned, 2);
+            size_t at = (size_t)y * w + x;
+            uint32_t v = gpu_swap(dv[at] << 8 | (sv ? sv[at] : 0), endian);
+            memcpy(wmem + ((base + (tile ^ in_tile[gx & 31])) & 0x1FFFFFFFu), &v, 4); /* gpu_store's store */
+        }
+    }
+}
+
 static void depth_write(const xenos_cp *cp, uint32_t base, uint32_t pitch_aligned, uint32_t endian, const uint32_t *dv,
                         const uint8_t *sv, int x0, int y0, int w, int h)
 {
+    if (cp->wmem && !(base & 3)) { /* WP-36: dword stores straight into memory, one loop per swap mode */
+        switch (endian & 3) {
+        case 0: depth_rows(cp->wmem, base, pitch_aligned, 0, dv, sv, x0, y0, w, h); break;
+        case 1: depth_rows(cp->wmem, base, pitch_aligned, 1, dv, sv, x0, y0, w, h); break;
+        case 2: depth_rows(cp->wmem, base, pitch_aligned, 2, dv, sv, x0, y0, w, h); break;
+        default: depth_rows(cp->wmem, base, pitch_aligned, 3, dv, sv, x0, y0, w, h); break;
+        }
+        return;
+    }
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
             size_t at = (size_t)y * w + x;
