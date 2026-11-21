@@ -530,6 +530,53 @@ static inline uint32_t rc_refill_cost(gba_rc_head *h, uint64_t now, uint32_t r15
         }                                                                                                            \
     } while (0)
 
+/* RC_STOP + RC_IN for a block whose first segment is one run (gba_tools lift.py « runs of opcode fetches »): when
+ * the bound says the event may fall inside, the run's exact cycles decide (its fetches computed, the buffer's state
+ * put back when the interpreter runs it instead). The segment's static cycles are EXTRA, exact for a run. */
+#define RC_STOP_IN(A, NFC, EXTRA, HINT, X)                                                                           \
+    do {                                                                                                             \
+        uint32_t c__;                                                                                                \
+        if (__builtin_expect(now + (uint32_t)(NFC) * fb + (uint32_t)(EXTRA) >= ne, 0)) {                             \
+            epc = (A);                                                                                               \
+            if (now >= ne)                                                                                           \
+                goto x_exit;                                                                                         \
+            RC_RUN_EXACT(A, NFC, EXTRA, HINT, X);                                                                    \
+        } else {                                                                                                     \
+            c__ = RC_RUN_FETCHES(A, NFC, X);                                                                         \
+        }                                                                                                            \
+        now += c__;                                                                                                  \
+        RC_COUNT_N(NFC);                                                                                             \
+    } while (0)
+
+/* RC_CHECK + RC_IN likewise. */
+#define RC_CHECK_IN(A, NFC, EXTRA, HINT, X)                                                                          \
+    do {                                                                                                             \
+        uint32_t c__;                                                                                                \
+        if (__builtin_expect(now + (uint32_t)(NFC) * fb + (uint32_t)(EXTRA) >= ne, 0)) {                             \
+            epc = (A);                                                                                               \
+            RC_RUN_EXACT(A, NFC, EXTRA, HINT, X);                                                                    \
+        } else {                                                                                                     \
+            c__ = RC_RUN_FETCHES(A, NFC, X);                                                                         \
+        }                                                                                                            \
+        now += c__;                                                                                                  \
+        RC_COUNT_N(NFC);                                                                                             \
+    } while (0)
+
+#define RC_RUN_FETCHES(A, N, X)                                                                                      \
+    (pf_ ? rc_pf_fetch_n(h, now, (uint32_t)(A) + RC_PIPE, RC_T,                                                      \
+                         RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0], (N), (X))                         \
+         : (uint32_t)(N) * fc)
+#define RC_RUN_EXACT(A, NFC, EXTRA, HINT, X)                                                                         \
+    do {                                                                                                             \
+        gba_rc_prefetch s__ = h->pf;                                                                                 \
+        c__ = RC_RUN_FETCHES(A, NFC, X);                                                                             \
+        if (now + c__ + (uint32_t)(EXTRA) >= ne) {                                                                   \
+            h->pf = s__;                                                                                             \
+            h->rc_hint = (HINT);                                                                                     \
+            goto x_interp;                                                                                           \
+        }                                                                                                            \
+    } while (0)
+
 /* The event check of a segment starting at A (after a memory access): the interpreter runs from A unless the
  * segment's static cycles end before the next event. */
 #define RC_CHECK(A, NFC, EXTRA, N)                                                                                   \

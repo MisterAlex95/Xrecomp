@@ -726,7 +726,7 @@ class FnLifter:
         else:
             out.append("    default: RC_NOT_COVERED();")
         out.append("    }")
-        runs, in_run = {}, set()
+        runs, in_run, fetched = {}, set(), set()
         if self.fetch_runs:
             runs = fetch_runs(addrs, size, bodies, leaders | segs | self.targets)
             in_run = {x + k * size for x, (n, _) in runs.items() for k in range(1, n)}
@@ -740,10 +740,16 @@ class FnLifter:
                 out.append("    RC_INTERP(%s);" % hx(x))
                 continue
             if x in leaders:
-                out.append("    RC_STOP(%s, %s, %d);" % (hx(x), segment_cost(addrs, i, size, leaders, bodies), left[x]))
-            if x in runs:
-                n, extras = runs[x]
-                out.append("    RC_IN(%s, %d, 0x%X%s);" % (hx(x), n, extras, "u" if extras < 1 << 32 else "ull"))
+                seg = segment_cost(addrs, i, size, leaders, bodies)
+                if is_run_segment(runs, x, seg):  # the check and the run's fetches in one (« runs of opcode fetches »)
+                    out.append("    RC_STOP_IN(%s, %s, %d, %s);" % (hx(x), seg, left[x], run_extras(runs[x][1])))
+                    fetched.add(x)
+                else:
+                    out.append("    RC_STOP(%s, %s, %d);" % (hx(x), seg, left[x]))
+            if x in fetched:
+                pass
+            elif x in runs:
+                out.append("    RC_IN(%s, %d, %s);" % (hx(x), runs[x][0], run_extras(runs[x][1])))
             elif x not in in_run:
                 out.append("    RC_I(%s);" % hx(x))
             if body:
@@ -754,8 +760,14 @@ class FnLifter:
             if nxt not in self.addrs:
                 out.append("    RC_EXIT(%s);" % hx(nxt))
             elif is_memory(body) and nxt not in leaders and bodies[nxt] is not None:
-                out.append("%s    RC_CHECK(%s, %s, %d);" % ("%s:" % label(nxt) if nxt in segs else "", hx(nxt),
-                                                         segment_cost(addrs, i + 1, size, leaders, bodies), left[nxt]))
+                seg = segment_cost(addrs, i + 1, size, leaders, bodies)
+                lab = "%s:" % label(nxt) if nxt in segs else ""
+                if is_run_segment(runs, nxt, seg):
+                    out.append("%s    RC_CHECK_IN(%s, %s, %d, %s);" % (lab, hx(nxt), seg, left[nxt],
+                                                                    run_extras(runs[nxt][1])))
+                    fetched.add(nxt)
+                else:
+                    out.append("%s    RC_CHECK(%s, %s, %d);" % (lab, hx(nxt), seg, left[nxt]))
         out += ["    RC_EPILOGUE();", "}"]
         return "\n".join(out) + "\n"
 
@@ -856,6 +868,16 @@ def plain_extra(body):
         if re.search(r"\bnow\b|\bRC_|\bh->|\bgoto\b|\breturn\b|\bepc\b|\bm_\b|rc_mul_cycles", t):
             return None
     return extra if extra < 16 else None
+
+
+def run_extras(extras):
+    return "0x%X%s" % (extras, "u" if extras < 1 << 32 else "ull")
+
+
+def is_run_segment(runs, x, seg):
+    """The segment starting at x (segment_cost's text) is one run: RC_STOP_IN / RC_CHECK_IN, whose exact cycles
+    decide when the bound says the next event may fall inside."""
+    return x in runs and runs[x][0] == int(seg.split(",", 1)[0])
 
 
 def fetch_runs(addrs, size, bodies, labels):
