@@ -54,7 +54,7 @@ import java.util.function.LongSupplier;
  *       Settings (performance overlay, game volume, bottom screen, a console game's scale and filter
  *       and the picture shader (XBA-206): all live; this game's language, widescreen and 480p, internal resolution,
  *       Vulkan driver and most Game settings: read at the start, so « Restart to apply » shows at the top once one
- *       of them changed (a second press restarts the game in a new process); Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
+ *       of them changed (a second press restarts the game in a new process); Share log), Controls, Screenshot, Report a problem (XBA-339), Back to launcher (the game stays alive and held in the
  *       background; « Back to the home screen » in a game's own app, which has no launcher to show), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
  *       title and « Paused · 0:42 played ».</li>
  * </ul>
@@ -1414,7 +1414,7 @@ final class GameMenu {
         pageV.setVisibility(View.VISIBLE);
         TextView explain = Theme.text(activity, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM,
                                       s(R.string.REPORT_PROBLEM_EXPLAIN));
-        explain.setMaxLines(4);
+        explain.setMaxLines(6);
         explain.setEllipsize(android.text.TextUtils.TruncateAt.END);
         explain.setLineSpacing(0, 1.15f);
         explain.setPadding(Theme.ROW_INSET, 0, Theme.ROW_INSET, Theme.S2);
