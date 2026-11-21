@@ -39,7 +39,7 @@
  *            3D texture (one colour per slice) at depth 0.625 (slice 2: blue).
  * Then WP-26's window offset (a picture drawn and resolved as two tiles: scissor and resolve rectangle moved, the
  * right tile resolved into the left one's picture), eagerly and with lazy resolves; WP-27's viewport z (scale -1,
- * offset 1, the test "greater").
+ * offset 1, the test "greater"); WP-28's clear through a 4x view of 1x tiles.
  * At the end (renderers of their own): WP-2's lazy resolves; WP-10's rectangle lists, 20 in one list (two passes of
  * the GPU path), drawn on the GPU and with RECOMP_X360_RECTS=cpu, the same bytes.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
@@ -349,6 +349,62 @@ static void viewport_z_reversed(xenos_gl *g, xenos_cp *cp, const uint32_t *ps, u
     CHECK(c[0] == 0 && c[1] == 255 && c[2] == 0,
           "viewport z scale -1 offset 1, test greater: %u,%u,%u, want green (blue: the viewport's z ignored)", c[0],
           c[1], c[2]);
+}
+
+/* WP-28, an MSAA view of single-sampled tiles (Direct3D's clears): a 64x64 1x picture (pitch 64, colour tile 0, depth
+ * tile 0x200) green at z 0.5; then a rectangle list through the 4x view of the same tiles (pitch 32, RB_SURFACE_INFO
+ * msaa 4x) over the view's (0,0)-(32,16): red at z 0.25 (test always, z write); then, at 1x again, a blue quad at
+ * z 0.35 with the test "less" (fails where the view's clear put 0.25). The view's pixel (x, y) is the picture's
+ * 2x2 block at (2x, 2y): the top half red, the bottom blue. Resolved to dst and read back. */
+static void msaa_view_clear(xenos_gl *g, xenos_cp *cp, const uint32_t *ps, uint32_t nps)
+{
+    enum { DST = 0xE4000, VQ = 0xEA000, RQ = 0xEA800 };
+    static uint32_t im[2 + 1024];
+    xenos_gl_stats s0, s1;
+    xenos_gl_get_stats(g, &s0);
+    for (uint32_t i = 0; i < 64 * 64 * 4; i += 4)
+        w32(DST + i, 0xABABABABu);
+    for (uint32_t i = 0; i < 4; i++)
+        reg(0x4400 + i, fbits(1.0f));
+    reg(0x2104, 0xFFFFu), reg(0x2201, 0x00010001u), reg(0x2205, 0), reg(0x2206, 0), reg(0x2208, 4);
+    reg(0x2080, 0), reg(0x2081, 0), reg(0x2082, 0);
+    reg(0x2000, 64u), reg(0x2001, 0), reg(0x2002, 0x200u);
+    reg(0x2200, 2u | 4u | 7u << 4); /* z test always, z write */
+    screen_quad(VQ, -8, -8, 72, 72, 0.5f, 0, 1, 0, ps, nps);
+    reg(0x2000, 32u | 2u << 16); /* the 4x view */
+    vertex_z(VQ + 0x100, 0, 0, 0.25f, 1, 0, 0), vertex_z(VQ + 0x120, 32, 0, 0.25f, 1, 0, 0);
+    vertex_z(VQ + 0x140, 0, 16, 0.25f, 1, 0, 0);
+    im[0] = 1, im[1] = nps;
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    reg(0x4800, (VQ + 0x100) | 3u), reg(0x4801, 2u | (24u << 2));
+    uint32_t rect = 8u | 2u << 6 | 3u << 16;
+    type3(PM4_DRAW_INDX_2, &rect, 1);
+    reg(0x2000, 64u);
+    reg(0x2200, 2u | 1u << 4); /* z test less, no write */
+    screen_quad(VQ + 0x200, -8, -8, 72, 72, 0.35f, 0, 0, 1, ps, nps);
+    reg(0x2200, 0);
+    resolve_rect(RQ, 0, 0, 64, 64, DST);
+    reg(0x2000, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2206, 0x3Fu);
+    run(cp);
+    xenos_gl_get_stats(g, &s1);
+    CHECK(s1.msaa_views == s0.msaa_views + 1, "MSAA view: drawn into its 1x surfaces %llu times, want 1",
+          (unsigned long long)(s1.msaa_views - s0.msaa_views));
+    static const struct {
+        int x, y;
+        uint32_t want;
+        const char *what;
+    } at[5] = {
+        {1, 1, 0xFF0000FFu, "the view's clear: red"},
+        {62, 30, 0xFF0000FFu, "the view's clear, its last 2x2 block: red"},
+        {62, 33, 0xFFFF0000u, "below it: blue (depth 0.5 from the green quad, 0.35 passes)"},
+        {1, 40, 0xFFFF0000u, "below it: blue"},
+        {40, 63, 0xFFFF0000u, "the last row: blue"},
+    };
+    for (int i = 0; i < 5; i++) {
+        uint32_t t = rd32(NULL, DST + tiled_off_pitch(at[i].x, at[i].y, 64, 2));
+        CHECK(t == at[i].want, "MSAA view of 1x tiles, %s: %08X, want %08X", at[i].what, t, at[i].want);
+    }
 }
 
 int main(int argc, char **argv)
@@ -2198,6 +2254,7 @@ int main(int argc, char **argv)
     }
     window_offset_tiles(g, &cp, ps, nps, 0);
     viewport_z_reversed(g, &cp, ps, nps);
+    msaa_view_clear(g, &cp, ps, nps);
     xenos_gl_destroy(g);
 
     /* WP-2, lazy resolves (RECOMP_X360_RESOLVE=lazy), on a renderer of their own: a resolve leaves memory as it was

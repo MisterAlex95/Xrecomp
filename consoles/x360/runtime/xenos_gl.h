@@ -104,6 +104,7 @@ typedef struct xenos_gl_stats {
     int gpu_timer;                 /* 1: the GPU's time is measured (EXT_disjoint_timer_query) */
     uint64_t gpu_time_ns;          /* GPU time from swap to swap (GL_TIME_ELAPSED_EXT), of gpu_time_frames frames */
     uint64_t gpu_time_frames;
+    uint64_t msaa_views;           /* WP-28: rectangle lists through an MSAA view drawn into its 1x stand-in surfaces */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */
