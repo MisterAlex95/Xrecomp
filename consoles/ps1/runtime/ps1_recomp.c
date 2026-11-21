@@ -608,19 +608,20 @@ void ps1_recomp_run(ps1_machine *m)
         }
         if (pc == s->interp_pc || m->next_delay || (m->cop0[C0_SR] & (SR_KUC | SR_ISC))) {
             /* the instruction lifted code left to the interpreter (after the loop's checks), a delay slot, user mode
-             * or an isolated cache. Then the rest of its block, while execution stays in sequence: inside a block
-             * nothing is a resume point. */
-            bool handed = pc == s->interp_pc;
-            if (handed)
-                s->stats.fallbacks++;
-            s->interp_pc = KEY_NONE;
-            s->stats.interp_ram++;
-            ps1_cpu_step(m);
+             * or an isolated cache. Then the rest of its block, while execution stays in sequence (one loop,
+             * ps1_cpu_step_handed): inside a block nothing is a resume point. */
             s->expect = KEY_NONE;
-            if (handed && s->interp_left > 1 && m->pc == pc + 4) {
-                s->interp_pc = pc + 4;
-                s->interp_left--;
+            if (pc != s->interp_pc) {
+                s->interp_pc = KEY_NONE;
+                s->stats.interp_ram++;
+                ps1_cpu_step(m);
+                continue;
             }
+            bool chained;
+            uint32_t n = ps1_cpu_step_handed(m, &s->interp_left, &chained);
+            s->stats.fallbacks += n;
+            s->stats.interp_ram += n;
+            s->interp_pc = chained ? m->pc : KEY_NONE;
             continue;
         }
         if (m->ld_reg) {

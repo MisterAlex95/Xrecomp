@@ -315,6 +315,12 @@ static inline bool ps1_rc_liftable_pc(uint32_t pc)
  * no interrupt is pending, no hook is due and the time slice is not up, as that loop would call ps1_cpu_step for each
  * (the BIOS, its exception handler), without a call per instruction. */
 void ps1_cpu_step_unliftable(ps1_machine *m);
+/* The recompiler's loop for the instructions lifted code hands over (PS1_RC_EXIT_INTERP, ps1_recomp_run): steps from
+ * pc while *left > 1 and execution stays in sequence, as that loop would one call at a time: while the time slice is
+ * not up, no interrupt is pending, no hook is due and the next instruction is liftable. One step at least; returns how
+ * many ran. *chained: the last one went on in sequence (*left counted down for it): the next instruction is still
+ * handed over. */
+uint32_t ps1_cpu_step_handed(ps1_machine *m, uint32_t *left, bool *chained);
 /* Steps the HLE kernel's RAM code (the exception vector, the handler chain walk, the trap stubs) exactly as
  * ps1_cpu_step would, with the run loop's checks between two instructions; returns how many ran (0: ps1_cpu_step must
  * run the one at pc). ps1_cpu.c « The HLE kernel's RAM code ». */
