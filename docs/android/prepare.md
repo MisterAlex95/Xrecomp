@@ -96,7 +96,8 @@ Readers ignore fields they do not know. `tools/prepare/pack.py` (`read`, `check`
 | `jobs`, `opt`, `files`, `compiled` | The compile: jobs started with, `-O`, C files, how many compiled now (the rest came from the object cache). |
 | `c_mb`, `obj_mb`, `pack_mb`, `cpus` | Sizes of the C, the objects, the libraries in the pack; the CPU count. |
 | `peak_rss_mb` | Each compile's own peak resident set (`wait4`'s `ru_maxrss`, one per clang): max, p90, median. Absent where the host has no `wait4`. |
-| `tools_peak_mb` | The largest pipeline tool (disasm, lift: `RUSAGE_CHILDREN` before the compile). |
+| `tools_peak_mb` | The largest pipeline tool (disasm, lift: `RUSAGE_CHILDREN` before the lift's compiles start, and the lifter's own peak). |
+| `early`, `lift_peak_mb` | Files compiled while the lifter ran (« The compile starts during the lift »), and the lifter's own peak resident set (`wait4`). Absent when none / unknown. |
 | `held_s` | Wall time the device log held every compile (`jobs` 0: critical heat, or a background Prepare while the game ran). |
 | `thermal` | From the device log (below): samples, the hottest status, seconds at severe or above, the fewest jobs allowed, the battery's hottest temperature, up to 24 points of the curve `[seconds into the run, status]`. Absent without a device log (a host). |
 
@@ -151,8 +152,8 @@ The steps, each one subprocess (`python -m tools.<tool>`) or a pool of compiler 
 |---|---|---|---|
 | 1 | `identify` | finds `default.xbe`, copies it to `<work>/xbe/`, `xbe_parser` → title ID, title profile; `xbe_ident` → XDK version, engines, profile layers in `<work>/ident.json` (shown in `msg`; never fails the step) | `parse` |
 | 2 | `analyse` | `disasm --lean` (no ASM listing, compact JSON), `func_id`, `abi_analysis` | `disasm`, `func_id`, `abi` |
-| 3 | `lift` | the project from `templates/new-game` + the profile layers (`profiles/`, [profiles.md](../technical/profiles.md)), then `tools.recomp --split-bytes 1000000` (below) | `lift` (= profile digest) |
-| 4 | `compile` | every C file to an object, largest first, cached | the object cache |
+| 3 | `lift` | the project from `templates/new-game` + the profile layers (`profiles/`, [profiles.md](../technical/profiles.md)), then `tools.recomp --split-bytes 1000000` (below); the chunks it has written are compiled meanwhile ([below](#compile-and-link)) | `lift` (= profile digest) |
+| 4 | `compile` | every C file to an object, largest first, cached; the objects compiled during the lift adopted | the object cache |
 | 5 | `pack` | `ld.lld` → `packs/<TID>.partial/libtitle.so`, `pack.json`, publish | `link` |
 
 Stamps live in `<work>/stamp.json` with the XBE's sha256 and the toolkit digest (`toolkit_sha256`, not the commit:
@@ -266,6 +267,39 @@ On the synthetic title of « Measurements », one seeded function: 160 of 160 fi
 (its chunk, the dispatch table, the stubs, the entry): 4.5 s of compile instead of ~80 s. The desktop Prepare (CMake) gains the same: its chunks no longer include `recomp_funcs.h`, and
 unchanged ones keep their bytes and mtime (`sync_generated`).
 
+**The compile starts during the lift.** The lifters write their C file by file (`x360_tools.recomp` one file per
+64 KB of guest code; `tools.recomp --split-bytes` one chunk as soon as its cut is known: `translator.ChunkStream`), and
+the compile no longer waits for the last one. While the lifter runs, `compile.EarlyCompile` polls `gen/` (every
+0.25 s) and compiles each `.c` whose stat (size, mtime, ctime, inode) stayed the same across two polls, with the
+step's own flags, into a temporary `obj/early-*.o`. After the lift, `compile_all` computes every key as before and
+*adopts* an early object (renames it to `<key>.o`) only when the source's stat is still the one taken before that
+compile started, and the headers it saw are unchanged (`recomp_funcs.h` left out for a file that does not include it:
+the lift writes it last). Everything else is compiled as before; an early object that is not adopted is deleted, and
+an early compile that fails says nothing (`compile_all` compiles the file again and reports the error). So the
+objects, their keys and `libtitle.so` are byte for byte those of a compile after the lift.
+
+- *Jobs.* The lifter counts as one: at most `min(--jobs, the device log's jobs) - 1` early compiles, so `--jobs 1`,
+  a severe device (1) or a hold (0) compile nothing during the lift, as before, and the thermal drop applies to them
+  as to the others (read before each start). One starts only while `MemAvailable` leaves the per-job 512 MB beside
+  the 3 GB reserve (the lifters' peaks: `x360_tools.recomp` 0.26 GB on Warhammer, `tools.recomp` below).
+- *In place.* An object's key and bytes hold its source's path, so every console lifts into `gen/` itself (emptied
+  first) instead of `gen.new` then a rename; the lift stamp is still dropped first and written only after the
+  lifter succeeded (XBA-138).
+- *Failure and cancel.* A lifter that fails stops the early compiles (killed, their temporary objects deleted) and
+  the step fails with `LIFT_FAILED`; a cancel (SIGTERM) kills the lifter and the compilers alike (`Procs.cancel`).
+  A run killed outright leaves `early-*.o` files, which no later run adopts and the next pack's prune deletes.
+- *Progress.* The lines stay step 3, `id=lift`, during the overlap (« lifting to C, 18 file(s) compiled
+  meanwhile »), so the app's stages and XBA-341 spans keep their meaning: `prepare.lift` holds the lift and the
+  compiles beside it, `prepare.compile` the rest (its first line counts the adopted files as done).
+- *Forecasting the chunks (Xbox).* `tools.recomp` translates the whole program before it knows everything a chunk
+  holds (the declarations of the call targets it stubs, the exception funclets placed after every function), so the
+  chunks it writes during the translation are a forecast: the end still writes every file through
+  `write_if_changed` from the whole program, a chunk forecast right keeps its bytes and stat (its early object is
+  adopted), and one that is not is written again (and compiled again).
+
+Measured on the host (`xba-deps` with the NDK 28 clang, `--opt 2`, before → after, the same job count, C, objects
+and `libtitle.so` identical): see « Measurements ».
+
 **Link**, ld.lld directly, what the NDK's `clang -shared` does plus our options:
 
 ```
@@ -376,7 +410,7 @@ progress lines already name, one span each, op `prepare.<stage>`:
 | `prepare.identify`, `prepare.analyse`, `prepare.lift`, `prepare.compile`, `prepare.pack` | the first `XBA_PROGRESS` line with that `id=` → the next stage (or the end) |
 
 What each tools.prepare stage holds: `identify` the XBE parse, `analyse` disasm + func_id + abi_analysis, `lift`
-tools.recomp, `compile` clang on default.xbe's C files **and**, on a title with more images (XBA-82), those images'
+tools.recomp and the compiles that run beside it (« The compile starts during the lift »), `compile` clang on default.xbe's C files **and**, on a title with more images (XBA-82), those images'
 whole identify / analyse / lift / compile (they report inside step 4), `pack` the link and pack.json.
 
 A retry after a kill starts again at `launch`, so a stage can appear twice. A Prepare whose stamps skip work (an
@@ -394,21 +428,23 @@ No title, no path, no file name, no install id.
 
 What a kill costs, step by step: identify, analyse (`disasm`, `func_id`, `abi`) and link have their stamps, so a
 finished sub-step is never redone; the compile keeps every finished object (cache, temp name + rename), so only the
-files in flight are lost; **the lift is one step**: a kill during it redoes the whole lift (it writes all the C at
-once; on the real title of « Measurements » the lift is under a minute of a 10–30 min Prepare).
+files in flight are lost; **the lift is one step**: a kill during it redoes the whole lift (on the real title of
+« Measurements » the lift is under a minute of a 10–30 min Prepare); the objects its early compiles had finished are
+temporary (`early-*.o`) and not reused.
 
-The lift stays one step on purpose (XBA-138). `tools.recomp` translates every function in memory first and writes
-the C only at the end (`translator.py`: `recomp_funcs.h`, then the chunks, through `write_if_changed`), so a kill
-almost always lands before the first file and a per-file resume would save only the write phase, seconds of the
-lift's ~50 s (48.2 s of 372 s in the `pack.json` example above: 13 % of the Prepare, at most one lift lost per kill).
+The lift stays one step on purpose (XBA-138). `tools.recomp` translates every function in memory first; the chunks
+it writes during the translation are a forecast the end checks (`translator.ChunkStream`, « Compile and link »), so
+a lift resumed from its files would still need the whole translation, and a per-file resume would save only the
+write phase, seconds of the lift's ~50 s (48.2 s of 372 s in the `pack.json` example above: 13 % of the Prepare, at
+most one lift lost per kill).
 Resuming the translation itself would mean checkpointing the translator's whole-program state (labels, indirect-call
 tables, the header that lists every function), for less than a minute. And nothing is lost downstream: a redone lift
 writes the same bytes, and the object cache is keyed by content, so the compile that follows finds every object it
 had. What the lift does guarantee: its stamp is dropped before it empties `gen/` and written only after
 `tools.recomp` succeeds, so a half-written `gen/` is never taken as a finished lift, even when a later run comes back
 to the stamp's earlier key (the « Enhancements » switch turned off, then on again;
-`test_android_killed_lift_never_passes_as_up_to_date`). The desktop Prepare lifts into `gen.new` and syncs, same
-guarantee.
+`test_android_killed_lift_never_passes_as_up_to_date`). The other consoles' packs lift into `gen/` the same way
+(since the overlap; `gen.new` before); the desktop Prepare lifts into `gen.new` and syncs, same guarantee.
 
 The app's side:
 
@@ -862,7 +898,7 @@ whole ROM (`AXVE-1A2B3C4D`), so two dumps of one game have two packs. The app's 
 |---|---|---|---|
 | 1 | `identify` | reads the ROM (32 MB at most: `BAD_ROM`; unreadable: `NO_ROM`), title key, SHA-256, header title; copies it to `<work>/rom.gba` | `rom` + `toolkit_sha256` (another ROM or toolkit starts over) |
 | 2 | `analyse` | the addresses earlier runs had to interpret: `<work>/discovered.txt` (plus `--discovered FILE`), merged into `<work>/discovered-seeds.txt` | (their digest, in the lift's key) |
-| 3 | `lift` | `python -m gba_tools.recomp <work>/rom.gba <work>/gen.new [--discovered seeds]`, then `gen.new` → `gen` (the stamp is dropped first: a half-written lift never passes) | `lift` |
+| 3 | `lift` | `python -m gba_tools.recomp <work>/rom.gba <work>/gen [--discovered seeds]` into `gen/` emptied first (the stamp is dropped first: a half-written lift never passes), its files compiled meanwhile (« Compile and link ») | `lift` |
 | 4 | `compile` | each `gen/*.c` with the flags below, the object cache of « Compile and link » | the object cache |
 | 5 | `pack` | `libtitle.so`, `pack.json`, atomic publish as `packs/gba-<KEY>` (`.partial`, `.old`, same rules) | `link` |
 
@@ -986,7 +1022,7 @@ else `PSX.EXE`; for an EXE, the file), not of the image:
 |---|---|---|---|
 | 1 | `identify` | reads the disc with the lifter's own reader (`ps1_tools.exe`: ISO 9660 on cooked or raw sectors, a `.cue`'s first data track, a `.chd`: see below): title key, the boot EXE (over 2 MB + 2 KB, missing, not a PS-X EXE, a CHD hunk it cannot decode: `BAD_DISC`; unreadable: `NO_DISC`), its SHA-256; copies it to `<work>/boot.exe` | `source` + `toolkit_sha256` (another EXE or toolkit starts over) |
 | 2 | `analyse` | the code earlier runs had to interpret: `<work>/discovered.txt` (plus `--discovered FILE`), one record kept per address + hash, sorted, into `<work>/discovered-seeds.txt` | (their digest, in the lift's key) |
-| 3 | `lift` | `python -m ps1_tools.recomp <work>/boot.exe <work>/gen.new [--discovered seeds]`, then `gen.new` → `gen` (the stamp is dropped first) | `lift` |
+| 3 | `lift` | `python -m ps1_tools.recomp <work>/boot.exe <work>/gen [--discovered seeds]` into `gen/` emptied first (the stamp is dropped first), its files compiled meanwhile | `lift` |
 | 4 | `compile` | each `gen/*.c` with the flags below, the object cache of « Compile and link » | the object cache |
 | 5 | `pack` | `libtitle.so`, `pack.json`, atomic publish as `packs/ps1-<KEY>` | `link` |
 
@@ -1187,7 +1223,7 @@ pair or word as it is: `n64_rom_normalize`'s rule):
 |---|---|---|---|
 | 1 | `identify` | reads the ROM (under 4 KB, over 64 MB, not an N64 byte order: `BAD_ROM`; unreadable: `NO_ROM`): title key, header title, byte order, the source identity | `source` + `toolkit_sha256` (another ROM or toolkit starts over; the same ROM in another byte order does not) |
 | 2 | `analyse` | the code earlier runs had to interpret: `<work>/discovered.txt` (plus `--discovered FILE`), one record kept per address + hash, sorted, into `<work>/discovered-seeds.txt` (the PS1's reader: the format is the same) | (their digest, in the lift's key) |
-| 3 | `lift` | `python -m n64_tools.recomp ROM <work>/gen.new [--discovered seeds]`, then `gen.new` → `gen` (the stamp is dropped first) | `lift` |
+| 3 | `lift` | `python -m n64_tools.recomp ROM <work>/gen [--discovered seeds]` into `gen/` emptied first (the stamp is dropped first), its files compiled meanwhile | `lift` |
 | 4 | `compile` | each `gen/*.c` with the flags below, the object cache of « Compile and link » | the object cache |
 | 5 | `pack` | `libtitle.so`, `pack.json`, atomic publish as `packs/n64-<KEY>` | `link` |
 

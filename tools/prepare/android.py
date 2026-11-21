@@ -301,6 +301,8 @@ class Run:
             try:
                 self.py_step(args, 3, 2, 100, "lifting to C", 30 * mb, "LIFT_FAILED", early, peak)
                 self.lift_peak_kb = peak[0] if peak else None
+                if self.lift_peak_kb:
+                    self.compile_stats["lift_peak_kb"] = self.lift_peak_kb
             except BaseException:
                 if early is not None:
                     early.abort()

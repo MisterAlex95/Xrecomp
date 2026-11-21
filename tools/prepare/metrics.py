@@ -139,6 +139,10 @@ def summary(steps, compile_stats, sources, objects, jobs, opt, pack_dir, device_
                               "median": mb(percentile(peaks, 50))}
     if tools_peak_kb:
         out["tools_peak_mb"] = mb(tools_peak_kb)
+    if compile_stats.get("early"):
+        out["early"] = compile_stats["early"]       # files compiled while the lifter ran (compile.py EarlyCompile)
+    if compile_stats.get("lift_peak_kb"):
+        out["lift_peak_mb"] = mb(compile_stats["lift_peak_kb"])
     if compile_stats.get("held_s"):
         out["held_s"] = round(compile_stats["held_s"])
     th = thermal_summary(device_log, steps.t0) if device_log else None

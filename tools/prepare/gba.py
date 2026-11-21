@@ -414,7 +414,7 @@ class Run:
                 try:
                     peak = cc.wait_ticking(p, tick, 1.0)
                     rc = p.returncode
-                    self.lift_peak_kb = peak
+                    self.lift_peak_kb = self.compile_stats["lift_peak_kb"] = peak
                 finally:
                     if rc is None:          # an exception (a cancel, a bug) while it ran: it does not outlive us
                         try:
