@@ -429,35 +429,44 @@ static void run_thread(x360_machine *x, x360_thread *t)
     x->m.cur = c;
     x->m.slice = X360_SLICE;
     uint64_t dispatches = 0; /* WP-19: lifted functions entered from here (the perf line's), counted, not timed */
+    /* WP-20: the dispatcher's fast path, a pc with lifted code that is no import thunk, tested first; the special
+     * return addresses (outside the image) and the thunks only behind that one test. What lifted code cannot change
+     * is read once, in locals (the call through fn would make the compiler load it again every time). */
+    xe_rc_fn *const fn_tab = x->fn_tab;
+    const uint32_t code_lo = x->code_lo, code_n = x->code_hi - x->code_lo;
+    const uint32_t thunk_lo = x->thunk_lo, thunk_n = x->thunk_hi - x->thunk_lo;
+    const uint64_t stop_at = x->stop_at;
     while (t->state == TH_READY && x->status == X360_RUNNING &&
            (x->m.slice >= 0 || (!(c->msr & 0x8000u) && x->m.slice >= -XE_EE_GRACE))) {
         uint32_t pc = c->pc;
+        xe_rc_fn fn = pc - code_lo < code_n && !(pc & 3) ? fn_tab[(pc - code_lo) >> 2] : NULL;
         int resumed = t->interp;
         t->interp = 0;
-        if (pc == X360_THREAD_EXIT) {
-            x360_thread_exit(x, t, (uint32_t)c->gpr[3]);
-            break;
+        if (!fn || pc - thunk_lo < thunk_n) {
+            if (pc == X360_THREAD_EXIT) {
+                x360_thread_exit(x, t, (uint32_t)c->gpr[3]);
+                break;
+            }
+            if (pc == X360_SEH_RETURN) { /* an exception handler returned (XBA-282) */
+                x360_seh_return(x, t);
+                continue;
+            }
+            if (pc == X360_APC_RETURN) { /* an APC routine returned (XBA-296) */
+                x360_apc_return(x, t);
+                continue;
+            }
+            const x360_thunk *th = x360_thunk_at(x, pc);
+            if (th) {
+                c->pc = (uint32_t)c->lr & ~3u;
+                x->st.hle_calls++;
+                sync_tb(x);
+                x360_hle_call(x, th);
+                x->m.slice -= 8;
+                continue;
+            }
         }
-        if (pc == X360_SEH_RETURN) { /* an exception handler returned (XBA-282) */
-            x360_seh_return(x, t);
-            continue;
-        }
-        if (pc == X360_APC_RETURN) { /* an APC routine returned (XBA-296) */
-            x360_apc_return(x, t);
-            continue;
-        }
-        const x360_thunk *th = x360_thunk_at(x, pc);
-        if (th) {
-            c->pc = (uint32_t)c->lr & ~3u;
-            x->st.hle_calls++;
-            sync_tb(x);
-            x360_hle_call(x, th);
-            x->m.slice -= 8;
-            continue;
-        }
-        if (x->m.rc_native >= x->stop_at)
+        if (x->m.rc_native >= stop_at)
             break; /* the caller's instruction budget: stop between two lifted functions */
-        xe_rc_fn fn = pc >= x->code_lo && pc < x->code_hi && !(pc & 3) ? x->fn_tab[(pc - x->code_lo) >> 2] : NULL;
         if (!fn) {
             if (x->stop_at_miss) {
                 missed(x, pc);
