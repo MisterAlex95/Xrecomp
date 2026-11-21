@@ -186,6 +186,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glPolygonOffset, (GLfloat, GLfloat))                                                                       \
     X(void, glScissor, (GLint, GLint, GLsizei, GLsizei))                                                               \
     X(void, glClearDepthf, (GLfloat))                                                                                  \
+    X(void, glDepthRangef, (GLfloat, GLfloat))                                                                         \
     X(void, glClearStencil, (GLint))                                                                                   \
     X(GLint, glGetUniformLocation, (GLuint, const GLchar *))                                                           \
     X(void, glUniform1i, (GLint, GLint))                                                                               \
@@ -470,7 +471,7 @@ struct xenos_gl {
      * function that changes blend, masks, depth / stencil, culling, polygon offset or scissor clears it (GS_DIRTY);
      * the program, vertex array and enabled attribute arrays as last set (use_program, bind_vao, attribs_enable) */
     int gs_valid;
-    uint32_t gs_blend[11], gs_depth[3], gs_cull, gs_offset[6], gs_scissor[5];
+    uint32_t gs_blend[11], gs_depth[6], gs_cull, gs_offset[6], gs_scissor[5];
     GLuint cur_prog, cur_vao;
     uint32_t attr_on;         /* attribute arrays enabled on vao (bit n: location n) */
     GLenum frame_fmt;         /* frame_tex's internal format */
@@ -2695,7 +2696,8 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
             f32 |= (uint32_t)float32_target(g, i) << i;
     uint32_t in_blend[11] = {cp->regs[0x2104], cp->regs[0x2105], cp->regs[0x2106], cp->regs[0x2107], cp->regs[0x2108],
                              cp->regs[0x2201], cp->regs[0x2209], cp->regs[0x220A], cp->regs[0x220B], f32, 0};
-    uint32_t in_depth[3] = {cp->regs[0x2200], cp->regs[0x210C], cp->regs[0x210D]};
+    uint32_t in_depth[6] = {cp->regs[0x2200], cp->regs[0x210C], cp->regs[0x210D], cp->regs[0x2206] & 0x30u,
+                            cp->regs[0x2113], cp->regs[0x2114]};
     int polygonal = (prim_type >= 4 && prim_type <= 7) || (prim_type >= 13 && prim_type <= 15);
     uint32_t in_offset[6] = {cp->regs[0x2205] & 0x3803u, cp->regs[0x2380], cp->regs[0x2381], cp->regs[0x2382],
                              cp->regs[0x2383], (uint32_t)polygonal};
@@ -2770,6 +2772,16 @@ static void apply_depth(xenos_gl *g, const xenos_cp *cp)
 {
     /* depth and stencil */
     uint32_t dc = cp->regs[0x2200];
+    /* WP-27: the viewport's z (PA_CL_VPORT_ZSCALE / ZOFFSET, PA_CL_VTE_CNTL bits 4 / 5; else 1 / 0): window z = z/w *
+     * scale + offset, which the shaders leave to the depth range (they hand GL z/w over 0..1). A title reversing
+     * depth through the viewport (scale -1, offset 1, test "greater" against a buffer cleared to 0: Adventure Time)
+     * otherwise has its depth test inverted. GL clamps the range to 0..1, as Xenos's depth is. */
+    uint32_t vte = cp->regs[0x2206];
+    float zs = vte & 0x10 ? as_float(cp->regs[0x2113]) : 1.0f, zo = vte & 0x20 ? as_float(cp->regs[0x2114]) : 0.0f;
+    float zn = zo, zf = zo + zs;
+    zn = zn > 0.0f ? (zn < 1.0f ? zn : 1.0f) : 0.0f; /* (NaN: 0) */
+    zf = zf > 0.0f ? (zf < 1.0f ? zf : 1.0f) : 0.0f;
+    g->glDepthRangef(zn, zf);
     if (dc & 2) {
         g->glEnable(GL_DEPTH_TEST);
         g->glDepthFunc(GL_NEVER + ((dc >> 4) & 7));
@@ -5089,6 +5101,7 @@ static void surface_reload(xenos_gl *g, surface *s)
         g->glDrawBuffers(1, &none);
         g->glEnable(GL_DEPTH_TEST);
         g->glDepthFunc(GL_NEVER + 7 /* GL_ALWAYS */);
+        g->glDepthRangef(0.0f, 1.0f); /* WP-27: the depth as it is (some drivers clamp gl_FragDepth to the range) */
         g->glDepthMask(1);
         g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
         g->glClearStencil(0);

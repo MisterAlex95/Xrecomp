@@ -38,7 +38,8 @@
  *            (S, T, face) coordinates at the centres of faces 4 (+Z: cyan) and 1 (-X: green), and a linear 4x4x4
  *            3D texture (one colour per slice) at depth 0.625 (slice 2: blue).
  * Then WP-26's window offset (a picture drawn and resolved as two tiles: scissor and resolve rectangle moved, the
- * right tile resolved into the left one's picture), eagerly and with lazy resolves.
+ * right tile resolved into the left one's picture), eagerly and with lazy resolves; WP-27's viewport z (scale -1,
+ * offset 1, the test "greater").
  * At the end (renderers of their own): WP-2's lazy resolves; WP-10's rectangle lists, 20 in one list (two passes of
  * the GPU path), drawn on the GPU and with RECOMP_X360_RECTS=cpu, the same bytes.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
@@ -131,10 +132,12 @@ static void reg(uint32_t index, uint32_t v)
     pk[npk++] = v;
 }
 
-/* the viewport Direct3D sets for the whole target: VTE scale / offset on, (W/2, -H/2) around the centre */
+/* the viewport Direct3D sets for the whole target: VTE scale / offset on, (W/2, -H/2) around the centre, z 0..1 */
 static void full_viewport(void)
 {
     reg(0x2206, 0x3Fu);
+    reg(0x2113, fbits(1.0f));
+    reg(0x2114, 0);
     reg(0x210F, fbits(W / 2.0f));
     reg(0x2110, fbits(W / 2.0f));
     reg(0x2111, fbits(-H / 2.0f));
@@ -305,6 +308,47 @@ static void window_offset_tiles(xenos_gl *g, xenos_cp *cp, const uint32_t *ps, u
         uint32_t t = rd32(NULL, DST + tiled_off_pitch(at[i].x, at[i].y, 64, 2));
         CHECK(t == at[i].want, "window offset tiles (%s), %s: %08X, want %08X", mode, at[i].what, t, at[i].want);
     }
+}
+
+/* WP-27, the viewport's z (PA_CL_VPORT_ZSCALE -1, ZOFFSET 1: depth reversed, as Adventure Time draws): window z =
+ * 1 - z. A blue quad at z 1 (window 0, test always, z write) "clears" the depth to 0; a green one at z 0.25 (window
+ * 0.75) passes the test "greater" and writes; a red one at z 0.75 (window 0.25) then fails it: green. Without the
+ * viewport's z the green quad fails (0.25 < 1): blue. */
+static void viewport_z_reversed(xenos_gl *g, xenos_cp *cp, const uint32_t *ps, uint32_t nps)
+{
+    enum { VQ = 0xE9000 };
+    static const uint32_t swap[4] = {0x53574150u, 0, W, H};
+    static uint32_t im[2 + 1024];
+    static const float qz[3] = {1.0f, 0.25f, 0.75f}, qc[3][3] = {{0, 0, 1}, {0, 1, 0}, {1, 0, 0}};
+    static const uint32_t zfunc[3] = {7, 4, 4}, zwrite[3] = {4, 4, 0}; /* always / greater; z write */
+    for (uint32_t q = 0; q < 3; q++)
+        for (uint32_t k = 0; k < 4; k++)
+            vertex_z(VQ + 0x80 * q + 32 * k, k & 1 ? 1.0f : -1.0f, k & 2 ? -1.0f : 1.0f, qz[q], qc[q][0], qc[q][1],
+                     qc[q][2]);
+    im[0] = 1, im[1] = nps;
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    for (uint32_t i = 0; i < 4; i++)
+        reg(0x4400 + i, fbits(1.0f));
+    reg(0x2104, 0xFFFFu), reg(0x2201, 0x00010001u), reg(0x2205, 0), reg(0x2208, 4);
+    reg(0x2000, 0), reg(0x2001, 0), reg(0x2002, 0x100u), reg(0x2081, 0), reg(0x2082, 0);
+    reg(0x2206, 0x3Fu);
+    reg(0x210F, fbits(W / 2.0f)), reg(0x2110, fbits(W / 2.0f)), reg(0x2111, fbits(-H / 2.0f));
+    reg(0x2112, fbits(H / 2.0f)), reg(0x2113, fbits(-1.0f)), reg(0x2114, fbits(1.0f));
+    reg(0x4801, 2u | (32u << 2));
+    uint32_t strip = 6u | 2u << 6 | 4u << 16;
+    for (uint32_t q = 0; q < 3; q++) {
+        reg(0x2200, 2u | zwrite[q] | zfunc[q] << 4);
+        reg(0x4800, (VQ + 0x80 * q) | 3u);
+        type3(PM4_DRAW_INDX_2, &strip, 1);
+    }
+    type3(PM4_XE_SWAP, swap, 4);
+    reg(0x2200, 0), reg(0x2002, 0), reg(0x2113, fbits(1.0f)), reg(0x2114, 0);
+    run(cp);
+    const uint8_t *c = px(g, W / 2, H / 2);
+    CHECK(c[0] == 0 && c[1] == 255 && c[2] == 0,
+          "viewport z scale -1 offset 1, test greater: %u,%u,%u, want green (blue: the viewport's z ignored)", c[0],
+          c[1], c[2]);
 }
 
 int main(int argc, char **argv)
@@ -2153,6 +2197,7 @@ int main(int argc, char **argv)
         run(&cp);
     }
     window_offset_tiles(g, &cp, ps, nps, 0);
+    viewport_z_reversed(g, &cp, ps, nps);
     xenos_gl_destroy(g);
 
     /* WP-2, lazy resolves (RECOMP_X360_RESOLVE=lazy), on a renderer of their own: a resolve leaves memory as it was
