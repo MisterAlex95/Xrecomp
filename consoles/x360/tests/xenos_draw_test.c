@@ -1566,6 +1566,65 @@ int main(int argc, char **argv)
               "depth resolve with stencil: inside %08X (want 800000 << 8 | 5A), outside %08X", in_s, out_s);
     }
 
+    /* WP-38: depth and stencil of a depth resolve, every word: three quads (stencil replace, depth always) leave A5 at z
+     * 0.25 over the target, 3C at z 0.75 over its left half, 7E at z 0.5 over its top-right quarter (between them all 8
+     * stencil bits); the rectangle (8, 16)-(40, 56) is resolved to a 24_8 copy prefilled with a marker. Inside, each
+     * word is its region's depth << 8 | stencil (the same word over a region, stencil exact); outside, the marker */
+    {
+        static const struct {
+            float x0, y0, x1, y1, z;
+            uint32_t ref;
+        } q[3] = {{-1, -1, 1, 1, 0.25f, 0xA5}, {-1, -1, 0, 1, 0.75f, 0x3C}, {0, 0, 1, 1, 0.5f, 0x7E}};
+        reg(0x2002, 0x300u);
+        reg(0x2200, 1u | 2u | 4u | 7u << 4 | 7u << 8 | 2u << 14); /* stencil always, replace on pass; depth always */
+        for (int k = 0; k < 3; k++) {
+            uint32_t at = 0x7D80 + 128 * (uint32_t)k;
+            vertex_z(at, q[k].x0, q[k].y0, q[k].z, 1, 1, 1), vertex_z(at + 32, q[k].x1, q[k].y0, q[k].z, 1, 1, 1);
+            vertex_z(at + 64, q[k].x0, q[k].y1, q[k].z, 1, 1, 1), vertex_z(at + 96, q[k].x1, q[k].y1, q[k].z, 1, 1, 1);
+            reg(0x210D, q[k].ref | 0xFFu << 8 | 0xFFu << 16);
+            reg(0x4800, at | 3u);
+            reg(0x4801, 2u | (32u << 2));
+            type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        }
+        reg(0x2200, 0);
+        static const float drv[6] = {8, 16, 40, 16, 40, 56};
+        for (int i = 0; i < 6; i++)
+            w32(0x7D00 + 4 * (uint32_t)i, fbits(drv[i]));
+        for (uint32_t a = 0xC0000; a < 0xC0000 + W * H * 4; a += 4)
+            w32(a, 0xDEADBEEFu);
+        reg(0x4800, 0x7D00u | 3u);
+        reg(0x4801, 2u | (6u << 2));
+        reg(0x2208, 6);
+        reg(0x2318, 4u);            /* source: depth, no clear, raw */
+        reg(0x2319, 0xC0000);
+        reg(0x231A, W | (uint32_t)H << 16);
+        reg(0x231B, 2u | 22u << 7); /* 8-in-32, 24_8 */
+        type3(PM4_DRAW_INDX_2, &rect, 1);
+        reg(0x2208, 4), reg(0x2002, 0);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        /* the region's word (taken at a pixel well inside it), by region: 0 A5, 1 3C, 2 7E */
+        uint32_t want[3] = {rd32(NULL, 0xC0000 + tiled_off(36, 50)), rd32(NULL, 0xC0000 + tiled_off(12, 40)),
+                            rd32(NULL, 0xC0000 + tiled_off(36, 20))};
+        static const uint32_t zw[3] = {0x400000u, 0xC00000u, 0x800000u};
+        for (int k = 0; k < 3; k++) {
+            uint32_t d = want[k] >> 8;
+            CHECK((want[k] & 0xFF) == q[k].ref && d + 16 >= zw[k] && d <= zw[k] + 16,
+                  "depth + stencil resolve, region %d: %08X, want %06X << 8 | %02X", k, want[k], zw[k], q[k].ref);
+        }
+        int bad = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                if (x == 31 || x == 32 || y == 31 || y == 32) /* the quads' edges run through pixel centres */
+                    continue;
+                int in = x >= 8 && x < 40 && y >= 16 && y < 56, region = x < 32 ? 1 : y < 32 ? 2 : 0;
+                uint32_t got = rd32(NULL, 0xC0000 + tiled_off(x, y)), exp = in ? want[region] : 0xDEADBEEFu;
+                if (got != exp && bad++ < 4)
+                    CHECK(0, "depth + stencil resolve at (%d, %d): %08X, want %08X", x, y, got, exp);
+            }
+        CHECK(!bad, "depth + stencil resolve: %d words wrong", bad);
+    }
+
     /* eDRAM aliasing: draw into one format, resolve the same tiles as another: the raw bits must come through */
     {
         /* resolve render target 0 (64 x 64) to `dest` in texture format `tf` */
