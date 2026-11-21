@@ -1,10 +1,11 @@
 /* resolve_write's direct way (WP-1) writes the bytes its generic way writes: for every pair it takes (RGBA8 to
  * 8_8_8_8 and its variants 6 / 14 / 50 / 62, RGB10_A2 to 2_10_10_10 7 / 54, floats to 16_16_16_16_FLOAT 32 and to
- * 32_FLOAT 36), each swap mode, with and without the red / blue exchange, rectangles that start and end inside a
- * 16-byte group, a destination that is not 16-byte aligned, and stores both into the writable memory pointer
- * (xenos_cp.wmem) and through write32. Every byte value of RGBA8 and every 10-bit value go through, and floats with
- * infinities, quiet NaNs, denormals, negative zero and rounding cases. Depth resolves (depth_write) against the
- * put_bytes loop they replaced. Prints the time of both ways for a 1920 x 1080 8_8_8_8 resolve. */
+ * 32_FLOAT 36, RGBA8 to the 16-bit formats of one channel a field 3 / 4 / 5 / 10 / 15 / 24, WP-36), each swap mode,
+ * with and without the red / blue exchange, rectangles that start and end inside a 16-byte group, a destination that
+ * is not 16-byte aligned, and stores both into the writable memory pointer (xenos_cp.wmem) and through write32. Every
+ * byte value of RGBA8 and every 10-bit value go through, and floats with infinities, quiet NaNs, denormals, negative
+ * zero and rounding cases. Depth resolves (depth_write) against the put_bytes loop they replaced. Prints the time of
+ * both ways for a 1920 x 1080 8_8_8_8 resolve. */
 #include "../runtime/xenos_gl.c"
 
 #include <time.h>
@@ -135,7 +136,9 @@ int main(void)
         return 1;
     static const struct { int lay; uint32_t fmt; } pairs[] = {{PIX_U8X4, 6},     {PIX_U8X4, 14},    {PIX_U8X4, 50},
                                                               {PIX_U8X4, 62},    {PIX_RGB10A2, 7},  {PIX_RGB10A2, 54},
-                                                              {PIX_F32X4, 32},   {PIX_F32X4, 36}};
+                                                              {PIX_F32X4, 32},   {PIX_F32X4, 36},   {PIX_U8X4, 3},
+                                                              {PIX_U8X4, 4},     {PIX_U8X4, 5},     {PIX_U8X4, 10},
+                                                              {PIX_U8X4, 15},    {PIX_U8X4, 24}};
     static const struct { int x0, y0, w, h; } rects[] = {{0, 0, 64, 64}, {3, 5, 61, 37}, {1, 30, 2, 3}, {0, 0, 1280, 6}};
     static const uint32_t bases[] = {0x200000u, 0x300004u, 0x400008u};
     int cases = 0;
@@ -155,7 +158,7 @@ int main(void)
         memset(&cp, 0, sizeof cp);
         cp.read32 = rd, cp.write32 = wr, cp.mem = g_mem, cp.wmem = g_mem;
         static const struct { int lay; uint32_t fmt, base; int bias; } no[] = {
-            {PIX_U8X4, 6, 0x200000u, 1},  {PIX_U8X4, 6, 0x200002u, 0}, {PIX_U8X4, 4, 0x200000u, 0},
+            {PIX_U8X4, 6, 0x200000u, 1},  {PIX_U8X4, 6, 0x200002u, 0}, {PIX_U8X4, 2, 0x200000u, 0},
             {PIX_U8X4, 32, 0x200000u, 0}, {PIX_RGB10A2, 6, 0x200000u, 0}, {PIX_F32X4, 6, 0x200000u, 0}};
         for (size_t i = 0; i < sizeof no / sizeof no[0]; i++) {
             resolve_dest d = {no[i].base, 64, no[i].fmt, 0, 0, no[i].bias};

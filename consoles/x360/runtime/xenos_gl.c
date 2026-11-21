@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #endif
 #include <dlfcn.h>
+#include <pthread.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1902,6 +1903,113 @@ static float component(uint32_t v, unsigned offset, unsigned width, const attr *
         }                                                                                                              \
     }
 
+/* WP-36: the packed formats' vertex loop with physical memory at hand, one copy per format and swap mode (both known
+ * at compile time): the words byte-swapped straight from memory, the components as the generic loops below make them
+ * (component, half_to_float), without gpu_read's call and switch per word. Warhammer fetches ~3.5 M attribute values
+ * a frame, most of them 8_8_8_8 and 16_16. The generic loops stay for a runtime without cp->mem; xenos_vertex_fetch_test
+ * checks that both give the same floats. */
+/* component() of every 8-bit value for each signedness and integer flag (index 2 * signed + integer), made once by
+ * component itself: 8_8_8_8 took a division per component */
+static float comp8_lut[4][256];
+static pthread_once_t comp8_once = PTHREAD_ONCE_INIT;
+static void comp8_init(void)
+{
+    for (int k = 0; k < 4; k++) {
+        attr t;
+        memset(&t, 0, sizeof t);
+        t.is_signed = (uint32_t)(k >> 1), t.is_integer = (uint32_t)(k & 1);
+        for (uint32_t u = 0; u < 256; u++)
+            comp8_lut[k][u] = component(u, 0, 8, &t);
+    }
+}
+
+static inline __attribute__((always_inline)) void packed_vertex(uint32_t format, uint32_t w0, uint32_t w1,
+                                                                const attr *a, const float *l8, float *o)
+{
+    switch (format) {
+    case 6: /* l8: comp8_lut for the attribute's flags */
+        for (int i = 0; i < 4; i++)
+            o[i] = l8[(w0 >> (8 * i)) & 255];
+        break;
+    case 7:
+        for (int i = 0; i < 3; i++)
+            o[i] = component(w0, 10 * i, 10, a);
+        o[3] = component(w0, 30, 2, a);
+        break;
+    case 16:
+        o[0] = component(w0, 0, 11, a), o[1] = component(w0, 11, 11, a), o[2] = component(w0, 22, 10, a);
+        o[3] = 1.0f;
+        break;
+    case 17:
+        o[0] = component(w0, 0, 10, a), o[1] = component(w0, 10, 11, a), o[2] = component(w0, 21, 11, a);
+        o[3] = 1.0f;
+        break;
+    case 25:
+        o[0] = component(w0, 0, 16, a), o[1] = component(w0, 16, 16, a);
+        o[2] = 0.0f, o[3] = 1.0f;
+        break;
+    case 26:
+        o[0] = component(w0, 0, 16, a), o[1] = component(w0, 16, 16, a);
+        o[2] = component(w1, 0, 16, a), o[3] = component(w1, 16, 16, a);
+        break;
+    case 31:
+        o[0] = half_to_float(w0 & 0xFFFF), o[1] = half_to_float(w0 >> 16);
+        o[2] = 0.0f, o[3] = 1.0f;
+        break;
+    default: /* 32 */
+        o[0] = half_to_float(w0 & 0xFFFF), o[1] = half_to_float(w0 >> 16);
+        o[2] = half_to_float(w1 & 0xFFFF), o[3] = half_to_float(w1 >> 16);
+        break;
+    }
+}
+
+static inline __attribute__((always_inline)) void packed_loop(const uint8_t *mem, uint32_t format, uint32_t endian,
+                                                              uint32_t at, uint32_t step, uint32_t count, float *out,
+                                                              size_t ostride, const attr *a, const float *l8)
+{
+    const int two = format == 26 || format == 32;
+    for (uint32_t v = 0; v < count; v++, at += step) {
+        uint32_t w0, w1 = 0;
+        memcpy(&w0, mem + (at & 0x1FFFFFFFu), 4);
+        w0 = gpu_swap(w0, endian);
+        if (two) {
+            memcpy(&w1, mem + ((at + 4) & 0x1FFFFFFFu), 4);
+            w1 = gpu_swap(w1, endian);
+        }
+        packed_vertex(format, w0, w1, a, l8, out + (size_t)v * ostride);
+    }
+}
+
+/* 1 when the format is one packed_loop takes (and it ran), else 0 */
+static int fetch_packed_mem(const uint8_t *mem, uint32_t format, uint32_t endian, uint32_t at, uint32_t step,
+                            uint32_t count, float *out, size_t ostride, const attr *a)
+{
+#define PACKED_E(F)                                                                                                    \
+    switch (endian & 3) {                                                                                              \
+    case 0: packed_loop(mem, F, 0, at, step, count, out, ostride, a, l8); break;                                       \
+    case 1: packed_loop(mem, F, 1, at, step, count, out, ostride, a, l8); break;                                       \
+    case 2: packed_loop(mem, F, 2, at, step, count, out, ostride, a, l8); break;                                       \
+    default: packed_loop(mem, F, 3, at, step, count, out, ostride, a, l8); break;                                      \
+    }
+    const float *l8 = NULL;
+    if (format == 6) {
+        pthread_once(&comp8_once, comp8_init);
+        l8 = comp8_lut[2 * (a->is_signed != 0) + (a->is_integer != 0)];
+    }
+    switch (format) {
+    case 6: PACKED_E(6) return 1;
+    case 7: PACKED_E(7) return 1;
+    case 16: PACKED_E(16) return 1;
+    case 17: PACKED_E(17) return 1;
+    case 25: PACKED_E(25) return 1;
+    case 26: PACKED_E(26) return 1;
+    case 31: PACKED_E(31) return 1;
+    case 32: PACKED_E(32) return 1;
+    default: return 0;
+    }
+#undef PACKED_E
+}
+
 /* one attribute of `count` vertices from index `first`, each as a vec4 `ostride` floats after the previous one
  * (Xenia's spirv_shader_translator_fetch.cc gives the packings: X in the low bits); 0 when the format is not
  * handled. The format is chosen once, then one loop runs over the vertices. */
@@ -1910,6 +2018,11 @@ static int fetch_vertices(const xenos_cp *cp, uint32_t base, uint32_t endian, co
 {
     uint32_t step = 4 * a->stride, at = base + 4 * (a->offset + first * a->stride);
     float *o;
+    if (cp->mem && fetch_packed_mem(cp->mem, a->format, endian, at, step, count, out, ostride, a)) {
+        if (a->format == 31 || a->format == 32)
+            return 1; /* exp_adjust does not apply to floats */
+        goto adjust;
+    }
     switch (a->format) {
     case 36: /* 32_FLOAT */
     case 37: /* 32_32_FLOAT */
@@ -2015,6 +2128,7 @@ static int fetch_vertices(const xenos_cp *cp, uint32_t base, uint32_t endian, co
     default:
         return 0;
     }
+adjust:
     if (a->exp_adjust) {
         float k = ldexpf(1.0f, a->exp_adjust); /* -32..31: no shift of 32 */
         for (uint32_t v = 0; v < count; v++)
@@ -3066,7 +3180,7 @@ static uint8_t unorm8(uint32_t v, unsigned bits)
 
 /* `s` holds one texel of tex_format(format)->bytes bytes and no more: the last texel of an 8 or 16 bpp level ends its
  * buffer, which can end its page (a 1024 x 768 k_8 one in Warhammer - Battle March, XBA-318) */
-static void texel(uint32_t format, const uint8_t *s, uint8_t out[4])
+static inline __attribute__((always_inline)) void texel(uint32_t format, const uint8_t *s, uint8_t out[4])
 {
     unsigned bytes = format == 2 || format == 8 || format == 9 ? 1 : (format == 10 || format == 3 || format == 4 || format == 5 || format == 15) ? 2 : 4;
     uint32_t v = s[0] | (bytes > 1 ? (uint32_t)s[1] << 8 : 0),
@@ -3114,8 +3228,19 @@ static float half_bits(uint32_t h)
     return s ? -v : v;
 }
 
+/* WP-36: half_bits of every 16-bit pattern, made once by half_bits itself (a half-float texel took up to 8 divisions);
+ * texel_f reads it, decode_texture makes it before a float format's first texel */
+static float half_lut[65536];
+static pthread_once_t half_once = PTHREAD_ONCE_INIT;
+static void half_lut_init(void)
+{
+    for (uint32_t i = 0; i < 65536; i++)
+        half_lut[i] = half_bits(i);
+}
+
 /* a float-decoded texel: 16-bit normalised (signed per the fetch constant's sign of X), halves, floats, depth */
-static void texel_f(uint32_t format, const uint8_t *s, uint32_t sign, float out[4])
+static inline __attribute__((always_inline)) void texel_f(uint32_t format, const uint8_t *s, uint32_t sign,
+                                                          float out[4])
 {
     out[0] = out[1] = out[2] = 0.0f;
     out[3] = 1.0f;
@@ -3142,7 +3267,7 @@ static void texel_f(uint32_t format, const uint8_t *s, uint32_t sign, float out[
     case 32: {
         int n = format == 30 ? 1 : format == 31 ? 2 : 4;
         for (int i = 0; i < n; i++)
-            out[i] = half_bits(s[2 * i] | (uint32_t)s[2 * i + 1] << 8);
+            out[i] = half_lut[s[2 * i] | (uint32_t)s[2 * i + 1] << 8];
         if (n == 1)
             out[1] = out[2] = out[3] = out[0];
         break;
@@ -3173,6 +3298,42 @@ static void texel_f(uint32_t format, const uint8_t *s, uint32_t sign, float out[
     }
 }
 
+/* WP-36: a row of n texels of a 1-texel-block format, `bytes` apart: the format chosen once, then a loop with texel /
+ * texel_f folded for it (the usual formats; any other through the same functions with the format at run time) */
+#define TEXEL_ROW(F)                                                                                                   \
+    case F:                                                                                                            \
+        for (uint32_t i = 0; i < n; i++)                                                                               \
+            texel(F, s + (size_t)i * bytes, o + 4 * (size_t)i);                                                        \
+        return;
+static void texel_row(uint32_t format, const uint8_t *s, unsigned bytes, uint8_t *o, uint32_t n)
+{
+    switch (format) {
+    TEXEL_ROW(2) TEXEL_ROW(3) TEXEL_ROW(4) TEXEL_ROW(5) TEXEL_ROW(6) TEXEL_ROW(7) TEXEL_ROW(10) TEXEL_ROW(14)
+    TEXEL_ROW(15)
+    default:
+        for (uint32_t i = 0; i < n; i++)
+            texel(format, s + (size_t)i * bytes, o + 4 * (size_t)i);
+    }
+}
+#undef TEXEL_ROW
+
+#define TEXEL_ROW_F(F)                                                                                                 \
+    case F:                                                                                                            \
+        for (uint32_t i = 0; i < n; i++)                                                                               \
+            texel_f(F, s + (size_t)i * bytes, sign, o + 4 * (size_t)i);                                                \
+        return;
+static void texel_row_f(uint32_t format, const uint8_t *s, unsigned bytes, uint32_t sign, float *o, uint32_t n)
+{
+    switch (format) {
+    TEXEL_ROW_F(22) TEXEL_ROW_F(24) TEXEL_ROW_F(25) TEXEL_ROW_F(26) TEXEL_ROW_F(30) TEXEL_ROW_F(31) TEXEL_ROW_F(32)
+    TEXEL_ROW_F(36)
+    default:
+        for (uint32_t i = 0; i < n; i++)
+            texel_f(format, s + (size_t)i * bytes, sign, o + 4 * (size_t)i);
+    }
+}
+#undef TEXEL_ROW_F
+
 static uint64_t fnv(const uint8_t *p, size_t n)
 {
     uint64_t h = 1469598103934665603ull;
@@ -3193,11 +3354,39 @@ static int64_t tiled3d(int32_t x, int32_t y, int32_t z, uint32_t pitch_blocks, u
            ((oi >> 5) & 7) << 8 | (oi >> 8) << 12;
 }
 
+/* WP-36: `words` aligned dwords from physical memory with the swap mode known at compile time: each one's bytes as
+ * the little-endian host stores the word gpu_read gives */
+static inline __attribute__((always_inline)) void read_words(const uint8_t *src, uint32_t words, uint32_t endian,
+                                                             uint8_t *out)
+{
+    for (uint32_t k = 0; k < words; k++) {
+        uint32_t w;
+        memcpy(&w, src + 4 * (size_t)k, 4);
+        w = gpu_swap(w, endian);
+        memcpy(out + 4 * (size_t)k, &w, 4);
+    }
+}
+
 /* `n` bytes at a guest physical address as the GPU reads them (after its swap), a dword at a time */
 static void read_bytes(const xenos_cp *cp, uint32_t addr, uint32_t n, uint32_t endian, uint8_t *out)
 {
     uint32_t i = 0;
     while (i < n) {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        uint32_t at = (addr + i) & 0x1FFFFFFFu;
+        if (cp->mem && !(at & 3) && n - i >= 4) { /* the whole dwords, up to the end of physical memory */
+            uint32_t words = (n - i) / 4, room = (0x20000000u - at) / 4;
+            words = words < room ? words : room;
+            switch (endian & 3) {
+            case 0: read_words(cp->mem + at, words, 0, out + i); break;
+            case 1: read_words(cp->mem + at, words, 1, out + i); break;
+            case 2: read_words(cp->mem + at, words, 2, out + i); break;
+            default: read_words(cp->mem + at, words, 3, out + i); break;
+            }
+            i += 4 * words;
+            continue;
+        }
+#endif
         uint32_t a = addr + i, word = gpu_read(cp, a & ~3u, endian);
         for (uint32_t b = a & 3; b < 4 && i < n; b++, i++)
             out[i] = (uint8_t)(word >> (8 * b));
@@ -3411,12 +3600,24 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
                     read_bytes(cp, level_addr + off, bw * tf->bytes, endian, row);
                     continue;
                 }
-                for (uint32_t bx = 0; bx < bw; bx++) {
-                    uint32_t off = dim == 2 ? (uint32_t)tiled3d((int32_t)(bx + ox), (int32_t)(by + oy), (int32_t)(z + oz),
-                                                                st.pitch_blocks, st.height_blocks, bpb_log2)
-                                            : z * st.stride + (uint32_t)tiled2d((int32_t)(bx + ox), (int32_t)(by + oy),
-                                                                                st.pitch_blocks, bpb_log2);
-                    read_bytes(cp, level_addr + off, tf->bytes, endian, row + (size_t)bx * tf->bytes);
+                if (dim == 2) {
+                    for (uint32_t bx = 0; bx < bw; bx++) {
+                        uint32_t off = (uint32_t)tiled3d((int32_t)(bx + ox), (int32_t)(by + oy), (int32_t)(z + oz),
+                                                         st.pitch_blocks, st.height_blocks, bpb_log2);
+                        read_bytes(cp, level_addr + off, tf->bytes, endian, row + (size_t)bx * tf->bytes);
+                    }
+                    continue;
+                }
+                /* WP-36: in a 2D-tiled row, 16 bytes of blocks from an aligned x lie together (8 one-byte blocks):
+                 * one address and one read per run of them, the bytes read_bytes gave block by block */
+                const uint32_t per = bpb_log2 ? 16u >> bpb_log2 : 8u;
+                for (uint32_t bx = 0; bx < bw;) {
+                    uint32_t gx = bx + ox, run = per - (gx & (per - 1));
+                    run = run < bw - bx ? run : bw - bx;
+                    uint32_t off = z * st.stride + (uint32_t)tiled2d((int32_t)gx, (int32_t)(by + oy), st.pitch_blocks,
+                                                                     bpb_log2);
+                    read_bytes(cp, level_addr + off, run * tf->bytes, endian, row + (size_t)bx * tf->bytes);
+                    bx += run;
                 }
             }
         if (!cp->mem)
@@ -3434,26 +3635,32 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
             return 0;
         }
         uint32_t sign = (fc[0] >> 2) & 3;
+        if (tf->is_float)
+            pthread_once(&half_once, half_lut_init);
         for (uint32_t z = 0; z < ld; z++) {
             size_t at = (size_t)z * lw * lh;
-            for (uint32_t by = 0; by < bh; by++)
+            for (uint32_t by = 0; by < bh; by++) {
+                if (tf->block != 4) { /* one texel a block: bw is lw */
+                    const uint8_t *s = src + z * slice_n + (size_t)by * bw * tf->bytes;
+                    if (tf->is_float)
+                        texel_row_f(tf->format, s, tf->bytes, sign, (float *)out->level[l] + (at + (size_t)by * lw) * 4,
+                                    bw);
+                    else
+                        texel_row(tf->format, s, tf->bytes, (uint8_t *)out->level[l] + (at + (size_t)by * lw) * 4, bw);
+                    continue;
+                }
                 for (uint32_t bx = 0; bx < bw; bx++) {
                     const uint8_t *s = src + z * slice_n + ((size_t)by * bw + bx) * tf->bytes;
-                    if (tf->block == 4) {
-                        uint8_t q[16][4];
-                        dxt_block(s, tf->format, q);
-                        uint8_t *o = out->level[l];
-                        for (uint32_t i = 0; i < 16; i++) {
-                            uint32_t tx = bx * 4 + i % 4, ty = by * 4 + i / 4;
-                            if (tx < lw && ty < lh)
-                                memcpy(o + (at + (size_t)ty * lw + tx) * 4, q[i], 4);
-                        }
-                    } else if (tf->is_float) {
-                        texel_f(tf->format, s, sign, (float *)out->level[l] + (at + (size_t)by * lw + bx) * 4);
-                    } else {
-                        texel(tf->format, s, (uint8_t *)out->level[l] + (at + (size_t)by * lw + bx) * 4);
+                    uint8_t q[16][4];
+                    dxt_block(s, tf->format, q);
+                    uint8_t *o = out->level[l];
+                    for (uint32_t i = 0; i < 16; i++) {
+                        uint32_t tx = bx * 4 + i % 4, ty = by * 4 + i / 4;
+                        if (tx < lw && ty < lh)
+                            memcpy(o + (at + (size_t)ty * lw + tx) * 4, q[i], 4);
                     }
                 }
+            }
         }
         free(src);
     }
@@ -4415,6 +4622,46 @@ static inline __attribute__((always_inline)) void direct_rows(const xenos_cp *cp
     }
 }
 
+/* WP-36: RGBA bytes into a 16-bit format whose fields each hold one channel's unorm (3 1_5_5_5, 4 5_6_5, 5 6_5_5,
+ * 10 8_8, 15 4_4_4_4, 24 16): encode_texel of one channel alone (the others 0, which encode to 0 bits) is that
+ * channel's field, so a table per channel built with it and ORed gives the generic way's bits without its floats; the
+ * bytes of up to 8 texels (16 bytes, contiguous in a tiled row) go out in one put_bytes, whose whole dwords are what
+ * the generic way's per-texel read-modify-writes end with. (Warhammer resolves its 1280 x 720 picture to 5_6_5 twice
+ * a frame: ~19 ms per frame in encode_texel and the per-texel read-modify-write before.) */
+static int direct16_format(uint32_t f)
+{
+    return f == 3 || f == 4 || f == 5 || f == 10 || f == 15 || f == 24;
+}
+
+static void direct16_rows(const xenos_cp *cp, const resolve_dest *d, const uint8_t *px, int x0, int y0, int w, int h)
+{
+    uint16_t lut[4][256];
+    for (int c = 0; c < 4; c++)
+        for (int b = 0; b < 256; b++) {
+            float p[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            uint8_t o[16] = {0};
+            p[c] = (float)b / 255.0f; /* pix_float's value of that byte (the generic way's factor 1 leaves it so) */
+            encode_texel(d->fmt, p, o);
+            lut[c][b] = (uint16_t)(o[0] | o[1] << 8);
+        }
+    const int sr = d->swap_rb ? 2 : 0, sb = d->swap_rb ? 0 : 2; /* the source byte of the format's red / blue */
+    for (int y = 0; y < h; y++) {
+        const uint8_t *row = px + (size_t)y * w * 4;
+        for (int x = 0; x < w;) {
+            int gx = x0 + x, run = 8 - (gx & 7);
+            run = run < w - x ? run : w - x;
+            uint8_t t[16];
+            for (int i = 0; i < run; i++) {
+                const uint8_t *sp = row + (size_t)(x + i) * 4;
+                uint32_t v = lut[0][sp[sr]] | lut[1][sp[1]] | lut[2][sp[sb]] | lut[3][sp[3]];
+                t[2 * i] = (uint8_t)v, t[2 * i + 1] = (uint8_t)(v >> 8);
+            }
+            put_bytes(cp, d->base + (uint32_t)tiled2d(gx, y0 + y, d->pitch_aligned, 1), t, 2 * run, d->endian);
+            x += run;
+        }
+    }
+}
+
 /* the direct way, for the pairs it knows (with no exponent bias and a dword-aligned destination); 0 (nothing
  * written) for any other */
 static int resolve_write_direct(const xenos_cp *cp, const resolve_dest *d, const uint8_t *px, int lay, int x0, int y0,
@@ -4432,6 +4679,8 @@ static int resolve_write_direct(const xenos_cp *cp, const resolve_dest *d, const
         kind = DIRECT_HALF4;
     else if (lay == PIX_F32X4 && f == 36)
         kind = DIRECT_F32;
+    else if (lay == PIX_U8X4 && direct16_format(f))
+        return direct16_rows(cp, d, px, x0, y0, w, h), 1;
     else
         return 0;
     /* one copy of the loop per pair, swap mode and red / blue exchange: the per-texel work folds into a few
@@ -5256,8 +5505,9 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
 }
 
 /* The stencil of a depth resolve (XBA-296). GLES 3.0 cannot sample stencil, so it is read a bit at a time: for each of
- * the 8 bits a full-target pass with the stencil test on that bit marks the pixels that have it, read back at the host
- * texel of each guest pixel (the one read_depth takes). Returns w * h values, top row first, or NULL. */
+ * the 8 bits a full-target pass with the stencil test on that bit marks the pixels that have it in one colour channel
+ * (four bits a read-back, WP-36), read back at the host texel of each guest pixel (the one read_depth takes). Returns
+ * w * h values, top row first, or NULL. */
 static const char STENCIL_FS[] =
     "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(1.0); }\n";
 
@@ -5318,17 +5568,26 @@ static const uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0
     g->glViewport(0, 0, hw, hh);
     use_program(g, g->sprog);
     bind_vao(g, g->vao);
-    for (int bit = 0; bit < 8; bit++) {
+    /* WP-36: four bits a read-back, one per colour channel (the pass of bit 4 * half + c writes channel c alone): 2
+     * read-backs and CPU passes instead of 8 */
+    for (int half = 0; half < 2; half++) {
+        g->glColorMask(1, 1, 1, 1);
         g->glClearColor(0, 0, 0, 0);
         g->glClear(GL_COLOR_BUFFER_BIT);
-        g->glStencilFuncSeparate(GL_FRONT_AND_BACK, 0x0202 /* GL_EQUAL */, 0xFF, 1u << bit);
-        g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+        for (int c = 0; c < 4; c++) {
+            g->glColorMask(c == 0, c == 1, c == 2, c == 3);
+            g->glStencilFuncSeparate(GL_FRONT_AND_BACK, 0x0202 /* GL_EQUAL */, 0xFF, 1u << (4 * half + c));
+            g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+        }
         g->glReadPixels(0, y0 * sc, hw, h * sc, GL_RGBA, GL_UNSIGNED_BYTE, rows);
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-                if (rows[((size_t)y * sc * hw + (size_t)(x0 + x) * sc) * 4])
-                    out[(size_t)y * w + x] |= (uint8_t)(1u << bit);
+        for (int y = 0; y < h; y++) {
+            const uint8_t *r = rows + ((size_t)y * sc * hw + (size_t)x0 * sc) * 4;
+            uint8_t *o = out + (size_t)y * w;
+            for (int x = 0; x < w; x++, r += (size_t)sc * 4)
+                o[x] |= (uint8_t)(((r[0] != 0) | (r[1] != 0) << 1 | (r[2] != 0) << 2 | (r[3] != 0) << 3) << (4 * half));
+        }
     }
+    g->glColorMask(1, 1, 1, 1);
     g->glDisable(GL_STENCIL_TEST);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
