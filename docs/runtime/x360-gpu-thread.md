@@ -169,10 +169,12 @@ A run that stops at an unmet `WAIT_REG_MEM` sets `taken` like any other, so neit
 current run: a wait that needs the guest is the guest's to open, as with the swap back-pressure. `held` is only set
 inside a Vd* call on the worker, never across these waits; drains and states are unchanged (they run between jobs or
 ask the GL thread as before); a job's end is the worker's, which is the thread waiting, so the GL thread is still
-serving. Result on that stretch: 28 / 287 swaps with `=1`, the same as inline (over 15 G: the same draws and swaps, 2
-packets fewer, 1.1 k fewer HLE calls of the 7.7 M; the guest sees the GPU a little later, as above); the off path is byte for byte origin's (stats, end save
-state, debug output; boot and loaded-state runs). The player is paced (one job per 1/60 s of virtual time) and keeps
-its one frame of pipeline.
+serving. Result on that stretch: 28 / 287 swaps with `=1`, the same as inline (over 15 G: the same draws and swaps,
+2 packets fewer, 1.1 k fewer HLE calls of the 7.7 M; the guest sees the GPU a little later, as above; 6 repeats gave
+the same swaps), with more long swaps (72 over 20 ms against none inline). The jump wait alone did not move that
+stretch (1 swap, as before); the lag bound did. From boot, 15 G: 128 swaps before, 260 after, 292 inline. The off
+path is byte for byte origin's (stats, end save state, debug output; boot and loaded-state runs, and the homebrew
+titles). The player is paced (one job per 1/60 s of virtual time) and keeps its one frame of pipeline.
 
 Left from 5.1 / later stages: the GPU runs only while a job runs (it idles while the frame loop does audio, present
 and pacing, so overlap is within a frame); no partial hold for rewind (section 6); present on swap (section 7).
