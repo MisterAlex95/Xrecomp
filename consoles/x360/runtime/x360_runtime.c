@@ -425,8 +425,41 @@ static void stage(const char *what)
 typedef struct gpu_perf {
     x360_machine *x;
     x360_render_perf line, run; /* the totals when the line's window and the run started */
+    x360_render_perf bench;     /* when the Benchmark's window started (host_perf_bench_mark) */
     char guest[256];            /* WP-19: the second line of the same window ("x360: perf2 ...", logged after it) */
+    int gpu_thread;             /* RECOMP_X360_GPU_THREAD's verdict, for the run summary */
 } gpu_perf;
+
+/* The run summary's figures (host_perf_config.summary): the gpu and perf2 fields as numbers, per guest frame, over the
+ * run or the Benchmark; f NULL: the Benchmark's window starts now. */
+static void gpu_perf_summary(void *ctx, int which, const struct host_perf_figures *f, struct host_perf_kv *kv)
+{
+    gpu_perf *gp = ctx;
+    x360_render_perf now;
+    x360_render_perf_get(gp->x, &now);
+    if (!f) {
+        gp->bench = now;
+        return;
+    }
+    const x360_render_perf *a = which == HOST_PERF_WIN_BENCH ? &gp->bench : &gp->run;
+#define D(fl) (now.fl >= a->fl ? now.fl - a->fl : 0)
+    double k = f->guest_frames ? 1.0 / (double)f->guest_frames : 0.0, ms = k / 1e6;
+    double gpu = (double)D(gpu_ns) * ms, cpu = (double)D(cpu_ns) * ms;
+    host_perf_kv_num(kv, "gpu_ms", gpu);
+    host_perf_kv_num(kv, "gpu_cpu_ms", cpu);
+    host_perf_kv_num(kv, "gpu_wait_ms", gpu > cpu ? gpu - cpu : 0.0);
+    host_perf_kv_num(kv, "resolve_ms", (double)D(resolve_ns) * ms);
+    host_perf_kv_num(kv, "resolve_read_ms", (double)D(read_ns) * ms);
+    host_perf_kv_num(kv, "resolve_write_ms", (double)D(write_ns) * ms);
+    host_perf_kv_num(kv, "guest_cpu_ms", (double)D(guest_cpu_ns) * ms);
+    host_perf_kv_num(kv, "turns", (double)D(turns) * k);
+    if (now.gpu_timer && D(gpu_time_frames))
+        host_perf_kv_num(kv, "gpu_time_ms", (double)D(gpu_time_ns) / (double)D(gpu_time_frames) / 1e6);
+#undef D
+    host_perf_kv_word(kv, "gpu_thread", gp->gpu_thread ? "on" : "off");
+    const char *r = getenv("RECOMP_X360_RESOLVE");
+    host_perf_kv_word(kv, "resolve_mode", r && !strcmp(r, "lazy") ? "lazy" : "eager");
+}
 
 static void gpu_perf_extra(void *ctx, const struct host_perf_figures *f, int run, char *out, size_t n)
 {
@@ -601,6 +634,8 @@ int x360_runtime_run(const x360_runtime_opts *o)
     x360_render_perf_get(x, &gp.line);
     gp.run = gp.line;
     hp_cfg.extra = gpu_perf_extra, hp_cfg.extra_ctx = &gp;
+    hp_cfg.summary = gpu_perf_summary;
+    gp.gpu_thread = gpu_thread;
     host_perf hp;
     host_perf_init(&hp, &hp_cfg, t0);
 

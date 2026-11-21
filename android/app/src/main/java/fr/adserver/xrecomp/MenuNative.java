@@ -87,4 +87,10 @@ final class MenuNative {
      * expected (0: unknown) }. Cheap (two atomic loads): ShaderOverlay polls it on the UI thread.
      */
     static native int[] nativeShaderProgress();
+
+    /** The Benchmark: its window starts at the game's next host frame (host_perf_bench_mark). */
+    static native void nativeBenchMark();
+
+    /** The Benchmark: the game's frame loop writes its window's summary (JSON) to path at its next host frame. */
+    static native boolean nativeBenchTake(String path);
 }

@@ -112,6 +112,7 @@ public class ShellActivity extends SDLActivity {
         }
         ShaderWarmup.cancel(this);   // an N64 shader warm-up never runs next to a game (its GPU memory, its driver)
         applyAutoResume();
+        GamePerf.beginRun(this);   // the run summary (host_perf_line.h), for the « game » performance transaction
         applyCheats(rom != null);
         applyVkDriver(rom != null);
         Console console = applyGameSettings(rom != null);

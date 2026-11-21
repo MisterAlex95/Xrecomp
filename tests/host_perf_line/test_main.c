@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define MS 1000000ull
 
@@ -359,6 +360,122 @@ static void test_frame_time(void)
     check(f.frame_mean_ms == 0 && f.frame_p99_ms == 0, "frame time: none without a frame");
 }
 
+/* ---- The run summary and the Benchmark (game performance reports) ---------------------------------------------- */
+
+static int summary_calls, summary_marks;
+
+static void summary_cb(void *ctx, int which, const struct host_perf_figures *f, struct host_perf_kv *kv)
+{
+    (void)ctx;
+    if (!f) {
+        summary_marks++;
+        return;
+    }
+    summary_calls++;
+    host_perf_kv_num(kv, "gpu_ms", which == HOST_PERF_WIN_BENCH ? 2.5 : 1.5);
+    host_perf_kv_word(kv, "gpu_thread", "off");
+    host_perf_kv_word(kv, "bad", "Halo /storage"); /* not a word: dropped */
+    host_perf_kv_num(kv, "Bad Key", 1);             /* not a key: dropped */
+}
+
+static double json_num(const char *json, const char *key)
+{
+    char k[64];
+    snprintf(k, sizeof k, "\"%s\":", key);
+    const char *at = strstr(json, k);
+    return at ? atof(at + strlen(k)) : -1.0;
+}
+
+static char *read_text(const char *path)
+{
+    static char buf[8192];
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return NULL;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    return buf;
+}
+
+static void test_summary(void)
+{
+    host_perf p;
+    host_perf_config c = gba_cfg();
+    char json[4096];
+    c.summary = summary_cb;
+    host_perf_init(&p, &c, 0);
+    uint64_t t = 0;
+    /* 10 s at 60 fps, then 10 s at 30 fps (a frame of 33 ms and one guest frame each): 1 s samples of each */
+    for (int i = 0; i < 600; i++)
+        t = frame(&p, t, 2 * MS, 0, 0, 16666667ull, 1);
+    for (int i = 0; i < 300; i++)
+        t = frame(&p, t, 30 * MS, 0, 0, 33333333ull, 1);
+    host_perf_frame(&p, t, NULL);
+    int n = host_perf_summary_json(&p, HOST_PERF_WIN_RUN, t, 1, json, sizeof json);
+    check(n > 0 && (size_t)n < sizeof json && json[0] == '{', "summary: JSON written");
+    check(strstr(json, "\"console\":\"gba\"") && strstr(json, "\"final\":1") && strstr(json, "\"bench\":0"),
+          "summary: console, final, not a benchmark");
+    check(json_num(json, "samples") >= 18 && json_num(json, "samples") <= 20, "summary: one sample a second");
+    double med = json_num(json, "fps_shown_median"), p5 = json_num(json, "fps_shown_p5");
+    check(med > 29 && med < 61 && p5 > 29 && p5 < 31, "summary: shown fps median and 5th percentile");
+    check(fabs(json_num(json, "seconds") - 20.0) < 0.1, "summary: the run's seconds");
+    check(json_num(json, "frame_p99_ms") > 33 && json_num(json, "frame_p99_ms") < 34, "summary: frame time p99");
+    check(strstr(json, "\"stages\":{\"emu\":") && strstr(json, "\"other\":"), "summary: stages by name, the rest");
+    check(strstr(json, "\"gpu_ms\":1.500") && strstr(json, "\"gpu_thread\":\"off\""), "summary: the runtime's figures");
+    check(!strstr(json, "Halo") && !strstr(json, "Bad Key") && !strstr(json, "storage"),
+          "summary: anything but numbers and words dropped");
+
+    /* notes: in every summary from now */
+    host_perf_summary_note_num("rsp_ms", 4.25);
+    host_perf_summary_json(&p, HOST_PERF_WIN_RUN, t, 0, json, sizeof json);
+    check(json_num(json, "rsp_ms") > 4.24 && json_num(json, "rsp_ms") < 4.26, "summary: a note");
+
+    /* the file: XBA_PERF_SUMMARY (refreshed by the frame loop every 10 s, at a pause and at the run's line) */
+    char path[256];
+    snprintf(path, sizeof path, "%s/host_perf_summary_%d.json", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp",
+             (int)getpid());
+    remove(path);
+    host_perf_summary_path(path);
+    host_perf_pause(&p, t);
+    char *text = read_text(path);
+    check(text && strstr(text, "\"final\":0") && strstr(text, "\"console\":\"gba\""), "summary: written at a pause");
+    host_perf_resume(&p, t + 1000 * MS);
+    t += 1000 * MS;
+    remove(path);
+    for (int i = 0; i < 700; i++)
+        t = frame(&p, t, 2 * MS, 0, 0, 16666667ull, 1);
+    text = read_text(path);
+    check(text != NULL, "summary: refreshed by the frame loop");
+    host_perf_log_run(&p, t, NULL);
+    text = read_text(path);
+    check(text && strstr(text, "\"final\":1"), "summary: final at the run's line");
+
+    /* the Benchmark: its own window and samples; the run's window goes on */
+    char bpath[300];
+    snprintf(bpath, sizeof bpath, "%s.bench", path);
+    remove(bpath);
+    host_perf_bench_take(bpath);
+    host_perf_frame(&p, t, NULL);
+    check(read_text(bpath) == NULL, "bench: nothing before a mark");
+    host_perf_bench_mark();
+    host_perf_frame(&p, t, NULL);
+    check(summary_marks == 1, "bench: the runtime is told the window starts");
+    for (int i = 0; i < 300; i++)
+        t = frame(&p, t, 30 * MS, 0, 0, 33333333ull, 1);
+    host_perf_bench_take(bpath);
+    host_perf_frame(&p, t, NULL);
+    text = read_text(bpath);
+    check(text && strstr(text, "\"bench\":1") && strstr(text, "\"gpu_ms\":2.500"), "bench: its summary");
+    check(text && fabs(json_num(text, "seconds") - 10.0) < 0.1 && json_num(text, "fps_shown_median") < 31,
+          "bench: only the benchmark's 10 s");
+    host_perf_summary_json(&p, HOST_PERF_WIN_RUN, t, 0, json, sizeof json);
+    check(json_num(json, "seconds") > 40, "bench: the run's window goes on");
+    remove(path);
+    remove(bpath);
+    host_perf_summary_path(NULL);
+}
+
 int main(void)
 {
     printf("host_perf_line\n");
@@ -371,6 +488,7 @@ int main(void)
     test_live();
     test_budget();
     test_frame_time();
+    test_summary();
     printf("%s (%d failure%s)\n", failures ? "FAIL" : "PASS", failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

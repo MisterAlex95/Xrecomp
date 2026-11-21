@@ -57,6 +57,7 @@ extern "C" {
 enum { HOST_PERF_EMU = 0, HOST_PERF_RENDER = 1, HOST_PERF_OTHER = 2 };
 
 struct host_perf_figures;
+struct host_perf_kv;
 
 typedef struct host_perf_config {
     const char *console;                      /* the log lines' prefix: "gba" -> "gba: perf ..." */
@@ -72,6 +73,10 @@ typedef struct host_perf_config {
      * Called with the window's figures (run = 1: the run's line); writes nothing to leave the line as it is. */
     void (*extra)(void *ctx, const struct host_perf_figures *f, int run, char *out, size_t n);
     void *extra_ctx;
+    /* Optional: the runtime's own figures as numbers and fixed words for the run summary (host_perf_summary_*),
+     * over the window `which` (HOST_PERF_WIN_RUN or HOST_PERF_WIN_BENCH). f NULL: that window starts again now (the
+     * runtime keeps its counters of that moment). Called from the frame loop's thread; ctx is extra_ctx. */
+    void (*summary)(void *ctx, int which, const struct host_perf_figures *f, struct host_perf_kv *kv);
 } host_perf_config;
 
 /* Running totals since host_perf_init. */
@@ -91,7 +96,9 @@ typedef struct host_perf_window {
     uint64_t worst_ns;                        /* its slowest host frame so far */
 } host_perf_window;
 
-enum { HOST_PERF_WIN_LINE, HOST_PERF_WIN_RUN, HOST_PERF_WIN_LIVE, HOST_PERF_WINDOWS };
+/* SAMPLE: the 1 s window of the fps samples (the summary's median and 5th percentile); BENCH: the Benchmark's. */
+enum { HOST_PERF_WIN_LINE, HOST_PERF_WIN_RUN, HOST_PERF_WIN_LIVE, HOST_PERF_WIN_SAMPLE, HOST_PERF_WIN_BENCH,
+       HOST_PERF_WINDOWS };
 
 typedef struct host_perf {
     host_perf_config cfg;
@@ -104,6 +111,10 @@ typedef struct host_perf {
     uint64_t paused_at;                       /* host_perf_pause's time */
     uint64_t budget_ns;                       /* the budget in use */
     int budget_auto;                          /* it follows frame_ns (the config's budget_ns was 0) */
+    uint64_t samples;                         /* fps samples taken (host_perf_summary: the store is shared) */
+    uint64_t bench_samples;                   /* samples when the Benchmark's window started */
+    int bench_on;                             /* host_perf_bench_mark applied: the BENCH window counts */
+    uint64_t summary_t;                       /* the run summary's last refresh */
 } host_perf;
 
 /* A window's figures (host_perf_take). Per guest frame unless said otherwise. */
@@ -170,6 +181,53 @@ int host_perf_format_frames(char *out, size_t n, double worst_ms, uint64_t over_
 int host_perf_format_frame_time(char *out, size_t n, double mean_ms, double p99_ms);
 /* The host frames' mean length and 99th percentile between totals a and b (b taken after a); 0 without a frame. */
 void host_perf_frame_time(const host_perf_totals *a, const host_perf_totals *b, double *mean_ms, double *p99_ms);
+
+/* ---- The run summary (game performance reports) ------------------------------------------------------------
+ *
+ * A small JSON file the app sends as a performance transaction « game » (docs/android/app-shell.md, « Game
+ * performance »). Numbers and fixed words only: never a title, path or file name. Where it goes: the env
+ * XBA_PERF_SUMMARY (a path; unset: nothing is written), or host_perf_summary_path. It is refreshed by the frame loop
+ * every HOST_PERF_SUMMARY_NS while frames run, when the run is paused (the menu's hold, the app in the background:
+ * a held game the launcher ends later has its figures on disk) and by host_perf_log_run (final 1); written to a
+ * temporary file and renamed. Its fields:
+ *   v 1, pid, console, final (0/1), bench (0/1), seconds, guest_frames, host_frames, speed_pct, guest_fps, full_hz,
+ *   shown_fps, fps_speed_median, fps_speed_p5, fps_shown_median, fps_shown_p5, samples (1 s windows),
+ *   frame_mean_ms, frame_p99_ms, worst_ms, over_1, over_2, budget_ms, busy_ms, emu_ms, render_ms, idle_ms,
+ *   stages {name: ms per guest frame, the rest by its name}, nums {key: number}, words {key: word}
+ * (nums and words: the runtime's summary callback, then the notes). */
+#define HOST_PERF_SUMMARY_NS 10000000000ull
+#define HOST_PERF_SAMPLE_NS 1000000000ull
+#define HOST_PERF_KV_MAX 24
+
+typedef struct host_perf_kv {
+    int n;
+    struct {
+        char key[32];
+        double num;
+        char word[24];                        /* "" for a number */
+    } e[HOST_PERF_KV_MAX];
+} host_perf_kv;
+
+/* A number or a word into kv (a key again replaces it). Keys: lower case letters, digits and "_"; words: the same and
+ * "-", 23 characters at most (anything else is dropped). */
+void host_perf_kv_num(host_perf_kv *kv, const char *key, double v);
+void host_perf_kv_word(host_perf_kv *kv, const char *key, const char *word);
+
+/* The summary's file ("" or NULL: back to XBA_PERF_SUMMARY). */
+void host_perf_summary_path(const char *path);
+/* A note added to every summary written from now in this process (a runtime figure the callback cannot give: the
+ * N64's RSP over the run). */
+void host_perf_summary_note_num(const char *key, double v);
+void host_perf_summary_note_word(const char *key, const char *word);
+/* The summary of window `which` (HOST_PERF_WIN_RUN / HOST_PERF_WIN_BENCH) as JSON into out. Returns its length. */
+int host_perf_summary_json(host_perf *p, int which, uint64_t now_ns, int final, char *out, size_t n);
+/* Writes the run's summary to the summary's file now (a runtime with its own run line: the N64). 0 when written. */
+int host_perf_summary_write(host_perf *p, uint64_t now_ns, int final);
+
+/* The Benchmark (any thread; the frame loop applies them at its next host frame): mark starts the BENCH window
+ * and its samples again; take writes the BENCH window's summary to path (0 when asked). */
+void host_perf_bench_mark(void);
+int host_perf_bench_take(const char *path);
 
 #ifdef __cplusplus
 }
