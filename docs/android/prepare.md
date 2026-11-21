@@ -363,6 +363,10 @@ progress lines already name, one span each, op `prepare.<stage>`:
 | `prepare.launch` | tools.prepare started → its first progress line (Python's start-up) |
 | `prepare.identify`, `prepare.analyse`, `prepare.lift`, `prepare.compile`, `prepare.pack` | the first `XBA_PROGRESS` line with that `id=` → the next stage (or the end) |
 
+What each tools.prepare stage holds: `identify` the XBE parse, `analyse` disasm + func_id + abi_analysis, `lift`
+tools.recomp, `compile` clang on default.xbe's C files **and**, on a title with more images (XBA-82), those images'
+whole identify / analyse / lift / compile (they report inside step 4), `pack` the link and pack.json.
+
 A retry after a kill starts again at `launch`, so a stage can appear twice. A Prepare whose stamps skip work (an
 up-to-date analysis or lift) shows those stages near zero. A Prepare resumed after its process died covers only the
 resumed part (`resumes` > 0); a Prepare given up after too many deaths sends nothing.
