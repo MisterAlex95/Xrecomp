@@ -568,6 +568,8 @@ int x360_timer_arm(x360_machine *x, uint32_t obj, uint64_t due, uint32_t period,
         return -1;
     }
     *tm = (x360_timer){obj, due ? due : 1, period, apc_routine, apc_ctx, kthread};
+    if (tm->due < x->timer_lb)
+        x->timer_lb = tm->due; /* WP-32 */
     x360_w32(x, obj + 4, 0);
     x360_w64(x, obj + 0x10, X360_EPOCH + (due ? due : 1));
     x360_w32(x, obj + 0x20, dpc);
@@ -592,15 +594,26 @@ int x360_timer_cancel(x360_machine *x, uint32_t obj)
 void x360_timers_fire(x360_machine *x)
 {
     uint64_t now = x360_now(x);
+    if (x->timer_lb && now < x->timer_lb)
+        return; /* WP-32: none due yet, without the scan (every scheduler turn) */
     for (;;) {
         x360_timer *tm = NULL;
+        uint64_t next = ~0ull; /* the earliest due time of the timers not due now */
         for (int k = 0; k < X360_MAX_TIMERS; k++) {
             x360_timer *e = &x->timers[k];
-            if (e->obj && e->due && now >= e->due && (!tm || e->due < tm->due))
-                tm = e;
+            if (!e->obj || !e->due)
+                continue;
+            if (now >= e->due) {
+                if (!tm || e->due < tm->due)
+                    tm = e;
+            } else if (e->due < next) {
+                next = e->due;
+            }
         }
-        if (!tm)
+        if (!tm) {
+            x->timer_lb = next;
             return;
+        }
         uint64_t at = X360_EPOCH + tm->due;
         uint32_t dpc = x360_r32(x, tm->obj + 0x20);
         x360_w32(x, tm->obj + 4, 1);
@@ -1261,6 +1274,7 @@ static void k_MmIsAddressValid(x360_machine *x, x360_thread *t, xe_cpu *c)
 void x360_kobj_reset(x360_machine *x)
 {
     memset(&x->kobj, 0, sizeof x->kobj);
+    x->timer_lb = 0; /* WP-32: the timers change under it */
     x360_vd_defaults(x);
     for (int k = 0; k < X360_MAX_TIMERS; k++) {
         x360_timer *tm = &x->timers[k];

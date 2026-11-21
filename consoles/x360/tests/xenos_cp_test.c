@@ -149,7 +149,9 @@ int main(void)
     uint32_t w = at;
     xenos_cp_set_wptr(&cp, w);
     CHECK(cp.stalled && cp.rptr == 0 && cp.regs[0x2401] == 0 && mem[0xF000 / 4] == 0, "stalled on the wait");
+    CHECK(!xenos_cp_stall_may_end(&cp), "WP-32: a register wait that does not hold cannot end the stall");
     xenos_cp_write_reg(&cp, 0x2400, 1);
+    CHECK(xenos_cp_stall_may_end(&cp), "WP-32: the register written, the wait may hold");
     xenos_cp_set_wptr(&cp, w);
     CHECK(!cp.stalled && cp.rptr == w && cp.regs[0x2401] == 0x42 && mem[0xF000 / 4] == w, "resumed: rptr %u",
           cp.rptr);
@@ -186,11 +188,20 @@ int main(void)
     xenos_cp_set_wptr(&cp, w1);
     CHECK(cp.stalled && cp.draws == draws0 + 1 && cp.regs[0x2703] == 0x74, "stopped inside the nested buffer");
     CHECK(cp.regs[0x2700] == 0 && cp.regs[0x2701] == 0 && cp.regs[0x2702] == 0, "nothing after the wait has run");
+    CHECK(!xenos_cp_stall_may_end(&cp), "WP-32: the memory wait in the nested buffer does not hold");
+    mem[0xC104 / 4] = 1; /* another word: still not */
+    CHECK(!xenos_cp_stall_may_end(&cp), "WP-32: another word written, still not");
+    mem[0xD100 / 4 + 4] ^= 1; /* the wait's own packet rewritten (its address): may end */
+    CHECK(xenos_cp_stall_may_end(&cp), "WP-32: the wait's packet changed in memory");
+    mem[0xD100 / 4 + 4] ^= 1;
     xenos_cp_set_wptr(&cp, w1); /* polled again while it does not hold */
+    CHECK(!xenos_cp_stall_may_end(&cp), "WP-32: recorded again by the retry");
     CHECK(cp.stalled && cp.draws == draws0 + 1 && cp.regs[0x2700] == 0, "still stopped, nothing run twice");
     mem[0xC100 / 4] = 1;
+    CHECK(xenos_cp_stall_may_end(&cp), "WP-32: the memory word written, the wait holds");
     cp.regs[0x2703] = 0;
     xenos_cp_set_wptr(&cp, w1);
+    CHECK(xenos_cp_stall_may_end(&cp), "WP-32: not stalled");
     CHECK(!cp.stalled && cp.draws == draws0 + 1, "resumed: the draw before the wait is not repeated");
     CHECK(cp.regs[0x2700] == 0x71 && cp.regs[0x2701] == 0x72 && cp.regs[0x2702] == 0x73,
           "the rest of both buffers, then the ring: %X %X %X", cp.regs[0x2700], cp.regs[0x2701], cp.regs[0x2702]);

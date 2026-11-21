@@ -587,8 +587,25 @@ int x360_gpu_run(x360_machine *x)
     return 1;
 }
 
+/* WP-32: 1 when posting the same write pointer again for a stalled ring would do nothing: the run half runs here
+ * (not deferred), nothing posted is waiting, the retry would stop at the same wait (xenos_cp_stall_may_end: same
+ * packet, condition still false) and the read pointer it writes back is already there. Then the poll does not post;
+ * the wait is looked at again at the next one (every scheduler turn), as the retry would have. */
+static int stall_retry_useless(x360_machine *x, struct x360_gpu *g, uint32_t w)
+{
+    uint32_t size_dw = g->cp.rb_size / 4;
+    if (g->deferred || !g->cp.stalled || !size_dw || w % size_dw != g->cp.wptr)
+        return 0;
+    uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_RELAXED);
+    if ((uint32_t)(post >> 32) != __atomic_load_n(&g->link.taken, __ATOMIC_RELAXED))
+        return 0;
+    if (g->cp.rptr_writeback && g->cp.write32 && phys_read(x, g->cp.rptr_writeback & 0x1FFFFFFFu) != g->cp.rptr)
+        return 0;
+    return !xenos_cp_stall_may_end(&g->cp);
+}
+
 /* Post half, first part: the registers titles poll, and the write pointer posted when the title moved it (or the
- * run half stalled on a wait: it looks again). Guest thread. */
+ * run half stalled on a wait that may hold now: it looks again). Guest thread. */
 static void gpu_post(x360_machine *x, struct x360_gpu *g, uint64_t now)
 {
     /* registers titles poll: the vertical counter, the display interrupt status, the viewport size. The status
@@ -599,7 +616,8 @@ static void gpu_post(x360_machine *x, struct x360_gpu *g, uint64_t now)
     x360_w32(x, GPU_MMIO + 4 * 0x1961, 1280u << 16 | 720u);
     if (g->ring) {
         uint32_t w = x360_r32(x, GPU_MMIO + 4 * XENOS_REG_CP_RB_WPTR);
-        if (w != g->last_wptr || __atomic_load_n(&g->link.stalled, __ATOMIC_RELAXED)) {
+        if (w != g->last_wptr ||
+            (__atomic_load_n(&g->link.stalled, __ATOMIC_RELAXED) && !stall_retry_useless(x, g, w))) {
             g->last_wptr = w;
             uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_RELAXED);
             /* release: the ring's packets (and what they point at), stored by the guest before it moved the write

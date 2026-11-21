@@ -229,6 +229,10 @@ struct x360_machine {
     uint32_t next_thread_id;
     x360_handle handles[X360_MAX_HANDLES];
     x360_timer timers[X360_MAX_TIMERS];
+    /* WP-32 (host state, not in save states): no armed timer is due before timer_lb (a lower bound, 0: unknown;
+     * x360_timer_arm lowers it, x360_timers_fire makes it exact, kobj_reset and a state load clear it); and the
+     * virtual time KeTimeStampBundle was last written for, plus 1 (0: write it at the next turn) */
+    uint64_t timer_lb, bundle_written;
     x360_audio_client audio[8];
     uint32_t audio_cells;     /* 8 guest words, client k's argument at + 4k (x360_more.c), 0: not made yet */
     x360_pad_slot pads[4];

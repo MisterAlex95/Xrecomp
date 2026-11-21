@@ -645,11 +645,13 @@ int x360_run(x360_machine *x, uint64_t insns)
         x360_audio_poll(x);
         x360_xma_poll(x);
         x360_input_poll(x);
-        if (x->timestamp_bundle) { /* KeTimeStampBundle: interrupt time, system time, tick count (ms) */
-            uint64_t now = x360_now(x);
-            x360_w64(x, x->timestamp_bundle, now);
-            x360_w64(x, x->timestamp_bundle + 8, X360_EPOCH + now);
-            x360_w32(x, x->timestamp_bundle + 16, (uint32_t)(now / 10000));
+        uint64_t bnow = x->timestamp_bundle ? x360_now(x) : 0;
+        if (x->timestamp_bundle && x->bundle_written != bnow + 1) {
+            /* KeTimeStampBundle: interrupt time, system time, tick count (ms); WP-32: when the time moved */
+            x->bundle_written = bnow + 1;
+            x360_w64(x, x->timestamp_bundle, bnow);
+            x360_w64(x, x->timestamp_bundle + 8, X360_EPOCH + bnow);
+            x360_w32(x, x->timestamp_bundle + 16, (uint32_t)(bnow / 10000));
         }
         int picked = x360_kdpc_ready(x); /* a DPC runs ahead of every thread */
         for (int n = 1; picked < 0 && n <= x->nthreads; n++) {
