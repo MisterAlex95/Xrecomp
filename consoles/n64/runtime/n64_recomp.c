@@ -889,6 +889,7 @@ void n64_recomp_run(n64_machine *m)
                 uint32_t n = n64_cpu_step_handed(m, &s->interp_left, &chained);
                 s->stats.fallbacks += n;
                 s->stats.interp_ram += n;
+                s->stats.handed++;
                 if (chained)
                     s->interp_pc = c->pc;
                 continue;
