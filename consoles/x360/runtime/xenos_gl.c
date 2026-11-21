@@ -213,7 +213,12 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei))                            \
     X(void, glGetInternalformativ, (GLenum, GLenum, GLenum, GLsizei, GLint *))                                        \
     X(void, glUniform3i, (GLint, GLint, GLint, GLint))                                                               \
-    X(void, glInvalidateFramebuffer, (GLenum, GLsizei, const GLenum *))
+    X(void, glInvalidateFramebuffer, (GLenum, GLsizei, const GLenum *))                                               \
+    X(void, glGenSamplers, (GLsizei, GLuint *))                                                                        \
+    X(void, glDeleteSamplers, (GLsizei, const GLuint *))                                                               \
+    X(void, glBindSampler, (GLuint, GLuint))                                                                           \
+    X(void, glSamplerParameteri, (GLuint, GLenum, GLint))                                                              \
+    X(void, glSamplerParameterf, (GLuint, GLenum, GLfloat))
 
 #define MAX_ATTRS 16
 #define UBO_BLOCK (4096 + 32 + 128 + 48) /* upload_constants: one stage's uniform block */
@@ -271,6 +276,7 @@ typedef struct texture {
     uint32_t checked; /* the epoch its memory was last compared in */
     int copy;         /* 1 + the resolve copy it was made from (its host picture, at the internal resolution) */
     int direct;       /* WP-18: tex is that copy's own texture (the fetch constant's size is the picture's), not ours */
+    uint32_t swz;     /* WP-24: 1 + the GL swizzle last set on tex (0: unknown); a direct one's is the copy's */
     int swap_rb;      /* that copy's: red and blue are the other way round from the memory the fetch constant reads */
     int levels;       /* mip levels uploaded */
     int copy_w, copy_h; /* a copy's texture: its host size and internal format (kept for the next copy that fits) */
@@ -328,6 +334,7 @@ typedef struct rt_copy {
     uint32_t checks;       /* sparse checks since the last full one (COPY_FULL_EVERY) */
     GLuint tex;            /* the destination's pitch x th at the internal resolution, top row first */
     int w, h;              /* pitch and height, both 32-aligned: the memory it stands for */
+    uint32_t swz;          /* WP-24: 1 + the GL swizzle last set on tex (0: unknown) */
     int th;                /* WP-18: the picture's rows: RB_COPY_DEST_PITCH's height (or what was resolved past it),
                             * aligned only when that is unset, so that a texture of the destination's own size samples
                             * the picture itself */
@@ -426,6 +433,15 @@ struct xenos_gl {
     int show_w, show_h;
     GLint frame_swz[4];       /* the swizzle last set on the frame's texture */
     int copy_direct;          /* WP-18: copies sampled and shown in place (RECOMP_X360_COPY_TEXTURES=blit: not) */
+    /* WP-24: GLES 3 sampler objects, one per sampling state met (wraps, filters, anisotropy), bound per unit (the
+     * texture keeps its swizzle and mip range). RECOMP_X360_SAMPLERS=0: texture parameters every bind, as before. */
+    int samplers_on;
+    struct {
+        uint32_t key;
+        GLuint id;
+    } sampler[64];
+    int nsampler;
+    GLuint unit_sampler[32];  /* what each texture unit has bound (units used by bind_textures and the passes) */
     GLenum frame_fmt;         /* frame_tex's internal format */
     uint8_t *frame;
     char cache[512], frames[512];
@@ -849,6 +865,10 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     if (g->depth_untouched)
         fprintf(stderr, "xenos: draws that do not use depth leave the depth surface untouched "
                         "(RECOMP_X360_UNUSED_DEPTH=untouched)\n");
+    const char *smp_env = getenv("RECOMP_X360_SAMPLERS"); /* on (default) | 0 (WP-24) */
+    g->samplers_on = !(smp_env && !strcmp(smp_env, "0"));
+    if (!g->samplers_on)
+        fprintf(stderr, "xenos: texture sampling state as texture parameters (RECOMP_X360_SAMPLERS=0)\n");
     const char *ct_env = getenv("RECOMP_X360_COPY_TEXTURES"); /* direct (default) | blit (WP-18) */
     g->copy_direct = !(ct_env && !strcmp(ct_env, "blit"));
     if (!g->copy_direct)
@@ -1024,6 +1044,8 @@ void xenos_gl_destroy(xenos_gl *g)
             g->glDeleteProgram(g->aprog);
         if (g->frame_tex)
             g->glDeleteTextures(1, &g->frame_tex);
+        for (int i = 0; i < g->nsampler; i++)
+            g->glDeleteSamplers(1, &g->sampler[i].id);
         g->glDeleteVertexArrays(1, &g->vao);
         g->glDeleteFramebuffers(1, &g->fbo);
         g->glDeleteFramebuffers(1, &g->rfbo);
@@ -3301,6 +3323,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
                     tf = rc->ifmt == GL_R32F ? GL_RED : GL_RG, tt = GL_FLOAT;
                 t->tex = new_texture(g, rc->ifmt, tf, tt, hw, hh);
                 t->copy_w = hw, t->copy_h = hh, t->copy_ifmt = rc->ifmt;
+                t->swz = 0;
             }
             blit_tex(g, rc->tex, t->tex, 0, 0, (int)w, (int)h, 0, 0, 1);
             t->copy = 1 + (int)(rc - g->copies);
@@ -3341,6 +3364,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     if (t->tex && !t->direct) /* a texture object keeps its first target and sizes: a new one */
         g->glDeleteTextures(1, &t->tex);
     t->direct = 0;
+    t->swz = 0;
     g->glGenTextures(1, &t->tex);
     t->copy = 0;
     t->swap_rb = 0;
@@ -3427,33 +3451,99 @@ static uint32_t swizzle_as_decoded(uint32_t swizzle, uint32_t format)
  * (2) samples the base level only, as a filter without mipmaps does (Xenia's mip_base_map: MaxLOD = MinLOD). Xenia's
  * base level there is mip_min_level; decode_texture uploads level 0 alone for a base map fetch constant, so one
  * with mip_min_level >= 1 still reads level 0 from the base address. */
-static void sampler_state(xenos_gl *g, GLenum target, const uint32_t *fc, int mipped, int copy)
+/* WP-24: unit `unit` without a sampler object (the passes' texelFetch: a depth or float texture would be incomplete
+ * under a filtering sampler) */
+static void unit_plain(xenos_gl *g, int unit)
+{
+    if (unit < 32 && g->unit_sampler[unit]) {
+        g->glBindSampler((GLuint)unit, 0);
+        g->unit_sampler[unit] = 0;
+    }
+}
+
+/* WP-24: the sampler object of a sampling state (made at first use; the table full: 0, texture parameters instead) */
+static GLuint sampler_of(xenos_gl *g, uint32_t key, GLint ws, GLint wt, GLint wr, GLint mag, GLint min, float aniso)
+{
+    for (int i = 0; i < g->nsampler; i++)
+        if (g->sampler[i].key == key)
+            return g->sampler[i].id;
+    if (g->nsampler == (int)(sizeof g->sampler / sizeof g->sampler[0]))
+        return 0;
+    GLuint id = 0;
+    g->glGenSamplers(1, &id);
+    if (!id)
+        return 0;
+    g->glSamplerParameteri(id, GL_TEXTURE_WRAP_S, ws);
+    g->glSamplerParameteri(id, GL_TEXTURE_WRAP_T, wt);
+    g->glSamplerParameteri(id, GL_TEXTURE_WRAP_R, wr);
+    g->glSamplerParameteri(id, GL_TEXTURE_MAG_FILTER, mag);
+    g->glSamplerParameteri(id, GL_TEXTURE_MIN_FILTER, min);
+    if (aniso > 0.0f)
+        g->glSamplerParameterf(id, 0x84FE /* GL_TEXTURE_MAX_ANISOTROPY_EXT */, aniso);
+    g->sampler[g->nsampler].key = key, g->sampler[g->nsampler].id = id;
+    g->nsampler++;
+    return id;
+}
+
+/* a texture's sampling state from its fetch constant: wraps, filters (mips when it has them), swizzle. copy: 0 the
+ * texture was decoded from memory, 1 it is a resolve's host picture, 3 one kept with red and blue unswapped. The
+ * fetch constant's mip range (dword 4: mip_min_level bits 2-5, mip_max_level 6-9) is the texture's own
+ * GL_TEXTURE_BASE_LEVEL / MAX_LEVEL (texture_of), GL's LOD counting from the base level; the mip filter "base map"
+ * (2) samples the base level only, as a filter without mipmaps does (Xenia's mip_base_map: MaxLOD = MinLOD). Xenia's
+ * base level there is mip_min_level; decode_texture uploads level 0 alone for a base map fetch constant, so one
+ * with mip_min_level >= 1 still reads level 0 from the base address. WP-24: the wraps and filters are a sampler
+ * object bound to `unit`, the swizzle is set on the texture when it is not the one last set there (*swz_cache:
+ * 1 + that swizzle, 0 unknown). */
+static void sampler_state(xenos_gl *g, int unit, GLenum target, const uint32_t *fc, int mipped, int copy,
+                          uint32_t *swz_cache)
 {
     static const GLint swz[6] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};
     if (((fc[3] >> 23) & 3) == 2)
         mipped = 0;
-    g->glTexParameteri(target, GL_TEXTURE_WRAP_S, wrap_mode((fc[0] >> 10) & 7));
-    g->glTexParameteri(target, GL_TEXTURE_WRAP_T, wrap_mode((fc[0] >> 13) & 7));
-    g->glTexParameteri(target, GL_TEXTURE_WRAP_R, wrap_mode((fc[0] >> 16) & 7));
+    uint32_t cs = (fc[0] >> 10) & 7, ct = (fc[0] >> 13) & 7, cr = (fc[0] >> 16) & 7;
     int mag = ((fc[3] >> 19) & 3) == 1, min = ((fc[3] >> 21) & 3) == 1, mip = ((fc[3] >> 23) & 3) == 1;
     if (g->tex_linear) /* XBA-282: the app's texture filter */
         mag = min = mip = 1;
-    if (g->tex_aniso > 1)
-        g->glTexParameterf(target, 0x84FE /* GL_TEXTURE_MAX_ANISOTROPY_EXT */, mipped ? g->tex_aniso : 1.0f);
-    g->glTexParameteri(target, GL_TEXTURE_MAG_FILTER, mag ? GL_LINEAR : GL_NEAREST);
-    g->glTexParameteri(target, GL_TEXTURE_MIN_FILTER,
-                       !mipped ? (min ? GL_LINEAR : GL_NEAREST)
-                       : min   ? (mip ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST)
-                               : (mip ? GL_NEAREST_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST));
+    GLint gmag = mag ? GL_LINEAR : GL_NEAREST;
+    GLint gmin = !mipped ? (min ? GL_LINEAR : GL_NEAREST)
+                 : min   ? (mip ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST)
+                         : (mip ? GL_NEAREST_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST);
+    float aniso = g->tex_aniso > 1 ? (mipped ? g->tex_aniso : 1.0f) : 0.0f;
+    GLuint smp = 0;
+    if (g->samplers_on && unit < 32) {
+        uint32_t key = wrap_mode(cs) == GL_REPEAT ? 0 : wrap_mode(cs) == GL_MIRRORED_REPEAT ? 1 : 2;
+        key |= (wrap_mode(ct) == GL_REPEAT ? 0u : wrap_mode(ct) == GL_MIRRORED_REPEAT ? 1u : 2u) << 2;
+        key |= (wrap_mode(cr) == GL_REPEAT ? 0u : wrap_mode(cr) == GL_MIRRORED_REPEAT ? 1u : 2u) << 4;
+        key |= (uint32_t)mag << 6 | (uint32_t)(gmin - GL_NEAREST) << 7 | (uint32_t)(aniso > 1.0f) << 16 |
+               (uint32_t)(aniso > 0.0f) << 17;
+        smp = sampler_of(g, key, wrap_mode(cs), wrap_mode(ct), wrap_mode(cr), gmag, gmin, aniso);
+    }
+    if (unit < 32 && g->unit_sampler[unit] != smp) {
+        g->glBindSampler((GLuint)unit, smp);
+        g->unit_sampler[unit] = smp;
+    }
+    if (!smp) {
+        g->glTexParameteri(target, GL_TEXTURE_WRAP_S, wrap_mode(cs));
+        g->glTexParameteri(target, GL_TEXTURE_WRAP_T, wrap_mode(ct));
+        g->glTexParameteri(target, GL_TEXTURE_WRAP_R, wrap_mode(cr));
+        if (aniso > 0.0f)
+            g->glTexParameterf(target, 0x84FE /* GL_TEXTURE_MAX_ANISOTROPY_EXT */, aniso);
+        g->glTexParameteri(target, GL_TEXTURE_MAG_FILTER, gmag);
+        g->glTexParameteri(target, GL_TEXTURE_MIN_FILTER, gmin);
+    }
     uint32_t swizzle = (fc[3] >> 1) & 0xFFF;
     if (copy)
         swizzle = swizzle_as_decoded(swizzle, fc[1] & 63);
     if (copy & 2)
         swizzle = swizzle_swap_rb(swizzle);
+    if (swz_cache && *swz_cache == 1 + swizzle && g->samplers_on)
+        return;
     for (int c = 0; c < 4; c++) {
         uint32_t s = (swizzle >> (3 * c)) & 7;
         g->glTexParameteri(target, GL_TEXTURE_SWIZZLE_R + (GLenum)c, s < 6 ? swz[s] : GL_ZERO);
     }
+    if (swz_cache)
+        *swz_cache = 1 + swizzle;
 }
 
 /* what the texture queries read of a fetch constant (XBA-296): the guest size, and two bits an axis for its border
@@ -3496,8 +3586,8 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
         const uint32_t *fi = &cp->regs[0x4800 + 6 * (p->sampler_fetch[i] & 31)];
         for (int j = 0; j < i; j++) {
             const uint32_t *fj = &cp->regs[0x4800 + 6 * (p->sampler_fetch[j] & 31)];
-            if (texs[j] == texs[i] && (((fi[0] ^ fj[0]) & 0x7FC00u) || ((fi[3] ^ fj[3]) & 0x01FFFFFEu) ||
-                                       ((fi[1] ^ fj[1]) & 63))) {
+            uint32_t m0 = g->samplers_on ? 0 : 0x7FC00u, m3 = g->samplers_on ? 0x1FFEu : 0x01FFFFFEu;
+            if (texs[j] == texs[i] && (((fi[0] ^ fj[0]) & m0) || ((fi[3] ^ fj[3]) & m3) || ((fi[1] ^ fj[1]) & 63))) {
                 texs[i] = texture_of(g, cp, fi, p->sampler_dim[i], 1);
                 break;
             }
@@ -3515,13 +3605,16 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
             continue;
         }
         int mipped = 0, copy = 0;
+        uint32_t *cache = NULL;
         for (int t = 0; t < MAX_TEXTURES; t++)
             if (g->textures[t].tex == tex) {
-                mipped = !g->textures[t].copy && g->textures[t].levels > 1;
-                copy = g->textures[t].copy ? (g->textures[t].swap_rb ? 3 : 1) : 0;
+                texture *e = &g->textures[t];
+                mipped = !e->copy && e->levels > 1;
+                copy = e->copy ? (e->swap_rb ? 3 : 1) : 0;
+                cache = e->direct ? &g->copies[e->copy - 1].swz : &e->swz;
                 break;
             }
-        sampler_state(g, target, fc, mipped, copy);
+        sampler_state(g, i, target, fc, mipped, copy, cache);
     }
     g->glActiveTexture(GL_TEXTURE0);
 }
@@ -4071,6 +4164,7 @@ static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint3
         upload_fmt(s->ifmt, &tf, &tt);
         rc->tex = new_texture(g, s->ifmt, tf, tt, (int)pitch_aligned * g->scale, th * g->scale);
         rc->ifmt = s->ifmt, rc->w = (int)pitch_aligned, rc->h = (int)height_aligned, rc->th = th;
+        rc->swz = 0;
         rc->swap_rb = swap_rb, rc->fmt = fmt, rc->endian = endian;
         rc->base = base, rc->bytes = bytes;
     }
@@ -4220,6 +4314,7 @@ static const uint32_t *read_depth(xenos_gl *g, const surface *s, int x0, int y0,
     g->glViewport(0, 0, w, h);
     g->glUseProgram(g->dprog);
     g->glActiveTexture(GL_TEXTURE0);
+    unit_plain(g, 0); /* WP-24 */
     g->glBindTexture(GL_TEXTURE_2D, s->tex);
     g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -4352,6 +4447,7 @@ static int alias_copy(xenos_gl *g, const surface *d, const surface *s, int dy, i
     g->glViewport(0, 0, d->w * k, d->h * k);
     g->glUseProgram(g->aprog);
     g->glActiveTexture(GL_TEXTURE0);
+    unit_plain(g, 0); /* WP-24 */
     g->glBindTexture(GL_TEXTURE_2D, s->tex);
     g->glUniform1i(g->glGetUniformLocation(g->aprog, "t"), 0);
     g->glUniform3i(g->aprog_off, 0, -dy * k, 0);
@@ -4561,6 +4657,7 @@ static void surface_reload(xenos_gl *g, surface *s)
     g->glDisable(GL_CULL_FACE);
     g->glViewport(0, 0, hw, hh);
     g->glActiveTexture(GL_TEXTURE0);
+    unit_plain(g, 0); /* WP-24 */
     g->glBindTexture(GL_TEXTURE_2D, s->tex);
     g->glBindVertexArray(g->vao);
     if (depth) {
@@ -4861,6 +4958,7 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
                     upload_fmt(s->ifmt, &tf, &tt);
                     rc->tex = new_texture(g, s->ifmt, tf, tt, (int)pitch_aligned * sc, th * sc);
                     rc->ifmt = s->ifmt, rc->w = (int)pitch_aligned, rc->h = (int)height_aligned, rc->th = th;
+                    rc->swz = 0;
                 }
                 rc->base = base & 0x1FFFF000u;
                 rc->bytes = pitch_aligned * height_aligned * (uint32_t)bpp;
@@ -5094,6 +5192,7 @@ static int bind_vertex_buffers(xenos_gl *g, const xenos_cp *cp, const program *p
         if (g->npending) /* lazy resolves under the buffer: written first */
             flush_range(g, cp, base, (uint32_t)(base + span));
         g->glActiveTexture(GL_TEXTURE0 + (GLenum)(p->nsamplers + i));
+        unit_plain(g, p->nsamplers + i); /* WP-24: texelFetch of a float texture: no filtering sampler there */
         if (cp->mem && (c0 & ~3u) < 0x20000000u && base + span <= 0x20000000u) {
             int fresh;
             vb_cached *c = vertex_buffer_cached(g, cp, at, base, c1, count, (uint32_t)span, &fresh);
@@ -5526,6 +5625,7 @@ static int frame_encode(xenos_gl *g, GLuint src, int fw, int fh)
     g->glViewport(0, 0, fw * k, fh * k);
     g->glUseProgram(g->aprog);
     g->glActiveTexture(GL_TEXTURE0);
+    unit_plain(g, 0); /* WP-24 */
     g->glBindTexture(GL_TEXTURE_2D, src);
     g->glUniform1i(g->glGetUniformLocation(g->aprog, "t"), 0);
     g->glUniform3i(g->aprog_off, 0, 0, 0);
@@ -5642,6 +5742,8 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
             g->frame_swz[c] = sel < 6 ? swz[sel] : GL_ZERO;
             g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R + (GLenum)c, g->frame_swz[c]);
         }
+        if (g->frame_copy)
+            g->copies[g->frame_copy - 1].swz = 0; /* its swizzle is the frame's now: set again when sampled */
         if (g->readback) {
             const uint8_t *px = read_raw(g, shown, rf, 0, 0, fw, fh);
             int lay = pix_layout(rf);
@@ -5713,6 +5815,8 @@ void xenos_gl_end_frame(xenos_gl *g)
     g->glDisable(GL_POLYGON_OFFSET_FILL);
     g->glColorMask(1, 1, 1, 1);
     g->glFrontFace(GL_CCW);
+    for (int i = 0; i < 32; i++) /* WP-24: the owner samples its own textures with their own parameters */
+        unit_plain(g, i);
     g->glActiveTexture(GL_TEXTURE0);
     g->glBindVertexArray(0);
     g->glUseProgram(0);
