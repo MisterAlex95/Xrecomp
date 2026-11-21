@@ -45,6 +45,7 @@ static inline xe_v128 xv_exptefp(xe_v128 b)
     xe_v128 r;
     for (int k = 0; k < 4; k++)
         r.f32[k] = exp2f(b.f32[k]);
+    XV_FIX1(r, b); /* NaN in: vB quieted; log2 of a negative number: the QNaN */
     return r;
 }
 
@@ -53,6 +54,7 @@ static inline xe_v128 xv_logefp(xe_v128 b)
     xe_v128 r;
     for (int k = 0; k < 4; k++)
         r.f32[k] = log2f(b.f32[k]);
+    XV_FIX1(r, b); /* NaN in: vB quieted; log2 of a negative number: the QNaN */
     return r;
 }
 

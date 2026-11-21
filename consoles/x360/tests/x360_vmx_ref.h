@@ -17,6 +17,11 @@
     X(xv_addsbs) X(xv_addshs) X(xv_addsws) X(xv_addubs) X(xv_adduhs) X(xv_adduws) X(xv_subsbs) X(xv_subshs)            \
     X(xv_subsws) X(xv_sububs) X(xv_subuhs) X(xv_subuws)
 
+/* float ops (a, b), (a, c, b) as the helpers take them, (b): the lifter's operands */
+#define XV_REF_F2(X) X(xv_addfp) X(xv_subfp) X(xv_mulfp) X(xv_maxfp) X(xv_minfp) X(xv_msum3fp) X(xv_msum4fp)
+#define XV_REF_F3(X) X(xv_maddfp) X(xv_nmsubfp)
+#define XV_REF_F1(X) X(xv_refp) X(xv_rsqrtefp) X(xv_exptefp) X(xv_logefp) X(w_rfin) X(w_rfiz) X(w_rfip) X(w_rfim)
+
 typedef xe_v128 (*xv_ref_bin)(xe_v128, xe_v128);
 typedef xe_v128 (*xv_ref_sat)(xe_v128, xe_v128, uint32_t *);
 
@@ -40,6 +45,13 @@ typedef struct xv_ref_set {
     xe_v128 (*daz)(uint32_t, xe_v128);
     xe_v128 (*lvsl)(uint32_t);
     xe_v128 (*lvsr)(uint32_t);
+    xv_ref_bin f2[16];
+    xe_v128 (*f3[4])(xe_v128, xe_v128, xe_v128);
+    xe_v128 (*f1[16])(xe_v128);
+    xe_v128 (*cfsx)(xe_v128, int);
+    xe_v128 (*cfux)(xe_v128, int);
+    xe_v128 (*ctsxs)(xe_v128, int, uint32_t *);
+    xe_v128 (*ctuxs)(xe_v128, int, uint32_t *);
 } xv_ref_set;
 
 #define XV_REF_SET(set_)                                                                                               \
@@ -67,9 +79,18 @@ typedef struct xv_ref_set {
         else                                                                                                           \
             xv_stve(m, ea, v, 4);                                                                                      \
     }                                                                                                                  \
+    static xe_v128 w_rfin(xe_v128 b) { return xv_rfi(b, 0); }                                                         \
+    static xe_v128 w_rfiz(xe_v128 b) { return xv_rfi(b, 1); }                                                         \
+    static xe_v128 w_rfip(xe_v128 b) { return xv_rfi(b, 2); }                                                         \
+    static xe_v128 w_rfim(xe_v128 b) { return xv_rfi(b, 3); }                                                         \
+    static xe_v128 w_cfsx(xe_v128 b, int i) { return xv_cfsx(b, i); }                                                 \
+    static xe_v128 w_cfux(xe_v128 b, int i) { return xv_cfux(b, i); }                                                 \
+    static xe_v128 w_ctsxs(xe_v128 b, int i, uint32_t *v) { return xv_ctsxs(b, i, v); }                               \
+    static xe_v128 w_ctuxs(xe_v128 b, int i, uint32_t *v) { return xv_ctuxs(b, i, v); }                               \
     const xv_ref_set set_ = {{XV_REF_BIN(XV_REF_PTR)}, {XV_REF_SAT(XV_REF_PTR)}, w_mrgb, w_mrgh, w_pkh, xv_perm,     \
                              w_sldoi, w_to, w_from, xv_lvlx, xv_lvrx, xv_stvlx, xv_stvrx, w_lve, w_stve, xv_daz,     \
-                             xv_lvsl, xv_lvsr};
+                             xv_lvsl, xv_lvsr, {XV_REF_F2(XV_REF_PTR)}, {XV_REF_F3(XV_REF_PTR)},                     \
+                             {XV_REF_F1(XV_REF_PTR)}, w_cfsx, w_cfux, w_ctsxs, w_ctuxs};
 #define XV_REF_PTR(n) n,
 
 extern const xv_ref_set xv_ref_fast, xv_ref_scalar;
