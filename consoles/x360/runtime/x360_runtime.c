@@ -482,7 +482,7 @@ int x360_runtime_run(const x360_runtime_opts *o)
         x360_destroy(x);
         if (lib)
             dlclose(lib);
-        return -1;
+        return X360_RUN_PACK_REFUSED;
     }
     if (getenv("RECOMP_X360_INTERP") && !strcmp(getenv("RECOMP_X360_INTERP"), "0"))
         x360_set_interp(x, 0); /* XBA-283: stop at the first missed address, as before */

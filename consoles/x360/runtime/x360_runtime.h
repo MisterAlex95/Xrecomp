@@ -52,8 +52,10 @@ typedef struct x360_runtime_opts {
 
 void x360_runtime_opts_init(x360_runtime_opts *o);
 
-/* Plays o->xex until the player quits, o->frames ran or the title stops. 0, or -1 when it cannot start. Logs
- * "x360: ..." lines on stdout, the perf line among them. */
+/* Plays o->xex until the player quits, o->frames ran or the title stops. 0, or -1 when it cannot start
+ * (X360_RUN_PACK_REFUSED when the pack cannot be loaded or bound: Prepare it again, e.g. a pack prepared for 4 KB pages
+ * on a device of 16 KB ones, WP-33). Logs "x360: ..." lines on stdout, the perf line among them. */
+#define X360_RUN_PACK_REFUSED (-2)
 int x360_runtime_run(const x360_runtime_opts *o);
 
 /* The app shell's entry point (pack_loader.c): xex the plain title, pack_lib its library, title_key its key; the pack's

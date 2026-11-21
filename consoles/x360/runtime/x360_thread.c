@@ -1110,8 +1110,10 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
         return -1;
     }
     if (total && x->m.view4k_skew && !(pack->features & XE_RC_FEAT_VIEW4K)) {
-        x360_fail(x, "the pack was built for hosts of 4 KB pages (this one's are %u bytes): build it again, with "
-                     "XE_VIEW4K_DYNAMIC=1", (unsigned)x->host_page);
+        /* WP-33: Prepare builds a pack without view4k_skew where the device's pages are 4 KB; a pack restored or
+         * copied onto a device of larger pages lands here */
+        x360_fail(x, "the pack was prepared for a device with 4 KB memory pages (this one's are %u bytes): Prepare it "
+                     "again on this device (XE_VIEW4K_DYNAMIC=1)", (unsigned)x->host_page);
         return -1;
     }
     if (!total) { /* XBA-283: nothing lifted, the interpreter runs it all (tests) */
