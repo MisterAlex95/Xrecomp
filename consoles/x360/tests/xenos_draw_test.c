@@ -2508,6 +2508,63 @@ int main(int argc, char **argv)
         if (cpu_ok && rect_frame[0] && rect_frame[1])
             CHECK(!memcmp(rect_frame[0], rect_frame[1], (size_t)W * H * 4),
                   "rectangle lists: the GPU's picture differs from the read-back one");
+        /* WP-35 step 2: the same 20 rectangles as an indexed list (16-bit DMA indices, 8-in-16), the vertices stored
+         * out of order (logical vertex v at slot 7v mod 60), each mode on a fresh renderer: the same picture. Below
+         * GLES 3.2 (the test's 3.0 context) the capture draws one point per index, as glDrawElements during transform
+         * feedback is an error there. */
+        enum { RVI = 0xEF000, RII = 0xEE800 };
+        for (int r = 0; r < NR; r++) {
+            float x0 = -1.0f + 0.5f * (float)(r % 4), x1 = x0 + 0.5f, y0 = 1.0f - 0.4f * (float)(r / 4),
+                  y1 = y0 - 0.4f;
+            float cr = (float)(r % 4) / 3.0f, cg = (float)(r / 4) / 4.0f, cb = (r & 1) ? 1.0f : 0.25f;
+            const float cx[3] = {x0, x1, x0}, cy[3] = {y0, y0, y1};
+            for (int k = 0; k < 3; k++) {
+                int j = (k + r % 3) % 3;
+                uint32_t v = (uint32_t)(3 * r + k), slot = (7u * v) % (NR * 3);
+                vertex(RVI + 32u * slot, cx[j], cy[j], cr, cg, cb);
+                mem[RII + 2 * v] = (uint8_t)(slot >> 8), mem[RII + 2 * v + 1] = (uint8_t)slot;
+            }
+        }
+        for (int mode = 1; mode >= 0 && cpu_ok; mode--) {
+            const char *env = getenv("RECOMP_X360_RECTS");
+            char saved[16] = "";
+            if (env)
+                snprintf(saved, sizeof saved, "%s", env);
+            setenv("RECOMP_X360_RECTS", mode ? "cpu" : "gpu", 1);
+            g = xenos_gl_create_scaled(cache, W, H, scale, why, sizeof why);
+            if (env)
+                setenv("RECOMP_X360_RECTS", saved, 1);
+            else
+                unsetenv("RECOMP_X360_RECTS");
+            CHECK(g != NULL, "indexed rectangle list (%s): no renderer: %s", mode ? "cpu" : "gpu", why);
+            if (!g)
+                continue;
+            cp.render_ctx = g;
+            reg(0x2104, 0xFFFFu), reg(0x2200, 0), reg(0x2201, 0x00010001u), reg(0x2205, 0), reg(0x2202, 0);
+            full_viewport();
+            for (int i = 0; i < 4; i++)
+                reg(0x4400 + i, fbits(1.0f));
+            im[0] = 1, im[1] = nps;
+            memcpy(im + 2, ps, 4 * nps);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+            reg(0x4800, (uint32_t)RVI | 3u);
+            reg(0x4801, 2u | ((uint32_t)NR * 3 * 8) << 2);
+            uint32_t idr[3] = {8u | 0u << 6 | (uint32_t)(NR * 3) << 16, RII, (uint32_t)(NR * 3 / 2) | 1u << 30};
+            type3(PM4_DRAW_INDX_2, idr, 3);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            xenos_gl_stats rs;
+            xenos_gl_get_stats(g, &rs);
+            CHECK(rs.rect_draws == 1, "indexed rectangle list (%s): %llu drawn", mode ? "cpu" : "gpu",
+                  (unsigned long long)rs.rect_draws);
+            int fw, fh;
+            const uint8_t *f = xenos_gl_frame(g, &fw, &fh);
+            int same = f && rect_frame[mode] && fw == W && fh == H && !memcmp(f, rect_frame[mode], (size_t)W * H * 4);
+            const uint8_t *q = px(g, W / 8, H / 10);
+            CHECK(same, "indexed rectangle list (%s): picture differs from the non-indexed one (rectangle 0 is "
+                        "%u,%u,%u)", mode ? "cpu" : "gpu", q[0], q[1], q[2]);
+            xenos_gl_destroy(g);
+        }
         free(rect_frame[0]);
         free(rect_frame[1]);
     }
