@@ -531,8 +531,11 @@ final class RemoteLibrary {
     /** Parsed torrents by file and its size and time: the library asks for them at every refresh. */
     private static final Map<String, TorrentMeta> META_CACHE = new java.util.HashMap<>();
 
-    /** The largest .torrent taken (a library of a few thousand files: well under a megabyte or two). */
-    static final int MAX_TORRENT = 16 << 20;
+    /**
+     * The largest .torrent taken. A library of a few thousand files is a megabyte or two, but a big one with small
+     * pieces passes 16 MB (a 20 MB torrent was refused, 2026-11-21): 64 MB, read once into memory when it is added.
+     */
+    static final int MAX_TORRENT = 64 << 20;
 
     /**
      * Adds a source from a .torrent (its bytes): written as <id>.torrent; the same torrent again only updates its

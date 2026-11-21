@@ -203,6 +203,19 @@ public class RemoteLibraryTest {
     }
 
     @Test
+    public void aTwentyMegabyteTorrentIsTaken() throws IOException {
+        // 2026-11-21: a 20 MB .torrent (small pieces: a long « pieces » string) was refused as « too large » at 16 MB.
+        java.util.Map<String, Object> info = TorrentMetaTest.map("name", "Big", "piece length", 16384L,
+                                                                 "pieces", new byte[20 << 20],
+                                                                 "files", files(file(1L << 40, "Game.iso")));
+        byte[] t = TorrentMetaTest.encode(TorrentMetaTest.map("announce", "x", "info", info));
+        assertTrue(t.length > 20 << 20);
+        RemoteLibrary.Source s = RemoteLibrary.addTorrent(files, t, Console.X360, 1);
+        assertNotNull(RemoteLibrary.meta(files, s.id));
+        assertEquals(1, RemoteLibrary.games(s, RemoteLibrary.meta(files, s.id)).size());
+    }
+
+    @Test
     public void aTorrentWithNoGameSaysWhatItHolds() throws IOException {
         TorrentMeta m = TorrentMeta.parse(torrent("T", false, files(file(1, "a.7z"), file(1, "b.7z"), file(1, "c.7z"),
                                                                     file(1, "x.txt"), file(1, "noext"))));

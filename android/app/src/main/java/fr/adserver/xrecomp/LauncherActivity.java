@@ -7944,7 +7944,7 @@ public class LauncherActivity extends Activity {
             TorrentMeta.parse(b);
         } catch (IOException | RuntimeException e) {
             Log.w(TAG, "launcher: net: bad torrent " + u + ": " + e);
-            setNote(getString(R.string.NET_BAD_TORRENT, e.getMessage()), NOTE_ERROR);
+            torrentRefused(getString(R.string.NET_BAD_TORRENT, e.getMessage()));
             return;
         }
         chooseSourceConsole(c -> {
@@ -7960,9 +7960,27 @@ public class LauncherActivity extends Activity {
                 else
                     setNote(getString(R.string.NET_SOURCE_ADDED, s.name, n), NOTE_OK);
             } catch (IOException e) {
-                setNote(getString(R.string.NET_BAD_TORRENT, e.getMessage()), NOTE_ERROR);
+                torrentRefused(getString(R.string.NET_BAD_TORRENT, e.getMessage()));
+                return;
             }
             refreshKeepingFocus();
+        });
+    }
+
+    /**
+     * Why a picked .torrent was refused, in a sheet as well as the footer: the picker's return rebuilds the screen,
+     * which cleared a footer-only note before the player saw it (« it closes the panel and nothing happens »).
+     */
+    private void torrentRefused(String why) {
+        setNote(why, NOTE_ERROR);
+        if (screen != Screen.LIBRARY && screen != Screen.SETUP)
+            return;
+        poller.post(() -> {
+            if (isFinishing() || isDestroyed())
+                return;
+            openSheet(R.string.NET_ADD_TORRENT);
+            sheetRow(why, () -> setNote(why, NOTE_ERROR));
+            sheetReady();
         });
     }
 

@@ -25,7 +25,7 @@ import java.util.Map;
  */
 final class TorrentMeta {
     static final int MAX_DEPTH = 16;
-    static final int MAX_FILES = 100_000;
+    static final int MAX_FILES = 500_000;
 
     /** One file of the torrent. */
     static final class File {
