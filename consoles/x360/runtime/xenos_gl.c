@@ -453,7 +453,10 @@ struct xenos_gl {
     int frame_copy;
     int show_w, show_h;
     GLint frame_swz[4];       /* the swizzle last set on the frame's texture */
-    int copy_direct;          /* WP-18: copies sampled and shown in place (RECOMP_X360_COPY_TEXTURES=blit: not) */
+    int copy_direct;          /* WP-18: copies sampled in place (RECOMP_X360_COPY_TEXTURES=blit: not) */
+    int direct_present;       /* WP-18: the front buffer's copy shown as it is (RECOMP_X360_DIRECT_PRESENT=1), not
+                               * blitted into frame_tex: the next resolve into it then waits for the window's read
+                               * (~18 ms/frame on the Mac), so off by default */
     /* WP-24: GLES 3 sampler objects, one per sampling state met (wraps, filters, anisotropy), bound per unit (the
      * texture keeps its swizzle and mip range). RECOMP_X360_SAMPLERS=0: texture parameters every bind, as before. */
     int samplers_on;
@@ -1079,7 +1082,11 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     const char *ct_env = getenv("RECOMP_X360_COPY_TEXTURES"); /* direct (default) | blit (WP-18) */
     g->copy_direct = !(ct_env && !strcmp(ct_env, "blit"));
     if (!g->copy_direct)
-        fprintf(stderr, "xenos: resolve pictures copied for each texture and frame (RECOMP_X360_COPY_TEXTURES=blit)\n");
+        fprintf(stderr, "xenos: resolve pictures copied for each texture (RECOMP_X360_COPY_TEXTURES=blit)\n");
+    const char *dp_env = getenv("RECOMP_X360_DIRECT_PRESENT"); /* 0 (default) | 1 (WP-18) */
+    g->direct_present = g->copy_direct && dp_env && !strcmp(dp_env, "1");
+    if (g->direct_present)
+        fprintf(stderr, "xenos: the front buffer's picture shown in place (RECOMP_X360_DIRECT_PRESENT=1)\n");
     const char *hash_env = getenv("RECOMP_X360_COPY_HASH"); /* sparse (default) | full (WP-12) */
     g->copy_hash_full = hash_env && !strcmp(hash_env, "full");
     if (g->copy_hash_full)
@@ -6078,10 +6085,11 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
     }
     if (src) {
         GLenum rf = is_float_fmt(src_fmt) ? GL_RGBA16F : GL_RGBA8; /* frame_tex's format */
-        /* WP-18: a copy of the frame's own size in frame_tex's format is shown as it is (frame_detach takes it out
-         * when it changes before the window shows it); else into frame_tex (a smaller frame, gamma, render target 0) */
+        /* WP-18, RECOMP_X360_DIRECT_PRESENT=1: a copy of the frame's own size in frame_tex's format is shown as it is
+         * (frame_detach takes it out when it changes before the window shows it); else into frame_tex (by default,
+         * a smaller frame, gamma, render target 0) */
         GLuint shown = g->frame_tex;
-        if (rc && src == rc->tex && g->copy_direct && fw == rc->w && fh == rc->th && src_fmt == rf) {
+        if (rc && src == rc->tex && g->direct_present && fw == rc->w && fh == rc->th && src_fmt == rf) {
             g->frame_copy = 1 + (int)(rc - g->copies);
             g->show_w = fw * g->scale, g->show_h = fh * g->scale;
             shown = src;
