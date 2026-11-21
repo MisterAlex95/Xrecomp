@@ -5832,6 +5832,8 @@ static void rects_selftest(xenos_gl *g)
     rect_line(g, stderr);
 }
 
+#define RECT_POINT_DRAWS 3072 /* indices of a rectangle list drawn one point at a time below GLES 3.2 */
+
 static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const uint32_t *idx, uint32_t n)
 {
     enum { F = RECT_VARYINGS * 4 };
@@ -5847,7 +5849,15 @@ static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const
     g->glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, g->tfbo);
     g->glEnable(GL_RASTERIZER_DISCARD);
     g->glBeginTransformFeedback(0 /* GL_POINTS */);
-    if (idx) {
+    /* WP-35 step 2: GLES 3.0 and 3.1 have no indexed draw while transform feedback is active (GL_INVALID_OPERATION,
+     * nothing captured; 3.2 lifts it): there each index is a draw of one point of its own inside the one capture
+     * (vertex idx[i], gl_VertexID = idx[i]; the captures follow each other in order). A long indexed list (no title
+     * seen draws one) keeps glDrawElements rather than thousands of draws. */
+    int gles32 = g->gl_major > 3 || (g->gl_major == 3 && g->gl_minor >= 2);
+    if (idx && !gles32 && nr * 3 <= RECT_POINT_DRAWS) {
+        for (uint32_t i = 0; i < nr * 3; i++)
+            g->glDrawArrays(0, (GLint)idx[i], 1);
+    } else if (idx) {
         g->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g->ibo);
         g->glBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * (GLsizeiptr)nr * 3, idx, GL_STREAM_DRAW);
         g->glDrawElements(0, (GLsizei)(nr * 3), GL_UNSIGNED_INT, NULL);
