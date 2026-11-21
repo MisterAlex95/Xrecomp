@@ -1163,6 +1163,21 @@ byte leaves for the dispatcher). The NDS lifter keeps both off: its output is by
 9.85M to 9.06M x86-64 instructions per frame (-8 %), with the same hashes over 600 frames and lockstep with the
 interpreter. Every pack of every console is stale (the toolkit digest).
 
+**GBA: the prefetch model, cheaper (XBA-295).** Lifted code called the cartridge prefetch buffer's model once per
+instruction (`rc_pf_fetch_i`, 23 % of a bench frame, 28 % with its slow path). gba_tools now lifts a run of
+instructions that only add static internal cycles (and literals folded from the function's own region) with one
+`RC_IN`: `rc_pf_fetch_n` charges the run's fetches at once, in closed form (the reads completed meanwhile, then a cycle
+per opcode from the buffer while it has some, then a wait for the read under way each), with a short path for the
+frequent states; a refill is two fetches in one call. Its result is exactly that of as many `rc_pf_fetch` calls (a
+unit test over random states, `test_prefetch`). The segments that are runs, or runs with conditional jumps, check the
+next event with their exact cycles once the bound fails (the most a fetch can cost, for each): fewer go to the
+interpreter (bench: 247556 -> 141524 handed instructions over 30 frames). Details: [gba/tools/README.md « Runs of
+opcode fetches »](gba/tools/README.md). The GBA bench goes from 9.06M to 7.36M x86-64 instructions per frame (-19 %;
+the prefetch functions 2.58M -> 2.20M, the interpreter for handed instructions 1.63M -> 0.93M), with the same hashes
+over 600 frames, lockstep with the interpreter and `GBA_RC_VERIFY`. The NDS lifter keeps it off (byte-identical
+output). Every pack of every console is stale (the toolkit digest); `GBA_RECOMP_ABI` and the save state format are
+unchanged.
+
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
 presents each one twice at 60 Hz), the generated frames take the repeats' slots, and the runtimes' frame sleep goes
