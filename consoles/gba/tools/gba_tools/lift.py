@@ -742,9 +742,12 @@ class FnLifter:
                 continue
             if x in leaders:
                 seg = segment_cost(addrs, i, size, leaders, bodies)
+                sim = segment_sim(addrs, i, bodies, seg, region) if self.fetch_runs else None
                 if is_run_segment(runs, x, seg):  # the check and the run's fetches in one (« runs of opcode fetches »)
                     out.append("    RC_STOP_IN(%s, %s, %d, %s);" % (hx(x), seg, left[x], run_args(runs[x], False)))
                     fetched.add(x)
+                elif sim:
+                    out.append("    RC_STOP_X(%s, %s, %d, %s);" % (hx(x), seg, left[x], run_args(sim, False)))
                 else:
                     out.append("    RC_STOP(%s, %s, %d);" % (hx(x), seg, left[x]))
             if x in fetched:
@@ -765,10 +768,14 @@ class FnLifter:
             elif is_memory(body) and nxt not in leaders and bodies[nxt] is not None:
                 seg = segment_cost(addrs, i + 1, size, leaders, bodies)
                 lab = "%s:" % label(nxt) if nxt in segs else ""
+                sim = segment_sim(addrs, i + 1, bodies, seg, region) if self.fetch_runs else None
                 if is_run_segment(runs, nxt, seg):
                     out.append("%s    RC_CHECK_IN(%s, %s, %d, %s);" % (lab, hx(nxt), seg, left[nxt],
                                                                     run_args(runs[nxt], False)))
                     fetched.add(nxt)
+                elif sim:
+                    out.append("%s    RC_CHECK_X(%s, %s, %d, %s);" % (lab, hx(nxt), seg, left[nxt],
+                                                                   run_args(sim, False)))
                 else:
                     out.append("%s    RC_CHECK(%s, %s, %d);" % (lab, hx(nxt), seg, left[nxt]))
         out += ["    RC_EPILOGUE();", "}"]
@@ -857,7 +864,7 @@ def segment_cost(addrs, i, size, leaders, bodies):
 # fails.
 
 PLAIN_NOW = re.compile(r"^now \+= (\d+);$")
-RUN_MAX = 16  # fetches per run at most (EXTRAS: 4 bits for each of the first 15)
+RUN_MAX = 16  # fetches per run at most (EXTRAS: 4 bits for each of the first 15; MAX_BLOCK bounds a segment)
 
 
 def plain_extra(body, lit=None):
@@ -892,6 +899,37 @@ def is_run_segment(runs, x, seg):
     """The segment starting at x (segment_cost's text) is one run: RC_STOP_IN / RC_CHECK_IN, whose exact cycles
     decide when the bound says the next event may fall inside."""
     return x in runs and runs[x][0] == int(seg.split(",", 1)[0])
+
+
+COND_JUMP = re.compile(r"^if \(.*\)( \{)?$")
+
+
+def cond_jump(body):
+    """A conditional jump: no cycles of its own when not taken (the refill belongs to the jump, which leaves)."""
+    if body is None or len(body) not in (2, 3) or not COND_JUMP.match(body[0]):
+        return False
+    if (len(body) == 3) != body[0].endswith("{") or (len(body) == 3 and body[2] != "}"):
+        return False
+    return re.match(r"^    RC_JUMP_(LOCAL|DYN)\([^;]*\);$", body[1]) is not None
+
+
+def segment_sim(addrs, i, bodies, seg, region):
+    """(fetches, extras, stops) of the segment starting at addrs[i] (segment_cost's text) when every instruction
+    before its last is plain, a literal that may join a run, or a conditional jump (not taken: the check bounds the
+    path that stays): RC_STOP_X / RC_CHECK_X compute its exact cycles when the bound fails. Else None."""
+    n = int(seg.split(",", 1)[0])
+    lit = "h->wait32[%d][0]" % region if 8 <= region <= 13 else None
+    extras = stops = 0
+    for k in range(n - 1):
+        body = bodies[addrs[i + k]]
+        if cond_jump(body):
+            continue
+        e = plain_extra(body, lit)
+        if e is None:
+            return None
+        extras |= e[0] << (4 * k)
+        stops |= e[1] << k
+    return n, extras, stops
 
 
 def fetch_runs(addrs, size, bodies, labels, region=0):
