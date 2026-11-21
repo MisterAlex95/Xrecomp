@@ -3088,11 +3088,11 @@ public class LauncherActivity extends Activity {
             if (CrashReport.available(this))
                 listRow(list, getString(R.string.REPORT_LAST_GAME), getString(R.string.REPORT_LAST_GAME_DETAIL),
                         this::reportLastGame);
-            if (AutoReports.possible(this))
-                privacyRow(list);
             if (CrashReport.available(this))   // XBA-339
                 listRow(list, getString(R.string.REPORT_PROBLEM), getString(R.string.REPORT_PROBLEM_DETAIL),
                         this::reportProblem);
+            if (AutoReports.possible(this))
+                privacyRow(list);
             MenuRow about = listRow(list, getString(R.string.ABOUT), getString(R.string.ABOUT_TEXT),
                                     () -> go(Screen.ABOUT));
             about.setValue(version());
