@@ -109,6 +109,15 @@ typedef struct x360_render_perf {
     uint64_t rect_draws; /* rectangle lists (Direct3D's clears) */
     uint64_t passes;     /* render passes (draws, clears, blits after a framebuffer change) */
     uint64_t hashed;     /* guest memory bytes hashed to see whether it changed */
+    /* WP-19, the second perf line (x360_render_perf_format_guest); host counters, not in save states */
+    uint64_t guest_cpu_ns;  /* thread CPU time of the scheduler's turns (guest code, HLE, interpreter) */
+    uint64_t dispatches;    /* lifted functions entered from the dispatcher */
+    uint64_t turns;         /* scheduler turns (a thread run until its slice ends, it blocks or ends) */
+    uint64_t guest_swaps;   /* swaps the command processor ran (unlike swaps, not reset by a state load) */
+    uint64_t long_swaps;    /* of them, those more than 20 ms of virtual time after the one before */
+    uint64_t loads;         /* attachments loaded at the start of a render pass (a tiler's reads from memory) */
+    int gpu_timer;          /* 1: the host GPU's time is measured (EXT_disjoint_timer_query) */
+    uint64_t gpu_time_ns, gpu_time_frames; /* host GPU time from swap to swap, over that many frames */
 } x360_render_perf;
 void x360_render_perf_get(x360_machine *x, x360_render_perf *out);
 /* now - since, per frame (frames of the caller's own unit): "gpu 41.0 (cpu 15.2, resolve 2.0: read 0.0 write 0.0; 73
@@ -116,6 +125,12 @@ void x360_render_perf_get(x360_machine *x, x360_render_perf *out);
  * those that can write; resolves included). Returns what snprintf returns. */
 int x360_render_perf_format(const x360_render_perf *now, const x360_render_perf *since, uint64_t frames,
                             const char *unit, char *out, size_t n);
+/* WP-19, the second line: now - since over `seconds` of wall time, per frame of the caller's unit: "guest 7.2 ms
+ * (191 k dispatches, 469 turns), swaps 60.0/s (0 > 20 ms), gpu-time 12.3 ms, loads 14.0 per frame" (guest: the
+ * scheduler turns' thread CPU time; gpu-time: the host GPU's per frame it measured, "n/a" without a timer; loads:
+ * attachments loaded at the start of a render pass). Returns what snprintf returns. */
+int x360_render_perf_format_guest(const x360_render_perf *now, const x360_render_perf *since, uint64_t frames,
+                                  double seconds, const char *unit, char *out, size_t n);
 /* The audio the title submits to the render driver (256-sample frames of 6 channels at 48 kHz), written to F as a
  * 32-bit float WAV, sizes filled in when the machine is freed. XMA is not decoded: XMA voices stay silent. */
 void x360_set_audio_out(x360_machine *x, FILE *f);

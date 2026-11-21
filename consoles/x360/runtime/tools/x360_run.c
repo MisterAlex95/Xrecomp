@@ -11,7 +11,8 @@
  * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
  * cache: / hdd:. --render: draw with the GLES 3.0 renderer, shaders from SHADER_CACHE (bringup's WORKDIR/shaders),
  * the first --frame-limit N (default 30) swaps written to --frames DIR as PPM, a WxH target (default 1280x720); the
- * log's "render: perf" line gives the GPU's time per swap of the run (x360_render_perf_format); X360_READBACK=0 reads
+ * log's "render: perf" line gives the GPU's time per swap of the run (x360_render_perf_format), "render: perf2" the
+ * guest's (x360_render_perf_format_guest; swaps per second of virtual time); X360_READBACK=0 reads
  * no frame back at the swaps, as a window does (timings, no frames written). On the Mac,
  * X360_ANGLE_DIR=DIR takes ANGLE's libEGL / libGLESv2 from DIR (the Android emulator's lib64/gles_angle). The title's
  * defaults apply as in the app (x360_title_env, printed on stderr), each unless the environment already sets it.
@@ -244,7 +245,9 @@ int main(int argc, char **argv)
     }
     x360_render_perf perf0, perf1;
     x360_render_perf_get(x, &perf0);
+    uint64_t vt0 = x360_time(x); /* the second perf line's swaps per second: of virtual time here (no pacing) */
     int st = x360_run(x, insns);
+    uint64_t vt1 = x360_time(x);
     x360_render_perf_get(x, &perf1);
     if (save_state && (st == X360_BUDGET || st == X360_EXITED)) {
         /* lazy resolves (RECOMP_X360_RESOLVE=lazy) into memory first; X360_SAVE_FLUSH=0 leaves them out, as a save
@@ -280,6 +283,9 @@ int main(int argc, char **argv)
         char line[512];
         x360_render_perf_format(&perf1, &perf0, perf1.swaps - perf0.swaps, "swap", line, sizeof line);
         fprintf(log, "render: perf over %llu swaps: %s\n", (unsigned long long)(perf1.swaps - perf0.swaps), line);
+        x360_render_perf_format_guest(&perf1, &perf0, perf1.swaps - perf0.swaps, (double)(vt1 - vt0) / 1e7, "swap",
+                                      line, sizeof line);
+        fprintf(log, "render: perf2 over %llu swaps: %s\n", (unsigned long long)(perf1.swaps - perf0.swaps), line);
     }
     if (missedp) {
         FILE *f = fopen(missedp, "w");

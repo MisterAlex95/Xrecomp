@@ -93,6 +93,12 @@ typedef struct xenos_gl_stats {
     /* WP-10: rectangle lists (rect_draws) whose capture was read back and the fourth corner made on the CPU
      * (RECOMP_X360_RECTS=cpu); the others had it made on the GPU */
     uint64_t rect_lists_read_back;
+    /* WP-19, the perf line */
+    uint64_t loads;                /* attachments loaded at the start of a pass (not cleared whole nor invalidated
+                                    * by its first operation: what a tiler reads back from memory), process-wide */
+    int gpu_timer;                 /* 1: the GPU's time is measured (EXT_disjoint_timer_query) */
+    uint64_t gpu_time_ns;          /* GPU time from swap to swap (GL_TIME_ELAPSED_EXT), of gpu_time_frames frames */
+    uint64_t gpu_time_frames;
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */
