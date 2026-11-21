@@ -58,9 +58,10 @@ exit $rc'
 
 cid=$(docker create --network none -e JOBS="$jobs" "$image" bash -c "$cmd")
 # tools/ppc: the shared PowerPC frontend; tools/xex: the XEX2 side; tools/xiso: mkxiso.py for the disc image;
-# consoles/gc/runtime: ppc_ops.h; src/xiso: the disc image reader the runtime links
+# consoles/gc/runtime: ppc_ops.h; src/xiso: the disc image reader the runtime links; src/input: console_pad, which
+# x360_pad_map (and so x360_run, WP-25) links
 tar -C "$repo" --exclude=__pycache__ -cf - consoles/x360 consoles/gc/runtime tools/__init__.py tools/ppc tools/xex \
-    tools/xiso src/xiso \
+    tools/xiso src/xiso src/input \
     | docker cp - "$cid:/usr/src"
 docker cp "$corpus/x360" "$cid:/usr/src/hb"
 rc=0
