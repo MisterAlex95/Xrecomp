@@ -1762,7 +1762,13 @@ class FunctionTranslator:
         if section is not None and section.is_code:
             upper = min(upper, _config.readable_end(section))
         raw_bytes = self._read_func_bytes(start, end)
+        # The operand-free decode first (the same instruction stream, several
+        # times faster): most bodies have no jmp through memory at all.
         if not raw_bytes or not any(
+                insn.mnemonic == "jmp" and "[" in insn.op_str
+                for insn in self.disasm.scan_function(raw_bytes, start, end)):
+            return None
+        if not any(
                 insn.mnemonic == "jmp" and insn.jump_target is None
                 and insn.operands and insn.operands[0].type == "mem"
                 and insn.operands[0].mem_index
