@@ -641,20 +641,31 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     "peak_kb" (each compile's peak RSS), "compiled" and "held_s" (wall time
     limit() held every compile, 0 jobs) and "hashed" (the sources read and
     hashed for their key: plan_keys()). early: the EarlyCompile that ran
-    beside the lift (finished): its objects that still match are adopted,
-    and its compiles count in stats.
+    beside the lift (finish()ed): its objects that still match are adopted,
+    its compiles still running are waited for (they take their slots until
+    they end, then are adopted or compiled again), and they count in stats.
     Raises StepError (COMPILE_FAILED / NO_SPACE) or Cancelled."""
-    os.makedirs(obj_dir, exist_ok=True)
-    cached_id = getattr(tc, "compiler_id_cached", None)
-    plan, hashed = plan_keys(sources, flags, cached_id(obj_dir) if cached_id else tc.compiler_id(), obj_dir)
-    if stats is not None:
-        stats["hashed"] = hashed
+    try:
+        os.makedirs(obj_dir, exist_ok=True)
+        cached_id = getattr(tc, "compiler_id_cached", None)
+        plan, hashed = plan_keys(sources, flags, cached_id(obj_dir) if cached_id else tc.compiler_id(), obj_dir)
+        if stats is not None:
+            stats["hashed"] = hashed
+        return _compile_plan(plan, flags, tc, jobs, log, on_progress, limit, stats, early)
+    finally:
+        if early is not None:       # after a normal end nothing is left; after a failure or a cancel, its
+            early.abort()           # compiles still running are killed and its objects deleted
+
+
+def _compile_plan(plan, flags, tc, jobs, log, on_progress, limit, stats, early):
+    busy = early.busy() if early is not None else set()      # before adopt(): one ending between is adopted
     adopted = early.adopt(plan) if early is not None else 0
     total = len(plan)
-    todo = [p for p in plan if not os.path.isfile(p[2])]
+    missing = [p for p in plan if not os.path.isfile(p[2])]
+    todo = [p for p in missing if p[0] not in busy]
     todo.sort(key=lambda p: -p[1])
     todo_bytes = sum(p[1] for p in todo) or 1
-    state = {"done": total - len(todo), "compiled": 0, "bytes": 0}
+    state = {"done": total - len(missing), "compiled": 0, "bytes": 0}
     lock = threading.Lock()
     failed = []
     t0 = time.time()
@@ -664,8 +675,9 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     peaks = []
     held = [0.0]
     held_since = [None]             # the device log holds every compile (jobs 0) since then
+    n_early_peaks = len(early.peaks) if early is not None else 0
     if early is not None:
-        peaks.extend(early.peaks)
+        peaks.extend(early.peaks[:n_early_peaks])
     if stats is not None:
         stats.update(peak_kb=peaks, compiled=0, held_s=0.0)
         if early is not None:
@@ -683,10 +695,12 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
                 elif allowed > 0 and held_since[0] is not None:
                     held[0] += time.time() - held_since[0]
                     held_since[0] = None
+                if early is not None:
+                    allowed -= early.running()      # the early compiles still running hold their slots
                 if running[0] < allowed:
                     running[0] += 1
                     return True
-                gate.wait(1.0)
+                gate.wait(0.25 if early is not None else 1.0)
             return False
 
     def leave():
@@ -729,10 +743,12 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
             if on_progress:
                 on_progress(state["done"], total, state["compiled"], eta)
 
-    if todo:
+    def pool(items):
+        if not items:
+            return
         ex = ThreadPoolExecutor(max_workers=max(1, jobs))
         try:
-            futs = [ex.submit(one, it) for it in todo]
+            futs = [ex.submit(one, it) for it in items]
             for fu in futs:
                 fu.result()
         except OSError as e:
@@ -743,6 +759,21 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
             # A cancel has killed the running compiles already (Procs.cancel);
             # queued ones return at once (failed / cancelled checked first).
             ex.shutdown(wait=True, cancel_futures=True)
+
+    pool(todo)
+    if busy and not failed and not tc.procs.cancelled.is_set():
+        # The early compiles that were running when the lift ended: adopted, or compiled again here.
+        early.wait()
+        with lock:
+            peaks.extend(early.peaks[n_early_peaks:])
+        late = early.adopt(plan)
+        adopted += late
+        state["done"] += late
+        if on_progress and late:
+            on_progress(state["done"], total, state["compiled"], None)
+        if stats is not None:
+            stats.update(early=adopted, early_compiled=early.compiled)
+        pool([p for p in missing if p[0] in busy and not os.path.isfile(p[2])])
     if held_since[0] is not None:
         held[0] += time.time() - held_since[0]
     if stats is not None:
@@ -800,6 +831,7 @@ class EarlyCompile:
         self._seen = {}           # source -> its stat at the last poll
         self._taken = {}          # source -> the stat it was queued with
         self._running = 0
+        self._busy = set()
         self._live = set()        # the clang processes running now (Popen)
         self._threads = []
         self._stop = False
@@ -819,9 +851,24 @@ class EarlyCompile:
             return self.compiled
 
     def finish(self):
-        """The lifter has exited: no early compile starts any more; waits for the running ones."""
+        """The lifter has exited: no early compile starts any more. The running ones go on: compile_all waits
+        for them (busy(), running(), wait())."""
         self._halt()
-        self._join()
+        if self._watcher is not None:
+            self._watcher.join()
+
+    def busy(self):
+        """The sources being compiled now."""
+        with self._lock:
+            return set(self._busy)
+
+    def running(self):
+        with self._lock:
+            return self._running
+
+    def wait(self):
+        for t in list(self._threads):
+            t.join()
 
     def abort(self):
         """The lift failed or was cancelled: the running compiles are killed, and every temporary object deleted."""
@@ -891,6 +938,7 @@ class EarlyCompile:
                     while self._queue and not self._stop and self._running < self._allowed() and self._room():
                         src = self._queue.pop(0)
                         self._running += 1
+                        self._busy.add(src)
                         t = threading.Thread(target=self._one, args=(src,), daemon=True)
                         self._threads.append(t)
                         t.start()
@@ -950,6 +998,7 @@ class EarlyCompile:
                     self.failed += 1
             with self._cv:
                 self._running -= 1
+                self._busy.discard(src)
                 self._cv.notify_all()
 
     def _run(self, args):

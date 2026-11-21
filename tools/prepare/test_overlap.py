@@ -330,3 +330,27 @@ def test_sigterm_during_the_overlap(tmp_path):
     assert log.exists() and not _pids_alive(str(log))
     assert not (tmp_path / "packs").exists() or not os.listdir(tmp_path / "packs")
     assert all(x.get("id") == "lift" for x in parsed if x["kind"] == "progress" and x.get("step") == 3)
+
+
+def test_compiles_running_when_the_lift_ends_are_waited_for_not_redone(tmp_path, monkeypatch):
+    """The early compiles still running when the lifter exits keep their slots; compile_all compiles the others
+    meanwhile, then adopts them: no file compiled twice, never more than --jobs at once."""
+    gen, flags, tc, early = _setup(tmp_path, monkeypatch, jobs=3, sleep="1.5")
+    early.start()
+    _lift(tmp_path, early, 6, 0.3)
+    early.finish()
+    assert early.running() > 0                       # the lift ended under them
+    sources = sorted(str(gen / fn) for fn in os.listdir(gen))
+    stats = {}
+    objs, n = cc.compile_all(sources, flags, tc, str(tmp_path / "obj"), 3, stats=stats, early=early)
+    assert n == 6 and stats["early"] >= 1
+    with open(tmp_path / "cc.log") as f:
+        starts = sum(1 for line in f if line.startswith("start"))
+    assert starts == 6                               # each file once
+    assert _max_running(str(tmp_path / "cc.log")) <= 3
+    want = {}
+    for o, s in zip(objs, sources):
+        with open(s, "rb") as f:
+            want[os.path.basename(o)] = b"obj:" + f.read()
+    assert _objects(objs) == want
+    assert not [fn for fn in os.listdir(tmp_path / "obj") if fn.startswith(cc.EARLY_PREFIX)]
