@@ -448,6 +448,9 @@ class _Args:
         self.shell_abi = 1
         self.opt = "2"
         self.python = None
+        # The compile's (android.Run.compile_setup, which the lift's early compiles use too); one job: none early.
+        self.cc, self.sysroot, self.cc_prefix_arg, self.ld, self.ld_prefix_arg = "clang", str(tmp_path), [], None, []
+        self.builtins, self.include_dir, self.jobs, self.cpu_features, self.device_log = None, [], 1, "none", None
 
 
 class _Tc:
