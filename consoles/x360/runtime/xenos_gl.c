@@ -1902,6 +1902,87 @@ static float component(uint32_t v, unsigned offset, unsigned width, const attr *
         }                                                                                                              \
     }
 
+/* WP-36: the packed formats' vertex loop with physical memory at hand, one copy per format and swap mode (both known
+ * at compile time): the words byte-swapped straight from memory, the components as the generic loops below make them
+ * (component, half_to_float), without gpu_read's call and switch per word. Warhammer fetches ~3.5 M attribute values
+ * a frame, most of them 8_8_8_8 and 16_16. The generic loops stay for a runtime without cp->mem; xenos_vertex_fetch_test
+ * checks that both give the same floats. */
+static inline __attribute__((always_inline)) void packed_vertex(uint32_t format, uint32_t w0, uint32_t w1,
+                                                                const attr *a, float *o)
+{
+    switch (format) {
+    case 6:
+        for (int i = 0; i < 4; i++)
+            o[i] = component(w0, 8 * i, 8, a);
+        break;
+    case 7:
+        for (int i = 0; i < 3; i++)
+            o[i] = component(w0, 10 * i, 10, a);
+        o[3] = component(w0, 30, 2, a);
+        break;
+    case 16:
+        o[0] = component(w0, 0, 11, a), o[1] = component(w0, 11, 11, a), o[2] = component(w0, 22, 10, a);
+        o[3] = 1.0f;
+        break;
+    case 17:
+        o[0] = component(w0, 0, 10, a), o[1] = component(w0, 10, 11, a), o[2] = component(w0, 21, 11, a);
+        o[3] = 1.0f;
+        break;
+    case 25:
+        o[0] = component(w0, 0, 16, a), o[1] = component(w0, 16, 16, a);
+        o[2] = 0.0f, o[3] = 1.0f;
+        break;
+    case 26:
+        o[0] = component(w0, 0, 16, a), o[1] = component(w0, 16, 16, a);
+        o[2] = component(w1, 0, 16, a), o[3] = component(w1, 16, 16, a);
+        break;
+    case 31:
+        o[0] = half_to_float(w0 & 0xFFFF), o[1] = half_to_float(w0 >> 16);
+        o[2] = 0.0f, o[3] = 1.0f;
+        break;
+    default: /* 32 */
+        o[0] = half_to_float(w0 & 0xFFFF), o[1] = half_to_float(w0 >> 16);
+        o[2] = half_to_float(w1 & 0xFFFF), o[3] = half_to_float(w1 >> 16);
+        break;
+    }
+}
+
+static inline __attribute__((always_inline)) void packed_loop(const uint8_t *mem, uint32_t format, uint32_t endian,
+                                                              uint32_t at, uint32_t step, uint32_t count, float *out,
+                                                              size_t ostride, const attr *a)
+{
+    const int two = format == 26 || format == 32;
+    for (uint32_t v = 0; v < count; v++, at += step) {
+        uint32_t w0, w1 = 0;
+        memcpy(&w0, mem + (at & 0x1FFFFFFFu), 4);
+        w0 = gpu_swap(w0, endian);
+        if (two) {
+            memcpy(&w1, mem + ((at + 4) & 0x1FFFFFFFu), 4);
+            w1 = gpu_swap(w1, endian);
+        }
+        packed_vertex(format, w0, w1, a, out + (size_t)v * ostride);
+    }
+}
+
+/* 1 when the format is one packed_loop takes (and it ran), else 0 */
+static int fetch_packed_mem(const uint8_t *mem, uint32_t format, uint32_t endian, uint32_t at, uint32_t step,
+                            uint32_t count, float *out, size_t ostride, const attr *a)
+{
+#define PACKED_E(F)                                                                                                        switch (endian & 3) {                                                                                                  case 0: packed_loop(mem, F, 0, at, step, count, out, ostride, a); break;                                              case 1: packed_loop(mem, F, 1, at, step, count, out, ostride, a); break;                                              case 2: packed_loop(mem, F, 2, at, step, count, out, ostride, a); break;                                              default: packed_loop(mem, F, 3, at, step, count, out, ostride, a); break;                                             }
+    switch (format) {
+    case 6: PACKED_E(6) return 1;
+    case 7: PACKED_E(7) return 1;
+    case 16: PACKED_E(16) return 1;
+    case 17: PACKED_E(17) return 1;
+    case 25: PACKED_E(25) return 1;
+    case 26: PACKED_E(26) return 1;
+    case 31: PACKED_E(31) return 1;
+    case 32: PACKED_E(32) return 1;
+    default: return 0;
+    }
+#undef PACKED_E
+}
+
 /* one attribute of `count` vertices from index `first`, each as a vec4 `ostride` floats after the previous one
  * (Xenia's spirv_shader_translator_fetch.cc gives the packings: X in the low bits); 0 when the format is not
  * handled. The format is chosen once, then one loop runs over the vertices. */
@@ -1910,6 +1991,11 @@ static int fetch_vertices(const xenos_cp *cp, uint32_t base, uint32_t endian, co
 {
     uint32_t step = 4 * a->stride, at = base + 4 * (a->offset + first * a->stride);
     float *o;
+    if (cp->mem && fetch_packed_mem(cp->mem, a->format, endian, at, step, count, out, ostride, a)) {
+        if (a->format == 31 || a->format == 32)
+            return 1; /* exp_adjust does not apply to floats */
+        goto adjust;
+    }
     switch (a->format) {
     case 36: /* 32_FLOAT */
     case 37: /* 32_32_FLOAT */
@@ -2015,6 +2101,7 @@ static int fetch_vertices(const xenos_cp *cp, uint32_t base, uint32_t endian, co
     default:
         return 0;
     }
+adjust:
     if (a->exp_adjust) {
         float k = ldexpf(1.0f, a->exp_adjust); /* -32..31: no shift of 32 */
         for (uint32_t v = 0; v < count; v++)
