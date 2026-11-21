@@ -165,11 +165,26 @@ static void record_miss(gc_machine *m, uint32_t pc)
     m->missed[m->nmissed++] = pc;
 }
 
-bool gc_recomp_dispatch(gc_machine *m)
+/* Runs entry idx (its span valid, the code at pc MEM1's): true when the instruction at the new pc is up next. */
+static inline bool run_entry(gc_machine *m, int idx)
 {
-    if (!m->rc)
+    m->h.rc_exit = GC_RC_EXIT_NORMAL;
+    m->rc->entries[idx].fn(m);
+    if (m->h.rc_exit == GC_RC_EXIT_NOT_COVERED)
         return false;
-    uint32_t pc = m->h.cpu.pc, s = rc_slot(pc, m->rc_hash_shift);
+    m->stats.calls++;
+    m->branched = true; /* lifted code leaves at a jump, a call, a return or a resume point */
+    if (m->h.rc_exit == GC_RC_EXIT_INTERP) {
+        gc_cpu_step(m);
+        m->stats.interp++;
+    }
+    return true;
+}
+
+/* Every case: pc listed several times, not listed, its code not MEM1's, its span not known valid. */
+static __attribute__((noinline)) bool dispatch_walk(gc_machine *m, uint32_t pc)
+{
+    uint32_t s = rc_slot(pc, m->rc_hash_shift);
     int idx = -1;
     bool listed = false, direct = true;
     /* an address may be listed several times (REL modules loaded in turn at one place, XBA-264): the entry whose
@@ -197,17 +212,21 @@ bool gc_recomp_dispatch(gc_machine *m)
             record_miss(m, pc);
         return false;
     }
-    m->h.rc_exit = GC_RC_EXIT_NORMAL;
-    m->rc->entries[idx].fn(m);
-    if (m->h.rc_exit == GC_RC_EXIT_NOT_COVERED)
+    return run_entry(m, idx);
+}
+
+bool gc_recomp_dispatch(gc_machine *m)
+{
+    if (!m->rc)
         return false;
-    m->stats.calls++;
-    m->branched = true; /* lifted code leaves at a jump, a call, a return or a resume point */
-    if (m->h.rc_exit == GC_RC_EXIT_INTERP) {
-        gc_cpu_step(m);
-        m->stats.interp++;
-    }
-    return true;
+    /* the common case inline: pc in its first slot, the code at pc MEM1's under the fetch fast path (gc_icode_direct's
+     * first test), its span known valid; dispatch_walk takes every other case and decides as before */
+    uint32_t pc = m->h.cpu.pc, s = rc_slot(pc, m->rc_hash_shift) & m->rc_hash_mask;
+    int32_t i = m->rc_hash_idx[s];
+    if (i >= 0 && m->rc_hash_keys[s] == pc && m->span_state[m->rc->entries[i].span] == 1 &&
+        ((pc & 0x3FFFFFFFu) | ((pc & m->ifast_mask) ^ m->ifast_val)) <= GC_RAM_SIZE - 4)
+        return run_entry(m, i);
+    return dispatch_walk(m, pc);
 }
 
 size_t gc_recomp_missed(gc_machine *m, uint32_t *out, size_t max)
